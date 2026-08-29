@@ -177,9 +177,8 @@ impl CudaElementwise {
                 .arg(&numel_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        Ok(self.stream.clone_dtoh(&out_dev)?)
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        crate::memory::readback(&self.stream, &out_dev)
     }
 
     /// 単項演算共通の起動手続き。[`Self::run_binary`] と同一構造。
@@ -205,9 +204,8 @@ impl CudaElementwise {
                 .arg(&numel_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        Ok(self.stream.clone_dtoh(&out_dev)?)
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        crate::memory::readback(&self.stream, &out_dev)
     }
 
     /// `out[i] = a[i] + b[i]`（f32・同一長）。

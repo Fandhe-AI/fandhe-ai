@@ -23,7 +23,7 @@ use std::any::Any;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DeviceRepr};
 
 use crate::device::CudaDevice;
 use crate::error::CudaError;
@@ -121,6 +121,31 @@ impl MemoryStats for CudaMemory {
     fn reset_peak(&self) {
         self.tracker.reset_peak();
     }
+}
+
+/// カーネル起動直後の都度 `synchronize()` を除去した非同期実行契約
+/// （イシュー #1013・`docs/backend-cuda-async-execution-design.md` §3〜
+/// §4）の下で、ホストへ結果を読み戻す全ての readback 経路が共有する
+/// 唯一の同期点。`clone_dtoh` は `cuMemcpyDtoHAsync` を発行する非同期
+/// コピー（`cudarc-0.19.8` `core.rs::memcpy_dtoh`）のため、呼び出し
+/// 直後にホスト側データが確定していることを保証するには `clone_dtoh`
+/// → `synchronize` の順が必須（逆順ではコピー自体の完了を待てない）。
+/// 起動元のカーネルが `unsafe { stream.launch(..) }` を経て投入した
+/// 非同期作業も、同一ストリーム上の FIFO 順序保証により本関数の
+/// `synchronize` で合わせて完了が確定する（`CudaDevice` は ordinal ごとに
+/// 単一ストリームを共有する。設計文書 §3「実行モデル」）。
+/// `download_inner`（本ファイル）・`gemm.rs`／`gemm_wmma.rs`／
+/// `gemm_mma.rs`／`gemm_mma_tf32.rs` の `download_f32`／`download_f16`・
+/// 各演算のホスト `Tensor` 返却ラッパーはすべて本関数を経由し、
+/// 「同期点は D2H 境界のみ」という契約を単一箇所に集約する。
+pub(crate) fn readback<T, Src>(stream: &Arc<CudaStream>, dev: &Src) -> Result<Vec<T>, CudaError>
+where
+    T: DeviceRepr,
+    Src: DevicePtr<T>,
+{
+    let host = stream.clone_dtoh(dev)?;
+    stream.synchronize()?;
+    Ok(host)
 }
 
 /// `numel` 分の `f32` 確保が消費するバイト数を検査付きで計算する
@@ -262,19 +287,10 @@ impl CudaMemory {
         let data = match &handle.slice {
             None => Vec::new(),
             Some(slice) => {
-                // `clone_dtoh` は内部で `cuMemcpyDtoHAsync` を発行する
-                // 非同期コピーのため（`cudarc-0.19.8/src/driver/safe/
-                // core.rs::memcpy_dtoh`）、`download` 復帰時点でホスト
-                // データが確定していることを保証するため
-                // `synchronize()` を後段に挟む（`fandhe_ai_tensor_core::buffer`
-                // モジュールコメント「download の同期契約」参照。
-                // カーネル起動直後の `gemm.rs` はカーネル完了待ちとして
-                // 起動 → synchronize → clone_dtoh の順だが、本関数は
-                // 「clone_dtoh 自体の非同期完了待ち」が主目的のため
-                // clone_dtoh → synchronize の順になる）。
-                let host = self.stream.clone_dtoh(slice)?;
-                self.stream.synchronize()?;
-                host
+                // 同期点は本モジュール共通の `readback` ヘルパーへ集約
+                // 済み（#1013。`fandhe_ai_tensor_core::buffer` モジュール
+                // コメント「download の同期契約」参照）。
+                readback(&self.stream, slice)?
             }
         };
         Tensor::new(data, buffer.shape()).map_err(|err| CudaError::InvalidShape {

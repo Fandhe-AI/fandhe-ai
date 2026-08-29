@@ -211,9 +211,20 @@ pub trait BackendOps {
     ///
     /// # デフォルト実装
     /// 既定は `token` を無視して [`BackendOps::sgd_step_device`] へ
-    /// そのまま委譲する。CPU／CUDA は dispatch ごとに同期実行するため
-    /// 実行時エラーが呼び出し元に即座に返り、遅延失敗トークンを必要と
-    /// しない（このデフォルトのままでよい）。Metal のみ
+    /// そのまま委譲する。CPU は dispatch ごとに同期実行するため実行時
+    /// エラーが呼び出し元に即座に返り、遅延失敗トークンを必要としない
+    /// （このデフォルトのままでよい）。CUDA はイシュー #1013
+    /// （`docs/backend-cuda-async-execution-design.md` §5）でカーネル
+    /// 起動直後の都度 `synchronize()` を除去し非同期実行契約へ移行した
+    /// が、本 `token`（`DispatchFailureCell`）は使わずオーバーライドも
+    /// しない（このデフォルトのまま）。CUDA の遅延エラーは
+    /// `backend-cuda::context_cache` 独自の ordinal 単位 poison 状態機械
+    /// （`BackendError::DeviceContextPoisoned` 等。単一ストリームの
+    /// FIFO 順序保証により sticky エラー観測時点で ordinal を poison し
+    /// 以降の演算入口を拒否する）で表現され、`sgd_step_device` 自体の
+    /// `Err` を通じて `DeviceParamStore::step` の `StorePoisoned` 自己
+    /// 遷移（§5 末尾「独立に併存」）へつながるため、Metal と異なり
+    /// バッチ単位の事前登録機構を必要としない。Metal のみ
     /// `backend-metal::ops::MetalBackendOps` がオーバーライドし、
     /// `MetalContext::encode` と**同一ロック区間で** `token` をバッチへ
     /// 登録する（encode と登録の間に別スレッドの `synchronize` が

@@ -382,9 +382,8 @@ impl CudaSoftmax {
                 .arg(&scale)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        Ok(self.stream.clone_dtoh(&out_dev)?)
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        crate::memory::readback(&self.stream, &out_dev)
     }
 }
 

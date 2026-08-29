@@ -17,8 +17,18 @@
 //! [`crate::backend_ops::BackendOps::sgd_step_device_tracked`]
 //! （デフォルトメソッド。非破壊拡張）の追加引数として渡す。実際に
 //! 登録・検査するのは Metal 実装（`backend-metal::ops::
-//! MetalBackendOps::sgd_step_device_tracked`）のみで、CPU／CUDA は
-//! 同期実行のため実行時エラーが即座に判明し本セルを使わない。
+//! MetalBackendOps::sgd_step_device_tracked`）のみで、CPU は同期実行の
+//! ため実行時エラーが即座に判明し本セルを使わない。CUDA はイシュー
+//! #1013（`docs/backend-cuda-async-execution-design.md` §5）でカーネル
+//! 起動直後の都度 `synchronize()` を除去し非同期実行契約へ移行したが、
+//! 本セルは使わず `backend-cuda::context_cache` 独自の ordinal 単位
+//! poison 状態機械（`Phase::Poisoned`・`BackendError::
+//! DeviceContextPoisoned` 等）で遅延エラーを表現する（Metal のバッチ単位
+//! 事前登録方式とは異なり、CUDA は単一ストリームの FIFO 順序保証により
+//! 「sticky エラー観測時点で ordinal を poison し以降の `begin_driver_call`
+//! を拒否する」形で同じ fail-closed 性質を達成する）。
+//! `DeviceParamStore::step` はそのエラーで `StorePoisoned` へ自己遷移する
+//! （§5 末尾「`StorePoisoned` と独立に併存」）。
 
 use std::sync::{Arc, Mutex};
 

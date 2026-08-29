@@ -253,6 +253,61 @@ pub enum BackendError {
     /// （`ShapeMismatch`・`DeviceMismatch`）のいずれにも意味的に適合しない
     /// 引数検証失敗をここへ集約する（イシュー #935）。
     InvalidArgument(String),
+    /// デバイスの ordinal が回復可能な poison 状態にある（イシュー
+    /// #1013・`docs/backend-cuda-async-execution-design.md` §5）。
+    ///
+    /// カーネル起動直後の都度 `synchronize()` を除去した非同期実行契約
+    /// の下では、ある演算の実行時エラー（sticky な driver エラー）の
+    /// 発覚が後続の別演算まで遅延しうる。`backend-cuda::context_cache`
+    /// はこれを検出した ordinal を fail-closed に拒否し、以降の演算
+    /// 入口をこの variant で拒否する。回復には該当 ordinal の
+    /// `invalidate` による再生成が必要（`backend-cuda` 内部 API。
+    /// 呼び出し元は本 variant を受け取った場合、当該 ordinal を経由する
+    /// 既存ハンドル・バッファをすべて破棄し、新たに `tape_for` 等で
+    /// 取り直す）。
+    DeviceContextPoisoned(String),
+    /// デバイスバッファ・ハンドルが保持する世代（[`crate::buffer::
+    /// DeviceBuffer::generation`]）が、対象 ordinal の現行世代と一致
+    /// しない（イシュー #1013）。
+    ///
+    /// 現行世代自体は健全（[`BackendError::DeviceContextPoisoned`] とは
+    /// 独立）だが、渡されたハンドルは `invalidate` による再生成前の
+    /// 旧世代に属するため、演算入口が使用を拒否する。呼び出し元は
+    /// 現行世代のキャッシュ（`tape_for` 等）からハンドルを取り直す
+    /// 必要がある（`invalidate` を呼ぶ必要はない）。
+    StaleDeviceGeneration {
+        /// 対象デバイスの ordinal。
+        ordinal: usize,
+        /// 渡されたハンドル・バッファが属する世代。
+        resource_generation: u64,
+        /// 対象 ordinal の現行世代。
+        current_generation: u64,
+    },
+    /// 対象 ordinal が `invalidate`（poison からの復旧処理）の drain 中
+    /// であり、一時的に演算入口を拒否した（イシュー #1013）。
+    ///
+    /// `DeviceContextPoisoned` とは異なり、この状態は短時間で解消する
+    /// （復旧が成功すれば `Active` へ、失敗すれば `DeviceContextUnrecoverable`
+    /// へ遷移する）。呼び出し元は短時間の再試行、またはそのままエラーを
+    /// 上位へ伝播するかを選べる。
+    DeviceContextRetiring {
+        /// 対象デバイスの ordinal。
+        ordinal: usize,
+    },
+    /// 対象 ordinal の復旧処理（`invalidate`）自体が失敗し、恒久的な
+    /// poison 状態（`unrecoverable`）へ確定した（イシュー #1013）。
+    ///
+    /// ストリーム完了同期の失敗、または復旧用の実処理プローブ
+    /// （256B alloc → H2D → 恒等カーネル起動 → D2H → 値照合）の不一致・
+    /// 上限回数超過を意味する。同一プロセス内に回復手段はなく、
+    /// プロセスの再起動が必要（fail-open を避けるための最終防御。
+    /// `.claude/rules/security.md` A08）。
+    DeviceContextUnrecoverable {
+        /// 対象デバイスの ordinal。
+        ordinal: usize,
+        /// 復旧処理が失敗した際のエラー内容（診断用）。
+        probe_error: String,
+    },
 }
 
 impl fmt::Display for BackendError {
@@ -282,6 +337,31 @@ impl fmt::Display for BackendError {
             ),
             BackendError::MissingGradient(msg) => write!(f, "missing gradient: {msg}"),
             BackendError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            BackendError::DeviceContextPoisoned(msg) => {
+                write!(
+                    f,
+                    "device context poisoned (recoverable via invalidate): {msg}"
+                )
+            }
+            BackendError::StaleDeviceGeneration {
+                ordinal,
+                resource_generation,
+                current_generation,
+            } => write!(
+                f,
+                "stale device generation on ordinal {ordinal}: resource generation \
+                 {resource_generation}, current generation {current_generation}"
+            ),
+            BackendError::DeviceContextRetiring { ordinal } => {
+                write!(f, "device context on ordinal {ordinal} is retiring")
+            }
+            BackendError::DeviceContextUnrecoverable {
+                ordinal,
+                probe_error,
+            } => write!(
+                f,
+                "device context on ordinal {ordinal} is unrecoverably poisoned: {probe_error}"
+            ),
         }
     }
 }

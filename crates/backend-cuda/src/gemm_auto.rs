@@ -644,7 +644,10 @@ impl SpecializedMmaKernelHandle {
         let mut c_dev = stream.alloc_zeros::<f16>((m as usize) * (n as usize))?;
         self.compiled
             .launch_f16(stream, &a_dev, &b_dev, &mut c_dev, m, n, k)?;
-        Ok(stream.clone_dtoh(&c_dev)?)
+        // `launch_f16`（`kernels_mma.rs::CompiledMmaKernel`）は #1013 で
+        // 非同期投入のみに契約変更済み。ここが本関数唯一のホストへの
+        // readback であるため、同期点を `readback` ヘルパーへ集約する。
+        crate::memory::readback(stream, &c_dev)
     }
 }
 

@@ -259,7 +259,53 @@
 - ホスト `Tensor` API の `DeviceBuffer` 版への拡張（#1022 と重なる可能性がある）
 - `invalidate`（§5 item 4）の根本的な回復手段の強化: 本設計の `invalidate` は同一 ordinal の primary context を再 retain する前提（c 参照）であり、sticky error が実際に primary context を汚染した場合はプロセス内で解消する手段を持たない（`Poisoned { unrecoverable: true }` へ確定しプロセス再起動を要求する契約に留める）。`cuDevicePrimaryCtxReset` 等による同一プロセス内での primary context の完全破棄・再生成を伴う根本的な回復は本設計のスコープ外とし、採否の判断は #1013（実装）のタイミングへ委ねる
 
-## 12. 出典
+## 12. 実装記録（#1013）
+
+本設計文書（#1012）の実装として #1013 が行った内容・スコープ判断を記録する
+（`docs/backend-metal-command-batching-design.md` §7 と同型の追記節）。
+
+- **Phase A（同期除去・readback 境界の集約）**: §2 の棚卸し表に列挙した
+  本番経路の `synchronize()` をすべて除去し、ホストへ結果を読み戻す全経路
+  （`memory.rs::readback` ヘルパー）へ同期点を集約した。`sgd.rs::CudaSgd::run`
+  （最優先項目）を含む。`rmsnorm.rs` の分岐内二重同期は `dx` の readback で
+  1 回に単一化した（§9 item 4）。`examples/` の launch-only 計測クロージャ・
+  手動ループ（`gemm_profile_target.rs` の ncu 突合用バイナリ含む）には
+  `CudaGemm::synchronize`／`CudaWmmaGemm::synchronize`／`CudaMmaGemm::
+  synchronize`／`CudaMmaTf32Gemm::synchronize`／`CudaTranspose::synchronize`
+  （新規公開 API。本番ディスパッチからは呼ばれない）を追加し、旧計測境界
+  （「GPU 実行 + 完了待ち」）を維持した
+- **Phase B（遅延エラー伝播の状態機械）**: `tensor-core::device::BackendError`
+  へ 4 variant（`DeviceContextPoisoned`／`StaleDeviceGeneration`／
+  `DeviceContextRetiring`／`DeviceContextUnrecoverable`）を追加し、
+  `tensor-core::buffer::DeviceBuffer` に `generation` フィールドを追加した
+  （`new_with_generation`／`generation()`。既定は `0`）。`backend-cuda::
+  context_cache` に ordinal 単位の poison 状態機械（`OrdinalRegistry`・
+  `Phase`・`CallToken`・`begin_driver_call`／`observe_driver_result`／
+  `invalidate_with`／`is_poisoned`／`current_generation`・
+  `classify_cuda_result`）を実装し、GPU 非依存の単体テスト（`poison_state_tests`
+  モジュール。17 件）で CI 常時検証できるようにした
+- **Phase C（`ops.rs` への結線）は本 PR のスコープ外とした**: 設計 §9 item
+  7・9〜11 が要求する各演算入口への `begin_driver_call`／`observe_driver_result`
+  結線・`DeviceBuffer` 構築の世代刻印・`static_cuda_memory` の世代追従は、
+  advisor レビューの助言（「一部の演算入口だけを結線すると、状態機械が
+  存在するのに実質 fail-open のまま残り、レビュー時に『カバレッジ済み』と
+  誤認されるリスクが結線なしより悪い」）に基づき、A+B のみを一貫した単位
+  として本 PR に含め、C は次イシューへ意図的に引き渡す（`invalidate` の
+  実 CUDA プローブ実装〈恒等カーネル起動・CC キーキャッシュ〉も同様に
+  未実装のまま残る）
+- **I4（`has_async_alloc`）は本 PR でも未実測のまま**: 設計文書 §3 が
+  保留とした cudarc 0.19.8 の非同期アロケーション対応可否は、GB10 実機
+  アクセスを要する検証のため引き続き未確認
+- **実測**: RTX 3060（CC 8.6）実機での before/after 計測は
+  `docs/perf/cuda-async-sync-removal-rtx3060.md` に記録した。トイモデル
+  規模（`BATCH=4, D_IN=8, D_HIDDEN=16, D_OUT=4`）ではホスト側ディスパッチ
+  オーバーヘッドが支配的なため、update フェーズ単体（都度同期除去の直接
+  対象）は約 1.7 倍高速化した一方、1 step 全体では明確な高速化を示せなかった
+  （誠実な報告として記録し、速報的な高速化は主張しない）。`bench-fandhe
+  train cuda` によるフレームワーク横並び 1 step 改善の実測・DGX Spark
+  GB10／Metal M4 Max での再計測は本 PR 時点で未実施のまま残す
+
+## 13. 出典
 
 - `scripts/bench/framework-compare/results/summary.md`（MLP 学習 1 step 実測値）
 - `crates/backend-cuda/src/device.rs`（ストリーム構成・`context_cache` 連携）

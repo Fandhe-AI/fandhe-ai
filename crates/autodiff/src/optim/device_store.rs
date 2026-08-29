@@ -88,9 +88,17 @@
 //! を `ops.sgd_step_device_tracked` へ同一ロック区間で渡しておき、
 //! `check_not_poisoned` が 4 つの状態機械エントリいずれかへの
 //! 入口で `failure_token.is_set()` を検査して `poisoned` へ自己遷移する
-//! （`ops` 側からの能動的な通知を待たない。CPU／CUDA は同期実行のため
+//! （`ops` 側からの能動的な通知を待たない。CPU は同期実行のため
 //! `failure_token` を使わず、`step()` 内の即時エラーでこれまでどおり
-//! `poisoned` へ遷移する）。
+//! `poisoned` へ遷移する。CUDA はイシュー #1013（`docs/backend-cuda-
+//! async-execution-design.md` §5）でカーネル起動直後の都度
+//! `synchronize()` を除去し非同期実行契約へ移行したが、`failure_token`
+//! は使わない: `backend-cuda::context_cache` が ordinal 単位の poison
+//! 状態機械で sticky エラーを検出すると、以降その ordinal 上の全 driver
+//! 呼び出しが `Err` を返すため、`step()` 自体の呼び出しが失敗して
+//! 従来どおり即時に `poisoned` へ遷移する。`StorePoisoned` と
+//! `context_cache` 側の poison は独立に併存する契約であり、どちらか
+//! 一方の存在が他方を代替しない）。
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

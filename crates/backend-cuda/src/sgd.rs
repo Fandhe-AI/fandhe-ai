@@ -84,6 +84,12 @@ impl CudaSgd {
 
     /// SGD 1 ステップを in-place で実行する（H2D／D2H なし）。
     ///
+    /// 非同期投入契約（イシュー #1013）: 本関数はカーネルをストリームへ
+    /// 投入するのみで完了を待たない（`synchronize()` を呼ばない）。
+    /// 呼び出し元が `param`／`grad` の内容をホストで読む場合は、
+    /// `MemoryOps::download`（`memory.rs::readback` 経由で同期する）を
+    /// 別途呼ぶ責務を負う。
+    ///
     /// `param`／`grad` は同じ `numel` を要求する（呼び出し元
     /// `ops.rs::CudaBackendOps::sgd_step_device` が shape 検証済みの
     /// バッファを渡す契約）。`velocity` は `params.momentum != 0.0` の
@@ -171,7 +177,14 @@ impl CudaSgd {
                 .arg(&use_momentum)
                 .launch(sgd_launch_config(numel as u32))?;
         }
-        self.stream.synchronize()?;
+        // ここでは `synchronize()` を呼ばない（イシュー #1013）。SGD は
+        // D2H を伴わない唯一の常駐経路であり、旧実装はここで毎回ホストを
+        // ブロックしていた（親 #1008 が診断した「都度同期」の主要因の
+        // 1 つ）。カーネルはストリームへ非同期投入されるのみで、完了は
+        // 次の同期点（呼び出し元が `MemoryOps::download`／`readback`
+        // ヘルパー経由でホストへ読み戻す時点、または `bench_harness::
+        // sync::CudaStreamSync::wait_idle`）で保証される（設計文書
+        // `docs/backend-cuda-async-execution-design.md` §3〜§4）。
         Ok(())
     }
 }

@@ -102,6 +102,10 @@ fn measure_wmma_tf32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
     let measurement = bench_run(config, || {
         gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
             .expect("WMMA(TF32) GEMM must succeed on CUDA-equipped runner (probed above)");
+        // #1013: `launch_wmma_tf32` は非同期投入のみに契約変更された
+        // ため、明示的な同期で計測境界を維持する。
+        gemm.synchronize()
+            .expect("stream synchronize must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops(size, measurement.median_secs)

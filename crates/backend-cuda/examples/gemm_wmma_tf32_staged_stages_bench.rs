@@ -154,6 +154,13 @@ fn measure_dyn_staged(
             size as u32,
         ) {
             first_err = Some(e);
+            return;
+        }
+        // #1013: `launch_tf32_staged_dyn` は非同期投入のみに契約変更
+        // されたため、「GPU 実行のみ」の計測境界を維持するには明示的な
+        // 同期が必要。
+        if let Err(e) = stream.synchronize() {
+            first_err = Some(e.into());
         }
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
@@ -195,6 +202,11 @@ fn measure_production_wmma_tf32(
             size as u32,
             size as u32,
         ) {
+            first_err = Some(e);
+            return;
+        }
+        // #1013: `measure_dyn_staged` と同じ理由で明示的な同期を追加する。
+        if let Err(e) = gemm.synchronize() {
             first_err = Some(e);
         }
     })

@@ -163,8 +163,11 @@ impl CudaMmaTf32Gemm {
             .alloc_zeros::<f32>((m as usize) * (n as usize))?)
     }
 
-    /// デバイス常駐済みの A/B/C バッファに対してカーネルを起動し、完了を
-    /// 待つ（H2D/D2H を含まない「GPU 実行のみ」の区間）。
+    /// デバイス常駐済みの A/B/C バッファに対してカーネルをストリームへ
+    /// 非同期投入する（H2D/D2H を含まない「GPU 実行のみ」の区間）。
+    ///
+    /// 非同期投入契約（イシュー #1013）: 本関数は完了を待たない。完了
+    /// 保証は呼び出し元の次の同期点（`download_f32` 等）に委ねる。
     ///
     /// safe な公開 API であるため、呼び出し元の事前検証に依存せず本関数
     /// 自身が `run_tf32` と同じ形状検証（`validate_gemm_dims`・
@@ -207,15 +210,16 @@ impl CudaMmaTf32Gemm {
             return Ok(());
         }
         if k == 0 {
-            // `memset_zeros` は非同期発行のため、本関数の「GPU 処理完了を
-            // 待って return する」契約（本関数ドキュメンテーションコメント
-            // 冒頭）をこの分岐でも守るには明示的な `synchronize` が必要
-            // （PR #823 codex-review 指摘是正: 通常経路はカーネル起動後に
-            // `synchronize` を呼ぶが、この早期 return パスは呼ばずに戻って
-            // いたため、host 側がゼロ埋め完了前に完了を観測しうるレースが
-            // あった）。
+            // `memset_zeros` は非同期発行のみに留める（イシュー #1013
+            // で本関数（常駐 API）の契約を「非同期投入のみ。完了保証は
+            // 呼び出し元の次の同期点（`download_f32`／`MemoryOps::
+            // download`／明示 `synchronize`）に委ねる」へ統一した。PR #823
+            // codex-review 指摘（旧: この早期 return パスが `synchronize`
+            // を呼ばずに戻っていたレース）は、単一ストリームの FIFO 順序
+            // 保証により後続の同期点が本 `memset_zeros` を含む全ての先行
+            // 投入を合わせて待つため、契約変更後も再発しない
+            // （`transpose.rs` の同型分岐と同じ判断。設計文書 §3〜§4）。
             self.stream.memset_zeros(c_dev)?;
-            self.stream.synchronize()?;
             return Ok(());
         }
 
@@ -249,13 +253,23 @@ impl CudaMmaTf32Gemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+        // 委ねる。
         Ok(())
     }
 
     /// C をデバイス→ホストへ転送する（`run_tf32` の D2H 部分の切り出し）。
+    ///
+    /// 同期点（#1013）: 常駐 `launch_tf32` は非同期投入のみで完了を待たない
+    /// ため、本関数が readback ヘルパー経由で完了を確定する。
     pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        Ok(self.stream.clone_dtoh(c_dev)?)
+        crate::memory::readback(&self.stream, c_dev)
+    }
+
+    /// ストリームの完了を明示的に待つ（イシュー #1013。
+    /// `gemm.rs::CudaGemm::synchronize` と同じ理由の公開 API）。
+    pub fn synchronize(&self) -> Result<(), CudaError> {
+        Ok(self.stream.synchronize()?)
     }
 }
 

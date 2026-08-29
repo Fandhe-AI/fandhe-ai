@@ -231,6 +231,546 @@ pub(crate) fn cached_sgd(
     get_or_build(cache, ordinal, || crate::sgd::CudaSgd::new(device))
 }
 
+// =========================================================================
+// 非同期実行の遅延エラー伝播（イシュー #1013・
+// `docs/backend-cuda-async-execution-design.md` §5「エラー伝播」）
+// =========================================================================
+//
+// カーネル起動直後の都度 `synchronize()` を除去した非同期実行契約の下では、
+// ある演算の実行時エラー（sticky な driver エラー）の発覚が後続の別演算
+// まで遅延しうる。本節は ordinal 単位の状態機械（[`Phase`]）で sticky
+// エラーを検出した ordinal を fail-closed に poison し、以降の演算入口
+// （[`begin_driver_call`]）で拒否することで、poison 後も気づかずに処理を
+// 継続する fail-open を防ぐ。
+//
+// 各 ordinal の状態は [`OrdinalState`]（`generation`・`phase`・
+// `in_flight`）として `Mutex` + `Condvar` で保護する。単一の
+// `Mutex<HashMap<usize, ...>>` ではなく ordinal ごとに独立した
+// `Mutex`/`Condvar` ペアを持たせることで、ある ordinal の `invalidate`
+// （drain 待ち。`Condvar::wait` でブロックしうる）が他 ordinal の
+// `begin_driver_call` を妨げない（`get_or_build` の 2 階層ロック設計と
+// 同じ「他 ordinal への同時アクセスを妨げない」判断）。
+//
+// state 遷移:
+//   Active（世代 g） --sticky エラー観測--> Poisoned{unrecoverable:false}
+//   Poisoned{false} --invalidate 開始--> Retiring
+//   Retiring --drain 完了 + stream sync 成功 + プローブ成功--> Active（世代 g+1）
+//   Retiring --stream sync 失敗 / プローブが sticky・不一致--> Poisoned{true}
+//   Retiring --プローブが operation-local・再試行余地あり--> Poisoned{false}（同一世代）
+//   Poisoned{true} は恒久状態（プロセス内に回復手段なし）
+
+use std::sync::Condvar;
+
+use fandhe_ai_tensor_core::device::BackendError;
+
+/// [`OrdinalState::phase`] の値。ordinal 単位の poison 状態機械
+/// （モジュール冒頭「非同期実行の遅延エラー伝播」参照）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// 通常運用中。`generation` は現行世代。
+    Active,
+    /// [`invalidate`] が復旧処理（drain → stream 完了同期 → 実処理
+    /// プローブ）を実行中。この間の [`begin_driver_call`] は
+    /// `BackendError::DeviceContextRetiring` で一時拒否する。
+    Retiring,
+    /// sticky エラーにより poison 済み。`unrecoverable == true` は
+    /// [`invalidate`] 自体が失敗した恒久状態（回復手段なし）、`false` は
+    /// [`invalidate`] で再生成しうる状態。
+    Poisoned { unrecoverable: bool },
+}
+
+/// ordinal 単位の poison 状態機械の本体（モジュール冒頭コメント参照）。
+struct OrdinalState {
+    /// `invalidate` が成功するたびに 1 増える世代カウンタ。
+    /// [`fandhe_ai_tensor_core::buffer::DeviceBuffer::generation`] と
+    /// 比較し、旧世代のハンドル・バッファの使用を検出する。
+    generation: u64,
+    phase: Phase,
+    /// 現在この ordinal 上で実行中（`begin_driver_call` 済み・
+    /// `CallToken` 未 drop）の演算数。[`invalidate`] の drain フェーズは
+    /// これが 0 になるまで待つ。
+    in_flight: u64,
+    /// `invalidate` の実処理プローブが operation-local エラーで失敗した
+    /// 連続回数。[`LIMIT_PROBE_RETRIES`] に達すると恒久 poison へ確定する
+    /// （無限リトライを避ける fail-closed な上限）。
+    probe_retry_count: u32,
+}
+
+impl Default for OrdinalState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            phase: Phase::Active,
+            in_flight: 0,
+            probe_retry_count: 0,
+        }
+    }
+}
+
+/// `invalidate` の実処理プローブの再試行上限（モジュール冒頭コメント
+/// 「state 遷移」参照）。operation-local な失敗が続く場合、無限に
+/// リトライせず恒久 poison（`unrecoverable: true`）へ確定する。
+const LIMIT_PROBE_RETRIES: u32 = 3;
+
+/// ordinal をキーとする [`OrdinalState`] レジストリ。テスト容易性のため
+/// static に依存しない構造体として切り出す（`get_or_build` テストと
+/// 同方針。本番経路は [`ordinal_registry`] が返すプロセスワイド static
+/// インスタンスを使う）。
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+/// ordinal 単位の `(Mutex<OrdinalState>, Condvar)` セルへの共有ハンドル
+/// （clippy `type_complexity` 回避。実体は [`OrdinalRegistry`] 参照）。
+type OrdinalCell = Arc<(Mutex<OrdinalState>, Condvar)>;
+
+#[allow(dead_code)]
+struct OrdinalRegistry {
+    states: Mutex<HashMap<usize, OrdinalCell>>,
+}
+
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+impl OrdinalRegistry {
+    fn new() -> Self {
+        Self {
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// `ordinal` に対応する `(Mutex<OrdinalState>, Condvar)` を取得する
+    /// （未登録なら `OrdinalState::default()` で新規登録）。
+    fn entry(&self, ordinal: usize) -> Result<OrdinalCell, BackendError> {
+        let mut guard = self.states.lock().map_err(|e| {
+            BackendError::DeviceContextPoisoned(format!(
+                "context_cache::OrdinalRegistry の Mutex が poison しました: {e}"
+            ))
+        })?;
+        Ok(Arc::clone(guard.entry(ordinal).or_insert_with(|| {
+            Arc::new((Mutex::new(OrdinalState::default()), Condvar::new()))
+        })))
+    }
+}
+
+/// プロセスワイドな [`OrdinalRegistry`]（本番経路が使う唯一のインスタンス。
+/// テストは [`OrdinalRegistry::new`] で独立インスタンスを使う）。
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+fn ordinal_registry() -> &'static OrdinalRegistry {
+    static REGISTRY: OnceLock<OrdinalRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(OrdinalRegistry::new)
+}
+
+/// 1 回の driver 呼び出し（1 演算）に対応するトークン。[`begin_driver_call`]
+/// が発行し、`Drop` で `in_flight` を 1 減らし [`invalidate`] の drain 待ち
+/// （`Condvar::notify_all`）へ通知する。演算関数のスコープ末尾で自然に
+/// drop される（`?` によるアーリーリターン・panic 経路でも解放される。
+/// `.claude/rules/coding-rust.md` の RAII 一本化方針と同型）。
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct CallToken {
+    ordinal: usize,
+    generation: u64,
+}
+
+impl Drop for CallToken {
+    fn drop(&mut self) {
+        // レジストリ取得・ロック取得が失敗しても（プロセス末期等）
+        // Drop は panic できないため、失敗時は静かに諦める
+        // （in_flight のわずかな不整合は `invalidate` の drain を長引かせる
+        // だけで安全性を損なわない。fail-open にはならない）。
+        if let Ok(cell) = ordinal_registry().entry(self.ordinal)
+            && let Ok(mut state) = cell.0.lock()
+        {
+            state.in_flight = state.in_flight.saturating_sub(1);
+            cell.1.notify_all();
+        }
+    }
+}
+
+/// 演算入口（`ops.rs` の各公開メソッド）が driver 呼び出し直前に 1 回だけ
+/// 呼ぶ（イシュー #1013 設計文書 §9 item 9「TOCTOU 回避のため事前検査を
+/// 別ステップにしない」）。
+///
+/// `resource_generations` には、当該演算が触れる全デバイスバッファ・
+/// ハンドルの [`fandhe_ai_tensor_core::buffer::DeviceBuffer::generation`]
+/// を渡す。現行世代（`ordinal` の `generation`）と 1 つでも不一致なら
+/// [`BackendError::StaleDeviceGeneration`] で拒否する（`in_flight` は
+/// 変更しない。世代不一致は「投入前」の拒否であり実行そのものが
+/// 行われないため）。
+///
+/// 拒否条件（`phase` 優先）: `Poisoned{false}` →
+/// [`BackendError::DeviceContextPoisoned`]、`Poisoned{true}` →
+/// [`BackendError::DeviceContextUnrecoverable`]、`Retiring` →
+/// [`BackendError::DeviceContextRetiring`]。`Active` かつ世代一致なら
+/// `in_flight += 1` して [`CallToken`] を返す。
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+pub(crate) fn begin_driver_call(
+    ordinal: usize,
+    resource_generations: &[u64],
+) -> Result<CallToken, BackendError> {
+    let cell = ordinal_registry().entry(ordinal)?;
+    let mut state = cell.0.lock().map_err(|e| {
+        BackendError::DeviceContextPoisoned(format!(
+            "context_cache::OrdinalState の Mutex が poison しました（ordinal={ordinal}）: {e}"
+        ))
+    })?;
+    match state.phase {
+        Phase::Poisoned {
+            unrecoverable: true,
+        } => {
+            return Err(BackendError::DeviceContextUnrecoverable {
+                ordinal,
+                probe_error: "device context is permanently poisoned; process restart required"
+                    .to_string(),
+            });
+        }
+        Phase::Poisoned {
+            unrecoverable: false,
+        } => {
+            return Err(BackendError::DeviceContextPoisoned(format!(
+                "ordinal {ordinal} is poisoned; call invalidate() to attempt recovery"
+            )));
+        }
+        Phase::Retiring => {
+            return Err(BackendError::DeviceContextRetiring { ordinal });
+        }
+        Phase::Active => {}
+    }
+    let current_generation = state.generation;
+    if let Some(&stale) = resource_generations
+        .iter()
+        .find(|&&g| g != current_generation)
+    {
+        return Err(BackendError::StaleDeviceGeneration {
+            ordinal,
+            resource_generation: stale,
+            current_generation,
+        });
+    }
+    state.in_flight += 1;
+    Ok(CallToken {
+        ordinal,
+        generation: current_generation,
+    })
+}
+
+/// driver 呼び出しの結果を観測し、sticky エラーなら ordinal を poison
+/// する（イシュー #1013 設計文書 §5「エラー伝播」）。ラッパー型の
+/// `observe` 委譲（`self.stream.xxx(..)?` → `self.observe(token,
+/// self.stream.xxx(..))?`）から呼ばれる想定。
+///
+/// `in_flight` は変更しない（解放は [`CallToken`] の `Drop` のみ。
+/// TOCTOU・二重減算を避けるため本関数の責務に含めない）。`Retiring` 中に
+/// sticky を観測しても `phase` を上書きしない（`invalidate` の drain を
+/// 永久待機させないため。`invalidate` 自身がストリーム同期・プローブで
+/// 別途エラーを検出する）。`Err` はそのまま呼び出し元へ返す
+/// （分類・poison 化は副作用であり戻り値は変えない）。
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+pub(crate) fn observe_driver_result<T>(
+    ordinal: usize,
+    token: &CallToken,
+    result: Result<T, cudarc::driver::result::DriverError>,
+) -> Result<T, cudarc::driver::result::DriverError> {
+    if let Err(ref e) = result
+        && classify_cuda_result(e) == ResultClass::Sticky
+        && let Ok(cell) = ordinal_registry().entry(ordinal)
+        && let Ok(mut state) = cell.0.lock()
+        && state.generation == token.generation
+        && state.phase == Phase::Active
+    {
+        state.phase = Phase::Poisoned {
+            unrecoverable: false,
+        };
+    }
+    result
+}
+
+/// `ordinal` が現在 poison 状態（`Poisoned{..}`。`unrecoverable` の
+/// いずれも含む）かを返す。
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+pub(crate) fn is_poisoned(ordinal: usize) -> bool {
+    let Ok(cell) = ordinal_registry().entry(ordinal) else {
+        // レジストリ自体が取得できない異常時は fail-closed（poison 扱い）
+        // に倒す（呼び出し元が「安全側」の判定を得られるようにする）。
+        return true;
+    };
+    let Ok(state) = cell.0.lock() else {
+        return true;
+    };
+    matches!(state.phase, Phase::Poisoned { .. })
+}
+
+/// `ordinal` の現行世代を返す（レジストリ未取得時は `0`。新規 ordinal は
+/// `OrdinalState::default()` の世代 `0` と整合する）。
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+pub(crate) fn current_generation(ordinal: usize) -> u64 {
+    let Ok(cell) = ordinal_registry().entry(ordinal) else {
+        return 0;
+    };
+    let Ok(state) = cell.0.lock() else {
+        return 0;
+    };
+    state.generation
+}
+
+/// `invalidate` の実処理プローブが検出しうる失敗の分類
+/// （[`invalidate_with`] のテスト注入用クロージャの戻り値）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+enum ProbeFailure {
+    /// 一時的・当該試行固有の失敗（例: OOM）。再試行の余地がある。
+    OperationLocal,
+    /// sticky なデバイス異常。即座に恒久 poison へ確定する。
+    Sticky,
+    /// プローブの往復値が一致しなかった（データ破損の兆候）。sticky と
+    /// 同様に即座に恒久 poison へ確定する。
+    Mismatch,
+}
+
+/// sticky（デバイス全体に影響し続ける） / operation-local（当該呼び出し
+/// 固有）の分類（イシュー #1013 設計文書 §5）。**未知の `CUresult` は
+/// sticky 側へ倒す**（fail-closed。個々のエラーコードを網羅できていない
+/// 場合に fail-open にしないための既定）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+enum ResultClass {
+    Sticky,
+    OperationLocal,
+}
+
+// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
+// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
+// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
+// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
+// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
+// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+#[allow(dead_code)]
+fn classify_cuda_result(err: &cudarc::driver::result::DriverError) -> ResultClass {
+    use cudarc::driver::sys::CUresult::*;
+    // operation-local: 当該呼び出しの引数・リソース状況に起因し、以降の
+    // 呼び出しには影響しない既知のエラーコード。
+    match err.0 {
+        CUDA_ERROR_INVALID_VALUE
+        | CUDA_ERROR_INVALID_HANDLE
+        | CUDA_ERROR_OUT_OF_MEMORY
+        | CUDA_ERROR_INVALID_IMAGE
+        | CUDA_ERROR_NO_BINARY_FOR_GPU
+        | CUDA_ERROR_NOT_FOUND
+        | CUDA_ERROR_INVALID_PTX
+        | CUDA_ERROR_UNSUPPORTED_PTX_VERSION => ResultClass::OperationLocal,
+        // 上記以外（`CUDA_ERROR_ILLEGAL_ADDRESS`・`CUDA_ERROR_LAUNCH_FAILED`・
+        // `CUDA_ERROR_ECC_UNCORRECTABLE`・`CUDA_ERROR_HARDWARE_STACK_ERROR`・
+        // `CUDA_ERROR_MISALIGNED_ADDRESS`・`CUDA_ERROR_INVALID_ADDRESS_SPACE`・
+        // `CUDA_ERROR_ASSERT`・`CUDA_ERROR_LAUNCH_TIMEOUT`・
+        // `CUDA_ERROR_INVALID_PC`・`CUDA_ERROR_CONTEXT_IS_DESTROYED`・
+        // `CUDA_ERROR_UNKNOWN` を含む未知の全コード）は sticky 側へ倒す。
+        _ => ResultClass::Sticky,
+    }
+}
+
+/// `invalidate`（本体は [`invalidate_with`]。実 CUDA のプローブ処理は
+/// 本関数自身では実装せず、`ops.rs`／`memory.rs` 側の復旧経路が実 CUDA
+/// クロージャを渡して呼ぶ想定。イシュー #1013 の本 PR 時点では
+/// `begin_driver_call`／`observe_driver_result` の結線（Phase C）を
+/// スコープ外としたため、本関数の呼び出し元は未結線（テストのみが
+/// `invalidate_with` を直接検証する）。
+///
+/// state 遷移: retire（`Retiring` へ。他スレッドが既に `Retiring` 中なら
+/// 完了を待つ。`Poisoned{true}` は即エラー）→ drain（`in_flight == 0` を
+/// 待つ）→ `sync`（ストリーム完了同期。失敗で恒久 poison）→ `probe`
+/// （実処理プローブ。`OperationLocal` なら同一世代のまま `Poisoned{false}`
+/// へ戻し再試行余地を残す、上限超過または `Sticky`/`Mismatch` なら恒久
+/// poison）→ 成功なら世代を 1 進めて `Active` へ復帰する。
+#[allow(dead_code)]
+fn invalidate_with(
+    registry: &OrdinalRegistry,
+    ordinal: usize,
+    sync: impl FnOnce() -> Result<(), ProbeFailure>,
+    probe: impl FnOnce() -> Result<(), ProbeFailure>,
+) -> Result<(), BackendError> {
+    let cell = registry.entry(ordinal)?;
+
+    // a. retire: 所有権を一本化する。他スレッドが既に Retiring 中なら
+    // Condvar でその完了を待つ（drain 中に別スレッドが invalidate を
+    // 呼んでも二重に実処理プローブを走らせない）。
+    let mut state = cell.0.lock().map_err(|e| {
+        BackendError::DeviceContextPoisoned(format!(
+            "context_cache::OrdinalState の Mutex が poison しました（ordinal={ordinal}）: {e}"
+        ))
+    })?;
+    loop {
+        match state.phase {
+            Phase::Poisoned {
+                unrecoverable: true,
+            } => {
+                return Err(BackendError::DeviceContextUnrecoverable {
+                    ordinal,
+                    probe_error: "already permanently poisoned".to_string(),
+                });
+            }
+            Phase::Retiring => {
+                state = cell.1.wait(state).map_err(|e| {
+                    BackendError::DeviceContextPoisoned(format!(
+                        "invalidate の Condvar 待機中に Mutex が poison しました: {e}"
+                    ))
+                })?;
+                continue;
+            }
+            Phase::Active | Phase::Poisoned { .. } => {
+                state.phase = Phase::Retiring;
+                break;
+            }
+        }
+    }
+
+    // b. drain: in_flight == 0 になるまで待つ。
+    while state.in_flight != 0 {
+        state = cell.1.wait(state).map_err(|e| {
+            BackendError::DeviceContextPoisoned(format!(
+                "invalidate の drain 待機中に Mutex が poison しました: {e}"
+            ))
+        })?;
+    }
+    // ロックを一旦手放し、sync/probe（時間のかかる実処理）はロック外で
+    // 実行する（`get_or_build` の「build はロック外で実行しない」設計とは
+    // 異なり、こちらは Retiring 中の排他が既に他スレッドの
+    // begin_driver_call を拒否しているため、ロックを保持し続ける必要が
+    // ない。長時間ロックを保持すると `is_poisoned`／`current_generation`
+    // まで巻き込んで無用にブロックする）。
+    drop(state);
+
+    // b'. ストリーム完了同期。
+    if let Err(_probe_failure) = sync() {
+        let mut state = cell.0.lock().map_err(|e| {
+            BackendError::DeviceContextPoisoned(format!(
+                "invalidate の sync 失敗処理中に Mutex が poison しました: {e}"
+            ))
+        })?;
+        state.phase = Phase::Poisoned {
+            unrecoverable: true,
+        };
+        cell.1.notify_all();
+        return Err(BackendError::DeviceContextUnrecoverable {
+            ordinal,
+            probe_error: "stream synchronize failed during invalidate".to_string(),
+        });
+    }
+
+    // c. 実処理プローブ。
+    match probe() {
+        Ok(()) => {
+            let mut state = cell.0.lock().map_err(|e| {
+                BackendError::DeviceContextPoisoned(format!(
+                    "invalidate の成功処理中に Mutex が poison しました: {e}"
+                ))
+            })?;
+            state.generation += 1;
+            state.phase = Phase::Active;
+            state.probe_retry_count = 0;
+            cell.1.notify_all();
+            Ok(())
+        }
+        Err(ProbeFailure::OperationLocal) => {
+            let mut state = cell.0.lock().map_err(|e| {
+                BackendError::DeviceContextPoisoned(format!(
+                    "invalidate のプローブ失敗処理中に Mutex が poison しました: {e}"
+                ))
+            })?;
+            state.probe_retry_count += 1;
+            if state.probe_retry_count >= LIMIT_PROBE_RETRIES {
+                state.phase = Phase::Poisoned {
+                    unrecoverable: true,
+                };
+                cell.1.notify_all();
+                return Err(BackendError::DeviceContextUnrecoverable {
+                    ordinal,
+                    probe_error: format!(
+                        "invalidate probe failed {} times (operation-local); giving up",
+                        state.probe_retry_count
+                    ),
+                });
+            }
+            state.phase = Phase::Poisoned {
+                unrecoverable: false,
+            };
+            cell.1.notify_all();
+            Err(BackendError::DeviceContextPoisoned(
+                "invalidate probe failed (operation-local); retry may recover".to_string(),
+            ))
+        }
+        Err(reason @ (ProbeFailure::Sticky | ProbeFailure::Mismatch)) => {
+            let mut state = cell.0.lock().map_err(|e| {
+                BackendError::DeviceContextPoisoned(format!(
+                    "invalidate のプローブ失敗処理中に Mutex が poison しました: {e}"
+                ))
+            })?;
+            state.phase = Phase::Poisoned {
+                unrecoverable: true,
+            };
+            cell.1.notify_all();
+            Err(BackendError::DeviceContextUnrecoverable {
+                ordinal,
+                probe_error: format!("invalidate probe failed ({reason:?})"),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +909,331 @@ mod tests {
 
         let err = get_or_build(cache.0, 0, || Ok(1)).unwrap_err();
         assert!(matches!(err, CudaError::ContextCacheUnavailable { .. }));
+    }
+}
+
+/// 非同期実行の遅延エラー伝播（状態機械。モジュール冒頭「非同期実行の
+/// 遅延エラー伝播」参照）の単体テスト。実 CUDA 依存なし（GPU 不要）で
+/// CI 常時実行できる（イシュー #1013 設計文書 §8 T3 系統の最小構成。
+/// 実機依存の T1・T2・T3b・T3i・T4 は #1014 へ引き渡す）。
+///
+/// [`begin_driver_call`]／[`observe_driver_result`]／[`is_poisoned`]／
+/// [`current_generation`] はプロセスワイド static（[`ordinal_registry`]）
+/// を経由するため、テスト間の干渉を避けるべく各テストは他所と衝突しない
+/// 専用 ordinal（10000 番台。実 CUDA テストは ordinal 0/1 のみを使う）を
+/// 使う。[`invalidate_with`] は `OrdinalRegistry::new()`（独立インスタンス）
+/// で検証するためこの制約を受けない。
+#[cfg(test)]
+mod poison_state_tests {
+    use super::*;
+    use cudarc::driver::result::DriverError;
+    use cudarc::driver::sys::CUresult;
+
+    /// テスト間で衝突しない ordinal を払い出す（`AtomicUsize` カウンタ。
+    /// 10000 番台に限定し実 CUDA テスト・他モジュールの ordinal 0/1 とは
+    /// 衝突しない）。
+    fn unique_ordinal() -> usize {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(10_000);
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn sticky_err() -> DriverError {
+        DriverError(CUresult::CUDA_ERROR_ILLEGAL_ADDRESS)
+    }
+
+    fn operation_local_err() -> DriverError {
+        DriverError(CUresult::CUDA_ERROR_INVALID_VALUE)
+    }
+
+    #[test]
+    fn classify_known_operation_local_codes_are_operation_local() {
+        for code in [
+            CUresult::CUDA_ERROR_INVALID_VALUE,
+            CUresult::CUDA_ERROR_INVALID_HANDLE,
+            CUresult::CUDA_ERROR_OUT_OF_MEMORY,
+            CUresult::CUDA_ERROR_INVALID_IMAGE,
+            CUresult::CUDA_ERROR_NO_BINARY_FOR_GPU,
+            CUresult::CUDA_ERROR_NOT_FOUND,
+            CUresult::CUDA_ERROR_INVALID_PTX,
+            CUresult::CUDA_ERROR_UNSUPPORTED_PTX_VERSION,
+        ] {
+            assert_eq!(
+                classify_cuda_result(&DriverError(code)),
+                ResultClass::OperationLocal,
+                "{code:?} は operation-local に分類されるはず"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_known_sticky_codes_are_sticky() {
+        for code in [
+            CUresult::CUDA_ERROR_ILLEGAL_ADDRESS,
+            CUresult::CUDA_ERROR_LAUNCH_FAILED,
+            CUresult::CUDA_ERROR_ECC_UNCORRECTABLE,
+            CUresult::CUDA_ERROR_MISALIGNED_ADDRESS,
+            CUresult::CUDA_ERROR_LAUNCH_TIMEOUT,
+        ] {
+            assert_eq!(
+                classify_cuda_result(&DriverError(code)),
+                ResultClass::Sticky,
+                "{code:?} は sticky に分類されるはず"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_unknown_code_falls_back_to_sticky_fail_closed() {
+        // `CUDA_ERROR_UNKNOWN` は明示リストのどちらにも含まれない代表例。
+        // fail-closed 契約（モジュール冒頭コメント）: 未知は sticky 側へ倒す。
+        assert_eq!(
+            classify_cuda_result(&DriverError(CUresult::CUDA_ERROR_UNKNOWN)),
+            ResultClass::Sticky
+        );
+    }
+
+    #[test]
+    fn begin_driver_call_succeeds_on_fresh_active_ordinal() {
+        let ordinal = unique_ordinal();
+        assert_eq!(current_generation(ordinal), 0);
+        assert!(!is_poisoned(ordinal));
+        let token = begin_driver_call(ordinal, &[0]).expect("fresh ordinal is Active・世代 0");
+        assert_eq!(token.generation, 0);
+    }
+
+    #[test]
+    fn begin_driver_call_rejects_stale_generation_without_touching_in_flight() {
+        let ordinal = unique_ordinal();
+        let err = begin_driver_call(ordinal, &[7]).expect_err("世代 7 は現行世代 0 と不一致");
+        assert!(matches!(
+            err,
+            BackendError::StaleDeviceGeneration {
+                ordinal: o,
+                resource_generation: 7,
+                current_generation: 0,
+            } if o == ordinal
+        ));
+        // 世代不一致の拒否は「投入前」のため in_flight は変化しない
+        // （後続の正常な begin_driver_call が引き続き成功することで
+        // 間接的に確認する）。
+        let token = begin_driver_call(ordinal, &[0]).expect("世代一致なら成功するはず");
+        drop(token);
+    }
+
+    #[test]
+    fn observe_driver_result_poisons_ordinal_on_sticky_error() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+        let observed = observe_driver_result::<()>(ordinal, &token, Err(sticky_err()));
+        assert!(observed.is_err(), "Err はそのまま伝播するはず");
+        assert!(is_poisoned(ordinal), "sticky エラーで poison するはず");
+
+        let rejected = begin_driver_call(ordinal, &[0]);
+        assert!(matches!(
+            rejected,
+            Err(BackendError::DeviceContextPoisoned(_))
+        ));
+    }
+
+    #[test]
+    fn observe_driver_result_does_not_poison_on_operation_local_error() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+        let observed = observe_driver_result::<()>(ordinal, &token, Err(operation_local_err()));
+        assert!(observed.is_err());
+        assert!(
+            !is_poisoned(ordinal),
+            "operation-local エラーは poison しないはず"
+        );
+    }
+
+    #[test]
+    fn observe_driver_result_passes_through_ok_without_side_effects() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+        let observed = observe_driver_result(ordinal, &token, Ok(42));
+        assert_eq!(observed.unwrap(), 42);
+        assert!(!is_poisoned(ordinal));
+    }
+
+    #[test]
+    fn call_token_drop_decrements_in_flight_allowing_second_begin_to_succeed() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+        drop(token);
+        let token2 = begin_driver_call(ordinal, &[0]).expect("2 回目も成功するはず");
+        drop(token2);
+    }
+
+    #[test]
+    fn invalidate_with_succeeds_advances_generation_and_reactivates() {
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        invalidate_with(&registry, ordinal, || Ok(()), || Ok(()))
+            .expect("sync・probe とも成功すれば invalidate は成功するはず");
+
+        let cell = registry.entry(ordinal).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(state.generation, 1, "成功時は世代が 1 進むはず");
+        assert_eq!(state.phase, Phase::Active);
+        assert_eq!(state.probe_retry_count, 0);
+    }
+
+    #[test]
+    fn invalidate_with_sync_failure_poisons_unrecoverably() {
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        let err = invalidate_with(&registry, ordinal, || Err(ProbeFailure::Sticky), || Ok(()))
+            .expect_err("sync 失敗は Err を返すはず");
+        assert!(matches!(
+            err,
+            BackendError::DeviceContextUnrecoverable { ordinal: o, .. } if o == ordinal
+        ));
+
+        let cell = registry.entry(ordinal).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(
+            state.phase,
+            Phase::Poisoned {
+                unrecoverable: true
+            },
+            "sync 失敗は b' の時点で恒久 poison へ確定するはず（c へ進まない）"
+        );
+    }
+
+    #[test]
+    fn invalidate_with_operation_local_probe_failure_stays_recoverable_under_retry_limit() {
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        let err = invalidate_with(
+            &registry,
+            ordinal,
+            || Ok(()),
+            || Err(ProbeFailure::OperationLocal),
+        )
+        .expect_err("プローブ失敗は Err を返すはず");
+        assert!(matches!(err, BackendError::DeviceContextPoisoned(_)));
+
+        let cell = registry.entry(ordinal).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(
+            state.phase,
+            Phase::Poisoned {
+                unrecoverable: false
+            },
+            "上限未満の operation-local 失敗は再試行余地を残すはず"
+        );
+        assert_eq!(state.probe_retry_count, 1);
+        assert_eq!(
+            state.generation, 0,
+            "回復可能 poison では世代を進めないはず"
+        );
+    }
+
+    #[test]
+    fn invalidate_with_operation_local_probe_failure_exceeding_limit_becomes_unrecoverable() {
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        for _ in 0..LIMIT_PROBE_RETRIES {
+            let _ = invalidate_with(
+                &registry,
+                ordinal,
+                || Ok(()),
+                || Err(ProbeFailure::OperationLocal),
+            );
+        }
+        let cell = registry.entry(ordinal).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(
+            state.phase,
+            Phase::Poisoned {
+                unrecoverable: true
+            },
+            "上限到達で恒久 poison へ確定するはず"
+        );
+    }
+
+    #[test]
+    fn invalidate_with_sticky_probe_failure_poisons_unrecoverably_immediately() {
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        let err = invalidate_with(&registry, ordinal, || Ok(()), || Err(ProbeFailure::Sticky))
+            .expect_err("sticky プローブ失敗は Err を返すはず");
+        assert!(matches!(
+            err,
+            BackendError::DeviceContextUnrecoverable { .. }
+        ));
+        let cell = registry.entry(ordinal).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(
+            state.phase,
+            Phase::Poisoned {
+                unrecoverable: true
+            },
+            "sticky は再試行回数に依らず即座に恒久 poison になるはず"
+        );
+    }
+
+    #[test]
+    fn invalidate_with_mismatch_probe_failure_poisons_unrecoverably_immediately() {
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        let err = invalidate_with(
+            &registry,
+            ordinal,
+            || Ok(()),
+            || Err(ProbeFailure::Mismatch),
+        )
+        .expect_err("mismatch プローブ失敗は Err を返すはず");
+        assert!(matches!(
+            err,
+            BackendError::DeviceContextUnrecoverable { .. }
+        ));
+    }
+
+    #[test]
+    fn invalidate_with_already_unrecoverable_rejects_immediately() {
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        // 1 回目でまず恒久 poison へ確定させる。
+        let _ = invalidate_with(&registry, ordinal, || Err(ProbeFailure::Sticky), || Ok(()));
+
+        // 2 回目は sync/probe が呼ばれずに即座に拒否されることを、
+        // クロージャ内で panic させることで検証する（呼ばれたら test 失敗）。
+        let err = invalidate_with(
+            &registry,
+            ordinal,
+            || panic!("恒久 poison 後は sync を呼ばないはず"),
+            || panic!("恒久 poison 後は probe を呼ばないはず"),
+        )
+        .expect_err("恒久 poison は即座に Err を返すはず");
+        assert!(matches!(
+            err,
+            BackendError::DeviceContextUnrecoverable { .. }
+        ));
+    }
+
+    #[test]
+    fn independent_registry_state_is_isolated_from_static_registry() {
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        // 独立レジストリなので static（`is_poisoned`/`current_generation`）
+        // には一切影響しない。独立レジストリの生値を `cell` 経由で直接
+        // 検査する形で相当する契約を確認する。
+        let cell = registry.entry(ordinal).unwrap();
+        {
+            let state = cell.0.lock().unwrap();
+            assert_eq!(state.generation, 0);
+            assert!(!matches!(state.phase, Phase::Poisoned { .. }));
+        }
+        invalidate_with(&registry, ordinal, || Ok(()), || Ok(())).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(state.generation, 1);
+        // static 側（ordinal 0 は実 CUDA テストが使う可能性があるため
+        // 直接は突かず、`unique_ordinal()` の新規発行分が世代 0 の
+        // ままであることで独立性を確認する）。
+        let isolated = unique_ordinal();
+        assert_eq!(current_generation(isolated), 0);
     }
 }
