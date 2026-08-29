@@ -12,13 +12,17 @@
 ありますが、サポート境界上は内部 API です。技術的に `pub` であることと、
 利用者向けにサポートされる公開面であることは区別しています。
 
-利用者が使うことを想定する入口は次の 2 つです。
+利用者が使うことを想定する入口は次の 4 つです。
 
 - `fandhe_ai::tape()` / `fandhe_ai::tape_for(Device)`: composition root。
   `Device` 識別子を受け取り、対応するバックエンドへ結線した `Tape` を
   構築します（詳細は [Getting Started](/getting-started/)
   のバックエンド切替節）
 - `fandhe_ai::compat::{array, Sequential}`: numpy/Keras 慣習の互換 API 層
+- `fandhe_ai::optim`: `Sgd`／`AdamW`／`clip_grad_norm`／`LrScheduler` 等の
+  optimizer 群の再エクスポート
+- `fandhe_ai::DeviceParamStore` / `Tape::step_device_param_store`:
+  学習ループのパラメータ更新をデバイス上に常駐させる経路
 
 `fandhe-ai` は任意の `BackendOps` 実装を注入できる公開 API をあえて設けて
 いません。`Tape` は `fandhe-ai` 側の newtype でラップされており、
