@@ -66,7 +66,9 @@ pub(crate) struct CudaSliceHandle(CudaSlice<f32>);
 // が返す破棄対象は本ハンドルの `Drop`（cudarc 側の `cuMemFree` 相当）で
 // 実解放される。CUDA は「即時返却」（`fandhe_ai_tensor_core::pool_core`
 // モジュール冒頭「統計契約」の `pending_return_bytes` は常に 0）のため、
-// `record_pending_merge` は呼ばない。
+// `record_pending_return`／`put_merged`（旧 `record_pending_merge`。
+// codex P2 最終指摘対応で本番呼び出し元ゼロとなり削除済み）のいずれも
+// 呼ばない。
 
 /// プールから貸し出された出力バッファの RAII ハンドル。
 ///

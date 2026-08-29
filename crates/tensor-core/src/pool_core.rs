@@ -261,7 +261,9 @@ pub struct SizeClassPool<H> {
     core: Mutex<PoolCore<H>>,
     /// Metal 専用の返却待ちバイト数（lock-free。§3.1「統計専用メソッドの
     /// 検証」・§3.5「ロック順序規則」）。CUDA・CPU では常に `0` のまま
-    /// （`record_pending_return`/`record_pending_merge` を呼ばないため）。
+    /// （`record_pending_return`/[`Self::put_merged`]（旧 `record_
+    /// pending_merge`。codex P2 最終指摘対応で `put_merged` へ統合・
+    /// 本体は削除済み）を呼ばないため）。
     pending_return_bytes: AtomicU64,
 }
 
@@ -445,16 +447,18 @@ where
     /// 必ず継続する（統計フィールドの防御であって `put` の成否を
     /// 左右させない設計判断。誤ってハンドルを `Err` で握り潰し
     /// リークさせない）。逆に `pending_pool_returns` 経由のエントリを
-    /// 誤って [`Self::put`]（本メソッドではなく通常版）へ渡すと、対に
-    /// なる減算（`record_pending_merge`）が一切呼ばれず
-    /// `pending_return_bytes` が恒久的に高い値のまま残る（Cursor
-    /// Bugbot High 指摘の退行はこちらの誤用パターン）。
+    /// 誤って [`Self::put`]（本メソッドではなく通常版）へ渡すと、
+    /// `put_merged` が内包する減算が一切呼ばれず `pending_return_bytes`
+    /// が恒久的に高い値のまま残る（Cursor Bugbot High 指摘の退行は
+    /// こちらの誤用パターン）。
     ///
-    /// # ロック内原子化（`put` を先に呼んでから `record_pending_merge`
+    /// # ロック内原子化（`put` を先に呼んでから旧 `record_pending_merge`
     /// を呼ぶ旧稿の何が問題だったか）
-    /// 旧稿は `put`（フリーリスト挿入・`cached_bytes` 加算・総量上限
-    /// 判定）を呼んだ**後**に `record_pending_merge`（`pending_return_
-    /// bytes` の減算）を呼んでいた。この順序だと、`put` 内の総量上限
+    /// 旧稿は `record_pending_merge`（`pending_return_bytes` の減算を
+    /// 単独で行う公開メソッド。codex P2 最終指摘で本番呼び出し元が
+    /// `put_merged` への統合によりゼロになったため削除済み）を持ち、
+    /// `put`（フリーリスト挿入・`cached_bytes` 加算・総量上限
+    /// 判定）を呼んだ**後**にこれを呼んでいた。この順序だと、`put` 内の総量上限
     /// 判定（`cached_bytes + pending_return_bytes`。[`Self::
     /// evict_over_capacity`]）が走る時点では、当該エントリの分が
     /// `cached_bytes`（挿入済み）と `pending_return_bytes`（未減算）の
@@ -591,29 +595,6 @@ where
     pub fn record_pending_return(&self, class_bytes: u64) {
         self.pending_return_bytes
             .fetch_add(class_bytes, Ordering::Relaxed);
-    }
-
-    /// Metal 専用: `pending_pool_returns` からフリーリストへ合流させる
-    /// ことを記録する lock-free な統計専用メソッド（`AtomicU64::
-    /// fetch_sub`。`record_pending_return` と対になる。§3.1・§3.5）。
-    ///
-    /// **合流先のフリーリストへの実際の挿入（`put`）と組み合わせて使う
-    /// 場合は、本メソッドを単独で呼ぶのではなく [`Self::put_merged`]
-    /// を使うこと**（Cursor Bugbot High・codex P2 指摘対応。単独で
-    /// `put`→本メソッドの順に呼ぶと総量上限判定が二重計上する退行を
-    /// 再発させる。詳細は [`Self::put_merged`] doc comment）。本メソッド
-    /// 自体は `pending_return_bytes` の減算のみを行う低水準の統計専用
-    /// メソッドとして残す（`put_merged` の内部実装が使うほか、将来
-    /// 挿入を伴わない合流経路が生じた場合に備える）。
-    ///
-    /// 設計文書が保証するとおり、この減算は対応する加算より先に発生し
-    /// 得ない構造（push/`take` と同一の `BatchSlots` クリティカル
-    /// セクション内で対になって呼ばれる契約）であるため、`Mutex` 系
-    /// 統計メソッドと異なり `debug_assert!`/`saturating_sub` の防御は
-    /// 適用しない設計判断とする（§3.1「統計専用メソッドの検証」）。
-    pub fn record_pending_merge(&self, class_bytes: u64) {
-        self.pending_return_bytes
-            .fetch_sub(class_bytes, Ordering::Relaxed);
     }
 
     /// 統計スナップショットを返す（診断用。§3.1「`stats`」）。
@@ -870,14 +851,28 @@ mod tests {
 
     #[test]
     fn pending_return_and_merge_round_trip_to_zero() {
+        // 旧稿は `record_pending_return`／`record_pending_merge`
+        // （減算専用の独立公開メソッド）を直接呼ぶ往復で検証していたが、
+        // `record_pending_merge` は本番呼び出し元が `put_merged` への
+        // 統合によりゼロになったため削除済み（codex P2 最終指摘対応。
+        // 誤用経路そのものの排除が最も fail-closed という判断。
+        // `docs/device-memory-pool-design.md` §8.2 参照）。本テストは
+        // `put_merged`（合流専用。ロック内で減算・挿入を行う）経由で
+        // 同じ往復を検証する。
         let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
         pool.record_pending_return(256);
         assert_eq!(pool.stats().pending_return_bytes, 256);
         assert_eq!(pool.idle_bytes(), 256);
 
-        pool.record_pending_merge(256);
+        let evicted = pool.put_merged(256, 1);
+        assert!(evicted.is_empty());
         assert_eq!(pool.stats().pending_return_bytes, 0);
-        assert_eq!(pool.idle_bytes(), 0);
+        assert_eq!(pool.stats().cached_bytes, 256, "put_merged は挿入も行う");
+        assert_eq!(
+            pool.idle_bytes(),
+            256,
+            "cached_bytes へ合流済みのため idle_bytes は変わらない"
+        );
     }
 
     #[test]
@@ -1080,7 +1075,7 @@ mod tests {
         assert_eq!(
             pool.stats().pending_return_bytes,
             0,
-            "put_merged 自身が record_pending_merge 相当の減算を行う"
+            "put_merged 自身が（削除済みの旧 record_pending_merge 相当の）減算を行う"
         );
     }
 

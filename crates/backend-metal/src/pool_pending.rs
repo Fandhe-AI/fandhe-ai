@@ -11,10 +11,12 @@
 //! `cargo test -p fandhe-ai-backend-metal` でも単体テストが回るように
 //! する。これは 2 度の codex-review P1 是正を経た
 //! `pending_return_bytes` の push/`take` と `record_pending_return`/
-//! `record_pending_merge` の順序契約（§3.1「統計専用メソッドの検証」）
-//! を実際に検証できる Linux 実行可能なテスト（本モジュール末尾の
-//! `Barrier` 注入テスト）を持つための構成であり、`cfg(target_os =
-//! "macos")` 限定モジュールへ埋め込むと Linux CI では一切実行されず
+//! `SizeClassPool::put_merged`（旧 `record_pending_merge`。codex P2
+//! 最終指摘対応で本番呼び出し元ゼロとなった同メソッドは削除し、
+//! `put_merged` のロック内減算へ統合済み）の順序契約（§3.1「統計専用
+//! メソッドの検証」）を実際に検証できる Linux 実行可能なテスト
+//! （本モジュール末尾の `Barrier` 注入テスト）を持つための構成であり、
+//! `cfg(target_os = "macos")` 限定モジュールへ埋め込むと Linux CI では一切実行されず
 //! 検証が空洞化する（advisor 指摘: 2 巡目レビューで最も厳しく審査された
 //! 契約を Linux で実行できる形に保つ）。
 //!
