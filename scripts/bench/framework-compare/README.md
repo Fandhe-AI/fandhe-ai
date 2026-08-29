@@ -22,6 +22,7 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 - 環境 2: DGX Spark（NVIDIA GB10。CUDA + ARM CPU）→ `results/raw/results-dgx.jsonl`。CUDA ホストでは `./run_all_cuda.sh` を使う（bench-candle / bench-burn は `--no-default-features --features cuda` でビルドされる。fandhe-ai は cfg + 実行時プローブのため feature 指定不要）
 - 環境 3: NVIDIA GeForce RTX 3060（12 GiB）/ Linux（CUDA。デバイス/tape 再利用モードの fresh/reuse 比較用）→ `results/raw/results-rtx3060.jsonl`（イシュー #925）
 - 環境 4: 環境 3 と同一機（RTX 3060 / Linux）。MLP 学習のデバイス常駐更新モード（`train --mode reuse`）の fresh/reuse 比較用 → `results/raw/results-rtx3060-train.jsonl`（イシュー #957/#958/#959。fandhe-ai 0.4.0 計測のため 0.3.0 計測の環境 3 とは別ファイル）
+- 環境 5: 環境 1 と同一機（Apple M4 Max / macOS）。MLP 学習のデバイス常駐更新モード（`train --mode reuse`）の cpu/metal での fresh/reuse 比較用 → `results/raw/results-m4max-train.jsonl`（イシュー #957。fandhe-ai 0.4.0 計測のため 0.3.0 計測の環境 1 とは別ファイル。環境 1 の `results.jsonl` を上書きしないよう `run_all.sh` ではなく個別実行で取得）
 
 ## 計測タスク
 
@@ -110,9 +111,9 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   fresh/reuse の最終 loss を統一複合判定で突合）を含む
 - 使用例: `cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse`
 - スイープ（`run_all*.sh` の (b') ループ）・集計（`summarize.py` の (b') 節）・
-  cpu/cuda 実測（RTX 3060。環境 4）は #959 で実装済み。Apple Silicon 実機（cpu/metal）・
-  DGX Spark GB10（cuda）での実測は本 PR 時点で未計測（`results/summary.md` 環境 4
-  「計測不可・未計測項目」参照。再現コマンドを記載済み）
+  cpu/cuda 実測（RTX 3060。環境 4）は #959 で実装済み。Apple Silicon 実機（cpu/metal）は
+  環境 5（`results/summary.md`。イシュー #957）で実測済み。DGX Spark GB10（cuda）での実測は
+  未計測（`results/summary.md` 環境 4「計測不可・未計測項目」参照。再現コマンドを記載済み）
 - **(b') 節の読み方**（`results/summary.md`・`summarize.py` 出力）: `初期化(init_s)` は
   `DeviceParamStore` 構築 1 回分のコスト、`中央値/Q1/Q3` は以後 80 step の 1 step あたり
   時間（`fresh` と同一プロトコル）。`fresh 中央値（参考）` と `fresh/reuse 比` で

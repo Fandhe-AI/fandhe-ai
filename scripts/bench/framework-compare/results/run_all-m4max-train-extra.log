@@ -1,0 +1,40 @@
+### 追加ラン 1 / 4
+== bench-fandhe train cpu size=64 mode=fresh ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"cpu","size":64,"median_s":0.017372667,"q1_s":0.017157625,"q3_s":0.017586594,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== bench-fandhe train metal size=64 mode=fresh ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"metal","size":64,"median_s":0.019465562,"q1_s":0.019183479,"q3_s":0.019688698,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== bench-fandhe train cpu size=64 mode=reuse ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"cpu","size":64,"median_s":0.017191167,"q1_s":0.016983438,"q3_s":0.017501240,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000119625}
+== bench-fandhe train metal size=64 mode=reuse ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"metal","size":64,"median_s":0.020260437,"q1_s":0.019970042,"q3_s":0.020648531,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.027223084}
+done. results in results/raw/results-m4max-train-extra.jsonl (run 1) ; failures (if any) in (none: no failures)
+### 追加ラン 2 / 4
+== bench-fandhe train cpu size=64 mode=fresh ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"cpu","size":64,"median_s":0.017189542,"q1_s":0.016986896,"q3_s":0.017423656,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== bench-fandhe train metal size=64 mode=fresh ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"metal","size":64,"median_s":0.019320687,"q1_s":0.019017667,"q3_s":0.019676407,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== bench-fandhe train cpu size=64 mode=reuse ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"cpu","size":64,"median_s":0.017405041,"q1_s":0.017221375,"q3_s":0.017681823,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000124250}
+== bench-fandhe train metal size=64 mode=reuse ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"metal","size":64,"median_s":0.020093355,"q1_s":0.019688375,"q3_s":0.020704553,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.028661917}
+done. results in results/raw/results-m4max-train-extra.jsonl (run 2) ; failures (if any) in (none: no failures)
+### 追加ラン 3 / 4
+== bench-fandhe train cpu size=64 mode=fresh ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"cpu","size":64,"median_s":0.017284917,"q1_s":0.016965251,"q3_s":0.017659802,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== bench-fandhe train metal size=64 mode=fresh ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"metal","size":64,"median_s":0.019520583,"q1_s":0.019157906,"q3_s":0.019809145,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== bench-fandhe train cpu size=64 mode=reuse ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"cpu","size":64,"median_s":0.017185750,"q1_s":0.016981562,"q3_s":0.017347552,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000112375}
+== bench-fandhe train metal size=64 mode=reuse ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"metal","size":64,"median_s":0.020322459,"q1_s":0.019730802,"q3_s":0.020825354,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.032377000}
+done. results in results/raw/results-m4max-train-extra.jsonl (run 3) ; failures (if any) in (none: no failures)
+### 追加ラン 4 / 4
+== bench-fandhe train cpu size=64 mode=fresh ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"cpu","size":64,"median_s":0.017455667,"q1_s":0.017199011,"q3_s":0.017831740,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== bench-fandhe train metal size=64 mode=fresh ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"metal","size":64,"median_s":0.019046104,"q1_s":0.018796480,"q3_s":0.019576771,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== bench-fandhe train cpu size=64 mode=reuse ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"cpu","size":64,"median_s":0.017406667,"q1_s":0.017252677,"q3_s":0.017654375,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000090791}
+== bench-fandhe train metal size=64 mode=reuse ==
+{"framework":"fandhe-ai","version":"0.4.0","task":"train","device":"metal","size":64,"median_s":0.019640521,"q1_s":0.019451312,"q3_s":0.020126563,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.032525167}
+done. results in results/raw/results-m4max-train-extra.jsonl (run 4) ; failures (if any) in (none: no failures)

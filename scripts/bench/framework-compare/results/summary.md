@@ -322,9 +322,8 @@ Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが
 
 ### 環境 4 の計測不可・未計測項目
 
-- Metal（Apple Silicon 実機）: このエージェント実行環境（x86_64 Linux）から到達不能のため未計測。
-  再現コマンド: Apple Silicon 実機で `./run_all.sh`（(b') ループが `train cpu 64 reuse` /
-  `train metal 64 reuse` を実行する）
+- Metal（Apple Silicon 実機）: 環境 5（Apple M4 Max / macOS。下記）で実測済み（本環境 4 の
+  x86_64 Linux からは到達不能のため、本節の表には含めない）
 - DGX Spark GB10（CUDA 実機）: `docs/real-hardware-verification-env.local.md` が本エージェント
   環境に存在せず SSH ホスト名が不明なため到達不能。再現コマンド: DGX Spark 実機で
   `./run_all_cuda.sh`
@@ -361,3 +360,70 @@ Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが
   API（デバイス常駐更新）を標準で使っているのに対し、fandhe-ai の reuse も残存する毎 step
   D2H（上記備考）に律速されているためと考えられる。詳細な要因分解は別イシューで追跡することを
   推奨する（PR 本文の対象外項目を参照）
+
+## 環境 5: Apple M4 Max / macOS（train fresh vs reuse。イシュー #957）
+
+- チップ: Apple M4 Max（Metal GPU 統合メモリ）
+- OS: macOS 26.6.2（25G83）
+- ツールチェーン: cargo 1.96.0 (30a34c682 2026-05-25) / rustc 1.96.0 (ac68faa20 2026-05-25)（`--release` ビルド）
+- fandhe-ai バージョン: 0.4.0（crates.io 公開版。#958/#998 の `train --mode reuse` 実装を含む）
+- 計測日: 2026-08-29
+- 対象: `bench-fandhe` の `train`（cpu / metal、fresh・reuse 両方）。イシュー #957 受け入れ条件 5
+  （Metal 実機での train reuse 実測）を埋めるもので、candle / Burn は計測していない
+  （reuse モードは `bench-fandhe` のみ対応。`run_all.sh` (b') ループと同じ扱い）
+- 生データ: `results/raw/results-m4max-train.jsonl`（下記 4 組み合わせ各 1 ラン分）・
+  `results/raw/skipped-m4max-train.log`（空。失敗なし）・`results/run_all-m4max-train.log`。
+  追加 4 回分の一次データは `results/raw/results-m4max-train-extra.jsonl`（4 ラン × 4 行 = 16 行）・
+  `results/run_all-m4max-train-extra.log`（4 ラン分の実行ログ。失敗なし）
+- 実行方法: `./run_all.sh` は `results/raw/results.jsonl`（環境 1 の既存データ）を初期化するため
+  実行せず、同スクリプトの `run()` と同一のコマンド形式
+  （`./target/release/bench-fandhe --task train --device <cpu|metal> --size 64 --mode <fresh|reuse> --out <JSONL>`）
+  で `train cpu 64 fresh` → `train metal 64 fresh` → `train cpu 64 reuse` → `train metal 64 reuse`
+  の順に実行した。計測回数（warmup 20・iters 80）・シードはバイナリ既定のまま
+- ノイズ対策: 環境 4 と同じ方式。上記 1 ランに加え同一手順で追加 4 回（計 5 回）実行した。
+  summarize.py の表は 1 ラン目（`results-m4max-train.jsonl`）のみから生成し（選別・捏造を
+  しないため）、追加 4 回分は `results-m4max-train-extra.jsonl` に別ファイルで保存する。
+  5 回分の傾向は下記「備考」に中央値の範囲のみ要約する。計測中は他の重い処理を起動していない
+
+### (b) MLP 学習（cpu / metal、fresh。summarize.py 生成）
+
+| デバイス | フレームワーク | 中央値 | Q1 | Q3 |
+| --- | --- | --- | --- | --- |
+| cpu | fandhe-ai | 17.525 ms | 17.302 ms | 17.819 ms |
+| cpu | candle | 計測不可 | - | - |
+| cpu | burn | 計測不可 | - | - |
+| metal | fandhe-ai | 19.699 ms | 19.087 ms | 20.284 ms |
+| metal | candle | 計測不可 | - | - |
+| metal | burn | 計測不可 | - | - |
+
+### (b') MLP 学習（デバイス常駐パラメータ更新モード。summarize.py 生成）
+
+| デバイス | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | fresh 中央値（参考） | fresh/reuse 比 | 最終 loss 突合（fresh） |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| cpu | fandhe-ai | 108.5 µs | 17.468 ms | 17.299 ms | 17.746 ms | 17.525 ms | 1.00 倍 | 一致 |
+| metal | fandhe-ai | 30.440 ms | 20.381 ms | 19.996 ms | 20.762 ms | 19.699 ms | 0.97 倍 | 一致 |
+
+### 環境 5 の計測不可・未計測項目
+
+- candle / Burn（cpu・metal、train fresh）: 本環境の目的（#957 受け入れ条件 5 の Metal train reuse
+  実測）の対象外のため計測していない。上表の「計測不可」は summarize.py が対象 JSONL に該当行が
+  無い場合の既定表記であり、本環境で実行して失敗したものではない。環境 1（同一機 Apple M4 Max）
+  の (b) 表に fresh の横並び値がある
+
+### 環境 5 の備考
+
+- **fresh と reuse の中央値は cpu で同水準（17.53 ms vs 17.47 ms、比 1.00 倍）、metal では reuse が
+  わずかに遅い（19.70 ms vs 20.38 ms、比 0.97 倍）**。環境 4（RTX 3060 / cpu）と同様、train の
+  reuse では明確な高速化は観測されなかった。設計上の理由は環境 4 の備考と同じ
+  （`register_resident_leaves` が毎 step 全パラメータを D2H download する経路が reuse でも残存する。
+  #954 申し送り）
+- 追加 4 回（計 5 回）の中央値の範囲: cpu fresh 17.19〜17.53 ms、cpu reuse 17.19〜17.47 ms、
+  metal fresh 19.05〜19.70 ms、metal reuse 19.64〜20.38 ms。metal の fresh/reuse の範囲は
+  一部重なり（差は最大でも約 1.3 ms、Q1〜Q3 幅と同程度）、5 回すべてで reuse の中央値が同一ランの
+  fresh より大きかった。この差が系統的かノイズかは本計測だけでは判別できない（要因分解は未実施）
+- metal の `init_s`（30.4 ms。5 回の範囲 27.2〜32.5 ms）は cpu（108.5 µs）より大きい。
+  初回 tape 構築 + 全パラメータの 1 回限りの H2D upload の経過時間（`bench-fandhe/src/main.rs`
+  `run_train_reuse` の定義）であり、
+  1 step あたり時間には含まれない
+- 最終 loss（checksum）は cpu / metal いずれも fresh / reuse で完全一致（0.080541。環境 4 の
+  cpu / cuda とも同値）。追加 4 回でも全 16 行が 0.080541 で一致した（数値一致契約を満たす）
