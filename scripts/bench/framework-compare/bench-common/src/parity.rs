@@ -164,7 +164,15 @@ impl GemmReference {
         if n == 0 {
             return Err(BenchError::InvalidShape { n });
         }
-        let expected = n * n;
+        // `n` は `--size` 由来の未検証な CLI 入力（`parse_cli` は
+        // `usize::parse` のみで上限を課さない）。`n * n` を無検証で計算
+        // すると debug ビルドではオーバーフロー panic、release ビルドでも
+        // wrap 後の `expected` が実際の要素数と食い違い、後続の
+        // `rows_per_chunk * n` が 0 になれば `chunks_mut(0)` が panic する
+        // （coding-rust.md「本番経路で panic させない」違反。イシュー #970
+        // codex-review 指摘・P1）。`checked_mul` で検証し型付きエラーに
+        // する。
+        let expected = n.checked_mul(n).ok_or(BenchError::SizeOverflow { n })?;
         if a.len() != expected {
             return Err(BenchError::ParityLengthMismatch {
                 expected,
@@ -187,10 +195,23 @@ impl GemmReference {
             .min(n);
         let rows_per_chunk = n.div_ceil(workers.max(1));
 
-        std::thread::scope(|scope| {
+        // `rows_per_chunk * n` は `chunks_mut` のチャンク長。`rows_per_chunk
+        // <= n`（`workers >= 1` なので `n.div_ceil(workers.max(1)) <= n`）
+        // かつ `n * n` は上で `checked_mul` 済みのため、この乗算は必ず
+        // `expected` 以下に収まりオーバーフローしない。
+        //
+        // `std::thread::Scope::spawn` は OS のスレッド生成に失敗すると
+        // panic する（イシュー #970 codex-review 指摘・P1）。並列度分の
+        // スレッドを無条件生成すると、プロセス・スレッド数上限や一時的
+        // リソース不足でベンチ CLI 全体が panic しうるため、
+        // `std::thread::Builder::spawn_scoped` で `io::Result` として
+        // 受け取り、失敗時は型付きエラーへ変換して呼び出し元へ返す
+        // （coding-rust.md「本番経路で panic させない」）。
+        std::thread::scope(|scope| -> Result<(), BenchError> {
+            let mut handles = Vec::with_capacity(workers.max(1));
             for (chunk_idx, c_chunk) in c.chunks_mut(rows_per_chunk * n).enumerate() {
                 let row_start = chunk_idx * rows_per_chunk;
-                scope.spawn(move || {
+                let spawned = std::thread::Builder::new().spawn_scoped(scope, move || {
                     let rows_in_chunk = c_chunk.len() / n;
                     for local_i in 0..rows_in_chunk {
                         let i = row_start + local_i;
@@ -208,8 +229,32 @@ impl GemmReference {
                         }
                     }
                 });
+                match spawned {
+                    Ok(handle) => handles.push(handle),
+                    Err(source) => {
+                        // 1 本でも `spawn_scoped` が失敗したら即座に打ち切り、
+                        // 型付きエラーとして呼び出し元へ返す。すでに spawn
+                        // 済みのスレッドは `scope` の終了（このクロージャを
+                        // 抜ける際の暗黙 join）で待ち合わされるため、ここで
+                        // 早期 return しても join 漏れは起きない。
+                        return Err(BenchError::ThreadSpawnFailed { source });
+                    }
+                }
             }
-        });
+            for handle in handles {
+                // スレッド内クロージャは戻り値を返さず panic もしない
+                // （境界検査済みのスライス演算のみ）ため `join()` は通常
+                // 失敗しない。万一 panic した場合はここで再 panic させず、
+                // 参照 GEMM 全体を型付きエラーとして扱う（本番経路で
+                // panic させない。coding-rust.md）。
+                if handle.join().is_err() {
+                    return Err(BenchError::ThreadSpawnFailed {
+                        source: std::io::Error::other("gemm reference worker thread panicked"),
+                    });
+                }
+            }
+            Ok(())
+        })?;
 
         Ok(Self { c })
     }
@@ -288,6 +333,19 @@ mod tests {
         assert!(matches!(
             GemmReference::compute(2, &[1.0, 2.0, 3.0, 4.0], &[1.0, 2.0]),
             Err(BenchError::ParityLengthMismatch { .. })
+        ));
+    }
+
+    /// イシュー #970 codex-review 指摘（P1）の回帰テスト: `--size` 由来の
+    /// 未検証な `n` に対し `n * n` が `usize` をオーバーフローする場合、
+    /// panic（debug ビルドの overflow-checks・release ビルドの
+    /// `chunks_mut(0)`）ではなく型付きエラーを返すことを確認する。
+    #[test]
+    fn compute_size_overflow_is_typed_error_not_panic() {
+        let n = (usize::MAX / 2) + 2; // n*n は usize::MAX を必ず超える
+        assert!(matches!(
+            GemmReference::compute(n, &[], &[]),
+            Err(BenchError::SizeOverflow { n: got }) if got == n
         ));
     }
 

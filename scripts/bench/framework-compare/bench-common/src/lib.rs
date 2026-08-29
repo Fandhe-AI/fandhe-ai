@@ -41,6 +41,18 @@ pub enum BenchError {
     /// 検出。`backend-cpu::parity::ParityError::LengthMismatch` と同じ思想）。
     /// イシュー #970。
     ParityLengthMismatch { expected: usize, actual: usize },
+    /// [`parity::GemmReference::compute`] の `n * n`（比較対象の要素数）が
+    /// `usize` の範囲を超える（`--size` は CLI からの未検証入力であり
+    /// `usize::parse` は上限を課さないため、巨大な値で乗算オーバーフロー
+    /// になりうる。coding-rust.md「本番経路で panic させない」に従い
+    /// `checked_mul` で検証し型付きエラーにする）。イシュー #970 codex-review
+    /// 指摘（P1）。
+    SizeOverflow { n: usize },
+    /// [`parity::GemmReference::compute`] の並列化（`std::thread::scope`）で
+    /// OS のスレッド生成に失敗した（`Scope::spawn` はスレッド生成失敗時に
+    /// panic するため、`std::thread::Builder::spawn_scoped` で `Result` として
+    /// 受け取り型付きエラーへ変換する）。イシュー #970 codex-review 指摘（P1）。
+    ThreadSpawnFailed { source: std::io::Error },
 }
 
 impl std::fmt::Display for BenchError {
@@ -80,6 +92,18 @@ impl std::fmt::Display for BenchError {
                     "MEASURE_ERROR: parity comparison length mismatch (expected {expected}, got {actual})"
                 )
             }
+            BenchError::SizeOverflow { n } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: gemm reference n*n overflows usize (n={n})"
+                )
+            }
+            BenchError::ThreadSpawnFailed { source } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: gemm reference thread spawn failed: {source}"
+                )
+            }
         }
     }
 }
@@ -88,6 +112,7 @@ impl std::error::Error for BenchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             BenchError::Io { source, .. } => Some(source),
+            BenchError::ThreadSpawnFailed { source } => Some(source),
             _ => None,
         }
     }
