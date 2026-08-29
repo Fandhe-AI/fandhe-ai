@@ -9,7 +9,8 @@
 
 ## 1. 目的と位置づけ
 
-- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.3.0`）を、既存 ML フレームワーク
+- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.4.0`。2026-08-29 に crates.io 公開済み
+  〈CLAUDE.md「Overview」節〉。イシュー #982 で `=0.3.0` から更新）を、既存 ML フレームワーク
   `candle-core =0.11.0`・`burn =0.21.0` と**同一プロトコル**（同一シード・同一入力・
   同一の同期境界・warmup 20 → 計測 20・中央値 + Q1/Q3）で横並び計測する
 - 本 workspace はベンチ専用ツール（全クレート `publish = false`・非配布）であり、
@@ -29,7 +30,7 @@
   `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート Cargo.lock・
   `cargo tree` に対する `scripts/check-forbidden-deps.sh` が fail-closed に検出する
 - 直接依存は `=x.y.z` 完全固定（`burn =0.21.0`・`candle-core =0.11.0`・
-  `fandhe-ai =0.3.0`）で、`Cargo.lock` をコミットして再現性を確保する
+  `fandhe-ai =0.4.0`）で、`Cargo.lock` をコミットして再現性を確保する
 - 同 workspace の `Cargo.lock` は比較対象という性質上、依存禁止リストのクレート
   （`burn-*`・`candle-*`・`cubecl`・`ndarray`・`tch` 等の推移的混入を含む）を
   **意図的に含む**。このため禁止リスト grep（`check_lock`）は適用せず、代わりに
@@ -37,12 +38,19 @@
   （`check_framework_compare`）を毎回実行する:
   1. `Cargo.lock` の存在（不在はエラー）
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
-  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.3.0）の存在
-     （承認外バージョンへのドリフト・比較対象の削除を検出）
+  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.4.0）の存在
+     （承認外バージョンへのドリフト・比較対象の削除を検出。加えて各エントリが
+     `source = "registry+https://github.com/rust-lang/crates.io-index"` を
+     伴うことを要求する＝path/git 依存への差し替えで `source`/`checksum` 行が
+     消える・書き換わるケースを fail-closed に検出する。イシュー #982）
   4. 各メンバー crate の `[dependencies]` が承認済み allowlist（比較対象の
      `=x.y.z` 完全固定 + `bench-common` の path 依存のみ）の範囲内であること
      （`tch` を含む allowlist 外の直接依存追加・ドット付きキー宣言・完全固定でない
-     バージョン指定を検出）
+     バージョン指定に加え、`@=` 付き承認済みエントリが `path`/`git`/`registry`/
+     `rev`/`branch`/`tag`/`package` キーで非 registry 取得元へ差し替えられている
+     ことを検出。`deny.toml` の `allow-wildcard-paths = true`（`bench-common` 用）
+     は path 依存自体を止めないため、この manifest 層検査が承認済み比較対象の
+     取得元を守る唯一の防御となる。イシュー #982）
   5. 各 Cargo.toml のセクションヘッダが allowlist の範囲内であること
      （`[dev-dependencies]`・`[build-dependencies]`・`[target.'cfg'.dependencies]`・
      `[dependencies.<crate>]` 等の代替依存宣言経路をセクション単位で遮断）
@@ -82,6 +90,12 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   専用契約検査・専用 deny.toml の CI 監査）と 3 節のライセンス実測
 - 承認外の変更（ピンの更新・allow リストの拡張・検査の緩和・適用範囲の変更）は
   従来どおりユーザー承認必須
+- 2026-08-29: ユーザーが #966 ツリーの議論でイシュー #982（`fandhe-ai` 承認ピンを
+  crates.io 公開済みの `=0.4.0` へ更新し、非 registry 取得元〈path/git 等〉への
+  差し替えを manifest 層・Cargo.lock 層の双方で fail-closed 検出する契約検査強化）
+  を承認。ピン更新自体は「承認済みバージョンの更新」で通常どおりユーザー承認が
+  必要な変更、検査強化は検出範囲の追加（fail-closed の強化）であり本来承認不要だが、
+  同一イシューでまとめて実施したため承認記録も本節にまとめて残す
 
 ## 5. tch-rs を計測対象に含めない判断
 
