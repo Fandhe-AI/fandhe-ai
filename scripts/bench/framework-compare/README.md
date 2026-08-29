@@ -11,7 +11,7 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 
 | フレームワーク | クレート | バージョン | デバイス |
 | --- | --- | --- | --- |
-| fandhe-ai | `fandhe-ai`（facade。crates.io 版） | =0.3.0 | CPU / Metal / CUDA（`tape_for(Device::…)`） |
+| fandhe-ai | `fandhe-ai`（facade。crates.io 版） | =0.4.0 | CPU / Metal / CUDA（`tape_for(Device::…)`） |
 | candle | `candle-core` | =0.11.0 | CPU / Metal（`metal` feature）/ CUDA（`cuda` feature） |
 | Burn | `burn` | =0.21.0 | CPU（ndarray）/ Metal（wgpu）/ CUDA（cubecl） |
 | tch-rs | — | 未計測 | libtorch 依存のため省略 |
@@ -82,7 +82,7 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   と同じ FMA 契約（f32 `mul_add`・逐次 k 昇順の演算順序固定）を持つ自前 GEMM を、行ブロック分割で
   `std::thread::scope` 並列化したもの（各 `c[i][j]` の累積鎖は k 昇順のまま = 逐次実装と bit 完全
   一致。`bench-common::parity::tests::compute_is_bit_identical_to_sequential_k_ascending`）。
-  fandhe-ai 0.3.0（crates.io 版）の facade は parity API を公開しておらず、candle/Burn を参照に
+  fandhe-ai 0.4.0（crates.io 版）の facade は parity API を公開しておらず、candle/Burn を参照に
   すると別途バイナリ間で結果を受け渡す仕組みが要る。自前参照は各バイナリが自己完結で計算できる
   ため採用した（f64 累積の参照は「真値との差」という別の指標になり本体契約と整合しないため不採用。
   結果テンソルをファイルへダンプして summarize.py 側で突合する方式は N=4096 で 64 MiB/行になり

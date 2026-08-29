@@ -21,7 +21,7 @@
 #                (1) Cargo.lock の存在（不在はエラー）、(2) 同ディレクトリの Cargo.toml が
 #                独自の [workspace] を宣言していること（本体 workspace への構造的
 #                非混入）、(3) 承認済み比較対象のピン（burn 0.21.0・candle-core 0.11.0・
-#                fandhe-ai 0.3.0。deps-policy.md 第 9 区分の承認バージョン）が
+#                fandhe-ai 0.4.0。deps-policy.md 第 9 区分の承認バージョン）が
 #                Cargo.lock に存在すること（承認外バージョンへのドリフトを検出）、
 #                (4) 各メンバー crate の [dependencies] が承認済み allowlist
 #                （比較対象の =x.y.z 完全固定 + bench-common の path 依存）の範囲内で
@@ -66,7 +66,7 @@ FORBIDDEN_CRATES_ALT='burn|burn-[a-z0-9-]+|cubecl|cubecl-[a-z0-9-]+|candle|candl
 # 承認済みピン。`<crate>=<version>` 形式のスペース区切り。ここを緩める・削る変更は
 # ユーザー承認必須（検査対象の追加は fail-closed の強化であり承認不要）。
 FRAMEWORK_COMPARE_DIR="scripts/bench/framework-compare"
-FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.3.0"
+FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.4.0"
 
 # 同ベンチの各メンバー crate が [dependencies] に宣言してよい直接依存の allowlist
 # （`<manifest 相対パス>:<crate>[@=version]...` 形式）。承認済み比較対象（=x.y.z 完全
@@ -75,7 +75,7 @@ FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.3.0"
 # allowlist の拡張はユーザー承認必須（deps-policy.md 第 9 区分）。
 FRAMEWORK_COMPARE_MANIFEST_ALLOWLIST="\
 bench-common/Cargo.toml:
-bench-fandhe/Cargo.toml:bench-common,fandhe-ai@=0.3.0
+bench-fandhe/Cargo.toml:bench-common,fandhe-ai@=0.4.0
 bench-candle/Cargo.toml:bench-common,candle-core@=0.11.0
 bench-burn/Cargo.toml:bench-common,burn@=0.21.0"
 

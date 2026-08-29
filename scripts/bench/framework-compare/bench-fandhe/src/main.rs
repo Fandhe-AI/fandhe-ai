@@ -21,7 +21,7 @@ use fandhe_ai::{Device, Tape, Tensor};
 use std::time::{Duration, Instant};
 
 const FRAMEWORK: &str = "fandhe-ai";
-const VERSION: &str = "0.3.0";
+const VERSION: &str = "0.4.0";
 
 const BATCH: usize = 64;
 const D_IN: usize = 784;
