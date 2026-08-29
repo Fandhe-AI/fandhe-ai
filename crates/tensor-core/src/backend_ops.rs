@@ -51,6 +51,7 @@ use crate::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
 use crate::fusion::FusionPlan;
+use crate::pool_core::PoolStats;
 
 /// [`BackendOps::sgd_step_device`] の 1 ステップ分のハイパーパラメータ
 /// （イシュー #935・`docs/device-resident-update-design.md` §3.1）。
@@ -415,6 +416,45 @@ pub trait BackendOps {
         Err(BackendError::Unsupported(
             "run_fused: default fail-safe (no fusion kernel available)".into(),
         ))
+    }
+
+    /// REQ-14 の明示解放 API（イシュー #1018 ツリー・#1019 設計・#1021
+    /// Metal 実装）。このバックエンドのデバイスメモリプールがアイドル
+    /// 保持しているバッファを全て解放する。CUDA で `has_async_alloc()`
+    /// が真の環境では、自作プール層の解放に加え driver 側 memory pool の
+    /// トリム（`cuMemPoolTrimTo(0)` 相当）・2 回の対象 stream 同期を
+    /// 内部で行う（`docs/device-memory-pool-design.md` §3.6 (2) の
+    /// 4 フェーズ）。Metal は driver トリムを持たないためフェーズが
+    /// 少ない（同 doc §3.6 (2)「バックエンド別の該当フェーズ」表参照）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `Ok(())`（プールを持たないバックエンドは解放対象なし。
+    /// fail-open ではなく「対象が存在しないため自明に成功」という
+    /// 意味）。CPU バックエンドは常にこのデフォルトのまま（本イシューの
+    /// 対象外。#1026）。CUDA／Metal は同 doc §3.6 (2) の契約で実カーネル
+    /// へオーバーライドする。
+    ///
+    /// # エラー
+    /// `Err` は同 doc §3.6 (2)「バックエンド別の該当フェーズ」表が定める
+    /// フェーズのいずれかの失敗を表す。実際に到達しうる `Err` の種別・
+    /// 個数はバックエンドごとに異なるため（例: Metal はフェーズ (ii) が
+    /// 失敗しない設計のため実質的にフェーズ (i) 失敗の 1 種類のみへ
+    /// 到達しうる。CPU は本メソッドを常にデフォルト実装のまま使うため
+    /// 到達しない）、本 doc comment では数を明記しない（正本は同 doc
+    /// §3.6 (2) の表）。黙殺・panic は禁止する（fail-closed。
+    /// `.claude/rules/coding-rust.md`）。
+    fn release_cached_device_memory(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// デバイスメモリプールの統計スナップショット（診断用。イシュー
+    /// #1021）。[`PoolStats`]（POD。内部ハンドル表現を一切含まない）
+    /// のみを返す。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `None`（プールを持たないバックエンド）。
+    fn device_memory_pool_stats(&self) -> Option<PoolStats> {
+        None
     }
 }
 

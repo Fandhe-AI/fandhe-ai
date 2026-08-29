@@ -135,7 +135,10 @@ impl MetalElementwise {
 
         let a_buf = MetalBuffer::new_with_data(ctx, a)?;
         let b_buf = MetalBuffer::new_with_data(ctx, b)?;
-        let out_buf = MetalBuffer::new_zeroed(ctx, numel)?;
+        // イシュー #1021: encode_binary_dispatch／encode_unary_dispatch は
+        // numel 全要素を書き切る出力専用バッファのため alloc_uninit_pooled
+        // を使う（設計文書 §6「A02」）。
+        let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, numel)?;
 
         ctx.dispatch_sync(|encoder| {
             encode_binary_dispatch(encoder, pipeline, &a_buf, &b_buf, &out_buf, numel as u32);
@@ -158,7 +161,10 @@ impl MetalElementwise {
         }
 
         let a_buf = MetalBuffer::new_with_data(ctx, a)?;
-        let out_buf = MetalBuffer::new_zeroed(ctx, numel)?;
+        // イシュー #1021: encode_binary_dispatch／encode_unary_dispatch は
+        // numel 全要素を書き切る出力専用バッファのため alloc_uninit_pooled
+        // を使う（設計文書 §6「A02」）。
+        let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, numel)?;
 
         ctx.dispatch_sync(|encoder| {
             encode_unary_dispatch(encoder, pipeline, &a_buf, &out_buf, numel as u32);

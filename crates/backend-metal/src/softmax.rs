@@ -103,7 +103,10 @@ impl MetalSoftmax {
         let route = row_kernel::select_route(hidden);
 
         let x_buf = MetalBuffer::new_with_data(ctx, x)?;
-        let out_buf = MetalBuffer::new_zeroed(ctx, x.len())?;
+        // イシュー #1021: softmax の各行カーネルは x.len() 全要素を書き切る
+        // 出力専用バッファのため alloc_uninit_pooled を使う（設計文書 §6
+        // 「A02」）。
+        let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, x.len())?;
 
         let rows_u = rows as u32;
         let hidden_u = hidden as u32;

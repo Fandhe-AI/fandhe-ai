@@ -833,11 +833,16 @@ impl MetalGemm {
         let b_buf = MetalBuffer::new_with_data(ctx, b)?;
         // `bias` が `None` の場合は `n` 要素のゼロ初期化バッファを渡す
         // （`shaders/gemm.metal::gemm_tiled_bias_act` 冒頭コメント参照）。
+        // イシュー #1021: ゼロ初期化が必要なため `alloc_zeroed_pooled`
+        // を使う（設計文書 §3.1「ホットパスへの接続点」）。
         let (bias_buf, has_bias): (MetalBuffer, i32) = match bias {
             Some(bias) => (MetalBuffer::new_with_data(ctx, bias)?, 1),
-            None => (MetalBuffer::new_zeroed(ctx, n)?, 0),
+            None => (MetalBuffer::alloc_zeroed_pooled(ctx, n)?, 0),
         };
-        let c_buf = MetalBuffer::new_zeroed(ctx, m * n)?;
+        // イシュー #1021: C は `encode_dispatch_bias_act` が `m * n`
+        // 全要素を書き切る出力専用バッファのため `alloc_uninit_pooled`
+        // を使う（`dispatch_variant` と同じ判断。設計文書 §6「A02」）。
+        let c_buf = MetalBuffer::alloc_uninit_pooled(ctx, m * n)?;
 
         let dims = Dims {
             m: m as u32,
@@ -972,7 +977,9 @@ impl MetalGemm {
         let (bias_ref, bias_offset, has_bias): (&MetalBuffer, usize, i32) = match bias {
             Some((b, offset)) => (b, offset, 1),
             None => {
-                zero_bias = MetalBuffer::new_zeroed(ctx, n)?;
+                // イシュー #1021: `alloc_zeroed_pooled`（プール経由・
+                // ゼロ初期化契約維持）。
+                zero_bias = MetalBuffer::alloc_zeroed_pooled(ctx, n)?;
                 (&zero_bias, 0, 0)
             }
         };
@@ -1295,7 +1302,13 @@ impl MetalGemm {
         // そのまま伝播する）。
         let a_buf = MetalBuffer::new_with_data(ctx, &a_padded)?;
         let b_buf = MetalBuffer::new_with_data(ctx, &b_padded)?;
-        let c_buf = MetalBuffer::new_zeroed(ctx, m_eff * n_eff)?;
+        // イシュー #1021: C は `encode_dispatch`／`encode_dispatch_tiled`
+        // が `m_eff * n_eff` 全要素を書き切る出力専用バッファ（下記
+        // `match` の両分岐がその全域を dispatch する）のため、ゼロ初期化
+        // を経由しないプール確保（`alloc_uninit_pooled`）を使う（設計
+        // 文書 §6「A02」: `alloc_uninit` は「カーネルが全要素を書き切る
+        // 出力専用」に限定する契約）。
+        let c_buf = MetalBuffer::alloc_uninit_pooled(ctx, m_eff * n_eff)?;
 
         match variant {
             GemmVariant::SimdgroupTiled(cfg) => {

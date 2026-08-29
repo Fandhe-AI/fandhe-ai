@@ -102,6 +102,7 @@ mod fusion;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
+pub mod pool_core;
 mod tensor;
 pub mod typed;
 
@@ -129,5 +130,6 @@ pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
+pub use pool_core::PoolStats;
 pub use tensor::Tensor;
 pub use typed::{BatchedFeatures, FixedMat, FixedVec};

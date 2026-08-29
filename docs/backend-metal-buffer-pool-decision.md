@@ -83,7 +83,10 @@ Mac 実機セッションで以下を実施し、本節を実測値で更新す�
 `.claude/rules/out-of-scope-tracking.md` に従い、実装対象外として記録する（ユーザー承認を得てから Issue へ切り
 出す）:
 
-- バッファプールの実装・`PooledMemory<MetalMemory>` の GEMM 経路接続（§5）
+- バッファプールの実装・`PooledMemory<MetalMemory>` の GEMM 経路接続（§5）:
+  イシュー #1018 ツリー（#1019 設計・#1021 Metal 実装）で対応済み
+  （`docs/device-memory-pool-design.md`。ただし §5 が示す `PooledMemory<MetalMemory>`
+  そのものではなく、新設のハンドル型非依存 `SizeClassPool<H>` を採用した）
 - `MetalBackendOps::gemm` の per-call `MetalContext::new` + パイプラインコンパイルのキャッシュ化（§1・§3 で判明した
   別軸の固定費。バッファプール単体より本番経路への影響が大きい可能性がある）
 - §4 の実機マイクロ計測（Mac 実機セッションでの後続対応）

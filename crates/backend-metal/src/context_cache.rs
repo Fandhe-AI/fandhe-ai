@@ -73,6 +73,7 @@ use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
 use crate::gemm::MetalGemm;
 use crate::generic_cache::get_or_build;
+use crate::pool::MetalAllocator;
 use crate::rmsnorm::MetalRmsNorm;
 use crate::sgd::MetalSgd;
 use crate::softmax::MetalSoftmax;
@@ -101,6 +102,7 @@ const _: fn() = || {
     assert_send_sync::<MetalElementwise>();
     assert_send_sync::<MetalRmsNorm>();
     assert_send_sync::<MetalSoftmax>();
+    assert_send_sync::<MetalAllocator>();
 };
 
 /// システムデフォルトの Metal デバイスに対応する [`MetalContext`] を
@@ -165,6 +167,30 @@ pub(crate) fn cached_sgd(ctx: &Arc<MetalContext>) -> Result<Arc<MetalSgd>, Metal
     static CACHE: OnceLock<Mutex<Option<Arc<MetalSgd>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || MetalSgd::new(ctx))
+}
+
+/// device 単位のプロセスワイド singleton [`MetalAllocator`]（イシュー
+/// #1021・設計文書 §3.1「プールは device 単位のプロセスワイド singleton
+/// とする」・§3.5）をプロセス内キャッシュから取得する。
+///
+/// `cached_gemm` と同じく `ctx` はヒット時未使用（ミス時の構築にのみ
+/// 使う）。プロセスに Metal デバイスは 1 台のみ（`context_cache.rs`
+/// モジュール冒頭コメント「システムデフォルトの Metal デバイス 1 台
+/// のみを扱う前提」）のため、本番経路（`crate::gemm`／`elementwise`／
+/// `softmax`／`rmsnorm`／`memory` がいずれも `context_cache::
+/// cached_context()` 由来の同一 `MetalContext` を参照する。`ops.rs` の
+/// 各演算メソッド参照）では初回構築時に渡した `ctx` が終始一貫する。
+///
+/// `crate::buffer::MetalBuffer::alloc_zeroed_pooled`／
+/// `alloc_uninit_pooled`・`crate::ops::MetalBackendOps::
+/// release_cached_device_memory`／`device_memory_pool_stats` の唯一の
+/// 呼び出し先。
+pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAllocator>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalAllocator>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || {
+        Ok(MetalAllocator::new(Arc::clone(ctx)))
+    })
 }
 
 #[cfg(test)]

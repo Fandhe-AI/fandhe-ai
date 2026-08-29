@@ -115,6 +115,7 @@ pub mod optim;
 // `compat`／`optim` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
 pub use fandhe_ai_autodiff::optim::{DeviceParamStore, ResidentLeaf, SgdConfig};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
+pub use fandhe_ai_tensor_core::PoolStats;
 pub use fandhe_ai_tensor_core::{BackendError, Device, Tensor};
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
@@ -251,4 +252,25 @@ fn resolve_ops(device: Device) -> Result<Box<dyn BackendOps + Send>, BackendErro
             Ok(Box::new(fandhe_ai_backend_metal::MetalBackendOps::new()))
         }
     }
+}
+
+/// REQ-14 の明示解放 API（イシュー #1018 ツリー・#1021）。`device` に
+/// 対応するバックエンドのデバイスメモリプールを全て解放する。プールを
+/// 持たないバックエンド（CPU 等）は何もせず `Ok(())` を返す
+/// （`BackendOps::release_cached_device_memory` の既定契約。
+/// `docs/device-memory-pool-design.md` §3.1「facade からの再公開」）。
+///
+/// `Device` は `tensor-core` 由来の外部型（識別子 enum）のため facade は
+/// inherent メソッドを追加できず（orphan rule。
+/// `docs/facade-device-handle-design.md` の「案 B のみ採用」方針）、
+/// [`tape_for`] と同型の自由関数として公開する。
+pub fn release_cached_memory(device: Device) -> Result<(), BackendError> {
+    resolve_ops(device)?.release_cached_device_memory()
+}
+
+/// デバイスメモリプールの統計スナップショット（診断用。イシュー
+/// #1021）。POD [`PoolStats`] のみを返し、内部ハンドル表現は含まない
+/// （`docs/device-memory-pool-design.md` §3.1「facade からの再公開」）。
+pub fn memory_pool_stats(device: Device) -> Result<Option<PoolStats>, BackendError> {
+    Ok(resolve_ops(device)?.device_memory_pool_stats())
 }

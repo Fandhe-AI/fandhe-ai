@@ -249,9 +249,33 @@ impl MetalMemory {
                 _alloc: alloc,
             })
         } else {
-            let buf = MetalBuffer::new_zeroed(&self.context, numel)?;
-            let bytes = checked_byte_len(numel)?;
-            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+            let buf = MetalBuffer::alloc_zeroed_pooled(&self.context, numel)?;
+            // `alloc_zeroed_pooled` は `self.context` がプロセスワイド
+            // singleton と一致する場合のみプール経由（`Backing::Pooled`）
+            // になり、一致しない場合（`MetalMemory::new` 経由の専有
+            // コンテキスト。`tests/memory_roundtrip.rs`・`bench-harness::
+            // peak_memory` が使う経路）は `new_zeroed` と同一の専有確保
+            // （`Backing::Owned`）へフォールバックする
+            // （`buffer.rs::MetalBuffer::singleton_context_matching`）。
+            // プール経由の場合のみ物理確保バイト数が `crate::pool::
+            // MetalAllocator::tracker`（`RawMetalBuffer::_alloc`）に
+            // 既に計上されているため `0` バイトを積んで二重計上を避け、
+            // フォールバック（専有確保）の場合は本トラッカーが唯一の
+            // 計測系列であるため通常どおり実バイト数を積む（`MetalBuffer::
+            // is_pooled` で判定。二重計上防止のためだけに既存の
+            // `AllocationTracker::allocated_bytes()` 計測契約〈TASK-14.1b・
+            // #175〉を静かに壊さないための分岐。`AllocationTracker::
+            // allocated_bytes` がプール経由分も把握するには
+            // `crate::pool::MetalAllocator::stats()`〈`PoolStats::
+            // cached_bytes`〉の併用が必要になる点は
+            // `docs/device-memory-pool-design.md` §8 スコープ外〈bench-
+            // harness の独自計測経路との統合〉として申し送り済み）。
+            let tracked_bytes = if buf.is_pooled() {
+                0
+            } else {
+                checked_byte_len(numel)?
+            };
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), tracked_bytes);
             Box::new(MetalBufferHandle {
                 buffer: Some(buf),
                 _alloc: alloc,

@@ -27,6 +27,7 @@ use crate::batch_state::{self, BatchMeta};
 use crate::buffer::MtlBuffer;
 use crate::device::MetalOccupancyInfo;
 use crate::error::MetalError;
+use crate::pool_pending;
 use crate::tile::OccupancyParams;
 
 pub(crate) type MtlDevice = ProtocolObject<dyn MTLDevice>;
@@ -85,6 +86,15 @@ struct BatchSlots {
     /// から呼ばれる）が `open` から移す。複数回の flush が間に挟まると
     /// 2 個以上になりうる）。
     committed: Vec<Batch>,
+    /// 保留中のプール返却列（イシュー #1021・設計文書 §3.3「Metal」）。
+    /// `PooledMetalHandle::Drop`（`crate::pool`）が `open`／`committed`
+    /// の有無を検査した**同一ロック区間内**でここへ push する（TOCTOU
+    /// 回避。§3.5「Metal `pending_pool_returns` の排他制御」）。`Send`
+    /// 境界は [`crate::pool::RawMetalBuffer`] が `Send`（`Batch` の
+    /// SAFETY コメントと同種の根拠。objc2-metal 0.3.2 の `MTLBuffer`
+    /// protocol が `Send + Sync` を supertrait に持つ）であるため
+    /// `PendingReturns<RawMetalBuffer>` も自動的に `Send` になる。
+    pending_pool_returns: pool_pending::PendingReturns<crate::pool::RawMetalBuffer>,
 }
 
 /// Metal デバイスとコマンドキューを保持するハンドル。
@@ -212,6 +222,45 @@ impl MetalContext {
             .map_err(|_| MetalError::BatchStateUnavailable {
                 detail: format!("{op}: batch mutex poisoned"),
             })
+    }
+
+    /// [`crate::pool::PooledMetalHandle::drop`] から呼ばれる、プール
+    /// バッファ返却の GPU 完了待ち判定（イシュー #1021・設計文書 §3.3
+    /// 「Metal」・§3.5「Metal `pending_pool_returns` の排他制御」）。
+    ///
+    /// `BatchSlots` の同一ロック区間内で「`open`／`committed` バッチの
+    /// 有無を検査する」処理と「`pending_pool_returns` へ追加する（また
+    /// はそのまま即時返却する）」処理を行うことで、検査後・追加前に
+    /// 別スレッドが `synchronize()` を呼んで空の `pending_pool_returns`
+    /// を drain してしまう TOCTOU 競合を構造的に防ぐ（§3.5）。
+    ///
+    /// 判定ロジック自体（in-flight なら push＋`record_pending_return`、
+    /// そうでなければ `Some` を返す）は `pool_pending::PendingReturns::
+    /// defer_or_release`（`objc2` 型に触れない純粋ロジック）に委譲する。
+    /// 即時返却経路（戻り値が `Some`）は `Mutex<PoolCore<H>>` を要する
+    /// `SizeClassPool::put` を呼ぶため、**ロックを解放した後**に
+    /// `pool_pending::put_all` へ渡す（§3.5「ロック順序規則」）。
+    ///
+    /// `lock_batch` が poison を検出した場合（本来到達しない異常系）は、
+    /// 返却対象のハンドルをそのまま drop する（プールへ戻せないだけで
+    /// メモリ安全性には影響しない。`Drop` から `Result` を返せないための
+    /// fail-safe な縮退。`crate::context_cache::on_poison` と同じ
+    /// 「panic させない」方針）。
+    pub(crate) fn defer_pool_return(
+        &self,
+        entry: pool_pending::PendingReturn<crate::pool::RawMetalBuffer>,
+    ) {
+        let Ok(mut slots) = self.lock_batch("defer_pool_return") else {
+            return;
+        };
+        let in_flight = slots.open.is_some() || !slots.committed.is_empty();
+        let immediate = slots
+            .pending_pool_returns
+            .defer_or_release(in_flight, entry);
+        drop(slots);
+        if let Some(entry) = immediate {
+            pool_pending::put_all(vec![entry]);
+        }
     }
 
     /// ディスパッチ内容の記録（バッファ結線・エンコード）だけを行い、
@@ -382,6 +431,21 @@ impl MetalContext {
                 // 末尾で drop される。GPU 実行は `waitUntilCompleted()`
                 // 直後の時点で完了済みのため、ここで解放してよい。
             }
+
+            // フェーズ (i) の合流（イシュー #1021・設計文書 §3.3
+            // 「Metal」）: `waitUntilCompleted()` 完了後、**`Ok`／`Err`
+            // いずれで復帰する場合も**、`pending_pool_returns` を
+            // `BatchSlots` の同一ロック区間内で `drain_for_merge`
+            // （`record_pending_merge` を対で呼ぶ。§3.1「統計専用
+            // メソッドの検証」）してから `put`（`Mutex<PoolCore<H>>` を
+            // 要するため、ここでロックを解放した後に呼ぶ。§3.5「ロック
+            // 順序規則」）する。合流はフェーズ (i) 自体が担う入出金で
+            // あり「解放処理」ではないため、`first_error` の有無に
+            // 関わらず必ず実行する。
+            let drained = slots.pending_pool_returns.drain_for_merge();
+            drop(slots);
+            pool_pending::put_all(drained);
+
             match first_error {
                 Some(err) => Err(err),
                 None => Ok(()),

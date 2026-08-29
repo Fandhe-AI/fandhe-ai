@@ -1441,3 +1441,104 @@ fresh/reuse の 4 通り）:
 
 この区分は本文書のレビュー往復で生じた不整合の再発を防ぐための運用上の
 指針であり、REQ・spec の記述そのものを変更するものではない。
+
+## §9 実装記録（#1021・Metal）
+
+Metal 側実装（イシュー #1021）が §8.2 の裁量事項を以下のとおり確定した。
+
+- **`SizeClassPoolConfig`**（`crates/tensor-core/src/pool_core.rs`。新規
+  モジュール。クレート root へは `PoolStats` のみ再エクスポート）: 設計
+  文書の例示名 `PoolConfig` は既存 `crate::pool::PoolConfig`（`PooledMemory`
+  用。クレート root で `pub use` 済み）と衝突するため採用しない。
+- **`RawMetalBuffer`**（`crates/backend-metal/src/pool.rs`）: 設計文書の
+  例示名 `MetalBufferHandle` は `memory.rs::MetalBufferHandle`
+  （`BufferHandle` 実装）と衝突するため採用しない。
+- **再利用時のゼロ初期化方式**: ホスト `zero_fill`（`synchronize()` 経由。
+  既存 `PoolZeroFill` と同一パターン）を採用した。`fillBuffer` blit・
+  専用フィルカーネルは実機未検証（Metal 実機なしの本ランで新規カーネル・
+  blit エンコーダ切替を検証できないため）のため不採用とし、out-of-scope
+  として記録した（下記）。
+- **`MetalBuffer` とプールの結線**: 内部表現を
+  `enum Backing { Owned(Retained<MtlBuffer>), Pooled(PooledMetalHandle) }`
+  へ拡張し、`raw()`／`read_to_vec()`／`zero_fill()` は論理長 `len`
+  のみを使う契約を維持した（capacity は `RawMetalBuffer::capacity_bytes`
+  が保持し `MetalBuffer` 側には現れない）。
+- **アロケータ singleton**: `crate::pool::MetalAllocator` を
+  `crate::context_cache::cached_allocator(&Arc<MetalContext>)`
+  （既存 `OnceLock<Mutex<Option<Arc<T>>>>` パターン）で保持する。
+  **独自の専有 `MetalContext`（`MetalMemory::new` 経由。プロセスワイド
+  singleton とは別インスタンス）からの確保要求は、プールへ結びつけると
+  GPU 完了待ち境界の不整合（singleton 側の `synchronize()` が独自
+  コンテキストの dispatch を関知できない）を起こしうるため、
+  `crate::buffer::MetalBuffer::singleton_context_matching` が渡された
+  `ctx` を singleton と照合し、一致しない場合はプール非経由の専有確保
+  （`new_zeroed` と同一経路）へフォールバックする**（設計文書レビュー
+  時点では未確定だった実装上の安全策。`tests/memory_roundtrip.rs` の
+  既存 `#[ignore]` テストが `MetalMemory::new`〈専有コンテキスト〉を
+  使っているため、この安全策により既存テストの前提を壊さない）。
+- **`MTLBuffer` の `Send`/`Sync`（実装時の実測訂正）**: 本節 §3.5 は
+  「Metal の `MTLBuffer` protocol も objc2-metal 0.3.2 で `Send + Sync`
+  を supertrait に持つ」と記述しているが、実装時に本クレートが依存する
+  objc2-metal 0.3.2 の生成コード（`MTLBuffer: MTLResource: MTLAllocation`
+  のいずれも `Send`/`Sync` を課さない。`MTLDevice: NSObjectProtocol +
+  Send + Sync` とは異なる）を実測したところ、この記述は実態と異なる
+  ことが判明した。よって `RawMetalBuffer` には `context.rs::Batch` と
+  同じ正当化ロジック（アクセスは `Mutex` で直列化される 3 経路に限定
+  される）で `unsafe impl Send`（`Sync` は付与しない）を付与した。
+  §3.5 が見込んでいた「`crate::pool::PooledMemory` の
+  `arc_with_non_send_sync` allow 解消」は、この実測結果により
+  Metal 側では成立しない（CUDA 側 #1020 の実測に委ねる）。
+
+**本ランでの未実施事項（Metal 実機なしのため）**:
+
+- Mac M4 Max 実機での `#[ignore]` テスト（`crates/backend-metal/tests/
+  pool_real_device.rs`・`crates/facade/tests/memory_pool_api.rs` の
+  Metal 経路）は未実行のまま。
+- §3.7 の効果実測（プール導入前後 × fresh/reuse）は本ランでは記入せず
+  空欄のまま維持した（推定値で埋めない。§0 の方針どおり）。
+- デバイス側ゼロ初期化（`fillBuffer` blit／専用フィルカーネル）への
+  切替は Mac 実機で検証可能になった時点で再評価する out-of-scope 事項
+  として記録する。
+- アップロード経路（`new_with_data`）・f16（`MetalHalfBuffer`）のプール化
+  は本 PR の対象外（設計文書 §3.1「ホットパスへの接続点」のスコープ外）。
+- 既存 `crate::pool::PooledMemory` の `arc_with_non_send_sync` allow 解消
+  は、上記実測訂正のとおり Metal 側では前提が崩れたため見送る（#1020
+  側の判断に委ねる）。
+- **`SizeClassPoolConfig::huge_entries_per_class` は未実装**（値を保持
+  するのみで参照・強制しない。`SizeClassPool::put` は `max_pool_bytes`
+  総量上限＋グローバル LRU〈§3.4〉のみを実装する。理由・判断根拠は
+  `pool_core.rs::SizeClassPoolConfig::huge_entries_per_class` の
+  doc comment を正とする）。
+- **`crate::pool::MetalAllocator::pending_pool_returns` 経由の GPU 完了
+  待ち返却（§3.3「Metal」）は、本 PR が接続したホットパス（`gemm.rs`／
+  `elementwise.rs`／`softmax.rs`／`rmsnorm.rs`／`memory.rs`）からは
+  到達しない**: いずれも `MetalContext::dispatch_sync`（encode +
+  即時 `synchronize` の薄いラッパー）を経由してから返り値バッファを
+  読み出すため、プール経由バッファが `Drop` される時点で `open`／
+  `committed` バッチは常に空であり、`defer_or_release` は必ず
+  `in_flight == false`（即時 `put` 経路）を通る。`pending_pool_returns`
+  への push／`record_pending_return`／`record_pending_merge` の実装・
+  push/`take` の順序契約は `crates/backend-metal/src/pool_pending.rs`
+  の単体テスト（Linux 実行可能）でのみ検証済みであり、実機での
+  in-flight 返却シナリオ（`sgd_step_device` 等バッチ dispatch を伴う
+  経路）は本 PR の接続範囲に含まれないため実機検証もされていない
+  （次にこの機構へ接続する PR〈例: SGD デバイス常駐更新のプール化〉
+  が最初の実機到達点になる）。
+- **Metal `MetalMemory::allocated_bytes()`（`AllocationTracker` 経由の
+  ピーク測定）の意味論変更**: `MetalMemory::new`（`context_cache` 非
+  経由の専有 `MetalContext`。`tests/memory_roundtrip.rs`・
+  `bench-harness::peak_memory` が使う経路）は
+  `singleton_context_matching` によりプール非経由（`Backing::Owned`）
+  へフォールバックするため、この経路の `allocated_bytes()` は従来
+  どおり実バイト数を計上する（回帰なし）。一方、`ops::MetalBackendOps`
+  の `static_metal_memory()`（`context_cache::cached_context()` 由来の
+  プロセス共有 `MetalMemory`）経由の `alloc_zeroed` はプール経由
+  （`Backing::Pooled`）になるため、その `TrackedAllocation` は `0`
+  バイトを積み、実バイト数の計測系列は `crate::pool::MetalAllocator::
+  tracker`（`crate::ops::MetalBackendOps::device_memory_pool_stats()`
+  経由でのみ可視）へ移る（二重計上防止。`memory.rs::alloc_zeroed_inner`
+  コメント参照）。`bench-harness::peak_memory` は現状 `MetalMemory::new`
+  経由（専有コンテキスト）のみを使うため本 PR 時点では影響しないが、
+  将来 `static_metal_memory()` 経由の計測へ切り替える場合はこの意味論
+  変更を踏まえる必要がある（§8 スコープ外「bench-harness の独自計測
+  経路との統合」と同じ論点）。
