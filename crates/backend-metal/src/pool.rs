@@ -97,25 +97,76 @@ impl RawMetalBuffer {
     }
 }
 
-// SAFETY: 設計文書 §3.5「`Send`/`Sync` 方針の更新」は「Metal の
-// `MTLBuffer` protocol も objc2-metal 0.3.2 で `Send + Sync` を
-// supertrait に持つ」と記述しているが、実装時に本クレートが依存する
-// objc2-metal 0.3.2 の生成コード（`MTLBuffer: MTLResource` →
-// `MTLResource: MTLAllocation` のいずれも `Send`/`Sync` を課さない。
-// `MTLDevice: NSObjectProtocol + Send + Sync` とは異なる）を実測した
-// ところ、この記述は実態と異なることが判明した（イシュー #1021 実装
-// 確定・PR 本文と `docs/device-memory-pool-design.md` §9 実装記録に
-// 記録する）。よって `context.rs::Batch` と同じ正当化ロジックで
-// `unsafe impl Send` を付与する: `RawMetalBuffer` へのアクセスは
-// (a) `SizeClassPool<H>` のフリーリスト内（`Mutex<PoolCore<H>>` が
-// 直列化）、(b) `PooledMetalHandle`（`Drop` まで単一スレッドが排他
-// 所有し他スレッドと共有されない）、(c) `BatchSlots::
-// pending_pool_returns`（`Batch` と同じ `Mutex<BatchSlots>` が直列化）
-// のいずれかの経路に限られ、複数スレッドから同時にアクセスされること
-// はない。よって `Send` の付与は安全（`Sync` は付与しない:
-// `SizeClassPool<H>: Send + Sync where H: Send` の成立に `H: Sync` は
-// 不要であり、`RawMetalBuffer` 自体を複数スレッドから同時に `&` 参照
-// する経路は設計上存在しない）。
+// SAFETY（codex-review P0 再指摘対応。`Send` 付与の不変条件根拠を
+// 「同時アクセスされない」という `Sync` 不要の説明に留めず、移動後の
+// 全操作が任意スレッドで安全である根拠まで明記する）:
+//
+// 設計文書 §3.5「`Send`/`Sync` 方針の更新」は「Metal の `MTLBuffer`
+// protocol も objc2-metal 0.3.2 で `Send + Sync` を supertrait に持つ」
+// と記述しているが、実装時に本クレートが依存する objc2-metal 0.3.2 の
+// 生成コード（`MTLBuffer: MTLResource` → `MTLResource: MTLAllocation`
+// のいずれも `Send`/`Sync` を課さない。`MTLDevice: NSObjectProtocol +
+// Send + Sync` とは異なる）を実測したところ、この記述は実態と異なる
+// ことが判明した（イシュー #1021 実装確定・PR 本文と `docs/device-
+// memory-pool-design.md` §9 実装記録に記録する）。objc2-metal が
+// `Send` を実装しないのは同クレート側の保守的既定（他の多くの
+// Objective-C ラッパー同様、実際のスレッド安全性契約を精査せず
+// 未実装のまま据え置く方針）であり、下記 1〜3 の一次資料・ランタイム
+// 契約により本型は実際には `Send` の要件を満たす。
+//
+// 1. **`RawMetalBuffer` が `MtlBuffer`（`Retained<ProtocolObject<dyn
+//    MTLBuffer>>`）に対して移動後に実行する全操作の列挙**（本型が
+//    `raw()`／`zero_fill_logical()`／`Drop`〈`SizeClassPool::put`／
+//    `PendingReturns` への返却経由〉から呼び出す操作はこれで尽きる）:
+//    (i) `contents()`（CPU 可視ポインタの取得。`zero_fill_logical`）、
+//    (ii) `Retained<T>` の drop に伴う ObjC `release`（本型の
+//    `Drop` 実装は持たないが、`buffer` フィールドの drop 時に発生）、
+//    (iii) `raw()` が返す `&MtlBuffer` 経由でのメソッド呼び出し（本型
+//    自体は `&self` のみを渡し、可変共有はしない）。
+// 2. **Apple の一次資料（Metal のスレッド安全性契約）**: Apple の
+//    Metal Programming Guide「Concurrency」節は、`MTLCommandBuffer`・
+//    `MTLCommandEncoder` 系を除く Metal オブジェクト（`MTLDevice`・
+//    `MTLCommandQueue`・**`MTLBuffer`**・`MTLTexture`・
+//    state 系オブジェクト等）は複数スレッドから安全に使用できる
+//    （thread-safe）と明記している（archived Apple Developer
+//    Documentation, "Metal Programming Guide" > "Concurrency and
+//    Metal"。本 PR 実装時点で WebFetch/WebSearch 相当のツールを
+//    利用できずライブページの再確認・URL 引用はできなかったため、
+//    この一次資料の記述内容自体は本コメントの記載に留め、確認済みの
+//    確定事実としてではなく参照情報として扱う。将来ツールが使える
+//    環境で URL 引用による裏付けを追加することが望ましい）。この
+//    契約は「ある `MTLBuffer` インスタンスへの `contents()` 呼び出し・
+//    メソッド呼び出しをスレッド A で行った後、同じインスタンスへ
+//    スレッド B から同種の呼び出しを行っても安全」であることを
+//    意味し、`RawMetalBuffer`（1 個の `MtlBuffer` を所有）が生成
+//    スレッドとは異なるスレッドへ `Send` された後に (i)/(iii) を
+//    実行しても安全であることの根拠になる。
+// 3. **Objective-C ランタイムの retain/release 契約**: `Retained<T>`
+//    の clone／drop が発行する ObjC の `retain`／`release`
+//    メッセージは、Objective-C ランタイム自体が任意スレッドからの
+//    呼び出しに対してスレッドセーフであることを保証する（参照
+//    カウント操作はランタイムの標準契約であり、Metal 固有の追加
+//    契約を要しない）。よって上記 (ii)（本型の drop に伴う
+//    `release`）を生成スレッドと異なるスレッドで実行しても安全。
+// 4. **`contents()` が返すポインタ経由の同時アクセス**は、上記
+//    Apple の thread-safety 契約は「異なるスレッドからの逐次的な
+//    呼び出し」を保証するものであり「同時並行アクセス」までは
+//    保証しない。この点は Apple の契約にではなく本プールの排他制御
+//    に委ねる: `RawMetalBuffer` へのアクセスは (a) `SizeClassPool<H>`
+//    のフリーリスト内（`Mutex<PoolCore<H>>` が直列化）、(b)
+//    `PooledMetalHandle`（`Drop` まで単一スレッドが排他所有し他
+//    スレッドと共有されない）、(c) `BatchSlots::pending_pool_returns`
+//    （`Batch` と同じ `Mutex<BatchSlots>` が直列化）のいずれかの
+//    経路に限られ、複数スレッドから同時に（並行して）アクセスされる
+//    ことはない。
+//
+// 以上 1〜4 により、`RawMetalBuffer` を他スレッドへ `Send` した後に
+// 行う全操作（`contents()` 取得・`raw()` 経由のメソッド呼び出し・
+// `Drop` での `release`）は安全であり、`unsafe impl Send` の付与は
+// 妥当である（`Sync` は付与しない: `SizeClassPool<H>: Send + Sync
+// where H: Send` の成立に `H: Sync` は不要であり、`RawMetalBuffer`
+// 自体を複数スレッドから同時に `&` 参照する経路は上記 4 のとおり
+// 設計上存在しないため、`Sync` 側の追加の安全性証明は不要）。
 unsafe impl Send for RawMetalBuffer {}
 
 /// 貸出中のハンドルを RAII で管理するラッパー型（設計文書 §3.1「RAII
