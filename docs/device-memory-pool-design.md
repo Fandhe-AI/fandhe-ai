@@ -80,12 +80,12 @@
 pub trait DeviceAllocator: Send + Sync {
     /// ゼロ初期化保証付きの確保。再利用バッファも必ずゼロ埋めしてから返す
     /// （A02 対策。§6 セキュリティ）。
-    fn alloc_zeroed(&self, bytes: u64) -> Result<Box<dyn BufferHandle>, BackendError>;
+    fn alloc_zeroed(&self, bytes: u64) -> Result<Box<dyn BufferHandle + Send>, BackendError>;
 
     /// ゼロ初期化を行わない確保。カーネルが確保領域の全要素を書き切る
     /// 出力専用の内部用途に限定し、`facade` の公開 API へは露出しない
     /// （§6 セキュリティ）。
-    fn alloc_uninit(&self, bytes: u64) -> Result<Box<dyn BufferHandle>, BackendError>;
+    fn alloc_uninit(&self, bytes: u64) -> Result<Box<dyn BufferHandle + Send>, BackendError>;
 
     /// アイドル保持中のバッファを全て解放し、解放できたバイト数を返す
     /// （REQ-14 の明示解放 API。既存 `release_all_pooled` の後継）。
@@ -127,14 +127,21 @@ jemalloc 型の方式を採用する: 2 の冪ごとの区間（オクターブ�
 
 | 帯 | 範囲 | 丸め粒度 |
 |---|---|---|
-| 最小 | `numel == 0` | プール非経由（従来どおり空ハンドルを即返す） |
+| 最小 | `bytes == 0` | プール非経由（従来どおり空ハンドルを即返す） |
+| 極小 | 1 B 〜 255 B | 256 B（小帯の最小クラス）へ切り上げてプール経由とする（小帯と同一のフリーリストを使う。専用クラスは設けない） |
 | 小 | 256 B 〜 1 MiB | 各オクターブを `1x`／`1.25x`／`1.5x`／`1.75x` の 4 段に分割（内部断片化の理論上限 25%） |
-| 大 | 1 MiB 超 〜 64 MiB 以下 | 2 MiB 単位切り上げ（exclusive プール。1 バッファ 1 エントリ） |
-| 巨大 | 64 MiB 超 | 完全一致のみ・保持上限 1 エントリ／クラス |
+| 大 | 1 MiB 超 〜 64 MiB 未満 | 2 MiB 単位切り上げ（exclusive プール。1 バッファ 1 エントリ） |
+| 巨大 | 64 MiB 以上 | 完全一致のみ・保持上限 1 エントリ／クラス |
 
-上記の閾値（1 MiB／2 MiB／64 MiB）は**案**であり、#1010 の内訳実測後に
-見直す。`max_pool_bytes` 超の単一バッファはプールに入れず即解放する
-（既存 `PooledMemory` の方針を踏襲）。
+空判定は要素数ではなくバイト数（`bytes == 0`）で行う（`shape` に 0 を含む
+形状は要素数 0 でもバイト数 0 になるため実質的に等価だが、以降の丸め計算が
+すべてバイト数ベースであることと表記を揃える）。1〜255 B の非空確保は
+256 B の最小クラスへ切り上げることで小帯の丸め規則へ合流させ、専用の帯・
+専用のフリーリストは設けない（分岐を増やさず内部断片化の上限も 256 B
+以下に収まるため）。上記の閾値（1 MiB／2 MiB／64 MiB）は**案**であり、
+#1010 の内訳実測後に見直す。`max_pool_bytes` 超の単一バッファはプールに
+入れず即解放する（既存 `PooledMemory` の方針を踏襲）。64 MiB ちょうどは
+「巨大」帯（64 MiB 以上）に属する（下記の GEMM 4096² 例を参照）。
 
 代表ワークロード（§2 事実 10）の写像（各行は実際に計算した値。検算方法は
 §5 検証方法を参照）:
@@ -325,7 +332,7 @@ fresh/reuse の 4 通り）:
   外部入力が流入しうる。サイズクラス丸め・capacity 計算は `checked_mul`／
   `checked_add`（`u64`）で行い、オーバーフローは型付きエラー
   （`BackendError::DeviceAllocationFailed`）として扱う（既存
-  `checked_byte_len` の方針を踏襲。§3.2）。`numel == 0` は FFI 非経由の
+  `checked_byte_len` の方針を踏襲。§3.2）。`bytes == 0` は FFI 非経由の
   空ハンドル契約を維持する。
 - **A04 安全でない設計（資源枯渇）**: 無制限なプール成長（v1 が教訓とした
   candle の Metal プール無制限成長・17 倍蓄積の事例）を防ぐため、総量
