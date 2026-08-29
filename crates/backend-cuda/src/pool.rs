@@ -234,7 +234,15 @@ fn release_cached_with<H: Send>(
 /// （モジュール冒頭「単一ストリームモデル」参照）。
 ///
 /// `crate::context_cache::cached_allocator` がプロセスワイドにキャッシュ
-/// する（`cached_gemm`／`cached_elementwise` 等と同型のキャッシュ経路）。
+/// する。ただし `cached_gemm`／`cached_elementwise` 等（eternal に
+/// `Arc` を保持する）とは異なり `Weak` 保持＋死んだエントリの刈り取り
+/// 方式のため、本当の意味での singleton であり続けるのは「`CudaGemm`
+/// 等のスイートが `allocator` フィールド経由で参照を保持し続ける限り」
+/// （正準経路。`ops.rs` 経由の呼び出しでは事実上常にこれに該当する）
+/// という条件付きである。全ハンドルが drop されればキャッシュからも
+/// 消え、次回構築時は新しいインスタンスになる（`context_cache.rs`
+/// モジュール冒頭「`cached_allocator` のみ Weak 参照＋刈り取り」参照。
+/// codex-review 指摘。イシュー #1020 PR #1061）。
 pub(crate) struct CudaAllocator {
     pool: Arc<SizeClassPool<CudaSliceHandle>>,
     stream: Arc<CudaStream>,

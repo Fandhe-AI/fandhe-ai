@@ -39,11 +39,21 @@
 //!
 //! # 所有モデル・生存期間
 //!
-//! 各キャッシュは `cached_device` では `ordinal`（`usize`）、それ以外
-//! （`cached_gemm`／`cached_elementwise`／`cached_rmsnorm`／
-//! `cached_softmax`／`cached_sgd`／`cached_allocator`）では
-//! [`ContextKey`]（ordinal + `CudaContext` の同一性。理由は
-//! [`ContextKey`] のドキュメントコメント参照）をキーとする
+//! `cached_device` は `ordinal`（`usize`）を、それ以外の `cached_gemm`／
+//! `cached_elementwise`／`cached_rmsnorm`／`cached_softmax`／`cached_sgd`／
+//! `cached_allocator` は [`ContextKey`]（ordinal + `CudaContext` の同一性。
+//! 理由は [`ContextKey`] のドキュメントコメント参照）をキーとする。
+//! `ops::CudaBackendOps` は演算メソッドごとに `Self::device_handle()`
+//! （`cached_device` 経由）を毎回取得し直し、呼び出し終了時にローカル
+//! 変数を drop する（`ops.rs` 参照）。つまり `cached_device`／
+//! `cached_gemm` 等の値を呼び出しをまたいで生かし続けているのは
+//! **このキャッシュ自身の `Arc` 保持だけ**であり、これは #929 受け入れ
+//! 条件 1（2 回目以降の呼び出しが `CudaContext::new`／NVRTC 初期化を
+//! 再度支払わない）を成立させるための意図した設計である。
+//!
+//! ## eternal 組（`cached_device`／`cached_gemm`／`cached_elementwise`／
+//! `cached_rmsnorm`／`cached_softmax`／`cached_sgd`）
+//!
 //! `HashMap<K, Arc<Mutex<Option<Arc<T>>>>>`（外側はエントリ登録専用の
 //! 短命ロック、内側はキー単位の single-flight ロック。[`get_or_build`]
 //! 参照）を `OnceLock<Mutex<_>>` で保持するプロセスワイド static。エントリは
@@ -53,12 +63,50 @@
 //! キャッシュ。無限に増えうる key 空間のため LRU 容量上限を持つ〉とは
 //! 前提が異なる。本モジュールは常駐させてよい「デバイス数 ×
 //! スイート数」個程度の有界エントリのみを扱うため、容量制御・LRU は
-//! 不要）。
-//! `CudaGemm`／`CudaElementwise`／`CudaRmsNorm`／`CudaSoftmax` の `Arc` は
-//! いずれも内部で `Arc<CudaStream>`（延いては `Arc<CudaContext>`）を
-//! 強参照するため、スイートキャッシュのエントリが 1 つでも生存する限り
-//! 対応する `CudaContext` は解放されない（`module_cache.rs` の ABA 考察と
-//! 同型の所有モデル）。
+//! 不要）。`CudaGemm`／`CudaElementwise`／`CudaRmsNorm`／`CudaSoftmax`／
+//! `CudaSgd` の `Arc` はいずれも内部で `Arc<CudaStream>`（延いては
+//! `Arc<CudaContext>`）を強参照するため、スイートキャッシュのエントリが
+//! 1 つでも生存する限り対応する `CudaContext` は解放されない
+//! （`module_cache.rs` の ABA 考察と同型の所有モデル）。この eternal な
+//! 保持は「`cached_device` を経由する正準な呼び出し（`ops.rs` が
+//! 唯一の呼び出し元）」を前提にしており、その前提の下では有界である。
+//!
+//! ## `cached_allocator` のみ Weak 参照＋刈り取り
+//!
+//! [`CudaAllocator`] は上記 eternal 組と異なり、`pub(crate)` な
+//! `CudaGemm::new`／`CudaElementwise::new` 等（`gemm.rs`・`elementwise.rs`
+//! 参照）の**内部**から `device` を受け取って構築される。これらのコンス
+//! トラクタ自体は `context_cache` を経由しない直接呼び出しにも開かれて
+//! いるため（`ContextKey` ドキュメントコメントが指す「公開関数の誤用
+//! パターン」）、`cached_device` に anchor されない `CudaContext`（＝
+//! `CudaDevice::new` を直接呼んで得た使い捨ての context）に対しても
+//! `cached_allocator` は呼ばれうる。旧実装は他の eternal 組と同じく
+//! `Arc<CudaAllocator>` を永久保持していたため、利用者が
+//! `CudaDevice::new`／`CudaGemm::new` を直接繰り返し呼ぶたびに
+//! `ContextKey`（ordinal + context ポインタ）が毎回変わり、
+//! エントリが際限なく積み上がって当該 `CudaContext`・stream・プール内
+//! GPU メモリ（既定最大 128 MiB。`pool.rs::PoolConfig::default()`）が
+//! 全ハンドル drop 後も解放されない欠陥があった（codex-review 指摘。
+//! イシュー #1020 PR #1061）。
+//!
+//! このため `cached_allocator` のみ [`get_or_build_weak`] を使い、
+//! `HashMap<ContextKey, Arc<Mutex<Option<Weak<CudaAllocator>>>>>` として
+//! **`Weak` を保持する**（[`get_or_build`] の `Arc` 保持版とはキャッシュ
+//! 本体の型が異なる。[`WeakSingleFlightCache`] 参照）。呼び出し元
+//! （`CudaGemm`／`CudaElementwise`／`CudaSoftmax` の `allocator`
+//! フィールド〈`CudaRmsNorm`／`CudaSgd` は `allocator` を持たず本キャッシュ
+//! を呼ばない。`gemm.rs`／`elementwise.rs`／`softmax.rs` 参照〉、または
+//! `ops::CudaBackendOps::
+//! release_cached_device_memory`／`device_memory_pool_stats` のローカル
+//! 変数）が `Arc<CudaAllocator>` を保持し続ける限りキャッシュヒットし
+//! 続ける（正準経路では eternal 組の `CudaGemm` 等が `allocator` を
+//! 内部保持し続けるため、実質的に従来同様キャッシュが効き続ける）。
+//! 一方、`Arc<CudaAllocator>` を保持する全ハンドルが drop されれば
+//! `Weak::upgrade()` が失敗し、次回 `get_or_build_weak` 呼び出し時に
+//! 当該エントリを刈り取る（`try_lock` で他スレッドが構築中のエントリを
+//! 誤って刈り取らない。[`get_or_build_weak`] 参照）。これにより
+//! 「利用者が `CudaAllocator` への全参照を drop すれば対応する
+//! `CudaContext`・プールメモリも解放される」ライフサイクル契約になる。
 //!
 //! # `Mutex` poison
 //!
@@ -74,7 +122,7 @@
 //! ため）。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
@@ -116,10 +164,11 @@ type Slot<T> = Arc<Mutex<Option<Arc<T>>>>;
 /// `K` は [`cached_device`] では `usize`（物理デバイス ordinal。この
 /// 関数はまだ `CudaContext` が存在しない段階で呼ばれるため ordinal しか
 /// キーにできない）、それ以外の `cached_gemm`／`cached_elementwise`／
-/// `cached_rmsnorm`／`cached_softmax`／`cached_sgd`／`cached_allocator`
-/// では [`ContextKey`]（ordinal + context の同一性）を使う（codex-review
-/// 指摘。イシュー #1020 PR #1061。理由は [`ContextKey`] のドキュメント
-/// コメント参照）。
+/// `cached_rmsnorm`／`cached_softmax`／`cached_sgd` では [`ContextKey`]
+/// （ordinal + context の同一性）を使う（codex-review 指摘。イシュー
+/// #1020 PR #1061。理由は [`ContextKey`] のドキュメントコメント参照）。
+/// `cached_allocator` のみ本型ではなく [`WeakSingleFlightCache`] を使う
+/// （モジュール冒頭「所有モデル・生存期間」参照）。
 type SingleFlightCache<K, T> = Mutex<HashMap<K, Slot<T>>>;
 
 /// `device` を受け取る各 `cached_*` 関数のキャッシュキー。
@@ -218,6 +267,76 @@ where
     Ok(built)
 }
 
+/// [`get_or_build_weak`] 用のキー単位 single-flight スロット。`None` は
+/// 未構築、`Some` は「直近に構築したハンドルへの `Weak`」（[`get_or_build`]
+/// の `Slot<T>` と異なり `Arc` ではなく `Weak` を保持する。モジュール冒頭
+/// 「`cached_allocator` のみ Weak 参照＋刈り取り」参照）。
+type WeakSlot<T> = Arc<Mutex<Option<Weak<T>>>>;
+
+/// [`cached_allocator`] 専用のプロセスワイドキャッシュ本体の型エイリアス
+/// （`SingleFlightCache<K, T>` の `Weak` 保持版）。他の `cached_*` が使う
+/// eternal な [`SingleFlightCache`] とは異なり、値を強参照しない
+/// （モジュール冒頭「所有モデル・生存期間」参照）。
+type WeakSingleFlightCache<K, T> = Mutex<HashMap<K, WeakSlot<T>>>;
+
+/// `cached_allocator` 専用の「ヒットなら `Weak::upgrade`・ミスまたは
+/// 死んだエントリなら `build` で再構築」の single-flight ロジック。
+/// [`get_or_build`] と 2 階層ロック構成（外側は登録専用の短命ロック、
+/// 内側はキー単位ロックで構築区間を直列化）は同一だが、以下 2 点が
+/// 異なる:
+///
+/// - スロットが保持するのは `Arc<T>` ではなく `Weak<T>`（[`WeakSlot`]）
+///   であり、呼び出し元が返り値の `Arc<T>`（および内部で `Arc<T>` を
+///   保持する `CudaGemm` 等）をすべて drop すれば `T` はキャッシュとは
+///   無関係に破棄される。
+/// - 外側ロック取得時に「死んだエントリ」（`Weak::upgrade()` が失敗する
+///   エントリ）を刈り取る。刈り取りは `try_lock` のみで行い、他スレッドが
+///   `build` 実行中で内側ロックを保持しているエントリ（`try_lock` 失敗）
+///   は無条件に残す（構築中のエントリを誤って刈り取ると、その構築の
+///   `single-flight` 契約〈`get_or_build_single_flights_concurrent_misses`
+///   と同型〉が壊れ、並行呼び出しが `build` を二重実行しうる）。走査対象は
+///   このキャッシュが実際に持つエントリ数のみであり、モジュール冒頭
+///   「所有モデル・生存期間」の想定どおり「デバイス数 × 直接構築の
+///   バイパス呼び出し延べ回数」に閉じる（正準経路ではエントリは 1 個の
+///   まま増えない）。
+///
+/// `None`（未構築 or 構築失敗直後）のエントリは刈り取り対象にしない
+/// （[`get_or_build`] の同種コメント参照: 外側ロックと内側ロックの間の
+/// 短い区間でスロットが `None` のまま他スレッドから観測されうるため、
+/// ここで刈り取ると two-thread が同時に `build` を実行する退行になる）。
+fn get_or_build_weak<K, T>(
+    cache: &WeakSingleFlightCache<K, T>,
+    key: K,
+    build: impl FnOnce() -> Result<T, CudaError>,
+) -> Result<Arc<T>, CudaError>
+where
+    K: Eq + std::hash::Hash,
+{
+    let slot = {
+        let mut guard = lock_cache(cache)?;
+        guard.retain(|_, slot| match slot.try_lock() {
+            Ok(inner) => inner
+                .as_ref()
+                .map(|weak| weak.strong_count() > 0)
+                .unwrap_or(true),
+            Err(_) => true,
+        });
+        Arc::clone(
+            guard
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(None))),
+        )
+    };
+
+    let mut slot_guard = lock_cache(&slot)?;
+    if let Some(existing) = slot_guard.as_ref().and_then(Weak::upgrade) {
+        return Ok(existing);
+    }
+    let built = Arc::new(build()?);
+    *slot_guard = Some(Arc::downgrade(&built));
+    Ok(built)
+}
+
 /// `ordinal` 番目の GPU に対応する [`CudaDevice`] をプロセス内キャッシュ
 /// から取得する。ヒット時は `CudaContext::new`／NVRTC 初期化を再実行
 /// しない（受け入れ条件 1）。
@@ -312,15 +431,24 @@ pub(crate) fn cached_sgd(device: &CudaDevice) -> Result<Arc<crate::sgd::CudaSgd>
 /// PR #1061。[`ContextKey`] のドキュメントコメント参照）。
 ///
 /// `crate::ops::CudaBackendOps::release_cached_device_memory`／
-/// `device_memory_pool_stats` の唯一の呼び出し先であり、`gemm.rs`
-/// （`CudaGemm::new` が本関数を呼び、`allocator` フィールドとして
-/// 保持する）からも参照される。`CudaAllocator::new` はカーネル
-/// コンパイルを伴わず失敗しない（`Result` を返さない）ため、
-/// `get_or_build` の `build` クロージャは常に `Ok` を返す。
+/// `device_memory_pool_stats` の唯一の呼び出し先であり、`gemm.rs`・
+/// `elementwise.rs`・`softmax.rs`（各 `CudaXxx::new` が本関数を呼び、
+/// `allocator` フィールドとして保持する。`CudaRmsNorm`／`CudaSgd` は
+/// `allocator` を持たず本関数を呼ばない）からも参照される。
+/// `CudaAllocator::new` はカーネルコンパイルを伴わず失敗しない
+/// （`Result` を返さない）ため、`build` クロージャは常に `Ok` を返す。
+///
+/// 他の `cached_*` と異なり [`get_or_build_weak`]（`Weak` 保持・死んだ
+/// エントリの刈り取りあり）を使う。理由はモジュール冒頭「所有モデル・
+/// 生存期間」§「`cached_allocator` のみ Weak 参照＋刈り取り」を参照
+/// （codex-review 指摘。イシュー #1020 PR #1061）。正準経路（`ops.rs`
+/// 経由）では `CudaGemm` 等の eternal キャッシュが `allocator` を内部
+/// 保持し続けるため、キャッシュ効果（2 回目以降が確保をやり直さない）は
+/// 従来と変わらない。
 pub(crate) fn cached_allocator(device: &CudaDevice) -> Result<Arc<CudaAllocator>, CudaError> {
-    static CACHE: OnceLock<SingleFlightCache<ContextKey, CudaAllocator>> = OnceLock::new();
+    static CACHE: OnceLock<WeakSingleFlightCache<ContextKey, CudaAllocator>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    get_or_build(cache, ContextKey::from_device(device), || {
+    get_or_build_weak(cache, ContextKey::from_device(device), || {
         Ok(CudaAllocator::new(device))
     })
 }
@@ -464,6 +592,143 @@ mod tests {
         });
 
         let err = get_or_build(cache.0, 0, || Ok(1)).unwrap_err();
+        assert!(matches!(err, CudaError::ContextCacheUnavailable { .. }));
+    }
+
+    /// [`get_or_build_weak`] 用の空キャッシュを構築する（`fresh_cache`
+    /// の `Weak` 版）。
+    fn fresh_weak_cache<T>() -> WeakSingleFlightCache<usize, T> {
+        Mutex::new(HashMap::new())
+    }
+
+    /// codex-review 指摘の回帰テスト（イシュー #1020 PR #1061。
+    /// `context_cache.rs:146` 付近）: [`get_or_build_weak`] はキャッシュ
+    /// 自体が値を強参照しないため、呼び出し元が返り値の `Arc` を drop
+    /// すれば値は破棄される（＝「利用者が全ハンドルを drop すれば
+    /// context・プールも解放される」ライフサイクル契約）。`get_or_build`
+    /// （`Arc` 保持版）ではこの `Arc::downgrade` した `Weak` は破棄後に
+    /// 必ず `upgrade` が `None` になる。
+    #[test]
+    fn get_or_build_weak_does_not_keep_value_alive() {
+        let cache = fresh_weak_cache::<u32>();
+
+        let built = get_or_build_weak(&cache, 0, || Ok(42)).expect("build succeeds");
+        let weak = Arc::downgrade(&built);
+        assert!(weak.upgrade().is_some(), "drop 前は生存しているはず");
+
+        drop(built);
+        assert!(
+            weak.upgrade().is_none(),
+            "呼び出し元の Arc を drop すればキャッシュが強参照していない限り値は破棄されるはず"
+        );
+    }
+
+    /// 上記テストの続き: 値が破棄された後に同じキーで再度呼び出すと、
+    /// 死んだエントリを刈り取ったうえで `build` を再実行し、新しい値を
+    /// 返す（ABA: 同じキーが新しい値へ差し替わるケースの確認）。
+    #[test]
+    fn get_or_build_weak_rebuilds_after_value_is_dropped() {
+        let cache = fresh_weak_cache::<u32>();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        // 注意: `calls` の加算は `get_or_build_weak` が渡された `build`
+        // クロージャを実際に呼び出した瞬間のみに置く（クロージャの
+        // 生成〈評価〉タイミングで加算すると、2 回目がキャッシュヒットで
+        // build 自体は呼ばれない場合でも `calls == 2` になってしまい、
+        // 「再構築された」ことの検証にならない）。
+        let first = get_or_build_weak(&cache, 0, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(1)
+        })
+        .expect("first build succeeds");
+        drop(first);
+
+        let second = get_or_build_weak(&cache, 0, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(2)
+        })
+        .expect("rebuild succeeds");
+        assert_eq!(
+            *second, 2,
+            "値が破棄された後の呼び出しは build を再実行して新しい値を返すはず"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "1 回目・2 回目それぞれで build が呼ばれるはず（死んだエントリはキャッシュヒットにならない）"
+        );
+    }
+
+    /// [`get_or_build_weak`] はヒット中（値が生存している間）は
+    /// `get_or_build`（`Arc` 保持版）と同じく `build` を再実行しない
+    /// （正準経路〈`ops.rs` 経由・`CudaGemm` 等が `allocator` を内部保持
+    /// し続ける〉でキャッシュ効果が従来と変わらないことの確認）。
+    #[test]
+    fn get_or_build_weak_caches_hit_while_value_is_alive() {
+        let cache = fresh_weak_cache::<u32>();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let first = get_or_build_weak(&cache, 0, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(7)
+        })
+        .expect("build succeeds");
+        let second = get_or_build_weak(&cache, 0, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(8)
+        })
+        .expect("cache hit succeeds without invoking build");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "値が生存している間は同一 Arc を共有するはず"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "値が生存している間は build が 1 回だけ呼ばれるはず"
+        );
+    }
+
+    /// 死んだエントリの刈り取り（codex-review 指摘。イシュー #1020
+    /// PR #1061）: 異なるキーのエントリが死んでも生存中のエントリには
+    /// 影響しない。かつ、別キーへの呼び出しをきっかけに死んだエントリが
+    /// 外側 `HashMap` から取り除かれる（マップサイズの回帰確認。
+    /// [`get_or_build_weak`] 冒頭コメント「外側ロック取得時に...刈り取る」
+    /// 参照）。
+    #[test]
+    fn get_or_build_weak_prunes_dead_entries_on_other_key_access() {
+        let cache = fresh_weak_cache::<u32>();
+
+        let dead = get_or_build_weak(&cache, 0, || Ok(100)).expect("key 0 builds");
+        drop(dead);
+        let alive = get_or_build_weak(&cache, 1, || Ok(200)).expect("key 1 builds");
+
+        {
+            let guard = cache.lock().expect("cache lock");
+            assert_eq!(
+                guard.len(),
+                1,
+                "key 0 の死んだエントリは key 1 へのアクセスをきっかけに刈り取られるはず"
+            );
+            assert!(guard.contains_key(&1), "key 1 の生存中エントリは残るはず");
+        }
+        assert_eq!(*alive, 200);
+    }
+
+    /// `Mutex` poison 時は panic せず `CudaError::ContextCacheUnavailable`
+    /// を返す（`get_or_build_reports_typed_error_on_poisoned_mutex` の
+    /// `Weak` 版）。
+    #[test]
+    fn get_or_build_weak_reports_typed_error_on_poisoned_mutex() {
+        let cache = fresh_weak_cache::<u32>();
+        let cache = std::panic::AssertUnwindSafe(&cache);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = cache.0.lock().expect("lock before poisoning");
+            panic!("intentionally poison the mutex for this test");
+        });
+
+        let err = get_or_build_weak(cache.0, 0, || Ok(1)).unwrap_err();
         assert!(matches!(err, CudaError::ContextCacheUnavailable { .. }));
     }
 
