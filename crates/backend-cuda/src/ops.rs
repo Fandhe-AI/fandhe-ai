@@ -89,6 +89,23 @@ impl CudaBackendOps {
     /// 呼び出し元まで伝播する `CudaError` は常に最初に失敗した 1 回を
     /// 表す）を `observe_cuda_result` で観測し、sticky エラーなら
     /// ordinal を poison する。
+    ///
+    /// **cold-cache 構築も同じ境界に含める**（Cursor Bugbot 指摘・
+    /// PR #1064 追補）: `context_cache::cached_gemm`／`cached_elementwise`／
+    /// `cached_rmsnorm`／`cached_softmax`／`cached_sgd` はキャッシュミス時
+    /// （初回呼び出し、または将来 `invalidate` が新世代のコンテキストを
+    /// 再構築した直後）に NVRTC コンパイル・モジュールロードという実際の
+    /// driver 呼び出しを行う。この構築呼び出しを `with_driver_call` の
+    /// 外側（`device_handle()` 直後）で素通しに実行すると、構築中に
+    /// sticky エラーが発生しても観測されず ordinal が poison されない
+    /// まま fail-open になる（構築失敗自体はキャッシュされず毎回
+    /// 再試行されるため、poison されない限りこの経路は永久に「観測なしで
+    /// 消費される」窓になる）。各呼び出し元は `cached_*` 取得自体も
+    /// 本ヘルパーで包む（`f` に `context_cache::cached_gemm(&device)` 等を
+    /// 渡す）ことでこの窓を閉じる。`resource_generations` は続く実行部と
+    /// 同じ値を渡し（`begin_driver_call` は世代不一致以外の目的では
+    /// 副作用を持たないため二重に渡しても安全）、構築用のトークンと
+    /// 実行用のトークンは別個に取得・解放する。
     fn with_driver_call<T>(
         &self,
         resource_generations: &[u64],
@@ -127,8 +144,11 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let ew = context_cache::cached_elementwise(&device)
-            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        let ew = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_elementwise(&device),
+        )?;
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -152,8 +172,11 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let ew = context_cache::cached_elementwise(&device)
-            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        let ew = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_elementwise(&device),
+        )?;
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -217,8 +240,9 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let rmsnorm =
-            context_cache::cached_rmsnorm(&device).map_err(map_fused_kernel_init_error)?;
+        let rmsnorm = self.with_driver_call(&[], map_fused_kernel_init_error, || {
+            context_cache::cached_rmsnorm(&device)
+        })?;
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -267,8 +291,9 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let softmax =
-            context_cache::cached_softmax(&device).map_err(map_fused_kernel_init_error)?;
+        let softmax = self.with_driver_call(&[], map_fused_kernel_init_error, || {
+            context_cache::cached_softmax(&device)
+        })?;
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -458,7 +483,9 @@ impl BackendOps for CudaBackendOps {
             .collect();
 
         let device = self.device_handle()?;
-        let sgd = context_cache::cached_sgd(&device).map_err(map_cuda_error)?;
+        let sgd = self.with_driver_call(&resource_generations, map_cuda_error, || {
+            context_cache::cached_sgd(&device)
+        })?;
 
         let grad_handle = grad
             .downcast_handle::<CudaBufferHandle>()
@@ -538,8 +565,11 @@ impl BackendOps for CudaBackendOps {
             .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
 
         let device = self.device_handle()?;
-        let gemm = context_cache::cached_gemm(&device)
-            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        let gemm = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -639,8 +669,11 @@ impl BackendOps for CudaBackendOps {
                 };
 
                 let device = self.device_handle()?;
-                let gemm = context_cache::cached_gemm(&device)
-                    .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+                let gemm = self.with_driver_call(
+                    &[],
+                    |e| BackendError::CudaUnavailable(e.to_string()),
+                    || context_cache::cached_gemm(&device),
+                )?;
                 let out = self.with_driver_call(
                     &[],
                     |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -715,6 +748,12 @@ impl BackendOps for CudaBackendOps {
             ));
         }
         if m == 0 || n == 0 {
+            // 早期 return でも poison 状態は fail-closed に検査する
+            // （Cursor Bugbot 指摘・PR #1064 追補: 空入力の早期 return は
+            // driver へ触れないため、begin_driver_call の poison 検査を明示的に
+            // 経由しないと poison 済み ordinal でも「空 step」相当が黙って
+            // 成功してしまう）。
+            context_cache::begin_driver_call(self.ordinal, &[])?;
             return Tensor::new(Vec::new(), &[m, n]).map_err(BackendError::ShapeMismatch);
         }
 
@@ -771,8 +810,6 @@ impl BackendOps for CudaBackendOps {
             ));
         };
 
-        let gemm = context_cache::cached_gemm(&device)
-            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         // `w`（・`bias`）はデバイス常駐のまま渡す唯一の入力（`a` はこの
         // 呼び出し内で毎回アップロードし直すため世代を跨がない。イシュー
         // #1013 設計文書 §9 item 7）。
@@ -783,6 +820,15 @@ impl BackendOps for CudaBackendOps {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+        // キャッシュ構築（`cached_gemm`）自体の driver 呼び出し（NVRTC
+        // コンパイル・モジュールロード）も同じ観測対象とする（Cursor
+        // Bugbot 指摘・PR #1064 追補: cold-cache 構築中の sticky エラーが
+        // 観測なしで消費され fail-open になっていた）。
+        let gemm = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
         self.with_driver_call(
             &resident_generations,
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -833,6 +879,12 @@ impl BackendOps for CudaBackendOps {
         }
         let r = b_shape[1];
         if p == 0 || r == 0 {
+            // 早期 return でも poison 状態は fail-closed に検査する
+            // （Cursor Bugbot 指摘・PR #1064 追補: 空入力の早期 return は
+            // driver へ触れないため、begin_driver_call の poison 検査を明示的に
+            // 経由しないと poison 済み ordinal でも「空 step」相当が黙って
+            // 成功してしまう）。
+            context_cache::begin_driver_call(self.ordinal, &[])?;
             return Tensor::new(Vec::new(), &[p, r]).map_err(BackendError::ShapeMismatch);
         }
         if q == 0 {
@@ -840,6 +892,12 @@ impl BackendOps for CudaBackendOps {
             // `out_features == 0` を許容する）が 0 の場合、GEMM の数学的
             // 定義どおり結果は全 0（`gemm`／`run_tiled_f32` の `k == 0`
             // 契約と同じ）。GPU 起動を回避してホスト側で直接構築する。
+            // 早期 return でも poison 状態は fail-closed に検査する
+            // （Cursor Bugbot 指摘・PR #1064 追補: 空入力の早期 return は
+            // driver へ触れないため、begin_driver_call の poison 検査を
+            // 明示的に経由しないと poison 済み ordinal でも「空 step」
+            // 相当が黙って成功してしまう）。
+            context_cache::begin_driver_call(self.ordinal, &[])?;
             return Tensor::from_shape_fill(&[p, r], |_| 0.0).map_err(BackendError::ShapeMismatch);
         }
 
@@ -876,11 +934,17 @@ impl BackendOps for CudaBackendOps {
             ));
         };
 
-        let gemm = context_cache::cached_gemm(&device)
-            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         // `w` のみがデバイス常駐入力（`b` はこの呼び出し内で毎回
         // アップロードし直すため世代を跨がない。イシュー #1013 設計文書
-        // §9 item 7）。
+        // §9 item 7）。キャッシュ構築（`cached_gemm`）自体の driver 呼び出し
+        // （NVRTC コンパイル・モジュールロード）も同じ観測対象とする
+        // （Cursor Bugbot 指摘・PR #1064 追補: cold-cache 構築中の sticky
+        // エラーが観測なしで消費され fail-open になっていた）。
+        let gemm = self.with_driver_call(
+            &[w.buffer().generation()],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
         self.with_driver_call(
             &[w.buffer().generation()],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -1200,6 +1264,120 @@ mod tests {
         assert!(
             matches!(err, BackendError::ShapeMismatch(_)),
             "expected ShapeMismatch for leaf shape != output_shape, got {err:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Cursor Bugbot 指摘（PR #1064 追補）の回帰テスト。
+    //
+    // `context_cache` のプロセスワイド static レジストリはテスト間で
+    // 共有されるため、他所（`context_cache.rs::poison_state_tests` は
+    // 10000 番台、実機依存テストは ordinal 0/1）と衝突しない専用 ordinal
+    // を払い出す（`context_cache.rs::poison_state_tests::unique_ordinal`
+    // と同方針）。
+    // ---------------------------------------------------------------
+
+    fn unique_test_ordinal() -> usize {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(30_000);
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn sticky_driver_error() -> cudarc::driver::result::DriverError {
+        cudarc::driver::result::DriverError(
+            cudarc::driver::sys::CUresult::CUDA_ERROR_ILLEGAL_ADDRESS,
+        )
+    }
+
+    /// [`CudaBackendOps::with_driver_call`] の回帰テスト（Cursor Bugbot
+    /// Medium 指摘・`ops.rs:100` 相当）: cold-cache 構築（`cached_gemm`
+    /// 等）を表す最初のクロージャが sticky な driver エラーを返した場合、
+    /// 修正前は構築呼び出しが `with_driver_call` の外側で素通しに実行され
+    /// 観測されないため ordinal が poison されず、以降の呼び出しも
+    /// fail-open のまま成功し続けた。修正後は構築呼び出し自体も
+    /// `with_driver_call` で包むため、直後の（実行フェーズ相当の）
+    /// 呼び出しが `DeviceContextPoisoned` で拒否されることを確認する。
+    #[test]
+    fn with_driver_call_poisons_ordinal_when_construction_closure_returns_sticky_error() {
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+
+        let construction_result: Result<(), BackendError> = cuda.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || Err(CudaError::Driver(sticky_driver_error())),
+        );
+        assert!(
+            construction_result.is_err(),
+            "構築失敗はそのまま Err として伝播するはず"
+        );
+
+        let run_result: Result<(), BackendError> = cuda.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || Ok(()),
+        );
+        assert!(
+            matches!(run_result, Err(BackendError::DeviceContextPoisoned(_))),
+            "構築呼び出しで観測された sticky エラーにより ordinal は poison され、             以降の呼び出しは fail-closed に拒否されるはず: {run_result:?}"
+        );
+    }
+
+    /// テスト専用の最小 `BufferHandle`（`tensor-core::backend_ops::
+    /// EmptyHandle` と同型。データの実体は持たず、`DeviceBuffer` を
+    /// 構築するためだけの空ハンドル）。
+    #[derive(Debug)]
+    struct EmptyHandle;
+
+    impl fandhe_ai_tensor_core::buffer::BufferHandle for EmptyHandle {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// [`CudaBackendOps::gemm_resident_rhs`] の回帰テスト（Cursor Bugbot
+    /// Low 指摘・`ops.rs:468` 相当の一般化）: `n == 0`（空入力）の早期
+    /// return 分岐は、修正前は `device_handle()`／driver 呼び出しの手前で
+    /// 無条件に `Ok` を返していたため、poison 済み ordinal でも「空
+    /// 出力」が黙って成功していた。修正後は早期 return の直前で
+    /// `begin_driver_call` の poison 検査を通すため、この分岐は driver
+    /// 呼び出し（＝実機）を要求せずに poison 状態のみで再現・検証できる
+    /// （`device_handle()` より手前で拒否されるため CUDA 非搭載環境でも
+    /// 実行可能）。
+    #[test]
+    fn gemm_resident_rhs_rejects_on_poisoned_ordinal_even_via_trivial_empty_shape_early_return() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+
+        // context_cache の poison 状態機械を直接操作して poison 化する
+        // （`context_cache::poison_state_tests` と同じ手法）。
+        let token = context_cache::begin_driver_call(ordinal, &[]).expect("begin succeeds");
+        let _ = context_cache::observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::Driver(sticky_driver_error())),
+        );
+        drop(token);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        // `a` は `[m, k] = [1, 1]`（k != 0 のため k==0 分岐は通らない）。
+        let a = Tensor::new(vec![1.0f32], &[1, 1]).expect("valid tensor");
+        // `w` は `[k, n] = [1, 0]`（n == 0 のため対象の早期 return 分岐へ
+        // 到達する）。ビュー構築は `buffer.numel() >= offset + numel`
+        // のみを検査し、`numel == 0` のビューは任意のバッキングバッファに
+        // 対して構築できる。
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let cuda_result = cuda.gemm_resident_rhs(&a, w, None);
+        assert!(
+            matches!(cuda_result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では n == 0 の早期 return 分岐も fail-closed に              拒否されるはず: {cuda_result:?}"
         );
     }
 }
