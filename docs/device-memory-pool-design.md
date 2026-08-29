@@ -93,39 +93,102 @@ allocator()` を削除し `DeviceAllocator` の実装インスタンスをいず
     ハンドル型非依存のフリーリスト・サイズクラス丸め・統計更新ロジック。
     **シグネチャに `BufferHandle`／`DeviceBuffer` を一切含めない**。`H`
     に trait 境界を課さない〈`H: Send` のみ。理由は §3.5〉ため、`H` が
-    何であるかを `tensor-core` 側は一切知らない。API 案:
-    `fn new(config: PoolConfig) -> Self`／`fn take(&self, bytes: u64)
-    -> Option<H>`（フリーリストに適合クラスの空きがあれば取り出す。
-    無ければ `None`。実際の確保 FFI 呼び出しは行わない）／
-    `fn register(&self, class_bytes: u64, handle: H)`（新規確保した
-    ハンドルをフリーリストへ記帳する。ハンドル生成・ゼロ初期化自体は
-    呼び出し元の責務）／`fn drain(&self) -> Vec<H>`（アイドル保持中の
-    全ハンドルを取り出して呼び出し元へ返す。**実際の解放 FFI 呼び出し・
-    driver トリム・stream 同期は呼び出し元〈各バックエンドの
-    `pub(crate)` アロケータ〉の責務であり、`tensor-core` はそれらを
-    一切知らない**）／`fn stats(&self) -> PoolStats`／`fn config(&self)
-    -> PoolConfig`）。
+    何であるかを `tensor-core` 側は一切知らない。`H` は各バックエンドの
+    **生ハンドル型**（例: `CudaSliceHandle`。下記「各バックエンドクレート
+    内に閉じる `pub(crate)` 面」参照）であり、
+    貸出中の RAII ラッパー型（`PooledCudaHandle` 等。下記 `pub(crate)`
+    面）とは別物である。
+
+    **不変条件（codex-review PR #1056 P1 是正。所有権遷移の一意性）**:
+    同一ハンドル（`H` の同一値）はフリーリスト（`SizeClassPool<H>` の
+    内部状態）と貸出中（呼び出し元が保持する RAII ラッパー内の
+    `Option<H>`）のいずれか一方にのみ存在し、両方に同時に存在すること
+    はない。したがって「新規確保したハンドルをフリーリストへ記帳する」
+    という操作（旧稿の `register`）は設けない。**新規確保直後のハンドル
+    は最初から貸出中として扱う**（RAII ラッパーが排他的に所有し、
+    `SizeClassPool<H>` は一切関知しない）。フリーリストへの遷移は
+    ラッパーの `Drop` 時にのみ発生する。API 案:
+
+    - `fn new(config: PoolConfig) -> Self`
+    - `fn take(&self, bytes: u64) -> Option<H>`（フリーリストから適合
+      クラスの空きハンドルを取り出す。**取り出した時点で所有権は完全に
+      呼び出し元へ移り、フリーリストからは消える**。無ければ `None`
+      〈呼び出し元が新規確保 FFI を呼ぶ〉。新規確保したハンドルは
+      `take` を経由せず直接 RAII ラッパーで包む〈`take` は「既存の
+      アイドルハンドルの再利用」専用〉）。
+    - `fn put(&self, class_bytes: u64, handle: H)`（貸出中のハンドルを
+      フリーリストへ返却する。旧稿の `register` の後継だが意味論が
+      異なる: **RAII ラッパーの `Drop` からのみ呼ばれる**〈返却であり
+      記帳ではない〉。新規確保直後には呼ばない）。
+    - `fn take_one_for_release(&self) -> Option<(u64, H)>`（解放処理
+      専用。フリーリストから 1 エントリ〈`(class_bytes, handle)`〉だけ
+      取り出す。§3.6 の解放トランザクションで使う。**一括 `drain()` は
+      設けない**〈part failure 時にキャッシュ全損させないため。理由は
+      下記「解放時の所有権遷移」〉）。
+    - `fn stats(&self) -> PoolStats`／`fn config(&self) -> PoolConfig`
+
+    **解放時の所有権遷移（codex-review PR #1056 P1 是正。トランザクション
+    型 API）**: 旧稿の一括 `drain(&self) -> Vec<H>` は、呼び出し後は
+    どのハンドルも `SizeClassPool<H>` の管理外になるため、§3.6 が要求
+    する「stream 同期・driver トリム失敗時に未解放エントリをキャッシュへ
+    残す」という fail-closed 契約を実現できない（一度 `drain` した時点で
+    キャッシュは空になってしまい、失敗時に戻す先がない）。本設計は
+    `take_one_for_release` による 1 件ずつの取り出しへ変更する。呼び出し
+    元（各バックエンドの `pub(crate)` アロケータの内部 `release_cached()`
+    実装。§3.1「2 段構成の命名規約」）は次の手順を踏む（詳細契約は
+    §3.6 (2)）: (i) 対象 stream の同期を**フリーリストへ一切触れる前に**
+    1 回実行し、失敗すれば即 `Err` を返す（フリーリストは無傷のまま。
+    キャッシュ全残）。(ii) 同期成功後、`take_one_for_release()` を
+    ループで呼び、取り出した 1 件ごとに実際の解放（ハンドルの drop・
+    バックエンド固有の解放処理）を試みる。成功すれば統計（`PoolStats::
+    cached_bytes` 等）を更新し次のエントリへ進む。**失敗すれば
+    そのハンドルを `put(class_bytes, handle)` で同じフリーリストへ
+    再挿入し、直ちに `Err` を返して処理を打ち切る**（以降の未着手
+    エントリはフリーリストに残ったまま）。(iii) 全エントリの解放に
+    成功した後、driver 側の予約メモリトリム（`cuMemPoolTrimTo(0)` 相当。
+    §3.6 (2)）を 1 回実行する。この最終トリムが失敗した場合、自作
+    プール層のフリーリストは既に空（`cached_bytes == 0`）であり
+    `Err` を返す（driver 予約分の残存は §3.6「REQ-14 との整合」が別途
+    扱う既知の差分であり、`PoolStats` の対象外）。
   - `SizeClassPool<H>: Send + Sync where H: Send`（`Mutex<PoolCore<H>>`
     で保護する内部実装。§3.5 参照）。
 - **各バックエンドクレート内に閉じる `pub(crate)` 面（`backend-cuda`・
   `backend-metal` それぞれ独立に実装。`tensor-core` からは不可視）**:
-  - ハンドル型（例: `backend-cuda::pool::PooledCudaHandle`〈内部に
-    `CudaSlice` を保持〉・`backend-metal::pool::PooledMetalHandle`
-    〈内部に `Retained<ProtocolObject<dyn MTLBuffer>>` を保持〉）。
-    `SizeClassPool<H>` の `H` を埋める具体型であり、`tensor-core` の
-    どの公開シグネチャにも現れない。
+  - **生ハンドル型（`H` を埋める具体型）**: 例
+    `backend-cuda::pool::CudaSliceHandle`〈内部に `CudaSlice` を保持〉・
+    `backend-metal::pool::MetalBufferHandle`〈内部に
+    `Retained<ProtocolObject<dyn MTLBuffer>>` を保持〉。
+    `SizeClassPool<H>` のフリーリストに格納される値そのものであり、
+    `tensor-core` のどの公開シグネチャにも現れない。
+  - **RAII 貸出ラッパー型（新設。codex-review PR #1056 P1 是正）**: 例
+    `backend-cuda::pool::PooledCudaHandle { handle: Option<CudaSliceHandle>,
+    class_bytes: u64, pool: Arc<SizeClassPool<CudaSliceHandle>> }`
+    （`backend-metal::pool::PooledMetalHandle` も同型）。`alloc_zeroed`／
+    `alloc_uninit`（下記）は生ハンドル型ではなく**この RAII ラッパーを
+    返す**。`Drop` 実装が `self.handle.take()` で `Option` から所有権を
+    奪ってから `pool.put(self.class_bytes, handle)` を呼ぶ（`Option`
+    にすることで二重 `Drop` 時の二重返却を型で防止する。既存
+    `PooledBufferHandle` の `ManuallyDrop` ガード方式〈§3.3〉と同じ目的の
+    別実装）。ホットパス（GEMM 等）はこのラッパーが scope を抜けるまで
+    生ハンドルを排他的に保持し続けるため、上記「不変条件」が保たれる。
   - 具体アロケータ型（例: `backend-cuda::pool::CudaAllocator`）が
     `SizeClassPool<H>` を保持し、`alloc_zeroed`／`alloc_uninit`（実際の
-    確保 FFI・ゼロ初期化）・解放（driver トリム・stream 同期を含む
-    実際の FFI）を実装する。いずれも `pub(crate)` 固有メソッドであり、
-    `tensor-core` のどの trait にも属さない（sealed ではなく、そもそも
-    `tensor-core` 側に対応する trait 自体が存在しない）。
+    確保 FFI・ゼロ初期化を行い `PooledCudaHandle` を返す）・内部
+    `release_cached()`（driver トリム・stream 同期を含む実際の FFI。
+    上記「解放時の所有権遷移」の手順を実装する）を実装する。いずれも
+    `pub(crate)` 固有メソッドであり、`tensor-core` のどの trait にも
+    属さない（sealed ではなく、そもそも `tensor-core` 側に対応する
+    trait 自体が存在しない）。
   - ホットパス（§2 事実 3・4。`backend-cuda/src/{gemm,elementwise,
     softmax}.rs`・`backend-metal/src/{gemm,elementwise}.rs`）は同一
     クレート内で `CudaAllocator`／`MetalAllocator` インスタンスへ直接
     アクセスし `alloc_zeroed`／`alloc_uninit` を呼ぶ（`BackendOps` を
     経由しない。呼び出し箇所はいずれも各バックエンド自身の内部実装で
-    あり、他クレートからの汎用呼び出しを必要としないため）。
+    あり、他クレートからの汎用呼び出しを必要としないため）。呼び出し元
+    は返却された `PooledCudaHandle`／`PooledMetalHandle` を演算の間
+    保持し、演算完了後（既存 `download` 契約の同期点を経てから）通常の
+    スコープ終了で `Drop` させる（明示 `free()` は設けない。§3.3
+    「返却は RAII のみ」を維持）。
   - プールは device 単位のプロセスワイド singleton とする
     （`static_cuda_memory`／同等の `Box::leak` 所有モデル。§2 事実 2 の
     計測系列単一化と整合させる）。CPU バックエンドは本イシューの
@@ -363,9 +426,12 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
   `BackendError::DeviceAllocationFailed` へ変換して即座に呼び出し元へ
   返す（driver 側の異常状態のまま再試行しても成功する見込みが薄く、
   黙殺すると fail-open になるため）。この場合もプール内部状態は一貫
-  させる（§3.6 (2) の fail-closed 契約により、解放できた分のみフリー
-  リストから外れ未解放分はキャッシュに残るため、直後に再試行しても
-  同じキャッシュ状態から再開できる）。(ii) `release_cached()` が `Ok`
+  させる（§3.6 (2) の fail-closed 契約・§3.1「解放時の所有権遷移」の
+  `take_one_for_release`／`put` トランザクションにより、解放できた分
+  のみフリーリストから外れ未解放分はキャッシュに残るため、直後の
+  再試行は「フリーリストに残存する未着手エントリ」のみを対象に
+  `take_one_for_release` を再開できる〈同一エントリを二重に解放しよう
+  とはしない〉）。(ii) `release_cached()` が `Ok`
   を返した（解放自体は成功した）にもかかわらず再確保が失敗した場合
   のみ、上記のとおり `BackendError::DeviceAllocationFailed` を返す。
   この内部 `release_cached()` の `Err` は、公開 API
@@ -380,10 +446,14 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
   に FFI を呼ぶ）。poison 時は既存方針（`into_inner` で継続。panic させ
   ない）を踏襲する。
 - **`Send`/`Sync` 方針の更新**: `SizeClassPool<H>: Send + Sync where H:
-  Send` とし、各バックエンドのハンドル型 `H`（例:
-  `PooledCudaHandle`・`PooledMetalHandle`。§3.1）は `Send` を実装する。
-  根拠は §2 事実 6・8: `CudaSlice` は `Send + Sync`、Metal の `MTLBuffer`
-  protocol も objc2-metal 0.3.2 で `Send + Sync` を supertrait に持つ。
+  Send` とし、各バックエンドの**生ハンドル型** `H`（例:
+  `CudaSliceHandle`・`MetalBufferHandle`。§3.1）は `Send` を実装する。
+  RAII 貸出ラッパー型（`PooledCudaHandle`・`PooledMetalHandle`。§3.1）は
+  `handle: Option<H>`（`H: Send`）と `pool: Arc<SizeClassPool<H>>`
+  （`SizeClassPool<H>: Send + Sync`）のみを保持するため自動的に `Send`
+  になる。根拠は §2 事実 6・8: `CudaSlice` は `Send + Sync`、Metal の
+  `MTLBuffer` protocol も objc2-metal 0.3.2 で `Send + Sync` を
+  supertrait に持つ。
   `crates/tensor-core/src/buffer.rs`「Send/Sync 境界」節が定めた「必要に
   なった時点で再検討する」の条件に、複数スレッド（学習ループのワーカー間
   でのプール共有）から確保・返却を行う本設計で到達したと位置づける。
@@ -409,46 +479,53 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    承認事項）。
 2. `release_cached()`（内部メソッド。§3.1「2 段構成の命名規約」。
    公開 API `BackendOps::release_cached_device_memory()` から呼ばれる。
-   REQ-14 の要求する解放 API）。CUDA で
-   `has_async_alloc()` が真の環境では、自作プールのフリーリスト解放
-   （`CudaSlice` の drop）に加え、driver 側 memory pool（§3.3）に残る
-   予約メモリを `cuMemPoolTrimTo(0)` 相当（`result::mem_pool` 経由。
-   §2 事実 6）で解放する呼び出しも `release_cached()` の内部契約に含める
-   （A/B いずれの設計かに関わらず必須。§3.3 参照）。これにより
-   `release_cached()` が REQ-14 の解放 API として自作プール保持分だけで
-   なく driver 予約分も含めて解放する契約になる。**`has_async_alloc()`
-   が真の環境では `CudaSlice` の drop は `cuMemFreeAsync` を対象 stream
-   へ enqueue するのみで、free の完了を待たない（§2 事実 6）。トリム
-   （`cuMemPoolTrimTo(0)` 相当）は「プールが現在保持する空き領域のうち
-   閾値超過分」を対象にするため、enqueue 済みで未完了の free はトリム
-   時点でまだプールへ返却されておらず解放可能領域に含まれない。この
-   未完了区間を放置すると §3.4 の OOM 再試行・本節冒頭の REQ-14 実メモリ
-   上限保証（driver 予約分も含めた解放）が達成できない。したがって
-   `release_cached()` は driver トリムを呼ぶ**前に**、当該プールに紐づく
-   対象 stream を同期（`cuStreamSynchronize` 相当。cudarc の同期
-   API 経由）し、enqueue 済みの `cuMemFreeAsync` がすべて完了したこと
-   （＝解放領域がプールに返却済みであること）を確認してからトリムを
-   実行する契約とする。この stream 同期呼び出し（CUDA FFI 経由）は driver
-   トリム呼び出しと同様に失敗し得るため、`release_cached()` の
-   戻り値は `Result<u64, BackendError>` とする（§3.1 の内部メソッド定義）。
-   自作プール層のフリーリスト解放（インメモリ操作）自体は失敗しないため、
-   `Err` は stream 同期失敗または driver トリム失敗のいずれかに限定される。
-   同期・トリムいずれかの失敗時に成功したものとして扱う（黙殺）・
-   `panic!` する・エラーを判別不能な値へ曖昧に符号化する（例: 失敗を `0`
-   として返す）のいずれも、driver 予約分の残存を「解放成功」と誤認させ
-   fail-open になるため禁止する（本番経路の panic 禁止・fail-closed の
-   維持。`.claude/rules/coding-rust.md`）。呼び出し元（LRU／OOM
-   フォールバック。§3.4）はこの `Err` を上位の
-   `BackendError::DeviceAllocationFailed` 等の型付きエラーへそのまま
-   伝播する契約とする。**
-   **部分失敗時の状態一貫性（fail-closed。§3.4 との整合）**: 同期・
-   トリムいずれかが `Err` を返した場合でも、自作プール層のフリーリスト
-   解放（インメモリ操作）自体は途中まで進んでいる可能性がある。この
-   場合、**既に解放できたエントリのみをフリーリストから外し、未解放の
-   エントリはキャッシュへ残す**（二重解放しない。解放済みエントリを
-   再度解放しようとしない）。呼び出し元は `Err` を受け取った時点で
-   プールの状態を「一部解放済み・残りはキャッシュ保持中」として扱い、
-   再試行（§3.4）は残存分に対してのみ行われる。
+   REQ-14 の要求する解放 API）。**手順は §3.1「解放時の所有権遷移」の
+   トランザクション型 API（`take_one_for_release`／`put`）に従う
+   （codex-review PR #1056 P1 是正。旧稿の一括 `drain()` を置き換えた）**:
+   (i) 対象 stream を同期（`cuStreamSynchronize` 相当。cudarc の同期
+   API 経由）し、enqueue 済みの `cuMemFreeAsync`（`has_async_alloc()` が
+   真の環境。§2 事実 6）がすべて完了したことを確認する。**この同期は
+   `take_one_for_release` を 1 度も呼ぶ前に行い、失敗した場合は
+   フリーリストへ一切触れずに `Err` を返す**（キャッシュは全件無傷の
+   まま残る。fail-closed）。(ii) 同期成功後、`take_one_for_release()` を
+   フリーリストが空になるまでループで呼ぶ。取り出した `(class_bytes,
+   handle)` ごとに実際の解放（`handle` の drop によるフリーリスト層の
+   解放。インメモリ操作でありこの段階自体は失敗しない）を行い、
+   `PoolStats`（`cached_bytes` 等）を更新してから次のエントリへ進む。
+   （本設計は per-handle の解放処理自体が失敗し得る一般形として
+   `put` による再挿入を用意しているが、CUDA の現行実装ではこの段階は
+   インメモリ操作のみで失敗しないため、実際に `put` へ戻る経路が使われ
+   るのは主に将来のバックエンド・想定外の実装変更に備えた防御である）。
+   (iii) フリーリストの全エントリの解放後、driver 側 memory pool
+   （§3.3）に残る予約メモリを `cuMemPoolTrimTo(0)` 相当（`result::
+   mem_pool` 経由。§2 事実 6）で 1 回解放する（A/B いずれの設計かに
+   関わらず必須。§3.3 参照）。これにより `release_cached()` が REQ-14 の
+   解放 API として自作プール保持分だけでなく driver 予約分も含めて
+   解放する契約になる。このトリム呼び出しが失敗した場合、自作プール層
+   のフリーリストは既に空（`PoolStats::cached_bytes == 0`。ステップ
+   (ii) が完了済みのため）であり、`Err` を返す（driver 予約分の残存は
+   下記「REQ-14 との整合」が別途扱う既知の差分）。
+   `release_cached()` の戻り値は `Result<u64, BackendError>` とする
+   （§3.1 の内部メソッド定義）。`Err` は「ステップ (i) の stream 同期
+   失敗」または「ステップ (iii) の driver トリム失敗」のいずれかに
+   限定される。黙殺（成功したものとして扱う）・`panic!` する・エラーを
+   判別不能な値へ曖昧に符号化する（例: 失敗を `0` として返す）のいずれ
+   も、driver 予約分の残存を「解放成功」と誤認させ fail-open になる
+   ため禁止する（本番経路の panic 禁止・fail-closed の維持。
+   `.claude/rules/coding-rust.md`）。呼び出し元（LRU／OOM フォールバック。
+   §3.4）はこの `Err` を上位の `BackendError::DeviceAllocationFailed`
+   等の型付きエラーへそのまま伝播する契約とする。
+   **部分失敗時の状態一貫性（fail-closed。§3.4 との整合）**: ステップ
+   (i) で失敗した場合はフリーリストは無傷（全件キャッシュ残存）。
+   ステップ (ii) の途中で個別の解放処理が失敗した場合（上記のとおり
+   CUDA の現行実装では発生しないが、防御として規定する）は、
+   その `(class_bytes, handle)` のみ `put` で同じフリーリストへ
+   再挿入し、以降の未着手エントリもフリーリストに残ったまま `Err` を
+   返す（二重解放しない。解放済みエントリを再度解放しようとしない）。
+   呼び出し元は `Err` を受け取った時点でプールの状態を「一部解放済み・
+   残りはキャッシュ保持中」として扱い、再試行（§3.4）は
+   `take_one_for_release` を継続呼び出しすることで**フリーリストに
+   残存する未着手エントリのみを対象に**行われる。
 3. OOM フォールバック（§3.4）。
 4. プロセス終了時は OS 側の回収に委ねる（既存 `Box::leak` 方針と同じ、
    意図的な「解放しないリーク」であることを明記する）。
@@ -502,6 +579,8 @@ fresh/reuse の 4 通り）:
 | 公開 `BackendOps` へ `allocator()` を追加する（旧稿・1 巡目） | `BackendOps::allocator(&self) -> Option<&dyn DeviceAllocator>` というデフォルトメソッドを `memory_ops()` と同型で公開 trait へ追加し、動的ディスパッチで各バックエンドの `DeviceAllocator` へ到達させる | crates.io 公開済み trait（`fandhe-ai-tensor-core::BackendOps`）から `Box<dyn BufferHandle + Send>` を返す低水準プール操作へ到達できてしまい、`docs/compat-api-scope.md` §0「`facade` が唯一のサポート対象公開 API 面」に反する（codex-review PR #1056 P1・1 巡目） |
 | `pub trait DeviceAllocator` は維持し `BackendOps::allocator()` のみ削除する（旧稿・2 巡目） | `BackendOps` への到達経路（`allocator()`）を削除すれば、`DeviceAllocator` の実装インスタンスがいずれの公開関数からも返らなくなるため十分と考えた | 「実装インスタンスを公開関数から返さない」ことと「型定義自体が公開面から不可視であること」は別の防御であり、後者を満たさない。`pub trait DeviceAllocator`・`pub mod allocator` として `fandhe-ai-tensor-core` に残る限り、外部コードが本クレートへ直接依存すれば `Box<dyn BufferHandle + Send>` を含む型を直接参照・独自実装できてしまう（codex-review PR #1056 P1・2 巡目。「facade が唯一のサポート対象公開 API 面」という**運用上の制約**は Rust の可視性検査を代替しない）。本設計（§3.1）は低水準 trait 自体を廃し、ハンドル型非依存の `SizeClassPool<H>`（`H` に trait 境界を課さない）と POD 型（`PoolConfig`／`PoolStats`）のみを `tensor-core` の公開面に残すことでこれを解消する |
 | REQ-14 の解放 API を内部 OOM フォールバックのみで満たす（旧稿） | `release_cached()` を「REQ-14 の明示解放 API」と位置づけつつ、実装インスタンスをいずれの公開関数からも返さない設計のままにする | 内部 OOM フォールバック（§3.4）から呼べるだけでは、`facade` を含む利用者側からプールを明示的に解放する経路が存在せず、REQ-14 が求める「プール解放 API の提供」を満たさない（codex-review PR #1056 P1）。本設計（§3.1）は低水準アロケータを一切露出せずに `BackendOps::release_cached_device_memory()`／`facade::release_cached_memory(device)`（unit のみを返す）を確定入口として追加することでこれを解消する |
+| `SizeClassPool<H>::register(class_bytes, handle)` で新規確保ハンドルをフリーリストへ記帳する（旧稿） | 確保直後のハンドルを `register` でフリーリストへ登録し、`take` で取り出して貸し出す設計 | フリーリストへの登録と貸出の間で所有権移転が定義されておらず、貸出中のハンドルが `take()` で別演算へ再取得できてしまう（use-after-return・上書きの構造的欠陥。codex-review PR #1056 P1）。本設計（§3.1）は `register` を廃止し、新規確保直後は RAII 貸出ラッパーが排他的に所有し、`put` は `Drop` 時のみ呼ばれる契約へ変更した |
+| `SizeClassPool<H>::drain() -> Vec<H>` で一括解放する（旧稿） | 解放時にフリーリストの全ハンドルを一括で取り出し、呼び出し元が順次解放する設計 | `drain` した時点で全ハンドルがプールの管理外になるため、途中で stream 同期・driver トリムが失敗しても取り出し済みハンドルをキャッシュへ戻す先がなく、§3.6 (2) の「未解放エントリはキャッシュへ残す」・§3.4 の「残存分のみ再試行」という fail-closed 契約を実現できない（codex-review PR #1056 P1）。本設計（§3.1）は `take_one_for_release` による 1 件ずつのトランザクション型取り出しと `put` による失敗時再挿入へ変更した |
 
 ## §5 検証方法（本文書内の記載の正しさ）
 
@@ -533,15 +612,43 @@ fresh/reuse の 4 通り）:
 - サイズクラス丸めの単体テスト（境界値・`u64` オーバーフロー）。
 - 再利用時ゼロ初期化のテスト（A02 対策の回帰防止。§7）。
 - LRU 破棄が `AllocationTracker::allocated_bytes` に正しく反映されること。
+- **`SizeClassPool<H>` の所有権遷移の単体テスト（新規。codex-review PR
+  #1056 P1 是正。§3.1「不変条件」の回帰防止）**:
+  (a) `take(bytes)` → RAII ラッパーを `drop` → 再度 `take(bytes)` で
+  **同一ハンドル**（`H` の同一性。テスト用の識別子を埋め込んだダミー
+  `H` で検証する）が返ること。
+  (b) `take(bytes)` で取り出したハンドルを RAII ラッパーが**保持中**の
+  間に、同じクラスへ別スレッド／別呼び出しから `take(bytes)` しても
+  貸出中のハンドルは返らない（フリーリストが空なら `None`）こと
+  （use-after-return・二重貸出の構造的防止の回帰テスト）。
+  (c) `put` は RAII ラッパーの `Drop` からのみ呼ばれ、新規確保直後の
+  ハンドルに対しては呼ばれないこと（新規確保パスの単体テストで
+  `put` 呼び出し回数が 0 のままであることを確認する）。
 - 内部 `release_cached()`（§3.1「2 段構成の命名規約」）が `Ok` を返す
   こと、および実行後に `PoolStats::cached_bytes` が 0 になること。
-- 内部 `release_cached()` が driver トリム失敗を模擬したフォールト注入
-  （CPU バックエンド等 driver FFI を持たない実装では該当なしのためスキップ
-  可）で `Err(BackendError::…)` を返し、OOM フォールバック（§3.4）が
+- **`take_one_for_release`／`put` によるトランザクション型解放の単体
+  テスト（新規。codex-review PR #1056 P1 是正。§3.1「解放時の所有権
+  遷移」・§3.6 (2) の回帰防止）**:
+  (a) stream 同期失敗を模擬したフォールト注入で、`take_one_for_release`
+  が**一度も呼ばれない**（＝フリーリストが無傷。`PoolStats::
+  cached_bytes` が解放前と変わらない）まま `Err` が返ること。
+  (b) driver トリム失敗を模擬したフォールト注入（CPU バックエンド等
+  driver FFI を持たない実装では該当なしのためスキップ可）で、
+  ステップ (ii)（§3.6 (2)）の個別解放が全件成功したうえで最終トリムの
+  みが失敗するケースでは `PoolStats::cached_bytes` が 0（フリーリスト
+  解放は完了済み）のまま `Err` が返ること。
+  (c) 個別解放（`take_one_for_release` 後・`put` 前）のフォールト注入
+  （現行 CUDA 実装では発生しない防御的経路。§3.6 (2) 注記）で、失敗
+  した `(class_bytes, handle)` が `put` により**同じフリーリストへ
+  再挿入**され `PoolStats::cached_bytes` が**その分だけ減っていない**
+  こと、かつ以降の未着手エントリもフリーリストに残ったまま `Err` が
+  返ること。
+  (d) 上記 (c) の失敗後に `release_cached()` を再試行すると、
+  `take_one_for_release` が**残存分（未着手エントリ）のみ**を対象に
+  処理を再開すること（既に解放済みのエントリを二重に処理しない。
+  §3.4 の再試行契約の回帰防止）。OOM フォールバック（§3.4）が
   この `Err` を黙殺・panic せず `BackendError::DeviceAllocationFailed`
-  へそのまま伝播すること（§3.1・§3.6 (2) の契約の回帰防止）。同時に
-  `PoolStats::cached_bytes` が「解放できた分のみ減り、未解放分は残る」
-  という部分失敗時の状態一貫性（§3.6 (2)）を確認する。
+  へそのまま伝播すること。
 - `#[ignore]` 実機テスト（既存 `memory_real_device.rs`／
   `memory_roundtrip.rs` の拡張。`has_async_alloc()` プローブは #1012 の
   該当タスクと共有する）。
