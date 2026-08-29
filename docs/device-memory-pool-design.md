@@ -86,7 +86,17 @@ pub trait DeviceAllocator: Send + Sync {
 
     /// アイドル保持中のバッファを全て解放し、解放できたバイト数を返す
     /// （REQ-14 の明示解放 API。既存 `release_all_pooled` の後継）。
-    fn release_cached(&self) -> u64;
+    /// CUDA で `has_async_alloc()` が真の環境では自作プール層の解放に
+    /// 加え driver 側 memory pool のトリム（`cuMemPoolTrimTo(0)` 相当。
+    /// §3.6 (2)）を伴うため、この driver FFI 呼び出しが失敗し得る
+    /// （エラーコード返却）ことを型で表現する。黙殺・panic は禁止
+    /// （本番経路の panic 禁止・fail-closed の維持。`.claude/rules/
+    /// coding-rust.md`）。自作プール層のフリーリスト解放（インメモリ
+    /// 操作）自体は失敗しないため、`Err` は driver トリム由来に限定
+    /// される。呼び出し元（LRU／OOM フォールバック。§3.4）はこの
+    /// `Err` を上位の `BackendError::DeviceAllocationFailed` 等へ
+    /// そのまま伝播し、driver 予約分の残存を「解放成功」と誤認しない。
+    fn release_cached(&self) -> Result<u64, BackendError>;
 
     /// 統計（診断・受け入れ条件の検証用）。
     fn stats(&self) -> AllocatorStats;
@@ -252,7 +262,16 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
 - **緩和策**: 総量上限＋グローバル LRU（既存踏襲）・クラス別アイドル
   上限・`release_cached()`・OOM 時は `release_cached()` を 1 回実行して
   から再試行し、それでも失敗すれば `BackendError::DeviceAllocationFailed`
-  を返す（fail-closed。無限リトライしない）。
+  を返す（fail-closed。無限リトライしない）。**`release_cached()` が
+  `Result<u64, BackendError>` を返す契約（§3.1）により、この OOM
+  フォールバック経路は 2 種類の失敗を区別して扱う**: (i) `release_cached()`
+  自体が `Err` を返した場合（driver トリム失敗）は、その `Err` をここで
+  黙殺せず、確保の再試行を行わずに `BackendError::DeviceAllocationFailed`
+  へ変換して即座に呼び出し元へ返す（driver 側の異常状態のまま再試行しても
+  成功する見込みが薄く、黙殺すると fail-open になるため）。(ii)
+  `release_cached()` が `Ok` を返した（解放自体は成功した）にもかかわらず
+  再確保が失敗した場合のみ、上記のとおり `BackendError::
+  DeviceAllocationFailed` を返す。
 
 ### 3.5 スレッド安全
 
@@ -290,7 +309,18 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    §2 事実 6）で解放する呼び出しも `release_cached()` の内部契約に含める
    （A/B いずれの設計かに関わらず必須。§3.3 参照）。これにより
    `release_cached()` が REQ-14 の解放 API として自作プール保持分だけで
-   なく driver 予約分も含めて解放する契約になる。
+   なく driver 予約分も含めて解放する契約になる。**この driver トリム
+   呼び出し（CUDA FFI 経由）は失敗し得るため、`release_cached()` の
+   戻り値は `Result<u64, BackendError>` とする（§3.1 の trait 定義）。
+   自作プール層のフリーリスト解放（インメモリ操作）自体は失敗しないため、
+   `Err` は driver トリム失敗に限定される。トリム失敗時に成功したものと
+   して扱う（黙殺）・`panic!` する・エラーを判別不能な値へ曖昧に符号化する
+   （例: 失敗を `0` として返す）のいずれも、driver 予約分の残存を「解放
+   成功」と誤認させ fail-open になるため禁止する（本番経路の panic 禁止・
+   fail-closed の維持。`.claude/rules/coding-rust.md`）。呼び出し元
+   （LRU／OOM フォールバック。§3.4）はこの `Err` を上位の
+   `BackendError::DeviceAllocationFailed` 等の型付きエラーへそのまま
+   伝播する契約とする。**
 3. OOM フォールバック（§3.4）。
 4. プロセス終了時は OS 側の回収に委ねる（既存 `Box::leak` 方針と同じ、
    意図的な「解放しないリーク」であることを明記する）。
@@ -364,7 +394,13 @@ fresh/reuse の 4 通り）:
 - サイズクラス丸めの単体テスト（境界値・`u64` オーバーフロー）。
 - 再利用時ゼロ初期化のテスト（A02 対策の回帰防止。§7）。
 - LRU 破棄が `AllocationTracker::allocated_bytes` に正しく反映されること。
-- `release_cached()` 実行後にプール保持分が 0 になること。
+- `release_cached()` が `Ok` を返すこと、および実行後にプール保持分が
+  0 になること。
+- `release_cached()` が driver トリム失敗を模擬したフォールト注入
+  （CPU バックエンド等 driver FFI を持たない実装では該当なしのためスキップ
+  可）で `Err(BackendError::…)` を返し、OOM フォールバック（§3.4）が
+  この `Err` を黙殺・panic せず `BackendError::DeviceAllocationFailed`
+  へそのまま伝播すること（§3.1・§3.6 (2) の契約の回帰防止）。
 - `#[ignore]` 実機テスト（既存 `memory_real_device.rs`／
   `memory_roundtrip.rs` の拡張。`has_async_alloc()` プローブは #1012 の
   該当タスクと共有する）。
