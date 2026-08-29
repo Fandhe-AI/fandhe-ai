@@ -74,18 +74,15 @@
   「既存実装者のビルドを壊す」問題と同種の教訓（`crates/tensor-core/src/
   buffer.rs`「破壊的変更」節）から、デフォルト実装で非対応バックエンドの
   ビルドを継続させる。
-- trait 案（object-safe・`Send + Sync` を要求する。理由は §3.5）:
+- trait 案（object-safe・`Send + Sync` を要求する。理由は §3.5）。
+  **未初期化確保はこの公開 trait に含めない**（下記「`alloc_uninit` の
+  可視性」を参照）:
 
 ```rust
 pub trait DeviceAllocator: Send + Sync {
     /// ゼロ初期化保証付きの確保。再利用バッファも必ずゼロ埋めしてから返す
     /// （A02 対策。§6 セキュリティ）。
     fn alloc_zeroed(&self, bytes: u64) -> Result<Box<dyn BufferHandle + Send>, BackendError>;
-
-    /// ゼロ初期化を行わない確保。カーネルが確保領域の全要素を書き切る
-    /// 出力専用の内部用途に限定し、`facade` の公開 API へは露出しない
-    /// （§6 セキュリティ）。
-    fn alloc_uninit(&self, bytes: u64) -> Result<Box<dyn BufferHandle + Send>, BackendError>;
 
     /// アイドル保持中のバッファを全て解放し、解放できたバイト数を返す
     /// （REQ-14 の明示解放 API。既存 `release_all_pooled` の後継）。
@@ -98,6 +95,39 @@ pub trait DeviceAllocator: Send + Sync {
     fn config(&self) -> PoolConfig;
 }
 ```
+
+- **`alloc_uninit` の可視性（レビュー指摘反映。§7 A02）**: 当初案は
+  `alloc_uninit`（ゼロ初期化を伴わない確保）を上記 `DeviceAllocator` の
+  メソッドとして含めていたが、`DeviceAllocator` は `BackendOps::
+  allocator()`（公開 API）から `&dyn DeviceAllocator` として得られる
+  object-safe な公開 trait であるため、trait に載せた時点で
+  `tensor-core`／`backend-*`（crates.io 公開クレート。CLAUDE.md の
+  「facade が唯一のサポートされる公開 API 面」という**運用上の**制約は
+  Rust の可視性検査では強制されない）を直接依存に追加した任意の外部
+  コードが `alloc_uninit` を呼び出せてしまい、前利用者のデータが残留した
+  未初期化バッファを読み出せる。「内部用途に限定」「facade へ露出しない」
+  という文書上の注記だけでは型システム上の防御にならないため、以下の
+  設計へ変更する:
+  - `alloc_uninit` は `DeviceAllocator` trait には含めない。各バックエンド
+    の具体アロケータ型（例: `backend-cuda` の `CudaAllocator`・
+    `backend-metal` の `MetalAllocator`）に **`pub(crate)` の固有メソッド**
+    として実装する（`pub(crate) fn alloc_uninit(&self, bytes: u64) ->
+    Result<Box<dyn BufferHandle + Send>, BackendError>`）。`pub(crate)` は
+    クレート境界そのものが可視性検査の対象になるため、`dyn
+    DeviceAllocator` のような trait オブジェクト経由の迂回では到達
+    できない（sealed trait パターンが防ぐ「外部からの trait 実装」ではなく
+    「外部からの呼び出し」を防ぐ必要があるため、可視性修飾子で直接塞ぐ
+    方式を採る）。
+  - ホットパス（§3.1 冒頭の接続点。`backend-cuda/src/gemm.rs`・
+    `elementwise.rs`・`softmax.rs`・`backend-metal/src/gemm.rs`・
+    `elementwise.rs`）は、`BackendOps::allocator()` が返す `&dyn
+    DeviceAllocator` 経由ではなく、各クレート内部で具体アロケータ型への
+    参照を直接保持し `alloc_uninit` を呼ぶ（同一クレート内なので
+    `pub(crate)` メソッドへ到達できる）。カーネルが確保領域の全要素を
+    書き切る出力専用の用途であることをカーネル実装側で保証する責務は
+    変わらない。
+  - `AllocatorStats`／`PoolConfig`（診断用）は `alloc_uninit` 呼び出しの
+    有無に依存しないため、公開 `DeviceAllocator` 側に残す。
 
 - **capacity と論理長の分離**: `DeviceBuffer` の `shape`（論理 numel）と、
   ハンドル内部の `capacity_bytes`（サイズクラス丸め後の実確保量）を分離
@@ -114,11 +144,14 @@ pub trait DeviceAllocator: Send + Sync {
 - ホットパスへの接続点（#1020／#1021 の作業対象。§2 事実 3・4 の箇所）:
   `backend-cuda/src/gemm.rs`・`elementwise.rs`・`softmax.rs` の
   `alloc_zeros` 呼び出しと、`backend-metal/src/gemm.rs`・`elementwise.rs`
-  の `new_zeroed` 呼び出しを、`allocator()` 経由（`alloc_zeroed`／
-  `alloc_uninit`）へ置き換える。入力側のアップロード経路（`clone_htod`・
-  `new_with_data`）は本イシューの対象外とする（`upload_into` の同期契約が
-  前提であり、forward 常駐化〈別イシュー〉が進むことで直接確保の頻度は
-  自然に減っていく）。
+  の `new_zeroed` 呼び出しを、ゼロ初期化が必要な箇所は `BackendOps::
+  allocator()`（`&dyn DeviceAllocator`）経由の `alloc_zeroed` へ、
+  カーネルが全要素を書き切る出力専用の箇所は上記「`alloc_uninit` の
+  可視性」節のとおり各クレート内部で具体アロケータ型を直接保持し
+  `pub(crate) alloc_uninit` を呼ぶ経路へ置き換える。入力側のアップロード
+  経路（`clone_htod`・`new_with_data`）は本イシューの対象外とする
+  （`upload_into` の同期契約が前提であり、forward 常駐化〈別イシュー〉が
+  進むことで直接確保の頻度は自然に減っていく）。
 
 ### 3.2 サイズクラス表（受け入れ条件）
 
@@ -358,10 +391,17 @@ fresh/reuse の 4 通り）:
 - **A02 暗号化の失敗／機微データ露出**: 再利用バッファに前利用者のデータ
   が残留するリスクがある。`alloc_zeroed` 経路は再利用時に必ずゼロ初期化
   （既存 `PoolZeroFill` 相当）を適用する。`alloc_uninit` はカーネルが
-  確保領域の全要素を書き切る内部出力専用に限定し、`facade` の公開 API へ
-  は露出しない（§3.1）。Metal でデバイス側フィル（`fillBuffer`）を採用
-  する場合も「貸出前に必ずフィルを encode する」ことを不変条件とする
-  （§3.3）。
+  確保領域の全要素を書き切る内部出力専用に限定する。当初案は「`facade`
+  の公開 API へは露出しない」という文書上の注記のみで済ませていたが、
+  `DeviceAllocator`（公開 trait）のメソッドとして定義すると
+  `BackendOps::allocator()` 経由で外部利用者が直接呼び出せてしまい注記が
+  型システムで担保されないとレビューで指摘された。このため `alloc_uninit`
+  は公開 `DeviceAllocator` trait には含めず、各バックエンドの具体
+  アロケータ型に `pub(crate)` 固有メソッドとして実装し、ホットパスは
+  同一クレート内から具体型経由で直接呼び出す設計へ変更した（§3.1
+  「`alloc_uninit` の可視性」）。Metal でデバイス側フィル
+  （`fillBuffer`）を採用する場合も「貸出前に必ずフィルを encode する」
+  ことを不変条件とする（§3.3）。
 - **A03 インジェクション（入力検証）**: shape は safetensors／ONNX 経由で
   外部入力が流入しうる。サイズクラス丸め・capacity 計算は `checked_mul`／
   `checked_add`（`u64`）で行い、オーバーフローは型付きエラー
