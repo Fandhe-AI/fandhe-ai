@@ -16,7 +16,7 @@
 - `crates/backend-cuda/src/gemm.rs`: `internal-diagnostics` feature 限定の診断コンストラクタ `CudaGemm::new_tf32_opt_only`／`CudaGemm::new_tf32_basic_only`（`run_wmma_tf32` の 3 段選択〈staged→opt→basic〉から opt／basic のいずれかへ強制する。fail-closed: 強制先カーネルが使用不能な場合は基本版へ黙ってフォールバックせず `Err` を返す）と、可用性フラグの検証のみを行う `#[ignore]` 実機テスト `wmma_tf32_diagnostic_constructors_force_expected_kernel`。
 - `crates/backend-cuda/examples/wmma_tolerance_probe.rs`: `--tf32-kernel <auto|opt|basic>`（環境変数 `WMMA_TOLERANCE_PROBE_TF32_KERNEL` フォールバック）を追加。`internal-diagnostics` feature 無効ビルドでは `opt`／`basic` を fail-closed で拒否する（黙って `auto` に縮退させない）。
 
-**以降の §3〜§6 は、実機計測が完了した時点で追記する骨子（手順・機構の説明）である。§4・§5 の表は見出しのみを示し、実測値は含まない。**
+**追記（イシュー #995・2026-08-29）**: 上記の実機不達は本ドキュメント初版時点のものであり、後続イシュー #995 が GB10 実機での計測を実施した。#995 のスケールスイープ計測（`--scales 0.1,1,10,100 --tf32-kernel {auto,opt,basic}`）は `s = 1` を含むため、その `scale = 1` 行が本イシュー §3 手順が想定していた `--scales 1` 単独実行と同一の入力・シード方針・カーネル強制構成に相当する（`ScaleConfig::Sweep` は指定したスケール集合ごとに独立して乱数列を再シードするため、`--scales 1` 単独実行と `--scales 0.1,1,10,100` 実行の `scale=1` 行は数値的に同一になる）。そのため個別に `--scales 1` の 3 ラン・2 回ずつを追加実行せず、`docs/perf/tensor-core-tolerance/gb10-sweep-tf32-{auto,opt,basic}.md` の `scale = 1` 行を本イシューの §5〜§7 の実測データとして転用する。計測環境・再現コマンドは `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md` §2〜§3 を参照（本ドキュメントでは重複記載しない）。§5〜§7 の数値部分を以下のとおり実測値で更新する。
 
 ## 3. 計測手順（GB10 実機。実測時にこのまま実行する）
 
@@ -70,31 +70,61 @@
 - `--tf32-kernel basic` の可用性ヘッダは `staged=no (…)`・`opt=no (disabled by CudaGemm::new_tf32_basic_only (diagnostic))` を表示し、`kernel` 列は全形状で `basic` になる。
 - `--tf32-kernel auto`（現行の本番既定コンストラクタ `CudaGemm::new` 相当）は形状ごとに staged／staged-swizzle／opt のいずれかが選ばれる（`run_wmma_tf32` の 3 段選択どおり）。
 
-実測完了後、この節に 3 構成それぞれの可用性ヘッダの実測値（引用）と、`auto` 構成で各形状がどのカーネルへ実際にルーティングされたかの一覧を追記する。
+実測（#995・2026-08-29。GB10・compute_121）: 3 構成の可用性ヘッダは以下のとおり。
 
-## 5. opt 版 TF32 誤差分布表（15 形状 × 5 シード集計）
+```
+# --tf32-kernel auto
+kernel availability: staged=yes, staged-swizzle group width=8, opt=yes, basic=yes
+routing rule: staged if n%4==0 && k%4==0 (swizzle variant if size condition) -> opt -> basic
 
-計測未了（GB10 実機不達。#994 の後続で追記）。
+# --tf32-kernel opt
+tf32 kernel select: opt
+kernel availability: staged=no (disabled by CudaGemm::new_tf32_opt_only (diagnostic)), staged-swizzle group width=none, opt=yes, basic=yes
+
+# --tf32-kernel basic
+tf32 kernel select: basic
+kernel availability: staged=no (disabled by CudaGemm::new_tf32_basic_only (diagnostic)), staged-swizzle group width=none, opt=no (disabled by CudaGemm::new_tf32_basic_only (diagnostic)), basic=yes
+```
+
+`auto` 構成でのルーティング先（15 形状）: `staged`（32x32x32・64x64x64・128x128x128・256x256x256〈両定義〉・512x512x512・100x100x100・64x96x128・256x256x512・256x256x1024・256x256x4096）、`opt`（1x1x1・17x23x19・17x19x23・33x31x65・130x70x90）。`basic` への降格は auto 構成では発生しなかった。
+
+## 5. opt 版 TF32 誤差分布表（15 形状 × 5 シード集計。s=1）
+
+実測（#995 のスケールスイープ生ログ `gb10-sweep-tf32-opt.md` の `scale=1` 行を集計。手法は `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md` §3 の集計ワンライナーと同一）:
 
 | shape | fail/total (5 seeds 合計) | max_abs_diff | max_rel_err | max_fail_abs_diff |
 |---|---|---|---|---|
-| （実測完了後に `docs/perf/tensor-core-tolerance/gb10-tf32-opt-s1.md` から転記） | - | - | - | - |
+| 32x32x32（block tile） | 807/5120 | 1.857e-3 | 2.556e-1 | 1.857e-3 |
+| 64x64x64（block tile ×2） | 3373/20480 | 3.377e-3 | 1.046e0 | 3.377e-3 |
+| 128x128x128（block tile ×4） | 13140/81920 | 4.337e-3 | 1.911e0 | 4.224e-3 |
+| 256x256x256（block tile ×8。重複マージ済み） | 53435/327680 | 6.827e-3 | 1.927e0 | 6.827e-3 |
+| 512x512x512（block tile ×16） | 212611/1310720 | 9.986e-3 | 1.980e0 | 9.986e-3 |
+| 1x1x1（sub-K-tile） | 0/5 | 1.228e-4 | 5.941e-4 | 0.000e0 |
+| 17x23x19（非倍数エッジ） | 312/1955 | 1.265e-3 | 8.375e-1 | 1.199e-3 |
+| 17x19x23（非倍数エッジ） | 240/1615 | 1.562e-3 | 1.495e-1 | 1.562e-3 |
+| 33x31x65（非倍数エッジ） | 826/5115 | 2.724e-3 | 5.746e-1 | 2.724e-3 |
+| 100x100x100（非倍数エッジ） | 7957/50000 | 3.624e-3 | 1.884e0 | 3.624e-3 |
+| 130x70x90（非倍数エッジ） | 7280/45500 | 4.167e-3 | 1.539e0 | 4.167e-3 |
+| 64x96x128（非正方） | 5066/30720 | 4.180e-3 | 1.743e0 | 4.177e-3 |
+| 256x256x512（K スイープ） | 52797/327680 | 9.242e-3 | 1.929e0 | 9.242e-3 |
+| 256x256x1024（K スイープ） | 53494/327680 | 1.297e-2 | 1.891e0 | 1.297e-2 |
+| 256x256x4096（K スイープ） | 53286/327680 | 2.544e-2 | 1.998e0 | 2.544e-2 |
 
 ## 6. 基本版との差分表
 
-計測未了（GB10 実機不達。#994 の後続で追記）。
+**全形状で差分なし**: `opt` 強制構成と `basic` 強制構成の生ログを `kernel` 列を除いて突合したところ、全形状・全シード（`s=1` に限らず #995 が計測した全スケールでも同様）で数値（`fail/total`・`max_abs_diff`・`max_rel_err`・percentile 列・`max_fail_abs_diff`）が完全一致した（`diff` 差分 0 行）。GB10 では TF32 WMMA カーネルのタイル戦略（共有メモリ・swizzle の有無）が誤差分布に一切影響しない。詳細・全スケールでの確認結果は `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md` §5 を参照。
 
 | shape | opt fail/total | basic fail/total | opt max_fail_abs_diff | basic max_fail_abs_diff | 差の有無 |
 |---|---|---|---|---|---|
-| （実測完了後に `docs/perf/tensor-core-tolerance/gb10-tf32-{opt,basic}-s1.md` の行単位 `diff` から転記） | - | - | - | - | - |
+| 全 15 形状（§5 の表と同一値） | （§5 と同一） | （§5 と同一） | （§5 と同一） | （§5 と同一） | なし |
 
 ## 7. sm_86 基本版実測（既存 §2.1）との対比
 
-計測未了。実測完了後、`docs/perf/cuda-tensor-core-tolerance-evaluation.md` §2.1（RTX 3060・sm_86・基本版）との対比を記す。GPU 世代（sm_86 vs GB10 の Blackwell 系譜）・カーネル実装（基本版 vs opt 版）の両方が異なる比較であるため、差異が生じても片方の要因に単純帰属せず、外挿もしない旨をここに明記する。
+実測（#995）: `basic` 強制構成（sm_86 実測時点のカーネルソースと同一）で対比した結果、**fail 率・`max_fail_abs_diff` はいずれの形状も表示桁（3 桁）でほぼ完全一致し、系統的な世代差は見られなかった**（最大差は 256x256x4096 の `max_fail_abs_diff` で 2.544e-2〈GB10〉vs 2.535e-2〈sm_86〉の 0.4% 差）。GPU 世代（sm_86 vs GB10）とカーネル実装（基本版 vs opt 版）を分離するため、本対比は `basic` 強制構成（sm_86 と同一カーネルソース）のみを用いており、opt 版固有の差異は §6 のとおり `basic` と数値的に同一なので追加で考慮する必要はない。詳細な形状別比較表は `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md` §10 を参照（本ドキュメントでは重複記載しない）。
 
 ## 8. 結論と制約
 
 - 閾値定数・判定式（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・`compare`）は本イシューでは変更しない。
 - スケール依存性の検証（`s ∈ {0.1, 1, 10, 100}`）は #995、閾値改定候補の選定は #996 のスコープ。
 - `docs/perf/cuda-parity-baseline.md` の `wmma_tf32`（基本版）行 2 件の provenance 未確定（`baseline_provenance_unconfirmed: true`。別シード 2000／8888）は、本イシューの計測では確定しない。今回追加した basic 強制入口（`CudaGemm::new_tf32_basic_only`）を使えば別イシューで再測定可能。
-- 本イシューは GB10 実機不達のため §5・§6・§7 の数値部分が未了のまま完了させる（`実装計画`「自動運転の制約」節の承認済み方針）。実機アクセスが確保でき次第、§3 の手順をそのまま再現して数値を追記する。
+- §5・§6・§7 の数値部分はイシュー #995 の GB10 実機計測（`scale=1` 行）により実測完了した（2026-08-29 追記）。
