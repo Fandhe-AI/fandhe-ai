@@ -372,15 +372,18 @@ Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが
   （Metal 実機での train reuse 実測）を埋めるもので、candle / Burn は計測していない
   （reuse モードは `bench-fandhe` のみ対応。`run_all.sh` (b') ループと同じ扱い）
 - 生データ: `results/raw/results-m4max-train.jsonl`（下記 4 組み合わせ各 1 ラン分）・
-  `results/raw/skipped-m4max-train.log`（空。失敗なし）・`results/run_all-m4max-train.log`
+  `results/raw/skipped-m4max-train.log`（空。失敗なし）・`results/run_all-m4max-train.log`。
+  追加 4 回分の一次データは `results/raw/results-m4max-train-extra.jsonl`（4 ラン × 4 行 = 16 行）・
+  `results/run_all-m4max-train-extra.log`（4 ラン分の実行ログ。失敗なし）
 - 実行方法: `./run_all.sh` は `results/raw/results.jsonl`（環境 1 の既存データ）を初期化するため
   実行せず、同スクリプトの `run()` と同一のコマンド形式
   （`./target/release/bench-fandhe --task train --device <cpu|metal> --size 64 --mode <fresh|reuse> --out <JSONL>`）
   で `train cpu 64 fresh` → `train metal 64 fresh` → `train cpu 64 reuse` → `train metal 64 reuse`
   の順に実行した。計測回数（warmup 20・iters 80）・シードはバイナリ既定のまま
 - ノイズ対策: 環境 4 と同じ方式。上記 1 ランに加え同一手順で追加 4 回（計 5 回）実行した。
-  JSONL には 1 ラン分のみをコミットし（選別・捏造をしないため）、5 回分の傾向は下記
-  「備考」に中央値の範囲のみ要約する。計測中は他の重い処理を起動していない
+  summarize.py の表は 1 ラン目（`results-m4max-train.jsonl`）のみから生成し（選別・捏造を
+  しないため）、追加 4 回分は `results-m4max-train-extra.jsonl` に別ファイルで保存する。
+  5 回分の傾向は下記「備考」に中央値の範囲のみ要約する。計測中は他の重い処理を起動していない
 
 ### (b) MLP 学習（cpu / metal、fresh。summarize.py 生成）
 
