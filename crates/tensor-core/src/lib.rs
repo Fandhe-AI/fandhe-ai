@@ -102,6 +102,7 @@ mod fusion;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
+pub mod pool_core;
 mod tensor;
 pub mod typed;
 
@@ -129,5 +130,10 @@ pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
+// `pool_core::PoolConfig` は `pool::PoolConfig`（crates.io 0.4.0 公開済み）と
+// root で名前が衝突するため再エクスポートしない（`pool_core.rs` モジュール
+// コメント「型名衝突の回避」参照）。`PoolStats` のみ再公開する
+// （`backend_ops::BackendOps::device_memory_pool_stats` の戻り値型）。
+pub use pool_core::PoolStats;
 pub use tensor::Tensor;
 pub use typed::{BatchedFeatures, FixedMat, FixedVec};

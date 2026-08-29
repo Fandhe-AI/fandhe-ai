@@ -8,6 +8,8 @@
 - 本文書は #1018 ツリーの**第 1 段（設計）**であり、`crates/**` は変更しない
   （docs-only）。API シグネチャは「案」として示し、最終決定は実装イシューで
   ある #1020（CUDA 実装）・#1021（Metal 実装）が実装しながら行う。
+- CUDA 実装（#1020）は完了し、採用判断・実測記入欄を
+  `docs/backend-cuda-pool-allocator-decision.md` に記録した。
 - 効果測定欄（§3.7）は Mac（M4 Max）・DGX Spark（GB10）実機セッションでの
   記入待ちの空欄とする。設計時点で「割当／解放区間」の実測値は存在せず、
   推定値では埋めない（`docs/backend-metal-buffer-pool-decision.md` §3 と

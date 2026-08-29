@@ -326,6 +326,7 @@ mod module_cache;
 mod module_cache_wiring_tests;
 mod nvrtc;
 mod ops;
+mod pool;
 mod rmsnorm;
 mod sgd;
 mod softmax;
