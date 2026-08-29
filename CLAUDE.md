@@ -63,6 +63,7 @@ fandhe-ai/
 └── docs/
     ├── backend-metal-aligned-load-decision.md # Metal GEMM アラインメント特化ロード分岐（align_M/N/K function constant 方式）不採用判断（#752 保留 → #808 格下げ）
     ├── backend-metal-async-copy-decision.md # Metal 非公式 simdgroup_async_copy 系 AIR intrinsic 不採用の決定記録（#546）
+    ├── backend-metal-command-batching-design.md # コマンドバッファ・エンコーダ共有と同期境界（waitUntilCompleted）の設計・CUDA 側契約との対応（#1015 ツリー・#1016）
     ├── backend-metal-mlx-classic-nax-decision.md # MLX classic 経路と CANDIDATES の構成対比・NAX 経路不採用判断（#549）
     ├── backend-metal-morton-mapping-decision.md # 標準 simdgroup_matrix API 下での Morton 順レーン→要素マッピング適用不可の判断（#544）
     ├── backend-metal-splitk-decision.md # split-K ディスパッチ分岐の MLX 選択条件対比・採否判断（#810）
