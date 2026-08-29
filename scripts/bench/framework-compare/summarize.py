@@ -99,10 +99,19 @@ def _safe_time_s(v):
     TypeError になるか不正な表示を生じていた）。有効なら `float` を、
     無効なら `None` を返す（fail-closed。呼び出し側は `None` を
     「無効な値」表示に倒す）。
+
+    `_is_plain_number` は任意精度の `int`（例: `10**1000`）を有限として
+    許容するため、`float(v)` 自体が `OverflowError: int too large to
+    convert to float` を送出しうる（イシュー #959 codex-review 2 巡目 P0
+    指摘: 巨大整数 1 件の混入で集計スクリプト全体が例外終了していた）。
+    変換不能な値も「無効な値」として `None` に倒す（fail-closed）。
     """
     if not _is_plain_number(v):
         return None
-    fv = float(v)
+    try:
+        fv = float(v)
+    except OverflowError:
+        return None
     return fv if fv > 0 else None
 
 
@@ -112,8 +121,17 @@ def _safe_finite_number(v):
     `float` へ正規化する（イシュー #959 codex-review P0 指摘。`checksums_match`
     への未検証な受け渡しを避ける）。有効なら `float` を、無効なら `None` を
     返す。
+
+    `_safe_time_s` と同じ理由（巨大整数 `int` の `float` 変換）で
+    `OverflowError` を捕捉し `None` に倒す（イシュー #959 codex-review
+    2 巡目 P0 指摘）。
     """
-    return float(v) if _is_plain_number(v) else None
+    if not _is_plain_number(v):
+        return None
+    try:
+        return float(v)
+    except OverflowError:
+        return None
 
 
 def load_rows(path):
@@ -683,7 +701,10 @@ def section(path, rows):
                 r_median = _safe_time_s(r.get("median_s"))
                 r_q1 = _safe_time_s(r.get("q1_s"))
                 r_q3 = _safe_time_s(r.get("q3_s"))
-                r_init = _safe_time_s(r.get("init_s")) if r.get("init_s") is not None else None
+                # `_safe_time_s(None)` は `_is_plain_number(None)` が False
+                # を返すため素通しで None になる（`r.get("init_s") is not
+                # None` による事前分岐は不要）。
+                r_init = _safe_time_s(r.get("init_s"))
                 r_checksum = _safe_finite_number(r.get("checksum"))
 
                 init_col = fmt_ms(r_init) if r_init is not None else "-"
@@ -712,7 +733,24 @@ def section(path, rows):
 
                 # 時間値（median_s/q1_s/q3_s）の無効値も「無効」判定の一部
                 # として扱う（イシュー #959 codex-review P1 指摘）。
-                row_invalid = r_median is None or r_q1 is None or r_q3 is None
+                # reuse 行の init_s は本節（(b')）が計測する初期化コストの
+                # 主対象であり必須フィールドのため、欠損・不正値も無効判定
+                # に含める（イシュー #959 codex-review 2 巡目 P0 指摘:
+                # 旧実装は init_s を表示列にのみ反映し `row_invalid` へ
+                # 含めていなかったため、init_s が不正でも `--strict` が
+                # exit 0 のまま fail-open していた）。
+                # fresh 側 median_s（fresh/reuse 比の算出・突合に使う値）が
+                # fresh 行自体は存在するのに不正（NaN・負値等）な場合も、
+                # 比較に使う値そのものが信頼できないため無効判定に含める
+                # （fresh 行が存在しない「突合不能」ケースとは区別する。
+                # 同 P0 指摘）。
+                row_invalid = (
+                    r_median is None
+                    or r_q1 is None
+                    or r_q3 is None
+                    or r_init is None
+                    or (fresh is not None and fresh_median is None)
+                )
 
                 if fresh:
                     if r_checksum is None or fresh_checksum is None:

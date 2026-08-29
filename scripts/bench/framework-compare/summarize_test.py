@@ -274,6 +274,53 @@ class ParityStatusTests(unittest.TestCase):
         self.assertIn(str(10**1000), reason)
 
 
+class SafeNumberOverflowTests(unittest.TestCase):
+    """イシュー #959 codex-review 2 巡目 P0 指摘の回帰テスト。
+
+    `_is_plain_number` は任意精度の `int`（`bool`・`NaN`・`Infinity` 以外は
+    有限として許容）を通すため、`10**1000` のような外部 JSONL 由来の巨大
+    整数を `float()` へ渡すと `OverflowError: int too large to convert to
+    float` になる。`_safe_time_s`・`_safe_finite_number` はこれを捕捉して
+    `None`（無効値）へ倒すべきで、集計スクリプト全体を落としてはならない。
+    """
+
+    def test_safe_time_s_huge_int_does_not_raise(self):
+        self.assertIsNone(summarize._safe_time_s(10**1000))
+
+    def test_safe_finite_number_huge_int_does_not_raise(self):
+        self.assertIsNone(summarize._safe_finite_number(10**1000))
+
+    def test_safe_time_s_huge_negative_int_does_not_raise(self):
+        self.assertIsNone(summarize._safe_time_s(-(10**1000)))
+
+    def test_reuse_row_with_huge_int_median_does_not_raise(self):
+        # `section()` 経由でも巨大整数混入時に例外終了しないことを end-to-end
+        # で固定する（呼び出し元は `_safe_time_s` の戻り値のみを扱うため
+        # 直接は落ちないはずだが、呼び出し経路自体を回帰対象として残す）。
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            {
+                **_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
+                "median_s": 10**1000,
+            },
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("無効な値", text)
+
+    def test_reuse_row_with_huge_int_checksum_does_not_raise(self):
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            {
+                **_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
+                "checksum": 10**1000,
+            },
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("突合不能（無効値）", text)
+
+
 class GemmParityHelpersTests(unittest.TestCase):
     def test_gemm_parity_failures_filters_task_and_status(self):
         rows = [
@@ -618,10 +665,65 @@ class TrainReuseSectionTests(unittest.TestCase):
     def test_section_does_not_flag_train_reuse_row_without_fresh(self):
         # fresh 欠落のみ（比較対象なしで突合不能）は値そのものの正当性を
         # 否定しないため無効扱いにしない（gemm の「突合不能（検証対象外）」
-        # と同じ位置づけ）。
-        rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054)]
+        # と同じ位置づけ）。init_s は本節が計測する必須フィールドのため
+        # 有効値を明示し、「fresh 欠落」のみを分離検証する（init_s 欠損の
+        # 検証は下の `test_section_flags_train_reuse_missing_init_s_as_invalid`
+        # に分離。イシュー #959 codex-review 2 巡目 P0 指摘）。
+        rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005)]
         *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
         self.assertFalse(has_train_reuse_invalid)
+
+    def test_section_flags_train_reuse_missing_init_s_as_invalid(self):
+        # イシュー #959 codex-review 2 巡目 P0 指摘: reuse 行の init_s は
+        # 本節（(b')）が計測する初期化コストの主対象であり必須フィールド
+        # だが、旧実装は表示列（"-"）にのみ反映し `has_train_reuse_invalid`
+        # へ反映していなかったため `--strict` が fail-open だった。
+        rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=None)]
+        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_reuse_invalid)
+
+    def test_section_flags_train_reuse_invalid_init_s_as_invalid(self):
+        rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=-1.0)]
+        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_reuse_invalid)
+
+    def test_section_flags_train_reuse_invalid_fresh_median_as_invalid(self):
+        # イシュー #959 codex-review 2 巡目 P0 指摘: fresh 行自体は存在する
+        # のに fresh 側 median_s（fresh/reuse 比の算出に使う値）が不正
+        # （NaN 等）な場合、表示は「計測不正」になるだけで
+        # `has_train_reuse_invalid` に反映されておらず `--strict` が
+        # fail-open だった。fresh 行が存在しない「突合不能」（上の
+        # `test_section_does_not_flag_train_reuse_row_without_fresh`）とは
+        # 区別する。
+        rows = [
+            _train_row(mode="fresh", median_s=float("nan"), checksum=0.08054),
+            _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
+        ]
+        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_reuse_invalid)
+
+    def test_main_strict_exit_code_reflects_train_reuse_missing_init_s(self):
+        # `has_train_reuse_invalid` の反映が `--strict` の終了コードまで
+        # 一貫していることを固定する回帰テスト（イシュー #959 codex-review
+        # 2 巡目 P0 指摘）。
+        path = _write_jsonl(
+            [
+                _with_parity(_base_row()),
+                _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+                _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=None),
+            ]
+        )
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", path, "--strict"]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+            os.unlink(path)
+        self.assertEqual(code, 2)
+        self.assertIn("train reuse", buf_err.getvalue())
 
     def test_reuse_invalid_median_with_valid_fresh_still_shows_fresh_median(self):
         # cursor bugbot 指摘: reuse の median_s が無効でも、対応する fresh
@@ -669,11 +771,15 @@ class TrainReuseSectionTests(unittest.TestCase):
         # fresh 行が存在しない（比較対象なしで突合不能）だけの reuse 行は
         # 値そのものの正当性を否定しないため「無効」扱いにせず、gemm 側が
         # 全て正常なら --strict でも exit 0 のまま（gemm の「突合不能
-        # （検証対象外）」と同じ位置づけ）。
+        # （検証対象外）」と同じ位置づけ）。init_s は本節の必須フィールド
+        # のため有効値を明示し、「fresh 欠落」のみを分離検証する（init_s
+        # 欠損側の --strict 回帰は
+        # `test_main_strict_exit_code_reflects_train_reuse_missing_init_s`
+        # に分離。イシュー #959 codex-review 2 巡目 P0 指摘）。
         path = _write_jsonl(
             [
                 _with_parity(_base_row()),
-                _train_row(mode="reuse", checksum=0.08),
+                _train_row(mode="reuse", checksum=0.08, init_s=0.005),
             ]
         )
         old_argv = sys.argv
