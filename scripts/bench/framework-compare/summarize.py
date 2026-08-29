@@ -94,6 +94,26 @@ FRAMEWORKS = ["fandhe-ai", "candle", "burn"]
 DEVICE_ORDER = ["cpu", "metal", "cuda"]
 DEVICE_LABEL = {"cpu": "CPU", "metal": "Metal", "cuda": "CUDA"}
 
+# `train_phases`（(b'') 節。イシュー #1009）専用の allowlist。producer 側の
+# 契約（`bench_common::parse_cli_from` の `--mode` allowlist・`PHASE_*` 定数
+# の値域）と同じ値域に固定する。security.md A03: 外部 JSONL 由来の値を
+# 辞書キーへ使う前・Markdown へ出力する前に allowlist 検証する
+# （codex-review 指摘。PR #1055）。
+_TRAIN_PHASES_MODES = ("fresh", "reuse")
+_PHASE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def _valid_phase_name(value):
+    """`phase` 文字列を producer 側（`bench_common::validate_phase_name`）と
+    同じ `[a-z0-9_]+`（非空）allowlist で検証する。`str` 以外（配列・
+    オブジェクト等の手組み JSON 混入）は無条件で拒否する。
+    """
+    return (
+        isinstance(value, str)
+        and len(value) > 0
+        and all(c in _PHASE_NAME_CHARS for c in value)
+    )
+
 
 def fmt_ms(s):
     if s >= 1.0:
@@ -554,20 +574,35 @@ def _train_phases_groups(rows):
     （出現順を保持）。fandhe-ai 単独タスクのためフレームワーク横断の集約は
     行わない（bench-candle/bench-burn は `--phases` を実装しない。README
     「train --phases」節参照）。
+
+    `device`/`mode` は外部 JSONL 由来のためグループ化キーへ使う前に型・
+    allowlist 検証する（security.md A03。codex-review 指摘・PR #1055）。
+    配列・オブジェクト等の unhashable な値がそのまま辞書キーになり
+    `TypeError` で集計全体が例外終了するのを防ぐほか、想定外の device/mode
+    文字列が (b'') 節に無検証で紛れ込むのも防ぐ。不正な行は集計対象から
+    除外し `skipped` として返す（呼び出し元が警告を出す）。
+
+    戻り値: (groups, skipped)
+    groups: {(device, mode): [row, ...]}
+    skipped: [row, ...]（device/mode が不正だった行）
     """
     groups = {}
+    skipped = []
     for r in rows:
         if r.get("task") != "train_phases":
             continue
-        key = (r.get("device"), r.get("mode"))
-        groups.setdefault(key, []).append(r)
-    return groups
+        device = r.get("device")
+        mode = r.get("mode")
+        if not (isinstance(device, str) and device in DEVICE_ORDER) or mode not in _TRAIN_PHASES_MODES:
+            skipped.append(r)
+            continue
+        groups.setdefault((device, mode), []).append(r)
+    return groups, skipped
 
 
-def _train_phases_devices(rows):
-    """`_train_phases_groups` のキー `(device, mode)` を DEVICE_ORDER →
-    mode（fresh → reuse）の順で返す。"""
-    groups = _train_phases_groups(rows)
+def _train_phases_devices(groups):
+    """`_train_phases_groups` が返した `groups` のキー `(device, mode)` を
+    DEVICE_ORDER → mode（fresh → reuse）の順で返す。"""
 
     def rank(key):
         device, mode = key
@@ -584,13 +619,20 @@ def _train_phases_validate(group_rows):
     外部 JSONL 由来の `phase`/`phase_index`/時間値は使用前に検証する
     （security.md A03。他節と同じ `_safe_time_s`/`_is_plain_number` 方針）。
 
-    - `phase` は非空 `str`、`phase_index` は非負整数でなければならない
-      （不正・重複はその行を無効として個別に報告する）。
+    - `phase` は producer 側（`bench_common::validate_phase_name`）と同じ
+      `[a-z0-9_]+`（非空）allowlist、`phase_index` は非負整数でなければ
+      ならない（不正・重複はその行を無効として個別に報告する）。非空文字列
+      チェックのみでは改行・`|` 等を含む値が通過し Markdown 表へ無加工出力
+      されうる（codex-review 指摘・PR #1055）。
+    - `phase_index` の重複に加え、`phase` 名自体の重複（異なる
+      `phase_index` に同じ `phase` 名を混入させる手組み JSON）も無効とする
+      （分母となる `step_total` が複数存在する場合に最初の行だけを分母に
+      使ってしまう不整合を防ぐ。同上指摘）。
     - `median_s`/`q1_s`/`q3_s`（reuse 行は `init_s` も）は `_safe_time_s`
       で検証する。
-    - `step_total` phase が存在しない、または `step_total` の
+    - `step_total` phase が存在しない・複数存在する・`step_total` の
       `median_s` が不正な場合、本グループ全体を無効とする（比の分母が
-      決まらないため）。
+      一意に決まらないため）。
     - 各 phase の中央値が `step_total` の中央値を上回る（計時区間の
       合計が全体を超過する不整合）場合もその行を無効とする。
 
@@ -599,7 +641,7 @@ def _train_phases_validate(group_rows):
                "q3": float|None, "reason": str|None}, ...]
              （有効な phase_index を持つ行は昇順、それ以外は末尾）
     invalid: bool（本グループに 1 件以上の無効行があるか）
-    step_total_median: float|None（比の分母。無効なら None）
+    step_total_median: float|None（比の分母。一意に決まらなければ None）
     """
     invalid = False
     keyed = {}
@@ -607,7 +649,7 @@ def _train_phases_validate(group_rows):
     for r in group_rows:
         phase = r.get("phase")
         phase_index = r.get("phase_index")
-        phase_ok = isinstance(phase, str) and len(phase) > 0
+        phase_ok = _valid_phase_name(phase)
         index_ok = (
             _is_plain_number(phase_index)
             and not _non_integral(phase_index)
@@ -624,12 +666,19 @@ def _train_phases_validate(group_rows):
             continue
         keyed[pi] = (phase, r)
 
-    step_total_row = next((r for phase, r in keyed.values() if phase == "step_total"), None)
-    if step_total_row is None:
+    name_to_pis = {}
+    for pi, (phase, _r) in keyed.items():
+        name_to_pis.setdefault(phase, []).append(pi)
+    duplicate_names = {name for name, pis in name_to_pis.items() if len(pis) > 1}
+    if duplicate_names:
+        invalid = True
+
+    step_total_pis = name_to_pis.get("step_total", [])
+    if len(step_total_pis) != 1:
         invalid = True
         step_total_median = None
     else:
-        step_total_median = _safe_time_s(step_total_row.get("median_s"))
+        step_total_median = _safe_time_s(keyed[step_total_pis[0]][1].get("median_s"))
         if step_total_median is None:
             invalid = True
 
@@ -644,6 +693,8 @@ def _train_phases_validate(group_rows):
             reason = "時間値が不正な値"
         if reason is None and r.get("mode") == "reuse" and _safe_time_s(r.get("init_s")) is None:
             reason = "init_s が不正な値"
+        if reason is None and phase in duplicate_names:
+            reason = f"phase 名 '{phase}' が重複"
         if (
             reason is None
             and step_total_median is not None
@@ -664,13 +715,20 @@ def _train_phases_section(rel, rows):
     """(b'') 節の Markdown 行を生成する。`train_phases` 行が無ければ
     `([], False)`（節自体を出力しない。既存 (a')/(b') と同じ方針）。
     """
-    groups = _train_phases_groups(rows)
-    if not groups:
+    groups, skipped = _train_phases_groups(rows)
+    if not groups and not skipped:
         return [], False
 
     lines = ["### (b'') MLP 学習 1 step のフェーズ分解（イシュー #1009）\n"]
     any_invalid = False
-    for device, mode in _train_phases_devices(rows):
+    for r in skipped:
+        any_invalid = True
+        print(
+            f"warning: {rel}: train_phases 行の device={r.get('device')!r}/"
+            f"mode={r.get('mode')!r} が不正な値 — 集計対象外",
+            file=sys.stderr,
+        )
+    for device, mode in _train_phases_devices(groups):
         group_rows = groups[(device, mode)]
         entries, invalid, step_total_median = _train_phases_validate(group_rows)
         any_invalid = any_invalid or invalid
@@ -712,7 +770,10 @@ def _train_phases_section(rel, rows):
                 ratio_col = "-"
             lines.append(f"| {phase_col} | {median_col} | {q1_col} | {q3_col} | {ratio_col} |")
             if e["phase"] != "step_total":
-                if e["median"] is None:
+                if e["median"] is None or e["reason"] is not None:
+                    # 無効行（重複 phase 名等）は合計に含めない。含めると
+                    # 例えば同名 phase の重複混入が「フェーズ合計」へ二重
+                    # 計上され、無効データの影響が集計値へ紛れ込む。
                     median_total_valid = False
                 else:
                     median_total += e["median"]

@@ -902,6 +902,63 @@ class TrainPhasesSectionTests(unittest.TestCase):
         *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
 
+    def test_phase_with_markdown_injection_chars_is_invalid(self):
+        # producer 契約は `[a-z0-9_]+`（`bench_common::validate_phase_name`）。
+        # 非空文字列チェックのみでは改行・`|` を含む値が検証を素通りし表へ
+        # 無加工出力される（codex-review 指摘・PR #1055）。
+        rows = _train_phases_group()
+        rows[0] = dict(rows[0])
+        rows[0]["phase"] = "tape_build|injected\n# hijacked heading"
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        text = "\n".join(lines)
+        self.assertNotIn("injected", text)
+        self.assertNotIn("hijacked", text)
+
+    def test_unhashable_device_does_not_raise(self):
+        # `device`/`mode` は外部 JSONL 由来のためグループ化キーへ使う前に
+        # 型検証する。配列等の unhashable な値をそのまま辞書キーにすると
+        # `TypeError` で集計全体が例外終了する（codex-review 指摘・PR #1055）。
+        rows = _train_phases_group()
+        rows[0] = dict(rows[0])
+        rows[0]["device"] = ["cpu"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("(b'')", "\n".join(lines))
+
+    def test_unallowlisted_mode_does_not_raise(self):
+        rows = _train_phases_group()
+        rows[0] = dict(rows[0])
+        rows[0]["mode"] = "evil"
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("(b'')", "\n".join(lines))
+
+    def test_duplicate_phase_name_with_distinct_index_is_invalid(self):
+        # phase_index が別々でも同じ phase 名（"step_total"）を混入させると、
+        # 修正前は最初の行だけが分母として無検証に採用されていた
+        # （codex-review 指摘・PR #1055）。
+        rows = _train_phases_group()
+        extra = dict(rows[-1])  # 2 つ目の "step_total"（phase_index だけ変える）
+        extra["phase_index"] = max(r["phase_index"] for r in rows) + 1
+        extra["median_s"] = 0.05
+        rows = rows + [extra]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        text = "\n".join(lines)
+        self.assertIn("重複", text)
+        # 分母が一意に決まらないため比の算出不能警告が出る（修正前は
+        # 最初の "step_total" 行が無検証に分母として使われていた）。
+        self.assertIn("step_total 行が欠落または不正", buf.getvalue())
+
     def test_negative_phase_index_is_invalid(self):
         rows = _train_phases_group()
         rows[0] = dict(rows[0])
