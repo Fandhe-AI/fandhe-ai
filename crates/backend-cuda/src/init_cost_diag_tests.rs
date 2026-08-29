@@ -172,9 +172,10 @@ fn measure_one_trial() -> TrialSample {
     // 内訳」参照）。
     let mut compile_secs = [0.0_f64; 8];
     let mut load_secs = [0.0_f64; 8];
-    for (i, (label, source, func_name)) in kernel_specs().iter().enumerate() {
+    for (i, spec) in kernel_specs().iter().enumerate() {
+        let label = spec.label;
         let t_compile = Instant::now();
-        let ptx = compile_ptx(source, device.arch()).unwrap_or_else(|e| {
+        let ptx = compile_ptx(spec.source, device.arch()).unwrap_or_else(|e| {
             panic!(
                 "NVRTC compile of production kernel source `{label}` must succeed \
                  on a compute-capability >= 8.0 real device (DGX Spark GB10 assumed): {e}"
@@ -186,7 +187,7 @@ fn measure_one_trial() -> TrialSample {
         let _func = device
             .context()
             .load_module(ptx)
-            .and_then(|module| module.load_function(func_name))
+            .and_then(|module| module.load_function(spec.func_name))
             .unwrap_or_else(|e| {
                 panic!("driver load_module/load_function for `{label}` must succeed: {e:?}")
             });
@@ -305,13 +306,13 @@ fn init_cost_diag_phase_breakdown() {
     println!("=== CUDA tape 初期化コスト フェーズ分解（イシュー #926） ===");
     print_quartiles_ms("(p1) CudaDevice::new", median_of(&device_new));
 
-    for (i, (label, _, _)) in kernel_specs().iter().enumerate() {
+    for (i, spec) in kernel_specs().iter().enumerate() {
         print_quartiles_ms(
-            &format!("(p2) compile_ptx[{label}]"),
+            &format!("(p2) compile_ptx[{}]", spec.label),
             median_of(&compile_by_kernel[i]),
         );
         print_quartiles_ms(
-            &format!("(p3) load_module+load_function[{label}]"),
+            &format!("(p3) load_module+load_function[{}]", spec.label),
             median_of(&load_by_kernel[i]),
         );
     }
@@ -422,5 +423,67 @@ fn init_cost_diag_reused_handle_steady_state_reference() {
     print_quartiles_ms(
         "reused-handle run_tiled_f32(N=1024) per-call",
         median_of(&samples),
+    );
+}
+
+/// イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線後、
+/// **同一 `context_cache::cached_device`** 上で `CudaGemm::new` を LRU
+/// cold（1 回目。全カーネル未コンパイル）→ LRU warm（2 回目。全カーネル
+/// module_cache ヒット）の順に計測し、結線の効果（`cuModuleGetFunction`
+/// のみで済む 2 回目の短縮）を実測する。
+///
+/// 受け入れ条件 2（初回 tape 構築時間 `init_s` の短縮値の記録）のうち、
+/// 「同一プロセス・同一 context 上での 2 個目以降の `CudaGemm` 構築」
+/// （本ファイル冒頭「効果の見積り」節参照。`CudaGemmAuto::new` の二重
+/// コンパイル・fresh モード計測・テスト群が該当）を直接計測する。
+///
+/// コールドプロセス初回 `CudaGemm::new`（`init_s` の主成分）自体は、
+/// ディスク PTX を実行入力にしない設計判断（`docs/cuda-jit-cache-design.md`
+/// 「ディスク PTX を実行入力にしない判断」）のもとでは本結線単独では
+/// 短縮されない（NVRTC 9 回のコンパイルは必ず走る）ため、本テストは
+/// 「cold（1 回目）」自体の絶対値ではなく cold→warm の差分を主眼とする。
+///
+/// `context_cache::cached_device(0)` を使う理由は
+/// `module_cache_wiring_tests.rs::cuda_gemm_new_second_construction_
+/// reuses_module_cache` と同じ（`Arc<CudaContext>` のポインタ同一性を
+/// 2 回の `CudaGemm::new` 呼び出し間で一致させ、`KernelModuleCache` の
+/// `ctx_id` キーを揃えるため）。
+#[test]
+#[ignore = "CUDA 実機（NVRTC 搭載・compute capability 8.0 以上。DGX Spark GB10 想定）必須。#1024"]
+fn init_cost_diag_gemm_new_lru_cold_vs_warm() {
+    let device = crate::context_cache::cached_device(0)
+        .expect("CUDA device must be available on the ignored diagnostic bench runner");
+
+    let t_cold = Instant::now();
+    let _gemm_cold = CudaGemm::new(&device)
+        .expect("1st (LRU cold) CudaGemm::new must succeed on the ignored diagnostic bench runner");
+    let cold_secs = t_cold.elapsed().as_secs_f64();
+
+    let t_warm = Instant::now();
+    let _gemm_warm = CudaGemm::new(&device)
+        .expect("2nd (LRU warm) CudaGemm::new must succeed on the ignored diagnostic bench runner");
+    let warm_secs = t_warm.elapsed().as_secs_f64();
+
+    println!("=== CudaGemm::new module_cache LRU cold/warm（イシュー #1024）===");
+    print_quartiles_ms(
+        "1st CudaGemm::new (LRU cold; 9 kernels NVRTC-compiled)",
+        Quartiles {
+            median: cold_secs,
+            q1: cold_secs,
+            q3: cold_secs,
+        },
+    );
+    print_quartiles_ms(
+        "2nd CudaGemm::new (LRU warm; module_cache hit for every kernel)",
+        Quartiles {
+            median: warm_secs,
+            q1: warm_secs,
+            q3: warm_secs,
+        },
+    );
+    assert!(
+        warm_secs <= cold_secs,
+        "2nd (LRU warm) CudaGemm::new must not be slower than the 1st (LRU cold) call: \
+         cold={cold_secs}s, warm={warm_secs}s"
     );
 }

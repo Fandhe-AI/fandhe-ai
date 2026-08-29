@@ -61,6 +61,7 @@ fandhe-ai/
 │   ├── workflows/           # implement-issue-tree.js（skills への相対 symlink）
 │   └── settings.json        # SessionStart / PostToolUse hooks
 └── docs/
+    ├── backend-cuda-ptx-embedding-decision.md # CUDA GEMM ビルド時 PTX 事前埋め込み（candle 方式）不採用判断・JIT キャッシュ結線範囲の更新（#1024）
     ├── backend-metal-aligned-load-decision.md # Metal GEMM アラインメント特化ロード分岐（align_M/N/K function constant 方式）不採用判断（#752 保留 → #808 格下げ）
     ├── backend-metal-async-copy-decision.md # Metal 非公式 simdgroup_async_copy 系 AIR intrinsic 不採用の決定記録（#546）
     ├── backend-metal-command-batching-design.md # コマンドバッファ・エンコーダ共有と同期境界（waitUntilCompleted）の設計・CUDA 側契約との対応（#1015 ツリー・#1016。§7 に #1017 実装記録追記）

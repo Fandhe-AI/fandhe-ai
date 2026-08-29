@@ -67,6 +67,17 @@ mma_f16 経路（`kernels_mma.rs::RenderedMmaKernel::compile`。#511・`lib.rs:2
 キャッシュを経由する構成へ変わったとしても、現行の「呼び出しごとに context を作り直す」
 構造ではキーが毎回変わり原理的にヒットし得ない。
 
+**追記（イシュー #1024）**: 上記の前提（a）は #929/#946（`context_cache.rs`）で解消済み。
+`ops.rs::CudaBackendOps::gemm` は `context_cache::cached_gemm(ordinal, &device)` 経由で
+`CudaGemm` を `ordinal` キーで常駐させるため、`Arc<CudaContext>` のポインタは同一プロセス内で
+安定する。この前提のもと、#1024 で `CudaGemm::new`（f32 GEMM 本番経路の 9 カーネル）を
+`module_cache`／NVRTC ディスクキャッシュへ結線した（`crates/backend-cuda/src/module_cache.rs::
+load_function_cached`。§8(b) 追記参照）。ただしディスクキャッシュはプロセス再起動をまたいだ
+NVRTC コンパイル時間短縮には寄与しない設計判断（`docs/cuda-jit-cache-design.md`「ディスク
+PTX を実行入力にしない判断」）が既に確定しているため、コールドプロセス初回 `CudaGemm::new`
+自体は本結線単独では短縮されない。短縮されるのは同一プロセス・同一 context 上での 2 個目
+以降の `CudaGemm` 構築（`CudaGemmAuto::new` の二重コンパイル・fresh モード計測・テスト群）。
+
 ### 3.2 内訳候補（本ドキュメントの作業仮説）
 
 | 候補 | 該当コード | 想定寄与 |
@@ -230,6 +241,18 @@ DGX Spark GB10 へ到達不能）。実機セッションへ引き継ぐ。
 |------|-----------|
 | reused-handle `run_tiled_f32`(N=1024) per-call | — |
 
+### 6.5 #1024 結線後の LRU cold/warm `CudaGemm::new` 計測（未実測）
+
+`init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm`（`#[ignore]`。
+`context_cache::cached_device(0)` 上で `CudaGemm::new` を LRU cold（1 回目）→ warm（2 回目）
+の順に計測）の実機実測値。DGX Spark GB10 セッションでの実行後にここへ転記する。
+
+| 指標 | 所要時間, ms |
+|------|-------------|
+| 1st `CudaGemm::new`（LRU cold。9 カーネル NVRTC コンパイル） | — |
+| 2nd `CudaGemm::new`（LRU warm。全カーネル module_cache ヒット） | — |
+| 短縮率（1st に対する 2nd の割合） | — |
+
 ## 7. 支配的要因の判定
 
 **未確定**（§6 の実測記入後に確定する）。§3.2 の作業仮説（NVRTC 8 本の毎回コンパイルが
@@ -250,6 +273,14 @@ DGX Spark GB10 へ到達不能）。実機セッションへ引き継ぐ。
    context 常駐化を伴わない限り `module_cache` のキー（`Arc<CudaContext>` ポインタ識別）は
    毎回変わりヒットしないため、**(a) と (b) は独立ではなく (a) が (b) の前提**である
    点に注意する。
+
+   **追記（イシュー #1024）**: (a) は #929/#946 で解消済みのため、#1024 で (b) を実装した。
+   `crates/backend-cuda/src/module_cache.rs::load_function_cached`（`kernels_mma.rs::
+   RenderedMmaKernel::compile` と共通化した 3 段フォールバック）を `CudaGemm::new` の 9
+   カーネル（naive f32/f16・tiled f32/f16・tiled_bias_act_f32・wmma_tf32・wmma_tf32_opt・
+   wmma_tf32_staged・サイズ条件付き swizzle 変種）へ結線した。実機での LRU cold/warm 計測
+   （`init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm`）は本ドキュメント
+   §6.5（未実測プレースホルダ）へ転記する。
 3. **(c) context をプロセス内で共有しキャッシュキーのポインタ識別を実効化する設計**:
    (a)(b) を実現する具体的な機構（`ordinal` ごとの `CudaDevice`／`CudaGemm` シングルトン
    キャッシュ等）の設計自体。並行性（複数スレッドからの共有）・エラー時の再構築方針を

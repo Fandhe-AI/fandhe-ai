@@ -236,10 +236,21 @@
 //! 解決不能・fs I/O 失敗）はコンパイル失敗にせず「ディスクキャッシュ
 //! なしの縮退運転」へフォールバックする fail-safe 方針を採る
 //! （`kernels_mma.rs::RenderedMmaKernel::compile` ドキュメンテーション
-//! コメント参照）。固定ソースの一回コンパイル経路（`CudaGemm::new`・
-//! `CudaWmmaGemm::new`・`CudaMmaGemm::new`・elementwise/transpose 群）は
-//! インスタンス構築時 1 回のみのコンパイルであり本タスクでは結線しない
-//! （拡大は効果に対しリスク過大と判断。実装計画 §3.4 スコープ境界）。
+//! コメント参照）。
+//!
+//! イシュー #1024 で結線範囲を `CudaGemm::new`（f32 GEMM 本番経路。naive
+//! f32/f16・tiled f32/f16・tiled_bias_act_f32・wmma_tf32・wmma_tf32_opt・
+//! wmma_tf32_staged の 8 カーネル＋サイズ条件付き swizzle 変種）へ拡張
+//! した。共通の 3 段フォールバック実装は
+//! `module_cache::load_function_cached` へ抽出し、
+//! `kernels_mma.rs::RenderedMmaKernel::compile` と `gemm.rs::CudaGemm::new`
+//! の双方がこれを呼ぶ（`gemm.rs::GemmKernelSpec::descriptor` 参照）。
+//! `CudaWmmaGemm::new`・`CudaMmaGemm::new`・elementwise/transpose 群は
+//! 未結線のまま残す（本イシューのスコープ外。将来の横展開は別イシューで
+//! 判断する）。ビルド時 PTX 事前埋め込み（candle の `build.rs` 事前生成
+//! 方式）は CUDA toolkit 非搭載環境でのビルド成立契約（REQ-2・PoC-v2-5）
+//! と衝突するため不採用と判断した（`docs/backend-cuda-ptx-embedding-
+//! decision.md` 参照）。
 
 //! イシュー #801（refactor）で TF32 `mma.sync`(m16n8k8)/`ldmatrix`/`cp.async`
 //! 経路（[`CudaMmaTf32Gemm`]。`kernels_mma_tf32.rs`／`gemm_mma_tf32.rs`）を
@@ -306,6 +317,13 @@ mod kernels_wmma;
 mod kernels_wmma_opt;
 pub mod memory;
 mod module_cache;
+// イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
+// （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
+// `context_cache`（非公開 `mod`）へ到達する必要があるため
+// `init_cost_diag_tests` と同じ理由でクレートルートの兄弟モジュールとして
+// 配置する。
+#[cfg(test)]
+mod module_cache_wiring_tests;
 mod nvrtc;
 mod ops;
 mod rmsnorm;
