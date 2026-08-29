@@ -22,11 +22,19 @@
 #                独自の [workspace] を宣言していること（本体 workspace への構造的
 #                非混入）、(3) 承認済み比較対象のピン（burn 0.21.0・candle-core 0.11.0・
 #                fandhe-ai 0.4.0。deps-policy.md 第 9 区分の承認バージョン）が
-#                Cargo.lock に存在すること（承認外バージョンへのドリフトを検出）、
-#                (4) 各メンバー crate の [dependencies] が承認済み allowlist
-#                （比較対象の =x.y.z 完全固定 + bench-common の path 依存）の範囲内で
-#                あること（`tch` 等 allowlist 外の直接依存追加・ドット付きキー宣言・
-#                完全固定でないバージョン指定を検出）、(5) 各 Cargo.toml のセクション
+#                Cargo.lock に存在すること（承認外バージョンへのドリフトを検出。
+#                加えて各エントリが `source = "registry+https://github.com/rust-lang/
+#                crates.io-index"` を伴うこと＝path/git 依存への差し替えで source/
+#                checksum 行が消える・書き換わるケースを fail-closed に検出する。
+#                イシュー #982）、(4) 各メンバー crate の [dependencies] が承認済み
+#                allowlist（比較対象の =x.y.z 完全固定 + bench-common の path 依存）の
+#                範囲内であること（`tch` 等 allowlist 外の直接依存追加・ドット付きキー
+#                宣言・完全固定でないバージョン指定に加え、`@=` 付き承認済みエントリが
+#                `path`/`git`/`registry`/`rev`/`branch`/`tag`/`package` キーで非
+#                registry 取得元へ差し替えられていることを検出。`deny.toml` の
+#                `allow-wildcard-paths = true`（bench-common 用）は path 依存自体を
+#                止めないため、この manifest 層検査が承認済み比較対象の取得元を守る
+#                唯一の防御となる。イシュー #982）、(5) 各 Cargo.toml のセクション
 #                ヘッダが allowlist の範囲内であること（[dev-dependencies]・
 #                [build-dependencies]・[target.'cfg'.dependencies]・
 #                [dependencies.<crate>] 等の代替依存宣言経路を遮断）、
@@ -60,6 +68,15 @@
 set -euo pipefail
 
 FORBIDDEN_CRATES_ALT='burn|burn-[a-z0-9-]+|cubecl|cubecl-[a-z0-9-]+|candle|candle-[a-z0-9-]+|tch|ndarray'
+
+# framework-compare の承認済み比較対象（`@=` 付き allowlist エントリ）が
+# crates.io registry 以外から取得されていることを示す TOML キーの候補
+# （check_manifest_deps_text が使う。イシュー #982）。`path`/`git` は取得元の
+# 直接指定、`registry` は代替レジストリ指定、`rev`/`branch`/`tag` は git 依存の
+# 付随キー（`git` を伴わず単独で現れても取得元差し替えの兆候として扱う）、
+# `package` は rename（`fandhe-ai = { package = "...", path = "..." }` 等）による
+# allowlist 名の偽装を防ぐため対象に含める。
+ORIGIN_KEY_ALT='path|git|registry|rev|branch|tag|package'
 
 # フレームワーク横並びベンチ（許容依存第 9 区分の適用範囲拡張。
 # .claude/rules/deps-policy.md「ベンチ比較対象（フレームワーク横並び）」）の
@@ -154,21 +171,32 @@ check_lock_all() {
   fi
 }
 
-# Cargo.lock 形式テキストに `name = "<crate>"` + `version = "<version>"` の
+# Cargo.lock 形式テキストに `name = "<crate>"` + `version = "<version>"` +
+# `source = "registry+https://github.com/rust-lang/crates.io-index"` の
 # パッケージエントリが存在することを検査する（テキスト入力版。self-test から
 # 固定文字列で直接検証できるよう、ファイル I/O と分離する）。
+# source 行の必須化はイシュー #982: path 依存は [[package]] エントリから
+# source/checksum 行そのものが消え、git 依存は `source = "git+…"` になるため、
+# version 一致だけでは非 registry 取得元への差し替えを検出できない
+# （check_manifest_deps_text の非 registry 取得元検出と対をなす Cargo.lock 層の防御）。
 check_lock_pin_text() {
   local label="$1"
   local text="$2"
   local crate="$3"
   local version="$4"
-  # Cargo.lock の [[package]] エントリは `name = "..."` の直後の行が `version = "..."`。
-  if echo "${text}" | grep -A1 "^name = \"${crate}\"\$" | grep -qF "version = \"${version}\""; then
-    echo "OK: ${label} に承認済みピン ${crate} ${version} が存在"
-    return 0
+  local block
+  # Cargo.lock の [[package]] エントリは `name = "..."` の直後に version・source・
+  # checksum が続く（-A3 で version 行 + source 候補行 + checksum 候補行まで拾う）。
+  block=$(echo "${text}" | grep -A3 "^name = \"${crate}\"\$" || true)
+  if ! echo "${block}" | grep -qF "version = \"${version}\""; then
+    echo "::error::${label} に承認済みピン ${crate} ${version} が見つかりません（承認外バージョンへのドリフト、または比較対象の削除。.claude/rules/deps-policy.md 第 9 区分）" >&2
+    return 1
   fi
-  echo "::error::${label} に承認済みピン ${crate} ${version} が見つかりません（承認外バージョンへのドリフト、または比較対象の削除。.claude/rules/deps-policy.md 第 9 区分）" >&2
-  return 1
+  if ! echo "${block}" | grep -qF 'source = "registry+https://github.com/rust-lang/crates.io-index"'; then
+    echo "::error::${label} の承認済みピン ${crate} ${version} が crates.io registry 取得元ではありません（path/git 依存等への差し替えの可能性。.claude/rules/deps-policy.md 第 9 区分）" >&2
+    return 1
+  fi
+  echo "OK: ${label} に承認済みピン ${crate} ${version}（registry 取得元）が存在"
 }
 
 # Cargo.toml 形式テキストの [dependencies] セクションを、許容された直接依存の
@@ -176,7 +204,10 @@ check_lock_pin_text() {
 # `"=<version>"` の完全固定宣言を要求する）と突合する（テキスト入力版。self-test
 # から固定文字列で直接検証できるよう、ファイル I/O と分離する）。allowlist 外の
 # 直接依存（禁止リストの `tch` を含む任意のクレート）・完全固定でないバージョン
-# 指定を fail-closed に検出する。
+# 指定を fail-closed に検出する。`@=` 付きエントリ（＝承認済み比較対象。registry
+# 取得・完全固定必須の意味）は、`fandhe-ai = { version = "=0.4.0", path = "…" }` の
+# ように完全固定文字列を保ったまま取得元だけを path/git 等へ差し替える迂回も
+# 検出する（イシュー #982。ORIGIN_KEY_ALT 参照）。
 check_manifest_deps_text() {
   local label="$1"
   local text="$2"
@@ -199,13 +230,14 @@ check_manifest_deps_text() {
     in_deps && /^[[:space:]]*[a-zA-Z0-9_.-]+[[:space:]]*=/ { print }
   ')
 
-  local line name entry entry_name entry_version found
+  local line raw_key name entry entry_name entry_version found
   while IFS= read -r line; do
     [ -n "${line}" ] || continue
-    name="${line%%=*}"
-    # 依存名の前後空白を除去し、ドット付きキーは最初の `.` までを依存名とする
-    name="$(echo "${name}" | tr -d '[:space:]')"
-    name="${name%%.*}"
+    raw_key="${line%%=*}"
+    # 依存名の前後空白を除去する（ドット付きキーはこの時点ではまだ切り出さない。
+    # 取得元キー検出でドット以降のサフィックスも使うため raw_key に残しておく）。
+    raw_key="$(echo "${raw_key}" | tr -d '[:space:]')"
+    name="${raw_key%%.*}"
     found=0
     local IFS_SAVE="${IFS}"
     IFS=','
@@ -219,6 +251,20 @@ check_manifest_deps_text() {
           entry_version="${entry#*@}"
           if ! echo "${line}" | grep -qF "\"${entry_version}\""; then
             echo "::error::${label} の直接依存 ${name} が承認済みの完全固定 ${entry_version} で宣言されていません（.claude/rules/deps-policy.md 第 9 区分）: ${line}" >&2
+            failed=1
+          fi
+          # 非 registry 取得元の検出（イシュー #982）: (a) ドット付きキー
+          # （`fandhe-ai.path = "…"` 形式）は raw_key のサフィックスが取得元キー
+          # 集合に含まれるかで判定する。(b) インライン table
+          # （`fandhe-ai = { version = "=…", path = "…" }` 形式）は行内の
+          # キー境界（`{`・`,`・空白の直後）で取得元キーが出現するかを判定する
+          # （`default-features`・`features` 等の無関係キーを誤検出しないための
+          # 境界指定）。
+          if [ "${raw_key}" != "${name}" ] && echo "${raw_key#*.}" | grep -qE "^(${ORIGIN_KEY_ALT})\$"; then
+            echo "::error::${label} の直接依存 ${name} が非 registry 取得元キー（${raw_key#*.}）で宣言されています（承認済み比較対象は crates.io registry からの取得が必須。.claude/rules/deps-policy.md 第 9 区分）: ${line}" >&2
+            failed=1
+          elif echo "${line}" | grep -qE "(^|[{,[:space:]])(${ORIGIN_KEY_ALT})[[:space:]]*="; then
+            echo "::error::${label} の直接依存 ${name} が非 registry 取得元キーを伴って宣言されています（承認済み比較対象は crates.io registry からの取得が必須。.claude/rules/deps-policy.md 第 9 区分）: ${line}" >&2
             failed=1
           fi
         fi
@@ -467,13 +513,19 @@ self_test() {
 
   # check_lock_pin_text（framework-compare の承認済みピン検査）も同じ固定入力方式で
   # 直接検証する（新設の検査経路の退行取りこぼし防止。ファイル fixture は増やさず
-  # インライン文字列で足りる）。
+  # インライン文字列で足りる）。source 行は crates.io registry 形式を含める
+  # （イシュー #982 で source 必須化したため、承認済みバージョン fixture が
+  # source 不在で誤って fail しないようにする）。
   local pin_ok_text='[[package]]
 name = "burn"
-version = "0.21.0"'
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "deadbeef"'
   local pin_drift_text='[[package]]
 name = "burn"
-version = "0.22.0"'
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "deadbeef"'
   if check_lock_pin_text "self-test pin fixture" "${pin_ok_text}" "burn" "0.21.0" >/dev/null; then
     echo "self-test OK: pin fixture（承認済みバージョン）は pass する"
   else
@@ -485,6 +537,32 @@ version = "0.22.0"'
     failed=1
   else
     echo "self-test OK: pin drift fixture は fail する"
+  fi
+
+  # check_lock_pin_text の非 registry 取得元検出（イシュー #982）: path 依存化で
+  # source/checksum 行そのものが消えるケースと、git 依存で source = "git+…" に
+  # 書き換わるケースの双方を fail-closed に検出すること。
+  local pin_path_dep_text='[[package]]
+name = "burn"
+version = "0.21.0"
+dependencies = [
+ "burn-core",
+]'
+  local pin_git_dep_text='[[package]]
+name = "burn"
+version = "0.21.0"
+source = "git+https://github.com/tracel-ai/burn?rev=deadbeef#deadbeef"'
+  if check_lock_pin_text "self-test pin path-dep fixture" "${pin_path_dep_text}" "burn" "0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: pin path-dep fixture が誤って pass した（source 行不在＝path 依存の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: pin path-dep fixture は fail する"
+  fi
+  if check_lock_pin_text "self-test pin git-dep fixture" "${pin_git_dep_text}" "burn" "0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: pin git-dep fixture が誤って pass した（git source の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: pin git-dep fixture は fail する"
   fi
 
   # check_manifest_deps_text（framework-compare の直接依存 allowlist 検査）も同方式で
@@ -600,6 +678,37 @@ tch = { version = "=0.22.0" }'
     failed=1
   else
     echo "self-test OK: manifest indented-dep fixture は fail する"
+  fi
+
+  # check_manifest_deps_text の非 registry 取得元検出（イシュー #982）: `@=` 付き
+  # 承認済みエントリが完全固定バージョン文字列を保ったまま path/git 依存へ差し替え
+  # られる、現行検査（バージョン文字列一致のみ）がすり抜けていた形そのもの。
+  local manifest_inline_path_dep_text='[dependencies]
+bench-common = { path = "../bench-common" }
+fandhe-ai = { version = "=0.4.0", path = "../../../crates/facade" }'
+  local manifest_inline_git_dep_text='[dependencies]
+bench-common = { path = "../bench-common" }
+fandhe-ai = { version = "=0.4.0", git = "https://github.com/Fandhe-AI/fandhe-ai", rev = "deadbeef" }'
+  local manifest_dotted_origin_text='[dependencies]
+bench-common = { path = "../bench-common" }
+fandhe-ai.path = "../../../crates/facade"'
+  if check_manifest_deps_text "self-test manifest inline path-dep fixture" "${manifest_inline_path_dep_text}" "bench-common,fandhe-ai@=0.4.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest inline path-dep fixture が誤って pass した（非 registry 取得元〈インライン table〉の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest inline path-dep fixture は fail する"
+  fi
+  if check_manifest_deps_text "self-test manifest inline git-dep fixture" "${manifest_inline_git_dep_text}" "bench-common,fandhe-ai@=0.4.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest inline git-dep fixture が誤って pass した（非 registry 取得元〈インライン table・git〉の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest inline git-dep fixture は fail する"
+  fi
+  if check_manifest_deps_text "self-test manifest dotted origin-key fixture" "${manifest_dotted_origin_text}" "bench-common,fandhe-ai@=0.4.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest dotted origin-key fixture が誤って pass した（非 registry 取得元〈ドット付きキー〉の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest dotted origin-key fixture は fail する"
   fi
 
   if [ "${failed}" -ne 0 ]; then
