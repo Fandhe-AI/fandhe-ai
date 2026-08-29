@@ -102,20 +102,22 @@ where
 
     /// `MetalContext::synchronize()` の `waitUntilCompleted()` 完了後、
     /// `BatchSlots` の同一ロック区間内で呼ぶ（設計文書 §3.3「Metal」・
-    /// §3.5）。保留列を `mem::take` で空にし、取り出した各エントリに
-    /// ついて `record_pending_merge` を呼んでから返す。呼び出し元は
-    /// 返された `Vec` を**ロック解放後**に `put_all` へ渡す（`put` が
-    /// `Mutex<PoolCore<H>>` を要するため。§3.5「ロック順序規則」）。
+    /// §3.5）。保留列を `mem::take` で空にして返す。呼び出し元は
+    /// 返された `Vec` を**ロック解放後**に `put_all` へ渡し、`put_all` が
+    /// フリーリスト挿入直後に 1 件ずつ `record_pending_merge` を呼ぶ
+    /// （`put` が `Mutex<PoolCore<H>>` を要するため。§3.5「ロック順序規則」）。
     ///
     /// `synchronize()` が `Ok`／`Err` いずれで復帰する場合も呼ぶ契約
     /// （合流はフェーズ (i) 自体が担う入出金であり「解放処理」ではない。
     /// 設計文書 §3.3「Metal」・§3.6 (2)「`Err` の種別」）。
     pub(crate) fn drain_for_merge(&mut self) -> Vec<PendingReturn<H>> {
-        let drained = std::mem::take(&mut self.entries);
-        for entry in &drained {
-            entry.pool.record_pending_merge(entry.class_bytes);
-        }
-        drained
+        // `record_pending_merge`（`pending_return_bytes` の減算）はここでは
+        // 呼ばず、ロック解放後の `put_all` がフリーリスト挿入直後に 1 件ずつ
+        // 呼ぶ（codex P2 指摘対応: 先に全件を減算すると、`put` までの窓で
+        // 対象バッファが `pending_return_bytes` にも `cached_bytes` にも
+        // 計上されず、`max_pool_bytes` の資源上限を一時的に過小評価する。
+        // 挿入後減算なら窓の間は両方に計上される過大評価＝保守側に振れる）。
+        std::mem::take(&mut self.entries)
     }
 }
 
@@ -134,6 +136,10 @@ pub(crate) fn put_all<H: Send>(entries: Vec<PendingReturn<H>>) {
         // （`SizeClassPool::put` の doc comment「Mutex 解放後に drop」
         // 契約を満たす）。
         let evicted = entry.pool.put(entry.class_bytes, entry.handle);
+        // フリーリスト挿入（`cached_bytes` 加算）後に `pending_return_bytes`
+        // を減算する（挿入前に減算すると、どちらにも計上されない窓が生じ
+        // 上限判定を一時的に過小評価する。`drain_for_merge` のコメント参照）。
+        entry.pool.record_pending_merge(entry.class_bytes);
         drop(evicted);
     }
 }
@@ -199,13 +205,19 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert_eq!(
             pool.stats().pending_return_bytes,
-            0,
-            "drain と同時に record_pending_merge が対で呼ばれる"
+            768,
+            "drain 時点では減算せず put_all の挿入直後に減算する（挿入前減算は \
+             どちらにも計上されない窓を生み上限判定を過小評価する。codex P2）"
         );
         assert_eq!(pool.stats().cached_bytes, 0, "put はまだ呼ばれていない");
 
         put_all(drained);
         assert_eq!(pool.stats().cached_bytes, 768);
+        assert_eq!(
+            pool.stats().pending_return_bytes,
+            0,
+            "put_all がフリーリスト挿入直後に record_pending_merge を対で呼ぶ"
+        );
     }
 
     #[test]
@@ -233,6 +245,12 @@ mod tests {
         // 同じ呼び出しで合流できることを確認する。
         let drained = pending.drain_for_merge();
         assert_eq!(drained.len(), 1);
+        assert_eq!(
+            pool.stats().pending_return_bytes,
+            1024,
+            "減算は put_all 側の責務（挿入直後）"
+        );
+        put_all(drained);
         assert_eq!(pool.stats().pending_return_bytes, 0);
     }
 

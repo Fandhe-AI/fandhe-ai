@@ -329,8 +329,16 @@ impl CudaAllocator {
 
         if let Some(mut handle) = self.pool.take(class_bytes) {
             self.pool.record_reuse(requested_bytes, class_bytes);
-            self.stream
-                .memset_zeros(&mut handle.0.slice_mut(0..numel))?;
+            // `record_reuse` 済みの貸出は、この `memset_zeros` が失敗すると
+            // `PooledCudaHandle` が構築されず `Drop` 経由の `record_loan_end`
+            // も走らないため、統計を明示的に巻き戻してからエラーを返す
+            // （Cursor Bugbot Low 指摘。Metal 再利用経路の synchronize 失敗
+            // 時の巻き戻し〈`backend-metal::pool`〉と同一契約。ハンドルは
+            // drop してデバイスメモリを解放する）。
+            if let Err(e) = self.stream.memset_zeros(&mut handle.0.slice_mut(0..numel)) {
+                self.pool.record_loan_end(requested_bytes, class_bytes);
+                return Err(e.into());
+            }
             return Ok(self.wrap_handle_from(handle, class_bytes, requested_bytes, numel));
         }
 
