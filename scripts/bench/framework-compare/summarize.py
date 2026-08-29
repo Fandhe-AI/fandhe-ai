@@ -56,6 +56,14 @@
   results/raw/ 配下が対象。articles#68 Bugbot 指摘・イシュー #971）。
 - (c) のバッチ/秒は 10 未満を小数 1 桁で表示する（`:.0f` だと 1 未満の値が
   1 に丸まり実際の約 2 倍に見えるため。articles#68 Bugbot 指摘・イシュー #971）。
+- (b') train reuse（イシュー #957/#958/#959）: reuse 行の checksum（最終
+  loss）を同一フレームワークの fresh 行と突合し、不一致・突合不能（無効
+  値）・時間値（median_s/q1_s/q3_s）の不正を表で「無効」表示するだけでなく
+  `--strict` の失敗条件（終了コード 2）にも含める。fresh 行が存在しない
+  （比較対象なしで突合不能）のみは値そのものの正当性を否定しないため
+  「無効」扱いにせず `--strict` の対象にしない（イシュー #959 codex-review
+  P1 指摘: 旧実装は表示のみで `section()` の戻り値に反映されず
+  `--strict` でも終了コード 0 のままだった）。
 """
 
 import argparse
@@ -636,6 +644,15 @@ def section(path, rows):
     # の JSONL では常にスキップ）。gemm と異なり fandhe-ai/candle/Burn 間の
     # checksum（最終 loss）は重み初期化の違いにより一致しないため、フレーム
     # ワーク横断の参照値は選ばず、同一フレームワーク内の fresh 行とのみ突合する。
+    # イシュー #959 codex-review P1 指摘: 上記 fw_col/match_col が「無効」
+    # 判定する状態（checksum 不一致・checksum 突合不能・時間値の無効値）を
+    # `section()` の戻り値へ反映していなかったため `--strict` が fail-open
+    # のままだった（`summarize_test.py` の
+    # `test_main_strict_exit_code_unaffected_by_train_reuse_rows` が固定して
+    # いた挙動）。fresh 欠落のみ（`match_col == "突合不能"`、比較対象なし）
+    # は gemm 側の「突合不能（検証対象外）」と同様に値そのものの正当性を
+    # 否定しないため無効扱いにしない。
+    has_train_reuse_invalid = False
     if any(r["task"] == "train" and r["mode"] == "reuse" for r in rows):
         lines.append(
             "### (b') MLP 学習（デバイス常駐パラメータ更新モード。ホスト経由 SGD との分離。イシュー #957/#958/#959）\n"
@@ -677,20 +694,31 @@ def section(path, rows):
                 fresh_median = _safe_time_s(fresh.get("median_s")) if fresh else None
                 fresh_checksum = _safe_finite_number(fresh.get("checksum")) if fresh else None
 
-                if fresh and fresh_median is not None and r_median is not None:
-                    fresh_col = fmt_ms(fresh_median)
-                    ratio_col = f"{fresh_median / r_median:.2f} 倍"
-                elif fresh:
-                    fresh_col = "計測不正"
-                    ratio_col = "-"
+                # fresh_col は fresh 自身の有効性のみで決める（reuse 側の
+                # median が無効でも fresh の計測値自体は隠さない。Bugbot
+                # 指摘: reuse median_s 無効・fresh 有効時に「計測不正」で
+                # 上書きされ有効な fresh 計測値が見えなくなっていた）。
+                # ratio_col（fresh/reuse 比）は両者が揃って初めて計算できる
+                # ため別条件で判定する。
+                if fresh:
+                    fresh_col = fmt_ms(fresh_median) if fresh_median is not None else "計測不正"
+                    if fresh_median is not None and r_median is not None:
+                        ratio_col = f"{fresh_median / r_median:.2f} 倍"
+                    else:
+                        ratio_col = "-"
                 else:
                     fresh_col = "未計測"
                     ratio_col = "-"
+
+                # 時間値（median_s/q1_s/q3_s）の無効値も「無効」判定の一部
+                # として扱う（イシュー #959 codex-review P1 指摘）。
+                row_invalid = r_median is None or r_q1 is None or r_q3 is None
 
                 if fresh:
                     if r_checksum is None or fresh_checksum is None:
                         match_col = "突合不能（無効値）"
                         fw_col = f"{fw}（無効: checksum が不正な値）"
+                        row_invalid = True
                         print(
                             f"warning: {rel}: {fw}/{device}/train/reuse の最終 loss "
                             "checksum が不正な値（非数値・NaN・Infinity 等）のため突合不能 "
@@ -703,6 +731,7 @@ def section(path, rows):
                     else:
                         match_col = "不一致"
                         fw_col = f"{fw}（無効: fresh と最終 loss 不一致）"
+                        row_invalid = True
                         print(
                             f"warning: {rel}: {fw}/{device}/train/reuse の最終 loss "
                             f"{r_checksum:.6f} が fresh {fresh_checksum:.6f} と不一致 "
@@ -712,6 +741,12 @@ def section(path, rows):
                 else:
                     match_col = "突合不能"
                     fw_col = fw
+
+                if row_invalid:
+                    has_train_reuse_invalid = True
+                    if "（無効" not in fw_col:
+                        fw_col = f"{fw}（無効: 時間値が不正な値）"
+
                 lines.append(
                     f"| {device} | {fw_col} | {init_col} | {median_col} | "
                     f"{q1_col} | {q3_col} | {fresh_col} | {ratio_col} | {match_col} |"
@@ -802,7 +837,7 @@ def section(path, rows):
             "コミットされた JSONL のため要素単位検証未実施。値の正当性を否定するものではない）"
         )
     lines.append("")
-    return lines, bool(mismatches), bool(parity_failures), bool(unverified_rows)
+    return lines, bool(mismatches), bool(parity_failures), bool(unverified_rows), has_train_reuse_invalid
 
 
 def main():
@@ -823,8 +858,10 @@ def main():
         action="store_true",
         help=(
             "GEMM checksum の不一致（イシュー #965）・要素単位検証の閾値超過・"
-            "要素単位検証を受けていない旧形式行（いずれもイシュー #970）が"
-            "1 件以上あれば終了コード 2 を返す（既定は 0 のまま警告のみ）"
+            "要素単位検証を受けていない旧形式行（いずれもイシュー #970）・"
+            "train reuse (b') の checksum 不一致／突合不能／時間値不正"
+            "（イシュー #959）が1 件以上あれば終了コード 2 を返す"
+            "（既定は 0 のまま警告のみ）"
         ),
     )
     args = parser.parse_args()
@@ -838,17 +875,25 @@ def main():
     any_checksum_mismatch = False
     any_parity_failure = False
     any_parity_unverified = False
+    any_train_reuse_invalid = False
     for path in inputs:
         rows = load_rows(path)
         if not rows:
             lines.append(f"## 集計対象: {os.path.relpath(path, HERE)}\n")
             lines.append("（有効な行なし）\n")
             continue
-        section_lines, has_mismatch, has_parity_failure, has_unverified = section(path, rows)
+        (
+            section_lines,
+            has_mismatch,
+            has_parity_failure,
+            has_unverified,
+            has_train_reuse_invalid,
+        ) = section(path, rows)
         lines.extend(section_lines)
         any_checksum_mismatch = any_checksum_mismatch or has_mismatch
         any_parity_failure = any_parity_failure or has_parity_failure
         any_parity_unverified = any_parity_unverified or has_unverified
+        any_train_reuse_invalid = any_train_reuse_invalid or has_train_reuse_invalid
 
     # 入力 JSONL と同一ディレクトリからのみ skipped*.log を収集する。HERE
     # 固定 glob だと、別ディレクトリの JSONL を明示指定して集計した際に
@@ -883,7 +928,10 @@ def main():
         sys.stdout.write(text)
 
     if (
-        any_checksum_mismatch or any_parity_failure or any_parity_unverified
+        any_checksum_mismatch
+        or any_parity_failure
+        or any_parity_unverified
+        or any_train_reuse_invalid
     ) and args.strict:
         if any_checksum_mismatch:
             print(
@@ -899,6 +947,16 @@ def main():
             print(
                 "error: --strict: 1 件以上の gemm 行が要素単位検証を受けていない"
                 "旧形式（イシュー #970）",
+                file=sys.stderr,
+            )
+        if any_train_reuse_invalid:
+            # イシュー #959 codex-review P1 指摘: train reuse (b') の
+            # checksum 不一致・checksum 突合不能（無効値）・時間値の無効値
+            # を fail-closed に --strict の失敗条件へ含める（旧実装は
+            # 表示のみで section() の戻り値に反映されず fail-open だった）。
+            print(
+                "error: --strict: 1 件以上の train reuse 行が無効"
+                "（checksum 不一致・突合不能・時間値の不正。イシュー #959）",
                 file=sys.stderr,
             )
         return 2

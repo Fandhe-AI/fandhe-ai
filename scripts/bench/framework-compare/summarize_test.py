@@ -300,7 +300,7 @@ class SectionRenderingTests(unittest.TestCase):
         rows = [_with_parity(_base_row(), fail_count=5, max_abs_err=1.2e-3, max_rel_err=4.5e-2)]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, has_checksum_mismatch, has_parity_failure, _ = summarize.section(
+            lines, has_checksum_mismatch, has_parity_failure, _, _ = summarize.section(
                 "dummy.jsonl", rows
             )
         text = "\n".join(lines)
@@ -313,7 +313,7 @@ class SectionRenderingTests(unittest.TestCase):
 
     def test_ok_row_not_marked_invalid(self):
         rows = [_with_parity(_base_row())]
-        lines, has_checksum_mismatch, has_parity_failure, _ = summarize.section(
+        lines, has_checksum_mismatch, has_parity_failure, _, _ = summarize.section(
             "dummy.jsonl", rows
         )
         text = "\n".join(lines)
@@ -323,7 +323,7 @@ class SectionRenderingTests(unittest.TestCase):
 
     def test_old_format_row_reported_as_unverified_not_invalid(self):
         rows = [_base_row()]
-        lines, has_checksum_mismatch, has_parity_failure, has_unverified = (
+        lines, has_checksum_mismatch, has_parity_failure, has_unverified, _ = (
             summarize.section("dummy.jsonl", rows)
         )
         text = "\n".join(lines)
@@ -345,7 +345,7 @@ class SectionRenderingTests(unittest.TestCase):
                 fail_count=1,  # かつ要素誤差超過
             ),
         ]
-        lines, has_checksum_mismatch, has_parity_failure, _ = summarize.section(
+        lines, has_checksum_mismatch, has_parity_failure, _, _ = summarize.section(
             "dummy.jsonl", rows
         )
         text = "\n".join(lines)
@@ -365,7 +365,7 @@ class SectionRenderingTests(unittest.TestCase):
         rows = [row]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, _, has_parity_failure, _ = summarize.section("dummy.jsonl", rows)
+            lines, _, has_parity_failure, _, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertTrue(has_parity_failure)
         self.assertIn("(a')", text)
@@ -377,7 +377,7 @@ class SectionRenderingTests(unittest.TestCase):
         row = _with_parity(_base_row(mode="reuse"))
         row["init_s"] = 0.01
         rows = [row]
-        lines, _, has_parity_failure, _ = summarize.section("dummy.jsonl", rows)
+        lines, _, has_parity_failure, _, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertFalse(has_parity_failure)
         self.assertIn("(a')", text)
@@ -437,7 +437,12 @@ class TrainReuseSectionTests(unittest.TestCase):
         lines, *_ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertIn("(b')", text)
-        self.assertIn("計測不正", text)
+        # reuse median_s=0 は無効な時間値として「無効な値」表示に倒す。
+        # fresh 自体は有効なので fresh 側は「計測不正」にならない
+        # （cursor bugbot 指摘の回帰確認。上の
+        # `test_reuse_invalid_median_with_valid_fresh_still_shows_fresh_median`
+        # と同じ設計）。
+        self.assertIn("無効な値", text)
 
     def test_reuse_row_with_negative_median_does_not_raise(self):
         rows = [
@@ -446,7 +451,7 @@ class TrainReuseSectionTests(unittest.TestCase):
         ]
         lines, *_ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
-        self.assertIn("計測不正", text)
+        self.assertIn("無効な値", text)
 
     def test_reuse_row_with_non_finite_fresh_median_does_not_raise(self):
         rows = [
@@ -574,16 +579,101 @@ class TrainReuseSectionTests(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("突合不能（無効値）", text)
 
-    def test_main_strict_exit_code_unaffected_by_train_reuse_rows(self):
-        # train reuse の最終 loss 不一致は --strict の対象（4-tuple・exit code）
-        # を変えない設計（計画 §4.2「`section()` の戻り値 4-tuple・`--strict`
-        # の判定は変更しない」）。gemm 側が全て正常なら train 側に不一致が
-        # あっても exit 0 のまま。
+    # 以下、イシュー #959 codex-review P1 指摘の回帰テスト: `section()` の
+    # 戻り値（5-tuple 目・has_train_reuse_invalid）が表示上の「無効」判定
+    # と一致することを確認する。
+
+    def test_section_flags_train_reuse_checksum_mismatch_as_invalid(self):
+        rows = [
+            _train_row(mode="fresh", checksum=0.08),
+            _train_row(mode="reuse", checksum=999.0),
+        ]
+        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_reuse_invalid)
+
+    def test_section_flags_train_reuse_invalid_checksum_as_invalid(self):
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=float("inf")),
+            _train_row(mode="reuse", median_s=0.01, checksum=0.08054),
+        ]
+        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_reuse_invalid)
+
+    def test_section_flags_train_reuse_invalid_median_as_invalid(self):
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            _train_row(mode="reuse", median_s=-0.01, checksum=0.08054),
+        ]
+        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_reuse_invalid)
+
+    def test_section_does_not_flag_ok_train_reuse_row(self):
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
+        ]
+        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_train_reuse_invalid)
+
+    def test_section_does_not_flag_train_reuse_row_without_fresh(self):
+        # fresh 欠落のみ（比較対象なしで突合不能）は値そのものの正当性を
+        # 否定しないため無効扱いにしない（gemm の「突合不能（検証対象外）」
+        # と同じ位置づけ）。
+        rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054)]
+        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_train_reuse_invalid)
+
+    def test_reuse_invalid_median_with_valid_fresh_still_shows_fresh_median(self):
+        # cursor bugbot 指摘: reuse の median_s が無効でも、対応する fresh
+        # の計測が有効なら「fresh 中央値（参考）」列に "計測不正" で
+        # 上書きせず、有効な fresh 計測値をそのまま表示する。
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            _train_row(mode="reuse", median_s=-0.01, checksum=0.08054),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        b_prime_row = next(
+            line for line in lines if line.startswith("| cpu |") and line.count("|") == 10
+        )
+        self.assertIn("20.000 ms", b_prime_row)  # fresh median_s=0.02 の表示
+        self.assertNotIn("計測不正", b_prime_row)
+
+    def test_main_strict_exit_code_reflects_train_reuse_mismatch(self):
+        # イシュー #959 codex-review P1 指摘: train reuse (b') の最終 loss
+        # 不一致は表示上「無効」判定されるにもかかわらず `section()` の
+        # 戻り値（4-tuple）に反映されておらず、`--strict` が fail-open
+        # （終了コード 0 のまま）だった。fail-closed（終了コード 2）に
+        # 修正し、本テストもその挙動を固定する（旧テスト名
+        # `test_main_strict_exit_code_unaffected_by_train_reuse_rows` は
+        # fail-open を固定していたため置き換え）。
         path = _write_jsonl(
             [
                 _with_parity(_base_row()),
                 _train_row(mode="fresh", checksum=0.08),
                 _train_row(mode="reuse", checksum=999.0),
+            ]
+        )
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", path, "--strict"]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+            os.unlink(path)
+        self.assertEqual(code, 2)
+        self.assertIn("train reuse", buf_err.getvalue())
+
+    def test_main_strict_exit_code_unaffected_by_train_reuse_fresh_missing(self):
+        # fresh 行が存在しない（比較対象なしで突合不能）だけの reuse 行は
+        # 値そのものの正当性を否定しないため「無効」扱いにせず、gemm 側が
+        # 全て正常なら --strict でも exit 0 のまま（gemm の「突合不能
+        # （検証対象外）」と同じ位置づけ）。
+        path = _write_jsonl(
+            [
+                _with_parity(_base_row()),
+                _train_row(mode="reuse", checksum=0.08),
             ]
         )
         old_argv = sys.argv
