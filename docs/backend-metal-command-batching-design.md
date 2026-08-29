@@ -142,16 +142,39 @@ CUDA 側で対応する語彙は §3.8 の対応表を参照。
 
 - 内容: 現在のコマンドバッファ・現在のコンピュートエンコーダ・投入済み op の
   ラベル列（エラー時の診断用）・そのバッチが参照する in-flight `MetalBuffer`
-  の保持列・**そのバッチへ dispatch を投入した `DeviceParamStore` の弱参照
-  列（影響ストア登録。§3.7 (2) のエラー伝播が同期呼び出し元の同一性に依らず
-  対象ストアへ届くようにするための登録先。`Weak` で保持し、ストアが先に
-  drop された場合は無視する）**。
-- 影響ストア登録の呼び出し規約: `sgd_step_device` が batch へ `encode` する
-  際、その `DeviceParamStore` の `Weak` 参照をバッチの登録列へ追加する
-  （同一バッチへ複数ストアが登録されうる。バッチはどのコンテキスト呼び出し
-  経路〈`synchronize()` の明示呼び出し・別スレッドの `download`／
+  の保持列・**そのバッチへ dispatch を投入した呼び出し元が登録する共有失敗
+  トークン列（影響トークン登録。§3.7 (2) のエラー伝播が同期呼び出し元の同一性
+  に依らず対象へ届くようにするための登録先）**。トークンの型は
+  `tensor-core`（`crates/tensor-core`）が定義するバックエンド非依存の共有
+  失敗セル（案: `DispatchFailureCell`。`Arc<Mutex<Option<BackendError>>>`
+  相当。`clone()` は `Arc` の複製のみで軽量）とし、`backend-metal` はこの
+  トークンを「`set()` できる不透明な共有ハンドル」としてのみ扱う。
+  **`backend-metal` が `autodiff::DeviceParamStore` 型そのもの（`Weak`
+  参照を含む）を保持・import することはない**（AGENTS.md「クレート境界の
+  維持」。`autodiff` は `tensor-core` に依存するが `tensor-core`／
+  `backend-metal` は `autodiff` を知らないという既存の依存方向を維持し、
+  `backend-metal → autodiff` の逆依存／循環を作らない。旧案〈本節初版〉は
+  `Batch` に `Weak<DeviceParamStore>` を持たせる設計だったが、レビュー指摘
+  により本節の共有トークン方式へ改める）。
+- 影響トークン登録の呼び出し規約: `sgd_step_device`（`autodiff` 側）は
+  自身が保持する `DispatchFailureCell` を `clone()`（`Arc` 複製）して batch
+  へ `encode` する際に渡し、バッチの登録列へ追加する（同一バッチへ複数
+  トークンが登録されうる。バッチはどのコンテキスト呼び出し経路〈
+  `synchronize()` の明示呼び出し・別スレッドの `download`／
   `sgd_step_device` が誘発する暗黙 flush 等〉で完了処理されても、登録済みの
-  全ストアを解決できる状態を保つ）。
+  全トークンへ `set()` できる状態を保つ）。`DeviceParamStore` 自体は値として
+  返され `Arc` で包まれていない（`facade::compat::Sequential::
+  init_device_param_store` の戻り値。§2.5）ため `Weak<DeviceParamStore>` は
+  構築できないが、共有トークンは `DeviceParamStore` 本体とは独立に発行する
+  小さな `Arc` セルであるためこの制約に影響されない（`DeviceParamStore` が
+  先に drop されてもトークンだけが `Batch` 側に残るだけで誰も読まなくなり
+  実害がない。旧案「ストアが先に drop された場合は無視する」と同じ安全側の
+  帰結を `Weak` なしで得る）。ポイズン遷移そのもの（`poisoned` フィールドへ
+  の書き込み）は `backend-metal` は一切行わない。`backend-metal` が行うのは
+  登録済みトークンへの `set()`（§3.7 (2)）のみであり、`poisoned` へ遷移
+  させる判断とその実行は `DeviceParamStore` 自身（`autodiff` クレート内）が
+  次回の `check_not_poisoned()` 呼び出し時に自分のトークンを検査して行う
+  （下記 §3.7 (2) 改訂）。
 - 保持方法: `Mutex<Option<Batch>>`（§2.3 の `Arc<MetalContext>` 複数スレッド
   共有契約と整合させるため）。
 - `encode(label, |encoder| ...) -> Result<(), MetalError>`: open batch が
@@ -212,7 +235,7 @@ open batch は以下のいずれかで閉じる。
 
 複数の `encode` 呼び出し・その後の `synchronize` にまたがって生存させる
 必要があるオブジェクト（open batch が保持するコマンドバッファ・エンコーダ・
-in-flight バッファ・§3.2 の影響ストアの `Weak` 参照）は、生成した
+in-flight バッファ・§3.2 の共有失敗トークン `DispatchFailureCell`）は、生成した
 `autoreleasepool` クロージャの内側で `Retained`（objc2 の所有権保持型）へ
 変換したうえで `Batch` 構造体のフィールドとして pool の外（`encode` 呼び出し
 自体の戻り値経由）へ持ち出し、次回以降の `encode`／`flush`／`synchronize`
@@ -301,24 +324,39 @@ drop（`Tape` は計算グラフのノード管理のみを担い GPU リソー�
 1. エラーが判明した時点で、そのバッチに含まれていた全ての dispatch の出力を
    **無効とみなす**（バッチ内のどの dispatch が実際に失敗要因かを個別に
    切り分けない。診断のためラベル列はエラーメッセージに含める。§3.2）。
-2. `DeviceParamStore` の poison 遷移は、**エラーを検出した `synchronize()`
-   呼び出しがそのバッチに登録された全ての影響ストア（§3.2 の影響ストア
-   登録）を直接 `poisoned` へ遷移させる**ことで行う。ストア自身が後から
+2. `DeviceParamStore` の poison 遷移は、**`backend-metal` 側が直接行わず、
+   `DeviceParamStore` 自身（`autodiff` クレート内）が §3.2 の共有失敗
+   トークン（`DispatchFailureCell`）を検査して自己遷移する**ことで行う。
+   `backend-metal` 側の役割は、エラーを検出した `synchronize()` 呼び出し
+   （呼び出し元が `DeviceParamStore::step`・別スレッドの `download`・
+   `MetalContext` drop のいずれであっても同一処理）が、そのバッチに登録
+   された全てのトークンへ `set(err)` することのみに限定する（`tensor-core`
+   が定義する型への操作であり、`autodiff::DeviceParamStore` の内部状態には
+   一切触れない。§3.2 の「クレート境界の維持」）。`DeviceParamStore` 側は
+   `check_not_poisoned()`（`step`／`sync_to_host`／`register_resident_leaves`
+   ／`snapshot_resident_leaves` の共通入口）の先頭で自分のトークンを検査し、
+   `set()` 済みであれば `poisoned` フィールドへ遷移させたうえで
+   `BackendError::StorePoisoned` を返す。これにより、ストア自身が後から
    自発的に `synchronize()` を呼んで初めて poison されるのではなく、
-   バッチの完了処理（`synchronize()` の内部実装。呼び出し元が
-   `DeviceParamStore::step`・別スレッドの `download`・`MetalContext` drop
-   のいずれであっても同一処理）が、そのバッチの status を検査した時点で
-   登録済みストアを直接 poison する。これにより、同一 `MetalContext` を
-   共有する別スレッド・別 API のホスト実体化が先に synchronize してバッチの
-   エラーを消費した場合でも、元の `DeviceParamStore` は「他者の
-   synchronize」に依存せず自分のバッチ登録経由で poison される（fail-closed
-   の維持。対称なホスト実体化が一切発生しない経路 — バッチが登録した
-   ストア全てが以降 `step`／`download`／`synchronize` を呼ばないまま放置
-   される場合 — についても、次回いずれかの API 呼び出し時に §3.5 の
-   暗黙・明示同期点を経由して同じバッチの status を再検査し、未消費のまま
-   だったエラーを遅延なく該当ストアへ伝播する。すなわちバッチの status
-   検査結果はバッチ側で一度確定させたら破棄せず、`Batch` が保持する `Result`
-   としてキャッシュし、登録ストアが増える限り再送可能にする）。
+   同一 `MetalContext` を共有する別スレッド・別 API のホスト実体化が先に
+   synchronize してバッチのエラーを消費した場合でも、元の `DeviceParamStore`
+   は「他者の synchronize」に依存せず自分のトークン経由で poison される
+   （fail-closed の維持。対称なホスト実体化が一切発生しない経路 — バッチが
+   登録したトークン全てに対応するストアが以降 `step`／`download`／
+   `synchronize` を呼ばないまま放置される場合 — についても、次回いずれかの
+   API 呼び出し時に §3.5 の暗黙・明示同期点を経由して同じバッチの status を
+   再検査し、未消費のままだったエラーを遅延なく該当トークンへ伝播する。
+   すなわちバッチの status 検査結果はバッチ側で一度確定させたら破棄せず、
+   `Batch` が保持する `Result` としてキャッシュし、登録トークンが増える限り
+   再送可能にする）。
+   `poisoned` フィールドは現状 `bool`（内部可変性なし）だが、
+   `sync_to_host`／`snapshot_resident_leaves` は `&self` で
+   `check_not_poisoned()` を呼ぶ（§2.5 のとおり `step`／
+   `register_resident_leaves` は `&mut self`）ため、自己遷移を実装するには
+   `poisoned` を `Cell<bool>`（または同等の内部可変性）へ、`DispatchFailureCell`
+   自体を保持するフィールドを追加する変更が `autodiff` 側に必要になる。
+   いずれも `autodiff` クレート内で完結する変更であり、`backend-metal` 側の
+   変更を要しない。
    これは既存の `StorePoisoned` 状態機械（§2.5・`.claude/rules/security.md`
    A08「部分的に更新されたデバイス側パラメータをそのまま学習継続・推論に
    使わせない」）の拡張であり、新しい状態を追加するものではない。
@@ -380,12 +418,14 @@ parity テストが green のまま）に委ねる。本文書では数値目標
    確認）。
 2. 複数パラメータに対する `sgd_step_device` の連続投入後の `sync_to_host`
    parity（既存の 100 step 累積判定パターンを流用し、許容誤差は変更しない）。
-3. `synchronize` 時のエラーが `DeviceParamStore` を `poisoned` へ正しく
-   遷移させること。加えて §3.7 (2) の影響ストア登録契約を検証するケース
-   として、同一バッチへ `encode` した `DeviceParamStore` とは別の API
-   （例: 別スレッドからの `download`）が先に synchronize してエラーを消費
-   した場合でも、元の `DeviceParamStore` が poisoned へ遷移すること（バッチ
-   登録経由の直接 poison。呼び出し元の同一性に依らないことの回帰確認）。
+3. `synchronize` 時のエラーが（`backend-metal` が登録済みトークンへ
+   `set()` した結果として）`DeviceParamStore` を次回の `check_not_poisoned()`
+   呼び出し時に `poisoned` へ正しく自己遷移させること。加えて §3.7 (2) の
+   共有失敗トークン登録契約を検証するケースとして、同一バッチへ `encode`
+   した `DeviceParamStore` とは別の API（例: 別スレッドからの `download`）
+   が先に synchronize してエラーを消費した場合でも、元の `DeviceParamStore`
+   がトークン経由で poisoned へ遷移すること（呼び出し元の同一性に依らない
+   ことの回帰確認）。
 4. `dispatch_sync` 互換経路（既存呼び出し元を変更しない場合の後方互換）の
    既存 parity テストが不変であること。
 
