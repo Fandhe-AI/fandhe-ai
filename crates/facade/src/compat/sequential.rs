@@ -358,9 +358,9 @@ impl Sequential {
     /// デバイス常駐パラメータでの学習用 forward（イシュー #935・
     /// #1022 でパラメータの毎 step D2H を排除）。
     ///
-    /// `store.register_resident_leaves(&tape.0)` を 1 回呼び（forward 用
+    /// `store.register_resident_params(&tape.0)` を 1 回呼び（forward 用
     /// 葉ノード登録。#1022 でホストへの download を撤去済み——
-    /// `DeviceParamStore::register_resident_leaves` のドキュメント
+    /// `DeviceParamStore::register_resident_params` のドキュメント
     /// 参照）、返る [`ResidentLeaf`] 列から [`Sequential::forward`]
     /// （`SequentialVars::forward`）と同一の層イテレーション（`Linear`
     /// 層は `store.linear_forward`〈デバイス常駐 weight のまま forward〉・
@@ -376,16 +376,16 @@ impl Sequential {
     /// 実例がある）。
     ///
     /// **forward 失敗時の pending ロールバック（codex-review PR #954 P2
-    /// 是正）**: `register_resident_leaves` で `store` を pending 状態へ
+    /// 是正）**: `register_resident_params` で `store` を pending 状態へ
     /// 遷移させた後、`forward_from_flat_leaves`（層数不一致・バックエンド
     /// 演算エラー等）が失敗した場合、そのまま `Err` を返すと `store` は
-    /// pending のまま残り、次回呼び出しの `register_resident_leaves` が
+    /// pending のまま残り、次回呼び出しの `register_resident_params` が
     /// `BackendError::PendingForwardUnconsumed` で拒否される
     /// （`DeviceParamStore` モジュール doc「状態機械」参照）。呼び出し元は
     /// forward の失敗を理由に `store` を破棄する義務を負わないため、公開
     /// ラッパーである本メソッド内で `store.abandon_pending_forward()` に
     /// より pending をロールバックしてから元のエラーを返す
-    /// （`register_resident_leaves` 自体が失敗した場合は pending 状態へ
+    /// （`register_resident_params` 自体が失敗した場合は pending 状態へ
     /// 遷移していないため、`?` でそのまま伝播してよい）。
     pub fn forward_resident<'t>(
         &self,
@@ -393,7 +393,7 @@ impl Sequential {
         input: &Var<'t>,
         store: &mut DeviceParamStore,
     ) -> Result<Var<'t>, AutodiffError> {
-        let leaves = store.register_resident_leaves(&tape.0)?;
+        let leaves = store.register_resident_params(&tape.0)?;
         match self.forward_from_flat_leaves(&tape.0, input, &leaves, store) {
             Ok(output) => Ok(output),
             Err(e) => {
@@ -406,7 +406,7 @@ impl Sequential {
     /// デバイス常駐パラメータでの推論（イシュー #935・#1022 でパラメータの
     /// download を撤去）。`store.device()` へ結線した新規 [`Tape`]
     /// （`crate::tape_for`）を内部で構築し、`store.
-    /// snapshot_resident_leaves`（読み取り専用版。`pending` 状態を
+    /// snapshot_resident_params`（読み取り専用版。`pending` 状態を
     /// 変化させない。#1022 で download を撤去済み）で得た [`ResidentLeaf`]
     /// 列から forward する。`Tape` はこの呼び出しのスコープ内で破棄される
     /// （`Sequential::predict` と同じ運用。`fandhe_ai_autodiff::nn::linear`
@@ -422,7 +422,7 @@ impl Sequential {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         let tape = crate::tape_for(store.device())?;
-        let leaves = store.snapshot_resident_leaves(&tape.0)?;
+        let leaves = store.snapshot_resident_params(&tape.0)?;
         let input_var = tape.var(input);
         let output = self.forward_from_flat_leaves(&tape.0, &input_var, &leaves, store)?;
         Ok(output.to_tensor())
@@ -439,8 +439,8 @@ impl Sequential {
     ///
     /// **#1022 による変更**: 旧実装は `Var` 列から [`LinearVars`] を
     /// 組み立てて `LinearVars::forward`（ホスト常駐 weight 前提の
-    /// `matmul`／`add`）を呼んでいた。`register_resident_leaves`／
-    /// `snapshot_resident_leaves` の戻り型が不透明な `ResidentLeaf`
+    /// `matmul`／`add`）を呼んでいた。`register_resident_params`／
+    /// `snapshot_resident_params` の戻り型が不透明な `ResidentLeaf`
     /// （ホスト値を持たない）へ変わったため、`Linear` 層は
     /// `store.linear_forward`（デバイス常駐のまま `BackendOps::
     /// gemm_resident_rhs` へ委譲）を呼ぶ形へ置き換える。

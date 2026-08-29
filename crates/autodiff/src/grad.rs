@@ -162,8 +162,8 @@ pub(crate) fn vjp(
                 ));
             };
             // イシュー #1022 P1 是正（codex-review 指摘）: `weight`／
-            // `bias` の `NodeId` は `DeviceParamStore::register_resident_
-            // leaves`／`snapshot_resident_leaves` が発行した
+            // `bias` の `NodeId` は `DeviceParamStore::
+            // register_resident_params`／`snapshot_resident_params` が発行した
             // `ResidentLeaf` から来るが、`ResidentLeaf` 自体はライフタイム
             // 引数のみで `Tape` の同一性を保証しない（`optim::device_store::
             // ResidentLeaf::tape_id` 検証は `linear_forward` 側の別途対応。

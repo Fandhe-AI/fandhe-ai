@@ -332,7 +332,7 @@ fn predict_resident_matches_predict_after_training() {
 }
 
 /// `forward_resident` が forward 失敗時に `pending` をロールバックする
-/// ことを検証する（codex-review PR #954 P2 是正）。`register_resident_leaves`
+/// ことを検証する（codex-review PR #954 P2 是正）。`register_resident_params`
 /// で pending 状態へ遷移した後、入力 shape 不整合で
 /// `forward_from_flat_vars` を失敗させ、その直後に呼んだ 2 回目の
 /// `forward_resident`（正しい入力）が `PendingForwardUnconsumed` ではなく

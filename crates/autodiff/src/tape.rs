@@ -137,7 +137,7 @@ pub(crate) enum Op {
     /// のまま。`Tape::push_resident_leaf` 参照）。
     ///
     /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore` の
-    /// `register_resident_leaves`／`snapshot_resident_leaves`（forward
+    /// `register_resident_params`／`snapshot_resident_params`（forward
     /// 用）のみが構築し、外部へは不透明型
     /// `optim::device_store::ResidentLeaf`（`shape()` のみ公開）として
     /// しか見えない——`Var` として公開しないのは、`Var::value()`／

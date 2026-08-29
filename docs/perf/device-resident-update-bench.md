@@ -229,3 +229,17 @@ Mac / DGX Spark セッションへの申し送り事項のままである。CPU 
 では、R3 統合後も「forward 1 step 内の D2H 0 回」（#1022 受け入れ条件）
 と「`step()` の起動・upload がパラメータ件数に依らず 1 回／step」
 （#1023）の両方が同時に成立することを機械検証済み。
+
+## 9. 追補（codex-review PR #1059 P1 是正）: メソッド名の SemVer 互換分離
+
+8 節までの記述で `register_resident_leaves`／`snapshot_resident_leaves`
+と呼んでいた D2H を伴わないメソッドは、`DeviceParamStore` が crates.io
+`fandhe-ai` 0.4.0 で公開済みの API であるため破壊的変更を避ける目的で
+`register_resident_params`／`snapshot_resident_params` へ改名した。旧名
+`register_resident_leaves`／`snapshot_resident_leaves` は 0.4.0 と同じ
+シグネチャ・挙動（D2H を伴い `Vec<Var<'t>>` を返す）のまま
+`#[deprecated(since = "0.5.0")]` として維持する。本ベンチ（`crates/
+facade/tests/device_param_store_bench.rs`）が計測する `forward_resident`
+は内部で新経路 `register_resident_params` を呼ぶため、6〜8 節の実測値・
+理論値の解釈に変更はない。設計の詳細は `docs/device-resident-update-
+design.md`「追補（#1022・#1023 統合、R3）」節の同項目を正とする。

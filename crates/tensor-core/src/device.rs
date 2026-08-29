@@ -222,19 +222,19 @@ pub enum BackendError {
     /// 呼ばれたことを表す。`DeviceParamStore` は `sgd_step_device` の
     /// 実行時エラー（GPU 側の実際の起動失敗等。件数・shape 不一致のような
     /// 事前検証で弾ける契約違反とは別）を検出すると内部状態を poisoned へ
-    /// 遷移し、以降の `step`／`sync_to_host`／`register_resident_leaves`／
-    /// `snapshot_resident_leaves` をすべてこの variant で fail-closed に
+    /// 遷移し、以降の `step`／`sync_to_host`／`register_resident_params`／
+    /// `snapshot_resident_params` をすべてこの variant で fail-closed に
     /// 拒否する（「部分的に更新されたデバイス側パラメータをそのまま学習
     /// 継続・推論に使ってしまう」ことを構造的に防ぐ。`.claude/rules/
     /// security.md` A08）。回復は新しい `DeviceParamStore` の再構築のみ。
     StorePoisoned,
     /// `DeviceParamStore::step`／`sync_to_host` 等に、`DeviceParamStore`
-    /// 構築時・直近の `register_resident_leaves` 呼び出しと異なる
+    /// 構築時・直近の `register_resident_params` 呼び出しと異なる
     /// `Tape`（`TapeId` 不一致）を渡した（`fandhe_ai_autodiff::var::Var` の
     /// クロステープ検査〈`AutodiffError::TapeMismatch`〉と同種の契約を
     /// デバイス常駐パラメータ側にも課す。イシュー #935）。
     TapeMismatch,
-    /// `DeviceParamStore::register_resident_leaves`（forward 用の
+    /// `DeviceParamStore::register_resident_params`（forward 用の
     /// デバイス→ホスト download・葉ノード登録）を、直前の登録が
     /// `step()` で消費（または `abandon_pending_forward()` で破棄）される
     /// 前に再度呼んだ。1 回の forward 記録に対し高々 1 回の `step()` が

@@ -1765,6 +1765,18 @@ Metal 実機・DGX Spark GB10 実機での再計測は本追補の記録時点�
   `nodes[weight.0]`／`nodes[bias_id.0]` の直接添字アクセスを
   `nodes.get(...)` へ置き換え、範囲外添字を fail-closed に拒否する
   （縦深防御。`.claude/rules/security.md` A08）。
+- **公開 API の SemVer 互換維持（codex-review PR #1059 P1 是正・追補）**:
+  `DeviceParamStore` は `facade` の公開 API（crates.io `fandhe-ai` 0.4.0 で
+  公開済み）であり、`register_resident_leaves`／`snapshot_resident_leaves`
+  の戻り型を `Vec<Var<'t>>` から `Vec<ResidentLeaf<'t>>` へ直接変更する
+  ことは破壊的変更になる。そのため D2H を伴わない常駐 forward 経路は
+  新規メソッド名 `register_resident_params`／`snapshot_resident_params`
+  として追加し（実体はここまでの本節が説明する挙動そのもの）、旧
+  `register_resident_leaves`／`snapshot_resident_leaves` は旧シグネチャ・
+  旧挙動（`mem.download` を伴い `tape.var(&tensor)` で `Op::Leaf` へ登録
+  する。#1022 以前の実装）のまま `#[deprecated(since = "0.5.0")]` として
+  維持する。`facade::compat::Sequential::forward_resident`／
+  `predict_resident`（内部実装）は新経路 `*_resident_params` を呼ぶ。
 
 Metal・CUDA 実機での再計測は本追補の記録セッションでは未実施（実機環境
 未接続。Mac／DGX Spark 実機セッションへ申し送り。`docs/perf/

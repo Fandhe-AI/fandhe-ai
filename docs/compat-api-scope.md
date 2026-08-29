@@ -54,10 +54,14 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
      再エクスポート。`crates/facade/src/lib.rs`）: 学習ループのパラメータ
      （および momentum 等の optimizer 状態）をデバイス上に常駐させ、SGD
      更新をデバイス上で完結させることでステップごとのホスト⇔デバイス
-     往復を削減する経路。#1022 で `register_resident_leaves`／
-     `snapshot_resident_leaves`（forward 用）のパラメータ download も
-     排除し、`DeviceParamStore::linear_forward`（`BackendOps::
-     gemm_resident_rhs` 経由）がデバイス常駐のまま forward する。
+     往復を削減する経路。#1022 で forward 用のパラメータ download を
+     排除した新経路 `register_resident_params`／`snapshot_resident_params`
+     を追加し、`DeviceParamStore::linear_forward`（`BackendOps::
+     gemm_resident_rhs` 経由）がデバイス常駐のまま forward する（旧
+     `register_resident_leaves`／`snapshot_resident_leaves`〈download を
+     伴う・`Vec<Var<'t>>` を返す〉は crates.io 0.4.0 公開済み API との
+     SemVer 互換のため `#[deprecated]` として維持する。codex-review PR
+     #1059 P1 是正）。
      `facade::Tape` newtype からの薄い委譲として提供し、`BackendOps`／
      `MemoryOps` は利用者向け公開面へ露出しない。数値一致は REQ-2 の
      バックエンド間統一複合判定（相対誤差 1e-3 未満 または絶対誤差
