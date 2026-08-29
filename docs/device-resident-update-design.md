@@ -1650,3 +1650,21 @@ device` の更新式・§5.2 の FMA 契約）に集約される。
   本ツリーのスコープ外とし、必要になった時点で別途 Issue 化する。
 - f16 経路への拡張。
 - optimizer 公開面（`facade` 側の意匠）の変更 — 接続先: #932。
+
+### 追補（#1023）: `DeviceParamStore` の連結バッファ化
+
+§3.3 が記述する「1 パラメータずつ grad を upload し `sgd_step_device` を
+起動する」構成は、Metal 実機（M4 Max）実測（`docs/perf/
+device-resident-update-bench.md` §3〜§5）で resident update が legacy 比
+132〜152 倍遅いという後退を招くことが判明した（原因: ディスパッチ単位
+あたり固定オーバーヘッド × パラメータ数）。#1023 で `DeviceParamStore` の
+内部実装を、全パラメータを単一の連結（フラット）`DeviceBuffer<f32>`
+（shape `[total_numel]`）として保持する方式へ再構成し、`step()` の更新
+フェーズ（grad upload・カーネル起動）をパラメータ数に依らず 1 回／step
+へバッチ化した。`BackendOps`／`MemoryOps` trait・3 バックエンドのカーネル
+実装（CPU／CUDA／Metal）はいずれも無変更（要素単位で shape 非依存に
+定義済みのため）。詳細は
+`crates/autodiff/src/optim/device_store.rs` モジュール冒頭コメント
+「パラメータ横断の単一連結バッファ化（イシュー #1023）」節を正とする。
+Metal 実機・DGX Spark GB10 実機での再計測は本追補の記録時点では未実施
+（`docs/perf/device-resident-update-bench.md` §6 追補参照）。
