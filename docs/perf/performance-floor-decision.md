@@ -63,7 +63,7 @@ Metal f16 の K=4096 ストレスケース許容誤差再評価（#156 が本イ
 3. 本ドキュメント §3 の確定表を実測結果で更新する
 4. ユーザー承認（PR レビュー・マージ）を経る
 5. `docs/spec/04-requirements.md` REQ-8 節への反映は spec リポジトリ
-   （Fandhe-AI/rust-ai-library-spec）側での対応をユーザーへ提案する（本リポの submodule は編集しない）
+   （Fandhe-AI/fandhe-ai-spec）側での対応をユーザーへ提案する（本リポの submodule は編集しない）
 
 ## 5. 申し送り
 
@@ -139,7 +139,7 @@ Metal f16 初期リリース段階の性能下限として**確定**する（暫
 ### spec 反映
 
 `docs/spec/04-requirements.md`（2026-08-05 版）REQ-8 表への反映は spec リポジトリ
-（Fandhe-AI/rust-ai-library-spec）側での対応をユーザーへ提案する（§5(a) と同じ扱い。
+（Fandhe-AI/fandhe-ai-spec）側での対応をユーザーへ提案する（§5(a) と同じ扱い。
 本リポでは `docs/spec/` submodule を編集しない）。
 
 ## 9. 追補（#393・2026-08-10）: CUDA f32/f16 最適化後下限の確定
@@ -204,7 +204,7 @@ spec_cuda_f32_optimized_measured_ratio`／`spec_cuda_f16_optimized_measured_rati
 ### spec 反映
 
 `docs/spec/04-requirements.md`（2026-08-05 版）REQ-8 表への反映は spec リポジトリ
-（Fandhe-AI/rust-ai-library-spec）側での対応をユーザーへ提案する（§5(a)・§8「spec 反映」と
+（Fandhe-AI/fandhe-ai-spec）側での対応をユーザーへ提案する（§5(a)・§8「spec 反映」と
 同じ扱い。本リポでは `docs/spec/` submodule を編集しない）。
 
 ## 10. 追補（#577・2026-08-18）: Optimized 段 5 行の再確定（GEMM 性能改善ツリー Phase F）
@@ -328,7 +328,7 @@ backend_dtype 別の承認値・根拠実測・CUDA 限定条件の継続を明�
 ### spec 反映
 
 `docs/spec/04-requirements.md`（2026-08-05 版）REQ-8 表への反映は spec リポジトリ
-（Fandhe-AI/rust-ai-library-spec）側での対応をユーザーへ提案する（§5(a)・§8・§9「spec 反映」と
+（Fandhe-AI/fandhe-ai-spec）側での対応をユーザーへ提案する（§5(a)・§8・§9「spec 反映」と
 同じ扱い。本リポでは `docs/spec/` submodule を編集しない）。
 
 ## 11. 追補（#799・2026-08-21）: Metal f16 タイル化後実測が下限へ与える影響の整理（下限値変更なし）

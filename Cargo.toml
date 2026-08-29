@@ -4,7 +4,7 @@
 # tensor-core・autodiff・backend-cpu/cuda/metal・onnx-interop・guardrail・self-repair・
 # bench-harness・facade の 10 クレート（+ 開発ツール docs-site）を member として明示列挙する（意図しないクレート
 # 混入防止のため glob は使わない）。TASK-1.1（docs/spec/05-tasks.md）の骨格作成に対応する。
-# facade は TASK-9.3（イシュー #410・spec 確定は rust-ai-library-spec#52）で追加した
+# facade は TASK-9.3（イシュー #410・spec 確定は fandhe-ai-spec#52）で追加した
 # composition root・compat 公開面クレート。
 #
 # docs-site（11 個目・イシュー #868/#869）は GitHub Pages 公開ツリー（#865 Phase 1）

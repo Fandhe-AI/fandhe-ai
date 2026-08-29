@@ -147,7 +147,7 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
    の先例を踏襲する）
 4. ユーザー承認（PR レビュー・マージ）を経る
 5. `docs/spec/04-requirements.md` REQ-8 節への反映は spec リポジトリ
-   （Fandhe-AI/rust-ai-library-spec）側での対応をユーザーへ提案する（本リポの `docs/spec/`
+   （Fandhe-AI/fandhe-ai-spec）側での対応をユーザーへ提案する（本リポの `docs/spec/`
    submodule は編集しない）
 
 ## 7. 関連参照

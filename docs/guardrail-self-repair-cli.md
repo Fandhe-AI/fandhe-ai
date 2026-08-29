@@ -1,7 +1,7 @@
 # guardrail／self-repair CLI コマンド仕様
 
 イシュー #183（親 #181）の成果物。`docs/spec/04-requirements.md`
-「画面・インターフェース要件」（L294-298、rust-ai-library-spec リポジトリ）が
+「画面・インターフェース要件」（L294-298、fandhe-ai-spec リポジトリ）が
 「具体的な CLI コマンド仕様は Phase 5（タスク分解後の実装リポ側）で定める」と
 明示委譲している事項を、TASK-4.1（`guardrail` 移植・#101 系）・TASK-3.1
 （`self-repair` 骨格移植・#131）・TASK-6.1（CI 常設化・#146）の実装着手前に
@@ -13,7 +13,7 @@
 `Fandhe-AI/rust-ai-library-v1`（旧 Burn 基盤リポジトリ、以下「v1」）の実装
 出典を都度明記する。`docs/spec/` submodule はこのリポジトリでは未初期化
 （`.gitmodules` のみ存在）のため、spec 引用は GitHub API
-（`gh api repos/Fandhe-AI/rust-ai-library-spec/contents/...`）経由で取得した
+（`gh api repos/Fandhe-AI/fandhe-ai-spec/contents/...`）経由で取得した
 2026-08-05 時点の内容に基づく。
 
 ## 0. 用語対応表
@@ -111,7 +111,7 @@ REQ-3「検証ゲートの計測系付け替え」注記（2026-08-05 v2 注記�
 
 ## 2. 入出力仕様（JSON 保存含む）
 
-`docs/spec/04-requirements.md` データ要件（L303、rust-ai-library-spec）が
+`docs/spec/04-requirements.md` データ要件（L303、fandhe-ai-spec）が
 定める「変更ごとの判定結果を構造化データ（JSON 等）として保存し、REQ-6 の
 回帰テストセットの根拠データとすること」に対応する。
 
@@ -561,7 +561,7 @@ v2 は次の 2 つの防御を組み合わせて塞ぐ:
 
 ## 5. 参照
 
-- `docs/spec/04-requirements.md`（rust-ai-library-spec）REQ-3・REQ-4・REQ-5・
+- `docs/spec/04-requirements.md`（fandhe-ai-spec）REQ-3・REQ-4・REQ-5・
   REQ-6・画面・インターフェース要件（L294-298）・データ要件（L300-304）
 - `Fandhe-AI/rust-ai-library-v1`:
   - `crates/guardrail/src/cli.rs`（`check`/`eval` 引数定義。TASK-4.1-S1・S4）

@@ -1,5 +1,5 @@
 //! composition root（TASK-9.3・イシュー #410・spec 確定は
-//! rust-ai-library-spec#52／spec PR #53。`docs/spec/05-tasks.md:315`）。
+//! fandhe-ai-spec#52／spec PR #53。`docs/spec/05-tasks.md:315`）。
 //!
 //! `facade` は 2 つの責務を担う（spec 確定内容）。
 //!

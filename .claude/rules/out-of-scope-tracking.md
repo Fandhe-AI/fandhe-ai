@@ -31,7 +31,7 @@ EOF
 ## 仕様変更が必要な場合
 
 実装リポの Issue ではなく仕様の変更が必要な事項（要件・受け入れ基準の修正）は、
-正本リポジトリ Fandhe-AI/rust-ai-library-spec 側での対応をユーザーに提案する（`docs/spec/` を直接編集しない）。
+正本リポジトリ Fandhe-AI/fandhe-ai-spec 側での対応をユーザーに提案する（`docs/spec/` を直接編集しない）。
 
 ## 注意
 

@@ -309,7 +309,7 @@ GEMM の絶対誤差は入力のスケール `s`（両行列を `s` 倍した場
      REQ-2 側で定義し、その範囲内でのみ現行閾値を適用する。
   3. あるいは、TF32/f16 Tensor Core 経路そのものをディスパッチ規則（#66）で高精度要求時に選択しない
      方針とし、経路ごとの精度トレードオフを利用者に明示する。
-- 上記いずれも **REQ-2 改定が必要**であり、正本 spec リポジトリ（Fandhe-AI/rust-ai-library-spec）側での
+- 上記いずれも **REQ-2 改定が必要**であり、正本 spec リポジトリ（Fandhe-AI/fandhe-ai-spec）側での
   対応をユーザーに提案する（`docs/spec/` は本リポでは編集しない。`.claude/rules/out-of-scope-tracking.md`）。
 
 ## 5. 制約事項

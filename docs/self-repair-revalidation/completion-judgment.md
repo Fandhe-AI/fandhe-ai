@@ -200,7 +200,7 @@ rule は「**すべて満たした場合のみ**『人間介在なし完走』�
 ## 7. 後続事項
 
 - spec 側 REQ-3 受け入れ基準チェックボックス（`docs/spec/04-requirements.md:95-101`）
-  の更新は正本リポジトリ（Fandhe-AI/rust-ai-library-spec）側の対応であり、
+  の更新は正本リポジトリ（Fandhe-AI/fandhe-ai-spec）側の対応であり、
   本リポでは行わない（`docs/spec/` 編集禁止。`.claude/rules/out-of-scope-tracking.md`）。
   本文書の判定結果（5 節）を踏まえたチェックボックス更新を、正本リポ側で
   対応することをユーザーへ提案する。

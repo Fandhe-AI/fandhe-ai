@@ -108,7 +108,7 @@ E_all の結果は「累積精度を上げるほど exceed_count が減る」こ
 ## spec への提案（ユーザー承認・spec リポ側対応が必要。本リポでは決定しない）
 
 `docs/spec/`（正本 submodule）は本リポで編集しない。以下は選択肢の提示に留め、採否・
-`Fandhe-AI/rust-ai-library-spec` への反映はユーザー判断事項とする
+`Fandhe-AI/fandhe-ai-spec` への反映はユーザー判断事項とする
 （`.claude/rules/out-of-scope-tracking.md`）。
 
 1. **REQ-7 判定式を REQ-2 と同型の複合判定へ改定する案**: `相対誤差 1e-3 未満 または 絶対誤差

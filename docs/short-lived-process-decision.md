@@ -60,7 +60,7 @@ TASK-13.1 実測記録（`docs/perf/startup-cost-measurement.md`）の要点:
 3. **再判定トリガーを明示する**: 下記「再判定トリガー」節の条件が満たされた時点で本決定を再検討する
 4. **申し送りメモを残す**: `docs/spec/04-requirements.md`（正本 submodule）は本タスクでは編集しない
    （TASK-13.2 の制約・`out-of-scope-tracking.md` 準拠）。除外事項への追記は spec リポジトリ
-   （Fandhe-AI/rust-ai-library-spec）側での対応とし、追記文案を下記に記録する
+   （Fandhe-AI/fandhe-ai-spec）側での対応とし、追記文案を下記に記録する
 
 ## 再判定トリガー
 
@@ -84,7 +84,7 @@ measurement.md`「CUDA 実測結果」節・「Metal 実測結果」節）。し
 ## 除外事項への追記文案（申し送り。spec リポジトリ側での対応を要する）
 
 `docs/spec/04-requirements.md` の「除外事項（v1 スコープ外）」節（`docs/spec/04-requirements.md:316` 以降）へ
-以下の追記を提案する。本追記の実施は Fandhe-AI/rust-ai-library-spec 側で行い、本リポジトリの
+以下の追記を提案する。本追記の実施は Fandhe-AI/fandhe-ai-spec 側で行い、本リポジトリの
 `docs/spec/` は編集しない（`out-of-scope-tracking.md`「仕様変更が必要な場合」準拠）。
 
 > **短命プロセスユースケース（TASK-13.2・#172、2026-08-08 追記提案）**: CLI・サーバーレス関数等、

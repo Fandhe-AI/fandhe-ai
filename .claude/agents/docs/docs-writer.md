@@ -22,5 +22,5 @@ tools: [Read, Grep, Glob, Edit, Write]
 
 ## 禁止事項
 
-- `docs/spec/` 配下（正本サブモジュール Fandhe-AI/rust-ai-library-spec）の編集
+- `docs/spec/` 配下（正本サブモジュール Fandhe-AI/fandhe-ai-spec）の編集
 - コード（`.rs`・`Cargo.toml`）の編集

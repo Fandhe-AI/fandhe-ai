@@ -244,5 +244,5 @@ cargo test -p onnx-interop                                              # pass�
   - 切り分け実施・帰結（実装改善では解消不能・判定式の構造的性質が支配的）は #413
     `docs/perf/onnx-transformer-e2e-error-analysis.md` に記録済み
 - REQ-7 側のステータス更新（受け入れ基準チェックボックスの反映等）が必要な場合、`docs/spec/`
-  は本リポで編集しないため spec リポ（`Fandhe-AI/rust-ai-library-spec`）側での対応をユーザーに
+  は本リポで編集しないため spec リポ（`Fandhe-AI/fandhe-ai-spec`）側での対応をユーザーに
   提案するに留める

@@ -91,7 +91,7 @@
   `docs/dispatch-rules-design.md`・`docs/typed-shape-design.md`・
   `docs/memory-pool-design.md` 等）と矛盾する実装は、設計文書の改訂とセットでない限り
   P1。新規の設計判断は docs へ記録する（欠落は P2）
-- **spec 正本の不可侵（P1）**: `docs/spec/`（rust-ai-library-spec submodule）実体の
+- **spec 正本の不可侵（P1）**: `docs/spec/`（fandhe-ai-spec submodule）実体の
   書き換えは禁止。仕様変更は spec リポジトリ側で行う（submodule ポインタの前進自体は
   通常の更新）
 
