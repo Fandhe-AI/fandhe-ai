@@ -238,19 +238,6 @@ impl MetalBuffer {
         self.len == 0
     }
 
-    /// 内部表現がプール経由（`Backing::Pooled`）かどうか（イシュー
-    /// #1021）。`memory.rs::alloc_zeroed_inner` が `TrackedAllocation`
-    /// の二重計上防止分岐（プール経由なら `crate::pool::MetalAllocator::
-    /// tracker` 側が既に計上済みのため `0` バイトを積む）を判定するために
-    /// 使う唯一の呼び出し元。`alloc_zeroed_pooled`／`alloc_uninit_pooled`
-    /// は `ctx` が singleton と一致しない場合に `Backing::Owned`
-    /// （`new_zeroed` と同一の専有確保）へフォールバックする
-    /// （`singleton_context_matching` 参照）ため、本メソッドの戻り値は
-    /// 呼び出し時の実際の確保経路を正しく反映する。
-    pub(crate) fn is_pooled(&self) -> bool {
-        matches!(self.backing, Backing::Pooled(_))
-    }
-
     /// TASK-1.8b（#39）のエンコーダ結線（`setBuffer_offset_atIndex` 等）
     /// から参照される生バッファへの参照。
     pub fn raw(&self) -> &MtlBuffer {

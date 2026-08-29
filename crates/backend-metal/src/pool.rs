@@ -51,12 +51,20 @@ use crate::pool_pending::PendingReturn;
 /// 常に論理長 `len` のみを使う契約を維持する（設計文書 §3.1「capacity と
 /// 論理長の分離」。`buffer.rs` 側は変更しない）。
 ///
-/// `_alloc`（[`TrackedAllocation`]）は本ハンドルの**物理確保**の生存期間
-/// （フリーリストで保持中も含む）を計測する。`memory.rs::MetalBufferHandle`
-/// 側の `_alloc` はプール経路では `TrackedAllocation::new(tracker, 0)`
-/// （二重計上防止。`memory.rs::alloc_zeroed_inner` コメント参照）にする
-/// ため、実バイト数の唯一の計測系列は本フィールドが指す
-/// [`MetalAllocator::tracker`] になる。
+/// `_alloc`（[`TrackedAllocation`]）は本ハンドルの**物理確保**（サイズ
+/// クラス丸め後の `capacity_bytes`）の生存期間（フリーリストで保持中も
+/// 含む）を [`MetalAllocator::tracker`]（本フィールドが指す、`memory.rs::
+/// MetalMemory::tracker` とは別の独立した `Arc<AllocationTracker>`）へ
+/// 計測する。`memory.rs::MetalBufferHandle` 側の `_alloc` は
+/// `MetalMemory::tracker` へ論理要求バイト数を計測する（プール経由か
+/// 否かに関わらず常に計上する。codex-review P1 是正・PR #1063。
+/// `memory.rs::alloc_zeroed_inner` コメント参照）。両者は異なる
+/// トラッカーで異なる量（物理容量 vs 論理要求量）を計測しており、
+/// 合算する経路は存在しないため「二重計上」は生じない（旧稿は誤って
+/// 二重計上を懸念し `MetalMemory::tracker` 側へ `0` を計上していたが、
+/// これは REQ-14 の公開契約〈`MemoryStats::allocated_bytes` 等〉が
+/// 参照する唯一の系列である `MetalMemory::tracker` を過小計上させる
+/// バグだった）。
 pub(crate) struct RawMetalBuffer {
     buffer: Retained<MtlBuffer>,
     capacity_bytes: u64,

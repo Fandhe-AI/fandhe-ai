@@ -1652,20 +1652,31 @@ Metal 側実装（イシュー #1021）が §8.2 の裁量事項を以下のと�
   （次にこの機構へ接続する PR〈例: SGD デバイス常駐更新のプール化〉
   が最初の実機到達点になる）。
 - **Metal `MetalMemory::allocated_bytes()`（`AllocationTracker` 経由の
-  ピーク測定）の意味論変更**: `MetalMemory::new`（`context_cache` 非
-  経由の専有 `MetalContext`。`tests/memory_roundtrip.rs`・
-  `bench-harness::peak_memory` が使う経路）は
-  `singleton_context_matching` によりプール非経由（`Backing::Owned`）
-  へフォールバックするため、この経路の `allocated_bytes()` は従来
-  どおり実バイト数を計上する（回帰なし）。一方、`ops::MetalBackendOps`
-  の `static_metal_memory()`（`context_cache::cached_context()` 由来の
+  ピーク測定）が過小計上していた欠陥の是正（codex-review P1・PR
+  #1063 追加是正）**: 本ラン時点の記述は「`ops::MetalBackendOps` の
+  `static_metal_memory()`（`context_cache::cached_context()` 由来の
   プロセス共有 `MetalMemory`）経由の `alloc_zeroed` はプール経由
   （`Backing::Pooled`）になるため、その `TrackedAllocation` は `0`
   バイトを積み、実バイト数の計測系列は `crate::pool::MetalAllocator::
-  tracker`（`crate::ops::MetalBackendOps::device_memory_pool_stats()`
-  経由でのみ可視）へ移る（二重計上防止。`memory.rs::alloc_zeroed_inner`
-  コメント参照）。`bench-harness::peak_memory` は現状 `MetalMemory::new`
-  経由（専有コンテキスト）のみを使うため本 PR 時点では影響しないが、
-  将来 `static_metal_memory()` 経由の計測へ切り替える場合はこの意味論
-  変更を踏まえる必要がある（§8 スコープ外「bench-harness の独自計測
-  経路との統合」と同じ論点）。
+  tracker` へ移る（二重計上防止）」という**意図的な意味論変更**として
+  いたが、これは誤りだった。`MetalAllocator::tracker` と
+  `MetalMemory::tracker` は別々の `Arc<AllocationTracker>` インスタンス
+  であり両者を合算する経路は存在しないため、実際には「二重計上」は
+  発生しておらず、`MetalAllocator` 自体は `MemoryStats` を実装しない
+  ため REQ-14 の公開契約（`allocated_bytes`／`peak_allocated_bytes`）
+  から到達可能なのは `MetalMemory::tracker` のみだった。したがって
+  `static_metal_memory()` 経由（通常の `MemoryOps::alloc_zeroed` 呼び
+  出し経路）で `0` を計上する旧実装は、本節冒頭（`memory.rs:139-142`
+  相当）が明記する「CPU/CUDA/Metal で同一契約」を破る過小計上バグ
+  だった（codex-review 指摘）。`crates/backend-metal/src/memory.rs::
+  MetalMemory::alloc_zeroed_inner` を修正し、プール経由か否かに
+  関わらず常に論理要求バイト数（`checked_byte_len(numel)`）を
+  `MetalMemory::tracker` へ計上するよう変更した（CUDA 側
+  `backend-cuda::memory::CudaMemory::alloc_zeroed_inner` は
+  `backend-cuda::pool::CudaAllocator` を一切経由しないため元から
+  同種の問題を持たない。CUDA 側の契約に Metal 側を揃える形の是正）。
+  二重計上防止のためだけに存在した `MetalBuffer::is_pooled()` は
+  呼び出し元を失ったため削除した。プール実装自体が持つ物理確保量の
+  計測（`crate::pool::MetalAllocator::stats()`〈`PoolStats::
+  cached_bytes`〉との統合）は引き続き §8 スコープ外「bench-harness の
+  独自計測経路との統合」として申し送る。
