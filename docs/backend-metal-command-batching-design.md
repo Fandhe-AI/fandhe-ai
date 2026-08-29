@@ -142,7 +142,16 @@ CUDA 側で対応する語彙は §3.8 の対応表を参照。
 
 - 内容: 現在のコマンドバッファ・現在のコンピュートエンコーダ・投入済み op の
   ラベル列（エラー時の診断用）・そのバッチが参照する in-flight `MetalBuffer`
-  の保持列。
+  の保持列・**そのバッチへ dispatch を投入した `DeviceParamStore` の弱参照
+  列（影響ストア登録。§3.7 (2) のエラー伝播が同期呼び出し元の同一性に依らず
+  対象ストアへ届くようにするための登録先。`Weak` で保持し、ストアが先に
+  drop された場合は無視する）**。
+- 影響ストア登録の呼び出し規約: `sgd_step_device` が batch へ `encode` する
+  際、その `DeviceParamStore` の `Weak` 参照をバッチの登録列へ追加する
+  （同一バッチへ複数ストアが登録されうる。バッチはどのコンテキスト呼び出し
+  経路〈`synchronize()` の明示呼び出し・別スレッドの `download`／
+  `sgd_step_device` が誘発する暗黙 flush 等〉で完了処理されても、登録済みの
+  全ストアを解決できる状態を保つ）。
 - 保持方法: `Mutex<Option<Batch>>`（§2.3 の `Arc<MetalContext>` 複数スレッド
   共有契約と整合させるため）。
 - `encode(label, |encoder| ...) -> Result<(), MetalError>`: open batch が
@@ -194,13 +203,25 @@ open batch は以下のいずれかで閉じる。
    バッファが肥大化するのを防ぐ）。具体的な上限値は #1017 の実装時に決定する
    （本文書では「上限を設ける」ことのみを契約として確定する）。
 
-`autoreleasepool` の適用範囲は、現行の「1 dispatch ごとに 1 pool」から
-「バッチ生成〜synchronize まで 1 pool」へ広げる。この変更に伴い、pool の
-スコープを超えて生存させる必要があるオブジェクト（open batch が保持する
-コマンドバッファ・エンコーダ・in-flight バッファ）は `Retained`（objc2 の
-所有権保持型）で明示的にプールの外へ持ち出す設計にする（`autoreleasepool`
-は既定でスコープ終了時にプール内の autoreleased オブジェクトを解放するため、
-persist させたいオブジェクトを暗黙のスコープ依存にしない）。
+`autoreleasepool` はクロージャの字句スコープでのみ開始・終了できる（objc2
+の API 契約）ため、「バッチ生成〜synchronize まで 1 pool を開いたまま保持
+する」設計は採用できない。現行の「1 dispatch ごとに 1 pool」は維持せず、
+代わりに `encode`／`flush`／`synchronize` の**各呼び出しをそれぞれ個別の
+短命 `autoreleasepool` で囲む**設計に改める（呼び出し 1 回 = pool 1 回。
+バッチをまたいで pool を持ち越さない）。
+
+複数の `encode` 呼び出し・その後の `synchronize` にまたがって生存させる
+必要があるオブジェクト（open batch が保持するコマンドバッファ・エンコーダ・
+in-flight バッファ・§3.2 の影響ストアの `Weak` 参照）は、生成した
+`autoreleasepool` クロージャの内側で `Retained`（objc2 の所有権保持型）へ
+変換したうえで `Batch` 構造体のフィールドとして pool の外（`encode` 呼び出し
+自体の戻り値経由）へ持ち出し、次回以降の `encode`／`flush`／`synchronize`
+呼び出し（＝別の pool）からはその `Retained` 経由でのみ参照する。これにより
+「オブジェクトの寿命は個々の呼び出しの pool スコープを超えて `Batch` が
+所有する」「pool 自体は各呼び出しの字句スコープに閉じる」の両方を矛盾なく
+満たす（`autoreleasepool` は既定でスコープ終了時にプール内の autoreleased
+オブジェクトを解放するため、persist させたいオブジェクトを暗黙のスコープ
+依存にしない）。
 
 ### 3.4 バッファ寿命・再利用契約
 
@@ -280,11 +301,26 @@ drop（`Tape` は計算グラフのノード管理のみを担い GPU リソー�
 1. エラーが判明した時点で、そのバッチに含まれていた全ての dispatch の出力を
    **無効とみなす**（バッチ内のどの dispatch が実際に失敗要因かを個別に
    切り分けない。診断のためラベル列はエラーメッセージに含める。§3.2）。
-2. `DeviceParamStore` は、synchronize を起点とするエラー（`step` 内部の
-   暗黙同期、または次回の `register_resident_leaves`／`sync_to_host` で
-   遅延して検出されるエラーを含む）を契機に `poisoned` へ遷移する。これは
-   既存の `StorePoisoned` 状態機械（§2.5・`.claude/rules/security.md` A08
-   「部分的に更新されたデバイス側パラメータをそのまま学習継続・推論に
+2. `DeviceParamStore` の poison 遷移は、**エラーを検出した `synchronize()`
+   呼び出しがそのバッチに登録された全ての影響ストア（§3.2 の影響ストア
+   登録）を直接 `poisoned` へ遷移させる**ことで行う。ストア自身が後から
+   自発的に `synchronize()` を呼んで初めて poison されるのではなく、
+   バッチの完了処理（`synchronize()` の内部実装。呼び出し元が
+   `DeviceParamStore::step`・別スレッドの `download`・`MetalContext` drop
+   のいずれであっても同一処理）が、そのバッチの status を検査した時点で
+   登録済みストアを直接 poison する。これにより、同一 `MetalContext` を
+   共有する別スレッド・別 API のホスト実体化が先に synchronize してバッチの
+   エラーを消費した場合でも、元の `DeviceParamStore` は「他者の
+   synchronize」に依存せず自分のバッチ登録経由で poison される（fail-closed
+   の維持。対称なホスト実体化が一切発生しない経路 — バッチが登録した
+   ストア全てが以降 `step`／`download`／`synchronize` を呼ばないまま放置
+   される場合 — についても、次回いずれかの API 呼び出し時に §3.5 の
+   暗黙・明示同期点を経由して同じバッチの status を再検査し、未消費のまま
+   だったエラーを遅延なく該当ストアへ伝播する。すなわちバッチの status
+   検査結果はバッチ側で一度確定させたら破棄せず、`Batch` が保持する `Result`
+   としてキャッシュし、登録ストアが増える限り再送可能にする）。
+   これは既存の `StorePoisoned` 状態機械（§2.5・`.claude/rules/security.md`
+   A08「部分的に更新されたデバイス側パラメータをそのまま学習継続・推論に
    使わせない」）の拡張であり、新しい状態を追加するものではない。
 3. `BackendOps`（`crates/tensor-core/src/backend_ops.rs:122`）へ非破壊的な
    拡張として `synchronize(&self) -> Result<(), BackendError>`（デフォルト
@@ -345,7 +381,11 @@ parity テストが green のまま）に委ねる。本文書では数値目標
 2. 複数パラメータに対する `sgd_step_device` の連続投入後の `sync_to_host`
    parity（既存の 100 step 累積判定パターンを流用し、許容誤差は変更しない）。
 3. `synchronize` 時のエラーが `DeviceParamStore` を `poisoned` へ正しく
-   遷移させること。
+   遷移させること。加えて §3.7 (2) の影響ストア登録契約を検証するケース
+   として、同一バッチへ `encode` した `DeviceParamStore` とは別の API
+   （例: 別スレッドからの `download`）が先に synchronize してエラーを消費
+   した場合でも、元の `DeviceParamStore` が poisoned へ遷移すること（バッチ
+   登録経由の直接 poison。呼び出し元の同一性に依らないことの回帰確認）。
 4. `dispatch_sync` 互換経路（既存呼び出し元を変更しない場合の後方互換）の
    既存 parity テストが不変であること。
 
