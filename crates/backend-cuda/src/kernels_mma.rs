@@ -928,8 +928,9 @@ impl RenderedMmaKernel {
     /// 乖離が生じない（`CudaKernelCacheKey` ドキュメンテーションコメント
     /// 「C-5」節と同じ意図）。
     ///
-    /// 唯一の呼び出し元 [`Self::cache_key`]（延いては [`Self::compile`]）が
-    /// `internal-diagnostics` feature（既定 off）ゲート経由の
+    /// 唯一の呼び出し元 [`Self::compile`]（`crate::module_cache::
+    /// load_function_cached` へ本メソッドの戻り値を渡す。イシュー #1024）
+    /// が `internal-diagnostics` feature（既定 off）ゲート経由の
     /// `gemm_auto.rs::SpecializedMmaKernelHandle::compile` からのみ呼ばれる
     /// ため、既定ビルドでは crate 内呼び出し元が存在せず dead-code 解析が
     /// 誤検知する。`#[allow(dead_code)]` の理由は [`Self::compile`] と同じ。
@@ -958,38 +959,6 @@ impl RenderedMmaKernel {
         )
     }
 
-    /// [`Self::cache_descriptor`]・`device`（compute capability・arch）・
-    /// [`crate::nvrtc::nvrtc_version`]・`self.source`（最終レンダー済み
-    /// ソース全体。C-5・#514 契約）から [`crate::nvrtc::CudaKernelCacheKey`]
-    /// を構築する（イシュー #511・C-4）。
-    ///
-    /// `compile_flags` は `--gpu-architecture=<arch>`（`compile_ptx` が
-    /// 実際に `CompileOptions::arch` へ渡す値と同一の `device.arch()`。
-    /// `nvrtc.rs` のキャッシュキーテスト群と同じ表記規約）のみを含める。
-    /// include path フォールバック（`compile_ptx` の `CUDA_INCLUDE_PATH`／
-    /// 既定パス探索）はキーへ含めない: toolkit ヘッダの ABI 差は
-    /// `nvrtc_version` フィールドが追従するため（`CudaKernelCacheKey`
-    /// ドキュメンテーションコメント「ソースコード断片」節と同じ判断）。
-    ///
-    /// `#[allow(dead_code)]` の理由は [`Self::cache_descriptor`] と同じ
-    /// （唯一の呼び出し元 [`Self::compile`] が `internal-diagnostics`
-    /// feature ゲート経由でのみ到達するため、既定ビルドで dead-code 解析
-    /// が誤検知する）。
-    #[allow(dead_code)]
-    fn cache_key(
-        &self,
-        device: &crate::device::CudaDevice,
-    ) -> Result<crate::nvrtc::CudaKernelCacheKey, CudaError> {
-        let descriptor = self.cache_descriptor()?;
-        let compile_flags = vec![format!("--gpu-architecture={}", device.arch())];
-        crate::nvrtc::CudaKernelCacheKey::from_device(
-            descriptor,
-            device,
-            compile_flags,
-            self.source.clone(),
-        )
-    }
-
     /// カーネルソースを NVRTC コンパイル → 固定エントリポイント
     /// `"gemm_mma_f16"` のロードまで descriptor 内部で完結させ、結果
     /// （`CudaFunction`）と展開元 `cfg` を不可分に束ねた
@@ -1000,128 +969,28 @@ impl RenderedMmaKernel {
     /// `CudaFunction`（別カーネル・別モジュールの関数）を返しても型上
     /// 検出できず、以降 `launch_f16` が前提とする「検証済み `cfg` と
     /// `self.func` が対応している」契約がホスト側からは検証不能なまま
-    /// 崩れうる欠陥があった。`compile_ptx`・`load_module`・
-    /// `load_function` をこのメソッド内で直接呼ぶことで、`self.source`
-    /// 以外のソースから得た `CudaFunction` を `CompiledMmaKernel` へ
-    /// 格納する経路自体を型・構造の両面で消す。
+    /// 崩れうる欠陥があった。ソース（`&self.source`）を本メソッド内部から
+    /// のみ [`crate::module_cache::load_function_cached`] へ渡すことで、
+    /// `self.source` 以外のソースから得た `CudaFunction` を
+    /// `CompiledMmaKernel` へ格納する経路自体を型・構造の両面で消す。
     ///
-    /// # 3 段フォールバック（イシュー #511・C-4。実装計画 §3.4）
-    ///
-    /// 1. **プロセス内 LRU**（[`crate::module_cache::KernelModuleCache`]）:
-    ///    同一 `CudaContext`・同一キャッシュキーでロード済みの
-    ///    `Arc<CudaModule>` があれば `cuModuleGetFunction`（軽量）のみで
-    ///    済ませ、NVRTC 再コンパイル・`load_module` 再ロードを回避する。
-    /// 2. **ディスクキャッシュ**（[`crate::nvrtc::load_cache_entry`]。
-    ///    C-3・#509）: ソース全文のバイト単位照合込みでヒット判定のみ
-    ///    行う。**ヒットしてもディスク上の `kernel.ptx` は実行入力として
-    ///    使わない**（イシュー #511 PR #703 codex-review P0 再指摘対応。
-    ///    詳細理由は下記実装のコメント参照）。ヒット／ミスいずれの場合も
-    ///    3 段目の NVRTC 直コンパイルへ進み、このプロセス内で生成した
-    ///    PTX のみを `load_module` する。
-    /// 3. **NVRTC 直コンパイル**（2 段目のヒット／ミスを問わず必ず実行):
-    ///    `compile_ptx` 実行後、ディスクに当該キーのエントリがまだ
-    ///    なければ [`crate::nvrtc::store_cache_entry`] でディスクへ保存
-    ///    する（C-2〜C-3 が用意した導線への結線。設計文書
-    ///    `docs/cuda-jit-cache-design.md` C-4 節）。
-    ///
-    /// いずれの段でロードした `Arc<CudaModule>` も、最終的に
-    /// [`crate::module_cache::KernelModuleCache::insert`] へ登録し、次回
-    /// 以降のプロセス内再利用に備える。
-    ///
-    /// # 縮退方針（fail-safe。実装計画 §3.5）
-    ///
-    /// プロセス内 LRU（容量設定不正・`Mutex` poison 等）・ディスク
-    /// キャッシュ（`workspace_root` 解決不能・fs I/O 失敗）いずれの失敗も
-    /// コンパイル失敗にせず、直後の段（最終的には NVRTC 直コンパイル）へ
-    /// 静かにフォールバックする。両キャッシュはあくまで最適化であり、
-    /// 数値正しさは NVRTC 直コンパイル経路・ディスクキャッシュのソース
-    /// 全文照合（[`crate::nvrtc::load_cache_entry`]。ハッシュ衝突安全弁）の
-    /// いずれでも独立に保たれるため、キャッシュ層の可用性低下が誤った
-    /// PTX の実行につながることはない（`module_cache.rs` 冒頭ドキュメン
-    /// テーションコメント「縮退方針」・`crate::nvrtc::runtime_workspace_root`
-    /// ドキュメンテーションコメントと同じ判断）。
+    /// 3 段フォールバック（プロセス内 LRU → ディスクキャッシュ照合 →
+    /// NVRTC 直コンパイル）・縮退方針の詳細は
+    /// [`crate::module_cache::load_function_cached`] のドキュメンテーション
+    /// コメントを正とする（イシュー #1024 で `gemm.rs::CudaGemm::new` と
+    /// 共有する実装へ抽出したため、本メソッド側では二重記載しない）。
     #[allow(dead_code)]
     pub fn compile(
         &self,
         device: &crate::device::CudaDevice,
     ) -> Result<CompiledMmaKernel, CudaError> {
-        let ctx = device.context();
-        let key = self.cache_key(device)?;
-
-        // 1 段目: プロセス内 LRU。キャッシュ自体が利用不能（容量設定
-        // 不正・poison）でもフォールバックし続ける（縮退方針）。
-        let module_cache = crate::module_cache::KernelModuleCache::global().ok();
-        if let Some(cache) = module_cache
-            && let Ok(Some(module)) = cache.get(ctx, &key)
-        {
-            let func = module.load_function("gemm_mma_f16")?;
-            return Ok(CompiledMmaKernel {
-                func,
-                cfg: self.cfg,
-            });
-        }
-
-        // ディスクキャッシュの読み書きに使う `workspace_root`。解決失敗も
-        // 縮退運転（ディスクキャッシュなし）へ倒す（`runtime_workspace_root`
-        // ドキュメンテーションコメント参照）。
-        let workspace_root = crate::nvrtc::runtime_workspace_root().ok();
-
-        // 2 段目: ディスクキャッシュ（ソース全文のバイト照合込み）。
-        //
-        // **ヒットしてもディスク上の `kernel.ptx` バイト列を実行入力として
-        // 使わない（イシュー #511 PR #703 codex-review P0 再指摘対応）**:
-        // `load_cache_entry` がここで検証するのは「保存済み `kernel.cu` が
-        // `self.source` とバイト単位で一致すること」のみであり、同一
-        // ディレクトリの `kernel.ptx` がそのソースから実際に生成された
-        // 成果物であることまでは検証しない。追加した権限検査
-        // （`nvrtc::is_cache_entry_permission_untrusted`。同一 uid のみ
-        // 信頼）を経てもなお、同一 uid の別プロセス・侵害プロセスが
-        // `kernel.cu` を保ったまま `kernel.ptx` だけを任意の有効な PTX へ
-        // 差し替える攻撃は防げない（ファイルを書き換えられる主体は同じ
-        // uid で新たな正当エントリも作れてしまうため、暗号学的ダイジェスト
-        // をディスク上へ同居させても認証にはならない。許容依存 8 区分
-        // `.claude/rules/deps-policy.md` に署名検証用クレートは含まれず
-        // 新規追加はユーザー承認が要るため本 PR のスコープでは導入
-        // しない）。よって disk hit は「ソース一致が確認できた」という
-        // シグナルとしてのみ扱い、実際にロードする PTX は常にこのプロセス
-        // 内で NVRTC が生成したものに限る（hit／miss いずれの分岐でも
-        // `compile_ptx` を経由する。下記参照）。`load_cache_entry` 呼び
-        // 出しそのもの（#509 の fs 配線・権限検査）は将来、認証済み検証
-        // 手段を導入した際に実行入力として再有効化できるよう維持する。
-        let disk_hit = workspace_root.as_ref().and_then(|root| {
-            crate::nvrtc::load_cache_entry(root, &key, &self.source)
-                .ok()
-                .flatten()
-        });
-
-        // 3 段目: NVRTC 直コンパイル。上記の理由によりディスクキャッシュが
-        // 保持する PTX バイト列は信頼せず、hit／miss いずれの場合も
-        // このプロセス内で NVRTC を実行して得た PTX のみをロードする
-        // （ディスク PTX を実行しない、という codex-review 指摘の対応案を
-        // 採用。安全な認証手段〈署名／暗号学的バインディング〉を導入する
-        // までの間の恒常方針とする）。
-        let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
-        if disk_hit.is_none()
-            && let Some(root) = workspace_root.as_ref()
-        {
-            // C-4 導線: コンパイル成功後、ディスクに当該キーのエントリが
-            // まだない場合のみ store_cache_entry を呼ぶ（設計文書
-            // `docs/cuda-jit-cache-design.md` C-4 節）。保存失敗はコン
-            // パイル結果自体には影響しない（縮退方針）ため戻り値は無視
-            // する。上記のとおりこのエントリは将来の認証済み検証手段
-            // 導入まで実行入力としては使われないが、#509 のディスク
-            // 永続化自体は今後の再有効化に備えて維持する。
-            let _ = crate::nvrtc::store_cache_entry(root, &key, &self.source, &ptx.to_src());
-        }
-        let module = ctx.load_module(ptx)?;
-
-        // ロード済みモジュールをプロセス内 LRU へ登録する（挿入失敗＝
-        // poison も縮退方針でコンパイル結果自体は返す）。
-        if let Some(cache) = module_cache {
-            let _ = cache.insert(ctx, key, std::sync::Arc::clone(&module));
-        }
-
-        let func = module.load_function("gemm_mma_f16")?;
+        let descriptor = self.cache_descriptor()?;
+        let func = crate::module_cache::load_function_cached(
+            device,
+            descriptor,
+            &self.source,
+            "gemm_mma_f16",
+        )?;
         Ok(CompiledMmaKernel {
             func,
             cfg: self.cfg,
