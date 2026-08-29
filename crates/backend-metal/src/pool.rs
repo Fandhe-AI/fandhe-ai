@@ -261,7 +261,21 @@ impl MetalAllocator {
                 // ページはゼロ初期化済み」という既存の暗黙契約に乗る
                 // （本関数はフレッシュ経路〈下記 `alloc_fresh`〉で明示
                 // ゼロクリアを行わない）。
-                self.context.synchronize()?;
+                // `record_reuse` 済みの貸出は、この `synchronize()` が失敗
+                // すると `PooledMetalHandle` が構築されず `Drop` 経由の
+                // `record_loan_end` も走らないため、統計を明示的に巻き戻して
+                // からエラーを返す（codex P2・Cursor Bugbot Low: 巻き戻しを
+                // 怠ると `capacity_waste_bytes` がプロセス生存期間にわたり
+                // 過大表示される）。`waitUntilCompleted` 復帰後はコマンド
+                // バッファが成功・失敗いずれでも完了しており GPU は本
+                // バッファを参照しないため、`raw` はそのまま drop して
+                // MTLBuffer を解放する（フリーリストへは戻さない: 失敗時に
+                // 解放処理を進めない §3.6 の契約とは別経路の貸出前初期化
+                // であり、保持し続ける理由がない）。
+                if let Err(e) = self.context.synchronize() {
+                    self.pool.record_loan_end(logical_bytes, class_bytes);
+                    return Err(e);
+                }
                 raw.zero_fill_logical(len);
             }
             return Ok(PooledMetalHandle {
