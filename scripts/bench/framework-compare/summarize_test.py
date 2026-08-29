@@ -20,6 +20,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -417,6 +418,73 @@ class MainStrictExitCodeTests(unittest.TestCase):
             self.assertEqual(code, 0)
         finally:
             os.unlink(path)
+
+
+class ToleranceDriftTests(unittest.TestCase):
+    """`CHECKSUM_*`/`PARITY_*`（summarize.py）が本体 `backend-cpu::parity`
+    の契約値から乖離していないことを機械照合する。
+
+    このハーネスは本体 workspace 外の独立 workspace（`.claude/rules/
+    deps-policy.md` 第 9 区分）のため本体クレートを import できず、
+    閾値は summarize.py・bench-common（Rust 側）双方に再定義している。
+    本体側だけが変更されると静かに乖離しうるため、代わりに本体ソースを
+    直接読んで数値を照合し、乖離・読み取り失敗のいずれも fail-closed
+    （test failure）で検知する（イシュー #970 codex-review 指摘・
+    PR #978 P1）。Rust 側の同趣旨テストは
+    `bench-common::parity::tests::parity_tolerances_match_backend_cpu_contract`。
+    """
+
+    def test_summarize_tolerances_match_backend_cpu_contract(self):
+        # HERE (scripts/bench/framework-compare) からリポジトリルートまでは
+        # 3 階層上（framework-compare → bench → scripts → root）。
+        backend_cpu_parity_path = os.path.join(
+            HERE, "..", "..", "..", "crates", "backend-cpu", "src", "parity.rs"
+        )
+        try:
+            with open(backend_cpu_parity_path, encoding="utf-8") as f:
+                source = f.read()
+        except OSError as err:
+            self.fail(
+                f"本体 parity.rs を読めない（{backend_cpu_parity_path}）: {err}。"
+                "パスがずれていないか確認すること"
+            )
+
+        rel_tol = _extract_f64_const(source, "RELATIVE_TOLERANCE")
+        abs_tol = _extract_f64_const(source, "ABSOLUTE_RESCUE_THRESHOLD")
+
+        self.assertEqual(
+            rel_tol,
+            summarize.CHECKSUM_REL_TOL,
+            "CHECKSUM_REL_TOL/PARITY_REL_TOL が backend-cpu::parity::"
+            "RELATIVE_TOLERANCE から乖離している。閾値の変更はユーザー承認"
+            "必須（.claude/rules/coding-rust.md）",
+        )
+        self.assertEqual(
+            abs_tol,
+            summarize.CHECKSUM_ABS_TOL,
+            "CHECKSUM_ABS_TOL/PARITY_ABS_TOL が backend-cpu::parity::"
+            "ABSOLUTE_RESCUE_THRESHOLD から乖離している。閾値の変更は"
+            "ユーザー承認必須（.claude/rules/coding-rust.md）",
+        )
+
+
+def _extract_f64_const(source, name):
+    """`pub const <name>: f64 = <value>;` 形式の宣言から数値を取り出す。
+
+    本体 `crates/backend-cpu/src/parity.rs` の宣言スタイル固定を前提に
+    した簡易パーサー（正規表現クレート追加を避けるため stdlib `re` の
+    みで十分）。宣言が見つからない・数値化できない場合は fail-closed に
+    例外を送出する（呼び出し側の `TestCase` が失敗として報告する）。
+    """
+    match = re.search(
+        rf"pub const {re.escape(name)}: f64 = ([^;]+);", source
+    )
+    if match is None:
+        raise AssertionError(
+            f"本体 parity.rs に `pub const {name}: f64 = ...;` の宣言が"
+            "見つからない（宣言スタイルが変わった可能性）"
+        )
+    return float(match.group(1).strip())
 
 
 if __name__ == "__main__":

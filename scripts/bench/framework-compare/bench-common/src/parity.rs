@@ -35,6 +35,13 @@ use crate::BenchError;
 
 /// 本体 `backend-cpu::parity::RELATIVE_TOLERANCE` と同値の相対誤差閾値。
 ///
+/// **正は `crates/backend-cpu/src/parity.rs::RELATIVE_TOLERANCE`**。本
+/// ワークスペースは独立 workspace（`.claude/rules/deps-policy.md` 第 9
+/// 区分）のため本体クレートへ path 依存できず、値をここへ再定義する
+/// 以外の選択肢がない。乖離は `tests::parity_tolerances_match_backend_cpu_contract`
+/// が本体ソースを読んで機械照合し fail-closed に検出する（イシュー #970
+/// codex-review 指摘・PR #978 P1）。
+///
 /// **変更はユーザー承認必須**（`.claude/rules/coding-rust.md`
 /// 「バックエンド間数値一致テストの許容誤差を単独で緩和しない」・
 /// `.claude/rules/security.md` A08）。ベンチの相互検証は本体の数値一致
@@ -42,8 +49,8 @@ use crate::BenchError;
 pub const PARITY_REL_TOL: f64 = 1e-3;
 
 /// 本体 `backend-cpu::parity::ABSOLUTE_RESCUE_THRESHOLD` と同値の絶対誤差
-/// 救済閾値（0 近傍の相対誤差跳ね上がり対策）。変更はユーザー承認必須
-/// （[`PARITY_REL_TOL`] と同じ理由）。
+/// 救済閾値（0 近傍の相対誤差跳ね上がり対策）。正・乖離検出・変更承認の
+/// 方針は [`PARITY_REL_TOL`] と同じ。
 pub const PARITY_ABS_TOL: f64 = 1e-5;
 
 /// GEMM の要素単位検証結果。反復間の worst-case を保持する
@@ -502,5 +509,66 @@ mod tests {
         let out = reference.as_slice().to_vec();
         let stats = reference.verify(&out).expect("verify");
         assert_eq!(stats.fail_count, 0);
+    }
+
+    /// [`PARITY_REL_TOL`]/[`PARITY_ABS_TOL`] は本体 `backend-cpu::parity`
+    /// の値を独立 workspace の制約下で再定義したもの（両定数のドキュメント
+    /// コメント参照）。本体側だけが変更されるとここが静かに乖離し、ベンチの
+    /// 合否判定・レポート表示（`summarize.py` の `CHECKSUM_*`/`PARITY_*`
+    /// 経由）が本体の承認済み契約と食い違う（イシュー #970 codex-review
+    /// 指摘・PR #978 P1）。単一の正へ集約できない（deps-policy.md 第 9
+    /// 区分により本体クレートへ path 依存できない）ため、代わりに本体
+    /// ソースを直接読んで数値を機械照合し、乖離を fail-closed（パース失敗
+    /// も含め test failure）で検知する。
+    #[test]
+    fn parity_tolerances_match_backend_cpu_contract() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        // bench-common (scripts/bench/framework-compare/bench-common) から
+        // リポジトリルートまでは 4 階層上（framework-compare → bench →
+        // scripts → root）。
+        let backend_cpu_parity_path =
+            std::path::Path::new(manifest_dir).join("../../../../crates/backend-cpu/src/parity.rs");
+        let source = std::fs::read_to_string(&backend_cpu_parity_path).unwrap_or_else(|err| {
+            panic!(
+                "本体 parity.rs を読めない（{}）: {err}。\
+                 パスがずれていないか確認すること",
+                backend_cpu_parity_path.display()
+            )
+        });
+
+        let rel_tol = extract_f64_const(&source, "RELATIVE_TOLERANCE");
+        let abs_tol = extract_f64_const(&source, "ABSOLUTE_RESCUE_THRESHOLD");
+
+        assert_eq!(
+            rel_tol, PARITY_REL_TOL,
+            "PARITY_REL_TOL が backend-cpu::parity::RELATIVE_TOLERANCE から乖離している。\
+             閾値の変更はユーザー承認必須（.claude/rules/coding-rust.md）"
+        );
+        assert_eq!(
+            abs_tol, PARITY_ABS_TOL,
+            "PARITY_ABS_TOL が backend-cpu::parity::ABSOLUTE_RESCUE_THRESHOLD から乖離している。\
+             閾値の変更はユーザー承認必須（.claude/rules/coding-rust.md）"
+        );
+    }
+
+    /// `pub const <name>: f64 = <value>;` 形式の宣言から数値を取り出す。
+    /// 本体 `crates/backend-cpu/src/parity.rs` の宣言スタイル固定を前提に
+    /// した簡易パーサー（正規表現クレートを追加しないため文字列走査で
+    /// 十分。宣言が見つからない・数値化できない場合は fail-closed に
+    /// panic する）。
+    fn extract_f64_const(source: &str, name: &str) -> f64 {
+        let needle = format!("pub const {name}: f64 = ");
+        let start = source.find(&needle).unwrap_or_else(|| {
+            panic!(
+                "本体 parity.rs に `{needle}` の宣言が見つからない（宣言スタイルが変わった可能性）"
+            )
+        });
+        let rest = &source[start + needle.len()..];
+        let end = rest.find(';').unwrap_or_else(|| {
+            panic!("本体 parity.rs の `{name}` 宣言に終端の `;` が見つからない")
+        });
+        rest[..end].trim().parse::<f64>().unwrap_or_else(|err| {
+            panic!("本体 parity.rs の `{name}` 宣言値を f64 として解釈できない: {err}")
+        })
     }
 }
