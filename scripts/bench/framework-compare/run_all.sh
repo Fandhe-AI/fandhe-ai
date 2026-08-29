@@ -11,11 +11,11 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
-run() { # run <binary> <task> <device> <size> [mode]
-  local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh}
-  echo "== $bin $task $device size=$size mode=$mode =="
-  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" --out "$OUT" 2>err.tmp; then
-    echo "$bin task=$task device=$device size=$size mode=$mode : $(cat err.tmp)" >> "$SKIP"
+run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
+  local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh} extra_flag=${6:-}
+  echo "== $bin $task $device size=$size mode=$mode extra=${extra_flag:-none} =="
+  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" ${extra_flag:+"$extra_flag"} --out "$OUT" 2>err.tmp; then
+    echo "$bin task=$task device=$device size=$size mode=$mode extra=${extra_flag:-none} : $(cat err.tmp)" >> "$SKIP"
     echo "  -> FAILED (recorded in $SKIP)"
   fi
   rm -f err.tmp
@@ -57,6 +57,16 @@ done
 # 判別しづらくなる。codex-review 指摘 #944 discussion_r3877595038 と同じ理由）
 for dev in cpu metal; do
   run bench-fandhe train "$dev" 64 reuse
+done
+
+# (b'') MLP 学習 1 step のフェーズ分解（イシュー #1009。bench-fandhe の
+# train タスクのみ対応。(a')/(b') と同じ理由で bench-candle / bench-burn は
+# ループに含めない: --phases は必ず MEASURE_ERROR で fail-fast する仕様の
+# ため、対象外の 2 バイナリまで含めると既知の対象外失敗が skipped.log の
+# 実際の計測失敗と混在し判別しづらくなる）
+for dev in cpu metal; do
+  run bench-fandhe train "$dev" 64 fresh --phases
+  run bench-fandhe train "$dev" 64 reuse --phases
 done
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"

@@ -56,6 +56,11 @@ pub enum BenchError {
     /// panic するため、`std::thread::Builder::spawn_scoped` で `Result` として
     /// 受け取り型付きエラーへ変換する）。イシュー #970 codex-review 指摘（P1）。
     ThreadSpawnFailed { source: std::io::Error },
+    /// [`PhaseRecord`] の `phase` 名が `[a-z0-9_]+` の allowlist を満たさない
+    /// （イシュー #1009）。`phase` はバイナリ内の定数文字列のみを渡す設計
+    /// だが、手組み JSON への文字列混入を fail-closed に遮断する
+    /// （security.md A03 と同じ思想。`BenchError::InvalidMode` と同型）。
+    InvalidPhaseName { value: String },
 }
 
 impl std::fmt::Display for BenchError {
@@ -105,6 +110,12 @@ impl std::fmt::Display for BenchError {
                 write!(
                     f,
                     "MEASURE_ERROR: gemm reference thread spawn failed: {source}"
+                )
+            }
+            BenchError::InvalidPhaseName { value } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: phase name '{value}' must match [a-z0-9_]+"
                 )
             }
         }
@@ -286,22 +297,81 @@ impl Record<'_> {
     /// propagated (typed) instead of panicking, so a bench binary exits with a
     /// diagnostic and the sweep script records the combination as skipped.
     pub fn emit(&self, path: &str) -> Result<(), BenchError> {
-        let io_err = |source: std::io::Error| BenchError::Io {
-            path: path.to_string(),
-            source,
-        };
-        let line = self.to_json_line();
-        println!("{line}");
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            std::fs::create_dir_all(parent).map_err(io_err)?;
-        }
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(io_err)?;
-        writeln!(f, "{line}").map_err(io_err)?;
+        emit_line(path, &self.to_json_line())
+    }
+}
+
+/// `Record::emit` / `PhaseRecord::emit`（イシュー #1009）が共用する追記処理。
+/// stdout へのエコー + `path`（JSONL）への追記を 1 箇所にまとめ、両者の
+/// I/O 経路（ディレクトリ作成・open・write）を二重管理しない。
+fn emit_line(path: &str, line: &str) -> Result<(), BenchError> {
+    let io_err = |source: std::io::Error| BenchError::Io {
+        path: path.to_string(),
+        source,
+    };
+    println!("{line}");
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).map_err(io_err)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(io_err)?;
+    writeln!(f, "{line}").map_err(io_err)?;
+    Ok(())
+}
+
+/// phase 名の allowlist（イシュー #1009）。`bench-fandhe` の `PHASE_*` 定数
+/// は `[a-z0-9_]+` のみを使う設計だが、ここで fail-closed に検証すること
+/// で手組み JSON への文字列混入経路を閉じる（security.md A03。
+/// `BenchError::InvalidMode` の allowlist 検証と同じ思想）。
+fn validate_phase_name(value: &str) -> Result<(), BenchError> {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
         Ok(())
+    } else {
+        Err(BenchError::InvalidPhaseName {
+            value: value.to_string(),
+        })
+    }
+}
+
+/// `train --phases`（イシュー #1009）の 1 区間 = 1 JSON 行。`Record` を
+/// ラップし、末尾に `phase`/`phase_index` の 2 キーを追加する。`Record` の
+/// フィールド集合自体は変えない（`bench-candle`/`bench-burn` の
+/// `Record { .. }` リテラルへ影響させないため）。
+pub struct PhaseRecord<'a> {
+    pub base: Record<'a>,
+    /// 区間名（`[a-z0-9_]+`。`bench-fandhe` の `PHASE_*` 定数を渡す）。
+    pub phase: &'a str,
+    /// 区間の出力順（0 始まり）。summarize.py の (b'') 節がこの順に表示する。
+    pub phase_index: usize,
+}
+
+impl PhaseRecord<'_> {
+    /// `Record::to_json_line()` の末尾 `}` の直前に `phase`/`phase_index` を
+    /// 挿入する。`phase` は [`validate_phase_name`] で検証し、不正な値は
+    /// 型付きエラーとして拒否する（呼び出し元は `?` で伝播させる）。
+    pub fn to_json_line(&self) -> Result<String, BenchError> {
+        validate_phase_name(self.phase)?;
+        let mut base_line = self.base.to_json_line();
+        // to_json_line() は常に単一行の `{...}` を返すため末尾は `}` で
+        // 終わる（Record::to_json_line 実装参照）。pop で除去して追記する。
+        base_line.pop();
+        Ok(format!(
+            "{base_line},\"phase\":\"{}\",\"phase_index\":{}}}",
+            self.phase, self.phase_index
+        ))
+    }
+
+    /// [`Record::emit`] と同じ追記処理（[`emit_line`] を共用）。
+    pub fn emit(&self, path: &str) -> Result<(), BenchError> {
+        let line = self.to_json_line()?;
+        emit_line(path, &line)
     }
 }
 
@@ -315,20 +385,33 @@ pub struct Cli {
     /// "fresh"（既定。既存プロトコルと同一）または "reuse"（イシュー #925。
     /// デバイス/tape を使い回し、初期化コストとカーネル実行を分離計測する）。
     pub mode: String,
+    /// `--phases`（値なしフラグ。イシュー #1009）。1 step の合計時間ではなく
+    /// 区間別の median/Q1/Q3 を出力する。既定 `false`（既存プロトコル不変）。
+    /// `bench-fandhe` の `task:"train"` のみ対応（`run()` の分岐で判定）。
+    pub phases: bool,
 }
 
-/// Parse the CLI arguments. An unparsable `--size` / unknown `--mode` is a
-/// typed error (diagnosed at the binary boundary), not a panic. `--mode` は
-/// allowlist（fresh/reuse）検証のみで、それ以外の値をフレームワーク側の
-/// 分岐へそのまま流さない（security.md A03 相当の方針）。
+/// Parse the CLI arguments from `std::env::args()`. 薄いラッパーで、実体は
+/// [`parse_cli_from`]（単体テスト可能化。イシュー #1009）。
 pub fn parse_cli() -> Result<Cli, BenchError> {
     let args: Vec<String> = std::env::args().collect();
+    parse_cli_from(&args)
+}
+
+/// [`parse_cli`] の本体。An unparsable `--size` / unknown `--mode` is a
+/// typed error (diagnosed at the binary boundary), not a panic. `--mode` は
+/// allowlist（fresh/reuse）検証のみで、それ以外の値をフレームワーク側の
+/// 分岐へそのまま流さない（security.md A03 相当の方針）。`args` の先頭は
+/// `std::env::args()` と同じくバイナリパス（インデックス 0）を想定するが、
+/// フラグ探索は位置に依らないため実際には無視される。
+pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
     let get = |flag: &str| -> Option<String> {
         args.iter()
             .position(|a| a == flag)
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
+    let has_flag = |flag: &str| -> bool { args.iter().any(|a| a == flag) };
     let size = match get("--size") {
         Some(s) => s.parse().map_err(|_| BenchError::InvalidArg {
             flag: "--size",
@@ -346,6 +429,7 @@ pub fn parse_cli() -> Result<Cli, BenchError> {
         size,
         out: get("--out").unwrap_or_else(|| "results/raw/results.jsonl".into()),
         mode,
+        phases: has_flag("--phases"),
     })
 }
 
@@ -543,5 +627,75 @@ mod tests {
         assert!(line.contains("\"parity_max_rel_err\":null"));
         // fail_count 自体は非有限ではないので通常どおり数値で出力される。
         assert!(line.contains("\"parity_fail_count\":1"));
+    }
+
+    // イシュー #1009: `--phases`（`parse_cli_from`）・`PhaseRecord` の契約。
+
+    fn args(v: &[&str]) -> Vec<String> {
+        std::iter::once("bench".to_string())
+            .chain(v.iter().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_cli_from_defaults_phases_to_false() {
+        let cli = parse_cli_from(&args(&["--task", "train"])).expect("parse should succeed");
+        assert!(!cli.phases);
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_phases_flag() {
+        let cli =
+            parse_cli_from(&args(&["--task", "train", "--phases"])).expect("parse should succeed");
+        assert!(cli.phases);
+    }
+
+    #[test]
+    fn parse_cli_from_phases_flag_is_order_independent() {
+        // 値なしフラグのため他フラグの前後どちらに置いても解釈が変わらない
+        // ことを固定する（`get()` の位置探索と異なり `has_flag` は値を
+        // 消費しないため、隣接フラグの値と誤認しない）。
+        let cli = parse_cli_from(&args(&["--phases", "--task", "train", "--mode", "reuse"]))
+            .expect("parse should succeed");
+        assert!(cli.phases);
+        assert_eq!(cli.task, "train");
+        assert_eq!(cli.mode, "reuse");
+    }
+
+    fn sample_phase_record(phase: &'static str, phase_index: usize) -> PhaseRecord<'static> {
+        PhaseRecord {
+            base: sample_record("fresh", None),
+            phase,
+            phase_index,
+        }
+    }
+
+    #[test]
+    fn phase_record_json_line_appends_phase_keys_after_base_fields() {
+        let line = sample_phase_record("forward", 2)
+            .to_json_line()
+            .expect("valid phase name");
+        // 既存 Record のキーは不変のまま維持され、末尾に phase 情報が追加
+        // される契約（§3.3）。
+        assert!(line.contains("\"task\":\"gemm\""));
+        assert!(line.contains("\"mode\":\"fresh\""));
+        assert!(line.ends_with("\"phase\":\"forward\",\"phase_index\":2}"));
+    }
+
+    #[test]
+    fn phase_record_rejects_invalid_phase_name() {
+        let err = sample_phase_record("Forward Pass!", 0)
+            .to_json_line()
+            .expect_err("invalid phase name must be rejected");
+        assert!(matches!(err, BenchError::InvalidPhaseName { .. }));
+        assert!(err.to_string().starts_with("MEASURE_ERROR:"));
+    }
+
+    #[test]
+    fn phase_record_rejects_empty_phase_name() {
+        let err = sample_phase_record("", 0)
+            .to_json_line()
+            .expect_err("empty phase name must be rejected");
+        assert!(matches!(err, BenchError::InvalidPhaseName { .. }));
     }
 }
