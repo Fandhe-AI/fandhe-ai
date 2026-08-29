@@ -80,6 +80,34 @@ def fmt_ms(s):
     return f"{s * 1e6:.1f} µs"
 
 
+def _safe_time_s(v):
+    """外部 JSONL 由来の時間値（init_s / median_s / q1_s / q3_s）を表示・
+    比率計算の前に検証する。`_is_plain_number` で bool・NaN・Infinity・
+    非数値を弾いたうえで、時間として不正な非正値（0 以下）も無効とする
+    （security.md「外部フォーマットのパース時検証（A03）」。イシュー #959
+    codex-review P0 指摘: (b') 経路で検証していたのは比率計算の
+    median_s のみで、init_s・q1_s・q3_s・fresh 側の値は未検証のまま
+    `fmt_ms` へ渡され、文字列や負値・NaN が混入すると比較演算で
+    TypeError になるか不正な表示を生じていた）。有効なら `float` を、
+    無効なら `None` を返す（fail-closed。呼び出し側は `None` を
+    「無効な値」表示に倒す）。
+    """
+    if not _is_plain_number(v):
+        return None
+    fv = float(v)
+    return fv if fv > 0 else None
+
+
+def _safe_finite_number(v):
+    """外部 JSONL 由来の数値（checksum 等、正値制約のないもの）を使用前に
+    検証する。`_is_plain_number` と同じ bool・NaN・Infinity 除外に加え、
+    `float` へ正規化する（イシュー #959 codex-review P0 指摘。`checksums_match`
+    への未検証な受け渡しを避ける）。有効なら `float` を、無効なら `None` を
+    返す。
+    """
+    return float(v) if _is_plain_number(v) else None
+
+
 def load_rows(path):
     # mode（イシュー #925）欠損は "fresh" 扱い（本フィールド追加前にコミット
     # 済みの JSONL との互換維持。モジュール docstring 参照）。
@@ -622,25 +650,54 @@ def section(path, rows):
                 if not r:
                     continue
                 fresh = get(rows, fw, "train", device, mode="fresh")
-                init_col = fmt_ms(r["init_s"]) if r.get("init_s") is not None else "-"
-                # median_s は外部 JSONL（bench-fandhe / 他フレームワークの計測
-                # 出力）由来であり、型・値域を検証せず除数にすると 0 で
-                # ZeroDivisionError、負値・非有限値でも不正な比率を出力して
-                # しまう（security.md 「外部フォーマットのパース時検証
-                # （A03）」。イシュー #959 codex-review P0 指摘）。
-                # `_is_plain_number` で bool・NaN・Infinity を弾いたうえで
-                # 有限かつ正であることを確認し、不正な行は比較不能として
-                # fail-closed に扱う（ratio_col を算出しない）。
-                reuse_median = r["median_s"]
-                fresh_median = fresh["median_s"] if fresh else None
-                if fresh and _is_plain_number(fresh_median) and fresh_median > 0 and _is_plain_number(reuse_median) and reuse_median > 0:
+                # median_s・q1_s・q3_s・init_s（表示・比率計算に使う全時間値）
+                # と checksum（最終 loss 突合）は外部 JSONL（bench-fandhe /
+                # 他フレームワークの計測出力）由来であり、型・値域を検証せず
+                # `fmt_ms` へ渡す・除数にする・`checksums_match` へ渡すと、
+                # 文字列で TypeError、bool・NaN・Infinity・負値で不正な表示・
+                # 判定を生じる（security.md「外部フォーマットのパース時検証
+                # （A03）」。イシュー #959 codex-review P0 指摘: 旧実装は
+                # 比率計算の median_s のみを検証しており、init_s・q1_s・q3_s・
+                # fresh 側の値・checksum は未検証のまま使われていた）。
+                # `_safe_time_s`（時間値: 有限かつ正のみ有効）・
+                # `_safe_finite_number`（checksum: 有限数のみ有効、符号は
+                # 制約しない）で使用前に検証し、不正な値は表示・計算に
+                # 使わず fail-closed に「無効な値」扱いとする。
+                r_median = _safe_time_s(r.get("median_s"))
+                r_q1 = _safe_time_s(r.get("q1_s"))
+                r_q3 = _safe_time_s(r.get("q3_s"))
+                r_init = _safe_time_s(r.get("init_s")) if r.get("init_s") is not None else None
+                r_checksum = _safe_finite_number(r.get("checksum"))
+
+                init_col = fmt_ms(r_init) if r_init is not None else "-"
+                median_col = fmt_ms(r_median) if r_median is not None else "無効な値"
+                q1_col = fmt_ms(r_q1) if r_q1 is not None else "無効な値"
+                q3_col = fmt_ms(r_q3) if r_q3 is not None else "無効な値"
+
+                fresh_median = _safe_time_s(fresh.get("median_s")) if fresh else None
+                fresh_checksum = _safe_finite_number(fresh.get("checksum")) if fresh else None
+
+                if fresh and fresh_median is not None and r_median is not None:
                     fresh_col = fmt_ms(fresh_median)
-                    ratio_col = f"{fresh_median / reuse_median:.2f} 倍"
+                    ratio_col = f"{fresh_median / r_median:.2f} 倍"
                 elif fresh:
                     fresh_col = "計測不正"
                     ratio_col = "-"
+                else:
+                    fresh_col = "未計測"
+                    ratio_col = "-"
+
                 if fresh:
-                    if checksums_match(r["checksum"], fresh["checksum"]):
+                    if r_checksum is None or fresh_checksum is None:
+                        match_col = "突合不能（無効値）"
+                        fw_col = f"{fw}（無効: checksum が不正な値）"
+                        print(
+                            f"warning: {rel}: {fw}/{device}/train/reuse の最終 loss "
+                            "checksum が不正な値（非数値・NaN・Infinity 等）のため突合不能 "
+                            "— 無効データとして表示",
+                            file=sys.stderr,
+                        )
+                    elif checksums_match(r_checksum, fresh_checksum):
                         match_col = "一致"
                         fw_col = fw
                     else:
@@ -648,18 +705,16 @@ def section(path, rows):
                         fw_col = f"{fw}（無効: fresh と最終 loss 不一致）"
                         print(
                             f"warning: {rel}: {fw}/{device}/train/reuse の最終 loss "
-                            f"{r['checksum']:.6f} が fresh {fresh['checksum']:.6f} と不一致 "
+                            f"{r_checksum:.6f} が fresh {fresh_checksum:.6f} と不一致 "
                             "— 無効データとして表示",
                             file=sys.stderr,
                         )
                 else:
-                    fresh_col = "未計測"
-                    ratio_col = "-"
                     match_col = "突合不能"
                     fw_col = fw
                 lines.append(
-                    f"| {device} | {fw_col} | {init_col} | {fmt_ms(r['median_s'])} | "
-                    f"{fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {fresh_col} | {ratio_col} | {match_col} |"
+                    f"| {device} | {fw_col} | {init_col} | {median_col} | "
+                    f"{q1_col} | {q3_col} | {fresh_col} | {ratio_col} | {match_col} |"
                 )
         lines.append("")
 

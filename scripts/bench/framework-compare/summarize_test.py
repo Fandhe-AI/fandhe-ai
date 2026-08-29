@@ -497,6 +497,83 @@ class TrainReuseSectionTests(unittest.TestCase):
         self.assertEqual(len(mismatches_before), len(mismatches_after))
         self.assertEqual(mismatches_before, mismatches_after)
 
+    def test_reuse_row_with_non_numeric_init_s_shows_dash_not_typeerror(self):
+        # イシュー #959 codex-review P0 指摘: init_s が文字列（"bad" 等）
+        # の場合、旧実装は `is not None` のみ検査していたため `fmt_ms`
+        # の比較演算（`s >= 1.0`）で TypeError になり集計全体が停止して
+        # いた。不正値は "-"（未計測相当）に倒し、例外を送出しないことを
+        # 確認する。
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            {
+                **_train_row(mode="reuse", median_s=0.01, checksum=0.08054),
+                "init_s": "bad",
+            },
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(b')", text)
+        b_prime_row = next(
+            line for line in lines if line.startswith("| cpu |") and line.count("|") == 10
+        )
+        self.assertIn("| - |", b_prime_row)
+
+    def test_reuse_row_with_negative_init_s_shows_dash(self):
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            {
+                **_train_row(mode="reuse", median_s=0.01, checksum=0.08054),
+                "init_s": -1.0,
+            },
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        b_prime_row = next(
+            line for line in lines if line.startswith("| cpu |") and line.count("|") == 10
+        )
+        self.assertIn("| - |", b_prime_row)
+
+    def test_reuse_row_with_invalid_q1_q3_shows_invalid_value_not_raise(self):
+        # q1_s/q3_s も外部 JSONL 由来であり、bool・非有限値・文字列が
+        # 混入しても `fmt_ms` へ渡す前に検証して落ちないことを確認する
+        # （イシュー #959 codex-review P0 指摘）。
+        row = {
+            **_train_row(mode="reuse", median_s=0.01, checksum=0.08054),
+            "q1_s": float("nan"),
+            "q3_s": True,
+        }
+        lines, *_ = summarize.section("dummy.jsonl", [row])
+        text = "\n".join(lines)
+        self.assertIn("(b')", text)
+        self.assertIn("無効な値", text)
+
+    def test_reuse_row_with_bool_checksum_marked_unverifiable_not_raise(self):
+        # checksum（最終 loss）に bool が混入すると `int` のサブクラスの
+        # ため型検査だけでは通過し、`f"{x:.6f}"` 自体は成立するが数値として
+        # 無意味な突合になる。`_safe_finite_number` で弾き「突合不能
+        # （無効値）」表示に倒すことを確認する（イシュー #959 codex-review
+        # P0 指摘）。
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            {
+                **_train_row(mode="reuse", median_s=0.01, checksum=True),
+            },
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("突合不能（無効値）", text)
+        self.assertIn("checksum が不正な値", text)
+
+    def test_reuse_row_with_infinite_checksum_marked_unverifiable_not_raise(self):
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=float("inf")),
+            _train_row(mode="reuse", median_s=0.01, checksum=0.08054),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("突合不能（無効値）", text)
+
     def test_main_strict_exit_code_unaffected_by_train_reuse_rows(self):
         # train reuse の最終 loss 不一致は --strict の対象（4-tuple・exit code）
         # を変えない設計（計画 §4.2「`section()` の戻り値 4-tuple・`--strict`
