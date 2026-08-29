@@ -42,9 +42,10 @@
   `parity_fail_count > 0` または各フィールドの型・値が不正（`null` 含む）
   な行を GEMM 表で「無効（要素誤差超過）」表示し `--strict` の対象にする
   （`parity_status`）。本フィールド追加前の JSONL（キー欠損）は「無効」と
-  区別して「未検証（旧形式）」と表示する（fail-closed だがデータの誤破棄を
-  しない）。checksum 突合（#965）とは独立に判定し、両方に該当する行は
-  理由を併記する。
+  区別して「未検証（旧形式）」と表示する（表示上は区別するが、要素単位検証
+  を一度も受けていない点は数値正当性が未確認のままであり、`--strict` の
+  対象にも含める。fail-closed だがデータの誤破棄はしない）。checksum
+  突合（#965）とは独立に判定し、両方に該当する行は理由を併記する。
 - 実行時失敗（skipped*.log）節は、集計対象として渡された各入力 JSONL と
   同一ディレクトリの skipped*.log のみを集める（入力省略時は従来どおり
   results/raw/ 配下が対象。articles#68 Bugbot 指摘・イシュー #971）。
@@ -673,7 +674,7 @@ def section(path, rows):
             "コミットされた JSONL のため要素単位検証未実施。値の正当性を否定するものではない）"
         )
     lines.append("")
-    return lines, bool(mismatches), bool(parity_failures)
+    return lines, bool(mismatches), bool(parity_failures), bool(unverified_rows)
 
 
 def main():
@@ -693,8 +694,9 @@ def main():
         "--strict",
         action="store_true",
         help=(
-            "GEMM checksum の不一致（イシュー #965）または要素単位検証の閾値超過"
-            "（イシュー #970）が 1 件以上あれば終了コード 2 を返す（既定は 0 のまま警告のみ）"
+            "GEMM checksum の不一致（イシュー #965）・要素単位検証の閾値超過・"
+            "要素単位検証を受けていない旧形式行（いずれもイシュー #970）が"
+            "1 件以上あれば終了コード 2 を返す（既定は 0 のまま警告のみ）"
         ),
     )
     args = parser.parse_args()
@@ -707,16 +709,18 @@ def main():
     lines = ["# ベンチマーク集計（summarize.py 生成）\n"]
     any_checksum_mismatch = False
     any_parity_failure = False
+    any_parity_unverified = False
     for path in inputs:
         rows = load_rows(path)
         if not rows:
             lines.append(f"## 集計対象: {os.path.relpath(path, HERE)}\n")
             lines.append("（有効な行なし）\n")
             continue
-        section_lines, has_mismatch, has_parity_failure = section(path, rows)
+        section_lines, has_mismatch, has_parity_failure, has_unverified = section(path, rows)
         lines.extend(section_lines)
         any_checksum_mismatch = any_checksum_mismatch or has_mismatch
         any_parity_failure = any_parity_failure or has_parity_failure
+        any_parity_unverified = any_parity_unverified or has_unverified
 
     # 入力 JSONL と同一ディレクトリからのみ skipped*.log を収集する。HERE
     # 固定 glob だと、別ディレクトリの JSONL を明示指定して集計した際に
@@ -750,7 +754,9 @@ def main():
     else:
         sys.stdout.write(text)
 
-    if (any_checksum_mismatch or any_parity_failure) and args.strict:
+    if (
+        any_checksum_mismatch or any_parity_failure or any_parity_unverified
+    ) and args.strict:
         if any_checksum_mismatch:
             print(
                 "error: --strict: 1 件以上の gemm checksum 不一致（イシュー #965）",
@@ -759,6 +765,12 @@ def main():
         if any_parity_failure:
             print(
                 "error: --strict: 1 件以上の gemm 要素単位検証の閾値超過（イシュー #970）",
+                file=sys.stderr,
+            )
+        if any_parity_unverified:
+            print(
+                "error: --strict: 1 件以上の gemm 行が要素単位検証を受けていない"
+                "旧形式（イシュー #970）",
                 file=sys.stderr,
             )
         return 2

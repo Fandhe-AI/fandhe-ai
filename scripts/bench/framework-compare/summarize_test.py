@@ -273,7 +273,7 @@ class SectionRenderingTests(unittest.TestCase):
         rows = [_with_parity(_base_row(), fail_count=5, max_abs_err=1.2e-3, max_rel_err=4.5e-2)]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, has_checksum_mismatch, has_parity_failure = summarize.section(
+            lines, has_checksum_mismatch, has_parity_failure, _ = summarize.section(
                 "dummy.jsonl", rows
             )
         text = "\n".join(lines)
@@ -286,7 +286,7 @@ class SectionRenderingTests(unittest.TestCase):
 
     def test_ok_row_not_marked_invalid(self):
         rows = [_with_parity(_base_row())]
-        lines, has_checksum_mismatch, has_parity_failure = summarize.section(
+        lines, has_checksum_mismatch, has_parity_failure, _ = summarize.section(
             "dummy.jsonl", rows
         )
         text = "\n".join(lines)
@@ -296,11 +296,15 @@ class SectionRenderingTests(unittest.TestCase):
 
     def test_old_format_row_reported_as_unverified_not_invalid(self):
         rows = [_base_row()]
-        lines, has_checksum_mismatch, has_parity_failure = summarize.section(
-            "dummy.jsonl", rows
+        lines, has_checksum_mismatch, has_parity_failure, has_unverified = (
+            summarize.section("dummy.jsonl", rows)
         )
         text = "\n".join(lines)
         self.assertFalse(has_parity_failure)
+        # 「無効（要素誤差超過）」とは区別されるが、要素単位検証を一度も
+        # 受けていない点では検証済みと同列に扱えないため、旧形式行の
+        # 存在は has_unverified（--strict 対象フラグ）で個別に伝える。
+        self.assertTrue(has_unverified)
         self.assertIn("未検証（旧形式）", text)
         self.assertNotIn("無効", text)
 
@@ -314,7 +318,7 @@ class SectionRenderingTests(unittest.TestCase):
                 fail_count=1,  # かつ要素誤差超過
             ),
         ]
-        lines, has_checksum_mismatch, has_parity_failure = summarize.section(
+        lines, has_checksum_mismatch, has_parity_failure, _ = summarize.section(
             "dummy.jsonl", rows
         )
         text = "\n".join(lines)
@@ -334,7 +338,7 @@ class SectionRenderingTests(unittest.TestCase):
         rows = [row]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, _, has_parity_failure = summarize.section("dummy.jsonl", rows)
+            lines, _, has_parity_failure, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertTrue(has_parity_failure)
         self.assertIn("(a')", text)
@@ -346,7 +350,7 @@ class SectionRenderingTests(unittest.TestCase):
         row = _with_parity(_base_row(mode="reuse"))
         row["init_s"] = 0.01
         rows = [row]
-        lines, _, has_parity_failure = summarize.section("dummy.jsonl", rows)
+        lines, _, has_parity_failure, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertFalse(has_parity_failure)
         self.assertIn("(a')", text)
@@ -394,10 +398,22 @@ class MainStrictExitCodeTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_old_format_exits_0_with_strict(self):
+    def test_old_format_exits_nonzero_with_strict(self):
+        # 旧形式（parity キー欠損）行は要素単位検証を一度も受けていない
+        # ため、--strict では checksum 不一致・要素誤差超過と同様に
+        # 拒否対象とする（codex-review PR #978 P1 指摘。イシュー #970）。
         path = _write_jsonl([_base_row()])
         try:
-            code, _, _ = self._run_main(path, strict=True)
+            code, _, err = self._run_main(path, strict=True)
+            self.assertEqual(code, 2)
+            self.assertIn("要素単位検証を受けていない", err)
+        finally:
+            os.unlink(path)
+
+    def test_old_format_exits_0_without_strict(self):
+        path = _write_jsonl([_base_row()])
+        try:
+            code, _, _ = self._run_main(path, strict=False)
             self.assertEqual(code, 0)
         finally:
             os.unlink(path)
