@@ -136,6 +136,15 @@ pub enum MetalError {
     /// catch-all 分類〈`memory.rs::map_metal_error` の `other` アーム〉に
     /// 紛れ込ませず意図を明示する）。
     ContextCacheUnavailable { detail: String },
+    /// `context.rs::MetalContext::batch`（コマンドバッファ共有バッチの
+    /// `Mutex<BatchSlots>`。イシュー #1017）が poison していた。
+    /// [`MetalError::ContextCacheUnavailable`] と同じ判断（panic させず
+    /// 型付きエラーとして呼び出し元へ伝える。`.claude/rules/
+    /// coding-rust.md`「本番経路で unwrap/expect を使わない」）だが、
+    /// キャッシュとバッチ状態は別の `Mutex` インスタンスであるため
+    /// variant を分ける。`detail` は poison を検出した操作
+    /// （`encode`／`flush`／`synchronize`）の内訳を保持する。
+    BatchStateUnavailable { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -231,6 +240,9 @@ impl fmt::Display for MetalError {
             }
             MetalError::ContextCacheUnavailable { detail } => {
                 write!(f, "Metal context/kernel-suite cache unavailable: {detail}")
+            }
+            MetalError::BatchStateUnavailable { detail } => {
+                write!(f, "Metal command batch state unavailable: {detail}")
             }
         }
     }

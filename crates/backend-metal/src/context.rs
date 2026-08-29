@@ -11,7 +11,11 @@
 //! `expect` 呼び出しだったが、本実装は [`MetalError`] を返す `Result` 化
 //! （coding-rust.md「本番経路で unwrap/expect を使わない」）。
 
+use std::sync::Mutex;
+
+use fandhe_ai_tensor_core::DispatchFailureCell;
 use fandhe_ai_tensor_core::dispatch::DeviceCaps;
+use objc2::Message;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
@@ -19,12 +23,68 @@ use objc2_metal::{
     MTLComputeCommandEncoder, MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily,
 };
 
+use crate::batch_state::{self, BatchMeta};
+use crate::buffer::MtlBuffer;
 use crate::device::MetalOccupancyInfo;
 use crate::error::MetalError;
 use crate::tile::OccupancyParams;
 
 pub(crate) type MtlDevice = ProtocolObject<dyn MTLDevice>;
 pub(crate) type MtlQueue = ProtocolObject<dyn MTLCommandQueue>;
+type MtlCommandBuffer = ProtocolObject<dyn MTLCommandBuffer>;
+type MtlComputeEncoder = ProtocolObject<dyn MTLComputeCommandEncoder>;
+
+/// コマンドバッファ共有バッチ 1 個分の状態（イシュー #1017・
+/// `docs/backend-metal-command-batching-design.md`）。
+///
+/// `encoder` は [`MetalContext::encode`] の複数回の呼び出しにまたがって
+/// 使い回す（`MTLComputeCommandEncoder` は `endEncoding()` を呼ぶまで
+/// 複数回の `dispatchThreadgroups_threadsPerThreadgroup` を受け付ける
+/// ため、1 dispatch = 1 エンコーダの旧 `dispatch_sync` と異なり
+/// バッチ内では 1 エンコーダを使い回してよい）。`in_flight` は dispatch
+/// が参照した `MTLBuffer` を [`MetalContext::synchronize`] 完了まで
+/// 生存させる保持列（呼び出し元が関数スコープを抜けても GPU 完了前に
+/// drop されないようにする。設計文書 §3.4）。`tokens` は `encode` と
+/// 同一ロック区間で登録された [`DispatchFailureCell`]（`tensor-core`）
+/// で、`synchronize` が実行時エラーを検出した際にまとめて `set` する
+/// （設計文書 §3.7 (2)。「encode 後に別 API で登録」方式は、その間に
+/// 別スレッドの `synchronize` が割り込む競合があるため採らない）。
+struct Batch {
+    cmd_buf: Retained<MtlCommandBuffer>,
+    encoder: Option<Retained<MtlComputeEncoder>>,
+    meta: BatchMeta,
+    in_flight: Vec<Retained<MtlBuffer>>,
+    tokens: Vec<DispatchFailureCell>,
+}
+
+// SAFETY: `MTLCommandBuffer`／`MTLComputeCommandEncoder`（objc2-metal
+// 0.3.2）は `Send`／`Sync` を supertrait に持たない（Apple の Metal
+// スレッディング契約が「同時アクセス不可」のみを課しスレッド親和性を
+// 持たないことに対応し、objc2-metal は直列化を静的に証明できないため
+// 保守的に付けていない）。`Batch` は `MetalContext::batch`
+// （`Mutex<BatchSlots>`）を介してのみ到達可能であり、`encode`／
+// `flush`／`synchronize`／`Drop` の全経路が `Mutex` のロック下でのみ
+// `Batch` の中身へ触れる（`Mutex` によるアクセスの完全直列化）。この
+// 直列化により、`Batch` が実際に複数スレッド間を移動しても Metal 側の
+// 「同時アクセス不可」契約に違反しない。よって `Send` の付与は安全
+// （`MetalContext` 自体は `context_cache.rs::assert_send_sync` が
+// `Send + Sync` を要求しており、`Mutex<BatchSlots>: Sync` の成立には
+// `Batch: Send` が必要）。イシュー #1017 実装計画 §2.1・
+// `docs/backend-metal-command-batching-design.md` §0 参照。
+unsafe impl Send for Batch {}
+
+/// [`MetalContext::batch`] が保持する開いているバッチ・commit 済みで
+/// 完了待ちのバッチ列。`Mutex` を介してのみアクセスされる（`Batch` の
+/// SAFETY コメント参照）ため、フィールド自体に追加の同期は不要。
+#[derive(Default)]
+struct BatchSlots {
+    /// まだ `commit()` していない、encode 中のバッチ（高々 1 個）。
+    open: Option<Batch>,
+    /// `commit()` 済みで `waitUntilCompleted()` 未実施のバッチ列
+    /// （[`MetalContext::flush`] が `open` から移す。複数の `flush` が
+    /// 間に挟まると 2 個以上になりうる）。
+    committed: Vec<Batch>,
+}
 
 /// Metal デバイスとコマンドキューを保持するハンドル。
 ///
@@ -47,6 +107,11 @@ pub struct MetalContext {
     queue: Retained<MtlQueue>,
     caps: DeviceCaps,
     occupancy_params: Option<OccupancyParams>,
+    /// コマンドバッファ共有バッチの状態（イシュー #1017）。
+    /// [`MetalContext::encode`]／[`MetalContext::flush`]／
+    /// [`MetalContext::synchronize`] がこの `Mutex` を介してのみ
+    /// アクセスする（[`Batch`] の SAFETY コメント参照）。
+    batch: Mutex<BatchSlots>,
 }
 
 impl MetalContext {
@@ -96,6 +161,7 @@ impl MetalContext {
             queue,
             caps,
             occupancy_params,
+            batch: Mutex::new(BatchSlots::default()),
         })
     }
 
@@ -132,49 +198,216 @@ impl MetalContext {
         self.caps
     }
 
-    /// コンピュートエンコーダを生成し `encode` にディスパッチ内容の記録
-    /// を委ね、`commit()` + `waitUntilCompleted()` で完了を待つ同期実行
-    /// ヘルパ。同期方式は PoC-v2-4 の計測境界（`GemmCase::dispatch`）と
-    /// 同一にし、v1 系と揃える（バックエンド間比較の計測条件を崩さない
-    /// ため。呼び出し元は TASK-1.8b・#39 のカーネルディスパッチ実装）。
+    /// バッチの `Mutex<BatchSlots>` をロックする共通ヘルパ。poison を
+    /// panic させず [`MetalError::BatchStateUnavailable`] へ変換する
+    /// （`context_cache.rs::on_poison` と同じ「本番経路で unwrap/expect
+    /// を使わない」判断。`.claude/rules/coding-rust.md`）。
+    fn lock_batch(
+        &self,
+        op: &'static str,
+    ) -> Result<std::sync::MutexGuard<'_, BatchSlots>, MetalError> {
+        self.batch
+            .lock()
+            .map_err(|_| MetalError::BatchStateUnavailable {
+                detail: format!("{op}: batch mutex poisoned"),
+            })
+    }
+
+    /// ディスパッチ内容の記録（バッファ結線・エンコード）だけを行い、
+    /// **待たない**（イシュー #1017・`docs/backend-metal-command-
+    /// batching-design.md` §3）。同一 [`MetalContext`] に対する連続した
+    /// `encode` 呼び出しは、上限（[`batch_state::MAX_DISPATCHES_PER_BATCH`]）
+    /// に達するまで同一コマンドバッファ・同一コンピュートエンコーダへ
+    /// 積まれる。実際に GPU 完了を待つのは [`Self::synchronize`]（ホスト
+    /// 実体化時: `memory.rs::download_inner`／`zero_fill`・`Drop`）のみ。
     ///
-    /// `commandBuffer()` / `computeCommandEncoder()` は autoreleased な
-    /// オブジェクトを返す。Rust バイナリ（test/bench 実行ファイル等）には
-    /// Cocoa アプリのような周囲の autorelease pool が存在しないため、
-    /// `autoreleasepool` で明示的に囲まないと繰り返しディスパッチ
-    /// （特にベンチマークループ）のたびに Metal の一時オブジェクトが
-    /// プロセス寿命分蓄積する。`commit()` は完了を待つだけで成功を返す
-    /// ため、`waitUntilCompleted()` 後にコマンドバッファの `status` を
-    /// 確認しない場合 GPU 側の fault・OOM・discarded work が `Ok(())`
-    /// として握り潰される（出力バッファの古い／不完全な内容を読む無言の
-    /// 数値誤りにつながるため、[`MetalError::CommandBufferExecutionFailed`]
-    /// として呼び出し元へ返す）。
-    pub fn dispatch_sync<F>(&self, encode: F) -> Result<(), MetalError>
+    /// `resources` は本 dispatch が参照する `MTLBuffer` 列で、
+    /// `synchronize()` が完了するまで [`Batch::in_flight`] へ retain
+    /// して生存させる（呼び出し元がバッファを関数スコープで drop しても
+    /// GPU 完了前に解放されないようにする。設計文書 §3.4・§2.5）。
+    /// `token`（`Some` の場合）は本 dispatch を含むバッチが実行時エラー
+    /// になった際に [`fandhe_ai_tensor_core::DispatchFailureCell::set`]
+    /// される（`encode` 呼び出しと同一ロック区間で登録するため、登録と
+    /// 別スレッドの `synchronize` の間に競合が生じない。設計文書
+    /// §3.7 (2)）。
+    ///
+    /// `commandBuffer()`／`computeCommandEncoder()` は autoreleased な
+    /// オブジェクトを返す。Rust バイナリには Cocoa アプリのような周囲の
+    /// autorelease pool が存在しないため、`autoreleasepool` で明示的に
+    /// 囲まないと繰り返し `encode` のたびに Metal の一時オブジェクトが
+    /// プロセス寿命分蓄積する（旧 `dispatch_sync` と同じ理由）。
+    pub(crate) fn encode<F>(
+        &self,
+        label: &'static str,
+        resources: &[&MtlBuffer],
+        token: Option<&DispatchFailureCell>,
+        encode_fn: F,
+    ) -> Result<(), MetalError>
     where
         F: FnOnce(&ProtocolObject<dyn MTLComputeCommandEncoder>),
     {
         autoreleasepool(|_pool| {
-            let cmd_buf = self
-                .queue
-                .commandBuffer()
-                .ok_or(MetalError::CommandBufferCreation)?;
-            let encoder = cmd_buf
-                .computeCommandEncoder()
-                .ok_or(MetalError::ComputeEncoderCreation)?;
+            let mut slots = self.lock_batch("encode")?;
 
-            encode(&encoder);
-            encoder.endEncoding();
-            cmd_buf.commit();
-            cmd_buf.waitUntilCompleted();
+            if slots.open.is_none() {
+                let cmd_buf = self
+                    .queue
+                    .commandBuffer()
+                    .ok_or(MetalError::CommandBufferCreation)?;
+                slots.open = Some(Batch {
+                    cmd_buf,
+                    encoder: None,
+                    meta: BatchMeta::new(),
+                    in_flight: Vec::new(),
+                    tokens: Vec::new(),
+                });
+            }
+            // 直前で `is_none()` なら新規構築し `Some` にしたばかりであり、
+            // 到達直後に `None` へ戻す経路はこの関数内に存在しない。
+            let batch = slots
+                .open
+                .as_mut()
+                .expect("open batch was just ensured above");
 
-            if cmd_buf.status() == MTLCommandBufferStatus::Error {
-                let message = cmd_buf
-                    .error()
-                    .map(|error| error.localizedDescription().to_string())
-                    .unwrap_or_else(|| "no NSError attached to failed command buffer".to_string());
-                return Err(MetalError::CommandBufferExecutionFailed { message });
+            if batch.encoder.is_none() {
+                let encoder = batch
+                    .cmd_buf
+                    .computeCommandEncoder()
+                    .ok_or(MetalError::ComputeEncoderCreation)?;
+                batch.encoder = Some(encoder);
+            }
+            let encoder = batch
+                .encoder
+                .as_ref()
+                .expect("encoder was just ensured above");
+
+            encode_fn(encoder);
+
+            batch
+                .in_flight
+                .extend(resources.iter().map(|buf| buf.retain()));
+            if let Some(token) = token {
+                batch.tokens.push(token.clone());
+            }
+            batch.meta.record_dispatch(label);
+
+            if batch.meta.should_auto_flush() {
+                self.flush_locked(&mut slots);
             }
             Ok(())
         })
+    }
+
+    /// 開いているバッチがあれば `endEncoding()` + `commit()` する
+    /// （**待たない**）。`slots.open` を `slots.committed` へ移し、後続の
+    /// `encode` は新しいコマンドバッファから開始する。
+    ///
+    /// [`batch_state::BatchMeta::should_auto_flush`] が
+    /// [`batch_state::MAX_DISPATCHES_PER_BATCH`] 到達を検出した際の安全弁
+    /// （[`Self::encode`] から呼ばれる）、および [`Self::synchronize`] が
+    /// 「まず全ての未 commit 分を commit してから待つ」ために呼ぶ内部
+    /// ヘルパ。呼び出し元は `self.batch` を既にロック済みであることが
+    /// 前提（デッドロック回避のため `&mut BatchSlots` を直接受け取る）。
+    fn flush_locked(&self, slots: &mut BatchSlots) {
+        if let Some(mut batch) = slots.open.take() {
+            if let Some(encoder) = batch.encoder.take() {
+                encoder.endEncoding();
+            }
+            batch.cmd_buf.commit();
+            slots.committed.push(batch);
+        }
+    }
+
+    /// 開いているバッチを `commit()` のみ行う公開版（**待たない**）。
+    /// 本イシュー時点の呼び出し元は存在しない（`encode` の自動 flush・
+    /// `synchronize` が内部で `flush_locked` を直接使うため）が、設計
+    /// 文書 §3.6 が示す「安全弁」の公開面として用意する。
+    pub fn flush(&self) -> Result<(), MetalError> {
+        let mut slots = self.lock_batch("flush")?;
+        self.flush_locked(&mut slots);
+        Ok(())
+    }
+
+    /// 開いている・commit 済みの全バッチを `waitUntilCompleted()` で
+    /// 完了させ、実行時エラーがあれば呼び出し元へ返す
+    /// **ホスト実体化時に呼ぶ唯一の同期点**（`memory.rs::download_inner`／
+    /// `zero_fill`・`Self::dispatch_sync`・`Drop` から呼ばれる。イシュー
+    /// #1017・設計文書 §3.5）。
+    ///
+    /// 開いているバッチはまず [`Self::flush_locked`] で commit してから
+    /// 待つ。複数バッチにまたがって失敗した場合、**全バッチの登録済み
+    /// トークンへ伝播**したうえで最初のエラーを返す（`.claude/rules/
+    /// security.md` A08。1 個のエラーで打ち切って残りのバッチの失敗を
+    /// 検出し損なわない）。`self.batch` のロックは待機（`waitUntilCompleted`
+    /// はブロッキング呼び出し）中も保持し続ける: 他スレッドからの
+    /// `encode`／`synchronize` はこの間ブロックされる（正しさを優先し
+    /// 並行性は最適化しない設計判断。設計文書 §3.5「同時実行の扱い」）。
+    pub fn synchronize(&self) -> Result<(), MetalError> {
+        let mut slots = self.lock_batch("synchronize")?;
+        self.flush_locked(&mut slots);
+        let batches = std::mem::take(&mut slots.committed);
+
+        let mut first_error: Option<MetalError> = None;
+        for batch in batches {
+            batch.cmd_buf.waitUntilCompleted();
+            if batch.cmd_buf.status() == MTLCommandBufferStatus::Error {
+                let message = batch
+                    .cmd_buf
+                    .error()
+                    .map(|error| error.localizedDescription().to_string())
+                    .unwrap_or_else(|| "no NSError attached to failed command buffer".to_string());
+                let formatted = batch_state::format_failure_message(batch.meta.labels(), &message);
+                batch_state::propagate_failure(&batch.tokens, &formatted);
+                if first_error.is_none() {
+                    first_error =
+                        Some(MetalError::CommandBufferExecutionFailed { message: formatted });
+                }
+            }
+            // `batch`（`in_flight` の retain 列を含む）はこのループの末尾
+            // で drop される。GPU 実行は `waitUntilCompleted()` 直後の
+            // 時点で完了済みのため、ここで解放してよい。
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// コンピュートエンコーダを生成し `encode_fn` にディスパッチ内容の
+    /// 記録を委ね、即座に完了を待つ同期実行ヘルパ（イシュー #1017 で
+    /// [`Self::encode`] + [`Self::synchronize`] の薄いラッパーへ変更した。
+    /// シグネチャ・戻り値の意味は不変であり既存呼び出し元
+    /// （`gemm.rs`／`elementwise.rs`／`rmsnorm.rs`／`softmax.rs`）は無
+    /// 変更のまま動作する）。同期方式は PoC-v2-4 の計測境界
+    /// （`GemmCase::dispatch`）と同一にし、v1 系と揃える（バックエンド間
+    /// 比較の計測条件を崩さないため）。
+    ///
+    /// `resources` を渡さない（`&[]`）のは、このバッファ列が
+    /// `synchronize()` 完了まで呼び出し元の関数スコープで生存する契約
+    /// （呼び出し元が `dispatch_sync` の戻り待ちを行う）ため、
+    /// [`Batch::in_flight`] による追加の生存延長が不要なため
+    /// （`sgd.rs::MetalSgd::run` が `Self::encode` を直接使う際は
+    /// `param`／`grad`／`velocity` を渡す点と対照的）。
+    pub fn dispatch_sync<F>(&self, encode_fn: F) -> Result<(), MetalError>
+    where
+        F: FnOnce(&ProtocolObject<dyn MTLComputeCommandEncoder>),
+    {
+        self.encode("dispatch_sync", &[], None, encode_fn)?;
+        self.synchronize()
+    }
+}
+
+impl Drop for MetalContext {
+    /// プロセス終了・スイートキャッシュ解放時に、開いている・commit 済み
+    /// のバッチを `synchronize()` 相当で完了させる（イシュー #1017・
+    /// 設計文書 §3.5「同期点」表）。`Drop` からは `Result` を返せない
+    /// ため、失敗（GPU fault 等）はここでは伝播せず無視する: `Drop` 時点
+    /// で呼び出し元は既に結果を受け取れない一方、GPU 側のコマンド
+    /// バッファ実行自体は本メソッドを呼ばなくても最終的に完了する
+    /// （破棄後もハンドルが握っていた in-flight バッファの解放を
+    /// 妨げないための best-effort な後始末であり、`unwrap`/`expect` の
+    /// ような panic 経路ではない）。
+    fn drop(&mut self) {
+        let _ = self.synchronize();
     }
 }

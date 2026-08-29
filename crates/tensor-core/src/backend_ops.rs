@@ -49,6 +49,7 @@
 use crate::Tensor;
 use crate::buffer::{DeviceBuffer, MemoryOps};
 use crate::device::{BackendError, Device};
+use crate::dispatch_failure::DispatchFailureCell;
 use crate::fusion::FusionPlan;
 
 /// [`BackendOps::sgd_step_device`] の 1 ステップ分のハイパーパラメータ
@@ -191,6 +192,38 @@ pub trait BackendOps {
         ))
     }
 
+    /// [`BackendOps::sgd_step_device`] と同型だが、Metal のコマンド
+    /// バッファ共有（イシュー #1017・`docs/backend-metal-command-
+    /// batching-design.md`）向けに共有失敗トークン
+    /// [`DispatchFailureCell`] を追加引数として受け取る非破壊拡張
+    /// （`gemm_bias_act`／`run_fused` と同じ「デフォルトメソッド追加」
+    /// パターン。`BackendOps` の SemVer 非破壊拡張）。
+    ///
+    /// # デフォルト実装
+    /// 既定は `token` を無視して [`BackendOps::sgd_step_device`] へ
+    /// そのまま委譲する。CPU／CUDA は dispatch ごとに同期実行するため
+    /// 実行時エラーが呼び出し元に即座に返り、遅延失敗トークンを必要と
+    /// しない（このデフォルトのままでよい）。Metal のみ
+    /// `backend-metal::ops::MetalBackendOps` がオーバーライドし、
+    /// `MetalContext::encode` と**同一ロック区間で** `token` をバッチへ
+    /// 登録する（encode と登録の間に別スレッドの `synchronize` が
+    /// 割り込む競合を防ぐ。設計文書 §3.7 (2)）。
+    ///
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore::step`
+    /// が呼び出し元となり、自身が保持する `failure_token` を渡す
+    /// （4 つの状態機械エントリ全てが `token.is_set()` を検査して
+    /// 自己 poison する。`device_store.rs` モジュール冒頭コメント参照）。
+    fn sgd_step_device_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        velocity: Option<&mut DeviceBuffer<f32>>,
+        config: &SgdStepConfig,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.sgd_step_device(param, grad, velocity, config)
+    }
+
     /// 行列積 `C = A @ B` を計算する（`A: [m, k]`・`B: [k, n]` の 2 次元
     /// テンソルのみ受け付ける。shape 不整合は
     /// [`BackendError::ShapeMismatch`]）。
@@ -322,7 +355,9 @@ pub fn ops_for<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::BufferHandle;
     use crate::error::ShapeError;
+    use std::any::Any;
 
     /// テスト専用のモック `BackendOps`。実バックエンドに依存せず
     /// `ops_for` の選択ロジックを検証するために `tensor-core` 内で定義
@@ -572,5 +607,59 @@ mod tests {
         let leaves: Vec<&Tensor<f32>> = vec![&leaf];
         let result = ops.run_fused(&plan, &leaves);
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// テスト専用の最小 `BufferHandle`（イシュー #1017・
+    /// `sgd_step_device_tracked_default_delegates_to_sgd_step_device`
+    /// が `DeviceBuffer<f32>` を構築するためだけに使う。データの実体は
+    /// 持たず downcast のためだけの空ハンドル）。
+    #[derive(Debug)]
+    struct EmptyHandle;
+
+    impl BufferHandle for EmptyHandle {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    fn empty_device_buffer(device: Device) -> DeviceBuffer<f32> {
+        DeviceBuffer::new(device, vec![1], Box::new(EmptyHandle))
+    }
+
+    /// [`BackendOps::sgd_step_device_tracked`] のデフォルト実装が
+    /// `token` を無視して [`BackendOps::sgd_step_device`] へそのまま
+    /// 委譲することを確認する（イシュー #1017 の非破壊拡張ガード。
+    /// `MockOps` はいずれのメソッドもオーバーライドしていないため、
+    /// 両者が同一の `Unsupported` メッセージを返すことで委譲を検証する）。
+    #[test]
+    fn sgd_step_device_tracked_default_delegates_to_sgd_step_device() {
+        let ops = MockOps(Device::Cpu);
+        let mut param = empty_device_buffer(Device::Cpu);
+        let grad = empty_device_buffer(Device::Cpu);
+        let config = SgdStepConfig {
+            lr: 0.1,
+            momentum: 0.0,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+            is_first_step: true,
+        };
+        let token = DispatchFailureCell::new();
+
+        let direct = ops.sgd_step_device(&mut param, &grad, None, &config);
+        let tracked = ops.sgd_step_device_tracked(&mut param, &grad, None, &config, &token);
+
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
+                assert_eq!(a, b);
+            }
+            other => panic!("expected both to return the same Unsupported error: {other:?}"),
+        }
+        // デフォルト委譲は token に一切触れない。
+        assert!(!token.is_set());
     }
 }

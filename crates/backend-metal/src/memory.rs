@@ -11,10 +11,16 @@
 //! （`buffer.rs` モジュールコメント「Safety 境界」参照）。
 //!
 //! `StorageModeShared`（Apple Silicon の UMA。`buffer.rs` モジュール
-//! コメント参照）を用いるため、CUDA のような明示的な非同期転送・
-//! `synchronize()` は不要（`MetalBuffer::read_to_vec` は `contents()` の
-//! CPU 可視アドレスを直接読むため、呼び出し復帰時点でホストデータは
-//! 既に確定している）。
+//! コメント参照）のため CUDA のような明示的な非同期**転送**は不要だが、
+//! イシュー #1017（コマンドバッファ共有バッチ）導入後は
+//! **`context.rs::MetalContext::synchronize` を経由する**（`download_inner`／
+//! `PoolZeroFill::zero_fill` 双方）。`sgd.rs::MetalSgd::run` 等が
+//! `ctx.encode`（バッファ結線のみ・待たない）でバッチへ積んだ dispatch
+//! は GPU 完了前に `contents()` のバイト列を確定させない: `synchronize`
+//! を挟まないまま `read_to_vec`／`zero_fill` を呼ぶと、GPU がまだ書き
+//! 込み中のバッファを読む・GPU 実行中のバッファへ上書きする未定義動作の
+//! 危険がある（UMA は物理メモリ共有を保証するのみで、CPU/GPU 間の
+//! **実行順序**の保証はコマンドバッファの完了同期に依存する）。
 
 use std::any::Any;
 use std::mem::size_of;
@@ -270,9 +276,14 @@ impl MetalMemory {
         let handle = buffer
             .downcast_handle::<MetalBufferHandle>()
             .ok_or(MetalError::DeviceUnavailable)?;
+        // ホスト実体化の同期点（イシュー #1017）: `read_to_vec` の前に
+        // `context.rs::MetalContext::synchronize` を挟み、コマンドバッファ
+        // 共有バッチに積まれた dispatch（`sgd.rs::MetalSgd::run` 等）の
+        // GPU 完了を待つ。UMA（`StorageModeShared`）は物理メモリ共有のみを
+        // 保証し、GPU 実行完了前に `contents()` を読む未定義動作を防ぐ
+        // ためには本呼び出しが必須（モジュール冒頭コメント参照）。
+        self.context.synchronize()?;
         let data = match &handle.buffer {
-            // StorageModeShared のため read_to_vec 復帰時点でホストデータは
-            // 既に確定している（同期不要。モジュール冒頭コメント参照）。
             None => Vec::new(),
             Some(buf) => buf.read_to_vec(),
         };
@@ -331,6 +342,13 @@ impl PoolZeroFill for MetalMemory {
         // 到達しない想定だが、`buffer` が `None` の場合に備えて no-op
         // として安全に振る舞う（CUDA 実装と同じ防御的分岐）。
         if let Some(buf) = metal_handle.buffer.as_ref() {
+            // ホスト実体化の同期点（イシュー #1017。`download_inner` と
+            // 同じ理由）: プールから再利用したバッファへ書き込む前に、
+            // そのバッファを最後に読み書きした dispatch の GPU 完了を
+            // 待つ。バッチに未完了の dispatch が残ったまま
+            // `contents()` へ直接ゼロ書き込みすると、GPU 実行中の
+            // バッファを CPU 側から上書きする未定義動作になりうる。
+            self.context.synchronize().map_err(map_metal_error)?;
             buf.zero_fill();
         }
         Ok(())
