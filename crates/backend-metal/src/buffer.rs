@@ -127,6 +127,15 @@ impl MetalBuffer {
 
     /// バッファの内容をホストへ読み出す。
     ///
+    /// **呼び出し前提（イシュー #1017）**: 呼び出し元は、このバッファへの
+    /// 書き込みが完了していることを `context.rs::MetalContext::
+    /// synchronize` 等で保証済みであること。本メソッド自体はシグネチャに
+    /// `&MetalContext` を持たないため同期を行わない（公開 API 非破壊。
+    /// `.claude/rules/security.md`）。クレート内の呼び出し元
+    /// （`memory.rs::download_inner`）は `read_to_vec` 直前に
+    /// `self.context.synchronize()` を挟む契約とすることでこの前提を
+    /// 満たす。
+    ///
     /// # Safety 境界（`unsafe` 使用箇所 2/3）
     /// `contents()` は `StorageModeShared` バッファの CPU 可視アドレスを
     /// 返す（確保時に `MTLResourceOptions::StorageModeShared` を指定して
@@ -160,8 +169,10 @@ impl MetalBuffer {
     /// 取り出した直後・呼び出し元へ返す前の排他所有段階でのみ本メソッドを
     /// 呼ぶため、ホスト側からの他のエイリアスは存在しない。GPU 側との
     /// 同時アクセスについては、本メソッド自体は GPU 実行完了の待機を
-    /// 行わない（`MTLCommandBuffer` の完了同期は `crate::ops` の GEMM
-    /// ディスパッチ経路が担う）。プールへ返却されるバッファは
+    /// 行わない（`MTLCommandBuffer` の完了同期は呼び出し元が担う。
+    /// イシュー #1017 以降は `memory.rs::PoolZeroFill::zero_fill` が本
+    /// メソッド呼び出し直前に `context.rs::MetalContext::synchronize`
+    /// を挟む契約に変わった）。プールへ返却されるバッファは
     /// `download`／GEMM 出力読み出しが完了した後に `Drop` されたもので
     /// あることが呼び出し元（`PooledMemory`）側の運用契約であり、本
     /// メソッドはその契約が守られている前提で安全である（契約破棄時の

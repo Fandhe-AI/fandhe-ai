@@ -90,7 +90,7 @@ C-1〜C-3・C-5 が用意したキー型・ディレクトリ命名・ディス�
 
 よって現行実装は disk hit を「ソース一致が確認できた」というシグナルとしてのみ扱い、実際にロードする PTX は常にこのプロセス内で NVRTC が生成したものに限る（ヒット・ミスいずれの分岐でも `compile_ptx` を経由する）。`load_cache_entry` の呼び出しそのもの（C-3・#509 の fs 配線・権限検査）は将来、認証済み検証手段（例: NVRTC を実行できる信頼済みプロセスのみが持つ鍵での署名検証）を導入した際に実行入力として再有効化できるよう維持する。この判断により、ディスクキャッシュはプロセス再起動をまたいだ NVRTC コンパイル時間の短縮には現時点で寄与しない（`store_cache_entry` によるディスク永続化自体は維持しており、将来の認証手段導入時に即座に活用できる）。プロセス内 LRU（1 段目）は本判断の影響を受けず、同一プロセス内での再利用は従来どおり `cuModuleGetFunction` のみで完結する。
 
-**スコープ境界**: 固定ソースの一回コンパイル経路（`CudaGemm::new`・`CudaWmmaGemm::new`・`CudaMmaGemm::new`・elementwise/transpose 群。いずれもインスタンス構築時に 1 回だけコンパイルする設計）は本タスクでは結線しない（拡大は効果に対しリスク過大と判断）。
+**スコープ境界（イシュー #1024 で更新）**: 固定ソースの一回コンパイル経路のうち、`CudaGemm::new`（f32 GEMM 本番経路。naive f32/f16・tiled f32/f16・tiled_bias_act_f32・wmma_tf32・wmma_tf32_opt・wmma_tf32_staged の 8 カーネル＋サイズ条件付き swizzle 変種）はイシュー #1024 で上記 3 段フォールバックへ結線した。共通ロジックは `crates/backend-cuda/src/module_cache.rs::load_function_cached` へ抽出し、`RenderedMmaKernel::compile` と `CudaGemm::new` の双方がこれを呼ぶ（`crates/backend-cuda/src/gemm.rs::GemmKernelSpec::descriptor` 参照）。`CudaWmmaGemm::new`・`CudaMmaGemm::new`・elementwise/transpose 群は引き続き未結線（本イシューのスコープ外。拡大は効果に対しリスク過大と判断し、横展開は別イシューで判断する）。
 
 ## キャッシュキー構成（総括。C-14・#539）
 
