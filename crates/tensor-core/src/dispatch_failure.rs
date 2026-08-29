@@ -23,12 +23,13 @@
 //! 起動直後の都度 `synchronize()` を除去し非同期実行契約へ移行したが、
 //! 本セルは使わず `backend-cuda::context_cache` 独自の ordinal 単位
 //! poison 状態機械（`Phase::Poisoned`・`BackendError::
-//! DeviceContextPoisoned` 等）で遅延エラーを表現する（Metal のバッチ単位
-//! 事前登録方式とは異なり、CUDA は単一ストリームの FIFO 順序保証により
-//! 「sticky エラー観測時点で ordinal を poison し以降の `begin_driver_call`
-//! を拒否する」形で同じ fail-closed 性質を達成する）。
-//! `DeviceParamStore::step` はそのエラーで `StorePoisoned` へ自己遷移する
-//! （§5 末尾「`StorePoisoned` と独立に併存」）。
+//! DeviceContextPoisoned` 等）で遅延エラーを表現する**予定**である。
+//! ただし同状態機械の演算入口（`ops.rs`・`sgd.rs`）への結線
+//! （`begin_driver_call`／`observe_driver_result` の呼び出し）は
+//! Phase C として #1062 へ引き継がれており、イシュー #1013 時点では
+//! 未結線（起動後の非同期実行時エラーは `step()` 時点では検出されず、
+//! 後続の readback 同期点で顕在化する。`device_store.rs`・
+//! `backend_ops.rs` の同趣旨の注記を参照）。
 
 use std::sync::{Arc, Mutex};
 
