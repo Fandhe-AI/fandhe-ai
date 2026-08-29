@@ -33,12 +33,28 @@
        --features internal-diagnostics --example wmma_tolerance_probe
    ```
 
-4. 実行（3 構成。いずれも `--scales 1` を付け、カーネル可用性ヘッダ・`kernel` 列付き 16 列表のスイープモード出力を得る）:
+4. 実行（3 構成。いずれも `--scales 1` を付け、カーネル可用性ヘッダ・`kernel` 列付き 16 列表のスイープモード出力を得る）。手順 3 の `CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai` はビルド成果物の出力先であって `PATH` には追加されないため、生成された example バイナリを裸のコマンド名で呼ぶと `command not found` になる。ビルド成果物の絶対パス（`$HOME/work/target-fandhe-ai/release/examples/wmma_tolerance_probe`）を明示するか、`cargo run` 形式で呼び出す:
 
    ```sh
-   wmma_tolerance_probe --scales 1 --tf32-kernel opt   > gb10-tf32-opt-s1.md
-   wmma_tolerance_probe --scales 1 --tf32-kernel basic > gb10-tf32-basic-s1.md
-   wmma_tolerance_probe --scales 1 --tf32-kernel auto  > gb10-tf32-auto-s1.md
+   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+       "$HOME/work/target-fandhe-ai/release/examples/wmma_tolerance_probe" \
+       --scales 1 --tf32-kernel opt   > gb10-tf32-opt-s1.md
+   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+       "$HOME/work/target-fandhe-ai/release/examples/wmma_tolerance_probe" \
+       --scales 1 --tf32-kernel basic > gb10-tf32-basic-s1.md
+   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+       "$HOME/work/target-fandhe-ai/release/examples/wmma_tolerance_probe" \
+       --scales 1 --tf32-kernel auto  > gb10-tf32-auto-s1.md
+   ```
+
+   もしくは（`cargo run` 形式。この場合もビルド時と同じ `CARGO_TARGET_DIR`・`--features internal-diagnostics` を揃える）:
+
+   ```sh
+   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+       CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+       cargo run --release -p fandhe-ai-backend-cuda \
+       --features internal-diagnostics --example wmma_tolerance_probe -- \
+       --scales 1 --tf32-kernel opt   > gb10-tf32-opt-s1.md
    ```
 
    各構成について exit code 0 を確認し、2 回ずつ実行して stdout が `diff` で完全一致する（決定性）ことを確認する。
