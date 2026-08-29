@@ -1447,6 +1447,21 @@ fresh/reuse の 4 通り）:
   `put_all_merged`（合流専用・`put_merged` を呼ぶ）を経路ごとに分離
   することで解消した。これも §8.2 の「メソッド分割自体は実装時の裁量」
   の範囲の変更である。**
+  **`put_merged` 内部の `pending_return_bytes` 減算方式（codex P2
+  再指摘・PR #1063 追加是正）**: 初版の `put_merged` は
+  `record_pending_return` との対応検証を行わない単純な
+  `AtomicU64::fetch_sub` で減算しており、`record_pending_return` を
+  経ていないエントリに誤用すると `u64` 下限をラップアラウンドし
+  `pending_return_bytes` が `u64::MAX` 付近へ恒久的にずれ、以後の
+  `max_pool_bytes`／LRU 判定が常時「上限超過」になりプールを事実上
+  無効化する致命的な退行があった。誤用を doc comment・テストで明記する
+  だけでは不変条件を保証できないと判断し、`AtomicU64::fetch_update`
+  による**飽和減算**（現在値が `class_bytes` 以上なら減算、未満なら
+  `0` へ飽和）へ変更した。飽和が発生すること自体が契約違反の兆候であり
+  検出には使えるが、`put_locked`（ハンドルの挿入）は飽和の有無に
+  関わらず必ず継続する契約とした（統計フィールドの防御であって `put`
+  の成否を左右させない設計判断。誤ってハンドルを `Err` で握り潰し
+  リークさせない）。
 - **エラー種別の表現**: `BackendError::DeviceAllocationFailed(String)`
   の理由文字列によるフェーズ区別（§3.6 (2)）は本設計文書が定める
   **暫定の**非破壊な表現方式である。より型安全な表現（`BackendError`

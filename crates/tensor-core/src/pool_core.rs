@@ -423,23 +423,32 @@ where
     /// put`]（新規貸出の即時返却経路。`pending_return_bytes` への計上を
     /// 経ていない）には使わない。
     ///
-    /// # 契約（誤用するとアンダーフローする）
+    /// # 契約（誤用は `pending_return_bytes` を飽和させる。codex P2
+    /// 再指摘対応）
     /// 呼び出し元が対応する `record_pending_return` を呼んでいない
-    /// エントリにこのメソッドを使うと、`pending_return_bytes`
-    /// （`AtomicU64::fetch_sub`。`record_pending_merge` と同じく
-    /// `saturating_sub` の防御を持たない設計判断。同メソッド doc
-    /// comment「統計専用メソッドの検証」参照）が **`u64` 下限を
-    /// ラップアラウンドし、天文学的に巨大な値（`u64::MAX` 付近）へ
-    /// 恒久的にずれる**（対になる加算が存在しないため）。この誤差は
-    /// `PoolStats::pending_return_bytes` の表示を壊すだけでなく、
+    /// エントリにこのメソッドを使うのは契約違反である。前ラウンドは
+    /// この減算を単純な `AtomicU64::fetch_sub` で行っていたが、対の
+    /// 加算がない場合に `u64` 下限をラップアラウンドし
+    /// `pending_return_bytes` が `u64::MAX` 付近へ恒久的にずれる欠陥が
+    /// あった（codex P2 再指摘）。ラップアラウンドした値は
     /// `max_pool_bytes`／LRU 判定（`cached_bytes + pending_return_bytes`）
     /// を常時「上限超過」と誤判定させ、以後のあらゆる `put`／
-    /// `put_merged` が挿入直後に自分自身を含め全件を LRU 追い出しする
-    /// 致命的な退行になる。逆に `pending_pool_
-    /// returns` 経由のエントリを誤って [`Self::put`]（本メソッドではなく
-    /// 通常版）へ渡すと、対になる減算（`record_pending_merge`）が
-    /// 一切呼ばれず `pending_return_bytes` が恒久的に高い値のまま残る
-    /// （Cursor Bugbot High 指摘の退行はこちらの誤用パターン）。
+    /// `put_merged` が挿入直後に全件を LRU 追い出しし**プールを事実上
+    /// 無効化する**致命的な退行になるため、doc comment・テストで
+    /// 誤用を明記するだけでは不十分と判断し、`fetch_update`
+    /// （`Ordering::Relaxed` の load／`Ordering::Relaxed` の CAS 成功時
+    /// ordering）による**飽和減算**（現在値が `class_bytes` 以上なら
+    /// 減算、未満なら `0` へ飽和）へ変更した。飽和が発生すること自体が
+    /// 契約違反（`record_pending_return` 非経由の誤用）の兆候であり、
+    /// 呼び出し元はこれを想定して正しく対にする責務を負う。一方で
+    /// ハンドルの挿入自体（[`Self::put_locked`]）は飽和の有無に関わらず
+    /// 必ず継続する（統計フィールドの防御であって `put` の成否を
+    /// 左右させない設計判断。誤ってハンドルを `Err` で握り潰し
+    /// リークさせない）。逆に `pending_pool_returns` 経由のエントリを
+    /// 誤って [`Self::put`]（本メソッドではなく通常版）へ渡すと、対に
+    /// なる減算（`record_pending_merge`）が一切呼ばれず
+    /// `pending_return_bytes` が恒久的に高い値のまま残る（Cursor
+    /// Bugbot High 指摘の退行はこちらの誤用パターン）。
     ///
     /// # ロック内原子化（`put` を先に呼んでから `record_pending_merge`
     /// を呼ぶ旧稿の何が問題だったか）
@@ -455,10 +464,10 @@ where
     /// 生じていた。
     ///
     /// 本メソッドは `core` の `Mutex` を取得した**同一ロック区間内**で
-    /// 「`pending_return_bytes` の減算」→「[`Self::put_locked`]
+    /// 「`pending_return_bytes` の飽和減算」→「[`Self::put_locked`]
     /// （挿入・総量上限判定）」の順に実行する。総量上限判定は減算後の
     /// `pending_return_bytes` を参照するため二重計上が起こらない。
-    /// 減算自体は `AtomicU64::fetch_sub`（`pending_return_bytes` は
+    /// 減算自体は `AtomicU64::fetch_update`（`pending_return_bytes` は
     /// `Mutex<PoolCore<H>>` の外側にある独立した atomic フィールド）で
     /// あり `core` の `Mutex` を必要としないが、本メソッドの呼び出し
     /// 区間全体を通して `core` のロックを保持し続けることで、
@@ -471,8 +480,20 @@ where
     #[must_use = "追い出されたエントリは呼び出し元が Mutex 解放後に drop すること"]
     pub fn put_merged(&self, class_bytes: u64, handle: H) -> Vec<(u64, H)> {
         let mut core = self.lock();
-        self.pending_return_bytes
-            .fetch_sub(class_bytes, Ordering::Relaxed);
+        // 飽和減算: 現在値が `class_bytes` 以上ならそのまま `fetch_sub`
+        // 相当の減算結果を採用し、未満（= 対の加算が無い契約違反）なら
+        // `0` へ飽和させる。`fetch_update` は CAS ループのため、失敗時
+        // （他スレッドが同時に `fetch_add`/`fetch_update` している場合）
+        // は自動的に最新値で再試行する。`Result` は常に `Ok`
+        // （クロージャが常に `Some` を返すため `fetch_update` は失敗
+        // しない設計）であり、`unwrap_or` はこの構造的な保証を明示する
+        // だけの防御的表現（`.claude/rules/coding-rust.md`「本番経路で
+        // panic しない」に従い `unwrap()` は使わない）。
+        let _ = self.pending_return_bytes.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(class_bytes)),
+        );
         self.put_locked(&mut core, class_bytes, handle)
     }
 
@@ -1064,32 +1085,64 @@ mod tests {
     }
 
     #[test]
-    fn put_merged_underflows_when_used_without_matching_pending_return() {
+    fn put_merged_saturates_pending_to_zero_when_used_without_matching_pending_return() {
         // 契約違反（`record_pending_return` を経ていないエントリへの
-        // 誤用）を明示する回帰テスト: 対になる加算が無いまま
-        // `AtomicU64::fetch_sub` を呼ぶと `u64` 下限をラップアラウンドし
-        // `pending_return_bytes` が天文学的に巨大な値へ恒久的にずれる
-        // （doc comment「誤用するとアンダーフローする」の直接検証。
-        // `saturating_sub` の防御を持たない設計判断であるため `0` には
-        // 張り付かない）。この誤差により以後の容量判定が常時「上限
-        // 超過」と誤判定し、挿入したばかりの自分自身を含め全件が
-        // LRU 追い出しされる。
+        // 誤用）の回帰テスト（codex P2 再指摘対応）: 前ラウンドは
+        // `AtomicU64::fetch_sub` によるラップアラウンドで
+        // `pending_return_bytes` が `u64::MAX` 付近へ恒久的にずれ、
+        // 以後のあらゆる容量判定が常時「上限超過」になりプールを
+        // 事実上無効化する致命的な退行があった。`fetch_update` による
+        // 飽和減算（現在値未満なら `0` へ飽和）へ変更したことで、
+        // 誤用時も `pending_return_bytes` は単に `0` のまま
+        // （変化なし）に留まり、ラップアラウンドは発生しない。
         let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
         let evicted = pool.put_merged(256, 1);
-        assert_eq!(
-            evicted,
-            vec![(256, 1)],
-            "誤って巨大化した pending_return_bytes により自己追い出しされる"
-        );
         assert!(
-            pool.stats().pending_return_bytes > u64::MAX / 2,
-            "対の加算がない減算はラップアラウンドし巨大な値になる"
+            evicted.is_empty(),
+            "誤用があっても pending_return_bytes は 0 のまま（過大な容量超過を              誤判定しない）ため通常どおり挿入が成功し自己追い出しは起きない"
+        );
+        assert_eq!(
+            pool.stats().pending_return_bytes,
+            0,
+            "対の加算がない減算は saturating_sub 相当で 0 に飽和する（ラップ              アラウンドしない）"
         );
         assert_eq!(
             pool.stats().cached_bytes,
-            0,
-            "誤判定により挿入した分もすぐ追い出されフリーリストに残らない"
+            256,
+            "ハンドルの挿入自体は飽和の有無に関わらず継続する（統計フィールド              の防御であって put の成否を左右させない）"
         );
+    }
+
+    #[test]
+    fn put_merged_saturation_does_not_corrupt_subsequent_capacity_checks() {
+        // codex P2 再指摘が懸念した「以後の容量判定が壊れる」ことが
+        // 起きないことを、誤用直後に正常系の put_merged を続けて呼ぶ形で
+        // 確認する。飽和後も pending_return_bytes は 0 のままであり、
+        // 続く正当な合流（record_pending_return 済み）の容量判定にも
+        // 悪影響を与えない。
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: 300,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        // 誤用（対になる record_pending_return が無い）。
+        let evicted = pool.put_merged(100, 1);
+        assert!(evicted.is_empty());
+        assert_eq!(pool.stats().pending_return_bytes, 0);
+        assert_eq!(pool.stats().cached_bytes, 100);
+
+        // 正しい使い方（record_pending_return 済み）を続けても、直前の
+        // 誤用でラップアラウンドしていれば即座に破綻していたはずの容量
+        // 判定が正常に機能する。
+        pool.record_pending_return(150);
+        let evicted = pool.put_merged(150, 2);
+        assert!(
+            evicted.is_empty(),
+            "cached(100) + merged(150) == 250 <= 300 のため追い出しなし"
+        );
+        assert_eq!(pool.stats().cached_bytes, 250);
+        assert_eq!(pool.stats().pending_return_bytes, 0);
     }
 
     #[test]
