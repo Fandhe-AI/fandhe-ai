@@ -3,12 +3,12 @@
 ## インストール
 
 本ライブラリは Rust の `stable` チャンネルを前提としています
-（リポジトリ直下の `rust-toolchain.toml` が単一真実源です）。crates.io（v0.3.0・
-2026-08-23 公開済み）から利用できます。
+（リポジトリ直下の `rust-toolchain.toml` が単一真実源です）。crates.io（v0.4.0・
+2026-08-29 公開済み）から利用できます。
 
 ```toml
 [dependencies]
-fandhe-ai = "0.3.0"
+fandhe-ai = "0.4.0"
 ```
 
 公開ドキュメントは以下のとおりです。

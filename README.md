@@ -26,12 +26,12 @@ cargo run -p docs-site -- --out dist/
 ## インストール
 
 本ライブラリは Rust の `stable` チャンネルを前提としています（リポジトリ直下の
-[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io（v0.3.0・
-2026-08-23 公開済み）から利用できます。
+[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io（v0.4.0・
+2026-08-29 公開済み）から利用できます。
 
 ```toml
 [dependencies]
-fandhe-ai = "0.3.0"
+fandhe-ai = "0.4.0"
 ```
 
 公開ドキュメントは以下のとおりです。
@@ -117,9 +117,10 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 
 ## ステータス
 
-- **crates.io 初回公開完了**: v0.3.0（6 クレート: `fandhe-ai`・`fandhe-ai-tensor-core`・
-  `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
-  `fandhe-ai-backend-metal`）を 2026-08-23 に公開済み
+- **crates.io 公開済み**: 初回公開 v0.3.0（6 クレート: `fandhe-ai`・
+  `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・
+  `fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`）を 2026-08-23 に、
+  最新 v0.4.0 を 2026-08-29 に公開済み
 - **ドキュメントサイト公開済み**: https://fandhe-ai.github.io/fandhe-ai/
 - **実装の進行状況**: コア（テンソル・autodiff・演算グラフ／カーネル融合機構）・
   3 バックエンド（CPU／CUDA／Metal）の実装と性能実測を継続中
@@ -263,7 +264,7 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 
 ### ロードマップ・タスク
 
-`docs/spec/06-roadmap.md` のマイルストーン（M0〜M5）と `docs/spec/05-tasks.md` のタスク（4h 粒度）に従って実装します。M0（workspace・CI・依存監査ベースライン）は完了し、コア・3 バックエンドの実装と性能実測、crates.io 公開（v0.3.0）・ドキュメントサイト公開まで到達しています（「ステータス」節参照）。未着手・進行中の作業は GitHub Issues で追跡しています。
+`docs/spec/06-roadmap.md` のマイルストーン（M0〜M5）と `docs/spec/05-tasks.md` のタスク（4h 粒度）に従って実装します。M0（workspace・CI・依存監査ベースライン）は完了し、コア・3 バックエンドの実装と性能実測、crates.io 公開（v0.4.0）・ドキュメントサイト公開まで到達しています（「ステータス」節参照）。未着手・進行中の作業は GitHub Issues で追跡しています。
 
 ### Conventional Commits と git hooks
 

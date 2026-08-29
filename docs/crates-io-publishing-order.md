@@ -445,6 +445,33 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > `cargo add fandhe-ai@0.3.0` → ビルド成功も実測確認済み（イシュー #867 の
 > クローズコメント参照）。以下の本文は保留当時の記録として原文のまま残す。
 
+> **追補（2026-08-29・#981）**: `#980`（PR #987・main `19d725e`）で
+> `workspace.version = 0.4.0` 反映済みの main を対象に、ユーザー操作で
+> `.github/workflows/release-all.yml` を `mode: dry-run-only` →
+> `mode: publish` の 2 段 dispatch し、**v0.4.0 の公開を完了した**。
+> dry-run run（[33229751049](https://github.com/Fandhe-AI/fandhe-ai/actions/runs/33229751049)。
+> ref `refs/heads/main`・sha `19d725e865f09aebbf5e42947673a0a53cf87c3a`・
+> `createdAt` 2026-08-29T02:45:59Z・`verify` success 02:46:02〜02:46:58Z・
+> `publish` skipped）で dry-run 成立を確認したのち、publish run
+> （[33230033581](https://github.com/Fandhe-AI/fandhe-ai/actions/runs/33230033581)。
+> 同 sha・`createdAt` 2026-08-29T02:53:03Z・`verify` success
+> 02:53:07〜02:53:37Z・`publish` success 02:54:44〜02:55:23Z）を dispatch し、
+> environment `crates-io-release` の承認（required reviewer 1 回・
+> `state: approved`）を経て `publish` ジョブが実行された。`cargo publish`
+> ログは §12 が想定する「cargo が依存順・crates.io index 反映待ちを内包する」
+> 挙動どおり、`fandhe-ai-tensor-core`（Uploaded 02:55:13Z → Published
+> 02:55:14Z）→ `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・
+> `fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`（Uploaded
+> 02:55:15〜18Z → 4 件まとめて Published 02:55:18Z）→ `fandhe-ai`
+> （Uploaded 02:55:19Z → Published 02:55:20Z）の順に完了した（本イシューで
+> §12.2 の想定を初めて実測で確認）。crates.io は 6 クレートとも `0.4.0` が
+> `versions` に存在（`fandhe-ai` 0.4.0 の `created_at` 2026-08-29T02:55:18.889Z）、
+> docs.rs は 6 クレートすべて `https://docs.rs/crate/<name>/0.4.0/status.json`
+> が `{"doc_status":true,"version":"0.4.0"}` を実測確認済み（2026-08-29 時点）。
+> §11 手順 4 のリリースタグ `v0.4.0`（`v0.3.0` も同様）は本イシューでは
+> **未付与**（`git ls-remote --tags origin` 実測で確認。付与要否はユーザー
+> 判断・記録用でありリリース CI のトリガーではない）。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -617,6 +644,15 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 ## 変更履歴
 
+- 2026-08-29（#981）: `release-all.yml` を `dry-run-only` → `publish` の
+  2 段でユーザー操作により dispatch し、公開 6 クレートの v0.4.0 を
+  crates.io へ公開完了（dry-run run
+  https://github.com/Fandhe-AI/fandhe-ai/actions/runs/33229751049・
+  publish run
+  https://github.com/Fandhe-AI/fandhe-ai/actions/runs/33230033581）。
+  crates.io 6 クレート `0.4.0` 反映・docs.rs 6 クレート
+  `doc_status: true` を実測確認し §10 追補に記録した。リリースタグ
+  `v0.4.0` は未付与（記録用・§11 手順 4 はユーザー判断）。
 - 2026-08-29（#980）: 公開 6 クレートの `workspace.version` を 0.3.0 → 0.4.0
   へ lockstep バンプした（`DeviceParamStore` によるデバイス常駐パラメータ
   更新 API〈#954〉・`fandhe_ai::optim`〈#961/#972〉・CUDA/Metal コンテキスト
