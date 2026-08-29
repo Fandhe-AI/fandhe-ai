@@ -26,6 +26,12 @@
   突合する（gemm と異なりフレームワーク間では突合しない: 重み初期化が異なる設計
   のため fandhe-ai と candle/Burn の最終 loss は一致しない。突合は同一フレーム
   ワーク内の fresh vs reuse のみ）。
+- (b'') MLP 学習の 1 step フェーズ分解（イシュー #1009。`bench-fandhe`
+  `--task train --phases` が出力する `task:"train_phases"` 行）。
+  `(device, mode)` ごとに `phase_index` 昇順で表示し、`step_total` 比
+  （= phase median / step_total median）を参考値として添える。`(b)`/`(b')`
+  とは独立の節で、`task != "train_phases"` の既存関数（`get`/`devices_in`
+  等）は本フィールドを一切読まないため既存表への影響はない。
 - checksum 相互突合（イシュー #965）: GEMM は全フレームワーク・全 mode で
   同一入力（xorshift64* の同一シード・同一生成式）のため、同一 size の
   checksum は本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5
@@ -64,6 +70,15 @@
   「無効」扱いにせず `--strict` の対象にしない（イシュー #959 codex-review
   P1 指摘: 旧実装は表示のみで `section()` の戻り値に反映されず
   `--strict` でも終了コード 0 のままだった）。
+- (b'') train phases（イシュー #1009）: `task:"train_phases"` 行の
+  `median_s`/`q1_s`/`q3_s`（reuse 行は `init_s` も必須）は `_safe_time_s`、
+  `phase` は非空 `str`、`phase_index` は非負整数として検証する。
+  `step_total` phase の欠落・`phase`/`phase_index` の重複・`step_total`
+  比が 100% を超える不整合（時間値の集計不整合を示す）は表で「無効」表示
+  し `--strict` の失敗条件にも含める（`section()` の戻り値に
+  `has_train_phases_invalid` を追加）。`task != "train_phases"` の既存
+  節（(a)/(a')/(b)/(b')/(c)・checksum 突合・parity 判定・`devices_in`）は
+  本フィールドを一切読まないため影響を受けない。
 """
 
 import argparse
@@ -528,6 +543,188 @@ def _row_key(r):
     return (r["framework"], r["device"], r["size"], r["mode"])
 
 
+# イシュー #1009: `bench-fandhe --task train --phases` が出力する
+# `task:"train_phases"` 行の集計（(b'') 節）。既存の `get`/`devices_in`/
+# gemm 系関数・(b')（`task == "train"` のみ読む）はこのタスク値を一切
+# 読まないため、以下のヘルパーは他節から独立している。
+
+
+def _train_phases_groups(rows):
+    """`task == "train_phases"` 行を `(device, mode)` ごとにグループ化する
+    （出現順を保持）。fandhe-ai 単独タスクのためフレームワーク横断の集約は
+    行わない（bench-candle/bench-burn は `--phases` を実装しない。README
+    「train --phases」節参照）。
+    """
+    groups = {}
+    for r in rows:
+        if r.get("task") != "train_phases":
+            continue
+        key = (r.get("device"), r.get("mode"))
+        groups.setdefault(key, []).append(r)
+    return groups
+
+
+def _train_phases_devices(rows):
+    """`_train_phases_groups` のキー `(device, mode)` を DEVICE_ORDER →
+    mode（fresh → reuse）の順で返す。"""
+    groups = _train_phases_groups(rows)
+
+    def rank(key):
+        device, mode = key
+        device_rank = DEVICE_ORDER.index(device) if device in DEVICE_ORDER else len(DEVICE_ORDER)
+        mode_rank = 0 if mode == "fresh" else 1
+        return (device_rank, mode_rank)
+
+    return sorted(groups.keys(), key=rank)
+
+
+def _train_phases_validate(group_rows):
+    """1 つの `(device, mode)` グループ内の `train_phases` 行を検証する。
+
+    外部 JSONL 由来の `phase`/`phase_index`/時間値は使用前に検証する
+    （security.md A03。他節と同じ `_safe_time_s`/`_is_plain_number` 方針）。
+
+    - `phase` は非空 `str`、`phase_index` は非負整数でなければならない
+      （不正・重複はその行を無効として個別に報告する）。
+    - `median_s`/`q1_s`/`q3_s`（reuse 行は `init_s` も）は `_safe_time_s`
+      で検証する。
+    - `step_total` phase が存在しない、または `step_total` の
+      `median_s` が不正な場合、本グループ全体を無効とする（比の分母が
+      決まらないため）。
+    - 各 phase の中央値が `step_total` の中央値を上回る（計時区間の
+      合計が全体を超過する不整合）場合もその行を無効とする。
+
+    戻り値: (entries, invalid, step_total_median)
+    entries: [{"phase": str, "median": float|None, "q1": float|None,
+               "q3": float|None, "reason": str|None}, ...]
+             （有効な phase_index を持つ行は昇順、それ以外は末尾）
+    invalid: bool（本グループに 1 件以上の無効行があるか）
+    step_total_median: float|None（比の分母。無効なら None）
+    """
+    invalid = False
+    keyed = {}
+    unresolved = []
+    for r in group_rows:
+        phase = r.get("phase")
+        phase_index = r.get("phase_index")
+        phase_ok = isinstance(phase, str) and len(phase) > 0
+        index_ok = (
+            _is_plain_number(phase_index)
+            and not _non_integral(phase_index)
+            and int(phase_index) >= 0
+        )
+        if not phase_ok or not index_ok:
+            invalid = True
+            unresolved.append((phase if phase_ok else "?", r, "phase/phase_index が不正な値"))
+            continue
+        pi = int(phase_index)
+        if pi in keyed:
+            invalid = True
+            unresolved.append((phase, r, f"phase_index {pi} が重複"))
+            continue
+        keyed[pi] = (phase, r)
+
+    step_total_row = next((r for phase, r in keyed.values() if phase == "step_total"), None)
+    if step_total_row is None:
+        invalid = True
+        step_total_median = None
+    else:
+        step_total_median = _safe_time_s(step_total_row.get("median_s"))
+        if step_total_median is None:
+            invalid = True
+
+    entries = []
+    for pi in sorted(keyed):
+        phase, r = keyed[pi]
+        median = _safe_time_s(r.get("median_s"))
+        q1 = _safe_time_s(r.get("q1_s"))
+        q3 = _safe_time_s(r.get("q3_s"))
+        reason = None
+        if median is None or q1 is None or q3 is None:
+            reason = "時間値が不正な値"
+        if reason is None and r.get("mode") == "reuse" and _safe_time_s(r.get("init_s")) is None:
+            reason = "init_s が不正な値"
+        if (
+            reason is None
+            and step_total_median is not None
+            and median is not None
+            and median > step_total_median * (1.0 + 1e-9)
+        ):
+            reason = "step_total 比が 100% を超過"
+        if reason is not None:
+            invalid = True
+        entries.append({"phase": phase, "median": median, "q1": q1, "q3": q3, "reason": reason})
+    for phase, r, reason in unresolved:
+        entries.append({"phase": phase, "median": None, "q1": None, "q3": None, "reason": reason})
+
+    return entries, invalid, step_total_median
+
+
+def _train_phases_section(rel, rows):
+    """(b'') 節の Markdown 行を生成する。`train_phases` 行が無ければ
+    `([], False)`（節自体を出力しない。既存 (a')/(b') と同じ方針）。
+    """
+    groups = _train_phases_groups(rows)
+    if not groups:
+        return [], False
+
+    lines = ["### (b'') MLP 学習 1 step のフェーズ分解（イシュー #1009）\n"]
+    any_invalid = False
+    for device, mode in _train_phases_devices(rows):
+        group_rows = groups[(device, mode)]
+        entries, invalid, step_total_median = _train_phases_validate(group_rows)
+        any_invalid = any_invalid or invalid
+        device_label = DEVICE_LABEL.get(device, device or "?")
+        lines.append(f"#### {device_label} / {mode}\n")
+        if invalid:
+            for e in entries:
+                if e["reason"] is not None:
+                    print(
+                        f"warning: {rel}: train_phases {device}/{mode}/{e['phase']} "
+                        f"— {e['reason']} — 無効データとして表示",
+                        file=sys.stderr,
+                    )
+            if step_total_median is None:
+                print(
+                    f"warning: {rel}: train_phases {device}/{mode} "
+                    "の step_total 行が欠落または不正 — 比の算出不能",
+                    file=sys.stderr,
+                )
+        if mode == "reuse":
+            init_val = next(
+                (_safe_time_s(r.get("init_s")) for r in group_rows if r.get("init_s") is not None),
+                None,
+            )
+            init_col = fmt_ms(init_val) if init_val is not None else "無効な値"
+            lines.append(f"初期化(init_s): {init_col}\n")
+        lines.append("| フェーズ | 中央値 | Q1 | Q3 | step_total 比 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        median_total = 0.0
+        median_total_valid = bool(entries)
+        for e in entries:
+            phase_col = f"{e['phase']}（無効: {e['reason']}）" if e["reason"] else e["phase"]
+            median_col = fmt_ms(e["median"]) if e["median"] is not None else "無効な値"
+            q1_col = fmt_ms(e["q1"]) if e["q1"] is not None else "無効な値"
+            q3_col = fmt_ms(e["q3"]) if e["q3"] is not None else "無効な値"
+            if e["median"] is not None and step_total_median is not None:
+                ratio_col = f"{e['median'] / step_total_median * 100:.1f}%"
+            else:
+                ratio_col = "-"
+            lines.append(f"| {phase_col} | {median_col} | {q1_col} | {q3_col} | {ratio_col} |")
+            if e["phase"] != "step_total":
+                if e["median"] is None:
+                    median_total_valid = False
+                else:
+                    median_total += e["median"]
+        if median_total_valid:
+            lines.append(
+                f"\n- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため "
+                f"step_total と一致しない場合がある）: {fmt_ms(median_total)}"
+            )
+        lines.append("")
+    return lines, any_invalid
+
+
 def section(path, rows):
     lines = []
     rel = os.path.relpath(path, HERE)
@@ -791,6 +988,14 @@ def section(path, rows):
                 )
         lines.append("")
 
+    # (b'') MLP 学習 1 step のフェーズ分解（イシュー #1009。`bench-fandhe`
+    # `--task train --phases` が出力する `task:"train_phases"` 行）。
+    # `(b)`/`(b')` とは独立の節で、(b')/(b) は `task == "train"` のみを
+    # 読むため本節の追加による既存表への影響はない（モジュール docstring
+    # 参照）。
+    train_phases_lines, has_train_phases_invalid = _train_phases_section(rel, rows)
+    lines.extend(train_phases_lines)
+
     lines.append(
         "### (c) 推論スループット（同 MLP forward のみ、バッチ 64。表のスループットはバッチ/秒 = 1/中央値。1 バッチ = 64 件）\n"
     )
@@ -875,7 +1080,14 @@ def section(path, rows):
             "コミットされた JSONL のため要素単位検証未実施。値の正当性を否定するものではない）"
         )
     lines.append("")
-    return lines, bool(mismatches), bool(parity_failures), bool(unverified_rows), has_train_reuse_invalid
+    return (
+        lines,
+        bool(mismatches),
+        bool(parity_failures),
+        bool(unverified_rows),
+        has_train_reuse_invalid,
+        has_train_phases_invalid,
+    )
 
 
 def main():
@@ -898,8 +1110,9 @@ def main():
             "GEMM checksum の不一致（イシュー #965）・要素単位検証の閾値超過・"
             "要素単位検証を受けていない旧形式行（いずれもイシュー #970）・"
             "train reuse (b') の checksum 不一致／突合不能／時間値不正"
-            "（イシュー #959）が1 件以上あれば終了コード 2 を返す"
-            "（既定は 0 のまま警告のみ）"
+            "（イシュー #959）・train_phases (b'') の phase/phase_index 不正・"
+            "step_total 欠落／時間値不正（イシュー #1009）が1 件以上あれば"
+            "終了コード 2 を返す（既定は 0 のまま警告のみ）"
         ),
     )
     args = parser.parse_args()
@@ -914,6 +1127,7 @@ def main():
     any_parity_failure = False
     any_parity_unverified = False
     any_train_reuse_invalid = False
+    any_train_phases_invalid = False
     for path in inputs:
         rows = load_rows(path)
         if not rows:
@@ -926,12 +1140,14 @@ def main():
             has_parity_failure,
             has_unverified,
             has_train_reuse_invalid,
+            has_train_phases_invalid,
         ) = section(path, rows)
         lines.extend(section_lines)
         any_checksum_mismatch = any_checksum_mismatch or has_mismatch
         any_parity_failure = any_parity_failure or has_parity_failure
         any_parity_unverified = any_parity_unverified or has_unverified
         any_train_reuse_invalid = any_train_reuse_invalid or has_train_reuse_invalid
+        any_train_phases_invalid = any_train_phases_invalid or has_train_phases_invalid
 
     # 入力 JSONL と同一ディレクトリからのみ skipped*.log を収集する。HERE
     # 固定 glob だと、別ディレクトリの JSONL を明示指定して集計した際に
@@ -970,6 +1186,7 @@ def main():
         or any_parity_failure
         or any_parity_unverified
         or any_train_reuse_invalid
+        or any_train_phases_invalid
     ) and args.strict:
         if any_checksum_mismatch:
             print(
@@ -995,6 +1212,13 @@ def main():
             print(
                 "error: --strict: 1 件以上の train reuse 行が無効"
                 "（checksum 不一致・突合不能・時間値の不正。イシュー #959）",
+                file=sys.stderr,
+            )
+        if any_train_phases_invalid:
+            print(
+                "error: --strict: 1 件以上の train_phases 行が無効"
+                "（phase/phase_index の不正・重複・step_total 欠落・"
+                "時間値の不正。イシュー #1009）",
                 file=sys.stderr,
             )
         return 2

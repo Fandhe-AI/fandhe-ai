@@ -306,12 +306,20 @@ fn main() {
 }
 
 /// `--mode reuse` は対象外（モジュールコメント参照。イシュー #925）。
+/// `--phases`（イシュー #1009）も `bench-fandhe` 専用であり、未知フラグを
+/// 黙殺せず fail-fast する（README「train --phases」節参照）。
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
     if cli.mode == "reuse" {
         return Err(
             "MEASURE_ERROR: --mode reuse is not applicable to burn (device reuse is already \
              the default API design; issue #925)"
+                .into(),
+        );
+    }
+    if cli.phases {
+        return Err(
+            "MEASURE_ERROR: --phases is not supported by burn (bench-fandhe only; issue #1009)"
                 .into(),
         );
     }

@@ -12,11 +12,11 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
-run() { # run <binary> <task> <device> <size> [mode]
-  local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh}
-  echo "== $bin $task $device size=$size mode=$mode =="
-  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" --out "$OUT" 2>err.tmp; then
-    echo "$bin task=$task device=$device size=$size mode=$mode : $(cat err.tmp)" >> "$SKIP"
+run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
+  local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh} extra_flag=${6:-}
+  echo "== $bin $task $device size=$size mode=$mode extra=${extra_flag:-none} =="
+  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" ${extra_flag:+"$extra_flag"} --out "$OUT" 2>err.tmp; then
+    echo "$bin task=$task device=$device size=$size mode=$mode extra=${extra_flag:-none} : $(cat err.tmp)" >> "$SKIP"
     echo "  -> FAILED (recorded in $SKIP)"
   fi
   rm -f err.tmp
@@ -71,6 +71,13 @@ if [[ " ${BINS[*]} " == *" bench-fandhe "* ]]; then
   # bench-candle / bench-burn の既知失敗で skipped-cuda.log を汚さない）。
   for dev in cuda cpu; do
     run bench-fandhe train "$dev" 64 reuse
+  done
+  # (b'') MLP 学習 1 step のフェーズ分解（イシュー #1009）。上と同じガード・
+  # 同じ理由（--phases は必ず MEASURE_ERROR で fail-fast する仕様のため
+  # bench-candle / bench-burn は対象外）。
+  for dev in cuda cpu; do
+    run bench-fandhe train "$dev" 64 fresh --phases
+    run bench-fandhe train "$dev" 64 reuse --phases
   done
 fi
 
