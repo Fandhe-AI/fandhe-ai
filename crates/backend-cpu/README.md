@@ -14,7 +14,7 @@ crates.io にも公開されています（依存解決のため）。
 
 ```toml
 [dependencies]
-fandhe-ai = "0.3.0"
+fandhe-ai = "0.4.0"
 ```
 
 開発版を試す場合は Git 依存でも参照できます。

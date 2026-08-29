@@ -34,7 +34,7 @@ categories = ["science", "mathematics", "hardware-support"]
 # `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
 # （公開 6 クレート間 path 依存。イシュー #881 で確定した方針。
 # `docs/crates-io-publishing-order.md`）。
-fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.4.0" }
 half.workspace = true
 
 # Apple フレームワークへの FFI 境界（REQ-2）。objc2-metal は macOS 専用 API のバインディング

@@ -41,7 +41,7 @@ categories = ["science", "mathematics"]
 # クレート（`bench-harness` 等。`publish.workspace = true` が現状
 # `false` を継承）への path 依存には付与しない（存在しない crates.io
 # パッケージを指すことになるため）。
-fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.4.0" }
 
 [dev-dependencies]
 # PoC-v2-2 突合テスト（`tests/poc_v2_2_parity.rs`・TASK-1.5d・#19）が

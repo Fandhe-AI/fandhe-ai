@@ -14,7 +14,7 @@ compat 公開面（`compat::array`／`compat::Sequential`）・optimizer 公開�
 
 ```toml
 [dependencies]
-fandhe-ai = "0.3.0"
+fandhe-ai = "0.4.0"
 ```
 
 開発版を試す場合は Git 依存でも参照できます。
