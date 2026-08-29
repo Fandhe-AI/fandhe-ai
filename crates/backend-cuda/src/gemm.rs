@@ -164,10 +164,16 @@ pub struct CudaGemm {
     /// 出力バッファのサイズクラス別プール（イシュー #1020・REQ-14）。
     /// `run_f32_kernel`／`run_tiled_bias_act_f32` の `alloc_zeros::<f32>`
     /// 直接呼び出しを置換する（`crate::pool` モジュール冒頭参照）。
-    /// `context_cache::cached_allocator` 経由で `(ordinal, 既定 stream)`
-    /// 単位のプロセスワイドプールを共有するため、`CudaGemm` の複数
-    /// インスタンス（`new_with_tf32_staged_swizzle` 等の診断用変種を
-    /// 含む）が同一 `ordinal` であれば同じプール状態を共有する。
+    /// `context_cache::cached_allocator` 経由で `device` の
+    /// `CudaContext` 単位のプロセスワイドプールを共有するため、
+    /// `CudaGemm` の複数インスタンス（`new_with_tf32_staged_swizzle`
+    /// 等の診断用変種を含む）が同一 `device`（＝同一 ordinal かつ
+    /// 同一 `CudaContext`）から構築されれば同じプール状態を共有する。
+    /// ordinal だけでなく context の同一性も一致条件に含めるのは、
+    /// `CudaDevice::new` が公開関数のため同一 ordinal でも異なる
+    /// `CudaContext` を持つ複数インスタンスが作られうるため
+    /// （`context_cache.rs::ContextKey` のドキュメントコメント参照。
+    /// codex-review 指摘。イシュー #1020 PR #1061）。
     allocator: Arc<CudaAllocator>,
     naive_f32: CudaFunction,
     naive_f16: CudaFunction,
@@ -973,7 +979,7 @@ impl CudaGemm {
             _ => (None, None, None),
         };
 
-        let allocator = context_cache::cached_allocator(device.ordinal(), device)?;
+        let allocator = context_cache::cached_allocator(device)?;
 
         Ok(Self {
             stream: device.stream().clone(),

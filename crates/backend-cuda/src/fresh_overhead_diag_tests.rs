@@ -290,7 +290,7 @@ fn run_phase_breakdown_for_variant(label: &str, variant: DownloadVariant) {
     let device = cached_device(0)
         .expect("CUDA device must be available on the ignored diagnostic bench runner");
     let gemm =
-        cached_gemm(0, &device).expect("CudaGemm construction (via context_cache) must succeed");
+        cached_gemm(&device).expect("CudaGemm construction (via context_cache) must succeed");
 
     println!("=== fresh GEMM D2H フェーズ分解: variant={label} (イシュー #956) ===");
     for &n in &SIZES {
@@ -411,8 +411,8 @@ fn fresh_overhead_diag_v3_pooled_output() {
     let device = cached_device(0)
         .expect("CUDA device must be available on the ignored diagnostic bench runner");
     let gemm =
-        cached_gemm(0, &device).expect("CudaGemm construction (via context_cache) must succeed");
-    let allocator = crate::context_cache::cached_allocator(0, &device)
+        cached_gemm(&device).expect("CudaGemm construction (via context_cache) must succeed");
+    let allocator = crate::context_cache::cached_allocator(&device)
         .expect("CudaAllocator construction (via context_cache) must succeed");
 
     println!("=== fresh GEMM (c) C 確保フェーズ: V3-pooled（イシュー #1020）===");

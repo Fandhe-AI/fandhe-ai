@@ -253,6 +253,15 @@ impl CudaAllocator {
         }
     }
 
+    /// 構築時に共有した `CudaContext` を返す（`context_cache.rs` の
+    /// `ContextKey` 回帰テスト専用のアクセサ。コード本体はこの
+    /// アロケータが持つ `stream`/`ctx` の同一性を直接検証しないため、
+    /// テスト以外の呼び出しは想定しない）。
+    #[cfg(test)]
+    pub(crate) fn context(&self) -> &Arc<CudaContext> {
+        &self.ctx
+    }
+
     /// サイズクラス丸め後のクラスバイト数を計算する共通処理
     /// （`alloc_zeroed_f32`/`alloc_uninit_f32` 共用）。
     fn class_bytes_for(&self, numel: usize) -> Result<(u64, Option<u64>), CudaError> {

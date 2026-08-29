@@ -275,7 +275,7 @@ impl CudaSoftmax {
                 ),
             })?;
 
-        let allocator = context_cache::cached_allocator(device.ordinal(), device)?;
+        let allocator = context_cache::cached_allocator(device)?;
 
         Ok(Self {
             stream: device.stream().clone(),

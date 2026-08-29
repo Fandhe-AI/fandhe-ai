@@ -138,7 +138,7 @@ impl CudaElementwise {
             .load_module(tanh_ptx)?
             .load_function("ew_tanh_f32")?;
 
-        let allocator = context_cache::cached_allocator(device.ordinal(), device)?;
+        let allocator = context_cache::cached_allocator(device)?;
 
         Ok(Self {
             stream: device.stream().clone(),
