@@ -81,8 +81,9 @@ struct BatchSlots {
     /// まだ `commit()` していない、encode 中のバッチ（高々 1 個）。
     open: Option<Batch>,
     /// `commit()` 済みで `waitUntilCompleted()` 未実施のバッチ列
-    /// （[`MetalContext::flush`] が `open` から移す。複数の `flush` が
-    /// 間に挟まると 2 個以上になりうる）。
+    /// （内部ヘルパ `flush_locked`（`encode` の自動 flush・`synchronize`
+    /// から呼ばれる）が `open` から移す。複数回の flush が間に挟まると
+    /// 2 個以上になりうる）。
     committed: Vec<Batch>,
 }
 
@@ -108,8 +109,8 @@ pub struct MetalContext {
     caps: DeviceCaps,
     occupancy_params: Option<OccupancyParams>,
     /// コマンドバッファ共有バッチの状態（イシュー #1017）。
-    /// [`MetalContext::encode`]／[`MetalContext::flush`]／
-    /// [`MetalContext::synchronize`] がこの `Mutex` を介してのみ
+    /// [`MetalContext::encode`]／[`MetalContext::synchronize`]（内部
+    /// ヘルパ `flush_locked` を含む）がこの `Mutex` を介してのみ
     /// アクセスする（[`Batch`] の SAFETY コメント参照）。
     batch: Mutex<BatchSlots>,
 }
@@ -316,16 +317,6 @@ impl MetalContext {
             batch.cmd_buf.commit();
             slots.committed.push(batch);
         }
-    }
-
-    /// 開いているバッチを `commit()` のみ行う公開版（**待たない**）。
-    /// 本イシュー時点の呼び出し元は存在しない（`encode` の自動 flush・
-    /// `synchronize` が内部で `flush_locked` を直接使うため）が、設計
-    /// 文書 §3.6 が示す「安全弁」の公開面として用意する。
-    pub fn flush(&self) -> Result<(), MetalError> {
-        let mut slots = self.lock_batch("flush")?;
-        self.flush_locked(&mut slots);
-        Ok(())
     }
 
     /// 開いている・commit 済みの全バッチを `waitUntilCompleted()` で

@@ -95,6 +95,20 @@ impl MetalMemory {
     /// 内部で [`Self::from_shared`] へ委譲する（`Arc::new` で包むだけの
     /// 薄いラッパー）。呼び出し元が単発で所有権を持つ `MetalContext` を
     /// そのまま渡せるよう、シグネチャは変更しない（非破壊）。
+    ///
+    /// **注意（イシュー #1017）**: `context` は呼び出し元が新規構築した
+    /// 専用インスタンスであり、`ops::MetalBackendOps`（`sgd_step_device`
+    /// 等）が内部で使う `context_cache::cached_context()`（プロセス全体
+    /// シングルトン）とは**別のバッチ状態**を持つ。本コンストラクタ経由の
+    /// `MetalMemory`（例: `bench-harness::peak_memory`・
+    /// `tests/memory_roundtrip.rs`）で `download`／`zero_fill` を呼んでも、
+    /// `MetalBackendOps` 経由でディスパッチされた別コンテキストのバッチ
+    /// （SGD 等）は同期しない。この経路を SGD デバイス常駐更新
+    /// （`fandhe_ai_autodiff::optim::device_store::DeviceParamStore`）と
+    /// 混在させない（同ストアは `tape.ops().memory_ops()` →
+    /// `MetalBackendOps::memory_ops()` → [`Self::from_shared`]
+    /// （プロセス共有コンテキスト）経由に固定されており、この懸念は
+    /// 生じない）。
     pub fn new(context: MetalContext) -> Self {
         Self::from_shared(Arc::new(context))
     }

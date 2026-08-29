@@ -80,7 +80,12 @@ impl DispatchFailureCell {
     /// 返し、`set` される前に他スレッドが panic した到達しにくい経路
     /// では `None` を返す。呼び出し元は `is_set()` を先に見て poison を
     /// 検出する契約であり、`take()` 自体は panic させないことのみを
-    /// 保証する）。
+    /// 保証する）。**poison 自体は `take()` 後も解除されない**ため
+    /// （`Mutex::lock()` は同一 `Mutex` が poison している限り恒久的に
+    /// `Err` を返す標準ライブラリの仕様）、`None` を取り出した場合でも
+    /// 以後 [`Self::is_set`] は `true` のまま固定される
+    /// （fail-closed。「エラーは無いが恒久的に設定済み扱い」という
+    /// 安全側の縮退であり、値を取りこぼしたことにはならない）。
     pub fn take(&self) -> Option<BackendError> {
         let mut guard = match self.inner.lock() {
             Ok(guard) => guard,
