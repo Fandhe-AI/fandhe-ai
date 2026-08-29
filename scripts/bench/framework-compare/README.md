@@ -55,8 +55,8 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 
 - 既定は `fresh`（上記「計測ごとに新しい計算グラフを作る」プロトコルと完全に同一。既存 JSONL・集計表との互換維持。
   ただし上記のとおり Metal / CUDA では candle / Burn とプロトコル同一ではない点に注意）
-- `reuse`（`bench-fandhe` の `gemm` タスクのみ対応。`bench-candle` / `bench-burn` は
-  デバイス再利用が API 上の既定設計のため対象外で MEASURE_ERROR を返す）:
+- `reuse`（`bench-fandhe` の `gemm`／`train` タスクに対応。`bench-candle` / `bench-burn` は
+  デバイス再利用が API 上の既定設計のため task に依らず対象外で MEASURE_ERROR を返す）:
   tape/デバイスを 1 回だけ構築し、その構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
   経過時間を `init_s`（JSONL のフィールド。初期化 1 回分のコスト）として分離記録したうえで、
   同一 tape 上で warmup 残り 19 回 → 計測 20 回を回し、`median_s`/`q1_s`/`q3_s` を
@@ -70,6 +70,46 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   N=4096 でも約 2.6 GiB で対象 GPU メモリ内に収まる。長時間・大サイズの reuse 計測では
   メモリ使用量の増加に留意する）
 - 使用例: `cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 2048 --mode reuse`
+
+### `train --mode reuse`（イシュー #958。デバイス常駐パラメータ更新）
+
+- `run_train`（`fresh`）は各 SGD ステップでホスト経由の更新（勾配を download → ホストで
+  `p - lr*g` → `apply_parameters` で書き戻し）を行っており、candle（`Var::set`）や
+  Burn（デバイス上更新）と非対称なプロトコルになっている（#957 背景）。`reuse` は
+  イシュー #954 で追加されたデバイス常駐パラメータ更新 API（`fandhe_ai::DeviceParamStore`）
+  を使い、`p - lr*g` の更新自体をデバイス上で完結させる
+- 参照実装は `crates/facade/tests/device_param_store_train.rs::train_with_device_param_store`
+  （`Sequential::init_device_param_store` で全パラメータを 1 回だけ H2D upload → 以後は
+  同一 `DeviceParamStore` を使い回す）であり、`run_train_reuse` はその構造に揃える
+- **`init_s` の定義**: 初回 tape 構築 + `init_device_param_store`（全パラメータの 1 回限りの
+  H2D upload）+ その完了を保証する明示同期点（`sync_device_param_store_to_host`）までの
+  経過時間。`bench-fandhe` が依存できる公開 API 面（`fandhe-ai =0.4.0`）には「ホスト転送を
+  伴わない完了待ち」が公開されていないため、この同期点は D2H 実体化コストを伴う
+  （codex-review PR #998 P2 指摘。`main.rs` の `run_train_reuse` init_s コメント参照）。
+  これは `gemm reuse` の `init_s` が「初回 matmul + ホスト実体化」を明示的に含めている前例
+  と同じ扱いであり、`init_s` は純粋な H2D upload 時間ではなく「upload 完了を確認可能な
+  最初の時点」までの時間として解釈する。以後 100 step（先頭 20 を warmup として除外、
+  残り 80 を計測）は gemm 同様 `median_s`/`q1_s`/`q3_s` として記録する。各 step の計測窓は
+  デバイス上 SGD 更新の完了を待たずに終える（次 step 冒頭の `register_resident_leaves` の
+  D2H download が同期点として機能し、定常状態では窓の境界が 1 step ずれるだけで
+  `forward + backward + update` の総和は変わらない。`main.rs` のループ冒頭コメント参照）
+- **tape は step ごとに新規生成する**（gemm reuse と異なり、tape 自体は使い回さない）:
+  `fandhe_ai_autodiff::Tape` はノード列クリア API を持たず学習ループはステップごとに
+  tape を生成・破棄する設計契約であり、単一 tape を 100 step 使い回すと `Tape::backward`
+  の逆順走査コストが step 数に比例して増加し 1 step の計測時間が非定常になる。reuse で
+  使い回すのは tape ではなく `DeviceParamStore`（デバイス常駐バッファ・デバイスを固定
+  する側）であり、fresh/reuse の計時差は「ホスト経由 SGD vs デバイス常駐更新」に限定される
+- **既知の前提（改善量の解釈範囲）**: `Sequential::forward_resident` が呼ぶ
+  `DeviceParamStore::register_resident_leaves` は forward 用に毎 step パラメータを
+  D2H download する（`docs/device-resident-update-design.md` §3.3b・イシュー #954 申し送り）。
+  reuse が排除するのは「毎 step の再アップロード（H2D）+ ホスト計算」であり、この D2H は
+  reuse でも残存する
+- **数値一致確認**（受け入れ条件 5）: `cargo test --locked --release -p bench-fandhe` に
+  `train_reuse_matches_fresh_final_loss_within_composite_tolerance`（cpu・実機非依存。
+  fresh/reuse の最終 loss を統一複合判定で突合）を含む
+- 使用例: `cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse`
+- スイープ・`run_all*.sh`/`summarize.py` への組み込み・cpu/metal/cuda 実測・
+  `results/summary.md` への反映はイシュー #959 の担当（本イシュー #958 のスコープ外）
 
 ### 要素単位検証（イシュー #970）
 
@@ -114,6 +154,7 @@ cd scripts/bench/framework-compare
 # 個別実行:
 cargo run --release -p bench-fandhe -- --task gemm --device metal --size 2048
 cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 2048 --mode reuse
+cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse
 # 集計（JSONL → Markdown 表。既定は results/raw/*.jsonl 全件を標準出力へ。
 # reuse 行が存在するファイルには (a') 節が追加される。
 # コミット済みの results/summary.md は既定動作では上書きされない）:
