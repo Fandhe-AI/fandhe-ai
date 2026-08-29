@@ -1060,6 +1060,114 @@ impl CudaGemm {
         Ok(gemm)
     }
 
+    /// `device` 上で、`run_wmma_tf32` の 3 段選択（staged→opt→basic）を
+    /// **opt 版に強制**したハンドルを構築する（イシュー #994）。
+    ///
+    /// 呼び出し元は `examples/wmma_tolerance_probe.rs` の
+    /// `--tf32-kernel opt`（`internal-diagnostics` feature 限定）のみ。
+    /// `docs/perf/cuda-tensor-core-tolerance-evaluation.md` §2.1 の TF32
+    /// 実測は TASK-11.1c 時点の基本版カーネルを対象としており、
+    /// TASK-11.1d（#63）で追加された opt 版（`Self::wmma_tf32_opt`）は
+    /// 未計測だった。本コンストラクタは `run_wmma_tf32` の 3 段選択から
+    /// staged 経路を除外することで、公開 API を経由しつつ常に opt 版が
+    /// 選ばれる状態を作る（[`new_without_tf32_staged_swizzle`]・
+    /// [`new_with_tf32_staged_swizzle`] と同じ「`new` で通常構築した後に
+    /// スロットを差し替える」設計）。
+    ///
+    /// 手順: [`new`](Self::new) で通常構築した後、`wmma_tf32_staged`／
+    /// `wmma_tf32_staged_swizzle`／`wmma_tf32_staged_swizzle_group_width`
+    /// を `None` に、`wmma_tf32_staged_error`／
+    /// `wmma_tf32_staged_swizzle_error` を診断専用の理由文字列に差し替える
+    /// （`tf32_kernel_availability_header` が理由付きで `staged=no (…)` を
+    /// 表示できるようにする）。`run_wmma_tf32` は staged が `None` のため
+    /// 常に opt 分岐（`self.wmma_tf32_opt.as_ref()`）へ進む。
+    ///
+    /// **fail-closed（A/A 誤認防止）**: `wmma_tf32_opt.is_none()`
+    /// （opt 版がこの device でコンパイル・ロードに失敗している）場合は
+    /// `basic` へ黙ってフォールバックせず `CudaError::WmmaUnavailable` を
+    /// 返す。黙って `Ok` を返すと「opt 版を計測したつもりが実際は basic を
+    /// 計測していた」誤認を招く（`new_with_tf32_staged_swizzle`
+    /// ドキュメンテーションコメント「A/A 誤認」節と同じ判断）。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （REQ-11「明示切替 API を公開面に置かない」を維持するため。既定
+    /// ビルドの公開 API 面は変更しない）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_tf32_opt_only(device: &CudaDevice) -> Result<Self, CudaError> {
+        let mut gemm = Self::new(device)?;
+
+        if gemm.wmma_tf32_opt.is_none() {
+            return Err(CudaError::WmmaUnavailable {
+                detail: format!(
+                    "new_tf32_opt_only: opt kernel unavailable, cannot force opt path \
+                     (reason: {})",
+                    gemm.wmma_tf32_opt_error
+                        .as_deref()
+                        .unwrap_or("unknown reason")
+                ),
+            });
+        }
+
+        gemm.wmma_tf32_staged = None;
+        gemm.wmma_tf32_staged_error =
+            Some("disabled by CudaGemm::new_tf32_opt_only (diagnostic)".to_string());
+        gemm.wmma_tf32_staged_swizzle = None;
+        gemm.wmma_tf32_staged_swizzle_group_width = None;
+        gemm.wmma_tf32_staged_swizzle_error =
+            Some("disabled by CudaGemm::new_tf32_opt_only (diagnostic)".to_string());
+        Ok(gemm)
+    }
+
+    /// `device` 上で、`run_wmma_tf32` の 3 段選択を**基本版（`wmma_tf32`）に
+    /// 強制**したハンドルを構築する（イシュー #994。
+    /// [`new_tf32_opt_only`](Self::new_tf32_opt_only) の basic 版）。
+    ///
+    /// 呼び出し元は `examples/wmma_tolerance_probe.rs` の
+    /// `--tf32-kernel basic`（`internal-diagnostics` feature 限定）のみ。
+    ///
+    /// 手順: staged 系スロット（`wmma_tf32_staged`／
+    /// `wmma_tf32_staged_swizzle`／`wmma_tf32_staged_swizzle_group_width`）
+    /// を無効化したうえで、さらに `wmma_tf32_opt` を `None`・
+    /// `wmma_tf32_opt_error` を診断専用の理由文字列に差し替える。
+    /// `run_wmma_tf32` は staged・opt がいずれも `None` のため常に basic
+    /// 分岐（`self.wmma_tf32.as_ref()`）へ進む。
+    ///
+    /// **fail-closed（A/A 誤認防止）**: `wmma_tf32.is_none()`（基本版
+    /// カーネル自体がこの device で使用不能）の場合は `CudaError::
+    /// WmmaUnavailable` を返す（[`new_tf32_opt_only`](Self::new_tf32_opt_only)
+    /// と同じ判断。basic を計測するつもりで実は何も実行できない状態を
+    /// 静かに通さない）。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （[`new_tf32_opt_only`](Self::new_tf32_opt_only) と同じ理由）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_tf32_basic_only(device: &CudaDevice) -> Result<Self, CudaError> {
+        let mut gemm = Self::new(device)?;
+
+        gemm.wmma_tf32_staged = None;
+        gemm.wmma_tf32_staged_error =
+            Some("disabled by CudaGemm::new_tf32_basic_only (diagnostic)".to_string());
+        gemm.wmma_tf32_staged_swizzle = None;
+        gemm.wmma_tf32_staged_swizzle_group_width = None;
+        gemm.wmma_tf32_staged_swizzle_error =
+            Some("disabled by CudaGemm::new_tf32_basic_only (diagnostic)".to_string());
+
+        if gemm.wmma_tf32.is_none() {
+            return Err(CudaError::WmmaUnavailable {
+                detail: format!(
+                    "new_tf32_basic_only: basic kernel unavailable, cannot force basic path \
+                     (reason: {})",
+                    gemm.wmma_tf32_error.as_deref().unwrap_or("unknown reason")
+                ),
+            });
+        }
+
+        gemm.wmma_tf32_opt = None;
+        gemm.wmma_tf32_opt_error =
+            Some("disabled by CudaGemm::new_tf32_basic_only (diagnostic)".to_string());
+        Ok(gemm)
+    }
+
     /// naive f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
     ///
     /// ホスト側形状検証（`validate_gemm_dims`）を先行させた後、
@@ -3003,5 +3111,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// イシュー #994 受け入れ基準（実機検証）: [`CudaGemm::
+    /// new_tf32_opt_only`]／[`CudaGemm::new_tf32_basic_only`] が、それぞれ
+    /// 意図したカーネル種別（可用性フラグ）を強制することを確認する。
+    /// 数値一致（誤差分布）は `examples/wmma_tolerance_probe.rs
+    /// --tf32-kernel opt/basic` の実機計測（`docs/perf/
+    /// cuda-tensor-core-tolerance-opt-remeasurement.md`）側の責務であり、
+    /// 本テストは「この診断入口が正しくルーティングを固定するか」のみを
+    /// 検証する（数値判定はしない）。
+    ///
+    /// - `new_tf32_opt_only`: `wmma_tf32_staged_available() == false` かつ
+    ///   `wmma_tf32_opt_available() == true` であることを assert する。
+    /// - `new_tf32_basic_only`: 両方 `false`（staged・opt とも不能）かつ
+    ///   `run_wmma_tf32` が 64×64×64 で `Ok` を返す（basic 経路が実際に
+    ///   起動できる）ことを assert する。
+    ///
+    /// `#[ignore]`: 本セッションは NVRTC 非搭載のため実行できない。DGX
+    /// Spark GB10 等の実機で `cargo test -p fandhe-ai-backend-cuda --lib
+    /// --release --features internal-diagnostics -- --ignored --nocapture
+    /// wmma_tf32_diagnostic_constructors_force_expected_kernel` から実行
+    /// する。`internal-diagnostics` feature（既定 off）でのみコンパイル
+    /// される（診断コンストラクタ自体が同 feature でゲートされているため）。
+    #[cfg(feature = "internal-diagnostics")]
+    #[test]
+    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
+    fn wmma_tf32_diagnostic_constructors_force_expected_kernel() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+
+        let opt_only = CudaGemm::new_tf32_opt_only(&device)
+            .expect("new_tf32_opt_only must succeed when the opt kernel is available");
+        assert!(
+            !opt_only.wmma_tf32_staged_available(),
+            "new_tf32_opt_only must disable the staged path (routing must fall through to opt)"
+        );
+        assert!(
+            opt_only.wmma_tf32_opt_available(),
+            "new_tf32_opt_only must keep the opt kernel available"
+        );
+
+        let basic_only = CudaGemm::new_tf32_basic_only(&device)
+            .expect("new_tf32_basic_only must succeed when the basic kernel is available");
+        assert!(
+            !basic_only.wmma_tf32_staged_available(),
+            "new_tf32_basic_only must disable the staged path"
+        );
+        assert!(
+            !basic_only.wmma_tf32_opt_available(),
+            "new_tf32_basic_only must disable the opt path (routing must fall through to basic)"
+        );
+        basic_only
+            .run_wmma_tf32(&[1.0f32; 64 * 64], &[1.0f32; 64 * 64], 64, 64, 64)
+            .expect("run_wmma_tf32 must succeed via the forced basic path for a 64x64x64 shape");
     }
 }

@@ -93,7 +93,8 @@ fandhe-ai/
     │   ├── metal-gemm-bottleneck-diagnosis.md # Metal GEMM 1024 以降スループット頭打ちの定量診断（#487）
     │   ├── metal-gemm-splitk-shapes.md # split-K 対象形状（K 支配的非正方）の劣化定量化実測記録（#810）
     │   ├── cuda-fresh-gemm-n2048-overhead-diagnosis.md # fresh モード CUDA GEMM N=2048 固有の約 166 ms 残存オーバーヘッド診断（実機未実測・計測コード先行整備。#956）
-    │   └── burn-wgpu-metal-gemm-zero-result.md # framework-compare の Burn(wgpu) Metal GEMM N>=512 全ゼロの原因切り分け（upstream 既知バグ。#965）
+    │   ├── burn-wgpu-metal-gemm-zero-result.md # framework-compare の Burn(wgpu) Metal GEMM N>=512 全ゼロの原因切り分け（upstream 既知バグ。#965）
+    │   └── cuda-tensor-core-tolerance-opt-remeasurement.md # opt 版 WMMA TF32 カーネルの数値一致誤差分布再実測（診断コンストラクタ先行実装・GB10 実機計測は未了。#994）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）
