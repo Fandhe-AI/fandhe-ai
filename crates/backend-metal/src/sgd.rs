@@ -14,6 +14,7 @@
 //! `ops.rs::MetalBackendOps::sgd_step_device` から
 //! `BackendOps::sgd_step_device` の実装として呼ばれる。
 
+use fandhe_ai_tensor_core::DispatchFailureCell;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
 
@@ -99,6 +100,20 @@ impl MetalSgd {
     /// バッファを渡す契約）。`velocity` は momentum 有効時のみ `Some` を
     /// 要求する。`numel == 0` の場合はディスパッチ自体を回避する
     /// （`elementwise.rs::MetalElementwise::run_binary` と同じ理由）。
+    ///
+    /// イシュー #1017（コマンドバッファ共有）で `token` の有無によって
+    /// 同期方式を分岐する（PR #1057 レビュー指摘。既存公開 API
+    /// `BackendOps::sgd_step_device`〈`token: None`〉の同期契約を壊さない
+    /// ため）: `token` が `None`（`ops.rs::MetalBackendOps::
+    /// sgd_step_device` 経由）の場合は `encode` 直後に本メソッド内で
+    /// `ctx.synchronize()` まで行い、復帰時点で GPU 実行の完了・成否
+    /// （`Result`）を呼び出し元へ返す（従来の `ctx.dispatch_sync` と
+    /// 同じ「1 呼び出し = 完了保証」契約）。`token` が `Some`（`ops.rs::
+    /// MetalBackendOps::sgd_step_device_tracked` 経由）の場合はバッチ化
+    /// のため待たず、実行時エラーは `ctx.encode` と同一ロック区間で
+    /// バッチへ登録した `token` へ、後続の `ctx.synchronize()`（ホスト
+    /// 実体化時）が検出した際に書き込まれる（非同期契約）。
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         ctx: &MetalContext,
@@ -107,6 +122,7 @@ impl MetalSgd {
         velocity: Option<&MetalBuffer>,
         numel: usize,
         params: &SgdKernelParams,
+        token: Option<&DispatchFailureCell>,
     ) -> Result<(), MetalError> {
         validate_sgd_len(numel)?;
         if numel == 0 {
@@ -123,18 +139,38 @@ impl MetalSgd {
         // ため）。
         let velocity_buf = velocity.unwrap_or(grad);
 
-        ctx.dispatch_sync(|encoder| {
-            encode_sgd_dispatch(
-                encoder,
-                &self.sgd_step_f32,
-                param,
-                grad,
-                velocity_buf,
-                numel as u32,
-                params,
-                use_momentum,
-            );
-        })
+        // SAFETY: `ctx.encode` が積むバッチの `synchronize()` 完了まで、
+        // `param`／`grad`／`velocity_buf` を `Batch::in_flight` へ retain
+        // させる必要がある（`ctx.dispatch_sync` と異なり、本メソッドの
+        // 復帰時点でこれらの引数の生存を呼び出し元へ保証させない）。
+        // `resources` に 3 本すべてを渡すことで、
+        // `DeviceParamStore::step` がループ末尾で `grad_buf` を drop
+        // しても GPU 完了までバッファの実体が生存し続ける
+        // （`context.rs::Batch` フィールド doc「§2.5」参照）。
+        ctx.encode(
+            "sgd_step_f32",
+            &[param.raw(), grad.raw(), velocity_buf.raw()],
+            token,
+            |encoder| {
+                encode_sgd_dispatch(
+                    encoder,
+                    &self.sgd_step_f32,
+                    param,
+                    grad,
+                    velocity_buf,
+                    numel as u32,
+                    params,
+                    use_momentum,
+                );
+            },
+        )?;
+
+        // `token` が `None` の場合のみここで待つ（上記ドキュメント参照）。
+        // `Some` の場合はバッチ化された非同期契約のため待たずに返す。
+        match token {
+            None => ctx.synchronize(),
+            Some(_) => Ok(()),
+        }
     }
 }
 
@@ -158,8 +194,12 @@ fn encode_sgd_dispatch(
     // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の
     // `MTLBuffer` への参照を保持するのみで即座に読み書きしない
     // （`elementwise.rs::encode_binary_dispatch` と同種のコメント参照）。
-    // `param_buf`／`grad_buf`／`velocity_buf` は呼び出し元
-    // `ctx.dispatch_sync` が完了するまで生存する。
+    // `param_buf`／`grad_buf`／`velocity_buf` は `MetalSgd::run` が
+    // `ctx.encode` の `resources` へ渡し、`Batch::in_flight` へ retain
+    // されるため `ctx.synchronize()` が完了するまで生存する（イシュー
+    // #1017。旧 `ctx.dispatch_sync` 経由時は呼び出し元の関数スコープが
+    // 生存を保証していたが、`ctx.encode` は待たずに復帰するため、この
+    // retain 列が生存契約の担い手になった）。
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(param_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(grad_buf.raw()), 0, 1);

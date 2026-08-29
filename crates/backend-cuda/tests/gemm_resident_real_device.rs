@@ -8,6 +8,7 @@
 //! ```
 
 use fandhe_ai_backend_cuda::{CudaBackendOps, CudaDevice};
+use fandhe_ai_tensor_core::buffer::DeviceBufferView;
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 fn assert_close(actual: f32, expected: f32, ctx: &str) {
@@ -74,10 +75,14 @@ fn gemm_resident_rhs_matches_cpu_reference_on_real_device() {
                 .unwrap();
 
             let w_dev = cuda_mem.upload(&w).unwrap();
+            let w_shape = [k, n];
+            let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
             let bias_dev = bias.as_ref().map(|b| cuda_mem.upload(b).unwrap());
-            let actual = cuda_ops
-                .gemm_resident_rhs(&a, &w_dev, bias_dev.as_ref())
-                .unwrap();
+            let bias_shape = [n];
+            let bias_view = bias_dev
+                .as_ref()
+                .map(|buf| DeviceBufferView::new(buf, 0, &bias_shape).unwrap());
+            let actual = cuda_ops.gemm_resident_rhs(&a, w_view, bias_view).unwrap();
 
             assert_tensor_close(
                 &actual,
@@ -114,7 +119,9 @@ fn gemm_resident_lhs_matches_cpu_reference_on_real_device() {
         let expected = cpu_ops.gemm(&w, &b).unwrap();
 
         let w_dev = cuda_mem.upload(&w).unwrap();
-        let actual = cuda_ops.gemm_resident_lhs(&w_dev, &b).unwrap();
+        let w_shape = [p, q];
+        let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+        let actual = cuda_ops.gemm_resident_lhs(w_view, &b).unwrap();
 
         assert_tensor_close(
             &actual,

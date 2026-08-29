@@ -28,6 +28,16 @@
 //! 初期化コスト (a) はどちらの経路も同一の `tape_for` 呼び出しコストを
 //! 払うため、本ベンチは (a) の差ではなく (b) の差を主眼に置く（設計文書
 //! §7「#936 への引き渡し事項」）。
+//!
+//! **#1023 追補**: `DeviceParamStore` の内部実装をパラメータ横断の単一
+//! 連結バッファへ再構成し、更新フェーズ（grad upload・
+//! `sgd_step_device_tracked` 起動）をパラメータ数に依らず 1 回／step へ
+//! バッチ化した（`crates/autodiff/src/optim/device_store.rs` モジュール
+//! 冒頭コメント参照）。本ベンチは呼び出し側 API（`init_device_param_store`／
+//! `forward_resident`／`step_device_param_store`）を変更なしで計測する
+//! ため、変更後の理論的なディスパッチ回数（更新フェーズ: 2N → 2）を
+//! 自動的に反映する。Metal 実機・DGX Spark GB10 実機での再計測は
+//! `docs/perf/device-resident-update-bench.md` §6 追補を参照。
 
 use std::time::Instant;
 

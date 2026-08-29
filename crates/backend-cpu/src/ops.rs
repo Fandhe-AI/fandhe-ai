@@ -12,7 +12,7 @@
 
 use std::sync::OnceLock;
 
-use fandhe_ai_tensor_core::buffer::{DeviceBuffer, MemoryOps};
+use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, DType, FusionPlan, SgdStepConfig, ShapeError, Tensor,
@@ -315,18 +315,23 @@ impl BackendOps for CpuBackendOps {
     }
 
     /// デバイス常駐 `w`（・`bias`）のまま `y = a @ w (+ bias)` を計算する
-    /// （イシュー #1022）。CPU は「デバイス」がホストメモリそのもの
-    /// （`CpuBufferHandle.data: Vec<f32>`）であるため、`downcast_handle`
-    /// で直接読むだけでゼロコピーに `gemm_blis_bias_act_parallel` へ渡せる
-    /// （`sgd_step_device` と同じ「転送コストゼロ」契約）。`bias` は
-    /// `[n]`（`w` の列数）への厳密一致のみ対応する（`gemm_bias_act` の
-    /// 融合カーネル契約と同じ）。カーネル本体（`gemm_blis_bias_act_
-    /// parallel`）へ触れる前に shape を検証する（REQ-8・OWASP A03）。
+    /// （イシュー #1022・#1023「R3」）。CPU は「デバイス」がホストメモリ
+    /// そのもの（`CpuBufferHandle.data: Vec<f32>`）であるため、
+    /// `downcast_handle` で連結バッファを直接読み、[`DeviceBufferView`]
+    /// の `offset()..offset()+numel()` 範囲をスライスするだけでゼロ
+    /// コピーに `gemm_blis_bias_act_parallel` へ渡せる（`sgd_step_device`
+    /// と同じ「転送コストゼロ」契約）。`bias` は `[n]`（`w` の列数）への
+    /// 厳密一致のみ対応する（`gemm_bias_act` の融合カーネル契約と同じ）。
+    /// カーネル本体（`gemm_blis_bias_act_parallel`）へ触れる前に shape を
+    /// 検証する（REQ-8・OWASP A03）。範囲自体の検査は
+    /// `DeviceBufferView::new` が構築時に済ませているため、ここでは
+    /// スライスの長さ（`w.numel()`）が shape 由来の期待値と一致する前提で
+    /// 直接インデックスする。
     fn gemm_resident_rhs(
         &self,
         a: &Tensor<f32>,
-        w: &DeviceBuffer<f32>,
-        bias: Option<&DeviceBuffer<f32>>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
     ) -> Result<Tensor<f32>, BackendError> {
         if w.device() != Device::Cpu {
             return Err(BackendError::DeviceMismatch);
@@ -348,8 +353,10 @@ impl BackendOps for CpuBackendOps {
         }
         let n = w_shape[1];
         let w_handle = w
+            .buffer()
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
+        let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
 
         let bias_handle = match bias {
             Some(b) => {
@@ -362,14 +369,14 @@ impl BackendOps for CpuBackendOps {
                         rhs: vec![n],
                     }));
                 }
-                Some(
-                    b.downcast_handle::<CpuBufferHandle>()
-                        .ok_or(BackendError::DeviceMismatch)?,
-                )
+                let handle = b
+                    .buffer()
+                    .downcast_handle::<CpuBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?;
+                Some(&handle.data[b.offset()..b.offset() + b.numel()])
             }
             None => None,
         };
-        let bias_slice = bias_handle.as_ref().map(|h| h.data.as_slice());
 
         let a_owned = a.contiguous();
         let a_slice = a_owned.as_slice().ok_or_else(|| {
@@ -379,25 +386,26 @@ impl BackendOps for CpuBackendOps {
         let mut out = vec![0.0f32; m * n];
         gemm_blis_bias_act_parallel(
             a_slice,
-            &w_handle.data,
+            w_slice,
             &mut out,
             m,
             n,
             k,
-            bias_slice,
+            bias_handle,
             Activation::None,
         )
         .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &[m, n]).map_err(BackendError::ShapeMismatch)
     }
 
-    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022）。
-    /// `Op::LinearResident` の VJP（`fandhe_ai_autodiff::grad`）が
-    /// `d_input^T = w @ g^T` を計算するために使う。[`Self::
-    /// gemm_resident_rhs`] と同じくゼロコピー（`downcast_handle` 直読み）。
+    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
+    /// #1023「R3」）。`Op::LinearResident` の VJP（`fandhe_ai_autodiff::
+    /// grad`）が `d_input^T = w @ g^T` を計算するために使う。[`Self::
+    /// gemm_resident_rhs`] と同じくゼロコピー（`downcast_handle` 直読み
+    /// + オフセット範囲スライス）。
     fn gemm_resident_lhs(
         &self,
-        w: &DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
         b: &Tensor<f32>,
     ) -> Result<Tensor<f32>, BackendError> {
         if w.device() != Device::Cpu {
@@ -420,8 +428,10 @@ impl BackendOps for CpuBackendOps {
         }
         let r = b_shape[1];
         let w_handle = w
+            .buffer()
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
+        let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
 
         let b_owned = b.contiguous();
         let b_slice = b_owned.as_slice().ok_or_else(|| {
@@ -429,7 +439,7 @@ impl BackendOps for CpuBackendOps {
         })?;
 
         let mut out = vec![0.0f32; p * r];
-        gemm_blis_parallel(&w_handle.data, b_slice, &mut out, p, r, q)
+        gemm_blis_parallel(w_slice, b_slice, &mut out, p, r, q)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &[p, r]).map_err(BackendError::ShapeMismatch)
     }

@@ -9,6 +9,7 @@
 #![cfg(target_os = "macos")]
 
 use fandhe_ai_backend_metal::MetalBackendOps;
+use fandhe_ai_tensor_core::buffer::DeviceBufferView;
 use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 fn assert_close(actual: f32, expected: f32, ctx: &str) {
@@ -68,10 +69,14 @@ fn gemm_resident_rhs_matches_cpu_reference() {
                 .unwrap();
 
             let w_dev = metal_mem.upload(&w).unwrap();
+            let w_shape = [k, n];
+            let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
             let bias_dev = bias.as_ref().map(|b| metal_mem.upload(b).unwrap());
-            let actual = metal_ops
-                .gemm_resident_rhs(&a, &w_dev, bias_dev.as_ref())
-                .unwrap();
+            let bias_shape = [n];
+            let bias_view = bias_dev
+                .as_ref()
+                .map(|buf| DeviceBufferView::new(buf, 0, &bias_shape).unwrap());
+            let actual = metal_ops.gemm_resident_rhs(&a, w_view, bias_view).unwrap();
 
             assert_tensor_close(
                 &actual,
@@ -106,7 +111,9 @@ fn gemm_resident_lhs_matches_cpu_reference() {
         let expected = cpu_ops.gemm(&w, &b).unwrap();
 
         let w_dev = metal_mem.upload(&w).unwrap();
-        let actual = metal_ops.gemm_resident_lhs(&w_dev, &b).unwrap();
+        let w_shape = [p, q];
+        let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+        let actual = metal_ops.gemm_resident_lhs(w_view, &b).unwrap();
 
         assert_tensor_close(
             &actual,

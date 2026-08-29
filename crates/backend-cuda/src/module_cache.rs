@@ -5,7 +5,15 @@
 //! `CudaKernelCacheKey`／ディスクキャッシュ `store_cache_entry`／
 //! `load_cache_entry`）は実装済みだが GEMM 経路へ未結線であり、繰り返し
 //! 形状での NVRTC 再コンパイル・`load_module` 再ロードのコストが残って
-//! いた（`kernels_mma.rs::RenderedMmaKernel::compile` からの結線で解消）。
+//! いた（`kernels_mma.rs::RenderedMmaKernel::compile` からの結線で解消、
+//! さらにイシュー #1024 で `gemm.rs::CudaGemm::new`（f32 本番経路の 9
+//! カーネル）へも結線した）。
+//!
+//! [`load_function_cached`] が 3 段フォールバック（プロセス内 LRU →
+//! ディスクキャッシュ照合 → NVRTC 直コンパイル）の単一実装であり、
+//! `kernels_mma.rs::RenderedMmaKernel::compile` と `gemm.rs::CudaGemm::new`
+//! の双方がこのヘルパーを呼ぶ（イシュー #1024。ロジックの二重管理を
+//! 避けるための共通化）。
 //!
 //! # 所有モデル（cudarc 0.19.8）
 //!
@@ -35,10 +43,11 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use cudarc::driver::{CudaContext, CudaModule};
+use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
 
+use crate::device::CudaDevice;
 use crate::error::CudaError;
-use crate::nvrtc::CudaKernelCacheKey;
+use crate::nvrtc::{CudaKernelCacheKey, CudaKernelDescriptor};
 
 /// 容量上限つき LRU の既定容量（未設定時）。
 ///
@@ -201,14 +210,11 @@ fn resolve_module_cache_capacity(raw: Option<&std::ffi::OsStr>) -> Result<NonZer
 /// [`resolve_module_cache_capacity`] の crate 内ラッパー。実プロセス
 /// 環境変数 `RUST_AI_CUDA_MODULE_CACHE_CAPACITY` を読んで委譲する。
 ///
-/// 唯一の呼び出し元 [`KernelModuleCache::global`] が
-/// `kernels_mma.rs::RenderedMmaKernel::compile`（`internal-diagnostics`
-/// feature ゲート経由でのみ到達。`kernels_mma.rs` 該当ドキュメンテーション
-/// コメント参照）経由でのみ呼ばれるため、既定ビルドでは crate 内呼び出し
-/// 元が実質存在せず dead-code 解析が誤検知する。テストは実環境変数への
-/// 依存を避けるため注入可能な [`resolve_module_cache_capacity`] を直接
-/// 呼ぶ（本関数と同じ理由）。
-#[allow(dead_code)]
+/// 唯一の呼び出し元 [`KernelModuleCache::global`] は [`load_function_cached`]
+/// （`kernels_mma.rs::RenderedMmaKernel::compile` と `gemm.rs::CudaGemm::new`
+/// の双方が既定ビルドで到達する共通ヘルパー。イシュー #1024）経由で呼ばれる。
+/// テストは実環境変数への依存を避けるため注入可能な
+/// [`resolve_module_cache_capacity`] を直接呼ぶ。
 fn module_cache_capacity() -> Result<NonZeroUsize, CudaError> {
     resolve_module_cache_capacity(std::env::var_os(CAPACITY_ENV_VAR).as_deref())
 }
@@ -237,22 +243,18 @@ fn module_cache_capacity() -> Result<NonZeroUsize, CudaError> {
 /// hit/miss カウンタ（[`Self::hit_count`]／[`Self::miss_count`]）を持ち、
 /// 実機テストでの再利用検証・将来の C-12（#534）性能計測の観測点とする。
 ///
-/// 唯一の crate 内呼び出し元 `kernels_mma.rs::RenderedMmaKernel::compile`
-/// が `internal-diagnostics` feature（既定 off）ゲート経由でのみ到達する
-/// （同ファイルの `#[allow(dead_code)]` 群と同じ理由）ため、既定ビルドでは
-/// 本 struct・以下の全メソッドが未参照のまま dead-code 解析が誤検知する。
-#[allow(dead_code)]
+/// 呼び出し元は [`load_function_cached`] 経由の
+/// `kernels_mma.rs::RenderedMmaKernel::compile`（`internal-diagnostics`
+/// feature 限定）と `gemm.rs::CudaGemm::new`（f32 本番経路。イシュー
+/// #1024 で結線）の 2 経路。後者は既定ビルドでも到達するため、
+/// `#[allow(dead_code)]` は不要（結線前は前者のみだったため付与して
+/// いた）。
 pub(crate) struct KernelModuleCache {
     inner: Mutex<LruCache<(usize, CudaKernelCacheKey), Arc<CudaModule>>>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
-// `#[allow(dead_code)]` の理由は `KernelModuleCache` 本体のドキュメン
-// テーションコメントと同じ（既定ビルドでは `internal-diagnostics`
-// feature 経由でのみ到達するため）。impl 全体を覆うことで各メソッド
-// 個別への重複付与を避ける。
-#[allow(dead_code)]
 impl KernelModuleCache {
     fn new(capacity: NonZeroUsize) -> Self {
         Self {
@@ -356,14 +358,113 @@ impl KernelModuleCache {
     }
 
     /// ヒット件数（実機テストでの再利用検証・C-12〈#534〉計測用）。
+    ///
+    /// 呼び出し元は `lib.rs::diagnostics::module_cache_hit_count`
+    /// （`internal-diagnostics` feature 限定）と
+    /// `module_cache_wiring_tests.rs`（`#[cfg(test)]`）のみのため、
+    /// 既定ビルド（feature なし・非 test）では未参照のまま dead-code
+    /// 解析が誤検知する。
+    #[allow(dead_code)]
     pub(crate) fn hit_count(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
     }
 
-    /// ミス件数。
+    /// ミス件数。`#[allow(dead_code)]` の理由は [`Self::hit_count`] と同じ。
+    #[allow(dead_code)]
     pub(crate) fn miss_count(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
     }
+}
+
+/// `descriptor`／`source`（最終レンダー済みカーネルソース全体）を鍵に、
+/// 3 段フォールバック（プロセス内 LRU → ディスクキャッシュ照合 → NVRTC
+/// 直コンパイル）で `func_name` の [`CudaFunction`] を取得する共通ヘルパー
+/// （イシュー #1024）。
+///
+/// 元々は `kernels_mma.rs::RenderedMmaKernel::compile` に個別実装されて
+/// いた 3 段ロジック（イシュー #511・C-4）をそのまま抽出したもの。
+/// `gemm.rs::CudaGemm::new`（f32 GEMM 本番経路の 9 カーネル）も本関数を
+/// 呼ぶことで、2 箇所が独立にフォールバック段数・縮退方針を実装して
+/// 乖離するのを防ぐ（単一の真実源化）。
+///
+/// # 3 段フォールバック
+///
+/// 1. **プロセス内 LRU**（[`KernelModuleCache`]）: 同一 `CudaContext`・
+///    同一キャッシュキーでロード済みの `Arc<CudaModule>` があれば
+///    `cuModuleGetFunction`（軽量）のみで済ませる。
+/// 2. **ディスクキャッシュ**（[`crate::nvrtc::load_cache_entry`]。
+///    C-3・#509）: ソース全文のバイト単位照合込みでヒット判定のみ
+///    行う。**ヒットしてもディスク上の `kernel.ptx` は実行入力として
+///    使わない**（イシュー #511 PR #703 codex-review P0 対応の踏襲。
+///    理由は `kernels_mma.rs::RenderedMmaKernel::compile` のドキュメン
+///    テーションコメント「2 段目」節を正とし、ここでは重複記載しない）。
+///    ヒット／ミスいずれの場合も 3 段目へ進む。
+/// 3. **NVRTC 直コンパイル**（2 段目のヒット／ミスを問わず必ず実行）:
+///    `compile_ptx` 実行後、ディスクに当該キーのエントリがまだ
+///    なければ [`crate::nvrtc::store_cache_entry`] でディスクへ保存する。
+///
+/// いずれの段でロードした `Arc<CudaModule>` も、最終的に
+/// [`KernelModuleCache::insert`] へ登録し、次回以降のプロセス内再利用に
+/// 備える。
+///
+/// # 縮退方針（fail-safe）
+///
+/// プロセス内 LRU（容量設定不正・`Mutex` poison 等）・ディスクキャッシュ
+/// （`workspace_root` 解決不能・fs I/O 失敗）いずれの失敗もコンパイル
+/// 失敗にせず、直後の段（最終的には NVRTC 直コンパイル）へ静かにフォール
+/// バックする（`module_cache.rs` 冒頭ドキュメンテーションコメント
+/// 「縮退方針」節と同じ判断）。
+pub(crate) fn load_function_cached(
+    device: &CudaDevice,
+    descriptor: CudaKernelDescriptor,
+    source: &str,
+    func_name: &str,
+) -> Result<CudaFunction, CudaError> {
+    let ctx = device.context();
+    let compile_flags = vec![format!("--gpu-architecture={}", device.arch())];
+    let key =
+        CudaKernelCacheKey::from_device(descriptor, device, compile_flags, source.to_owned())?;
+
+    // 1 段目: プロセス内 LRU。キャッシュ自体が利用不能（容量設定不正・
+    // poison）でもフォールバックし続ける（縮退方針）。
+    let module_cache = KernelModuleCache::global().ok();
+    if let Some(cache) = module_cache
+        && let Ok(Some(module)) = cache.get(ctx, &key)
+    {
+        return Ok(module.load_function(func_name)?);
+    }
+
+    // ディスクキャッシュの読み書きに使う `workspace_root`。解決失敗も
+    // 縮退運転（ディスクキャッシュなし）へ倒す。
+    let workspace_root = crate::nvrtc::runtime_workspace_root().ok();
+
+    // 2 段目: ディスクキャッシュ（ソース全文のバイト照合込み。実行入力
+    // としては使わない。上記ドキュメンテーションコメント参照）。
+    let disk_hit = workspace_root.as_ref().and_then(|root| {
+        crate::nvrtc::load_cache_entry(root, &key, source)
+            .ok()
+            .flatten()
+    });
+
+    // 3 段目: NVRTC 直コンパイル。hit／miss いずれの場合もこのプロセス内
+    // で NVRTC を実行して得た PTX のみをロードする。
+    let ptx = crate::nvrtc::compile_ptx(source, device.arch())?;
+    if disk_hit.is_none()
+        && let Some(root) = workspace_root.as_ref()
+    {
+        // 保存失敗はコンパイル結果自体には影響しない（縮退方針）ため
+        // 戻り値は無視する。
+        let _ = crate::nvrtc::store_cache_entry(root, &key, source, &ptx.to_src());
+    }
+    let module = ctx.load_module(ptx)?;
+
+    // ロード済みモジュールをプロセス内 LRU へ登録する（挿入失敗＝ poison
+    // も縮退方針でコンパイル結果自体は返す）。
+    if let Some(cache) = module_cache {
+        let _ = cache.insert(ctx, key, Arc::clone(&module));
+    }
+
+    Ok(module.load_function(func_name)?)
 }
 
 #[cfg(test)]

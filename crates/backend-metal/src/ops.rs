@@ -15,9 +15,11 @@
 //! 非 macOS 環境ではこのファイル自体がコンパイル対象に入らない
 //! （`lib.rs` の cfg 境界と整合。`device.rs` と同方針）。
 
-use fandhe_ai_tensor_core::buffer::MemoryOps;
+use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{Activation, BackendOps, FusionPlan, ShapeError, Tensor};
+use fandhe_ai_tensor_core::{
+    Activation, BackendOps, DispatchFailureCell, FusionPlan, ShapeError, Tensor,
+};
 
 use crate::context::MetalContext;
 use crate::context_cache;
@@ -183,29 +185,18 @@ fn static_metal_memory() -> Result<&'static MetalMemory, BackendError> {
     Ok(mem)
 }
 
-impl BackendOps for MetalBackendOps {
-    fn device(&self) -> Device {
-        Device::Metal
-    }
-
-    /// `static_metal_memory()`（プロセス内シングルトン）を返す
-    /// （イシュー #935）。デバイス非対応等で初期化に失敗した場合は
-    /// `None`（`memory_ops` のデフォルト契約と同じ fail-safe）。
-    fn memory_ops(&self) -> Option<&dyn MemoryOps> {
-        static_metal_memory().ok().map(|m| m as &dyn MemoryOps)
-    }
-
-    /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
-    /// `docs/device-resident-update-design.md` §3.2・§5.2）。
-    /// `context_cache::cached_sgd`（プロセス内 MSL コンパイル済みパイプ
-    /// ラインキャッシュ）を経由するため、学習ループの 2 回目以降の
-    /// ステップは再コンパイルを支払わない。
-    fn sgd_step_device(
+impl MetalBackendOps {
+    /// [`BackendOps::sgd_step_device`]／
+    /// [`BackendOps::sgd_step_device_tracked`] 共通の検証・ディスパッチ
+    /// 本体（イシュー #1017 でトークン引数を追加する際に二重化を避ける
+    /// ため切り出した。それ以前の検証ロジック自体は無変更）。
+    fn sgd_step_device_impl(
         &self,
         param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
         grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
         velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
         config: &fandhe_ai_tensor_core::SgdStepConfig,
+        token: Option<&DispatchFailureCell>,
     ) -> Result<(), BackendError> {
         if param.device() != Device::Metal || grad.device() != Device::Metal {
             return Err(BackendError::DeviceMismatch);
@@ -296,8 +287,68 @@ impl BackendOps for MetalBackendOps {
             velocity_metal_buf,
             numel,
             &kernel_params,
+            token,
         )
         .map_err(map_metal_error)
+    }
+}
+
+impl BackendOps for MetalBackendOps {
+    fn device(&self) -> Device {
+        Device::Metal
+    }
+
+    /// `static_metal_memory()`（プロセス内シングルトン）を返す
+    /// （イシュー #935）。デバイス非対応等で初期化に失敗した場合は
+    /// `None`（`memory_ops` のデフォルト契約と同じ fail-safe）。
+    fn memory_ops(&self) -> Option<&dyn MemoryOps> {
+        static_metal_memory().ok().map(|m| m as &dyn MemoryOps)
+    }
+
+    /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
+    /// `docs/device-resident-update-design.md` §3.2・§5.2）。
+    /// `context_cache::cached_sgd`（プロセス内 MSL コンパイル済みパイプ
+    /// ラインキャッシュ）を経由するため、学習ループの 2 回目以降の
+    /// ステップは再コンパイルを支払わない。
+    ///
+    /// 実体は `sgd_step_device_impl`（`token: None`）。
+    /// [`BackendOps::sgd_step_device_tracked`] のオーバーライド
+    /// （下記）とロジックを共有する（イシュー #1017。二重化しない）が、
+    /// `token: None` を受けた `sgd.rs::MetalSgd::run` が `encode` 直後に
+    /// `ctx.synchronize()` まで行うため、本メソッドは従来どおり
+    /// **同期契約**（復帰時点で GPU 実行の完了・成否を返す）を保つ
+    /// （PR #1057 レビュー指摘。バッチ化された非同期契約は
+    /// `sgd_step_device_tracked` 限定）。
+    fn sgd_step_device(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        config: &fandhe_ai_tensor_core::SgdStepConfig,
+    ) -> Result<(), BackendError> {
+        self.sgd_step_device_impl(param, grad, velocity, config, None)
+    }
+
+    /// [`BackendOps::sgd_step_device_tracked`] の Metal オーバーライド
+    /// （イシュー #1017・`docs/backend-metal-command-batching-design.md`
+    /// §3.7）。`token` を `sgd_step_device_impl` → `sgd.rs::
+    /// MetalSgd::run` → `context.rs::MetalContext::encode` へそのまま
+    /// 渡し、encode と同一ロック区間でバッチへ登録させる。`token` が
+    /// `Some` のため `MetalSgd::run` は `encode` 後に待たず、遅延実行
+    /// （バッチ化）される非同期契約となる（`sgd_step_device` との違いは
+    /// 同メソッド doc 参照）。
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore::step`
+    /// が呼び出し元となる（`device_store.rs` モジュール冒頭コメント
+    /// 「遅延失敗トークン経由の poison」参照）。
+    fn sgd_step_device_tracked(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        config: &fandhe_ai_tensor_core::SgdStepConfig,
+        token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.sgd_step_device_impl(param, grad, velocity, config, Some(token))
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -449,17 +500,19 @@ impl BackendOps for MetalBackendOps {
     }
 
     /// デバイス常駐 `w`（・`bias`）のまま `y = a @ w (+ bias)` を計算する
-    /// （イシュー #1022）。`a`（活性化値）のみをホストからアップロード
-    /// し、`w`／`bias` は [`crate::gemm::MetalGemm::
+    /// （イシュー #1022・#1023「R3」）。`a`（活性化値）のみをホストから
+    /// アップロードし、`w`／`bias` は [`crate::gemm::MetalGemm::
     /// dispatch_bias_act_prepared`]（イシュー #1022 で追加した
-    /// prepared 版入口）へそのまま渡すことでこれらの download を発生
-    /// させない（Apple Silicon の UMA・`StorageModeShared` のため CUDA の
-    /// ような明示同期は不要。`memory.rs` モジュールコメント参照）。
+    /// prepared 版入口。#1023 でオフセット引数を追加し `DeviceBufferView`
+    /// の部分範囲をそのまま `setBuffer:offset:` へ渡せるようにした）へ
+    /// そのまま渡すことでこれらの download を発生させない（Apple Silicon
+    /// の UMA・`StorageModeShared` のため CUDA のような明示同期は不要。
+    /// `memory.rs` モジュールコメント参照）。
     fn gemm_resident_rhs(
         &self,
         a: &Tensor<f32>,
-        w: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
-        bias: Option<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
     ) -> Result<Tensor<f32>, BackendError> {
         if w.device() != Device::Metal {
             return Err(BackendError::DeviceMismatch);
@@ -508,6 +561,7 @@ impl BackendOps for MetalBackendOps {
         }
 
         let w_handle = w
+            .buffer()
             .downcast_handle::<MetalBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
         let Some(w_buf) = w_handle.buffer.as_ref() else {
@@ -517,16 +571,22 @@ impl BackendOps for MetalBackendOps {
         };
         let bias_handle = bias
             .map(|b| {
-                b.downcast_handle::<MetalBufferHandle>()
+                b.buffer()
+                    .downcast_handle::<MetalBufferHandle>()
                     .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset()))
             })
             .transpose()?;
-        let bias_buf = match &bias_handle {
-            Some(h) => Some(h.buffer.as_ref().ok_or_else(|| {
-                BackendError::DeviceAllocationFailed(
-                    "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation".into(),
-                )
-            })?),
+        let bias_arg = match &bias_handle {
+            Some((h, offset)) => {
+                let buf = h.buffer.as_ref().ok_or_else(|| {
+                    BackendError::DeviceAllocationFailed(
+                        "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation"
+                            .into(),
+                    )
+                })?;
+                Some((buf, *offset))
+            }
             None => None,
         };
 
@@ -554,20 +614,33 @@ impl BackendOps for MetalBackendOps {
 
         let gemm = context_cache::cached_gemm(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-        gemm.dispatch_bias_act_prepared(&ctx, a_buf, w_buf, bias_buf, false, c_buf, m, n, k)
-            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        gemm.dispatch_bias_act_prepared(
+            &ctx,
+            a_buf,
+            0,
+            w_buf,
+            w.offset(),
+            bias_arg,
+            false,
+            c_buf,
+            m,
+            n,
+            k,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
 
         mem.download(&c_dev_buf)
     }
 
-    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022）。
-    /// `Op::LinearResident` の VJP が `d_input^T = w @ g^T` を計算する
-    /// ために使う。`bias` なし（`None`）で [`Self::gemm_resident_rhs`] と
-    /// 同じ [`crate::gemm::MetalGemm::dispatch_bias_act_prepared`] を
-    /// 呼ぶ（`has_bias=0`・`act=0` で純粋な `w @ b` になる）。
+    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
+    /// #1023「R3」）。`Op::LinearResident` の VJP が `d_input^T = w @ g^T`
+    /// を計算するために使う。`bias` なし（`None`）で [`Self::
+    /// gemm_resident_rhs`] と同じ [`crate::gemm::MetalGemm::
+    /// dispatch_bias_act_prepared`] を呼ぶ（`has_bias=0`・`act=0` で
+    /// 純粋な `w @ b` になる）。
     fn gemm_resident_lhs(
         &self,
-        w: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
         b: &Tensor<f32>,
     ) -> Result<Tensor<f32>, BackendError> {
         if w.device() != Device::Metal {
@@ -600,6 +673,7 @@ impl BackendOps for MetalBackendOps {
         }
 
         let w_handle = w
+            .buffer()
             .downcast_handle::<MetalBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
         let Some(w_buf) = w_handle.buffer.as_ref() else {
@@ -631,8 +705,20 @@ impl BackendOps for MetalBackendOps {
 
         let gemm = context_cache::cached_gemm(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-        gemm.dispatch_bias_act_prepared(&ctx, w_buf, b_buf, None, false, c_buf, p, r, q)
-            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        gemm.dispatch_bias_act_prepared(
+            &ctx,
+            w_buf,
+            w.offset(),
+            b_buf,
+            0,
+            None,
+            false,
+            c_buf,
+            p,
+            r,
+            q,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
 
         mem.download(&c_dev_buf)
     }

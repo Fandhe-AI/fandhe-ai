@@ -11,7 +11,7 @@
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::{CpuBackendOps, CpuMemory};
-use fandhe_ai_tensor_core::buffer::MemoryOps;
+use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
@@ -42,10 +42,14 @@ fn gemm_resident_rhs_matches_host_gemm_bias_act_across_shapes() {
                 .unwrap();
 
             let w_dev = mem.upload(&w).unwrap();
+            let w_shape = [k, n];
+            let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
             let bias_dev = bias.as_ref().map(|b| mem.upload(b).unwrap());
-            let actual = ops
-                .gemm_resident_rhs(&a, &w_dev, bias_dev.as_ref())
-                .unwrap();
+            let bias_shape = [n];
+            let bias_view = bias_dev
+                .as_ref()
+                .map(|buf| DeviceBufferView::new(buf, 0, &bias_shape).unwrap());
+            let actual = ops.gemm_resident_rhs(&a, w_view, bias_view).unwrap();
 
             assert_eq!(actual.shape(), expected.shape(), "m={m} k={k} n={n}");
             let a_data = actual.contiguous();
@@ -74,7 +78,9 @@ fn gemm_resident_lhs_matches_host_gemm_across_shapes() {
         let expected = ops.gemm(&w, &b).unwrap();
 
         let w_dev = mem.upload(&w).unwrap();
-        let actual = ops.gemm_resident_lhs(&w_dev, &b).unwrap();
+        let w_shape = [p, q];
+        let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+        let actual = ops.gemm_resident_lhs(w_view, &b).unwrap();
 
         assert_eq!(actual.shape(), expected.shape(), "p={p} q={q} r={r}");
         let a_data = actual.contiguous();
@@ -96,7 +102,9 @@ fn gemm_resident_rhs_rejects_incompatible_shapes() {
     let a = tensor(vec![1.0, 2.0, 3.0], &[1, 3]);
     let w = tensor(vec![1.0, 2.0], &[2, 1]);
     let w_dev = mem.upload(&w).unwrap();
-    let err = ops.gemm_resident_rhs(&a, &w_dev, None).unwrap_err();
+    let w_shape = [2, 1];
+    let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+    let err = ops.gemm_resident_rhs(&a, w_view, None).unwrap_err();
     assert!(matches!(
         err,
         fandhe_ai_tensor_core::BackendError::ShapeMismatch(_)
@@ -112,9 +120,13 @@ fn gemm_resident_rhs_rejects_bias_shape_mismatch() {
     let w = tensor(vec![1.0, 2.0], &[2, 1]);
     let bias = tensor(vec![1.0, 2.0], &[2]);
     let w_dev = mem.upload(&w).unwrap();
+    let w_shape = [2, 1];
+    let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
     let bias_dev = mem.upload(&bias).unwrap();
+    let bias_shape = [2];
+    let bias_view = DeviceBufferView::new(&bias_dev, 0, &bias_shape).unwrap();
     let err = ops
-        .gemm_resident_rhs(&a, &w_dev, Some(&bias_dev))
+        .gemm_resident_rhs(&a, w_view, Some(bias_view))
         .unwrap_err();
     assert!(matches!(
         err,

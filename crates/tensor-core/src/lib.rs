@@ -95,6 +95,7 @@ mod broadcast;
 pub mod buffer;
 pub mod device;
 pub mod dispatch;
+mod dispatch_failure;
 mod element;
 mod error;
 mod fusion;
@@ -106,9 +107,10 @@ pub mod typed;
 
 pub use backend_ops::{Activation, BackendOps, SgdStepConfig, ops_for};
 pub use broadcast::broadcast_shape;
-pub use buffer::{BufferHandle, DeviceBuffer, MemoryOps};
+pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};
 pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
+pub use dispatch_failure::DispatchFailureCell;
 pub use element::Element;
 pub use error::ShapeError;
 // `MAX_FUSED_CHAIN_LEN`（#404）: `fandhe_ai_autodiff::tape` の push 時上限適用が

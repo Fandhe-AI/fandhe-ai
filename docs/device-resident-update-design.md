@@ -1691,3 +1691,81 @@ device` の更新式・§5.2 の FMA 契約）に集約される。
   `MemoryOps::download` であり、演算出力（y・dXᵀ・loss 等）の D2H は
   含まない（現行アーキテクチャの `BackendOps` がホスト `Tensor<f32>`
   契約であるため。演算単位同期の廃止は #1011〜#1014・phase-4 のスコープ）。
+
+### 追補（#1023）: `DeviceParamStore` の連結バッファ化
+
+§3.3 が記述する「1 パラメータずつ grad を upload し `sgd_step_device` を
+起動する」構成は、Metal 実機（M4 Max）実測（`docs/perf/
+device-resident-update-bench.md` §3〜§5）で resident update が legacy 比
+132〜152 倍遅いという後退を招くことが判明した（原因: ディスパッチ単位
+あたり固定オーバーヘッド × パラメータ数）。#1023 で `DeviceParamStore` の
+内部実装を、全パラメータを単一の連結（フラット）`DeviceBuffer<f32>`
+（shape `[total_numel]`）として保持する方式へ再構成し、`step()` の更新
+フェーズ（grad upload・カーネル起動）をパラメータ数に依らず 1 回／step
+へバッチ化した。`BackendOps`／`MemoryOps` trait・3 バックエンドのカーネル
+実装（CPU／CUDA／Metal）はいずれも無変更（要素単位で shape 非依存に
+定義済みのため）。詳細は
+`crates/autodiff/src/optim/device_store.rs` モジュール冒頭コメント
+「パラメータ横断の単一連結バッファ化（イシュー #1023）」節を正とする。
+Metal 実機・DGX Spark GB10 実機での再計測は本追補の記録時点では未実施
+（`docs/perf/device-resident-update-bench.md` §6 追補参照）。
+
+### 追補（#1022・#1023 統合、R3: 要素オフセット付き常駐ビュー）
+
+上記 2 つの追補は、それぞれ別ブランチ上で独立に `DeviceParamStore` の
+内部表現を書き換えたため、単純な統合ではどちらか一方の最適化を
+リバートすることになる緊張関係があった:
+
+- #1022 の resident-aware VJP は `linear_forward`／VJP が
+  `BackendOps::gemm_resident_rhs`／`gemm_resident_lhs` へ**パラメータ
+  ごとの独立した `DeviceBuffer`**（その shape そのものを表す）を渡す
+  前提だった。
+- #1023 の連結バッファ化は全パラメータを**単一の連結 `DeviceBuffer`**
+  （shape `[total_numel]`）へまとめ、`step()` の grad upload・カーネル
+  起動をパラメータ数に依らず 1 回にする。
+
+`gemm_resident_rhs`／`gemm_resident_lhs` は「渡されたバッファの shape が
+そのまま重みの shape」という契約であり、オフセット・サブビューの概念を
+持たなかったため、連結バッファの一部を直接渡すことができなかった。
+
+この緊張を解消するため、**両者を両立させる「R3: 要素オフセット付き
+常駐ビュー」設計**を採用した（candle の `Storage` + `Layout`〈offset
+保持〉と同じ発想）。
+
+- `tensor-core` に軽量ビュー型 `buffer::DeviceBufferView<'a>`
+  （`buffer: &'a DeviceBuffer<f32>`・`offset: usize`〈要素単位〉・
+  `shape: &'a [usize]`）を追加した。コンストラクタ `DeviceBufferView::
+  new` は `offset + shape.numel() <= buffer.numel()` を検証し、超過は
+  `BackendError::InvalidArgument`（本番経路で panic しない）で拒否する。
+- `BackendOps::gemm_resident_rhs`／`gemm_resident_lhs` の引数を
+  `&DeviceBuffer<f32>` から `DeviceBufferView<'_>` へ変更した。契約は
+  「ビューの `offset..offset+numel` 範囲を shape の重みとして扱う」。
+  カーネル側の手動境界検査（REQ-8）は従来どおり維持する。
+- CPU 実装はホストスライスの範囲インデックス（`&data[offset..offset+
+  numel]`）、CUDA 実装は `cudarc::driver::CudaSlice::slice(offset..
+  offset+numel)`（`CudaView`）、Metal 実装は `setBuffer:offset:atIndex:`
+  のバイトオフセット（`offset * size_of::<f32>()`）でそれぞれビューを
+  実現する。3 バックエンドとも既存カーネル本体（PTX／MSL）は無変更。
+- `DeviceParamStore` は #1023 の連結バッファ（`params: DeviceBuffer<f32>`・
+  `layout: Vec<ParamLayout>`）をそのまま採用し、`register_resident_
+  leaves`／`snapshot_resident_leaves`（#1022）は download を行わず
+  `layout` の添字（`slot`）で `Op::ResidentLeaf` を登録する。
+  `linear_forward` は `checked_resident_buffer(store_id, slot)` が
+  `layout[slot]` の `offset`／`shape` から `DeviceBufferView` を構築して
+  `gemm_resident_rhs`／`gemm_resident_lhs` へ渡す。`step()` の更新
+  フェーズ（grad upload・カーネル起動）は #1023 のまま単一連結バッファへ
+  の 1 回／step を維持する。
+- **P1 是正（codex-review 指摘）**: `ResidentLeaf` に `tape_id: TapeId`
+  を追加し、`linear_forward` で `weight`／`bias` の `tape_id` が引数
+  `tape` と一致することを検証する（`BackendError::TapeMismatch`）。
+  ライフタイム引数 `'t` のみでは `Tape` の同一性を保証しないため、
+  同じ `DeviceParamStore` から別 `Tape` 上で得た `ResidentLeaf` を
+  誤って渡すと、`grad::vjp` が別テープの `nodes` を誤って読む余地が
+  あった。あわせて `grad::vjp` の `Op::LinearResident` 分岐は
+  `nodes[weight.0]`／`nodes[bias_id.0]` の直接添字アクセスを
+  `nodes.get(...)` へ置き換え、範囲外添字を fail-closed に拒否する
+  （縦深防御。`.claude/rules/security.md` A08）。
+
+Metal・CUDA 実機での再計測は本追補の記録セッションでは未実施（実機環境
+未接続。Mac／DGX Spark 実機セッションへ申し送り。`docs/perf/
+device-resident-update-bench.md` 追補参照）。

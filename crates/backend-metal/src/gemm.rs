@@ -851,8 +851,11 @@ impl MetalGemm {
                 encoder,
                 &self.pipeline_tiled_bias_act,
                 &a_buf,
+                0,
                 &b_buf,
+                0,
                 &bias_buf,
+                0,
                 &c_buf,
                 dims,
                 has_bias,
@@ -894,40 +897,83 @@ impl MetalGemm {
     /// が 0 のまま epilogue のみ適用される。ホスト側 early-return は
     /// 行わない——`k == 0` はどのみち `Linear::new` の `in_features > 0`
     /// 制約により実運用では到達しない）。
+    /// `a_offset`／`b_offset`／`bias`（`Some` の場合の offset）は要素
+    /// 単位のオフセット（イシュー #1023「R3: 要素オフセット付き常駐
+    /// ビュー」設計。`docs/device-resident-update-design.md` 追補
+    /// 参照）。`#1023` のパラメータ横断連結バッファ化後、`ops::
+    /// MetalBackendOps::gemm_resident_rhs`／`gemm_resident_lhs` の
+    /// `w`／`bias` は単一の連結 `MetalBuffer` 内の部分範囲としてしか
+    /// 表現できないため、`a_buf`／`b_buf` それぞれの物理バッファ全体が
+    /// ちょうど `m*k`／`k*n` であることを要求していた旧
+    /// `validate_bias_act_dims` 直接呼び出しをやめ、`offset + numel <=
+    /// buf.len()` の範囲検査へ置き換える（Apple Silicon の UMA・
+    /// `StorageModeShared` のため offset はバイト単位へ変換して
+    /// `setBuffer:offset:` へそのまま渡せる。CPU 側配列のオフセット
+    /// スライスと同じ発想）。既存の全体バッファ呼び出し（`run_tiled_
+    /// bias_act_f32`）は `a_offset = b_offset = bias offset = 0` を渡す
+    /// （offset 0 の場合は従来の「バッファ全体 = m*k/k*n」契約と等価）。
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_bias_act_prepared(
         &self,
         ctx: &MetalContext,
         a_buf: &MetalBuffer,
+        a_offset: usize,
         b_buf: &MetalBuffer,
-        bias_buf: Option<&MetalBuffer>,
+        b_offset: usize,
+        bias: Option<(&MetalBuffer, usize)>,
         act_relu: bool,
         c_buf: &MetalBuffer,
         m: usize,
         n: usize,
         k: usize,
     ) -> Result<(), MetalError> {
-        let dims = validate_bias_act_dims(a_buf.len(), b_buf.len(), m, n, k)?;
+        let mk = m.checked_mul(k).ok_or(MetalError::DimProductOverflow)?;
+        let kn = k.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+        let dims = validate_bias_act_dims(mk, kn, m, n, k)?;
+        let a_end = a_offset
+            .checked_add(mk)
+            .ok_or(MetalError::DimProductOverflow)?;
+        if a_end > a_buf.len() {
+            return Err(MetalError::ALenMismatch {
+                expected: a_end,
+                actual: a_buf.len(),
+            });
+        }
+        let b_end = b_offset
+            .checked_add(kn)
+            .ok_or(MetalError::DimProductOverflow)?;
+        if b_end > b_buf.len() {
+            return Err(MetalError::BLenMismatch {
+                expected: b_end,
+                actual: b_buf.len(),
+            });
+        }
         if c_buf.len() != m * n {
             return Err(MetalError::CLenMismatch {
                 expected: m * n,
                 actual: c_buf.len(),
             });
         }
-        if let Some(b) = bias_buf
-            && b.len() != n
-        {
-            return Err(MetalError::InvalidElementwiseShape {
-                detail: format!("bias length mismatch: expected {n} (n), actual {}", b.len()),
-            });
+        if let Some((b, offset)) = bias {
+            let end = offset
+                .checked_add(n)
+                .ok_or(MetalError::DimProductOverflow)?;
+            if end > b.len() {
+                return Err(MetalError::InvalidElementwiseShape {
+                    detail: format!(
+                        "bias view range [{offset}, {end}) exceeds backing buffer length ({})",
+                        b.len()
+                    ),
+                });
+            }
         }
 
         let zero_bias;
-        let (bias_ref, has_bias): (&MetalBuffer, i32) = match bias_buf {
-            Some(b) => (b, 1),
+        let (bias_ref, bias_offset, has_bias): (&MetalBuffer, usize, i32) = match bias {
+            Some((b, offset)) => (b, offset, 1),
             None => {
                 zero_bias = MetalBuffer::new_zeroed(ctx, n)?;
-                (&zero_bias, 0)
+                (&zero_bias, 0, 0)
             }
         };
         let act_i: i32 = if act_relu { 1 } else { 0 };
@@ -937,8 +983,11 @@ impl MetalGemm {
                 encoder,
                 &self.pipeline_tiled_bias_act,
                 a_buf,
+                a_offset,
                 b_buf,
+                b_offset,
                 bias_ref,
+                bias_offset,
                 c_buf,
                 dims,
                 has_bias,
@@ -1668,12 +1717,16 @@ fn encode_dispatch(
 /// （16×16・`div_ceil(16)`。`gemm_tiled_bias_act` は `gemm_tiled` と同じ
 /// タイリング形状のため）。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn encode_dispatch_bias_act(
     encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
     a_buf: &MetalBuffer,
+    a_offset: usize,
     b_buf: &MetalBuffer,
+    b_offset: usize,
     bias_buf: &MetalBuffer,
+    bias_offset: usize,
     c_buf: &MetalBuffer,
     dims: Dims,
     has_bias: i32,
@@ -1681,13 +1734,22 @@ fn encode_dispatch_bias_act(
 ) {
     encoder.setComputePipelineState(pipeline);
 
+    // イシュー #1023「R3」: `*_offset` は要素単位のオフセットであり、
+    // Metal の `setBuffer:offset:atIndex:` はバイト単位を要求するため
+    // `size_of::<f32>()` を掛けて変換する（呼び出し元
+    // `dispatch_bias_act_prepared` が offset+numel の範囲検査を済ませて
+    // いるため、ここでの追加検査は不要）。
+    let a_byte_offset = a_offset * std::mem::size_of::<f32>();
+    let b_byte_offset = b_offset * std::mem::size_of::<f32>();
+    let bias_byte_offset = bias_offset * std::mem::size_of::<f32>();
+
     // SAFETY: FFI 境界 1/2。`encode_dispatch` の同種コメントと同一の
     // 契約（`a_buf`/`b_buf`/`bias_buf`/`c_buf` は `dispatch_sync` の同期
     // 完了まで呼び出し元スタックフレームで生存する）。
     unsafe {
-        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), 0, 0);
-        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), 0, 1);
-        encoder.setBuffer_offset_atIndex(Some(bias_buf.raw()), 0, 2);
+        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), a_byte_offset, 0);
+        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), b_byte_offset, 1);
+        encoder.setBuffer_offset_atIndex(Some(bias_buf.raw()), bias_byte_offset, 2);
         encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 3);
     }
 

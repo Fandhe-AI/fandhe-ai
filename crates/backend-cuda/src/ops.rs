@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use fandhe_ai_tensor_core::buffer::MemoryOps;
+use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
 
@@ -596,17 +596,21 @@ impl BackendOps for CudaBackendOps {
     }
 
     /// デバイス常駐 `w`（・`bias`）のまま `y = a @ w (+ bias)` を計算する
-    /// （イシュー #1022）。`a`（活性化値）のみをホストからアップロード
-    /// し、`w`／`bias` は [`crate::gemm::CudaGemm::launch_tiled_bias_act_f32`]
-    /// （device-slice 起動。イシュー #1022 で `run_tiled_bias_act_f32` の
-    /// 本体から切り出した経路）へそのまま渡すことで、これらの download
-    /// を発生させない（`sgd_step_device` と同じ「転送コストを最小化する」
+    /// （イシュー #1022・#1023「R3」）。`a`（活性化値）のみをホストから
+    /// アップロードし、`w`／`bias` は [`crate::gemm::CudaGemm::
+    /// launch_tiled_bias_act_f32_resident`]（`CudaView` 部分ビュー起動。
+    /// #1023 のパラメータ横断連結バッファ化後、`w`／`bias` は連結
+    /// バッファ内のオフセット範囲としてしか表現できないため、`w`／
+    /// `bias` を `DeviceBufferView`（`offset`／`shape` 付き）で受け取り、
+    /// `CudaSlice::slice(offset..offset+numel)` で `CudaView` を構築して
+    /// カーネルへ渡す）へそのまま渡すことで、これらの download を
+    /// 発生させない（`sgd_step_device` と同じ「転送コストを最小化する」
     /// 方針）。
     fn gemm_resident_rhs(
         &self,
         a: &Tensor<f32>,
-        w: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
-        bias: Option<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
     ) -> Result<Tensor<f32>, BackendError> {
         if w.device() != Device::Cuda(self.ordinal) {
             return Err(BackendError::DeviceMismatch);
@@ -659,25 +663,33 @@ impl BackendOps for CudaBackendOps {
         }
 
         let w_handle = w
+            .buffer()
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_slice) = w_handle.slice.as_ref() else {
+        let Some(w_full) = w_handle.slice.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_rhs: w buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
         let bias_handle = bias
             .map(|b| {
-                b.downcast_handle::<CudaBufferHandle>()
+                b.buffer()
+                    .downcast_handle::<CudaBufferHandle>()
                     .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset(), b.numel()))
             })
             .transpose()?;
-        let bias_slice = match &bias_handle {
-            Some(h) => Some(h.slice.as_ref().ok_or_else(|| {
-                BackendError::DeviceAllocationFailed(
-                    "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation".into(),
-                )
-            })?),
+        let bias_view = match &bias_handle {
+            Some((h, offset, numel)) => {
+                let Some(full) = h.slice.as_ref() else {
+                    return Err(BackendError::DeviceAllocationFailed(
+                        "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation"
+                            .into(),
+                    ));
+                };
+                Some(full.slice(*offset..*offset + *numel))
+            }
             None => None,
         };
 
@@ -705,22 +717,29 @@ impl BackendOps for CudaBackendOps {
 
         let gemm = context_cache::cached_gemm(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-        gemm.launch_tiled_bias_act_f32(
-            a_slice, w_slice, bias_slice, false, c_slice, m as u32, n as u32, k as u32,
+        gemm.launch_tiled_bias_act_f32_resident(
+            a_slice,
+            &w_view,
+            bias_view.as_ref(),
+            false,
+            c_slice,
+            m as u32,
+            n as u32,
+            k as u32,
         )
         .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
 
         mem.download(&c_dev_buf)
     }
 
-    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022）。
-    /// `Op::LinearResident` の VJP が `d_input^T = w @ g^T` を計算する
-    /// ために使う。[`Self::gemm_resident_rhs`] と同じく `w` は download
-    /// せず [`crate::gemm::CudaGemm::launch_tiled_f32`]（device-slice
-    /// 起動。既存メソッド）へそのまま渡す。
+    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
+    /// #1023「R3」）。`Op::LinearResident` の VJP が `d_input^T = w @ g^T`
+    /// を計算するために使う。[`Self::gemm_resident_rhs`] と同じく `w` は
+    /// download せず [`crate::gemm::CudaGemm::launch_tiled_f32_resident`]
+    /// （`CudaView` 部分ビュー起動）へそのまま渡す。
     fn gemm_resident_lhs(
         &self,
-        w: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
         b: &Tensor<f32>,
     ) -> Result<Tensor<f32>, BackendError> {
         if w.device() != Device::Cuda(self.ordinal) {
@@ -754,13 +773,15 @@ impl BackendOps for CudaBackendOps {
         }
 
         let w_handle = w
+            .buffer()
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_slice) = w_handle.slice.as_ref() else {
+        let Some(w_full) = w_handle.slice.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_lhs: w buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
 
         let device = self.device_handle()?;
         let mem = CudaMemory::new(&device);
@@ -786,7 +807,7 @@ impl BackendOps for CudaBackendOps {
 
         let gemm = context_cache::cached_gemm(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-        gemm.launch_tiled_f32(w_slice, b_slice, c_slice, p as u32, r as u32, q as u32)
+        gemm.launch_tiled_f32_resident(&w_view, b_slice, c_slice, p as u32, r as u32, q as u32)
             .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
 
         mem.download(&c_dev_buf)

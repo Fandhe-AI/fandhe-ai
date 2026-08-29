@@ -161,7 +161,25 @@ pub(crate) fn vjp(
                         .to_string(),
                 ));
             };
-            let (store_id, slot) = match &nodes[weight.0].op {
+            // イシュー #1022 P1 是正（codex-review 指摘）: `weight`／
+            // `bias` の `NodeId` は `DeviceParamStore::register_resident_
+            // leaves`／`snapshot_resident_leaves` が発行した
+            // `ResidentLeaf` から来るが、`ResidentLeaf` 自体はライフタイム
+            // 引数のみで `Tape` の同一性を保証しない（`optim::device_store::
+            // ResidentLeaf::tape_id` 検証は `linear_forward` 側の別途対応。
+            // `optim/device_store.rs` モジュール冒頭参照）。ここでは
+            // 縦深防御として `nodes[weight.0]` の直接添字アクセス（別
+            // テープの葉が混入した場合に範囲外添字 panic・無関係ノード
+            // 誤読の余地があった）を `nodes.get(...)` へ置き換え、
+            // fail-closed に拒否する（`.claude/rules/security.md` A08）。
+            let weight_node = nodes.get(weight.0).ok_or_else(|| {
+                AutodiffError::InvalidArgument(
+                    "grad::vjp: Op::LinearResident.weight node_id is out of range for this tape \
+                     (contract violation: leaf registered on a different Tape?)"
+                        .to_string(),
+                )
+            })?;
+            let (store_id, slot) = match &weight_node.op {
                 Op::ResidentLeaf { store_id, slot } => (*store_id, *slot),
                 _ => {
                     return Err(AutodiffError::InvalidArgument(
@@ -194,8 +212,16 @@ pub(crate) fn vjp(
             if let Some(bias_id) = bias {
                 // bias の勾配は `Op::Add` の VJP と同じ縮約
                 // （`reduce_to_shape`。行方向ブロードキャストの逆演算）。
-                let bias_shape = &nodes[bias_id.0].shape;
-                let d_bias = reduce_to_shape(upstream, bias_shape);
+                // `weight` と同じ理由で `nodes.get(...)` を経由し、
+                // 範囲外添字 panic を防ぐ（fail-closed）。
+                let bias_node = nodes.get(bias_id.0).ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "grad::vjp: Op::LinearResident.bias node_id is out of range for this \
+                         tape (contract violation: leaf registered on a different Tape?)"
+                            .to_string(),
+                    )
+                })?;
+                let d_bias = reduce_to_shape(upstream, &bias_node.shape);
                 contributions.push((bias_id, d_bias));
             }
             contributions

@@ -24,7 +24,8 @@ use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, DType, FusedOpKind, FusionPlan, MAX_FUSED_CHAIN_LEN, Tensor,
+    BackendError, BackendOps, DType, DeviceBufferView, FusedOpKind, FusionPlan,
+    MAX_FUSED_CHAIN_LEN, Tensor,
 };
 
 use crate::error::AutodiffError;
@@ -181,8 +182,8 @@ pub(crate) enum Op {
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
-/// `Op::ResidentLeaf { store_id, slot }` から実際の `DeviceBuffer<f32>`
-/// を引くための解決インタフェース（イシュー #1022）。
+/// `Op::ResidentLeaf { store_id, slot }` から実際のデバイスバッファ範囲
+/// を引くための解決インタフェース（イシュー #1022・#1023「R3」）。
 ///
 /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore` が実装し、
 /// `Tape::backward_with_resident` から `grad::vjp` へスレッドする。`Tape`
@@ -192,9 +193,16 @@ pub(crate) enum Op {
 /// ないため、バッファの所有は `DeviceParamStore` 側に留め、backward の
 /// 呼び出し側から本トレイトオブジェクトとして一時的に借用する設計と
 /// した（`docs/device-resident-update-design.md` §3.3e）。
+///
+/// 戻り値が `&DeviceBuffer<f32>` ではなく [`DeviceBufferView`] である
+/// 理由: イシュー #1023「パラメータ横断の単一連結バッファ化」により
+/// `DeviceParamStore` は全パラメータを 1 本の連結 `DeviceBuffer<f32>`
+/// として保持するため、`slot` に対応する個々のパラメータは連結
+/// バッファ内の要素オフセット範囲としてしか表現できない
+/// （「R3: 要素オフセット付き常駐ビュー」設計）。
 pub(crate) trait ResidentResolver {
     /// `store_id`（このリゾルバ自身が保持するストアと一致するはず）・
-    /// `slot`（ストア内の位置）から対応する `DeviceBuffer<f32>` を返す。
+    /// `slot`（ストア内の位置）から対応するデバイスバッファ範囲を返す。
     /// 別ストアの葉が混入した場合・`slot` が範囲外の場合は
     /// `AutodiffError::InvalidArgument` で fail-closed に拒否する
     /// （`.claude/rules/security.md` A08。誤った勾配をデバイスへ適用
@@ -203,7 +211,7 @@ pub(crate) trait ResidentResolver {
         &self,
         store_id: u64,
         slot: usize,
-    ) -> Result<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, AutodiffError>;
+    ) -> Result<DeviceBufferView<'_>, AutodiffError>;
 }
 
 impl Op {

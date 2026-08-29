@@ -166,3 +166,66 @@ download を行わなくなったため、新経路の GPU ディスパッチ回
   --ignored --nocapture` を参照）。4 節で観測された Metal の後退
   （小規模モデルでの GPU ディスパッチ回数増加が主因）が #1022 の
   forward download 排除でどの程度緩和されるかは実機再計測が必要。
+
+## 7. 追補（#1023）: `DeviceParamStore` の連結バッファ化
+
+上記 4 節が診断した「ディスパッチ単位あたり固定オーバーヘッド ×
+パラメータ数」を解消するため、#1023 で `DeviceParamStore` の内部実装を
+全パラメータ単一の連結（フラット）`DeviceBuffer<f32>` へ再構成し、
+`step()` の更新フェーズ（grad upload・カーネル起動）をパラメータ数に
+依らず 1 回／step へバッチ化した（forward 用 D2H download
+〈`register_resident_leaves`／`snapshot_resident_leaves`／
+`sync_to_host`〉も同様に 1 回へ縮退）。設計・実装の詳細は
+`docs/device-resident-update-design.md`「追補（#1023）」節・
+`crates/autodiff/src/optim/device_store.rs` モジュール冒頭コメントを
+正とする。
+
+理論上のディスパッチ回数（パラメータ件数 `N` の場合）:
+
+| フェーズ | #1023 以前 | #1023 以降 |
+|----------|-----------|-----------|
+| 更新（grad upload + カーネル起動） | `2N` | `2`（`N` に依存しない） |
+| forward 用 download | `N` | `1` |
+
+**実機再計測は本追補の記録時点では未実施**（本イシューを実装したセッション
+は Linux x86_64・RTX 3060〈CUDA driver あり・nvcc なし〉環境であり、Metal
+実機（M4 Max）・DGX Spark GB10 実機のいずれにも到達できなかったため）。
+4〜5 節が記録した Metal の後退（update フェーズ単体で約 132〜152 倍）が
+解消するかどうかは、Mac / DGX Spark セッションで以下を再実行して判定
+する必要がある:
+
+```
+cargo test -p fandhe-ai --release --test device_param_store_bench -- --nocapture
+cargo test -p fandhe-ai --release --test device_param_store_bench -- --ignored --nocapture
+```
+
+再計測結果が得られ次第、本節を実測値で更新し、5 節の「後退」判定を
+再評価する。理論上のディスパッチ回数削減（上表）は Metal 後退解消を
+保証するものではない点に注意する（小規模モデルでは command buffer
+往復自体の固定コストが `2` 回起動でも残るため。設計文書「追補（#1023）」
+節の制約・既知の限界を参照）。
+
+## 8. 追補（#1022・#1023 統合、R3: 要素オフセット付き常駐ビュー）
+
+6 節（#1022: forward download 排除）と 7 節（#1023: 連結バッファ化・
+単一カーネル起動）は、当時それぞれ独立したブランチ上で `DeviceParamStore`
+の内部表現を書き換えていたため単純併合できず、統合時に
+`DeviceBufferView`（要素オフセット付き常駐ビュー。candle の
+`Storage`＋`Layout` と同じ発想）を導入して両立させた（設計の詳細は
+`docs/device-resident-update-design.md`「追補（#1022・#1023 統合、R3）」
+節を正とする）。理論上のディスパッチ回数は 7 節の表のまま変わらない
+（`DeviceBufferView` はコピーを伴わない参照のみのビューであり、
+追加の転送・カーネル起動を発生させないため）。
+
+本追補の記録セッションでも Metal・CUDA 実機には到達できず（Linux
+環境・GPU 実機なし）、6・7 節が未実施のまま残した実機再計測（`cargo
+test -p fandhe-ai --release --test device_param_store_bench --
+--nocapture` および `-- --ignored --nocapture`）は本統合後も引き続き
+Mac / DGX Spark セッションへの申し送り事項のままである。CPU 参照実装
+（`crates/backend-cpu/tests/gemm_resident_parity.rs`）とローカル
+ユニットテスト（`crates/autodiff/src/optim/device_store.rs` の
+`resident_forward_backward_has_zero_param_download`・
+`step_launches_sgd_kernel_exactly_once_regardless_of_param_count` 等）
+では、R3 統合後も「forward 1 step 内の D2H 0 回」（#1022 受け入れ条件）
+と「`step()` の起動・upload がパラメータ件数に依らず 1 回／step」
+（#1023）の両方が同時に成立することを機械検証済み。

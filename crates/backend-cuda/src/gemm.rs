@@ -35,13 +35,22 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, CudaView, LaunchConfig, PushKernelArg};
 use half::f16;
 
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels;
 use crate::kernels_wmma_opt;
+use crate::module_cache::load_function_cached;
+use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
+// `compile_ptx` は本番経路（`CudaGemm::new`。イシュー #1024 で
+// `load_function_cached` 経由へ結線済み）ではなく、`internal-diagnostics`
+// feature（既定 off）限定の診断用コンストラクタ
+// （`new_with_tf32_staged_swizzle`／`new_with_tf32_staged_pads`）専用の
+// 直コンパイル経路でのみ使う。既定ビルドでは未参照のため import 自体も
+// 同 feature でゲートし、未使用 import 警告を避ける。
+#[cfg(feature = "internal-diagnostics")]
 use crate::nvrtc::compile_ptx;
 
 /// naive GEMM カーネル起動 1 回あたりのブロック次元（16x16 = 256 スレッド）。
@@ -487,20 +496,67 @@ pub(crate) fn wmma_tf32_staged_alignment_ok(n: u32, k: u32) -> bool {
     n.is_multiple_of(4) && k.is_multiple_of(4)
 }
 
+/// [`kernel_specs`] の要素型。診断・ログ用ラベル（`label`）・NVRTC ソース
+/// （`source`）・ロードする関数名（`func_name`）に加え、イシュー #1024 で
+/// `module_cache`／NVRTC ディスクキャッシュへ結線するためのキー識別
+/// メタデータ（`block_m`/`block_n`/`block_k`/`stages`/`dtype`）を持つ。
+///
+/// `block_*`/`stages` は実際の起動パラメータ（[`launch_config`] 等が別途
+/// 保持する）ではなく、[`crate::nvrtc::CudaKernelDescriptor`] のキャッシュ
+/// キーを一意にするための識別メタデータに過ぎない（一意性の本体は
+/// [`Self::descriptor`] が保持する `source` 全文＋`kernel_name`。
+/// `CudaKernelDescriptor` ドキュメンテーションコメント「フィールドは
+/// private + getter とし」節参照）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GemmKernelSpec {
+    pub(crate) label: &'static str,
+    pub(crate) source: &'static str,
+    pub(crate) func_name: &'static str,
+    block_m: u32,
+    block_n: u32,
+    block_k: u32,
+    stages: u32,
+    dtype: fandhe_ai_tensor_core::dispatch::DType,
+}
+
+impl GemmKernelSpec {
+    /// `self` から [`crate::nvrtc::CudaKernelDescriptor`] を導出する
+    /// （イシュー #1024）。`CudaGemm::new` が構築する各カーネルは shape
+    /// 特化を行わない（同一 device 上では常に同一ソース・同一パラメータ
+    /// でコンパイルする）ため、`shape` は全次元 sentinel `0`・
+    /// `compiled_dims` は [`CompiledDims::DYNAMIC_ALL`] を渡す
+    /// （`kernels_mma.rs::RenderedMmaKernel::cache_descriptor` が
+    /// shape 特化ありの場合に個別次元を `Static`/`Dynamic` へ振り分けるのと
+    /// 対照的に、本経路は形状非依存の固定カーネルのみを扱うため常に
+    /// 全次元動的固定でよい）。
+    pub(crate) fn descriptor(&self) -> Result<CudaKernelDescriptor, CudaError> {
+        CudaKernelDescriptor::new_with_compiled_dims(
+            self.label,
+            fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+            self.block_m,
+            self.block_n,
+            self.block_k,
+            self.stages,
+            self.dtype,
+            CompiledDims::DYNAMIC_ALL,
+        )
+    }
+}
+
 /// `CudaGemm::new` が 1 回の構築で NVRTC コンパイル・ロードする 8 カーネル
-/// の `(診断・ログ用ラベル, NVRTC ソース, ロードする関数名)` 組の**唯一の
-/// 真実源**。
+/// の [`GemmKernelSpec`] 組の**唯一の真実源**。
 ///
 /// 順序は naive f32/f16・tiled f32/f16・tiled_bias_act_f32（先頭 5 件、
 /// `?` 早期 return に合流する必須カーネル）・wmma_tf32・wmma_tf32_opt・
 /// wmma_tf32_staged（末尾 3 件、失敗を `Option` へ退避するフォールバック
 /// カーネル）の順に固定する。先頭 5 件は [`CudaGemm::new`] が本関数の
-/// スライスを直接ループして compile_ptx／load_module／load_function する
+/// スライスを直接ループして [`crate::module_cache::load_function_cached`]
+/// （イシュー #1024。module_cache／NVRTC ディスクキャッシュ経由）を呼ぶ
 /// ため実装上ずれようがなく、末尾 3 件は [`compile_wmma_tf32`]／
 /// [`compile_wmma_tf32_opt`]／[`compile_wmma_tf32_staged`] がそれぞれ本関数
-/// の対応要素からソース・関数名を取得する（これらは失敗を `Option` へ退避
-/// するフォールバック方式のため、先頭 5 件と同じ単純ループへは合流させ
-/// ない。個別関数化の理由は各関数のドキュメンテーションコメント参照）。
+/// の対応要素を取得する（これらは失敗を `Option` へ退避するフォールバック
+/// 方式のため、先頭 5 件と同じ単純ループへは合流させない。個別関数化の
+/// 理由は各関数のドキュメンテーションコメント参照）。
 ///
 /// `crates/backend-cuda/src/init_cost_diag_tests.rs`（イシュー #926 の
 /// フェーズ分解診断テスト）も本関数をそのまま呼び出し、8 カーネルの
@@ -508,44 +564,101 @@ pub(crate) fn wmma_tf32_staged_alignment_ok(n: u32, k: u32) -> bool {
 /// 手作業で複製していたが、本番側でカーネルの追加・削除・ソース差し替え
 /// が起きても診断側の一覧が追従せず乖離しうるため、単一の `pub(crate)`
 /// 関数へ統合した（Review #945 P2 指摘）。
-pub(crate) fn kernel_specs() -> [(&'static str, &'static str, &'static str); 8] {
+pub(crate) fn kernel_specs() -> [GemmKernelSpec; 8] {
+    use fandhe_ai_tensor_core::dispatch::DType;
     [
-        ("naive_f32", kernels::NAIVE_F32, "gemm_naive_f32"),
-        ("naive_f16", kernels::NAIVE_F16, "gemm_naive_f16"),
-        ("tiled_f32", kernels::TILED_F32, "gemm_tiled_f32"),
-        ("tiled_f16", kernels::TILED_F16, "gemm_tiled_f16"),
-        (
-            "tiled_bias_act_f32",
-            kernels::TILED_BIAS_ACT_F32,
-            "gemm_tiled_bias_act_f32",
-        ),
-        ("wmma_tf32", kernels::WMMA_TF32_F32, "gemm_wmma_tf32"),
-        (
-            "wmma_tf32_opt",
-            kernels_wmma_opt::wmma_tf32_f32_opt_source(),
-            "gemm_wmma_tf32_opt",
-        ),
-        (
-            "wmma_tf32_staged",
-            kernels_wmma_opt::wmma_tf32_f32_staged_source(),
-            "gemm_wmma_tf32_staged",
-        ),
+        GemmKernelSpec {
+            label: "naive_f32",
+            source: kernels::NAIVE_F32,
+            func_name: "gemm_naive_f32",
+            block_m: NAIVE_BLOCK_DIM.0,
+            block_n: NAIVE_BLOCK_DIM.1,
+            block_k: 1,
+            stages: 1,
+            dtype: DType::F32,
+        },
+        GemmKernelSpec {
+            label: "naive_f16",
+            source: kernels::NAIVE_F16,
+            func_name: "gemm_naive_f16",
+            block_m: NAIVE_BLOCK_DIM.0,
+            block_n: NAIVE_BLOCK_DIM.1,
+            block_k: 1,
+            stages: 1,
+            dtype: DType::F16,
+        },
+        GemmKernelSpec {
+            label: "tiled_f32",
+            source: kernels::TILED_F32,
+            func_name: "gemm_tiled_f32",
+            block_m: kernels::TILE,
+            block_n: kernels::TILE,
+            block_k: kernels::TILE,
+            stages: 1,
+            dtype: DType::F32,
+        },
+        GemmKernelSpec {
+            label: "tiled_f16",
+            source: kernels::TILED_F16,
+            func_name: "gemm_tiled_f16",
+            block_m: kernels::TILE,
+            block_n: kernels::TILE,
+            block_k: kernels::TILE,
+            stages: 1,
+            dtype: DType::F16,
+        },
+        GemmKernelSpec {
+            label: "tiled_bias_act_f32",
+            source: kernels::TILED_BIAS_ACT_F32,
+            func_name: "gemm_tiled_bias_act_f32",
+            block_m: kernels::TILE,
+            block_n: kernels::TILE,
+            block_k: kernels::TILE,
+            stages: 1,
+            dtype: DType::F32,
+        },
+        GemmKernelSpec {
+            label: "wmma_tf32",
+            source: kernels::WMMA_TF32_F32,
+            func_name: "gemm_wmma_tf32",
+            block_m: kernels::WMMA_TF32_BLOCK_M,
+            block_n: kernels::WMMA_TF32_BLOCK_N,
+            block_k: kernels::WMMA_TF32_K_TILE,
+            stages: 1,
+            dtype: DType::F32,
+        },
+        GemmKernelSpec {
+            label: "wmma_tf32_opt",
+            source: kernels_wmma_opt::wmma_tf32_f32_opt_source(),
+            func_name: "gemm_wmma_tf32_opt",
+            block_m: kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_M,
+            block_n: kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_N,
+            block_k: kernels_wmma_opt::WMMA_TF32_OPT_K_TILE,
+            stages: 1,
+            dtype: DType::F32,
+        },
+        GemmKernelSpec {
+            label: "wmma_tf32_staged",
+            source: kernels_wmma_opt::wmma_tf32_f32_staged_source(),
+            func_name: "gemm_wmma_tf32_staged",
+            block_m: kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M,
+            block_n: kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N,
+            block_k: kernels_wmma_opt::WMMA_TF32_STAGED_K_TILE,
+            stages: kernels_wmma_opt::WMMA_TF32_STAGED_STAGES,
+            dtype: DType::F32,
+        },
     ]
 }
 
-/// WMMA(TF32) カーネル（[`kernel_specs`] index 5）を単独でコンパイル・
-/// ロードする。`CudaGemm::new` から呼ばれ、戻り値の `Err` は naive/tiled
-/// 4 カーネルの `?` 早期 return には合流させず、呼び出し元で
-/// `wmma_tf32_error` として退避する（[`CudaGemm::wmma_tf32`] フィールドの
-/// ドキュメンテーションコメント参照。レビュー指摘 #62）。
-fn compile_wmma_tf32(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
-    let (_, source, func_name) = kernel_specs()[5];
-    let ptx = compile_ptx(source, arch)?;
-    let func = device
-        .context()
-        .load_module(ptx)?
-        .load_function(func_name)?;
-    Ok(func)
+/// WMMA(TF32) カーネル（[`kernel_specs`] index 5）を単独で
+/// [`load_function_cached`]（module_cache／NVRTC ディスクキャッシュ経由。
+/// イシュー #1024）経由でロードする。`CudaGemm::new` から呼ばれ、戻り値の
+/// `Err` は naive/tiled 4 カーネルの `?` 早期 return には合流させず、
+/// 呼び出し元で `wmma_tf32_error` として退避する（[`CudaGemm::wmma_tf32`]
+/// フィールドのドキュメンテーションコメント参照。レビュー指摘 #62）。
+fn compile_wmma_tf32(device: &CudaDevice) -> Result<CudaFunction, CudaError> {
+    let spec = kernel_specs()[5];
+    load_function_cached(device, spec.descriptor()?, spec.source, spec.func_name)
 }
 
 /// `kernels::WMMA_TF32_BLOCK_M`／`WMMA_TF32_BLOCK_N`（ブロックタイル一辺）を
@@ -571,17 +684,12 @@ fn wmma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
 }
 
 /// WMMA(TF32) opt カーネル（[`kernel_specs`] index 6）を単独で
-/// コンパイル・ロードする。[`compile_wmma_tf32`] と同じ理由（レビュー指摘
-/// #62 の踏襲）で `CudaGemm::new` の早期 return には合流させず、呼び出し元で
-/// `wmma_tf32_opt_error` として退避する。
-fn compile_wmma_tf32_opt(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
-    let (_, source, func_name) = kernel_specs()[6];
-    let ptx = compile_ptx(source, arch)?;
-    let func = device
-        .context()
-        .load_module(ptx)?
-        .load_function(func_name)?;
-    Ok(func)
+/// [`load_function_cached`] 経由でロードする。[`compile_wmma_tf32`] と
+/// 同じ理由（レビュー指摘 #62 の踏襲）で `CudaGemm::new` の早期 return には
+/// 合流させず、呼び出し元で `wmma_tf32_opt_error` として退避する。
+fn compile_wmma_tf32_opt(device: &CudaDevice) -> Result<CudaFunction, CudaError> {
+    let spec = kernel_specs()[6];
+    load_function_cached(device, spec.descriptor()?, spec.source, spec.func_name)
 }
 
 /// [`wmma_tf32_launch_config`] の opt 版。ブロックタイル
@@ -602,17 +710,39 @@ fn wmma_tf32_opt_launch_config(m: u32, n: u32) -> LaunchConfig {
 }
 
 /// WMMA(TF32) opt-staged カーネル（イシュー #500・[`kernel_specs`] index 7）
-/// を単独でコンパイル・ロードする。[`compile_wmma_tf32_opt`] と同じ理由で
-/// `CudaGemm::new` の早期 return には合流させず、呼び出し元で
-/// `wmma_tf32_staged_error` として退避する。
-fn compile_wmma_tf32_staged(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
-    let (_, source, func_name) = kernel_specs()[7];
-    let ptx = compile_ptx(source, arch)?;
-    let func = device
-        .context()
-        .load_module(ptx)?
-        .load_function(func_name)?;
-    Ok(func)
+/// を単独で [`load_function_cached`] 経由でロードする。
+/// [`compile_wmma_tf32_opt`] と同じ理由で `CudaGemm::new` の早期 return には
+/// 合流させず、呼び出し元で `wmma_tf32_staged_error` として退避する。
+fn compile_wmma_tf32_staged(device: &CudaDevice) -> Result<CudaFunction, CudaError> {
+    let spec = kernel_specs()[7];
+    load_function_cached(device, spec.descriptor()?, spec.source, spec.func_name)
+}
+
+/// [`compile_wmma_tf32_staged`]（[`kernel_specs`] index 7）と同一のブロック
+/// タイル・段数メタデータを流用しつつ `kernel_name` のみ
+/// `"wmma_tf32_staged_swizzle"` へ差し替えた
+/// [`crate::nvrtc::CudaKernelDescriptor`] を構築する。
+///
+/// swizzle 変種は `group_width`（実行時に `device.multiprocessor_count()`
+/// から導出。[`CudaGemm::new`] 参照）によってソース文字列が変わるため
+/// [`kernel_specs`] の固定配列には含めない。`kernel_name` を base
+/// （`"wmma_tf32_staged"`）と分けるのは、同一 `kernel_name`・異なる
+/// `source` のキーが `CudaKernelCacheKey` の `Hash`/`Eq`（`source` を含む）
+/// 上は別エントリになる（ソース全文比較のため誤ヒットはしない）ものの、
+/// ディスクキャッシュのディレクトリ命名（`kernel.<name>.<hash>`）が
+/// base と衝突しないようにするため（イシュー #1024）。
+fn wmma_tf32_staged_swizzle_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
+    let base = kernel_specs()[7];
+    CudaKernelDescriptor::new_with_compiled_dims(
+        "wmma_tf32_staged_swizzle",
+        fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+        base.block_m,
+        base.block_n,
+        base.block_k,
+        base.stages,
+        base.dtype,
+        CompiledDims::DYNAMIC_ALL,
+    )
 }
 
 /// [`wmma_tf32_opt_launch_config`] の staged 版。ブロックタイル
@@ -660,53 +790,37 @@ impl CudaGemm {
     /// PTX を生成しようとした際に NVRTC が拒否することで間接的に検査される
     /// （実機での網羅検証は未実施。`docs/cuda-tensor-core-design.md` 参照）。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
-        let arch = device.arch();
-
         // naive f32/f16・tiled f32/f16・tiled_bias_act_f32（イシュー #599。
         // epilogue 融合カーネルも naive/tiled と同様 `#include` を使わず全
         // compute capability で成立するため、WMMA(TF32) 系のような Option
         // 化・失敗の退避は行わず、`new` の早期 return（`?`）に合流させる）の
         // 5 カーネルは [`kernel_specs`]（本番・イシュー #926 診断テストの
-        // 双方が参照する単一の真実源。Review #945 P2 指摘）の先頭 5 要素
-        // からソース・関数名を取得してコンパイル・ロードする（固定長配列の
-        // 直接インデックス参照のため、本番経路で禁止される `unwrap`/
-        // `expect` を要素取得に必要としない。`.claude/rules/coding-rust.md`）。
+        // 双方が参照する単一の真実源。Review #945 P2 指摘）の先頭 5 要素を
+        // [`load_function_cached`]（module_cache／NVRTC ディスクキャッシュ
+        // 経由。イシュー #1024）でロードする（固定長配列の直接インデックス
+        // 参照のため、本番経路で禁止される `unwrap`/`expect` を要素取得に
+        // 必要としない。`.claude/rules/coding-rust.md`）。
         let specs = kernel_specs();
 
-        let (_, naive_f32_source, naive_f32_func) = specs[0];
-        let naive_f32_ptx = compile_ptx(naive_f32_source, arch)?;
-        let naive_f32 = device
-            .context()
-            .load_module(naive_f32_ptx)?
-            .load_function(naive_f32_func)?;
+        let spec = specs[0];
+        let naive_f32 =
+            load_function_cached(device, spec.descriptor()?, spec.source, spec.func_name)?;
 
-        let (_, naive_f16_source, naive_f16_func) = specs[1];
-        let naive_f16_ptx = compile_ptx(naive_f16_source, arch)?;
-        let naive_f16 = device
-            .context()
-            .load_module(naive_f16_ptx)?
-            .load_function(naive_f16_func)?;
+        let spec = specs[1];
+        let naive_f16 =
+            load_function_cached(device, spec.descriptor()?, spec.source, spec.func_name)?;
 
-        let (_, tiled_f32_source, tiled_f32_func) = specs[2];
-        let tiled_f32_ptx = compile_ptx(tiled_f32_source, arch)?;
-        let tiled_f32 = device
-            .context()
-            .load_module(tiled_f32_ptx)?
-            .load_function(tiled_f32_func)?;
+        let spec = specs[2];
+        let tiled_f32 =
+            load_function_cached(device, spec.descriptor()?, spec.source, spec.func_name)?;
 
-        let (_, tiled_f16_source, tiled_f16_func) = specs[3];
-        let tiled_f16_ptx = compile_ptx(tiled_f16_source, arch)?;
-        let tiled_f16 = device
-            .context()
-            .load_module(tiled_f16_ptx)?
-            .load_function(tiled_f16_func)?;
+        let spec = specs[3];
+        let tiled_f16 =
+            load_function_cached(device, spec.descriptor()?, spec.source, spec.func_name)?;
 
-        let (_, tiled_bias_act_f32_source, tiled_bias_act_f32_func) = specs[4];
-        let tiled_bias_act_f32_ptx = compile_ptx(tiled_bias_act_f32_source, arch)?;
-        let tiled_bias_act_f32 = device
-            .context()
-            .load_module(tiled_bias_act_f32_ptx)?
-            .load_function(tiled_bias_act_f32_func)?;
+        let spec = specs[4];
+        let tiled_bias_act_f32 =
+            load_function_cached(device, spec.descriptor()?, spec.source, spec.func_name)?;
 
         // `kernels::WMMA_TF32_F32` はブロックタイル（M/N=32）を warp タイル
         // （WMMA_TF32_FRAG=16）の 2x2 グリッドに割ることを前提にしており、
@@ -733,7 +847,7 @@ impl CudaGemm {
         // 上記 4 カーネルと異なり `?` で早期 return せず、失敗を
         // `wmma_tf32_error` に退避して naive/tiled の可用性から切り離す
         // （`Self::wmma_tf32` フィールドのドキュメンテーションコメント参照）。
-        let (wmma_tf32, wmma_tf32_error) = match compile_wmma_tf32(device, arch) {
+        let (wmma_tf32, wmma_tf32_error) = match compile_wmma_tf32(device) {
             Ok(func) => (Some(func), None),
             Err(e) => (None, Some(e.to_string())),
         };
@@ -777,7 +891,7 @@ impl CudaGemm {
         const _: () = assert!(kernels_wmma_opt::WMMA_TF32_OPT_A_PAD.is_multiple_of(4));
         const _: () = assert!(kernels_wmma_opt::WMMA_TF32_OPT_B_PAD.is_multiple_of(4));
 
-        let (wmma_tf32_opt, wmma_tf32_opt_error) = match compile_wmma_tf32_opt(device, arch) {
+        let (wmma_tf32_opt, wmma_tf32_opt_error) = match compile_wmma_tf32_opt(device) {
             Ok(func) => (Some(func), None),
             Err(e) => (None, Some(e.to_string())),
         };
@@ -815,11 +929,10 @@ impl CudaGemm {
         const _: () = assert!(kernels_wmma_opt::WMMA_TF32_STAGED_B_PAD.is_multiple_of(4));
         const _: () = assert!(kernels_wmma_opt::WMMA_TF32_STAGED_STAGES >= 2);
 
-        let (wmma_tf32_staged, wmma_tf32_staged_error) =
-            match compile_wmma_tf32_staged(device, arch) {
-                Ok(func) => (Some(func), None),
-                Err(e) => (None, Some(e.to_string())),
-            };
+        let (wmma_tf32_staged, wmma_tf32_staged_error) = match compile_wmma_tf32_staged(device) {
+            Ok(func) => (Some(func), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
 
         // イシュー #856: `wmma_tf32_staged`（base）のコンパイルに成功し、
         // かつ SM 数が実測できた場合のみ swizzle 変種を追加コンパイルする
@@ -840,12 +953,8 @@ impl CudaGemm {
                 );
                 match kernels_wmma_opt::wmma_tf32_f32_staged_source_with_swizzle(group_width)
                     .and_then(|src| {
-                        let ptx = compile_ptx(&src, arch)?;
-                        let func = device
-                            .context()
-                            .load_module(ptx)?
-                            .load_function("gemm_wmma_tf32_staged")?;
-                        Ok(func)
+                        let descriptor = wmma_tf32_staged_swizzle_descriptor()?;
+                        load_function_cached(device, descriptor, &src, "gemm_wmma_tf32_staged")
                     }) {
                     Ok(func) => (Some(func), Some(group_width), None),
                     Err(e) => (None, None, Some(e.to_string())),
@@ -1395,6 +1504,43 @@ impl CudaGemm {
     /// する受け入れテスト（`tests/gemm_wmma_tf32_opt.rs`）はこの関数で
     /// 事前に可用性を確認し、フォールバックが起きていないことを保証した
     /// うえで計測・検証する。
+    /// 基本版 WMMA(TF32) カーネル（`wmma_tf32` フィールド。非公開）が
+    /// `new` 時点でコンパイル・ロードに成功しているかを返す（イシュー #1024）。
+    /// [`Self::wmma_tf32_opt_available`]・[`Self::wmma_tf32_staged_available`]
+    /// と同型の可用性 getter（`run_wmma_tf32` の内部フォールバック先を
+    /// 強制実行する API ではなく、単に `new` 時点の成否を読み取るだけの
+    /// もので REQ-11「明示切替 API を提供しない」方針に抵触しない）。
+    /// module_cache／NVRTC ディスクキャッシュ結線の診断テスト
+    /// （`module_cache_wiring_tests.rs`）が、基本版が NVRTC に拒否される
+    /// 環境（naive/tiled はビルドできるが TF32 WMMA は未対応の CUDA
+    /// デバイス）で `kernel_specs` の必須件数を過大に見積もらないよう
+    /// 実際にコンパイルへ成功した件数を算出するために使う。
+    ///
+    /// `module_cache_wiring_tests.rs` は同一クレート内の `#[cfg(test)]`
+    /// モジュール（`crate::CudaGemm` へ直接アクセス。統合テスト
+    /// クレートではない）からのみ呼ばれる内部診断用アクセサのため
+    /// `pub(crate)` に限定する（PR #1060 codex-review P1 指摘対応:
+    /// 安定した公開 API 面〈`wmma_tf32_opt_available`・
+    /// `wmma_tf32_staged_available` 等〉と異なり `tests/`・`examples/`
+    /// から参照されない内部表現であり、`pub fn` として公開 API へ
+    /// 露出させない）。
+    ///
+    /// 非 test ビルドでは呼び出し元が存在しないため `#[cfg(test)]` を
+    /// 付与し `dead_code` lint（`-D warnings`）を回避する。
+    #[cfg(test)]
+    pub(crate) fn wmma_tf32_available(&self) -> bool {
+        self.wmma_tf32.is_some()
+    }
+
+    /// [`Self::wmma_tf32_available`] が `false` の場合の失敗理由
+    /// （[`Self::wmma_tf32_opt_unavailable_reason`] と同じ理由）。
+    /// [`Self::wmma_tf32_available`] と同じ理由で `pub(crate)` かつ
+    /// `#[cfg(test)]` に限定する（PR #1060 codex-review P1 指摘対応）。
+    #[cfg(test)]
+    pub(crate) fn wmma_tf32_unavailable_reason(&self) -> Option<&str> {
+        self.wmma_tf32_error.as_deref()
+    }
+
     pub fn wmma_tf32_opt_available(&self) -> bool {
         self.wmma_tf32_opt.is_some()
     }
@@ -2041,6 +2187,128 @@ impl CudaGemm {
                 .arg(&k_i)
                 .arg(&has_bias)
                 .arg(&act_i)
+                .launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    /// [`Self::launch_tiled_bias_act_f32`] の常駐ビュー版（イシュー
+    /// #1023「R3: 要素オフセット付き常駐ビュー」設計。`docs/
+    /// device-resident-update-design.md` 追補参照）。
+    ///
+    /// `#1023`（パラメータ横断の単一連結バッファ化）後、
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore` は
+    /// `weight`／`bias` を含む全パラメータを 1 本の連結
+    /// `DeviceBuffer<f32>` として保持するため、個々のパラメータは
+    /// 連結バッファの部分範囲（`cudarc::driver::CudaView`）としてしか
+    /// 表現できない。本メソッドは [`Self::launch_tiled_bias_act_f32`]
+    /// と同一のカーネル・同一の境界検証ロジックを、`w_dev`／`bias_dev`
+    /// のみ `CudaView`（オフセット付き部分ビュー）で受け取る形へ
+    /// 変えたオーバーロードであり、`a_dev`／`c_dev`（毎ステップ新規
+    /// upload/確保するため常に全体バッファ）は従来どおり
+    /// `&CudaSlice<f32>` のまま。
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_tiled_bias_act_f32_resident(
+        &self,
+        a_dev: &CudaSlice<f32>,
+        w_dev: &CudaView<'_, f32>,
+        bias_dev: Option<&CudaView<'_, f32>>,
+        act_relu: bool,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), w_dev.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+        if let Some(bias_dev) = bias_dev
+            && bias_dev.len() != n as usize
+        {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "bias length mismatch: expected {n} (n), actual {}",
+                    bias_dev.len()
+                ),
+            });
+        }
+
+        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+        let act_i: i32 = if act_relu { 1 } else { 0 };
+
+        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+
+        // SAFETY: `launch_tiled_bias_act_f32` と同一の根拠。`w_dev`／
+        // `bias_dev` は `CudaView`（`PushKernelArg` は `CudaSlice` と
+        // 同様 `&CudaView` にも実装されており、渡すポインタは元バッファ
+        // 先頭 + オフセットバイトを指す。`DeviceBufferView::new`
+        // （`tensor-core`）が構築時に offset+numel の範囲検査を済ませて
+        // いるため、ここでの追加のオフセット検証は不要）。has_bias == 0
+        // の場合のダミー引数には `a_dev` を再利用する（`CudaView` 型引数
+        // を要求されるため `a_dev.slice(..)` でその場の一時ビューを渡す）。
+        let dummy_view;
+        let bias_arg: (i32, &CudaView<'_, f32>) = match bias_dev {
+            Some(bias_dev) => (1, bias_dev),
+            None => {
+                dummy_view = a_dev.slice(..);
+                (0, &dummy_view)
+            }
+        };
+        let (has_bias, bias_arg) = bias_arg;
+
+        unsafe {
+            self.stream
+                .launch_builder(&self.tiled_bias_act_f32)
+                .arg(a_dev)
+                .arg(w_dev)
+                .arg(bias_arg)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .arg(&has_bias)
+                .arg(&act_i)
+                .launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    /// [`Self::launch_tiled_f32`] の常駐ビュー版（イシュー #1023「R3」）。
+    /// `Op::LinearResident` の VJP（`fandhe_ai_autodiff::grad`）が
+    /// `d_input^T = w @ g^T` を計算する際、`w`（連結バッファ内の部分
+    /// ビュー）を `a_dev` 位置へ渡すために使う。[`Self::
+    /// launch_tiled_bias_act_f32_resident`] と同じ理由で `a_dev` のみ
+    /// `CudaView`、`b_dev`／`c_dev` は毎回新規 upload/確保される全体
+    /// バッファのまま `&CudaSlice<f32>`。
+    pub fn launch_tiled_f32_resident(
+        &self,
+        a_dev: &CudaView<'_, f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+
+        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `launch_tiled_f32` と同一の根拠。
+        unsafe {
+            self.stream
+                .launch_builder(&self.tiled_f32)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
                 .launch(cfg)?;
         }
         self.stream.synchronize()?;
