@@ -255,12 +255,9 @@ impl MetalAllocator {
                 // 再利用時のゼロ初期化契約（設計文書 §3.3「ゼロ初期化は
                 // ホスト書き込み」・§6「A02」）: 前利用者のバイト残留を
                 // 防ぐため、`synchronize()` で GPU 完了を待ってから
-                // `zero_fill_logical` する。フレッシュ確保
-                // （`newBufferWithLength_options` 直後）はこの限りでなく
-                // `buffer.rs::MetalBuffer::new_zeroed` と同じ「OS 新規
-                // ページはゼロ初期化済み」という既存の暗黙契約に乗る
-                // （本関数はフレッシュ経路〈下記 `alloc_fresh`〉で明示
-                // ゼロクリアを行わない）。
+                // `zero_fill_logical` する。フレッシュ確保経路も同様に
+                // 明示ゼロクリアする（下記 `alloc_fresh` 直後。GPU 未使用の
+                // ため同期は不要）。
                 // `record_reuse` 済みの貸出は、この `synchronize()` が失敗
                 // すると `PooledMetalHandle` が構築されず `Drop` 経由の
                 // `record_loan_end` も走らないため、統計を明示的に巻き戻して
@@ -288,13 +285,28 @@ impl MetalAllocator {
         }
 
         match self.alloc_fresh(class_bytes, logical_bytes) {
-            Ok(raw) => Ok(self.wrap_fresh(raw, class_bytes, logical_bytes)),
+            Ok(raw) => {
+                // フレッシュ確保時のゼロ初期化契約（codex P1 対応。設計文書
+                // §3.3／§6「A02」）: `newBufferWithLength_options` の内容が
+                // ゼロであることは Metal の API 契約として保証されないため、
+                // 「OS 新規ページはゼロ初期化済み」という暗黙条件に依存せず、
+                // `zero_on_reuse == true`（`alloc_zeroed` 系の呼び出し）なら
+                // fresh 経路でも明示的にゼロクリアする。fresh バッファは
+                // GPU 未使用のため `synchronize()` は不要。
+                if zero_on_reuse {
+                    raw.zero_fill_logical(len);
+                }
+                Ok(self.wrap_fresh(raw, class_bytes, logical_bytes))
+            }
             Err(MetalError::BufferAllocation { .. }) => {
                 // OOM フォールバック（設計文書 §3.4）: `release_cached()`
                 // を 1 回実行してから再試行する。それでも失敗すれば
                 // fail-closed に `Err` を返す（無限リトライしない）。
                 self.release_cached()?;
                 let raw = self.alloc_fresh(class_bytes, logical_bytes)?;
+                if zero_on_reuse {
+                    raw.zero_fill_logical(len);
+                }
                 Ok(self.wrap_fresh(raw, class_bytes, logical_bytes))
             }
             Err(other) => Err(other),
