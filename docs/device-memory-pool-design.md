@@ -293,26 +293,37 @@ allocator()` を削除し `DeviceAllocator` の実装インスタンスをいず
     `Retained<ProtocolObject<dyn MTLBuffer>>` を保持〉。
     `SizeClassPool<H>` のフリーリストに格納される値そのものであり、
     `tensor-core` のどの公開シグネチャにも現れない。
-  - **RAII 貸出ラッパー型（新設。codex-review PR #1056 P1 是正）**: 例
-    `backend-cuda::pool::PooledCudaHandle { handle: Option<CudaSliceHandle>,
-    class_bytes: u64, logical_bytes: u64, pool: Arc<SizeClassPool<
-    CudaSliceHandle>> }`（`backend-metal::pool::PooledMetalHandle` も
-    同型）。`logical_bytes`（新規。codex-review PR #1056 P1 是正）は
-    `alloc_zeroed`／`alloc_uninit`（下記）呼び出し時に要求された論理
-    バイト数（`class_bytes` への丸め前の値）を保持し、`Drop` 時の
-    `record_loan_end(logical_bytes, class_bytes)` 呼び出し（下記）に
-    使う。`alloc_zeroed`／`alloc_uninit`（下記）は生ハンドル型ではなく
-    **この RAII ラッパーを返す**。二重返却・use-after-return の構造的
-    防止は**両バックエンド共通で `Option<H>::take()` 方式に統一する**
-    （codex-review PR #1056 P2 是正。旧稿は本節で `Option<H>::take()`、
-    §3.3・§7 の一部記述で既存 `PooledBufferHandle` の `ManuallyDrop`
-    ガード方式と、2 つの異なる二重防止方式が併記されており矛盾して
-    いた。`ManuallyDrop` 方式への言及は削除し本節の記述を正とする）:
-    `Drop` 実装は必ず `self.handle.take()` で `Option` から所有権を
-    奪ってから後段の処理へ渡す（`take()` 後の `self.handle` は `None`
-    になるため、何らかの経路で二重に `Drop` が走っても 2 回目は `None`
-    を握って何もしない）。所有権を奪った直後、**`pool.put()` の
-    呼び出しタイミングとは独立に**
+  - **RAII 貸出ラッパー型（新設。codex-review PR #1056 P1 是正。
+    二重返却防止方式は #1063 で `ManuallyDrop<H>` へ改訂済み。
+    §8.1「改訂履歴」参照）**: 例
+    `backend-cuda::pool::PooledCudaHandle { handle: ManuallyDrop<
+    CudaSliceHandle>, class_bytes: u64, logical_bytes: u64, pool:
+    Arc<SizeClassPool<CudaSliceHandle>> }`（`backend-metal::pool::
+    PooledMetalHandle` も同型）。`logical_bytes`（新規。codex-review
+    PR #1056 P1 是正）は `alloc_zeroed`／`alloc_uninit`（下記）呼び
+    出し時に要求された論理バイト数（`class_bytes` への丸め前の値）を
+    保持し、`Drop` 時の `record_loan_end(logical_bytes, class_bytes)`
+    呼び出し（下記）に使う。`alloc_zeroed`／`alloc_uninit`（下記）は
+    生ハンドル型ではなく**この RAII ラッパーを返す**。二重返却・
+    use-after-return の構造的防止は**両バックエンド共通で
+    `ManuallyDrop<H>` ＋ `Drop` 内 `ManuallyDrop::take` 方式に統一
+    する**（#1063・codex-review P1 是正。旧稿〈PR #1056 P2 是正〉は
+    `Option<H>::take()` 方式を正としていたが、`raw()` 等の読み取り
+    アクセサが「`Drop` 実行中の一瞬を除き常に `Some`」という実行時
+    には常に成り立つが型システムでは表現できない不変条件に依存し
+    `None` 分岐を `unreachable!()` で埋めざるを得なかった〈codex-
+    review P1 指摘〉。`ManuallyDrop<H>` 方式はこの `unreachable!()`
+    分岐自体を型構造から排除する。防止する契約自体〈同一ハンドルが
+    フリーリストと貸出中の双方に存在しない・二重返却されない〉は
+    不変であり、実現方式のみを変更した）:
+    `Drop` 実装は必ず `unsafe { std::mem::ManuallyDrop::take(&mut
+    self.handle) }` で所有権を奪ってから後段の処理へ渡す。SAFETY:
+    `Drop::drop` は言語仕様上インスタンスごとにちょうど 1 回だけ
+    呼ばれ、`drop` 完了後は `self`（本ラッパー自体）への一切の
+    アクセスが言語仕様上不可能（値は既に破棄済み）であるため、
+    `self.handle` への二重 `take`・`take` 後のアクセス
+    （use-after-take）はいずれも構造的に発生しない。所有権を奪った
+    直後、**`pool.put()` の呼び出しタイミングとは独立に**
     `pool.record_loan_end(self.logical_bytes, self.class_bytes)`
     を CUDA・Metal 共通で即座に呼ぶ（`PoolStats::capacity_waste_bytes`
     の会計。上記「フィールド更新契約」・下記「Metal の返却待ちバイト数」
@@ -537,7 +548,8 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
   （`crates/tensor-core/src/buffer.rs`「解放方針」節を維持）。
 - **返却の GPU 完了待ち契約（codex-review PR #1056 P1 是正。CUDA／
   Metal で異なる理由）**: §3.1「RAII 貸出ラッパー型」の `Drop` は
-  `Option<H>::take()` で所有権を取り出した後、CUDA は即座に
+  `ManuallyDrop::take`（#1063 で `Option<H>::take()` から改訂。§8.1
+  「改訂履歴」参照）で所有権を取り出した後、CUDA は即座に
   `pool.put()` する一方、Metal は GPU 完了まで `put()` を遅延させる
   （下記「Metal」参照）。この非対称の根拠を以下に明記する:
   - **CUDA が即時 `put()` で安全な理由**: 本設計は単一ストリームモデル
@@ -696,14 +708,21 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
     側フィルをバッチへ encode する案を推奨する（同期点を新たに増やさ
     ないため）。最終選択は #1021 に委ねる。
 - **二重返却・use-after-return の構造的防止（codex-review PR #1056 P2
-  是正。方式の統一）**: §3.1「RAII 貸出ラッパー型」が定める
-  `Option<H>::take()` 方式に統一する。旧稿は本節で既存
-  `PooledBufferHandle` の `ManuallyDrop` によるガード方式
-  （`crates/tensor-core/src/pool.rs`）を継承すると記載しており、§3.1 の
-  `Option<H>::take()` 方式と矛盾していた。`PooledMemory`（既存）が
-  `ManuallyDrop` を使うこと自体は変更しない（既存公開 API・実装への
-  非破壊）が、本設計（`SizeClassPool<H>`・`PooledCudaHandle`／
-  `PooledMetalHandle`）は新規実装であり `ManuallyDrop` を採用しない。
+  是正・#1063 P1 是正で `ManuallyDrop<H>` へ改訂。§8.1「改訂履歴」
+  参照）**: §3.1「RAII 貸出ラッパー型」が定める `ManuallyDrop<H>` ＋
+  `Drop` 内 `ManuallyDrop::take` 方式に統一する。旧稿（PR #1056
+  時点）は本節で既存 `PooledBufferHandle` の `ManuallyDrop` によるガード
+  方式（`crates/tensor-core/src/pool.rs`）を継承すると記載しており、
+  §3.1 が当時定めていた `Option<H>::take()` 方式と矛盾していたため、
+  その巡では `Option<H>::take()` へ統一する形で解消した。その後
+  #1063（イシュー #1021 実装）で、`Option<H>::take()` 方式が要求する
+  「読み取りアクセサは `Drop` 実行中の一瞬を除き常に `Some`」という
+  型で表現できない不変条件への依存（`unreachable!()` 分岐。codex-
+  review P1 指摘）を解消するため、既存 `PooledBufferHandle` と同じ
+  `ManuallyDrop<H>` 方式へ再度統一した（詳細は §3.1「RAII 貸出
+  ラッパー型」・§8.1「改訂履歴」）。`PooledMemory`（既存）が
+  `ManuallyDrop` を使うこと自体は変更していない（既存公開 API・実装
+  への非破壊）。
 
 ### 3.4 断片化
 
@@ -1073,7 +1092,7 @@ fresh/reuse の 4 通り）:
 | REQ-14 の解放 API を内部 OOM フォールバックのみで満たす（旧稿） | `release_cached()` を「REQ-14 の明示解放 API」と位置づけつつ、実装インスタンスをいずれの公開関数からも返さない設計のままにする | 内部 OOM フォールバック（§3.4）から呼べるだけでは、`facade` を含む利用者側からプールを明示的に解放する経路が存在せず、REQ-14 が求める「プール解放 API の提供」を満たさない（codex-review PR #1056 P1）。本設計（§3.1）は低水準アロケータを一切露出せずに `BackendOps::release_cached_device_memory()`／`facade::release_cached_memory(device)`（unit のみを返す）を確定入口として追加することでこれを解消する |
 | `SizeClassPool<H>::register(class_bytes, handle)` で新規確保ハンドルをフリーリストへ記帳する（旧稿） | 確保直後のハンドルを `register` でフリーリストへ登録し、`take` で取り出して貸し出す設計 | フリーリストへの登録と貸出の間で所有権移転が定義されておらず、貸出中のハンドルが `take()` で別演算へ再取得できてしまう（use-after-return・上書きの構造的欠陥。codex-review PR #1056 P1）。本設計（§3.1）は `register` を廃止し、新規確保直後は RAII 貸出ラッパーが排他的に所有し、`put` は `Drop` 時のみ呼ばれる契約へ変更した |
 | `SizeClassPool<H>::drain() -> Vec<H>` で一括解放する（旧稿） | 解放時にフリーリストの全ハンドルを一括で取り出し、呼び出し元が順次解放する設計 | `drain` した時点で全ハンドルがプールの管理外になるため、途中で stream 同期・driver トリムが失敗しても取り出し済みハンドルをキャッシュへ戻す先がなく、§3.6 (2) の「未解放エントリはキャッシュへ残す」・§3.4 の「残存分のみ再試行」という fail-closed 契約を実現できない（codex-review PR #1056 P1）。本設計（§3.1）は `take_one_for_release` による 1 件ずつのトランザクション型取り出しと `put` による失敗時再挿入へ変更した |
-| Metal も CUDA と同様に `PooledMetalHandle::Drop` で即座に `pool.put()` する（旧稿） | RAII ラッパーの `Drop` 実装を CUDA／Metal で共通化し、`Option<H>::take()` 後ただちに `pool.put()` する | Metal のコマンド実行は非同期であり、`Drop` 時点で GPU 側の読み書きが完了している保証がない。§3.3「Metal」（#1054 §3.4 由来）は「in-flight バッチの保持列から外れる（`synchronize()` される）まで再貸出ししない」契約を既に確定させており、即時 `put()` はこの契約に違反し、返却直後に別演算へ `take()` されたバッファが実行中カーネルの入出力を上書きしうる（codex-review PR #1056 P1）。本設計（§3.3・§3.5）は `MetalContext` の `pending_pool_returns`（`Mutex<BatchSlots>` 保護）へ所有権を一時的に委譲し、`synchronize()` 完了後にのみ `put()` する機構へ変更した。CUDA は stream 順序保証（§3.3「返却の GPU 完了待ち契約」）により即時 `put()` のままで安全なため、この変更は Metal 側にのみ適用する |
+| Metal も CUDA と同様に `PooledMetalHandle::Drop` で即座に `pool.put()` する（旧稿） | RAII ラッパーの `Drop` 実装を CUDA／Metal で共通化し、所有権を取り出した後ただちに `pool.put()` する | Metal のコマンド実行は非同期であり、`Drop` 時点で GPU 側の読み書きが完了している保証がない。§3.3「Metal」（#1054 §3.4 由来）は「in-flight バッチの保持列から外れる（`synchronize()` される）まで再貸出ししない」契約を既に確定させており、即時 `put()` はこの契約に違反し、返却直後に別演算へ `take()` されたバッファが実行中カーネルの入出力を上書きしうる（codex-review PR #1056 P1）。本設計（§3.3・§3.5）は `MetalContext` の `pending_pool_returns`（`Mutex<BatchSlots>` 保護）へ所有権を一時的に委譲し、`synchronize()` 完了後にのみ `put()` する機構へ変更した。CUDA は stream 順序保証（§3.3「返却の GPU 完了待ち契約」）により即時 `put()` のままで安全なため、この変更は Metal 側にのみ適用する |
 | release_cached() を stream 同期 1 回 → 個別解放 → driver トリムの 3 段のままにする（旧稿） | `cuMemFreeAsync` の enqueue（個別解放）直後に `cuMemPoolTrimTo` を呼ぶ | `cuMemFreeAsync` はエンキューのみで完了を待たないため、直後の trim はまだ driver 側に解放が反映されていないメモリを見落とす（Cursor Bugbot High 指摘）。本設計（§3.6 (2)）は個別解放後にもう 1 回 stream 同期を挟む 4 段構成へ変更し、この 2 回目の同期の失敗はハンドルが既に drop 済み（再挿入不可）であることを踏まえた専用の `Err` 種別で区別する |
 | `SizeClassPool<H>` を `take`／`put`／解放系メソッドのみに留め、新規確保は統計を一切更新しない（旧稿） | 新規確保は `take` を経由せず RAII ラッパーが直接包むため、`SizeClassPool<H>` はハンドルの custody を持つ操作（`take`／`put`／`take_one_for_release`）でしか統計を更新できないという前提のまま設計する | 新規確保の発生・その内部断片化（`class_bytes − logical_bytes`）を記録する経路が存在せず、`alloc_count`／`capacity_waste_bytes` という `PoolStats` の宣言済みフィールドを実装不能にする（codex-review PR #1056 P1）。本設計（§3.1）は `record_allocation`／`record_loan_end`（いずれもハンドルを受け取らない統計専用メソッド）を追加し、ハンドルの custody とは独立に統計だけを更新できるようにした |
 | 公開 `BackendOps::release_cached_device_memory()` の doc comment を「`Err` は 2 種類」のまま維持する（旧稿） | トリム前 stream 同期失敗・driver トリム失敗の 2 種類のみを doc comment に列挙する | §3.6 (2) の 4 フェーズ設計（post-free sync 失敗を含む）と矛盾し、実装者が post-free sync 失敗を表現・伝播できず fail-closed 契約を破るおそれがある（codex-review PR #1056 P1）。本設計（§3.1・§3.6 (2)）は doc comment を §3.6 (2)「バックエンド別の該当フェーズ」表を参照する形へ改め、CUDA／Metal／CPU 別の該当フェーズを明記した |
@@ -1363,8 +1382,9 @@ fresh/reuse の 4 通り）:
   ログや統計に含めない。
 - **スレッド安全性（メモリ安全上の前提）**: ロックを保持したまま FFI を
   呼ばない（§3.5）・poison 時は panic せず継続する・二重返却を
-  `Option<H>::take()` で構造的に防止する（§3.1・§3.3。codex-review PR
-  #1056 P2 是正で `ManuallyDrop` 方式から統一した）ことを契約として記す。
+  `ManuallyDrop<H>` ＋ `Drop` 内 `ManuallyDrop::take` で構造的に
+  防止する（§3.1・§3.3。#1063 で統一。§8.1「改訂履歴」参照）ことを
+  契約として記す。
 
 ## §8 本設計文書で確定する事項／実装イシューで確定する事項
 
@@ -1388,8 +1408,23 @@ fresh/reuse の 4 通り）:
 - **所有権不変条件**: 同一ハンドルがフリーリストと貸出中に同時に存在
   しないこと（§3.1「不変条件」）。返却は RAII 限定・明示 `free()` を
   設けないこと（§3.3）。二重返却・use-after-return の構造的防止は
-  `Option<H>::take()` 方式に統一すること（§3.1・§3.3。`ManuallyDrop`
-  方式は採らない）。
+  `ManuallyDrop<H>` ＋ `Drop` 内 `ManuallyDrop::take`（`Drop::drop`
+  の 1 回性により二重 take・use-after-take が構造的に不可能）方式に
+  統一すること（§3.1・§3.3）。
+  - **改訂履歴（#1063・イシュー #1021・codex-review P1 是正）**: 本項
+    は当初（PR #1056 確定時点）「`Option<H>::take()` 方式に統一する
+    （`ManuallyDrop` 方式は採らない）」としていた。この確定は、
+    後続の CUDA 実装（#1020・PR #1061・main マージ済み）が
+    `PooledCudaHandle` を `ManuallyDrop<CudaSliceHandle>` として実装
+    した時点で実態と乖離した誤記になっていた（`Option<H>::take()` の
+    ままでは読み取りアクセサ〈`raw()` 等〉が「`Drop` 実行中の一瞬を
+    除き常に `Some`」という型で表現できない不変条件に依存し
+    `unreachable!()` 分岐を要するため、codex-review P1 の指摘対象に
+    なった）。本 PR（#1063）で Metal 実装（`PooledMetalHandle`）も
+    同じ指摘を受け、CUDA・Metal 両実装の実態（`ManuallyDrop<H>`）へ
+    本項を整合させた。防止する契約自体（同一ハンドルがフリーリストと
+    貸出中の双方に存在しない・二重返却されない）は本改訂の前後で
+    不変であり、変更したのは実現方式の記述のみである。
 - **REQ-14 の解放プロトコルの段階と失敗時状態**: `release_cached()` の
   フェーズ構成（CUDA 4 段・Metal 2 段。§3.6 (2)「バックエンド別の該当
   フェーズ」表）・各フェーズの `Err` 時のプール状態（フリーリストへの
@@ -1545,24 +1580,31 @@ Metal 側実装（イシュー #1021）が §8.2 の裁量事項を以下のと�
   済みの契約であり本型はその弱いケース）への参照を含む形へ強化した。
 - **`PooledMetalHandle` の二重返却防止方式を `Option<H>::take()` から
   `ManuallyDrop<H>` へ変更（PR #1063 codex-review P1 指摘対応。
-  §8.1 との齟齬に関する重要な申し送り）**: `raw()`／`capacity_bytes()`
-  が `Option<H>` の `None` 分岐を `unreachable!()` で埋めていた
-  （実行時には常に成り立つが型システムでは表現できない不変条件への
-  依存）ことが P1 として指摘されたため、`handle` フィールドを
-  `ManuallyDrop<RawMetalBuffer>` へ変更し `unreachable!()` 分岐を
-  型構造ごと排除した。**ただし §8.1「本設計文書で確定する事項」は
-  「二重返却・use-after-return の構造的防止は `Option<H>::take()`
-  方式に統一すること（`ManuallyDrop` 方式は採らない）」と明記して
-  おり、この変更は §8.1 の確定事項と文面上矛盾する**。一方で main
-  マージ済みの `crates/backend-cuda/src/pool.rs::PooledCudaHandle`
-  （#1020・PR #1061）は既に `handle: std::mem::ManuallyDrop<
-  CudaSliceHandle>` を採用しており、§8.1 の禁止事項は実装の実態と
-  既に乖離していた。この乖離の解消（§8.1 本文の改訂、または両
-  バックエンドを `Option` へ差し戻すことの当否）は本文書 §8.1 が
-  要求する**ユーザー承認・spec 整合の再確認**の対象であり、実装
-  Agent の裁量で §8.1 本文を書き換えることはしていない。ユーザー
-  承認を経て §8.1 を本記録に整合する形へ改訂するか、別の方針を
-  決定することが必要である。
+  §8.1 改訂の経緯）**: `raw()`／`capacity_bytes()` が `Option<H>` の
+  `None` 分岐を `unreachable!()` で埋めていた（実行時には常に成り立つ
+  が型システムでは表現できない不変条件への依存）ことが P1 として
+  指摘されたため、`handle` フィールドを `ManuallyDrop<RawMetalBuffer>`
+  へ変更し `unreachable!()` 分岐を型構造ごと排除した。この変更は
+  当初、§8.1「本設計文書で確定する事項」の「二重返却・use-after-return
+  の構造的防止は `Option<H>::take()` 方式に統一すること（`ManuallyDrop`
+  方式は採らない）」という記述と文面上矛盾する状態になった。調査の
+  結果、main マージ済みの `crates/backend-cuda/src/pool.rs::
+  PooledCudaHandle`（#1020・PR #1061）が既に `handle: std::mem::
+  ManuallyDrop<CudaSliceHandle>` を採用しており、§8.1 の当該記述は
+  CUDA 実装の時点で既に実態と乖離した誤記になっていたことが判明した。
+
+  **main セッション判断（PR #1063・Phase 完了レポートでユーザーへ
+  報告）**: 差し戻し（両バックエンドを `Option<H>::take()` へ戻す）は
+  main マージ済み CUDA コードの再改修と `unreachable!()` 問題の再燃を
+  招くため採らず、**文書側を実態へ改訂して両バックエンド
+  `ManuallyDrop<H>` 統一を確定する**方針とした。§8.1 の当該項は
+  「改訂履歴」として旧記述（`Option<H>::take()` 確定）が CUDA 実装
+  （PR #1061）と乖離していた誤記であったこと、本 PR（#1063・イシュー
+  #1021）で実態（CUDA・Metal 両方 `ManuallyDrop<H>`）へ整合させたことを
+  §8.1 本文に明記した（§3.1・§3.3・§7 セキュリティ考慮事項の関連記述も
+  同時に整合させた）。防止する契約自体（二重返却・use-after-return の
+  構造的防止）は本改訂の前後で不変であり、変更したのは実現方式の
+  記述のみである。
 
 **本ランでの未実施事項（Metal 実機なしのため）**:
 
