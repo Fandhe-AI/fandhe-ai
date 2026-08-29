@@ -67,8 +67,13 @@ fn readout<B: Backend, const D: usize>(
 
 fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::error::Error>> {
     let n = cli.size;
-    let a_host = Xorshift64Star::new(SEED_A).fill_vec(n * n);
-    let b_host = Xorshift64Star::new(SEED_B).fill_vec(n * n);
+    // イシュー #970 codex-review 指摘（PR #978・P1）: `n * n`（要素数）を
+    // 入力ベクタ生成前に `gemm_element_count` で検証する（`--size` は
+    // 未検証な CLI 入力であり、無検証の乗算は debug で panic・release では
+    // wrap した長さで確保・使用してしまう）。
+    let len = gemm_element_count(n)?;
+    let a_host = Xorshift64Star::new(SEED_A).fill_vec(len);
+    let b_host = Xorshift64Star::new(SEED_B).fill_vec(len);
     // イシュー #970: 参照 GEMM は `tensor2` に渡す前の host Vec の clone から
     // 計算する（本体の FMA 契約と同じ参照。計測窓の外・warmup 前に 1 回だけ）。
     let reference = GemmReference::compute(n, &a_host, &b_host)?;

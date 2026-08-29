@@ -146,6 +146,24 @@ pub fn compare_elementwise(actual: &[f32], reference: &[f32]) -> Result<ParitySt
     })
 }
 
+/// `--size` 由来の未検証な `n` から GEMM 入力・参照値の要素数（= `n*n`）を
+/// 検証して返す。
+///
+/// イシュー #970 codex-review 指摘（PR #978・P1）: [`GemmReference::compute`]
+/// 側にのみ `checked_mul` 検証を置いても、3 つの呼び出し元
+/// （`bench-burn`/`bench-candle`/`bench-fandhe`）はいずれもその呼び出しより
+/// **先に** 未検証の `n` で `n * n`（`fill_vec` へ渡す要素数）を評価していた
+/// ため、debug ビルドではその時点で乗算オーバーフロー panic、release
+/// ビルドでも wrap した長さでベクタを確保・使用してしまい
+/// `GemmReference::compute` の検証まで到達できなかった（本番経路で panic
+/// させない契約違反。`.claude/rules/coding-rust.md`）。本関数を入力ベクタ
+/// 生成の**前**に呼び、検証済みの要素数を `fill_vec` と
+/// [`GemmReference::compute`]（後者は本関数を内部で呼び直すだけで二重に
+/// `checked_mul` しない）の双方で共有することで、検証漏れの経路を作らない。
+pub fn gemm_element_count(n: usize) -> Result<usize, BenchError> {
+    n.checked_mul(n).ok_or(BenchError::SizeOverflow { n })
+}
+
 /// FMA 契約の参照 GEMM（`C = A @ B`。i-k-j ループ・f32 `mul_add`・逐次 k
 /// 昇順）。各 `c[i][j]` の累積鎖は k 昇順・FMA のまま
 /// （`backend-cpu::parity::matmul_reference_fma` と bit 完全一致する契約）
@@ -165,14 +183,14 @@ impl GemmReference {
             return Err(BenchError::InvalidShape { n });
         }
         // `n` は `--size` 由来の未検証な CLI 入力（`parse_cli` は
-        // `usize::parse` のみで上限を課さない）。`n * n` を無検証で計算
-        // すると debug ビルドではオーバーフロー panic、release ビルドでも
-        // wrap 後の `expected` が実際の要素数と食い違い、後続の
-        // `rows_per_chunk * n` が 0 になれば `chunks_mut(0)` が panic する
-        // （coding-rust.md「本番経路で panic させない」違反。イシュー #970
-        // codex-review 指摘・P1）。`checked_mul` で検証し型付きエラーに
-        // する。
-        let expected = n.checked_mul(n).ok_or(BenchError::SizeOverflow { n })?;
+        // `usize::parse` のみで上限を課さない）。呼び出し元（3 バイナリの
+        // `run_gemm`/`gemm_inputs`）は入力ベクタ生成前に
+        // [`gemm_element_count`] を既に呼んでいるため、ここでの再検証は
+        // 同じ検証を重複させるだけだが、`GemmReference::compute` 単体でも
+        // 契約が閉じるよう同じ検証済み経路（`checked_mul`）を通す
+        // （coding-rust.md「本番経路で panic させない」。イシュー #970
+        // codex-review 指摘・P1）。
+        let expected = gemm_element_count(n)?;
         if a.len() != expected {
             return Err(BenchError::ParityLengthMismatch {
                 expected,
@@ -347,6 +365,27 @@ mod tests {
             GemmReference::compute(n, &[], &[]),
             Err(BenchError::SizeOverflow { n: got }) if got == n
         ));
+    }
+
+    /// イシュー #970 codex-review 指摘（PR #978・P1）の回帰テスト:
+    /// [`gemm_element_count`] は呼び出し元（3 バイナリの `run_gemm`/
+    /// `gemm_inputs`）が入力ベクタ生成前に呼ぶ共通関数。巨大な `n` に対し
+    /// panic せず `SizeOverflow` を返すことを、`GemmReference::compute` と
+    /// 独立に確認する（入力ベクタ生成前の検証経路が抜け落ちていないかの
+    /// 直接的な回帰テスト）。
+    #[test]
+    fn gemm_element_count_overflow_is_typed_error_not_panic() {
+        let n = (usize::MAX / 2) + 2; // n*n は usize::MAX を必ず超える
+        assert!(matches!(
+            gemm_element_count(n),
+            Err(BenchError::SizeOverflow { n: got }) if got == n
+        ));
+    }
+
+    /// 非オーバーフロー時は `n*n` をそのまま返す（正常系の疎通確認）。
+    #[test]
+    fn gemm_element_count_normal_case() {
+        assert_eq!(gemm_element_count(8).expect("no overflow"), 64);
     }
 
     /// n=17 は典型的なスレッド数（2/4/8/12 等）で割り切れず、行ブロック

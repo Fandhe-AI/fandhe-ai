@@ -8,7 +8,10 @@ use std::io::Write;
 use std::time::Duration;
 
 pub mod parity;
-pub use parity::{GemmReference, PARITY_ABS_TOL, PARITY_REL_TOL, ParityStats, compare_elementwise};
+pub use parity::{
+    GemmReference, PARITY_ABS_TOL, PARITY_REL_TOL, ParityStats, compare_elementwise,
+    gemm_element_count,
+};
 
 /// Typed error for the shared bench utilities. Bench binaries propagate this
 /// (as `Box<dyn Error>`) up to `main`, diagnose on stderr, and exit non-zero;
