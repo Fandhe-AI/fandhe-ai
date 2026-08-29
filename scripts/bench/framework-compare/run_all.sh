@@ -50,4 +50,13 @@ for n in 256 512 1024 2048 4096; do
   run bench-fandhe gemm metal "$n" reuse
 done
 
+# (b') MLP 学習 — デバイス常駐更新モード（イシュー #957/#958/#959。bench-fandhe の
+# train タスクのみ対応。(a') と同じ理由で bench-candle / bench-burn はループに
+# 含めない: reuse モードは必ず MEASURE_ERROR で fail-fast する仕様のため、対象外の
+# 2 バイナリまで含めると既知の対象外失敗が skipped.log の実際の計測失敗と混在し
+# 判別しづらくなる。codex-review 指摘 #944 discussion_r3877595038 と同じ理由）
+for dev in cpu metal; do
+  run bench-fandhe train "$dev" 64 reuse
+done
+
 echo "done. results in $OUT ; failures (if any) in $SKIP"

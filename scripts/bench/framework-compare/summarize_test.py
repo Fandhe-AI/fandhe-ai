@@ -73,6 +73,32 @@ def _write_jsonl(rows):
     return path
 
 
+def _train_row(
+    framework="fandhe-ai", device="cpu", mode="fresh", median_s=0.01, checksum=0.08, init_s=None
+):
+    """train タスク（(b)/(b') 節）用の合成行（イシュー #957/#958/#959）。
+
+    `_base_row` は task="gemm" 固定・`gflops` 必須のため train 行には流用
+    しない（gemm と train は集計対象列が異なる。summarize.py `Record` 参照）。
+    """
+    return {
+        "framework": framework,
+        "version": "0.4.0",
+        "task": "train",
+        "device": device,
+        "size": 64,
+        "median_s": median_s,
+        "q1_s": median_s * 0.9,
+        "q3_s": median_s * 1.1,
+        "gflops": None,
+        "checksum": checksum,
+        "warmup": 20,
+        "iters": 80,
+        "mode": mode,
+        "init_s": init_s,
+    }
+
+
 class ParityStatusTests(unittest.TestCase):
     def test_missing_keys_is_unverified(self):
         row = _base_row()
@@ -357,6 +383,110 @@ class SectionRenderingTests(unittest.TestCase):
         self.assertIn("(a')", text)
         self.assertNotIn("無効", text)
         self.assertIn("100.0", text)  # gflops=100.0（_base_row の既定値）
+
+
+class TrainReuseSectionTests(unittest.TestCase):
+    """(b') train reuse 節の集計（イシュー #957/#958/#959）。"""
+
+    def test_no_train_reuse_rows_omits_section(self):
+        # 旧 JSONL（train fresh のみ、reuse 行なし）では (b') を出力しない
+        # （互換維持。モジュール docstring 参照）。
+        rows = [_train_row(mode="fresh")]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertNotIn("(b')", text)
+
+    def test_reuse_row_renders_init_and_fresh_reference(self):
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(b')", text)
+        self.assertIn("5.000 ms", text)  # init_s=0.005 の fmt_ms 表示
+        self.assertIn("2.00 倍", text)  # fresh 0.02 / reuse 0.01
+        # (b') 表の行自体（gemm 側「データ有効性」節の無関係な「突合不能」
+        # 記述と混同しないよう、(b') 行のみを取り出して検証する）。
+        # (b) 表・(b') 表とも "| cpu |" で始まるため列数（"|" の個数）で区別
+        # する: (b) は 5 列（6 個の "|"）、(b') は 9 列（10 個の "|"）。
+        b_prime_row = next(
+            line for line in lines if line.startswith("| cpu |") and line.count("|") == 10
+        )
+        self.assertIn("一致", b_prime_row)
+        self.assertNotIn("突合不能", b_prime_row)
+
+    def test_reuse_row_without_fresh_shows_unmeasured(self):
+        rows = [_train_row(mode="reuse", init_s=0.005)]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(b')", text)
+        self.assertIn("未計測", text)
+        self.assertIn("突合不能", text)
+        self.assertIn("| - |", text)  # fresh/reuse 比の "-" 列
+
+    def test_reuse_loss_mismatch_marked_invalid(self):
+        # 契約外の乖離（不一致）。
+        rows = [
+            _train_row(mode="fresh", checksum=0.08),
+            _train_row(mode="reuse", checksum=0.20),
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("無効: fresh と最終 loss 不一致", text)
+        self.assertIn("不一致", buf.getvalue())
+
+        # 契約内（複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は
+        # 「一致」表示のまま。
+        rows_ok = [
+            _train_row(mode="fresh", checksum=0.080541),
+            _train_row(mode="reuse", checksum=0.080542),
+        ]
+        lines_ok, *_ = summarize.section("dummy.jsonl", rows_ok)
+        text_ok = "\n".join(lines_ok)
+        self.assertNotIn("無効: fresh と最終 loss 不一致", text_ok)
+        self.assertIn("一致", text_ok)
+
+    def test_train_reuse_rows_do_not_affect_gemm_checksum_reference(self):
+        # gemm の checksum 突合（`gemm_checksum_mismatches`）は task でフィルタ
+        # 済みのはずで、train reuse 行を混ぜても結果が変わらないことの回帰確認。
+        gemm_only = [
+            _with_parity(_base_row(framework="fandhe-ai", checksum=100.0)),
+            _with_parity(_base_row(framework="candle", checksum=100.0)),
+        ]
+        mismatches_before = summarize.gemm_checksum_mismatches(gemm_only)
+        mixed = gemm_only + [
+            _train_row(mode="fresh", checksum=0.08),
+            _train_row(mode="reuse", checksum=999.0),  # gemm 突合には無関係
+        ]
+        mismatches_after = summarize.gemm_checksum_mismatches(mixed)
+        self.assertEqual(len(mismatches_before), len(mismatches_after))
+        self.assertEqual(mismatches_before, mismatches_after)
+
+    def test_main_strict_exit_code_unaffected_by_train_reuse_rows(self):
+        # train reuse の最終 loss 不一致は --strict の対象（4-tuple・exit code）
+        # を変えない設計（計画 §4.2「`section()` の戻り値 4-tuple・`--strict`
+        # の判定は変更しない」）。gemm 側が全て正常なら train 側に不一致が
+        # あっても exit 0 のまま。
+        path = _write_jsonl(
+            [
+                _with_parity(_base_row()),
+                _train_row(mode="fresh", checksum=0.08),
+                _train_row(mode="reuse", checksum=999.0),
+            ]
+        )
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", path, "--strict"]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+            os.unlink(path)
+        self.assertEqual(code, 0)
 
 
 class MainStrictExitCodeTests(unittest.TestCase):

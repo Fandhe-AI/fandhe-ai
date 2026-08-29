@@ -21,6 +21,11 @@
   欠損は "fresh" として扱う（互換維持。get(row, "mode", "fresh")）。
   既存の GEMM 表（(a)）は fresh 行のみを集計し、reuse 行が存在するファイル
   にのみ (a') 節（初期化 init_s・中央値・fresh との並記）を追加する。
+  train の reuse 行（イシュー #957/#958/#959。`DeviceParamStore` によるデバイス
+  常駐パラメータ更新）も同様に (b') 節で集計し、最終 loss（checksum）を fresh と
+  突合する（gemm と異なりフレームワーク間では突合しない: 重み初期化が異なる設計
+  のため fandhe-ai と candle/Burn の最終 loss は一致しない。突合は同一フレーム
+  ワーク内の fresh vs reuse のみ）。
 - checksum 相互突合（イシュー #965）: GEMM は全フレームワーク・全 mode で
   同一入力（xorshift64* の同一シード・同一生成式）のため、同一 size の
   checksum は本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5
@@ -597,6 +602,52 @@ def section(path, rows):
             else:
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - |")
     lines.append("")
+
+    # (b') MLP 学習 — デバイス常駐パラメータ更新モード（イシュー #957/#958/#959）。
+    # reuse 行が存在するファイルにのみ出力する（(a') と同じく本フィールド追加前
+    # の JSONL では常にスキップ）。gemm と異なり fandhe-ai/candle/Burn 間の
+    # checksum（最終 loss）は重み初期化の違いにより一致しないため、フレーム
+    # ワーク横断の参照値は選ばず、同一フレームワーク内の fresh 行とのみ突合する。
+    if any(r["task"] == "train" and r["mode"] == "reuse" for r in rows):
+        lines.append(
+            "### (b') MLP 学習（デバイス常駐パラメータ更新モード。ホスト経由 SGD との分離。イシュー #957/#958/#959）\n"
+        )
+        lines.append(
+            "| デバイス | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | fresh 中央値（参考） | fresh/reuse 比 | 最終 loss 突合（fresh） |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for device in devices_in(rows, "train", mode="reuse"):
+            for fw in FRAMEWORKS:
+                r = get(rows, fw, "train", device, mode="reuse")
+                if not r:
+                    continue
+                fresh = get(rows, fw, "train", device, mode="fresh")
+                init_col = fmt_ms(r["init_s"]) if r.get("init_s") is not None else "-"
+                if fresh:
+                    fresh_col = fmt_ms(fresh["median_s"])
+                    ratio_col = f"{fresh['median_s'] / r['median_s']:.2f} 倍"
+                    if checksums_match(r["checksum"], fresh["checksum"]):
+                        match_col = "一致"
+                        fw_col = fw
+                    else:
+                        match_col = "不一致"
+                        fw_col = f"{fw}（無効: fresh と最終 loss 不一致）"
+                        print(
+                            f"warning: {rel}: {fw}/{device}/train/reuse の最終 loss "
+                            f"{r['checksum']:.6f} が fresh {fresh['checksum']:.6f} と不一致 "
+                            "— 無効データとして表示",
+                            file=sys.stderr,
+                        )
+                else:
+                    fresh_col = "未計測"
+                    ratio_col = "-"
+                    match_col = "突合不能"
+                    fw_col = fw
+                lines.append(
+                    f"| {device} | {fw_col} | {init_col} | {fmt_ms(r['median_s'])} | "
+                    f"{fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {fresh_col} | {ratio_col} | {match_col} |"
+                )
+        lines.append("")
 
     lines.append(
         "### (c) 推論スループット（同 MLP forward のみ、バッチ 64。表のスループットはバッチ/秒 = 1/中央値。1 バッチ = 64 件）\n"

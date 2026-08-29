@@ -66,6 +66,12 @@ if [[ " ${BINS[*]} " == *" bench-fandhe "* ]]; then
   for n in 256 512 1024 2048 4096; do
     run bench-fandhe gemm cuda "$n" reuse
   done
+  # (b') MLP 学習 — デバイス常駐更新モード（イシュー #957/#958/#959）。上と同じ
+  # ガード（BINS に bench-fandhe が含まれる場合のみ）・同じ理由（対象外の
+  # bench-candle / bench-burn の既知失敗で skipped-cuda.log を汚さない）。
+  for dev in cuda cpu; do
+    run bench-fandhe train "$dev" 64 reuse
+  done
 fi
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
