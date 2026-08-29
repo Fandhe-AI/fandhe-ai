@@ -36,6 +36,13 @@
 //! ./target/release/examples/wmma_tolerance_probe --scales 0.1,1,10,100
 //! WMMA_TOLERANCE_PROBE_SCALES=0.1,1,10,100 ./target/release/examples/wmma_tolerance_probe
 //!
+//! # TF32 カーネル強制選択（イシュー #994。internal-diagnostics feature 限定）
+//! cargo build --release -p fandhe-ai-backend-cuda --features internal-diagnostics \
+//!     --example wmma_tolerance_probe
+//! ./target/release/examples/wmma_tolerance_probe --scales 1 --tf32-kernel opt
+//! ./target/release/examples/wmma_tolerance_probe --scales 1 --tf32-kernel basic
+//! ./target/release/examples/wmma_tolerance_probe --scales 1 --tf32-kernel auto
+//!
 //! ./target/release/examples/wmma_tolerance_probe --help
 //! ```
 //!
@@ -227,18 +234,73 @@ fn parse_scales(raw: &str) -> Result<Vec<f64>, String> {
     Ok(scales)
 }
 
+/// TF32 経路（`CudaGemm::run_wmma_tf32`）のカーネル強制選択（イシュー
+/// #994）。`--tf32-kernel`／`WMMA_TOLERANCE_PROBE_TF32_KERNEL` で指定する。
+///
+/// `Auto`（既定）は現行どおり `CudaGemm::new`（本番既定コンストラクタ。
+/// 3 段選択 staged→opt→basic）を使う。`Opt`／`Basic` は
+/// `internal-diagnostics` feature 限定の診断コンストラクタ
+/// （[`fandhe_ai_backend_cuda::CudaGemm::new_tf32_opt_only`]／
+/// [`fandhe_ai_backend_cuda::CudaGemm::new_tf32_basic_only`]）を使い、
+/// staged 経路を除外して opt／basic のいずれかへ強制する
+/// （`docs/perf/cuda-tensor-core-tolerance-evaluation.md` §2.1 の TF32
+/// 実測が TASK-11.1c 時点の基本版カーネル限定だったのに対し、
+/// TASK-11.1d（#63）の opt 版を実測するために必要な診断入口）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tf32KernelSelect {
+    Auto,
+    Opt,
+    Basic,
+}
+
+impl Tf32KernelSelect {
+    /// `raw`（大文字小文字を無視）を `auto`／`opt`／`basic` のいずれかへ
+    /// パースする。それ以外は fail-closed で `Err`（`parse_scales` と同じ
+    /// 「未知の値を無音で `auto` にしない」方針）。
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "opt" => Ok(Self::Opt),
+            "basic" => Ok(Self::Basic),
+            other => Err(format!(
+                "invalid --tf32-kernel value: '{other}' (expected 'auto', 'opt', or 'basic')"
+            )),
+        }
+    }
+}
+
+/// CLI／環境変数から解決した計測構成（イシュー #994。`--scales`／
+/// `--tf32-kernel` を単一の [`resolve_probe_config`] 呼び出しで解決する）。
+#[derive(Debug, Clone, PartialEq)]
+struct ProbeConfig {
+    scales: ScaleConfig,
+    tf32_kernel: Tf32KernelSelect,
+}
+
 /// CLI 引数（`--help`／`-h` は呼び出し元 `main` が先に処理済みの前提）と
-/// 環境変数 `WMMA_TOLERANCE_PROBE_SCALES` から [`ScaleConfig`] を決定する。
-/// CLI が優先し、いずれも未指定なら `ScaleConfig::Default`（R1/R2）。
+/// 環境変数 `WMMA_TOLERANCE_PROBE_SCALES`／`WMMA_TOLERANCE_PROBE_TF32_KERNEL`
+/// から [`ProbeConfig`] を決定する。各フラグとも CLI が優先し、いずれも
+/// 未指定なら `--scales` は `ScaleConfig::Default`（R1/R2）、
+/// `--tf32-kernel` は `Tf32KernelSelect::Auto` になる（#993・#994）。
 ///
 /// 未知の引数は fail-closed でエラーにする（無音無視は「指定したはずの
-/// `--scales` が効いていない」を気づかせないため。`cuda_floor_bench.rs`
-/// の `env_override` と同じ「無音フォールバックを避ける」方針）。
-fn resolve_scale_config(
+/// `--scales`／`--tf32-kernel` が効いていない」を気づかせないため。
+/// `cuda_floor_bench.rs` の `env_override` と同じ「無音フォールバックを
+/// 避ける」方針）。
+///
+/// `--tf32-kernel opt`／`basic` は `internal-diagnostics` feature（既定
+/// off）でビルドされていない限り拒否する（黙って `auto` へ縮退させない。
+/// REQ-11「明示切替 API を公開面に置かない」は `CudaGemm` 側の話であり、
+/// このハーネス自身は診断入口を呼ぶだけだが、非 feature ビルドで
+/// `opt`／`basic` を指定しても効果がない状態を「指定が効いている」と
+/// 誤認させないための fail-closed 判断）。
+fn resolve_probe_config(
     args: &[String],
     env_scales: Option<String>,
-) -> Result<ScaleConfig, String> {
-    let mut cli_value: Option<String> = None;
+    env_tf32_kernel: Option<String>,
+) -> Result<ProbeConfig, String> {
+    let mut cli_scales: Option<String> = None;
+    let mut cli_tf32_kernel: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -246,30 +308,65 @@ fn resolve_scale_config(
             let value = args
                 .get(i + 1)
                 .ok_or_else(|| "--scales requires a value".to_string())?;
-            cli_value = Some(value.clone());
+            cli_scales = Some(value.clone());
             i += 2;
         } else if let Some(value) = arg.strip_prefix("--scales=") {
-            cli_value = Some(value.to_string());
+            cli_scales = Some(value.to_string());
+            i += 1;
+        } else if arg == "--tf32-kernel" {
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| "--tf32-kernel requires a value".to_string())?;
+            cli_tf32_kernel = Some(value.clone());
+            i += 2;
+        } else if let Some(value) = arg.strip_prefix("--tf32-kernel=") {
+            cli_tf32_kernel = Some(value.to_string());
             i += 1;
         } else {
             return Err(format!("unknown argument: '{arg}'"));
         }
     }
-    match cli_value.or(env_scales) {
-        Some(raw) => Ok(ScaleConfig::Sweep(parse_scales(&raw)?)),
-        None => Ok(ScaleConfig::Default),
+
+    let scales = match cli_scales.or(env_scales) {
+        Some(raw) => ScaleConfig::Sweep(parse_scales(&raw)?),
+        None => ScaleConfig::Default,
+    };
+
+    let tf32_kernel = match cli_tf32_kernel.or(env_tf32_kernel) {
+        Some(raw) => Tf32KernelSelect::parse(&raw)?,
+        None => Tf32KernelSelect::Auto,
+    };
+    if tf32_kernel != Tf32KernelSelect::Auto && !cfg!(feature = "internal-diagnostics") {
+        return Err(format!(
+            "--tf32-kernel {} requires `--features internal-diagnostics`",
+            match tf32_kernel {
+                Tf32KernelSelect::Opt => "opt",
+                Tf32KernelSelect::Basic => "basic",
+                Tf32KernelSelect::Auto => unreachable!("guarded by the outer condition above"),
+            }
+        ));
     }
+
+    Ok(ProbeConfig {
+        scales,
+        tf32_kernel,
+    })
 }
 
 fn print_usage() {
     println!(
-        "使い方: wmma_tolerance_probe [--scales <s1,s2,...>] [--help]\n\
+        "使い方: wmma_tolerance_probe [--scales <s1,s2,...>] [--tf32-kernel <auto|opt|basic>] [--help]\n\
          \n\
          --scales <カンマ区切りの正の有限値>\n\
          \u{20}\u{20}各要素をこの倍率で入力データにスケールしてスイープ計測する\n\
          \u{20}\u{20}（例: --scales 0.1,1,10,100）。未指定時は環境変数\n\
          \u{20}\u{20}WMMA_TOLERANCE_PROBE_SCALES を確認し、それも未指定なら\n\
          \u{20}\u{20}s=1 単一の既定モード（#993 以前と同一形式の出力）になる。\n\
+         --tf32-kernel <auto|opt|basic>\n\
+         \u{20}\u{20}TF32 経路（CudaGemm::run_wmma_tf32）が使うカーネルを強制する\n\
+         \u{20}\u{20}（既定 auto。opt/basic は `--features internal-diagnostics`\n\
+         \u{20}\u{20}ビルド限定。未指定時は環境変数\n\
+         \u{20}\u{20}WMMA_TOLERANCE_PROBE_TF32_KERNEL を確認する。イシュー #994）。\n\
          --help, -h\n\
          \u{20}\u{20}この使い方を表示して終了する（exit 0）。"
     );
@@ -699,16 +796,61 @@ fn probe_f16(gemm: &CudaWmmaGemm, scales: &ScaleConfig) -> bool {
     had_unexpected_error
 }
 
+/// [`ProbeConfig::tf32_kernel`] に従い `CudaGemm` を構築する（イシュー
+/// #994）。`Auto` は本番既定コンストラクタ [`CudaGemm::new`] を使い、
+/// `Opt`／`Basic` は `internal-diagnostics` feature 限定の診断コンストラクタ
+/// （[`CudaGemm::new_tf32_opt_only`]／[`CudaGemm::new_tf32_basic_only`]）を
+/// 使う。
+///
+/// [`resolve_probe_config`] が非 feature ビルドでは `Opt`／`Basic` を
+/// 事前に拒否する契約のため、`internal-diagnostics` 無効ビルドで本関数の
+/// `Opt`／`Basic` 分岐へ到達することはない（到達した場合はハーネス自身の
+/// 契約違反であり `unreachable!` で早期に検知する）。
+fn build_cuda_gemm(
+    device: &CudaDevice,
+    tf32_kernel: Tf32KernelSelect,
+) -> Result<CudaGemm, CudaError> {
+    match tf32_kernel {
+        Tf32KernelSelect::Auto => CudaGemm::new(device),
+        Tf32KernelSelect::Opt => {
+            #[cfg(feature = "internal-diagnostics")]
+            {
+                CudaGemm::new_tf32_opt_only(device)
+            }
+            #[cfg(not(feature = "internal-diagnostics"))]
+            {
+                unreachable!(
+                    "resolve_probe_config must reject --tf32-kernel opt without \
+                     internal-diagnostics"
+                )
+            }
+        }
+        Tf32KernelSelect::Basic => {
+            #[cfg(feature = "internal-diagnostics")]
+            {
+                CudaGemm::new_tf32_basic_only(device)
+            }
+            #[cfg(not(feature = "internal-diagnostics"))]
+            {
+                unreachable!(
+                    "resolve_probe_config must reject --tf32-kernel basic without \
+                     internal-diagnostics"
+                )
+            }
+        }
+    }
+}
+
 /// `main` の終了コード。CUDA driver／NVRTC 非搭載・Tensor Core 非対応
 /// 環境での意図的スキップは exit 0 のまま維持し、それ以外の想定外エラー
 /// （`CudaDevice::new`／`CudaGemm::new`／`CudaWmmaGemm::new` の想定外エラー、
 /// または [`probe_tf32`]・[`probe_f16`] 内の想定外エラー）は exit 1 を返す
 /// （#186・PR #257 Codex Review 指摘「stress shape で
 /// allocation/launch/execution エラーが起きても行を出力するだけでプログラム
-/// は exit 0 のままになり、部分計測を完了と誤認しうる」対応）。`--scales`
-/// の解決（[`resolve_scale_config`]）に失敗した場合も使い方を表示して
-/// exit 1 を返す（#993。CUDA 初期化より前に判定するため driver 非搭載
-/// 環境でも入力検証エラーを検出できる）。
+/// は exit 0 のままになり、部分計測を完了と誤認しうる」対応）。`--scales`／
+/// `--tf32-kernel` の解決（[`resolve_probe_config`]）に失敗した場合も
+/// 使い方を表示して exit 1 を返す（#993・#994。CUDA 初期化より前に判定
+/// するため driver 非搭載環境でも入力検証エラーを検出できる）。
 fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
@@ -718,7 +860,8 @@ fn main() -> std::process::ExitCode {
         return ExitCode::SUCCESS;
     }
     let env_scales = std::env::var("WMMA_TOLERANCE_PROBE_SCALES").ok();
-    let scale_config = match resolve_scale_config(&args, env_scales) {
+    let env_tf32_kernel = std::env::var("WMMA_TOLERANCE_PROBE_TF32_KERNEL").ok();
+    let probe_config = match resolve_probe_config(&args, env_scales, env_tf32_kernel) {
         Ok(cfg) => cfg,
         Err(msg) => {
             eprintln!("error: {msg}\n");
@@ -726,14 +869,27 @@ fn main() -> std::process::ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let scale_config = &probe_config.scales;
 
-    println!("# WMMA Tensor Core 経路 誤差分布実測（TASK-11.1g・#186・#993）\n");
+    println!("# WMMA Tensor Core 経路 誤差分布実測（TASK-11.1g・#186・#993・#994）\n");
     println!(
         "閾値（REQ-2 統一複合判定・変更対象外）: RELATIVE_TOLERANCE={RELATIVE_TOLERANCE:e}, \
          ABSOLUTE_RESCUE_THRESHOLD={ABSOLUTE_RESCUE_THRESHOLD:e}\n"
     );
-    if let ScaleConfig::Sweep(scales) = &scale_config {
+    if let ScaleConfig::Sweep(scales) = scale_config {
         println!("scales: {scales:?}\n");
+    }
+    // `--tf32-kernel` 明示時のみ 1 行追加する（既定 `auto` の出力は #993
+    // 以前と同一形式を維持する契約〈A2〉を壊さないため）。
+    if probe_config.tf32_kernel != Tf32KernelSelect::Auto {
+        println!(
+            "tf32 kernel select: {}\n",
+            match probe_config.tf32_kernel {
+                Tf32KernelSelect::Auto => "auto",
+                Tf32KernelSelect::Opt => "opt",
+                Tf32KernelSelect::Basic => "basic",
+            }
+        );
     }
 
     let device = match CudaDevice::new(0) {
@@ -759,9 +915,9 @@ fn main() -> std::process::ExitCode {
 
     let mut had_unexpected_error = false;
 
-    match CudaGemm::new(&device) {
+    match build_cuda_gemm(&device, probe_config.tf32_kernel) {
         Ok(gemm) => {
-            if probe_tf32(&device, &gemm, &scale_config) {
+            if probe_tf32(&device, &gemm, scale_config) {
                 had_unexpected_error = true;
             }
         }
@@ -769,14 +925,17 @@ fn main() -> std::process::ExitCode {
             println!("\nNVRTC 非搭載環境のため TF32 経路の計測をスキップします: {detail}");
         }
         Err(other) => {
-            println!("\nCudaGemm::new が想定外のエラーを返しました: {other}");
+            println!(
+                "\nCudaGemm 構築（tf32_kernel={:?}）が想定外のエラーを返しました: {other}",
+                probe_config.tf32_kernel
+            );
             had_unexpected_error = true;
         }
     }
 
     match CudaWmmaGemm::new(&device) {
         Ok(gemm) => {
-            if probe_f16(&gemm, &scale_config) {
+            if probe_f16(&gemm, scale_config) {
                 had_unexpected_error = true;
             }
         }
@@ -888,43 +1047,120 @@ mod tests {
     }
 
     #[test]
-    fn resolve_scale_config_defaults_when_unspecified() {
+    fn resolve_probe_config_defaults_when_unspecified() {
+        let cfg = resolve_probe_config(&[], None, None).unwrap();
+        assert_eq!(cfg.scales, ScaleConfig::Default);
+        assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Auto);
+    }
+
+    #[test]
+    fn resolve_probe_config_scales_prefers_cli_over_env() {
+        let args = vec!["--scales".to_string(), "1,2".to_string()];
+        let cfg = resolve_probe_config(&args, Some("9,9.5".to_string()), None).unwrap();
+        assert_eq!(cfg.scales, ScaleConfig::Sweep(vec![1.0, 2.0]));
+    }
+
+    #[test]
+    fn resolve_probe_config_scales_falls_back_to_env() {
+        let cfg = resolve_probe_config(&[], Some("0.1,1".to_string()), None).unwrap();
+        assert_eq!(cfg.scales, ScaleConfig::Sweep(vec![0.1, 1.0]));
+    }
+
+    #[test]
+    fn resolve_probe_config_scales_supports_equals_form() {
+        let args = vec!["--scales=1,10".to_string()];
+        let cfg = resolve_probe_config(&args, None, None).unwrap();
+        assert_eq!(cfg.scales, ScaleConfig::Sweep(vec![1.0, 10.0]));
+    }
+
+    #[test]
+    fn resolve_probe_config_rejects_unknown_argument() {
+        let args = vec!["--bogus".to_string()];
+        assert!(resolve_probe_config(&args, None, None).is_err());
+    }
+
+    #[test]
+    fn resolve_probe_config_rejects_missing_scales_value() {
+        let args = vec!["--scales".to_string()];
+        assert!(resolve_probe_config(&args, None, None).is_err());
+    }
+
+    #[test]
+    fn resolve_probe_config_rejects_missing_tf32_kernel_value() {
+        let args = vec!["--tf32-kernel".to_string()];
+        assert!(resolve_probe_config(&args, None, None).is_err());
+    }
+
+    #[test]
+    fn tf32_kernel_select_parse_is_case_insensitive() {
         assert_eq!(
-            resolve_scale_config(&[], None).unwrap(),
-            ScaleConfig::Default
+            Tf32KernelSelect::parse("AUTO").unwrap(),
+            Tf32KernelSelect::Auto
+        );
+        assert_eq!(
+            Tf32KernelSelect::parse("Auto").unwrap(),
+            Tf32KernelSelect::Auto
         );
     }
 
     #[test]
-    fn resolve_scale_config_prefers_cli_over_env() {
-        let args = vec!["--scales".to_string(), "1,2".to_string()];
-        let cfg = resolve_scale_config(&args, Some("9,9.5".to_string())).unwrap();
-        assert_eq!(cfg, ScaleConfig::Sweep(vec![1.0, 2.0]));
+    fn resolve_probe_config_tf32_kernel_auto_supports_equals_form_and_env_fallback() {
+        let args = vec!["--tf32-kernel=AUTO".to_string()];
+        let cfg = resolve_probe_config(&args, None, None).unwrap();
+        assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Auto);
+
+        let cfg = resolve_probe_config(&[], None, Some("auto".to_string())).unwrap();
+        assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Auto);
     }
 
     #[test]
-    fn resolve_scale_config_falls_back_to_env() {
-        let cfg = resolve_scale_config(&[], Some("0.1,1".to_string())).unwrap();
-        assert_eq!(cfg, ScaleConfig::Sweep(vec![0.1, 1.0]));
+    fn resolve_probe_config_tf32_kernel_cli_overrides_env() {
+        // env に不正値を与えても CLI 側が優先されれば env は一切パースされない
+        // （`.or()` によるショートサーキット）。
+        let args = vec!["--tf32-kernel".to_string(), "auto".to_string()];
+        let cfg = resolve_probe_config(&args, None, Some("not-a-kernel".to_string())).unwrap();
+        assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Auto);
     }
 
     #[test]
-    fn resolve_scale_config_supports_equals_form() {
-        let args = vec!["--scales=1,10".to_string()];
-        let cfg = resolve_scale_config(&args, None).unwrap();
-        assert_eq!(cfg, ScaleConfig::Sweep(vec![1.0, 10.0]));
+    fn resolve_probe_config_rejects_unknown_tf32_kernel_value() {
+        let args = vec!["--tf32-kernel".to_string(), "turbo".to_string()];
+        assert!(resolve_probe_config(&args, None, None).is_err());
     }
 
+    /// `internal-diagnostics` feature 無効ビルド（既定）でのみ実行する。
+    /// `opt`／`basic` は診断コンストラクタを呼べないため、無音で `auto` に
+    /// 縮退させず fail-closed で拒否することを確認する（#994）。
+    #[cfg(not(feature = "internal-diagnostics"))]
     #[test]
-    fn resolve_scale_config_rejects_unknown_argument() {
-        let args = vec!["--bogus".to_string()];
-        assert!(resolve_scale_config(&args, None).is_err());
+    fn resolve_probe_config_rejects_opt_and_basic_without_internal_diagnostics_feature() {
+        let opt_args = vec!["--tf32-kernel".to_string(), "opt".to_string()];
+        let err = resolve_probe_config(&opt_args, None, None).unwrap_err();
+        assert!(
+            err.contains("internal-diagnostics"),
+            "unexpected error: {err}"
+        );
+
+        let basic_args = vec!["--tf32-kernel".to_string(), "basic".to_string()];
+        let err = resolve_probe_config(&basic_args, None, None).unwrap_err();
+        assert!(
+            err.contains("internal-diagnostics"),
+            "unexpected error: {err}"
+        );
     }
 
+    /// `internal-diagnostics` feature 有効ビルドでのみ実行する。`opt`／
+    /// `basic` が受理されることを確認する（#994）。
+    #[cfg(feature = "internal-diagnostics")]
     #[test]
-    fn resolve_scale_config_rejects_missing_value() {
-        let args = vec!["--scales".to_string()];
-        assert!(resolve_scale_config(&args, None).is_err());
+    fn resolve_probe_config_accepts_opt_and_basic_with_internal_diagnostics_feature() {
+        let opt_args = vec!["--tf32-kernel".to_string(), "OPT".to_string()];
+        let cfg = resolve_probe_config(&opt_args, None, None).unwrap();
+        assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Opt);
+
+        let basic_args = vec!["--tf32-kernel=basic".to_string()];
+        let cfg = resolve_probe_config(&basic_args, None, None).unwrap();
+        assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Basic);
     }
 
     #[test]
