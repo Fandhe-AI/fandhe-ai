@@ -76,6 +76,37 @@ fn compiled_kernel_count(gemm: &CudaGemm) -> u64 {
     MANDATORY_KERNEL_COUNT + optional_available_count
 }
 
+/// [`compiled_kernel_count`] の否定側: TF32 WMMA 系 3 種のうち NVRTC
+/// コンパイルに失敗し fail-soft した（`compile_wmma_tf32` 等が `Err` を
+/// 返し `*_available()` が `false` になった）カーネル数を返す。
+///
+/// レビュー指摘対応（イシュー #1024・codex-review。PRRT_kwDOTuUCJc6da6Ul）:
+/// `load_function_cached`（`module_cache.rs`）は `KernelModuleCache` への
+/// insert（cache 登録）をコンパイル成功時にしか行わないため、fail-soft
+/// する optional カーネルは呼び出すたびに 3 段フォールバックの 2 段目
+/// （ディスクキャッシュ照合）まで到達したうえで NVRTC 直コンパイルに
+/// 失敗する。この経路は `KernelModuleCache::get` の miss（`get` 自体は
+/// ヒットしていないため実装上ミスとして計上済み。`module_cache.rs`
+/// `load_function_cached` 冒頭「1 段目」参照）を毎回計上するが insert
+/// されないため、2 回目の `CudaGemm::new` でも同じ数だけ miss が
+/// 増える。したがって 2 回の構築間で `miss_count` の増分がゼロになる
+/// のは全 optional カーネルが利用可能な環境のみであり、TF32 WMMA が
+/// 未対応（fail-soft）なデバイスでは無条件のゼロ期待は誤って fail する
+/// （同一デバイス上では NVRTC コンパイル結果が決定的なため、fail-soft
+/// する集合は 1 回目・2 回目で一致する前提）。
+fn unavailable_optional_kernel_count(gemm: &CudaGemm) -> u64 {
+    let total_optional: u64 = 3;
+    let available_count = [
+        gemm.wmma_tf32_available(),
+        gemm.wmma_tf32_opt_available(),
+        gemm.wmma_tf32_staged_available(),
+    ]
+    .into_iter()
+    .filter(|available| *available)
+    .count() as u64;
+    total_optional - available_count
+}
+
 /// (a) 同一 `context_cache::cached_device` 上で `CudaGemm::new` を 2 回
 /// 構築すると、2 回目は `KernelModuleCache` の `hit_count` が
 /// [`compiled_kernel_count`]（実際にコンパイル・ロードへ成功したカーネル
@@ -146,9 +177,21 @@ fn cuda_gemm_new_second_construction_reuses_module_cache() {
          successfully compiled kernel_specs entry: before={hits_before_second}, \
          after={hits_after_second}, expected_kernel_count={expected_kernel_count}"
     );
+    // fail-soft する optional WMMA(TF32) カーネル（未対応デバイスでは
+    // `unavailable_optional_kernel_count(&gemm2)` > 0）は insert
+    // されないため（`unavailable_optional_kernel_count` ドキュメンテー
+    // ションコメント参照）、2 回目の構築でも同じ数だけ miss が再度
+    // 発生しうる。したがって「増分ゼロ」ではなく「増分は fail-soft
+    // したカーネル数と一致する」を期待値とする（イシュー #1024
+    // レビュー指摘対応。PRRT_kwDOTuUCJc6da6Ul）。
+    let expected_repeated_miss_count = unavailable_optional_kernel_count(&gemm2);
     assert_eq!(
-        misses_after_second, misses_after_first,
-        "2nd CudaGemm::new must not introduce new module cache misses"
+        misses_after_second,
+        misses_after_first + expected_repeated_miss_count,
+        "2nd CudaGemm::new must not introduce new module cache misses beyond the fail-soft \
+         optional WMMA(TF32) kernels that never get inserted into the cache: \
+         misses_after_first={misses_after_first}, misses_after_second={misses_after_second}, \
+         expected_repeated_miss_count={expected_repeated_miss_count}"
     );
 
     // (b) 同一入力に対する 2 インスタンスの出力が一致することを、既存の
