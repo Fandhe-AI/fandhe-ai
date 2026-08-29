@@ -425,6 +425,38 @@ class TrainReuseSectionTests(unittest.TestCase):
         self.assertIn("突合不能", text)
         self.assertIn("| - |", text)  # fresh/reuse 比の "-" 列
 
+    def test_reuse_row_with_zero_median_does_not_raise(self):
+        # イシュー #959 codex-review P0 指摘: 外部 JSONL の reuse median_s が
+        # 0 の行で fresh/reuse 比を除算すると ZeroDivisionError で集計全体
+        # が停止していた。0 は無効データとして "計測不正" 表示に倒し、
+        # 例外を送出しないことを確認する。
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            _train_row(mode="reuse", median_s=0.0, checksum=0.08054, init_s=0.005),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(b')", text)
+        self.assertIn("計測不正", text)
+
+    def test_reuse_row_with_negative_median_does_not_raise(self):
+        rows = [
+            _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
+            _train_row(mode="reuse", median_s=-0.01, checksum=0.08054, init_s=0.005),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("計測不正", text)
+
+    def test_reuse_row_with_non_finite_fresh_median_does_not_raise(self):
+        rows = [
+            _train_row(mode="fresh", median_s=float("nan"), checksum=0.08054),
+            _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("計測不正", text)
+
     def test_reuse_loss_mismatch_marked_invalid(self):
         # 契約外の乖離（不一致）。
         rows = [

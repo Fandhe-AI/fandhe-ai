@@ -623,9 +623,23 @@ def section(path, rows):
                     continue
                 fresh = get(rows, fw, "train", device, mode="fresh")
                 init_col = fmt_ms(r["init_s"]) if r.get("init_s") is not None else "-"
+                # median_s は外部 JSONL（bench-fandhe / 他フレームワークの計測
+                # 出力）由来であり、型・値域を検証せず除数にすると 0 で
+                # ZeroDivisionError、負値・非有限値でも不正な比率を出力して
+                # しまう（security.md 「外部フォーマットのパース時検証
+                # （A03）」。イシュー #959 codex-review P0 指摘）。
+                # `_is_plain_number` で bool・NaN・Infinity を弾いたうえで
+                # 有限かつ正であることを確認し、不正な行は比較不能として
+                # fail-closed に扱う（ratio_col を算出しない）。
+                reuse_median = r["median_s"]
+                fresh_median = fresh["median_s"] if fresh else None
+                if fresh and _is_plain_number(fresh_median) and fresh_median > 0 and _is_plain_number(reuse_median) and reuse_median > 0:
+                    fresh_col = fmt_ms(fresh_median)
+                    ratio_col = f"{fresh_median / reuse_median:.2f} 倍"
+                elif fresh:
+                    fresh_col = "計測不正"
+                    ratio_col = "-"
                 if fresh:
-                    fresh_col = fmt_ms(fresh["median_s"])
-                    ratio_col = f"{fresh['median_s'] / r['median_s']:.2f} 倍"
                     if checksums_match(r["checksum"], fresh["checksum"]):
                         match_col = "一致"
                         fw_col = fw
