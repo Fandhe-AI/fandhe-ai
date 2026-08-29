@@ -169,7 +169,10 @@ fn detach_autodiff_cargo_toml(sandbox: &Path) {
     let content = std::fs::read_to_string(&cargo_toml).expect("sandbox Cargo.toml 読み取りに失敗");
 
     let with_package_fields = content
-        .replace("version.workspace = true", "version = \"0.3.0\"")
+        // #980: workspace 版数バンプ（0.3.0 → 0.4.0）に追従。tensor-core 側の
+        // 実版（`=0.4.0` 併記）と照合させるための sandbox 用リテラルで、
+        // 依存解決結果には影響しない。
+        .replace("version.workspace = true", "version = \"0.4.0\"")
         .replace("edition.workspace = true", "edition = \"2024\"")
         .replace(
             "license.workspace = true",

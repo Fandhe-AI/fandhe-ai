@@ -617,6 +617,18 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 ## 変更履歴
 
+- 2026-08-29（#980）: 公開 6 クレートの `workspace.version` を 0.3.0 → 0.4.0
+  へ lockstep バンプした（`DeviceParamStore` によるデバイス常駐パラメータ
+  更新 API〈#954〉・`fandhe_ai::optim`〈#961/#972〉・CUDA/Metal コンテキスト
+  初期化キャッシュ〈#946/#948〉等、公開 API 追加を伴うため 0.x 系ルールで
+  minor 桁を上げた）。内部依存 `version = "=0.3.0"`（4 節・9 箇所）を
+  `"=0.4.0"` へ更新し、`cargo metadata --locked` の fail-closed 照合で
+  漏れゼロを確認した。cargo 1.96.0 で 8.1 節の多パッケージ dry-run
+  （`cargo publish --dry-run --locked -p fandhe-ai-tensor-core -p
+  fandhe-ai-autodiff -p fandhe-ai-backend-cpu -p fandhe-ai-backend-cuda -p
+  fandhe-ai-backend-metal -p fandhe-ai`）を再実測し、6 件すべてが
+  Packaging → Verifying → `warning: aborting upload due to dry run` まで
+  成功した。実公開（`release-all.yml` の dispatch）は対象外（後続 #981）。
 - 2026-08-23（ユーザー指示・対応 issue なし）: 公開 6 クレートを 1 回の
   `workflow_dispatch` でまとめてリリースする `.github/workflows/release-all.yml`
   を新設し、release.yml（単一クレート・障害復旧用）との使い分け・6 パッケージ
