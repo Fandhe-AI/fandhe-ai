@@ -1533,6 +1533,36 @@ Metal 側実装（イシュー #1021）が §8.2 の裁量事項を以下のと�
   §3.5 が見込んでいた「`crate::pool::PooledMemory` の
   `arc_with_non_send_sync` allow 解消」は、この実測結果により
   Metal 側では成立しない（CUDA 側 #1020 の実測に委ねる）。
+- **`unsafe impl Send for RawMetalBuffer` の SAFETY 根拠強化（PR #1063
+  codex-review P0 再三の指摘対応）**: 上記の `unsafe impl Send` 自体の
+  可否は変更していないが、SAFETY コメントを (1) Apple の一次資料の
+  実確認（archived Metal Programming Guide "Command Organization and
+  Execution Model" が同時アクセス不可を明示するのは command
+  buffer／command encoder のみで `MTLBuffer` に特定スレッドへの束縛
+  契約はないこと）・(2) 本リポジトリ内の既存前例（`context.rs::Batch`
+  の `unsafe impl Send`。#1017・マージ済み・レビュー済み。`Retained<
+  MtlBuffer>` のスレッド間移動自体は `Batch::in_flight` で既に確立
+  済みの契約であり本型はその弱いケース）への参照を含む形へ強化した。
+- **`PooledMetalHandle` の二重返却防止方式を `Option<H>::take()` から
+  `ManuallyDrop<H>` へ変更（PR #1063 codex-review P1 指摘対応。
+  §8.1 との齟齬に関する重要な申し送り）**: `raw()`／`capacity_bytes()`
+  が `Option<H>` の `None` 分岐を `unreachable!()` で埋めていた
+  （実行時には常に成り立つが型システムでは表現できない不変条件への
+  依存）ことが P1 として指摘されたため、`handle` フィールドを
+  `ManuallyDrop<RawMetalBuffer>` へ変更し `unreachable!()` 分岐を
+  型構造ごと排除した。**ただし §8.1「本設計文書で確定する事項」は
+  「二重返却・use-after-return の構造的防止は `Option<H>::take()`
+  方式に統一すること（`ManuallyDrop` 方式は採らない）」と明記して
+  おり、この変更は §8.1 の確定事項と文面上矛盾する**。一方で main
+  マージ済みの `crates/backend-cuda/src/pool.rs::PooledCudaHandle`
+  （#1020・PR #1061）は既に `handle: std::mem::ManuallyDrop<
+  CudaSliceHandle>` を採用しており、§8.1 の禁止事項は実装の実態と
+  既に乖離していた。この乖離の解消（§8.1 本文の改訂、または両
+  バックエンドを `Option` へ差し戻すことの当否）は本文書 §8.1 が
+  要求する**ユーザー承認・spec 整合の再確認**の対象であり、実装
+  Agent の裁量で §8.1 本文を書き換えることはしていない。ユーザー
+  承認を経て §8.1 を本記録に整合する形へ改訂するか、別の方針を
+  決定することが必要である。
 
 **本ランでの未実施事項（Metal 実機なしのため）**:
 

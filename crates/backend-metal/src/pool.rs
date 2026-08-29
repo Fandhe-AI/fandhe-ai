@@ -195,11 +195,24 @@ unsafe impl Send for RawMetalBuffer {}
 /// `MetalBuffer` 側が論理長 `len` を使って提供する（本型自体は生バッファ
 /// への到達経路のみを提供する）。
 ///
-/// 二重返却・use-after-return の構造的防止は `Option<H>::take()` 方式
-/// （設計文書 §3.1）: `Drop` は必ず `self.handle.take()` で所有権を奪って
-/// から後段処理へ渡す。
+/// 二重返却・use-after-return の構造的防止は `ManuallyDrop<H>` 方式
+/// （codex-review P1 是正。設計文書 §3.1「解放時の所有権遷移」・§8
+/// 実装記録参照）: 旧稿は `Option<H>` で保持し `Drop` が `take()` で
+/// 所有権を奪う方式だったため、`raw()`／`capacity_bytes()` は「`Drop`
+/// 実行中の一瞬を除き常に `Some`」という**実行時には常に成り立つが
+/// 型では表現できない**不変条件に依存し、`None` 分岐を `unreachable!()`
+/// で埋めていた（構造的には決して踏まないはずのパスだが、型システムは
+/// それを保証しない）。本型は `handle: ManuallyDrop<RawMetalBuffer>`
+/// （`Option` を経由しない）へ変更し、`raw()`／`capacity_bytes()` は
+/// `&self.handle` への直接アクセスとなり `unreachable!()` の分岐自体が
+/// 型構造から消滅した。`Drop::drop` は言語仕様上インスタンスごとに
+/// ちょうど 1 回だけ呼ばれ、`ManuallyDrop::take` はその 1 回の `drop`
+/// 内でのみ呼ぶため、二重 take（同じハンドルを 2 度返却してしまう
+/// use-after-take 相当の不変条件違反）は構造的に発生しない
+/// （`crates/backend-cuda/src/pool.rs::PooledCudaHandle` と同型の
+/// パターン）。
 pub(crate) struct PooledMetalHandle {
-    handle: Option<RawMetalBuffer>,
+    handle: std::mem::ManuallyDrop<RawMetalBuffer>,
     class_bytes: u64,
     logical_bytes: u64,
     pool: Arc<SizeClassPool<RawMetalBuffer>>,
@@ -208,42 +221,36 @@ pub(crate) struct PooledMetalHandle {
 
 impl PooledMetalHandle {
     /// `crate::buffer::MetalBuffer::raw`（`Backing::Pooled` 分岐）から
-    /// 呼ばれる。`handle` は `Drop` の `take()` 実行中の一瞬を除き常に
-    /// `Some` であり（本型が生存している間はその不変条件が構造的に
-    /// 保たれる。`Drop` 中は他コードから本メソッドが呼ばれることは
-    /// あり得ない）、到達不能パスは `unreachable!()`（本番経路で
-    /// panic しない `.claude/rules/coding-rust.md` の対象は
-    /// `unwrap`/`expect` によるフォールブル値の握り潰しであり、構造的に
-    /// 到達しない不変条件違反の検出は本クレート `gemm.rs::pipeline_for`
-    /// と同じ扱い）。
+    /// 呼ばれる。`handle` が `ManuallyDrop` のため `Drop::drop` が
+    /// `ManuallyDrop::take` で所有権を奪うまで常に有効であり、
+    /// （旧稿が必要としていた）`None` 分岐・`unreachable!()` は存在
+    /// しない。
     pub(crate) fn raw(&self) -> &MtlBuffer {
-        match &self.handle {
-            Some(raw) => raw.raw(),
-            None => unreachable!(
-                "PooledMetalHandle::raw: called while the handle was taken during Drop"
-            ),
-        }
+        self.handle.raw()
     }
 
     /// `crate::buffer::MetalBuffer` が構築直後に「論理長が capacity を
     /// 超えていない」不変条件を `debug_assert!` で固定するためのアクセサ
     /// （設計文書 §3.1「capacity と論理長の分離」）。
     pub(crate) fn capacity_bytes(&self) -> u64 {
-        match &self.handle {
-            Some(raw) => raw.capacity_bytes(),
-            None => unreachable!(
-                "PooledMetalHandle::capacity_bytes: called while the handle was taken during Drop"
-            ),
-        }
+        self.handle.capacity_bytes()
     }
 }
 
 impl Drop for PooledMetalHandle {
     /// 設計文書 §3.1「RAII 貸出ラッパー型」・§3.3「Metal」。
+    ///
+    /// SAFETY: `ManuallyDrop::take` は `Drop::drop` 内のこの 1 箇所
+    /// でのみ呼ばれる。`Drop::drop` は言語仕様上インスタンスごとに
+    /// ちょうど 1 回だけ呼ばれ、`drop` 完了後は `self`（`PooledMetalHandle`
+    /// 自体）へのいかなるアクセスも言語仕様上不可能（値は既に破棄
+    /// 済み）であるため、`self.handle` への二重 `take`・`take` 後の
+    /// アクセス（use-after-take）はいずれも構造的に発生しない
+    /// （`raw()`／`capacity_bytes()` は `&self` を要求するため、
+    /// `drop` 完了後の `self` が存在しない以上これらのメソッドが
+    /// `take` 後に呼ばれることもあり得ない）。
     fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
-            return;
-        };
+        let handle = unsafe { std::mem::ManuallyDrop::take(&mut self.handle) };
         // `record_loan_end` は `put()` の呼び出しタイミングとは独立に、
         // `Drop` の時点で常に即座に呼ぶ（CUDA・Metal 共通。設計文書
         // §3.1「フィールド更新契約」`capacity_waste_bytes` 行）。
@@ -347,7 +354,7 @@ impl MetalAllocator {
                 raw.zero_fill_logical(len);
             }
             return Ok(PooledMetalHandle {
-                handle: Some(raw),
+                handle: std::mem::ManuallyDrop::new(raw),
                 class_bytes,
                 logical_bytes,
                 pool: Arc::clone(&self.pool),
@@ -392,7 +399,7 @@ impl MetalAllocator {
     ) -> PooledMetalHandle {
         self.pool.record_allocation(logical_bytes, class_bytes);
         PooledMetalHandle {
-            handle: Some(raw),
+            handle: std::mem::ManuallyDrop::new(raw),
             class_bytes,
             logical_bytes,
             pool: Arc::clone(&self.pool),
