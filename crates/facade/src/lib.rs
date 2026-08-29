@@ -115,7 +115,7 @@ pub mod optim;
 // `compat`／`optim` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
 pub use fandhe_ai_autodiff::optim::{DeviceParamStore, ResidentLeaf, SgdConfig};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
-pub use fandhe_ai_tensor_core::{BackendError, Device, Tensor};
+pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
 /// newtype ラッパー（codex-review PR #424 P1 是正）。
@@ -251,4 +251,27 @@ fn resolve_ops(device: Device) -> Result<Box<dyn BackendOps + Send>, BackendErro
             Ok(Box::new(fandhe_ai_backend_metal::MetalBackendOps::new()))
         }
     }
+}
+
+/// `device` のデバイスメモリプール（イシュー #1020・REQ-14。`backend-cuda`
+/// のサイズクラス別プール実装。`backend-metal` は後続 #1021）がアイドル保持して
+/// いる分を即座に実解放する。
+///
+/// `fandhe_ai_tensor_core::BackendOps::release_cached_device_memory` への
+/// 薄い委譲（composition root。`docs/compat-api-scope.md` §0 の確定
+/// 公開面）。プールを持たないバックエンド（CPU・本イシュー時点の Metal）は
+/// 既定実装（no-op）が呼ばれ `Ok(())` を返す。存在しないデバイス・範囲外
+/// ordinal・driver 不在は [`BackendError`] を返す（`tape_for` と同じ
+/// fail-fast。`resolve_ops` を経由するため検証規則も同一）。
+pub fn release_cached_memory(device: Device) -> Result<(), BackendError> {
+    resolve_ops(device)?.release_cached_device_memory()
+}
+
+/// `device` のデバイスメモリプールの現在の利用状況（[`PoolStats`]）を
+/// 返す。プールを持たないバックエンドは `Ok(None)`（`BackendOps::
+/// device_memory_pool_stats` の既定実装）。存在しないデバイス・範囲外
+/// ordinal・driver 不在は [`release_cached_memory`] と同じく
+/// [`BackendError`] を返す。
+pub fn memory_pool_stats(device: Device) -> Result<Option<PoolStats>, BackendError> {
+    Ok(resolve_ops(device)?.device_memory_pool_stats())
 }

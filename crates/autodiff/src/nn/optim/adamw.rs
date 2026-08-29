@@ -16,7 +16,7 @@
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
-use crate::eval::dense_vec;
+use crate::eval::dense_vec_ref;
 
 /// `torch.optim.AdamW` と同一の既定値。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -193,8 +193,13 @@ impl AdamW {
 
         let mut out = Vec::with_capacity(params_and_grads.len());
         for (slot, (param, grad)) in self.states.iter_mut().zip(params_and_grads.iter()) {
-            let param_data = dense_vec(param);
-            let grad_data = dense_vec(grad);
+            // `param`/`grad` は読み取り専用の走査のみ（m/v・new_param は
+            // 別バッファへ積む）なので、contiguous 入力に対する
+            // `slice.to_vec()` コピーが不要な `dense_vec_ref`
+            // （`Cow<[f32]>`）を使う（イシュー #1026・`eval.rs::
+            // dense_vec_ref` doc、`optim/sgd.rs::Sgd::step` と同じ変更）。
+            let param_data = dense_vec_ref(param);
+            let grad_data = dense_vec_ref(grad);
             let mut new_param = Vec::with_capacity(param_data.len());
 
             for i in 0..param_data.len() {
@@ -343,7 +348,10 @@ mod tests {
         let grad3 = t(vec![0.1, 0.1], &[2]);
         let out_after_failed = opt.step(&[(&param3, &grad3)]).unwrap();
         let out_ref = opt_ref.step(&[(&param3, &grad3)]).unwrap();
-        assert_eq!(dense_vec(&out_after_failed[0]), dense_vec(&out_ref[0]));
+        assert_eq!(
+            crate::eval::dense_vec(&out_after_failed[0]),
+            crate::eval::dense_vec(&out_ref[0])
+        );
     }
 
     #[test]

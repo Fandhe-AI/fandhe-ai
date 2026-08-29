@@ -21,6 +21,8 @@
 //! `unwrap()`/`expect()` は使わず `debug_assert!` 経由のフォールバックで
 //! 吸収する。`.claude/rules/coding-rust.md`）。
 
+use std::borrow::Cow;
+
 use fandhe_ai_tensor_core::Tensor;
 
 use crate::var::Reduction;
@@ -62,6 +64,36 @@ pub(crate) fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
         }
     }
     out
+}
+
+/// `dense_vec` の読み取り専用・コピー回避版（イシュー #1026・
+/// `perf(backend-cpu): 学習ループのホスト側コピー・再構築を除去する`）。
+///
+/// `Sgd::step`／`AdamW::step`（`crates/autodiff/src/optim/sgd.rs`・
+/// `crates/autodiff/src/nn/optim/adamw.rs`）は各 step で `param`／`grad`／
+/// momentum バッファを走査するだけで書き換えない（更新後の値は別の
+/// 新規 `Vec` へ積んで `Tensor::new` で構築し直す）。この読み取り専用の
+/// 用途では `dense_vec` の `slice.to_vec()`（ヒープ確保 + 全要素コピー）
+/// は不要であり、既に contiguous な入力（`Linear::weight`/`bias`・
+/// `Gradients` 出力はいずれも密なバッファ）に対しては `tensor.as_slice()`
+/// が直接借用スライスを返す（`contiguous()` を経由しない）ため、それを
+/// そのまま返せば呼び出し元の走査は成立する。
+///
+/// 戻り値を `Cow<[f32]>` にしているのは、非 contiguous な入力
+/// （transpose 済み view 等）では `contiguous()` が新しい `Tensor` を
+/// 実体化する必要があり、その結果は本関数のローカル変数になるため
+/// スライスを呼び出し元へ借用として返せない（ダングリング参照になり
+/// コンパイルエラーになる）ためである。この場合のみ `dense_vec`
+/// （所有権を持つ `Vec` を返す既存の稠密化ロジック。二重実装しない）
+/// へフォールバックし `Cow::Owned` として返す。
+///
+/// `pub(crate)`: `dense_vec` と同じ可視性（optimizer モジュールから
+/// 呼ばれるための最小限の公開範囲）。
+pub(crate) fn dense_vec_ref(tensor: &Tensor<f32>) -> Cow<'_, [f32]> {
+    match tensor.as_slice() {
+        Some(slice) => Cow::Borrowed(slice),
+        None => Cow::Owned(dense_vec(tensor)),
+    }
 }
 
 /// shape とデータ長の一致を型で保証する非 panic 構築（TASK-12.1d・
@@ -458,4 +490,62 @@ pub(crate) fn cross_entropy_loss(
         Reduction::Sum => total,
     };
     build_tensor(vec![loss], &[])
+}
+
+#[cfg(test)]
+mod dense_vec_ref_tests {
+    use super::*;
+
+    // イシュー #1026「学習ループのホスト側コピー・再構築を除去する」の
+    // 機械的な回帰検証（advisor 助言: `dense_vec_ref` は `MemoryOps`
+    // 境界を持たないため `AllocationTracker` ではコピー回数を数えられ
+    // ない。ここでは「返した `Cow` が呼び出し元の `Tensor` のバッファを
+    // 直接指している（ポインタ一致）」ことを確認することで、
+    // `slice.to_vec()` によるヒープコピーが発生していないことを機械的に
+    // 検証する）。
+
+    #[test]
+    fn contiguous_input_borrows_without_copy() {
+        let tensor = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let borrowed = dense_vec_ref(&tensor);
+
+        assert!(
+            matches!(borrowed, std::borrow::Cow::Borrowed(_)),
+            "contiguous な入力は Cow::Borrowed（コピーなし）を返す契約"
+        );
+        // ポインタ一致で「元の `Tensor` のバッファをそのまま指している」
+        // ことを確認する（`to_vec()` していれば別のヒープ確保になり
+        // ポインタが一致しない）。
+        let original_ptr = tensor
+            .as_slice()
+            .expect("test fixture: contiguous")
+            .as_ptr();
+        assert_eq!(borrowed.as_ptr(), original_ptr);
+        assert_eq!(&*borrowed, &[1.0, 2.0, 3.0, 4.0][..]);
+    }
+
+    #[test]
+    fn non_contiguous_input_falls_back_to_owned_dense_vec() {
+        // transpose 済み view は非 contiguous になるため `as_slice()` が
+        // `None` を返す（`tensor.rs` doc）。`dense_vec_ref` は `dense_vec`
+        // へフォールバックし、値は一致するが所有権を持つ `Cow::Owned` を
+        // 返す契約。
+        let tensor = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let transposed = tensor
+            .transpose(0, 1)
+            .expect("test fixture: 2 次元 tensor の transpose(0, 1) は常に成功する");
+        assert!(
+            transposed.as_slice().is_none(),
+            "test fixture: transpose 後は非 contiguous であることが前提"
+        );
+
+        let owned = dense_vec_ref(&transposed);
+        assert!(
+            matches!(owned, std::borrow::Cow::Owned(_)),
+            "非 contiguous な入力は Cow::Owned（dense_vec フォールバック）を返す契約"
+        );
+        assert_eq!(&*owned, &dense_vec(&transposed)[..]);
+    }
 }

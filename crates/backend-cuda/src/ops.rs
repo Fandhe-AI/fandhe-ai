@@ -127,7 +127,7 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let ew = context_cache::cached_elementwise(self.ordinal, &device)
+        let ew = context_cache::cached_elementwise(&device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         let out = self.with_driver_call(
             &[],
@@ -152,7 +152,7 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let ew = context_cache::cached_elementwise(self.ordinal, &device)
+        let ew = context_cache::cached_elementwise(&device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         let out = self.with_driver_call(
             &[],
@@ -217,8 +217,8 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let rmsnorm = context_cache::cached_rmsnorm(self.ordinal, &device)
-            .map_err(map_fused_kernel_init_error)?;
+        let rmsnorm =
+            context_cache::cached_rmsnorm(&device).map_err(map_fused_kernel_init_error)?;
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -267,8 +267,8 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let softmax = context_cache::cached_softmax(self.ordinal, &device)
-            .map_err(map_fused_kernel_init_error)?;
+        let softmax =
+            context_cache::cached_softmax(&device).map_err(map_fused_kernel_init_error)?;
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -458,7 +458,7 @@ impl BackendOps for CudaBackendOps {
             .collect();
 
         let device = self.device_handle()?;
-        let sgd = context_cache::cached_sgd(self.ordinal, &device).map_err(map_cuda_error)?;
+        let sgd = context_cache::cached_sgd(&device).map_err(map_cuda_error)?;
 
         let grad_handle = grad
             .downcast_handle::<CudaBufferHandle>()
@@ -538,7 +538,7 @@ impl BackendOps for CudaBackendOps {
             .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
 
         let device = self.device_handle()?;
-        let gemm = context_cache::cached_gemm(self.ordinal, &device)
+        let gemm = context_cache::cached_gemm(&device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         let out = self.with_driver_call(
             &[],
@@ -639,7 +639,7 @@ impl BackendOps for CudaBackendOps {
                 };
 
                 let device = self.device_handle()?;
-                let gemm = context_cache::cached_gemm(self.ordinal, &device)
+                let gemm = context_cache::cached_gemm(&device)
                     .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
                 let out = self.with_driver_call(
                     &[],
@@ -771,7 +771,7 @@ impl BackendOps for CudaBackendOps {
             ));
         };
 
-        let gemm = context_cache::cached_gemm(self.ordinal, &device)
+        let gemm = context_cache::cached_gemm(&device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         // `w`（・`bias`）はデバイス常駐のまま渡す唯一の入力（`a` はこの
         // 呼び出し内で毎回アップロードし直すため世代を跨がない。イシュー
@@ -876,7 +876,7 @@ impl BackendOps for CudaBackendOps {
             ));
         };
 
-        let gemm = context_cache::cached_gemm(self.ordinal, &device)
+        let gemm = context_cache::cached_gemm(&device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         // `w` のみがデバイス常駐入力（`b` はこの呼び出し内で毎回
         // アップロードし直すため世代を跨がない。イシュー #1013 設計文書
@@ -989,6 +989,37 @@ impl BackendOps for CudaBackendOps {
         Err(BackendError::Unsupported(
             "CudaBackendOps::max: reduction カーネル未実装（#599 スコープ外）".into(),
         ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::release_cached_device_memory`] の CUDA 実装
+    /// （イシュー #1020・REQ-14）。`gemm.rs`／`elementwise.rs`／`softmax.rs`
+    /// が `context_cache::cached_allocator` 経由で共有する
+    /// `(ordinal, 既定 stream)` 単位のサイズクラス別プールを即座に解放する。
+    ///
+    /// エラー文字列にはフェーズ識別子（`crate::pool::ReleasePhase`。
+    /// "pre-free sync"／"handle release"／"post-free sync"／"driver trim"）
+    /// を含める（新しい `BackendError` variant は追加しない設計判断。
+    /// `docs/backend-cuda-pool-allocator-decision.md` 参照）。
+    fn release_cached_device_memory(&self) -> Result<(), BackendError> {
+        let device = self.device_handle()?;
+        let allocator = context_cache::cached_allocator(&device)
+            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        allocator
+            .release_cached()
+            .map(|_freed_bytes| ())
+            .map_err(|e| {
+                BackendError::DeviceAllocationFailed(format!("release_cached_device_memory: {e}"))
+            })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::device_memory_pool_stats`] の CUDA 実装。
+    /// driver 不在等で `device_handle()` が失敗した場合は `None` を返す
+    /// （`memory_ops` と同じ fail-safe 契約。統計取得の失敗で呼び出し元の
+    /// エラー処理を複雑化させない）。
+    fn device_memory_pool_stats(&self) -> Option<fandhe_ai_tensor_core::PoolStats> {
+        let device = self.device_handle().ok()?;
+        let allocator = context_cache::cached_allocator(&device).ok()?;
+        Some(allocator.stats())
     }
 }
 
