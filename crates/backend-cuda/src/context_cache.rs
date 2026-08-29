@@ -742,6 +742,30 @@ pub(crate) fn observe_cuda_result<T>(
     }
 }
 
+/// [`observe_cuda_result`] の「値を消費しない」版（codex-review P0
+/// 指摘・PR #1064 追補）。
+///
+/// `pool.rs::ReleaseCacheError` のように、driver 呼び出しの失敗を
+/// `CudaError` 単体ではなく他のコンテキスト情報（`ReleasePhase` 等）と
+/// 組にして保持する独自エラー型が呼び出し元に存在する場合、
+/// `observe_cuda_result` のように `Result<T, CudaError>` を消費・再構築
+/// させると呼び出し元の型情報（phase 等）が失われる。本関数は
+/// `&CudaError`（借用）のみを受け取り、sticky エラーなら ordinal を
+/// poison する副作用だけを行う（戻り値なし）。呼び出し元は自身の
+/// エラー型（`ReleaseCacheError` 等）から `&CudaError` を取り出して
+/// 本関数へ渡し、その後は自身のエラー型のまま `BackendError` へ変換
+/// してよい（`ops.rs::CudaBackendOps::release_cached_device_memory`
+/// 参照）。
+pub(crate) fn observe_cuda_error_ref(ordinal: usize, token: &CallToken, err: &CudaError) {
+    if let CudaError::Driver(e) = err {
+        // `observe_driver_result` は `Result` を消費・再構築する設計だが、
+        // 分類・poison化の副作用だけが必要なため `Err` を渡して結果を
+        // 捨てる（`observe_driver_result` は `Err(_)` を無変更で返す契約
+        // のため、ここで戻り値を調べる必要はない）。
+        let _ = observe_driver_result::<()>(ordinal, token, Err(*e));
+    }
+}
+
 /// `ordinal` が現在 poison 状態（`Poisoned{..}`。`unrecoverable` の
 /// いずれも含む）かを返す。
 // 本番経路では `begin_driver_call` が同等の poison 判定を内包する
@@ -1522,6 +1546,58 @@ mod poison_state_tests {
             rejected,
             Err(BackendError::DeviceContextPoisoned(_))
         ));
+    }
+
+    /// [`observe_cuda_error_ref`] の回帰テスト（codex-review P0 指摘・
+    /// `ops.rs:1117` 相当・PR #1064 追補）: `pool.rs::ReleaseCacheError`
+    /// のように `CudaError` を他の情報（フェーズ識別子等）と組にして
+    /// 保持する独自エラー型からでも、`&CudaError` を取り出して渡せば
+    /// 同じ分類・poison 化が行われることを確認する（値を消費しないため
+    /// 呼び出し元は独自エラー型を失わずに済む）。
+    #[test]
+    fn observe_cuda_error_ref_poisons_ordinal_on_sticky_driver_error() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+
+        let driver_error = CudaError::Driver(sticky_err());
+        observe_cuda_error_ref(ordinal, &token, &driver_error);
+
+        assert!(
+            is_poisoned(ordinal),
+            "&CudaError 経由でも sticky エラーは poison するはず"
+        );
+        let rejected = begin_driver_call(ordinal, &[0]);
+        assert!(matches!(
+            rejected,
+            Err(BackendError::DeviceContextPoisoned(_))
+        ));
+    }
+
+    #[test]
+    fn observe_cuda_error_ref_does_not_poison_on_operation_local_driver_error() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+
+        let driver_error = CudaError::Driver(operation_local_err());
+        observe_cuda_error_ref(ordinal, &token, &driver_error);
+
+        assert!(
+            !is_poisoned(ordinal),
+            "operation-local エラーは &CudaError 経由でも poison しないはず"
+        );
+    }
+
+    #[test]
+    fn observe_cuda_error_ref_does_not_poison_on_non_driver_cuda_error() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+
+        let non_driver = CudaError::InvalidShape {
+            detail: "host-side validation failure, not a driver call".to_string(),
+        };
+        observe_cuda_error_ref(ordinal, &token, &non_driver);
+
+        assert!(!is_poisoned(ordinal));
     }
 
     #[test]

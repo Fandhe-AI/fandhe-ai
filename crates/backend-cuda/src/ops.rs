@@ -781,8 +781,20 @@ impl BackendOps for CudaBackendOps {
             // （Cursor Bugbot 指摘・PR #1064 追補: 空入力の早期 return は
             // driver へ触れないため、begin_driver_call の poison 検査を明示的に
             // 経由しないと poison 済み ordinal でも「空 step」相当が黙って
-            // 成功してしまう）。
-            context_cache::begin_driver_call(self.ordinal, &[])?;
+            // 成功してしまう）。世代も通常経路（`resident_generations`。
+            // 本関数下部参照）と同じ `w`／`bias` の generation を渡す
+            // （codex-review P1 指摘・PR #1064 追補: 空スライスのままだと
+            // `invalidate` 後の旧世代 `w`／`bias` ビューがこの分岐だけ
+            // `StaleDeviceGeneration` を経由せず成功してしまい、「旧世代は
+            // 全て拒否する」という公開エラー契約を経路依存に破る）。
+            let empty_shape_generations = [
+                Some(w.buffer().generation()),
+                bias.map(|b| b.buffer().generation()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            context_cache::begin_driver_call(self.ordinal, &empty_shape_generations)?;
             return Tensor::new(Vec::new(), &[m, n]).map_err(BackendError::ShapeMismatch);
         }
 
@@ -921,8 +933,11 @@ impl BackendOps for CudaBackendOps {
             // （Cursor Bugbot 指摘・PR #1064 追補: 空入力の早期 return は
             // driver へ触れないため、begin_driver_call の poison 検査を明示的に
             // 経由しないと poison 済み ordinal でも「空 step」相当が黙って
-            // 成功してしまう）。
-            context_cache::begin_driver_call(self.ordinal, &[])?;
+            // 成功してしまう）。世代も通常経路と同じ `w` の generation を
+            // 渡す（codex-review P1 指摘・PR #1064 追補: 空スライスの
+            // ままだと `invalidate` 後の旧世代 `w` ビューがこの分岐だけ
+            // `StaleDeviceGeneration` を経由せず成功してしまう）。
+            context_cache::begin_driver_call(self.ordinal, &[w.buffer().generation()])?;
             return Tensor::new(Vec::new(), &[p, r]).map_err(BackendError::ShapeMismatch);
         }
         if q == 0 {
@@ -934,8 +949,9 @@ impl BackendOps for CudaBackendOps {
             // （Cursor Bugbot 指摘・PR #1064 追補: 空入力の早期 return は
             // driver へ触れないため、begin_driver_call の poison 検査を
             // 明示的に経由しないと poison 済み ordinal でも「空 step」
-            // 相当が黙って成功してしまう）。
-            context_cache::begin_driver_call(self.ordinal, &[])?;
+            // 相当が黙って成功してしまう）。世代も通常経路と同じ `w` の
+            // generation を渡す（codex-review P1 指摘・PR #1064 追補）。
+            context_cache::begin_driver_call(self.ordinal, &[w.buffer().generation()])?;
             return Tensor::from_shape_fill(&[p, r], |_| 0.0).map_err(BackendError::ShapeMismatch);
         }
 
@@ -1112,24 +1128,44 @@ impl BackendOps for CudaBackendOps {
     fn release_cached_device_memory(&self) -> Result<(), BackendError> {
         // `device_handle_raw`（キャッシュミス時の `CudaDevice::new`）自体も
         // poison 検査・観測の対象に含める（codex-review P0 指摘・PR #1064
-        // 追補・`ops.rs:147` 相当）。`cached_allocator`／`release_cached`
-        // 自体（`ReleaseCacheError` を返す。`CudaError` とは別型のため
-        // `with_driver_call` の閉域には未統合）の poison 結線は本 PR の
-        // スコープ外として残す（out-of-scope-tracking.md 対象。イシュー
-        // #1062 の残件と同種）。
+        // 追補・`ops.rs:147` 相当）。
         let device = self.with_driver_call(
             &[],
             |e| BackendError::CudaUnavailable(e.to_string()),
             || self.device_handle_raw(),
         )?;
-        let allocator = context_cache::cached_allocator(&device)
-            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-        allocator
-            .release_cached()
-            .map(|_freed_bytes| ())
-            .map_err(|e| {
-                BackendError::DeviceAllocationFailed(format!("release_cached_device_memory: {e}"))
-            })
+
+        // `cached_allocator`／`release_cached`（pre/post-free の
+        // `stream.synchronize()`・driver トリム）自体も poison 検査・観測
+        // の対象に含める（codex-review P0 指摘・PR #1064 追補: これらは
+        // 先行する非同期カーネルの sticky エラーを最初に観測しうる同期点
+        // であり、`ReleaseCacheError` へ変換されるだけで poison 化されない
+        // と、次の演算が Active のまま通ってしまう fail-open 経路になる）。
+        // `release_cached` の戻り値型 `ReleaseCacheError` は `CudaError`
+        // そのものではないため `with_driver_call` の一律インターフェース
+        // には載せず、`begin_driver_call`／`observe_cuda_error_ref` を
+        // 直接呼んで分類・poison 化のみを行い、`ReleaseCacheError` が
+        // 運ぶフェーズ識別子はそのまま `BackendError` のメッセージへ残す
+        // （`pool.rs::ReleaseCacheError` ドキュメンテーションコメント
+        // 参照）。
+        let token = context_cache::begin_driver_call(self.ordinal, &[])?;
+        let allocator = match context_cache::observe_cuda_result(
+            self.ordinal,
+            &token,
+            context_cache::cached_allocator(&device),
+        ) {
+            Ok(allocator) => allocator,
+            Err(e) => return Err(BackendError::CudaUnavailable(e.to_string())),
+        };
+        match allocator.release_cached() {
+            Ok(_freed_bytes) => Ok(()),
+            Err(e) => {
+                context_cache::observe_cuda_error_ref(self.ordinal, &token, &e.detail);
+                Err(BackendError::DeviceAllocationFailed(format!(
+                    "release_cached_device_memory: {e}"
+                )))
+            }
+        }
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::device_memory_pool_stats`] の CUDA 実装。
@@ -1450,6 +1486,122 @@ mod tests {
         assert!(
             matches!(cuda_result, Err(BackendError::DeviceContextPoisoned(_))),
             "poison 済み ordinal では n == 0 の早期 return 分岐も fail-closed に              拒否されるはず: {cuda_result:?}"
+        );
+    }
+
+    /// [`CudaBackendOps::gemm_resident_rhs`] の回帰テスト（codex-review
+    /// P1 指摘・`ops.rs:785` 相当・PR #1064 追補）: `m == 0 || n == 0`
+    /// の早期 return 分岐は、修正前は `begin_driver_call` を空スライス
+    /// （generation 検査なし）で呼んでいたため、`invalidate` 後の旧世代
+    /// `w` ビューでもこの分岐だけ `StaleDeviceGeneration` を経由せず
+    /// 成功してしまい、「旧世代のバッファは全て拒否する」という公開
+    /// エラー契約を経路依存に破っていた。修正後は通常経路と同じ
+    /// `w.buffer().generation()` を渡すため、旧世代スタンプ済みの `w`
+    /// では空 shape でも `StaleDeviceGeneration` を返す（実機不要。
+    /// `current_generation` は新規 ordinal で既定 `0` のため、`w` を
+    /// 意図的にそれと異なる世代でスタンプするだけで再現できる）。
+    #[test]
+    fn gemm_resident_rhs_rejects_stale_generation_even_via_trivial_empty_shape_early_return() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        assert_eq!(
+            context_cache::current_generation(ordinal),
+            0,
+            "新規 ordinal の現行世代は既定 0 のはず"
+        );
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(vec![1.0f32], &[1, 1]).expect("valid tensor");
+        // `w` を現行世代（0）とは異なる世代（1）でスタンプする
+        // （`invalidate` による回復後に取り残された旧世代バッファを
+        // 模す）。`m == 0 || n == 0` の早期 return 分岐（`w` は
+        // `[k, n] = [1, 0]` で n == 0）へ到達させる。
+        let w_buffer = DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            vec![1],
+            Box::new(EmptyHandle),
+            1,
+        );
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.gemm_resident_rhs(&a, w, None);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代 w ビューは空 shape の早期 return でも StaleDeviceGeneration で              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// [`CudaBackendOps::gemm_resident_lhs`] の同種回帰テスト（`p == 0 ||
+    /// r == 0` 分岐）。
+    #[test]
+    fn gemm_resident_lhs_rejects_stale_generation_even_via_trivial_empty_shape_early_return() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        // `b` は `[q, r] = [1, 0]`（r == 0 のため `p == 0 || r == 0` 分岐へ
+        // 到達する）。`w` は `[p, q] = [1, 1]` で世代 1 にスタンプする。
+        let b = Tensor::new(Vec::new(), &[1, 0]).expect("valid tensor");
+        let w_buffer = DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            vec![1],
+            Box::new(EmptyHandle),
+            1,
+        );
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 1]).expect("view construction succeeds");
+
+        let result = cuda.gemm_resident_lhs(w, &b);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代 w ビューは空 shape の早期 return でも StaleDeviceGeneration で              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// [`CudaBackendOps::gemm_resident_lhs`] の `q == 0` 分岐の同種回帰
+    /// テスト。
+    #[test]
+    fn gemm_resident_lhs_rejects_stale_generation_even_via_trivial_zero_contraction_dim_early_return()
+     {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        // `w` は `[p, q] = [1, 0]`（q == 0）・`b` は `[q, r] = [0, 1]`。
+        let b = Tensor::new(Vec::new(), &[0, 1]).expect("valid tensor");
+        let w_buffer = DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            vec![1],
+            Box::new(EmptyHandle),
+            1,
+        );
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.gemm_resident_lhs(w, &b);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代 w ビューは q == 0 の早期 return でも StaleDeviceGeneration で              拒否されるはず: {result:?}"
         );
     }
 
