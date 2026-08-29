@@ -184,6 +184,16 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
   `has_async_alloc()` が偽の環境では `CudaSlice::drop` がホスト同期を伴う
   経路へ退化するため、自作プールによる「解放しない」ことの価値が相対的に
   高くなる点も判断材料として記録する。
+  **B 採用時の driver プール予約メモリの扱い（レビュー指摘への対応）**:
+  A/B いずれの設計を選んでも、`has_async_alloc()` が真の環境では cudarc
+  自体が内部で `cuMemAllocAsync`／`cuMemFreeAsync`（driver 側 stream-ordered
+  アロケータ。§2 事実 6）を経由する。つまり B（自作サイズクラスプール）を
+  採用しても、自作プールの `release_cached()`／LRU 破棄で `CudaSlice` を
+  drop するのは自作プール層の保持を解くだけであり、driver 側プールが
+  release threshold の既定挙動により予約メモリ（reserved memory）を
+  保持し続け得る。これは A 固有の懸念ではなく `has_async_alloc()` が真で
+  ある限り常に該当するため、`release_cached()` の契約（§3.6 (2)）へ
+  driver 側トリム呼び出しを組み込む。
 - **Metal**: #1054 §3.4 の契約をそのまま採用する。すなわちプールへ返却
   されたバッファは、in-flight バッチの保持列から外れる（＝そのバッチが
   `synchronize()` される）まで再貸出ししない。ゼロ初期化はホスト書き込み
@@ -240,7 +250,14 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
 1. 総量上限（既定 128 MiB を暫定継続）＋グローバル LRU。学習ワーキング
    セットとの関係は #1010 の内訳実測後に再評価する（変更する場合はユーザー
    承認事項）。
-2. `release_cached()`（明示解放。REQ-14 の要求する解放 API）。
+2. `release_cached()`（明示解放。REQ-14 の要求する解放 API）。CUDA で
+   `has_async_alloc()` が真の環境では、自作プールのフリーリスト解放
+   （`CudaSlice` の drop）に加え、driver 側 memory pool（§3.3）に残る
+   予約メモリを `cuMemPoolTrimTo(0)` 相当（`result::mem_pool` 経由。
+   §2 事実 6）で解放する呼び出しも `release_cached()` の内部契約に含める
+   （A/B いずれの設計かに関わらず必須。§3.3 参照）。これにより
+   `release_cached()` が REQ-14 の解放 API として自作プール保持分だけで
+   なく driver 予約分も含めて解放する契約になる。
 3. OOM フォールバック（§3.4）。
 4. プロセス終了時は OS 側の回収に委ねる（既存 `Box::leak` 方針と同じ、
    意図的な「解放しないリーク」であることを明記する）。
@@ -248,10 +265,22 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    外。§6）。
 
 REQ-14 との整合: プール保持分は既存 `AllocationTracker::allocated_bytes`
-に計上され続ける（既存機構をそのまま用いる）。GEMM 4096³ で係数 2.0
-（384 MiB 以内）を維持できることは、巨大帯を「完全一致・1 エントリ保持」
-に限定した §3.2 の方針で担保する。係数 2.0 自体は変更しない（緩和・厳格化
-ともユーザー承認事項。`docs/peak-memory-coefficient-decision.md`）。
+に計上され続ける（既存機構をそのまま用いる）。ただし CUDA で
+`has_async_alloc()` が真の環境では、driver 側 memory pool の予約メモリ
+（§3.3）は自作プール層より下（cudarc 内部）で保持されるため
+`AllocationTracker` の計上対象に含まれない。この差分を放置すると
+`release_cached()`／LRU 破棄後も実メモリは driver 側に残存し得るため、
+GEMM 4096³ の係数 2.0 判定を `AllocationTracker` の値のみで行うと実際の
+ピークメモリを過小評価するおそれがある。したがって本設計では
+(i) `release_cached()` が §3.6 (2) の driver トリム呼び出しを含むことで
+driver 予約分の残存を都度解消し、(ii) #1020 の実機計測では
+`AllocationTracker::allocated_bytes` に加えて driver 側の実メモリ使用量
+（`nvidia-smi` またはプロセスの実メモリ計測）も併せて確認し、両者の乖離が
+無いことを係数 2.0 判定の受け入れ条件へ加える、の 2 点を契約とする。
+GEMM 4096³ で係数 2.0（384 MiB 以内）を維持できることは、巨大帯を
+「完全一致・1 エントリ保持」に限定した §3.2 の方針と、上記 driver 予約
+メモリのトリム・実測併用で担保する。係数 2.0 自体は変更しない（緩和・
+厳格化ともユーザー承認事項。`docs/peak-memory-coefficient-decision.md`）。
 
 ### 3.7 計測・受け入れ条件への写像
 
@@ -308,6 +337,11 @@ fresh/reuse の 4 通り）:
   該当タスクと共有する）。
 - 既存 `pooled_memory_integration.rs` の係数 2 倍回帰テストを新
   `DeviceAllocator` 経路へ移植する。
+- `#[ignore]` 実機テスト（DGX Spark GB10・`has_async_alloc()` が真の
+  環境）: `release_cached()` 実行後に `AllocationTracker::allocated_bytes`
+  が 0 になることに加え、driver 側の実メモリ使用量（`nvidia-smi` 等）も
+  併せて確認し、両者に有意な乖離が残らないことを確認する（§3.6 の driver
+  トリム契約の回帰防止）。
 
 ### 6.3 スコープ外（`.claude/rules/out-of-scope-tracking.md` に従い記録のみ。起票はユーザー承認後）
 
@@ -348,8 +382,9 @@ fresh/reuse の 4 通り）:
 - **A08 ソフトウェア・データ整合性**: 本イシューは docs-only 変更であり
   `docs/spec/`（正本 submodule）は編集しない。数値一致の複合判定・カーネル
   境界検査・許容誤差・REQ-14 の係数上限はいずれも変更しない（緩和は
-  ユーザー承認必須）。`unsafe` 追加候補（`cuMemPoolSetAttribute` 等の
-  FFI・`fillBuffer` の encode 呼び出し）は FFI 境界に限定し、理由コメント
+  ユーザー承認必須）。`unsafe` 追加候補（`cuMemPoolSetAttribute`・
+  `cuMemPoolTrimTo`（§3.6 の driver 予約メモリ解放契約）等の FFI・
+  `fillBuffer` の encode 呼び出し）は FFI 境界に限定し、理由コメント
   と security-auditor によるレビューを必須とする。
 - **A09 セキュリティログ・監視の不足**: `AllocatorStats` はバイト数・
   カウンタのみを公開し、デバイスポインタ値をログや統計に含めない。
