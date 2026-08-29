@@ -265,10 +265,16 @@ impl MetalContext {
             }
             // 直前で `is_none()` なら新規構築し `Some` にしたばかりであり、
             // 到達直後に `None` へ戻す経路はこの関数内に存在しない。
+            // ただし `.claude/rules/coding-rust.md`「本番経路で
+            // unwrap/expect を使わない」に従い、万一の到達不能パスも
+            // panic ではなく型付きエラー（`BatchStateUnavailable`）で
+            // 呼び出し元へ伝える（codex-review P1 指摘対応）。
             let batch = slots
                 .open
                 .as_mut()
-                .expect("open batch was just ensured above");
+                .ok_or_else(|| MetalError::BatchStateUnavailable {
+                    detail: "encode: open batch missing immediately after construction".to_string(),
+                })?;
 
             if batch.encoder.is_none() {
                 let encoder = batch
@@ -277,10 +283,14 @@ impl MetalContext {
                     .ok_or(MetalError::ComputeEncoderCreation)?;
                 batch.encoder = Some(encoder);
             }
-            let encoder = batch
-                .encoder
-                .as_ref()
-                .expect("encoder was just ensured above");
+            let encoder =
+                batch
+                    .encoder
+                    .as_ref()
+                    .ok_or_else(|| MetalError::BatchStateUnavailable {
+                        detail: "encode: encoder missing immediately after construction"
+                            .to_string(),
+                    })?;
 
             encode_fn(encoder);
 
@@ -333,35 +343,50 @@ impl MetalContext {
     /// はブロッキング呼び出し）中も保持し続ける: 他スレッドからの
     /// `encode`／`synchronize` はこの間ブロックされる（正しさを優先し
     /// 並行性は最適化しない設計判断。設計文書 §3.5「同時実行の扱い」）。
+    ///
+    /// `flush_locked` の `endEncoding()`／`commit()` に加え、本メソッド
+    /// 自身の `waitUntilCompleted()`／`status()`／`error()` も
+    /// autoreleased なオブジェクトを返しうる（[`Self::encode`] の
+    /// autoreleasepool コメント参照）。`encode` から `should_auto_flush`
+    /// 経由で `flush_locked` のみが呼ばれる経路は `encode` 側の
+    /// `autoreleasepool` で覆われているが、本メソッドを直接呼ぶ経路
+    /// （`memory.rs::download_inner`／`zero_fill`・`Drop`）はそれを
+    /// 経由しないため、ここで独自に `autoreleasepool` を張らないと
+    /// プロセス寿命分蓄積する（Cursor Bugbot 指摘・PR #1057）。
     pub fn synchronize(&self) -> Result<(), MetalError> {
-        let mut slots = self.lock_batch("synchronize")?;
-        self.flush_locked(&mut slots);
-        let batches = std::mem::take(&mut slots.committed);
+        autoreleasepool(|_pool| {
+            let mut slots = self.lock_batch("synchronize")?;
+            self.flush_locked(&mut slots);
+            let batches = std::mem::take(&mut slots.committed);
 
-        let mut first_error: Option<MetalError> = None;
-        for batch in batches {
-            batch.cmd_buf.waitUntilCompleted();
-            if batch.cmd_buf.status() == MTLCommandBufferStatus::Error {
-                let message = batch
-                    .cmd_buf
-                    .error()
-                    .map(|error| error.localizedDescription().to_string())
-                    .unwrap_or_else(|| "no NSError attached to failed command buffer".to_string());
-                let formatted = batch_state::format_failure_message(batch.meta.labels(), &message);
-                batch_state::propagate_failure(&batch.tokens, &formatted);
-                if first_error.is_none() {
-                    first_error =
-                        Some(MetalError::CommandBufferExecutionFailed { message: formatted });
+            let mut first_error: Option<MetalError> = None;
+            for batch in batches {
+                batch.cmd_buf.waitUntilCompleted();
+                if batch.cmd_buf.status() == MTLCommandBufferStatus::Error {
+                    let message = batch
+                        .cmd_buf
+                        .error()
+                        .map(|error| error.localizedDescription().to_string())
+                        .unwrap_or_else(|| {
+                            "no NSError attached to failed command buffer".to_string()
+                        });
+                    let formatted =
+                        batch_state::format_failure_message(batch.meta.labels(), &message);
+                    batch_state::propagate_failure(&batch.tokens, &formatted);
+                    if first_error.is_none() {
+                        first_error =
+                            Some(MetalError::CommandBufferExecutionFailed { message: formatted });
+                    }
                 }
+                // `batch`（`in_flight` の retain 列を含む）はこのループの
+                // 末尾で drop される。GPU 実行は `waitUntilCompleted()`
+                // 直後の時点で完了済みのため、ここで解放してよい。
             }
-            // `batch`（`in_flight` の retain 列を含む）はこのループの末尾
-            // で drop される。GPU 実行は `waitUntilCompleted()` 直後の
-            // 時点で完了済みのため、ここで解放してよい。
-        }
-        match first_error {
-            Some(err) => Err(err),
-            None => Ok(()),
-        }
+            match first_error {
+                Some(err) => Err(err),
+                None => Ok(()),
+            }
+        })
     }
 
     /// コンピュートエンコーダを生成し `encode_fn` にディスパッチ内容の

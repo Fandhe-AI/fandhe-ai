@@ -53,7 +53,7 @@
 //! 判明しない。このため `step()` 呼び出し時点では検出できない失敗が
 //! ある。`failure_token`（[`fandhe_ai_tensor_core::DispatchFailureCell`]）
 //! を `ops.sgd_step_device_tracked` へ同一ロック区間で渡しておき、
-//! [`Self::check_not_poisoned`] が 4 つの状態機械エントリいずれかへの
+//! `check_not_poisoned` が 4 つの状態機械エントリいずれかへの
 //! 入口で `failure_token.is_set()` を検査して `poisoned` へ自己遷移する
 //! （`ops` 側からの能動的な通知を待たない。CPU／CUDA は同期実行のため
 //! `failure_token` を使わず、`step()` 内の即時エラーでこれまでどおり
@@ -88,7 +88,7 @@ struct PendingForward {
 ///
 /// `poisoned` は `AtomicBool`（`Cell<bool>` ではない）とする: `&self`
 /// メソッド（`sync_to_host`／`snapshot_resident_leaves`）からも
-/// [`Self::check_not_poisoned`] が「遅延失敗トークンを検出して自己
+/// `check_not_poisoned` が「遅延失敗トークンを検出して自己
 /// poison する」ために書き込みが必要であり、`&self` からの内部可変性を
 /// 要求するため（モジュール冒頭「遅延失敗トークン経由の poison」参照）。
 #[derive(Debug)]
@@ -215,6 +215,16 @@ impl DeviceParamStore {
             node_ids.push(var.node_id());
             vars.push(var);
         }
+        // Cursor Bugbot 指摘（PR #1057）対応: `download` 呼び出し中に
+        // 別スレッドが先に `synchronize` して GPU fault を検出し
+        // `failure_token` をセットした場合、この関数冒頭の
+        // `check_not_poisoned` はその発生前に通過済みのため見逃す
+        // （`MetalContext::synchronize` は commit 済みバッチを一度だけ
+        // drain するため、後続の `download` 内 `synchronize` 呼び出しは
+        // 既に空の committed リストに対して成功扱いで返り、実際は無効な
+        // バッファ内容を読んだ可能性がある）。`download` 完了直後にも
+        // 再検査し、その間に poison 化していれば結果を破棄して拒否する。
+        self.check_not_poisoned()?;
         self.pending = Some(PendingForward {
             tape_id: tape.id,
             node_ids,
@@ -237,10 +247,17 @@ impl DeviceParamStore {
                     .to_string(),
             )
         })?;
-        self.params
+        let vars: Vec<Var<'t>> = self
+            .params
             .iter()
             .map(|buf| Ok(tape.var(&mem.download(buf)?)))
-            .collect()
+            .collect::<Result<_, BackendError>>()?;
+        // `register_resident_leaves` と同じレース（Cursor Bugbot 指摘・
+        // PR #1057）への対処: `download` の間に別スレッドが GPU fault を
+        // 検出し `failure_token` を設定した可能性があるため、返却直前に
+        // 再検査する。
+        self.check_not_poisoned()?;
+        Ok(vars)
     }
 
     /// `pending`（未消費の forward 登録）を副作用なくクリアする冪等
@@ -450,7 +467,15 @@ impl DeviceParamStore {
                 "DeviceParamStore::sync_to_host: backend does not implement MemoryOps".to_string(),
             )
         })?;
-        self.params.iter().map(|buf| mem.download(buf)).collect()
+        let tensors: Vec<Tensor<f32>> = self
+            .params
+            .iter()
+            .map(|buf| mem.download(buf))
+            .collect::<Result<_, BackendError>>()?;
+        // `register_resident_leaves`／`snapshot_resident_leaves` と同じ
+        // レース（Cursor Bugbot 指摘・PR #1057）への対処。
+        self.check_not_poisoned()?;
+        Ok(tensors)
     }
 }
 

@@ -199,9 +199,9 @@
 //!
 //! イシュー #1017（親 #1015・設計 #1016・`docs/backend-metal-command-
 //! batching-design.md`）で `MetalContext` にコマンドバッファ共有バッチ
-//! （[`context::MetalContext::encode`]／[`context::MetalContext::synchronize`]）を
+//! （`context::MetalContext::encode`／`context::MetalContext::synchronize`）を
 //! 追加した。既存の
-//! [`context::MetalContext::dispatch_sync`]（`encode` + 即時
+//! `context::MetalContext::dispatch_sync`（`encode` + 即時
 //! `synchronize` の薄いラッパーへ変更。シグネチャ・戻り値の意味は不変）
 //! を経由する既存呼び出し元（`gemm.rs`／`elementwise.rs`／`rmsnorm.rs`／
 //! `softmax.rs`）は無変更のまま後方互換を保つ。`sgd.rs::MetalSgd::run`
