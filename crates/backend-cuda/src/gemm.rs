@@ -1515,13 +1515,29 @@ impl CudaGemm {
     /// 環境（naive/tiled はビルドできるが TF32 WMMA は未対応の CUDA
     /// デバイス）で `kernel_specs` の必須件数を過大に見積もらないよう
     /// 実際にコンパイルへ成功した件数を算出するために使う。
-    pub fn wmma_tf32_available(&self) -> bool {
+    ///
+    /// `module_cache_wiring_tests.rs` は同一クレート内の `#[cfg(test)]`
+    /// モジュール（`crate::CudaGemm` へ直接アクセス。統合テスト
+    /// クレートではない）からのみ呼ばれる内部診断用アクセサのため
+    /// `pub(crate)` に限定する（PR #1060 codex-review P1 指摘対応:
+    /// 安定した公開 API 面〈`wmma_tf32_opt_available`・
+    /// `wmma_tf32_staged_available` 等〉と異なり `tests/`・`examples/`
+    /// から参照されない内部表現であり、`pub fn` として公開 API へ
+    /// 露出させない）。
+    ///
+    /// 非 test ビルドでは呼び出し元が存在しないため `#[cfg(test)]` を
+    /// 付与し `dead_code` lint（`-D warnings`）を回避する。
+    #[cfg(test)]
+    pub(crate) fn wmma_tf32_available(&self) -> bool {
         self.wmma_tf32.is_some()
     }
 
     /// [`Self::wmma_tf32_available`] が `false` の場合の失敗理由
     /// （[`Self::wmma_tf32_opt_unavailable_reason`] と同じ理由）。
-    pub fn wmma_tf32_unavailable_reason(&self) -> Option<&str> {
+    /// [`Self::wmma_tf32_available`] と同じ理由で `pub(crate)` かつ
+    /// `#[cfg(test)]` に限定する（PR #1060 codex-review P1 指摘対応）。
+    #[cfg(test)]
+    pub(crate) fn wmma_tf32_unavailable_reason(&self) -> Option<&str> {
         self.wmma_tf32_error.as_deref()
     }
 
