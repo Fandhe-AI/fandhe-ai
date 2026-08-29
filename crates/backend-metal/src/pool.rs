@@ -97,9 +97,9 @@ impl RawMetalBuffer {
     }
 }
 
-// SAFETY（codex-review P0 再指摘対応。`Send` 付与の不変条件根拠を
-// 「同時アクセスされない」という `Sync` 不要の説明に留めず、移動後の
-// 全操作が任意スレッドで安全である根拠まで明記する）:
+// SAFETY（codex-review P0 再指摘対応。`Send` の証明に必要なのは
+// 「値を他スレッドへ移動した後、その型に対して行う操作が（直列化
+// された前提で）安全である」ことであり、以下 1〜5 でこれを示す）:
 //
 // 設計文書 §3.5「`Send`/`Sync` 方針の更新」は「Metal の `MTLBuffer`
 // protocol も objc2-metal 0.3.2 で `Send + Sync` を supertrait に持つ」
@@ -108,11 +108,7 @@ impl RawMetalBuffer {
 // のいずれも `Send`/`Sync` を課さない。`MTLDevice: NSObjectProtocol +
 // Send + Sync` とは異なる）を実測したところ、この記述は実態と異なる
 // ことが判明した（イシュー #1021 実装確定・PR 本文と `docs/device-
-// memory-pool-design.md` §9 実装記録に記録する）。objc2-metal が
-// `Send` を実装しないのは同クレート側の保守的既定（他の多くの
-// Objective-C ラッパー同様、実際のスレッド安全性契約を精査せず
-// 未実装のまま据え置く方針）であり、下記 1〜3 の一次資料・ランタイム
-// 契約により本型は実際には `Send` の要件を満たす。
+// memory-pool-design.md` §9 実装記録に記録する）。
 //
 // 1. **`RawMetalBuffer` が `MtlBuffer`（`Retained<ProtocolObject<dyn
 //    MTLBuffer>>`）に対して移動後に実行する全操作の列挙**（本型が
@@ -123,44 +119,48 @@ impl RawMetalBuffer {
 //    `Drop` 実装は持たないが、`buffer` フィールドの drop 時に発生）、
 //    (iii) `raw()` が返す `&MtlBuffer` 経由でのメソッド呼び出し（本型
 //    自体は `&self` のみを渡し、可変共有はしない）。
-// 2. **Apple の一次資料（Metal のスレッド安全性契約）**: Apple の
-//    Metal Programming Guide「Concurrency」節は、`MTLCommandBuffer`・
-//    `MTLCommandEncoder` 系を除く Metal オブジェクト（`MTLDevice`・
-//    `MTLCommandQueue`・**`MTLBuffer`**・`MTLTexture`・
-//    state 系オブジェクト等）は複数スレッドから安全に使用できる
-//    （thread-safe）と明記している（archived Apple Developer
-//    Documentation, "Metal Programming Guide" > "Concurrency and
-//    Metal"。本 PR 実装時点で WebFetch/WebSearch 相当のツールを
-//    利用できずライブページの再確認・URL 引用はできなかったため、
-//    この一次資料の記述内容自体は本コメントの記載に留め、確認済みの
-//    確定事実としてではなく参照情報として扱う。将来ツールが使える
-//    環境で URL 引用による裏付けを追加することが望ましい）。この
-//    契約は「ある `MTLBuffer` インスタンスへの `contents()` 呼び出し・
-//    メソッド呼び出しをスレッド A で行った後、同じインスタンスへ
-//    スレッド B から同種の呼び出しを行っても安全」であることを
-//    意味し、`RawMetalBuffer`（1 個の `MtlBuffer` を所有）が生成
-//    スレッドとは異なるスレッドへ `Send` された後に (i)/(iii) を
-//    実行しても安全であることの根拠になる。
-// 3. **Objective-C ランタイムの retain/release 契約**: `Retained<T>`
-//    の clone／drop が発行する ObjC の `retain`／`release`
-//    メッセージは、Objective-C ランタイム自体が任意スレッドからの
-//    呼び出しに対してスレッドセーフであることを保証する（参照
-//    カウント操作はランタイムの標準契約であり、Metal 固有の追加
-//    契約を要しない）。よって上記 (ii)（本型の drop に伴う
+// 2. **Apple がスレッド利用に制約を課すのは command buffer／command
+//    encoder のみであり、`MTLBuffer` には特定スレッドへの束縛契約が
+//    課されていない**（実確認済みの一次資料。archived Apple Developer
+//    Documentation, "Metal Programming Guide" > "Command Organization
+//    and Execution Model"、
+//    <https://developer.apple.com/library/archive/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/Cmd-Submiss/Cmd-Submiss.html>）:
+//    引用 "In general, command queues are thread-safe and allow
+//    multiple active command buffers to be encoded simultaneously."・
+//    "Only one CPU thread can access a command buffer at a time."
+//    （command encoder も同時に 1 つのみ active と明記）。すなわち
+//    Apple が明示するスレッド制約の対象は command buffer／encoder に
+//    限られ、`MTLBuffer` を含むそれ以外のオブジェクトに「生成した
+//    スレッドでのみ使える」といった束縛契約は課されていない。これは
+//    「`MTLBuffer` が thread-safe である」ことを積極的に保証する記述
+//    ではないが、少なくとも「他スレッドへの移動・そこからの利用」を
+//    禁じる契約も存在しないことの根拠になる（本型が課す排他制御は
+//    下記 4 が別途担う）。
+// 3. **Objective-C ランタイムの参照カウント契約**: `Retained<T>` の
+//    clone／drop が発行する ObjC の `retain`／`release` メッセージは、
+//    Objective-C ランタイム自体がアトミックに処理するスレッドセーフな
+//    操作である（参照カウント操作はランタイムの標準契約であり、Metal
+//    固有の追加契約を要しない）。よって上記 (ii)（本型の drop に伴う
 //    `release`）を生成スレッドと異なるスレッドで実行しても安全。
-// 4. **`contents()` が返すポインタ経由の同時アクセス**は、上記
-//    Apple の thread-safety 契約は「異なるスレッドからの逐次的な
-//    呼び出し」を保証するものであり「同時並行アクセス」までは
-//    保証しない。この点は Apple の契約にではなく本プールの排他制御
-//    に委ねる: `RawMetalBuffer` へのアクセスは (a) `SizeClassPool<H>`
-//    のフリーリスト内（`Mutex<PoolCore<H>>` が直列化）、(b)
-//    `PooledMetalHandle`（`Drop` まで単一スレッドが排他所有し他
-//    スレッドと共有されない）、(c) `BatchSlots::pending_pool_returns`
-//    （`Batch` と同じ `Mutex<BatchSlots>` が直列化）のいずれかの
-//    経路に限られ、複数スレッドから同時に（並行して）アクセスされる
-//    ことはない。
+// 4. **`contents()` で得たポインタ経由の読み書きを含む全アクセスの
+//    排他制御**: 上記 2 は「他スレッドからの利用を禁じる契約がない」
+//    ことを示すのみで「同時並行アクセスが安全」であることまでは
+//    示さないため、同時並行アクセスの防止は Apple の契約にではなく
+//    本プールの排他制御に委ねる: `RawMetalBuffer` へのアクセスは
+//    (a) `SizeClassPool<H>` のフリーリスト内（`Mutex<PoolCore<H>>` が
+//    直列化）、(b) `PooledMetalHandle`（`Drop` まで単一スレッドが
+//    排他所有し他スレッドと共有されない）、(c) `BatchSlots::
+//    pending_pool_returns`（`Batch` と同じ `Mutex<BatchSlots>` が
+//    直列化）のいずれかの経路に限られ、複数スレッドから同時に
+//    （並行して）アクセスされることはない。よって `Sync` は主張せず
+//    `Send` のみを付与する。
+// 5. objc2-metal が `Send` を実装しないのは同クレート側の保守的既定
+//    （他の多くの Objective-C ラッパー同様、実際のスレッド安全性契約を
+//    精査せず未実装のまま据え置く方針）であり、上記 1〜4 の下では本型
+//    の利用範囲（フリーリスト・RAII ラッパー・返却待ち列のいずれかで
+//    直列化されたアクセスのみ）において安全である。
 //
-// 以上 1〜4 により、`RawMetalBuffer` を他スレッドへ `Send` した後に
+// 以上 1〜5 により、`RawMetalBuffer` を他スレッドへ `Send` した後に
 // 行う全操作（`contents()` 取得・`raw()` 経由のメソッド呼び出し・
 // `Drop` での `release`）は安全であり、`unsafe impl Send` の付与は
 // 妥当である（`Sync` は付与しない: `SizeClassPool<H>: Send + Sync
