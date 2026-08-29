@@ -1504,6 +1504,27 @@ impl CudaGemm {
     /// する受け入れテスト（`tests/gemm_wmma_tf32_opt.rs`）はこの関数で
     /// 事前に可用性を確認し、フォールバックが起きていないことを保証した
     /// うえで計測・検証する。
+    /// 基本版 WMMA(TF32) カーネル（[`Self::wmma_tf32`]）が `new` 時点で
+    /// コンパイル・ロードに成功しているかを返す（イシュー #1024）。
+    /// [`Self::wmma_tf32_opt_available`]・[`Self::wmma_tf32_staged_available`]
+    /// と同型の可用性 getter（`run_wmma_tf32` の内部フォールバック先を
+    /// 強制実行する API ではなく、単に `new` 時点の成否を読み取るだけの
+    /// もので REQ-11「明示切替 API を提供しない」方針に抵触しない）。
+    /// module_cache／NVRTC ディスクキャッシュ結線の診断テスト
+    /// （`module_cache_wiring_tests.rs`）が、基本版が NVRTC に拒否される
+    /// 環境（naive/tiled はビルドできるが TF32 WMMA は未対応の CUDA
+    /// デバイス）で `kernel_specs` の必須件数を過大に見積もらないよう
+    /// 実際にコンパイルへ成功した件数を算出するために使う。
+    pub fn wmma_tf32_available(&self) -> bool {
+        self.wmma_tf32.is_some()
+    }
+
+    /// [`Self::wmma_tf32_available`] が `false` の場合の失敗理由
+    /// （[`Self::wmma_tf32_opt_unavailable_reason`] と同じ理由）。
+    pub fn wmma_tf32_unavailable_reason(&self) -> Option<&str> {
+        self.wmma_tf32_error.as_deref()
+    }
+
     pub fn wmma_tf32_opt_available(&self) -> bool {
         self.wmma_tf32_opt.is_some()
     }
