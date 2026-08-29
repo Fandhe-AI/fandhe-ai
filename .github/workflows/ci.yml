@@ -751,6 +751,13 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo test --manifest-path scripts/bench/framework-compare/bench-common/Cargo.toml --locked --release
 
+      # イシュー #970: summarize.py の要素単位検証（parity_status 等）の
+      # 回帰テスト。python3 標準ライブラリの unittest のみ（追加依存なし）で、
+      # cargo の有無に関わらず常時実行する（deps-forbidden ジョブの他の
+      # python3 実行ステップと同一方針）。
+      - name: フレームワーク横並びベンチ summarize.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/summarize_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ

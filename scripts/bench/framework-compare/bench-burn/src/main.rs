@@ -52,34 +52,71 @@ fn checksum<B: Backend, const D: usize>(
         .sum())
 }
 
+/// Host-materialize and return the raw elements (forces sync). `run_gemm`
+/// （イシュー #970）は checksum に加え要素単位の参照比較
+/// （`GemmReference::verify`）が必要なため、`checksum` とは別に生の
+/// `Vec<f32>` を返す readout を用意する（`checksum` は `run_infer` が
+/// 引き続き使うためシグネチャを変更しない）。
+fn readout<B: Backend, const D: usize>(
+    t: Tensor<B, D>,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    t.into_data()
+        .to_vec::<f32>()
+        .map_err(|e| format!("MEASURE_ERROR: into_data to_vec failed: {e:?}").into())
+}
+
 fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::error::Error>> {
     let n = cli.size;
-    let a = tensor2::<B>(Xorshift64Star::new(SEED_A).fill_vec(n * n), [n, n], dev);
-    let b = tensor2::<B>(Xorshift64Star::new(SEED_B).fill_vec(n * n), [n, n], dev);
+    // イシュー #970 codex-review 指摘（PR #978・P1）: `n * n`（要素数）を
+    // 入力ベクタ生成前に `gemm_element_count` で検証する（`--size` は
+    // 未検証な CLI 入力であり、無検証の乗算は debug で panic・release では
+    // wrap した長さで確保・使用してしまう）。
+    let len = gemm_element_count(n)?;
+    let a_host = Xorshift64Star::new(SEED_A).fill_vec(len);
+    let b_host = Xorshift64Star::new(SEED_B).fill_vec(len);
+    // イシュー #970: 参照 GEMM は `tensor2` に渡す前の host Vec の clone から
+    // 計算する（本体の FMA 契約と同じ参照。計測窓の外・warmup 前に 1 回だけ）。
+    let reference = GemmReference::compute(n, &a_host, &b_host)?;
+    let a = tensor2::<B>(a_host, [n, n], dev);
+    let b = tensor2::<B>(b_host, [n, n], dev);
     let mut cs = 0.0;
+    let mut parity: Option<ParityStats> = None;
 
     // イシュー #965 codex-review 指摘: cs は毎反復上書きされるため、ループ後に
     // 最後の値だけを検査すると途中反復が縮退（全ゼロ/非有限）していても
     // 最終反復が正常なら見逃す。壊れた計算の実行時間を性能値として記録しない
     // 契約（`.claude/rules/security.md` A08）を反復単位で満たすため、
     // checksum 計算直後・warmup を含む全反復で検証する。
-    let one = |cs: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
+    let one = |cs: &mut f64,
+               parity: &mut Option<ParityStats>|
+     -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let c = a.clone().matmul(b.clone());
-        *cs = checksum(c)?;
+        // sync: materialize result on host and read elements（従来どおり
+        // 計測窓内）。
+        let out = readout(c)?;
+        *cs = out.iter().map(|&x| x as f64).sum();
+        let elapsed = start.elapsed();
         // イシュー #965: Burn(wgpu) Metal 経路は N>=512 で結果テンソル全ゼロを
         // 返す upstream 既知バグを持つ（tracel-ai/burn#4966 →
         // tracel-ai/cubek#283。`docs/perf/burn-wgpu-metal-gemm-zero-result.md`）。
         validate_gemm_checksum(*cs)?;
-        Ok(start.elapsed())
+        // イシュー #970: 要素単位検証は計測窓の外で行う（O(n^2)。GEMM 自体
+        // の O(n^3) に対する比較コストの混入を避けるため）。
+        let stats = reference.verify(&out)?;
+        *parity = Some(match parity.take() {
+            Some(prev) => prev.worst(stats),
+            None => stats,
+        });
+        Ok(elapsed)
     };
 
     for _ in 0..WARMUP_ITERS {
-        one(&mut cs)?;
+        one(&mut cs, &mut parity)?;
     }
     let mut durations = Vec::with_capacity(MEASURE_ITERS);
     for _ in 0..MEASURE_ITERS {
-        durations.push(one(&mut cs)?);
+        durations.push(one(&mut cs, &mut parity)?);
     }
     let st = stats(&durations)?;
     Record {
@@ -96,6 +133,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         iters: MEASURE_ITERS,
         mode: "fresh",
         init_s: None,
+        parity,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -202,6 +240,7 @@ fn run_train<B: AutodiffBackend>(
         iters: measured.len(),
         mode: "fresh",
         init_s: None,
+        parity: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -241,6 +280,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         iters: MEASURE_ITERS,
         mode: "fresh",
         init_s: None,
+        parity: None,
     }
     .emit(&cli.out)?;
     Ok(())

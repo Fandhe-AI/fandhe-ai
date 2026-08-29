@@ -71,6 +71,40 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   メモリ使用量の増加に留意する）
 - 使用例: `cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 2048 --mode reuse`
 
+### 要素単位検証（イシュー #970）
+
+`(a)` GEMM の checksum（全要素和）は、要素の入れ替わりや正負誤差の相殺で偶然一致しうる破損を
+見逃す。3 バイナリ（`bench-fandhe`/`bench-candle`/`bench-burn`）は `gemm` タスクの各反復で、
+結果を参照実装と**要素単位**で突合し、反復間の worst-case を JSONL の 4 フィールド
+（`parity_total`・`parity_fail_count`・`parity_max_abs_err`・`parity_max_rel_err`）として記録する。
+
+- **参照実装**: `bench-common::GemmReference`。本体 `backend-cpu::parity::matmul_reference_fma`
+  と同じ FMA 契約（f32 `mul_add`・逐次 k 昇順の演算順序固定）を持つ自前 GEMM を、行ブロック分割で
+  `std::thread::scope` 並列化したもの（各 `c[i][j]` の累積鎖は k 昇順のまま = 逐次実装と bit 完全
+  一致。`bench-common::parity::tests::compute_is_bit_identical_to_sequential_k_ascending`）。
+  fandhe-ai 0.3.0（crates.io 版）の facade は parity API を公開しておらず、candle/Burn を参照に
+  すると別途バイナリ間で結果を受け渡す仕組みが要る。自前参照は各バイナリが自己完結で計算できる
+  ため採用した（f64 累積の参照は「真値との差」という別の指標になり本体契約と整合しないため不採用。
+  結果テンソルをファイルへダンプして summarize.py 側で突合する方式は N=4096 で 64 MiB/行になり
+  コミット・転送が非現実的なため不採用）
+- **閾値**: `PARITY_ABS_TOL = 1e-5`・`PARITY_REL_TOL = 1e-3`。本体の数値一致契約
+  （`.claude/rules/coding-rust.md`「バックエンド構成」節）と同値であり、緩和はユーザー承認必須
+- **タイミング**（x86_64・12 コアホストでの実測値。`std::thread::available_parallelism()`
+  ベースで並列化されるため実効値は環境依存）: 参照 GEMM の計算は warmup 前・計測窓の外で
+  1 回だけ（N=1024 で約 210 ms、N=4096 で約 12.8 s）。要素単位の比較（`compare_elementwise`。
+  単スレッド）自体は毎反復（warmup 含む）行うが `start.elapsed()` の**後**（O(n²) の比較コストが
+  O(n³) の GEMM 計測時間へ混入しないようにするため。checksum の計算・`validate_gemm_checksum`
+  は従来どおり計測窓内のまま変更しない）で、N=4096 で 1 回あたり約 61 ms（40 反復合計で
+  約 2.4 s）。合計するとバイナリ 1 回起動あたり N=4096 で参照計算 + 全反復比較の合計は
+  約 15 秒程度であり、毎反復ではなくバイナリ 1 回起動（`run_all*.sh` の 1 組み合わせ）あたりの
+  追加コストとしては許容範囲と判断した（GEMM 自体の計測窓には影響しない）
+- **`summarize.py` の判定**: `parity_fail_count > 0`、または 4 フィールドの型・値が不正（`null` 含む）
+  な行を「無効（要素誤差超過）」として表で表示し GFLOP/s を `-` にする（`parity_status`）。本フィールド
+  追加前の JSONL（キー欄自体が無い）は「無効」ではなく「未検証（旧形式）」として区別する（キー欠損と
+  `null` を混同しない。データ有効性節・`--strict` 対象）
+- `train`/`infer` タスクは対象外（fandhe-ai の重み初期化が candle/Burn と異なる設計のため checksum
+  同様に比較不能。§「計測プロトコル」重み初期化の節を参照）
+
 ## 使い方
 
 ```bash
@@ -94,10 +128,20 @@ python3 summarize.py results/raw/results.jsonl --out /tmp/tables.md   # 入力�
 `summarize.py` は GEMM の checksum（全フレームワーク・全 mode で同一入力のため本来一致するはず）を
 size ごとに相互突合し、参照値と外れる行を表で「（無効: checksum 不一致）」表示する
 （既定では stderr へ警告のみ、`--strict` を付けると不一致 1 件以上で終了コード 2）。
-各バイナリ側にも `bench-common::validate_gemm_checksum` による縮退 checksum（全ゼロ・非有限）の
-emit 前ガードがある（`skipped.log` に理由付きで記録される）。**既知の無効データ**: Burn(wgpu)
-Metal GEMM の N>=512 は upstream 既知バグ（`docs/perf/burn-wgpu-metal-gemm-zero-result.md`。
+これとは独立に、要素単位検証（イシュー #970。前節参照）の閾値超過も同じ表で「（無効: 要素誤差超過
+fail=<k>/<total>, max_abs=<e>, max_rel=<e>）」と表示し、`--strict` の対象にする（両方に該当する行は
+理由を併記する）。各バイナリ側にも `bench-common::validate_gemm_checksum` による縮退 checksum
+（全ゼロ・非有限）の emit 前ガードがある（`skipped.log` に理由付きで記録される）。**既知の無効データ**:
+Burn(wgpu) Metal GEMM の N>=512 は upstream 既知バグ（`docs/perf/burn-wgpu-metal-gemm-zero-result.md`。
 イシュー #965）により結果テンソル全ゼロを返すため無効（`results/summary.md`「データ有効性の注記」参照）。
+コミット済みの raw JSONL（`results/raw/*.jsonl`）は本フィールド追加前に計測されたものであり、
+要素単位検証は「未検証（旧形式）」表示になる（本 PR で数値を捏造・再計測はしていない。
+次回再計測キャンペーンから要素単位検証が有効になる）。**「未検証（旧形式）」行も要素単位検証を
+一度も受けていない点では検証済みと同列に扱えないため `--strict` の対象に含まれる**（既定の
+非 `--strict` 実行では引き続き警告表示のみで終了コード 0）。このため、コミット済みの旧形式
+JSONL（`results/raw/*.jsonl`）に対して `--strict` を付けて実行すると終了コード 2 になる
+（`run_all*.sh`・CI は `summarize.py` を `--strict` なしでのみ呼ぶため、この経路は影響を受けない。
+要素単位検証つきで再計測した JSONL のみが `--strict` を通過する）。
 
 ## 依存ポリシー上の位置づけ
 
