@@ -396,11 +396,84 @@ where
     #[must_use = "追い出されたエントリは呼び出し元が Mutex 解放後に drop すること"]
     pub fn put(&self, class_bytes: u64, handle: H) -> Vec<(u64, H)> {
         let mut core = self.lock();
+        self.put_locked(&mut core, class_bytes, handle)
+    }
+
+    /// [`Self::put`]／[`Self::put_merged`] 共通のロック済み挿入本体
+    /// （フリーリスト push・巨大帯クラス別上限・総量上限＋グローバル
+    /// LRU の判定）。呼び出し元は既に `core` のロックを取得済みで
+    /// あることが前提（`&mut PoolCore<H>` を直接受け取る。
+    /// `evict_over_capacity`／`evict_over_huge_class_limit` と同型の
+    /// パターン）。
+    fn put_locked(&self, core: &mut PoolCore<H>, class_bytes: u64, handle: H) -> Vec<(u64, H)> {
         core.free.push((class_bytes, handle));
         core.cached_bytes = core.cached_bytes.saturating_add(class_bytes);
-        let mut evicted = self.evict_over_huge_class_limit(&mut core, class_bytes);
-        evicted.extend(self.evict_over_capacity(&mut core));
+        let mut evicted = self.evict_over_huge_class_limit(core, class_bytes);
+        evicted.extend(self.evict_over_capacity(core));
         evicted
+    }
+
+    /// **Metal 専用: `pending_pool_returns` からの合流専用 `put`**
+    /// （Cursor Bugbot High・codex P2 指摘対応。設計文書 §3.3「Metal」・
+    /// §3.4「`max_pool_bytes`／LRU 判定の対象」）。
+    ///
+    /// `record_pending_return(class_bytes)` 済み（= [`Self::
+    /// record_pending_return`] を呼んで `pending_pool_returns` へ push
+    /// 済み）のエントリを合流させる場合に**限り**使う。通常の [`Self::
+    /// put`]（新規貸出の即時返却経路。`pending_return_bytes` への計上を
+    /// 経ていない）には使わない。
+    ///
+    /// # 契約（誤用するとアンダーフローする）
+    /// 呼び出し元が対応する `record_pending_return` を呼んでいない
+    /// エントリにこのメソッドを使うと、`pending_return_bytes`
+    /// （`AtomicU64::fetch_sub`。`record_pending_merge` と同じく
+    /// `saturating_sub` の防御を持たない設計判断。同メソッド doc
+    /// comment「統計専用メソッドの検証」参照）が **`u64` 下限を
+    /// ラップアラウンドし、天文学的に巨大な値（`u64::MAX` 付近）へ
+    /// 恒久的にずれる**（対になる加算が存在しないため）。この誤差は
+    /// `PoolStats::pending_return_bytes` の表示を壊すだけでなく、
+    /// `max_pool_bytes`／LRU 判定（`cached_bytes + pending_return_bytes`）
+    /// を常時「上限超過」と誤判定させ、以後のあらゆる `put`／
+    /// `put_merged` が挿入直後に自分自身を含め全件を LRU 追い出しする
+    /// 致命的な退行になる。逆に `pending_pool_
+    /// returns` 経由のエントリを誤って [`Self::put`]（本メソッドではなく
+    /// 通常版）へ渡すと、対になる減算（`record_pending_merge`）が
+    /// 一切呼ばれず `pending_return_bytes` が恒久的に高い値のまま残る
+    /// （Cursor Bugbot High 指摘の退行はこちらの誤用パターン）。
+    ///
+    /// # ロック内原子化（`put` を先に呼んでから `record_pending_merge`
+    /// を呼ぶ旧稿の何が問題だったか）
+    /// 旧稿は `put`（フリーリスト挿入・`cached_bytes` 加算・総量上限
+    /// 判定）を呼んだ**後**に `record_pending_merge`（`pending_return_
+    /// bytes` の減算）を呼んでいた。この順序だと、`put` 内の総量上限
+    /// 判定（`cached_bytes + pending_return_bytes`。[`Self::
+    /// evict_over_capacity`]）が走る時点では、当該エントリの分が
+    /// `cached_bytes`（挿入済み）と `pending_return_bytes`（未減算）の
+    /// **両方**に二重計上されていた（codex P2 指摘）。上限ぎりぎりの
+    /// 状態で合流すると、この二重計上分だけ見かけ上の使用量が水増しされ、
+    /// 挿入したばかりの自分自身が即座に LRU 追い出しされる不具合が
+    /// 生じていた。
+    ///
+    /// 本メソッドは `core` の `Mutex` を取得した**同一ロック区間内**で
+    /// 「`pending_return_bytes` の減算」→「[`Self::put_locked`]
+    /// （挿入・総量上限判定）」の順に実行する。総量上限判定は減算後の
+    /// `pending_return_bytes` を参照するため二重計上が起こらない。
+    /// 減算自体は `AtomicU64::fetch_sub`（`pending_return_bytes` は
+    /// `Mutex<PoolCore<H>>` の外側にある独立した atomic フィールド）で
+    /// あり `core` の `Mutex` を必要としないが、本メソッドの呼び出し
+    /// 区間全体を通して `core` のロックを保持し続けることで、
+    /// 同じロックを取得する他スレッドの [`Self::put`]／[`Self::take`]
+    /// （いずれも総量上限判定や `cached_bytes` 更新のために `core`
+    /// ロックを要する）からは、このエントリが「`pending` 計上中」から
+    /// 「`cached` 計上中」へ遷移する過程が不可分な単一の操作として
+    /// 観測される（中間状態〈どちらにも計上されない窓・二重計上〉が
+    /// 外部から見えない）。
+    #[must_use = "追い出されたエントリは呼び出し元が Mutex 解放後に drop すること"]
+    pub fn put_merged(&self, class_bytes: u64, handle: H) -> Vec<(u64, H)> {
+        let mut core = self.lock();
+        self.pending_return_bytes
+            .fetch_sub(class_bytes, Ordering::Relaxed);
+        self.put_locked(&mut core, class_bytes, handle)
     }
 
     /// [`Self::put`] が記帳直後に呼ぶ巨大帯クラス別保持上限の強制本体。
@@ -502,6 +575,15 @@ where
     /// Metal 専用: `pending_pool_returns` からフリーリストへ合流させる
     /// ことを記録する lock-free な統計専用メソッド（`AtomicU64::
     /// fetch_sub`。`record_pending_return` と対になる。§3.1・§3.5）。
+    ///
+    /// **合流先のフリーリストへの実際の挿入（`put`）と組み合わせて使う
+    /// 場合は、本メソッドを単独で呼ぶのではなく [`Self::put_merged`]
+    /// を使うこと**（Cursor Bugbot High・codex P2 指摘対応。単独で
+    /// `put`→本メソッドの順に呼ぶと総量上限判定が二重計上する退行を
+    /// 再発させる。詳細は [`Self::put_merged`] doc comment）。本メソッド
+    /// 自体は `pending_return_bytes` の減算のみを行う低水準の統計専用
+    /// メソッドとして残す（`put_merged` の内部実装が使うほか、将来
+    /// 挿入を伴わない合流経路が生じた場合に備える）。
     ///
     /// 設計文書が保証するとおり、この減算は対応する加算より先に発生し
     /// 得ない構造（push/`take` と同一の `BatchSlots` クリティカル
@@ -949,6 +1031,86 @@ mod tests {
             evicted,
             vec![(huge, 1)],
             "3 件目で最古（1 件目）が追い出される"
+        );
+    }
+
+    // --- put_merged（Cursor Bugbot High・codex P2 是正の回帰テスト） ---
+
+    #[test]
+    fn put_merged_subtracts_pending_before_capacity_check_without_self_eviction() {
+        // codex P2 の再現条件: 上限ぎりぎり（上限 300B・pending 256B・
+        // cached 0）で 256B のエントリを合流させる。旧稿（put → 減算の
+        // 順）だと合流直後の判定時点で cached_bytes(256) +
+        // pending_return_bytes(256、未減算) == 512 > 300 となり、
+        // 挿入したばかりの自分自身が即座に LRU 追い出しされていた。
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: 300,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+        pool.record_pending_return(256);
+
+        let evicted = pool.put_merged(256, 1);
+        assert!(
+            evicted.is_empty(),
+            "減算後の pending_return_bytes（0）で判定すれば上限内であり自己追い出しは起きない"
+        );
+        assert_eq!(pool.stats().cached_bytes, 256, "合流分がフリーリストへ入る");
+        assert_eq!(
+            pool.stats().pending_return_bytes,
+            0,
+            "put_merged 自身が record_pending_merge 相当の減算を行う"
+        );
+    }
+
+    #[test]
+    fn put_merged_underflows_when_used_without_matching_pending_return() {
+        // 契約違反（`record_pending_return` を経ていないエントリへの
+        // 誤用）を明示する回帰テスト: 対になる加算が無いまま
+        // `AtomicU64::fetch_sub` を呼ぶと `u64` 下限をラップアラウンドし
+        // `pending_return_bytes` が天文学的に巨大な値へ恒久的にずれる
+        // （doc comment「誤用するとアンダーフローする」の直接検証。
+        // `saturating_sub` の防御を持たない設計判断であるため `0` には
+        // 張り付かない）。この誤差により以後の容量判定が常時「上限
+        // 超過」と誤判定し、挿入したばかりの自分自身を含め全件が
+        // LRU 追い出しされる。
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        let evicted = pool.put_merged(256, 1);
+        assert_eq!(
+            evicted,
+            vec![(256, 1)],
+            "誤って巨大化した pending_return_bytes により自己追い出しされる"
+        );
+        assert!(
+            pool.stats().pending_return_bytes > u64::MAX / 2,
+            "対の加算がない減算はラップアラウンドし巨大な値になる"
+        );
+        assert_eq!(
+            pool.stats().cached_bytes,
+            0,
+            "誤判定により挿入した分もすぐ追い出されフリーリストに残らない"
+        );
+    }
+
+    #[test]
+    fn put_merged_still_enforces_huge_class_limit_and_global_lru() {
+        // put_merged も put_locked を共有するため、巨大帯クラス別上限・
+        // グローバル LRU の判定は通常の put と同一に適用される。
+        let huge = 64 * 1024 * 1024u64;
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: huge * 10,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+        pool.record_pending_return(huge);
+        assert!(pool.put_merged(huge, 1).is_empty());
+
+        pool.record_pending_return(huge);
+        let evicted = pool.put_merged(huge, 2);
+        assert_eq!(
+            evicted,
+            vec![(huge, 1)],
+            "巨大帯クラス別上限（既定 1 エントリ／クラス）は put_merged 経由でも適用される"
         );
     }
 }

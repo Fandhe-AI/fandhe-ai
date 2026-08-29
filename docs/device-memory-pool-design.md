@@ -1433,7 +1433,20 @@ fresh/reuse の 4 通り）:
   更新する際の呼び出し順序（例: `record_pending_merge` と `put` の
   呼び出し順）。ロック**外**で行う限りにおいて、この順序自体が
   他の契約（不変条件・fail-closed 状態遷移）に影響しない範囲は実装時の
-  裁量とする。
+  裁量とする。**ただし `record_pending_merge`（減算）と `put`（挿入・
+  総量上限判定）を組み合わせる場合、両者を独立に〈`put` の後に
+  `record_pending_merge`〉呼ぶ構成は、`put` 内の総量上限判定
+  （`cached_bytes + pending_return_bytes`）が減算前の値を見るため
+  合流対象エントリを二重計上し、挿入したばかりの自分自身を即座に
+  LRU 追い出しする実害が生じる（codex P2・Cursor Bugbot High 指摘。
+  PR #1063 追加是正）。本実装は `SizeClassPool::put_merged`
+  （`record_pending_return` 済みのエントリの合流専用。`core` の
+  `Mutex` を取得した同一ロック区間内で「減算 → 挿入・容量判定」を行う
+  新設メソッド）を追加し、`crates/backend-metal/src/pool_pending.rs`
+  の `put_all`（即時返却専用・`SizeClassPool::put` を呼ぶ）と
+  `put_all_merged`（合流専用・`put_merged` を呼ぶ）を経路ごとに分離
+  することで解消した。これも §8.2 の「メソッド分割自体は実装時の裁量」
+  の範囲の変更である。**
 - **エラー種別の表現**: `BackendError::DeviceAllocationFailed(String)`
   の理由文字列によるフェーズ区別（§3.6 (2)）は本設計文書が定める
   **暫定の**非破壊な表現方式である。より型安全な表現（`BackendError`

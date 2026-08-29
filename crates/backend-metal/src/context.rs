@@ -435,16 +435,23 @@ impl MetalContext {
             // フェーズ (i) の合流（イシュー #1021・設計文書 §3.3
             // 「Metal」）: `waitUntilCompleted()` 完了後、**`Ok`／`Err`
             // いずれで復帰する場合も**、`pending_pool_returns` を
-            // `BatchSlots` の同一ロック区間内で `drain_for_merge`
-            // （`record_pending_merge` を対で呼ぶ。§3.1「統計専用
-            // メソッドの検証」）してから `put`（`Mutex<PoolCore<H>>` を
+            // `BatchSlots` の同一ロック区間内で `drain_for_merge` して
+            // から `put_all_merged`（`SizeClassPool::put_merged` が
+            // `pending_return_bytes` の減算とフリーリスト挿入・総量
+            // 上限判定を単一ロック区間内で行う。`Mutex<PoolCore<H>>` を
             // 要するため、ここでロックを解放した後に呼ぶ。§3.5「ロック
             // 順序規則」）する。合流はフェーズ (i) 自体が担う入出金で
             // あり「解放処理」ではないため、`first_error` の有無に
             // 関わらず必ず実行する。
             let drained = slots.pending_pool_returns.drain_for_merge();
             drop(slots);
-            pool_pending::put_all(drained);
+            // 合流経路は `put_all_merged`（`SizeClassPool::put_merged`）を
+            // 使う（`drain_for_merge` 由来のエントリは既に
+            // `record_pending_return` 済みのため。`put_all`〈即時返却
+            // 専用〉へ渡すと対の減算が呼ばれず `pending_return_bytes` が
+            // 恒久的に高止まりする。Cursor Bugbot High・codex P2 指摘
+            // 対応。PR #1063 追加是正）。
+            pool_pending::put_all_merged(drained);
 
             match first_error {
                 Some(err) => Err(err),

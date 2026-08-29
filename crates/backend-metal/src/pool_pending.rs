@@ -23,6 +23,15 @@
 //! 定義する [`PendingReturns<H>`] を `BatchSlots` へ埋め込み、
 //! [`PendingReturns::defer_or_release`]／[`PendingReturns::drain_for_merge`]
 //! を呼ぶだけの薄い配線に徹する（判定ロジックの二重管理を避ける）。
+//!
+//! [`put_all`]（即時返却専用）と [`put_all_merged`]（合流専用）は
+//! 経路ごとに関数を分ける（PR #1063 追加是正。Cursor Bugbot High・
+//! codex P2 指摘対応）。`defer_or_release` の即時返却（`in_flight ==
+//! false`）は `record_pending_return` を経ていないため [`put_all`]
+//! （`SizeClassPool::put`）へ、`drain_for_merge` の戻り値は
+//! `record_pending_return` 済みのため [`put_all_merged`]
+//! （`SizeClassPool::put_merged`）へ渡す契約とする（詳細は各関数の
+//! doc comment）。
 
 // 本番からの唯一の呼び出し元 `pool.rs`／`context.rs` は `cfg(target_os =
 // "macos")` 限定（`lib.rs`）のため、非 macOS ビルド（Linux 単体ビルド・
@@ -103,32 +112,55 @@ where
     /// `MetalContext::synchronize()` の `waitUntilCompleted()` 完了後、
     /// `BatchSlots` の同一ロック区間内で呼ぶ（設計文書 §3.3「Metal」・
     /// §3.5）。保留列を `mem::take` で空にして返す。呼び出し元は
-    /// 返された `Vec` を**ロック解放後**に `put_all` へ渡し、`put_all` が
-    /// フリーリスト挿入直後に 1 件ずつ `record_pending_merge` を呼ぶ
-    /// （`put` が `Mutex<PoolCore<H>>` を要するため。§3.5「ロック順序規則」）。
+    /// 返された `Vec` を**ロック解放後**に [`put_all_merged`] へ渡す
+    /// （`put_merged` が `Mutex<PoolCore<H>>` を要するため。§3.5
+    /// 「ロック順序規則」）。**[`put_all`]（即時返却専用）へは渡さない**
+    /// （本モジュール冒頭「合流専用 `put_all_merged` と即時返却専用
+    /// `put_all` の分離」参照。Cursor Bugbot High 指摘対応）。
     ///
     /// `synchronize()` が `Ok`／`Err` いずれで復帰する場合も呼ぶ契約
     /// （合流はフェーズ (i) 自体が担う入出金であり「解放処理」ではない。
     /// 設計文書 §3.3「Metal」・§3.6 (2)「`Err` の種別」）。
     pub(crate) fn drain_for_merge(&mut self) -> Vec<PendingReturn<H>> {
-        // `record_pending_merge`（`pending_return_bytes` の減算）はここでは
-        // 呼ばず、ロック解放後の `put_all` がフリーリスト挿入直後に 1 件ずつ
-        // 呼ぶ（codex P2 指摘対応: 先に全件を減算すると、`put` までの窓で
-        // 対象バッファが `pending_return_bytes` にも `cached_bytes` にも
-        // 計上されず、`max_pool_bytes` の資源上限を一時的に過小評価する。
-        // 挿入後減算なら窓の間は両方に計上される過大評価＝保守側に振れる）。
+        // `pending_return_bytes` の減算はここでは呼ばず、ロック解放後の
+        // `put_all_merged` が `SizeClassPool::put_merged`（`pending_
+        // return_bytes` の減算とフリーリスト挿入・総量上限判定を単一の
+        // ロック区間内で行う）へ委譲する（codex P2 指摘対応。詳細は
+        // `pool_core.rs::SizeClassPool::put_merged` doc comment）。
         std::mem::take(&mut self.entries)
     }
 }
 
 /// [`PendingReturns::defer_or_release`]（`in_flight == false` の即時
-/// 返却経路）・[`PendingReturns::drain_for_merge`] の戻り値をロック解放
-/// 後にまとめて `SizeClassPool::put` する共通ヘルパー（設計文書 §3.5
+/// 返却経路。`record_pending_return` を経ていない = `pending_return_
+/// bytes` への計上が無いエントリ）の戻り値をロック解放後に
+/// `SizeClassPool::put`（通常版）する共通ヘルパー（設計文書 §3.5
 /// 「ロック順序規則」: `Mutex<PoolCore<H>>` を要する Mutex 系操作は
-/// `BatchSlots` ロック解放後に呼ぶ）。追い出されたハンドル（`put` が
-/// 内部で LRU 破棄した分。将来 `SizeClassPool::put` が追い出しを返す
-/// 拡張をした場合に備えた形だが、本イシュー時点の `put` は戻り値を
-/// 持たないためここでは単に `put` を呼ぶだけの薄いラッパーに留める。
+/// `BatchSlots` ロック解放後に呼ぶ）。
+///
+/// # 合流専用 `put_all_merged` と即時返却専用 `put_all` の分離
+/// （Cursor Bugbot High・codex P2 指摘対応。PR #1063 追加是正）
+///
+/// 旧稿は本関数 1 つが両方の経路（即時返却・[`PendingReturns::
+/// drain_for_merge`] 由来の合流）を担い、`put` の後に無条件で
+/// `record_pending_merge`（`pending_return_bytes` の減算）を呼んでいた。
+/// これは 2 つの契約違反を生んでいた:
+///
+/// 1. **即時返却経路の誤減算（Cursor Bugbot High）**: 即時返却経路の
+///    エントリは `record_pending_return` を経ていない（`pending_
+///    return_bytes` へ一度も加算されていない）ため、対になる加算のない
+///    減算が発生し `saturating_sub` で `0` に張り付く恒久的なずれになる。
+/// 2. **合流経路の二重計上（codex P2）**: `put`（`cached_bytes` 加算・
+///    総量上限判定）を呼んだ**後**に減算していたため、`put` 内の
+///    総量上限判定の時点では当該エントリが `cached_bytes`（挿入済み）と
+///    `pending_return_bytes`（未減算）の**両方**に計上され、上限
+///    ぎりぎりの状態で合流すると挿入したばかりの自分自身が即座に
+///    LRU 追い出しされていた。
+///
+/// 本関数（即時返却専用）は通常の [`fandhe_ai_tensor_core::pool_core::
+/// SizeClassPool::put`] のみを呼ぶ（`pending_return_bytes` には一切
+/// 触れない）。合流専用の [`put_all_merged`] は `SizeClassPool::
+/// put_merged`（減算と挿入・容量判定を単一ロック区間内で行う）を呼ぶ。
 pub(crate) fn put_all<H: Send>(entries: Vec<PendingReturn<H>>) {
     for entry in entries {
         // `put` の戻り値（総量上限超過時の LRU 追い出し分。設計文書
@@ -136,10 +168,20 @@ pub(crate) fn put_all<H: Send>(entries: Vec<PendingReturn<H>>) {
         // （`SizeClassPool::put` の doc comment「Mutex 解放後に drop」
         // 契約を満たす）。
         let evicted = entry.pool.put(entry.class_bytes, entry.handle);
-        // フリーリスト挿入（`cached_bytes` 加算）後に `pending_return_bytes`
-        // を減算する（挿入前に減算すると、どちらにも計上されない窓が生じ
-        // 上限判定を一時的に過小評価する。`drain_for_merge` のコメント参照）。
-        entry.pool.record_pending_merge(entry.class_bytes);
+        drop(evicted);
+    }
+}
+
+/// [`PendingReturns::drain_for_merge`] の戻り値をロック解放後にまとめて
+/// `SizeClassPool::put_merged` する共通ヘルパー（上記「合流専用
+/// `put_all_merged` と即時返却専用 `put_all` の分離」参照）。
+pub(crate) fn put_all_merged<H: Send>(entries: Vec<PendingReturn<H>>) {
+    for entry in entries {
+        // `put_merged` が `pending_return_bytes` の減算・フリーリスト
+        // 挿入・総量上限判定を単一ロック区間内で行うため、二重計上・
+        // 未計上の窓のいずれも生じない（`pool_core.rs::SizeClassPool::
+        // put_merged` doc comment）。
+        let evicted = entry.pool.put_merged(entry.class_bytes, entry.handle);
         drop(evicted);
     }
 }
@@ -191,6 +233,16 @@ mod tests {
 
         put_all(vec![result.unwrap()]);
         assert_eq!(pool.stats().cached_bytes, 256);
+        // (a) Cursor Bugbot High 指摘の回帰テスト: 即時返却経路
+        // （`record_pending_return` を経ていない）は `put_all`
+        // （`SizeClassPool::put`。通常版）を通るため
+        // `pending_return_bytes` は挿入後も一切動かない（`put_all_
+        // merged` を誤って使うと対の加算がない減算でここが動いてしまう）。
+        assert_eq!(
+            pool.stats().pending_return_bytes,
+            0,
+            "put_all（即時返却専用）は pending_return_bytes を一切変更しない"
+        );
     }
 
     #[test]
@@ -206,18 +258,51 @@ mod tests {
         assert_eq!(
             pool.stats().pending_return_bytes,
             768,
-            "drain 時点では減算せず put_all の挿入直後に減算する（挿入前減算は \
-             どちらにも計上されない窓を生み上限判定を過小評価する。codex P2）"
+            "drain 時点では減算せず put_all_merged（SizeClassPool::put_merged）\
+             がロック内で減算・挿入・容量判定を一体で行う（codex P2 対応。\
+             `pool_core.rs::SizeClassPool::put_merged` doc comment 参照）"
         );
-        assert_eq!(pool.stats().cached_bytes, 0, "put はまだ呼ばれていない");
+        assert_eq!(
+            pool.stats().cached_bytes,
+            0,
+            "put_merged はまだ呼ばれていない"
+        );
 
-        put_all(drained);
+        put_all_merged(drained);
         assert_eq!(pool.stats().cached_bytes, 768);
         assert_eq!(
             pool.stats().pending_return_bytes,
             0,
-            "put_all がフリーリスト挿入直後に record_pending_merge を対で呼ぶ"
+            "put_all_merged が put_merged 経由で減算と挿入を対にして行う"
         );
+    }
+
+    #[test]
+    fn drain_for_merge_then_put_all_merged_near_limit_does_not_self_evict() {
+        // (b) codex P2 の再現条件を `PendingReturns` 経由の統合テストで
+        // 確認する: 上限 300B・pending 256B・cached 0 の状態で 256B の
+        // エントリを合流させても、挿入したばかりの自分自身が LRU
+        // 追い出しされない（`put_all_merged` が `put_merged` の減算
+        // 済み値で容量判定するため）。
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: 300,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: Arc<SizeClassPool<u32>> = Arc::new(SizeClassPool::new(cfg));
+        let mut pending = PendingReturns::default();
+
+        pending.defer_or_release(true, entry(&pool, 256, 1));
+        assert_eq!(pool.stats().pending_return_bytes, 256);
+
+        let drained = pending.drain_for_merge();
+        put_all_merged(drained);
+
+        assert_eq!(
+            pool.stats().cached_bytes,
+            256,
+            "合流したエントリが自己追い出しされずフリーリストへ残る"
+        );
+        assert_eq!(pool.stats().pending_return_bytes, 0);
     }
 
     #[test]
@@ -248,9 +333,9 @@ mod tests {
         assert_eq!(
             pool.stats().pending_return_bytes,
             1024,
-            "減算は put_all 側の責務（挿入直後）"
+            "減算は put_all_merged（put_merged）側の責務"
         );
-        put_all(drained);
+        put_all_merged(drained);
         assert_eq!(pool.stats().pending_return_bytes, 0);
     }
 
@@ -301,7 +386,11 @@ mod tests {
         assert_eq!(released.len() as u64, rounds);
 
         let expected_total: u64 = released.iter().map(|e| e.class_bytes).sum();
-        put_all(released);
+        // このテストは `defer_or_release(true, ..)` のみを使うため
+        // `released` は常に `drain_for_merge` 由来（`record_pending_
+        // return` 済み）のエントリのみで構成される。合流専用
+        // `put_all_merged` を使う。
+        put_all_merged(released);
 
         let stats = pool.stats();
         assert_eq!(
