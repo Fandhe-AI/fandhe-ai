@@ -112,6 +112,18 @@ pub enum CudaError {
     /// 参照）。
     WmmaUnavailable { detail: String },
 
+    /// tiled pipeline GEMM カーネル（イシュー #1033・
+    /// `kernels_tiled_pipeline::tiled_pipeline_f32_source()`）が
+    /// `CudaGemm::new` 時点でコンパイル・ロードに失敗しており、
+    /// `run_tiled_pipeline_f32` を呼べない状態であることを表す。
+    ///
+    /// cp.async（`cp.async.cg.shared.global`/`commit_group`/`wait_group`）
+    /// は sm_80（Ampere）以降限定のため、naive/tiled の 5 カーネルより
+    /// 失敗しうる環境が広い（`WmmaUnavailable` と同じ理由）。`CudaGemm::new`
+    /// はこの失敗を `Err` として早期 return せず本 variant の detail として
+    /// 保持し、naive/tiled 5 カーネルの可用性を道連れにしない。
+    TiledPipelineUnavailable { detail: String },
+
     /// カーネルソースのテンプレート展開（`kernels_mma::render_mma_f16`・
     /// `kernels_wmma_opt::render_wmma_tf32_opt`／`render_wmma_f16_opt`。
     /// イシュー #516）に渡された shape／タイル／段数の構成値が、境界検査・
@@ -268,6 +280,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::WmmaUnavailable { detail } => {
                 write!(f, "WMMA(TF32) GEMM kernel unavailable: {detail}")
+            }
+            CudaError::TiledPipelineUnavailable { detail } => {
+                write!(f, "tiled pipeline GEMM kernel unavailable: {detail}")
             }
             CudaError::InvalidKernelConfig { detail } => {
                 write!(f, "invalid kernel template config: {detail}")

@@ -312,6 +312,7 @@ mod kernels_mma_tf32;
 mod kernels_rmsnorm;
 mod kernels_sgd;
 mod kernels_softmax;
+mod kernels_tiled_pipeline;
 mod kernels_transpose;
 mod kernels_wmma;
 mod kernels_wmma_opt;

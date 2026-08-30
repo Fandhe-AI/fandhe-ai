@@ -42,6 +42,7 @@ use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels;
+use crate::kernels_tiled_pipeline;
 use crate::kernels_wmma_opt;
 use crate::module_cache::load_function_cached;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
@@ -264,6 +265,21 @@ pub struct CudaGemm {
     /// NVRTC コンパイルに失敗した場合の理由文字列（`wmma_tf32_staged_error`
     /// と同型の fail-soft 方針。base の可用性へは波及させない）。
     wmma_tf32_staged_swizzle_error: Option<String>,
+    /// イシュー #1033。`kernels_tiled_pipeline::tiled_pipeline_f32_source()`
+    /// （cp.async 多段パイプラインを Tensor Core 不使用の FP32 SIMT 経路へ
+    /// 移植した変種カーネル。既定 3 stage）のコンパイル済みハンドル。
+    /// `wmma_tf32` 系と同じ理由（cp.async は Ampere〈sm_80〉以降限定で
+    /// naive/tiled の 5 カーネルより失敗しうる環境が広い）で `Option` に
+    /// し、コンパイル失敗を `new` の早期 return に合流させない
+    /// （`Self::wmma_tf32` フィールドのドキュメンテーションコメントと同型
+    /// の fail-soft 方針）。本イシューのスコープでは `run_tiled_f32`
+    /// （既定本番経路）を置き換えず、[`CudaGemm::run_tiled_pipeline_f32`]
+    /// で明示的に呼べる選択可能な変種として追加するに留める
+    /// （`kernels_tiled_pipeline.rs` 冒頭コメント「位置づけ・非結線」）。
+    tiled_pipeline: Option<CudaFunction>,
+    /// `tiled_pipeline` が `None` の場合の失敗理由。`wmma_tf32_error` と
+    /// 同じ理由で文字列化して保持する。
+    tiled_pipeline_error: Option<String>,
 }
 
 /// GEMM 呼び出しの `m`/`n`/`k` とホスト側スライス長の整合性を検証する。
@@ -510,6 +526,93 @@ pub(crate) fn validate_wmma_tf32_staged_k_bound(k: u32) -> Result<(), CudaError>
 /// 選択条件であり拒否ではなくフォールバックが正しい契約のため）。
 pub(crate) fn wmma_tf32_staged_alignment_ok(n: u32, k: u32) -> bool {
     n.is_multiple_of(4) && k.is_multiple_of(4)
+}
+
+/// tiled pipeline カーネル（イシュー #1033）の cp.async 16 バイト転送粒度が
+/// 要求するグローバル側整列制約を検証する。[`wmma_tf32_staged_alignment_ok`]
+/// と同一の根拠（A の行ストライドは `k`、B の行ストライドは `n` であり、
+/// 共有メモリ側のタイル幅が 4 の倍数であることと合わせて `k % 4 == 0 &&
+/// n % 4 == 0` を満たさない限り 16 バイト境界からずれうる。
+/// `kernels_tiled_pipeline.rs` 冒頭コメント「整列制約」参照）。満たさない
+/// 形状は `run_tiled_pipeline_f32` が `CudaError::InvalidShape` を返す
+/// （`wmma_tf32_staged_alignment_ok` はフォールバック経路選択の条件だが、
+/// tiled pipeline は他経路へのフォールバックを持たない単独の選択可能
+/// 変種のため fail-closed に拒否する）。
+pub(crate) fn tiled_pipeline_alignment_ok(n: u32, k: u32) -> bool {
+    n.is_multiple_of(4) && k.is_multiple_of(4)
+}
+
+/// tiled pipeline カーネル固有の `k` 追加上限検証（イシュー #1033）。
+/// [`validate_tiled_k_bound`] と同一の理由（各 K タイル反復で `t * TP_BK +
+/// col0`〈`col0` は最大 `TP_BK - 4`〉相当を C の `int` 算術で計算するため、
+/// `k` が `i32::MAX - (TP_BK - 1)` を超えると当該算術が i32 の範囲で
+/// オーバーフローしうる）で、`TP_BK` 基準に独立して検証する。
+pub(crate) fn validate_tiled_pipeline_k_bound(k: u32) -> Result<(), CudaError> {
+    let limit = i32::MAX as u32 - (kernels_tiled_pipeline::TP_BK - 1);
+    if k > limit {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "k must not exceed i32::MAX - (TP_BK - 1) for tiled pipeline kernel \
+                 tile-index arithmetic: k={k}, limit={limit}, TP_BK={}",
+                kernels_tiled_pipeline::TP_BK
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// tiled pipeline カーネル（イシュー #1033・既定 stage 数固定）の
+/// [`crate::nvrtc::CudaKernelDescriptor`] を構築する。`kernel_specs` の
+/// 固定配列には含めない（本モジュールは #1032 との並行実装衝突回避のため
+/// 独立ファイルに切り出した選択可能変種であり、本番必須 5 カーネル・
+/// WMMA(TF32) 系 3 カーネルの一覧管理とは別枠で扱う。`kernels_tiled_pipeline.rs`
+/// 冒頭コメント「位置づけ・非結線」参照）。
+fn tiled_pipeline_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
+    CudaKernelDescriptor::new_with_compiled_dims(
+        "tiled_pipeline_f32",
+        fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+        kernels_tiled_pipeline::TP_BM,
+        kernels_tiled_pipeline::TP_BN,
+        kernels_tiled_pipeline::TP_BK,
+        kernels_tiled_pipeline::TP_DEFAULT_STAGES,
+        fandhe_ai_tensor_core::dispatch::DType::F32,
+        CompiledDims::DYNAMIC_ALL,
+    )
+}
+
+/// tiled pipeline カーネル（既定 stage 数固定）を単独で
+/// [`load_function_cached`] 経由でロードする。`compile_wmma_tf32` と同じ
+/// 理由（cp.async は sm_80 以降限定で失敗しうる環境が広い）で `CudaGemm::new`
+/// の早期 return には合流させず、呼び出し元で `tiled_pipeline_error` として
+/// 退避する。
+fn compile_tiled_pipeline(device: &CudaDevice) -> Result<CudaFunction, CudaError> {
+    let descriptor = tiled_pipeline_descriptor()?;
+    load_function_cached(
+        device,
+        descriptor,
+        kernels_tiled_pipeline::tiled_pipeline_f32_source(),
+        "gemm_tiled_pipeline_f32",
+    )
+}
+
+/// [`wmma_tf32_launch_config`] の tiled pipeline 版。ブロックタイル
+/// `kernels_tiled_pipeline::TP_BM/TP_BN`（64×64）を単位に `div_ceil` で
+/// グリッドを構築する。ブロック次元は `TP_BLOCK_THREADS`（256）の 1 次元
+/// （カーネル内で `tx = tid % TP_THREADS_X`・`ty = tid / TP_THREADS_X` へ
+/// 分解する契約。`kernels_tiled_pipeline.rs` 参照）。末尾ブロックの余剰は
+/// カーネル内の手動境界チェック（REQ-8）に委ねる契約は他 GEMM カーネルと
+/// 共通。
+fn tiled_pipeline_launch_config(m: u32, n: u32) -> LaunchConfig {
+    let grid_dim = (
+        n.div_ceil(kernels_tiled_pipeline::TP_BN),
+        m.div_ceil(kernels_tiled_pipeline::TP_BM),
+        1,
+    );
+    LaunchConfig {
+        grid_dim,
+        block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
+        shared_mem_bytes: 0,
+    }
 }
 
 /// [`kernel_specs`] の要素型。診断・ログ用ラベル（`label`）・NVRTC ソース
@@ -979,6 +1082,16 @@ impl CudaGemm {
             _ => (None, None, None),
         };
 
+        // イシュー #1033: `kernels_tiled_pipeline::tiled_pipeline_f32_source()`
+        // の cp.async パイプライン契約（`TP_STAGES >= 2` 等）は同モジュール側の
+        // コンパイル時 const assert が保証するため、ここでは追加の const
+        // アサーションを重複させない（`kernels_tiled_pipeline.rs` 冒頭の
+        // 契約検査群を単一の真実源とする）。
+        let (tiled_pipeline, tiled_pipeline_error) = match compile_tiled_pipeline(device) {
+            Ok(func) => (Some(func), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+
         let allocator = context_cache::cached_allocator(device)?;
 
         Ok(Self {
@@ -998,6 +1111,8 @@ impl CudaGemm {
             wmma_tf32_staged_swizzle,
             wmma_tf32_staged_swizzle_group_width,
             wmma_tf32_staged_swizzle_error,
+            tiled_pipeline,
+            tiled_pipeline_error,
         })
     }
 
@@ -1360,6 +1475,158 @@ impl CudaGemm {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
         self.run_f16_kernel(&self.tiled_f16, a, b, m, n, k, TILED_BLOCK_DIM)
+    }
+
+    /// イシュー #1033: `kernels_tiled_pipeline::tiled_pipeline_f32_source()`
+    /// を実行する。[`Self::run_tiled_f32`] の**選択可能な変種**（本番既定
+    /// 経路は置き換えない。`kernels_tiled_pipeline.rs` 冒頭コメント
+    /// 「位置づけ・非結線」参照）。
+    ///
+    /// ホスト側形状検証は `validate_gemm_dims` に加え、
+    /// `validate_tiled_pipeline_k_bound`・cp.async 16 バイト整列検証
+    /// （[`tiled_pipeline_alignment_ok`]。満たさない形状は
+    /// `CudaError::InvalidShape` を返す。フォールバック経路を持たない
+    /// 単独の選択可能変種のため fail-closed に拒否する契約）を経由する。
+    /// カーネル自体が使用不能（`new` 時のコンパイル失敗。cp.async は
+    /// sm_80 以降限定）な場合は `CudaError::TiledPipelineUnavailable` を
+    /// 返す。
+    pub fn run_tiled_pipeline_f32(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        let func =
+            self.tiled_pipeline
+                .as_ref()
+                .ok_or_else(|| CudaError::TiledPipelineUnavailable {
+                    detail: self.tiled_pipeline_error.clone().unwrap_or_else(|| {
+                        "tiled pipeline kernel unavailable for an unknown reason".to_string()
+                    }),
+                })?;
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_tiled_pipeline_k_bound(k)?;
+        if !tiled_pipeline_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 \
+                     (cp.async 16-byte transfer granularity): n={n}, k={k}"
+                ),
+            });
+        }
+        self.run_f32_kernel(
+            func,
+            a,
+            b,
+            m,
+            n,
+            k,
+            (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
+        )
+    }
+
+    /// [`Self::run_tiled_pipeline_f32`] が使用可能かを返す（`new` 時の
+    /// cp.async カーネルコンパイルに成功しているか）。`wmma_tf32_opt_available`
+    /// と同じ理由（形状に依らない静的な可用性照会 API。テスト・bench
+    /// example が実行前に判定できるようにするため）で公開する。
+    pub fn tiled_pipeline_available(&self) -> bool {
+        self.tiled_pipeline.is_some()
+    }
+
+    /// [`Self::tiled_pipeline_available`] が `false` の場合の失敗理由
+    /// （`wmma_tf32_opt_unavailable_reason` と同じ理由で公開する）。
+    pub fn tiled_pipeline_unavailable_reason(&self) -> Option<&str> {
+        self.tiled_pipeline_error.as_deref()
+    }
+
+    /// `device` 上で任意のステージ数（2〜4）の tiled pipeline カーネルを
+    /// オンデマンドでコンパイルする（イシュー #1033・
+    /// `examples/gemm_tiled_pipeline_bench.rs` の 3 vs 4 stage 比較専用。
+    /// `kernels_tiled_pipeline.rs` 冒頭コメント「stages=4 版はベンチ用途に
+    /// 限りオンデマンドでコンパイルする」参照）。本番オブジェクト
+    /// （[`new`](Self::new) が保持する既定ステージ数固定の
+    /// [`Self::tiled_pipeline`]）の初期化コストには影響しない独立した
+    /// コンパイル経路であり、`&self` を取らない（`CudaGemm` の状態に
+    /// 触れず `device` のみから完結するため）。
+    pub fn compile_tiled_pipeline_variant(
+        device: &CudaDevice,
+        stages: u32,
+    ) -> Result<CudaFunction, CudaError> {
+        let source = kernels_tiled_pipeline::tiled_pipeline_f32_source_with_stages(stages)?;
+        let descriptor = CudaKernelDescriptor::new_with_compiled_dims(
+            "tiled_pipeline_f32_variant",
+            fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+            kernels_tiled_pipeline::TP_BM,
+            kernels_tiled_pipeline::TP_BN,
+            kernels_tiled_pipeline::TP_BK,
+            stages,
+            fandhe_ai_tensor_core::dispatch::DType::F32,
+            CompiledDims::DYNAMIC_ALL,
+        )?;
+        load_function_cached(device, descriptor, &source, "gemm_tiled_pipeline_f32")
+    }
+
+    /// デバイス常駐済みの A/B/C バッファに対して、任意のコンパイル済み
+    /// tiled pipeline カーネル（既定 3 stage の [`Self::tiled_pipeline`]、
+    /// または [`Self::compile_tiled_pipeline_variant`] が返す任意段数の
+    /// 変種）を起動し、完了を待たずに投入する（`#1013` の非同期投入契約。
+    /// [`Self::launch_tiled_f32`] と同じ「GPU 実行のみ」区間をベンチ計測
+    /// できるよう公開する）。
+    ///
+    /// ホスト側形状検証は [`Self::run_tiled_pipeline_f32`] と同一
+    /// （`validate_gemm_dims`・`validate_tiled_pipeline_k_bound`・
+    /// cp.async 16 バイト整列検証）に加え、デバイスバッファ長
+    /// （`a_dev`/`b_dev`/`c_dev`）が `m/n/k` と 1:1 対応することを起動前に
+    /// 検証する（`launch_tiled_f32` と同じ「safe な公開 API である以上、
+    /// 呼び出し元の契約違反から独立して GPU 側 OOB を防ぐ」判断）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_tiled_pipeline_f32(
+        &self,
+        func: &CudaFunction,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_pipeline_k_bound(k)?;
+        if !tiled_pipeline_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 \
+                     (cp.async 16-byte transfer granularity): n={n}, k={k}"
+                ),
+            });
+        }
+        validate_output_len(c_dev.len(), m, n)?;
+
+        let cfg = tiled_pipeline_launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `run_f32_kernel`／`launch_tiled_f32` と同一の根拠。
+        // カーネル引数（a_dev/b_dev/c_dev・m_i/n_i/k_i）は上記で検証済みの
+        // m/n/k と 1:1 対応し、カーネル内の手動境界チェック（cp.async
+        // src_size ゼロ充填・エピローグ guarded store。
+        // `kernels_tiled_pipeline.rs` 冒頭コメント「REQ-8」参照）と合わせて
+        // OOB 読み書きが起きない根拠とする。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／明示 `synchronize`）へ委ねる。
+        Ok(())
     }
 
     /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM を実行
