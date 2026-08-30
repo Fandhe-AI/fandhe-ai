@@ -89,6 +89,7 @@ fandhe-ai/
     ├── inference-forward-fixed-cost-design.md # 推論 forward の固定費削減（tape 不要経路・活性化デバイス常駐チェーン）の設計・bit-exactness 契約・実測記録（#1028）
     ├── kernel-fusion.md     # TASK-12.2b カーネル融合の適用範囲・限界（複合WLで融合を性能目標の前提にしない。#168）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
+    ├── matmul-vjp-zero-copy-decision.md # matmul VJP の転置ゼロコピー化（`eval::matmul` の stride 対応）・CPU BLIS／CUDA／Metal gemm 結線を別イシューへ引き継ぐスコープ判断・実測記入欄（#1043 ツリー・#1046）
     ├── oss-comparison-harness-decision.md # OSS 直接比較ハーネス（matrixmultiply・gemm crate・MLX・PyTorch）の恒久化・本体 workspace 外配置の設計判断・matrixmultiply/gemm の許容依存第 9 区分〈ベンチ比較対象〉としての条件付きユーザー承認記録（#755）
     ├── perf/                # 性能実測・下限確定の記録群（`performance-floor-decision.md` ほか。GEMM 最適化ツリー #479 の実測記録を含む）
     │   ├── performance-floor-decision.md # REQ-8 段階的下限の確定判断・追補記録（#158・#386・#393・#577）

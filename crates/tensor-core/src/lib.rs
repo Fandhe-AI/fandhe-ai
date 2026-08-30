@@ -89,6 +89,22 @@
 //! 呼ぶ構成のため（`tensor-core` → `autodiff` の逆依存を作れないため）、
 //! `FusionGraph`／`detect_fusion` は本クレート内では `plan.rs` の
 //! `#[cfg(test)]`（`from_segment` の単体テスト）からのみ使用される。
+//!
+//! `layout`（`backend-metal` 専用モジュール〈#1040〉の 2 次元 view 転置
+//! 分類・先頭次元 collapse）は、イシュー #1046 で `autodiff::eval::matmul`
+//! と共用するため一時的に本クレートへ移設したが、`pub mod layout` が
+//! `fandhe-ai-tensor-core`（crates.io 公開クレート）の公開面へ内部
+//! レイアウト型を露出させてしまう問題が codex-review で指摘された
+//! （`#[doc(hidden)]` は rustdoc 表示を隠すのみで Rust の可視性・semver
+//! 上の公開面は変えないため契約にできない。AGENTS.md「内部表現の公開
+//! API への漏出は P1」。PR #1077）。そのため PR #1077 で `backend-metal`
+//! （`crates/backend-metal/src/layout.rs`）・`autodiff`
+//! （`crates/autodiff/src/layout.rs`）それぞれのクレート内非公開
+//! モジュールへ分類ロジックを複製する形へ差し戻し、本クレートからは
+//! `layout` モジュール自体を削除した。両モジュールは共通のシェーダ
+//! 添字契約（`backend-metal::shaders::gemm.metal` の
+//! `gemm_tiled_bias_act`）を正とする双子モジュールであり、変更する際は
+//! 両方に反映する（設計判断の記録は `docs/matmul-vjp-zero-copy-decision.md`）。
 
 mod backend_ops;
 mod broadcast;
