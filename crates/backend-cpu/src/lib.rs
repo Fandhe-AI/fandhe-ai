@@ -116,7 +116,9 @@ pub mod softmax;
 
 pub use device::CpuDeviceProvider;
 pub use elementwise::{
-    add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,
+    add, add_slice, add_slice_force_parallel, add_slice_force_serial, exp, exp_slice,
+    exp_slice_force_parallel, exp_slice_force_serial, mul, mul_slice, mul_slice_force_parallel,
+    mul_slice_force_serial, relu, relu_slice, tanh, tanh_slice,
 };
 pub use fused_elementwise::run_fused_elementwise;
 pub use gemm::{
