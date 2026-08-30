@@ -349,7 +349,26 @@ mod transpose;
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use elementwise::CudaElementwise;
 pub use error::CudaError;
-pub use gemm::{CudaGemm, TiledPipelineFunction};
+pub use gemm::CudaGemm;
+// `TiledPipelineFunction`／`CudaGemm::compile_tiled_pipeline_variant`／
+// `CudaGemm::launch_tiled_pipeline_f32` はベンチ専用の常駐 API（イシュー
+// #1033。`gemm.rs::TiledPipelineFunction` 冒頭ドキュメンテーションコメント
+// 参照。本番ディスパッチ経路は `CudaGemm::run_tiled_pipeline_f32`〈選択可能
+// 変種〉／既定の `run_tiled_f32` であり、両者とも常駐ハンドルを要求しない）。
+// PR #1071 codex-review P1 指摘の是正: 従来は本ブロックへ無条件 re-export
+// しており、`SpecializedMmaKernelHandle` と同じ「テスト・ベンチ専用」の
+// 意図に反して通常ビルドの安定した公開 API 面へ漏出していた。
+// `SpecializedMmaKernelHandle` と同じ `internal-diagnostics` feature
+// （既定 off）でゲートし、`examples/gemm_tiled_pipeline_bench.rs`・
+// `tests/cpu_cuda_tiled_pipeline_parity.rs` の常駐 API 使用箇所は
+// `Cargo.toml` の `[[example]]`/`[[test]]` セクションで
+// `required-features = ["internal-diagnostics"]` を指定して到達する
+// （`cargo test --all-features` でのみビルド・実行される）。
+// `TiledPipelineFunction` を返す・受け取る公開関数（`compile_tiled_pipeline_
+// variant`・`launch_tiled_pipeline_f32`。`gemm.rs` 側で同 feature ゲート
+// 済み）以外にこの型を公開面へ露出する経路はない。
+#[cfg(feature = "internal-diagnostics")]
+pub use gemm::TiledPipelineFunction;
 pub use gemm_auto::{
     CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
     TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,

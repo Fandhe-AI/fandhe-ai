@@ -1702,14 +1702,6 @@ impl CudaGemm {
         n: u32,
         k: u32,
     ) -> Result<Vec<f32>, CudaError> {
-        let func =
-            self.tiled_pipeline
-                .as_ref()
-                .ok_or_else(|| CudaError::TiledPipelineUnavailable {
-                    detail: self.tiled_pipeline_error.clone().unwrap_or_else(|| {
-                        "tiled pipeline kernel unavailable for an unknown reason".to_string()
-                    }),
-                })?;
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
         validate_tiled_pipeline_k_bound(k)?;
         if !tiled_pipeline_alignment_ok(n, k) {
@@ -1720,6 +1712,25 @@ impl CudaGemm {
                 ),
             });
         }
+        // codex-review P2 指摘（PR #1071）: 形状検証（`validate_gemm_dims`・
+        // `validate_tiled_pipeline_k_bound`・整列検証）を先に完了させ、
+        // `m == 0 || n == 0`（他の `run_*_f32` 系と同じ正当な no-op 形状。
+        // 本関数コメント「ホスト側形状検証」参照）を `self.tiled_pipeline`
+        // ハンドル参照より前に判定する。従来は逆順だったため、cp.async
+        // 非対応環境（sm_80 未満・NVRTC コンパイル失敗等で `tiled_pipeline`
+        // が `None`）では正当なゼロ次元入力まで
+        // `CudaError::TiledPipelineUnavailable` として拒否されていた。
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        let func =
+            self.tiled_pipeline
+                .as_ref()
+                .ok_or_else(|| CudaError::TiledPipelineUnavailable {
+                    detail: self.tiled_pipeline_error.clone().unwrap_or_else(|| {
+                        "tiled pipeline kernel unavailable for an unknown reason".to_string()
+                    }),
+                })?;
         self.run_f32_kernel(
             func.as_cuda_function(),
             a,
@@ -1754,6 +1765,15 @@ impl CudaGemm {
     /// `Self::tiled_pipeline`）の初期化コストには影響しない独立した
     /// コンパイル経路であり、`&self` を取らない（`CudaGemm` の状態に
     /// 触れず `device` のみから完結するため）。
+    ///
+    /// **公開面ゲート（codex-review P1 指摘・PR #1071）**: 本関数はベンチ
+    /// 専用（`examples/gemm_tiled_pipeline_bench.rs`）であり本番ディスパッチ
+    /// 経路（`run_tiled_pipeline_f32`・既定 `run_tiled_f32`）からは呼ばれ
+    /// ない。`SpecializedMmaKernelHandle::compile`（`gemm_auto.rs`）と同じ
+    /// `internal-diagnostics` feature（既定 off）でゲートし、通常ビルドの
+    /// 安定した公開 API 面から除外する（`lib.rs` の `TiledPipelineFunction`
+    /// re-export コメント参照）。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn compile_tiled_pipeline_variant(
         device: &CudaDevice,
         stages: u32,
@@ -1828,6 +1848,14 @@ impl CudaGemm {
     /// `validate_output_len` の直後（launch config 構築前）で no-op を
     /// `Ok(())` として返し、`c_dev`（論理長 0）に触れず・カーネルを起動
     /// せずに `run_tiled_pipeline_f32` と同じ契約へ揃える。
+    ///
+    /// **公開面ゲート（codex-review P1 指摘・PR #1071）**: 本関数は
+    /// `compile_tiled_pipeline_variant` と同じくベンチ専用の常駐 API
+    /// （`examples/gemm_tiled_pipeline_bench.rs`）であり本番ディスパッチ
+    /// 経路からは呼ばれない。同じ `internal-diagnostics` feature（既定
+    /// off）でゲートする（`lib.rs` の `TiledPipelineFunction` re-export
+    /// コメント参照）。
+    #[cfg(feature = "internal-diagnostics")]
     #[allow(clippy::too_many_arguments)]
     pub fn launch_tiled_pipeline_f32(
         &self,
