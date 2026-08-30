@@ -17,7 +17,7 @@
 //! FMA 契約統一済みのため、`MatMul` の VJP もここを経由するだけで
 //! 契約を引き継ぐ）。
 
-use fandhe_ai_tensor_core::{BackendOps, Tensor};
+use fandhe_ai_tensor_core::{BackendError, BackendOps, Tensor};
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
@@ -124,7 +124,42 @@ pub(crate) fn vjp(
         } => {
             let pred_val = materialize_fallible(nodes, ops, pred)?;
             let target_val = materialize_fallible(nodes, ops, target)?;
-            let (dpred, dtarget) = mse_loss_vjp(pred_val, target_val, upstream, reduction);
+            let n = pred_val.numel();
+            let (dpred, dtarget) = if n == 0 {
+                // `mse_loss_vjp` と同じゼロ除算回避（`scale` 計算前に
+                // 早期 return。融合カーネル呼び出しを回避することで
+                // `n == 0` を渡すバックエンド実装契約を単純に保つ）。
+                let zeros = build_tensor(vec![0f32; 0], pred_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = mse_loss_scale(g_value, n, reduction);
+                match ops.mse_loss_backward(pred_val, target_val, scale) {
+                    Ok(dpred) => {
+                        if dpred.shape() != pred_val.shape() {
+                            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                    lhs: dpred.shape().to_vec(),
+                                    rhs: pred_val.shape().to_vec(),
+                                },
+                            )));
+                        }
+                        // `dTarget = −dPred`（`backend_ops.rs::BackendOps::
+                        // mse_loss_backward` doc 参照）。カーネル側は
+                        // `dPred` のみを計算する契約のため、符号反転は
+                        // ホスト側の単純な逐次 map（新規 GPU カーネル
+                        // 起動・D2H を増やさない）で行う。
+                        let dtarget_data: Vec<f32> =
+                            dense_vec(&dpred).iter().map(|&v| -v).collect();
+                        let dtarget = build_tensor(dtarget_data, dpred.shape());
+                        (dpred, dtarget)
+                    }
+                    Err(BackendError::Unsupported(_)) => {
+                        mse_loss_vjp(pred_val, target_val, upstream, reduction)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                }
+            };
             vec![(pred, dpred), (target, dtarget)]
         }
         Op::CrossEntropyLoss {
@@ -505,10 +540,7 @@ fn mse_loss_vjp(
     let g_value = dense_vec(g).first().copied().unwrap_or(0.0);
     let pred_data = dense_vec(pred);
     let target_data = dense_vec(target);
-    let scale = match reduction {
-        Reduction::Mean => g_value * 2.0 / n as f32,
-        Reduction::Sum => g_value * 2.0,
-    };
+    let scale = mse_loss_scale(g_value, n, reduction);
     let dpred_data: Vec<f32> = pred_data
         .iter()
         .zip(target_data.iter())
@@ -518,6 +550,20 @@ fn mse_loss_vjp(
     let dpred = build_tensor(dpred_data, &shape);
     let dtarget = build_tensor(dtarget_data, &shape);
     (dpred, dtarget)
+}
+
+/// `mse_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
+/// `Op::MseLoss` 分岐。イシュー #1045）の双方が使う `scale` 算出の
+/// 共有ロジック: `dPred = scale·(pred−target)`（`Mean` は `g·2/n`、
+/// `Sum` は `g·2`）。`BackendOps::mse_loss_backward` の呼び出し元が
+/// このスケールを事前計算して渡す契約（`backend_ops.rs` doc 参照）
+/// であり、フォールバック（`mse_loss_vjp`）と融合カーネル経路とで
+/// 同一の数式を 2 か所に別実装しないための切り出し。
+fn mse_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
+    match reduction {
+        Reduction::Mean => g_value * 2.0 / n as f32,
+        Reduction::Sum => g_value * 2.0,
+    }
 }
 
 /// `CrossEntropyLoss(logits, targets)` の VJP:

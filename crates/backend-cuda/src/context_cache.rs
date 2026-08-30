@@ -418,6 +418,19 @@ pub(crate) fn cached_sgd(device: &CudaDevice) -> Result<Arc<crate::sgd::CudaSgd>
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::mse::CudaMse`] スイートを
+/// プロセス内キャッシュから取得する（イシュー #1045。キーは
+/// [`ContextKey`]。`cached_gemm` 冒頭コメント参照）。
+/// `ops::CudaBackendOps::mse_loss`／`mse_loss_backward` の唯一の呼び出し
+/// 先。
+pub(crate) fn cached_mse(device: &CudaDevice) -> Result<Arc<crate::mse::CudaMse>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::mse::CudaMse>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::mse::CudaMse::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`CudaAllocator`]（出力バッファの
 /// サイズクラス別プール。イシュー #1020・REQ-14）をプロセス内キャッシュ
 /// から取得する。キーは [`ContextKey`]（ordinal + context の同一性）

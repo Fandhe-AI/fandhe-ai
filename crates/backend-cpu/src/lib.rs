@@ -108,6 +108,7 @@ pub mod fused_elementwise;
 pub mod gemm;
 pub mod gemm_blis;
 pub mod memory;
+mod mse;
 mod ops;
 pub mod parity;
 pub mod reduction;
