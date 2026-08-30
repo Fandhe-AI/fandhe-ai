@@ -1308,6 +1308,41 @@ class TargetGateTests(unittest.TestCase):
         self.assertEqual(rec_b["status"], "undeterminable")
         self.assertIn("fandhe-ai 未計測", rec_b["reason"])
 
+    def test_missing_task_for_measured_device_is_undeterminable(self):
+        # P0 回帰（イシュー #1051 codex-review 指摘）: cpu で infer は
+        # fandhe-ai/candle 双方計測済みだが、gemm/train が丸ごと未計測
+        # （実行時失敗等で 0 件）の場合、以前は devices_in がタスク単位
+        # だったため cpu×gemm/train の組そのものが列挙されず「全達成」に
+        # 混入しなかった。デバイス集合をファイル横断に変更した現在は
+        # cpu×gemm/cpu×train の組が判定不能として明示的に列挙される。
+        rows = [
+            _infer_row(framework="fandhe-ai", device="cpu"),
+            _infer_row(framework="candle", device="cpu"),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        gemm_rec = next(r for r in records if r["task"] == "gemm" and r["device"] == "cpu")
+        train_rec = next(r for r in records if r["task"] == "train" and r["device"] == "cpu")
+        self.assertEqual(gemm_rec["status"], "undeterminable")
+        self.assertIn("gemm 未計測", gemm_rec["reason"])
+        self.assertEqual(train_rec["status"], "undeterminable")
+        self.assertIn("fandhe-ai 未計測", train_rec["reason"])
+
+    def test_devices_restricted_to_fandhe_and_target_framework(self):
+        # P1 回帰（イシュー #1051 codex-review 指摘）: burn 専用デバイス
+        # （metal）は --target candle 指定時のデバイス集合に含めない。
+        # 含めてしまうと、candle 側が計測していない metal に対して
+        # 「candle 未計測」の判定不能レコードが生成されてしまう
+        # （burn/candle いずれも計測していないだけで判定不能とすべき
+        # 対象ではない）。
+        rows = [
+            _infer_row(framework="fandhe-ai", device="cpu"),
+            _infer_row(framework="candle", device="cpu"),
+            _infer_row(framework="burn", device="metal"),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        self.assertFalse(any(r["device"] == "metal" for r in records))
+        self.assertTrue(any(r["device"] == "cpu" for r in records))
+
 
 class MainTargetExitCodeTests(unittest.TestCase):
     def _run_main(self, path, target=None, strict=False):
@@ -1342,8 +1377,17 @@ class MainTargetExitCodeTests(unittest.TestCase):
             os.unlink(path)
 
     def test_all_achieved_exits_0(self):
+        # イシュー #1051 P0 修正（codex-review 指摘）: `target_gate` は
+        # デバイス集合をファイル全体（gemm/train/infer 横断）から導出する
+        # ため、GATE_TASKS の一部タスクが丸ごと欠落したまま「全達成」を
+        # 装うのを避ける目的で、gemm/train/infer の 3 タスク全てを
+        # fandhe-ai/candle 双方で満たす完全なフィクスチャにする。
         path = _write_jsonl(
             [
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
                 _infer_row(framework="fandhe-ai", median_s=0.0001),
                 _infer_row(framework="candle", median_s=0.0005),
             ]
@@ -1365,6 +1409,21 @@ class MainTargetExitCodeTests(unittest.TestCase):
         try:
             code, _, _ = self._run_main(path)
             self.assertEqual(code, 0)
+        finally:
+            os.unlink(path)
+
+    def test_gate_records_empty_exits_3_not_0(self):
+        # P0 回帰（イシュー #1051 codex-review 指摘）: 入力 JSONL に
+        # fandhe-ai/target いずれの行も存在しない（ここでは burn のみ）
+        # 場合、以前は gate_records_all が空のまま unmet=0・
+        # undeterminable=0 で exit 0（「全達成」の誤判定）になっていた。
+        # 計測対象が丸ごと欠落した入力は判定不能として非ゼロ終了する。
+        path = _write_jsonl([_infer_row(framework="burn", median_s=0.002)])
+        try:
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("目標達成ゲート", out)
         finally:
             os.unlink(path)
 

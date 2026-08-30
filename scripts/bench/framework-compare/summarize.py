@@ -710,6 +710,41 @@ def _gate_row_invalid_reason(rows, gemm_mismatch_map, row):
     return None
 
 
+def _gate_devices(rows, target):
+    """`target_gate` が列挙対象とするデバイス集合を返す。
+
+    task 単位（`devices_in(rows, task, ...)`）ではなく **ファイル内の
+    fandhe-ai/target 行全体**からデバイス集合を導出する。理由は 2 点
+    （イシュー #1051 codex-review 指摘）:
+
+    - P1: `devices_in` は framework を絞らないため、`--target candle`
+      指定時に burn 専用デバイス（candle 側が存在しないデバイス）まで
+      対象に入り、双方未計測でも「fandhe-ai 未計測」の判定不能レコード
+      が生成されてしまう。framework を `("fandhe-ai", target)` に限定
+      することで防ぐ。
+    - P0: task 単位で集合を作ると、あるデバイスで特定 task（例: train）
+      が fandhe-ai/target 双方とも 0 件（実行時失敗等で計測が丸ごと
+      欠落）の場合、そのデバイスは当該 task の列挙対象から漏れ、
+      `target_gate` がそのデバイス×task の組を一切生成しない
+      （＝判定不能ではなく「そもそも存在しない」扱いになり、後段の
+      `gate_records_all` 集計が「全達成」を誤って通す）。task をまたいで
+      デバイス集合を 1 つに統一することで、あるデバイスが他 task で
+      計測されている限りは当該デバイス×task の組が必ず列挙され、
+      `fandhe_row`/`target_row` が `None` の場合の既存の「未計測」判定
+      経路（本関数の呼び出し元 `target_gate` 内）で判定不能として
+      捕捉される（run_all.sh/run_all_cuda.sh は 1 ファイル内で device
+      ごとに gemm/train/infer を必ず揃って計測する構成のため、
+      「そのデバイスは対象外」と「そのデバイスの当該 task だけ欠落」を
+      混同しない）。
+    """
+    present = {
+        r["device"]
+        for r in rows
+        if r.get("framework") in ("fandhe-ai", target) and r.get("device") in DEVICE_ORDER
+    }
+    return [d for d in DEVICE_ORDER if d in present]
+
+
 def target_gate(rows, target):
     """fandhe-ai と `target`（candle/burn）の中央値を同一ファイル内で
     突合し、達成／未達／判定不能を判定する（イシュー #1051）。
@@ -725,11 +760,8 @@ def target_gate(rows, target):
     gemm_mismatch_map = {_row_key(r): (ref, ref_label) for r, ref, ref_label in mismatches}
 
     records = []
+    devices = _gate_devices(rows, target)
     for task in GATE_TASKS:
-        devices = sorted(
-            set(devices_in(rows, task, mode="fresh")) | set(devices_in(rows, task, mode="reuse")),
-            key=lambda d: DEVICE_ORDER.index(d) if d in DEVICE_ORDER else len(DEVICE_ORDER),
-        )
         for device in devices:
             if task == "gemm":
                 sizes = sorted(
@@ -741,6 +773,29 @@ def target_gate(rows, target):
                         and r["framework"] in ("fandhe-ai", target)
                     }
                 )
+                if not sizes:
+                    # P0: このデバイスでは gemm が fandhe-ai/target
+                    # 双方とも 0 件（サイズが 1 つも存在しない）。
+                    # sizes が空のまま `for size in sizes` を素通りさせる
+                    # と、このデバイス×task の組が gate_records_all へ
+                    # 一切現れず「全達成」の誤判定に加担する。size=None
+                    # の判定不能レコードを明示的に積む。
+                    records.append(
+                        {
+                            "task": task,
+                            "device": device,
+                            "size": None,
+                            "fandhe_mode": None,
+                            "target_mode": None,
+                            "fandhe_median": None,
+                            "target_median": None,
+                            "ratio": None,
+                            "status": "undeterminable",
+                            "reason": "gemm 未計測（fandhe-ai/target 双方 0 件）",
+                            "note": None,
+                        }
+                    )
+                    continue
             else:
                 sizes = [None]
             for size in sizes:
@@ -1600,15 +1655,35 @@ def main():
         )
         for gate_section_lines in gate_section_lines_by_file:
             lines.extend(gate_section_lines)
+        gate_records_empty = not gate_records_all
+        if gate_records_empty:
+            # P0（イシュー #1051 codex-review 指摘）: 入力 JSONL が全て
+            # 「有効な行なし」だった、または全ファイルで fandhe-ai/target
+            # いずれの行も存在しなかった等の理由で gate_records_all が
+            # 1 件も生成されない場合、達成 0・未達 0・判定不能 0 のまま
+            # 下の分岐を素通りし exit 0（「全達成」の誤判定）になって
+            # しまう。計測対象が丸ごと欠落した入力を「全達成」として通す
+            # fail-open を避けるため、判定不能 1 件として扱い後段の
+            # 非ゼロ終了判定（`gate_unmet > 0 or gate_undeterminable > 0`）
+            # に確実に載せる（`--strict` との優先順位はこの後の分岐に
+            # そのまま委ねる。実装計画 §3 の優先順位を変えない）。
+            lines.append(
+                "**全体集計**: 目標達成ゲートの対象データが 0 件のため判定不能"
+                "（入力 JSONL に有効な行がない、または fandhe-ai/target "
+                "いずれの行も存在しない）\n"
+            )
         gate_achieved = sum(1 for r in gate_records_all if r["status"] == "achieved")
         gate_unmet = sum(1 for r in gate_records_all if r["status"] == "unmet")
         gate_undeterminable = sum(
             1 for r in gate_records_all if r["status"] == "undeterminable"
         )
-        lines.append(
-            f"**全体集計**: 達成 {gate_achieved} / 未達 {gate_unmet} / "
-            f"判定不能 {gate_undeterminable}\n"
-        )
+        if gate_records_empty:
+            gate_undeterminable = 1
+        else:
+            lines.append(
+                f"**全体集計**: 達成 {gate_achieved} / 未達 {gate_unmet} / "
+                f"判定不能 {gate_undeterminable}\n"
+            )
 
     text = "\n".join(lines) + "\n"
     if args.out:
