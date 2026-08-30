@@ -101,7 +101,10 @@ backend-cpu/src/reduction.rs` モジュール doc「小サイズ直列フォー�
 
 ## 残課題（PR 本文にも記載）
 
-- `PARALLEL_THRESHOLD`（elementwise・reduction 共有）・
+- `PARALLEL_THRESHOLD`（elementwise 専用。reduction は上記のとおり
+  直列フォールバック自体が未導入のため本閾値を使用していない）・
   `GEMM_THREADING_THRESHOLD`（GEMM）いずれも M4 Max 実機での境界再
   スイープが残課題（`docs/perf/cpu-gemm-small-shape-serial-fallback.md`
-  と同じ事情）
+  と同じ事情）。reduction は閾値導入自体が残課題（上記「reduction
+  への直列フォールバックは未導入」節参照）であり、上記 2 つの実機
+  再スイープ対象には含まれない
