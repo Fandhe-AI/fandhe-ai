@@ -117,7 +117,11 @@ fn gemm_bias_act_parity_smoke_env_adaptive() {
 }
 
 /// 実機必須の形状網羅（受け入れ条件の本体）。m/n/k=0 縮退・bias 未指定
-/// （`Activation::None`）を含む。
+/// （`Activation::None`）を含む。イシュー #1032 でレジスタブロッキング版
+/// tiled f32 へ刷新した `TILED_BIAS_ACT_F32` が `TILED_F32` と bit 完全
+/// 一致契約を保つことを、境界形状（65x63x17・96x160x48。
+/// `tests/gemm_tiled.rs::tiled_f32_matches_cpu_reference_across_shapes` の
+/// ケースと揃える）でも確認する。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn gemm_bias_act_matches_cpu_across_shapes() {
@@ -129,6 +133,8 @@ fn gemm_bias_act_matches_cpu_across_shapes() {
         (607, 608, 609, 1, 1, 1, Activation::Relu),
         (610, 611, 612, 19, 29, 23, Activation::Relu),
         (613, 614, 615, 65, 33, 31, Activation::None),
+        (616, 617, 618, 65, 63, 17, Activation::Relu),
+        (619, 620, 621, 96, 160, 48, Activation::None),
     ];
     for &(seed_a, seed_b, seed_bias, m, n, k, act) in cases {
         assert_gemm_bias_act_parity(seed_a, seed_b, seed_bias, m, n, k, act);
