@@ -444,6 +444,130 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(out, &[p, r]).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `a`（デバイス常駐）・`w`（デバイス常駐）・`bias`（デバイス常駐・
+    /// 任意）から `y = act(a @ w + bias)` を、入出力ともホストへ実体化
+    /// せずに計算する（イシュー #1028・`docs/inference-forward-fixed-
+    /// cost-design.md` §3.2）。CPU は「デバイス」がホストメモリその
+    /// ものであるため `downcast_handle` の直読みだけでゼロコピーに
+    /// なる（`gemm_resident_rhs`／`sgd_step_device` と同じモデル）。
+    ///
+    /// **bit-exactness 契約**（`docs/inference-forward-fixed-cost-
+    /// design.md` §3.3 (b)）: 旧経路（`Sequential::predict` 等が
+    /// `tape.ops()` 経由で呼ぶ非融合 `gemm` → `add`（bias 行方向複製）
+    /// → `relu` の 3 段合成）と**同一の累積順序**を保つため、本メソッドは
+    /// `gemm_bias_act`／`gemm_resident_rhs` が使う融合カーネル
+    /// （[`gemm_blis_bias_act_parallel`]。bias／act をカーネル内
+    /// epilogue で適用するため tiling 次第で加算順序が変わりうる）を
+    /// 使わず、`gemm`（[`gemm_blis_parallel`]）→ bias 行方向複製加算
+    /// （単一の `a + b` はグルーピングに依らず IEEE 754 で一意に定まる
+    /// ため、ループ構造が異なっても `elementwise::add` と bit-exact）→
+    /// `relu`（`max(x, 0.0)`。`elementwise::relu_slice` と同一定義）の
+    /// 3 段を明示的に合成する。将来 CPU 側に融合カーネル版を追加する
+    /// 場合は、本 doc の bit-exactness 契約ごと見直すこと。
+    fn linear_forward_device(
+        &self,
+        a: &DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Cpu || w.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+
+        let a_handle = a
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        if a_handle.data.len() != a.numel() {
+            // `DeviceBuffer::new` 経由で構築される限り到達しないはずだが、
+            // shape とハンドル実体のずれを本番経路で `unwrap`/`expect` に
+            // 頼らず検出する（REQ-8・OWASP A03 と同種の防御）。
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: a.numel(),
+                    actual: a_handle.data.len(),
+                },
+            ));
+        }
+        let a_slice = &a_handle.data[..];
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
+
+        let bias_handle_slice = match bias {
+            Some(b) => {
+                if b.device() != Device::Cpu {
+                    return Err(BackendError::DeviceMismatch);
+                }
+                if b.shape() != [n] {
+                    return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                        lhs: b.shape().to_vec(),
+                        rhs: vec![n],
+                    }));
+                }
+                let handle = b
+                    .buffer()
+                    .downcast_handle::<CpuBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?;
+                Some(&handle.data[b.offset()..b.offset() + b.numel()])
+            }
+            None => None,
+        };
+
+        // 1 段目: 非融合 `gemm`（`self.gemm` と同一カーネル）。
+        let mut out = vec![0.0f32; m * n];
+        gemm_blis_parallel(a_slice, w_slice, &mut out, m, n, k)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        // 2 段目: bias の行方向複製加算（`elementwise::add` の broadcast
+        // と同じ結果を単一ループで生成。単一の浮動小数点加算はグルー
+        // ピングに依らず一意に定まるため bit-exact）。
+        if let Some(bias_slice) = bias_handle_slice {
+            for i in 0..m {
+                let row = &mut out[i * n..(i + 1) * n];
+                for (c, b) in row.iter_mut().zip(bias_slice.iter()) {
+                    *c += b;
+                }
+            }
+        }
+
+        // 3 段目: activation（`elementwise::relu_slice` と同一定義）。
+        match act {
+            Activation::None => {}
+            Activation::Relu => {
+                for v in out.iter_mut() {
+                    *v = v.max(0.0);
+                }
+            }
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "linear_forward_device: unsupported activation {act:?}"
+                )));
+            }
+        }
+
+        shared_cpu_memory().wrap_vec(out, vec![m, n])
+    }
+
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         elementwise::add(a, b).map_err(BackendError::ShapeMismatch)
     }

@@ -20,15 +20,49 @@
 //! （`Linear`）を層順に取り出すためのダウンキャストフックを提供する。
 
 use crate::error::AutodiffError;
+use crate::eval;
 use crate::nn::activation::{Relu, Sigmoid, Tanh};
 use crate::nn::linear::Linear;
 use crate::tape::Tape;
 use crate::var::Var;
+use fandhe_ai_tensor_core::{BackendError, BackendOps, Tensor};
 
 /// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
 pub trait Module {
     /// このステップの `tape` 上で 1 回分の forward を計算する。
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+
+    /// `tape`（葉ノード登録・演算記録）を経由せず、`ops` を直接呼んで
+    /// 1 回分の forward をホスト常駐 `Tensor` で計算する（イシュー
+    /// #1028・`docs/inference-forward-fixed-cost-design.md` §3.1「段階
+    /// A」）。推論専用の tape 不要経路（`compat::Sequential::predict`
+    /// が呼ぶ）が、[`Self::forward`] と同じ演算列・同じ丸め（bit
+    /// 完全一致）を保ちつつ、`Tape::var` の葉クローン（`Linear` の
+    /// `weight`/`bias` を毎呼び出しで clone する固定費。`nn/linear.rs`
+    /// の `Linear::bind` 参照）とノード記録のアロケーションを回避する
+    /// ために追加した。
+    ///
+    /// # デフォルト実装
+    ///
+    /// `fandhe-ai-autodiff` は crates.io 公開クレートであり
+    /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
+    /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
+    /// ない）とする。既定は [`BackendError::Unsupported`] を返す
+    /// fail-safe（本クレート内 4 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// `Tanh`〉はいずれもこのデフォルトをオーバーライドする。呼び出し元
+    /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
+    /// フォールバックの合図として扱うこと）。
+    fn forward_host(
+        &self,
+        _ops: &dyn BackendOps,
+        _input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Err(AutodiffError::Backend(BackendError::Unsupported(
+            "Module::forward_host: default fail-safe (tape-free forward not implemented for \
+             this Module)"
+                .into(),
+        )))
+    }
 
     /// 学習可能パラメータを持つ層（現状 `Linear` のみ）への読み取り
     /// アクセスフック。既定実装は `None`（活性化関数など無状態の層は
@@ -65,6 +99,25 @@ impl Module for Linear {
     fn as_linear_mut(&mut self) -> Option<&mut Linear> {
         Some(self)
     }
+
+    /// [`Module::forward`]（`Linear::bind(tape).forward(input)`。
+    /// `LinearVars::forward` が `input.matmul(&weight)` → `.add(&bias)`
+    /// と非融合合成する）と **同一の演算列**（`ops.gemm` → `ops.add`）を
+    /// 直接呼ぶ。融合カーネル（`ops.gemm_bias_act`）を使わない理由は
+    /// bit-exactness 契約（`Module::forward_host` doc 参照）: 融合
+    /// epilogue はカーネル内 tiling 次第で加算順序が変わりうるため、
+    /// 旧経路と厳密に同じ累積順序を保証できるのは非融合合成のみ。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let y = ops.gemm(input, self.weight())?;
+        match self.bias() {
+            Some(bias) => Ok(ops.add(&y, bias)?),
+            None => Ok(y),
+        }
+    }
 }
 
 /// `Relu::forward`（shape 不変の単項演算のため構造的に失敗しえない）を
@@ -74,6 +127,16 @@ impl Module for Relu {
     fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         Ok(Relu::forward(self, input))
     }
+
+    /// `Var::relu()`（`nn::activation::Relu::forward`）が呼ぶ
+    /// `tape.ops().relu(...)` と同一のディスパッチ（`ops.relu`）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(ops.relu(input)?)
+    }
 }
 
 /// `Sigmoid::forward` への委譲。`Relu` の実装と同じ理由で `tape` は
@@ -82,6 +145,17 @@ impl Module for Sigmoid {
     fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         Ok(Sigmoid::forward(self, input))
     }
+
+    /// `Var::sigmoid()` は `BackendOps` ディスパッチを経由せず
+    /// `eval::sigmoid`（ホスト直接計算）を呼ぶ（`var.rs` 参照）。
+    /// bit-exactness のため同じ `eval::sigmoid` を直接呼ぶ。
+    fn forward_host(
+        &self,
+        _ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(eval::sigmoid(input))
+    }
 }
 
 /// `Tanh::forward` への委譲。`Relu` の実装と同じ理由で `tape` は
@@ -89,6 +163,16 @@ impl Module for Sigmoid {
 impl Module for Tanh {
     fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         Ok(Tanh::forward(self, input))
+    }
+
+    /// `Var::tanh()` も `Sigmoid` と同様 `eval::tanh`（ホスト直接計算）を
+    /// 呼ぶ。bit-exactness のため同じ関数を直接呼ぶ。
+    fn forward_host(
+        &self,
+        _ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(eval::tanh(input))
     }
 }
 
