@@ -236,17 +236,26 @@ struct Args {
 }
 
 /// `Path::parse` が受理する値の表示用一覧（`|` 区切り）。USAGE 文言と
-/// 不正 `--path` 時のエラーメッセージの双方をこの単一の文字列リテラルを
-/// `concat!` で埋め込んで生成し、`Path::parse` の受理値との乖離
-/// （codex-review 指摘: エラーメッセージが allowlist の一部
-/// `tiled_f32` を列挙していなかった）を構造的に防ぐ。
+/// 不正 `--path` 時のエラーメッセージの双方がこの単一の文字列リテラルを
+/// 参照して生成され、`Path::parse` の受理値との乖離（codex-review
+/// 指摘: エラーメッセージが allowlist の一部 `tiled_f32` を列挙していな
+/// かった）を構造的に防ぐ。`USAGE` 側は `concat!` が const 識別子を展開
+/// できないため `usage()` 関数で `format!` して埋め込む（codex-review
+/// 指摘 #1090: 以前は USAGE 側に同じリテラルを別途直書きしており、
+/// 将来 `Path` へバリアントを追加した際に片方だけ更新される恐れが
+/// あった）。`path_allowlist_display_matches_usage_and_parse` が両表示と
+/// `Path::parse` の整合を検証する。
 const PATH_ALLOWLIST_DISPLAY: &str = "wmma_tf32|mma_f16|tiled_f32|tiled_f32_swizzle";
 
-const USAGE: &str = concat!(
-    "usage: gemm_profile_target --path {",
-    "wmma_tf32|mma_f16|tiled_f32|tiled_f32_swizzle",
-    "} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--group-width N (tiled_f32_swizzle only)] [--allow-missing-driver]"
-);
+/// USAGE 文言を組み立てる（`PATH_ALLOWLIST_DISPLAY` を唯一の入力源とする。
+/// 上記コメント参照）。
+fn usage() -> String {
+    format!(
+        "usage: gemm_profile_target --path {{{PATH_ALLOWLIST_DISPLAY}}} --size {{1024|2048|4096}} \
+         [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] \
+         [--group-width N (tiled_f32_swizzle only)] [--allow-missing-driver]"
+    )
+}
 
 /// `--group-width` は `CudaGemm::new_with_tiled_f32_swizzle`（イシュー
 /// #1034）でのみ意味を持つ tiled f32 swizzle 固有のパラメータのため、
@@ -438,7 +447,7 @@ fn main() {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("error: {e}\n{USAGE}");
+            eprintln!("error: {e}\n{}", usage());
             std::process::exit(1);
         }
     };
@@ -1008,7 +1017,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Path, tflops, validate_b_pad_requires_wmma_tf32,
+        PATH_ALLOWLIST_DISPLAY, Path, tflops, usage, validate_b_pad_requires_wmma_tf32,
         validate_group_width_requires_tiled_f32_swizzle,
     };
 
@@ -1045,6 +1054,49 @@ mod tests {
         ] {
             assert_eq!(Path::parse(p.as_str()), Some(p));
         }
+    }
+
+    // codex-review 指摘（PR #1090）: `PATH_ALLOWLIST_DISPLAY` は
+    // `usage()`（`format!` 経由）とエラーメッセージ双方の唯一の入力源だが、
+    // `Path::parse` の受理値集合とは別の場所で手書きされている。`Path`
+    // へバリアントを追加した際に片方だけ更新される回帰を検知するため、
+    // `PATH_ALLOWLIST_DISPLAY` の `|` 区切り各要素が `Path::parse` で
+    // 受理され、かつ `usage()` の表示文言にそのまま現れることを検証する。
+    #[test]
+    fn path_allowlist_display_matches_usage_and_parse() {
+        let entries: Vec<&str> = PATH_ALLOWLIST_DISPLAY.split('|').collect();
+
+        // Path::parse が受理する全バリアントと allowlist 表示が過不足なく
+        // 一致することを、既知の全バリアント集合との突合で検証する
+        // （`path_as_str_round_trips_through_parse` は逆方向＝各バリアント
+        // が表示に現れることまでは検証しないため独立して必要）。
+        let all_variants = [
+            Path::WmmaTf32,
+            Path::MmaF16,
+            Path::TiledF32,
+            Path::TiledF32Swizzle,
+        ];
+        assert_eq!(entries.len(), all_variants.len());
+        for variant in all_variants {
+            assert!(
+                entries.contains(&variant.as_str()),
+                "allowlist 表示 '{PATH_ALLOWLIST_DISPLAY}' に '{}' が含まれない",
+                variant.as_str()
+            );
+        }
+
+        // 各表示要素は Path::parse で実際に受理される（乖離があれば
+        // 表示だけ存在して実際は拒否される値が生まれる）。
+        for entry in &entries {
+            assert!(
+                Path::parse(entry).is_some(),
+                "'{entry}' は表示に含まれるが Path::parse に拒否される"
+            );
+        }
+
+        // usage() 文言に allowlist 表示がそのまま埋め込まれている
+        // （USAGE 側だけ別リテラルへドリフトする回帰を検知する）。
+        assert!(usage().contains(PATH_ALLOWLIST_DISPLAY));
     }
 
     #[test]
