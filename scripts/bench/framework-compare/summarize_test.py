@@ -929,6 +929,81 @@ class TrainPhasesSectionTests(unittest.TestCase):
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("step_total", buf.getvalue())
 
+    # イシュー #1010: sub-100 ns 区間（`tape_build` 等）は、9 桁固定小数
+    # シリアライズ自体は ns 単位を表現できるため丸まらないが、計時クロック
+    # の分解能未満の標本では連続する `Instant::now()` が同一時刻を返し
+    # median_s/q1_s/q3_s が 0.0 と計測されることがある。
+    # `_safe_phase_time_s` は phase 行（`step_total` を除く）に限りこれを
+    # 妥当な下限として許容し、`--strict` を誤って落とさない
+    # （`_safe_phase_time_s` docstring 参照）。
+
+    def test_phase_zero_median_is_valid_and_strict_passes(self):
+        rows = _train_phases_group(device="cpu", mode="fresh")
+        rows[0] = dict(rows[0])  # tape_build（phase_index 0・step_total 以外）
+        assert rows[0]["phase"] == "tape_build"
+        rows[0]["median_s"] = 0.0
+        rows[0]["q1_s"] = 0.0
+        rows[0]["q3_s"] = 0.0
+        buf_err = io.StringIO()
+        with contextlib.redirect_stderr(buf_err):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_train_phases_invalid)
+        text = "\n".join(lines)
+        self.assertIn("0.0 µs", text)
+        self.assertNotIn("無効", text)
+
+    def test_step_total_zero_median_is_still_invalid(self):
+        # 比の分母（`step_total`）はゼロ除算回避のため引き続き 0 秒を
+        # 許容しない（`_safe_time_s`（> 0）のまま。phase 行の緩和対象外）。
+        rows = _train_phases_group(device="cpu", mode="fresh")
+        rows = [dict(r) for r in rows]
+        for r in rows:
+            if r["phase"] == "step_total":
+                r["median_s"] = 0.0
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+
+    def test_init_s_zero_is_still_invalid(self):
+        # `init_s`（reuse の初期化コスト）も緩和対象外（`_safe_time_s`
+        # のまま。実測として 0 秒はあり得ないため fail-closed を維持）。
+        rows = _train_phases_group(device="cpu", mode="reuse", init_s=0.0)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+
+    def test_phase_negative_median_is_still_invalid(self):
+        rows = _train_phases_group(device="cpu", mode="fresh")
+        rows[0] = dict(rows[0])
+        rows[0]["median_s"] = -0.0001
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+
+    def test_phase_nan_median_is_still_invalid(self):
+        rows = _train_phases_group(device="cpu", mode="fresh")
+        rows[0] = dict(rows[0])
+        rows[0]["median_s"] = float("nan")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+
+    def test_safe_phase_time_s_accepts_zero_rejects_invalid(self):
+        # `_safe_phase_time_s` 単体の境界値検証（`_safe_time_s` との差分は
+        # 0 の扱いのみで、負値・NaN・Infinity・bool・非数は同じく無効）。
+        self.assertEqual(summarize._safe_phase_time_s(0.0), 0.0)
+        self.assertEqual(summarize._safe_phase_time_s(0), 0.0)
+        self.assertIsNone(summarize._safe_phase_time_s(-0.0001))
+        self.assertIsNone(summarize._safe_phase_time_s(float("nan")))
+        self.assertIsNone(summarize._safe_phase_time_s(float("inf")))
+        self.assertIsNone(summarize._safe_phase_time_s(True))
+        self.assertIsNone(summarize._safe_phase_time_s("0.0"))
+        self.assertIsNone(summarize._safe_phase_time_s(10**1000))
+
     def test_missing_required_non_step_total_phase_is_invalid(self):
         # codex-review 指摘（PR #1055）: `backward` 等の必須 phase 行が
         # 欠落していても `step_total` 行さえ残っていれば修正前は有効判定

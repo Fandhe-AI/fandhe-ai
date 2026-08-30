@@ -187,7 +187,13 @@ reuse のみ `init_s`）に加え、`phase`（区間名）・`phase_index`（出
 近いほど支配的な区間）を表示する。表末尾の「フェーズ合計（中央値の和）」は参考値であり
 （中央値は加法的でないため `step_total` と厳密には一致しない）、`step_total` 行の欠落・
 `phase`/`phase_index` の不正や重複・phase 中央値が `step_total` を超える不整合は
-「無効」表示され `--strict` の対象になる。
+「無効」表示され `--strict` の対象になる。`tape_build` 等の sub-100 ns 区間は、9 桁
+固定小数シリアライズ自体は ns 単位を表現できる（41 ns なら `0.000000041`）ため丸まらない
+が、計時クロックの分解能未満の間隔しか空かない標本では `Instant::now()` の連続呼び出しが
+同一時刻を返し区間長が `0.000000000`（= `0.0 µs` 表示）と計測されることがある。
+`step_total` 以外の phase 行に限りこれを妥当な下限として許容する（`step_total`・`init_s`
+は引き続き 0 秒を不正値として扱う。イシュー #1010・`summarize.py` の
+`_safe_phase_time_s` 参照）。
 
 使用例:
 
@@ -196,8 +202,9 @@ cargo run --release -p bench-fandhe -- --task train --device cpu --mode fresh --
 cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse --phases
 ```
 
-Metal（M4 Max）・DGX Spark GB10 実機での計測・`results/summary.md` への記録は
-本 PR のスコープ外（Mac / DGX Spark 実機を持つセッションでの追加計測に委ねる）。
+Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
+`docs/perf/train-step-phase-breakdown.md`（イシュー #1010）を参照。
+`results/summary.md` への環境情報の統合記録は別途 #1050 に委ねる。
 
 ### 要素単位検証（イシュー #970）
 

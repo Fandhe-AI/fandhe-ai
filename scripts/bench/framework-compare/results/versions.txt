@@ -13,3 +13,21 @@ bench-burn v0.1.0 (bench-burn)
 bench-fandhe v0.1.0 (bench-fandhe)
 ├── bench-common v0.1.0 (bench-common)
 └── fandhe-ai v0.4.0
+
+# イシュー #1010: 学習 1 step フェーズ分解実測（`--task train --phases`。
+# `results-*-phases-0.4.0*.jsonl`）の環境情報。計測日 2026-08-31。
+# fandhe-ai は crates.io 公開版 v0.4.0（2026-08-29 公開）を計測しており、
+# 現 main（#1055 以降・#1078〜#1081 等のマージ後）とは内訳が異なる
+# （docs/perf/train-step-phase-breakdown.md §7 版差注記を参照）。
+#
+# 環境 A: Apple M4 Max / macOS 26.6.2 (25G83)
+# cargo 1.96.0 (30a34c682 2026-05-25) / rustc 1.96.0 (ac68faa20 2026-05-25)
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.4.0
+
+# 環境 B: DGX Spark GB10（sm_121）/ NVIDIA driver 580.173.02 / Ubuntu 24.04 aarch64
+# CUDA 13.0 V13.0.88 (nvcc) / cargo 1.97.0 / rustc 1.97.0 (2d8144b78 2026-07-07)
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.4.0
