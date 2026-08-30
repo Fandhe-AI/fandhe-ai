@@ -130,6 +130,14 @@ use crate::var::Var;
 #[derive(Debug)]
 struct PendingForward {
     tape_id: TapeId,
+    /// `register_resident_params`／`register_resident_leaves`（非推奨版）
+    /// を呼んだ時点の `Tape::epoch()`（#1048）。`PendingForward` は `Tape`
+    /// を借用しない値のため `Tape::reset()` をまたいで生存しうる——
+    /// `step()` は `tape_id` 一致に加えこの世代番号も検査し、reset で
+    /// 破棄されたはずの登録済み葉ノード（`node_ids`）を新しい step で
+    /// 誤って参照する経路を fail-closed に拒否する（`tape::Tape::epoch`
+    /// doc・`step` 実装参照）。
+    epoch: u64,
     node_ids: Vec<NodeId>,
 }
 
@@ -474,6 +482,7 @@ impl DeviceParamStore {
         }
         self.pending = Some(PendingForward {
             tape_id: tape.id,
+            epoch: tape.epoch(),
             node_ids,
         });
         Ok(leaves)
@@ -568,6 +577,7 @@ impl DeviceParamStore {
         }
         self.pending = Some(PendingForward {
             tape_id: tape.id,
+            epoch: tape.epoch(),
             node_ids,
         });
         Ok(vars)
@@ -829,6 +839,17 @@ impl DeviceParamStore {
             // 呼び出し元の誤り（別 Tape を渡した）であり、ストア自体は
             // 壊れていない。`take()` していないため `pending` は復元不要
             // でそのまま残る。
+            return Err(BackendError::TapeMismatch);
+        }
+        if pending.epoch != tape.epoch() {
+            // `register_resident_params` 登録後に `tape.reset()`（#1048）
+            // が呼ばれた場合（同一 `TapeId` のまま世代だけ進む）。reset は
+            // 演算後に登録された葉（`Op::ResidentLeaf` を含む）を破棄する
+            // ため、`pending.node_ids` は現在のノード列に対応しない可能性
+            // がある——`tape_id` 一致検査と同じ理由で `take()` せずに
+            // 拒否し、`pending` を復元不要のまま残す（呼び出し元は
+            // `abandon_pending_forward` で明示的にクリアするか、正しい
+            // 世代で再登録し直す）。
             return Err(BackendError::TapeMismatch);
         }
 
@@ -1488,6 +1509,35 @@ mod tests {
             .unwrap();
         let grads1 = store.backward(&tape1, &loss1).unwrap();
         store.step(&tape1, &grads1, &SgdConfig::new(0.1)).unwrap();
+    }
+
+    /// `register_resident_params` 後に `tape.reset()`（#1048）が呼ばれた
+    /// 場合、`pending`（reset 前の世代で登録した葉ノード）を古いまま
+    /// 使わせず fail-closed に拒否することを検証する。`tape_id` 自体は
+    /// 変わらない（`reset` は同一 `Tape` 上の世代のみを進める）ため、
+    /// `pending.epoch` による検査がなければこの誤用は `tape_id` 一致検査
+    /// をすり抜けてしまう（`PendingForward::epoch` doc 参照）。
+    #[test]
+    fn step_after_tape_reset_is_rejected_by_epoch_mismatch() {
+        let mut tape = simple_tape(None);
+        let w = tensor(vec![1.0], &[1]);
+        let mut store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        store.register_resident_params(&tape).unwrap();
+
+        // epoch 検査は `grads` の中身を読む前（`vars`/`grad.get` より前）
+        // に行われるため、`grads` 自体は reset 前の適当な演算列から
+        // 得たもので構わない。
+        let x = tape.var(&tensor(vec![1.0], &[1]));
+        let loss = x.mse_loss(&x).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+
+        tape.reset();
+        let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
+        assert!(matches!(err, BackendError::TapeMismatch));
+        // `tape_id` 不一致時と同じく `take()` されないため pending は残る
+        // （`abandon_pending_forward` が `true`＝クリア対象が存在したこと
+        // で確認できる）。
+        assert!(store.abandon_pending_forward());
     }
 
     #[test]

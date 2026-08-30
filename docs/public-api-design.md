@@ -351,15 +351,14 @@ impl Gradients {
 
 `no_grad` 相当（勾配追跡を一時的に止める）は、専用フラグ API を設けず「`Tensor<T>` のまま演算する」ことで表現する。`Tensor<T>` と `Var` は別型であるため、追跡なしの経路を選ぶことはコンパイル時に強制される。
 
-### 3.1.1 学習ループにおける Tape のライフサイクル（未決事項として記録）
+### 3.1.1 学習ループにおける Tape のライフサイクル（イシュー #1048 で確定）
 
 動的テープ式（Wengert list）では `Tape::var()` を呼ぶたびにノードが
-`nodes: RefCell<Vec<TapeNode>>` へ追加される一方、ノード列をクリアす
-る `reset()`/`clear()` 相当の API は存在しない。`Gradients::get(&self,
-var: &Var) -> Result<Option<&Tensor<f32>>, AutodiffError>` は `&Var`
-（延いては `&'t Tape` への借用、および `TapeId` 一致検査）をキーに
-勾配を引くため、複数ステップの学習ループでは以下の運用を前提とする
-設計とする:
+`nodes: RefCell<Vec<TapeNode>>` へ追加される。学習ループ・reuse GEMM
+（framework-compare の `run_gemm_reuse`／`run_train_reuse`）向けに、
+以下 2 通りの運用のいずれかを選べる:
+
+**運用 A（ステップごと `Tape::new()`）**:
 
 1. パラメータ自体は非追跡の `Tensor<f32>` として学習ループの外
    （呼び出し側）で保持する。
@@ -370,13 +369,38 @@ var: &Var) -> Result<Option<&Tensor<f32>>, AutodiffError>` は `&Var`
    更新する。
 4. ステップ末で `Tape` をスコープアウトさせ破棄する。
 
-`Tape` を学習ループ全体で使い回す運用（§2.1 のコメントが「学習ループ
-の勾配バッファ」と述べているのは `Storage` の再利用最適化の話であり、
-`Tape` 自体を使い回す意図ではない点に注意）はノード列が際限なく肥大
-化するため非推奨とし、`Tape` のドキュメンテーションコメントに明記す
-る。明示的な `reset()`/`clear()` API を別途用意すべきかは、上記のス
-テップごと `Tape::new()` パターンで十分かどうかも含め TASK-1.5 実装
-時に決定する（6-7 参照）。
+**運用 B（`Tape::reset()` による再利用。#1048 で追加）**: `Tape::reset
+(&mut self)` は、最初の演算（非葉ノード）が記録される*前*に登録した
+葉ノードのみを保持したままノード列を切り詰める。`Tape::leaf_count()`
+（保持される葉の個数）・`Tape::leaf(index)`（保持された葉 `index`
+番目を `Var` として再取得。O(1)・コピーなし）と組み合わせ、同一
+`Tape` を毎ステップ使い回せる:
+
+1. ステップの外でパラメータ・入力用の `Tape` を 1 回だけ構築し、
+   パラメータを `tape.var(&param)` で葉として登録する（この時点では
+   まだ演算を行わない）。
+2. 各ステップで `tape.leaf(index)` により登録済みの葉 `Var` を再取得
+   し、順伝播・`backward()` を実行する。
+3. ステップ末で `tape.reset()` を呼び、ステップ内で記録した演算
+   ノード（結果ノードの `Tensor<f32>` を含む）を破棄する——`&mut self`
+   を要求するため、reset 前に取得した古い `Var`/`ResidentLeaf` を
+   reset 後も使う経路はコンパイル時に排除される（借用検査）。`Tape`
+   を借用しない値（`Gradients`・`DeviceParamStore` の `pending`）は
+   世代番号（`Tape::epoch()`）による実行時検査で reset 後の誤用を
+   `Err(AutodiffError::TapeMismatch)`／`Err(BackendError::TapeMismatch)`
+   として fail-closed に拒否する。
+4. 次ステップの入力（バッチ・毎ステップのパラメータ葉等）は演算
+   *後*に登録するため、葉プレフィックスに含まれず reset のたびに
+   破棄される——step ごとの葉が無限蓄積することはない。
+
+`Tape` を学習ループ全体で使い回しつつ `reset()` を一切呼ばない運用
+（§2.1 のコメントが「学習ループの勾配バッファ」と述べているのは
+`Storage` の再利用最適化の話であり、`Tape` 自体を使い回す意図では
+ない点に注意）はノード列が際限なく肥大化するため引き続き非推奨とし、
+`Tape` のドキュメンテーションコメントに明記する。運用 A・B いずれも
+サポート対象であり、reuse GEMM・学習ループの性能が問題になる経路
+（framework-compare の reuse ベンチが動機。#1048）では運用 B を推奨
+する。
 
 ### 3.2 演算セット（初期）
 
@@ -622,7 +646,7 @@ pub enum BackendError {
 4. **演算グラフ／融合機構（イシュー #161）との接続点**: `Var`/`Tape` の演算記録が将来の融合機構（TASK-12.1a）とどう接続するかは本文書では設計しない。`Tape` の `Op` 列挙が融合対象の中間表現候補になりうる点のみ接続点として記録する。
 5. **`DeviceBuffer` の内部表現**（4.2）: TASK-1.9b（#45）で確定した。`Box<dyn BufferHandle>`（`Any` ダウンキャスト経由の依存逆転構成）で不透明ハンドルを保持し、解放は各バックエンドの具体ハンドル型の `Drop` に一本化する（4.2 の「TASK-1.9b（#45）実装時の突合結果」参照）。
 6. **`Var`/`Tape` の借用モデル**（3.1）: 本文書は productize 時の API 使い勝手を優先し `RefCell` + 共有参照方式を採用したが、PoC-v2-2 確定 API は `&mut Tape` 方式だった。TASK-1.5 実装時に借用チェッカ上の問題が生じた場合は `&mut Tape` 方式へ戻す判断もありうる。この方式は `Var::value()` が `Ref<'_, Tensor<f32>>` を公開シグネチャへ露出する副作用も伴う（`Ref` を保持したまま同じ `Tape` へ `borrow_mut()` を要する演算を呼ぶと panic しうる）。本文書は回避策として所有値を返す `Var::to_tensor()` を追加したが、`value()` 自体を非公開化する・`Ref` を返さない別設計にするといった、より根本的な対処の要否は TASK-1.5 実装時に再検討する。
-7. **`Tape` のライフサイクル（学習ループ）**（3.1.1）: ステップごとに新しい `Tape` を生成し破棄する運用を推奨として記録した。明示的な `reset()`/`clear()` API を別途用意すべきか、`Gradients::get` が `&Var`（＝テープ借用 + `TapeId` 一致検査）をキーにする現行設計を維持するか、テープに依存しないハンドル（`VarId` 等）をキーにする形へ変えるかは TASK-1.5 実装時に決定する。後者へ変える場合も、`VarId` 単独では発行元テープを識別できないため `TapeId` との組（`(TapeId, VarId)`）でキー化し、本文書が導入したクロステープ照合（3.1「クロステープ安全性」）を維持する必要がある。
+7. **`Tape` のライフサイクル（学習ループ）**（3.1.1・**確定。イシュー #1048**）: ステップごとに新しい `Tape` を生成し破棄する運用（運用 A）に加え、`Tape::reset()`（`&mut self`）で葉プレフィックスまで切り詰めて同一 `Tape` を再利用する運用（運用 B）を追加した。`Gradients::get` は `&Var`（＝テープ借用 + `TapeId` 一致検査）をキーにする現行設計を維持しつつ、`Tape::epoch()`（reset のたびに +1 する世代番号）による追加検査で reset 後の stale な `Gradients`／`DeviceParamStore::pending` を fail-closed に拒否する（`VarId`／`(TapeId, VarId)` へのキー変更は行わなかった）。
 8. **`BackendOps` の f16 対応**（4.2）: `DeviceBuffer<T: Element>` はジェネリックだが `BackendOps` トレイト v1 は `f32` 固定。GPU 推論で使う `half::f16` 経路の入口設計（トレイトのジェネリック化か並行トレイト追加か）は TASK-1.9 実装時に決定する。
 9. **デバイスハンドル再利用の公開 API 化（イシュー #931）**: 再構築コストが発生していたのは `tape()`／`tape_for(Device)` 呼び出しごとではなく、`CudaBackendOps::gemm` 等の**演算呼び出しごと**に `CudaDevice::new`／`CudaGemm::new` が都度実行される構成だった（`Tape` を使い回しても解消しない。`crates/backend-cuda/src/ops.rs` 冒頭コメント参照）ことへの対応方針。facade に新規公開型（`DeviceHandle` 等）を追加する案は不採用と判断し、バックエンド内部（`backend-cuda::context_cache`・`backend-metal::context_cache`）のプロセス内常駐キャッシュのみで対応する構成を採用した（CUDA は #929/#946、Metal も #930/#948 で同型の実装が完了済み）。設計判断・採否根拠は `docs/facade-device-handle-design.md` を正とする。
 

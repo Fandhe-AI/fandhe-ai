@@ -26,7 +26,9 @@
 
 `fandhe-ai` は任意の `BackendOps` 実装を注入できる公開 API をあえて設けて
 いません。`Tape` は `fandhe-ai` 側の newtype でラップされており、
-`var`／`backward` の 2 メソッドのみを公開しています。
+`var`／`backward` に加え、学習ループ・reuse GEMM で同一 `Tape` を
+再利用するための `reset`／`leaf_count`／`leaf`（イシュー #1048）を
+公開しています。
 
 ## ページ一覧
 

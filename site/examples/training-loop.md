@@ -148,5 +148,37 @@ loss decreased: true
 （`let updated: Vec<Tensor<f32>> = { ... };`）で囲み、ブロックを抜けて
 借用を解放してから `apply_parameters` を呼ぶ構成にしています。
 
+## `Tape` の再利用（`reset`）について
+
+上記の例はステップごとに `fandhe_ai::tape()` を新規生成・破棄する
+運用です。ステップ内で `Tape` を再利用したい場合（reuse GEMM・
+tape 構築コストが問題になる学習ループ）は、`Tape::reset`（イシュー
+#1048）でノード列を葉プレフィックス（最初の演算より前に登録した葉）
+まで切り詰め、同一 `Tape` を使い回せます。
+
+```rust
+let mut tape = fandhe_ai::tape();
+let x = tape.var(&x_data); // 演算前に登録した葉は reset を跨いで保持される
+let w = tape.var(&w_data);
+
+for _ in 0..STEPS {
+    // `tape.leaf(index)` で保持済みの葉 `Var` を再取得する（コピーなし）。
+    let x = tape.leaf(0).unwrap();
+    let w = tape.leaf(1).unwrap();
+    let y = x.matmul(&w)?.relu();
+    let loss = y.mse_loss(&target)?;
+    let grads = tape.backward(&loss)?;
+    // ... grads を使ってパラメータを更新 ...
+    tape.reset(); // 演算ノードを切り詰め、次ステップ用に再利用する
+}
+```
+
+`reset` は `&mut self` を要求するため、reset 前に取得した `Var` を
+reset 後のスコープへ持ち越すことはコンパイル時に弾かれます（借用
+検査による静的な安全性）。`reset` 前に得た `Gradients` を reset 後の
+`Var` に対して読もうとした場合は、`Gradients::get` が
+`Err(AutodiffError::TapeMismatch)` を返します（世代番号による
+実行時 fail-closed 検査）。
+
 決定的シード・数値一致の判定方針は
 [数値一致契約](/guides/numerical-parity/)を参照してください。

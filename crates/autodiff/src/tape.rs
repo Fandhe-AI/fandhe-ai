@@ -20,7 +20,7 @@
 //! 試み、`Unsupported` の場合は `ops` 自身の per-op メソッドへ逐次
 //! フォールバックする。
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
@@ -377,14 +377,32 @@ pub(crate) struct TapeNode {
 /// 持たないため `#[derive(Debug)]` は撤去し、`ops` の中身を表示しない
 /// 手書き `impl fmt::Debug` へ置き換える（下記）。
 ///
-/// **学習ループでの運用**: ノード列をクリアする `reset()`/`clear()`
-/// 相当の API は本イシューでは提供しない。学習ループはステップごとに
-/// 新しい `Tape::new_with_ops(ops)` を生成・破棄する運用を前提とする
-/// （`docs/public-api-design.md` §3.1.1「未決事項として記録」）。
+/// **学習ループでの運用（イシュー #1048 で確定）**: ステップごとに新しい
+/// `Tape::new_with_ops(ops)` を生成・破棄する運用に加え、[`Tape::reset`]
+/// でノード列を葉プレフィックスまで切り詰めて同一 `Tape` を再利用する
+/// 運用にも対応する（`docs/public-api-design.md` §3.1.1。旧「未決事項」を
+/// 確定へ更新）。`reset` は結果ノードの `Tensor<f32>`（デバイスバッファ）を
+/// drop してプールへ返却するため、reuse GEMM・学習ループでのバッファ
+/// 蓄積（framework-compare reuse ベンチ・#1048 発端）を解消する。
 pub struct Tape {
     pub(crate) id: TapeId,
     pub(crate) nodes: RefCell<Vec<TapeNode>>,
     pub(crate) ops: Box<dyn BackendOps + Send>,
+    /// [`Tape::reset`] が呼ばれるたびに +1 する世代カウンタ（#1048）。
+    /// `Var<'t>`／`ResidentLeaf<'t>` は `&'t Tape` を静的に借用するため
+    /// reset 後の stale 値はコンパイル時に排除されるが、`Tape` を借用
+    /// しない値（[`crate::backward::Gradients`]・
+    /// `optim::device_store::DeviceParamStore` の `pending`）は reset を
+    /// またいで生存しうる。これらは本カウンタを記録しておき、参照時に
+    /// 現在の `epoch()` と比較して不一致なら fail-closed に拒否する
+    /// （`Gradients::get`・`DeviceParamStore::step` 参照）。
+    epoch: Cell<u64>,
+    /// 葉プレフィックス長（#1048）。最初の非葉ノード（`Op::Leaf`/
+    /// `Op::ResidentLeaf` 以外）が push された時点の `nodes.len()` を
+    /// [`Tape::freeze_leaf_prefix`] が 1 回だけ `Some` に固定する。
+    /// `None` の間は「まだ演算が始まっていない」ことを表し、[`Tape::reset`]
+    /// は現在の全ノードを保持する（`leaf_count`/`reset` 参照）。
+    retained_leaf_len: Cell<Option<usize>>,
 }
 
 impl std::fmt::Debug for Tape {
@@ -440,6 +458,8 @@ impl Tape {
             id: TapeId(NEXT_TAPE_ID.fetch_add(1, Ordering::Relaxed)),
             nodes: RefCell::new(Vec::new()),
             ops,
+            epoch: Cell::new(0),
+            retained_leaf_len: Cell::new(None),
         }
     }
 
@@ -463,6 +483,98 @@ impl Tape {
         self.len() == 0
     }
 
+    /// 現在の世代番号（#1048。[`Tape::reset`] のたびに +1）。
+    /// `Gradients::get`／`DeviceParamStore::step` が stale 値を fail-closed
+    /// に拒否するための比較対象（`epoch` フィールド doc 参照）。
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.get()
+    }
+
+    /// 葉プレフィックス長を、まだ固定されていなければ `current_len` で
+    /// 1 回だけ固定する（#1048）。`push_eager`（`Op::Leaf` 以外）・
+    /// `push_lazy`・`push_view`（いずれも非葉ノードのみを追記する経路）
+    /// の**push 前**に、その時点の `nodes.len()`（＝これから追記する
+    /// 非葉ノードの直前までの葉数）を渡して呼ぶ契約とする。
+    /// `push_resident_leaf`（`Op::ResidentLeaf` は葉扱い。モジュール doc
+    /// 「学習ループでの運用」参照）は呼ばない。
+    fn freeze_leaf_prefix(&self, current_len: usize) {
+        if self.retained_leaf_len.get().is_none() {
+            self.retained_leaf_len.set(Some(current_len));
+        }
+    }
+
+    /// [`Tape::reset`] 後も保持される葉の個数（#1048）。葉プレフィックスが
+    /// まだ固定されていない（一度も演算が記録されていない）間は現在の
+    /// 全ノード数を返す——この場合は登録済みの葉がすべて保持対象になる
+    /// （`reset` のドキュメント参照）。
+    pub fn leaf_count(&self) -> usize {
+        self.retained_leaf_len
+            .get()
+            .unwrap_or_else(|| self.nodes.borrow().len())
+    }
+
+    /// 保持される葉 `index` 番目（登録順）の `Var` を再取得する
+    /// （#1048）。`reset()` はノードの中身を保持したまま切り詰めるだけ
+    /// なので、`leaf(index)` は既存ノードへの `NodeId` 再包装のみ
+    /// （コピー・再計算なし・O(1)）。`index` が葉プレフィックス範囲外、
+    /// または当該ノードが `Op::Leaf` でない（例: `Op::ResidentLeaf`。
+    /// `Var::value()`/`to_tensor()` は非 fallible なため、ホスト値を
+    /// 持たない `ResidentLeaf` を `Var` として返すと誤動作の温床になる。
+    /// `tape::Op::ResidentLeaf` doc 参照）場合は `None` を返す
+    /// （境界外・型不一致で panic しない。`.claude/rules/coding-rust.md`）。
+    pub fn leaf(&self, index: usize) -> Option<crate::var::Var<'_>> {
+        if index >= self.leaf_count() {
+            return None;
+        }
+        let nodes = self.nodes.borrow();
+        match nodes.get(index) {
+            Some(node) if matches!(node.op, Op::Leaf) => {
+                Some(crate::var::Var::from_raw(self, NodeId(index)))
+            }
+            _ => None,
+        }
+    }
+
+    /// ノード列を葉プレフィックス（[`Tape::leaf_count`]）まで切り詰め、
+    /// 次のステップで同一 `Tape` を再利用可能にする（#1048。イシュー
+    /// 発端: framework-compare reuse GEMM が同一 tape へ matmul を
+    /// 繰り返し呼ぶたびに結果ノードの `Tensor<f32>` が蓄積し続け解放
+    /// されない問題）。
+    ///
+    /// **`&mut self` の理由**: `Var<'t>`（`var.rs`）・`ResidentLeaf<'t>`
+    /// （`optim::device_store`）はいずれも `&'t Tape` を静的に借用する
+    /// ため、`reset` が `&mut self` を要求すれば「reset 前に取得した
+    /// 古い `Var`/`ResidentLeaf` を reset 後も使う」経路はコンパイル時に
+    /// 排除される（借用検査で弾かれる）。実行時 stale 検査（世代番号）
+    /// を要するのは `Tape` を借用しない値（`Gradients`・
+    /// `DeviceParamStore::pending`）のみに限定できる（`epoch` フィールド
+    /// doc・`Gradients::get`・`DeviceParamStore::step` 参照）。
+    ///
+    /// **保持される葉の範囲**: 最初の演算（非葉ノード）が記録される
+    /// *前* に登録した葉のみが保持される（[`Tape::leaf_count`]）。
+    /// forward 内で毎ステップ登録される葉（入力バッチ・
+    /// `Op::ResidentLeaf`・`Sequential::bind` の per-step パラメータ葉）は
+    /// 演算後に登録されるため葉プレフィックスに含まれず、reset のたびに
+    /// 破棄される——これにより step ごとの葉が無限蓄積することもない。
+    /// 一度も演算を記録していない `Tape`（`leaf_count` が未固定）の
+    /// reset は全ノードを保持する no-op。
+    ///
+    /// **`&mut self` 経由で `RefCell` を介さず切り詰める**: `self.nodes
+    /// .get_mut()` は `&mut Tape` から直接 `Vec` へアクセスするため、
+    /// 実行中の借用（`Ref`/`RefMut`）が残っていても二重借用 panic には
+    /// ならない（コンパイル時に排他が保証される）。`truncate` で
+    /// drop された `TapeNode::value`（`Tensor<f32>` = `Arc<Storage>`）は
+    /// 参照カウントが 0 になれば即座にデバイスバッファをプール
+    /// （`SizeClassPool`）へ返却する——これが蓄積解消の実体。
+    pub fn reset(&mut self) {
+        let keep = self
+            .retained_leaf_len
+            .get()
+            .unwrap_or_else(|| self.nodes.get_mut().len());
+        self.nodes.get_mut().truncate(keep);
+        self.epoch.set(self.epoch.get() + 1);
+    }
+
     /// この `Tape` が保持する `ops`（バックエンド実行の必須所有値）への
     /// 借用。`backward.rs`／`grad.rs` が `materialize_fallible` を呼ぶ際
     /// に使う。
@@ -480,6 +592,14 @@ impl Tape {
     pub(crate) fn push_eager(&self, op: Op, value: Tensor<f32>) -> NodeId {
         let shape = value.shape().to_vec();
         let mut nodes = self.nodes.borrow_mut();
+        // `Op::Leaf` のみ葉ノード（`push_resident_leaf` の `Op::ResidentLeaf`
+        // と合わせて #1048 の葉プレフィックス判定対象）。それ以外
+        // （`MatMul`/`Sum`/`Max`/`Sigmoid`/`MseLoss`/`CrossEntropyLoss`/
+        // `LinearResident`）は演算ノードのため、これから追記する直前の
+        // 長さで葉プレフィックスを固定する（`Tape::reset` doc 参照）。
+        if !matches!(op, Op::Leaf) {
+            self.freeze_leaf_prefix(nodes.len());
+        }
         let id = NodeId(nodes.len());
         nodes.push(TapeNode {
             op,
@@ -529,6 +649,8 @@ impl Tape {
     pub(crate) fn push_view(&self, op: Op, shape: Vec<usize>) -> NodeId {
         debug_assert!(op.is_view());
         let mut nodes = self.nodes.borrow_mut();
+        // view ノードは常に非葉（#1048。`Tape::reset` doc 参照）。
+        self.freeze_leaf_prefix(nodes.len());
         let id = NodeId(nodes.len());
         nodes.push(TapeNode {
             op,
@@ -602,6 +724,8 @@ impl Tape {
     pub(crate) fn push_lazy(&self, op: Op, shape: Vec<usize>) -> (NodeId, bool) {
         debug_assert!(op.is_lazy_elementwise());
         let mut nodes = self.nodes.borrow_mut();
+        // elementwise 5 演算はいずれも非葉（#1048。`Tape::reset` doc 参照）。
+        self.freeze_leaf_prefix(nodes.len());
         let size = Tape::effective_subtree_size(&nodes, &op);
         let at_limit = size >= MAX_FUSED_CHAIN_LEN;
         let id = NodeId(nodes.len());

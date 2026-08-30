@@ -142,6 +142,16 @@ impl<'t> Var<'t> {
         self.id
     }
 
+    /// この `Var` が属する `Tape` の現在の世代番号（#1048）。`Gradients::get`
+    /// が「この `Var` は reset 後の別世代のものか」を fail-closed に検査
+    /// するための比較対象（`tape::Tape::epoch` doc 参照）。`Var<'t>` 自体は
+    /// `&'t Tape` を静的に借用するため reset 後に stale な `Var` を作る
+    /// ことはコンパイル時に排除されるが、`Gradients`（`Tape` を借用しない
+    /// 値）は reset をまたいで生存しうるため、こちらは実行時検査が要る。
+    pub(crate) fn tape_epoch(&self) -> u64 {
+        self.tape.epoch()
+    }
+
     /// 2 次元 `matmul`（`docs/public-api-design.md` §3.2）。
     ///
     /// **TASK-12.1d（#164）**: 非 elementwise のため常に実体化済みで
