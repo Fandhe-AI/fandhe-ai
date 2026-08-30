@@ -229,6 +229,47 @@ pub(crate) fn vjp(
             }
             contributions
         }
+        // view ノード（イシュー #1047・親 #1043「カーネル融合・autodiff
+        // 実行モデルの強化」）。`Reshape`/`Transpose` は逆写像も同じ演算
+        // 族（reshape は「元の shape へ戻す」・transpose は対合）で
+        // 表現でき、いずれも zero-copy（`Tensor::reshape`/`transpose`
+        // が `storage: Arc<Storage>` を共有するのみ）。中間バッファを
+        // 持たないという本イシューの受け入れ条件は、forward（`tape.rs::
+        // resolve_view`）だけでなく backward（本 VJP）でも成立する。
+        Op::Reshape { input } => {
+            let input_shape = &nodes[input.0].shape;
+            // `upstream` は out_shape（このノード自身の shape）を持つ。
+            // 非 contiguous（例: 上流に `transpose` が挟まる）な場合は
+            // zero-copy な `reshape` が `ShapeError::NonContiguousReshape`
+            // を返しうるため、その場合に限り `contiguous()`（明示コピー）
+            // を経由してから戻す（勾配バッファ側の話であり、view ノード
+            // 自身が確保を持つわけではない。zero-copy を優先する順序を
+            // 明記する）。
+            let da = match upstream.reshape(input_shape) {
+                Ok(t) => t,
+                Err(_) => upstream.contiguous().reshape(input_shape).unwrap_or_else(|_| {
+                    debug_assert!(
+                        false,
+                        "grad::vjp: Op::Reshape の逆伝播で reshape が失敗した（forward 側の契約違反）"
+                    );
+                    upstream.clone()
+                }),
+            };
+            vec![(input, da)]
+        }
+        Op::Transpose { input, dim0, dim1 } => {
+            // transpose は対合（同じ軸で 2 回適用すると恒等）のため、
+            // 逆伝播も同じ `dim0`/`dim1` で `upstream` を transpose する
+            // だけで閉じる（zero-copy。`tape::Op::Transpose` doc 参照）。
+            let da = upstream.transpose(dim0, dim1).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "grad::vjp: Op::Transpose の逆伝播で transpose が失敗した（forward 側の契約違反）"
+                );
+                upstream.clone()
+            });
+            vec![(input, da)]
+        }
     };
     Ok(contributions)
 }

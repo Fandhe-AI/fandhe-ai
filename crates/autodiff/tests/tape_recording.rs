@@ -232,3 +232,132 @@ fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
         .expect("contiguous() 直後は必ず as_slice() が Some を返す")
         .to_vec()
 }
+
+// --- view 系ノード（reshape / transpose。イシュー #1047・親 #1043） ---
+
+/// 8. `Var::reshape`/`Var::transpose` がテープへノードを 1 個ずつ追記
+///    し、`to_tensor()` の値が期待どおりであることを検証する（受け入れ
+///    条件「forward 実行時にテープへ演算が記録される」の view 系個別
+///    確認）。
+#[test]
+fn reshape_and_transpose_record_single_node_each() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let before = tape.len();
+
+    let r = x.reshape(&[3, 2]).unwrap();
+    assert_eq!(tape.len(), before + 1);
+    assert_eq!(r.to_tensor().shape(), &[3, 2]);
+    assert_eq!(
+        dense_vec(&r.to_tensor()),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
+
+    let tr = x.transpose(0, 1).unwrap();
+    assert_eq!(tape.len(), before + 2);
+    assert_eq!(tr.to_tensor().shape(), &[3, 2]);
+    // [[1,2,3],[4,5,6]]^T == [[1,4],[2,5],[3,6]]
+    assert_eq!(tr.to_tensor().get(&[0, 0]).unwrap(), 1.0);
+    assert_eq!(tr.to_tensor().get(&[0, 1]).unwrap(), 4.0);
+    assert_eq!(tr.to_tensor().get(&[2, 0]).unwrap(), 3.0);
+    assert_eq!(tr.to_tensor().get(&[2, 1]).unwrap(), 6.0);
+}
+
+/// 9. `reshape`/`transpose` が zero-copy（既存バッファの `Arc` 共有）で
+///    あることを実測する（イシュー #1047 の中核契約「中間バッファを
+///    持たない」の直接検証。`as_view_slice().as_ptr()` の一致でバッファ
+///    共有を確認する）。
+#[test]
+fn reshape_and_transpose_share_underlying_buffer() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let x_val = x.to_tensor();
+    let x_ptr = x_val
+        .as_view_slice()
+        .expect("contiguous な葉テンソルは必ず as_view_slice を返す")
+        .as_ptr();
+
+    let r = x.reshape(&[4]).unwrap();
+    let r_val = r.to_tensor();
+    let r_ptr = r_val
+        .as_view_slice()
+        .expect("reshape は zero-copy のため as_view_slice を返す")
+        .as_ptr();
+    assert_eq!(r_ptr, x_ptr, "reshape は入力と storage を共有するはず");
+
+    let tr = x.transpose(0, 1).unwrap();
+    let tr_val = tr.to_tensor();
+    // transpose 後は非 contiguous なため `as_slice()` は使えないが、
+    // `as_view_slice()` は非 contiguous でも同一 storage を指す限り
+    // 同じ開始アドレスを返す（`tensor-core::Tensor::as_view_slice` の
+    // 実装が `offset` を起点にするため）。
+    let tr_ptr = tr_val
+        .as_view_slice()
+        .expect("transpose は zero-copy のため as_view_slice を返す")
+        .as_ptr();
+    assert_eq!(tr_ptr, x_ptr, "transpose は入力と storage を共有するはず");
+}
+
+/// 10. view の view（`transpose` → `reshape` は非 contiguous のため
+///     エラー、`reshape` → `transpose` は成功）を検証する
+///     （`resolve_view` の再帰対応・`Tensor::reshape` の案 A〈非
+///     contiguous はエラー〉との整合）。
+#[test]
+fn view_of_view_reshape_after_transpose_is_non_contiguous_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let tr = x.transpose(0, 1).unwrap(); // shape [3,2]・非 contiguous
+    let err = tr.reshape(&[6]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::NonContiguousReshape)
+        ),
+        "非 contiguous な transpose 結果への reshape は NonContiguousReshape のはず: {err:?}"
+    );
+}
+
+/// 11. `reshape` → `transpose`（先に contiguous 化する view の合成）は
+///     成功し、値も期待どおりであることを検証する。
+#[test]
+fn view_of_view_transpose_after_reshape_succeeds() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let r = x.reshape(&[3, 2]).unwrap(); // [[1,2],[3,4],[5,6]]
+    let tr = r.transpose(0, 1).unwrap(); // [[1,3,5],[2,4,6]]
+    assert_eq!(tr.to_tensor().shape(), &[2, 3]);
+    assert_eq!(
+        dense_vec(&tr.to_tensor()),
+        vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]
+    );
+}
+
+/// 12. `reshape` の異常系（要素数不一致・非 contiguous 入力）が
+///     `AutodiffError::Shape(..)` を返すことを検証する。
+#[test]
+fn reshape_shape_mismatches_return_shape_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+
+    let err = x.reshape(&[3]).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountMismatch { .. })
+    ));
+}
+
+/// 13. `transpose` の異常系（軸範囲外）が `AutodiffError::Shape(..)` を
+///     返すことを検証する。
+#[test]
+fn transpose_axis_out_of_range_returns_shape_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+
+    let err = x.transpose(0, 5).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}

@@ -179,6 +179,38 @@ pub(crate) enum Op {
         weight: NodeId,
         bias: Option<NodeId>,
     },
+    /// `Var::reshape` が記録する view ノード（イシュー #1047・親 #1043
+    /// 「カーネル融合・autodiff 実行モデルの強化」）。出力 shape は
+    /// `TapeNode.shape` に構造的に保持済みのため payload には持たない。
+    ///
+    /// **ホスト値を持たない**（`push_view` で登録。`TapeNode::value` は
+    /// 常に空の `OnceCell` のまま——burn-autodiff の `MemoryBound {
+    /// retro_forward }` checkpointing に相当し、forward 出力を保持せず
+    /// backward 時に親ノードから再導出する。`resolve_view`（下記）が
+    /// 実際の再導出ロジック）。`input` は push 前に層 1
+    /// （`materialize_fallible`）で実体化済み——これが `resolve_view` を
+    /// infallible にできる理由（`Var::reshape` doc・`resolve_view` doc
+    /// 参照）。
+    ///
+    /// **融合境界**: `is_lazy_elementwise() == false` のため
+    /// `push_lazy`（elementwise 5 演算専用）を経由せず、
+    /// `build_lazy_plan`／`fallback_per_op`／`eval_fallback` の 3 走査器
+    /// からは常に「葉」（`_` 分岐）として扱われる（`docs/
+    /// kernel-fusion.md` 表 4「transpose 混在連鎖は融合しない」が既に
+    /// 確定済みのため後退ではない）。
+    Reshape { input: NodeId },
+    /// `Var::transpose` が記録する view ノード（イシュー #1047）。
+    /// `dim0`／`dim1` は forward 時点で軸範囲検査済み（`Var::transpose`）。
+    ///
+    /// `Reshape` と同じく**ホスト値を持たない**・**融合境界**（同上）。
+    /// VJP（`grad.rs`）は対合性（`transpose` を 2 回適用すると恒等）を
+    /// 利用し、同じ `dim0`／`dim1` で upstream を transpose するだけで
+    /// zero-copy に閉じる。
+    Transpose {
+        input: NodeId,
+        dim0: usize,
+        dim1: usize,
+    },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -223,6 +255,14 @@ impl Op {
             self,
             Op::Add(..) | Op::Mul(..) | Op::Relu(..) | Op::Exp(..) | Op::Tanh(..)
         )
+    }
+
+    /// view 系ノード（`reshape`/`transpose`。イシュー #1047）かどうか。
+    /// `push_view` で登録され `TapeNode::value` を常に空のまま保つ
+    /// ノード種別を指し、`materialize_fallible`／`materialize_non_fallible`
+    /// はこの判定で `resolve_view`（下記）への分岐を選ぶ。
+    pub(crate) fn is_view(&self) -> bool {
+        matches!(self, Op::Reshape { .. } | Op::Transpose { .. })
     }
 }
 
@@ -428,6 +468,31 @@ impl Tape {
         let id = NodeId(nodes.len());
         nodes.push(TapeNode {
             op: Op::ResidentLeaf { store_id, slot },
+            shape,
+            value: OnceCell::new(),
+            lazy_chain_size: 0,
+        });
+        id
+    }
+
+    /// view 系ノード（[`Op::Reshape`]/[`Op::Transpose`]。イシュー #1047）を
+    /// 追記する。`push_eager`（値渡し・即実体化）とも `push_lazy`
+    /// （elementwise 5 演算限定・自己実体化契約あり）とも異なる第 3 の
+    /// 登録経路——**ホスト値を一切渡さず**（`value: OnceCell::new()`）、
+    /// `lazy_chain_size` は融合連鎖に参加しないため常に 0 とする。
+    ///
+    /// **呼び出し契約**: `op` が指す `input`（`Op::Reshape { input }`／
+    /// `Op::Transpose { input, .. }`）は本関数を呼ぶ**前**に層 1
+    /// （`materialize_fallible`）で実体化済みであること（`Var::reshape`／
+    /// `Var::transpose` の実装がこの順序を守る）。view は既存バッファへの
+    /// 別解釈でしかなく、参照先の実体が存在することを前提に
+    /// [`resolve_view`] が infallible に動作できる設計だからである。
+    pub(crate) fn push_view(&self, op: Op, shape: Vec<usize>) -> NodeId {
+        debug_assert!(op.is_view());
+        let mut nodes = self.nodes.borrow_mut();
+        let id = NodeId(nodes.len());
+        nodes.push(TapeNode {
+            op,
             shape,
             value: OnceCell::new(),
             lazy_chain_size: 0,
@@ -721,7 +786,7 @@ fn build_lazy_plan(
     let output_shape = nodes[id.0].shape.clone();
     let leaves: Vec<Tensor<f32>> = leaf_order
         .iter()
-        .map(|&n| lazy_leaf_value(&nodes[n]))
+        .map(|&n| lazy_leaf_value(nodes, n))
         .collect();
 
     let plan = FusionPlan::from_ops(ops, output_shape, DType::F32, leaf_count)?;
@@ -762,18 +827,91 @@ fn unreachable_op_kind() -> FusedOpKind {
     FusedOpKind::Add { lhs: 0, rhs: 0 }
 }
 
-/// 実体化済みノードの値を読む（`build_lazy_plan` の葉収集専用）。
-/// `OnceCell::get().is_some()` を確認済みの呼び出し元からのみ呼ばれる
-/// ため理論上必ず `Some` を返すが、`unwrap()`/`expect()` は使わず、
-/// `None` の場合は `shape` から構築した安全側フォールバック（全要素
+/// 実体化済みノードの値を読む（`build_lazy_plan`／`fallback_per_op`／
+/// `eval_fallback` の葉収集共通ヘルパー）。
+///
+/// **view ノード対応（イシュー #1047）**: 3 走査器はいずれも
+/// elementwise 5 演算の連結成分のみを `interior` として収集し、それ以外
+/// （非 elementwise・未実体化）は `_` 分岐で「葉」として扱う
+/// （`build_lazy_plan` 等のドキュメント参照）。`Op::Reshape`/
+/// `Op::Transpose`（`push_view` で登録・`value` は常に空。`tape::Op`
+/// doc 参照）がこの経路で葉として現れた場合、旧実装の
+/// `debug_assert!(false) + ゼロ埋め`（「実体化済みのはずが未実体化
+/// だった」契約違反フォールバック）に誤って落ちてしまう——view は
+/// 契約上ホスト値を持たないのが正常な状態であり契約違反ではないため、
+/// `resolve_view`（下記）で再導出する専用分岐を設ける。
+///
+/// それ以外（非 view で未実体化）は真の契約違反であり、`unwrap()`/
+/// `expect()` は使わず `shape` から構築した安全側フォールバック（全要素
 /// `0.0`）を返す（本番経路 panic 禁止方針）。
-fn lazy_leaf_value(node: &TapeNode) -> Tensor<f32> {
+fn lazy_leaf_value(nodes: &[TapeNode], n: usize) -> Tensor<f32> {
+    let node = &nodes[n];
     match node.value.get() {
         Some(t) => t.clone(),
+        None if node.op.is_view() => resolve_view(nodes, NodeId(n)),
         None => {
             debug_assert!(
                 false,
                 "lazy_leaf_value: 実体化済みのはずのノードが未実体化だった（契約違反）"
+            );
+            safe_zeros(&node.shape)
+        }
+    }
+}
+
+/// view ノード（[`Op::Reshape`]/[`Op::Transpose`]。イシュー #1047）を
+/// 入力側へ再帰的に辿り、最初に実体化済み（`value.get().is_some()`）な
+/// ノードの値へ `reshape`/`transpose` を順に適用して再導出する
+/// （burn-autodiff の `retro_forward` 相当）。`push_view` の呼び出し
+/// 契約（`input` は push 前に層 1で実体化済み）により通常は 1 段の
+/// 再帰で終わるが、view の view（例: `x.transpose(0,1)?.reshape(..)?`）
+/// にも構造的に対応するため再帰実装とする。
+///
+/// **`Arc` 共有のみ・バッファは確保しない**: `Tensor::reshape`／
+/// `transpose` はいずれも既存 `storage: Arc<Storage>` を `Arc::clone`
+/// するだけの zero-copy view 演算（`tensor-core/src/tensor.rs`）で
+/// あり、本関数はそれらを合成するだけなので新規ヒープ確保を伴わない
+/// （`tests/view_zero_alloc.rs` が機械的に検証する）。
+///
+/// **infallible な理由**: `Var::reshape`/`transpose`（`var.rs`）が push
+/// 時点で shape・軸範囲を検査済みのため、ここでの `reshape`/`transpose`
+/// 呼び出しは構造的に失敗しえない。それでも本番経路 panic 禁止方針
+/// （`.claude/rules/coding-rust.md`）のため、`Err` 分岐は
+/// `debug_assert!` + 安全側フォールバック（全要素 `0.0`）に吸収する
+/// （到達すれば forward 側の shape 検査ロジックにバグがある）。
+fn resolve_view(nodes: &[TapeNode], id: NodeId) -> Tensor<f32> {
+    let node = &nodes[id.0];
+    if let Some(v) = node.value.get() {
+        return v.clone();
+    }
+    match &node.op {
+        Op::Reshape { input } => {
+            let base = resolve_view(nodes, *input);
+            base.reshape(&node.shape).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "resolve_view: Op::Reshape の再導出が失敗した（forward 側の契約違反）"
+                );
+                safe_zeros(&node.shape)
+            })
+        }
+        Op::Transpose { input, dim0, dim1 } => {
+            let base = resolve_view(nodes, *input);
+            base.transpose(*dim0, *dim1).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "resolve_view: Op::Transpose の再導出が失敗した（forward 側の契約違反）"
+                );
+                safe_zeros(&node.shape)
+            })
+        }
+        _ => {
+            // `push_view` の呼び出し契約（`input` は事前実体化済み）に
+            // より、非 view ノードが未実体化のままここへ渡ることはない。
+            // 到達すれば契約違反であり、安全側フォールバックで吸収する。
+            debug_assert!(
+                false,
+                "resolve_view: 非 view ノードへ到達した（契約違反。push_view の事前実体化契約が破られた）"
             );
             safe_zeros(&node.shape)
         }
@@ -829,7 +967,7 @@ fn fallback_per_op(
             computed
                 .get(&n)
                 .cloned()
-                .unwrap_or_else(|| lazy_leaf_value(&nodes[n]))
+                .unwrap_or_else(|| lazy_leaf_value(nodes, n))
         }
     };
     for &cur in &interior {
@@ -894,6 +1032,24 @@ pub(crate) fn materialize_fallible<'a>(
         return Ok(v);
     }
 
+    // view ノード（イシュー #1047）: `build_lazy_plan`（elementwise 5
+    // 演算の連結成分専用）を経由せず、`resolve_view` で入力側から直接
+    // 再導出する。結果（入力と `Arc` 共有の view ヘッダ）は他の実体化
+    // 経路と同じく対象ノード自身の `OnceCell` にのみキャッシュする。
+    if nodes[id.0].op.is_view() {
+        let computed = resolve_view(nodes, id);
+        match nodes[id.0].value.set(computed) {
+            Ok(()) => {}
+            Err(_rejected) => { /* fan-out 二重到達: 既存値を正として使う */ }
+        }
+        return nodes[id.0].value.get().ok_or_else(|| {
+            AutodiffError::Backward(
+                "materialize_fallible: OnceCell 不変条件違反（view 解決後の set 直後に get が None を返した）"
+                    .into(),
+            )
+        });
+    }
+
     let (plan, leaves, _root) = build_lazy_plan(nodes, id).map_err(AutodiffError::Backend)?;
     let leaf_refs: Vec<&Tensor<f32>> = leaves.iter().collect();
     let computed = match ops.run_fused(&plan, &leaf_refs) {
@@ -943,6 +1099,12 @@ pub(crate) fn materialize_non_fallible<'a>(
     // 値を返すため、この経路は構造的に失敗しない
     // （`docs/fusion-graph-design.md` §3.5.3 (i)〜(iii)）。
     nodes[id.0].value.get_or_init(|| {
+        // view ノード（イシュー #1047）: 融合・per-op フォールバックの
+        // 前に最優先で判定する（`resolve_view` は infallible なため、
+        // ここで確実に値が決まる。層 1 の同分岐と対応）。
+        if nodes[id.0].op.is_view() {
+            return resolve_view(nodes, id);
+        }
         build_lazy_plan(nodes, id)
             .ok()
             .and_then(|(plan, leaves, _root)| {
@@ -995,7 +1157,7 @@ fn eval_fallback(nodes: &[TapeNode], id: NodeId) -> Tensor<f32> {
             computed
                 .get(&n)
                 .cloned()
-                .unwrap_or_else(|| lazy_leaf_value(&nodes[n]))
+                .unwrap_or_else(|| lazy_leaf_value(nodes, n))
         }
     };
     for &cur in &interior {

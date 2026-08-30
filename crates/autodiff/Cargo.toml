@@ -56,3 +56,18 @@ bench-harness = { path = "../bench-harness" }
 # （#29）が行った同種の判断の先例）。
 serde.workspace = true
 serde_json.workspace = true
+
+# view 系ノード（reshape / transpose。イシュー #1047）の「forward・
+# backward でバッファ確保が 0」という受け入れ条件を
+# `bench_harness::alloc_tracker::TrackingAllocator`（`#[global_allocator]`
+# フック）で機械的に実測する専用テストターゲット。同トラッカーはプロセス
+# 全体で共有される静的カウンタを持つため、libtest 既定の並列実行下では
+# 他テストの確保・解放が干渉する（`crates/bench-harness/src/
+# alloc_tracker.rs` モジュール冒頭「テストでの計測検証（プロセス分離）」
+# 節）。`crates/bench-harness/tests/alloc_tracker_serial.rs`（`[[test]]
+# harness = false`）と同じ対処方針を採用し、本クレートでも専用の
+# 単一スレッド・単一プロセスバイナリへ分離する。
+[[test]]
+name = "view_zero_alloc"
+path = "tests/view_zero_alloc.rs"
+harness = false

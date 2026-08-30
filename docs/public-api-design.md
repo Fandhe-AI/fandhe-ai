@@ -395,6 +395,17 @@ end-to-end backward テスト（`tests/nn_activation.rs`）で受け入れ条件
 CPU 参照実装（`eval.rs`）止まりとする（バックエンド接続差し替え時に
 まとめて対応）。
 
+**イシュー #1047 追加**: `reshape`/`transpose`（view 系ノード）を
+追加した。既存の演算セット（`push_eager`／`push_lazy` の 2 経路）とは
+別に、ホスト値を一切保持せず backward 時に入力から再導出する第 3 の
+登録経路（`Tape::push_view`／`tape::resolve_view`。burn-autodiff の
+`MemoryBound { retro_forward }` 相当）を導入した。`tensor-core::Tensor`
+の `reshape`／`transpose` と同じく zero-copy（`Arc<Storage>` 共有）で
+あり、中間バッファを持たない（設計判断・メモリ実測は `docs/
+autodiff-view-recompute-decision.md` を参照）。非 contiguous な
+`reshape` は案 A（エラー。`tensor-core::Tensor::reshape` と同じ方針）を
+踏襲する。
+
 ## 4. backend 入口公開 API
 
 ### 4.1 デバイス選択

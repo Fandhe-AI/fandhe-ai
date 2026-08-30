@@ -296,3 +296,127 @@ fn non_scalar_loss_seed_is_implicit_sum_projection() {
     assert_eq!(dx.get(&[0]).unwrap(), 1.0);
     assert_eq!(dx.get(&[1]).unwrap(), 1.0);
 }
+
+// --- view 系ノード（reshape / transpose）の backward（イシュー #1047・
+// 親 #1043「カーネル融合・autodiff 実行モデルの強化」） ---
+
+/// 14. `reshape` 単体の backward: loss = sum(reshape(x, [4]))。
+///     sum は形状に依存しないため dx は全要素 1（x の元 shape [2,2]）。
+#[test]
+fn reshape_backward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let r = x.reshape(&[4]).unwrap();
+    let loss = r.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[2, 2]);
+    for i in 0..2 {
+        for j in 0..2 {
+            assert_eq!(dx.get(&[i, j]).unwrap(), 1.0);
+        }
+    }
+}
+
+/// 15. `transpose` 単体の backward: loss = sum(transpose(x, 0, 1))。
+///     sum は形状・順序に依存しないため dx は全要素 1（x の元 shape）。
+#[test]
+fn transpose_backward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let tr = x.transpose(0, 1).unwrap();
+    let loss = tr.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[2, 3]);
+    for i in 0..2 {
+        for j in 0..3 {
+            assert_eq!(dx.get(&[i, j]).unwrap(), 1.0);
+        }
+    }
+}
+
+/// 16. `reshape → matmul`（view を fallible 演算〈matmul〉へ渡す経路）。
+///     `w` を単位行列にして matmul を恒等化し、reshape 単体の VJP
+///     （zero-copy `reshape` の逆写像）が正しく合成されることを
+///     解析解と厳密一致で検証する。
+#[test]
+fn reshape_then_matmul_backward_matches_analytical() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // x: shape [4] → reshape → [2,2]
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[4]));
+    let w = tape.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2])); // 単位行列
+    let r = x.reshape(&[2, 2]).unwrap();
+    let y = r.matmul(&w).unwrap(); // y == r（w が単位行列のため）
+    let loss = y.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    // d(sum(r @ I))/dr = ones[2,2] → reshape の逆写像で dx = ones[4]
+    assert_eq!(dx.shape(), &[4]);
+    for i in 0..4 {
+        assert_eq!(dx.get(&[i]).unwrap(), 1.0);
+    }
+}
+
+/// 17. `relu → transpose → add`（view が融合境界になる経路）。融合
+///     （`push_lazy`）と view（`push_view`）が混在する連鎖で、非融合
+///     参照実装と同じ勾配になることを解析解と突合する。
+///
+///     `y = relu(x)` [2,3] → `t = transpose(y, 0, 1)` [3,2] →
+///     `z = t + bias`（bias: [2]、列方向 broadcast）→ `loss = sum(z)`。
+///     `dz = ones[3,2]` → `dbias = reduce_to_shape(dz, [2])`（各列 3 要素
+///     の総和 = 3） → `dt = ones[3,2]` → `dy = transpose(dt, 0, 1) =
+///     ones[2,3]` → `dx = dy * (x > 0)`（ReLU 劣勾配）。
+#[test]
+fn relu_transpose_add_fusion_boundary_matches_reference() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![-1.0, 2.0, -3.0, 4.0, 5.0, -6.0], &[2, 3]));
+    let bias = tape.var(&t(vec![10.0, 20.0], &[2]));
+
+    let y = x.relu();
+    let tr = y.transpose(0, 1).unwrap();
+    let z = tr.add(&bias).unwrap();
+    let loss = z.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    let dbias = grads.get(&bias).unwrap().expect("bias は loss に到達する");
+
+    // ReLU 劣勾配: x > 0 の位置のみ 1、それ以外 0。
+    let expected_dx = [0.0, 1.0, 0.0, 1.0, 1.0, 0.0];
+    for (idx, &expected) in expected_dx.iter().enumerate() {
+        let (i, j) = (idx / 3, idx % 3);
+        assert_eq!(
+            dx.get(&[i, j]).unwrap(),
+            expected,
+            "dx[{i},{j}] 不一致（ReLU 劣勾配）"
+        );
+    }
+    // bias は [2] へ 3 要素ずつ縮約されるため、各要素は 3.0。
+    assert_eq!(dbias.get(&[0]).unwrap(), 3.0);
+    assert_eq!(dbias.get(&[1]).unwrap(), 3.0);
+}
+
+/// 18. view ノード自身の fan-out（同一 `reshape` 結果を `mul` の両
+///     オペランドとして 2 回消費し、勾配が合算されることを検証する）。
+///     `loss = sum(r * r)`（`r = reshape(x, [2,2])`）→ `dr = 2r` →
+///     `dx = reshape(2r, [4]) = 2x`。
+#[test]
+fn view_node_fan_out_accumulates_gradient() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, -2.0, 3.0, 0.5], &[4]));
+    let r = x.reshape(&[2, 2]).unwrap();
+    let y = r.mul(&r).unwrap();
+    let loss = y.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[4]);
+    assert_eq!(dx.get(&[0]).unwrap(), 2.0);
+    assert_eq!(dx.get(&[1]).unwrap(), -4.0);
+    assert_eq!(dx.get(&[2]).unwrap(), 6.0);
+    assert_eq!(dx.get(&[3]).unwrap(), 1.0);
+}

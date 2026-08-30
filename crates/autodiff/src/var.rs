@@ -16,7 +16,7 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
+    ShapeError, Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 
 use crate::error::AutodiffError;
@@ -408,5 +408,107 @@ impl<'t> Var<'t> {
         let value = eval::sigmoid(&self.value());
         let id = self.tape.push_eager(Op::Sigmoid(self.id), value);
         Var::from_raw(self.tape, id)
+    }
+
+    /// 新しい shape へ再解釈する view 系ノード（イシュー #1047・親
+    /// #1043）。`Tensor::reshape`（`tensor-core`）と同じく contiguous な
+    /// 入力に限り zero-copy（案 A・エラー方式。`docs/spec/
+    /// public-api-design.md` §2.2.1 は未決事項としていたが、本イシューは
+    /// 自動運転モードのため安全側の案 A を踏襲する。案 B〈暗黙コピー〉
+    /// への変更はユーザー承認事項として `tensor-core::Tensor::reshape`
+    /// のドキュメント参照）。
+    ///
+    /// 検査順序（演算メソッド規律「①クロステープ検査 → ②shape 検査 →
+    /// ③forward 値計算 → ④ノード記録」を view 系向けに具体化）:
+    /// ①要素数一致（クロステープ検査は単項演算のため不要）→ ②層 1
+    /// （`materialize_fallible`）で入力を実体化 → ③実体化値の
+    /// `is_contiguous()` を検査（非 contiguous なら
+    /// `ShapeError::NonContiguousReshape` を返し、暗黙コピーでバッファ
+    /// 確保 0 の契約を破らない）→ ④`Tape::push_view` でホスト値を持たない
+    /// ノードとして記録する（`tape::Op::Reshape` doc「forward のたびに
+    /// バッファ確保しない」の中核）。
+    pub fn reshape(&self, shape: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let in_numel: usize = in_shape.iter().product();
+        // `checked_numel` 相当のオーバーフロー検査（`tensor-core` は
+        // この関数を非公開にしているため、`autodiff` 側で `checked_mul`
+        // を用いて自前実装する。REQ-8 趣旨の境界検査 A03 対策）。
+        let out_numel = shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d));
+        let out_numel = match out_numel {
+            Some(n) => n,
+            None => {
+                return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
+            }
+        };
+        if out_numel != in_numel {
+            return Err(AutodiffError::Shape(ShapeError::ElementCountMismatch {
+                expected: out_numel,
+                actual: in_numel,
+            }));
+        }
+
+        // 入力を層 1 で実体化する（`Tape::push_view` の呼び出し契約:
+        // `input` は push 前に必ず実体化済みであること）。`Ref` を保持
+        // したまま `push_view`（`borrow_mut`）を呼ぶと `RefCell` の
+        // 二重可変借用 panic になるため、`is_contiguous()` 検査まで
+        // 完了してからスコープを閉じる。
+        {
+            let nodes = self.tape.nodes.borrow();
+            let input_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?;
+            if !input_val.is_contiguous() {
+                return Err(AutodiffError::Shape(ShapeError::NonContiguousReshape));
+            }
+        }
+        let id = self
+            .tape
+            .push_view(Op::Reshape { input: self.id }, shape.to_vec());
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 2 軸の転置（view 系ノード。イシュー #1047・親 #1043）。
+    /// `Tensor::transpose`（`tensor-core`）と同じく常に zero-copy
+    /// （strides の入れ替えのみ）。`dim0 == dim1` は恒等 view として
+    /// 許容する（`Tensor::transpose` 自体が同じ挙動）。
+    ///
+    /// 検査順序: ①`dim0`／`dim1` が rank 範囲内 → ②`Tape::push_view` で
+    /// ホスト値を持たないノードとして記録する（`reshape` と異なり
+    /// transpose は非 contiguous 化しても失敗しない演算のため実体化前
+    /// 検査は軸範囲のみで足りる。ただし `Tape::push_view` の呼び出し
+    /// 契約〈`input` 事前実体化〉を満たすため、軸検査の後に層 1で入力を
+    /// 実体化してから記録する）。
+    pub fn transpose(&self, dim0: usize, dim1: usize) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if dim0 >= rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim0,
+                rank,
+            }));
+        }
+        if dim1 >= rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim1,
+                rank,
+            }));
+        }
+        let mut out_shape = in_shape;
+        out_shape.swap(dim0, dim1);
+
+        // `Tape::push_view` の呼び出し契約（`input` は push 前に実体化
+        // 済み）を満たす。`Ref` を保持したまま `push_view` を呼ばない
+        // よう、実体化はスコープ内で完結させる。
+        {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?;
+        }
+        let id = self.tape.push_view(
+            Op::Transpose {
+                input: self.id,
+                dim0,
+                dim1,
+            },
+            out_shape,
+        );
+        Ok(Var::from_raw(self.tape, id))
     }
 }
