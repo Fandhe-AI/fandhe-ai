@@ -161,113 +161,88 @@ pub fn tanh_slice(a: &[f32], out: &mut [f32]) {
     }
 }
 
-// --- ベンチ専用: 逐次／並列強制版 ---
-//
-// `add_slice`／`mul_slice`／`exp_slice` は `PARALLEL_THRESHOLD` による
-// 自動判定を内蔵するため、同一要素数で逐次経路と並列経路を比較できない
-// （`elementwise_threshold_perf.rs` の実測が異なる要素数〈閾値未満＝逐次・
-// 閾値以上＝並列〉を跨いで比較していたため、要素数増加の影響と並列化
-// オーバーヘッドの影響を切り分けられないという codex-review 指摘。
-// イシュー #1027）。以下は `PARALLEL_THRESHOLD` 判定を経由せず経路を
-// 固定するベンチ専用版で、`gemm_blis`（直列専用入口）／
-// `gemm_blis_parallel`（並列専用入口）が別関数として公開されているのと
-// 同じ発想（本体ロジックはスライスカーネル層と同一・分岐のみ除去）。
-// 本番の `*_slice` 関数の閾値判定・数値契約には影響しない。
+/// ベンチハーネス専用の逐次／並列強制版カーネル（公開 API 契約外）。
+///
+/// `add_slice`／`mul_slice`／`exp_slice` は `PARALLEL_THRESHOLD` による
+/// 自動判定を内蔵するため、同一要素数で逐次経路と並列経路を比較できない
+/// （`tests/elementwise_threshold_perf.rs` の実測が異なる要素数〈閾値未満＝
+/// 逐次・閾値以上＝並列〉を跨いで比較していたため、要素数増加の影響と
+/// 並列化オーバーヘッドの影響を切り分けられないという codex-review 指摘。
+/// イシュー #1027）。本モジュールは `PARALLEL_THRESHOLD` 判定を経由せず
+/// 経路を固定するベンチ専用版を提供する（本体ロジックはスライスカーネル層
+/// と同一・分岐のみ除去。本番の `*_slice` 関数の閾値判定・数値契約には
+/// 影響しない）。
+///
+/// # 公開範囲の契約（PR #1066 codex-review P1 対応）
+///
+/// `tests/elementwise_threshold_perf.rs`（同一クレートの結合テスト形式
+/// ベンチハーネス）から到達するためだけの内部ディスパッチ詳細であり、
+/// サポート対象の公開 API ではない（`facade` から到達不能・semver 互換性の
+/// 対象外）。`lib.rs` 側で `#[doc(hidden)]` を付けて再エクスポートし
+/// docs.rs・rustdoc から隠す（`tensor-core` の `pool_core` と同型の前例）。
+///
+/// 長さ検査は `debug_assert_eq!` に留める（release では消える）: 本番経路
+/// から呼ばれない前提のため、本番 panic 経路（`.claude/rules/coding-rust.md`
+/// 「本番経路で `unwrap()`／`expect()` を使わない」と同趣旨）を追加しない。
+/// 長さ不一致時は `zip` が短い方へ切り詰めるだけで未定義動作にはならない。
+pub mod bench_internal {
+    use rayon::prelude::*;
 
-/// `add_slice` の本体ロジックから `PARALLEL_THRESHOLD` 判定を除いた
-/// 逐次強制版（ベンチ専用。上記「ベンチ専用」節参照）。
-pub fn add_slice_force_serial(a: &[f32], b: &[f32], out: &mut [f32]) {
-    assert_eq!(
-        a.len(),
-        b.len(),
-        "add_slice_force_serial: length mismatch (a vs b)"
-    );
-    assert_eq!(
-        a.len(),
-        out.len(),
-        "add_slice_force_serial: length mismatch (a vs out)"
-    );
-    for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
-        *o = x + y;
+    /// `add_slice` の本体ロジックから `PARALLEL_THRESHOLD` 判定を除いた
+    /// 逐次強制版（ベンチ専用。モジュール doc コメント参照）。
+    pub fn add_slice_force_serial(a: &[f32], b: &[f32], out: &mut [f32]) {
+        debug_assert_eq!(a.len(), b.len(), "add_slice_force_serial: a vs b");
+        debug_assert_eq!(a.len(), out.len(), "add_slice_force_serial: a vs out");
+        for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
+            *o = x + y;
+        }
     }
-}
 
-/// `add_slice` の本体ロジックから `PARALLEL_THRESHOLD` 判定を除いた
-/// 並列強制版（ベンチ専用。上記「ベンチ専用」節参照）。
-pub fn add_slice_force_parallel(a: &[f32], b: &[f32], out: &mut [f32]) {
-    assert_eq!(
-        a.len(),
-        b.len(),
-        "add_slice_force_parallel: length mismatch (a vs b)"
-    );
-    assert_eq!(
-        a.len(),
-        out.len(),
-        "add_slice_force_parallel: length mismatch (a vs out)"
-    );
-    out.par_iter_mut()
-        .zip(a.par_iter())
-        .zip(b.par_iter())
-        .for_each(|((o, &x), &y)| *o = x + y);
-}
-
-/// `mul_slice` の逐次強制版（ベンチ専用。上記「ベンチ専用」節参照）。
-pub fn mul_slice_force_serial(a: &[f32], b: &[f32], out: &mut [f32]) {
-    assert_eq!(
-        a.len(),
-        b.len(),
-        "mul_slice_force_serial: length mismatch (a vs b)"
-    );
-    assert_eq!(
-        a.len(),
-        out.len(),
-        "mul_slice_force_serial: length mismatch (a vs out)"
-    );
-    for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
-        *o = x * y;
+    /// `add_slice` の本体ロジックから `PARALLEL_THRESHOLD` 判定を除いた
+    /// 並列強制版（ベンチ専用。モジュール doc コメント参照）。
+    pub fn add_slice_force_parallel(a: &[f32], b: &[f32], out: &mut [f32]) {
+        debug_assert_eq!(a.len(), b.len(), "add_slice_force_parallel: a vs b");
+        debug_assert_eq!(a.len(), out.len(), "add_slice_force_parallel: a vs out");
+        out.par_iter_mut()
+            .zip(a.par_iter())
+            .zip(b.par_iter())
+            .for_each(|((o, &x), &y)| *o = x + y);
     }
-}
 
-/// `mul_slice` の並列強制版（ベンチ専用。上記「ベンチ専用」節参照）。
-pub fn mul_slice_force_parallel(a: &[f32], b: &[f32], out: &mut [f32]) {
-    assert_eq!(
-        a.len(),
-        b.len(),
-        "mul_slice_force_parallel: length mismatch (a vs b)"
-    );
-    assert_eq!(
-        a.len(),
-        out.len(),
-        "mul_slice_force_parallel: length mismatch (a vs out)"
-    );
-    out.par_iter_mut()
-        .zip(a.par_iter())
-        .zip(b.par_iter())
-        .for_each(|((o, &x), &y)| *o = x * y);
-}
-
-/// `exp_slice` の逐次強制版（ベンチ専用。上記「ベンチ専用」節参照）。
-pub fn exp_slice_force_serial(a: &[f32], out: &mut [f32]) {
-    assert_eq!(
-        a.len(),
-        out.len(),
-        "exp_slice_force_serial: length mismatch"
-    );
-    for (o, &x) in out.iter_mut().zip(a) {
-        *o = x.exp();
+    /// `mul_slice` の逐次強制版（ベンチ専用。モジュール doc コメント参照）。
+    pub fn mul_slice_force_serial(a: &[f32], b: &[f32], out: &mut [f32]) {
+        debug_assert_eq!(a.len(), b.len(), "mul_slice_force_serial: a vs b");
+        debug_assert_eq!(a.len(), out.len(), "mul_slice_force_serial: a vs out");
+        for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
+            *o = x * y;
+        }
     }
-}
 
-/// `exp_slice` の並列強制版（ベンチ専用。上記「ベンチ専用」節参照）。
-pub fn exp_slice_force_parallel(a: &[f32], out: &mut [f32]) {
-    assert_eq!(
-        a.len(),
-        out.len(),
-        "exp_slice_force_parallel: length mismatch"
-    );
-    out.par_iter_mut()
-        .zip(a.par_iter())
-        .for_each(|(o, &x)| *o = x.exp());
+    /// `mul_slice` の並列強制版（ベンチ専用。モジュール doc コメント参照）。
+    pub fn mul_slice_force_parallel(a: &[f32], b: &[f32], out: &mut [f32]) {
+        debug_assert_eq!(a.len(), b.len(), "mul_slice_force_parallel: a vs b");
+        debug_assert_eq!(a.len(), out.len(), "mul_slice_force_parallel: a vs out");
+        out.par_iter_mut()
+            .zip(a.par_iter())
+            .zip(b.par_iter())
+            .for_each(|((o, &x), &y)| *o = x * y);
+    }
+
+    /// `exp_slice` の逐次強制版（ベンチ専用。モジュール doc コメント参照）。
+    pub fn exp_slice_force_serial(a: &[f32], out: &mut [f32]) {
+        debug_assert_eq!(a.len(), out.len(), "exp_slice_force_serial: a vs out");
+        for (o, &x) in out.iter_mut().zip(a) {
+            *o = x.exp();
+        }
+    }
+
+    /// `exp_slice` の並列強制版（ベンチ専用。モジュール doc コメント参照）。
+    pub fn exp_slice_force_parallel(a: &[f32], out: &mut [f32]) {
+        debug_assert_eq!(a.len(), out.len(), "exp_slice_force_parallel: a vs out");
+        out.par_iter_mut()
+            .zip(a.par_iter())
+            .for_each(|(o, &x)| *o = x.exp());
+    }
 }
 
 // --- Tensor 入口層 ---

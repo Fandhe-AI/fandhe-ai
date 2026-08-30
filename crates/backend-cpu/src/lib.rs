@@ -115,10 +115,15 @@ pub mod rmsnorm;
 pub mod softmax;
 
 pub use device::CpuDeviceProvider;
+// ベンチ専用の逐次／並列強制版カーネル（`tests/elementwise_threshold_perf.rs`
+// 専用の内部ディスパッチ詳細。イシュー #1027）。サポート対象の公開 API では
+// ない（`facade` から到達不能・semver 互換性の対象外）ため `#[doc(hidden)]`
+// で docs.rs・rustdoc から隠す（`tensor-core` の `pool_core` と同型の前例。
+// PR #1066 codex-review P1 対応）。
+#[doc(hidden)]
+pub use elementwise::bench_internal;
 pub use elementwise::{
-    add, add_slice, add_slice_force_parallel, add_slice_force_serial, exp, exp_slice,
-    exp_slice_force_parallel, exp_slice_force_serial, mul, mul_slice, mul_slice_force_parallel,
-    mul_slice_force_serial, relu, relu_slice, tanh, tanh_slice,
+    add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,
 };
 pub use fused_elementwise::run_fused_elementwise;
 pub use gemm::{

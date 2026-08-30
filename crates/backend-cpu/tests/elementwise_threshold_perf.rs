@@ -26,7 +26,9 @@
 //! （`add_slice_force_serial`／`add_slice_force_parallel` 等。本体の
 //! `*_slice` 関数と同一ロジックから分岐のみを除いたもの。`gemm_blis`
 //! 〈直列専用入口〉／`gemm_blis_parallel`〈並列専用入口〉と同じ発想）を
-//! 追加し、本ハーネスは各候補サイズで両経路を**同一サイズ**で計測して
+//! 追加し（公開 API 契約外の `#[doc(hidden)]` な `bench_internal`
+//! モジュール。PR #1066 codex-review P1 対応）、本ハーネスは各候補サイズで
+//! 両経路を**同一サイズ**で計測して
 //! 中央値比（並列 / 逐次）を報告する。1.0 に近い・下回るサイズが
 //! 「並列化が逐次に追いつく／上回る」交差点であり、これと
 //! `PARALLEL_THRESHOLD` の関係を突合できる。
@@ -48,11 +50,13 @@
 
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run};
-use fandhe_ai_backend_cpu::{
-    add_slice, add_slice_force_parallel, add_slice_force_serial, exp_slice,
-    exp_slice_force_parallel, exp_slice_force_serial, mul_slice, mul_slice_force_parallel,
-    mul_slice_force_serial,
+// 逐次／並列強制版は `#[doc(hidden)]` の `bench_internal` モジュール経由で
+// 参照する（公開 API 契約外のベンチ専用面。PR #1066 codex-review P1 対応）。
+use fandhe_ai_backend_cpu::bench_internal::{
+    add_slice_force_parallel, add_slice_force_serial, exp_slice_force_parallel,
+    exp_slice_force_serial, mul_slice_force_parallel, mul_slice_force_serial,
 };
+use fandhe_ai_backend_cpu::{add_slice, exp_slice, mul_slice};
 use std::hint::black_box;
 
 fn random_vec(seed: u64, len: usize) -> Vec<f32> {
