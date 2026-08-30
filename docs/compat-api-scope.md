@@ -32,7 +32,7 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
   REQ-12「利用者向け融合制御 API」・REQ-9「互換 API 層」のいずれにも
   該当しない。技術的に `pub` であることと、利用者向けにサポートされる
   公開面であることは区別する
-- **確定入口は次の 4 つ**である（正本 spec 側の記述〈REQ-9 の 2026-08-08
+- **確定入口は次の 5 つ**である（正本 spec 側の記述〈REQ-9 の 2026-08-08
   追記・2026-08-29 追記〉と整合済み）:
   1. `fandhe_ai::tape()`／`fandhe_ai::tape_for(Device)`（composition root。
      `crates/facade/src/lib.rs`）
@@ -81,6 +81,22 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
      `BackendOps`／`MemoryOps` は他の確定入口と同じく利用者向け公開面へ
      露出しない。設計・採用判断は `docs/device-memory-pool-design.md`・
      `docs/backend-cuda-pool-allocator-decision.md` を参照
+
+  5. **デバイスメモリプールの明示解放・統計 API `fandhe_ai::
+     release_cached_memory(Device)`／`fandhe_ai::memory_pool_stats(Device)`**
+     （`crates/facade/src/lib.rs`。イシュー #1018 ツリー・#1019 設計
+     〈`docs/device-memory-pool-design.md`〉・#1021 Metal 実装）: REQ-14
+     の明示解放 API。`device` に対応するバックエンドのデバイスメモリ
+     プール（サイズクラス別フリーリスト。`fandhe_ai_tensor_core::
+     backend_ops::BackendOps::release_cached_device_memory`／
+     `device_memory_pool_stats` を薄く再公開）がアイドル保持している
+     バッファを全て解放する、または統計スナップショット（POD
+     `fandhe_ai::PoolStats`。内部ハンドル表現を一切含まない）を返す。
+     `Device` は識別子 enum（外部型）であり facade は inherent メソッドを
+     追加できない（orphan rule。`docs/facade-device-handle-design.md`
+     「案 B のみ採用」と同じ理由）ため、`tape`／`tape_for` と同型の
+     自由関数として提供する。プールを持たないバックエンド（CPU 等）は
+     解放を no-op（`Ok(())`）・統計を `None` とする。
 
   `SgdConfig` はクレート root（4 の経路）と `crate::optim::SgdConfig`
   （3 の経路）の 2 経路から再エクスポートされる同一型〈`lib.rs`

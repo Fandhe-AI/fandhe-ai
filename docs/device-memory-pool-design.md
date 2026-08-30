@@ -255,10 +255,10 @@ allocator()` を削除し `DeviceAllocator` の実装インスタンスをいず
     | フィールド | 増加 | 減少 | 備考 |
     |---|---|---|---|
     | `alloc_count` | `record_allocation` 呼び出しごとに `+1` | なし（単調増加のカウンタ） | 新規物理確保の回数 |
-    | `reuse_count` | `take` 成功（`Some` を返した）ごとに `+1` | なし（単調増加のカウンタ） | フリーリストからの再利用ヒット回数 |
+    | `reuse_count` | `take` 成功（`Some` を返した）ごとに `+1`（実装は `take` 自身ではなく、`Some` を受け取った直後に呼ぶ `record_reuse` が加算する。§8.2「具体メソッドの引数形状の微調整」の範囲・PR #1063） | なし（単調増加のカウンタ） | フリーリストからの再利用ヒット回数 |
     | `cached_bytes` | `put` で `+class_bytes` | `take` 成功で `−class_bytes`（取り出した分）／`take_one_for_release` で `−class_bytes`（取り出した分） | フリーリストが現在保持する総バイト数。恒等式 `cached_bytes == Σ(フリーリスト中の各エントリの class_bytes)` を常に満たす |
     | `pending_return_bytes`（`AtomicU64`。`Mutex<PoolCore<H>>` の外） | `record_pending_return(class_bytes)` 呼び出しごとに `+class_bytes`（`fetch_add`／`Relaxed`。`PooledMetalHandle::Drop` が `pending_pool_returns` へ push するのと**同一の `BatchSlots` クリティカルセクション内**で呼ぶ。§3.3「Metal」・§3.5） | `record_pending_merge(class_bytes)` 呼び出しごとに `−class_bytes`（`fetch_sub`／`Relaxed`。`MetalContext::synchronize()` が `pending_pool_returns` から `std::mem::take` するのと**同一の `BatchSlots` クリティカルセクション内**で呼ぶ。`record_loan_end` は既に `Drop` 時点で呼び出し済みのためここでは呼ばない。下記「Metal の返却待ちバイト数」参照） | CUDA・CPU では常に `0`（`pending_pool_returns` 相当の機構を持たないため呼ばれない）。push／`take` と加減算が同一クリティカルセクションで対になるため（Cursor Bugbot・codex-review 再指摘対応。旧稿は `BatchSlots` ロック解放後に加減算する契約だったため、別スレッドの `synchronize()` が先着すると `record_pending_merge` の減算が `record_pending_return` の加算より先に走り、`saturating_sub` で `0` に張り付いた後の加算が恒久的な誤差として残り得た）、`pending_return_bytes` に恒久的な誤差は生じない。ただし `record_pending_merge`〈ロック内〉と `put`〈ロック解放後〉の間の短い窓では、当該バイト数は `pending_return_bytes` にも `cached_bytes` にも含まれない中間状態になる（二重計上にはならず、`max_pool_bytes`／LRU の判定〈§3.4〉は実態より少なく見える保守側にのみ振れる） |
-    | `capacity_waste_bytes` | `record_allocation` で `+(class_bytes − logical_bytes)`／`take` 成功で `+(class_bytes − bytes)`〈`bytes` はその回の `take` 呼び出しの論理バイト数〉 | 対応する貸出が終了する時（`record_loan_end(logical_bytes, class_bytes)` 呼び出しごとに `−(class_bytes − logical_bytes)`。**この `logical_bytes` はその貸出が `record_allocation` または `take` で開始した時点の値と同一でなければならない**〈RAII ラッパーが自身の `logical_bytes` フィールドに保持し続けることで担保する〉 | **意味論はストック量**（現在貸出中の全ハンドルについて `Σ(class_bytes − logical_bytes)` を表すリアルタイムの内部断片化実測値であり、`capacity_waste_bytes` 単体では「これまでの累積無駄」ではない）。`release_cached()` の再挿入（`put` のみ・`record_loan_end` を伴わない）はこのフィールドに影響しない（対象エントリは貸出中ではなくアイドルだったため） |
+    | `capacity_waste_bytes` | `record_allocation` で `+(class_bytes − logical_bytes)`／`take` 成功で `+(class_bytes − bytes)`〈`bytes` はその回の `take` 呼び出しの論理バイト数。実装は `take` 自身ではなく `record_reuse` が加算する（`reuse_count` と同じ理由。上記行参照）。codex-review P2・Cursor Bugbot 指摘対応: 旧稿はこの加算が実装から漏れており、再利用貸出後に `record_loan_end` が減算しても対応する加算がなく過小表示・`debug_assert!` 失敗を招いていた（PR #1063）〉 | 対応する貸出が終了する時（`record_loan_end(logical_bytes, class_bytes)` 呼び出しごとに `−(class_bytes − logical_bytes)`。**この `logical_bytes` はその貸出が `record_allocation` または `take` で開始した時点の値と同一でなければならない**〈RAII ラッパーが自身の `logical_bytes` フィールドに保持し続けることで担保する〉 | **意味論はストック量**（現在貸出中の全ハンドルについて `Σ(class_bytes − logical_bytes)` を表すリアルタイムの内部断片化実測値であり、`capacity_waste_bytes` 単体では「これまでの累積無駄」ではない）。`release_cached()` の再挿入（`put` のみ・`record_loan_end` を伴わない）はこのフィールドに影響しない（対象エントリは貸出中ではなくアイドルだったため） |
     | `released_bytes` | `record_release(class_bytes)` 呼び出しごとに `+class_bytes`（`release_cached()`〈内部メソッド。§3.1「2 段構成の命名規約」〉のフェーズ (ii) で個別解放が成功するたびに呼ぶ） | なし（単調増加のカウンタ） | §3.6 (2) 参照。プロセス起動からの累積解放バイト数（診断用） |
 
     **Metal の返却待ちバイト数（`pending_return_bytes`）と
@@ -293,26 +293,37 @@ allocator()` を削除し `DeviceAllocator` の実装インスタンスをいず
     `Retained<ProtocolObject<dyn MTLBuffer>>` を保持〉。
     `SizeClassPool<H>` のフリーリストに格納される値そのものであり、
     `tensor-core` のどの公開シグネチャにも現れない。
-  - **RAII 貸出ラッパー型（新設。codex-review PR #1056 P1 是正）**: 例
-    `backend-cuda::pool::PooledCudaHandle { handle: Option<CudaSliceHandle>,
-    class_bytes: u64, logical_bytes: u64, pool: Arc<SizeClassPool<
-    CudaSliceHandle>> }`（`backend-metal::pool::PooledMetalHandle` も
-    同型）。`logical_bytes`（新規。codex-review PR #1056 P1 是正）は
-    `alloc_zeroed`／`alloc_uninit`（下記）呼び出し時に要求された論理
-    バイト数（`class_bytes` への丸め前の値）を保持し、`Drop` 時の
-    `record_loan_end(logical_bytes, class_bytes)` 呼び出し（下記）に
-    使う。`alloc_zeroed`／`alloc_uninit`（下記）は生ハンドル型ではなく
-    **この RAII ラッパーを返す**。二重返却・use-after-return の構造的
-    防止は**両バックエンド共通で `Option<H>::take()` 方式に統一する**
-    （codex-review PR #1056 P2 是正。旧稿は本節で `Option<H>::take()`、
-    §3.3・§7 の一部記述で既存 `PooledBufferHandle` の `ManuallyDrop`
-    ガード方式と、2 つの異なる二重防止方式が併記されており矛盾して
-    いた。`ManuallyDrop` 方式への言及は削除し本節の記述を正とする）:
-    `Drop` 実装は必ず `self.handle.take()` で `Option` から所有権を
-    奪ってから後段の処理へ渡す（`take()` 後の `self.handle` は `None`
-    になるため、何らかの経路で二重に `Drop` が走っても 2 回目は `None`
-    を握って何もしない）。所有権を奪った直後、**`pool.put()` の
-    呼び出しタイミングとは独立に**
+  - **RAII 貸出ラッパー型（新設。codex-review PR #1056 P1 是正。
+    二重返却防止方式は #1063 で `ManuallyDrop<H>` へ改訂済み。
+    §8.1「改訂履歴」参照）**: 例
+    `backend-cuda::pool::PooledCudaHandle { handle: ManuallyDrop<
+    CudaSliceHandle>, class_bytes: u64, logical_bytes: u64, pool:
+    Arc<SizeClassPool<CudaSliceHandle>> }`（`backend-metal::pool::
+    PooledMetalHandle` も同型）。`logical_bytes`（新規。codex-review
+    PR #1056 P1 是正）は `alloc_zeroed`／`alloc_uninit`（下記）呼び
+    出し時に要求された論理バイト数（`class_bytes` への丸め前の値）を
+    保持し、`Drop` 時の `record_loan_end(logical_bytes, class_bytes)`
+    呼び出し（下記）に使う。`alloc_zeroed`／`alloc_uninit`（下記）は
+    生ハンドル型ではなく**この RAII ラッパーを返す**。二重返却・
+    use-after-return の構造的防止は**両バックエンド共通で
+    `ManuallyDrop<H>` ＋ `Drop` 内 `ManuallyDrop::take` 方式に統一
+    する**（#1063・codex-review P1 是正。旧稿〈PR #1056 P2 是正〉は
+    `Option<H>::take()` 方式を正としていたが、`raw()` 等の読み取り
+    アクセサが「`Drop` 実行中の一瞬を除き常に `Some`」という実行時
+    には常に成り立つが型システムでは表現できない不変条件に依存し
+    `None` 分岐を `unreachable!()` で埋めざるを得なかった〈codex-
+    review P1 指摘〉。`ManuallyDrop<H>` 方式はこの `unreachable!()`
+    分岐自体を型構造から排除する。防止する契約自体〈同一ハンドルが
+    フリーリストと貸出中の双方に存在しない・二重返却されない〉は
+    不変であり、実現方式のみを変更した）:
+    `Drop` 実装は必ず `unsafe { std::mem::ManuallyDrop::take(&mut
+    self.handle) }` で所有権を奪ってから後段の処理へ渡す。SAFETY:
+    `Drop::drop` は言語仕様上インスタンスごとにちょうど 1 回だけ
+    呼ばれ、`drop` 完了後は `self`（本ラッパー自体）への一切の
+    アクセスが言語仕様上不可能（値は既に破棄済み）であるため、
+    `self.handle` への二重 `take`・`take` 後のアクセス
+    （use-after-take）はいずれも構造的に発生しない。所有権を奪った
+    直後、**`pool.put()` の呼び出しタイミングとは独立に**
     `pool.record_loan_end(self.logical_bytes, self.class_bytes)`
     を CUDA・Metal 共通で即座に呼ぶ（`PoolStats::capacity_waste_bytes`
     の会計。上記「フィールド更新契約」・下記「Metal の返却待ちバイト数」
@@ -499,7 +510,7 @@ jemalloc 型の方式を採用する: 2 の冪ごとの区間（オクターブ�
 |---|---|---|
 | 最小 | `bytes == 0` | プール非経由（従来どおり空ハンドルを即返す） |
 | 極小 | 1 B 〜 255 B | 256 B（小帯の最小クラス）へ切り上げてプール経由とする（小帯と同一のフリーリストを使う。専用クラスは設けない） |
-| 小 | 256 B 〜 1 MiB | 各オクターブを `1x`／`1.25x`／`1.5x`／`1.75x` の 4 段に分割（内部断片化の理論上限 25%） |
+| 小 | 256 B 〜 1 MiB | 各オクターブを `1x`／`1.25x`／`1.5x`／`1.75x` の 4 段に分割（内部断片化の理論上限 25%）。`(1.75x, 2x]` の範囲（4 段目の丸め先を超える端数）は次オクターブの `1x`（`= 2x`）へ切り上げる（Cursor Bugbot High 指摘対応・PR #1063。旧稿の `pool_core.rs::size_class_for` 実装はこの範囲を「到達不能」と誤って前提し `BackendError` を返していた） |
 | 大 | 1 MiB 超 〜 64 MiB 未満 | 2 MiB 単位切り上げ（exclusive プール。1 バッファ 1 エントリ） |
 | 巨大 | 64 MiB 以上 | 完全一致のみ・保持上限 1 エントリ／クラス |
 
@@ -537,7 +548,8 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
   （`crates/tensor-core/src/buffer.rs`「解放方針」節を維持）。
 - **返却の GPU 完了待ち契約（codex-review PR #1056 P1 是正。CUDA／
   Metal で異なる理由）**: §3.1「RAII 貸出ラッパー型」の `Drop` は
-  `Option<H>::take()` で所有権を取り出した後、CUDA は即座に
+  `ManuallyDrop::take`（#1063 で `Option<H>::take()` から改訂。§8.1
+  「改訂履歴」参照）で所有権を取り出した後、CUDA は即座に
   `pool.put()` する一方、Metal は GPU 完了まで `put()` を遅延させる
   （下記「Metal」参照）。この非対称の根拠を以下に明記する:
   - **CUDA が即時 `put()` で安全な理由**: 本設計は単一ストリームモデル
@@ -696,14 +708,21 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
     側フィルをバッチへ encode する案を推奨する（同期点を新たに増やさ
     ないため）。最終選択は #1021 に委ねる。
 - **二重返却・use-after-return の構造的防止（codex-review PR #1056 P2
-  是正。方式の統一）**: §3.1「RAII 貸出ラッパー型」が定める
-  `Option<H>::take()` 方式に統一する。旧稿は本節で既存
-  `PooledBufferHandle` の `ManuallyDrop` によるガード方式
-  （`crates/tensor-core/src/pool.rs`）を継承すると記載しており、§3.1 の
-  `Option<H>::take()` 方式と矛盾していた。`PooledMemory`（既存）が
-  `ManuallyDrop` を使うこと自体は変更しない（既存公開 API・実装への
-  非破壊）が、本設計（`SizeClassPool<H>`・`PooledCudaHandle`／
-  `PooledMetalHandle`）は新規実装であり `ManuallyDrop` を採用しない。
+  是正・#1063 P1 是正で `ManuallyDrop<H>` へ改訂。§8.1「改訂履歴」
+  参照）**: §3.1「RAII 貸出ラッパー型」が定める `ManuallyDrop<H>` ＋
+  `Drop` 内 `ManuallyDrop::take` 方式に統一する。旧稿（PR #1056
+  時点）は本節で既存 `PooledBufferHandle` の `ManuallyDrop` によるガード
+  方式（`crates/tensor-core/src/pool.rs`）を継承すると記載しており、
+  §3.1 が当時定めていた `Option<H>::take()` 方式と矛盾していたため、
+  その巡では `Option<H>::take()` へ統一する形で解消した。その後
+  #1063（イシュー #1021 実装）で、`Option<H>::take()` 方式が要求する
+  「読み取りアクセサは `Drop` 実行中の一瞬を除き常に `Some`」という
+  型で表現できない不変条件への依存（`unreachable!()` 分岐。codex-
+  review P1 指摘）を解消するため、既存 `PooledBufferHandle` と同じ
+  `ManuallyDrop<H>` 方式へ再度統一した（詳細は §3.1「RAII 貸出
+  ラッパー型」・§8.1「改訂履歴」）。`PooledMemory`（既存）が
+  `ManuallyDrop` を使うこと自体は変更していない（既存公開 API・実装
+  への非破壊）。
 
 ### 3.4 断片化
 
@@ -1073,7 +1092,7 @@ fresh/reuse の 4 通り）:
 | REQ-14 の解放 API を内部 OOM フォールバックのみで満たす（旧稿） | `release_cached()` を「REQ-14 の明示解放 API」と位置づけつつ、実装インスタンスをいずれの公開関数からも返さない設計のままにする | 内部 OOM フォールバック（§3.4）から呼べるだけでは、`facade` を含む利用者側からプールを明示的に解放する経路が存在せず、REQ-14 が求める「プール解放 API の提供」を満たさない（codex-review PR #1056 P1）。本設計（§3.1）は低水準アロケータを一切露出せずに `BackendOps::release_cached_device_memory()`／`facade::release_cached_memory(device)`（unit のみを返す）を確定入口として追加することでこれを解消する |
 | `SizeClassPool<H>::register(class_bytes, handle)` で新規確保ハンドルをフリーリストへ記帳する（旧稿） | 確保直後のハンドルを `register` でフリーリストへ登録し、`take` で取り出して貸し出す設計 | フリーリストへの登録と貸出の間で所有権移転が定義されておらず、貸出中のハンドルが `take()` で別演算へ再取得できてしまう（use-after-return・上書きの構造的欠陥。codex-review PR #1056 P1）。本設計（§3.1）は `register` を廃止し、新規確保直後は RAII 貸出ラッパーが排他的に所有し、`put` は `Drop` 時のみ呼ばれる契約へ変更した |
 | `SizeClassPool<H>::drain() -> Vec<H>` で一括解放する（旧稿） | 解放時にフリーリストの全ハンドルを一括で取り出し、呼び出し元が順次解放する設計 | `drain` した時点で全ハンドルがプールの管理外になるため、途中で stream 同期・driver トリムが失敗しても取り出し済みハンドルをキャッシュへ戻す先がなく、§3.6 (2) の「未解放エントリはキャッシュへ残す」・§3.4 の「残存分のみ再試行」という fail-closed 契約を実現できない（codex-review PR #1056 P1）。本設計（§3.1）は `take_one_for_release` による 1 件ずつのトランザクション型取り出しと `put` による失敗時再挿入へ変更した |
-| Metal も CUDA と同様に `PooledMetalHandle::Drop` で即座に `pool.put()` する（旧稿） | RAII ラッパーの `Drop` 実装を CUDA／Metal で共通化し、`Option<H>::take()` 後ただちに `pool.put()` する | Metal のコマンド実行は非同期であり、`Drop` 時点で GPU 側の読み書きが完了している保証がない。§3.3「Metal」（#1054 §3.4 由来）は「in-flight バッチの保持列から外れる（`synchronize()` される）まで再貸出ししない」契約を既に確定させており、即時 `put()` はこの契約に違反し、返却直後に別演算へ `take()` されたバッファが実行中カーネルの入出力を上書きしうる（codex-review PR #1056 P1）。本設計（§3.3・§3.5）は `MetalContext` の `pending_pool_returns`（`Mutex<BatchSlots>` 保護）へ所有権を一時的に委譲し、`synchronize()` 完了後にのみ `put()` する機構へ変更した。CUDA は stream 順序保証（§3.3「返却の GPU 完了待ち契約」）により即時 `put()` のままで安全なため、この変更は Metal 側にのみ適用する |
+| Metal も CUDA と同様に `PooledMetalHandle::Drop` で即座に `pool.put()` する（旧稿） | RAII ラッパーの `Drop` 実装を CUDA／Metal で共通化し、所有権を取り出した後ただちに `pool.put()` する | Metal のコマンド実行は非同期であり、`Drop` 時点で GPU 側の読み書きが完了している保証がない。§3.3「Metal」（#1054 §3.4 由来）は「in-flight バッチの保持列から外れる（`synchronize()` される）まで再貸出ししない」契約を既に確定させており、即時 `put()` はこの契約に違反し、返却直後に別演算へ `take()` されたバッファが実行中カーネルの入出力を上書きしうる（codex-review PR #1056 P1）。本設計（§3.3・§3.5）は `MetalContext` の `pending_pool_returns`（`Mutex<BatchSlots>` 保護）へ所有権を一時的に委譲し、`synchronize()` 完了後にのみ `put()` する機構へ変更した。CUDA は stream 順序保証（§3.3「返却の GPU 完了待ち契約」）により即時 `put()` のままで安全なため、この変更は Metal 側にのみ適用する |
 | release_cached() を stream 同期 1 回 → 個別解放 → driver トリムの 3 段のままにする（旧稿） | `cuMemFreeAsync` の enqueue（個別解放）直後に `cuMemPoolTrimTo` を呼ぶ | `cuMemFreeAsync` はエンキューのみで完了を待たないため、直後の trim はまだ driver 側に解放が反映されていないメモリを見落とす（Cursor Bugbot High 指摘）。本設計（§3.6 (2)）は個別解放後にもう 1 回 stream 同期を挟む 4 段構成へ変更し、この 2 回目の同期の失敗はハンドルが既に drop 済み（再挿入不可）であることを踏まえた専用の `Err` 種別で区別する |
 | `SizeClassPool<H>` を `take`／`put`／解放系メソッドのみに留め、新規確保は統計を一切更新しない（旧稿） | 新規確保は `take` を経由せず RAII ラッパーが直接包むため、`SizeClassPool<H>` はハンドルの custody を持つ操作（`take`／`put`／`take_one_for_release`）でしか統計を更新できないという前提のまま設計する | 新規確保の発生・その内部断片化（`class_bytes − logical_bytes`）を記録する経路が存在せず、`alloc_count`／`capacity_waste_bytes` という `PoolStats` の宣言済みフィールドを実装不能にする（codex-review PR #1056 P1）。本設計（§3.1）は `record_allocation`／`record_loan_end`（いずれもハンドルを受け取らない統計専用メソッド）を追加し、ハンドルの custody とは独立に統計だけを更新できるようにした |
 | 公開 `BackendOps::release_cached_device_memory()` の doc comment を「`Err` は 2 種類」のまま維持する（旧稿） | トリム前 stream 同期失敗・driver トリム失敗の 2 種類のみを doc comment に列挙する | §3.6 (2) の 4 フェーズ設計（post-free sync 失敗を含む）と矛盾し、実装者が post-free sync 失敗を表現・伝播できず fail-closed 契約を破るおそれがある（codex-review PR #1056 P1）。本設計（§3.1・§3.6 (2)）は doc comment を §3.6 (2)「バックエンド別の該当フェーズ」表を参照する形へ改め、CUDA／Metal／CPU 別の該当フェーズを明記した |
@@ -1363,8 +1382,9 @@ fresh/reuse の 4 通り）:
   ログや統計に含めない。
 - **スレッド安全性（メモリ安全上の前提）**: ロックを保持したまま FFI を
   呼ばない（§3.5）・poison 時は panic せず継続する・二重返却を
-  `Option<H>::take()` で構造的に防止する（§3.1・§3.3。codex-review PR
-  #1056 P2 是正で `ManuallyDrop` 方式から統一した）ことを契約として記す。
+  `ManuallyDrop<H>` ＋ `Drop` 内 `ManuallyDrop::take` で構造的に
+  防止する（§3.1・§3.3。#1063 で統一。§8.1「改訂履歴」参照）ことを
+  契約として記す。
 
 ## §8 本設計文書で確定する事項／実装イシューで確定する事項
 
@@ -1388,8 +1408,23 @@ fresh/reuse の 4 通り）:
 - **所有権不変条件**: 同一ハンドルがフリーリストと貸出中に同時に存在
   しないこと（§3.1「不変条件」）。返却は RAII 限定・明示 `free()` を
   設けないこと（§3.3）。二重返却・use-after-return の構造的防止は
-  `Option<H>::take()` 方式に統一すること（§3.1・§3.3。`ManuallyDrop`
-  方式は採らない）。
+  `ManuallyDrop<H>` ＋ `Drop` 内 `ManuallyDrop::take`（`Drop::drop`
+  の 1 回性により二重 take・use-after-take が構造的に不可能）方式に
+  統一すること（§3.1・§3.3）。
+  - **改訂履歴（#1063・イシュー #1021・codex-review P1 是正）**: 本項
+    は当初（PR #1056 確定時点）「`Option<H>::take()` 方式に統一する
+    （`ManuallyDrop` 方式は採らない）」としていた。この確定は、
+    後続の CUDA 実装（#1020・PR #1061・main マージ済み）が
+    `PooledCudaHandle` を `ManuallyDrop<CudaSliceHandle>` として実装
+    した時点で実態と乖離した誤記になっていた（`Option<H>::take()` の
+    ままでは読み取りアクセサ〈`raw()` 等〉が「`Drop` 実行中の一瞬を
+    除き常に `Some`」という型で表現できない不変条件に依存し
+    `unreachable!()` 分岐を要するため、codex-review P1 の指摘対象に
+    なった）。本 PR（#1063）で Metal 実装（`PooledMetalHandle`）も
+    同じ指摘を受け、CUDA・Metal 両実装の実態（`ManuallyDrop<H>`）へ
+    本項を整合させた。防止する契約自体（同一ハンドルがフリーリストと
+    貸出中の双方に存在しない・二重返却されない）は本改訂の前後で
+    不変であり、変更したのは実現方式の記述のみである。
 - **REQ-14 の解放プロトコルの段階と失敗時状態**: `release_cached()` の
   フェーズ構成（CUDA 4 段・Metal 2 段。§3.6 (2)「バックエンド別の該当
   フェーズ」表）・各フェーズの `Err` 時のプール状態（フリーリストへの
@@ -1422,17 +1457,60 @@ fresh/reuse の 4 通り）:
   `SizeClassPool<H>` **内部**のロック実装詳細は実装時に決めてよい。
 - **具体メソッドの引数形状の微調整**: `record_allocation`／
   `record_loan_end`／`record_release`／`record_pending_return`／
-  `record_pending_merge`（§3.1）の引数の型・順序・まとめ方（例:
-  `class_bytes`・`logical_bytes` を個別の `u64` にするか小さな構造体に
-  まとめるか）。「ハンドルを一切受け取らない統計専用メソッドである
-  こと」「どの操作から呼ばれるか」「どのフィールドをどう増減させる
-  契約か」は 8.1 の確定事項だが、シグネチャの具体形は実装時に決めて
-  よい。
+  `record_pending_merge`／`record_reuse`（新設。`take` 成功直後に呼び
+  `reuse_count`＋`capacity_waste_bytes` をまとめて更新する。PR #1063・
+  §3.1）の引数の型・順序・まとめ方（例: `class_bytes`・`logical_bytes`
+  を個別の `u64` にするか小さな構造体にまとめるか）。「ハンドルを
+  一切受け取らない統計専用メソッドであること」「どの操作から呼ばれる
+  か」「どのフィールドをどう増減させる契約か」は 8.1 の確定事項だが、
+  シグネチャの具体形・メソッド分割自体は実装時に決めてよい。
 - **統計更新の順序の細部**: 同一イベント内で複数の統計フィールドを
   更新する際の呼び出し順序（例: `record_pending_merge` と `put` の
   呼び出し順）。ロック**外**で行う限りにおいて、この順序自体が
   他の契約（不変条件・fail-closed 状態遷移）に影響しない範囲は実装時の
-  裁量とする。
+  裁量とする。**ただし `record_pending_merge`（減算）と `put`（挿入・
+  総量上限判定）を組み合わせる場合、両者を独立に〈`put` の後に
+  `record_pending_merge`〉呼ぶ構成は、`put` 内の総量上限判定
+  （`cached_bytes + pending_return_bytes`）が減算前の値を見るため
+  合流対象エントリを二重計上し、挿入したばかりの自分自身を即座に
+  LRU 追い出しする実害が生じる（codex P2・Cursor Bugbot High 指摘。
+  PR #1063 追加是正）。本実装は `SizeClassPool::put_merged`
+  （`record_pending_return` 済みのエントリの合流専用。`core` の
+  `Mutex` を取得した同一ロック区間内で「減算 → 挿入・容量判定」を行う
+  新設メソッド）を追加し、`crates/backend-metal/src/pool_pending.rs`
+  の `put_all`（即時返却専用・`SizeClassPool::put` を呼ぶ）と
+  `put_all_merged`（合流専用・`put_merged` を呼ぶ）を経路ごとに分離
+  することで解消した。これも §8.2 の「メソッド分割自体は実装時の裁量」
+  の範囲の変更である。**
+  **`put_merged` 内部の `pending_return_bytes` 減算方式（codex P2
+  再指摘・PR #1063 追加是正）**: 初版の `put_merged` は
+  `record_pending_return` との対応検証を行わない単純な
+  `AtomicU64::fetch_sub` で減算しており、`record_pending_return` を
+  経ていないエントリに誤用すると `u64` 下限をラップアラウンドし
+  `pending_return_bytes` が `u64::MAX` 付近へ恒久的にずれ、以後の
+  `max_pool_bytes`／LRU 判定が常時「上限超過」になりプールを事実上
+  無効化する致命的な退行があった。誤用を doc comment・テストで明記する
+  だけでは不変条件を保証できないと判断し、`AtomicU64::fetch_update`
+  による**飽和減算**（現在値が `class_bytes` 以上なら減算、未満なら
+  `0` へ飽和）へ変更した。飽和が発生すること自体が契約違反の兆候であり
+  検出には使えるが、`put_locked`（ハンドルの挿入）は飽和の有無に
+  関わらず必ず継続する契約とした（統計フィールドの防御であって `put`
+  の成否を左右させない設計判断。誤ってハンドルを `Err` で握り潰し
+  リークさせない）。
+  **`record_pending_merge` の削除（codex P2 最終指摘・PR #1063 追加
+  是正）**: 上記の飽和化を経てもなお、`record_pending_merge`
+  （`pending_return_bytes` の減算のみを行う独立した公開メソッド）が
+  `fetch_sub` のまま残存し `put_merged` を経由しない直接呼び出しでは
+  同じラップアラウンドの危険を再現しうる、という指摘を受けた。調査の
+  結果、`put_merged` への統合により**本番呼び出し元が既にゼロ**（残る
+  参照はテスト 1 件と doc コメントのみ）だったため、飽和化して残す
+  のではなく**メソッドごと削除**した（誤用経路そのものを構造的に
+  排除する方が「doc/テストで契約を明記するが呼び出し自体は可能」より
+  fail-closed であるという判断。`pending_return_bytes` の減算は
+  `put_merged` 内部の飽和 `fetch_update` のみに一本化され、これを単独
+  で（挿入を伴わずに）呼ぶ公開経路は存在しなくなった）。該当テスト
+  （`record_pending_merge` を直接呼んでいたもの）は `put_merged` 経由の
+  検証へ書き換えた。
 - **エラー種別の表現**: `BackendError::DeviceAllocationFailed(String)`
   の理由文字列によるフェーズ区別（§3.6 (2)）は本設計文書が定める
   **暫定の**非破壊な表現方式である。より型安全な表現（`BackendError`
@@ -1443,3 +1521,162 @@ fresh/reuse の 4 通り）:
 
 この区分は本文書のレビュー往復で生じた不整合の再発を防ぐための運用上の
 指針であり、REQ・spec の記述そのものを変更するものではない。
+
+## §9 実装記録（#1021・Metal）
+
+Metal 側実装（イシュー #1021）が §8.2 の裁量事項を以下のとおり確定した。
+
+- **`SizeClassPoolConfig`**（`crates/tensor-core/src/pool_core.rs`。新規
+  モジュール。クレート root へは `PoolStats` のみ再エクスポート）: 設計
+  文書の例示名 `PoolConfig` は既存 `crate::pool::PoolConfig`（`PooledMemory`
+  用。クレート root で `pub use` 済み）と衝突するため採用しない。
+- **`RawMetalBuffer`**（`crates/backend-metal/src/pool.rs`）: 設計文書の
+  例示名 `MetalBufferHandle` は `memory.rs::MetalBufferHandle`
+  （`BufferHandle` 実装）と衝突するため採用しない。
+- **再利用時のゼロ初期化方式**: ホスト `zero_fill`（`synchronize()` 経由。
+  既存 `PoolZeroFill` と同一パターン）を採用した。`fillBuffer` blit・
+  専用フィルカーネルは実機未検証（Metal 実機なしの本ランで新規カーネル・
+  blit エンコーダ切替を検証できないため）のため不採用とし、out-of-scope
+  として記録した（下記）。
+- **`MetalBuffer` とプールの結線**: 内部表現を
+  `enum Backing { Owned(Retained<MtlBuffer>), Pooled(PooledMetalHandle) }`
+  へ拡張し、`raw()`／`read_to_vec()`／`zero_fill()` は論理長 `len`
+  のみを使う契約を維持した（capacity は `RawMetalBuffer::capacity_bytes`
+  が保持し `MetalBuffer` 側には現れない）。
+- **アロケータ singleton**: `crate::pool::MetalAllocator` を
+  `crate::context_cache::cached_allocator(&Arc<MetalContext>)`
+  （既存 `OnceLock<Mutex<Option<Arc<T>>>>` パターン）で保持する。
+  **独自の専有 `MetalContext`（`MetalMemory::new` 経由。プロセスワイド
+  singleton とは別インスタンス）からの確保要求は、プールへ結びつけると
+  GPU 完了待ち境界の不整合（singleton 側の `synchronize()` が独自
+  コンテキストの dispatch を関知できない）を起こしうるため、
+  `crate::buffer::MetalBuffer::singleton_context_matching` が渡された
+  `ctx` を singleton と照合し、一致しない場合はプール非経由の専有確保
+  （`new_zeroed` と同一経路）へフォールバックする**（設計文書レビュー
+  時点では未確定だった実装上の安全策。`tests/memory_roundtrip.rs` の
+  既存 `#[ignore]` テストが `MetalMemory::new`〈専有コンテキスト〉を
+  使っているため、この安全策により既存テストの前提を壊さない）。
+- **`MTLBuffer` の `Send`/`Sync`（実装時の実測訂正）**: 本節 §3.5 は
+  「Metal の `MTLBuffer` protocol も objc2-metal 0.3.2 で `Send + Sync`
+  を supertrait に持つ」と記述しているが、実装時に本クレートが依存する
+  objc2-metal 0.3.2 の生成コード（`MTLBuffer: MTLResource: MTLAllocation`
+  のいずれも `Send`/`Sync` を課さない。`MTLDevice: NSObjectProtocol +
+  Send + Sync` とは異なる）を実測したところ、この記述は実態と異なる
+  ことが判明した。よって `RawMetalBuffer` には `context.rs::Batch` と
+  同じ正当化ロジック（アクセスは `Mutex` で直列化される 3 経路に限定
+  される）で `unsafe impl Send`（`Sync` は付与しない）を付与した。
+  §3.5 が見込んでいた「`crate::pool::PooledMemory` の
+  `arc_with_non_send_sync` allow 解消」は、この実測結果により
+  Metal 側では成立しない（CUDA 側 #1020 の実測に委ねる）。
+- **`unsafe impl Send for RawMetalBuffer` の SAFETY 根拠強化（PR #1063
+  codex-review P0 再三の指摘対応）**: 上記の `unsafe impl Send` 自体の
+  可否は変更していないが、SAFETY コメントを (1) Apple の一次資料の
+  実確認（archived Metal Programming Guide "Command Organization and
+  Execution Model" が同時アクセス不可を明示するのは command
+  buffer／command encoder のみで `MTLBuffer` に特定スレッドへの束縛
+  契約はないこと）・(2) 本リポジトリ内の既存前例（`context.rs::Batch`
+  の `unsafe impl Send`。#1017・マージ済み・レビュー済み。`Retained<
+  MtlBuffer>` のスレッド間移動自体は `Batch::in_flight` で既に確立
+  済みの契約であり本型はその弱いケース）への参照を含む形へ強化した。
+- **`PooledMetalHandle` の二重返却防止方式を `Option<H>::take()` から
+  `ManuallyDrop<H>` へ変更（PR #1063 codex-review P1 指摘対応。
+  §8.1 改訂の経緯）**: `raw()`／`capacity_bytes()` が `Option<H>` の
+  `None` 分岐を `unreachable!()` で埋めていた（実行時には常に成り立つ
+  が型システムでは表現できない不変条件への依存）ことが P1 として
+  指摘されたため、`handle` フィールドを `ManuallyDrop<RawMetalBuffer>`
+  へ変更し `unreachable!()` 分岐を型構造ごと排除した。この変更は
+  当初、§8.1「本設計文書で確定する事項」の「二重返却・use-after-return
+  の構造的防止は `Option<H>::take()` 方式に統一すること（`ManuallyDrop`
+  方式は採らない）」という記述と文面上矛盾する状態になった。調査の
+  結果、main マージ済みの `crates/backend-cuda/src/pool.rs::
+  PooledCudaHandle`（#1020・PR #1061）が既に `handle: std::mem::
+  ManuallyDrop<CudaSliceHandle>` を採用しており、§8.1 の当該記述は
+  CUDA 実装の時点で既に実態と乖離した誤記になっていたことが判明した。
+
+  **main セッション判断（PR #1063・Phase 完了レポートでユーザーへ
+  報告）**: 差し戻し（両バックエンドを `Option<H>::take()` へ戻す）は
+  main マージ済み CUDA コードの再改修と `unreachable!()` 問題の再燃を
+  招くため採らず、**文書側を実態へ改訂して両バックエンド
+  `ManuallyDrop<H>` 統一を確定する**方針とした。§8.1 の当該項は
+  「改訂履歴」として旧記述（`Option<H>::take()` 確定）が CUDA 実装
+  （PR #1061）と乖離していた誤記であったこと、本 PR（#1063・イシュー
+  #1021）で実態（CUDA・Metal 両方 `ManuallyDrop<H>`）へ整合させたことを
+  §8.1 本文に明記した（§3.1・§3.3・§7 セキュリティ考慮事項の関連記述も
+  同時に整合させた）。防止する契約自体（二重返却・use-after-return の
+  構造的防止）は本改訂の前後で不変であり、変更したのは実現方式の
+  記述のみである。
+
+**本ランでの未実施事項（Metal 実機なしのため）**:
+
+- Mac M4 Max 実機での `#[ignore]` テスト（`crates/backend-metal/tests/
+  pool_real_device.rs`・`crates/facade/tests/memory_pool_api.rs` の
+  Metal 経路）は未実行のまま。
+- §3.7 の効果実測（プール導入前後 × fresh/reuse）は本ランでは記入せず
+  空欄のまま維持した（推定値で埋めない。§0 の方針どおり）。
+- デバイス側ゼロ初期化（`fillBuffer` blit／専用フィルカーネル）への
+  切替は Mac 実機で検証可能になった時点で再評価する out-of-scope 事項
+  として記録する。
+- アップロード経路（`new_with_data`）・f16（`MetalHalfBuffer`）のプール化
+  は本 PR の対象外（設計文書 §3.1「ホットパスへの接続点」のスコープ外）。
+- 既存 `crate::pool::PooledMemory` の `arc_with_non_send_sync` allow 解消
+  は、上記実測訂正のとおり Metal 側では前提が崩れたため見送る（#1020
+  側の判断に委ねる）。
+- **`SizeClassPoolConfig::huge_entries_per_class` は実装済み**
+  （codex-review P1 是正・PR #1063。`SizeClassPool::put` が記帳直後に
+  `class_bytes >= huge_min_bytes` のエントリ数を数え、本フィールドの
+  上限を超える間は最も古い同一クラスのエントリを追い出す。
+  `max_pool_bytes` 総量上限＋グローバル LRU〈§3.4〉とは独立に働く
+  追加の安全弁。詳細は `pool_core.rs::SizeClassPool::put`／
+  `evict_over_huge_class_limit` の doc comment を正とする）。
+- **`SizeClassPool::record_reuse(logical_bytes, class_bytes)` を新設**
+  （codex P2・Cursor Bugbot 指摘対応・PR #1063・§8.2「具体メソッドの
+  引数形状の微調整」の範囲）。`take` 成功直後に呼ぶ統計専用メソッドで、
+  `reuse_count` の `+1`（旧稿は `take` 自身が加算していた）と
+  `capacity_waste_bytes` の `+(class_bytes − logical_bytes)`（§3.1
+  契約表が定めるが実装が漏れていた加算）をまとめて行う。これにより
+  再利用貸出でも新規確保と同様に waste が計上され、対応する
+  `record_loan_end` の減算と過不足なく対になる。
+- **`crate::pool::MetalAllocator::pending_pool_returns` 経由の GPU 完了
+  待ち返却（§3.3「Metal」）は、本 PR が接続したホットパス（`gemm.rs`／
+  `elementwise.rs`／`softmax.rs`／`rmsnorm.rs`／`memory.rs`）からは
+  到達しない**: いずれも `MetalContext::dispatch_sync`（encode +
+  即時 `synchronize` の薄いラッパー）を経由してから返り値バッファを
+  読み出すため、プール経由バッファが `Drop` される時点で `open`／
+  `committed` バッチは常に空であり、`defer_or_release` は必ず
+  `in_flight == false`（即時 `put` 経路）を通る。`pending_pool_returns`
+  への push／`record_pending_return`／`record_pending_merge` の実装・
+  push/`take` の順序契約は `crates/backend-metal/src/pool_pending.rs`
+  の単体テスト（Linux 実行可能）でのみ検証済みであり、実機での
+  in-flight 返却シナリオ（`sgd_step_device` 等バッチ dispatch を伴う
+  経路）は本 PR の接続範囲に含まれないため実機検証もされていない
+  （次にこの機構へ接続する PR〈例: SGD デバイス常駐更新のプール化〉
+  が最初の実機到達点になる）。
+- **Metal `MetalMemory::allocated_bytes()`（`AllocationTracker` 経由の
+  ピーク測定）が過小計上していた欠陥の是正（codex-review P1・PR
+  #1063 追加是正）**: 本ラン時点の記述は「`ops::MetalBackendOps` の
+  `static_metal_memory()`（`context_cache::cached_context()` 由来の
+  プロセス共有 `MetalMemory`）経由の `alloc_zeroed` はプール経由
+  （`Backing::Pooled`）になるため、その `TrackedAllocation` は `0`
+  バイトを積み、実バイト数の計測系列は `crate::pool::MetalAllocator::
+  tracker` へ移る（二重計上防止）」という**意図的な意味論変更**として
+  いたが、これは誤りだった。`MetalAllocator::tracker` と
+  `MetalMemory::tracker` は別々の `Arc<AllocationTracker>` インスタンス
+  であり両者を合算する経路は存在しないため、実際には「二重計上」は
+  発生しておらず、`MetalAllocator` 自体は `MemoryStats` を実装しない
+  ため REQ-14 の公開契約（`allocated_bytes`／`peak_allocated_bytes`）
+  から到達可能なのは `MetalMemory::tracker` のみだった。したがって
+  `static_metal_memory()` 経由（通常の `MemoryOps::alloc_zeroed` 呼び
+  出し経路）で `0` を計上する旧実装は、本節冒頭（`memory.rs:139-142`
+  相当）が明記する「CPU/CUDA/Metal で同一契約」を破る過小計上バグ
+  だった（codex-review 指摘）。`crates/backend-metal/src/memory.rs::
+  MetalMemory::alloc_zeroed_inner` を修正し、プール経由か否かに
+  関わらず常に論理要求バイト数（`checked_byte_len(numel)`）を
+  `MetalMemory::tracker` へ計上するよう変更した（CUDA 側
+  `backend-cuda::memory::CudaMemory::alloc_zeroed_inner` は
+  `backend-cuda::pool::CudaAllocator` を一切経由しないため元から
+  同種の問題を持たない。CUDA 側の契約に Metal 側を揃える形の是正）。
+  二重計上防止のためだけに存在した `MetalBuffer::is_pooled()` は
+  呼び出し元を失ったため削除した。プール実装自体が持つ物理確保量の
+  計測（`crate::pool::MetalAllocator::stats()`〈`PoolStats::
+  cached_bytes`〉との統合）は引き続き §8 スコープ外「bench-harness の
+  独自計測経路との統合」として申し送る。

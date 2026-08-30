@@ -102,6 +102,13 @@ mod fusion;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
+// プールの共通コアロジック（サイズクラス・フリーリスト・統計）。`backend-cuda`／
+// `backend-metal` が具体ハンドル型で実装を組み立てるためのクレート横断内部面で
+// あり、サポート対象の公開 API ではない（PR #1063 codex-review P1 対応。公開契約
+// は `PoolStats` の再エクスポートのみ。`docs/device-memory-pool-design.md` §3.1・
+// §8。`#[doc(hidden)]` により docs.rs・rustdoc から隠し、semver 互換性の対象外で
+// あることを明示する）。
+#[doc(hidden)]
 pub mod pool_core;
 mod tensor;
 pub mod typed;
@@ -130,10 +137,11 @@ pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
-// `pool_core::PoolConfig` は `pool::PoolConfig`（crates.io 0.4.0 公開済み）と
-// root で名前が衝突するため再エクスポートしない（`pool_core.rs` モジュール
-// コメント「型名衝突の回避」参照）。`PoolStats` のみ再公開する
-// （`backend_ops::BackendOps::device_memory_pool_stats` の戻り値型）。
+// `pool_core::SizeClassPoolConfig` は `pool::PoolConfig`（crates.io 0.4.0
+// 公開済み）と紛らわしい命名衝突を避けるため意図的に非公開のまま
+// （`pool_core.rs` モジュールコメント「命名の差異」参照）。`PoolStats` の
+// みを再公開する（`backend_ops::BackendOps::device_memory_pool_stats` の
+// 戻り値型。CUDA〈#1020〉・Metal〈#1021〉共通の統計スナップショット型）。
 pub use pool_core::PoolStats;
 pub use tensor::Tensor;
 pub use typed::{BatchedFeatures, FixedMat, FixedVec};

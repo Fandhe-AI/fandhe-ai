@@ -1,613 +1,1164 @@
-//! ハンドル非依存のサイズクラス別プール本体（イシュー #1020・REQ-14）。
+//! サイズクラス別・ハンドル型非依存のデバイスメモリプール本体
+//! （イシュー #1021・#1020。設計は `docs/device-memory-pool-design.md`
+//! §3.1〜3.6）。
 //!
-//! # 位置付け・既存 [`crate::pool`] との違い
+//! # 位置付け（既存 [`crate::pool`] との関係）
 //!
-//! [`crate::pool::PooledMemory`] はバイトサイズ**完全一致**のバケット方式
-//! （opt-in デコレータ）であり、どの本番実行経路にも接続されていない
-//! （`docs/device-memory-pool-design.md` §3.1・`docs/backend-cuda-pool-allocator-decision.md`）。
-//! 本モジュールはそれとは別に、`backend-cuda`（後続 #1021 の `backend-metal`
-//! も同様に予定）のホットパス（GEMM／elementwise／softmax の出力バッファ確保）
-//! へ実際に接続するための**サイズクラス丸め**（近い要求サイズを同一クラスへ
-//! 集約し再利用率を上げる）プール本体 [`SizeClassPool`] を提供する。
+//! [`crate::pool::PooledMemory`]（TASK-#201・REQ-14 14-3）は「バイトサイズ
+//! 完全一致バケット」の opt-in デコレータであり、`MemoryOps` 実装をラップ
+//! する形で既に存在する。本モジュールはそれとは**別モジュール**として
+//! 共存し、サイズクラス丸め（jemalloc 型のオクターブ分割。§3.2）・
+//! `capacity != 論理長` の分離・Metal の GPU 完了待ち返却
+//! （`pending_return_bytes`）という新しい契約を持つ。既存 `PooledMemory`・
+//! `PoolZeroFill` の公開 API は本モジュールの追加によって一切変更しない
+//! （非破壊拡張。設計文書 §3.1「既存 `PooledMemory` との関係」）。
 //!
-//! ハンドル型 `H` を型パラメータとする（`Send` のみを要求）ことで、
-//! `backend-cuda::pool::CudaSliceHandle`（`CudaSlice<f32>` を包む）・
-//! 将来の `backend-metal` ハンドル型のいずれでも同じプール機構を再利用できる
-//! （`backend-cpu` は cudarc/objc2 のような確保コストが小さいため対象外）。
-//! `crate::pool::PooledMemory` は `MemoryOps` デコレータとして残し、本モジュール
-//! と統合・置換はしない（既存公開 API `PoolConfig`/`PooledMemory` 非破壊。
-//! 設計判断は `docs/backend-cuda-pool-allocator-decision.md` を参照）。
+//! # `tensor-core` に置く理由・置かないもの
 //!
-//! # 型名衝突の回避
+//! 本モジュールが公開するのは POD 型（[`SizeClassPoolConfig`]・
+//! [`PoolStats`]）とハンドル型非依存の [`SizeClassPool<H>`] のみである。
+//! `H` に一切 trait 境界を課さない（`Send` のみ。§3.5）ため、`tensor-core`
+//! 自身は `H` が具体的に何であるか（`CudaSliceHandle`・
+//! `crate::pool::PooledBufferHandle`（`pool.rs` 内部の非公開型）とは
+//! 異なる新設の生ハンドル型。
+//! `backend-cuda`／`backend-metal` それぞれの `pub(crate)` モジュール）を
+//! 一切知らない。低水準 trait（`DeviceAllocator` 相当）・`BufferHandle`
+//! を実装するアダプタ型はここには置かない（codex-review PR #1056 の
+//! 2 度の P1 是正を経て確定した設計。§3.1 冒頭「レビュー履歴」参照）。
 //!
-//! 本モジュールの [`PoolConfig`] はクレートルートへ再エクスポート**しない**
-//! （`crate::pool::PoolConfig` が crates.io 0.4.0 で公開済みのため、同名を
-//! root で再エクスポートすると衝突する）。呼び出し元は
-//! `fandhe_ai_tensor_core::pool_core::PoolConfig` のフルパスで参照する。
-//! ルートへ再エクスポートするのは [`PoolStats`] のみ（`backend_ops::BackendOps`
-//! のデフォルトメソッド `device_memory_pool_stats` の戻り値型のため）。
+//! # 命名の差異（イシュー #1021 実装確定・PR 本文に記録）
 //!
-//! # サイズクラス丸め規則（design 文書 §3.2 を実装）
+//! 設計文書は新設定型を `PoolConfig` と例示しているが、[`crate::pool::
+//! PoolConfig`]（`PooledMemory` 用。クレート root へ `pub use` 済み）と
+//! 同名になり既存公開 API と衝突するため、本実装は
+//! [`SizeClassPoolConfig`] を採用する（クレート root へは [`PoolStats`]
+//! のみ再エクスポートし、本設定型は `pool_core::SizeClassPoolConfig` の
+//! パス経由でのみ到達可能とする）。#1020（CUDA 実装）はこの命名へ揃える。
 //!
-//! [`size_class_for`] は要求バイト数を以下の帯へ丸める:
+//! # #1020／#1021 統合時の経緯（PR #1063 マージコンフリクト解消）
 //!
-//! - `0` バイト → `None`（プール対象外。空バッファは呼び出し元がプールを
-//!   介さず直接ハンドリングする契約。`crate::pool` の「空テンソル契約」と同型）
-//! - `1..=255` バイト → `256` バイト固定（極小帯）
-//! - `256 バイト以上 1MiB（[`PoolConfig::small_band_max`]）以下` →
-//!   4 段階（256B の 2 のべき乗切り上げ: 256, 1KiB, 4KiB, ... と同種の
-//!   処理を簡略化し、`next_power_of_two` で切り上げる小帯）
-//! - `1MiB 超 64MiB（[`PoolConfig::huge_threshold`]）以下` →
-//!   [`PoolConfig::large_granularity`]（既定 2MiB）単位への切り上げ（大帯）
-//! - `64MiB 超` → 完全一致（巨大帯。丸めない。バケット当たり
-//!   [`PoolConfig::huge_max_entries_per_class`] 件までしか保持しない）
-//!
-//! 計算はすべて `checked_*` を用い、オーバーフロー時は
-//! `BackendError::DeviceAllocationFailed` を返す（OWASP A03。
-//! `.claude/rules/security.md`）。
-//!
-//! # 所有権契約（design 文書 §3.5 を実装）
-//!
-//! - (a) `take` はヒット時 `Some(H)` を返しプール内部の該当バケットから
-//!   除去する（二重貸出はしない）
-//! - (b) `put` は返却されたハンドルをバケットへ戻し、総量上限
-//!   （[`PoolConfig::max_pool_bytes`]）超過分をグローバル LRU で破棄する。
-//!   破棄対象は `Vec<H>` として**呼び出し元へ返す**（ロック内で `H` の
-//!   `Drop`〈CUDA では FFI 解放を伴いうる〉を実行しない契約。§3.5「ロック
-//!   粒度」）
-//! - (c) 巨大帯は 1 クラスあたり [`PoolConfig::huge_max_entries_per_class`]
-//!   件（既定 1）までしか保持しない（`docs/backend-cuda-pool-allocator-decision.md`
-//!   の「巨大確保は再利用機会が乏しく専有コストが高い」判断）
-//!
-//! # 統計契約
-//!
-//! [`PoolStats`] は `alloc_count`（`take` 呼び出し総数）・`reuse_count`
-//! （`take` がヒットした回数）・`cached_bytes`（現在アイドル保持中の総
-//! バイト数。恒等式 `cached_bytes == Σ class_bytes` を維持）・
-//! `pending_return_bytes`（返却待ち。CUDA は即時返却のため常に 0 だが、
-//! 将来の非同期返却バックエンド向けに予約）・`capacity_waste_bytes`
-//! （丸めによる `class_bytes - requested_bytes` の累積。実質未使用の
-//! 確保 API サポート値として保持）・`released_bytes`（LRU 破棄・明示解放で
-//! 実解放した累積バイト数）を保持する。
+//! #1020（CUDA・PR #1061）と #1021（Metal・本 PR）は共通祖先
+//! （#1056・設計文書のみのコミット）から本モジュールを独立に実装した
+//! ため、main への統合時に本ファイルが add/add コンフリクトになった。
+//! CUDA 側の独自実装（`PoolConfig`〈フィールド名 `small_band_max` 等〉・
+//! `size_class_for` が `Result<Option<u64>, _>` を返す・`put` が
+//! `Vec<H>` を返す・`record_allocation(class_bytes, requested_bytes)` が
+//! take 成功・新規確保の両経路を担う・`record_loan_end()` が引数無し）
+//! ではなく、**本ファイル（Metal 側）の API を単一の正とした**（理由:
+//! 巨大帯クラス別上限〈`evict_over_huge_class_limit`〉・オクターブ境界
+//! `(1.75p, 2p]` の切り上げ・再利用貸出時の `capacity_waste_bytes` 計上
+//! 〈`record_reuse`〉という 3 件の codex-review／Cursor Bugbot 是正
+//! （PR #1063）が本ファイル側にのみ存在し、CUDA 側の独自実装には同等の
+//! 修正が反映されていなかったため）。`crates/backend-cuda/src/pool.rs`
+//! は本ファイルの API（`SizeClassPoolConfig`・`take`／`record_reuse`／
+//! `record_allocation`（引数順は `(logical_bytes, class_bytes)`）／
+//! `put` が返す `Vec<(u64, H)>`／`record_loan_end(logical_bytes,
+//! class_bytes)`）へ合わせて書き換えた（CUDA の統計・テスト意図
+//! 〈`alloc_count`／`reuse_count`／`capacity_waste_bytes` の増減契約〉は
+//! 本ファイルの契約と等価であることを確認済み。差分は主に命名・引数
+//! 形状のみ）。
 
-use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::device::BackendError;
 
-/// サイズクラス丸めパラメータ（モジュール冒頭「サイズクラス丸め規則」参照）。
+/// [`SizeClassPool`] のサイズクラス境界・総量上限の設定値（POD。
+/// 設計文書 §3.2 の帯・丸め粒度に対応するフィールドを持つ）。
 ///
-/// `crate::pool::PoolConfig`（バイトサイズ完全一致方式）とは別の型
-/// （モジュール冒頭「型名衝突の回避」参照）。
+/// `Default` は設計文書が確定した既定値（`max_pool_bytes` 128 MiB・
+/// 小帯上限 1 MiB・大帯粒度 2 MiB・巨大帯下限 64 MiB）を返す。閾値の
+/// 見直しは #1010 の内訳実測後にユーザー承認を経て行う（設計文書 §3.2
+/// 末尾）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PoolConfig {
-    /// プールがアイドル保持してよいバイト数の総上限（既定 128MiB。
-    /// `crate::pool::PoolConfig::default` と同値。REQ-14 14-3 の係数
-    /// 上限〈2 倍以内〉を侵さない安全側の値として据え置く）。
+pub struct SizeClassPoolConfig {
+    /// アイドル保持（`cached_bytes + pending_return_bytes`）の総量上限。
+    /// 超過時はグローバル LRU で古いエントリから破棄する（§3.4）。
+    /// `0` はプール無効（全パススルー）を意味する（既存 `PoolConfig` と
+    /// 同じ契約）。
     pub max_pool_bytes: u64,
-    /// 小帯（`next_power_of_two` 切り上げ）の上限バイト数（既定 1MiB）。
-    pub small_band_max: u64,
-    /// 大帯（`1MiB 超 huge_threshold 以下`）の切り上げ粒度（既定 2MiB）。
-    pub large_granularity: u64,
-    /// これを超えるバイト数は完全一致の巨大帯として扱う（既定 64MiB）。
-    pub huge_threshold: u64,
-    /// 巨大帯 1 クラスあたりの最大保持エントリ数（既定 1）。
-    pub huge_max_entries_per_class: usize,
+    /// 小帯（オクターブ 4 段丸め）の上限バイト数。これ以下は §3.2 の
+    /// `1x`/`1.25x`/`1.5x`/`1.75x` 丸めを適用する。
+    pub small_max_bytes: u64,
+    /// 大帯（1 バッファ 1 エントリの exclusive プール）の丸め粒度。
+    pub large_granule_bytes: u64,
+    /// 巨大帯（完全一致・1 エントリ／クラス保持）の下限バイト数。
+    pub huge_min_bytes: u64,
+    /// 巨大帯 1 クラスあたりの保持上限エントリ数（設計文書は「1
+    /// エントリ／クラス」を確定済み。将来の見直しに備え設定値として
+    /// 持たせる）。
+    ///
+    /// `SizeClassPool::put` が記帳直後に本フィールドを参照し、
+    /// `class_bytes >= huge_min_bytes`（巨大帯）のエントリ数がこの上限を
+    /// 超える間は最も古い同一クラスのエントリから追い出す
+    /// （codex-review P1 是正。旧稿は総量上限＋グローバル LRU〈§3.4〉
+    /// のみに委ねクラス単位の強制をしていなかったため、既定
+    /// `max_pool_bytes` 128 MiB を上回るまで同一巨大クラスを複数保持
+    /// できてしまっていた）。
+    pub huge_entries_per_class: usize,
 }
 
-impl Default for PoolConfig {
+impl Default for SizeClassPoolConfig {
     fn default() -> Self {
         Self {
             max_pool_bytes: 128 * 1024 * 1024,
-            small_band_max: 1024 * 1024,
-            large_granularity: 2 * 1024 * 1024,
-            huge_threshold: 64 * 1024 * 1024,
-            huge_max_entries_per_class: 1,
+            small_max_bytes: 1024 * 1024,
+            large_granule_bytes: 2 * 1024 * 1024,
+            huge_min_bytes: 64 * 1024 * 1024,
+            huge_entries_per_class: 1,
         }
     }
 }
 
-/// プール利用状況の統計（モジュール冒頭「統計契約」参照）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// [`SizeClassPool`] の統計スナップショット（POD。ハンドル・ポインタ・
+/// trait object を一切含まない。設計文書 §3.1「フィールド更新契約」表が
+/// 各フィールドの増減規則の正）。
+///
+/// `stats()` 単発の呼び出し内で全フィールドが厳密に同一時刻の値である
+/// ことは要求しない（`Mutex` 保護フィールドと `AtomicU64`
+/// （`pending_return_bytes`）を別々に読むため。診断用スナップショットと
+/// しての利用に留める。§3.1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PoolStats {
-    /// `take` の呼び出し総数。
+    /// 新規物理確保（[`SizeClassPool::record_allocation`]）の累積回数。
     pub alloc_count: u64,
-    /// `take` がヒット（プールから再利用）した回数。
+    /// フリーリストからの再利用ヒット（[`SizeClassPool::take`] が
+    /// `Some` を返した回数）の累積。
     pub reuse_count: u64,
-    /// 現在アイドル保持中の総バイト数。
+    /// フリーリストが現在保持する総バイト数
+    /// （`Σ(フリーリスト中の各エントリの class_bytes)`）。
     pub cached_bytes: u64,
-    /// 返却待ちバイト数（CUDA は即時返却のため常に 0）。
+    /// Metal 専用: GPU 完了待ちでフリーリストへ未合流の返却待ちバイト数
+    /// （CUDA・CPU では常に `0`）。
     pub pending_return_bytes: u64,
-    /// サイズクラス丸めによる確保過多バイト数の累積。
+    /// 現在貸出中の全ハンドルについての内部断片化ストック量
+    /// （`Σ(class_bytes − logical_bytes)`。累積ではなくリアルタイム値）。
     pub capacity_waste_bytes: u64,
-    /// LRU 破棄・明示解放で実解放した累積バイト数。
+    /// `release_cached()` が個別解放に成功した累積バイト数（診断用）。
     pub released_bytes: u64,
 }
 
-/// 要求バイト数 `bytes` をサイズクラスへ丸める（モジュール冒頭「サイズ
-/// クラス丸め規則」参照）。`bytes == 0` は `Ok(None)`（プール対象外）。
-/// 演算はすべて `checked_*` で行い、オーバーフローは
-/// `BackendError::DeviceAllocationFailed` として拒否する。
-pub fn size_class_for(bytes: u64, config: &PoolConfig) -> Result<Option<u64>, BackendError> {
-    if bytes == 0 {
-        return Ok(None);
-    }
-    if bytes > config.huge_threshold {
-        // 巨大帯: 丸めない（完全一致）。
-        return Ok(Some(bytes));
-    }
-    if bytes <= config.small_band_max {
-        // 小帯: 2 のべき乗切り上げ。256 未満は 256 に底上げする
-        // （極小確保のクラス数爆発を防ぐ。design §3.2）。
-        let floored = bytes.max(256);
-        let rounded = floored.checked_next_power_of_two().ok_or_else(|| {
-            BackendError::DeviceAllocationFailed(format!(
-                "pool_core: size class rounding overflows u64: bytes={bytes}"
-            ))
-        })?;
-        return Ok(Some(rounded));
-    }
-    // 大帯: large_granularity 単位への切り上げ。
-    let granularity = config.large_granularity.max(1);
-    let quotient = bytes.checked_add(granularity - 1).ok_or_else(|| {
-        BackendError::DeviceAllocationFailed(format!(
-            "pool_core: size class rounding overflows u64: bytes={bytes}"
-        ))
-    })? / granularity;
-    let rounded = quotient.checked_mul(granularity).ok_or_else(|| {
-        BackendError::DeviceAllocationFailed(format!(
-            "pool_core: size class rounding overflows u64: bytes={bytes}"
-        ))
-    })?;
-    Ok(Some(rounded))
-}
-
-/// `PoolCore` が保持する 1 エントリ。`tick` は挿入順（グローバル LRU 用。
-/// `crate::pool::PoolEntry` と同型の設計）。
-struct Entry<H> {
-    handle: H,
-    tick: u64,
-}
-
-/// プール本体の内部状態（`Mutex` で保護される。ロック内で `H` の `Drop`
-/// を実行しないため `H` に追加の trait 境界を要求しない）。
-struct PoolCore<H> {
-    config: PoolConfig,
-    buckets: BTreeMap<u64, VecDeque<Entry<H>>>,
-    order: BTreeMap<u64, u64>,
-    cached_bytes: u64,
-    next_tick: u64,
-    stats: PoolStats,
-}
-
-impl<H> PoolCore<H> {
-    fn new(config: PoolConfig) -> Self {
-        Self {
-            config,
-            buckets: BTreeMap::new(),
-            order: BTreeMap::new(),
-            cached_bytes: 0,
-            next_tick: 0,
-            stats: PoolStats::default(),
-        }
-    }
-
-    fn take(&mut self, class_bytes: u64) -> Option<H> {
-        self.stats.alloc_count = self.stats.alloc_count.saturating_add(1);
-        let bucket = self.buckets.get_mut(&class_bytes)?;
-        let entry = bucket.pop_front()?;
-        self.order.remove(&entry.tick);
-        self.cached_bytes = self.cached_bytes.saturating_sub(class_bytes);
-        self.stats.cached_bytes = self.cached_bytes;
-        self.stats.reuse_count = self.stats.reuse_count.saturating_add(1);
-        if bucket.is_empty() {
-            self.buckets.remove(&class_bytes);
-        }
-        Some(entry.handle)
-    }
-
-    /// `handle`（`class_bytes` バイトのクラス）をプールへ返却する。
-    /// 上限超過分・巨大帯の保持数超過分は `Vec<H>` として呼び出し元へ返す
-    /// （ロック内で `Drop` しない契約。design §3.5）。
-    fn put(&mut self, class_bytes: u64, handle: H) -> Vec<H> {
-        let mut evicted = Vec::new();
-        if self.config.max_pool_bytes == 0 || class_bytes > self.config.max_pool_bytes {
-            evicted.push(handle);
-            return evicted;
-        }
-        let is_huge = class_bytes > self.config.huge_threshold;
-        if is_huge {
-            let cap = self.config.huge_max_entries_per_class.max(1);
-            if let Some(bucket) = self.buckets.get(&class_bytes)
-                && bucket.len() >= cap
-            {
-                // 巨大帯は保持上限を超える追加返却をそのまま解放対象にする
-                // （モジュール冒頭 (c)）。
-                evicted.push(handle);
-                return evicted;
-            }
-        }
-        let tick = self.next_tick;
-        self.next_tick = self.next_tick.wrapping_add(1);
-        self.buckets
-            .entry(class_bytes)
-            .or_default()
-            .push_back(Entry { handle, tick });
-        self.order.insert(tick, class_bytes);
-        self.cached_bytes = self.cached_bytes.saturating_add(class_bytes);
-        self.stats.cached_bytes = self.cached_bytes;
-        evicted.extend(self.evict_to_limit());
-        evicted
-    }
-
-    /// `cached_bytes` が上限を超えている間、グローバル最古エントリから
-    /// 破棄対象へ積む（`crate::pool::PoolCore::evict_to_limit` と同型）。
-    fn evict_to_limit(&mut self) -> Vec<H> {
-        let mut evicted = Vec::new();
-        while self.cached_bytes > self.config.max_pool_bytes {
-            let Some((&tick, &class_bytes)) = self.order.iter().next() else {
-                break;
-            };
-            self.order.remove(&tick);
-            let Some(bucket) = self.buckets.get_mut(&class_bytes) else {
-                continue;
-            };
-            if let Some(entry) = bucket.pop_front() {
-                self.cached_bytes = self.cached_bytes.saturating_sub(class_bytes);
-                self.stats.cached_bytes = self.cached_bytes;
-                self.stats.released_bytes = self.stats.released_bytes.saturating_add(class_bytes);
-                evicted.push(entry.handle);
-            }
-            if bucket.is_empty() {
-                self.buckets.remove(&class_bytes);
-            }
-        }
-        evicted
-    }
-
-    /// `release_cached` フェーズ (ii) 用: バケットから 1 件取り出す
-    /// （呼び出し元がロック解放後に drop する。ロック内で `H::Drop` を
-    /// 呼ばない契約を維持するため、複数件の取り出しはこのメソッドを
-    /// ループで呼び出す〈`backend-cuda::pool::release_cached_with`〉）。
-    fn take_one_for_release(&mut self) -> Option<(u64, H)> {
-        let (&tick, &class_bytes) = self.order.iter().next()?;
-        self.order.remove(&tick);
-        let bucket = self.buckets.get_mut(&class_bytes)?;
-        let entry = bucket.pop_front()?;
-        self.cached_bytes = self.cached_bytes.saturating_sub(class_bytes);
-        self.stats.cached_bytes = self.cached_bytes;
-        if bucket.is_empty() {
-            self.buckets.remove(&class_bytes);
-        }
-        Some((class_bytes, entry.handle))
-    }
-
-    fn record_release(&mut self, class_bytes: u64) {
-        self.stats.released_bytes = self.stats.released_bytes.saturating_add(class_bytes);
-    }
-
-    fn record_capacity_waste(&mut self, class_bytes: u64, requested_bytes: u64) {
-        self.stats.capacity_waste_bytes = self
-            .stats
-            .capacity_waste_bytes
-            .saturating_add(class_bytes.saturating_sub(requested_bytes));
-    }
-
-    fn record_pending_return(&mut self, delta: i64) {
-        if delta >= 0 {
-            self.stats.pending_return_bytes =
-                self.stats.pending_return_bytes.saturating_add(delta as u64);
-        } else {
-            self.stats.pending_return_bytes = self
-                .stats
-                .pending_return_bytes
-                .saturating_sub(delta.unsigned_abs());
-        }
-    }
-}
-
-/// ハンドル非依存のサイズクラス別プール（`backend-cuda::pool::CudaAllocator`
-/// が `SizeClassPool<CudaSliceHandle>` として利用する。モジュール冒頭参照）。
+/// `bytes` を §3.2 のサイズクラス表へ丸めた `class_bytes` を返す。
 ///
-/// `H: Send` のみを要求する（`Sync` は要求しない。`Mutex` 越しの排他アクセス
-/// のみで共有するため `H` 自体の `Sync` は不要。`SizeClassPool<H>` 自身が
-/// `Send + Sync` になることは `#[cfg(test)]` のコンパイル時アサーションで
-/// 固定する）。
-pub struct SizeClassPool<H> {
-    core: Mutex<PoolCore<H>>,
-    config: PoolConfig,
+/// - `bytes == 0`: プール非経由（呼び出し元が空ハンドルを扱う契約。
+///   本関数自体は `bytes == 0` を渡されても `Ok(0)` を返すのみで、
+///   「経由しない」という制御自体は呼び出し元が担う）。
+/// - `1..=255`: 256 B（小帯の最小クラス）へ切り上げる。
+/// - `256..=small_max_bytes`: オクターブを `1x`/`1.25x`/`1.5x`/`1.75x`
+///   の 4 段に分割し、切り上げ先の最小クラスへ丸める（内部断片化の
+///   理論上限 25%）。
+/// - `small_max_bytes` 超 〜 `huge_min_bytes` 未満: `large_granule_bytes`
+///   単位へ切り上げる。
+/// - `huge_min_bytes` 以上: 完全一致（丸めなし）。
+///
+/// `checked_mul`/`checked_add`（`u64`）で計算し、オーバーフロー時は
+/// [`BackendError::DeviceAllocationFailed`] を返す（設計文書 §3.2 末尾。
+/// 呼び出し元の shape 由来の巨大な確保要求に対する前段検証。OWASP A03）。
+pub fn size_class_for(bytes: u64, cfg: &SizeClassPoolConfig) -> Result<u64, BackendError> {
+    if bytes == 0 {
+        return Ok(0);
+    }
+    if bytes >= cfg.huge_min_bytes {
+        return Ok(bytes);
+    }
+    if bytes > cfg.small_max_bytes {
+        // 大帯: `large_granule_bytes` の倍数へ切り上げ。
+        let granule = cfg.large_granule_bytes.max(1);
+        let steps = bytes
+            .checked_add(granule - 1)
+            .ok_or_else(|| overflow_err(bytes))?
+            / granule;
+        return steps
+            .checked_mul(granule)
+            .ok_or_else(|| overflow_err(bytes));
+    }
+    if bytes <= 255 {
+        return Ok(256);
+    }
+    // 小帯: 2 の冪ごとのオクターブを 1x/1.25x/1.5x/1.75x の 4 段に分割。
+    // `octave` は `bytes` が属するオクターブの下端の 2 冪指数
+    // （`2^octave <= bytes < 2^(octave+1)`）。
+    let octave = 63 - bytes.leading_zeros();
+    let base: u64 = 1u64
+        .checked_shl(octave)
+        .ok_or_else(|| overflow_err(bytes))?;
+    // 4 段の刻み幅は `base / 4`（= `base * 0.25`）。`base >= 256` なので
+    // `base / 4 >= 64` であり整数除算での精度損失はない。
+    let step = base / 4;
+    for mult in 4..=7u64 {
+        let class = base
+            .checked_add(
+                step.checked_mul(mult - 4)
+                    .ok_or_else(|| overflow_err(bytes))?,
+            )
+            .ok_or_else(|| overflow_err(bytes))?;
+        if class >= bytes {
+            return Ok(class);
+        }
+    }
+    // `mult == 7`（`base * 1.75`）でも `class >= bytes` を満たさない場合
+    // （`bytes` が `(base * 1.75, base * 2)` の範囲。Cursor Bugbot 指摘。
+    // 旧稿はここを「到達不能」と誤って前提していたが、`octave` の不変
+    // 条件 `bytes < 2^(octave+1) == base * 2` はこの区間を排除しない
+    // ため実際に到達しうる）は、次オクターブの base（`base * 2` ==
+    // `2^(octave+1)`）へ切り上げる。設計文書 §3.2 が「巨大帯下限
+    // 未満はオクターブ内 4 段丸め、それ以上は次段階の丸め」を要求して
+    // おり、`2p` ちょうどまでの切り上げが小帯の契約（内部断片化の理論
+    // 上限 25%）と整合する。
+    base.checked_mul(2).ok_or_else(|| overflow_err(bytes))
 }
 
-impl<H: Send> SizeClassPool<H> {
-    pub fn new(config: PoolConfig) -> Self {
+fn overflow_err(bytes: u64) -> BackendError {
+    BackendError::DeviceAllocationFailed(format!(
+        "size_class_for: size-class rounding overflowed u64 for bytes={bytes}"
+    ))
+}
+
+/// `class_bytes` をキーとするフリーリストの 1 バケット。
+type FreeListEntry<H> = (u64, H);
+
+/// `Mutex` で保護する内部状態（フリーリスト・統計。`pending_return_bytes`
+/// は別途 `AtomicU64` で持つため含めない。§3.1「統計専用メソッドの
+/// 検証」）。
+struct PoolCore<H> {
+    /// 挿入順を保つフリーリスト（LRU 破棄は先頭から。`take`/
+    /// `take_one_for_release` は末尾からではなく該当クラス優先で探す
+    /// ため単純な `Vec` で十分。設計文書は「グローバル LRU」を要求する
+    /// が、挿入順管理自体は `Vec` の順序で表現し、破棄は
+    /// 先頭〈最も古い〉から行う）。
+    free: Vec<FreeListEntry<H>>,
+    alloc_count: u64,
+    reuse_count: u64,
+    cached_bytes: u64,
+    capacity_waste_bytes: u64,
+    released_bytes: u64,
+}
+
+impl<H> Default for PoolCore<H> {
+    fn default() -> Self {
         Self {
-            core: Mutex::new(PoolCore::new(config)),
+            free: Vec::new(),
+            alloc_count: 0,
+            reuse_count: 0,
+            cached_bytes: 0,
+            capacity_waste_bytes: 0,
+            released_bytes: 0,
+        }
+    }
+}
+
+/// ハンドル型非依存のサイズクラス別プール本体（設計文書 §3.1）。
+///
+/// `H` は各バックエンドの生ハンドル型（`tensor-core` はその中身を
+/// 一切知らない。`H: Send` のみを要求）。所有権の不変条件（設計文書
+/// §3.1「不変条件」）: 同一ハンドルはフリーリストと貸出中のいずれか
+/// 一方にのみ存在する。新規確保直後のハンドルは `take`/`record_
+/// allocation` を経由せず直接呼び出し元の RAII ラッパーが排他所有する
+/// （`SizeClassPool` はハンドルの custody を一切持たない。統計のみ
+/// `record_allocation` で関知する）。
+pub struct SizeClassPool<H> {
+    config: SizeClassPoolConfig,
+    core: Mutex<PoolCore<H>>,
+    /// Metal 専用の返却待ちバイト数（lock-free。§3.1「統計専用メソッドの
+    /// 検証」・§3.5「ロック順序規則」）。CUDA・CPU では常に `0` のまま
+    /// （`record_pending_return`/[`Self::put_merged`]（旧 `record_
+    /// pending_merge`。codex P2 最終指摘対応で `put_merged` へ統合・
+    /// 本体は削除済み）を呼ばないため）。
+    pending_return_bytes: AtomicU64,
+}
+
+// `SizeClassPool<H>: Send + Sync where H: Send`（設計文書 §3.5）。
+// `Mutex<PoolCore<H>>` は `H: Send` であれば `Sync` になる（`Mutex<T>:
+// Sync where T: Send`）ため、`H: Send` のみで両方が自動導出される。
+// 下記のコンパイル時 assert で固定する（§3.1 末尾）。
+
+impl<H> SizeClassPool<H>
+where
+    H: Send,
+{
+    /// 新規のプールを構築する。
+    pub fn new(config: SizeClassPoolConfig) -> Self {
+        Self {
             config,
+            core: Mutex::new(PoolCore::default()),
+            pending_return_bytes: AtomicU64::new(0),
         }
     }
 
-    pub fn config(&self) -> PoolConfig {
+    /// 設定値を返す（丸め計算の再利用等、呼び出し元〈具体アロケータ〉が
+    /// `size_class_for` を自ら呼ぶ際に使う）。
+    pub fn config(&self) -> SizeClassPoolConfig {
         self.config
     }
 
-    /// `class_bytes` のバケットから再利用可能なハンドルを取り出す
-    /// （ヒットしなければ `None`。呼び出し元は新規確保にフォールバック
-    /// する。`crate::pool::PoolCore::acquire` と同型）。
+    /// `Mutex` guard を取得する共通ヘルパー。poison 時は `into_inner` で
+    /// 継続する（既存 `crate::pool::PoolCore` と同じ「panic させない」
+    /// 方針。§3.5）。
+    fn lock(&self) -> std::sync::MutexGuard<'_, PoolCore<H>> {
+        self.core
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// フリーリストから `bytes`（呼び出し元が計算済みの `class_bytes`）に
+    /// 一致するエントリを 1 件取り出す。取り出した時点で所有権は完全に
+    /// 呼び出し元へ移り、フリーリストからは消える。無ければ `None`
+    /// （呼び出し元が新規確保 FFI を呼び `record_allocation` で統計を
+    /// 更新する契約。設計文書 §3.1）。
+    ///
+    /// **`reuse_count`／`capacity_waste_bytes` の更新はここでは行わない**
+    /// （codex-review・Cursor Bugbot 指摘対応。旧稿は本メソッドが
+    /// `reuse_count` のみを直接加算し、`capacity_waste_bytes`
+    /// への加算〈設計文書 §3.1 契約表「`take` 成功で
+    /// `+(class_bytes − bytes)`」〉が漏れていたため、再利用貸出後に
+    /// `record_loan_end` が減算しても対応する加算が存在せず
+    /// `saturating_sub` で過小表示・`debug_assert!` 失敗を招いていた）。
+    /// 呼び出し元が `Some` を受け取った直後に必ず [`Self::record_reuse`]
+    /// を呼び、両フィールドをまとめて更新する契約とする。
     pub fn take(&self, class_bytes: u64) -> Option<H> {
-        match self.core.lock() {
-            Ok(mut core) => core.take(class_bytes),
-            // poisoned でも継続する方針は `crate::pool`／`memory_stats` と
-            // 同一（単調カウンタ／FIFO キューのみで不変条件破壊が起きない）。
-            Err(poisoned) => poisoned.into_inner().take(class_bytes),
-        }
+        let mut core = self.lock();
+        let idx = core.free.iter().position(|(c, _)| *c == class_bytes)?;
+        let (c, handle) = core.free.remove(idx);
+        core.cached_bytes = core.cached_bytes.saturating_sub(c);
+        Some(handle)
     }
 
-    /// `handle`（`class_bytes` バイトのクラス）をプールへ返却する。
-    /// 上限超過・巨大帯保持数超過分は `Vec<H>` として返す（呼び出し元が
-    /// ロック非保持の状態で `drop` する契約。design §3.5「ロック粒度」）。
-    #[must_use = "破棄対象ハンドルを drop し忘れるとメモリがリークする"]
-    pub fn put(&self, class_bytes: u64, handle: H) -> Vec<H> {
-        match self.core.lock() {
-            Ok(mut core) => core.put(class_bytes, handle),
-            Err(poisoned) => poisoned.into_inner().put(class_bytes, handle),
-        }
+    /// 新規物理確保が発生したことを記録する統計専用メソッド（ハンドルを
+    /// 一切受け取らない。`take` が `None` を返した直後に具体アロケータが
+    /// 呼ぶ。§3.1）。
+    pub fn record_allocation(&self, logical_bytes: u64, class_bytes: u64) {
+        let mut core = self.lock();
+        core.alloc_count += 1;
+        core.capacity_waste_bytes = core
+            .capacity_waste_bytes
+            .saturating_add(class_bytes.saturating_sub(logical_bytes));
+        debug_assert!(
+            class_bytes >= logical_bytes,
+            "size class must never round below the requested logical size"
+        );
     }
 
-    /// サイズクラス丸めによる無駄バイト数（`class_bytes - requested_bytes`）
-    /// を `PoolStats::capacity_waste_bytes` へ加算する。呼び出し元
-    /// （`backend-cuda::pool::PooledCudaAllocator::alloc_zeroed_f32`／
-    /// `alloc_uninit_f32`）は `take` ヒット時・ミス時いずれの経路でも
-    /// 本メソッドを呼ぶ（クラス丸めによる無駄はヒット時の再利用でも
-    /// 都度発生するため、両経路で計上するのが意図した契約。
-    /// `alloc_count`/`reuse_count` の計上とは独立で、それらは
-    /// `take` 自体が行う）。
-    pub fn record_allocation(&self, class_bytes: u64, requested_bytes: u64) {
-        match self.core.lock() {
-            Ok(mut core) => core.record_capacity_waste(class_bytes, requested_bytes),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .record_capacity_waste(class_bytes, requested_bytes),
-        }
+    /// フリーリストからの再利用貸出が成功したことを記録する統計専用
+    /// メソッド（ハンドルを一切受け取らない。`take` が `Some` を返した
+    /// 直後に具体アロケータが呼ぶ。§3.1 契約表・§8.2「具体メソッドの
+    /// 引数形状の微調整」の範囲での新設）。
+    ///
+    /// `reuse_count` の `+1`（旧稿は `take` 自身が加算していた）と
+    /// `capacity_waste_bytes` の `+(class_bytes − logical_bytes)`
+    /// （codex-review P2・Cursor Bugbot 指摘対応。新規確保
+    /// （`record_allocation`）と同様、再利用貸出でも `capacity_bytes −
+    /// 論理バイト数` の内部断片化ストックを計上しなければ、対応する
+    /// `record_loan_end` の減算と対にならない）を単一のロック区間で
+    /// まとめて行う。`logical_bytes` はこの貸出が終わる際に呼ばれる
+    /// `record_loan_end` へ渡す値と同一でなければならない
+    /// （RAII ラッパーが自身のフィールドに保持し続けることで担保する。
+    /// `record_allocation` と同じ契約）。
+    pub fn record_reuse(&self, logical_bytes: u64, class_bytes: u64) {
+        let mut core = self.lock();
+        core.reuse_count += 1;
+        core.capacity_waste_bytes = core
+            .capacity_waste_bytes
+            .saturating_add(class_bytes.saturating_sub(logical_bytes));
+        debug_assert!(
+            class_bytes >= logical_bytes,
+            "size class must never round below the requested logical size"
+        );
     }
 
-    /// 貸出終了（`Drop` 開始）を記録するフック。現状 `SizeClassPool` 自体
-    /// は明示的な貸出カウントを持たないため no-op だが、将来の貸出数
-    /// 統計拡張に備えて呼び出し元（`backend-cuda::pool::PooledCudaHandle`）
-    /// からの呼び出し点を先に固定しておく。
-    pub fn record_loan_end(&self) {}
+    /// 貸出中のハンドルをフリーリストへ返却する（RAII ラッパーの
+    /// `Drop` から、または `release_cached()` の個別解放失敗時の再挿入
+    /// から呼ばれる。§3.1「不変条件」）。フリーリストへの記帳
+    /// （`cached_bytes += class_bytes`）のみを行い、内部断片化の増減は
+    /// 関知しない（`record_loan_end` が別途担う。§3.1）。
+    ///
+    /// **総量上限・グローバル LRU（設計文書 §3.4。OWASP A04 資源枯渇
+    /// 対策）**: 記帳後、`cached_bytes + pending_return_bytes`
+    /// （`max_pool_bytes`／LRU 判定の対象。§3.4「`max_pool_bytes`／LRU
+    /// 判定の対象」）が `config().max_pool_bytes` を超える間、挿入順が
+    /// 最も古いエントリ（`free` の先頭。`Vec` の push は末尾へ追加する
+    /// ため先頭が最古）から追い出す。呼び出し元はこの戻り値
+    /// （追い出されたエントリ）を `Mutex` 解放後に drop する契約とする
+    /// （ロック保持中に `H` の drop〈FFI 解放を伴いうる〉を行わない。
+    /// §3.5「プール本体は `Mutex<PoolCore>`」の「ロックを保持したまま
+    /// FFI 呼び出しを行わない」方針と同じ理由）。`max_pool_bytes == 0`
+    /// はプール無効（全パススルー）契約のため、この場合は挿入した
+    /// エントリ自身を含め全件が追い出される。
+    ///
+    /// **巨大帯クラス別保持上限（`SizeClassPoolConfig::
+    /// huge_entries_per_class`。設計文書 §3.2「巨大 | 64 MiB 以上 |
+    /// 完全一致のみ・保持上限 1 エントリ／クラス」・codex-review P1
+    /// 指摘対応）**: `class_bytes >= huge_min_bytes`（巨大帯）の場合、
+    /// 記帳直後にフリーリスト中の同一 `class_bytes` のエントリ数を数え、
+    /// `huge_entries_per_class` を超える間は最も古い同一クラスの
+    /// エントリから追い出す（今回挿入した分は必ず最新のため対象外。
+    /// 巨大帯は完全一致クラスのため「同一クラス」は「同一物理サイズ」
+    /// と同義）。追い出したエントリは上記のグローバル LRU 追い出しと
+    /// 同じ戻り値へ合流させ、呼び出し元が `Mutex` 解放後に drop する
+    /// 契約を共有する。
+    #[must_use = "追い出されたエントリは呼び出し元が Mutex 解放後に drop すること"]
+    pub fn put(&self, class_bytes: u64, handle: H) -> Vec<(u64, H)> {
+        let mut core = self.lock();
+        self.put_locked(&mut core, class_bytes, handle)
+    }
 
-    /// `release_cached` フェーズ (ii) 用: 1 件取り出す（ループ呼び出し）。
+    /// [`Self::put`]／[`Self::put_merged`] 共通のロック済み挿入本体
+    /// （フリーリスト push・巨大帯クラス別上限・総量上限＋グローバル
+    /// LRU の判定）。呼び出し元は既に `core` のロックを取得済みで
+    /// あることが前提（`&mut PoolCore<H>` を直接受け取る。
+    /// `evict_over_capacity`／`evict_over_huge_class_limit` と同型の
+    /// パターン）。
+    fn put_locked(&self, core: &mut PoolCore<H>, class_bytes: u64, handle: H) -> Vec<(u64, H)> {
+        core.free.push((class_bytes, handle));
+        core.cached_bytes = core.cached_bytes.saturating_add(class_bytes);
+        let mut evicted = self.evict_over_huge_class_limit(core, class_bytes);
+        evicted.extend(self.evict_over_capacity(core));
+        evicted
+    }
+
+    /// **Metal 専用: `pending_pool_returns` からの合流専用 `put`**
+    /// （Cursor Bugbot High・codex P2 指摘対応。設計文書 §3.3「Metal」・
+    /// §3.4「`max_pool_bytes`／LRU 判定の対象」）。
+    ///
+    /// `record_pending_return(class_bytes)` 済み（= [`Self::
+    /// record_pending_return`] を呼んで `pending_pool_returns` へ push
+    /// 済み）のエントリを合流させる場合に**限り**使う。通常の [`Self::
+    /// put`]（新規貸出の即時返却経路。`pending_return_bytes` への計上を
+    /// 経ていない）には使わない。
+    ///
+    /// # 契約（誤用は `pending_return_bytes` を飽和させる。codex P2
+    /// 再指摘対応）
+    /// 呼び出し元が対応する `record_pending_return` を呼んでいない
+    /// エントリにこのメソッドを使うのは契約違反である。前ラウンドは
+    /// この減算を単純な `AtomicU64::fetch_sub` で行っていたが、対の
+    /// 加算がない場合に `u64` 下限をラップアラウンドし
+    /// `pending_return_bytes` が `u64::MAX` 付近へ恒久的にずれる欠陥が
+    /// あった（codex P2 再指摘）。ラップアラウンドした値は
+    /// `max_pool_bytes`／LRU 判定（`cached_bytes + pending_return_bytes`）
+    /// を常時「上限超過」と誤判定させ、以後のあらゆる `put`／
+    /// `put_merged` が挿入直後に全件を LRU 追い出しし**プールを事実上
+    /// 無効化する**致命的な退行になるため、doc comment・テストで
+    /// 誤用を明記するだけでは不十分と判断し、`fetch_update`
+    /// （`Ordering::Relaxed` の load／`Ordering::Relaxed` の CAS 成功時
+    /// ordering）による**飽和減算**（現在値が `class_bytes` 以上なら
+    /// 減算、未満なら `0` へ飽和）へ変更した。飽和が発生すること自体が
+    /// 契約違反（`record_pending_return` 非経由の誤用）の兆候であり、
+    /// 呼び出し元はこれを想定して正しく対にする責務を負う。一方で
+    /// ハンドルの挿入自体（[`Self::put_locked`]）は飽和の有無に関わらず
+    /// 必ず継続する（統計フィールドの防御であって `put` の成否を
+    /// 左右させない設計判断。誤ってハンドルを `Err` で握り潰し
+    /// リークさせない）。逆に `pending_pool_returns` 経由のエントリを
+    /// 誤って [`Self::put`]（本メソッドではなく通常版）へ渡すと、
+    /// `put_merged` が内包する減算が一切呼ばれず `pending_return_bytes`
+    /// が恒久的に高い値のまま残る（Cursor Bugbot High 指摘の退行は
+    /// こちらの誤用パターン）。
+    ///
+    /// # ロック内原子化（`put` を先に呼んでから旧 `record_pending_merge`
+    /// を呼ぶ旧稿の何が問題だったか）
+    /// 旧稿は `record_pending_merge`（`pending_return_bytes` の減算を
+    /// 単独で行う公開メソッド。codex P2 最終指摘で本番呼び出し元が
+    /// `put_merged` への統合によりゼロになったため削除済み）を持ち、
+    /// `put`（フリーリスト挿入・`cached_bytes` 加算・総量上限
+    /// 判定）を呼んだ**後**にこれを呼んでいた。この順序だと、`put` 内の総量上限
+    /// 判定（`cached_bytes + pending_return_bytes`。[`Self::
+    /// evict_over_capacity`]）が走る時点では、当該エントリの分が
+    /// `cached_bytes`（挿入済み）と `pending_return_bytes`（未減算）の
+    /// **両方**に二重計上されていた（codex P2 指摘）。上限ぎりぎりの
+    /// 状態で合流すると、この二重計上分だけ見かけ上の使用量が水増しされ、
+    /// 挿入したばかりの自分自身が即座に LRU 追い出しされる不具合が
+    /// 生じていた。
+    ///
+    /// 本メソッドは `core` の `Mutex` を取得した**同一ロック区間内**で
+    /// 「`pending_return_bytes` の飽和減算」→「[`Self::put_locked`]
+    /// （挿入・総量上限判定）」の順に実行する。総量上限判定は減算後の
+    /// `pending_return_bytes` を参照するため二重計上が起こらない。
+    /// 減算自体は `AtomicU64::fetch_update`（`pending_return_bytes` は
+    /// `Mutex<PoolCore<H>>` の外側にある独立した atomic フィールド）で
+    /// あり `core` の `Mutex` を必要としないが、本メソッドの呼び出し
+    /// 区間全体を通して `core` のロックを保持し続けることで、
+    /// 同じロックを取得する他スレッドの [`Self::put`]／[`Self::take`]
+    /// （いずれも総量上限判定や `cached_bytes` 更新のために `core`
+    /// ロックを要する）からは、このエントリが「`pending` 計上中」から
+    /// 「`cached` 計上中」へ遷移する過程が不可分な単一の操作として
+    /// 観測される（中間状態〈どちらにも計上されない窓・二重計上〉が
+    /// 外部から見えない）。
+    #[must_use = "追い出されたエントリは呼び出し元が Mutex 解放後に drop すること"]
+    pub fn put_merged(&self, class_bytes: u64, handle: H) -> Vec<(u64, H)> {
+        let mut core = self.lock();
+        // 飽和減算: 現在値が `class_bytes` 以上ならそのまま `fetch_sub`
+        // 相当の減算結果を採用し、未満（= 対の加算が無い契約違反）なら
+        // `0` へ飽和させる。`fetch_update` は CAS ループのため、失敗時
+        // （他スレッドが同時に `fetch_add`/`fetch_update` している場合）
+        // は自動的に最新値で再試行する。`Result` は常に `Ok`
+        // （クロージャが常に `Some` を返すため `fetch_update` は失敗
+        // しない設計）であり、`unwrap_or` はこの構造的な保証を明示する
+        // だけの防御的表現（`.claude/rules/coding-rust.md`「本番経路で
+        // panic しない」に従い `unwrap()` は使わない）。
+        let _ = self.pending_return_bytes.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(class_bytes)),
+        );
+        self.put_locked(&mut core, class_bytes, handle)
+    }
+
+    /// [`Self::put`] が記帳直後に呼ぶ巨大帯クラス別保持上限の強制本体。
+    /// `class_bytes` が巨大帯（`>= huge_min_bytes`）でなければ何もしない
+    /// （小帯・大帯はクラス別ではなく総量上限＋グローバル LRU
+    /// （[`Self::evict_over_capacity`]）のみで制御する設計文書 §3.2 の
+    /// 契約どおり）。
+    fn evict_over_huge_class_limit(
+        &self,
+        core: &mut PoolCore<H>,
+        class_bytes: u64,
+    ) -> Vec<(u64, H)> {
+        let mut evicted = Vec::new();
+        if class_bytes < self.config.huge_min_bytes {
+            return evicted;
+        }
+        loop {
+            let count = core.free.iter().filter(|(c, _)| *c == class_bytes).count();
+            if count <= self.config.huge_entries_per_class {
+                break;
+            }
+            // 同一クラスのうち最も古い（`free` 内で最も先頭に近い）
+            // エントリから追い出す（グローバル LRU と同じ「挿入順が
+            // 最古から」の方針。今回挿入した分は末尾にあるため、他に
+            // 同一クラスのエントリが残っている限りそちらが先に選ばれる）。
+            let Some(idx) = core.free.iter().position(|(c, _)| *c == class_bytes) else {
+                break;
+            };
+            let (bytes, handle) = core.free.remove(idx);
+            core.cached_bytes = core.cached_bytes.saturating_sub(bytes);
+            evicted.push((bytes, handle));
+        }
+        evicted
+    }
+
+    /// [`Self::put`] が記帳直後に呼ぶ LRU 追い出しの本体。`core` は
+    /// 呼び出し元が既にロック取得済みであることが前提（`&mut
+    /// PoolCore<H>` を直接受け取る。`flush_locked`〈`context.rs`〉と
+    /// 同型のパターン）。
+    fn evict_over_capacity(&self, core: &mut PoolCore<H>) -> Vec<(u64, H)> {
+        let mut evicted = Vec::new();
+        loop {
+            let idle = core
+                .cached_bytes
+                .saturating_add(self.pending_return_bytes.load(Ordering::Relaxed));
+            if idle <= self.config.max_pool_bytes || core.free.is_empty() {
+                break;
+            }
+            // 先頭（挿入順が最も古いエントリ）から追い出す（グローバル
+            // LRU。設計文書 §3.4「総量上限＋グローバル LRU」）。
+            let (bytes, handle) = core.free.remove(0);
+            core.cached_bytes = core.cached_bytes.saturating_sub(bytes);
+            evicted.push((bytes, handle));
+        }
+        evicted
+    }
+
+    /// 貸出の終了（RAII ラッパーの `Drop`）を記録する統計専用メソッド。
+    /// `put` 自体の呼び出しタイミングとは独立に、`Drop` の時点で常に
+    /// 即座に呼ぶ（CUDA・Metal 共通。§3.1「フィールド更新契約」
+    /// `capacity_waste_bytes` 行）。
+    pub fn record_loan_end(&self, logical_bytes: u64, class_bytes: u64) {
+        let mut core = self.lock();
+        let waste = class_bytes.saturating_sub(logical_bytes);
+        debug_assert!(
+            core.capacity_waste_bytes >= waste,
+            "capacity_waste_bytes underflow: loan end waste exceeds outstanding stock"
+        );
+        core.capacity_waste_bytes = core.capacity_waste_bytes.saturating_sub(waste);
+    }
+
+    /// 解放処理専用: フリーリストから 1 エントリだけ取り出す
+    /// （`release_cached()` の解放トランザクションで使う。一括 `drain`
+    /// は設けない。§3.1「解放時の所有権遷移」）。
     pub fn take_one_for_release(&self) -> Option<(u64, H)> {
-        match self.core.lock() {
-            Ok(mut core) => core.take_one_for_release(),
-            Err(poisoned) => poisoned.into_inner().take_one_for_release(),
-        }
+        let mut core = self.lock();
+        let entry = core.free.pop()?;
+        core.cached_bytes = core.cached_bytes.saturating_sub(entry.0);
+        Some(entry)
     }
 
+    /// `take_one_for_release` で取り出したエントリの個別解放が成功した
+    /// ことを記録する統計専用メソッド（`released_bytes` の加算のみ。
+    /// `cached_bytes` は `take_one_for_release` が既に減算済み。§3.1）。
     pub fn record_release(&self, class_bytes: u64) {
-        match self.core.lock() {
-            Ok(mut core) => core.record_release(class_bytes),
-            Err(poisoned) => poisoned.into_inner().record_release(class_bytes),
-        }
+        let mut core = self.lock();
+        core.released_bytes = core.released_bytes.saturating_add(class_bytes);
     }
 
-    pub fn record_pending_merge(&self, delta: i64) {
-        match self.core.lock() {
-            Ok(mut core) => core.record_pending_return(delta),
-            Err(poisoned) => poisoned.into_inner().record_pending_return(delta),
-        }
+    /// Metal 専用: `pending_pool_returns` へ返却を委譲したことを記録する
+    /// lock-free な統計専用メソッド（`AtomicU64::fetch_add`。`Mutex<
+    /// PoolCore<H>>` を一切取らない。`BatchSlots` のロックを保持したまま
+    /// 呼んでもデッドロックしない。§3.1・§3.5「ロック順序規則」）。
+    pub fn record_pending_return(&self, class_bytes: u64) {
+        self.pending_return_bytes
+            .fetch_add(class_bytes, Ordering::Relaxed);
     }
 
+    /// 統計スナップショットを返す（診断用。§3.1「`stats`」）。
     pub fn stats(&self) -> PoolStats {
-        match self.core.lock() {
-            Ok(core) => core.stats,
-            Err(poisoned) => poisoned.into_inner().stats,
+        let core = self.lock();
+        PoolStats {
+            alloc_count: core.alloc_count,
+            reuse_count: core.reuse_count,
+            cached_bytes: core.cached_bytes,
+            pending_return_bytes: self.pending_return_bytes.load(Ordering::Relaxed),
+            capacity_waste_bytes: core.capacity_waste_bytes,
+            released_bytes: core.released_bytes,
         }
+    }
+
+    /// `max_pool_bytes`／LRU 判定の対象量（`cached_bytes +
+    /// pending_return_bytes`。§3.4「`max_pool_bytes`／LRU 判定の対象」）。
+    pub fn idle_bytes(&self) -> u64 {
+        let cached = self.lock().cached_bytes;
+        cached.saturating_add(self.pending_return_bytes.load(Ordering::Relaxed))
     }
 }
+
+// コンパイル時アサーション: `SizeClassPool<H>: Send + Sync where H: Send`
+// を固定する（設計文書 §3.5・codex-review PR #1056 の合意事項）。
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    fn check<H: Send>() {
+        assert_send_sync::<SizeClassPool<H>>();
+    }
+    let _ = check::<u32>;
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn cfg() -> PoolConfig {
-        PoolConfig::default()
+    fn cfg() -> SizeClassPoolConfig {
+        SizeClassPoolConfig::default()
     }
 
-    // --- size_class_for 丸め規則 ---
+    // --- サイズクラス丸め（設計文書 §3.2 の 6 例 + 境界） ---
 
     #[test]
-    fn size_class_zero_bytes_is_none() {
-        assert_eq!(size_class_for(0, &cfg()).unwrap(), None);
-    }
-
-    #[test]
-    fn size_class_small_band_rounds_to_power_of_two() {
-        assert_eq!(size_class_for(1, &cfg()).unwrap(), Some(256));
-        assert_eq!(size_class_for(200, &cfg()).unwrap(), Some(256));
-        assert_eq!(size_class_for(255, &cfg()).unwrap(), Some(256));
-        assert_eq!(size_class_for(256, &cfg()).unwrap(), Some(256));
-        assert_eq!(size_class_for(257, &cfg()).unwrap(), Some(512));
-    }
-
-    #[test]
-    fn size_class_small_band_boundary_1mib() {
-        let one_mib = 1024 * 1024;
-        assert_eq!(size_class_for(one_mib, &cfg()).unwrap(), Some(one_mib));
-        // 1MiB + 1 は大帯（large_granularity=2MiB 切り上げ）に入る。
+    fn size_class_representative_workload_examples() {
+        let c = cfg();
+        assert_eq!(size_class_for(200_704, &c).unwrap(), 229_376);
+        assert_eq!(size_class_for(802_816, &c).unwrap(), 917_504);
+        assert_eq!(size_class_for(65_536, &c).unwrap(), 65_536);
+        assert_eq!(size_class_for(10_240, &c).unwrap(), 10_240);
+        assert_eq!(size_class_for(2_560, &c).unwrap(), 2_560);
         assert_eq!(
-            size_class_for(one_mib + 1, &cfg()).unwrap(),
-            Some(2 * 1024 * 1024)
+            size_class_for(64 * 1024 * 1024, &c).unwrap(),
+            64 * 1024 * 1024
         );
     }
 
     #[test]
-    fn size_class_large_band_rounds_to_granularity() {
-        // 200,704 バイト → 大帯（1MiB 超えていないので実際は小帯側）
-        // ではなく明示的に大帯範囲の値で検証する。
-        let two_mib = 2 * 1024 * 1024;
-        let three_mib = 3 * 1024 * 1024;
+    fn size_class_zero_bytes_passthrough() {
+        assert_eq!(size_class_for(0, &cfg()).unwrap(), 0);
+    }
+
+    #[test]
+    fn size_class_tiny_rounds_up_to_256() {
+        assert_eq!(size_class_for(1, &cfg()).unwrap(), 256);
+        assert_eq!(size_class_for(255, &cfg()).unwrap(), 256);
+        assert_eq!(size_class_for(256, &cfg()).unwrap(), 256);
+    }
+
+    #[test]
+    fn size_class_small_band_upper_boundary() {
+        let c = cfg();
+        assert_eq!(size_class_for(1024 * 1024, &c).unwrap(), 1024 * 1024);
+    }
+
+    #[test]
+    fn size_class_large_band_rounds_to_granule() {
+        let c = cfg();
+        // 1 MiB + 1 は大帯へ入り、2 MiB 単位へ切り上げられる。
         assert_eq!(
-            size_class_for(two_mib + 1, &cfg()).unwrap(),
-            Some(2 * two_mib)
-        );
-        assert_eq!(
-            size_class_for(three_mib, &cfg()).unwrap(),
-            Some(2 * two_mib)
+            size_class_for(1024 * 1024 + 1, &c).unwrap(),
+            2 * 1024 * 1024
         );
     }
 
     #[test]
-    fn size_class_huge_band_is_exact_match() {
+    fn size_class_huge_lower_boundary_exact_match() {
+        let c = cfg();
+        // 64 MiB - 1 は大帯（2 MiB 単位切り上げ）に属する。
+        assert_eq!(
+            size_class_for(64 * 1024 * 1024 - 1, &c).unwrap(),
+            64 * 1024 * 1024
+        );
+        // 64 MiB ちょうどは巨大帯（完全一致）。
+        assert_eq!(
+            size_class_for(64 * 1024 * 1024, &c).unwrap(),
+            64 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn size_class_octave_1_75x_boundary_rounds_within_octave() {
+        // Cursor Bugbot 指摘の境界（`1.75p` ちょうど）: オクターブ内
+        // 4 段丸めの最終段（`base * 1.75`）自身に一致する場合はその
+        // クラスへ丸める（次オクターブへの繰り上げは発生しない）。
+        // オクターブ 10（`base = 1024`）で検証する。
+        let c = cfg();
+        let base = 1024u64;
+        assert_eq!(size_class_for(base + base * 3 / 4, &c).unwrap(), 1792);
+    }
+
+    #[test]
+    fn size_class_between_1_75x_and_2x_rounds_up_to_next_octave() {
+        // Cursor Bugbot High 指摘の回帰テスト: `(1.75p, 2p)` の範囲は
+        // 旧稿では `size_class_for` が「到達不能」と誤って前提していた
+        // 分岐に入り `AllocationSizeOverflow` 相当のエラーになっていた。
+        // 設計文書 §3.2 は `2p` までの切り上げを要求するため、次
+        // オクターブの base（`2p`）へ切り上げる。
         let c = cfg();
         assert_eq!(
-            size_class_for(c.huge_threshold, &c).unwrap(),
-            Some(c.huge_threshold)
+            size_class_for(1793, &c).unwrap(),
+            2048,
+            "1.75p + 1 は 2p へ切り上げ"
         );
-        assert_eq!(
-            size_class_for(c.huge_threshold + 1, &c).unwrap(),
-            Some(c.huge_threshold + 1)
-        );
-        // 巨大帯は要求ごとに異なる値でも丸めない（完全一致）。
-        let odd = c.huge_threshold + 12345;
-        assert_eq!(size_class_for(odd, &c).unwrap(), Some(odd));
     }
 
     #[test]
-    fn size_class_overflow_is_err() {
-        // 既定 `PoolConfig`（huge_threshold=64MiB）では `u64::MAX` は巨大帯
-        // （完全一致・丸め演算なし）に入るためオーバーフローしない。
-        // 大帯の `checked_add` オーバーフロー経路を検証するため、
-        // `huge_threshold` を `u64::MAX` に広げ、大帯の切り上げ演算
-        // （`bytes + (granularity - 1)`）が確実にオーバーフローする値
-        // （`u64::MAX`）を渡す。
-        let config = PoolConfig {
-            huge_threshold: u64::MAX,
+    fn size_class_exact_2x_is_next_octave_base() {
+        // `2p` ちょうどは（`octave` の再計算により）次オクターブの
+        // 1x（そのもの）として既に正しく扱われていたことの確認
+        // （回帰防止。上記 2 テストと合わせて `1.75p`／`1.75p+1`／`2p`
+        // の 3 点を境界として押さえる）。
+        let c = cfg();
+        assert_eq!(size_class_for(2048, &c).unwrap(), 2048);
+    }
+
+    #[test]
+    fn size_class_overflow_rejected() {
+        // `bytes == u64::MAX` は既定設定では巨大帯（完全一致・丸め計算
+        // なし）に該当し `Ok` を返してしまうため、大帯（`checked_add`
+        // による切り上げ演算を経由する帯）でオーバーフローが起きる
+        // よう `large_granule_bytes` を意図的に巨大化した設定を使う。
+        let overflow_cfg = SizeClassPoolConfig {
+            small_max_bytes: 0,
+            large_granule_bytes: u64::MAX - 1,
+            huge_min_bytes: u64::MAX,
             ..cfg()
         };
-        assert!(size_class_for(u64::MAX, &config).is_err());
+        let err = size_class_for(u64::MAX - 1, &overflow_cfg).unwrap_err();
+        assert!(matches!(err, BackendError::DeviceAllocationFailed(_)));
     }
 
-    // --- 所有権契約 (a)(b)(c) ---
+    // --- 所有権・統計契約 ---
 
     #[test]
-    fn take_miss_then_put_then_take_hit() {
+    fn take_on_empty_pool_returns_none() {
         let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
-        assert_eq!(pool.take(256), None);
-        let evicted = pool.put(256, 42u32);
-        assert!(evicted.is_empty());
-        assert_eq!(pool.take(256), Some(42));
-        // 一度取り出したら同じクラスから二重に取れない。
-        assert_eq!(pool.take(256), None);
+        assert!(pool.take(256).is_none());
     }
 
     #[test]
-    fn put_over_limit_evicts_lru_as_vec() {
-        let config = PoolConfig {
-            max_pool_bytes: 512,
-            ..cfg()
+    fn put_then_take_reuses_handle_and_updates_stats() {
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        let _ = pool.put(256, 42);
+        assert_eq!(pool.stats().cached_bytes, 256);
+
+        let handle = pool.take(256).expect("reuse hit");
+        assert_eq!(handle, 42);
+        // `take` 自体は `reuse_count`／`capacity_waste_bytes` を更新
+        // しない契約（`record_reuse` 呼び出し前は据え置き）。
+        let stats = pool.stats();
+        assert_eq!(stats.cached_bytes, 0);
+        assert_eq!(stats.reuse_count, 0);
+
+        pool.record_reuse(200, 256);
+        let stats = pool.stats();
+        assert_eq!(stats.reuse_count, 1);
+        assert_eq!(stats.capacity_waste_bytes, 56);
+    }
+
+    #[test]
+    fn record_reuse_waste_is_reversed_by_record_loan_end() {
+        // codex P2・Cursor Bugbot 指摘対応の回帰テスト: 再利用貸出
+        // （`take` 成功 → `record_reuse`）でも新規確保
+        // （`record_allocation`）と同様に `capacity_waste_bytes` が
+        // 加算され、対応する `record_loan_end` で過不足なく相殺される
+        // ことを検証する（設計文書 §3.1 契約表「`take` 成功で
+        // `+(class_bytes − bytes)`」）。
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        let _ = pool.put(256, 1);
+        let handle = pool.take(256).expect("reuse hit");
+        pool.record_reuse(200, 256);
+        assert_eq!(pool.stats().capacity_waste_bytes, 56);
+
+        pool.record_loan_end(200, 256);
+        assert_eq!(
+            pool.stats().capacity_waste_bytes,
+            0,
+            "再利用貸出で加算した waste は record_loan_end で過不足なく相殺されるべき"
+        );
+
+        // 相殺後、返却して次の貸出（新規確保経路）でも整合することを
+        // 確認する（複数貸出経路をまたいだ加算・減算の対称性）。
+        let _ = pool.put(256, handle);
+        pool.record_allocation(180, 256);
+        assert_eq!(pool.stats().capacity_waste_bytes, 76);
+        pool.record_loan_end(180, 256);
+        assert_eq!(pool.stats().capacity_waste_bytes, 0);
+    }
+
+    #[test]
+    fn record_allocation_updates_alloc_count_and_waste() {
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        pool.record_allocation(200, 256);
+        let stats = pool.stats();
+        assert_eq!(stats.alloc_count, 1);
+        assert_eq!(stats.capacity_waste_bytes, 56);
+    }
+
+    #[test]
+    fn record_loan_end_reverses_capacity_waste() {
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        pool.record_allocation(200, 256);
+        pool.record_loan_end(200, 256);
+        assert_eq!(pool.stats().capacity_waste_bytes, 0);
+    }
+
+    #[test]
+    fn take_one_for_release_transaction_removes_and_updates_cached_bytes() {
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        let _ = pool.put(256, 1);
+        let _ = pool.put(512, 2);
+        assert_eq!(pool.stats().cached_bytes, 768);
+
+        let (class_bytes, handle) = pool.take_one_for_release().expect("entry present");
+        assert_eq!(pool.stats().cached_bytes, 768 - class_bytes);
+        // どちらの順で pop されても handle は投入済みの値のいずれか。
+        assert!(handle == 1 || handle == 2);
+
+        pool.record_release(class_bytes);
+        assert_eq!(pool.stats().released_bytes, class_bytes);
+
+        // 失敗を模した再挿入: `put` はハンドルをフリーリストへ戻す
+        // （§3.1「解放時の所有権遷移」フェーズ (ii) 失敗時の再挿入）。
+        let _ = pool.put(class_bytes, handle);
+        assert_eq!(pool.stats().cached_bytes, 768);
+    }
+
+    #[test]
+    fn take_one_for_release_on_empty_pool_returns_none() {
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        assert!(pool.take_one_for_release().is_none());
+    }
+
+    #[test]
+    fn pending_return_and_merge_round_trip_to_zero() {
+        // 旧稿は `record_pending_return`／`record_pending_merge`
+        // （減算専用の独立公開メソッド）を直接呼ぶ往復で検証していたが、
+        // `record_pending_merge` は本番呼び出し元が `put_merged` への
+        // 統合によりゼロになったため削除済み（codex P2 最終指摘対応。
+        // 誤用経路そのものの排除が最も fail-closed という判断。
+        // `docs/device-memory-pool-design.md` §8.2 参照）。本テストは
+        // `put_merged`（合流専用。ロック内で減算・挿入を行う）経由で
+        // 同じ往復を検証する。
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        pool.record_pending_return(256);
+        assert_eq!(pool.stats().pending_return_bytes, 256);
+        assert_eq!(pool.idle_bytes(), 256);
+
+        let evicted = pool.put_merged(256, 1);
+        assert!(evicted.is_empty());
+        assert_eq!(pool.stats().pending_return_bytes, 0);
+        assert_eq!(pool.stats().cached_bytes, 256, "put_merged は挿入も行う");
+        assert_eq!(
+            pool.idle_bytes(),
+            256,
+            "cached_bytes へ合流済みのため idle_bytes は変わらない"
+        );
+    }
+
+    #[test]
+    fn idle_bytes_combines_cached_and_pending() {
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        let _ = pool.put(256, 1);
+        pool.record_pending_return(512);
+        assert_eq!(pool.idle_bytes(), 768);
+    }
+
+    #[test]
+    fn put_evicts_oldest_entries_when_over_max_pool_bytes() {
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: 300,
+            ..SizeClassPoolConfig::default()
         };
-        let pool: SizeClassPool<u32> = SizeClassPool::new(config);
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        // 1 件目（最古）は上限内。
+        let evicted = pool.put(100, 1);
+        assert!(evicted.is_empty(), "1 件目は上限を超えないため追い出しなし");
+
+        // 2 件目で 200 バイトとなり依然上限（300）以内。
+        let evicted = pool.put(100, 2);
+        assert!(evicted.is_empty(), "2 件目まででは上限を超えない");
+
+        // 3 件目で 300 バイトとなりちょうど上限（超過ではない）。
+        let evicted = pool.put(100, 3);
+        assert!(
+            evicted.is_empty(),
+            "ちょうど上限と一致する場合は追い出さない（`<=` 判定）"
+        );
+
+        // 4 件目で上限超過。最古（1 件目）から追い出される。
+        let evicted = pool.put(100, 4);
+        assert_eq!(
+            evicted,
+            vec![(100, 1)],
+            "最も古いエントリ（挿入順1件目）から追い出されるはず"
+        );
+        assert_eq!(pool.stats().cached_bytes, 300, "追い出し後は上限以内に戻る");
+    }
+
+    #[test]
+    fn put_with_zero_max_pool_bytes_evicts_everything() {
+        // `max_pool_bytes == 0` はプール無効（全パススルー）契約。
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: 0,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+        let evicted = pool.put(256, 1);
+        assert_eq!(
+            evicted,
+            vec![(256, 1)],
+            "max_pool_bytes == 0 は挿入したエントリ自身も即座に追い出す"
+        );
+        assert_eq!(pool.stats().cached_bytes, 0);
+    }
+
+    #[test]
+    fn put_eviction_accounts_for_pending_return_bytes() {
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: 300,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+        // 返却待ち分（pending_return_bytes）も判定対象に含む（§3.4）。
+        pool.record_pending_return(250);
+        let evicted = pool.put(100, 1);
+        assert_eq!(
+            evicted,
+            vec![(100, 1)],
+            "pending_return_bytes 込みで上限超過するため挿入直後に追い出される"
+        );
+    }
+
+    #[test]
+    fn size_class_pool_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SizeClassPool<u32>>();
+    }
+
+    // --- 巨大帯クラス別保持上限（codex-review P1 是正の回帰テスト） ---
+
+    #[test]
+    fn put_evicts_oldest_same_huge_class_entry_over_per_class_limit() {
+        // 既定 `huge_entries_per_class == 1` のまま、`max_pool_bytes` を
+        // 十分大きくして総量上限＋グローバル LRU（`evict_over_capacity`）
+        // が介入しない条件で、巨大帯クラス別上限のみで追い出されることを
+        // 確認する。
+        let huge = 64 * 1024 * 1024u64;
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: huge * 10,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        let evicted = pool.put(huge, 1);
+        assert!(evicted.is_empty(), "1 件目は上限（1 件／クラス）以内");
+
+        // 同一クラスへ 2 件目を挿入すると上限超過し、最古（1 件目）が
+        // 追い出される。
+        let evicted = pool.put(huge, 2);
+        assert_eq!(
+            evicted,
+            vec![(huge, 1)],
+            "同一巨大クラスの最古エントリが追い出されるはず"
+        );
+        assert_eq!(pool.stats().cached_bytes, huge, "残るのは 2 件目の分のみ");
+    }
+
+    #[test]
+    fn put_huge_class_limit_does_not_affect_other_classes() {
+        // 巨大帯クラス別上限は「同一 `class_bytes`」単位。異なる巨大
+        // クラス（完全一致丸めのため異なるバイト数 = 異なるクラス）は
+        // 互いに干渉しない。
+        let huge_a = 64 * 1024 * 1024u64;
+        let huge_b = 65 * 1024 * 1024u64;
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: huge_a + huge_b + 1,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        assert!(pool.put(huge_a, 1).is_empty());
+        assert!(
+            pool.put(huge_b, 2).is_empty(),
+            "異なる巨大クラスは互いの上限に影響しない"
+        );
+        assert_eq!(pool.stats().cached_bytes, huge_a + huge_b);
+    }
+
+    #[test]
+    fn put_huge_class_limit_does_not_apply_below_huge_min_bytes() {
+        // 巨大帯クラス別上限は `class_bytes >= huge_min_bytes` の場合の
+        // み適用する。小帯・大帯は従来どおり総量上限＋グローバル LRU の
+        // みで制御される（設計文書 §3.2）。
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: u64::MAX,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        // 同一クラス（256 バイト。小帯）を複数保持しても追い出されない。
         assert!(pool.put(256, 1).is_empty());
         assert!(pool.put(256, 2).is_empty());
-        // 3 件目（256*3=768 > 512）で最古（1）が破棄される。
-        let evicted = pool.put(256, 3);
-        assert_eq!(evicted, vec![1]);
-        assert!(pool.stats().cached_bytes <= 512);
+        assert!(pool.put(256, 3).is_empty());
+        assert_eq!(pool.stats().cached_bytes, 256 * 3);
     }
 
     #[test]
-    fn huge_band_respects_max_entries_per_class() {
-        let config = PoolConfig {
-            huge_max_entries_per_class: 1,
-            ..cfg()
+    fn put_huge_class_limit_respects_configured_entries_per_class() {
+        // `huge_entries_per_class` を 2 に緩めた場合、3 件目の挿入で
+        // 初めて追い出しが発生することを確認する（上限値そのものが
+        // 参照されていることの直接検証）。
+        let huge = 64 * 1024 * 1024u64;
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: huge * 10,
+            huge_entries_per_class: 2,
+            ..SizeClassPoolConfig::default()
         };
-        let pool: SizeClassPool<u32> = SizeClassPool::new(config);
-        let huge = config.huge_threshold + 1;
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
         assert!(pool.put(huge, 1).is_empty());
-        // 2 件目は保持上限超過のためそのまま破棄対象として返る。
-        let evicted = pool.put(huge, 2);
-        assert_eq!(evicted, vec![2]);
+        assert!(
+            pool.put(huge, 2).is_empty(),
+            "2 件目までは上限（2 件／クラス）以内"
+        );
+        let evicted = pool.put(huge, 3);
+        assert_eq!(
+            evicted,
+            vec![(huge, 1)],
+            "3 件目で最古（1 件目）が追い出される"
+        );
     }
 
-    // --- 統計契約 ---
+    // --- put_merged（Cursor Bugbot High・codex P2 是正の回帰テスト） ---
 
     #[test]
-    fn stats_track_alloc_and_reuse_counts() {
-        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
-        assert_eq!(pool.take(256), None); // alloc_count=1, reuse_count=0
-        let _ = pool.put(256, 1);
-        assert_eq!(pool.take(256), Some(1)); // alloc_count=2, reuse_count=1
-        let stats = pool.stats();
-        assert_eq!(stats.alloc_count, 2);
-        assert_eq!(stats.reuse_count, 1);
-    }
-
-    #[test]
-    fn stats_cached_bytes_matches_sum_of_class_bytes() {
-        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
-        let _ = pool.put(256, 1);
-        let _ = pool.put(512, 2);
-        assert_eq!(pool.stats().cached_bytes, 256 + 512);
-        pool.take(256);
-        assert_eq!(pool.stats().cached_bytes, 512);
-    }
-
-    #[test]
-    fn stats_pending_return_defaults_zero() {
-        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
-        assert_eq!(pool.stats().pending_return_bytes, 0);
-        pool.record_pending_merge(100);
-        assert_eq!(pool.stats().pending_return_bytes, 100);
-        pool.record_pending_merge(-100);
-        assert_eq!(pool.stats().pending_return_bytes, 0);
-    }
-
-    #[test]
-    fn stats_released_bytes_accumulates_on_eviction() {
-        let config = PoolConfig {
-            max_pool_bytes: 256,
-            ..cfg()
+    fn put_merged_subtracts_pending_before_capacity_check_without_self_eviction() {
+        // codex P2 の再現条件: 上限ぎりぎり（上限 300B・pending 256B・
+        // cached 0）で 256B のエントリを合流させる。旧稿（put → 減算の
+        // 順）だと合流直後の判定時点で cached_bytes(256) +
+        // pending_return_bytes(256、未減算) == 512 > 300 となり、
+        // 挿入したばかりの自分自身が即座に LRU 追い出しされていた。
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: 300,
+            ..SizeClassPoolConfig::default()
         };
-        let pool: SizeClassPool<u32> = SizeClassPool::new(config);
-        let _ = pool.put(256, 1);
-        let _ = pool.put(256, 2); // 1 を破棄
-        assert_eq!(pool.stats().released_bytes, 256);
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+        pool.record_pending_return(256);
+
+        let evicted = pool.put_merged(256, 1);
+        assert!(
+            evicted.is_empty(),
+            "減算後の pending_return_bytes（0）で判定すれば上限内であり自己追い出しは起きない"
+        );
+        assert_eq!(pool.stats().cached_bytes, 256, "合流分がフリーリストへ入る");
+        assert_eq!(
+            pool.stats().pending_return_bytes,
+            0,
+            "put_merged 自身が（削除済みの旧 record_pending_merge 相当の）減算を行う"
+        );
     }
 
     #[test]
-    fn take_one_for_release_drains_lru_order() {
+    fn put_merged_saturates_pending_to_zero_when_used_without_matching_pending_return() {
+        // 契約違反（`record_pending_return` を経ていないエントリへの
+        // 誤用）の回帰テスト（codex P2 再指摘対応）: 前ラウンドは
+        // `AtomicU64::fetch_sub` によるラップアラウンドで
+        // `pending_return_bytes` が `u64::MAX` 付近へ恒久的にずれ、
+        // 以後のあらゆる容量判定が常時「上限超過」になりプールを
+        // 事実上無効化する致命的な退行があった。`fetch_update` による
+        // 飽和減算（現在値未満なら `0` へ飽和）へ変更したことで、
+        // 誤用時も `pending_return_bytes` は単に `0` のまま
+        // （変化なし）に留まり、ラップアラウンドは発生しない。
         let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
-        let _ = pool.put(256, 1);
-        let _ = pool.put(512, 2);
-        let (bytes, handle) = pool.take_one_for_release().unwrap();
-        assert_eq!(bytes, 256);
-        assert_eq!(handle, 1);
-        let (bytes2, handle2) = pool.take_one_for_release().unwrap();
-        assert_eq!(bytes2, 512);
-        assert_eq!(handle2, 2);
-        assert!(pool.take_one_for_release().is_none());
-        assert_eq!(pool.stats().cached_bytes, 0);
+        let evicted = pool.put_merged(256, 1);
+        assert!(
+            evicted.is_empty(),
+            "誤用があっても pending_return_bytes は 0 のまま（過大な容量超過を              誤判定しない）ため通常どおり挿入が成功し自己追い出しは起きない"
+        );
+        assert_eq!(
+            pool.stats().pending_return_bytes,
+            0,
+            "対の加算がない減算は saturating_sub 相当で 0 に飽和する（ラップ              アラウンドしない）"
+        );
+        assert_eq!(
+            pool.stats().cached_bytes,
+            256,
+            "ハンドルの挿入自体は飽和の有無に関わらず継続する（統計フィールド              の防御であって put の成否を左右させない）"
+        );
     }
 
     #[test]
-    fn zero_max_pool_bytes_disables_pool_passthrough() {
-        let config = PoolConfig {
-            max_pool_bytes: 0,
-            ..cfg()
+    fn put_merged_saturation_does_not_corrupt_subsequent_capacity_checks() {
+        // codex P2 再指摘が懸念した「以後の容量判定が壊れる」ことが
+        // 起きないことを、誤用直後に正常系の put_merged を続けて呼ぶ形で
+        // 確認する。飽和後も pending_return_bytes は 0 のままであり、
+        // 続く正当な合流（record_pending_return 済み）の容量判定にも
+        // 悪影響を与えない。
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: 300,
+            ..SizeClassPoolConfig::default()
         };
-        let pool: SizeClassPool<u32> = SizeClassPool::new(config);
-        let evicted = pool.put(256, 1);
-        assert_eq!(evicted, vec![1]);
-        assert_eq!(pool.stats().cached_bytes, 0);
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        // 誤用（対になる record_pending_return が無い）。
+        let evicted = pool.put_merged(100, 1);
+        assert!(evicted.is_empty());
+        assert_eq!(pool.stats().pending_return_bytes, 0);
+        assert_eq!(pool.stats().cached_bytes, 100);
+
+        // 正しい使い方（record_pending_return 済み）を続けても、直前の
+        // 誤用でラップアラウンドしていれば即座に破綻していたはずの容量
+        // 判定が正常に機能する。
+        pool.record_pending_return(150);
+        let evicted = pool.put_merged(150, 2);
+        assert!(
+            evicted.is_empty(),
+            "cached(100) + merged(150) == 250 <= 300 のため追い出しなし"
+        );
+        assert_eq!(pool.stats().cached_bytes, 250);
+        assert_eq!(pool.stats().pending_return_bytes, 0);
     }
 
-    // --- Send + Sync コンパイル時アサーション ---
-
-    fn assert_send_sync<T: Send + Sync>() {}
-
     #[test]
-    fn size_class_pool_is_send_sync() {
-        assert_send_sync::<SizeClassPool<u32>>();
+    fn put_merged_still_enforces_huge_class_limit_and_global_lru() {
+        // put_merged も put_locked を共有するため、巨大帯クラス別上限・
+        // グローバル LRU の判定は通常の put と同一に適用される。
+        let huge = 64 * 1024 * 1024u64;
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: huge * 10,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+        pool.record_pending_return(huge);
+        assert!(pool.put_merged(huge, 1).is_empty());
+
+        pool.record_pending_return(huge);
+        let evicted = pool.put_merged(huge, 2);
+        assert_eq!(
+            evicted,
+            vec![(huge, 1)],
+            "巨大帯クラス別上限（既定 1 エントリ／クラス）は put_merged 経由でも適用される"
+        );
     }
 }

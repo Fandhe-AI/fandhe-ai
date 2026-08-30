@@ -1,41 +1,61 @@
-//! `fandhe_ai::release_cached_memory`／`memory_pool_stats`（イシュー
-//! #1020・REQ-14）の結線検証。
+//! `fandhe_ai::release_cached_memory`／`fandhe_ai::memory_pool_stats`
+//! （REQ-14 の明示解放 API。イシュー #1018 ツリー・#1020 CUDA・#1021
+//! Metal）の受入テスト。
 //!
-//! CPU は常に「プールを持たないバックエンド」（`BackendOps` の既定
-//! メソッド。`crates/tensor-core/src/backend_ops.rs`）であるため、
-//! `release_cached_memory(Device::Cpu) == Ok(())`・
-//! `memory_pool_stats(Device::Cpu) == Ok(None)` を CI（GitHub ホステッド。
-//! CUDA 実機不要）で固定する。
+//! CPU 経路（プールを持たない既定契約。`BackendOps` の既定メソッド。
+//! `crates/tensor-core/src/backend_ops.rs`）は Linux CI でも実行できる
+//! ため CI（GitHub ホステッド）で固定する。
 //!
 //! CUDA 経路は `tests/tape_construction.rs` と同じ「実行環境適応型」
 //! 方針（`CudaDeviceProvider::is_available()` で選択可能デバイスの有無を
 //! 判定してから分岐）に従い、実機がある場合のみ確保→drop→解放→
-//! `cached_bytes == 0` を検証する `#[ignore]` テストとする（実機依存を
-//! 通常 CI ジョブへ持ち込まない。`.claude/rules/coding-rust.md`）。
+//! `cached_bytes == 0` を検証する。Metal 経路（実際のプール保持・解放の
+//! 裏付け）は Apple Silicon 実機依存のため両方とも `#[ignore]` で分離
+//! する（`.claude/rules/coding-rust.md`）。
 
 use fandhe_ai::Device;
 
-/// CPU（プール未接続バックエンド）での `release_cached_memory` は常に
-/// `Ok(())`（no-op）。
+/// CPU バックエンドは `release_cached_device_memory`（`BackendOps` の
+/// 既定実装）のまま常に `Ok(())` を返す（`docs/device-memory-pool-
+/// design.md` §3.1「デフォルト実装（非破壊拡張）」）。
 #[test]
-fn release_cached_memory_on_cpu_is_ok_noop() {
-    // `BackendError` は `#[non_exhaustive]`・`PartialEq` 非実装（拡張性
-    // 優先の設計。`device.rs` 冒頭コメント参照）のため `assert_eq!` では
-    // なく `assert!(matches!(..))` で判定する。
-    assert!(matches!(
-        fandhe_ai::release_cached_memory(Device::Cpu),
-        Ok(())
-    ));
+fn release_cached_memory_on_cpu_is_ok() {
+    fandhe_ai::release_cached_memory(Device::Cpu)
+        .expect("CPU の release_cached_memory は常に成功するはず");
 }
 
-/// CPU（プール未接続バックエンド）での `memory_pool_stats` は常に
-/// `Ok(None)`（`BackendOps::device_memory_pool_stats` の既定実装）。
+/// CPU バックエンドは `device_memory_pool_stats` の既定実装のまま
+/// `Ok(None)` を返す（プールを持たないバックエンド。同 doc §3.1）。
 #[test]
 fn memory_pool_stats_on_cpu_is_ok_none() {
-    assert!(matches!(
-        fandhe_ai::memory_pool_stats(Device::Cpu),
-        Ok(None)
-    ));
+    let stats = fandhe_ai::memory_pool_stats(Device::Cpu)
+        .expect("CPU の memory_pool_stats は常に成功するはず");
+    assert!(stats.is_none(), "CPU はプールを持たないため None のはず");
+}
+
+/// Metal バックエンド: 確保 → drop → 解放 → `cached_bytes == 0` の
+/// 一連の流れを facade 公開面のみで確認する（実機依存）。
+///
+/// facade は `MemoryOps`／`DeviceBuffer` を直接公開しないため（REQ-12。
+/// `docs/compat-api-scope.md` §0）、本テストは確保自体を
+/// `fandhe_ai::tape_for(Device::Metal)` 経由の演算（`Tape` の
+/// `Var` 生成 API）で間接的に発生させることはせず、`release_cached_
+/// memory`／`memory_pool_stats` の往復のみを確認する（確保・解放の
+/// 直接検証は `crates/backend-metal/tests/pool_real_device.rs` が
+/// `BackendOps` を直接使って担う）。
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn release_cached_memory_on_metal_reports_zero_cached_bytes_afterwards() {
+    fandhe_ai::release_cached_memory(Device::Metal)
+        .expect("Metal 実機で release_cached_memory は成功するはず");
+    let stats = fandhe_ai::memory_pool_stats(Device::Metal)
+        .expect("Metal 実機で memory_pool_stats は成功するはず")
+        .expect("Metal はプールを持つため Some のはず");
+    assert_eq!(
+        stats.cached_bytes, 0,
+        "release_cached_memory 直後は cached_bytes == 0 のはず"
+    );
 }
 
 /// CUDA 実機（`libcuda` 到達可能かつ選択可能デバイス 1 台以上）がある

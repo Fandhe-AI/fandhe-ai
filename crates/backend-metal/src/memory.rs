@@ -249,9 +249,53 @@ impl MetalMemory {
                 _alloc: alloc,
             })
         } else {
-            let buf = MetalBuffer::new_zeroed(&self.context, numel)?;
-            let bytes = checked_byte_len(numel)?;
-            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+            let buf = MetalBuffer::alloc_zeroed_pooled(&self.context, numel)?;
+            // `alloc_zeroed_pooled` は `self.context` がプロセスワイド
+            // singleton と一致する場合のみプール経由（`Backing::Pooled`）
+            // になり、一致しない場合（`MetalMemory::new` 経由の専有
+            // コンテキスト。`tests/memory_roundtrip.rs`・`bench-harness::
+            // peak_memory` が使う経路）は `new_zeroed` と同一の専有確保
+            // （`Backing::Owned`）へフォールバックする
+            // （`buffer.rs::MetalBuffer::singleton_context_matching`）。
+            //
+            // **常に論理バイト数（`checked_byte_len(numel)`）を
+            // `self.tracker` へ計上する（codex-review P1 是正。PR #1063）**:
+            // 旧稿はプール経由（`MetalBuffer::is_pooled() == true`。
+            // 二重計上防止のためだけの用途を失ったため本 PR で
+            // 削除済み）の場合に `0` バイトを積んでいた。理由付けは
+            // 「`crate::pool::
+            // MetalAllocator::tracker`（`RawMetalBuffer::_alloc`）に
+            // 既に計上されているため二重計上を避ける」だったが、
+            // `MetalAllocator::tracker` と `self.tracker`（`MetalMemory`
+            // 自身のフィールド）は**別々の `Arc<AllocationTracker>`
+            // インスタンス**であり、両者を合算する経路はどこにも
+            // 存在しない（`MetalAllocator` 自体は `MemoryStats` を
+            // 実装しておらず、REQ-14 の公開契約〈`allocated_bytes`／
+            // `peak_allocated_bytes`〉から到達可能なのは `self.tracker`
+            // のみ）。つまり「二重計上」は実際には発生しておらず、
+            // `0` を積む分岐は本節冒頭（上記コメント §139-142 相当。
+            // `impl MemoryStats for MetalMemory`）が明記する「CPU/CUDA/
+            // Metal で同一契約」を破る過小計上バグだった
+            // （`static_metal_memory()`〈`ops.rs`〉経由の cached
+            // singleton context は常にプール経由になるため、通常の
+            // `MemoryOps::alloc_zeroed` 呼び出し経路で実害が生じていた。
+            // codex-review 指摘）。CUDA 側（`backend-cuda::memory::
+            // CudaMemory::alloc_zeroed_inner`）は `self.stream.
+            // alloc_zeros` を直接呼び `backend-cuda::pool::
+            // CudaAllocator`（GEMM 等ホットパス専用。REQ-14 の
+            // `MemoryOps` 経路とは別系統）を一切経由しないため同種の
+            // 問題を構造的に持たない。CUDA 側の契約（`MemoryStats` は
+            // 常に論理確保量を反映する）に Metal 側を揃えるため、
+            // 上記の判定分岐は廃し常に `checked_byte_len` を計上する
+            // （プール経由の物理容量〈サイズクラス丸め後の
+            // capacity〉ではなく、他バックエンドと同じ論理要求量を
+            // 計上する契約は維持する）。プール実装自体が持つ物理確保量
+            // の計測（`crate::pool::MetalAllocator::stats()`〈`PoolStats::
+            // cached_bytes`〉との統合）は `docs/device-memory-pool-
+            // design.md` §8 スコープ外〈bench-harness の独自計測経路
+            // との統合〉として申し送り済みのまま変更しない。
+            let tracked_bytes = checked_byte_len(numel)?;
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), tracked_bytes);
             Box::new(MetalBufferHandle {
                 buffer: Some(buf),
                 _alloc: alloc,
@@ -425,5 +469,48 @@ mod tests {
     fn metal_memory_and_pooled_metal_memory_implement_memory_stats() {
         assert_memory_stats::<MetalMemory>();
         assert_memory_stats::<fandhe_ai_tensor_core::pool::PooledMemory<MetalMemory>>();
+    }
+
+    /// pooled 経路（`static_metal_memory()` が使う singleton
+    /// `MetalContext`）でも `MemoryStats::allocated_bytes`／
+    /// `peak_allocated_bytes` が論理要求バイト数を反映することを確認
+    /// する（codex-review P1 是正の回帰テスト。PR #1063）。
+    ///
+    /// `context_cache::cached_context()` は `pub(crate)` のため、この
+    /// 検証は外部統合テスト（`tests/memory_roundtrip.rs`）ではなく
+    /// クレート内部の `#[cfg(test)]` からのみ行える。`MetalMemory::new`
+    /// （専有コンテキスト）は `singleton_context_matching` により常に
+    /// プール非経由（`Backing::Owned`）へフォールバックするため、この
+    /// バグ（`Backing::Pooled` の場合に `0` を計上していた）を再現・
+    /// 検証できない。`MetalMemory::from_shared(context_cache::
+    /// cached_context()?)` で singleton と同一の `Arc<MetalContext>` を
+    /// 明示的に共有し、プール経由分岐を確実に踏む。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn pooled_alloc_zeroed_records_logical_bytes_via_shared_context() {
+        let ctx = crate::context_cache::cached_context()
+            .expect("singleton MetalContext の取得に失敗した（実機依存）");
+        let mem = MetalMemory::from_shared(ctx);
+
+        let numel = 4096usize;
+        let expected_bytes = (numel * size_of::<f32>()) as u64;
+
+        let buf = mem
+            .alloc_zeroed(&[numel])
+            .expect("pooled alloc_zeroed は成功するはず");
+        assert_eq!(
+            mem.allocated_bytes(),
+            expected_bytes,
+            "pooled 経路（Backing::Pooled）でも 0 ではなく論理要求バイト数を              計上するはず（codex-review P1 是正）"
+        );
+        assert_eq!(mem.peak_allocated_bytes(), expected_bytes);
+
+        drop(buf);
+        assert_eq!(mem.allocated_bytes(), 0, "貸出終了後は current が 0 に戻る");
+        assert_eq!(
+            mem.peak_allocated_bytes(),
+            expected_bytes,
+            "peak は過去最大値を保持する"
+        );
     }
 }

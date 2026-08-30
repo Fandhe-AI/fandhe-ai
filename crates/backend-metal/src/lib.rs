@@ -222,10 +222,17 @@
 // 判断で `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）
 // でも単体テストが回るようにする。
 pub(crate) mod batch_state;
+// `context.rs::MetalContext::synchronize`／`pool.rs::PooledMetalHandle::
+// Drop`（イシュー #1021）が「保留中のプール返却列」へ push・合流する
+// 判定ロジック（`objc2` 系 FFI に触れない）を切り出したモジュール。
+// `batch_state`／`generic_cache` と同じ設計判断で `cfg(target_os =
+// "macos")` を付けず、Linux（本実装環境・CI）でも単体テストが回る
+// ようにする（`pool_pending.rs` モジュール冒頭コメント参照）。
 #[cfg(target_os = "macos")]
 pub mod buffer;
 #[cfg(target_os = "macos")]
 pub mod context;
+pub(crate) mod pool_pending;
 // `ops::MetalBackendOps` からのみ参照する内部モジュール（CUDA 側
 // `context_cache`〈feat/929-cuda-ctx-cache〉と同じ可視性方針）。
 // `MetalContext`／`MetalGemm` 等の公開型はここを経由せず既存の `pub use`
@@ -253,8 +260,13 @@ pub mod memory;
 #[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
+// `crate::buffer::MetalBuffer::alloc_zeroed_pooled`／`alloc_uninit_pooled`
+// からのみ到達する `pub(crate)` 面（イシュー #1021）。`tensor-core` の
+// どの公開 trait にも属さない低水準アロケータ実装のため非公開のまま。
 #[cfg(target_os = "macos")]
 pub mod pipeline;
+#[cfg(target_os = "macos")]
+pub(crate) mod pool;
 #[cfg(target_os = "macos")]
 pub mod rmsnorm;
 #[cfg(target_os = "macos")]

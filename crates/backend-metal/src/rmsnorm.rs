@@ -167,11 +167,17 @@ impl MetalRmsNorm {
         // `hidden` 要素のゼロ初期化バッファを渡し、無条件ロードされても
         // 確保範囲内に収まるようにする（コンパイラの最適化戦略に依存しない
         // fail-closed な対策）。
+        // イシュー #1021: `w` が `None` の場合のダミーバッファは
+        // 上記コメントのとおり select 化された無条件ロードに対する
+        // fail-closed な境界確保であり、ゼロ初期化契約自体は維持する
+        // 必要があるため alloc_zeroed_pooled を使う。
         let (w_buf, has_weight) = match w {
             Some(w_slice) => (MetalBuffer::new_with_data(ctx, w_slice)?, 1i32),
-            None => (MetalBuffer::new_zeroed(ctx, hidden)?, 0i32),
+            None => (MetalBuffer::alloc_zeroed_pooled(ctx, hidden)?, 0i32),
         };
-        let out_buf = MetalBuffer::new_zeroed(ctx, x.len())?;
+        // out は rmsnorm 各行カーネルが x.len() 全要素を書き切る出力専用
+        // バッファのため alloc_uninit_pooled を使う（設計文書 §6「A02」）。
+        let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, x.len())?;
 
         let rows_u = rows as u32;
         let hidden_u = hidden as u32;

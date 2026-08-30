@@ -51,6 +51,7 @@ use crate::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
 use crate::fusion::FusionPlan;
+use crate::pool_core::PoolStats;
 
 /// [`BackendOps::sgd_step_device`] の 1 ステップ分のハイパーパラメータ
 /// （イシュー #935・`docs/device-resident-update-design.md` §3.1）。
@@ -442,27 +443,53 @@ pub trait BackendOps {
         ))
     }
 
-    /// デバイスメモリプール（`backend-cuda::pool::CudaAllocator` 等。
-    /// イシュー #1020・REQ-14）がアイドル保持している分を即座に実解放する。
+    /// REQ-14 の明示解放 API（イシュー #1018 ツリー・#1019 設計・#1020
+    /// CUDA 実装・#1021 Metal 実装）。このバックエンドのデバイスメモリ
+    /// プールがアイドル保持しているバッファを全て解放する。CUDA で
+    /// `has_async_alloc()` が真の環境では、自作プール層の解放に加え
+    /// driver 側 memory pool のトリム（`cuMemPoolTrimTo(0)` 相当）・
+    /// 2 回の対象 stream 同期を内部で行う（`docs/device-memory-pool-
+    /// design.md` §3.6 (2) の 4 フェーズ）。Metal は driver トリムを
+    /// 持たないためフェーズが少ない（同 doc §3.6 (2)「バックエンド別の
+    /// 該当フェーズ」表参照）。
     ///
-    /// `crate::pool::PooledMemory::release_all_pooled`（`MemoryOps` デコレータ
-    /// 側の解放 API）とは別経路であり、本メソッドはホットパス確保
-    /// （`backend_ops::BackendOps` 経由の GEMM／elementwise／softmax カーネル）
-    /// が使う `SizeClassPool` を対象とする。既定実装は no-op（`Ok(())`）で
-    /// あり、プール未接続のバックエンド（`backend-cpu`・`backend-metal`。
-    /// Metal 実装は後続 #1021）を破壊しない非破壊拡張（デフォルトメソッド
-    /// 追加）である。`backend-cuda::CudaBackendOps` はプール実体へ委譲する
-    /// オーバーライドを持つ（`crates/backend-cuda/src/ops.rs`）。
+    /// `crate::pool::PooledMemory::release_all_pooled`（`MemoryOps`
+    /// デコレータ側の解放 API）とは別経路であり、本メソッドはホット
+    /// パス確保（`backend_ops::BackendOps` 経由の GEMM／elementwise／
+    /// softmax カーネル）が使う `SizeClassPool`（`pool_core.rs`）を
+    /// 対象とする。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `Ok(())`（プールを持たないバックエンドは解放対象なし。
+    /// fail-open ではなく「対象が存在しないため自明に成功」という
+    /// 意味）。CPU バックエンドは常にこのデフォルトのまま（本イシューの
+    /// 対象外。#1026）。CUDA（`backend-cuda::CudaBackendOps`）／Metal
+    /// は同 doc §3.6 (2) の契約で実カーネルへオーバーライドする
+    /// （`crates/backend-cuda/src/ops.rs`・`crates/backend-metal/src/
+    /// ops.rs`）。
+    ///
+    /// # エラー
+    /// `Err` は同 doc §3.6 (2)「バックエンド別の該当フェーズ」表が定める
+    /// フェーズのいずれかの失敗を表す。実際に到達しうる `Err` の種別・
+    /// 個数はバックエンドごとに異なるため（例: Metal はフェーズ (ii) が
+    /// 失敗しない設計のため実質的にフェーズ (i) 失敗の 1 種類のみへ
+    /// 到達しうる。CPU は本メソッドを常にデフォルト実装のまま使うため
+    /// 到達しない）、本 doc comment では数を明記しない（正本は同 doc
+    /// §3.6 (2) の表）。黙殺・panic は禁止する（fail-closed。
+    /// `.claude/rules/coding-rust.md`）。
     fn release_cached_device_memory(&self) -> Result<(), BackendError> {
         Ok(())
     }
 
-    /// デバイスメモリプールの現在の利用統計（[`crate::PoolStats`]）を返す。
+    /// デバイスメモリプールの統計スナップショット（診断用。イシュー
+    /// #1020・#1021）。[`PoolStats`]（POD。内部ハンドル表現を一切
+    /// 含まない）のみを返す。
     ///
-    /// プールを持たないバックエンド（既定実装。`backend-cpu`・
-    /// 本イシュー時点の `backend-metal`）は `None` を返す。`backend-cuda`
-    /// のみ `Some(stats)` を返すオーバーライドを持つ。
-    fn device_memory_pool_stats(&self) -> Option<crate::PoolStats> {
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `None`（プールを持たないバックエンド。`backend-cpu`）。
+    /// `backend-cuda`・`backend-metal` は `Some(stats)` を返す
+    /// オーバーライドを持つ。
+    fn device_memory_pool_stats(&self) -> Option<PoolStats> {
         None
     }
 }

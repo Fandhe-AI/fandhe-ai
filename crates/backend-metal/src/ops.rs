@@ -795,6 +795,35 @@ impl BackendOps for MetalBackendOps {
                 .into(),
         ))
     }
+
+    /// REQ-14 の明示解放 API（イシュー #1021）。`crate::pool::
+    /// MetalAllocator::release_cached`（内部メソッド。設計文書 §3.1
+    /// 「2 段構成の命名規約」・§3.6 (2) のバックエンド別フェーズ表
+    /// 「Metal」列）へ委譲する。バイト数は
+    /// `device_memory_pool_stats()`（`PoolStats::cached_bytes`）から
+    /// 確認できるため戻り値からは捨てる（設計文書 §3.1 同節）。
+    fn release_cached_device_memory(&self) -> Result<(), BackendError> {
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        context_cache::cached_allocator(&ctx)
+            .map_err(map_metal_error)?
+            .release_cached()
+            .map(|_bytes| ())
+            .map_err(map_metal_error)
+    }
+
+    /// デバイスメモリプールの統計スナップショット（イシュー #1021）。
+    /// コンテキスト・アロケータ取得自体が失敗した場合（デバイス不在等）
+    /// は `None`（プールを持たない扱い。`BackendOps::
+    /// device_memory_pool_stats` の既定契約と同じ fail-safe）とし、
+    /// panic・`Err` の握り潰しはしない（呼び出し元が診断目的でしか
+    /// 使わない値のため、デバイス不在自体は他の演算メソッド呼び出しで
+    /// 既に検出できる。ここで `Result` を返す必要はないという既存
+    /// trait シグネチャ〈`Option<PoolStats>`〉の制約に従う）。
+    fn device_memory_pool_stats(&self) -> Option<fandhe_ai_tensor_core::PoolStats> {
+        let ctx = context_cache::cached_context().ok()?;
+        let allocator = context_cache::cached_allocator(&ctx).ok()?;
+        Some(allocator.stats())
+    }
 }
 
 impl MetalBackendOps {

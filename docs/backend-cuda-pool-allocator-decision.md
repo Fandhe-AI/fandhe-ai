@@ -79,8 +79,12 @@
 変更しない（非推奨化もしない）。`arc_with_non_send_sync` の allow も据え置く。`crate::pool_core`
 （本イシューで新設）はハンドル非依存のサイズクラス丸めプール本体であり、`crate::pool` の
 バイトサイズ完全一致プールとは別の型・別の関心事として共存する（`crate::pool_core` モジュール
-コメント「型名衝突の回避」参照。`pool_core::PoolConfig` はクレートルートへ再エクスポートせず、
-`PoolStats` のみを再公開する）。
+コメント「命名の差異」参照。`pool_core::SizeClassPoolConfig` はクレートルートへ再エクスポートせず、
+`PoolStats` のみを再公開する）。**PR #1063 マージ時の追記**: 本ドキュメント作成時点（PR #1061）の
+独自 `pool_core` 実装（`PoolConfig` 等の命名）は、#1021（Metal）が独立実装した `pool_core.rs`
+との統合時に Metal 側 API（`SizeClassPoolConfig`）へ一本化された（`crates/tensor-core/src/
+pool_core.rs` モジュール doc「#1020／#1021 統合時の経緯」参照。`crates/backend-cuda/src/pool.rs`
+はこの一本化後の API を呼ぶよう書き換え済み）。
 
 ## 6. 実装した公開面（facade 到達経路）
 

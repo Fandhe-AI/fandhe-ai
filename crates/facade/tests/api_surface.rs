@@ -594,3 +594,63 @@ fn optim_types_are_reachable_via_facade_only() {
         .unwrap_or_else(|e| panic!("test fixture: global_grad_norm が失敗した: {e}"));
     assert_eq!(global_norm, 0.0, "test fixture: 空スライスの norm は 0");
 }
+
+/// デバイスメモリプール（イシュー #1021）の公開面固定（受入基準
+/// `docs/device-memory-pool-design.md` §3.1「`tensor-core` にはハンドル
+/// の内部表現を一切含まない POD 型のみを置く」）。
+///
+/// (a) `src/` の `pub use`／`pub fn` シグネチャに低水準アロケータ
+/// 型（`DeviceAllocator`／`BufferHandle`）が一切現れないことを固定する
+/// （`facade_does_not_reexport_tape_or_backend_ops` と同型の走査）。
+#[test]
+fn facade_does_not_expose_low_level_allocator_types() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            let is_pub_surface = trimmed.starts_with("pub use") || trimmed.starts_with("pub fn");
+            if !is_pub_surface {
+                continue;
+            }
+            for forbidden in ["DeviceAllocator", "BufferHandle"] {
+                if trimmed.contains(forbidden) {
+                    offending.push(format!(
+                        "{}: `{trimmed}` が {forbidden} を含む",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が低水準アロケータ型（DeviceAllocator/BufferHandle）を\
+         含んでいる（設計文書 §3.1 のカプセル化契約違反）: {offending:?}"
+    );
+}
+
+/// (b) `release_cached_memory`／`memory_pool_stats`（`pub fn`）・
+/// `PoolStats`（`pub use`）が facade の公開面に存在することを固定する
+/// （REQ-14 の明示解放 API・診断統計が利用者から到達できることの
+/// コンパイル時裏付け）。
+#[test]
+fn release_cached_memory_and_pool_stats_are_reachable_via_facade() {
+    // CPU はプールを持たないため常に `Ok(())`／`Ok(None)`（`BackendOps`
+    // の既定実装。`docs/device-memory-pool-design.md` §3.1）。
+    fandhe_ai::release_cached_memory(fandhe_ai::Device::Cpu)
+        .expect("test fixture: CPU の release_cached_memory は常に成功するはず");
+    let stats = fandhe_ai::memory_pool_stats(fandhe_ai::Device::Cpu)
+        .expect("test fixture: CPU の memory_pool_stats は常に成功するはず");
+    assert!(
+        stats.is_none(),
+        "test fixture: CPU はプールを持たないため None のはず"
+    );
+
+    // `PoolStats` 自体がクレート root から到達可能で POD であることの
+    // 型検査（`Copy`/`Clone`/`Debug`/`Default` を要求しない最小限の
+    // 構築・比較のみ行う）。
+    let a = fandhe_ai::PoolStats::default();
+    let b = a;
+    assert_eq!(a, b, "test fixture: PoolStats は値として比較できるはず");
+}

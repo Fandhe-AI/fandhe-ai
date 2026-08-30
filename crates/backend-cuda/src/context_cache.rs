@@ -85,7 +85,7 @@
 //! `CudaDevice::new`／`CudaGemm::new` を直接繰り返し呼ぶたびに
 //! `ContextKey`（ordinal + context ポインタ）が毎回変わり、
 //! エントリが際限なく積み上がって当該 `CudaContext`・stream・プール内
-//! GPU メモリ（既定最大 128 MiB。`pool.rs::PoolConfig::default()`）が
+//! GPU メモリ（既定最大 128 MiB。`fandhe_ai_tensor_core::pool_core::SizeClassPoolConfig::default()`）が
 //! 全ハンドル drop 後も解放されない欠陥があった（codex-review 指摘。
 //! イシュー #1020 PR #1061）。
 //!

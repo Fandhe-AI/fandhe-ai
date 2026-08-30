@@ -32,12 +32,26 @@
 //! `alloc_zeros::<f16>`）・`MemoryOps`（`memory.rs::CudaMemory`）経由の
 //! `DeviceBuffer` はスコープ外（`CudaBufferHandle.slice.len()==numel`
 //! 前提の既存検証への影響範囲が広いため。out-of-scope-tracking.md 対象）。
+//!
+//! # `pool_core` API 統合（PR #1063 マージコンフリクト解消）
+//!
+//! 本モジュールは元々（#1020・PR #1061）独自の `pool_core` 実装
+//! （`PoolConfig`／`Vec<H>` を返す `put`／引数無し `record_loan_end` 等）
+//! と組んでいたが、#1021（Metal）が独立に実装した `pool_core.rs` との
+//! main 統合時に、巨大帯クラス別上限・オクターブ境界切り上げ・再利用
+//! 貸出時の waste 計上という 3 件の是正が反映済みの Metal 側 API
+//! （[`SizeClassPoolConfig`]・`record_reuse`・`(logical_bytes,
+//! class_bytes)` の引数順・`Vec<(u64, H)>` を返す `put`）へ合わせて
+//! 書き換えた（詳細は `crates/tensor-core/src/pool_core.rs` モジュール
+//! doc「#1020／#1021 統合時の経緯」参照）。
 
 use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, CudaView, CudaViewMut};
 
-use fandhe_ai_tensor_core::pool_core::{PoolConfig, PoolStats, SizeClassPool, size_class_for};
+use fandhe_ai_tensor_core::pool_core::{
+    PoolStats, SizeClassPool, SizeClassPoolConfig, size_class_for,
+};
 
 use crate::device::CudaDevice;
 use crate::error::CudaError;
@@ -52,7 +66,9 @@ pub(crate) struct CudaSliceHandle(CudaSlice<f32>);
 // が返す破棄対象は本ハンドルの `Drop`（cudarc 側の `cuMemFree` 相当）で
 // 実解放される。CUDA は「即時返却」（`fandhe_ai_tensor_core::pool_core`
 // モジュール冒頭「統計契約」の `pending_return_bytes` は常に 0）のため、
-// `record_pending_merge` は呼ばない。
+// `record_pending_return`／`put_merged`（旧 `record_pending_merge`。
+// codex P2 最終指摘対応で本番呼び出し元ゼロとなり削除済み）のいずれも
+// 呼ばない。
 
 /// プールから貸し出された出力バッファの RAII ハンドル。
 ///
@@ -67,6 +83,10 @@ pub(crate) struct CudaSliceHandle(CudaSlice<f32>);
 pub(crate) struct PooledCudaHandle {
     handle: std::mem::ManuallyDrop<CudaSliceHandle>,
     class_bytes: u64,
+    // `record_allocation`／`record_reuse` に渡した値と同一でなければ
+    // ならない（`pool_core.rs` 契約。`record_loan_end` 呼び出し時に
+    // 再計算せず、貸出開始時の値をそのまま保持する）。
+    logical_bytes: u64,
     logical_numel: usize,
     pool: Arc<SizeClassPool<CudaSliceHandle>>,
 }
@@ -101,7 +121,8 @@ impl Drop for PooledCudaHandle {
             drop(inner);
             return;
         }
-        self.pool.record_loan_end();
+        self.pool
+            .record_loan_end(self.logical_bytes, self.class_bytes);
         // `put` が返す破棄対象（LRU 超過分）はロック解放後にここで drop
         // される（`pool_core.rs` モジュール冒頭「所有権契約 (b)」。ロック
         // 内で FFI 解放を伴いうる `Drop` を実行しない契約）。
@@ -263,11 +284,12 @@ pub(crate) struct CudaAllocator {
 
 impl CudaAllocator {
     /// `device` の既定ストリーム・コンテキストを共有した新規アロケータを
-    /// 構築する（`PoolConfig::default()`。既定 128MiB 上限は REQ-14 の
-    /// 係数上限〈2 倍以内〉を侵さない安全側の値。`pool_core.rs` 参照）。
+    /// 構築する（`SizeClassPoolConfig::default()`。既定 128MiB 上限は
+    /// REQ-14 の係数上限〈2 倍以内〉を侵さない安全側の値。
+    /// `pool_core.rs` 参照）。
     pub(crate) fn new(device: &CudaDevice) -> Self {
         Self {
-            pool: Arc::new(SizeClassPool::new(PoolConfig::default())),
+            pool: Arc::new(SizeClassPool::new(SizeClassPoolConfig::default())),
             stream: Arc::clone(device.stream()),
             ctx: Arc::clone(device.context()),
         }
@@ -284,7 +306,11 @@ impl CudaAllocator {
 
     /// サイズクラス丸め後のクラスバイト数を計算する共通処理
     /// （`alloc_zeroed_f32`/`alloc_uninit_f32` 共用）。
-    fn class_bytes_for(&self, numel: usize) -> Result<(u64, Option<u64>), CudaError> {
+    ///
+    /// `size_class_for` は `bytes == 0` を `Ok(0)` として返す契約
+    /// （`pool_core.rs` doc comment）のため、呼び出し元は戻り値の
+    /// `class_bytes == 0` で「プール非経由（空バッファ）」を判定する。
+    fn class_bytes_for(&self, numel: usize) -> Result<(u64, u64), CudaError> {
         let requested_bytes = checked_byte_len(numel)?;
         let class_bytes = size_class_for(requested_bytes, &self.pool.config()).map_err(|e| {
             CudaError::InvalidShape {
@@ -306,34 +332,42 @@ impl CudaAllocator {
     /// OWASP A04）。
     pub(crate) fn alloc_zeroed_f32(&self, numel: usize) -> Result<PooledCudaHandle, CudaError> {
         let (requested_bytes, class_bytes) = self.class_bytes_for(numel)?;
-        let Some(class_bytes) = class_bytes else {
+        if class_bytes == 0 {
             // numel == 0: プールを介さず直接確保する（空テンソル契約。
             // `PooledCudaHandle::drop` は `class_bytes == 0` を見て
             // プールへ返却せず直接解放する）。
             let raw = self.stream.alloc_zeros::<f32>(0)?;
-            return Ok(self.wrap_handle(raw, 0, 0));
-        };
+            return Ok(self.wrap_handle(raw, 0, 0, 0));
+        }
         let class_numel = (class_bytes / std::mem::size_of::<f32>() as u64) as usize;
 
         if let Some(mut handle) = self.pool.take(class_bytes) {
-            self.pool.record_allocation(class_bytes, requested_bytes);
-            self.stream
-                .memset_zeros(&mut handle.0.slice_mut(0..numel))?;
-            return Ok(self.wrap_handle_from(handle, class_bytes, numel));
+            self.pool.record_reuse(requested_bytes, class_bytes);
+            // `record_reuse` 済みの貸出は、この `memset_zeros` が失敗すると
+            // `PooledCudaHandle` が構築されず `Drop` 経由の `record_loan_end`
+            // も走らないため、統計を明示的に巻き戻してからエラーを返す
+            // （Cursor Bugbot Low 指摘。Metal 再利用経路の synchronize 失敗
+            // 時の巻き戻し〈`backend-metal::pool`〉と同一契約。ハンドルは
+            // drop してデバイスメモリを解放する）。
+            if let Err(e) = self.stream.memset_zeros(&mut handle.0.slice_mut(0..numel)) {
+                self.pool.record_loan_end(requested_bytes, class_bytes);
+                return Err(e.into());
+            }
+            return Ok(self.wrap_handle_from(handle, class_bytes, requested_bytes, numel));
         }
 
         match self.stream.alloc_zeros::<f32>(class_numel) {
             Ok(raw) => {
-                self.pool.record_allocation(class_bytes, requested_bytes);
-                Ok(self.wrap_handle(raw, class_bytes, numel))
+                self.pool.record_allocation(requested_bytes, class_bytes);
+                Ok(self.wrap_handle(raw, class_bytes, requested_bytes, numel))
             }
             Err(_) => {
                 // OOM フォールバック: キャッシュ解放を 1 回試み再試行する
                 // （OWASP A04。無限リトライはしない）。
                 let _ = self.release_cached();
                 let raw = self.stream.alloc_zeros::<f32>(class_numel)?;
-                self.pool.record_allocation(class_bytes, requested_bytes);
-                Ok(self.wrap_handle(raw, class_bytes, numel))
+                self.pool.record_allocation(requested_bytes, class_bytes);
+                Ok(self.wrap_handle(raw, class_bytes, requested_bytes, numel))
             }
         }
     }
@@ -350,15 +384,15 @@ impl CudaAllocator {
     /// 生確保）で新規確保する。
     pub(crate) fn alloc_uninit_f32(&self, numel: usize) -> Result<PooledCudaHandle, CudaError> {
         let (requested_bytes, class_bytes) = self.class_bytes_for(numel)?;
-        let Some(class_bytes) = class_bytes else {
+        if class_bytes == 0 {
             let raw = self.stream.alloc_zeros::<f32>(0)?;
-            return Ok(self.wrap_handle(raw, 0, 0));
-        };
+            return Ok(self.wrap_handle(raw, 0, 0, 0));
+        }
         let class_numel = (class_bytes / std::mem::size_of::<f32>() as u64) as usize;
 
         if let Some(handle) = self.pool.take(class_bytes) {
-            self.pool.record_allocation(class_bytes, requested_bytes);
-            return Ok(self.wrap_handle_from(handle, class_bytes, numel));
+            self.pool.record_reuse(requested_bytes, class_bytes);
+            return Ok(self.wrap_handle_from(handle, class_bytes, requested_bytes, numel));
         }
 
         // SAFETY: `alloc::<f32>` は指定要素数分のデバイスメモリを未初期化
@@ -372,15 +406,15 @@ impl CudaAllocator {
         let alloc_result = unsafe { self.stream.alloc::<f32>(class_numel) };
         match alloc_result {
             Ok(raw) => {
-                self.pool.record_allocation(class_bytes, requested_bytes);
-                Ok(self.wrap_handle(raw, class_bytes, numel))
+                self.pool.record_allocation(requested_bytes, class_bytes);
+                Ok(self.wrap_handle(raw, class_bytes, requested_bytes, numel))
             }
             Err(_) => {
                 let _ = self.release_cached();
                 // SAFETY: 上記と同一根拠。
                 let raw = unsafe { self.stream.alloc::<f32>(class_numel) }?;
-                self.pool.record_allocation(class_bytes, requested_bytes);
-                Ok(self.wrap_handle(raw, class_bytes, numel))
+                self.pool.record_allocation(requested_bytes, class_bytes);
+                Ok(self.wrap_handle(raw, class_bytes, requested_bytes, numel))
             }
         }
     }
@@ -389,20 +423,28 @@ impl CudaAllocator {
         &self,
         raw: CudaSlice<f32>,
         class_bytes: u64,
+        logical_bytes: u64,
         logical_numel: usize,
     ) -> PooledCudaHandle {
-        self.wrap_handle_from(CudaSliceHandle(raw), class_bytes, logical_numel)
+        self.wrap_handle_from(
+            CudaSliceHandle(raw),
+            class_bytes,
+            logical_bytes,
+            logical_numel,
+        )
     }
 
     fn wrap_handle_from(
         &self,
         handle: CudaSliceHandle,
         class_bytes: u64,
+        logical_bytes: u64,
         logical_numel: usize,
     ) -> PooledCudaHandle {
         PooledCudaHandle {
             handle: std::mem::ManuallyDrop::new(handle),
             class_bytes,
+            logical_bytes,
             logical_numel,
             pool: Arc::clone(&self.pool),
         }
@@ -462,8 +504,8 @@ mod tests {
     // （`context_cache.rs::tests::fresh_cache` と同じ「GPU 不要ロジックは
     // 実カーネル型に依存しない形でテストする」方針）。
 
-    fn cfg() -> PoolConfig {
-        PoolConfig::default()
+    fn cfg() -> SizeClassPoolConfig {
+        SizeClassPoolConfig::default()
     }
 
     #[test]
