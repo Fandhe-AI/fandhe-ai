@@ -19,7 +19,7 @@
 | OS | macOS 26.6.2（BuildVersion 25G83） |
 | Xcode / xctrace | Xcode 26.6（17F113）／ xctrace 16.0（17F113） |
 | rustc | 1.96.0（ac68faa20 2026-05-25） |
-| 計測コミット SHA | `2a12c44294c707579254a90286573243293a0d4`（`origin/main` fetch 直後の HEAD） |
+| 計測コミット SHA | `2a12c44294c707579254a90286573243293a0d40`（`origin/main` fetch 直後の HEAD） |
 | 計測プロトコル | `bench-harness::protocol::run`（`MeasurementConfig::default()` = warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1）。§4 の追加スイープ（`tmp_tile_sweep`）も同一 `MeasurementConfig::default()` を使用 |
 | 決定的シード | `0xC0FFEE`（各 example の `SEED` 定数） |
 | 計測衛生 | AC 電源接続・実行順は本 doc の記載順（§2→§3→§4→§5→§6）どおり連続実行。他 GPU 負荷アプリの明示終了は未実施（既定のバックグラウンドプロセスのみ）。**§3.4 で後述するとおり、直前の GPU 負荷履歴によって同一構成でも中央値が有意に変動する（サーマル/クロック状態依存）ことを実測で確認した** — 詳細は §3.4 参照 |
