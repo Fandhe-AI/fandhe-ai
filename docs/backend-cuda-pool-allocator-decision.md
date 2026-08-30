@@ -3,7 +3,8 @@
 イシュー #1020「perf(backend-cuda): CUDA プールアロケータの実装とテスト」（親 #1018 ツリー。
 上位ゴール #1008「学習ループの固定費削減」）の実装記録。設計の正本は
 `docs/device-memory-pool-design.md`（#1019）であり、本文書はその「§8.2 実装裁量」の範囲内で
-本イシューが確定した判断と、実装後に得られた実測（実機実測は後続セッション）を記録する。
+本イシューが確定した判断と、実装後に得られた実測（実機実測は 2026-08-31・DGX Spark GB10・
+イシュー #1025 実装セッションで完了済み）を記録する。
 
 ## 1. 採用方式（案 A vs 案 B）
 
@@ -100,25 +101,36 @@ pool_core.rs` モジュール doc「#1020／#1021 統合時の経緯」参照。
 一切到達できない（`crates/facade/tests/api_surface.rs::facade_does_not_expose_pool_implementation_types`
 が機械的に固定する）。
 
-## 7. 実測記入欄（実機実測は後続セッションで記入）
+## 7. 実測記入欄（実機実測完了・2026-08-31・DGX Spark GB10・イシュー #1025 実装セッション）
 
 ### 7.1 fresh N=2048 固有オーバーヘッド（#956/#1025）への効果
 
 `crates/backend-cuda/src/fresh_overhead_diag_tests.rs::fresh_overhead_diag_v3_pooled_output`
 （`#[ignore]`）が (c) C 確保フェーズをプール経由へ差し替えた変種として計測コードを用意した。
 
-**正直な記録（実装計画 AC-3 の必須注記）**: #956/#1025 が特定した N=2048 固有の約 166 ms は、
-主に**ホスト側 `Vec<f32>` の解放**（`fresh_overhead_diag_tests.rs` の帰属分析 (f3)。`Fresh` 分岐の
-`free_host_secs` に対応）に帰属する仮説であり、本プールが直接効くのは**デバイス側 C 確保**
-（(c) フェーズ。`alloc_c_secs` 相当）**のみ**である。したがって V3 が (c) を大幅に短縮しても、
-166 ms 全体の解消を意味しない。ホスト側解放コストへの対処は本イシューのスコープ外。
+**正直な記録（実装計画 AC-3 の必須注記・2026-08-31 実機実測で更新）**: #956/#1025 が特定した
+N=2048 固有の約 166〜184 ms は、イシュー #1025 の実装セッション（2026-08-31・HEAD `d6bd4ff`）
+で実機実測した結果 **再現しなかった**（fresh N=2048 が reuse N=2048 と同水準。詳細・帰属先の
+推定は `docs/perf/cuda-fresh-gemm-n2048-overhead-diagnosis.md` §6〜§7 を参照）。以下は当初の
+仮説（本プールが直接効くのは**デバイス側 C 確保**（(c) フェーズ）**のみ**というホスト側解放
+（(f3)）非対象の見立て）どおりの実測値である。**166 ms 規模の値が何によって解消していたかは
+原因未特定のまま**（同 doc §7・§10 のとおり、#1061〈本プール導入〉・#1077・#1079・#1080 を
+候補として挙げたが個々の PR の寄与を分離する追加実験は未実施。#1081〈tape ノードクリア API〉
+は同 doc §7 で fresh 経路への直接の関与が確認できないとして候補から撤回済み）現 HEAD では
+非再現だった、というのが正確な記述であり、本プール単独の寄与を主張するものではない。
 
-| 環境 | N | (c) alloc [プールミス・warmup] | (c) alloc [プールヒット・中央値] | 備考 |
+**注意（測定区間が異なる。下表の 2 列を単純比較しない）**: 「GEMM 全体」列は `run_tiled_f32`
+（H2D・launch・synchronize・D2H・(c) alloc を含む GEMM 全体、かつプールミス時の 1 回限りの
+warmup）、「alloc 単体」列は `alloc_zeroed_f32`（(c) フェーズのみ、プールヒット時）であり
+測定対象の範囲が異なる。両者の比を「短縮倍率」として主張することはできない
+（`fresh_overhead_diag_v3_pooled_output` の実装参照。詳細は同診断 doc §10 の注意も参照）。
+
+| 環境 | N | `run_tiled_f32`（GEMM 全体・プールミス時 warmup） | (c) `alloc_zeroed_f32` 単体（プールヒット・中央値） | 備考 |
 |---|---|---|---|---|
-| DGX Spark GB10（実機セッション記入待ち） | 1024 | — | — | |
-| DGX Spark GB10（実機セッション記入待ち） | 2048 | — | — | |
-| DGX Spark GB10（実機セッション記入待ち） | 4096 | — | — | |
-| RTX 3060（参考値。Linux サーバー・`libcuda` 到達可能であれば） | 1024/2048/4096 | — | — | 正式値ではなく参考値 |
+| DGX Spark GB10（2026-08-31 実測。driver 580.173.02・CUDA 13.0） | 1024 | 2.616 ms | 0.002 ms | |
+| DGX Spark GB10（2026-08-31 実測） | 2048 | 8.948 ms | 0.003 ms | |
+| DGX Spark GB10（2026-08-31 実測） | 4096 | 54.981 ms | 0.003 ms | `release_cached`: `freed_bytes=88080384` |
+| RTX 3060（参考値。Linux サーバー・`libcuda` 到達可能であれば） | 1024/2048/4096 | — | — | 正式値ではなく参考値。未実施のまま |
 
 実行コマンド:
 
@@ -134,7 +146,7 @@ cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --nocapture --
 
 | 環境 | 実行結果 | 備考 |
 |---|---|---|
-| DGX Spark GB10（実機セッション記入待ち） | — | |
+| DGX Spark GB10（2026-08-31 実測・イシュー #1025 実装セッション） | pass（`release_cached_memory_on_cuda_drains_pool_after_gemm ... ok`） | |
 
 実行コマンド:
 
@@ -151,4 +163,3 @@ cargo test -p fandhe-ai --test memory_pool_api -- --ignored --nocapture
 - `CU_MEMPOOL_ATTR_RELEASE_THRESHOLD` の調整（実機比較後に判断）
 - `softmax.rs` の `alloc_uninit_f32` 化（persistent grid カーネルの全要素書き込み確認完了後）
 - 既存 `PooledMemory` の非推奨化・`arc_with_non_send_sync` allow 解消
-- 実機実測（DGX Spark GB10 での §7 記入欄の充足）
