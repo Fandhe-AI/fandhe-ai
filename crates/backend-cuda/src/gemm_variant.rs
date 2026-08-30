@@ -26,7 +26,7 @@
 //!   「選択ロジックのユニットテスト」を通常 CI（`#[ignore]` 不要）で
 //!   充足するため）。
 //! - 実際のカーネル起動・NVRTC コンパイルは呼び出し側
-//!   （`gemm.rs::CudaGemm::new_with_f32_variant_selection`。
+//!   （`gemm_variant_selection.rs::CudaGemmF32VariantSelection::new`。
 //!   `internal-diagnostics` feature 限定の opt-in 経路）が担う。
 //!   本モジュールはどのカーネルを使うべきかの「判定」のみを返し、
 //!   実行はしない（A03 インジェクション対策と同じ関心の分離: 判定に

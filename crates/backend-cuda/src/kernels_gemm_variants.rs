@@ -1,9 +1,9 @@
 //! `gemm_variant.rs`（イシュー #1035）が選択する DoubleBuffer / SplitK
-//! カーネルソース。**opt-in・未計測の実験実装**であり、`gemm.rs` の
-//! `internal-diagnostics` feature 限定コンストラクタ
-//! （`new_with_f32_variant_selection`）からのみ NVRTC コンパイルされる。
-//! 本番既定コンストラクタ（`CudaGemm::new`）・`kernels::TILED_F32` は
-//! 一切変更しない（実装計画 §3・§8）。
+//! カーネルソース。**opt-in・未計測の実験実装**であり、
+//! `gemm_variant_selection.rs` の `internal-diagnostics` feature 限定
+//! コンストラクタ（`CudaGemmF32VariantSelection::new`）からのみ NVRTC
+//! コンパイルされる。本番既定コンストラクタ（`CudaGemm::new`）・
+//! `kernels::TILED_F32` は一切変更しない（実装計画 §3・§8）。
 //!
 //! # 対応するカーネル
 //!
@@ -48,7 +48,7 @@ pub const TILED_DB_TILE: u32 = 32;
 ///
 /// # 呼び出し元
 ///
-/// `gemm.rs::CudaGemm::new_with_f32_variant_selection`
+/// `gemm_variant_selection.rs::CudaGemmF32VariantSelection::new`
 /// （`internal-diagnostics` feature 限定）が NVRTC コンパイルし、
 /// `gemm_tiled_db_f32` エントリポイントをロードする。本番既定経路
 /// （`run_tiled_f32`）からは呼ばれない。
@@ -138,7 +138,7 @@ extern "C" __global__ void gemm_tiled_db_f32(
 ///
 /// # 呼び出し元
 ///
-/// `gemm.rs::CudaGemm::new_with_f32_variant_selection`
+/// `gemm_variant_selection.rs::CudaGemmF32VariantSelection::new`
 /// （`internal-diagnostics` feature 限定）。`c_partial` バッファサイズは
 /// `gemm_variant::validate_split_k_launch` が起動前に cap 検査する。
 pub const SPLITK_PARTIAL_F32: &str = r#"
