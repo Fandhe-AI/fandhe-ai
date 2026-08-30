@@ -436,17 +436,29 @@ drain・ストリーム完了同期の配線」を**独立レジストリ**で�
   本節の骨子のみを先行整備し、実機実測は別セッションで追記する
   （`docs/perf/cuda-fresh-gemm-n2048-overhead-diagnosis.md`・
   `docs/perf/train-linear-epilogue-fusion.md` と同じ「計測コード先行
-  整備・実機未実測の明記」方針）。実行予定コマンド:
+  整備・実機未実測の明記」方針）。実行予定コマンド（review 指摘・P1:
+  以前の記載は opt-in 環境変数〈`poison_recovery_real_device_tests.rs`
+  冒頭コメント「運用契約」参照〉を欠いており、`require_opt_in` の
+  早期 `return` に入って両テストとも「何も検証せず成功する」fail-open
+  な例になっていた。下記のとおり両テストへ
+  `FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1` を必須付与し、T-R2 には
+  恒久 poison への同意 `FANDHE_AI_CUDA_POISON_RECOVERY_ALLOW_UNRECOVERABLE=1`
+  も追加する）:
   ```
+  FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1 \
   cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored \
     poison_recovery_real_probe_restores_active_and_rejects_stale_generation \
     --test-threads=1 --nocapture
+  FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1 \
+  FANDHE_AI_CUDA_POISON_RECOVERY_ALLOW_UNRECOVERABLE=1 \
   cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored \
     poison_from_real_cuda_error_fails_closed_to_unrecoverable \
     --test-threads=1 --nocapture
   ```
   （T-R1 → 既存実機テストの非後退確認（`async_ordering_real_device` 等）
-  → T-R2（単独・最後）の順で実行する）
+  → T-R2（単独・最後）の順で実行する。いずれかの環境変数が未設定の
+  まま実行すると `require_opt_in` が標準エラーへ理由を出力したうえで
+  即 `return` し、テストは何も検証せず成功扱いになる点に注意）
 
 ## 13. 出典
 
