@@ -14,6 +14,12 @@
 `cargo run -p fandhe-ai-backend-metal --example fixed_overhead_diagnosis --release -- --size=256,512`
 を実行してから記入する。**
 
+**追補（#1036・2026-08-31）**: 本 doc が診断対象とする「都度構築（P6）」の約 5 ms 固定費は、
+`context_cache`（#930/#948）導入により解消済みであることを M4 Max 実機で確認した（P6-P7 は
+256/512 のいずれも -0.02〜-0.05 ms・計測ノイズの範囲内でほぼゼロ）。実測裏取りの記録は
+`docs/perf/metal-gemm-bottleneck-rediagnosis.md`（#1036）§6 に記載する。本 doc §5「実測結果」以降の
+テンプレートは context_cache 導入前の構成を前提としており埋めない（前提の違いを本追補で明示する）。
+
 ## 1. 背景・出典
 
 PR #915 のフレームワーク横並び実測（`scripts/bench/framework-compare/results/summary.md`

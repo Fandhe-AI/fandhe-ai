@@ -19,6 +19,13 @@ Metal GEMM が実測（`docs/perf/metal-gemm-dynamic-tile.md`・#381 実測）�
 で `cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis --release -- --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200`
 を実行してから記入する（CLI 引数は macOS 実行時必須。§1 参照。`--iters=200` は §2「サンプル数下限」節参照）。**
 
+**追補（#1036・2026-08-31）**: 本 doc §3.2 の解析値は `tile::select` が「4 サイズとも 64×64×16, wm=wn=2 を
+選択する」という #744 是正前・`context_cache`（#930/#948）導入前の構成の記録である。#744 是正後の現行
+`main`（正方立方 512〜4096 帯は一律 `CANDIDATES[3]` = 32×32×16 を選択）を前提とした再診断は
+`docs/perf/metal-gemm-bottleneck-rediagnosis.md`（#1036・M4 Max 実機実測完了）を正とする。本 doc の
+§1「計測手段」・§2「計測手順」・診断ハーネス自体の設計判断は引き続き有効であり、本追補は §3.2 以降の
+記載値の前提が現行実装と乖離している旨を明示するものである。
+
 ## 1. 計測手段
 
 `crates/backend-metal/examples/gemm_diagnosis.rs`（本イシューで新規作成）。
