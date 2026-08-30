@@ -25,6 +25,69 @@ struct Dims {
     uint k;
 };
 
+// === タイル化カーネル共通境界検査ヘルパ（イシュー #1038） ===
+//
+// `gemm_simdgroup_tiled`（f32・#188/#532/#538/#745）・
+// `gemm_simdgroup_tiled_f16`（half・#796/#797）の 2 系統が手書きで
+// 二重管理していた REQ-8 境界検査述語（ブロック原点の早期 return・
+// 協調ロードのベクトルグループ in-bounds 判定・境界グループの要素単位
+// スカラーフォールバック判定）をここへ集約する。いずれも副作用のない
+// 純粋述語（bool を返すのみ）であり、呼び出し側の判定式は抽出前後で
+// 完全に等価（フラグメントロード順・MMA 発行順・累算順は一切変更しない。
+// #536/#538 と同じ「ビット単位で不変」の論法）。
+//
+// dtype 差分（協調ロードのベクトル幅 4/8・共有メモリレイアウト・
+// エピローグ staging）はこの述語だけでは吸収できないため、
+// `docs/backend-metal-aligned-load-decision.md`「検査省略型 variant
+// 不採用」判断を踏まえ、本イシューでは境界判定式の共通化までに留め、
+// ロード・ストア本体（型テンプレート化）は Mac 実機での MSL コンパイル
+// 確認が可能なセッションへ持ち越す（イシュー #1038 計画 §3.1 フォールバック
+// 基準。以下 5 関数のいずれも `BM`/`BN`/`BK`/`WM`/`WN` 等の function
+// constant に依存しないため、両カーネルより前方のファイル冒頭
+// （`Dims` 定義直後）へ配置してもカーネル側の宣言順序制約を受けない）。
+
+// ブロック原点（`row0`/`col0`）が実効次元を完全に超えるかどうかの判定
+// （REQ-8 第 1 ガード）。f32/f16 両カーネルとも早期 return の条件式として
+// 同一に使う。
+inline bool tiled_block_out_of_range(uint row0, uint col0, constant Dims& dims) {
+    return row0 >= dims.m || col0 >= dims.n;
+}
+
+// 協調ロード（staged 経路）の A タイル側ベクトルグループ in-bounds 判定
+// （REQ-8）。`vec_w` はロード幅（f32 版 float4=4、f16 版 half8 相当の
+// 128bit 幅=8）。グループ全 `vec_w` 要素が実効次元・K タイル端の内側に
+// 収まる場合のみベクトルロードを許可し、境界グループは呼び出し側で
+// 要素単位のスカラーフォールバック（`tiled_a_elem_in_bounds`）へ回す。
+inline bool tiled_a_group_in_bounds(
+    uint kk, uint bk_eff, uint global_row, uint global_k, uint vec_w, constant Dims& dims
+) {
+    return (kk + vec_w <= bk_eff) && (global_row < dims.m) && (global_k + vec_w <= dims.k);
+}
+
+// 協調ロードの B タイル側ベクトルグループ in-bounds 判定（A タイル側と対。
+// REQ-8）。
+inline bool tiled_b_group_in_bounds(
+    uint kk, uint bk_eff, uint global_k, uint global_col, uint vec_w, constant Dims& dims
+) {
+    return (kk < bk_eff) && (global_k < dims.k) && (global_col + vec_w <= dims.n);
+}
+
+// A タイル境界グループの要素単位スカラーフォールバック判定（REQ-8）。
+// ベクトル幅に依存しないため f32/f16 で完全同一の述語。
+inline bool tiled_a_elem_in_bounds(
+    uint kk_e, uint bk_eff, uint global_row, uint global_k_e, constant Dims& dims
+) {
+    return kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k;
+}
+
+// B タイル境界グループの要素単位スカラーフォールバック判定（A タイル側と
+// 対。REQ-8）。
+inline bool tiled_b_elem_in_bounds(
+    uint kk, uint bk_eff, uint global_k, uint global_col_e, constant Dims& dims
+) {
+    return kk < bk_eff && global_k < dims.k && global_col_e < dims.n;
+}
+
 // 素朴な 3 重ループ（タイル化なし）。gid.y = 行、gid.x = 列。
 //
 // 手動境界チェック（`gid.y >= dims.m || gid.x >= dims.n` で早期 return）は
@@ -513,7 +576,7 @@ kernel void gemm_simdgroup_tiled(
     // （REQ-8。dispatch 側 grid は div_ceil(BM)/div_ceil(BN) で切り上げる
     // ため、末尾ブロックは部分的にしか実効次元へ収まらないケースが実際に
     // 発生する）。
-    if (row0 >= dims.m || col0 >= dims.n) {
+    if (tiled_block_out_of_range(row0, col0, dims)) {
         return;
     }
 
@@ -638,8 +701,7 @@ kernel void gemm_simdgroup_tiled(
                 uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
                 uint global_row = row0 + r;
                 uint global_k = p0 + kk;
-                bool group_in_bounds =
-                    (kk + 4 <= bk_eff) && (global_row < dims.m) && (global_k + 4 <= dims.k);
+                bool group_in_bounds = tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         a + (size_t)global_row * (size_t)dims.k + (size_t)global_k);
@@ -649,7 +711,7 @@ kernel void gemm_simdgroup_tiled(
                     for (uint e = 0; e < 4; e++) {
                         uint kk_e = kk + e;
                         uint global_k_e = global_k + e;
-                        tile_a[dst_idx + e] = (kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)
+                        tile_a[dst_idx + e] = tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)
                             ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k_e]
                             : 0.0f;
                     }
@@ -664,8 +726,7 @@ kernel void gemm_simdgroup_tiled(
                 uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
                 uint global_k = p0 + kk;
                 uint global_col = col0 + c_;
-                bool group_in_bounds =
-                    (kk < bk_eff) && (global_k < dims.k) && (global_col + 4 <= dims.n);
+                bool group_in_bounds = tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 4, dims);
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         b + (size_t)global_k * (size_t)dims.n + (size_t)global_col);
@@ -675,7 +736,7 @@ kernel void gemm_simdgroup_tiled(
                     for (uint e = 0; e < 4; e++) {
                         uint c_e = c_ + e;
                         uint global_col_e = global_col + e;
-                        tile_b[dst_idx + e] = (kk < bk_eff && global_k < dims.k && global_col_e < dims.n)
+                        tile_b[dst_idx + e] = tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)
                             ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col_e]
                             : 0.0f;
                     }
@@ -879,7 +940,7 @@ kernel void gemm_simdgroup_tiled_f16(
 
     // REQ-8: ブロック全体が実効次元を完全に超える場合は早期 return する
     // （`gemm_simdgroup_tiled` と同一の判断根拠）。
-    if (row0 >= dims.m || col0 >= dims.n) {
+    if (tiled_block_out_of_range(row0, col0, dims)) {
         return;
     }
 
@@ -978,8 +1039,7 @@ kernel void gemm_simdgroup_tiled_f16(
                 uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
                 uint global_row = row0 + r;
                 uint global_k = p0 + kk;
-                bool group_in_bounds =
-                    (kk + 8 <= bk_eff) && (global_row < dims.m) && (global_k + 8 <= dims.k);
+                bool group_in_bounds = tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 8, dims);
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         a + (size_t)global_row * (size_t)dims.k + (size_t)global_k);
@@ -991,7 +1051,7 @@ kernel void gemm_simdgroup_tiled_f16(
                     for (uint e = 0; e < 8; e++) {
                         uint kk_e = kk + e;
                         uint global_k_e = global_k + e;
-                        tile_a[dst_idx + e] = (kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)
+                        tile_a[dst_idx + e] = tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)
                             ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k_e]
                             : half(0.0h);
                     }
@@ -1006,8 +1066,7 @@ kernel void gemm_simdgroup_tiled_f16(
                 uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
                 uint global_k = p0 + kk;
                 uint global_col = col0 + c_;
-                bool group_in_bounds =
-                    (kk < bk_eff) && (global_k < dims.k) && (global_col + 8 <= dims.n);
+                bool group_in_bounds = tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 8, dims);
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         b + (size_t)global_k * (size_t)dims.n + (size_t)global_col);
@@ -1019,7 +1078,7 @@ kernel void gemm_simdgroup_tiled_f16(
                     for (uint e = 0; e < 8; e++) {
                         uint c_e = c_ + e;
                         uint global_col_e = global_col + e;
-                        tile_b[dst_idx + e] = (kk < bk_eff && global_k < dims.k && global_col_e < dims.n)
+                        tile_b[dst_idx + e] = tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)
                             ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col_e]
                             : half(0.0h);
                     }

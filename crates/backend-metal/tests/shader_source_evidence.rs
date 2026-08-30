@@ -214,30 +214,213 @@ fn gemm_simdgroup_tiled_f16_source_uses_matrix_unit_instructions() {
     }
 }
 
-/// REQ-8 の証跡（イシュー #796・協調ロードのベクトル化はイシュー #797）:
-/// `gemm_simdgroup_tiled_f16` が手動境界チェック（ブロック原点の早期
-/// return・協調ロードのグループ単位 in-bounds 判定＋要素単位スカラー
-/// フォールバック・エピローグ書き戻しの要素単位 in-bounds 判定）を
-/// 維持していることをロックする（`gemm_simdgroup_tiled_source_retains_*`
-/// と同種の検査。性能上の下限・最適化の達成を理由に境界チェックを省略
-/// しない方針 `.claude/rules/coding-rust.md` の機械検証）。#797 でベクトル
-/// 化した A/B 協調ロードは 8 要素グループ単位の `group_in_bounds` 判定と、
-/// 境界グループの要素単位スカラーフォールバック（`kk_e`/`global_k_e`・
-/// `c_e`/`global_col_e`）の 2 段構成になる。
+/// REQ-8 の証跡（イシュー #796・協調ロードのベクトル化はイシュー #797・
+/// 境界判定式の f32/f16 共通化はイシュー #1038）: `gemm_simdgroup_tiled_f16`
+/// が手動境界チェック（ブロック原点の早期 return・協調ロードのグループ
+/// 単位 in-bounds 判定＋要素単位スカラーフォールバック・エピローグ書き
+/// 戻しの要素単位 in-bounds 判定）を維持していることをロックする
+/// （`gemm_simdgroup_tiled_source_retains_*` と同種の検査。性能上の下限・
+/// 最適化の達成を理由に境界チェックを省略しない方針
+/// `.claude/rules/coding-rust.md` の機械検証）。
+///
+/// #1038 でブロック原点・グループ単位 in-bounds・要素単位フォールバックの
+/// 各判定式は `gemm_simdgroup_tiled`（f32）と共有する述語関数
+/// （`tiled_block_out_of_range`/`tiled_a_group_in_bounds`/
+/// `tiled_b_group_in_bounds`/`tiled_a_elem_in_bounds`/
+/// `tiled_b_elem_in_bounds`。ファイル冒頭 `Dims` 定義直後）へ抽出済みの
+/// ため、ここではブール式そのものではなく**呼び出し**（ベクトル幅引数
+/// `8` を含む）が本カーネル本体に実在することを検査する（抽出前は
+/// ブール式自体がここに現れていたため、需要が消えたのではなく検査対象の
+/// 形が変わった点に注意）。エピローグ（タイル粒度統合。#797）は f32 版の
+/// タイル原点 `continue` 構造と異なり要素単位 `continue` を経ない即時判定
+/// のため共有述語化していない（設計判断は `gemm.metal` 冒頭ヘルパ群
+/// コメント参照）。
 #[test]
 fn gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards() {
     let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
     for needle in [
-        "if (row0 >= dims.m || col0 >= dims.n)",
-        "(kk + 8 <= bk_eff) && (global_row < dims.m) && (global_k + 8 <= dims.k)",
-        "(kk < bk_eff) && (global_k < dims.k) && (global_col + 8 <= dims.n)",
-        "(kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)",
-        "(kk < bk_eff && global_k < dims.k && global_col_e < dims.n)",
+        "if (tiled_block_out_of_range(row0, col0, dims))",
+        "tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 8, dims)",
+        "tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 8, dims)",
+        "tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)",
+        "tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)",
         "if (out_row < dims.m && out_col < dims.n)",
     ] {
         assert!(
             kernel_body.contains(needle),
             "gemm_simdgroup_tiled_f16 に REQ-8 手動境界チェック `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1038 の証跡: `gemm_simdgroup_tiled`（f32）・
+/// `gemm_simdgroup_tiled_f16` の 2 系統が、共有の境界検査述語関数
+/// （ファイル冒頭 `Dims` 定義直後。両カーネルより前方のため、いずれの
+/// `_kernel_body()` スライスにも定義自体は含まれない）を**両方から**
+/// 呼び出していることをロックする。片側のカーネルだけが共通化されて
+/// もう片側が独自のインライン式へ後退する退行（境界検査ドリフト）を
+/// 検出する目的（イシュー #1038 計画「3.2 節」）。
+#[test]
+fn gemm_simdgroup_tiled_variants_share_boundary_check_helpers() {
+    for helper_def in [
+        "inline bool tiled_block_out_of_range(",
+        "inline bool tiled_a_group_in_bounds(",
+        "inline bool tiled_b_group_in_bounds(",
+        "inline bool tiled_a_elem_in_bounds(",
+        "inline bool tiled_b_elem_in_bounds(",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(helper_def),
+            "gemm.metal に共通境界検査ヘルパ `{helper_def}` の定義が見つかりません（イシュー #1038）"
+        );
+    }
+
+    let f32_body = gemm_simdgroup_tiled_kernel_body();
+    let f16_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for (call, vec_w_f32, vec_w_f16) in [
+        ("tiled_block_out_of_range(row0, col0, dims)", "", ""),
+        (
+            "tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, ",
+            "4, dims)",
+            "8, dims)",
+        ),
+        (
+            "tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, ",
+            "4, dims)",
+            "8, dims)",
+        ),
+        (
+            "tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)",
+            "",
+            "",
+        ),
+        (
+            "tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)",
+            "",
+            "",
+        ),
+    ] {
+        let f32_needle = format!("{call}{vec_w_f32}");
+        let f16_needle = format!("{call}{vec_w_f16}");
+        assert!(
+            f32_body.contains(&f32_needle),
+            "gemm_simdgroup_tiled（f32）が共通ヘルパ呼び出し `{f32_needle}` を含んでいません（境界検査ドリフトの疑い。イシュー #1038）"
+        );
+        assert!(
+            f16_body.contains(&f16_needle),
+            "gemm_simdgroup_tiled_f16 が共通ヘルパ呼び出し `{f16_needle}` を含んでいません（境界検査ドリフトの疑い。イシュー #1038）"
+        );
+    }
+}
+
+/// イシュー #1038 codex-review 指摘への対応
+/// （PR #1074 レビュー r3888410843）: 上記
+/// `gemm_simdgroup_tiled_variants_share_boundary_check_helpers` はヘルパの
+/// **呼び出し**（シグネチャ・定義行の存在）のみを検査しており、ヘルパ
+/// **本体**の境界条件式（例: `kk + 8 <= bk_eff`／`global_k + 8 <= dims.k`
+/// 相当）が空実装・`return true;` 等へ後退しても検出できない。
+///
+/// さらに PR #1074 レビュー（codex-review P2）指摘: 当初の実装は各条件式を
+/// `body.contains(condition)` で個別に部分一致検査していたため、条件式
+/// 同士を結ぶ論理演算子（`&&` → `||` 等）が弱体化されても検出できなかった
+/// （例: `tiled_a_group_in_bounds` が `return cond1 || cond2 || cond3;` へ
+/// 書き換えられても、3 つの `contains` はいずれも真のまま通ってしまう）。
+/// 本テストは空白を正規化した **完全な `return` 式**を期待値と厳密一致
+/// 検査することで、条件式の脱落だけでなく結合演算子の弱体化・条件の
+/// 順序入れ替えも検出する。加えて、A/B group・elem 系ヘルパ（4 個）は
+/// `&&` のみで結合され `||` を含まないこと、block ヘルパ（1 個）は逆に
+/// `||` のみで結合され `&&` を含まないことを個別に固定し、`contains`
+/// 方式では見逃す論理演算子の入れ替えを構文レベルで遮断する。
+///
+/// 5 個のヘルパそれぞれの定義本体（シグネチャ直後の `{` から対応する `}`
+/// まで。ネストした波括弧を持たない単純な `return ...;` 一文のみのため、
+/// 最初に現れる `}` を対応する閉じ括弧として素朴に切り出せる）を個別に
+/// 抽出し、REQ-8 の境界条件式そのものがヘルパ本体に実在することを検査
+/// する（Metal 実機非依存・ホスト側で実行可能。`#[ignore]` の数値回帰
+/// テストとは独立に通常 CI で退行を検出する）。
+#[test]
+fn gemm_metal_boundary_helpers_retain_req8_condition_expressions() {
+    /// `signature` の直後に現れる `{` から、対応する `}` までの本体
+    /// （中括弧含む）を切り出す。5 ヘルパはいずれも単純な `return` 一文
+    /// のみでネストした波括弧を持たないため、最初の `{`/`}` ペアで
+    /// 本体全体を過不足なく取得できる。
+    fn extract_helper_body(source: &str, signature: &str) -> String {
+        let sig_pos = source.find(signature).unwrap_or_else(|| {
+            panic!("gemm.metal にヘルパシグネチャ `{signature}` が見つかりません")
+        });
+        let after_sig = &source[sig_pos..];
+        let open = after_sig
+            .find('{')
+            .unwrap_or_else(|| panic!("ヘルパ `{signature}` の本体開始 `{{` が見つかりません"));
+        let close = after_sig[open..]
+            .find('}')
+            .unwrap_or_else(|| panic!("ヘルパ `{signature}` の本体終端 `}}` が見つかりません"));
+        after_sig[open..=open + close].to_string()
+    }
+
+    /// 本体中の連続空白（改行・インデント含む）を単一の半角スペースへ
+    /// 正規化する。ソース側のフォーマット（改行位置・インデント幅）が
+    /// 変わっても意味的に同一な `return` 式を同一文字列として比較できる
+    /// ようにするため。
+    fn normalize_whitespace(body: &str) -> String {
+        body.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    // (シグネチャ, 完全な return 式（正規化後の期待値）, 結合演算子)
+    for (signature, expected_return, connective) in [
+        (
+            "inline bool tiled_block_out_of_range(",
+            "return row0 >= dims.m || col0 >= dims.n;",
+            "||",
+        ),
+        (
+            "inline bool tiled_a_group_in_bounds(",
+            "return (kk + vec_w <= bk_eff) && (global_row < dims.m) && (global_k + vec_w <= dims.k);",
+            "&&",
+        ),
+        (
+            "inline bool tiled_b_group_in_bounds(",
+            "return (kk < bk_eff) && (global_k < dims.k) && (global_col + vec_w <= dims.n);",
+            "&&",
+        ),
+        (
+            "inline bool tiled_a_elem_in_bounds(",
+            "return kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k;",
+            "&&",
+        ),
+        (
+            "inline bool tiled_b_elem_in_bounds(",
+            "return kk < bk_eff && global_k < dims.k && global_col_e < dims.n;",
+            "&&",
+        ),
+    ] {
+        let raw_body = extract_helper_body(GEMM_METAL_SOURCE, signature);
+        let body = normalize_whitespace(&raw_body);
+
+        // 空白正規化した本体全体が期待する `return` 式を含むことを厳密
+        // 一致で検査する（部分式ごとの `contains` では検出できない結合
+        // 演算子の弱体化・条件の脱落・順序入れ替えをまとめて検出する）。
+        assert!(
+            body.contains(expected_return),
+            "ヘルパ `{signature}` の本体が期待する REQ-8 境界条件式 `{expected_return}` と一致しません（正規化後の本体: `{body}`）"
+        );
+
+        // 結合演算子そのものの入れ替え（`&&` → `||` 等）を構文レベルで
+        // 固定する。上の完全一致検査だけでも検出できるが、意図（A/B
+        // group・elem ヘルパは AND 結合、block ヘルパは OR 結合）を
+        // 明示的に読み取れるよう独立した検査としても残す。
+        let (required, forbidden) = if connective == "&&" {
+            ("&&", "||")
+        } else {
+            ("||", "&&")
+        };
+        assert!(
+            body.contains(required),
+            "ヘルパ `{signature}` の本体に結合演算子 `{required}` が見つかりません（本体: `{body}`）"
+        );
+        assert!(
+            !body.contains(forbidden),
+            "ヘルパ `{signature}` の本体に本来含まれないはずの結合演算子 `{forbidden}` が含まれています（結合演算子の弱体化の疑い。本体: `{body}`）"
         );
     }
 }
