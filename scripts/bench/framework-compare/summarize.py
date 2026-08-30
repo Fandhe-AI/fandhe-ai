@@ -185,23 +185,92 @@ def _parse_skip_failure(line):
     return {"framework": framework, "task": task, "device": device, "size": size, "raw": line}
 
 
-def _inject_skip_failures_into_gate(gate_records_all, skip_failures, target):
-    """skip 由来の失敗を `gate_records_all` へ判定不能レコードとして注入する。
+def _skip_log_paths_for_input(path):
+    """入力 JSONL ファイルに対応する skipped*.log の一覧を返す（環境スコープ）。
 
-    `gate_records_all`（`target_gate` が生成した実データ由来のレコード）に
-    既に同じ `(task, device, size)` の組が存在する場合は注入しない
-    （実データ側で既に判定済み＝fail-open ではないため二重計上しない）。
-    存在しない組（＝該当デバイス・size が丸ごと失敗し JSONL に一切残ら
-    なかった）のみを新規レコードとして追加する（fail-closed）。
+    codex P0・Bugbot High 指摘（PR #1082 4 巡目）: skip 失敗の注入を
+    全入力ファイル横断で共有される `gate_records_all` へ行うと、環境 A の
+    JSONL に `gemm/cuda/N=256` の達成行があるだけで、環境 B（別ディレクトリ
+    ・skipped*.log にしか記録が残っていない）の同じ組の失敗が
+    `existing_keys` により注入されず握りつぶされる。`target_gate` 自身が
+    課している「ファイルをまたいだ突合は環境混同になるため行わない」契約
+    （モジュール docstring 参照）に反していた。
+
+    加えて、`run_all.sh`/`run_all_cuda.sh` は同一ディレクトリ
+    （`results/raw/`）に複数環境の JSONL を書き出す運用（例:
+    `results.jsonl`〈環境 1〉と `results-cuda.jsonl`〈環境 2〉が同居。
+    README「計測結果」節参照）のため、単純にディレクトリ単位で
+    skipped*.log を共有すると同一ディレクトリ内の別環境の失敗まで
+    混入しうる。両スクリプトの命名規約（`results<suffix>.jsonl` <->
+    `skipped<suffix>.log`。例: `results.jsonl`<->`skipped.log`、
+    `results-cuda.jsonl`<->`skipped-cuda.log`）に厳密一致する
+    skipped*.log が存在すればそれだけを対象にする（最も精度が高い環境
+    識別）。一致するファイルが存在しない場合（命名規約に従わないファイル名
+    ・アドホックな実行等で環境識別子が特定できない）は、同じディレクトリの
+    skipped*.log 全件へフォールバックする（判定不能の握りつぶしを避ける
+    fail-closed 側の選択。ディレクトリという境界自体は超えない）。
+
+    戻り値: 一致した skipped*.log の絶対パスのリスト（重複なし・昇順）。
+    """
+    d = os.path.dirname(os.path.abspath(path))
+    base = os.path.basename(path)
+    if base.endswith(".jsonl"):
+        stem = base[: -len(".jsonl")]
+        if stem.startswith("results"):
+            suffix = stem[len("results") :]
+            expected = os.path.join(d, f"skipped{suffix}.log")
+            if os.path.isfile(expected):
+                return [expected]
+    return sorted(glob.glob(os.path.join(d, "skipped*.log")))
+
+
+def _skip_failures_for_paths(log_paths):
+    """`log_paths`（`_skip_log_paths_for_input` が返す skipped*.log 群）を
+    読み、`_parse_skip_failure` で構造化した失敗のリストを返す。
+    """
+    failures = []
+    for log_path in log_paths:
+        for line in open(log_path):
+            line = line.strip()
+            if line:
+                failures.append(_parse_skip_failure(line))
+    return failures
+
+
+def _inject_skip_failures_into_gate(gate_records, skip_failures, target):
+    """skip 由来の失敗を `gate_records` へ判定不能レコードとして注入する。
+
+    **呼び出し契約（codex P0・Bugbot High 指摘・PR #1082 4 巡目）**:
+    `gate_records`・`skip_failures` は必ず **単一の入力ファイル（＝単一
+    環境）に属するものだけ** を渡すこと。全入力ファイル横断で集約した
+    `gate_records_all` を渡すと、環境 A の JSONL に達成行がある
+    `(task, device, size)` の組について、環境 B（別ファイル・skipped*.log
+    にしか記録が残っていない）の同じ組の失敗が `existing_keys` に紛れて
+    注入されなくなる（`target_gate` 自身の「ファイルをまたいだ突合は
+    環境混同になるため行わない」契約への違反。呼び出し元 `main()` は
+    ファイルごとのループ内で `target_gate`/空ファイル用プレースホルダの
+    直後に本関数を呼び、その戻り値を `gate_records_all` へ追加する
+    設計にする。`_skip_log_paths_for_input`/`_skip_failures_for_paths`
+    も参照）。
+
+    `gate_records`（同一環境内で `target_gate` が生成した実データ由来の
+    レコード）に既に同じ `(task, device, size)` の組が存在する場合は
+    注入しない（実データ側で既に判定済み＝fail-open ではないため二重
+    計上しない）。存在しない組（＝該当デバイス・size が丸ごと失敗し
+    JSONL に一切残らなかった）のみを新規レコードとして追加する
+    （fail-closed）。
 
     `task`/`device` を特定できない行（ビルド失敗等）は、値を捏造せず
     device 単位より粗い「詳細不明」の判定不能レコード 1 件（重複行は
     まとめる）に倒す。
 
     戻り値: 注入したレコードのリスト（Markdown 節への表示用。空なら
-    `[]`）。`gate_records_all` は本関数の呼び出しにより直接変更される。
+    `[]`）。`gate_records` は本関数の呼び出しにより直接変更される
+    （呼び出し元が同じ list オブジェクトを `gate_records_all` へ
+    extend する運用を前提に、in-place 追加のみ行い新しい list は
+    作らない）。
     """
-    existing_keys = {(r["task"], r["device"], r["size"]) for r in gate_records_all}
+    existing_keys = {(r["task"], r["device"], r["size"]) for r in gate_records}
     injected = []
     seen_keys = set()
     seen_unparsed = set()
@@ -232,7 +301,7 @@ def _inject_skip_failures_into_gate(gate_records_all, skip_failures, target):
                 "reason": f"skipped*.log の詳細不明な失敗記録: {sf['raw']}",
                 "note": None,
             }
-            gate_records_all.append(record)
+            gate_records.append(record)
             injected.append(record)
             continue
         if sf["framework"] not in ("fandhe-ai", target):
@@ -255,7 +324,7 @@ def _inject_skip_failures_into_gate(gate_records_all, skip_failures, target):
             "reason": f"skipped*.log に実行時失敗（{sf['framework']}・{size_label}）",
             "note": None,
         }
-        gate_records_all.append(record)
+        gate_records.append(record)
         injected.append(record)
     return injected
 
@@ -1970,10 +2039,19 @@ def main():
                     "reason": "入力ファイルに有効な行が無い",
                     "note": None,
                 }
+                gate_records = [empty_record]
+                # codex P0・Bugbot High 指摘（PR #1082 4 巡目）: skip 由来の
+                # 失敗はこのファイル（環境）自身に対応する skipped*.log
+                # のみを対象にする（`_inject_skip_failures_into_gate`
+                # docstring「呼び出し契約」参照。全ファイル横断の
+                # `gate_records_all` へ直接注入すると環境が混同される）。
+                skip_paths = _skip_log_paths_for_input(path)
+                skip_failures = _skip_failures_for_paths(skip_paths)
+                _inject_skip_failures_into_gate(gate_records, skip_failures, args.target)
                 gate_section_lines_by_file.append(
-                    target_gate_section(rel, [empty_record], args.target)
+                    target_gate_section(rel, gate_records, args.target)
                 )
-                gate_records_all.append(empty_record)
+                gate_records_all.extend(gate_records)
             continue
         (
             section_lines,
@@ -1996,6 +2074,17 @@ def main():
         if args.target:
             rel = os.path.relpath(path, HERE)
             gate_records = target_gate(rows, args.target)
+            # codex P0・Bugbot High 指摘（PR #1082 4 巡目）: skip 由来の
+            # 失敗はこのファイル（環境）自身に対応する skipped*.log の
+            # みを対象にする（`_inject_skip_failures_into_gate` docstring
+            # 「呼び出し契約」参照）。以前は全ファイル横断で集約した
+            # `gate_records_all` を渡していたため、環境 A の JSONL に
+            # 達成行がある組について、環境 B（別ファイル）の同じ組の
+            # skipped*.log 失敗が `existing_keys` に紛れて注入されず
+            # 「全達成」に混入する fail-open があった。
+            skip_paths = _skip_log_paths_for_input(path)
+            skip_failures = _skip_failures_for_paths(skip_paths)
+            _inject_skip_failures_into_gate(gate_records, skip_failures, args.target)
             gate_section_lines_by_file.append(target_gate_section(rel, gate_records, args.target))
             gate_records_all.extend(gate_records)
 
@@ -2013,43 +2102,24 @@ def main():
     )
     lines.append("## 実行時失敗（skipped*.log）\n")
     any_skip = False
-    skip_failures = []
     for sl in skip_logs:
         for line in open(sl):
             line = line.strip()
             if line:
                 any_skip = True
                 lines.append(f"- **{os.path.basename(sl)}**: {line}")
-                # codex-review P0 指摘（PR #1082 3 巡目）: 表示用の生行に加え
-                # `--target` ゲートへ組み込むための構造化情報も収集する
-                # （`_inject_skip_failures_into_gate` 参照）。
-                skip_failures.append(_parse_skip_failure(line))
     if not any_skip:
         lines.append("- なし（skipped*.log は空または不在）")
     lines.append("")
+    # 目標達成ゲートへの skip 失敗の組み込みは、上のファイルごとのループ
+    # 内（`_skip_log_paths_for_input`/`_inject_skip_failures_into_gate`）
+    # で環境スコープを保ったまま既に完了している（codex P0・Bugbot High
+    # 指摘・PR #1082 4 巡目）。ここでの表示用ループはあくまで人間向けの
+    # 生ログ一覧であり、ゲート判定には使わない。
 
     gate_unmet = 0
     gate_undeterminable = 0
     if args.target:
-        # codex-review P0 指摘（PR #1082 3 巡目）: あるデバイスの全実行
-        # （または既知デバイス上の特定 size）が丸ごと失敗し
-        # skipped*.log にしか記録が残らなかった場合、`target_gate` は
-        # 成功して JSONL に残った fandhe-ai/target 行だけからデバイス・
-        # size 集合を導出するため、その組合せが判定対象に一切現れず
-        # 「全達成」に混入する fail-open があった。実データ由来の
-        # `gate_records_all` を先に確定させたうえで、skip 由来の失敗を
-        # 判定不能レコードとして注入する（既に実データ側で判定済みの
-        # 組は二重計上しない。`_inject_skip_failures_into_gate` docstring
-        # 参照）。
-        skip_gate_records = _inject_skip_failures_into_gate(
-            gate_records_all, skip_failures, args.target
-        )
-        if skip_gate_records:
-            gate_section_lines_by_file.append(
-                target_gate_section(
-                    "skipped*.log（実行時失敗由来）", skip_gate_records, args.target
-                )
-            )
         lines.append(
             f"## 目標達成ゲート（--target {args.target}。イシュー #1051）\n"
         )

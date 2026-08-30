@@ -1980,6 +1980,74 @@ class MainTargetExitCodeTests(unittest.TestCase):
             self.assertIn("詳細不明な失敗記録", out)
         finally:
             shutil.rmtree(tmpdir)
+
+    def test_skip_log_cross_environment_is_not_suppressed_by_other_file_achieving(self):
+        # codex P0・Bugbot High 指摘（PR #1082 4 巡目・同一原因）:
+        # `_inject_skip_failures_into_gate` の `existing_keys` を全入力
+        # ファイル横断の `gate_records_all` から作っていたため、環境 A の
+        # JSONL に `gemm/cpu/N=256` の達成行があると、環境 B（別ディレクトリ
+        # ・自身の JSONL には当該組が一切現れず、`skipped.log` にしか
+        # 記録が残っていない）の同じ組の失敗が `existing_keys` に紛れて
+        # 注入されなくなる（`target_gate` 自身の「ファイルをまたいだ突合は
+        # 環境混同になるため行わない」契約違反）。
+        #
+        # 環境 A: gemm/cpu/N=256・train/infer とも全達成（この
+        # `gemm/cpu/N=256` の達成行が旧実装での「毒」になる）。
+        # 環境 B: gemm/cpu/N=512・train/infer は全達成だが gemm/cpu/N=256
+        # の行自体は無く、`skipped.log` にのみ同じ組の失敗が記録されている
+        # （env A/B とも他の組が全て達成のため、この 1 件の判定不能以外に
+        # exit 3 を招く要因が無い状態にして原因を一意にする）。
+        env_a_dir = tempfile.mkdtemp()
+        env_b_dir = tempfile.mkdtemp()
+        try:
+            env_a_path = os.path.join(env_a_dir, "results.jsonl")
+            env_a_rows = [
+                _with_parity(_base_row(framework="fandhe-ai", size=256, checksum=1.0)),
+                _with_parity(_base_row(framework="candle", size=256, checksum=1.0)),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(env_a_path, "w") as f:
+                for r in env_a_rows:
+                    f.write(json.dumps(r) + "\n")
+
+            env_b_path = os.path.join(env_b_dir, "results.jsonl")
+            env_b_rows = [
+                _with_parity(_base_row(framework="fandhe-ai", size=512, checksum=2.0), total=512 * 512),
+                _with_parity(_base_row(framework="candle", size=512, checksum=2.0), total=512 * 512),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(env_b_path, "w") as f:
+                for r in env_b_rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(env_b_dir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=gemm device=cpu size=256 mode=fresh "
+                    "extra=none : segfault\n"
+                )
+
+            code, out, err = self._run_main([env_a_path, env_b_path], target="candle")
+            # 環境 A・B とも実データ側の (task, device, size) は全て達成
+            # であることを前提にしたテストのため、それ自体を先に検証する
+            # （このアサーションが崩れると原因が別要因〈parity 等〉に
+            # すり替わり、本テストの識別力が失われるため）。
+            self.assertIn("| gemm | CPU | 256 | 1.000 ms（fresh） | 1.000 ms（fresh） | 1.00 倍 | 達成", out)
+            self.assertIn("| gemm | CPU | 512 | 1.000 ms（fresh） | 1.000 ms（fresh） | 1.00 倍 | 達成", out)
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            # 環境 B（skipped.log 由来）の判定不能が実際に記録されている
+            # ことを確認する（環境 A の達成データに紛れて握りつぶされて
+            # いないこと）。
+            self.assertIn("skipped*.log に実行時失敗", out)
+        finally:
+            shutil.rmtree(env_a_dir)
+            shutil.rmtree(env_b_dir)
+
     def test_target_outside_allowlist_is_argparse_error(self):
         path = _write_jsonl([_infer_row(framework="fandhe-ai")])
         try:
