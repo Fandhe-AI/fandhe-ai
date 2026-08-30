@@ -43,7 +43,7 @@ gemm crate（faer 実体）は (mc,nc) タイル 2D 分配＋packing 共有の�
 
 | 候補 | 内容 | 実装 |
 |---|---|---|
-| `RowPanel` | 本番既定と同一（行パネル分割・`dispatch_region`／`dispatch_shared_b` 自動選択） | `gemm_blis_parallel_with_blocks` |
+| `RowPanel` | 本番既定と同一（行パネル分割・タスク数に関わらず常に `dispatch_region`。PR #1075 codex-review・Cursor Bugbot 指摘を受け `gemm_blis_parallel_with_blocks`〈実タスク数 2 以上で `dispatch_shared_b` へ分岐し本番と乖離〉から切替） | `gemm_blis_parallel_row_panel_with_blocks` |
 | `SharedB` | B パネル共有・A は (jc,pc) ごとに再 pack（#750） | `dispatch_shared_b`（強制） |
 | `SharedBPcOuter` | B パネル共有・A はタスクごとに pc ブロックあたり 1 回だけ pack（pc→jc の順に入替） | `dispatch_shared_b_pc_outer`（新規・イシュー #1041） |
 

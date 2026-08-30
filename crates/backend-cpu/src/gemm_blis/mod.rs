@@ -1381,6 +1381,50 @@ pub(crate) fn gemm_blis_parallel_with_blocks(
     dispatch_shared_b(a, b, c, n, k, 0..m, blocks)
 }
 
+/// A/B 計測（`GemmDriverVariant::RowPanel`。イシュー #1041）専用: 本番
+/// 公開入口 [`gemm_blis_parallel`] とロジックを完全一致させつつ `blocks`
+/// のみ注入できるようにした入口。
+///
+/// [`gemm_blis_parallel_with_blocks`]（テスト専用の共有 B 経路カバレッジ
+/// 維持関数）は実タスク数 2 以上で常に [`dispatch_shared_b`] へ分岐する
+/// ため、`RowPanel`（本番既定と同一であることが前提の A/B 計測基準線）
+/// がそちらを誤って計測してしまう指摘（PR #1075 codex-review・Cursor
+/// Bugbot。ともに同一箇所を独立検出）を受けて追加した。[`gemm_blis_parallel`]
+/// 本体（タスク数に関わらず常に [`dispatch_region`] を行パネルごとに
+/// 独立呼び出し）と分岐を完全一致させ、`blocks` の注入だけを追加する。
+#[cfg(test)]
+pub(crate) fn gemm_blis_parallel_row_panel_with_blocks(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    validate_block_sizes(blocks)?;
+
+    // n == 0／m == 1 の no-op・専用経路対処は呼び出し元
+    // `gemm_blis_parallel_variant` が既に行っている（本関数は
+    // `RowPanel` 用の内部ディスパッチのみを担う）ため、ここでは
+    // `gemm_blis_parallel` 本体の rayon 行パネル分割のみを再現する。
+    if n == 0 {
+        return Ok(());
+    }
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let panel_rows = m.div_ceil(num_threads).max(1);
+
+    c.par_chunks_mut(panel_rows * n)
+        .enumerate()
+        .try_for_each(|(panel_idx, c_chunk)| {
+            let row_start = panel_idx * panel_rows;
+            let row_end = (row_start + c_chunk.len() / n).min(m);
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+        })
+}
+
 /// #753: MC タイル境界に整列した行範囲分配（[`partition::row_ranges_for_workers`]）
 /// を使う `gemm_blis_parallel` の 2 次元タイルジョブ分配版。
 ///
@@ -1778,9 +1822,11 @@ fn dispatch_shared_b_pc_outer(
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GemmDriverVariant {
-    /// 本番公開入口（[`gemm_blis_parallel`]）と同じ行パネル分割
-    /// （`dispatch_region`／`dispatch_shared_b` の自動選択。
-    /// [`gemm_blis_parallel_with_blocks`] をそのまま使う）。
+    /// 本番公開入口（[`gemm_blis_parallel`]）と分岐を完全一致させた
+    /// 行パネル分割（タスク数に関わらず常に `dispatch_region`。
+    /// [`gemm_blis_parallel_with_blocks`] は実タスク数 2 以上で
+    /// `dispatch_shared_b` へ分岐するため使わない。
+    /// [`gemm_blis_parallel_row_panel_with_blocks`] 参照）。
     RowPanel,
     /// B パネル共有・A は (jc,pc) ごとに再 pack（#750。[`dispatch_shared_b`]
     /// を実タスク数に関わらず強制する版）。
@@ -1820,7 +1866,9 @@ pub(crate) fn gemm_blis_parallel_variant(
     }
 
     match variant {
-        GemmDriverVariant::RowPanel => gemm_blis_parallel_with_blocks(a, b, c, m, n, k, blocks),
+        GemmDriverVariant::RowPanel => {
+            gemm_blis_parallel_row_panel_with_blocks(a, b, c, m, n, k, blocks)
+        }
         GemmDriverVariant::SharedB => dispatch_shared_b(a, b, c, n, k, 0..m, blocks),
         GemmDriverVariant::SharedBPcOuter => {
             dispatch_shared_b_pc_outer(a, b, c, n, k, 0..m, blocks)
