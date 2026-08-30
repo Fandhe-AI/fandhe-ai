@@ -318,7 +318,20 @@ fn gemm_simdgroup_tiled_variants_share_boundary_check_helpers() {
 /// `gemm_simdgroup_tiled_variants_share_boundary_check_helpers` はヘルパの
 /// **呼び出し**（シグネチャ・定義行の存在）のみを検査しており、ヘルパ
 /// **本体**の境界条件式（例: `kk + 8 <= bk_eff`／`global_k + 8 <= dims.k`
-/// 相当）が空実装・`return true;` 等へ後退しても検出できない。本テストは
+/// 相当）が空実装・`return true;` 等へ後退しても検出できない。
+///
+/// さらに PR #1074 レビュー（codex-review P2）指摘: 当初の実装は各条件式を
+/// `body.contains(condition)` で個別に部分一致検査していたため、条件式
+/// 同士を結ぶ論理演算子（`&&` → `||` 等）が弱体化されても検出できなかった
+/// （例: `tiled_a_group_in_bounds` が `return cond1 || cond2 || cond3;` へ
+/// 書き換えられても、3 つの `contains` はいずれも真のまま通ってしまう）。
+/// 本テストは空白を正規化した **完全な `return` 式**を期待値と厳密一致
+/// 検査することで、条件式の脱落だけでなく結合演算子の弱体化・条件の
+/// 順序入れ替えも検出する。加えて、A/B group・elem 系ヘルパ（4 個）は
+/// `&&` のみで結合され `||` を含まないこと、block ヘルパ（1 個）は逆に
+/// `||` のみで結合され `&&` を含まないことを個別に固定し、`contains`
+/// 方式では見逃す論理演算子の入れ替えを構文レベルで遮断する。
+///
 /// 5 個のヘルパそれぞれの定義本体（シグネチャ直後の `{` から対応する `}`
 /// まで。ネストした波括弧を持たない単純な `return ...;` 一文のみのため、
 /// 最初に現れる `}` を対応する閉じ括弧として素朴に切り出せる）を個別に
@@ -345,47 +358,70 @@ fn gemm_metal_boundary_helpers_retain_req8_condition_expressions() {
         after_sig[open..=open + close].to_string()
     }
 
-    for (signature, required_conditions) in [
+    /// 本体中の連続空白（改行・インデント含む）を単一の半角スペースへ
+    /// 正規化する。ソース側のフォーマット（改行位置・インデント幅）が
+    /// 変わっても意味的に同一な `return` 式を同一文字列として比較できる
+    /// ようにするため。
+    fn normalize_whitespace(body: &str) -> String {
+        body.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    // (シグネチャ, 完全な return 式（正規化後の期待値）, 結合演算子)
+    for (signature, expected_return, connective) in [
         (
             "inline bool tiled_block_out_of_range(",
-            vec!["row0 >= dims.m", "col0 >= dims.n"],
+            "return row0 >= dims.m || col0 >= dims.n;",
+            "||",
         ),
         (
             "inline bool tiled_a_group_in_bounds(",
-            vec![
-                "kk + vec_w <= bk_eff",
-                "global_row < dims.m",
-                "global_k + vec_w <= dims.k",
-            ],
+            "return (kk + vec_w <= bk_eff) && (global_row < dims.m) && (global_k + vec_w <= dims.k);",
+            "&&",
         ),
         (
             "inline bool tiled_b_group_in_bounds(",
-            vec![
-                "kk < bk_eff",
-                "global_k < dims.k",
-                "global_col + vec_w <= dims.n",
-            ],
+            "return (kk < bk_eff) && (global_k < dims.k) && (global_col + vec_w <= dims.n);",
+            "&&",
         ),
         (
             "inline bool tiled_a_elem_in_bounds(",
-            vec![
-                "kk_e < bk_eff",
-                "global_row < dims.m",
-                "global_k_e < dims.k",
-            ],
+            "return kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k;",
+            "&&",
         ),
         (
             "inline bool tiled_b_elem_in_bounds(",
-            vec!["kk < bk_eff", "global_k < dims.k", "global_col_e < dims.n"],
+            "return kk < bk_eff && global_k < dims.k && global_col_e < dims.n;",
+            "&&",
         ),
     ] {
-        let body = extract_helper_body(GEMM_METAL_SOURCE, signature);
-        for condition in required_conditions {
-            assert!(
-                body.contains(condition),
-                "ヘルパ `{signature}` の本体に REQ-8 境界条件式 `{condition}` が見つかりません（本体: `{body}`）"
-            );
-        }
+        let raw_body = extract_helper_body(GEMM_METAL_SOURCE, signature);
+        let body = normalize_whitespace(&raw_body);
+
+        // 空白正規化した本体全体が期待する `return` 式を含むことを厳密
+        // 一致で検査する（部分式ごとの `contains` では検出できない結合
+        // 演算子の弱体化・条件の脱落・順序入れ替えをまとめて検出する）。
+        assert!(
+            body.contains(expected_return),
+            "ヘルパ `{signature}` の本体が期待する REQ-8 境界条件式 `{expected_return}` と一致しません（正規化後の本体: `{body}`）"
+        );
+
+        // 結合演算子そのものの入れ替え（`&&` → `||` 等）を構文レベルで
+        // 固定する。上の完全一致検査だけでも検出できるが、意図（A/B
+        // group・elem ヘルパは AND 結合、block ヘルパは OR 結合）を
+        // 明示的に読み取れるよう独立した検査としても残す。
+        let (required, forbidden) = if connective == "&&" {
+            ("&&", "||")
+        } else {
+            ("||", "&&")
+        };
+        assert!(
+            body.contains(required),
+            "ヘルパ `{signature}` の本体に結合演算子 `{required}` が見つかりません（本体: `{body}`）"
+        );
+        assert!(
+            !body.contains(forbidden),
+            "ヘルパ `{signature}` の本体に本来含まれないはずの結合演算子 `{forbidden}` が含まれています（結合演算子の弱体化の疑い。本体: `{body}`）"
+        );
     }
 }
 
