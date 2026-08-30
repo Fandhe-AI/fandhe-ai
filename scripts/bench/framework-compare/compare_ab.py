@@ -87,6 +87,23 @@ def _safe_finite(v):
         return None
 
 
+def _protocol_int(rows, key):
+    """`rows` 全件が同一の正整数値を持つ計測プロトコル値（`warmup`／
+    `iters`）を検証する（Review 指摘・#1083: プロトコル値の schema 検証が
+    無く異なる計測プロトコル混在でも比較が成立してしまう fail-open を塞ぐ）。
+
+    戻り値は `(value, error)` のタプル。妥当なら `(int値, None)`、不正なら
+    `(None, エラー理由の文字列)`。
+    """
+    values = {r.get(key) for r in rows}
+    if len(values) != 1:
+        return None, "単一値でない（混在入力）"
+    v = next(iter(values))
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+        return None, f"正整数でない（{v!r}）"
+    return v, None
+
+
 def checksums_match(a, b):
     """本体の数値一致契約と同一の複合判定（相対誤差 1e-3 未満 または 絶対誤差
     1e-5 未満）。summarize.py `checksums_match` と同一アルゴリズム（対称な
@@ -103,6 +120,11 @@ def load_rows(path):
     """JSONL を読み、不正な行（JSON として parse 不能）は理由付きで報告し
     スキップする（A08: 捏造しない。呼び出し元は戻り値の 2 要素目〈警告文の
     リスト〉を表示・記録する）。
+
+    呼び出し元（`main`）は戻り値の warnings が非空の場合、残った正常行の
+    件数に関わらず入力全体を判定不能（fail-closed・非 0 終了）として扱う
+    契約とする（Review 指摘・#1083: 破損・切り詰められた外部 JSONL でも
+    各 mode 5 件以上の正常行が残れば成功扱いになる fail-open を塞ぐ）。
     """
     rows = []
     warnings = []
@@ -196,11 +218,60 @@ def compare_mode(before_rows, after_rows, mode):
         return result
     before_version = next(iter(before_versions))
     after_version = next(iter(after_versions))
+    if not isinstance(before_version, str) or not before_version:
+        result["status"] = "undeterminable"
+        result["reason"] = f"before の framework_version が非空文字列でない（{before_version!r}）"
+        return result
+    if not isinstance(after_version, str) or not after_version:
+        result["status"] = "undeterminable"
+        result["reason"] = f"after の framework_version が非空文字列でない（{after_version!r}）"
+        return result
     if before_version == after_version:
         result["status"] = "undeterminable"
         result["reason"] = (
             f"before/after の framework_version が同一（{before_version!r}）"
             "— A/B 比較になっていない"
+        )
+        return result
+
+    # 計測プロトコル値（warmup／iters）の schema 検証・before/after 一致検証
+    # （Review 指摘・#1083）: 異なる計測プロトコル〈例: warmup/iters が違う〉
+    # の記録同士を比較すると、性能差が実装変更由来なのか計測条件差由来なのか
+    # 判別できなくなる。各値が before/after それぞれで単一の正整数であり、
+    # かつ before/after 間で一致することを要求する。
+    before_warmup, before_warmup_err = _protocol_int(before, "warmup")
+    if before_warmup is None:
+        result["status"] = "undeterminable"
+        result["reason"] = f"before の warmup が{before_warmup_err}"
+        return result
+    after_warmup, after_warmup_err = _protocol_int(after, "warmup")
+    if after_warmup is None:
+        result["status"] = "undeterminable"
+        result["reason"] = f"after の warmup が{after_warmup_err}"
+        return result
+    if before_warmup != after_warmup:
+        result["status"] = "undeterminable"
+        result["reason"] = (
+            f"before/after の warmup が異なる（{before_warmup} != {after_warmup}）"
+            "— 計測プロトコルが揃っていない"
+        )
+        return result
+
+    before_iters, before_iters_err = _protocol_int(before, "iters")
+    if before_iters is None:
+        result["status"] = "undeterminable"
+        result["reason"] = f"before の iters が{before_iters_err}"
+        return result
+    after_iters, after_iters_err = _protocol_int(after, "iters")
+    if after_iters is None:
+        result["status"] = "undeterminable"
+        result["reason"] = f"after の iters が{after_iters_err}"
+        return result
+    if before_iters != after_iters:
+        result["status"] = "undeterminable"
+        result["reason"] = (
+            f"before/after の iters が異なる（{before_iters} != {after_iters}）"
+            "— 計測プロトコルが揃っていない"
         )
         return result
 
@@ -381,6 +452,12 @@ def main(argv=None):
     for w in before_warnings + after_warnings:
         print(f"warning: {w}", file=sys.stderr)
 
+    # fail-closed（A08・Review 指摘・#1083）: 入力 JSONL に JSON parse 不能な
+    # 行が 1 行でもあれば、残った正常行だけで各 mode 5 件以上を満たしていて
+    # も「破損・切り詰められた外部入力を正常計測として確定表示する」ことを
+    # 許さない。入力全体を判定不能扱いとし非 0 終了させる。
+    has_invalid_lines = bool(before_warnings or after_warnings)
+
     results = [compare_mode(before_rows, after_rows, mode) for mode in MODES]
     phase_results_by_mode = {
         mode: compare_phases(before_rows, after_rows, mode) for mode in MODES
@@ -395,7 +472,14 @@ def main(argv=None):
     else:
         print(text, end="")
 
-    if any_undeterminable:
+    if has_invalid_lines:
+        print(
+            "undeterminable: 入力 JSONL に不正な行（JSON parse 不能）が"
+            "含まれるため、正常行の件数に関わらず判定不能として扱う"
+            "（fail-closed）",
+            file=sys.stderr,
+        )
+    if any_undeterminable or has_invalid_lines:
         for r in results:
             if r["status"] != "ok":
                 print(f"undeterminable: mode={r['mode']}（{r['reason']}）", file=sys.stderr)

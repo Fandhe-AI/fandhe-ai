@@ -218,6 +218,85 @@ class CompareModeTests(unittest.TestCase):
         self.assertLess(result["before_median_s"], 1.0)
 
 
+    def test_undeterminable_when_warmup_differs(self):
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        for r in recs:
+            r["warmup"] = 20
+        _write_jsonl(before_path, recs)
+        after_recs = [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)]
+        for r in after_recs:
+            r["warmup"] = 5
+        _write_jsonl(after_path, after_recs)
+        before_rows, _ = compare_ab.load_rows(before_path)
+        after_rows, _ = compare_ab.load_rows(after_path)
+        result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("warmup", result["reason"])
+
+    def test_undeterminable_when_iters_differs(self):
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        for r in recs:
+            r["iters"] = 80
+        _write_jsonl(before_path, recs)
+        after_recs = [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)]
+        for r in after_recs:
+            r["iters"] = 10
+        _write_jsonl(after_path, after_recs)
+        before_rows, _ = compare_ab.load_rows(before_path)
+        after_rows, _ = compare_ab.load_rows(after_path)
+        result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("iters", result["reason"])
+
+    def test_undeterminable_when_warmup_not_a_single_positive_int(self):
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        recs[0]["warmup"] = 0
+        _write_jsonl(before_path, recs)
+        _write_jsonl(
+            after_path,
+            [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)],
+        )
+        before_rows, _ = compare_ab.load_rows(before_path)
+        after_rows, _ = compare_ab.load_rows(after_path)
+        result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("warmup", result["reason"])
+
+    def test_undeterminable_when_version_is_empty_string(self):
+        before_path, after_path = self._paths()
+        recs = [_rec("", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        _write_jsonl(before_path, recs)
+        _write_jsonl(
+            after_path,
+            [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)],
+        )
+        before_rows, _ = compare_ab.load_rows(before_path)
+        after_rows, _ = compare_ab.load_rows(after_path)
+        result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("framework_version", result["reason"])
+        self.assertIn("非空文字列", result["reason"])
+
+    def test_undeterminable_when_version_is_none(self):
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        for r in recs:
+            r["version"] = None
+        _write_jsonl(before_path, recs)
+        _write_jsonl(
+            after_path,
+            [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)],
+        )
+        before_rows, _ = compare_ab.load_rows(before_path)
+        after_rows, _ = compare_ab.load_rows(after_path)
+        result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("framework_version", result["reason"])
+
+
 class MainCliTests(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -259,6 +338,36 @@ class MainCliTests(unittest.TestCase):
             rc = compare_ab.main([before_path, after_path])
         self.assertEqual(rc, 2)
         self.assertIn("undeterminable: mode=reuse", buf.getvalue())
+
+    def test_main_returns_nonzero_when_input_has_invalid_line_even_with_enough_valid_rows(
+        self,
+    ):
+        """Review 指摘（#1083）: 破損・切り詰められた外部 JSONL でも、各
+        mode 5 件以上の正常行が残っていれば `main` が exit 0・性能値を返す
+        fail-open の回帰防止。不正行が 1 行でもあれば、正常行が十分でも
+        判定不能として非 0 終了する。
+        """
+        before_path = os.path.join(self.tmpdir.name, "before.jsonl")
+        after_path = os.path.join(self.tmpdir.name, "after.jsonl")
+        lines = [
+            json.dumps(_rec("0.4.0", 0.012 + i * 0.0001, "fresh")) for i in range(5)
+        ]
+        lines += [
+            json.dumps(_rec("0.4.0", 0.010 + i * 0.0001, "reuse")) for i in range(5)
+        ]
+        # 末尾を切り詰めたような不正行を 1 行混入させる。
+        lines.append('{"framework": "fandhe-ai", "task": "train"')
+        _write_jsonl(before_path, lines)
+        _write_jsonl(
+            after_path,
+            [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)]
+            + [_rec("0.5.0", 0.006 + i * 0.0001, "reuse") for i in range(5)],
+        )
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = compare_ab.main([before_path, after_path])
+        self.assertEqual(rc, 2)
+        self.assertIn("不正な行", buf.getvalue())
 
 
 if __name__ == "__main__":
