@@ -149,3 +149,6 @@ M=N=K=2048: gemm_blis_parallel median=0.040295s（対 gemm_parallel 1.801x）
 - 実装: `crates/backend-cpu/src/gemm_blis/mod.rs`（`gemm_blis_shared_b_region`／
   `gemm_blis_ic_loop`／`IcLoopContext`／`dispatch_shared_b`。いずれも `#[cfg(test)]` 限定で
   本番未結線）
+- 後続（イシュー #1041）: A packing の重複解消候補 `gemm_blis_shared_b_pc_outer_region`
+  （`GemmDriverVariant::SharedBPcOuter`）を A/B 一括計測ハーネスへ統合済み。詳細は
+  `docs/perf/cpu-gemm-candle-cpu-retune.md` を参照
