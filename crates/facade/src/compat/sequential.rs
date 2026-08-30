@@ -156,32 +156,35 @@ impl Sequential {
         // `Linear` → `Add`（bias）→ `Relu` が別ノード・別カーネル起動に
         // なる（`Module::forward` は多態 dispatch のため層間の関係を
         // 知らない）。ここでインデックス走査へ変え、`Linear` 層に出会う
-        // たび「次層が `ReLU` か」（`Module::as_relu`）を先読みして
-        // `LinearVars::forward_with_activation` へ結線し、`ReLU` 層自体を
-        // スキップする（`ReLU` が続かない末尾 `Linear` 等は bias のみ
-        // 融合の `Activation::None`）。それ以外の層（`Sigmoid`／`Tanh`
+        // たび「次層が `ReLU` か」（`Module::as_relu`）を先読みし、
+        // **`ReLU` が実際に続く場合のみ** `LinearVars::
+        // forward_with_activation(.., Activation::Relu)` へ結線して
+        // `ReLU` 層自体のノード追加をスキップする。`ReLU` が続かない
+        // 単体 `Linear`・`Linear` → `Sigmoid`／`Tanh` は、`docs/
+        // inference-forward-fixed-cost-design.md` §3.1 が `forward_host`
+        // について明記する bit-exactness 契約（「融合 epilogue は
+        // カーネル内 tiling 次第で加算順序が変わりうるため旧経路と
+        // 同じ演算列を使う」）を学習 forward 側でも壊さないよう、従来
+        // どおり `LinearVars::forward`（`matmul` → `add`。非融合）へ
+        // 委譲する（レビュー指摘 #1079・PRRT_kwDOTuUCJc6dgIt-。融合対象を
+        // `Linear` → `ReLU` に限定）。それ以外の層（`Sigmoid`／`Tanh`
         // 等。`BackendOps::gemm_bias_act` の `Activation` に対応する
         // variant を持たない）は従来どおり `Module::forward` へ委譲する。
         let mut i = 0;
         while i < self.layers.len() {
             let layer = &self.layers[i];
             if let Some(linear) = layer.as_linear() {
-                let act = if self.layers.get(i + 1).is_some_and(|next| next.as_relu()) {
-                    Activation::Relu
-                } else {
-                    Activation::None
-                };
+                let fuse_relu = self.layers.get(i + 1).is_some_and(|next| next.as_relu());
                 // `nn::Module::forward` と同じく `tape.0`（`pub(crate)`
                 // フィールド）経由で内部の生 `Tape` を取り出す（本ファイル
                 // 冒頭 doc「公開シグネチャの型」参照）。
-                current = linear
-                    .bind(&tape.0)
-                    .forward_with_activation(&current, act)?;
-                i += if matches!(act, Activation::Relu) {
-                    2
+                let bound = linear.bind(&tape.0);
+                current = if fuse_relu {
+                    bound.forward_with_activation(&current, Activation::Relu)?
                 } else {
-                    1
+                    bound.forward(&current)?
                 };
+                i += if fuse_relu { 2 } else { 1 };
             } else {
                 current = layer.forward(&tape.0, &current)?;
                 i += 1;
@@ -636,7 +639,12 @@ impl<'m, 't> SequentialVars<'m, 't> {
         // に任せる（`Linear` 層に出会うたびに 1 件ずつ。ReLU をスキップ
         // しても `linears` 自体には ReLU 分の要素がないため対応関係は
         // 崩れない）。インデックス走査へ変えたのは `self.model.layers`
-        // 側で「次層」を覗く必要があるため。
+        // 側で「次層」を覗く必要があるため。**`ReLU` が実際に続く場合
+        // のみ**融合する（レビュー指摘 #1079・PRRT_kwDOTuUCJc6dgIt-。
+        // `Sequential::forward` と同じ理由で `Linear` 単体・`Linear` →
+        // `Sigmoid`／`Tanh` は `LinearVars::forward`〈非融合〉のまま。
+        // `docs/inference-forward-fixed-cost-design.md` §3.1 の
+        // bit-exactness 契約を学習側でも壊さない）。
         let mut linears = self.linears.iter();
         let layers = &self.model.layers;
         let mut i = 0;
@@ -650,17 +658,13 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                let act = if layers.get(i + 1).is_some_and(|next| next.as_relu()) {
-                    Activation::Relu
+                let fuse_relu = layers.get(i + 1).is_some_and(|next| next.as_relu());
+                current = if fuse_relu {
+                    vars.forward_with_activation(&current, Activation::Relu)?
                 } else {
-                    Activation::None
+                    vars.forward(&current)?
                 };
-                current = vars.forward_with_activation(&current, act)?;
-                i += if matches!(act, Activation::Relu) {
-                    2
-                } else {
-                    1
-                };
+                i += if fuse_relu { 2 } else { 1 };
             } else {
                 // 活性化層は `nn::Module::forward` へ委譲する（`&fandhe_ai_autodiff::Tape`
                 // が必要。`Sequential::forward` と同じ理由で `tape.0` 経由）。
@@ -1383,10 +1387,14 @@ mod tests {
 
     #[test]
     fn sequential_forward_fuses_linear_relu_into_single_gemm_bias_act_launch() {
-        // 受け入れ条件 1（イシュー #1044）: Linear -> ReLU -> Linear の
-        // 層あたりカーネル起動数が 1（`gemm_bias_act`）になり、非融合
-        // 合成（`gemm`／`add`）や別ノードの `relu` が発生しないことを
-        // 機械検証する。
+        // 受け入れ条件 1（イシュー #1044。レビュー指摘 #1079・
+        // PRRT_kwDOTuUCJc6dgIt- で融合対象を `Linear` → `ReLU` に限定する
+        // よう修正）: `Linear` → `ReLU` の層あたりカーネル起動数が 1
+        // （`gemm_bias_act`）になり、別ノードの `relu` が発生しないことを
+        // 機械検証する。`ReLU` が続かない 2 個目の `Linear` は
+        // bit-exactness 契約（`docs/inference-forward-fixed-cost-design.md`
+        // §3.1）を守るため従来どおり非融合合成（`gemm` → `add`）のまま
+        // であることも合わせて検証する。
         let model = Sequential::new()
             .add_linear(4, 8, SEED1)
             .unwrap()
@@ -1409,19 +1417,21 @@ mod tests {
 
         assert_eq!(
             Counters::get(&counters.gemm_bias_act),
-            2,
-            "Linear 層 2 個（1 個目は ReLU 融合、2 個目は bias のみ融合）でそれぞれ \
-             gemm_bias_act が 1 回ずつ呼ばれるはず"
+            1,
+            "Linear -> ReLU に融合された 1 個目の Linear のみ gemm_bias_act が \
+             1 回呼ばれるはず"
         );
         assert_eq!(
             Counters::get(&counters.gemm),
-            0,
-            "非融合 gemm 合成は発生しないはず"
+            1,
+            "ReLU が続かない 2 個目の Linear は非融合合成（gemm）のままのはず"
         );
         assert_eq!(
             Counters::get(&counters.add),
             0,
-            "非融合 add 合成は発生しないはず"
+            "2 個目の Linear の bias 加算（Var::add）は遅延ノードのまま実体化されない \
+             （本テストは to_tensor() 等で結果を実体化しないため Op::Add は記録されるのみで \
+             BackendOps::add は呼ばれない。Var::add の遅延契約は var.rs 参照）"
         );
         assert_eq!(
             Counters::get(&counters.relu),

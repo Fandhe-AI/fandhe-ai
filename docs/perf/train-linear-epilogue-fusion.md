@@ -19,7 +19,7 @@ forward_with_activation` へ結線した。
 
 | 経路 | before（層 1 個あたり） | after |
 |------|------------------------|-------|
-| host 常駐 forward（`Sequential::forward`／`SequentialVars::forward`） | `matmul`（`Op::MatMul`）→ `add`（`Op::Add`。bias broadcast leaf `[n]` は `run_fused` 対象外のため per-op フォールバック）→ `relu`（`Op::Relu`）の **3 起動** | `gemm_bias_act`（`Op::LinearAct`）の **1 起動**（ReLU が続かない末尾 `Linear` は bias のみ融合の 1 起動） |
+| host 常駐 forward（`Sequential::forward`／`SequentialVars::forward`） | `matmul`（`Op::MatMul`）→ `add`（`Op::Add`。bias broadcast leaf `[n]` は `run_fused` 対象外のため per-op フォールバック）→ `relu`（`Op::Relu`）の **3 起動** | `Linear` → `ReLU` に融合される層は `gemm_bias_act`（`Op::LinearAct`）の **1 起動**。`ReLU` が続かない `Linear`（末尾 `Linear` や `Linear` → `Sigmoid`／`Tanh`）は bit-exactness 契約（`docs/inference-forward-fixed-cost-design.md` §3.1）を保つため融合せず従来どおり `matmul` → `add` のまま（レビュー指摘 #1079・PRRT_kwDOTuUCJc6dgIt- で融合対象を `Linear` → `ReLU` に限定） |
 | デバイス常駐 forward（`forward_resident`／`DeviceParamStore::linear_forward_with_activation`） | `gemm_resident_rhs`（`Op::LinearResident`。bias 融合済み）→ `relu` の **2 起動** | `gemm_resident_rhs_act` の **1 起動**（CPU のみ。CUDA／Metal は §4 参照） |
 
 機械検証（`BackendOps` 呼び出し回数の直接カウント）:
@@ -27,8 +27,11 @@ forward_with_activation` へ結線した。
 - `crates/facade/src/compat/sequential.rs::tests::
   sequential_forward_fuses_linear_relu_into_single_gemm_bias_act_launch`
   — `Sequential::new().add_linear(4, 8, _).add_relu().add_linear(8, 2, _)`
-  の `bind().forward()` で `gemm_bias_act == 2`・`gemm == 0`・
-  `add == 0`・`relu == 0`・`run_fused == 0`。
+  の `bind().forward()` で `gemm_bias_act == 1`（`Linear` → `ReLU` に
+  融合された 1 個目のみ）・`gemm == 1`（ReLU が続かない 2 個目の
+  `Linear`）・`add == 0`（同 `Linear` の bias 加算は `Var::add` の
+  遅延契約により本テストでは実体化されない）・`relu == 0`・
+  `run_fused == 0`。
 
 勾配の bit 一致検証:
 

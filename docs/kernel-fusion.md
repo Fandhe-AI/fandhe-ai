@@ -191,9 +191,28 @@ sequential::Sequential::forward`／`SequentialVars::forward`）からは
   Module::as_relu()`（新設フック。既定 `false`・`Relu` のみ `true`。
   `as_linear` と同じ明示列挙方式）を使い、`Sequential::forward`・
   `SequentialVars::forward`・`forward_from_flat_leaves`（resident 版）
-  が `Linear` 層に出会うたびに「次層が `ReLU` か」を先読みして
-  `Activation::Relu`（先読みが真）／`Activation::None`（それ以外。
-  bias のみ融合）を選び、`ReLU` 層自体のノード追加をスキップする。
+  が `Linear` 層に出会うたびに「次層が `ReLU` か」を先読みする。
+  **融合対象は `Linear` → `ReLU` の組に限定する**（レビュー指摘
+  #1079・PRRT_kwDOTuUCJc6dgIt-。策定当初は「次層が `ReLU` でなくても
+  `Activation::None` で bias のみ融合する」設計だったが、CPU の
+  `gemm_bias_act`／`gemm_resident_rhs_act` は `bias.shape() == [n]`
+  （通常経路）で融合カーネル `gemm_blis_bias_act_parallel` を直接呼ぶ
+  ため、`docs/inference-forward-fixed-cost-design.md` §3.1 が
+  `forward_host` について明記する bit-exactness 契約（「融合 epilogue
+  はカーネル内 tiling 次第で加算順序が変わりうるため旧経路〈`gemm` →
+  `add`〉と同じ演算列を使う」）を学習 forward 側で無条件に破ることに
+  なっていた）。`ReLU` が続く場合のみ `Activation::Relu` を渡して
+  `ReLU` 層自体のノード追加をスキップし、`ReLU` が続かない単体
+  `Linear`・`Linear` → `Sigmoid`／`Tanh` は従来どおり非融合合成
+  （`LinearVars::forward`。`matmul` → `add`）へ委譲する。ただし
+  `forward_from_flat_leaves`（resident 版）が呼ぶ
+  `DeviceParamStore::linear_forward_with_activation` は `Activation::
+  None` でも `gemm_resident_rhs_act` → 内部で `gemm_resident_rhs` を
+  呼ぶだけの非破壊拡張（CPU は `gemm_resident_rhs_impl` を同一引数で
+  共有、`tensor-core` デフォルトも `gemm_resident_rhs` を呼んだ後
+  `act == None` ならそのまま返す）であり `DeviceParamStore::
+  linear_forward`（非 act 版）と数値的に同一のため、この経路は
+  `Activation::None` のままでよい（数値経路の分岐は不要）。
   `Sigmoid`／`Tanh` は `Activation` に対応する variant を持たないため
   従来どおり別ノード（融合対象外）。
 - **効果（層あたりカーネル起動数。CPU・host 常駐 forward）**:

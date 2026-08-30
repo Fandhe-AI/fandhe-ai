@@ -171,7 +171,8 @@ impl<'t> LinearVars<'t> {
     /// [`Self::forward`] の epilogue 融合版（イシュー #1044・`docs/
     /// kernel-fusion.md` §2.2「学習経路への結線」）。`y = act(input.matmul(
     /// weight) (+ bias))` を `Var::linear_act`（`var.rs`）経由で 1 ノード
-    /// （[`crate::tape::Op::LinearAct`]）として記録し、`BackendOps::
+    /// （`crate::tape::Op::LinearAct`。非公開のためコードスパン表記で
+    /// 参照しリンク化しない）として記録し、`BackendOps::
     /// gemm_bias_act`（epilogue 融合カーネル。CPU／CUDA／Metal とも
     /// オーバーライド済み）へ直接委ねる。
     ///
