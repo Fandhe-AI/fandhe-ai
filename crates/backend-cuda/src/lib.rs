@@ -337,7 +337,7 @@ mod transpose;
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use elementwise::CudaElementwise;
 pub use error::CudaError;
-pub use gemm::CudaGemm;
+pub use gemm::{CudaGemm, TiledPipelineFunction};
 pub use gemm_auto::{
     CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
     TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,

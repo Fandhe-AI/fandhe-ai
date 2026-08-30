@@ -276,7 +276,7 @@ pub struct CudaGemm {
     /// （既定本番経路）を置き換えず、[`CudaGemm::run_tiled_pipeline_f32`]
     /// で明示的に呼べる選択可能な変種として追加するに留める
     /// （`kernels_tiled_pipeline.rs` 冒頭コメント「位置づけ・非結線」）。
-    tiled_pipeline: Option<CudaFunction>,
+    tiled_pipeline: Option<TiledPipelineFunction>,
     /// `tiled_pipeline` が `None` の場合の失敗理由。`wmma_tf32_error` と
     /// 同じ理由で文字列化して保持する。
     tiled_pipeline_error: Option<String>,
@@ -580,19 +580,51 @@ fn tiled_pipeline_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
     )
 }
 
+/// tiled pipeline カーネルのコンパイル済みハンドル（イシュー #1033・
+/// codex-review P0〈PR #1071〉対応）。
+///
+/// [`CudaGemm::launch_tiled_pipeline_f32`] は safe 公開 API でありながら
+/// `unsafe { launch(..) }` を行うため、渡された関数ハンドルが
+/// `gemm_tiled_pipeline_f32`（`TP_BM`/`TP_BN`/`TP_BK` 固定・
+/// `tiled_pipeline_launch_config` が仮定する grid/block 構成・
+/// カーネル引数シグネチャ）と一致することを型で保証する必要がある。
+/// 生の [`CudaFunction`] を直接引数に取ると、呼び出し元が全く無関係な
+/// （別シグネチャ・別 launch config 前提の）関数ハンドルを safe に渡せて
+/// しまい、`unsafe` launch 側の GPU 範囲外アクセス等の前提が崩れる。
+///
+/// 本型はフィールドを非公開にし、[`CudaGemm::compile_tiled_pipeline_variant`]
+/// （公開コンストラクタ）と本モジュール内の `compile_tiled_pipeline`
+/// （`CudaGemm::new` 経由）以外に生成手段を持たない。両者はいずれも
+/// `tiled_pipeline_descriptor`/`compile_tiled_pipeline_variant` 内で
+/// `TP_BM`/`TP_BN`/`TP_BK` 固定・`func_name = "gemm_tiled_pipeline_f32"`
+/// を経由してのみ [`CudaFunction`] を得るため、この型の値は必ず期待する
+/// シグネチャ・タイル構成のカーネルを指すことが構築時点で保証される
+/// （検証済みハンドルへの封じ込め）。
+pub struct TiledPipelineFunction(CudaFunction);
+
+impl TiledPipelineFunction {
+    /// 起動に使う内部の [`CudaFunction`] を返す。本モジュール限定
+    /// （呼び出し元が生ハンドルを取り出して検証を迂回できないようにする
+    /// ため `pub(crate)` に留める）。
+    fn as_cuda_function(&self) -> &CudaFunction {
+        &self.0
+    }
+}
+
 /// tiled pipeline カーネル（既定 stage 数固定）を単独で
 /// [`load_function_cached`] 経由でロードする。`compile_wmma_tf32` と同じ
 /// 理由（cp.async は sm_80 以降限定で失敗しうる環境が広い）で `CudaGemm::new`
 /// の早期 return には合流させず、呼び出し元で `tiled_pipeline_error` として
 /// 退避する。
-fn compile_tiled_pipeline(device: &CudaDevice) -> Result<CudaFunction, CudaError> {
+fn compile_tiled_pipeline(device: &CudaDevice) -> Result<TiledPipelineFunction, CudaError> {
     let descriptor = tiled_pipeline_descriptor()?;
-    load_function_cached(
+    let func = load_function_cached(
         device,
         descriptor,
         kernels_tiled_pipeline::tiled_pipeline_f32_source(),
         "gemm_tiled_pipeline_f32",
-    )
+    )?;
+    Ok(TiledPipelineFunction(func))
 }
 
 /// [`wmma_tf32_launch_config`] の tiled pipeline 版。ブロックタイル
@@ -1575,7 +1607,7 @@ impl CudaGemm {
     ///
     /// ホスト側形状検証は `validate_gemm_dims` に加え、
     /// `validate_tiled_pipeline_k_bound`・cp.async 16 バイト整列検証
-    /// （[`tiled_pipeline_alignment_ok`]。満たさない形状は
+    /// （`tiled_pipeline_alignment_ok`。満たさない形状は
     /// `CudaError::InvalidShape` を返す。フォールバック経路を持たない
     /// 単独の選択可能変種のため fail-closed に拒否する契約）を経由する。
     /// カーネル自体が使用不能（`new` 時のコンパイル失敗。cp.async は
@@ -1607,7 +1639,15 @@ impl CudaGemm {
                 ),
             });
         }
-        self.run_f32_kernel(func, a, b, m, n, k, tiled_pipeline_launch_config(m, n))
+        self.run_f32_kernel(
+            func.as_cuda_function(),
+            a,
+            b,
+            m,
+            n,
+            k,
+            tiled_pipeline_launch_config(m, n),
+        )
     }
 
     /// [`Self::run_tiled_pipeline_f32`] が使用可能かを返す（`new` 時の
@@ -1630,13 +1670,13 @@ impl CudaGemm {
     /// `kernels_tiled_pipeline.rs` 冒頭コメント「stages=4 版はベンチ用途に
     /// 限りオンデマンドでコンパイルする」参照）。本番オブジェクト
     /// （[`new`](Self::new) が保持する既定ステージ数固定の
-    /// [`Self::tiled_pipeline`]）の初期化コストには影響しない独立した
+    /// `Self::tiled_pipeline`）の初期化コストには影響しない独立した
     /// コンパイル経路であり、`&self` を取らない（`CudaGemm` の状態に
     /// 触れず `device` のみから完結するため）。
     pub fn compile_tiled_pipeline_variant(
         device: &CudaDevice,
         stages: u32,
-    ) -> Result<CudaFunction, CudaError> {
+    ) -> Result<TiledPipelineFunction, CudaError> {
         let source = kernels_tiled_pipeline::tiled_pipeline_f32_source_with_stages(stages)?;
         let descriptor = CudaKernelDescriptor::new_with_compiled_dims(
             "tiled_pipeline_f32_variant",
@@ -1648,11 +1688,12 @@ impl CudaGemm {
             fandhe_ai_tensor_core::dispatch::DType::F32,
             CompiledDims::DYNAMIC_ALL,
         )?;
-        load_function_cached(device, descriptor, &source, "gemm_tiled_pipeline_f32")
+        let func = load_function_cached(device, descriptor, &source, "gemm_tiled_pipeline_f32")?;
+        Ok(TiledPipelineFunction(func))
     }
 
     /// デバイス常駐済みの A/B/C バッファに対して、任意のコンパイル済み
-    /// tiled pipeline カーネル（既定 3 stage の [`Self::tiled_pipeline`]、
+    /// tiled pipeline カーネル（既定 3 stage の `Self::tiled_pipeline`、
     /// または [`Self::compile_tiled_pipeline_variant`] が返す任意段数の
     /// 変種）を起動し、完了を待たずに投入する（`#1013` の非同期投入契約。
     /// [`Self::launch_tiled_f32`] と同じ「GPU 実行のみ」区間をベンチ計測
@@ -1667,7 +1708,7 @@ impl CudaGemm {
     #[allow(clippy::too_many_arguments)]
     pub fn launch_tiled_pipeline_f32(
         &self,
-        func: &CudaFunction,
+        func: &TiledPipelineFunction,
         a_dev: &CudaSlice<f32>,
         b_dev: &CudaSlice<f32>,
         c_dev: &mut CudaSlice<f32>,
@@ -1698,7 +1739,7 @@ impl CudaGemm {
         // OOB 読み書きが起きない根拠とする。
         unsafe {
             self.stream
-                .launch_builder(func)
+                .launch_builder(func.as_cuda_function())
                 .arg(a_dev)
                 .arg(b_dev)
                 .arg(c_dev)
