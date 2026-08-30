@@ -116,10 +116,43 @@ def checksums_match(a, b):
     return diff / denom < CHECKSUM_REL_TOL
 
 
+def _train_row_schema_error(r):
+    """`framework == fandhe-ai` かつ `task == train` の行に対する必須フィールド
+    の schema 検証（codex-review P0 指摘・PR #1088: 構文上有効な JSON だが
+    必須フィールド欠損・型不正な行が `_train_records` で無検証のまま黙って
+    除外され、他 mode に正常行が `MIN_RECORDS` 件以上残っていれば A/B 判定
+    が成功扱いになってしまう fail-open を塞ぐ）。
+
+    schema 適合なら None、不適合ならエラー理由の文字列を返す。
+    """
+    mode = r.get("mode", "fresh")
+    if mode not in ("fresh", "reuse"):
+        return f"mode が fresh/reuse のいずれでもない（{mode!r}）"
+    if not isinstance(r.get("version"), str) or not r.get("version"):
+        return f"version が非空文字列でない（{r.get('version')!r}）"
+    if _safe_positive(r.get("median_s")) is None:
+        return f"median_s が正の有限数でない（{r.get('median_s')!r}）"
+    if _safe_finite(r.get("checksum")) is None:
+        return f"checksum が有限数でない（{r.get('checksum')!r}）"
+    for key in ("warmup", "iters"):
+        v = r.get(key)
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            return f"{key} が正整数でない（{v!r}）"
+    return None
+
+
 def load_rows(path):
-    """JSONL を読み、不正な行（JSON として parse 不能）は理由付きで報告し
-    スキップする（A08: 捏造しない。呼び出し元は戻り値の 2 要素目〈警告文の
-    リスト〉を表示・記録する）。
+    """JSONL を読み、不正な行は理由付きで報告しスキップする（A08: 捏造しない。
+    呼び出し元は戻り値の 2 要素目〈警告文のリスト〉を表示・記録する）。
+
+    不正行の判定は 3 段階（いずれも該当すれば warning を追加し `rows` へは
+    含めない）:
+      1. JSON として parse 不能
+      2. parse 結果が JSON object（dict）でない（scalar・配列等。正当な
+         レコードは常に object であるため schema 不正として扱う）
+      3. `framework == fandhe-ai` かつ `task == train` の行で、
+         `_train_row_schema_error` が必須フィールド欠損・型不正を検出した
+         場合（codex-review P0 指摘・PR #1088）
 
     呼び出し元（`main`）は戻り値の warnings が非空の場合、残った正常行の
     件数に関わらず入力全体を判定不能（fail-closed・非 0 終了）として扱う
@@ -134,9 +167,24 @@ def load_rows(path):
             if not line:
                 continue
             try:
-                rows.append(json.loads(line))
+                obj = json.loads(line)
             except json.JSONDecodeError as e:
                 warnings.append(f"{path}:{lineno}: invalid JSON ({e}) — skipped")
+                continue
+            if not isinstance(obj, dict):
+                warnings.append(
+                    f"{path}:{lineno}: JSON object ではない（{type(obj).__name__}） — skipped"
+                )
+                continue
+            if obj.get("framework") == "fandhe-ai" and obj.get("task") == "train":
+                err = _train_row_schema_error(obj)
+                if err is not None:
+                    warnings.append(
+                        f"{path}:{lineno}: train record の schema が不正"
+                        f"（{err}） — skipped"
+                    )
+                    continue
+            rows.append(obj)
     return rows, warnings
 
 
@@ -452,16 +500,36 @@ def main(argv=None):
     for w in before_warnings + after_warnings:
         print(f"warning: {w}", file=sys.stderr)
 
-    # fail-closed（A08・Review 指摘・#1083）: 入力 JSONL に JSON parse 不能な
-    # 行が 1 行でもあれば、残った正常行だけで各 mode 5 件以上を満たしていて
-    # も「破損・切り詰められた外部入力を正常計測として確定表示する」ことを
-    # 許さない。入力全体を判定不能扱いとし非 0 終了させる。
+    # fail-closed（A08・Review 指摘・#1083）: 入力 JSONL に不正な行（JSON
+    # parse 不能・schema 不正）が 1 行でもあれば、残った正常行だけで各 mode
+    # 5 件以上を満たしていても「破損・切り詰められた外部入力を正常計測として
+    # 確定表示する」ことを許さない。入力全体を判定不能扱いとし非 0 終了させる。
+    #
+    # この判定は render() 呼び出しより前に確定させ、`results` の各 mode の
+    # status を undeterminable へ上書きしてから表を描画する（Cursor Bugbot
+    # 指摘・PR #1088: has_invalid_lines の判定を render() 後に行うと、
+    # Markdown 表の「判定」列には不正行検出前に確定した中央値・比率つきの
+    # "ok" がそのまま残ってしまい、Phase D がその表をそのまま perf record
+    # へコピーする経路で「判定不能」の情報が失われる fail-open になる）。
     has_invalid_lines = bool(before_warnings or after_warnings)
 
     results = [compare_mode(before_rows, after_rows, mode) for mode in MODES]
-    phase_results_by_mode = {
-        mode: compare_phases(before_rows, after_rows, mode) for mode in MODES
-    }
+    if has_invalid_lines:
+        invalid_reason = (
+            "入力 JSONL に不正な行（JSON parse 不能／schema 不正）が"
+            "含まれるため判定不能（fail-closed）"
+        )
+        for r in results:
+            r["status"] = "undeterminable"
+            r["reason"] = invalid_reason
+        # フェーズ分解表（診断用）も同一入力由来のため、不正行検出時は
+        # 実測値らしき数値を一切表に出さない（判定不能な入力からの診断値の
+        # 独り歩きを防ぐ）。
+        phase_results_by_mode = {mode: [] for mode in MODES}
+    else:
+        phase_results_by_mode = {
+            mode: compare_phases(before_rows, after_rows, mode) for mode in MODES
+        }
 
     text, any_undeterminable = render(
         results, phase_results_by_mode, args.before, args.after

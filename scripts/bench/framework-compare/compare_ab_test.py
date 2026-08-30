@@ -21,7 +21,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -160,7 +160,9 @@ class CompareModeTests(unittest.TestCase):
         after_rows, _ = compare_ab.load_rows(after_path)
         result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
         self.assertEqual(result["status"], "undeterminable")
-        self.assertIn("median_s", result["reason"])
+        # median_s=-1.0 は load_rows の schema 検証（Review 指摘・#1083）で
+        # 既に除外されるため、5 件中 1 件欠けレコード不足として判定不能になる。
+        self.assertIn("レコード不足", result["reason"])
 
     def test_invalid_json_line_is_skipped_with_warning_not_exception(self):
         before_path, after_path = self._paths()
@@ -175,6 +177,39 @@ class CompareModeTests(unittest.TestCase):
         self.assertEqual(len(rows), 5)
         self.assertEqual(len(warnings), 1)
         self.assertIn("invalid JSON", warnings[0])
+
+    def test_schema_invalid_train_row_is_skipped_with_warning(self):
+        """codex-review P0 指摘（PR #1088）: 構文上有効な JSON だが必須
+        フィールド（median_s）を欠く train レコードが、他に正常行が
+        MIN_RECORDS 件以上あっても無検証に黙って除外されないことを確認する
+        （`load_rows` 段階で warning 付きスキップされる）。
+        """
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        broken = _rec("0.4.0", 0.012, "fresh")
+        del broken["median_s"]
+        recs.append(broken)
+        _write_jsonl(before_path, recs)
+        _write_jsonl(
+            after_path,
+            [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)],
+        )
+        rows, warnings = compare_ab.load_rows(before_path)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("schema", warnings[0])
+
+    def test_schema_invalid_train_row_with_non_object_value_is_skipped(self):
+        """JSON としては有効だが object でない行（scalar・配列等）は
+        schema 不正としてスキップされることを確認する。"""
+        before_path, after_path = self._paths()
+        lines = [json.dumps(_rec("0.4.0", 0.012 + i * 0.0001, "fresh")) for i in range(5)]
+        lines.append(json.dumps([1, 2, 3]))
+        _write_jsonl(before_path, lines)
+        rows, warnings = compare_ab.load_rows(before_path)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("JSON object", warnings[0])
 
     def test_other_framework_or_device_rows_are_excluded(self):
         before_path, after_path = self._paths()
@@ -263,7 +298,10 @@ class CompareModeTests(unittest.TestCase):
         after_rows, _ = compare_ab.load_rows(after_path)
         result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
         self.assertEqual(result["status"], "undeterminable")
-        self.assertIn("warmup", result["reason"])
+        # warmup=0（正整数でない）は load_rows の schema 検証（Review
+        # 指摘・#1083）で当該 1 件が既に除外されるため、5 件中 4 件のみ残り
+        # レコード不足として判定不能になる。
+        self.assertIn("レコード不足", result["reason"])
 
     def test_undeterminable_when_version_is_empty_string(self):
         before_path, after_path = self._paths()
@@ -277,8 +315,9 @@ class CompareModeTests(unittest.TestCase):
         after_rows, _ = compare_ab.load_rows(after_path)
         result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
         self.assertEqual(result["status"], "undeterminable")
-        self.assertIn("framework_version", result["reason"])
-        self.assertIn("非空文字列", result["reason"])
+        # version="" は load_rows の schema 検証（Review 指摘・#1083）で
+        # 全 5 件が除外されるため、レコード不足として判定不能になる。
+        self.assertIn("レコード不足", result["reason"])
 
     def test_undeterminable_when_version_is_none(self):
         before_path, after_path = self._paths()
@@ -294,7 +333,9 @@ class CompareModeTests(unittest.TestCase):
         after_rows, _ = compare_ab.load_rows(after_path)
         result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
         self.assertEqual(result["status"], "undeterminable")
-        self.assertIn("framework_version", result["reason"])
+        # version=None は load_rows の schema 検証（Review 指摘・#1083）で
+        # 全 5 件が除外されるため、レコード不足として判定不能になる。
+        self.assertIn("レコード不足", result["reason"])
 
 
 class MainCliTests(unittest.TestCase):
@@ -368,6 +409,39 @@ class MainCliTests(unittest.TestCase):
             rc = compare_ab.main([before_path, after_path])
         self.assertEqual(rc, 2)
         self.assertIn("不正な行", buf.getvalue())
+
+    def test_main_table_shows_undeterminable_not_ok_when_input_has_invalid_line(
+        self,
+    ):
+        """Cursor Bugbot 指摘（PR #1088）: `has_invalid_lines` の判定が
+        render() の後で行われていたため、不正行を検出しても出力 Markdown
+        表の「判定」列には不正行検出前に確定した中央値・比率つきの "ok" が
+        残ってしまう fail-open の回帰防止。標準出力（Markdown 表）自体に
+        "ok" が現れず、"判定不能" が現れることを検証する。
+        """
+        before_path = os.path.join(self.tmpdir.name, "before.jsonl")
+        after_path = os.path.join(self.tmpdir.name, "after.jsonl")
+        lines = [
+            json.dumps(_rec("0.4.0", 0.012 + i * 0.0001, "fresh")) for i in range(5)
+        ]
+        lines += [
+            json.dumps(_rec("0.4.0", 0.010 + i * 0.0001, "reuse")) for i in range(5)
+        ]
+        lines.append('{"framework": "fandhe-ai", "task": "train"')
+        _write_jsonl(before_path, lines)
+        _write_jsonl(
+            after_path,
+            [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)]
+            + [_rec("0.5.0", 0.006 + i * 0.0001, "reuse") for i in range(5)],
+        )
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        with redirect_stdout(out_buf), redirect_stderr(err_buf):
+            rc = compare_ab.main([before_path, after_path])
+        self.assertEqual(rc, 2)
+        table_text = out_buf.getvalue()
+        self.assertNotIn("| ok |", table_text)
+        self.assertIn("判定不能", table_text)
 
 
 if __name__ == "__main__":
