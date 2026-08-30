@@ -214,30 +214,101 @@ fn gemm_simdgroup_tiled_f16_source_uses_matrix_unit_instructions() {
     }
 }
 
-/// REQ-8 の証跡（イシュー #796・協調ロードのベクトル化はイシュー #797）:
-/// `gemm_simdgroup_tiled_f16` が手動境界チェック（ブロック原点の早期
-/// return・協調ロードのグループ単位 in-bounds 判定＋要素単位スカラー
-/// フォールバック・エピローグ書き戻しの要素単位 in-bounds 判定）を
-/// 維持していることをロックする（`gemm_simdgroup_tiled_source_retains_*`
-/// と同種の検査。性能上の下限・最適化の達成を理由に境界チェックを省略
-/// しない方針 `.claude/rules/coding-rust.md` の機械検証）。#797 でベクトル
-/// 化した A/B 協調ロードは 8 要素グループ単位の `group_in_bounds` 判定と、
-/// 境界グループの要素単位スカラーフォールバック（`kk_e`/`global_k_e`・
-/// `c_e`/`global_col_e`）の 2 段構成になる。
+/// REQ-8 の証跡（イシュー #796・協調ロードのベクトル化はイシュー #797・
+/// 境界判定式の f32/f16 共通化はイシュー #1038）: `gemm_simdgroup_tiled_f16`
+/// が手動境界チェック（ブロック原点の早期 return・協調ロードのグループ
+/// 単位 in-bounds 判定＋要素単位スカラーフォールバック・エピローグ書き
+/// 戻しの要素単位 in-bounds 判定）を維持していることをロックする
+/// （`gemm_simdgroup_tiled_source_retains_*` と同種の検査。性能上の下限・
+/// 最適化の達成を理由に境界チェックを省略しない方針
+/// `.claude/rules/coding-rust.md` の機械検証）。
+///
+/// #1038 でブロック原点・グループ単位 in-bounds・要素単位フォールバックの
+/// 各判定式は `gemm_simdgroup_tiled`（f32）と共有する述語関数
+/// （`tiled_block_out_of_range`/`tiled_a_group_in_bounds`/
+/// `tiled_b_group_in_bounds`/`tiled_a_elem_in_bounds`/
+/// `tiled_b_elem_in_bounds`。ファイル冒頭 `Dims` 定義直後）へ抽出済みの
+/// ため、ここではブール式そのものではなく**呼び出し**（ベクトル幅引数
+/// `8` を含む）が本カーネル本体に実在することを検査する（抽出前は
+/// ブール式自体がここに現れていたため、需要が消えたのではなく検査対象の
+/// 形が変わった点に注意）。エピローグ（タイル粒度統合。#797）は f32 版の
+/// タイル原点 `continue` 構造と異なり要素単位 `continue` を経ない即時判定
+/// のため共有述語化していない（設計判断は `gemm.metal` 冒頭ヘルパ群
+/// コメント参照）。
 #[test]
 fn gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards() {
     let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
     for needle in [
-        "if (row0 >= dims.m || col0 >= dims.n)",
-        "(kk + 8 <= bk_eff) && (global_row < dims.m) && (global_k + 8 <= dims.k)",
-        "(kk < bk_eff) && (global_k < dims.k) && (global_col + 8 <= dims.n)",
-        "(kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)",
-        "(kk < bk_eff && global_k < dims.k && global_col_e < dims.n)",
+        "if (tiled_block_out_of_range(row0, col0, dims))",
+        "tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 8, dims)",
+        "tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 8, dims)",
+        "tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)",
+        "tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)",
         "if (out_row < dims.m && out_col < dims.n)",
     ] {
         assert!(
             kernel_body.contains(needle),
             "gemm_simdgroup_tiled_f16 に REQ-8 手動境界チェック `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1038 の証跡: `gemm_simdgroup_tiled`（f32）・
+/// `gemm_simdgroup_tiled_f16` の 2 系統が、共有の境界検査述語関数
+/// （ファイル冒頭 `Dims` 定義直後。両カーネルより前方のため、いずれの
+/// `_kernel_body()` スライスにも定義自体は含まれない）を**両方から**
+/// 呼び出していることをロックする。片側のカーネルだけが共通化されて
+/// もう片側が独自のインライン式へ後退する退行（境界検査ドリフト）を
+/// 検出する目的（イシュー #1038 計画「3.2 節」）。
+#[test]
+fn gemm_simdgroup_tiled_variants_share_boundary_check_helpers() {
+    for helper_def in [
+        "inline bool tiled_block_out_of_range(",
+        "inline bool tiled_a_group_in_bounds(",
+        "inline bool tiled_b_group_in_bounds(",
+        "inline bool tiled_a_elem_in_bounds(",
+        "inline bool tiled_b_elem_in_bounds(",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(helper_def),
+            "gemm.metal に共通境界検査ヘルパ `{helper_def}` の定義が見つかりません（イシュー #1038）"
+        );
+    }
+
+    let f32_body = gemm_simdgroup_tiled_kernel_body();
+    let f16_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for (call, vec_w_f32, vec_w_f16) in [
+        ("tiled_block_out_of_range(row0, col0, dims)", "", ""),
+        (
+            "tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, ",
+            "4, dims)",
+            "8, dims)",
+        ),
+        (
+            "tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, ",
+            "4, dims)",
+            "8, dims)",
+        ),
+        (
+            "tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)",
+            "",
+            "",
+        ),
+        (
+            "tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)",
+            "",
+            "",
+        ),
+    ] {
+        let f32_needle = format!("{call}{vec_w_f32}");
+        let f16_needle = format!("{call}{vec_w_f16}");
+        assert!(
+            f32_body.contains(&f32_needle),
+            "gemm_simdgroup_tiled（f32）が共通ヘルパ呼び出し `{f32_needle}` を含んでいません（境界検査ドリフトの疑い。イシュー #1038）"
+        );
+        assert!(
+            f16_body.contains(&f16_needle),
+            "gemm_simdgroup_tiled_f16 が共通ヘルパ呼び出し `{f16_needle}` を含んでいません（境界検査ドリフトの疑い。イシュー #1038）"
         );
     }
 }
