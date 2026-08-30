@@ -737,8 +737,8 @@ pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::
         });
     }
 
-    const ANCHOR: &str = "    int row = blockIdx.y * TILE + threadIdx.y;\n    \
-                           int col = blockIdx.x * TILE + threadIdx.x;\n";
+    const ANCHOR: &str = "    int block_row = blockIdx.y * BM;\n    \
+                           int block_col = blockIdx.x * BN;\n";
     let source = TILED_F32;
     let occurrences = source.matches(ANCHOR).count();
     // `unwrap()`/`expect()`・panic 系マクロを本番経路で使わない方針
@@ -787,8 +787,8 @@ pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::
          \x20       n_block >= num_n_blocks) {{\n\
          \x20       return;\n\
          \x20   }}\n\
-         \x20   int row = (int)(m_block * TILE) + threadIdx.y;\n\
-         \x20   int col = (int)(n_block * TILE) + threadIdx.x;\n"
+         \x20   int block_row = (int)(m_block * BM);\n\
+         \x20   int block_col = (int)(n_block * BN);\n"
     );
 
     Ok(source.replacen(ANCHOR, &remap, 1))
@@ -958,8 +958,8 @@ mod tests {
                 "long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;",
                 "long long full_groups = num_m_blocks / SWIZZLE_GROUP;",
                 "long long remainder = num_m_blocks % SWIZZLE_GROUP;",
-                "int row = (int)(m_block * TILE) + threadIdx.y;",
-                "int col = (int)(n_block * TILE) + threadIdx.x;",
+                "int block_row = (int)(m_block * BM);",
+                "int block_col = (int)(n_block * BN);",
             ] {
                 assert!(
                     src.contains(needle),
@@ -968,7 +968,7 @@ mod tests {
                 );
             }
             assert!(
-                !src.contains("int row = blockIdx.y * TILE + threadIdx.y;"),
+                !src.contains("int block_row = blockIdx.y * BM;"),
                 "group_width={group_width}: 元のアンカー（blockIdx.y 直書き）が \
                  remap 後も残っています"
             );
@@ -988,7 +988,7 @@ mod tests {
             "tiled_f32_source_with_swizzle 呼び出し後に TILED_F32 が変化しています"
         );
         assert!(
-            TILED_F32.contains("int row = blockIdx.y * TILE + threadIdx.y;"),
+            TILED_F32.contains("int block_row = blockIdx.y * BM;"),
             "TILED_F32 の元のアンカー行が失われています（本番カーネルは無変更のはず）"
         );
     }
