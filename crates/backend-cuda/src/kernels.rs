@@ -175,6 +175,7 @@ pub const TILED_F32: &str = r#"
 #define TM 4
 #define TN 4
 #define PAD 4
+#define THREADS 256
 
 extern "C" __global__ void gemm_tiled_f32(
     const float* __restrict__ a,
@@ -204,11 +205,11 @@ extern "C" __global__ void gemm_tiled_f32(
         int k_base = t * BK;
 
         // REQ-8: A タイルの guarded load（転置格納）。BM*BK 要素を
-        // 256 スレッドで (BM*BK)/256 要素ずつ分担する。範囲外は 0 埋め
-        // （0 を掛けても acc に寄与しないため数値的にも安全）。
+        // THREADS スレッドで (BM*BK)/THREADS 要素ずつ分担する。範囲外は
+        // 0 埋め（0 を掛けても acc に寄与しないため数値的にも安全）。
 #pragma unroll
-        for (int i = 0; i < (BM * BK) / 256; ++i) {
-            int idx = tid + i * 256;
+        for (int i = 0; i < (BM * BK) / THREADS; ++i) {
+            int idx = tid + i * THREADS;
             int mm = idx % BM;
             int kk = idx / BM;
             int row = block_row + mm;
@@ -218,8 +219,8 @@ extern "C" __global__ void gemm_tiled_f32(
 
         // REQ-8: B タイルの guarded load。
 #pragma unroll
-        for (int i = 0; i < (BN * BK) / 256; ++i) {
-            int idx = tid + i * 256;
+        for (int i = 0; i < (BN * BK) / THREADS; ++i) {
+            int idx = tid + i * THREADS;
             int nn = idx % BN;
             int kk = idx / BN;
             int b_row = k_base + kk;
@@ -371,6 +372,7 @@ pub const TILED_BIAS_ACT_F32: &str = r#"
 #define TM 4
 #define TN 4
 #define PAD 4
+#define THREADS 256
 
 extern "C" __global__ void gemm_tiled_bias_act_f32(
     const float* __restrict__ a,
@@ -404,8 +406,8 @@ extern "C" __global__ void gemm_tiled_bias_act_f32(
 
         // REQ-8: TILED_F32 と同じ guarded load（転置格納）。
 #pragma unroll
-        for (int i = 0; i < (BM * BK) / 256; ++i) {
-            int idx = tid + i * 256;
+        for (int i = 0; i < (BM * BK) / THREADS; ++i) {
+            int idx = tid + i * THREADS;
             int mm = idx % BM;
             int kk = idx / BM;
             int row = block_row + mm;
@@ -413,8 +415,8 @@ extern "C" __global__ void gemm_tiled_bias_act_f32(
             as_tile[kk][mm] = (row < m && col < k) ? a[row * k + col] : 0.0f;
         }
 #pragma unroll
-        for (int i = 0; i < (BN * BK) / 256; ++i) {
-            int idx = tid + i * 256;
+        for (int i = 0; i < (BN * BK) / THREADS; ++i) {
+            int idx = tid + i * THREADS;
             int nn = idx % BN;
             int kk = idx / BN;
             int b_row = k_base + kk;
@@ -720,6 +722,12 @@ mod tests {
             ("TM", TILED_F32_TM),
             ("TN", TILED_F32_TN),
             ("PAD", TILED_F32_PAD),
+            // カーネルソース内のロード段階スレッド分担（`(BM*BK)/THREADS`
+            // 等）が生の `256` を重複保持せず `THREADS` マクロ経由に
+            // なったため、その `#define THREADS` も Rust 側の唯一の
+            // 真実源（`TILED_F32_THREADS_X * TILED_F32_THREADS_Y`）との
+            // 突合対象に加える（レビュー指摘。イシュー #1032）。
+            ("THREADS", TILED_F32_THREADS_X * TILED_F32_THREADS_Y),
         ];
         for (name, value) in checks {
             let expected = format!("#define {name} {value}");

@@ -3143,6 +3143,21 @@ mod tests {
         assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 
+    // `validate_tiled_k_bound`（`kernels::TILE`=32 基準）を `TILED_F32`
+    // （`TILED_F32_BK`=16 基準）にもそのまま流用してよいという判断
+    // （同関数のドキュメンテーションコメント参照）は「`TILE` >
+    // `TILED_F32_BK`（同関数が計算する上限のほうが厳しい＝安全側）」
+    // という前提に依存する。この前提はコメントに文章として書かれて
+    // いるのみで機械検証されていなかったため、コンパイル時定数検査で
+    // 固定する（レビュー指摘。イシュー #1032）。将来どちらかの定数の
+    // 変更で前提が崩れた場合はビルドが失敗し、`TILED_F32` 専用の
+    // `k` 上限検証関数の新設が必要になったことに気づける。
+    const _: () = assert!(
+        kernels::TILE > kernels::TILED_F32_BK,
+        "TILE が TILED_F32_BK 以下になったため、\
+         validate_tiled_k_bound を TILED_F32 経路へ流用する前提が崩れている"
+    );
+
     #[test]
     fn launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
         // 17x19 を 16x16 ブロックで覆うには grid (2, 2) が必要
