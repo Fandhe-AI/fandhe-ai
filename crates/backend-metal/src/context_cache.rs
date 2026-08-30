@@ -169,6 +169,15 @@ pub(crate) fn cached_sgd(ctx: &Arc<MetalContext>) -> Result<Arc<MetalSgd>, Metal
     get_or_build(cache, on_poison, || MetalSgd::new(ctx))
 }
 
+/// [`crate::mse::MetalMse`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1045）。`ops::MetalBackendOps::mse_loss`／
+/// `mse_loss_backward` の唯一の呼び出し先。
+pub(crate) fn cached_mse(ctx: &Arc<MetalContext>) -> Result<Arc<crate::mse::MetalMse>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::mse::MetalMse>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::mse::MetalMse::new(ctx))
+}
+
 /// device 単位のプロセスワイド singleton [`MetalAllocator`]（イシュー
 /// #1021・設計文書 §3.1「プールは device 単位のプロセスワイド singleton
 /// とする」・§3.5）をプロセス内キャッシュから取得する。

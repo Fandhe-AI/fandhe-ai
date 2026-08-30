@@ -16,7 +16,8 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    ShapeError, Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
+    BackendError, MseReduction, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
+    reduce_out_shape, require_same_shape,
 };
 
 use crate::error::AutodiffError;
@@ -40,6 +41,22 @@ pub enum Reduction {
     Mean,
     /// 全要素総和（`Σ(pred−target)²`）。
     Sum,
+}
+
+/// `crate::var::Reduction` → `fandhe_ai_tensor_core::MseReduction` の変換
+/// （イシュー #1045）。`tensor-core` → `autodiff` の逆依存は作れないため
+/// `MseReduction` は `Reduction` の再エクスポートではなく独立した型
+/// （`backend_ops.rs::MseReduction` doc 参照）であり、`Var::mse_loss_with`
+/// が `BackendOps::mse_loss`／`mse_loss_backward` を呼ぶ直前にここで変換
+/// する。両者は `Mean`/`Sum` の 2 variant のみで意味論も同一のため
+/// 単純な 1 対 1 写像。
+impl From<Reduction> for MseReduction {
+    fn from(value: Reduction) -> Self {
+        match value {
+            Reduction::Mean => MseReduction::Mean,
+            Reduction::Sum => MseReduction::Sum,
+        }
+    }
 }
 
 /// テープ上の 1 ノードを指す追跡対象値。値そのものではなく `NodeId` +
@@ -267,11 +284,19 @@ impl<'t> Var<'t> {
     /// （MSE・CrossEntropy）の実装」）。`nn::loss::MseLoss`（`nn/loss.rs`）
     /// はこのメソッドを呼ぶだけの薄いラッパー（REQ-9）。
     ///
-    /// **TASK-12.1d（#164）**: `BackendOps` に対応メソッドがないため
-    /// 融合対象外とし、入力を層 1（`materialize_fallible`）で実体化
-    /// したうえで従来どおり `eval::mse_loss` を直接呼ぶ（設計書 §3.5.1
-    /// 「`sigmoid`/`mse_loss`/`cross_entropy_loss` は従来どおり `eval.rs`
-    /// で即時計算し `OnceCell` を充填して返す」）。
+    /// **TASK-12.1d（#164）→ イシュー #1045 で更新**: 入力を層 1
+    /// （`materialize_fallible`）で実体化したうえで、`self.tape.ops()`
+    /// の `BackendOps::mse_loss`（CPU／CUDA／Metal の融合カーネル。
+    /// `docs/kernel-fusion.md`）を試みる。`Err(BackendError::
+    /// Unsupported(_))` のときのみ従来のホスト参照実装 `eval::mse_loss`
+    /// へフォールバックし、それ以外のエラー（融合カーネルが実行時に
+    /// 失敗した場合等）は伝播する（判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08。`materialize_fallible` の
+    /// `run_fused` フォールバック規律と同じ方針。`tape.rs:905` 参照）。
+    /// `require_same_shape` が既に shape 一致を検査済みのため、
+    /// バックエンド実装が返す `ShapeMismatch` は「バックエンド実装の
+    /// 契約違反」を意味し、こちらも `Unsupported` 同様フォールバック
+    /// せず伝播する（想定内の分岐で握り潰さない）。
     pub fn mse_loss_with(
         &self,
         target: &Var<'t>,
@@ -287,7 +312,28 @@ impl<'t> Var<'t> {
             let target_val = materialize_fallible(&nodes, self.tape.ops(), target.id)?.clone();
             (pred_val, target_val)
         };
-        let value = eval::mse_loss(&pred_val, &target_val, reduction);
+        let value = match self
+            .tape
+            .ops()
+            .mse_loss(&pred_val, &target_val, reduction.into())
+        {
+            Ok(v) => {
+                // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                // mse_loss` doc「戻り値は shape `[]`」）を検証する
+                // （実装バグの黙認防止。`.claude/rules/security.md` A08）。
+                if !v.shape().is_empty() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: Vec::new(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::mse_loss(&pred_val, &target_val, reduction),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
         let id = self.tape.push_eager(
             Op::MseLoss {
                 pred: self.id,

@@ -18,7 +18,8 @@
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DispatchFailureCell, FusionPlan, ShapeError, Tensor,
+    Activation, BackendOps, DispatchFailureCell, FusionPlan, MseReduction, ShapeError, Tensor,
+    require_same_shape,
 };
 
 use crate::context::MetalContext;
@@ -835,6 +836,85 @@ impl BackendOps for MetalBackendOps {
         Err(BackendError::Unsupported(
             "MetalBackendOps::max: reduction カーネル未実装（TASK-1.9c スコープ外）".into(),
         ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の Metal 実装
+    /// （イシュー #1045）。`Self::sum`／`Self::max`（汎用 reduction）とは
+    /// 独立した専用融合カーネル（`crate::mse::MetalMse`）へのディスパッチ
+    /// （`backend_ops.rs::BackendOps::mse_loss` doc の設計判断参照）。
+    /// `reduction` に応じた `factor`（`Mean` は `1.0/n`、`Sum` は `1.0`）は
+    /// ここで計算してカーネルへ渡す。未知 `MseReduction` variant は
+    /// `backend-cpu`／`backend-cuda` と同じく `Unsupported` として拒否
+    /// する。
+    fn mse_loss(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_owned = pred.contiguous();
+        let target_owned = target.contiguous();
+        let pred_slice = pred_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("mse_loss: pred not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("mse_loss: target not contiguous".into())
+        })?;
+        let numel = pred_slice.len();
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    1.0
+                } else {
+                    1.0 / numel as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "mse_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mse = context_cache::cached_mse(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let value = mse
+            .run_mse_loss_f32(&ctx, pred_slice, target_slice, factor)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::mse_loss_backward`] の Metal
+    /// 実装（イシュー #1045）。`dTarget = −dPred` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側で符号反転して得る
+    /// 契約のため、本メソッドは `dPred` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::mse_loss_backward` doc 参照）。
+    fn mse_loss_backward(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_owned = pred.contiguous();
+        let target_owned = target.contiguous();
+        let pred_slice = pred_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("mse_loss_backward: pred not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("mse_loss_backward: target not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mse = context_cache::cached_mse(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = mse
+            .run_mse_backward_f32(&ctx, pred_slice, target_slice, scale)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装
