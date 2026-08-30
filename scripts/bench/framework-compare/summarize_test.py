@@ -1218,7 +1218,10 @@ class TargetGateTests(unittest.TestCase):
         records = summarize.target_gate(rows, "candle")
         rec = next(r for r in records if r["task"] == "infer")
         self.assertEqual(rec["status"], "unmet")
-        self.assertIsNone(rec["size"])
+        # イシュー #1051 codex-review 追加指摘（PR #1082）以降、infer も
+        # gemm と同じ経路で実データの size（`_infer_row` 既定 64）を
+        # 列挙するため `None` 固定ではなくなった。
+        self.assertEqual(rec["size"], 64)
 
     def test_train_undeterminable_when_target_unmeasured(self):
         rows = [_train_row(framework="fandhe-ai", device="cuda")]
@@ -1325,7 +1328,13 @@ class TargetGateTests(unittest.TestCase):
         self.assertEqual(gemm_rec["status"], "undeterminable")
         self.assertIn("gemm 未計測", gemm_rec["reason"])
         self.assertEqual(train_rec["status"], "undeterminable")
-        self.assertIn("fandhe-ai 未計測", train_rec["reason"])
+        # PR #1082 の修正（size 列挙を task 共通化）以降、train 行が
+        # 1 件も無い場合は「0 件」の分岐（size=None）で捕捉される
+        # （以前は sizes=[None] 固定で `_pick_row_for_gate` 経由の
+        # 「fandhe-ai 未計測」に到達していたが、実データが無いこと自体を
+        # より正確に表す理由文言になった）。
+        self.assertIn("train 未計測", train_rec["reason"])
+        self.assertIsNone(train_rec["size"])
 
     def test_devices_restricted_to_fandhe_and_target_framework(self):
         # P1 回帰（イシュー #1051 codex-review 指摘）: burn 専用デバイス
@@ -1342,6 +1351,45 @@ class TargetGateTests(unittest.TestCase):
         records = summarize.target_gate(rows, "candle")
         self.assertFalse(any(r["device"] == "metal" for r in records))
         self.assertTrue(any(r["device"] == "cpu" for r in records))
+
+    def test_train_multiple_sizes_are_all_evaluated_not_just_first(self):
+        # P0 回帰（PR #1082 codex-review 追加指摘）: 修正前は
+        # task != "gemm" を `sizes = [None]` 固定にしており、
+        # `get(..., size=None)` は size 条件を適用せず最初に一致した
+        # 行を返すだけだったため、train/infer に複数 size の行が
+        # 混在すると先頭の 1 行しか評価されず、他 size の未達・
+        # target 未計測が黙って無視されて全体が「全達成」側へ
+        # fail-open していた。ここでは size=64 が達成・size=128 が
+        # target 未計測（判定不能）という混在データを与え、両方が
+        # 個別レコードとして列挙されることを確認する。
+        rows = [
+            dict(_train_row(framework="fandhe-ai", median_s=0.0005), size=64),
+            dict(_train_row(framework="candle", median_s=0.001), size=64),
+            dict(_train_row(framework="fandhe-ai", median_s=0.02), size=128),
+            # candle 側 size=128 は計測なし（意図的に欠落させる）。
+        ]
+        records = summarize.target_gate(rows, "candle")
+        train_recs = {r["size"]: r for r in records if r["task"] == "train"}
+        self.assertEqual(set(train_recs), {64, 128})
+        self.assertEqual(train_recs[64]["status"], "achieved")
+        self.assertEqual(train_recs[128]["status"], "undeterminable")
+        self.assertIn("candle 未計測", train_recs[128]["reason"])
+
+    def test_infer_multiple_sizes_unmet_size_is_not_hidden_by_achieved_size(self):
+        # 上記と対の観点: size=64 が achieved・size=128 が unmet の場合、
+        # 先頭行（size=64）の achieved だけを見て unmet を握りつぶさない
+        # ことを確認する。
+        rows = [
+            dict(_infer_row(framework="fandhe-ai", median_s=0.0001), size=64),
+            dict(_infer_row(framework="candle", median_s=0.0005), size=64),
+            dict(_infer_row(framework="fandhe-ai", median_s=0.01), size=128),
+            dict(_infer_row(framework="candle", median_s=0.001), size=128),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        infer_recs = {r["size"]: r for r in records if r["task"] == "infer"}
+        self.assertEqual(set(infer_recs), {64, 128})
+        self.assertEqual(infer_recs[64]["status"], "achieved")
+        self.assertEqual(infer_recs[128]["status"], "unmet")
 
 
 class MainTargetExitCodeTests(unittest.TestCase):

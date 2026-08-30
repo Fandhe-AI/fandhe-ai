@@ -750,7 +750,13 @@ def target_gate(rows, target):
     突合し、達成／未達／判定不能を判定する（イシュー #1051）。
 
     戻り値: dict のリスト。各要素のキーは
-    `task`/`device`/`size`（gemm 以外は `None`）/`fandhe_mode`/
+    `task`/`device`/`size`（fandhe-ai/target いずれの行にも当該
+    task・device の実測が 1 件も無い場合のみ `None`。それ以外は
+    task を問わず実データの size を列挙する。イシュー #1051
+    codex-review 追加指摘: train/infer も gemm と同じ経路で size 集合を
+    実測から都度導出するため、通常は現状の運用〈train/infer は単一
+    size=64 のみ〉により単一値になるが、複数 size が存在する場合も
+    取りこぼさず全て判定する）/`fandhe_mode`/
     `target_mode`/`fandhe_median`/`target_median`/`ratio`
     （= target_median / fandhe_median）/`status`
     （"achieved"|"unmet"|"undeterminable"）/`reason`（判定不能の理由。
@@ -763,41 +769,51 @@ def target_gate(rows, target):
     devices = _gate_devices(rows, target)
     for task in GATE_TASKS:
         for device in devices:
-            if task == "gemm":
-                sizes = sorted(
+            # イシュー #1051 codex-review 追加指摘（P0）: 当初は
+            # task == "gemm" のみサイズを列挙し、train/infer は
+            # `sizes = [None]` 固定にしていた。`get()`/`_pick_row_for_gate`
+            # は size=None を「size 条件を適用しない（最初に一致した行を
+            # 返す）」ものとして扱うため、train/infer に複数 size の行が
+            # 混在すると先頭の 1 行しか評価されず、他 size の未達・
+            # target 側の未計測が黙って無視されて「全達成」側へ
+            # fail-open してしまう。run_all.sh/run_all_cuda.sh は現状
+            # train/infer を単一 size（64）でしか実行しないが、この
+            # 判定不能検出（P0）と同じ理由で、実データが持つ size 集合を
+            # 実測から都度導出し、gemm と同じ経路で 1 size ごとに突合
+            # する（size が実際に 1 つしか無ければ従来と同じ挙動になり、
+            # 複数あれば取りこぼさず全て判定する）。
+            sizes = sorted(
+                {
+                    r["size"]
+                    for r in rows
+                    if r["task"] == task
+                    and r["device"] == device
+                    and r["framework"] in ("fandhe-ai", target)
+                }
+            )
+            if not sizes:
+                # P0: このデバイスでは task が fandhe-ai/target
+                # 双方とも 0 件（サイズが 1 つも存在しない）。
+                # sizes が空のまま `for size in sizes` を素通りさせる
+                # と、このデバイス×task の組が gate_records_all へ
+                # 一切現れず「全達成」の誤判定に加担する。size=None
+                # の判定不能レコードを明示的に積む。
+                records.append(
                     {
-                        r["size"]
-                        for r in rows
-                        if r["task"] == "gemm"
-                        and r["device"] == device
-                        and r["framework"] in ("fandhe-ai", target)
+                        "task": task,
+                        "device": device,
+                        "size": None,
+                        "fandhe_mode": None,
+                        "target_mode": None,
+                        "fandhe_median": None,
+                        "target_median": None,
+                        "ratio": None,
+                        "status": "undeterminable",
+                        "reason": f"{task} 未計測（fandhe-ai/target 双方 0 件）",
+                        "note": None,
                     }
                 )
-                if not sizes:
-                    # P0: このデバイスでは gemm が fandhe-ai/target
-                    # 双方とも 0 件（サイズが 1 つも存在しない）。
-                    # sizes が空のまま `for size in sizes` を素通りさせる
-                    # と、このデバイス×task の組が gate_records_all へ
-                    # 一切現れず「全達成」の誤判定に加担する。size=None
-                    # の判定不能レコードを明示的に積む。
-                    records.append(
-                        {
-                            "task": task,
-                            "device": device,
-                            "size": None,
-                            "fandhe_mode": None,
-                            "target_mode": None,
-                            "fandhe_median": None,
-                            "target_median": None,
-                            "ratio": None,
-                            "status": "undeterminable",
-                            "reason": "gemm 未計測（fandhe-ai/target 双方 0 件）",
-                            "note": None,
-                        }
-                    )
-                    continue
-            else:
-                sizes = [None]
+                continue
             for size in sizes:
                 fandhe_row, fandhe_mode = _pick_row_for_gate(rows, "fandhe-ai", task, device, size)
                 target_row, target_mode = _pick_row_for_gate(rows, target, task, device, size)
