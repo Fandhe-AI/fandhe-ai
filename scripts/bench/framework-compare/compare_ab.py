@@ -42,6 +42,14 @@ MODES = ["fresh", "reuse"]
 # 最小限必要なレコード数（coding-rust.md「ベンチは 5 回計測の中央値」）。
 MIN_RECORDS = 5
 
+# `run_all_cuda.sh`・`run_ab_train_cuda.sh` はいずれも train タスクを
+# `size=64` 固定でのみ起動する（両スクリプト実測）。現状の JSONL は train
+# レコードが size=64 のみで構成されるため実害はないが、将来 size の異なる
+# train レコードが同一 JSONL に混在した場合に compare_mode() が size を
+# またいで中央値を算出してしまう defensive gap（Review 指摘・#1083）を
+# 塞ぐため、`_train_records` で size=64 に明示的に絞り込む。
+TRAIN_SIZE = 64
+
 _PHASE_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
@@ -111,9 +119,14 @@ def load_rows(path):
 
 
 def _train_records(rows, mode):
-    """`framework == fandhe-ai`・`task == train`・`device == cuda`・指定 mode
-    の行だけを、`row.get("mode", "fresh")`（mode キー欠損は fresh 扱い。
-    summarize.py `load_rows` と同じ互換方針）で絞り込む。
+    """`framework == fandhe-ai`・`task == train`・`device == cuda`・
+    `size == TRAIN_SIZE`・指定 mode の行だけを、`row.get("mode", "fresh")`
+    （mode キー欠損は fresh 扱い。summarize.py `load_rows` と同じ互換方針）
+    で絞り込む。
+
+    size 絞り込みは fail-closed（`r.get("size") != TRAIN_SIZE` は除外）とし、
+    size の異なる train レコードが同一 JSONL に混在しても中央値を size を
+    またいで算出しない（Review 指摘・#1083）。
     """
     out = []
     for r in rows:
@@ -124,6 +137,8 @@ def _train_records(rows, mode):
         if r.get("task") != "train":
             continue
         if r.get("device") != "cuda":
+            continue
+        if r.get("size") != TRAIN_SIZE:
             continue
         if r.get("mode", "fresh") != mode:
             continue

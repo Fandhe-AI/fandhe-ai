@@ -193,6 +193,30 @@ class CompareModeTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["before_n"], 5)
 
+    def test_rows_with_different_size_are_excluded(self):
+        """Review 指摘（#1083）: size の異なる train レコードが同一 JSONL に
+        混在しても、`_train_records` の TRAIN_SIZE 絞り込みにより中央値算出
+        が size をまたがないことを確認する（defensive gap の回帰防止）。
+        """
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        # size=64 以外の行を大量に混入させる。中央値算出に混ざれば
+        # before_median_s がこの極端な値へ引っ張られて壊れる。
+        other_size_recs = [_rec("0.4.0", 999.0, "fresh") for _ in range(5)]
+        for r in other_size_recs:
+            r["size"] = 128
+        _write_jsonl(before_path, recs + other_size_recs)
+        _write_jsonl(
+            after_path,
+            [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)],
+        )
+        before_rows, _ = compare_ab.load_rows(before_path)
+        after_rows, _ = compare_ab.load_rows(after_path)
+        result = compare_ab.compare_mode(before_rows, after_rows, "fresh")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["before_n"], 5)
+        self.assertLess(result["before_median_s"], 1.0)
+
 
 class MainCliTests(unittest.TestCase):
     def setUp(self):
