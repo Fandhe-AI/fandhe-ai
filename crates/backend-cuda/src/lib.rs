@@ -609,6 +609,15 @@ pub mod diagnostics {
         (kernels_mma::MMA_BM, kernels_mma::MMA_BN)
     }
 
+    /// tiled f32（本番既定 f32 経路 `TILED_F32`。イシュー #1034 の swizzle
+    /// 診断対象）カーネルのブロックタイル形状 `(block_m, block_n)`。
+    /// `examples/gemm_profile_target.rs` の `Path::TiledF32Swizzle`
+    /// occupancy 概算専用（`wmma_tf32_opt_block_tile`・`mma_f16_block_tile`
+    /// と同じ理由）。
+    pub fn tiled_f32_block_tile() -> (u32, u32) {
+        (crate::kernels::TILE, crate::kernels::TILE)
+    }
+
     /// イシュー #499: L2 再利用のためのタイル→SM 割り当てスウィズルの
     /// グルーピング幅動的選択（`swizzle::select_swizzle_group_width`）を
     /// `mma_f16` のブロックタイル（`MMA_BM`/`MMA_BN`）に対して適用した
@@ -641,6 +650,28 @@ pub mod diagnostics {
             kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N,
         )
     }
+
+    /// イシュー #1034: [`mma_swizzle_group_width`] の tiled f32（本番既定
+    /// f32 経路 `TILED_F32`）版。`swizzle::select_swizzle_group_width` を
+    /// tiled f32 のブロックタイル（`kernels::TILE` x `kernels::TILE`。
+    /// 32×32）に対して適用する（`mma_f16`・TF32 opt-staged と異なる
+    /// ブロックタイルのため専用ラッパーが必要。`swizzle.rs` 本体は無
+    /// 変更）。`examples/gemm_tiled_f32_swizzle_bench.rs`・
+    /// `gemm.rs::CudaGemm::new_with_tiled_f32_swizzle`（`internal-
+    /// diagnostics` feature 限定・診断用 opt-in 入口。本番既定コンスト
+    /// ラクタ `CudaGemm::new` はこの経路を呼ばない）を呼ぶ側から到達する。
+    pub fn tiled_f32_swizzle_group_width(num_sms: u32) -> u32 {
+        swizzle::select_swizzle_group_width(num_sms, crate::kernels::TILE, crate::kernels::TILE)
+    }
+
+    /// イシュー #1034: `kernels::tiled_f32_source_with_swizzle`（非公開
+    /// `mod kernels` 配下）の crate 外部（`examples/
+    /// gemm_tiled_f32_swizzle_bench.rs` 等の診断用バイナリ）からの到達用
+    /// 再公開。`kernels` は本番カーネルソースの内部表現のため非公開の
+    /// ままとし（PR #637 codex-review 指摘と同じ理由）、本モジュール経由
+    /// のみを唯一の公開境界とする（`wmma_tf32_f32_staged_source_with_
+    /// swizzle` の再公開と同じ方針）。
+    pub use crate::kernels::tiled_f32_source_with_swizzle;
 
     // イシュー #856: `examples/wmma_tf32_staged_ptx_dump.rs`
     // （TF32 opt-staged base／swizzle 変種のレジスタ・スピル差分を
