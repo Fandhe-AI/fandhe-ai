@@ -2001,3 +2001,11 @@ mod poison_state_tests {
 #[cfg(test)]
 #[path = "async_ordering_poison_tests.rs"]
 mod async_ordering_poison_tests;
+
+/// イシュー #1084: `invalidate_with` の poison 回復経路（実 CUDA の
+/// `sync`／実処理プローブ）を実機で検証する追加テスト（T3i の隣接拡張。
+/// 上記 `async_ordering_poison_tests` と同じ配置理由・同じ非公開
+/// アイテムへのアクセス方針）。
+#[cfg(test)]
+#[path = "poison_recovery_real_device_tests.rs"]
+mod poison_recovery_real_device_tests;
