@@ -235,7 +235,18 @@ struct Args {
     allow_missing_driver: bool,
 }
 
-const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16|tiled_f32|tiled_f32_swizzle} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--group-width N (tiled_f32_swizzle only)] [--allow-missing-driver]";
+/// `Path::parse` が受理する値の表示用一覧（`|` 区切り）。USAGE 文言と
+/// 不正 `--path` 時のエラーメッセージの双方をこの単一の文字列リテラルを
+/// `concat!` で埋め込んで生成し、`Path::parse` の受理値との乖離
+/// （codex-review 指摘: エラーメッセージが allowlist の一部
+/// `tiled_f32` を列挙していなかった）を構造的に防ぐ。
+const PATH_ALLOWLIST_DISPLAY: &str = "wmma_tf32|mma_f16|tiled_f32|tiled_f32_swizzle";
+
+const USAGE: &str = concat!(
+    "usage: gemm_profile_target --path {",
+    "wmma_tf32|mma_f16|tiled_f32|tiled_f32_swizzle",
+    "} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--group-width N (tiled_f32_swizzle only)] [--allow-missing-driver]"
+);
 
 /// `--group-width` は `CudaGemm::new_with_tiled_f32_swizzle`（イシュー
 /// #1034）でのみ意味を持つ tiled f32 swizzle 固有のパラメータのため、
@@ -288,7 +299,7 @@ fn parse_args() -> Result<Args, String> {
                 let v = it.next().ok_or("--path には値が必要")?;
                 path = Some(Path::parse(&v).ok_or_else(|| {
                     format!(
-                        "--path は 'wmma_tf32'／'mma_f16'／'tiled_f32_swizzle' のみ受理する \
+                        "--path は '{PATH_ALLOWLIST_DISPLAY}' のいずれかのみ受理する \
                          （指定値: '{v}'）"
                     )
                 })?);
