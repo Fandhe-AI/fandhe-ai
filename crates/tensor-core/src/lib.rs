@@ -89,6 +89,15 @@
 //! 呼ぶ構成のため（`tensor-core` → `autodiff` の逆依存を作れないため）、
 //! `FusionGraph`／`detect_fusion` は本クレート内では `plan.rs` の
 //! `#[cfg(test)]`（`from_segment` の単体テスト）からのみ使用される。
+//!
+//! `layout`（元は `backend-metal` 専用モジュール〈#1040〉。イシュー
+//! #1046 で本クレートへ移設）は、`Tensor::shape`/`strides` から
+//! 2 次元 view の転置分類（[`layout::classify_2d`]）・先頭次元 collapse
+//! （[`layout::collapse_leading_dims`]）を導出する純粋関数群を提供する。
+//! `backend-metal` の GEMM strided 入口と `autodiff::eval::matmul`
+//! （matmul VJP のホスト側転置コピー除去）が共通で必要とするため
+//! `tensor-core` に置く。`facade` の公開 API 面には出さない内部ヘルパ
+//! （`docs/compat-api-scope.md` §0）のため re-export リストには含めない。
 
 mod backend_ops;
 mod broadcast;
@@ -99,6 +108,7 @@ mod dispatch_failure;
 mod element;
 mod error;
 mod fusion;
+pub mod layout;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;

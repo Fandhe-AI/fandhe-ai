@@ -107,6 +107,15 @@ storage から借用で返す。`as_slice`（contiguous 限定）と異なり転
   `ops.rs` も `contiguous()` を呼んでいる）
 - Metal 実機実測（M4 Max）と性能目標判定
 
+**#1046 での消化状況（追補）**: 上記のうち「`grad.rs` のホスト参照
+実装経路（`eval::matmul` 経由）の転置コピー除去」は #1046 で消化した
+（`layout` モジュール自体も `tensor-core` へ移設し `backend-metal` は
+再エクスポートへ縮約。`docs/matmul-vjp-zero-copy-decision.md` 参照）。
+「`BackendOps` trait 拡張（`gemm_resident_rhs_nt` 等）による
+`d_input` のデバイス側直接計算化」「CUDA／CPU の同型 zero-repack 化」
+「Metal 実機実測」は #1046 でも未消化のまま引き続き別イシュー行きで
+ある（`docs/matmul-vjp-zero-copy-decision.md` §3.2 が現時点の一覧）。
+
 ## 5. 実機実測（未実施。Mac セッションで実施予定）
 
 ```sh

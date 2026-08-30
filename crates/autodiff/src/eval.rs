@@ -23,9 +23,22 @@
 
 use std::borrow::Cow;
 
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{Tensor, layout};
 
 use crate::var::Reduction;
+
+std::thread_local! {
+    /// `matmul`（下記）が転置 view（`grad.rs::transpose2d` が作る
+    /// zero-copy view）を `layout::classify_2d` で分類できず、
+    /// `dense_vec`（`contiguous()` 経由のホスト側転置コピー）へ
+    /// フォールバックした回数（イシュー #1046。`backend-metal::ops::
+    /// RESIDENT_HOST_REPACK_COUNT` と同型の可観測点）。matmul VJP
+    /// （`grad.rs::matmul_vjp`・`Op::LinearResident` の `d_weight`）が
+    /// 転置 view を渡しても本カウンタが増えないことをテストで確認する
+    /// ことで、「転置コピー 0 回」（受け入れ条件 (a)）を機械検証する。
+    pub(crate) static MATMUL_HOST_REPACK_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 
 /// テンソルを行優先連続バッファへ実体化し `Vec<f32>` として取り出す。
 ///
@@ -159,21 +172,69 @@ pub(crate) fn dense_vec_i32(tensor: &Tensor<i32>) -> Vec<i32> {
     out
 }
 
+/// `matmul`（下記）のオペランド 1 個を、ホスト側転置コピーなしで
+/// 読み出せる形へ変換する（イシュー #1046）。
+///
+/// `layout::classify_2d`（`backend-metal` と共用。`tensor-core::layout`）
+/// が行優先 contiguous・転置 view（`grad.rs::transpose2d` が作る
+/// `strides == [1, ld]` の zero-copy view）のいずれかに分類できる場合、
+/// `Tensor::as_view_slice`（借用）をそのまま返し `MATMUL_HOST_REPACK_COUNT`
+/// を増やさない。分類できない形状（stride 0 のブロードキャスト等）
+/// のみ、従来どおり `dense_vec`（`contiguous()` 経由のホスト側コピー）
+/// へフォールバックしカウンタを増やす。
+fn matmul_operand(tensor: &Tensor<f32>) -> (Cow<'_, [f32]>, layout::MatrixLayout) {
+    if let Some(matrix_layout) = layout::classify_2d(tensor.shape(), tensor.strides())
+        && let Some(slice) = tensor.as_view_slice()
+    {
+        return (Cow::Borrowed(slice), matrix_layout);
+    }
+    MATMUL_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+    let (rows, cols) = (tensor.shape()[0], tensor.shape()[1]);
+    (
+        Cow::Owned(dense_vec(tensor)),
+        layout::MatrixLayout {
+            rows,
+            cols,
+            ld: cols,
+            transposed: false,
+        },
+    )
+}
+
 /// 2 次元 `matmul`（`lhs: [m,k]` × `rhs: [k,n]` → `[m,n]`）。
 /// shape 検査（`matmul_out_shape`）は呼び出し元が済ませている前提。
+///
+/// イシュー #1046: `matmul_vjp`（`grad.rs`）が `transpose2d`（zero-copy
+/// view）で作った転置オペランドをそのまま渡しても、`matmul_operand` が
+/// `layout::MatrixLayout` の添字式（`transposed` フラグで行優先／列優先
+/// を切替）で読み出すためホスト側転置コピーが発生しない。行優先
+/// contiguous 入力（従来からの主経路）では `ld == cols` となり、
+/// 添字式は変更前の `lhs_data[i * k + p]`／`rhs_data[p * n + j]` と
+/// 完全に一致する（k ループの反復順・`mul_add` 呼び出しも不変のため
+/// 既存の bit 完全一致テストを崩さない）。
 pub(crate) fn matmul(lhs: &Tensor<f32>, rhs: &Tensor<f32>) -> Tensor<f32> {
     let m = lhs.shape()[0];
     let k = lhs.shape()[1];
     let n = rhs.shape()[1];
-    let lhs_data = dense_vec(lhs);
-    let rhs_data = dense_vec(rhs);
+    let (lhs_data, lhs_layout) = matmul_operand(lhs);
+    let (rhs_data, rhs_layout) = matmul_operand(rhs);
     let mut out = vec![0f32; m * n];
     for i in 0..m {
         for j in 0..n {
             let mut acc = 0f32;
             for p in 0..k {
+                let a = if lhs_layout.transposed {
+                    lhs_data[p * lhs_layout.ld + i]
+                } else {
+                    lhs_data[i * lhs_layout.ld + p]
+                };
+                let b = if rhs_layout.transposed {
+                    rhs_data[j * rhs_layout.ld + p]
+                } else {
+                    rhs_data[p * rhs_layout.ld + j]
+                };
                 // FMA 契約統一（コメント冒頭参照）: 積和を `mul_add` で行う。
-                acc = lhs_data[i * k + p].mul_add(rhs_data[p * n + j], acc);
+                acc = a.mul_add(b, acc);
             }
             out[i * n + j] = acc;
         }

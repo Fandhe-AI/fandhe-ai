@@ -1,0 +1,84 @@
+# matmul VJP 転置ゼロコピー化（イシュー #1046）: スコープ判断・実測記入欄
+
+## 1. 背景
+
+親イシュー #1043（Phase 3）は「GEMM 入口の転置フラグ／stride 化を
+`autodiff` の matmul VJP（`grad.rs::matmul_vjp`）へ波及させ、ホスト側の
+転置コピーをなくす」ことを要求する。前提となる Metal 限定の GEMM 入口
+転置フラグ（`layout::classify_2d`・`dispatch_strided_bias_act_prepared`）
+は #1040（PR #1076）で導入済みで、同 PR の
+`docs/backend-metal-transpose-collapse-design.md` §4 が
+「`grad.rs` の `transpose2d` 排除・CPU/CUDA の同型 zero-repack 化」を
+本イシューへ引き継いでいた。
+
+## 2. 調査で判明した事実
+
+- `grad.rs::transpose2d` は `Tensor::transpose(0, 1)` を呼ぶのみで、
+  既に **zero-copy**（stride 入れ替えのみ）である。転置コピーが実際に
+  発生していたのは `eval::matmul`（ホスト参照実装）内部の `dense_vec`
+  （`Tensor::contiguous()` 経由でホスト転置コピーを強制する）だった
+- `crates/backend-cpu/src/gemm_blis/pack.rs::pack_a`／`pack_b` は
+  複数のマイクロカーネル variant（`gemm_blis_region`・
+  `gemm_blis_parallel_with_blocks`・`gemm_blis_parallel_2d_with_blocks`
+  等。`gemm_blis/mod.rs` 内 6 箇所以上の呼び出し）に直接埋め込まれて
+  おり、行優先前提の添字（`k_total`/`n_total` 固定）を stride 一般化
+  （`(rs, cs)` 化）するには全 variant・全 microkernel 経路への横断変更
+  が必要で、影響範囲が単一のディスパッチ経路に閉じない
+
+## 3. 決定: 本イシューはスコープを縮小する
+
+### 3.1 実施した変更（本イシューの範囲）
+
+1. `crates/tensor-core/src/layout.rs`（新規）: `backend-metal/src/layout.rs`
+   （#1040）が持っていた `MatrixLayout`／`classify_2d`／
+   `collapse_leading_dims`／`required_span`（純粋関数・FFI 非依存）を
+   `tensor-core` へ移設した。`backend-metal::layout` は再エクスポートへ
+   縮約し、`gemm.rs`・`ops.rs`・既存テストの参照パスは変更していない
+2. `crates/autodiff/src/eval.rs::matmul`: `dense_vec`（`contiguous()`
+   強制）をやめ、`layout::classify_2d` + `Tensor::as_view_slice`
+   （借用）で行優先／転置 view の両方を直接読み出す `matmul_operand`
+   ヘルパーを新設。k ループの反復順・`f32::mul_add` 呼び出しは不変の
+   ため、行優先 contiguous 入力（既存の主経路）では **bit 完全一致**を
+   維持する
+3. 診断カウンタ `eval::MATMUL_HOST_REPACK_COUNT`（`backend-metal::ops::
+   RESIDENT_HOST_REPACK_COUNT` と同型の `thread_local` カウンタ）を
+   追加し、`grad.rs::matmul_vjp_does_not_repack_transposed_operands`
+   （`crates/autodiff/src/grad.rs`）が `matmul_vjp` 実行後もカウンタが
+   増えないことを機械検証する
+
+この変更により、`matmul_vjp`（`Op::MatMul`）・`Op::LinearResident` の
+`d_weight`（`eval::matmul(xᵀ, g)`）の**ホスト参照実装経路**では、転置
+オペランドに対するホスト側転置コピーが発生しなくなる（受け入れ条件 (a)
+をこの経路について機械検証済み。(b) は既存の workspace テスト
+green で確認済み・許容誤差は変更していない）。
+
+### 3.2 スコープ外とした項目（別イシューでの対応が必要）
+
+| 項目 | 理由 | 引き継ぎ先 |
+|------|------|-----------|
+| CPU BLIS packing の stride 一般化（`ops.rs::gemm`／`gemm_resident_lhs` 等を stride 対応にし `Op::MatMul` の VJP を `ops.gemm` 経由へ切替） | `pack_a`/`pack_b` が複数マイクロカーネル variant に埋め込まれ、影響範囲が単一ディスパッチ経路に閉じない。中途半端に `Op::MatMul` だけ `ops.gemm` へ繋ぎ替えると、CPU バックエンドでは転置コピーがホスト（`eval::matmul`）から `backend-cpu::gemm` の `contiguous()` へ単に移動するだけで受け入れ条件 (a) を満たさない | 別イシュー提案（ユーザー承認後に起票。`.claude/rules/out-of-scope-tracking.md`） |
+| CUDA 本番 GEMM カーネルの lda／転置対応 | 本ラン環境（Linux x86_64・NVRTC 非搭載）では実機検証不能。`backend-cuda::ops.rs::gemm`／`gemm_resident_lhs` は `contiguous()` を維持（コード変更なし） | 別イシュー提案 |
+| Metal `BackendOps::gemm` の NT/TN/TT strided 結線・`gemm_resident_rhs_nt` 新設 | 受け入れ条件 (a) は上記 3.1 のホスト参照実装経路で機械検証済みであり、Metal 側の追加結線は Mac 実機での検証が前提。今回のホスト側変更のみで PR の受け入れ条件を満たすため、リスクを増やす追加変更を見送った | 別イシュー提案（`docs/backend-metal-transpose-collapse-design.md` §4 の残項目として引き続き追跡） |
+| `Op::LinearResident.d_input`（`ops.gemm_resident_lhs(w_dev, gᵀ) → transpose2d`）のデバイス側直接計算化 | `BackendOps` trait 拡張（`gemm_resident_rhs_nt` 等）を伴う公開面変更のため、実機検証が可能なセッションでの設計・実装が必要 | 別イシュー提案 |
+
+## 4. 数値一致・許容誤差
+
+- ガードレール閾値・テスト許容誤差は変更していない
+  （`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの
+  許容誤差を単独で緩和しない」）
+- `Op::MatMul`／`Op::LinearResident.d_weight` は引き続き
+  `eval::matmul`（ホスト参照実装）を通るため、CPU/CUDA/Metal いずれの
+  バックエンドを使う学習ループでも既存の数値一致契約に影響しない
+  （バックエンド固有の GEMM カーネル自体は変更していない）
+
+## 5. 実機実測（未実施）
+
+本ランは Linux x86_64（NVRTC 非搭載・Metal 実機なし）のため、以下は
+未実施のまま記入欄を残す。
+
+```sh
+# CPU 側「1 学習 step 中の転置コピー削減」の効果測定（before/after）
+cargo bench -p bench-harness -- <該当ベンチ名>
+```
+
+（実測値は未記入。後続セッションでの実行後にこの節を更新する）
