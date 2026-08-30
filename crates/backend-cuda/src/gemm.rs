@@ -63,13 +63,33 @@ use crate::nvrtc::compile_ptx;
 /// 共有メモリを使わない naive カーネルの `__shared__` 配列サイズ制約は受けない。
 const NAIVE_BLOCK_DIM: (u32, u32, u32) = (16, 16, 1);
 
-/// tiled GEMM カーネル起動 1 回あたりのブロック次元。
+/// tiled f16 GEMM（[`CudaGemm::run_tiled_f16`]）カーネル起動 1 回あたりの
+/// ブロック次元。**イシュー #1032 以降 f16 専用**（f32 tiled 系は
+/// [`TILED_F32_BLOCK_DIM`] へ分離。f16 は本イシューのスコープ外）。
 ///
 /// `kernels::TILE` x `kernels::TILE` に固定する必要がある（カーネル内
-/// `__shared__ float as_tile[TILE][TILE]` 等はブロック内スレッド数と
+/// `__shared__ __half as_tile[TILE][TILE]` 等はブロック内スレッド数と
 /// 1:1 対応するコンパイル時定数のため、ここがずれるとタイル境界外の
 /// スレッドが共有メモリを書かない一方でロード先が欠落し誤った積和になる）。
 const TILED_BLOCK_DIM: (u32, u32, u32) = (kernels::TILE, kernels::TILE, 1);
+
+/// tiled f32 GEMM（[`CudaGemm::run_tiled_f32`]／
+/// [`CudaGemm::run_tiled_bias_act_f32`]。イシュー #1032 レジスタブロッキング
+/// 刷新版）カーネル起動 1 回あたりのブロック次元（16x16 = 256 スレッド）。
+///
+/// `kernels::TILED_F32_THREADS_X` x `kernels::TILED_F32_THREADS_Y` に
+/// 固定する必要がある（各スレッドが `TILED_F32_TM` x `TILED_F32_TN` 出力
+/// を担当するレジスタブロッキング構成のため、旧 [`TILED_BLOCK_DIM`] の
+/// ような「ブロック次元＝タイル一辺」の 1:1 対応ではなく、
+/// [`tiled_f32_launch_config`] がタイル一辺（`TILED_F32_BM`/`BN`）と
+/// ブロック次元を別々に扱う。`kernels.rs` の
+/// `tiled_f32_constants_satisfy_thread_and_tile_invariants` テストが
+/// この整合を検査する）。
+const TILED_F32_BLOCK_DIM: (u32, u32, u32) = (
+    kernels::TILED_F32_THREADS_X,
+    kernels::TILED_F32_THREADS_Y,
+    1,
+);
 
 /// WMMA TF32 GEMM カーネル起動 1 回あたりのブロック次元（128 スレッド = 4 warp、
 /// `kernels::WMMA_TF32_THREADS` を 1 次元ブロックとして起動する）。
@@ -391,14 +411,24 @@ pub(crate) fn validate_output_len(c_len: usize, m: u32, n: u32) -> Result<(), Cu
 
 /// tiled カーネル専用の `k` 追加上限検証。
 ///
-/// tiled カーネル（`kernels::TILED_F32`/`TILED_F16`）は各タイル反復で
-/// `t * TILE + threadIdx.x`（`threadIdx.x` は最大 `TILE - 1`）を C の `int`
-/// 算術で計算し `a_col`／`b_row` を得る。この値は `k` に近い最終タイルで
-/// 最大 `k + TILE - 2` 程度に達しうるため、`k` が `i32::MAX - (TILE - 1)`
-/// を超えると当該算術が i32 の範囲でオーバーフローしうる（実行前ガード。
+/// `kernels::TILED_F16`（`TILE`=32 基準）は各タイル反復で `t * TILE +
+/// threadIdx.x`（`threadIdx.x` は最大 `TILE - 1`）を C の `int` 算術で計算
+/// し `a_col`／`b_row` を得る。この値は `k` に近い最終タイルで最大
+/// `k + TILE - 2` 程度に達しうるため、`k` が `i32::MAX - (TILE - 1)` を
+/// 超えると当該算術が i32 の範囲でオーバーフローしうる（実行前ガード。
 /// `validate_gemm_dims` の i32 積ガードとは独立に、tiled 固有のタイル
-/// インデックス算術を保護する）。`run_tiled_f32`／`run_tiled_f16` からのみ
-/// 呼ばれ、naive 経路の契約（`validate_gemm_dims` のみ）は変更しない。
+/// インデックス算術を保護する）。
+///
+/// **`kernels::TILED_F32`（イシュー #1032・`TILED_F32_BK`=16 基準）との
+/// 関係**: `TILED_F32` の同種算術（`t * BK + kk`。`kk` は最大 `BK - 1`＝
+/// 15）が要求する上限は `i32::MAX - (BK - 1)` であり、`TILE`（32）> `BK`
+/// （16）のため本関数（`TILE` 基準）が計算する上限は `TILED_F32` の実際の
+/// 必要上限より**厳しい**（より小さい `k` で弾く安全側）。したがって
+/// `TILED_F32` に対しても本関数をそのまま流用してよく、`BK` 専用の別関数
+/// を新設する必要はない（実装計画 §3.4）。
+///
+/// `run_tiled_f32`／`run_tiled_f16` からのみ呼ばれ、naive 経路の契約
+/// （`validate_gemm_dims` のみ）は変更しない。
 pub(crate) fn validate_tiled_k_bound(k: u32) -> Result<(), CudaError> {
     let limit = i32::MAX as u32 - (kernels::TILE - 1);
     if k > limit {
@@ -768,9 +798,9 @@ pub(crate) fn kernel_specs() -> [GemmKernelSpec; 8] {
             label: "tiled_f32",
             source: kernels::TILED_F32,
             func_name: "gemm_tiled_f32",
-            block_m: kernels::TILE,
-            block_n: kernels::TILE,
-            block_k: kernels::TILE,
+            block_m: kernels::TILED_F32_BM,
+            block_n: kernels::TILED_F32_BN,
+            block_k: kernels::TILED_F32_BK,
             stages: 1,
             dtype: DType::F32,
         },
@@ -788,9 +818,9 @@ pub(crate) fn kernel_specs() -> [GemmKernelSpec; 8] {
             label: "tiled_bias_act_f32",
             source: kernels::TILED_BIAS_ACT_F32,
             func_name: "gemm_tiled_bias_act_f32",
-            block_m: kernels::TILE,
-            block_n: kernels::TILE,
-            block_k: kernels::TILE,
+            block_m: kernels::TILED_F32_BM,
+            block_n: kernels::TILED_F32_BN,
+            block_k: kernels::TILED_F32_BK,
             stages: 1,
             dtype: DType::F32,
         },
@@ -856,6 +886,29 @@ fn wmma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
     LaunchConfig {
         grid_dim,
         block_dim: WMMA_TF32_BLOCK_DIM,
+        shared_mem_bytes: 0,
+    }
+}
+
+/// `kernels::TILED_F32_BM`／`TILED_F32_BN`（ブロックタイル一辺）を単位に
+/// `m`/`n` を `div_ceil` で包含するグリッド次元を構築する（イシュー
+/// #1032）。
+///
+/// [`wmma_tf32_launch_config`] と同じ理由（該当コメント参照）: レジスタ
+/// ブロッキング版 tiled f32 カーネルはスレッド形状（[`TILED_F32_BLOCK_DIM`]、
+/// 16x16=256 スレッド）とタイル一辺（64×64）が「ブロック次元＝タイル
+/// 一辺」の旧 [`launch_config`] 前提から外れるため、専用のグリッド計算
+/// 関数として分離する。末尾ブロックの余剰はカーネル内の手動境界チェック
+/// （REQ-8）に委ねる契約は共通。
+fn tiled_f32_launch_config(m: u32, n: u32) -> LaunchConfig {
+    let grid_dim = (
+        n.div_ceil(kernels::TILED_F32_BN),
+        m.div_ceil(kernels::TILED_F32_BM),
+        1,
+    );
+    LaunchConfig {
+        grid_dim,
+        block_dim: TILED_F32_BLOCK_DIM,
         shared_mem_bytes: 0,
     }
 }
@@ -1589,8 +1642,10 @@ impl CudaGemm {
     /// ホスト側形状検証は naive 版と同じ `validate_gemm_dims` に加え、
     /// tiled カーネル固有のタイルインデックス算術を保護する
     /// `validate_tiled_k_bound` を経由する（モジュールコメント
-    /// 「PoC からの変更点」3 参照）。ブロック次元は
-    /// `TILED_BLOCK_DIM`（`kernels::TILE` x `kernels::TILE`）で固定する。
+    /// 「PoC からの変更点」3 参照）。イシュー #1032 のレジスタブロッキング
+    /// 刷新版カーネル（`kernels::TILED_F32`）を、専用の
+    /// `tiled_f32_launch_config`（ブロック次元 `TILED_F32_BLOCK_DIM`・
+    /// タイル一辺 `kernels::TILED_F32_BM`/`BN`）で起動する。
     pub fn run_tiled_f32(
         &self,
         a: &[f32],
@@ -1608,7 +1663,7 @@ impl CudaGemm {
             m,
             n,
             k,
-            launch_config(m, n, TILED_BLOCK_DIM),
+            tiled_f32_launch_config(m, n),
         )
     }
 
@@ -1900,7 +1955,7 @@ impl CudaGemm {
             .allocator
             .alloc_uninit_f32((m as usize) * (n as usize))?;
 
-        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let cfg = tiled_f32_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
         let act_i: i32 = if act_relu { 1 } else { 0 };
 
@@ -2568,7 +2623,7 @@ impl CudaGemm {
         validate_tiled_k_bound(k)?;
         validate_output_len(c_dev.len(), m, n)?;
 
-        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let cfg = tiled_f32_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
@@ -2651,7 +2706,7 @@ impl CudaGemm {
             None => (0, a_dev),
         };
 
-        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let cfg = tiled_f32_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
         let act_i: i32 = if act_relu { 1 } else { 0 };
 
@@ -2723,7 +2778,7 @@ impl CudaGemm {
             });
         }
 
-        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let cfg = tiled_f32_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
         let act_i: i32 = if act_relu { 1 } else { 0 };
 
@@ -2787,7 +2842,7 @@ impl CudaGemm {
         validate_tiled_k_bound(k)?;
         validate_output_len(c_dev.len(), m, n)?;
 
-        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let cfg = tiled_f32_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: `launch_tiled_f32` と同一の根拠。
@@ -3526,6 +3581,21 @@ mod tests {
         let err = validate_tiled_k_bound(limit + 1).unwrap_err();
         assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
+
+    // `validate_tiled_k_bound`（`kernels::TILE`=32 基準）を `TILED_F32`
+    // （`TILED_F32_BK`=16 基準）にもそのまま流用してよいという判断
+    // （同関数のドキュメンテーションコメント参照）は「`TILE` >
+    // `TILED_F32_BK`（同関数が計算する上限のほうが厳しい＝安全側）」
+    // という前提に依存する。この前提はコメントに文章として書かれて
+    // いるのみで機械検証されていなかったため、コンパイル時定数検査で
+    // 固定する（レビュー指摘。イシュー #1032）。将来どちらかの定数の
+    // 変更で前提が崩れた場合はビルドが失敗し、`TILED_F32` 専用の
+    // `k` 上限検証関数の新設が必要になったことに気づける。
+    const _: () = assert!(
+        kernels::TILE > kernels::TILED_F32_BK,
+        "TILE が TILED_F32_BK 以下になったため、\
+         validate_tiled_k_bound を TILED_F32 経路へ流用する前提が崩れている"
+    );
 
     #[test]
     fn launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
