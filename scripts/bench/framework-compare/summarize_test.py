@@ -155,6 +155,31 @@ def _train_phases_group(device="cpu", mode="fresh", init_s=None):
     return rows
 
 
+def _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0005, checksum=13.9):
+    """infer タスク（(c) 節）用の合成行（イシュー #1051 のゲート判定用）。
+
+    `_train_row` と異なり `throughput_per_s` を持ち `gflops`/`init_s` を
+    持たない（実データ形状。results/raw/*.jsonl の infer 行を参照）。
+    infer には reuse モード自体が無い（モジュール docstring 参照）ため
+    `mode` は常に "fresh" 固定とする。
+    """
+    return {
+        "framework": framework,
+        "version": "0.4.0",
+        "task": "infer",
+        "device": device,
+        "size": 64,
+        "median_s": median_s,
+        "q1_s": median_s * 0.9,
+        "q3_s": median_s * 1.1,
+        "throughput_per_s": 1.0 / median_s,
+        "checksum": checksum,
+        "warmup": 20,
+        "iters": 20,
+        "mode": "fresh",
+    }
+
+
 class ParityStatusTests(unittest.TestCase):
     def test_missing_keys_is_unverified(self):
         row = _base_row()
@@ -1150,6 +1175,229 @@ class MainStrictExitCodeTests(unittest.TestCase):
         try:
             code, _, _ = self._run_main(path, strict=False)
             self.assertEqual(code, 0)
+        finally:
+            os.unlink(path)
+
+
+class TargetGateTests(unittest.TestCase):
+    """`target_gate`/`target_gate_section`（イシュー #1051）の判定規則。"""
+
+    def test_gemm_reuse_preferred_over_fresh_and_achieved(self):
+        # fandhe-ai に reuse 行がある場合は reuse 側の中央値を使う
+        # （実装計画 §3「fandhe-ai 側の行」）。fandhe reuse 0.5ms <
+        # candle fresh 1.0ms → achieved・ratio 2.0。
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+            dict(
+                _with_parity(_base_row(framework="fandhe-ai", mode="reuse")),
+                median_s=0.0005,
+            ),
+            _with_parity(_base_row(framework="candle", mode="fresh"), total=65536),
+        ]
+        rows[2]["median_s"] = 0.001
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
+        self.assertEqual(rec["status"], "achieved")
+        self.assertEqual(rec["fandhe_mode"], "reuse")
+        self.assertAlmostEqual(rec["ratio"], 2.0)
+
+    def test_fandhe_fresh_only_uses_fresh(self):
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+            _with_parity(_base_row(framework="candle", mode="fresh")),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm")
+        self.assertEqual(rec["fandhe_mode"], "fresh")
+
+    def test_infer_unmet_when_fandhe_slower(self):
+        rows = [
+            _infer_row(framework="fandhe-ai", median_s=0.002),
+            _infer_row(framework="candle", median_s=0.0005),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "infer")
+        self.assertEqual(rec["status"], "unmet")
+        self.assertIsNone(rec["size"])
+
+    def test_train_undeterminable_when_target_unmeasured(self):
+        rows = [_train_row(framework="fandhe-ai", device="cuda")]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train" and r["device"] == "cuda")
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("candle 未計測", rec["reason"])
+
+    def test_undeterminable_when_fandhe_row_has_parity_failure(self):
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai"), fail_count=3),
+            _with_parity(_base_row(framework="candle")),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm")
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+        self.assertIn("fandhe-ai", rec["reason"])
+
+    def test_undeterminable_when_train_reuse_checksum_mismatches_fresh(self):
+        rows = [
+            _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08),
+            dict(
+                _train_row(framework="fandhe-ai", mode="reuse", init_s=0.001),
+                checksum=999.0,
+            ),
+            _train_row(framework="candle", mode="fresh", median_s=0.005),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train")
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+
+    def test_undeterminable_when_median_is_non_finite_number(self):
+        # NaN/文字列/巨大 int が混入しても例外で落ちず判定不能に倒す
+        # （`_safe_time_s` の fail-closed 契約と同じ。イシュー #970 系の
+        # 教訓を踏襲）。
+        for bad_median in (float("nan"), "not-a-number", 10**1000, True):
+            with self.subTest(bad_median=bad_median):
+                rows = [
+                    dict(_with_parity(_base_row(framework="fandhe-ai")), median_s=bad_median),
+                    _with_parity(_base_row(framework="candle")),
+                ]
+                records = summarize.target_gate(rows, "candle")
+                rec = next(r for r in records if r["task"] == "gemm")
+                self.assertEqual(rec["status"], "undeterminable")
+
+    def test_old_format_gemm_row_is_judged_with_note(self):
+        # 旧形式（parity キー欠損）行は判定は行うが備考に注記する
+        # （実装計画 §3「旧形式（parity 未検証）行」）。
+        rows = [
+            _base_row(framework="fandhe-ai", checksum=100.0),
+            _base_row(framework="candle", checksum=100.0),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm")
+        self.assertIn(rec["status"], ("achieved", "unmet"))
+        self.assertEqual(rec["note"], "未検証（旧形式）")
+
+    def test_target_gate_section_renders_unmet_marker_and_list(self):
+        rows = [
+            _infer_row(framework="fandhe-ai", median_s=0.002),
+            _infer_row(framework="candle", median_s=0.0005),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        lines = summarize.target_gate_section("dummy.jsonl", records, "candle")
+        text = "\n".join(lines)
+        self.assertIn("**未達**", text)
+        self.assertIn("infer/CPU", text)
+
+    def test_files_are_not_cross_matched(self):
+        # ファイルをまたいだ突合はしない: 1 回の target_gate 呼び出しは
+        # 1 ファイル分の rows のみを対象とする。片方に candle のみ・他方に
+        # fandhe-ai のみのケースは、それぞれの呼び出し内で双方
+        # 判定不能になる（main() がファイルごとに target_gate を呼ぶ
+        # ことで保証される契約。ここでは関数単体で確認する）。
+        rows_fandhe_only = [_infer_row(framework="fandhe-ai")]
+        rows_candle_only = [_infer_row(framework="candle")]
+        rec_a = next(
+            r for r in summarize.target_gate(rows_fandhe_only, "candle") if r["task"] == "infer"
+        )
+        rec_b = next(
+            r for r in summarize.target_gate(rows_candle_only, "candle") if r["task"] == "infer"
+        )
+        self.assertEqual(rec_a["status"], "undeterminable")
+        self.assertIn("candle 未計測", rec_a["reason"])
+        self.assertEqual(rec_b["status"], "undeterminable")
+        self.assertIn("fandhe-ai 未計測", rec_b["reason"])
+
+
+class MainTargetExitCodeTests(unittest.TestCase):
+    def _run_main(self, path, target=None, strict=False):
+        argv = [path]
+        if target:
+            argv += ["--target", target]
+        if strict:
+            argv.append("--strict")
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", *argv]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+        return code, buf_out.getvalue(), buf_err.getvalue()
+
+    def test_unmet_exits_3_and_reports_stderr(self):
+        path = _write_jsonl(
+            [
+                _infer_row(framework="fandhe-ai", median_s=0.002),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+        )
+        try:
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("未達", err)
+            self.assertIn("目標達成ゲート", out)
+        finally:
+            os.unlink(path)
+
+    def test_all_achieved_exits_0(self):
+        path = _write_jsonl(
+            [
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+        )
+        try:
+            code, _, _ = self._run_main(path, target="candle")
+            self.assertEqual(code, 0)
+        finally:
+            os.unlink(path)
+
+    def test_without_target_exits_0_unchanged(self):
+        # 既存契約（--target 省略時は挙動不変）の回帰確認。
+        path = _write_jsonl(
+            [
+                _infer_row(framework="fandhe-ai", median_s=0.002),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+        )
+        try:
+            code, _, _ = self._run_main(path)
+            self.assertEqual(code, 0)
+        finally:
+            os.unlink(path)
+
+    def test_target_outside_allowlist_is_argparse_error(self):
+        path = _write_jsonl([_infer_row(framework="fandhe-ai")])
+        try:
+            old_argv = sys.argv
+            sys.argv = ["summarize.py", path, "--target", "fandhe-ai"]
+            buf_err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(buf_err), self.assertRaises(SystemExit) as ctx:
+                    summarize.main()
+                self.assertEqual(ctx.exception.code, 2)
+            finally:
+                sys.argv = old_argv
+        finally:
+            os.unlink(path)
+
+    def test_strict_takes_priority_over_gate_exit_code(self):
+        # 旧形式 gemm 行（--strict 対象）と unmet な gemm ゲート判定が
+        # 両立する場合、データ無効の解消を優先し終了コードは 2
+        # （実装計画 §3「--strict と併用し旧形式 gemm 行 → exit 2 が
+        # 優先される」）。
+        path = _write_jsonl(
+            [
+                dict(_base_row(framework="fandhe-ai"), median_s=0.002),
+                dict(_base_row(framework="candle"), median_s=0.0005),
+            ]
+        )
+        try:
+            code, _, err = self._run_main(path, target="candle", strict=True)
+            self.assertEqual(code, 2)
+            self.assertIn("要素単位検証を受けていない", err)
         finally:
             os.unlink(path)
 

@@ -83,6 +83,22 @@
   `has_train_phases_invalid` を追加）。`task != "train_phases"` の既存
   節（(a)/(a')/(b)/(b')/(c)・checksum 突合・parity 判定・`devices_in`）は
   本フィールドを一切読まないため影響を受けない。
+- 目標達成ゲート（イシュー #1051。`--target candle`/`--target burn`）:
+  親 #1049「横並び再計測と目標達成ゲート」の完了判定を人間の目視に頼らず
+  機械的に行うためのオプション。**同一入力 JSONL ファイル内**（1 ファイル
+  = 1 環境。モジュール docstring 冒頭の方針と同じ）の `(task, device,
+  size)` ごとに、fandhe-ai と `--target` 指定フレームワークの `median_s`
+  を突合し、fandhe-ai が同等以上の性能（`fandhe_median_s <=
+  target_median_s`）かを判定する。ファイルをまたいだ突合は環境混同になる
+  ため行わない。fandhe-ai・target とも reuse 行があれば reuse を優先し
+  無ければ fresh を使う（`_pick_row_for_gate`。infer には reuse 行が
+  存在しないため常に fresh）。checksum 不一致・要素誤差超過・train reuse
+  の checksum 不一致等（既存の無効判定と同じ規則）に該当する行は「達成」
+  と判定せず「判定不能（無効データ）」に倒す（壊れた計算の実行時間で
+  達成判定しない。A08）。`--target` 指定時、1 件でも未達／判定不能が
+  あれば終了コード 3 を返す（`--strict` 由来の 2 と区別。両方の条件を
+  満たす場合はデータ無効の解消を優先させるため 2 を返す）。判定式・許容
+  マージンはユーザー承認なく緩めない（`.claude/rules/coding-rust.md`）。
 """
 
 import argparse
@@ -97,6 +113,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FRAMEWORKS = ["fandhe-ai", "candle", "burn"]
 DEVICE_ORDER = ["cpu", "metal", "cuda"]
 DEVICE_LABEL = {"cpu": "CPU", "metal": "Metal", "cuda": "CUDA"}
+
+# イシュー #1051: 目標達成ゲート（--target）の対象タスク・比較先 allowlist。
+# `--target` は argparse の `choices=GATE_TARGET_CHOICES` で検証するため、
+# CLI から任意の framework 文字列が Markdown 出力・辞書キーへ流れ込むことは
+# ない（security.md A03）。fandhe-ai 自身を target にする比較は無意味な
+# ため FRAMEWORKS から除外する。
+GATE_TARGET_CHOICES = [fw for fw in FRAMEWORKS if fw != "fandhe-ai"]
+GATE_TASKS = ("gemm", "train", "infer")
 
 # `train_phases`（(b'') 節。イシュー #1009）専用の allowlist。producer 側の
 # 契約（`bench_common::parse_cli_from` の `--mode` allowlist・`PHASE_*` 定数
@@ -599,6 +623,243 @@ def _parity_reason(row):
 
 def _row_key(r):
     return (r["framework"], r["device"], r["size"], r["mode"])
+
+
+# イシュー #1051: 目標達成ゲート（--target）専用のヘルパー群。既存の
+# `section()`（Markdown 表生成）とは独立に、同じ無効判定規則（checksum
+# 突合・要素単位検証・train reuse 突合）を再適用して「達成／未達／
+# 判定不能」を機械的に判定する。`section()` の戻り値シグネチャ（6-tuple）
+# を破壊しない実装方針（実装計画 §3）のため、無効判定ロジックは
+# `gemm_checksum_mismatches`/`_parity_reason`/`_safe_time_s`/
+# `_safe_finite_number`/`checksums_match` を再利用しつつ、train reuse の
+# 判定のみ `_train_reuse_row_invalid_reason` として同等ロジックを本関数
+# 群専用に複製する（`section()` 内の (b') ループは表示副作用〈stderr
+# warning・Markdown 行〉を持つため直接共有すると呼び出しごとに warning が
+# 重複出力される。ゲート判定は無音で理由文字列のみ返す）。
+
+
+def _pick_row_for_gate(rows, fw, task, device, size=None):
+    """ゲート判定に使う行を選ぶ: reuse 行があれば優先し、無ければ fresh。
+
+    戻り値は `(row, mode)`。該当行が無ければ `(None, None)`。gemm/train は
+    fandhe-ai に reuse 行が存在しうる（イシュー #925/#957）。infer は
+    reuse モード自体が存在しないため常に fresh へフォールバックする
+    （`bench-fandhe` の `--mode` allowlist は gemm/train 用。モジュール
+    docstring 参照）。
+    """
+    row = get(rows, fw, task, device, size, mode="reuse")
+    if row is not None:
+        return row, "reuse"
+    row = get(rows, fw, task, device, size, mode="fresh")
+    if row is not None:
+        return row, "fresh"
+    return None, None
+
+
+def _train_reuse_row_invalid_reason(rows, r):
+    """train task・mode="reuse" 行の無効理由を返す（有効なら `None`）。
+
+    `section()` の (b') ループと同一の判定規則（時間値の検証・同一
+    フレームワーク内 fresh 行との checksum 突合）を、表示副作用なしで
+    単一行に対して適用する。fresh 行が存在しない（比較対象なし）だけの
+    場合は値そのものの正当性を否定しないため無効扱いにしない
+    （`section()` の同節コメント参照）。
+    """
+    r_median = _safe_time_s(r.get("median_s"))
+    r_q1 = _safe_time_s(r.get("q1_s"))
+    r_q3 = _safe_time_s(r.get("q3_s"))
+    r_init = _safe_time_s(r.get("init_s"))
+    if r_median is None or r_q1 is None or r_q3 is None or r_init is None:
+        return "時間値が不正な値"
+    fresh = get(rows, r["framework"], "train", r["device"], mode="fresh")
+    if fresh is None:
+        return None
+    fresh_median = _safe_time_s(fresh.get("median_s"))
+    if fresh_median is None:
+        return "fresh 側の時間値が不正な値"
+    r_checksum = _safe_finite_number(r.get("checksum"))
+    fresh_checksum = _safe_finite_number(fresh.get("checksum"))
+    if r_checksum is None or fresh_checksum is None:
+        return "checksum が不正な値"
+    if not checksums_match(r_checksum, fresh_checksum):
+        return "fresh と最終 loss 不一致"
+    return None
+
+
+def _gate_row_invalid_reason(rows, gemm_mismatch_map, row):
+    """ゲート判定用の行無効理由（有効なら `None`）。
+
+    task ごとに既存の無効判定規則を再適用する: gemm は checksum 不一致
+    （`gemm_mismatch_map`。呼び出し側が `gemm_checksum_mismatches(rows)`
+    から 1 回だけ構築し使い回す。行ごとに再計算すると size 数に対し
+    O(n^2) になるため）と要素単位検証失敗（`_parity_reason`）、train の
+    reuse 行は `_train_reuse_row_invalid_reason`。train の fresh 行・
+    infer 行には（現状 `section()` 側にも）無効判定規則が無いため
+    `None` を返す。
+    """
+    if row["task"] == "gemm":
+        reasons = []
+        if _row_key(row) in gemm_mismatch_map:
+            reasons.append("checksum 不一致")
+        preason = _parity_reason(row)
+        if preason is not None:
+            reasons.append(preason)
+        return "; ".join(reasons) if reasons else None
+    if row["task"] == "train" and row["mode"] == "reuse":
+        return _train_reuse_row_invalid_reason(rows, row)
+    return None
+
+
+def target_gate(rows, target):
+    """fandhe-ai と `target`（candle/burn）の中央値を同一ファイル内で
+    突合し、達成／未達／判定不能を判定する（イシュー #1051）。
+
+    戻り値: dict のリスト。各要素のキーは
+    `task`/`device`/`size`（gemm 以外は `None`）/`fandhe_mode`/
+    `target_mode`/`fandhe_median`/`target_median`/`ratio`
+    （= target_median / fandhe_median）/`status`
+    （"achieved"|"unmet"|"undeterminable"）/`reason`（判定不能の理由。
+    achieved/unmet では `None`）/`note`（旧形式 gemm 行への注記など）。
+    """
+    mismatches = gemm_checksum_mismatches(rows)
+    gemm_mismatch_map = {_row_key(r): (ref, ref_label) for r, ref, ref_label in mismatches}
+
+    records = []
+    for task in GATE_TASKS:
+        devices = sorted(
+            set(devices_in(rows, task, mode="fresh")) | set(devices_in(rows, task, mode="reuse")),
+            key=lambda d: DEVICE_ORDER.index(d) if d in DEVICE_ORDER else len(DEVICE_ORDER),
+        )
+        for device in devices:
+            if task == "gemm":
+                sizes = sorted(
+                    {
+                        r["size"]
+                        for r in rows
+                        if r["task"] == "gemm"
+                        and r["device"] == device
+                        and r["framework"] in ("fandhe-ai", target)
+                    }
+                )
+            else:
+                sizes = [None]
+            for size in sizes:
+                fandhe_row, fandhe_mode = _pick_row_for_gate(rows, "fandhe-ai", task, device, size)
+                target_row, target_mode = _pick_row_for_gate(rows, target, task, device, size)
+                record = {
+                    "task": task,
+                    "device": device,
+                    "size": size,
+                    "fandhe_mode": fandhe_mode,
+                    "target_mode": target_mode,
+                    "fandhe_median": None,
+                    "target_median": None,
+                    "ratio": None,
+                    "status": "undeterminable",
+                    "reason": None,
+                    "note": None,
+                }
+                if fandhe_row is None:
+                    record["reason"] = "fandhe-ai 未計測"
+                    records.append(record)
+                    continue
+                if target_row is None:
+                    record["reason"] = f"{target} 未計測"
+                    records.append(record)
+                    continue
+                freason = _gate_row_invalid_reason(rows, gemm_mismatch_map, fandhe_row)
+                treason = _gate_row_invalid_reason(rows, gemm_mismatch_map, target_row)
+                if freason is not None or treason is not None:
+                    parts = []
+                    if freason is not None:
+                        parts.append(f"fandhe-ai: {freason}")
+                    if treason is not None:
+                        parts.append(f"{target}: {treason}")
+                    record["reason"] = "無効データ（" + "; ".join(parts) + "）"
+                    records.append(record)
+                    continue
+                fandhe_median = _safe_time_s(fandhe_row.get("median_s"))
+                target_median = _safe_time_s(target_row.get("median_s"))
+                if fandhe_median is None or target_median is None:
+                    record["reason"] = "時間値が不正"
+                    records.append(record)
+                    continue
+                record["fandhe_median"] = fandhe_median
+                record["target_median"] = target_median
+                record["ratio"] = target_median / fandhe_median
+                # 旧形式（要素単位検証キー欠損）gemm 行は判定は行うが、
+                # 一度も要素単位検証を受けていない点を注記する（実装計画
+                # §3「旧形式（parity 未検証）行」）。
+                if (
+                    fandhe_row["task"] == "gemm" and parity_status(fandhe_row) == "unverified"
+                ) or (target_row["task"] == "gemm" and parity_status(target_row) == "unverified"):
+                    record["note"] = "未検証（旧形式）"
+                if fandhe_median <= target_median:
+                    record["status"] = "achieved"
+                else:
+                    record["status"] = "unmet"
+                records.append(record)
+    return records
+
+
+def target_gate_section(rel, records, target):
+    """target_gate() の結果を 1 ファイル分の Markdown 節へ整形する。
+
+    `device`/`task`/`mode` は `DEVICE_ORDER`/`GATE_TASKS`/
+    `_TRAIN_PHASES_MODES` allowlist 由来の値のみで構成される
+    `records`（`target_gate` が生成）から来るため、JSONL の生文字列を
+    未検証のまま Markdown へ流さない（既存 (b'') 節と同じ方針）。
+    """
+    lines = [f"### 集計対象: {rel}\n"]
+    lines.append(
+        f"| タスク | デバイス | N | fandhe-ai 中央値 | {target} 中央値 | "
+        "比（target/fandhe） | 判定 | 備考 |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    unmet = []
+    undeterminable = []
+    for rec in records:
+        device_label = DEVICE_LABEL.get(rec["device"], rec["device"])
+        size_label = str(rec["size"]) if rec["size"] is not None else "-"
+        key = f"{rec['task']}/{device_label}"
+        if rec["size"] is not None:
+            key += f"/N={rec['size']}"
+        if rec["status"] == "undeterminable":
+            fandhe_col = (
+                f"{fmt_ms(rec['fandhe_median'])}（{rec['fandhe_mode']}）"
+                if rec["fandhe_median"] is not None
+                else "-"
+            )
+            target_col = (
+                f"{fmt_ms(rec['target_median'])}（{rec['target_mode']}）"
+                if rec["target_median"] is not None
+                else "-"
+            )
+            ratio_col = "-"
+            status_col = f"判定不能（{rec['reason']}）"
+            undeterminable.append(f"{key}（{rec['reason']}）")
+        else:
+            fandhe_col = f"{fmt_ms(rec['fandhe_median'])}（{rec['fandhe_mode']}）"
+            target_col = f"{fmt_ms(rec['target_median'])}（{rec['target_mode']}）"
+            ratio_col = f"{rec['ratio']:.2f} 倍"
+            if rec["status"] == "achieved":
+                status_col = "達成"
+            else:
+                status_col = "**未達**"
+                unmet.append(key)
+        note_col = rec["note"] or ""
+        lines.append(
+            f"| {rec['task']} | {device_label} | {size_label} | {fandhe_col} | "
+            f"{target_col} | {ratio_col} | {status_col} | {note_col} |"
+        )
+    lines.append("")
+    lines.append("未達一覧:")
+    lines.extend([f"- {u}" for u in unmet] if unmet else ["- なし"])
+    lines.append("")
+    lines.append("判定不能一覧:")
+    lines.extend([f"- {u}" for u in undeterminable] if undeterminable else ["- なし"])
+    lines.append("")
+    return lines
 
 
 # イシュー #1009: `bench-fandhe --task train --phases` が出力する
@@ -1250,6 +1511,18 @@ def main():
             "終了コード 2 を返す（既定は 0 のまま警告のみ）"
         ),
     )
+    parser.add_argument(
+        "--target",
+        choices=GATE_TARGET_CHOICES,
+        default=None,
+        help=(
+            "指定フレームワーク（candle/burn）と fandhe-ai の GEMM/学習/推論"
+            "中央値を同一ファイル内で突合し、目標達成ゲート節を出力する"
+            "（イシュー #1051）。未達または判定不能が 1 件以上あれば"
+            "終了コード 3 を返す（`--strict` の無効データ判定〈終了コード 2〉"
+            "と両方該当する場合はデータ無効の解消を優先し 2 を返す）"
+        ),
+    )
     args = parser.parse_args()
 
     inputs = args.inputs or sorted(glob.glob(os.path.join(HERE, "results/raw/*.jsonl")))
@@ -1263,6 +1536,8 @@ def main():
     any_parity_unverified = False
     any_train_reuse_invalid = False
     any_train_phases_invalid = False
+    gate_section_lines_by_file = []
+    gate_records_all = []
     for path in inputs:
         rows = load_rows(path)
         if not rows:
@@ -1283,6 +1558,15 @@ def main():
         any_parity_unverified = any_parity_unverified or has_unverified
         any_train_reuse_invalid = any_train_reuse_invalid or has_train_reuse_invalid
         any_train_phases_invalid = any_train_phases_invalid or has_train_phases_invalid
+
+        # イシュー #1051: 目標達成ゲート。--target 指定時のみ計算する
+        # （既存の呼び出し元は --target を渡さないため非破壊。モジュール
+        # docstring・実装計画 §3 参照）。
+        if args.target:
+            rel = os.path.relpath(path, HERE)
+            gate_records = target_gate(rows, args.target)
+            gate_section_lines_by_file.append(target_gate_section(rel, gate_records, args.target))
+            gate_records_all.extend(gate_records)
 
     # 入力 JSONL と同一ディレクトリからのみ skipped*.log を収集する。HERE
     # 固定 glob だと、別ディレクトリの JSONL を明示指定して集計した際に
@@ -1307,6 +1591,24 @@ def main():
     if not any_skip:
         lines.append("- なし（skipped*.log は空または不在）")
     lines.append("")
+
+    gate_unmet = 0
+    gate_undeterminable = 0
+    if args.target:
+        lines.append(
+            f"## 目標達成ゲート（--target {args.target}。イシュー #1051）\n"
+        )
+        for gate_section_lines in gate_section_lines_by_file:
+            lines.extend(gate_section_lines)
+        gate_achieved = sum(1 for r in gate_records_all if r["status"] == "achieved")
+        gate_unmet = sum(1 for r in gate_records_all if r["status"] == "unmet")
+        gate_undeterminable = sum(
+            1 for r in gate_records_all if r["status"] == "undeterminable"
+        )
+        lines.append(
+            f"**全体集計**: 達成 {gate_achieved} / 未達 {gate_unmet} / "
+            f"判定不能 {gate_undeterminable}\n"
+        )
 
     text = "\n".join(lines) + "\n"
     if args.out:
@@ -1356,7 +1658,30 @@ def main():
                 "時間値の不正。イシュー #1009）",
                 file=sys.stderr,
             )
+        # イシュー #1051 実装計画 §3: --strict の無効データ判定（終了コード
+        # 2）と目標達成ゲートの未達／判定不能（終了コード 3）が両方該当
+        # する場合は、壊れたデータ上の達成判定は信用できないためデータ
+        # 無効の解消を優先させる（2 を返す。ゲート結果自体は上で Markdown
+        # へ出力済みのため情報は失われない）。
         return 2
+
+    if args.target and (gate_unmet > 0 or gate_undeterminable > 0):
+        print(
+            f"error: --target {args.target}: 未達 {gate_unmet} 件 / "
+            f"判定不能 {gate_undeterminable} 件",
+            file=sys.stderr,
+        )
+        for r in gate_records_all:
+            if r["status"] not in ("unmet", "undeterminable"):
+                continue
+            label = f"{r['task']}/{r['device']}"
+            if r["size"] is not None:
+                label += f"/N={r['size']}"
+            if r["status"] == "unmet":
+                print(f"  unmet: {label}", file=sys.stderr)
+            else:
+                print(f"  undeterminable: {label}（{r['reason']}）", file=sys.stderr)
+        return 3
     return 0
 
 
