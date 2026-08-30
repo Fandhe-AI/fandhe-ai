@@ -86,8 +86,9 @@ fresh ≒ reuse である。
 
 イシュー #1025 の実装セッションでは `docs/real-hardware-verification-env.local.md`
 （`.gitignore` 対象・実ホスト名）が存在し、DGX Spark GB10 実機（`CUDA_NODE` 変数。
-`docs/real-hardware-verification-env.md` §2.4）へ到達できた。§5 の全計測を実機で実行し
-§6 に記録する。#926/#945・#534 で確立した「診断コード + ドキュメント骨子を先行整備し
+`docs/real-hardware-verification-env.md` §2.4）へ到達できた。§5.1〜§5.3 の計測を実機で実行し
+§6 に記録する（§5.4 の H2 判別用環境変数注入・`strace` は §6.4・§9 のとおり未実施）。
+#926/#945・#534 で確立した「診断コード + ドキュメント骨子を先行整備し
 実機セッションへ引き継ぐ」構成が、本イシューで実際に引き継がれ完結した形になる。
 
 ## 5. 計測方法
