@@ -153,6 +153,95 @@
   を参照（本リポの開発環境が Linux のため実機検証未完・再現コマンドの
   記録に留まる）。
 
+#### 2.2.1 学習経路への結線（イシュー #1044）
+
+`gemm_bias_act`（上記）は §2.2 実装当初は GEMM epilogue の融合カーネルと
+して用意されていたが、学習 forward（`fandhe_ai_facade::compat::
+sequential::Sequential::forward`／`SequentialVars::forward`）からは
+どこからも呼ばれておらず、`Linear` → `ReLU` は「`matmul`（`Op::MatMul`）
+→ `add`（`Op::Add`。bias の broadcast leaf `[n]` は `run_fused` の
+`ShapeMismatch` 対象外形状のため per-op フォールバック）→ `relu`
+（別ノードの `Op::Relu`）」という 3 カーネル起動のままだった。イシュー
+#1044 で以下のとおり結線した。
+
+- **autodiff 側**: `fandhe_ai_autodiff::nn::linear::LinearVars::
+  forward_with_activation(input, act)`（新設）が `Var::linear_act`
+  （`var.rs`。`matmul`／`add` と同じ「①クロステープ検査 → ②shape 検査
+  〈`matmul_out_shape`＋`broadcast_shape`〉→ ③forward 値計算 →
+  ④ノード記録」の順で処理）経由で `tape.ops().gemm_bias_act` を直接
+  呼び、`Op::LinearAct { input, weight, bias, act }`（新設・非
+  elementwise・常時実体化）として 1 ノードで記録する。`Op::
+  LinearResident`（デバイス常駐 weight。#1022）にも `act: Activation`
+  フィールドを追加し、`DeviceParamStore::linear_forward_with_activation`
+  が `BackendOps::gemm_resident_rhs_act`（新設。`tensor-core` の
+  デフォルト実装は `gemm_resident_rhs` → `act == Relu` なら `self.relu`
+  の非破壊合成。CPU（`backend-cpu::ops::CpuBackendOps`）はこれを
+  `gemm_blis_bias_act_parallel` へ `act` を直接渡すカーネル内融合で
+  オーバーライド済み）へ委譲する。
+- **backward 側**: `Op::LinearAct`／`Op::LinearResident`（`act ==
+  Relu`）の VJP（`grad.rs`）は、前活性化を再計算せず forward 記録値
+  `out_value`（bias 加算・activation 適用後の値）から
+  `out_value > 0` でマスクを復元する。既存 `Op::Relu` の VJP は
+  `x > 0`（`x` は前活性化）でマスクするが、`relu(x) = max(x, 0)` の
+  性質上 `x > 0 ⇔ relu(x) > 0` かつ非正 `x`・NaN 入力のいずれも
+  両基準で同じ「マスク不成立（勾配 0）」に揃うため、両者は同一の
+  劣勾配規約を表す（`grad.rs::vjp` の `Op::LinearResident`／
+  `Op::LinearAct` 分岐コメント参照）。
+- **層対検出は `Sequential` 側**: `fandhe_ai_autodiff::nn::module::
+  Module::as_relu()`（新設フック。既定 `false`・`Relu` のみ `true`。
+  `as_linear` と同じ明示列挙方式）を使い、`Sequential::forward`・
+  `SequentialVars::forward`・`forward_from_flat_leaves`（resident 版）
+  が `Linear` 層に出会うたびに「次層が `ReLU` か」を先読みする。
+  **融合対象は `Linear` → `ReLU` の組に限定する**（レビュー指摘
+  #1079・PRRT_kwDOTuUCJc6dgIt-。策定当初は「次層が `ReLU` でなくても
+  `Activation::None` で bias のみ融合する」設計だったが、CPU の
+  `gemm_bias_act`／`gemm_resident_rhs_act` は `bias.shape() == [n]`
+  （通常経路）で融合カーネル `gemm_blis_bias_act_parallel` を直接呼ぶ
+  ため、`docs/inference-forward-fixed-cost-design.md` §3.1 が
+  `forward_host` について明記する bit-exactness 契約（「融合 epilogue
+  はカーネル内 tiling 次第で加算順序が変わりうるため旧経路〈`gemm` →
+  `add`〉と同じ演算列を使う」）を学習 forward 側で無条件に破ることに
+  なっていた）。`ReLU` が続く場合のみ `Activation::Relu` を渡して
+  `ReLU` 層自体のノード追加をスキップし、`ReLU` が続かない単体
+  `Linear`・`Linear` → `Sigmoid`／`Tanh` は従来どおり非融合合成
+  （`LinearVars::forward`。`matmul` → `add`）へ委譲する。ただし
+  `forward_from_flat_leaves`（resident 版）が呼ぶ
+  `DeviceParamStore::linear_forward_with_activation` は `Activation::
+  None` でも `gemm_resident_rhs_act` → 内部で `gemm_resident_rhs` を
+  呼ぶだけの非破壊拡張（CPU は `gemm_resident_rhs_impl` を同一引数で
+  共有、`tensor-core` デフォルトも `gemm_resident_rhs` を呼んだ後
+  `act == None` ならそのまま返す）であり `DeviceParamStore::
+  linear_forward`（非 act 版）と数値的に同一のため、この経路は
+  `Activation::None` のままでよい（数値経路の分岐は不要）。
+  `Sigmoid`／`Tanh` は `Activation` に対応する variant を持たないため
+  従来どおり別ノード（融合対象外）。
+- **効果（層あたりカーネル起動数。CPU・host 常駐 forward）**:
+  `matmul`＋`add`＋`relu` の 3 起動 → `gemm_bias_act` の 1 起動へ
+  削減（デバイス常駐 forward は `gemm_resident_rhs`＋`relu` の 2 起動 →
+  `gemm_resident_rhs_act` の 1 起動）。機械検証は
+  `crates/facade/src/compat/sequential.rs` の
+  `sequential_forward_fuses_linear_relu_into_single_gemm_bias_act_launch`
+  （`CountingOps` による `BackendOps` 呼び出し回数の直接カウント）。
+  勾配の bit 一致検証は同ファイルの
+  `sequential_vars_forward_with_activation_grad_matches_manual_composition`
+  と `crates/autodiff/src/optim/device_store.rs` の
+  `linear_forward_with_activation_relu_grad_matches_manual_relu_composition`。
+  CPU 実測は `docs/perf/train-linear-epilogue-fusion.md` を参照。
+- **スコープ外（#1044 時点）**: CUDA／Metal は `gemm_resident_rhs_act`
+  をオーバーライドせず、`tensor-core` のデフォルト（`gemm_resident_rhs`
+  ＋ `relu` の 2 起動）にフォールバックする（値は正しいが 1 起動には
+  ならない）。両バックエンドの常駐 GEMM カーネル入口
+  （CUDA `launch_tiled_bias_act_f32_resident`・Metal
+  `dispatch_strided_bias_act_prepared`）はいずれも `act`／`act_relu`
+  を既に受け取れるため、後続イシューでの結線は型検査（`make
+  build-cross`／`check-cross-metal-tests`）のみで済む見込み（実機
+  必須の poison／generation 検査を含む既存コードへの変更は本イシュー
+  では見送った）。backward 側の GEMM（`grad.rs::matmul_vjp` が
+  `eval::matmul` をホスト直接計算している点）の `BackendOps` 経由化・
+  転置ゼロコピーはイシュー #1046 の領域。`Module::forward_host`
+  （推論の tape 不要経路。#1028 の bit-exact 契約）への
+  `gemm_bias_act` 適用は未着手。
+
 ## 3. 限界
 
 融合が働かない、または連鎖が分断されるパターンを列挙する。いずれも

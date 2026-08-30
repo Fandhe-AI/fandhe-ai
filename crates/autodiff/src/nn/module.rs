@@ -83,6 +83,21 @@ pub trait Module {
     fn as_linear_mut(&mut self) -> Option<&mut Linear> {
         None
     }
+
+    /// この層が `ReLU` かどうか（イシュー #1044・`docs/kernel-fusion.md`
+    /// §2.2「学習経路への結線」）。`as_linear` と同じ明示列挙方式
+    /// （`docs/compat-api-scope.md` §1 の閉集合維持。`Any` ダウンキャスト
+    /// は使わない）で、`fandhe_ai_facade::compat::sequential::Sequential`
+    /// が forward 中に「次層が `ReLU` か」を先読みし、`Linear` 層を
+    /// `LinearVars::forward_with_activation(input, Activation::Relu)`
+    /// （1 ノード・1 カーネル起動）へ結線して `ReLU` 層自体をスキップ
+    /// するかどうかを判定する。既定は `false`（`Linear`／
+    /// `Sigmoid`／`Tanh` はオーバーライドしない。`Sigmoid`／`Tanh` は
+    /// `BackendOps::gemm_bias_act` の `Activation` に対応する variant を
+    /// 持たないため融合対象外）。
+    fn as_relu(&self) -> bool {
+        false
+    }
 }
 
 /// `Linear::bind(tape)` で当該ステップの葉ノードを登録してから
@@ -142,6 +157,10 @@ impl Module for Linear {
 impl Module for Relu {
     fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         Ok(Relu::forward(self, input))
+    }
+
+    fn as_relu(&self) -> bool {
+        true
     }
 
     /// `Var::relu()`（`nn::activation::Relu::forward`）が呼ぶ

@@ -478,6 +478,49 @@ pub trait BackendOps {
         ))
     }
 
+    /// [`Self::gemm_resident_rhs`] の activation 融合版（イシュー #1044・
+    /// `docs/kernel-fusion.md` §2.2）。学習 forward の `Linear` 層に続く
+    /// `ReLU` 層をこの epilogue へ折り込み、層 1 個あたりのカーネル
+    /// 起動数を 2（gemm+bias／relu）から 1（gemm+bias+act）へ減らす。
+    /// 呼び出し元は `fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore::linear_forward_with_activation`（次層が
+    /// `ReLU` の場合のみ `Activation::Relu` を渡し、それ以外は
+    /// `Activation::None` を渡す。bias のみの融合は既存
+    /// `gemm_resident_rhs` と同じ）。
+    ///
+    /// `bias` は `Some` の場合 `[n]`（`w` の列数）への行方向複製のみ
+    /// 対応する（[`Self::gemm_resident_rhs`] と同じ厳密一致契約）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    ///
+    /// `gemm_bias_act`（`gemm` → `add` → `act` の 3 段合成）と同型の
+    /// フェイルセーフ合成: [`Self::gemm_resident_rhs`]（bias 融合のみ・
+    /// `act` なし）を呼んだ後、`act == Relu` なら結果へ
+    /// `self.relu`（ホスト常駐 `Tensor` に対する elementwise。実体化済み
+    /// のためこの合成は追加のデバイス常駐制約を破らない）を適用する。
+    /// `gemm_resident_rhs` 自体が `Unsupported` を返すバックエンド
+    /// （本メソッドをオーバーライドしていないバックエンド）では、この
+    /// デフォルトも同じ `Unsupported` を透過的に伝播する。CPU
+    /// バックエンド（`backend-cpu::ops::CpuBackendOps`）はこのデフォルトを
+    /// カーネル内融合実装（`gemm_blis_bias_act_parallel` へ `act` を
+    /// 直接渡す）でオーバーライドする。CUDA／Metal は本イシューの
+    /// スコープ外（実機検証環境が必要。`launch_tiled_bias_act_f32_
+    /// resident`／`dispatch_strided_bias_act_prepared` は既に `act_relu`
+    /// を受け取れるため、後続イシューでの結線は型検査のみで済む）。
+    fn gemm_resident_rhs_act(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out = self.gemm_resident_rhs(a, w, bias)?;
+        match act {
+            Activation::None => Ok(out),
+            Activation::Relu => self.relu(&out),
+        }
+    }
+
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
     /// #1023「R3」）。
     ///
