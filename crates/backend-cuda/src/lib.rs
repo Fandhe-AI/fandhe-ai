@@ -643,13 +643,22 @@ pub mod diagnostics {
         (kernels_mma::MMA_BM, kernels_mma::MMA_BN)
     }
 
-    /// tiled f32（本番既定 f32 経路 `TILED_F32`。イシュー #1034 の swizzle
-    /// 診断対象）カーネルのブロックタイル形状 `(block_m, block_n)`。
-    /// `examples/gemm_profile_target.rs` の `Path::TiledF32Swizzle`
-    /// occupancy 概算専用（`wmma_tf32_opt_block_tile`・`mma_f16_block_tile`
-    /// と同じ理由）。
+    /// tiled f32（本番既定 f32 経路 `TILED_F32`。イシュー #1030／#1034 の
+    /// occupancy 診断対象）カーネルのブロックタイル形状
+    /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
+    /// `Path::TiledF32`／`Path::TiledF32Swizzle` occupancy 概算専用
+    /// （`wmma_tf32_opt_block_tile`・`mma_f16_block_tile` と同じ理由）。
+    ///
+    /// `crate::kernels::TILE`（32。レジスタブロッキング導入前の旧
+    /// 素朴カーネルが使っていたタイル一辺）ではなく
+    /// `crate::kernels::TILED_F32_BM`／`TILED_F32_BN`（64。#1032 の
+    /// レジスタブロッキング適用後、実際に起動する `launch_tiled_f32`
+    /// が使うブロックタイル一辺。`gemm.rs` の `tiled_f32_launch_config`
+    /// 参照）を返す。旧定数のままだと `actual_blocks`／`blocks_per_sm`
+    /// の occupancy 見積りが実カーネルの 4 倍（(64/32)^2）過大になり、
+    /// ncu 実測との突合が成立しない（Cursor Bugbot 指摘: PR #1090）。
     pub fn tiled_f32_block_tile() -> (u32, u32) {
-        (crate::kernels::TILE, crate::kernels::TILE)
+        (crate::kernels::TILED_F32_BM, crate::kernels::TILED_F32_BN)
     }
 
     /// イシュー #499: L2 再利用のためのタイル→SM 割り当てスウィズルの
