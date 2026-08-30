@@ -1646,9 +1646,14 @@ mod tests {
     /// `gemm_rejects_on_poisoned_ordinal_before_device_handle_is_attempted`・
     /// `gemm_resident_rhs_rejects_on_poisoned_ordinal_even_via_trivial_empty_shape_early_return`
     /// が既にカバーする `gemm`／`gemm_resident_rhs` を除く、残る公開演算
-    /// エントリ（`add`〈`mul`／`relu`／`exp`／`tanh` は同じ
-    /// `elementwise_binary`／`elementwise_unary` 経路を通るためこの 1 本で
-    /// 代表する〉・`sgd_step_device`・`gemm_resident_lhs`・
+    /// エントリ（`add`〈`mul` は同じ `elementwise_binary` 経路を通るため
+    /// 併せて代表する。`relu`〈`exp`／`tanh` は同じ `elementwise_unary`
+    /// 経路を通るため併せて代表する〉は下記
+    /// `relu_rejects_on_poisoned_ordinal_before_device_handle_is_attempted`
+    /// で個別に検証する（codex-review 指摘・PR #1067。`elementwise_binary`
+    /// と `elementwise_unary` はディスパッチ関数自体が分かれているため
+    /// `add` 側の検証だけでは `elementwise_unary` 経路を通らない）〉・
+    /// `sgd_step_device`・`gemm_resident_lhs`・
     /// `release_cached_device_memory`）が、poison 済み ordinal では実処理
     /// （driver 呼び出し）へ一切入らず `BackendError::DeviceContextPoisoned`
     /// を即座に返すことを確認する（GPU 不要・CI 常時実行）。
@@ -1684,7 +1689,28 @@ mod tests {
         let result = cuda.add(&a, &b);
         assert!(
             matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
-            "poison 済み ordinal では add（elementwise_binary 経由。mul／relu／exp／             tanh も同一経路）は device_handle_raw() が試行される前に拒否されるはず:             {result:?}"
+            "poison 済み ordinal では add（elementwise_binary 経由。mul も同一経路）は             device_handle_raw() が試行される前に拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn relu_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        // codex-review 指摘（PR #1067）: 上記 `add_rejects_on_poisoned_
+        // ordinal_before_device_handle_is_attempted` は `elementwise_binary`
+        // 経路のみを通り、`relu`／`exp`／`tanh` が使う `elementwise_unary`
+        // 経路は未検証だった。`elementwise_binary`／`elementwise_unary` は
+        // ともに `with_driver_call` を経由する同一のゲート構造だが、
+        // ディスパッチ関数自体が分かれているため実際に両方を通しておく。
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(vec![1.0, -2.0], &[1, 2]).expect("valid tensor");
+
+        let result = cuda.relu(&a);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では relu（elementwise_unary 経由。exp／tanh も             同一経路）は device_handle_raw() が試行される前に拒否されるはず:             {result:?}"
         );
     }
 

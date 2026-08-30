@@ -125,7 +125,23 @@ fn invalidate_with_real_stream_sync_drains_pending_launches_and_reactivates() {
     // 値の正しさ自体は sync クロージャの呼び出し有無を判別しないが、
     // 「実 CUDA クロージャを渡した呼び出しが少なくとも壊れていない」
     // ことの確認として残す）。
-    let host: Vec<f32> = stream.clone_dtoh(&param).expect("readback must succeed");
+    //
+    // Cursor Bugbot 指摘（PR #1067）: `clone_dtoh` は `cuMemcpyDtoHAsync`
+    // を発行する非同期 API であり（`memory.rs` 冒頭コメント「唯一の同期
+    // 点」参照）、`invalidate_with` に渡した `sync` クロージャは先行する
+    // SGD launch 群のみを待つ（`invalidate_with` 復帰時点の保証範囲）。
+    // この D2H コピー自体の完了は別途保証されないため、`memory.rs::
+    // readback`（本クレートの D2H 読み出し全経路が共有する唯一の同期点）
+    // と同じ `clone_dtoh` → `synchronize` の順（逆順ではコピー自体の
+    // 完了を待てない。同関数コメント参照）でホスト側 `Vec` を確定させて
+    // から検査する。
+    let host: Vec<f32> = {
+        let host = stream.clone_dtoh(&param).expect("readback must succeed");
+        stream
+            .synchronize()
+            .expect("post-readback synchronize must succeed");
+        host
+    };
     let expected = -(STEPS as f32);
     for (i, &v) in host.iter().enumerate().take(8) {
         assert!(
