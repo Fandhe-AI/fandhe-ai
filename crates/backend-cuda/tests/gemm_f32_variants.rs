@@ -56,8 +56,13 @@ enum ExpectedCategory {
     AlwaysSimple,
     /// アラインメント済み・K 十分・grid が現実的などの GPU の SM 数も
     /// 大きく上回る大形状。`blocks < num_sms`（SplitK の必要条件）には
-    /// 該当し得ないため、DoubleBuffer が利用可能なら必ず DoubleBuffer、
-    /// 不可（NVRTC コンパイル失敗）なら Simple へ fail-soft する。
+    /// 該当し得ないため SplitK は対象外だが、DoubleBuffer 自体の必要条件
+    /// （`blocks >= num_sms` かつ `num_sms` が既知）は形状だけでは
+    /// 保証されない（イシュー #1035 PR #1073 Bugbot 指摘: `num_sms` が
+    /// `None`〈実機 SM 数取得失敗〉のときはヒューリスティックが常に
+    /// Simple を返すため、DoubleBuffer が利用可能でも Simple へ fail-soft
+    /// する）。`assert_matches_heuristic` 側で `num_sms` と `blocks` の
+    /// 大小関係も検証する。
     DoubleBufferIfAvailable,
     /// K 支配的非正方（grid が SM 数を埋めきれない可能性がある形状）。
     /// `blocks` と実機 SM 数の大小関係はハードウェア依存のため、期待値は
@@ -103,18 +108,30 @@ fn assert_matches_heuristic(
             );
         }
         ExpectedCategory::DoubleBufferIfAvailable => {
-            let expected = if double_buffer_available {
+            // 実際のセレクタ（`gemm_variant.rs::select_f32_gemm_variant`）
+            // の DoubleBuffer 分岐は `blocks >= num_sms` かつ `num_sms` が
+            // 既知であることも要求する。テスト形状は `blocks` を十分大きく
+            // 選んでいるため実機では通常 `blocks >= num_sms` が成立するが、
+            // `num_sms` 取得失敗（`None`）や SM 数が極端に大きい環境では
+            // 成立しない可能性があるため、ここで動的に検証する（イシュー
+            // #1035 PR #1073 Bugbot 指摘: これを見ずに
+            // `double_buffer_available` のみで期待値を決めると、fail-soft
+            // で Simple に落ちた場合を SplitK コンパイル失敗と誤認して
+            // アサーションが失敗しうる）。
+            let blocks = expected_blocks(m, n);
+            let grid_fills_sms = num_sms.is_some_and(|sms| blocks >= u64::from(sms));
+            let expected = if double_buffer_available && grid_fills_sms {
                 GemmVariantKind::DoubleBuffer
             } else {
                 GemmVariantKind::Simple
             };
             assert_eq!(
                 actual, expected,
-                "{label}: blocks が現実的などの SM 数も上回る大形状は \
-                 SplitK の対象になり得ないため、double_buffer_available=\
-                 {double_buffer_available} のとき actual={expected:?} を \
-                 期待したが actual={actual:?} だった（fail-soft \
-                 フォールバックが本来のカーネルを覆い隠していないか確認する）"
+                "{label}: blocks({blocks}) と num_sms({num_sms:?}) の関係・\
+                 double_buffer_available={double_buffer_available} から \
+                 actual={expected:?} を期待したが actual={actual:?} だった \
+                 （fail-soft フォールバックが本来のカーネルを覆い隠して \
+                 いないか確認する）"
             );
             exercised.double_buffer = matches!(actual, GemmVariantKind::DoubleBuffer);
         }
