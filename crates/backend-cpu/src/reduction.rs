@@ -608,10 +608,11 @@ mod tests {
                 "max が PARALLEL_THRESHOLD 境界 n={n} でスレッド数間に不一致"
             );
 
-            // 逐次経路（n < threshold）・並列経路（n >= threshold）いずれも
-            // CHUNK 単位の逐次 fold をチャンク番号順に結合する共通構造の
-            // ため、`chunk_boundary_deterministic_sum` と同じ naive 実装
-            // （本実装と同一の累積順序）との bit 一致で経路自体の正しさも
+            // sum_slice は常に par_chunks 経由（閾値による逐次/並列分岐は
+            // 未導入。モジュール doc「小サイズ直列フォールバック」参照）で
+            // CHUNK 単位の逐次 fold をチャンク番号順に結合する構造のため、
+            // `chunk_boundary_deterministic_sum` と同じ naive 実装
+            // （本実装と同一の累積順序）との bit 一致で当該構造の正しさも
             // 確認する。
             let naive = data
                 .chunks(CHUNK)

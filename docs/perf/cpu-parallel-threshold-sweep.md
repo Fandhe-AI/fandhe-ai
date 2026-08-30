@@ -58,45 +58,46 @@ docs に無かった。reduction（`crates/backend-cpu/src/reduction.rs`）に�
 こと（上記「計測環境」節）を踏まえ、現時点では実測記録に留め値は
 保守的に維持する。
 
-## 実装: reduction への直列フォールバック追加
+## reduction への直列フォールバックは未導入
 
 `crates/backend-cpu/src/reduction.rs` の `sum_slice`／`max_slice`／
-`axis_reduce` に `crate::elementwise::PARALLEL_THRESHOLD` を再利用した
-直列フォールバックを追加した（マジックナンバー重複回避。既存の
-softmax／rmsnorm と同じ「`elementwise` の定数を re-export せず
-`pub(crate)` で直接参照する」パターン踏襲）。
+`axis_reduce` へ `crate::elementwise::PARALLEL_THRESHOLD` を再利用した
+直列フォールバックを追加する実装を一度試みたが、`gemm_blis/mod.rs` の
+`should_serialize`（イシュー #811・#1027）と同じ「reduction 専用の
+実機直列/並列比較を実施していないうちは攻めた値を本番結線しない」
+方針（PR #758 前例）に倣い、本番未結線へ差し戻した（`crates/
+backend-cpu/src/reduction.rs` モジュール doc「小サイズ直列フォール
+バック（未導入）」節参照）。`elementwise::PARALLEL_THRESHOLD` は
+要素ごと独立・アキュムレータなしの契約に対する値であり、reduction
+（累積を伴う別契約）へそのまま転用してよい根拠が実測として無いため。
 
-- **`sum_slice`／`max_slice`（全縮約 `dim=None`）**: `data.len() <
-  PARALLEL_THRESHOLD` なら `CHUNK`（4,096）単位の**逐次** fold へ
-  フォールバックする。チャンク分割・チャンク間結合順序は並列版と
-  同一構造（`.into_iter()` に置き換えるだけ）のため、逐次実行は並列
-  実行と bit 完全一致する（モジュール doc「決定性契約」・「小サイズ
-  直列フォールバック」節参照）
-- **`axis_reduce`（軸指定 `dim=Some(axis)`）**: 縮約軸を含む総入力要素数
-  （`outer × inner × axis_len`。飽和乗算で安全側〈並列側〉へ倒す）が
-  閾値未満なら出力要素側の `into_par_iter()` を `Iterator` の逐次
-  `map` へ置き換える。出力要素ごとの計算は元々独立であり縮約軸自体は
-  常に逐次累積のため、こちらも bit 完全一致を保つ
-- **`mean` は `sum` 経由のため自動的に適用される**
+- **現状**: `sum_slice`／`max_slice`（全縮約 `dim=None`）は常に
+  `par_chunks` によるチャンク並列、`axis_reduce`（軸指定
+  `dim=Some(axis)`）は常に出力要素側の `into_par_iter()` を経由する
+  （サイズによる分岐なし）
 - **テスト**: `parallel_threshold_boundary_deterministic_full_reduction`
-  （`sum`/`max` の全縮約。閾値直下・直上でシングル／4 スレッドプール間
-  の to_bits() 完全一致、および `chunk_boundary_deterministic_sum` と
-  同じ naive 実装との bit 一致を確認）・
+  （`sum`/`max` の全縮約。`PARALLEL_THRESHOLD` 直下・直上という代表
+  サイズでシングル／4 スレッドプール間の to_bits() 完全一致、および
+  `chunk_boundary_deterministic_sum` と同じ naive 実装との bit 一致を
+  確認。reduction 自体は閾値で分岐しないため、これは常時並列経路の
+  決定性を確認するテストである）・
   `parallel_threshold_boundary_deterministic_axis_reduction`（軸指定
   reduction の同種確認。`outer=4` 固定で `axis_len` を調整し
-  `outer*inner*axis_len` が閾値境界を跨ぐ shape を構成）を
+  `outer*inner*axis_len` が代表サイズ境界を跨ぐ shape を構成）を
   `crates/backend-cpu/src/reduction.rs` に追加した
+- reduction 専用の M4 Max 実機直列/並列比較を実施し閾値を確定・
+  ユーザー承認を得られれば、直列フォールバックの導入を再検討する
+  余地がある（上記モジュール doc 参照）
 
 ## 受け入れ条件との突合
 
 - (a) 閾値スイープの実測記録: 本 doc「実測: elementwise 閾値スイープ」
-- (b) 小形状ベンチで後退なし・大形状で非後退: reduction は新規
-  フォールバックのため既存テスト（`chunk_boundary_deterministic_sum`／
-  `chunk_boundary_deterministic_max_and_mean`）が全通過することで
-  大形状（閾値超）の非後退を確認済み。小形状側は新規閾値境界テストで
-  bit 完全一致（＝性能面の後退があっても数値結果は不変という設計の
-  ため、「後退なし」は数値的性質として保証される。elementwise は
-  実装済みのため変更なし）
+- (b) 小形状ベンチで後退なし・大形状で非後退: reduction は直列
+  フォールバック未導入（常に並列経路）のため後退の余地がない。
+  追加した決定性テスト（`chunk_boundary_deterministic_sum`／
+  `chunk_boundary_deterministic_max_and_mean` に加え上記 2 テスト）が
+  全通過することで並列経路の bit 完全一致を確認済み。elementwise は
+  実装済みのため変更なし
 
 ## 残課題（PR 本文にも記載）
 

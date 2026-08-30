@@ -1417,12 +1417,15 @@ mod tests {
         assert!(gemm_blis(&a, &b, &mut c, 0, 0, 0).is_ok());
     }
 
-    // --- ワークロード閾値直列フォールバック（イシュー #811・#1027 で本番結線） ---
+    // --- ワークロード閾値直列フォールバック（イシュー #811・#1027。
+    //     `#[cfg(test)]` 限定の判定ロジック検証） ---
     //
-    // `should_serialize` は本番公開入口（`gemm_blis_parallel`／
-    // `gemm_blis_bias_act_parallel`）から直接参照される（`should_serialize`
-    // ドキュメントコメント参照）。以下は境界形状で `gemm_naive`／非融合
-    // 経路と bit 完全一致することを検証する。乱数生成は `mod tests`
+    // `should_serialize` は `#[cfg(test)]` 限定であり本番公開入口
+    // （`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`）からは
+    // 未参照（`GEMM_THREADING_THRESHOLD` ドキュメントコメント「本番
+    // 未結線」参照）。以下はテスト専用の判定ロジック自体が実測表・
+    // 境界形状で `gemm_naive`／非融合経路と bit 完全一致することを
+    // 検証する（本番経路への影響はない）。乱数生成は `mod tests`
     // 既存の `xorshift32_vec`（`bench_harness` 非依存の理由は同関数の
     // ドキュメントコメント参照）を再利用する。
 
