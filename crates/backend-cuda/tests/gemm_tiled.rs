@@ -72,13 +72,20 @@ fn assert_tiled_f32_matches_cpu_reference(gemm: &CudaGemm, seed: u64, m: u32, n:
 
 /// 実機（DGX Spark GB10 等）必須の数値一致テスト。受け入れ条件の一部。
 ///
-/// 形状ケースは `kernels::TILE`（32）の境界を踏むケースを含める:
+/// 形状ケースは `kernels::TILE`（32。tiled f16 版の境界）に加え、イシュー
+/// #1032 で導入したレジスタブロッキング版 tiled f32
+/// （`TILED_F32_BM`/`BN`=64・`TILED_F32_BK`=16）の境界を踏むケースを含める:
 /// 128^3・512^3（TILE の整数倍）・64x96x128（非正方・TILE の整数倍）・
 /// 1x1x1（num_tiles=1 の最小ケース）・17x23x19・33x31x65（いずれも TILE の
 /// 非整数倍で、末尾タイルのゼロパディング分岐（`kernels.rs` の三項ガード）
-/// を実際に踏む）。CI self-hosted runner は CUDA toolkit 非搭載のため通常
-/// 実行ではスキップされる（実機での実行導線は `make test-ignored-cuda`。
-/// `Makefile`・`README.md` 参照。#36）。
+/// を実際に踏む）・**65x63x17**（BM/BN=64・BK=16 いずれも非整数倍で
+/// M/N/K 全方向の末尾タイル分岐を同時に踏む）・**64x64x16**（BM/BN/BK と
+/// ちょうど一致し num_tiles=1・レジスタタイル境界ぴったりの最小ケース）・
+/// **96x160x48**（BM/BN/BK いずれの整数倍でもある非正方の複数タイル
+/// ケースで、レジスタブロッキング積和ループを複数回・複数ブロックに
+/// わたって正しく積み上げることを確認する）。CI self-hosted runner は
+/// CUDA toolkit 非搭載のため通常実行ではスキップされる（実機での実行
+/// 導線は `make test-ignored-cuda`。`Makefile`・`README.md` 参照。#36）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn tiled_f32_matches_cpu_reference_across_shapes() {
@@ -92,6 +99,9 @@ fn tiled_f32_matches_cpu_reference_across_shapes() {
         (1, 1, 1),
         (17, 23, 19),
         (33, 31, 65),
+        (65, 63, 17),
+        (64, 64, 16),
+        (96, 160, 48),
     ];
     for (idx, &(m, n, k)) in cases.iter().enumerate() {
         assert_tiled_f32_matches_cpu_reference(&gemm, 2000 + idx as u64, m, n, k);
