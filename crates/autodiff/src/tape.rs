@@ -183,14 +183,18 @@ pub(crate) enum Op {
     /// 「カーネル融合・autodiff 実行モデルの強化」）。出力 shape は
     /// `TapeNode.shape` に構造的に保持済みのため payload には持たない。
     ///
-    /// **ホスト値を持たない**（`push_view` で登録。`TapeNode::value` は
-    /// 常に空の `OnceCell` のまま——burn-autodiff の `MemoryBound {
-    /// retro_forward }` checkpointing に相当し、forward 出力を保持せず
-    /// backward 時に親ノードから再導出する。`resolve_view`（下記）が
-    /// 実際の再導出ロジック）。`input` は push 前に層 1
-    /// （`materialize_fallible`）で実体化済み——これが `resolve_view` を
-    /// infallible にできる理由（`Var::reshape` doc・`resolve_view` doc
-    /// 参照）。
+    /// **ホスト値は登録時のみ空**（`push_view` で `value: OnceCell::new()`
+    /// のまま登録。burn-autodiff の `MemoryBound { retro_forward }`
+    /// checkpointing に相当し、forward 出力を保持せず backward 時に親
+    /// ノードから再導出する。`resolve_view`（下記）が実際の再導出
+    /// ロジック）。初回実体化後は `materialize_fallible`／
+    /// `materialize_non_fallible` が `resolve_view` の結果を自身の
+    /// `OnceCell` へ `set`／`get_or_init` でキャッシュする——view
+    /// ヘッダ（shape のみで値は伴わない軽量な結果）のキャッシュであり、
+    /// 融合対象の中間 `Tensor` 実体化を避ける本イシューの利得とは
+    /// 矛盾しない。`input` は push 前に層 1（`materialize_fallible`）で
+    /// 実体化済み——これが `resolve_view` を infallible にできる理由
+    /// （`Var::reshape` doc・`resolve_view` doc 参照）。
     ///
     /// **融合境界**: `is_lazy_elementwise() == false` のため
     /// `push_lazy`（elementwise 5 演算専用）を経由せず、
@@ -258,9 +262,11 @@ impl Op {
     }
 
     /// view 系ノード（`reshape`/`transpose`。イシュー #1047）かどうか。
-    /// `push_view` で登録され `TapeNode::value` を常に空のまま保つ
-    /// ノード種別を指し、`materialize_fallible`／`materialize_non_fallible`
-    /// はこの判定で `resolve_view`（下記）への分岐を選ぶ。
+    /// `push_view` で登録時は `TapeNode::value` を空のまま保つノード
+    /// 種別を指し、`materialize_fallible`／`materialize_non_fallible`
+    /// はこの判定で `resolve_view`（下記）への分岐を選ぶ（初回実体化後は
+    /// 同メソッドが `resolve_view` の結果を `value` へキャッシュする。
+    /// `Op::Reshape` doc 参照）。
     pub(crate) fn is_view(&self) -> bool {
         matches!(self, Op::Reshape { .. } | Op::Transpose { .. })
     }
@@ -844,6 +850,12 @@ fn unreachable_op_kind() -> FusedOpKind {
 /// それ以外（非 view で未実体化）は真の契約違反であり、`unwrap()`/
 /// `expect()` は使わず `shape` から構築した安全側フォールバック（全要素
 /// `0.0`）を返す（本番経路 panic 禁止方針）。
+///
+/// なお view ノードは `push_view` 登録時のみ `value` が空であり、
+/// `materialize_fallible`／`materialize_non_fallible` を経由して一度
+/// 実体化された後は同じ `OnceCell` に結果がキャッシュされるため、本関数
+/// が `resolve_view` へ分岐するのは未実体化のまま到達した場合のみ
+/// （`Op::Reshape` doc 参照）。
 fn lazy_leaf_value(nodes: &[TapeNode], n: usize) -> Tensor<f32> {
     let node = &nodes[n];
     match node.value.get() {
