@@ -308,6 +308,51 @@ impl<T: Element> Tensor<T> {
         self.storage.data.get(start..end)
     }
 
+    /// 非 contiguous な view でも、全 strides が非負である限り
+    /// `[offset, offset + span)`（`span = 1 + Σ (shape_i − 1)·stride_i`）を
+    /// storage から借用で返す（イシュー #1040）。
+    ///
+    /// `as_slice`（contiguous 限定）と異なり、転置 view（`transpose`/
+    /// `transpose2d` 後の負でない stride を持つ view）もカバーする。
+    /// `backend-metal::layout::classify_2d`／`collapse_leading_dims` が
+    /// 分類した view を、ホスト側で `contiguous()`（転置コピー）せずに
+    /// そのまま GPU バッファへアップロードするための受け渡し口として
+    /// 使う（呼び出し元がスライスの要素を `layout` 側の `ld`/`transposed`
+    /// 契約で再解釈する前提。単純な「先頭から numel 個」の意味を持つ
+    /// `as_slice` とは異なり、本メソッドが返すスライスはそれ自体では
+    /// 論理形状を表さない）。
+    ///
+    /// - `numel() == 0`: `Some(&[])`（`as_slice` と同じ契約）
+    /// - 負の stride を含む: `None`（`Tensor` の現行公開 API では
+    ///   `transpose`/`narrow`/`broadcast_to` のいずれも負 stride を
+    ///   生成しないため到達しないが、将来の負 stride 拡張に備えた
+    ///   fail-safe）
+    /// - `span` が storage 範囲を超える／`offset + span` がオーバー
+    ///   フローする: `None`
+    pub fn as_view_slice(&self) -> Option<&[T]> {
+        if self.numel() == 0 {
+            return Some(&[]);
+        }
+        // span = 1 + Σ (shape_i − 1) * stride_i（各軸が到達しうる最大
+        // オフセットの総和。dim == 0 の軸は `numel() == 0` の早期
+        // リターンで捕捉済みのはずだが、万一の不整合に備え
+        // `checked_sub` で防御する）。
+        let mut span: usize = 1;
+        for (&dim, &stride) in self.shape.iter().zip(self.strides.iter()) {
+            if stride < 0 {
+                return None;
+            }
+            let Some(dim_minus_one) = dim.checked_sub(1) else {
+                continue;
+            };
+            let extent = dim_minus_one.checked_mul(stride as usize)?;
+            span = span.checked_add(extent)?;
+        }
+        let start = self.offset;
+        let end = start.checked_add(span)?;
+        self.storage.data.get(start..end)
+    }
+
     /// 2 軸の strides を入れ替えるのみ。常に zero-copy。
     /// 転置後は非 contiguous になりうる（`is_contiguous()` で判定）。
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Result<Tensor<T>, ShapeError> {
@@ -870,6 +915,59 @@ mod tests {
         assert!(t.as_slice().is_some());
         let tt = t.transpose(0, 1).unwrap();
         assert!(tt.as_slice().is_none());
+    }
+
+    // イシュー #1040: `as_view_slice` は非 contiguous view（transpose 後）
+    // でも storage の借用を返す（`backend-metal::layout::classify_2d` が
+    // 分類した view をホスト側転置コピーなしで GPU へアップロードする
+    // 受け渡し口）。
+    #[test]
+    fn as_view_slice_contiguous_matches_as_slice() {
+        let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        assert_eq!(t.as_view_slice(), t.as_slice());
+    }
+
+    #[test]
+    fn as_view_slice_returns_some_after_transpose() {
+        let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let tt = t.transpose(0, 1).unwrap();
+        assert!(tt.as_slice().is_none());
+        // strides == [1, 3]（非負）のため view slice は storage 全体を
+        // 借用できる（storage 自体は転置されておらず、strides の入れ替え
+        // のみで表現されている）。
+        assert_eq!(
+            tt.as_view_slice(),
+            Some(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0][..])
+        );
+    }
+
+    #[test]
+    fn as_view_slice_after_narrow_offsets_correctly() {
+        let t = Tensor::<f32>::new((0..12).map(|v| v as f32).collect(), &[4, 3]).unwrap();
+        let n = t.narrow(0, 1, 2).unwrap();
+        // narrow(dim=0, start=1, len=2) → offset=3、shape=[2,3]、
+        // strides=[3,1] のままで、span = 1 + (2-1)*3 + (3-1)*1 = 6
+        // なので storage[3..9] を借用する。
+        assert_eq!(n.as_view_slice(), Some(&[3.0, 4.0, 5.0, 6.0, 7.0, 8.0][..]));
+    }
+
+    #[test]
+    fn as_view_slice_empty_tensor_is_empty_slice() {
+        let t = Tensor::<f32>::zeros(&[0, 3]).unwrap();
+        let tt = t.transpose(0, 1).unwrap();
+        assert_eq!(tt.as_view_slice(), Some(&[][..]));
+    }
+
+    #[test]
+    fn as_view_slice_broadcast_stride_zero_is_in_bounds() {
+        // stride 0（ブロードキャスト view）は非負のため `as_view_slice`
+        // は `None` を返さない契約（`classify_2d` 側が別途 stride 0 を
+        // 拒否するため GEMM 入口へは伝播しない。本メソッド自体は
+        // 「非負 stride なら範囲内借用を返す」という単純な契約に留める）。
+        let t = Tensor::<f32>::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let b = t.broadcast_to(&[2, 3]).unwrap();
+        assert_eq!(b.strides(), &[0, 1]);
+        assert_eq!(b.as_view_slice(), Some(&[1.0, 2.0, 3.0][..]));
     }
 
     // Bugbot 指摘（PR #215）: transpose／内側軸を長さ 0 まで narrow した後の

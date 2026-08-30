@@ -70,6 +70,7 @@ fandhe-ai/
     ├── backend-metal-mlx-classic-nax-decision.md # MLX classic 経路と CANDIDATES の構成対比・NAX 経路不採用判断（#549）
     ├── backend-metal-morton-mapping-decision.md # 標準 simdgroup_matrix API 下での Morton 順レーン→要素マッピング適用不可の判断（#544）
     ├── backend-metal-splitk-decision.md # split-K ディスパッチ分岐の MLX 選択条件対比・採否判断（#810）
+    ├── backend-metal-transpose-collapse-design.md # 転置パターン別 strided GEMM 入口（GemmStrides）・先頭次元 collapse の設計・実機実測記入欄（#1029 ツリー・#1040）
     ├── backend-metal-wgpu-decision.md  # Metal バックエンド実装方式（wgpu 非採用）の決定記録
     ├── backend-switching-design.md     # cfg ベースバックエンド切替の設計
     ├── cpu-gemm-b-packing-sharing-decision.md # B パネル packing のスレッド間共有化の設計検討・適用可否判断（#565）

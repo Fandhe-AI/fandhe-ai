@@ -25,6 +25,23 @@ struct Dims {
     uint k;
 };
 
+// イシュー #1040: `gemm_tiled_bias_act` の A/B オペランドを転置パターン
+// （NN/NT/TN/TT）・stride 付きで読み出すためのパラメータ。`lda`/`ldb` は
+// leading dimension（`trans_* == 0` なら行 stride、`trans_* == 1` なら
+// 列 stride。`crate::layout::MatrixLayout::ld` と同じ意味）。
+// `crate::gemm::GemmStrides`（repr(C)）とレイアウトを一致させる
+// （4 × uint32 = 16 バイト。`crate::gemm` のレイアウト一致テスト参照）。
+// NN（`trans_a == 0 && trans_b == 0`・`lda == k`・`ldb == n`）は既存の
+// 密行優先アクセスと完全に同一の添字になり、`crate::gemm::
+// dispatch_bias_act_prepared`（後方互換入口）はこの構成で
+// `dispatch_strided_bias_act_prepared` へ委譲する。
+struct GemmStrides {
+    uint lda;
+    uint ldb;
+    uint trans_a;
+    uint trans_b;
+};
+
 // === タイル化カーネル共通境界検査ヘルパ（イシュー #1038） ===
 //
 // `gemm_simdgroup_tiled`（f32・#188/#532/#538/#745）・
@@ -227,6 +244,18 @@ kernel void gemm_tiled(
 // ガードは `gemm_tiled` と同一（該当コメント参照）。epilogue の
 // `bias[col]` 参照は書き込みガード（したがって `col < n`）の内側でのみ
 // 行うため、`bias`（`n` 要素確保済み）への範囲外読み出しは発生しない。
+//
+// イシュー #1040: A/B の添字を `GemmStrides`（`st`）に基づく転置対応式へ
+// 一般化した。`st.trans_a == 0 && st.trans_b == 0 && st.lda == k &&
+// st.ldb == n` の NN 構成では、以下の `A(row, kk)`/`B(kk, col)` は
+// それぞれ従来の `a[row*k+kk]`/`b[kk*n+col]` と完全に同一の式へ簡約される
+// ため、既存 `dispatch_bias_act_prepared`（NN 専用後方互換入口）の
+// 数値結果は非後退（`crate::gemm` のビット同一テスト参照）。
+// `lda`/`ldb` は転置有無に応じて「行 stride」または「列 stride」の
+// いずれかを表す（`crate::layout::MatrixLayout` ドキュメンテーション
+// コメント参照）。手動境界チェック（`row < m && a_col < k` 等）は
+// 添字の変更後も変わらず維持する（REQ-8。境界検査省略の正当化に
+// 最適化を用いない）。
 kernel void gemm_tiled_bias_act(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
@@ -235,6 +264,7 @@ kernel void gemm_tiled_bias_act(
     constant Dims& dims [[buffer(4)]],
     constant int& has_bias [[buffer(5)]],
     constant int& act [[buffer(6)]],
+    constant GemmStrides& st [[buffer(7)]],
     uint2 gid [[thread_position_in_grid]],
     uint2 lid [[thread_position_in_threadgroup]]
 ) {
@@ -255,10 +285,22 @@ kernel void gemm_tiled_bias_act(
         uint a_col = t * TILE + lid.x;
         uint b_row = t * TILE + lid.y;
 
-        tile_a[lid.y][lid.x] =
-            (row < m && a_col < k) ? a[(size_t)row * (size_t)k + (size_t)a_col] : 0.0;
-        tile_b[lid.y][lid.x] =
-            (b_row < k && col < n) ? b[(size_t)b_row * (size_t)n + (size_t)col] : 0.0;
+        // A(row, a_col): `st.trans_a` が真なら列優先（転置 view）として
+        // `a[a_col * lda + row]`、偽なら行優先として `a[row * lda +
+        // a_col]`（`crate::layout` の `a_at` 参照実装・
+        // `tests/shader_source_evidence.rs` の needle と一致させる）。
+        tile_a[lid.y][lid.x] = (row < m && a_col < k)
+            ? (st.trans_a != 0
+                   ? a[(size_t)a_col * (size_t)st.lda + (size_t)row]
+                   : a[(size_t)row * (size_t)st.lda + (size_t)a_col])
+            : 0.0;
+        // B(b_row, col): `st.trans_b` が真なら `b[col * ldb + b_row]`、
+        // 偽なら `b[b_row * ldb + col]`。
+        tile_b[lid.y][lid.x] = (b_row < k && col < n)
+            ? (st.trans_b != 0
+                   ? b[(size_t)col * (size_t)st.ldb + (size_t)b_row]
+                   : b[(size_t)b_row * (size_t)st.ldb + (size_t)col])
+            : 0.0;
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 

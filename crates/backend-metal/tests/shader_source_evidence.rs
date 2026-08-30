@@ -698,3 +698,56 @@ fn gemm_simdgroup_tiled_source_gates_fine_barrier_between_fragment_load_and_mma(
          位置する契約です（b_frag_load={b_frag_load_pos} barrier={barrier_pos} mma={mma_pos}）"
     );
 }
+
+/// イシュー #1040 の証跡: `gemm_tiled_bias_act` が `GemmStrides`（lda/ldb/
+/// trans_a/trans_b）を受け取り、転置パターン別の添字分岐（`crate::layout`
+/// の `a_at`/`b_at` 参照実装と同じ式）を保持していることをロックする。
+/// 将来の書き換えでこの分岐が誤って単純な密行優先添字へ巻き戻された
+/// 場合に検出する（`gemm_metal_source_uses_simdgroup_matrix_instructions`
+/// と同方針）。
+#[test]
+fn gemm_tiled_bias_act_source_retains_gemm_strides_transpose_branch() {
+    for needle in [
+        "struct GemmStrides {",
+        "constant GemmStrides& st [[buffer(7)]]",
+        "st.trans_a != 0",
+        "st.trans_b != 0",
+        "a[(size_t)a_col * (size_t)st.lda + (size_t)row]",
+        "a[(size_t)row * (size_t)st.lda + (size_t)a_col]",
+        "b[(size_t)col * (size_t)st.ldb + (size_t)b_row]",
+        "b[(size_t)b_row * (size_t)st.ldb + (size_t)col]",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal に転置パターン別添字 `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// `gemm_tiled_bias_act` の REQ-8 手動境界チェック（`row < m && a_col < k`・
+/// `b_row < k && col < n`・C 書き込み時の `row < m && col < n`）が
+/// `GemmStrides` 導入後も維持されていることをロックする（イシュー
+/// #1040。カーネル境界検査規約「性能・最適化を理由に手動境界チェックを
+/// 省略しない」への準拠を機械検証する）。
+#[test]
+fn gemm_tiled_bias_act_source_retains_req8_boundary_guards() {
+    let kernel_start = GEMM_METAL_SOURCE
+        .find("kernel void gemm_tiled_bias_act(")
+        .expect("gemm_tiled_bias_act カーネルが見つかりません");
+    let next_kernel_start = GEMM_METAL_SOURCE[kernel_start..]
+        .find("\nkernel void gemm_simdgroup(")
+        .map(|offset| kernel_start + offset)
+        .expect("gemm_tiled_bias_act の後続カーネル境界が見つかりません");
+    let kernel_body = &GEMM_METAL_SOURCE[kernel_start..next_kernel_start];
+
+    for needle in [
+        "row < m && a_col < k",
+        "b_row < k && col < n",
+        "row < m && col < n",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_tiled_bias_act に REQ-8 境界チェック `{needle}` が見つかりません"
+        );
+    }
+}
