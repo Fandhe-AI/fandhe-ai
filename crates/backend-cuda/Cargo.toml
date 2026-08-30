@@ -158,6 +158,22 @@ required-features = ["internal-diagnostics"]
 name = "gemm_mma_tf32_block_tile_bench"
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #1035: f32 GEMM の形状別カーネル選択（simple / double-buffer /
+# split-K）ヒューリスティックの A/B ベンチ。
+# `gemm_variant_selection::CudaGemmF32VariantSelection`（同 feature ゲート）
+# を使う。
+name = "gemm_f32_variant_bench"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+# イシュー #1035: 上記ヒューリスティックが選ぶ DoubleBuffer／SplitK
+# カーネルの実機数値一致・決定性テスト（`#[ignore]`。GPU 不要の選択ロジック
+# 結線検査は非 ignore で同居）。`specialized_mma_parity` と同じ理由
+# （`gemm_variant_selection` シンボルを使う）で feature ゲートが必要。
+name = "gemm_f32_variants"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

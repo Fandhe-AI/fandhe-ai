@@ -282,6 +282,18 @@ mod elementwise;
 mod error;
 mod gemm;
 mod gemm_auto;
+// イシュー #1035: f32 GEMM の形状別カーネル選択（simple / double-buffer /
+// split-K）ヒューリスティック。GPU 資源を要さない純関数のみで構成し、
+// `gemm.rs` の opt-in コンストラクタ（`internal-diagnostics` feature
+// 限定）から参照される。本番既定経路（`CudaGemm::new`）へは未結線
+// （実装計画 §3・§8 参照）。
+mod gemm_variant;
+mod kernels_gemm_variants;
+// イシュー #1035: 上記 2 モジュールを実際に NVRTC コンパイル・起動する
+// opt-in 実行経路。`internal-diagnostics` feature（既定 off）限定
+// （`gemm_variant_selection.rs` 冒頭ドキュメントコメント参照）。
+#[cfg(feature = "internal-diagnostics")]
+pub mod gemm_variant_selection;
 // イシュー #926: CUDA GEMM の固定初期化コスト（tape_for 初期化コスト。
 // フレームワーク横並びベンチ・PR #915 実測 440〜460 ms 帯）のフェーズ分解
 // 診断テスト。`kernels`／`kernels_wmma_opt`（非公開 `mod`）へ到達するため

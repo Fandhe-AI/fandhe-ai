@@ -2882,6 +2882,159 @@ mod tests {
         }
     }
 
+    /// イシュー #1038 の証跡: `CANDIDATES` を全て、8 の倍数ではあるが
+    /// `bm`/`bn`（64・32）にも `bk`（32・16）にも揃わない非タイル倍数の
+    /// 境界形状で検証する（f32 版）。`all_tile_candidates_match_cpu_
+    /// reference_medium_shape`（m=n=k=256。全候補の `bm`/`bn`/`bk` を
+    /// 割り切る「タイル倍数」形状）は境界検査（REQ-8）自体の実効性
+    /// （ブロック原点の早期 return・協調ロードのベクトルグループ
+    /// in-bounds 判定＋要素単位フォールバック）を一度も踏まない盲点が
+    /// あり、これを埋める（#1038 計画「3.3 節」）。
+    ///
+    /// **形状の選定根拠**: `crate::gemm::MetalGemm::dispatch_variant` は
+    /// `SimdgroupTiled` へ渡す前に `crate::pad::pad8` で m/n/k を 8 の倍数
+    /// （実効次元）へ切り上げる契約のため、シェーダが見る境界は「8 の
+    /// 倍数ではあるが `bm`/`bn`/`bk` の倍数ではない」ことで踏める。
+    /// `CANDIDATES`（本ファイル上方）の `bm`/`bn` は 64・32 の 2 種、`bk`
+    /// は 32・16・8 の 3 種（`TileConfig::SINGLE_SIMDGROUP_8X8` の
+    /// bm=bn=bk=8 を除く）。m=100→pad8=104（104 mod 64=40・mod 32=8。
+    /// いずれも非 0 のため `bm=64`・`bm=32` の両方でブロック端の部分タイル
+    /// が生じる）、n=84→pad8=88（88 mod 64=24・mod 32=24。同様に両方の
+    /// `bn` で部分タイルが生じる）、k=68→pad8=72（72 mod 32=8・mod 16=8。
+    /// `bk=32`・`bk=16` の両方で K タイル末尾の端数〈`bk_eff<bk`〉が生じ、
+    /// 協調ロードのベクトルグループ境界フォールバック〈`tiled_a_elem_
+    /// in_bounds`/`tiled_b_elem_in_bounds`〉を実際に踏む）。`bk=8`
+    /// （`wm4_bk8` 候補・`SINGLE_SIMDGROUP_8X8`）は pad8 後の k が既に
+    /// 8 の倍数のため K タイル端数は生じないが、m/n 側のブロック端部分
+    /// タイルは同様に踏む。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_match_cpu_reference_non_multiple_boundary_shape() {
+        use bench_harness::rng::Xorshift64Star;
+        use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        for (i, &cfg) in CANDIDATES.iter().enumerate() {
+            let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+                panic!("候補 {cfg:?} のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
+            });
+            assert_eq!(
+                resolved, cfg,
+                "候補 {cfg:?} が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                 （構成失敗を検知できていない）"
+            );
+
+            let (m, n, k) = (100, 84, 68);
+            let seed_a = 1000 + i as u64;
+            let seed_b = 2000 + i as u64;
+
+            let a = Xorshift64Star::new(seed_a).fill_vec(m * k);
+            let b = Xorshift64Star::new(seed_b).fill_vec(k * n);
+
+            let mut expected = vec![0.0f32; m * n];
+            matmul_reference_fma(&a, &b, &mut expected, m, n, k)
+                .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+            let actual = gemm
+                .dispatch_variant(
+                    &ctx,
+                    crate::gemm::GemmVariant::SimdgroupTiled(cfg),
+                    &a,
+                    &b,
+                    m,
+                    n,
+                    k,
+                )
+                .unwrap_or_else(|err| {
+                    panic!("Metal SimdgroupTiled({cfg:?}) GEMM のディスパッチに失敗した: {err}")
+                });
+
+            assert_parity(
+                &format!(
+                    "metal SimdgroupTiled({cfg:?}) gemm 非タイル倍数境界形状 m={m} n={n} k={k}"
+                ),
+                &actual,
+                &expected,
+            );
+        }
+    }
+
+    /// 上記 f32 版の f16 版（イシュー #1038）:
+    /// `all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`
+    /// と同じ判断根拠・手法で、非タイル倍数の境界形状
+    /// （`all_tile_candidates_match_cpu_reference_non_multiple_boundary_shape`
+    /// と同一の m=100・n=84・k=68。選定根拠は同関数のコメント参照）を
+    /// `gemm_simdgroup_tiled_f16` で検証する。参照値は f16→f32→
+    /// `matmul_reference_fma`→f16 丸め→f32 の 3 段階
+    /// （`all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`
+    /// と同一手法）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_match_cpu_reference_f16_tiled_non_multiple_boundary_shape() {
+        use bench_harness::rng::Xorshift64Star;
+        use fandhe_ai_backend_cpu::parity::assert_parity;
+        use half::f16;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx)
+            .expect("GEMM パイプラインの構築に失敗した（f16 タイル化含む）");
+
+        for (i, &cfg) in CANDIDATES.iter().enumerate() {
+            let resolved = gemm.resolve_tile_config_f16(&ctx, cfg).unwrap_or_else(|err| {
+                panic!("候補 {cfg:?}（f16）のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
+            });
+            assert_eq!(
+                resolved, cfg,
+                "候補 {cfg:?}（f16）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                 （構成失敗を検知できていない）"
+            );
+
+            let (m, n, k) = (100, 84, 68);
+            let mut rng_a = Xorshift64Star::new(3000 + i as u64);
+            let mut rng_b = Xorshift64Star::new(4000 + i as u64);
+            let a_f16: Vec<f16> = rng_a.fill_vec_f16(m * k);
+            let b_f16: Vec<f16> = rng_b.fill_vec_f16(k * n);
+
+            let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
+            let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
+            let mut c_ref_f32 = vec![0.0f32; m * n];
+            fandhe_ai_backend_cpu::parity::matmul_reference_fma(
+                &a_f32,
+                &b_f32,
+                &mut c_ref_f32,
+                m,
+                n,
+                k,
+            )
+            .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+            let c_ref_rounded: Vec<f32> = c_ref_f32
+                .iter()
+                .map(|&x| f16::from_f32(x).to_f32())
+                .collect();
+
+            let c_gpu_f16 = gemm
+                .dispatch_f16_tiled_unverified(&ctx, &a_f16, &b_f16, m, n, k, cfg)
+                .unwrap_or_else(|err| {
+                    panic!("Metal f16 SimdgroupTiled({cfg:?}) GEMM のディスパッチに失敗した: {err}")
+                });
+            let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
+
+            assert_parity(
+                &format!(
+                    "metal f16 SimdgroupTiled({cfg:?}) gemm 非タイル倍数境界形状 m={m} n={n} k={k}"
+                ),
+                &c_gpu_f32,
+                &c_ref_rounded,
+            );
+        }
+    }
+
     /// `dispatch_f16_auto_unverified`（イシュー #798）が実際に呼ぶ経路——
     /// `tile::select(m, n, k)` の出力をそのまま `resolve_tile_config_f16`
     /// へ渡す——を、`select` の各分岐を代表する形状で検証する
