@@ -142,6 +142,13 @@ fn assert_matches_heuristic(
                 && k.is_multiple_of(EXPECT_TILE);
             let split_k_condition =
                 split_k_available && num_sms.is_some_and(|sms| blocks < u64::from(sms));
+            // DoubleBuffer 分岐も `DoubleBufferIfAvailable` と同様に
+            // `blocks >= num_sms` かつ `num_sms` が既知であることを要求する
+            // （イシュー #1035 PR #1073 Bugbot 指摘: `num_sms` 取得失敗
+            // （`None`）の実機環境では `aligned && double_buffer_available`
+            // だけで DoubleBuffer を期待すると、fail-soft で Simple に
+            // 落ちた実装上正しい結果を誤って失敗と判定してしまう）。
+            let grid_fills_sms = num_sms.is_some_and(|sms| blocks >= u64::from(sms));
             if split_k_condition {
                 assert!(
                     matches!(actual, GemmVariantKind::SplitK { .. }),
@@ -151,7 +158,7 @@ fn assert_matches_heuristic(
                      静かに Simple へ落ちていないか確認する）"
                 );
                 exercised.split_k = true;
-            } else if aligned && double_buffer_available {
+            } else if aligned && double_buffer_available && grid_fills_sms {
                 assert_eq!(
                     actual,
                     GemmVariantKind::DoubleBuffer,
