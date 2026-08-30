@@ -354,7 +354,12 @@ mod tests {
     fn sum_full_matches_naive() {
         let t = Tensor::<f32>::new((0..24).map(|v| v as f32).collect(), &[2, 3, 4]).unwrap();
         let out = sum(&t, None).unwrap();
-        assert_eq!(out.shape(), &[]);
+        // 型注釈が必要な理由: 単体テストビルドは dev-dependency の
+        // `bench_harness`（→ `serde_json`）を参照するため、`serde_json` の
+        // `impl PartialEq<Value> for usize` が候補に載り空スライスリテラルの
+        // 要素型を推論できない（elementwise.rs の `bench_internal` 移設で
+        // 顕在化。PR #1066）。
+        assert_eq!(out.shape(), &[] as &[usize]);
         let expected: f32 = (0..24).map(|v| v as f32).sum();
         assert_eq!(out.get(&[]).unwrap(), expected);
     }

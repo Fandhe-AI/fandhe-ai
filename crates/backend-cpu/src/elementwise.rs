@@ -161,36 +161,49 @@ pub fn tanh_slice(a: &[f32], out: &mut [f32]) {
     }
 }
 
-/// ベンチハーネス専用の逐次／並列強制版カーネル（公開 API 契約外）。
-///
-/// `add_slice`／`mul_slice`／`exp_slice` は `PARALLEL_THRESHOLD` による
-/// 自動判定を内蔵するため、同一要素数で逐次経路と並列経路を比較できない
-/// （`tests/elementwise_threshold_perf.rs` の実測が異なる要素数〈閾値未満＝
-/// 逐次・閾値以上＝並列〉を跨いで比較していたため、要素数増加の影響と
-/// 並列化オーバーヘッドの影響を切り分けられないという codex-review 指摘。
-/// イシュー #1027）。本モジュールは `PARALLEL_THRESHOLD` 判定を経由せず
-/// 経路を固定するベンチ専用版を提供する（本体ロジックはスライスカーネル層
-/// と同一・分岐のみ除去。本番の `*_slice` 関数の閾値判定・数値契約には
-/// 影響しない）。
-///
-/// # 公開範囲の契約（PR #1066 codex-review P1 対応）
-///
-/// `tests/elementwise_threshold_perf.rs`（同一クレートの結合テスト形式
-/// ベンチハーネス）から到達するためだけの内部ディスパッチ詳細であり、
-/// サポート対象の公開 API ではない（`facade` から到達不能・semver 互換性の
-/// 対象外）。`lib.rs` 側で `#[doc(hidden)]` を付けて再エクスポートし
-/// docs.rs・rustdoc から隠す（`tensor-core` の `pool_core` と同型の前例）。
-///
-/// 長さ検査は `debug_assert_eq!` に留める（release では消える）: 本番経路
-/// から呼ばれない前提のため、本番 panic 経路（`.claude/rules/coding-rust.md`
-/// 「本番経路で `unwrap()`／`expect()` を使わない」と同趣旨）を追加しない。
-/// 長さ不一致時は `zip` が短い方へ切り詰めるだけで未定義動作にはならない。
-pub mod bench_internal {
+// --- ベンチ専用: 逐次／並列強制版（`#[cfg(test)]` 限定） ---
+//
+// `add_slice`／`mul_slice`／`exp_slice` は `PARALLEL_THRESHOLD` による
+// 自動判定を内蔵するため、同一要素数で逐次経路と並列経路を比較できない
+// （codex-review 指摘・イシュー #1027）。下記モジュールは判定を経由せず
+// 経路を固定するベンチ専用版と、その同一サイズ比較スイープ（`#[ignore]`）を
+// 提供する。
+//
+// `#[cfg(test)]` の private モジュールに限定する理由（PR #1066 codex-review
+// P1 再指摘対応）: 当初の `#[doc(hidden)] pub` 方式は rustdoc 表示を隠す
+// だけで可視性・semver 上の公開性は変わらず、release ビルドで
+// `debug_assert_eq!` が消えた状態の関数（長さ不一致を `zip` が黙って短い方へ
+// 切り詰める、本番 `*_slice` の release でも有効な `assert_eq!` 契約と異なる
+// 面）を外部クレートが呼べてしまう。`#[cfg(test)]` 化により通常ビルド・
+// 公開面から完全に消え、本番 panic 経路も外部到達可能な異契約面も残らない。
+
+#[cfg(test)]
+mod bench_internal {
+    //! `PARALLEL_THRESHOLD` 判定を除いた逐次／並列強制版カーネルと、その
+    //! 同一サイズ直列 vs 並列比較スイープ（イシュー #1027）。強制版の本体
+    //! ロジックはスライスカーネル層と同一・分岐のみ除去（`gemm_blis`
+    //! 〈直列専用入口〉／`gemm_blis_parallel`〈並列専用入口〉が別関数で
+    //! あるのと同じ発想）で、本番の `*_slice` 関数の閾値判定・数値契約には
+    //! 影響しない。自動判定版（公開 API の `add_slice` 等）のスイープは
+    //! `tests/elementwise_threshold_perf.rs`（integration test）を参照。
+    //!
+    //! 長さ検査は `debug_assert_eq!` に留める（`#[cfg(test)]` 限定のため
+    //! 本番経路には存在せず、テストビルドでは debug assertion が有効）。
+    //!
+    //! スイープは `#[ignore]` のため通常の `cargo test` では実行されず、
+    //! テスト全体の実行時間へ影響しない。実行例:
+    //! ```text
+    //! cargo test -p fandhe-ai-backend-cpu --release -- --ignored elementwise_serial_vs_parallel_sweep
+    //! ```
+
+    use bench_harness::rng::Xorshift64Star;
+    use bench_harness::{MeasurementConfig, run};
     use rayon::prelude::*;
+    use std::hint::black_box;
 
     /// `add_slice` の本体ロジックから `PARALLEL_THRESHOLD` 判定を除いた
     /// 逐次強制版（ベンチ専用。モジュール doc コメント参照）。
-    pub fn add_slice_force_serial(a: &[f32], b: &[f32], out: &mut [f32]) {
+    fn add_slice_force_serial(a: &[f32], b: &[f32], out: &mut [f32]) {
         debug_assert_eq!(a.len(), b.len(), "add_slice_force_serial: a vs b");
         debug_assert_eq!(a.len(), out.len(), "add_slice_force_serial: a vs out");
         for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
@@ -200,7 +213,7 @@ pub mod bench_internal {
 
     /// `add_slice` の本体ロジックから `PARALLEL_THRESHOLD` 判定を除いた
     /// 並列強制版（ベンチ専用。モジュール doc コメント参照）。
-    pub fn add_slice_force_parallel(a: &[f32], b: &[f32], out: &mut [f32]) {
+    fn add_slice_force_parallel(a: &[f32], b: &[f32], out: &mut [f32]) {
         debug_assert_eq!(a.len(), b.len(), "add_slice_force_parallel: a vs b");
         debug_assert_eq!(a.len(), out.len(), "add_slice_force_parallel: a vs out");
         out.par_iter_mut()
@@ -210,7 +223,7 @@ pub mod bench_internal {
     }
 
     /// `mul_slice` の逐次強制版（ベンチ専用。モジュール doc コメント参照）。
-    pub fn mul_slice_force_serial(a: &[f32], b: &[f32], out: &mut [f32]) {
+    fn mul_slice_force_serial(a: &[f32], b: &[f32], out: &mut [f32]) {
         debug_assert_eq!(a.len(), b.len(), "mul_slice_force_serial: a vs b");
         debug_assert_eq!(a.len(), out.len(), "mul_slice_force_serial: a vs out");
         for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
@@ -219,7 +232,7 @@ pub mod bench_internal {
     }
 
     /// `mul_slice` の並列強制版（ベンチ専用。モジュール doc コメント参照）。
-    pub fn mul_slice_force_parallel(a: &[f32], b: &[f32], out: &mut [f32]) {
+    fn mul_slice_force_parallel(a: &[f32], b: &[f32], out: &mut [f32]) {
         debug_assert_eq!(a.len(), b.len(), "mul_slice_force_parallel: a vs b");
         debug_assert_eq!(a.len(), out.len(), "mul_slice_force_parallel: a vs out");
         out.par_iter_mut()
@@ -229,7 +242,7 @@ pub mod bench_internal {
     }
 
     /// `exp_slice` の逐次強制版（ベンチ専用。モジュール doc コメント参照）。
-    pub fn exp_slice_force_serial(a: &[f32], out: &mut [f32]) {
+    fn exp_slice_force_serial(a: &[f32], out: &mut [f32]) {
         debug_assert_eq!(a.len(), out.len(), "exp_slice_force_serial: a vs out");
         for (o, &x) in out.iter_mut().zip(a) {
             *o = x.exp();
@@ -237,11 +250,108 @@ pub mod bench_internal {
     }
 
     /// `exp_slice` の並列強制版（ベンチ専用。モジュール doc コメント参照）。
-    pub fn exp_slice_force_parallel(a: &[f32], out: &mut [f32]) {
+    fn exp_slice_force_parallel(a: &[f32], out: &mut [f32]) {
         debug_assert_eq!(a.len(), out.len(), "exp_slice_force_parallel: a vs out");
         out.par_iter_mut()
             .zip(a.par_iter())
             .for_each(|(o, &x)| *o = x.exp());
+    }
+
+    fn random_vec(seed: u64, len: usize) -> Vec<f32> {
+        Xorshift64Star::new(seed).fill_vec(len)
+    }
+
+    /// 同一要素数で逐次強制版・並列強制版を測り、中央値比（並列 / 逐次。
+    /// 1.0 未満＝並列が有利）を報告する。サイズを固定するため、要素数増加の
+    /// 影響を排除して並列化オーバーヘッドそのものを捉える。
+    ///
+    /// `run` はクロージャ呼び出し自体を `black_box` するのみで、クロージャ
+    /// 内部の入出力までは保護しない（`bench_harness::protocol::run`
+    /// ドキュメンテーションコメント参照）。release/LTO で入力・出力バッファが
+    /// 定数畳み込み・dead code 除去の対象にならないよう、計測対象の入出力を
+    /// 明示的に `black_box` で保護する（codex-review 指摘・イシュー #1027）。
+    fn measure_size_serial_vs_parallel(label: &str, n: usize) {
+        let a = random_vec(7000 + n as u64, n);
+        let b = random_vec(8000 + n as u64, n);
+        let config = MeasurementConfig::default(); // warmup 20・iters 20（TASK-8.1 下限）
+
+        macro_rules! measure_pair {
+            ($name:literal, $serial_fn:expr, $parallel_fn:expr, $out_len:expr) => {{
+                let mut out_s = vec![0.0f32; $out_len];
+                let serial = run(&config, || {
+                    $serial_fn(black_box(&a), black_box(&b), black_box(&mut out_s));
+                })
+                .expect(concat!($name, " 逐次強制版の計測に失敗"));
+                black_box(&out_s);
+
+                let mut out_p = vec![0.0f32; $out_len];
+                let parallel = run(&config, || {
+                    $parallel_fn(black_box(&a), black_box(&b), black_box(&mut out_p));
+                })
+                .expect(concat!($name, " 並列強制版の計測に失敗"));
+                black_box(&out_p);
+
+                (serial.median_secs, parallel.median_secs)
+            }};
+        }
+
+        let (add_serial_secs, add_parallel_secs) = measure_pair!(
+            "add_slice",
+            add_slice_force_serial,
+            add_slice_force_parallel,
+            n
+        );
+        let (mul_serial_secs, mul_parallel_secs) = measure_pair!(
+            "mul_slice",
+            mul_slice_force_serial,
+            mul_slice_force_parallel,
+            n
+        );
+
+        // `exp_slice_force_{serial,parallel}` は単項（`b` を使わない）のため
+        // 上記マクロの二項シグネチャに合わせられず個別に計測する。
+        let mut out_exp_s = vec![0.0f32; n];
+        let exp_serial = run(&config, || {
+            exp_slice_force_serial(black_box(&a), black_box(&mut out_exp_s));
+        })
+        .expect("exp_slice 逐次強制版の計測に失敗");
+        black_box(&out_exp_s);
+
+        let mut out_exp_p = vec![0.0f32; n];
+        let exp_parallel = run(&config, || {
+            exp_slice_force_parallel(black_box(&a), black_box(&mut out_exp_p));
+        })
+        .expect("exp_slice 並列強制版の計測に失敗");
+        black_box(&out_exp_p);
+
+        println!(
+            "label={label} n={n} \
+             add_serial_ns={as_ns:.1} add_parallel_ns={ap_ns:.1} add_parallel_ratio={ar:.3} \
+             mul_serial_ns={ms_ns:.1} mul_parallel_ns={mp_ns:.1} mul_parallel_ratio={mr:.3} \
+             exp_serial_ns={es_ns:.1} exp_parallel_ns={ep_ns:.1} exp_parallel_ratio={er:.3}",
+            as_ns = add_serial_secs * 1e9,
+            ap_ns = add_parallel_secs * 1e9,
+            ar = add_parallel_secs / add_serial_secs,
+            ms_ns = mul_serial_secs * 1e9,
+            mp_ns = mul_parallel_secs * 1e9,
+            mr = mul_parallel_secs / mul_serial_secs,
+            es_ns = exp_serial.median_secs * 1e9,
+            ep_ns = exp_parallel.median_secs * 1e9,
+            er = exp_parallel.median_secs / exp_serial.median_secs,
+        );
+    }
+
+    /// [`measure_size_serial_vs_parallel`] による同一サイズ直列 vs 並列
+    /// 比較のスイープ（codex-review 指摘・イシュー #1027）。
+    /// `PARALLEL_THRESHOLD` を挟む要素数 2^12〜2^18 で、要素数増加の影響を
+    /// 排除した並列化オーバーヘッドそのものの交差点を実測する。
+    #[test]
+    #[ignore = "実測ハーネス（--release 推奨）。通常 CI では実行しない"]
+    fn elementwise_serial_vs_parallel_sweep() {
+        for exp2 in 12..=18u32 {
+            let n = 1usize << exp2;
+            measure_size_serial_vs_parallel(&format!("2^{exp2}"), n);
+        }
     }
 }
 
