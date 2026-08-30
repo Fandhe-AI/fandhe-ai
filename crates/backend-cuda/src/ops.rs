@@ -22,7 +22,9 @@ use std::sync::Arc;
 
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
+use fandhe_ai_tensor_core::{
+    Activation, BackendOps, DType, FusionPlan, MseReduction, ShapeError, Tensor, require_same_shape,
+};
 
 use crate::context_cache;
 use crate::device::CudaDevice;
@@ -1116,6 +1118,104 @@ impl BackendOps for CudaBackendOps {
         ))
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の CUDA 実装
+    /// （イシュー #1045）。`Self::sum`／`Self::max`（汎用 reduction）とは
+    /// 独立した専用融合カーネル（`crate::mse::CudaMse`）へのディスパッチ
+    /// であり、`Self::sum` の未実装状態とは無関係にここで実装する
+    /// （`backend_ops.rs::BackendOps::mse_loss` doc の設計判断参照:
+    /// `Op::MseLoss` は解析形の専用ノードであり融合 IR〈`run_fused`〉を
+    /// 経由しない）。
+    ///
+    /// `reduction` に応じた `factor`（`Mean` は `1.0/n`、`Sum` は `1.0`）は
+    /// ここで計算してカーネルへ渡す（`CudaMse::run_mse_loss_f32` は
+    /// reduction 種別を知らない。`kernels_mse.rs` 冒頭コメント参照）。
+    /// 未知 `MseReduction` variant は `backend-cpu::ops::CpuBackendOps::
+    /// mse_loss` と同じく `Unsupported` として拒否する。
+    fn mse_loss(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_owned = pred.contiguous();
+        let target_owned = target.contiguous();
+        let pred_slice = pred_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("mse_loss: pred not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("mse_loss: target not contiguous".into())
+        })?;
+        let numel = pred_slice.len();
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    1.0
+                } else {
+                    1.0 / numel as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "mse_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let mse = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_mse(&device)
+            },
+        )?;
+        let value = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || mse.run_mse_loss_f32(pred_slice, target_slice, factor),
+        )?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::mse_loss_backward`] の CUDA
+    /// 実装（イシュー #1045）。`dTarget = −dPred` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側で符号反転して得る
+    /// 契約のため、本メソッドは `dPred` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::mse_loss_backward` doc 参照）。
+    fn mse_loss_backward(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_owned = pred.contiguous();
+        let target_owned = target.contiguous();
+        let pred_slice = pred_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("mse_loss_backward: pred not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("mse_loss_backward: target not contiguous".into())
+        })?;
+
+        let mse = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_mse(&device)
+            },
+        )?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || mse.run_mse_backward_f32(pred_slice, target_slice, scale),
+        )?;
+        Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::release_cached_device_memory`] の CUDA 実装
     /// （イシュー #1020・REQ-14）。`gemm.rs`／`elementwise.rs`／`softmax.rs`
     /// が `context_cache::cached_allocator` 経由で共有する
@@ -1711,6 +1811,35 @@ mod tests {
         assert!(
             matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
             "poison 済み ordinal では relu（elementwise_unary 経由。exp／tanh も             同一経路）は device_handle_raw() が試行される前に拒否されるはず:             {result:?}"
+        );
+    }
+
+    #[test]
+    fn mse_loss_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        // イシュー #1045: `mse_loss`／`mse_loss_backward` は `elementwise_
+        // binary`／`elementwise_unary` とは別のディスパッチ関数
+        // （`context_cache::cached_mse` 経由）のため、`with_driver_call`
+        // ゲートが正しく結線されていることを個別に確認する
+        // （`relu_rejects_on_poisoned_ordinal...` のコメントと同じ理由）。
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let pred = Tensor::new(vec![1.0, 2.0], &[1, 2]).expect("valid tensor");
+        let target = Tensor::new(vec![0.0, 0.0], &[1, 2]).expect("valid tensor");
+
+        let forward = cuda.mse_loss(&pred, &target, MseReduction::Mean);
+        assert!(
+            matches!(forward, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では mse_loss は device_handle_raw() が試行される前に \
+             拒否されるはず: {forward:?}"
+        );
+
+        let backward = cuda.mse_loss_backward(&pred, &target, 1.0);
+        assert!(
+            matches!(backward, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では mse_loss_backward は device_handle_raw() が試行される \
+             前に拒否されるはず: {backward:?}"
         );
     }
 
