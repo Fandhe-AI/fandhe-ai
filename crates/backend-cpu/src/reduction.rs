@@ -27,6 +27,20 @@
 //!   本モジュールはこの保証を用いてチャンク部分和をチャンク番号順に逐次結合し、
 //!   PoC-v2-5 の「逐次固定順序で bit 一致」前提を踏襲する。
 //!
+//! ## 小サイズ直列フォールバック（イシュー #811・#1027）
+//!
+//! `elementwise` モジュールと同じ理由（rayon のタスク分割・スレッド同期
+//! オーバーヘッドが µs オーダーの固定費として小サイズ入力の逐次実行の
+//! 利得を上回る。`crate::elementwise` モジュール doc「並列化」参照）で、
+//! 対象要素数が [`crate::elementwise::PARALLEL_THRESHOLD`] 未満の場合は
+//! 逐次実行にフォールバックする。閾値はマジックナンバーの重複を避ける
+//! ため `elementwise` の定数を再利用する（softmax/rmsnorm と同じ既存
+//! パターン）。フォールバック経路は並列経路と**同一の分割・結合順序**
+//! （全縮約: `CHUNK` 単位の逐次 fold をチャンク番号順に結合。軸指定:
+//! 出力要素ごとに縮約軸を昇順で逐次累積）で計算するため、スレッド数に
+//! 依らず bit 完全一致のまま不変（上記「決定性契約」の一部として、
+//! 逐次実行そのものが決定性契約の特殊ケースになる）。
+//!
 //! ## 空縮約の意味論
 //!
 //! - `sum` は単位元 `0.0`（NumPy 互換）を返す。
@@ -119,8 +133,18 @@ fn gather_elements(a: &Tensor<f32>) -> Vec<f32> {
 }
 
 /// `data` を [`CHUNK`] 単位に分割し、決定性契約（モジュール doc 参照）に
-/// 従って `sum` を計算する。
+/// 従って `sum` を計算する。要素数が [`crate::elementwise::PARALLEL_THRESHOLD`]
+/// 未満なら rayon を経由せず逐次で同じ分割・結合順序を再現する（モジュール
+/// doc「小サイズ直列フォールバック」参照。`CHUNK` 単位の逐次 fold を
+/// チャンク番号順に結合する構造自体は並列版と共通のため、逐次実行は
+/// 並列実行と bit 完全一致する）。
 fn sum_slice(data: &[f32]) -> f32 {
+    if data.len() < crate::elementwise::PARALLEL_THRESHOLD {
+        return data
+            .chunks(CHUNK)
+            .map(|chunk| chunk.iter().copied().fold(0.0f32, |acc, v| acc + v))
+            .fold(0.0f32, |acc, v| acc + v);
+    }
     data.par_chunks(CHUNK)
         .map(|chunk| chunk.iter().copied().fold(0.0f32, |acc, v| acc + v))
         .collect::<Vec<f32>>()
@@ -130,7 +154,10 @@ fn sum_slice(data: &[f32]) -> f32 {
 
 /// `data` を [`CHUNK`] 単位に分割し、決定性契約（モジュール doc 参照）に
 /// 従って `max` を計算する。`data` が空の場合は `None` を返す（呼び出し元が
-/// [`ReduceError::EmptyReduction`] に変換する）。
+/// [`ReduceError::EmptyReduction`] に変換する）。要素数が
+/// [`crate::elementwise::PARALLEL_THRESHOLD`] 未満の場合の逐次フォール
+/// バックは [`sum_slice`] と同じ理由・同じ分割構造（モジュール doc
+/// 「小サイズ直列フォールバック」参照）。
 ///
 /// 単位元として `f32::NEG_INFINITY` を用いる（`max(x, -inf) == x` が任意の
 /// 有限値 `x` で成立するため、`unwrap`/`expect` なしで畳み込みの初期値に
@@ -140,6 +167,13 @@ fn sum_slice(data: &[f32]) -> f32 {
 fn max_slice(data: &[f32]) -> Option<f32> {
     if data.is_empty() {
         return None;
+    }
+    if data.len() < crate::elementwise::PARALLEL_THRESHOLD {
+        let result = data
+            .chunks(CHUNK)
+            .map(|chunk| chunk.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+            .fold(f32::NEG_INFINITY, f32::max);
+        return Some(result);
     }
     let result = data
         .par_chunks(CHUNK)
@@ -168,6 +202,13 @@ fn checked_product(dims: &[usize]) -> Result<usize, ReduceError> {
 /// 縮約軸を `0..axis_len` の昇順で `op` により逐次累積する（決定性契約は
 /// モジュール doc 参照）。`Range<usize>` は `IndexedParallelIterator` であり
 /// `.collect()` が出力順を保持するため、`flat` 昇順の出力ベクタが得られる。
+///
+/// 総入力要素数（`outer * inner * axis_len`）が
+/// [`crate::elementwise::PARALLEL_THRESHOLD`] 未満なら rayon を経由せず
+/// 逐次 `map` へフォールバックする（モジュール doc「小サイズ直列
+/// フォールバック」参照）。出力要素ごとの計算は元々独立かつ縮約軸は
+/// 逐次累積のため、`into_iter()` に置き換えるだけで並列版と同一の
+/// `flat` 昇順の結果が得られ bit 完全一致を保つ。
 fn axis_reduce<F>(a: &Tensor<f32>, axis: usize, identity: f32, op: F) -> Vec<f32>
 where
     F: Fn(f32, f32) -> f32 + Sync,
@@ -180,33 +221,44 @@ where
     let inner: usize = inner_dims.iter().product();
     let total_out = outer * inner;
 
-    (0..total_out)
-        .into_par_iter()
-        .map(|flat| {
-            // このクロージャは `flat in 0..total_out`（`total_out = outer *
-            // inner`）でのみ呼ばれる。`total_out > 0` は `inner > 0` を含意する
-            // ため（`inner == 0` なら `total_out == 0` で range が空になり
-            // 到達しない）、`inner` によるゼロ除算は発生しない。
-            let (o, i) = (flat / inner, flat % inner);
-            let outer_idx = unravel(o, outer_dims);
-            let inner_idx = unravel(i, inner_dims);
-            let mut full_idx = Vec::with_capacity(shape.len());
-            full_idx.extend_from_slice(&outer_idx);
-            full_idx.push(0);
-            full_idx.extend_from_slice(&inner_idx);
-            let mut acc = identity;
-            for k in 0..axis_len {
-                full_idx[axis] = k;
-                let value = a.get(&full_idx);
-                debug_assert!(
-                    value.is_some(),
-                    "axis_reduce: 走査ロジックのバグにより index {full_idx:?} が範囲外になった"
-                );
-                acc = op(acc, value.unwrap_or(identity));
-            }
-            acc
-        })
-        .collect()
+    // 直列/並列いずれの経路でも呼ぶ共通の 1 出力要素ぶんの計算
+    // （`flat in 0..total_out` を前提とする契約はクロージャ内コメント参照）。
+    let compute = |flat: usize| -> f32 {
+        // このクロージャは `flat in 0..total_out`（`total_out = outer *
+        // inner`）でのみ呼ばれる。`total_out > 0` は `inner > 0` を含意する
+        // ため（`inner == 0` なら `total_out == 0` で range が空になり
+        // 到達しない）、`inner` によるゼロ除算は発生しない。
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut acc = identity;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let value = a.get(&full_idx);
+            debug_assert!(
+                value.is_some(),
+                "axis_reduce: 走査ロジックのバグにより index {full_idx:?} が範囲外になった"
+            );
+            acc = op(acc, value.unwrap_or(identity));
+        }
+        acc
+    };
+
+    // 総入力要素数（縮約軸を含む）を閾値と比較する。`outer*inner*axis_len`
+    // の計算はオーバーフローしうるが、本関数の呼び出し元（`sum`/`max`/
+    // `mean`）が既に `checked_product`／`checked_mul` で `outer*inner` の
+    // 非オーバーフローを検証済みのため、ここでは飽和乗算で安全側
+    // （並列側）に倒す（性能ヒューリスティクスであり数値結果には無関係）。
+    let total_in = total_out.saturating_mul(axis_len);
+    if total_in < crate::elementwise::PARALLEL_THRESHOLD {
+        (0..total_out).map(compute).collect()
+    } else {
+        (0..total_out).into_par_iter().map(compute).collect()
+    }
 }
 
 /// 軸指定・全縮約いずれにも対応する `sum`。
@@ -536,6 +588,97 @@ mod tests {
         assert_eq!(out.shape(), out_c.shape());
         for i in 0..out.shape()[0] {
             assert_eq!(out.get(&[i]).unwrap(), out_c.get(&[i]).unwrap());
+        }
+    }
+
+    /// 小サイズ直列フォールバック（イシュー #811・#1027）の境界
+    /// （`crate::elementwise::PARALLEL_THRESHOLD` の直下・直上）で、
+    /// 全縮約（`dim=None`）の `sum`/`max` がシングルスレッド／
+    /// マルチスレッドプール間で to_bits() 完全一致することを確認する
+    /// （`chunk_boundary_deterministic_sum`／
+    /// `chunk_boundary_deterministic_max_and_mean` と同じ検証方針だが、
+    /// こちらは `PARALLEL_THRESHOLD` 境界に焦点を当てる。閾値未満では
+    /// 常に逐次実行になるため、スレッドプール差が結果に一切影響しない
+    /// ことも同時に確認できる）。
+    #[test]
+    fn parallel_threshold_boundary_deterministic_full_reduction() {
+        let threshold = crate::elementwise::PARALLEL_THRESHOLD;
+        let single = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("failed to build single-thread rayon pool for determinism test");
+        let multi = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("failed to build 4-thread rayon pool for determinism test");
+
+        for n in [threshold - 1, threshold, threshold + 1] {
+            let data: Vec<f32> = (0..n).map(|i| ((i % 131) as f32) * 0.25 - 7.0).collect();
+            let t = Tensor::<f32>::new(data.clone(), &[n]).unwrap();
+
+            let sum_a = single.install(|| sum(&t, None).unwrap());
+            let sum_b = multi.install(|| sum(&t, None).unwrap());
+            assert_eq!(
+                sum_a.get(&[]).unwrap().to_bits(),
+                sum_b.get(&[]).unwrap().to_bits(),
+                "sum が PARALLEL_THRESHOLD 境界 n={n} でスレッド数間に不一致"
+            );
+
+            let max_a = single.install(|| max(&t, None).unwrap());
+            let max_b = multi.install(|| max(&t, None).unwrap());
+            assert_eq!(
+                max_a.get(&[]).unwrap().to_bits(),
+                max_b.get(&[]).unwrap().to_bits(),
+                "max が PARALLEL_THRESHOLD 境界 n={n} でスレッド数間に不一致"
+            );
+
+            // 逐次経路（n < threshold）・並列経路（n >= threshold）いずれも
+            // CHUNK 単位の逐次 fold をチャンク番号順に結合する共通構造の
+            // ため、`chunk_boundary_deterministic_sum` と同じ naive 実装
+            // （本実装と同一の累積順序）との bit 一致で経路自体の正しさも
+            // 確認する。
+            let naive = data
+                .chunks(CHUNK)
+                .map(|chunk| chunk.iter().fold(0.0f32, |acc, &v| acc + v))
+                .fold(0.0f32, |acc, v| acc + v);
+            assert_eq!(sum_a.get(&[]).unwrap().to_bits(), naive.to_bits());
+        }
+    }
+
+    /// 小サイズ直列フォールバック（イシュー #811・#1027）の境界で、軸指定
+    /// reduction（`axis_reduce`）がシングルスレッド／マルチスレッドプール
+    /// 間で bit 完全一致することを確認する。`axis_reduce` の閾値判定は
+    /// `outer*inner*axis_len`（縮約軸を含む総入力要素数）のため、
+    /// shape を `[outer, axis_len]`（`axis=1`）に固定して境界を跨がせる。
+    #[test]
+    fn parallel_threshold_boundary_deterministic_axis_reduction() {
+        let threshold = crate::elementwise::PARALLEL_THRESHOLD;
+        let outer = 4usize;
+        let single = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("failed to build single-thread rayon pool for determinism test");
+        let multi = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("failed to build 4-thread rayon pool for determinism test");
+
+        for total_in in [threshold - 1, threshold, threshold + 1] {
+            let axis_len = total_in.div_ceil(outer);
+            let numel = outer * axis_len;
+            let data: Vec<f32> = (0..numel).map(|i| ((i % 97) as f32) * 0.5 - 3.0).collect();
+            let t = Tensor::<f32>::new(data, &[outer, axis_len]).unwrap();
+
+            let sum_a = single.install(|| sum(&t, Some(1)).unwrap());
+            let sum_b = multi.install(|| sum(&t, Some(1)).unwrap());
+            for i in 0..outer {
+                assert_eq!(
+                    sum_a.get(&[i]).unwrap().to_bits(),
+                    sum_b.get(&[i]).unwrap().to_bits(),
+                    "axis sum が total_in={total_in}（outer={outer}, axis_len={axis_len}）\
+                     でスレッド数間に不一致（i={i}）"
+                );
+            }
         }
     }
 }
