@@ -240,3 +240,49 @@ fn tiled_pipeline_rejects_misaligned_shape() {
         .expect_err("misaligned n must be rejected");
     assert!(matches!(err, CudaError::InvalidShape { .. }));
 }
+
+/// codex-review P1 指摘（PR #1071）の回帰テスト: `compile_tiled_pipeline_variant`
+/// で**別の** `CudaDevice`（＝別 `CudaContext`。`CudaDevice::new` は同一
+/// ordinal でも呼ぶたびに新しい `CudaContext` を生成する。
+/// `context_cache.rs::ContextKey` ドキュメントコメント参照）から得た
+/// ハンドルを、それとは異なる `CudaGemm` インスタンスへ渡すと、
+/// `launch_tiled_pipeline_f32` が `unsafe` launch へ到達する前に
+/// `CudaError::TiledPipelineContextMismatch` を返し fail-closed に拒否する
+/// ことを確認する。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_rejects_mismatched_context_handle() {
+    // `gemm` を構築する context と、`other_func` を構築する context を
+    // 意図的に分ける（同一 ordinal でも `CudaDevice::new` の呼び出しごとに
+    // 別 `CudaContext` が生成される）。
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    assert!(
+        gemm.tiled_pipeline_available(),
+        "tiled pipeline kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.tiled_pipeline_unavailable_reason()
+    );
+
+    let other_device =
+        CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let other_func = CudaGemm::compile_tiled_pipeline_variant(&other_device, 3)
+        .expect("tiled pipeline variant compilation must succeed on the other context");
+
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&[0.0f32; 16], &[0.0f32; 16])
+        .expect("upload_f32 must succeed for a well-formed 4x4x4 shape");
+    let mut c_dev = gemm
+        .alloc_output_f32(4, 4)
+        .expect("alloc_output_f32 must succeed for a well-formed 4x4 output shape");
+
+    let err = gemm
+        .launch_tiled_pipeline_f32(&other_func, &a_dev, &b_dev, &mut c_dev, 4, 4, 4)
+        .expect_err(
+            "launching a handle compiled against a different CudaContext must be rejected \
+             before reaching the unsafe launch",
+        );
+    assert!(matches!(
+        err,
+        CudaError::TiledPipelineContextMismatch { .. }
+    ));
+}

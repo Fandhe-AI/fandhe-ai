@@ -600,7 +600,25 @@ fn tiled_pipeline_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
 /// を経由してのみ [`CudaFunction`] を得るため、この型の値は必ず期待する
 /// シグネチャ・タイル構成のカーネルを指すことが構築時点で保証される
 /// （検証済みハンドルへの封じ込め）。
-pub struct TiledPipelineFunction(CudaFunction);
+///
+/// `context_ptr`（codex-review P1 指摘・PR #1071）: 上記のシグネチャ・
+/// タイル構成の一致だけでは、`compile_tiled_pipeline_variant` に**別の
+/// `CudaDevice`（＝別 GPU・別 `CudaContext`）** を渡して得たハンドルを
+/// `CudaGemm::launch_tiled_pipeline_f32`（別インスタンス。別 context の
+/// `stream` を保持）へ safe Rust から渡せてしまう不変条件の穴が残る。
+/// 複数 GPU・複数 context 利用時にこれを行うと、context 固有の
+/// `CUfunction` と、別 context の `stream`／デバイスバッファを混在させた
+/// `unsafe` launch に到達し、CUDA driver レベルの未定義動作
+/// （invalid device context・実質的な OOB リスク）を招きうる。
+/// `Arc<CudaContext>` のポインタ同一性（`context_cache.rs::ContextKey` と
+/// 同じ識別方式）をハンドルへ焼き込み、`launch_tiled_pipeline_f32` が
+/// 起動直前に `self.stream.context()` と fail-closed に一致検証すること
+/// で、非公開フィールドの型保証をシグネチャだけでなく生成元 context にも
+/// 拡張する。`CudaFunction` は内部で `Arc<CudaModule>`→`Arc<CudaContext>`
+/// を強参照し続けるため（cudarc 0.19.8 `driver::safe::core::CudaFunction`
+/// の `module` フィールド）、本型が生存する間はポインタが指す
+/// `CudaContext` の再利用（ABA）は起こらない。
+pub struct TiledPipelineFunction(CudaFunction, usize);
 
 impl TiledPipelineFunction {
     /// 起動に使う内部の [`CudaFunction`] を返す。本モジュール限定
@@ -608,6 +626,13 @@ impl TiledPipelineFunction {
     /// ため `pub(crate)` に留める）。
     fn as_cuda_function(&self) -> &CudaFunction {
         &self.0
+    }
+
+    /// 生成元 `CudaDevice` の `Arc<CudaContext>` ポインタ同一性識別子。
+    /// [`CudaGemm::launch_tiled_pipeline_f32`] が起動直前の context 一致
+    /// 検証に使う（型ドキュメントコメント参照）。
+    fn context_ptr(&self) -> usize {
+        self.1
     }
 }
 
@@ -624,7 +649,8 @@ fn compile_tiled_pipeline(device: &CudaDevice) -> Result<TiledPipelineFunction, 
         kernels_tiled_pipeline::tiled_pipeline_f32_source(),
         "gemm_tiled_pipeline_f32",
     )?;
-    Ok(TiledPipelineFunction(func))
+    let context_ptr = Arc::as_ptr(device.context()) as usize;
+    Ok(TiledPipelineFunction(func, context_ptr))
 }
 
 /// [`wmma_tf32_launch_config`] の tiled pipeline 版。ブロックタイル
@@ -1689,7 +1715,8 @@ impl CudaGemm {
             CompiledDims::DYNAMIC_ALL,
         )?;
         let func = load_function_cached(device, descriptor, &source, "gemm_tiled_pipeline_f32")?;
-        Ok(TiledPipelineFunction(func))
+        let context_ptr = Arc::as_ptr(device.context()) as usize;
+        Ok(TiledPipelineFunction(func, context_ptr))
     }
 
     /// デバイス常駐済みの A/B/C バッファに対して、任意のコンパイル済み
@@ -1705,6 +1732,18 @@ impl CudaGemm {
     /// （`a_dev`/`b_dev`/`c_dev`）が `m/n/k` と 1:1 対応することを起動前に
     /// 検証する（`launch_tiled_f32` と同じ「safe な公開 API である以上、
     /// 呼び出し元の契約違反から独立して GPU 側 OOB を防ぐ」判断）。
+    ///
+    /// **context 一致検証（codex-review P1 指摘・PR #1071）**: `func` が
+    /// `self.stream`（＝この `CudaGemm` を構築した `CudaDevice`）と同じ
+    /// `CudaContext` から生成されたことを [`TiledPipelineFunction`] の
+    /// `context_ptr`（型ドキュメントコメント参照）で fail-closed に検証
+    /// する。複数 GPU・複数 `CudaContext` 利用時に、別 context で
+    /// `compile_tiled_pipeline_variant` して得たハンドルをこのインスタンス
+    /// へ渡すと、context 固有の `CUfunction` と本インスタンスの
+    /// `stream`／デバイスバッファを混在させた `unsafe` launch に到達し
+    /// うる（invalid device context・実質的な UB／OOB リスク）ため、
+    /// 起動前に一致しなければ `CudaError::TiledPipelineContextMismatch`
+    /// を返し `unsafe` launch へ到達させない。
     #[allow(clippy::too_many_arguments)]
     pub fn launch_tiled_pipeline_f32(
         &self,
@@ -1716,6 +1755,15 @@ impl CudaGemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
+        let self_context_ptr = Arc::as_ptr(self.stream.context()) as usize;
+        if func.context_ptr() != self_context_ptr {
+            return Err(CudaError::TiledPipelineContextMismatch {
+                detail: "TiledPipelineFunction was compiled against a different CudaContext \
+                         (different CudaDevice/GPU) than this CudaGemm instance's stream; \
+                         refusing to launch across mismatched CUDA contexts"
+                    .to_string(),
+            });
+        }
         validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
         validate_tiled_pipeline_k_bound(k)?;
         if !tiled_pipeline_alignment_ok(n, k) {
