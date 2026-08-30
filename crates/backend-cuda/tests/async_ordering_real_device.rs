@@ -99,6 +99,19 @@ fn forward_backward_update_chain_matches_cpu_reference_without_explicit_sync() {
     let mut w_cpu_dev = cpu_mem.upload(&tensor(w_init.clone(), &[k, n])).unwrap();
     let mut velocity_cpu_dev = cpu_mem.alloc_zeroed(&[k, n]).unwrap();
 
+    // codex-review 指摘（PR #1067）: 同期 fallback 環境
+    // （`has_async_alloc()` が偽）では `DeviceBuffer` の `Drop` が
+    // 明示同期を伴いうる（`pool.rs` 参照）。ループの都度
+    // `grad_w_cuda_dev` を drop すると、その暗黙同期が
+    // `sgd_step_device` と次ステップの `gemm_resident_rhs` の間に
+    // 挟まってしまい、本テストが検証したい launch-only の非同期連鎖
+    // （I1。上記ドキュメンテーションコメント参照）を fallback 環境では
+    // 実際には検証できなくなる。ループ全体を通じて全ステップ分の
+    // `grad_w_cuda_dev` をここへ保持し、最終 download の後（関数末尾）
+    // までまとめて drop することで、`has_async_alloc()` の真偽に依らず
+    // I1 の不変条件を保つ。
+    let mut grad_w_cuda_devs = Vec::with_capacity(STEPS);
+
     const STEPS: usize = 12;
     for step in 0..STEPS {
         let w_shape = [k, n];
@@ -140,6 +153,9 @@ fn forward_backward_update_chain_matches_cpu_reference_without_explicit_sync() {
                 &config,
             )
             .expect("cuda sgd_step_device must succeed on real hardware");
+        // ここで drop せず関数末尾までまとめて保持する（上記
+        // codex-review 指摘対応のコメント参照）。
+        grad_w_cuda_devs.push(grad_w_cuda_dev);
         let grad_w_cpu_dev = cpu_mem.upload(&grad_w_cpu).unwrap();
         cpu_ops
             .sgd_step_device(
@@ -163,6 +179,10 @@ fn forward_backward_update_chain_matches_cpu_reference_without_explicit_sync() {
             &format!("W[{i}] after {STEPS} steps"),
         );
     }
+
+    // 最終 download の完了後にまとめて drop する（上記
+    // codex-review 指摘対応のコメント参照）。
+    drop(grad_w_cuda_devs);
 }
 
 /// T2（早期 D2H の検出）: 大形状の常駐バッファへ launch-only の
@@ -201,6 +221,17 @@ fn many_chained_sgd_steps_then_immediate_download_matches_cpu_reference() {
     let mut cpu_param = cpu_mem.upload(&tensor(init, &[NUMEL])).unwrap();
     let mut cpu_velocity = cpu_mem.alloc_zeroed(&[NUMEL]).unwrap();
 
+    // codex-review 指摘（PR #1067）: 同期 fallback 環境
+    // （`has_async_alloc()` が偽）では `DeviceBuffer` の `Drop` が
+    // 明示同期を伴いうる（`pool.rs` 参照）。ループの都度 `cuda_grad` を
+    // drop すると、その暗黙同期が連鎖投入の途中に挟まり、本テストが
+    // 検証したい「明示同期なしの launch-only 連鎖投入」（上記
+    // ドキュメンテーションコメント参照）を fallback 環境では実際には
+    // 検証できなくなる。ループ全体を通じて全ステップ分の `cuda_grad` を
+    // ここへ保持し、最終 download の後（関数末尾）までまとめて drop
+    // することで、`has_async_alloc()` の真偽に依らずテストの意図を保つ。
+    let mut cuda_grads = Vec::with_capacity(STEPS);
+
     for step in 0..STEPS {
         // 勾配は決定的な擬似データ（ステップごとに変化させ、SGD の状態
         // 〈momentum 項〉が毎回異なる値で更新されるようにする）。
@@ -232,6 +263,9 @@ fn many_chained_sgd_steps_then_immediate_download_matches_cpu_reference() {
         cpu_ops
             .sgd_step_device(&mut cpu_param, &cpu_grad, Some(&mut cpu_velocity), &config)
             .unwrap();
+        // ここで drop せず関数末尾までまとめて保持する（上記
+        // codex-review 指摘対応のコメント参照）。
+        cuda_grads.push(cuda_grad);
     }
 
     // 連鎖投入直後（明示同期なし）に download する。
@@ -255,6 +289,10 @@ fn many_chained_sgd_steps_then_immediate_download_matches_cpu_reference() {
             &format!("param[{i}] after {STEPS} chained steps, numel={NUMEL}"),
         );
     }
+
+    // 最終 download の完了後にまとめて drop する（上記
+    // codex-review 指摘対応のコメント参照）。
+    drop(cuda_grads);
 }
 
 /// T4（前提確認プローブ）: `docs/backend-cuda-async-execution-design.md`

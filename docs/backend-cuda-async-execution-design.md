@@ -314,11 +314,16 @@
   に実装した。T3b は当初 T3i と同じ新規モジュールへ置く想定だったが、
   `ops.rs` の `#[cfg(test)] mod tests` に `gemm`／`gemm_resident_rhs` の
   poison 拒否テストが既に実装済みであることが判明したため、残る公開演算
-  （`add`〈`mul`／`relu`／`exp`／`tanh` は同一経路のため代表 1 本〉・
-  `sgd_step_device`・`gemm_resident_lhs`・`release_cached_device_memory`）
-  の poison 拒否テストをその既存モジュールへ追加する形にした（ヘルパー
-  〈`unique_test_ordinal`・`EmptyHandle`・`sticky_driver_error`〉の重複を
-  避けるため）。T3i のみ `context_cache.rs` の子モジュール
+  （`add`〈`mul` は同じ `elementwise_binary` 経路を通るため併せて代表〉・
+  `relu`〈`exp`／`tanh` は同じ `elementwise_unary` 経路を通るため併せて
+  代表〉・`sgd_step_device`・`gemm_resident_lhs`・
+  `release_cached_device_memory`）の poison 拒否テストをその既存モジュール
+  へ追加する形にした（ヘルパー〈`unique_test_ordinal`・`EmptyHandle`・
+  `sticky_driver_error`〉の重複を避けるため）。`add` と `relu` は
+  ディスパッチ関数（`elementwise_binary`／`elementwise_unary`）自体が
+  分かれているため個別に代表テストを置いた（codex-review 指摘・PR
+  #1067。`add` 側の検証だけでは `elementwise_unary` 経路は未検証だった）。
+  T3i のみ `context_cache.rs` の子モジュール
   `async_ordering_poison_tests`（`#[path]` 宣言）に置いた
   （`OrdinalRegistry`／`invalidate_with`／`ProbeFailure` がモジュール
   非公開のため）
