@@ -955,6 +955,24 @@ impl MetalBackendOps {
         let n = b_shape[1];
         let batch_dims = &a_shape[..a_shape.len() - 1];
         let out_shape: Vec<usize> = batch_dims.iter().copied().chain([n]).collect();
+        let m: usize = batch_dims.iter().product();
+
+        // イシュー #1040 是正（codex-review・Cursor Bugbot 指摘）: `m == 0`
+        // （バッチ次元のいずれかが 0）または `n == 0` の場合、出力の要素数
+        // は 0 であり GPU 起動は不要（`gemm_resident_lhs`／
+        // `gemm_resident_rhs` と同じ「numel == 0 は空 Tensor」の判断。
+        // Metal context 取得前に判定することで `MetalBufferHandle::
+        // buffer == None`（空バッファ）に起因する `DeviceAllocationFailed`
+        // を回避する）。`k == 0`（`m`・`n` は非 0）は GEMM の数学的定義
+        // どおり結果が全 0（`gemm_resident_lhs` の同分岐と同じ判断）で、
+        // こちらも GPU 起動を避けホスト側で直接構築する。
+        if m == 0 || n == 0 {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        if k == 0 {
+            return Tensor::from_shape_fill(&out_shape, |_| 0.0)
+                .map_err(BackendError::ShapeMismatch);
+        }
 
         let ctx = context_cache::cached_context().map_err(map_metal_error)?;
         let mem = MetalMemory::from_shared(ctx.clone());
