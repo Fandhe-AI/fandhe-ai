@@ -491,6 +491,122 @@ extern "C" __global__ void gemm_wmma_tf32(
 }
 "#;
 
+/// [`TILED_F32`] のアンカー 2 行（`row`/`col` のグローバル添字計算）を、
+/// `swizzle.rs::swizzled_block_idx` と同一の整数式（グループ幅
+/// `group_width` の M 方向グルーピング remap）へ差し替えた変種ソースを
+/// 生成する（イシュー #1034。f16 `mma.sync` 経路の #499・TF32 opt-staged
+/// 経路の #741 と同一設計。`kernels_mma.rs::mma_f16_source_with_swizzle`
+/// 参照）。
+///
+/// **`TILED_F32`（本番既定 f32 カーネル。`docs/perf/
+/// cuda-gemm-kernel-improvement-policy.md` §1）自体は変更しない**
+/// （`replacen` で新規 `String` を都度構築するのみ）。
+///
+/// # 呼び出し元
+///
+/// `gemm.rs::CudaGemm::new_with_tiled_f32_swizzle`（`internal-diagnostics`
+/// feature 限定・診断用 opt-in 入口）専用。**本番既定コンストラクタ
+/// （`CudaGemm::new`）・`run_tiled_f32`／`launch_tiled_f32` はこの関数を
+/// 呼ばない**（実装計画 §2「本番結線を本ランで行わない判断」。ncu による
+/// L2 ヒット率実測・N=4096 改善値・サイズ条件付き適用へのユーザー承認を
+/// 実機セッションで経てから `new` への昇格を検討する。`swizzle.rs`
+/// 冒頭コメントが記録する f16 経路の先例〈#740 差し戻し→#775/#782 実機
+/// ゲート後に `new` へ昇格〉と同じ安全側の順序を踏む）。
+///
+/// # remap の整数式（`swizzle.rs::swizzled_block_idx` と単一の設計を共有）
+///
+/// `gemm.rs::launch_config` は `TILED_BLOCK_DIM`（`kernels::TILE` 一辺）
+/// 版のグリッドを `gridDim.x = num_n_blocks`・`gridDim.y = num_m_blocks`
+/// （`blockIdx.x` が N 方向・`blockIdx.y` が M 方向）で構築する
+/// （`kernels_mma.rs::mma_f16_source_with_swizzle` の grid レイアウトと
+/// 同一）。したがって remap 式自体は `mma_f16_source_with_swizzle` と
+/// 同一構造（`BM`/`BN` の代わりに `TILE` を単位とする）をそのまま適用
+/// できる。線形 index・ブロック数・積は `long long`（64 bit）で計算し、
+/// 最終座標を明示的に範囲検査してから `int` へ縮小する（PR #667
+/// codex-review P0 是正を踏襲。REQ-8「境界検査の省略禁止」）。
+///
+/// remap 後も、タイルロード時の三項ガード・C 書き込み時の `if (row < m &&
+/// col < n)`（`TILED_F32` 本体の既存手動境界チェック）は一切変更しない
+/// （swizzle はブロックがどの `(m_block, n_block)` を担当するかの割り当て
+/// のみを変え、各出力要素の積和順序・境界チェックの要否は変えないため）。
+///
+/// # エラー契約
+///
+/// `group_width < 2` は `CudaError::InvalidShape` で拒否する
+/// （`mma_f16_source_with_swizzle` と同一の理由。`group_width == 1` は
+/// 恒等写像に等しく L2 再利用効果を持たない）。アンカー未検出・複数検出
+/// （`TILED_F32` 改変で本関数の前提が崩れた場合）も `CudaError::
+/// InvalidShape` で拒否し、panic しない（本番経路から呼ばれる
+/// `mma_f16_source_with_swizzle` と同じ fail-closed 契約。本関数自体は
+/// `internal-diagnostics` feature 限定の opt-in 入口のみから呼ばれるが、
+/// 契約を弱めない）。
+pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    if group_width < 2 {
+        return Err(crate::error::CudaError::InvalidShape {
+            detail: format!(
+                "tiled_f32_source_with_swizzle requires group_width >= 2 (got {group_width}); \
+                 group_width == 1 degenerates to the identity block mapping and offers no \
+                 L2 reuse benefit"
+            ),
+        });
+    }
+
+    const ANCHOR: &str = "    int row = blockIdx.y * TILE + threadIdx.y;\n    \
+                           int col = blockIdx.x * TILE + threadIdx.x;\n";
+    let source = TILED_F32;
+    let occurrences = source.matches(ANCHOR).count();
+    // `unwrap()`/`expect()`・panic 系マクロを本番経路で使わない方針
+    // （coding-rust.md）に合わせ、型付きエラーで返す
+    // （`mma_f16_source_with_swizzle` と同じ理由）。
+    if occurrences != 1 {
+        return Err(crate::error::CudaError::InvalidShape {
+            detail: format!(
+                "TILED_F32 中のグローバル添字アンカー（row/col）の出現数が 1 では \
+                 ありません（{occurrences} 件検出。tiled_f32_source_with_swizzle \
+                 の前提が崩れています）"
+            ),
+        });
+    }
+
+    let remap = format!(
+        "    // イシュー #1034: L2 再利用のためのタイル→SM 割り当てスウィズル\n\
+         \x20   // remap（swizzle.rs::swizzled_block_idx と同一式。\n\
+         \x20   // kernels_mma.rs::mma_f16_source_with_swizzle と同型で\n\
+         \x20   // `BM`/`BN` の代わりに `TILE` を単位とする。本ファイル\n\
+         \x20   // tiled_f32_source_with_swizzle ドキュメンテーションコメント\n\
+         \x20   // 参照）。PR #667 codex-review P0 是正を踏襲し、線形 index・\n\
+         \x20   // ブロック数・積は `long long`（64 bit）で計算し、最終座標を\n\
+         \x20   // 明示的に範囲検査してから `int` へ縮小する（REQ-8「境界検査\n\
+         \x20   // の省略禁止」）。\n\
+         \x20   #define SWIZZLE_GROUP {group_width}\n\
+         \x20   long long num_m_blocks = gridDim.y;\n\
+         \x20   long long num_n_blocks = gridDim.x;\n\
+         \x20   long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;\n\
+         \x20   long long full_groups = num_m_blocks / SWIZZLE_GROUP;\n\
+         \x20   long long remainder = num_m_blocks % SWIZZLE_GROUP;\n\
+         \x20   long long full_group_blocks = (long long)SWIZZLE_GROUP * num_n_blocks;\n\
+         \x20   long long full_groups_total_blocks = full_groups * full_group_blocks;\n\
+         \x20   long long m_block, n_block;\n\
+         \x20   if (linear_idx < full_groups_total_blocks) {{\n\
+         \x20       long long group_idx = linear_idx / full_group_blocks;\n\
+         \x20       long long idx_in_group = linear_idx % full_group_blocks;\n\
+         \x20       m_block = group_idx * SWIZZLE_GROUP + (idx_in_group % SWIZZLE_GROUP);\n\
+         \x20       n_block = idx_in_group / SWIZZLE_GROUP;\n\
+         \x20   }} else {{\n\
+         \x20       long long idx_in_group = linear_idx - full_groups_total_blocks;\n\
+         \x20       m_block = full_groups * SWIZZLE_GROUP + (idx_in_group % remainder);\n\
+         \x20       n_block = idx_in_group / remainder;\n\
+         \x20   }}\n\
+         \x20   if (m_block < 0 || m_block >= num_m_blocks || n_block < 0 ||\n\
+         \x20       n_block >= num_n_blocks) {{\n\
+         \x20       return;\n\
+         \x20   }}\n\
+         \x20   int row = (int)(m_block * TILE) + threadIdx.y;\n\
+         \x20   int col = (int)(n_block * TILE) + threadIdx.x;\n"
+    );
+
+    Ok(source.replacen(ANCHOR, &remap, 1))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +659,72 @@ mod tests {
                 "WMMA_TF32_F32 の `#define {name}` が Rust 側の定数（{value}）と一致しません"
             );
         }
+    }
+
+    /// イシュー #1034 受け入れ基準: `group_width < 2` を拒否する
+    /// （`tiled_f32_source_with_swizzle` ドキュメンテーションコメント
+    /// 「エラー契約」参照。`mma_f16_source_with_swizzle` と同型の検査）。
+    #[test]
+    fn tiled_f32_source_with_swizzle_rejects_group_width_below_two() {
+        let err = tiled_f32_source_with_swizzle(1).expect_err("group_width=1 must be rejected");
+        assert!(matches!(err, crate::error::CudaError::InvalidShape { .. }));
+        let err = tiled_f32_source_with_swizzle(0).expect_err("group_width=0 must be rejected");
+        assert!(matches!(err, crate::error::CudaError::InvalidShape { .. }));
+    }
+
+    /// イシュー #1034 受け入れ基準: `group_width >= 2` では生成ソースに
+    /// `#define SWIZZLE_GROUP <group_width>` と remap 断片が含まれ、かつ
+    /// 元のアンカー（`blockIdx.y`/`blockIdx.x` 直書き）は除去されている
+    /// ことを検査する（`mma_f16_source_with_swizzle_contains_group_
+    /// define_and_remap_fragment` と同型）。
+    #[test]
+    fn tiled_f32_source_with_swizzle_contains_group_define_and_remap_fragment() {
+        for group_width in [2u32, 8, 16] {
+            let src = tiled_f32_source_with_swizzle(group_width)
+                .unwrap_or_else(|err| panic!("group_width={group_width}: {err}"));
+
+            let expected_define = format!("#define SWIZZLE_GROUP {group_width}");
+            assert!(
+                src.contains(&expected_define),
+                "group_width={group_width}: 生成ソースに `{expected_define}` が \
+                 見つかりません"
+            );
+            for needle in [
+                "long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;",
+                "long long full_groups = num_m_blocks / SWIZZLE_GROUP;",
+                "long long remainder = num_m_blocks % SWIZZLE_GROUP;",
+                "int row = (int)(m_block * TILE) + threadIdx.y;",
+                "int col = (int)(n_block * TILE) + threadIdx.x;",
+            ] {
+                assert!(
+                    src.contains(needle),
+                    "group_width={group_width}: 生成ソースに remap 断片 `{needle}` \
+                     が見つかりません"
+                );
+            }
+            assert!(
+                !src.contains("int row = blockIdx.y * TILE + threadIdx.y;"),
+                "group_width={group_width}: 元のアンカー（blockIdx.y 直書き）が \
+                 remap 後も残っています"
+            );
+        }
+    }
+
+    /// `tiled_f32_source_with_swizzle` はアンカー置換のみを行い、
+    /// `TILED_F32`（本番既定 f32 カーネル）自体は不変であることを
+    /// ロックする（`mma_f16_source_with_swizzle_does_not_mutate_
+    /// mma_f16_source` と同型の回帰防止。実装計画 2 節の安全側判断）。
+    #[test]
+    fn tiled_f32_source_with_swizzle_does_not_mutate_tiled_f32_source() {
+        let before = TILED_F32;
+        let _ = tiled_f32_source_with_swizzle(8).expect("group_width=8 must be accepted");
+        assert_eq!(
+            TILED_F32, before,
+            "tiled_f32_source_with_swizzle 呼び出し後に TILED_F32 が変化しています"
+        );
+        assert!(
+            TILED_F32.contains("int row = blockIdx.y * TILE + threadIdx.y;"),
+            "TILED_F32 の元のアンカー行が失われています（本番カーネルは無変更のはず）"
+        );
     }
 }
