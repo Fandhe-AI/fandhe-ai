@@ -106,6 +106,7 @@ import glob
 import json
 import math
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -121,6 +122,142 @@ DEVICE_LABEL = {"cpu": "CPU", "metal": "Metal", "cuda": "CUDA"}
 # ため FRAMEWORKS から除外する。
 GATE_TARGET_CHOICES = [fw for fw in FRAMEWORKS if fw != "fandhe-ai"]
 GATE_TASKS = ("gemm", "train", "infer")
+
+# codex-review P0 指摘（PR #1082 3 巡目）: `run_all.sh`/`run_all_cuda.sh` の
+# `run()` 関数は実行時失敗を JSONL には一切書かず（"never fabricated"。
+# 両スクリプト冒頭コメント参照）`skipped*.log` にのみ記録する。従来の
+# `target_gate`/`_gate_devices` は成功して JSONL に残った fandhe-ai/target
+# 行だけからデバイス集合・size 集合を導出していたため、あるデバイスの
+# 全実行（または既知デバイス上の特定 size）が丸ごと失敗して
+# skipped*.log にしか記録されなかった場合、その組合せが判定対象に一切
+# 現れず「全達成」に混入する fail-open があった。`_parse_skip_failure`
+# は両スクリプトが書き出す行形式（`<bin> task=<task> device=<device>
+# size=<size> mode=<mode> extra=<extra> : <エラーメッセージ>`。両
+# スクリプトの `run()` 定義で同一書式）を解析し、`main()` が
+# `gate_records_all` へ判定不能レコードとして注入する
+# （`_inject_skip_failures_into_gate` 参照）。
+_SKIP_BIN_TO_FRAMEWORK = {
+    "bench-fandhe": "fandhe-ai",
+    "bench-candle": "candle",
+    "bench-burn": "burn",
+}
+
+_SKIP_LINE_RE = re.compile(
+    r"^(?P<bin>\S+)\s+task=(?P<task>\S+)\s+device=(?P<device>\S+)\s+"
+    r"size=(?P<size>\S+)\s+mode=(?P<mode>\S+)\s+extra=(?P<extra>\S+)\s*:\s*(?P<err>.*)$"
+)
+
+
+def _parse_skip_failure(line):
+    """`skipped*.log` の 1 行を解析し、ゲート判定に使える構造化情報を返す。
+
+    `run_all.sh`/`run_all_cuda.sh` の `run()` 関数（両スクリプト同一書式）が
+    書き出す `<bin> task=<task> device=<device> size=<size> mode=<mode>
+    extra=<extra> : <エラーメッセージ>` を対象とする。`build()`
+    （`run_all_cuda.sh` のビルド失敗記録）等、この書式に一致しない行は
+    `task`/`device`/`size` を特定できないため全て `None` に倒す
+    （呼び出し側 `_inject_skip_failures_into_gate` が device 単位の粗い
+    判定不能レコードへ fail-closed に倒す）。
+
+    `framework`/`task`/`device` は許可された値（`_SKIP_BIN_TO_FRAMEWORK`・
+    `GATE_TASKS`・`DEVICE_ORDER`）のみを採用する（security.md A03。外部
+    プロセスの stderr 出力を含む行を未検証のまま辞書キー・Markdown へ
+    通さない）。`size` は `_valid_gate_size` で検証し、不正・パース不能
+    なら `None` に倒す（`--size` に非整数が渡ることはないが、外部ログの
+    内容は信頼しない）。
+
+    戻り値: {"framework": str|None, "task": str|None, "device": str|None,
+              "size": int|None, "raw": str}
+    """
+    m = _SKIP_LINE_RE.match(line)
+    if not m:
+        return {"framework": None, "task": None, "device": None, "size": None, "raw": line}
+    framework = _SKIP_BIN_TO_FRAMEWORK.get(m.group("bin"))
+    task = m.group("task") if m.group("task") in GATE_TASKS else None
+    device = m.group("device") if m.group("device") in DEVICE_ORDER else None
+    size = None
+    try:
+        size_candidate = int(m.group("size"))
+    except ValueError:
+        size_candidate = None
+    if size_candidate is not None and _valid_gate_size(size_candidate):
+        size = size_candidate
+    return {"framework": framework, "task": task, "device": device, "size": size, "raw": line}
+
+
+def _inject_skip_failures_into_gate(gate_records_all, skip_failures, target):
+    """skip 由来の失敗を `gate_records_all` へ判定不能レコードとして注入する。
+
+    `gate_records_all`（`target_gate` が生成した実データ由来のレコード）に
+    既に同じ `(task, device, size)` の組が存在する場合は注入しない
+    （実データ側で既に判定済み＝fail-open ではないため二重計上しない）。
+    存在しない組（＝該当デバイス・size が丸ごと失敗し JSONL に一切残ら
+    なかった）のみを新規レコードとして追加する（fail-closed）。
+
+    `task`/`device` を特定できない行（ビルド失敗等）は、値を捏造せず
+    device 単位より粗い「詳細不明」の判定不能レコード 1 件（重複行は
+    まとめる）に倒す。
+
+    戻り値: 注入したレコードのリスト（Markdown 節への表示用。空なら
+    `[]`）。`gate_records_all` は本関数の呼び出しにより直接変更される。
+    """
+    existing_keys = {(r["task"], r["device"], r["size"]) for r in gate_records_all}
+    injected = []
+    seen_keys = set()
+    seen_unparsed = set()
+    for sf in skip_failures:
+        if sf["task"] is None or sf["device"] is None:
+            # advisor 指摘（PR #1082 4 巡目）: framework 判定より先に処理
+            # する。`run_all_cuda.sh` の `build()` が書く `"$crate BUILD
+            # FAILED: ..."` は `_SKIP_LINE_RE` に一致せず framework も
+            # `None` になるため、`sf["framework"] not in (...)` の判定を
+            # 先に行うと `bench-fandhe BUILD FAILED`（＝当該スイープで
+            # fandhe-ai データが丸ごと生成されなかった、この種の中で
+            # 最も深刻な fail-open）が framework 不明を理由に無条件で
+            # 握りつぶされてしまう。framework が特定できない行は
+            # target が何であれ対象判定を待たず fail-closed に倒す。
+            if sf["raw"] in seen_unparsed:
+                continue
+            seen_unparsed.add(sf["raw"])
+            record = {
+                "task": "-",
+                "device": "-",
+                "size": None,
+                "fandhe_mode": None,
+                "target_mode": None,
+                "fandhe_median": None,
+                "target_median": None,
+                "ratio": None,
+                "status": "undeterminable",
+                "reason": f"skipped*.log の詳細不明な失敗記録: {sf['raw']}",
+                "note": None,
+            }
+            gate_records_all.append(record)
+            injected.append(record)
+            continue
+        if sf["framework"] not in ("fandhe-ai", target):
+            continue
+        key = (sf["task"], sf["device"], sf["size"])
+        if key in existing_keys or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        size_label = f"N={sf['size']}" if sf["size"] is not None else "size 不明"
+        record = {
+            "task": sf["task"],
+            "device": sf["device"],
+            "size": sf["size"],
+            "fandhe_mode": None,
+            "target_mode": None,
+            "fandhe_median": None,
+            "target_median": None,
+            "ratio": None,
+            "status": "undeterminable",
+            "reason": f"skipped*.log に実行時失敗（{sf['framework']}・{size_label}）",
+            "note": None,
+        }
+        gate_records_all.append(record)
+        injected.append(record)
+    return injected
 
 # `train_phases`（(b'') 節。イシュー #1009）専用の allowlist。producer 側の
 # 契約（`bench_common::parse_cli_from` の `--mode` allowlist・`PHASE_*` 定数
@@ -1876,12 +2013,17 @@ def main():
     )
     lines.append("## 実行時失敗（skipped*.log）\n")
     any_skip = False
+    skip_failures = []
     for sl in skip_logs:
         for line in open(sl):
             line = line.strip()
             if line:
                 any_skip = True
                 lines.append(f"- **{os.path.basename(sl)}**: {line}")
+                # codex-review P0 指摘（PR #1082 3 巡目）: 表示用の生行に加え
+                # `--target` ゲートへ組み込むための構造化情報も収集する
+                # （`_inject_skip_failures_into_gate` 参照）。
+                skip_failures.append(_parse_skip_failure(line))
     if not any_skip:
         lines.append("- なし（skipped*.log は空または不在）")
     lines.append("")
@@ -1889,6 +2031,25 @@ def main():
     gate_unmet = 0
     gate_undeterminable = 0
     if args.target:
+        # codex-review P0 指摘（PR #1082 3 巡目）: あるデバイスの全実行
+        # （または既知デバイス上の特定 size）が丸ごと失敗し
+        # skipped*.log にしか記録が残らなかった場合、`target_gate` は
+        # 成功して JSONL に残った fandhe-ai/target 行だけからデバイス・
+        # size 集合を導出するため、その組合せが判定対象に一切現れず
+        # 「全達成」に混入する fail-open があった。実データ由来の
+        # `gate_records_all` を先に確定させたうえで、skip 由来の失敗を
+        # 判定不能レコードとして注入する（既に実データ側で判定済みの
+        # 組は二重計上しない。`_inject_skip_failures_into_gate` docstring
+        # 参照）。
+        skip_gate_records = _inject_skip_failures_into_gate(
+            gate_records_all, skip_failures, args.target
+        )
+        if skip_gate_records:
+            gate_section_lines_by_file.append(
+                target_gate_section(
+                    "skipped*.log（実行時失敗由来）", skip_gate_records, args.target
+                )
+            )
         lines.append(
             f"## 目標達成ゲート（--target {args.target}。イシュー #1051）\n"
         )

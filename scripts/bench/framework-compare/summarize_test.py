@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -1845,6 +1846,140 @@ class MainTargetExitCodeTests(unittest.TestCase):
             os.unlink(empty_path)
             os.unlink(achieved_path)
 
+    def test_skip_log_entirely_failed_device_forces_undeterminable_exit_3(self):
+        # codex P0（PR #1082 3 巡目指摘）: `_gate_devices`/`target_gate` は
+        # 成功して JSONL に残った fandhe-ai/target 行だけからデバイス集合を
+        # 導出するため、あるデバイスの全実行が失敗し skipped*.log にしか
+        # 記録が残らなかった場合、そのデバイスは判定対象に一切現れず
+        # 「全達成」に混入する fail-open があった。CPU は全達成の正常
+        # データ、CUDA は skipped.log のみに記録がある（JSONL には一切
+        # 現れない）ケースで exit 3 になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", device="cpu", checksum=1.0)),
+                _train_row(framework="fandhe-ai", device="cpu", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", device="cpu", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0001),
+                _infer_row(framework="candle", device="cpu", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped-cuda.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=gemm device=cuda size=256 mode=fresh "
+                    "extra=none : CUDA driver not found\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            # `DEVICE_LABEL` により表示は大文字化される
+            # （`target_gate_section`・`DEVICE_LABEL` 定義参照）。
+            self.assertIn("CUDA", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_single_size_failure_on_known_device_forces_undeterminable_exit_3(self):
+        # 上記と対の観点（codex P0・PR #1082 3 巡目指摘の 2 点目）: CPU
+        # デバイス自体は他 size で計測済み（`_gate_devices` には現れる）
+        # だが、gemm cpu size=1024 の実行だけが失敗し skipped.log にしか
+        # 記録がないケース。`sizes` は実データからのみ導出されるため、
+        # 実データに一切現れない size=1024 は黙って判定対象から漏れて
+        # いた。全達成データ（size=256）+ skipped.log の size=1024 失敗
+        # 記録を与え、exit 3 になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", size=256, checksum=1.0)),
+                _with_parity(_base_row(framework="candle", size=256, checksum=1.0)),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=gemm device=cpu size=1024 mode=fresh "
+                    "extra=none : OOM\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("N=1024", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_failure_already_covered_by_real_data_is_not_double_counted(self):
+        # 回帰確認: 既に実データ側で判定済み（例えば candle 側が計測
+        # できておらず「candle 未計測」として既に判定不能）の組は、
+        # 同じ組を指す skipped.log の記録があっても二重にレコードを
+        # 追加しない（`_inject_skip_failures_into_gate` の
+        # `existing_keys` 抑制）。skipped.log の有無で判定不能件数が
+        # 変わらないことを確認する（水増しされない）。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [_infer_row(framework="fandhe-ai")]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            code_without, out_without, _ = self._run_main(path, target="candle")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-candle task=infer device=cpu size=64 mode=fresh "
+                    "extra=none : timeout\n"
+                )
+            code_with, out_with, _ = self._run_main(path, target="candle")
+            self.assertEqual(code_without, 3)
+            self.assertEqual(code_with, 3)
+            count_without = int(re.search(r"判定不能 (\d+)", out_without).group(1))
+            count_with = int(re.search(r"判定不能 (\d+)", out_with).group(1))
+            self.assertEqual(count_with, count_without)
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+    def test_skip_log_unparseable_build_failure_forces_undeterminable_exit_3(self):
+        # advisor 指摘（PR #1082 4 巡目）: `run_all_cuda.sh` の `build()` が
+        # 書く `"$crate BUILD FAILED: ..."` は `_SKIP_LINE_RE` に一致せず
+        # framework も特定できないため、framework 判定を先に行う実装だと
+        # `bench-fandhe BUILD FAILED`（＝当該スイープで fandhe-ai データが
+        # 丸ごと生成されなかった、最も深刻なケース）が framework 不明を
+        # 理由に無条件で握りつぶされ、CPU が全達成なら exit 0 になって
+        # しまっていた。ここでは CPU 全達成データ + ビルド失敗のみの
+        # skipped-cuda.log を与え、exit 3（判定不能扱い）になることを
+        # 確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", device="cpu", checksum=1.0)),
+                _train_row(framework="fandhe-ai", device="cpu", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", device="cpu", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0001),
+                _infer_row(framework="candle", device="cpu", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped-cuda.log"), "w") as f:
+                f.write(
+                    "bench-fandhe BUILD FAILED: error[E0432]: unresolved import\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("詳細不明な失敗記録", out)
+        finally:
+            shutil.rmtree(tmpdir)
     def test_target_outside_allowlist_is_argparse_error(self):
         path = _write_jsonl([_infer_row(framework="fandhe-ai")])
         try:
