@@ -2048,6 +2048,120 @@ class MainTargetExitCodeTests(unittest.TestCase):
             shutil.rmtree(env_a_dir)
             shutil.rmtree(env_b_dir)
 
+    def test_skip_log_mode_aware_downgrades_achieved_when_used_mode_never_succeeded(self):
+        # codex-review P0 指摘その1（PR #1082 5 巡目）: `existing_keys` が
+        # `(task, device, size)` のみで skip 行の `framework`/`mode` を
+        # 無視していたため、fandhe-ai の fresh 実行が失敗して
+        # skipped.log に記録されていても、同じ組の fandhe-ai reuse 実行が
+        # 成功し（`_pick_row_for_gate` は reuse を優先）target（candle）の
+        # fresh 実行も成功していれば「達成」のまま握りつぶされ exit 0 に
+        # なっていた（train reuse は比較対象の fresh 行が存在しない場合を
+        # 有効値として扱う仕様のため、fresh 実行が実際に試みられて失敗
+        # したという証拠があっても checksum 突合不能な状態を見逃す）。
+        # ここでは fandhe-ai の fresh 行を意図的に欠落させ（＝失敗）、
+        # reuse 行のみを与え、candle の fresh 行は正常に成功させたうえで
+        # skipped.log に fandhe-ai の fresh 失敗を記録する。exit 3
+        # （判定不能）になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=0.08, init_s=0.001, median_s=0.005
+                ),
+                _train_row(framework="candle", mode="fresh", median_s=0.03),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=train device=cpu size=64 mode=fresh "
+                    "extra=none : segfault\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            # gemm/infer は全達成のため、判定不能の原因は train の
+            # skip 失敗のみに一意化される（`_gate_devices` が cpu を
+            # gemm/infer からも拾うため、train データを与えないと
+            # 「gemm/infer 未計測」という無関係な判定不能が混入し
+            # 本テストの識別力が下がる）。
+            self.assertIn("| gemm | CPU | 256 | 1.000 ms（fresh） | 1.000 ms（fresh） | 1.00 倍 | 達成", out)
+            self.assertIn("| infer | CPU | 64", out)
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("skipped*.log に実行時失敗", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_mode_aware_suppresses_when_exact_mode_actually_succeeded(self):
+        # 上記と対の観点（重複抑止側）: skip 失敗と全く同じ
+        # (framework, task, device, size, mode) の実行が実際には成功して
+        # JSONL に残っている場合（再実行後の stale な skipped.log
+        # エントリ）は、達成判定を判定不能へ格下げしない。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", mode="fresh", median_s=0.03),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=train device=cpu size=64 mode=fresh "
+                    "extra=none : stale-failure-before-rerun\n"
+                )
+            code, out, _ = self._run_main(path, target="candle")
+            self.assertEqual(code, 0)
+            self.assertIn("| train | CPU | 64", out)
+            self.assertNotIn("skipped*.log に実行時失敗", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_unknown_binary_with_valid_task_device_is_not_silently_dropped(self):
+        # codex-review P0 指摘その2（PR #1082 5 巡目）: 正規表現一致で
+        # task/device が妥当でも binary 名が `_SKIP_BIN_TO_FRAMEWORK`
+        # allowlist 外だと `framework` が `None` になり、旧実装では
+        # `sf["framework"] not in (...)` 判定（`None not in (...)` は
+        # 常に真）により無条件で無視されていた（fail-open）。CPU が
+        # gemm/train/infer 全て達成のデータ + 未知 binary 名の skip 行
+        # 1 件を与え、exit 3（判定不能）になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", device="cpu", checksum=1.0)),
+                _train_row(framework="fandhe-ai", device="cpu", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", device="cpu", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0001),
+                _infer_row(framework="candle", device="cpu", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-mystery task=gemm device=cpu size=256 mode=fresh "
+                    "extra=none : unknown binary\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("詳細不明な失敗記録", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
     def test_target_outside_allowlist_is_argparse_error(self):
         path = _write_jsonl([_infer_row(framework="fandhe-ai")])
         try:

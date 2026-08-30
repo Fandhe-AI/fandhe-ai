@@ -166,15 +166,31 @@ def _parse_skip_failure(line):
     なら `None` に倒す（`--size` に非整数が渡ることはないが、外部ログの
     内容は信頼しない）。
 
+    `mode`（PR #1082 5 巡目 codex-review P0 指摘その1）: `--mode` の
+    allowlist（`_TRAIN_PHASES_MODES`。producer 側 `bench_common::
+    parse_cli_from` の `--mode` allowlist と同じ値域）で検証する。
+    旧実装は `mode` を一切保持していなかったため、`_inject_skip_failures_
+    into_gate` は「どの実行（framework の fresh/reuse どちらか）が
+    失敗したか」を区別できず、失敗した実行とは異なるモードの成功データ
+    のみで「達成」を出してしまう fail-open があった。
+
     戻り値: {"framework": str|None, "task": str|None, "device": str|None,
-              "size": int|None, "raw": str}
+              "size": int|None, "mode": str|None, "raw": str}
     """
     m = _SKIP_LINE_RE.match(line)
     if not m:
-        return {"framework": None, "task": None, "device": None, "size": None, "raw": line}
+        return {
+            "framework": None,
+            "task": None,
+            "device": None,
+            "size": None,
+            "mode": None,
+            "raw": line,
+        }
     framework = _SKIP_BIN_TO_FRAMEWORK.get(m.group("bin"))
     task = m.group("task") if m.group("task") in GATE_TASKS else None
     device = m.group("device") if m.group("device") in DEVICE_ORDER else None
+    mode = m.group("mode") if m.group("mode") in _TRAIN_PHASES_MODES else None
     size = None
     try:
         size_candidate = int(m.group("size"))
@@ -182,7 +198,14 @@ def _parse_skip_failure(line):
         size_candidate = None
     if size_candidate is not None and _valid_gate_size(size_candidate):
         size = size_candidate
-    return {"framework": framework, "task": task, "device": device, "size": size, "raw": line}
+    return {
+        "framework": framework,
+        "task": task,
+        "device": device,
+        "size": size,
+        "mode": mode,
+        "raw": line,
+    }
 
 
 def _skip_log_paths_for_input(path):
@@ -237,54 +260,70 @@ def _skip_failures_for_paths(log_paths):
     return failures
 
 
-def _inject_skip_failures_into_gate(gate_records, skip_failures, target):
+def _inject_skip_failures_into_gate(gate_records, skip_failures, target, rows):
     """skip 由来の失敗を `gate_records` へ判定不能レコードとして注入する。
 
     **呼び出し契約（codex P0・Bugbot High 指摘・PR #1082 4 巡目）**:
-    `gate_records`・`skip_failures` は必ず **単一の入力ファイル（＝単一
-    環境）に属するものだけ** を渡すこと。全入力ファイル横断で集約した
-    `gate_records_all` を渡すと、環境 A の JSONL に達成行がある
+    `gate_records`・`skip_failures`・`rows` は必ず **単一の入力ファイル
+    （＝単一環境）に属するものだけ** を渡すこと。全入力ファイル横断で
+    集約した `gate_records_all` を渡すと、環境 A の JSONL に達成行がある
     `(task, device, size)` の組について、環境 B（別ファイル・skipped*.log
-    にしか記録が残っていない）の同じ組の失敗が `existing_keys` に紛れて
-    注入されなくなる（`target_gate` 自身の「ファイルをまたいだ突合は
-    環境混同になるため行わない」契約への違反。呼び出し元 `main()` は
-    ファイルごとのループ内で `target_gate`/空ファイル用プレースホルダの
-    直後に本関数を呼び、その戻り値を `gate_records_all` へ追加する
-    設計にする。`_skip_log_paths_for_input`/`_skip_failures_for_paths`
-    も参照）。
+    にしか記録が残っていない）の同じ組の失敗が握りつぶされる
+    （`target_gate` 自身の「ファイルをまたいだ突合は環境混同になるため
+    行わない」契約への違反。呼び出し元 `main()` は空ファイル用
+    プレースホルダには `rows=[]` を渡す。`_skip_log_paths_for_input`/
+    `_skip_failures_for_paths` も参照）。
 
-    `gate_records`（同一環境内で `target_gate` が生成した実データ由来の
-    レコード）に既に同じ `(task, device, size)` の組が存在する場合は
-    注入しない（実データ側で既に判定済み＝fail-open ではないため二重
-    計上しない）。存在しない組（＝該当デバイス・size が丸ごと失敗し
-    JSONL に一切残らなかった）のみを新規レコードとして追加する
-    （fail-closed）。
+    **(task, device, size) 単位ではなく (framework, task, device, size,
+    mode) 単位で判定する（codex-review P0 指摘その1・PR #1082 5 巡目）**:
+    旧実装は `(task, device, size)` のみで重複を判定していたため、
+    fandhe-ai の fresh 実行が失敗して skipped*.log に記録されていても、
+    同じ組の fandhe-ai reuse 実行が成功し（`_pick_row_for_gate` は
+    reuse を優先）target 側の fresh 実行も成功していれば「達成」の
+    まま握りつぶされていた（train reuse は比較対象の fresh 行が
+    存在しない場合を「値そのものの正当性を否定しない」= 有効値として
+    扱う仕様〈`_train_reuse_row_invalid_reason` docstring 参照〉のため、
+    fresh 実行が実際には試みられて失敗したという明確な証拠があっても
+    checksum 突合不能な状態を見逃していた）。本関数は skip 失敗
+    1 件ごとに、**その正確な (framework, task, device, size, mode) の
+    実行が実際に成功して `rows`（同一環境の実データ）へ残っているか**
+    を `get()` で確認する。残っていれば「再実行後に成功した古い失敗
+    記録（stale）」とみなして無視する（重複抑止はこの場合のみ）。
+    残っていなければ、その (task, device, size) の既存レコードが
+    「達成」であっても判定不能へ格下げする（既に判定不能なら理由は
+    上書きしない。1 件でも本物の失敗があれば「達成」を名乗らせない
+    という fail-closed の原則）。既存レコードが無い場合は新規の判定
+    不能レコードを追加する（従来どおり）。
 
-    `task`/`device` を特定できない行（ビルド失敗等）は、値を捏造せず
-    device 単位より粗い「詳細不明」の判定不能レコード 1 件（重複行は
-    まとめる）に倒す。
+    **framework が特定できない行も握りつぶさない（codex-review P0
+    指摘その2・PR #1082 5 巡目）**: 正規表現自体は一致し `task`/`device`
+    が妥当な値でも、binary 名が `_SKIP_BIN_TO_FRAMEWORK` の allowlist に
+    無ければ `framework` は `None` になる。旧実装は `task`/`device` が
+    `None` の行のみを「詳細不明」の粗い判定不能レコードへ倒し、
+    `framework is None` はその後の `sf["framework"] not in (...)` 判定で
+    `None not in (...)` が常に真になるため無条件で `continue`（無視）
+    されていた（未知 binary 名の失敗が握りつぶされる fail-open）。
+    `framework is None` も `task`/`device` が `None` の場合と同じ粗い
+    「詳細不明」判定不能レコードへ倒す。
 
-    戻り値: 注入したレコードのリスト（Markdown 節への表示用。空なら
-    `[]`）。`gate_records` は本関数の呼び出しにより直接変更される
-    （呼び出し元が同じ list オブジェクトを `gate_records_all` へ
-    extend する運用を前提に、in-place 追加のみ行い新しい list は
-    作らない）。
+    `task`/`device`/`framework` のいずれかを特定できない行（ビルド失敗・
+    未知 binary 名等）は、値を捏造せず device 単位より粗い「詳細不明」の
+    判定不能レコード 1 件（重複行はまとめる）に倒す。
+
+    戻り値: 新規追加または格下げされたレコードのリスト（Markdown 節への
+    表示用。空なら `[]`）。`gate_records` は本関数の呼び出しにより
+    直接変更される（呼び出し元が同じ list オブジェクトを
+    `gate_records_all` へ extend する運用を前提に、in-place 追加のみ
+    行い新しい list は作らない）。
     """
-    existing_keys = {(r["task"], r["device"], r["size"]) for r in gate_records}
+    existing_by_key = {(r["task"], r["device"], r["size"]): r for r in gate_records}
     injected = []
-    seen_keys = set()
     seen_unparsed = set()
     for sf in skip_failures:
-        if sf["task"] is None or sf["device"] is None:
-            # advisor 指摘（PR #1082 4 巡目）: framework 判定より先に処理
-            # する。`run_all_cuda.sh` の `build()` が書く `"$crate BUILD
-            # FAILED: ..."` は `_SKIP_LINE_RE` に一致せず framework も
-            # `None` になるため、`sf["framework"] not in (...)` の判定を
-            # 先に行うと `bench-fandhe BUILD FAILED`（＝当該スイープで
-            # fandhe-ai データが丸ごと生成されなかった、この種の中で
-            # 最も深刻な fail-open）が framework 不明を理由に無条件で
-            # 握りつぶされてしまう。framework が特定できない行は
-            # target が何であれ対象判定を待たず fail-closed に倒す。
+        if sf["task"] is None or sf["device"] is None or sf["framework"] is None:
+            # codex-review P0 指摘その2（PR #1082 5 巡目）: task/device が
+            # 妥当でも framework が allowlist 外で None になるケースも
+            # ここへ倒す（docstring 参照）。
             if sf["raw"] in seen_unparsed:
                 continue
             seen_unparsed.add(sf["raw"])
@@ -306,11 +345,26 @@ def _inject_skip_failures_into_gate(gate_records, skip_failures, target):
             continue
         if sf["framework"] not in ("fandhe-ai", target):
             continue
-        key = (sf["task"], sf["device"], sf["size"])
-        if key in existing_keys or key in seen_keys:
+        mode = sf.get("mode")
+        if mode is not None and get(
+            rows, sf["framework"], sf["task"], sf["device"], sf["size"], mode=mode
+        ) is not None:
+            # codex-review P0 指摘その1（PR #1082 5 巡目）: この正確な
+            # (framework, task, device, size, mode) の実行は実際には
+            # 成功して `rows` に残っている＝skipped*.log は再実行前の
+            # 古い失敗記録（stale）。判定不能化しない（docstring 参照）。
             continue
-        seen_keys.add(key)
+        key = (sf["task"], sf["device"], sf["size"])
         size_label = f"N={sf['size']}" if sf["size"] is not None else "size 不明"
+        mode_label = mode if mode is not None else "mode 不明"
+        reason = f"skipped*.log に実行時失敗（{sf['framework']}・{mode_label}・{size_label}）"
+        existing = existing_by_key.get(key)
+        if existing is not None:
+            if existing["status"] != "undeterminable":
+                existing["status"] = "undeterminable"
+                existing["reason"] = reason
+                injected.append(existing)
+            continue
         record = {
             "task": sf["task"],
             "device": sf["device"],
@@ -321,9 +375,10 @@ def _inject_skip_failures_into_gate(gate_records, skip_failures, target):
             "target_median": None,
             "ratio": None,
             "status": "undeterminable",
-            "reason": f"skipped*.log に実行時失敗（{sf['framework']}・{size_label}）",
+            "reason": reason,
             "note": None,
         }
+        existing_by_key[key] = record
         gate_records.append(record)
         injected.append(record)
     return injected
@@ -2047,7 +2102,7 @@ def main():
                 # `gate_records_all` へ直接注入すると環境が混同される）。
                 skip_paths = _skip_log_paths_for_input(path)
                 skip_failures = _skip_failures_for_paths(skip_paths)
-                _inject_skip_failures_into_gate(gate_records, skip_failures, args.target)
+                _inject_skip_failures_into_gate(gate_records, skip_failures, args.target, rows)
                 gate_section_lines_by_file.append(
                     target_gate_section(rel, gate_records, args.target)
                 )
@@ -2084,7 +2139,7 @@ def main():
             # 「全達成」に混入する fail-open があった。
             skip_paths = _skip_log_paths_for_input(path)
             skip_failures = _skip_failures_for_paths(skip_paths)
-            _inject_skip_failures_into_gate(gate_records, skip_failures, args.target)
+            _inject_skip_failures_into_gate(gate_records, skip_failures, args.target, rows)
             gate_section_lines_by_file.append(target_gate_section(rel, gate_records, args.target))
             gate_records_all.extend(gate_records)
 
