@@ -1799,6 +1799,18 @@ impl CudaGemm {
     /// うる（invalid device context・実質的な UB／OOB リスク）ため、
     /// 起動前に一致しなければ `CudaError::TiledPipelineContextMismatch`
     /// を返し `unsafe` launch へ到達させない。
+    ///
+    /// **`m == 0 || n == 0`（codex-review P1 指摘・PR #1071）**:
+    /// `validate_gemm_dims` は naive/tiled 系（`run_f32_kernel` 冒頭コメント
+    /// 参照）と同じくこの形状を正当な no-op として受理するが、そのまま
+    /// `tiled_pipeline_launch_config` を呼ぶと grid_dim の x（n 由来）また
+    /// は y（m 由来）が 0 になり driver launch へ進んでしまう。
+    /// `run_tiled_pipeline_f32` は早期 return で空の結果を返す一方、本関数
+    /// （常駐 API）はこれまで検証後に無条件で launch config を構築して
+    /// いたため、ゼロ次元形状で `CUDA_ERROR_INVALID_VALUE` 等になり得た。
+    /// `validate_output_len` の直後（launch config 構築前）で no-op を
+    /// `Ok(())` として返し、`c_dev`（論理長 0）に触れず・カーネルを起動
+    /// せずに `run_tiled_pipeline_f32` と同じ契約へ揃える。
     #[allow(clippy::too_many_arguments)]
     pub fn launch_tiled_pipeline_f32(
         &self,
@@ -1830,6 +1842,9 @@ impl CudaGemm {
             });
         }
         validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
 
         let cfg = tiled_pipeline_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);

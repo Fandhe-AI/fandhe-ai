@@ -286,3 +286,47 @@ fn tiled_pipeline_rejects_mismatched_context_handle() {
         CudaError::TiledPipelineContextMismatch { .. }
     ));
 }
+
+/// codex-review P1 指摘（PR #1071）の回帰テスト:
+/// `launch_tiled_pipeline_f32`（常駐 API）は `run_tiled_pipeline_f32` と
+/// 同じく m==0／n==0 を no-op として受理し、`unsafe` launch へ到達せず
+/// `Ok(())` を返すことを確認する（`tiled_pipeline_zero_dim_shape_returns_
+/// empty_without_launch` の常駐 API 版）。修正前は検証後に無条件で
+/// grid_dim の一方が 0 の `LaunchConfig` を構築して driver launch へ
+/// 進んでいたため、ゼロ次元形状で `CUDA_ERROR_INVALID_VALUE` 等になり
+/// 得た（`launch_tiled_pipeline_f32` ドキュメンテーションコメント参照）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn launch_tiled_pipeline_zero_dim_shape_is_noop_without_launch() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    assert!(
+        gemm.tiled_pipeline_available(),
+        "tiled pipeline kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.tiled_pipeline_unavailable_reason()
+    );
+    let func = CudaGemm::compile_tiled_pipeline_variant(&device, 3)
+        .expect("tiled pipeline variant compilation must succeed");
+
+    // m==0: a_dev は空（m*k==0）、b_dev は k*n==16 要素、c_dev は空
+    // （m*n==0）。
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&[], &[0.0f32; 16])
+        .expect("upload_f32 must succeed for a well-formed m==0 shape");
+    let mut c_dev = gemm
+        .alloc_output_f32(0, 4)
+        .expect("alloc_output_f32 must succeed for a well-formed m==0 output shape");
+    gemm.launch_tiled_pipeline_f32(&func, &a_dev, &b_dev, &mut c_dev, 0, 4, 4)
+        .expect("m==0 must be treated as a no-op, not a driver launch error");
+
+    // n==0: a_dev は m*k==16 要素、b_dev は空（k*n==0）、c_dev は空
+    // （m*n==0）。
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&[0.0f32; 16], &[])
+        .expect("upload_f32 must succeed for a well-formed n==0 shape");
+    let mut c_dev = gemm
+        .alloc_output_f32(4, 0)
+        .expect("alloc_output_f32 must succeed for a well-formed n==0 output shape");
+    gemm.launch_tiled_pipeline_f32(&func, &a_dev, &b_dev, &mut c_dev, 4, 0, 4)
+        .expect("n==0 must be treated as a no-op, not a driver launch error");
+}

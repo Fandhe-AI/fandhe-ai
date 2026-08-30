@@ -59,9 +59,14 @@ NVIDIA GeForce RTX 3060（compute capability 8.6・Driver Version 595.71.05・CU
    ```sh
    cargo run -p fandhe-ai-backend-cuda --example gemm_tiled_pipeline_bench --release
    ```
-   N=1024/2048/4096 それぞれについて、tiled f32（本番既定経路）・tiled pipeline（既定 3 stage）・tiled pipeline
-   （4 stage・オンデマンドコンパイル）の TFLOPS を 5 回計測中央値（`bench_harness::MeasurementConfig::default` の
-   warmup/計測 20 回以上）で記録する。
+   N=1024/2048/4096 それぞれについて、TFLOPS を 5 回計測中央値（`bench_harness::MeasurementConfig::default` の
+   warmup/計測 20 回以上）で記録する。**計測区間は 2 段に分かれる**（codex-review P2／Cursor Bugbot 指摘。PR #1071
+   `gemm_tiled_pipeline_bench.rs` モジュールコメント「計測区間の統一」参照。異なる区間の TFLOPS を同じ比率へ混ぜると
+   「転送有無の違い」が「stage 数増加による改善」として誤計上されるため、実装は比較を分離済み）:
+   - **転送込み同士**: `tiled_f32`（本番既定経路） vs `pipeline3`（既定 3 stage・転送込み）。`pipeline3_over_tiled`
+     はこの区間の比率
+   - **GPU-only 同士**: `pipeline3_gpu_only`（既定 3 stage） vs `pipeline4_gpu_only`（4 stage）。
+     `pipeline4_over_pipeline3_gpu_only` はこの区間の比率で、cp.async ステージ数の増加そのものの効果を表す
 
 3. **3 vs 4 stage の追加スイープが必要な場合**: `examples/gemm_tiled_pipeline_bench.rs` の `STAGE_4` 定数を変更するか、
    `CudaGemm::compile_tiled_pipeline_variant(&device, stages)` を直接呼ぶ小さな診断バイナリを追加する
@@ -74,11 +79,13 @@ NVIDIA GeForce RTX 3060（compute capability 8.6・Driver Version 595.71.05・CU
 
 ## 実測結果（プレースホルダ。DGX Spark GB10 セッションで記入）
 
-| size (M=N=K) | tiled_f32 TFLOPS | tiled_pipeline(3) TFLOPS | tiled_pipeline(4) TFLOPS | pipeline(3)/tiled | pipeline(4)/tiled |
-|---|---|---|---|---|---|
-| 1024 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
-| 2048 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
-| 4096 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
+列は `gemm_tiled_pipeline_bench.rs` の出力そのまま（区間を混ぜない。上記「実測手順」手順 2 参照）。
+
+| size (M=N=K) | tiled_f32 TFLOPS（転送込み） | pipeline3 TFLOPS（転送込み） | pipeline3_over_tiled | pipeline3_gpu_only TFLOPS | pipeline4_gpu_only TFLOPS | pipeline4_over_pipeline3_gpu_only |
+|---|---|---|---|---|---|---|
+| 1024 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
+| 2048 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
+| 4096 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
 
 ## スコープ外事項（本 PR では対応しない）
 
