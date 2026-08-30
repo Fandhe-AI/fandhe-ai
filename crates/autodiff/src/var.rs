@@ -16,7 +16,7 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
+    Activation, Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 
 use crate::error::AutodiffError;
@@ -147,6 +147,62 @@ impl<'t> Var<'t> {
         };
         let value = self.tape.ops().gemm(&lhs_val, &rhs_val)?;
         let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `y = act(self.matmul(weight) (+ bias))` を 1 ノード
+    /// （[`Op::LinearAct`]）として記録する（イシュー #1044・`docs/
+    /// kernel-fusion.md` §2.2「学習経路への結線」）。
+    /// `fandhe_ai_autodiff::nn::linear::LinearVars::forward_with_activation`
+    /// が唯一の呼び出し元（`Var::matmul` と同じ「①クロステープ検査 →
+    /// ②shape 検査 → ③forward 値計算 → ④ノード記録」の順で処理する
+    /// 非 elementwise・常時実体化の演算）。
+    ///
+    /// `bias` の shape が `[n]`（`weight` の列数）でない場合は
+    /// `BackendOps::gemm_bias_act` の融合カーネル契約（厳密一致のみ）に
+    /// 収まらないため、呼び出し元（`LinearVars::forward_with_activation`）
+    /// が事前に非融合合成（`matmul` → `add` → `relu`）へフォールバック
+    /// する契約とし、本メソッドは bias 厳密一致（または `None`）の
+    /// ケースのみを扱う。
+    pub(crate) fn linear_act(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        act: Activation,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(weight)?;
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+        let lhs_shape = self.shape();
+        let rhs_shape = weight.shape();
+        let out_shape = matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        if let Some(b) = bias {
+            broadcast_shape(&out_shape, &b.shape())?;
+        }
+        let (lhs_val, rhs_val, bias_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let rhs_val = materialize_fallible(&nodes, self.tape.ops(), weight.id)?.clone();
+            let bias_val = match bias {
+                Some(b) => Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone()),
+                None => None,
+            };
+            (lhs_val, rhs_val, bias_val)
+        };
+        let value = self
+            .tape
+            .ops()
+            .gemm_bias_act(&lhs_val, &rhs_val, bias_val.as_ref(), act)?;
+        let id = self.tape.push_eager(
+            Op::LinearAct {
+                input: self.id,
+                weight: weight.id,
+                bias: bias.map(|b| b.id),
+                act,
+            },
+            value,
+        );
         Ok(Var::from_raw(self.tape, id))
     }
 

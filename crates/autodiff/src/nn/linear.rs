@@ -167,4 +167,26 @@ impl<'t> LinearVars<'t> {
             None => Ok(y),
         }
     }
+
+    /// [`Self::forward`] の epilogue 融合版（イシュー #1044・`docs/
+    /// kernel-fusion.md` §2.2「学習経路への結線」）。`y = act(input.matmul(
+    /// weight) (+ bias))` を `Var::linear_act`（`var.rs`）経由で 1 ノード
+    /// （[`crate::tape::Op::LinearAct`]）として記録し、`BackendOps::
+    /// gemm_bias_act`（epilogue 融合カーネル。CPU／CUDA／Metal とも
+    /// オーバーライド済み）へ直接委ねる。
+    ///
+    /// 唯一の呼び出し元は `fandhe_ai_facade::compat::sequential::
+    /// Sequential`（次層が `ReLU` かを先読みし、その場合のみ
+    /// `Activation::Relu` を渡して `ReLU` 層自体のノード追加をスキップ
+    /// する。次層が `ReLU` でなければ `Activation::None` で bias のみ
+    /// 融合する）。`Var::linear_act` が bias の broadcast 可否を
+    /// `Var::add` と同じ判定で検査するため、本メソッド自体は追加の
+    /// shape 検査を持たない。
+    pub fn forward_with_activation(
+        &self,
+        input: &Var<'t>,
+        act: fandhe_ai_tensor_core::Activation,
+    ) -> Result<Var<'t>, AutodiffError> {
+        input.linear_act(&self.weight, self.bias.as_ref(), act)
+    }
 }

@@ -24,7 +24,7 @@ use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, DType, DeviceBufferView, FusedOpKind, FusionPlan,
+    Activation, BackendError, BackendOps, DType, DeviceBufferView, FusedOpKind, FusionPlan,
     MAX_FUSED_CHAIN_LEN, Tensor,
 };
 
@@ -178,6 +178,39 @@ pub(crate) enum Op {
         input: NodeId,
         weight: NodeId,
         bias: Option<NodeId>,
+        /// bias 加算に続けて適用する epilogue activation（イシュー
+        /// #1044）。`Activation::None` は既存の bias のみ融合と同じ
+        /// 挙動（追加前は暗黙に `None` だった）。`DeviceParamStore::
+        /// linear_forward_with_activation` が次層 `ReLU` 先読み時に
+        /// `Activation::Relu` を渡す。VJP（`grad.rs`）は forward 記録値
+        /// `out_value` から ReLU マスクを復元するため、この場合も
+        /// 前活性化の再計算・追加ノードを必要としない。
+        act: Activation,
+    },
+    /// ホスト常駐 `weight`（・`bias`）で forward した Linear+activation
+    /// 融合ノード（イシュー #1044・`docs/kernel-fusion.md` §2.2「学習
+    /// 経路への結線」）。`y = act(input.matmul(weight) (+ bias))` と
+    /// 数式上は `Op::MatMul` → `Op::Add` → `Op::Relu` の合成と同じだが、
+    /// `fandhe_ai_autodiff::nn::linear::LinearVars::forward_with_activation`
+    /// が `BackendOps::gemm_bias_act`（epilogue 融合カーネル。3
+    /// バックエンドとも既にオーバーライド済み）を直接呼んで 1 ノードで
+    /// 記録する（`Sequential`〈`fandhe_ai_facade::compat::sequential`〉が
+    /// `Linear` 層の直後が `ReLU` 層であることを先読みして本 variant を
+    /// 選ぶ。次層が `ReLU` でなければ `act: Activation::None` で bias
+    /// のみ融合する）。
+    ///
+    /// **常に実体化済み**（`push_eager`）: 非 elementwise（`MatMul` と
+    /// 同じ扱い）のため融合対象外（`Op::is_lazy_elementwise` 参照）。
+    ///
+    /// **`Op::LinearResident` との違い**: 本 variant は `weight`／`bias`
+    /// いずれもホスト常駐の通常ノード（`Op::Leaf` 等）を指す。デバイス
+    /// 常駐オペランドは扱わないため `ResidentResolver` を必要とせず、
+    /// 素の [`Tape::backward`] からも正しく計算できる。
+    LinearAct {
+        input: NodeId,
+        weight: NodeId,
+        bias: Option<NodeId>,
+        act: Activation,
     },
 }
 

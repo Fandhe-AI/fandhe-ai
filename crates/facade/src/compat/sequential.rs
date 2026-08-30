@@ -86,6 +86,7 @@ use crate::{
 };
 use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid, Tanh};
 use fandhe_ai_autodiff::nn::{Linear, Module};
+use fandhe_ai_tensor_core::Activation;
 
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
 /// チェーン（`self` を消費し `Self` を返す）で層を追加し、`predict` で
@@ -150,13 +151,41 @@ impl Sequential {
     /// grad check 等の用途にも使える）。
     pub fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         let mut current = *input;
-        for layer in &self.layers {
-            // `nn::Module::forward` は `&fandhe_ai_autodiff::Tape` を要求する
-            // （`autodiff` クレート側の trait 定義のため facade newtype
-            // には書き換えられない）。`tape.0`（`pub(crate)` フィールド）
-            // 経由で内部の生 `Tape` を取り出す（本ファイル冒頭 doc
-            // 「公開シグネチャの型」参照）。
-            current = layer.forward(&tape.0, &current)?;
+        // イシュー #1044（`docs/kernel-fusion.md` §2.2「学習経路への
+        // 結線」）: 単純な `for layer in &self.layers` 逐次委譲だと
+        // `Linear` → `Add`（bias）→ `Relu` が別ノード・別カーネル起動に
+        // なる（`Module::forward` は多態 dispatch のため層間の関係を
+        // 知らない）。ここでインデックス走査へ変え、`Linear` 層に出会う
+        // たび「次層が `ReLU` か」（`Module::as_relu`）を先読みして
+        // `LinearVars::forward_with_activation` へ結線し、`ReLU` 層自体を
+        // スキップする（`ReLU` が続かない末尾 `Linear` 等は bias のみ
+        // 融合の `Activation::None`）。それ以外の層（`Sigmoid`／`Tanh`
+        // 等。`BackendOps::gemm_bias_act` の `Activation` に対応する
+        // variant を持たない）は従来どおり `Module::forward` へ委譲する。
+        let mut i = 0;
+        while i < self.layers.len() {
+            let layer = &self.layers[i];
+            if let Some(linear) = layer.as_linear() {
+                let act = if self.layers.get(i + 1).is_some_and(|next| next.as_relu()) {
+                    Activation::Relu
+                } else {
+                    Activation::None
+                };
+                // `nn::Module::forward` と同じく `tape.0`（`pub(crate)`
+                // フィールド）経由で内部の生 `Tape` を取り出す（本ファイル
+                // 冒頭 doc「公開シグネチャの型」参照）。
+                current = linear
+                    .bind(&tape.0)
+                    .forward_with_activation(&current, act)?;
+                i += if matches!(act, Activation::Relu) {
+                    2
+                } else {
+                    1
+                };
+            } else {
+                current = layer.forward(&tape.0, &current)?;
+                i += 1;
+            }
         }
         Ok(current)
     }
@@ -496,7 +525,14 @@ impl Sequential {
     ) -> Result<Var<'t>, AutodiffError> {
         let mut current = *input;
         let mut cursor = leaves.iter();
-        for layer in &self.layers {
+        // `SequentialVars::forward`（`Sequential::forward` 経由）と同じ
+        // 「次層が `ReLU` かを先読みして `Linear` 層へ結線する」方式
+        // （イシュー #1044）。デバイス常駐版は `store.
+        // linear_forward_with_activation`（`BackendOps::
+        // gemm_resident_rhs_act` を経由）を使う。
+        let mut i = 0;
+        while i < self.layers.len() {
+            let layer = &self.layers[i];
             if let Some(linear) = layer.as_linear() {
                 let weight = cursor.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
@@ -516,11 +552,22 @@ impl Sequential {
                 } else {
                     None
                 };
+                let act = if self.layers.get(i + 1).is_some_and(|next| next.as_relu()) {
+                    Activation::Relu
+                } else {
+                    Activation::None
+                };
                 current = store
-                    .linear_forward(tape, &current, weight, bias)
+                    .linear_forward_with_activation(tape, &current, weight, bias, act)
                     .map_err(AutodiffError::Backend)?;
+                i += if matches!(act, Activation::Relu) {
+                    2
+                } else {
+                    1
+                };
             } else {
                 current = layer.forward(tape, &current)?;
+                i += 1;
             }
         }
         // `leaves` が `self.layers` の要求件数より多い（より大きなモデルの
@@ -582,8 +629,19 @@ impl<'m, 't> SequentialVars<'m, 't> {
         // 添字アクセスが本番経路で panic するのを避け fail-closed
         // （`InvalidArgument`）にするための保険として残す
         // （`.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+        // イシュー #1044（`docs/kernel-fusion.md` §2.2「学習経路への
+        // 結線」）: `Sequential::forward`（推論・非学習経路）と同じ
+        // 「次層が `ReLU` かを先読みして `Linear` 層へ結線する」方式。
+        // `self.linears` の消費は従来どおりイテレータ（`linears.next()`）
+        // に任せる（`Linear` 層に出会うたびに 1 件ずつ。ReLU をスキップ
+        // しても `linears` 自体には ReLU 分の要素がないため対応関係は
+        // 崩れない）。インデックス走査へ変えたのは `self.model.layers`
+        // 側で「次層」を覗く必要があるため。
         let mut linears = self.linears.iter();
-        for layer in &self.model.layers {
+        let layers = &self.model.layers;
+        let mut i = 0;
+        while i < layers.len() {
+            let layer = &layers[i];
             if layer.as_linear().is_some() {
                 let vars = linears.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
@@ -592,11 +650,22 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                current = vars.forward(&current)?;
+                let act = if layers.get(i + 1).is_some_and(|next| next.as_relu()) {
+                    Activation::Relu
+                } else {
+                    Activation::None
+                };
+                current = vars.forward_with_activation(&current, act)?;
+                i += if matches!(act, Activation::Relu) {
+                    2
+                } else {
+                    1
+                };
             } else {
                 // 活性化層は `nn::Module::forward` へ委譲する（`&fandhe_ai_autodiff::Tape`
                 // が必要。`Sequential::forward` と同じ理由で `tape.0` 経由）。
                 current = layer.forward(&tape.0, &current)?;
+                i += 1;
             }
         }
         Ok(current)
@@ -1139,6 +1208,309 @@ mod tests {
         assert_eq!(original_params.len(), after_params.len());
         for (before, after) in original_params.iter().zip(after_params.iter()) {
             assert_eq!(dense_vec(before), dense_vec(after));
+        }
+    }
+
+    /// イシュー #1044「Linear の epilogue 融合（bias + ReLU）が学習
+    /// forward / backward 経路で適用されることを検証・修正する」の
+    /// 機械検証本体。`fandhe_ai_backend_cpu::CpuBackendOps` を包み、
+    /// `BackendOps` の各メソッド呼び出し回数を `AtomicUsize` で数える
+    /// （`gemm_bias_act`／`gemm_resident_rhs_act` が実際に呼ばれ、
+    /// 非融合合成〈`gemm`／`add`〉や別ノードの `relu` が呼ばれていない
+    /// ことを検証する。値そのものは `CpuBackendOps` へ委譲するため
+    /// 数値は変わらない）。`Tape::new_with_ops`（`pub(crate)`）を直接
+    /// 呼べるのはこのクレート内（本ファイル）に限るため、この
+    /// カウンタ検証は facade の統合テスト（`tests/*.rs`。別クレート
+    /// コンパイル単位）ではなくここに置く。
+    /// `CountingOps` の呼び出し回数カウンタ。`CountingOps` 自体は
+    /// `Box<dyn BackendOps>` として `Tape` の所有物になり `Tape::ops()`
+    /// は `&dyn BackendOps`（ダウンキャスト不能。`BackendOps` は
+    /// `std::any::Any` を要求しない）しか返さないため、`Tape` 構築前に
+    /// `Arc<AtomicUsize>` の複製をこちら側に残しておき、forward 後は
+    /// この複製から読む。
+    #[derive(Clone, Default)]
+    struct Counters {
+        gemm: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        add: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        relu: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        gemm_bias_act: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        run_fused: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        gemm_resident_rhs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        gemm_resident_rhs_act: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Counters {
+        fn get(counter: &std::sync::atomic::AtomicUsize) -> usize {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    struct CountingOps {
+        inner: fandhe_ai_backend_cpu::CpuBackendOps,
+        counters: Counters,
+    }
+
+    impl CountingOps {
+        fn new(counters: Counters) -> Self {
+            Self {
+                inner: fandhe_ai_backend_cpu::CpuBackendOps::new(),
+                counters,
+            }
+        }
+    }
+
+    impl fandhe_ai_tensor_core::BackendOps for CountingOps {
+        fn device(&self) -> fandhe_ai_tensor_core::device::Device {
+            self.inner.device()
+        }
+
+        fn gemm(
+            &self,
+            a: &Tensor<f32>,
+            b: &Tensor<f32>,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.counters
+                .gemm
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.gemm(a, b)
+        }
+
+        fn add(
+            &self,
+            a: &Tensor<f32>,
+            b: &Tensor<f32>,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.counters
+                .add
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.add(a, b)
+        }
+
+        fn mul(
+            &self,
+            a: &Tensor<f32>,
+            b: &Tensor<f32>,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.inner.mul(a, b)
+        }
+
+        fn relu(
+            &self,
+            a: &Tensor<f32>,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.counters
+                .relu
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.relu(a)
+        }
+
+        fn exp(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.inner.exp(a)
+        }
+
+        fn tanh(
+            &self,
+            a: &Tensor<f32>,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.inner.tanh(a)
+        }
+
+        fn sum(
+            &self,
+            a: &Tensor<f32>,
+            dim: Option<usize>,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.inner.sum(a, dim)
+        }
+
+        fn max(
+            &self,
+            a: &Tensor<f32>,
+            dim: Option<usize>,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.inner.max(a, dim)
+        }
+
+        fn gemm_bias_act(
+            &self,
+            a: &Tensor<f32>,
+            b: &Tensor<f32>,
+            bias: Option<&Tensor<f32>>,
+            act: Activation,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.counters
+                .gemm_bias_act
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.gemm_bias_act(a, b, bias, act)
+        }
+
+        fn gemm_resident_rhs(
+            &self,
+            a: &Tensor<f32>,
+            w: fandhe_ai_tensor_core::DeviceBufferView<'_>,
+            bias: Option<fandhe_ai_tensor_core::DeviceBufferView<'_>>,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.counters
+                .gemm_resident_rhs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.gemm_resident_rhs(a, w, bias)
+        }
+
+        fn gemm_resident_rhs_act(
+            &self,
+            a: &Tensor<f32>,
+            w: fandhe_ai_tensor_core::DeviceBufferView<'_>,
+            bias: Option<fandhe_ai_tensor_core::DeviceBufferView<'_>>,
+            act: Activation,
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.counters
+                .gemm_resident_rhs_act
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.gemm_resident_rhs_act(a, w, bias, act)
+        }
+
+        fn run_fused(
+            &self,
+            plan: &fandhe_ai_tensor_core::FusionPlan,
+            leaves: &[&Tensor<f32>],
+        ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+            self.counters
+                .run_fused
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.run_fused(plan, leaves)
+        }
+    }
+
+    #[test]
+    fn sequential_forward_fuses_linear_relu_into_single_gemm_bias_act_launch() {
+        // 受け入れ条件 1（イシュー #1044）: Linear -> ReLU -> Linear の
+        // 層あたりカーネル起動数が 1（`gemm_bias_act`）になり、非融合
+        // 合成（`gemm`／`add`）や別ノードの `relu` が発生しないことを
+        // 機械検証する。
+        let model = Sequential::new()
+            .add_linear(4, 8, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(8, 2, SEED2)
+            .unwrap();
+
+        // `counters`（`Arc` 共有）は `CountingOps` を `Box<dyn BackendOps>`
+        // として `Tape` へ move した後もこちら側から読める（`Tape::ops()`
+        // は `&dyn BackendOps` しか返さずダウンキャスト手段を持たない
+        // ため、move 前に複製を残しておく設計）。
+        let counters = Counters::default();
+        let ops = CountingOps::new(counters.clone());
+        let tape = Tape(fandhe_ai_autodiff::Tape::new_with_ops(Box::new(ops)));
+        let input = Tensor::new(vec![0.25_f32; 3 * 4], &[3, 4]).unwrap();
+        let input_var = tape.var(&input);
+
+        let vars = model.bind(&tape);
+        vars.forward(&tape, &input_var).unwrap();
+
+        assert_eq!(
+            Counters::get(&counters.gemm_bias_act),
+            2,
+            "Linear 層 2 個（1 個目は ReLU 融合、2 個目は bias のみ融合）でそれぞれ \
+             gemm_bias_act が 1 回ずつ呼ばれるはず"
+        );
+        assert_eq!(
+            Counters::get(&counters.gemm),
+            0,
+            "非融合 gemm 合成は発生しないはず"
+        );
+        assert_eq!(
+            Counters::get(&counters.add),
+            0,
+            "非融合 add 合成は発生しないはず"
+        );
+        assert_eq!(
+            Counters::get(&counters.relu),
+            0,
+            "ReLU は Linear へ融合され、別ノードとしての relu 呼び出しは発生しないはず"
+        );
+        assert_eq!(
+            Counters::get(&counters.run_fused),
+            0,
+            "本経路は run_fused（elementwise 融合）を経由しないはず"
+        );
+    }
+
+    /// イシュー #1044 の backward 側検証: `Op::LinearAct` の VJP
+    /// （`grad.rs`）が非融合合成（`Op::MatMul` → `Op::Add` → `Op::Relu`）
+    /// の VJP と同じ勾配をパラメータへ返すことを、`Tape::backward` を
+    /// 通した実測でビット一致検証する（`out_value` からの ReLU マスク
+    /// 復元が既存 `Op::Relu` の劣勾配規約〈`x > 0`〉と一致することの
+    /// 統合確認。単体の規約一致自体は `grad.rs` 側で `out_value > 0` と
+    /// `Op::Relu` の `v > 0.0` が同値であることをコード上の理由として
+    /// 既に記録している）。
+    #[test]
+    fn sequential_vars_forward_with_activation_grad_matches_manual_composition() {
+        let linear1 = Linear::new(4, 8, true, SEED1).unwrap();
+        let linear2 = Linear::new(8, 2, true, SEED2).unwrap();
+
+        let batch = 3;
+        let input_data: Vec<f32> = (0..batch * 4).map(|i| i as f32 * 0.07 - 0.5).collect();
+        let input_tensor = Tensor::new(input_data, &[batch, 4]).unwrap();
+
+        // 融合経路: `LinearVars::forward_with_activation` を直接呼ぶ
+        // （`Sequential::bind().forward()` が内部で辿るのと同じ 1 ノード
+        // 経路）。
+        let fused_tape = crate::tape();
+        let fused_input = fused_tape.var(&input_tensor);
+        let fused_vars1 = linear1.bind(&fused_tape.0);
+        let fused_vars2 = linear2.bind(&fused_tape.0);
+        let h = fused_vars1
+            .forward_with_activation(&fused_input, Activation::Relu)
+            .unwrap();
+        let out = fused_vars2
+            .forward_with_activation(&h, Activation::None)
+            .unwrap();
+        let loss = out.sum(None).unwrap();
+        let fused_grads = fused_tape.backward(&loss).unwrap();
+
+        // 非融合経路: `matmul` → `add` → `relu` を明示的に合成する
+        // （`LinearVars::forward` + `Var::relu`）。
+        let manual_tape = crate::tape();
+        let manual_input = manual_tape.var(&input_tensor);
+        let manual_vars1 = linear1.bind(&manual_tape.0);
+        let manual_vars2 = linear2.bind(&manual_tape.0);
+        let h = manual_vars1.forward(&manual_input).unwrap();
+        let h = h.relu();
+        let out = manual_vars2.forward(&h).unwrap();
+        let loss = out.sum(None).unwrap();
+        let manual_grads = manual_tape.backward(&loss).unwrap();
+
+        for (label, fused_var, manual_var) in [
+            ("linear1.weight", &fused_vars1.weight, &manual_vars1.weight),
+            ("linear2.weight", &fused_vars2.weight, &manual_vars2.weight),
+        ] {
+            let fused_g = fused_grads.get(fused_var).unwrap().unwrap();
+            let manual_g = manual_grads.get(manual_var).unwrap().unwrap();
+            assert_eq!(
+                dense_vec(fused_g),
+                dense_vec(manual_g),
+                "{label}: 融合経路（Op::LinearAct）と非融合合成の勾配がビット一致しない"
+            );
+        }
+        for (label, fused_var, manual_var) in [
+            (
+                "linear1.bias",
+                fused_vars1.bias.as_ref().unwrap(),
+                manual_vars1.bias.as_ref().unwrap(),
+            ),
+            (
+                "linear2.bias",
+                fused_vars2.bias.as_ref().unwrap(),
+                manual_vars2.bias.as_ref().unwrap(),
+            ),
+        ] {
+            let fused_g = fused_grads.get(fused_var).unwrap().unwrap();
+            let manual_g = manual_grads.get(manual_var).unwrap().unwrap();
+            assert_eq!(
+                dense_vec(fused_g),
+                dense_vec(manual_g),
+                "{label}: 融合経路（Op::LinearAct）と非融合合成の勾配がビット一致しない"
+            );
         }
     }
 }
