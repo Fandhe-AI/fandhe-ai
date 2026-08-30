@@ -489,7 +489,7 @@ opt-in 変種 `tiled_f32_swizzle`（#1034。`CudaGemm::new_with_tiled_f32_swizzl
 
 `crates/backend-cuda/examples/gemm_profile_target.rs` の `--path` allowlist へ
 `tiled_f32`（`CudaGemm::new` + `launch_tiled_f32`。診断用変種を一切構築しない
-基準経路）を追加した（`Path::TiledF32`。§3.3 のループコマンドで `--path
+基準経路）を追加した（`Path::TiledF32`。§8.3.1 のループコマンドで `--path
 tiled_f32` を指定して単体プロファイルできる）。既存 `tiled_f32_swizzle` 分岐
 （`Path::TiledF32Swizzle`）は `new_with_tiled_f32_swizzle` を経由するため、base
 自体を単独プロファイルするには本追加が必要だった。`Path::parse`・
@@ -500,6 +500,49 @@ tiled_f32` を指定して単体プロファイルできる）。既存 `tiled_f
 
 `tiled_pipeline`（#1033・`compile_tiled_pipeline_variant` 経由）の path 追加は
 本セッションでは行っていない（§8.7 のスコープ外・引き継ぎ事項として記録する）。
+
+### 8.3.1 採取コマンド（`tiled_f32`／`tiled_f32_swizzle`。6 通り: 2 path × 3 size）
+
+§3.3 のループは `wmma_tf32`／`mma_f16`（§4／§5 の既存診断・2026-08-19 実測分）
+専用であり `tiled_f32`／`tiled_f32_swizzle` を起動しない（codex-review 指摘・
+PR #1090。§3.3 本文が「§8.5 の 6 条件」の採取元と誤読されないよう、本節へ
+専用のループを切り出す）。§8.5 の記録表（6 条件）を埋めるには、§3.1〜§3.2 の
+事前確認（メトリクス存在確認・`ALLOC_ZEROS_LAUNCHES` 前提の実機検証）を終えた
+うえで、`BIN`・`METRICS`・sudo 経由起動・fail-closed な `status` 検査は §3.3 と
+同一のまま、対象 path のみを差し替えた下記ループを実行する。
+
+```sh
+# BIN・METRICS・sudo 経由起動・status 検査の構成は §3.3 と同一（詳細説明は
+# §3.3 本文を参照。本節では path リストの差分のみを示す）。
+BIN=$HOME/work/target-fandhe-ai/release/examples/gemm_profile_target
+METRICS="sm__warps_active.avg.pct_of_peak_sustained_active,\
+lts__t_sector_hit_rate.pct,\
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
+lts__t_bytes.sum.per_second,\
+sm__inst_issued.avg.pct_of_peak_sustained_active"
+
+for path in tiled_f32 tiled_f32_swizzle; do
+  for size in 1024 2048 4096; do
+    LOG="ncu-${path}-${size}.log"
+    sudo ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
+        "$BIN" --path "$path" --size "$size" \
+        > "$LOG" 2>&1
+    status=$?
+    cat "$LOG"
+    if [ "$status" -ne 0 ]; then
+      echo "abort: path=${path} size=${size} で gemm_profile_target または ncu が非 0 終了した" \
+           "（opt カーネル不在等の異常系。ログ ${LOG} を確認する）。" >&2
+      exit 1
+    fi
+  done
+done
+```
+
+`--launch-skip`（既定 `--warmup 2` なら 2）は §3.3 と同じ理由で手計算せず
+`gemm_profile_target` の出力行をそのまま使い、§3.3.1 の事前検証を `tiled_f32`
+でも一度確認してから本ループへ進むこと（`ALLOC_ZEROS_LAUNCHES = 0` の前提は
+path に依存しないが、カーネル起動順序自体は path 固有のため鵜呑みにしない）。
 
 ### 8.4 実測状況: 実機アクセス不能のため未実施（fail-closed）
 
@@ -566,7 +609,8 @@ tiled_f32` を指定して単体プロファイルできる）。既存 `tiled_f
 
 - **§8.5 の ncu 実測**: DGX Spark GB10 への SSH 接続手段（`CUDA_NODE`・
   `docs/real-hardware-verification-env.local.md`）を持つ後続セッションが、
-  §3.1〜§3.3 の手順（`--path tiled_f32` を含む）に従って実施する。
+  §3.1〜§3.2 の事前確認を終えたうえで §8.3.1 の採取ループ（`--path tiled_f32`・
+  `tiled_f32_swizzle`）に従って実施する。
 - **`tiled_pipeline` path の `gemm_profile_target` への追加**（実装計画 §2 の
   「可能なら追加」項目）は本セッションでは見送った。優先順位確定に必須ではない
   ため §8.6 の判断には影響しないが、上記 4 の実測に着手するセッションで併せて
