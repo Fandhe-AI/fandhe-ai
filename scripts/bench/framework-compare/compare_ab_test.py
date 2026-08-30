@@ -337,6 +337,91 @@ class CompareModeTests(unittest.TestCase):
         # 全 5 件が除外されるため、レコード不足として判定不能になる。
         self.assertIn("レコード不足", result["reason"])
 
+    def test_device_missing_train_row_is_skipped_with_warning(self):
+        """codex-review P0 指摘（PR #1088）: device 欠損の train 行が
+        warning にならず `_train_records` で黙って除外され、他に正常行が
+        MIN_RECORDS 件以上残れば A/B 判定が成功扱いになってしまう fail-open
+        を塞ぐ（`_train_row_schema_error` の device 型検証）。"""
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        broken = _rec("0.4.0", 0.012, "fresh")
+        del broken["device"]
+        recs.append(broken)
+        _write_jsonl(before_path, recs)
+        rows, warnings = compare_ab.load_rows(before_path)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("device", warnings[0])
+
+    def test_size_wrong_type_train_row_is_skipped_with_warning(self):
+        """codex-review P0 指摘（PR #1088）: size が文字列型（例:
+        `"64"`）の train 行が warning にならず `_train_records` で黙って
+        除外される fail-open を塞ぐ（`_train_row_schema_error` の size
+        型検証。bool は int のサブクラスのため明示的に除外する）。"""
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        broken = _rec("0.4.0", 0.012, "fresh")
+        broken["size"] = "64"
+        recs.append(broken)
+        _write_jsonl(before_path, recs)
+        rows, warnings = compare_ab.load_rows(before_path)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("size", warnings[0])
+
+    def test_main_returns_nonzero_for_device_size_corrupted_input_even_with_enough_valid_rows(
+        self,
+    ):
+        """codex-review P0 指摘（PR #1088）の再現シナリオ全体: device 欠損・
+        size 型不正の行が各 mode に混在しても、他の正常行が MIN_RECORDS 件
+        以上残っているだけで A/B 判定を成功扱いにしない（fail-closed）こと
+        を CLI 経由で確認する。"""
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        broken_device = _rec("0.4.0", 0.012, "fresh")
+        del broken_device["device"]
+        broken_size = _rec("0.4.0", 0.012, "fresh")
+        broken_size["size"] = "64"
+        recs.append(broken_device)
+        recs.append(broken_size)
+        _write_jsonl(before_path, recs)
+        _write_jsonl(
+            after_path,
+            [_rec("0.5.0", 0.009 + i * 0.0001, "fresh") for i in range(5)],
+        )
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = compare_ab.main([before_path, after_path])
+        self.assertNotEqual(rc, 0)
+
+    def test_version_with_pipe_char_train_row_is_skipped_with_warning(self):
+        """codex-review P0 指摘（PR #1088）: version に Markdown 制御文字
+        （`|`）を含む train 行が非空文字列検証だけでは通過し、Markdown 表
+        へ未エスケープで連結されて列・行を追加できてしまう脆弱性を塞ぐ
+        （`_train_row_schema_error` の `_VERSION_RE` allowlist 検証）。"""
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        broken = _rec("0.4.0 | injected |", 0.012, "fresh")
+        recs.append(broken)
+        _write_jsonl(before_path, recs)
+        rows, warnings = compare_ab.load_rows(before_path)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("version", warnings[0])
+
+    def test_version_with_newline_train_row_is_skipped_with_warning(self):
+        """version に改行を含む行も allowlist 検証で warning 化される
+        ことを確認する（Markdown 表の行追加を防ぐ）。"""
+        before_path, after_path = self._paths()
+        recs = [_rec("0.4.0", 0.012 + i * 0.0001, "fresh") for i in range(5)]
+        broken = _rec("0.4.0\n| injected |", 0.012, "fresh")
+        recs.append(broken)
+        _write_jsonl(before_path, recs)
+        rows, warnings = compare_ab.load_rows(before_path)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("version", warnings[0])
+
 
 class MainCliTests(unittest.TestCase):
     def setUp(self):

@@ -52,6 +52,14 @@ TRAIN_SIZE = 64
 
 _PHASE_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
+# `version`（framework_version）の許容文字集合（codex-review P0 指摘・PR #1088:
+# 未検証の version を Markdown 表へそのまま連結すると `|` や改行を含む外部
+# 入力で列・行を追加できてしまう。A03 の「外部フォーマットのパース検証」に
+# 従い、crate バージョン文字列として想定される英数字・`.`・`-`・`+`・`_`
+# のみを許容し、それ以外（`|`・改行・バッククォート等の Markdown 制御文字を
+# 含む）は schema 不正として warning 化する）。
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
 
 def _is_plain_number(v):
     """外部 JSONL 由来の値が bool・NaN・Infinity・非数値でない「素の数値」か
@@ -128,8 +136,27 @@ def _train_row_schema_error(r):
     mode = r.get("mode", "fresh")
     if mode not in ("fresh", "reuse"):
         return f"mode が fresh/reuse のいずれでもない（{mode!r}）"
-    if not isinstance(r.get("version"), str) or not r.get("version"):
-        return f"version が非空文字列でない（{r.get('version')!r}）"
+    # device／size は比較対象（cuda・TRAIN_SIZE）を決める必須フィールド
+    # （codex-review P0 指摘・PR #1088）。値の一致検証（device=="cuda"・
+    # size==TRAIN_SIZE）自体は `_train_records` が既に担い、他 device・
+    # 他 size の正当な行（例: device="cpu" の別ベンチ行）を黙って除外する
+    # 設計を保つ（compare_ab_test.py
+    # test_other_framework_or_device_rows_are_excluded・
+    # test_rows_with_different_size_are_excluded が回帰防止として固定）。
+    # ここで検証するのは「型として schema に適合するか」のみ: device 欠損
+    # （None 等）・size が bool／文字列等の型不正は、値の意味を問う以前に
+    # レコードとして壊れているため warning 化して入力全体を判定不能にする。
+    device = r.get("device")
+    if not isinstance(device, str) or not device:
+        return f"device が非空文字列でない（{device!r}）"
+    size = r.get("size")
+    if isinstance(size, bool) or not isinstance(size, int):
+        return f"size が整数でない（{size!r}）"
+    if not isinstance(r.get("version"), str) or not _VERSION_RE.match(r.get("version")):
+        return (
+            "version が許容文字集合（英数字・`.`・`-`・`+`・`_`）の"
+            f"semver 形式でない（{r.get('version')!r}）"
+        )
     if _safe_positive(r.get("median_s")) is None:
         return f"median_s が正の有限数でない（{r.get('median_s')!r}）"
     if _safe_finite(r.get("checksum")) is None:
