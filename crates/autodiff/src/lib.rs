@@ -105,6 +105,19 @@
 //! クレート doc・`compat/mod.rs` 参照。`nn::Module`・`Linear`・
 //! `activation` 等、`compat` が依拠する `nn` 側の部品は本クレートに残る）。
 
+//! #1047（親 #1043「カーネル融合・autodiff 実行モデルの強化」）で
+//! view 系ノード `Var::reshape`/`Var::transpose`（`tape::Op::Reshape`/
+//! `Op::Transpose`）を追加した。`push_eager`/`push_lazy` に続く第 3 の
+//! 登録経路 `Tape::push_view` はホスト値を一切保持せず、backward 時
+//! （または後続の実体化要求時）に入力ノードから `tape::resolve_view`
+//! で再導出する（burn-autodiff の `MemoryBound { retro_forward }` 相当。
+//! `tensor-core::Tensor::reshape`/`transpose` の zero-copy 性質（`Arc`
+//! 共有）を利用するため中間バッファを一切確保しない。設計判断・メモリ
+//! 実測は `docs/autodiff-view-recompute-decision.md` を参照）。
+//! elementwise 5 演算の融合連鎖には参加しない融合境界ノードであり、
+//! これは `docs/kernel-fusion.md` が既に確定させた「transpose を挟む
+//! 連鎖は融合しない」方針と整合する。
+
 mod backward;
 pub mod compat;
 mod default_ops;

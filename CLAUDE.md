@@ -61,6 +61,7 @@ fandhe-ai/
 │   ├── workflows/           # implement-issue-tree.js（skills への相対 symlink）
 │   └── settings.json        # SessionStart / PostToolUse hooks
 └── docs/
+    ├── autodiff-view-recompute-decision.md # view 系ノード（reshape / transpose）の再計算方式化の設計（push_view／resolve_view による中間バッファ非確保・融合境界化・実測記録。#1043 ツリー・#1047）
     ├── backend-cuda-async-execution-design.md # CUDA 非同期実行モデルの同期契約（ストリーム順序・エラー伝播・D2H 境界・poison/invalidate 状態機械。#1011 ツリー・#1012）
     ├── backend-cuda-pool-allocator-decision.md # CUDA サイズクラス別プールアロケータ（自作 SizeClassPool<H> 案 B・driver プール〈cuMemPoolTrimTo〉併用）の採用判断・alloc_uninit 適用確認範囲・実測記入欄（#1018 ツリー・#1020）
     ├── backend-cuda-ptx-embedding-decision.md # CUDA GEMM ビルド時 PTX 事前埋め込み（candle 方式）不採用判断・JIT キャッシュ結線範囲の更新（#1024）
