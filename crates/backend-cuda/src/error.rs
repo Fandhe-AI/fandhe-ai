@@ -124,7 +124,9 @@ pub enum CudaError {
     /// 保持し、naive/tiled 5 カーネルの可用性を道連れにしない。
     TiledPipelineUnavailable { detail: String },
 
-    /// [`crate::gemm::CudaGemm::launch_tiled_pipeline_f32`] に渡された
+    /// `CudaGemm::launch_tiled_pipeline_f32`（`internal-diagnostics`
+    /// feature 限定の常駐 API。既定 feature 構成の rustdoc からは非公開の
+    /// ためリンク化しない）に渡された
     /// `TiledPipelineFunction`、または `a_dev`/`b_dev`/`c_dev`
     /// （`CudaSlice`）のいずれかが、この `CudaGemm` インスタンスの
     /// `stream`（＝生成元 `CudaDevice`）とは異なる `CudaContext` から
