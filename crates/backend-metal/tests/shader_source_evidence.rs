@@ -313,6 +313,82 @@ fn gemm_simdgroup_tiled_variants_share_boundary_check_helpers() {
     }
 }
 
+/// イシュー #1038 codex-review 指摘への対応
+/// （PR #1074 レビュー r3888410843）: 上記
+/// `gemm_simdgroup_tiled_variants_share_boundary_check_helpers` はヘルパの
+/// **呼び出し**（シグネチャ・定義行の存在）のみを検査しており、ヘルパ
+/// **本体**の境界条件式（例: `kk + 8 <= bk_eff`／`global_k + 8 <= dims.k`
+/// 相当）が空実装・`return true;` 等へ後退しても検出できない。本テストは
+/// 5 個のヘルパそれぞれの定義本体（シグネチャ直後の `{` から対応する `}`
+/// まで。ネストした波括弧を持たない単純な `return ...;` 一文のみのため、
+/// 最初に現れる `}` を対応する閉じ括弧として素朴に切り出せる）を個別に
+/// 抽出し、REQ-8 の境界条件式そのものがヘルパ本体に実在することを検査
+/// する（Metal 実機非依存・ホスト側で実行可能。`#[ignore]` の数値回帰
+/// テストとは独立に通常 CI で退行を検出する）。
+#[test]
+fn gemm_metal_boundary_helpers_retain_req8_condition_expressions() {
+    /// `signature` の直後に現れる `{` から、対応する `}` までの本体
+    /// （中括弧含む）を切り出す。5 ヘルパはいずれも単純な `return` 一文
+    /// のみでネストした波括弧を持たないため、最初の `{`/`}` ペアで
+    /// 本体全体を過不足なく取得できる。
+    fn extract_helper_body(source: &str, signature: &str) -> String {
+        let sig_pos = source.find(signature).unwrap_or_else(|| {
+            panic!("gemm.metal にヘルパシグネチャ `{signature}` が見つかりません")
+        });
+        let after_sig = &source[sig_pos..];
+        let open = after_sig
+            .find('{')
+            .unwrap_or_else(|| panic!("ヘルパ `{signature}` の本体開始 `{{` が見つかりません"));
+        let close = after_sig[open..]
+            .find('}')
+            .unwrap_or_else(|| panic!("ヘルパ `{signature}` の本体終端 `}}` が見つかりません"));
+        after_sig[open..=open + close].to_string()
+    }
+
+    for (signature, required_conditions) in [
+        (
+            "inline bool tiled_block_out_of_range(",
+            vec!["row0 >= dims.m", "col0 >= dims.n"],
+        ),
+        (
+            "inline bool tiled_a_group_in_bounds(",
+            vec![
+                "kk + vec_w <= bk_eff",
+                "global_row < dims.m",
+                "global_k + vec_w <= dims.k",
+            ],
+        ),
+        (
+            "inline bool tiled_b_group_in_bounds(",
+            vec![
+                "kk < bk_eff",
+                "global_k < dims.k",
+                "global_col + vec_w <= dims.n",
+            ],
+        ),
+        (
+            "inline bool tiled_a_elem_in_bounds(",
+            vec![
+                "kk_e < bk_eff",
+                "global_row < dims.m",
+                "global_k_e < dims.k",
+            ],
+        ),
+        (
+            "inline bool tiled_b_elem_in_bounds(",
+            vec!["kk < bk_eff", "global_k < dims.k", "global_col_e < dims.n"],
+        ),
+    ] {
+        let body = extract_helper_body(GEMM_METAL_SOURCE, signature);
+        for condition in required_conditions {
+            assert!(
+                body.contains(condition),
+                "ヘルパ `{signature}` の本体に REQ-8 境界条件式 `{condition}` が見つかりません（本体: `{body}`）"
+            );
+        }
+    }
+}
+
 /// イシュー #797 の証跡: `gemm_simdgroup_tiled_f16` の協調ロードが
 /// half 8 要素（128bit）幅のベクトルロードへ移行済みであることをロックする
 /// （#796 時点はスカラーロードに留まっていた。上記
