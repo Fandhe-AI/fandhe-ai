@@ -137,8 +137,9 @@ backend-cpu/src/reduction.rs` モジュール doc「小サイズ直列フォー�
   確認。reduction 自体は閾値で分岐しないため、これは常時並列経路の
   決定性を確認するテストである）・
   `parallel_threshold_boundary_deterministic_axis_reduction`（軸指定
-  reduction の同種確認。`outer=4` 固定で `axis_len` を調整し
-  `outer*inner*axis_len` が代表サイズ境界を跨ぐ shape を構成）を
+  reduction の同種確認。`outer` は各代表サイズの約数から選ぶ（32,767・
+  32,768・32,769 要素に対しそれぞれ `outer=7, 4, 3`）ことで丸めなしに
+  `outer*axis_len` が代表サイズ境界を正確に跨ぐ shape を構成）を
   `crates/backend-cpu/src/reduction.rs` に追加した
 - reduction 専用の M4 Max 実機直列/並列比較を実施し閾値を確定・
   ユーザー承認を得られれば、直列フォールバックの導入を再検討する
