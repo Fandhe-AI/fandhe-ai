@@ -25,6 +25,7 @@
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run};
 use fandhe_ai_backend_cpu::{add_slice, exp_slice, mul_slice};
+use std::hint::black_box;
 
 fn random_vec(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)
@@ -42,23 +43,31 @@ fn measure_size(label: &str, n: usize) {
     let b = random_vec(8000 + n as u64, n);
     let config = MeasurementConfig::default(); // warmup 20・iters 20（TASK-8.1 下限）
 
+    // `run` はクロージャ呼び出し自体を `black_box` するのみで、クロージャ内部の
+    // 入出力までは保護しない（`bench_harness::protocol::run` ドキュメンテーション
+    // コメント参照）。release/LTO で `a`／`b`／出力バッファが定数畳み込み・
+    // dead code 除去の対象にならないよう、計測対象の入出力を明示的に
+    // `black_box` で保護する（codex-review 指摘・イシュー #1027）。
     let mut out_add = vec![0.0f32; n];
     let add = run(&config, || {
-        add_slice(&a, &b, &mut out_add);
+        add_slice(black_box(&a), black_box(&b), black_box(&mut out_add));
     })
     .expect("add_slice の計測に失敗");
+    black_box(&out_add);
 
     let mut out_mul = vec![0.0f32; n];
     let mul = run(&config, || {
-        mul_slice(&a, &b, &mut out_mul);
+        mul_slice(black_box(&a), black_box(&b), black_box(&mut out_mul));
     })
     .expect("mul_slice の計測に失敗");
+    black_box(&out_mul);
 
     let mut out_exp = vec![0.0f32; n];
     let exp = run(&config, || {
-        exp_slice(&a, &mut out_exp);
+        exp_slice(black_box(&a), black_box(&mut out_exp));
     })
     .expect("exp_slice（libm 経由）の計測に失敗");
+    black_box(&out_exp);
 
     println!(
         "label={label} n={n} add_median_ns={add_ns:.1} mul_median_ns={mul_ns:.1} \

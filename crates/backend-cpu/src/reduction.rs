@@ -30,9 +30,12 @@
 //! ## 小サイズ直列フォールバック（未導入・イシュー #811・#1027・codex-review
 //! 指摘への対応）
 //!
-//! `elementwise` モジュールで REQ-8 の正式対象実機 Apple M4 Max 実測により
-//! 閾値確定済みの `crate::elementwise::PARALLEL_THRESHOLD`（elementwise
-//! モジュール doc「並列化」参照）は要素ごと独立・アキュムレータなしの
+//! `elementwise` モジュールの `crate::elementwise::PARALLEL_THRESHOLD`
+//! （elementwise モジュール doc「並列化」参照）はローカル QEMU x86_64 での
+//! スイープ実測により現状維持と判断された値であり、REQ-8 の正式対象実機
+//! Apple M4 Max での再スイープはまだ実施していない（`docs/perf/
+//! cpu-parallel-threshold-sweep.md`「計測環境」節に残課題として記録）。
+//! この値は要素ごと独立・アキュムレータなしの
 //! 契約に対するものであり、reduction（累積を伴う別契約。上記「決定性
 //! 契約」参照）へそのまま転用してよい根拠がない（reduction 専用の直列/
 //! 並列比較を M4 Max で実施していない）。そのため本モジュールは常に
