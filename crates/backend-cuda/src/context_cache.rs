@@ -1418,7 +1418,10 @@ mod tests {
 /// 非同期実行の遅延エラー伝播（状態機械。モジュール冒頭「非同期実行の
 /// 遅延エラー伝播」参照）の単体テスト。実 CUDA 依存なし（GPU 不要）で
 /// CI 常時実行できる（イシュー #1013 設計文書 §8 T3 系統の最小構成。
-/// 実機依存の T1・T2・T3b・T3i・T4 は #1014 へ引き渡す）。
+/// 実機依存の T1・T2・T4 は `crates/backend-cuda/tests/
+/// async_ordering_real_device.rs`、T3b は `ops.rs` の `#[cfg(test)]`
+/// モジュール、T3i は本ファイル末尾の `async_ordering_poison_tests`
+/// 子モジュールへ、それぞれイシュー #1014 で実装済み）。
 ///
 /// [`begin_driver_call`]／[`observe_driver_result`]／[`is_poisoned`]／
 /// [`current_generation`] はプロセスワイド static（[`ordinal_registry`]）
@@ -1976,3 +1979,12 @@ mod poison_state_tests {
         );
     }
 }
+
+/// イシュー #1014（設計文書 §8 T3i）: `invalidate_with` を実 CUDA
+/// クロージャで検証する実機依存テスト（`#[ignore]`）。`OrdinalRegistry`・
+/// `invalidate_with`・`ProbeFailure` がモジュール非公開のため、統合テスト
+/// （`tests/` 配下）ではなく子モジュールとして配置する
+/// （`jit_cache_regression_tests.rs` と同じ配置方式）。
+#[cfg(test)]
+#[path = "async_ordering_poison_tests.rs"]
+mod async_ordering_poison_tests;
