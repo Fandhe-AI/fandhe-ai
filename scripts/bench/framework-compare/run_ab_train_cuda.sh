@@ -35,12 +35,20 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
+# fail-closed（AGENTS.md）: run() 内の個々の起動失敗はログに記録しつつ計測を
+# 継続する（1 回の失敗で残りの試行を打ち切らない）が、スクリプト全体としては
+# 1 件でも失敗があれば呼び出し元へ非 0 終了で伝播させる。ANY_FAILED はその
+# ための集計フラグ（真偽ではなく失敗件数を保持し、末尾の exit 判定材料と
+# スクリプト内 "-> FAILED" 表示の裏付けに使う）。
+ANY_FAILED=0
+
 run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
   local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh} extra_flag=${6:-}
   echo "== $bin $task $device size=$size mode=$mode extra=${extra_flag:-none} =="
   if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" ${extra_flag:+"$extra_flag"} --out "$OUT" 2>err.tmp; then
     echo "$bin task=$task device=$device size=$size mode=$mode extra=${extra_flag:-none} : $(cat err.tmp)" >> "$SKIP"
     echo "  -> FAILED (recorded in $SKIP)"
+    ANY_FAILED=$((ANY_FAILED + 1))
   fi
   rm -f err.tmp
 }
@@ -73,3 +81,11 @@ run bench-fandhe train cuda 64 fresh --phases
 run bench-fandhe train cuda 64 reuse --phases
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
+
+# fail-closed（AGENTS.md）: fresh/reuse や --phases の一部が失敗した不完全な
+# 計測を、呼び出し元（実行者・CI 相当）が成功と誤判定しないよう非 0 終了する
+# （github-actions[bot] レビュー指摘。PR #1088）。
+if [[ "$ANY_FAILED" -gt 0 ]]; then
+  echo "FAILED: $ANY_FAILED run(s) failed; see $SKIP" >&2
+  exit 1
+fi
