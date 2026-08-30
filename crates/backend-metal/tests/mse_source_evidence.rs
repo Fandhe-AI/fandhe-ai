@@ -63,6 +63,30 @@ fn mse_metal_source_uses_threadgroup_barrier() {
     );
 }
 
+/// REQ-8: `mse_partial_f32` の grid-stride ループ添字（`idx`／`stride`）が
+/// `ulong` で宣言されていることをロックする
+/// （`softmax.metal`／`rmsnorm.metal` の `ulong row_base` と同じ理由。
+/// `numel` は `u32::MAX`（`mse.rs::validate_mse_len`）まで許容するため、
+/// `uint` 添字のままだと `numel` 近傍で unsigned wraparound により
+/// `idx < numel` の境界チェックを迂回しうる。Bugbot 指摘）。
+#[test]
+fn mse_metal_partial_grid_stride_loop_index_is_declared_ulong() {
+    assert!(
+        MSE_METAL_SOURCE.contains("ulong stride = (ulong)grid_size * (ulong)tg_size;"),
+        "stride が ulong で宣言されていない"
+    );
+    assert!(
+        MSE_METAL_SOURCE.contains(
+            "for (ulong idx = (ulong)tg_id * (ulong)tg_size + (ulong)tid; idx < numel; idx += stride)"
+        ),
+        "idx ループ添字が ulong で宣言されていない"
+    );
+    assert!(
+        !MSE_METAL_SOURCE.contains("for (uint idx = tg_id * tg_size + tid"),
+        "grid-stride ループ添字が uint へ縮退している"
+    );
+}
+
 /// 3 カーネルすべてが実在することをロックする（関数シグネチャの grep。
 /// リネームや削除を検出する）。
 #[test]

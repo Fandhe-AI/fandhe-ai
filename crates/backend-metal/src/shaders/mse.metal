@@ -80,8 +80,15 @@ kernel void mse_partial_f32(
     threadgroup float simd_sums[MSE_SIMDGROUPS_PER_TG];
 
     float acc = 0.0f;
-    uint stride = grid_size * tg_size;
-    for (uint idx = tg_id * tg_size + tid; idx < numel; idx += stride) {
+    // REQ-8: `numel` は `u32::MAX`（`mse.rs::validate_mse_len`）まで
+    // 許容するため、`uint` 添字のまま `idx += stride` を続けると `numel`
+    // 近傍で unsigned wraparound（`idx` が 0 付近へ巻き戻る）により
+    // `idx < numel` の境界チェックを迂回しうる（Bugbot 指摘。CUDA 側
+    // `kernels_mse.rs::MSE_PARTIAL_F32` の `long long` 対応と同じ理由）。
+    // `softmax.metal`／`rmsnorm.metal` の `ulong row_base` と同じ方針で
+    // `ulong` を用いる。
+    ulong stride = (ulong)grid_size * (ulong)tg_size;
+    for (ulong idx = (ulong)tg_id * (ulong)tg_size + (ulong)tid; idx < numel; idx += stride) {
         float diff = pred[idx] - target[idx];
         acc = fma(diff, diff, acc);
     }

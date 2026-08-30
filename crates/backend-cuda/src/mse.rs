@@ -33,6 +33,22 @@ pub(crate) fn validate_mse_len(len: usize) -> Result<(), CudaError> {
     Ok(())
 }
 
+/// `pred_len`／`target_len` の一致と `i32::MAX` 上限の両方を検証する
+/// （`elementwise.rs::validate_elementwise_binary_dims` と同じ構成）。
+///
+/// `run_mse_loss_f32`／`run_mse_backward_f32` は `CudaMse` の公開メソッド
+/// であり、`ops.rs` の事前検証を経ない直接呼び出しに対しても長さ不一致を
+/// `panic!`（`assert_eq!`）ではなく型付きエラーとして返す契約とする
+/// （AGENTS.md「本番経路の panic 禁止」）。
+pub(crate) fn validate_mse_binary_len(pred_len: usize, target_len: usize) -> Result<(), CudaError> {
+    if pred_len != target_len {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!("mse length mismatch: pred_len={pred_len}, target_len={target_len}"),
+        });
+    }
+    validate_mse_len(pred_len)
+}
+
 /// forward 1 段目（`mse_partial_f32`）の起動ブロック数を決定する。
 /// `min(ceil_div(numel, MSE_BLOCK_DIM), MSE_MAX_BLOCKS)`（`kernels_mse.rs`
 /// 冒頭コメント「forward の 2 段構成」の契約）。`numel > 0` を前提とする
@@ -95,8 +111,7 @@ impl CudaMse {
         target: &[f32],
         factor: f32,
     ) -> Result<f32, CudaError> {
-        assert_eq!(pred.len(), target.len(), "length mismatch (pred vs target)");
-        validate_mse_len(pred.len())?;
+        validate_mse_binary_len(pred.len(), target.len())?;
         let numel = pred.len();
         if numel == 0 {
             return Ok(0.0);
@@ -172,8 +187,7 @@ impl CudaMse {
         target: &[f32],
         scale: f32,
     ) -> Result<Vec<f32>, CudaError> {
-        assert_eq!(pred.len(), target.len(), "length mismatch (pred vs target)");
-        validate_mse_len(pred.len())?;
+        validate_mse_binary_len(pred.len(), target.len())?;
         let numel = pred.len();
         if numel == 0 {
             return Ok(Vec::new());

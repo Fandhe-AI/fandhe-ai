@@ -102,8 +102,8 @@ extern "C" __global__ void mse_partial_f32(
     int warp_id = threadIdx.x / 32;
 
     float acc = 0.0f;
-    int stride = gridDim.x * blockDim.x;
-    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < numel; idx += stride) {
+    long long stride = (long long)gridDim.x * blockDim.x;
+    for (long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x; idx < numel; idx += stride) {
         float diff = pred[idx] - target[idx];
         acc = fmaf(diff, diff, acc);
     }
@@ -204,6 +204,32 @@ mod tests {
     fn mse_partial_f32_has_grid_stride_bound_check() {
         assert!(MSE_PARTIAL_F32.contains("idx < numel"));
         assert!(!MSE_PARTIAL_F32.contains("atomicAdd"));
+    }
+
+    /// grid-stride ループの添字（`idx`／`stride`）が `long long` で
+    /// 宣言されていることをソース文字列に対して検査する
+    /// （`kernels_softmax.rs::tests::
+    /// onepass_and_twopass_loop_indices_are_declared_long_long` と同じ
+    /// 理由・同じ検査パターン）。`numel` は `i32::MAX` まで許容する
+    /// （`mse.rs::validate_mse_len`）ため、`int` 添字のまま `idx += stride`
+    /// を続けると `numel` 近傍で signed overflow（UB）により `idx <
+    /// numel` の境界チェックを迂回しうる（Bugbot 指摘）。
+    #[test]
+    fn mse_partial_f32_grid_stride_loop_index_is_declared_long_long() {
+        assert!(
+            MSE_PARTIAL_F32.contains("long long stride = (long long)gridDim.x * blockDim.x;"),
+            "stride が long long で宣言されていない"
+        );
+        assert!(
+            MSE_PARTIAL_F32.contains(
+                "for (long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x; idx < numel; idx += stride)"
+            ),
+            "idx ループ添字が long long で宣言されていない"
+        );
+        assert!(
+            !MSE_PARTIAL_F32.contains("for (int idx = blockIdx.x * blockDim.x + threadIdx.x"),
+            "grid-stride ループ添字が int へ縮退している"
+        );
     }
 
     #[test]
