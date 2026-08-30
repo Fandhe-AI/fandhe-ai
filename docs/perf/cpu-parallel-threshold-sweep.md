@@ -19,8 +19,11 @@ docs に無かった。reduction（`crates/backend-cpu/src/reduction.rs`）に�
   再スイープが残課題（GEMM 側と同じ事情。`cpu-gemm-small-shape-
   serial-fallback.md` 計測環境節参照）
 - 計測プロトコル: `bench_harness::run`（warmup 20・iters 20・中央値。
-  TASK-8.1 準拠）。ハーネス: `crates/backend-cpu/tests/
-  elementwise_threshold_perf.rs`（`#[ignore]`）
+  TASK-8.1 準拠）。ハーネス: 自動判定版スイープは `crates/backend-cpu/
+  tests/elementwise_threshold_perf.rs`、同一サイズ逐次 vs 並列比較は
+  `crates/backend-cpu/src/elementwise.rs` の `#[cfg(test)] mod
+  bench_internal` 単体テスト（いずれも `#[ignore]`。強制版を公開面に
+  出さないための配置。PR #1066 codex-review P1 対応）
 
 ## 実測: elementwise（`add`／`mul`／`exp`）閾値スイープ
 
@@ -73,10 +76,11 @@ docs に無かった。reduction（`crates/backend-cpu/src/reduction.rs`）に�
 `PARALLEL_THRESHOLD` 判定を経由しない逐次強制版・並列強制版
 （`add_slice_force_serial`／`add_slice_force_parallel` 等。`gemm_blis`
 〈直列専用入口〉／`gemm_blis_parallel`〈並列専用入口〉と同じ発想。
-`crates/backend-cpu/src/elementwise.rs` 「ベンチ専用: 逐次／並列強制版」
-節）を追加し、**同一要素数**で両経路を計測する
-`elementwise_serial_vs_parallel_sweep`
-（`crates/backend-cpu/tests/elementwise_threshold_perf.rs`）を実行した:
+`crates/backend-cpu/src/elementwise.rs` の `#[cfg(test)] mod
+bench_internal`。強制版を公開面に出さないため通常ビルドから消える
+`#[cfg(test)]` の private モジュールに置く）を追加し、**同一要素数**で
+両経路を計測する `elementwise_serial_vs_parallel_sweep`（同モジュール内の
+単体テスト）を実行した:
 
 | 要素数 | add 逐次 | add 並列 | add 比（並列/逐次） | mul 逐次 | mul 並列 | mul 比 | exp 逐次 | exp 並列 | exp 比 |
 |---|---|---|---|---|---|---|---|---|---|

@@ -634,12 +634,15 @@ mod tests {
     /// はこの閾値で分岐しない。上記テスト同様、代表サイズとして流用する
     /// のみ）で、軸指定 reduction（`axis_reduce`）がシングルスレッド／
     /// マルチスレッドプール間で bit 完全一致することを確認する。
-    /// shape を `[outer, axis_len]`（`axis=1`）に固定して当該サイズを
-    /// 跨がせる。
+    /// shape は `[outer, axis_len]`（`axis=1`）とし、`outer` は各
+    /// `total_in` の約数（`32,767 = 7 × 4,681`・`32,768 = 4 × 8,192`・
+    /// `32,769 = 3 × 10,923`）を取って丸めなしで正確に `total_in` 要素の
+    /// 入力を構成する（当初の `outer = 4` 固定 + `div_ceil` 丸めでは
+    /// 閾値直下 32,767 が 32,768 要素へ丸まり閾値ちょうどと同一 shape に
+    /// なっていた。PR #1066 codex-review P2 対応）。
     #[test]
     fn parallel_threshold_boundary_deterministic_axis_reduction() {
         let threshold = crate::elementwise::PARALLEL_THRESHOLD;
-        let outer = 4usize;
         let single = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
             .build()
@@ -649,10 +652,16 @@ mod tests {
             .build()
             .expect("failed to build 4-thread rayon pool for determinism test");
 
-        for total_in in [threshold - 1, threshold, threshold + 1] {
-            let axis_len = total_in.div_ceil(outer);
-            let numel = outer * axis_len;
-            let data: Vec<f32> = (0..numel).map(|i| ((i % 97) as f32) * 0.5 - 3.0).collect();
+        for (total_in, outer) in [(threshold - 1, 7usize), (threshold, 4), (threshold + 1, 3)] {
+            assert_eq!(
+                total_in % outer,
+                0,
+                "テスト前提の破れ: outer={outer} が total_in={total_in} の約数でない"
+            );
+            let axis_len = total_in / outer;
+            let data: Vec<f32> = (0..total_in)
+                .map(|i| ((i % 97) as f32) * 0.5 - 3.0)
+                .collect();
             let t = Tensor::<f32>::new(data, &[outer, axis_len]).unwrap();
 
             let sum_a = single.install(|| sum(&t, Some(1)).unwrap());
