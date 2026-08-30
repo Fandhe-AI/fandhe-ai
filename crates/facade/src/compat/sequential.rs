@@ -172,11 +172,54 @@ impl Sequential {
     /// **TASK-9.4（#411）**: 旧 `fandhe_ai_autodiff::compat` 版が持っていた
     /// `predict_with_ops`（任意 `BackendOps` 注入経路）は本移設で公開面
     /// から撤去した（モジュール doc 参照）。
+    ///
+    /// **イシュー #1028（`docs/inference-forward-fixed-cost-design.md`
+    /// §3.1「段階 A」）**: 内部実装は tape 不要経路
+    /// （`predict_tape_free`。非公開の内部メソッドのためリンクなし）
+    /// を優先し、層構成が `Module::forward_host` 未対応
+    /// （`BackendError::Unsupported`）の場合のみ旧経路
+    /// （`predict_via_tape`。同じく非公開。`Tape::var` の葉
+    /// クローン・ノード記録を伴う）へ fail-closed にフォールバックする。
+    /// `docs/compat-api-scope.md` §1 の 3 種（Linear・ReLU/Sigmoid/Tanh）
+    /// はいずれも tape 不要経路に対応済みのため（`nn/module.rs` の
+    /// 各 `forward_host` オーバーライド）、通常はフォールバックへ
+    /// 到達しない。公開シグネチャ・戻り値・数値結果は変更しない
+    /// （新旧経路の bit 完全一致は `sequential_predict_tape_free_matches_via_tape_bit_exact`
+    /// で検証）。
     pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
+        match self.predict_tape_free(input) {
+            Err(AutodiffError::Backend(BackendError::Unsupported(_))) => {
+                self.predict_via_tape(input)
+            }
+            other => other,
+        }
+    }
+
+    /// 旧経路（`Tape` 上で `forward` を実行し `to_tensor()` で実体化する。
+    /// TASK-9.4 当初実装）。[`Self::predict`] のフォールバック先。
+    fn predict_via_tape(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
         let tape = crate::tape();
         let input_var = tape.var(input);
         let output = self.forward(&tape, &input_var)?;
         Ok(output.to_tensor())
+    }
+
+    /// tape 不要経路（イシュー #1028）。`Tape`／`Var` を一切構築せず、
+    /// 層ごとに `Module::forward_host` を直接呼ぶ（CPU の
+    /// `fandhe_ai_backend_cpu::CpuBackendOps` に固定。[`crate::tape`] が
+    /// 常に CPU バックエンドで `Tape` を構築するのと同じ構成であり、
+    /// `predict` の既存の「CPU 固定」契約を変えない）。1 層でも
+    /// `Unsupported` を返した場合は途中結果を捨てて `Unsupported` を
+    /// そのまま伝播し、[`Self::predict`] が旧経路へ全体フォールバック
+    /// する（部分的にホストフォールバックしない。§3.2 のフォール
+    /// バック契約と同じ「黙示のフォールバックをしない」設計）。
+    fn predict_tape_free(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
+        let ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
+        let mut current = input.clone();
+        for layer in &self.layers {
+            current = layer.forward_host(&ops, &current)?;
+        }
+        Ok(current)
     }
 
     /// 学習ステップの入口（#294）。このステップの `tape` へ全 `Linear`
@@ -728,6 +771,68 @@ mod tests {
             Err(err) => assert!(matches!(err, AutodiffError::InvalidArgument(_))),
             Ok(_) => panic!("in_features == 0 は拒否されるはず"),
         }
+    }
+
+    // =================================================================
+    // イシュー #1028: 推論 forward の固定費削減（tape 不要経路）
+    // =================================================================
+
+    /// [`Sequential::predict`] の新経路（tape 不要。`predict_tape_free`）が
+    /// 旧経路（`predict_via_tape`）と bit 完全一致することを、
+    /// Linear・ReLU・Sigmoid・Tanh を混在させた層構成・複数バッチ・
+    /// bias 有無混在で確認する（`docs/inference-forward-fixed-cost-
+    /// design.md` §3.3 (b) の bit-exactness 契約）。
+    #[test]
+    fn sequential_predict_tape_free_matches_via_tape_bit_exact() {
+        for batch in [1usize, 3, 8] {
+            let model = Sequential {
+                layers: vec![
+                    Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
+                    Box::new(Relu),
+                    Box::new(Linear::new(16, 12, false, SEED2).unwrap()),
+                    Box::new(Sigmoid),
+                    Box::new(Linear::new(12, 4, true, SEED1 + SEED2).unwrap()),
+                    Box::new(Tanh),
+                ],
+            };
+            let input_data: Vec<f32> = (0..batch * 8).map(|i| (i as f32) * 0.05 - 0.3).collect();
+            let input = Tensor::new(input_data, &[batch, 8]).unwrap();
+
+            let via_tape_fast = model.predict(&input).unwrap();
+            let via_tape_slow = model.predict_via_tape(&input).unwrap();
+
+            assert_eq!(
+                via_tape_fast.shape(),
+                via_tape_slow.shape(),
+                "batch={batch}"
+            );
+            assert_eq!(
+                dense_vec(&via_tape_fast),
+                dense_vec(&via_tape_slow),
+                "predict（tape 不要経路）は predict_via_tape（旧経路）と \
+                 bit 完全一致するはず（batch={batch}）"
+            );
+        }
+    }
+
+    /// [`Sequential::predict`] は `add_linear`（bias あり既定）で構築した
+    /// 通常の `Sequential::new()` 経由モデルでも新旧経路が一致すること
+    /// （`layers` を直接構築するテスト専用経路だけでなく、公開 API の
+    /// 通常経路でも成立することの確認）。
+    #[test]
+    fn sequential_predict_public_builder_tape_free_matches_via_tape() {
+        let model = Sequential::new()
+            .add_linear(4, 6, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(6, 2, SEED2)
+            .unwrap();
+        let input = Tensor::new(vec![0.1_f32, -0.2, 0.3, -0.4], &[1, 4]).unwrap();
+
+        let fast = model.predict(&input).unwrap();
+        let slow = model.predict_via_tape(&input).unwrap();
+
+        assert_eq!(dense_vec(&fast), dense_vec(&slow));
     }
 
     // =================================================================

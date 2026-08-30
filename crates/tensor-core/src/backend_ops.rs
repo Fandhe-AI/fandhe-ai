@@ -417,6 +417,56 @@ pub trait BackendOps {
         ))
     }
 
+    /// `a`（デバイス常駐）・`w`（デバイス常駐）・`bias`（デバイス常駐・
+    /// 任意）から `y = act(a @ w + bias)` を、入力・出力いずれもホストへ
+    /// 実体化せずに計算する（イシュー #1028・`docs/inference-forward-
+    /// fixed-cost-design.md` §3.2）。
+    ///
+    /// [`Self::gemm_resident_rhs`] は `a`・戻り値がホスト常駐 `Tensor<f32>`
+    /// であり、多層 MLP の推論チェーンでは層ごとに D2H（戻り値）→ H2D
+    /// （次層の `a`）が発生する（`docs/backend-cuda-async-execution-
+    /// design.md` §2.3 が指摘する「ホスト `Tensor` を返す `BackendOps` API
+    /// は戻り値の D2H が構造的な同期点」の具体例）。本メソッドは `a`・
+    /// 戻り値をいずれも [`DeviceBuffer`] のまま扱うことで、推論チェーンの
+    /// 同期点を最終出力の 1 回（呼び出し元が明示的に `download` する
+    /// 箇所）へ集約できるようにする。
+    ///
+    /// `act` は bias 加算後の elementwise 適用（[`Activation::Relu`] は
+    /// `max(0, x)` で数値的に恒等な後段適用。[`Self::gemm_bias_act`] と
+    /// 同じ契約）。`bias` は `Some` の場合 `[n]`（`w` の列数）への行方向
+    /// 複製のみ対応する（[`Self::gemm_resident_rhs`] と同じ厳密一致契約。
+    /// ブロードキャスト全般は非対応）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gemm_resident_rhs`]・[`Self::gemm_resident_lhs`] と同じ
+    /// 非破壊拡張（デフォルトメソッド追加）であり、既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とする（デバイス
+    /// 常駐の入出力を扱えないバックエンドが誤って黙示のホスト
+    /// フォールバック〈`a` を download して `gemm_bias_act` へ委譲し
+    /// 結果を再 upload する等〉を行い、「入出力とも D2H/H2D しない」
+    /// という受け入れ条件を静かに破ることを防ぐため。呼び出し元
+    /// （`fandhe_ai_autodiff::optim::device_store` の推論ヘルパー）は
+    /// `Unsupported` を検出した場合、層構成全体を [`Self::gemm_bias_act`]
+    /// ベースの per-op 経路へフォールバックする契約とする）。CPU 実装
+    /// （`backend-cpu::ops::CpuBackendOps`）はこのデフォルトをカーネル
+    /// 呼び出しでオーバーライドする。CUDA／Metal 実装は本イシューの
+    /// スコープ外（実機検証環境が必要なため。設計は同文書で確定済み・
+    /// 引き継ぎは out-of-scope-tracking.md に従う）。
+    fn linear_forward_device(
+        &self,
+        _a: &DeviceBuffer<f32>,
+        _w: DeviceBufferView<'_>,
+        _bias: Option<DeviceBufferView<'_>>,
+        _act: Activation,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linear_forward_device: default fail-safe (no device-resident chained forward \
+             kernel available)"
+                .into(),
+        ))
+    }
+
     /// 融合グラフ（#162 が検出した elementwise 連鎖・#163 が生成する
     /// カーネル）を 1 回のカーネル呼び出しで実行する（TASK-12.1d・#164）。
     ///
@@ -830,5 +880,23 @@ mod tests {
         }
         // デフォルト委譲は token に一切触れない。
         assert!(!token.is_set());
+    }
+
+    /// [`BackendOps::linear_forward_device`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する（イシュー
+    /// #1028）。デバイス常駐の入出力を扱えないバックエンド（`MockOps`）
+    /// が黙示のホストフォールバックへ落ちず、明示的に拒否することが
+    /// 受け入れ条件の中核（`docs/inference-forward-fixed-cost-design.md`
+    /// §3.2 のフォールバック契約）。
+    #[test]
+    fn linear_forward_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = empty_device_buffer(Device::Cpu);
+        let w_buf = empty_device_buffer(Device::Cpu);
+        let w_view = DeviceBufferView::new(&w_buf, 0, &[1]).unwrap();
+
+        let result = ops.linear_forward_device(&a, w_view, None, Activation::None);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 }

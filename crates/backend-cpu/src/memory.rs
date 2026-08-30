@@ -20,6 +20,7 @@ use std::any::Any;
 use std::mem::size_of;
 use std::sync::Arc;
 
+use fandhe_ai_tensor_core::ShapeError;
 use fandhe_ai_tensor_core::Tensor;
 use fandhe_ai_tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
@@ -76,6 +77,46 @@ impl CpuMemory {
         Self {
             tracker: Arc::new(AllocationTracker::new()),
         }
+    }
+
+    /// 既に計算済みのホスト常駐 `data`（`shape` に整合する要素数）を
+    /// コピーなしで [`DeviceBuffer`] としてラップする（イシュー #1028）。
+    ///
+    /// `ops.rs::CpuBackendOps::linear_forward_device` が推論チェーンの
+    /// 中間出力（`gemm_blis_parallel` の出力バッファ）を、`upload`
+    /// （`Tensor` 経由の複製）を経由せずそのまま次層の入力
+    /// `DeviceBuffer` へ仕立てるために使う（CPU は「デバイス」が
+    /// ホストメモリそのものであるため、`data` の所有権移動だけで
+    /// 「デバイス常駐」契約を満たせる）。`alloc_zeroed`/`upload` と同じ
+    /// `AllocationTracker` 計上を行う（計測系列の一貫性を保つ。
+    /// `memory_stats` モジュールコメント参照）。
+    ///
+    /// `data.len()` が `shape` の要素数積と一致しない場合は呼び出し元
+    /// （`ops.rs`）のロジック不整合であり、fail-closed に
+    /// [`BackendError::ShapeMismatch`] で拒否する（本番経路で
+    /// `unwrap()`/`expect()` を使わない方針。`.claude/rules/
+    /// coding-rust.md`）。
+    pub(crate) fn wrap_vec(
+        &self,
+        data: Vec<f32>,
+        shape: Vec<usize>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let expected = checked_numel(&shape)?;
+        if data.len() != expected {
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected,
+                    actual: data.len(),
+                },
+            ));
+        }
+        let bytes = checked_byte_len(data.len())?;
+        let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+        let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle {
+            data,
+            _alloc: alloc,
+        });
+        Ok(DeviceBuffer::new(Device::Cpu, shape, handle))
     }
 }
 
