@@ -25,8 +25,67 @@ use crate::context::MetalContext;
 use crate::context_cache;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
+use crate::layout::{self, MatrixLayout};
 use crate::memory::{MetalBufferHandle, MetalMemory, map_metal_error};
 use crate::row_kernel::{self, plan_dtype_is_f32};
+
+std::thread_local! {
+    /// [`MetalBackendOps::gemm_resident_lhs`]／[`MetalBackendOps::
+    /// gemm_resident_rhs`] が「転置 view の zero-repack 経路」に乗れず
+    /// `Tensor::contiguous()`（ホスト側転置コピー）へフォールバックした
+    /// 回数（イシュー #1040。`gemm::BIAS_ACT_FUSED_LAUNCH_COUNT` と同型の
+    /// 可観測点）。`crate::layout::classify_2d` が `None` を返す入力
+    /// （stride 0 のブロードキャスト等の非対応形状）のみがこのフォール
+    /// バックへ到達する。`pub(crate)`（`gemm::BIAS_ACT_FUSED_LAUNCH_COUNT`
+    /// と同じ可視性方針。クレート境界外の `tests/gemm_resident_parity.rs`
+    /// からは参照できないため、「フォールバック非経由」の確認は本ファイル
+    /// 内の `#[cfg(test)]` クレート内テスト（macOS 実機・`#[ignore]`）に
+    /// 委ね、外部テストファイルは数値一致のみを検証する契約とする）。
+    pub(crate) static RESIDENT_HOST_REPACK_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// GEMM オペランド 1 個をアップロードする（イシュー #1040）。
+/// `layout::classify_2d` が分類できる view（行優先 contiguous・転置
+/// view のいずれか）は [`MetalMemory::upload_view`] 経由で
+/// `Tensor::as_view_slice`（借用）をそのままアップロードし、ホスト側の
+/// 転置コピーを発生させない。分類できない形状（stride 0 の
+/// ブロードキャスト等）のみ、従来どおり `MemoryOps::upload`
+/// （`Tensor::contiguous()` 経由）へフォールバックし
+/// [`RESIDENT_HOST_REPACK_COUNT`] を増やす。
+///
+/// 戻り値の [`MatrixLayout`] は `dispatch_strided_bias_act_prepared` へ
+/// そのまま渡す（フォールバック時は `contiguous()` 後の実際の行優先
+/// 形状に対応する NN レイアウトを返す）。
+fn upload_operand_for_resident_gemm(
+    mem: &MetalMemory,
+    tensor: &Tensor<f32>,
+) -> Result<
+    (
+        fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        MatrixLayout,
+    ),
+    BackendError,
+> {
+    if let Some(layout) = layout::classify_2d(tensor.shape(), tensor.strides())
+        && let Some(slice) = tensor.as_view_slice()
+    {
+        let dev_buf = mem
+            .upload_view(slice, tensor.shape())
+            .map_err(map_metal_error)?;
+        return Ok((dev_buf, layout));
+    }
+    RESIDENT_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+    let dev_buf = mem.upload(tensor)?;
+    let (rows, cols) = (tensor.shape()[0], tensor.shape()[1]);
+    let layout = MatrixLayout {
+        rows,
+        cols,
+        ld: cols,
+        transposed: false,
+    };
+    Ok((dev_buf, layout))
+}
 
 /// Metal バックエンドの `BackendOps` 実装。`Device::Metal` は ordinal を
 /// 持たない単一 variant のため（`docs/public-api-design.md` §4.1・
@@ -592,7 +651,10 @@ impl BackendOps for MetalBackendOps {
 
         let ctx = context_cache::cached_context().map_err(map_metal_error)?;
         let mem = MetalMemory::from_shared(ctx.clone());
-        let a_dev_buf = mem.upload(a)?;
+        // イシュー #1040: `a` が転置 view（`classify_2d` で分類可能）の
+        // 場合は `Tensor::contiguous()`（ホスト側転置コピー）を経由せず
+        // アップロードする（`upload_operand_for_resident_gemm` 参照）。
+        let (a_dev_buf, a_layout) = upload_operand_for_resident_gemm(&mem, a)?;
         let a_handle = a_dev_buf
             .downcast_handle::<MetalBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
@@ -600,6 +662,12 @@ impl BackendOps for MetalBackendOps {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_rhs: a buffer has numel > 0 but no device allocation".into(),
             ));
+        };
+        let w_layout = MatrixLayout {
+            rows: k,
+            cols: n,
+            ld: n,
+            transposed: false,
         };
 
         let c_dev_buf = mem.alloc_zeroed(&[m, n])?;
@@ -614,12 +682,14 @@ impl BackendOps for MetalBackendOps {
 
         let gemm = context_cache::cached_gemm(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-        gemm.dispatch_bias_act_prepared(
+        gemm.dispatch_strided_bias_act_prepared(
             &ctx,
             a_buf,
             0,
+            a_layout,
             w_buf,
             w.offset(),
+            w_layout,
             bias_arg,
             false,
             c_buf,
@@ -684,7 +754,11 @@ impl BackendOps for MetalBackendOps {
 
         let ctx = context_cache::cached_context().map_err(map_metal_error)?;
         let mem = MetalMemory::from_shared(ctx.clone());
-        let b_dev_buf = mem.upload(b)?;
+        // イシュー #1040: `Op::LinearResident` の VJP は `transpose2d`
+        // した upstream 勾配（転置 view）をここへ渡す。`classify_2d` で
+        // 分類できる限りホスト側転置コピーなしでアップロードする
+        // （`upload_operand_for_resident_gemm` 参照）。
+        let (b_dev_buf, b_layout) = upload_operand_for_resident_gemm(&mem, b)?;
         let b_handle = b_dev_buf
             .downcast_handle::<MetalBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
@@ -692,6 +766,12 @@ impl BackendOps for MetalBackendOps {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_lhs: b buffer has numel > 0 but no device allocation".into(),
             ));
+        };
+        let w_layout = MatrixLayout {
+            rows: p,
+            cols: q,
+            ld: q,
+            transposed: false,
         };
         let c_dev_buf = mem.alloc_zeroed(&[p, r])?;
         let c_handle = c_dev_buf
@@ -705,12 +785,14 @@ impl BackendOps for MetalBackendOps {
 
         let gemm = context_cache::cached_gemm(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-        gemm.dispatch_bias_act_prepared(
+        gemm.dispatch_strided_bias_act_prepared(
             &ctx,
             w_buf,
             w.offset(),
+            w_layout,
             b_buf,
             0,
+            b_layout,
             None,
             false,
             c_buf,
@@ -827,6 +909,133 @@ impl BackendOps for MetalBackendOps {
 }
 
 impl MetalBackendOps {
+    /// `a`（rank >= 2 の `[B0, …, M, K]`）の先頭次元を行次元へ畳み、
+    /// `b`（`[K, N]`）との GEMM を `[B0, …, M, N]` として計算する
+    /// （イシュー #1040。バッチ matmul の公開 API 化は別イシュー——
+    /// `BackendOps` trait は変更せず、本メソッドは `MetalBackendOps` の
+    /// inherent メソッドとして追加する）。
+    ///
+    /// `crate::layout::collapse_leading_dims` が `Some` を返す場合
+    /// （先頭次元が連続 view として畳める場合）は `a` を
+    /// `contiguous()` せずそのまま `MatrixLayout` へ変換し、
+    /// `gemm::MetalGemm::dispatch_strided_bias_act_prepared` へ渡す。
+    /// `None`（collapse 不能な非連続 view）の場合は `a.contiguous()`
+    /// 後に `[B0*…*M, K]` へ reshape してから同じ入口へ渡す
+    /// （collapse 可否に関わらず数値結果は同一——`gemm.metal` の
+    /// 添字計算は「連続な行優先バッファ」という前提のみに依存する）。
+    ///
+    /// `bias`・activation は扱わない（`gemm_bias_act` の trait 実装が
+    /// 別途担う）。
+    pub fn gemm_collapsed_lhs(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if a.rank() < 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a.rank(),
+            }));
+        }
+        let b_shape = b.shape();
+        if b_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: b_shape.len(),
+            }));
+        }
+        let a_shape = a.shape().to_vec();
+        let k = a_shape[a_shape.len() - 1];
+        if b_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.clone(),
+                rhs: b_shape.to_vec(),
+            }));
+        }
+        let n = b_shape[1];
+        let batch_dims = &a_shape[..a_shape.len() - 1];
+        let out_shape: Vec<usize> = batch_dims.iter().copied().chain([n]).collect();
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+
+        // `a` を collapse 可能なら zero-copy（`as_view_slice`）、
+        // 不能なら `contiguous()` 後の実際の行優先形状で NN レイアウトを
+        // 構築する（`upload_operand_for_resident_gemm` と同じ
+        // 「分類できなければ contiguous へフォールバック」方針だが、
+        // 本メソッドは rank >= 2 の先頭次元 collapse を扱うため
+        // `collapse_leading_dims` を使う専用ロジックとする）。
+        let (a_dev_buf, a_layout, m) = match layout::collapse_leading_dims(a.shape(), a.strides()) {
+            Some(collapsed) => {
+                let slice = a.as_view_slice().ok_or_else(|| {
+                    BackendError::KernelLaunchFailed(
+                        "gemm_collapsed_lhs: collapse_leading_dims succeeded but \
+                         as_view_slice returned None (non-negative-stride invariant violated)"
+                            .into(),
+                    )
+                })?;
+                let dev_buf = mem.upload_view(slice, a.shape()).map_err(map_metal_error)?;
+                let m = collapsed.rows;
+                (dev_buf, collapsed, m)
+            }
+            None => {
+                let a_owned = a.contiguous();
+                let m: usize = batch_dims.iter().product();
+                let a_reshaped = a_owned
+                    .reshape(&[m, k])
+                    .map_err(BackendError::ShapeMismatch)?;
+                let dev_buf = mem.upload(&a_reshaped)?;
+                let layout = MatrixLayout {
+                    rows: m,
+                    cols: k,
+                    ld: k,
+                    transposed: false,
+                };
+                (dev_buf, layout, m)
+            }
+        };
+        let a_handle = a_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_collapsed_lhs: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let (b_dev_buf, b_layout) = upload_operand_for_resident_gemm(&mem, b)?;
+        let b_handle = b_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_buf) = b_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_collapsed_lhs: b buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_collapsed_lhs: output buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        gemm.dispatch_strided_bias_act_prepared(
+            &ctx, a_buf, 0, a_layout, b_buf, 0, b_layout, None, false, c_buf, m, n, k,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let c_tensor = mem.download(&c_dev_buf)?;
+        c_tensor
+            .reshape(&out_shape)
+            .map_err(BackendError::ShapeMismatch)
+    }
+
     /// 一致した leaf・shape・dtype を検証してから
     /// [`crate::rmsnorm::MetalRmsNorm::run_rmsnorm_f32_raw`] を `inv_n = 1.0`・`eps = 0.0`・
     /// `w = None`（`has_weight = 0`）で直接呼ぶ（プランの意味論 `x *
@@ -975,6 +1184,44 @@ mod tests {
         assert_eq!(
             gemm_bias_act_route(Some(&[4]), 8),
             GemmBiasActRoute::ComposedFallback
+        );
+    }
+
+    // --- gemm_resident_lhs／gemm_resident_rhs zero-repack 経路（イシュー
+    // #1040。Metal 実機依存。`tests/gemm_bias_act_parity.rs` と同じ
+    // 「pub(crate) カウンタはクレート内テストで検証」方針） ---
+
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn gemm_resident_lhs_transposed_b_does_not_increment_repack_counter() {
+        let ops = MetalBackendOps::new();
+        let mem = ops
+            .memory_ops()
+            .expect("MetalBackendOps must implement MemoryOps");
+        let (p, q, r) = (4usize, 8usize, 5usize);
+        let w = Tensor::new((0..p * q).map(|i| i as f32 * 0.1).collect(), &[p, q]).unwrap();
+        let w_dev = mem.upload(&w).expect("w upload must succeed");
+        let w_shape = [p, q];
+        let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+
+        // 転置 view（`Op::LinearResident` の VJP が渡す実際の形と同じ:
+        // 元 [r, q] 行優先データを `transpose(0, 1)` して [q, r] として
+        // 読む）。
+        let b_rq = Tensor::new((0..r * q).map(|i| i as f32 * 0.01).collect(), &[r, q]).unwrap();
+        let b_t = b_rq.transpose(0, 1).unwrap();
+        assert!(
+            b_t.as_slice().is_none(),
+            "precondition: b_t must be non-contiguous"
+        );
+
+        let before = RESIDENT_HOST_REPACK_COUNT.with(|c| c.get());
+        let _ = ops
+            .gemm_resident_lhs(w_view, &b_t)
+            .expect("gemm_resident_lhs must succeed on Metal-equipped test runner");
+        let after = RESIDENT_HOST_REPACK_COUNT.with(|c| c.get());
+        assert_eq!(
+            before, after,
+            "transposed view input must not fall back to contiguous() host repack"
         );
     }
 }

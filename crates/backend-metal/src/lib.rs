@@ -197,6 +197,28 @@
 //! 変更した。カーネルソース・ディスパッチロジック・許容誤差・境界検査は
 //! 一切変更していない。
 //!
+//! イシュー #1040（親 #1029。兄弟 #1037: タイル構成のテーブル駆動選択が
+//! 本イシューの公開型をキーとして利用する）で [`layout`] モジュールを
+//! 追加した。学習ループの VJP（`crates/autodiff/src/grad.rs` の
+//! `Op::LinearResident` 分岐）が `transpose2d` で作る転置 view を、
+//! 従来の `Tensor::contiguous()`（ホスト側転置コピー）を経由せず
+//! `gemm::MetalGemm::dispatch_strided_bias_act_prepared` へそのまま渡す
+//! ための分類・collapse ヘルパ（`layout::classify_2d`／
+//! `layout::collapse_leading_dims`）を提供する。`pad`／`tile` と同じ
+//! 設計判断で `objc2` 系 FFI に触れないため `cfg(target_os = "macos")`
+//! を付けず、Linux（本実装環境・CI）でも単体テストが回る。
+//! `gemm_tiled_bias_act`（イシュー #605）を `GemmStrides`（lda/ldb/
+//! trans_a/trans_b）で拡張し、既存 `dispatch_bias_act_prepared` は
+//! NN（`lda=k`・`ldb=n`）で新関数へ委譲する後方互換構成を採った
+//! （既存カーネル・許容誤差・境界検査は変更しない）。`ops::
+//! MetalBackendOps::gemm_resident_lhs`／`gemm_resident_rhs` は
+//! `layout::classify_2d` が `Some` を返す入力（転置 view を含む）を
+//! ホスト側コピーなしで GPU へ渡し、`None`（stride 0 ブロードキャスト等の
+//! 非対応形状）の場合のみ従来の `contiguous()` へフォールバックする。
+//! `gemm_simdgroup_tiled` 系への転置ロード導入（MSL コンパイル確認が
+//! Mac 必須）は本イシューでは行わず #1037 へ引き継ぐ（詳細は
+//! `docs/backend-metal-transpose-collapse-design.md`）。
+//!
 //! イシュー #1017（親 #1015・設計 #1016・`docs/backend-metal-command-
 //! batching-design.md`）で `MetalContext` にコマンドバッファ共有バッチ
 //! （`context::MetalContext::encode`／`context::MetalContext::synchronize`）を
@@ -255,6 +277,7 @@ pub mod gemm;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
+pub mod layout;
 #[cfg(target_os = "macos")]
 pub mod memory;
 #[cfg(target_os = "macos")]

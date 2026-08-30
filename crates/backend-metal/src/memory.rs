@@ -330,6 +330,43 @@ impl MetalMemory {
         Ok(DeviceBuffer::new(Device::Metal, shape, handle))
     }
 
+    /// イシュー #1040: `crate::layout::classify_2d` が分類済みの
+    /// borrowed スライス（`Tensor::as_view_slice`）をそのままアップ
+    /// ロードする。[`Self::upload_inner`]（常に `Tensor::contiguous()`
+    /// を経由し、非 contiguous な転置 view でホスト側の転置コピーを
+    /// 発生させる）と異なり、`ops::MetalBackendOps::gemm_resident_lhs`／
+    /// `gemm_resident_rhs` が転置 view を検出した場合にホスト側コピー
+    /// なしで GPU バッファへ渡すために使う。`TrackedAllocation` による
+    /// 計測契約は `upload_inner` と同一（`checked_byte_len` で計測し、
+    /// 空スライスは 0 バイト確保として扱う）。
+    ///
+    /// `shape` は返す `DeviceBuffer` のメタデータとしての論理形状
+    /// （呼び出し元は別途 `crate::layout::MatrixLayout` で `ld`/
+    /// `transposed` を扱うため、ここでの shape 自体は GEMM の添字計算に
+    /// は使わない）。
+    pub(crate) fn upload_view(
+        &self,
+        slice: &[f32],
+        shape: &[usize],
+    ) -> Result<DeviceBuffer<f32>, MetalError> {
+        if slice.is_empty() {
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
+            let handle: Box<dyn BufferHandle> = Box::new(MetalBufferHandle {
+                buffer: None,
+                _alloc: alloc,
+            });
+            return Ok(DeviceBuffer::new(Device::Metal, shape.to_vec(), handle));
+        }
+        let buf = MetalBuffer::new_with_data(&self.context, slice)?;
+        let bytes = checked_byte_len(slice.len())?;
+        let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+        let handle: Box<dyn BufferHandle> = Box::new(MetalBufferHandle {
+            buffer: Some(buf),
+            _alloc: alloc,
+        });
+        Ok(DeviceBuffer::new(Device::Metal, shape.to_vec(), handle))
+    }
+
     fn download_inner(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, MetalError> {
         let handle = buffer
             .downcast_handle::<MetalBufferHandle>()

@@ -32,6 +32,7 @@ use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
 use crate::half_buffer::MetalHalfBuffer;
+use crate::layout::{self, MatrixLayout};
 use crate::pad::{pad_matrix, pad_matrix_f16, pad8, unpad_matrix, unpad_matrix_f16};
 use crate::pipeline::{self, MtlLibrary, MtlPipeline};
 use crate::tile::{self, TileConfig};
@@ -129,6 +130,54 @@ struct Dims {
     m: u32,
     n: u32,
     k: u32,
+}
+
+/// `shaders/gemm.metal` の `GemmStrides` 構造体とレイアウトを一致させる
+/// （`repr(C)`・4 × u32 = 16 バイト。イシュー #1040）。
+/// [`MetalGemm::dispatch_strided_bias_act_prepared`] が
+/// `crate::layout::MatrixLayout` から構築し `setBytes_length_atIndex`
+/// （buffer index 7）で渡す。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GemmStrides {
+    lda: u32,
+    ldb: u32,
+    trans_a: u32,
+    trans_b: u32,
+}
+
+impl GemmStrides {
+    /// NN（両オペランドとも行優先 contiguous）構成。`lda == k`・
+    /// `ldb == n`・転置フラグ両方 0。既存 [`MetalGemm::
+    /// dispatch_bias_act_prepared`]（後方互換入口）が使う。
+    fn nn(k: u32, n: u32) -> Self {
+        GemmStrides {
+            lda: k,
+            ldb: n,
+            trans_a: 0,
+            trans_b: 0,
+        }
+    }
+
+    /// [`crate::layout::MatrixLayout`] の組から構築する。
+    fn from_layouts(a: &MatrixLayout, b: &MatrixLayout) -> Result<Self, MetalError> {
+        let lda = u32::try_from(a.ld).map_err(|_| MetalError::DimensionExceedsU32 {
+            m: a.ld,
+            n: 0,
+            k: 0,
+        })?;
+        let ldb = u32::try_from(b.ld).map_err(|_| MetalError::DimensionExceedsU32 {
+            m: 0,
+            n: b.ld,
+            k: 0,
+        })?;
+        Ok(GemmStrides {
+            lda,
+            ldb,
+            trans_a: u32::from(a.transposed),
+            trans_b: u32::from(b.transposed),
+        })
+    }
 }
 
 /// naive・tiled・simdgroup の 3 パイプラインを保持するハンドル。
@@ -850,6 +899,9 @@ impl MetalGemm {
             k: k as u32,
         };
         let act_i: i32 = if act_relu { 1 } else { 0 };
+        // NN（両オペランドとも行優先 contiguous。`run_tiled_bias_act_f32`
+        // は常にホストスライスを密行優先として受け取る契約）。
+        let strides = GemmStrides::nn(dims.k, dims.n);
 
         ctx.dispatch_sync(|encoder| {
             encode_dispatch_bias_act(
@@ -865,6 +917,7 @@ impl MetalGemm {
                 dims,
                 has_bias,
                 act_i,
+                strides,
             );
         })?;
 
@@ -932,33 +985,69 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<(), MetalError> {
-        let mk = m.checked_mul(k).ok_or(MetalError::DimProductOverflow)?;
-        let kn = k.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
-        let dims = validate_bias_act_dims(mk, kn, m, n, k)?;
-        let a_end = a_offset
-            .checked_add(mk)
-            .ok_or(MetalError::DimProductOverflow)?;
-        if a_end > a_buf.len() {
-            return Err(MetalError::ALenMismatch {
-                expected: a_end,
-                actual: a_buf.len(),
-            });
-        }
-        let b_end = b_offset
-            .checked_add(kn)
-            .ok_or(MetalError::DimProductOverflow)?;
-        if b_end > b_buf.len() {
-            return Err(MetalError::BLenMismatch {
-                expected: b_end,
-                actual: b_buf.len(),
-            });
-        }
-        if c_buf.len() != m * n {
-            return Err(MetalError::CLenMismatch {
-                expected: m * n,
-                actual: c_buf.len(),
-            });
-        }
+        // NN（両オペランドとも行優先 contiguous）委譲。イシュー #1040 で
+        // 転置パターン対応 [`Self::dispatch_strided_bias_act_prepared`]
+        // を追加した際、本関数はその後方互換の薄いラッパーへ変更した
+        // （`lda == k`・`ldb == n`・転置フラグ両方 0 で従来と完全に
+        // 同一の添字・数値結果になる。`tests` のビット同一回帰参照）。
+        let a_layout = MatrixLayout {
+            rows: m,
+            cols: k,
+            ld: k,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: k,
+            cols: n,
+            ld: n,
+            transposed: false,
+        };
+        self.dispatch_strided_bias_act_prepared(
+            ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, bias, act_relu, c_buf, m, n,
+            k,
+        )
+    }
+
+    /// [`Self::dispatch_bias_act_prepared`] の転置パターン・stride 対応版
+    /// （イシュー #1040）。`a_layout`/`b_layout`
+    /// （[`crate::layout::MatrixLayout`]。`crate::layout::classify_2d`／
+    /// `crate::layout::collapse_leading_dims` が導出する）を介して、
+    /// 転置 view（NT/TN/TT）や先頭次元 collapse 後の view を
+    /// `Tensor::contiguous()`（ホスト側転置コピー）を経由せずそのまま
+    /// GPU カーネルへ渡す。`ops::MetalBackendOps::gemm_resident_lhs`／
+    /// `gemm_resident_rhs` が転置 view を検出した場合にこちらを直接
+    /// 呼ぶ。NN（`dispatch_bias_act_prepared` の委譲先としての利用）と
+    /// 転置経路の双方をこの 1 関数に集約することで、`GemmStrides` の
+    /// 構築・検証ロジックの重複を避ける。
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_strided_bias_act_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        bias: Option<(&MetalBuffer, usize)>,
+        act_relu: bool,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(), MetalError> {
+        let (dims, strides) = validate_strided_dims(
+            a_buf.len(),
+            a_offset,
+            a_layout,
+            b_buf.len(),
+            b_offset,
+            b_layout,
+            c_buf.len(),
+            m,
+            n,
+            k,
+        )?;
         if let Some((b, offset)) = bias {
             let end = offset
                 .checked_add(n)
@@ -999,6 +1088,7 @@ impl MetalGemm {
                 dims,
                 has_bias,
                 act_i,
+                strides,
             );
         })?;
 
@@ -1440,6 +1530,90 @@ fn validate_bias_act_dims(
     })
 }
 
+/// [`MetalGemm::dispatch_strided_bias_act_prepared`] 専用の検証
+/// （イシュー #1040）。`validate_bias_act_dims`（全体バッファ =
+/// `m*k`/`k*n` を前提とする密行優先専用の検証）と異なり、
+/// `a_layout`/`b_layout`（転置・stride 付き view）が論理形状
+/// `(m,k)`/`(k,n)` と整合すること、および `offset +
+/// required_span(layout) <= buf_len` を fail-closed に検証する。
+/// `m == 0 || n == 0`（呼び出し元が no-op として扱う縮退）は
+/// `validate_bias_act_dims` と同じく一律拒否しない。
+#[allow(clippy::too_many_arguments)]
+fn validate_strided_dims(
+    a_buf_len: usize,
+    a_offset: usize,
+    a_layout: MatrixLayout,
+    b_buf_len: usize,
+    b_offset: usize,
+    b_layout: MatrixLayout,
+    c_len: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<(Dims, GemmStrides), MetalError> {
+    if a_layout.rows != m || a_layout.cols != k {
+        return Err(MetalError::ShapeMismatch {
+            detail: format!(
+                "a_layout logical shape [{}, {}] does not match (m, k) = ({m}, {k})",
+                a_layout.rows, a_layout.cols
+            ),
+        });
+    }
+    if b_layout.rows != k || b_layout.cols != n {
+        return Err(MetalError::ShapeMismatch {
+            detail: format!(
+                "b_layout logical shape [{}, {}] does not match (k, n) = ({k}, {n})",
+                b_layout.rows, b_layout.cols
+            ),
+        });
+    }
+
+    m.checked_mul(k).ok_or(MetalError::DimProductOverflow)?;
+    k.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+    m.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+
+    if m > u32::MAX as usize || n > u32::MAX as usize || k > u32::MAX as usize {
+        return Err(MetalError::DimensionExceedsU32 { m, n, k });
+    }
+
+    let a_span = layout::required_span(&a_layout).ok_or(MetalError::DimProductOverflow)?;
+    let a_end = a_offset
+        .checked_add(a_span)
+        .ok_or(MetalError::DimProductOverflow)?;
+    if a_end > a_buf_len {
+        return Err(MetalError::ALenMismatch {
+            expected: a_end,
+            actual: a_buf_len,
+        });
+    }
+
+    let b_span = layout::required_span(&b_layout).ok_or(MetalError::DimProductOverflow)?;
+    let b_end = b_offset
+        .checked_add(b_span)
+        .ok_or(MetalError::DimProductOverflow)?;
+    if b_end > b_buf_len {
+        return Err(MetalError::BLenMismatch {
+            expected: b_end,
+            actual: b_buf_len,
+        });
+    }
+
+    if c_len != m * n {
+        return Err(MetalError::CLenMismatch {
+            expected: m * n,
+            actual: c_len,
+        });
+    }
+
+    let dims = Dims {
+        m: m as u32,
+        n: n as u32,
+        k: k as u32,
+    };
+    let strides = GemmStrides::from_layouts(&a_layout, &b_layout)?;
+    Ok((dims, strides))
+}
+
 /// [`validate_dims`] の f16 版（TASK-8.3b・#156）。判定ロジック自体は
 /// 要素数（`.len()`）にのみ依存し dtype に非依存のため中身は同一だが、
 /// `MetalGemm::dispatch_f16_unverified` の入力型（`&[half::f16]`）に合わせて独立実装
@@ -1722,9 +1896,10 @@ fn encode_dispatch(
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
 
-/// `gemm_tiled_bias_act`（イシュー #605）用のパイプライン設定・バッファ
-/// 結線（index 0〜3）・`Dims`（index 4）・`has_bias`（index 5）・`act`
-/// （index 6）の `setBytes`・ディスパッチを行う。
+/// `gemm_tiled_bias_act`（イシュー #605。イシュー #1040 で `GemmStrides`
+/// 引数を追加）用のパイプライン設定・バッファ結線（index 0〜3）・
+/// `Dims`（index 4）・`has_bias`（index 5）・`act`（index 6）・
+/// `GemmStrides`（index 7）の `setBytes`・ディスパッチを行う。
 /// [`MetalGemm::run_tiled_bias_act_f32`] が [`MetalContext::dispatch_sync`]
 /// のクロージャから呼ぶ。threadgroup・grid 計算は `Tiled` variant と同一
 /// （16×16・`div_ceil(16)`。`gemm_tiled_bias_act` は `gemm_tiled` と同じ
@@ -1743,6 +1918,7 @@ fn encode_dispatch_bias_act(
     dims: Dims,
     has_bias: i32,
     act: i32,
+    strides: GemmStrides,
 ) {
     encoder.setComputePipelineState(pipeline);
 
@@ -1784,6 +1960,18 @@ fn encode_dispatch_bias_act(
             std::ptr::NonNull::from(&act).cast(),
             std::mem::size_of::<i32>(),
             6,
+        );
+        // イシュー #1040: `shaders/gemm.metal::gemm_tiled_bias_act` の
+        // `constant GemmStrides& st [[buffer(7)]]` に対応する。この
+        // `setBytes` を追加したことで buffer index 7 は
+        // `gemm_tiled_bias_act` を起動する全経路（本関数のみ）で必須と
+        // なった——本関数は唯一のディスパッチ入口であり、他のパイプライン
+        // 構築・エンコードコードパスは存在しない（`grep -rn
+        // 'gemm_tiled_bias_act\b'` で確認済み）。
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&strides).cast(),
+            std::mem::size_of::<GemmStrides>(),
+            7,
         );
     }
 
@@ -2244,6 +2432,195 @@ mod tests {
         assert!(matches!(
             err,
             MetalError::DimensionExceedsU32 { m, n: 1, k: 1 } if m == over_u32
+        ));
+    }
+
+    // --- GemmStrides / validate_strided_dims（イシュー #1040。pure・実機不要） ---
+
+    /// `shaders/gemm.metal::GemmStrides`（4 × uint32）とのレイアウト一致
+    /// （`repr(C)`・16 バイト）を Linux 上で確認する（advisor 指摘:
+    /// MSL の実際のフィールドオフセットは Mac 実機コンパイルでしか検証
+    /// できないため、少なくとも Rust 側の `repr(C)` サイズ・アライン
+    /// メントが「4 個の連続する u32」という前提から外れていないことを
+    /// 機械的に固定する）。
+    #[test]
+    fn gemm_strides_repr_c_layout_matches_msl_struct() {
+        assert_eq!(std::mem::size_of::<GemmStrides>(), 16);
+        assert_eq!(std::mem::align_of::<GemmStrides>(), 4);
+    }
+
+    #[test]
+    fn gemm_strides_nn_has_zero_transpose_flags() {
+        let s = GemmStrides::nn(4, 5);
+        assert_eq!(
+            s,
+            GemmStrides {
+                lda: 4,
+                ldb: 5,
+                trans_a: 0,
+                trans_b: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn gemm_strides_from_layouts_encodes_transpose_flags() {
+        let a = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 3,
+            transposed: false,
+        };
+        let b = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 3,
+            transposed: true,
+        };
+        let s = GemmStrides::from_layouts(&a, &b).unwrap();
+        assert_eq!(
+            s,
+            GemmStrides {
+                lda: 3,
+                ldb: 3,
+                trans_a: 0,
+                trans_b: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn validate_strided_dims_accepts_nn_and_matches_validate_bias_act_dims() {
+        let a_layout = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 3,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 4,
+            transposed: false,
+        };
+        let (dims, strides) =
+            validate_strided_dims(6, 0, a_layout, 12, 0, b_layout, 8, 2, 4, 3).unwrap();
+        assert_eq!((dims.m, dims.n, dims.k), (2, 4, 3));
+        assert_eq!(strides, GemmStrides::nn(3, 4));
+    }
+
+    #[test]
+    fn validate_strided_dims_accepts_transposed_layout() {
+        // 転置 view: 元 [3,2] 行優先バッファ（12 要素…以下略）を A=[2,3] の
+        // 転置 view として読む（strides 相当 = ld: 2, transposed: true）。
+        let a_layout = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 2,
+            transposed: true,
+        };
+        let b_layout = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 4,
+            transposed: false,
+        };
+        // required_span(transposed): (cols-1)*ld + rows = (3-1)*2+2 = 6
+        let (_, strides) =
+            validate_strided_dims(6, 0, a_layout, 12, 0, b_layout, 8, 2, 4, 3).unwrap();
+        assert_eq!(strides.trans_a, 1);
+        assert_eq!(strides.trans_b, 0);
+    }
+
+    #[test]
+    fn validate_strided_dims_rejects_shape_mismatch() {
+        let a_layout = MatrixLayout {
+            rows: 99,
+            cols: 3,
+            ld: 3,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 4,
+            transposed: false,
+        };
+        let err = validate_strided_dims(300, 0, a_layout, 12, 0, b_layout, 8, 2, 4, 3).unwrap_err();
+        assert!(matches!(err, MetalError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn validate_strided_dims_rejects_span_exceeding_buffer() {
+        let a_layout = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 3,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 4,
+            transposed: false,
+        };
+        // a_buf_len = 5 だが required_span = (2-1)*3+3 = 6 のため不足。
+        let err = validate_strided_dims(5, 0, a_layout, 12, 0, b_layout, 8, 2, 4, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::ALenMismatch {
+                expected: 6,
+                actual: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_strided_dims_rejects_offset_pushing_span_out_of_bounds() {
+        let a_layout = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 3,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 4,
+            transposed: false,
+        };
+        // a_offset=2・required_span=6 → end=8 > a_buf_len=6。
+        let err = validate_strided_dims(6, 2, a_layout, 12, 0, b_layout, 8, 2, 4, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::ALenMismatch {
+                expected: 8,
+                actual: 6
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_strided_dims_rejects_c_len_mismatch() {
+        let a_layout = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 3,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 4,
+            transposed: false,
+        };
+        let err = validate_strided_dims(6, 0, a_layout, 12, 0, b_layout, 7, 2, 4, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::CLenMismatch {
+                expected: 8,
+                actual: 7
+            }
         ));
     }
 
