@@ -107,7 +107,8 @@ fandhe-ai/
     │   ├── cuda-tensor-core-tolerance-gb10-scale-sweep.md # GB10（sm_121）実機での入力スケールスイープ再実測・sm_86 との世代差記録（#995）
     │   ├── cpu-gemm-candle-cpu-retune.md # CPU GEMM マイクロカーネル・packing 再チューニング（pc 外側ループ・A 1 回 pack 候補〈SharedBPcOuter〉。対 gemm crate 逆転狙い・実機実測は持ち越し。#1041）
     │   ├── train-linear-epilogue-fusion.md # 学習 forward の Linear+ReLU epilogue 融合（gemm_bias_act／gemm_resident_rhs_act 結線）の起動数 before/after・CPU 実測・Metal/DGX Spark 未実測の明記（#1044）
-    │   └── train-step-phase-breakdown.md # CPU / CUDA / Metal 学習 1 step のフェーズ分解実機実測（M4 Max・DGX Spark GB10・5 回計測）・支配項トップ 3（backward が 83.6〜97.3% で全バックエンド共通の支配項）・#1008 配下 Issue 優先順位の更新案（#1010）
+    │   ├── train-step-phase-breakdown.md # CPU / CUDA / Metal 学習 1 step のフェーズ分解実機実測（M4 Max・DGX Spark GB10・5 回計測）・支配項トップ 3（backward が 83.6〜97.3% で全バックエンド共通の支配項）・#1008 配下 Issue 優先順位の更新案（#1010）
+    │   └── cuda-async-sync-removal-framework-compare-ab.md # CUDA 都度同期廃止（#1011）の framework-compare 実践規模 A/B 計測手順・記入欄（次回 crates.io 公開・ピン更新〈ユーザー承認必須〉後の DGX Spark 実機計測待ち。#1083）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）

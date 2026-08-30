@@ -758,6 +758,12 @@ jobs:
       - name: フレームワーク横並びベンチ summarize.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/summarize_test.py
 
+      # イシュー #1083: compare_ab.py（都度同期廃止〈#1011〉の実践規模 A/B
+      # 比較ヘルパー）の回帰テスト。summarize_test.py と同一方針（stdlib の
+      # unittest のみ・cargo の有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ compare_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/compare_ab_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
