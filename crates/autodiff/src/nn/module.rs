@@ -25,7 +25,7 @@ use crate::nn::activation::{Relu, Sigmoid, Tanh};
 use crate::nn::linear::Linear;
 use crate::tape::Tape;
 use crate::var::Var;
-use fandhe_ai_tensor_core::{BackendError, BackendOps, Tensor};
+use fandhe_ai_tensor_core::{BackendError, BackendOps, Tensor, broadcast_shape, matmul_out_shape};
 
 /// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
 pub trait Module {
@@ -107,14 +107,30 @@ impl Module for Linear {
     /// bit-exactness 契約（`Module::forward_host` doc 参照）: 融合
     /// epilogue はカーネル内 tiling 次第で加算順序が変わりうるため、
     /// 旧経路と厳密に同じ累積順序を保証できるのは非融合合成のみ。
+    ///
+    /// **エラー型の一致契約（review 指摘）**: `Var::matmul`/`add`（tape
+    /// 経路。`var.rs`）は shape 不整合を `matmul_out_shape`/
+    /// `broadcast_shape` で `ops.gemm`/`ops.add` 呼び出し**前**に検査し
+    /// `AutodiffError::Shape` として返す。本メソッド（tape 不要経路）が
+    /// この事前検査を省いて `ops.gemm`/`ops.add` の `?` に任せると、同じ
+    /// shape 不整合が `BackendError::ShapeMismatch` 経由の
+    /// `AutodiffError::Backend` として返り、`compat::Sequential::predict`
+    /// のフォールバック判定対象外の経路で `AutodiffError` の variant が
+    /// 呼び出し元から見て変わってしまう（旧経路と新経路で同じ入力が
+    /// 異なるエラー variant を返す）。それを避けるため、tape 経路と
+    /// 同じ関数で同じ順序に事前検査してから `ops` を呼ぶ。
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        matmul_out_shape(input.shape(), self.weight().shape())?;
         let y = ops.gemm(input, self.weight())?;
         match self.bias() {
-            Some(bias) => Ok(ops.add(&y, bias)?),
+            Some(bias) => {
+                broadcast_shape(y.shape(), bias.shape())?;
+                Ok(ops.add(&y, bias)?)
+            }
             None => Ok(y),
         }
     }

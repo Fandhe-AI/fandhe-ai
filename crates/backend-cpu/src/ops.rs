@@ -534,7 +534,13 @@ impl BackendOps for CpuBackendOps {
         };
 
         // 1 段目: 非融合 `gemm`（`self.gemm` と同一カーネル）。
-        let mut out = vec![0.0f32; m * n];
+        // `m * n` はホスト入力由来の shape 積であり、アロケーション前に
+        // オーバーフロー検査を行う（REQ-8・OWASP A03。`reduction.rs` の
+        // `ElementCountOverflow` 使用箇所と同一方針）。
+        let out_len = m.checked_mul(n).ok_or(BackendError::ShapeMismatch(
+            ShapeError::ElementCountOverflow,
+        ))?;
+        let mut out = vec![0.0f32; out_len];
         gemm_blis_parallel(a_slice, w_slice, &mut out, m, n, k)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
 

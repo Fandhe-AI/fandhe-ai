@@ -175,9 +175,10 @@ impl Sequential {
     ///
     /// **イシュー #1028（`docs/inference-forward-fixed-cost-design.md`
     /// §3.1「段階 A」）**: 内部実装は tape 不要経路
-    /// （[`Self::predict_tape_free`]）を優先し、層構成が
-    /// `Module::forward_host` 未対応（`BackendError::Unsupported`）の
-    /// 場合のみ旧経路（[`Self::predict_via_tape`]。`Tape::var` の葉
+    /// （`predict_tape_free`。非公開の内部メソッドのためリンクなし）
+    /// を優先し、層構成が `Module::forward_host` 未対応
+    /// （`BackendError::Unsupported`）の場合のみ旧経路
+    /// （`predict_via_tape`。同じく非公開。`Tape::var` の葉
     /// クローン・ノード記録を伴う）へ fail-closed にフォールバックする。
     /// `docs/compat-api-scope.md` §1 の 3 種（Linear・ReLU/Sigmoid/Tanh）
     /// はいずれも tape 不要経路に対応済みのため（`nn/module.rs` の
