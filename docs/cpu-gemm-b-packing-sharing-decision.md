@@ -285,6 +285,14 @@ Apple M4 Max 実機に到達できず（`docs/perf/cpu-gemm-b-packing-sharing.md
 本番未結線である。本節タイトルの「§F を『結線済み』へ更新する」は実機ゲート通過後の別セッション
 に持ち越す。
 
+**追記（イシュー #1041）**: 対 gemm crate（faer 実体）直接比較で判明した N=1024/2048 の
+劣位（`docs/perf/oss-gemm-comparison-baseline.md` §7.2）を受け、A packing の重複（本節が
+扱う B の重複とは別軸。jc 反復ごとに同一 A 行を再 pack する問題）を解消する pc 外側ループ
+候補 `gemm_blis_shared_b_pc_outer_region`（`GemmDriverVariant::SharedBPcOuter`）を
+A/B 一括計測ハーネスへ統合した。本節の B 共有化（案 B）と組み合わせた形で実装済みだが、
+採用ゲート（実機 5 回中央値での受け入れ条件達成）は同じく未通過のため `#[cfg(test)]` 限定
+のまま。詳細は `docs/perf/cpu-gemm-candle-cpu-retune.md` を参照。
+
 ## 出典
 
 - イシュー #565（本ドキュメントの起票元）・#564／PR #701（E-8。MC/KC/NC パラメータ化・NC 拡大

@@ -1,0 +1,149 @@
+# CPU GEMM マイクロカーネル・packing 再チューニング（対 gemm crate 逆転。イシュー #1041）
+
+## §1 目的・受け入れ条件
+
+- **課題**: 自作 `gemm_blis_parallel`（`crates/backend-cpu/src/gemm_blis/mod.rs`）は
+  M4 Max N=2048 で 808 vs 893 GFLOP/s（gemm crate = candle CPU バックエンドの実体。約 0.90 倍）、
+  GB10 Grace CPU で 467 vs 513 と劣位。第 0 回実機比較（`docs/perf/
+  oss-gemm-comparison-baseline.md` §7.2）でも 512/1024/2048 で 0.84〜0.91 倍、4096 でのみ
+  1.01 倍
+- **受け入れ条件**:
+  1. Apple M4 Max・DGX Spark GB10（Grace CPU）の N=1024/2048（正方 GEMM）で gemm crate
+     （`scripts/bench/oss-gemm-compare/`）以上のスループットを達成する
+  2. 5 回計測の中央値で記録する
+  3. （副次目標）PyTorch CPU（Accelerate/AMX 経路。M4 Max で約 3 TFLOPS）との差も記録する
+- **本 PR のスコープ**: 実装・bit 完全一致検証・A/B 一括計測ハーネスの整備まで。実機実測・
+  受け入れ条件の達成判定は Mac／DGX Spark 実機セッションへ持ち越す（下記§5 参照）。
+
+## §2 診断（コード読解に基づく重複コストモデル）
+
+`gemm_blis_parallel`（`mod.rs`）は行パネル 1 次元分割
+（`panel_rows = m.div_ceil(num_threads)`）で、各 rayon タスクが独立に
+`gemm_blis_region`（直列 5-loop 相当）を呼ぶ。#750 で B パネル共有経路
+（`gemm_blis_shared_b_region`）を追加し B の重複 pack は解消済みだが、A は
+各タスクが (jc,pc) ブロックの組ごとに packing し直す（jc の反復回数ぶん同じ
+行範囲を重複 pack する）。
+
+| 形状（16 スレッド想定） | 各タスクの行数 | A packing の重複回数（jc 反復数） |
+|---|---|---|
+| N=2048（NC=512） | 128 行 = MC ちょうど（ic ループ 1 回） | jc 4 回 × pc 8 回 → 同一 A 行を 4 回 pack |
+| N=1024（NC=512） | 64 行（MC 未満） | jc 2 回 × pc 8 回 → 同一 A 行を 2 回 pack |
+
+gemm crate（faer 実体）は (mc,nc) タイル 2D 分配＋packing 共有のため A・B とも重複がない。
+1024/2048 で劣位・4096 で拮抗という観測は「A packing 重複コスト（メモリ帯域）が演算量
+2N³ に対して相対的に重い中形状ほど効く」仮説と整合する。設計検討
+`docs/cpu-gemm-b-packing-sharing-decision.md` も案 B（共有 pack＋ic 並列）を推奨済みだが、
+同ドキュメントは B の共有化のみを扱い A の重複は残る。
+
+## §3 候補（`GemmDriverVariant`。`#[cfg(test)]` 限定）
+
+`crates/backend-cpu/src/gemm_blis/mod.rs` に A/B 一括計測用の列挙 `GemmDriverVariant` と
+入口 `gemm_blis_parallel_variant` を追加した（本番公開入口 `gemm_blis_parallel`／
+`gemm_blis_bias_act_parallel` は変更しない）。
+
+| 候補 | 内容 | 実装 |
+|---|---|---|
+| `RowPanel` | 本番既定と同一（行パネル分割・`dispatch_region`／`dispatch_shared_b` 自動選択） | `gemm_blis_parallel_with_blocks` |
+| `SharedB` | B パネル共有・A は (jc,pc) ごとに再 pack（#750） | `dispatch_shared_b`（強制） |
+| `SharedBPcOuter` | B パネル共有・A はタスクごとに pc ブロックあたり 1 回だけ pack（pc→jc の順に入替） | `dispatch_shared_b_pc_outer`（新規・イシュー #1041） |
+
+### bit 完全一致契約（REQ-2）を保つ根拠
+
+`gemm_naive` との bit 完全一致は「C の各要素が pc（縮約次元のブロック）昇順に
+`f32::mul_add` で蓄積される」ことにのみ依存する（`mod.rs` 冒頭ドキュメント参照）。
+C の各要素は (m,n) 座標で一意に決まる 1 つの (タスク行範囲, jc ブロック) の組にのみ
+属し、ある pc 値の中で jc・タスク行範囲の反復順を入れ替えても、その要素が
+「どの pc の時に触れられるか」の集合と大小関係は変化しない（pc は `SharedBPcOuter`
+でも外側で昇順に回るため）。jc・タスク行範囲の入れ替えは互いに素な C 要素集合を
+担当するだけで、同一要素の蓄積順序には影響しない。実装は
+`crates/backend-cpu/tests`（integration test は `pub(crate)` 入口に到達できないため、
+`mod.rs` 内 `#[cfg(test)] mod tests` に集約。lib 単体テストの既存方針を踏襲）に
+以下の検証を追加した:
+
+- `gemm_blis_shared_b_pc_outer_multi_sync_point_matches_serial_bit_exact`: 小さい
+  `BlockSizes`（mc=16・kc=17・nc=19）で多数の (pc,jc) 同期点を強制し直列経路と bit 一致
+- `gemm_blis_shared_b_pc_outer_matches_naive_bit_exact_when_tasks_fewer_than_threads`:
+  実タスク数 Q < スレッド数 T のケース
+- `gemm_blis_parallel_variant_all_candidates_match_naive_bit_exact`: 3 候補 ×
+  5 形状（m==1・極小・MC 未満・MC ちょうど・MC/KC/NC 境界を跨ぐ非正方）× 4 スレッド数
+  （1/2/3/16）の網羅グリッド
+
+### A パネル容量の拡張
+
+`panel_capacity` は「ic ループが `blocks.mc` 単位で A パネルを使い回す」前提で
+`mc_len_max = blocks.mc.min(mc_total)` にクランプした容量を返すが、`SharedBPcOuter` は
+タスクの担当行範囲全体（`task_mc` 行）を pc ブロックごとに 1 回で pack し、その pc の
+全 jc 反復で使い回すため `blocks.mc` によるクランプを行わず `task_mc` 行ぶんの容量が要る
+（新規ヘルパー `task_a_capacity`。`checked_mul` でオーバーフローを検出し
+`GemmError::DimProductOverflow` へ変換。OWASP A03）。対象形状（N=1024/2048・16 スレッド）
+では `task_mc`（64〜128 行）が既定 MC（128）以下のため、実質的な footprint 増加はない。
+
+## §4 x86_64 ローカル smoke（採用根拠にしない）
+
+実装セッションは Linux x86_64（aarch64 実機なし）のため、以下は**動作確認のみ**を目的とした
+smoke 実行であり、REQ-8 受け入れ条件の判定には使わない（AVX2/AVX-512 実行系は M4 Max の
+NEON・GB10 の Grace CPU（aarch64）と特性が異なる）。
+
+```
+$ cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored gemm_blis_variant_ab_1024_2048 --nocapture
+variant=RowPanel size=1024 median_gflops=433.964
+variant=SharedB size=1024 median_gflops=344.090
+variant=SharedBPcOuter size=1024 median_gflops=407.660
+variant=RowPanel size=2048 median_gflops=444.939
+variant=SharedB size=2048 median_gflops=450.896
+variant=SharedBPcOuter size=2048 median_gflops=476.784
+```
+
+x86_64（AVX2/AVX-512）では `SharedBPcOuter` が N=2048 で最良（対 RowPanel +7.2%）。
+N=1024 では `RowPanel` が最良（x86_64 の MC/KC/NC・キャッシュ階層は aarch64 実測値と別物の
+ため、この smoke だけでは実機での優劣を予測できない）。
+
+## §5 実機計測手順（持ち越し）
+
+1. `git pull` 済みの本ブランチで以下を実行:
+   ```
+   cargo test -p fandhe-ai-backend-cpu --lib gemm_blis
+   ```
+   （bit 完全一致回帰の確認。全 pass が前提）
+2. A/B 計測（5 回**独立プロセス**実行の中央値の中央値。既存ベンチハーネスと同方針）:
+   ```
+   cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored gemm_blis_variant_ab_1024_2048 --nocapture
+   ```
+   を 5 回実行し、各 (variant, size) の中央値を記録する
+3. OSS 直接比較（既存ハーネス。`docs/perf/oss-gemm-comparison-baseline.md` の手順を踏襲）:
+   ```
+   cargo run --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --release -- --sizes 512,1024,2048,4096
+   ```
+4. PyTorch CPU（副次目標。M4 Max: `scripts/bench/gemm_bench_torch_mps_f32.py` 相当の
+   CPU 版スクリプトを用意して計測。GB10: 同様に Grace CPU 上で計測）
+5. 下表へ記入し、1024/2048 の両方で `SharedBPcOuter`（または他候補）が gemm crate 以上、
+   かつ 4096 で非劣化であれば採用候補として確定する
+
+### 記入表（値は空欄。実測前の捏造禁止。fail-closed）
+
+| 実機 | N | RowPanel (GFLOP/s) | SharedB (GFLOP/s) | SharedBPcOuter (GFLOP/s) | gemm crate (GFLOP/s) | 対 gemm crate 比（最良候補） | PyTorch CPU (GFLOP/s) |
+|---|---|---|---|---|---|---|---|
+| M4 Max | 1024 | | | | | | |
+| M4 Max | 2048 | | | | | | |
+| M4 Max | 4096 | | | | | | |
+| GB10 (Grace CPU) | 1024 | | | | | | |
+| GB10 (Grace CPU) | 2048 | | | | | | |
+| GB10 (Grace CPU) | 4096 | | | | | | |
+
+## §6 本番結線（別 PR・ユーザー承認）
+
+`docs/cpu-gemm-b-packing-sharing-decision.md` §F・`docs/perf/cpu-gemm-b-packing-sharing.md`
+と同じ採用ゲート方針を踏襲する: 実機 5 回中央値で受け入れ条件 1 を満たす候補が確定した後、
+本番公開入口（`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`）への結線は**別 PR**（ユーザー
+承認後）で行う。1024/2048 で gemm crate 未満の候補しかなければ、次候補（B 側 laneq のベクトル
+転置化・`vld1q_f32_x3` 経路の prefetch・KC 再スイープ）を追跡 Issue へ切り出す
+（`.claude/rules/out-of-scope-tracking.md`）。
+
+## 出典
+
+- イシュー #1041（本ドキュメントの起票元）
+- `docs/perf/oss-gemm-comparison-baseline.md` §7.2（対 gemm crate 比較ベースライン）
+- `docs/cpu-gemm-b-packing-sharing-decision.md`（B 共有化の設計判断・採用ゲート方針の前例）
+- `crates/backend-cpu/src/gemm_blis/mod.rs`（`GemmDriverVariant`・
+  `gemm_blis_shared_b_pc_outer_region`・`gemm_blis_parallel_variant`）
+- `.claude/rules/out-of-scope-tracking.md`（後続タスク起票のユーザー承認要件）

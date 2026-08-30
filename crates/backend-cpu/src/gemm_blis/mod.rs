@@ -1448,6 +1448,386 @@ pub(crate) fn gemm_blis_parallel_2d_with_blocks(
     })
 }
 
+/// [`gemm_blis_shared_b_pc_outer_region`] 用: 1 タスクが 1 pc ブロックで
+/// 保持する A パネル容量（`task_mc` を `blocks.mc` にクランプしない点が
+/// [`panel_capacity`] と異なる。同関数のドキュメント参照）。`mr_blocks *
+/// kc_len_max * mr` の乗算は `checked_mul` でオーバーフローを検出し
+/// `GemmError::DimProductOverflow` へ変換する（OWASP A03・
+/// `.claude/rules/security.md`）。`task_mc`（タスク行数）は呼び出し元の
+/// `mc_total`（`validate_dims` 済みの `m` 以下）由来のため実用上到達
+/// しない想定だが、`unwrap` を使わず型付きエラーで fail-closed にする。
+#[cfg(test)]
+fn task_a_capacity(task_mc: usize, kc_len_max: usize, mr: usize) -> Result<usize, GemmError> {
+    let mr_blocks = task_mc.div_ceil(mr.max(1));
+    mr_blocks
+        .checked_mul(kc_len_max)
+        .and_then(|v| v.checked_mul(mr))
+        .ok_or(GemmError::DimProductOverflow)
+}
+
+/// [`gemm_blis_shared_b_pc_outer_region`] 専用: `a_panel` にタスク担当
+/// 行範囲全体が pc ブロックぶん 1 回で packing 済みであることを前提に、
+/// jr→ir のみを回して `c_chunk`（タスク行 0 起点でオフセット済み）へ
+/// 書き戻す（[`gemm_blis_ic_loop`] から A packing と `ic`（`blocks.mc`
+/// 単位のブロッキング）を除いた版）。
+///
+/// タイル書き戻しロジック（完全タイル直接 / 端タイル copy-in-copy-out）
+/// は [`gemm_blis_ic_loop`] と一字一句同一にすることで bit 完全一致
+/// 契約（REQ-2）・FMA 契約を保つ（コード重複は「ic ブロッキングの
+/// 有無」というループ構造の違いを吸収するための意図的な選択。共通化
+/// すると `ic` 変数の有無で分岐が増え可読性が下がるため、#750 の
+/// `IcLoopContext` と同型の「文脈を引数で渡す」設計のみ踏襲する）。
+#[cfg(test)]
+fn gemm_blis_jr_ir_loop<K: Microkernel>(
+    kernel: K,
+    c_chunk: &mut [f32],
+    task_mc: usize,
+    a_panel: &[f32],
+    ctx: &IcLoopContext,
+) -> Result<(), GemmError> {
+    let mr = K::MR;
+    let nr = K::NR;
+    let IcLoopContext {
+        b_panel,
+        n,
+        kc_len,
+        jc,
+        nr_blocks,
+        nc_len,
+        ..
+    } = *ctx;
+
+    let mr_blocks = task_mc.div_ceil(mr);
+
+    for jr_block in 0..nr_blocks {
+        let jr = jr_block * nr;
+        let nr_eff = nr.min(nc_len - jr);
+        let bp_slice = &b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
+
+        for ir_block in 0..mr_blocks {
+            let ir = ir_block * mr;
+            let mr_eff = mr.min(task_mc - ir);
+            let ap_slice = &a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr];
+            let col_base = jc + jr;
+
+            if mr_eff == mr && nr_eff == nr {
+                // 完全タイル直接ロード/ストア（`gemm_blis_ic_loop` の
+                // 同分岐と同一根拠。#557）。
+                let row0 = ir * n + col_base;
+                let c_direct = &mut c_chunk[row0..row0 + (mr - 1) * n + nr];
+                kernel.run_with_ldc(ap_slice, bp_slice, c_direct, n, kc_len)?;
+            } else {
+                // 端タイル: `MAX_TILE` スタックバッファ経由（同上）。
+                let mut c_tile_buf = [0.0f32; MAX_TILE];
+                let c_tile = &mut c_tile_buf[..mr * nr];
+                for i in 0..mr_eff {
+                    let src = &c_chunk[(ir + i) * n + col_base..(ir + i) * n + col_base + nr_eff];
+                    c_tile[i * nr..i * nr + nr_eff].copy_from_slice(src);
+                }
+                kernel.run_with_ldc(ap_slice, bp_slice, c_tile, nr, kc_len)?;
+                for i in 0..mr_eff {
+                    let dst =
+                        &mut c_chunk[(ir + i) * n + col_base..(ir + i) * n + col_base + nr_eff];
+                    dst.copy_from_slice(&c_tile[i * nr..i * nr + nr_eff]);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// pc 外側ループ・A 1 回 pack 版の並列 5-loop 本体（イシュー #1041）。
+///
+/// [`gemm_blis_shared_b_region`]（#750）は jc→pc→ic の順で、B を
+/// (jc,pc) ブロックごとに 1 回だけ pack して全タスクへ共有するが、A は
+/// 各タスクが (jc,pc) の組ごとに packing し直す（jc の反復回数ぶん同じ
+/// 行範囲を重複 pack する）。gemm crate（faer 実体）との直接比較
+/// （`docs/perf/oss-gemm-comparison-baseline.md` §7.2・イシュー #1041
+/// 診断）では N=1024/2048 で 0.84〜0.91 倍と劣位であり、
+/// `docs/cpu-gemm-b-packing-sharing-decision.md` の重複コストモデル
+/// により、A packing 重複（メモリ帯域）が中形状ほど演算量 2N³ に対して
+/// 相対的に重いと診断された（`docs/perf/cpu-gemm-candle-cpu-retune.md`
+/// §2 参照）。
+///
+/// 本関数は pc→jc の順に入れ替え、各 pc ブロックで各タスクが自分の
+/// 担当行範囲を **1 回だけ** pack してから、その pc に属する全 jc
+/// ブロックへ使い回す（B は [`gemm_blis_shared_b_region`] と同じく
+/// (jc,pc) ごとに 1 回 pack して全タスクへ共有する。A・B とも
+/// 「誰がいつ pack するか」だけが変わる）。
+///
+/// ## bit 完全一致契約（REQ-2）を保つ根拠
+///
+/// `gemm_naive` との bit 完全一致は「C の各要素が pc（縮約次元の
+/// ブロック）昇順に `f32::mul_add` で蓄積される」ことにのみ依存する
+/// （本ファイル冒頭ドキュメント参照）。C の各要素は (m,n) 座標で一意に
+/// 決まる 1 つの (タスク行範囲, jc ブロック) の組にのみ属し、ある pc
+/// 値の中で jc・タスク行範囲の反復順を入れ替えても、その要素が
+/// 「どの pc の時に触れられるか」の集合と大小関係は変化しない（pc は
+/// 本関数でも [`gemm_blis_shared_b_region`] と同じく外側で昇順に回る
+/// ため）。jc・タスク行範囲の入れ替えは互いに素な C 要素集合を担当
+/// するだけで、同一要素の蓄積順序には影響しない。
+///
+/// ## A パネル容量の拡張
+///
+/// [`panel_capacity`] は「ic ループが `blocks.mc` 単位で A パネルを
+/// 使い回す」前提で `mc_len_max = blocks.mc.min(mc_total)` にクランプ
+/// した容量を返すが、本関数はタスクの担当行範囲全体（`task_mc` 行）を
+/// pc ブロックごとに 1 回で pack し、その pc の全 jc 反復で使い回す
+/// ため `blocks.mc` によるクランプを行わず `task_mc` 行ぶんの容量が
+/// 要る（[`task_a_capacity`] 参照）。
+///
+/// **本番未結線**: [`gemm_blis_shared_b_region`] と同じ理由
+/// （実機 5 回中央値の非劣化確認・ユーザー承認が採用ゲート）で
+/// `#[cfg(test)]`。`#[cfg(test)]` の [`gemm_blis_parallel_variant`]
+/// 経由で bit 完全一致検証・A/B 一括計測ハーネスから到達する。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_shared_b_pc_outer_region<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k_dim: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    let mr = K::MR;
+    let nr = K::NR;
+    let row_start = rows.start;
+    let mc_total = rows.end - rows.start;
+    let a = &a[row_start * k_dim..];
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let panel_rows = mc_total.div_ceil(num_threads).max(1);
+    let num_tasks = mc_total.div_ceil(panel_rows);
+
+    // 共有 B バッファ: `gemm_blis_shared_b_region` と同じ算出方法。
+    let (b_cap, _) = panel_capacity(n, k_dim, mc_total, mr, nr, blocks);
+    let mut b_panel_buf = vec![0.0f32; b_cap];
+
+    // タスクごとの A バッファ: `blocks.mc` にクランプせず、担当行範囲
+    // 全体（最終タスク以外は `panel_rows` 行）を 1 pc ブロックぶん保持
+    // できる容量で確保する（上記ドキュメント参照）。
+    let kc_len_max = blocks.kc.min(k_dim);
+    let a_cap = task_a_capacity(panel_rows, kc_len_max, mr)?;
+    let mut a_bufs: Vec<Vec<f32>> = (0..num_tasks).map(|_| vec![0.0f32; a_cap]).collect();
+
+    for pc in (0..k_dim).step_by(blocks.kc) {
+        let kc_len = blocks.kc.min(k_dim - pc);
+
+        // A packing をタスク単位で 1 回（この pc ブロックの全 jc 反復で
+        // 使い回す）。各タスクの書き込み先は互いに素な `a_bufs[task]`
+        // のため `par_iter_mut` でデータ競合なく並列化できる
+        // （`unsafe` 不要）。
+        a_bufs
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(task_idx, a_buf)| {
+                let task_row_start = task_idx * panel_rows;
+                if task_row_start >= mc_total {
+                    return;
+                }
+                let task_mc = panel_rows.min(mc_total - task_row_start);
+                let a_task = &a[task_row_start * k_dim..];
+                let mr_blocks = task_mc.div_ceil(mr);
+                for ir_block in 0..mr_blocks {
+                    let ir = ir_block * mr;
+                    let mr_eff = mr.min(task_mc - ir);
+                    pack_a(
+                        &mut a_buf[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr],
+                        a_task,
+                        APackTile {
+                            k_total: k_dim,
+                            row_start: ir,
+                            mr,
+                            mr_eff,
+                            kc_start: pc,
+                            kc_len,
+                        },
+                    );
+                }
+            });
+
+        for jc in (0..n).step_by(blocks.nc) {
+            let nc_len = blocks.nc.min(n - jc);
+            let nr_blocks = nc_len.div_ceil(nr);
+            let b_panel = &mut b_panel_buf[..nr_blocks * kc_len * nr];
+
+            // B packing の nr ブロック単位並列化（`gemm_blis_shared_b_region`
+            // と同じ理由・同じ実装。#750）。
+            b_panel
+                .par_chunks_mut(kc_len * nr)
+                .enumerate()
+                .for_each(|(jr_block, dst)| {
+                    let jr = jr_block * nr;
+                    let nr_eff = nr.min(nc_len - jr);
+                    pack_b(
+                        dst,
+                        b,
+                        BPackTile {
+                            n_total: n,
+                            kc_start: pc,
+                            kc_len,
+                            col_start: jc + jr,
+                            nr,
+                            nr_eff,
+                        },
+                    );
+                });
+
+            let b_panel_ref: &[f32] = b_panel;
+            let ctx = IcLoopContext {
+                b_panel: b_panel_ref,
+                n,
+                k_dim,
+                pc,
+                kc_len,
+                jc,
+                nr_blocks,
+                nc_len,
+                blocks,
+            };
+
+            // ic 相当（タスク行範囲）の並列化。A は既にこの pc ブロック
+            // ぶん packing 済み（`a_bufs[task_idx]`）のため、ここでは
+            // 読み取り専用で参照するだけで pack をやり直さない
+            // （[`gemm_blis_jr_ir_loop`] 参照。データ競合はコンパイル時の
+            // 借用分割で排除。`unsafe` 不要）。
+            c.par_chunks_mut(panel_rows * n)
+                .enumerate()
+                .zip(a_bufs.par_iter())
+                .try_for_each(|((task_idx, c_chunk), a_buf)| {
+                    let task_mc = c_chunk.len() / n;
+                    if task_mc == 0 {
+                        return Ok(());
+                    }
+                    let _ = task_idx;
+                    gemm_blis_jr_ir_loop(kernel, c_chunk, task_mc, a_buf, &ctx)
+                })?;
+        }
+    }
+    Ok(())
+}
+
+/// [`dispatch_shared_b`] の pc 外側版（イシュー #1041）。ロジックは
+/// `dispatch_shared_b` と同一で、呼ぶ先
+/// （[`gemm_blis_shared_b_pc_outer_region`]）のみが異なる。本番未結線
+/// のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(target_arch = "x86_64")]
+fn dispatch_shared_b_pc_outer(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    #[cfg(avx512_stable)]
+    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+        return gemm_blis_shared_b_pc_outer_region(kernel, a, b, c, n, k, rows, blocks);
+    }
+    if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
+        gemm_blis_shared_b_pc_outer_region(kernel, a, b, c, n, k, rows, blocks)
+    } else {
+        gemm_blis_shared_b_pc_outer_region(ScalarKernel, a, b, c, n, k, rows, blocks)
+    }
+}
+
+/// aarch64 版 [`dispatch_shared_b_pc_outer`]（#1041）。[`dispatch_shared_b`]
+/// の aarch64 版と同じ理由で NEON 固定。本番未結線のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(target_arch = "aarch64")]
+fn dispatch_shared_b_pc_outer(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    debug_assert_eq!(Isa::detect(), Isa::Neon);
+    gemm_blis_shared_b_pc_outer_region(microkernel::NeonKernel, a, b, c, n, k, rows, blocks)
+}
+
+/// aarch64／x86_64 以外の arch 版 [`dispatch_shared_b_pc_outer`]（#1041）。
+/// [`dispatch_shared_b`] の同 arch 版と同じ理由で [`ScalarKernel`] 固定。
+/// 本番未結線のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn dispatch_shared_b_pc_outer(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    debug_assert_eq!(Isa::detect(), Isa::Scalar);
+    gemm_blis_shared_b_pc_outer_region(ScalarKernel, a, b, c, n, k, rows, blocks)
+}
+
+/// A/B 一括計測ハーネス（イシュー #1041）向け: 並列 5-loop ドライバの
+/// 候補を 1 つの入口で選べるようにする列挙。「本番未結線」節と同じ
+/// `#[cfg(test)]` 限定（実機ゲート未通過のため。[`gemm_blis_shared_b_pc_outer_region`]
+/// ドキュメント参照）。
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GemmDriverVariant {
+    /// 本番公開入口（[`gemm_blis_parallel`]）と同じ行パネル分割
+    /// （`dispatch_region`／`dispatch_shared_b` の自動選択。
+    /// [`gemm_blis_parallel_with_blocks`] をそのまま使う）。
+    RowPanel,
+    /// B パネル共有・A は (jc,pc) ごとに再 pack（#750。[`dispatch_shared_b`]
+    /// を実タスク数に関わらず強制する版）。
+    SharedB,
+    /// B パネル共有・A はタスクごとに pc ブロックあたり 1 回だけ pack
+    /// （本 PR・イシュー #1041・[`dispatch_shared_b_pc_outer`]）。
+    SharedBPcOuter,
+}
+
+/// [`GemmDriverVariant`] で指定した候補を強制実行する A/B 計測専用入口
+/// （イシュー #1041）。[`gemm_blis_parallel_with_blocks`] と同じ検証
+/// （[`validate_dims`]・[`validate_block_sizes`]・`n == 0`／`m == 1` の
+/// 専用経路）を経てから候補を分岐する。本番公開入口
+/// （[`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]）は変更
+/// しない（本関数はテスト・計測専用の新規入口）。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_blis_parallel_variant(
+    variant: GemmDriverVariant,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    validate_block_sizes(blocks)?;
+
+    if n == 0 {
+        return Ok(());
+    }
+    if m == 1 {
+        gemm_row_vector(a, b, c, n);
+        return Ok(());
+    }
+
+    match variant {
+        GemmDriverVariant::RowPanel => gemm_blis_parallel_with_blocks(a, b, c, m, n, k, blocks),
+        GemmDriverVariant::SharedB => dispatch_shared_b(a, b, c, n, k, 0..m, blocks),
+        GemmDriverVariant::SharedBPcOuter => {
+            dispatch_shared_b_pc_outer(a, b, c, n, k, 0..m, blocks)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2878,6 +3258,219 @@ mod tests {
                 median(samples_detected),
                 median(samples_2d),
             );
+        }
+    }
+
+    // --- pc 外側ループ・A 1 回 pack 候補（イシュー #1041） ---
+
+    /// [`gemm_blis_shared_b_pc_outer_region`] が多数の (pc,jc) 同期点を
+    /// 跨いでも直列経路（[`gemm_blis_with_kernel_and_blocks`]）と bit
+    /// 完全一致することを、小さい `BlockSizes`（既定値より大幅に小さく
+    /// 多数の pc/jc 反復を強制する）で検証する（#750 の
+    /// `gemm_blis_shared_b_region_multi_sync_point_matches_serial_bit_exact`
+    /// と同型のテスト構成）。固定 4 スレッドプールで `m > panel_rows`
+    /// （実タスク数 >= 2）を確定させ、pc 外側の共有 A・共有 B 経路を
+    /// 確実に通す。
+    #[test]
+    fn gemm_blis_shared_b_pc_outer_multi_sync_point_matches_serial_bit_exact() {
+        let (m, n, k) = (200, 600, 700);
+        let blocks = BlockSizes {
+            mc: 16,
+            kc: 17,
+            nc: 19,
+        };
+        let a = xorshift32_vec(0x7a7a_7a7a, m * k);
+        let b = xorshift32_vec(0x8b8b_8b8b, k * n);
+
+        let mut c_serial = vec![0.0f32; m * n];
+        gemm_blis_with_kernel_and_blocks(ScalarKernel, &a, &b, &mut c_serial, m, n, k, blocks)
+            .unwrap();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap_or_else(|e| panic!("4 スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_pc_outer = vec![0.0f32; m * n];
+        pool.install(|| {
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::SharedBPcOuter,
+                &a,
+                &b,
+                &mut c_pc_outer,
+                m,
+                n,
+                k,
+                blocks,
+            )
+            .unwrap()
+        });
+
+        assert_eq!(
+            c_serial, c_pc_outer,
+            "多 (pc,jc) 同期点を跨ぐ pc 外側・A 1 回 pack 経路は直列経路と \
+             bit 完全一致するはず（#1041）"
+        );
+    }
+
+    /// イシュー #1041: 実タスク数 Q が rayon の稼働スレッド数 T を下回る
+    /// 形状でも [`gemm_blis_shared_b_pc_outer_region`] が `gemm_naive` と
+    /// bit 完全一致することを確認する（#750 の
+    /// `gemm_blis_parallel_matches_naive_bit_exact_when_tasks_fewer_than_threads`
+    /// と同型。`a_bufs`／`c.par_chunks_mut` の長さがずれないことの回帰）。
+    #[test]
+    fn gemm_blis_shared_b_pc_outer_matches_naive_bit_exact_when_tasks_fewer_than_threads() {
+        let (m, n, k) = (10, 130, 40);
+        let a = xorshift32_vec(0x9c9c_9c9c, m * k);
+        let b = xorshift32_vec(0xadad_adad, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(16)
+            .build()
+            .unwrap_or_else(|e| panic!("16 スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_pc_outer = vec![0.0f32; m * n];
+        pool.install(|| {
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::SharedBPcOuter,
+                &a,
+                &b,
+                &mut c_pc_outer,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap()
+        });
+
+        assert_eq!(
+            c_naive, c_pc_outer,
+            "m={m} 行を num_threads=16 で分割する実タスク数 Q < T のケースは \
+             gemm_naive と bit 完全一致するはず（#1041）"
+        );
+    }
+
+    /// イシュー #1041: [`GemmDriverVariant`] の全候補（`RowPanel`・
+    /// `SharedB`・`SharedBPcOuter`）が MC/KC/NC 境界を跨ぐ複数形状・
+    /// 複数スレッド数の組で `gemm_naive` と bit 完全一致することを
+    /// 網羅的に検証する（A/B 一括計測ハーネスが候補間で数値的に等価な
+    /// 結果を比較することの前提を担保する）。
+    #[test]
+    fn gemm_blis_parallel_variant_all_candidates_match_naive_bit_exact() {
+        let shapes: &[(usize, usize, usize)] = &[
+            (1, 64, 64),     // m == 1（gemv 専用経路）
+            (5, 7, 3),       // 極小・端タイルのみ
+            (64, 64, 64),    // MC 未満（診断表の N=1024 相当パターン）
+            (128, 128, 96),  // MC ちょうど（診断表の N=2048 相当パターン）
+            (200, 600, 700), // MC/KC/NC 境界を跨ぐ非正方
+        ];
+        let thread_counts = [1usize, 2, 3, 16];
+
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0xbebe_bebe ^ (m as u32), m * k);
+            let b = xorshift32_vec(0xcfcf_cfcf ^ (n as u32), k * n);
+
+            let mut c_naive = vec![0.0f32; m * n];
+            crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+            for &num_threads in &thread_counts {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap_or_else(|e| {
+                        panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
+                    });
+
+                for variant in [
+                    GemmDriverVariant::RowPanel,
+                    GemmDriverVariant::SharedB,
+                    GemmDriverVariant::SharedBPcOuter,
+                ] {
+                    let mut c = vec![0.0f32; m * n];
+                    pool.install(|| {
+                        gemm_blis_parallel_variant(
+                            variant,
+                            &a,
+                            &b,
+                            &mut c,
+                            m,
+                            n,
+                            k,
+                            default_blocks(),
+                        )
+                        .unwrap()
+                    });
+                    assert_eq!(
+                        c_naive, c,
+                        "variant={variant:?} shape=({m},{n},{k}) num_threads={num_threads} は \
+                         gemm_naive と bit 完全一致するはず（#1041）"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A/B 一括計測ハーネス（イシュー #1041。実機セッションで実行する
+    /// 想定。値は本 PR の採用根拠にしない。x86_64 ローカルでの smoke
+    /// 実行は sanity 目的のみ）。`#[ignore]` のため通常 CI では実行
+    /// されない。5 回独立実行の中央値は呼び出し側運用（既存ベンチ
+    /// テストと同方針。`docs/perf/cpu-gemm-candle-cpu-retune.md` 参照）。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用。ローカル smoke 目的のみ \
+                （#1041。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_variant_ab_1024_2048 --nocapture）"]
+    fn gemm_blis_variant_ab_1024_2048() {
+        use std::time::Instant;
+
+        fn median(mut xs: Vec<f64>) -> f64 {
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            xs[xs.len() / 2]
+        }
+
+        fn run_variant(
+            variant: GemmDriverVariant,
+            a: &[f32],
+            b: &[f32],
+            m: usize,
+            n: usize,
+            k: usize,
+            iters: usize,
+        ) -> f64 {
+            let mut c = vec![0.0f32; m * n];
+            // warmup
+            for _ in 0..3 {
+                gemm_blis_parallel_variant(variant, a, b, &mut c, m, n, k, default_blocks())
+                    .unwrap();
+            }
+            let mut samples = Vec::with_capacity(iters);
+            for _ in 0..iters {
+                let start = Instant::now();
+                gemm_blis_parallel_variant(variant, a, b, &mut c, m, n, k, default_blocks())
+                    .unwrap();
+                let elapsed = start.elapsed().as_secs_f64();
+                let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
+                samples.push(flops / elapsed / 1e9);
+            }
+            median(samples)
+        }
+
+        for &dim in &[1024usize, 2048] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xdede_dede, m * k);
+            let b = xorshift32_vec(0xefef_efef, k * n);
+
+            for variant in [
+                GemmDriverVariant::RowPanel,
+                GemmDriverVariant::SharedB,
+                GemmDriverVariant::SharedBPcOuter,
+            ] {
+                let gflops = run_variant(variant, &a, &b, m, n, k, 20);
+                println!("variant={variant:?} size={dim} median_gflops={gflops:.3}");
+            }
         }
     }
 }
