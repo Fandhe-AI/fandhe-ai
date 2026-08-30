@@ -382,9 +382,9 @@
 drain・ストリーム完了同期の配線」を**独立レジストリ**で検証したのに
 対し、本節は「本番のグローバルレジストリ上での poison → 実 CUDA の
 `sync`／実処理プローブによる回復 → 新世代での演算成功・旧世代拒否」の
-通し（T-R1）と、「実際の CUDA driver エラー（block 次元超過・意図的な
-範囲外書き込み）に由来する poison と fail-closed 恒久化」（T-R2）を
-対象とする。
+通し（T-R1）と、「実際の CUDA driver エラー（block 次元超過・メモリ
+アクセスを伴わない `__trap()` カーネル起因のデバイス異常）に由来する
+poison と fail-closed 恒久化」（T-R2）を対象とする。
 
 - **配置**: `crates/backend-cuda/src/poison_recovery_real_device_tests.rs`
   （`context_cache.rs` の子モジュール。`#[path]` 宣言は T3i
@@ -407,9 +407,13 @@ drain・ストリーム完了同期の配線」を**独立レジストリ**で�
   「不正サイズの launch」（block 次元をデバイス上限より大幅に超過させた
   起動）が同期的にエラーを返し、かつ ordinal を poison しないこと
   （`classify_cuda_result` の operation-local 分類の実機確認。イシュー
-  本文の例に対する実測回答）、(b) 意図的な範囲外書き込みカーネルの
-  launch 後、本番演算（`download`）がその遅延エラーを観測し ordinal を
-  poison すること、(c) その状態で `invalidate_with`（実
+  本文の例に対する実測回答）、(b) メモリアクセスを伴わない `__trap()`
+  カーネル（review 指摘・2 ラウンド目: 意図的な範囲外書き込みカーネルは
+  `.claude/rules/coding-rust.md` のカーネル境界検査規約にテスト・故障
+  注入目的の例外がないため不採用とし、メモリアクセスを伴わない
+  `__trap()` へ置き換えた）の launch 後、本番演算（`download`）がその
+  遅延エラーを観測し ordinal を poison すること、(c) その状態で
+  `invalidate_with`（実
   `stream.synchronize()` を `sync` に渡す）を呼ぶと `sync` 自体が失敗し
   `DeviceContextUnrecoverable`（恒久 poison）へ倒れること、(d) 以降の
   本番演算が `DeviceContextUnrecoverable` で拒否され続けること。(a) の

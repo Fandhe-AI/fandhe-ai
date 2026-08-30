@@ -23,8 +23,9 @@
 //!    演算成功・旧世代バッファの拒否」を通しで検証する。
 //! 2. [`poison_from_real_cuda_error_fails_closed_to_unrecoverable`]
 //!    （T-R2）: 実際に CUDA driver が返すエラー（block 次元超過の
-//!    `CUDA_ERROR_INVALID_VALUE` 相当・意図的な範囲外書き込みによる
-//!    `CUDA_ERROR_ILLEGAL_ADDRESS` 相当）を発生させ、
+//!    `CUDA_ERROR_INVALID_VALUE` 相当・メモリアクセスを伴わない
+//!    `__trap()` カーネルによる `CUDA_ERROR_ASSERT`／`CUDA_ERROR_
+//!    LAUNCH_FAILED` 相当）を発生させ、
 //!    `classify_cuda_result`（`context_cache.rs` 本体・変更なし）の
 //!    分類どおりに「operation-local は poison しない」「sticky は
 //!    poison し、context 破壊後は `invalidate_with` の sync 自体が
@@ -145,30 +146,28 @@ extern "C" __global__ void poison_recovery_probe_write_f32(float* __restrict__ o
 /// テストローカルの NVRTC カーネル 2（[`poison_from_real_cuda_error_
 /// fails_closed_to_unrecoverable`] 専用）。
 ///
-/// 確保済みバッファからの相対オフセットではなく、**null ポインタ
-/// （アドレス 0）へ直接書き込む**。目的は sticky な
-/// `CUDA_ERROR_ILLEGAL_ADDRESS`（`context_cache::classify_cuda_result`
-/// の分類で sticky 側へ倒れる未知／破壊的エラーの代表例）を確実に
-/// 発生させることであり、`.claude/rules/coding-rust.md` のカーネル境界
-/// 検査規約はカーネルが**意図せず**範囲外アクセスしないための規約で
-/// あり、本カーネルは検証目的で**意図的に**違反する（プロダクトコード
-/// `kernels_*.rs` には含めず、本テストファイル内に閉じる）。
+/// 引数を取らず、メモリアクセスを一切行わない `__trap()`（PTX `trap`
+/// 命令）のみを実行する。目的は sticky なデバイス異常（
+/// `context_cache::classify_cuda_result` の分類で sticky 側へ倒れる
+/// `CUDA_ERROR_ASSERT`／`CUDA_ERROR_LAUNCH_FAILED` 等。同関数の未知
+/// コードを sticky 側へ倒す既定コメントに明記済み）を確実に発生させる
+/// ことである。メモリアクセスが存在しないためカーネル自身に境界検査
+/// 対象がなく、`.claude/rules/coding-rust.md`「カーネル実装の境界検査
+/// （REQ-8）」規約（性能・テスト目的を理由に境界チェックを省略しない）
+/// を回避ではなく自明に満たす。
 ///
-/// review 指摘（P0）: 以前の実装は確保済み 1 要素バッファから
-/// `1ULL << 34` 要素分オフセットしたアドレスへ書き込んでいたが、
-/// このアドレスがプロセス全体の仮想アドレス空間で未マップである
-/// ことは CUDA の仮想アドレス配置上保証されない（他の有効な
-/// デバイスメモリ領域を指す可能性があり、その場合 `CUDA_ERROR_
-/// ILLEGAL_ADDRESS` にならず当該領域を破壊しうる）。null ポインタ
-/// （アドレス 0）は CUDA のデバイス仮想アドレス空間で常に予約済み・
-/// 未マップであり（`cudaMalloc` 系 API がアドレス 0 を返すことはなく、
-/// CUDA ドライバは 0 ページを常にガードする）、確保状況に依存せず
-/// 確実に `CUDA_ERROR_ILLEGAL_ADDRESS` を引き起こす。`out` 引数は
-/// 使わないため削除した（呼び出し側もカーネル引数を渡さない）。
-const ILLEGAL_WRITE_SRC: &str = r#"
-extern "C" __global__ void poison_recovery_illegal_write_f32() {
-    float* bad = (float*)0;
-    *bad = 1.0f;
+/// review 指摘（P0・2 ラウンド目）: 以前の実装は null ポインタ
+/// （アドレス 0）への意図的な範囲外書き込みだったが、境界チェック
+/// 省略には「テスト・故障注入目的」の例外が規約上存在しないという
+/// 指摘を受けた。本ラウンドでは書き込みそのものをなくし、`__trap()`
+/// という「メモリアクセスを伴わない」故障注入手段へ置き換える
+/// （driver API 経由でポインタを解放してダングリングにする代替案は、
+/// `cuMemFree` 後もサブアロケータが VA を保持しマップされたままになり
+/// うるため確実性を欠くとして不採用。値ではなく命令自体で確実に
+/// 異常を発生させる本方式を採用した）。
+const TRAP_SRC: &str = r#"
+extern "C" __global__ void poison_recovery_trap() {
+    __trap();
 }
 "#;
 
@@ -401,13 +400,12 @@ fn poison_from_real_cuda_error_fails_closed_to_unrecoverable() {
         .expect("load_module must succeed")
         .load_function("poison_recovery_probe_write_f32")
         .expect("load_function must succeed");
-    let illegal_ptx =
-        compile_ptx(ILLEGAL_WRITE_SRC, arch).expect("illegal-write kernel must compile");
-    let illegal_fn: CudaFunction = device
+    let trap_ptx = compile_ptx(TRAP_SRC, arch).expect("trap kernel must compile");
+    let trap_fn: CudaFunction = device
         .context()
-        .load_module(illegal_ptx)
+        .load_module(trap_ptx)
         .expect("load_module must succeed")
-        .load_function("poison_recovery_illegal_write_f32")
+        .load_function("poison_recovery_trap")
         .expect("load_function must succeed");
 
     // 手順 0: healthy な状態で probe 用バッファを確保しておく（context
@@ -465,28 +463,33 @@ fn poison_from_real_cuda_error_fails_closed_to_unrecoverable() {
          ordinal を poison しないはず"
     );
 
-    // 手順 2: 実 sticky エラーを発生させる。null ポインタへの書き込みを
-    // 行うカーネルを、本番の観測経路（`begin_driver_call`／
-    // `observe_cuda_result`）を経由せず直接投入する（非同期投入契約
-    // 〈イシュー #1013・設計文書 §5〉により launch 自体の戻り値は
-    // 多くの場合 `Ok` に見える。遅延エラーは後続の同期呼び出しで
-    // 観測される）。
+    // 手順 2: 実 sticky エラーを発生させる。メモリアクセスを一切
+    // 行わない `__trap()` カーネルを、本番の観測経路
+    // （`begin_driver_call`／`observe_cuda_result`）を経由せず直接
+    // 投入する（非同期投入契約〈イシュー #1013・設計文書 §5〉により
+    // launch 自体の戻り値は多くの場合 `Ok` に見える。遅延エラーは
+    // 後続の同期呼び出しで観測される）。
     //
-    // SAFETY: `poison_recovery_illegal_write_f32`（本ファイル上部の
-    // `ILLEGAL_WRITE_SRC`）は null ポインタ（アドレス 0。CUDA の
-    // デバイス仮想アドレス空間で常に予約済み・未マップであり、確保状況
-    // に依存せず確実に未マップと判定できる）へ意図的に書き込む。目的は
-    // sticky な `CUDA_ERROR_ILLEGAL_ADDRESS` を発生させ、後続の本番演算
-    // がこれを遅延エラーとして観測し ordinal を poison することを確認
-    // するためである。カーネルは引数を取らないため、確保済みバッファを
-    // 渡す必要はない。本呼び出し後は CUcontext が破壊される前提であり、
-    // 本テストは `#[ignore]` かつプロセス末尾専用（モジュール冒頭コメント
-    // 「運用契約」参照）。
+    // SAFETY: `poison_recovery_trap`（本ファイル上部の `TRAP_SRC`）は
+    // 引数を取らず、いかなるメモリへもアクセスしない（PTX `trap`
+    // 命令のみを実行する）。したがってカーネル自身に境界検査対象は
+    // 存在せず、`.claude/rules/coding-rust.md`「カーネル実装の境界検査
+    // （REQ-8）」規約に抵触しない（review 指摘・2 ラウンド目: 以前の
+    // 実装は null ポインタへの意図的な範囲外書き込みだったが、境界
+    // チェック省略にテスト・故障注入目的の例外はないとの指摘を受け、
+    // 書き込みを伴わない `__trap()` へ置き換えた。上部ドキュメント
+    // コメント参照）。`__trap()` はデバイス異常（`CUDA_ERROR_ASSERT`
+    // または `CUDA_ERROR_LAUNCH_FAILED` 相当。`context_cache::
+    // classify_cuda_result` の分類でいずれも sticky 側へ倒れる）を
+    // 確実に発生させ、後続の本番演算がこれを遅延エラーとして観測し
+    // ordinal を poison することを確認する目的で使う。本呼び出し後は
+    // CUcontext が破壊される前提であり、本テストは `#[ignore]` かつ
+    // プロセス末尾専用（モジュール冒頭コメント「運用契約」参照）。
     unsafe {
         // 起動自体の Result は意図的に無視する（非同期投入契約。後続の
         // 本番演算がストリーム順序で先行するこの launch のエラーを
         // 遅延して観測する）。
-        let _ = stream.launch_builder(&illegal_fn).launch(LaunchConfig {
+        let _ = stream.launch_builder(&trap_fn).launch(LaunchConfig {
             grid_dim: (1, 1, 1),
             block_dim: (1, 1, 1),
             shared_mem_bytes: 0,
@@ -498,7 +501,7 @@ fn poison_from_real_cuda_error_fails_closed_to_unrecoverable() {
     let download_result = memory.download(&probe_buffer);
     assert!(
         download_result.is_err(),
-        "illegal address 書き込み後の同期を含む本番演算は失敗するはず: \
+        "__trap() 実行後の同期を含む本番演算は失敗するはず: \
          {download_result:?}"
     );
     assert!(
