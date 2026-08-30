@@ -258,7 +258,7 @@ fn transpose2d(tensor: &Tensor<f32>) -> Tensor<f32> {
 ///
 /// イシュー #1046: `transpose2d`（下記。`Tensor::transpose` の zero-copy
 /// stride view）で作った転置オペランドは、`eval::matmul` 側
-/// （`eval::matmul_operand`・`tensor_core::layout::classify_2d`）が
+/// （`eval::matmul_operand`・`crate::layout::classify_2d`）が
 /// `ld`／`transposed` フラグの添字式で直接読み出すため、本関数を含む
 /// このホスト参照経路にホスト側転置コピー（`contiguous()` の repack）
 /// は発生しない（`eval::MATMUL_HOST_REPACK_COUNT` で機械検証）。

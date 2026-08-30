@@ -111,6 +111,7 @@ mod default_ops;
 mod error;
 mod eval;
 mod grad;
+mod layout;
 pub mod nn;
 pub mod optim;
 mod tape;

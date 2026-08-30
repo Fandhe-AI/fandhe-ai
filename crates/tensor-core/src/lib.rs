@@ -90,22 +90,21 @@
 //! `FusionGraph`／`detect_fusion` は本クレート内では `plan.rs` の
 //! `#[cfg(test)]`（`from_segment` の単体テスト）からのみ使用される。
 //!
-//! `layout`（元は `backend-metal` 専用モジュール〈#1040〉。イシュー
-//! #1046 で本クレートへ移設）は、`Tensor::shape`/`strides` から
-//! 2 次元 view の転置分類（[`layout::classify_2d`]）・先頭次元 collapse
-//! （[`layout::collapse_leading_dims`]）を導出する純粋関数群を提供する。
-//! `backend-metal` の GEMM strided 入口と `autodiff::eval::matmul`
-//! （matmul VJP のホスト側転置コピー除去）が共通で必要とするため
-//! `tensor-core` に置く。`facade` の公開 API 面には出さない内部ヘルパ
-//! （`docs/compat-api-scope.md` §0）のため re-export リストには含めない。
-//! `pub mod layout;` 自体は `backend-metal`（`crate::layout` 再エクスポート
-//! 経由）・`autodiff::eval`（`layout::classify_2d` 直接呼び出し）という
-//! クレート境界をまたぐ呼び出し元があるため `mod`（非公開）にはできないが、
-//! `MatrixLayout`／`TransposePattern`／`classify_2d` 等は `fandhe-ai-tensor-core`
-//! の利用者向け契約（semver 対象）ではない。`pool_core`（PR #1063 codex-review
-//! P1 対応）と同じ理由・同じ方式で `#[doc(hidden)]` を付け、docs.rs・rustdoc
-//! から隠したうえで semver 互換性の対象外であることをコード上でも明示する
-//! （PR #1077 codex-review P1 対応）。
+//! `layout`（`backend-metal` 専用モジュール〈#1040〉の 2 次元 view 転置
+//! 分類・先頭次元 collapse）は、イシュー #1046 で `autodiff::eval::matmul`
+//! と共用するため一時的に本クレートへ移設したが、`pub mod layout` が
+//! `fandhe-ai-tensor-core`（crates.io 公開クレート）の公開面へ内部
+//! レイアウト型を露出させてしまう問題が codex-review で指摘された
+//! （`#[doc(hidden)]` は rustdoc 表示を隠すのみで Rust の可視性・semver
+//! 上の公開面は変えないため契約にできない。AGENTS.md「内部表現の公開
+//! API への漏出は P1」。PR #1077）。そのため PR #1077 で `backend-metal`
+//! （`crates/backend-metal/src/layout.rs`）・`autodiff`
+//! （`crates/autodiff/src/layout.rs`）それぞれのクレート内非公開
+//! モジュールへ分類ロジックを複製する形へ差し戻し、本クレートからは
+//! `layout` モジュール自体を削除した。両モジュールは共通のシェーダ
+//! 添字契約（`backend-metal::shaders::gemm.metal` の
+//! `gemm_tiled_bias_act`）を正とする双子モジュールであり、変更する際は
+//! 両方に反映する（設計判断の記録は `docs/matmul-vjp-zero-copy-decision.md`）。
 
 mod backend_ops;
 mod broadcast;
@@ -116,8 +115,6 @@ mod dispatch_failure;
 mod element;
 mod error;
 mod fusion;
-#[doc(hidden)]
-pub mod layout;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;

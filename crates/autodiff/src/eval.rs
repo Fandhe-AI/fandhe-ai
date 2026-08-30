@@ -23,8 +23,9 @@
 
 use std::borrow::Cow;
 
-use fandhe_ai_tensor_core::{Tensor, layout};
+use fandhe_ai_tensor_core::Tensor;
 
+use crate::layout;
 use crate::var::Reduction;
 
 std::thread_local! {
@@ -175,8 +176,10 @@ pub(crate) fn dense_vec_i32(tensor: &Tensor<i32>) -> Vec<i32> {
 /// `matmul`（下記）のオペランド 1 個を、ホスト側転置コピーなしで
 /// 読み出せる形へ変換する（イシュー #1046）。
 ///
-/// `layout::classify_2d`（`backend-metal` と共用。`tensor-core::layout`）
-/// が行優先 contiguous・転置 view（`grad.rs::transpose2d` が作る
+/// `layout::classify_2d`（`crate::layout`。`backend-metal::layout` と
+/// 同一規則の双子モジュール。PR #1077 で `tensor-core` からクレート内
+/// 非公開モジュールへ差し戻した。詳細は `crate::layout` のクレート
+/// ドキュメント参照）が行優先 contiguous・転置 view（`grad.rs::transpose2d` が作る
 /// `strides == [1, ld]` の zero-copy view）のいずれかに分類できる場合、
 /// `Tensor::as_view_slice`（借用）をそのまま返し `MATMUL_HOST_REPACK_COUNT`
 /// を増やさない。分類できない形状（stride 0 のブロードキャスト等）

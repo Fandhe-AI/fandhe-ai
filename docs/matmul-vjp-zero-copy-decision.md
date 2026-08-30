@@ -29,11 +29,23 @@
 
 ### 3.1 実施した変更（本イシューの範囲）
 
-1. `crates/tensor-core/src/layout.rs`（新規）: `backend-metal/src/layout.rs`
-   （#1040）が持っていた `MatrixLayout`／`classify_2d`／
-   `collapse_leading_dims`／`required_span`（純粋関数・FFI 非依存）を
-   `tensor-core` へ移設した。`backend-metal::layout` は再エクスポートへ
-   縮約し、`gemm.rs`・`ops.rs`・既存テストの参照パスは変更していない
+1. `crates/autodiff/src/layout.rs`（新規）: `backend-metal/src/layout.rs`
+   （#1040）が持つ `MatrixLayout`／`classify_2d`（純粋関数・FFI 非依存）
+   を `autodiff` 側にもクレート内非公開（`mod layout;`。`pub` にしない）
+   で複製した。初版（PR #1077 codex-review 前）では両クレートの共通
+   モジュールとして `tensor-core::layout`（`pub mod layout`）へ集約して
+   いたが、`fandhe-ai-tensor-core`（crates.io 公開クレート）の公開面へ
+   内部レイアウト型を露出させてしまう問題が codex-review で指摘された
+   （`#[doc(hidden)]` は semver 上の公開面を変えないため契約にできない。
+   AGENTS.md「内部表現の公開 API への漏出は P1」）。そのため `tensor-core`
+   からは `layout` モジュールを削除し、`backend-metal`（`collapse_leading_dims`／
+   `required_span`／`TransposePattern` を含む元の実装のまま）・`autodiff`
+   （`classify_2d`／`MatrixLayout` のみ。`collapse_leading_dims` 等は
+   `autodiff` 側で未使用のため複製しない）それぞれのクレート内非公開
+   モジュールへ分類ロジックを複製する構成へ差し戻した（両モジュールは
+   `backend-metal::shaders::gemm.metal` の添字計算を共通契約とする双子
+   モジュール。変更時は両方に反映する）。`gemm.rs`・`ops.rs`・既存テスト
+   の参照パス（`crate::layout::…`）は変更していない
 2. `crates/autodiff/src/eval.rs::matmul`: `dense_vec`（`contiguous()`
    強制）をやめ、`layout::classify_2d` + `Tensor::as_view_slice`
    （借用）で行優先／転置 view の両方を直接読み出す `matmul_operand`
