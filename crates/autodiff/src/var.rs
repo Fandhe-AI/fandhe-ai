@@ -175,12 +175,22 @@ impl<'t> Var<'t> {
     /// ②shape 検査 → ③forward 値計算 → ④ノード記録」の順で処理する
     /// 非 elementwise・常時実体化の演算）。
     ///
-    /// `bias` の shape が `[n]`（`weight` の列数）でない場合は
-    /// `BackendOps::gemm_bias_act` の融合カーネル契約（厳密一致のみ）に
-    /// 収まらないため、呼び出し元（`LinearVars::forward_with_activation`）
-    /// が事前に非融合合成（`matmul` → `add` → `relu`）へフォールバック
-    /// する契約とし、本メソッドは bias 厳密一致（または `None`）の
-    /// ケースのみを扱う。
+    /// `bias` の shape 検証は `broadcast_shape`（`out_shape` へブロード
+    /// キャスト可能かの NumPy 互換判定）のみを行い、`[n]`（`weight` の
+    /// 列数）と厳密一致しない bias（`[1, n]` 等）も含めてそのまま
+    /// `BackendOps::gemm_bias_act` へ委譲する。**非融合合成へのフォール
+    /// バックは本メソッド・呼び出し元（`LinearVars::
+    /// forward_with_activation`）のどちらの責務でもなく、
+    /// `BackendOps::gemm_bias_act` 自身の契約**（`tensor-core::
+    /// backend_ops` の doc 参照。CPU／CUDA／Metal の融合カーネル実装は
+    /// bias が `[n]` 厳密一致でない場合 `matmul` → `add`（NumPy 互換
+    /// ブロードキャスト）→ activation の非融合合成へ内部的に
+    /// フォールバックし、デフォルト実装も同じ合成のため、いずれの
+    /// バックエンドでも `[n]` 以外の broadcast 可能な bias が
+    /// `ShapeMismatch` になることはない）。本メソッドが呼び出し前に
+    /// `broadcast_shape` で検証するのは「`gemm_bias_act` に委譲する前に
+    /// ブロードキャスト不能な shape を早期に拒否する」ためであり、
+    /// フォールバック経路の選択自体は行わない。
     pub(crate) fn linear_act(
         &self,
         weight: &Var<'t>,
@@ -510,5 +520,50 @@ impl<'t> Var<'t> {
         let value = eval::sigmoid(&self.value());
         let id = self.tape.push_eager(Op::Sigmoid(self.id), value);
         Var::from_raw(self.tape, id)
+    }
+}
+
+#[cfg(test)]
+mod linear_act_tests {
+    use super::*;
+    use crate::tape::Tape;
+
+    /// codex-review 指摘（PR #1079・discussion_r3889050931）の実測検証:
+    /// `linear_act` は bias が `[n]`（`weight` の列数）と厳密一致しない
+    /// broadcast 可能な shape（ここでは `[1, n]`）でも `ShapeMismatch` を
+    /// 返さず、`matmul` → `add`（NumPy 互換ブロードキャスト）→ `relu` の
+    /// 非融合合成と bit 一致する結果を返すことを確認する。フォール
+    /// バックは `linear_act`／呼び出し元ではなく `BackendOps::
+    /// gemm_bias_act` 自身の契約（`tensor-core::backend_ops` の doc・
+    /// 各バックエンドの `ComposedFallback` 分岐）で行われる（本メソッド
+    /// の doc コメント参照）。`Linear`（`nn::linear`）は `from_parameters`
+    /// で bias を `[out_features]` 厳密一致にしか構築できないため、この
+    /// broadcast bias 経路は `Linear` 経由では到達できない
+    /// （`pub(crate)` の `linear_act` を直接呼ぶ本テストでのみ検証可能）。
+    #[test]
+    fn linear_act_accepts_broadcastable_bias_not_strictly_matching_out_features() {
+        let tape = Tape::new();
+        // input: [2, 2]、weight: [2, 3] → out: [2, 3]。
+        let input = tape.var(&Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap());
+        let weight = tape.var(&Tensor::new(vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0], &[2, 3]).unwrap());
+        // bias: `[3]`（out_features 厳密一致）ではなく `[1, 3]`
+        // （broadcast 可能だが厳密一致ではない shape）。
+        let bias = tape.var(&Tensor::new(vec![10.0, -5.0, 0.0], &[1, 3]).unwrap());
+
+        let fused = input
+            .linear_act(&weight, Some(&bias), Activation::Relu)
+            .expect("broadcast bias は ShapeMismatch にならず成功するはず");
+
+        let composed = input
+            .matmul(&weight)
+            .and_then(|y| y.add(&bias))
+            .map(|y| y.relu())
+            .expect("非融合合成（matmul→add→relu）も同じ broadcast bias で成功するはず");
+
+        assert_eq!(
+            fused.value().as_slice().unwrap(),
+            composed.value().as_slice().unwrap(),
+            "broadcast bias 経路は融合・非融合合成で bit 一致するはず"
+        );
     }
 }
