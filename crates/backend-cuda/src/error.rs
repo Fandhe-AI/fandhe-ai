@@ -125,19 +125,23 @@ pub enum CudaError {
     TiledPipelineUnavailable { detail: String },
 
     /// [`crate::gemm::CudaGemm::launch_tiled_pipeline_f32`] に渡された
-    /// `TiledPipelineFunction` が、この `CudaGemm` インスタンスの
+    /// `TiledPipelineFunction`、または `a_dev`/`b_dev`/`c_dev`
+    /// （`CudaSlice`）のいずれかが、この `CudaGemm` インスタンスの
     /// `stream`（＝生成元 `CudaDevice`）とは異なる `CudaContext` から
-    /// コンパイルされたことを表す（codex-review P1 指摘・PR #1071）。
+    /// 生成されたことを表す（codex-review P1・P0 指摘・PR #1071）。
     ///
     /// `compile_tiled_pipeline_variant` は任意の `CudaDevice` からハンドル
-    /// を生成できるため、複数 GPU・複数 context 利用時に別 context 由来の
-    /// ハンドルを safe Rust から渡せてしまう。context 固有の `CUfunction`
-    /// と別 context の `stream`／デバイスバッファを混在させた `unsafe`
-    /// launch は invalid device context・実質的な UB／OOB リスクに到達
-    /// しうるため、`launch_tiled_pipeline_f32` は起動前に
-    /// `Arc<CudaContext>` のポインタ同一性を検証し、不一致ならこの
-    /// variant で fail-closed に拒否する（`gemm.rs::TiledPipelineFunction`
-    /// のドキュメンテーションコメント参照）。
+    /// を生成でき、`CudaSlice` も任意の `CudaDevice` で確保したものを
+    /// safe Rust から渡せてしまうため、複数 GPU・複数 context 利用時に
+    /// 別 context 由来のハンドル・バッファを渡せてしまう。context 固有の
+    /// `CUfunction`・デバイスポインタと別 context の `stream` を
+    /// 混在させた `unsafe` launch は invalid device context・実質的な
+    /// UB／OOB リスクに到達しうるため、`launch_tiled_pipeline_f32` は
+    /// 起動前に `func` と 3 バッファそれぞれの `Arc<CudaContext>` の
+    /// ポインタ同一性を個別に検証し、いずれか 1 つでも不一致なら
+    /// この variant で fail-closed に拒否する
+    /// （`gemm.rs::TiledPipelineFunction` のドキュメンテーションコメント・
+    /// `launch_tiled_pipeline_f32` 本体のコメント参照）。
     TiledPipelineContextMismatch { detail: String },
 
     /// カーネルソースのテンプレート展開（`kernels_mma::render_mma_f16`・

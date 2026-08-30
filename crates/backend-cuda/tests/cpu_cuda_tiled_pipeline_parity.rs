@@ -287,6 +287,56 @@ fn tiled_pipeline_rejects_mismatched_context_handle() {
     ));
 }
 
+/// codex-review P0 指摘（PR #1071）の回帰テスト: `func` は `gemm` 自身の
+/// context から生成された正しいハンドルであっても、`a_dev`/`b_dev`/`c_dev`
+/// が**別の** `CudaDevice`（＝別 `CudaContext`。上記テストと同じ
+/// `CudaDevice::new` の性質）から確保した `CudaSlice` であれば
+/// `launch_tiled_pipeline_f32` が `unsafe` launch へ到達する前に
+/// `CudaError::TiledPipelineContextMismatch` を返し fail-closed に拒否する
+/// ことを確認する。`func` の context 一致検証（上記テスト）だけでは
+/// バッファの生成元 context 不一致を検出できないという穴を塞いだことの
+/// 回帰テスト（`validate_gemm_dims` は長さのみ検証するため、同じ長さの
+/// 別 context バッファは以前この検証を素通りしていた）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_rejects_mismatched_context_buffers() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    assert!(
+        gemm.tiled_pipeline_available(),
+        "tiled pipeline kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.tiled_pipeline_unavailable_reason()
+    );
+    let func = CudaGemm::compile_tiled_pipeline_variant(&device, 3)
+        .expect("tiled pipeline variant compilation must succeed against gemm's own context");
+
+    // `other_gemm` は別 `CudaDevice`（＝別 `CudaContext`）で構築し、その
+    // `upload_f32`/`alloc_output_f32` で確保したバッファを `gemm` 側の
+    // 正しい `func` と組み合わせて渡す（func は一致・バッファのみ不一致）。
+    let other_device =
+        CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let other_gemm = CudaGemm::new(&other_device)
+        .expect("tiled pipeline kernel compilation must succeed on the other context");
+
+    let (a_dev, b_dev) = other_gemm
+        .upload_f32(&[0.0f32; 16], &[0.0f32; 16])
+        .expect("upload_f32 must succeed for a well-formed 4x4x4 shape on the other context");
+    let mut c_dev = other_gemm.alloc_output_f32(4, 4).expect(
+        "alloc_output_f32 must succeed for a well-formed 4x4 output shape on the other context",
+    );
+
+    let err = gemm
+        .launch_tiled_pipeline_f32(&func, &a_dev, &b_dev, &mut c_dev, 4, 4, 4)
+        .expect_err(
+            "launching with buffers allocated on a different CudaContext must be rejected \
+             before reaching the unsafe launch, even when func's context matches",
+        );
+    assert!(matches!(
+        err,
+        CudaError::TiledPipelineContextMismatch { .. }
+    ));
+}
+
 /// codex-review P1 指摘（PR #1071）の回帰テスト:
 /// `launch_tiled_pipeline_f32`（常駐 API）は `run_tiled_pipeline_f32` と
 /// 同じく m==0／n==0 を no-op として受理し、`unsafe` launch へ到達せず

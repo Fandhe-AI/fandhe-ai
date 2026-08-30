@@ -1800,6 +1800,23 @@ impl CudaGemm {
     /// 起動前に一致しなければ `CudaError::TiledPipelineContextMismatch`
     /// を返し `unsafe` launch へ到達させない。
     ///
+    /// **バッファ生成元 context の検証（codex-review P0 指摘・PR #1071）**:
+    /// 上記の `func` 検証だけでは、公開引数 `a_dev`/`b_dev`/`c_dev`
+    /// （いずれも safe な [`CudaSlice`]）が同じ context 由来かどうかを
+    /// 保証できない。`CudaSlice` はどの `CudaDevice`／`CudaContext` で
+    /// 確保したものでも safe Rust から本関数へ渡せてしまうため、
+    /// 呼び出し元が別の `CudaDevice`（＝別 `CudaGemm`）で確保した
+    /// `CudaSlice` を（長さだけ `m/n/k` と一致させて）この
+    /// `CudaGemm`（別 context の `stream`）へ渡すと、context 固有の
+    /// デバイスポインタと本インスタンスの `stream` を混在させた
+    /// `unsafe` launch に到達し、invalid device context・実質的な
+    /// UB／OOB リスクを招く。`CudaSlice::context()`
+    /// （cudarc 0.19.8 `driver::safe::core::CudaSlice::context`）が
+    /// 返す `Arc<CudaContext>` のポインタ同一性を `self.stream.context()`
+    /// と `func` 側と同じ fail-closed 方式で検証し、3 バッファのいずれか
+    /// が不一致なら `CudaError::TiledPipelineContextMismatch` を返して
+    /// `unsafe` launch へ到達させない。
+    ///
     /// **`m == 0 || n == 0`（codex-review P1 指摘・PR #1071）**:
     /// `validate_gemm_dims` は naive/tiled 系（`run_f32_kernel` 冒頭コメント
     /// 参照）と同じくこの形状を正当な no-op として受理するが、そのまま
@@ -1830,6 +1847,27 @@ impl CudaGemm {
                          refusing to launch across mismatched CUDA contexts"
                     .to_string(),
             });
+        }
+        // codex-review P0 指摘（PR #1071）: `func` の context 一致検証だけ
+        // では、safe な `CudaSlice` 引数が別 `CudaDevice`／`CudaContext`
+        // 由来である可能性を排除できない（長さの一致のみでは検出不能）。
+        // `CudaSlice::context()` のポインタ同一性を `self_context_ptr` と
+        // 個別に fail-closed 検証し、混在した `unsafe` launch を防ぐ
+        // （関数ドキュメントコメント「バッファ生成元 context の検証」参照）。
+        for (name, buf_context_ptr) in [
+            ("a_dev", Arc::as_ptr(a_dev.context()) as usize),
+            ("b_dev", Arc::as_ptr(b_dev.context()) as usize),
+            ("c_dev", Arc::as_ptr(c_dev.context()) as usize),
+        ] {
+            if buf_context_ptr != self_context_ptr {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: format!(
+                        "{name} was allocated on a different CudaContext (different \
+                         CudaDevice/GPU) than this CudaGemm instance's stream; refusing \
+                         to launch across mismatched CUDA contexts"
+                    ),
+                });
+            }
         }
         validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
         validate_tiled_pipeline_k_bound(k)?;
