@@ -1471,7 +1471,7 @@ impl CudaGemm {
     /// `validate_tiled_k_bound` を経由する（モジュールコメント
     /// 「PoC からの変更点」3 参照）。イシュー #1032 のレジスタブロッキング
     /// 刷新版カーネル（`kernels::TILED_F32`）を、専用の
-    /// [`tiled_f32_launch_config`]（ブロック次元 [`TILED_F32_BLOCK_DIM`]・
+    /// `tiled_f32_launch_config`（ブロック次元 `TILED_F32_BLOCK_DIM`・
     /// タイル一辺 `kernels::TILED_F32_BM`/`BN`）で起動する。
     pub fn run_tiled_f32(
         &self,
