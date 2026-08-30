@@ -187,27 +187,29 @@ fn gemm_blis_parallel_large_n_matches_naive_bit_exact_across_thread_pools() {
 
 /// 小形状・細長形状で `gemm_blis_parallel`（本番公開入口）がスレッド数
 /// 横断で `gemm_naive` と bit 完全一致することを確認する（`src/
-/// gemm_blis/mod.rs` の `mod tests` に `gemm_blis_parallel_thresholded`
-/// 〈`#[cfg(test)]`・ワークロード閾値直列フォールバックのテスト専用適用
-/// 経路。`GEMM_THREADING_THRESHOLD` ドキュメントコメント「本番未結線」
-/// 節・イシュー #811 参照〉・m==1 の単体テストがあるが、それらは実行
-/// 環境の既定 rayon プールのみを対象にする。本テストは
+/// gemm_blis/mod.rs` の `mod tests` に `should_serialize` の表駆動テスト・
+/// m==1 の単体テストがあるが、それらは実行環境の既定 rayon プールのみを
+/// 対象にする）。`should_serialize`（イシュー #811・#1027。`#[cfg(test)]`
+/// 限定で本番未結線。`GEMM_THREADING_THRESHOLD` ドキュメント「本番未結線」
+/// 参照）による閾値分類自体は本番経路には影響しないため、本テストは
 /// `gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools` と
-/// 同じくスレッド数横断で確認することで、m==1 分岐（本番結線済み）が
-/// rayon プールサイズに依存しない純粋な形状判定であることを裏付ける。
-/// `(67, 61, 63)` は `GEMM_THREADING_THRESHOLD` 未満の形状だが、当該
-/// 閾値は本番未結線のため `gemm_blis_parallel` は常時並列経路を通る）。
+/// 同じくスレッド数横断で `gemm_blis_parallel`（常に並列経路）・m==1
+/// 専用経路がいずれも rayon プールサイズに依存せず bit 完全一致する
+/// ことを確認する。下記のコメントは各形状が仮に閾値分岐を導入した
+/// 場合にどちらへ分類されるかの参考情報であり、本テストの合否には
+/// 影響しない。
 #[test]
 fn gemm_blis_parallel_small_and_elongated_shapes_match_naive_bit_exact_across_thread_pools() {
-    // (67, 61, 63): 67*61*63 = 257,481。テスト専用の
-    // `gemm_blis_parallel_thresholded`（`src/gemm_blis/mod.rs`）では
-    // GEMM_THREADING_THRESHOLD(589,824) 未満のため直列フォールバック
-    // 経路になるが、ここで呼ぶ本番 `gemm_blis_parallel` は当該閾値を
-    // 参照しない（本番未結線）ため常時並列経路のまま。
+    // (67, 61, 63): 67*61*63 = 257,481 < GEMM_THREADING_THRESHOLD(589,824)
+    // かつ n=61 >= NR_CLAMP のためクランプ非該当 → 仮に閾値分岐を導入
+    // すれば `should_serialize` は `true`（直列側）になる形状。
     // (1, 900, 700): m==1（gemv 相当）専用経路。m*n*k=630,000 は閾値を
     // 超えるため、m==1 判定が閾値判定より先に効くことも併せて確認する。
-    // (500, 1, 600): n==1（列ベクトル。BLIS 経路のまま）。
-    // (400, 400, 2): k==2（gevv 相当。BLIS 経路のまま）。
+    // (500, 1, 600): n==1 は NR_CLAMP(8) にクランプされ
+    // 500*8*600=2,400,000 で閾値超過 → 仮に導入すれば `should_serialize`
+    // は `false`（並列側。tall-skinny 反例の是正と同じ理由）。
+    // (400, 400, 2): k==2（gevv 相当）。400*400*2=320,000 < 閾値 →
+    // 仮に導入すれば `should_serialize` は `true`（直列側）。
     let shapes: [(usize, usize, usize); 4] =
         [(67, 61, 63), (1, 900, 700), (500, 1, 600), (400, 400, 2)];
 

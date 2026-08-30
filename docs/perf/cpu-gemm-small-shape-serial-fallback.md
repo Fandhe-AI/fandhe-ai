@@ -225,3 +225,104 @@ gevv 形状は BLIS 経路が naive よりやや遅い傾向（0.52〜0.87x）�
   しない（判断 1「本番未結線」節参照）
 - gevv（k<=2）専用経路の再検討（実機実測・実ワークロードでの出現頻度
   判明後）
+
+## 追補（イシュー #1027）: `NR_CLAMP` 導入による本番結線
+
+親イシュー #1008（perf(phase-1) 学習・推論ループの固定費の診断と除去）
+配下のイシュー #1027 で、上記「残課題」節の 2 点のうち `m*n*k` 単純積の
+限界（Bugbot 反例）を解消し、ワークロード閾値直列フォールバックを
+**本番結線した**（判断 1「本番未結線」節の記述は本追補で更新済みの扱い
+とする。M4 Max 実機での境界再スイープは引き続き残課題）。
+
+- **判定式の変更**: `m.saturating_mul(n).saturating_mul(k) <
+  GEMM_THREADING_THRESHOLD` から
+  `m.saturating_mul(n.max(NR_CLAMP)).saturating_mul(k) <
+  GEMM_THREADING_THRESHOLD`（`NR_CLAMP = 8`）へ変更した
+  （`crates/backend-cpu/src/gemm_blis/mod.rs` の `should_serialize`
+  ドキュメントコメント参照）。B/C パネルの packing はマイクロカーネル
+  NR 幅（NEON/AVX2 の最小値 8）までゼロパディングして処理するため、
+  `n` が小さい細長形状でも実効仕事量は `n` そのものではなく NR 幅程度が
+  下限になるという保守的な近似
+- **Bugbot 反例の解消**: `m=512,n=1,k=512`（実測 1: parallel/serial
+  2.233x で並列が優位）は単純積 262,144 では誤って直列側へ倒れていたが、
+  `NR_CLAMP` 適用後は `512*8*512=2,097,152` で閾値を超え並列判定に是正
+  される（`should_serialize_matches_measured_table`・
+  `gemm_blis_parallel_tall_skinny_matches_naive` で回帰検知）
+- **既存実測表との整合**: 実測 1〜3 の全形状（正方 16/32/64/128/256・
+  gevv m=n=256〜2048,k=1/2）は `n >= NR_CLAMP` のためクランプの影響を
+  受けず、判定結果は変わらない（`should_serialize` ドキュメント
+  コメント「既存実測との整合」節・机上突合テスト参照）
+- **結線箇所**: `gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
+  （本番公開入口）の `m == 1` 判定の直後に `should_serialize` 分岐を
+  挿入した。既存の検証順序（`validate_dims` → bias 長 → activation →
+  `n == 0` 早期 return → `m == 1` 専用経路）は変更していない
+- **テスト専用ラッパの整理**: `gemm_blis_parallel_thresholded`／
+  `gemm_blis_bias_act_parallel_thresholded`（`#[cfg(test)]`）は本番結線
+  により役目を終えたため削除し、参照テストは本番公開入口
+  （`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`）の直接呼び出し
+  へ書き換えた
+- **閾値値・bit 完全一致契約・ガードレール非該当の判断は変更なし**:
+  `GEMM_THREADING_THRESHOLD = 589,824` は保守的な値のまま維持する
+  （M4 Max 実機での境界再スイープは残課題のまま）。直列フォールバック
+  は呼び出し経路のみを変えるため `gemm_naive` との bit 完全一致は
+  不変（本 PR のローカル QEMU x86_64 再実測は下記「実測 4」参照）
+- **残課題（更新）**: 閾値 589,824 の M4 Max 実機での境界再スイープの
+  みが残る（`m*n*k` 単純積の限界は本追補で解消済み）。gevv 専用経路の
+  再検討は変更なし
+
+## 実測 4: 本番結線後の再確認（ローカル QEMU x86_64・#1027）
+
+小形状・細長形状（`gemm_small_shape_perf.rs`。本番公開入口
+`gemm_blis_parallel` を計測。RUSTFLAGS="-C target-feature=+avx2,+fma"
+--release）:
+
+| 形状 | naive | serial | parallel（本番結線後） | parallel/serial |
+|---|---|---|---|---|
+| square 16 | 0.516µs | 0.352µs | 0.345µs | 0.980x（直列に統一） |
+| square 32 | 2.371µs | 1.587µs | 1.131µs | 0.713x |
+| square 64 | 8.943µs | 6.664µs | 6.721µs | 1.008x（直列に統一） |
+| square 128 | 85.5µs | 47.5µs | 27.9µs | 0.588x（並列のまま。非劣化） |
+| square 256 | 873.8µs | 282.5µs | 136.3µs | 0.482x（並列のまま。非劣化） |
+| m=512,n=1,k=512（Bugbot 反例） | 445µs | 134µs | 68µs | 0.507x（並列のまま。是正確認） |
+| m=1,n=512,k=512 | 7.5µs | 7.5µs | 12.4µs | 1.665x（m==1 専用経路） |
+
+16/64 は閾値フォールバックで直列に実質統一され（parallel/serial が
+1.0 前後）、128/256・Bugbot 反例形状（m=512,n=1,k=512）は従来どおり
+並列経路のまま非劣化を維持している。
+
+大形状（`gemm_blis_perf.rs::gemm_blis_perf_square_512_1024_2048`。
+閾値を大きく超える 512³ 以上）:
+
+| M=N=K | gemm_parallel | gemm_blis_parallel（本番結線後） | speedup |
+|---|---|---|---|
+| 512 | 1.683ms | 0.545ms | 3.090x |
+| 1024 | 12.176ms | 4.819ms | 2.527x |
+| 2048 | 93.480ms | 33.536ms | 2.787x |
+
+導入前（判断 1 時点）の speedup（1.361x/1.916x/2.139x）と同等以上であり
+非劣化を確認した（計測環境・実行間のばらつきの範囲内）。計測前後の
+`/proc/loadavg` は 1 分平均 1.7〜1.9（12 論理コア環境で他プロセスの
+軽微な同時実行があるが、非劣化判定に影響する規模ではない）。
+
+## 追補（PR #1066・codex-review P1 指摘への対応）: 本番結線の巻き戻し
+
+上記「追補（イシュー #1027）」で本番結線した `should_serialize` 経由の
+ワークロード閾値直列フォールバックは、PR #1066 の codex-review P1 指摘
+（「差分自身が REQ-8 正式対象実機 Apple M4 Max での境界再スイープ未実施
+と明記しているにもかかわらず本番 GEMM ディスパッチへ結線している」）を
+受けて**再度本番未結線へ巻き戻した**。`NR_CLAMP` による Bugbot 反例の
+解消は実装・テストとして維持するが、`should_serialize`／
+`GEMM_THREADING_THRESHOLD`／`NR_CLAMP` は `#[cfg(test)]` 限定に戻し、
+`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`（本番公開入口）は
+常に並列経路（`m == 1` 専用経路を除く）を通る。`dispatch_shared_b`
+（イシュー #750）と同じ「実機ゲート未通過のうちは本番結線しない」
+方針に統一した。M4 Max 実機での境界再スイープが完了し閾値が確定・
+承認された時点で、`should_serialize` の `#[cfg(test)]` を外し本番
+入口から再度呼び出す形で再結線を検討する。
+
+同様の理由で `crates/backend-cpu/src/reduction.rs` の `sum`/`max`/
+`axis_reduce` へ `elementwise::PARALLEL_THRESHOLD` を転用する直列
+フォールバック（PR #1066 で新規追加された指摘）も本番結線を見送った
+（reduction は elementwise と異なる累積契約のため、elementwise 用の
+閾値をそのまま転用してよい根拠がない。reduction 専用の M4 Max 実測が
+別途必要）。
