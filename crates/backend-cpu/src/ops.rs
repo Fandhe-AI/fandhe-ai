@@ -630,7 +630,7 @@ impl BackendOps for CpuBackendOps {
         let pred_slice = pred_c.as_slice().unwrap_or(&[]);
         let target_slice = target_c.as_slice().unwrap_or(&[]);
         let numel = pred_slice.len();
-        let sum_sq = mse::mse_sum_sq_f32(pred_slice, target_slice);
+        let sum_sq = mse::mse_sum_sq_f32(pred_slice, target_slice)?;
         let value = match reduction {
             MseReduction::Mean => {
                 if numel == 0 {
@@ -666,7 +666,7 @@ impl BackendOps for CpuBackendOps {
         let pred_slice = pred_c.as_slice().unwrap_or(&[]);
         let target_slice = target_c.as_slice().unwrap_or(&[]);
         let mut dpred = vec![0.0f32; pred_slice.len()];
-        mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred);
+        mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
     }
 
