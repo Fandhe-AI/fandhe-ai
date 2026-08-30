@@ -150,18 +150,21 @@ const fn default_blocks() -> BlockSizes {
 
 /// `gemm_blis_parallel`／`gemm_blis_bias_act_parallel` の rayon 行パネル
 /// 並列化を直列（[`dispatch_region`] 直呼び）へフォールバックさせる
-/// 実効ワークロード積の下限（イシュー #811・#1027 で本番結線）。
+/// 実効ワークロード積の下限（イシュー #811・#1027）。
 ///
-/// **本番結線済み（#1027）**: [`should_serialize`] 経由で
-/// [`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]（本番公開入口）
-/// から直接参照する。以前は 2 点の理由（(1) 境界実測がローカル QEMU
-/// x86_64 に限られ REQ-8 正式対象実機 Apple M4 Max での再スイープ未実施
-/// 〈PR #830 codex-review P1 指摘〉、(2) `m*n*k` 単純積が `m` が大きく
-/// `n`／`k` が小さい細長形状〈例 m=512,n=1,k=512〉を誤って直列側へ倒す
-/// 〈Cursor Bugbot 指摘〉）で `#[cfg(test)]` 限定に留めていたが、(2) は
-/// [`should_serialize`] の `NR_CLAMP` 導入で解消した（下記ドキュメント
-/// コメント参照）。(1) の M4 Max 実機での境界再スイープは残課題のまま
-/// であり、閾値 589,824 自体は保守的な値として変更しない
+/// **本番未結線（`#[cfg(test)]` 限定・codex-review P1 指摘への対応）**:
+/// [`should_serialize`] は本番公開入口（[`gemm_blis_parallel`]／
+/// [`gemm_blis_bias_act_parallel`]）からは参照しない。理由は境界実測が
+/// ローカル QEMU x86_64 に限られ、REQ-8 の正式対象実機 Apple M4 Max
+/// での再スイープが未実施のため（PR #830 codex-review P1 指摘で
+/// 一度 `#[cfg(test)]` 限定化した後、#1027 で本番結線を試みたが同種の
+/// 指摘を再度受けたことを踏まえ、`dispatch_shared_b`〈#750〉・
+/// `gemm_blis_parallel_with_blocks`〈#564〉と同じ「実機ゲート未通過の
+/// うちは攻めた値を本番結線しない」方針〈PR #758 前例〉に統一する）。
+/// `m*n*k` 単純積が細長形状〈例 m=512,n=1,k=512〉を誤って直列側へ倒す
+/// 〈Cursor Bugbot 指摘〉問題自体は下記 `NR_CLAMP` 導入で解消済みだが、
+/// M4 Max 実機での境界再スイープが残る限りは本番結線しない。閾値
+/// 589,824 自体は保守的な値として変更しない
 /// （`docs/perf/cpu-gemm-small-shape-serial-fallback.md` 追補参照）。
 /// `m == 1`（gemv）専用経路 [`gemm_row_vector`] は本判断と独立
 /// （マイクロカーネルが複数行分の packing を前提とする構造に対し
@@ -194,6 +197,7 @@ const fn default_blocks() -> BlockSizes {
 /// 閾値・テスト許容誤差のいずれでもない（数値結果は不変のまま）ため、
 /// `.claude/rules/delegation-impl.md` の「実装 Agent にガードレール
 /// 閾値・テスト許容誤差を緩和させない」禁止事項には該当しない。
+#[cfg(test)]
 pub(crate) const GEMM_THREADING_THRESHOLD: usize = 48 * 48 * 256;
 
 /// [`should_serialize`] が `n` の実効値としてクランプする下限（#1027）。
@@ -206,6 +210,7 @@ pub(crate) const GEMM_THREADING_THRESHOLD: usize = 48 * 48 * 256;
 /// ISA ごとに異なる実際の NR 値より安全側（並列判定が並列寄りになる方向）
 /// に倒す保守的な近似とする（`should_serialize` の判定は「実行される
 /// 実効仕事量」の proxy であり FLOP 数そのものではない）。
+#[cfg(test)]
 const NR_CLAMP: usize = 8;
 
 /// `gemm_blis_parallel`／`gemm_blis_bias_act_parallel` が rayon 行パネル
@@ -232,6 +237,11 @@ const NR_CLAMP: usize = 8;
 /// **オーバーフロー時の安全側フォールバック**: `saturating_mul` を使う
 /// ため、三重積オーバーフロー時は `usize::MAX` へ飽和し常に `false`
 /// （並列側）を返す。
+///
+/// `#[cfg(test)]` 限定（本番未結線。上記 [`GEMM_THREADING_THRESHOLD`]
+/// ドキュメント「本番未結線」参照）。実測表との突合テスト
+/// （`should_serialize_matches_measured_table` 等）からのみ呼ばれる。
+#[cfg(test)]
 pub(crate) fn should_serialize(m: usize, n: usize, k: usize) -> bool {
     m.saturating_mul(n.max(NR_CLAMP)).saturating_mul(k) < GEMM_THREADING_THRESHOLD
 }
@@ -409,15 +419,11 @@ pub fn gemm_blis_parallel(
         return Ok(());
     }
 
-    // ワークロード閾値直列フォールバック（イシュー #811・#1027 で本番
-    // 結線）: rayon 行パネル分割はタスク分割・スレッド同期のオーバー
-    // ヘッド（µs オーダーの固定費。`docs/perf/
-    // cpu-gemm-small-shape-serial-fallback.md`）を伴うため、小形状では
-    // 直列 `dispatch_region` 呼び出しへフォールバックする
-    // （[`should_serialize`] ドキュメントコメント参照）。
-    if should_serialize(m, n, k) {
-        return dispatch_region(a, b, c, n, k, 0..m, default_blocks());
-    }
+    // ワークロード閾値直列フォールバック（イシュー #811・#1027）は
+    // 本番結線しない（[`GEMM_THREADING_THRESHOLD`] ドキュメント
+    // 「本番未結線」参照。REQ-8 正式対象実機 Apple M4 Max での境界
+    // 再スイープ未実施のため。`should_serialize` は `#[cfg(test)]`
+    // 限定で実装・実測突合テストのみ保持する）。
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
@@ -524,15 +530,9 @@ pub fn gemm_blis_bias_act_parallel(
         return apply_epilogue(c, n, bias, act);
     }
 
-    // ワークロード閾値直列フォールバック（イシュー #811・#1027 で本番
-    // 結線）は `gemm_blis_parallel` と同じ理由（[`should_serialize`]
-    // ドキュメントコメント参照）。epilogue（bias 加算・activation）は
-    // 要素独立の演算のため、直列 GEMM 本体の完了後に `c` 全体へ 1 回だけ
-    // 適用すればよい（本関数冒頭「bit 完全一致契約」参照）。
-    if should_serialize(m, n, k) {
-        dispatch_region(a, b, c, n, k, 0..m, default_blocks())?;
-        return apply_epilogue(c, n, bias, act);
-    }
+    // ワークロード閾値直列フォールバック（イシュー #811・#1027）は
+    // `gemm_blis_parallel` と同じ理由（[`GEMM_THREADING_THRESHOLD`]
+    // ドキュメント「本番未結線」参照）で本番結線しない。
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
@@ -1474,9 +1474,10 @@ mod tests {
         assert!(!should_serialize(usize::MAX, usize::MAX, usize::MAX));
     }
 
-    /// `GEMM_THREADING_THRESHOLD` 直下（フォールバック発動＝直列経路）が
-    /// 本番公開入口 `gemm_blis_parallel` で `gemm_naive` と bit 完全一致
-    /// することを確認する。
+    /// `GEMM_THREADING_THRESHOLD` 直下相当の小形状（直列フォールバックは
+    /// 本番未結線のため実際には並列経路のみを通る。`GEMM_THREADING_THRESHOLD`
+    /// ドキュメント「本番未結線」参照）が本番公開入口 `gemm_blis_parallel`
+    /// で `gemm_naive` と bit 完全一致することを確認する。
     #[test]
     fn gemm_blis_parallel_threshold_boundary_below_matches_naive() {
         // 64*64*64 = 262,144 < GEMM_THREADING_THRESHOLD(589,824)。
@@ -1493,13 +1494,13 @@ mod tests {
 
         assert_eq!(
             c_naive, c_parallel,
-            "閾値直下（直列フォールバック経路）は gemm_naive と bit 完全一致するはず"
+            "閾値直下相当の小形状（並列経路）は gemm_naive と bit 完全一致するはず"
         );
     }
 
-    /// `GEMM_THREADING_THRESHOLD` 直上（フォールバック非発動＝並列経路）が
-    /// 本番公開入口 `gemm_blis_parallel` で `gemm_naive` と bit 完全一致
-    /// することを確認する。
+    /// `GEMM_THREADING_THRESHOLD` 直上相当の形状が本番公開入口
+    /// `gemm_blis_parallel` で `gemm_naive` と bit 完全一致することを
+    /// 確認する。
     #[test]
     fn gemm_blis_parallel_threshold_boundary_above_matches_naive() {
         // 128*128*128 = 2,097,152 > GEMM_THREADING_THRESHOLD(589,824)。
@@ -1516,15 +1517,15 @@ mod tests {
 
         assert_eq!(
             c_naive, c_parallel,
-            "閾値直上（並列経路）は gemm_naive と bit 完全一致するはず"
+            "閾値直上相当の形状（並列経路）は gemm_naive と bit 完全一致するはず"
         );
     }
 
-    /// 閾値直下の直列フォールバック経路（epilogue 融合版
-    /// `gemm_blis_bias_act_parallel`）が、bias 加算・activation を含めて
-    /// `gemm_blis_parallel` → 個別 bias/act 適用と bit 完全一致することを
-    /// 確認する（`gemm_blis_bias_act_parallel` 冒頭ドキュメント「bit
-    /// 完全一致契約」参照）。
+    /// 閾値直下相当の小形状（epilogue 融合版 `gemm_blis_bias_act_parallel`。
+    /// 直列フォールバックは本番未結線のため実際には並列経路のみを通る）が、
+    /// bias 加算・activation を含めて `gemm_blis_parallel` → 個別 bias/act
+    /// 適用と bit 完全一致することを確認する（`gemm_blis_bias_act_parallel`
+    /// 冒頭ドキュメント「bit 完全一致契約」参照）。
     #[test]
     fn gemm_blis_bias_act_parallel_threshold_boundary_below_matches_unfused() {
         let (m, n, k) = (32, 48, 40); // 32*48*40 = 61,440 < 589,824
@@ -1543,7 +1544,7 @@ mod tests {
 
         assert_eq!(
             c_fused, c_unfused,
-            "閾値直下の epilogue 融合経路は非融合の gemm_blis_parallel + apply_epilogue と bit 完全一致するはず"
+            "閾値直下相当の小形状の epilogue 融合経路は非融合の gemm_blis_parallel + apply_epilogue と bit 完全一致するはず"
         );
     }
 

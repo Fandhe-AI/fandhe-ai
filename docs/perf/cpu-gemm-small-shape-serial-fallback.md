@@ -303,3 +303,26 @@ gevv 形状は BLIS 経路が naive よりやや遅い傾向（0.52〜0.87x）�
 非劣化を確認した（計測環境・実行間のばらつきの範囲内）。計測前後の
 `/proc/loadavg` は 1 分平均 1.7〜1.9（12 論理コア環境で他プロセスの
 軽微な同時実行があるが、非劣化判定に影響する規模ではない）。
+
+## 追補（PR #1066・codex-review P1 指摘への対応）: 本番結線の巻き戻し
+
+上記「追補（イシュー #1027）」で本番結線した `should_serialize` 経由の
+ワークロード閾値直列フォールバックは、PR #1066 の codex-review P1 指摘
+（「差分自身が REQ-8 正式対象実機 Apple M4 Max での境界再スイープ未実施
+と明記しているにもかかわらず本番 GEMM ディスパッチへ結線している」）を
+受けて**再度本番未結線へ巻き戻した**。`NR_CLAMP` による Bugbot 反例の
+解消は実装・テストとして維持するが、`should_serialize`／
+`GEMM_THREADING_THRESHOLD`／`NR_CLAMP` は `#[cfg(test)]` 限定に戻し、
+`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`（本番公開入口）は
+常に並列経路（`m == 1` 専用経路を除く）を通る。`dispatch_shared_b`
+（イシュー #750）と同じ「実機ゲート未通過のうちは本番結線しない」
+方針に統一した。M4 Max 実機での境界再スイープが完了し閾値が確定・
+承認された時点で、`should_serialize` の `#[cfg(test)]` を外し本番
+入口から再度呼び出す形で再結線を検討する。
+
+同様の理由で `crates/backend-cpu/src/reduction.rs` の `sum`/`max`/
+`axis_reduce` へ `elementwise::PARALLEL_THRESHOLD` を転用する直列
+フォールバック（PR #1066 で新規追加された指摘）も本番結線を見送った
+（reduction は elementwise と異なる累積契約のため、elementwise 用の
+閾値をそのまま転用してよい根拠がない。reduction 専用の M4 Max 実測が
+別途必要）。

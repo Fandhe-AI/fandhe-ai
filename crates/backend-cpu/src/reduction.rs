@@ -27,19 +27,26 @@
 //!   本モジュールはこの保証を用いてチャンク部分和をチャンク番号順に逐次結合し、
 //!   PoC-v2-5 の「逐次固定順序で bit 一致」前提を踏襲する。
 //!
-//! ## 小サイズ直列フォールバック（イシュー #811・#1027）
+//! ## 小サイズ直列フォールバック（未導入・イシュー #811・#1027・codex-review
+//! 指摘への対応）
 //!
-//! `elementwise` モジュールと同じ理由（rayon のタスク分割・スレッド同期
-//! オーバーヘッドが µs オーダーの固定費として小サイズ入力の逐次実行の
-//! 利得を上回る。`crate::elementwise` モジュール doc「並列化」参照）で、
-//! 対象要素数が [`crate::elementwise::PARALLEL_THRESHOLD`] 未満の場合は
-//! 逐次実行にフォールバックする。閾値はマジックナンバーの重複を避ける
-//! ため `elementwise` の定数を再利用する（softmax/rmsnorm と同じ既存
-//! パターン）。フォールバック経路は並列経路と**同一の分割・結合順序**
-//! （全縮約: `CHUNK` 単位の逐次 fold をチャンク番号順に結合。軸指定:
-//! 出力要素ごとに縮約軸を昇順で逐次累積）で計算するため、スレッド数に
-//! 依らず bit 完全一致のまま不変（上記「決定性契約」の一部として、
-//! 逐次実行そのものが決定性契約の特殊ケースになる）。
+//! `elementwise` モジュールで REQ-8 の正式対象実機 Apple M4 Max 実測により
+//! 閾値確定済みの `crate::elementwise::PARALLEL_THRESHOLD`（elementwise
+//! モジュール doc「並列化」参照）は要素ごと独立・アキュムレータなしの
+//! 契約に対するものであり、reduction（累積を伴う別契約。上記「決定性
+//! 契約」参照）へそのまま転用してよい根拠がない（reduction 専用の直列/
+//! 並列比較を M4 Max で実施していない）。そのため本モジュールは常に
+//! rayon 経由（全縮約: `par_chunks` によるチャンク並列、軸指定:
+//! 出力要素側の並列）で計算し、閾値ベースの直列フォールバックは導入
+//! しない。`gemm_blis/mod.rs` の `dispatch_shared_b`（イシュー #750）・
+//! `should_serialize`（イシュー #811・#1027。同ファイル参照）と同じ
+//! 「実機ゲート未通過のうちは攻めた値を本番結線しない」方針（PR #758
+//! 前例）に倣う。reduction 専用の M4 Max 実機直列/並列比較を実施し
+//! 閾値を確定・ユーザー承認を得られれば、`sum_slice`/`max_slice`/
+//! `axis_reduce` へ同様の分岐（`ThreadPoolBuilder::num_threads(1)` 下でも
+//! `par_chunks`/`Range` の順序保持契約により逐次実行と bit 完全一致する
+//! ことは自明なため、導入時も上記「決定性契約」を壊さない）を追加する
+//! 余地がある。
 //!
 //! ## 空縮約の意味論
 //!
@@ -133,18 +140,12 @@ fn gather_elements(a: &Tensor<f32>) -> Vec<f32> {
 }
 
 /// `data` を [`CHUNK`] 単位に分割し、決定性契約（モジュール doc 参照）に
-/// 従って `sum` を計算する。要素数が [`crate::elementwise::PARALLEL_THRESHOLD`]
-/// 未満なら rayon を経由せず逐次で同じ分割・結合順序を再現する（モジュール
-/// doc「小サイズ直列フォールバック」参照。`CHUNK` 単位の逐次 fold を
-/// チャンク番号順に結合する構造自体は並列版と共通のため、逐次実行は
-/// 並列実行と bit 完全一致する）。
+/// 従って `sum` を計算する。`elementwise` 用に検証された閾値を転用する
+/// 直列フォールバックは reduction 専用の M4 Max 実機検証未了のため
+/// 本番結線しない（モジュール doc「小サイズ直列フォールバック」参照）。
+/// 常に rayon 経由（`ThreadPoolBuilder::num_threads(1)` 下でも `par_chunks`
+/// の順序保持契約により逐次実行と bit 完全一致する）で計算する。
 fn sum_slice(data: &[f32]) -> f32 {
-    if data.len() < crate::elementwise::PARALLEL_THRESHOLD {
-        return data
-            .chunks(CHUNK)
-            .map(|chunk| chunk.iter().copied().fold(0.0f32, |acc, v| acc + v))
-            .fold(0.0f32, |acc, v| acc + v);
-    }
     data.par_chunks(CHUNK)
         .map(|chunk| chunk.iter().copied().fold(0.0f32, |acc, v| acc + v))
         .collect::<Vec<f32>>()
@@ -154,10 +155,9 @@ fn sum_slice(data: &[f32]) -> f32 {
 
 /// `data` を [`CHUNK`] 単位に分割し、決定性契約（モジュール doc 参照）に
 /// 従って `max` を計算する。`data` が空の場合は `None` を返す（呼び出し元が
-/// [`ReduceError::EmptyReduction`] に変換する）。要素数が
-/// [`crate::elementwise::PARALLEL_THRESHOLD`] 未満の場合の逐次フォール
-/// バックは [`sum_slice`] と同じ理由・同じ分割構造（モジュール doc
-/// 「小サイズ直列フォールバック」参照）。
+/// [`ReduceError::EmptyReduction`] に変換する）。直列フォールバックを
+/// 本番結線しない理由は [`sum_slice`] と同じ（モジュール doc「小サイズ
+/// 直列フォールバック」参照）。
 ///
 /// 単位元として `f32::NEG_INFINITY` を用いる（`max(x, -inf) == x` が任意の
 /// 有限値 `x` で成立するため、`unwrap`/`expect` なしで畳み込みの初期値に
@@ -167,13 +167,6 @@ fn sum_slice(data: &[f32]) -> f32 {
 fn max_slice(data: &[f32]) -> Option<f32> {
     if data.is_empty() {
         return None;
-    }
-    if data.len() < crate::elementwise::PARALLEL_THRESHOLD {
-        let result = data
-            .chunks(CHUNK)
-            .map(|chunk| chunk.iter().copied().fold(f32::NEG_INFINITY, f32::max))
-            .fold(f32::NEG_INFINITY, f32::max);
-        return Some(result);
     }
     let result = data
         .par_chunks(CHUNK)
@@ -202,13 +195,8 @@ fn checked_product(dims: &[usize]) -> Result<usize, ReduceError> {
 /// 縮約軸を `0..axis_len` の昇順で `op` により逐次累積する（決定性契約は
 /// モジュール doc 参照）。`Range<usize>` は `IndexedParallelIterator` であり
 /// `.collect()` が出力順を保持するため、`flat` 昇順の出力ベクタが得られる。
-///
-/// 総入力要素数（`outer * inner * axis_len`）が
-/// [`crate::elementwise::PARALLEL_THRESHOLD`] 未満なら rayon を経由せず
-/// 逐次 `map` へフォールバックする（モジュール doc「小サイズ直列
-/// フォールバック」参照）。出力要素ごとの計算は元々独立かつ縮約軸は
-/// 逐次累積のため、`into_iter()` に置き換えるだけで並列版と同一の
-/// `flat` 昇順の結果が得られ bit 完全一致を保つ。
+/// 小サイズ直列フォールバックは reduction 専用の M4 Max 実機検証未了の
+/// ため導入しない（モジュール doc「小サイズ直列フォールバック」参照）。
 fn axis_reduce<F>(a: &Tensor<f32>, axis: usize, identity: f32, op: F) -> Vec<f32>
 where
     F: Fn(f32, f32) -> f32 + Sync,
@@ -221,8 +209,8 @@ where
     let inner: usize = inner_dims.iter().product();
     let total_out = outer * inner;
 
-    // 直列/並列いずれの経路でも呼ぶ共通の 1 出力要素ぶんの計算
-    // （`flat in 0..total_out` を前提とする契約はクロージャ内コメント参照）。
+    // 出力要素ごとの計算（`flat in 0..total_out` を前提とする契約は
+    // クロージャ内コメント参照）。
     let compute = |flat: usize| -> f32 {
         // このクロージャは `flat in 0..total_out`（`total_out = outer *
         // inner`）でのみ呼ばれる。`total_out > 0` は `inner > 0` を含意する
@@ -248,17 +236,7 @@ where
         acc
     };
 
-    // 総入力要素数（縮約軸を含む）を閾値と比較する。`outer*inner*axis_len`
-    // の計算はオーバーフローしうるが、本関数の呼び出し元（`sum`/`max`/
-    // `mean`）が既に `checked_product`／`checked_mul` で `outer*inner` の
-    // 非オーバーフローを検証済みのため、ここでは飽和乗算で安全側
-    // （並列側）に倒す（性能ヒューリスティクスであり数値結果には無関係）。
-    let total_in = total_out.saturating_mul(axis_len);
-    if total_in < crate::elementwise::PARALLEL_THRESHOLD {
-        (0..total_out).map(compute).collect()
-    } else {
-        (0..total_out).into_par_iter().map(compute).collect()
-    }
+    (0..total_out).into_par_iter().map(compute).collect()
 }
 
 /// 軸指定・全縮約いずれにも対応する `sum`。
@@ -591,15 +569,13 @@ mod tests {
         }
     }
 
-    /// 小サイズ直列フォールバック（イシュー #811・#1027）の境界
-    /// （`crate::elementwise::PARALLEL_THRESHOLD` の直下・直上）で、
-    /// 全縮約（`dim=None`）の `sum`/`max` がシングルスレッド／
-    /// マルチスレッドプール間で to_bits() 完全一致することを確認する
-    /// （`chunk_boundary_deterministic_sum`／
-    /// `chunk_boundary_deterministic_max_and_mean` と同じ検証方針だが、
-    /// こちらは `PARALLEL_THRESHOLD` 境界に焦点を当てる。閾値未満では
-    /// 常に逐次実行になるため、スレッドプール差が結果に一切影響しない
-    /// ことも同時に確認できる）。
+    /// `crate::elementwise::PARALLEL_THRESHOLD` の直下・直上というサイズ
+    /// （reduction 自体はこの閾値で分岐しない。イシュー #811・#1027・
+    /// モジュール doc「小サイズ直列フォールバック」参照。他モジュールと
+    /// 揃えた代表サイズとして流用するのみ）で、全縮約（`dim=None`）の
+    /// `sum`/`max` がシングルスレッド／マルチスレッドプール間で
+    /// to_bits() 完全一致することを確認する（`chunk_boundary_deterministic_sum`／
+    /// `chunk_boundary_deterministic_max_and_mean` と同じ検証方針）。
     #[test]
     fn parallel_threshold_boundary_deterministic_full_reduction() {
         let threshold = crate::elementwise::PARALLEL_THRESHOLD;
@@ -645,11 +621,12 @@ mod tests {
         }
     }
 
-    /// 小サイズ直列フォールバック（イシュー #811・#1027）の境界で、軸指定
-    /// reduction（`axis_reduce`）がシングルスレッド／マルチスレッドプール
-    /// 間で bit 完全一致することを確認する。`axis_reduce` の閾値判定は
-    /// `outer*inner*axis_len`（縮約軸を含む総入力要素数）のため、
-    /// shape を `[outer, axis_len]`（`axis=1`）に固定して境界を跨がせる。
+    /// `crate::elementwise::PARALLEL_THRESHOLD` 相当のサイズ（reduction 自体
+    /// はこの閾値で分岐しない。上記テスト同様、代表サイズとして流用する
+    /// のみ）で、軸指定 reduction（`axis_reduce`）がシングルスレッド／
+    /// マルチスレッドプール間で bit 完全一致することを確認する。
+    /// shape を `[outer, axis_len]`（`axis=1`）に固定して当該サイズを
+    /// 跨がせる。
     #[test]
     fn parallel_threshold_boundary_deterministic_axis_reduction() {
         let threshold = crate::elementwise::PARALLEL_THRESHOLD;
