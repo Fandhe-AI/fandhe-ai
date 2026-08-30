@@ -177,6 +177,7 @@
 - 加えて `BackendError::DeviceContextRetiring { ordinal: usize }`（`#[non_exhaustive]` 非破壊追加）を追加する。これは item 2 の「`invalidate` が drain 中の generation に対する新規呼び出し」を示す一時的なエラーであり、`DeviceContextPoisoned`（恒久的または `invalidate` 待ちの拒否）とは異なり短時間のうちに解消する契約であることをメッセージに明記する
 - 加えて `BackendError::DeviceContextUnrecoverable { ordinal: usize, probe_error: String }`（`#[non_exhaustive]` 非破壊追加）を追加する。これは item 4-d の「`invalidate` がストリーム完了同期（b'）または独立検証プローブ（c）のいずれかに失敗し、当該 ordinal を恒久的に poison した」ことを示す専用 variant であり、メッセージに「同一プロセス内での回復手段はなく、プロセス再起動が必要である」旨を明記する。この variant を受け取った以後、当該 ordinal への `invalidate` 呼び出しは常に同じエラーを返す（fail-closed の恒久化）
 - 「同期漏れによって静かに間違った値が返る」失敗はエラーとして検出できない。この種の失敗は §8 のテスト方針で構造的に防ぐ（境界チェックを緩めることでは対処しない。`.claude/rules/coding-rust.md`）
+- 上記 state 遷移（item 1）・poison／回復の分岐（item 4）の実機検証記録は §12c（#1084）を参照
 
 ## 6. 複数デバイス・複数 tape・スレッド間の順序保証（design decision 4）
 
@@ -373,6 +374,95 @@
   のままであり、それに依存する設計文書 T3o／T3p のモックテストは本 PR
   でも実装しない（本 PR のスコープ外。追跡方法はユーザー承認事項として
   別途提案する）
+
+## 12c. 実機検証記録（#1084・poison 回復経路）
+
+§5 item 4（state 遷移）・§9 item 5（実処理プローブの設計）を実機で検証
+する追加テスト（T-R1・T-R2）の実装記録。T3i（§12b）は「回復成功時の
+drain・ストリーム完了同期の配線」を**独立レジストリ**で検証したのに
+対し、本節は「本番のグローバルレジストリ上での poison → 実 CUDA の
+`sync`／実処理プローブによる回復 → 新世代での演算成功・旧世代拒否」の
+通し（T-R1）と、「実際の CUDA driver エラー（block 次元超過・メモリ
+アクセスを伴わない `__trap()` カーネル起因のデバイス異常）に由来する
+poison と fail-closed 恒久化」（T-R2）を対象とする。
+
+- **配置**: `crates/backend-cuda/src/poison_recovery_real_device_tests.rs`
+  （`context_cache.rs` の子モジュール。`#[path]` 宣言は T3i
+  （`async_ordering_poison_tests`）の直後に追加した。`OrdinalRegistry`・
+  `invalidate_with`・`ProbeFailure`・`begin_driver_call`・
+  `observe_cuda_result`・`is_poisoned`・`current_generation`・
+  `ordinal_registry` がモジュール非公開のため、T3i と同じ理由で
+  `tests/`（統合テスト）ではなく子モジュールに置く
+- **T-R1（回復成功経路）の検証項目**: (a) 本番の観測経路
+  （`begin_driver_call`／`observe_cuda_result`）で注入した sticky エラー
+  により ordinal 0 が poison されること、(b) poison 中は本番演算
+  （`add`）が `DeviceContextPoisoned` で拒否されること、(c)
+  `invalidate_with` を実 CUDA の `sync`（`stream.synchronize()`）＋実処理
+  プローブ（既知データを使った SGD 1 ステップの GPU 往復と値照合）で
+  駆動すると `Ok(())` を返し `generation` がちょうど 1 進み `phase` が
+  `Active` へ復帰すること、(d) 回復前の世代を刻印された実バッファの
+  `download` が `StaleDeviceGeneration` で拒否されること、(e) 新世代で
+  確保したバッファの `upload`／`download`・`add` がいずれも成功すること
+- **T-R2（実 CUDA エラー起点の fail-closed 恒久化）の検証項目**: (a)
+  「不正サイズの launch」（block 次元をデバイス上限より大幅に超過させた
+  起動）が同期的にエラーを返し、かつ ordinal を poison しないこと
+  （`classify_cuda_result` の operation-local 分類の実機確認。イシュー
+  本文の例に対する実測回答）、(b) メモリアクセスを伴わない `__trap()`
+  カーネル（review 指摘・2 ラウンド目: 意図的な範囲外書き込みカーネルは
+  `.claude/rules/coding-rust.md` のカーネル境界検査規約にテスト・故障
+  注入目的の例外がないため不採用とし、メモリアクセスを伴わない
+  `__trap()` へ置き換えた）の launch 後、本番演算（`download`）がその
+  遅延エラーを観測し ordinal を poison すること、(c) その状態で
+  `invalidate_with`（実
+  `stream.synchronize()` を `sync` に渡す）を呼ぶと `sync` 自体が失敗し
+  `DeviceContextUnrecoverable`（恒久 poison）へ倒れること、(d) 以降の
+  本番演算が `DeviceContextUnrecoverable` で拒否され続けること。(a) の
+  具体的な `CUresult` は環境依存でありうるため固定検査しない
+  （テストは「起動が同期的に失敗すること」「その失敗が ordinal を
+  poison しないこと」の 2 点のみを検証する。実機実測時に観測された
+  コード自体は下記「実機実測」項目へ記録する）
+- **運用契約（プロセス分離）**: `context_cache::ordinal_registry()` は
+  プロセスワイド static であり、両テストとも本番のデフォルト ordinal 0
+  を直接変異させる。T-R2 は CUcontext を意図的に破壊し ordinal 0 を
+  恒久 poison（プロセス再起動以外に回復手段がない）へ確定させるため、
+  各テストは単独プロセス（テスト名フィルタでの個別 `cargo test`
+  起動・`--test-threads=1`）で実行し、**T-R2 は他の実機テスト
+  （T-R1 を含む）より後に実行する**契約とした（ファイル冒頭コメント
+  「運用契約」参照。`nvrtc.rs` の `setmaxnreg` プローブの外部タイムアウト
+  運用契約と同型）
+- **スコープ外として残る事項（#1084 実装計画 §7 のとおり）**:
+  production `invalidate(ordinal)` の呼び出しタイミング（poison 検出後に
+  いつ・どこから `invalidate_with` を呼ぶか）の結線は本節の対象外の
+  まま残る（§12b「production `invalidate(ordinal)` の未結線」と同じ
+  追跡対象）
+- **実機実測**: 環境・実行コマンド・結果は DGX Spark GB10 実機セッション
+  未実施のため未記入（記入欄）。本 PR はテストコード（`#[ignore]`）と
+  本節の骨子のみを先行整備し、実機実測は別セッションで追記する
+  （`docs/perf/cuda-fresh-gemm-n2048-overhead-diagnosis.md`・
+  `docs/perf/train-linear-epilogue-fusion.md` と同じ「計測コード先行
+  整備・実機未実測の明記」方針）。実行予定コマンド（review 指摘・P1:
+  以前の記載は opt-in 環境変数〈`poison_recovery_real_device_tests.rs`
+  冒頭コメント「運用契約」参照〉を欠いており、`require_opt_in` の
+  早期 `return` に入って両テストとも「何も検証せず成功する」fail-open
+  な例になっていた。下記のとおり両テストへ
+  `FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1` を必須付与し、T-R2 には
+  恒久 poison への同意 `FANDHE_AI_CUDA_POISON_RECOVERY_ALLOW_UNRECOVERABLE=1`
+  も追加する）:
+  ```
+  FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1 \
+  cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored \
+    poison_recovery_real_probe_restores_active_and_rejects_stale_generation \
+    --test-threads=1 --nocapture
+  FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1 \
+  FANDHE_AI_CUDA_POISON_RECOVERY_ALLOW_UNRECOVERABLE=1 \
+  cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored \
+    poison_from_real_cuda_error_fails_closed_to_unrecoverable \
+    --test-threads=1 --nocapture
+  ```
+  （T-R1 → 既存実機テストの非後退確認（`async_ordering_real_device` 等）
+  → T-R2（単独・最後）の順で実行する。いずれかの環境変数が未設定の
+  まま実行すると `require_opt_in` が標準エラーへ理由を出力したうえで
+  即 `return` し、テストは何も検証せず成功扱いになる点に注意）
 
 ## 13. 出典
 
