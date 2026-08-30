@@ -3467,6 +3467,16 @@ mod tests {
     /// 実行は sanity 目的のみ）。`#[ignore]` のため通常 CI では実行
     /// されない。5 回独立実行の中央値は呼び出し側運用（既存ベンチ
     /// テストと同方針。`docs/perf/cpu-gemm-candle-cpu-retune.md` 参照）。
+    ///
+    /// 候補間の計測順序はサンプル単位でローテーションする（PR #1075
+    /// codex-review 指摘）。固定順で候補ごとに一括計測すると、5 回
+    /// 独立実行してもプロセス内の測定順序自体は毎回同じになるため、
+    /// キャッシュ状態・周波数ブースト・サーマルスロットリングの影響が
+    /// 常に同じ候補（例: 常に 1 番目に測る RowPanel）へ偏る順序バイアスが
+    /// 生じ、実機採用ゲートで候補間の性能差を誤判定しうる。本関数は
+    /// ウォームアップ・本計測いずれもサンプル単位で全候補を round-robin
+    /// 実行し、走査開始位置を反復ごとに 1 つずつずらす（`rotate`）ことで、
+    /// どの候補も「常に先頭」「常に末尾」に固定されないようにする。
     #[test]
     #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用。ローカル smoke 目的のみ \
                 （#1041。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
@@ -3479,44 +3489,85 @@ mod tests {
             xs[xs.len() / 2]
         }
 
-        fn run_variant(
-            variant: GemmDriverVariant,
+        /// `variants` の全候補を 1 プロセス内で計測するが、ウォームアップ・
+        /// 本計測ともサンプル単位で round-robin し、走査開始位置を反復
+        /// ごとにローテーションする。これにより「候補 X は常に他候補より
+        /// 先に（＝周波数ブースト前や熱の低い状態で）測られる」といった
+        /// 順序バイアスを均す（PR #1075 codex-review 指摘）。戻り値は
+        /// `variants` と同じ順序の中央値 GFLOP/s。
+        fn run_variants_interleaved(
+            variants: &[GemmDriverVariant],
             a: &[f32],
             b: &[f32],
             m: usize,
             n: usize,
             k: usize,
             iters: usize,
-        ) -> f64 {
-            let mut c = vec![0.0f32; m * n];
-            // warmup
-            for _ in 0..3 {
-                gemm_blis_parallel_variant(variant, a, b, &mut c, m, n, k, default_blocks())
+        ) -> Vec<f64> {
+            let mut outputs: Vec<Vec<f32>> = variants.iter().map(|_| vec![0.0f32; m * n]).collect();
+
+            // ウォームアップも round-robin＋反復ごとの開始位置ローテーションで
+            // 実行し、ウォームアップ順自体が本計測のキャッシュ・熱状態に
+            // 与える偏りを避ける。
+            for w in 0..3 {
+                for offset in 0..variants.len() {
+                    let idx = (offset + w) % variants.len();
+                    gemm_blis_parallel_variant(
+                        variants[idx],
+                        a,
+                        b,
+                        &mut outputs[idx],
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
                     .unwrap();
+                }
             }
-            let mut samples = Vec::with_capacity(iters);
-            for _ in 0..iters {
-                let start = Instant::now();
-                gemm_blis_parallel_variant(variant, a, b, &mut c, m, n, k, default_blocks())
+
+            let mut samples: Vec<Vec<f64>> =
+                variants.iter().map(|_| Vec::with_capacity(iters)).collect();
+            let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
+            for it in 0..iters {
+                // 反復ごとに走査開始位置を 1 つずつずらす。1 回の反復内では
+                // 全候補を測るため合計サンプル数は候補間で完全に揃ったまま、
+                // 「常に同じ候補が先に測られる」偏りだけを取り除く。
+                for offset in 0..variants.len() {
+                    let idx = (offset + it) % variants.len();
+                    let start = Instant::now();
+                    gemm_blis_parallel_variant(
+                        variants[idx],
+                        a,
+                        b,
+                        &mut outputs[idx],
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
                     .unwrap();
-                let elapsed = start.elapsed().as_secs_f64();
-                let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
-                samples.push(flops / elapsed / 1e9);
+                    let elapsed = start.elapsed().as_secs_f64();
+                    samples[idx].push(flops / elapsed / 1e9);
+                }
             }
-            median(samples)
+
+            samples.into_iter().map(median).collect()
         }
+
+        let variants = [
+            GemmDriverVariant::RowPanel,
+            GemmDriverVariant::SharedB,
+            GemmDriverVariant::SharedBPcOuter,
+        ];
 
         for &dim in &[1024usize, 2048] {
             let (m, n, k) = (dim, dim, dim);
             let a = xorshift32_vec(0xdede_dede, m * k);
             let b = xorshift32_vec(0xefef_efef, k * n);
 
-            for variant in [
-                GemmDriverVariant::RowPanel,
-                GemmDriverVariant::SharedB,
-                GemmDriverVariant::SharedBPcOuter,
-            ] {
-                let gflops = run_variant(variant, &a, &b, m, n, k, 20);
+            let gflops = run_variants_interleaved(&variants, &a, &b, m, n, k, 20);
+            for (variant, gflops) in variants.iter().zip(gflops) {
                 println!("variant={variant:?} size={dim} median_gflops={gflops:.3}");
             }
         }
