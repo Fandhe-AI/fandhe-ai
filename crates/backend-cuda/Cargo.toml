@@ -174,6 +174,29 @@ required-features = ["internal-diagnostics"]
 name = "gemm_f32_variants"
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #1033・PR #1071 codex-review P1 指摘の是正: `gemm_tiled_pipeline_
+# bench` は `TiledPipelineFunction`・`CudaGemm::compile_tiled_pipeline_
+# variant`・`CudaGemm::launch_tiled_pipeline_f32`（いずれもベンチ専用の
+# 常駐 API。`gemm.rs::TiledPipelineFunction` 冒頭コメント参照）を直接使う
+# ため、これらを既定ビルドの公開 API 面から除外した結果として
+# `internal-diagnostics` feature なしではビルドできない。`specialized_mma_
+# parity`（上記）と同じ理由で `required-features` を指定する。
+name = "gemm_tiled_pipeline_bench"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+# イシュー #1033・PR #1071 codex-review P1 指摘の是正: `cpu_cuda_tiled_
+# pipeline_parity` は `CudaGemm::compile_tiled_pipeline_variant`・
+# `CudaGemm::launch_tiled_pipeline_f32`（上記 `gemm_tiled_pipeline_bench`
+# と同じベンチ専用常駐 API）を使う回帰テストを含むため、同じ理由で
+# `internal-diagnostics` feature を要求する。`cargo test --workspace`
+# （feature 未指定）では対象外としてスキップされ、`cargo test
+# --all-features`（CI の test ジョブ・`make test` が使うコマンド）で
+# のみビルド・実行される（`specialized_mma_parity` と同じ契約）。
+name = "cpu_cuda_tiled_pipeline_parity"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

@@ -42,6 +42,7 @@ use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels;
+use crate::kernels_tiled_pipeline;
 use crate::kernels_wmma_opt;
 use crate::module_cache::load_function_cached;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
@@ -284,6 +285,21 @@ pub struct CudaGemm {
     /// NVRTC コンパイルに失敗した場合の理由文字列（`wmma_tf32_staged_error`
     /// と同型の fail-soft 方針。base の可用性へは波及させない）。
     wmma_tf32_staged_swizzle_error: Option<String>,
+    /// イシュー #1033。`kernels_tiled_pipeline::tiled_pipeline_f32_source()`
+    /// （cp.async 多段パイプラインを Tensor Core 不使用の FP32 SIMT 経路へ
+    /// 移植した変種カーネル。既定 3 stage）のコンパイル済みハンドル。
+    /// `wmma_tf32` 系と同じ理由（cp.async は Ampere〈sm_80〉以降限定で
+    /// naive/tiled の 5 カーネルより失敗しうる環境が広い）で `Option` に
+    /// し、コンパイル失敗を `new` の早期 return に合流させない
+    /// （`Self::wmma_tf32` フィールドのドキュメンテーションコメントと同型
+    /// の fail-soft 方針）。本イシューのスコープでは `run_tiled_f32`
+    /// （既定本番経路）を置き換えず、[`CudaGemm::run_tiled_pipeline_f32`]
+    /// で明示的に呼べる選択可能な変種として追加するに留める
+    /// （`kernels_tiled_pipeline.rs` 冒頭コメント「位置づけ・非結線」）。
+    tiled_pipeline: Option<TiledPipelineFunction>,
+    /// `tiled_pipeline` が `None` の場合の失敗理由。`wmma_tf32_error` と
+    /// 同じ理由で文字列化して保持する。
+    tiled_pipeline_error: Option<String>,
 }
 
 /// GEMM 呼び出しの `m`/`n`/`k` とホスト側スライス長の整合性を検証する。
@@ -540,6 +556,151 @@ pub(crate) fn validate_wmma_tf32_staged_k_bound(k: u32) -> Result<(), CudaError>
 /// 選択条件であり拒否ではなくフォールバックが正しい契約のため）。
 pub(crate) fn wmma_tf32_staged_alignment_ok(n: u32, k: u32) -> bool {
     n.is_multiple_of(4) && k.is_multiple_of(4)
+}
+
+/// tiled pipeline カーネル（イシュー #1033）の cp.async 16 バイト転送粒度が
+/// 要求するグローバル側整列制約を検証する。[`wmma_tf32_staged_alignment_ok`]
+/// と同一の根拠（A の行ストライドは `k`、B の行ストライドは `n` であり、
+/// 共有メモリ側のタイル幅が 4 の倍数であることと合わせて `k % 4 == 0 &&
+/// n % 4 == 0` を満たさない限り 16 バイト境界からずれうる。
+/// `kernels_tiled_pipeline.rs` 冒頭コメント「整列制約」参照）。満たさない
+/// 形状は `run_tiled_pipeline_f32` が `CudaError::InvalidShape` を返す
+/// （`wmma_tf32_staged_alignment_ok` はフォールバック経路選択の条件だが、
+/// tiled pipeline は他経路へのフォールバックを持たない単独の選択可能
+/// 変種のため fail-closed に拒否する）。
+pub(crate) fn tiled_pipeline_alignment_ok(n: u32, k: u32) -> bool {
+    n.is_multiple_of(4) && k.is_multiple_of(4)
+}
+
+/// tiled pipeline カーネル固有の `k` 追加上限検証（イシュー #1033）。
+/// [`validate_tiled_k_bound`] と同一の理由（各 K タイル反復で `t * TP_BK +
+/// col0`〈`col0` は最大 `TP_BK - 4`〉相当を C の `int` 算術で計算するため、
+/// `k` が `i32::MAX - (TP_BK - 1)` を超えると当該算術が i32 の範囲で
+/// オーバーフローしうる）で、`TP_BK` 基準に独立して検証する。
+pub(crate) fn validate_tiled_pipeline_k_bound(k: u32) -> Result<(), CudaError> {
+    let limit = i32::MAX as u32 - (kernels_tiled_pipeline::TP_BK - 1);
+    if k > limit {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "k must not exceed i32::MAX - (TP_BK - 1) for tiled pipeline kernel \
+                 tile-index arithmetic: k={k}, limit={limit}, TP_BK={}",
+                kernels_tiled_pipeline::TP_BK
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// tiled pipeline カーネル（イシュー #1033・既定 stage 数固定）の
+/// [`crate::nvrtc::CudaKernelDescriptor`] を構築する。`kernel_specs` の
+/// 固定配列には含めない（本モジュールは #1032 との並行実装衝突回避のため
+/// 独立ファイルに切り出した選択可能変種であり、本番必須 5 カーネル・
+/// WMMA(TF32) 系 3 カーネルの一覧管理とは別枠で扱う。`kernels_tiled_pipeline.rs`
+/// 冒頭コメント「位置づけ・非結線」参照）。
+fn tiled_pipeline_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
+    CudaKernelDescriptor::new_with_compiled_dims(
+        "tiled_pipeline_f32",
+        fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+        kernels_tiled_pipeline::TP_BM,
+        kernels_tiled_pipeline::TP_BN,
+        kernels_tiled_pipeline::TP_BK,
+        kernels_tiled_pipeline::TP_DEFAULT_STAGES,
+        fandhe_ai_tensor_core::dispatch::DType::F32,
+        CompiledDims::DYNAMIC_ALL,
+    )
+}
+
+/// tiled pipeline カーネルのコンパイル済みハンドル（イシュー #1033・
+/// codex-review P0〈PR #1071〉対応）。
+///
+/// [`CudaGemm::launch_tiled_pipeline_f32`] は safe 公開 API でありながら
+/// `unsafe { launch(..) }` を行うため、渡された関数ハンドルが
+/// `gemm_tiled_pipeline_f32`（`TP_BM`/`TP_BN`/`TP_BK` 固定・
+/// `tiled_pipeline_launch_config` が仮定する grid/block 構成・
+/// カーネル引数シグネチャ）と一致することを型で保証する必要がある。
+/// 生の [`CudaFunction`] を直接引数に取ると、呼び出し元が全く無関係な
+/// （別シグネチャ・別 launch config 前提の）関数ハンドルを safe に渡せて
+/// しまい、`unsafe` launch 側の GPU 範囲外アクセス等の前提が崩れる。
+///
+/// 本型はフィールドを非公開にし、[`CudaGemm::compile_tiled_pipeline_variant`]
+/// （公開コンストラクタ）と本モジュール内の `compile_tiled_pipeline`
+/// （`CudaGemm::new` 経由）以外に生成手段を持たない。両者はいずれも
+/// `tiled_pipeline_descriptor`/`compile_tiled_pipeline_variant` 内で
+/// `TP_BM`/`TP_BN`/`TP_BK` 固定・`func_name = "gemm_tiled_pipeline_f32"`
+/// を経由してのみ [`CudaFunction`] を得るため、この型の値は必ず期待する
+/// シグネチャ・タイル構成のカーネルを指すことが構築時点で保証される
+/// （検証済みハンドルへの封じ込め）。
+///
+/// `context_ptr`（codex-review P1 指摘・PR #1071）: 上記のシグネチャ・
+/// タイル構成の一致だけでは、`compile_tiled_pipeline_variant` に**別の
+/// `CudaDevice`（＝別 GPU・別 `CudaContext`）** を渡して得たハンドルを
+/// `CudaGemm::launch_tiled_pipeline_f32`（別インスタンス。別 context の
+/// `stream` を保持）へ safe Rust から渡せてしまう不変条件の穴が残る。
+/// 複数 GPU・複数 context 利用時にこれを行うと、context 固有の
+/// `CUfunction` と、別 context の `stream`／デバイスバッファを混在させた
+/// `unsafe` launch に到達し、CUDA driver レベルの未定義動作
+/// （invalid device context・実質的な OOB リスク）を招きうる。
+/// `Arc<CudaContext>` のポインタ同一性（`context_cache.rs::ContextKey` と
+/// 同じ識別方式）をハンドルへ焼き込み、`launch_tiled_pipeline_f32` が
+/// 起動直前に `self.stream.context()` と fail-closed に一致検証すること
+/// で、非公開フィールドの型保証をシグネチャだけでなく生成元 context にも
+/// 拡張する。`CudaFunction` は内部で `Arc<CudaModule>`→`Arc<CudaContext>`
+/// を強参照し続けるため（cudarc 0.19.8 `driver::safe::core::CudaFunction`
+/// の `module` フィールド）、本型が生存する間はポインタが指す
+/// `CudaContext` の再利用（ABA）は起こらない。
+pub struct TiledPipelineFunction(CudaFunction, usize);
+
+impl TiledPipelineFunction {
+    /// 起動に使う内部の [`CudaFunction`] を返す。本モジュール限定
+    /// （呼び出し元が生ハンドルを取り出して検証を迂回できないようにする
+    /// ため `pub(crate)` に留める）。
+    fn as_cuda_function(&self) -> &CudaFunction {
+        &self.0
+    }
+
+    /// 生成元 `CudaDevice` の `Arc<CudaContext>` ポインタ同一性識別子。
+    /// [`CudaGemm::launch_tiled_pipeline_f32`] が起動直前の context 一致
+    /// 検証に使う（型ドキュメントコメント参照）。
+    fn context_ptr(&self) -> usize {
+        self.1
+    }
+}
+
+/// tiled pipeline カーネル（既定 stage 数固定）を単独で
+/// [`load_function_cached`] 経由でロードする。`compile_wmma_tf32` と同じ
+/// 理由（cp.async は sm_80 以降限定で失敗しうる環境が広い）で `CudaGemm::new`
+/// の早期 return には合流させず、呼び出し元で `tiled_pipeline_error` として
+/// 退避する。
+fn compile_tiled_pipeline(device: &CudaDevice) -> Result<TiledPipelineFunction, CudaError> {
+    let descriptor = tiled_pipeline_descriptor()?;
+    let func = load_function_cached(
+        device,
+        descriptor,
+        kernels_tiled_pipeline::tiled_pipeline_f32_source(),
+        "gemm_tiled_pipeline_f32",
+    )?;
+    let context_ptr = Arc::as_ptr(device.context()) as usize;
+    Ok(TiledPipelineFunction(func, context_ptr))
+}
+
+/// [`wmma_tf32_launch_config`] の tiled pipeline 版。ブロックタイル
+/// `kernels_tiled_pipeline::TP_BM/TP_BN`（64×64）を単位に `div_ceil` で
+/// グリッドを構築する。ブロック次元は `TP_BLOCK_THREADS`（256）の 1 次元
+/// （カーネル内で `tx = tid % TP_THREADS_X`・`ty = tid / TP_THREADS_X` へ
+/// 分解する契約。`kernels_tiled_pipeline.rs` 参照）。末尾ブロックの余剰は
+/// カーネル内の手動境界チェック（REQ-8）に委ねる契約は他 GEMM カーネルと
+/// 共通。
+fn tiled_pipeline_launch_config(m: u32, n: u32) -> LaunchConfig {
+    let grid_dim = (
+        n.div_ceil(kernels_tiled_pipeline::TP_BN),
+        m.div_ceil(kernels_tiled_pipeline::TP_BM),
+        1,
+    );
+    LaunchConfig {
+        grid_dim,
+        block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
+        shared_mem_bytes: 0,
+    }
 }
 
 /// [`kernel_specs`] の要素型。診断・ログ用ラベル（`label`）・NVRTC ソース
@@ -1032,6 +1193,16 @@ impl CudaGemm {
             _ => (None, None, None),
         };
 
+        // イシュー #1033: `kernels_tiled_pipeline::tiled_pipeline_f32_source()`
+        // の cp.async パイプライン契約（`TP_STAGES >= 2` 等）は同モジュール側の
+        // コンパイル時 const assert が保証するため、ここでは追加の const
+        // アサーションを重複させない（`kernels_tiled_pipeline.rs` 冒頭の
+        // 契約検査群を単一の真実源とする）。
+        let (tiled_pipeline, tiled_pipeline_error) = match compile_tiled_pipeline(device) {
+            Ok(func) => (Some(func), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+
         let allocator = context_cache::cached_allocator(device)?;
 
         Ok(Self {
@@ -1051,6 +1222,8 @@ impl CudaGemm {
             wmma_tf32_staged_swizzle,
             wmma_tf32_staged_swizzle_group_width,
             wmma_tf32_staged_swizzle_error,
+            tiled_pipeline,
+            tiled_pipeline_error,
         })
     }
 
@@ -1506,6 +1679,262 @@ impl CudaGemm {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
         self.run_f16_kernel(&self.tiled_f16, a, b, m, n, k, TILED_BLOCK_DIM)
+    }
+
+    /// イシュー #1033: `kernels_tiled_pipeline::tiled_pipeline_f32_source()`
+    /// を実行する。[`Self::run_tiled_f32`] の**選択可能な変種**（本番既定
+    /// 経路は置き換えない。`kernels_tiled_pipeline.rs` 冒頭コメント
+    /// 「位置づけ・非結線」参照）。
+    ///
+    /// ホスト側形状検証は `validate_gemm_dims` に加え、
+    /// `validate_tiled_pipeline_k_bound`・cp.async 16 バイト整列検証
+    /// （`tiled_pipeline_alignment_ok`。満たさない形状は
+    /// `CudaError::InvalidShape` を返す。フォールバック経路を持たない
+    /// 単独の選択可能変種のため fail-closed に拒否する契約）を経由する。
+    /// カーネル自体が使用不能（`new` 時のコンパイル失敗。cp.async は
+    /// sm_80 以降限定）な場合は `CudaError::TiledPipelineUnavailable` を
+    /// 返す。
+    pub fn run_tiled_pipeline_f32(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_tiled_pipeline_k_bound(k)?;
+        if !tiled_pipeline_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 \
+                     (cp.async 16-byte transfer granularity): n={n}, k={k}"
+                ),
+            });
+        }
+        // codex-review P2 指摘（PR #1071）: 形状検証（`validate_gemm_dims`・
+        // `validate_tiled_pipeline_k_bound`・整列検証）を先に完了させ、
+        // `m == 0 || n == 0`（他の `run_*_f32` 系と同じ正当な no-op 形状。
+        // 本関数コメント「ホスト側形状検証」参照）を `self.tiled_pipeline`
+        // ハンドル参照より前に判定する。従来は逆順だったため、cp.async
+        // 非対応環境（sm_80 未満・NVRTC コンパイル失敗等で `tiled_pipeline`
+        // が `None`）では正当なゼロ次元入力まで
+        // `CudaError::TiledPipelineUnavailable` として拒否されていた。
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        let func =
+            self.tiled_pipeline
+                .as_ref()
+                .ok_or_else(|| CudaError::TiledPipelineUnavailable {
+                    detail: self.tiled_pipeline_error.clone().unwrap_or_else(|| {
+                        "tiled pipeline kernel unavailable for an unknown reason".to_string()
+                    }),
+                })?;
+        self.run_f32_kernel(
+            func.as_cuda_function(),
+            a,
+            b,
+            m,
+            n,
+            k,
+            tiled_pipeline_launch_config(m, n),
+        )
+    }
+
+    /// [`Self::run_tiled_pipeline_f32`] が使用可能かを返す（`new` 時の
+    /// cp.async カーネルコンパイルに成功しているか）。`wmma_tf32_opt_available`
+    /// と同じ理由（形状に依らない静的な可用性照会 API。テスト・bench
+    /// example が実行前に判定できるようにするため）で公開する。
+    pub fn tiled_pipeline_available(&self) -> bool {
+        self.tiled_pipeline.is_some()
+    }
+
+    /// [`Self::tiled_pipeline_available`] が `false` の場合の失敗理由
+    /// （`wmma_tf32_opt_unavailable_reason` と同じ理由で公開する）。
+    pub fn tiled_pipeline_unavailable_reason(&self) -> Option<&str> {
+        self.tiled_pipeline_error.as_deref()
+    }
+
+    /// `device` 上で任意のステージ数（2〜4）の tiled pipeline カーネルを
+    /// オンデマンドでコンパイルする（イシュー #1033・
+    /// `examples/gemm_tiled_pipeline_bench.rs` の 3 vs 4 stage 比較専用。
+    /// `kernels_tiled_pipeline.rs` 冒頭コメント「stages=4 版はベンチ用途に
+    /// 限りオンデマンドでコンパイルする」参照）。本番オブジェクト
+    /// （[`new`](Self::new) が保持する既定ステージ数固定の
+    /// `Self::tiled_pipeline`）の初期化コストには影響しない独立した
+    /// コンパイル経路であり、`&self` を取らない（`CudaGemm` の状態に
+    /// 触れず `device` のみから完結するため）。
+    ///
+    /// **公開面ゲート（codex-review P1 指摘・PR #1071）**: 本関数はベンチ
+    /// 専用（`examples/gemm_tiled_pipeline_bench.rs`）であり本番ディスパッチ
+    /// 経路（`run_tiled_pipeline_f32`・既定 `run_tiled_f32`）からは呼ばれ
+    /// ない。`SpecializedMmaKernelHandle::compile`（`gemm_auto.rs`）と同じ
+    /// `internal-diagnostics` feature（既定 off）でゲートし、通常ビルドの
+    /// 安定した公開 API 面から除外する（`lib.rs` の `TiledPipelineFunction`
+    /// re-export コメント参照）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn compile_tiled_pipeline_variant(
+        device: &CudaDevice,
+        stages: u32,
+    ) -> Result<TiledPipelineFunction, CudaError> {
+        let source = kernels_tiled_pipeline::tiled_pipeline_f32_source_with_stages(stages)?;
+        let descriptor = CudaKernelDescriptor::new_with_compiled_dims(
+            "tiled_pipeline_f32_variant",
+            fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+            kernels_tiled_pipeline::TP_BM,
+            kernels_tiled_pipeline::TP_BN,
+            kernels_tiled_pipeline::TP_BK,
+            stages,
+            fandhe_ai_tensor_core::dispatch::DType::F32,
+            CompiledDims::DYNAMIC_ALL,
+        )?;
+        let func = load_function_cached(device, descriptor, &source, "gemm_tiled_pipeline_f32")?;
+        let context_ptr = Arc::as_ptr(device.context()) as usize;
+        Ok(TiledPipelineFunction(func, context_ptr))
+    }
+
+    /// デバイス常駐済みの A/B/C バッファに対して、任意のコンパイル済み
+    /// tiled pipeline カーネル（既定 3 stage の `Self::tiled_pipeline`、
+    /// または [`Self::compile_tiled_pipeline_variant`] が返す任意段数の
+    /// 変種）を起動し、完了を待たずに投入する（`#1013` の非同期投入契約。
+    /// [`Self::launch_tiled_f32`] と同じ「GPU 実行のみ」区間をベンチ計測
+    /// できるよう公開する）。
+    ///
+    /// ホスト側形状検証は [`Self::run_tiled_pipeline_f32`] と同一
+    /// （`validate_gemm_dims`・`validate_tiled_pipeline_k_bound`・
+    /// cp.async 16 バイト整列検証）に加え、デバイスバッファ長
+    /// （`a_dev`/`b_dev`/`c_dev`）が `m/n/k` と 1:1 対応することを起動前に
+    /// 検証する（`launch_tiled_f32` と同じ「safe な公開 API である以上、
+    /// 呼び出し元の契約違反から独立して GPU 側 OOB を防ぐ」判断）。
+    ///
+    /// **context 一致検証（codex-review P1 指摘・PR #1071）**: `func` が
+    /// `self.stream`（＝この `CudaGemm` を構築した `CudaDevice`）と同じ
+    /// `CudaContext` から生成されたことを [`TiledPipelineFunction`] の
+    /// `context_ptr`（型ドキュメントコメント参照）で fail-closed に検証
+    /// する。複数 GPU・複数 `CudaContext` 利用時に、別 context で
+    /// `compile_tiled_pipeline_variant` して得たハンドルをこのインスタンス
+    /// へ渡すと、context 固有の `CUfunction` と本インスタンスの
+    /// `stream`／デバイスバッファを混在させた `unsafe` launch に到達し
+    /// うる（invalid device context・実質的な UB／OOB リスク）ため、
+    /// 起動前に一致しなければ `CudaError::TiledPipelineContextMismatch`
+    /// を返し `unsafe` launch へ到達させない。
+    ///
+    /// **バッファ生成元 context の検証（codex-review P0 指摘・PR #1071）**:
+    /// 上記の `func` 検証だけでは、公開引数 `a_dev`/`b_dev`/`c_dev`
+    /// （いずれも safe な [`CudaSlice`]）が同じ context 由来かどうかを
+    /// 保証できない。`CudaSlice` はどの `CudaDevice`／`CudaContext` で
+    /// 確保したものでも safe Rust から本関数へ渡せてしまうため、
+    /// 呼び出し元が別の `CudaDevice`（＝別 `CudaGemm`）で確保した
+    /// `CudaSlice` を（長さだけ `m/n/k` と一致させて）この
+    /// `CudaGemm`（別 context の `stream`）へ渡すと、context 固有の
+    /// デバイスポインタと本インスタンスの `stream` を混在させた
+    /// `unsafe` launch に到達し、invalid device context・実質的な
+    /// UB／OOB リスクを招く。`CudaSlice::context()`
+    /// （cudarc 0.19.8 `driver::safe::core::CudaSlice::context`）が
+    /// 返す `Arc<CudaContext>` のポインタ同一性を `self.stream.context()`
+    /// と `func` 側と同じ fail-closed 方式で検証し、3 バッファのいずれか
+    /// が不一致なら `CudaError::TiledPipelineContextMismatch` を返して
+    /// `unsafe` launch へ到達させない。
+    ///
+    /// **`m == 0 || n == 0`（codex-review P1 指摘・PR #1071）**:
+    /// `validate_gemm_dims` は naive/tiled 系（`run_f32_kernel` 冒頭コメント
+    /// 参照）と同じくこの形状を正当な no-op として受理するが、そのまま
+    /// `tiled_pipeline_launch_config` を呼ぶと grid_dim の x（n 由来）また
+    /// は y（m 由来）が 0 になり driver launch へ進んでしまう。
+    /// `run_tiled_pipeline_f32` は早期 return で空の結果を返す一方、本関数
+    /// （常駐 API）はこれまで検証後に無条件で launch config を構築して
+    /// いたため、ゼロ次元形状で `CUDA_ERROR_INVALID_VALUE` 等になり得た。
+    /// `validate_output_len` の直後（launch config 構築前）で no-op を
+    /// `Ok(())` として返し、`c_dev`（論理長 0）に触れず・カーネルを起動
+    /// せずに `run_tiled_pipeline_f32` と同じ契約へ揃える。
+    ///
+    /// **公開面ゲート（codex-review P1 指摘・PR #1071）**: 本関数は
+    /// `compile_tiled_pipeline_variant` と同じくベンチ専用の常駐 API
+    /// （`examples/gemm_tiled_pipeline_bench.rs`）であり本番ディスパッチ
+    /// 経路からは呼ばれない。同じ `internal-diagnostics` feature（既定
+    /// off）でゲートする（`lib.rs` の `TiledPipelineFunction` re-export
+    /// コメント参照）。
+    #[cfg(feature = "internal-diagnostics")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_tiled_pipeline_f32(
+        &self,
+        func: &TiledPipelineFunction,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        let self_context_ptr = Arc::as_ptr(self.stream.context()) as usize;
+        if func.context_ptr() != self_context_ptr {
+            return Err(CudaError::TiledPipelineContextMismatch {
+                detail: "TiledPipelineFunction was compiled against a different CudaContext \
+                         (different CudaDevice/GPU) than this CudaGemm instance's stream; \
+                         refusing to launch across mismatched CUDA contexts"
+                    .to_string(),
+            });
+        }
+        // codex-review P0 指摘（PR #1071）: `func` の context 一致検証だけ
+        // では、safe な `CudaSlice` 引数が別 `CudaDevice`／`CudaContext`
+        // 由来である可能性を排除できない（長さの一致のみでは検出不能）。
+        // `CudaSlice::context()` のポインタ同一性を `self_context_ptr` と
+        // 個別に fail-closed 検証し、混在した `unsafe` launch を防ぐ
+        // （関数ドキュメントコメント「バッファ生成元 context の検証」参照）。
+        for (name, buf_context_ptr) in [
+            ("a_dev", Arc::as_ptr(a_dev.context()) as usize),
+            ("b_dev", Arc::as_ptr(b_dev.context()) as usize),
+            ("c_dev", Arc::as_ptr(c_dev.context()) as usize),
+        ] {
+            if buf_context_ptr != self_context_ptr {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: format!(
+                        "{name} was allocated on a different CudaContext (different \
+                         CudaDevice/GPU) than this CudaGemm instance's stream; refusing \
+                         to launch across mismatched CUDA contexts"
+                    ),
+                });
+            }
+        }
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_pipeline_k_bound(k)?;
+        if !tiled_pipeline_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 \
+                     (cp.async 16-byte transfer granularity): n={n}, k={k}"
+                ),
+            });
+        }
+        validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+
+        let cfg = tiled_pipeline_launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `run_f32_kernel`／`launch_tiled_f32` と同一の根拠。
+        // カーネル引数（a_dev/b_dev/c_dev・m_i/n_i/k_i）は上記で検証済みの
+        // m/n/k と 1:1 対応し、カーネル内の手動境界チェック（cp.async
+        // src_size ゼロ充填・エピローグ guarded store。
+        // `kernels_tiled_pipeline.rs` 冒頭コメント「REQ-8」参照）と合わせて
+        // OOB 読み書きが起きない根拠とする。
+        unsafe {
+            self.stream
+                .launch_builder(func.as_cuda_function())
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／明示 `synchronize`）へ委ねる。
+        Ok(())
     }
 
     /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM を実行
@@ -2063,13 +2492,29 @@ impl CudaGemm {
         Ok(c_host)
     }
 
-    /// f32 カーネル共通の起動手続き（naive/tiled 双方から呼ばれる）。
+    /// f32 カーネル共通の起動手続き（naive/tiled/tiled pipeline 共通から
+    /// 呼ばれる）。
     ///
     /// 呼び出し元がホスト側形状検証（`validate_gemm_dims`／
     /// `validate_tiled_k_bound`）を終えている前提で、`clone_htod` で A・B
-    /// を転送し `block_dim` に応じたグリッドでカーネルを起動、
-    /// `synchronize` の後 `clone_dtoh` で C を回収する（PoC-v2-3 の
+    /// を転送し、呼び出し元が構築済みの `cfg`（`LaunchConfig`）でカーネルを
+    /// 起動、`synchronize` の後 `clone_dtoh` で C を回収する（PoC-v2-3 の
     /// `run_f32` と同じ構造）。
+    ///
+    /// **イシュー #1033 Review 指摘対応**: 以前は `block_dim` を受け取り
+    /// 内部で `launch_config(m, n, block_dim)`（`block_dim` = 出力タイル
+    /// サイズという 1 スレッド = 1 出力要素モデルの契約）を呼んでいたが、
+    /// tiled pipeline カーネル（256 スレッド 1 次元ブロックで `TP_BM x
+    /// TP_BN`＝64×64 タイルをレジスタブロッキング担当）はこの契約を満た
+    /// さず、`run_tiled_pipeline_f32` が `block_dim = (TP_BLOCK_THREADS,
+    /// 1, 1) = (256, 1, 1)` を渡すと `grid.x = n.div_ceil(256)` となって
+    /// 正しい `n.div_ceil(TP_BN=64)` より過小になり、`n > 256` の形状で C
+    /// の広範囲が未計算（未初期化メモリ）のまま返っていた。呼び出し元が
+    /// 自身のカーネルの実際のタイル形状に応じた `LaunchConfig` を構築して
+    /// 渡す方式へ変更し、`run_tiled_pipeline_f32` は
+    /// `launch_tiled_pipeline_f32` と同じ `tiled_pipeline_launch_config`
+    /// を使うようにした。naive/tiled は従来どおり `launch_config(m, n,
+    /// NAIVE_BLOCK_DIM/TILED_BLOCK_DIM)` を呼び出し元で構築する。
     #[allow(clippy::too_many_arguments)]
     fn run_f32_kernel(
         &self,

@@ -112,6 +112,40 @@ pub enum CudaError {
     /// 参照）。
     WmmaUnavailable { detail: String },
 
+    /// tiled pipeline GEMM カーネル（イシュー #1033・
+    /// `kernels_tiled_pipeline::tiled_pipeline_f32_source()`）が
+    /// `CudaGemm::new` 時点でコンパイル・ロードに失敗しており、
+    /// `run_tiled_pipeline_f32` を呼べない状態であることを表す。
+    ///
+    /// cp.async（`cp.async.cg.shared.global`/`commit_group`/`wait_group`）
+    /// は sm_80（Ampere）以降限定のため、naive/tiled の 5 カーネルより
+    /// 失敗しうる環境が広い（`WmmaUnavailable` と同じ理由）。`CudaGemm::new`
+    /// はこの失敗を `Err` として早期 return せず本 variant の detail として
+    /// 保持し、naive/tiled 5 カーネルの可用性を道連れにしない。
+    TiledPipelineUnavailable { detail: String },
+
+    /// `CudaGemm::launch_tiled_pipeline_f32`（`internal-diagnostics`
+    /// feature 限定の常駐 API。既定 feature 構成の rustdoc からは非公開の
+    /// ためリンク化しない）に渡された
+    /// `TiledPipelineFunction`、または `a_dev`/`b_dev`/`c_dev`
+    /// （`CudaSlice`）のいずれかが、この `CudaGemm` インスタンスの
+    /// `stream`（＝生成元 `CudaDevice`）とは異なる `CudaContext` から
+    /// 生成されたことを表す（codex-review P1・P0 指摘・PR #1071）。
+    ///
+    /// `compile_tiled_pipeline_variant` は任意の `CudaDevice` からハンドル
+    /// を生成でき、`CudaSlice` も任意の `CudaDevice` で確保したものを
+    /// safe Rust から渡せてしまうため、複数 GPU・複数 context 利用時に
+    /// 別 context 由来のハンドル・バッファを渡せてしまう。context 固有の
+    /// `CUfunction`・デバイスポインタと別 context の `stream` を
+    /// 混在させた `unsafe` launch は invalid device context・実質的な
+    /// UB／OOB リスクに到達しうるため、`launch_tiled_pipeline_f32` は
+    /// 起動前に `func` と 3 バッファそれぞれの `Arc<CudaContext>` の
+    /// ポインタ同一性を個別に検証し、いずれか 1 つでも不一致なら
+    /// この variant で fail-closed に拒否する
+    /// （`gemm.rs::TiledPipelineFunction` のドキュメンテーションコメント・
+    /// `launch_tiled_pipeline_f32` 本体のコメント参照）。
+    TiledPipelineContextMismatch { detail: String },
+
     /// カーネルソースのテンプレート展開（`kernels_mma::render_mma_f16`・
     /// `kernels_wmma_opt::render_wmma_tf32_opt`／`render_wmma_f16_opt`。
     /// イシュー #516）に渡された shape／タイル／段数の構成値が、境界検査・
@@ -268,6 +302,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::WmmaUnavailable { detail } => {
                 write!(f, "WMMA(TF32) GEMM kernel unavailable: {detail}")
+            }
+            CudaError::TiledPipelineUnavailable { detail } => {
+                write!(f, "tiled pipeline GEMM kernel unavailable: {detail}")
+            }
+            CudaError::TiledPipelineContextMismatch { detail } => {
+                write!(f, "tiled pipeline kernel context mismatch: {detail}")
             }
             CudaError::InvalidKernelConfig { detail } => {
                 write!(f, "invalid kernel template config: {detail}")
