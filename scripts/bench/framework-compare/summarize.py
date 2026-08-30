@@ -345,8 +345,16 @@ def gemm_checksum_reference(rows):
     「突合不能」として区別する（`gemm_checksum_unverifiable` 参照）。
 
     戻り値: {size: (ref_value, ref_source_label, candidate_count)}
+
+    `size` は `_valid_gate_size` で検証済みの値のみを対象にする（イシュー
+    #1051 codex-review P0 指摘・PR #1082: 本関数は `target_gate` の起点
+    〈`gemm_checksum_mismatches` 経由〉から呼ばれるため、外部 JSONL の
+    `size` が配列・文字列混在等の不正値だと集合化・`sorted()` で例外終了
+    しうる。不正な size を持つ行はここで黙って除外する〈本関数の役割は
+    checksum 参照値の算出であり、size 自体の妥当性判定は `target_gate` 側
+    の `_valid_gate_size` 検査が別途「判定不能」として明示する〉）。
     """
-    sizes = sorted({r["size"] for r in rows if r["task"] == "gemm"})
+    sizes = sorted({r["size"] for r in rows if r["task"] == "gemm" and _valid_gate_size(r.get("size"))})
     result = {}
     for size in sizes:
         candidates = [
@@ -418,6 +426,16 @@ def gemm_checksum_mismatches(rows):
     for r in rows:
         if r["task"] != "gemm":
             continue
+        # `reference` のキーは `_valid_gate_size` 検証済みの size のみ
+        # （`gemm_checksum_reference` docstring 参照）。`r["size"]` が不正
+        # （配列・オブジェクト等の unhashable 値）だと `dict.get()` 自体が
+        # `TypeError: unhashable type` を送出し呼び出し元（`target_gate`
+        # は本関数を起点で呼ぶ）が例外終了する（イシュー #1051
+        # codex-review P0 指摘・PR #1082 2 巡目）。不正な size の行は
+        # ここでは扱わず、判定不能レコード化は呼び出し元
+        # （`target_gate` の `invalid_size_rows`）の責務とする。
+        if not _valid_gate_size(r.get("size")):
+            continue
         ref, ref_label, candidate_count = reference.get(r["size"], (None, None, 0))
         if ref is None:
             if candidate_count >= 2:
@@ -444,6 +462,11 @@ def gemm_checksum_unverifiable(rows):
     unverifiable = []
     for r in rows:
         if r["task"] != "gemm":
+            continue
+        # `gemm_checksum_mismatches` と同じ理由（不正 size での
+        # `dict.get()` 例外終了防止。イシュー #1051 codex-review P0
+        # 指摘 2 巡目・PR #1082）で、不正な size の行はここでは扱わない。
+        if not _valid_gate_size(r.get("size")):
             continue
         _, _, candidate_count = reference.get(r["size"], (None, None, 0))
         if candidate_count <= 1:
@@ -489,6 +512,22 @@ def _non_integral(v):
     みを判定対象とする。
     """
     return isinstance(v, float) and not v.is_integer()
+
+
+def _valid_gate_size(v):
+    """`size` フィールドを set 内包・`sorted()` へ渡す前に検証する。
+
+    producer 契約（`bench-common::parse_cli_from` の `--size`）上 `size` は
+    常に正の整数だが、外部 JSONL の値は型・値域未検証のまま信頼できない
+    （security.md「外部フォーマットのパース時検証（A03）」）。配列・
+    オブジェクト等の unhashable な値は `{r["size"] for r in ...}` の集合化で
+    `TypeError: unhashable type` を、文字列と整数の混在は `sorted()` の
+    比較演算で `TypeError` を、それぞれ送出し集計全体を例外終了させうる
+    （イシュー #1051 codex-review P0 指摘・PR #1082）。`_is_plain_number` で
+    bool・NaN・Infinity・非数値をまず弾き、整数性・正値を追加検証する
+    （`gemm_checksum_reference`・`target_gate` 双方の size 集合化で共有する）。
+    """
+    return _is_plain_number(v) and not _non_integral(v) and int(v) > 0
 
 
 def _format_maybe_huge(v):
@@ -638,22 +677,52 @@ def _row_key(r):
 # 重複出力される。ゲート判定は無音で理由文字列のみ返す）。
 
 
-def _pick_row_for_gate(rows, fw, task, device, size=None):
+def _pick_row_for_gate(rows, fw, task, device, size):
     """ゲート判定に使う行を選ぶ: reuse 行があれば優先し、無ければ fresh。
 
-    戻り値は `(row, mode)`。該当行が無ければ `(None, None)`。gemm/train は
-    fandhe-ai に reuse 行が存在しうる（イシュー #925/#957）。infer は
-    reuse モード自体が存在しないため常に fresh へフォールバックする
-    （`bench-fandhe` の `--mode` allowlist は gemm/train 用。モジュール
-    docstring 参照）。
+    `size` は必須（唯一の呼び出し元 `target_gate` は `_valid_gate_size` で
+    検証済みの整数を常に渡す）。`size=None`（size 条件を適用しない）を
+    許容すると、複数 size を持つフレームワークで後述の重複検出が
+    「異なる size の行が複数ある」を「重複キー」と誤検知するため、あえて
+    既定値を持たせず必須引数にしている（codex-review 指摘・PR #1082）。
+
+    戻り値は `(row, mode, dup_reason)`。該当行が無ければ
+    `(None, None, None)`。gemm/train は fandhe-ai に reuse 行が存在しうる
+    （イシュー #925/#957）。infer は reuse モード自体が存在しないため
+    常に fresh へフォールバックする（`bench-fandhe` の `--mode` allowlist
+    は gemm/train 用。モジュール docstring 参照）。
+
+    同じ `(framework, task, device, size, mode)` に複数行が存在する場合は
+    `dup_reason`（`None` 以外）を返し `row`/`mode` は `None` にする
+    （codex-review P0 指摘・PR #1082: 旧実装は `get()` が返す最初に一致
+    した行だけを採用し残りを検証しなかった。producer 側の重複バグ・
+    JSONL の手組み改変で同一キーに正常行と壊れた行が混在した場合、
+    出現順次第で遅い〈未達を示す〉fandhe-ai 行を握りつぶし「達成」判定を
+    返してしまう fail-open があったため、重複自体を判定不能として扱う）。
     """
-    row = get(rows, fw, task, device, size, mode="reuse")
-    if row is not None:
-        return row, "reuse"
-    row = get(rows, fw, task, device, size, mode="fresh")
-    if row is not None:
-        return row, "fresh"
-    return None, None
+    for mode in ("reuse", "fresh"):
+        matches = [
+            r
+            for r in rows
+            if r["framework"] == fw
+            and r["task"] == task
+            and r["device"] == device
+            and r["mode"] == mode
+            and r["size"] == size
+        ]
+        if len(matches) > 1:
+            return (
+                None,
+                None,
+                (
+                    f"重複キー: framework={fw}, task={task}, device={device}, "
+                    f"size={size}, mode={mode} の行が {len(matches)} 件あり "
+                    "一意に選べない"
+                ),
+            )
+        if matches:
+            return matches[0], mode, None
+    return None, None, None
 
 
 def _train_reuse_row_invalid_reason(rows, r):
@@ -664,6 +733,22 @@ def _train_reuse_row_invalid_reason(rows, r):
     単一行に対して適用する。fresh 行が存在しない（比較対象なし）だけの
     場合は値そのものの正当性を否定しないため無効扱いにしない
     （`section()` の同節コメント参照）。
+
+    fresh 側の検索は `r` と同一 `size` に限定する（Bugbot Medium 指摘・
+    PR #1082: `size` を渡さず `get()` を呼ぶと `size=None`＝size 条件
+    無視となり、複数 size のデータが混在する場合に別 size の fresh 行と
+    誤って突合される。正常な複数 size データを判定不能に倒す、または
+    壊れた reuse 行がたまたま別 size の先頭 fresh checksum と一致して
+    無効判定をすり抜けるおそれがあったため、同一 size の fresh 行のみを
+    比較対象にする）。
+
+    同一 size の fresh 行が複数存在する場合は `_pick_row_for_gate` と
+    同じ理由（advisor 指摘・PR #1082 3 巡目）で判定不能に倒す:
+    `get()` は最初に一致した行だけを返し残りを検証しないため、複数の
+    fresh 行のうち checksum が一致するものが先に現れると、他の
+    不一致な fresh 行を握りつぶして「有効」判定してしまう fail-open が
+    ありうる（`_pick_row_for_gate` の重複キー検出は reuse 側のみを見る
+    ため、fresh 側 1 行を選ぶ本関数のこの箇所は独立に検証が必要）。
     """
     r_median = _safe_time_s(r.get("median_s"))
     r_q1 = _safe_time_s(r.get("q1_s"))
@@ -671,9 +756,20 @@ def _train_reuse_row_invalid_reason(rows, r):
     r_init = _safe_time_s(r.get("init_s"))
     if r_median is None or r_q1 is None or r_q3 is None or r_init is None:
         return "時間値が不正な値"
-    fresh = get(rows, r["framework"], "train", r["device"], mode="fresh")
-    if fresh is None:
+    fresh_matches = [
+        x
+        for x in rows
+        if x["framework"] == r["framework"]
+        and x["task"] == "train"
+        and x["device"] == r["device"]
+        and x["mode"] == "fresh"
+        and x["size"] == r.get("size")
+    ]
+    if len(fresh_matches) > 1:
+        return f"同一 size の fresh 行が {len(fresh_matches)} 件あり突合先が一意に決まらない"
+    if not fresh_matches:
         return None
+    fresh = fresh_matches[0]
     fresh_median = _safe_time_s(fresh.get("median_s"))
     if fresh_median is None:
         return "fresh 側の時間値が不正な値"
@@ -782,22 +878,22 @@ def target_gate(rows, target):
             # 実測から都度導出し、gemm と同じ経路で 1 size ごとに突合
             # する（size が実際に 1 つしか無ければ従来と同じ挙動になり、
             # 複数あれば取りこぼさず全て判定する）。
-            sizes = sorted(
-                {
-                    r["size"]
-                    for r in rows
-                    if r["task"] == task
-                    and r["device"] == device
-                    and r["framework"] in ("fandhe-ai", target)
-                }
-            )
-            if not sizes:
-                # P0: このデバイスでは task が fandhe-ai/target
-                # 双方とも 0 件（サイズが 1 つも存在しない）。
-                # sizes が空のまま `for size in sizes` を素通りさせる
-                # と、このデバイス×task の組が gate_records_all へ
-                # 一切現れず「全達成」の誤判定に加担する。size=None
-                # の判定不能レコードを明示的に積む。
+            candidate_rows = [
+                r
+                for r in rows
+                if r["task"] == task
+                and r["device"] == device
+                and r["framework"] in ("fandhe-ai", target)
+            ]
+            # 外部 JSONL 由来の `size` を検証せず set 内包・`sorted()` へ
+            # 渡すと、配列／オブジェクト混入で `unhashable type`、文字列と
+            # 整数の混在で比較 `TypeError` となり集計全体が例外終了しうる
+            # （codex-review P0 指摘・PR #1082）。producer 契約どおりの
+            # 値（正の整数）のみを `sizes` に採用し、不正値を持つ行は
+            # 例外にせず判定不能レコードへ倒す（security.md A03）。
+            invalid_size_rows = [r for r in candidate_rows if not _valid_gate_size(r.get("size"))]
+            sizes = sorted({int(r["size"]) for r in candidate_rows if _valid_gate_size(r.get("size"))})
+            if invalid_size_rows:
                 records.append(
                     {
                         "task": task,
@@ -809,14 +905,46 @@ def target_gate(rows, target):
                         "target_median": None,
                         "ratio": None,
                         "status": "undeterminable",
-                        "reason": f"{task} 未計測（fandhe-ai/target 双方 0 件）",
+                        "reason": (
+                            f"{task} の size が不正な値（正の整数以外）の行が "
+                            f"{len(invalid_size_rows)} 件"
+                        ),
                         "note": None,
                     }
                 )
+            if not sizes:
+                # P0: このデバイスでは task が fandhe-ai/target
+                # 双方とも 0 件（サイズが 1 つも存在しない）。
+                # sizes が空のまま `for size in sizes` を素通りさせる
+                # と、このデバイス×task の組が gate_records_all へ
+                # 一切現れず「全達成」の誤判定に加担する。size=None
+                # の判定不能レコードを明示的に積む。ただし不正 size 行が
+                # 存在する場合は上記で既に判定不能レコードを積んでいる
+                # ため、ここでの重複追加は避ける。
+                if not invalid_size_rows:
+                    records.append(
+                        {
+                            "task": task,
+                            "device": device,
+                            "size": None,
+                            "fandhe_mode": None,
+                            "target_mode": None,
+                            "fandhe_median": None,
+                            "target_median": None,
+                            "ratio": None,
+                            "status": "undeterminable",
+                            "reason": f"{task} 未計測（fandhe-ai/target 双方 0 件）",
+                            "note": None,
+                        }
+                    )
                 continue
             for size in sizes:
-                fandhe_row, fandhe_mode = _pick_row_for_gate(rows, "fandhe-ai", task, device, size)
-                target_row, target_mode = _pick_row_for_gate(rows, target, task, device, size)
+                fandhe_row, fandhe_mode, fandhe_dup_reason = _pick_row_for_gate(
+                    rows, "fandhe-ai", task, device, size
+                )
+                target_row, target_mode, target_dup_reason = _pick_row_for_gate(
+                    rows, target, task, device, size
+                )
                 record = {
                     "task": task,
                     "device": device,
@@ -830,6 +958,11 @@ def target_gate(rows, target):
                     "reason": None,
                     "note": None,
                 }
+                if fandhe_dup_reason is not None or target_dup_reason is not None:
+                    parts = [r for r in (fandhe_dup_reason, target_dup_reason) if r is not None]
+                    record["reason"] = "; ".join(parts)
+                    records.append(record)
+                    continue
                 if fandhe_row is None:
                     record["reason"] = "fandhe-ai 未計測"
                     records.append(record)
@@ -1246,8 +1379,18 @@ def section(path, rows):
 
     lines.append("### (a) GEMM（C = A×B、f32、正方行列）\n")
     for device in devices_in(rows, "gemm"):
+        # `_valid_gate_size` で不正な size（配列・文字列混在等）を除外して
+        # から集合化・`sorted()` する（イシュー #1051 codex-review 指摘の
+        # 防御的スイープ・PR #1082。target_gate 側の同一パターンと同じ
+        # 理由: 外部 JSONL 由来の size を未検証のまま渡すと
+        # `unhashable type`/比較 `TypeError` で `main()` 全体が
+        # traceback 停止しうる）。
         sizes = sorted(
-            {r["size"] for r in rows if r["task"] == "gemm" and r["device"] == device}
+            {
+                r["size"]
+                for r in rows
+                if r["task"] == "gemm" and r["device"] == device and _valid_gate_size(r.get("size"))
+            }
         )
         lines.append(f"#### {DEVICE_LABEL[device]}\n")
         lines.append("| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s |")
@@ -1277,11 +1420,16 @@ def section(path, rows):
             "### (a') GEMM（デバイス/tape 再利用モード。初期化コストとカーネル実行の分離。イシュー #925）\n"
         )
         for device in devices_in(rows, "gemm", mode="reuse"):
+            # (a) 節と同じ防御（`_valid_gate_size`。イシュー #1051
+            # codex-review 指摘の防御的スイープ・PR #1082）。
             sizes = sorted(
                 {
                     r["size"]
                     for r in rows
-                    if r["task"] == "gemm" and r["device"] == device and r["mode"] == "reuse"
+                    if r["task"] == "gemm"
+                    and r["device"] == device
+                    and r["mode"] == "reuse"
+                    and _valid_gate_size(r.get("size"))
                 }
             )
             lines.append(f"#### {DEVICE_LABEL[device]}\n")
@@ -1496,8 +1644,20 @@ def section(path, rows):
     # 一致」表示に含まれ検証済みと誤認させていた問題の修正）。
     unverifiable_rows = gemm_checksum_unverifiable(rows)
     unverifiable_keys = {_row_key(r) for r in unverifiable_rows}
+    # `_row_key(r)` は `r["size"]` を含むタプルのため、size が不正
+    # （配列等の unhashable 値）だとタプル自体が unhashable になり
+    # `not in unverifiable_keys` のハッシュ計算で `TypeError` を送出する
+    # （イシュー #1051 codex-review 指摘の防御的スイープ・PR #1082）。
+    # `gemm_checksum_unverifiable`/`gemm_checksum_mismatches` 側で既に
+    # 不正 size の行を除外しているのと同じ理由で、ここでも
+    # `_valid_gate_size` で事前に弾く（不正 size の行は「検証済み」にも
+    # 「突合不能」にも数えない）。
     verified_total = sum(
-        1 for r in rows if r["task"] == "gemm" and _row_key(r) not in unverifiable_keys
+        1
+        for r in rows
+        if r["task"] == "gemm"
+        and _valid_gate_size(r.get("size"))
+        and _row_key(r) not in unverifiable_keys
     )
     if mismatches:
         for r, ref, ref_label in mismatches:

@@ -424,6 +424,18 @@ class GemmParityHelpersTests(unittest.TestCase):
 
 
 class SectionRenderingTests(unittest.TestCase):
+    def test_gemm_row_with_unhashable_size_does_not_raise(self):
+        # イシュー #1051 codex-review 指摘の防御的スイープ（PR #1082）:
+        # (a)/(a') 節の size 集合化・`sorted()` も `target_gate` と同じ
+        # `_valid_gate_size` フィルタを適用する。`main()` は `section()`
+        # と `--target` ゲートを同一実行内で呼ぶため、片方だけ防御しても
+        # 不正 size の gemm 行で全体が traceback 停止しうる。
+        rows = [dict(_with_parity(_base_row()), size=["not", "hashable"])]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, _, _, _, _, _ = summarize.section("dummy.jsonl", rows)  # 例外を送出しないこと
+        self.assertIn("### (a) GEMM", "\n".join(lines))
+
     def test_fail_row_marked_invalid_with_dash_gflops(self):
         rows = [_with_parity(_base_row(), fail_count=5, max_abs_err=1.2e-3, max_rel_err=4.5e-2)]
         buf = io.StringIO()
@@ -1391,6 +1403,196 @@ class TargetGateTests(unittest.TestCase):
         self.assertEqual(infer_recs[64]["status"], "achieved")
         self.assertEqual(infer_recs[128]["status"], "unmet")
 
+    def test_duplicate_key_row_is_undeterminable_not_fail_open(self):
+        # P0 修正（codex-review 指摘・PR #1082）: 同一
+        # (framework, task, device, size, mode) に複数行が存在する場合、
+        # 旧実装は `get()` が返す先頭行だけを採用し残りを検証しなかった。
+        # 正常行（速い）を先に置き、未達（遅い）な fandhe-ai 行を後置する
+        # と未達を隠して「達成」判定を返してしまう fail-open があった。
+        # ここでは fandhe-ai/gemm/cpu/size=256/fresh に 2 行を与え、先頭を
+        # 速い行（達成条件を満たす）にしても「重複キー」で判定不能へ倒れ、
+        # 誤って「達成」を返さないことを確認する。
+        rows = [
+            dict(_with_parity(_base_row(framework="fandhe-ai", mode="fresh")), median_s=0.0001),
+            dict(_with_parity(_base_row(framework="fandhe-ai", mode="fresh")), median_s=0.5),
+            _with_parity(_base_row(framework="candle", mode="fresh")),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("重複キー", rec["reason"])
+        self.assertIsNone(rec["fandhe_median"])
+
+    def test_duplicate_key_on_target_side_is_also_undeterminable(self):
+        # 上記と対称のケース: 重複が target（candle）側にある場合も同様に
+        # 判定不能へ倒れることを確認する。
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+            dict(_with_parity(_base_row(framework="candle", mode="fresh")), median_s=0.001),
+            dict(_with_parity(_base_row(framework="candle", mode="fresh")), median_s=0.002),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("重複キー", rec["reason"])
+
+    def test_invalid_size_values_do_not_raise_and_are_undeterminable(self):
+        # P0 修正（codex-review 指摘・PR #1082）: 外部 JSONL 由来の `size`
+        # を型・値域未検証のまま set 内包・`sorted()` へ渡すと、配列／
+        # オブジェクトは `unhashable type`、文字列と整数の混在は比較
+        # `TypeError` で集計全体が traceback 停止しうる。producer 契約
+        # （正の整数）に反する値は例外にせず判定不能レコードへ倒す
+        # （security.md「外部フォーマットのパース時検証（A03）」）。
+        bad_sizes = [
+            ["not", "hashable"],
+            {"nested": "object"},
+            "64",  # candle 側の int 64 と型が混在し sorted() 比較で TypeError になりうる
+            0,
+            -5,
+            1.5,
+            True,
+        ]
+        for bad_size in bad_sizes:
+            with self.subTest(bad_size=bad_size):
+                rows = [
+                    dict(_infer_row(framework="fandhe-ai"), size=bad_size),
+                    _infer_row(framework="candle"),
+                ]
+                # 例外を送出せず判定不能レコードを返すことを確認する
+                # （fail-closed。旧実装は traceback で停止していた）。
+                records = summarize.target_gate(rows, "candle")
+                invalid_rec = next(
+                    r for r in records if r["task"] == "infer" and r["size"] is None
+                )
+                self.assertEqual(invalid_rec["status"], "undeterminable")
+                self.assertIn("size が不正な値", invalid_rec["reason"])
+                # candle 側の有効な size=64 は不正値混入の影響を受けず
+                # 独立に判定される（fandhe-ai 側に有効な size が無いため
+                # 「fandhe-ai 未計測」となる）。
+                valid_rec = next(
+                    r for r in records if r["task"] == "infer" and r["size"] == 64
+                )
+                self.assertEqual(valid_rec["status"], "undeterminable")
+                self.assertIn("fandhe-ai 未計測", valid_rec["reason"])
+
+    def test_gemm_row_with_unhashable_size_does_not_raise(self):
+        # advisor 指摘（PR #1082 2 巡目）: `target_gate` は
+        # `gemm_checksum_mismatches(rows)` を先頭で無条件に呼ぶため、
+        # 不正な size を持つ gemm 行は task フィルタで弾かれる infer 行の
+        # テストでは再現しない。`gemm_checksum_mismatches`/
+        # `gemm_checksum_unverifiable` 内の `reference.get(r["size"], ...)`
+        # は `size` が配列等の unhashable 値だと `TypeError` を送出しうる
+        # （`gemm_checksum_reference` 側の `_valid_gate_size` フィルタとは
+        # 別の dict 参照経路のため個別に防御が必要）。
+        rows = [
+            dict(_with_parity(_base_row(framework="fandhe-ai")), size=["x", "y"]),
+            _with_parity(_base_row(framework="candle")),
+        ]
+        records = summarize.target_gate(rows, "candle")  # 例外を送出しないこと
+        invalid_rec = next(r for r in records if r["task"] == "gemm" and r["size"] is None)
+        self.assertEqual(invalid_rec["status"], "undeterminable")
+        self.assertIn("size が不正な値", invalid_rec["reason"])
+
+    def test_train_reuse_size_matches_same_size_fresh_row_not_other_size(self):
+        # Bugbot Medium 指摘（PR #1082）: `_train_reuse_row_invalid_reason`
+        # が fresh 行の検索に `size` を渡していなかったため、複数 size の
+        # train データが存在する場合に reuse 行が別 size の fresh 行と
+        # 誤って突合されていた。ここでは size=64/128 それぞれで
+        # reuse checksum と同一 size の fresh checksum が一致する
+        # （正当な）データを与え、両方とも達成として正しく判定される
+        # ことを確認する（size を渡さない旧実装では size=128 の reuse
+        # 行が size=64 の fresh checksum〈0.08〉と誤って突合され
+        # 不一致「無効データ」判定に落ちてしまっていた）。
+        rows = [
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.01),
+                size=64,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=0.08, init_s=0.001, median_s=0.005
+                ),
+                size=64,
+            ),
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=5.0, median_s=0.02),
+                size=128,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=5.0, init_s=0.002, median_s=0.015
+                ),
+                size=128,
+            ),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=64),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=128),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        train_recs = {r["size"]: r for r in records if r["task"] == "train"}
+        self.assertEqual(set(train_recs), {64, 128})
+        self.assertEqual(train_recs[64]["status"], "achieved")
+        self.assertEqual(train_recs[128]["status"], "achieved")
+
+    def test_train_reuse_size_mismatch_detected_against_same_size_fresh(self):
+        # 上記と対の観点: reuse checksum が「同一 size」の fresh と
+        # 不一致な場合は正しく無効判定される（別 size の fresh とたまたま
+        # 一致してすり抜けない）ことを確認する。size=64 は reuse checksum
+        # が同一 size fresh（0.08）と不一致（999.0）。size=128 の fresh
+        # checksum（0.08 と同じ値）とは偶然一致してしまう配置にしてあり、
+        # size を渡さない旧実装ならこの一致をすり抜けて「達成」と
+        # 誤判定しうる。
+        rows = [
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.01),
+                size=64,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=999.0, init_s=0.001, median_s=0.005
+                ),
+                size=64,
+            ),
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.02),
+                size=128,
+            ),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=64),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train" and r["size"] == 64)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+
+    def test_train_reuse_duplicate_fresh_row_is_undeterminable_not_fail_open(self):
+        # advisor 指摘（PR #1082 3 巡目）: `_train_reuse_row_invalid_reason`
+        # の fresh 側検索が `get()`（最初に一致した行だけを返す）のままだと、
+        # 同一 size に複数 fresh 行がある場合、先頭が checksum 一致する
+        # fresh 行であれば他の不一致な fresh 行を握りつぶして「有効」判定
+        # してしまう。ここでは reuse checksum（999.0）と一致する fresh
+        # 行を先頭に、不一致な fresh 行（0.08）を 2 番目に置いても
+        # 「達成」側へすり抜けず判定不能になることを確認する。
+        rows = [
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=999.0, median_s=0.01),
+                size=64,
+            ),
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.011),
+                size=64,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=999.0, init_s=0.001, median_s=0.005
+                ),
+                size=64,
+            ),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=64),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train" and r["size"] == 64)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+
 
 class MainTargetExitCodeTests(unittest.TestCase):
     def _run_main(self, path, target=None, strict=False):
@@ -1472,6 +1674,38 @@ class MainTargetExitCodeTests(unittest.TestCase):
             self.assertEqual(code, 3)
             self.assertIn("判定不能", err)
             self.assertIn("目標達成ゲート", out)
+        finally:
+            os.unlink(path)
+
+    def test_invalid_size_exits_3_via_main(self):
+        # main() の実配線経路（`--target` あり・`--strict` なし）でも
+        # size 不正検出が exit 3 に到達することを確認する（records の
+        # 中身だけでなく main() の集計・終了コード判定まで含めた回帰）。
+        path = _write_jsonl(
+            [
+                dict(_infer_row(framework="fandhe-ai"), size=["bad"]),
+                _infer_row(framework="candle"),
+            ]
+        )
+        try:
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+        finally:
+            os.unlink(path)
+
+    def test_duplicate_key_exits_3_via_main(self):
+        path = _write_jsonl(
+            [
+                dict(_with_parity(_base_row(framework="fandhe-ai")), median_s=0.0001),
+                dict(_with_parity(_base_row(framework="fandhe-ai")), median_s=0.5),
+                _with_parity(_base_row(framework="candle")),
+            ]
+        )
+        try:
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
         finally:
             os.unlink(path)
 
