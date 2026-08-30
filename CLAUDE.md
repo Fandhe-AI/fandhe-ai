@@ -101,7 +101,7 @@ fandhe-ai/
     │   ├── cuda-gemm-bottleneck-diagnosis.md # CUDA GEMM M=N=K=4096 データ再利用崩壊の定量診断（#486）
     │   ├── metal-gemm-bottleneck-diagnosis.md # Metal GEMM 1024 以降スループット頭打ちの定量診断（#487）
     │   ├── metal-gemm-splitk-shapes.md # split-K 対象形状（K 支配的非正方）の劣化定量化実測記録（#810）
-    │   ├── cuda-fresh-gemm-n2048-overhead-diagnosis.md # fresh モード CUDA GEMM N=2048 固有の約 166 ms 残存オーバーヘッド診断（実機未実測・計測コード先行整備。#956）
+    │   ├── cuda-fresh-gemm-n2048-overhead-diagnosis.md # fresh モード CUDA GEMM N=2048 固有の約 166〜184 ms 残存オーバーヘッド診断（DGX Spark GB10 実機実測完了・HEAD 時点で非再現を確認・コード修正なし。#956・#1025）
     │   ├── burn-wgpu-metal-gemm-zero-result.md # framework-compare の Burn(wgpu) Metal GEMM N>=512 全ゼロの原因切り分け（upstream 既知バグ。#965）
     │   ├── cuda-tensor-core-tolerance-opt-remeasurement.md # opt 版 WMMA TF32 カーネルの数値一致誤差分布再実測（GB10 実機計測完了・sm_86 との差分なし。#994・#995）
     │   ├── cuda-tensor-core-tolerance-gb10-scale-sweep.md # GB10（sm_121）実機での入力スケールスイープ再実測・sm_86 との世代差記録（#995）
