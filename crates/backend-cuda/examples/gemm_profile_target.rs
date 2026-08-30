@@ -149,10 +149,21 @@ const SEED: u64 = 0xC0FFEE;
 const ALLOC_ZEROS_LAUNCHES: usize = 0;
 
 /// 対象経路（CLI `--path` の allowlist）。
+///
+/// `TiledF32Swizzle`（イシュー #1034）は本番既定 f32 経路（tiled f32・
+/// `kernels::TILED_F32`）へブロック実行順スウィズルを適用した診断用
+/// 変種（`CudaGemm::new_with_tiled_f32_swizzle`。`internal-diagnostics`
+/// feature 限定・本番未結線）を起動する。既存 2 経路（`WmmaTf32`／
+/// `MmaF16`）と異なり base（無 swizzle）自体をこのバイナリで計測する
+/// 経路は用意しない（tiled f32 base は naive/tiled 4 カーネルの一つで
+/// 常に利用可能なため、本ツールの主目的である「未成熟カーネルの ncu
+/// 診断」の対象外。base との比較は `examples/
+/// gemm_tiled_f32_swizzle_bench.rs` の壁時計 A/B が担う）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Path {
     WmmaTf32,
     MmaF16,
+    TiledF32Swizzle,
 }
 
 impl Path {
@@ -160,6 +171,7 @@ impl Path {
         match s {
             "wmma_tf32" => Some(Self::WmmaTf32),
             "mma_f16" => Some(Self::MmaF16),
+            "tiled_f32_swizzle" => Some(Self::TiledF32Swizzle),
             _ => None,
         }
     }
@@ -168,6 +180,7 @@ impl Path {
         match self {
             Self::WmmaTf32 => "wmma_tf32",
             Self::MmaF16 => "mma_f16",
+            Self::TiledF32Swizzle => "tiled_f32_swizzle",
         }
     }
 }
@@ -196,6 +209,12 @@ struct Args {
     /// メモリ変種（本番と同一レイアウト・同一 occupancy）を起動する
     /// （モジュール冒頭ドキュメンテーションコメント参照）。
     b_pad: Option<u32>,
+    /// `--group-width` 指定値（イシュー #1034。`--path tiled_f32_swizzle`
+    /// 限定）。`None`（既定）は `device.multiprocessor_count()` からの
+    /// 動的選択（`diagnostics::tiled_f32_swizzle_group_width`）を、
+    /// `Some(v)` は明示指定の幅を `CudaGemm::new_with_tiled_f32_swizzle`
+    /// へ渡す。
+    group_width: Option<u32>,
     /// `CudaDevice::new` が `CudaError::DriverUnavailable`（CUDA 非搭載
     /// 環境）を返した場合に終了コード 0 でスキップすることを明示的に
     /// 許可するフラグ。既定は `false`（非 0 終了）。`docs/perf/`
@@ -209,7 +228,22 @@ struct Args {
     allow_missing_driver: bool,
 }
 
-const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--allow-missing-driver]";
+const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16|tiled_f32_swizzle} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--group-width N (tiled_f32_swizzle only)] [--allow-missing-driver]";
+
+/// `--group-width` は `CudaGemm::new_with_tiled_f32_swizzle`（イシュー
+/// #1034）でのみ意味を持つ tiled f32 swizzle 固有のパラメータのため、
+/// `--path tiled_f32_swizzle` 以外との併用を拒否する
+/// （`validate_b_pad_requires_wmma_tf32` と同じ理由・同じ検査方式。
+/// `.claude/rules/security.md` A03「外部入力の検証」）。
+fn validate_group_width_requires_tiled_f32_swizzle(
+    group_width: Option<u32>,
+    path: Option<Path>,
+) -> Result<(), String> {
+    if group_width.is_some() && path != Some(Path::TiledF32Swizzle) {
+        return Err("--group-width は --path tiled_f32_swizzle の場合のみ指定できる".to_string());
+    }
+    Ok(())
+}
 
 /// `--b-pad` は static 共有メモリ変種（`render_wmma_tf32_staged`。イシュー
 /// #743）でのみ意味を持つ TF32 staged 固有のパラメータのため、
@@ -238,6 +272,7 @@ fn parse_args() -> Result<Args, String> {
     let mut warmup: usize = 2;
     let mut allow_missing_driver = false;
     let mut b_pad: Option<u32> = None;
+    let mut group_width: Option<u32> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -245,7 +280,10 @@ fn parse_args() -> Result<Args, String> {
             "--path" => {
                 let v = it.next().ok_or("--path には値が必要")?;
                 path = Some(Path::parse(&v).ok_or_else(|| {
-                    format!("--path は 'wmma_tf32' または 'mma_f16' のみ受理する（指定値: '{v}'）")
+                    format!(
+                        "--path は 'wmma_tf32'／'mma_f16'／'tiled_f32_swizzle' のみ受理する \
+                         （指定値: '{v}'）"
+                    )
                 })?);
             }
             "--size" => {
@@ -285,11 +323,18 @@ fn parse_args() -> Result<Args, String> {
                         .map_err(|_| format!("--b-pad は正の整数のみ受理する（指定値: '{v}'）"))?,
                 );
             }
+            "--group-width" => {
+                let v = it.next().ok_or("--group-width には値が必要")?;
+                group_width = Some(v.parse::<u32>().map_err(|_| {
+                    format!("--group-width は正の整数のみ受理する（指定値: '{v}'）")
+                })?);
+            }
             other => return Err(format!("未知の引数: '{other}'")),
         }
     }
 
     validate_b_pad_requires_wmma_tf32(b_pad, path)?;
+    validate_group_width_requires_tiled_f32_swizzle(group_width, path)?;
 
     // `--warmup`／`--iters` は usize へ変換できれば無制限に受理していたため、
     // `args.warmup + args.iters`（total_launches 算出）や
@@ -315,6 +360,7 @@ fn parse_args() -> Result<Args, String> {
         total_launches,
         launch_skip,
         b_pad,
+        group_width,
         allow_missing_driver,
     })
 }
@@ -345,6 +391,7 @@ fn print_occupancy_estimate(path: Path, size: u32, sm_count: Option<u32>) {
     let (block_m, block_n): (u32, u32) = match path {
         Path::WmmaTf32 => diagnostics::wmma_tf32_opt_block_tile(),
         Path::MmaF16 => diagnostics::mma_f16_block_tile(),
+        Path::TiledF32Swizzle => diagnostics::tiled_f32_block_tile(),
     };
     let actual_blocks = size.div_ceil(block_m) as u64 * size.div_ceil(block_n) as u64;
     match sm_count {
@@ -809,12 +856,83 @@ fn main() {
                 tflops(args.size, per_iter_secs)
             );
         }
+        Path::TiledF32Swizzle => {
+            // イシュー #1034: `--group-width` 未指定時は
+            // `device.multiprocessor_count()` 実測値からの動的選択
+            // （`gemm_tiled_f32_swizzle_bench.rs` と同じ既定）を使う。
+            let num_sms = sm_count.unwrap_or(1).max(1);
+            let group_width = args
+                .group_width
+                .unwrap_or_else(|| diagnostics::tiled_f32_swizzle_group_width(num_sms));
+            println!("tiled_f32_swizzle group_width={group_width} (num_sms={num_sms})");
+
+            let gemm = match CudaGemm::new_with_tiled_f32_swizzle(&device, group_width) {
+                Ok(g) => g,
+                Err(e) => {
+                    // 上の `Path::WmmaTf32`／`Path::MmaF16` 分岐と同じ理由
+                    // （`CudaDevice::new` 成立後の変種コンパイル失敗は
+                    // NVRTC コンパイル失敗等の異常系。fail-closed 採取
+                    // ループが検知できるよう非 0 終了させる）。
+                    eprintln!(
+                        "backend-cuda gemm_profile_target: tiled f32 swizzle variant \
+                         unavailable (group_width={group_width}, {e}); aborting because the \
+                         target kernel never launched (this is not an environment-adaptive \
+                         skip)."
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            let a = rng.fill_vec((m as usize) * (k as usize));
+            let b = rng.fill_vec((k as usize) * (n as usize));
+            let (a_dev, b_dev) = gemm
+                .upload_f32(&a, &b)
+                .expect("tiled_f32_swizzle upload must succeed on CUDA-equipped runner");
+            // `alloc_output_f32`（`gemm.rs`）は上の `Path::WmmaTf32` 分岐と
+            // 同じ理由（`ALLOC_ZEROS_LAUNCHES` 定義コメント参照）で ncu の
+            // 起動通し番号に含まれない。
+            let mut c_dev = gemm
+                .alloc_output_f32(m, n)
+                .expect("tiled_f32_swizzle output allocation must succeed on CUDA-equipped runner");
+
+            for _ in 0..args.warmup {
+                gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                    .expect("tiled_f32_swizzle warmup launch must succeed on CUDA-equipped runner");
+            }
+            // `launch_tiled_f32` は非同期投入契約（#1013 と同型）のため、
+            // 上の各分岐と同じ理由で明示的な同期を挟む
+            // （ncu の起動通し番号には影響しない）。
+            gemm.synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
+            let start = Instant::now();
+            for _ in 0..args.iters {
+                gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                    .expect(
+                        "tiled_f32_swizzle measured launch must succeed on CUDA-equipped runner",
+                    );
+            }
+            gemm.synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
+            let elapsed = start.elapsed().as_secs_f64();
+            let per_iter_secs = elapsed / args.iters as f64;
+            println!(
+                "wall-clock (tiled_f32_swizzle, launch-only, {} iters): total={elapsed:.6}s \
+                 per_iter={per_iter_secs:.6}s tflops={:.4} (ncu 実測値との突合用の参考値。\
+                 ncu 実行中は計測区間にプロファイラのオーバーヘッドが乗るため単体実行時の \
+                 数値とは一致しない)",
+                args.iters,
+                tflops(args.size, per_iter_secs)
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Path, tflops, validate_b_pad_requires_wmma_tf32};
+    use super::{
+        Path, tflops, validate_b_pad_requires_wmma_tf32,
+        validate_group_width_requires_tiled_f32_swizzle,
+    };
 
     // CLI 引数は固定 allowlist との完全一致のみ受理する
     // （`.claude/rules/security.md` A03「シェル呼び出しでユーザー入力を
@@ -829,6 +947,10 @@ mod tests {
     fn path_parse_accepts_only_allowlisted_values() {
         assert_eq!(Path::parse("wmma_tf32"), Some(Path::WmmaTf32));
         assert_eq!(Path::parse("mma_f16"), Some(Path::MmaF16));
+        assert_eq!(
+            Path::parse("tiled_f32_swizzle"),
+            Some(Path::TiledF32Swizzle)
+        );
         assert_eq!(Path::parse("wmma_f16"), None);
         assert_eq!(Path::parse(""), None);
         assert_eq!(Path::parse("wmma_tf32; rm -rf /"), None);
@@ -836,7 +958,7 @@ mod tests {
 
     #[test]
     fn path_as_str_round_trips_through_parse() {
-        for p in [Path::WmmaTf32, Path::MmaF16] {
+        for p in [Path::WmmaTf32, Path::MmaF16, Path::TiledF32Swizzle] {
             assert_eq!(Path::parse(p.as_str()), Some(p));
         }
     }
@@ -864,5 +986,29 @@ mod tests {
         assert!(validate_b_pad_requires_wmma_tf32(Some(72), Some(Path::WmmaTf32)).is_ok());
         assert!(validate_b_pad_requires_wmma_tf32(None, Some(Path::MmaF16)).is_ok());
         assert!(validate_b_pad_requires_wmma_tf32(None, None).is_ok());
+    }
+
+    // イシュー #1034: `--group-width` は `--path tiled_f32_swizzle` 限定
+    // （`validate_b_pad_requires_wmma_tf32` と同じ検査方式・同じ理由）。
+
+    #[test]
+    fn group_width_without_path_tiled_f32_swizzle_is_rejected() {
+        assert!(validate_group_width_requires_tiled_f32_swizzle(Some(8), None).is_err());
+        assert!(
+            validate_group_width_requires_tiled_f32_swizzle(Some(8), Some(Path::WmmaTf32)).is_err()
+        );
+        assert!(
+            validate_group_width_requires_tiled_f32_swizzle(Some(8), Some(Path::MmaF16)).is_err()
+        );
+    }
+
+    #[test]
+    fn group_width_with_path_tiled_f32_swizzle_or_absent_is_accepted() {
+        assert!(
+            validate_group_width_requires_tiled_f32_swizzle(Some(8), Some(Path::TiledF32Swizzle))
+                .is_ok()
+        );
+        assert!(validate_group_width_requires_tiled_f32_swizzle(None, Some(Path::MmaF16)).is_ok());
+        assert!(validate_group_width_requires_tiled_f32_swizzle(None, None).is_ok());
     }
 }
