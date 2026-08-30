@@ -1641,4 +1641,150 @@ mod tests {
             "poison 済み ordinal では device_handle_raw() が試行される前に              begin_driver_call が拒否するはず（CUDA 非搭載環境でも              CudaUnavailable にすり替わらないことを確認する）: {result:?}"
         );
     }
+
+    /// イシュー #1014（設計文書 §8 T3b: 呼び出し側の拒否経路）: 上記
+    /// `gemm_rejects_on_poisoned_ordinal_before_device_handle_is_attempted`・
+    /// `gemm_resident_rhs_rejects_on_poisoned_ordinal_even_via_trivial_empty_shape_early_return`
+    /// が既にカバーする `gemm`／`gemm_resident_rhs` を除く、残る公開演算
+    /// エントリ（`add`〈`mul` は同じ `elementwise_binary` 経路を通るため
+    /// 併せて代表する。`relu`〈`exp`／`tanh` は同じ `elementwise_unary`
+    /// 経路を通るため併せて代表する〉は下記
+    /// `relu_rejects_on_poisoned_ordinal_before_device_handle_is_attempted`
+    /// で個別に検証する（codex-review 指摘・PR #1067。`elementwise_binary`
+    /// と `elementwise_unary` はディスパッチ関数自体が分かれているため
+    /// `add` 側の検証だけでは `elementwise_unary` 経路を通らない）〉・
+    /// `sgd_step_device`・`gemm_resident_lhs`・
+    /// `release_cached_device_memory`）が、poison 済み ordinal では実処理
+    /// （driver 呼び出し）へ一切入らず `BackendError::DeviceContextPoisoned`
+    /// を即座に返すことを確認する（GPU 不要・CI 常時実行）。
+    ///
+    /// 実 CUDA fault 注入は行わず（`.claude/rules/coding-rust.md`
+    /// カーネル境界検査の規約に反するため）、`context_cache` の poison
+    /// 状態機械を直接セットする方式を採る（設計文書 §8 T3b が明示的に
+    /// 許容する代替経路）。`MemoryOps::upload`／`download` は同一の
+    /// `with_driver_call` ゲート（`memory.rs` の `CudaMemory::
+    /// with_driver_call`）を通るが、そちらは `context_cache::
+    /// poison_state_tests`（GPU 非依存モック）で既に等価な検証がある
+    /// ため、ordinal 0/1（実機テストが使う共有 ordinal）を汚染してまで
+    /// ここで重複検証しない（イシュー #1014 実装計画 §3 方針 2 の判断）。
+    fn poison_ordinal(ordinal: usize) {
+        let token = context_cache::begin_driver_call(ordinal, &[]).expect("begin succeeds");
+        let _ = context_cache::observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::Driver(sticky_driver_error())),
+        );
+        drop(token);
+    }
+
+    #[test]
+    fn add_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(vec![1.0, 2.0], &[1, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0, 2.0], &[1, 2]).expect("valid tensor");
+
+        let result = cuda.add(&a, &b);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では add（elementwise_binary 経由。mul も同一経路）は             device_handle_raw() が試行される前に拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn relu_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        // codex-review 指摘（PR #1067）: 上記 `add_rejects_on_poisoned_
+        // ordinal_before_device_handle_is_attempted` は `elementwise_binary`
+        // 経路のみを通り、`relu`／`exp`／`tanh` が使う `elementwise_unary`
+        // 経路は未検証だった。`elementwise_binary`／`elementwise_unary` は
+        // ともに `with_driver_call` を経由する同一のゲート構造だが、
+        // ディスパッチ関数自体が分かれているため実際に両方を通しておく。
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(vec![1.0, -2.0], &[1, 2]).expect("valid tensor");
+
+        let result = cuda.relu(&a);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では relu（elementwise_unary 経由。exp／tanh も             同一経路）は device_handle_raw() が試行される前に拒否されるはず:             {result:?}"
+        );
+    }
+
+    #[test]
+    fn sgd_step_device_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        use fandhe_ai_tensor_core::SgdStepConfig;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let mut param =
+            DeviceBuffer::<f32>::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+        let grad = DeviceBuffer::<f32>::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+        let config = SgdStepConfig {
+            lr: 0.1,
+            momentum: 0.0,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+            is_first_step: true,
+        };
+
+        // momentum == 0.0 のため velocity は不要（`use_momentum` 分岐を
+        // 通らない。`ops.rs::sgd_step_device` 参照）。poison 検査
+        // （`cached_sgd` 構築の `with_driver_call`）は device/shape の
+        // 事前検証の後・実際のバッファ downcast より前に走る。
+        let result = cuda.sgd_step_device(&mut param, &grad, None, &config);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では sgd_step_device は cached_sgd 構築より前に             拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn gemm_resident_lhs_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        // `w` は `[p, q] = [1, 0]`（q == 0）の早期 return 分岐（`begin_driver_call`
+        // による poison 検査を経由する）へ到達させる。`p`／`r` が非ゼロの
+        // 一般経路は poison 検査より先に `w.buffer().downcast_handle::
+        // <CudaBufferHandle>()` を呼ぶため、テスト専用の `EmptyHandle`
+        // （`CudaBufferHandle` ではない）を渡すと `DeviceContextPoisoned`
+        // ではなく `DeviceMismatch` にすり替わってしまう（`gemm_resident_lhs`
+        // の実装順序どおり）。早期 return 分岐を使うことでこの問題を回避
+        // する（`gemm_resident_lhs_rejects_stale_generation_even_via_trivial_
+        // zero_contraction_dim_early_return` と同じ手法）。
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+        let b = Tensor::new(Vec::new(), &[0, 1]).expect("valid tensor");
+
+        let result = cuda.gemm_resident_lhs(w, &b);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では gemm_resident_lhs は q == 0 の早期 return 分岐でも             拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn release_cached_device_memory_rejects_on_poisoned_ordinal_before_device_handle_is_attempted()
+    {
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let result = cuda.release_cached_device_memory();
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では release_cached_device_memory は             device_handle_raw() が試行される前に拒否されるはず: {result:?}"
+        );
+    }
 }

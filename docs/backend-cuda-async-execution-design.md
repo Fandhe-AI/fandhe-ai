@@ -74,7 +74,7 @@
 - **I1（ストリーム順序）**: 同一 ordinal 上のすべての演算は投入順に実行される。依存関係を満たすためだけの明示同期は不要
 - **I2（同期点での完了保証）**: ホストがデバイス結果を読む API（§4）の復帰時点で、その API 呼び出しに先行して投入された全作業が完了している
 - **I3（ホスト側一時バッファの解放）**: ホスト側入力 (`Vec` 等) は `clone_htod` 復帰後に解放してよい（ペイジャブル H2D は driver 側でステージングされる。pinned メモリを導入する場合はこの前提を再確認する必要がある。§10）
-- **I4（デバイス一時バッファの解放）**: `CudaSlice::drop` はイベント待ち + `cuMemFreeAsync` により、明示同期なしで use-after-free を起こさない。ただし `has_async_alloc` が偽の環境では Drop がホスト同期にフォールバックする。**GB10 実機で `CudaContext::has_async_alloc()` が真であることは本文書執筆時点で未実測**であり、§8 T4 で確認する
+- **I4（デバイス一時バッファの解放）**: `CudaSlice::drop` はイベント待ち + `cuMemFreeAsync` により、明示同期なしで use-after-free を起こさない。ただし `has_async_alloc` が偽の環境では Drop がホスト同期にフォールバックする。**ローカル RTX 3060（driver 595.71.05・CC 8.6）実機で `CudaContext::has_async_alloc()` は `true`（イシュー #1014・`crates/backend-cuda/tests/async_ordering_real_device.rs::probe_has_async_alloc_on_real_device` の実測。2026-08-30）。GB10 実機は依然未実測のまま**であり、GB10 実測は後続の実機セッションへ引き継ぐ
 - **I5（数値意味論の不変）**: カーネル側の手動境界チェック（`.claude/rules/coding-rust.md`）・FMA 契約・バックエンド間数値一致の複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は非同期化によって変化しない
 
 多ストリーム化・イベント DAG・CUDA Graph は本設計では採用しない（§10 に理由を記す）。
@@ -304,6 +304,75 @@
   （誠実な報告として記録し、速報的な高速化は主張しない）。`bench-fandhe
   train cuda` によるフレームワーク横並び 1 step 改善の実測・DGX Spark
   GB10／Metal M4 Max での再計測は本 PR 時点で未実施のまま残す
+
+## 12b. 実装記録（#1014・回帰テスト追加）
+
+§8 が #1014 へ引き渡した実機依存テスト（T1・T2・T3b・T3i・T4）の実装記録。
+
+- **配置（引き渡し時の想定からの変更）**: T1・T2・T4 は想定どおり
+  `crates/backend-cuda/tests/async_ordering_real_device.rs`（`#[ignore]`）
+  に実装した。T3b は当初 T3i と同じ新規モジュールへ置く想定だったが、
+  `ops.rs` の `#[cfg(test)] mod tests` に `gemm`／`gemm_resident_rhs` の
+  poison 拒否テストが既に実装済みであることが判明したため、残る公開演算
+  （`add`〈`mul` は同じ `elementwise_binary` 経路を通るため併せて代表〉・
+  `relu`〈`exp`／`tanh` は同じ `elementwise_unary` 経路を通るため併せて
+  代表〉・`sgd_step_device`・`gemm_resident_lhs`・
+  `release_cached_device_memory`）の poison 拒否テストをその既存モジュール
+  へ追加する形にした（ヘルパー〈`unique_test_ordinal`・`EmptyHandle`・
+  `sticky_driver_error`〉の重複を避けるため）。`add` と `relu` は
+  ディスパッチ関数（`elementwise_binary`／`elementwise_unary`）自体が
+  分かれているため個別に代表テストを置いた（codex-review 指摘・PR
+  #1067。`add` 側の検証だけでは `elementwise_unary` 経路は未検証だった）。
+  T3i のみ `context_cache.rs` の子モジュール
+  `async_ordering_poison_tests`（`#[path]` 宣言）に置いた
+  （`OrdinalRegistry`／`invalidate_with`／`ProbeFailure` がモジュール
+  非公開のため）
+- **T1 の設計変更（advisor レビューに基づく判断）**: イシュー #1014 の
+  実装計画は「async 系」「各段の後に `download` を挟む staged-sync 系」
+  「CPU 参照系」の 3 系統比較を想定していたが、`gemm_resident_rhs` は
+  戻り値がホスト `Tensor` である以上 D2H を毎回伴う（single-stream 構成。
+  §2.1）ため「staged-sync 系」は「async 系」と全く同一のスケジュールに
+  なり判別力を持たない。よって「async 系 vs CPU 参照系」の 1 対比較へ
+  簡略化した。テスト自体の不変条件（`sgd_step_device` と直後の
+  `gemm_resident_rhs` の間で `download` 等を一切呼ばないこと）はテスト
+  ファイル内のドキュメンテーションコメントに明記した
+- **T3i の設計変更（advisor レビューに基づく判断）**: 実装計画は「長時間
+  カーネル投入直後に別スレッドから `invalidate_with` を呼び、host 復帰
+  ではなくデバイス側完了までブロックされることを完了マーカー値＋経過
+  時間下限で検証する」ものだったが、本バックエンドは ordinal ごとに
+  単一の in-order ストリームのみを持つため、`invalidate_with` 復帰後の
+  D2H は `sync` クロージャの呼び出し有無に関わらずストリーム順序で
+  先行カーネルの後に来る（値の正しさが判別力を持たない）。経過時間の
+  下限判定も環境依存でフレーキーになるため不採用とした。`sync` クロー
+  ジャの契約（呼ばれること・`probe` より前に呼ばれること・失敗時は
+  `probe` を呼ばず恒久 poison へ倒すこと）自体は `poison_state_tests`
+  （GPU 非依存モック。`invalidate_with_sync_failure_poisons_unrecoverably`
+  等）が既に検証しているため、T3i は「実際の
+  `device.stream().synchronize()` を渡した `invalidate_with` 呼び出しが
+  実ストリームの残作業を抱えた状態でも正しく動作する」という配線
+  （wiring）確認に限定した（`Ok` の返却・`generation` がちょうど 1 進む
+  こと・`phase` が `Active` へ復帰すること・決定的な期待値の読み出し）
+- **T2 のスコープの誠実な記述**: 単一ストリーム構成のため、T2 が検出
+  できるのは「D2H が別ストリーム／null ストリームへ誤って発行される」
+  種類の回帰であり、「本来必要な明示同期が抜けている」種類の回帰
+  そのものではない（設計文書 §8 の「負の対照は任意」という記述と整合）
+- **実機実測（ローカル RTX 3060・driver 595.71.05・CC 8.6・2026-08-30）**:
+  T1・T2・T3i・T4 はいずれも green（T4 の実測値は §3 I4 の注記へ反映
+  済み）。既存回帰テストの非後退確認として `cpu_cuda_parity`・
+  `gemm_resident_real_device`・`memory_real_device` を実行しいずれも
+  green を確認した。`parity_nonregression` は本検証環境（`nvidia` pip
+  パッケージの include 一式を `CUDA_INCLUDE_PATH` として補った簡易構成。
+  完全な CUDA toolkit ではない）に `mma.h` が含まれずコンパイル不能な
+  カーネルがあり、また `mma_f16` の fail_count がベースラインよりわずかに
+  後退した（本 PR は `gemm_mma.rs`／`kernels_mma.rs`／許容誤差設定の
+  いずれにも触れておらず、本 PR が原因ではない環境固有の事象と判断した。
+  完全な CUDA toolkit を持つ実機セッションでの再確認を推奨する）。DGX
+  Spark GB10・Metal M4 Max での実測は本 PR の対象外のまま残す
+- **production `invalidate(ordinal)` の未結線**: #1062 クローズ後も
+  実 CUDA プローブ実装（恒等カーネル起動・CC キーキャッシュ）は未着手
+  のままであり、それに依存する設計文書 T3o／T3p のモックテストは本 PR
+  でも実装しない（本 PR のスコープ外。追跡方法はユーザー承認事項として
+  別途提案する）
 
 ## 13. 出典
 
