@@ -260,6 +260,39 @@ def _skip_failures_for_paths(log_paths):
     return failures
 
 
+def _sanitize_skip_raw_for_display(raw, max_len=120):
+    """外部プロセスの stderr 出力を含む skipped*.log の生行（`raw`）を
+    Markdown 表セルへ安全に埋め込める表現へ変換する。
+
+    codex-review P0 指摘（PR #1082 6 巡目・security.md A03）: `raw` は
+    ベンチバイナリの stderr（外部プロセス出力）をそのまま含む未信頼
+    文字列であり、`target_gate_section()` は `reason` を `|` 区切りの
+    Markdown 表セル・箇条書きへ無加工で埋め込む。`raw` に `|` が含まれると
+    表構造が壊れ、`<script>` 等の HTML/Markdown 構文を含む場合はそのまま
+    出力ページへ混入しうる（生成物が GitHub 等でレンダリングされる場合の
+    注入経路になる）。
+
+    - 改行・連続空白は単一の半角スペースへ正規化する（表セル内で改行する
+      とレンダリングが崩れるため）。
+    - `&` を先に `&amp;` へ変換してから `<`/`>` を実体参照へ、`|` を
+      Markdown のエスケープ形式 `\\|` へ変換する（`&` を後回しにすると
+      置換で生成した実体参照自体を再エスケープしてしまう二重エスケープ
+      を防ぐ）。
+    - `max_len` 文字を超える場合は切り詰めて末尾に `…` を付す（表の
+      横幅を制御し、巨大な stderr 出力の丸ごと埋め込みも防ぐ）。
+    """
+    normalized = " ".join(raw.split())
+    escaped = (
+        normalized.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("|", "\\|")
+    )
+    if len(escaped) > max_len:
+        escaped = escaped[:max_len] + "…"
+    return escaped
+
+
 def _inject_skip_failures_into_gate(gate_records, skip_failures, target, rows):
     """skip 由来の失敗を `gate_records` へ判定不能レコードとして注入する。
 
@@ -327,6 +360,14 @@ def _inject_skip_failures_into_gate(gate_records, skip_failures, target, rows):
             if sf["raw"] in seen_unparsed:
                 continue
             seen_unparsed.add(sf["raw"])
+            # codex-review P0 指摘（PR #1082 6 巡目・security.md A03）:
+            # `sf["raw"]`（ベンチバイナリの stderr を含む未信頼文字列）を
+            # 無加工で `reason` に格納すると、`target_gate_section()` が
+            # `|` 区切りの Markdown 表セル・箇条書きへそのまま埋め込むため
+            # `|` で表構造を、`<script>` 等で出力ページの HTML/Markdown
+            # 構文を改変できてしまう。理由文の主要部分は固定文にし、
+            # 生内容は `_sanitize_skip_raw_for_display`（長さ制限・
+            # Markdown/HTML エスケープ）を通した安全な表現のみを付記する。
             record = {
                 "task": "-",
                 "device": "-",
@@ -337,7 +378,10 @@ def _inject_skip_failures_into_gate(gate_records, skip_failures, target, rows):
                 "target_median": None,
                 "ratio": None,
                 "status": "undeterminable",
-                "reason": f"skipped*.log の詳細不明な失敗記録: {sf['raw']}",
+                "reason": (
+                    "skipped ログに未解析の失敗記録あり: "
+                    f"{_sanitize_skip_raw_for_display(sf['raw'])}"
+                ),
                 "note": None,
             }
             gate_records.append(record)
@@ -346,9 +390,22 @@ def _inject_skip_failures_into_gate(gate_records, skip_failures, target, rows):
         if sf["framework"] not in ("fandhe-ai", target):
             continue
         mode = sf.get("mode")
-        if mode is not None and get(
-            rows, sf["framework"], sf["task"], sf["device"], sf["size"], mode=mode
-        ) is not None:
+        # Bugbot Medium 指摘（PR #1082 6 巡目）: `sf["size"] is None`
+        # （size をパースできなかった skip 行）のまま `get(..., size=None,
+        # ...)` を呼ぶと、`get()` は `size=None` を「size で絞らない」と
+        # 解釈するため、同一 framework/task/device/mode の**任意の** size
+        # の成功行が存在するだけで stale 判定されてしまう（size が
+        # 分からない失敗を、たまたま別 size の成功と混同して握りつぶす
+        # fail-open）。size が特定できている場合のみ stale 抑止の対象に
+        # する。
+        if (
+            mode is not None
+            and sf["size"] is not None
+            and get(
+                rows, sf["framework"], sf["task"], sf["device"], sf["size"], mode=mode
+            )
+            is not None
+        ):
             # codex-review P0 指摘その1（PR #1082 5 巡目）: この正確な
             # (framework, task, device, size, mode) の実行は実際には
             # 成功して `rows` に残っている＝skipped*.log は再実行前の

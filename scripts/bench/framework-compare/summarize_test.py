@@ -1977,7 +1977,7 @@ class MainTargetExitCodeTests(unittest.TestCase):
             code, out, err = self._run_main(path, target="candle")
             self.assertEqual(code, 3)
             self.assertIn("判定不能", err)
-            self.assertIn("詳細不明な失敗記録", out)
+            self.assertIn("未解析の失敗記録あり", out)
         finally:
             shutil.rmtree(tmpdir)
 
@@ -2158,7 +2158,91 @@ class MainTargetExitCodeTests(unittest.TestCase):
             code, out, err = self._run_main(path, target="candle")
             self.assertEqual(code, 3)
             self.assertIn("判定不能", err)
-            self.assertIn("詳細不明な失敗記録", out)
+            self.assertIn("未解析の失敗記録あり", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_raw_content_with_pipe_and_script_tag_does_not_break_table(self):
+        # codex P0 指摘（PR #1082 6 巡目・security.md A03）: 外部プロセス
+        # stderr を含む未信頼文字列 `sf["raw"]` を無加工で `reason` に
+        # 格納すると、`target_gate_section()` が `|` 区切りの Markdown
+        # 表セル・箇条書きへそのまま埋め込むため、`|` で表構造を、
+        # `<script>` 等で出力ページの HTML/Markdown 構文を改変できる。
+        # `|` と `<script>` を含む skip 行を与えても、出力に生の `|`
+        # 区切り・`<script>` が現れず（エスケープ済みの `\|`・`&lt;`
+        # として現れる）、exit 3 になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", device="cpu", checksum=1.0)),
+                _train_row(framework="fandhe-ai", device="cpu", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", device="cpu", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0001),
+                _infer_row(framework="candle", device="cpu", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-mystery task=gemm device=cpu size=256 mode=fresh "
+                    "extra=none : boom | <script>alert(1)</script>\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            # `## 実行時失敗（skipped*.log）` は生ログの informational な
+            # 一覧表示（`|` 区切り表ではなく箇条書き）であり、今回の
+            # 修正対象（`target_gate_section()` の表セルへ渡る `reason`）
+            # とは別の既存機能のため、そちらの生テキストは対象にしない。
+            # ゲート節（`## 目標達成ゲート` 以降）に限定して、`reason` が
+            # サニタイズ済みで表構造・HTML 構文を壊していないことを
+            # 確認する。
+            gate_section = out[out.index("## 目標達成ゲート"):]
+            self.assertNotIn(" | <script>", gate_section)
+            self.assertNotIn("boom | <", gate_section)
+            self.assertNotIn("<script>alert(1)</script>", gate_section)
+            self.assertIn("&lt;script&gt;", gate_section)
+            self.assertIn("boom \\| ", gate_section)
+            self.assertIn("未解析の失敗記録あり", gate_section)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_unresolvable_size_does_not_suppress_via_unrelated_success(self):
+        # Bugbot Medium 指摘（PR #1082 6 巡目）: stale 成功判定が `get()` に
+        # `sf["size"]` を渡すが、`get()` は `size=None` を「size で絞ら
+        # ない」と解釈するため、`_parse_skip_failure` が size を解析
+        # できず `None` にした skip 失敗が、同じ framework/task/device/
+        # mode の**任意の** size の成功行によって stale 扱いされ握り
+        # つぶされていた（fail-open）。ここでは size が不正
+        # （`_valid_gate_size` が弾く負数）な skip 行と、同じ
+        # framework/task/device/mode の別 size の成功行を与え、
+        # 判定不能として exit 3 になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", mode="fresh", median_s=0.03),
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=train device=cpu size=-1 mode=fresh "
+                    "extra=none : bogus-size-failure\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("skipped*.log に実行時失敗", out)
         finally:
             shutil.rmtree(tmpdir)
 
