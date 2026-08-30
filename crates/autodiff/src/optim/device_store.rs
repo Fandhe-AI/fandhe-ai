@@ -117,7 +117,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{DispatchFailureCell, SgdStepConfig, Tensor};
+use fandhe_ai_tensor_core::{Activation, DispatchFailureCell, SgdStepConfig, Tensor};
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
@@ -669,6 +669,27 @@ impl DeviceParamStore {
         weight: &ResidentLeaf<'t>,
         bias: Option<&ResidentLeaf<'t>>,
     ) -> Result<Var<'t>, BackendError> {
+        self.linear_forward_with_activation(tape, input, weight, bias, Activation::None)
+    }
+
+    /// [`Self::linear_forward`] の activation 融合版（イシュー #1044・
+    /// `docs/kernel-fusion.md` §2.2「学習経路への結線」）。次層が
+    /// `ReLU` の場合、呼び出し元（`fandhe_ai_facade::compat::sequential::
+    /// Sequential::forward_from_flat_leaves`）が `act: Activation::Relu`
+    /// を渡し、`ReLU` 層自体のノード追加をスキップする。層あたりの
+    /// カーネル起動数を「gemm+bias（`Op::LinearResident`）→ 別ノードの
+    /// `relu`」の 2 起動から「gemm+bias+act」の 1 起動へ減らす。
+    ///
+    /// `act` 以外の契約（`ResidentLeaf` の tape 一致検査・bias shape
+    /// 厳密一致・D2H 排除）は [`Self::linear_forward`] と同一。
+    pub fn linear_forward_with_activation<'t>(
+        &self,
+        tape: &'t Tape,
+        input: &Var<'t>,
+        weight: &ResidentLeaf<'t>,
+        bias: Option<&ResidentLeaf<'t>>,
+        act: Activation,
+    ) -> Result<Var<'t>, BackendError> {
         self.check_not_poisoned()?;
         self.check_device(tape)?;
         if input.tape_id() != tape.id {
@@ -715,12 +736,15 @@ impl DeviceParamStore {
                 .clone()
         };
 
-        let y = tape.ops().gemm_resident_rhs(&x_val, w_buf, b_buf)?;
+        let y = tape
+            .ops()
+            .gemm_resident_rhs_act(&x_val, w_buf, b_buf, act)?;
         let node_id = tape.push_eager(
             Op::LinearResident {
                 input: input.node_id(),
                 weight: weight.node_id,
                 bias: bias.map(|b| b.node_id),
+                act,
             },
             y,
         );
@@ -1808,6 +1832,93 @@ mod tests {
             upload_count.load(Ordering::SeqCst),
             upload_before,
             "勾配欠落は upload 前に拒否されるはず"
+        );
+    }
+
+    /// イシュー #1044: `linear_forward_with_activation(..., Activation::
+    /// Relu)`（デバイス常駐 epilogue 融合）の勾配が、`linear_forward`
+    /// （bias のみ融合）+ `Var::relu()`（別ノード）という非融合合成の
+    /// 勾配とビット一致することを検証する（`Op::LinearResident` の VJP
+    /// が `act == Relu` の場合に適用する `out_value > 0` マスクが、
+    /// 非融合 `Op::Relu` の VJP と同じ勾配を返すことの実測確認。
+    /// `MockDeviceOps::gemm_resident_rhs_act` は `BackendOps` の既定
+    /// メソッド〈`gemm_resident_rhs` → `act == Relu` なら `self.relu`〉
+    /// をそのまま使うため、フォワード値自体も両経路で一致する）。
+    #[test]
+    fn linear_forward_with_activation_relu_grad_matches_manual_relu_composition() {
+        let fused_tape = simple_tape(None);
+        let w = tensor(vec![1.0, -2.0, 0.5, 3.0], &[2, 2]);
+        let b = tensor(vec![0.1, -0.1], &[2]);
+        let x_data = tensor(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]);
+
+        let mut fused_store = DeviceParamStore::new(&fused_tape, &[&w, &b]).unwrap();
+        let fused_leaves = fused_store.register_resident_params(&fused_tape).unwrap();
+        let fused_x = fused_tape.var(&x_data);
+        let fused_out = fused_store
+            .linear_forward_with_activation(
+                &fused_tape,
+                &fused_x,
+                &fused_leaves[0],
+                Some(&fused_leaves[1]),
+                Activation::Relu,
+            )
+            .unwrap();
+        let fused_loss = fused_out.sum(None).unwrap();
+        let fused_grads = fused_store.backward(&fused_tape, &fused_loss).unwrap();
+
+        let manual_tape = simple_tape(None);
+        let mut manual_store = DeviceParamStore::new(&manual_tape, &[&w, &b]).unwrap();
+        let manual_leaves = manual_store.register_resident_params(&manual_tape).unwrap();
+        let manual_x = manual_tape.var(&x_data);
+        let manual_pre = manual_store
+            .linear_forward(
+                &manual_tape,
+                &manual_x,
+                &manual_leaves[0],
+                Some(&manual_leaves[1]),
+            )
+            .unwrap();
+        let manual_out = manual_pre.relu();
+        let manual_loss = manual_out.sum(None).unwrap();
+        let manual_grads = manual_store.backward(&manual_tape, &manual_loss).unwrap();
+
+        assert_eq!(
+            crate::eval::dense_vec(&fused_out.to_tensor()),
+            crate::eval::dense_vec(&manual_out.to_tensor()),
+            "融合・非融合で forward 出力がビット一致しない"
+        );
+
+        // `ResidentLeaf` は値アクセサを持たない不透明型（doc 参照）の
+        // ため、勾配取得には `node_id` から `Var::from_raw` で `Var` を
+        // 組み立てて `Gradients::get` に渡す（`node_id` は private
+        // フィールドだが本 `mod tests` は同一モジュールの子孫として
+        // アクセス可能）。
+        let fused_w_grad = fused_grads
+            .get(&Var::from_raw(&fused_tape, fused_leaves[0].node_id))
+            .unwrap()
+            .unwrap();
+        let manual_w_grad = manual_grads
+            .get(&Var::from_raw(&manual_tape, manual_leaves[0].node_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::eval::dense_vec(fused_w_grad),
+            crate::eval::dense_vec(manual_w_grad),
+            "weight 勾配が融合・非融合でビット一致しない"
+        );
+
+        let fused_b_grad = fused_grads
+            .get(&Var::from_raw(&fused_tape, fused_leaves[1].node_id))
+            .unwrap()
+            .unwrap();
+        let manual_b_grad = manual_grads
+            .get(&Var::from_raw(&manual_tape, manual_leaves[1].node_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::eval::dense_vec(fused_b_grad),
+            crate::eval::dense_vec(manual_b_grad),
+            "bias 勾配が融合・非融合でビット一致しない"
         );
     }
 

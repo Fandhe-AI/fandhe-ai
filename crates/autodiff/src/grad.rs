@@ -17,7 +17,7 @@
 //! FMA 契約統一済みのため、`MatMul` の VJP もここを経由するだけで
 //! 契約を引き継ぐ）。
 
-use fandhe_ai_tensor_core::{BackendError, BackendOps, Tensor};
+use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, Tensor};
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
@@ -188,6 +188,7 @@ pub(crate) fn vjp(
             input,
             weight,
             bias,
+            act,
         } => {
             let Some(resident) = resident else {
                 return Err(AutodiffError::InvalidArgument(
@@ -227,11 +228,39 @@ pub(crate) fn vjp(
             let w_dev = resident.resident_buffer(store_id, slot)?;
             let x_val = materialize_fallible(nodes, ops, input)?;
 
+            // epilogue activation のマスク段（イシュー #1044）。`act ==
+            // Relu` の場合、フォワードで融合した ReLU の劣勾配
+            // （`Op::Relu` の VJP と同じ `out_value > 0` 規約。`out_value`
+            // は bias 加算後・activation 適用後の forward 記録値なので
+            // ここから直接マスクを復元でき、前活性化の再計算・追加ノード
+            // を必要としない）を先に適用し、以降は「非融合の
+            // `Op::LinearResident`（`act: None`）の VJP と同じ勾配 `g`」
+            // として扱う。
+            let masked_upstream;
+            let g: &Tensor<f32> = match act {
+                Activation::None => upstream,
+                Activation::Relu => {
+                    masked_upstream = elementwise_mul_mask(upstream, out_value, |v| v > 0.0);
+                    &masked_upstream
+                }
+                // `Activation` は `#[non_exhaustive]`（`tensor-core::
+                // backend_ops`）のため、autodiff クレート外から見た未知の
+                // 将来 variant に対しては、誤った勾配（マスクなし）を
+                // 静かに返すのではなく fail-closed で拒否する
+                // （`.claude/rules/security.md` A08）。
+                _ => {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "grad::vjp: Op::LinearResident has an unsupported Activation variant \
+                         ({act:?}); the VJP mask is only defined for None/Relu"
+                    )));
+                }
+            };
+
             // d_input^T = W @ g^T（`W: [k,n]`・`g: [m,n]` → `g^T: [n,m]`
             // → `tmp: [k,m]`）。`W` はデバイス常駐のまま
             // `ops.gemm_resident_lhs` へ渡し、ホストへ download しない
             // （本イシューの受け入れ条件の中核）。
-            let g_t = transpose2d(upstream);
+            let g_t = transpose2d(g);
             let tmp = ops
                 .gemm_resident_lhs(w_dev, &g_t)
                 .map_err(AutodiffError::Backend)?;
@@ -244,7 +273,7 @@ pub(crate) fn vjp(
             // `layout::classify_2d` で分類して直接読み出すためホスト側
             // 転置コピーは発生しない（`eval::MATMUL_HOST_REPACK_COUNT`）。
             let x_t = transpose2d(x_val);
-            let d_weight = eval::matmul(&x_t, upstream);
+            let d_weight = eval::matmul(&x_t, g);
 
             let mut contributions = vec![(input, d_input), (weight, d_weight)];
             if let Some(bias_id) = bias {
@@ -259,7 +288,47 @@ pub(crate) fn vjp(
                             .to_string(),
                     )
                 })?;
-                let d_bias = reduce_to_shape(upstream, &bias_node.shape);
+                let d_bias = reduce_to_shape(g, &bias_node.shape);
+                contributions.push((bias_id, d_bias));
+            }
+            contributions
+        }
+        Op::LinearAct {
+            input,
+            weight,
+            bias,
+            act,
+        } => {
+            let w_val = materialize_fallible(nodes, ops, weight)?;
+            let x_val = materialize_fallible(nodes, ops, input)?;
+
+            // epilogue activation のマスク段（`Op::LinearResident` と同じ
+            // `out_value > 0` 規約。イシュー #1044）。
+            let masked_upstream;
+            let g: &Tensor<f32> = match act {
+                Activation::None => upstream,
+                Activation::Relu => {
+                    masked_upstream = elementwise_mul_mask(upstream, out_value, |v| v > 0.0);
+                    &masked_upstream
+                }
+                // `Activation` は `#[non_exhaustive]`（`tensor-core::
+                // backend_ops`）のため、autodiff クレート外から見た未知の
+                // 将来 variant に対しては、誤った勾配（マスクなし）を
+                // 静かに返すのではなく fail-closed で拒否する
+                // （`.claude/rules/security.md` A08）。
+                _ => {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "grad::vjp: Op::LinearAct has an unsupported Activation variant \
+                         ({act:?}); the VJP mask is only defined for None/Relu"
+                    )));
+                }
+            };
+
+            let (d_input, d_weight) = matmul_vjp(x_val, w_val, g);
+            let mut contributions = vec![(input, d_input), (weight, d_weight)];
+            if let Some(bias_id) = bias {
+                let bias_shape = &nodes[bias_id.0].shape;
+                let d_bias = reduce_to_shape(g, bias_shape);
                 contributions.push((bias_id, d_bias));
             }
             contributions

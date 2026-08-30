@@ -16,7 +16,7 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    BackendError, MseReduction, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
+    Activation, BackendError, MseReduction, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
     reduce_out_shape, require_same_shape,
 };
 
@@ -164,6 +164,72 @@ impl<'t> Var<'t> {
         };
         let value = self.tape.ops().gemm(&lhs_val, &rhs_val)?;
         let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `y = act(self.matmul(weight) (+ bias))` を 1 ノード
+    /// （[`Op::LinearAct`]）として記録する（イシュー #1044・`docs/
+    /// kernel-fusion.md` §2.2「学習経路への結線」）。
+    /// `fandhe_ai_autodiff::nn::linear::LinearVars::forward_with_activation`
+    /// が唯一の呼び出し元（`Var::matmul` と同じ「①クロステープ検査 →
+    /// ②shape 検査 → ③forward 値計算 → ④ノード記録」の順で処理する
+    /// 非 elementwise・常時実体化の演算）。
+    ///
+    /// `bias` の shape 検証は `broadcast_shape`（`out_shape` へブロード
+    /// キャスト可能かの NumPy 互換判定）のみを行い、`[n]`（`weight` の
+    /// 列数）と厳密一致しない bias（`[1, n]` 等）も含めてそのまま
+    /// `BackendOps::gemm_bias_act` へ委譲する。**非融合合成へのフォール
+    /// バックは本メソッド・呼び出し元（`LinearVars::
+    /// forward_with_activation`）のどちらの責務でもなく、
+    /// `BackendOps::gemm_bias_act` 自身の契約**（`tensor-core::
+    /// backend_ops` の doc 参照。CPU／CUDA／Metal の融合カーネル実装は
+    /// bias が `[n]` 厳密一致でない場合 `matmul` → `add`（NumPy 互換
+    /// ブロードキャスト）→ activation の非融合合成へ内部的に
+    /// フォールバックし、デフォルト実装も同じ合成のため、いずれの
+    /// バックエンドでも `[n]` 以外の broadcast 可能な bias が
+    /// `ShapeMismatch` になることはない）。本メソッドが呼び出し前に
+    /// `broadcast_shape` で検証するのは「`gemm_bias_act` に委譲する前に
+    /// ブロードキャスト不能な shape を早期に拒否する」ためであり、
+    /// フォールバック経路の選択自体は行わない。
+    pub(crate) fn linear_act(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        act: Activation,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(weight)?;
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+        let lhs_shape = self.shape();
+        let rhs_shape = weight.shape();
+        let out_shape = matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        if let Some(b) = bias {
+            broadcast_shape(&out_shape, &b.shape())?;
+        }
+        let (lhs_val, rhs_val, bias_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let rhs_val = materialize_fallible(&nodes, self.tape.ops(), weight.id)?.clone();
+            let bias_val = match bias {
+                Some(b) => Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone()),
+                None => None,
+            };
+            (lhs_val, rhs_val, bias_val)
+        };
+        let value = self
+            .tape
+            .ops()
+            .gemm_bias_act(&lhs_val, &rhs_val, bias_val.as_ref(), act)?;
+        let id = self.tape.push_eager(
+            Op::LinearAct {
+                input: self.id,
+                weight: weight.id,
+                bias: bias.map(|b| b.id),
+                act,
+            },
+            value,
+        );
         Ok(Var::from_raw(self.tape, id))
     }
 
@@ -556,5 +622,50 @@ impl<'t> Var<'t> {
             out_shape,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+}
+
+#[cfg(test)]
+mod linear_act_tests {
+    use super::*;
+    use crate::tape::Tape;
+
+    /// codex-review 指摘（PR #1079・discussion_r3889050931）の実測検証:
+    /// `linear_act` は bias が `[n]`（`weight` の列数）と厳密一致しない
+    /// broadcast 可能な shape（ここでは `[1, n]`）でも `ShapeMismatch` を
+    /// 返さず、`matmul` → `add`（NumPy 互換ブロードキャスト）→ `relu` の
+    /// 非融合合成と bit 一致する結果を返すことを確認する。フォール
+    /// バックは `linear_act`／呼び出し元ではなく `BackendOps::
+    /// gemm_bias_act` 自身の契約（`tensor-core::backend_ops` の doc・
+    /// 各バックエンドの `ComposedFallback` 分岐）で行われる（本メソッド
+    /// の doc コメント参照）。`Linear`（`nn::linear`）は `from_parameters`
+    /// で bias を `[out_features]` 厳密一致にしか構築できないため、この
+    /// broadcast bias 経路は `Linear` 経由では到達できない
+    /// （`pub(crate)` の `linear_act` を直接呼ぶ本テストでのみ検証可能）。
+    #[test]
+    fn linear_act_accepts_broadcastable_bias_not_strictly_matching_out_features() {
+        let tape = Tape::new();
+        // input: [2, 2]、weight: [2, 3] → out: [2, 3]。
+        let input = tape.var(&Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap());
+        let weight = tape.var(&Tensor::new(vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0], &[2, 3]).unwrap());
+        // bias: `[3]`（out_features 厳密一致）ではなく `[1, 3]`
+        // （broadcast 可能だが厳密一致ではない shape）。
+        let bias = tape.var(&Tensor::new(vec![10.0, -5.0, 0.0], &[1, 3]).unwrap());
+
+        let fused = input
+            .linear_act(&weight, Some(&bias), Activation::Relu)
+            .expect("broadcast bias は ShapeMismatch にならず成功するはず");
+
+        let composed = input
+            .matmul(&weight)
+            .and_then(|y| y.add(&bias))
+            .map(|y| y.relu())
+            .expect("非融合合成（matmul→add→relu）も同じ broadcast bias で成功するはず");
+
+        assert_eq!(
+            fused.value().as_slice().unwrap(),
+            composed.value().as_slice().unwrap(),
+            "broadcast bias 経路は融合・非融合合成で bit 一致するはず"
+        );
     }
 }

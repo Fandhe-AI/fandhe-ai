@@ -82,6 +82,73 @@ impl MemoryOps for CpuBackendOps {
     }
 }
 
+/// `BackendOps::gemm_resident_rhs`／`gemm_resident_rhs_act` の共有本体
+/// （イシュー #1044）。両メソッドとも shape 検証・`DeviceBufferView`
+/// のゼロコピー読み出し（`downcast_handle` 直読み + オフセット範囲
+/// スライス）は同一で、epilogue の `act` のみが異なるため 1 箇所に
+/// まとめる（`gemm` 本体を 2 か所に複製しない）。
+fn gemm_resident_rhs_impl(
+    a: &Tensor<f32>,
+    w: DeviceBufferView<'_>,
+    bias: Option<DeviceBufferView<'_>>,
+    act: Activation,
+) -> Result<Tensor<f32>, BackendError> {
+    if w.device() != Device::Cpu {
+        return Err(BackendError::DeviceMismatch);
+    }
+    let a_shape = a.shape();
+    if a_shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: a_shape.len(),
+        }));
+    }
+    let (m, k) = (a_shape[0], a_shape[1]);
+    let w_shape = w.shape();
+    if w_shape.len() != 2 || w_shape[0] != k {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: a_shape.to_vec(),
+            rhs: w_shape.to_vec(),
+        }));
+    }
+    let n = w_shape[1];
+    let w_handle = w
+        .buffer()
+        .downcast_handle::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
+
+    let bias_handle = match bias {
+        Some(b) => {
+            if b.device() != Device::Cpu {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+            let handle = b
+                .buffer()
+                .downcast_handle::<CpuBufferHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            Some(&handle.data[b.offset()..b.offset() + b.numel()])
+        }
+        None => None,
+    };
+
+    let a_owned = a.contiguous();
+    let a_slice = a_owned.as_slice().ok_or_else(|| {
+        gemm_contiguity_fail_safe("gemm_resident_rhs: lhs not contiguous after contiguous()")
+    })?;
+
+    let mut out = vec![0.0f32; m * n];
+    gemm_blis_bias_act_parallel(a_slice, w_slice, &mut out, m, n, k, bias_handle, act)
+        .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+    Tensor::new(out, &[m, n]).map_err(BackendError::ShapeMismatch)
+}
+
 impl BackendOps for CpuBackendOps {
     fn device(&self) -> Device {
         Device::Cpu
@@ -334,69 +401,27 @@ impl BackendOps for CpuBackendOps {
         w: DeviceBufferView<'_>,
         bias: Option<DeviceBufferView<'_>>,
     ) -> Result<Tensor<f32>, BackendError> {
-        if w.device() != Device::Cpu {
-            return Err(BackendError::DeviceMismatch);
-        }
-        let a_shape = a.shape();
-        if a_shape.len() != 2 {
-            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
-                expected: 2,
-                actual: a_shape.len(),
-            }));
-        }
-        let (m, k) = (a_shape[0], a_shape[1]);
-        let w_shape = w.shape();
-        if w_shape.len() != 2 || w_shape[0] != k {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: a_shape.to_vec(),
-                rhs: w_shape.to_vec(),
-            }));
-        }
-        let n = w_shape[1];
-        let w_handle = w
-            .buffer()
-            .downcast_handle::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
+        gemm_resident_rhs_impl(a, w, bias, Activation::None)
+    }
 
-        let bias_handle = match bias {
-            Some(b) => {
-                if b.device() != Device::Cpu {
-                    return Err(BackendError::DeviceMismatch);
-                }
-                if b.shape() != [n] {
-                    return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                        lhs: b.shape().to_vec(),
-                        rhs: vec![n],
-                    }));
-                }
-                let handle = b
-                    .buffer()
-                    .downcast_handle::<CpuBufferHandle>()
-                    .ok_or(BackendError::DeviceMismatch)?;
-                Some(&handle.data[b.offset()..b.offset() + b.numel()])
-            }
-            None => None,
-        };
-
-        let a_owned = a.contiguous();
-        let a_slice = a_owned.as_slice().ok_or_else(|| {
-            gemm_contiguity_fail_safe("gemm_resident_rhs: lhs not contiguous after contiguous()")
-        })?;
-
-        let mut out = vec![0.0f32; m * n];
-        gemm_blis_bias_act_parallel(
-            a_slice,
-            w_slice,
-            &mut out,
-            m,
-            n,
-            k,
-            bias_handle,
-            Activation::None,
-        )
-        .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-        Tensor::new(out, &[m, n]).map_err(BackendError::ShapeMismatch)
+    /// [`Self::gemm_resident_rhs`] の activation 融合版（イシュー #1044・
+    /// `docs/kernel-fusion.md` §2.2「学習経路への結線」）。`Linear` 層に
+    /// 続く `ReLU` を別カーネル起動にせず、bias 加算と同じ epilogue へ
+    /// 折り込む（呼び出し元は `fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore::linear_forward_with_activation`）。カーネル本体
+    /// （`gemm_blis_bias_act_parallel`）は元々 `act` 引数を受け取れる
+    /// ため、本メソッドは shape 検証・ゼロコピー読み出しを共有する
+    /// `gemm_resident_rhs_impl` へ `act` をそのまま渡すだけ（`gemm_bias_act`
+    /// と同じ「常駐版は `Activation::None` 固定、activation 版は `act`
+    /// を透過する」非破壊拡張パターン）。
+    fn gemm_resident_rhs_act(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<Tensor<f32>, BackendError> {
+        gemm_resident_rhs_impl(a, w, bias, act)
     }
 
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
