@@ -15,14 +15,15 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DType, FusionPlan, SgdStepConfig, ShapeError, Tensor,
+    Activation, BackendOps, DType, FusionPlan, MseReduction, SgdStepConfig, ShapeError, Tensor,
+    require_same_shape,
 };
 
 use crate::gemm_blis::{gemm_blis_bias_act_parallel, gemm_blis_parallel};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::softmax::{self, match_softmax_plan};
-use crate::{elementwise, fused_elementwise, reduction};
+use crate::{elementwise, fused_elementwise, mse, reduction};
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
 /// する単一 `CpuMemory`（イシュー #935・`docs/device-resident-update-design.md`
@@ -625,6 +626,73 @@ impl BackendOps for CpuBackendOps {
 
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         reduction::max(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の CPU 実装
+    /// （イシュー #1045）。shape 検証・contiguous 化・`mse::
+    /// mse_sum_sq_f32` への委譲・`reduction` に応じた最終変換（`Mean`/
+    /// `Sum`）・スカラー `Tensor` への詰め直しを行う（`ops.rs` の既存
+    /// 方針。モジュール冒頭コメント参照）。
+    ///
+    /// `reduction` 分岐をここで解決する理由: `MseReduction` は
+    /// `#[non_exhaustive]` であり、`f32` を返す `mse::mse_sum_sq_f32`
+    /// 側では未知 variant に対する「安全な既定値」が存在しない
+    /// （`mse.rs` モジュール doc 参照）。`BackendError` を返せる本メソッド
+    /// でのみ、未知 variant を `Unsupported` として型付きに拒否できる。
+    fn mse_loss(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_c = pred.contiguous();
+        let target_c = target.contiguous();
+        // `contiguous()` の戻り値は常に `as_slice()` が `Some` を返す
+        // （`Tensor::contiguous` の契約。`tensor.rs`）ため、`unwrap_or`
+        // で空スライスへ後退することはない（shape 一致検証済みで両者
+        // 同じ要素数のため、以降のスライス長も一致する）。
+        let pred_slice = pred_c.as_slice().unwrap_or(&[]);
+        let target_slice = target_c.as_slice().unwrap_or(&[]);
+        let numel = pred_slice.len();
+        let sum_sq = mse::mse_sum_sq_f32(pred_slice, target_slice)?;
+        let value = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    0.0
+                } else {
+                    sum_sq / numel as f32
+                }
+            }
+            MseReduction::Sum => sum_sq,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "mse_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::mse_loss_backward`] の CPU
+    /// 実装（イシュー #1045）。`dTarget = −dPred` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側で符号反転して得る
+    /// 契約のため、本メソッドは `dPred` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::mse_loss_backward` doc 参照）。
+    fn mse_loss_backward(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_c = pred.contiguous();
+        let target_c = target.contiguous();
+        let pred_slice = pred_c.as_slice().unwrap_or(&[]);
+        let target_slice = target_c.as_slice().unwrap_or(&[]);
+        let mut dpred = vec![0.0f32; pred_slice.len()];
+        mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
+        Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装（`Unsupported`

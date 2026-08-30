@@ -110,6 +110,27 @@ pub enum Activation {
     Relu,
 }
 
+/// [`BackendOps::mse_loss`]／[`BackendOps::mse_loss_backward`] の縮約種別
+/// （イシュー #1045・親イシュー #1043「カーネル融合・autodiff 実行モデル
+/// の強化」）。
+///
+/// `fandhe_ai_autodiff::var::Reduction`（`Mean`／`Sum`）と同一の意味論を
+/// 持つが、`tensor-core` → `autodiff` の逆依存は作れない（本ファイル
+/// 冒頭コメント・`SgdStepConfig` と同じ整理）ため独立した型として定義
+/// する。`autodiff` 側で `impl From<Reduction> for MseReduction` を用意し
+/// 変換する（`var.rs` 参照）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`Activation` と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MseReduction {
+    /// 全要素平均（`Σ(pred−target)² / n`）。
+    Mean,
+    /// 全要素総和（`Σ(pred−target)²`）。
+    Sum,
+}
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -275,6 +296,72 @@ pub trait BackendOps {
     // reduction（`docs/public-api-design.md` §4.2 と同じ 2 演算）
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError>;
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError>;
+
+    /// 平均二乗誤差 `reduction(Σ(pred−target)²)` の forward を 1 個の
+    /// 融合カーネルで計算する（イシュー #1045・親イシュー #1043）。
+    ///
+    /// `pred`／`target` は同一 shape（呼び出し元が [`crate::ops_shape::
+    /// require_same_shape`] で検証済み）。戻り値は shape `[]`（スカラー）。
+    /// `numel == 0` は `Mean`／`Sum` とも `0.0`（`fandhe_ai_autodiff::eval::
+    /// mse_loss` の既存契約と同じ。mean 側はゼロ除算回避、sum 側は空和が
+    /// 数学的に 0 のため元々の定義と一致）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// 本メソッドは `gemm_bias_act`・`sgd_step_device` と同じ非破壊拡張
+    /// （デフォルトメソッド追加。公開 API 非破壊はガードレール条件・
+    /// `.claude/rules/security.md`）であり、既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とする。
+    /// `fandhe_ai_autodiff::var::Var::mse_loss_with` は `Unsupported` の
+    /// ときのみ従来のホスト参照実装（`eval::mse_loss`）へフォールバック
+    /// し、それ以外のエラーは伝播する（判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。CPU／CUDA／Metal の各実装は
+    /// このデフォルトをカーネル内融合実装でオーバーライドする
+    /// （`backend-cpu::mse`・`backend-cuda::mse`・`backend-metal::mse`
+    /// 参照）。
+    fn mse_loss(
+        &self,
+        _pred: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "mse_loss: default fail-safe (no fused MSE forward kernel available)".into(),
+        ))
+    }
+
+    /// 平均二乗誤差の backward（`dPred = scale·(pred−target)`）を 1 個の
+    /// 融合カーネルで計算する（イシュー #1045）。
+    ///
+    /// `scale` は呼び出し元（`fandhe_ai_autodiff::grad::vjp` の
+    /// `Op::MseLoss` 分岐）が上流勾配 `g`（スカラー）と `reduction` から
+    /// 事前計算して渡す（`Mean` は `g·2/n`、`Sum` は `g·2`）。カーネル側は
+    /// 縮約種別を意識せずこの `scale` を適用するだけでよい。
+    ///
+    /// `dTarget = −dPred` は常に成り立つ（`d/dtarget (pred−target)² =
+    /// −2(pred−target)`）ため、本メソッドは `dPred` の 1 テンソルのみを
+    /// 返す契約とする（`dTarget` を別テンソルとしてカーネルに計算・
+    /// 転送させるのは無駄な allocation・D2H を増やすだけであり、融合
+    /// カーネルで転送量を削減するという本イシューの目的と矛盾する）。
+    /// 呼び出し元がホスト側で `dPred` を符号反転するだけで `dTarget` を
+    /// 得る（`grad.rs` 参照）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、`Var::
+    /// mse_loss_with` の呼び出し元（`grad::vjp`）は `Unsupported` の
+    /// ときのみ既存のホスト参照実装（`mse_loss_vjp`）へフォールバックする。
+    fn mse_loss_backward(
+        &self,
+        _pred: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "mse_loss_backward: default fail-safe (no fused MSE backward kernel available)".into(),
+        ))
+    }
 
     /// GEMM の epilogue（bias 加算・activation）を融合した
     /// `act(A @ B + bias)` を計算する（TASK-12.1f・#203）。
@@ -941,5 +1028,25 @@ mod tests {
         let result = ops.linear_forward_device(&a, w_view, None, Activation::None);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::mse_loss`]／[`BackendOps::mse_loss_backward`] の
+    /// 既定実装が両方とも fail-safe（[`BackendError::Unsupported`]）を
+    /// 返すことを確認する（イシュー #1045。`run_fused_default_returns_
+    /// unsupported`・`linear_forward_device_default_is_unsupported` と
+    /// 同型のガード）。`MockOps` はいずれのメソッドもオーバーライドして
+    /// いないため、融合カーネル未実装のバックエンドが黙示のホスト
+    /// フォールバックへ落ちず明示的に拒否することが受け入れ条件の中核。
+    #[test]
+    fn mse_loss_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let pred = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
+        let target = Tensor::new(vec![0.0, 0.0], &[2]).unwrap();
+
+        let forward = ops.mse_loss(&pred, &target, MseReduction::Mean);
+        let backward = ops.mse_loss_backward(&pred, &target, 1.0);
+
+        assert!(matches!(forward, Err(BackendError::Unsupported(_))));
+        assert!(matches!(backward, Err(BackendError::Unsupported(_))));
     }
 }

@@ -281,6 +281,8 @@ pub mod layout;
 #[cfg(target_os = "macos")]
 pub mod memory;
 #[cfg(target_os = "macos")]
+pub mod mse;
+#[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
 // `crate::buffer::MetalBuffer::alloc_zeroed_pooled`／`alloc_uninit_pooled`
@@ -350,6 +352,8 @@ pub use gemm::{GemmVariant, MetalGemm};
 pub use half_buffer::MetalHalfBuffer;
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
+#[cfg(target_os = "macos")]
+pub use mse::MetalMse;
 #[cfg(target_os = "macos")]
 pub use ops::MetalBackendOps;
 #[cfg(target_os = "macos")]
