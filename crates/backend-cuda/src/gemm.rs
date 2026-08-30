@@ -1426,7 +1426,15 @@ impl CudaGemm {
         k: u32,
     ) -> Result<Vec<f32>, CudaError> {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
-        self.run_f32_kernel(&self.naive_f32, a, b, m, n, k, NAIVE_BLOCK_DIM)
+        self.run_f32_kernel(
+            &self.naive_f32,
+            a,
+            b,
+            m,
+            n,
+            k,
+            launch_config(m, n, NAIVE_BLOCK_DIM),
+        )
     }
 
     /// naive f16 GEMM を実行する。入出力は `half::f16`、GPU 内部アキュムレート
@@ -1460,7 +1468,15 @@ impl CudaGemm {
     ) -> Result<Vec<f32>, CudaError> {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
-        self.run_f32_kernel(&self.tiled_f32, a, b, m, n, k, TILED_BLOCK_DIM)
+        self.run_f32_kernel(
+            &self.tiled_f32,
+            a,
+            b,
+            m,
+            n,
+            k,
+            launch_config(m, n, TILED_BLOCK_DIM),
+        )
     }
 
     /// tiled f16 GEMM を実行する。手順は [`Self::run_tiled_f32`] と同一。
@@ -1516,15 +1532,7 @@ impl CudaGemm {
                 ),
             });
         }
-        self.run_f32_kernel(
-            func,
-            a,
-            b,
-            m,
-            n,
-            k,
-            (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
-        )
+        self.run_f32_kernel(func, a, b, m, n, k, tiled_pipeline_launch_config(m, n))
     }
 
     /// [`Self::run_tiled_pipeline_f32`] が使用可能かを返す（`new` 時の
@@ -2184,13 +2192,29 @@ impl CudaGemm {
         Ok(c_host)
     }
 
-    /// f32 カーネル共通の起動手続き（naive/tiled 双方から呼ばれる）。
+    /// f32 カーネル共通の起動手続き（naive/tiled/tiled pipeline 共通から
+    /// 呼ばれる）。
     ///
     /// 呼び出し元がホスト側形状検証（`validate_gemm_dims`／
     /// `validate_tiled_k_bound`）を終えている前提で、`clone_htod` で A・B
-    /// を転送し `block_dim` に応じたグリッドでカーネルを起動、
-    /// `synchronize` の後 `clone_dtoh` で C を回収する（PoC-v2-3 の
+    /// を転送し、呼び出し元が構築済みの `cfg`（`LaunchConfig`）でカーネルを
+    /// 起動、`synchronize` の後 `clone_dtoh` で C を回収する（PoC-v2-3 の
     /// `run_f32` と同じ構造）。
+    ///
+    /// **イシュー #1033 Review 指摘対応**: 以前は `block_dim` を受け取り
+    /// 内部で `launch_config(m, n, block_dim)`（`block_dim` = 出力タイル
+    /// サイズという 1 スレッド = 1 出力要素モデルの契約）を呼んでいたが、
+    /// tiled pipeline カーネル（256 スレッド 1 次元ブロックで `TP_BM x
+    /// TP_BN`＝64×64 タイルをレジスタブロッキング担当）はこの契約を満た
+    /// さず、`run_tiled_pipeline_f32` が `block_dim = (TP_BLOCK_THREADS,
+    /// 1, 1) = (256, 1, 1)` を渡すと `grid.x = n.div_ceil(256)` となって
+    /// 正しい `n.div_ceil(TP_BN=64)` より過小になり、`n > 256` の形状で C
+    /// の広範囲が未計算（未初期化メモリ）のまま返っていた。呼び出し元が
+    /// 自身のカーネルの実際のタイル形状に応じた `LaunchConfig` を構築して
+    /// 渡す方式へ変更し、`run_tiled_pipeline_f32` は
+    /// `launch_tiled_pipeline_f32` と同じ `tiled_pipeline_launch_config`
+    /// を使うようにした。naive/tiled は従来どおり `launch_config(m, n,
+    /// NAIVE_BLOCK_DIM/TILED_BLOCK_DIM)` を呼び出し元で構築する。
     #[allow(clippy::too_many_arguments)]
     fn run_f32_kernel(
         &self,
@@ -2200,7 +2224,7 @@ impl CudaGemm {
         m: u32,
         n: u32,
         k: u32,
-        block_dim: (u32, u32, u32),
+        cfg: LaunchConfig,
     ) -> Result<Vec<f32>, CudaError> {
         // Cursor Bugbot 指摘（PR #240）: `validate_gemm_dims` は
         // `backend-cpu::gemm_naive` と同様 m==0／n==0（a/c が空）を no-op
@@ -2241,7 +2265,6 @@ impl CudaGemm {
             .allocator
             .alloc_uninit_f32((m as usize) * (n as usize))?;
 
-        let cfg = launch_config(m, n, block_dim);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/b.len()/
