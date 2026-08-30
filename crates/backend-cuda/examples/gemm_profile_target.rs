@@ -65,7 +65,8 @@
 //! の直後に `ncu --launch-skip <値>` として明示出力するので、手計算せず
 //! その値を使う。
 //!
-//! `--path`（`wmma_tf32`｜`mma_f16`。必須）・`--size`（`1024`｜`2048`｜
+//! `--path`（`wmma_tf32`｜`mma_f16`｜`tiled_f32`｜`tiled_f32_swizzle`。
+//! 必須）・`--size`（`1024`｜`2048`｜
 //! `4096`。必須）は固定 allowlist との完全一致のみ受理する（`.claude/rules/
 //! security.md` A03「外部入力の検証」。シェル呼び出し・文字列展開は行わ
 //! ない）。`--iters`（既定 5）・`--warmup`（既定 2）は正の整数のみ受理する。
@@ -150,19 +151,23 @@ const ALLOC_ZEROS_LAUNCHES: usize = 0;
 
 /// 対象経路（CLI `--path` の allowlist）。
 ///
-/// `TiledF32Swizzle`（イシュー #1034）は本番既定 f32 経路（tiled f32・
-/// `kernels::TILED_F32`）へブロック実行順スウィズルを適用した診断用
-/// 変種（`CudaGemm::new_with_tiled_f32_swizzle`。`internal-diagnostics`
-/// feature 限定・本番未結線）を起動する。既存 2 経路（`WmmaTf32`／
-/// `MmaF16`）と異なり base（無 swizzle）自体をこのバイナリで計測する
-/// 経路は用意しない（tiled f32 base は naive/tiled 4 カーネルの一つで
-/// 常に利用可能なため、本ツールの主目的である「未成熟カーネルの ncu
-/// 診断」の対象外。base との比較は `examples/
-/// gemm_tiled_f32_swizzle_bench.rs` の壁時計 A/B が担う）。
+/// `TiledF32`（イシュー #1030。#1032 のレジスタブロッキング適用後の
+/// 本番既定 f32 経路そのもの・`CudaGemm::new` + `launch_tiled_f32`）は
+/// swizzle 等の診断用変種を一切構築しない基準経路であり、#1030 の ncu
+/// 再診断における主対象。`TiledF32Swizzle`（イシュー #1034）は同じ
+/// `launch_tiled_f32` を呼ぶが、構築時にブロック実行順スウィズルを
+/// 適用した診断用変種（`CudaGemm::new_with_tiled_f32_swizzle`。
+/// `internal-diagnostics` feature 限定・本番未結線）を経由する点のみが
+/// 異なる（対照条件）。旧版（#1030 起票時点）は base 計測経路を意図的に
+/// 用意していなかった（tiled f32 base は常に利用可能なため対象外と
+/// 判断していた）が、#1032 のレジスタブロッキング適用で本番既定経路
+/// 自体が ncu 実測未実施のまま変化したため、#1030 で `TiledF32` を
+/// 追加し base 自体を主対象に格上げする（実装計画 §2）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Path {
     WmmaTf32,
     MmaF16,
+    TiledF32,
     TiledF32Swizzle,
 }
 
@@ -171,6 +176,7 @@ impl Path {
         match s {
             "wmma_tf32" => Some(Self::WmmaTf32),
             "mma_f16" => Some(Self::MmaF16),
+            "tiled_f32" => Some(Self::TiledF32),
             "tiled_f32_swizzle" => Some(Self::TiledF32Swizzle),
             _ => None,
         }
@@ -180,6 +186,7 @@ impl Path {
         match self {
             Self::WmmaTf32 => "wmma_tf32",
             Self::MmaF16 => "mma_f16",
+            Self::TiledF32 => "tiled_f32",
             Self::TiledF32Swizzle => "tiled_f32_swizzle",
         }
     }
@@ -228,7 +235,7 @@ struct Args {
     allow_missing_driver: bool,
 }
 
-const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16|tiled_f32_swizzle} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--group-width N (tiled_f32_swizzle only)] [--allow-missing-driver]";
+const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16|tiled_f32|tiled_f32_swizzle} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--group-width N (tiled_f32_swizzle only)] [--allow-missing-driver]";
 
 /// `--group-width` は `CudaGemm::new_with_tiled_f32_swizzle`（イシュー
 /// #1034）でのみ意味を持つ tiled f32 swizzle 固有のパラメータのため、
@@ -391,7 +398,7 @@ fn print_occupancy_estimate(path: Path, size: u32, sm_count: Option<u32>) {
     let (block_m, block_n): (u32, u32) = match path {
         Path::WmmaTf32 => diagnostics::wmma_tf32_opt_block_tile(),
         Path::MmaF16 => diagnostics::mma_f16_block_tile(),
-        Path::TiledF32Swizzle => diagnostics::tiled_f32_block_tile(),
+        Path::TiledF32 | Path::TiledF32Swizzle => diagnostics::tiled_f32_block_tile(),
     };
     let actual_blocks = size.div_ceil(block_m) as u64 * size.div_ceil(block_n) as u64;
     match sm_count {
@@ -856,6 +863,66 @@ fn main() {
                 tflops(args.size, per_iter_secs)
             );
         }
+        Path::TiledF32 => {
+            // イシュー #1030: 診断用変種を一切構築しない本番既定 f32 経路
+            // そのもの（`CudaGemm::new` + `launch_tiled_f32`。#1032 の
+            // レジスタブロッキング適用後のカーネル）。`Path::TiledF32Swizzle`
+            // 分岐と対照させるための基準条件であり、group_width 等の
+            // opt-in パラメータは持たない。
+            let gemm = match CudaGemm::new(&device) {
+                Ok(g) => g,
+                Err(e) => {
+                    // 上の `Path::WmmaTf32` 分岐と同じ理由（`CudaDevice::new`
+                    // 成立後の `CudaGemm::new` 失敗は異常系。fail-closed
+                    // 採取ループが検知できるよう非 0 終了させる）。
+                    eprintln!(
+                        "backend-cuda gemm_profile_target: tiled f32 (base) kernel unavailable \
+                         ({e}); aborting because the target kernel never launched (this is not \
+                         an environment-adaptive skip)."
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            let a = rng.fill_vec((m as usize) * (k as usize));
+            let b = rng.fill_vec((k as usize) * (n as usize));
+            let (a_dev, b_dev) = gemm
+                .upload_f32(&a, &b)
+                .expect("tiled_f32 upload must succeed on CUDA-equipped runner");
+            // `alloc_output_f32`（`gemm.rs`）は上の `Path::WmmaTf32` 分岐と
+            // 同じ理由（`ALLOC_ZEROS_LAUNCHES` 定義コメント参照）で ncu の
+            // 起動通し番号に含まれない。
+            let mut c_dev = gemm
+                .alloc_output_f32(m, n)
+                .expect("tiled_f32 output allocation must succeed on CUDA-equipped runner");
+
+            for _ in 0..args.warmup {
+                gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                    .expect("tiled_f32 warmup launch must succeed on CUDA-equipped runner");
+            }
+            // `launch_tiled_f32` は非同期投入契約（#1013 と同型）のため、
+            // 上の各分岐と同じ理由で明示的な同期を挟む
+            // （ncu の起動通し番号には影響しない）。
+            gemm.synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
+            let start = Instant::now();
+            for _ in 0..args.iters {
+                gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                    .expect("tiled_f32 measured launch must succeed on CUDA-equipped runner");
+            }
+            gemm.synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
+            let elapsed = start.elapsed().as_secs_f64();
+            let per_iter_secs = elapsed / args.iters as f64;
+            println!(
+                "wall-clock (tiled_f32, launch-only, {} iters): total={elapsed:.6}s \
+                 per_iter={per_iter_secs:.6}s tflops={:.4} (ncu 実測値との突合用の参考値。\
+                 ncu 実行中は計測区間にプロファイラのオーバーヘッドが乗るため単体実行時の \
+                 数値とは一致しない)",
+                args.iters,
+                tflops(args.size, per_iter_secs)
+            );
+        }
         Path::TiledF32Swizzle => {
             // イシュー #1034: `--group-width` 未指定時は
             // `device.multiprocessor_count()` 実測値からの動的選択
@@ -947,6 +1014,7 @@ mod tests {
     fn path_parse_accepts_only_allowlisted_values() {
         assert_eq!(Path::parse("wmma_tf32"), Some(Path::WmmaTf32));
         assert_eq!(Path::parse("mma_f16"), Some(Path::MmaF16));
+        assert_eq!(Path::parse("tiled_f32"), Some(Path::TiledF32));
         assert_eq!(
             Path::parse("tiled_f32_swizzle"),
             Some(Path::TiledF32Swizzle)
@@ -958,7 +1026,12 @@ mod tests {
 
     #[test]
     fn path_as_str_round_trips_through_parse() {
-        for p in [Path::WmmaTf32, Path::MmaF16, Path::TiledF32Swizzle] {
+        for p in [
+            Path::WmmaTf32,
+            Path::MmaF16,
+            Path::TiledF32,
+            Path::TiledF32Swizzle,
+        ] {
             assert_eq!(Path::parse(p.as_str()), Some(p));
         }
     }
