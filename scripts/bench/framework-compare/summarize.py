@@ -74,8 +74,9 @@
   `step_total` phase の `median_s`/`q1_s`/`q3_s`・`init_s`（reuse 行のみ
   必須）は `_safe_time_s`（> 0 のみ有効）、`step_total` 以外の phase の
   `median_s`/`q1_s`/`q3_s` は `_safe_phase_time_s`（>= 0 有効。sub-ns
-  区間が 9 桁固定小数で 0 に丸まるための専用検証。イシュー #1010・
-  `_safe_phase_time_s` docstring 参照）、`phase` は非空 `str`、
+  区間の一部標本が計時クロックの分解能により 0 になりうるための専用
+  検証。イシュー #1010・`_safe_phase_time_s` docstring 参照）、`phase` は
+  非空 `str`、
   `phase_index` は非負整数として検証する。
   `step_total` phase の欠落・`phase`/`phase_index` の重複・`step_total`
   比が 100% を超える不整合（時間値の集計不整合を示す）に加え、mode ごとの
@@ -538,23 +539,27 @@ def _safe_phase_time_s(v):
     """`train_phases`（(b'') 節。イシュー #1010）の phase 行専用の時間値検証。
 
     `bench-fandhe --task train --phases` の producer 側は各区間の時間を
-    9 桁固定小数の秒で JSONL へ書き出す（`bench-common` の JSONL
-    シリアライズ契約）。`tape_build`（CPU fresh で実測 約 41 ns。
-    `docs/perf/train-step-phase-breakdown.md` 出典）のような sub-100 ns
-    区間は 9 桁固定小数で丸めると `0.000000000` になり、`step_total` と
-    同じ `_safe_time_s`（> 0 のみ有効）で検証すると「時間として不正」
-    扱いになってしまう。しかし 0 は sub-ns 区間の実測値としてあり得る
-    妥当な下限であり、`_safe_time_s` が本来弾きたい不正値（負値・NaN・
-    Infinity・bool・非数・巨大整数の変換不能値）とは性質が異なるため、
-    phase 行（`step_total` を除く）の median_s/q1_s/q3_s に限り本関数で
-    0 を許容する（イシュー #1010 実装時に `summarize.py --strict` が
-    cpu fresh/reuse の sub-ns 区間で誤って exit 2 になっていたことへの
-    対処）。fail-closed の対象（負値・NaN・Infinity・非数・巨大整数）は
-    `_safe_time_s` と同じ判定基準のまま変えない。呼び出し側
-    `_train_phases_validate` は `step_total` 行・`init_s`・比率計算の
-    分母（`step_total_median`）には従来どおり `_safe_time_s`（> 0 のみ
-    有効）を使い続ける（0 秒の step_total・init_s は実測として不合理
-    であり、比率計算のゼロ除算も避ける）。
+    9 桁固定小数の秒（ナノ秒単位）で JSONL へ書き出す（`bench-common` の
+    JSONL シリアライズ契約）。`tape_build` のような sub-100 ns 区間は
+    41 ns なら `0.000000041` としてそのまま表現でき、9 桁固定小数への
+    シリアライズ自体は `0.000000000` へ丸めない（41/42 ns の実測値が
+    生データにそのまま残っていることでも確認済み）。実際に median_s が
+    0 になるのは、同一区間の 5 反復中の一部標本で `Instant::now()` の
+    連続 2 回呼び出しが計時クロックの分解能（OS・プラットフォーム依存の
+    タイマ粒度）未満の間隔しか空かずに同一時刻を返し、区間長が厳密に
+    0 と計測されるためである（sub-ns の演算コストを計時できないタイマ
+    分解能の限界であり、シリアライズの丸め誤差ではない）。0 は sub-ns
+    区間の実測値としてあり得る妥当な下限であり、`_safe_time_s` が本来
+    弾きたい不正値（負値・NaN・Infinity・bool・非数・巨大整数の変換不能
+    値）とは性質が異なるため、phase 行（`step_total` を除く）の
+    median_s/q1_s/q3_s に限り本関数で 0 を許容する（イシュー #1010
+    実装時に `summarize.py --strict` が cpu fresh/reuse の sub-ns 区間で
+    誤って exit 2 になっていたことへの対処）。fail-closed の対象（負値・
+    NaN・Infinity・非数・巨大整数）は `_safe_time_s` と同じ判定基準の
+    まま変えない。呼び出し側 `_train_phases_validate` は `step_total`
+    行・`init_s`・比率計算の分母（`step_total_median`）には従来どおり
+    `_safe_time_s`（> 0 のみ有効）を使い続ける（0 秒の step_total・
+    init_s は実測として不合理であり、比率計算のゼロ除算も避ける）。
     """
     if not _is_plain_number(v):
         return None

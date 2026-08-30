@@ -53,8 +53,10 @@
 
 「step_total 比」は当該行の 5 ラン中央値 ÷ step_total の 5 ラン中央値。
 sub-µs の値（`0.0 µs` 表示）は `_safe_phase_time_s` により有効値として扱う
-（producer 側の 9 桁固定小数シリアライズで sub-100 ns 区間が 0 に丸まるため。
-`summarize.py` `_safe_phase_time_s` docstring 参照）。
+（9 桁固定小数シリアライズ自体は ns 単位を表現できるため丸まらないが、
+sub-100 ns 区間は計時クロックの分解能未満の標本で連続する `Instant::now()`
+が同一時刻を返し区間長が 0 と計測されることがあるため。`summarize.py`
+`_safe_phase_time_s` docstring 参照）。
 
 ### 3.1 CPU / Apple M4 Max
 

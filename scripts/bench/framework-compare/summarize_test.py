@@ -929,8 +929,10 @@ class TrainPhasesSectionTests(unittest.TestCase):
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("step_total", buf.getvalue())
 
-    # イシュー #1010: sub-100 ns 区間（`tape_build` 等）は producer 側の
-    # 9 桁固定小数シリアライズで median_s/q1_s/q3_s が 0.0 に丸まる。
+    # イシュー #1010: sub-100 ns 区間（`tape_build` 等）は、9 桁固定小数
+    # シリアライズ自体は ns 単位を表現できるため丸まらないが、計時クロック
+    # の分解能未満の標本では連続する `Instant::now()` が同一時刻を返し
+    # median_s/q1_s/q3_s が 0.0 と計測されることがある。
     # `_safe_phase_time_s` は phase 行（`step_total` を除く）に限りこれを
     # 妥当な下限として許容し、`--strict` を誤って落とさない
     # （`_safe_phase_time_s` docstring 参照）。
