@@ -98,6 +98,14 @@
 //! （matmul VJP のホスト側転置コピー除去）が共通で必要とするため
 //! `tensor-core` に置く。`facade` の公開 API 面には出さない内部ヘルパ
 //! （`docs/compat-api-scope.md` §0）のため re-export リストには含めない。
+//! `pub mod layout;` 自体は `backend-metal`（`crate::layout` 再エクスポート
+//! 経由）・`autodiff::eval`（`layout::classify_2d` 直接呼び出し）という
+//! クレート境界をまたぐ呼び出し元があるため `mod`（非公開）にはできないが、
+//! `MatrixLayout`／`TransposePattern`／`classify_2d` 等は `fandhe-ai-tensor-core`
+//! の利用者向け契約（semver 対象）ではない。`pool_core`（PR #1063 codex-review
+//! P1 対応）と同じ理由・同じ方式で `#[doc(hidden)]` を付け、docs.rs・rustdoc
+//! から隠したうえで semver 互換性の対象外であることをコード上でも明示する
+//! （PR #1077 codex-review P1 対応）。
 
 mod backend_ops;
 mod broadcast;
@@ -108,6 +116,7 @@ mod dispatch_failure;
 mod element;
 mod error;
 mod fusion;
+#[doc(hidden)]
 pub mod layout;
 pub mod memory_stats;
 mod ops_shape;
