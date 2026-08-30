@@ -134,6 +134,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         mode: "fresh",
         init_s: None,
         parity,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -241,6 +242,7 @@ fn run_train<B: AutodiffBackend>(
         mode: "fresh",
         init_s: None,
         parity: None,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -281,6 +283,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         mode: "fresh",
         init_s: None,
         parity: None,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -305,11 +308,20 @@ fn main() {
     }
 }
 
-/// `--mode reuse` は対象外（モジュールコメント参照。イシュー #925）。
-/// `--phases`（イシュー #1009）も `bench-fandhe` 専用であり、未知フラグを
-/// 黙殺せず fail-fast する（README「train --phases」節参照）。
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = parse_cli()?;
+/// `--mode reuse`（モジュールコメント参照。イシュー #925）・`--phases`
+/// （`bench-fandhe` 専用。イシュー #1009）・`--tf32`（イシュー #1042）の
+/// 対象外フラグを検査する。`run()`（`Backend` の型パラメータを要する
+/// `dispatch::<B>` 呼び出しの手前）から分離してあるのは、バックエンド
+/// 型に依存しない純粋なガードのみをユニットテストから直接検証できる
+/// ようにするため。
+///
+/// `--tf32` を受理しない理由: burn 0.21 の CUDA バックエンドは常時 TF32
+/// （既定で TF32 accumulation type へ強制降格。メモリ `burn-cuda-tf32.md`）
+/// であり、FP32 厳密経路自体を持たないため `--tf32` に opt-in／opt-out の
+/// 意味を持たせられない。既存の burn GEMM 計測（`--tf32` なし）が実質的に
+/// 常に TF32 相当であることは README に明記し、フラグとしては受理せず
+/// fail-fast する（`docs/cuda-tf32-optin-api-decision.md` C-1）。
+fn validate_unsupported_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.mode == "reuse" {
         return Err(
             "MEASURE_ERROR: --mode reuse is not applicable to burn (device reuse is already \
@@ -323,6 +335,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    if cli.tf32 {
+        return Err(
+            "MEASURE_ERROR: --tf32 is not accepted by burn (burn CUDA is always TF32 by \
+             default; see README '--tf32' 節; issue #1042)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = parse_cli()?;
+    validate_unsupported_flags(&cli)?;
     match cli.device.as_str() {
         "cpu" => dispatch::<NdArray>(&cli, &NdArrayDevice::Cpu),
         #[cfg(feature = "metal")]
@@ -335,5 +360,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             cfg!(feature = "cuda"),
         )
         .into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_cli(tf32: bool) -> Cli {
+        Cli {
+            task: "gemm".to_string(),
+            device: "cuda".to_string(),
+            size: 64,
+            out: "/dev/null".to_string(),
+            mode: "fresh".to_string(),
+            phases: false,
+            tf32,
+        }
+    }
+
+    /// イシュー #1042: burn は FP32 厳密経路を持たないため `--tf32` は
+    /// 常に MEASURE_ERROR で fail-fast する（`docs/cuda-tf32-optin-api-
+    /// decision.md` C-1）。
+    #[test]
+    fn tf32_flag_is_always_measure_error() {
+        let err = validate_unsupported_flags(&base_cli(true))
+            .expect_err("--tf32 must be rejected on bench-burn");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--tf32"), "msg={msg}");
+    }
+
+    #[test]
+    fn tf32_flag_absent_passes_the_guard() {
+        assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
     }
 }

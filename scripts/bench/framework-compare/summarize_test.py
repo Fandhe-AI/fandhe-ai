@@ -452,6 +452,38 @@ class SectionRenderingTests(unittest.TestCase):
         # 無効行の GFLOP/s 列は "-"（性能値として見せない）。
         self.assertIn("| - |", text)
 
+    def test_tf32_section_absent_without_tf32_rows(self):
+        # イシュー #1042: `--tf32` 行が 1 件も無いファイルでは
+        # (a-tf32) 節自体を出力しない（既存ファイルとの表示差分を
+        # 作らない）。
+        rows = [_with_parity(_base_row())]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        self.assertNotIn("(a-tf32)", "\n".join(lines))
+
+    def test_tf32_section_rendered_when_tf32_row_present(self):
+        rows = [
+            _with_parity(_base_row()),
+            dict(_with_parity(_base_row(framework="candle")), tf32=True, gflops=200.0),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(a-tf32) GEMM TF32", text)
+        self.assertIn("| 200.0 |", text)
+
+    def test_tf32_row_parity_failure_marked_invalid_in_tf32_section(self):
+        rows = [
+            dict(
+                _with_parity(_base_row(), fail_count=2, max_abs_err=1e-2, max_rel_err=1e-2),
+                tf32=True,
+            ),
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(a-tf32)", text)
+        self.assertIn("無効: 要素誤差超過", text)
+
     def test_ok_row_not_marked_invalid(self):
         rows = [_with_parity(_base_row())]
         lines, has_checksum_mismatch, has_parity_failure, _, _, _ = summarize.section(
@@ -1289,6 +1321,24 @@ class TargetGateTests(unittest.TestCase):
         self.assertEqual(rec["fandhe_mode"], "reuse")
         self.assertAlmostEqual(rec["ratio"], 2.0)
 
+    def test_tf32_optin_row_excluded_from_gate(self):
+        # イシュー #1042: 同一 size に TF32 opt-in 行（10 倍高速。もし
+        # 誤って拾われれば ratio ≈ 10.0 になる）と FP32 行（等速）が同居
+        # する場合、`target_gate` は FP32 行のみを使う（fail-open 防止。
+        # `_pick_row_for_gate`/`get()` の tf32 除外フィルタ参照）。
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+            dict(
+                _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+                median_s=0.0001,
+                tf32=True,
+            ),
+            _with_parity(_base_row(framework="candle", mode="fresh")),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
+        self.assertAlmostEqual(rec["ratio"], 1.0)
+
     def test_fandhe_fresh_only_uses_fresh(self):
         rows = [
             _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
@@ -1590,6 +1640,18 @@ class TargetGateTests(unittest.TestCase):
         rows = [bool_row]
         r = summarize.get(rows, "fandhe-ai", "gemm", "cpu", 1)
         self.assertIsNone(r)
+
+    def test_get_function_defaults_to_excluding_tf32_rows(self):
+        # イシュー #1042: `get()` の既定 `tf32=False` は TF32 opt-in 行を
+        # 拾わない（fail-open 防止。同一 size に FP32/TF32 双方が存在する
+        # 場合、明示指定なしの呼び出しは常に FP32 行を返す）。
+        tf32_row = dict(_base_row(framework="fandhe-ai", size=256), tf32=True)
+        fp32_row = _base_row(framework="fandhe-ai", size=256)
+        rows = [tf32_row, fp32_row]
+        self.assertIs(summarize.get(rows, "fandhe-ai", "gemm", "cpu", 256), fp32_row)
+        self.assertIs(
+            summarize.get(rows, "fandhe-ai", "gemm", "cpu", 256, tf32=True), tf32_row
+        )
 
     def test_pick_row_for_gate_missing_size_key_does_not_raise(self):
         # Bugbot Medium 指摘（PR #1082 2 巡目・summarize.py L702-712）:

@@ -599,8 +599,8 @@ def load_rows(path):
     return rows
 
 
-def get(rows, fw, task, device, size=None, mode="fresh"):
-    """`(framework, task, device, size, mode)` に一致する最初の行を返す。
+def get(rows, fw, task, device, size=None, mode="fresh", tf32=False):
+    """`(framework, task, device, size, mode, tf32)` に一致する最初の行を返す。
 
     `size=None` は size 条件を適用しない（呼び出し元がフレームワーク・
     デバイス・mode のみで絞り込みたい場合の既定動作）。`size` を指定する
@@ -609,6 +609,13 @@ def get(rows, fw, task, device, size=None, mode="fresh"):
     `r["size"]` を読むと `size` キー欠損行で `KeyError`、`bool`（`True ==
     1`）混入行で意図しない一致が起こりうる。行の `size` が不正な場合は
     比較対象から除外する＝一致しないものとして扱う。fail-closed）。
+
+    `tf32`（既定 `False`。イシュー #1042）: `r.get("tf32", False)` と一致
+    する行のみを対象にする（キー欠損 = `False` の互換規約。`Record.tf32`
+    ドキュメンテーションコメント参照）。既定を `False` にすることで、
+    通常の呼び出し元（`section()` の (a) GEMM 節・`target_gate` 系）が
+    明示指定なしに TF32 opt-in 行を誤って FP32 行として拾わないようにする
+    （fail-open 防止）。
     """
     for r in rows:
         if (
@@ -616,6 +623,7 @@ def get(rows, fw, task, device, size=None, mode="fresh"):
             and r["task"] == task
             and r["device"] == device
             and r["mode"] == mode
+            and bool(r.get("tf32", False)) == tf32
         ):
             if size is None:
                 return r
@@ -725,13 +733,28 @@ def gemm_checksum_reference(rows):
     checksum 参照値の算出であり、size 自体の妥当性判定は `target_gate` 側
     の `_valid_gate_size` 検査が別途「判定不能」として明示する〉）。
     """
-    sizes = sorted({r["size"] for r in rows if r["task"] == "gemm" and _valid_gate_size(r.get("size"))})
+    # イシュー #1042: `tf32` 行はここでは除外する。TF32 は FP32 と異なる
+    # 精度（reduced precision accumulation）で計算するため、同一 size で
+    # FP32 行と混在させると多数決クラスタ・優先経路の判定が TF32 行の
+    # checksum に引きずられ、正当な FP32 行を「孤立した誤値」と誤判定
+    # しうる（fail-open のおそれ）。TF32 行自身の checksum 妥当性検証は
+    # `section()` の TF32 専用節（`_tf32_gemm_reference`）が別途担う。
+    sizes = sorted(
+        {
+            r["size"]
+            for r in rows
+            if r["task"] == "gemm" and _valid_gate_size(r.get("size")) and not r.get("tf32", False)
+        }
+    )
     result = {}
     for size in sizes:
         candidates = [
             r
             for r in rows
-            if r["task"] == "gemm" and r["size"] == size and r["mode"] == "fresh"
+            if r["task"] == "gemm"
+            and r["size"] == size
+            and r["mode"] == "fresh"
+            and not r.get("tf32", False)
         ]
 
         # 相互一致するクラスタのうち最大のものを先に求める（多数派の把握）。
@@ -797,6 +820,11 @@ def gemm_checksum_mismatches(rows):
     for r in rows:
         if r["task"] != "gemm":
             continue
+        # イシュー #1042: TF32 行は FP32 参照との単純突合対象から除外する
+        # （`gemm_checksum_reference` のコメント参照。専用の妥当性検証は
+        # `section()` の TF32 節が別途担う）。
+        if r.get("tf32", False):
+            continue
         # `reference` のキーは `_valid_gate_size` 検証済みの size のみ
         # （`gemm_checksum_reference` docstring 参照）。`r["size"]` が不正
         # （配列・オブジェクト等の unhashable 値）だと `dict.get()` 自体が
@@ -833,6 +861,10 @@ def gemm_checksum_unverifiable(rows):
     unverifiable = []
     for r in rows:
         if r["task"] != "gemm":
+            continue
+        # イシュー #1042: `gemm_checksum_mismatches` と同じ理由で TF32 行を
+        # 除外する。
+        if r.get("tf32", False):
             continue
         # `gemm_checksum_mismatches` と同じ理由（不正 size での
         # `dict.get()` 例外終了防止。イシュー #1051 codex-review P0
@@ -1040,7 +1072,14 @@ def _parity_reason(row):
 
 
 def _row_key(r):
-    return (r["framework"], r["device"], r["size"], r["mode"])
+    # イシュー #1042: `tf32` をキーへ含める。同一
+    # `(framework, device, size, mode)` で FP32 行と TF32 opt-in 行が
+    # 同一ファイルへ同居しうるため（`--tf32` は同じ size を使う想定。
+    # `docs/cuda-tf32-optin-api-decision.md`）、`tf32` を含めないと
+    # `mismatch_by_key`/`unverifiable_keys` 等の辞書で片方が上書きされ、
+    # 無効判定（checksum 不一致・parity 失敗）の付記先を取り違える
+    # （fail-open のおそれ）。
+    return (r["framework"], r["device"], r["size"], r["mode"], bool(r.get("tf32", False)))
 
 
 # イシュー #1051: 目標達成ゲート（--target）専用のヘルパー群。既存の
@@ -1092,6 +1131,10 @@ def _pick_row_for_gate(rows, fw, task, device, size):
             and r["task"] == task
             and r["device"] == device
             and r["mode"] == mode
+            # イシュー #1042: TF32 opt-in 行を目標達成ゲートの判定対象から
+            # 除外する（既定 FP32 との混同・fail-open 防止。モジュール
+            # docstring 参照）。
+            and not r.get("tf32", False)
             and _valid_gate_size(r.get("size"))
             and r.get("size") == size
         ]
@@ -1851,6 +1894,59 @@ def section(path, rows):
                     )
             lines.append("")
 
+    # (a-tf32) TF32 opt-in GEMM（イシュー #1042）。`--tf32` で計測された行が
+    # 存在するファイルにのみ出力する。目標達成ゲート（(a) 節・
+    # `target_gate`）からは既定で除外済み（`get()`/`_pick_row_for_gate`/
+    # `gemm_checksum_reference` の `tf32` 除外フィルタ参照）のため、ここで
+    # 独立に表示する。checksum 相互突合は（a) 節と異なり FP32 行を巻き込ま
+    # ないため行わず、行自身の要素単位検証（`parity_status`）のみを「無効」
+    # 判定に使う。
+    tf32_rows = [r for r in rows if r["task"] == "gemm" and r.get("tf32", False)]
+    if tf32_rows:
+        for r in tf32_rows:
+            preason = _parity_reason(r)
+            if preason is not None:
+                print(
+                    f"warning: {rel}: {r['framework']}/{r['device']}/size={r['size']}/{r['mode']} "
+                    f"(tf32) の gemm 要素単位検証が閾値超過 — {preason} — 無効データとして表示",
+                    file=sys.stderr,
+                )
+        lines.append(
+            "### (a-tf32) GEMM TF32（--tf32 opt-in。REQ-2 統一複合判定。CUDA Tensor Core reduced precision）\n"
+        )
+        tf32_devices = sorted(
+            {r["device"] for r in tf32_rows if r["device"] in DEVICE_ORDER},
+            key=DEVICE_ORDER.index,
+        )
+        for device in tf32_devices:
+            sizes = sorted(
+                {
+                    r["size"]
+                    for r in tf32_rows
+                    if r["device"] == device and _valid_gate_size(r.get("size"))
+                }
+            )
+            lines.append(f"#### {DEVICE_LABEL[device]}\n")
+            lines.append("| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for n in sizes:
+                for fw in FRAMEWORKS:
+                    r = get(rows, fw, "gemm", device, n, tf32=True)
+                    if r:
+                        preason = _parity_reason(r)
+                        if preason is not None:
+                            fw_col = f"{fw}（無効: {preason}）"
+                            lines.append(
+                                f"| {n} | {fw_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | - |"
+                            )
+                        else:
+                            lines.append(
+                                f"| {n} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['gflops']:.1f} |"
+                            )
+                    else:
+                        lines.append(f"| {n} | {fw} | 計測不可 | - | - | - |")
+            lines.append("")
+
     lines.append(
         "### (b) MLP 学習（784→256→10、ReLU、バッチ 64、MSE、SGD lr=0.01、1 ステップあたり時間）\n"
     )
@@ -2054,6 +2150,12 @@ def section(path, rows):
         1
         for r in rows
         if r["task"] == "gemm"
+        # イシュー #1042: TF32 行は checksum 相互突合の対象から除外済み
+        # （`gemm_checksum_unverifiable`/`gemm_checksum_reference` 参照）
+        # のため `unverifiable_keys` にも決して現れない。ここで明示的に
+        # 除かないと「相互突合できた」件数へ誤って計上されてしまう
+        # （fail-open のおそれ）。
+        and not r.get("tf32", False)
         and _valid_gate_size(r.get("size"))
         and _row_key(r) not in unverifiable_keys
     )
