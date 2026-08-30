@@ -83,6 +83,22 @@
   `has_train_phases_invalid` を追加）。`task != "train_phases"` の既存
   節（(a)/(a')/(b)/(b')/(c)・checksum 突合・parity 判定・`devices_in`）は
   本フィールドを一切読まないため影響を受けない。
+- 目標達成ゲート（イシュー #1051。`--target candle`/`--target burn`）:
+  親 #1049「横並び再計測と目標達成ゲート」の完了判定を人間の目視に頼らず
+  機械的に行うためのオプション。**同一入力 JSONL ファイル内**（1 ファイル
+  = 1 環境。モジュール docstring 冒頭の方針と同じ）の `(task, device,
+  size)` ごとに、fandhe-ai と `--target` 指定フレームワークの `median_s`
+  を突合し、fandhe-ai が同等以上の性能（`fandhe_median_s <=
+  target_median_s`）かを判定する。ファイルをまたいだ突合は環境混同になる
+  ため行わない。fandhe-ai・target とも reuse 行があれば reuse を優先し
+  無ければ fresh を使う（`_pick_row_for_gate`。infer には reuse 行が
+  存在しないため常に fresh）。checksum 不一致・要素誤差超過・train reuse
+  の checksum 不一致等（既存の無効判定と同じ規則）に該当する行は「達成」
+  と判定せず「判定不能（無効データ）」に倒す（壊れた計算の実行時間で
+  達成判定しない。A08）。`--target` 指定時、1 件でも未達／判定不能が
+  あれば終了コード 3 を返す（`--strict` 由来の 2 と区別。両方の条件を
+  満たす場合はデータ無効の解消を優先させるため 2 を返す）。判定式・許容
+  マージンはユーザー承認なく緩めない（`.claude/rules/coding-rust.md`）。
 """
 
 import argparse
@@ -90,6 +106,7 @@ import glob
 import json
 import math
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -97,6 +114,331 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FRAMEWORKS = ["fandhe-ai", "candle", "burn"]
 DEVICE_ORDER = ["cpu", "metal", "cuda"]
 DEVICE_LABEL = {"cpu": "CPU", "metal": "Metal", "cuda": "CUDA"}
+
+# イシュー #1051: 目標達成ゲート（--target）の対象タスク・比較先 allowlist。
+# `--target` は argparse の `choices=GATE_TARGET_CHOICES` で検証するため、
+# CLI から任意の framework 文字列が Markdown 出力・辞書キーへ流れ込むことは
+# ない（security.md A03）。fandhe-ai 自身を target にする比較は無意味な
+# ため FRAMEWORKS から除外する。
+GATE_TARGET_CHOICES = [fw for fw in FRAMEWORKS if fw != "fandhe-ai"]
+GATE_TASKS = ("gemm", "train", "infer")
+
+# codex-review P0 指摘（PR #1082 3 巡目）: `run_all.sh`/`run_all_cuda.sh` の
+# `run()` 関数は実行時失敗を JSONL には一切書かず（"never fabricated"。
+# 両スクリプト冒頭コメント参照）`skipped*.log` にのみ記録する。従来の
+# `target_gate`/`_gate_devices` は成功して JSONL に残った fandhe-ai/target
+# 行だけからデバイス集合・size 集合を導出していたため、あるデバイスの
+# 全実行（または既知デバイス上の特定 size）が丸ごと失敗して
+# skipped*.log にしか記録されなかった場合、その組合せが判定対象に一切
+# 現れず「全達成」に混入する fail-open があった。`_parse_skip_failure`
+# は両スクリプトが書き出す行形式（`<bin> task=<task> device=<device>
+# size=<size> mode=<mode> extra=<extra> : <エラーメッセージ>`。両
+# スクリプトの `run()` 定義で同一書式）を解析し、`main()` が
+# `gate_records_all` へ判定不能レコードとして注入する
+# （`_inject_skip_failures_into_gate` 参照）。
+_SKIP_BIN_TO_FRAMEWORK = {
+    "bench-fandhe": "fandhe-ai",
+    "bench-candle": "candle",
+    "bench-burn": "burn",
+}
+
+_SKIP_LINE_RE = re.compile(
+    r"^(?P<bin>\S+)\s+task=(?P<task>\S+)\s+device=(?P<device>\S+)\s+"
+    r"size=(?P<size>\S+)\s+mode=(?P<mode>\S+)\s+extra=(?P<extra>\S+)\s*:\s*(?P<err>.*)$"
+)
+
+
+def _parse_skip_failure(line):
+    """`skipped*.log` の 1 行を解析し、ゲート判定に使える構造化情報を返す。
+
+    `run_all.sh`/`run_all_cuda.sh` の `run()` 関数（両スクリプト同一書式）が
+    書き出す `<bin> task=<task> device=<device> size=<size> mode=<mode>
+    extra=<extra> : <エラーメッセージ>` を対象とする。`build()`
+    （`run_all_cuda.sh` のビルド失敗記録）等、この書式に一致しない行は
+    `task`/`device`/`size` を特定できないため全て `None` に倒す
+    （呼び出し側 `_inject_skip_failures_into_gate` が device 単位の粗い
+    判定不能レコードへ fail-closed に倒す）。
+
+    `framework`/`task`/`device` は許可された値（`_SKIP_BIN_TO_FRAMEWORK`・
+    `GATE_TASKS`・`DEVICE_ORDER`）のみを採用する（security.md A03。外部
+    プロセスの stderr 出力を含む行を未検証のまま辞書キー・Markdown へ
+    通さない）。`size` は `_valid_gate_size` で検証し、不正・パース不能
+    なら `None` に倒す（`--size` に非整数が渡ることはないが、外部ログの
+    内容は信頼しない）。
+
+    `mode`（PR #1082 5 巡目 codex-review P0 指摘その1）: `--mode` の
+    allowlist（`_TRAIN_PHASES_MODES`。producer 側 `bench_common::
+    parse_cli_from` の `--mode` allowlist と同じ値域）で検証する。
+    旧実装は `mode` を一切保持していなかったため、`_inject_skip_failures_
+    into_gate` は「どの実行（framework の fresh/reuse どちらか）が
+    失敗したか」を区別できず、失敗した実行とは異なるモードの成功データ
+    のみで「達成」を出してしまう fail-open があった。
+
+    戻り値: {"framework": str|None, "task": str|None, "device": str|None,
+              "size": int|None, "mode": str|None, "raw": str}
+    """
+    m = _SKIP_LINE_RE.match(line)
+    if not m:
+        return {
+            "framework": None,
+            "task": None,
+            "device": None,
+            "size": None,
+            "mode": None,
+            "raw": line,
+        }
+    framework = _SKIP_BIN_TO_FRAMEWORK.get(m.group("bin"))
+    task = m.group("task") if m.group("task") in GATE_TASKS else None
+    device = m.group("device") if m.group("device") in DEVICE_ORDER else None
+    mode = m.group("mode") if m.group("mode") in _TRAIN_PHASES_MODES else None
+    size = None
+    try:
+        size_candidate = int(m.group("size"))
+    except ValueError:
+        size_candidate = None
+    if size_candidate is not None and _valid_gate_size(size_candidate):
+        size = size_candidate
+    return {
+        "framework": framework,
+        "task": task,
+        "device": device,
+        "size": size,
+        "mode": mode,
+        "raw": line,
+    }
+
+
+def _skip_log_paths_for_input(path):
+    """入力 JSONL ファイルに対応する skipped*.log の一覧を返す（環境スコープ）。
+
+    codex P0・Bugbot High 指摘（PR #1082 4 巡目）: skip 失敗の注入を
+    全入力ファイル横断で共有される `gate_records_all` へ行うと、環境 A の
+    JSONL に `gemm/cuda/N=256` の達成行があるだけで、環境 B（別ディレクトリ
+    ・skipped*.log にしか記録が残っていない）の同じ組の失敗が
+    `existing_keys` により注入されず握りつぶされる。`target_gate` 自身が
+    課している「ファイルをまたいだ突合は環境混同になるため行わない」契約
+    （モジュール docstring 参照）に反していた。
+
+    加えて、`run_all.sh`/`run_all_cuda.sh` は同一ディレクトリ
+    （`results/raw/`）に複数環境の JSONL を書き出す運用（例:
+    `results.jsonl`〈環境 1〉と `results-cuda.jsonl`〈環境 2〉が同居。
+    README「計測結果」節参照）のため、単純にディレクトリ単位で
+    skipped*.log を共有すると同一ディレクトリ内の別環境の失敗まで
+    混入しうる。両スクリプトの命名規約（`results<suffix>.jsonl` <->
+    `skipped<suffix>.log`。例: `results.jsonl`<->`skipped.log`、
+    `results-cuda.jsonl`<->`skipped-cuda.log`）に厳密一致する
+    skipped*.log が存在すればそれだけを対象にする（最も精度が高い環境
+    識別）。一致するファイルが存在しない場合（命名規約に従わないファイル名
+    ・アドホックな実行等で環境識別子が特定できない）は、同じディレクトリの
+    skipped*.log 全件へフォールバックする（判定不能の握りつぶしを避ける
+    fail-closed 側の選択。ディレクトリという境界自体は超えない）。
+
+    戻り値: 一致した skipped*.log の絶対パスのリスト（重複なし・昇順）。
+    """
+    d = os.path.dirname(os.path.abspath(path))
+    base = os.path.basename(path)
+    if base.endswith(".jsonl"):
+        stem = base[: -len(".jsonl")]
+        if stem.startswith("results"):
+            suffix = stem[len("results") :]
+            expected = os.path.join(d, f"skipped{suffix}.log")
+            if os.path.isfile(expected):
+                return [expected]
+    return sorted(glob.glob(os.path.join(d, "skipped*.log")))
+
+
+def _skip_failures_for_paths(log_paths):
+    """`log_paths`（`_skip_log_paths_for_input` が返す skipped*.log 群）を
+    読み、`_parse_skip_failure` で構造化した失敗のリストを返す。
+    """
+    failures = []
+    for log_path in log_paths:
+        for line in open(log_path):
+            line = line.strip()
+            if line:
+                failures.append(_parse_skip_failure(line))
+    return failures
+
+
+def _sanitize_skip_raw_for_display(raw, max_len=120):
+    """外部プロセスの stderr 出力を含む skipped*.log の生行（`raw`）を
+    Markdown 表セルへ安全に埋め込める表現へ変換する。
+
+    codex-review P0 指摘（PR #1082 6 巡目・security.md A03）: `raw` は
+    ベンチバイナリの stderr（外部プロセス出力）をそのまま含む未信頼
+    文字列であり、`target_gate_section()` は `reason` を `|` 区切りの
+    Markdown 表セル・箇条書きへ無加工で埋め込む。`raw` に `|` が含まれると
+    表構造が壊れ、`<script>` 等の HTML/Markdown 構文を含む場合はそのまま
+    出力ページへ混入しうる（生成物が GitHub 等でレンダリングされる場合の
+    注入経路になる）。
+
+    - 改行・連続空白は単一の半角スペースへ正規化する（表セル内で改行する
+      とレンダリングが崩れるため）。
+    - `&` を先に `&amp;` へ変換してから `<`/`>` を実体参照へ、`|` を
+      Markdown のエスケープ形式 `\\|` へ変換する（`&` を後回しにすると
+      置換で生成した実体参照自体を再エスケープしてしまう二重エスケープ
+      を防ぐ）。
+    - `max_len` 文字を超える場合は切り詰めて末尾に `…` を付す（表の
+      横幅を制御し、巨大な stderr 出力の丸ごと埋め込みも防ぐ）。
+    """
+    normalized = " ".join(raw.split())
+    escaped = (
+        normalized.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("|", "\\|")
+    )
+    if len(escaped) > max_len:
+        escaped = escaped[:max_len] + "…"
+    return escaped
+
+
+def _inject_skip_failures_into_gate(gate_records, skip_failures, target, rows):
+    """skip 由来の失敗を `gate_records` へ判定不能レコードとして注入する。
+
+    **呼び出し契約（codex P0・Bugbot High 指摘・PR #1082 4 巡目）**:
+    `gate_records`・`skip_failures`・`rows` は必ず **単一の入力ファイル
+    （＝単一環境）に属するものだけ** を渡すこと。全入力ファイル横断で
+    集約した `gate_records_all` を渡すと、環境 A の JSONL に達成行がある
+    `(task, device, size)` の組について、環境 B（別ファイル・skipped*.log
+    にしか記録が残っていない）の同じ組の失敗が握りつぶされる
+    （`target_gate` 自身の「ファイルをまたいだ突合は環境混同になるため
+    行わない」契約への違反。呼び出し元 `main()` は空ファイル用
+    プレースホルダには `rows=[]` を渡す。`_skip_log_paths_for_input`/
+    `_skip_failures_for_paths` も参照）。
+
+    **(task, device, size) 単位ではなく (framework, task, device, size,
+    mode) 単位で判定する（codex-review P0 指摘その1・PR #1082 5 巡目）**:
+    旧実装は `(task, device, size)` のみで重複を判定していたため、
+    fandhe-ai の fresh 実行が失敗して skipped*.log に記録されていても、
+    同じ組の fandhe-ai reuse 実行が成功し（`_pick_row_for_gate` は
+    reuse を優先）target 側の fresh 実行も成功していれば「達成」の
+    まま握りつぶされていた（train reuse は比較対象の fresh 行が
+    存在しない場合を「値そのものの正当性を否定しない」= 有効値として
+    扱う仕様〈`_train_reuse_row_invalid_reason` docstring 参照〉のため、
+    fresh 実行が実際には試みられて失敗したという明確な証拠があっても
+    checksum 突合不能な状態を見逃していた）。本関数は skip 失敗
+    1 件ごとに、**その正確な (framework, task, device, size, mode) の
+    実行が実際に成功して `rows`（同一環境の実データ）へ残っているか**
+    を `get()` で確認する。残っていれば「再実行後に成功した古い失敗
+    記録（stale）」とみなして無視する（重複抑止はこの場合のみ）。
+    残っていなければ、その (task, device, size) の既存レコードが
+    「達成」であっても判定不能へ格下げする（既に判定不能なら理由は
+    上書きしない。1 件でも本物の失敗があれば「達成」を名乗らせない
+    という fail-closed の原則）。既存レコードが無い場合は新規の判定
+    不能レコードを追加する（従来どおり）。
+
+    **framework が特定できない行も握りつぶさない（codex-review P0
+    指摘その2・PR #1082 5 巡目）**: 正規表現自体は一致し `task`/`device`
+    が妥当な値でも、binary 名が `_SKIP_BIN_TO_FRAMEWORK` の allowlist に
+    無ければ `framework` は `None` になる。旧実装は `task`/`device` が
+    `None` の行のみを「詳細不明」の粗い判定不能レコードへ倒し、
+    `framework is None` はその後の `sf["framework"] not in (...)` 判定で
+    `None not in (...)` が常に真になるため無条件で `continue`（無視）
+    されていた（未知 binary 名の失敗が握りつぶされる fail-open）。
+    `framework is None` も `task`/`device` が `None` の場合と同じ粗い
+    「詳細不明」判定不能レコードへ倒す。
+
+    `task`/`device`/`framework` のいずれかを特定できない行（ビルド失敗・
+    未知 binary 名等）は、値を捏造せず device 単位より粗い「詳細不明」の
+    判定不能レコード 1 件（重複行はまとめる）に倒す。
+
+    戻り値: 新規追加または格下げされたレコードのリスト（Markdown 節への
+    表示用。空なら `[]`）。`gate_records` は本関数の呼び出しにより
+    直接変更される（呼び出し元が同じ list オブジェクトを
+    `gate_records_all` へ extend する運用を前提に、in-place 追加のみ
+    行い新しい list は作らない）。
+    """
+    existing_by_key = {(r["task"], r["device"], r["size"]): r for r in gate_records}
+    injected = []
+    seen_unparsed = set()
+    for sf in skip_failures:
+        if sf["task"] is None or sf["device"] is None or sf["framework"] is None:
+            # codex-review P0 指摘その2（PR #1082 5 巡目）: task/device が
+            # 妥当でも framework が allowlist 外で None になるケースも
+            # ここへ倒す（docstring 参照）。
+            if sf["raw"] in seen_unparsed:
+                continue
+            seen_unparsed.add(sf["raw"])
+            # codex-review P0 指摘（PR #1082 6 巡目・security.md A03）:
+            # `sf["raw"]`（ベンチバイナリの stderr を含む未信頼文字列）を
+            # 無加工で `reason` に格納すると、`target_gate_section()` が
+            # `|` 区切りの Markdown 表セル・箇条書きへそのまま埋め込むため
+            # `|` で表構造を、`<script>` 等で出力ページの HTML/Markdown
+            # 構文を改変できてしまう。理由文の主要部分は固定文にし、
+            # 生内容は `_sanitize_skip_raw_for_display`（長さ制限・
+            # Markdown/HTML エスケープ）を通した安全な表現のみを付記する。
+            record = {
+                "task": "-",
+                "device": "-",
+                "size": None,
+                "fandhe_mode": None,
+                "target_mode": None,
+                "fandhe_median": None,
+                "target_median": None,
+                "ratio": None,
+                "status": "undeterminable",
+                "reason": (
+                    "skipped ログに未解析の失敗記録あり: "
+                    f"{_sanitize_skip_raw_for_display(sf['raw'])}"
+                ),
+                "note": None,
+            }
+            gate_records.append(record)
+            injected.append(record)
+            continue
+        if sf["framework"] not in ("fandhe-ai", target):
+            continue
+        mode = sf.get("mode")
+        # Bugbot Medium 指摘（PR #1082 6 巡目）: `sf["size"] is None`
+        # （size をパースできなかった skip 行）のまま `get(..., size=None,
+        # ...)` を呼ぶと、`get()` は `size=None` を「size で絞らない」と
+        # 解釈するため、同一 framework/task/device/mode の**任意の** size
+        # の成功行が存在するだけで stale 判定されてしまう（size が
+        # 分からない失敗を、たまたま別 size の成功と混同して握りつぶす
+        # fail-open）。size が特定できている場合のみ stale 抑止の対象に
+        # する。
+        if (
+            mode is not None
+            and sf["size"] is not None
+            and get(
+                rows, sf["framework"], sf["task"], sf["device"], sf["size"], mode=mode
+            )
+            is not None
+        ):
+            # codex-review P0 指摘その1（PR #1082 5 巡目）: この正確な
+            # (framework, task, device, size, mode) の実行は実際には
+            # 成功して `rows` に残っている＝skipped*.log は再実行前の
+            # 古い失敗記録（stale）。判定不能化しない（docstring 参照）。
+            continue
+        key = (sf["task"], sf["device"], sf["size"])
+        size_label = f"N={sf['size']}" if sf["size"] is not None else "size 不明"
+        mode_label = mode if mode is not None else "mode 不明"
+        reason = f"skipped*.log に実行時失敗（{sf['framework']}・{mode_label}・{size_label}）"
+        existing = existing_by_key.get(key)
+        if existing is not None:
+            if existing["status"] != "undeterminable":
+                existing["status"] = "undeterminable"
+                existing["reason"] = reason
+                injected.append(existing)
+            continue
+        record = {
+            "task": sf["task"],
+            "device": sf["device"],
+            "size": sf["size"],
+            "fandhe_mode": None,
+            "target_mode": None,
+            "fandhe_median": None,
+            "target_median": None,
+            "ratio": None,
+            "status": "undeterminable",
+            "reason": reason,
+            "note": None,
+        }
+        existing_by_key[key] = record
+        gate_records.append(record)
+        injected.append(record)
+    return injected
 
 # `train_phases`（(b'') 節。イシュー #1009）専用の allowlist。producer 側の
 # 契約（`bench_common::parse_cli_from` の `--mode` allowlist・`PHASE_*` 定数
@@ -218,6 +560,16 @@ def load_rows(path):
 
 
 def get(rows, fw, task, device, size=None, mode="fresh"):
+    """`(framework, task, device, size, mode)` に一致する最初の行を返す。
+
+    `size=None` は size 条件を適用しない（呼び出し元がフレームワーク・
+    デバイス・mode のみで絞り込みたい場合の既定動作）。`size` を指定する
+    場合、行側の `size` は `r.get("size")` で取得し `_valid_gate_size` で
+    検証したうえで比較する（Bugbot Medium 指摘・PR #1082 2 巡目: 直接
+    `r["size"]` を読むと `size` キー欠損行で `KeyError`、`bool`（`True ==
+    1`）混入行で意図しない一致が起こりうる。行の `size` が不正な場合は
+    比較対象から除外する＝一致しないものとして扱う。fail-closed）。
+    """
     for r in rows:
         if (
             r["framework"] == fw
@@ -225,7 +577,10 @@ def get(rows, fw, task, device, size=None, mode="fresh"):
             and r["device"] == device
             and r["mode"] == mode
         ):
-            if size is None or r["size"] == size:
+            if size is None:
+                return r
+            row_size = r.get("size")
+            if _valid_gate_size(row_size) and row_size == size:
                 return r
     return None
 
@@ -321,8 +676,16 @@ def gemm_checksum_reference(rows):
     「突合不能」として区別する（`gemm_checksum_unverifiable` 参照）。
 
     戻り値: {size: (ref_value, ref_source_label, candidate_count)}
+
+    `size` は `_valid_gate_size` で検証済みの値のみを対象にする（イシュー
+    #1051 codex-review P0 指摘・PR #1082: 本関数は `target_gate` の起点
+    〈`gemm_checksum_mismatches` 経由〉から呼ばれるため、外部 JSONL の
+    `size` が配列・文字列混在等の不正値だと集合化・`sorted()` で例外終了
+    しうる。不正な size を持つ行はここで黙って除外する〈本関数の役割は
+    checksum 参照値の算出であり、size 自体の妥当性判定は `target_gate` 側
+    の `_valid_gate_size` 検査が別途「判定不能」として明示する〉）。
     """
-    sizes = sorted({r["size"] for r in rows if r["task"] == "gemm"})
+    sizes = sorted({r["size"] for r in rows if r["task"] == "gemm" and _valid_gate_size(r.get("size"))})
     result = {}
     for size in sizes:
         candidates = [
@@ -394,6 +757,16 @@ def gemm_checksum_mismatches(rows):
     for r in rows:
         if r["task"] != "gemm":
             continue
+        # `reference` のキーは `_valid_gate_size` 検証済みの size のみ
+        # （`gemm_checksum_reference` docstring 参照）。`r["size"]` が不正
+        # （配列・オブジェクト等の unhashable 値）だと `dict.get()` 自体が
+        # `TypeError: unhashable type` を送出し呼び出し元（`target_gate`
+        # は本関数を起点で呼ぶ）が例外終了する（イシュー #1051
+        # codex-review P0 指摘・PR #1082 2 巡目）。不正な size の行は
+        # ここでは扱わず、判定不能レコード化は呼び出し元
+        # （`target_gate` の `invalid_size_rows`）の責務とする。
+        if not _valid_gate_size(r.get("size")):
+            continue
         ref, ref_label, candidate_count = reference.get(r["size"], (None, None, 0))
         if ref is None:
             if candidate_count >= 2:
@@ -420,6 +793,11 @@ def gemm_checksum_unverifiable(rows):
     unverifiable = []
     for r in rows:
         if r["task"] != "gemm":
+            continue
+        # `gemm_checksum_mismatches` と同じ理由（不正 size での
+        # `dict.get()` 例外終了防止。イシュー #1051 codex-review P0
+        # 指摘 2 巡目・PR #1082）で、不正な size の行はここでは扱わない。
+        if not _valid_gate_size(r.get("size")):
             continue
         _, _, candidate_count = reference.get(r["size"], (None, None, 0))
         if candidate_count <= 1:
@@ -465,6 +843,30 @@ def _non_integral(v):
     みを判定対象とする。
     """
     return isinstance(v, float) and not v.is_integer()
+
+
+def _valid_gate_size(v):
+    """`size` フィールドを set 内包・`sorted()`・突合比較へ渡す前に検証する。
+
+    producer 契約（`bench-common::parse_cli_from` の `--size`）上 `size` は
+    常に正の整数だが、外部 JSONL の値は型・値域未検証のまま信頼できない
+    （security.md「外部フォーマットのパース時検証（A03）」）。配列・
+    オブジェクト等の unhashable な値は `{r["size"] for r in ...}` の集合化で
+    `TypeError: unhashable type` を、文字列と整数の混在は `sorted()` の
+    比較演算で `TypeError` を、それぞれ送出し集計全体を例外終了させうる
+    （イシュー #1051 codex-review P0 指摘・PR #1082）。
+
+    `bool` は Python では `int` のサブクラスのため、後続の `_is_plain_number`
+    に処理を委ねる前にここで明示的に弾く（Bugbot Medium 指摘・PR #1082
+    2 巡目: `True == 1` により `_pick_row_for_gate`/
+    `_train_reuse_row_invalid_reason` の突合で `size: true` の行が
+    `size=1` の行として誤って選ばれうる。`_is_plain_number` も内部で
+    `isinstance(v, bool)` を弾いているため機能的には冗長だが、本関数の
+    契約〈bool を size として許容しない〉を独立に読み取れるようにする）。
+    """
+    if isinstance(v, bool):
+        return False
+    return _is_plain_number(v) and not _non_integral(v) and int(v) > 0
 
 
 def _format_maybe_huge(v):
@@ -599,6 +1001,422 @@ def _parity_reason(row):
 
 def _row_key(r):
     return (r["framework"], r["device"], r["size"], r["mode"])
+
+
+# イシュー #1051: 目標達成ゲート（--target）専用のヘルパー群。既存の
+# `section()`（Markdown 表生成）とは独立に、同じ無効判定規則（checksum
+# 突合・要素単位検証・train reuse 突合）を再適用して「達成／未達／
+# 判定不能」を機械的に判定する。`section()` の戻り値シグネチャ（6-tuple）
+# を破壊しない実装方針（実装計画 §3）のため、無効判定ロジックは
+# `gemm_checksum_mismatches`/`_parity_reason`/`_safe_time_s`/
+# `_safe_finite_number`/`checksums_match` を再利用しつつ、train reuse の
+# 判定のみ `_train_reuse_row_invalid_reason` として同等ロジックを本関数
+# 群専用に複製する（`section()` 内の (b') ループは表示副作用〈stderr
+# warning・Markdown 行〉を持つため直接共有すると呼び出しごとに warning が
+# 重複出力される。ゲート判定は無音で理由文字列のみ返す）。
+
+
+def _pick_row_for_gate(rows, fw, task, device, size):
+    """ゲート判定に使う行を選ぶ: reuse 行があれば優先し、無ければ fresh。
+
+    `size` は必須（唯一の呼び出し元 `target_gate` は `_valid_gate_size` で
+    検証済みの整数を常に渡す）。`size=None`（size 条件を適用しない）を
+    許容すると、複数 size を持つフレームワークで後述の重複検出が
+    「異なる size の行が複数ある」を「重複キー」と誤検知するため、あえて
+    既定値を持たせず必須引数にしている（codex-review 指摘・PR #1082）。
+
+    戻り値は `(row, mode, dup_reason)`。該当行が無ければ
+    `(None, None, None)`。gemm/train は fandhe-ai に reuse 行が存在しうる
+    （イシュー #925/#957）。infer は reuse モード自体が存在しないため
+    常に fresh へフォールバックする（`bench-fandhe` の `--mode` allowlist
+    は gemm/train 用。モジュール docstring 参照）。
+
+    同じ `(framework, task, device, size, mode)` に複数行が存在する場合は
+    `dup_reason`（`None` 以外）を返し `row`/`mode` は `None` にする
+    （codex-review P0 指摘・PR #1082: 旧実装は `get()` が返す最初に一致
+    した行だけを採用し残りを検証しなかった。producer 側の重複バグ・
+    JSONL の手組み改変で同一キーに正常行と壊れた行が混在した場合、
+    出現順次第で遅い〈未達を示す〉fandhe-ai 行を握りつぶし「達成」判定を
+    返してしまう fail-open があったため、重複自体を判定不能として扱う）。
+    """
+    for mode in ("reuse", "fresh"):
+        # `r.get("size")` を `_valid_gate_size` で検証してから比較する
+        # （Bugbot Medium 指摘・PR #1082 2 巡目: 直接 `r["size"]` を読むと
+        # `size` キー欠損行で `KeyError`、`bool` 混入行で `True == 1` に
+        # より意図しない一致が起こりうる。不正な size を持つ行は比較対象
+        # から除外する＝一致しないものとして扱う。fail-closed）。
+        matches = [
+            r
+            for r in rows
+            if r["framework"] == fw
+            and r["task"] == task
+            and r["device"] == device
+            and r["mode"] == mode
+            and _valid_gate_size(r.get("size"))
+            and r.get("size") == size
+        ]
+        if len(matches) > 1:
+            return (
+                None,
+                None,
+                (
+                    f"重複キー: framework={fw}, task={task}, device={device}, "
+                    f"size={size}, mode={mode} の行が {len(matches)} 件あり "
+                    "一意に選べない"
+                ),
+            )
+        if matches:
+            return matches[0], mode, None
+    return None, None, None
+
+
+def _train_reuse_row_invalid_reason(rows, r):
+    """train task・mode="reuse" 行の無効理由を返す（有効なら `None`）。
+
+    `section()` の (b') ループと同一の判定規則（時間値の検証・同一
+    フレームワーク内 fresh 行との checksum 突合）を、表示副作用なしで
+    単一行に対して適用する。fresh 行が存在しない（比較対象なし）だけの
+    場合は値そのものの正当性を否定しないため無効扱いにしない
+    （`section()` の同節コメント参照）。
+
+    fresh 側の検索は `r` と同一 `size` に限定する（Bugbot Medium 指摘・
+    PR #1082: `size` を渡さず `get()` を呼ぶと `size=None`＝size 条件
+    無視となり、複数 size のデータが混在する場合に別 size の fresh 行と
+    誤って突合される。正常な複数 size データを判定不能に倒す、または
+    壊れた reuse 行がたまたま別 size の先頭 fresh checksum と一致して
+    無効判定をすり抜けるおそれがあったため、同一 size の fresh 行のみを
+    比較対象にする）。
+
+    同一 size の fresh 行が複数存在する場合は `_pick_row_for_gate` と
+    同じ理由（advisor 指摘・PR #1082 3 巡目）で判定不能に倒す:
+    `get()` は最初に一致した行だけを返し残りを検証しないため、複数の
+    fresh 行のうち checksum が一致するものが先に現れると、他の
+    不一致な fresh 行を握りつぶして「有効」判定してしまう fail-open が
+    ありうる（`_pick_row_for_gate` の重複キー検出は reuse 側のみを見る
+    ため、fresh 側 1 行を選ぶ本関数のこの箇所は独立に検証が必要）。
+    """
+    r_median = _safe_time_s(r.get("median_s"))
+    r_q1 = _safe_time_s(r.get("q1_s"))
+    r_q3 = _safe_time_s(r.get("q3_s"))
+    r_init = _safe_time_s(r.get("init_s"))
+    if r_median is None or r_q1 is None or r_q3 is None or r_init is None:
+        return "時間値が不正な値"
+    # `x.get("size")` を `_valid_gate_size` で検証してから比較する
+    # （Bugbot Medium 指摘・PR #1082 2 巡目: 直接 `x["size"]` を読むと
+    # `size` キー欠損行で `KeyError`、`bool` 混入行で `True == 1` に
+    # より意図しない一致が起こりうる。不正な size を持つ行は比較対象から
+    # 除外する＝一致しないものとして扱う。fail-closed。`r`（reuse 行）は
+    # `_pick_row_for_gate` 経由で既に有効な size を持つことが保証されて
+    # いるが、`r.get("size")` で取得し直接キーアクセスは避ける）。
+    fresh_matches = [
+        x
+        for x in rows
+        if x["framework"] == r["framework"]
+        and x["task"] == "train"
+        and x["device"] == r["device"]
+        and x["mode"] == "fresh"
+        and _valid_gate_size(x.get("size"))
+        and x.get("size") == r.get("size")
+    ]
+    if len(fresh_matches) > 1:
+        return f"同一 size の fresh 行が {len(fresh_matches)} 件あり突合先が一意に決まらない"
+    if not fresh_matches:
+        return None
+    fresh = fresh_matches[0]
+    fresh_median = _safe_time_s(fresh.get("median_s"))
+    if fresh_median is None:
+        return "fresh 側の時間値が不正な値"
+    r_checksum = _safe_finite_number(r.get("checksum"))
+    fresh_checksum = _safe_finite_number(fresh.get("checksum"))
+    if r_checksum is None or fresh_checksum is None:
+        return "checksum が不正な値"
+    if not checksums_match(r_checksum, fresh_checksum):
+        return "fresh と最終 loss 不一致"
+    return None
+
+
+def _gate_row_invalid_reason(rows, gemm_mismatch_map, row):
+    """ゲート判定用の行無効理由（有効なら `None`）。
+
+    task ごとに既存の無効判定規則を再適用する: gemm は checksum 不一致
+    （`gemm_mismatch_map`。呼び出し側が `gemm_checksum_mismatches(rows)`
+    から 1 回だけ構築し使い回す。行ごとに再計算すると size 数に対し
+    O(n^2) になるため）と要素単位検証失敗（`_parity_reason`）、train の
+    reuse 行は `_train_reuse_row_invalid_reason`。train の fresh 行・
+    infer 行には（現状 `section()` 側にも）無効判定規則が無いため
+    `None` を返す。
+    """
+    if row["task"] == "gemm":
+        reasons = []
+        if _row_key(row) in gemm_mismatch_map:
+            reasons.append("checksum 不一致")
+        preason = _parity_reason(row)
+        if preason is not None:
+            reasons.append(preason)
+        return "; ".join(reasons) if reasons else None
+    if row["task"] == "train" and row["mode"] == "reuse":
+        return _train_reuse_row_invalid_reason(rows, row)
+    return None
+
+
+def _gate_devices(rows, target):
+    """`target_gate` が列挙対象とするデバイス集合を返す。
+
+    task 単位（`devices_in(rows, task, ...)`）ではなく **ファイル内の
+    fandhe-ai/target 行全体**からデバイス集合を導出する。理由は 2 点
+    （イシュー #1051 codex-review 指摘）:
+
+    - P1: `devices_in` は framework を絞らないため、`--target candle`
+      指定時に burn 専用デバイス（candle 側が存在しないデバイス）まで
+      対象に入り、双方未計測でも「fandhe-ai 未計測」の判定不能レコード
+      が生成されてしまう。framework を `("fandhe-ai", target)` に限定
+      することで防ぐ。
+    - P0: task 単位で集合を作ると、あるデバイスで特定 task（例: train）
+      が fandhe-ai/target 双方とも 0 件（実行時失敗等で計測が丸ごと
+      欠落）の場合、そのデバイスは当該 task の列挙対象から漏れ、
+      `target_gate` がそのデバイス×task の組を一切生成しない
+      （＝判定不能ではなく「そもそも存在しない」扱いになり、後段の
+      `gate_records_all` 集計が「全達成」を誤って通す）。task をまたいで
+      デバイス集合を 1 つに統一することで、あるデバイスが他 task で
+      計測されている限りは当該デバイス×task の組が必ず列挙され、
+      `fandhe_row`/`target_row` が `None` の場合の既存の「未計測」判定
+      経路（本関数の呼び出し元 `target_gate` 内）で判定不能として
+      捕捉される（run_all.sh/run_all_cuda.sh は 1 ファイル内で device
+      ごとに gemm/train/infer を必ず揃って計測する構成のため、
+      「そのデバイスは対象外」と「そのデバイスの当該 task だけ欠落」を
+      混同しない）。
+    """
+    present = {
+        r["device"]
+        for r in rows
+        if r.get("framework") in ("fandhe-ai", target) and r.get("device") in DEVICE_ORDER
+    }
+    return [d for d in DEVICE_ORDER if d in present]
+
+
+def target_gate(rows, target):
+    """fandhe-ai と `target`（candle/burn）の中央値を同一ファイル内で
+    突合し、達成／未達／判定不能を判定する（イシュー #1051）。
+
+    戻り値: dict のリスト。各要素のキーは
+    `task`/`device`/`size`（fandhe-ai/target いずれの行にも当該
+    task・device の実測が 1 件も無い場合のみ `None`。それ以外は
+    task を問わず実データの size を列挙する。イシュー #1051
+    codex-review 追加指摘: train/infer も gemm と同じ経路で size 集合を
+    実測から都度導出するため、通常は現状の運用〈train/infer は単一
+    size=64 のみ〉により単一値になるが、複数 size が存在する場合も
+    取りこぼさず全て判定する）/`fandhe_mode`/
+    `target_mode`/`fandhe_median`/`target_median`/`ratio`
+    （= target_median / fandhe_median）/`status`
+    （"achieved"|"unmet"|"undeterminable"）/`reason`（判定不能の理由。
+    achieved/unmet では `None`）/`note`（旧形式 gemm 行への注記など）。
+    """
+    mismatches = gemm_checksum_mismatches(rows)
+    gemm_mismatch_map = {_row_key(r): (ref, ref_label) for r, ref, ref_label in mismatches}
+
+    records = []
+    devices = _gate_devices(rows, target)
+    for task in GATE_TASKS:
+        for device in devices:
+            # イシュー #1051 codex-review 追加指摘（P0）: 当初は
+            # task == "gemm" のみサイズを列挙し、train/infer は
+            # `sizes = [None]` 固定にしていた。`get()`/`_pick_row_for_gate`
+            # は size=None を「size 条件を適用しない（最初に一致した行を
+            # 返す）」ものとして扱うため、train/infer に複数 size の行が
+            # 混在すると先頭の 1 行しか評価されず、他 size の未達・
+            # target 側の未計測が黙って無視されて「全達成」側へ
+            # fail-open してしまう。run_all.sh/run_all_cuda.sh は現状
+            # train/infer を単一 size（64）でしか実行しないが、この
+            # 判定不能検出（P0）と同じ理由で、実データが持つ size 集合を
+            # 実測から都度導出し、gemm と同じ経路で 1 size ごとに突合
+            # する（size が実際に 1 つしか無ければ従来と同じ挙動になり、
+            # 複数あれば取りこぼさず全て判定する）。
+            candidate_rows = [
+                r
+                for r in rows
+                if r["task"] == task
+                and r["device"] == device
+                and r["framework"] in ("fandhe-ai", target)
+            ]
+            # 外部 JSONL 由来の `size` を検証せず set 内包・`sorted()` へ
+            # 渡すと、配列／オブジェクト混入で `unhashable type`、文字列と
+            # 整数の混在で比較 `TypeError` となり集計全体が例外終了しうる
+            # （codex-review P0 指摘・PR #1082）。producer 契約どおりの
+            # 値（正の整数）のみを `sizes` に採用し、不正値を持つ行は
+            # 例外にせず判定不能レコードへ倒す（security.md A03）。
+            invalid_size_rows = [r for r in candidate_rows if not _valid_gate_size(r.get("size"))]
+            sizes = sorted({int(r["size"]) for r in candidate_rows if _valid_gate_size(r.get("size"))})
+            if invalid_size_rows:
+                records.append(
+                    {
+                        "task": task,
+                        "device": device,
+                        "size": None,
+                        "fandhe_mode": None,
+                        "target_mode": None,
+                        "fandhe_median": None,
+                        "target_median": None,
+                        "ratio": None,
+                        "status": "undeterminable",
+                        "reason": (
+                            f"{task} の size が不正な値（正の整数以外）の行が "
+                            f"{len(invalid_size_rows)} 件"
+                        ),
+                        "note": None,
+                    }
+                )
+            if not sizes:
+                # P0: このデバイスでは task が fandhe-ai/target
+                # 双方とも 0 件（サイズが 1 つも存在しない）。
+                # sizes が空のまま `for size in sizes` を素通りさせる
+                # と、このデバイス×task の組が gate_records_all へ
+                # 一切現れず「全達成」の誤判定に加担する。size=None
+                # の判定不能レコードを明示的に積む。ただし不正 size 行が
+                # 存在する場合は上記で既に判定不能レコードを積んでいる
+                # ため、ここでの重複追加は避ける。
+                if not invalid_size_rows:
+                    records.append(
+                        {
+                            "task": task,
+                            "device": device,
+                            "size": None,
+                            "fandhe_mode": None,
+                            "target_mode": None,
+                            "fandhe_median": None,
+                            "target_median": None,
+                            "ratio": None,
+                            "status": "undeterminable",
+                            "reason": f"{task} 未計測（fandhe-ai/target 双方 0 件）",
+                            "note": None,
+                        }
+                    )
+                continue
+            for size in sizes:
+                fandhe_row, fandhe_mode, fandhe_dup_reason = _pick_row_for_gate(
+                    rows, "fandhe-ai", task, device, size
+                )
+                target_row, target_mode, target_dup_reason = _pick_row_for_gate(
+                    rows, target, task, device, size
+                )
+                record = {
+                    "task": task,
+                    "device": device,
+                    "size": size,
+                    "fandhe_mode": fandhe_mode,
+                    "target_mode": target_mode,
+                    "fandhe_median": None,
+                    "target_median": None,
+                    "ratio": None,
+                    "status": "undeterminable",
+                    "reason": None,
+                    "note": None,
+                }
+                if fandhe_dup_reason is not None or target_dup_reason is not None:
+                    parts = [r for r in (fandhe_dup_reason, target_dup_reason) if r is not None]
+                    record["reason"] = "; ".join(parts)
+                    records.append(record)
+                    continue
+                if fandhe_row is None:
+                    record["reason"] = "fandhe-ai 未計測"
+                    records.append(record)
+                    continue
+                if target_row is None:
+                    record["reason"] = f"{target} 未計測"
+                    records.append(record)
+                    continue
+                freason = _gate_row_invalid_reason(rows, gemm_mismatch_map, fandhe_row)
+                treason = _gate_row_invalid_reason(rows, gemm_mismatch_map, target_row)
+                if freason is not None or treason is not None:
+                    parts = []
+                    if freason is not None:
+                        parts.append(f"fandhe-ai: {freason}")
+                    if treason is not None:
+                        parts.append(f"{target}: {treason}")
+                    record["reason"] = "無効データ（" + "; ".join(parts) + "）"
+                    records.append(record)
+                    continue
+                fandhe_median = _safe_time_s(fandhe_row.get("median_s"))
+                target_median = _safe_time_s(target_row.get("median_s"))
+                if fandhe_median is None or target_median is None:
+                    record["reason"] = "時間値が不正"
+                    records.append(record)
+                    continue
+                record["fandhe_median"] = fandhe_median
+                record["target_median"] = target_median
+                record["ratio"] = target_median / fandhe_median
+                # 旧形式（要素単位検証キー欠損）gemm 行は判定は行うが、
+                # 一度も要素単位検証を受けていない点を注記する（実装計画
+                # §3「旧形式（parity 未検証）行」）。
+                if (
+                    fandhe_row["task"] == "gemm" and parity_status(fandhe_row) == "unverified"
+                ) or (target_row["task"] == "gemm" and parity_status(target_row) == "unverified"):
+                    record["note"] = "未検証（旧形式）"
+                if fandhe_median <= target_median:
+                    record["status"] = "achieved"
+                else:
+                    record["status"] = "unmet"
+                records.append(record)
+    return records
+
+
+def target_gate_section(rel, records, target):
+    """target_gate() の結果を 1 ファイル分の Markdown 節へ整形する。
+
+    `device`/`task`/`mode` は `DEVICE_ORDER`/`GATE_TASKS`/
+    `_TRAIN_PHASES_MODES` allowlist 由来の値のみで構成される
+    `records`（`target_gate` が生成）から来るため、JSONL の生文字列を
+    未検証のまま Markdown へ流さない（既存 (b'') 節と同じ方針）。
+    """
+    lines = [f"### 集計対象: {rel}\n"]
+    lines.append(
+        f"| タスク | デバイス | N | fandhe-ai 中央値 | {target} 中央値 | "
+        "比（target/fandhe） | 判定 | 備考 |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    unmet = []
+    undeterminable = []
+    for rec in records:
+        device_label = DEVICE_LABEL.get(rec["device"], rec["device"])
+        size_label = str(rec["size"]) if rec["size"] is not None else "-"
+        key = f"{rec['task']}/{device_label}"
+        if rec["size"] is not None:
+            key += f"/N={rec['size']}"
+        if rec["status"] == "undeterminable":
+            fandhe_col = (
+                f"{fmt_ms(rec['fandhe_median'])}（{rec['fandhe_mode']}）"
+                if rec["fandhe_median"] is not None
+                else "-"
+            )
+            target_col = (
+                f"{fmt_ms(rec['target_median'])}（{rec['target_mode']}）"
+                if rec["target_median"] is not None
+                else "-"
+            )
+            ratio_col = "-"
+            status_col = f"判定不能（{rec['reason']}）"
+            undeterminable.append(f"{key}（{rec['reason']}）")
+        else:
+            fandhe_col = f"{fmt_ms(rec['fandhe_median'])}（{rec['fandhe_mode']}）"
+            target_col = f"{fmt_ms(rec['target_median'])}（{rec['target_mode']}）"
+            ratio_col = f"{rec['ratio']:.2f} 倍"
+            if rec["status"] == "achieved":
+                status_col = "達成"
+            else:
+                status_col = "**未達**"
+                unmet.append(key)
+        note_col = rec["note"] or ""
+        lines.append(
+            f"| {rec['task']} | {device_label} | {size_label} | {fandhe_col} | "
+            f"{target_col} | {ratio_col} | {status_col} | {note_col} |"
+        )
+    lines.append("")
+    lines.append("未達一覧:")
+    lines.extend([f"- {u}" for u in unmet] if unmet else ["- なし"])
+    lines.append("")
+    lines.append("判定不能一覧:")
+    lines.extend([f"- {u}" for u in undeterminable] if undeterminable else ["- なし"])
+    lines.append("")
+    return lines
 
 
 # イシュー #1009: `bench-fandhe --task train --phases` が出力する
@@ -914,8 +1732,18 @@ def section(path, rows):
 
     lines.append("### (a) GEMM（C = A×B、f32、正方行列）\n")
     for device in devices_in(rows, "gemm"):
+        # `_valid_gate_size` で不正な size（配列・文字列混在等）を除外して
+        # から集合化・`sorted()` する（イシュー #1051 codex-review 指摘の
+        # 防御的スイープ・PR #1082。target_gate 側の同一パターンと同じ
+        # 理由: 外部 JSONL 由来の size を未検証のまま渡すと
+        # `unhashable type`/比較 `TypeError` で `main()` 全体が
+        # traceback 停止しうる）。
         sizes = sorted(
-            {r["size"] for r in rows if r["task"] == "gemm" and r["device"] == device}
+            {
+                r["size"]
+                for r in rows
+                if r["task"] == "gemm" and r["device"] == device and _valid_gate_size(r.get("size"))
+            }
         )
         lines.append(f"#### {DEVICE_LABEL[device]}\n")
         lines.append("| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s |")
@@ -945,11 +1773,16 @@ def section(path, rows):
             "### (a') GEMM（デバイス/tape 再利用モード。初期化コストとカーネル実行の分離。イシュー #925）\n"
         )
         for device in devices_in(rows, "gemm", mode="reuse"):
+            # (a) 節と同じ防御（`_valid_gate_size`。イシュー #1051
+            # codex-review 指摘の防御的スイープ・PR #1082）。
             sizes = sorted(
                 {
                     r["size"]
                     for r in rows
-                    if r["task"] == "gemm" and r["device"] == device and r["mode"] == "reuse"
+                    if r["task"] == "gemm"
+                    and r["device"] == device
+                    and r["mode"] == "reuse"
+                    and _valid_gate_size(r.get("size"))
                 }
             )
             lines.append(f"#### {DEVICE_LABEL[device]}\n")
@@ -1164,8 +1997,20 @@ def section(path, rows):
     # 一致」表示に含まれ検証済みと誤認させていた問題の修正）。
     unverifiable_rows = gemm_checksum_unverifiable(rows)
     unverifiable_keys = {_row_key(r) for r in unverifiable_rows}
+    # `_row_key(r)` は `r["size"]` を含むタプルのため、size が不正
+    # （配列等の unhashable 値）だとタプル自体が unhashable になり
+    # `not in unverifiable_keys` のハッシュ計算で `TypeError` を送出する
+    # （イシュー #1051 codex-review 指摘の防御的スイープ・PR #1082）。
+    # `gemm_checksum_unverifiable`/`gemm_checksum_mismatches` 側で既に
+    # 不正 size の行を除外しているのと同じ理由で、ここでも
+    # `_valid_gate_size` で事前に弾く（不正 size の行は「検証済み」にも
+    # 「突合不能」にも数えない）。
     verified_total = sum(
-        1 for r in rows if r["task"] == "gemm" and _row_key(r) not in unverifiable_keys
+        1
+        for r in rows
+        if r["task"] == "gemm"
+        and _valid_gate_size(r.get("size"))
+        and _row_key(r) not in unverifiable_keys
     )
     if mismatches:
         for r, ref, ref_label in mismatches:
@@ -1250,6 +2095,18 @@ def main():
             "終了コード 2 を返す（既定は 0 のまま警告のみ）"
         ),
     )
+    parser.add_argument(
+        "--target",
+        choices=GATE_TARGET_CHOICES,
+        default=None,
+        help=(
+            "指定フレームワーク（candle/burn）と fandhe-ai の GEMM/学習/推論"
+            "中央値を同一ファイル内で突合し、目標達成ゲート節を出力する"
+            "（イシュー #1051）。未達または判定不能が 1 件以上あれば"
+            "終了コード 3 を返す（`--strict` の無効データ判定〈終了コード 2〉"
+            "と両方該当する場合はデータ無効の解消を優先し 2 を返す）"
+        ),
+    )
     args = parser.parse_args()
 
     inputs = args.inputs or sorted(glob.glob(os.path.join(HERE, "results/raw/*.jsonl")))
@@ -1263,11 +2120,50 @@ def main():
     any_parity_unverified = False
     any_train_reuse_invalid = False
     any_train_phases_invalid = False
+    gate_section_lines_by_file = []
+    gate_records_all = []
     for path in inputs:
         rows = load_rows(path)
         if not rows:
             lines.append(f"## 集計対象: {os.path.relpath(path, HERE)}\n")
             lines.append("（有効な行なし）\n")
+            if args.target:
+                # P0 修正（codex-review 指摘・PR #1082 2 巡目）: 空ファイルを
+                # 無条件に `continue` で読み飛ばすと、`--target` 指定時に
+                # 複数入力のうち 1 ファイルが空でも他ファイルが全達成なら
+                # `gate_records_all` が非空のまま空ファイル分の判定不能が
+                # 一切計上されず exit 0 になる fail-open があった
+                # （計測が丸ごと欠落したファイルを「対象外」と黙って扱う）。
+                # ファイル単位の判定不能レコードを 1 件積み、後段の
+                # `gate_achieved`/`gate_unmet`/`gate_undeterminable` 集計・
+                # exit code 判定へ確実に反映させる。
+                rel = os.path.relpath(path, HERE)
+                empty_record = {
+                    "task": "-",
+                    "device": "-",
+                    "size": None,
+                    "fandhe_mode": None,
+                    "target_mode": None,
+                    "fandhe_median": None,
+                    "target_median": None,
+                    "ratio": None,
+                    "status": "undeterminable",
+                    "reason": "入力ファイルに有効な行が無い",
+                    "note": None,
+                }
+                gate_records = [empty_record]
+                # codex P0・Bugbot High 指摘（PR #1082 4 巡目）: skip 由来の
+                # 失敗はこのファイル（環境）自身に対応する skipped*.log
+                # のみを対象にする（`_inject_skip_failures_into_gate`
+                # docstring「呼び出し契約」参照。全ファイル横断の
+                # `gate_records_all` へ直接注入すると環境が混同される）。
+                skip_paths = _skip_log_paths_for_input(path)
+                skip_failures = _skip_failures_for_paths(skip_paths)
+                _inject_skip_failures_into_gate(gate_records, skip_failures, args.target, rows)
+                gate_section_lines_by_file.append(
+                    target_gate_section(rel, gate_records, args.target)
+                )
+                gate_records_all.extend(gate_records)
             continue
         (
             section_lines,
@@ -1283,6 +2179,26 @@ def main():
         any_parity_unverified = any_parity_unverified or has_unverified
         any_train_reuse_invalid = any_train_reuse_invalid or has_train_reuse_invalid
         any_train_phases_invalid = any_train_phases_invalid or has_train_phases_invalid
+
+        # イシュー #1051: 目標達成ゲート。--target 指定時のみ計算する
+        # （既存の呼び出し元は --target を渡さないため非破壊。モジュール
+        # docstring・実装計画 §3 参照）。
+        if args.target:
+            rel = os.path.relpath(path, HERE)
+            gate_records = target_gate(rows, args.target)
+            # codex P0・Bugbot High 指摘（PR #1082 4 巡目）: skip 由来の
+            # 失敗はこのファイル（環境）自身に対応する skipped*.log の
+            # みを対象にする（`_inject_skip_failures_into_gate` docstring
+            # 「呼び出し契約」参照）。以前は全ファイル横断で集約した
+            # `gate_records_all` を渡していたため、環境 A の JSONL に
+            # 達成行がある組について、環境 B（別ファイル）の同じ組の
+            # skipped*.log 失敗が `existing_keys` に紛れて注入されず
+            # 「全達成」に混入する fail-open があった。
+            skip_paths = _skip_log_paths_for_input(path)
+            skip_failures = _skip_failures_for_paths(skip_paths)
+            _inject_skip_failures_into_gate(gate_records, skip_failures, args.target, rows)
+            gate_section_lines_by_file.append(target_gate_section(rel, gate_records, args.target))
+            gate_records_all.extend(gate_records)
 
     # 入力 JSONL と同一ディレクトリからのみ skipped*.log を収集する。HERE
     # 固定 glob だと、別ディレクトリの JSONL を明示指定して集計した際に
@@ -1307,6 +2223,49 @@ def main():
     if not any_skip:
         lines.append("- なし（skipped*.log は空または不在）")
     lines.append("")
+    # 目標達成ゲートへの skip 失敗の組み込みは、上のファイルごとのループ
+    # 内（`_skip_log_paths_for_input`/`_inject_skip_failures_into_gate`）
+    # で環境スコープを保ったまま既に完了している（codex P0・Bugbot High
+    # 指摘・PR #1082 4 巡目）。ここでの表示用ループはあくまで人間向けの
+    # 生ログ一覧であり、ゲート判定には使わない。
+
+    gate_unmet = 0
+    gate_undeterminable = 0
+    if args.target:
+        lines.append(
+            f"## 目標達成ゲート（--target {args.target}。イシュー #1051）\n"
+        )
+        for gate_section_lines in gate_section_lines_by_file:
+            lines.extend(gate_section_lines)
+        gate_records_empty = not gate_records_all
+        if gate_records_empty:
+            # P0（イシュー #1051 codex-review 指摘）: 入力 JSONL が全て
+            # 「有効な行なし」だった、または全ファイルで fandhe-ai/target
+            # いずれの行も存在しなかった等の理由で gate_records_all が
+            # 1 件も生成されない場合、達成 0・未達 0・判定不能 0 のまま
+            # 下の分岐を素通りし exit 0（「全達成」の誤判定）になって
+            # しまう。計測対象が丸ごと欠落した入力を「全達成」として通す
+            # fail-open を避けるため、判定不能 1 件として扱い後段の
+            # 非ゼロ終了判定（`gate_unmet > 0 or gate_undeterminable > 0`）
+            # に確実に載せる（`--strict` との優先順位はこの後の分岐に
+            # そのまま委ねる。実装計画 §3 の優先順位を変えない）。
+            lines.append(
+                "**全体集計**: 目標達成ゲートの対象データが 0 件のため判定不能"
+                "（入力 JSONL に有効な行がない、または fandhe-ai/target "
+                "いずれの行も存在しない）\n"
+            )
+        gate_achieved = sum(1 for r in gate_records_all if r["status"] == "achieved")
+        gate_unmet = sum(1 for r in gate_records_all if r["status"] == "unmet")
+        gate_undeterminable = sum(
+            1 for r in gate_records_all if r["status"] == "undeterminable"
+        )
+        if gate_records_empty:
+            gate_undeterminable = 1
+        else:
+            lines.append(
+                f"**全体集計**: 達成 {gate_achieved} / 未達 {gate_unmet} / "
+                f"判定不能 {gate_undeterminable}\n"
+            )
 
     text = "\n".join(lines) + "\n"
     if args.out:
@@ -1356,7 +2315,30 @@ def main():
                 "時間値の不正。イシュー #1009）",
                 file=sys.stderr,
             )
+        # イシュー #1051 実装計画 §3: --strict の無効データ判定（終了コード
+        # 2）と目標達成ゲートの未達／判定不能（終了コード 3）が両方該当
+        # する場合は、壊れたデータ上の達成判定は信用できないためデータ
+        # 無効の解消を優先させる（2 を返す。ゲート結果自体は上で Markdown
+        # へ出力済みのため情報は失われない）。
         return 2
+
+    if args.target and (gate_unmet > 0 or gate_undeterminable > 0):
+        print(
+            f"error: --target {args.target}: 未達 {gate_unmet} 件 / "
+            f"判定不能 {gate_undeterminable} 件",
+            file=sys.stderr,
+        )
+        for r in gate_records_all:
+            if r["status"] not in ("unmet", "undeterminable"):
+                continue
+            label = f"{r['task']}/{r['device']}"
+            if r["size"] is not None:
+                label += f"/N={r['size']}"
+            if r["status"] == "unmet":
+                print(f"  unmet: {label}", file=sys.stderr)
+            else:
+                print(f"  undeterminable: {label}（{r['reason']}）", file=sys.stderr)
+        return 3
     return 0
 
 

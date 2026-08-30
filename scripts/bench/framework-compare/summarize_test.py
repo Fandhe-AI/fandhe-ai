@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -153,6 +154,31 @@ def _train_phases_group(device="cpu", mode="fresh", init_s=None):
         median_s = 0.01 if phase == "step_total" else 0.0005
         rows.append(_train_phases_row(device, mode, phase, phase_index, median_s, init_s))
     return rows
+
+
+def _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0005, checksum=13.9):
+    """infer タスク（(c) 節）用の合成行（イシュー #1051 のゲート判定用）。
+
+    `_train_row` と異なり `throughput_per_s` を持ち `gflops`/`init_s` を
+    持たない（実データ形状。results/raw/*.jsonl の infer 行を参照）。
+    infer には reuse モード自体が無い（モジュール docstring 参照）ため
+    `mode` は常に "fresh" 固定とする。
+    """
+    return {
+        "framework": framework,
+        "version": "0.4.0",
+        "task": "infer",
+        "device": device,
+        "size": 64,
+        "median_s": median_s,
+        "q1_s": median_s * 0.9,
+        "q3_s": median_s * 1.1,
+        "throughput_per_s": 1.0 / median_s,
+        "checksum": checksum,
+        "warmup": 20,
+        "iters": 20,
+        "mode": "fresh",
+    }
 
 
 class ParityStatusTests(unittest.TestCase):
@@ -399,6 +425,18 @@ class GemmParityHelpersTests(unittest.TestCase):
 
 
 class SectionRenderingTests(unittest.TestCase):
+    def test_gemm_row_with_unhashable_size_does_not_raise(self):
+        # イシュー #1051 codex-review 指摘の防御的スイープ（PR #1082）:
+        # (a)/(a') 節の size 集合化・`sorted()` も `target_gate` と同じ
+        # `_valid_gate_size` フィルタを適用する。`main()` は `section()`
+        # と `--target` ゲートを同一実行内で呼ぶため、片方だけ防御しても
+        # 不正 size の gemm 行で全体が traceback 停止しうる。
+        rows = [dict(_with_parity(_base_row()), size=["not", "hashable"])]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, _, _, _, _, _ = summarize.section("dummy.jsonl", rows)  # 例外を送出しないこと
+        self.assertIn("### (a) GEMM", "\n".join(lines))
+
     def test_fail_row_marked_invalid_with_dash_gflops(self):
         rows = [_with_parity(_base_row(), fail_count=5, max_abs_err=1.2e-3, max_rel_err=4.5e-2)]
         buf = io.StringIO()
@@ -1150,6 +1188,1094 @@ class MainStrictExitCodeTests(unittest.TestCase):
         try:
             code, _, _ = self._run_main(path, strict=False)
             self.assertEqual(code, 0)
+        finally:
+            os.unlink(path)
+
+
+class TargetGateTests(unittest.TestCase):
+    """`target_gate`/`target_gate_section`（イシュー #1051）の判定規則。"""
+
+    def test_gemm_reuse_preferred_over_fresh_and_achieved(self):
+        # fandhe-ai に reuse 行がある場合は reuse 側の中央値を使う
+        # （実装計画 §3「fandhe-ai 側の行」）。fandhe reuse 0.5ms <
+        # candle fresh 1.0ms → achieved・ratio 2.0。
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+            dict(
+                _with_parity(_base_row(framework="fandhe-ai", mode="reuse")),
+                median_s=0.0005,
+            ),
+            _with_parity(_base_row(framework="candle", mode="fresh"), total=65536),
+        ]
+        rows[2]["median_s"] = 0.001
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
+        self.assertEqual(rec["status"], "achieved")
+        self.assertEqual(rec["fandhe_mode"], "reuse")
+        self.assertAlmostEqual(rec["ratio"], 2.0)
+
+    def test_fandhe_fresh_only_uses_fresh(self):
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+            _with_parity(_base_row(framework="candle", mode="fresh")),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm")
+        self.assertEqual(rec["fandhe_mode"], "fresh")
+
+    def test_infer_unmet_when_fandhe_slower(self):
+        rows = [
+            _infer_row(framework="fandhe-ai", median_s=0.002),
+            _infer_row(framework="candle", median_s=0.0005),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "infer")
+        self.assertEqual(rec["status"], "unmet")
+        # イシュー #1051 codex-review 追加指摘（PR #1082）以降、infer も
+        # gemm と同じ経路で実データの size（`_infer_row` 既定 64）を
+        # 列挙するため `None` 固定ではなくなった。
+        self.assertEqual(rec["size"], 64)
+
+    def test_train_undeterminable_when_target_unmeasured(self):
+        rows = [_train_row(framework="fandhe-ai", device="cuda")]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train" and r["device"] == "cuda")
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("candle 未計測", rec["reason"])
+
+    def test_undeterminable_when_fandhe_row_has_parity_failure(self):
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai"), fail_count=3),
+            _with_parity(_base_row(framework="candle")),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm")
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+        self.assertIn("fandhe-ai", rec["reason"])
+
+    def test_undeterminable_when_train_reuse_checksum_mismatches_fresh(self):
+        rows = [
+            _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08),
+            dict(
+                _train_row(framework="fandhe-ai", mode="reuse", init_s=0.001),
+                checksum=999.0,
+            ),
+            _train_row(framework="candle", mode="fresh", median_s=0.005),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train")
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+
+    def test_undeterminable_when_median_is_non_finite_number(self):
+        # NaN/文字列/巨大 int が混入しても例外で落ちず判定不能に倒す
+        # （`_safe_time_s` の fail-closed 契約と同じ。イシュー #970 系の
+        # 教訓を踏襲）。
+        for bad_median in (float("nan"), "not-a-number", 10**1000, True):
+            with self.subTest(bad_median=bad_median):
+                rows = [
+                    dict(_with_parity(_base_row(framework="fandhe-ai")), median_s=bad_median),
+                    _with_parity(_base_row(framework="candle")),
+                ]
+                records = summarize.target_gate(rows, "candle")
+                rec = next(r for r in records if r["task"] == "gemm")
+                self.assertEqual(rec["status"], "undeterminable")
+
+    def test_old_format_gemm_row_is_judged_with_note(self):
+        # 旧形式（parity キー欠損）行は判定は行うが備考に注記する
+        # （実装計画 §3「旧形式（parity 未検証）行」）。
+        rows = [
+            _base_row(framework="fandhe-ai", checksum=100.0),
+            _base_row(framework="candle", checksum=100.0),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm")
+        self.assertIn(rec["status"], ("achieved", "unmet"))
+        self.assertEqual(rec["note"], "未検証（旧形式）")
+
+    def test_target_gate_section_renders_unmet_marker_and_list(self):
+        rows = [
+            _infer_row(framework="fandhe-ai", median_s=0.002),
+            _infer_row(framework="candle", median_s=0.0005),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        lines = summarize.target_gate_section("dummy.jsonl", records, "candle")
+        text = "\n".join(lines)
+        self.assertIn("**未達**", text)
+        self.assertIn("infer/CPU", text)
+
+    def test_files_are_not_cross_matched(self):
+        # ファイルをまたいだ突合はしない: 1 回の target_gate 呼び出しは
+        # 1 ファイル分の rows のみを対象とする。片方に candle のみ・他方に
+        # fandhe-ai のみのケースは、それぞれの呼び出し内で双方
+        # 判定不能になる（main() がファイルごとに target_gate を呼ぶ
+        # ことで保証される契約。ここでは関数単体で確認する）。
+        rows_fandhe_only = [_infer_row(framework="fandhe-ai")]
+        rows_candle_only = [_infer_row(framework="candle")]
+        rec_a = next(
+            r for r in summarize.target_gate(rows_fandhe_only, "candle") if r["task"] == "infer"
+        )
+        rec_b = next(
+            r for r in summarize.target_gate(rows_candle_only, "candle") if r["task"] == "infer"
+        )
+        self.assertEqual(rec_a["status"], "undeterminable")
+        self.assertIn("candle 未計測", rec_a["reason"])
+        self.assertEqual(rec_b["status"], "undeterminable")
+        self.assertIn("fandhe-ai 未計測", rec_b["reason"])
+
+    def test_missing_task_for_measured_device_is_undeterminable(self):
+        # P0 回帰（イシュー #1051 codex-review 指摘）: cpu で infer は
+        # fandhe-ai/candle 双方計測済みだが、gemm/train が丸ごと未計測
+        # （実行時失敗等で 0 件）の場合、以前は devices_in がタスク単位
+        # だったため cpu×gemm/train の組そのものが列挙されず「全達成」に
+        # 混入しなかった。デバイス集合をファイル横断に変更した現在は
+        # cpu×gemm/cpu×train の組が判定不能として明示的に列挙される。
+        rows = [
+            _infer_row(framework="fandhe-ai", device="cpu"),
+            _infer_row(framework="candle", device="cpu"),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        gemm_rec = next(r for r in records if r["task"] == "gemm" and r["device"] == "cpu")
+        train_rec = next(r for r in records if r["task"] == "train" and r["device"] == "cpu")
+        self.assertEqual(gemm_rec["status"], "undeterminable")
+        self.assertIn("gemm 未計測", gemm_rec["reason"])
+        self.assertEqual(train_rec["status"], "undeterminable")
+        # PR #1082 の修正（size 列挙を task 共通化）以降、train 行が
+        # 1 件も無い場合は「0 件」の分岐（size=None）で捕捉される
+        # （以前は sizes=[None] 固定で `_pick_row_for_gate` 経由の
+        # 「fandhe-ai 未計測」に到達していたが、実データが無いこと自体を
+        # より正確に表す理由文言になった）。
+        self.assertIn("train 未計測", train_rec["reason"])
+        self.assertIsNone(train_rec["size"])
+
+    def test_devices_restricted_to_fandhe_and_target_framework(self):
+        # P1 回帰（イシュー #1051 codex-review 指摘）: burn 専用デバイス
+        # （metal）は --target candle 指定時のデバイス集合に含めない。
+        # 含めてしまうと、candle 側が計測していない metal に対して
+        # 「candle 未計測」の判定不能レコードが生成されてしまう
+        # （burn/candle いずれも計測していないだけで判定不能とすべき
+        # 対象ではない）。
+        rows = [
+            _infer_row(framework="fandhe-ai", device="cpu"),
+            _infer_row(framework="candle", device="cpu"),
+            _infer_row(framework="burn", device="metal"),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        self.assertFalse(any(r["device"] == "metal" for r in records))
+        self.assertTrue(any(r["device"] == "cpu" for r in records))
+
+    def test_train_multiple_sizes_are_all_evaluated_not_just_first(self):
+        # P0 回帰（PR #1082 codex-review 追加指摘）: 修正前は
+        # task != "gemm" を `sizes = [None]` 固定にしており、
+        # `get(..., size=None)` は size 条件を適用せず最初に一致した
+        # 行を返すだけだったため、train/infer に複数 size の行が
+        # 混在すると先頭の 1 行しか評価されず、他 size の未達・
+        # target 未計測が黙って無視されて全体が「全達成」側へ
+        # fail-open していた。ここでは size=64 が達成・size=128 が
+        # target 未計測（判定不能）という混在データを与え、両方が
+        # 個別レコードとして列挙されることを確認する。
+        rows = [
+            dict(_train_row(framework="fandhe-ai", median_s=0.0005), size=64),
+            dict(_train_row(framework="candle", median_s=0.001), size=64),
+            dict(_train_row(framework="fandhe-ai", median_s=0.02), size=128),
+            # candle 側 size=128 は計測なし（意図的に欠落させる）。
+        ]
+        records = summarize.target_gate(rows, "candle")
+        train_recs = {r["size"]: r for r in records if r["task"] == "train"}
+        self.assertEqual(set(train_recs), {64, 128})
+        self.assertEqual(train_recs[64]["status"], "achieved")
+        self.assertEqual(train_recs[128]["status"], "undeterminable")
+        self.assertIn("candle 未計測", train_recs[128]["reason"])
+
+    def test_infer_multiple_sizes_unmet_size_is_not_hidden_by_achieved_size(self):
+        # 上記と対の観点: size=64 が achieved・size=128 が unmet の場合、
+        # 先頭行（size=64）の achieved だけを見て unmet を握りつぶさない
+        # ことを確認する。
+        rows = [
+            dict(_infer_row(framework="fandhe-ai", median_s=0.0001), size=64),
+            dict(_infer_row(framework="candle", median_s=0.0005), size=64),
+            dict(_infer_row(framework="fandhe-ai", median_s=0.01), size=128),
+            dict(_infer_row(framework="candle", median_s=0.001), size=128),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        infer_recs = {r["size"]: r for r in records if r["task"] == "infer"}
+        self.assertEqual(set(infer_recs), {64, 128})
+        self.assertEqual(infer_recs[64]["status"], "achieved")
+        self.assertEqual(infer_recs[128]["status"], "unmet")
+
+    def test_duplicate_key_row_is_undeterminable_not_fail_open(self):
+        # P0 修正（codex-review 指摘・PR #1082）: 同一
+        # (framework, task, device, size, mode) に複数行が存在する場合、
+        # 旧実装は `get()` が返す先頭行だけを採用し残りを検証しなかった。
+        # 正常行（速い）を先に置き、未達（遅い）な fandhe-ai 行を後置する
+        # と未達を隠して「達成」判定を返してしまう fail-open があった。
+        # ここでは fandhe-ai/gemm/cpu/size=256/fresh に 2 行を与え、先頭を
+        # 速い行（達成条件を満たす）にしても「重複キー」で判定不能へ倒れ、
+        # 誤って「達成」を返さないことを確認する。
+        rows = [
+            dict(_with_parity(_base_row(framework="fandhe-ai", mode="fresh")), median_s=0.0001),
+            dict(_with_parity(_base_row(framework="fandhe-ai", mode="fresh")), median_s=0.5),
+            _with_parity(_base_row(framework="candle", mode="fresh")),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("重複キー", rec["reason"])
+        self.assertIsNone(rec["fandhe_median"])
+
+    def test_duplicate_key_on_target_side_is_also_undeterminable(self):
+        # 上記と対称のケース: 重複が target（candle）側にある場合も同様に
+        # 判定不能へ倒れることを確認する。
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+            dict(_with_parity(_base_row(framework="candle", mode="fresh")), median_s=0.001),
+            dict(_with_parity(_base_row(framework="candle", mode="fresh")), median_s=0.002),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("重複キー", rec["reason"])
+
+    def test_invalid_size_values_do_not_raise_and_are_undeterminable(self):
+        # P0 修正（codex-review 指摘・PR #1082）: 外部 JSONL 由来の `size`
+        # を型・値域未検証のまま set 内包・`sorted()` へ渡すと、配列／
+        # オブジェクトは `unhashable type`、文字列と整数の混在は比較
+        # `TypeError` で集計全体が traceback 停止しうる。producer 契約
+        # （正の整数）に反する値は例外にせず判定不能レコードへ倒す
+        # （security.md「外部フォーマットのパース時検証（A03）」）。
+        bad_sizes = [
+            ["not", "hashable"],
+            {"nested": "object"},
+            "64",  # candle 側の int 64 と型が混在し sorted() 比較で TypeError になりうる
+            0,
+            -5,
+            1.5,
+            True,
+        ]
+        for bad_size in bad_sizes:
+            with self.subTest(bad_size=bad_size):
+                rows = [
+                    dict(_infer_row(framework="fandhe-ai"), size=bad_size),
+                    _infer_row(framework="candle"),
+                ]
+                # 例外を送出せず判定不能レコードを返すことを確認する
+                # （fail-closed。旧実装は traceback で停止していた）。
+                records = summarize.target_gate(rows, "candle")
+                invalid_rec = next(
+                    r for r in records if r["task"] == "infer" and r["size"] is None
+                )
+                self.assertEqual(invalid_rec["status"], "undeterminable")
+                self.assertIn("size が不正な値", invalid_rec["reason"])
+                # candle 側の有効な size=64 は不正値混入の影響を受けず
+                # 独立に判定される（fandhe-ai 側に有効な size が無いため
+                # 「fandhe-ai 未計測」となる）。
+                valid_rec = next(
+                    r for r in records if r["task"] == "infer" and r["size"] == 64
+                )
+                self.assertEqual(valid_rec["status"], "undeterminable")
+                self.assertIn("fandhe-ai 未計測", valid_rec["reason"])
+
+    def test_gemm_row_with_unhashable_size_does_not_raise(self):
+        # advisor 指摘（PR #1082 2 巡目）: `target_gate` は
+        # `gemm_checksum_mismatches(rows)` を先頭で無条件に呼ぶため、
+        # 不正な size を持つ gemm 行は task フィルタで弾かれる infer 行の
+        # テストでは再現しない。`gemm_checksum_mismatches`/
+        # `gemm_checksum_unverifiable` 内の `reference.get(r["size"], ...)`
+        # は `size` が配列等の unhashable 値だと `TypeError` を送出しうる
+        # （`gemm_checksum_reference` 側の `_valid_gate_size` フィルタとは
+        # 別の dict 参照経路のため個別に防御が必要）。
+        rows = [
+            dict(_with_parity(_base_row(framework="fandhe-ai")), size=["x", "y"]),
+            _with_parity(_base_row(framework="candle")),
+        ]
+        records = summarize.target_gate(rows, "candle")  # 例外を送出しないこと
+        invalid_rec = next(r for r in records if r["task"] == "gemm" and r["size"] is None)
+        self.assertEqual(invalid_rec["status"], "undeterminable")
+        self.assertIn("size が不正な値", invalid_rec["reason"])
+
+    def test_get_function_missing_size_key_does_not_raise(self):
+        # Bugbot Medium 指摘（PR #1082 2 巡目・summarize.py L243-253）:
+        # `get()` が `r["size"]` を直接アクセスするため、`size` キー欠損の
+        # 行が framework/task/device/mode まで一致すると `KeyError` を
+        # 送出しうる。`r.get("size")` 経由での検証に切り替え、欠損行は
+        # 一致しないものとして扱う。
+        bad_row = _base_row(framework="fandhe-ai")
+        del bad_row["size"]
+        good_row = _base_row(framework="fandhe-ai", size=256)
+        rows = [bad_row, good_row]
+        r = summarize.get(rows, "fandhe-ai", "gemm", "cpu", 256)  # 例外を送出しないこと
+        self.assertIs(r, good_row)
+
+    def test_get_function_excludes_bool_size(self):
+        # `True == 1` により `size: true` の行が `size=1` のクエリで
+        # 誤選択されないことを確認する（Bugbot Medium 指摘・PR #1082
+        # 2 巡目）。
+        bool_row = _base_row(framework="fandhe-ai", size=True)
+        rows = [bool_row]
+        r = summarize.get(rows, "fandhe-ai", "gemm", "cpu", 1)
+        self.assertIsNone(r)
+
+    def test_pick_row_for_gate_missing_size_key_does_not_raise(self):
+        # Bugbot Medium 指摘（PR #1082 2 巡目・summarize.py L702-712）:
+        # `_pick_row_for_gate` の候補列挙が `r["size"]` を直接アクセス
+        # するため、size キー欠損行が framework/task/device/mode まで
+        # 一致すると `KeyError` を送出しうる。
+        bad_row = _base_row(framework="fandhe-ai", mode="fresh")
+        del bad_row["size"]
+        good_row = _base_row(framework="fandhe-ai", mode="fresh", size=256)
+        rows = [bad_row, good_row]
+        row, mode, dup_reason = summarize._pick_row_for_gate(
+            rows, "fandhe-ai", "gemm", "cpu", 256
+        )  # 例外を送出しないこと
+        self.assertIs(row, good_row)
+        self.assertEqual(mode, "fresh")
+        self.assertIsNone(dup_reason)
+
+    def test_pick_row_for_gate_excludes_bool_size(self):
+        bool_row = _base_row(framework="fandhe-ai", mode="fresh", size=True)
+        row, mode, dup_reason = summarize._pick_row_for_gate(
+            [bool_row], "fandhe-ai", "gemm", "cpu", 1
+        )
+        self.assertIsNone(row)
+        self.assertIsNone(mode)
+        self.assertIsNone(dup_reason)
+
+    def test_train_reuse_missing_size_key_row_does_not_raise_via_target_gate(self):
+        # end-to-end 確認: size キー欠損の train 行が rows に混在しても
+        # `target_gate` 全体が例外終了せず、他の正常な size の判定へ
+        # 影響しないことを確認する。
+        bad_row = _train_row(framework="fandhe-ai", mode="fresh", checksum=99.0, median_s=0.02)
+        del bad_row["size"]
+        rows = [
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.01),
+                size=64,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=0.08, init_s=0.001, median_s=0.005
+                ),
+                size=64,
+            ),
+            bad_row,
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=64),
+        ]
+        records = summarize.target_gate(rows, "candle")  # 例外を送出しないこと
+        rec = next(r for r in records if r["task"] == "train" and r["size"] == 64)
+        self.assertEqual(rec["status"], "achieved")
+
+    def test_train_reuse_bool_size_row_is_not_treated_as_size_one_match(self):
+        # Bugbot Medium 指摘（PR #1082 2 巡目・summarize.py L758-767）:
+        # `_train_reuse_row_invalid_reason` の fresh 候補列挙が
+        # `True == 1` により `size: true` の行を `size=1` の reuse 行と
+        # 誤って突合しうる。ここでは `size=True` の fresh 行（checksum
+        # 999.0・reuse とは不一致）を混入させても、正当な同一 size(1) の
+        # fresh 行が存在しない場合と同じ扱い（突合不能ではなく fresh 側
+        # 「未計測」＝有効）になり、reuse 行の実測（candle より高速）が
+        # そのまま「達成」判定に使われることを確認する（bool 行に化けた
+        # 誤った不一致検出ですり抜けさせない）。
+        rows = [
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=5.0, init_s=0.001, median_s=0.005
+                ),
+                size=1,
+            ),
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=999.0, median_s=0.02),
+                size=True,
+            ),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=1),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train" and r["size"] == 1)
+        self.assertEqual(rec["status"], "achieved")
+
+    def test_train_reuse_size_matches_same_size_fresh_row_not_other_size(self):
+        # Bugbot Medium 指摘（PR #1082）: `_train_reuse_row_invalid_reason`
+        # が fresh 行の検索に `size` を渡していなかったため、複数 size の
+        # train データが存在する場合に reuse 行が別 size の fresh 行と
+        # 誤って突合されていた。ここでは size=64/128 それぞれで
+        # reuse checksum と同一 size の fresh checksum が一致する
+        # （正当な）データを与え、両方とも達成として正しく判定される
+        # ことを確認する（size を渡さない旧実装では size=128 の reuse
+        # 行が size=64 の fresh checksum〈0.08〉と誤って突合され
+        # 不一致「無効データ」判定に落ちてしまっていた）。
+        rows = [
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.01),
+                size=64,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=0.08, init_s=0.001, median_s=0.005
+                ),
+                size=64,
+            ),
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=5.0, median_s=0.02),
+                size=128,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=5.0, init_s=0.002, median_s=0.015
+                ),
+                size=128,
+            ),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=64),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=128),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        train_recs = {r["size"]: r for r in records if r["task"] == "train"}
+        self.assertEqual(set(train_recs), {64, 128})
+        self.assertEqual(train_recs[64]["status"], "achieved")
+        self.assertEqual(train_recs[128]["status"], "achieved")
+
+    def test_train_reuse_size_mismatch_detected_against_same_size_fresh(self):
+        # 上記と対の観点: reuse checksum が「同一 size」の fresh と
+        # 不一致な場合は正しく無効判定される（別 size の fresh とたまたま
+        # 一致してすり抜けない）ことを確認する。size=64 は reuse checksum
+        # が同一 size fresh（0.08）と不一致（999.0）。size=128 の fresh
+        # checksum（0.08 と同じ値）とは偶然一致してしまう配置にしてあり、
+        # size を渡さない旧実装ならこの一致をすり抜けて「達成」と
+        # 誤判定しうる。
+        rows = [
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.01),
+                size=64,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=999.0, init_s=0.001, median_s=0.005
+                ),
+                size=64,
+            ),
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.02),
+                size=128,
+            ),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=64),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train" and r["size"] == 64)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+
+    def test_train_reuse_duplicate_fresh_row_is_undeterminable_not_fail_open(self):
+        # advisor 指摘（PR #1082 3 巡目）: `_train_reuse_row_invalid_reason`
+        # の fresh 側検索が `get()`（最初に一致した行だけを返す）のままだと、
+        # 同一 size に複数 fresh 行がある場合、先頭が checksum 一致する
+        # fresh 行であれば他の不一致な fresh 行を握りつぶして「有効」判定
+        # してしまう。ここでは reuse checksum（999.0）と一致する fresh
+        # 行を先頭に、不一致な fresh 行（0.08）を 2 番目に置いても
+        # 「達成」側へすり抜けず判定不能になることを確認する。
+        rows = [
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=999.0, median_s=0.01),
+                size=64,
+            ),
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.011),
+                size=64,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=999.0, init_s=0.001, median_s=0.005
+                ),
+                size=64,
+            ),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=64),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train" and r["size"] == 64)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+
+
+class MainTargetExitCodeTests(unittest.TestCase):
+    def _run_main(self, path, target=None, strict=False):
+        # `path` は単一パス（str）または複数パス（list。複数入力ファイル
+        # をまたぐ回帰確認用）のいずれも受け付ける。
+        argv = list(path) if isinstance(path, (list, tuple)) else [path]
+        if target:
+            argv += ["--target", target]
+        if strict:
+            argv.append("--strict")
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", *argv]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+        return code, buf_out.getvalue(), buf_err.getvalue()
+
+    def test_unmet_exits_3_and_reports_stderr(self):
+        path = _write_jsonl(
+            [
+                _infer_row(framework="fandhe-ai", median_s=0.002),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+        )
+        try:
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("未達", err)
+            self.assertIn("目標達成ゲート", out)
+        finally:
+            os.unlink(path)
+
+    def test_all_achieved_exits_0(self):
+        # イシュー #1051 P0 修正（codex-review 指摘）: `target_gate` は
+        # デバイス集合をファイル全体（gemm/train/infer 横断）から導出する
+        # ため、GATE_TASKS の一部タスクが丸ごと欠落したまま「全達成」を
+        # 装うのを避ける目的で、gemm/train/infer の 3 タスク全てを
+        # fandhe-ai/candle 双方で満たす完全なフィクスチャにする。
+        path = _write_jsonl(
+            [
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+        )
+        try:
+            code, _, _ = self._run_main(path, target="candle")
+            self.assertEqual(code, 0)
+        finally:
+            os.unlink(path)
+
+    def test_without_target_exits_0_unchanged(self):
+        # 既存契約（--target 省略時は挙動不変）の回帰確認。
+        path = _write_jsonl(
+            [
+                _infer_row(framework="fandhe-ai", median_s=0.002),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+        )
+        try:
+            code, _, _ = self._run_main(path)
+            self.assertEqual(code, 0)
+        finally:
+            os.unlink(path)
+
+    def test_gate_records_empty_exits_3_not_0(self):
+        # P0 回帰（イシュー #1051 codex-review 指摘）: 入力 JSONL に
+        # fandhe-ai/target いずれの行も存在しない（ここでは burn のみ）
+        # 場合、以前は gate_records_all が空のまま unmet=0・
+        # undeterminable=0 で exit 0（「全達成」の誤判定）になっていた。
+        # 計測対象が丸ごと欠落した入力は判定不能として非ゼロ終了する。
+        path = _write_jsonl([_infer_row(framework="burn", median_s=0.002)])
+        try:
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("目標達成ゲート", out)
+        finally:
+            os.unlink(path)
+
+    def test_invalid_size_exits_3_via_main(self):
+        # main() の実配線経路（`--target` あり・`--strict` なし）でも
+        # size 不正検出が exit 3 に到達することを確認する（records の
+        # 中身だけでなく main() の集計・終了コード判定まで含めた回帰）。
+        path = _write_jsonl(
+            [
+                dict(_infer_row(framework="fandhe-ai"), size=["bad"]),
+                _infer_row(framework="candle"),
+            ]
+        )
+        try:
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+        finally:
+            os.unlink(path)
+
+    def test_duplicate_key_exits_3_via_main(self):
+        path = _write_jsonl(
+            [
+                dict(_with_parity(_base_row(framework="fandhe-ai")), median_s=0.0001),
+                dict(_with_parity(_base_row(framework="fandhe-ai")), median_s=0.5),
+                _with_parity(_base_row(framework="candle")),
+            ]
+        )
+        try:
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+        finally:
+            os.unlink(path)
+
+    def test_empty_input_file_does_not_cause_fail_open_when_other_file_achieves(self):
+        # codex P0（PR #1082 2 巡目指摘）: `rows` が空の入力ファイルを
+        # 無条件に `continue` で読み飛ばすと、`--target` 指定時に複数
+        # 入力のうち 1 ファイルが空でも、他ファイルが全達成なら
+        # `gate_records_all` が非空となり判定不能に数えられず exit 0 に
+        # なる fail-open があった（計測が丸ごと欠落したファイルを
+        # 「対象外」と黙って扱ってしまう）。ここでは空ファイル 1 件 +
+        # 全達成ファイル 1 件を与え、exit 3（判定不能扱い）になることを
+        # 確認する。
+        empty_path = _write_jsonl([])
+        achieved_path = _write_jsonl(
+            [
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+        )
+        try:
+            code, out, err = self._run_main([empty_path, achieved_path], target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("有効な行が無い", out)
+            # 空ファイル分の判定不能 1 件が集計に確実に載っていることを
+            # 明示的に確認する（`achieved_path` 単体は
+            # `test_all_achieved_exits_0` で「達成のみ」を確認済みのため、
+            # ここでの判定不能はもっぱら空ファイルに由来する）。
+            self.assertIn("判定不能 1", out)
+            self.assertIn("達成", out)
+            self.assertNotIn("達成 0", out)
+        finally:
+            os.unlink(empty_path)
+            os.unlink(achieved_path)
+
+    def test_skip_log_entirely_failed_device_forces_undeterminable_exit_3(self):
+        # codex P0（PR #1082 3 巡目指摘）: `_gate_devices`/`target_gate` は
+        # 成功して JSONL に残った fandhe-ai/target 行だけからデバイス集合を
+        # 導出するため、あるデバイスの全実行が失敗し skipped*.log にしか
+        # 記録が残らなかった場合、そのデバイスは判定対象に一切現れず
+        # 「全達成」に混入する fail-open があった。CPU は全達成の正常
+        # データ、CUDA は skipped.log のみに記録がある（JSONL には一切
+        # 現れない）ケースで exit 3 になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", device="cpu", checksum=1.0)),
+                _train_row(framework="fandhe-ai", device="cpu", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", device="cpu", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0001),
+                _infer_row(framework="candle", device="cpu", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped-cuda.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=gemm device=cuda size=256 mode=fresh "
+                    "extra=none : CUDA driver not found\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            # `DEVICE_LABEL` により表示は大文字化される
+            # （`target_gate_section`・`DEVICE_LABEL` 定義参照）。
+            self.assertIn("CUDA", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_single_size_failure_on_known_device_forces_undeterminable_exit_3(self):
+        # 上記と対の観点（codex P0・PR #1082 3 巡目指摘の 2 点目）: CPU
+        # デバイス自体は他 size で計測済み（`_gate_devices` には現れる）
+        # だが、gemm cpu size=1024 の実行だけが失敗し skipped.log にしか
+        # 記録がないケース。`sizes` は実データからのみ導出されるため、
+        # 実データに一切現れない size=1024 は黙って判定対象から漏れて
+        # いた。全達成データ（size=256）+ skipped.log の size=1024 失敗
+        # 記録を与え、exit 3 になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", size=256, checksum=1.0)),
+                _with_parity(_base_row(framework="candle", size=256, checksum=1.0)),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=gemm device=cpu size=1024 mode=fresh "
+                    "extra=none : OOM\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("N=1024", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_failure_already_covered_by_real_data_is_not_double_counted(self):
+        # 回帰確認: 既に実データ側で判定済み（例えば candle 側が計測
+        # できておらず「candle 未計測」として既に判定不能）の組は、
+        # 同じ組を指す skipped.log の記録があっても二重にレコードを
+        # 追加しない（`_inject_skip_failures_into_gate` の
+        # `existing_keys` 抑制）。skipped.log の有無で判定不能件数が
+        # 変わらないことを確認する（水増しされない）。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [_infer_row(framework="fandhe-ai")]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            code_without, out_without, _ = self._run_main(path, target="candle")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-candle task=infer device=cpu size=64 mode=fresh "
+                    "extra=none : timeout\n"
+                )
+            code_with, out_with, _ = self._run_main(path, target="candle")
+            self.assertEqual(code_without, 3)
+            self.assertEqual(code_with, 3)
+            count_without = int(re.search(r"判定不能 (\d+)", out_without).group(1))
+            count_with = int(re.search(r"判定不能 (\d+)", out_with).group(1))
+            self.assertEqual(count_with, count_without)
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+    def test_skip_log_unparseable_build_failure_forces_undeterminable_exit_3(self):
+        # advisor 指摘（PR #1082 4 巡目）: `run_all_cuda.sh` の `build()` が
+        # 書く `"$crate BUILD FAILED: ..."` は `_SKIP_LINE_RE` に一致せず
+        # framework も特定できないため、framework 判定を先に行う実装だと
+        # `bench-fandhe BUILD FAILED`（＝当該スイープで fandhe-ai データが
+        # 丸ごと生成されなかった、最も深刻なケース）が framework 不明を
+        # 理由に無条件で握りつぶされ、CPU が全達成なら exit 0 になって
+        # しまっていた。ここでは CPU 全達成データ + ビルド失敗のみの
+        # skipped-cuda.log を与え、exit 3（判定不能扱い）になることを
+        # 確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", device="cpu", checksum=1.0)),
+                _train_row(framework="fandhe-ai", device="cpu", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", device="cpu", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0001),
+                _infer_row(framework="candle", device="cpu", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped-cuda.log"), "w") as f:
+                f.write(
+                    "bench-fandhe BUILD FAILED: error[E0432]: unresolved import\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("未解析の失敗記録あり", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_cross_environment_is_not_suppressed_by_other_file_achieving(self):
+        # codex P0・Bugbot High 指摘（PR #1082 4 巡目・同一原因）:
+        # `_inject_skip_failures_into_gate` の `existing_keys` を全入力
+        # ファイル横断の `gate_records_all` から作っていたため、環境 A の
+        # JSONL に `gemm/cpu/N=256` の達成行があると、環境 B（別ディレクトリ
+        # ・自身の JSONL には当該組が一切現れず、`skipped.log` にしか
+        # 記録が残っていない）の同じ組の失敗が `existing_keys` に紛れて
+        # 注入されなくなる（`target_gate` 自身の「ファイルをまたいだ突合は
+        # 環境混同になるため行わない」契約違反）。
+        #
+        # 環境 A: gemm/cpu/N=256・train/infer とも全達成（この
+        # `gemm/cpu/N=256` の達成行が旧実装での「毒」になる）。
+        # 環境 B: gemm/cpu/N=512・train/infer は全達成だが gemm/cpu/N=256
+        # の行自体は無く、`skipped.log` にのみ同じ組の失敗が記録されている
+        # （env A/B とも他の組が全て達成のため、この 1 件の判定不能以外に
+        # exit 3 を招く要因が無い状態にして原因を一意にする）。
+        env_a_dir = tempfile.mkdtemp()
+        env_b_dir = tempfile.mkdtemp()
+        try:
+            env_a_path = os.path.join(env_a_dir, "results.jsonl")
+            env_a_rows = [
+                _with_parity(_base_row(framework="fandhe-ai", size=256, checksum=1.0)),
+                _with_parity(_base_row(framework="candle", size=256, checksum=1.0)),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(env_a_path, "w") as f:
+                for r in env_a_rows:
+                    f.write(json.dumps(r) + "\n")
+
+            env_b_path = os.path.join(env_b_dir, "results.jsonl")
+            env_b_rows = [
+                _with_parity(_base_row(framework="fandhe-ai", size=512, checksum=2.0), total=512 * 512),
+                _with_parity(_base_row(framework="candle", size=512, checksum=2.0), total=512 * 512),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(env_b_path, "w") as f:
+                for r in env_b_rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(env_b_dir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=gemm device=cpu size=256 mode=fresh "
+                    "extra=none : segfault\n"
+                )
+
+            code, out, err = self._run_main([env_a_path, env_b_path], target="candle")
+            # 環境 A・B とも実データ側の (task, device, size) は全て達成
+            # であることを前提にしたテストのため、それ自体を先に検証する
+            # （このアサーションが崩れると原因が別要因〈parity 等〉に
+            # すり替わり、本テストの識別力が失われるため）。
+            self.assertIn("| gemm | CPU | 256 | 1.000 ms（fresh） | 1.000 ms（fresh） | 1.00 倍 | 達成", out)
+            self.assertIn("| gemm | CPU | 512 | 1.000 ms（fresh） | 1.000 ms（fresh） | 1.00 倍 | 達成", out)
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            # 環境 B（skipped.log 由来）の判定不能が実際に記録されている
+            # ことを確認する（環境 A の達成データに紛れて握りつぶされて
+            # いないこと）。
+            self.assertIn("skipped*.log に実行時失敗", out)
+        finally:
+            shutil.rmtree(env_a_dir)
+            shutil.rmtree(env_b_dir)
+
+    def test_skip_log_mode_aware_downgrades_achieved_when_used_mode_never_succeeded(self):
+        # codex-review P0 指摘その1（PR #1082 5 巡目）: `existing_keys` が
+        # `(task, device, size)` のみで skip 行の `framework`/`mode` を
+        # 無視していたため、fandhe-ai の fresh 実行が失敗して
+        # skipped.log に記録されていても、同じ組の fandhe-ai reuse 実行が
+        # 成功し（`_pick_row_for_gate` は reuse を優先）target（candle）の
+        # fresh 実行も成功していれば「達成」のまま握りつぶされ exit 0 に
+        # なっていた（train reuse は比較対象の fresh 行が存在しない場合を
+        # 有効値として扱う仕様のため、fresh 実行が実際に試みられて失敗
+        # したという証拠があっても checksum 突合不能な状態を見逃す）。
+        # ここでは fandhe-ai の fresh 行を意図的に欠落させ（＝失敗）、
+        # reuse 行のみを与え、candle の fresh 行は正常に成功させたうえで
+        # skipped.log に fandhe-ai の fresh 失敗を記録する。exit 3
+        # （判定不能）になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=0.08, init_s=0.001, median_s=0.005
+                ),
+                _train_row(framework="candle", mode="fresh", median_s=0.03),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=train device=cpu size=64 mode=fresh "
+                    "extra=none : segfault\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            # gemm/infer は全達成のため、判定不能の原因は train の
+            # skip 失敗のみに一意化される（`_gate_devices` が cpu を
+            # gemm/infer からも拾うため、train データを与えないと
+            # 「gemm/infer 未計測」という無関係な判定不能が混入し
+            # 本テストの識別力が下がる）。
+            self.assertIn("| gemm | CPU | 256 | 1.000 ms（fresh） | 1.000 ms（fresh） | 1.00 倍 | 達成", out)
+            self.assertIn("| infer | CPU | 64", out)
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("skipped*.log に実行時失敗", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_mode_aware_suppresses_when_exact_mode_actually_succeeded(self):
+        # 上記と対の観点（重複抑止側）: skip 失敗と全く同じ
+        # (framework, task, device, size, mode) の実行が実際には成功して
+        # JSONL に残っている場合（再実行後の stale な skipped.log
+        # エントリ）は、達成判定を判定不能へ格下げしない。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", mode="fresh", median_s=0.03),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=train device=cpu size=64 mode=fresh "
+                    "extra=none : stale-failure-before-rerun\n"
+                )
+            code, out, _ = self._run_main(path, target="candle")
+            self.assertEqual(code, 0)
+            self.assertIn("| train | CPU | 64", out)
+            self.assertNotIn("skipped*.log に実行時失敗", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_unknown_binary_with_valid_task_device_is_not_silently_dropped(self):
+        # codex-review P0 指摘その2（PR #1082 5 巡目）: 正規表現一致で
+        # task/device が妥当でも binary 名が `_SKIP_BIN_TO_FRAMEWORK`
+        # allowlist 外だと `framework` が `None` になり、旧実装では
+        # `sf["framework"] not in (...)` 判定（`None not in (...)` は
+        # 常に真）により無条件で無視されていた（fail-open）。CPU が
+        # gemm/train/infer 全て達成のデータ + 未知 binary 名の skip 行
+        # 1 件を与え、exit 3（判定不能）になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", device="cpu", checksum=1.0)),
+                _train_row(framework="fandhe-ai", device="cpu", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", device="cpu", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0001),
+                _infer_row(framework="candle", device="cpu", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-mystery task=gemm device=cpu size=256 mode=fresh "
+                    "extra=none : unknown binary\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("未解析の失敗記録あり", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_raw_content_with_pipe_and_script_tag_does_not_break_table(self):
+        # codex P0 指摘（PR #1082 6 巡目・security.md A03）: 外部プロセス
+        # stderr を含む未信頼文字列 `sf["raw"]` を無加工で `reason` に
+        # 格納すると、`target_gate_section()` が `|` 区切りの Markdown
+        # 表セル・箇条書きへそのまま埋め込むため、`|` で表構造を、
+        # `<script>` 等で出力ページの HTML/Markdown 構文を改変できる。
+        # `|` と `<script>` を含む skip 行を与えても、出力に生の `|`
+        # 区切り・`<script>` が現れず（エスケープ済みの `\|`・`&lt;`
+        # として現れる）、exit 3 になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _with_parity(_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", device="cpu", checksum=1.0)),
+                _train_row(framework="fandhe-ai", device="cpu", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", device="cpu", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0001),
+                _infer_row(framework="candle", device="cpu", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-mystery task=gemm device=cpu size=256 mode=fresh "
+                    "extra=none : boom | <script>alert(1)</script>\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            # `## 実行時失敗（skipped*.log）` は生ログの informational な
+            # 一覧表示（`|` 区切り表ではなく箇条書き）であり、今回の
+            # 修正対象（`target_gate_section()` の表セルへ渡る `reason`）
+            # とは別の既存機能のため、そちらの生テキストは対象にしない。
+            # ゲート節（`## 目標達成ゲート` 以降）に限定して、`reason` が
+            # サニタイズ済みで表構造・HTML 構文を壊していないことを
+            # 確認する。
+            gate_section = out[out.index("## 目標達成ゲート"):]
+            self.assertNotIn(" | <script>", gate_section)
+            self.assertNotIn("boom | <", gate_section)
+            self.assertNotIn("<script>alert(1)</script>", gate_section)
+            self.assertIn("&lt;script&gt;", gate_section)
+            self.assertIn("boom \\| ", gate_section)
+            self.assertIn("未解析の失敗記録あり", gate_section)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_log_unresolvable_size_does_not_suppress_via_unrelated_success(self):
+        # Bugbot Medium 指摘（PR #1082 6 巡目）: stale 成功判定が `get()` に
+        # `sf["size"]` を渡すが、`get()` は `size=None` を「size で絞ら
+        # ない」と解釈するため、`_parse_skip_failure` が size を解析
+        # できず `None` にした skip 失敗が、同じ framework/task/device/
+        # mode の**任意の** size の成功行によって stale 扱いされ握り
+        # つぶされていた（fail-open）。ここでは size が不正
+        # （`_valid_gate_size` が弾く負数）な skip 行と、同じ
+        # framework/task/device/mode の別 size の成功行を与え、
+        # 判定不能として exit 3 になることを確認する。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", mode="fresh", median_s=0.03),
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-fandhe task=train device=cpu size=-1 mode=fresh "
+                    "extra=none : bogus-size-failure\n"
+                )
+            code, out, err = self._run_main(path, target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("skipped*.log に実行時失敗", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_target_outside_allowlist_is_argparse_error(self):
+        path = _write_jsonl([_infer_row(framework="fandhe-ai")])
+        try:
+            old_argv = sys.argv
+            sys.argv = ["summarize.py", path, "--target", "fandhe-ai"]
+            buf_err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(buf_err), self.assertRaises(SystemExit) as ctx:
+                    summarize.main()
+                self.assertEqual(ctx.exception.code, 2)
+            finally:
+                sys.argv = old_argv
+        finally:
+            os.unlink(path)
+
+    def test_strict_takes_priority_over_gate_exit_code(self):
+        # 旧形式 gemm 行（--strict 対象）と unmet な gemm ゲート判定が
+        # 両立する場合、データ無効の解消を優先し終了コードは 2
+        # （実装計画 §3「--strict と併用し旧形式 gemm 行 → exit 2 が
+        # 優先される」）。
+        path = _write_jsonl(
+            [
+                dict(_base_row(framework="fandhe-ai"), median_s=0.002),
+                dict(_base_row(framework="candle"), median_s=0.0005),
+            ]
+        )
+        try:
+            code, _, err = self._run_main(path, target="candle", strict=True)
+            self.assertEqual(code, 2)
+            self.assertIn("要素単位検証を受けていない", err)
         finally:
             os.unlink(path)
 
