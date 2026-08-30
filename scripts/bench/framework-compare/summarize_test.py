@@ -1493,6 +1493,104 @@ class TargetGateTests(unittest.TestCase):
         self.assertEqual(invalid_rec["status"], "undeterminable")
         self.assertIn("size が不正な値", invalid_rec["reason"])
 
+    def test_get_function_missing_size_key_does_not_raise(self):
+        # Bugbot Medium 指摘（PR #1082 2 巡目・summarize.py L243-253）:
+        # `get()` が `r["size"]` を直接アクセスするため、`size` キー欠損の
+        # 行が framework/task/device/mode まで一致すると `KeyError` を
+        # 送出しうる。`r.get("size")` 経由での検証に切り替え、欠損行は
+        # 一致しないものとして扱う。
+        bad_row = _base_row(framework="fandhe-ai")
+        del bad_row["size"]
+        good_row = _base_row(framework="fandhe-ai", size=256)
+        rows = [bad_row, good_row]
+        r = summarize.get(rows, "fandhe-ai", "gemm", "cpu", 256)  # 例外を送出しないこと
+        self.assertIs(r, good_row)
+
+    def test_get_function_excludes_bool_size(self):
+        # `True == 1` により `size: true` の行が `size=1` のクエリで
+        # 誤選択されないことを確認する（Bugbot Medium 指摘・PR #1082
+        # 2 巡目）。
+        bool_row = _base_row(framework="fandhe-ai", size=True)
+        rows = [bool_row]
+        r = summarize.get(rows, "fandhe-ai", "gemm", "cpu", 1)
+        self.assertIsNone(r)
+
+    def test_pick_row_for_gate_missing_size_key_does_not_raise(self):
+        # Bugbot Medium 指摘（PR #1082 2 巡目・summarize.py L702-712）:
+        # `_pick_row_for_gate` の候補列挙が `r["size"]` を直接アクセス
+        # するため、size キー欠損行が framework/task/device/mode まで
+        # 一致すると `KeyError` を送出しうる。
+        bad_row = _base_row(framework="fandhe-ai", mode="fresh")
+        del bad_row["size"]
+        good_row = _base_row(framework="fandhe-ai", mode="fresh", size=256)
+        rows = [bad_row, good_row]
+        row, mode, dup_reason = summarize._pick_row_for_gate(
+            rows, "fandhe-ai", "gemm", "cpu", 256
+        )  # 例外を送出しないこと
+        self.assertIs(row, good_row)
+        self.assertEqual(mode, "fresh")
+        self.assertIsNone(dup_reason)
+
+    def test_pick_row_for_gate_excludes_bool_size(self):
+        bool_row = _base_row(framework="fandhe-ai", mode="fresh", size=True)
+        row, mode, dup_reason = summarize._pick_row_for_gate(
+            [bool_row], "fandhe-ai", "gemm", "cpu", 1
+        )
+        self.assertIsNone(row)
+        self.assertIsNone(mode)
+        self.assertIsNone(dup_reason)
+
+    def test_train_reuse_missing_size_key_row_does_not_raise_via_target_gate(self):
+        # end-to-end 確認: size キー欠損の train 行が rows に混在しても
+        # `target_gate` 全体が例外終了せず、他の正常な size の判定へ
+        # 影響しないことを確認する。
+        bad_row = _train_row(framework="fandhe-ai", mode="fresh", checksum=99.0, median_s=0.02)
+        del bad_row["size"]
+        rows = [
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.01),
+                size=64,
+            ),
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=0.08, init_s=0.001, median_s=0.005
+                ),
+                size=64,
+            ),
+            bad_row,
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=64),
+        ]
+        records = summarize.target_gate(rows, "candle")  # 例外を送出しないこと
+        rec = next(r for r in records if r["task"] == "train" and r["size"] == 64)
+        self.assertEqual(rec["status"], "achieved")
+
+    def test_train_reuse_bool_size_row_is_not_treated_as_size_one_match(self):
+        # Bugbot Medium 指摘（PR #1082 2 巡目・summarize.py L758-767）:
+        # `_train_reuse_row_invalid_reason` の fresh 候補列挙が
+        # `True == 1` により `size: true` の行を `size=1` の reuse 行と
+        # 誤って突合しうる。ここでは `size=True` の fresh 行（checksum
+        # 999.0・reuse とは不一致）を混入させても、正当な同一 size(1) の
+        # fresh 行が存在しない場合と同じ扱い（突合不能ではなく fresh 側
+        # 「未計測」＝有効）になり、reuse 行の実測（candle より高速）が
+        # そのまま「達成」判定に使われることを確認する（bool 行に化けた
+        # 誤った不一致検出ですり抜けさせない）。
+        rows = [
+            dict(
+                _train_row(
+                    framework="fandhe-ai", mode="reuse", checksum=5.0, init_s=0.001, median_s=0.005
+                ),
+                size=1,
+            ),
+            dict(
+                _train_row(framework="fandhe-ai", mode="fresh", checksum=999.0, median_s=0.02),
+                size=True,
+            ),
+            dict(_train_row(framework="candle", mode="fresh", median_s=0.03), size=1),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "train" and r["size"] == 1)
+        self.assertEqual(rec["status"], "achieved")
+
     def test_train_reuse_size_matches_same_size_fresh_row_not_other_size(self):
         # Bugbot Medium 指摘（PR #1082）: `_train_reuse_row_invalid_reason`
         # が fresh 行の検索に `size` を渡していなかったため、複数 size の
@@ -1596,7 +1694,9 @@ class TargetGateTests(unittest.TestCase):
 
 class MainTargetExitCodeTests(unittest.TestCase):
     def _run_main(self, path, target=None, strict=False):
-        argv = [path]
+        # `path` は単一パス（str）または複数パス（list。複数入力ファイル
+        # をまたぐ回帰確認用）のいずれも受け付ける。
+        argv = list(path) if isinstance(path, (list, tuple)) else [path]
         if target:
             argv += ["--target", target]
         if strict:
@@ -1708,6 +1808,42 @@ class MainTargetExitCodeTests(unittest.TestCase):
             self.assertIn("判定不能", err)
         finally:
             os.unlink(path)
+
+    def test_empty_input_file_does_not_cause_fail_open_when_other_file_achieves(self):
+        # codex P0（PR #1082 2 巡目指摘）: `rows` が空の入力ファイルを
+        # 無条件に `continue` で読み飛ばすと、`--target` 指定時に複数
+        # 入力のうち 1 ファイルが空でも、他ファイルが全達成なら
+        # `gate_records_all` が非空となり判定不能に数えられず exit 0 に
+        # なる fail-open があった（計測が丸ごと欠落したファイルを
+        # 「対象外」と黙って扱ってしまう）。ここでは空ファイル 1 件 +
+        # 全達成ファイル 1 件を与え、exit 3（判定不能扱い）になることを
+        # 確認する。
+        empty_path = _write_jsonl([])
+        achieved_path = _write_jsonl(
+            [
+                _with_parity(_base_row(framework="fandhe-ai", checksum=1.0)),
+                _with_parity(_base_row(framework="candle", checksum=1.0)),
+                _train_row(framework="fandhe-ai", checksum=0.08, median_s=0.0005),
+                _train_row(framework="candle", checksum=0.09, median_s=0.01),
+                _infer_row(framework="fandhe-ai", median_s=0.0001),
+                _infer_row(framework="candle", median_s=0.0005),
+            ]
+        )
+        try:
+            code, out, err = self._run_main([empty_path, achieved_path], target="candle")
+            self.assertEqual(code, 3)
+            self.assertIn("判定不能", err)
+            self.assertIn("有効な行が無い", out)
+            # 空ファイル分の判定不能 1 件が集計に確実に載っていることを
+            # 明示的に確認する（`achieved_path` 単体は
+            # `test_all_achieved_exits_0` で「達成のみ」を確認済みのため、
+            # ここでの判定不能はもっぱら空ファイルに由来する）。
+            self.assertIn("判定不能 1", out)
+            self.assertIn("達成", out)
+            self.assertNotIn("達成 0", out)
+        finally:
+            os.unlink(empty_path)
+            os.unlink(achieved_path)
 
     def test_target_outside_allowlist_is_argparse_error(self):
         path = _write_jsonl([_infer_row(framework="fandhe-ai")])

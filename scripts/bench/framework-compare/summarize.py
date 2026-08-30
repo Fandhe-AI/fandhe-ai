@@ -242,6 +242,16 @@ def load_rows(path):
 
 
 def get(rows, fw, task, device, size=None, mode="fresh"):
+    """`(framework, task, device, size, mode)` に一致する最初の行を返す。
+
+    `size=None` は size 条件を適用しない（呼び出し元がフレームワーク・
+    デバイス・mode のみで絞り込みたい場合の既定動作）。`size` を指定する
+    場合、行側の `size` は `r.get("size")` で取得し `_valid_gate_size` で
+    検証したうえで比較する（Bugbot Medium 指摘・PR #1082 2 巡目: 直接
+    `r["size"]` を読むと `size` キー欠損行で `KeyError`、`bool`（`True ==
+    1`）混入行で意図しない一致が起こりうる。行の `size` が不正な場合は
+    比較対象から除外する＝一致しないものとして扱う。fail-closed）。
+    """
     for r in rows:
         if (
             r["framework"] == fw
@@ -249,7 +259,10 @@ def get(rows, fw, task, device, size=None, mode="fresh"):
             and r["device"] == device
             and r["mode"] == mode
         ):
-            if size is None or r["size"] == size:
+            if size is None:
+                return r
+            row_size = r.get("size")
+            if _valid_gate_size(row_size) and row_size == size:
                 return r
     return None
 
@@ -515,7 +528,7 @@ def _non_integral(v):
 
 
 def _valid_gate_size(v):
-    """`size` フィールドを set 内包・`sorted()` へ渡す前に検証する。
+    """`size` フィールドを set 内包・`sorted()`・突合比較へ渡す前に検証する。
 
     producer 契約（`bench-common::parse_cli_from` の `--size`）上 `size` は
     常に正の整数だが、外部 JSONL の値は型・値域未検証のまま信頼できない
@@ -523,10 +536,18 @@ def _valid_gate_size(v):
     オブジェクト等の unhashable な値は `{r["size"] for r in ...}` の集合化で
     `TypeError: unhashable type` を、文字列と整数の混在は `sorted()` の
     比較演算で `TypeError` を、それぞれ送出し集計全体を例外終了させうる
-    （イシュー #1051 codex-review P0 指摘・PR #1082）。`_is_plain_number` で
-    bool・NaN・Infinity・非数値をまず弾き、整数性・正値を追加検証する
-    （`gemm_checksum_reference`・`target_gate` 双方の size 集合化で共有する）。
+    （イシュー #1051 codex-review P0 指摘・PR #1082）。
+
+    `bool` は Python では `int` のサブクラスのため、後続の `_is_plain_number`
+    に処理を委ねる前にここで明示的に弾く（Bugbot Medium 指摘・PR #1082
+    2 巡目: `True == 1` により `_pick_row_for_gate`/
+    `_train_reuse_row_invalid_reason` の突合で `size: true` の行が
+    `size=1` の行として誤って選ばれうる。`_is_plain_number` も内部で
+    `isinstance(v, bool)` を弾いているため機能的には冗長だが、本関数の
+    契約〈bool を size として許容しない〉を独立に読み取れるようにする）。
     """
+    if isinstance(v, bool):
+        return False
     return _is_plain_number(v) and not _non_integral(v) and int(v) > 0
 
 
@@ -701,6 +722,11 @@ def _pick_row_for_gate(rows, fw, task, device, size):
     返してしまう fail-open があったため、重複自体を判定不能として扱う）。
     """
     for mode in ("reuse", "fresh"):
+        # `r.get("size")` を `_valid_gate_size` で検証してから比較する
+        # （Bugbot Medium 指摘・PR #1082 2 巡目: 直接 `r["size"]` を読むと
+        # `size` キー欠損行で `KeyError`、`bool` 混入行で `True == 1` に
+        # より意図しない一致が起こりうる。不正な size を持つ行は比較対象
+        # から除外する＝一致しないものとして扱う。fail-closed）。
         matches = [
             r
             for r in rows
@@ -708,7 +734,8 @@ def _pick_row_for_gate(rows, fw, task, device, size):
             and r["task"] == task
             and r["device"] == device
             and r["mode"] == mode
-            and r["size"] == size
+            and _valid_gate_size(r.get("size"))
+            and r.get("size") == size
         ]
         if len(matches) > 1:
             return (
@@ -756,6 +783,13 @@ def _train_reuse_row_invalid_reason(rows, r):
     r_init = _safe_time_s(r.get("init_s"))
     if r_median is None or r_q1 is None or r_q3 is None or r_init is None:
         return "時間値が不正な値"
+    # `x.get("size")` を `_valid_gate_size` で検証してから比較する
+    # （Bugbot Medium 指摘・PR #1082 2 巡目: 直接 `x["size"]` を読むと
+    # `size` キー欠損行で `KeyError`、`bool` 混入行で `True == 1` に
+    # より意図しない一致が起こりうる。不正な size を持つ行は比較対象から
+    # 除外する＝一致しないものとして扱う。fail-closed。`r`（reuse 行）は
+    # `_pick_row_for_gate` 経由で既に有効な size を持つことが保証されて
+    # いるが、`r.get("size")` で取得し直接キーアクセスは避ける）。
     fresh_matches = [
         x
         for x in rows
@@ -763,7 +797,8 @@ def _train_reuse_row_invalid_reason(rows, r):
         and x["task"] == "train"
         and x["device"] == r["device"]
         and x["mode"] == "fresh"
-        and x["size"] == r.get("size")
+        and _valid_gate_size(x.get("size"))
+        and x.get("size") == r.get("size")
     ]
     if len(fresh_matches) > 1:
         return f"同一 size の fresh 行が {len(fresh_matches)} 件あり突合先が一意に決まらない"
@@ -1774,6 +1809,34 @@ def main():
         if not rows:
             lines.append(f"## 集計対象: {os.path.relpath(path, HERE)}\n")
             lines.append("（有効な行なし）\n")
+            if args.target:
+                # P0 修正（codex-review 指摘・PR #1082 2 巡目）: 空ファイルを
+                # 無条件に `continue` で読み飛ばすと、`--target` 指定時に
+                # 複数入力のうち 1 ファイルが空でも他ファイルが全達成なら
+                # `gate_records_all` が非空のまま空ファイル分の判定不能が
+                # 一切計上されず exit 0 になる fail-open があった
+                # （計測が丸ごと欠落したファイルを「対象外」と黙って扱う）。
+                # ファイル単位の判定不能レコードを 1 件積み、後段の
+                # `gate_achieved`/`gate_unmet`/`gate_undeterminable` 集計・
+                # exit code 判定へ確実に反映させる。
+                rel = os.path.relpath(path, HERE)
+                empty_record = {
+                    "task": "-",
+                    "device": "-",
+                    "size": None,
+                    "fandhe_mode": None,
+                    "target_mode": None,
+                    "fandhe_median": None,
+                    "target_median": None,
+                    "ratio": None,
+                    "status": "undeterminable",
+                    "reason": "入力ファイルに有効な行が無い",
+                    "note": None,
+                }
+                gate_section_lines_by_file.append(
+                    target_gate_section(rel, [empty_record], args.target)
+                )
+                gate_records_all.append(empty_record)
             continue
         (
             section_lines,
