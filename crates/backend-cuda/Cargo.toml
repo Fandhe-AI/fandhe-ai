@@ -133,6 +133,13 @@ name = "gemm_wmma_tf32_swizzle_bench"
 required-features = ["internal-diagnostics"]
 
 [[example]]
+# イシュー #1034: 本番既定 f32 経路（tiled f32・`TILED_F32`）への swizzle
+# 横展開の A/B ベンチ（`gemm_wmma_tf32_swizzle_bench` と同型）。`gemm.rs::
+# CudaGemm::new_with_tiled_f32_swizzle`（同 feature ゲート）を使う。
+name = "gemm_tiled_f32_swizzle_bench"
+required-features = ["internal-diagnostics"]
+
+[[example]]
 # イシュー #840: #804 が整備した f16 `mma.sync` ブロックタイル・ステージ数
 # 拡大候補（`diagnostics::mma_f16_source_with_block_tile`）を実際に NVRTC
 # コンパイル・起動して現行本番定数と実機 A/B 計測する（`gemm_wmma_tf32_

@@ -1148,6 +1148,81 @@ impl CudaGemm {
         Ok(gemm)
     }
 
+    /// `device` 上で、L2 再利用のためのタイル→SM 割り当てスウィズル
+    /// （イシュー #1034。TF32 opt-staged 経路の #741・f16 mma.sync 経路の
+    /// #499 と同一設計）を明示指定の `group_width` で **本番既定 f32 経路
+    /// （`TILED_F32`）** へ**強制適用**した変種を NVRTC コンパイルし保持
+    /// するハンドルを構築する（**診断用・明示幅指定の入口**。
+    /// [`new_with_tf32_staged_swizzle`](Self::new_with_tf32_staged_swizzle)
+    /// と同型の位置づけ）。
+    ///
+    /// **本番既定コンストラクタ（[`new`](Self::new)）への結線は本イシュー
+    /// のスコープ外**（実装計画 §2「本番結線を本ランで行わない判断」・
+    /// §7「スコープ外」(a)）。`new`・`run_tiled_f32`／`launch_tiled_f32`
+    /// は本コンストラクタが返す変種を経由しない限り一切影響を受けない。
+    /// ncu による L2 ヒット率実測・N=4096 改善値・サイズ条件付き適用への
+    /// ユーザー承認を DGX Spark 実機セッションで得てから、`swizzle.rs::
+    /// should_apply_swizzle` 相当のサイズ条件付き適用を `new` へ結線する
+    /// 判断へ進める（f16 経路の先例〈#740 差し戻し→#775/#782 実機ゲート
+    /// 後に `new` へ昇格〉と同じ安全側の順序）。
+    ///
+    /// 手順: [`new`](Self::new) で通常構築した後、`tiled_f32` スロット
+    /// のみを `kernels::tiled_f32_source_with_swizzle(group_width)` の
+    /// コンパイル結果へ差し替える。naive・tiled_f16・tiled_bias_act_f32・
+    /// WMMA 系の各スロットは [`new`](Self::new) の構築結果をそのまま
+    /// 保持し、swizzle 変種のコンパイル失敗の影響を受けない。
+    ///
+    /// `tiled_f32` は（`wmma_tf32_staged` と異なり）`Option` ではなく
+    /// 必須 `CudaFunction` フィールドのため、`wmma_tf32_staged_swizzle`
+    /// のような「動的変種を破棄する」後始末は不要（`new` はそもそも
+    /// `tiled_f32` へのサイズ条件付き動的変種を構築しない。上記「スコープ
+    /// 外」節参照）。
+    ///
+    /// **変種のコンパイル失敗は base へ黙ってフォールバックせず `Err` を
+    /// 返す**（`new_with_tf32_staged_swizzle` と同じ理由。A/B ベンチが
+    /// 気づかず base〈無 swizzle〉を計測してしまう A/A 誤認を防ぐ
+    /// fail-closed な安全側判断）。
+    ///
+    /// 返す [`CudaGemm`] は [`new`](Self::new) が返すものと同一の型・API
+    /// （`run_tiled_f32`／`launch_tiled_f32` 含む）を持つ。grid/block
+    /// 構成（`TILED_BLOCK_DIM`）・形状検証（`validate_gemm_dims`／
+    /// `validate_tiled_k_bound`）はブロックタイル定数（`kernels::TILE`）を
+    /// 変更しないため共有できる（swizzle はブロックがどの `(m_block,
+    /// n_block)` を担当するかの割り当てのみを変え、各出力要素の積和順序・
+    /// 手動境界チェックの要否は変えない。`kernels::
+    /// tiled_f32_source_with_swizzle` ドキュメンテーションコメント参照）。
+    ///
+    /// 任意ソースを受ける公開 API（`new_with_source` 型）は意図的に作らず
+    /// `group_width: u32` のみを受ける（`new_with_tf32_staged_swizzle` と
+    /// 同じ理由。`.claude/rules/security.md` A03 インジェクション対策）。
+    /// `group_width < 2` は `kernels::tiled_f32_source_with_swizzle` が
+    /// `CudaError::InvalidShape` で拒否する。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （`new_with_tf32_staged_swizzle` と同じ feature ゲート方針）。
+    /// `examples/gemm_tiled_f32_swizzle_bench.rs`（`Cargo.toml` の
+    /// `required-features` で同 feature を要求）・bit 一致テスト（本ファイル
+    /// 下部 `tiled_f32_swizzle_variant_matches_base_bit_exact_output`）専用の
+    /// 入口。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_with_tiled_f32_swizzle(
+        device: &CudaDevice,
+        group_width: u32,
+    ) -> Result<Self, CudaError> {
+        let mut gemm = Self::new(device)?;
+
+        let arch = device.arch();
+        let src = kernels::tiled_f32_source_with_swizzle(group_width)?;
+        let ptx = compile_ptx(&src, arch)?;
+        let tiled_f32 = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_tiled_f32")?;
+
+        gemm.tiled_f32 = tiled_f32;
+        Ok(gemm)
+    }
+
     /// `device` 上で、`wmma_tf32_staged` の SMEM パディング幅（`a_pad`/
     /// `b_pad`）のみを差し替えた変種を NVRTC コンパイルし保持するハンドルを
     /// 構築する（イシュー #743・`kernels_wmma_opt::
@@ -3515,6 +3590,168 @@ mod tests {
                     "shape (m={m}, n={n}, k={k}) group_width={group_width}: swizzle \
                      変種の出力が base と bit 一致しません（remap がブロック内部の \
                      計算・アキュムレート順序に影響していないか確認すること）"
+                );
+            }
+        }
+    }
+
+    /// イシュー #1034 受け入れ基準（実機検証）: [`CudaGemm::
+    /// new_with_tiled_f32_swizzle`] が生成する本番既定 f32 経路
+    /// （`TILED_F32`）の swizzle 変種が、`CudaGemm::new`（base）と
+    /// **ビット一致**の出力を返すことを確認する。
+    ///
+    /// swizzle はブロック割り当て（どの `(m_block, n_block)` をどの物理
+    /// ブロックが担当するか）のみを変え、各ブロック内部の積和順序・
+    /// アキュムレート方式は変えないため、`wmma_tf32_staged_swizzle_
+    /// variant_matches_base_bit_exact_output` と同じ論法で tolerance を
+    /// 使わない bit 等値で主張できる（同一バックエンド内の実装詳細比較の
+    /// ため `.claude/rules/coding-rust.md` の許容誤差緩和禁止契約の対象
+    /// 外）。**本番既定コンストラクタ `CudaGemm::new` は `tiled_f32` へ
+    /// サイズ条件付き動的変種を一切構築しない**（`new_with_tiled_f32_
+    /// swizzle` ドキュメンテーションコメント「本番結線は本イシューの
+    /// スコープ外」節）ため、`wmma_tf32_staged_swizzle_variant_matches_
+    /// base_bit_exact_output` と異なり base に専用の `new_without_*`
+    /// バリアントは不要（`CudaGemm::new` をそのまま base として使っても
+    /// A/A 誤認は生じない）。
+    ///
+    /// `group_width` は動的選択結果（`device.multiprocessor_count()`
+    /// 実測値ベース。`kernels::TILE` x `kernels::TILE` ブロックタイル）に
+    /// 加え、参考として固定候補 `8`/`16` も検査する。
+    ///
+    /// 形状（`kernels::TILE` = 32 を基準に `wmma_tf32_staged_swizzle_
+    /// variant_matches_base_bit_exact_output`〈ブロックタイル 64〉と同じ
+    /// ブロック数比になるよう縮尺した）:
+    /// - `(256, 256, 256)`: `num_m_blocks=8`。group_width=8 では
+    ///   `full_groups=1・remainder=0`（remainder 分岐は経由しない）、
+    ///   group_width=16 では `full_groups=0・remainder=8`（remainder
+    ///   分岐のみ経由）となり、両分岐を候補幅間でカバーする。
+    /// - `(80, 136, 160)`: タイル端形状（いずれの次元も `TILE`〈32〉の
+    ///   非整数倍。手動境界チェック分岐も併せて踏む）。
+    /// - `(544, 256, 2048)`: `num_m_blocks=17`。group_width∈{8,16} 双方で
+    ///   full_groups・remainder の両分岐を経由させる（`wmma_tf32_staged_
+    ///   swizzle_variant_matches_base_bit_exact_output` の `(1088, 256,
+    ///   2048)`〈`num_m_blocks=17`〉と同じブロック数比）。
+    ///
+    /// `#[ignore]`: 本セッションは NVRTC 非搭載のため実行できない。DGX
+    /// Spark GB10 等の実機で `cargo test -p fandhe-ai-backend-cuda --lib --release
+    /// --features internal-diagnostics -- --ignored --nocapture
+    /// tiled_f32_swizzle_variant_matches_base_bit_exact_output` から実行
+    /// する。`internal-diagnostics` feature（既定 off）でのみコンパイル
+    /// される（[`CudaGemm::new_with_tiled_f32_swizzle`] 自体が同 feature
+    /// でゲートされているため）。
+    #[cfg(feature = "internal-diagnostics")]
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+    fn tiled_f32_swizzle_variant_matches_base_bit_exact_output() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let base =
+            CudaGemm::new(&device).expect("base CudaGemm::new must succeed on ignored test runner");
+
+        let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
+        let dynamic_group_width =
+            crate::swizzle::select_swizzle_group_width(num_sms, kernels::TILE, kernels::TILE);
+
+        let shapes: [(u32, u32, u32); 3] = [(256, 256, 256), (80, 136, 160), (544, 256, 2048)];
+        let seed: u64 = 424_244;
+
+        for group_width in [dynamic_group_width, 8, 16] {
+            let variant = CudaGemm::new_with_tiled_f32_swizzle(&device, group_width)
+                .unwrap_or_else(|err| {
+                    panic!("group_width={group_width}: new_with_tiled_f32_swizzle failed: {err}")
+                });
+
+            for &(m, n, k) in &shapes {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+                let a: Vec<f32> = rng.fill_vec((m as usize) * (k as usize));
+                let b: Vec<f32> = rng.fill_vec((k as usize) * (n as usize));
+
+                let base_c = base.run_tiled_f32(&a, &b, m, n, k).unwrap_or_else(|err| {
+                    panic!("base run_tiled_f32 failed for shape (m={m}, n={n}, k={k}): {err}")
+                });
+                let variant_c = variant
+                    .run_tiled_f32(&a, &b, m, n, k)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "group_width={group_width} run_tiled_f32 failed for shape \
+                         (m={m}, n={n}, k={k}): {err}"
+                        )
+                    });
+
+                assert_eq!(
+                    variant_c, base_c,
+                    "shape (m={m}, n={n}, k={k}) group_width={group_width}: swizzle \
+                     変種の出力が base と bit 一致しません（remap がブロック内部の \
+                     計算・アキュムレート順序に影響していないか確認すること）"
+                );
+            }
+        }
+    }
+
+    /// イシュー #1034 受け入れ基準（実機検証）: [`CudaGemm::
+    /// new_with_tiled_f32_swizzle`] の swizzle 変種が CPU 参照実装
+    /// （[`fandhe_ai_backend_cpu::matmul_reference_fma`]）と統一複合判定
+    /// （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
+    /// `.claude/rules/coding-rust.md`）で一致することを確認する。
+    ///
+    /// `tiled_f32_swizzle_variant_matches_base_bit_exact_output` は変種と
+    /// base の**相互**一致のみを検査するため、base 自体が CPU 参照実装と
+    /// parity を保っているか（tolerance を用いた真の数値正当性）は別途
+    /// 検査する必要がある（`tests/gemm_tiled.rs::
+    /// assert_tiled_f32_matches_cpu_reference` が base 側で既に検査
+    /// 済みだが、swizzle 変種側も独立して同じ主張を成立させておく）。
+    ///
+    /// `#[ignore]`: 本セッションは NVRTC 非搭載のため実行できない。DGX
+    /// Spark GB10 等の実機で `cargo test -p fandhe-ai-backend-cuda --lib --release
+    /// --features internal-diagnostics -- --ignored --nocapture
+    /// tiled_f32_swizzle_variant_matches_cpu_reference` から実行する。
+    #[cfg(feature = "internal-diagnostics")]
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+    fn tiled_f32_swizzle_variant_matches_cpu_reference() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+
+        let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
+        let dynamic_group_width =
+            crate::swizzle::select_swizzle_group_width(num_sms, kernels::TILE, kernels::TILE);
+
+        let shapes: [(u32, u32, u32); 3] = [(256, 256, 256), (80, 136, 160), (544, 256, 2048)];
+        let seed: u64 = 424_245;
+
+        for group_width in [dynamic_group_width, 8, 16] {
+            let variant = CudaGemm::new_with_tiled_f32_swizzle(&device, group_width)
+                .unwrap_or_else(|err| {
+                    panic!("group_width={group_width}: new_with_tiled_f32_swizzle failed: {err}")
+                });
+
+            for &(m, n, k) in &shapes {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+                let a: Vec<f32> = rng.fill_vec((m as usize) * (k as usize));
+                let b: Vec<f32> = rng.fill_vec((k as usize) * (n as usize));
+
+                let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+                fandhe_ai_backend_cpu::matmul_reference_fma(
+                    &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+                )
+                .expect("matmul_reference_fma shape validation must pass for test input");
+
+                let c_gpu = variant
+                    .run_tiled_f32(&a, &b, m, n, k)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "group_width={group_width} run_tiled_f32 failed for shape \
+                         (m={m}, n={n}, k={k}): {err}"
+                        )
+                    });
+
+                fandhe_ai_backend_cpu::assert_parity(
+                    &format!(
+                        "tiled f32 swizzle (group_width={group_width}) CPU/GPU parity \
+                         (shape m={m} n={n} k={k})"
+                    ),
+                    &c_gpu,
+                    &c_ref,
                 );
             }
         }
