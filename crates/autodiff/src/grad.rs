@@ -204,7 +204,10 @@ pub(crate) fn vjp(
 
             // d_weight = x^T @ g（既存 `matmul_vjp` の `dB` と同一式。
             // `x`・`g` はいずれもホスト常駐のため通常の `eval::matmul` で
-            // 計算できる）。
+            // 計算できる）。イシュー #1046: `x_t` は `transpose2d` の
+            // zero-copy view であり、`eval::matmul` 側が
+            // `layout::classify_2d` で分類して直接読み出すためホスト側
+            // 転置コピーは発生しない（`eval::MATMUL_HOST_REPACK_COUNT`）。
             let x_t = transpose2d(x_val);
             let d_weight = eval::matmul(&x_t, upstream);
 
@@ -252,6 +255,13 @@ fn transpose2d(tensor: &Tensor<f32>) -> Tensor<f32> {
 /// `MatMul(A, B)` の VJP: `dA = g @ Bᵀ`、`dB = Aᵀ @ g`
 /// （`A: [m,k]`・`B: [k,n]`・`g: [m,n]`）。`eval::matmul` を再利用する
 /// ため FMA 契約（`f32::mul_add`）は forward と自動的に統一される。
+///
+/// イシュー #1046: `transpose2d`（下記。`Tensor::transpose` の zero-copy
+/// stride view）で作った転置オペランドは、`eval::matmul` 側
+/// （`eval::matmul_operand`・`crate::layout::classify_2d`）が
+/// `ld`／`transposed` フラグの添字式で直接読み出すため、本関数を含む
+/// このホスト参照経路にホスト側転置コピー（`contiguous()` の repack）
+/// は発生しない（`eval::MATMUL_HOST_REPACK_COUNT` で機械検証）。
 fn matmul_vjp(a: &Tensor<f32>, b: &Tensor<f32>, g: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
     let b_t = transpose2d(b);
     let a_t = transpose2d(a);
@@ -677,6 +687,30 @@ mod tests {
 
         assert_grad_close("matmul dA", &da, &num_da);
         assert_grad_close("matmul dB", &db, &num_db);
+    }
+
+    /// イシュー #1046 受け入れ条件 (a) の機械検証: `matmul_vjp` は
+    /// `transpose2d`（zero-copy view）で作った転置オペランドを
+    /// `eval::matmul` へ渡すが、`eval::matmul_operand` が
+    /// `layout::classify_2d` で分類して直接読み出すため、ホスト側
+    /// 転置コピー（`eval::MATMUL_HOST_REPACK_COUNT`）が発生しない
+    /// ことを確認する。
+    #[test]
+    fn matmul_vjp_does_not_repack_transposed_operands() {
+        let a = t(&[1.0, 2.0, -1.0, 0.5, 3.0, -2.0], &[2, 3]);
+        let b = t(&[0.5, -1.0, 2.0, 1.0, -0.5, 1.5], &[3, 2]);
+        let g = t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]);
+
+        let before = eval::MATMUL_HOST_REPACK_COUNT.with(|c| c.get());
+        let _ = matmul_vjp(&a, &b, &g);
+        let after = eval::MATMUL_HOST_REPACK_COUNT.with(|c| c.get());
+
+        assert_eq!(
+            before, after,
+            "matmul_vjp: 転置オペランド（transpose2d の zero-copy view）が \
+             eval::matmul でホスト側転置コピーへフォールバックした \
+             （MATMUL_HOST_REPACK_COUNT が増加した）"
+        );
     }
 
     // --- Add（同 shape・bias broadcast・スカラー broadcast） ---
