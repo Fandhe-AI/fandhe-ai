@@ -59,6 +59,23 @@
 //!   実行してはならない**。実機実行の全体順序（既存実機テストの非後退
 //!   確認を含む）は `docs/backend-cuda-async-execution-design.md` §12c
 //!   を正とする。
+//!
+//! 上記の運用契約はコメントだけでは強制されない（`cargo test -p
+//! fandhe-ai-backend-cuda --lib -- --ignored` のようにテスト名フィルタ
+//! なしでフィルタなしで起動すると、同一プロセス・マルチスレッドで T-R1・
+//! T-R2 が並行または意図しない順序で実行されうる。review 指摘）ため、
+//! 各テストの冒頭で opt-in 環境変数を fail-closed に検査する
+//! （未設定なら即 return して何もしない。テストは実行されたが何も
+//! 検証しなかった扱いになる＝安全側）。
+//!
+//! - `FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1`: T-R1・T-R2 共通の
+//!   基本 opt-in（実機・単独プロセス起動であることの明示的同意）。
+//! - `FANDHE_AI_CUDA_POISON_RECOVERY_ALLOW_UNRECOVERABLE=1`: T-R2 のみが
+//!   追加で要求する opt-in（本番グローバルレジストリの ordinal 0 を
+//!   恒久 poison させ、以降そのプロセスでは CUDA を一切使えなくする
+//!   ことへの明示的同意）。この 2 段構えにより、基本 opt-in のみを
+//!   設定してテスト名フィルタなしで実行した場合でも T-R2 は自動では
+//!   走らない。
 
 use std::sync::Arc;
 
@@ -79,6 +96,34 @@ use crate::memory::CudaMemory;
 use crate::nvrtc::compile_ptx;
 use crate::ops::CudaBackendOps;
 use crate::sgd::{CudaSgd, SgdKernelParams};
+
+/// 本ファイルの実機テスト共通の基本 opt-in 環境変数（モジュール冒頭
+/// コメント「運用契約」参照）。フィルタなしの `--ignored` 一括実行で
+/// 意図せず本番グローバルレジストリを変異させないための fail-closed
+/// ガード（未設定なら早期 return）。
+const OPT_IN_ENV: &str = "FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE";
+
+/// [`poison_from_real_cuda_error_fails_closed_to_unrecoverable`]（T-R2）
+/// のみが追加で要求する opt-in（恒久 poison への明示的同意）。
+const OPT_IN_UNRECOVERABLE_ENV: &str = "FANDHE_AI_CUDA_POISON_RECOVERY_ALLOW_UNRECOVERABLE";
+
+/// `env_var` が `"1"` に設定されているかを検査し、未設定・不一致なら
+/// `test_name` を添えて標準エラーへ理由を出力したうえで `false` を返す
+/// （呼び出し側はこれを受けて即 `return` する。何も検証せず正常終了する
+/// ため、`--ignored` の一括実行に対して安全側＝fail-closed に倒れる）。
+fn require_opt_in(env_var: &str, test_name: &str) -> bool {
+    match std::env::var(env_var) {
+        Ok(v) if v == "1" => true,
+        _ => {
+            eprintln!(
+                "skipping {test_name}: set {env_var}=1 to opt in (単独プロセス・単独 \
+                 テスト名フィルタでの実行を前提とする運用契約。モジュール冒頭コメント \
+                 「運用契約」参照)"
+            );
+            false
+        }
+    }
+}
 
 /// テストローカルの NVRTC カーネル 1（実処理プローブ・「不正サイズの
 /// launch」テスト共用）。`idx == 0` のスレッドだけが `out[0]` へ決定的な
@@ -111,8 +156,8 @@ extern "C" __global__ void poison_recovery_probe_write_f32(float* __restrict__ o
 /// ための破壊的プローブとして使う。
 const ILLEGAL_WRITE_SRC: &str = r#"
 extern "C" __global__ void poison_recovery_illegal_write_f32(float* __restrict__ out) {
-    // `out` は 1 要素分しか確保されていない。2^34 要素（約 64Gi 要素・
-    // 256GiB 相当のオフセット）先はどの実機構成でも確保範囲外であり、
+    // `out` は 1 要素分しか確保されていない。2^34 要素（16Gi 要素・f32 換算
+    // 64GiB 相当のオフセット）先はどの実機構成でも確保範囲外であり、
     // CUDA_ERROR_ILLEGAL_ADDRESS を引き起こす。
     float* bad = out + (1ULL << 34);
     *bad = 1.0f;
@@ -131,6 +176,13 @@ extern "C" __global__ void poison_recovery_illegal_write_f32(float* __restrict__
             ordinal 0 を変異させるため単独プロセスで実行すること（モジュール \
             冒頭コメント「運用契約」参照）"]
 fn poison_recovery_real_probe_restores_active_and_rejects_stale_generation() {
+    if !require_opt_in(
+        OPT_IN_ENV,
+        "poison_recovery_real_probe_restores_active_and_rejects_stale_generation",
+    ) {
+        return;
+    }
+
     let ordinal = 0usize;
     let device =
         CudaDevice::new(ordinal).expect("CUDA device 0 must be available on ignored test runner");
@@ -313,6 +365,16 @@ fn poison_recovery_real_probe_restores_active_and_rejects_stale_generation() {
             かつ他の実機テストより後に実行すること（モジュール冒頭コメント \
             「運用契約」参照）"]
 fn poison_from_real_cuda_error_fails_closed_to_unrecoverable() {
+    if !require_opt_in(
+        OPT_IN_ENV,
+        "poison_from_real_cuda_error_fails_closed_to_unrecoverable",
+    ) || !require_opt_in(
+        OPT_IN_UNRECOVERABLE_ENV,
+        "poison_from_real_cuda_error_fails_closed_to_unrecoverable",
+    ) {
+        return;
+    }
+
     let ordinal = 0usize;
     let device =
         CudaDevice::new(ordinal).expect("CUDA device 0 must be available on ignored test runner");
@@ -381,6 +443,14 @@ fn poison_from_real_cuda_error_fails_closed_to_unrecoverable() {
         );
         // token はブロック末尾で drop される。
     }
+    // 本 assertion は「block 次元超過は CUDA_ERROR_INVALID_VALUE を返し
+    // classify_cuda_result の operation-local 固定リストに含まれる」
+    // （`context_cache.rs` の分類実装で確認済み）という前提に立った固定
+    // 検査である。実 CUresult 自体は driver バージョン依存で理論上は
+    // 未列挙コード（sticky 側デフォルト）が返る可能性が残るため、実機
+    // 実測で本前提と食い違いが生じた場合は
+    // `docs/backend-cuda-async-execution-design.md` §12c へ記録する
+    // （review 指摘）。
     assert!(
         !is_poisoned(ordinal),
         "operation-local な起動エラー（classify_cuda_result の分類）は \
