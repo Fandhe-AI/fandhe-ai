@@ -153,6 +153,28 @@ impl Tape {
         self.0.backward(loss)
     }
 
+    /// ノード列を葉プレフィックスまで切り詰め、次のステップで同一
+    /// `Tape` を再利用可能にする（イシュー #1048。
+    /// `fandhe_ai_autodiff::Tape::reset` への委譲。同メソッドの doc
+    /// 「学習ループでの運用」参照）。学習ループ・reuse GEMM が step
+    /// ごとに新しい `Tape` を生成・破棄する運用の代替となる。
+    pub fn reset(&mut self) {
+        self.0.reset();
+    }
+
+    /// [`Tape::reset`] 後も保持される葉の個数（`fandhe_ai_autodiff::
+    /// Tape::leaf_count` への委譲）。
+    pub fn leaf_count(&self) -> usize {
+        self.0.leaf_count()
+    }
+
+    /// 保持される葉 `index` 番目（登録順）の `Var` を再取得する
+    /// （`fandhe_ai_autodiff::Tape::leaf` への委譲。範囲外・非 `Var`
+    /// 表現の葉は `None`）。
+    pub fn leaf(&self, index: usize) -> Option<Var<'_>> {
+        self.0.leaf(index)
+    }
+
     /// [`DeviceParamStore::step`] への委譲入口（イシュー #935）。
     ///
     /// `DeviceParamStore` の状態機械メソッドは `fandhe_ai_autodiff::Tape`

@@ -12,11 +12,14 @@
 //! `backward()`/`accumulate()`）を f32・`vjp()` ディスパッチ経由の形へ
 //! productize したもの。
 //!
-//! **学習ループでの運用**: `Tape` はステップごとに使い捨てる運用を
-//! 前提とする（`tape.rs` モジュールコメント「学習ループでの運用」・
-//! `docs/public-api-design.md` §3.1.1）。`backward()` はテープへノードを
-//! 追加しないため、`nodes` の不変借用 1 回で走査を完結できる
-//! （`RefCell` の二重可変借用 panic の余地を作らない）。
+//! **学習ループでの運用**: `Tape` はステップごとに使い捨てる運用、または
+//! `Tape::reset()`（#1048）で葉プレフィックスまで切り詰めて再利用する
+//! 運用のいずれにも対応する（`tape.rs` モジュールコメント「学習ループ
+//! での運用」・`docs/public-api-design.md` §3.1.1）。`backward()` はテープへ
+//! ノードを追加しないため、`nodes` の不変借用 1 回で走査を完結できる
+//! （`RefCell` の二重可変借用 panic の余地を作らない）。`reset()` を挟んだ
+//! 後の `Gradients` は世代番号（`Gradients::epoch`）により無効化される
+//! （`Gradients::get` 参照）。
 
 use fandhe_ai_tensor_core::Tensor;
 
@@ -36,18 +39,31 @@ use crate::var::Var;
 #[derive(Debug)]
 pub struct Gradients {
     tape_id: TapeId,
+    /// `backward_impl` 実行時点の `Tape::epoch()`（#1048）。`Gradients` は
+    /// `Tape` を借用しない値のため、`Tape::reset()` をまたいで生存しうる
+    /// （`Var<'t>`/`ResidentLeaf<'t>` と異なり借用検査による静的排除が
+    /// 効かない）。`get()` がこの値と `var.tape_epoch()` を突き合わせ、
+    /// reset 後（別 step）の `Var` に対する古い勾配の誤参照を fail-closed
+    /// に拒否する（`tape::Tape::epoch` doc 参照）。
+    epoch: u64,
     grads: Vec<Option<Tensor<f32>>>,
 }
 
 impl Gradients {
-    /// `var` に対応する勾配を取得する。`var` が別 `Tape` に属する場合は
-    /// `Err(TapeMismatch)`（`Var::matmul` 等のクロステープ検査
-    /// 〈`var.rs`〉と同じ契約）。backward 実行後に同一テープへ追加された
-    /// `Var`（`node_id()` が `grads.len()` 以上）や、loss から到達しない
-    /// `Var` は `Ok(None)`（境界外アクセスで panic しない。
-    /// `.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+    /// `var` に対応する勾配を取得する。`var` が別 `Tape` に属する場合、
+    /// または `var` が属する `Tape` が本 `Gradients` 計算後に `reset()`
+    /// された場合（#1048。同一 `TapeId` のまま世代だけ進んだ場合を含む）
+    /// は `Err(TapeMismatch)`（`Var::matmul` 等のクロステープ検査
+    /// 〈`var.rs`〉と同じ契約を世代不一致にも拡張）。backward 実行後に
+    /// 同一世代内で追加された `Var`（`node_id()` が `grads.len()` 以上）
+    /// や、loss から到達しない `Var` は `Ok(None)`（境界外アクセスで
+    /// panic しない。`.claude/rules/coding-rust.md` 本番経路 panic
+    /// 禁止方針）。
     pub fn get(&self, var: &Var<'_>) -> Result<Option<&Tensor<f32>>, AutodiffError> {
         if var.tape_id() != self.tape_id {
+            return Err(AutodiffError::TapeMismatch);
+        }
+        if var.tape_epoch() != self.epoch {
             return Err(AutodiffError::TapeMismatch);
         }
         Ok(self.grads.get(var.node_id().0).and_then(|g| g.as_ref()))
@@ -176,6 +192,7 @@ impl Tape {
 
         Ok(Gradients {
             tape_id: self.id,
+            epoch: self.epoch(),
             grads,
         })
     }
