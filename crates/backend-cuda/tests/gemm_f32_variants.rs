@@ -18,8 +18,144 @@
 //! `cargo test -p fandhe-ai-backend-cuda --features internal-diagnostics \
 //! -- --ignored` により実施する。
 
-use fandhe_ai_backend_cuda::gemm_variant_selection::CudaGemmF32VariantSelection;
+use fandhe_ai_backend_cuda::gemm_variant_selection::{
+    CudaGemmF32VariantSelection, GemmVariantKind,
+};
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError};
+
+/// `gemm_variant.rs::VARIANT_TILE` の複製（本ファイル側の期待変種計算
+/// 専用）。値そのものの単一の真実源は `kernels::TILE`／`gemm_variant.rs::
+/// VARIANT_TILE` であり、本定数はテスト側の複製であることを明記する
+/// （`gemm_variant.rs::VARIANT_TILE` 自体のコメントと同じ方針。値変更時は
+/// 3 箇所を同時に見直す必要がある）。
+const EXPECT_TILE: u32 = 32;
+
+/// `gemm_variant::num_blocks`（非公開）と同じ計算をテスト側で複製する
+/// （`grid` が生成するスレッドブロック総数。オーバーフロー安全のため
+/// `u64` 昇算）。イシュー #1035 PR #1073 レビュー指摘: これまでのテストは
+/// `selected_variant` の戻り値を実行結果のラベル付けにしか使っておらず、
+/// DoubleBuffer／SplitK 候補が実際に選ばれたかどうかを一切検証していな
+/// かった（NVRTC コンパイル失敗による fail-soft フォールバックで Simple
+/// へ静かに落ちても成功してしまう）。本関数はそのギャップを埋めるための
+/// 期待値計算に使う。
+fn expected_blocks(m: u32, n: u32) -> u64 {
+    let tiles_m = u64::from(m).div_ceil(u64::from(EXPECT_TILE));
+    let tiles_n = u64::from(n).div_ceil(u64::from(EXPECT_TILE));
+    tiles_m * tiles_n
+}
+
+/// 各テスト形状が「どのヒューリスティック分岐を狙って設計されたか」を表す
+/// 分類（`run_f32_matches_cpu_reference_across_variant_shapes` のケース表と
+/// 対応）。
+#[derive(Debug, Clone, Copy)]
+enum ExpectedCategory {
+    /// 非整列・小 K・境界形状。`num_sms`（実機 SM 数）に依存せず常に
+    /// Simple が選ばれるはずの形状（アラインメント不成立または
+    /// `k < DOUBLE_BUFFER_MIN_K` かつ `k < SPLITK_MIN_K` により、
+    /// DoubleBuffer／SplitK いずれの分岐にも入り得ない）。
+    AlwaysSimple,
+    /// アラインメント済み・K 十分・grid が現実的などの GPU の SM 数も
+    /// 大きく上回る大形状。`blocks < num_sms`（SplitK の必要条件）には
+    /// 該当し得ないため、DoubleBuffer が利用可能なら必ず DoubleBuffer、
+    /// 不可（NVRTC コンパイル失敗）なら Simple へ fail-soft する。
+    DoubleBufferIfAvailable,
+    /// K 支配的非正方（grid が SM 数を埋めきれない可能性がある形状）。
+    /// `blocks` と実機 SM 数の大小関係はハードウェア依存のため、期待値は
+    /// 実行時に `selection.num_sms()`（公開 API）を使って動的に算出する。
+    KDominant,
+}
+
+/// [`assert_matches_heuristic`] の戻り値。集計側（呼び出しループ）が
+/// 「DoubleBuffer／SplitK が可用時に実際に一度でも選ばれたか」を追跡する
+/// ために使う（可用なのに全ケースで Simple へ落ちていれば、テスト形状の
+/// 設計不足かヒューリスティックの回帰を示す）。
+#[derive(Debug, Clone, Copy, Default)]
+struct VariantExercised {
+    double_buffer: bool,
+    split_k: bool,
+}
+
+/// `category` と実機の可用性・SM 数から、`selected_variant` が返すべき
+/// 値をヒューリスティックの判定順序どおりに検証する（`gemm_variant.rs::
+/// select_f32_gemm_variant` の判定順序 §1〜3 と同じ順序をテスト側で最小限
+/// 複製する。`gemm_variant` モジュールは非公開のため対象関数を直接呼べず、
+/// 独立した経路で期待値を導出することでテストの意義を保つ）。
+#[allow(clippy::too_many_arguments)]
+fn assert_matches_heuristic(
+    label: &str,
+    category: ExpectedCategory,
+    m: u32,
+    n: u32,
+    k: u32,
+    num_sms: Option<u32>,
+    double_buffer_available: bool,
+    split_k_available: bool,
+    actual: GemmVariantKind,
+) -> VariantExercised {
+    let mut exercised = VariantExercised::default();
+    match category {
+        ExpectedCategory::AlwaysSimple => {
+            assert_eq!(
+                actual,
+                GemmVariantKind::Simple,
+                "{label}: 非整列・小 K・境界形状はハードウェアに関わらず常に \
+                 Simple を選ぶはずだが actual={actual:?} だった"
+            );
+        }
+        ExpectedCategory::DoubleBufferIfAvailable => {
+            let expected = if double_buffer_available {
+                GemmVariantKind::DoubleBuffer
+            } else {
+                GemmVariantKind::Simple
+            };
+            assert_eq!(
+                actual, expected,
+                "{label}: blocks が現実的などの SM 数も上回る大形状は \
+                 SplitK の対象になり得ないため、double_buffer_available=\
+                 {double_buffer_available} のとき actual={expected:?} を \
+                 期待したが actual={actual:?} だった（fail-soft \
+                 フォールバックが本来のカーネルを覆い隠していないか確認する）"
+            );
+            exercised.double_buffer = matches!(actual, GemmVariantKind::DoubleBuffer);
+        }
+        ExpectedCategory::KDominant => {
+            let blocks = expected_blocks(m, n);
+            let aligned = m.is_multiple_of(EXPECT_TILE)
+                && n.is_multiple_of(EXPECT_TILE)
+                && k.is_multiple_of(EXPECT_TILE);
+            let split_k_condition =
+                split_k_available && num_sms.is_some_and(|sms| blocks < u64::from(sms));
+            if split_k_condition {
+                assert!(
+                    matches!(actual, GemmVariantKind::SplitK { .. }),
+                    "{label}: blocks({blocks}) < num_sms({num_sms:?}) かつ \
+                     split_k_available=true のため SplitK を期待したが \
+                     actual={actual:?} だった（fail-soft フォールバックが \
+                     静かに Simple へ落ちていないか確認する）"
+                );
+                exercised.split_k = true;
+            } else if aligned && double_buffer_available {
+                assert_eq!(
+                    actual,
+                    GemmVariantKind::DoubleBuffer,
+                    "{label}: SplitK 対象外（blocks={blocks}, num_sms=\
+                     {num_sms:?}）だがアラインメント済みかつ \
+                     double_buffer_available=true のため DoubleBuffer を \
+                     期待したが actual={actual:?} だった"
+                );
+                exercised.double_buffer = true;
+            } else {
+                assert_eq!(
+                    actual,
+                    GemmVariantKind::Simple,
+                    "{label}: SplitK・DoubleBuffer いずれも対象外/不可のため \
+                     Simple を期待したが actual={actual:?} だった"
+                );
+            }
+        }
+    }
+    exercised
+}
 
 /// 決定的シードで A・B（f32）を生成する（`tests/gemm_tiled.rs` と同じ
 /// 生成方法）。
@@ -101,21 +237,59 @@ fn run_f32_matches_cpu_reference_across_variant_shapes() {
     let selection =
         CudaGemmF32VariantSelection::new(&device).expect("variant selection handle must build");
 
-    // (m, n, k, seed): DoubleBuffer 想定（大アラインメント形状）・
+    // (m, n, k, seed, category): DoubleBuffer 想定（大アラインメント形状）・
     // SplitK 想定（K 支配的非正方）・Simple 想定（非整列・小 K）・境界
     // （33/65/1000 等の非整列サイズ・m=n=128,k=8192 の K 支配形状）。
-    let cases: &[(u32, u32, u32, u64)] = &[
-        (4096, 4096, 4096, 1),
-        (2048, 2048, 2048, 2),
-        (128, 128, 8192, 3),
-        (256, 256, 16384, 4),
-        (1000, 1000, 1000, 5),
-        (33, 65, 97, 6),
-        (1, 1, 1, 7),
+    // category は `assert_matches_heuristic` が実際の選択を検証するために
+    // 使う（イシュー #1035 PR #1073 レビュー指摘対応: これまでは
+    // `selected_variant` の戻り値をログラベルにしか使わず、DoubleBuffer／
+    // SplitK が実際に選ばれたかを検証していなかった）。
+    let cases: &[(u32, u32, u32, u64, ExpectedCategory)] = &[
+        (
+            4096,
+            4096,
+            4096,
+            1,
+            ExpectedCategory::DoubleBufferIfAvailable,
+        ),
+        (
+            2048,
+            2048,
+            2048,
+            2,
+            ExpectedCategory::DoubleBufferIfAvailable,
+        ),
+        (128, 128, 8192, 3, ExpectedCategory::KDominant),
+        (256, 256, 16384, 4, ExpectedCategory::KDominant),
+        (1000, 1000, 1000, 5, ExpectedCategory::AlwaysSimple),
+        (33, 65, 97, 6, ExpectedCategory::AlwaysSimple),
+        (1, 1, 1, 7, ExpectedCategory::AlwaysSimple),
     ];
 
-    for &(m, n, k, seed) in cases {
+    let num_sms = selection.num_sms();
+    let double_buffer_available = selection.double_buffer_available();
+    let split_k_available = selection.split_k_available();
+    let mut exercised = VariantExercised::default();
+
+    for &(m, n, k, seed, category) in cases {
         let (a, b) = gen_ab(seed, m as usize, n as usize, k as usize);
+
+        let variant = selection.selected_variant(m, n, k);
+        let label = format!("gemm_f32_variants m={m} n={n} k={k} variant={variant:?}");
+
+        let result = assert_matches_heuristic(
+            &label,
+            category,
+            m,
+            n,
+            k,
+            num_sms,
+            double_buffer_available,
+            split_k_available,
+            variant,
+        );
+        exercised.double_buffer |= result.double_buffer;
+        exercised.split_k |= result.split_k;
 
         let actual = selection
             .run_f32(&a, &b, m, n, k)
@@ -132,13 +306,41 @@ fn run_f32_matches_cpu_reference_across_variant_shapes() {
         )
         .unwrap_or_else(|e| panic!("CPU reference failed for m={m} n={n} k={k}: {e:?}"));
 
-        fandhe_ai_backend_cpu::assert_parity(
-            &format!(
-                "gemm_f32_variants m={m} n={n} k={k} variant={:?}",
-                selection.selected_variant(m, n, k)
-            ),
-            &actual,
-            &expected,
+        fandhe_ai_backend_cpu::assert_parity(&label, &actual, &expected);
+    }
+
+    // fail-soft フォールバック（NVRTC コンパイル失敗）自体は許容するが、
+    // 「コンパイルには成功しているのに、テスト形状のどれも実際にその
+    // カーネルを選ばなかった」場合は検証漏れなので失敗させる（イシュー
+    // #1035 PR #1073 レビュー指摘のコア: 候補カーネルが実際に選択される
+    // ことを最低 1 回は確認する）。
+    if double_buffer_available {
+        assert!(
+            exercised.double_buffer,
+            "double_buffer_available()=true だが、いずれの形状も実際には \
+             DoubleBuffer を選ばなかった（テスト形状が不十分かヒューリス \
+             ティックが回帰している）"
+        );
+    } else {
+        eprintln!(
+            "DoubleBuffer カーネル不可用（fail-soft フォールバックが有効）: \
+             {:?}",
+            selection.double_buffer_error()
+        );
+    }
+    if split_k_available {
+        assert!(
+            exercised.split_k,
+            "split_k_available()=true だが、いずれの形状も実際には SplitK \
+             を選ばなかった（テスト形状が不十分かヒューリスティックが \
+             回帰している）"
+        );
+    } else {
+        eprintln!(
+            "SplitK カーネル不可用（fail-soft フォールバックが有効）: \
+             partial={:?} reduce={:?}",
+            selection.split_k_partial_error(),
+            selection.split_k_reduce_error()
         );
     }
 }
@@ -156,10 +358,56 @@ fn split_k_execution_is_bit_deterministic_across_repeated_runs() {
     // K 支配的非正方形状（SplitK 選択を狙う。`gemm_variant.rs` の
     // ヒューリスティックが実際に SplitK を選ぶかは実機の SM 数実測に
     // 依存するため、選ばれなかった場合（Simple/DoubleBuffer）でも決定性
-    // 自体は成立するはずであり、テストの主張は「選択された変種が何であれ
-    // 2 回の実行が bit 一致する」こととする。
+    // 自体は成立するはずであり、決定性の主張自体は「選択された変種が
+    // 何であれ 2 回の実行が bit 一致する」こととする。
+    //
+    // ただし本テストの名前・ドキュメンテーションコメントが謳う
+    // 「SplitK 経路の決定性」を実際に検証したかどうかは別に可視化する
+    // （イシュー #1035 PR #1073 レビュー指摘: fail-soft フォールバックで
+    // Simple へ静かに落ちても success してしまい、SplitK が一度も
+    // 実行されないまま「SplitK の決定性を確認した」ように見えてしまう
+    // 懸念への対処）。`run_f32_matches_cpu_reference_across_variant_shapes`
+    // と同じ `assert_matches_heuristic` で実際の選択を検証しつつ、
+    // 可用なのに選ばれなかった場合は失敗させ、不可用（NVRTC コンパイル
+    // 失敗）の場合はその理由を出力して可視化する。
     let (m, n, k) = (128u32, 128u32, 8192u32);
     let (a, b) = gen_ab(42, m as usize, n as usize, k as usize);
+
+    let num_sms = selection.num_sms();
+    let double_buffer_available = selection.double_buffer_available();
+    let split_k_available = selection.split_k_available();
+    let variant = selection.selected_variant(m, n, k);
+    let label = format!("split_k_execution_is_bit_deterministic variant={variant:?}");
+
+    let exercised = assert_matches_heuristic(
+        &label,
+        ExpectedCategory::KDominant,
+        m,
+        n,
+        k,
+        num_sms,
+        double_buffer_available,
+        split_k_available,
+        variant,
+    );
+    if split_k_available {
+        assert!(
+            exercised.split_k,
+            "split_k_available()=true だが m={m} n={n} k={k} は SplitK を \
+             選ばなかった（本テストの主張〈SplitK 経路の決定性〉が \
+             実際には検証されていない。形状の SM 数前提〈num_sms=\
+             {num_sms:?}〉がヒューリスティックの想定と合っているか確認 \
+             する）"
+        );
+    } else {
+        eprintln!(
+            "SplitK カーネル不可用（fail-soft フォールバックが有効。本テスト \
+             は SplitK の決定性を検証できていない）: partial={:?} \
+             reduce={:?}",
+            selection.split_k_partial_error(),
+            selection.split_k_reduce_error()
+        );
+    }
 
     let first = selection
         .run_f32(&a, &b, m, n, k)
@@ -169,9 +417,7 @@ fn split_k_execution_is_bit_deterministic_across_repeated_runs() {
         .expect("second run_f32 must succeed");
 
     assert_eq!(
-        first,
-        second,
-        "selected variant={:?} must produce bit-identical output across repeated runs",
-        selection.selected_variant(m, n, k)
+        first, second,
+        "selected variant={variant:?} must produce bit-identical output across repeated runs"
     );
 }

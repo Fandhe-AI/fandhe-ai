@@ -39,7 +39,17 @@ use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::{CudaGemm, validate_gemm_dims, validate_tiled_k_bound};
-use crate::gemm_variant::{self, GemmVariantKind};
+use crate::gemm_variant;
+// `GemmVariantKind` を本モジュール経由で外部（`internal-diagnostics`
+// feature 限定の `tests/gemm_f32_variants.rs`・`examples/gemm_f32_variant_
+// bench.rs`）へ再公開する。`gemm_variant` モジュール自体は非公開
+// （`lib.rs` の `mod gemm_variant;`）のため、これが無いと呼び出し側は
+// `selected_variant` の戻り値を変数へ束縛して `Debug` 出力する以外の方法
+// （`match`／`assert_eq!` で具体的な variant を検証する等）で扱えない
+// （イシュー #1035 PR #1073 レビュー指摘: テストが実際に選ばれた variant
+// を検証できず、fail-soft フォールバックが Simple へ静かに落ちても
+// 気づけない問題への対処）。
+pub use crate::gemm_variant::GemmVariantKind;
 use crate::kernels_gemm_variants::{
     SPLITK_PARTIAL_F32, SPLITK_REDUCE_BLOCK_DIM, SPLITK_REDUCE_F32, TILED_DB_F32, TILED_DB_TILE,
 };
