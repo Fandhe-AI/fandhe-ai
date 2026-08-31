@@ -1,0 +1,145 @@
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:651:48
+    |
+651 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:664:8
+    |
+653 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+664 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:57:10
+   |
+57 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:75:11
+   |
+75 | pub const SPLITK_MIN_K: u32 = 1024;
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:79:11
+   |
+79 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+   |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:84:11
+   |
+84 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+   |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:90:11
+   |
+90 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:94:11
+   |
+94 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:101:7
+    |
+101 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:107:4
+    |
+107 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:119:4
+    |
+119 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:139:4
+    |
+139 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:178:8
+    |
+178 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:232:8
+    |
+232 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:219:8
+    |
+219 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 21 warnings
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running `target/release/examples/gemm_diagnosis --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200`
+size=512 phase=start epoch_ms=1788130079338
+size=512 phase=result epoch_ms=1788130079535 tile=32x32x16(2x2, staged=true) actual_groups=256 ideal_groups=240 barriers_per_tg=64 arithmetic_intensity=7.7576 wall_ms=0.4265 wall_q1_ms=0.3950 wall_q3_ms=0.5049 tflops_lower_bound=0.6295 logical_load_gbs_lower_bound=81.1403
+size=1024 phase=start epoch_ms=1788130079535
+size=1024 phase=result epoch_ms=1788130080074 tile=32x32x16(2x2, staged=true) actual_groups=1024 ideal_groups=240 barriers_per_tg=128 arithmetic_intensity=7.8769 wall_ms=1.2148 wall_q1_ms=1.1790 wall_q3_ms=1.2710 tflops_lower_bound=1.7677 logical_load_gbs_lower_bound=224.4175
+size=2048 phase=start epoch_ms=1788130080074
+size=2048 phase=result epoch_ms=1788130082310 tile=32x32x16(2x2, staged=true) actual_groups=4096 ideal_groups=240 barriers_per_tg=256 arithmetic_intensity=7.9380 wall_ms=5.4939 wall_q1_ms=5.4188 wall_q3_ms=5.5905 tflops_lower_bound=3.1271 logical_load_gbs_lower_bound=393.9407
+size=4096 phase=start epoch_ms=1788130082310
+size=4096 phase=result epoch_ms=1788130095012 tile=32x32x16(2x2, staged=true) actual_groups=16384 ideal_groups=240 barriers_per_tg=512 arithmetic_intensity=7.9689 wall_ms=31.6801 wall_q1_ms=31.3015 wall_q3_ms=32.0760 tflops_lower_bound=4.3383 logical_load_gbs_lower_bound=544.4100

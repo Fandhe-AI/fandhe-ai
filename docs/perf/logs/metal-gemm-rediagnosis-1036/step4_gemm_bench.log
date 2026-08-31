@@ -1,0 +1,161 @@
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:651:48
+    |
+651 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:664:8
+    |
+653 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+664 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:57:10
+   |
+57 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:75:11
+   |
+75 | pub const SPLITK_MIN_K: u32 = 1024;
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:79:11
+   |
+79 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+   |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:84:11
+   |
+84 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+   |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:90:11
+   |
+90 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:94:11
+   |
+94 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:101:7
+    |
+101 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:107:4
+    |
+107 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:119:4
+    |
+119 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:139:4
+    |
+139 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:178:8
+    |
+178 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:232:8
+    |
+232 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:219:8
+    |
+219 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 21 warnings
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running `target/release/examples/gemm_bench`
+size=256 naive_tflops=0.0768 tiled_tflops=0.1008 simdgroup_tflops=0.1116 dynamic_tile_auto_tflops=0.1205 auto_over_simdgroup=1.0790 simdgroup_over_naive=1.4540
+size=512 naive_tflops=0.1745 tiled_tflops=0.3260 simdgroup_tflops=0.4184 dynamic_tile_auto_tflops=0.6489 auto_over_simdgroup=1.5508 simdgroup_over_naive=2.3974
+size=1024 naive_tflops=0.8200 tiled_tflops=1.0153 simdgroup_tflops=1.1757 dynamic_tile_auto_tflops=1.7914 auto_over_simdgroup=1.5237 simdgroup_over_naive=1.4338
+size=2048 naive_tflops=1.0447 tiled_tflops=1.3624 simdgroup_tflops=1.6718 dynamic_tile_auto_tflops=3.1999 auto_over_simdgroup=1.9141 simdgroup_over_naive=1.6002
+size=4096 naive_tflops=1.1047 tiled_tflops=1.5110 simdgroup_tflops=2.0186 dynamic_tile_auto_tflops=4.3965 auto_over_simdgroup=2.1780 simdgroup_over_naive=1.8272
+shape=(4096x512x512) simdgroup_tflops=0.9494 dynamic_tile_auto_tflops=1.4102 auto_over_simdgroup=1.4854
+shape=(512x4096x512) simdgroup_tflops=0.9823 dynamic_tile_auto_tflops=1.4218 auto_over_simdgroup=1.4474
+size=2048 candidate=bm64_bn64_bk16_staged tflops=1.2140 requested=(64x64x16,wm=2,wn=2,staged=true) resolved=(64x64x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=2048 candidate=bm32_bn32_bk16_staged tflops=8.4334 requested=(32x32x16,wm=2,wn=2,staged=true) resolved=(32x32x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=2048 candidate=bm32_bn32_bk16_direct tflops=3.0630 requested=(32x32x16,wm=2,wn=2,staged=false) resolved=(32x32x16,wm=2,wn=2,staged=false) resolved_matches_requested=true
+size=2048 candidate=tm8_tn4_bm128_bn64_bk16_staged tflops=0.5557 requested=(128x64x16,wm=2,wn=2,staged=true) resolved=(128x64x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=2048 candidate=tm4_tn8_bm64_bn128_bk16_staged tflops=0.8308 requested=(64x128x16,wm=2,wn=2,staged=true) resolved=(64x128x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=2048 candidate=tm8_tn8_bm128_bn128_bk16_staged tflops=0.3921 requested=(128x128x16,wm=2,wn=2,staged=true) resolved=(128x128x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=bm64_bn64_bk16_staged tflops=1.2079 requested=(64x64x16,wm=2,wn=2,staged=true) resolved=(64x64x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=bm32_bn32_bk16_staged tflops=7.1049 requested=(32x32x16,wm=2,wn=2,staged=true) resolved=(32x32x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=bm32_bn32_bk16_direct tflops=2.9603 requested=(32x32x16,wm=2,wn=2,staged=false) resolved=(32x32x16,wm=2,wn=2,staged=false) resolved_matches_requested=true
+size=4096 candidate=tm8_tn4_bm128_bn64_bk16_staged tflops=0.5451 requested=(128x64x16,wm=2,wn=2,staged=true) resolved=(128x64x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=tm4_tn8_bm64_bn128_bk16_staged tflops=0.8879 requested=(64x128x16,wm=2,wn=2,staged=true) resolved=(64x128x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=tm8_tn8_bm128_bn128_bk16_staged tflops=0.3587 requested=(128x128x16,wm=2,wn=2,staged=true) resolved=(128x128x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+--- occupancy 判定組み込み比較（旧: select / 新: select_with_occupancy）---
+size=512 old_tile=(32x32) old_tflops=0.6307 new_tile=(32x32) new_tflops=0.6298 new_over_old=0.9985 occupancy_params=Some(OccupancyParams { gpu_core_count: 40, max_threadgroup_memory_bytes: 32768 })
+size=1024 old_tile=(32x32) old_tflops=1.2153 new_tile=(32x32) new_tflops=1.1086 new_over_old=0.9122 occupancy_params=Some(OccupancyParams { gpu_core_count: 40, max_threadgroup_memory_bytes: 32768 })
+size=2048 old_tile=(32x32) old_tflops=2.1461 new_tile=(32x32) new_tflops=2.1824 new_over_old=1.0169 occupancy_params=Some(OccupancyParams { gpu_core_count: 40, max_threadgroup_memory_bytes: 32768 })
+size=4096 old_tile=(32x32) old_tflops=4.0930 new_tile=(32x32) new_tflops=4.0853 new_over_old=0.9981 occupancy_params=Some(OccupancyParams { gpu_core_count: 40, max_threadgroup_memory_bytes: 32768 })
