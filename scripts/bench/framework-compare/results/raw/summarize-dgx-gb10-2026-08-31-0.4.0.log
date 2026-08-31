@@ -1,0 +1,269 @@
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=2048/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2/4194304, max_abs=3.624e-05, max_rel=2.811e-01 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cpu/size=2048/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2/4194304, max_abs=3.815e-05, max_rel=3.944e-01 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=256/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=10538/65536, max_abs=1.581e-03, max_rel=1.554e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=512/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=42361/262144, max_abs=2.343e-03, max_rel=1.972e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=1024/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=169929/1048576, max_abs=3.643e-03, max_rel=1.965e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=2048/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=681454/4194304, max_abs=4.941e-03, max_rel=1.987e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=4096/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2729050/16777216, max_abs=7.117e-03, max_rel=1.997e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cpu/size=2048/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=5/4194304, max_abs=3.529e-05, max_rel=3.052e-01 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=256/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=10538/65536, max_abs=1.581e-03, max_rel=1.554e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=512/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=42361/262144, max_abs=2.343e-03, max_rel=1.972e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=1024/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=169929/1048576, max_abs=3.643e-03, max_rel=1.965e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=2048/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=681454/4194304, max_abs=4.941e-03, max_rel=1.987e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=4096/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2729050/16777216, max_abs=7.117e-03, max_rel=1.997e+00 — 無効データとして表示
+# ベンチマーク集計（summarize.py 生成）
+
+## 集計対象: results/raw/results-cuda.jsonl
+
+| フレームワーク | バージョン |
+| --- | --- |
+| fandhe-ai | 0.4.0 |
+| candle | 0.11.0 |
+| burn | 0.21.0 |
+
+### (a) GEMM（C = A×B、f32、正方行列）
+
+#### CPU
+
+| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s |
+| --- | --- | --- | --- | --- | --- |
+| 256 | fandhe-ai | 347.1 µs | 334.6 µs | 366.9 µs | 96.7 |
+| 256 | candle | 368.0 µs | 342.7 µs | 407.6 µs | 91.2 |
+| 256 | burn | 584.6 µs | 577.7 µs | 588.9 µs | 57.4 |
+| 512 | fandhe-ai | 2.416 ms | 2.216 ms | 2.476 ms | 111.1 |
+| 512 | candle | 1.350 ms | 1.278 ms | 1.416 ms | 198.9 |
+| 512 | burn | 3.376 ms | 3.367 ms | 3.379 ms | 79.5 |
+| 1024 | fandhe-ai | 7.742 ms | 7.613 ms | 7.925 ms | 277.4 |
+| 1024 | candle | 5.269 ms | 5.111 ms | 5.632 ms | 407.6 |
+| 1024 | burn | 22.681 ms | 22.633 ms | 22.790 ms | 94.7 |
+| 2048 | fandhe-ai | 35.220 ms | 34.893 ms | 36.612 ms | 487.8 |
+| 2048 | candle（無効: 要素誤差超過 fail=2/4194304, max_abs=3.815e-05, max_rel=3.944e-01） | 30.346 ms | 30.074 ms | 31.160 ms | - |
+| 2048 | burn（無効: 要素誤差超過 fail=5/4194304, max_abs=3.529e-05, max_rel=3.052e-01） | 157.673 ms | 157.626 ms | 157.731 ms | - |
+
+#### CUDA
+
+| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s |
+| --- | --- | --- | --- | --- | --- |
+| 256 | fandhe-ai | 113.9 µs | 113.7 µs | 114.2 µs | 294.5 |
+| 256 | candle | 76.3 µs | 76.0 µs | 76.7 µs | 439.9 |
+| 256 | burn | 計測不可 | - | - | - |
+| 512 | fandhe-ai | 401.8 µs | 400.8 µs | 402.5 µs | 668.1 |
+| 512 | candle | 241.4 µs | 240.9 µs | 242.2 µs | 1112.2 |
+| 512 | burn | 計測不可 | - | - | - |
+| 1024 | fandhe-ai | 1.880 ms | 1.879 ms | 1.882 ms | 1142.3 |
+| 1024 | candle | 966.8 µs | 965.8 µs | 969.4 µs | 2221.2 |
+| 1024 | burn | 計測不可 | - | - | - |
+| 2048 | fandhe-ai | 151.065 ms | 148.142 ms | 152.199 ms | 113.7 |
+| 2048 | candle（無効: 要素誤差超過 fail=2/4194304, max_abs=3.624e-05, max_rel=2.811e-01） | 4.275 ms | 4.260 ms | 4.327 ms | - |
+| 2048 | burn | 計測不可 | - | - | - |
+| 4096 | fandhe-ai | 131.321 ms | 130.219 ms | 131.915 ms | 1046.6 |
+| 4096 | candle | 57.187 ms | 56.412 ms | 61.542 ms | 2403.3 |
+| 4096 | burn | 計測不可 | - | - | - |
+
+### (a') GEMM（デバイス/tape 再利用モード。初期化コストとカーネル実行の分離。イシュー #925）
+
+#### CUDA
+
+| N | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | GFLOP/s | fresh 中央値（参考） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 256 | fandhe-ai | 413.486 ms | 111.2 µs | 110.9 µs | 133.3 µs | 301.9 | 113.9 µs |
+| 512 | fandhe-ai | 463.710 ms | 714.3 µs | 706.6 µs | 720.2 µs | 375.8 | 401.8 µs |
+| 1024 | fandhe-ai | 404.073 ms | 3.292 ms | 3.164 ms | 3.380 ms | 652.4 | 1.880 ms |
+| 2048 | fandhe-ai | 430.462 ms | 16.098 ms | 15.988 ms | 16.504 ms | 1067.2 | 151.065 ms |
+| 4096 | fandhe-ai | 521.044 ms | 130.981 ms | 126.196 ms | 140.262 ms | 1049.3 | 131.321 ms |
+
+### (a-tf32) GEMM TF32（--tf32 opt-in。REQ-2 統一複合判定。CUDA Tensor Core reduced precision）
+
+#### CUDA
+
+| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s |
+| --- | --- | --- | --- | --- | --- |
+| 256 | fandhe-ai | 計測不可 | - | - | - |
+| 256 | candle | 計測不可 | - | - | - |
+| 256 | burn（無効: 要素誤差超過 fail=10538/65536, max_abs=1.581e-03, max_rel=1.554e+00） | 363.7 µs | 283.7 µs | 372.1 µs | - |
+| 512 | fandhe-ai | 計測不可 | - | - | - |
+| 512 | candle | 計測不可 | - | - | - |
+| 512 | burn（無効: 要素誤差超過 fail=42361/262144, max_abs=2.343e-03, max_rel=1.972e+00） | 468.2 µs | 453.0 µs | 477.9 µs | - |
+| 1024 | fandhe-ai | 計測不可 | - | - | - |
+| 1024 | candle | 計測不可 | - | - | - |
+| 1024 | burn（無効: 要素誤差超過 fail=169929/1048576, max_abs=3.643e-03, max_rel=1.965e+00） | 1.147 ms | 1.006 ms | 1.172 ms | - |
+| 2048 | fandhe-ai | 計測不可 | - | - | - |
+| 2048 | candle | 計測不可 | - | - | - |
+| 2048 | burn（無効: 要素誤差超過 fail=681454/4194304, max_abs=4.941e-03, max_rel=1.987e+00） | 4.118 ms | 4.085 ms | 4.186 ms | - |
+| 4096 | fandhe-ai | 計測不可 | - | - | - |
+| 4096 | candle | 計測不可 | - | - | - |
+| 4096 | burn（無効: 要素誤差超過 fail=2729050/16777216, max_abs=7.117e-03, max_rel=1.997e+00） | 38.144 ms | 38.025 ms | 38.599 ms | - |
+
+### (b) MLP 学習（784→256→10、ReLU、バッチ 64、MSE、SGD lr=0.01、1 ステップあたり時間）
+
+| デバイス | フレームワーク | 中央値 | Q1 | Q3 |
+| --- | --- | --- | --- | --- |
+| cpu | fandhe-ai | 13.638 ms | 13.396 ms | 14.092 ms |
+| cpu | candle | 2.045 ms | 1.839 ms | 2.342 ms |
+| cpu | burn | 781.6 µs | 776.5 µs | 790.7 µs |
+| cuda | fandhe-ai | 12.309 ms | 12.235 ms | 12.391 ms |
+| cuda | candle | 272.2 µs | 270.7 µs | 275.0 µs |
+| cuda | burn（TF32） | 446.3 µs | 438.1 µs | 521.8 µs |
+
+### (b') MLP 学習（デバイス常駐パラメータ更新モード。ホスト経由 SGD との分離。イシュー #957/#958/#959）
+
+| デバイス | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | fresh 中央値（参考） | fresh/reuse 比 | 最終 loss 突合（fresh） |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| cpu | fandhe-ai | 651.5 µs | 13.985 ms | 13.671 ms | 14.236 ms | 13.638 ms | 0.98 倍 | 一致 |
+| cuda | fandhe-ai | 214.523 ms | 12.410 ms | 12.398 ms | 12.418 ms | 12.309 ms | 0.99 倍 | 一致 |
+
+### (b'') MLP 学習 1 step のフェーズ分解（イシュー #1009）
+
+#### CPU / fresh
+
+| フェーズ | 中央値 | Q1 | Q3 | step_total 比 |
+| --- | --- | --- | --- | --- |
+| tape_build | 0.2 µs | 0.2 µs | 0.3 µs | 0.0% |
+| leaf_register | 1.2 µs | 1.1 µs | 1.3 µs | 0.0% |
+| forward | 2.149 ms | 1.640 ms | 2.641 ms | 15.1% |
+| loss_readout | 0.2 µs | 0.1 µs | 0.2 µs | 0.0% |
+| backward | 11.935 ms | 11.806 ms | 11.987 ms | 83.9% |
+| param_readout | 32.6 µs | 28.1 µs | 33.6 µs | 0.2% |
+| host_sgd | 44.7 µs | 43.3 µs | 48.9 µs | 0.3% |
+| apply_params | 0.5 µs | 0.5 µs | 0.6 µs | 0.0% |
+| tape_drop | 2.2 µs | 2.0 µs | 2.4 µs | 0.0% |
+| step_total | 14.222 ms | 13.754 ms | 14.714 ms | 100.0% |
+
+- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため step_total と一致しない場合がある）: 14.166 ms
+
+#### CPU / reuse
+
+初期化(init_s): 643.0 µs
+
+| フェーズ | 中央値 | Q1 | Q3 | step_total 比 |
+| --- | --- | --- | --- | --- |
+| tape_build | 0.1 µs | 0.1 µs | 0.2 µs | 0.0% |
+| leaf_register | 0.1 µs | 0.1 µs | 0.2 µs | 0.0% |
+| forward_resident | 1.389 ms | 1.158 ms | 1.620 ms | 10.0% |
+| loss_readout | 0.0 µs | 0.0 µs | 0.1 µs | 0.0% |
+| backward | 12.377 ms | 12.347 ms | 12.477 ms | 89.2% |
+| device_update | 114.5 µs | 113.6 µs | 115.9 µs | 0.8% |
+| tape_drop | 1.6 µs | 1.6 µs | 2.0 µs | 0.0% |
+| step_total | 13.876 ms | 13.594 ms | 14.126 ms | 100.0% |
+
+- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため step_total と一致しない場合がある）: 13.883 ms
+
+#### CUDA / fresh
+
+| フェーズ | 中央値 | Q1 | Q3 | step_total 比 |
+| --- | --- | --- | --- | --- |
+| tape_build | 5.1 µs | 4.8 µs | 6.3 µs | 0.0% |
+| leaf_register | 1.1 µs | 1.0 µs | 1.3 µs | 0.0% |
+| forward | 243.1 µs | 240.6 µs | 253.0 µs | 2.0% |
+| loss_readout | 0.0 µs | 0.0 µs | 0.1 µs | 0.0% |
+| backward | 12.048 ms | 12.036 ms | 12.061 ms | 97.1% |
+| param_readout | 47.3 µs | 45.4 µs | 52.6 µs | 0.4% |
+| host_sgd | 60.9 µs | 60.6 µs | 62.2 µs | 0.5% |
+| apply_params | 0.3 µs | 0.3 µs | 0.5 µs | 0.0% |
+| tape_drop | 3.0 µs | 2.8 µs | 3.4 µs | 0.0% |
+| step_total | 12.410 ms | 12.396 ms | 12.446 ms | 100.0% |
+
+- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため step_total と一致しない場合がある）: 12.409 ms
+
+#### CUDA / reuse
+
+初期化(init_s): 218.257 ms
+
+| フェーズ | 中央値 | Q1 | Q3 | step_total 比 |
+| --- | --- | --- | --- | --- |
+| tape_build | 3.6 µs | 3.5 µs | 4.1 µs | 0.0% |
+| leaf_register | 0.1 µs | 0.1 µs | 0.1 µs | 0.0% |
+| forward_resident | 269.7 µs | 268.5 µs | 272.3 µs | 2.2% |
+| loss_readout | 0.0 µs | 0.0 µs | 0.1 µs | 0.0% |
+| backward | 12.059 ms | 12.040 ms | 12.084 ms | 97.2% |
+| device_update | 61.5 µs | 60.9 µs | 64.4 µs | 0.5% |
+| tape_drop | 3.8 µs | 3.5 µs | 4.3 µs | 0.0% |
+| step_total | 12.403 ms | 12.380 ms | 12.425 ms | 100.0% |
+
+- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため step_total と一致しない場合がある）: 12.398 ms
+
+### (c) 推論スループット（同 MLP forward のみ、バッチ 64。表のスループットはバッチ/秒 = 1/中央値。1 バッチ = 64 件）
+
+| デバイス | フレームワーク | 中央値 | Q1 | Q3 | バッチ/秒 |
+| --- | --- | --- | --- | --- | --- |
+| cpu | fandhe-ai | 364.7 µs | 349.9 µs | 450.9 µs | 2742 |
+| cpu | candle | 262.5 µs | 235.9 µs | 301.1 µs | 3809 |
+| cpu | burn | 743.5 µs | 741.0 µs | 744.3 µs | 1345 |
+| cuda | fandhe-ai | 222.6 µs | 221.3 µs | 224.8 µs | 4493 |
+| cuda | candle | 40.5 µs | 39.8 µs | 41.6 µs | 24684 |
+| cuda | burn（TF32） | 101.1 µs | 100.1 µs | 102.2 µs | 9892 |
+
+#### データ有効性（checksum 突合・要素単位検証。イシュー #965・#970）
+
+- 不一致なし（相互突合できた 27 行の checksum が参照値と一致）
+- **無効（要素誤差超過）**: candle/cuda/size=2048/fresh — 要素誤差超過 fail=2/4194304, max_abs=3.624e-05, max_rel=2.811e-01
+- **無効（要素誤差超過）**: candle/cpu/size=2048/fresh — 要素誤差超過 fail=2/4194304, max_abs=3.815e-05, max_rel=3.944e-01
+- **無効（要素誤差超過）**: burn/cuda/size=256/fresh — 要素誤差超過 fail=10538/65536, max_abs=1.581e-03, max_rel=1.554e+00
+- **無効（要素誤差超過）**: burn/cuda/size=512/fresh — 要素誤差超過 fail=42361/262144, max_abs=2.343e-03, max_rel=1.972e+00
+- **無効（要素誤差超過）**: burn/cuda/size=1024/fresh — 要素誤差超過 fail=169929/1048576, max_abs=3.643e-03, max_rel=1.965e+00
+- **無効（要素誤差超過）**: burn/cuda/size=2048/fresh — 要素誤差超過 fail=681454/4194304, max_abs=4.941e-03, max_rel=1.987e+00
+- **無効（要素誤差超過）**: burn/cuda/size=4096/fresh — 要素誤差超過 fail=2729050/16777216, max_abs=7.117e-03, max_rel=1.997e+00
+- **無効（要素誤差超過）**: burn/cpu/size=2048/fresh — 要素誤差超過 fail=5/4194304, max_abs=3.529e-05, max_rel=3.052e-01
+
+## 実行時失敗（skipped*.log）
+
+- **skipped-m4max-0.4.0.log**: bench-burn task=gemm device=metal size=512 mode=fresh : MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor i…
+- **skipped-m4max-0.4.0.log**: bench-burn task=gemm device=metal size=1024 mode=fresh : MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor …
+- **skipped-m4max-0.4.0.log**: bench-burn task=gemm device=metal size=2048 mode=fresh : MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor …
+- **skipped-m4max-0.4.0.log**: bench-burn task=gemm device=metal size=4096 mode=fresh : MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor …
+- **skipped-rtx3060-train.log**: bench-candle BUILD FAILED (--features cuda): Err(Os { code: 2, kind: NotFound, message: "No such file or directory" }) —…
+- **skipped-rtx3060-train.log**: bench-burn task=gemm/train/infer device=cuda : ビルドは成功したが実行時に cubecl-cuda が「CUDA installation not found」パニックを出し（CUDA_PATH…
+- **skipped-rtx3060-train.log**: bench-fandhe task=train device=metal mode=reuse : NOT RUN — macOS 実機がこのエージェント環境（x86_64 Linux）から到達不能。再現: Apple Silicon 実機…
+- **skipped-rtx3060-train.log**: bench-fandhe task=train device=cuda mode=reuse (DGX Spark GB10 / sm_121) : NOT RUN — docs/real-hardware-verification-env…
+
+## 目標達成ゲート（--target candle。イシュー #1051）
+
+### 集計対象: results/raw/results-cuda.jsonl
+
+| タスク | デバイス | N | fandhe-ai 中央値 | candle 中央値 | 比（target/fandhe） | 判定 | 備考 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| gemm | CPU | 256 | 347.1 µs（fresh） | 368.0 µs（fresh） | 1.06 倍 | 達成 |  |
+| gemm | CPU | 512 | 2.416 ms（fresh） | 1.350 ms（fresh） | 0.56 倍 | **未達** |  |
+| gemm | CPU | 1024 | 7.742 ms（fresh） | 5.269 ms（fresh） | 0.68 倍 | **未達** |  |
+| gemm | CPU | 2048 | - | - | - | 判定不能（無効データ（candle: 要素誤差超過 fail=2/4194304, max_abs=3.815e-05, max_rel=3.944e-01）） |  |
+| gemm | CUDA | 256 | 111.2 µs（reuse） | 76.3 µs（fresh） | 0.69 倍 | **未達** |  |
+| gemm | CUDA | 512 | 714.3 µs（reuse） | 241.4 µs（fresh） | 0.34 倍 | **未達** |  |
+| gemm | CUDA | 1024 | 3.292 ms（reuse） | 966.8 µs（fresh） | 0.29 倍 | **未達** |  |
+| gemm | CUDA | 2048 | - | - | - | 判定不能（無効データ（candle: 要素誤差超過 fail=2/4194304, max_abs=3.624e-05, max_rel=2.811e-01）） |  |
+| gemm | CUDA | 4096 | 130.981 ms（reuse） | 57.187 ms（fresh） | 0.44 倍 | **未達** |  |
+| train | CPU | 64 | 13.985 ms（reuse） | 2.045 ms（fresh） | 0.15 倍 | **未達** |  |
+| train | CUDA | 64 | 12.410 ms（reuse） | 272.2 µs（fresh） | 0.02 倍 | **未達** |  |
+| infer | CPU | 64 | 364.7 µs（fresh） | 262.5 µs（fresh） | 0.72 倍 | **未達** |  |
+| infer | CUDA | 64 | 222.6 µs（fresh） | 40.5 µs（fresh） | 0.18 倍 | **未達** |  |
+
+未達一覧:
+- gemm/CPU/N=512
+- gemm/CPU/N=1024
+- gemm/CUDA/N=256
+- gemm/CUDA/N=512
+- gemm/CUDA/N=1024
+- gemm/CUDA/N=4096
+- train/CPU/N=64
+- train/CUDA/N=64
+- infer/CPU/N=64
+- infer/CUDA/N=64
+
+判定不能一覧:
+- gemm/CPU/N=2048（無効データ（candle: 要素誤差超過 fail=2/4194304, max_abs=3.815e-05, max_rel=3.944e-01））
+- gemm/CUDA/N=2048（無効データ（candle: 要素誤差超過 fail=2/4194304, max_abs=3.624e-05, max_rel=2.811e-01））
+
+**全体集計**: 達成 1 / 未達 10 / 判定不能 2
+
+error: --target candle: 未達 10 件 / 判定不能 2 件
+  unmet: gemm/cpu/N=512
+  unmet: gemm/cpu/N=1024
+  undeterminable: gemm/cpu/N=2048（無効データ（candle: 要素誤差超過 fail=2/4194304, max_abs=3.815e-05, max_rel=3.944e-01））
+  unmet: gemm/cuda/N=256
+  unmet: gemm/cuda/N=512
+  unmet: gemm/cuda/N=1024
+  undeterminable: gemm/cuda/N=2048（無効データ（candle: 要素誤差超過 fail=2/4194304, max_abs=3.624e-05, max_rel=2.811e-01））
+  unmet: gemm/cuda/N=4096
+  unmet: train/cpu/N=64
+  unmet: train/cuda/N=64
+  unmet: infer/cpu/N=64
+  unmet: infer/cuda/N=64

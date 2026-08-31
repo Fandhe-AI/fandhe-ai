@@ -3,7 +3,7 @@
 イシュー #1035「perf(backend-cuda): 形状別カーネル選択を simple / double-buffer / split-K のヒューリスティックへ拡張する」の実機比較記録テンプレート。
 親ツリー #1029（GEMM カーネルの candle 超え）・#1007 の Phase 2。cuBLAS フル FP32（candle CUDA）を上回ることが目標で、本イシューは特に小サイズ（N=256〜512。candle 実測 423〜1,109 GFLOP/s @GB10、`docs/perf/cuda-gemm-kernel-vs-frameworks-baseline.md` §3.2）で SM が遊ぶ形状への対処を担う。
 
-## 状態: 未実測・実機実行待ち
+## 状態: DGX Spark GB10 実機実測完了（#1031 実機実測セッション。下記「1a. GB10 実機実測結果」節）。受け入れ条件 (a)「全 N で candle 以上」は**未達**、かつ `#[ignore]` 正当性テストが SplitK 経路で複合判定 FAIL を検出した。本ファイル冒頭の実装セッション記録（下記）は当時の状態としてそのまま残す
 
 本実装セッションは実機接続情報（`docs/real-hardware-verification-env.local.md`）を持たないため、本イシューの受け入れ条件が要求する「(a) 全 N で candle 以上」の検証は実行できない（`docs/perf/cuda-gemm-cost-model-selection.md`・#527 が同じ理由で「未実測・要実機実行」のまま安全側クローズしている先例と同型）。受け入れ条件 (b)「選択ロジックのユニットテスト」は本ランで充足済み（§2）。
 
@@ -28,6 +28,104 @@
 - 本ランは NVRTC 実行不能環境（CUDA toolkit 非搭載）のため、DoubleBuffer／SplitK カーネルの数値検証・性能 A/B がすべて実機待ちになる。よって #1034（PR #740→#758 差し戻しの教訓）と同じ判断で、**未検証カーネルを本番既定経路へ結線しない**。選択ヒューリスティック（`gemm_variant.rs`）とカーネル（`kernels_gemm_variants.rs`）・実行経路（`gemm_variant_selection.rs`）はすべて `internal-diagnostics` feature（既定 off）限定の opt-in とし、本番既定コンストラクタ（`CudaGemm::new`）・`run_tiled_f32`・`kernels::TILED_F32` は一切変更していない
 - 選択ヒューリスティックの閾値定数（`SPLITK_MIN_K`=1024・`SPLITK_MIN_K_PER_SPLIT`=32・`SPLITK_MAX_SPLITS`=32・`SPLITK_PARTIAL_MAX_BYTES`=256 MiB・`DOUBLE_BUFFER_MIN_K`=64）は実機実測前の**暫定値**であり、`cuda-gemm-cost-model-selection.md`（#527）と同じ方針で補正は 1 回限りとし、実測を追わない補正ループは行わない
 
+## 1a. GB10 実機実測結果（#1031 実機実測セッション）
+
+実機: DGX Spark GB10（compute capability (12, 1) = sm_121）・driver 580.173.02・
+CUDA 13.0.88（`nvcc --version` 実測）・rustc 1.97.0。計測時 `nvidia-smi
+--query-gpu=utilization.gpu --format=csv,noheader` で 0% を確認済み。commit
+`10011cd4f8ef097351c0dc1244eb55c8a021040b`。
+
+### 正当性検証（`#[ignore]` テスト）: SplitK 経路で複合判定 FAIL を検出
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics -- --ignored --nocapture
+```
+
+`gemm_f32_variants.rs` の `#[ignore]` テスト 2 件のうち:
+
+- `split_k_execution_is_bit_deterministic_across_repeated_runs`: **PASS**
+- `run_f32_matches_cpu_reference_across_variant_shapes`: **FAIL**（形状を順に検証する
+  アサーションループの 3 件目で panic し以降の形状は未検証。4096³・2048³
+  〈DoubleBuffer 想定〉は通過済みだったが、`m=128 n=128 k=8192`〈`ExpectedCategory::
+  KDominant`。SplitK { num_splits: 8 } が選択される形状〉で以下の複合判定 FAIL を
+  検出）:
+  ```
+  gemm_f32_variants m=128 n=128 k=8192 variant=SplitK { num_splits: 8 }:
+  複合判定 FAIL（fail_count=8/16384, max_abs_diff=3.662e-4, max_rel_err=1.090e-2,
+  mean_abs_diff=3.574e-5, mean_rel_err=6.131e-6, p50_abs_diff=2.575e-5,
+  p99_abs_diff=1.688e-4, p999_abs_diff=2.594e-4）
+  ```
+  16384 要素中 8 要素が複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を
+  満たさない。CPU 参照実装との数値不一致であり、fresh モードの計測揺らぎ等の
+  非決定性ではない（`split_k_execution_is_bit_deterministic_across_repeated_runs`
+  が PASS しているため SplitK 自体は決定的だが、その決定的な出力が CPU 参照と
+  一致しない）。`m=n=128,k=16384`〈SplitK 対象のもう一方の想定形状〉・非整列形状
+  （1000³・33×65×97・1×1×1）はテストが早期 panic したため**未検証**。
+
+**本ファイルは実装 Agent の権限外（コード変更・許容誤差変更はユーザー承認必須。
+`.claude/rules/security.md`「自己修復ループ固有のガードレール」・`coding-rust.md`
+「バックエンド間数値一致テストの許容誤差を単独で緩和しない」）のため、この
+SplitK 数値不一致に対する原因調査・修正は行っていない**。後続 Issue での追跡が
+必要（`.claude/rules/out-of-scope-tracking.md` 準拠。本レポートで報告し
+ユーザー判断を仰ぐ）。
+
+### 性能計測（正当性が未確定な SplitK 経路を含む点に留意。参考データとして記録）
+
+```sh
+cargo run -p fandhe-ai-backend-cuda --example gemm_f32_variant_bench --release --features internal-diagnostics
+```
+
+`num_sms=Some(48) double_buffer_available=true split_k_partial_error=None split_k_reduce_error=None`
+
+| 形状（M, N, K） | 選択された変種 | base_gflops（`TILED_F32`。GFLOP/s） | selected_gflops（GFLOP/s） | candle 実測（GFLOP/s） | candle 比 |
+|-----------------|----------------|------------------------------|-----------------|------------------------|-----------|
+| 256, 256, 256 | DoubleBuffer | 544.7 | 514.9（ratio 0.9452） | 423.0（`cuda-gemm-kernel-vs-frameworks-baseline.md` §3.2 N=256） | 約 1.22 倍 |
+| 512, 512, 512 | DoubleBuffer | 1933.7 | 1303.4（ratio 0.6740） | 1109.3（同 N=512） | 約 1.18 倍 |
+| 1024, 1024, 1024 | DoubleBuffer | 3903.5 | 1890.8（ratio 0.4844） | 2269.1（同 N=1024） | 約 0.83 倍（**暫定未達**・境界差あり） |
+| 4096, 4096, 4096 | DoubleBuffer | 2826.1 | 226.6（ratio 0.0802） | 2265.1（同 N=4096） | 約 0.10 倍（**暫定未達**・境界差あり） |
+| 128, 128, 8192 | SplitK { num_splits: 8 } | 388.2 | 873.8（ratio 2.2509） | 該当値なし（`cuda-gemm-kernel-vs-frameworks-baseline.md` は K 支配的非正方形状の candle 値を含まない。推定しない） | 判定不能（正当性も上記のとおり未確定） |
+| 256, 256, 16384 | DoubleBuffer | 1119.6 | 1012.7（ratio 0.9045） | 該当値なし（同上） | 判定不能 |
+
+（`base_gflops`／`selected_gflops` は例出力の TFLOPS を ×1000 して GFLOP/s へ換算。
+ratio は例出力の `ratio` フィールドをそのまま転記）
+
+**計測境界差（candle 比の解釈に必須）**: `selected_gflops`（`CudaGemmF32VariantSelection::
+run_f32`。`gemm_f32_variant_bench.rs` 冒頭コメント「計測境界」節が明記するとおり
+H2D→カーネル起動→D2H を一括計測する高水準 API）は、測定クロージャへ毎回ホスト側の
+`Vec<f32>`（`a`/`b`）を渡すため**イテレーションごとに A・B の H2D 転送を含む**。一方
+candle 側の比較値（`bench-candle/src/main.rs::run_gemm`）は `Tensor::from_vec` による
+A・B のデバイスへの転送を計測ループの**外**（warmup 前に 1 回）で行い、計測窓は
+`matmul` 呼び出し＋結果のホスト実体化（D2H）のみを含む。すなわち両者は同一の計測境界
+ではなく、**fandhe-ai 側の `selected_gflops` は candle 側には含まれない A・B の
+毎回の H2D 転送コストを余分に負っている**（fandhe-ai に有利な方向ではなく、
+不利な方向のバイアスである）。したがって境界差を除いて同一境界へ揃えた場合、
+selected/candle 比は**改善する方向**に動き、N=1024（約 0.83 倍）は「未達」判定が
+覆る可能性を否定できない（N=4096 の約 0.10 倍は、`TILED_F32` 単体比でも 0.08 倍と
+いう fandhe-ai 内部の同一境界比較が大幅悪化を示しているため、境界差の補正で
+「達成」へ反転する見込みは薄いが、確定判断は同一境界での再計測を待つ）。
+このため **N=1024・4096 は同一境界で再計測するまで「比較不能（暫定未達）」として
+扱い、確定した採用判断には用いない**（Review 指摘・PR #1098）。N=256・512 の
+「達成」（約 1.18〜1.22 倍）は同一境界へ揃えれば比率がさらに改善しうる側であり、
+この境界差で過大評価される方向ではない（達成判定は維持）。
+
+**採用判断（全 N で candle 以上で確定）**: **確定せず（暫定未達成）**。判定できた
+4 形状のうち 256/512 は candle を上回る（約 1.18〜1.22 倍）が、**1024・4096 は本計測の
+境界では candle を下回る**（約 0.83 倍・約 0.10 倍。上記のとおり同一境界での再計測まで
+比較不能として扱い、確定判断には用いない）。ただし本番結線の可否は candle 比とは
+独立に、次の fandhe-ai 内部比較だけで「結線しない」と判断できる:とくに N=4096 は選択された DoubleBuffer 変種が基準経路
+（`TILED_F32`）比でも 0.08 倍まで低下しており、現在の選択ヒューリスティック
+（`SPLITK_MIN_K`・`SPLITK_MAX_SPLITS`・`SPLITK_PARTIAL_MAX_BYTES`・
+`DOUBLE_BUFFER_MIN_K` の暫定閾値）は N=1024・4096 の正方形状で DoubleBuffer 変種を
+選択した結果、`TILED_F32` 単体よりも大幅に悪化させている。128×128×8192・
+256×256×16384（K 支配的形状）は candle 参照値が本リポの既存ベースライン
+ドキュメントに存在しないため判定不能とし、推定値は記入しない。128×128×8192 は
+加えて正当性が未確定（上記）。
+
+**本ファイル §1 手順 3 が指示する「未達の場合は暫定閾値の補正を 1 回だけ行い
+再計測する」は本セッションでは実施していない**（実装 Agent の権限外。閾値変更＝
+`gemm_variant.rs` のコード変更であり `docs/spec-proposal` 系のスコープ判断・
+ユーザー承認が必要）。本番既定経路への結線判断（同手順 4）も同様に未実施。
+
 ## 1. 実機手順
 
 前提: CUDA driver + NVRTC 搭載実機（DGX Spark GB10 等。`docs/real-hardware-verification-env.md` の接続手順）。
@@ -44,18 +142,10 @@ cargo run -p fandhe-ai-backend-cuda --example gemm_f32_variant_bench --release -
 3. **受け入れ条件 (a)「全 N で candle 以上」を判定する**。満たさない場合は暫定閾値の補正を **1 回だけ** 行い再計測する（補正はコミット・PR に根拠を明記する。補正ループ禁止）
 4. **本番既定経路への結線判断**: 受け入れ条件を満たし、かつ数値検証（`#[ignore]` テスト）が全 green であることを確認したうえで、ユーザー承認を得てから後続 Issue として本番結線（`gemm_auto.rs::CudaGemmAuto::run_f32` からの呼び出し）を実施する。本 PR ではこの結線を行わない
 
-### 記録欄（実機セッションで埋める）
+### 記録欄
 
-| 形状（M, N, K） | 選択された変種 | base_tflops（`TILED_F32`） | selected_tflops | candle 実測（GFLOP/s） | candle 比 |
-|-----------------|----------------|------------------------------|-----------------|------------------------|-----------|
-| 256, 256, 256 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 512, 512, 512 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 1024, 1024, 1024 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 4096, 4096, 4096 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 128, 128, 8192 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 256, 256, 16384 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-
-**採用判断（全 N で candle 以上で確定）**: 未実測のため未確定。
+DGX Spark GB10 実機実測完了。データ本体・正当性検証結果・採用判断は
+**上記「1a. GB10 実機実測結果」節**に記録済み（本節は重複を避けるため転記しない）。
 
 ## 2. GPU 不要ユニットテストの検証範囲
 

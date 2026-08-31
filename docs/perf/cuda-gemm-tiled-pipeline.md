@@ -4,7 +4,7 @@
 親イシュー #1031（FP32 SIMT GEMM 強化）・ルート #1029「GEMM カーネルの candle 超え」Phase 2 の一環。
 受け入れ条件「N=4096 での改善値の記録（5 回計測中央値）」「カーネル側の手動境界検査の維持（REQ-8）」に対応する。
 
-## 状態: 実測未実施・NVRTC 未検証（実装環境に CUDA driver はあるが NVRTC がない）
+## 状態: DGX Spark GB10 実機実測完了（下記「実測結果」節）。以下は実測前の実装セッションの記録として残す
 
 本実装セッションの実行環境には CUDA **driver**（`libcuda`）が実在し、`nvidia-smi` で以下の実機が確認できる:
 
@@ -77,15 +77,59 @@ NVIDIA GeForce RTX 3060（compute capability 8.6・Driver Version 595.71.05・CU
 4. **記録先**: 実測値・TFLOPS・対 tiled f32 比・対 candle 比（`docs/perf/cuda-gemm-kernel-improvement-policy.md` の
    比較基準）は本ファイルの「実測結果」節（プレースホルダ。以下）へ追記する。
 
-## 実測結果（プレースホルダ。DGX Spark GB10 セッションで記入）
+## 実測結果（DGX Spark GB10 実機実測完了。#1031）
+
+実機: DGX Spark GB10（compute capability (12, 1) = sm_121）・driver 580.173.02・CUDA 13.0.88
+（`nvcc --version` 実測）・rustc 1.97.0。計測時 `nvidia-smi --query-gpu=utilization.gpu
+--format=csv,noheader` で 0% を確認済み（他プロセス非同居）。commit
+`10011cd4f8ef097351c0dc1244eb55c8a021040b`（rsync 転送元 worktree の HEAD）。
+
+**正当性検証（手順 1）**: `cargo test -p fandhe-ai-backend-cuda --release --features
+internal-diagnostics --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture`
+（`internal-diagnostics` feature 指定が本コマンドに必須である点は本ファイルの手順記載から
+更新: feature 未指定では `cargo test` が `requires the features: internal-diagnostics` で
+即座に失敗する）。**9 件全て PASS**（`tiled_pipeline_matches_tiled_f32`・
+`tiled_pipeline_matches_reference_across_shapes`・`tiled_pipeline_k4096_stress` を含む）。
+これは本カーネル（`TILED_PIPELINE_F32_BODY`。`cp.async.cg.shared.global`／
+`.commit_group`／`.wait_group` を含む）が sm_121 実機で NVRTC 構文検証を初めて通過し、
+かつ CPU 参照実装・`run_tiled_f32` の双方と数値一致（複合判定: 相対誤差 1e-3 未満 または
+絶対誤差 1e-5 未満）することを確認した記録である（本ファイル冒頭「状態」節の
+「いかなる実機でも未検証」は本実測により解消）。
+
+**性能計測（手順 2）**: `cargo run -p fandhe-ai-backend-cuda --example
+gemm_tiled_pipeline_bench --release --features internal-diagnostics`（同様に feature 指定が
+必須。既存記載の手順ではエラーになったため実行時に追加した）。
 
 列は `gemm_tiled_pipeline_bench.rs` の出力そのまま（区間を混ぜない。上記「実測手順」手順 2 参照）。
 
 | size (M=N=K) | tiled_f32 TFLOPS（転送込み） | pipeline3 TFLOPS（転送込み） | pipeline3_over_tiled | pipeline3_gpu_only TFLOPS | pipeline4_gpu_only TFLOPS | pipeline4_over_pipeline3_gpu_only |
 |---|---|---|---|---|---|---|
-| 1024 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
-| 2048 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
-| 4096 | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) | (未実測) |
+| 1024 | 3.9053 | 5.1523 | 1.3193 | 11.2165 | 10.7736 | 0.9605 |
+| 2048 | 5.4793 | 7.8827 | 1.4386 | 13.0398 | 12.1491 | 0.9317 |
+| 4096 | 0.2120 | 0.2104 | 0.9926 | 9.9062 | 9.7746 | 0.9867 |
+
+**観察**:
+
+- 転送込み区間（`tiled_f32` vs `pipeline3`）では N=1024・2048 で pipeline3 が
+  1.32〜1.44 倍改善する一方、**N=4096 では両者とも 0.21 TFLOPS 台まで落ち込み
+  `pipeline3_over_tiled` が 0.99 倍（実質横ばい）**になっている。この N=4096 の絶対値の
+  低さは `docs/perf/cuda-fresh-gemm-n2048-overhead-diagnosis.md` §6.4 が記録する
+  「N=4096 P4（fresh モードの D2H/確保オーバーヘッド）のばらつき（540 ms ↔ 39 ms、原因未特定）」
+  と同系統の fresh モード転送込み経路の残存オーバーヘッド事象と整合する挙動であり、
+  `tiled_f32`（本番既定経路）自体も同じ落ち込みを示していることから **本ファイルが対象と
+  する cp.async パイプライン化固有の劣化ではない**（`tiled_f32` 側もほぼ同水準まで
+  落ちているため、両者の相対比較である `pipeline3_over_tiled` の値自体は破綻していない）。
+  原因調査は上記診断ドキュメントのスコープであり本ファイルでは追跡のみとする。
+- **GPU-only 区間（`pipeline3_gpu_only` vs `pipeline4_gpu_only`）では 3 サイズとも
+  4 stage が 3 stage を下回る**（`pipeline4_over_pipeline3_gpu_only` = 0.93〜0.99 倍）。
+  cp.async ステージ数を 3→4 に増やしても sm_121 では改善せず、静的共有メモリ予算内
+  （§「実測手順」手順 3 の記載どおり TP_MAX_STAGES=4 でも約 37KiB）に収まる範囲でも
+  occupancy 等の他要因が支配的である可能性が高い。3 stage（既定）を据え置く判断を
+  裏付ける結果であり、4 stage への切替は推奨されない。
+- GPU-only 経路の絶対値（3 stage: 9.91〜13.04 TFLOPS）は転送込み経路（0.21〜5.15
+  TFLOPS）を大きく上回り、H2D/D2H・出力バッファ確保のオーバーヘッドが依然として
+  支配的であることを示す。この転送込みオーバーヘッドの削減自体は本イシューのスコープ外
+  （「スコープ外事項」節・本番既定経路への結線判断は #1035 が担う）。
 
 ## スコープ外事項（本 PR では対応しない）
 

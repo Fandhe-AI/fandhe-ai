@@ -112,14 +112,78 @@ compute_capability=(8, 6)（sm_86）。`tiled_f32_outperforms_naive_at_4096`
 
 - **ncu によるバンクコンフリクト減少確認**: 本ランでは `nsight-compute`
   未導入環境のため未実施。XOR swizzle 導入要否の判断はこの実測後に行う
-  （実装計画 §3.2 の段階方針）。
-- **DGX Spark GB10（sm_121）実機での性能実測**: REQ-8 段階的下限の判定・
-  親イシュー #1031（candle/Burn 比 N=4096 で 2,410 GFLOP/s 超え目標）の
-  達成確認は DGX Spark セッションで実施する。
+  （実装計画 §3.2 の段階方針）。ncu 自体は DGX Spark GB10 実機実測
+  セッション（#6 節）でも未導入のため引き続き未実施。
+- **DGX Spark GB10（sm_121）実機での性能実測**: #6 節で実施済み。
 - **Metal M4 Max 実機比較**: 本イシューは CUDA バックエンドのみが対象の
   ためスコープ外。
 
-## 6. 関連
+## 6. DGX Spark GB10（sm_121）実機実測（#1031 実機実測セッション）
+
+実機: DGX Spark GB10（compute capability (12, 1) = sm_121）・driver 580.173.02・
+CUDA 13.0.88（`nvcc --version` 実測）・rustc 1.97.0。計測時 `nvidia-smi
+--query-gpu=utilization.gpu --format=csv,noheader` で 0% を確認済み。commit
+`10011cd4f8ef097351c0dc1244eb55c8a021040b`。
+
+`examples/cuda_floor_bench.rs --release`（`launch_tiled_f32` の GPU 実行 + 同期のみを
+計測。H2D/D2H を含まない。§4 の RTX 3060 実測と同じ計測境界）の `tiled_f32_tflops`
+列を転記する。**本カーネル（register-blocked 版）は既に `kernels.rs::TILED_F32`
+本体を置換済みであり、HEAD には非 register-blocked 版（before）が存在しないため、
+GB10 実機での before/after 倍率は取得できない**（旧版へ revert しての再計測はスコープ外。
+§4 の RTX 3060 実機での倍率〈別機種〉と直接比較しない）。よって以下は after 単独の
+絶対値と目標（親イシュー #1031「candle/Burn 比 N=4096 で 2,410 GFLOP/s 超え」）との
+比較のみを記録する。
+
+| N | tiled_f32 TFLOPS（GPU 実行のみ・5 回計測中央値） |
+|---|---|
+| 512  | 4.5640 TFLOPS (q1=4.5764, q3=4.5504) |
+| 1024 | 6.7469 TFLOPS (q1=6.7633, q3=6.3289) |
+| 2048 | 7.5413 TFLOPS (q1=7.5430, q3=7.5398) |
+| 4096 | 7.1008 TFLOPS (q1=7.1060, q3=7.0988) |
+
+**q1 > q3 の見え方について（転記ミスではない）**: 上表の q1 は中央値より大きく q3 は
+中央値より小さいという、通常の四分位（q1 < median < q3）と逆の並びに見える。これは
+`cuda_floor_bench.rs` が時間ドメイン（秒）の分位点（`q1_secs < median_secs < q3_secs`。
+速い試行ほど下位 25%）を TFLOPS へ換算してから出力する仕様のためで、逆数変換により
+大小関係が反転する（`examples/cuda_floor_bench.rs` の `TflopsSample` 構造体・同ファイル
+`#[cfg(test)]` の `assert!(sample.tflops_from_q1_secs > sample.median)` ／
+`assert!(sample.median > sample.tflops_from_q3_secs)` がこの仕様を裏付ける）。転記は
+ログ出力どおりであり誤りではない。
+
+**目標達成判定**: N=4096 で 7,100.8 GFLOP/s（7.1008 TFLOPS）を記録し、親イシュー
+#1031 の目標値 2,410 GFLOP/s を約 2.95 倍上回る。
+
+参考比較（以下はいずれも限定条件付きであり、7,100.8 GFLOP/s 自体の 2,410 GFLOP/s 超え
+という上記判定を覆すものではないが、倍率の解釈には注意が必要）:
+
+- `docs/perf/cuda-gemm-kernel-vs-frameworks-baseline.md` §4 の「tiled f32（基準経路）」
+  N=4096 行（1972.3 GFLOP/s。candle 比 約 0.87 倍・burn 比 約 0.67 倍で**下回っていた**）
+  と本節の 7,100.8 GFLOP/s を単純に並べると 1972.3 → 7100.8（約 3.60 倍）に見えるが、
+  **この 1972.3 GFLOP/s は `cuda-optimized-remeasurement.md`（2026-08-18 計測・
+  driver 580.159.03）に由来し、本節の実測（2026-08-31 計測・driver 580.173.02）とは
+  別セッションかつ GB10 個体の同一性が未確認のクロスセッション比較**である
+  （同ベースラインドキュメント §4「限定条件 7」）。加えて本ファイル §6 冒頭のとおり
+  HEAD には非 register-blocked 版が残っておらず revert 再計測もしていないため、
+  「register blocking 単独の効果として 3.60 倍」と断定はできない（§6 冒頭の
+  「before/after 倍率は取得できない」という記述と整合させ、この 3.60 倍は
+  register blocking 単独への帰属ではなく、クロスセッション・別 driver 版数の
+  参考比較として扱う）。
+- GB10 candle 実測（`cuda-gemm-kernel-vs-frameworks-baseline.md` §3.2・§4 経由。
+  N=4096: 2265.1 GFLOP/s）・burn 実測（同 N=4096: 2935.5 GFLOP/s）と比べると
+  7,100.8 GFLOP/s はそれぞれ約 3.13 倍・約 2.42 倍上回る。ただしこの比較にも
+  同ベースラインドキュメント **限定条件 1**（fandhe-ai 側は `cuda_floor_bench` の
+  launch-only 同期＝カーネル完了待ちのみで H2D/D2H・ホスト実体化を含まないのに対し、
+  candle/burn の framework-compare 実測は matmul 呼び出し＋ホスト実体化を含む。
+  同一境界での比較ではなく fandhe-ai 側に有利な方向のバイアスがある）と
+  **限定条件 7**（2026-08-18 の cuda-optimized-remeasurement.md 系列と 2026-08-28 の
+  framework-compare 系列は別セッション・GB10 個体未確認のクロスセッション比較。
+  本節の 2026-08-31 実測はさらに別セッション）が及ぶため、「突合済み」の値の単純比較
+  ではなく、境界差・セッション差が未解消のままの参考比較として扱う。
+- 上記の限定条件を踏まえても、7,100.8 GFLOP/s が親イシュー目標 2,410 GFLOP/s を
+  約 2.95 倍上回るという本節冒頭の**目標達成判定自体は成立する**（この判定は同一
+  セッション内の絶対値比較のみに依拠しており、クロスセッション参考比較には依存しない）。
+
+## 7. 関連
 
 - `docs/perf/cuda-gemm-kernel-improvement-policy.md`（本イシューの動機）
 - `docs/kernel-fusion.md` §2.2（`TILED_F32`/`TILED_BIAS_ACT_F32` bit 完全
