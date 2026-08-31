@@ -381,19 +381,129 @@ drop（`Tape` は計算グラフのノード管理のみを担い GPU リソー�
 
 ## §4 期待効果と実機計測計画（Mac セッション記入欄）
 
-計測対象・指標（実測は空欄。Mac セッションで記入する）:
+**実測日・環境**: 2026-08-31・Apple M4 Max（macOS）。HEAD（#1017 実装
+反映済み）でビルド・計測。計測は release ビルド（`cargo build --release`）
+後に実施した。
 
-- 1 step あたりのコマンドバッファ生成数・`waitUntilCompleted` 呼び出し回数
-  （変更前・変更後）。
-- `bench-fandhe --task train --device metal --mode reuse`（5 回計測の中央値。
-  `.claude/rules/coding-rust.md` のベンチ規約に従う）。
-- 比較の基準点: `scripts/bench/framework-compare/results/summary.md` 環境 5
-  (b') 表の metal reuse 中央値 20.381 ms（§1 参照。現状 reuse が fresh より
-  遅い状態からの改善幅を見る）。
+### 4.1 計測境界の注意（比較の前提）
 
-判定基準は #1015 の受け入れ条件（改善が見られること、かつ既存の数値一致
-parity テストが green のまま）に委ねる。本文書では数値目標を確定しない
-（実測前の推定値を記載しない）。
+`scripts/bench/framework-compare/bench-fandhe`（`fandhe-ai =0.4.0` の
+crates.io ピン。`.claude/rules/deps-policy.md` の第 9 区分）は本ワーク
+ツリーの改善前コードしか計測できないため、以下の 2 種類の計測を分離した
+（タスク指示・本文書冒頭の指示どおり実測前の推定値は記載しない）。
+
+1. **#1017 の効果を隔離するマイクロベンチ**（HEAD 上・同一プロセス内で
+   バッチ化前後の 2 経路を横並び計測。他の性能改善コミットの影響を
+   受けない）。
+2. **HEAD 絶対値としての MLP 学習 1 step 計測**（`bench-fandhe --task
+   train --mode reuse` と同一モデル形状・シード・step 数・warmup 数の
+   プロトコルを HEAD の `facade` crate（path 依存）で再現。crates.io
+   0.4.0 基準点との比較は「#1017 単独の delta」ではなく「#1017 を含む
+   HEAD までの全改善コミットの累積 delta」である点を明記する）。
+
+### 4.2 コマンドバッファ生成数・`waitUntilCompleted` 呼び出し回数
+
+**実行時カウンタは追加していない**（本 doc タスクの範囲外の本番コード
+変更〈`crates/backend-metal/src/context.rs` への計測用計装〉を避けるため。
+代わりに #1017 で変更された唯一の経路（`BackendOps::
+sgd_step_device_tracked`。§7）をソースコードから静的に突き合わせた）。
+
+- `gemm.rs`／`elementwise.rs`／`rmsnorm.rs`／`softmax.rs` の
+  `dispatch_sync` 呼び出し（§2.1 の 11 箇所）は #1017 で**無変更**
+  （§7 実装記録に明記）。MLP 1 step あたり GEMM 呼び出しは §1 の通り
+  6 回発生し、各呼び出しは変更前・変更後とも独立した 1 コマンドバッファ
+  ＋ 1 `waitUntilCompleted()` のまま。
+- `sgd_step_device`（`token: None`。§3.7 (3) の非バッチ契約）は
+  変更前・変更後とも「`encode` 直後に `ctx.synchronize()`」を維持
+  （`ops.rs:375-390`・`sgd.rs` doc コメント）。
+- 変更があるのは `sgd_step_device_tracked`（`token: Some`）のみ:
+  変更前はデフォルト委譲で `sgd_step_device` へ流れ 1 呼び出し = 1 コマンド
+  バッファ ＋ 1 `waitUntilCompleted()`（即時ブロッキング）。変更後は
+  `encode` のみを行い、その場では待たない（`context.rs::encode`）。
+- `DeviceParamStore::step` は #1023（#1017 以前）で既にパラメータ数に
+  依らず 1 回の起動へ集約済み（`device_store.rs:43-44`）であるため、
+  reuse ループの 1 step あたりの `sgd_step_device_tracked` 呼び出しは
+  変更前後とも **1 回**。`register_resident_leaves`（forward 側の
+  D2H download。§2.2）の直後に `ctx.synchronize()` が走り、まだ
+  flush されていない SGD バッチがあればそこで `flush()` ＋
+  `waitUntilCompleted()` される（`memory.rs::download_inner` が
+  §3.5 の同期点）。
+- 結論: **MLP 学習 1 step あたりのコマンドバッファ生成数・
+  `waitUntilCompleted()` 呼び出し回数は変更前後で同数**（GEMM 6 回 +
+  SGD 1 回 = 7 回、いずれもカウント不変）。#1017 が変えるのは「SGD の
+  完了待ちが *いつ* 発生するか」であり、「起動直後の専用ブロッキング
+  待機」から「次 step 冒頭の `register_resident_leaves` の download が
+  必要とする同期点への遅延・合流」へ移した点にある（host 側は SGD 完了を
+  待つ間に次 step のホスト側前処理を進められる。ただし本 doc 執筆時点で
+  reuse ループが `sgd_step_device_tracked` を 1 step あたり 1 回しか
+  呼ばないため、複数 `encode` が同一コマンドバッファへ積み増される
+  効果〈§3.2 の本来の狙い〉はこの経路では実現していない）。
+
+### 4.3 マイクロベンチ: #1017 の効果を隔離した計測（HEAD・新規追加）
+
+`crates/backend-metal/tests/command_batching_bench.rs`
+（`command_batching_micro_bench_untracked_vs_tracked`）で、同一 shape
+（要素数 1024）・同一パラメータ／勾配バッファに対し、非バッチ経路
+（`sgd_step_device`。呼び出しごとに同期）とバッチ経路
+（`sgd_step_device_tracked`。100 回連続 `encode` の後に 1 回だけ
+`download` で同期）を 100 回連続更新× 5 trial の中央値で比較した。
+
+| 経路 | 100 回連続更新の中央値（Q1〜Q3） |
+| --- | --- |
+| 非バッチ（`sgd_step_device`。#1017 以前の `sgd_step_device_tracked` デフォルト委譲と同一の同期契約） | 10.857 ms（10.743〜13.596 ms） |
+| バッチ（`sgd_step_device_tracked`。#1017） | 0.489 ms（0.476〜0.918 ms） |
+
+speedup 約 22.2 倍（`tracked_faster=true`）。これは #1017 が導入した
+「`encode` の連続投入 + 単一の遅延同期」機構そのものの効果を、他の
+性能改善コミットと混同せず HEAD 上で単独に隔離した計測である。§4.2 で
+述べた通り、現行の reuse ループ 1 step あたりの `sgd_step_device_tracked`
+呼び出しは 1 回のみのため、この 22 倍という数値は「複数の SGD 起動を
+1 コマンドバッファへ積み増す場合の上限効果」を示す指標であり、現行の
+MLP 1 step の直接的な短縮幅とは別物である（§4.2 の結論と整合）。
+
+### 4.4 HEAD 絶対値: MLP 学習 1 step（MNIST 規模 2 層 MLP・train・reuse）
+
+`crates/facade/tests/mnist_scale_train_reuse_bench.rs`
+（`mnist_scale_train_fresh_vs_reuse_metal`）で、`bench-fandhe` と同一の
+モデル形状（`BATCH=64`／`D_IN=784`／`D_HIDDEN=256`／`D_OUT=10`）・
+乱数シード・`TRAIN_STEPS=100`／`TRAIN_WARMUP=20`（先頭 20 step を捨て
+残り 80 step の中央値）のプロトコルを HEAD の `facade` crate（path
+依存）で再現した。
+
+| | fresh（ホスト経由 SGD） | reuse（デバイス常駐 SGD） | reuse/fresh |
+| --- | --- | --- | --- |
+| HEAD（本実測。M4 Max） | 17.493 ms（17.094〜17.743 ms） | 8.756 ms（8.496〜9.117 ms） | 1.998 倍高速 |
+| `fandhe-ai =0.4.0`（`results/summary.md` 環境 5 (b') 表。§1 引用） | 19.699 ms | 20.381 ms | 0.966 倍（reuse が遅い） |
+
+**境界差の明記（§4.1）**: 上段（HEAD）と下段（0.4.0）は計測対象コード
+のバージョンが異なる。HEAD の reuse 8.756 ms は #1017 単独の効果ではなく、
+0.4.0 以降にマージされた性能改善コミット群（#1013・#1023・#1028・
+#1043〜#1047・#1044・#1078〜#1082 等。冒頭コメント参照）を累積した結果
+であり、§4.3 のマイクロベンチが #1017 単独の delta を担う。
+
+### 4.5 #1015 受け入れ条件の充足判定
+
+受け入れ条件「改善が見られること、かつ既存の数値一致 parity テストが
+green のまま」を以下のとおり判定する。
+
+- **改善**: (a) HEAD 絶対値として reuse が 0.4.0 の 20.381 ms から
+  8.756 ms へ改善し、かつ 0.4.0 で発生していた「reuse が fresh より
+  遅い」逆転（0.966 倍）が解消され reuse が fresh の 1.998 倍高速に
+  なった（§4.4。ただし累積 delta であり #1017 単独の寄与は §4.3 の
+  マイクロベンチ〈約 22 倍〉に限定して評価する）。(b) #1017 が導入した
+  バッチ化機構そのものは、その機構を直接行使する経路（連続
+  `sgd_step_device_tracked` 呼び出し）において約 22 倍の高速化を示した
+  （§4.3）。現行の reuse ループはこの機構を 1 step あたり 1 回しか
+  行使しないため、MLP 1 step の短縮幅への直接的寄与は §4.2 の結論
+  （コマンドバッファ・wait 回数は不変、完了待ちの時間帯が後ろへ
+  ずれるのみ）にとどまる点は正直に記録する。
+- **parity green**: `make test-ignored-metal`（`cargo test -p
+  fandhe-ai-backend-metal --release -- --ignored --nocapture` 相当）
+  を実行し、既存の実機依存テスト（`command_batching.rs` の #1017
+  受け入れ条件 1〜4 を含む）・parity テスト（`sgd_device_parity.rs`・
+  `cpu_metal_parity.rs`・`gemm_*_parity.rs`・`rmsnorm_parity.rs`・
+  `softmax_parity.rs` 等）を含む全 31 テストバイナリが `test result: ok`
+  （failed 0）で完走したことを確認済み（2026-08-31 実測）。
 
 ## §5 代替案と採否
 
@@ -478,8 +588,11 @@ Metal API を直接呼ばない純粋なロジック）は `cfg(target_os = "mac
   `MetalContext::Drop` に `synchronize()` を追加した（§3.5 の表どおり）。
   既存の `dispatch_sync` 呼び出し元（`gemm.rs`／`elementwise.rs`／
   `rmsnorm.rs`／`softmax.rs`）はシグネチャ・挙動とも無変更。
-- **§4 実測**: Metal 実機（Mac セッション）未実施のため空欄のまま
-  （PR 本文に明記）。実測手順は
-  `crates/backend-metal/tests/command_batching.rs` 冒頭コメント・
-  `crates/facade/tests/device_param_store_bench.rs` の
-  `legacy_vs_resident_per_step_metal` を参照。
+- **§4 実測**: 2026-08-31・Apple M4 Max 実機で実測済み（§4 参照）。
+  `crates/backend-metal/tests/command_batching_bench.rs`
+  （#1017 単独の効果を隔離するマイクロベンチ）・`crates/facade/tests/
+  mnist_scale_train_reuse_bench.rs`（`bench-fandhe` 相当プロトコルの
+  HEAD 絶対値計測）を新規追加した。`crates/backend-metal/tests/
+  command_batching.rs` 冒頭コメント・`crates/facade/tests/
+  device_param_store_bench.rs` の `legacy_vs_resident_per_step_metal`
+  は正しさ検証・小規模ベンチの既存参照として引き続き有効。
