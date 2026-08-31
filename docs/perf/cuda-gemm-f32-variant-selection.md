@@ -3,7 +3,9 @@
 イシュー #1035「perf(backend-cuda): 形状別カーネル選択を simple / double-buffer / split-K のヒューリスティックへ拡張する」の実機比較記録テンプレート。
 親ツリー #1029（GEMM カーネルの candle 超え）・#1007 の Phase 2。cuBLAS フル FP32（candle CUDA）を上回ることが目標で、本イシューは特に小サイズ（N=256〜512。candle 実測 423〜1,109 GFLOP/s @GB10、`docs/perf/cuda-gemm-kernel-vs-frameworks-baseline.md` §3.2）で SM が遊ぶ形状への対処を担う。
 
-## 状態: DGX Spark GB10 実機実測完了（#1031 実機実測セッション。下記「1a. GB10 実機実測結果」節）。受け入れ条件 (a)「全 N で candle 以上」は**未達**、かつ `#[ignore]` 正当性テストが SplitK 経路で複合判定 FAIL を検出した。本ファイル冒頭の実装セッション記録（下記）は当時の状態としてそのまま残す
+## 状態（追補: イシュー #1100。下記「1b」節）: SplitK の複合判定 FAIL と DoubleBuffer の性能逆転を修正した。SplitK は選択ヒューリスティックから撤退（K 支配的形状は Simple へ）し、DoubleBuffer は base（`TILED_F32`）と同一のバッファ管理（プール経由 `alloc_uninit_f32`）へ揃えた。**本 PR の実装セッションは CUDA 実機（GB10）接続を持たないため、DoubleBuffer 是正後の GB10 再実測は未実施**（下記「1b」節参照。#994 の先例に従い安全側〈選択条件は変更しない〉のまま「未実測」を明記する）
+
+## 状態（#1035 当時の記録。下記そのまま維持）: DGX Spark GB10 実機実測完了（#1031 実機実測セッション。下記「1a. GB10 実機実測結果」節）。受け入れ条件 (a)「全 N で candle 以上」は**未達**、かつ `#[ignore]` 正当性テストが SplitK 経路で複合判定 FAIL を検出した。本ファイル冒頭の実装セッション記録（下記）は当時の状態としてそのまま残す
 
 本実装セッションは実機接続情報（`docs/real-hardware-verification-env.local.md`）を持たないため、本イシューの受け入れ条件が要求する「(a) 全 N で candle 以上」の検証は実行できない（`docs/perf/cuda-gemm-cost-model-selection.md`・#527 が同じ理由で「未実測・要実機実行」のまま安全側クローズしている先例と同型）。受け入れ条件 (b)「選択ロジックのユニットテスト」は本ランで充足済み（§2）。
 
@@ -126,6 +128,45 @@ selected/candle 比は**改善する方向**に動き、N=1024（約 0.83 倍）
 `gemm_variant.rs` のコード変更であり `docs/spec-proposal` 系のスコープ判断・
 ユーザー承認が必要）。本番既定経路への結線判断（同手順 4）も同様に未実施。
 
+## 1b. イシュー #1100 の修正内容（SplitK parity 失敗・DoubleBuffer 性能逆転）
+
+「1a」節が検出した 2 件（SplitK の複合判定 FAIL・DoubleBuffer の `TILED_F32` 単体比劣化）に対する修正記録。**本 PR の実装セッションは CUDA 実機（GB10・Metal）への接続情報を持たないため、下記の是正は GPU 不要のホスト側検証（ユニットテスト・ホストモデルシミュレーション）のみで完結させ、GB10 実機での再実測は未実施のまま安全側で完了させる**（#994 の先例と同じ判断: 未検証の変更を選択条件の緩和方向へ倒さない）。
+
+### SplitK: 撤退（parity FAIL の根本原因はカーネルバグではなく演算順序）
+
+計画セッションでテストと同一の入力生成（`bench_harness::rng::Xorshift64Star`・seed=3・m=n=128・k=8192）・同一の CPU 参照（`matmul_reference_fma` の逐次 k 昇順 `mul_add` 連鎖）・SplitK と同一の数式モデル（split ごとの f32 FMA 連鎖 → s 昇順 f32 縮約・`k_per_split=1024`×8 分割）をホスト側 Rust で再現したところ（`crates/backend-cuda/tests/splitk_reorder_error_host_model.rs`）、GB10 実機の FAIL レポート（fail_count=8/16384・max_abs_diff=3.662e-4・max_rel_err=1.090e-2）と 3 指標が一致した（相対許容 5e-3 で機械検査済み）。さらに縮約・部分和の精度を f32→f64（ほぼ厳密値）へ引き上げても fail 数は減らないことも同テストで固定した（`higher_precision_reduction_does_not_eliminate_fail_count`）。
+
+差分の支配項は CPU 参照実装（K=8192 の逐次 f32 `mul_add` 連鎖）自身の丸め誤差であり、真値ゼロ近傍（桁落ち）要素では絶対誤差救済 1e-5 を超えるため、**K 方向の累積順序を CPU 参照と一致させない限り、いかなる精度改善でも複合判定は通らない**（split-K という手法の本質と非両立）。tolerance（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・参照実装（`matmul_reference_fma`）の変更はユーザー承認必須（`.claude/rules/security.md` A08）のため本イシューでは行わない。
+
+よって `gemm_variant.rs::select_f32_gemm_variant` から SplitK 選択分岐を撤退した（K 支配的形状も `blocks < num_sms` のため DoubleBuffer の前提〈`blocks >= num_sms`〉を満たさず自然に `Simple` へ倒れる）。カーネル自体（`SPLITK_PARTIAL_F32`／`SPLITK_REDUCE_F32`。インデックス計算・境界チェック・決定性）は誤りではないため削除せず、`CudaGemmF32VariantSelection::run_split_k_forced`（診断専用。ヒューリスティックを経由しない明示起動）として保持する。spec 側での「split 順序を反映した parity 契約」の再検討要否はユーザー判断に委ねる（`out-of-scope-tracking.md` 準拠。本 PR では Issue 起票を行わない）。
+
+### DoubleBuffer: バッファ管理を base と同一条件へ揃えた（性能逆転の是正）
+
+`CudaGemm::run_tiled_f32`（base）は #1020 でプールアロケータ経由 `alloc_uninit_f32` へ移行済みだったが、`gemm_variant_selection.rs::run_double_buffer`／`run_split_k` は毎イテレーション raw `stream.alloc_zeros`（cuMemAlloc + memset + 都度解放）で C（および split-K の c_partial）を確保していた。GB10 実測で観測された「N が大きいほど悪化する」傾向（N=4096 で `TILED_F32` 単体比 0.08 倍）はこのバッファ管理差が有力仮説だったため、`CudaGemmF32VariantSelection` に `context_cache::cached_allocator` 経由のプールを導入し、DoubleBuffer・SplitK（診断専用）双方の出力バッファを base と同一の `alloc_uninit_f32` へ揃えた。
+
+`alloc_uninit_f32` の安全性根拠（前利用データが D2H 前に必ず上書きされること）: `TILED_DB_F32` は `row < m && col < n` の全要素へ無条件書き込み（`num_tiles == 0` の早期 return パスも `c[row*n+col] = 0.0f` を無条件出力）、`SPLITK_PARTIAL_F32` も全 `(bz, row, col)`（`row<m && col<n`）へ無条件書き込み（末尾の空分割も `acc=0.0f` のまま出力）、`SPLITK_REDUCE_F32` も `idx < m*n` の全要素へ無条件書き込み。いずれも `docs/backend-cuda-pool-allocator-decision.md` §「`alloc_uninit` の適用」の確認済みパターンと同型。
+
+**GB10 実機再実測は未実施**（本 PR の実装セッションに CUDA 実機接続なし）。バッファ管理差の是正がどの程度性能を改善するかは実機実測待ちであり、`gemm_variant.rs::DOUBLE_BUFFER_MIN_K` 等の選択閾値は本 PR では**変更していない**（安全側: 未検証のまま閾値を動かさない。実装計画 §5 手順 6 の「実機不達の場合の fallback」に従う）。次に実機接続を持つセッションで下記コマンドを実行し、結果を本節に追記すること:
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics -- --ignored --nocapture
+cargo run -p fandhe-ai-backend-cuda --example gemm_f32_variant_bench --release --features internal-diagnostics
+```
+
+合格基準:
+
+- `run_f32_matches_cpu_reference_across_variant_shapes`: 全形状で複合判定 green（128×128×8192 は撤退により `Simple` が選ばれ、`TILED_F32` と同一の数値契約になるため green のはず）
+- `split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail`: 2 回実行が bit 一致し、複合判定は引き続き FAIL（PASS した場合は #1100 の撤退判断の前提が崩れているため要再検討）
+- DoubleBuffer が選択される全形状（N=256/512/1024/4096・256×256×16384）で `TILED_F32` 単体比が 1.0 倍以上に改善しているか確認する。1.0 倍未満が残る場合は、実装計画 §5 手順 6 に従い（1 回限りの）閾値補正または DoubleBuffer 自体の選択除外を検討する（ユーザー承認のうえ実施）
+
+### 本 PR で検証済みの事項（GPU 不要）
+
+- `cargo build --workspace`
+- `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test -p fandhe-ai-backend-cuda --all-features`（`gemm_variant::tests`〈撤退後の新契約〉・`kernels_gemm_variants::tests`・`splitk_reorder_error_host_model.rs`〈GB10 レポート値の再現・精度モデル比較の 2 件〉・`gemm_f32_variants.rs`〈環境適応スモーク 2 件。`#[ignore]` 2 件は未実行〉を含む全 green）
+- `cargo test --workspace` / `cargo test --workspace --all-features`（回帰確認）
+- `git diff origin/main -- crates/backend-cuda/tests/parity_nonregression.rs crates/backend-cuda/tests/common/parity_baseline crates/backend-cuda/src/kernels.rs crates/backend-cuda/src/kernels_mma.rs crates/backend-cuda/src/kernels_wmma.rs crates/backend-cuda/src/kernels_wmma_opt.rs` が無差分（既存カーネル・fixture・tolerance を一切変更していないことの機械確認）
+
 ## 1. 実機手順
 
 前提: CUDA driver + NVRTC 搭載実機（DGX Spark GB10 等。`docs/real-hardware-verification-env.md` の接続手順）。
@@ -149,16 +190,23 @@ DGX Spark GB10 実機実測完了。データ本体・正当性検証結果・�
 
 ## 2. GPU 不要ユニットテストの検証範囲
 
+**イシュー #1100 で更新**: SplitK は `select_f32_gemm_variant` の選択候補から撤退した（下記「1b」節）。
+
 `crates/backend-cuda/src/gemm_variant.rs::tests`（`select_f32_gemm_variant`・`derive_split_count`・`validate_split_k_launch`）:
 
 - num_sms 判定不能（`None`）・境界条件（0 次元・`num_sms=0`）では常に `Simple`
-- SplitK: grid が SM を埋められず K 支配的な形状で選ばれる／候補利用不能・K 閾値未満・K 非支配では選ばれない／部分和バッファが cap を超える場合は `Simple` へ fail-closed で降格する
+- K 支配的な形状（grid が SM を埋められない）は SplitK ではなく `Simple` が選ばれる（撤退後の契約。`k_dominant_small_grid_shape_selects_simple_not_split_k`）
 - DoubleBuffer: grid が SM を十分埋めるアラインメント済み大形状で選ばれる／非整列・候補利用不能・K 閾値未満では選ばれない
-- `derive_split_count` が常に 2 冪（または 1）かつ `[1, SPLITK_MAX_SPLITS]` の範囲内であること・`num_blocks`/`num_sms` が 0 の場合は 1 を返すこと
+- `derive_split_count`（診断専用 `recommend_split_count` 経由で到達可能）が常に 2 冪（または 1）かつ `[1, SPLITK_MAX_SPLITS]` の範囲内であること・`num_blocks`/`num_sms` が 0 の場合は 1 を返すこと
 - 選択の決定性（同一入力 2 回で同一結果）・巨大形状（`i32::MAX` 近傍）での非 panic（`u64` オーバーフロー安全性）
-- `validate_split_k_launch` の範囲外 `num_splits` 拒否・cap 超過拒否・正常系受理
+- `validate_split_k_launch`（診断専用 `run_split_k_forced` が起動前に呼ぶ）の範囲外 `num_splits` 拒否・cap 超過拒否・正常系受理
 
-`crates/backend-cuda/src/kernels_gemm_variants.rs::tests`（カーネルソース構造検査。`kernels_rmsnorm.rs` の split-K テスト群と同型）:
+`crates/backend-cuda/tests/splitk_reorder_error_host_model.rs`（GPU 不要。イシュー #1100 で新規追加）:
+
+- GB10 実機レポート（fail_count=8/16384・max_abs_diff=3.662e-4・max_rel_err=1.090e-2）と同一の形状・分割数・シードで split-K の数式モデル（f32 部分和 + f32 縮約）をホスト側 Rust で再現し、3 指標が一致することを固定する（`f32_partial_f32_reduce_matches_gb10_report`）
+- 部分和・縮約の精度を f64（ほぼ厳密値）まで引き上げても複合判定 FAIL が解消しないことを固定する（`higher_precision_reduction_does_not_eliminate_fail_count`）
+
+`crates/backend-cuda/src/kernels_gemm_variants.rs::tests`（カーネルソース構造検査。`kernels_rmsnorm.rs` の split-K テスト群と同型。SplitK カーネル自体は診断専用として保持しているため引き続き検証する）:
 
 - split-K 部分和カーネルが `c_partial` へ無条件に 1 回だけ書くこと（末尾要素ブロックの扱い）
 - split-K の 2 カーネルがいずれも atomics を使わないこと（決定的書き込み）
@@ -167,14 +215,16 @@ DGX Spark GB10 実機実測完了。データ本体・正当性検証結果・�
 - double-buffer カーネルの smem が 2 面であること・C への書き込み時の手動境界チェック（REQ-8）・タイルロードの三項ガードを維持していること
 - split-K 部分和カーネルのタイルロードも三項ガードを維持していること
 
-`crates/backend-cuda/tests/gemm_f32_variants.rs`（`internal-diagnostics` feature 限定）:
+`crates/backend-cuda/tests/gemm_f32_variants.rs`（`internal-diagnostics` feature 限定。イシュー #1100 で `KDominant` の期待値・決定性テストを更新）:
 
-- 環境適応スモーク（非 ignore）: `CudaGemmF32VariantSelection::new` が CUDA 非搭載環境で panic せず型付きエラーを返すこと・`selected_variant` が panic しないこと
-- `#[ignore]`（実機必須。本ランは未実行）: CPU 参照実装との複合判定（アラインメント済み大形状・K 支配的非正方・非整列・境界サイズを網羅）・SplitK の bit 決定性
+- 環境適応スモーク（非 ignore）: `CudaGemmF32VariantSelection::new` が CUDA 非搭載環境で panic せず型付きエラーを返すこと・`selected_variant`（SplitK を返さない）が panic しないこと
+- `#[ignore]`（実機必須。本ランは未実行）: CPU 参照実装との複合判定（アラインメント済み大形状・K 支配的非正方は撤退後の契約〈`Simple` または `DoubleBuffer`〉・非整列・境界サイズを網羅する `run_f32_matches_cpu_reference_across_variant_shapes`）・`run_split_k_forced` の bit 決定性と GB10 FAIL 再現（`split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail`）
 
 ## 3. スコープ外・追跡事項（`out-of-scope-tracking.md` 準拠）
 
 - 本番既定経路（`CudaGemm::new`・`run_tiled_f32`・`CudaGemmAuto::run_f32`）への選択ヒューリスティック結線は、実機実測（A/B・複合判定・parity 非後退）とユーザー承認後の後続作業とする
-- 暫定閾値（`SPLITK_MIN_K`・occupancy 係数・バッファ cap）の実機補正は上記結線判断とセットで実施する（補正は 1 回限り・補正ループ禁止）
+- DoubleBuffer 是正後の GB10 実機再実測（本 PR〈#1100〉の実装セッションでは実行不能。上記「1b」節）
+- 暫定閾値（`DOUBLE_BUFFER_MIN_K`・occupancy 係数・バッファ cap）の実機補正は上記結線判断とセットで実施する（補正は 1 回限り・補正ループ禁止）
+- split 順序を反映した parity 契約（参照実装・判定方式）の spec 側検討要否（`docs/spec/` は編集しないため、必要なら Fandhe-AI/fandhe-ai-spec 側でユーザーが判断する。上記「1b」節）
 - #1033（cp.async 多段パイプライン）の DoubleBuffer 候補への差し替え統合は #1033 マージ後の後続判断とする（`gemm_variant_selection.rs::CudaGemmF32VariantSelection` の候補は `Option` スロットで保持しており差し替え可能な構造）
 - resident 経路（`launch_tiled_f32_resident`）への変種適用は本 PR のスコープ外とし、本番既定経路への結線判断と同時に検討する
