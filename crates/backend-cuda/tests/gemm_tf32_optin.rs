@@ -9,8 +9,14 @@
 //! と同じ構成方針）:
 //!
 //! 1. opt-in OFF（既定）時、`gemm` 出力が本イシュー導入前と bit-exact に
-//!    一致すること（既定 OFF の非後退契約）。
-//! 2. opt-in ON 時、`gemm` 出力が CPU 参照実装（FP32 厳密）と REQ-2 統一
+//!    一致すること（既定 OFF の非後退契約）。CUDA 内で完結する `==` の
+//!    完全一致で検証する（codex-review P2 指摘・PR #1091: tolerance
+//!    許容比較では非後退契約を固定できないため。詳細は
+//!    `gemm_tf32_optin_off_matches_default_fp32_path_env_adaptive` の
+//!    ドキュメンテーションコメント）。
+//! 2. 上記とは別に、opt-in OFF 時の `gemm` 出力が CPU 参照実装と REQ-2
+//!    統一複合判定で一致すること（通常のバックエンド間 parity 契約）。
+//! 3. opt-in ON 時、`gemm` 出力が CPU 参照実装（FP32 厳密）と REQ-2 統一
 //!    複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で一致する
 //!    こと。
 //!
@@ -28,7 +34,7 @@ use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_cuda::CudaBackendOps;
 use fandhe_ai_backend_cuda::precision::{set_tf32_gemm_enabled, tf32_gemm_enabled};
 use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{BackendOps, Tensor};
+use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 mod common;
 
@@ -80,11 +86,76 @@ fn assert_tf32_optin_gemm_parity(seed_a: u64, seed_b: u64, m: usize, n: usize, k
 /// 環境適応スモーク（属性なし。通常 CI で実行）。opt-in OFF（既定）時の
 /// `gemm` 出力が opt-in を一切知らないかのように動作する（本イシュー
 /// 導入前の `run_tiled_f32` 単独経路と bit-exact に一致する）ことを、
-/// CPU 参照実装との複合判定で確認する。CUDA 不在なら
-/// `BackendError::CudaUnavailable` を確認して早期 return する
+/// **CUDA 内で完結する bit-exact 比較**で確認する（codex-review P2
+/// 指摘・PR #1091: `assert_parity`〈相対誤差 1e-3／絶対誤差 1e-5 許容〉
+/// は CPU-GPU 異丸め方式間の複合判定としては正しいが、OFF 時の非後退
+/// 契約〈同一 GPU カーネル `run_tiled_f32` を挟んで出力が一切変化しない
+/// こと〉を固定するには誤差許容比較では不十分で、許容範囲内の出力劣化を
+/// 検出できない）。
+///
+/// 比較対象は `self.gemm(a, b)`（OFF 時は `gemm_fp32_strict` へ委譲。
+/// `ops.rs::CudaBackendOps::gemm` 冒頭コメント参照）と、
+/// `gemm_bias_act(a, b, Some(&zero_bias), Activation::None)` を
+/// ブロードキャスト可能だが `[n]` 完全一致ではない bias 形状（`[1]`。
+/// `n != 1` の形状を使うことで `ops.rs::gemm_bias_act_route` が
+/// `ComposedFallback`〈`gemm_fp32_strict` → `add` → 恒等〉を選ぶことを
+/// 保証する）で迂回的に呼んだ経路の 2 通り。両者は TF32 opt-in フラグの
+/// 影響を受けない同一の `gemm_fp32_strict` 呼び出しに帰着するため、
+/// ゼロ加算（`+0.0` は丸め誤差を生まない）・恒等 activation を介しても
+/// bit-exact に一致するはずであり、`==` の完全一致で比較する（tolerance
+/// 判定を混入させない）。CUDA 不在なら双方が同型の
+/// `BackendError::CudaUnavailable` を返すことを確認して早期 return する
 /// （`gemm_bias_act_parity.rs` と同じ分岐パターン）。
 #[test]
 fn gemm_tf32_optin_off_matches_default_fp32_path_env_adaptive() {
+    let _guard = Tf32FlagGuard::acquire(false);
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+    let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+    // n=2 に対し形状 [1] はブロードキャスト可能だが `[n]` 完全一致では
+    // ないため `gemm_bias_act_route` が `ComposedFallback` を選ぶ
+    // （`ops.rs::gemm_bias_act_route`）。
+    let zero_bias = Tensor::new(vec![0.0], &[1]).expect("valid tensor");
+
+    let direct = cuda.gemm(&a, &b);
+    let via_fallback = cuda.gemm_bias_act(&a, &b, Some(&zero_bias), Activation::None);
+
+    match (direct, via_fallback) {
+        (Ok(direct_result), Ok(fallback_result)) => {
+            assert_eq!(direct_result.shape(), fallback_result.shape());
+            assert_eq!(
+                direct_result.as_slice().expect("contiguous"),
+                fallback_result.as_slice().expect("contiguous"),
+                "opt-in OFF 時の gemm 出力が gemm_fp32_strict 経由の \
+                 参照値と bit-exact に一致しない（非後退契約違反）"
+            );
+        }
+        (
+            Err(BackendError::CudaUnavailable(direct_msg)),
+            Err(BackendError::CudaUnavailable(fallback_msg)),
+        ) => {
+            assert!(
+                !direct_msg.is_empty(),
+                "error detail message must not be empty"
+            );
+            assert!(
+                !fallback_msg.is_empty(),
+                "error detail message must not be empty"
+            );
+        }
+        (direct_res, fallback_res) => panic!(
+            "unexpected result combination for CudaBackendOps::gemm vs gemm_bias_act \
+             fallback (opt-in OFF): direct={direct_res:?}, fallback={fallback_res:?}"
+        ),
+    }
+}
+
+/// opt-in OFF 時、`gemm` 出力が CPU 参照実装と REQ-2 統一複合判定で
+/// 一致することを確認する環境適応スモーク（CPU-GPU 異丸め方式間の
+/// 通常の parity 契約。上記の bit-exact テストとは別の観点で、こちらは
+/// バックエンド間数値一致そのものを検証する）。
+#[test]
+fn gemm_tf32_optin_off_matches_cpu_reference_env_adaptive() {
     let _guard = Tf32FlagGuard::acquire(false);
     let cuda = CudaBackendOps::new(0);
     let cpu = CpuBackendOps::new();
