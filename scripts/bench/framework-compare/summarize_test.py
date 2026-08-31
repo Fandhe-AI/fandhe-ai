@@ -424,6 +424,57 @@ class GemmParityHelpersTests(unittest.TestCase):
         self.assertEqual(unverified[0]["framework"], "fandhe-ai")
 
 
+class LoadRowsTf32ValidationTests(unittest.TestCase):
+    """`load_rows()` の `tf32` フィールド型検証（イシュー #1042
+    codex-review P0 指摘・PR #1091）。`bool(r.get("tf32", False))` は
+    文字列 `"false"` 等の非 bool 値も真として誤って受理する fail-open
+    だったため、キー欠損（`False` 扱い）または厳密な `bool` 型のみを
+    許容し、それ以外は `ValueError` でロード全体を失敗させることを
+    検証する。
+    """
+
+    def test_missing_tf32_key_loads_as_untouched_row(self):
+        path = _write_jsonl([_base_row()])
+        try:
+            rows = summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertNotIn("tf32", rows[0])
+
+    def test_strict_bool_true_and_false_load_unchanged(self):
+        rows_in = [
+            dict(_base_row(framework="fandhe-ai"), tf32=True),
+            dict(_base_row(framework="candle"), tf32=False),
+        ]
+        path = _write_jsonl(rows_in)
+        try:
+            rows = summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertIs(rows[0]["tf32"], True)
+        self.assertIs(rows[1]["tf32"], False)
+
+    def test_string_tf32_value_raises_value_error(self):
+        path = _write_jsonl([dict(_base_row(), tf32="false")])
+        try:
+            with self.assertRaises(ValueError):
+                summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+
+    def test_truthy_non_bool_tf32_value_raises_value_error(self):
+        # `bool(1) == True` かつ `bool("x") == True` だが、いずれも
+        # 外部 JSONL 由来の非 bool 型であり fail-closed で拒否する。
+        for bad_value in (1, "x", [], {}, None):
+            with self.subTest(bad_value=bad_value):
+                path = _write_jsonl([dict(_base_row(), tf32=bad_value)])
+                try:
+                    with self.assertRaises(ValueError):
+                        summarize.load_rows(path)
+                finally:
+                    os.unlink(path)
+
+
 class SectionRenderingTests(unittest.TestCase):
     def test_gemm_row_with_unhashable_size_does_not_raise(self):
         # イシュー #1051 codex-review 指摘の防御的スイープ（PR #1082）:

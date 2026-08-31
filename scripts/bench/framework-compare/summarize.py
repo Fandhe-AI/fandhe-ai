@@ -596,6 +596,23 @@ def load_rows(path):
         rows = [json.loads(line) for line in f if line.strip()]
     for r in rows:
         r.setdefault("mode", "fresh")
+        # イシュー #1042 codex-review P0 指摘（PR #1091）: `tf32` は外部
+        # JSONL 由来の値であり、`bool(r.get("tf32", False))` は文字列
+        # `"false"`・空でない配列／オブジェクト等の非 bool 値も真として
+        # 誤って受理してしまう fail-open の欠陥だった（本来 FP32 として
+        # 通常ゲートに含めるべき行が、型検証なしに TF32 専用扱いへ
+        # 誤って除外されうる）。ここでキー欠損（`False` 扱い。互換規約
+        # ドキュメント `get()`／`devices_in()` docstring 参照）または
+        # 厳密な `bool` 型であることを検証し、不正型はロード全体を
+        # エラー終了させる（fail-closed。AGENTS.md「外部フォーマットの
+        # パース検証」「fail-closed の維持」）。検証後は各利用箇所が
+        # `r.get("tf32", False) is True` のように厳密な bool 一致で
+        # 判定できる（`bool(...)` での再変換は行わない）。
+        if "tf32" in r and not isinstance(r["tf32"], bool):
+            raise ValueError(
+                f"{path}: 不正な 'tf32' フィールド型（bool を期待）: "
+                f"{r['tf32']!r}（行: {r!r}）"
+            )
     return rows
 
 
@@ -623,7 +640,7 @@ def get(rows, fw, task, device, size=None, mode="fresh", tf32=False):
             and r["task"] == task
             and r["device"] == device
             and r["mode"] == mode
-            and bool(r.get("tf32", False)) == tf32
+            and (r.get("tf32", False) is True) == tf32
         ):
             if size is None:
                 return r
@@ -646,7 +663,7 @@ def devices_in(rows, task, mode="fresh", tf32=False):
     present = {
         r["device"]
         for r in rows
-        if r["task"] == task and r["mode"] == mode and bool(r.get("tf32", False)) == tf32
+        if r["task"] == task and r["mode"] == mode and (r.get("tf32", False) is True) == tf32
     }
     return [d for d in DEVICE_ORDER if d in present]
 
@@ -756,7 +773,7 @@ def gemm_checksum_reference(rows):
         {
             r["size"]
             for r in rows
-            if r["task"] == "gemm" and _valid_gate_size(r.get("size")) and not r.get("tf32", False)
+            if r["task"] == "gemm" and _valid_gate_size(r.get("size")) and r.get("tf32", False) is not True
         }
     )
     result = {}
@@ -767,7 +784,7 @@ def gemm_checksum_reference(rows):
             if r["task"] == "gemm"
             and r["size"] == size
             and r["mode"] == "fresh"
-            and not r.get("tf32", False)
+            and r.get("tf32", False) is not True
         ]
 
         # 相互一致するクラスタのうち最大のものを先に求める（多数派の把握）。
@@ -836,7 +853,7 @@ def gemm_checksum_mismatches(rows):
         # イシュー #1042: TF32 行は FP32 参照との単純突合対象から除外する
         # （`gemm_checksum_reference` のコメント参照。専用の妥当性検証は
         # `section()` の TF32 節が別途担う）。
-        if r.get("tf32", False):
+        if r.get("tf32", False) is True:
             continue
         # `reference` のキーは `_valid_gate_size` 検証済みの size のみ
         # （`gemm_checksum_reference` docstring 参照）。`r["size"]` が不正
@@ -877,7 +894,7 @@ def gemm_checksum_unverifiable(rows):
             continue
         # イシュー #1042: `gemm_checksum_mismatches` と同じ理由で TF32 行を
         # 除外する。
-        if r.get("tf32", False):
+        if r.get("tf32", False) is True:
             continue
         # `gemm_checksum_mismatches` と同じ理由（不正 size での
         # `dict.get()` 例外終了防止。イシュー #1051 codex-review P0
@@ -1092,7 +1109,7 @@ def _row_key(r):
     # `mismatch_by_key`/`unverifiable_keys` 等の辞書で片方が上書きされ、
     # 無効判定（checksum 不一致・parity 失敗）の付記先を取り違える
     # （fail-open のおそれ）。
-    return (r["framework"], r["device"], r["size"], r["mode"], bool(r.get("tf32", False)))
+    return (r["framework"], r["device"], r["size"], r["mode"], r.get("tf32", False) is True)
 
 
 # イシュー #1051: 目標達成ゲート（--target）専用のヘルパー群。既存の
@@ -1147,7 +1164,7 @@ def _pick_row_for_gate(rows, fw, task, device, size):
             # イシュー #1042: TF32 opt-in 行を目標達成ゲートの判定対象から
             # 除外する（既定 FP32 との混同・fail-open 防止。モジュール
             # docstring 参照）。
-            and not r.get("tf32", False)
+            and r.get("tf32", False) is not True
             and _valid_gate_size(r.get("size"))
             and r.get("size") == size
         ]
@@ -1838,7 +1855,7 @@ def section(path, rows):
         # 防御的スイープ・PR #1082。target_gate 側の同一パターンと同じ
         # 理由: 外部 JSONL 由来の size を未検証のまま渡すと
         # `unhashable type`/比較 `TypeError` で `main()` 全体が
-        # traceback 停止しうる）。`not r.get("tf32", False)` で TF32
+        # traceback 停止しうる）。`r.get("tf32", False) is not True` で TF32
         # opt-in 行を除外する（Cursor Bugbot Low 指摘・PR #1091: 含めると
         # `get()` が既定 tf32=False で見つけられない size が「計測不可」
         # と誤表示される。TF32 専用行は (a-tf32) 節が表示する）。
@@ -1848,7 +1865,7 @@ def section(path, rows):
                 for r in rows
                 if r["task"] == "gemm"
                 and r["device"] == device
-                and not r.get("tf32", False)
+                and r.get("tf32", False) is not True
                 and _valid_gate_size(r.get("size"))
             }
         )
@@ -1891,7 +1908,7 @@ def section(path, rows):
                     if r["task"] == "gemm"
                     and r["device"] == device
                     and r["mode"] == "reuse"
-                    and not r.get("tf32", False)
+                    and r.get("tf32", False) is not True
                     and _valid_gate_size(r.get("size"))
                 }
             )
@@ -1923,7 +1940,7 @@ def section(path, rows):
     # 独立に表示する。checksum 相互突合は（a) 節と異なり FP32 行を巻き込ま
     # ないため行わず、行自身の要素単位検証（`parity_status`）のみを「無効」
     # 判定に使う。
-    tf32_rows = [r for r in rows if r["task"] == "gemm" and r.get("tf32", False)]
+    tf32_rows = [r for r in rows if r["task"] == "gemm" and r.get("tf32", False) is True]
     if tf32_rows:
         for r in tf32_rows:
             preason = _parity_reason(r)
@@ -2177,7 +2194,7 @@ def section(path, rows):
         # のため `unverifiable_keys` にも決して現れない。ここで明示的に
         # 除かないと「相互突合できた」件数へ誤って計上されてしまう
         # （fail-open のおそれ）。
-        and not r.get("tf32", False)
+        and r.get("tf32", False) is not True
         and _valid_gate_size(r.get("size"))
         and _row_key(r) not in unverifiable_keys
     )
