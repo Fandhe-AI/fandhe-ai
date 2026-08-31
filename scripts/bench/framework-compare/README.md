@@ -162,7 +162,7 @@ backward・パラメータ更新のどこが支配的か）を追跡できない
 | `leaf_register` | 入力/教師データの `tape.var(...)` |
 | `forward_resident` | `model.forward_resident(&tape, &x, &mut store)` + `mse_loss`（`register_resident_leaves` の毎 step D2H を含む） |
 | `loss_readout` | `loss.to_tensor().get(&[])` |
-| `backward` | `tape.backward(&loss)` |
+| `backward` | `tape.backward_device_param_store(&loss, &store)`（0.5.0 から `forward_resident` が積む `Op::LinearResident` の解決に必須。イシュー #1059） |
 | `device_update` | `tape.step_device_param_store(&mut store, &grads, &config)`（grad H2D + デバイス上 SGD 発行。CUDA では非同期発行のため完了待ちは次 step の `forward_resident` に計上される） |
 | `tape_drop` | `drop(tape)` |
 | `step_total` | 検算用 |

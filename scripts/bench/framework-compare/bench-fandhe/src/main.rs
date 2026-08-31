@@ -453,10 +453,16 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `--mode reuse` の train 計測（イシュー #958）。`DeviceParamStore` を
 /// 1 回だけ構築し（`init_s` として初期化コストを分離記録）、以後の各 step
-/// は新規 tape 上で `forward_resident` → `backward` →
+/// は新規 tape 上で `forward_resident` → `backward_device_param_store` →
 /// `step_device_param_store`（デバイス上 SGD 更新）を行う。ホスト経由の
 /// download/upload（fresh の `p - lr*g` 相当）はループ内で一切行わない。
 /// モジュール doc「train --mode reuse」節に設計判断の詳細を記す。
+///
+/// fandhe-ai 0.5.0 から `forward_resident`（イシュー #1059）が積むグラフは
+/// `Op::LinearResident` を含み、素の `Tape::backward` はこれを解決できず
+/// 型付きエラーで拒否する。`store` の DeviceParamStore を渡す
+/// `Tape::backward_device_param_store` が必須（`docs/device-resident-
+/// update-design.md` §3.3e・`docs/compat-api-scope.md`「backward」節）。
 fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let model = build_model()?;
     let (x_data, y_data) = mlp_data()?;
@@ -536,7 +542,7 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             .to_tensor()
             .get(&[])
             .ok_or("loss should be a scalar with shape []")?;
-        let grads = tape.backward(&loss)?;
+        let grads = tape.backward_device_param_store(&loss, &store)?;
         // デバイス上 SGD 更新（ホストへの download/upload を経由しない）。
         tape.step_device_param_store(&mut store, &grads, &config)?;
         durations.push(start.elapsed());
@@ -697,7 +703,9 @@ fn measure_train_phases(cli: &Cli) -> Result<(PhaseSamples, f32), Box<dyn std::e
 /// `train --phases`（reuse。イシュー #1009）の計測本体。`run_train_reuse`
 /// と同一の処理順・同一 API 呼び出しを区間分解する（`init_s` の定義・
 /// 終端同期の検証は `run_train_reuse` と同一。モジュール doc「train
-/// --mode reuse」節参照）。
+/// --mode reuse」節参照）。`backward` ではなく
+/// `backward_device_param_store` を使う理由は `run_train_reuse` doc 参照
+/// （0.5.0 の `Op::LinearResident` 契約。イシュー #1059）。
 fn measure_train_reuse_phases(
     cli: &Cli,
 ) -> Result<(PhaseSamples, f32, f64), Box<dyn std::error::Error>> {
@@ -740,7 +748,7 @@ fn measure_train_reuse_phases(
         phases.push(PHASE_LOSS_READOUT, t0.elapsed());
 
         let t0 = Instant::now();
-        let grads = tape.backward(&loss)?;
+        let grads = tape.backward_device_param_store(&loss, &store)?;
         phases.push(PHASE_BACKWARD, t0.elapsed());
 
         let t0 = Instant::now();
