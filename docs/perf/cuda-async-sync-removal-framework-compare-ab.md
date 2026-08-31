@@ -95,8 +95,17 @@ before（0.4.0）/after（0.5.0）それぞれで実行し、`compare_ab.py` で
 
 | mode | before version | after version | before median | after median | after/before | 判定 |
 |---|---|---|---|---|---|---|
-| fresh | 0.4.0 | 0.5.0 | 12.404 ms (n=5) | 11.507 ms (n=5) | 0.928 | ok |
-| reuse | 0.4.0 | 0.5.0 | 12.362 ms (n=5) | 5.436 ms (n=5) | 0.440 | ok |
+| fresh | 0.4.0 | 0.5.0 | 12.404 ms (n=5) | 11.507 ms (n=5) | 0.928 | ok（受入条件 2 の根拠） |
+| reuse | 0.4.0 | 0.5.0 | 12.362 ms (n=5) | 5.436 ms (n=5) | 0.440 | ok（参考値。§6 参照） |
+
+**codex-review P1 対応（2026-09-01）**: reuse 行は受入条件 2（都度同期除去
+単独の効果）の根拠に使わない。before（0.4.0）は素の `Tape::backward`、
+after（0.5.0）は `006eeff` で追従した `backward_device_param_store` であり、
+計測対象コードが一致しない。加えて 0.5.0 の `forward_resident` は #1059 で
+毎 step の D2H 排除・backward 経路自体の変更（`Op::LinearResident`／
+`DeviceParamStore::backward`）を伴うため、reuse の 0.440 は「都度同期除去
+（#1011）」と「#1059 の resident forward/backward 変更」の複合効果であり、
+両者を分離できない。§6 の受入判定は同一プロトコル（fresh）のみに依拠する。
 
 ### フェーズ分解（診断用・fresh・単発計測）
 
@@ -113,7 +122,7 @@ before（0.4.0）/after（0.5.0）それぞれで実行し、`compare_ab.py` で
 | tape_drop | 2.7 us | 2.0 us | 0.745 |
 | step_total | 12.414 ms | 11.504 ms | 0.927 |
 
-### フェーズ分解（診断用・reuse・単発計測）
+### フェーズ分解（参考値・reuse・単発計測。§6 は本表に依拠しない）
 
 | phase | before | after | after/before |
 |---|---|---|---|
@@ -126,18 +135,22 @@ before（0.4.0）/after（0.5.0）それぞれで実行し、`compare_ab.py` で
 | tape_drop | 3.3 us | 1.0 us | 0.312 |
 | step_total | 12.379 ms | 5.439 ms | 0.439 |
 
-reuse の `backward`（12.043 ms → 5.243 ms・0.435）が 1 step 短縮の支配項で
-あり、都度同期除去（#1011）の効果が `stream.synchronize()` を最も高頻度に
-挟んでいた backward 経路に集中して現れている。fresh 側は forward・
-param_readout 等にも短縮が分散するが、backward の絶対時間（約 11〜12 ms）
-自体が支配的なため 1 step 総和の短縮率（0.928）は reuse（0.440）より小さい。
-**計測条件の注意**: after 側の reuse 計測は `006eeff`（`bench-fandhe` の
-`--mode reuse` を 0.5.0 の `Op::LinearResident`／`backward_device_param_store`
-契約へ追従させた修正）適用後のツリーで取得した。before 側は 0.4.0 の
-素の `Tape::backward` のままであり、この API 呼び出し差自体は本 A/B が
-比較したい「都度同期の有無」とは独立な契約変更だが、before/after 間で
-計測対象コード（`main.rs` の `run_train_reuse`）が完全に同一ではない点は
-計測条件として明記する。
+reuse の `backward`（12.043 ms → 5.243 ms・0.435）が 1 step 短縮の支配項
+だが、この短縮を都度同期除去（#1011）単独の効果として帰属させることは
+**できない**。before（0.4.0）の `backward` は素の `Tape::backward` を、
+after（0.5.0）の `backward` は `006eeff` で追従した
+`backward_device_param_store`（`DeviceParamStore::backward`。#1059 で
+`Op::LinearResident` 解決のため新設）を、それぞれ計測しており、
+計測対象コード自体が before/after で異なる。加えて 0.5.0 の
+`forward_resident`（#1059）は毎 step の D2H 排除も伴うため、reuse の
+0.440 は「#1011 の都度同期除去」と「#1059 の resident forward/backward
+経路変更」を分離できない**複合効果の参考値**である（0.4.0→0.5.0 で
+reuse 経路が実測ベースで約 2.3 倍高速化したこと自体は事実だが、その
+内訳を本 A/B から切り出せない）。fresh 側は before/after とも同一の
+`Tape::backward` を呼ぶ同一プロトコルであり、forward・param_readout 等
+にも短縮が分散しつつ backward の絶対時間（約 11〜12 ms）が支配的なため、
+1 step 総和の短縮率は 0.928 にとどまる。§6 の受入判定はこの fresh の
+結果にのみ依拠する。
 
 ## 5. 数値一致確認
 
@@ -154,12 +167,21 @@ param_readout 等にも短縮が分散するが、backward の絶対時間（約
 
 ## 6. #1011 受入条件 2 の判定
 
-- 短縮の有無・比率: fresh は after/before 0.928（約 1.08 倍）、reuse は
-  after/before 0.440（約 2.3 倍短縮）。いずれも 1 step 総和が短縮しており、
-  受入条件 2「MLP 学習 1 step（CUDA）が実測で短縮する」を実践規模の
-  ワークロードで確認できた
+**根拠は同一プロトコル（fresh。before/after とも `Tape::backward` を呼ぶ
+同一呼び出しコード）のみに依拠する**（codex-review P1 対応。reuse は
+#1059 の resident forward/backward 経路変更との複合効果であり、都度同期
+除去単独の効果として分離できないため受入判定の根拠にしない。§4 参照）。
+
+- 短縮の有無・比率（fresh・同一プロトコル）: 1 step 総和が 12.404 ms →
+  11.507 ms（after/before 0.928・約 1.08 倍）、フェーズ分解の `backward`
+  が 12.057 ms → 11.239 ms（0.932）短縮した。受入条件 2「MLP 学習 1 step
+  （CUDA）が実測で短縮する」を実践規模のワークロードで確認できた
 - 判定（クローズ可否）: 短縮確認済み・クローズ可（最終判断は #1011 側で
   main が行う）
+- 参考値（受入判定の根拠にはしない）: reuse は 1 step 総和が 12.362 ms →
+  5.436 ms（after/before 0.440・約 2.3 倍短縮）。0.4.0→0.5.0 の複合改善
+  （#1011 の都度同期除去 + #1059 の resident forward/backward 経路変更）
+  としての参考記録に留める
 
 ## 7. 未実施事項
 
@@ -167,8 +189,11 @@ param_readout 等にも短縮が分散するが、backward の絶対時間（約
   取得していない。記録先は設計文書 I4（別 PR。本文書のスコープ外）のまま
 - Metal 側の同種 A/B 計測はスコープ外（本文書は CUDA 限定）
 - reuse 側の after 計測は `006eeff`（`backward_device_param_store` 追従）
-  適用後のツリーであり、before（0.4.0・素の `Tape::backward`）との
-  API 呼び出し差は §4 の計測条件の注意に明記した
+  適用後のツリーであり、before（0.4.0・素の `Tape::backward`）とは
+  計測対象コードが一致しない。このため reuse の 0.440 は #1011 単独の
+  効果として受入判定へ使わず参考値に格下げした（§4・§6。codex-review
+  P1 対応。同一プロトコルでの reuse A/B 再計測〈backward 呼び出し経路を
+  before/after で揃えた計測〉は本文書のスコープ外の後続課題とする）
 
 ## 8. 出典
 
