@@ -2406,20 +2406,51 @@ class MainTargetExitCodeTests(unittest.TestCase):
             code, out, err = self._run_main(path, target="candle")
             self.assertEqual(code, 3)
             self.assertIn("判定不能", err)
-            # `## 実行時失敗（skipped*.log）` は生ログの informational な
-            # 一覧表示（`|` 区切り表ではなく箇条書き）であり、今回の
-            # 修正対象（`target_gate_section()` の表セルへ渡る `reason`）
-            # とは別の既存機能のため、そちらの生テキストは対象にしない。
-            # ゲート節（`## 目標達成ゲート` 以降）に限定して、`reason` が
-            # サニタイズ済みで表構造・HTML 構文を壊していないことを
-            # 確認する。
-            gate_section = out[out.index("## 目標達成ゲート"):]
-            self.assertNotIn(" | <script>", gate_section)
-            self.assertNotIn("boom | <", gate_section)
-            self.assertNotIn("<script>alert(1)</script>", gate_section)
-            self.assertIn("&lt;script&gt;", gate_section)
-            self.assertIn("boom \\| ", gate_section)
-            self.assertIn("未解析の失敗記録あり", gate_section)
+            # `## 実行時失敗（skipped*.log）` 節（生ログの informational な
+            # 一覧表示・箇条書き）も `_sanitize_skip_raw_for_display` で
+            # サニタイズ済みで出力される（イシュー #1085）。ゲート節
+            # （`## 目標達成ゲート` の `reason`）と合わせて出力全体（`out`）
+            # に対し、生の `|`・`<script>` が現れずエスケープ済み表現の
+            # みが現れることを確認する。
+            self.assertNotIn(" | <script>", out)
+            self.assertNotIn("boom | <", out)
+            self.assertNotIn("<script>alert(1)</script>", out)
+            self.assertIn("&lt;script&gt;", out)
+            self.assertIn("boom \\| ", out)
+            self.assertIn("未解析の失敗記録あり", out)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_skip_failures_section_escapes_raw_log_content(self):
+        # イシュー #1085: `## 実行時失敗（skipped*.log）` 節は skip 行を
+        # 無加工で箇条書きへ埋め込んでおり、PR #1082 のゲート節向け
+        # サニタイズ（`_sanitize_skip_raw_for_display`）の対象外だった
+        # （security.md A03 と同種の注入経路）。`--target` 無指定
+        # （ゲート節注入と独立の経路）で本節単体のサニタイズを確認する:
+        # `<script>` の実体参照化・`|` の Markdown エスケープ・120 文字
+        # 超の切り詰め（末尾 `…`）・ログファイル名の bold 表示維持。
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "results.jsonl")
+            rows = [_base_row(framework="fandhe-ai", device="cpu", checksum=1.0)]
+            with open(path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            long_token = "x" * 200
+            with open(os.path.join(tmpdir, "skipped.log"), "w") as f:
+                f.write(
+                    "bench-mystery task=gemm device=cpu size=256 mode=fresh "
+                    f"extra=none : boom | <script>alert(1)</script> {long_token}\n"
+                )
+            code, out, err = self._run_main(path)
+            section = out[out.index("## 実行時失敗（skipped*.log）"):]
+            self.assertNotIn("<script>alert(1)</script>", section)
+            self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", section)
+            self.assertNotIn("boom | <", section)
+            self.assertIn("boom \\| ", section)
+            self.assertNotIn(long_token, section)
+            self.assertIn("…", section)
+            self.assertIn("**skipped.log**", section)
         finally:
             shutil.rmtree(tmpdir)
 
