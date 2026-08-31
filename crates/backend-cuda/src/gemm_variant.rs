@@ -180,13 +180,27 @@ fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
 /// 撤退した SplitK を `run_split_k_forced` で診断的に再現する際に
 /// `derive_split_count`／[`SPLITK_MIN_K`]／`num_blocks` を到達可能に
 /// 保つ（`select_f32_gemm_variant` 自体はこれらを呼ばなくなったため）。
-/// `k < SPLITK_MIN_K` は分割の意義が薄いと判断し `1`（=事実上分割なし）を
-/// 返す（旧 `select_f32_gemm_variant` の K 歪度条件を踏襲）。
-pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> u32 {
+///
+/// # 戻り値の契約（イシュー #1100 codex-review 指摘で `Option<u32>` 化）
+///
+/// `derive_split_count` は分割の意義が薄い場合（`k < SPLITK_MIN_K`・
+/// `num_blocks(m, n) == 0`・`num_sms == 0`・K が小さく
+/// `SPLITK_MIN_K_PER_SPLIT` 制約で 1 分割にクランプされる場合を含む）に
+/// `1`（= 事実上分割なし）を返しうるが、[`validate_split_k_launch`] は
+/// `num_splits == 1` を常に拒否する（`[2, SPLITK_MAX_SPLITS]` のみ許容）。
+/// 内部値が `1` のまま `Some(1)` を返すと、呼び出し元が戻り値をそのまま
+/// `run_split_k_forced` へ渡す正規呼び出しが必ず `InvalidShape` になる
+/// 契約不整合が生じるため、本関数は分割不能を `None` で明示し、`Some` の
+/// 場合は必ず `[2, SPLITK_MAX_SPLITS]`（`validate_split_k_launch` が
+/// 受理可能な範囲）の値であることを保証する。
+pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
     if k < SPLITK_MIN_K {
-        return 1;
+        return None;
     }
-    derive_split_count(num_blocks(m, n), num_sms, k)
+    match derive_split_count(num_blocks(m, n), num_sms, k) {
+        1 => None,
+        splits => Some(splits),
+    }
 }
 
 /// SplitK の部分和バッファサイズ（bytes）を `u64` の checked 演算で
@@ -390,6 +404,53 @@ mod tests {
         // k=64 では 1 分割あたり最低 32 の制約から最大 2 分割まで。
         let splits = derive_split_count(1, 132, 64);
         assert!(splits <= 2);
+    }
+
+    // --- recommend_split_count（イシュー #1100 codex-review 指摘: 戻り値
+    // Option<u32> 化。`Some` は必ず validate_split_k_launch が受理する
+    // [2, SPLITK_MAX_SPLITS] の範囲内であることを保証する契約） ---
+
+    #[test]
+    fn recommend_split_count_returns_none_when_k_below_min() {
+        assert_eq!(recommend_split_count(128, 128, SPLITK_MIN_K - 1, 64), None);
+    }
+
+    #[test]
+    fn recommend_split_count_returns_none_for_zero_dims_or_sms() {
+        assert_eq!(recommend_split_count(0, 128, 65536, 64), None);
+        assert_eq!(recommend_split_count(128, 128, 65536, 0), None);
+    }
+
+    #[test]
+    fn recommend_split_count_none_matches_derive_split_count_one_exhaustively() {
+        // recommend_split_count が Some を返す全ケースで derive_split_count
+        // が 1（=分割なし）を返さないこと、逆に derive_split_count が 1 を
+        // 返すケース（num_blocks==0 or num_sms==0。k>=SPLITK_MIN_K の下で
+        // max_by_k は SPLITK_MIN_K/SPLITK_MIN_K_PER_SPLIT=32 以上のため
+        // 1 にクランプされ得ない）では常に None を返すことを、
+        // derive_split_count と recommend_split_count の内部呼び出しの
+        // 一貫性として突き合わせる（Some の値が validate_split_k_launch
+        // 非受理の 1 に戻ってしまう再発を防ぐ）。
+        for (m, n, num_sms) in [(0u32, 128u32, 64u32), (128, 0, 64), (128, 128, 0)] {
+            let k = SPLITK_MIN_K;
+            assert_eq!(derive_split_count(num_blocks(m, n), num_sms, k), 1);
+            assert_eq!(recommend_split_count(m, n, k, num_sms), None);
+        }
+    }
+
+    #[test]
+    fn recommend_split_count_some_is_always_validate_split_k_launch_acceptable() {
+        // Some(num_splits) を返す場合は run_split_k_forced へそのまま
+        // 渡しても validate_split_k_launch が受理する範囲であることを
+        // 保証する（codex-review P2 指摘の再発防止）。
+        let m = 4096;
+        let n = 4096;
+        let k = 65536;
+        let num_sms = 64;
+        let recommended =
+            recommend_split_count(m, n, k, num_sms).expect("この形状では分割が推奨されるはず");
+        assert!((2..=SPLITK_MAX_SPLITS).contains(&recommended));
+        assert!(validate_split_k_launch(m, n, recommended).is_ok());
     }
 
     // --- DoubleBuffer ---

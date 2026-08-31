@@ -260,12 +260,21 @@ impl CudaGemmF32VariantSelection {
     /// [`Self::run_split_k_forced`] 呼び出し前に、`m`/`n`/`k` から
     /// `gemm_variant::derive_split_count` が導く「妥当な分割数」を得る
     /// 診断専用ヘルパー（イシュー #1100）。`num_sms` 取得失敗時
-    /// （`self.num_sms.is_none()` またはハードウェア異常で `0`）は
-    /// 分割の意義を判定できないため `1`（=事実上分割なし）を返す。
-    pub fn recommend_split_count(&self, m: u32, n: u32, k: u32) -> u32 {
+    /// （`self.num_sms.is_none()` またはハードウェア異常で `0`）を含め、
+    /// 分割の意義がない（K が小さすぎる・SM 数に対し grid が小さすぎる
+    /// 等で実質 1 分割にしかならない）場合は `None` を返す。
+    ///
+    /// 戻り値が `Some(num_splits)` の場合、`num_splits` は必ず
+    /// `[2, SPLITK_MAX_SPLITS]` の範囲内であり、そのまま
+    /// [`Self::run_split_k_forced`] へ渡せば `validate_split_k_launch`
+    /// の分割数検証を通る（`gemm_variant::recommend_split_count` の
+    /// 契約参照。P2 codex-review 指摘: 旧実装は分割不能時に `1` を返して
+    /// おり、`run_split_k_forced` にそのまま渡すと `validate_split_k_
+    /// launch` が必ず `InvalidShape` を返す契約不整合があった）。
+    pub fn recommend_split_count(&self, m: u32, n: u32, k: u32) -> Option<u32> {
         match self.num_sms {
             Some(num_sms) if num_sms > 0 => gemm_variant::recommend_split_count(m, n, k, num_sms),
-            _ => 1,
+            _ => None,
         }
     }
 
@@ -276,8 +285,9 @@ impl CudaGemmF32VariantSelection {
     /// gemm_f32_variants.rs`）・spec 側の parity 契約再検討に備えた足場
     /// として公開する。`num_splits` の cap 検査（`gemm_variant::
     /// validate_split_k_launch`）は内部の [`Self::run_split_k`] が行う。
-    /// 妥当な `num_splits` が分からない場合は [`Self::recommend_split_count`]
-    /// を使う。
+    /// 妥当な `num_splits` は [`Self::recommend_split_count`] が
+    /// `Some(num_splits)` で返す（`None` は分割の意義がない = 呼ばない
+    /// べきことを表す。`Some` の値は常にこの引数の検証を通る）。
     pub fn run_split_k_forced(
         &self,
         a: &[f32],
