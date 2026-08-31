@@ -100,7 +100,7 @@ fandhe-ai/
     │   ├── sm121-device-attributes.md # sm_121（DGX Spark GB10）デバイス属性・L1/L2 実効帯域の実測記録（#482）
     │   ├── cuda-gemm-bottleneck-diagnosis.md # CUDA GEMM M=N=K=4096 データ再利用崩壊の定量診断（#486）
     │   ├── metal-gemm-bottleneck-diagnosis.md # Metal GEMM 1024 以降スループット頭打ちの定量診断（#487。#744 是正前・context_cache 導入前の前提。再診断は metal-gemm-bottleneck-rediagnosis.md を参照）
-    │   ├── metal-gemm-bottleneck-rediagnosis.md # Metal GEMM 1024 以降頭打ちの context_cache 後の再診断（M4 Max 実機実測完了。転送〈アップロード＋readback〉を主要候補と特定〈主因確定は candle 側転送分離測定待ち〉・タイル形状は現行 CANDIDATES[3] が 2048/4096 で最良・1024 は [5] と同等。#1036）
+    │   ├── metal-gemm-bottleneck-rediagnosis.md # Metal GEMM 1024 以降頭打ちの context_cache 後の再診断（M4 Max 実機実測完了。転送〈アップロード＋readback〉を主要候補と特定〈主因確定は candle 側転送分離測定待ち〉・タイル形状は現行 CANDIDATES[3] が 4096 で最良・1024/2048 は [5]/[6] と同等〈相対 5% 未満〉。#1036）
     │   ├── metal-gemm-splitk-shapes.md # split-K 対象形状（K 支配的非正方）の劣化定量化実測記録（#810）
     │   ├── cuda-fresh-gemm-n2048-overhead-diagnosis.md # fresh モード CUDA GEMM N=2048 固有の約 166〜184 ms 残存オーバーヘッド診断（DGX Spark GB10 実機実測完了・HEAD 時点で非再現を確認・コード修正なし。#956・#1025）
     │   ├── burn-wgpu-metal-gemm-zero-result.md # framework-compare の Burn(wgpu) Metal GEMM N>=512 全ゼロの原因切り分け（upstream 既知バグ。#965）
