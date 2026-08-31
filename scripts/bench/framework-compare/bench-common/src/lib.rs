@@ -247,6 +247,15 @@ pub struct Record<'a> {
     /// 設計で比較不能なため常に `None`（emit しない。summarize.py 側は
     /// キー欠損を「旧形式（未検証）」として区別し「無効」と混同しない）。
     pub parity: Option<ParityStats>,
+    /// `--tf32`（イシュー #1042）。TF32 Tensor Core（reduced precision）
+    /// 経路で計測したかを示す。既定 `false`（FP32 厳密）。`true` のときの
+    /// み JSON に `"tf32":true` を emit する（`mode`/`init_s` と異なる
+    /// 「キー欠損 = false」の互換規約。`parity` と同型: 旧形式 JSONL には
+    /// このキーが存在しないため、欠損を「非 tf32」として扱えば後方互換が
+    /// 保たれる）。summarize.py の目標達成ゲートは既定でこのフィールドが
+    /// `true` の行を除外する（fail-open 防止。FP32 目標値との混同を防ぐ。
+    /// `docs/cuda-tf32-optin-api-decision.md` 参照）。
+    pub tf32: bool,
 }
 
 impl Record<'_> {
@@ -288,6 +297,9 @@ impl Record<'_> {
                 fmt_f64_or_null(p.max_abs_err),
                 fmt_f64_or_null(p.max_rel_err),
             ));
+        }
+        if self.tf32 {
+            s.push_str(",\"tf32\":true");
         }
         s.push('}');
         s
@@ -389,6 +401,13 @@ pub struct Cli {
     /// 区間別の median/Q1/Q3 を出力する。既定 `false`（既存プロトコル不変）。
     /// `bench-fandhe` の `task:"train"` のみ対応（`run()` の分岐で判定）。
     pub phases: bool,
+    /// `--tf32`（値なしフラグ。イシュー #1042）。TF32 Tensor Core
+    /// （reduced precision）経路での計測を要求する。既定 `false`
+    /// （FP32 厳密。既存プロトコル不変）。対応は `gemm` × `cuda` に限定し、
+    /// フレームワークごとの受理・拒否は各バイナリの `dispatch` が判定する
+    /// （`docs/cuda-tf32-optin-api-decision.md` 参照。`--phases` と同型の
+    /// allowlist 方式）。
+    pub tf32: bool,
 }
 
 /// Parse the CLI arguments from `std::env::args()`. 薄いラッパーで、実体は
@@ -430,6 +449,7 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         out: get("--out").unwrap_or_else(|| "results/raw/results.jsonl".into()),
         mode,
         phases: has_flag("--phases"),
+        tf32: has_flag("--tf32"),
     })
 }
 
@@ -515,6 +535,7 @@ mod tests {
             mode,
             init_s,
             parity: None,
+            tf32: false,
         }
     }
 
@@ -660,6 +681,43 @@ mod tests {
         assert!(cli.phases);
         assert_eq!(cli.task, "train");
         assert_eq!(cli.mode, "reuse");
+    }
+
+    // イシュー #1042: `--tf32`（`parse_cli_from`）・`Record.tf32` の契約。
+
+    #[test]
+    fn parse_cli_from_defaults_tf32_to_false() {
+        let cli = parse_cli_from(&args(&["--task", "gemm"])).expect("parse should succeed");
+        assert!(!cli.tf32);
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_tf32_flag() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--device", "cuda", "--tf32"]))
+            .expect("parse should succeed");
+        assert!(cli.tf32);
+    }
+
+    #[test]
+    fn parse_cli_from_tf32_flag_is_order_independent() {
+        let cli = parse_cli_from(&args(&["--tf32", "--task", "gemm", "--device", "cuda"]))
+            .expect("parse should succeed");
+        assert!(cli.tf32);
+        assert_eq!(cli.task, "gemm");
+        assert_eq!(cli.device, "cuda");
+    }
+
+    #[test]
+    fn json_line_without_tf32_omits_tf32_key() {
+        let line = sample_record("fresh", None).to_json_line();
+        assert!(!line.contains("\"tf32\""));
+    }
+
+    #[test]
+    fn json_line_with_tf32_includes_tf32_true() {
+        let mut r = sample_record("fresh", None);
+        r.tf32 = true;
+        assert!(r.to_json_line().contains("\"tf32\":true"));
     }
 
     fn sample_phase_record(phase: &'static str, phase_index: usize) -> PhaseRecord<'static> {

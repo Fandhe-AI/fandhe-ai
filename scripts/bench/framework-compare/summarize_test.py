@@ -424,6 +424,57 @@ class GemmParityHelpersTests(unittest.TestCase):
         self.assertEqual(unverified[0]["framework"], "fandhe-ai")
 
 
+class LoadRowsTf32ValidationTests(unittest.TestCase):
+    """`load_rows()` の `tf32` フィールド型検証（イシュー #1042
+    codex-review P0 指摘・PR #1091）。`bool(r.get("tf32", False))` は
+    文字列 `"false"` 等の非 bool 値も真として誤って受理する fail-open
+    だったため、キー欠損（`False` 扱い）または厳密な `bool` 型のみを
+    許容し、それ以外は `ValueError` でロード全体を失敗させることを
+    検証する。
+    """
+
+    def test_missing_tf32_key_loads_as_untouched_row(self):
+        path = _write_jsonl([_base_row()])
+        try:
+            rows = summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertNotIn("tf32", rows[0])
+
+    def test_strict_bool_true_and_false_load_unchanged(self):
+        rows_in = [
+            dict(_base_row(framework="fandhe-ai"), tf32=True),
+            dict(_base_row(framework="candle"), tf32=False),
+        ]
+        path = _write_jsonl(rows_in)
+        try:
+            rows = summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertIs(rows[0]["tf32"], True)
+        self.assertIs(rows[1]["tf32"], False)
+
+    def test_string_tf32_value_raises_value_error(self):
+        path = _write_jsonl([dict(_base_row(), tf32="false")])
+        try:
+            with self.assertRaises(ValueError):
+                summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+
+    def test_truthy_non_bool_tf32_value_raises_value_error(self):
+        # `bool(1) == True` かつ `bool("x") == True` だが、いずれも
+        # 外部 JSONL 由来の非 bool 型であり fail-closed で拒否する。
+        for bad_value in (1, "x", [], {}, None):
+            with self.subTest(bad_value=bad_value):
+                path = _write_jsonl([dict(_base_row(), tf32=bad_value)])
+                try:
+                    with self.assertRaises(ValueError):
+                        summarize.load_rows(path)
+                finally:
+                    os.unlink(path)
+
+
 class SectionRenderingTests(unittest.TestCase):
     def test_gemm_row_with_unhashable_size_does_not_raise(self):
         # イシュー #1051 codex-review 指摘の防御的スイープ（PR #1082）:
@@ -451,6 +502,38 @@ class SectionRenderingTests(unittest.TestCase):
         self.assertIn("fail=5/65536", text)
         # 無効行の GFLOP/s 列は "-"（性能値として見せない）。
         self.assertIn("| - |", text)
+
+    def test_tf32_section_absent_without_tf32_rows(self):
+        # イシュー #1042: `--tf32` 行が 1 件も無いファイルでは
+        # (a-tf32) 節自体を出力しない（既存ファイルとの表示差分を
+        # 作らない）。
+        rows = [_with_parity(_base_row())]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        self.assertNotIn("(a-tf32)", "\n".join(lines))
+
+    def test_tf32_section_rendered_when_tf32_row_present(self):
+        rows = [
+            _with_parity(_base_row()),
+            dict(_with_parity(_base_row(framework="candle")), tf32=True, gflops=200.0),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(a-tf32) GEMM TF32", text)
+        self.assertIn("| 200.0 |", text)
+
+    def test_tf32_row_parity_failure_marked_invalid_in_tf32_section(self):
+        rows = [
+            dict(
+                _with_parity(_base_row(), fail_count=2, max_abs_err=1e-2, max_rel_err=1e-2),
+                tf32=True,
+            ),
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(a-tf32)", text)
+        self.assertIn("無効: 要素誤差超過", text)
 
     def test_ok_row_not_marked_invalid(self):
         rows = [_with_parity(_base_row())]
@@ -1289,6 +1372,47 @@ class TargetGateTests(unittest.TestCase):
         self.assertEqual(rec["fandhe_mode"], "reuse")
         self.assertAlmostEqual(rec["ratio"], 2.0)
 
+    def test_tf32_optin_row_excluded_from_gate(self):
+        # イシュー #1042: 同一 size に TF32 opt-in 行（10 倍高速。もし
+        # 誤って拾われれば ratio ≈ 10.0 になる）と FP32 行（等速）が同居
+        # する場合、`target_gate` は FP32 行のみを使う（fail-open 防止。
+        # `_pick_row_for_gate`/`get()` の tf32 除外フィルタ参照）。
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+            dict(
+                _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
+                median_s=0.0001,
+                tf32=True,
+            ),
+            _with_parity(_base_row(framework="candle", mode="fresh")),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
+        self.assertAlmostEqual(rec["ratio"], 1.0)
+
+    def test_tf32_only_size_excluded_from_gate_size_set(self):
+        # イシュー #1042 codex-review P2 指摘（PR #1091）:
+        # `_pick_row_for_gate` は gemm について tf32=False の行しか
+        # 選ばないため、FP32 側に存在しない size を持つ TF32 専用行が
+        # `candidate_rows`/`sizes` に混入すると、その size は両
+        # フレームワークとも「該当行なし」として undeterminable に
+        # なってしまう（size=512 は tf32=True 行しか無く、FP32 行は
+        # size=256 のみ）。修正後は size=512 が sizes 集合から除外され、
+        # gemm のゲート判定は size=256（achieved）の 1 件のみになる。
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", size=256, mode="fresh")),
+            _with_parity(_base_row(framework="candle", size=256, mode="fresh")),
+            dict(
+                _with_parity(_base_row(framework="fandhe-ai", size=512, mode="fresh")),
+                tf32=True,
+            ),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        gemm_records = [r for r in records if r["task"] == "gemm"]
+        self.assertEqual(len(gemm_records), 1)
+        self.assertEqual(gemm_records[0]["size"], 256)
+        self.assertEqual(gemm_records[0]["status"], "achieved")
+
     def test_fandhe_fresh_only_uses_fresh(self):
         rows = [
             _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
@@ -1591,6 +1715,18 @@ class TargetGateTests(unittest.TestCase):
         r = summarize.get(rows, "fandhe-ai", "gemm", "cpu", 1)
         self.assertIsNone(r)
 
+    def test_get_function_defaults_to_excluding_tf32_rows(self):
+        # イシュー #1042: `get()` の既定 `tf32=False` は TF32 opt-in 行を
+        # 拾わない（fail-open 防止。同一 size に FP32/TF32 双方が存在する
+        # 場合、明示指定なしの呼び出しは常に FP32 行を返す）。
+        tf32_row = dict(_base_row(framework="fandhe-ai", size=256), tf32=True)
+        fp32_row = _base_row(framework="fandhe-ai", size=256)
+        rows = [tf32_row, fp32_row]
+        self.assertIs(summarize.get(rows, "fandhe-ai", "gemm", "cpu", 256), fp32_row)
+        self.assertIs(
+            summarize.get(rows, "fandhe-ai", "gemm", "cpu", 256, tf32=True), tf32_row
+        )
+
     def test_pick_row_for_gate_missing_size_key_does_not_raise(self):
         # Bugbot Medium 指摘（PR #1082 2 巡目・summarize.py L702-712）:
         # `_pick_row_for_gate` の候補列挙が `r["size"]` を直接アクセス
@@ -1600,21 +1736,23 @@ class TargetGateTests(unittest.TestCase):
         del bad_row["size"]
         good_row = _base_row(framework="fandhe-ai", mode="fresh", size=256)
         rows = [bad_row, good_row]
-        row, mode, dup_reason = summarize._pick_row_for_gate(
+        row, mode, dup_reason, used_tf32 = summarize._pick_row_for_gate(
             rows, "fandhe-ai", "gemm", "cpu", 256
         )  # 例外を送出しないこと
         self.assertIs(row, good_row)
         self.assertEqual(mode, "fresh")
         self.assertIsNone(dup_reason)
+        self.assertFalse(used_tf32)
 
     def test_pick_row_for_gate_excludes_bool_size(self):
         bool_row = _base_row(framework="fandhe-ai", mode="fresh", size=True)
-        row, mode, dup_reason = summarize._pick_row_for_gate(
+        row, mode, dup_reason, used_tf32 = summarize._pick_row_for_gate(
             [bool_row], "fandhe-ai", "gemm", "cpu", 1
         )
         self.assertIsNone(row)
         self.assertIsNone(mode)
         self.assertIsNone(dup_reason)
+        self.assertFalse(used_tf32)
 
     def test_train_reuse_missing_size_key_row_does_not_raise_via_target_gate(self):
         # end-to-end 確認: size キー欠損の train 行が rows に混在しても

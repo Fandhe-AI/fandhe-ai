@@ -275,6 +275,16 @@
 //! 各演算メソッド）・`device.rs`（`CudaDeviceProvider::probe`）の両方から
 //! 参照する。カーネルソース・許容誤差・境界検査には触れない（構造的に
 //! 数値一致契約は不変）。
+//!
+//! イシュー #1042（親ツリー #1029 Phase 2）で [`precision`] モジュールを
+//! 追加した。`ops::CudaBackendOps::gemm`（公開 GEMM 経路）は既定で
+//! `CudaGemm::run_tiled_f32`（FP32 厳密）を使うが、
+//! `precision::set_tf32_gemm_enabled(true)`（`facade::
+//! set_cuda_tf32_gemm_enabled` から到達する composition root 公開 API）
+//! で opt-in すると `CudaGemm::run_wmma_tf32`（TF32 Tensor Core。既存の
+//! WMMA 本番経路）へプロセスワイドに切り替わる。既定 OFF・fail-closed
+//! （TF32 カーネル使用不能時は FP32 へ黙示フォールバックしない）の契約
+//! は `precision.rs` モジュール冒頭コメントを正とする。
 
 mod context_cache;
 pub mod device;
@@ -342,6 +352,7 @@ mod module_cache_wiring_tests;
 mod nvrtc;
 mod ops;
 mod pool;
+pub mod precision;
 mod rmsnorm;
 mod sgd;
 mod softmax;

@@ -240,6 +240,34 @@ Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
 - `train`/`infer` タスクは対象外（fandhe-ai の重み初期化が candle/Burn と異なる設計のため checksum
   同様に比較不能。§「計測プロトコル」重み初期化の節を参照）
 
+### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
+
+`backend-cuda` の GEMM 公開経路（`fandhe-ai::gemm`）は既定で FP32 厳密（`run_tiled_f32`）だが、
+opt-in で WMMA TF32 Tensor Core 経路（`run_wmma_tf32`）へ切り替えられる公開 API
+（`fandhe_ai::set_cuda_tf32_gemm_enabled`）を追加した（`docs/cuda-tf32-optin-api-decision.md`）。
+一方 burn 0.21 の CUDA バックエンドは常時 TF32（既定で reduced precision accumulation へ強制降格。
+メモリ `burn-cuda-tf32.md`）であり、fandhe-ai の既定 FP32 計測と条件が揃わない。`--tf32` は
+`--task gemm --device cuda` 限定でこの条件差を埋め、TF32 同士の同条件比較を可能にする値なし
+フラグである。
+
+- **`bench-candle`**: `--tf32` 指定時、candle-core 0.11 の公開プロセスグローバルスイッチ
+  （`candle_core::cuda_backend::set_gemm_reduced_precision_f32`。既定 `false` = FP32 厳密）を
+  有効化してから計測する。`--task gemm --device cuda` 以外との組合せは `MEASURE_ERROR` で
+  fail-fast する。`cuda` cargo feature を有効化したビルド（`--no-default-features --features
+  cuda`）が必要（既定は `metal`）
+- **`bench-fandhe`**: **本イシュー時点では `--tf32` は常に `MEASURE_ERROR` で fail-fast する**。
+  `bench-fandhe` は crates.io 公開版 `fandhe-ai =0.4.0` に完全固定されており（deps-policy 第 9
+  区分）、本イシューで追加した `set_cuda_tf32_gemm_enabled` は次回リリース（v0.5.0 公開 + ピン
+  更新のユーザー承認）まで呼べない（C-1/C-2 分割。`docs/cuda-tf32-optin-api-decision.md`）
+- **`bench-burn`**: `--tf32` は受理せず常に `MEASURE_ERROR` で fail-fast する。burn の CUDA
+  バックエンドは FP32 厳密経路自体を持たないため、フラグに opt-in／opt-out の意味を持たせられ
+  ない（既存の burn GEMM 計測が実質的に常に TF32 相当であることの明記）
+- **JSONL**: `--tf32` で計測した行は `"tf32":true` を emit する（既定は emit しないキー欠損 =
+  `false` の互換規約。`bench_common::Record::tf32`）
+- **`summarize.py`**: `--tf32` 行は目標達成ゲート（`--target`）・(a) GEMM 節の checksum 相互突合・
+  FP32 参照値算出から**既定で除外**する（fail-open 防止。FP32 目標値との混同を防ぐ）。`--tf32` 行が
+  存在するファイルには専用節「`(a-tf32) GEMM TF32`」を追加表示する
+
 ## 使い方
 
 ```bash

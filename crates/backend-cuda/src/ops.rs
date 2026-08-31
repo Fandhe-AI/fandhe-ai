@@ -55,6 +55,55 @@ pub struct CudaBackendOps {
 }
 
 impl CudaBackendOps {
+    /// GEMM 本体（f32）の FP32 厳密経路（`run_tiled_f32`）のみを実行する
+    /// 内部ヘルパー。`crate::precision::tf32_gemm_enabled()` の状態に
+    /// 関わらず常に FP32 厳密で計算する（TF32 opt-in フラグを一切見ない）。
+    ///
+    /// `gemm`（公開経路。opt-in 時は TF32 へ分岐しうる）と
+    /// `gemm_bias_act` の `ComposedFallback`（非融合合成経路）の双方から
+    /// 呼ばれる。後者が `self.gemm(a, b)` を直接呼ぶと `gemm` 側の TF32
+    /// 分岐へ意図せず波及し、`gemm_bias_act` は本イシュー（#1042）の
+    /// 適用範囲外のまま FP32 で動作するという `crate::precision` モジュール
+    /// 冒頭コメントの契約（「適用範囲は `CudaBackendOps::gemm`（素の f32
+    /// GEMM）のみ」）に反するため、`ComposedFallback` は必ずこのヘルパーを
+    /// 経由する（codex-review 指摘。PR #1091）。
+    fn gemm_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
+        let n = b.shape()[1] as u32;
+
+        // `run_tiled_f32`／`run_wmma_tf32` はいずれも contiguous な
+        // `&[f32]` を要求する（CPU 実装と同じ契約。`ops.rs`（backend-cpu）
+        // 参照）。
+        let a_owned = a.contiguous();
+        let b_owned = b.contiguous();
+        let a_slice = a_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: lhs not contiguous".into()))?;
+        let b_slice = b_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
+
+        let gemm = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gemm(&device)
+            },
+        )?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || gemm.run_tiled_f32(a_slice, b_slice, m, n, k),
+        )?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
     /// 指定した `ordinal` に対応する `CudaBackendOps` を構築する。
     /// 構築自体は driver 初期化を行わないため常に成功する（実際の
     /// driver 呼び出しは各メソッドが `Self::device_handle`（`context_cache`
@@ -574,14 +623,30 @@ impl BackendOps for CudaBackendOps {
         })
     }
 
+    /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、
+    /// 本イシュー導入前と bit-exact に不変（`crate::precision` モジュール
+    /// 冒頭コメントの契約）。`crate::precision::tf32_gemm_enabled()` が
+    /// opt-in（`true`）の場合のみ WMMA TF32 Tensor Core 経路
+    /// （[`crate::gemm::CudaGemm::run_wmma_tf32`]）へ分岐する（イシュー
+    /// #1042。親ツリー #1029 Phase 2）。opt-in 時に TF32 カーネルが使用
+    /// 不能（cc<8.0・NVRTC コンパイル失敗等）な場合は
+    /// `CudaError::WmmaUnavailable` をそのまま `BackendError` へ変換して
+    /// 伝播し、FP32 への黙示フォールバックはしない（fail-closed。明示
+    /// opt-in の計測条件を静かに崩さない方針。`crate::precision` 参照）。
+    ///
+    /// **注意**: `gemm_bias_act` の `ComposedFallback` からはこの
+    /// メソッドを呼ばない（`gemm_fp32_strict` を使う）。本メソッドは
+    /// TF32 opt-in フラグの適用対象である「素の公開 GEMM 入口」専用。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        if !crate::precision::tf32_gemm_enabled() {
+            return self.gemm_fp32_strict(a, b);
+        }
+
         let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
         let n = b.shape()[1] as u32;
 
-        // `run_tiled_f32` は contiguous な `&[f32]` を要求する（CPU 実装
-        // と同じ契約。`ops.rs`（backend-cpu）参照）。
         let a_owned = a.contiguous();
         let b_owned = b.contiguous();
         let a_slice = a_owned
@@ -602,8 +667,9 @@ impl BackendOps for CudaBackendOps {
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
-            || gemm.run_tiled_f32(a_slice, b_slice, m, n, k),
+            || gemm.run_wmma_tf32(a_slice, b_slice, m, n, k),
         )?;
+        crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -616,8 +682,13 @@ impl BackendOps for CudaBackendOps {
     /// `bias` が `None` またはブロードキャストの厳密一致形状 `[n]`
     /// の場合にのみ融合カーネルを使う。それ以外（`[1]`・`[1, n]` 等の
     /// ブロードキャスト可能だが `[n]` ちょうどでない shape）はデフォルト
-    /// 実装と同じ 3 段合成（`self.gemm` → `self.add` → `self.relu`）へ
-    /// フォールバックする。両バックエンドは本イシュー時点で `add`／`relu`
+    /// 実装と同じ 3 段合成（`self.gemm_fp32_strict` → `self.add` →
+    /// `self.relu`）へフォールバックする。`self.gemm`（TF32 opt-in 分岐
+    /// を持つ公開経路）ではなく `gemm_fp32_strict` を使うのは、
+    /// `gemm_bias_act` が `crate::precision` モジュール冒頭コメントの
+    /// 契約どおり本イシュー（#1042）のスコープ外のまま常に FP32 で
+    /// 動作することを保証するため（codex-review 指摘。PR #1091）。
+    /// 両バックエンドは本イシュー時点で `add`／`relu`
     /// が実装済みのため CPU と異なり `Unsupported` を透過しない
     /// （モジュール冒頭コメント参照）。
     ///
@@ -646,7 +717,7 @@ impl BackendOps for CudaBackendOps {
                     fandhe_ai_tensor_core::broadcast_shape(&out_shape, bias.shape())
                         .map_err(BackendError::ShapeMismatch)?;
                 }
-                let mut out = self.gemm(a, b)?;
+                let mut out = self.gemm_fp32_strict(a, b)?;
                 if let Some(bias) = bias {
                     out = self.add(&out, bias)?;
                 }
@@ -1391,6 +1462,106 @@ mod tests {
                 assert!(!msg.is_empty(), "error detail message must not be empty");
             }
             Err(other) => panic!("unexpected error variant for gemm_bias_act: {other}"),
+        }
+    }
+
+    /// フラグはプロセスグローバル（`crate::precision`）のため、他の
+    /// テストとの競合を避けて直列化・原状復帰する RAII ガード
+    /// （`precision.rs::tests::FlagGuard` と同型。イシュー #1042）。
+    struct Tf32FlagGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: bool,
+    }
+
+    impl Tf32FlagGuard {
+        fn acquire() -> Self {
+            // `precision.rs::tests::FlagGuard` と単一ロックを共有する
+            // （codex-review P2・Cursor Bugbot Medium 指摘。別々の
+            // `static LOCK` を持つと直列化が効かず `TF32_GEMM_ENABLED`
+            // を巡るレースが起こりうる。PR #1091）。
+            let lock = crate::precision::test_support::tf32_flag_test_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let original = crate::precision::tf32_gemm_enabled();
+            Self {
+                _lock: lock,
+                original,
+            }
+        }
+    }
+
+    impl Drop for Tf32FlagGuard {
+        fn drop(&mut self) {
+            crate::precision::set_tf32_gemm_enabled(self.original);
+        }
+    }
+
+    /// 環境適応（CUDA 非搭載環境でも実行可能。実機なら本体まで検証）:
+    /// `crate::precision::tf32_gemm_enabled()` が既定 `false`（OFF）の
+    /// 場合、`gemm` が TF32 経路（[`crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT`]）
+    /// へ一切到達しないことを検証する（イシュー #1042 実装計画 §2.1
+    /// 「既定は OFF（FP32 厳密）」契約。`gemm_bias_act_fused_path_
+    /// increments_launch_counter_env_adaptive` と同じ分岐パターン）。
+    #[test]
+    fn gemm_stays_on_fp32_path_when_tf32_optin_flag_is_disabled_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_tf32_gemm_enabled(false);
+
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+
+        let before = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        let _ = cuda.gemm(&a, &b);
+        let after = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        assert_eq!(
+            before, after,
+            "既定 OFF のはずが TF32 opt-in 経路のカウンタが増加した（フラグ OFF 時の \
+             bit-exact 不変契約違反の疑い）: before={before}, after={after}"
+        );
+    }
+
+    /// opt-in（`true`）時、CUDA 実機が利用可能で TF32 カーネルが使用可能な
+    /// 環境では `gemm` が [`crate::gemm::CudaGemm::run_wmma_tf32`] 経路へ
+    /// 実際にルーティングされる（[`crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT`]
+    /// の増加で検証）ことを確認する。CUDA 非搭載環境・TF32 カーネル使用
+    /// 不能環境（`CudaError::WmmaUnavailable` 由来の
+    /// `BackendError::KernelLaunchFailed`）ではエラーの型のみ確認して
+    /// 早期 return する（fail-closed 契約: FP32 への黙示フォールバックを
+    /// しないことの裏返しとして、エラーはそのまま伝播される）。
+    #[test]
+    fn gemm_routes_to_tf32_path_when_optin_flag_is_enabled_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_tf32_gemm_enabled(true);
+
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+
+        let before = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        match cuda.gemm(&a, &b) {
+            Ok(_) => {
+                let after = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+                assert!(
+                    after > before,
+                    "opt-in 時に TF32 経路の起動カウンタが増加していない（既定 \
+                     FP32 経路へ黙示フォールバックした疑い）: before={before}, after={after}"
+                );
+            }
+            Err(BackendError::CudaUnavailable(msg)) => {
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(BackendError::KernelLaunchFailed(msg)) => {
+                // TF32 カーネル使用不能環境（cc<8.0 等）の fail-closed 伝播。
+                // FP32 への黙示フォールバックはしない契約（`crate::precision`
+                // モジュール冒頭コメント参照）。
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(other) => panic!("unexpected error variant for tf32 opt-in gemm: {other}"),
         }
     }
 

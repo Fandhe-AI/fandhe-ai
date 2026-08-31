@@ -80,6 +80,7 @@ fandhe-ai/
     ├── crates-io-publishing-order.md # crates.io 公開 6 クレート間 path 依存の version 併記方針（[dependencies] は付与・[dev-dependencies] は strip）・公開順序（トポロジカル順）・workspace.version 一括バンプ運用（#881）
     ├── cuda-streamk-decision.md        # CUDA GEMM StreamK スケジューリングの機構要約・wave 定量化・採否判断（保留。#812）
     ├── cuda-tensor-core-design.md      # TASK-11.1a WMMA/mma カーネル設計メモ（#60）
+    ├── cuda-tf32-optin-api-decision.md # CUDA GEMM の TF32 Tensor Core 経路を opt-in で選択する公開 API（`fandhe_ai::set_cuda_tf32_gemm_enabled`）の設計判断・既定 OFF／fail-closed 方針・framework-compare `--tf32` の C-1/C-2 分割（#1042）
     ├── device-memory-pool-design.md # デバイスメモリのサイズクラス・プールアロケータ設計（ハンドル非依存 SizeClassPool<H>〈take／put の RAII 返却・record_allocation／record_loan_end／record_release（Mutex 系）と record_pending_return／record_pending_merge（AtomicU64 の lock-free 系。push／take と同一クリティカルセクションで対にして順序逆転を排除）による PoolStats 更新契約・Metal は synchronize 完了まで put を遅延し同期の成否に関わらず pending_return_bytes で可視化した返却待ちを合流・take_one_for_release とバックエンド別フェーズを持つ release_cached のトランザクション型解放〉・PoolConfig／PoolStats・サイズクラス表・寿命・断片化・スレッド安全・解放戦略・REQ-14 解放 API の facade 到達経路・§8 設計確定事項／実装確定事項の区分。#1018 ツリー・#1019）
     ├── device-resident-update-design.md # 学習ループのパラメータ更新デバイス常駐化の設計（更新経路・所有権・数値一致契約。#933 ツリー・#934）
     ├── facade-device-handle-design.md # デバイスハンドル再利用の公開 API 設計判断（案 B のみ採用・#929/#946 実装済みの追認・#931）
@@ -107,7 +108,8 @@ fandhe-ai/
     │   ├── cuda-tensor-core-tolerance-gb10-scale-sweep.md # GB10（sm_121）実機での入力スケールスイープ再実測・sm_86 との世代差記録（#995）
     │   ├── cpu-gemm-candle-cpu-retune.md # CPU GEMM マイクロカーネル・packing 再チューニング（pc 外側ループ・A 1 回 pack 候補〈SharedBPcOuter〉。対 gemm crate 逆転狙い・実機実測は持ち越し。#1041）
     │   ├── train-linear-epilogue-fusion.md # 学習 forward の Linear+ReLU epilogue 融合（gemm_bias_act／gemm_resident_rhs_act 結線）の起動数 before/after・CPU 実測・Metal/DGX Spark 未実測の明記（#1044）
-    │   └── train-step-phase-breakdown.md # CPU / CUDA / Metal 学習 1 step のフェーズ分解実機実測（M4 Max・DGX Spark GB10・5 回計測）・支配項トップ 3（backward が 83.6〜97.3% で全バックエンド共通の支配項）・#1008 配下 Issue 優先順位の更新案（#1010）
+    │   ├── train-step-phase-breakdown.md # CPU / CUDA / Metal 学習 1 step のフェーズ分解実機実測（M4 Max・DGX Spark GB10・5 回計測）・支配項トップ 3（backward が 83.6〜97.3% で全バックエンド共通の支配項）・#1008 配下 Issue 優先順位の更新案（#1010）
+    │   └── cuda-tf32-optin-parity.md # CUDA TF32 opt-in GEMM（`crate::precision`）の複合判定・実機実行手順・実測記入欄（本エージェント実行環境に CUDA 実機なしのため未実測明記。#1042）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）

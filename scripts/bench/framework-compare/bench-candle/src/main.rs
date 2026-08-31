@@ -68,6 +68,36 @@ fn readout2(t: &Tensor) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
 fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let n = cli.size;
     let dev = make_device(&cli.device)?;
+    // イシュー #1042: `--tf32`（`dispatch` が事前に `task == "gemm" &&
+    // device == "cuda"` を検証済み）は candle 0.11 の公開プロセスグローバル
+    // スイッチ（`cuda_backend::set_gemm_reduced_precision_f32`。既定
+    // `false` = FP32 厳密）を有効化する。burn の TF32 既定降格
+    // （`burn-cuda-tf32.md`）との条件差を埋め、fandhe-ai opt-in 実装
+    // （`docs/cuda-tf32-optin-api-decision.md`）との同条件比較を可能にする。
+    // 本バイナリはタスク 1 回の計測ごとにプロセスを起動する設計（`run_all*.sh`
+    // のスイープ方式）のため、有効化後に明示的に無効へ戻す必要はない。
+    // `cuda` cargo feature が無効なビルド（既定 `metal`）では
+    // `candle_core::cuda_backend` モジュール自体が存在しない
+    // （candle-core `#[cfg(feature = "cuda")]`）ため、`--features cuda`
+    // ビルドを要求する型付きエラーへ fail-closed する（`dispatch` の
+    // task/device 検証を通過していても、`cuda` feature 自体が無効な
+    // ビルドでは `make_device("cuda")` が `NotCompiledWithCudaSupport` を
+    // 返すため通常この分岐には到達しないが、コンパイル可能性のため両方の
+    // cfg 分岐を用意する）。
+    if cli.tf32 {
+        #[cfg(feature = "cuda")]
+        {
+            candle_core::cuda_backend::set_gemm_reduced_precision_f32(true);
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            return Err(
+                "MEASURE_ERROR: --tf32 requires building bench-candle with --features cuda \
+                 --no-default-features (issue #1042)"
+                    .into(),
+            );
+        }
+    }
     // イシュー #970 codex-review 指摘（PR #978・P1）: `n * n`（要素数）を
     // 入力ベクタ生成前に `gemm_element_count` で検証する（`--size` は
     // 未検証な CLI 入力であり、無検証の乗算は debug で panic・release では
@@ -137,6 +167,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "fresh",
         init_s: None,
         parity,
+        tf32: cli.tf32,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -231,6 +262,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "fresh",
         init_s: None,
         parity: None,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -272,6 +304,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "fresh",
         init_s: None,
         parity: None,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -286,9 +319,28 @@ fn main() {
 
 /// `--mode reuse` は対象外（モジュールコメント参照。イシュー #925）。
 /// `--phases`（イシュー #1009）も `bench-fandhe` 専用であり、未知フラグを
-/// 黙殺せず fail-fast する（README「train --phases」節参照）。
+/// 黙殺せず fail-fast する（README「train --phases」節参照）。`run()` から
+/// [`dispatch`] を分離してあるのは `parse_cli()`（`std::env::args()` 依存）
+/// を経由せずテストから直接分岐を検証できるようにするため
+/// （`bench-fandhe::dispatch` と同じ構成方針）。
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
+    dispatch(&cli)
+}
+
+/// task × `--tf32` の分岐（イシュー #1042）。`--tf32` は `--task gemm
+/// --device cuda` 限定で候補精度（`candle_core::cuda_backend::
+/// set_gemm_reduced_precision_f32`。candle 0.11 の公開 API）を有効化し、
+/// それ以外の task/device 組合せは MEASURE_ERROR で fail-fast する
+/// （`docs/cuda-tf32-optin-api-decision.md` C-1）。`cuda` cargo feature が
+/// 無効なビルド（既定 `metal`）では `cuda_backend` モジュール自体が
+/// コンパイル対象から外れる（candle-core `#[cfg(feature = "cuda")]`）ため、
+/// `--tf32` 指定時は `device == "cuda"` を先に検査してから
+/// `#[cfg(feature = "cuda")]` 分岐へ入る（feature 無効ビルドでは
+/// `device == "cuda"` でも `Device::new_cuda` が
+/// `NotCompiledWithCudaSupport` を返すため、実際にはこの分岐へ到達する
+/// 前に `run_gemm` 内の `make_device` が失敗する）。
+fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.mode == "reuse" {
         return Err(
             "MEASURE_ERROR: --mode reuse is not applicable to candle (device reuse is already \
@@ -302,10 +354,53 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    if cli.tf32 && !(cli.task == "gemm" && cli.device == "cuda") {
+        return Err(format!(
+            "MEASURE_ERROR: --tf32 is only supported for --task gemm --device cuda on candle \
+             (got task='{}' device='{}'; issue #1042)",
+            cli.task, cli.device
+        )
+        .into());
+    }
     match cli.task.as_str() {
-        "gemm" => run_gemm(&cli),
-        "train" => run_train(&cli),
-        "infer" => run_infer(&cli),
+        "gemm" => run_gemm(cli),
+        "train" => run_train(cli),
+        "infer" => run_infer(cli),
         other => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_cli(task: &str, device: &str, tf32: bool) -> Cli {
+        Cli {
+            task: task.to_string(),
+            device: device.to_string(),
+            size: 64,
+            out: "/dev/null".to_string(),
+            mode: "fresh".to_string(),
+            phases: false,
+            tf32,
+        }
+    }
+
+    #[test]
+    fn tf32_with_non_gemm_task_is_measure_error() {
+        let cli = base_cli("train", "cuda", true);
+        let err = dispatch(&cli).expect_err("--tf32 with train task must be rejected");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--tf32"), "msg={msg}");
+    }
+
+    #[test]
+    fn tf32_with_non_cuda_device_is_measure_error() {
+        let cli = base_cli("gemm", "cpu", true);
+        let err = dispatch(&cli).expect_err("--tf32 with non-cuda device must be rejected");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--tf32"), "msg={msg}");
     }
 }
