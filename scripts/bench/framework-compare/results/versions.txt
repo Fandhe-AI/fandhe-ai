@@ -31,3 +31,23 @@ bench-fandhe v0.1.0 (bench-fandhe)
 bench-fandhe v0.1.0 (bench-fandhe)
 ├── bench-common v0.1.0 (bench-common)
 └── fandhe-ai v0.4.0
+
+# 環境 6/7: fandhe-ai 0.4.0 横並び再計測（イシュー #1050）。計測日 2026-08-29。
+# 実行ログ自体には cargo tree の出力が残っていない（summary.md 環境 6/7 節の
+# 「ツールチェーン」注記を参照）。下記は本ワークスペースの Cargo.lock
+# （scripts/bench/framework-compare/Cargo.lock。承認済みピン fandhe-ai =0.4.0 /
+# candle-core =0.11.0 / burn =0.21.0 の固定を #991 で確定して以降、計測日
+# 2026-08-29 12:44:54 +0900 のコミット 3d8c23c 以降 2026-08-31 の本追記時点まで
+# 変更なし。`git log --oneline -- scripts/bench/framework-compare/Cargo.lock` で確認）
+# から `cargo tree -p <crate> --depth 1` を再実行して得た実際の出力であり、
+# 環境 5/A/B と環境 6/7 が「同一ノードだから同一のはず」という推定ではなく、
+# 固定された Cargo.lock 由来の同一トップレベル依存であることを示す。
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.4.0
+bench-candle v0.1.0 (bench-candle)
+├── bench-common v0.1.0 (bench-common)
+└── candle-core v0.11.0
+bench-burn v0.1.0 (bench-burn)
+├── bench-common v0.1.0 (bench-common)
+└── burn v0.21.0
