@@ -53,6 +53,28 @@ pub fn tf32_gemm_enabled() -> bool {
     TF32_GEMM_ENABLED.load(Ordering::SeqCst)
 }
 
+/// `TF32_GEMM_ENABLED` を操作するテスト間で共有する直列化ロック
+/// （`cfg(test)` 限定）。
+///
+/// 当初は本モジュールの `tests::FlagGuard` と `ops.rs::tests::
+/// Tf32FlagGuard` がそれぞれ独立した `static LOCK: Mutex<()>` を
+/// 持っていたため、`cargo test` の既定並列実行下で異なるテストバイナリ
+/// 内のテストが別々のロックを取得しつつ同一のプロセスグローバル
+/// `TF32_GEMM_ENABLED` を書き換え合い、直列化が効かないレースが起こり
+/// うる不具合があった（codex-review P2・Cursor Bugbot Medium 指摘。
+/// PR #1091）。両モジュールの RAII ガードは本関数が返す単一の `Mutex`
+/// を経由することで直列化を統一する。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+
+    /// フラグ操作テスト全体で共有する単一ロックを返す。
+    pub(crate) fn tf32_flag_test_lock() -> &'static Mutex<()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +82,8 @@ mod tests {
     /// フラグはプロセスグローバルのため、他のテストとの競合を避けて
     /// 直列化・原状復帰する RAII ガード（イシュー #1042 実装計画
     /// §3「テスト」節。`cargo test` の既定並列実行下でも安全に検証する）。
+    /// ロック本体は `test_support::tf32_flag_test_lock()`（`ops.rs::tests::
+    /// Tf32FlagGuard` と共有）を使う。
     struct FlagGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         original: bool,
@@ -67,10 +91,11 @@ mod tests {
 
     impl FlagGuard {
         fn acquire() -> Self {
-            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             // 直前のテストが panic してポイズンされていても、原状復帰の
             // ためだけに使うロックなので握り潰して継続する。
-            let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = test_support::tf32_flag_test_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let original = tf32_gemm_enabled();
             Self {
                 _lock: lock,

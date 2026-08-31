@@ -55,6 +55,55 @@ pub struct CudaBackendOps {
 }
 
 impl CudaBackendOps {
+    /// GEMM 本体（f32）の FP32 厳密経路（`run_tiled_f32`）のみを実行する
+    /// 内部ヘルパー。`crate::precision::tf32_gemm_enabled()` の状態に
+    /// 関わらず常に FP32 厳密で計算する（TF32 opt-in フラグを一切見ない）。
+    ///
+    /// `gemm`（公開経路。opt-in 時は TF32 へ分岐しうる）と
+    /// `gemm_bias_act` の `ComposedFallback`（非融合合成経路）の双方から
+    /// 呼ばれる。後者が `self.gemm(a, b)` を直接呼ぶと `gemm` 側の TF32
+    /// 分岐へ意図せず波及し、`gemm_bias_act` は本イシュー（#1042）の
+    /// 適用範囲外のまま FP32 で動作するという `crate::precision` モジュール
+    /// 冒頭コメントの契約（「適用範囲は `CudaBackendOps::gemm`（素の f32
+    /// GEMM）のみ」）に反するため、`ComposedFallback` は必ずこのヘルパーを
+    /// 経由する（codex-review 指摘。PR #1091）。
+    fn gemm_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
+        let n = b.shape()[1] as u32;
+
+        // `run_tiled_f32`／`run_wmma_tf32` はいずれも contiguous な
+        // `&[f32]` を要求する（CPU 実装と同じ契約。`ops.rs`（backend-cpu）
+        // 参照）。
+        let a_owned = a.contiguous();
+        let b_owned = b.contiguous();
+        let a_slice = a_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: lhs not contiguous".into()))?;
+        let b_slice = b_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
+
+        let gemm = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gemm(&device)
+            },
+        )?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || gemm.run_tiled_f32(a_slice, b_slice, m, n, k),
+        )?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
     /// 指定した `ordinal` に対応する `CudaBackendOps` を構築する。
     /// 構築自体は driver 初期化を行わないため常に成功する（実際の
     /// driver 呼び出しは各メソッドが `Self::device_handle`（`context_cache`
@@ -584,15 +633,20 @@ impl BackendOps for CudaBackendOps {
     /// `CudaError::WmmaUnavailable` をそのまま `BackendError` へ変換して
     /// 伝播し、FP32 への黙示フォールバックはしない（fail-closed。明示
     /// opt-in の計測条件を静かに崩さない方針。`crate::precision` 参照）。
+    ///
+    /// **注意**: `gemm_bias_act` の `ComposedFallback` からはこの
+    /// メソッドを呼ばない（`gemm_fp32_strict` を使う）。本メソッドは
+    /// TF32 opt-in フラグの適用対象である「素の公開 GEMM 入口」専用。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        if !crate::precision::tf32_gemm_enabled() {
+            return self.gemm_fp32_strict(a, b);
+        }
+
         let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
         let n = b.shape()[1] as u32;
 
-        // `run_tiled_f32`／`run_wmma_tf32` はいずれも contiguous な
-        // `&[f32]` を要求する（CPU 実装と同じ契約。`ops.rs`（backend-cpu）
-        // 参照）。
         let a_owned = a.contiguous();
         let b_owned = b.contiguous();
         let a_slice = a_owned
@@ -610,21 +664,12 @@ impl BackendOps for CudaBackendOps {
                 context_cache::cached_gemm(&device)
             },
         )?;
-        let out = if crate::precision::tf32_gemm_enabled() {
-            let out = self.with_driver_call(
-                &[],
-                |e| BackendError::KernelLaunchFailed(e.to_string()),
-                || gemm.run_wmma_tf32(a_slice, b_slice, m, n, k),
-            )?;
-            crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
-            out
-        } else {
-            self.with_driver_call(
-                &[],
-                |e| BackendError::KernelLaunchFailed(e.to_string()),
-                || gemm.run_tiled_f32(a_slice, b_slice, m, n, k),
-            )?
-        };
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || gemm.run_wmma_tf32(a_slice, b_slice, m, n, k),
+        )?;
+        crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -637,8 +682,13 @@ impl BackendOps for CudaBackendOps {
     /// `bias` が `None` またはブロードキャストの厳密一致形状 `[n]`
     /// の場合にのみ融合カーネルを使う。それ以外（`[1]`・`[1, n]` 等の
     /// ブロードキャスト可能だが `[n]` ちょうどでない shape）はデフォルト
-    /// 実装と同じ 3 段合成（`self.gemm` → `self.add` → `self.relu`）へ
-    /// フォールバックする。両バックエンドは本イシュー時点で `add`／`relu`
+    /// 実装と同じ 3 段合成（`self.gemm_fp32_strict` → `self.add` →
+    /// `self.relu`）へフォールバックする。`self.gemm`（TF32 opt-in 分岐
+    /// を持つ公開経路）ではなく `gemm_fp32_strict` を使うのは、
+    /// `gemm_bias_act` が `crate::precision` モジュール冒頭コメントの
+    /// 契約どおり本イシュー（#1042）のスコープ外のまま常に FP32 で
+    /// 動作することを保証するため（codex-review 指摘。PR #1091）。
+    /// 両バックエンドは本イシュー時点で `add`／`relu`
     /// が実装済みのため CPU と異なり `Unsupported` を透過しない
     /// （モジュール冒頭コメント参照）。
     ///
@@ -667,7 +717,7 @@ impl BackendOps for CudaBackendOps {
                     fandhe_ai_tensor_core::broadcast_shape(&out_shape, bias.shape())
                         .map_err(BackendError::ShapeMismatch)?;
                 }
-                let mut out = self.gemm(a, b)?;
+                let mut out = self.gemm_fp32_strict(a, b)?;
                 if let Some(bias) = bias {
                     out = self.add(&out, bias)?;
                 }
@@ -1425,8 +1475,13 @@ mod tests {
 
     impl Tf32FlagGuard {
         fn acquire() -> Self {
-            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            // `precision.rs::tests::FlagGuard` と単一ロックを共有する
+            // （codex-review P2・Cursor Bugbot Medium 指摘。別々の
+            // `static LOCK` を持つと直列化が効かず `TF32_GEMM_ENABLED`
+            // を巡るレースが起こりうる。PR #1091）。
+            let lock = crate::precision::test_support::tf32_flag_test_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let original = crate::precision::tf32_gemm_enabled();
             Self {
                 _lock: lock,

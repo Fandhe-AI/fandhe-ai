@@ -633,8 +633,21 @@ def get(rows, fw, task, device, size=None, mode="fresh", tf32=False):
     return None
 
 
-def devices_in(rows, task, mode="fresh"):
-    present = {r["device"] for r in rows if r["task"] == task and r["mode"] == mode}
+def devices_in(rows, task, mode="fresh", tf32=False):
+    """`task`／`mode` に一致するデバイス一覧（`DEVICE_ORDER` 順）を返す。
+
+    `tf32`（既定 `False`。イシュー #1042）: `get()` と同じ
+    `r.get("tf32", False)` 一致規約でデバイスを絞り込む。既定 `False` の
+    呼び出し元（(a) GEMM 節・(a') reuse 節）が、TF32 opt-in 専用に
+    計測されたデバイス（FP32 gemm 行を持たない）まで拾って「計測不可」
+    プレースホルダ行を作らないようにするため（Cursor Bugbot Low
+    指摘・PR #1091。TF32 専用行は別途 (a-tf32) 節が表示する）。
+    """
+    present = {
+        r["device"]
+        for r in rows
+        if r["task"] == task and r["mode"] == mode and bool(r.get("tf32", False)) == tf32
+    }
     return [d for d in DEVICE_ORDER if d in present]
 
 
@@ -1825,12 +1838,18 @@ def section(path, rows):
         # 防御的スイープ・PR #1082。target_gate 側の同一パターンと同じ
         # 理由: 外部 JSONL 由来の size を未検証のまま渡すと
         # `unhashable type`/比較 `TypeError` で `main()` 全体が
-        # traceback 停止しうる）。
+        # traceback 停止しうる）。`not r.get("tf32", False)` で TF32
+        # opt-in 行を除外する（Cursor Bugbot Low 指摘・PR #1091: 含めると
+        # `get()` が既定 tf32=False で見つけられない size が「計測不可」
+        # と誤表示される。TF32 専用行は (a-tf32) 節が表示する）。
         sizes = sorted(
             {
                 r["size"]
                 for r in rows
-                if r["task"] == "gemm" and r["device"] == device and _valid_gate_size(r.get("size"))
+                if r["task"] == "gemm"
+                and r["device"] == device
+                and not r.get("tf32", False)
+                and _valid_gate_size(r.get("size"))
             }
         )
         lines.append(f"#### {DEVICE_LABEL[device]}\n")
@@ -1863,6 +1882,8 @@ def section(path, rows):
         for device in devices_in(rows, "gemm", mode="reuse"):
             # (a) 節と同じ防御（`_valid_gate_size`。イシュー #1051
             # codex-review 指摘の防御的スイープ・PR #1082）。
+            # (a) 節と同じ理由で TF32 opt-in 行を除外する（Cursor Bugbot
+            # Low 指摘・PR #1091）。
             sizes = sorted(
                 {
                     r["size"]
@@ -1870,6 +1891,7 @@ def section(path, rows):
                     if r["task"] == "gemm"
                     and r["device"] == device
                     and r["mode"] == "reuse"
+                    and not r.get("tf32", False)
                     and _valid_gate_size(r.get("size"))
                 }
             )
