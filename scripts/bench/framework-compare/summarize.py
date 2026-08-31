@@ -1399,12 +1399,27 @@ def target_gate(rows, target):
             # 実測から都度導出し、gemm と同じ経路で 1 size ごとに突合
             # する（size が実際に 1 つしか無ければ従来と同じ挙動になり、
             # 複数あれば取りこぼさず全て判定する）。
+            # イシュー #1042 codex-review P2 指摘（PR #1091）: gemm は
+            # `_pick_row_for_gate` が tf32=False の行のみを候補にする
+            # （`tf32_candidates = (False,) if task == "gemm" else ...`）
+            # ため、`sizes`/`invalid_size_rows` の導出元である
+            # `candidate_rows` に tf32=True の行を含めたままだと、
+            # FP32 側に存在しない size を持つ TF32 専用行が混在した
+            # 場合に `sizes` へその size が混入し、`_pick_row_for_gate`
+            # は tf32=False で探すため両フレームワークとも
+            # 「該当行なし」となって undeterminable が生成され、ゲートが
+            # 誤って失敗しうる。gemm では tf32=True の行を候補集合から
+            # 除外し、`_pick_row_for_gate` が実際に参照する母集団と
+            # size 集合の導出元を一致させる（train/infer は
+            # `_pick_row_for_gate` が tf32=True もフォールバック候補に
+            # 含めるため除外しない）。
             candidate_rows = [
                 r
                 for r in rows
                 if r["task"] == task
                 and r["device"] == device
                 and r["framework"] in ("fandhe-ai", target)
+                and (task != "gemm" or r.get("tf32", False) is not True)
             ]
             # 外部 JSONL 由来の `size` を検証せず set 内包・`sorted()` へ
             # 渡すと、配列／オブジェクト混入で `unhashable type`、文字列と

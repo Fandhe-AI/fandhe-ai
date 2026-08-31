@@ -1390,6 +1390,29 @@ class TargetGateTests(unittest.TestCase):
         rec = next(r for r in records if r["task"] == "gemm" and r["size"] == 256)
         self.assertAlmostEqual(rec["ratio"], 1.0)
 
+    def test_tf32_only_size_excluded_from_gate_size_set(self):
+        # イシュー #1042 codex-review P2 指摘（PR #1091）:
+        # `_pick_row_for_gate` は gemm について tf32=False の行しか
+        # 選ばないため、FP32 側に存在しない size を持つ TF32 専用行が
+        # `candidate_rows`/`sizes` に混入すると、その size は両
+        # フレームワークとも「該当行なし」として undeterminable に
+        # なってしまう（size=512 は tf32=True 行しか無く、FP32 行は
+        # size=256 のみ）。修正後は size=512 が sizes 集合から除外され、
+        # gemm のゲート判定は size=256（achieved）の 1 件のみになる。
+        rows = [
+            _with_parity(_base_row(framework="fandhe-ai", size=256, mode="fresh")),
+            _with_parity(_base_row(framework="candle", size=256, mode="fresh")),
+            dict(
+                _with_parity(_base_row(framework="fandhe-ai", size=512, mode="fresh")),
+                tf32=True,
+            ),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        gemm_records = [r for r in records if r["task"] == "gemm"]
+        self.assertEqual(len(gemm_records), 1)
+        self.assertEqual(gemm_records[0]["size"], 256)
+        self.assertEqual(gemm_records[0]["status"], "achieved")
+
     def test_fandhe_fresh_only_uses_fresh(self):
         rows = [
             _with_parity(_base_row(framework="fandhe-ai", mode="fresh")),
