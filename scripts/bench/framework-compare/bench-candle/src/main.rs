@@ -173,6 +173,192 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// イシュー #1103: `docs/perf/metal-gemm-bottleneck-rediagnosis.md` §7.1 が
+/// 未確定のまま残した「candle 側の転送分離測定」を埋めるタスク。
+///
+/// fandhe 側（`crates/backend-metal/examples/gemm_bench.rs`）は
+/// `dispatch_auto`（転送込み: 毎反復ホスト→デバイスアップロード＋カーネル
+/// 実行＋readback）と `dispatch_tiled_prepared`（転送除外: バッファを
+/// ループ外で 1 回だけアップロードし、計測対象をディスパッチ〈エンコード＋
+/// コマンドバッファ完了待ち〉のみに絞る）の 2 境界を同一プロセス内で比較
+/// している（同 doc §4.1・§4.3）。本関数はこの 2 境界を candle 側でも
+/// 同一プロセス内で再現し、`gemm_transfer_incl`（転送込み）・
+/// `gemm_transfer_excl`（転送除外）という 2 つの `task` 名の `Record` を
+/// 1 回のプロセス実行で出力する（`run_gemm` の既存 `task: "gemm"` は
+/// 変更しない。既存の候補比較・summarize.py・candle 比ゲート〈#1082〉は
+/// 新 task 名を扱わないため影響しない）。
+///
+/// - **転送込み境界**: 計測クロージャ内で `Tensor::from_slice`（A・B の
+///   毎反復アップロード。`&[f32]` 参照を渡すのみでホスト側 clone を
+///   発生させない。fandhe 側 `dispatch_auto`/`dispatch_variant` も
+///   `&[f32]` 参照のみを受け取るため、ここで `Tensor::from_vec` +
+///   事前 `clone()` を使うと candle 側だけに余分な host メモリコピーが
+///   計測窓へ混入し比較の対称性が崩れる。イシュー #1103 Review 指摘）
+///   → `matmul` → `to_vec2` readback を行う。checksum 集計は readback
+///   完了後（計測窓外）で行い、転送除外境界側の計測方針と揃える。
+///   fandhe `dispatch_auto` と同じ境界。
+/// - **転送除外境界**: A・B はループ外で 1 回だけデバイス転送する。
+///   計測クロージャ内は `matmul` と `Device::synchronize()`（candle 0.11
+///   の公開 API。`~/.cargo/registry/.../candle-core-0.11.0/src/device.rs:511`）
+///   のみを計測し、readback は計測窓の外で 1 回行う（fandhe
+///   `dispatch_tiled_prepared` が readback を計測対象に含めないのと同じ
+///   境界）。checksum 検証（縮退遮断・`validate_gemm_checksum`）は両境界
+///   とも実施するが、除外境界側は計測窓外の readback 結果に対して行う。
+///
+/// `--mode`/`--phases`/`--tf32` は `dispatch` の既存 fail-fast 分岐
+/// （`--mode reuse` 拒否・`--phases` 拒否・`--tf32` は gemm×cuda 限定）を
+/// そのまま適用する（本タスクは metal 限定の追加検証のため、それらの
+/// 分岐を独自に緩めない）。
+fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.device != "metal" {
+        return Err(format!(
+            "MEASURE_ERROR: gemm-transfer-split は --device metal 限定（イシュー #1103。\
+             docs/perf/metal-gemm-bottleneck-rediagnosis.md §7.1 の candle 転送分離測定は \
+             Metal 頭打ち診断の追補のため、他デバイスへは拡張しない）: got device='{}'",
+            cli.device
+        )
+        .into());
+    }
+    let n = cli.size;
+    let dev = make_device(&cli.device)?;
+    let len = gemm_element_count(n)?;
+
+    // --- 転送込み境界（fandhe dispatch_auto と同一。run_gemm と同じ入力
+    // 生成・checksum 縮退検査・参照比較を踏襲する） ---
+    {
+        let a_host = Xorshift64Star::new(SEED_A).fill_vec(len);
+        let b_host = Xorshift64Star::new(SEED_B).fill_vec(len);
+        let reference = GemmReference::compute(n, &a_host, &b_host)?;
+        let mut checksum = 0.0;
+        let mut parity: Option<ParityStats> = None;
+
+        let one = |sync_checksum: &mut f64,
+                   parity: &mut Option<ParityStats>|
+         -> Result<Duration, Box<dyn std::error::Error>> {
+            let start = Instant::now();
+            // 毎反復ホスト→デバイス転送（fandhe dispatch_auto のアップロード
+            // 込み境界と同一）。`Tensor::from_slice` は `&[f32]` 参照を
+            // 受け取り device へアップロードする（`Tensor::from_vec` と違い
+            // Vec を消費しないため呼び出し側の事前 `clone()` が不要）。
+            // fandhe 側の `dispatch_auto`/`dispatch_variant` も `&[f32]`
+            // 参照を受け取るのみでホスト側 clone を発生させないため、ここで
+            // `from_vec(...clone())` を使うと candle 側だけに余分な host
+            // メモリコピー（A・B 計 128MB @ N=4096）が計測窓内に混入し
+            // 比較の対称性が崩れる（イシュー #1103 Review 指摘）。
+            let a = Tensor::from_slice(&a_host, (n, n), &dev)?;
+            let b = Tensor::from_slice(&b_host, (n, n), &dev)?;
+            let c = a.matmul(&b)?;
+            let rows = readout2(&c)?;
+            // checksum 集計（O(n²) の `sum()`）は fandhe 側の計測境界
+            // （アップロード＋カーネル実行＋readback のみ）に対応物がない
+            // ホスト側後処理のため、readback 完了時点で `elapsed` を確定し
+            // 集計は計測窓の外で行う（転送除外境界の checksum 計測方針との
+            // 対称性も合わせて確保する。イシュー #1103 Review 指摘）。
+            let elapsed = start.elapsed();
+            *sync_checksum = rows.iter().flat_map(|r| r.iter()).map(|&x| x as f64).sum();
+            validate_gemm_checksum(*sync_checksum)?;
+            let out: Vec<f32> = rows.into_iter().flatten().collect();
+            let stats = reference.verify(&out)?;
+            *parity = Some(match parity.take() {
+                Some(prev) => prev.worst(stats),
+                None => stats,
+            });
+            Ok(elapsed)
+        };
+
+        for _ in 0..WARMUP_ITERS {
+            one(&mut checksum, &mut parity)?;
+        }
+        let mut durations = Vec::with_capacity(MEASURE_ITERS);
+        for _ in 0..MEASURE_ITERS {
+            durations.push(one(&mut checksum, &mut parity)?);
+        }
+        let st = stats(&durations)?;
+        Record {
+            framework: FRAMEWORK,
+            framework_version: VERSION,
+            task: "gemm_transfer_incl",
+            device: &cli.device,
+            size: n,
+            stats: st,
+            gflops: Some(gemm_gflops(n, st.median_s)),
+            throughput_per_s: None,
+            checksum,
+            warmup: WARMUP_ITERS,
+            iters: MEASURE_ITERS,
+            mode: "fresh",
+            init_s: None,
+            parity,
+            tf32: cli.tf32,
+        }
+        .emit(&cli.out)?;
+    }
+
+    // --- 転送除外境界（fandhe dispatch_tiled_prepared と同一。A/B はループ
+    // 外で 1 回だけデバイス転送し、計測窓は matmul + synchronize のみ） ---
+    {
+        let a_host = Xorshift64Star::new(SEED_A).fill_vec(len);
+        let b_host = Xorshift64Star::new(SEED_B).fill_vec(len);
+        let reference = GemmReference::compute(n, &a_host, &b_host)?;
+        // ループ外の 1 回だけの転送（prepared 境界。以降の計測窓には
+        // ホスト→デバイス転送を含めない）。
+        let a = Tensor::from_vec(a_host, (n, n), &dev)?;
+        let b = Tensor::from_vec(b_host, (n, n), &dev)?;
+
+        let one = || -> Result<Duration, Box<dyn std::error::Error>> {
+            let start = Instant::now();
+            let c = a.matmul(&b)?;
+            // readback を計測窓に含めない代わりに、デバイス側の実行完了を
+            // 待つ（`dispatch_tiled_prepared` のコマンドバッファ完了待ちと
+            // 同じ役割）。`c` は計測窓内では破棄され、checksum は計測ループ
+            // 終了後に別途 1 回だけ readback して検証する。
+            dev.synchronize()?;
+            let elapsed = start.elapsed();
+            drop(c);
+            Ok(elapsed)
+        };
+
+        for _ in 0..WARMUP_ITERS {
+            one()?;
+        }
+        let mut durations = Vec::with_capacity(MEASURE_ITERS);
+        for _ in 0..MEASURE_ITERS {
+            durations.push(one()?);
+        }
+        let st = stats(&durations)?;
+
+        // checksum 検証は計測窓の外で 1 回だけ行う（fandhe prepared 系列と
+        // 同じく、readback 自体を計測対象に含めないため）。
+        let c = a.matmul(&b)?;
+        let rows = readout2(&c)?;
+        let checksum: f64 = rows.iter().flat_map(|r| r.iter()).map(|&x| x as f64).sum();
+        validate_gemm_checksum(checksum)?;
+        let out: Vec<f32> = rows.into_iter().flatten().collect();
+        let parity = Some(reference.verify(&out)?);
+
+        Record {
+            framework: FRAMEWORK,
+            framework_version: VERSION,
+            task: "gemm_transfer_excl",
+            device: &cli.device,
+            size: n,
+            stats: st,
+            gflops: Some(gemm_gflops(n, st.median_s)),
+            throughput_per_s: None,
+            checksum,
+            warmup: WARMUP_ITERS,
+            iters: MEASURE_ITERS,
+            mode: "fresh",
+            init_s: None,
+            parity,
+            tf32: cli.tf32,
+        }
+        .emit(&cli.out)?;
+    }
+
+    Ok(())
+}
+
 struct Mlp {
     w1: Var,
     b1: Var,
@@ -364,6 +550,7 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     match cli.task.as_str() {
         "gemm" => run_gemm(cli),
+        "gemm-transfer-split" => run_gemm_transfer_split(cli),
         "train" => run_train(cli),
         "infer" => run_infer(cli),
         other => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
@@ -402,5 +589,32 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
         assert!(msg.contains("--tf32"), "msg={msg}");
+    }
+
+    /// イシュー #1103: `gemm-transfer-split` は Metal 頭打ち診断の追補
+    /// （`docs/perf/metal-gemm-bottleneck-rediagnosis.md` §7.1）専用のため
+    /// `--device metal` 以外を fail-closed で拒否する
+    /// （`run_gemm_transfer_split` 冒頭のデバイス検証）。
+    #[test]
+    fn gemm_transfer_split_with_non_metal_device_is_measure_error() {
+        let cli = base_cli("gemm-transfer-split", "cpu", false);
+        let err =
+            dispatch(&cli).expect_err("gemm-transfer-split with non-metal device must be rejected");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("gemm-transfer-split"), "msg={msg}");
+    }
+
+    /// `--mode reuse` は candle 全体で対象外（モジュール冒頭コメント・
+    /// イシュー #925）。`gemm-transfer-split` も例外にしない（`dispatch`
+    /// の既存 fail-fast 分岐がタスク種別を問わず先に検査するため）。
+    #[test]
+    fn gemm_transfer_split_with_reuse_mode_is_measure_error() {
+        let mut cli = base_cli("gemm-transfer-split", "metal", false);
+        cli.mode = "reuse".to_string();
+        let err = dispatch(&cli).expect_err("--mode reuse must be rejected for candle");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--mode reuse"), "msg={msg}");
     }
 }

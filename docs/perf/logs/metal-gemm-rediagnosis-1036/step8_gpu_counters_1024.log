@@ -1,0 +1,62 @@
+実行コマンド:
+  cargo build -p fandhe-ai-backend-metal --example gemm_counter_workload --release
+  xcrun xctrace record --template 'Metal System Trace' --instrument 'Metal GPU Counters' \
+    --output counters_1024.trace --launch -- \
+    ./target/release/examples/gemm_counter_workload --size=1024 --iters=200
+
+record 標準出力（stderr 含む）:
+  Starting recording with the Metal System Trace template and Metal GPU Counters Instrument. Launching process: gemm_counter_workload.
+  Ctrl-C to stop the recording
+  Target app exited, ending recording...
+  Run issues were detected (trace is still ready to be viewed):
+  * [Warning] GPU Service reported error: Selected counter profile is not supported on target device
+
+  Recording completed. Saving output file...
+  Output file saved as: counters_1024.trace
+
+xctrace export --toc の該当抜粋（Metal System Trace 既定〈#1036〉と異なり、
+--instrument 'Metal GPU Counters' 明示指定によりカウンタセットが
+「Performance Limiters」へ変わり counter-profile が 0 から 3 へ変化した
+ことを確認。ただし GPU Service 自体が warning のとおりこのカウンタ
+プロファイルを本デバイス〈M4 Max・macOS 26.6.2〉で非対応と報告している）:
+
+  <intruments-recording-settings>
+      <instrument name="Metal GPU Counters">
+          <array>
+              <dictionary>
+                  <key name="GPU">
+                      <value>Counter Set: Performance Limiters</value>
+                      <value>Shader Timeline: Enabled</value>
+                      <value>Induced GPU Performance State: Default</value>
+                  </key>
+              </dictionary>
+          </array>
+      </instrument>
+  </intruments-recording-settings>
+  ...
+  <table schema="gpu-counter-info" counter-profile="3" counter-device="0" shader-profiler="1" .../>
+  <table schema="gpu-counter-info" counter-profile="0" counter-device="0" shader-profiler="0" .../>
+  <table schema="metal-gpu-counter-profile" counter-profile="3" counter-device="0" shader-profiler="1" .../>
+  <table schema="metal-gpu-counter-profile" counter-profile="0" counter-device="0" shader-profiler="0" .../>
+  <table schema="gpu-counter-value" .../>
+  <table schema="metal-gpu-counter-intervals" .../>
+
+xctrace export --xpath '/trace-toc/run[@number="1"]/data/table[@schema="gpu-counter-value"]' の結果:
+  スキーマ定義（timestamp/counter-id/value/accelerator-id/sample-index/ring-buffer-index）
+  のみでデータ行が 0 件（実際のカウンタサンプルは採取されていない）。
+
+xctrace export --xpath '.../table[@schema="metal-gpu-counter-profile"]' の結果:
+  スキーマ定義（timestamp のみ）でデータ行が 0 件。
+
+xctrace export --xpath '.../table[@schema="gpu-counter-info"][1]'（counter-profile="3" 側）の結果:
+  スキーマ定義（timestamp/counter-id/name/max-value/.../description/...）のみで
+  カウンタ名の列挙行が 0 件（「Performance Limiters」カウンタセットに属する
+  個々のカウンタ名が 1 つも登録されていない）。
+
+結論: counter-profile 自体は #1036（0=無効）から前進して 3（Performance
+Limiters）へ活性化したが、GPU Service が warning で明示するとおり
+「Selected counter profile is not supported on target device」であり、
+実データは一切採取できない（gpu-counter-info・gpu-counter-value・
+metal-gpu-counter-profile のいずれもデータ行 0 件）。--template を
+'Game Performance' へ変えても同一の warning・同一の空データという結果
+だった（本ログの末尾・別ログ参照）。

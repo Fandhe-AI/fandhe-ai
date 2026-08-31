@@ -1,0 +1,53 @@
+実行コマンド:
+  xcrun xctrace record --template 'Metal System Trace' --instrument 'Metal GPU Counters' \
+    --output counters_4096.trace --launch -- \
+    ./target/release/examples/gemm_counter_workload --size=4096 --iters=200
+
+record 標準出力（stderr 含む）:
+  Starting recording with the Metal System Trace template and Metal GPU Counters Instrument. Launching process: gemm_counter_workload.
+  Ctrl-C to stop the recording
+  Target app exited, ending recording...
+  Run issues were detected (trace is still ready to be viewed):
+  * [Warning] GPU Service reported error: Selected counter profile is not supported on target device
+
+  Recording completed. Saving output file...
+  Output file saved as: counters_4096.trace
+
+xctrace export --toc の counter-profile: 1024/2048 と同一（0 と 3 の 2 エントリ。
+データ行は 0 件で同一の失敗パターン）。
+
+--- フォールバック試行: 代替テンプレート（Game Performance） ---
+実行コマンド（N=1024 で試行。テンプレートのみ変更）:
+  xcrun xctrace record --template 'Game Performance' --instrument 'Metal GPU Counters' \
+    --output counters_1024_gp.trace --launch -- \
+    ./target/release/examples/gemm_counter_workload --size=1024 --iters=200
+
+結果: 'Metal System Trace' と同一の warning
+  "[Warning] GPU Service reported error: Selected counter profile is not supported on target device"
+  が再現し、代替テンプレートでも解消しない。
+
+--- 追加試行: 'GPU' instrument（'Metal GPU Counters' とは別の標準 instrument） ---
+実行コマンド（N=1024 で試行）:
+  xcrun xctrace record --template 'Metal System Trace' --instrument 'GPU' \
+    --output counters_1024_gpu.trace --launch -- \
+    ./target/release/examples/gemm_counter_workload --size=1024 --iters=200
+
+結果: warning なしで完走したが、`--toc` の counter-profile は 0（無効）の
+ままで、`gpu-counter-info`/`gpu-counter-value` にデータ行なし。この
+instrument は `gpu-performance-state-info`/`gpu-performance-state-intervals`
+（GPU の動作状態〈performance state〉の遷移情報）のみを追加するもので、
+占有率・ALU/メモリ limiter 内訳（本イシューが求める GPU counters）は
+提供しない。
+
+結論（受け入れ条件 (a) の分岐: フォールバック実施済み・非対話環境では
+確定不能と判定）: `--instrument 'Metal GPU Counters'` の明示指定により
+counter-profile 自体は #1036（0=無効）から前進し 3（Performance Limiters）
+まで活性化したが、GPU Service が「Selected counter profile is not
+supported on target device」と明示的に拒否するため、テンプレートを
+変えても（Metal System Trace / Game Performance）実データは一切採取
+できない。GUI（Instruments.app）でのカウンタセット選択操作
+（`docs/perf/metal-gemm-bottleneck-rediagnosis.md` §5.1 が既に不採用と
+判断した経路）が必要な可能性が高く、非対話セッション（本サブエージェント
+実行環境）では対応できない。`MTLCounterSampleBuffer` のカーネル内組み込み
+による代替採取は本イシューのスコープ外（#1103 計画 §7・元 doc §8）として
+記録に留める。
