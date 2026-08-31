@@ -1713,21 +1713,23 @@ class TargetGateTests(unittest.TestCase):
         del bad_row["size"]
         good_row = _base_row(framework="fandhe-ai", mode="fresh", size=256)
         rows = [bad_row, good_row]
-        row, mode, dup_reason = summarize._pick_row_for_gate(
+        row, mode, dup_reason, used_tf32 = summarize._pick_row_for_gate(
             rows, "fandhe-ai", "gemm", "cpu", 256
         )  # 例外を送出しないこと
         self.assertIs(row, good_row)
         self.assertEqual(mode, "fresh")
         self.assertIsNone(dup_reason)
+        self.assertFalse(used_tf32)
 
     def test_pick_row_for_gate_excludes_bool_size(self):
         bool_row = _base_row(framework="fandhe-ai", mode="fresh", size=True)
-        row, mode, dup_reason = summarize._pick_row_for_gate(
+        row, mode, dup_reason, used_tf32 = summarize._pick_row_for_gate(
             [bool_row], "fandhe-ai", "gemm", "cpu", 1
         )
         self.assertIsNone(row)
         self.assertIsNone(mode)
         self.assertIsNone(dup_reason)
+        self.assertFalse(used_tf32)
 
     def test_train_reuse_missing_size_key_row_does_not_raise_via_target_gate(self):
         # end-to-end 確認: size キー欠損の train 行が rows に混在しても
