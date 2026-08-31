@@ -8,10 +8,9 @@
 を fresh/reuse 各 5 回起動した結果）を読み、`(mode)` ごとに before/after の
 `median_s` を集約して Markdown 表を出力する。
 
-設計方針（summarize.py と同じ思想を踏襲。二重管理を避けるため関数は
-再実装するが、判定基準の定数〈CHECKSUM_ABS_TOL/CHECKSUM_REL_TOL〉と
-複合判定〈checksums_match〉のロジックは summarize.py と同一の値・アルゴリズム
-を用いる）:
+設計方針（summarize.py と同じ思想を踏襲。判定基準の定数〈CHECKSUM_ABS_TOL/
+CHECKSUM_REL_TOL〉と複合判定〈checksums_match〉は checksum_contract.py を
+単一真実源として summarize.py と共有する）:
 - fail-closed: レコード不足（5 件未満）・`framework_version` が before/after
   で同一（比較にならない）・最終 loss（checksum）が本体の数値一致契約
   （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。coding-rust.md）を外れる
@@ -26,15 +25,25 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
+import os
 import re
 import sys
 
-# summarize.py の CHECKSUM_ABS_TOL/CHECKSUM_REL_TOL と同一値（本体の数値一致
-# 契約: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。coding-rust.md）。
-CHECKSUM_ABS_TOL = 1e-5
-CHECKSUM_REL_TOL = 1e-3
+# 数値一致契約（tolerance 定数・checksums_match）は checksum_contract.py を
+# 単一真実源として参照する（codex-review P1 指摘・PR #1088: 分散定義の禁止）。
+# sys.path に依存しないファイルパス指定 import（テストと同じ方式）。
+_CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "checksum_contract",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "checksum_contract.py"),
+)
+_checksum_contract = importlib.util.module_from_spec(_CONTRACT_SPEC)
+_CONTRACT_SPEC.loader.exec_module(_checksum_contract)
+CHECKSUM_ABS_TOL = _checksum_contract.CHECKSUM_ABS_TOL
+CHECKSUM_REL_TOL = _checksum_contract.CHECKSUM_REL_TOL
+checksums_match = _checksum_contract.checksums_match
 
 # 本比較で対象にする mode（bench-fandhe train タスクが emit する 2 モード）。
 MODES = ["fresh", "reuse"]
@@ -110,18 +119,6 @@ def _protocol_int(rows, key):
     if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
         return None, f"正整数でない（{v!r}）"
     return v, None
-
-
-def checksums_match(a, b):
-    """本体の数値一致契約と同一の複合判定（相対誤差 1e-3 未満 または 絶対誤差
-    1e-5 未満）。summarize.py `checksums_match` と同一アルゴリズム（対称な
-    分母 `max(|a|, |b|, 1e-12)`）。
-    """
-    diff = abs(a - b)
-    if diff < CHECKSUM_ABS_TOL:
-        return True
-    denom = max(abs(a), abs(b), 1e-12)
-    return diff / denom < CHECKSUM_REL_TOL
 
 
 def _train_row_schema_error(r):

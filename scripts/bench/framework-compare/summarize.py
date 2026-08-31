@@ -108,6 +108,7 @@
 
 import argparse
 import glob
+import importlib.util
 import json
 import math
 import os
@@ -719,8 +720,18 @@ def _devices_in_train_infer(rows, task, mode="fresh"):
 # `summarize_test.py::ToleranceDriftTests` が本体ソースを直接読んで
 # 機械照合し fail-closed に検出する（イシュー #970 codex-review 指摘・
 # PR #978 P1）。
-CHECKSUM_ABS_TOL = 1e-5
-CHECKSUM_REL_TOL = 1e-3
+# 数値一致契約（tolerance 定数・checksums_match）は checksum_contract.py を
+# 単一真実源として参照する（codex-review P1 指摘・PR #1088: 分散定義の禁止）。
+# sys.path に依存しないファイルパス指定 import（テストと同じ方式）。
+_CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "checksum_contract",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "checksum_contract.py"),
+)
+_checksum_contract = importlib.util.module_from_spec(_CONTRACT_SPEC)
+_CONTRACT_SPEC.loader.exec_module(_checksum_contract)
+CHECKSUM_ABS_TOL = _checksum_contract.CHECKSUM_ABS_TOL
+CHECKSUM_REL_TOL = _checksum_contract.CHECKSUM_REL_TOL
+checksums_match = _checksum_contract.checksums_match
 
 # 要素単位検証（イシュー #970）の閾値。CHECKSUM_* と同値（本体契約と揃える
 # ための独立の名前。JSONL 側の生成は `bench-common::parity::{PARITY_ABS_TOL,
@@ -750,19 +761,6 @@ def _priority_rank(row):
     return len(_REFERENCE_PRIORITY)
 
 
-def checksums_match(a, b):
-    """本体の数値一致契約と同一の複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
-
-    分母は `max(abs(a), abs(b), 1e-12)` とし、引数順序（a, b のどちらを参照値と
-    するか）に依らず対称な判定にする（`composite_close` 相当。イシュー #965
-    codex-review P1 指摘: 旧実装の `diff / abs(b)` は非対称で、境界付近では
-    a/b の順序次第で判定結果が変わりうる問題があった）。
-    """
-    diff = abs(a - b)
-    if diff < CHECKSUM_ABS_TOL:
-        return True
-    denom = max(abs(a), abs(b), 1e-12)
-    return diff / denom < CHECKSUM_REL_TOL
 
 
 def gemm_checksum_reference(rows):
