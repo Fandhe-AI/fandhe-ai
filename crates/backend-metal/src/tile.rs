@@ -700,17 +700,17 @@ pub fn fallback_chain(primary: TileConfig) -> Vec<TileConfig> {
 ///
 /// **単独では機種を一意に識別できない（P1・codex-review 指摘・PR #1108
 /// レビュー）**: GPU コア数 40 は M4 Max だけでなく M3 Max の 40 コア構成
-/// にも該当しうるため、本定数単独を機種ゲートに使わない。[`verify_m4_max`]
+/// にも該当しうるため、本定数単独を機種ゲートに使わない。`verify_m4_max`
 /// が [`crate::device::probe_soc_brand_string`]（SoC ブランド文字列の実測。
 /// 例: `"Apple M4 Max"`）と組み合わせて検証する。
 const M4_MAX_GPU_CORE_COUNT: u32 = 40;
 
-/// [`verify_m4_max`] が [`crate::device::probe_soc_brand_string`] の実測値と
+/// `verify_m4_max` が [`crate::device::probe_soc_brand_string`] の実測値と
 /// 完全一致比較する SoC ブランド名（P1・codex-review 指摘・PR #1108
 /// レビュー）。
 const M4_MAX_SOC_BRAND: &str = "Apple M4 Max";
 
-/// [`verify_m4_max`] からのみ構築可能な、M4 Max 実機として検証済みである
+/// `verify_m4_max` からのみ構築可能な、M4 Max 実機として検証済みである
 /// ことを表す opaque 型（P1・codex-review 再指摘・PR #1108 レビュー）。
 ///
 /// **背景（旧実装の問題）**: 是正前は `select_for_device`／
@@ -720,10 +720,10 @@ const M4_MAX_SOC_BRAND: &str = "Apple M4 Max";
 /// 値をそのまま渡す契約は doc comment 上の記述に過ぎず型・実装では強制され
 /// ないため、外部利用者や将来の呼び出し元が実測 GPU コア数（例: M3 Max の
 /// 40 コア構成）を直接 `Some(40)` として渡すと、SoC ブランド照合
-/// （[`verify_m4_max`]）を経ずに M4 Max 専用の厳密一致テーブルが誤って
+/// （`verify_m4_max`）を経ずに M4 Max 専用の厳密一致テーブルが誤って
 /// 有効化されてしまう。
 ///
-/// **是正方針**: フィールドを非公開にし、[`verify_m4_max`]（GPU コア数と
+/// **是正方針**: フィールドを非公開にし、`verify_m4_max`（GPU コア数と
 /// SoC ブランド文字列の両方が一致する場合にのみ構築）以外の経路では本型の
 /// 値を作れない構造にする。`select_for_device`／
 /// `select_with_occupancy_for_device` の `gpu_core_count` 引数を本型へ
@@ -734,9 +734,12 @@ const M4_MAX_SOC_BRAND: &str = "Apple M4 Max";
 pub struct VerifiedM4MaxGpuCoreCount(u32);
 
 impl VerifiedM4MaxGpuCoreCount {
-    /// 検証済みの GPU コア数を返す（常に [`M4_MAX_GPU_CORE_COUNT`] と
+    /// 検証済みの GPU コア数を返す（常に `M4_MAX_GPU_CORE_COUNT` と
     /// 一致する。デバッグ表示・ログ等、値そのものを必要とする呼び出し元
-    /// 向けのアクセサ）。
+    /// 向けのアクセサ。`M4_MAX_GPU_CORE_COUNT` は非公開定数のため、
+    /// intra-doc link ではなくバッククォートのコードスパン表記とする
+    /// （rustdoc `-D rustdoc::private-intra-doc-links` が非公開アイテムへの
+    /// intra-doc link をビルド失敗にするため。PR #1108 レビュー）。
     pub fn gpu_core_count(self) -> u32 {
         self.0
     }
@@ -765,7 +768,23 @@ impl VerifiedM4MaxGpuCoreCount {
 /// 結果を [`select_for_device`] へ渡す想定（ディスパッチ経路のホットパスに
 /// FFI を持ち込まないための設計。`MetalContext::occupancy_params` と同じ
 /// 判断）。
-pub fn verify_m4_max(
+///
+/// **`pub(crate)` に閉じる理由（P1・codex-review 再指摘・PR #1108
+/// レビュー）**: 本関数は実機プローブを一切行わず、呼び出し元が渡した
+/// `gpu_core_count`／`soc_brand` の文字列比較のみで判定する。以前は
+/// `pub` だったため、外部呼び出し元（または未実測機種を利用する crate
+/// 内呼び出し元）が `verify_m4_max(Some(40), Some("Apple M4 Max"))` の
+/// ように実機プローブ（[`crate::device::probe_gpu_core_count`]・
+/// [`crate::device::probe_soc_brand_string`]）を経由しない任意値を直接
+/// 渡すことで、M4 Max 実機として未検証のまま [`VerifiedM4MaxGpuCoreCount`]
+/// を偽造でき、M3 Max 等の未検証機種でも M4 Max 専用の厳密一致テーブルを
+/// 有効化できてしまっていた（`AGENTS.md`「実機固有値をロジックへ直書き
+/// しない」規約が求める安全側運用に反する）。本関数を `pub(crate)` に
+/// 閉じ、公開経路を実機プローブを内部で行う
+/// [`crate::context::MetalContext::verified_m4_max_gpu_core_count`] のみへ
+/// 限定することで、crate 外部から任意値でトークンを生成する経路を
+/// コンパイル時に排除する。
+pub(crate) fn verify_m4_max(
     gpu_core_count: Option<u32>,
     soc_brand: Option<&str>,
 ) -> Option<VerifiedM4MaxGpuCoreCount> {
@@ -797,10 +816,10 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 /// あり、occupancy 判定は行わない（形状のみによる選択）。
 ///
 /// `gpu_core_count` はイシュー #1039 の厳密一致テーブル（M4 Max 実測）の
-/// 適用可否判定にのみ使う（[`verify_m4_max`] 参照。呼び出し元が実機値を
+/// 適用可否判定にのみ使う（`verify_m4_max` 参照。呼び出し元が実機値を
 /// 取得できない・意図的に無効化したい場合は `None` を渡せば従来の形状
 /// クラス判定のみへフォールバックする）。**引数の型が
-/// [`VerifiedM4MaxGpuCoreCount`]（[`verify_m4_max`] からのみ構築可能な
+/// [`VerifiedM4MaxGpuCoreCount`]（`verify_m4_max` からのみ構築可能な
 /// opaque 型）であるため、未検証の GPU コア数（生の `u32`）を渡して
 /// ブランド照合を迂回することはコンパイル時に不可能**（P1・codex-review
 /// 再指摘・PR #1108 レビュー）。
@@ -856,7 +875,7 @@ pub fn select_for_device(
 /// unwrap/expect を使わない」）。
 ///
 /// `gpu_core_count` はイシュー #1039 の厳密一致テーブルの適用可否判定に
-/// のみ使う。**引数の型が [`VerifiedM4MaxGpuCoreCount`]（[`verify_m4_max`]
+/// のみ使う。**引数の型が [`VerifiedM4MaxGpuCoreCount`]（`verify_m4_max`
 /// からのみ構築可能な opaque 型）であるため、未検証の GPU コア数（生の
 /// `u32`）を渡してブランド照合を迂回することはコンパイル時に不可能**
 /// （P1・codex-review 再指摘・PR #1108 レビュー）。

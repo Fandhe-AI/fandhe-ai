@@ -211,7 +211,7 @@ impl MetalContext {
     /// イシュー #1039 の M4 Max 実測厳密一致テーブル（`crate::tile` の
     /// `exact_match_cfg`）を適用してよいかどうかを、`new` 時にキャッシュ
     /// した GPU コア数と SoC ブランド文字列の両方から検証する
-    /// （[`crate::tile::verify_m4_max`] への委譲。P1・codex-review 再指摘・
+    /// （`crate::tile::verify_m4_max` への委譲。P1・codex-review 再指摘・
     /// PR #1108 レビュー: GPU コア数だけでは機種〈M3 Max との 40 コア構成
     /// の混同〉を一意に識別できないため）。戻り値は [`crate::tile::
     /// VerifiedM4MaxGpuCoreCount`]（`verify_m4_max` からのみ構築可能な
