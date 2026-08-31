@@ -12,6 +12,7 @@
 //! （coding-rust.md「本番経路で unwrap/expect を使わない」）。
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fandhe_ai_tensor_core::DispatchFailureCell;
 use fandhe_ai_tensor_core::dispatch::DeviceCaps;
@@ -123,6 +124,36 @@ pub struct MetalContext {
     /// ヘルパ `flush_locked` を含む）がこの `Mutex` を介してのみ
     /// アクセスする（[`Batch`] の SAFETY コメント参照）。
     batch: Mutex<BatchSlots>,
+    /// イシュー #1099 診断用カウンタ（本番経路の判断には使わず、
+    /// テスト・ベンチからバッチング効果を実測するためだけに存在する。
+    /// `Relaxed` 加算のみで、ホットパスへの影響は 1 命令程度に留める。
+    /// `Mutex<BatchSlots>` の外に置くのは、カウンタ読み出しがロックを
+    /// 取らずに行えるようにするため（診断専用であり厳密な同時性は
+    /// 要求しない）。[`Self::diagnostic_batch_counters`] 参照。
+    diag_encode_calls: AtomicUsize,
+    diag_command_buffers: AtomicUsize,
+    diag_wait_until_completed: AtomicUsize,
+}
+
+/// [`MetalContext::diagnostic_batch_counters`] が返す、ある時点での
+/// バッチング診断カウンタのスナップショット（イシュー #1099）。
+///
+/// テスト・診断専用であり、`facade` の公開 API 面（`docs/compat-api-scope.md`
+/// §0「`facade` が唯一のサポートされる公開 API 面」）には含めない。
+/// `lib.rs::__diagnostic_batch_counters_snapshot`（`#[doc(hidden)]`）
+/// 経由で `backend-metal`／`facade` の実機ベンチ・回帰テストから
+/// カウンタ差分を読む用途にのみ使う。
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BatchCountersSnapshot {
+    /// [`MetalContext::encode`] の呼び出し回数（dispatch 1 回ごとに 1）。
+    pub encode_calls: usize,
+    /// 新規コマンドバッファ生成回数（`queue.commandBuffer()` の呼び出し
+    /// 回数。バッチが開くたびに 1 回）。
+    pub command_buffers: usize,
+    /// `waitUntilCompleted()` の呼び出し回数（[`MetalContext::synchronize`]
+    /// が完了待ちしたバッチの総数）。
+    pub wait_until_completed: usize,
 }
 
 impl MetalContext {
@@ -173,7 +204,24 @@ impl MetalContext {
             caps,
             occupancy_params,
             batch: Mutex::new(BatchSlots::default()),
+            diag_encode_calls: AtomicUsize::new(0),
+            diag_command_buffers: AtomicUsize::new(0),
+            diag_wait_until_completed: AtomicUsize::new(0),
         })
+    }
+
+    /// イシュー #1099 診断用: 現時点までのバッチングカウンタ
+    /// スナップショットを返す（`lib.rs::__diagnostic_batch_counters_snapshot`
+    /// 経由でクレート外のテスト・ベンチから読む唯一の経路）。
+    /// `Relaxed` で読むため、他スレッドの同時呼び出しと厳密には順序
+    /// 保証しない（診断専用であり本番の正しさに影響しない）。
+    #[doc(hidden)]
+    pub fn diagnostic_batch_counters(&self) -> BatchCountersSnapshot {
+        BatchCountersSnapshot {
+            encode_calls: self.diag_encode_calls.load(Ordering::Relaxed),
+            command_buffers: self.diag_command_buffers.load(Ordering::Relaxed),
+            wait_until_completed: self.diag_wait_until_completed.load(Ordering::Relaxed),
+        }
     }
 
     /// [`crate::buffer::MetalBuffer`] の確保・パイプライン構築
@@ -299,11 +347,20 @@ impl MetalContext {
         autoreleasepool(|_pool| {
             let mut slots = self.lock_batch("encode")?;
 
+            // イシュー #1099 診断カウンタ: この `encode` 呼び出し自体を
+            // 1 カウントする（`batch.meta.record_dispatch` と対応する
+            // 呼び出し回数。バッチング効果の実測に使う。本番の正しさ
+            // には影響しない `Relaxed` 加算）。
+            self.diag_encode_calls.fetch_add(1, Ordering::Relaxed);
+
             if slots.open.is_none() {
                 let cmd_buf = self
                     .queue
                     .commandBuffer()
                     .ok_or(MetalError::CommandBufferCreation)?;
+                // イシュー #1099 診断カウンタ: 新規コマンドバッファ生成の
+                // たびに 1 カウントする（バッチが開くたび = 1 回）。
+                self.diag_command_buffers.fetch_add(1, Ordering::Relaxed);
                 slots.open = Some(Batch {
                     cmd_buf,
                     encoder: None,
@@ -411,6 +468,10 @@ impl MetalContext {
             let mut first_error: Option<MetalError> = None;
             for batch in batches {
                 batch.cmd_buf.waitUntilCompleted();
+                // イシュー #1099 診断カウンタ: `waitUntilCompleted()` の
+                // 呼び出し回数（バッチ 1 個の完了待ちごとに 1）。
+                self.diag_wait_until_completed
+                    .fetch_add(1, Ordering::Relaxed);
                 if batch.cmd_buf.status() == MTLCommandBufferStatus::Error {
                     let message = batch
                         .cmd_buf

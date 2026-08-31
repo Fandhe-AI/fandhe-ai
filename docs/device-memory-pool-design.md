@@ -50,7 +50,7 @@
 | 5 | 完全一致方式にした理由は `download` 契約（ハンドル実長 = numel）を壊さないため。サイズクラス丸め（capacity と論理 numel の分離）は導入時点で申し送りのスコープ外事項として明記されていた | `docs/memory-pool-design.md`「サイズクラス方針」「スコープ外」節 |
 | 6 | cudarc 0.19.8 は `CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED`（`has_async_alloc`）が真なら `cuMemAllocAsync`／`cuMemFreeAsync`（driver 側 stream-ordered アロケータ）を使い、偽ならホスト同期を伴う通常の `cuMemAlloc`／`cuMemFree` に退化する。`CudaSlice::drop` は記録イベントをデバイス側で待ってから解放する。`cuMemPool*`（`get_mem_pool`／`set_mem_pool`／`result::mem_pool` 配下の attribute 操作・alloc_async 等）の raw binding も存在する | `cudarc-0.19.8/src/driver/safe/core.rs`（`has_async_alloc` フィールド・`malloc_async`／`free_async` 呼び出し箇所）・`src/driver/result.rs`（`mem_pool` モジュール・`get_default_mem_pool`／`get_mem_pool`／`set_mem_pool`） |
 | 7 | `BufferHandle`／`DeviceBuffer` は `Send`/`Sync` を要求しない方針（v1 判断。「必要になった時点で再検討」）。`PooledMemory` の `Arc<Mutex<PoolCore>>` は `clippy::arc_with_non_send_sync` を明示 `allow` している | `crates/tensor-core/src/buffer.rs`「Send/Sync 境界」節・`crates/tensor-core/src/pool.rs`（`arc_with_non_send_sync` allow 箇所） |
-| 8 | Metal 側の `MTLBuffer`／`MTLLibrary` 等 protocol は objc2-metal 0.3.2 で `Send + Sync` を supertrait に持つ（`context_cache.rs` のコンパイル時 `assert_send_sync` で固定）。#1054 §3.4 は「in-flight バッチが参照しうる `MetalBuffer` へのホスト読み書き（`zero_fill`・プール再利用の `new_with_data` を含む）は必ず `synchronize()` を経由してから行う」と契約し、プール導入後もこの契約を変えないと明記している | `crates/backend-metal/src/context_cache.rs`（`assert_send_sync` ブロック）・`docs/backend-metal-command-batching-design.md` §3.4・§3.5 |
+| 8 | Metal 側の `MTLBuffer`／`MTLLibrary` 等 protocol は objc2-metal 0.3.2 で `Send + Sync` を supertrait に持つ（`context_cache.rs` のコンパイル時 `assert_send_sync` で固定）。#1054 §3.4 は「in-flight バッチが参照しうる `MetalBuffer` へのホスト読み書き（`zero_fill`・プール再利用の `new_with_data` を含む）は必ず `synchronize()` を経由してから行う」と契約し、プール導入後もこの契約を変えないと明記している（**#1099 追記**: `crate::pool::MetalAllocator` の zero-on-reuse 経路〈フリーリスト再利用のゼロ埋め〉に限り、返却側の pending-return 不変条件により「ホスト書き込み前に必ず `synchronize()` を経由する」という一般契約を `synchronize()` を経由せずに満たせることが判明し、本イシューで同期を除去した。`fandhe_ai_tensor_core::pool::PooledMemory<MetalMemory>`〈`memory.rs::PoolZeroFill`〉は対象外で無変更。詳細は本文書 §10・`docs/backend-metal-command-batching-design.md` §8） | `crates/backend-metal/src/context_cache.rs`（`assert_send_sync` ブロック）・`docs/backend-metal-command-batching-design.md` §3.4・§3.5・§8 |
 | 9 | REQ-14 は「バッファプール等のキャッシュ機構を導入する場合、係数上限（2 倍以内）を維持できなければプール解放 API を提供する」ことを求める。係数 2.0（GEMM 4096³ で 384MiB 以内）は #179 で実測（対理論比 1.000）に基づき確定済み・変更なし | `docs/peak-memory-coefficient-decision.md` |
 | 10 | 代表ワークロード（MLP 学習。`bench-fandhe`）の形状: `BATCH=64`・`D_IN=784`・`D_HIDDEN=256`・`D_OUT=10` → f32 でのバイトサイズは `x` 200,704 B・`W1` 802,816 B・`h` 65,536 B・`W2` 10,240 B・`out` 2,560 B。GEMM 4096² f32 = 64 MiB | `scripts/bench/framework-compare/bench-fandhe/src/main.rs` の `BATCH`／`D_IN`／`D_HIDDEN`／`D_OUT` 定数 |
 | 11 | `train --phases` の区間名: `tape_build`／`leaf_register`／`forward`／`forward_resident`／`loss_readout`／`backward`／`param_readout`／`host_sgd`／`apply_params`／`device_update`／`tape_drop`／`step_total` | 同ファイルの `PHASE_*` 定数群 |
@@ -1680,3 +1680,51 @@ Metal 側実装（イシュー #1021）が §8.2 の裁量事項を以下のと�
   計測（`crate::pool::MetalAllocator::stats()`〈`PoolStats::
   cached_bytes`〉との統合）は引き続き §8 スコープ外「bench-harness の
   独自計測経路との統合」として申し送る。
+
+## §10 実装記録（#1099。取得（take）側ゼロ埋め同期の除去）
+
+イシュー #1099（`crate::pool::MetalAllocator::alloc_inner` の
+zero-on-reuse 経路から無条件 `self.context.synchronize()` を除去した。
+詳細な安全性の証明・実測は `docs/backend-metal-command-batching-design.md`
+§8 を参照）が、本文書（返却〈`put`〉側の `pending_pool_returns` 機構）と
+矛盾しないことをここに記録する。
+
+- **変更範囲は「取得（`take`）」側に限定**: #1099 が変更したのは
+  `SizeClassPool::take()` がフリーリストからヒットを返した直後の
+  ゼロ埋め手順（同期してからゼロ埋め → 同期せずゼロ埋め）のみ。
+  「返却（`put`）」側の機構（§3.3「Metal」の `pending_pool_returns`・
+  `defer_or_release`・`synchronize()` 完了後の `put_all_merged` 合流）
+  は一切変更していない。`PoolStats` の各フィールド（`pending_return_
+  bytes`・`cached_bytes`・`reuse_count`・`capacity_waste_bytes` 等。
+  §3.1「フィールド更新契約」）の更新契約・呼び出し経路も無変更。
+- **§9 の「本 PR が接続したホットパスからは到達しない」の位置づけ更新**:
+  §9 実装記録（#1021・PR #1063 時点）は「`gemm.rs`／`elementwise.rs`／
+  `softmax.rs`／`rmsnorm.rs`／`memory.rs` はいずれも `dispatch_sync`
+  （encode + 即時 `synchronize` の薄いラッパー）経由のため、プール
+  経由バッファが `Drop` される時点で `open`／`committed` バッチは
+  常に空であり、`defer_or_release` の in-flight（`pending_pool_
+  returns` へ退避する）分岐は実機到達しない」と記録していた。これは
+  #1021 マージ時点（#1017 のバッチング機構がまだ実運用経路に接続
+  される前）の状況を正しく述べたものだったが、#1017（`sgd_step_
+  device_tracked`）が学習ループへ接続された後は、SGD の tracked
+  encode が残す open バッチの最中に次の `alloc_zeroed`（GEMM／MSE
+  出力）が `Drop` されるケースが実運用（MLP reuse 学習ループ）で
+  発生するようになった（`docs/backend-metal-command-batching-design.md`
+  §4.2 の診断が特定した経路）。つまり `defer_or_release` の in-flight
+  分岐（`pending_pool_returns` 退避・§3.3「Metal」）は、#1099 時点では
+  **実機到達済み**である（§9 の「本 PR の接続範囲に含まれないため実機
+  検証もされていない」は #1021 時点の記述として維持し、本節が
+  「後続 PR で到達点になった」ことを追記する。§9 が予告していた「次に
+  この機構へ接続する PR」が、SGD デバイス常駐更新のバッチング〈#1017〉
+  ＋本イシュー〈#1099〉の組み合わせで実現した）。本イシューの回帰
+  テスト（`crates/backend-metal/tests/command_batching.rs::
+  pool_reuse_zero_fill_does_not_synchronize_open_batch`。実機実行済み・
+  green）が、この in-flight 分岐の実機到達と正しさを初めて検証した。
+- **矛盾がないことの確認**: #1099 は「取得側が同期を要求しなくなった」
+  だけであり、「返却側が GPU 完了を待たずにフリーリストへ戻る」ことは
+  一切許容していない（`defer_or_release`・`synchronize()` 完了後合流の
+  不変条件はそのまま）。取得側で同期が不要になったのは、返却側の
+  不変条件（フリーリスト上のバッファは常に GPU 未参照）がそもそも
+  取得側の同期を不要にする形で証明できるためであり、両者は独立した
+  契約ではなく後者が前者を包含する関係にある（`docs/backend-metal-
+  command-batching-design.md` §8.1 の証明参照）。
