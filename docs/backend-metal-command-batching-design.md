@@ -418,70 +418,90 @@ crates.io ピン。`.claude/rules/deps-policy.md` の第 9 区分）は本ワー
 
 ### 4.2 コマンドバッファ生成数・`waitUntilCompleted` 呼び出し回数
 
-**実行時カウンタは追加していない**（本 doc タスクの範囲外の本番コード
-変更〈`crates/backend-metal/src/context.rs` への計測用計装〉を避けるため。
-代わりに #1017 で変更された唯一の経路（`BackendOps::
-sgd_step_device_tracked`。§7）をソースコードから静的に突き合わせた）。
+**再カウントの方法（codex-review PR #1097 P2 是正・2026-08-31 再実測）**:
+前版は「GEMM 6 + SGD 1 = 7 回」という不完全な内訳から「境界で 1 組だけ
+統合され 7→6」と静的に導出していたが、実測ベンチ（§4.4・
+`mnist_scale_train_reuse_bench.rs` の 1 step）は `MseLoss::forward`／
+`backward` も実行しており、Metal の `mse_loss`／`mse_loss_backward`
+（`crates/backend-metal/src/mse.rs` の `dispatch_sync` 呼び出し 3 箇所・
+132/145/184 行）を経由する。これが「7 回」に含まれていなかった。本節は
+一時的な実行時カウンタ（`MetalContext::encode`／`synchronize` に
+`AtomicUsize` を追加し、ラベル列も記録）を `context.rs`・
+`crates/facade/tests/`（一時ファイル）へ**一時的に**追加し、実際の
+reuse ループ 1 step を計測してから、計装を `git checkout` で完全に revert
+した（本番コードへは計装を残していない。以下の数値はその実測ログを
+根拠とする）。
 
-**訂正（レビュー指摘対応。2026-08-31）**: 初版は「pending の SGD バッチは
-`register_resident_leaves`（forward 側の D2H download）の直後の
-`ctx.synchronize()` が flush する」と記述していたが誤りだった。実測して
-いる reuse ループ（`crates/facade/src/compat/sequential.rs:465-479` の
-`forward_resident`）が呼ぶのは `DeviceParamStore::register_resident_params`
-（`crates/autodiff/src/optim/device_store.rs:459-489`）であり、これは
-`tape.push_resident_leaf` でタペにノードを積むだけで **device 呼び出し・
-download・`synchronize()` を一切行わない**（`register_resident_params`
-本体に `mem`／`ops`／`ctx` への参照が現れないことをソースから確認済み）。
-D2H download を伴う `register_resident_leaves`（同ファイル 544 行）は
-`#[deprecated(since = "0.5.0", ...)]`（536-543 行）の互換専用旧経路で
-あり、#1022 で forward から排除済みのため本計測の reuse ループでは
-呼ばれない。
+**実測結果（steady-state・3 step warmup 後、単独 1 step と 10 step
+平均の両方で一致。2026-08-31・M4 Max）**:
 
-- `gemm.rs`／`elementwise.rs`／`rmsnorm.rs`／`softmax.rs`／`mse.rs` の
-  `dispatch_sync` 呼び出し（§2.1 追記のとおり HEAD 時点で計 14 箇所。
-  `sgd.rs` は含まれない）は #1017 で**無変更**（§7 実装記録に明記）。
-  MLP 1 step あたり GEMM 呼び出しは §1 の通り 6 回発生し、各呼び出しは
-  変更前・変更後とも `dispatch_sync`（`context.rs:478-483`。`encode` 後に
-  **無条件に** `self.synchronize()` を呼ぶ）を経由する。
+| 指標 | 実測値（1 step あたり） |
+| --- | --- |
+| `encode()` 呼び出し総数（= 個々のディスパッチ数） | **9**（10 step 平均でも 9.000 と完全一致） |
+| 実際に生成されたコマンドバッファ数 | **9**（`encode()` 呼び出し数と完全一致） |
+| `waitUntilCompleted()` 呼び出し数 | **9**（10 step 平均） |
+| バッチあたりの dispatch 数（`BatchMeta::dispatch_count()`） | 全 9 バッチとも **1**（`batch_state.rs:55`） |
+
+単独 1 step のラベル列は `["dispatch_sync" ×8, "sgd_step_f32" ×1]`
+（`dispatch_sync` は `gemm.rs`／`elementwise.rs`／`mse.rs` の
+`ctx.dispatch_sync` ラッパーが常に同一の文字列リテラルを渡すため
+〈`context.rs:317` 付近の `self.encode("dispatch_sync", ...)`〉、ラベル
+だけでは呼び出し元まで判別できない）。内訳は構造的に次のとおりと推定
+される: forward の Linear1（`gemm_resident_rhs`。`ops.rs:571-` が既定実装
+で呼ぶ `dispatch_strided_bias_act_prepared`）1 回 + forward の ReLU
+（`elementwise.rs`）1 回 + forward の Linear2（`gemm_resident_rhs`）1 回
++ MSE forward（`mse.rs:132,145` の 2 段リダクション）2 回 + MSE
+backward（`mse.rs:184`）1 回 + backward 側の resident GEMM 系呼び出し
+（`gemm_resident_lhs`〈`ops.rs:777`〉等）2 回 = 8 回、に `sgd_step_f32`
+（SGD tracked encode。`sgd.rs:150`）1 回を加えた計 9 回。この内訳の各
+呼び出し元までの厳密な対応は、ラベルが区別できないため実測ログのみ
+からは確定できない（総数 9 とバッチサイズ分布が全 1 であることが
+主張の核心であり、個別呼び出し元の対応は補助的な推定に留める）。
+
+**なぜ #1017 のバッチ化が全く発現しないか（file:line 根拠）**: 9 個の
+バッチがいずれも dispatch 数 1（＝マージなし）だった理由は、GEMM・MSE
+の出力バッファがプール経由の **zero-on-reuse** 確保
+（`mem.alloc_zeroed(...)`。`crates/backend-metal/src/ops.rs:674`
+〈`gemm_resident_rhs` の `c_dev_buf`〉・`ops.rs:777`
+〈`gemm_resident_lhs`〉・`ops.rs:1114`〈別の resident GEMM 経路〉）で
+確保されており、`SizeClassPool` がフリーリストの再利用バッファを返す際
+（`crates/backend-metal/src/pool.rs:329,343-358`）、`zero_on_reuse ==
+true` なら **`self.context.synchronize()` を無条件に呼んでからゼロ
+クリアする**契約になっているため（「前利用者のバイト残留を防ぐため」。
+`pool.rs:345-347` のコメント参照）。この `synchronize()` は当該 GEMM／
+MSE 呼び出し自身の `dispatch_sync`（＝ `encode()` + `synchronize()`）が
+走る**前**に発生する。したがって、直前の op（前 step の
+`sgd_step_device_tracked` が残した未 flush バッチを含む）がまだ open の
+ままであっても、次の GEMM／MSE 呼び出しの出力バッファ確保時点で
+プール由来の `synchronize()` が先に走り、open batch を flush してしまう
+——結果として当該 GEMM／MSE 自身の `encode()` が呼ばれる頃には常に
+`slots.open.is_none()` であり、**マージの機会自体が構造的に発生しない**
+（steady-state な MLP 学習では GEMM 出力サイズが毎 step 同一のため、
+2 step 目以降はほぼ確実にプールのフリーリストが命中し、この
+`synchronize()` が毎回発火する）。
+
 - `sgd_step_device`（`token: None`。§3.7 (3) の非バッチ契約）は
   変更前・変更後とも「`encode` 直後に `ctx.synchronize()`」を維持
-  （`ops.rs:375-390`・`sgd.rs` doc コメント）。
-- 変更があるのは `sgd_step_device_tracked`（`token: Some`）のみ:
-  変更前はデフォルト委譲で `sgd_step_device` へ流れ 1 呼び出し = 1 コマンド
-  バッファ ＋ 1 `waitUntilCompleted()`（即時ブロッキング）。変更後は
-  `encode` のみを行い、その場では待たない（`context.rs::encode`）。
-- `DeviceParamStore::step` は #1023（#1017 以前）で既にパラメータ数に
+  （`ops.rs:375-390`・`sgd.rs` doc コメント）。無変更。
+- `sgd_step_device_tracked`（`token: Some`）は #1017 で `encode` のみを
+  行い、その場では待たない契約へ変更された（`context.rs::encode`）。
+  `DeviceParamStore::step` は #1023（#1017 以前）で既にパラメータ数に
   依らず 1 回の起動へ集約済み（`device_store.rs:43-44`）であるため、
   reuse ループの 1 step あたりの `sgd_step_device_tracked` 呼び出しは
-  変更前後とも **1 回**。
-- **pending SGD バッチの実際の flush 契機**: `sgd_step_device_tracked`
-  が残す open batch は、上記の訂正のとおり forward 構築時（tape へ
-  ノードを積むだけの遅延評価）では flush されない。`fandhe_ai_autodiff::
-  var::Var::to_tensor`（`materialize_non_fallible` 経由でグラフを
-  eager 評価する。`crates/autodiff/src/var.rs:107-109`）や
-  `tape.backward_device_param_store` がグラフを実行する際、最初に
-  発行される実際の backend ディスパッチ（forward 1 層目の GEMM 等）が
-  `dispatch_sync` を呼ぶ。`MetalContext::encode`（`context.rs:289-302`。
-  `slots.open.is_none()` でなければ既存の open batch へ積み増す）の
-  契約により、この最初の `dispatch_sync` 呼び出し自身の `encode()` は
-  「前 step の `sgd_step_device_tracked` が残した未 flush のバッチ」へ
-  **同じコマンドバッファとして積み増され**、続く `self.synchronize()`
-  （`dispatch_sync` 自身が呼ぶ）が前 step の SGD ディスパッチとこの
-  ディスパッチを**まとめて** flush・待機する。
-- 結論（訂正後）: 定常状態では 1 step あたり「GEMM 6 回 + SGD 1 回」＝
-  7 回の `encode` イベントのうち、step 境界をまたぐ 1 組（前 step の
-  SGD encode と当 step の最初の `dispatch_sync` の encode）が**物理的に
-  同一コマンドバッファへ統合**される。したがって 1 step あたりの
-  コマンドバッファ生成数・`waitUntilCompleted()` 呼び出し回数は
-  **7 回から 6 回へ、1 回（約 14%）実際に減る**（S step の定常状態で
-  総数は概ね `7S` から `6S` へ。境界の 1 回のみの効果であり、同一 step
-  内の残り 5 回の GEMM 起動は互いに独立したまま統合されない。この点は
-  ソースコードの静的突き合わせによる導出であり、実行時カウンタでの
-  直接検証は行っていない）。§4.3 のマイクロベンチが示す約 22 倍の
-  高速化は「複数の `encode` を連続投入し 1 回だけ同期する」場合の
-  上限効果であり、reuse ループでは 1 step あたり高々 1 組しか統合が
-  起きないため、その上限効果の一部（1/7 の統合）のみが実際の MLP 1 step
-  へ反映される、という整合的な説明になる。
+  常に **1 回**。
+- **結論（実測により訂正）**: 上記のプール由来 `synchronize()` の介在に
+  より、`sgd_step_device_tracked` が「待たない」契約になったこと自体は、
+  **現行の MLP reuse 学習ループにおいてコマンドバッファ数・
+  `waitUntilCompleted()` 呼び出し数を 1 つも削減しない**（実測: 9 回→
+  9 回、削減率 0%）。#1017 が変えるのは、SGD 起動の完了待ちが「起動直後
+  の専用ブロッキング待機」から「次の GEMM／MSE 呼び出しが自身の出力
+  バッファをプールから再利用する際に副次的に要求する `synchronize()`
+  への遅延」へ移った、という点のみであり、コマンドバッファ・wait の
+  **回数**そのものへの寄与は本ワークロードでは実測上ゼロである。
+  §4.3 のマイクロベンチ（GEMM／MSE のようなプール確保を挟まず
+  `sgd_step_device_tracked` だけを連続投入する）が示す高速化は、この
+  「プール確保が介在しない」特殊条件下でのみ現れる上限効果であり、
+  実際の学習ループでは発現しないことを本節の実測が示す。
 
 ### 4.3 マイクロベンチ: #1017 の効果を隔離した計測（HEAD・新規追加）
 
@@ -505,13 +525,14 @@ D2H download を伴う `register_resident_leaves`（同ファイル 544 行）�
 speedup 約 16.9 倍（`tracked_faster=true`。5 trial とも数値一致検証
 green）。これは #1017 が導入した「`encode` の連続投入 + 単一の遅延同期」
 機構そのものの効果を、他の性能改善コミットと混同せず HEAD 上で単独に
-隔離した計測である。§4.2（訂正後）で述べた通り、現行の reuse ループでは
-1 step あたり `sgd_step_device_tracked` の呼び出しは 1 回のみであり、
-その未 flush バッチは次 step 最初の `dispatch_sync` 呼び出しと 1 回だけ
-統合される（7 回 → 6 回。§4.2）。したがってこの約 17 倍という数値は
-「複数の SGD 起動（多数の `encode`）を 1 コマンドバッファへ積み増す場合の
-上限効果」を示す指標であり、reuse ループが現に得ている「1 step あたり
-1 回分の統合」という限定的な効果とは別物である（§4.2 の結論と整合）。
+隔離した計測である。**§4.2（実測により訂正済み）で確認したとおり、
+現行の MLP reuse 学習ループでは GEMM／MSE 出力のプール確保
+（zero-on-reuse）が毎 dispatch ごとに `synchronize()` を強制するため、
+この約 17 倍のマージ効果は発現しない**（実測: MLP 1 step あたりの
+コマンドバッファ・wait 回数削減は 0%。§4.2）。本節の数値は「GEMM／MSE
+のようなプール確保を挟まない、`sgd_step_device_tracked` の連続投入」と
+いう狭い条件下での #1017 機構自体の上限効果を示す指標であり、実際の
+MLP 1 step の短縮への直接的寄与ではない。
 
 ### 4.4 HEAD 絶対値: MLP 学習 1 step（MNIST 規模 2 層 MLP・train・reuse）
 
@@ -551,15 +572,26 @@ green のまま」を以下のとおり判定する。
 - **改善**: (a) HEAD 絶対値として reuse が 0.4.0 の 20.381 ms から
   9.485 ms へ改善し、かつ 0.4.0 で発生していた「reuse が fresh より
   遅い」逆転（0.966 倍）が解消され reuse が fresh の 2.011 倍高速に
-  なった（§4.4。ただし累積 delta であり #1017 単独の寄与は §4.3 の
-  マイクロベンチ〈約 16.9 倍。最終パラメータの数値一致検証 green〉に
-  限定して評価する）。(b) #1017 が導入したバッチ化機構そのものは、
-  その機構を直接行使する経路（連続 `sgd_step_device_tracked` 呼び出し）
-  において約 16.9 倍の高速化を示した（§4.3）。現行の reuse ループは
-  この機構を 1 step あたり 1 回しか行使しないため、MLP 1 step の
-  短縮幅への直接的寄与は §4.2（訂正後）の結論（1 step あたりコマンド
-  バッファ・wait 回数が 7 回から 6 回へ 1 回分〈約 14%〉統合される、
-  という限定的な効果）にとどまる点は正直に記録する。
+  なった（§4.4。ただし累積 delta であり #1017 単独の寄与ではない）。
+  (b) #1017 が導入したバッチ化機構そのものは、その機構を直接行使する
+  経路（連続 `sgd_step_device_tracked` 呼び出し）において約 16.9 倍の
+  高速化を示した（§4.3）。しかし §4.2 の実測（一時計装・revert 済み）
+  により、**現行の MLP reuse 学習ループではこの機構が一切発現しない**
+  ことが判明した: GEMM／MSE の出力バッファがプール経由の zero-on-reuse
+  確保（`ops.rs:674,777,1114` の `mem.alloc_zeroed`）であり、プールの
+  フリーリスト再利用が `pool.rs:329,343-358` の `self.context.
+  synchronize()` を毎 dispatch ごとに強制するため、`sgd_step_device_
+  tracked` が残す未 flush バッチは常にこの副次的な `synchronize()` で
+  単独 flush され、後続 dispatch とマージする機会が構造的に存在しない
+  （実測: 1 step あたりのコマンドバッファ・`waitUntilCompleted()`
+  呼び出し数は 9 回のまま、削減率 0%）。したがって (a) の HEAD 絶対値
+  改善は #1017 以外の性能改善コミット（§4.4 冒頭コメント参照）に
+  ほぼ全面的に帰属し、**#1017 自身が本 MLP ワークロードの実行時間短縮に
+  寄与した実測上の根拠は無い**点を正直に記録する。#1017 の効果が実際に
+  現れうるのは、GEMM／MSE のような zero-on-reuse プール確保を挟まない
+  経路（例: 複数パラメータの `sgd_step_device_tracked` を連続投入し
+  最後にまとめて `download` する用途。§4.3 のマイクロベンチが示す条件）
+  に限定される。
 - **parity green**: `make test-ignored-metal`（`cargo test -p
   fandhe-ai-backend-metal --release -- --ignored --nocapture` 相当）
   を実行し、既存の実機依存テスト（`command_batching.rs` の #1017
