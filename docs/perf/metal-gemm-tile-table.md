@@ -66,6 +66,8 @@ NT/TN/TT はいずれも NN 最良候補の概ね 15〜25%（大形状ほど低�
 
 **NN（正方立方・準正方長方形の実測点）**: 2 回計測いずれも最良候補の順位が一致した以下の厳密一致 `(m, n, k)` タプルに限り、`tile.rs` 側の `shape_cfg`（`select_with_occupancy` の段 1・形状判定の出力）を測定済み最良候補へ差し替えるよう更新した（`fn select_with_occupancy` 冒頭の厳密一致テーブル）。既存の occupancy 縮退判定（段 2。`params` が `Some` の場合）はこの差し替え後も迂回しない構造にした（P1・codex-review 指摘・PR #1108 レビュー対応。`select()` 経由〈`params: None`〉では従来どおり縮退せず `shape_cfg` を返すため本番ディスパッチの挙動は変わらない）。実測範囲外への無根拠拡張はしない（#744/PR #760 と同一判断軸）。
 
+**機種ゲート（P1・codex-review 指摘・PR #1108 レビュー再指摘対応）**: 本テーブルは M4 Max（40 コア構成）実機実測のみが根拠であり、`select()`／`select_with_occupancy()` はデバイス情報を受け取らないため、無対応のままでは M1〜M5 を含む全 Apple Silicon 機種へ無条件適用されてしまう（`AGENTS.md`「実機固有値をロジックへ直書きしない」規約への抵触）。これに対し `select()`／`select_with_occupancy()` へ `gpu_core_count: Option<u32>` 引数を追加し、`Some(40)`（`tile::M4_MAX_GPU_CORE_COUNT`）と一致する場合にのみ厳密一致テーブルを評価するよう是正した（呼び出し元は `MetalContext::occupancy_params().map(|p| p.gpu_core_count)`〈`crate::device::probe_gpu_core_count` の IOKit 実測値を `MetalContext::new` が 1 回だけキャッシュしたもの〉を渡す）。コア数が一致しない・取得不能（`None`）な機種は本テーブルを経由せず、既存の形状クラス判定（縦長・横長・正方立方・大形状フォールバック）のみへ従来どおり流れる。回帰テストは `tile::tests::select_exact_match_table_is_gated_by_m4_max_gpu_core_count`。他機種（M1〜M5・M4 Max 以外のコア数構成）での候補の優劣は引き続き未実測のため、§6「スコープ外」の「M4 Max 以外の Apple Silicon 別テーブル」の解消を待たずにテーブルを機種非依存へ拡張することはしない。
+
 | (m,n,k) | 旧選択（#744/PR #760 是正後） | 新選択（#1039） | 改善率（最良候補比） |
 |---|---|---|---|
 | (512,512,512) | CANDIDATES[3]（0.736/0.885） | CANDIDATES[5]（1.024/1.374） | 約 1.39〜1.55 倍 |

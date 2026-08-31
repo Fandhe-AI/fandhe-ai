@@ -101,7 +101,7 @@ mod macos_impl {
         let a: Vec<f32> = rng.fill_vec(m * k);
         let b: Vec<f32> = rng.fill_vec(k * n);
 
-        let cfg = tile::select(m, n, k);
+        let cfg = tile::select(m, n, k, ctx.occupancy_params().map(|p| p.gpu_core_count));
 
         let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
         let a_padded = pad_matrix(&a, m, k, m_eff, k_eff);

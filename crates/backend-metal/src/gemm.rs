@@ -598,7 +598,13 @@ impl MetalGemm {
     /// `select()` と常に同一結果になることを確認したため、本番ディスパッチ
     /// へは組み込まない（`docs/perf/metal-gemm-occupancy-select.md`
     /// 「#747 判断」節・`crate::tile::select_with_occupancy` ドキュメンテー
-    /// ションコメント参照）。
+    /// ションコメント参照）。**`ctx.occupancy_params().map(|p|
+    /// p.gpu_core_count)` は occupancy 縮退の有効化とは別に、イシュー
+    /// #1039 の M4 Max 実測厳密一致テーブル（`tile::select_with_occupancy`
+    /// 内の `exact_match_cfg`）の機種ゲートとして [`tile::select`] へ渡す**
+    /// （P1・codex-review 指摘・PR #1108 レビュー: 実測機種以外へ無条件適用
+    /// されないようにするため。`crate::tile` モジュール `M4_MAX_GPU_CORE_COUNT`
+    /// 参照）。
     pub fn dispatch_auto(
         &self,
         ctx: &MetalContext,
@@ -608,7 +614,7 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<f32>, MetalError> {
-        let cfg = tile::select(m, n, k);
+        let cfg = tile::select(m, n, k, ctx.occupancy_params().map(|p| p.gpu_core_count));
         self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)
     }
 
@@ -662,7 +668,7 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<half::f16>, MetalError> {
-        let cfg = tile::select(m, n, k);
+        let cfg = tile::select(m, n, k, ctx.occupancy_params().map(|p| p.gpu_core_count));
         self.dispatch_f16_tiled_unverified(ctx, a, b, m, n, k, cfg)
     }
 
