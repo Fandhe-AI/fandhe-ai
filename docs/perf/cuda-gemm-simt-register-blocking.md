@@ -141,16 +141,47 @@ GB10 実機での before/after 倍率は取得できない**（旧版へ revert 
 | 2048 | 7.5413 TFLOPS (q1=7.5430, q3=7.5398) |
 | 4096 | 7.1008 TFLOPS (q1=7.1060, q3=7.0988) |
 
+**q1 > q3 の見え方について（転記ミスではない）**: 上表の q1 は中央値より大きく q3 は
+中央値より小さいという、通常の四分位（q1 < median < q3）と逆の並びに見える。これは
+`cuda_floor_bench.rs` が時間ドメイン（秒）の分位点（`q1_secs < median_secs < q3_secs`。
+速い試行ほど下位 25%）を TFLOPS へ換算してから出力する仕様のためで、逆数変換により
+大小関係が反転する（`examples/cuda_floor_bench.rs` の `TflopsSample` 構造体・同ファイル
+`#[cfg(test)]` の `assert!(sample.tflops_from_q1_secs > sample.median)` ／
+`assert!(sample.median > sample.tflops_from_q3_secs)` がこの仕様を裏付ける）。転記は
+ログ出力どおりであり誤りではない。
+
 **目標達成判定**: N=4096 で 7,100.8 GFLOP/s（7.1008 TFLOPS）を記録し、親イシュー
-#1031 の目標値 2,410 GFLOP/s を約 2.95 倍上回る。`docs/perf/cuda-gemm-kernel-vs-
-frameworks-baseline.md` §4 の「tiled f32（基準経路）」行（同じく `cuda_floor_bench`
-の GPU 実行のみ区間で計測。同ドキュメント §4 の N=4096 行は register blocking 導入前
-1972.3 GFLOP/s で candle 比 約 0.87 倍・burn 比 約 0.67 倍と**下回っていた**）と比較すると、
-本イシュー（register blocking）により 1972.3 → 7100.8 GFLOP/s（約 3.60 倍）へ改善し、
-GB10 candle 実測（N=4096: 2265.1 GFLOP/s）・burn 実測（N=4096: 2935.5 GFLOP/s。いずれも
-同ドキュメント §3 の転送込み `fandhe-ai (fresh)` 系列とは別に §4 で `cuda_floor_bench`
-ベースへ突合済みの値）をそれぞれ約 3.13 倍・約 2.42 倍上回る水準へ転じた。**達成**（tiled f32
-が candle/burn を下回っていた状態から上回る状態への転換を本セッションで確認）。
+#1031 の目標値 2,410 GFLOP/s を約 2.95 倍上回る。
+
+参考比較（以下はいずれも限定条件付きであり、7,100.8 GFLOP/s 自体の 2,410 GFLOP/s 超え
+という上記判定を覆すものではないが、倍率の解釈には注意が必要）:
+
+- `docs/perf/cuda-gemm-kernel-vs-frameworks-baseline.md` §4 の「tiled f32（基準経路）」
+  N=4096 行（1972.3 GFLOP/s。candle 比 約 0.87 倍・burn 比 約 0.67 倍で**下回っていた**）
+  と本節の 7,100.8 GFLOP/s を単純に並べると 1972.3 → 7100.8（約 3.60 倍）に見えるが、
+  **この 1972.3 GFLOP/s は `cuda-optimized-remeasurement.md`（2026-08-18 計測・
+  driver 580.159.03）に由来し、本節の実測（2026-08-31 計測・driver 580.173.02）とは
+  別セッションかつ GB10 個体の同一性が未確認のクロスセッション比較**である
+  （同ベースラインドキュメント §4「限定条件 7」）。加えて本ファイル §6 冒頭のとおり
+  HEAD には非 register-blocked 版が残っておらず revert 再計測もしていないため、
+  「register blocking 単独の効果として 3.60 倍」と断定はできない（§6 冒頭の
+  「before/after 倍率は取得できない」という記述と整合させ、この 3.60 倍は
+  register blocking 単独への帰属ではなく、クロスセッション・別 driver 版数の
+  参考比較として扱う）。
+- GB10 candle 実測（`cuda-gemm-kernel-vs-frameworks-baseline.md` §3.2・§4 経由。
+  N=4096: 2265.1 GFLOP/s）・burn 実測（同 N=4096: 2935.5 GFLOP/s）と比べると
+  7,100.8 GFLOP/s はそれぞれ約 3.13 倍・約 2.42 倍上回る。ただしこの比較にも
+  同ベースラインドキュメント **限定条件 1**（fandhe-ai 側は `cuda_floor_bench` の
+  launch-only 同期＝カーネル完了待ちのみで H2D/D2H・ホスト実体化を含まないのに対し、
+  candle/burn の framework-compare 実測は matmul 呼び出し＋ホスト実体化を含む。
+  同一境界での比較ではなく fandhe-ai 側に有利な方向のバイアスがある）と
+  **限定条件 7**（2026-08-18 の cuda-optimized-remeasurement.md 系列と 2026-08-28 の
+  framework-compare 系列は別セッション・GB10 個体未確認のクロスセッション比較。
+  本節の 2026-08-31 実測はさらに別セッション）が及ぶため、「突合済み」の値の単純比較
+  ではなく、境界差・セッション差が未解消のままの参考比較として扱う。
+- 上記の限定条件を踏まえても、7,100.8 GFLOP/s が親イシュー目標 2,410 GFLOP/s を
+  約 2.95 倍上回るという本節冒頭の**目標達成判定自体は成立する**（この判定は同一
+  セッション内の絶対値比較のみに依拠しており、クロスセッション参考比較には依存しない）。
 
 ## 7. 関連
 

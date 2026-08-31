@@ -77,7 +77,7 @@ cargo run -p fandhe-ai-backend-cuda --example gemm_f32_variant_bench --release -
 
 `num_sms=Some(48) double_buffer_available=true split_k_partial_error=None split_k_reduce_error=None`
 
-| 形状（M, N, K） | 選択された変種 | base_tflops（`TILED_F32`） | selected_tflops | candle 実測（GFLOP/s） | candle 比 |
+| 形状（M, N, K） | 選択された変種 | base_gflops（`TILED_F32`。GFLOP/s） | selected_gflops（GFLOP/s） | candle 実測（GFLOP/s） | candle 比 |
 |-----------------|----------------|------------------------------|-----------------|------------------------|-----------|
 | 256, 256, 256 | DoubleBuffer | 544.7 | 514.9（ratio 0.9452） | 423.0（`cuda-gemm-kernel-vs-frameworks-baseline.md` §3.2 N=256） | 約 1.22 倍 |
 | 512, 512, 512 | DoubleBuffer | 1933.7 | 1303.4（ratio 0.6740） | 1109.3（同 N=512） | 約 1.18 倍 |
@@ -86,8 +86,25 @@ cargo run -p fandhe-ai-backend-cuda --example gemm_f32_variant_bench --release -
 | 128, 128, 8192 | SplitK { num_splits: 8 } | 388.2 | 873.8（ratio 2.2509） | 該当値なし（`cuda-gemm-kernel-vs-frameworks-baseline.md` は K 支配的非正方形状の candle 値を含まない。推定しない） | 判定不能（正当性も上記のとおり未確定） |
 | 256, 256, 16384 | DoubleBuffer | 1119.6 | 1012.7（ratio 0.9045） | 該当値なし（同上） | 判定不能 |
 
-（`base_tflops`／`selected_tflops` は例出力の TFLOPS を ×1000 して GFLOP/s へ換算。
+（`base_gflops`／`selected_gflops` は例出力の TFLOPS を ×1000 して GFLOP/s へ換算。
 ratio は例出力の `ratio` フィールドをそのまま転記）
+
+**計測境界差（candle 比の解釈に必須）**: `selected_gflops`（`CudaGemmF32VariantSelection::
+run_f32`。`gemm_f32_variant_bench.rs` 冒頭コメント「計測境界」節が明記するとおり
+H2D→カーネル起動→D2H を一括計測する高水準 API）は、測定クロージャへ毎回ホスト側の
+`Vec<f32>`（`a`/`b`）を渡すため**イテレーションごとに A・B の H2D 転送を含む**。一方
+candle 側の比較値（`bench-candle/src/main.rs::run_gemm`）は `Tensor::from_vec` による
+A・B のデバイスへの転送を計測ループの**外**（warmup 前に 1 回）で行い、計測窓は
+`matmul` 呼び出し＋結果のホスト実体化（D2H）のみを含む。すなわち両者は同一の計測境界
+ではなく、**fandhe-ai 側の `selected_gflops` は candle 側には含まれない A・B の
+毎回の H2D 転送コストを余分に負っている**（fandhe-ai に有利な方向ではなく、
+不利な方向のバイアスである）。したがって N=1024・4096 の「未達」判定
+（selected/candle 比 約 0.83 倍・約 0.10 倍）は、この境界差を除いた場合に
+悪化することはあっても、境界差を理由に覆ることはない（バイアスの方向が
+fandhe-ai に不利なため、同一境界へ揃えれば比率はむしろ改善しうる側であり、
+「未達」を「達成」に反転させる方向のバイアスではない）。N=256・512 の「達成」
+（約 1.18〜1.22 倍）についても同様に、同一境界へ揃えれば比率はさらに改善しうる
+側であり、この境界差は「達成」判定を過大評価させる方向のバイアスではない。
 
 **採用判断（全 N で candle 以上で確定）**: **未達成**。判定できた 4 形状のうち
 256/512 は candle を上回る（約 1.18〜1.22 倍）が、**1024・4096 は candle を下回る**
