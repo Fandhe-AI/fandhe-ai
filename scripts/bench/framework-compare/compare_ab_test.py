@@ -529,5 +529,50 @@ class MainCliTests(unittest.TestCase):
         self.assertIn("判定不能", table_text)
 
 
+
+class PathMarkdownValidationTests(unittest.TestCase):
+    """入力パスの Markdown インジェクション拒否（codex-review P0 指摘・
+    PR #1088: バッククォート・改行を含むパスは render() へ到達させず
+    非 0 終了する fail-closed 契約）の回帰テスト。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        # 検証は load_rows より前に行われるため after 側は実在ファイルで
+        # なくてよいが、正常パスとの組合せ確認用に最小の正常入力を用意する。
+        self.ok_path = os.path.join(self.tmpdir.name, "ok.jsonl")
+        _write_jsonl(self.ok_path, [_rec("0.4.0", 0.01, "fresh")])
+
+    def _assert_rejected(self, bad_path, expect_reason):
+        err_buf = io.StringIO()
+        out_buf = io.StringIO()
+        with redirect_stderr(err_buf), redirect_stdout(out_buf):
+            rc = compare_ab.main([bad_path, self.ok_path])
+        self.assertEqual(rc, 2)
+        self.assertIn(expect_reason, err_buf.getvalue())
+        # レポート（Markdown）は一切出力されない（不正パスを埋め込んだ
+        # 生成物を作らない）。
+        self.assertEqual(out_buf.getvalue(), "")
+
+    def test_main_rejects_path_with_backtick(self):
+        self._assert_rejected("evil`# 挿入見出し`.jsonl", "バッククォート")
+
+    def test_main_rejects_path_with_newline(self):
+        self._assert_rejected("evil\n# 挿入見出し.jsonl", "制御文字")
+
+    def test_main_rejects_after_path_too(self):
+        err_buf = io.StringIO()
+        with redirect_stderr(err_buf):
+            rc = compare_ab.main([self.ok_path, "b\rad.jsonl"])
+        self.assertEqual(rc, 2)
+        self.assertIn("after パスが不正", err_buf.getvalue())
+
+    def test_path_markdown_error_accepts_normal_paths(self):
+        self.assertIsNone(compare_ab._path_markdown_error(self.ok_path))
+        self.assertIsNone(
+            compare_ab._path_markdown_error("results/raw/results-dgx-0.4.0.jsonl")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

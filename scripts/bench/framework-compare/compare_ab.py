@@ -260,6 +260,28 @@ def _fmt_ms(s):
     return f"{s * 1e6:.1f} us"
 
 
+def _path_markdown_error(path):
+    """CLI から受け取った入力パスを Markdown レポートへ埋め込む前の fail-closed
+    検証（codex-review P0 指摘・PR #1088: `before_path`／`after_path` をバック
+    クォートで囲むだけで `render()` の Markdown へ連結すると、ファイル名に
+    バッククォート・改行を含めて任意の見出し・表・指示文をレポートへ挿入できる。
+    `--out` の生成物を perf 記録へ転記する運用では外部入力由来のパスが
+    プロンプトインジェクションにも波及するため、A03 の「外部入力のパース検証」
+    に従いエスケープではなく拒否で塞ぐ）。
+
+    コードスパン（`` ` `` 囲み）を突き破れるバッククォートと、行構造を壊す
+    改行を含む制御文字（C0 全域・DEL）を拒否する。正当な計測 JSONL のパスに
+    これらが現れることはない。適合なら None、不適合なら理由の文字列を返す。
+    """
+    if not isinstance(path, str) or not path:
+        return "パスが非空文字列でない"
+    if "`" in path:
+        return "パスにバッククォートを含む（Markdown コードスパンを突き破るため拒否）"
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+        return "パスに改行等の制御文字を含む（Markdown の行構造を壊すため拒否）"
+    return None
+
+
 def compare_mode(before_rows, after_rows, mode):
     """1 mode 分の before/after 比較結果を辞書で返す。
 
@@ -521,6 +543,15 @@ def main(argv=None):
     parser.add_argument("after", help="after（都度同期廃止後）の JSONL パス")
     parser.add_argument("--out", help="出力先ファイル（省略時は標準出力）")
     args = parser.parse_args(argv)
+
+    # render() より前に入力パス自体を検証する（codex-review P0 指摘・
+    # PR #1088: 詳細は _path_markdown_error の docstring）。不正なパスは
+    # レポートを一切生成せず非 0 終了する（fail-closed）。
+    for label, path in (("before", args.before), ("after", args.after)):
+        err = _path_markdown_error(path)
+        if err is not None:
+            print(f"error: {label} パスが不正: {err}", file=sys.stderr)
+            return 2
 
     before_rows, before_warnings = load_rows(args.before)
     after_rows, after_warnings = load_rows(args.after)
