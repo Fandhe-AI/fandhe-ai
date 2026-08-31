@@ -850,19 +850,38 @@ pub fn select_with_occupancy(
         _ => CANDIDATES[3], // 32x32（準正方中形状長方形。#744 是正前と同一挙動）
     });
 
-    // occupancy 縮退の対象は段 1 が大タイル系（CANDIDATES[0..=2]）を選んだ
-    // 場合のみ。CANDIDATES[3]（既に中形状）は縮退不要、SINGLE_SIMDGROUP_8X8
-    // は段 1 の SMALL 判定のみが返しうる（上の match の到達条件上ここには
-    // 来ない）。`m == n == k`（実測どおりの立方 GEMM）かつ `m <=
-    // SQUARE_MEASURED_MAX`（実測範囲内）は #744 是正後 CANDIDATES[3] を
-    // 直接返すため縮退対象から外れるが、`m != n` の準正方大形状長方形、
-    // `m == n` でも `k != m`（K 未実測）の正方出力、および
-    // `SQUARE_MEASURED_MAX` 超の正方立方形状（上記 `m,n >= LARGE` 分岐）は
-    // 引き続き CANDIDATES[0] を返しうるため、縮退判定（actual/ideal 比較）
-    // は縦長・横長に加えてこの経路でも生きたままになる（#744 是正前と同一
-    // 挙動。PR #760 レビュー対応でコメントを実装へ整合）。
-    let is_large_tile_candidate =
-        shape_cfg == CANDIDATES[0] || shape_cfg == CANDIDATES[1] || shape_cfg == CANDIDATES[2];
+    // occupancy 縮退の対象は「大タイル系」（CANDIDATES[3]〈中形状・32x32〉
+    // より threadgroup 分担面積 `bm*bn` が大きい構成）を選んだ場合のみ。
+    // CANDIDATES[3] 自体（既に中形状）は縮退不要、SINGLE_SIMDGROUP_8X8 は
+    // 段 1 の SMALL 判定のみが返しうる（上の match の到達条件上ここには
+    // 来ない）。
+    //
+    // **`CANDIDATES[0..=2]` への固定列挙ではなく `bm*bn` 比較にする（P1・
+    // codex-review 指摘・PR #1108 レビュー）**: 厳密一致テーブル
+    // （`exact_match_cfg`）が返す `CANDIDATES[5]`／`[6]` は `bm=64,bn=32`
+    // と `CANDIDATES[1]`（縦長・大タイル系）と同一の threadgroup 分担面積
+    // を持つため、`actual_groups` の算出式（`m`/`n`/`bm`/`bn` のみに依存）
+    // は `CANDIDATES[1]` と同一であり、`CANDIDATES[1]` が対象なら
+    // `CANDIDATES[5]`／`[6]` も同じ理由で under-occupied になりうる。旧実装
+    // の固定列挙（`CANDIDATES[0..=2]` のみ）はこの 2 候補を構造上常に対象外
+    // にしており、`shape_cfg` 決定への合流（上のコメント参照）で「occupancy
+    // 縮退を迂回しない」としていた意図（`docs/perf/metal-gemm-tile-table.md`
+    // §5）と矛盾していた。`bm*bn` 比較にすることで、厳密一致テーブルの
+    // 追加候補を含め、大タイル系と同じ threadgroup 分担面積を持つ構成には
+    // 常に一様に occupancy 縮退が適用される（`select_with_occupancy_
+    // shrinks_exact_match_candidates_when_underoccupied` 参照）。
+    //
+    // `m == n == k`（実測どおりの立方 GEMM）かつ `m <= SQUARE_MEASURED_MAX`
+    // （実測範囲内）は #744 是正後 CANDIDATES[3] を直接返すため縮退対象から
+    // 外れるが、`m != n` の準正方大形状長方形、`m == n` でも `k != m`（K
+    // 未実測）の正方出力、および `SQUARE_MEASURED_MAX` 超の正方立方形状
+    // （上記 `m,n >= LARGE` 分岐）は引き続き CANDIDATES[0] を返しうるため、
+    // 縮退判定（actual/ideal 比較）は縦長・横長に加えてこの経路でも生きた
+    // ままになる（#744 是正前と同一挙動。PR #760 レビュー対応でコメントを
+    // 実装へ整合）。
+    let mid_tile_area = (CANDIDATES[3].bm as u64) * (CANDIDATES[3].bn as u64);
+    let shape_cfg_area = (shape_cfg.bm as u64) * (shape_cfg.bn as u64);
+    let is_large_tile_candidate = shape_cfg_area > mid_tile_area;
 
     if !is_large_tile_candidate {
         return shape_cfg;
@@ -2106,12 +2125,14 @@ mod tests {
         // イシュー #1039 の厳密一致テーブル（`select_with_occupancy` 冒頭）
         // がこれら 4 点の `shape_cfg` を測定済み最良候補へ差し替える（P1・
         // codex-review 指摘・PR #1108 レビュー対応で occupancy 判定を迂回
-        // しない構造へ変更済み）。1024/2048/4096 は `CANDIDATES[6]`／`[1]`／
-        // `[2]` で `is_large_tile_candidate` 対象外（縮退不可）だが、
-        // `CANDIDATES[1]`（2048 立方）は対象内であり、この
-        // `m4_max_expected_params()` 下では `is_underoccupied` が偽のため
-        // 実際には縮退しない（期待値は `select` 側と同一。`select_picks_
-        // measured_best_config_for_true_square_shapes` 参照）。
+        // しない構造へ変更済み）。512/1024/2048/4096 いずれも
+        // `is_large_tile_candidate`（`bm*bn` が CANDIDATES[3] 超）の対象
+        // であり、この `m4_max_expected_params()` 下では 4 点とも
+        // `is_underoccupied` が偽（over-occupied）のため実際には縮退しない
+        // （期待値は `select` 側と同一。`select_picks_measured_best_config_
+        // for_true_square_shapes` 参照。underoccupied 時に実際に縮退する
+        // ことは `select_with_occupancy_shrinks_exact_match_candidates_
+        // when_underoccupied` が別途固定する）。
         assert_eq!(
             select_with_occupancy(512, 512, 512, Some(m4_max_expected_params())),
             CANDIDATES[5]
@@ -2127,6 +2148,59 @@ mod tests {
         assert_eq!(
             select_with_occupancy(4096, 4096, 4096, Some(m4_max_expected_params())),
             CANDIDATES[2]
+        );
+    }
+
+    #[test]
+    fn select_with_occupancy_shrinks_exact_match_candidates_when_underoccupied() {
+        // P1・codex-review 指摘・PR #1108 レビュー対応の回帰テスト:
+        // 厳密一致テーブル（イシュー #1039）が返す `CANDIDATES[5]`／`[6]`
+        // （いずれも `bm=64,bn=32` で `CANDIDATES[1]`・縦長・大タイル系と
+        // 同一の threadgroup 分担面積）が、`is_large_tile_candidate` の
+        // 固定列挙（旧実装は `CANDIDATES[0..=2]` のみ）により構造上常に
+        // occupancy 縮退の対象外（867 行目相当で早期 return）になっていた
+        // 問題を固定する。`gpu_core_count` を小さくして意図的に
+        // under-occupied な状況を作り、実際に `CANDIDATES[3]`（中形状）へ
+        // 縮退することを検証する（`max_threadgroup_memory_bytes` は
+        // `m4_max_expected_params()` と同じ 32768 バイトのままにし、
+        // `smem_groups_per_core` によるキャップは変えず `gpu_core_count`
+        // のみを縮小することで `ideal_groups` を下げる）。
+        //
+        // `is_underoccupied(actual, ideal)` は `actual <= ideal`（groups
+        // 数が目標に対して少なすぎる＝under-occupied）で縮退する契約
+        // （本ファイル [`is_underoccupied`] ドキュメント参照）。厳密一致点
+        // は `m == n` が大きく `actual_groups` 自体が大きいため、通常の
+        // `m4_max_expected_params()`（コア数 40）では over-occupied
+        // （縮退しない。上の `..._bypass_occupancy_shrink_via_step1` が
+        // 固定）。ここでは意図的にコア数を大きくし `ideal_groups` を
+        // `actual_groups` 以上へ引き上げることで under-occupied を作る。
+        //
+        // (512,512,512) → 段 1 は `CANDIDATES[5]`（bm=64,bn=32,bk=32）。
+        // actual_groups = ceil(512/64)*ceil(512/32) = 8*16 = 128。
+        // shared_mem_bytes = (64*(32+4) + 32*(32+4))*4 = 13824 →
+        // smem_groups_per_core = min(6, 32768/13824=2) = 2 →
+        // ideal_groups = gpu_core_count(100) * 2 = 200。128 <= 200 のため
+        // under-occupied（縮退）。
+        let large_core_count_params = OccupancyParams {
+            gpu_core_count: 100,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(
+            select_with_occupancy(512, 512, 512, Some(large_core_count_params)),
+            CANDIDATES[3],
+            "CANDIDATES[5]（512 立方の厳密一致点）も under-occupied 時は縮退する"
+        );
+
+        // (1024,1024,1024) → 段 1 は `CANDIDATES[6]`（bm=64,bn=32,bk=8）。
+        // actual_groups = ceil(1024/64)*ceil(1024/32) = 16*32 = 512。
+        // shared_mem_bytes = (64*(8+4) + 8*(32+4))*4 = 4224 →
+        // smem_groups_per_core = min(6, 32768/4224=7) = 6 →
+        // ideal_groups = gpu_core_count(100) * 6 = 600。512 <= 600 のため
+        // under-occupied（縮退）。
+        assert_eq!(
+            select_with_occupancy(1024, 1024, 1024, Some(large_core_count_params)),
+            CANDIDATES[3],
+            "CANDIDATES[6]（1024 立方の厳密一致点）も under-occupied 時は縮退する"
         );
     }
 
