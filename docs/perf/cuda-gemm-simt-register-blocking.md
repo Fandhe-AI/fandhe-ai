@@ -112,14 +112,47 @@ compute_capability=(8, 6)（sm_86）。`tiled_f32_outperforms_naive_at_4096`
 
 - **ncu によるバンクコンフリクト減少確認**: 本ランでは `nsight-compute`
   未導入環境のため未実施。XOR swizzle 導入要否の判断はこの実測後に行う
-  （実装計画 §3.2 の段階方針）。
-- **DGX Spark GB10（sm_121）実機での性能実測**: REQ-8 段階的下限の判定・
-  親イシュー #1031（candle/Burn 比 N=4096 で 2,410 GFLOP/s 超え目標）の
-  達成確認は DGX Spark セッションで実施する。
+  （実装計画 §3.2 の段階方針）。ncu 自体は DGX Spark GB10 実機実測
+  セッション（#6 節）でも未導入のため引き続き未実施。
+- **DGX Spark GB10（sm_121）実機での性能実測**: #6 節で実施済み。
 - **Metal M4 Max 実機比較**: 本イシューは CUDA バックエンドのみが対象の
   ためスコープ外。
 
-## 6. 関連
+## 6. DGX Spark GB10（sm_121）実機実測（#1031 実機実測セッション）
+
+実機: DGX Spark GB10（compute capability (12, 1) = sm_121）・driver 580.173.02・
+CUDA 13.0.88（`nvcc --version` 実測）・rustc 1.97.0。計測時 `nvidia-smi
+--query-gpu=utilization.gpu --format=csv,noheader` で 0% を確認済み。commit
+`10011cd4f8ef097351c0dc1244eb55c8a021040b`。
+
+`examples/cuda_floor_bench.rs --release`（`launch_tiled_f32` の GPU 実行 + 同期のみを
+計測。H2D/D2H を含まない。§4 の RTX 3060 実測と同じ計測境界）の `tiled_f32_tflops`
+列を転記する。**本カーネル（register-blocked 版）は既に `kernels.rs::TILED_F32`
+本体を置換済みであり、HEAD には非 register-blocked 版（before）が存在しないため、
+GB10 実機での before/after 倍率は取得できない**（旧版へ revert しての再計測はスコープ外。
+§4 の RTX 3060 実機での倍率〈別機種〉と直接比較しない）。よって以下は after 単独の
+絶対値と目標（親イシュー #1031「candle/Burn 比 N=4096 で 2,410 GFLOP/s 超え」）との
+比較のみを記録する。
+
+| N | tiled_f32 TFLOPS（GPU 実行のみ・5 回計測中央値） |
+|---|---|
+| 512  | 4.5640 TFLOPS (q1=4.5764, q3=4.5504) |
+| 1024 | 6.7469 TFLOPS (q1=6.7633, q3=6.3289) |
+| 2048 | 7.5413 TFLOPS (q1=7.5430, q3=7.5398) |
+| 4096 | 7.1008 TFLOPS (q1=7.1060, q3=7.0988) |
+
+**目標達成判定**: N=4096 で 7,100.8 GFLOP/s（7.1008 TFLOPS）を記録し、親イシュー
+#1031 の目標値 2,410 GFLOP/s を約 2.95 倍上回る。`docs/perf/cuda-gemm-kernel-vs-
+frameworks-baseline.md` §4 の「tiled f32（基準経路）」行（同じく `cuda_floor_bench`
+の GPU 実行のみ区間で計測。同ドキュメント §4 の N=4096 行は register blocking 導入前
+1972.3 GFLOP/s で candle 比 約 0.87 倍・burn 比 約 0.67 倍と**下回っていた**）と比較すると、
+本イシュー（register blocking）により 1972.3 → 7100.8 GFLOP/s（約 3.60 倍）へ改善し、
+GB10 candle 実測（N=4096: 2265.1 GFLOP/s）・burn 実測（N=4096: 2935.5 GFLOP/s。いずれも
+同ドキュメント §3 の転送込み `fandhe-ai (fresh)` 系列とは別に §4 で `cuda_floor_bench`
+ベースへ突合済みの値）をそれぞれ約 3.13 倍・約 2.42 倍上回る水準へ転じた。**達成**（tiled f32
+が candle/burn を下回っていた状態から上回る状態への転換を本セッションで確認）。
+
+## 7. 関連
 
 - `docs/perf/cuda-gemm-kernel-improvement-policy.md`（本イシューの動機）
 - `docs/kernel-fusion.md` §2.2（`TILED_F32`/`TILED_BIAS_ACT_F32` bit 完全
