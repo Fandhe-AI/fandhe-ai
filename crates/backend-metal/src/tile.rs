@@ -20,19 +20,24 @@
 //! **選択閾値は暫定値**: 下記 [`select`] のサイズ閾値・候補パラメータは
 //! MLX steel の実装傾向を参考にした暫定初期値であり、Apple Silicon 実機
 //! での `examples/gemm_bench.rs` 実測（`docs/perf/metal-gemm-dynamic-tile.md`
-//! に記録）で確定させる前提（イシュー #188 計画のスコープ）。**真の正方
-//! 立方形状（`m == n == k`。縦長・横長に該当しない形状の部分集合）かつ
-//! `m <= 4096`（実測範囲内）の閾値はイシュー #744・2026-08-19 M4 Max 実機
-//! 実測により CANDIDATES\[3\]（32x32/bk16/staged）への一律選択で確定済み**
-//! （512〜4096 の `m == n == k` 全帯域で最良候補比の逸失なし。判断根拠は
-//! `docs/perf/metal-tile-select-correction.md`）。`m == n == k` かつ
-//! `m > 4096`（実測範囲外の正方立方形状）、`m == n` でも `k != m`（K 未
-//! 実測の正方出力。例: (2048,2048,64)）、縦長・横長の閾値、および `m != n`
-//! の準正方長方形（縦長・横長いずれにも該当しないが `m == n` でもない
-//! 形状。例: 1536x1024）は引き続き暫定値のまま（#744 の実測対象は
-//! `m == n == k` の 512/1024/2048/4096 の 4 点のみであり、この範囲を超え
-//! て性能選択閾値を無制限に拡張するのは根拠不一致になるため #744 是正前
-//! の挙動を維持する。PR #760 codex-review 指摘対応）。
+//! に記録）で確定させる前提（イシュー #188 計画のスコープ）。**厳密一致
+//! する `(m, n, k)` の実測点（[`select_with_occupancy`] 冒頭の厳密一致
+//! テーブル参照）は測定済み最良候補で確定済み**: イシュー #744
+//! （2026-08-19）で `m == n == k` の 512/1024/2048/4096 の 4 点を
+//! `CANDIDATES[3]`（32x32/bk16/staged）一律選択で確定させたが、
+//! #1038〜#1040 の staged 経路変更を経てイシュー #1039（2026-08-31/09-01）
+//! で `CANDIDATES` 全 8 候補を再実測した結果 `CANDIDATES[3]` はもはや
+//! 最良候補ではなく、この 4 点は測定済み最良候補（`CANDIDATES[5]`／
+//! `[6]`／`[1]`／`[2]`）へ個別に更新した。同じ #1039 実測で、`m == n` だが
+//! `k != m`（K 未実測の正方出力。例: (2048,2048,64)）・`m != n` の準正方
+//! 長方形（例: 1536x1024）についても各 2 点の測定済み最良候補を厳密一致
+//! テーブルへ追加した（判断根拠・数値は `docs/perf/metal-gemm-tile-table.md`）。
+//! **上記の厳密一致点以外**（`m == n == k` の未測定サイズ・`m > 4096` の
+//! 正方立方形状・厳密一致点以外の K 未実測正方出力・準正方長方形）は
+//! 引き続き暫定値のまま（実測は厳密に一致する `(m, n, k)` の点のみで
+//! あり、この範囲を超えて性能選択閾値を無制限に拡張するのは根拠不一致に
+//! なるため #744 是正前の挙動を維持する。PR #760 codex-review 指摘対応・
+//! #1039 でも同一方針を踏襲）。
 //! `docs/dispatch-rules-design.md`（accelerated 経路選択は
 //! `min(M,N,K) >= 512`）とはレイヤが異なる点に注意: 本モジュールは
 //! 「accelerated（Metal）経路に入った後」のタイル構成選択であり、
@@ -744,6 +749,42 @@ pub fn select_with_occupancy(
         return TileConfig::SINGLE_SIMDGROUP_8X8;
     }
 
+    // イシュー #1039・2026-08-31/09-01 M4 Max 実機実測（`CANDIDATES` 全 8
+    // 候補・`examples/gemm_transpose_tile_sweep.rs`・2 回計測いずれも同順位）
+    // による厳密一致テーブル。以下の完全一致する `(m, n, k)` に限り、下の
+    // 形状クラス判定より優先して測定済み最良候補を直接返す（occupancy
+    // 縮退も経由しない。#744 の `CANDIDATES[3]` 一律確定と同じ「実測点は
+    // 実測結果を直接返す」判断軸）。
+    //
+    // #744（2026-08-19）は `m == n == k` の 512/1024/2048/4096 の 4 点で
+    // `CANDIDATES[3]`（32x32）一律選択を確定させたが、#1038〜#1040 の
+    // staged 経路変更（タイル variant 群の整理・転置ロード境界確立等）を
+    // 経て、同じ 4 点で `CANDIDATES` 全候補を再実測した結果
+    // `CANDIDATES[3]` はもはや最良候補ではなくなっていた（例:
+    // size=4096 で `CANDIDATES[3]` 8.24〜8.36 TFLOPS に対し最良候補
+    // `CANDIDATES[2]` 9.76〜9.91 TFLOPS。詳細値・判断根拠は
+    // `docs/perf/metal-gemm-tile-table.md`）。また `m == n` だが `k != m`
+    // （K 未実測の正方出力）・`m != n` の準正方長方形（#744/PR #760 の
+    // 実測対象外として `CANDIDATES[0]` へ安全側フォールバックしていた
+    // 帯域）についても、本イシューで実測した点は `CANDIDATES[0]` 比
+    // 3〜6 倍の逸失があることを確認した。**実測は下記の厳密な
+    // `(m, n, k)` タプルのみ**であり、近傍値・未測定点へは拡張しない
+    // （実測範囲外への無根拠拡張をしない方針。#744/PR #760 と同一判断軸）。
+    match (m, n, k) {
+        // 正方立方（m == n == k）実測点。
+        (512, 512, 512) => return CANDIDATES[5], // 64x32/bk32/wm2wn2
+        (1024, 1024, 1024) => return CANDIDATES[6], // 64x32/bk8/wm4wn1
+        (2048, 2048, 2048) => return CANDIDATES[1], // 64x32/bk16/wm2wn2（縦長候補だが正方形状でも最良）
+        (4096, 4096, 4096) => return CANDIDATES[2], // 32x64/bk16/wm2wn2（横長候補だが正方形状でも最良）
+        // K 未実測の正方出力（m == n・k != m）実測点。
+        (2048, 2048, 64) => return CANDIDATES[1],
+        (2048, 2048, 512) => return CANDIDATES[6],
+        // 準正方長方形（m != n・縦横比 < ASPECT_RATIO）実測点。
+        (1536, 1024, 1024) => return CANDIDATES[1],
+        (1024, 1536, 1536) => return CANDIDATES[6],
+        _ => {}
+    }
+
     let tall = m >= n.saturating_mul(ASPECT_RATIO);
     let wide = n >= m.saturating_mul(ASPECT_RATIO);
 
@@ -1343,8 +1384,8 @@ mod tests {
         );
         assert_eq!(
             select(512, 512, 512),
-            CANDIDATES[3],
-            "正方立方（実測範囲内） → CANDIDATES[3]"
+            CANDIDATES[5],
+            "正方立方（イシュー #1039 実測点） → CANDIDATES[5]"
         );
         assert_eq!(
             select(1536, 1024, 512),
@@ -1873,19 +1914,22 @@ mod tests {
     }
 
     #[test]
-    fn select_picks_mid_square_config_for_large_true_square_shapes() {
-        // #744・2026-08-19 M4 Max 実機実測（5 回中央値）: `m == n`（真の
-        // 正方形状）512〜4096 の全帯域で CANDIDATES[3]（32x32/bk16/staged）
-        // が CANDIDATES[0]（64x64/bk16/staged）に一貫して優越する
-        // （size=2048 で最良候補比約 2.8 倍の逸失が是正前は生じていた）。
-        // 旧テスト名 `select_picks_large_square_config_above_threshold` は
-        // 是正前の「正方大形状 → CANDIDATES[0]」分岐を前提にしていたため
-        // リネームし期待値を更新する（`docs/perf/metal-tile-select-correction.md`）。
-        for &size in &[512usize, 1024, 2048, 4096] {
-            let cfg = select(size, size, size);
-            assert_eq!(cfg, CANDIDATES[3], "size={size}");
-            assert_eq!((cfg.bm, cfg.bn), (32, 32), "size={size}");
-        }
+    fn select_picks_measured_best_config_for_true_square_shapes() {
+        // イシュー #1039・2026-08-31/09-01 M4 Max 実機実測（`CANDIDATES` 全
+        // 8 候補・2 回計測いずれも同順位）: #744（2026-08-19）は `m == n
+        // == k` の 512/1024/2048/4096 の 4 点で CANDIDATES[3]（32x32）一律
+        // 選択を確定させたが、#1038〜#1040 の staged 経路変更を経て同じ
+        // 4 点を再実測した結果 CANDIDATES[3] はもはや最良候補ではなかった
+        // （size=4096: CANDIDATES[3] 8.24〜8.36 TFLOPS に対し最良候補
+        // CANDIDATES[2] 9.76〜9.91 TFLOPS。詳細値は
+        // `docs/perf/metal-gemm-tile-table.md`）。旧テスト名
+        // `select_picks_mid_square_config_for_large_true_square_shapes` は
+        // #744 是正時点の「一律 CANDIDATES[3]」前提を反映していたため
+        // リネームし期待値を更新する。
+        assert_eq!(select(512, 512, 512), CANDIDATES[5]);
+        assert_eq!(select(1024, 1024, 1024), CANDIDATES[6]);
+        assert_eq!(select(2048, 2048, 2048), CANDIDATES[1]);
+        assert_eq!(select(4096, 4096, 4096), CANDIDATES[2]);
     }
 
     #[test]
@@ -1903,12 +1947,28 @@ mod tests {
     fn select_keeps_pre_744_behavior_for_square_output_with_unmeasured_k() {
         // P1・codex-review 指摘対応（PR #760）: #744 の実測は `m == n == k`
         // の立方 GEMM（512/1024/2048/4096）のみ。`m == n` だが `k` が
-        // 異なる形状（例: (2048,2048,64)）は実測範囲外のため、立方 GEMM の
-        // 実測結果を任意の `k` を持つ正方出力へ拡張しない
+        // 異なる形状（例: (2048,2048,1536)）は依然実測範囲外のため、立方
+        // GEMM の実測結果を任意の `k` を持つ正方出力へ拡張しない
         // （#744 是正前の挙動 `m,n >= LARGE(512)` なら CANDIDATES[0] を維持）。
-        let cfg = select(2048, 2048, 64);
+        // `(2048,2048,64)`／`(2048,2048,512)` はイシュー #1039 実測点の
+        // 厳密一致テーブル対象へ移行したため、本テストはそれ以外の
+        // `k`（実測対象外）で検証する。
+        let cfg = select(2048, 2048, 1536);
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
+    }
+
+    #[test]
+    fn select_picks_measured_best_config_for_square_output_with_measured_k() {
+        // イシュー #1039・2026-08-31/09-01 M4 Max 実機実測: `m == n` だが
+        // `k != m`（K 未実測の正方出力）のうち、この 2 点は実測により
+        // CANDIDATES[0]（是正前の安全側フォールバック値）比 3〜6 倍の
+        // 逸失があることを確認した（(2048,2048,64): CANDIDATES[0] 0.665〜
+        // 0.667 TFLOPS に対し CANDIDATES[1] 2.27 TFLOPS。(2048,2048,512):
+        // CANDIDATES[0] 1.16 TFLOPS に対し CANDIDATES[6] 7.51 TFLOPS。
+        // 詳細値は `docs/perf/metal-gemm-tile-table.md`）。
+        assert_eq!(select(2048, 2048, 64), CANDIDATES[1]);
+        assert_eq!(select(2048, 2048, 512), CANDIDATES[6]);
     }
 
     #[test]
@@ -1920,16 +1980,30 @@ mod tests {
 
     #[test]
     fn select_keeps_pre_744_behavior_for_near_square_large_rectangle() {
-        // PR #760 codex-review 指摘対応: #744 の実機実測は `m == n`（真の
-        // 正方形状）512〜4096 の 4 点のみであり、縦長・横長いずれにも該当
-        // しないが `m != n` の準正方長方形（本例は m:n=1.5:1）へ CANDIDATES[3]
-        // 一律選択を広げる根拠はない。この帯域は #744 是正前の挙動
-        // （`m,n >= 512` なら CANDIDATES[0]）をそのまま維持する。#747 の
-        // 判断は `m == n == k` の実測帯域に限られ本帯域は対象外（実測は
-        // Mac 実機セッション〈実機ツリー #408 系〉に委ねる）。
-        let cfg = select(1536, 1024, 1024);
+        // PR #760 codex-review 指摘対応: 縦長・横長いずれにも該当しないが
+        // `m != n` の準正方長方形一般に対して、実測されていない `(m, n,
+        // k)` の組へ CANDIDATES[3] 一律選択を広げる根拠はない。この帯域は
+        // 引き続き #744 是正前の挙動（`m,n >= 512` なら CANDIDATES[0]）を
+        // 既定として維持する（実測点のみイシュー #1039 の厳密一致テーブル
+        // で上書きする。下の `select_picks_measured_best_config_for_
+        // near_square_large_rectangle` 参照）。本例は `(1536, 1024, 512)`
+        // で `k` を実測点（1024）と変えて厳密一致から外している。
+        let cfg = select(1536, 1024, 512);
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
+    }
+
+    #[test]
+    fn select_picks_measured_best_config_for_near_square_large_rectangle() {
+        // イシュー #1039・2026-08-31/09-01 M4 Max 実機実測: 準正方長方形
+        // （`m != n`・縦横比 < 2）のこの 2 点は CANDIDATES[0]（是正前の
+        // 安全側フォールバック値）比 5〜6 倍の逸失があることを確認した
+        // （(1536,1024,1024): CANDIDATES[0] 1.18 TFLOPS に対し
+        // CANDIDATES[1] 6.35 TFLOPS。(1024,1536,1536): CANDIDATES[0] 1.21
+        // TFLOPS に対し CANDIDATES[6] 6.89 TFLOPS。詳細値は
+        // `docs/perf/metal-gemm-tile-table.md`）。
+        assert_eq!(select(1536, 1024, 1024), CANDIDATES[1]);
+        assert_eq!(select(1024, 1536, 1536), CANDIDATES[6]);
     }
 
     #[test]
@@ -2006,10 +2080,27 @@ mod tests {
         // 縮退の有無で 512 と 1024/2048/4096 を書き分けていたが、その分岐が
         // 撤去されたため意味を失い本テストへ統合する
         // （occupancy 縮退の検証自体は縦長/横長形状のテストが引き続き担う）。
-        for &size in &[512usize, 1024, 2048, 4096] {
-            let cfg = select_with_occupancy(size, size, size, Some(m4_max_expected_params()));
-            assert_eq!(cfg, CANDIDATES[3], "size={size}");
-        }
+        // イシュー #1039 の厳密一致テーブル（`select_with_occupancy` 冒頭）
+        // がこれら 4 点に対し occupancy 判定より先に測定済み最良候補を
+        // 直接返すため、期待値も #1039 実測結果へ更新する（`select` 側の
+        // 期待値と同一。`select_picks_measured_best_config_for_true_
+        // square_shapes` 参照）。
+        assert_eq!(
+            select_with_occupancy(512, 512, 512, Some(m4_max_expected_params())),
+            CANDIDATES[5]
+        );
+        assert_eq!(
+            select_with_occupancy(1024, 1024, 1024, Some(m4_max_expected_params())),
+            CANDIDATES[6]
+        );
+        assert_eq!(
+            select_with_occupancy(2048, 2048, 2048, Some(m4_max_expected_params())),
+            CANDIDATES[1]
+        );
+        assert_eq!(
+            select_with_occupancy(4096, 4096, 4096, Some(m4_max_expected_params())),
+            CANDIDATES[2]
+        );
     }
 
     #[test]
@@ -2038,14 +2129,19 @@ mod tests {
         // PR #760 codex-review 指摘対応: `m != n` の準正方大形状長方形は
         // 段 1 で CANDIDATES[0]（大タイル系）を返すため（`LARGE` 分岐の
         // 再導入）、occupancy 縮退（段 2）が #744 是正前と同様に生きた
-        // ままであることを固定する。
+        // ままであることを固定する。`k=512`（`m=1536, n=1024` の実測点
+        // `k=1024` はイシュー #1039 の厳密一致テーブルが occupancy 判定
+        // より先に測定済み最良候補を返すため、この境界計算の検証に使えな
+        // くなった。`actual_groups`/`ideal_groups` は `m`/`n`/`shape_cfg`
+        // のみに依存し `k` に依存しないため、`k` を変えても以下の計算は
+        // 同一のまま成立する）。
         //
         // m=1536, n=1024, CANDIDATES[0]（bm=bn=64, pad=4）:
         // actual_groups = ceil(1536/64)*ceil(1024/64) = 24*16 = 384。
         // smem_groups_per_core = min(6, 32768/9472=3) = 3 →
         // ideal_groups = 40*3 = 120。384 > 120 のため over-occupied（縮退
         // しない）。
-        let cfg = select_with_occupancy(1536, 1024, 1024, Some(m4_max_expected_params()));
+        let cfg = select_with_occupancy(1536, 1024, 512, Some(m4_max_expected_params()));
         assert_eq!(cfg, CANDIDATES[0]);
     }
 
@@ -3059,7 +3155,7 @@ mod tests {
         let shapes: &[(usize, usize, usize)] = &[
             (2048, 256, 512),  // 縦長 → CANDIDATES[1]
             (256, 2048, 512),  // 横長 → CANDIDATES[2]
-            (512, 512, 512),   // 正方立方（実測範囲内）→ CANDIDATES[3]
+            (512, 512, 512),   // 正方立方（イシュー #1039 実測点）→ CANDIDATES[5]
             (1536, 1024, 512), // 準正方大形状長方形 → CANDIDATES[0]
             (32, 32, 32),      // 微小形状 → SINGLE_SIMDGROUP_8X8
         ];
