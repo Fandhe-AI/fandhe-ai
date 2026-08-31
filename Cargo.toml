@@ -56,12 +56,12 @@ members = [
 # `crates/tensor-core/src/buffer.rs::BufferHandle::as_any_mut` のドキュメント
 # コメント参照）。0.x 系ルールに従い 0.2.0 → 0.3.0 とする。
 #
-# イシュー #979/#980: デバイス常駐パラメータ更新 API `DeviceParamStore`（#954）・
-# `fandhe_ai::optim`（#961/#972）等、公開 API の追加を伴うため 0.x 系ルールに
-# 従い 0.3.0 → 0.4.0 とする。内部依存の `version = "=0.4.0"` 併記は
+# イシュー #1011/#1083: CUDA 都度同期廃止（#1064）・TF32 opt-in API（#1042）等、
+# 公開 API の追加・実行モデル変更を伴うため 0.x 系ルールに従い
+# 0.4.0 → 0.5.0 とする。内部依存の `version = "=0.5.0"` 併記は
 # `docs/crates-io-publishing-order.md` §4「版数運用: `workspace.version` に
 # よる lockstep」を参照。
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
