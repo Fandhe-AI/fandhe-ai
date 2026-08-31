@@ -361,3 +361,28 @@ pub use rmsnorm::MetalRmsNorm;
 #[cfg(target_os = "macos")]
 pub use softmax::MetalSoftmax;
 pub use tile::TileConfig;
+
+/// テスト・診断専用: プロセスワイド singleton `MetalContext`
+/// （`context_cache::cached_context`。`ops::MetalBackendOps` の全演算
+/// メソッドが経由する唯一のコンテキスト）のバッチング診断カウンタ
+/// スナップショットを返す（イシュー #1099）。
+///
+/// `#[doc(hidden)]` かつ本コメントで明記するとおり `facade` が唯一の
+/// サポート対象公開 API 面という方針（`docs/compat-api-scope.md` §0）
+/// には含めない。`backend-metal`（`tests/command_batching_bench.rs`）・
+/// `facade`（`tests/mnist_scale_train_reuse_bench.rs`）の実機テスト・
+/// ベンチが、SGD バッチング（#1017）のプール再利用時同期除去（#1099）
+/// 効果を「encode 呼び出し数・コマンドバッファ生成数・
+/// `waitUntilCompleted` 呼び出し数」の before/after 差分として実測する
+/// ためだけに存在する。
+///
+/// 直接 `MetalContext::new()` した別インスタンスではカウンタが常に 0 の
+/// ままになる（`ops::MetalBackendOps` はこの singleton 経由でのみ dispatch
+/// するため）。呼び出し元は必ず本関数を使う。
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn __diagnostic_batch_counters_snapshot() -> Result<context::BatchCountersSnapshot, MetalError>
+{
+    let ctx = context_cache::cached_context()?;
+    Ok(ctx.diagnostic_batch_counters())
+}

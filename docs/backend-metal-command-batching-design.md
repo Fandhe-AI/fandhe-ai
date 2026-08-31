@@ -287,6 +287,17 @@ Metal の `commandBuffer()` はリソースを retain する既定の動作の�
 プールの導入後もこの契約（ゼロ埋めはホスト書き込みであり同期を要する）は
 変更しない。
 
+**#1099 追記**: 上記は `fandhe_ai_tensor_core::pool::PooledMemory<
+MetalMemory>`（`memory.rs::PoolZeroFill for MetalMemory::zero_fill`）を
+指しており、この経路は無変更のまま維持する。一方、`crate::pool::
+MetalAllocator`（`buffer.rs::alloc_zeroed_pooled`／`alloc_uninit_pooled`
+経由。`ops.rs` の GEMM／MSE 出力バッファ確保が使う、実際に本イシューが
+問題視した経路）は、#1021 の pending-return 不変条件によりフリーリスト
+上のバッファが常に GPU 未参照であることが構造的に保証されるため、
+`synchronize()` を経由せずに「ホスト書き込み前に GPU 完了を待つ」という
+一般契約を満たせることが判明し、`synchronize()` を除去した。証明・実測
+は §8 を参照。
+
 ### 3.5 同期点一覧（受け入れ条件 (a)）
 
 | API / 契機 | 種別 | 理由 | CUDA 対応（§3.8） |
@@ -708,3 +719,139 @@ Metal API を直接呼ばない純粋なロジック）は `cfg(target_os = "mac
   command_batching.rs` 冒頭コメント・`crates/facade/tests/
   device_param_store_bench.rs` の `legacy_vs_resident_per_step_metal`
   は正しさ検証・小規模ベンチの既存参照として引き続き有効。
+
+## 8. 実装記録（#1099。§4.2・§4.4・§4.5・§3.4・§3.5 の追記）
+
+§4.2・§4.5 が特定した「9 個のバッチがいずれも dispatch 数 1（マージ
+なし）」の直接原因（`pool.rs::MetalAllocator::alloc_inner` の
+zero-on-reuse 経路が無条件 `self.context.synchronize()` を呼ぶ）を
+解消した（イシュー #1099）。
+
+### 8.1 §3.4／§3.5 の契約改訂
+
+§3.4 の「メモリプール導入後もこの契約（ゼロ埋めはホスト書き込みであり
+同期を要する）は変更しない」は、**`crate::pool::MetalAllocator`
+（`buffer.rs::alloc_zeroed_pooled`／`alloc_uninit_pooled` 経由。
+`ops.rs` の GEMM／MSE 出力バッファ確保が使う経路）に限り本イシューで
+変更する**。`fandhe_ai_tensor_core::pool::PooledMemory<MetalMemory>`
+（`memory.rs::PoolZeroFill for MetalMemory::zero_fill`。§3.5 表の
+`PoolZeroFill::zero_fill` 行）は本イシューのスコープ外の**別の**
+プール機構であり、同期契約は無変更のまま維持する（`zero_fill` 自身は
+「そのバッファを最後に読み書きした dispatch」の完了を待つ必要がある
+という一般契約自体は変わらないが、`MetalAllocator` はこの一般契約を
+満たすことを別の不変条件〈8.2〉で構造的に保証できるため、同期を
+経由せずに満たす）。
+
+`crate::pool::MetalAllocator::alloc_inner` の zero-on-reuse 経路
+（`pool.rs`）から `self.context.synchronize()` を除去した。安全性の
+根拠（#1021 の pending-return 不変条件）:
+
+1. バッファの返却経路は `PooledMetalHandle::Drop` →
+   `MetalContext::defer_pool_return` のみ（`context.rs:249-`）。
+   `BatchSlots` の同一ロック区間内で `open`／`committed`（in-flight）
+   バッチの有無を検査し、in-flight ならフリーリストへ入れず
+   `pending_pool_returns` へ退避する（`pool_pending.rs::
+   PendingReturns::defer_or_release`）。
+2. 退避分の合流（`put_all_merged`）は `MetalContext::synchronize` の
+   `waitUntilCompleted()` **完了後**、同一ロック保持のまま行う
+   （`synchronize` は待機中も `BatchSlots` ロックを保持し続けるため、
+   「committed を take した後・完了前」に別スレッドの Drop が即時
+   返却へ抜ける TOCTOU 窓は存在しない）。
+3. 即時返却（`in_flight == false`）が成立するのは open/committed
+   バッチが 1 つも無い時点のみで、その時点でこのコンテキストの全
+   GPU work は完了済み。
+
+よって**フリーリスト上のバッファはいかなる open／committed／実行中
+コマンドバッファからも参照されない**（GPU 未参照）ことが不変条件と
+して成立し、`take()` で得た再利用バッファへのホスト書き込み
+（`zero_fill_logical`）に同期は不要（§3.6 の「ホスト→GPU」可視性
+保証はバッファを参照する dispatch の commit 前にホスト書き込みが
+完了していることのみを要求し、本経路はその条件を満たす）。
+
+**エラー伝播の位置づけの変化**: 従来は再利用確保時の `synchronize()`
+が前バッチの実行エラーを alloc エラーとして早期に表面化させていたが、
+除去後はエラー自体が失われるわけではなく、次のホスト実体化（各 op の
+`dispatch_sync`／`download`／`Drop` が呼ぶ `synchronize()`）で
+`DispatchFailureCell` 経由で登録済み全トークンへ伝播する契約（#1017・
+§3.7 (2)）がそのまま働く。位置が「確保時」から「次の同期点」へ遅延
+するのみで、エラーが握り潰される経路は増えない。
+
+### 8.2 `PoolStats` 契約との非矛盾
+
+`record_reuse` 後、`zero_on_reuse` 分岐は従来 `synchronize()` 失敗時に
+`record_loan_end` で統計を巻き戻していたが、この分岐自体が
+`synchronize()` 呼び出しと共に消滅した（`zero_fill_logical` はホスト
+側のみの操作で失敗しない）。`pending_return_bytes`／
+`record_pending_return`／`put_merged`（`docs/device-memory-pool-design.md`
+§3.1・§3.3）の契約には一切触れておらず、返却経路（`defer_pool_return`）
+・合流経路（`synchronize` 内の `drain_for_merge` → `put_all_merged`）は
+無変更のまま。取得経路（`take()` → `record_reuse`）のみを変更した。
+
+### 8.3 実測（2026-08-31・Apple M4 Max 実機）
+
+**§4.2 の再実測（診断カウンタは本番コードへ恒久化。テスト・診断専用
+`#[doc(hidden)]` API として `crates/backend-metal/src/context.rs::
+MetalContext::diagnostic_batch_counters`／`lib.rs::
+__diagnostic_batch_counters_snapshot` に残す。§4.2 が「一時計装・
+`git checkout` で完全に revert」した方式から変更した）**:
+`crates/facade/tests/mnist_scale_train_reuse_bench.rs::
+mnist_scale_train_reuse_metal_batch_counters`（WARMUP=20 step 後の
+steady-state 1 step）で実測。
+
+| 指標 | before（§4.2・#1099 適用前） | after（#1099 適用後・本実測） |
+| --- | --- | --- |
+| `encode()` 呼び出し総数 | 9 | **9**（不変） |
+| コマンドバッファ生成数 | 9 | **8** |
+| `waitUntilCompleted()` 呼び出し数 | 9 | **8** |
+
+§4.2 が静的に見込んでいた「境界で 1 組統合され 9→8」という想定どおり
+の結果になった（前 step の `sgd_step_f32` tracked encode が、次 step
+先頭の dispatch と同一バッチへ合流する）。
+
+**§4.4 の再実測**（`mnist_scale_train_fresh_vs_reuse_metal`。5 trial
+中央値）:
+
+| | fresh | reuse | reuse/fresh |
+| --- | --- | --- | --- |
+| #1099 適用前（§4.4 表） | 19.070 ms（19.043〜20.405 ms） | 9.485 ms（9.358〜9.533 ms） | 2.011 倍高速 |
+| #1099 適用後（本実測） | 18.148 ms（18.078〜18.244 ms） | 8.862 ms（8.725〜8.870 ms） | 2.048 倍高速 |
+
+コマンドバッファ・wait 回数の 1 step あたり 1 回減（9→8、約 11%
+削減）に対し、reuse 中央値の短縮は 9.485 ms → 8.862 ms（約 6.6%）。
+§4.2 が既に指摘したとおり、この MLP ワークロードの支配項は
+`docs/perf/train-step-phase-breakdown.md` の backward（83.6〜97.3%）
+であり、コマンドバッファ数の削減はホスト側の固定費（コマンドバッファ
+生成・`waitUntilCompleted` の呼び出しオーバーヘッド）のみに効くため、
+削減率が 1 step 全体の短縮率より小さいのは整合的である。
+
+**新規追加テスト**（実機実行済み・全 green。`--ignored --test-threads=1`）:
+
+- `crates/backend-metal/tests/command_batching.rs::
+  pool_reuse_zero_fill_does_not_synchronize_open_batch`（本イシューの
+  核心となる回帰テスト。open バッチが存在する状態でのプール再利用
+  ゼロ埋めが `waitUntilCompleted` を発火させないこと・再利用バッファが
+  全ゼロであること・SGD 更新結果が正しいことを検証）。
+- `crates/backend-metal/tests/command_batching_bench.rs::
+  pool_reuse_interleaved_with_tracked_steps_preserves_batching`
+  （50 step の tracked SGD + プール再利用の混在投入で、コマンドバッファ
+  生成数〈1〉が `encode()` 呼び出し数〈50〉より大幅に少ないことを確認。
+  受入条件 2 のもう一方の確認先）。
+- `crates/facade/tests/mnist_scale_train_reuse_bench.rs::
+  mnist_scale_train_reuse_metal_batch_counters`（上表の 9/8/8 を assert
+  する回帰テスト）。
+
+**既存 parity・回帰テストの green 確認**: `cargo test -p
+fandhe-ai-backend-metal --release -- --ignored --test-threads=1`
+（`pool_real_device.rs` の再利用時全ゼロ契約テストを含む全ての実機
+ignored テスト）・`cargo test -p fandhe-ai --release --test
+device_param_store_backend_parity -- --ignored --nocapture
+--test-threads=1`（`device_resident_matches_host_sgd_on_metal_across_
+100_steps`）が green（CUDA 側ケースは本 Mac に CUDA 実機が無いため
+`CudaUnavailable` で失敗するが、#1099 の変更と無関係な既知の環境制約）。
+tolerance（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は変更していない。
+`cargo fmt --all -- --check`／`cargo clippy -p fandhe-ai-backend-metal
+--lib --tests --examples -- -D warnings` は 0 差分・0 warning
+（`fandhe-ai-backend-cuda` の一部 dead-code warning は本 Mac に CUDA
+toolkit 由来の `internal-diagnostics` feature 依存関数群が未使用に
+なる既知の環境依存であり #1099 と無関係。`git stash` での前後比較で
+本 PR の変更前から同一であることを確認済み）。

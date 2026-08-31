@@ -248,3 +248,117 @@ fn synchronize_after_auto_flush_at_limit() {
 fn dispatch_sync_callers_unchanged_regression_is_covered_elsewhere() {
     // 意図的な no-op（モジュール冒頭コメント参照）。
 }
+
+/// イシュー #1099 の核心となる回帰テスト: プールのフリーリスト命中
+/// （`MemoryOps::alloc_zeroed` → `pool::MetalAllocator::alloc_inner` の
+/// zero-on-reuse 経路）が、**open な（未 commit の）バッチが存在する
+/// 状態**で発生しても `MetalContext::synchronize()`（`waitUntilCompleted`）
+/// を発火させないこと・再利用バッファが正しく全ゼロであることを、
+/// 診断カウンタ（`fandhe_ai_backend_metal::
+/// __diagnostic_batch_counters_snapshot`。`#[doc(hidden)]` のテスト・
+/// 診断専用 API）で確認する。
+///
+/// 手順:
+/// 1. `alloc_zeroed` で確保したバッファを、どのバッチも open していない
+///    状態で drop する（即時 `put()` 経路。設計文書 §3.3「Metal」）→
+///    同じサイズクラスのフリーリストへ 1 エントリが載る。
+/// 2. `sgd_step_device_tracked` を 1 回呼んで **待たない** dispatch を
+///    encode し、`open` バッチを作る（`download` 等の同期点を挟まない）。
+/// 3. open バッチが存在する状態のまま `alloc_zeroed` を再度呼ぶ →
+///    手順 1 のフリーリストにヒットし zero-on-reuse 経路を通る。
+///    **#1099 適用前はここで無条件 `synchronize()` が発火し、手順 2 の
+///    open バッチが flush・待機されていた**（SGD バッチング無効化の
+///    直接原因。イシュー本文・設計文書 §4.2 参照）。適用後は同期しない
+///    ため `wait_until_completed` カウンタは手順 3 の前後で不変のはず。
+/// 4. `download` で最終同期し、再利用バッファが全ゼロであること・SGD
+///    の更新結果が正しいこと（REQ-2 複合判定）を確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn pool_reuse_zero_fill_does_not_synchronize_open_batch() {
+    let ops = MetalBackendOps::new();
+    let mem = ops
+        .memory_ops()
+        .expect("MetalBackendOps must implement MemoryOps");
+
+    const N: usize = 4096;
+
+    // 手順 1: フリーリストへ 1 エントリを準備する（open バッチが無い
+    // 状態での drop = 即時 put()。設計文書 §3.3「Metal」）。
+    {
+        let primer = mem
+            .alloc_zeroed(&[N])
+            .expect("alloc_zeroed must succeed on real hardware");
+        drop(primer);
+    }
+
+    // 手順 2: SGD tracked encode で open バッチを作る（待たない）。
+    let init = vec![1.0f32, -2.0, 0.5, 3.25];
+    let mut param = mem
+        .upload(&Tensor::new(init.clone(), &[4]).unwrap())
+        .unwrap();
+    let grad = vec![0.1f32, 0.2, -0.1, 0.05];
+    let grad_buf = mem
+        .upload(&Tensor::new(grad.clone(), &[4]).unwrap())
+        .unwrap();
+    let config = SgdStepConfig {
+        lr: 0.1,
+        momentum: 0.0,
+        dampening: 0.0,
+        weight_decay: 0.0,
+        nesterov: false,
+        is_first_step: true,
+    };
+    let token = DispatchFailureCell::new();
+    ops.sgd_step_device_tracked(&mut param, &grad_buf, None, &config, &token)
+        .expect("sgd_step_device_tracked must succeed on real hardware");
+
+    let before = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+        .expect("singleton MetalContext must be available on real hardware");
+
+    // 手順 3: open バッチがある状態でフリーリストへヒットさせる。
+    let reused = mem
+        .alloc_zeroed(&[N])
+        .expect("alloc_zeroed reuse must succeed on real hardware");
+
+    let after = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+        .expect("singleton MetalContext must be available on real hardware");
+
+    assert_eq!(
+        after.wait_until_completed, before.wait_until_completed,
+        "#1099: プール再利用時ゼロ埋めは open バッチを synchronize() させない"
+    );
+    assert_eq!(
+        after.encode_calls, before.encode_calls,
+        "alloc_zeroed 自体は encode() を呼ばない"
+    );
+    assert_eq!(
+        after.command_buffers, before.command_buffers,
+        "alloc_zeroed 自体は新規コマンドバッファを生成しない"
+    );
+
+    // 手順 4: 終端同期後に正しさを確認する。
+    let reused_values = mem
+        .download(&reused)
+        .expect("download must synchronize the still-open SGD batch");
+    for (i, v) in reused_values
+        .contiguous()
+        .as_slice()
+        .expect("reused buffer must be contiguous")
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(*v, 0.0, "reused buffer element {i} must be zero-filled");
+    }
+
+    let result = mem
+        .download(&param)
+        .expect("download must return the SGD-updated parameter");
+    let expected = vanilla_sgd_expected(&init, &[grad], config.lr);
+    for (i, exp) in expected.iter().enumerate() {
+        assert_close(result.get(&[i]).unwrap(), *exp, &format!("param index {i}"));
+    }
+    assert!(
+        !token.is_set(),
+        "no runtime error expected on real hardware"
+    );
+}

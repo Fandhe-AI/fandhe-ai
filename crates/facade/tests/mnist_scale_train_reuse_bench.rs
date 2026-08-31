@@ -265,3 +265,91 @@ fn bench_fresh_vs_reuse(device: Device, label: &str) {
 fn mnist_scale_train_fresh_vs_reuse_metal() {
     bench_fresh_vs_reuse(Device::Metal, "metal");
 }
+
+/// イシュー #1099 の受入条件 2: プール再利用時ゼロ埋めの無条件
+/// `synchronize()` 除去（`crates/backend-metal/src/pool.rs::
+/// MetalAllocator::alloc_inner`）により、steady-state の MLP reuse 学習
+/// 1 step でコマンドバッファ生成数・`waitUntilCompleted()` 呼び出し数が
+/// `docs/backend-metal-command-batching-design.md` §4.2 の before 実測
+/// （9 / 9 / 9）から **9 / 8 / 8** へ減ることを、プロセスワイド singleton
+/// `MetalContext`（`ops::MetalBackendOps` の全演算メソッドが経由する
+/// 唯一のコンテキスト）の診断カウンタ（`fandhe_ai_backend_metal::
+/// __diagnostic_batch_counters_snapshot`。`#[doc(hidden)]` のテスト・
+/// 診断専用 API）差分で確認する。`encode()` 呼び出し総数（= dispatch
+/// 総数）自体は #1099 で不変のはず（9）。
+///
+/// warmup（`WARMUP` step）で MSL パイプライン初回コンパイル・プールの
+/// フリーリスト充足を steady-state 化してから、その次の 1 step だけを
+/// 計測窓に取る（`run_fresh`／`run_reuse` と同じモデル形状・シードだが、
+/// 本テストはカウンタ差分のみを見るため `durations` は測らない）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn mnist_scale_train_reuse_metal_batch_counters() {
+    let device = Device::Metal;
+    let model = build_model();
+    let (x_data, y_data) = mlp_data();
+
+    let init_tape = fandhe_ai::tape_for(device).unwrap();
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
+    let _ = init_tape.sync_device_param_store_to_host(&store).unwrap();
+    drop(init_tape);
+
+    let config = FacadeSgdConfig::new(LR);
+
+    let run_step = |store: &mut fandhe_ai::DeviceParamStore| {
+        let tape = fandhe_ai::tape_for(device).unwrap();
+        let x = tape.var(&x_data);
+        let y = tape.var(&y_data);
+        let pred = model.forward_resident(&tape, &x, store).unwrap();
+        let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+        let last_loss = loss
+            .to_tensor()
+            .get(&[])
+            .expect("loss は shape [] スカラー");
+        assert!(
+            last_loss.is_finite(),
+            "MEASURE_ERROR: step loss not finite: {last_loss}"
+        );
+        let grads = tape.backward_device_param_store(&loss, store).unwrap();
+        tape.step_device_param_store(store, &grads, &config)
+            .unwrap();
+    };
+
+    // steady-state 到達（`TRAIN_WARMUP`＝20 と同じ考え方。#1017／#1099
+    // いずれもプールのフリーリスト充足状態が前提のため、初回数 step は
+    // フレッシュ確保が混じりカウンタが安定しない）。
+    const WARMUP: usize = TRAIN_WARMUP;
+    for _ in 0..WARMUP {
+        run_step(&mut store);
+    }
+
+    let before = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+        .expect("singleton MetalContext は実機で必ず取得できるはず");
+    run_step(&mut store);
+    let after = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+        .expect("singleton MetalContext は実機で必ず取得できるはず");
+
+    let encode_delta = after.encode_calls - before.encode_calls;
+    let command_buffer_delta = after.command_buffers - before.command_buffers;
+    let wait_delta = after.wait_until_completed - before.wait_until_completed;
+
+    println!(
+        "[mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: \
+         encode_delta={encode_delta} command_buffer_delta={command_buffer_delta} \
+         wait_delta={wait_delta} — before（#1099 適用前）は 9/9/9 \
+         （`docs/backend-metal-command-batching-design.md` §4.2）"
+    );
+
+    assert_eq!(
+        encode_delta, 9,
+        "encode() 呼び出し総数（= dispatch 総数）は #1099 で不変のはず"
+    );
+    assert_eq!(
+        command_buffer_delta, 8,
+        "コマンドバッファ生成数は #1099 適用後 9→8（境界で 1 組統合）のはず"
+    );
+    assert_eq!(
+        wait_delta, 8,
+        "waitUntilCompleted() 呼び出し数は #1099 適用後 9→8 のはず"
+    );
+}

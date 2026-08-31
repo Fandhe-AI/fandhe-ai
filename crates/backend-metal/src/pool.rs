@@ -340,25 +340,47 @@ impl MetalAllocator {
             if zero_on_reuse {
                 // 再利用時のゼロ初期化契約（設計文書 §3.3「ゼロ初期化は
                 // ホスト書き込み」・§6「A02」）: 前利用者のバイト残留を
-                // 防ぐため、`synchronize()` で GPU 完了を待ってから
-                // `zero_fill_logical` する。フレッシュ確保経路も同様に
-                // 明示ゼロクリアする（下記 `alloc_fresh` 直後。GPU 未使用の
-                // ため同期は不要）。
-                // `record_reuse` 済みの貸出は、この `synchronize()` が失敗
-                // すると `PooledMetalHandle` が構築されず `Drop` 経由の
-                // `record_loan_end` も走らないため、統計を明示的に巻き戻して
-                // からエラーを返す（codex P2・Cursor Bugbot Low: 巻き戻しを
-                // 怠ると `capacity_waste_bytes` がプロセス生存期間にわたり
-                // 過大表示される）。`waitUntilCompleted` 復帰後はコマンド
-                // バッファが成功・失敗いずれでも完了しており GPU は本
-                // バッファを参照しないため、`raw` はそのまま drop して
-                // MTLBuffer を解放する（フリーリストへは戻さない: 失敗時に
-                // 解放処理を進めない §3.6 の契約とは別経路の貸出前初期化
-                // であり、保持し続ける理由がない）。
-                if let Err(e) = self.context.synchronize() {
-                    self.pool.record_loan_end(logical_bytes, class_bytes);
-                    return Err(e);
-                }
+                // 防ぐため `zero_fill_logical` で明示ゼロクリアする。
+                //
+                // イシュー #1099: 従来はここで `self.context.synchronize()`
+                // を無条件に呼んでいたが、#1021 の pending-return 不変条件
+                // （`context.rs::MetalContext::defer_pool_return` /
+                // `pool_pending.rs::PendingReturns::defer_or_release`）に
+                // より、フリーリスト上のバッファは常に GPU 未参照である
+                // ことが構造的に保証されるため、この同期は不要と判明した:
+                //
+                // 1. バッファの返却経路は `PooledMetalHandle::Drop` →
+                //    `defer_pool_return` のみ。`BatchSlots` の同一ロック
+                //    区間内で `open`／`committed`（in-flight）バッチの
+                //    有無を検査し、in-flight ならフリーリストへ入れず
+                //    `pending_pool_returns` へ退避する。
+                // 2. 退避分の合流（`put_all_merged`）は
+                //    `MetalContext::synchronize` の `waitUntilCompleted()`
+                //    完了後、同一ロック保持のまま行う（`synchronize` は
+                //    待機中も `BatchSlots` ロックを保持し続けるため、
+                //    「committed を take した後・完了前」に別スレッドの
+                //    Drop が即時返却へ抜ける TOCTOU 窓は存在しない）。
+                // 3. 即時返却（`in_flight == false`）が成立するのは
+                //    open/committed バッチが 1 つも無い時点のみで、その
+                //    時点でこのコンテキストの全 GPU work は完了済み。
+                //
+                // よってフリーリスト上のバッファはいかなる open /
+                // committed / 実行中コマンドバッファからも参照されず、
+                // ここで `take()` した再利用バッファへのホスト書き込みに
+                // 同期は不要（`StorageModeShared` の可視性保証は commit
+                // 前の CPU 書き込みが GPU から可視であることのみを要求し、
+                // 本経路はその条件を満たす）。この除去により、直前 step が
+                // 残した未 flush バッチ（例: `sgd_step_device_tracked`）が
+                // 次 step 先頭の確保のたびに毎回 flush される構造的な
+                // バッチング無効化を解消する（設計根拠・実測は
+                // `docs/backend-metal-command-batching-design.md` §8）。
+                //
+                // 同期を取り除いたことで、前バッチの実行時エラーはこの
+                // 確保時点では検出されなくなる（従来の早期表面化が失われる）。
+                // ただしエラー自体は失われず、次のホスト実体化
+                // （各 op の `dispatch_sync`／`download`／`Drop` が呼ぶ
+                // `synchronize()`）で `DispatchFailureCell` 経由で登録済み
+                // 全トークンへ伝播する契約（#1017）がそのまま働く。
                 raw.zero_fill_logical(len);
             }
             return Ok(PooledMetalHandle {

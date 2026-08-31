@@ -206,3 +206,107 @@ fn command_batching_micro_bench_untracked_vs_tracked() {
         tracked_q.median < untracked_q.median,
     );
 }
+
+/// イシュー #1099 の受入条件 2 の一方の確認先（もう一方は
+/// `crates/facade/tests/mnist_scale_train_reuse_bench.rs`）: プール
+/// 再利用（`MemoryOps::alloc_zeroed` のフリーリスト命中）を挟んだ
+/// tracked ステップの連続投入でも、#1017 のバッチングが維持される
+/// （= 生成されるコマンドバッファ数が `encode()` 呼び出し総数より
+/// はるかに少ない）ことをカウンタで確認する。
+///
+/// #1099 適用前は、各 `alloc_zeroed` 呼び出し（zero-on-reuse 経路）が
+/// 無条件 `synchronize()` を発火し、直前の `sgd_step_device_tracked` が
+/// 積んだ open バッチを毎回 flush・待機していたため、コマンドバッファ
+/// 数 ≈ `encode()` 呼び出し数（バッチングが実質無効化）になっていた。
+/// 適用後はプール再利用が同期を発火しないため、コマンドバッファ数は
+/// `encode()` 呼び出し数よりはるかに少ないはず（`batch_state::
+/// MAX_DISPATCHES_PER_BATCH` に到達するまで 1 コマンドバッファへ積まれ
+/// 続ける）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn pool_reuse_interleaved_with_tracked_steps_preserves_batching() {
+    let ops = MetalBackendOps::new();
+    let mem = ops
+        .memory_ops()
+        .expect("MetalBackendOps must implement MemoryOps");
+
+    const REUSE_NUMEL: usize = 4096;
+    const STEPS: usize = 50; // `batch_state::MAX_DISPATCHES_PER_BATCH`（256）未満。
+
+    // フリーリストへ 1 エントリを準備する（open バッチが無い状態での
+    // drop = 即時 put()）。
+    drop(
+        mem.alloc_zeroed(&[REUSE_NUMEL])
+            .expect("alloc_zeroed must succeed on real hardware"),
+    );
+
+    let mut param = mem
+        .upload(&Tensor::new(vec![0.0f32; NUMEL], &[NUMEL]).unwrap())
+        .unwrap();
+    let grad = mem
+        .upload(&Tensor::new(vec![0.01f32; NUMEL], &[NUMEL]).unwrap())
+        .unwrap();
+    let config = sgd_config();
+    let token = DispatchFailureCell::new();
+
+    let before = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+        .expect("singleton MetalContext must be available on real hardware");
+
+    for _ in 0..STEPS {
+        ops.sgd_step_device_tracked(&mut param, &grad, None, &config, &token)
+            .expect("sgd_step_device_tracked must succeed on real hardware");
+        // フリーリストヒット（初回）またはフレッシュ確保（2 回目以降。
+        // 直前の drop は open バッチ中のため即時 put() されず
+        // フリーリストへは戻らない）のいずれでも、encode() を伴わない
+        // ため `encode_calls` は増えない。この drop 自体も open バッチ
+        // 中なので pending へ退避されるだけで synchronize は起きない。
+        drop(
+            mem.alloc_zeroed(&[REUSE_NUMEL])
+                .expect("alloc_zeroed must succeed on real hardware"),
+        );
+    }
+
+    let mid = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+        .expect("singleton MetalContext must be available on real hardware");
+
+    let encode_delta = mid.encode_calls - before.encode_calls;
+    let command_buffer_delta = mid.command_buffers - before.command_buffers;
+
+    assert_eq!(
+        encode_delta, STEPS,
+        "encode() は sgd_step_device_tracked 1 回につき 1 回のはず"
+    );
+    assert!(
+        command_buffer_delta < encode_delta,
+        "#1099: プール再利用が挟まってもバッチングが維持され、\
+         コマンドバッファ数（{command_buffer_delta}）は encode() 呼び出し数\
+         （{encode_delta}）より少ないはず"
+    );
+
+    // 終端同期して正しさを確認する（download が唯一の同期点）。
+    let result = mem
+        .download(&param)
+        .expect("download must synchronize all batched steps");
+    let expected: Vec<f32> = vec![0.0f32; NUMEL]
+        .iter()
+        .map(|p| {
+            let mut v = *p;
+            for _ in 0..STEPS {
+                v -= config.lr * 0.01;
+            }
+            v
+        })
+        .collect();
+    for (i, exp) in expected.iter().enumerate() {
+        assert_close(result.get(&[i]).unwrap(), *exp, &format!("index {i}"));
+    }
+    assert!(
+        !token.is_set(),
+        "no runtime error expected on real hardware"
+    );
+
+    println!(
+        "[pool_reuse_interleaved_with_tracked_steps_preserves_batching] steps={STEPS} \
+         encode_delta={encode_delta} command_buffer_delta={command_buffer_delta}"
+    );
+}
