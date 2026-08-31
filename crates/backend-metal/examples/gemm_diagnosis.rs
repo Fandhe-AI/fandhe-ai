@@ -239,7 +239,7 @@ mod analytics {
         // でも算出できる純粋関数の設計を保つため機種ゲートは常に `None`
         // （M4 Max 実測テーブル不使用）で評価する（`tile::select`
         // ドキュメンテーションコメント参照）。
-        let tile = fandhe_ai_backend_metal::tile::select(size, size, size, None);
+        let tile = fandhe_ai_backend_metal::tile::select(size, size, size);
 
         let groups_m = ceil_div(size, tile.bm);
         let groups_n = ceil_div(size, tile.bn);

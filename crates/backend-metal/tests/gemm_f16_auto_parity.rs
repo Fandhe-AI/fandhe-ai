@@ -242,11 +242,11 @@ fn dispatch_f16_auto_matches_explicit_tile_select_dispatch() {
     let a: Vec<f16> = rng.fill_vec_f16(m * k);
     let b: Vec<f16> = rng.fill_vec_f16(k * n);
 
-    let cfg: TileConfig = fandhe_ai_backend_metal::tile::select(
+    let cfg: TileConfig = fandhe_ai_backend_metal::tile::select_for_device(
         m,
         n,
         k,
-        ctx.occupancy_params().map(|p| p.gpu_core_count),
+        ctx.verified_m4_max_gpu_core_count(),
     );
     let explicit = gemm
         .dispatch_f16_tiled_unverified(&ctx, &a, &b, m, n, k, cfg)

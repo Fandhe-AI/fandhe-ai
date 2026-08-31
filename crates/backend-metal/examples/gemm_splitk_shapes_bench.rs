@@ -168,7 +168,7 @@ mod analytics {
         // ゲートは常に `None`（M4 Max 実測テーブル不使用）で評価し、形状
         // クラス判定のみによる選択を解析対象とする（`tile::select`
         // ドキュメンテーションコメント参照）。
-        let tile = fandhe_ai_backend_metal::tile::select(m, n, k, None);
+        let tile = fandhe_ai_backend_metal::tile::select(m, n, k);
 
         let groups_m = ceil_div(m, tile.bm);
         let groups_n = ceil_div(n, tile.bn);
@@ -280,11 +280,11 @@ mod macos_impl {
         let a: Vec<f32> = rng.fill_vec(m * k);
         let b: Vec<f32> = rng.fill_vec(k * n);
 
-        let cfg = fandhe_ai_backend_metal::tile::select(
+        let cfg = fandhe_ai_backend_metal::tile::select_for_device(
             m,
             n,
             k,
-            ctx.occupancy_params().map(|p| p.gpu_core_count),
+            ctx.verified_m4_max_gpu_core_count(),
         );
         let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
         let a_padded = pad_matrix(&a, m, k, m_eff, k_eff);

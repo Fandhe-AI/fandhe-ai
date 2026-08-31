@@ -152,12 +152,8 @@ mod macos_impl {
         let measurement_config = MeasurementConfig::default();
 
         for size in [256usize, 512, 1024, 2048, 4096] {
-            let cfg = tile::select(
-                size,
-                size,
-                size,
-                ctx.occupancy_params().map(|p| p.gpu_core_count),
-            );
+            let cfg =
+                tile::select_for_device(size, size, size, ctx.verified_m4_max_gpu_core_count());
 
             let mut rng = Xorshift64Star::new(SEED);
             let a = rng.fill_vec(size * size);

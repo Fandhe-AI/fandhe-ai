@@ -94,8 +94,8 @@ pub enum GemmVariant {
     /// 動的タイル選択（TASK-1.8f・#188）。`gemm_simdgroup_tiled` を
     /// 保持する [`TileConfig`] の MSL function constant（BM/BN/BK/WM/WN・
     /// `USE_TGP_STAGING`）で特殊化してディスパッチする。行列サイズから
-    /// 構成を自動選択する入口は [`MetalGemm::dispatch_auto`]（[`tile::select`]
-    /// を使う。`tile::select_with_occupancy` による occupancy 縮退はイシュー
+    /// 構成を自動選択する入口は [`MetalGemm::dispatch_auto`]（[`tile::select_for_device`]
+    /// を使う。`tile::select_with_occupancy_for_device` による occupancy 縮退はイシュー
     /// #542 で実装済みだが、`dispatch_auto` への適用はイシュー #747 で
     /// **不採用確定**（#744 是正により、実測帯域〈512/1024/2048/4096〉では
     /// 段 1〈形状判定〉が occupancy 縮退を経ず `select()` と同一結果へ収束
@@ -590,21 +590,24 @@ impl MetalGemm {
     /// 「Metal GEMM を実行すると決まった後」のタイル構成選択のみを担う。
     /// イシュー #188 計画「スコープ外」節）。
     ///
-    /// **occupancy 判定（イシュー #542・[`tile::select_with_occupancy`]）は
-    /// 不採用確定（イシュー #747）**: `ctx.occupancy_params()` は実機値
+    /// **occupancy 判定（イシュー #542・[`tile::select_with_occupancy_for_device`]）
+    /// は不採用確定（イシュー #747）**: `ctx.occupancy_params()` は実機値
     /// （GPU コア数・threadgroup memory 上限）からキャッシュされるが、
     /// #744 是正（段 1 の正方立方形状判定是正）により実測帯域
     /// 〈512/1024/2048/4096〉では occupancy 縮退の適用対象が実質消滅し
-    /// `select()` と常に同一結果になることを確認したため、本番ディスパッチ
-    /// へは組み込まない（`docs/perf/metal-gemm-occupancy-select.md`
-    /// 「#747 判断」節・`crate::tile::select_with_occupancy` ドキュメンテー
-    /// ションコメント参照）。**`ctx.occupancy_params().map(|p|
-    /// p.gpu_core_count)` は occupancy 縮退の有効化とは別に、イシュー
-    /// #1039 の M4 Max 実測厳密一致テーブル（`tile::select_with_occupancy`
-    /// 内の `exact_match_cfg`）の機種ゲートとして [`tile::select`] へ渡す**
-    /// （P1・codex-review 指摘・PR #1108 レビュー: 実測機種以外へ無条件適用
-    /// されないようにするため。`crate::tile` モジュール `M4_MAX_GPU_CORE_COUNT`
-    /// 参照）。
+    /// [`tile::select_for_device`] と常に同一結果になることを確認したため、
+    /// 本番ディスパッチへは組み込まない（`docs/perf/
+    /// metal-gemm-occupancy-select.md`「#747 判断」節・`crate::tile::
+    /// select_with_occupancy_for_device` ドキュメンテーションコメント参照）。
+    /// **`ctx.verified_m4_max_gpu_core_count()` は occupancy 縮退の有効化
+    /// とは別に、イシュー #1039 の M4 Max 実測厳密一致テーブル
+    /// （`tile::select_with_occupancy_for_device` 内の `exact_match_cfg`）
+    /// の機種ゲートとして [`tile::select_for_device`] へ渡す**（P1・
+    /// codex-review 指摘・PR #1108 レビュー: 実測機種以外へ無条件適用され
+    /// ないようにするため。GPU コア数だけでは機種〈M3 Max との 40 コア
+    /// 構成の混同〉を一意に識別できないため、[`MetalContext::
+    /// verified_m4_max_gpu_core_count`] が SoC ブランド文字列と組み合わせて
+    /// 検証済みの値を渡す。`crate::tile` モジュール `verify_m4_max` 参照）。
     pub fn dispatch_auto(
         &self,
         ctx: &MetalContext,
@@ -614,7 +617,7 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<f32>, MetalError> {
-        let cfg = tile::select(m, n, k, ctx.occupancy_params().map(|p| p.gpu_core_count));
+        let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
         self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)
     }
 
@@ -668,7 +671,7 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<half::f16>, MetalError> {
-        let cfg = tile::select(m, n, k, ctx.occupancy_params().map(|p| p.gpu_core_count));
+        let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
         self.dispatch_f16_tiled_unverified(ctx, a, b, m, n, k, cfg)
     }
 

@@ -172,7 +172,7 @@ mod macos_impl {
         let c_buf = MetalHalfBuffer::new_zeroed(ctx, m_eff * n_eff)
             .expect("C バッファ確保（計測外の事前準備）に失敗した（実機でのみ実行する前提）");
 
-        let cfg = tile::select(m, n, k, ctx.occupancy_params().map(|p| p.gpu_core_count));
+        let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
         // ループの外で一度 `dispatch_f16_tiled_prepared_unverified` を呼び、
         // resolved 構成の取得と `MetalGemm::tiled_f16_cache`（`gemm.rs`
         // `pipeline_for_tile_f16`）のウォームアップを行う。フォールバックが
