@@ -277,6 +277,10 @@ def _sanitize_skip_raw_for_display(raw, max_len=120):
     出力ページへ混入しうる（生成物が GitHub 等でレンダリングされる場合の
     注入経路になる）。
 
+    呼び出し元は `target_gate_section()` の `reason` 生成箇所に加え、
+    `main()` 内の「実行時失敗（skipped*.log）」節（skipped*.log の生行を
+    箇条書きへ埋め込む別コードパス）でも使う（イシュー #1085）。
+
     - 改行・連続空白は単一の半角スペースへ正規化する（表セル内で改行する
       とレンダリングが崩れるため）。
     - `&` を先に `&amp;` へ変換してから `<`/`>` を実体参照へ、`|` を
@@ -2501,7 +2505,10 @@ def main():
             line = line.strip()
             if line:
                 any_skip = True
-                lines.append(f"- **{os.path.basename(sl)}**: {line}")
+                lines.append(
+                    f"- **{os.path.basename(sl)}**: "
+                    f"{_sanitize_skip_raw_for_display(line)}"
+                )
     if not any_skip:
         lines.append("- なし（skipped*.log は空または不在）")
     lines.append("")
@@ -2509,7 +2516,12 @@ def main():
     # 内（`_skip_log_paths_for_input`/`_inject_skip_failures_into_gate`）
     # で環境スコープを保ったまま既に完了している（codex P0・Bugbot High
     # 指摘・PR #1082 4 巡目）。ここでの表示用ループはあくまで人間向けの
-    # 生ログ一覧であり、ゲート判定には使わない。
+    # 生ログ一覧であり、ゲート判定には使わない。ただし `line` 自体は
+    # ベンチバイナリの stderr を含む未信頼文字列のため、ゲート節と同じ
+    # `_sanitize_skip_raw_for_display` で Markdown/HTML エスケープしてから
+    # 埋め込む（イシュー #1085・security.md A03。ファイル名部分
+    # `os.path.basename(sl)` はローカル glob 一致でありユーザー入力由来
+    # ではないため対象外）。
 
     gate_unmet = 0
     gate_undeterminable = 0
