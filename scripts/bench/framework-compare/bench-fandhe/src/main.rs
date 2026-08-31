@@ -37,12 +37,18 @@
 //! を固定する側）であり、fresh/reuse の計時差は「ホスト経由 SGD vs デバ
 //! イス常駐更新」に限定される。
 //!
-//! 既知の前提（改善量の解釈範囲）: `Sequential::forward_resident` が呼ぶ
-//! `DeviceParamStore::register_resident_leaves` は forward 用に毎 step
-//! パラメータを D2H download する（`crates/autodiff/src/optim/
-//! device_store.rs`・`docs/device-resident-update-design.md` §3.3b・
-//! イシュー #954 申し送り）。reuse が排除するのは「毎 step の再アップ
-//! ロード（H2D）+ ホスト計算」であり、この D2H は reuse でも残存する。
+//! 既知の前提（改善量の解釈範囲・codex-review PR #1104 P2 是正）: 0.5.0 の
+//! `Sequential::forward_resident` が呼ぶのは `DeviceParamStore::
+//! register_resident_params`（D2H を伴わない。#1059 で D2H を伴う旧
+//! `register_resident_leaves` から分離。`crates/autodiff/src/optim/
+//! device_store.rs` doc 参照）であり、forward 自体に毎 step の D2H は
+//! 発生しない。各 step 中の唯一のホスト同期点は `loss_readout`
+//! （`loss.to_tensor().get()`）であり、これが（1 step ずれた形で）前
+//! step の backward・デバイス上 SGD 更新の完了を保証する（ストリーム
+//! 順序保証。`docs/backend-cuda-async-execution-design.md` §3 I1/I2・
+//! 本関数下部のループ冒頭コメント参照）。reuse が排除するのは「毎 step
+//! のホスト経由 `p - lr*g` 計算 + 再アップロード（H2D）」であり、
+//! パラメータの D2H（forward 用）は 0.5.0 では構造的に発生しない。
 //!
 //! `train --phases`（イシュー #1009）: `run_train`/`run_train_reuse` が
 //! 1 step の合計時間しか記録しない点を補い、公開 API の呼び出し境界で
@@ -516,10 +522,16 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // API（上記 init_s のコメント参照）が公開 API 面に無いという同じ
     // ギャップに阻まれる。
     //
-    // 代わりに、次 step 冒頭の `forward_resident` →
-    // `register_resident_leaves` が毎 step 必ず全パラメータを D2H
-    // download する（`DeviceParamStore::register_resident_leaves` doc・
-    // README「既知の前提」節）ことを同期点として利用する: 計測窓 i は
+    // 代わりに、この step 自身の `loss_readout`（`loss.to_tensor().get()`
+    // の D2H 実体化）を同期点として利用する（codex-review PR #1104 P2
+    // 是正: 0.5.0 の `forward_resident` は #1059 で D2H を伴わない
+    // `register_resident_params` に切り替わっており、forward 側の D2H
+    // には依存しない。モジュール doc「既知の前提」節参照）。
+    // `docs/backend-cuda-async-execution-design.md` §3 のストリーム順序
+    // 保証（I1）・同期点での完了保証（I2）により、`loss_readout` の
+    // D2H は先行する全投入済み作業（forward_i 自身に加え、ループ内で
+    // その手前に投入済みの前 step の backward_{i-1}・update_{i-1} を
+    // 含む）の完了を保証してから復帰する。よって計測窓 i は
     // 実際には「step i-1 の更新完了待ち + forward_i + backward_i +
     // step i の更新発行」を計測しており、定常状態では
     // `forward + backward + update` の総和に等しい（境界がひとつずれる

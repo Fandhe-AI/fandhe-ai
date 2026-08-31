@@ -92,20 +92,29 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   と同じ扱いであり、`init_s` は純粋な H2D upload 時間ではなく「upload 完了を確認可能な
   最初の時点」までの時間として解釈する。以後 100 step（先頭 20 を warmup として除外、
   残り 80 を計測）は gemm 同様 `median_s`/`q1_s`/`q3_s` として記録する。各 step の計測窓は
-  デバイス上 SGD 更新の完了を待たずに終える（次 step 冒頭の `register_resident_leaves` の
-  D2H download が同期点として機能し、定常状態では窓の境界が 1 step ずれるだけで
-  `forward + backward + update` の総和は変わらない。`main.rs` のループ冒頭コメント参照）
+  デバイス上 SGD 更新の完了を待たずに終える（0.5.0 の `forward_resident` は #1059 で
+  D2H を伴わない `register_resident_params` に切り替わっており forward 側の D2H には
+  依存しない。代わりにこの step 自身の `loss_readout`〈`loss.to_tensor().get()`〉が
+  ストリーム順序保証で前 step の backward/update 完了を含めて同期点として機能し、
+  定常状態では窓の境界が 1 step ずれるだけで `forward + backward + update` の総和は
+  変わらない。`docs/backend-cuda-async-execution-design.md` §3 I1/I2・`main.rs` の
+  ループ冒頭コメント参照）
 - **tape は step ごとに新規生成する**（gemm reuse と異なり、tape 自体は使い回さない）:
   `fandhe_ai_autodiff::Tape` はノード列クリア API を持たず学習ループはステップごとに
   tape を生成・破棄する設計契約であり、単一 tape を 100 step 使い回すと `Tape::backward`
   の逆順走査コストが step 数に比例して増加し 1 step の計測時間が非定常になる。reuse で
   使い回すのは tape ではなく `DeviceParamStore`（デバイス常駐バッファ・デバイスを固定
   する側）であり、fresh/reuse の計時差は「ホスト経由 SGD vs デバイス常駐更新」に限定される
-- **既知の前提（改善量の解釈範囲）**: `Sequential::forward_resident` が呼ぶ
-  `DeviceParamStore::register_resident_leaves` は forward 用に毎 step パラメータを
-  D2H download する（`docs/device-resident-update-design.md` §3.3b・イシュー #954 申し送り）。
-  reuse が排除するのは「毎 step の再アップロード（H2D）+ ホスト計算」であり、この D2H は
-  reuse でも残存する
+- **既知の前提（改善量の解釈範囲・codex-review PR #1104 P2 是正）**: 0.5.0 の
+  `Sequential::forward_resident` が呼ぶのは `DeviceParamStore::register_resident_params`
+  （D2H を伴わない。#1059 で D2H を伴う旧 `register_resident_leaves` から分離。
+  `crates/autodiff/src/optim/device_store.rs` doc 参照）であり、forward 自体に毎 step
+  の D2H は発生しない。各 step 中の唯一のホスト同期点は `loss_readout`
+  （`loss.to_tensor().get()`）であり、これが（1 step ずれた形で）前 step の
+  backward・デバイス上 SGD 更新の完了を保証する（`docs/backend-cuda-async-execution-
+  design.md` §3 I1/I2）。reuse が排除するのは「毎 step のホスト経由 `p - lr*g` 計算 +
+  再アップロード（H2D）」であり、パラメータの D2H（forward 用）は 0.5.0 では構造的に
+  発生しない
 - **数値一致確認**（受け入れ条件 5）: `cargo test --locked --release -p bench-fandhe` に
   `train_reuse_matches_fresh_final_loss_within_composite_tolerance`（cpu・実機非依存。
   fresh/reuse の最終 loss を統一複合判定で突合）を含む
@@ -160,7 +169,7 @@ backward・パラメータ更新のどこが支配的か）を追跡できない
 | --- | --- |
 | `tape_build` | `make_tape(&cli.device)` |
 | `leaf_register` | 入力/教師データの `tape.var(...)` |
-| `forward_resident` | `model.forward_resident(&tape, &x, &mut store)` + `mse_loss`（`register_resident_leaves` の毎 step D2H を含む） |
+| `forward_resident` | `model.forward_resident(&tape, &x, &mut store)` + `mse_loss`（`register_resident_params` 経由〈#1059〉で D2H を伴わない。`mse_loss` 自体も遅延実体化） |
 | `loss_readout` | `loss.to_tensor().get(&[])` |
 | `backward` | `tape.backward_device_param_store(&loss, &store)`（0.5.0 から `forward_resident` が積む `Op::LinearResident` の解決に必須。イシュー #1059） |
 | `device_update` | `tape.step_device_param_store(&mut store, &grads, &config)`（grad H2D + デバイス上 SGD 発行。CUDA では非同期発行のため完了待ちは次 step の `forward_resident` に計上される） |
