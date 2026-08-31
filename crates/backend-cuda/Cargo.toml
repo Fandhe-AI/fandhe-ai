@@ -67,7 +67,7 @@ test = true
 # `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
 # （公開 6 クレート間 path 依存。イシュー #881 で確定した方針。
 # `docs/crates-io-publishing-order.md`）。
-fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.4.0" }
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.5.0" }
 # CUDA バックエンド（REQ-2）。無条件依存＋動的ロード方式のため cfg 分離しない
 # （features・default-features は workspace ルートの [workspace.dependencies] で確定済み。
 # member 側で default-features を再指定しても inherited dependency には反映されないため
