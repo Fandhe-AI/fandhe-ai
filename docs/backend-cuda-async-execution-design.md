@@ -305,6 +305,10 @@
   （誠実な報告として記録し、速報的な高速化は主張しない）。`bench-fandhe
   train cuda` によるフレームワーク横並び 1 step 改善の実測・DGX Spark
   GB10／Metal M4 Max での再計測は本 PR 時点で未実施のまま残す
+- **framework-compare での実践規模 A/B 計測（イシュー #1083）**: 上記の
+  「未実施のまま残す」実測は `docs/perf/cuda-async-sync-removal-framework-compare-ab.md`
+  （手順雛形。実測は次回 crates.io 公開・ユーザー承認後の DGX Spark 実機
+  セッションで記入）へ引き継いだ
 
 ## 12b. 実装記録（#1014・回帰テスト追加）
 

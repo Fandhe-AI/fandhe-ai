@@ -339,6 +339,53 @@ echo $?   # 0: 全達成 / 2: --strict の無効データ判定が優先 / 3: �
   「達成」と判定されても性能特性の異なる経路同士の比較である点に注意する（本ツールはこの区別を自動
   判定しない。人間が判断する）
 
+## A/B 計測（都度同期廃止・イシュー #1083）
+
+#1011（CUDA 都度 `stream.synchronize()` 廃止）の受入条件「MLP 学習 1 step が
+実測で短縮する」を、実践規模（本ハーネスの `train cuda 64`）で確認するための
+before/after 比較手順。RTX 3060 トイモデルでの計測（`docs/perf/cuda-async-sync-removal-rtx3060.md`）
+では非同期化の効果が 1 step 全体の短縮として顕在化しなかったため、比較対象を
+本ハーネスへ広げる。
+
+**前提**: 本比較は `fandhe-ai` ピン（`bench-fandhe/Cargo.toml`）の crates.io
+バージョンで before/after を作る。ピンの更新は依存ポリシー（`.claude/rules/deps-policy.md`
+第 9 区分）上ユーザー承認必須のため、次回 crates.io 公開（#1064 都度同期廃止を
+含む版）後に別途承認を得てから行う。承認前の本ディレクトリのピンは常に
+「都度同期あり」側（before）を指す。
+
+```bash
+cd scripts/bench/framework-compare
+# before（現行ピン。都度同期あり）を DGX Spark 実機で計測:
+bash run_ab_train_cuda.sh before-0.4.0
+# ピン更新（別 PR・承認後）を適用したツリーで after を計測:
+bash run_ab_train_cuda.sh after-0.5.0
+
+# before/after の 5 回計測中央値を比較（fresh/reuse 各 mode ごとに Markdown 表）:
+python3 compare_ab.py results/raw/results-dgx-ab-before-0.4.0.jsonl \
+  results/raw/results-dgx-ab-after-0.5.0.jsonl
+echo $?   # 0: 判定完了（性能比較が成立） / 2: 判定不能（レコード不足・version 同一・checksum 不一致等）
+```
+
+- `run_ab_train_cuda.sh <label>` はラベル（`[A-Za-z0-9._-]+` のみ許可）ごとに
+  `bench-fandhe train cuda 64` を fresh/reuse それぞれ **5 回**起動し
+  `results/raw/results-dgx-ab-<label>.jsonl` へ記録する（`run_all_cuda.sh` は
+  fresh/reuse 各 1 回のみのため、5 回計測中央値〈coding-rust.md〉を得るには
+  本スクリプトを使う）。失敗は `results/raw/skipped-dgx-ab-<label>.log` に
+  記録される（`run_all_cuda.sh` と同じく数値を捏造しない）。診断用に
+  `--phases`（イシュー #1009）も fresh/reuse 各 1 回追加で記録する。
+- `compare_ab.py BEFORE.jsonl AFTER.jsonl` は `(mode)` ごとに 5 レコードの
+  `median_s` から中央値を算出し before/after を比較する。以下はいずれも
+  「判定不能」として明示され、性能値を確定表示しない（fail-closed。
+  security.md A08）: レコードが 5 件未満、before/after の `framework_version`
+  が同一（A/B になっていない）、最終 loss（`checksum`）が本体の数値一致契約
+  （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる。`--phases` 行が
+  両ファイルにあれば phase 別の参考表も出す（同期点の分析。単発計測のため
+  5 回中央値の対象外）。
+- 計測境界の注意: fandhe-ai 0.4.0 の `Tensor<f32>` はホスト常駐で、reuse
+  モードでも各 step の `loss.to_tensor()` 実体化が単一 in-order ストリーム
+  上の同期点として残る（`docs/backend-cuda-async-execution-design.md`）。
+  定常状態では計測窓のずれ（1 step）を無視でき 1 step 総和と等価とみなす。
+
 ## 依存ポリシー上の位置づけ
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）
