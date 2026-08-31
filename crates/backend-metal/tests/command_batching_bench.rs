@@ -51,12 +51,27 @@ fn sgd_config() -> SgdStepConfig {
     }
 }
 
+/// REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
+/// `.claude/rules/coding-rust.md`）。非バッチ経路とバッチ経路の最終
+/// パラメータを突き合わせる（codex-review PR #1097 P2 是正）。
+fn assert_close(actual: f32, expected: f32, ctx: &str) {
+    let abs_diff = (actual - expected).abs();
+    let rel_diff = abs_diff / expected.abs().max(1e-12);
+    assert!(
+        abs_diff < 1e-5 || rel_diff < 1e-3,
+        "{ctx}: actual={actual} expected={expected} abs_diff={abs_diff} rel_diff={rel_diff}"
+    );
+}
+
 /// 非バッチ経路（`BackendOps::sgd_step_device`）で `steps` 回連続更新した
-/// 所要秒を返す。呼び出しごとに `encode` + `ctx.synchronize()`
-/// （`sgd.rs::MetalSgd::run` の `token: None` 分岐）を行うため、GPU
-/// 実行完了をホストが毎回ブロッキング待機する（#1017 以前の
-/// `sgd_step_device_tracked` デフォルト委譲と同一の同期契約）。
-fn run_untracked(ops: &MetalBackendOps, steps: usize) -> f64 {
+/// 所要秒と、完了後にホストへ実体化した最終パラメータを返す。呼び出し
+/// ごとに `encode` + `ctx.synchronize()`（`sgd.rs::MetalSgd::run` の
+/// `token: None` 分岐）を行うため、GPU 実行完了をホストが毎回ブロッキング
+/// 待機する（#1017 以前の `sgd_step_device_tracked` デフォルト委譲と
+/// 同一の同期契約）。`download` はタイマー確定後に呼ぶため計測窓には
+/// 含めない（非バッチ経路は各呼び出しで既に同期済みのため、計測結果へは
+/// 影響しない）。
+fn run_untracked(ops: &MetalBackendOps, steps: usize) -> (f64, Vec<f32>) {
     let mem = ops
         .memory_ops()
         .expect("MetalBackendOps must implement MemoryOps");
@@ -73,14 +88,28 @@ fn run_untracked(ops: &MetalBackendOps, steps: usize) -> f64 {
         ops.sgd_step_device(&mut param, &grad, None, &config)
             .expect("sgd_step_device must succeed on real hardware");
     }
-    start.elapsed().as_secs_f64()
+    let elapsed = start.elapsed().as_secs_f64();
+    let result = mem
+        .download(&param)
+        .expect("download must return the final parameter values");
+    let values = result
+        .contiguous()
+        .as_slice()
+        .expect("downloaded tensor must be contiguous")
+        .to_vec();
+    (elapsed, values)
 }
 
 /// バッチ経路（`BackendOps::sgd_step_device_tracked`。#1017）で `steps`
-/// 回連続更新した所要秒を返す。呼び出しごとには待たず（`encode` のみ）、
-/// `steps` 回分をまとめて 1 回の `download`（唯一の同期点。設計文書
-/// §3.5）で完了を確定させる。
-fn run_tracked(ops: &MetalBackendOps, steps: usize) -> f64 {
+/// 回連続更新した所要秒と、完了後にホストへ実体化した最終パラメータを
+/// 返す。呼び出しごとには待たず（`encode` のみ）、`steps` 回分をまとめて
+/// 1 回の `download`（唯一の同期点。設計文書 §3.5）で完了を確定させる。
+/// `download` の戻り値は計測窓の内側で確定させる必要がある（同期点
+/// そのものであるため。呼び出し元 [`command_batching_micro_bench_untracked_vs_tracked`]
+/// が非バッチ経路の最終パラメータと突き合わせ、100 回更新の反映を検証
+/// する（codex-review PR #1097 P2 是正。従来は戻り値を破棄しており
+/// 反映を未検証のまま計測結果を採用していた）。
+fn run_tracked(ops: &MetalBackendOps, steps: usize) -> (f64, Vec<f32>) {
     let mem = ops
         .memory_ops()
         .expect("MetalBackendOps must implement MemoryOps");
@@ -98,7 +127,7 @@ fn run_tracked(ops: &MetalBackendOps, steps: usize) -> f64 {
         ops.sgd_step_device_tracked(&mut param, &grad, None, &config, &token)
             .expect("sgd_step_device_tracked must succeed on real hardware");
     }
-    let _ = mem
+    let result = mem
         .download(&param)
         .expect("download must synchronize the batched steps");
     let elapsed = start.elapsed().as_secs_f64();
@@ -106,12 +135,20 @@ fn run_tracked(ops: &MetalBackendOps, steps: usize) -> f64 {
         !token.is_set(),
         "no runtime error expected on real hardware"
     );
-    elapsed
+    let values = result
+        .contiguous()
+        .as_slice()
+        .expect("downloaded tensor must be contiguous")
+        .to_vec();
+    (elapsed, values)
 }
 
-/// #1017 の効果を隔離するマイクロベンチ本体（record only。hard assert
-/// はしない。`crates/facade/tests/device_param_store_bench.rs` と同じ
-/// 「GPU クロック挙動等の環境揺らぎを hard assert に持ち込まない」方針）。
+/// #1017 の効果を隔離するマイクロベンチ本体。**時間の採用自体は record
+/// only**（`crates/facade/tests/device_param_store_bench.rs` と同じ
+/// 「GPU クロック挙動等の環境揺らぎを hard assert に持ち込まない」方針）
+/// だが、**各 trial の最終パラメータ一致（数値一致複合判定）は hard
+/// assert する**（codex-review PR #1097 P2 是正。バッチ化が結果を壊して
+/// いないことを確認してから時間を採用する）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn command_batching_micro_bench_untracked_vs_tracked() {
@@ -124,9 +161,30 @@ fn command_batching_micro_bench_untracked_vs_tracked() {
 
     let mut untracked_secs = Vec::with_capacity(TRIALS);
     let mut tracked_secs = Vec::with_capacity(TRIALS);
-    for _ in 0..TRIALS {
-        untracked_secs.push(run_untracked(&ops, STEPS));
-        tracked_secs.push(run_tracked(&ops, STEPS));
+    for trial in 0..TRIALS {
+        let (untracked_elapsed, untracked_values) = run_untracked(&ops, STEPS);
+        let (tracked_elapsed, tracked_values) = run_tracked(&ops, STEPS);
+
+        // 非バッチ経路とバッチ経路は同一初期値（0.0）・同一勾配（定数
+        // 0.01）・同一 lr・同一 steps で更新するため、100 回更新後の
+        // 最終パラメータは一致するはず。バッチ化が計算結果を壊していない
+        // ことを、時間を採用する前に検証する（codex-review PR #1097
+        // P2 是正）。
+        assert_eq!(
+            untracked_values.len(),
+            tracked_values.len(),
+            "trial {trial}: untracked/tracked のダウンロード要素数が不一致"
+        );
+        for (i, (u, t)) in untracked_values
+            .iter()
+            .zip(tracked_values.iter())
+            .enumerate()
+        {
+            assert_close(*t, *u, &format!("trial {trial} index {i}"));
+        }
+
+        untracked_secs.push(untracked_elapsed);
+        tracked_secs.push(tracked_elapsed);
     }
 
     let untracked_q = median_q1_q3(&untracked_secs).expect("TRIALS 個の non-NaN サンプルのはず");

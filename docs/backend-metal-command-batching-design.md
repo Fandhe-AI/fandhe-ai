@@ -491,22 +491,27 @@ D2H download を伴う `register_resident_leaves`（同ファイル 544 行）�
 （`sgd_step_device`。呼び出しごとに同期）とバッチ経路
 （`sgd_step_device_tracked`。100 回連続 `encode` の後に 1 回だけ
 `download` で同期）を 100 回連続更新× 5 trial の中央値で比較した。
+**各 trial で非バッチ経路とバッチ経路の最終パラメータ（`download` の
+戻り値）を REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差
+1e-5 未満）で突き合わせ、一致を確認したうえで時間を採用する**
+（codex-review PR #1097 P2 是正。初版はバッチ経路の `download` 結果を
+破棄しており 100 回更新の反映を未検証のまま計測していた）。
 
 | 経路 | 100 回連続更新の中央値（Q1〜Q3） |
 | --- | --- |
-| 非バッチ（`sgd_step_device`。#1017 以前の `sgd_step_device_tracked` デフォルト委譲と同一の同期契約） | 10.857 ms（10.743〜13.596 ms） |
-| バッチ（`sgd_step_device_tracked`。#1017） | 0.489 ms（0.476〜0.918 ms） |
+| 非バッチ（`sgd_step_device`。#1017 以前の `sgd_step_device_tracked` デフォルト委譲と同一の同期契約） | 12.129 ms（10.446〜13.435 ms） |
+| バッチ（`sgd_step_device_tracked`。#1017） | 0.718 ms（0.705〜0.751 ms） |
 
-speedup 約 22.2 倍（`tracked_faster=true`）。これは #1017 が導入した
-「`encode` の連続投入 + 単一の遅延同期」機構そのものの効果を、他の
-性能改善コミットと混同せず HEAD 上で単独に隔離した計測である。§4.2
-（訂正後）で述べた通り、現行の reuse ループでは 1 step あたり
-`sgd_step_device_tracked` の呼び出しは 1 回のみであり、その未 flush
-バッチは次 step 最初の `dispatch_sync` 呼び出しと 1 回だけ統合される
-（7 回 → 6 回。§4.2）。したがってこの 22 倍という数値は「複数の SGD 起動
-（多数の `encode`）を 1 コマンドバッファへ積み増す場合の上限効果」を
-示す指標であり、reuse ループが現に得ている「1 step あたり 1 回分の統合」
-という限定的な効果とは別物である（§4.2 の結論と整合）。
+speedup 約 16.9 倍（`tracked_faster=true`。5 trial とも数値一致検証
+green）。これは #1017 が導入した「`encode` の連続投入 + 単一の遅延同期」
+機構そのものの効果を、他の性能改善コミットと混同せず HEAD 上で単独に
+隔離した計測である。§4.2（訂正後）で述べた通り、現行の reuse ループでは
+1 step あたり `sgd_step_device_tracked` の呼び出しは 1 回のみであり、
+その未 flush バッチは次 step 最初の `dispatch_sync` 呼び出しと 1 回だけ
+統合される（7 回 → 6 回。§4.2）。したがってこの約 17 倍という数値は
+「複数の SGD 起動（多数の `encode`）を 1 コマンドバッファへ積み増す場合の
+上限効果」を示す指標であり、reuse ループが現に得ている「1 step あたり
+1 回分の統合」という限定的な効果とは別物である（§4.2 の結論と整合）。
 
 ### 4.4 HEAD 絶対値: MLP 学習 1 step（MNIST 規模 2 層 MLP・train・reuse）
 
@@ -514,16 +519,26 @@ speedup 約 22.2 倍（`tracked_faster=true`）。これは #1017 が導入し�
 （`mnist_scale_train_fresh_vs_reuse_metal`）で、`bench-fandhe` と同一の
 モデル形状（`BATCH=64`／`D_IN=784`／`D_HIDDEN=256`／`D_OUT=10`）・
 乱数シード・`TRAIN_STEPS=100`／`TRAIN_WARMUP=20`（先頭 20 step を捨て
-残り 80 step の中央値）のプロトコルを HEAD の `facade` crate（path
-依存）で再現した。
+残り 80 step の median/Q1/Q3 を取る、`bench-fandhe` と同一境界の 1 実行）
+のプロトコルを HEAD の `facade` crate（path 依存）で再現した。**計測
+境界の訂正（codex-review PR #1097 P1 是正）**: 初版は上記 1 実行の外側に
+追加の全量 warmup 実行（`run_fresh`／`run_reuse` の破棄呼び出し）を
+挟んでおり `bench-fandhe` と計測境界が異なっていた。本版はこの追加
+warmup を削除し、`bench-fandhe` と同一境界の 1 実行を 5 trial 独立に
+繰り返し、各実行の median をさらに中央値化した（各実行内の先頭 20 step
+が `bench-fandhe` と同じ役割の warmup を兼ねる）。**数値検証（同 PR
+P2 是正）**: `bench-fandhe` と同じく最終 step の loss の有限性、reuse
+では終端同期後のパラメータ個数・全要素有限性を検証し、いずれかが破れた
+場合は計測結果を採用せず失敗させる契約にした（初版は loss を読み捨て、
+同期後パラメータも未検査だった）。
 
 | | fresh（ホスト経由 SGD） | reuse（デバイス常駐 SGD） | reuse/fresh |
 | --- | --- | --- | --- |
-| HEAD（本実測。M4 Max） | 17.493 ms（17.094〜17.743 ms） | 8.756 ms（8.496〜9.117 ms） | 1.998 倍高速 |
+| HEAD（本実測。M4 Max。5 trial 中央値） | 19.070 ms（19.043〜20.405 ms） | 9.485 ms（9.358〜9.533 ms） | 2.011 倍高速 |
 | `fandhe-ai =0.4.0`（`results/summary.md` 環境 5 (b') 表。§1 引用） | 19.699 ms | 20.381 ms | 0.966 倍（reuse が遅い） |
 
 **境界差の明記（§4.1）**: 上段（HEAD）と下段（0.4.0）は計測対象コード
-のバージョンが異なる。HEAD の reuse 8.756 ms は #1017 単独の効果ではなく、
+のバージョンが異なる。HEAD の reuse 9.485 ms は #1017 単独の効果ではなく、
 0.4.0 以降にマージされた性能改善コミット群（#1013・#1023・#1028・
 #1043〜#1047・#1044・#1078〜#1082 等。冒頭コメント参照）を累積した結果
 であり、§4.3 のマイクロベンチが #1017 単独の delta を担う。
@@ -534,31 +549,41 @@ speedup 約 22.2 倍（`tracked_faster=true`）。これは #1017 が導入し�
 green のまま」を以下のとおり判定する。
 
 - **改善**: (a) HEAD 絶対値として reuse が 0.4.0 の 20.381 ms から
-  8.756 ms へ改善し、かつ 0.4.0 で発生していた「reuse が fresh より
-  遅い」逆転（0.966 倍）が解消され reuse が fresh の 1.998 倍高速に
+  9.485 ms へ改善し、かつ 0.4.0 で発生していた「reuse が fresh より
+  遅い」逆転（0.966 倍）が解消され reuse が fresh の 2.011 倍高速に
   なった（§4.4。ただし累積 delta であり #1017 単独の寄与は §4.3 の
-  マイクロベンチ〈約 22 倍〉に限定して評価する）。(b) #1017 が導入した
-  バッチ化機構そのものは、その機構を直接行使する経路（連続
-  `sgd_step_device_tracked` 呼び出し）において約 22 倍の高速化を示した
-  （§4.3）。現行の reuse ループはこの機構を 1 step あたり 1 回しか
-  行使しないため、MLP 1 step の短縮幅への直接的寄与は §4.2（訂正後）の
-  結論（1 step あたりコマンドバッファ・wait 回数が 7 回から 6 回へ
-  1 回分〈約 14%〉統合される、という限定的な効果）にとどまる点は
-  正直に記録する。
+  マイクロベンチ〈約 16.9 倍。最終パラメータの数値一致検証 green〉に
+  限定して評価する）。(b) #1017 が導入したバッチ化機構そのものは、
+  その機構を直接行使する経路（連続 `sgd_step_device_tracked` 呼び出し）
+  において約 16.9 倍の高速化を示した（§4.3）。現行の reuse ループは
+  この機構を 1 step あたり 1 回しか行使しないため、MLP 1 step の
+  短縮幅への直接的寄与は §4.2（訂正後）の結論（1 step あたりコマンド
+  バッファ・wait 回数が 7 回から 6 回へ 1 回分〈約 14%〉統合される、
+  という限定的な効果）にとどまる点は正直に記録する。
 - **parity green**: `make test-ignored-metal`（`cargo test -p
   fandhe-ai-backend-metal --release -- --ignored --nocapture` 相当）
   を実行し、既存の実機依存テスト（`command_batching.rs` の #1017
   受け入れ条件 1〜4 を含む）・parity テスト（`sgd_device_parity.rs`・
   `cpu_metal_parity.rs`・`gemm_*_parity.rs`・`rmsnorm_parity.rs`・
-  `softmax_parity.rs` 等）を含む全 31 個の `test result: ok`（failed 0）
-  ブロックで完走したことを確認済み（2026-08-31 実測。内訳: lib
-  unittests 1〈`src/lib.rs`〉+ `tests/*.rs` 統合テスト 28 本〈本ファイル
-  §4.3 の新規 `command_batching_bench.rs` を含む〉+ `[[example]]` の
-  `test = true` 指定分 1〈`examples/gemm_splitk_shapes_bench.rs`。
-  `Cargo.toml` コメント参照〉+ 末尾の `Doc-tests fandhe_ai_backend_metal`
-  パス 1〈doctest 0 件〉= 31。`grep -c 'test result: ok'` と
-  `grep -c '^running'` がいずれも 31 で一致することを実行ログから確認
-  済み）。
+  `softmax_parity.rs` 等）・`command_batching_bench.rs` の数値一致検証
+  （§4.3）を含む全 31 個の `test result: ok`（failed 0）ブロックで完走
+  したことを確認済み（2026-08-31 実測・codex-review PR #1097 の P1/P2
+  是正後に再実測。内訳: lib unittests 1〈`src/lib.rs`〉+ `tests/*.rs`
+  統合テスト 28 本〈本ファイル §4.3 の新規 `command_batching_bench.rs`
+  を含む〉+ `[[example]]` の `test = true` 指定分 1〈`examples/
+  gemm_splitk_shapes_bench.rs`。`Cargo.toml` コメント参照〉+ 末尾の
+  `Doc-tests fandhe_ai_backend_metal` パス 1〈doctest 0 件〉= 31。
+  `grep -c 'test result: ok'` と `grep -c '^running'` がいずれも 31 で
+  一致することを実行ログから確認済み）。`cargo clippy --workspace
+  --all-targets --all-features -- -D warnings` はネイティブ macOS ターゲット
+  で exit 0（0 error）。Linux ターゲットでの dead_code 是正
+  （`crates/facade/tests/mnist_scale_train_reuse_bench.rs` への
+  `#![cfg(target_os = "macos")]` 追加）は `cargo check --target
+  x86_64-unknown-linux-gnu -p fandhe-ai --tests` で当該ファイル由来の
+  warning が 0 件になったことを確認済み（本 Mac に `x86_64-linux-gnu-gcc`
+  クロスリンカが無いため `cargo clippy --workspace --target
+  x86_64-unknown-linux-gnu` のフルビルドは再現不能。詳細は PR #1097
+  対応コミットの報告を参照）。
 
 ## §5 代替案と採否
 
