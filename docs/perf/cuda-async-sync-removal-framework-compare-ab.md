@@ -15,23 +15,22 @@
 「実践規模のワークロードで再計測しないと結論が出ない」という同記録の
 申し送りを引き継ぐ。
 
-**本 PR（イシュー #1083 の Phase A）時点の状態**: 本文書は手順・記入欄の
-雛形のみを整備する。実測（§4）は次回 crates.io 公開後、`fandhe-ai` ピンの
-更新（ユーザー承認必須。`.claude/rules/deps-policy.md` 第 9 区分）を経た
-DGX Spark GB10 実機セッションで行う（§2 の Phase B/C）。
+**追補（2026-09-01）**: Phase B（`fandhe-ai =0.5.0` へのピン更新。PR #1104。
+イシュー #1011 の A/B 計測前提としてユーザー承認済み）・Phase C（DGX Spark
+GB10 実機での before/after 計測）・Phase D（本文書 §4〜6 への記録）が完了
+した。以下は Phase A 完了時点（本文書初版）の記述を原文のまま残す。
 
-## 1. 計測環境（記入欄）
-
-実機セッションで記入する。
+## 1. 計測環境
 
 | 項目 | 値 |
 | --- | --- |
-| ホスト | （DGX Spark GB10。実ホスト名は `docs/real-hardware-verification-env.local.md` 参照） |
-| GPU | （sm_121 等） |
-| driver / CUDA | |
-| 計測日 | |
-| before バージョン | `fandhe-ai =0.4.0`（crates.io。都度同期あり） |
-| after バージョン | （次回公開版。都度同期なし・#1064 適用済み） |
+| ホスト | DGX Spark GB10（実ホスト名は `docs/real-hardware-verification-env.local.md` 参照。本文書では非公開） |
+| GPU | NVIDIA GB10（sm_121） |
+| driver / CUDA | CUDA 13.0 系 |
+| rustc | 1.97.0 |
+| 計測日 | 2026-08-31 〜 2026-09-01 |
+| before バージョン | `fandhe-ai =0.4.0`（crates.io。都度同期あり。PR #1104 の pin 更新コミット `e3682d5` 直前の main ツリー） |
+| after バージョン | `fandhe-ai =0.5.0`（crates.io。2026-08-31 公開・都度同期なし。#1011 実装 + `006eeff`〈bench-fandhe の reuse 経路を 0.5.0 の `backward_device_param_store` 契約へ追従〉適用済みツリー） |
 
 ## 2. 手順
 
@@ -70,10 +69,11 @@ DGX Spark GB10 実機セッションで行う（§2 の Phase B/C）。
 
 ## 3. before 参考値（既存データからの転記・参考情報）
 
-**未転記（本 PR 時点）**: #1050（`results-dgx-0.4.0.jsonl` のコミット・
-`results/summary.md` 環境追記）が本リポジトリへマージされた時点でコミット
-済みの 0.4.0 実測 JSONL から転記する。捏造を避けるため、コミットされていない
-値をここへ書き写さない（A08）。
+**追補（2026-09-01）**: before/after の実測は §4 で本 A/B 専用に
+`results-dgx-ab-before-0.4.0.jsonl`／`results-dgx-ab-after-0.5.0.jsonl`
+（`scripts/bench/framework-compare/results/raw/` にコミット済み）として
+直接取得済みのため、本節（既存 `results-dgx-0.4.0.jsonl` 等からの転記）は
+使用しなかった。以下は Phase A 完了時点の記述を原文のまま残す。
 
 参考までに、本リポジトリに既にコミット済みの `results-dgx.jsonl`
 （`framework_version: "0.3.0"`。#1083 の A/B 比較対象である 0.4.0 とは別
@@ -83,38 +83,117 @@ DGX Spark GB10 実機セッションで行う（§2 の Phase B/C）。
 参照できるが、本 A/B の before 値としては使わない（§4 で 0.4.0 起点の
 before を実測し直す）。
 
-## 4. after 実測表（記入欄）
+## 4. after 実測表
 
-実機セッション（Phase C/D）で `compare_ab.py` の出力を転記する。
+DGX Spark GB10 実機で `run_ab_train_cuda.sh`（fresh/reuse 各 5 回起動）を
+before（0.4.0）/after（0.5.0）それぞれで実行し、`compare_ab.py` で 5 回
+計測中央値を比較した結果（raw JSONL は
+`scripts/bench/framework-compare/results/raw/results-dgx-ab-{before-0.4.0,after-0.5.0}.jsonl`
+にコミット済み。skipped ログはいずれも空 = 失敗 0 件）。
 
-| mode | before version | after version | before median (n=5) | after median (n=5) | after/before | 判定 |
-| --- | --- | --- | --- | --- | --- | --- |
-| fresh | | | | | | |
-| reuse | | | | | | |
+### 1 step 総和（5 回計測の中央値）
 
-### フェーズ分解（診断用。§2 の同期点分析の裏付け）
+| mode | before version | after version | before median | after median | after/before | 判定 |
+|---|---|---|---|---|---|---|
+| fresh | 0.4.0 | 0.5.0 | 12.404 ms (n=5) | 11.507 ms (n=5) | 0.928 | ok（受入条件 2 の根拠） |
+| reuse | 0.4.0 | 0.5.0 | 12.362 ms (n=5) | 5.436 ms (n=5) | 0.440 | ok（参考値。§6 参照） |
+
+**codex-review P1 対応（2026-09-01）**: reuse 行は受入条件 2（都度同期除去
+単独の効果）の根拠に使わない。before（0.4.0）は素の `Tape::backward`、
+after（0.5.0）は `006eeff` で追従した `backward_device_param_store` であり、
+計測対象コードが一致しない。加えて 0.5.0 の `forward_resident` は #1059 で
+毎 step の D2H 排除・backward 経路自体の変更（`Op::LinearResident`／
+`DeviceParamStore::backward`）を伴うため、reuse の 0.440 は「都度同期除去
+（#1011）」と「#1059 の resident forward/backward 変更」の複合効果であり、
+両者を分離できない。§6 の受入判定は同一プロトコル（fresh）のみに依拠する。
+
+### フェーズ分解（診断用・fresh・単発計測）
 
 | phase | before | after | after/before |
-| --- | --- | --- | --- |
-| | | | |
+|---|---|---|---|
+| tape_build | 4.1 us | 3.3 us | 0.810 |
+| leaf_register | 0.9 us | 0.9 us | 1.026 |
+| forward | 238.4 us | 177.5 us | 0.745 |
+| loss_readout | 0.0 us | 0.0 us | 1.500 |
+| backward | 12.057 ms | 11.239 ms | 0.932 |
+| param_readout | 46.4 us | 26.0 us | 0.560 |
+| host_sgd | 60.4 us | 53.0 us | 0.877 |
+| apply_params | 0.3 us | 0.2 us | 0.853 |
+| tape_drop | 2.7 us | 2.0 us | 0.745 |
+| step_total | 12.414 ms | 11.504 ms | 0.927 |
 
-## 5. 数値一致確認（記入欄）
+### フェーズ分解（参考値・reuse・単発計測。§6 は本表に依拠しない）
+
+| phase | before | after | after/before |
+|---|---|---|---|
+| tape_build | 3.3 us | 3.1 us | 0.942 |
+| leaf_register | 0.1 us | 0.1 us | 1.000 |
+| forward_resident | 266.7 us | 150.1 us | 0.563 |
+| loss_readout | 0.0 us | 0.0 us | 1.000 |
+| backward | 12.043 ms | 5.243 ms | 0.435 |
+| device_update | 59.5 us | 40.2 us | 0.676 |
+| tape_drop | 3.3 us | 1.0 us | 0.312 |
+| step_total | 12.379 ms | 5.439 ms | 0.439 |
+
+reuse の `backward`（12.043 ms → 5.243 ms・0.435）が 1 step 短縮の支配項
+だが、この短縮を都度同期除去（#1011）単独の効果として帰属させることは
+**できない**。before（0.4.0）の `backward` は素の `Tape::backward` を、
+after（0.5.0）の `backward` は `006eeff` で追従した
+`backward_device_param_store`（`DeviceParamStore::backward`。#1059 で
+`Op::LinearResident` 解決のため新設）を、それぞれ計測しており、
+計測対象コード自体が before/after で異なる。加えて 0.5.0 の
+`forward_resident`（#1059）は毎 step の D2H 排除も伴うため、reuse の
+0.440 は「#1011 の都度同期除去」と「#1059 の resident forward/backward
+経路変更」を分離できない**複合効果の参考値**である（0.4.0→0.5.0 で
+reuse 経路が実測ベースで約 2.3 倍高速化したこと自体は事実だが、その
+内訳を本 A/B から切り出せない）。fresh 側は before/after とも同一の
+`Tape::backward` を呼ぶ同一プロトコルであり、forward・param_readout 等
+にも短縮が分散しつつ backward の絶対時間（約 11〜12 ms）が支配的なため、
+1 step 総和の短縮率は 0.928 にとどまる。§6 の受入判定はこの fresh の
+結果にのみ依拠する。
+
+## 5. 数値一致確認
 
 - 最終 loss（checksum）の複合判定（相対誤差 1e-3 未満 または 絶対誤差
-  1e-5 未満）: `compare_ab.py` の判定結果を転記
-- `cargo test -p fandhe-ai-backend-cuda -- --ignored`（#1067）: 実機実行結果
+  1e-5 未満）: `compare_ab.py` が fresh・reuse 双方で `ok` と判定
+  （`python3 compare_ab.py results/raw/results-dgx-ab-before-0.4.0.jsonl
+  results/raw/results-dgx-ab-after-0.5.0.jsonl` の終了コード 0）
+- `cargo test -p fandhe-ai-backend-cuda -- --ignored`（#1067）: GB10 実機で
+  20 passed / 9 failed。失敗内訳は以下のとおりで、いずれも #1011 の
+  同期契約変更とは独立の既知事象:
+  - `wmma_tf32` 系: provenance 未確定の fail-closed 判定（#1102 で追跡中）
+  - `jit_cache_bench` 系: キャッシュルートの pin 設定に起因する
+    `os error 22`（実行環境要因。#1011 の変更対象外）
 
-## 6. #1011 受入条件 2 の判定（記入欄）
+## 6. #1011 受入条件 2 の判定
 
-- 短縮の有無・比率:
-- 判定（クローズ可否）:
+**根拠は同一プロトコル（fresh。before/after とも `Tape::backward` を呼ぶ
+同一呼び出しコード）のみに依拠する**（codex-review P1 対応。reuse は
+#1059 の resident forward/backward 経路変更との複合効果であり、都度同期
+除去単独の効果として分離できないため受入判定の根拠にしない。§4 参照）。
+
+- 短縮の有無・比率（fresh・同一プロトコル）: 1 step 総和が 12.404 ms →
+  11.507 ms（after/before 0.928・約 1.08 倍）、フェーズ分解の `backward`
+  が 12.057 ms → 11.239 ms（0.932）短縮した。受入条件 2「MLP 学習 1 step
+  （CUDA）が実測で短縮する」を実践規模のワークロードで確認できた
+- 判定（クローズ可否）: 短縮確認済み・クローズ可（最終判断は #1011 側で
+  main が行う）
+- 参考値（受入判定の根拠にはしない）: reuse は 1 step 総和が 12.362 ms →
+  5.436 ms（after/before 0.440・約 2.3 倍短縮）。0.4.0→0.5.0 の複合改善
+  （#1011 の都度同期除去 + #1059 の resident forward/backward 経路変更）
+  としての参考記録に留める
 
 ## 7. 未実施事項
 
-- 本文書公開時点では §4〜6 は未実測（記入欄のまま）
-- `has_async_alloc` プローブ（設計文書 §3 保留・#1014 T4）は Phase C で
-  同時取得可能だが、記録先は設計文書 I4（別 PR。本文書のスコープ外）
+- `has_async_alloc` プローブ（設計文書 §3 保留・#1014 T4）は本セッションで
+  取得していない。記録先は設計文書 I4（別 PR。本文書のスコープ外）のまま
 - Metal 側の同種 A/B 計測はスコープ外（本文書は CUDA 限定）
+- reuse 側の after 計測は `006eeff`（`backward_device_param_store` 追従）
+  適用後のツリーであり、before（0.4.0・素の `Tape::backward`）とは
+  計測対象コードが一致しない。このため reuse の 0.440 は #1011 単独の
+  効果として受入判定へ使わず参考値に格下げした（§4・§6。codex-review
+  P1 対応。同一プロトコルでの reuse A/B 再計測〈backward 呼び出し経路を
+  before/after で揃えた計測〉は本文書のスコープ外の後続課題とする）
 
 ## 8. 出典
 

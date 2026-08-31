@@ -75,6 +75,12 @@ fail-closed 検査するため path 依存への差し替えは不可）、本�
   スイープ追加。起票はユーザー承認を得てから行う（`out-of-scope-tracking.md`
   に従い、実装完了後に既存イシュー検索・ユーザー確認を経て起票する）。
 
+**追補（2026-08-31・イシュー #1011）**: 承認済みピンを `fandhe-ai =0.5.0`
+（crates.io 公開済み・`release-all.yml` run 33388884217）へ更新した（前提
+条件は充足）。ただし `bench-fandhe`（`main.rs`）側の呼び出し結線・`run_all`
+の tf32 スイープ追加自体は本更新のスコープ外で未実施のため、`--tf32` は
+引き続き `MEASURE_ERROR` で fail-fast する。C-2 本体は別イシューのまま。
+
 ## フォローアップ（スコープ外事項の追跡）
 
 - `gemm_bias_act`・`gemm_resident_*`・学習経路への TF32 opt-in 拡張は本イシュー

@@ -472,6 +472,15 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > **未付与**（`git ls-remote --tags origin` 実測で確認。付与要否はユーザー
 > 判断・記録用でありリリース CI のトリガーではない）。
 
+> **追補（2026-08-31）**: `.github/workflows/release-all.yml`
+> （[run 33388884217](https://github.com/Fandhe-AI/fandhe-ai/actions/runs/33388884217)）
+> により公開 6 クレートの **v0.5.0 の公開を完了した**（成功・6 クレート
+> crates.io 反映確認済み）。§11 手順 4 のリリースタグ `v0.4.0` とは異なり、
+> `v0.5.0` はタグ `a5e465d` として付与済み。framework-compare の承認ピン
+> （`.claude/rules/deps-policy.md` 第 9 区分）はイシュー #1011（CUDA 都度
+> 同期廃止の A/B 計測前提）でユーザー承認を得て `fandhe-ai =0.4.0` から
+> `=0.5.0` へ更新した（`scripts/bench/framework-compare/`）。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -644,6 +653,11 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 ## 変更履歴
 
+- 2026-08-31（#1011 ツリー）: `release-all.yml`（run 33388884217）で公開 6
+  クレートの v0.5.0 を crates.io へ公開完了。リリースタグ `v0.5.0`（`a5e465d`）
+  を付与済み。§10 追補に記録した。framework-compare の承認ピンをイシュー
+  #1011 のユーザー承認を得て `fandhe-ai =0.4.0` → `=0.5.0` へ更新した
+  （`.claude/rules/deps-policy.md` 第 9 区分・`docs/framework-compare-harness-decision.md`）。
 - 2026-08-29（#981）: `release-all.yml` を `dry-run-only` → `publish` の
   2 段でユーザー操作により dispatch し、公開 6 クレートの v0.4.0 を
   crates.io へ公開完了（dry-run run

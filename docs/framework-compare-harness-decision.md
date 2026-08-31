@@ -9,8 +9,8 @@
 
 ## 1. 目的と位置づけ
 
-- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.4.0`。2026-08-29 に crates.io 公開済み
-  〈CLAUDE.md「Overview」節〉。イシュー #982 で `=0.3.0` から更新）を、既存 ML フレームワーク
+- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.5.0`。2026-08-31 に crates.io 公開済み
+  〈`docs/crates-io-publishing-order.md` §10 追補〉。イシュー #1011 で `=0.4.0` から更新）を、既存 ML フレームワーク
   `candle-core =0.11.0`・`burn =0.21.0` と**同一プロトコル**（同一シード・同一入力・
   同一の同期境界・warmup 20 → 計測 20・中央値 + Q1/Q3）で横並び計測する
 - 本 workspace はベンチ専用ツール（全クレート `publish = false`・非配布）であり、
@@ -30,7 +30,7 @@
   `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート Cargo.lock・
   `cargo tree` に対する `scripts/check-forbidden-deps.sh` が fail-closed に検出する
 - 直接依存は `=x.y.z` 完全固定（`burn =0.21.0`・`candle-core =0.11.0`・
-  `fandhe-ai =0.4.0`）で、`Cargo.lock` をコミットして再現性を確保する
+  `fandhe-ai =0.5.0`）で、`Cargo.lock` をコミットして再現性を確保する
 - 同 workspace の `Cargo.lock` は比較対象という性質上、依存禁止リストのクレート
   （`burn-*`・`candle-*`・`cubecl`・`ndarray`・`tch` 等の推移的混入を含む）を
   **意図的に含む**。このため禁止リスト grep（`check_lock`）は適用せず、代わりに
@@ -38,7 +38,7 @@
   （`check_framework_compare`）を毎回実行する:
   1. `Cargo.lock` の存在（不在はエラー）
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
-  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.4.0）の存在
+  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.5.0）の存在
      （承認外バージョンへのドリフト・比較対象の削除を検出。加えて各エントリが
      `source = "registry+https://github.com/rust-lang/crates.io-index"` を
      伴うことを要求する＝path/git 依存への差し替えで `source`/`checksum` 行が
@@ -96,6 +96,10 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   を承認。ピン更新自体は「承認済みバージョンの更新」で通常どおりユーザー承認が
   必要な変更、検査強化は検出範囲の追加（fail-closed の強化）であり本来承認不要だが、
   同一イシューでまとめて実施したため承認記録も本節にまとめて残す
+- 2026-08-31: ユーザーがイシュー #1011（CUDA 都度同期廃止の framework-compare
+  実践規模 A/B 計測前提。`docs/perf/cuda-async-sync-removal-framework-compare-ab.md`）
+  で `fandhe-ai` 承認ピンを crates.io 公開済みの `=0.5.0`（`release-all.yml` run
+  33388884217・tag `v0.5.0` = `a5e465d`）へ更新することを承認
 
 ## 5. tch-rs を計測対象に含めない判断
 
