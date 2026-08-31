@@ -211,12 +211,15 @@ impl MetalContext {
     /// イシュー #1039 の M4 Max 実測厳密一致テーブル（`crate::tile` の
     /// `exact_match_cfg`）を適用してよいかどうかを、`new` 時にキャッシュ
     /// した GPU コア数と SoC ブランド文字列の両方から検証する
-    /// （[`crate::tile::verify_m4_max`] への委譲。P1・codex-review 指摘・
+    /// （[`crate::tile::verify_m4_max`] への委譲。P1・codex-review 再指摘・
     /// PR #1108 レビュー: GPU コア数だけでは機種〈M3 Max との 40 コア構成
-    /// の混同〉を一意に識別できないため）。`crate::gemm::MetalGemm::
-    /// dispatch_auto` 等の本番ディスパッチ入口は、この戻り値をそのまま
-    /// `tile::select_for_device` の `gpu_core_count` 引数へ渡す契約。
-    pub fn verified_m4_max_gpu_core_count(&self) -> Option<u32> {
+    /// の混同〉を一意に識別できないため）。戻り値は [`crate::tile::
+    /// VerifiedM4MaxGpuCoreCount`]（`verify_m4_max` からのみ構築可能な
+    /// opaque 型）であり、`crate::gemm::MetalGemm::dispatch_auto` 等の
+    /// 本番ディスパッチ入口は、この戻り値をそのまま `tile::
+    /// select_for_device` の `gpu_core_count` 引数へ渡す（未検証の生の
+    /// GPU コア数を渡してブランド照合を迂回することは型上できない）。
+    pub fn verified_m4_max_gpu_core_count(&self) -> Option<tile::VerifiedM4MaxGpuCoreCount> {
         tile::verify_m4_max(
             self.occupancy_params.map(|p| p.gpu_core_count),
             self.soc_brand.as_deref(),

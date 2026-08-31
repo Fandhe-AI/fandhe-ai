@@ -710,6 +710,38 @@ const M4_MAX_GPU_CORE_COUNT: u32 = 40;
 /// レビュー）。
 const M4_MAX_SOC_BRAND: &str = "Apple M4 Max";
 
+/// [`verify_m4_max`] からのみ構築可能な、M4 Max 実機として検証済みである
+/// ことを表す opaque 型（P1・codex-review 再指摘・PR #1108 レビュー）。
+///
+/// **背景（旧実装の問題）**: 是正前は `select_for_device`／
+/// `select_with_occupancy_for_device` が生の `Option<u32>`（GPU コア数）を
+/// 受け取り、内部で `gpu_core_count == Some(M4_MAX_GPU_CORE_COUNT)`
+/// （コア数一致のみ）を検査していた。呼び出し元が `verify_m4_max` の戻り
+/// 値をそのまま渡す契約は doc comment 上の記述に過ぎず型・実装では強制され
+/// ないため、外部利用者や将来の呼び出し元が実測 GPU コア数（例: M3 Max の
+/// 40 コア構成）を直接 `Some(40)` として渡すと、SoC ブランド照合
+/// （[`verify_m4_max`]）を経ずに M4 Max 専用の厳密一致テーブルが誤って
+/// 有効化されてしまう。
+///
+/// **是正方針**: フィールドを非公開にし、[`verify_m4_max`]（GPU コア数と
+/// SoC ブランド文字列の両方が一致する場合にのみ構築）以外の経路では本型の
+/// 値を作れない構造にする。`select_for_device`／
+/// `select_with_occupancy_for_device` の `gpu_core_count` 引数を本型へ
+/// 変更したことで、未検証の `u32` を渡してブランド照合を迂回することが
+/// コンパイル時に不可能になる（`AGENTS.md`「実機固有値のハードコード回避」
+/// 規約・公開 API 契約維持への対応）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedM4MaxGpuCoreCount(u32);
+
+impl VerifiedM4MaxGpuCoreCount {
+    /// 検証済みの GPU コア数を返す（常に [`M4_MAX_GPU_CORE_COUNT`] と
+    /// 一致する。デバッグ表示・ログ等、値そのものを必要とする呼び出し元
+    /// 向けのアクセサ）。
+    pub fn gpu_core_count(self) -> u32 {
+        self.0
+    }
+}
+
 /// GPU コア数と SoC ブランド文字列を組み合わせ、イシュー #1039 の厳密一致
 /// テーブル（`exact_match_cfg`）を適用してよい M4 Max 実機かどうかを検証
 /// する（P1・codex-review 指摘・PR #1108 レビュー）。
@@ -721,18 +753,24 @@ const M4_MAX_SOC_BRAND: &str = "Apple M4 Max";
 /// 本関数は SoC ブランド文字列という OS が直接返す実測値を追加シグナルと
 /// して使う点に注意）。`gpu_core_count` が `M4_MAX_GPU_CORE_COUNT`
 /// （40）と一致し、かつ `soc_brand` が `M4_MAX_SOC_BRAND`（`"Apple M4
-/// Max"`）と完全一致する場合にのみ `Some(M4_MAX_GPU_CORE_COUNT)` を返す。
+/// Max"`）と完全一致する場合にのみ [`VerifiedM4MaxGpuCoreCount`] を返す。
 /// いずれかが不一致・取得不能（`None`）の場合は `None` を返し、
 /// [`select_for_device`]／[`select_with_occupancy_for_device`] は厳密一致
 /// テーブルを経由せず既存の形状クラス判定のみへ安全側でフォールバックする。
+///
+/// **本関数が [`VerifiedM4MaxGpuCoreCount`] の唯一の構築経路**（フィールド
+/// 非公開のため。P1・codex-review 再指摘・PR #1108 レビュー）。
 ///
 /// `crate::context::MetalContext::new` がデバイス初期化時に 1 回だけ呼び、
 /// 結果を [`select_for_device`] へ渡す想定（ディスパッチ経路のホットパスに
 /// FFI を持ち込まないための設計。`MetalContext::occupancy_params` と同じ
 /// 判断）。
-pub fn verify_m4_max(gpu_core_count: Option<u32>, soc_brand: Option<&str>) -> Option<u32> {
+pub fn verify_m4_max(
+    gpu_core_count: Option<u32>,
+    soc_brand: Option<&str>,
+) -> Option<VerifiedM4MaxGpuCoreCount> {
     if gpu_core_count == Some(M4_MAX_GPU_CORE_COUNT) && soc_brand == Some(M4_MAX_SOC_BRAND) {
-        Some(M4_MAX_GPU_CORE_COUNT)
+        Some(VerifiedM4MaxGpuCoreCount(M4_MAX_GPU_CORE_COUNT))
     } else {
         None
     }
@@ -761,11 +799,17 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 /// `gpu_core_count` はイシュー #1039 の厳密一致テーブル（M4 Max 実測）の
 /// 適用可否判定にのみ使う（[`verify_m4_max`] 参照。呼び出し元が実機値を
 /// 取得できない・意図的に無効化したい場合は `None` を渡せば従来の形状
-/// クラス判定のみへフォールバックする）。**呼び出し元は
-/// [`verify_m4_max`] の戻り値をそのまま渡すこと**（GPU コア数のみでは
-/// 機種を一意に識別できないため。`verify_m4_max` ドキュメンテーション
-/// コメント参照）。
-pub fn select_for_device(m: usize, n: usize, k: usize, gpu_core_count: Option<u32>) -> TileConfig {
+/// クラス判定のみへフォールバックする）。**引数の型が
+/// [`VerifiedM4MaxGpuCoreCount`]（[`verify_m4_max`] からのみ構築可能な
+/// opaque 型）であるため、未検証の GPU コア数（生の `u32`）を渡して
+/// ブランド照合を迂回することはコンパイル時に不可能**（P1・codex-review
+/// 再指摘・PR #1108 レビュー）。
+pub fn select_for_device(
+    m: usize,
+    n: usize,
+    k: usize,
+    gpu_core_count: Option<VerifiedM4MaxGpuCoreCount>,
+) -> TileConfig {
     select_with_occupancy_for_device(m, n, k, gpu_core_count, None)
 }
 
@@ -812,14 +856,15 @@ pub fn select_for_device(m: usize, n: usize, k: usize, gpu_core_count: Option<u3
 /// unwrap/expect を使わない」）。
 ///
 /// `gpu_core_count` はイシュー #1039 の厳密一致テーブルの適用可否判定に
-/// のみ使う。**呼び出し元は [`verify_m4_max`] の戻り値をそのまま渡す
-/// こと**（GPU コア数のみでは機種を一意に識別できないため。P1・
-/// codex-review 指摘・PR #1108 レビュー）。
+/// のみ使う。**引数の型が [`VerifiedM4MaxGpuCoreCount`]（[`verify_m4_max`]
+/// からのみ構築可能な opaque 型）であるため、未検証の GPU コア数（生の
+/// `u32`）を渡してブランド照合を迂回することはコンパイル時に不可能**
+/// （P1・codex-review 再指摘・PR #1108 レビュー）。
 pub fn select_with_occupancy_for_device(
     m: usize,
     n: usize,
     k: usize,
-    gpu_core_count: Option<u32>,
+    gpu_core_count: Option<VerifiedM4MaxGpuCoreCount>,
     params: Option<OccupancyParams>,
 ) -> TileConfig {
     const SMALL: usize = 64;
@@ -850,23 +895,23 @@ pub fn select_with_occupancy_for_device(
     // `select_for_device()` 経由（`params: None`）では従来どおり縮退せず
     // `shape_cfg` をそのまま返すため、本番ディスパッチの挙動自体は変わらない。
     //
-    // **機種ゲート（P1・codex-review 指摘・PR #1108 レビュー）**: 本テーブル
+    // **機種ゲート（P1・codex-review 再指摘・PR #1108 レビュー）**: 本テーブル
     // は M4 Max（40 コア構成）実機実測のみが根拠であり、`select_for_device()`
     // は元々デバイス情報を受け取らないため無対応のままでは M1〜M5 を含む全
     // Apple Silicon 機種へ無条件適用されてしまう（`AGENTS.md`「実機固有値を
     // ロジックへ直書きしない」規約への抵触）。**GPU コア数だけでは機種を
     // 一意に識別できない**（`gpu_core_count == 40` は M4 Max だけでなく
-    // M3 Max の 40 コア構成にも該当しうる）ため、本関数自体は `verify_m4_max`
-    // による事前検証を前提とし、`gpu_core_count == Some(M4_MAX_GPU_CORE_COUNT)`
-    // （呼び出し元が [`verify_m4_max`] の戻り値をそのまま渡す契約。
-    // `crate::device::probe_gpu_core_count`〈GPU コア数の IOKit 実測〉と
-    // `crate::device::probe_soc_brand_string`〈SoC ブランド文字列の実測〉の
-    // 両方が一致した場合にのみ `Some(40)` になる。`crate::context::
-    // MetalContext::new` が 1 回だけキャッシュ）の場合のみ本テーブルを評価し、
-    // コア数が一致しない・取得不能（`None`）な機種は下の形状クラス判定
-    // （縦長・横長・正方立方・大形状フォールバック）のみへ従来どおり流れる。
-    // 他機種での候補の優劣は未実測のため、共通性を実測するまでテーブルを
-    // 機種非依存へ拡張しない
+    // M3 Max の 40 コア構成にも該当しうる）ため、`gpu_core_count` 引数の
+    // 型自体を [`VerifiedM4MaxGpuCoreCount`]（[`verify_m4_max`] からのみ
+    // 構築可能な opaque 型。フィールド非公開）にすることで、SoC ブランド
+    // 照合（`crate::device::probe_gpu_core_count`〈GPU コア数の IOKit
+    // 実測〉と `crate::device::probe_soc_brand_string`〈SoC ブランド文字列
+    // の実測〉の両方一致）を経ずに本テーブルを有効化することがコンパイル
+    // 時に不可能になっている（`crate::context::MetalContext::new` が 1 回
+    // だけキャッシュした値を `verified_m4_max_gpu_core_count` 経由で渡す）。
+    // 未検証（`None`）な機種は下の形状クラス判定（縦長・横長・正方立方・
+    // 大形状フォールバック）のみへ従来どおり流れる。他機種での候補の優劣は
+    // 未実測のため、共通性を実測するまでテーブルを機種非依存へ拡張しない
     // （`select_exact_match_table_is_gated_by_m4_max_gpu_core_count` 参照）。
     //
     // #744（2026-08-19）は `m == n == k` の 512/1024/2048/4096 の 4 点で
@@ -890,7 +935,7 @@ pub fn select_with_occupancy_for_device(
     // **実測は下記の厳密な `(m, n, k)` タプルのみ**であり、近傍値・未測定点
     // へは拡張しない（実測範囲外への無根拠拡張をしない方針。#744/PR #760
     // と同一判断軸）。
-    let exact_match_cfg = if gpu_core_count == Some(M4_MAX_GPU_CORE_COUNT) {
+    let exact_match_cfg = if gpu_core_count.is_some() {
         match (m, n, k) {
             // 正方立方（m == n == k）実測点。2 回計測いずれも順位一致。
             (512, 512, 512) => Some(CANDIDATES[5]), // 64x32/bk32/wm2wn2
@@ -1357,6 +1402,14 @@ pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
 mod tests {
     use super::*;
 
+    /// テスト専用: [`verify_m4_max`] を経由して [`VerifiedM4MaxGpuCoreCount`]
+    /// を構築するヘルパー（P1 是正・PR #1108 レビューで opaque 型化した
+    /// ことに伴い、テストからも生の `u32` を直接渡せなくなったため。GPU
+    /// コア数・SoC ブランド文字列の両方が実測一致した体で検証する）。
+    fn verified_m4_max_for_test() -> Option<VerifiedM4MaxGpuCoreCount> {
+        verify_m4_max(Some(M4_MAX_GPU_CORE_COUNT), Some(M4_MAX_SOC_BRAND))
+    }
+
     // --- TileConfig::thread_count / shared_mem_bytes（pure） ---
 
     #[test]
@@ -1534,27 +1587,27 @@ mod tests {
         // への委譲）は `objc2` 系 FFI に触れない純粋関数のため、同じ形状を
         // ここで固定し Linux（CI）上でも分岐主張のドリフトを検知する。
         assert_eq!(
-            select_for_device(2048, 256, 512, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(2048, 256, 512, verified_m4_max_for_test()),
             CANDIDATES[1],
             "縦長 → CANDIDATES[1]"
         );
         assert_eq!(
-            select_for_device(256, 2048, 512, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(256, 2048, 512, verified_m4_max_for_test()),
             CANDIDATES[2],
             "横長 → CANDIDATES[2]"
         );
         assert_eq!(
-            select_for_device(512, 512, 512, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(512, 512, 512, verified_m4_max_for_test()),
             CANDIDATES[5],
             "正方立方（イシュー #1039 実測点） → CANDIDATES[5]"
         );
         assert_eq!(
-            select_for_device(1536, 1024, 512, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(1536, 1024, 512, verified_m4_max_for_test()),
             CANDIDATES[0],
             "準正方大形状長方形 → CANDIDATES[0]"
         );
         assert_eq!(
-            select_for_device(32, 32, 32, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(32, 32, 32, verified_m4_max_for_test()),
             TileConfig::SINGLE_SIMDGROUP_8X8,
             "微小形状 → SINGLE_SIMDGROUP_8X8"
         );
@@ -1562,7 +1615,7 @@ mod tests {
         // dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape`）
         // が staged 経路（CANDIDATES[3]）を踏むことを固定する。
         assert_eq!(
-            select_for_device(521, 265, 131, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(521, 265, 131, verified_m4_max_for_test()),
             CANDIDATES[3],
             "8 非整列の端数形状（m,n,k は SMALL=64 以上） → CANDIDATES[3]"
         );
@@ -2071,11 +2124,11 @@ mod tests {
     #[test]
     fn select_falls_back_to_single_simdgroup_for_small_shapes() {
         assert_eq!(
-            select_for_device(32, 32, 32, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(32, 32, 32, verified_m4_max_for_test()),
             TileConfig::SINGLE_SIMDGROUP_8X8
         );
         assert_eq!(
-            select_for_device(1000, 1000, 32, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(1000, 1000, 32, verified_m4_max_for_test()),
             TileConfig::SINGLE_SIMDGROUP_8X8
         );
     }
@@ -2094,19 +2147,19 @@ mod tests {
         // #744 是正時点の「一律 CANDIDATES[3]」前提を反映していたため
         // リネームし期待値を更新する。
         assert_eq!(
-            select_for_device(512, 512, 512, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(512, 512, 512, verified_m4_max_for_test()),
             CANDIDATES[5]
         );
         assert_eq!(
-            select_for_device(1024, 1024, 1024, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(1024, 1024, 1024, verified_m4_max_for_test()),
             CANDIDATES[6]
         );
         assert_eq!(
-            select_for_device(2048, 2048, 2048, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(2048, 2048, 2048, verified_m4_max_for_test()),
             CANDIDATES[1]
         );
         assert_eq!(
-            select_for_device(4096, 4096, 4096, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(4096, 4096, 4096, verified_m4_max_for_test()),
             CANDIDATES[2]
         );
     }
@@ -2124,35 +2177,45 @@ mod tests {
         // いずれも `m == n == k` かつ `SQUARE_MEASURED_MAX` 以内の真の
         // 正方立方形状のため #744 是正後の CANDIDATES[3]）へ落ちることを
         // 固定する。
-        for gpu_core_count in [None, Some(24u32), Some(16), Some(60)] {
+        for raw_gpu_core_count in [None, Some(24u32), Some(16), Some(60)] {
             assert_ne!(
-                gpu_core_count,
+                raw_gpu_core_count,
                 Some(M4_MAX_GPU_CORE_COUNT),
                 "本テストは M4 Max 以外のコア数のみを対象とする"
+            );
+            // opaque 型化（P1 是正・PR #1108 レビュー）により、未検証の
+            // 生コア数を `select_for_device` へ直接渡すことはできない。
+            // `verify_m4_max` を経由させると、コア数不一致（SoC ブランドの
+            // 値に関わらず）により必ず `None` になることを利用し、元の
+            // 「ゲートされない」意図を保ったまま新シグネチャへ対応する。
+            let gpu_core_count = verify_m4_max(raw_gpu_core_count, Some(M4_MAX_SOC_BRAND));
+            assert_eq!(
+                gpu_core_count, None,
+                "コア数が不一致のため verify_m4_max は必ず None を返す想定"
             );
             assert_eq!(
                 select_for_device(512, 512, 512, gpu_core_count),
                 CANDIDATES[3],
-                "gpu_core_count={gpu_core_count:?} では厳密一致テーブル \
+                "gpu_core_count={raw_gpu_core_count:?} では厳密一致テーブル \
                  （CANDIDATES[5]）を適用せず形状クラス判定（CANDIDATES[3]）\
                  へフォールバックする"
             );
             assert_eq!(
                 select_for_device(1024, 1024, 1024, gpu_core_count),
                 CANDIDATES[3],
-                "gpu_core_count={gpu_core_count:?} では厳密一致テーブル \
+                "gpu_core_count={raw_gpu_core_count:?} では厳密一致テーブル \
                  （CANDIDATES[6]）を適用しない"
             );
             assert_eq!(
                 select_for_device(2048, 2048, 2048, gpu_core_count),
                 CANDIDATES[3],
-                "gpu_core_count={gpu_core_count:?} では厳密一致テーブル \
+                "gpu_core_count={raw_gpu_core_count:?} では厳密一致テーブル \
                  （CANDIDATES[1]）を適用しない"
             );
             assert_eq!(
                 select_for_device(4096, 4096, 4096, gpu_core_count),
                 CANDIDATES[3],
-                "gpu_core_count={gpu_core_count:?} では厳密一致テーブル \
+                "gpu_core_count={raw_gpu_core_count:?} では厳密一致テーブル \
                  （CANDIDATES[2]）を適用しない"
             );
             // 準正方長方形の実測点（`(1536, 1024, 1024)`）も同様にゲートの
@@ -2164,7 +2227,7 @@ mod tests {
             assert_eq!(
                 select_for_device(1536, 1024, 1024, gpu_core_count),
                 CANDIDATES[0],
-                "gpu_core_count={gpu_core_count:?} では準正方長方形の \
+                "gpu_core_count={raw_gpu_core_count:?} では準正方長方形の \
                  厳密一致点（CANDIDATES[1]）も適用しない"
             );
         }
@@ -2182,7 +2245,7 @@ mod tests {
         // 両方一致: M4 Max 実機と判定する。
         assert_eq!(
             verify_m4_max(Some(M4_MAX_GPU_CORE_COUNT), Some(M4_MAX_SOC_BRAND)),
-            Some(M4_MAX_GPU_CORE_COUNT)
+            Some(VerifiedM4MaxGpuCoreCount(M4_MAX_GPU_CORE_COUNT))
         );
 
         // GPU コア数は一致するが SoC ブランドが異なる（例: M3 Max の 40
@@ -2214,7 +2277,7 @@ mod tests {
         // 512/1024/2048/4096 の 4 点のみ（#744）。4096 超の正方形状（実測
         // 対象外）へ CANDIDATES[3] 一律選択を無制限に広げないことを固定する
         // （#744 是正前の挙動 `m,n >= LARGE(512)` なら CANDIDATES[0] を維持）。
-        let cfg = select_for_device(8192, 8192, 8192, Some(M4_MAX_GPU_CORE_COUNT));
+        let cfg = select_for_device(8192, 8192, 8192, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
     }
@@ -2230,7 +2293,7 @@ mod tests {
         // したが 2 回計測で順位が入れ替わり厳密一致テーブルへは含めない
         // ため（`select_keeps_pre_744_behavior_for_rank_unstable_measured_points`
         // 参照）、本テストはそれ以外の `k`（実測対象外）で検証する。
-        let cfg = select_for_device(2048, 2048, 1536, Some(M4_MAX_GPU_CORE_COUNT));
+        let cfg = select_for_device(2048, 2048, 1536, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
     }
@@ -2248,22 +2311,22 @@ mod tests {
         // よって #744 是正前の挙動（`m,n >= LARGE(512)` なら
         // CANDIDATES[0]）のまま変わらないことを固定する回帰ガード。
         assert_eq!(
-            select_for_device(2048, 2048, 64, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(2048, 2048, 64, verified_m4_max_for_test()),
             CANDIDATES[0]
         );
         assert_eq!(
-            select_for_device(2048, 2048, 512, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(2048, 2048, 512, verified_m4_max_for_test()),
             CANDIDATES[0]
         );
         assert_eq!(
-            select_for_device(1024, 1536, 1536, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(1024, 1536, 1536, verified_m4_max_for_test()),
             CANDIDATES[0]
         );
     }
 
     #[test]
     fn select_picks_mid_square_config_for_moderate_shapes() {
-        let cfg = select_for_device(128, 128, 128, Some(M4_MAX_GPU_CORE_COUNT));
+        let cfg = select_for_device(128, 128, 128, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[3]);
         assert_eq!((cfg.bm, cfg.bn), (32, 32));
     }
@@ -2278,7 +2341,7 @@ mod tests {
         // で上書きする。下の `select_picks_measured_best_config_for_
         // near_square_large_rectangle` 参照）。本例は `(1536, 1024, 512)`
         // で `k` を実測点（1024）と変えて厳密一致から外している。
-        let cfg = select_for_device(1536, 1024, 512, Some(M4_MAX_GPU_CORE_COUNT));
+        let cfg = select_for_device(1536, 1024, 512, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
     }
@@ -2296,7 +2359,7 @@ mod tests {
         // `select_keeps_pre_744_behavior_for_rank_unstable_measured_points`
         // 参照）。
         assert_eq!(
-            select_for_device(1536, 1024, 1024, Some(M4_MAX_GPU_CORE_COUNT)),
+            select_for_device(1536, 1024, 1024, verified_m4_max_for_test()),
             CANDIDATES[1]
         );
     }
@@ -2308,21 +2371,21 @@ mod tests {
         // （どちらの経路でも CANDIDATES[3]）ことを固定する。`LARGE` 分岐の
         // 再導入（PR #760 レビュー対応）がこの帯域を誤って変えていないかの
         // 検証。
-        let cfg = select_for_device(128, 192, 128, Some(M4_MAX_GPU_CORE_COUNT));
+        let cfg = select_for_device(128, 192, 128, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[3]);
         assert_eq!((cfg.bm, cfg.bn), (32, 32));
     }
 
     #[test]
     fn select_picks_tall_config_when_m_dominates() {
-        let cfg = select_for_device(1024, 128, 256, Some(M4_MAX_GPU_CORE_COUNT));
+        let cfg = select_for_device(1024, 128, 256, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[1]);
         assert_eq!((cfg.bm, cfg.bn), (64, 32));
     }
 
     #[test]
     fn select_picks_wide_config_when_n_dominates() {
-        let cfg = select_for_device(128, 1024, 256, Some(M4_MAX_GPU_CORE_COUNT));
+        let cfg = select_for_device(128, 1024, 256, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[2]);
         assert_eq!((cfg.bm, cfg.bn), (32, 64));
     }
@@ -2345,8 +2408,8 @@ mod tests {
             (2048, 2048, 64),   // m==n だが K 未実測の正方出力（PR #760 レビュー対応で追加）
         ] {
             assert_eq!(
-                select_with_occupancy_for_device(m, n, k, Some(M4_MAX_GPU_CORE_COUNT), None),
-                select_for_device(m, n, k, Some(M4_MAX_GPU_CORE_COUNT)),
+                select_with_occupancy_for_device(m, n, k, verified_m4_max_for_test(), None),
+                select_for_device(m, n, k, verified_m4_max_for_test()),
                 "m={m} n={n} k={k}"
             );
         }
@@ -2391,7 +2454,7 @@ mod tests {
                 512,
                 512,
                 512,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(m4_max_expected_params())
             ),
             CANDIDATES[5]
@@ -2401,7 +2464,7 @@ mod tests {
                 1024,
                 1024,
                 1024,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(m4_max_expected_params())
             ),
             CANDIDATES[6]
@@ -2411,7 +2474,7 @@ mod tests {
                 2048,
                 2048,
                 2048,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(m4_max_expected_params())
             ),
             CANDIDATES[1]
@@ -2421,7 +2484,7 @@ mod tests {
                 4096,
                 4096,
                 4096,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(m4_max_expected_params())
             ),
             CANDIDATES[2]
@@ -2467,7 +2530,7 @@ mod tests {
                 512,
                 512,
                 512,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(large_core_count_params)
             ),
             CANDIDATES[3],
@@ -2485,7 +2548,7 @@ mod tests {
                 1024,
                 1024,
                 1024,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(large_core_count_params)
             ),
             CANDIDATES[3],
@@ -2511,10 +2574,10 @@ mod tests {
                     size,
                     size,
                     size,
-                    Some(M4_MAX_GPU_CORE_COUNT),
+                    verified_m4_max_for_test(),
                     Some(m4_max_expected_params())
                 ),
-                select_for_device(size, size, size, Some(M4_MAX_GPU_CORE_COUNT)),
+                select_for_device(size, size, size, verified_m4_max_for_test()),
                 "size={size}"
             );
         }
@@ -2541,7 +2604,7 @@ mod tests {
             1536,
             1024,
             512,
-            Some(M4_MAX_GPU_CORE_COUNT),
+            verified_m4_max_for_test(),
             Some(m4_max_expected_params()),
         );
         assert_eq!(cfg, CANDIDATES[0]);
@@ -2558,7 +2621,7 @@ mod tests {
             512,
             128,
             256,
-            Some(M4_MAX_GPU_CORE_COUNT),
+            verified_m4_max_for_test(),
             Some(m4_max_expected_params()),
         );
         assert_eq!(cfg, CANDIDATES[3]);
@@ -2572,7 +2635,7 @@ mod tests {
             128,
             512,
             256,
-            Some(M4_MAX_GPU_CORE_COUNT),
+            verified_m4_max_for_test(),
             Some(m4_max_expected_params()),
         );
         assert_eq!(cfg, CANDIDATES[3]);
@@ -2601,7 +2664,7 @@ mod tests {
             2304,
             128,
             768,
-            Some(M4_MAX_GPU_CORE_COUNT),
+            verified_m4_max_for_test(),
             Some(params),
         );
         assert_eq!(cfg, CANDIDATES[3]);
@@ -2621,7 +2684,7 @@ mod tests {
                 128,
                 128,
                 128,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(extreme_params)
             ),
             CANDIDATES[3]
@@ -2631,7 +2694,7 @@ mod tests {
                 32,
                 32,
                 32,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(extreme_params)
             ),
             TileConfig::SINGLE_SIMDGROUP_8X8
@@ -2651,10 +2714,10 @@ mod tests {
                 1024,
                 1024,
                 1024,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(params)
             ),
-            select_for_device(1024, 1024, 1024, Some(M4_MAX_GPU_CORE_COUNT))
+            select_for_device(1024, 1024, 1024, verified_m4_max_for_test())
         );
     }
 
@@ -2672,10 +2735,10 @@ mod tests {
                 1024,
                 1024,
                 1024,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(params)
             ),
-            select_for_device(1024, 1024, 1024, Some(M4_MAX_GPU_CORE_COUNT))
+            select_for_device(1024, 1024, 1024, verified_m4_max_for_test())
         );
     }
 
@@ -2697,7 +2760,7 @@ mod tests {
                 m,
                 n,
                 k,
-                Some(M4_MAX_GPU_CORE_COUNT),
+                verified_m4_max_for_test(),
                 Some(m4_max_expected_params()),
             );
             cfg.validate(1024, 32 * 1024).unwrap_or_else(|e| {
@@ -2817,7 +2880,7 @@ mod tests {
             (2048, 2048, 2048),
             (4096, 512, 512),
         ] {
-            let cfg = select_for_device(m, n, k, Some(M4_MAX_GPU_CORE_COUNT));
+            let cfg = select_for_device(m, n, k, verified_m4_max_for_test());
             cfg.validate(1024, 32 * 1024)
                 .unwrap_or_else(|e| panic!("select({m},{n},{k})={cfg:?} rejected: {e}"));
         }
@@ -3612,7 +3675,7 @@ mod tests {
         ];
 
         for &(m, n, k) in shapes {
-            let expected = select_for_device(m, n, k, Some(M4_MAX_GPU_CORE_COUNT));
+            let expected = select_for_device(m, n, k, verified_m4_max_for_test());
             let resolved = gemm
                 .resolve_tile_config_f16(&ctx, expected)
                 .unwrap_or_else(|err| {
