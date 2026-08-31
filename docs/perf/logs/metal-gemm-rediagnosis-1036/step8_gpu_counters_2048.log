@@ -1,0 +1,22 @@
+実行コマンド:
+  xcrun xctrace record --template 'Metal System Trace' --instrument 'Metal GPU Counters' \
+    --output counters_2048.trace --launch -- \
+    ./target/release/examples/gemm_counter_workload --size=2048 --iters=200
+
+record 標準出力（stderr 含む）:
+  Starting recording with the Metal System Trace template and Metal GPU Counters Instrument. Launching process: gemm_counter_workload.
+  Ctrl-C to stop the recording
+  Target app exited, ending recording...
+  Run issues were detected (trace is still ready to be viewed):
+  * [Warning] GPU Service reported error: Selected counter profile is not supported on target device
+
+  Recording completed. Saving output file...
+  Output file saved as: counters_2048.trace
+
+xctrace export --toc の counter-profile: 1024 と同一（0 と 3 の 2 エントリ。
+3 が「Performance Limiters」の活性化を示すが、データ行は 0 件で
+step8_gpu_counters_1024.log と同一の失敗パターン）。
+
+結論: N=1024 と同一の「counter-profile=3 まで活性化・GPU Service が
+非対応と報告・実データ 0 件」という結果。size を変えても device 側の
+非対応は変わらない（デバイス／OS レベルの制約であることを示唆）。

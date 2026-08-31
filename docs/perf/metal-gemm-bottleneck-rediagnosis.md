@@ -1,7 +1,8 @@
 # Metal GEMM 1024 以降スループット頭打ち context_cache 後の再診断（#1036）
 
 イシュー #1036「docs(perf): Metal GEMM 1024 以降の頭打ちを context_cache 後の構成で M4 Max 実機診断する」の
-実測記録。親 #1029「GEMM カーネルの candle 超え」配下。
+実測記録。親 #1029「GEMM カーネルの candle 超え」配下。イシュー #1103「docs(perf): Metal GEMM 頭打ち診断の
+残件（同一境界での candle 転送分離測定・GPU カウンタ表）を実施する」による追補を含む（§1.1・§5.3・§7.1b）。
 
 `docs/perf/metal-gemm-bottleneck-diagnosis.md`（#487）・`docs/perf/metal-fixed-overhead-diagnosis.md`
 （#927）はいずれも現行実装と前提が乖離している（#744 是正前の `tile::select`・`context_cache`（#930/#948）
@@ -31,6 +32,19 @@
 では後続セッションから監査・再現できないため収録。`metal_trace.trace` バンドル・`gpu_intervals.xml`
 （約 720 KB）・`toc.xml` はサイズとバイナリ性のため未収録で、§5.1 の目視抽出値の一次出典は
 `durations_raw.txt` とする）。
+
+### 1.1 #1103 追補セッションの環境
+
+イシュー #1103（本 doc §7.1「candle 転送分離測定」・§5「GPU counters」の未計測 2 点の解消）は
+別セッションで実施した。環境は上表と同一実機（Apple M4 Max・macOS 26.6.2・AC 電源接続）だが、
+計測コミット SHA・xctrace バージョンは以下のとおり更新されている。
+
+| 項目 | 値 |
+|------|-----|
+| 計測コミット SHA | `b5c8f11c5a3061ff66c6acdddd47cf9c41c7d042`（`origin/main` fetch 直後の HEAD。#1104 マージ後） |
+| xctrace | 16.0（17F113）。#1036 と同一バージョン |
+| 追補範囲 | §7.1（candle transfer-split 測定・主因記述の更新）・§5.3（新設。GPU counters 再試行） |
+| 生ログ | `step7_candle_transfer_split.log`・`step7_fandhe_gemm_bench_rerun.log`・`step8_gpu_counters_{1024,2048,4096}.log` を追加収録（下記 §5.3・§7.1 参照） |
 
 ## 2. 0.4.0 実測ベースライン（転記・出典明記）
 
@@ -262,6 +276,57 @@ System Trace」テンプレートの既定設定では GPU Counters（occupancy�
   のいずれでも `CANDIDATES[3]` の 15〜30% 程度に留まり、異なる K 刻み・wm/wn 配分（`cand5`/`cand6`）も
   4096 で `CANDIDATES[3]` を上回らず、1024/2048 でも閾値を超えて上回ることはない
 
+### 5.3 GPU counters 再試行（#1103 追補）
+
+イシュー #1103 は §5.1 が未計測のまま残した GPU counters（占有率・ALU/メモリ limiter 内訳）の
+採取を再試行した。§5.1 は「Metal System Trace」テンプレート**既定**設定でカウンタプロファイルが
+無効（`counter-profile=0`）だったことを原因としていたため、`xctrace record` の `--instrument`
+オプションで `Metal GPU Counters` instrument を明示追加し、テンプレート既定を上書きする経路を
+試した。
+
+```
+cargo build -p fandhe-ai-backend-metal --example gemm_counter_workload --release
+xcrun xctrace record --template 'Metal System Trace' --instrument 'Metal GPU Counters' \
+  --output counters_<N>.trace --launch -- \
+  ./target/release/examples/gemm_counter_workload --size=<N> --iters=200
+```
+
+（`gemm_counter_workload` は本イシューで新規追加した size 固定・反復ディスパッチ専用 example。
+§5.1 の課題「`gemm_f32_prepared_bench` は 512〜4096 を連続実行するため 1 トレースに複数 size が
+混在し `<row>` の `ref` 属性解決パーサなしでは紐付けられない」を、1 プロセス実行 = 1 trace = 1 size
+という対応にすることで回避する。`crates/backend-metal/examples/gemm_counter_workload.rs`）。
+
+**結果（N=1024/2048/4096 とも同一の失敗パターン。生ログ:
+`step8_gpu_counters_{1024,2048,4096}.log`）**:
+
+| size | `xctrace record` の警告 | `--toc` の `counter-profile` | `gpu-counter-value`/`gpu-counter-info` のデータ行 |
+|------|--------------------------|-------------------------------|----------------------------------------------------|
+| 1024 | `GPU Service reported error: Selected counter profile is not supported on target device` | 3（`Counter Set: Performance Limiters`。§5.1 の 0=無効から前進） | 0 件 |
+| 2048 | 同上 | 3（同上） | 0 件 |
+| 4096 | 同上 | 3（同上） | 0 件 |
+
+`--instrument 'Metal GPU Counters'` の明示指定は §5.1（既定テンプレートで `counter-profile=0`）
+から前進し、カウンタセット（`Performance Limiters`）自体は `counter-profile=3` として活性化する。
+しかし `xctrace record` 自体が warning で明示するとおり、**GPU Service がこのカウンタプロファイルを
+本デバイス（Apple M4 Max・macOS 26.6.2）で非対応と報告**しており、`gpu-counter-info`（カウンタ名
+の列挙）・`gpu-counter-value`（サンプル値）・`metal-gpu-counter-profile`（区間別プロファイル）の
+いずれもデータ行が 0 件のままだった。
+
+フォールバックとして代替テンプレート `Game Performance`（N=1024 で試行）も試したが、同一の
+warning・同一の空データという結果だった。さらに `Metal GPU Counters` とは別の標準 instrument
+`GPU`（`gpu-performance-state-info`/`gpu-performance-state-intervals` を提供）も試したが、
+これは GPU の動作状態〈performance state〉の遷移情報のみで、占有率・ALU/メモリ limiter 内訳
+（本イシューが求める GPU counters）は提供しない（詳細は `step8_gpu_counters_4096.log` 末尾）。
+
+**判断（受け入れ条件 (a) のフォールバック分岐: フォールバック実施済み・非対話環境では確定不能）**:
+GUI（Instruments.app）でのカウンタセット選択操作が必要な可能性が高く、`xctrace` の CLI オプション
+には対象カウンタセットを個別指定する手段がない（`xcrun xctrace record --help` にも該当オプション
+なし）。非対話セッション（本サブエージェント実行環境）ではこれ以上の解消ができないため、真の
+occupancy・ALU/メモリ limiter 内訳は**引き続き未計測**として扱う。§5.2 の proxy 証跡（並列度
+proxy・カーネル純境界分離・タイル形状スイープ）を占有度合いの判断材料とする方針は変更しない。
+`MTLCounterSampleBuffer` のカーネル内組み込みによる代替採取は引き続き本イシューのスコープ外
+（§8 参照）。
+
 ## 6. 固定費解消の裏取り（受け入れ条件外・context_cache 前提確認）
 
 ```
@@ -284,13 +349,13 @@ cargo run -p fandhe-ai-backend-metal --example fixed_overhead_diagnosis --releas
 
 ### 7.1 頭打ち要因の主要候補
 
-以下の実測から、N=1024 以降の頭打ち（0.4.0 ベースラインでの candle 比ギャップ）の要因の**主要候補を転送
-（アップロード＋readback）オーバーヘッド**とする。占有度合い（並列度 proxy）・タイル形状のいずれも
-主因としての説明力が実測で否定された。ただし本 doc の実測で分かるのは「fandhe-ai の直接呼び出し内で
-転送等が約 38% を占める」ことまでであり、比較対象の candle も転送込み・§7.2 のとおり 0.4.0 facade 経路
-（3.03 TFLOPS）と本 doc の直接呼び出し（4.40 TFLOPS）も単純比較できないため、candle 比ギャップの**主因と
-確定はしない**（確定には同一プロセス・同一入出力境界で fandhe-ai と candle の転送時間を分離した測定が
-必要。§8 へ記録。Review 指摘・#1036）:
+以下の実測から、N=1024 以降の頭打ちの要因のうち、**fandhe-ai 自身の系列内では転送
+（アップロード＋readback）オーバーヘッドが無視できない寄与を持つ**ことは確定した。ただし
+#1103 で追加実施した candle 側の同一境界での転送分離測定（下記「candle 転送分離測定」節）の
+結果、**candle 比ギャップの主因を転送オーバーヘッドと確定することはできない**（むしろ candle
+側の転送寄与率が fandhe-ai より一貫して大きく、単純な「fandhe-ai 側の転送コストが candle に
+劣後する主因」という仮説は実測で支持されなかった。詳細は同節）。占有度合い（並列度 proxy）・
+タイル形状のいずれも主因としての説明力が実測で否定された点は #1036 時点から変わらない:
 
 1. **並列度〈concurrency/saturation〉proxy は「不足」を示さない**（§3.3・§5.2）: 1024 以降
    `actual_groups` は `ideal_groups` を常に大きく上回る
@@ -306,12 +371,61 @@ cargo run -p fandhe-ai-backend-metal --example fixed_overhead_diagnosis --releas
    カーネル純境界と直接比較できない（計測境界が揃っていないため「カーネル純境界は candle を上回る」
    とは主張しない。candle との比較は転送込み同士の §7.2 の注意に従う）
 
-真の occupancy（レジスタ・threadgroup memory 使用率、§5.1 で未計測）が別途頭打ちに寄与している可能性は
-排除できないが、上記 3 点（proxy 不足なし・タイル形状は現行が最良〜同等・自系列の転送分離で約 1.62 倍差）は「タイル形状の
-再選択（#1037/#1039 のスコープ）だけでは 0.4.0 ベースラインのギャップを解消できない」ことを強く示唆する。
-残存ギャップの解消には、GEMM カーネル自体の変更ではなく **facade／`MetalGemm::dispatch_auto` 呼び出し
-経路の転送（アップロード・readback）削減**（既にデバイス常駐化されたバッファの再利用範囲拡大等）が
-主要な候補になる。
+真の occupancy（レジスタ・threadgroup memory 使用率、§5.1・§5.3 で未計測）が別途頭打ちに寄与している
+可能性は排除できないが、上記 3 点（proxy 不足なし・タイル形状は現行が最良〜同等・自系列の転送分離で
+約 1.62 倍差）は「タイル形状の再選択（#1037/#1039 のスコープ）だけでは頭打ちを解消できない」ことを
+強く示唆する。fandhe-ai 自身の end-to-end 経路（facade／`MetalGemm::dispatch_auto`）の転送削減
+（既にデバイス常駐化されたバッファの再利用範囲拡大等）は依然として有力な改善候補だが、**candle 比の
+ギャップを埋める主因**としての位置づけは下記の実測により後退した。
+
+### 7.1b candle 転送分離測定（#1103 追補・受け入れ条件 1）
+
+`docs/perf/metal-gemm-bottleneck-rediagnosis.md` §7.1（#1036 時点）は「candle 比ギャップの主因は
+転送オーバーヘッド」と確定するには candle 側の同一境界での転送分離測定が必要、と留保していた
+（§8 の「candle 比ギャップの主因確定に必要な…測定」項目）。#1103 はこれを実施した。
+
+`scripts/bench/framework-compare/bench-candle/src/main.rs` に新タスク `gemm-transfer-split`
+（`--device metal` 限定）を追加し、fandhe-ai の `dispatch_auto`（転送込み）／
+`dispatch_tiled_prepared`（転送除外）と同一の 2 境界を candle 側でも**同一プロセス内**で計測した:
+
+- **転送込み境界**（`gemm_transfer_incl`）: 計測クロージャ内で毎反復 `Tensor::from_vec`（A・B の
+  ホスト→デバイス転送）→ `matmul` → `to_vec2` readback
+- **転送除外境界**（`gemm_transfer_excl`）: A・B をループ外で 1 回だけ転送し、計測クロージャ内は
+  `matmul` + `Device::synchronize()` のみ（readback は計測窓外で 1 回のみ）
+
+実測（M4 Max・生ログ `step7_candle_transfer_split.log`。fandhe-ai 側は同一セッション内で
+`gemm_bench` を再実行した値〈`step7_fandhe_gemm_bench_rerun.log`〉を併記。fandhe-ai の transfer
+込みは `dynamic_tile_auto_tflops`、転送除外は `bm32_bn32_bk16_staged` 候補〈`CANDIDATES[3]` と
+同一構成〉の同一プロセス内値。N=1024 は `gemm_bench` の候補比較が 2048/4096 のみのため fandhe-ai
+側の同一プロセス転送除外値がなく、参考掲載に留める）:
+
+| size | framework | 転送込み TFLOPS | 転送除外 TFLOPS | 除外/込み比 | 転送寄与率 |
+|------|-----------|-------------------|-------------------|----------------|--------------|
+| 1024 | candle | 0.7062 | 6.6878 | 9.47× | 89.4% |
+| 1024 | fandhe-ai | 1.8254 | （同一プロセス値なし。§4.2 参考値 1.7623〈別プロセス〉） | — | — |
+| 2048 | candle | 1.3024 | 8.4533 | 6.49× | 84.6% |
+| 2048 | fandhe-ai | 3.3005 | 8.8313 | 2.68× | 62.6% |
+| 4096 | candle | 3.2046 | 13.1686 | 4.11× | 75.7% |
+| 4096 | fandhe-ai | 4.4289 | 8.2179 | 1.86× | 46.1% |
+
+（転送寄与率 = 1 − 転送込み/転送除外。両フレームワークとも「転送を除外すると大幅に速くなる」こと
+自体は共通するが、寄与率は N=2048/4096 のいずれも **candle の方が fandhe-ai より高い**〈2048:
+84.6% vs 62.6%・4096: 75.7% vs 46.1%〉。これは「fandhe-ai が candle より転送コストの相対負担が
+重い」という仮説とは逆方向の結果である）
+
+**判断（S5 の分岐: candle 側の転送寄与率が fandhe-ai と同程度またはそれ以上 → 主因記述を後退させる）**:
+candle 自身も転送込み/転送除外の差が大きく（むしろ fandhe-ai より寄与率が高い）、この同一プロセス内
+比較からは「fandhe-ai の転送オーバーヘッドが candle に対して相対的に大きい」という主張は支持されない。
+むしろ転送除外（カーネル純境界）同士を比較すると、N=2048 では fandhe-ai（8.83 TFLOPS）が candle
+（8.45 TFLOPS）をわずかに上回り、N=4096 では candle（13.17 TFLOPS）が fandhe-ai（8.22 TFLOPS）を
+明確に上回るという非一貫な結果になっている。したがって**candle 比ギャップの主因を「転送オーバーヘッド」
+と確定することはできない**。N=4096 のカーネル純境界での candle 優位は、転送以外の要因（カーネル
+実装・タイル形状・MLX steel gemm 側の最適化差等）に起因する可能性が高いが、本追補の範囲では
+それ以上の切り分けは行わない（新たな追加調査が必要であれば別 Issue で扱う。§8 参照）。
+
+なお本節の数値はいずれも fandhe-ai／candle それぞれの**プロセス内**での転送込み/転送除外比較
+（§3.4 の計測契約に従う）であり、fandhe-ai と candle 間の絶対 TFLOPS 比較はプロセス間の参考値に
+留める（§3.4 の原因未確定のプロセス間変動が候補として残っているため）。
 
 ### 7.2 経路間の比較に関する注意
 
@@ -343,14 +457,21 @@ vs facade 経由の `bench-fandhe`）が異なるため単純に差分を「faca
 ## 8. スコープ外（記録のみ）
 
 - タイル選択テーブルの実装変更（#1037/#1038/#1039 のスコープ。本 doc は候補の確定リストを引き渡すのみ）
-- `MTLCounterSampleBuffer` の src 組み込みによるカーネル内 GPU counters 採取（§5.1 で不採用と判断。
-  必要であれば `out-of-scope-tracking.md` に従いユーザー承認のうえ別 Issue で起票）
+- `MTLCounterSampleBuffer` の src 組み込みによるカーネル内 GPU counters 採取（§5.1・§5.3 で不採用と
+  判断。必要であれば `out-of-scope-tracking.md` に従いユーザー承認のうえ別 Issue で起票）
 - §7.2 の経路間ギャップ（`dispatch_auto` 直接呼び出し vs facade `context_cache` 経由）の定量診断
 - `xctrace` エクスポートの `<row>` `ref` 属性解決による size 別 GPU 実行時間の機械的な内訳表生成
 - §3.4 のプロセス間変動（約 3 倍）の帰属検証（同一ハーネスでの負荷順序入れ替え反復・温度／クロック記録）
-- candle 比ギャップの主因確定に必要な、同一プロセス・同一入出力境界で fandhe-ai と candle（MLX steel gemm）
-  の転送時間を分離した測定（§7.1。candle 側の転送除きカーネル純境界の計測経路整備が前提）
-  （§5.1。本セッションでは完成させられなかった）
+- ~~candle 比ギャップの主因確定に必要な、同一プロセス・同一入出力境界で fandhe-ai と candle（MLX steel
+  gemm）の転送時間を分離した測定~~ → **#1103 で実施済み**（§7.1「candle 転送分離測定」節）。
+  結果は「主因を転送オーバーヘッドと確定できない」という判断であり、N=4096 のカーネル純境界での
+  candle 優位（転送以外の要因）は追加調査が必要（未着手・別 Issue 検討）
+- ~~§5.1 の GPU counters 未計測（「Metal System Trace」テンプレート既定でカウンタプロファイル無効）~~
+  → **#1103 で `--instrument 'Metal GPU Counters'` を追加試行済み**（§5.3）。カウンタプロファイルは
+  活性化（`counter-profile=0`→`3`）したが GPU Service が本デバイスで非対応と報告し、実データは
+  引き続き未計測。非対話環境ではこれ以上の解消不可と判断（§5.3 参照）
+- 上記 candle 側カーネル純境界差（N=4096 で candle が fandhe-ai を上回る要因）の追加切り分け
+  （カーネル実装・タイル形状・MLX steel gemm 側最適化差等。#1103 では未着手）
 - framework-compare `summary.md` の 0.4.0 正式更新・REQ-8 下限の再確定（人間承認タスク。計画 §6 のとおり
   本イシューのスコープ外）
 
@@ -362,4 +483,9 @@ vs facade 経由の `bench-fandhe`）が異なるため単純に差分を「faca
 - `crates/backend-metal/src/tile.rs`（`TileConfig`・`CANDIDATES`・`select`）
 - `crates/backend-metal/examples/gemm_diagnosis.rs`・`gemm_f32_prepared_bench.rs`・`gemm_bench.rs`・
   `fixed_overhead_diagnosis.rs`・`gemm_tile_sweep.rs`（§4.4 の追加タイル候補スイープ。本診断の計測本体）
-- 親 #1029・トラッキング系譜 #480 → Phase D #530 → D-2 #533／D-7 #541/#542（旧診断の後続タスク）
+- `crates/backend-metal/examples/gemm_counter_workload.rs`（§5.3。#1103 で追加した GPU counters
+  採取用の size 固定・反復ディスパッチワークロード）
+- `scripts/bench/framework-compare/bench-candle/src/main.rs`（`run_gemm_transfer_split`。§7.1
+  「candle 転送分離測定」節。#1103 で追加した `gemm-transfer-split` タスク）
+- 親 #1029・トラッキング系譜 #480 → Phase D #530 → D-2 #533／D-7 #541/#542（旧診断の後続タスク）・
+  #1036（本 doc の初版）・#1103（本節の追補元イシュー）

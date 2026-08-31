@@ -1,0 +1,14 @@
+実行コマンド（各 size ごとに 1 プロセス）:
+  ./target/release/bench-candle --task gemm-transfer-split --device metal --size <N> --mode fresh --out <jsonl>
+
+=== size=1024 ===
+{"framework":"candle","version":"0.11.0","task":"gemm_transfer_incl","device":"metal","size":1024,"median_s":0.003041104,"q1_s":0.002996604,"q3_s":0.003092218,"gflops":706.153,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+{"framework":"candle","version":"0.11.0","task":"gemm_transfer_excl","device":"metal","size":1024,"median_s":0.000321104,"q1_s":0.000317521,"q3_s":0.000345834,"gflops":6687.803,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+
+=== size=2048 ===
+{"framework":"candle","version":"0.11.0","task":"gemm_transfer_incl","device":"metal","size":2048,"median_s":0.013190687,"q1_s":0.008416011,"q3_s":0.013346750,"gflops":1302.424,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+{"framework":"candle","version":"0.11.0","task":"gemm_transfer_excl","device":"metal","size":2048,"median_s":0.002032333,"q1_s":0.001877083,"q3_s":0.002056635,"gflops":8453.275,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+
+=== size=4096 ===
+{"framework":"candle","version":"0.11.0","task":"gemm_transfer_incl","device":"metal","size":4096,"median_s":0.042888666,"q1_s":0.041017188,"q3_s":0.046558531,"gflops":3204.552,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+{"framework":"candle","version":"0.11.0","task":"gemm_transfer_excl","device":"metal","size":4096,"median_s":0.010436833,"q1_s":0.010413198,"q3_s":0.010448479,"gflops":13168.645,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
