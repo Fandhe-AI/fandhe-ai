@@ -20,15 +20,17 @@
 | Xcode / xctrace | Xcode 26.6（17F113）／ xctrace 16.0（17F113） |
 | rustc | 1.96.0（ac68faa20 2026-05-25） |
 | 計測コミット SHA | `2a12c44294c707579254a90286573243293a0d40`（`origin/main` fetch 直後の HEAD） |
-| 計測プロトコル | `bench-harness::protocol::run`（`MeasurementConfig::default()` = warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1）。§4 の追加スイープ（`tmp_tile_sweep`）も同一 `MeasurementConfig::default()` を使用 |
+| 計測プロトコル | `bench-harness::protocol::run`（`MeasurementConfig::default()` = warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1）。§4 の追加スイープ（`gemm_tile_sweep` example）も同一 `MeasurementConfig::default()` を使用 |
 | 決定的シード | `0xC0FFEE`（各 example の `SEED` 定数） |
 | 計測衛生 | AC 電源接続・実行順は本 doc の記載順（§2→§3→§4→§5→§6）どおり連続実行。他 GPU 負荷アプリの明示終了は未実施（既定のバックグラウンドプロセスのみ）。**§3.4 で後述するとおり、別プロセス・別バイナリでは同一構成でも中央値が約 3 倍変動するプロセス間変動を観測した（原因はサーマル/クロック等の候補があるが未統制・未記録のため帰属は未確定）** — 詳細は §3.4 参照 |
 
 生ログはリポジトリ内 `docs/perf/logs/metal-gemm-rediagnosis-1036/` に保存する（`step2_gemm_diagnosis.log`・
-`step3_kernel_pure.log`・`step4_gemm_bench.log`・`step4b_extra_candidates.log`・`step6_fixed_overhead.log`・
-`durations_raw.txt`〈§5.1 の GPU 区間抽出〉。Review 指摘・#1036: 一時パスのみでは後続セッションから監査・
-再現できないため収録。`metal_trace.trace` バンドル・`gpu_intervals.xml`（約 720 KB）・`toc.xml` はサイズと
-バイナリ性のため未収録で、§5.1 の目視抽出値の一次出典は `durations_raw.txt` とする）。
+`step3_kernel_pure.log`・`step4_gemm_bench.log`・`step4b_extra_candidates.log`・
+`step4b_extra_candidates_rerun.log`〈§4.4 追記のとおり `gemm_tile_sweep` example による再実行ログ〉・
+`step6_fixed_overhead.log`・`durations_raw.txt`〈§5.1 の GPU 区間抽出〉。Review 指摘・#1036: 一時パスのみ
+では後続セッションから監査・再現できないため収録。`metal_trace.trace` バンドル・`gpu_intervals.xml`
+（約 720 KB）・`toc.xml` はサイズとバイナリ性のため未収録で、§5.1 の目視抽出値の一次出典は
+`durations_raw.txt` とする）。
 
 ## 2. 0.4.0 実測ベースライン（転記・出典明記）
 
@@ -85,7 +87,7 @@ cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis --release -- \
 
 ### 3.4 計測衛生上の所見: プロセス間の中央値変動（原因未確定）
 
-§4.2（`gemm_f32_prepared_bench`。アイドル直後に単独実行）と §4.4（`tmp_tile_sweep`。直前に §4.3
+§4.2（`gemm_f32_prepared_bench`。アイドル直後に単独実行）と §4.4（`gemm_tile_sweep` example。直前に §4.3
 `gemm_bench` フルスイート実行済み）で同一構成（32×32×16, wm=2, wn=2, staged, N=1024）を計測したところ、
 中央値 TFLOPS が 1.76 → 5.44（約 3.1 倍）に変動した。両者は別プロセス・別バイナリの計測で、直前負荷以外の
 条件も統制しておらず温度・クロックも記録していないため、この差をサーマル/クロック状態に帰属することは
@@ -167,8 +169,9 @@ prepared 値 7.1049 TFLOPS。**転送（アップロード＋readback）を除�
 
 `crate::tile::CANDIDATES` のうち §4.3 で未比較の候補（`[4]` 64×64×16 wm=1,wn=2 ／ `[5]` 64×32×32
 wm=2,wn=2 ／ `[6]` 64×32×8 wm=4,wn=1）を、`[0]`（64×64×16 baseline）・`[3]`（32×32×16 現行選択）と
-併せて一時計測バイナリ（`dispatch_tiled_prepared` を直接呼ぶ最小 example。本 PR には含めない。生成・
-削除の経緯は §7 参照）で比較した。
+併せて `crates/backend-metal/examples/gemm_tile_sweep.rs`（`dispatch_tiled_prepared` を直接呼ぶ example。
+初回計測時は一時パスのみで生成・削除していたが、codex-review 指摘〈PR #1096・P2〉を受け再現可能な
+example として本 doc と同時に収録した）で比較した。
 
 | size | candidate | tflops | resolved_matches_requested |
 |------|-----------|--------|-------------------------------|
@@ -190,7 +193,12 @@ wm=2,wn=2 ／ `[6]` 64×32×8 wm=4,wn=1）を、`[0]`（64×64×16 baseline）�
 
 （生ログ: `step4b_extra_candidates.log`。§3.4 のとおり本スイープは §4.3 実行直後のため絶対値は §4.2/§4.3
 と直接比較しない。1024 の cand3 が §4.2 の同構成〈1.76 TFLOPS〉と大きく乖離するのは §3.4 の原因未確定の
-プロセス間変動によるもので、本スイープ内部の相対順位のみを根拠として用いる）
+プロセス間変動によるもので、本スイープ内部の相対順位のみを根拠として用いる。再収録 example
+〈`gemm_tile_sweep`。生ログ: `step4b_extra_candidates_rerun.log`〉による再実行でも、cand0／cand4（64×64 系）
+が cand3／cand5／cand6 より明確に劣る傾向・cand3／cand5／cand6 が互いに近接する傾向は再現した。ただし
+2048 の cand3 と cand6 の順位（この再実行では cand6 がわずかに上回る）は §4.4 判断基準の 5% 未満の差で
+プロセス間変動の範囲内であり、下記「観察」の結論〈cand3 が 2048/4096 で最良、1024 は cand3/cand5 同等〉
+を覆すものではなく、順位傾向の確認用とする）
 
 **観察**: 2048/4096 では現行 `CANDIDATES[3]`（32×32×16, wm=2, wn=2, staged）がテストした 7 構成中
 最良で、`cand5`（64×32×32, bk=32）・`cand6`（64×32×8, wm=4）は `cand3` の 84〜91% 程度に留まる。
@@ -350,5 +358,5 @@ vs facade 経由の `bench-fandhe`）が異なるため単純に差分を「faca
 - `docs/perf/metal-tile-select-correction.md`（#744。`tile::select` 現行挙動の確定根拠）
 - `crates/backend-metal/src/tile.rs`（`TileConfig`・`CANDIDATES`・`select`）
 - `crates/backend-metal/examples/gemm_diagnosis.rs`・`gemm_f32_prepared_bench.rs`・`gemm_bench.rs`・
-  `fixed_overhead_diagnosis.rs`（本診断の計測本体）
+  `fixed_overhead_diagnosis.rs`・`gemm_tile_sweep.rs`（§4.4 の追加タイル候補スイープ。本診断の計測本体）
 - 親 #1029・トラッキング系譜 #480 → Phase D #530 → D-2 #533／D-7 #541/#542（旧診断の後続タスク）
