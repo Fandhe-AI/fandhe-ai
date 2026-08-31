@@ -31,3 +31,9 @@ bench-fandhe v0.1.0 (bench-fandhe)
 bench-fandhe v0.1.0 (bench-fandhe)
 ├── bench-common v0.1.0 (bench-common)
 └── fandhe-ai v0.4.0
+
+# 環境 6/7: fandhe-ai 0.4.0 横並び再計測（イシュー #1050）。計測日 2026-08-29。
+# 環境 6（DGX Spark GB10）は環境 B と同一ノード・同一 cargo tree（fandhe-ai v0.4.0）。
+# 環境 7（Apple M4 Max）は環境 A と同一機・同一 cargo tree（fandhe-ai v0.4.0）。
+# candle-core / burn の cargo tree は環境 5 以前と不変（candle-core v0.11.0 / burn v0.21.0。
+# 本節冒頭のベースエントリ参照）。
