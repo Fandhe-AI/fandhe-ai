@@ -188,9 +188,15 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// 変更しない。既存の候補比較・summarize.py・candle 比ゲート〈#1082〉は
 /// 新 task 名を扱わないため影響しない）。
 ///
-/// - **転送込み境界**: `run_gemm` と同じく計測クロージャ内で
-///   `Tensor::from_vec`（A・B の毎反復アップロード）→ `matmul` →
-///   `to_vec2` readback を行う。fandhe `dispatch_auto` と同じ境界。
+/// - **転送込み境界**: 計測クロージャ内で `Tensor::from_slice`（A・B の
+///   毎反復アップロード。`&[f32]` 参照を渡すのみでホスト側 clone を
+///   発生させない。fandhe 側 `dispatch_auto`/`dispatch_variant` も
+///   `&[f32]` 参照のみを受け取るため、ここで `Tensor::from_vec` +
+///   事前 `clone()` を使うと candle 側だけに余分な host メモリコピーが
+///   計測窓へ混入し比較の対称性が崩れる。イシュー #1103 Review 指摘）
+///   → `matmul` → `to_vec2` readback を行う。checksum 集計は readback
+///   完了後（計測窓外）で行い、転送除外境界側の計測方針と揃える。
+///   fandhe `dispatch_auto` と同じ境界。
 /// - **転送除外境界**: A・B はループ外で 1 回だけデバイス転送する。
 ///   計測クロージャ内は `matmul` と `Device::synchronize()`（candle 0.11
 ///   の公開 API。`~/.cargo/registry/.../candle-core-0.11.0/src/device.rs:511`）
@@ -231,14 +237,25 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
          -> Result<Duration, Box<dyn std::error::Error>> {
             let start = Instant::now();
             // 毎反復ホスト→デバイス転送（fandhe dispatch_auto のアップロード
-            // 込み境界と同一）。`a_host`/`b_host` は `clone()` して渡す
-            // （`Tensor::from_vec` が Vec を消費するため）。
-            let a = Tensor::from_vec(a_host.clone(), (n, n), &dev)?;
-            let b = Tensor::from_vec(b_host.clone(), (n, n), &dev)?;
+            // 込み境界と同一）。`Tensor::from_slice` は `&[f32]` 参照を
+            // 受け取り device へアップロードする（`Tensor::from_vec` と違い
+            // Vec を消費しないため呼び出し側の事前 `clone()` が不要）。
+            // fandhe 側の `dispatch_auto`/`dispatch_variant` も `&[f32]`
+            // 参照を受け取るのみでホスト側 clone を発生させないため、ここで
+            // `from_vec(...clone())` を使うと candle 側だけに余分な host
+            // メモリコピー（A・B 計 128MB @ N=4096）が計測窓内に混入し
+            // 比較の対称性が崩れる（イシュー #1103 Review 指摘）。
+            let a = Tensor::from_slice(&a_host, (n, n), &dev)?;
+            let b = Tensor::from_slice(&b_host, (n, n), &dev)?;
             let c = a.matmul(&b)?;
             let rows = readout2(&c)?;
-            *sync_checksum = rows.iter().flat_map(|r| r.iter()).map(|&x| x as f64).sum();
+            // checksum 集計（O(n²) の `sum()`）は fandhe 側の計測境界
+            // （アップロード＋カーネル実行＋readback のみ）に対応物がない
+            // ホスト側後処理のため、readback 完了時点で `elapsed` を確定し
+            // 集計は計測窓の外で行う（転送除外境界の checksum 計測方針との
+            // 対称性も合わせて確保する。イシュー #1103 Review 指摘）。
             let elapsed = start.elapsed();
+            *sync_checksum = rows.iter().flat_map(|r| r.iter()).map(|&x| x as f64).sum();
             validate_gemm_checksum(*sync_checksum)?;
             let out: Vec<f32> = rows.into_iter().flatten().collect();
             let stats = reference.verify(&out)?;
