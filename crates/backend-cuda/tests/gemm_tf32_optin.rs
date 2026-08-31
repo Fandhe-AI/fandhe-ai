@@ -110,8 +110,21 @@ fn assert_tf32_optin_gemm_parity(seed_a: u64, seed_b: u64, m: usize, n: usize, k
 fn gemm_tf32_optin_off_matches_default_fp32_path_env_adaptive() {
     let _guard = Tf32FlagGuard::acquire(false);
     let cuda = CudaBackendOps::new(0);
-    let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
-    let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+    // Cursor Bugbot 指摘（PR #1091・Medium）: 小さい整数オペランド
+    // （旧: 1.0..8.0）は TF32（仮数部 10bit への丸め）でも FP32（23bit）
+    // でも厳密に表現できてしまうため、`gemm` が OFF 時に誤って TF32
+    // 経路へルーティングされても本テストの bit-exact 比較が silent
+    // degradation を検出できない（`via_fallback` 側は常に
+    // `gemm_fp32_strict` を使う一方、`direct` 側だけ誤って TF32 精度に
+    // 丸まっても、整数入力は丸めで値が変化しないため一致してしまう）。
+    // `Xorshift64Star::fill_vec` は `[-1, 1)` の 24bit 仮数精度乱数を
+    // 生成し、TF32 の 10bit への丸めで実際に値が変化する（＝バグがあれば
+    // 検出できる）入力にする。
+    let mut rng = Xorshift64Star::new(0x1042_C0FF_EE00);
+    let a_data = rng.fill_vec(4);
+    let b_data = rng.fill_vec(4);
+    let a = Tensor::new(a_data, &[2, 2]).expect("valid tensor");
+    let b = Tensor::new(b_data, &[2, 2]).expect("valid tensor");
     // n=2 に対し形状 [1] はブロードキャスト可能だが `[n]` 完全一致では
     // ないため `gemm_bias_act_route` が `ComposedFallback` を選ぶ
     // （`ops.rs::gemm_bias_act_route`）。

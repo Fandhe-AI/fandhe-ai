@@ -134,7 +134,13 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         mode: "fresh",
         init_s: None,
         parity,
-        tf32: false,
+        // codex-review 指摘（PR #1091・P1）: burn 0.21 の CUDA バックエンドは
+        // 常時 TF32（`validate_unsupported_flags` のコメント・
+        // `burn-cuda-tf32.md` 参照）で FP32 厳密経路を持たないため、
+        // device が cuda の行は `tf32: true` として記録する（CPU/Metal は
+        // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
+        // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
+        tf32: cli.device == "cuda",
     }
     .emit(&cli.out)?;
     Ok(())
@@ -242,7 +248,13 @@ fn run_train<B: AutodiffBackend>(
         mode: "fresh",
         init_s: None,
         parity: None,
-        tf32: false,
+        // codex-review 指摘（PR #1091・P1）: burn 0.21 の CUDA バックエンドは
+        // 常時 TF32（`validate_unsupported_flags` のコメント・
+        // `burn-cuda-tf32.md` 参照）で FP32 厳密経路を持たないため、
+        // device が cuda の行は `tf32: true` として記録する（CPU/Metal は
+        // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
+        // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
+        tf32: cli.device == "cuda",
     }
     .emit(&cli.out)?;
     Ok(())
@@ -283,7 +295,13 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         mode: "fresh",
         init_s: None,
         parity: None,
-        tf32: false,
+        // codex-review 指摘（PR #1091・P1）: burn 0.21 の CUDA バックエンドは
+        // 常時 TF32（`validate_unsupported_flags` のコメント・
+        // `burn-cuda-tf32.md` 参照）で FP32 厳密経路を持たないため、
+        // device が cuda の行は `tf32: true` として記録する（CPU/Metal は
+        // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
+        // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
+        tf32: cli.device == "cuda",
     }
     .emit(&cli.out)?;
     Ok(())
