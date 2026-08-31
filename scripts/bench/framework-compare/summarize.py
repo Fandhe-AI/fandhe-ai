@@ -277,6 +277,10 @@ def _sanitize_skip_raw_for_display(raw, max_len=120):
     出力ページへ混入しうる（生成物が GitHub 等でレンダリングされる場合の
     注入経路になる）。
 
+    呼び出し元は `target_gate_section()` の `reason` 生成箇所に加え、
+    `main()` 内の「実行時失敗（skipped*.log）」節（skipped*.log の生行を
+    箇条書きへ埋め込む別コードパス）でも使う（イシュー #1085）。
+
     - 改行・連続空白は単一の半角スペースへ正規化する（表セル内で改行する
       とレンダリングが崩れるため）。
     - `&` を先に `&amp;` へ変換してから `<`/`>` を実体参照へ、`|` を
@@ -596,11 +600,28 @@ def load_rows(path):
         rows = [json.loads(line) for line in f if line.strip()]
     for r in rows:
         r.setdefault("mode", "fresh")
+        # イシュー #1042 codex-review P0 指摘（PR #1091）: `tf32` は外部
+        # JSONL 由来の値であり、`bool(r.get("tf32", False))` は文字列
+        # `"false"`・空でない配列／オブジェクト等の非 bool 値も真として
+        # 誤って受理してしまう fail-open の欠陥だった（本来 FP32 として
+        # 通常ゲートに含めるべき行が、型検証なしに TF32 専用扱いへ
+        # 誤って除外されうる）。ここでキー欠損（`False` 扱い。互換規約
+        # ドキュメント `get()`／`devices_in()` docstring 参照）または
+        # 厳密な `bool` 型であることを検証し、不正型はロード全体を
+        # エラー終了させる（fail-closed。AGENTS.md「外部フォーマットの
+        # パース検証」「fail-closed の維持」）。検証後は各利用箇所が
+        # `r.get("tf32", False) is True` のように厳密な bool 一致で
+        # 判定できる（`bool(...)` での再変換は行わない）。
+        if "tf32" in r and not isinstance(r["tf32"], bool):
+            raise ValueError(
+                f"{path}: 不正な 'tf32' フィールド型（bool を期待）: "
+                f"{r['tf32']!r}（行: {r!r}）"
+            )
     return rows
 
 
-def get(rows, fw, task, device, size=None, mode="fresh"):
-    """`(framework, task, device, size, mode)` に一致する最初の行を返す。
+def get(rows, fw, task, device, size=None, mode="fresh", tf32=False):
+    """`(framework, task, device, size, mode, tf32)` に一致する最初の行を返す。
 
     `size=None` は size 条件を適用しない（呼び出し元がフレームワーク・
     デバイス・mode のみで絞り込みたい場合の既定動作）。`size` を指定する
@@ -609,6 +630,13 @@ def get(rows, fw, task, device, size=None, mode="fresh"):
     `r["size"]` を読むと `size` キー欠損行で `KeyError`、`bool`（`True ==
     1`）混入行で意図しない一致が起こりうる。行の `size` が不正な場合は
     比較対象から除外する＝一致しないものとして扱う。fail-closed）。
+
+    `tf32`（既定 `False`。イシュー #1042）: `r.get("tf32", False)` と一致
+    する行のみを対象にする（キー欠損 = `False` の互換規約。`Record.tf32`
+    ドキュメンテーションコメント参照）。既定を `False` にすることで、
+    通常の呼び出し元（`section()` の (a) GEMM 節・`target_gate` 系）が
+    明示指定なしに TF32 opt-in 行を誤って FP32 行として拾わないようにする
+    （fail-open 防止）。
     """
     for r in rows:
         if (
@@ -616,6 +644,7 @@ def get(rows, fw, task, device, size=None, mode="fresh"):
             and r["task"] == task
             and r["device"] == device
             and r["mode"] == mode
+            and (r.get("tf32", False) is True) == tf32
         ):
             if size is None:
                 return r
@@ -625,7 +654,57 @@ def get(rows, fw, task, device, size=None, mode="fresh"):
     return None
 
 
-def devices_in(rows, task, mode="fresh"):
+def devices_in(rows, task, mode="fresh", tf32=False):
+    """`task`／`mode` に一致するデバイス一覧（`DEVICE_ORDER` 順）を返す。
+
+    `tf32`（既定 `False`。イシュー #1042）: `get()` と同じ
+    `r.get("tf32", False)` 一致規約でデバイスを絞り込む。既定 `False` の
+    呼び出し元（(a) GEMM 節・(a') reuse 節）が、TF32 opt-in 専用に
+    計測されたデバイス（FP32 gemm 行を持たない）まで拾って「計測不可」
+    プレースホルダ行を作らないようにするため（Cursor Bugbot Low
+    指摘・PR #1091。TF32 専用行は別途 (a-tf32) 節が表示する）。
+    """
+    present = {
+        r["device"]
+        for r in rows
+        if r["task"] == task and r["mode"] == mode and (r.get("tf32", False) is True) == tf32
+    }
+    return [d for d in DEVICE_ORDER if d in present]
+
+
+def _get_train_infer_row(rows, fw, task, device, mode="fresh"):
+    """train/infer 表示節（(b)/(c)）専用の行取得。既定の FP32
+    （`tf32=False`）行を優先し、無ければ TF32 強制フレームワーク（burn
+    CUDA 等）の行をフォールバックとして返す。戻り値は `(row, is_tf32)`
+    （該当行が無ければ `(None, False)`）。
+
+    イシュー #1042 Cursor Bugbot 指摘（PR #1091・Medium）: burn の CUDA
+    train/infer は常時 TF32（FP32 厳密経路を持たない。
+    `bench-burn/src/main.rs` の `tf32: cli.device == "cuda"`）で
+    記録されるが、`get()` の既定 `tf32=False` のみで探索すると burn
+    CUDA train/infer 行が「計測不可」表示になり、成功した計測が欠測
+    として消える。GEMM の `--tf32` opt-in（同一フレームワークが
+    FP32/TF32 両方の行を持ちうるため既定 FP32 探索から除外し、TF32 行は
+    別途 (a-tf32) 節が表示する）とは異なり、train/infer では TF32 が
+    当該フレームワーク・デバイスの唯一の実測値であるため、表示側では
+    フォールバックとして拾う（精度条件が異なることは呼び出し元が
+    `is_tf32` を見て列に注記する）。
+    """
+    row = get(rows, fw, task, device, mode=mode, tf32=False)
+    if row is not None:
+        return row, False
+    row = get(rows, fw, task, device, mode=mode, tf32=True)
+    if row is not None:
+        return row, True
+    return None, False
+
+
+def _devices_in_train_infer(rows, task, mode="fresh"):
+    """train/infer 表示節（(b)/(c)）専用のデバイス一覧（`DEVICE_ORDER`
+    順）。`devices_in()` と異なり `tf32` の値を問わず union で集める
+    （`_get_train_infer_row` と対になるヘルパー。理由は同関数の
+    docstring 参照）。
+    """
     present = {r["device"] for r in rows if r["task"] == task and r["mode"] == mode}
     return [d for d in DEVICE_ORDER if d in present]
 
@@ -725,13 +804,28 @@ def gemm_checksum_reference(rows):
     checksum 参照値の算出であり、size 自体の妥当性判定は `target_gate` 側
     の `_valid_gate_size` 検査が別途「判定不能」として明示する〉）。
     """
-    sizes = sorted({r["size"] for r in rows if r["task"] == "gemm" and _valid_gate_size(r.get("size"))})
+    # イシュー #1042: `tf32` 行はここでは除外する。TF32 は FP32 と異なる
+    # 精度（reduced precision accumulation）で計算するため、同一 size で
+    # FP32 行と混在させると多数決クラスタ・優先経路の判定が TF32 行の
+    # checksum に引きずられ、正当な FP32 行を「孤立した誤値」と誤判定
+    # しうる（fail-open のおそれ）。TF32 行自身の checksum 妥当性検証は
+    # `section()` の TF32 専用節（`_tf32_gemm_reference`）が別途担う。
+    sizes = sorted(
+        {
+            r["size"]
+            for r in rows
+            if r["task"] == "gemm" and _valid_gate_size(r.get("size")) and r.get("tf32", False) is not True
+        }
+    )
     result = {}
     for size in sizes:
         candidates = [
             r
             for r in rows
-            if r["task"] == "gemm" and r["size"] == size and r["mode"] == "fresh"
+            if r["task"] == "gemm"
+            and r["size"] == size
+            and r["mode"] == "fresh"
+            and r.get("tf32", False) is not True
         ]
 
         # 相互一致するクラスタのうち最大のものを先に求める（多数派の把握）。
@@ -797,6 +891,11 @@ def gemm_checksum_mismatches(rows):
     for r in rows:
         if r["task"] != "gemm":
             continue
+        # イシュー #1042: TF32 行は FP32 参照との単純突合対象から除外する
+        # （`gemm_checksum_reference` のコメント参照。専用の妥当性検証は
+        # `section()` の TF32 節が別途担う）。
+        if r.get("tf32", False) is True:
+            continue
         # `reference` のキーは `_valid_gate_size` 検証済みの size のみ
         # （`gemm_checksum_reference` docstring 参照）。`r["size"]` が不正
         # （配列・オブジェクト等の unhashable 値）だと `dict.get()` 自体が
@@ -833,6 +932,10 @@ def gemm_checksum_unverifiable(rows):
     unverifiable = []
     for r in rows:
         if r["task"] != "gemm":
+            continue
+        # イシュー #1042: `gemm_checksum_mismatches` と同じ理由で TF32 行を
+        # 除外する。
+        if r.get("tf32", False) is True:
             continue
         # `gemm_checksum_mismatches` と同じ理由（不正 size での
         # `dict.get()` 例外終了防止。イシュー #1051 codex-review P0
@@ -1040,7 +1143,14 @@ def _parity_reason(row):
 
 
 def _row_key(r):
-    return (r["framework"], r["device"], r["size"], r["mode"])
+    # イシュー #1042: `tf32` をキーへ含める。同一
+    # `(framework, device, size, mode)` で FP32 行と TF32 opt-in 行が
+    # 同一ファイルへ同居しうるため（`--tf32` は同じ size を使う想定。
+    # `docs/cuda-tf32-optin-api-decision.md`）、`tf32` を含めないと
+    # `mismatch_by_key`/`unverifiable_keys` 等の辞書で片方が上書きされ、
+    # 無効判定（checksum 不一致・parity 失敗）の付記先を取り違える
+    # （fail-open のおそれ）。
+    return (r["framework"], r["device"], r["size"], r["mode"], r.get("tf32", False) is True)
 
 
 # イシュー #1051: 目標達成ゲート（--target）専用のヘルパー群。既存の
@@ -1065,11 +1175,16 @@ def _pick_row_for_gate(rows, fw, task, device, size):
     「異なる size の行が複数ある」を「重複キー」と誤検知するため、あえて
     既定値を持たせず必須引数にしている（codex-review 指摘・PR #1082）。
 
-    戻り値は `(row, mode, dup_reason)`。該当行が無ければ
-    `(None, None, None)`。gemm/train は fandhe-ai に reuse 行が存在しうる
-    （イシュー #925/#957）。infer は reuse モード自体が存在しないため
-    常に fresh へフォールバックする（`bench-fandhe` の `--mode` allowlist
-    は gemm/train 用。モジュール docstring 参照）。
+    戻り値は `(row, mode, dup_reason, used_tf32)`。該当行が無ければ
+    `(None, None, None, False)`。gemm/train は fandhe-ai に reuse 行が
+    存在しうる（イシュー #925/#957）。infer は reuse モード自体が
+    存在しないため常に fresh へフォールバックする（`bench-fandhe` の
+    `--mode` allowlist は gemm/train 用。モジュール docstring 参照）。
+
+    `used_tf32`: 選ばれた行が TF32 フォールバック（後述）経由なら
+    `True`。呼び出し元（`target_gate`）はこれを見て達成／未達判定に
+    「TF32 強制計測」の注記を添える（精度条件が FP32 と異なることを
+    黙って隠さないため）。
 
     同じ `(framework, task, device, size, mode)` に複数行が存在する場合は
     `dup_reason`（`None` 以外）を返し `row`/`mode` は `None` にする
@@ -1078,36 +1193,53 @@ def _pick_row_for_gate(rows, fw, task, device, size):
     JSONL の手組み改変で同一キーに正常行と壊れた行が混在した場合、
     出現順次第で遅い〈未達を示す〉fandhe-ai 行を握りつぶし「達成」判定を
     返してしまう fail-open があったため、重複自体を判定不能として扱う）。
+
+    TF32 フォールバック（イシュー #1042 Cursor Bugbot 指摘・PR #1091・
+    Medium）: gemm は `--tf32` opt-in（同一フレームワークが FP32/TF32
+    両方の行を持ちうる）のため引き続き TF32 行を判定対象から除外する
+    （既定 FP32 との混同・fail-open 防止）。一方 train/infer は burn の
+    CUDA 実行が常時 TF32（FP32 厳密経路を持たない。
+    `bench-burn/src/main.rs` の `tf32: cli.device == "cuda"`）で、TF32 行
+    を除外し続けると成功した burn CUDA train/infer 計測が「未計測」判定
+    に化ける（表示側の `_get_train_infer_row` と同じ根本原因）。
+    train/infer では TF32 行を持つフレームワーク・デバイスにとって
+    それが唯一の実測値であるため、FP32（`tf32=False`）行が 1 件も
+    無い場合に限り TF32 行へフォールバックする。
     """
-    for mode in ("reuse", "fresh"):
-        # `r.get("size")` を `_valid_gate_size` で検証してから比較する
-        # （Bugbot Medium 指摘・PR #1082 2 巡目: 直接 `r["size"]` を読むと
-        # `size` キー欠損行で `KeyError`、`bool` 混入行で `True == 1` に
-        # より意図しない一致が起こりうる。不正な size を持つ行は比較対象
-        # から除外する＝一致しないものとして扱う。fail-closed）。
-        matches = [
-            r
-            for r in rows
-            if r["framework"] == fw
-            and r["task"] == task
-            and r["device"] == device
-            and r["mode"] == mode
-            and _valid_gate_size(r.get("size"))
-            and r.get("size") == size
-        ]
-        if len(matches) > 1:
-            return (
-                None,
-                None,
-                (
-                    f"重複キー: framework={fw}, task={task}, device={device}, "
-                    f"size={size}, mode={mode} の行が {len(matches)} 件あり "
-                    "一意に選べない"
-                ),
-            )
-        if matches:
-            return matches[0], mode, None
-    return None, None, None
+    tf32_candidates = (False,) if task == "gemm" else (False, True)
+    for tf32_value in tf32_candidates:
+        for mode in ("reuse", "fresh"):
+            # `r.get("size")` を `_valid_gate_size` で検証してから比較する
+            # （Bugbot Medium 指摘・PR #1082 2 巡目: 直接 `r["size"]` を
+            # 読むと `size` キー欠損行で `KeyError`、`bool` 混入行で
+            # `True == 1` により意図しない一致が起こりうる。不正な size
+            # を持つ行は比較対象から除外する＝一致しないものとして扱う。
+            # fail-closed）。
+            matches = [
+                r
+                for r in rows
+                if r["framework"] == fw
+                and r["task"] == task
+                and r["device"] == device
+                and r["mode"] == mode
+                and (r.get("tf32", False) is True) == tf32_value
+                and _valid_gate_size(r.get("size"))
+                and r.get("size") == size
+            ]
+            if len(matches) > 1:
+                return (
+                    None,
+                    None,
+                    (
+                        f"重複キー: framework={fw}, task={task}, device={device}, "
+                        f"size={size}, mode={mode}, tf32={tf32_value} の行が "
+                        f"{len(matches)} 件あり一意に選べない"
+                    ),
+                    False,
+                )
+            if matches:
+                return matches[0], mode, None, tf32_value
+    return None, None, None, False
 
 
 def _train_reuse_row_invalid_reason(rows, r):
@@ -1271,12 +1403,27 @@ def target_gate(rows, target):
             # 実測から都度導出し、gemm と同じ経路で 1 size ごとに突合
             # する（size が実際に 1 つしか無ければ従来と同じ挙動になり、
             # 複数あれば取りこぼさず全て判定する）。
+            # イシュー #1042 codex-review P2 指摘（PR #1091）: gemm は
+            # `_pick_row_for_gate` が tf32=False の行のみを候補にする
+            # （`tf32_candidates = (False,) if task == "gemm" else ...`）
+            # ため、`sizes`/`invalid_size_rows` の導出元である
+            # `candidate_rows` に tf32=True の行を含めたままだと、
+            # FP32 側に存在しない size を持つ TF32 専用行が混在した
+            # 場合に `sizes` へその size が混入し、`_pick_row_for_gate`
+            # は tf32=False で探すため両フレームワークとも
+            # 「該当行なし」となって undeterminable が生成され、ゲートが
+            # 誤って失敗しうる。gemm では tf32=True の行を候補集合から
+            # 除外し、`_pick_row_for_gate` が実際に参照する母集団と
+            # size 集合の導出元を一致させる（train/infer は
+            # `_pick_row_for_gate` が tf32=True もフォールバック候補に
+            # 含めるため除外しない）。
             candidate_rows = [
                 r
                 for r in rows
                 if r["task"] == task
                 and r["device"] == device
                 and r["framework"] in ("fandhe-ai", target)
+                and (task != "gemm" or r.get("tf32", False) is not True)
             ]
             # 外部 JSONL 由来の `size` を検証せず set 内包・`sorted()` へ
             # 渡すと、配列／オブジェクト混入で `unhashable type`、文字列と
@@ -1332,10 +1479,10 @@ def target_gate(rows, target):
                     )
                 continue
             for size in sizes:
-                fandhe_row, fandhe_mode, fandhe_dup_reason = _pick_row_for_gate(
+                fandhe_row, fandhe_mode, fandhe_dup_reason, fandhe_used_tf32 = _pick_row_for_gate(
                     rows, "fandhe-ai", task, device, size
                 )
-                target_row, target_mode, target_dup_reason = _pick_row_for_gate(
+                target_row, target_mode, target_dup_reason, target_used_tf32 = _pick_row_for_gate(
                     rows, target, task, device, size
                 )
                 record = {
@@ -1387,10 +1534,28 @@ def target_gate(rows, target):
                 # 旧形式（要素単位検証キー欠損）gemm 行は判定は行うが、
                 # 一度も要素単位検証を受けていない点を注記する（実装計画
                 # §3「旧形式（parity 未検証）行」）。
+                notes = []
                 if (
                     fandhe_row["task"] == "gemm" and parity_status(fandhe_row) == "unverified"
                 ) or (target_row["task"] == "gemm" and parity_status(target_row) == "unverified"):
-                    record["note"] = "未検証（旧形式）"
+                    notes.append("未検証（旧形式）")
+                # イシュー #1042 Cursor Bugbot 指摘（PR #1091・Medium）:
+                # train/infer の TF32 フォールバック（`_pick_row_for_gate`）で
+                # 選ばれた行は burn CUDA 等の常時 TF32 実行であり FP32 と
+                # 精度条件が異なる。時間比較そのものは有効だが、精度条件の
+                # 違いを黙って隠さないよう注記する（判定を隠蔽しない・
+                # security.md の fail-closed 方針と同じ透明性の趣旨）。
+                tf32_parties = []
+                if fandhe_used_tf32:
+                    tf32_parties.append("fandhe-ai")
+                if target_used_tf32:
+                    tf32_parties.append(target)
+                if tf32_parties:
+                    notes.append(
+                        "TF32 強制計測（" + "・".join(tf32_parties) + "。FP32 と精度条件が異なる）"
+                    )
+                if notes:
+                    record["note"] = "; ".join(notes)
                 if fandhe_median <= target_median:
                     record["status"] = "achieved"
                 else:
@@ -1782,12 +1947,18 @@ def section(path, rows):
         # 防御的スイープ・PR #1082。target_gate 側の同一パターンと同じ
         # 理由: 外部 JSONL 由来の size を未検証のまま渡すと
         # `unhashable type`/比較 `TypeError` で `main()` 全体が
-        # traceback 停止しうる）。
+        # traceback 停止しうる）。`r.get("tf32", False) is not True` で TF32
+        # opt-in 行を除外する（Cursor Bugbot Low 指摘・PR #1091: 含めると
+        # `get()` が既定 tf32=False で見つけられない size が「計測不可」
+        # と誤表示される。TF32 専用行は (a-tf32) 節が表示する）。
         sizes = sorted(
             {
                 r["size"]
                 for r in rows
-                if r["task"] == "gemm" and r["device"] == device and _valid_gate_size(r.get("size"))
+                if r["task"] == "gemm"
+                and r["device"] == device
+                and r.get("tf32", False) is not True
+                and _valid_gate_size(r.get("size"))
             }
         )
         lines.append(f"#### {DEVICE_LABEL[device]}\n")
@@ -1820,6 +1991,8 @@ def section(path, rows):
         for device in devices_in(rows, "gemm", mode="reuse"):
             # (a) 節と同じ防御（`_valid_gate_size`。イシュー #1051
             # codex-review 指摘の防御的スイープ・PR #1082）。
+            # (a) 節と同じ理由で TF32 opt-in 行を除外する（Cursor Bugbot
+            # Low 指摘・PR #1091）。
             sizes = sorted(
                 {
                     r["size"]
@@ -1827,6 +2000,7 @@ def section(path, rows):
                     if r["task"] == "gemm"
                     and r["device"] == device
                     and r["mode"] == "reuse"
+                    and r.get("tf32", False) is not True
                     and _valid_gate_size(r.get("size"))
                 }
             )
@@ -1851,17 +2025,75 @@ def section(path, rows):
                     )
             lines.append("")
 
+    # (a-tf32) TF32 opt-in GEMM（イシュー #1042）。`--tf32` で計測された行が
+    # 存在するファイルにのみ出力する。目標達成ゲート（(a) 節・
+    # `target_gate`）からは既定で除外済み（`get()`/`_pick_row_for_gate`/
+    # `gemm_checksum_reference` の `tf32` 除外フィルタ参照）のため、ここで
+    # 独立に表示する。checksum 相互突合は（a) 節と異なり FP32 行を巻き込ま
+    # ないため行わず、行自身の要素単位検証（`parity_status`）のみを「無効」
+    # 判定に使う。
+    tf32_rows = [r for r in rows if r["task"] == "gemm" and r.get("tf32", False) is True]
+    if tf32_rows:
+        for r in tf32_rows:
+            preason = _parity_reason(r)
+            if preason is not None:
+                print(
+                    f"warning: {rel}: {r['framework']}/{r['device']}/size={r['size']}/{r['mode']} "
+                    f"(tf32) の gemm 要素単位検証が閾値超過 — {preason} — 無効データとして表示",
+                    file=sys.stderr,
+                )
+        lines.append(
+            "### (a-tf32) GEMM TF32（--tf32 opt-in。REQ-2 統一複合判定。CUDA Tensor Core reduced precision）\n"
+        )
+        tf32_devices = sorted(
+            {r["device"] for r in tf32_rows if r["device"] in DEVICE_ORDER},
+            key=DEVICE_ORDER.index,
+        )
+        for device in tf32_devices:
+            sizes = sorted(
+                {
+                    r["size"]
+                    for r in tf32_rows
+                    if r["device"] == device and _valid_gate_size(r.get("size"))
+                }
+            )
+            lines.append(f"#### {DEVICE_LABEL[device]}\n")
+            lines.append("| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for n in sizes:
+                for fw in FRAMEWORKS:
+                    r = get(rows, fw, "gemm", device, n, tf32=True)
+                    if r:
+                        preason = _parity_reason(r)
+                        if preason is not None:
+                            fw_col = f"{fw}（無効: {preason}）"
+                            lines.append(
+                                f"| {n} | {fw_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | - |"
+                            )
+                        else:
+                            lines.append(
+                                f"| {n} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['gflops']:.1f} |"
+                            )
+                    else:
+                        lines.append(f"| {n} | {fw} | 計測不可 | - | - | - |")
+            lines.append("")
+
     lines.append(
         "### (b) MLP 学習（784→256→10、ReLU、バッチ 64、MSE、SGD lr=0.01、1 ステップあたり時間）\n"
     )
     lines.append("| デバイス | フレームワーク | 中央値 | Q1 | Q3 |")
     lines.append("| --- | --- | --- | --- | --- |")
-    for device in devices_in(rows, "train"):
+    for device in _devices_in_train_infer(rows, "train"):
         for fw in FRAMEWORKS:
-            r = get(rows, fw, "train", device)
+            r, is_tf32 = _get_train_infer_row(rows, fw, "train", device)
             if r:
+                # イシュー #1042 Cursor Bugbot 指摘（PR #1091・Medium）: burn
+                # CUDA のように TF32 フォールバック行しか無い場合、FP32 と
+                # 精度条件が異なることを黙って隠さないようフレームワーク列に
+                # 注記する（(a-tf32) 節と同じ透明性の趣旨）。
+                fw_col = f"{fw}（TF32）" if is_tf32 else fw
                 lines.append(
-                    f"| {device} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} |"
+                    f"| {device} | {fw_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} |"
                 )
             else:
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - |")
@@ -2023,12 +2255,15 @@ def section(path, rows):
             return f"{v:.1f}"
         return f"{v:.0f}"
 
-    for device in devices_in(rows, "infer"):
+    for device in _devices_in_train_infer(rows, "infer"):
         for fw in FRAMEWORKS:
-            r = get(rows, fw, "infer", device)
+            r, is_tf32 = _get_train_infer_row(rows, fw, "infer", device)
             if r:
+                # (b) 節と同じ理由で TF32 フォールバック行を注記する
+                # （イシュー #1042 Cursor Bugbot 指摘・PR #1091・Medium）。
+                fw_col = f"{fw}（TF32）" if is_tf32 else fw
                 lines.append(
-                    f"| {device} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {fmt_tps(r['throughput_per_s'])} |"
+                    f"| {device} | {fw_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {fmt_tps(r['throughput_per_s'])} |"
                 )
             else:
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - | - |")
@@ -2054,6 +2289,12 @@ def section(path, rows):
         1
         for r in rows
         if r["task"] == "gemm"
+        # イシュー #1042: TF32 行は checksum 相互突合の対象から除外済み
+        # （`gemm_checksum_unverifiable`/`gemm_checksum_reference` 参照）
+        # のため `unverifiable_keys` にも決して現れない。ここで明示的に
+        # 除かないと「相互突合できた」件数へ誤って計上されてしまう
+        # （fail-open のおそれ）。
+        and r.get("tf32", False) is not True
         and _valid_gate_size(r.get("size"))
         and _row_key(r) not in unverifiable_keys
     )
@@ -2264,7 +2505,10 @@ def main():
             line = line.strip()
             if line:
                 any_skip = True
-                lines.append(f"- **{os.path.basename(sl)}**: {line}")
+                lines.append(
+                    f"- **{os.path.basename(sl)}**: "
+                    f"{_sanitize_skip_raw_for_display(line)}"
+                )
     if not any_skip:
         lines.append("- なし（skipped*.log は空または不在）")
     lines.append("")
@@ -2272,7 +2516,12 @@ def main():
     # 内（`_skip_log_paths_for_input`/`_inject_skip_failures_into_gate`）
     # で環境スコープを保ったまま既に完了している（codex P0・Bugbot High
     # 指摘・PR #1082 4 巡目）。ここでの表示用ループはあくまで人間向けの
-    # 生ログ一覧であり、ゲート判定には使わない。
+    # 生ログ一覧であり、ゲート判定には使わない。ただし `line` 自体は
+    # ベンチバイナリの stderr を含む未信頼文字列のため、ゲート節と同じ
+    # `_sanitize_skip_raw_for_display` で Markdown/HTML エスケープしてから
+    # 埋め込む（イシュー #1085・security.md A03。ファイル名部分
+    # `os.path.basename(sl)` はローカル glob 一致でありユーザー入力由来
+    # ではないため対象外）。
 
     gate_unmet = 0
     gate_undeterminable = 0

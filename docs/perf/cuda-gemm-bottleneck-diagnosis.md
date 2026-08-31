@@ -440,3 +440,181 @@ SSH 不達・ncu 不在・カウンタ権限なしで採取不能な指標があ
 - カーネル最適化そのもの（B-2〜B-8 の各イシューで実施）
 - REQ-8 下限・tolerance・ガードレール閾値の変更（人間承認タスク）
 - Metal／CPU 側の同種診断（A-7 #487／A-8 #488）
+
+## 8. FP32 SIMT 経路の再診断（#1030・2026-08-31）
+
+### 8.1 背景・受け入れ基準の読み替え
+
+イシュー #1030（親 #1029・ルート #1007）は、2026-08-29 実測（`fandhe-ai` 0.4.0・
+`scripts/bench/framework-compare`・GB10）で CUDA FP32 GEMM が N=4096 reuse
+1,101 GFLOP/s と candle（cuBLAS フル FP32）2,410 GFLOP/s の半分以下だった課題を
+受け、本ドキュメント §1〜§7（#486 系。wmma_tf32／mma_f16 が主対象）と同型の ncu
+診断を **FP32 SIMT 経路（`kernels::TILED_F32`・本番既定 f32 経路）**に対して行う
+ことを目的として起票された。
+
+**起票後の状況変化**: #1030 起票時点で計画されていた #1031 配下の sub-issue
+（#1032 レジスタブロッキング・#1033 cp.async 多段パイプライン・#1034 ブロック
+実行順スウィズル・#1035 variant selection）は、本セッション時点（2026-08-31）で
+いずれも実装・マージが完了している（#1032／#1033／#1034 はクローズ済み、#1035
+はマージ済み）。ただし各実装の docs（`cuda-gemm-simt-register-blocking.md` §5・
+`cuda-gemm-tiled-pipeline.md`・`cuda-gemm-f32-variant-selection.md` §「状態」）
+が記録するとおり、**DGX Spark GB10（REQ-8 判定機）実機での実測はいずれも未実施**
+のまま残っている（#1032 は RTX 3060 参考値のみ・#1033／#1035 は NVRTC 未検証環境
+のため全欄未実測）。
+
+したがって、本節における受け入れ基準 2（「Phase 2 表 2.2 = #1031 配下 sub-issue
+群の優先順位を実測根拠で確定する」）は、**「未着手 sub-issue の順序決め」ではなく
+「実機で残っている作業（バンクコンフリクト確認・swizzle 有効化判断・pipeline
+段数スイープ・variant selection 結線判断）の優先順位を ncu 実測根拠で確定する」**
+ことへ読み替える（実装計画 §1 の読み替えと同一。この読み替え自体を受け入れ基準の
+一部として明記する）。
+
+### 8.2 診断対象・カーネル版差
+
+主対象は現行 main の本番 FP32 SIMT 経路 `CudaGemm::run_tiled_f32`
+（`kernels.rs::TILED_F32`。#1032 のレジスタブロッキング適用後）とし、対照として
+opt-in 変種 `tiled_f32_swizzle`（#1034。`CudaGemm::new_with_tiled_f32_swizzle`）
+を、wmma_tf32 は §4／§5 の既測値（2026-08-19）との突合参考として扱う。
+
+**版差の明示**: 2026-08-29 実測の 1,101 GFLOP/s（`framework-compare` の
+`fandhe-ai` 0.4.0）は #1032（レジスタブロッキング）適用**前**の旧カーネル
+（1 スレッド 1 出力・32x32 タイル）の値である。`cuda-gemm-simt-register-blocking.md`
+§4 の RTX 3060 参考実測では同カーネルが N=4096 で 1.0090 TFLOPS（旧）→
+3.4831 TFLOPS（新・レジスタブロッキング後）と 3.45 倍化しており、現行 main の
+`tiled_f32` は 0.4.0 実測時点のカーネルとは既に別物である。本節の実測（実施でき
+次第）は現行 `tiled_f32`（レジスタブロッキング後）を対象とし、0.4.0 実測値を
+直接の比較対象としない。
+
+### 8.3 コード変更（実施済み）
+
+`crates/backend-cuda/examples/gemm_profile_target.rs` の `--path` allowlist へ
+`tiled_f32`（`CudaGemm::new` + `launch_tiled_f32`。診断用変種を一切構築しない
+基準経路）を追加した（`Path::TiledF32`。§8.3.1 のループコマンドで `--path
+tiled_f32` を指定して単体プロファイルできる）。既存 `tiled_f32_swizzle` 分岐
+（`Path::TiledF32Swizzle`）は `new_with_tiled_f32_swizzle` を経由するため、base
+自体を単独プロファイルするには本追加が必要だった。`Path::parse`・
+`path_as_str_round_trips_through_parse` の単体テストと USAGE 文字列を合わせて
+更新済み（`cargo test -p fandhe-ai-backend-cuda --example gemm_profile_target
+--features internal-diagnostics --release` で 7 件 green・本セッションで確認
+済み）。
+
+`tiled_pipeline`（#1033・`compile_tiled_pipeline_variant` 経由）の path 追加は
+本セッションでは行っていない（§8.7 のスコープ外・引き継ぎ事項として記録する）。
+
+### 8.3.1 採取コマンド（`tiled_f32`／`tiled_f32_swizzle`。6 通り: 2 path × 3 size）
+
+§3.3 のループは `wmma_tf32`／`mma_f16`（§4／§5 の既存診断・2026-08-19 実測分）
+専用であり `tiled_f32`／`tiled_f32_swizzle` を起動しない（codex-review 指摘・
+PR #1090。§3.3 本文が「§8.5 の 6 条件」の採取元と誤読されないよう、本節へ
+専用のループを切り出す）。§8.5 の記録表（6 条件）を埋めるには、§3.1〜§3.2 の
+事前確認（メトリクス存在確認・`ALLOC_ZEROS_LAUNCHES` 前提の実機検証）を終えた
+うえで、`BIN`・`METRICS`・sudo 経由起動・fail-closed な `status` 検査は §3.3 と
+同一のまま、対象 path のみを差し替えた下記ループを実行する。
+
+```sh
+# BIN・METRICS・sudo 経由起動・status 検査の構成は §3.3 と同一（詳細説明は
+# §3.3 本文を参照。本節では path リストの差分のみを示す）。
+BIN=$HOME/work/target-fandhe-ai/release/examples/gemm_profile_target
+METRICS="sm__warps_active.avg.pct_of_peak_sustained_active,\
+lts__t_sector_hit_rate.pct,\
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
+lts__t_bytes.sum.per_second,\
+sm__inst_issued.avg.pct_of_peak_sustained_active"
+
+for path in tiled_f32 tiled_f32_swizzle; do
+  for size in 1024 2048 4096; do
+    LOG="ncu-${path}-${size}.log"
+    sudo ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
+        "$BIN" --path "$path" --size "$size" \
+        > "$LOG" 2>&1
+    status=$?
+    cat "$LOG"
+    if [ "$status" -ne 0 ]; then
+      echo "abort: path=${path} size=${size} で gemm_profile_target または ncu が非 0 終了した" \
+           "（opt カーネル不在等の異常系。ログ ${LOG} を確認する）。" >&2
+      exit 1
+    fi
+  done
+done
+```
+
+`--launch-skip`（既定 `--warmup 2` なら 2）は §3.3 と同じ理由で手計算せず
+`gemm_profile_target` の出力行をそのまま使い、§3.3.1 の事前検証を `tiled_f32`
+でも一度確認してから本ループへ進むこと（`ALLOC_ZEROS_LAUNCHES = 0` の前提は
+path に依存しないが、カーネル起動順序自体は path 固有のため鵜呑みにしない）。
+
+### 8.4 実測状況: 実機アクセス不能のため未実施（fail-closed）
+
+本実装セッションは DGX Spark GB10 実機への接続手段を持たない
+（`docs/real-hardware-verification-env.md` §3 が要求する `CUDA_NODE` 環境変数・
+`docs/real-hardware-verification-env.local.md`〈`.gitignore` 対象・実値のみ
+ローカル管理〉のいずれも本セッションの worktree・環境に存在しないことを確認
+した）。よって §3.1 の ncu 事前確認以降（メトリクス存在確認・launch-skip 前提
+検証・本採取ループ）は一切実行していない。§6 の先例（2026-08-14／2026-08-15
+セッション）と同じ理由・同じ判断（値を捏造せずテンプレートのまま残す）に従い、
+下記 §8.5 の記録表は全欄「(未採取)」のまま残す。
+
+### 8.5 記録表（テンプレート。全欄未採取）
+
+| path | size | achieved occupancy（%） | L2 hit rate（%） | SMEM bank conflicts（ld, sum） | L2/LTS throughput（bytes/s） | instruction issue rate（%peak） | TFLOPS（単体実行） |
+|------|------|--------------------------|--------------------|-------------------------------------|-------------------------------|-------------------------------------|----------------------|
+| tiled_f32 | 1024 | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) |
+| tiled_f32 | 2048 | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) |
+| tiled_f32 | 4096 | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) |
+| tiled_f32_swizzle | 1024 | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) |
+| tiled_f32_swizzle | 2048 | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) |
+| tiled_f32_swizzle | 4096 | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) |
+
+（未採取理由: §8.4 のとおり本セッションは実機アクセスを持たないため。wmma_tf32
+の 2048 側 occupancy・L2/LTS throughput・issue rate〈§4.2 で「(未採取)」のまま
+残る欄〉の補完も同じ理由で本セッションでは実施できていない。）
+
+### 8.6 #1031 実機残作業の優先順位（実測根拠は §8.4 の理由により暫定・既存 docs 実測に基づく推定）
+
+上記のとおり本節自体の ncu 実測は未実施のため、下記は §8.5 の実測値ではなく、
+`cuda-gemm-simt-register-blocking.md`・`cuda-gemm-tiled-pipeline.md`・
+`cuda-gemm-f32-variant-selection.md` の既存記録および §5（wmma_tf32／mma_f16の
+2026-08-19 実測）の類推から導く**暫定**の優先順位である。GB10 実機での §8.5
+実測が得られ次第、この順序を実測根拠で確定し直す必要がある。
+
+1. **GB10 実機での `tiled_f32`（#1032 適用後カーネル）基礎実測が最優先**:
+   `cuda-gemm-simt-register-blocking.md` §4 は RTX 3060（sm_86）参考値
+   （N=4096 で 3.45 倍化）のみを持ち、REQ-8 判定機である GB10（sm_121）実測は
+   ゼロ件（同 §5「未実施として残る検証」）。#1031 の受け入れ基準（N=1024/2048/
+   4096 で candle 超え）の判定自体がこの実測を前提とするため、他の全項目に先行
+   する。
+2. **SMEM バンクコンフリクトの ncu 確認（#1032 §5 の残タスク）**: レジスタ
+   ブロッキング適用後のバンクコンフリクト状況が未確認のため、XOR swizzle 等の
+   追加対策要否を判断する前提として 1 の直後に実施する。
+3. **`tiled_f32_swizzle`（#1034）本番有効化判断**: §5 の wmma_tf32 診断
+   （2026-08-19 実測。L2 ヒット率 96.77%→76.51% が最有力主因候補）と同型の
+   L2 律速が `tiled_f32` でも生じているかを §8.5 の L2 hit rate 実測で確認し、
+   有意な悪化が見られる場合に優先度を上げる（現時点では tiled_f32 自体の L2
+   実測が皆無のため、swizzle 有効化を実測なしに進めない）。
+4. **`tiled_pipeline`（#1033）段数スイープ**: `cuda-gemm-tiled-pipeline.md`
+   冒頭の「状態」が示すとおり NVRTC 実行環境自体が未検証（実装セッションに
+   CUDA driver はあるが NVRTC がない）。GB10 実機で NVRTC コンパイルが通ることの
+   確認が 1〜3 に対しても前提となるため、この検証自体を 1 と同時に行うのが
+   効率的だが、段数スイープという追加パラメータの実測は 1〜3 の後で良い。
+5. **`gemm_variant_selection`（#1035）結線判断**: `cuda-gemm-f32-variant-
+   selection.md` の記録表は 6 形状すべて「未実測」（NVRTC 実行不能環境のため）。
+   DoubleBuffer／SplitK カーネルの数値検証・A/B 自体が 1〜4 の実機環境確立を
+   前提とするため最後に着手する。
+
+本番結線・閾値変更そのものはこの優先順位確定のみでは行わない（`deps-policy.md`・
+`security.md` の人間承認事項に該当する変更は別途ユーザー承認を要する）。
+
+### 8.7 引き継ぎ条件・スコープ外（未達分）
+
+- **§8.5 の ncu 実測**: DGX Spark GB10 への SSH 接続手段（`CUDA_NODE`・
+  `docs/real-hardware-verification-env.local.md`）を持つ後続セッションが、
+  §3.1〜§3.2 の事前確認を終えたうえで §8.3.1 の採取ループ（`--path tiled_f32`・
+  `tiled_f32_swizzle`）に従って実施する。
+- **`tiled_pipeline` path の `gemm_profile_target` への追加**（実装計画 §2 の
+  「可能なら追加」項目）は本セッションでは見送った。優先順位確定に必須ではない
+  ため §8.6 の判断には影響しないが、上記 4 の実測に着手するセッションで併せて
+  追加することを推奨する。
+- **§8.6 の優先順位の確定**: 上記は既存 docs からの推定に基づく暫定順位であり、
+  §8.5 の実測が得られ次第、実測根拠で再確定する（本節冒頭の受け入れ基準読み替え
+  のとおり、これが受け入れ基準 2 の完了条件）。

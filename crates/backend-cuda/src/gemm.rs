@@ -171,6 +171,14 @@ thread_local! {
     /// 混入しない（直列化やプロセス全体 Mutex を要さない、呼び出し単位の
     /// 観測フック）。
     pub(crate) static BIAS_ACT_FUSED_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// `ops.rs::CudaBackendOps::gemm` が `crate::precision::tf32_gemm_enabled()`
+    /// opt-in 時に [`CudaGemm::run_wmma_tf32`] へ実際にルーティングした回数
+    /// （イシュー #1042）。`BIAS_ACT_FUSED_LAUNCH_COUNT` と同型の可観測点で、
+    /// 実機なしの単体テストが opt-in フラグの分岐（TF32 経路 vs 既定の
+    /// `run_tiled_f32`）を検証するために使う。スレッドローカルにする理由も
+    /// 同上（並列テスト間の偽陽性混入を避ける）。
+    pub(crate) static TF32_OPTIN_GEMM_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。

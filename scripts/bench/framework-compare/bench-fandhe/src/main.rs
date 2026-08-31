@@ -273,6 +273,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "fresh",
         init_s: None,
         parity,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -357,6 +358,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "reuse",
         init_s: Some(init_s),
         parity: Some(parity),
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -443,6 +445,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "fresh",
         init_s: None,
         parity: None,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -585,6 +588,7 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "reuse",
         init_s: Some(init_s),
         parity: None,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -811,6 +815,7 @@ fn emit_phase_records(
                 mode,
                 init_s,
                 parity: None,
+                tf32: false,
             },
             phase,
             phase_index,
@@ -881,6 +886,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "fresh",
         init_s: None,
         parity: None,
+        tf32: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -907,7 +913,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// あるのは `parse_cli()`（`std::env::args()` 依存）を経由せず
 /// `tests::phases_with_gemm_or_infer_is_measure_error` から直接分岐を
 /// 検証できるようにするため。
+///
+/// **`--tf32`（イシュー #1042）は本バイナリでは常に MEASURE_ERROR で
+/// fail-fast する**: `bench-fandhe` は crates.io 公開版 `fandhe-ai
+/// =0.4.0` に完全固定されており（deps-policy 第 9 区分。
+/// `check_framework_compare` が registry 取得元を fail-closed 検査する
+/// ため path 依存への差し替えは不可）、本イシューで追加した
+/// `fandhe_ai::set_cuda_tf32_gemm_enabled` は次回リリース（v0.5.0 公開 +
+/// ピン更新のユーザー承認）まで本バイナリから呼べない（C-1/C-2 分割。
+/// `docs/cuda-tf32-optin-api-decision.md` 参照）。`--phases` の対象外
+/// 組合せ拒否と同型の allowlist 方式で、`cli.phases`（`match` の第 3 要素）
+/// より先に検査する。
 fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.tf32 {
+        return Err(
+            "MEASURE_ERROR: --tf32 requires fandhe-ai >= 0.5.0 (bench-fandhe is pinned to \
+             0.4.0; see docs/cuda-tf32-optin-api-decision.md C-1/C-2; issue #1042)"
+                .into(),
+        );
+    }
     match (cli.task.as_str(), cli.mode.as_str(), cli.phases) {
         ("train", "fresh", true) => run_train_phases(cli),
         ("train", "reuse", true) => run_train_reuse_phases(cli),
@@ -958,6 +982,7 @@ mod tests {
             out: out.to_string_lossy().into_owned(),
             mode: mode.to_string(),
             phases: false,
+            tf32: false,
         }
     }
 
@@ -1035,6 +1060,7 @@ mod tests {
             out: out.to_string_lossy().into_owned(),
             mode: mode.to_string(),
             phases: true,
+            tf32: false,
         }
     }
 
@@ -1163,12 +1189,38 @@ mod tests {
                 out: out.to_string_lossy().into_owned(),
                 mode: mode.to_string(),
                 phases: true,
+                tf32: false,
             };
             let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
             let msg = err.to_string();
             assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
             assert!(msg.contains("--phases"), "msg={msg}");
             assert!(msg.contains(task), "msg={msg}");
+        }
+    }
+
+    /// イシュー #1042: `bench-fandhe` は `fandhe-ai =0.4.0` に完全固定
+    /// されており本イシューの新 API を呼べないため、`--tf32` は task/mode
+    /// の組合せに関わらず常に MEASURE_ERROR で fail-fast する
+    /// （`docs/cuda-tf32-optin-api-decision.md` C-1）。
+    #[test]
+    fn tf32_flag_is_always_measure_error() {
+        for (task, mode) in [("gemm", "fresh"), ("gemm", "reuse"), ("train", "fresh")] {
+            let out = temp_out_path(&format!("tf32-unsupported-{task}-{mode}"));
+            let cli = Cli {
+                task: task.to_string(),
+                device: "cuda".to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: mode.to_string(),
+                phases: false,
+                tf32: true,
+            };
+            let err = dispatch(&cli).expect_err("--tf32 must be rejected on bench-fandhe");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--tf32"), "msg={msg}");
+            assert!(msg.contains("0.5.0"), "msg={msg}");
         }
     }
 
@@ -1187,6 +1239,7 @@ mod tests {
                 out: out.to_string_lossy().into_owned(),
                 mode: mode.to_string(),
                 phases: true,
+                tf32: false,
             };
             dispatch(&cli).expect("cuda train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -1214,6 +1267,7 @@ mod tests {
                 out: out.to_string_lossy().into_owned(),
                 mode: mode.to_string(),
                 phases: true,
+                tf32: false,
             };
             dispatch(&cli).expect("metal train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");

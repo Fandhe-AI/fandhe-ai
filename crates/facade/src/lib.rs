@@ -305,3 +305,28 @@ pub fn release_cached_memory(device: Device) -> Result<(), BackendError> {
 pub fn memory_pool_stats(device: Device) -> Result<Option<PoolStats>, BackendError> {
     Ok(resolve_ops(device)?.device_memory_pool_stats())
 }
+
+/// CUDA GEMM（`fandhe_ai::tape().var(a).matmul(b)` 等が最終的に到達する
+/// `CudaBackendOps::gemm`）の TF32 Tensor Core 経路を opt-in で有効化・
+/// 無効化する（イシュー #1042。親ツリー #1029 Phase 2）。
+///
+/// `fandhe_ai_backend_cuda::precision::set_tf32_gemm_enabled` への薄い
+/// 委譲（composition root。`docs/compat-api-scope.md` §0 の確定公開面）。
+/// **既定は無効（FP32 厳密）**。有効化すると以降の全スレッド・全 CUDA
+/// device の `gemm` 呼び出しがプロセスワイドに TF32 Tensor Core 経路へ
+/// 切り替わる（`Device` 単位ではない。`fandhe_ai_backend_cuda::precision`
+/// モジュール冒頭コメントの契約参照）。有効時に TF32 カーネルが使用不能
+/// （cc<8.0・NVRTC コンパイル失敗等）な環境では `gemm` 呼び出しが
+/// [`BackendError`] を返す（fail-closed。FP32 への黙示フォールバックは
+/// しない）。数値一致許容誤差（相対 1e-3 未満 または 絶対 1e-5 未満）・
+/// 適用範囲（`gemm_bias_act`・`gemm_resident_*`・学習経路は対象外）は
+/// 変更しない（`docs/cuda-tf32-optin-api-decision.md`）。
+pub fn set_cuda_tf32_gemm_enabled(enabled: bool) {
+    fandhe_ai_backend_cuda::precision::set_tf32_gemm_enabled(enabled);
+}
+
+/// [`set_cuda_tf32_gemm_enabled`] で設定した現在の opt-in 状態を返す
+/// （既定 `false`）。
+pub fn cuda_tf32_gemm_enabled() -> bool {
+    fandhe_ai_backend_cuda::precision::tf32_gemm_enabled()
+}
