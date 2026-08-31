@@ -19,8 +19,20 @@
 //! `cfg(target_os = "macos")` ＋ 各 `#[test]` の理由付き `#[ignore]` は
 //! `command_batching.rs` と同じ方針。
 //!
+//! **`--test-threads=1` が必須（レビュー指摘対応）**:
+//! [`pool_reuse_interleaved_with_tracked_steps_preserves_batching`] は
+//! プロセスワイド singleton `MetalContext` の診断カウンタ
+//! （`__diagnostic_batch_counters_snapshot`）を読む。既定の並列実行
+//! （`cargo test` は `--test-threads` 未指定だとスレッドプールで
+//! `#[test]` 関数を同時実行する）下では、同一バイナリ内の他テスト
+//! （`command_batching_micro_bench_untracked_vs_tracked`）が同じ
+//! singleton 経由で `encode()` を呼ぶため、カウンタの before/after
+//! 差分が他テストの dispatch で汚染され、`command_buffer_delta <
+//! encode_delta` の判定が本来の意図と無関係な理由で fail/pass しうる。
+//! 必ず `--test-threads=1` を付けて逐次実行すること。
+//!
 //! ```sh
-//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture --test-threads=1
 //! ```
 #![cfg(target_os = "macos")]
 

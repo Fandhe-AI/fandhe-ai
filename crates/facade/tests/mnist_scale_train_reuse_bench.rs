@@ -49,8 +49,19 @@
 //! PR #1097 clippy 指摘対応）。理由付き `#[ignore]` は既存の
 //! `device_param_store_bench.rs` と同じ方針。
 //!
+//! **`--test-threads=1` が必須（レビュー指摘対応）**:
+//! [`mnist_scale_train_reuse_metal_batch_counters`] はプロセスワイド
+//! singleton `MetalContext` の診断カウンタ
+//! （`__diagnostic_batch_counters_snapshot`）を読む。既定の並列実行
+//! （`cargo test` は `--test-threads` 未指定だとスレッドプールで
+//! `#[test]` 関数を同時実行する）下では、同一バイナリ内の他テスト
+//! （`mnist_scale_train_fresh_vs_reuse_metal`）が同じ singleton 経由で
+//! `encode()` を呼ぶため、カウンタの before/after 差分が他テストの
+//! dispatch で汚染され、期待値との一致判定が意図と無関係な理由で
+//! fail/pass しうる。必ず `--test-threads=1` を付けて逐次実行すること。
+//!
 //! ```sh
-//! cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture
+//! cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1
 //! ```
 #![cfg(target_os = "macos")]
 
