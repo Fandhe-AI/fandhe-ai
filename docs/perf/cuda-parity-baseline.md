@@ -526,24 +526,38 @@ GB10 実機実測・解消記録を追記する（イシュー #1102 配下・�
    （`baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only`・
    `wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced`）も全経路 enforced
    の状態へ強化方向で更新した。
-2. **ゼロコスト非後退契約化（3 件）**: 既存の確定済みベースライン行と
-   形状・シードが完全一致するため新規実機測定が不要だった 3 件を
-   `assert_parity`（green 必須）から `assert_no_parity_regression` へ
-   変換し、GB10 実機 release 2 回で green を確認した:
+2. **非後退監視の併設（3 件・PR #1115 の codex-review P1 指摘を受けて revert 済み）**:
+   既存の確定済みベースライン行と形状・シードが完全一致するため新規実機測定が
+   不要だった 3 件について、`assert_parity`（green 必須）から
+   `assert_no_parity_regression` へ**変換する**変更・CPU 参照実装比較を
+   `CudaGemm::run_wmma_tf32` 直接呼び出しとの bit-exact 比較へ**置換する**変更を
+   当初適用したが、いずれも REQ-2 統一複合判定を受け入れ条件から外す片側変更
+   （AGENTS.md「数値契約の片側変更」・`.claude/rules/coding-rust.md`「バックエンド間
+   数値一致テストの許容誤差を単独で緩和しない」に抵触）との codex-review P1 指摘を
+   受け、元の受け入れ条件（`assert_parity`・CPU 参照実装比較）を維持したまま
+   revert し、非後退監視・配線検証は別テストとして併設する形に修正済み:
    - `tensor_core_real_device.rs::tensor_core_parity_record`（TF32 部分。
-     512×512×512 seed=0x7A0 = `WmmaTf32Opt` 既存行）
-   - `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（256×256×4096
-     seed=9999 = `MmaF16` 既存行）
-   - `gemm_tf32_optin.rs::gemm_tf32_optin_on_matches_cpu_across_shapes`
-     は CPU 参照実装との tolerance 比較ではなく `CudaGemm::run_wmma_tf32`
-     直接呼び出しとの bit-exact 比較へ構造変更（本ファイルの目的が
-     「opt-in フラグ配線検証」であり CPU 参照比較が過剰だったため。
-     ベースライン非依存）
+     512×512×512 seed=0x7A0 = `WmmaTf32Opt` 既存行）は `assert_parity` を維持し、
+     `tensor_core_parity_record_tf32_non_regression` を併設（GB10 実機 release
+     2 回 green）。**元の `assert_parity` 自体は §5.3 のとおり恒常 fail のまま
+     未解消**（本項目が解消したのは基本版 provenance fail-closed〈上記 1〉のみ）
+   - `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（256×256×4096 seed=9999 =
+     `MmaF16` 既存行）は `assert_parity` を維持し、
+     `mma_f16_k4096_stress_non_regression` を併設（GB10 実機 release 2 回
+     green）。**元の `assert_parity` 自体は §5.3 のとおり恒常 fail のまま未解消**
+   - `gemm_tf32_optin.rs::gemm_tf32_optin_on_matches_cpu_across_shapes` は
+     CPU 参照実装との tolerance 比較（`assert_tf32_optin_gemm_parity`）を維持し、
+     bit-exact 配線検証を `gemm_tf32_optin_on_wiring_matches_run_wmma_tf32`
+     （`assert_tf32_optin_wiring_bit_exact`）として併設。併設テストは GB10 実機
+     release 2 回 green を確認したが、**復元した元の CPU 参照実装比較（TF32
+     経路）自体は本 revert 時点で新規に実機再測定していない**。TF32 経路が
+     複数テストで最小形状から恒常的に閾値超過している事実に鑑みると同種の
+     fail が再現しうるため、pass/fail 確定は未実施のまま次ラウンドへ引き継ぐ
 3. **未解消（新規実機測定を要するため本イシューのスコープ外）**: §5.3
-   記載の残り 5 件（`wmma_f16_k4096_stress`〈WMMA〉・`wmma_f16_opt_k4096_stress`・
+   記載の残り 6 件（`wmma_f16_k4096_stress`〈WMMA〉・`wmma_f16_opt_k4096_stress`・
    `wmma_tf32_k4096_stress_poc_v2_5`・`wmma_tf32_matches_reference_across_shapes`・
-   `wmma_tf32_opt_k4096_stress`・`wmma_tf32_opt_matches_reference_across_shapes`。
-   計 6 件）に加え、`gemm_wmma_tf32_staged.rs`・`gemm_mma_tf32.rs`（mma_tf32
+   `wmma_tf32_opt_k4096_stress`・`wmma_tf32_opt_matches_reference_across_shapes`）
+   に加え、`gemm_wmma_tf32_staged.rs`・`gemm_mma_tf32.rs`（mma_tf32
    系。`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 の原因未確定残差）・
    `mma_tf32_vs_wmma_tf32_staged.rs`・`specialized_mma_parity.rs` は複数
    形状にわたる `assert_parity` 直接比較で、既存ベースライン行と一致しない
