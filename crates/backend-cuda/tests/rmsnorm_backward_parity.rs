@@ -148,6 +148,61 @@ fn cpu_rmsnorm_rstd_reference(x: &[f32], eps: f32, rows: usize, hidden: usize) -
         .collect()
 }
 
+/// weight gradient の split-K 経路（`num_blocks >= 2`）専用の CPU 参照
+/// 実装。GPU 側 `RMSNORM_BWD_DW_PARTIAL_F32`／`RMSNORM_BWD_DW_REDUCE_F32`
+/// （`kernels_rmsnorm.rs`）の二段縮約と**同一の加算順序**で `dw` を計算
+/// する（イシュー #1102 GB10 実機再検証で判明した第 2 の非結合性。
+/// `docs/perf/cuda-parity-baseline.md` §9.5 追補）:
+///
+/// 1. 行を `num_blocks` 個のブロック（`rows_per_block =
+///    ceil(rows / num_blocks)`。末尾ブロックは `rows` で切り詰め。GPU の
+///    `RMSNORM_BWD_DW_PARTIAL_F32` と同じ切り方）へ分割し、各ブロック内は
+///    行順の `mul_add`（fmaf）逐次蓄積で部分和を求める（単段カーネル・
+///    `cpu_rmsnorm_backward_reference` の dw 蓄積と同じ FMA 契約）
+/// 2. ブロック間はブロック番号 `0..num_blocks` の順に**単純な浮動小数点
+///    加算**（`+=`。GPU の `RMSNORM_BWD_DW_REDUCE_F32` が
+///    `acc += smem[buf][j][tid]` で行うのと同じ、`fmaf` を使わない結合）
+///    で縮約する
+///
+/// 浮動小数点加算は結合則を満たさないため、単段（`num_blocks == 1`。
+/// `RMSNORM_BWD_DW_F32` 相当）の逐次和とはこの二段縮約が一般に一致しない
+/// （GB10 実機実測: `(rows=4096, hidden=4097, num_blocks=8)` で
+/// `fail_count=1/4097, max_abs_diff=3.052e-4`。9.5 追補）。dw split 経路の
+/// parity 検証はこの関数を使うことで、GPU の実際の縮約順序と揃えた上で
+/// dw カーネル自体の正しさ（縮約式・境界処理）を検証する
+/// （`num_blocks == 1` でも本関数は単一ブロックの `RMSNORM_BWD_DW_F32`
+/// と同一順序に退化するため、単段・split-K 両方の呼び出し元で共通に使える）。
+fn cpu_rmsnorm_dw_split_reference(
+    x: &[f32],
+    dy: &[f32],
+    rstd: &[f32],
+    rows: usize,
+    hidden: usize,
+    num_blocks: u32,
+) -> Vec<f32> {
+    let mut dw = vec![0.0f32; hidden];
+    if hidden == 0 || rows == 0 || num_blocks == 0 {
+        return dw;
+    }
+    let num_blocks = num_blocks as usize;
+    let rows_per_block = rows.div_ceil(num_blocks);
+
+    for b in 0..num_blocks {
+        let row_start = (b * rows_per_block).min(rows);
+        let row_end = ((b + 1) * rows_per_block).min(rows);
+        for (i, dw_i) in dw.iter_mut().enumerate() {
+            let mut partial = 0.0f32;
+            for (offset, &r) in rstd[row_start..row_end].iter().enumerate() {
+                let row = row_start + offset;
+                let idx = row * hidden + i;
+                partial = (dy[idx] * r).mul_add(x[idx], partial);
+            }
+            *dw_i += partial;
+        }
+    }
+    dw
+}
+
 fn assert_rmsnorm_backward_parity(
     rmsnorm: &CudaRmsNorm,
     seed_x: u64,
@@ -375,16 +430,20 @@ fn assert_rmsnorm_backward_dw_split_parity(
     );
 
     // `gpu_rstd = Some(&rstd)`: forward が実際に生成した `rstd` を CPU 参照
-    // 側にもそのまま供給し、dw（および dx）カーネルの縮約式・境界処理のみを
-    // 検証する。rstd 自体の一致（forward の warp butterfly reduction と CPU
-    // 逐次和という縮約順序の非結合性による ULP 差）は上記の rstd バッファ
-    // parity（REQ-2 統一複合判定）が別途 fail-closed に検出する（責務分離
-    // の契約。イシュー #1102・`docs/perf/cuda-parity-baseline.md` §9.5）。
-    // 同一 rstd を使うことで dw カーネル自体のバグ（誤った縮約式・境界
-    // 誤り等）は本テストが引き続き検出できる（§9.2 診断 2 で dw カーネル
-    // 自体の bit 一致・無罪を実測確認済み — 誤差の入り得る経路は rstd の
-    // 非結合性のみだった）。
-    let (cpu_dx, cpu_dw) = cpu_rmsnorm_backward_reference(
+    // 側にもそのまま供給し、dx カーネルの縮約式・境界処理のみを検証する
+    // （dx は num_blocks に依存しない単一カーネル `RMSNORM_BWD_DX_F32` の
+    // ため split 順序の非結合性を持たず、`cpu_rmsnorm_backward_reference`
+    // の単純な行順逐次和で問題ない）。rstd 自体の一致（forward の warp
+    // butterfly reduction と CPU 逐次和という縮約順序の非結合性による ULP
+    // 差）は上記の rstd バッファ parity（REQ-2 統一複合判定）が別途
+    // fail-closed に検出する（責務分離の契約。イシュー #1102・
+    // `docs/perf/cuda-parity-baseline.md` §9.5）。dw 側の戻り値
+    // （`_cpu_dw_naive_order`）は本関数では使わない——単段の逐次和のみで
+    // split-K の二段縮約順序を再現しないため、GB10 実機実測
+    // （`(rows=4096, hidden=4097, num_blocks=8)` で FAIL）により dw 検証
+    // には使えないと判明した（9.5 追補）。dw は下記の
+    // `cpu_rmsnorm_dw_split_reference`（GPU と同一の二段縮約順序）を使う。
+    let (cpu_dx, _cpu_dw_naive_order) = cpu_rmsnorm_backward_reference(
         &x_data,
         Some(&w_data),
         &dy_data,
@@ -402,13 +461,21 @@ fn assert_rmsnorm_backward_dw_split_parity(
         &gpu_dx,
         &cpu_dx,
     );
+
+    // dw: GPU の split-K 二段縮約（ブロック内 fmaf 蓄積 → ブロック間
+    // 単純加算）と同一順序の CPU 参照実装で比較する（イシュー #1102 GB10
+    // 実機再検証で判明した第 2 の非結合性への対応。`docs/perf/
+    // cuda-parity-baseline.md` §9.5 追補・`cpu_rmsnorm_dw_split_reference`
+    // のドキュメンテーションコメント参照）。
+    let cpu_dw_split =
+        cpu_rmsnorm_dw_split_reference(&x_data, &dy_data, &rstd, rows, hidden, num_blocks);
     fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
             "rmsnorm backward dw cpu-cuda split-K parity rows={rows} hidden={hidden} \
              num_blocks={num_blocks} eps={eps}"
         ),
         &gpu_dw.expect("with_weight=true means dw must be Some"),
-        &cpu_dw.expect("with_weight=true means dw must be Some"),
+        &cpu_dw_split,
     );
 }
 
@@ -609,4 +676,67 @@ fn save_bytes_reduction_is_hidden_times_smaller() {
 
     let reduction_ratio = naive_saved_bytes / recompute_saved_bytes;
     assert_eq!(reduction_ratio, hidden); // hidden=4096 倍の削減
+}
+
+/// `cpu_rmsnorm_dw_split_reference`（GPU split-K dw と同一の二段縮約順序）
+/// の CPU 専用回帰テスト（実機不要。イシュー #1102 GB10 実機再検証で
+/// 判明した dw split 経路固有の非結合性への対応の妥当性確認）。
+#[test]
+fn cpu_dw_split_reference_matches_naive_reference_when_num_blocks_is_one() {
+    // `num_blocks == 1` では split-K 参照実装は単一ブロックの行順逐次
+    // `mul_add` 蓄積へ退化し、最終加算は `0.0 + partial == partial`
+    // （浮動小数点の加法単位元。精度損失なし）となるため、
+    // `cpu_rmsnorm_backward_reference` の dw 出力と bit-for-bit 一致する
+    // はずである（GPU `RMSNORM_BWD_DW_F32`〈単段〉と `RMSNORM_BWD_DW_
+    // PARTIAL_F32`/`RMSNORM_BWD_DW_REDUCE_F32`〈num_blocks=1 の split-K〉
+    // が同一の蓄積順序を持つのと対応する）。
+    let rows = 37usize;
+    let hidden = 129usize;
+    let eps = 1e-5f32;
+    let x_data = Xorshift64Star::new(4001).fill_vec(rows * hidden);
+    let dy_data = Xorshift64Star::new(4002).fill_vec(rows * hidden);
+    let w_data = Xorshift64Star::new(4003).fill_vec(hidden);
+
+    let rstd = cpu_rmsnorm_rstd_reference(&x_data, eps, rows, hidden);
+    let (_dx, naive_dw) = cpu_rmsnorm_backward_reference(
+        &x_data,
+        Some(&w_data),
+        &dy_data,
+        eps,
+        rows,
+        hidden,
+        Some(&rstd),
+    );
+    let split_dw = cpu_rmsnorm_dw_split_reference(&x_data, &dy_data, &rstd, rows, hidden, 1);
+    let naive_dw = naive_dw.expect("with_weight=true means dw must be Some");
+
+    assert_eq!(naive_dw.len(), split_dw.len());
+    assert_eq!(
+        naive_dw.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        split_dw.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "num_blocks=1 では split 参照実装と素朴逐次参照実装は bit 一致するはずである"
+    );
+}
+
+/// `cpu_rmsnorm_dw_split_reference` の末尾ブロック・境界条件の回帰
+/// テスト（`rows` が `num_blocks` を割り切らないケース。GPU
+/// `RMSNORM_BWD_DW_PARTIAL_F32` の「末尾要素ブロックの扱い」コメントと
+/// 対応）: 全 `hidden` 要素が有限値で埋まり、`num_blocks` を変えても
+/// 出力形状が壊れないことを確認する（数値そのものの厳密一致は
+/// GPU 実測でのみ検証可能なため、ここでは形状・有限性のみを assert する）。
+#[test]
+fn cpu_dw_split_reference_handles_non_divisible_num_blocks() {
+    let rows = 10usize;
+    let hidden = 5usize;
+    let eps = 1e-5f32;
+    let x_data = Xorshift64Star::new(5001).fill_vec(rows * hidden);
+    let dy_data = Xorshift64Star::new(5002).fill_vec(rows * hidden);
+    let rstd = cpu_rmsnorm_rstd_reference(&x_data, eps, rows, hidden);
+
+    // rows=10 を num_blocks=7 で割ると rows_per_block=2、末尾ブロックは
+    // 行範囲が空になる（b=5,6 は [10,12) と [12,14) で共に rows=10 を
+    // 超過し空範囲）。
+    let dw = cpu_rmsnorm_dw_split_reference(&x_data, &dy_data, &rstd, rows, hidden, 7);
+    assert_eq!(dw.len(), hidden);
+    assert!(dw.iter().all(|v| v.is_finite()));
 }

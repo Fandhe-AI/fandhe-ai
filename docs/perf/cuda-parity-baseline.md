@@ -559,16 +559,74 @@ CPU 側で独自に逐次和から再計算する方式から、**forward（GPU�
 自体の parity をどこで検証しているか」を本ファイル単体で追跡できるように
 するため。`.claude/rules/code-comment-style.md`）。
 
-**期待される実機効果（GB10 未実測。次回実機セッションで確認）**: `(rows=8192,
-hidden=4096, num_blocks=1)` ケースにおいて、CPU 参照側の `rstd` が GPU
-forward の `rstd` と一致するため、9.2 で確認された「`rows=8192` の逐次
-蓄積が `rstd` の ULP 差をランダムウォーク的に増幅する」経路が排除され、
-`rmsnorm_backward_dw_split_matches_cpu_across_shapes` は pass する見込み
-である（診断 2 の bit 一致実測が根拠）。確認コマンド:
+**GB10 実機再検証（2026-09-01・9.5 の rstd 供給責務分離を適用したブランチ
+`fix/1102-rmsnorm-dw-parity-contract` 時点。コーディネータによる実機実行）**:
+
+- `rmsnorm_backward_matches_cpu_across_shapes`（非 split・dx 中心）: **pass**
+- `rmsnorm_backward_dw_split_matches_cpu_across_shapes`: **旧 FAIL ケース
+  （`rows=8192, hidden=4096, num_blocks=1`）は通過した**（9.2 診断
+  「dw カーネル無罪・rstd の ULP 差が真因」という切り分け、および 9.5 の
+  rstd 供給責務分離の妥当性を実機で裏付ける結果）。ただし**別ケースで
+  FAIL が新規発生**した:
+  `(rows=4096, hidden=4097, num_blocks=8, eps=1e-5)` で
+  `fail_count=1/4097, max_abs_diff=3.052e-4, max_rel_err=1.315e-3,
+  mean_abs_diff=3.147e-5`（`rmsnorm_backward_parity.rs:405` 相当）
+
+### 9.6 第 2 の非結合性: dw split-K の二段縮約順序（イシュー #1102 継続）
+
+**切り分け**: 9.5 は `rstd` の非結合性（forward の warp butterfly
+reduction 対 CPU 逐次和）を責務分離したが、`num_blocks >= 2`（split-K
+経路）では **dw 自体の縮約にも別の非結合性**が存在する。GPU 側
+（`kernels_rmsnorm.rs`）は二段構成である:
+
+1. `RMSNORM_BWD_DW_PARTIAL_F32`: 行を `num_blocks` 個のブロック
+   （`rows_per_block = ceil(rows / num_blocks)`）へ分割し、各ブロック内は
+   行順の `fmaf` 逐次蓄積で部分和 `dw_partial[b, i]` を求める
+2. `RMSNORM_BWD_DW_REDUCE_F32`: `dw_partial` をブロック番号
+   `b = 0..num_blocks` の順に**単純な浮動小数点加算**
+   （`acc += smem[buf][j][tid]`。`fmaf` ではない）で縮約し `dw` を書く
+
+一方 9.5 以前の CPU 参照実装（`cpu_rmsnorm_backward_reference` の dw 蓄積）
+は `num_blocks` に関わらず `0..rows` の単一の行順逐次 `mul_add` 蓄積で
+あり、GPU の二段（ブロック内 fmaf・ブロック間単純加算）構造を再現して
+いなかった。浮動小数点加算は結合則を満たさないため、`num_blocks` が
+大きく `hidden` が vec4 非整列（4097）な形状ほどこの縮約順序差が複合判定
+を超えうる規模まで蓄積しうる。
+
+**対応（tolerance 非変更）**: `crates/backend-cuda/tests/
+rmsnorm_backward_parity.rs` に `cpu_rmsnorm_dw_split_reference` を新設し、
+GPU の二段縮約順序（ブロック内 `mul_add` 逐次蓄積 → ブロック間
+`num_blocks` 順の単純加算）を CPU 側で明示的に再現した。
+`assert_rmsnorm_backward_dw_split_parity` の dw 判定はこの関数の出力と
+比較するよう変更し、9.5 の `cpu_rmsnorm_backward_reference`（単一の行順
+逐次和）を dw 判定には使わないことにした（dx 判定は num_blocks に依存
+しない独立カーネル `RMSNORM_BWD_DX_F32` を経由するため従来どおり
+`cpu_rmsnorm_backward_reference` を使い続けて問題ない）。
+
+- `num_blocks == 1` では `cpu_rmsnorm_dw_split_reference` は単一ブロックの
+  行順逐次 `mul_add` 蓄積へ退化し、最終加算が `0.0 + partial ==
+  partial`（浮動小数点の加法単位元。精度損失なし）となるため、
+  `cpu_rmsnorm_backward_reference` の dw 出力と bit-for-bit 一致する
+  （CPU 専用回帰テスト `cpu_dw_split_reference_matches_naive_reference_
+  when_num_blocks_is_one` で確認。実機不要・通常 CI で実行）
+- `rows` が `num_blocks` を割り切らない末尾ブロック（空範囲）の扱いも
+  GPU 側コメント「末尾要素ブロックの扱い」と対応させ、CPU 専用回帰テスト
+  `cpu_dw_split_reference_handles_non_divisible_num_blocks` で形状・
+  有限性を確認した
+- `RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・複合判定式・ケース表・
+  シードは引き続き一切変更していない
+- dx 側・非 split（`num_blocks=1` の `RMSNORM_BWD_DW_F32`）側は本対応の
+  影響を受けない（dx は独立カーネル、`num_blocks=1` は上記のとおり
+  bit-for-bit 退化）ため非後退が保たれる設計である
+
+**実機確認コマンド（次回 GB10 セッション）**:
 
 ```sh
 cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_backward_parity \
   -- --ignored --nocapture rmsnorm_backward_dw_split_matches_cpu_across_shapes
+cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_backward_parity \
+  -- --ignored --nocapture rmsnorm_backward_matches_cpu_across_shapes
+make test-ignored-cuda
 ```
 
 実機確認が完了し次第、本節に実測値（fail_count・max_abs_diff 等）を追記し、
