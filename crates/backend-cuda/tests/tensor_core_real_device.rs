@@ -60,8 +60,6 @@ use bench_harness::{BenchReport, Measurement, MeasurementConfig};
 use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm, CudaWmmaGemm};
 use half::f16;
 
-mod common;
-
 /// ホスト⇔デバイス転送のみ（`clone_htod`（a・b）／`alloc_zeros`（出力）／
 /// `synchronize`／`clone_dtoh`（出力）。カーネル起動を含まない）を計測する。
 ///
@@ -190,20 +188,35 @@ fn tensor_core_tflops_record() {
             .expect("BenchReport::to_json must succeed for a validated report")
     );
 
-    // WMMA TF32（opt。上記 assert で opt 経路の実行を保証済み）。
+    // WMMA TF32（opt もしくは opt-staged。上記 assert は opt 版の可用性の
+    // みを保証しており、`run_wmma_tf32` の 3 段選択（staged→opt→basic。
+    // `gemm.rs::run_wmma_tf32` ドキュメンテーションコメント参照）は
+    // 整列形状（`n%4==0 && k%4==0`）かつ staged 版が利用可能ならそちらを
+    // 最優先で選ぶ。M=N=K=4096 は整列形状であるため実機では staged 経路が
+    // 選ばれる可能性が高い。記録ラベルを固定文字列にすると実際に計測した
+    // カーネルと食い違う（イシュー #1106・PR #1115 codex-review P1 指摘
+    // 対応）ため、`CudaGemm::wmma_tf32_routed_path_is_staged` で実際に
+    // 選択された経路を判定してラベルへ反映する。
+    let tf32_path_label = if gemm.wmma_tf32_routed_path_is_staged(n, k) {
+        "wmma_tf32_staged"
+    } else {
+        "wmma_tf32_opt"
+    };
     let tf32_measurement = bench_harness::run(&config, || {
         let _ = gemm
             .run_wmma_tf32(&a_f32, &b_f32, m, n, k)
             .expect("run_wmma_tf32 must succeed on CUDA-equipped test runner");
     })
     .expect("WMMA TF32 measurement must satisfy TASK-8.1 protocol");
-    let tf32_report =
-        BenchReport::from_measurement("gemm_wmma_tf32_opt_4096", "cuda", &tf32_measurement).expect(
-            "BenchReport::from_measurement must succeed for a protocol-conformant measurement",
-        );
+    let tf32_report = BenchReport::from_measurement(
+        format!("gemm_{tf32_path_label}_4096"),
+        "cuda",
+        &tf32_measurement,
+    )
+    .expect("BenchReport::from_measurement must succeed for a protocol-conformant measurement");
     let tf32_tflops = (flops / tf32_measurement.median_secs) / 1e12;
     println!(
-        "tflops_record path=wmma_tf32_opt tflops={tf32_tflops:.3} report={}",
+        "tflops_record path={tf32_path_label} tflops={tf32_tflops:.3} report={}",
         tf32_report
             .to_json()
             .expect("BenchReport::to_json must succeed for a validated report")
@@ -257,7 +270,7 @@ fn tensor_core_tflops_record() {
         f32_transfer_measurement.median_secs
     );
     println!(
-        "tflops_record_compute_only path=wmma_tf32_opt tflops={tf32_compute_tflops:.3} \
+        "tflops_record_compute_only path={tf32_path_label} tflops={tf32_compute_tflops:.3} \
          (wall_clock_tflops={tf32_tflops:.3}, transfer_secs={:.6})",
         f32_transfer_measurement.median_secs
     );
@@ -337,17 +350,42 @@ fn tensor_core_parity_record() {
     // 「バックエンド間数値一致テストの許容誤差を単独で緩和しない」に
     // 抵触するとの指摘）。TF32 経路が REQ-2 統一複合判定を最小形状から
     // 恒常的に満たさない既知状態（`docs/spec/04-requirements.md` REQ-2
-    // の 2026-08-29 追記）にあること自体は事実であり、その非後退監視は
-    // `tensor_core_parity_record_tf32_non_regression`（本ファイル下部）
-    // へ**別テストとして併設**する（codex-review の提案どおり、元の
-    // 受け入れ条件はここで維持したまま置き換えない）。
+    // の 2026-08-29 追記）にあること自体は事実だが、その非後退監視は
+    // 本ファイルには併設しない（**PR #1115 codex-review 再指摘対応**:
+    // 併設していた `tensor_core_parity_record_tf32_non_regression` は
+    // `wmma_tf32_opt_available()` の確認後に公開 API `run_wmma_tf32` を
+    // 呼んでいたが、整列形状（512×512×512。`n%4==0 && k%4==0`）では
+    // `run_wmma_tf32` の 3 段選択が staged 経路を最優先で選ぶため
+    // （`gemm.rs::run_wmma_tf32` ドキュメンテーションコメント参照）、
+    // 実際には staged 経路の結果を `ParityPath::WmmaTf32Opt` の記録値に
+    // 対して判定してしまっていた。`common/parity_baseline.rs` の
+    // `ParityPath::WmmaTf32Opt` ドキュメンテーションコメントが明記する
+    // とおり、opt カーネル単独の非後退監視は公開 API 経由では行わず
+    // `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress`
+    // （`src/gemm.rs`。private field 経由で 3 段選択を経由せず opt
+    // カーネルを直接強制実行し、512×512×512 seed=0x7A0 行を含む全
+    // `WmmaTf32Opt` 行を検査する）が既に正しく行っている。実際に選ばれた
+    // staged 経路専用の非後退監視を追加するには 512×512×512 形状の
+    // `ParityPath::WmmaTf32Staged` ベースライン行の新規実機実測が必要
+    // だが未実施のため、推定値を書かず（`docs/perf/cuda-parity-baseline.md`
+    // 「ベースライン更新規約」）このファイルでは追加しない。よって本ファイル
+    // からは重複かつ誤判定だった非後退テストを削除し、`src/gemm.rs` 側の
+    // 既存の正しい検査に一本化する）。
     fandhe_ai_backend_cpu::assert_parity(
         "tensor_core_parity_record tf32 512x512x512",
         &c_gpu_tf32,
         &c_ref_tf32,
     );
+    // 実際に選択された経路（staged／opt）をラベルへ反映する（上記
+    // `tf32_path_label` と同じ理由。イシュー #1106・PR #1115 codex-review
+    // P1 指摘対応）。
+    let tf32_record_path_label = if gemm.wmma_tf32_routed_path_is_staged(n, k) {
+        "wmma_tf32_staged"
+    } else {
+        "wmma_tf32_opt"
+    };
     println!(
-        "parity_record path=wmma_tf32_opt shape=512x512x512 result=pass \
+        "parity_record path={tf32_record_path_label} shape=512x512x512 result=pass \
          (composite tolerance: relative<1e-3 or absolute<1e-5)"
     );
 
@@ -392,85 +430,5 @@ fn tensor_core_parity_record() {
     println!(
         "parity_record path=wmma_f16_opt shape=512x512x512 result=pass \
          (composite tolerance: relative<1e-3 or absolute<1e-5)"
-    );
-}
-
-/// `tensor_core_parity_record` の TF32 部分（512×512×512・seed=0x7A0）に
-/// 対する**非後退監視の併設テスト**（イシュー #1106・PR #1115
-/// codex-review P1 指摘対応）。
-///
-/// TF32 Tensor Core 経路は REQ-2 統一複合判定を最小形状から恒常的に
-/// 満たさない既知状態（`docs/spec/04-requirements.md` REQ-2 の
-/// 2026-08-29 追記「CUDA Tensor Core 経路の既知の不合格」・
-/// `docs/backend-cuda-real-device-testing.md` §5.3）にあるため、
-/// `tensor_core_parity_record` 本体は `assert_parity`（green 必須。
-/// REQ-2 受け入れ条件そのもの）を維持したまま、本テストは #491 で
-/// 確立した parity 非後退契約（`common::parity_baseline::
-/// assert_no_parity_regression`）で「既知の不合格分布から悪化して
-/// いないか」を別観点として監視する。**`assert_parity` を置き換える
-/// ものではなく追加のゲートである**——`tensor_core_parity_record` が
-/// green になるまでは REQ-2 違反として扱う（本体テストの failing が
-/// 本来の状態を正しく表す）。
-///
-/// 入力 seed（0x7A0）・形状（512×512×512）は `common/parity_baseline.rs`
-/// の `ParityPath::WmmaTf32Opt` 512×512×512 行（GB10 実機実測で
-/// `baseline_provenance_unconfirmed: false` 確定済み）と完全一致する
-/// ため、新規実機測定を要さない（判定式・tolerance 定数は一切変更
-/// しない）。
-#[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 7.0 以降）必須。実測記録は docs/perf/cuda-tensor-core-measurement.md"]
-fn tensor_core_parity_record_tf32_non_regression() {
-    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
-    let (m, n, k) = (512u32, 512u32, 512u32);
-
-    let gemm = CudaGemm::new(&device).expect("CudaGemm::new (tiled/WMMA TF32) must succeed");
-    assert!(
-        gemm.wmma_tf32_opt_available(),
-        "WMMA TF32 opt kernel must be available on this ignored test runner (reason: {:?})",
-        gemm.wmma_tf32_opt_unavailable_reason()
-    );
-
-    let mut rng_tf32 = bench_harness::rng::Xorshift64Star::new(0x7A0);
-    let a_tf32 = rng_tf32.fill_vec((m as usize) * (k as usize));
-    let b_tf32 = rng_tf32.fill_vec((k as usize) * (n as usize));
-    let mut c_ref_tf32 = vec![0.0f32; (m as usize) * (n as usize)];
-    fandhe_ai_backend_cpu::matmul_reference_fma(
-        &a_tf32,
-        &b_tf32,
-        &mut c_ref_tf32,
-        m as usize,
-        n as usize,
-        k as usize,
-    )
-    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
-    let c_gpu_tf32 = gemm
-        .run_wmma_tf32(&a_tf32, &b_tf32, m, n, k)
-        .expect("run_wmma_tf32 must succeed on CUDA-equipped test runner");
-
-    let baseline = common::parity_baseline::BASELINES
-        .iter()
-        .find(|b| {
-            b.path == common::parity_baseline::ParityPath::WmmaTf32Opt
-                && b.m == m
-                && b.n == n
-                && b.k == k
-                && b.seed == 0x7A0
-        })
-        .expect("wmma_tf32_opt 512x512x512 seed=0x7A0 baseline row must exist in fixture");
-    let report = fandhe_ai_backend_cpu::compare(&c_gpu_tf32, &c_ref_tf32)
-        .expect("shape must match baseline fixture");
-    common::parity_baseline::assert_no_parity_regression(
-        "tensor_core_parity_record_tf32_non_regression 512x512x512",
-        &report,
-        baseline,
-    );
-    println!(
-        "parity_record_non_regression path=wmma_tf32_opt shape=512x512x512 \
-         result=non-regression-pass (fail_count={}/{}, mean_abs_diff={:.6e}, \
-         baseline_ceiling={:.6e})",
-        report.fail_count,
-        report.total,
-        report.mean_abs_diff,
-        baseline.baseline_mean_abs_diff_ceiling
     );
 }

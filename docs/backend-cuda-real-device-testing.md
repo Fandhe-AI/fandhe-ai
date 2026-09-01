@@ -267,6 +267,21 @@ fail であり、本イシューのスコープ内〈テスト実行・結果記
    `tensor_core_tflops_record`（性能プロトコル。並列実行時の GPU 競合による既知の不安定。§5.1・
    #391 系）はパリティ判定と無関係のため対象外のまま。
 
+**追記（PR #1115 codex-review 再指摘対応）**: 上記 2 の `tensor_core_parity_record_tf32_non_regression`
+（`tensor_core_real_device.rs`）は、`wmma_tf32_opt_available()` の確認後に公開 API `run_wmma_tf32` を
+呼んでいたが、対象形状（512×512×512。`n%4==0 && k%4==0`）は整列条件を満たすため `run_wmma_tf32` の
+3 段選択（staged→opt→basic）が staged 経路を最優先で選ぶ（`gemm.rs::run_wmma_tf32` ドキュメンテーション
+コメント参照）。結果として実際には staged 経路の結果を `ParityPath::WmmaTf32Opt` の記録値（opt カーネル
+単独の非後退上限）に対して判定してしまっており、経路とベースラインが食い違う欠陥があった。
+`common/parity_baseline.rs` の `ParityPath::WmmaTf32Opt` ドキュメンテーションコメントが明記するとおり、
+opt カーネル単独の非後退監視は公開 API 経由では行わず `fandhe_ai_backend_cuda::gemm::tests::
+wmma_tf32_opt_kernel_parity_does_not_regress`（`src/gemm.rs`。private field 経由で 3 段選択を経由せず
+opt カーネルを直接強制実行し、512×512×512 seed=0x7A0 行を含む全 `WmmaTf32Opt` 行を検査する）が既に
+正しく行っている。よって `tensor_core_parity_record_tf32_non_regression` は重複かつ誤判定だったため
+削除し、`src/gemm.rs` 側の既存の正しい検査に一本化した（実際に選ばれる staged 経路専用の非後退監視を
+追加するには 512×512×512 形状の `ParityPath::WmmaTf32Staged` ベースライン行の新規実機実測が必要だが
+未実施のため、推定値を書かず本ラウンドでは追加しない）。
+
 ## 6. `#[ignore]` 分離が通常 CI で機械的に効いている根拠
 
 `docs/backend-metal-real-device-testing.md` と同型の確認。Mac（CUDA 非搭載）・CI（GitHub ホステッド・CUDA

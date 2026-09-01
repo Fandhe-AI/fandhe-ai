@@ -313,8 +313,8 @@ falsification 検査群）が全て green であることを確認した。
 
 | 経路 | 形状（M×N×K） | seed | fail_count/total | mean_abs_diff | 実測日 | 実測コミット |
 |---|---|---|---|---|---|---|
-| `wmma_tf32`（基本版） | 32×32×32 | 2000 | 要再測定・申し送り（現行記録値 154/1024 は provenance 未確定） | 要再測定・申し送り（現行記録値 3.698e-4 は provenance 未確定） | — | — |
-| `wmma_tf32`（基本版） | 256×256×4096 | 8888 | 要再測定・申し送り（現行記録値 10647/65536 は provenance 未確定） | 要再測定・申し送り（現行記録値 4.476e-3 は provenance 未確定） | — | — |
+| `wmma_tf32`（基本版） | 32×32×32 | 2000 | 154/1024 (15.0%) | 3.697936e-4（記録表記 3.699e-4・fixture 天井値 3.699e-4） | 2026-08-31/09-01 | c58d905（#1106。release 2 回・同一値） |
+| `wmma_tf32`（基本版） | 256×256×4096 | 8888 | 10647/65536 (16.2%) | 4.476030e-3（記録表記 4.477e-3・fixture 天井値 4.477e-3） | 2026-08-31/09-01 | c58d905（#1106。release 2 回・同一値） |
 | `wmma_tf32_staged` | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463436e-3（記録表記 4.463e-3・fixture 天井値 4.464e-3） | 2026-08-19 | 06b24b4（#726。release/debug 各 2 回・計 4 回で同一値） |
 
 ### 8.6 結論（本イシュー #575 のスコープでの完了状態）
@@ -540,7 +540,24 @@ GB10 実機実測・解消記録を追記する（イシュー #1102 配下・�
      512×512×512 seed=0x7A0 = `WmmaTf32Opt` 既存行）は `assert_parity` を維持し、
      `tensor_core_parity_record_tf32_non_regression` を併設（GB10 実機 release
      2 回 green）。**元の `assert_parity` 自体は §5.3 のとおり恒常 fail のまま
-     未解消**（本項目が解消したのは基本版 provenance fail-closed〈上記 1〉のみ）
+     未解消**（本項目が解消したのは基本版 provenance fail-closed〈上記 1〉のみ）。
+     **追記（PR #1115 codex-review 再指摘対応。本項目自体の欠陥）**: この併設
+     テストは `wmma_tf32_opt_available()` の確認後に公開 API `run_wmma_tf32` を
+     呼んでいたが、対象形状（512×512×512）は cp.async 整列条件
+     （`n%4==0 && k%4==0`）を満たすため `run_wmma_tf32` の 3 段選択（staged→
+     opt→basic）が staged 経路を最優先で選ぶ（`gemm.rs::run_wmma_tf32`
+     ドキュメンテーションコメント参照）。結果として実際には staged 経路の
+     結果を `WmmaTf32Opt`（opt カーネル単独の非後退上限）に対して判定して
+     しまっており、経路とベースラインが食い違う欠陥があった。opt カーネル
+     単独の非後退監視は `fandhe_ai_backend_cuda::gemm::tests::
+     wmma_tf32_opt_kernel_parity_does_not_regress`（`src/gemm.rs`。private
+     field 経由で 3 段選択を経由せず opt カーネルを直接強制実行し、この
+     512×512×512 seed=0x7A0 行を含む全 `WmmaTf32Opt` 行を検査する）が既に
+     正しく行っているため、`tensor_core_parity_record_tf32_non_regression`
+     は重複かつ誤判定だったとして削除した（実際に選ばれる staged 経路専用の
+     非後退監視の追加には 512×512×512 形状の `WmmaTf32Staged` ベースライン
+     行の新規実機実測が要るが未実施のため、推定値を書かず本ラウンドでは
+     追加していない）
    - `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（256×256×4096 seed=9999 =
      `MmaF16` 既存行）は `assert_parity` を維持し、
      `mma_f16_k4096_stress_non_regression` を併設（GB10 実機 release 2 回
