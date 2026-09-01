@@ -632,6 +632,88 @@ make test-ignored-cuda
 実機確認が完了し次第、本節に実測値（fail_count・max_abs_diff 等）を追記し、
 イシュー #1102／#1105 のクローズ可否を判断する。
 
+### 9.7 方針転換: テスト弱体化ではなくカーネル精度改善で解消する（PR #1120 codex P1・Bugbot Low 対応）
+
+9.5〜9.6 の対応は「CPU 参照実装を GPU の内部縮約順序（`rstd` の
+warp butterfly reduction・dw split-K の二段縮約）に合わせる」方式だった。
+PR #1120 の codex-review が P1 として以下を指摘した:
+
+> GPU forward の `rstd` を CPU 参照へ流用すると「独立 CPU 参照による
+> forward→backward end-to-end 一致」の検査が失われる。`rstd` 単体 +
+> 同一 `rstd` 下 dw/dx を別々に通しても、`rstd` の許容内差が `rows`
+> 方向に蓄積した dw 誤差を拘束できない。カーネル単体検査の追加は可だが、
+> 独立 CPU 参照の end-to-end 判定は残し、**実装側を修正して**統一複合
+> 判定を満たせ、という内容。
+
+この指摘は妥当と判断し、方針を転換した。
+
+**新方針（tolerance 変更なし・独立 end-to-end 検査を弱体化しない）**:
+
+1. **テスト側**: `assert_rmsnorm_backward_dw_split_parity`
+   （`crates/backend-cuda/tests/rmsnorm_backward_parity.rs`）の**主検査**を
+   独立 CPU 参照実装による end-to-end parity（`rstd`・dw・dx のいずれも
+   GPU の内部実装詳細を一切参照しない独立計算。9.5 以前の元の契約）へ
+   戻した。9.5・9.6 で追加した「GPU `rstd` を流用したカーネル単体検査」
+   （`rstd` バッファ parity・同一 `rstd` 供給下の dx／dw カーネル単体
+   検査。`cpu_rmsnorm_dw_split_reference` を含む）は**追加検査**として
+   残し、主検査を置き換えない構成にした（イシュー #1102／#1105 の
+   切り分けで有用性が実証済みのため削除はしない）
+2. **カーネル側の精度改善**（`crates/backend-cuda/src/kernels_rmsnorm.rs`）:
+   forward（`RMSNORM_F32_ONEPASS`／`RMSNORM_F32_TWOPASS`）の二乗和
+   `acc` を `float` から **`double` アキュムレータ**へ変更した。レーン内
+   部分和（`fma((double)v, (double)v, acc)`）・warp shuffle 縮約
+   （`__shfl_xor_sync` は CUDA の組み込みオーバーロードで `double`
+   〈8 byte〉に対応）・最終の除算＋平方根（`1.0 / sqrt(fma(acc,
+   (double)inv_n, (double)eps))`）のすべてを `double` で行い、`rstd` へ
+   代入する 1 回だけ `float` へ downcast する。SMEM への正規化前データ
+   格納・出力・`rstd` 自体の型契約（`float`）は変更していない
+3. **設計判断の根拠**: `hidden` 程度（数千要素）の総和では、`double`
+   （53 bit 仮数）の丸め誤差は最終 `float32` downcast の 1 ULP 未満に
+   収まる。9.2 実測の GPU/CPU `rstd` 相対差 `max_rstd_rel_delta =
+   2.06e-6`（float32 同士の縮約順序差由来）は `double` 化により実質的に
+   消滅する見込みであり、FAIL の余裕が僅か（9.5 実測: `max_rel_err =
+   1.315e-3` に対し許容 `1e-3`、`max_abs_diff = 3.052e-4`）だったことから
+   `rstd` 精度改善のみで複合判定を満たせる可能性が高いと判断した
+   （dw split-K の部分和・最終縮約自体の `double` 化は、この `rstd`
+   精度改善で解消しない場合の次段対応として保留する。9.6 に記録した
+   `cpu_rmsnorm_dw_split_reference`〈追加検査〉は保留中もそのまま有効）
+4. **他バックエンド・既存契約との整合**: FMA 契約統一
+   （`.claude/rules/coding-rust.md`「CPU 参照実装は `f32::mul_add`」）は
+   matmul 等の積和契約の話であり、縮約途中の**精度**（`double`
+   アキュムレータの採用）を複合判定の許容範囲内で引き上げることとは
+   独立の軸である。CPU 参照実装・`backend-cpu` 本番実装・Metal
+   バックエンドはいずれも `rstd` を `f32` で計算する契約のままであり、
+   本変更は「GPU 側の実装精度を独立 CPU 参照実装の精度により近づける」
+   ものであって、バックエンド間の丸め契約自体（FMA 使用・`f32` 型）を
+   変更するものではない。したがって既存の tolerance・複合判定の設計
+   意図（実装依存の縮約順序差を許容しつつ実質的なバグは検出する）とも
+   矛盾しない
+5. **性能への影響**: forward カーネルは行あたり 1 回の二乗和縮約（`hidden`
+   要素分のロード + 蓄積）でありメモリ帯域律速（`kernels_rmsnorm.rs`
+   モジュールコメント「設計」節）。`double` 演算は SM の FP64 ユニットを
+   使うが、演算数自体は `hidden` 要素程度でメモリロード量（`float4`
+   ベクトル化ロードは変更なし）と比べて軽微であり、帯域律速の性質上
+   全体スループットへの影響は無視できると見積もる（実機での定量計測は
+   次回 GB10 セッションで REQ-8 性能下限との非後退確認と合わせて行う）
+6. **Bugbot Low 対応**: `cpu_rmsnorm_rstd_reference`（追加検査で使う
+   rstd バッファ parity 用の独立参照）が `hidden == 0` で `0.0f32` 埋め
+   していたが、GPU 側の実際の契約（`rmsnorm.rs::run_rmsnorm_f32_inner`
+   の早期 return。`hidden == 0` では `sum(x^2) == 0` が数学的に確定する
+   ため `rstd = 1.0 / eps.sqrt()` を全行同一値で返す。カーネル自体は
+   この縮退ケースでは起動されない）と不一致だった。`1.0f32 /
+   eps.sqrt()` を返すよう修正した
+7. CUDA カーネルの変更は NVRTC ソース文字列（Rust の `&str` 定数）の
+   変更であり、Mac 環境では実機コンパイル確認ができない。ソース文字列
+   の存在検査（`forward_kernels_do_not_use_approximate_rsqrtf`。`double
+   acc = 0.0;`・新 `rstd` 計算式の文字列を回帰検出するよう更新済み）・
+   CPU 側テスト・`cargo fmt`／`cargo clippy --workspace --all-targets
+   --all-features -- -D warnings` の通過をローカルで確認した。GB10
+   実機でのコンパイル成立・数値実測はコーディネータが実施する
+
+**実機確認コマンド（変更なし。上記参照）**。実機確認完了後、本節に
+実測値を追記し、`rstd` 精度改善のみで解消したか、dw split-K 側の
+`double` 化が追加で必要かを判断する。
+
 ## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
 
 本節は §1〜8（GEMM `wmma`/`mma` 系ベースライン表・非後退契約本体）の続き

@@ -63,37 +63,45 @@
 //! （`hidden`／`rows` 自体の型は kernel ABI 契約のため `int` のまま
 //! 据え置く）。
 //!
-//! # 数値契約（FMA・丸め）
+//! # 数値契約（FMA・丸め・精度）
 //!
-//! 二乗和の蓄積・正規化の積和は `fmaf` を明示使用し、CPU 参照実装
-//! （`f32::mul_add`）と丸め方針を揃える（`.claude/rules/coding-rust.md`）。
-//! `rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps))`。`run_fused` 経由
-//! （`ops.rs`）で呼ばれる場合は `inv_n = 1.0`・`eps = 0.0`・
-//! `has_weight = 0` を渡し、プランの意味論 `x * rsqrt(sum(x^2))` と
-//! 厳密一致させる（`ops.rs` ドキュメンテーションコメント参照）。
+//! 正規化の積和は `fmaf` を明示使用し、CPU 参照実装（`f32::mul_add`）と
+//! 丸め方針を揃える（`.claude/rules/coding-rust.md`）。二乗和 `acc` の
+//! 蓄積・縮約・`rstd` の除算＋平方根は `double`（53 bit 仮数）で行い、
+//! `rstd` へ代入する 1 回だけ `float` へ downcast する（§「精度契約
+//! （§9.7 追補）」参照。`run_fused` 経由（`ops.rs`）で呼ばれる場合は
+//! `inv_n = 1.0`・`eps = 0.0`・`has_weight = 0` を渡し、プランの意味論
+//! `x * rsqrt(sum(x^2))` と厳密一致させる（`ops.rs` ドキュメンテーション
+//! コメント参照）。
 //!
 //! **近似 intrinsic `rsqrtf` を使わない理由**（イシュー #1105）:
 //! `rsqrtf`（MUFU.RSQ 近似 intrinsic。丸めがアーキテクチャ実装依存・
 //! 最大 ~2 ulp）は CPU 参照実装・`backend-cpu` 側 RMSNorm 本番実装が
 //! 共に使う `1.0f32 / (...).sqrt()`（IEEE 丸め）と丸め契約が不一致
-//! だったため `1.0f / sqrtf(...)` へ統一した（`.claude/rules/coding-rust.md`
-//! の FMA・丸め契約統一規約。NVRTC は既定で `prec-div`／`prec-sqrt` が
-//! true〈fast-math 未指定。`nvrtc.rs`〉のため IEEE 丸めになる）。forward
-//! は行あたり 1 回の演算でメモリ律速のため性能への影響は無視できる。
+//! だったため統一した（`.claude/rules/coding-rust.md` の FMA・丸め契約
+//! 統一規約。NVRTC は既定で `prec-div`／`prec-sqrt` が true〈fast-math
+//! 未指定。`nvrtc.rs`〉のため IEEE 丸めになる）。forward は行あたり
+//! 1 回の演算でメモリ律速のため性能への影響は無視できる。
 //!
-//! **重要な注記**: この統一は独立に妥当な是正だが、DGX Spark GB10
-//! （sm_121）実機で観測された `RMSNORM_BWD_DW_F32`（単段フォールバック
-//! dw 経路。`dw[j] = Σ_row (dy[row,j] * rstd[row]) * x[row,j]` を行方向に
-//! serial 蓄積）の REQ-2 統一複合判定（相対 1e-3 未満 または絶対 1e-5
-//! 未満。`crates/backend-cpu/src/parity.rs`）超過 FAIL の**主因ではない**
-//! （実機実測で反証済み）。真因は本カーネルの二乗和 `acc` を求める
-//! warp 内 `__shfl_xor_sync` butterfly reduction（並列木構造）と CPU 参照
-//! 実装の逐次和という縮約順序の違いに起因する `rstd` の ULP 差（浮動小数点
-//! 加算の非結合性）で、`rows` が大きいケースで蓄積を通じて増幅される。
-//! 切り分け・実測記録・残存 FAIL の扱い（ユーザー判断事項）は
-//! `docs/perf/cuda-parity-baseline.md` §9 を参照。tolerance
-//! （`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）はこの修正で一切
-//! 変更しない（変更はユーザー承認必須。`.claude/rules/security.md`）。
+//! **精度契約（§9.7 追補・イシュー #1102）**: DGX Spark GB10（sm_121）
+//! 実機で観測された `rmsnorm_backward_dw_split_matches_cpu_across_shapes`
+//! の REQ-2 統一複合判定（相対 1e-3 未満 または絶対 1e-5 未満。
+//! `crates/backend-cpu/src/parity.rs`）超過 FAIL の主因は `rsqrtf` の
+//! 丸め契約不一致ではなく、本カーネルの二乗和 `acc` を求める warp 内
+//! `__shfl_xor_sync` butterfly reduction（並列木構造）と CPU 参照実装の
+//! 逐次和という**縮約順序の違い（浮動小数点加算の非結合性）**に起因する
+//! `rstd` の ULP 差であることが実機実測で確定している
+//! （`docs/perf/cuda-parity-baseline.md` §9.2）。codex-review 指摘
+//! （PR #1120）を受け、この非結合性そのものへの対応として二乗和 `acc`
+//! を `float` から `double` アキュムレータへ変更した（レーン内部分和・
+//! warp shuffle 縮約・最終の除算＋平方根のいずれも `double`）。
+//! `hidden` 程度の要素数の総和では `double`（53 bit 仮数）の丸め誤差は
+//! 最終 `float` downcast の 1 ULP 未満に収まるため、独立 CPU 参照実装
+//! （逐次和）との差を tolerance に対して無視できる水準へ縮小する
+//! （tolerance 自体は一切変更していない。`RELATIVE_TOLERANCE`／
+//! `ABSOLUTE_RESCUE_THRESHOLD` の変更はユーザー承認必須。
+//! `.claude/rules/security.md`）。切り分け・実測記録は
+//! `docs/perf/cuda-parity-baseline.md` §9 を参照。
 //!
 //! # 意味論の正
 //!
@@ -177,7 +185,21 @@ extern "C" __global__ void rmsnorm_f32_onepass(
         const float* x_row = x + row * (long long)hidden;
         float* out_row = out + row * (long long)hidden;
 
-        float acc = 0.0f;
+        // 二乗和 acc は double アキュムレータ（レーン内部分和・warp
+        // shuffle 縮約とも）。イシュー #1102 GB10 実機実測で判明した
+        // 「forward の warp butterfly reduction と CPU 逐次和という
+        // 縮約順序の非結合性による rstd の ULP 差」（`docs/perf/
+        // cuda-parity-baseline.md` §9.2）への対応（同 §9.7 追補）:
+        // float32 では縮約順序ごとに異なる丸め誤差が生じるが、途中
+        // 計算を double（53 bit 仮数）で行えば `hidden` 要素程度の
+        // 総和では丸め誤差が最終 float32 downcast の 1 ULP 未満に
+        // 縮まり、独立 CPU 参照実装（逐次和）との差を REQ-2 統一複合
+        // 判定に対して無視できる水準へ抑えられる（`.claude/rules/
+        // coding-rust.md` の tolerance 非緩和方針は維持したまま、GPU
+        // 側の実装精度を CPU 参照実装の精度へ近づける対応）。SMEM への
+        // 正規化前データ格納・最終出力・`rstd` の型契約自体は float の
+        // まま変更しない（二乗和の蓄積過程のみを double 化する）。
+        double acc = 0.0;
 
         // ベクトル化ロード（float4）+ SMEM 格納 + 二乗和蓄積。
         // `base + 3 < hidden` は vec_hidden の定義上常に成立するが、
@@ -192,10 +214,10 @@ extern "C" __global__ void rmsnorm_f32_onepass(
                 smem[base + 1] = v.y;
                 smem[base + 2] = v.z;
                 smem[base + 3] = v.w;
-                acc = fmaf(v.x, v.x, acc);
-                acc = fmaf(v.y, v.y, acc);
-                acc = fmaf(v.z, v.z, acc);
-                acc = fmaf(v.w, v.w, acc);
+                acc = fma((double)v.x, (double)v.x, acc);
+                acc = fma((double)v.y, (double)v.y, acc);
+                acc = fma((double)v.z, (double)v.z, acc);
+                acc = fma((double)v.w, (double)v.w, acc);
             }
         }
         // スカラー経路: hidden % 4 != 0 なら全要素、それ以外は端要素なし
@@ -204,7 +226,7 @@ extern "C" __global__ void rmsnorm_f32_onepass(
         for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32) {
             float v = x_row[i];
             smem[i] = v;
-            acc = fmaf(v, v, acc);
+            acc = fma((double)v, (double)v, acc);
         }
 
         // 上記ロードループが書いた smem を他レーンが読めるようにする
@@ -213,12 +235,18 @@ extern "C" __global__ void rmsnorm_f32_onepass(
         __syncwarp(0xffffffffu);
 
         // warp 内 butterfly reduction（5 段、全レーンが総和を保持する）。
+        // `__shfl_xor_sync` は `double`（8 byte）に対応する組み込み
+        // オーバーロードを持つ（CUDA C++ Programming Guide の warp shuffle
+        // functions 節。内部で 2 回の 32-bit shuffle に分解される）ため
+        // 型変更のみで動作する。
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             acc += __shfl_xor_sync(0xffffffffu, acc, offset);
         }
 
-        float rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps));
+        // 最終の除算・平方根も double で行い、float32 へは 1 回だけ
+        // downcast する（`rstd` 自体・以降の正規化出力の型契約は不変）。
+        float rstd = (float)(1.0 / sqrt(fma(acc, (double)inv_n, (double)eps)));
 
         // 学習経路（`save_rstd != 0`）でのみ行あたり 1 スカラーを書く
         // （イシュー #596: 逆伝播は正規化済みテンソルを保存せず、この
@@ -274,27 +302,47 @@ extern "C" __global__ void rmsnorm_f32_twopass(
         // は `long long`（本ファイル冒頭コメント「ループ添字の
         // オーバーフロー安全性」参照。`hidden` が `i32::MAX` 近傍でも
         // `int` 添字の signed overflow による境界チェック迂回を防ぐ）。
-        float acc = 0.0f;
+        // 二乗和 acc は double アキュムレータ（レーン内部分和・warp
+        // shuffle 縮約とも）。イシュー #1102 GB10 実機実測で判明した
+        // 「forward の warp butterfly reduction と CPU 逐次和という
+        // 縮約順序の非結合性による rstd の ULP 差」（`docs/perf/
+        // cuda-parity-baseline.md` §9.2）への対応（同 §9.7 追補）:
+        // float32 では縮約順序ごとに異なる丸め誤差が生じるが、途中
+        // 計算を double（53 bit 仮数）で行えば `hidden` 要素程度の
+        // 総和では丸め誤差が最終 float32 downcast の 1 ULP 未満に
+        // 縮まり、独立 CPU 参照実装（逐次和）との差を REQ-2 統一複合
+        // 判定に対して無視できる水準へ抑えられる（`.claude/rules/
+        // coding-rust.md` の tolerance 非緩和方針は維持したまま、GPU
+        // 側の実装精度を CPU 参照実装の精度へ近づける対応）。SMEM への
+        // 正規化前データ格納・最終出力・`rstd` の型契約自体は float の
+        // まま変更しない（二乗和の蓄積過程のみを double 化する）。
+        double acc = 0.0;
         for (long long base = lane * 4; base < vec_hidden; base += 32 * 4) {
             if (base + 3 < hidden) {
                 float4 v = *reinterpret_cast<const float4*>(x_row + base);
-                acc = fmaf(v.x, v.x, acc);
-                acc = fmaf(v.y, v.y, acc);
-                acc = fmaf(v.z, v.z, acc);
-                acc = fmaf(v.w, v.w, acc);
+                acc = fma((double)v.x, (double)v.x, acc);
+                acc = fma((double)v.y, (double)v.y, acc);
+                acc = fma((double)v.z, (double)v.z, acc);
+                acc = fma((double)v.w, (double)v.w, acc);
             }
         }
         for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32) {
             float v = x_row[i];
-            acc = fmaf(v, v, acc);
+            acc = fma((double)v, (double)v, acc);
         }
 
+        // warp 内 butterfly reduction。`__shfl_xor_sync` は `double`
+        // （8 byte）に対応する組み込みオーバーロードを持つ（CUDA C++
+        // Programming Guide の warp shuffle functions 節。内部で 2 回の
+        // 32-bit shuffle に分解される）ため型変更のみで動作する。
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             acc += __shfl_xor_sync(0xffffffffu, acc, offset);
         }
 
-        float rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps));
+        // 最終の除算・平方根も double で行い、float32 へは 1 回だけ
+        // downcast する（`rstd` 自体・以降の正規化出力の型契約は不変）。
+        float rstd = (float)(1.0 / sqrt(fma(acc, (double)inv_n, (double)eps)));
 
         // 学習経路のみ行あたり 1 スカラーを保存する（1 パス経路と同じ
         // 契約。本ファイル冒頭コメント「意味論」・イシュー #596 参照）。
@@ -819,7 +867,7 @@ mod tests {
     }
 
     /// 順伝播カーネルが近似 intrinsic `rsqrtf` を使わず、IEEE 丸めの
-    /// `1.0f / sqrtf(...)` で `rstd` を計算していることを回帰検出する。
+    /// 除算・平方根で `rstd` を計算していることを回帰検出する。
     /// `rsqrtf`（MUFU.RSQ 近似・丸めがアーキテクチャ実装依存）は CPU
     /// 参照実装・`backend-cpu` 本番実装（共に IEEE 丸めの
     /// `1.0f32 / (...).sqrt()`）と丸め契約が不一致だったため統一した
@@ -828,9 +876,16 @@ mod tests {
     /// REQ-2 複合判定超過 FAIL の主因はこの丸め契約不一致ではなく、
     /// forward の warp butterfly reduction と CPU 逐次和の縮約順序差
     /// （非結合性）に起因する `rstd` の ULP 差であることが実機実測で
-    /// 確定している（`docs/perf/cuda-parity-baseline.md` §9）。本テストは
+    /// 確定している（`docs/perf/cuda-parity-baseline.md` §9.2）。本テストは
     /// 独立に妥当なこの丸め契約統一が再度 `rsqrtf` へ後退しないことを
-    /// CI（実機不要）で保証するものであり、上記 FAIL の解消を主張しない。
+    /// CI（実機不要）で保証する。
+    ///
+    /// **§9.7 追補（イシュー #1102）**: 上記 ULP 差そのものへの対応として
+    /// 二乗和 `acc` を `double` アキュムレータ化した（レーン内部分和・
+    /// warp shuffle 縮約・最終の除算＋平方根のいずれも `double`。float32
+    /// への downcast は `rstd` 代入の 1 回のみ）。本テストはこの `double`
+    /// 化された計算式（`float rstd = (float)(1.0 / sqrt(fma(acc, ...)))`）
+    /// の存在も回帰検出する（`rsqrtf` 不使用の検査対象を新計算式に更新）。
     #[test]
     fn forward_kernels_do_not_use_approximate_rsqrtf() {
         for src in [RMSNORM_F32_ONEPASS, RMSNORM_F32_TWOPASS] {
@@ -839,8 +894,15 @@ mod tests {
                 "近似 intrinsic rsqrtf への後退を検出（イシュー #1105 参照）"
             );
             assert!(
-                src.contains("float rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps));"),
-                "rstd の IEEE 丸め計算式（1.0f / sqrtf(...)）が見つからない"
+                src.contains("double acc = 0.0;"),
+                "二乗和アキュムレータが double でない（イシュー #1102 §9.7 の \
+                 精度改善が後退している）"
+            );
+            assert!(
+                src.contains(
+                    "float rstd = (float)(1.0 / sqrt(fma(acc, (double)inv_n, (double)eps)));"
+                ),
+                "rstd の IEEE 丸め計算式（double 精度の 1.0 / sqrt(fma(...))）が見つからない"
             );
         }
     }

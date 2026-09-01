@@ -12,20 +12,28 @@
 //! （保存は行あたり `rstd` 1 本のみ）で同じ結果に到達することを検証する
 //! （実装計画 §6「受け入れ判定」）。
 //!
-//! **責務分離の契約（イシュー #1102・`docs/perf/cuda-parity-baseline.md`
-//! §9.5）**: split-K dw 検証（`assert_rmsnorm_backward_dw_split_parity`）
-//! は forward が実際に生成した `rstd` を CPU 参照側にもそのまま供給し、
-//! dw／dx カーネルの縮約式・境界処理を検証する。`rstd` バッファ自体の
-//! parity（取り違え・破損の検出）は同関数内で CPU 独立再計算
-//! （`cpu_rmsnorm_rstd_reference`）との複合判定として別立てで行う。
-//! `rstd` 自体の縮約順序差（forward の warp butterfly reduction と CPU
-//! 逐次和という非結合性に起因する ULP 差）は REQ-2 統一複合判定の許容
-//! 範囲に収まることを 9.2 実測（`max_rstd_rel_delta = 2.06e-6`）で確認
-//! 済みであり、この複合判定はその ULP 差では fail しない一方、dw／dx
-//! カーネル自体のバグ（縮約式・境界誤り）や `rstd` バッファの取り違えは
-//! 引き続き検出する。これはバックエンド間数値一致の tolerance を緩和する
-//! ものではなく（`.claude/rules/coding-rust.md`）、単に「どの経路がどの
-//! 誤差要因を検証するか」の責務を明確化したものである。
+//! **主検査は独立 CPU 参照実装による end-to-end parity（イシュー
+//! #1102・`docs/perf/cuda-parity-baseline.md` §9）**: `rstd`・dw・dx の
+//! いずれも GPU の内部実装詳細（split-K の有無・ブロック分割・warp
+//! butterfly reduction 等）を一切参照しない独立実装（本ファイル内の
+//! テスト専用関数）で計算し、forward→backward の一連の計算結果を GPU
+//! 出力と比較する。これが本ファイルの唯一の主張（受け入れ判定）であり、
+//! カーネル実装の内部詳細を検証側が知っている前提の検査（後述の追加
+//! 検査）でこれを置き換えない（codex-review 指摘・PR #1120）。
+//!
+//! GB10 実機で観測された FAIL（イシュー #1102・#1105）はこの主検査に
+//! 対して**カーネル側の精度改善**（forward の二乗和 `acc` を `double`
+//! アキュムレータ化。`crates/backend-cuda/src/kernels_rmsnorm.rs` §9.7
+//! 追補）で解消を図った。tolerance（`RELATIVE_TOLERANCE`／
+//! `ABSOLUTE_RESCUE_THRESHOLD`）は一切変更していない
+//! （`.claude/rules/coding-rust.md` の tolerance 非緩和方針）。
+//!
+//! **追加検査（主検査を置き換えない）**: `assert_rmsnorm_backward_
+//! dw_split_parity` は上記の独立 end-to-end 検査に加え、GPU forward が
+//! 生成した `rstd` バッファ自体の parity（取り違え・破損の検出）、および
+//! 同一 `rstd` を供給した状態での dw／dx カーネル単体の縮約式・境界処理
+//! 検査を追加で行う。これらはイシュー #1102／#1105 の切り分けで有用性が
+//! 実証された補助検査であり、独立 end-to-end 検査の代替ではない。
 //!
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
@@ -44,21 +52,16 @@ mod common;
 /// `dw_i = Σ_r dy[r,i]·x[r,i]·rstd[r]` を計算する（`f32::mul_add` で
 /// GPU 側 `fmaf` と丸め方針を揃える。`.claude/rules/coding-rust.md`）。
 ///
-/// `gpu_rstd`（行ごとの `rstd`。`Some` の場合は `rows` 要素）を渡すと、
-/// CPU 参照実装は自前で二乗和を逐次縮約して `rstd` を再計算する代わりに
-/// この値をそのまま使う。**責務分離の契約**（イシュー #1102・
-/// `docs/perf/cuda-parity-baseline.md` §9.5）: forward の
-/// warp butterfly reduction（並列木構造）と CPU 側の単純逐次和は
-/// 結合則を満たさない浮動小数点演算の性質上 `rstd` に ULP 差を生み、
-/// `rows` が大きい dw の逐次蓄積（本ファイルの split-K 検証群）では
-/// この ULP 差が増幅されて複合判定を超えうる（実測: 9.2 診断）。
-/// dw・dx の逆伝播カーネル自体の正しさ（縮約式・境界処理）を検証するには、
-/// forward が実際に生成した `rstd` を両側（GPU 出力・CPU 参照）で揃えて
-/// 同一入力から比較するのが筋であり、`rstd` バッファ自体の parity は
-/// 呼び出し元（`assert_rmsnorm_backward_dw_split_parity`）が
-/// `cpu_rmsnorm_rstd_reference` との複合判定で別途検証する。`None`（呼び
-/// 出し元が独自に `rstd` を再計算させたい場合。現状は用途なし）との後方
-/// 互換のため `Option` にしている。
+/// `gpu_rstd`（行ごとの `rstd`。`Some` の場合は `rows` 要素）は
+/// **追加検査専用**のフックである: `None` を渡すと本関数は自前で二乗和を
+/// 逐次縮約して `rstd` を独立に再計算する（**主検査**——独立 CPU 参照
+/// 実装による forward→backward end-to-end parity。本ファイル冒頭の
+/// モジュールコメント参照——が使う経路であり、既定・推奨の使い方）。
+/// `Some(&rstd)` を渡すと GPU forward が実際に生成した `rstd` をそのまま
+/// 使い、dw／dx カーネル単体の縮約式・境界処理のみを切り分けて検証する
+/// **追加検査**（`assert_rmsnorm_backward_dw_split_parity` が使う。主検査
+/// の代替ではない）になる。`rstd` バッファ自体の parity は追加検査の
+/// 呼び出し元が `cpu_rmsnorm_rstd_reference` との複合判定で別途検証する。
 fn cpu_rmsnorm_backward_reference(
     x: &[f32],
     w: Option<&[f32]>,
@@ -133,7 +136,15 @@ fn cpu_rmsnorm_backward_reference(
 /// （`docs/perf/cuda-parity-baseline.md` §9.5）。
 fn cpu_rmsnorm_rstd_reference(x: &[f32], eps: f32, rows: usize, hidden: usize) -> Vec<f32> {
     if hidden == 0 {
-        return vec![0.0f32; rows];
+        // Bugbot 指摘（PR #1120）: `hidden == 0` は GPU 側
+        // （`rmsnorm.rs::run_rmsnorm_f32_inner` の早期 return。`kernels_
+        // rmsnorm.rs` のカーネル自体はこの縮退ケースでは起動されない）が
+        // `sum(x^2) == 0` を根拠に `rstd = 1.0 / eps.sqrt()`（`eps` の
+        // 有限性・非負性は `validate_rmsnorm_launch` が検証済み）を全行
+        // 同一値で返す契約になっている。以前の実装は `0.0f32` で埋めて
+        // おり、この契約と不一致だった（GPU/CPU で異なる `rstd` 定義に
+        // なっていた）ため修正した。
+        return vec![1.0f32 / eps.sqrt(); rows];
     }
     let inv_n = 1.0f32 / hidden as f32;
     (0..rows)
@@ -409,16 +420,56 @@ fn assert_rmsnorm_backward_dw_split_parity(
              CUDA-equipped test runner",
         );
 
-    // `rstd` バッファ自体の parity（弱まる検証範囲の補い。advisor 指摘対応）:
-    // dw／dx カーネル検証を「同一 rstd 供給方式」へ切り替えたことで、CPU
-    // 側が自前の逐次和で rstd を再計算しなくなる。これにより GPU forward
-    // が保存した `rstd` バッファ自体の取り違え・破損（縮約式や境界処理と
-    // 無関係な経路のバグ）を検出する経路が失われないよう、CPU 独立実装
-    // （`cpu_rmsnorm_rstd_reference`。縮約順序は GPU forward の warp
-    // butterfly reduction と異なる素朴な逐次和）との複合判定を明示的に
-    // 行う。9.2 実測の `max_rstd_rel_delta = 2.06e-6` は相対許容 1e-3 の
-    // 3 桁下であり、縮約順序差由来の ULP 不一致では fail しないことを
-    // 確認済み（`docs/perf/cuda-parity-baseline.md` §9.5）。
+    // ============================================================
+    // 【主検査】独立 CPU 参照実装による forward→backward end-to-end parity
+    // ============================================================
+    // codex-review 指摘（PR #1120）: GPU forward の `rstd` を CPU 参照へ
+    // 流用する方式を主検査にすると、「独立 CPU 参照実装による
+    // forward→backward の end-to-end 一致」という検証そのものが失われる
+    // （rstd 単体 + 同一 rstd 供給下の dw/dx を別々に通しても、rstd の
+    // 許容内差が `rows` 方向に蓄積する dw 誤差を拘束できない）。この
+    // 指摘は妥当であり、主検査は必ず独立 CPU 参照実装（`rstd` も dw も
+    // GPU の内部実装詳細〈split-K の有無・ブロック分割〉を一切参照せず
+    // 独自に計算する）で行う。GB10 実機で観測された FAIL（イシュー
+    // #1102・`docs/perf/cuda-parity-baseline.md` §9）はこの主検査に対して
+    // **カーネル側**（forward の二乗和 `acc` を `double` アキュムレータ化。
+    // `kernels_rmsnorm.rs` §9.7 追補）で解消を図った。tolerance
+    // （`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・本関数の
+    // 判定対象・ケース表は一切変更していない。
+    let (cpu_dx, cpu_dw) =
+        cpu_rmsnorm_backward_reference(&x_data, Some(&w_data), &dy_data, eps, rows, hidden, None);
+
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!(
+            "rmsnorm backward dx cpu-cuda split-K parity rows={rows} hidden={hidden} \
+             num_blocks={num_blocks} eps={eps}"
+        ),
+        &gpu_dx,
+        &cpu_dx,
+    );
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!(
+            "rmsnorm backward dw cpu-cuda split-K parity rows={rows} hidden={hidden} \
+             num_blocks={num_blocks} eps={eps}"
+        ),
+        gpu_dw
+            .as_ref()
+            .expect("with_weight=true means dw must be Some"),
+        &cpu_dw.expect("with_weight=true means dw must be Some"),
+    );
+
+    // ============================================================
+    // 【追加検査】カーネル単体の縮約式・境界処理の検証（主検査を置き換え
+    // ない。イシュー #1102・#1105 の切り分けで有用性が実証された補助
+    // 検査として維持する）
+    // ============================================================
+
+    // rstd バッファ自体の parity: GPU forward が保存した `rstd` バッファ
+    // 自体の取り違え・破損（縮約式や境界処理と無関係な経路のバグ）を
+    // 検出する（Bugbot 指摘対応: `hidden == 0` では GPU 側
+    // `1.0f / sqrtf(fma(0, inv_n, eps))` が有限値 `1/sqrt(eps)` を書く
+    // ため、`cpu_rmsnorm_rstd_reference` も同じ値を返すよう統一済み。
+    // 同関数のドキュメンテーションコメント参照）。
     let cpu_rstd = cpu_rmsnorm_rstd_reference(&x_data, eps, rows, hidden);
     fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
@@ -429,21 +480,11 @@ fn assert_rmsnorm_backward_dw_split_parity(
         &cpu_rstd,
     );
 
-    // `gpu_rstd = Some(&rstd)`: forward が実際に生成した `rstd` を CPU 参照
-    // 側にもそのまま供給し、dx カーネルの縮約式・境界処理のみを検証する
-    // （dx は num_blocks に依存しない単一カーネル `RMSNORM_BWD_DX_F32` の
-    // ため split 順序の非結合性を持たず、`cpu_rmsnorm_backward_reference`
-    // の単純な行順逐次和で問題ない）。rstd 自体の一致（forward の warp
-    // butterfly reduction と CPU 逐次和という縮約順序の非結合性による ULP
-    // 差）は上記の rstd バッファ parity（REQ-2 統一複合判定）が別途
-    // fail-closed に検出する（責務分離の契約。イシュー #1102・
-    // `docs/perf/cuda-parity-baseline.md` §9.5）。dw 側の戻り値
-    // （`_cpu_dw_naive_order`）は本関数では使わない——単段の逐次和のみで
-    // split-K の二段縮約順序を再現しないため、GB10 実機実測
-    // （`(rows=4096, hidden=4097, num_blocks=8)` で FAIL）により dw 検証
-    // には使えないと判明した（9.5 追補）。dw は下記の
-    // `cpu_rmsnorm_dw_split_reference`（GPU と同一の二段縮約順序）を使う。
-    let (cpu_dx, _cpu_dw_naive_order) = cpu_rmsnorm_backward_reference(
+    // 同一 rstd 供給下のカーネル単体検査（dx）: `gpu_rstd = Some(&rstd)`
+    // で forward の `rstd` を CPU 参照側にもそのまま供給し、dx カーネル
+    // （`RMSNORM_BWD_DX_F32`。num_blocks に依存しない独立カーネル）の
+    // 縮約式・境界処理のみを切り分けて検証する。
+    let (cpu_dx_same_rstd, _cpu_dw_naive_order) = cpu_rmsnorm_backward_reference(
         &x_data,
         Some(&w_data),
         &dy_data,
@@ -452,30 +493,29 @@ fn assert_rmsnorm_backward_dw_split_parity(
         hidden,
         Some(&rstd),
     );
-
     fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
-            "rmsnorm backward dx cpu-cuda split-K parity rows={rows} hidden={hidden} \
-             num_blocks={num_blocks} eps={eps}"
+            "rmsnorm backward dx cpu-cuda split-K same-rstd kernel-only parity rows={rows} \
+             hidden={hidden} num_blocks={num_blocks} eps={eps}"
         ),
         &gpu_dx,
-        &cpu_dx,
+        &cpu_dx_same_rstd,
     );
 
-    // dw: GPU の split-K 二段縮約（ブロック内 fmaf 蓄積 → ブロック間
-    // 単純加算）と同一順序の CPU 参照実装で比較する（イシュー #1102 GB10
-    // 実機再検証で判明した第 2 の非結合性への対応。`docs/perf/
-    // cuda-parity-baseline.md` §9.5 追補・`cpu_rmsnorm_dw_split_reference`
-    // のドキュメンテーションコメント参照）。
-    let cpu_dw_split =
+    // 同一 rstd 供給下のカーネル単体検査（dw）: GPU の split-K 二段縮約
+    // （ブロック内 fmaf 蓄積 → ブロック間単純加算）と同一順序の CPU 参照
+    // 実装で比較し、dw カーネル自体の縮約式・境界処理を切り分けて検証
+    // する（`cpu_rmsnorm_dw_split_reference` のドキュメンテーション
+    // コメント参照）。
+    let cpu_dw_split_same_rstd =
         cpu_rmsnorm_dw_split_reference(&x_data, &dy_data, &rstd, rows, hidden, num_blocks);
     fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
-            "rmsnorm backward dw cpu-cuda split-K parity rows={rows} hidden={hidden} \
-             num_blocks={num_blocks} eps={eps}"
+            "rmsnorm backward dw cpu-cuda split-K same-rstd kernel-only parity rows={rows} \
+             hidden={hidden} num_blocks={num_blocks} eps={eps}"
         ),
         &gpu_dw.expect("with_weight=true means dw must be Some"),
-        &cpu_dw_split,
+        &cpu_dw_split_same_rstd,
     );
 }
 
