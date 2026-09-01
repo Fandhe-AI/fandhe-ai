@@ -1474,8 +1474,9 @@ fn is_plain_dir(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Linux の `O_NOFOLLOW`（`<fcntl.h>`。`asm-generic/bits/fcntl-linux.h`
-/// では 8 進数 `0400000`）。[`open_nofollow`] 用（イシュー #509
+/// Linux の `O_NOFOLLOW`（`<fcntl.h>`。x86_64 等の asm-generic 系
+/// アーキテクチャでは `asm-generic/bits/fcntl-linux.h` の定義どおり
+/// 8 進数 `0400000`）。[`open_nofollow`] 用（イシュー #509
 /// codex-review P0 指摘対応）。
 ///
 /// `libc`／`rustix` クレートは許容依存 8 区分（`.claude/rules/
@@ -1485,8 +1486,42 @@ fn is_plain_dir(path: &Path) -> bool {
 /// `target_os` で分岐する（本クレートのビルド対象は Linux/macOS のみ。
 /// `backend-switching-design.md`。非 unix は crate ルート／`nvrtc`
 /// モジュール冒頭の `compile_error!` でビルド自体を拒否する）。
-#[cfg(target_os = "linux")]
+///
+/// **Linux はさらに CPU アーキテクチャで値が異なる**（イシュー #1107）。
+/// `O_NOFOLLOW`／`O_DIRECTORY` は POSIX 標準に値の規定がなく、Linux
+/// カーネルの UAPI ヘッダはアーキテクチャごとに個別定義している。
+/// x86_64 は asm-generic 値（`0400000`）を継承するが、aarch64
+/// （`arch/arm64/include/uapi/asm/fcntl.h`）は独自に
+/// `O_NOFOLLOW = 0100000` を定義する。誤って asm-generic 値
+/// （`0400000`）を aarch64 で使うと、aarch64 の UAPI 上では
+/// `0400000` は `O_LARGEFILE`（実質 no-op）を意味するため
+/// symlink 追従拒否が静かに無効化される（TOCTOU 対策の欠落。
+/// セキュリティ上のリグレッション）。GB10（DGX Spark・aarch64
+/// Linux）実機で本欠陥を確認し、`target_arch` 分岐で修正した。
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const O_NOFOLLOW: i32 = 0o400000;
+
+/// aarch64 Linux 版 `O_NOFOLLOW`（`arch/arm64/include/uapi/asm/
+/// fcntl.h` では 8 進数 `0100000`）。x86_64 版と同じ理由・同じ用途。
+/// 上記コメント（イシュー #1107）参照。
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const O_NOFOLLOW: i32 = 0o100000;
+
+/// Linux のうち x86_64／aarch64 以外の CPU アーキテクチャでは
+/// `O_NOFOLLOW`／`O_DIRECTORY` の実値を未検証のため、fail-closed で
+/// ビルド自体を拒否する（誤った定数値のまま symlink 保護・
+/// ディレクトリ限定チェックが無効化された状態で動作するのを防ぐ。
+/// イシュー #1107 の教訓）。対応アーキテクチャを追加する場合は
+/// 当該カーネル UAPI ヘッダの値を確認したうえで分岐を追加すること。
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+compile_error!(
+    "O_NOFOLLOW/O_DIRECTORY の値は x86_64/aarch64 Linux でのみ検証済みです。\
+     このアーキテクチャ向けの値をカーネル UAPI ヘッダで確認してから \
+     target_arch 分岐を追加してください（イシュー #1107）。"
+);
 
 /// macOS（Darwin）の `O_NOFOLLOW`（`<fcntl.h>` では `0x0100`）。上記
 /// Linux 版と同じ理由・同じ用途。
@@ -1627,13 +1662,27 @@ fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
         .open(path)
 }
 
-/// Linux の `O_DIRECTORY`（`<fcntl.h>`。8 進数 `0200000`）。
+/// Linux の `O_DIRECTORY`（`<fcntl.h>`。x86_64 等の asm-generic 系
+/// アーキテクチャでは 8 進数 `0200000`）。
 /// [`open_dir_nofollow`] 用（イシュー #509 codex-review P0 再指摘対応:
 /// [`create_dir_all_verified`]／[`load_cache_entry_in`] の fd 起点実装が
 /// 対象を確実にディレクトリへ限定するために使う）。[`O_NOFOLLOW`] 定数と
 /// 同じ理由で `libc`／`rustix` を使わず自前定義する。
-#[cfg(target_os = "linux")]
+///
+/// **aarch64 Linux では値が異なる**（[`O_NOFOLLOW`] のコメント・
+/// イシュー #1107 参照）。asm-generic 値（`0200000`）を aarch64 の
+/// UAPI 上で解釈すると `O_DIRECT` を意味し、ディレクトリ（tmpfs 含む）
+/// への open をカーネルが `EINVAL`（os error 22）で拒否する。GB10
+/// 実機の JIT キャッシュルート pin 失敗（`open_dir_nofollow` 経由）は
+/// この誤値が原因だった。
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const O_DIRECTORY: i32 = 0o200000;
+
+/// aarch64 Linux 版 `O_DIRECTORY`（`arch/arm64/include/uapi/asm/
+/// fcntl.h` では 8 進数 `040000`）。x86_64 版と同じ理由・同じ用途。
+/// 上記コメント（イシュー #1107）参照。
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const O_DIRECTORY: i32 = 0o40000;
 
 /// macOS（Darwin）の `O_DIRECTORY`（`<fcntl.h>` では `0x100000`）。上記
 /// Linux 版と同じ理由・同じ用途。
