@@ -703,11 +703,20 @@ pub fn fallback_chain(primary: TileConfig) -> Vec<TileConfig> {
 /// にも該当しうるため、本定数単独を機種ゲートに使わない。`verify_m4_max`
 /// が [`crate::device::probe_soc_brand_string`]（SoC ブランド文字列の実測。
 /// 例: `"Apple M4 Max"`）と組み合わせて検証する。
+// 本定数は `verify_m4_max`（下記）と `#[cfg(test)] mod tests` からのみ
+// 参照される。`verify_m4_max` を `cfg(any(test, target_os = "macos"))`
+// で分離した（下記コメント参照）ことに伴い、非 macOS・非テストの
+// lib ビルド（Linux CI の `cargo clippy --all-targets` が生成する
+// テスト抜きコンパイル単位）では到達不能になるため同じ cfg を付与する
+// （PR #1108 CI clippy 失敗の是正）。
+#[cfg(any(test, target_os = "macos"))]
 const M4_MAX_GPU_CORE_COUNT: u32 = 40;
 
 /// `verify_m4_max` が [`crate::device::probe_soc_brand_string`] の実測値と
 /// 完全一致比較する SoC ブランド名（P1・codex-review 指摘・PR #1108
 /// レビュー）。
+// `M4_MAX_GPU_CORE_COUNT` と同じ理由で cfg を付与する。
+#[cfg(any(test, target_os = "macos"))]
 const M4_MAX_SOC_BRAND: &str = "Apple M4 Max";
 
 /// `verify_m4_max` からのみ構築可能な、M4 Max 実機として検証済みである
@@ -784,6 +793,18 @@ impl VerifiedM4MaxGpuCoreCount {
 /// [`crate::context::MetalContext::verified_m4_max_gpu_core_count`] のみへ
 /// 限定することで、crate 外部から任意値でトークンを生成する経路を
 /// コンパイル時に排除する。
+// **`cfg(any(test, target_os = "macos"))`（PR #1108 CI clippy 失敗の
+// 是正）**: 本関数の非テスト呼び出し元は `crate::context::MetalContext::
+// verified_m4_max_gpu_core_count`（`cfg(target_os = "macos")` 限定の
+// `context` モジュール）のみであり、それ以外は `#[cfg(test)] mod
+// tests` 内のヘルパー `verified_m4_max_for_test` からの参照に限られる。
+// 非 macOS・非テストの lib ビルド（Linux CI の `cargo clippy
+// --all-targets` が生成するテスト抜きコンパイル単位）では両呼び出し元
+// が存在せず到達不能になるため、`pub(crate)` に閉じた際の意図（P1・
+// codex-review 再指摘・PR #1108 レビュー）を保ったまま cfg で分離する
+// （`#[allow(dead_code)]` による抑制は `coding-rust.md` により禁止のため
+// 使わない）。
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn verify_m4_max(
     gpu_core_count: Option<u32>,
     soc_brand: Option<&str>,
