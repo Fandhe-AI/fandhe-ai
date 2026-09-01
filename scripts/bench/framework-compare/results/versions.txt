@@ -78,3 +78,32 @@ bench-candle v0.1.0 (bench-candle)
 bench-burn v0.1.0 (bench-burn)
 ├── bench-common v0.1.0 (bench-common)
 └── burn v0.21.0
+
+# 環境 10/11: fandhe-ai 0.6.0 横並び再計測（イシュー #1031/#1037/#1118 の 0.6.0 反映確認）。計測日 2026-09-02。
+# 環境 8/9 と同一ノード。DGX Spark GB10 側は実行ログに rustc/cargo バージョン記録がないため、
+# 同一ノードの環境 8 実測値を参照する（推定ではなく直近実測の踏襲。環境 6 と同方針）。
+# Apple M4 Max 側は本追記時点で `cargo tree -p <crate> --depth 1` を再実行して実測した。
+
+# 環境 10: DGX Spark GB10（sm_121）/ NVIDIA driver 580.173.02 / Ubuntu aarch64
+# CUDA 13.0 V13.0.88 (nvcc) / cargo 1.97.0（環境 8 実測値を参照。本追記時点の再実測なし）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0
+bench-candle v0.1.0 (bench-candle)
+├── bench-common v0.1.0 (bench-common)
+└── candle-core v0.11.0
+bench-burn v0.1.0 (bench-burn)
+├── bench-common v0.1.0 (bench-common)
+└── burn v0.21.0
+
+# 環境 11: Apple M4 Max / macOS 26.6.2 (25G83)
+# cargo 1.96.0 (30a34c682 2026-05-25) / rustc 1.96.0 (ac68faa20 2026-05-25)
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0
+bench-candle v0.1.0 (bench-candle)
+├── bench-common v0.1.0 (bench-common)
+└── candle-core v0.11.0
+bench-burn v0.1.0 (bench-burn)
+├── bench-common v0.1.0 (bench-common)
+└── burn v0.21.0
