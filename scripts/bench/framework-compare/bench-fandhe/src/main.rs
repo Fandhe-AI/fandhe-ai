@@ -68,7 +68,7 @@ use fandhe_ai::{Device, SgdConfig, Tape, Tensor};
 use std::time::{Duration, Instant};
 
 const FRAMEWORK: &str = "fandhe-ai";
-const VERSION: &str = "0.5.0";
+const VERSION: &str = "0.6.0";
 
 const BATCH: usize = 64;
 const D_IN: usize = 784;
@@ -936,19 +936,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// **`--tf32`（イシュー #1042）は本バイナリでは常に MEASURE_ERROR で
 /// fail-fast する**: `bench-fandhe` は crates.io 公開版 `fandhe-ai
-/// =0.4.0` に完全固定されており（deps-policy 第 9 区分。
+/// =0.6.0` に完全固定されており（deps-policy 第 9 区分。
 /// `check_framework_compare` が registry 取得元を fail-closed 検査する
-/// ため path 依存への差し替えは不可）、本イシューで追加した
-/// `fandhe_ai::set_cuda_tf32_gemm_enabled` は次回リリース（v0.5.0 公開 +
-/// ピン更新のユーザー承認）まで本バイナリから呼べない（C-1/C-2 分割。
-/// `docs/cuda-tf32-optin-api-decision.md` 参照）。`--phases` の対象外
-/// 組合せ拒否と同型の allowlist 方式で、`cli.phases`（`match` の第 3 要素）
-/// より先に検査する。
+/// ため path 依存への差し替えは不可）。`fandhe_ai::set_cuda_tf32_gemm_enabled`
+/// 自体は crates.io 公開版から呼び出し可能になったが（承認ピンは v0.5.0 公開
+/// 時点で `>= 0.5.0` を満たしている）、`bench-fandhe`（`main.rs`）側の
+/// 呼び出し結線・`run_all` の tf32 スイープ追加（C-2。
+/// `docs/cuda-tf32-optin-api-decision.md` 参照）は依然未実施のため
+/// fail-fast する。`--phases` の対象外組合せ拒否と同型の allowlist 方式で、
+/// `cli.phases`（`match` の第 3 要素）より先に検査する。
 fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.tf32 {
         return Err(
-            "MEASURE_ERROR: --tf32 requires fandhe-ai >= 0.5.0 (bench-fandhe is pinned to \
-             0.4.0; see docs/cuda-tf32-optin-api-decision.md C-1/C-2; issue #1042)"
+            "MEASURE_ERROR: --tf32 requires fandhe-ai >= 0.5.0 (wiring not implemented in \
+             bench-fandhe yet; see docs/cuda-tf32-optin-api-decision.md C-2; issue #1042)"
                 .into(),
         );
     }
