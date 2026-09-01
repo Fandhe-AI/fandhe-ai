@@ -110,24 +110,44 @@ pub enum ParityPath {
     WmmaTf32Staged,
     /// `CudaMmaGemm::run_f16`（`mma.sync`/`ldmatrix`/`cp.async` 経路）。
     MmaF16,
-    /// `CudaWmmaGemm::run_f16`（基本 WMMA(f16) カーネル）。
+    /// `CudaWmmaGemm::run_f16`（**実効経路**。`wmma_f16_opt` が
+    /// `CudaWmmaGemm::new` 時点でコンパイル・ロードに成功していれば
+    /// 自動的にそちらが選ばれ、`None` の場合のみ基本版〈`wmma_f16`〉へ
+    /// フォールバックする。`gemm_wmma.rs::CudaWmmaGemm::run_f16` はこの
+    /// 選択を公開しない――basic／opt いずれかを強制実行する経路が存在
+    /// しない〈`CudaGemm`〈TF32〉の `wmma_tf32`／`wmma_tf32_opt` private
+    /// field 経由の強制実行とは異なる〉ため、本パスは常に「その時点で
+    /// 実際に選ばれた経路」の値を記録する）。
     ///
-    /// **イシュー #1106（GB10 全件洗い出し）で追加**: `tests/cpu_cuda_wmma_parity.rs::
-    /// wmma_f16_k4096_stress`（256×256×4096・seed=8888）は f16→f32→
-    /// `matmul_reference_fma`→f16 丸め→f32 の量子化込み参照でも K=4096
-    /// 蓄積により既知の tail 超過（`docs/backend-cuda-real-device-testing.md`
-    /// §5.3）を持つ。本体テスト自体は `assert_parity`（REQ-2 受け入れ条件）
-    /// を維持したまま、非後退監視を `wmma_f16_k4096_stress_non_regression`
-    /// として別テストで併設する（`ParityPath::MmaF16`・`tensor_core_parity_record`
-    /// tf32 行と同型の「元の受け入れ条件は置き換えない」設計。
+    /// **イシュー #1106（GB10 全件洗い出し）で追加・PR #1124 codex-review
+    /// 〈Cursor Bugbot Medium〉指摘で名称・provenance 記述を訂正**:
+    /// 当初 `tests/cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress`
+    /// （256×256×4096・seed=8888）を「基本 WMMA(f16) カーネル」、
+    /// `tests/gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress`
+    /// （256×256×4096・seed=8889）を「`run_f16_opt`（opt WMMA(f16)
+    /// カーネル）」として別 `ParityPath`（`WmmaF16`／`WmmaF16Opt`）で
+    /// 記録していたが、両テストとも同一の公開 API `run_f16` を呼ぶのみで
+    /// （`run_f16_opt` という関数は存在しない）、GB10 実機では opt
+    /// カーネルがロード済みのため**両方とも実際には同一の opt 経路を
+    /// 別シードで測っていただけ**だった（`WmmaF16` を basic 実測かのよう
+    /// に扱う provenance 誤り。opt がロードされない環境では
+    /// baseline_provenance_unconfirmed: false のまま basic 経路の値に
+    /// 対して誤 fail しうる欠陥もあった）。本 PR で `WmmaF16Opt` を廃止
+    /// し `WmmaF16` 1 本（「run_f16 実効経路」という正しい意味）へ統合
+    /// した。basic 単独を強制実行する経路が本クレートに存在しないため、
+    /// 実測し直しではなく名称・ドキュメンテーションコメントの訂正で
+    /// 対応する（`docs/perf/cuda-parity-baseline.md` §10.8 参照）。将来
+    /// basic 強制実行 API（`CudaGemm` の TF32 経路と同型の private
+    /// field 経由アクセス）を追加した場合は、独立した `ParityPath` へ
+    /// 再分離すること。
+    ///
+    /// 本体テスト自体は `assert_parity`（REQ-2 受け入れ条件）を維持した
+    /// まま、非後退監視を `wmma_f16_k4096_stress_non_regression`・
+    /// `wmma_f16_opt_k4096_stress_non_regression` として別テストで併設
+    /// する（`ParityPath::MmaF16`・`tensor_core_parity_record` tf32 行と
+    /// 同型の「元の受け入れ条件は置き換えない」設計。
     /// `docs/perf/cuda-parity-baseline.md` §10.4 参照）。
     WmmaF16,
-    /// `CudaWmmaGemm::run_f16_opt`（opt WMMA(f16) カーネル）。
-    ///
-    /// `WmmaF16` と同じ理由で追加（`tests/gemm_wmma_f16_opt.rs::
-    /// wmma_f16_opt_k4096_stress`。256×256×4096・seed=8889 の非後退監視を
-    /// `wmma_f16_opt_k4096_stress_non_regression` として併設する）。
-    WmmaF16Opt,
 }
 
 impl std::fmt::Display for ParityPath {
@@ -138,7 +158,6 @@ impl std::fmt::Display for ParityPath {
             ParityPath::WmmaTf32Staged => "wmma_tf32_staged",
             ParityPath::MmaF16 => "mma_f16",
             ParityPath::WmmaF16 => "wmma_f16",
-            ParityPath::WmmaF16Opt => "wmma_f16_opt",
         };
         f.write_str(s)
     }
@@ -663,15 +682,21 @@ pub static BASELINES: &[ParityBaseline] = &[
         // `run_f16` は基本/opt の分岐を持たないため provenance 不確実性なし。
         baseline_provenance_unconfirmed: false,
     },
-    // wmma_f16: K=4096 ストレスケース（256x256x4096、seed=8888）。
-    // `tests/cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress` の唯一の
-    // 呼出し（`assert_wmma_f16_parity(&gemm, ctx, 8888, 256, 256, 4096)`）。
-    // イシュー #1106（GB10 全件洗い出し）で追加。実測: DGX Spark GB10
-    // （sm_121・CUDA 13.0）・GPU アイドル・直列実行（`--test-threads=1`）
-    // 2026-09-02。
+    // wmma_f16: `run_f16` 実効経路の K=4096 ストレスケース（256x256x4096、
+    // seed=8888）。`tests/cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress`
+    // の唯一の呼出し（`assert_wmma_f16_parity(&gemm, ctx, 8888, 256, 256,
+    // 4096)`）。イシュー #1106（GB10 全件洗い出し）で追加。実測: DGX
+    // Spark GB10（sm_121・CUDA 13.0）・GPU アイドル・直列実行
+    // （`--test-threads=1`）2026-09-02。GB10 実機では opt カーネルが
+    // ロード済みのため、この値は opt 経由の実効出力である
+    // （`ParityPath::WmmaF16` ドキュメンテーションコメント「PR #1124
+    // codex-review〈Cursor Bugbot Medium〉指摘」参照。basic 単独を強制
+    // 実行する経路がないため、この事実を明示したうえで
+    // `baseline_provenance_unconfirmed: false` のまま維持する——値自体は
+    // 「run_f16 実効経路の出力」という主張どおりに正しく実測されている）。
     ParityBaseline {
         path: ParityPath::WmmaF16,
-        context: "wmma_f16 256x256x4096 seed=8888",
+        context: "wmma_f16 256x256x4096 seed=8888 (run_f16 effective route; GB10: opt)",
         m: 256,
         n: 256,
         k: 4096,
@@ -679,18 +704,19 @@ pub static BASELINES: &[ParityBaseline] = &[
         total: 256 * 256,
         baseline_fail_count: 99,
         baseline_mean_abs_diff_ceiling: 7.563e-5,
-        // `run_f16`（基本 WMMA）は分岐を持たないため provenance 不確実性
-        // なし。
         baseline_provenance_unconfirmed: false,
     },
-    // wmma_f16_opt: K=4096 ストレスケース（256x256x4096、seed=8889）。
-    // `tests/gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress` の唯一の
-    // 呼出し（`assert_wmma_f16_opt_parity(&gemm, ctx, 8889, 256, 256,
-    // 4096)`）。イシュー #1106（GB10 全件洗い出し）で追加。実測環境は
-    // 上記 `wmma_f16` 行と同一（2026-09-02）。
+    // wmma_f16: `run_f16` 実効経路の K=4096 ストレスケース（256x256x4096、
+    // seed=8889）。`tests/gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress`
+    // の唯一の呼出し（`assert_wmma_f16_opt_parity(&gemm, ctx, 8889, 256,
+    // 256, 4096)`）。上記 seed=8888 行と同じ `run_f16` 実効経路を別シード
+    // で計測した行（両テストとも同一の公開 API `run_f16` を呼ぶのみで、
+    // `run_f16_opt` という専用関数は存在しない。旧 `ParityPath::WmmaF16Opt`
+    // から統合。`ParityPath::WmmaF16` ドキュメンテーションコメント参照）。
+    // 実測環境は上記行と同一（2026-09-02）。
     ParityBaseline {
-        path: ParityPath::WmmaF16Opt,
-        context: "wmma_f16_opt 256x256x4096 seed=8889",
+        path: ParityPath::WmmaF16,
+        context: "wmma_f16 256x256x4096 seed=8889 (run_f16 effective route; GB10: opt)",
         m: 256,
         n: 256,
         k: 4096,

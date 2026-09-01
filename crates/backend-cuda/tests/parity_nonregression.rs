@@ -331,17 +331,17 @@ fn parity_baselines_do_not_regress() {
         // `wmma_tf32_opt_kernel_parity_does_not_regress`。`src/gemm.rs`）へ
         // 検査自体を移設済み（本ファイル冒頭ドキュメンテーションコメント
         // 参照。PR #640・#678 codex-review P1 指摘対応）。
-        // `ParityPath::WmmaF16`／`WmmaF16Opt` 行（イシュー #1106・GB10
-        // 全件洗い出しで追加）もここでは検査しない。それぞれの記録元
-        // ファイル（`tests/cpu_cuda_wmma_parity.rs::
-        // wmma_f16_k4096_stress_non_regression`・`tests/gemm_wmma_f16_opt.rs::
-        // wmma_f16_opt_k4096_stress_non_regression`）が同一 baseline 行を
-        // 直接検査済みのため、ここでの重複検査は行わない（`WmmaTf32`／
-        // `WmmaTf32Opt` の除外と同じ理由）。
+        // `ParityPath::WmmaF16` 行（イシュー #1106・GB10 全件洗い出しで
+        // 追加。PR #1124 codex-review〈Cursor Bugbot Medium〉指摘で
+        // `WmmaF16Opt` から統合。`ParityPath::WmmaF16` ドキュメンテーション
+        // コメント参照）もここでは検査しない。それぞれの記録元ファイル
+        // （`tests/cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress_non_regression`・
+        // `tests/gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress_non_regression`）
+        // が同一 baseline 行を直接検査済みのため、ここでの重複検査は
+        // 行わない（`WmmaTf32`／`WmmaTf32Opt` の除外と同じ理由）。
         if baseline.path == ParityPath::WmmaTf32
             || baseline.path == ParityPath::WmmaTf32Opt
             || baseline.path == ParityPath::WmmaF16
-            || baseline.path == ParityPath::WmmaF16Opt
         {
             continue;
         }
@@ -353,10 +353,7 @@ fn parity_baselines_do_not_regress() {
                 ParityPath::MmaF16 => {
                     check_mma_f16_baseline(&mma_gemm, baseline);
                 }
-                ParityPath::WmmaTf32
-                | ParityPath::WmmaTf32Opt
-                | ParityPath::WmmaF16
-                | ParityPath::WmmaF16Opt => {
+                ParityPath::WmmaTf32 | ParityPath::WmmaTf32Opt | ParityPath::WmmaF16 => {
                     unreachable!("continue で除外済み")
                 }
             }));

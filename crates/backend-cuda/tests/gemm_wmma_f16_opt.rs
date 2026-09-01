@@ -131,13 +131,18 @@ fn wmma_f16_opt_k4096_stress() {
 /// と同型のパターン）。
 ///
 /// `run_f16`（opt カーネルが利用可能な環境では自動的にそちらへルーティング
-/// される公開 API）は K=4096 蓄積により既知の tail 超過を持つため、
-/// `wmma_f16_opt_k4096_stress` 本体は `assert_parity`（REQ-2 受け入れ条件）
-/// を維持したまま、本テストは parity 非後退契約で「既知の不合格分布から
-/// 悪化していないか」を別観点として監視する。**`assert_parity` を置き換
-/// えるものではない**（`wmma_f16_k4096_stress_non_regression` ドキュメン
-/// テーションコメントと同じ設計。`docs/perf/cuda-parity-baseline.md`
-/// §10.4 参照）。
+/// される公開 API。専用の `run_f16_opt` 関数は存在しない）は K=4096 蓄積
+/// により既知の tail 超過を持つため、`wmma_f16_opt_k4096_stress` 本体は
+/// `assert_parity`（REQ-2 受け入れ条件）を維持したまま、本テストは
+/// parity 非後退契約で「既知の不合格分布から悪化していないか」を別観点
+/// として監視する。**`assert_parity` を置き換えるものではない**
+/// （`wmma_f16_k4096_stress_non_regression` ドキュメンテーションコメント
+/// と同じ設計。`docs/perf/cuda-parity-baseline.md` §10.4 参照）。
+///
+/// **PR #1124 codex-review〈Cursor Bugbot Medium〉指摘対応**: 参照する
+/// baseline 行は `common::parity_baseline::ParityPath::WmmaF16`
+/// （「run_f16 実効経路」の意味。旧 `WmmaF16Opt` から統合。
+/// `ParityPath::WmmaF16` ドキュメンテーションコメント参照）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn wmma_f16_opt_k4096_stress_non_regression() {
@@ -172,13 +177,13 @@ fn wmma_f16_opt_k4096_stress_non_regression() {
     let baseline = common::parity_baseline::BASELINES
         .iter()
         .find(|b| {
-            b.path == common::parity_baseline::ParityPath::WmmaF16Opt
+            b.path == common::parity_baseline::ParityPath::WmmaF16
                 && b.m == m
                 && b.n == n
                 && b.k == k
                 && b.seed == seed
         })
-        .expect("wmma_f16_opt 256x256x4096 seed=8889 baseline row must exist in fixture");
+        .expect("wmma_f16 256x256x4096 seed=8889 baseline row must exist in fixture");
     let report = fandhe_ai_backend_cpu::compare(&c_gpu_f32, &c_ref_rounded)
         .expect("shape must match baseline fixture");
     common::parity_baseline::assert_no_parity_regression(

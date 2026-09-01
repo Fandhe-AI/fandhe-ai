@@ -181,6 +181,13 @@ fn wmma_f16_k4096_stress() {
 /// `wmma_f16_k4096_stress` が green になるまでは REQ-2 違反として扱う
 /// （本体テストの failing が本来の状態を正しく表す。
 /// `docs/perf/cuda-parity-baseline.md` §10.4 参照）。
+///
+/// **PR #1124 codex-review〈Cursor Bugbot Medium〉指摘対応**: 参照する
+/// baseline 行は `common::parity_baseline::ParityPath::WmmaF16`
+/// （`CudaWmmaGemm::run_f16` の「実効経路」の意味。opt カーネルが
+/// ロード済みなら自動的にそちらへルーティングされ、本テストが basic
+/// カーネル単独を強制実行しているわけではない。
+/// `ParityPath::WmmaF16` ドキュメンテーションコメント参照）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn wmma_f16_k4096_stress_non_regression() {

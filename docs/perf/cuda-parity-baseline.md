@@ -1459,3 +1459,33 @@ fail_count=0/1 を確認済みの値）。
 - #1106 の受入条件「GB10 で該当テスト群が全 pass」は、上記未決定事項が
   残る限り本 PR 単独では満たされない（スコープ分割の要否をユーザーへ
   諮る）
+
+### 10.8 PR #1124 codex-review 指摘対応（Cursor Bugbot Medium: WmmaF16 provenance 誤り）
+
+`ParityPath::WmmaF16`（basic カーネル記録の主張）・`ParityPath::WmmaF16Opt`
+（`run_f16_opt` カーネル記録の主張）として §10.5・§10.7 で追加した 2 行は、
+実際には両方とも `CudaWmmaGemm::run_f16`（`gemm_wmma.rs`）を呼ぶのみ
+だった。`run_f16` は `wmma_f16_opt` フィールドが `CudaWmmaGemm::new`
+時点でコンパイル・ロードに成功していれば自動的にそちらへルーティング
+し、`None` の場合のみ基本版（`wmma_f16`）へフォールバックする。この
+選択を公開せず、いずれかを強制実行する API（`CudaGemm`〈TF32〉が持つ
+`wmma_tf32`／`wmma_tf32_opt` private field 経由の強制実行に相当するもの）
+は `CudaWmmaGemm` に存在しない。したがって GB10 実機（opt カーネルが
+コンパイル・ロード可能）では両テストとも同一の opt 経路を別シードで
+測っていただけであり、`WmmaF16` を「基本 WMMA(f16) カーネル」の記録と
+主張していたのは provenance の誤りだった（`run_f16_opt` という関数も
+実在しない）。この誤りを放置すると、opt がロードされない環境（cc<8.0
+等）で basic 経路の値に対して `WmmaF16` baseline が誤って fail する
+可能性、および basic 経路固有の回帰を見逃す可能性があった。
+
+**対応**: `ParityPath::WmmaF16Opt` を廃止し `WmmaF16`（「`run_f16` 実効
+経路」の意味へ再定義）へ統合した。2 行の `context` を
+`"... (run_f16 effective route; GB10: opt)"` へ改め、実測時点で opt
+経路の出力であったことを明示した。`baseline_provenance_unconfirmed` は
+`false` のまま維持する——値自体は「run_f16 実効経路の出力」という
+主張どおりに正しく実測されているため（実測し直しは不要）。basic 単独
+を強制実行する API が将来追加された場合は、独立した `ParityPath` へ
+再分離すること。
+
+この対応により、必要な GB10 再実測は**なし**（`context` とコメントの
+訂正のみ。数値・fail_count・ceiling は変更していない）。
