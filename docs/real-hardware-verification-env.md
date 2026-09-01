@@ -149,6 +149,17 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 
 結果の転記手順は §8「結果の記録先」に従う。
 
+### 4.6 既知の解消済み問題
+
+- **JIT キャッシュ系テストの `os error 22`（イシュー #1107・解消済み）**: GB10（aarch64 Linux）でのみ
+  `open_dir_nofollow`（`crates/backend-cuda/src/nvrtc.rs`）がキャッシュルート pin 時に
+  `failed to pin cache root …: Invalid argument (os error 22)` で失敗していた事象。原因は
+  Linux 用 `O_NOFOLLOW`／`O_DIRECTORY` の自前定数が x86_64（asm-generic）の値のみを定義しており、
+  aarch64 の UAPI（`arch/arm64/include/uapi/asm/fcntl.h`）では別値だったこと（aarch64 上で
+  asm-generic の `O_DIRECTORY` 値はカーネル的には `O_DIRECT` を意味し、ディレクトリ open が
+  `EINVAL` になる）。`target_arch` 分岐で修正済み（対象コメントは同ファイルの `O_NOFOLLOW`／
+  `O_DIRECTORY` 定数を参照）。回避手順は不要になったため本節は記録のみ。
+
 ## 5. PyTorch 参照値の再計測（同一実機）
 
 ### 5.1 venv の利用
