@@ -948,7 +948,7 @@ dw のみが対象と確認済み。softmax の縮約〈max・sum〉は別イシ
 バックエンド実装ともに精度・overflow 安全性を引き上げることで、縮約
 順序の非結合性に由来する誤差を許容範囲内へ収める——に立つ。
 
-### 9.10 codex-review 3 件目の P1 一括是正（PR #1120。eps overflow・NaN 非伝播・契約文言の精密化）
+### 9.10 codex-review 3 件目の P1 一括是正 + 4 件目の inf+inf 追加是正（PR #1120。eps overflow・NaN 非伝播・契約文言の精密化・inf+inf 汚染）
 
 PR #1120 に対し codex-review が同時に P1 を 3 件指摘した。すべて妥当と
 判断し 1 コミットで是正した。
@@ -1029,6 +1029,52 @@ rmsnorm_parity -- --ignored --nocapture` 全 6 テスト pass。うち 3 は本�
 の是正で新規追加）。CUDA 側（`kernels_rmsnorm.rs` の要素積修正）は
 ソース文字列検査・CPU 側テストで確認済みだが、GB10 実機での最終確認は
 コーディネータに委ねる（確認コマンドは §9.7〜§9.8 と同一）。
+
+**4. `rmsnorm.metal`: `scale == +inf` の状態に `a == +inf` が続くと NaN
+汚染（codex-review P1 + Bugbot Medium。同根の 1 件。PR #1120 追加是正）**:
+上記 2 番目の NaN 是正（`isnan` 検出）とは別に、`scale` が既に `+inf`
+（先行する inf 要素で確定済み）の状態で次の要素 `a` も `+inf` だった
+場合、`a > scale` が `inf > inf` で偽になり `else if` 分岐へ入る。そこで
+計算する `ratio = a / scale = inf / inf` は IEEE 754 の不定形で `NaN`
+になり、`rmsnorm_kahan_add(ssq, comp, ratio * ratio)` を通じて `ssq` を
+`NaN` へ汚染してしまう。CPU/CUDA の `f64` 意味論では `inf + inf = inf`
+（有限の不定形にならない）ため二乗和は `inf` のまま、`rstd` は有限の
+`0` になり（`NaN` にはならない）、意味論が不一致だった。
+
+`rmsnorm_ssq_add` に `isinf(scale) && isinf(a)` の明示分岐を追加し
+（`isnan` チェックの直後・通常のリスケール分岐より前）、この場合は
+リスケール計算自体を行わず `scale` を `+inf` のまま維持して `ssq` のみ
+Neumaier 加算で更新する（呼び出し元は `fabs(v)` を渡すため `a` は常に
+非負であり `isinf(a)` は必ず `+inf` を意味する。`rmsnorm_ssq_combine`
+側は既存の `isinf(scale) && isinf(other_scale)` 分岐〈本節 3 番目是正の
+延長で既に導入済み〉がレーン間結合の同型ケースを担っており、今回の
+是正はレーン内蓄積（`rmsnorm_ssq_add`）側の抜け漏れを埋めるもの）。
+
+**実機テスト**（`tests/rmsnorm_parity.rs::
+rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row`）を追加した:
+`hidden=65`（非 4 の倍数のためスカラー経路。`hidden > 32` でレーン割当
+`idx % 32` が複数レーンにまたがる）で、**同一レーン配置**（`idx=0`・
+`idx=32`。いずれもレーン 0 が同一ループ内で逐次処理し
+`rmsnorm_ssq_add` を直撃する）と**別レーン配置**（`idx=0` はレーン 0・
+`idx=1` はレーン 1。`rmsnorm_ssq_combine` の inf+inf 分岐を経由する）の
+両方を検証する。`+inf` 要素自体の出力は `x_i * rstd(=0) = inf * 0 =
+NaN`（IEEE 754 の不定形。CPU 参照実装でも同じ `NaN` になる契約）になる
+一方、それ以外の有限要素の出力は `finite * 0 = 0.0`（厳密な等式）に
+なるという区別を踏まえ、位置ごとに直接値検査で判定する（`tolerance`
+は使わない）。
+
+**回帰の実機再現確認**: 是正前に `isinf(scale) && isinf(a)` 分岐を一時的に
+無効化して同テストを実行したところ、行 0（同一レーン配置）で有限要素の
+GPU 出力が `NaN` になる（指摘どおりの症状）ことを Apple M4 Max 実機で
+確認したうえで、是正を復元し全テスト pass を再確認した。
+
+**実機実測（Apple M4 Max・macOS。本節 4 番目の是正時点）**: `cargo test
+-p fandhe-ai-backend-metal --release --test rmsnorm_parity -- --ignored
+--nocapture` 全 7 テスト pass（新規追加の
+`rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row` を含む）。
+`cargo test -p fandhe-ai-backend-metal --release -- --ignored
+--test-threads=1`（実機依存テスト全件）も全 pass（非後退確認）。
+`tolerance`・ケース表・シードは一切変更していない。
 
 ## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
 

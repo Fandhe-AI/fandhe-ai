@@ -371,3 +371,109 @@ fn rmsnorm_propagates_nan_matching_backend_cpu() {
         &cpu_out[row2_start..row2_start + hidden],
     );
 }
+
+/// 同一行に複数の `+inf` 要素がある場合の CPU-Metal parity（イシュー
+/// #1102。codex-review・Bugbot 指摘・PR #1120 の同根バグ: `rmsnorm_ssq_add`
+/// で `scale` が既に `+inf` の状態に次の `a == +inf` が来ると、`a > scale`
+/// が偽（`inf > inf` は偽）になり `else if` 分岐の `ratio = a / scale =
+/// inf/inf` が `NaN` になって `ssq` を汚染していた。CPU/CUDA の `f64`
+/// 意味論では二乗和が `inf` になり `rstd` は有限の `0` になる（`ssq` 自体
+/// は `NaN` にならない）ため、この汚染は意味論の不一致だった。
+/// `isinf(scale) && isinf(a)` の明示分岐（リスケール計算をスキップし
+/// `scale` を `+inf` のまま維持する）でこれを解消したことを実機で確認
+/// する。
+///
+/// `hidden=65`（非 4 の倍数のためスカラー経路。`hidden > 32` でレーン
+/// 割当 `idx % 32` が複数レーンにまたがる）で、**同一レーン配置**
+/// （grid-stride ストライドの性質により 1 レーンは `idx, idx+32,
+/// idx+64, ...` を担当する。`idx=0` と `idx=32` はいずれもレーン 0 が
+/// 同一ループ内で逐次処理する）と**別レーン配置**（`idx=0` はレーン 0・
+/// `idx=1` はレーン 1。butterfly 縮約で `rmsnorm_ssq_combine` の
+/// `isinf(scale) && isinf(other_scale)` 分岐を経由する）の両方を検証
+/// する。
+///
+/// `rstd = 0`（`sum(x^2) = inf` により有限に帰着する）が正しい意味論
+/// だが、`+inf` 要素**自体**の出力は `x_i * rstd = inf * 0 = NaN`
+/// （IEEE 754 の不定形）になる——これは実装のバグではなく、無限大を
+/// 「無限小の rstd で正規化する」という操作が数学的に不定であることの
+/// 反映であり、CPU 参照実装（`f64` 蓄積の素朴な `x * rstd` 計算）でも
+/// 同じ `NaN` になる（本テストはこの一致も検証する）。それ以外の
+/// 有限要素の出力は `finite * 0 = 0.0`（丸め誤差の入り込む余地がない
+/// 厳密な等式）になるため、tolerance を使わず直接値検査で判定する
+/// （`assert_parity` は `NaN` 位置を含む比較に使わない）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let rmsnorm = MetalRmsNorm::new(&ctx).expect("RMSNorm パイプラインの構築に失敗した");
+
+    let rows = 2usize;
+    let hidden = 65usize; // 非 4 の倍数（スカラー経路）・hidden > 32。
+    let eps = 1e-5f32;
+    let mut x_data = Xorshift64Star::new(54_001).fill_vec(rows * hidden);
+
+    // 行 0: 同一レーン配置。レーン 0 が担当する idx=0・idx=32（いずれも
+    // `idx % 32 == 0`）へ +inf を置く（rmsnorm_ssq_add が同一レーンの
+    // ループ内で 2 回連続して +inf を取り込む経路を直撃する）。
+    let row0_inf_indices = [0usize, 32usize];
+    for &i in &row0_inf_indices {
+        x_data[i] = f32::INFINITY;
+    }
+
+    // 行 1: 別レーン配置。idx=0（レーン 0）・idx=1（レーン 1）へ +inf を
+    // 置く（butterfly 縮約の rmsnorm_ssq_combine が isinf(scale) &&
+    // isinf(other_scale) 分岐を経由する経路を直撃する）。
+    let row1_inf_indices = [0usize, 1usize];
+    for &i in &row1_inf_indices {
+        x_data[hidden + i] = f32::INFINITY;
+    }
+
+    let gpu_out = rmsnorm
+        .run_rmsnorm_f32(&ctx, &x_data, None, eps, rows, hidden)
+        .expect("MetalRmsNorm::run_rmsnorm_f32 must succeed on Metal-equipped test runner");
+    let cpu_out = fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, None, eps, rows, hidden)
+        .expect("fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
+
+    let inf_indices_by_row = [row0_inf_indices.as_slice(), row1_inf_indices.as_slice()];
+    for row in 0..rows {
+        let gpu_row = &gpu_out[row * hidden..(row + 1) * hidden];
+        let cpu_row = &cpu_out[row * hidden..(row + 1) * hidden];
+        let inf_indices = inf_indices_by_row[row];
+
+        for i in 0..hidden {
+            let is_inf_pos = inf_indices.contains(&i);
+            if is_inf_pos {
+                // +inf 要素自体: x_i * rstd = inf * 0 = NaN（IEEE 754 の
+                // 不定形。CPU/GPU で一致するはずの契約）。
+                assert!(
+                    gpu_row[i].is_nan(),
+                    "行 {row} idx {i}: +inf 要素自体の GPU 出力が NaN でない（inf*0=NaN の \
+                     意味論が崩れている）: {}",
+                    gpu_row[i]
+                );
+                assert!(
+                    cpu_row[i].is_nan(),
+                    "行 {row} idx {i}: +inf 要素自体の CPU 出力が NaN でない（テスト前提 \
+                     崩れ）: {}",
+                    cpu_row[i]
+                );
+            } else {
+                // 有限要素: finite * rstd(=0) = 0.0（厳密な等式）。GPU が
+                // NaN を返す場合は「+inf/+inf の ratio 計算による ssq 汚染」
+                // 回帰の再発を意味する。
+                assert_eq!(
+                    gpu_row[i], 0.0f32,
+                    "行 {row} idx {i}: +inf を含む行の有限要素の GPU 出力が 0.0 でない \
+                     （ssq が NaN 汚染された回帰の可能性）: {}",
+                    gpu_row[i]
+                );
+                assert_eq!(
+                    cpu_row[i], 0.0f32,
+                    "行 {row} idx {i}: +inf を含む行の有限要素の CPU 出力が 0.0 でない \
+                     （テスト前提崩れ）: {}",
+                    cpu_row[i]
+                );
+            }
+        }
+    }
+}

@@ -130,6 +130,19 @@ inline void rmsnorm_ssq_add(thread float& scale, thread float& ssq, thread float
         comp = 0.0f;
         return;
     }
+    if (isinf(scale) && isinf(a)) {
+        // `scale`・`a` とも +inf（2 個目以降の inf 要素。codex-review・
+        // Bugbot 指摘・PR #1120 の同根バグ）。通常のリスケール分岐は
+        // `a > scale` が偽（inf > inf は偽）になり、else 分岐の
+        // `ratio = a / scale = inf/inf` が `NaN` になって誤って `ssq` を
+        // 汚染してしまう（呼び出し元は `fabs(v)` を渡すため `a` は
+        // 常に非負であり `isinf(a)` は必ず `+inf` を意味する）。
+        // 二乗和は inf 要素が何個あっても inf のままという不変量を保つ
+        // ため、`scale` は `+inf` のまま維持し `ssq` のみ Neumaier 加算で
+        // 更新する（リスケール計算自体は行わない）。
+        rmsnorm_kahan_add(ssq, comp, 1.0f);
+        return;
+    }
     if (a > scale) {
         if (scale > 0.0f) {
             float ratio = scale / a;
