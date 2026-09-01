@@ -163,3 +163,28 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
 - `crates/bench-harness/src/threshold.rs`（REQ-8 下限表のデータ化・自動合否判定）
 - `crates/bench-harness/src/rounding.rs`（丸め規則の公開 API。`floor_lower_bound`）
 - `docs/spec/04-requirements.md` REQ-8（正本。段階的下限の受け入れ基準）
+- `scripts/bench/framework-compare/results/summary.md`（candle・burn との横並び計測。§8 参照）
+
+## 8. フレームワーク横並び（candle 比）の達成状況（イシュー #1052）
+
+- 本節は `scripts/bench/framework-compare`（イシュー #915／#1050／#1051）による candle・burn との
+  横並び計測に関する追補であり、**§2 の PyTorch 比段階的下限表・§3 丸め規則は変更しない**
+  （REQ-8 の下限自体はここでは動かない。本節は別ツール・別比較対象〈candle〉での達成状況の記録）
+- fandhe-ai 0.5.0（crates.io 公開版・2026-08-31 公開）での実機再計測（DGX Spark GB10・Apple
+  M4 Max。計測日 2026-09-01）に対し `python3 summarize.py --target candle` を実行した結果、
+  **達成 1 件・未達 23 件・判定不能 2 件**（終了コード 3）。出典・詳細な (task, device, size)
+  ごとの判定表は `scripts/bench/framework-compare/results/summary.md` 環境 8（DGX Spark GB10）・
+  環境 9（Apple M4 Max）節「〜の目標達成ゲート」および「目標達成ゲート総括」節、生データは
+  `scripts/bench/framework-compare/results/raw/results-dgx-0.5.0.jsonl`・
+  `results-m4max-0.5.0.jsonl` を参照
+- **収録範囲の限定**: `v0.5.0` タグ以降に main へ入った改善（#1108 Metal 選択テーブル・#1110
+  Metal SGD バッチング・#1111 CUDA variant selection 修正）はこの達成状況に反映されていない。
+  CUDA GEMM 改善トラッカー #1031・Metal GEMM 改善トラッカー #1037 も本計測時点で open のまま
+  （未着手）であり、下記の未達は「0.5.0 時点・上記改善適用前」の現在地である
+- 未達・判定不能項目の追跡状況（詳細は `results/summary.md`「目標達成ゲート総括」節）:
+  - CUDA GEMM（N=256〜4096）: 既存トラッカー #1031（open）
+  - Metal GEMM（N=256〜4096）: 既存トラッカー #1037（open）
+  - CPU GEMM・学習（train）・推論（infer）の全項目: 既存の個別トラッカーなし。次回 crates.io
+    公開後の再計測とあわせた Issue 化の要否はユーザー判断（本 PR では Issue 操作を行わず、
+    未追跡のまま `out-of-scope-tracking.md` に従いスコープ外として引き継ぐ）
+
