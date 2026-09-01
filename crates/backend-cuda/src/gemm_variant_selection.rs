@@ -265,12 +265,17 @@ impl CudaGemmF32VariantSelection {
     /// 等で実質 1 分割にしかならない）場合は `None` を返す。
     ///
     /// 戻り値が `Some(num_splits)` の場合、`num_splits` は必ず
-    /// `[2, SPLITK_MAX_SPLITS]` の範囲内であり、そのまま
-    /// [`Self::run_split_k_forced`] へ渡せば `validate_split_k_launch`
-    /// の分割数検証を通る（`gemm_variant::recommend_split_count` の
-    /// 契約参照。P2 codex-review 指摘: 旧実装は分割不能時に `1` を返して
-    /// おり、`run_split_k_forced` にそのまま渡すと `validate_split_k_
-    /// launch` が必ず `InvalidShape` を返す契約不整合があった）。
+    /// `[2, SPLITK_MAX_SPLITS]` の範囲内かつ `m`/`n` から決まる部分和
+    /// バッファサイズが `SPLITK_PARTIAL_MAX_BYTES` cap 内（オーバー
+    /// フローなし）であることを `gemm_variant::recommend_split_count`
+    /// 内部で `validate_split_k_launch` により検証済みのため、そのまま
+    /// [`Self::run_split_k_forced`] へ渡せば必ず検証を通る（契約参照。
+    /// P2 codex-review 指摘: 旧実装は分割不能時に `1` を返しており、
+    /// `run_split_k_forced` にそのまま渡すと `validate_split_k_launch`
+    /// が必ず `InvalidShape` を返す契約不整合があった。さらに PR #1111
+    /// codex-review／Cursor Bugbot 指摘: `[2, SPLITK_MAX_SPLITS]` 範囲内
+    /// でも大きな `m`/`n` では cap 検査未適用のため `Some` を返しても
+    /// `InvalidShape` になりうる契約不整合が残っていた点も解消した）。
     pub fn recommend_split_count(&self, m: u32, n: u32, k: u32) -> Option<u32> {
         match self.num_sms {
             Some(num_sms) if num_sms > 0 => gemm_variant::recommend_split_count(m, n, k, num_sms),

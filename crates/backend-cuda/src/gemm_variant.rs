@@ -193,13 +193,24 @@ fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
 /// 契約不整合が生じるため、本関数は分割不能を `None` で明示し、`Some` の
 /// 場合は必ず `[2, SPLITK_MAX_SPLITS]`（`validate_split_k_launch` が
 /// 受理可能な範囲）の値であることを保証する。
+///
+/// さらに `derive_split_count` は `num_splits` の範囲（`[2,
+/// SPLITK_MAX_SPLITS]`）のみを決定し、`m`／`n` に応じた部分和バッファ
+/// サイズ（[`SPLITK_PARTIAL_MAX_BYTES`] cap・オーバーフロー）は考慮しない。
+/// そのため範囲内の `num_splits` でも `m`／`n` が大きい形状では
+/// `validate_split_k_launch` が `InvalidShape` を返しうる（PR #1111
+/// codex-review／Cursor Bugbot 指摘）。本関数は `Some` を返す前に必ず
+/// [`validate_split_k_launch`] を適用し、失敗した場合は `None` を返す
+/// ことで「本関数が `Some` を返せば `validate_split_k_launch` を必ず
+/// 通る」契約を保証する。
 pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
     if k < SPLITK_MIN_K {
         return None;
     }
     match derive_split_count(num_blocks(m, n), num_sms, k) {
         1 => None,
-        splits => Some(splits),
+        splits if validate_split_k_launch(m, n, splits).is_ok() => Some(splits),
+        _ => None,
     }
 }
 
@@ -451,6 +462,26 @@ mod tests {
             recommend_split_count(m, n, k, num_sms).expect("この形状では分割が推奨されるはず");
         assert!((2..=SPLITK_MAX_SPLITS).contains(&recommended));
         assert!(validate_split_k_launch(m, n, recommended).is_ok());
+    }
+
+    #[test]
+    fn recommend_split_count_returns_none_when_partial_buffer_exceeds_cap() {
+        // PR #1111 codex-review／Cursor Bugbot 指摘: derive_split_count が
+        // [2, SPLITK_MAX_SPLITS] 範囲内の値を返しても、m/n が大きいと
+        // 部分和バッファが SPLITK_PARTIAL_MAX_BYTES cap を超えうる。
+        // m=n=8192・num_splits=2 で 2*8192*8192*4 = 536,870,912 bytes
+        // (> cap の 268,435,456 bytes) となる形状で None を返すことを
+        // 検証する（従来は cap 検査なしで Some を返し run_split_k_forced/
+        // validate_split_k_launch で InvalidShape になっていた）。
+        let m = 8192;
+        let n = 8192;
+        let k = 65536;
+        let num_sms = 64;
+        // derive_split_count 自身は m/n の絶対値でなく num_blocks(m, n) と
+        // num_sms・k の関係から分割数を導くため、cap 超過を検査しなければ
+        // Some(2) 以上を返しうることを前提として確認する。
+        assert!(derive_split_count(num_blocks(m, n), num_sms, k) >= 2);
+        assert_eq!(recommend_split_count(m, n, k, num_sms), None);
     }
 
     // --- DoubleBuffer ---
