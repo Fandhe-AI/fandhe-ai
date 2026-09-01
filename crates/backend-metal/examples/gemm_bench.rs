@@ -391,8 +391,15 @@ mod macos_impl {
         for size in [512usize, 1024, 2048, 4096] {
             let config = MeasurementConfig::default();
 
-            let old_cfg = tile::select(size, size, size);
-            let new_cfg = tile::select_with_occupancy(size, size, size, ctx.occupancy_params());
+            let gpu_core_count = ctx.verified_m4_max_gpu_core_count();
+            let old_cfg = tile::select_for_device(size, size, size, gpu_core_count);
+            let new_cfg = tile::select_with_occupancy_for_device(
+                size,
+                size,
+                size,
+                gpu_core_count,
+                ctx.occupancy_params(),
+            );
 
             let mut old_samples = Vec::with_capacity(ROUNDS);
             let mut new_samples = Vec::with_capacity(ROUNDS);

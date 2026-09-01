@@ -20,19 +20,31 @@
 //! **選択閾値は暫定値**: 下記 [`select`] のサイズ閾値・候補パラメータは
 //! MLX steel の実装傾向を参考にした暫定初期値であり、Apple Silicon 実機
 //! での `examples/gemm_bench.rs` 実測（`docs/perf/metal-gemm-dynamic-tile.md`
-//! に記録）で確定させる前提（イシュー #188 計画のスコープ）。**真の正方
-//! 立方形状（`m == n == k`。縦長・横長に該当しない形状の部分集合）かつ
-//! `m <= 4096`（実測範囲内）の閾値はイシュー #744・2026-08-19 M4 Max 実機
-//! 実測により CANDIDATES\[3\]（32x32/bk16/staged）への一律選択で確定済み**
-//! （512〜4096 の `m == n == k` 全帯域で最良候補比の逸失なし。判断根拠は
-//! `docs/perf/metal-tile-select-correction.md`）。`m == n == k` かつ
-//! `m > 4096`（実測範囲外の正方立方形状）、`m == n` でも `k != m`（K 未
-//! 実測の正方出力。例: (2048,2048,64)）、縦長・横長の閾値、および `m != n`
-//! の準正方長方形（縦長・横長いずれにも該当しないが `m == n` でもない
-//! 形状。例: 1536x1024）は引き続き暫定値のまま（#744 の実測対象は
-//! `m == n == k` の 512/1024/2048/4096 の 4 点のみであり、この範囲を超え
-//! て性能選択閾値を無制限に拡張するのは根拠不一致になるため #744 是正前
-//! の挙動を維持する。PR #760 codex-review 指摘対応）。
+//! に記録）で確定させる前提（イシュー #188 計画のスコープ）。**厳密一致
+//! する `(m, n, k)` の実測点（[`select_with_occupancy`] 冒頭の厳密一致
+//! テーブル参照）は測定済み最良候補で確定済み**: イシュー #744
+//! （2026-08-19）で `m == n == k` の 512/1024/2048/4096 の 4 点を
+//! `CANDIDATES[3]`（32x32/bk16/staged）一律選択で確定させたが、
+//! #1038〜#1040 の staged 経路変更を経てイシュー #1039（2026-08-31/09-01）
+//! で `CANDIDATES` 全 8 候補を再実測した結果 `CANDIDATES[3]` はもはや
+//! 最良候補ではなく、この 4 点は測定済み最良候補（`CANDIDATES[5]`／
+//! `[6]`／`[1]`／`[2]`）へ個別に更新した。同じ #1039 実測で、`m != n` の
+//! 準正方長方形 `(1536,1024,1024)` についても 2 回計測（run1/run2）いずれも
+//! 最良候補が一致したため測定済み最良候補を厳密一致テーブルへ追加した
+//! （判断根拠・数値は `docs/perf/metal-gemm-tile-table.md`）。`m == n` だが
+//! `k != m`（K 未実測の正方出力。例: (2048,2048,64)）・`(1024,1536,1536)`
+//! は 2 回計測で最良候補の順位が入れ替わった（プロセス間変動）ため、
+//! 「2 回一致した点のみ反映する」方針に従い厳密一致テーブルへは含めない
+//! （`docs/perf/metal-gemm-tile-table.md` §5「順位不安定のため反映しない」
+//! 節）。厳密一致テーブルの各エントリは `select_with_occupancy` 内部で
+//! `shape_cfg` に合流させ、既存の occupancy 縮退判定（`params` が `Some`
+//! の場合）を迂回しない（P1・codex-review 指摘・PR #1108 レビュー対応）。
+//! **上記の厳密一致点以外**（`m == n == k` の未測定サイズ・`m > 4096` の
+//! 正方立方形状・厳密一致点以外の K 未実測正方出力・準正方長方形）は
+//! 引き続き暫定値のまま（実測は厳密に一致する `(m, n, k)` の点のみで
+//! あり、この範囲を超えて性能選択閾値を無制限に拡張するのは根拠不一致に
+//! なるため #744 是正前の挙動を維持する。PR #760 codex-review 指摘対応・
+//! #1039 でも同一方針を踏襲）。
 //! `docs/dispatch-rules-design.md`（accelerated 経路選択は
 //! `min(M,N,K) >= 512`）とはレイヤが異なる点に注意: 本モジュールは
 //! 「accelerated（Metal）経路に入った後」のタイル構成選択であり、
@@ -674,31 +686,191 @@ pub fn fallback_chain(primary: TileConfig) -> Vec<TileConfig> {
     }
 }
 
-/// `(m, n, k)` から [`TileConfig`] を選択する（暫定閾値。本ファイル冒頭
-/// コメント参照）。[`select_with_occupancy(m, n, k, None)`][select_with_occupancy]
-/// への委譲であり、occupancy 判定は行わない（形状のみによる選択。既存
-/// 呼び出し元・既存テストとの完全互換を保つための後方互換入口。イシュー
-/// #542 で `select_with_occupancy` を追加した際に本関数を委譲化した）。
-pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
-    select_with_occupancy(m, n, k, None)
+/// イシュー #1039 の厳密一致テーブル（`exact_match_cfg`。下記
+/// [`select_with_occupancy_for_device`] 内）が対象とする GPU コア数
+/// （M4 Max 40 コア構成）。[`crate::device::probe_gpu_core_count`]（IOKit
+/// 実測。macOS 限定）または [`OccupancyParams::gpu_core_count`] の実測値と
+/// 比較し、一致した機種にのみ実測テーブルを適用する（P1・codex-review
+/// 指摘・PR #1108 レビュー: `select()` がデバイス情報を受け取らず全 Apple
+/// Silicon 機種へ無条件適用されていた問題への対応。`AGENTS.md`「実機固有値
+/// をロジックへ直書きしない」規約に対し、値そのものはハードコードのままだが
+/// 適用範囲を実測機種へ限定することで、M1〜M5 等の未実測機種は本テーブルを
+/// 経由せず既存の形状クラス判定（縦長・横長・正方立方・大形状フォール
+/// バック）へ従来どおり流れる）。
+///
+/// **単独では機種を一意に識別できない（P1・codex-review 指摘・PR #1108
+/// レビュー）**: GPU コア数 40 は M4 Max だけでなく M3 Max の 40 コア構成
+/// にも該当しうるため、本定数単独を機種ゲートに使わない。`verify_m4_max`
+/// が [`crate::device::probe_soc_brand_string`]（SoC ブランド文字列の実測。
+/// 例: `"Apple M4 Max"`）と組み合わせて検証する。
+// 本定数は `verify_m4_max`（下記）と `#[cfg(test)] mod tests` からのみ
+// 参照される。`verify_m4_max` を `cfg(any(test, target_os = "macos"))`
+// で分離した（下記コメント参照）ことに伴い、非 macOS・非テストの
+// lib ビルド（Linux CI の `cargo clippy --all-targets` が生成する
+// テスト抜きコンパイル単位）では到達不能になるため同じ cfg を付与する
+// （PR #1108 CI clippy 失敗の是正）。
+#[cfg(any(test, target_os = "macos"))]
+const M4_MAX_GPU_CORE_COUNT: u32 = 40;
+
+/// `verify_m4_max` が [`crate::device::probe_soc_brand_string`] の実測値と
+/// 完全一致比較する SoC ブランド名（P1・codex-review 指摘・PR #1108
+/// レビュー）。
+// `M4_MAX_GPU_CORE_COUNT` と同じ理由で cfg を付与する。
+#[cfg(any(test, target_os = "macos"))]
+const M4_MAX_SOC_BRAND: &str = "Apple M4 Max";
+
+/// `verify_m4_max` からのみ構築可能な、M4 Max 実機として検証済みである
+/// ことを表す opaque 型（P1・codex-review 再指摘・PR #1108 レビュー）。
+///
+/// **背景（旧実装の問題）**: 是正前は `select_for_device`／
+/// `select_with_occupancy_for_device` が生の `Option<u32>`（GPU コア数）を
+/// 受け取り、内部で `gpu_core_count == Some(M4_MAX_GPU_CORE_COUNT)`
+/// （コア数一致のみ）を検査していた。呼び出し元が `verify_m4_max` の戻り
+/// 値をそのまま渡す契約は doc comment 上の記述に過ぎず型・実装では強制され
+/// ないため、外部利用者や将来の呼び出し元が実測 GPU コア数（例: M3 Max の
+/// 40 コア構成）を直接 `Some(40)` として渡すと、SoC ブランド照合
+/// （`verify_m4_max`）を経ずに M4 Max 専用の厳密一致テーブルが誤って
+/// 有効化されてしまう。
+///
+/// **是正方針**: フィールドを非公開にし、`verify_m4_max`（GPU コア数と
+/// SoC ブランド文字列の両方が一致する場合にのみ構築）以外の経路では本型の
+/// 値を作れない構造にする。`select_for_device`／
+/// `select_with_occupancy_for_device` の `gpu_core_count` 引数を本型へ
+/// 変更したことで、未検証の `u32` を渡してブランド照合を迂回することが
+/// コンパイル時に不可能になる（`AGENTS.md`「実機固有値のハードコード回避」
+/// 規約・公開 API 契約維持への対応）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedM4MaxGpuCoreCount(u32);
+
+impl VerifiedM4MaxGpuCoreCount {
+    /// 検証済みの GPU コア数を返す（常に `M4_MAX_GPU_CORE_COUNT` と
+    /// 一致する。デバッグ表示・ログ等、値そのものを必要とする呼び出し元
+    /// 向けのアクセサ。`M4_MAX_GPU_CORE_COUNT` は非公開定数のため、
+    /// intra-doc link ではなくバッククォートのコードスパン表記とする
+    /// （rustdoc `-D rustdoc::private-intra-doc-links` が非公開アイテムへの
+    /// intra-doc link をビルド失敗にするため。PR #1108 レビュー）。
+    pub fn gpu_core_count(self) -> u32 {
+        self.0
+    }
 }
 
-/// `(m, n, k)` から [`TileConfig`] を選択する（occupancy 判定込み。イシュー
-/// #542）。**`crate::gemm::MetalGemm::dispatch_auto` の入口としては不採用
-/// 確定**（本番ディスパッチは引き続き [`select`] を使う。イシュー #747 で、
-/// #744 是正（段 1 が実測範囲内の正方立方形状に対し occupancy 縮退を経ず
-/// 直接 `CANDIDATES``[3]` を返すよう是正済み）により本関数の縮退経路が
-/// 実測帯域〈512/1024/2048/4096〉で `select()` と常に同一結果へ収束する
-/// ことを確認し、「小サイズ帯のみ occupancy 有効化」という #747 の目的は
-/// #744 是正へ吸収されたと判断した。`crate::gemm` モジュールドキュメンテー
-/// ションコメント・`docs/perf/metal-gemm-occupancy-select.md`「#747 判断」節
-/// 参照）。`examples/gemm_bench.rs` の旧/新比較セクションから明示的に
-/// 呼ばれる。
+/// GPU コア数と SoC ブランド文字列を組み合わせ、イシュー #1039 の厳密一致
+/// テーブル（`exact_match_cfg`）を適用してよい M4 Max 実機かどうかを検証
+/// する（P1・codex-review 指摘・PR #1108 レビュー）。
+///
+/// **GPU コア数だけでは機種を一意に識別できない**: `gpu_core_count == 40`
+/// は M4 Max だけでなく M3 Max の 40 コア構成にも該当しうる
+/// （`crate::device` モジュールドキュメンテーションコメント「機種識別子
+/// からの対応表推定」節が却下した「`hw.model` からの対応表推定」とは異なり、
+/// 本関数は SoC ブランド文字列という OS が直接返す実測値を追加シグナルと
+/// して使う点に注意）。`gpu_core_count` が `M4_MAX_GPU_CORE_COUNT`
+/// （40）と一致し、かつ `soc_brand` が `M4_MAX_SOC_BRAND`（`"Apple M4
+/// Max"`）と完全一致する場合にのみ [`VerifiedM4MaxGpuCoreCount`] を返す。
+/// いずれかが不一致・取得不能（`None`）の場合は `None` を返し、
+/// [`select_for_device`]／[`select_with_occupancy_for_device`] は厳密一致
+/// テーブルを経由せず既存の形状クラス判定のみへ安全側でフォールバックする。
+///
+/// **本関数が [`VerifiedM4MaxGpuCoreCount`] の唯一の構築経路**（フィールド
+/// 非公開のため。P1・codex-review 再指摘・PR #1108 レビュー）。
+///
+/// `crate::context::MetalContext::new` がデバイス初期化時に 1 回だけ呼び、
+/// 結果を [`select_for_device`] へ渡す想定（ディスパッチ経路のホットパスに
+/// FFI を持ち込まないための設計。`MetalContext::occupancy_params` と同じ
+/// 判断）。
+///
+/// **`pub(crate)` に閉じる理由（P1・codex-review 再指摘・PR #1108
+/// レビュー）**: 本関数は実機プローブを一切行わず、呼び出し元が渡した
+/// `gpu_core_count`／`soc_brand` の文字列比較のみで判定する。以前は
+/// `pub` だったため、外部呼び出し元（または未実測機種を利用する crate
+/// 内呼び出し元）が `verify_m4_max(Some(40), Some("Apple M4 Max"))` の
+/// ように実機プローブ（[`crate::device::probe_gpu_core_count`]・
+/// [`crate::device::probe_soc_brand_string`]）を経由しない任意値を直接
+/// 渡すことで、M4 Max 実機として未検証のまま [`VerifiedM4MaxGpuCoreCount`]
+/// を偽造でき、M3 Max 等の未検証機種でも M4 Max 専用の厳密一致テーブルを
+/// 有効化できてしまっていた（`AGENTS.md`「実機固有値をロジックへ直書き
+/// しない」規約が求める安全側運用に反する）。本関数を `pub(crate)` に
+/// 閉じ、公開経路を実機プローブを内部で行う
+/// [`crate::context::MetalContext::verified_m4_max_gpu_core_count`] のみへ
+/// 限定することで、crate 外部から任意値でトークンを生成する経路を
+/// コンパイル時に排除する。
+// **`cfg(any(test, target_os = "macos"))`（PR #1108 CI clippy 失敗の
+// 是正）**: 本関数の非テスト呼び出し元は `crate::context::MetalContext::
+// verified_m4_max_gpu_core_count`（`cfg(target_os = "macos")` 限定の
+// `context` モジュール）のみであり、それ以外は `#[cfg(test)] mod
+// tests` 内のヘルパー `verified_m4_max_for_test` からの参照に限られる。
+// 非 macOS・非テストの lib ビルド（Linux CI の `cargo clippy
+// --all-targets` が生成するテスト抜きコンパイル単位）では両呼び出し元
+// が存在せず到達不能になるため、`pub(crate)` に閉じた際の意図（P1・
+// codex-review 再指摘・PR #1108 レビュー）を保ったまま cfg で分離する
+// （`#[allow(dead_code)]` による抑制は `coding-rust.md` により禁止のため
+// 使わない）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn verify_m4_max(
+    gpu_core_count: Option<u32>,
+    soc_brand: Option<&str>,
+) -> Option<VerifiedM4MaxGpuCoreCount> {
+    if gpu_core_count == Some(M4_MAX_GPU_CORE_COUNT) && soc_brand == Some(M4_MAX_SOC_BRAND) {
+        Some(VerifiedM4MaxGpuCoreCount(M4_MAX_GPU_CORE_COUNT))
+    } else {
+        None
+    }
+}
+
+/// `(m, n, k)` から [`TileConfig`] を選択する（後方互換入口）。
+///
+/// **公開 API 互換性（P1・codex-review 指摘・PR #1108 レビュー）**: 本関数
+/// の 3 引数シグネチャは PR #1108 以前から存在する公開 API
+/// （`fandhe-ai-backend-metal` は crates.io 公開クレート）であり、破壊的
+/// 変更を避けるため維持する。イシュー #1039 の M4 Max 実測厳密一致テーブル
+/// はデバイス情報（`gpu_core_count`）を必要とするため、これを受け取る版は
+/// 別名 [`select_for_device`] として追加し、本関数は `gpu_core_count: None`
+/// で委譲する（＝厳密一致テーブルは経由せず既存の形状クラス判定のみ。
+/// PR #1108 以前と完全一致する挙動）。
+pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
+    select_for_device(m, n, k, None)
+}
+
+/// `(m, n, k)` と実測 GPU コア数から [`TileConfig`] を選択する
+/// （[`select`] のデバイス情報対応版。P1・codex-review 指摘・PR #1108
+/// レビューで新設）。[`select_with_occupancy_for_device(m, n, k,
+/// gpu_core_count, None)`][select_with_occupancy_for_device] への委譲で
+/// あり、occupancy 判定は行わない（形状のみによる選択）。
+///
+/// `gpu_core_count` はイシュー #1039 の厳密一致テーブル（M4 Max 実測）の
+/// 適用可否判定にのみ使う（`verify_m4_max` 参照。呼び出し元が実機値を
+/// 取得できない・意図的に無効化したい場合は `None` を渡せば従来の形状
+/// クラス判定のみへフォールバックする）。**引数の型が
+/// [`VerifiedM4MaxGpuCoreCount`]（`verify_m4_max` からのみ構築可能な
+/// opaque 型）であるため、未検証の GPU コア数（生の `u32`）を渡して
+/// ブランド照合を迂回することはコンパイル時に不可能**（P1・codex-review
+/// 再指摘・PR #1108 レビュー）。
+pub fn select_for_device(
+    m: usize,
+    n: usize,
+    k: usize,
+    gpu_core_count: Option<VerifiedM4MaxGpuCoreCount>,
+) -> TileConfig {
+    select_with_occupancy_for_device(m, n, k, gpu_core_count, None)
+}
+
+/// `(m, n, k)` と実測 GPU コア数から [`TileConfig`] を選択する（occupancy
+/// 判定込み。イシュー #542。[`select_with_occupancy`] のデバイス情報対応版
+/// で、P1・codex-review 指摘・PR #1108 レビューにより本名へ改名した）。
+/// **`crate::gemm::MetalGemm::dispatch_auto` の入口としては不採用確定**
+/// （本番ディスパッチは引き続き [`select_for_device`] を使う。イシュー
+/// #747 で、#744 是正（段 1 が実測範囲内の正方立方形状に対し occupancy
+/// 縮退を経ず直接 `CANDIDATES``[3]` を返すよう是正済み）により本関数の
+/// 縮退経路が実測帯域〈512/1024/2048/4096〉で [`select_for_device`] と
+/// 常に同一結果へ収束することを確認し、「小サイズ帯のみ occupancy 有効化」
+/// という #747 の目的は #744 是正へ吸収されたと判断した。`crate::gemm`
+/// モジュールドキュメンテーションコメント・`docs/perf/
+/// metal-gemm-occupancy-select.md`「#747 判断」節参照）。
+/// `examples/gemm_bench.rs` の旧/新比較セクションから明示的に呼ばれる。
 ///
 /// 2 段階判定（MFA 型方法論。本ファイル「occupancy 目標算出」節参照）:
 ///
-/// 1. **形状判定**: [`select`] と同一ロジックで形状優先の構成を決める
-///    （閾値はパディング前の元次元 `m`/`n`/`k` に対して判定する。
+/// 1. **形状判定**: [`select_for_device`] と同一ロジックで形状優先の構成を
+///    決める（閾値はパディング前の元次元 `m`/`n`/`k` に対して判定する。
 ///    `crate::pad::pad8` によるパディングは選択後・パイプライン確保直前に
 ///    `crate::gemm` 側で行う。本関数はパディングの有無を問わない純粋関数）。
 /// 2. **occupancy 縮退**: 段 1 の結果が大タイル系（`CANDIDATES``[0..=2]`。
@@ -711,8 +883,8 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 ///    対象は「大タイル→中タイル」の 1 段のみ）。
 ///
 /// **fail-safe フォールバック**: 以下のいずれかに該当する場合は occupancy
-/// 判定を無効化し、段 1 の結果をそのまま返す（現行 [`select`] と完全一致。
-/// 安全側。#541 doc §5 の残課題に対する確定方針）:
+/// 判定を無効化し、段 1 の結果をそのまま返す（現行 [`select_for_device`]
+/// と完全一致。安全側。#541 doc §5 の残課題に対する確定方針）:
 /// - `params` が `None`（呼び出し元が実機値を取得できなかった、または
 ///   意図的に occupancy 判定を無効化したい場合）
 /// - [`actual_groups`] が `None`（`cfg.bm`／`cfg.bn` が 0。`CANDIDATES`
@@ -722,10 +894,17 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 ///
 /// いずれの分岐も panic しない（`.claude/rules/coding-rust.md`「本番経路で
 /// unwrap/expect を使わない」）。
-pub fn select_with_occupancy(
+///
+/// `gpu_core_count` はイシュー #1039 の厳密一致テーブルの適用可否判定に
+/// のみ使う。**引数の型が [`VerifiedM4MaxGpuCoreCount`]（`verify_m4_max`
+/// からのみ構築可能な opaque 型）であるため、未検証の GPU コア数（生の
+/// `u32`）を渡してブランド照合を迂回することはコンパイル時に不可能**
+/// （P1・codex-review 再指摘・PR #1108 レビュー）。
+pub fn select_with_occupancy_for_device(
     m: usize,
     n: usize,
     k: usize,
+    gpu_core_count: Option<VerifiedM4MaxGpuCoreCount>,
     params: Option<OccupancyParams>,
 ) -> TileConfig {
     const SMALL: usize = 64;
@@ -743,6 +922,76 @@ pub fn select_with_occupancy(
     if m < SMALL || n < SMALL || k < SMALL {
         return TileConfig::SINGLE_SIMDGROUP_8X8;
     }
+
+    // イシュー #1039・2026-08-31/09-01 M4 Max 実機実測（`CANDIDATES` 全 8
+    // 候補・`examples/gemm_transpose_tile_sweep.rs`）による厳密一致テーブル。
+    // 以下の完全一致する `(m, n, k)` に限り、下の形状クラス判定（縦長・
+    // 横長・正方立方・大形状フォールバック）より優先して測定済み最良候補を
+    // `shape_cfg` として採用する。**occupancy 縮退は迂回しない**（P1・
+    // codex-review 指摘・PR #1108 レビュー）: 早期 `return` にはせず、下の
+    // `shape_cfg` 決定に合流させることで、#744 由来の `m == n && k == m
+    // && m <= SQUARE_MEASURED_MAX => CANDIDATES[3]` 分岐と構造上同じ扱いに
+    // なる（=既存の occupancy 判定を M4 Max 実測値にも一様に適用する）。
+    // `select_for_device()` 経由（`params: None`）では従来どおり縮退せず
+    // `shape_cfg` をそのまま返すため、本番ディスパッチの挙動自体は変わらない。
+    //
+    // **機種ゲート（P1・codex-review 再指摘・PR #1108 レビュー）**: 本テーブル
+    // は M4 Max（40 コア構成）実機実測のみが根拠であり、`select_for_device()`
+    // は元々デバイス情報を受け取らないため無対応のままでは M1〜M5 を含む全
+    // Apple Silicon 機種へ無条件適用されてしまう（`AGENTS.md`「実機固有値を
+    // ロジックへ直書きしない」規約への抵触）。**GPU コア数だけでは機種を
+    // 一意に識別できない**（`gpu_core_count == 40` は M4 Max だけでなく
+    // M3 Max の 40 コア構成にも該当しうる）ため、`gpu_core_count` 引数の
+    // 型自体を [`VerifiedM4MaxGpuCoreCount`]（[`verify_m4_max`] からのみ
+    // 構築可能な opaque 型。フィールド非公開）にすることで、SoC ブランド
+    // 照合（`crate::device::probe_gpu_core_count`〈GPU コア数の IOKit
+    // 実測〉と `crate::device::probe_soc_brand_string`〈SoC ブランド文字列
+    // の実測〉の両方一致）を経ずに本テーブルを有効化することがコンパイル
+    // 時に不可能になっている（`crate::context::MetalContext::new` が 1 回
+    // だけキャッシュした値を `verified_m4_max_gpu_core_count` 経由で渡す）。
+    // 未検証（`None`）な機種は下の形状クラス判定（縦長・横長・正方立方・
+    // 大形状フォールバック）のみへ従来どおり流れる。他機種での候補の優劣は
+    // 未実測のため、共通性を実測するまでテーブルを機種非依存へ拡張しない
+    // （`select_exact_match_table_is_gated_by_m4_max_gpu_core_count` 参照）。
+    //
+    // #744（2026-08-19）は `m == n == k` の 512/1024/2048/4096 の 4 点で
+    // `CANDIDATES[3]`（32x32）一律選択を確定させたが、#1038〜#1040 の
+    // staged 経路変更（タイル variant 群の整理・転置ロード境界確立等）を
+    // 経て、同じ 4 点で `CANDIDATES` 全候補を再実測した結果
+    // `CANDIDATES[3]` はもはや最良候補ではなくなっていた（例:
+    // size=4096 で `CANDIDATES[3]` 8.24〜8.36 TFLOPS に対し最良候補
+    // `CANDIDATES[2]` 9.76〜9.91 TFLOPS。詳細値・判断根拠は
+    // `docs/perf/metal-gemm-tile-table.md`）。この 4 点は 2 回計測
+    // （run1/run2）いずれも順位が一致している。また `(1536, 1024, 1024)`
+    // （準正方長方形）も 2 回計測いずれも `CANDIDATES[1]` が最良で一致した
+    // ため採用する。**`m == n` だが `k != m`（K 未実測の正方出力）帯域の
+    // `(2048, 2048, 64)`／`(2048, 2048, 512)`、および準正方長方形
+    // `(1024, 1536, 1536)` は 2 回計測で最良候補の順位が入れ替わった
+    // （プロセス間変動。`docs/perf/metal-gemm-tile-table.md` §3・§5）ため
+    // 本テーブルへ含めない**（`docs/perf/metal-bench-noise-protocol.md`
+    // が指摘する既知の系統誤差源。2 回一致した点のみ反映する方針は本ファイル
+    // 冒頭の判断基準どおりであり、単一 run の結果で分岐を追加しない。
+    // 再計測での順位確認は out-of-scope-tracking.md に沿って追跡する）。
+    // **実測は下記の厳密な `(m, n, k)` タプルのみ**であり、近傍値・未測定点
+    // へは拡張しない（実測範囲外への無根拠拡張をしない方針。#744/PR #760
+    // と同一判断軸）。
+    let exact_match_cfg = if gpu_core_count.is_some() {
+        match (m, n, k) {
+            // 正方立方（m == n == k）実測点。2 回計測いずれも順位一致。
+            (512, 512, 512) => Some(CANDIDATES[5]), // 64x32/bk32/wm2wn2
+            (1024, 1024, 1024) => Some(CANDIDATES[6]), // 64x32/bk8/wm4wn1
+            (2048, 2048, 2048) => Some(CANDIDATES[1]), // 64x32/bk16/wm2wn2（縦長候補だが正方形状でも最良）
+            (4096, 4096, 4096) => Some(CANDIDATES[2]), // 32x64/bk16/wm2wn2（横長候補だが正方形状でも最良）
+            // 準正方長方形（m != n・縦横比 < ASPECT_RATIO）実測点。2 回計測
+            // いずれも `CANDIDATES[1]` が最良で一致。
+            (1536, 1024, 1024) => Some(CANDIDATES[1]),
+            _ => None,
+        }
+    } else {
+        // M4 Max（40 コア）以外の機種、またはコア数取得不能（`None`）の
+        // 場合は本テーブルを評価しない（上記「機種ゲート」節）。
+        None
+    };
 
     let tall = m >= n.saturating_mul(ASPECT_RATIO);
     let wide = n >= m.saturating_mul(ASPECT_RATIO);
@@ -785,27 +1034,46 @@ pub fn select_with_occupancy(
     // （実機ツリー #408 系）に委ねる（`docs/perf/metal-tile-select-correction.md`
     // 「実機確認結果（記入欄）」節）。縦長・横長の分岐自体も 2026-08-19 実測が
     // 正方形状のみを対象としているため変更しない（安全側）。
-    let shape_cfg = match (tall, wide) {
+    let shape_cfg = exact_match_cfg.unwrap_or_else(|| match (tall, wide) {
         (true, _) => CANDIDATES[1], // 64x32（縦長）
         (_, true) => CANDIDATES[2], // 32x64（横長）
         _ if m == n && k == m && m <= SQUARE_MEASURED_MAX => CANDIDATES[3], // 32x32（真の正方立方・実測範囲内。#744）
         _ if m >= LARGE && n >= LARGE => CANDIDATES[0], // 大形状（4096 超の正方・K 未実測の正方形状含む・準正方大形状長方形）。#744 実測対象外・是正前の挙動を維持
         _ => CANDIDATES[3], // 32x32（準正方中形状長方形。#744 是正前と同一挙動）
-    };
+    });
 
-    // occupancy 縮退の対象は段 1 が大タイル系（CANDIDATES[0..=2]）を選んだ
-    // 場合のみ。CANDIDATES[3]（既に中形状）は縮退不要、SINGLE_SIMDGROUP_8X8
-    // は段 1 の SMALL 判定のみが返しうる（上の match の到達条件上ここには
-    // 来ない）。`m == n == k`（実測どおりの立方 GEMM）かつ `m <=
-    // SQUARE_MEASURED_MAX`（実測範囲内）は #744 是正後 CANDIDATES[3] を
-    // 直接返すため縮退対象から外れるが、`m != n` の準正方大形状長方形、
-    // `m == n` でも `k != m`（K 未実測）の正方出力、および
-    // `SQUARE_MEASURED_MAX` 超の正方立方形状（上記 `m,n >= LARGE` 分岐）は
-    // 引き続き CANDIDATES[0] を返しうるため、縮退判定（actual/ideal 比較）
-    // は縦長・横長に加えてこの経路でも生きたままになる（#744 是正前と同一
-    // 挙動。PR #760 レビュー対応でコメントを実装へ整合）。
-    let is_large_tile_candidate =
-        shape_cfg == CANDIDATES[0] || shape_cfg == CANDIDATES[1] || shape_cfg == CANDIDATES[2];
+    // occupancy 縮退の対象は「大タイル系」（CANDIDATES[3]〈中形状・32x32〉
+    // より threadgroup 分担面積 `bm*bn` が大きい構成）を選んだ場合のみ。
+    // CANDIDATES[3] 自体（既に中形状）は縮退不要、SINGLE_SIMDGROUP_8X8 は
+    // 段 1 の SMALL 判定のみが返しうる（上の match の到達条件上ここには
+    // 来ない）。
+    //
+    // **`CANDIDATES[0..=2]` への固定列挙ではなく `bm*bn` 比較にする（P1・
+    // codex-review 指摘・PR #1108 レビュー）**: 厳密一致テーブル
+    // （`exact_match_cfg`）が返す `CANDIDATES[5]`／`[6]` は `bm=64,bn=32`
+    // と `CANDIDATES[1]`（縦長・大タイル系）と同一の threadgroup 分担面積
+    // を持つため、`actual_groups` の算出式（`m`/`n`/`bm`/`bn` のみに依存）
+    // は `CANDIDATES[1]` と同一であり、`CANDIDATES[1]` が対象なら
+    // `CANDIDATES[5]`／`[6]` も同じ理由で under-occupied になりうる。旧実装
+    // の固定列挙（`CANDIDATES[0..=2]` のみ）はこの 2 候補を構造上常に対象外
+    // にしており、`shape_cfg` 決定への合流（上のコメント参照）で「occupancy
+    // 縮退を迂回しない」としていた意図（`docs/perf/metal-gemm-tile-table.md`
+    // §5）と矛盾していた。`bm*bn` 比較にすることで、厳密一致テーブルの
+    // 追加候補を含め、大タイル系と同じ threadgroup 分担面積を持つ構成には
+    // 常に一様に occupancy 縮退が適用される（`select_with_occupancy_
+    // shrinks_exact_match_candidates_when_underoccupied` 参照）。
+    //
+    // `m == n == k`（実測どおりの立方 GEMM）かつ `m <= SQUARE_MEASURED_MAX`
+    // （実測範囲内）は #744 是正後 CANDIDATES[3] を直接返すため縮退対象から
+    // 外れるが、`m != n` の準正方大形状長方形、`m == n` でも `k != m`（K
+    // 未実測）の正方出力、および `SQUARE_MEASURED_MAX` 超の正方立方形状
+    // （上記 `m,n >= LARGE` 分岐）は引き続き CANDIDATES[0] を返しうるため、
+    // 縮退判定（actual/ideal 比較）は縦長・横長に加えてこの経路でも生きた
+    // ままになる（#744 是正前と同一挙動。PR #760 レビュー対応でコメントを
+    // 実装へ整合）。
+    let mid_tile_area = (CANDIDATES[3].bm as u64) * (CANDIDATES[3].bn as u64);
+    let shape_cfg_area = (shape_cfg.bm as u64) * (shape_cfg.bn as u64);
+    let is_large_tile_candidate = shape_cfg_area > mid_tile_area;
 
     if !is_large_tile_candidate {
         return shape_cfg;
@@ -828,6 +1096,25 @@ pub fn select_with_occupancy(
     } else {
         shape_cfg
     }
+}
+
+/// `(m, n, k)` から [`TileConfig`] を選択する（occupancy 判定込み。後方
+/// 互換入口）。
+///
+/// **公開 API 互換性（P1・codex-review 指摘・PR #1108 レビュー）**: 本関数
+/// の 4 引数シグネチャ（`gpu_core_count` を含まない）は PR #1108 以前から
+/// 存在する公開 API（`fandhe-ai-backend-metal` は crates.io 公開クレート）
+/// であり、破壊的変更を避けるため維持する。デバイス情報を受け取る版は
+/// 別名 [`select_with_occupancy_for_device`] として追加し、本関数は
+/// `gpu_core_count: None` で委譲する（＝厳密一致テーブルは経由せず既存の
+/// 形状クラス判定＋occupancy 縮退のみ。PR #1108 以前と完全一致する挙動）。
+pub fn select_with_occupancy(
+    m: usize,
+    n: usize,
+    k: usize,
+    params: Option<OccupancyParams>,
+) -> TileConfig {
+    select_with_occupancy_for_device(m, n, k, None, params)
 }
 
 /// threadgroup ID スウィズル（`swizzle_log` 相当。イシュー #540）の群幅を
@@ -1155,6 +1442,14 @@ pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
 mod tests {
     use super::*;
 
+    /// テスト専用: [`verify_m4_max`] を経由して [`VerifiedM4MaxGpuCoreCount`]
+    /// を構築するヘルパー（P1 是正・PR #1108 レビューで opaque 型化した
+    /// ことに伴い、テストからも生の `u32` を直接渡せなくなったため。GPU
+    /// コア数・SoC ブランド文字列の両方が実測一致した体で検証する）。
+    fn verified_m4_max_for_test() -> Option<VerifiedM4MaxGpuCoreCount> {
+        verify_m4_max(Some(M4_MAX_GPU_CORE_COUNT), Some(M4_MAX_SOC_BRAND))
+    }
+
     // --- TileConfig::thread_count / shared_mem_bytes（pure） ---
 
     #[test]
@@ -1332,27 +1627,27 @@ mod tests {
         // への委譲）は `objc2` 系 FFI に触れない純粋関数のため、同じ形状を
         // ここで固定し Linux（CI）上でも分岐主張のドリフトを検知する。
         assert_eq!(
-            select(2048, 256, 512),
+            select_for_device(2048, 256, 512, verified_m4_max_for_test()),
             CANDIDATES[1],
             "縦長 → CANDIDATES[1]"
         );
         assert_eq!(
-            select(256, 2048, 512),
+            select_for_device(256, 2048, 512, verified_m4_max_for_test()),
             CANDIDATES[2],
             "横長 → CANDIDATES[2]"
         );
         assert_eq!(
-            select(512, 512, 512),
-            CANDIDATES[3],
-            "正方立方（実測範囲内） → CANDIDATES[3]"
+            select_for_device(512, 512, 512, verified_m4_max_for_test()),
+            CANDIDATES[5],
+            "正方立方（イシュー #1039 実測点） → CANDIDATES[5]"
         );
         assert_eq!(
-            select(1536, 1024, 512),
+            select_for_device(1536, 1024, 512, verified_m4_max_for_test()),
             CANDIDATES[0],
             "準正方大形状長方形 → CANDIDATES[0]"
         );
         assert_eq!(
-            select(32, 32, 32),
+            select_for_device(32, 32, 32, verified_m4_max_for_test()),
             TileConfig::SINGLE_SIMDGROUP_8X8,
             "微小形状 → SINGLE_SIMDGROUP_8X8"
         );
@@ -1360,7 +1655,7 @@ mod tests {
         // dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape`）
         // が staged 経路（CANDIDATES[3]）を踏むことを固定する。
         assert_eq!(
-            select(521, 265, 131),
+            select_for_device(521, 265, 131, verified_m4_max_for_test()),
             CANDIDATES[3],
             "8 非整列の端数形状（m,n,k は SMALL=64 以上） → CANDIDATES[3]"
         );
@@ -1868,24 +2163,152 @@ mod tests {
 
     #[test]
     fn select_falls_back_to_single_simdgroup_for_small_shapes() {
-        assert_eq!(select(32, 32, 32), TileConfig::SINGLE_SIMDGROUP_8X8);
-        assert_eq!(select(1000, 1000, 32), TileConfig::SINGLE_SIMDGROUP_8X8);
+        assert_eq!(
+            select_for_device(32, 32, 32, verified_m4_max_for_test()),
+            TileConfig::SINGLE_SIMDGROUP_8X8
+        );
+        assert_eq!(
+            select_for_device(1000, 1000, 32, verified_m4_max_for_test()),
+            TileConfig::SINGLE_SIMDGROUP_8X8
+        );
     }
 
     #[test]
-    fn select_picks_mid_square_config_for_large_true_square_shapes() {
-        // #744・2026-08-19 M4 Max 実機実測（5 回中央値）: `m == n`（真の
-        // 正方形状）512〜4096 の全帯域で CANDIDATES[3]（32x32/bk16/staged）
-        // が CANDIDATES[0]（64x64/bk16/staged）に一貫して優越する
-        // （size=2048 で最良候補比約 2.8 倍の逸失が是正前は生じていた）。
-        // 旧テスト名 `select_picks_large_square_config_above_threshold` は
-        // 是正前の「正方大形状 → CANDIDATES[0]」分岐を前提にしていたため
-        // リネームし期待値を更新する（`docs/perf/metal-tile-select-correction.md`）。
-        for &size in &[512usize, 1024, 2048, 4096] {
-            let cfg = select(size, size, size);
-            assert_eq!(cfg, CANDIDATES[3], "size={size}");
-            assert_eq!((cfg.bm, cfg.bn), (32, 32), "size={size}");
+    fn select_picks_measured_best_config_for_true_square_shapes() {
+        // イシュー #1039・2026-08-31/09-01 M4 Max 実機実測（`CANDIDATES` 全
+        // 8 候補・2 回計測いずれも同順位）: #744（2026-08-19）は `m == n
+        // == k` の 512/1024/2048/4096 の 4 点で CANDIDATES[3]（32x32）一律
+        // 選択を確定させたが、#1038〜#1040 の staged 経路変更を経て同じ
+        // 4 点を再実測した結果 CANDIDATES[3] はもはや最良候補ではなかった
+        // （size=4096: CANDIDATES[3] 8.24〜8.36 TFLOPS に対し最良候補
+        // CANDIDATES[2] 9.76〜9.91 TFLOPS。詳細値は
+        // `docs/perf/metal-gemm-tile-table.md`）。旧テスト名
+        // `select_picks_mid_square_config_for_large_true_square_shapes` は
+        // #744 是正時点の「一律 CANDIDATES[3]」前提を反映していたため
+        // リネームし期待値を更新する。
+        assert_eq!(
+            select_for_device(512, 512, 512, verified_m4_max_for_test()),
+            CANDIDATES[5]
+        );
+        assert_eq!(
+            select_for_device(1024, 1024, 1024, verified_m4_max_for_test()),
+            CANDIDATES[6]
+        );
+        assert_eq!(
+            select_for_device(2048, 2048, 2048, verified_m4_max_for_test()),
+            CANDIDATES[1]
+        );
+        assert_eq!(
+            select_for_device(4096, 4096, 4096, verified_m4_max_for_test()),
+            CANDIDATES[2]
+        );
+    }
+
+    #[test]
+    fn select_exact_match_table_is_gated_by_m4_max_gpu_core_count() {
+        // P1・codex-review 指摘・PR #1108 レビュー対応の回帰テスト:
+        // イシュー #1039 の厳密一致テーブル（`exact_match_cfg`）は M4 Max
+        // （40 コア構成）実機実測のみが根拠であり、`gpu_core_count` が
+        // `Some(M4_MAX_GPU_CORE_COUNT)` と一致する場合にのみ適用される
+        // （`select_with_occupancy_for_device` 本体の「機種ゲート」節）。
+        // 一致しない
+        // コア数・取得不能（`None`）の場合は、実測点の `(m, n, k)` を
+        // 与えても本テーブルを経由せず、既存の形状クラス判定（この 4 点は
+        // いずれも `m == n == k` かつ `SQUARE_MEASURED_MAX` 以内の真の
+        // 正方立方形状のため #744 是正後の CANDIDATES[3]）へ落ちることを
+        // 固定する。
+        for raw_gpu_core_count in [None, Some(24u32), Some(16), Some(60)] {
+            assert_ne!(
+                raw_gpu_core_count,
+                Some(M4_MAX_GPU_CORE_COUNT),
+                "本テストは M4 Max 以外のコア数のみを対象とする"
+            );
+            // opaque 型化（P1 是正・PR #1108 レビュー）により、未検証の
+            // 生コア数を `select_for_device` へ直接渡すことはできない。
+            // `verify_m4_max` を経由させると、コア数不一致（SoC ブランドの
+            // 値に関わらず）により必ず `None` になることを利用し、元の
+            // 「ゲートされない」意図を保ったまま新シグネチャへ対応する。
+            let gpu_core_count = verify_m4_max(raw_gpu_core_count, Some(M4_MAX_SOC_BRAND));
+            assert_eq!(
+                gpu_core_count, None,
+                "コア数が不一致のため verify_m4_max は必ず None を返す想定"
+            );
+            assert_eq!(
+                select_for_device(512, 512, 512, gpu_core_count),
+                CANDIDATES[3],
+                "gpu_core_count={raw_gpu_core_count:?} では厳密一致テーブル \
+                 （CANDIDATES[5]）を適用せず形状クラス判定（CANDIDATES[3]）\
+                 へフォールバックする"
+            );
+            assert_eq!(
+                select_for_device(1024, 1024, 1024, gpu_core_count),
+                CANDIDATES[3],
+                "gpu_core_count={raw_gpu_core_count:?} では厳密一致テーブル \
+                 （CANDIDATES[6]）を適用しない"
+            );
+            assert_eq!(
+                select_for_device(2048, 2048, 2048, gpu_core_count),
+                CANDIDATES[3],
+                "gpu_core_count={raw_gpu_core_count:?} では厳密一致テーブル \
+                 （CANDIDATES[1]）を適用しない"
+            );
+            assert_eq!(
+                select_for_device(4096, 4096, 4096, gpu_core_count),
+                CANDIDATES[3],
+                "gpu_core_count={raw_gpu_core_count:?} では厳密一致テーブル \
+                 （CANDIDATES[2]）を適用しない"
+            );
+            // 準正方長方形の実測点（`(1536, 1024, 1024)`）も同様にゲートの
+            // 対象であることを固定する。ゲートされない場合、`m != n` で
+            // tall／wide いずれにも該当せず `m,n >= LARGE(512)` のため
+            // `select_with_occupancy_keeps_near_square_large_rectangle_
+            // without_shrink_when_occupied` と同じ経路（大形状フォール
+            // バック分岐）を通り CANDIDATES[0] になる（#744 是正前の挙動）。
+            assert_eq!(
+                select_for_device(1536, 1024, 1024, gpu_core_count),
+                CANDIDATES[0],
+                "gpu_core_count={raw_gpu_core_count:?} では準正方長方形の \
+                 厳密一致点（CANDIDATES[1]）も適用しない"
+            );
         }
+    }
+
+    #[test]
+    fn verify_m4_max_requires_both_gpu_core_count_and_soc_brand_to_match() {
+        // P1・codex-review 指摘・PR #1108 レビュー対応の回帰テスト:
+        // GPU コア数だけでは機種を一意に識別できない（`gpu_core_count ==
+        // 40` は M4 Max だけでなく M3 Max の 40 コア構成にも該当しうる）。
+        // `verify_m4_max` は GPU コア数と SoC ブランド文字列の両方が一致
+        // した場合にのみ `Some(M4_MAX_GPU_CORE_COUNT)` を返すことを固定
+        // する。
+
+        // 両方一致: M4 Max 実機と判定する。
+        assert_eq!(
+            verify_m4_max(Some(M4_MAX_GPU_CORE_COUNT), Some(M4_MAX_SOC_BRAND)),
+            Some(VerifiedM4MaxGpuCoreCount(M4_MAX_GPU_CORE_COUNT))
+        );
+
+        // GPU コア数は一致するが SoC ブランドが異なる（例: M3 Max の 40
+        // コア構成）。機種を誤認しないよう `None` を返す。
+        assert_eq!(
+            verify_m4_max(Some(M4_MAX_GPU_CORE_COUNT), Some("Apple M3 Max")),
+            None,
+            "GPU コア数が一致しても SoC ブランドが異なる場合は M4 Max と \
+             判定しない（M3 Max 等の同コア数構成との混同防止）"
+        );
+
+        // SoC ブランドは一致するが GPU コア数が異なる（binned 構成等）。
+        assert_eq!(
+            verify_m4_max(Some(32), Some(M4_MAX_SOC_BRAND)),
+            None,
+            "SoC ブランドが一致しても GPU コア数が異なる場合は M4 Max \
+             実測テーブルの対象外とする（binned 構成の混同防止）"
+        );
+
+        // いずれかが取得不能（`None`）な場合も安全側で `None` を返す。
+        assert_eq!(verify_m4_max(None, Some(M4_MAX_SOC_BRAND)), None);
+        assert_eq!(verify_m4_max(Some(M4_MAX_GPU_CORE_COUNT), None), None);
+        assert_eq!(verify_m4_max(None, None), None);
     }
 
     #[test]
@@ -1894,7 +2317,7 @@ mod tests {
         // 512/1024/2048/4096 の 4 点のみ（#744）。4096 超の正方形状（実測
         // 対象外）へ CANDIDATES[3] 一律選択を無制限に広げないことを固定する
         // （#744 是正前の挙動 `m,n >= LARGE(512)` なら CANDIDATES[0] を維持）。
-        let cfg = select(8192, 8192, 8192);
+        let cfg = select_for_device(8192, 8192, 8192, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
     }
@@ -1903,33 +2326,82 @@ mod tests {
     fn select_keeps_pre_744_behavior_for_square_output_with_unmeasured_k() {
         // P1・codex-review 指摘対応（PR #760）: #744 の実測は `m == n == k`
         // の立方 GEMM（512/1024/2048/4096）のみ。`m == n` だが `k` が
-        // 異なる形状（例: (2048,2048,64)）は実測範囲外のため、立方 GEMM の
-        // 実測結果を任意の `k` を持つ正方出力へ拡張しない
+        // 異なる形状（例: (2048,2048,1536)）は依然実測範囲外のため、立方
+        // GEMM の実測結果を任意の `k` を持つ正方出力へ拡張しない
         // （#744 是正前の挙動 `m,n >= LARGE(512)` なら CANDIDATES[0] を維持）。
-        let cfg = select(2048, 2048, 64);
+        // `(2048,2048,64)`／`(2048,2048,512)` はイシュー #1039 で実測
+        // したが 2 回計測で順位が入れ替わり厳密一致テーブルへは含めない
+        // ため（`select_keeps_pre_744_behavior_for_rank_unstable_measured_points`
+        // 参照）、本テストはそれ以外の `k`（実測対象外）で検証する。
+        let cfg = select_for_device(2048, 2048, 1536, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
     }
 
     #[test]
+    fn select_keeps_pre_744_behavior_for_rank_unstable_measured_points() {
+        // イシュー #1039・2026-08-31/09-01 M4 Max 実機実測（PR #1108
+        // codex-review・cursor[bot] 指摘対応）: `(2048,2048,64)`・
+        // `(2048,2048,512)`・`(1024,1536,1536)` は 2 回計測
+        // （run1/run2。`docs/perf/logs/metal-gemm-tile-table-1039/`）で
+        // 最良候補の順位が入れ替わった（プロセス間変動。
+        // `docs/perf/metal-gemm-tile-table.md` §3・§5「順位不安定のため
+        // 反映しない」節）ため、厳密一致テーブルへ含めない（本ファイル
+        // 冒頭コメントの「2 回一致した点のみ反映する」方針どおり）。
+        // よって #744 是正前の挙動（`m,n >= LARGE(512)` なら
+        // CANDIDATES[0]）のまま変わらないことを固定する回帰ガード。
+        assert_eq!(
+            select_for_device(2048, 2048, 64, verified_m4_max_for_test()),
+            CANDIDATES[0]
+        );
+        assert_eq!(
+            select_for_device(2048, 2048, 512, verified_m4_max_for_test()),
+            CANDIDATES[0]
+        );
+        assert_eq!(
+            select_for_device(1024, 1536, 1536, verified_m4_max_for_test()),
+            CANDIDATES[0]
+        );
+    }
+
+    #[test]
     fn select_picks_mid_square_config_for_moderate_shapes() {
-        let cfg = select(128, 128, 128);
+        let cfg = select_for_device(128, 128, 128, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[3]);
         assert_eq!((cfg.bm, cfg.bn), (32, 32));
     }
 
     #[test]
     fn select_keeps_pre_744_behavior_for_near_square_large_rectangle() {
-        // PR #760 codex-review 指摘対応: #744 の実機実測は `m == n`（真の
-        // 正方形状）512〜4096 の 4 点のみであり、縦長・横長いずれにも該当
-        // しないが `m != n` の準正方長方形（本例は m:n=1.5:1）へ CANDIDATES[3]
-        // 一律選択を広げる根拠はない。この帯域は #744 是正前の挙動
-        // （`m,n >= 512` なら CANDIDATES[0]）をそのまま維持する。#747 の
-        // 判断は `m == n == k` の実測帯域に限られ本帯域は対象外（実測は
-        // Mac 実機セッション〈実機ツリー #408 系〉に委ねる）。
-        let cfg = select(1536, 1024, 1024);
+        // PR #760 codex-review 指摘対応: 縦長・横長いずれにも該当しないが
+        // `m != n` の準正方長方形一般に対して、実測されていない `(m, n,
+        // k)` の組へ CANDIDATES[3] 一律選択を広げる根拠はない。この帯域は
+        // 引き続き #744 是正前の挙動（`m,n >= 512` なら CANDIDATES[0]）を
+        // 既定として維持する（実測点のみイシュー #1039 の厳密一致テーブル
+        // で上書きする。下の `select_picks_measured_best_config_for_
+        // near_square_large_rectangle` 参照）。本例は `(1536, 1024, 512)`
+        // で `k` を実測点（1024）と変えて厳密一致から外している。
+        let cfg = select_for_device(1536, 1024, 512, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
+    }
+
+    #[test]
+    fn select_picks_measured_best_config_for_near_square_large_rectangle() {
+        // イシュー #1039・2026-08-31/09-01 M4 Max 実機実測: 準正方長方形
+        // （`m != n`・縦横比 < 2）の `(1536,1024,1024)` は 2 回計測いずれも
+        // `CANDIDATES[1]` が最良で一致しており、CANDIDATES[0]（是正前の
+        // 安全側フォールバック値）比 約 5〜6 倍の逸失があることを確認した
+        // （CANDIDATES[0] 1.16〜1.18 TFLOPS に対し CANDIDATES[1] 6.29〜
+        // 6.35 TFLOPS。詳細値は `docs/perf/metal-gemm-tile-table.md`）。
+        // `(1024,1536,1536)` は 2 回計測で順位が入れ替わったため厳密一致
+        // テーブルへ含めない（
+        // `select_keeps_pre_744_behavior_for_rank_unstable_measured_points`
+        // 参照）。
+        assert_eq!(
+            select_for_device(1536, 1024, 1024, verified_m4_max_for_test()),
+            CANDIDATES[1]
+        );
     }
 
     #[test]
@@ -1939,21 +2411,21 @@ mod tests {
         // （どちらの経路でも CANDIDATES[3]）ことを固定する。`LARGE` 分岐の
         // 再導入（PR #760 レビュー対応）がこの帯域を誤って変えていないかの
         // 検証。
-        let cfg = select(128, 192, 128);
+        let cfg = select_for_device(128, 192, 128, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[3]);
         assert_eq!((cfg.bm, cfg.bn), (32, 32));
     }
 
     #[test]
     fn select_picks_tall_config_when_m_dominates() {
-        let cfg = select(1024, 128, 256);
+        let cfg = select_for_device(1024, 128, 256, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[1]);
         assert_eq!((cfg.bm, cfg.bn), (64, 32));
     }
 
     #[test]
     fn select_picks_wide_config_when_n_dominates() {
-        let cfg = select(128, 1024, 256);
+        let cfg = select_for_device(128, 1024, 256, verified_m4_max_for_test());
         assert_eq!(cfg, CANDIDATES[2]);
         assert_eq!((cfg.bm, cfg.bn), (32, 64));
     }
@@ -1976,8 +2448,8 @@ mod tests {
             (2048, 2048, 64),   // m==n だが K 未実測の正方出力（PR #760 レビュー対応で追加）
         ] {
             assert_eq!(
-                select_with_occupancy(m, n, k, None),
-                select(m, n, k),
+                select_with_occupancy_for_device(m, n, k, verified_m4_max_for_test(), None),
+                select_for_device(m, n, k, verified_m4_max_for_test()),
                 "m={m} n={n} k={k}"
             );
         }
@@ -2006,10 +2478,122 @@ mod tests {
         // 縮退の有無で 512 と 1024/2048/4096 を書き分けていたが、その分岐が
         // 撤去されたため意味を失い本テストへ統合する
         // （occupancy 縮退の検証自体は縦長/横長形状のテストが引き続き担う）。
-        for &size in &[512usize, 1024, 2048, 4096] {
-            let cfg = select_with_occupancy(size, size, size, Some(m4_max_expected_params()));
-            assert_eq!(cfg, CANDIDATES[3], "size={size}");
-        }
+        // イシュー #1039 の厳密一致テーブル（`select_with_occupancy` 冒頭）
+        // がこれら 4 点の `shape_cfg` を測定済み最良候補へ差し替える（P1・
+        // codex-review 指摘・PR #1108 レビュー対応で occupancy 判定を迂回
+        // しない構造へ変更済み）。512/1024/2048/4096 いずれも
+        // `is_large_tile_candidate`（`bm*bn` が CANDIDATES[3] 超）の対象
+        // であり、この `m4_max_expected_params()` 下では 4 点とも
+        // `is_underoccupied` が偽（over-occupied）のため実際には縮退しない
+        // （期待値は `select` 側と同一。`select_picks_measured_best_config_
+        // for_true_square_shapes` 参照。underoccupied 時に実際に縮退する
+        // ことは `select_with_occupancy_shrinks_exact_match_candidates_
+        // when_underoccupied` が別途固定する）。
+        assert_eq!(
+            select_with_occupancy_for_device(
+                512,
+                512,
+                512,
+                verified_m4_max_for_test(),
+                Some(m4_max_expected_params())
+            ),
+            CANDIDATES[5]
+        );
+        assert_eq!(
+            select_with_occupancy_for_device(
+                1024,
+                1024,
+                1024,
+                verified_m4_max_for_test(),
+                Some(m4_max_expected_params())
+            ),
+            CANDIDATES[6]
+        );
+        assert_eq!(
+            select_with_occupancy_for_device(
+                2048,
+                2048,
+                2048,
+                verified_m4_max_for_test(),
+                Some(m4_max_expected_params())
+            ),
+            CANDIDATES[1]
+        );
+        assert_eq!(
+            select_with_occupancy_for_device(
+                4096,
+                4096,
+                4096,
+                verified_m4_max_for_test(),
+                Some(m4_max_expected_params())
+            ),
+            CANDIDATES[2]
+        );
+    }
+
+    #[test]
+    fn select_with_occupancy_shrinks_exact_match_candidates_when_underoccupied() {
+        // P1・codex-review 指摘・PR #1108 レビュー対応の回帰テスト:
+        // 厳密一致テーブル（イシュー #1039）が返す `CANDIDATES[5]`／`[6]`
+        // （いずれも `bm=64,bn=32` で `CANDIDATES[1]`・縦長・大タイル系と
+        // 同一の threadgroup 分担面積）が、`is_large_tile_candidate` の
+        // 固定列挙（旧実装は `CANDIDATES[0..=2]` のみ）により構造上常に
+        // occupancy 縮退の対象外（867 行目相当で早期 return）になっていた
+        // 問題を固定する。`gpu_core_count` を小さくして意図的に
+        // under-occupied な状況を作り、実際に `CANDIDATES[3]`（中形状）へ
+        // 縮退することを検証する（`max_threadgroup_memory_bytes` は
+        // `m4_max_expected_params()` と同じ 32768 バイトのままにし、
+        // `smem_groups_per_core` によるキャップは変えず `gpu_core_count`
+        // のみを縮小することで `ideal_groups` を下げる）。
+        //
+        // `is_underoccupied(actual, ideal)` は `actual <= ideal`（groups
+        // 数が目標に対して少なすぎる＝under-occupied）で縮退する契約
+        // （本ファイル [`is_underoccupied`] ドキュメント参照）。厳密一致点
+        // は `m == n` が大きく `actual_groups` 自体が大きいため、通常の
+        // `m4_max_expected_params()`（コア数 40）では over-occupied
+        // （縮退しない。上の `..._bypass_occupancy_shrink_via_step1` が
+        // 固定）。ここでは意図的にコア数を大きくし `ideal_groups` を
+        // `actual_groups` 以上へ引き上げることで under-occupied を作る。
+        //
+        // (512,512,512) → 段 1 は `CANDIDATES[5]`（bm=64,bn=32,bk=32）。
+        // actual_groups = ceil(512/64)*ceil(512/32) = 8*16 = 128。
+        // shared_mem_bytes = (64*(32+4) + 32*(32+4))*4 = 13824 →
+        // smem_groups_per_core = min(6, 32768/13824=2) = 2 →
+        // ideal_groups = gpu_core_count(100) * 2 = 200。128 <= 200 のため
+        // under-occupied（縮退）。
+        let large_core_count_params = OccupancyParams {
+            gpu_core_count: 100,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(
+            select_with_occupancy_for_device(
+                512,
+                512,
+                512,
+                verified_m4_max_for_test(),
+                Some(large_core_count_params)
+            ),
+            CANDIDATES[3],
+            "CANDIDATES[5]（512 立方の厳密一致点）も under-occupied 時は縮退する"
+        );
+
+        // (1024,1024,1024) → 段 1 は `CANDIDATES[6]`（bm=64,bn=32,bk=8）。
+        // actual_groups = ceil(1024/64)*ceil(1024/32) = 16*32 = 512。
+        // shared_mem_bytes = (64*(8+4) + 8*(32+4))*4 = 4224 →
+        // smem_groups_per_core = min(6, 32768/4224=7) = 6 →
+        // ideal_groups = gpu_core_count(100) * 6 = 600。512 <= 600 のため
+        // under-occupied（縮退）。
+        assert_eq!(
+            select_with_occupancy_for_device(
+                1024,
+                1024,
+                1024,
+                verified_m4_max_for_test(),
+                Some(large_core_count_params)
+            ),
+            CANDIDATES[3],
+            "CANDIDATES[6]（1024 立方の厳密一致点）も under-occupied 時は縮退する"
+        );
     }
 
     #[test]
@@ -2026,8 +2610,14 @@ mod tests {
         // （docs/perf/metal-gemm-occupancy-select.md「#747 判断」節）。
         for &size in &[512usize, 1024, 2048, 4096] {
             assert_eq!(
-                select_with_occupancy(size, size, size, Some(m4_max_expected_params())),
-                select(size, size, size),
+                select_with_occupancy_for_device(
+                    size,
+                    size,
+                    size,
+                    verified_m4_max_for_test(),
+                    Some(m4_max_expected_params())
+                ),
+                select_for_device(size, size, size, verified_m4_max_for_test()),
                 "size={size}"
             );
         }
@@ -2038,14 +2628,25 @@ mod tests {
         // PR #760 codex-review 指摘対応: `m != n` の準正方大形状長方形は
         // 段 1 で CANDIDATES[0]（大タイル系）を返すため（`LARGE` 分岐の
         // 再導入）、occupancy 縮退（段 2）が #744 是正前と同様に生きた
-        // ままであることを固定する。
+        // ままであることを固定する。`k=512`（`m=1536, n=1024` の実測点
+        // `k=1024` はイシュー #1039 の厳密一致テーブルが `shape_cfg` を
+        // 測定済み最良候補 `CANDIDATES[1]` へ差し替えるため、この境界計算
+        // の検証に使えなくなった。`actual_groups`/`ideal_groups` は
+        // `m`/`n`/`shape_cfg` のみに依存し `k` に依存しないため、`k` を
+        // 変えても以下の計算は同一のまま成立する）。
         //
         // m=1536, n=1024, CANDIDATES[0]（bm=bn=64, pad=4）:
         // actual_groups = ceil(1536/64)*ceil(1024/64) = 24*16 = 384。
         // smem_groups_per_core = min(6, 32768/9472=3) = 3 →
         // ideal_groups = 40*3 = 120。384 > 120 のため over-occupied（縮退
         // しない）。
-        let cfg = select_with_occupancy(1536, 1024, 1024, Some(m4_max_expected_params()));
+        let cfg = select_with_occupancy_for_device(
+            1536,
+            1024,
+            512,
+            verified_m4_max_for_test(),
+            Some(m4_max_expected_params()),
+        );
         assert_eq!(cfg, CANDIDATES[0]);
     }
 
@@ -2056,7 +2657,13 @@ mod tests {
         // CANDIDATES[1] の smem_groups_per_core=4（7424 バイト）→
         // ideal_groups=40*4=160。32 <= 160 で under-occupied のため
         // CANDIDATES[3] へ縮退する。
-        let cfg = select_with_occupancy(512, 128, 256, Some(m4_max_expected_params()));
+        let cfg = select_with_occupancy_for_device(
+            512,
+            128,
+            256,
+            verified_m4_max_for_test(),
+            Some(m4_max_expected_params()),
+        );
         assert_eq!(cfg, CANDIDATES[3]);
     }
 
@@ -2064,7 +2671,13 @@ mod tests {
     fn select_with_occupancy_shrinks_wide_shape_when_underoccupied() {
         // 横長（128x512）: 段 1 は CANDIDATES[2]（32x64）を選ぶ。縦長と対称の
         // 形状のため同じく under-occupied となり CANDIDATES[3] へ縮退する。
-        let cfg = select_with_occupancy(128, 512, 256, Some(m4_max_expected_params()));
+        let cfg = select_with_occupancy_for_device(
+            128,
+            512,
+            256,
+            verified_m4_max_for_test(),
+            Some(m4_max_expected_params()),
+        );
         assert_eq!(cfg, CANDIDATES[3]);
     }
 
@@ -2087,7 +2700,13 @@ mod tests {
             gpu_core_count: 24,
             max_threadgroup_memory_bytes: 1024 * 1024,
         };
-        let cfg = select_with_occupancy(2304, 128, 768, Some(params));
+        let cfg = select_with_occupancy_for_device(
+            2304,
+            128,
+            768,
+            verified_m4_max_for_test(),
+            Some(params),
+        );
         assert_eq!(cfg, CANDIDATES[3]);
     }
 
@@ -2101,11 +2720,23 @@ mod tests {
             max_threadgroup_memory_bytes: 1,
         };
         assert_eq!(
-            select_with_occupancy(128, 128, 128, Some(extreme_params)),
+            select_with_occupancy_for_device(
+                128,
+                128,
+                128,
+                verified_m4_max_for_test(),
+                Some(extreme_params)
+            ),
             CANDIDATES[3]
         );
         assert_eq!(
-            select_with_occupancy(32, 32, 32, Some(extreme_params)),
+            select_with_occupancy_for_device(
+                32,
+                32,
+                32,
+                verified_m4_max_for_test(),
+                Some(extreme_params)
+            ),
             TileConfig::SINGLE_SIMDGROUP_8X8
         );
     }
@@ -2119,8 +2750,14 @@ mod tests {
             max_threadgroup_memory_bytes: 32 * 1024,
         };
         assert_eq!(
-            select_with_occupancy(1024, 1024, 1024, Some(params)),
-            select(1024, 1024, 1024)
+            select_with_occupancy_for_device(
+                1024,
+                1024,
+                1024,
+                verified_m4_max_for_test(),
+                Some(params)
+            ),
+            select_for_device(1024, 1024, 1024, verified_m4_max_for_test())
         );
     }
 
@@ -2134,8 +2771,14 @@ mod tests {
             max_threadgroup_memory_bytes: 1024, // CANDIDATES[0] の 9472 バイト未満
         };
         assert_eq!(
-            select_with_occupancy(1024, 1024, 1024, Some(params)),
-            select(1024, 1024, 1024)
+            select_with_occupancy_for_device(
+                1024,
+                1024,
+                1024,
+                verified_m4_max_for_test(),
+                Some(params)
+            ),
+            select_for_device(1024, 1024, 1024, verified_m4_max_for_test())
         );
     }
 
@@ -2153,9 +2796,16 @@ mod tests {
             (2048, 2048, 2048),
             (4096, 512, 512),
         ] {
-            let cfg = select_with_occupancy(m, n, k, Some(m4_max_expected_params()));
-            cfg.validate(1024, 32 * 1024)
-                .unwrap_or_else(|e| panic!("select_with_occupancy({m}, {n}, {k}) rejected: {e}"));
+            let cfg = select_with_occupancy_for_device(
+                m,
+                n,
+                k,
+                verified_m4_max_for_test(),
+                Some(m4_max_expected_params()),
+            );
+            cfg.validate(1024, 32 * 1024).unwrap_or_else(|e| {
+                panic!("select_with_occupancy_for_device({m}, {n}, {k}) rejected: {e}")
+            });
         }
     }
 
@@ -2270,7 +2920,7 @@ mod tests {
             (2048, 2048, 2048),
             (4096, 512, 512),
         ] {
-            let cfg = select(m, n, k);
+            let cfg = select_for_device(m, n, k, verified_m4_max_for_test());
             cfg.validate(1024, 32 * 1024)
                 .unwrap_or_else(|e| panic!("select({m},{n},{k})={cfg:?} rejected: {e}"));
         }
@@ -3059,13 +3709,13 @@ mod tests {
         let shapes: &[(usize, usize, usize)] = &[
             (2048, 256, 512),  // 縦長 → CANDIDATES[1]
             (256, 2048, 512),  // 横長 → CANDIDATES[2]
-            (512, 512, 512),   // 正方立方（実測範囲内）→ CANDIDATES[3]
+            (512, 512, 512),   // 正方立方（イシュー #1039 実測点）→ CANDIDATES[5]
             (1536, 1024, 512), // 準正方大形状長方形 → CANDIDATES[0]
             (32, 32, 32),      // 微小形状 → SINGLE_SIMDGROUP_8X8
         ];
 
         for &(m, n, k) in shapes {
-            let expected = select(m, n, k);
+            let expected = select_for_device(m, n, k, verified_m4_max_for_test());
             let resolved = gemm
                 .resolve_tile_config_f16(&ctx, expected)
                 .unwrap_or_else(|err| {

@@ -336,6 +336,90 @@ pub fn probe_gpu_core_count() -> Option<u32> {
     Some(value as u32)
 }
 
+/// `sysctl machdep.cpu.brand_string`（Apple Silicon で SoC 名を返す。例:
+/// `"Apple M4 Max"`）を読み取る（P1・codex-review 指摘・PR #1108
+/// レビュー対応）。
+///
+/// **`crate::tile` の M4 Max 実測厳密一致テーブル適用可否判定への用途**:
+/// GPU コア数（[`probe_gpu_core_count`]）だけでは機種を一意に識別できない
+/// （M3 Max にも 40 コア構成が存在し、同じ `gpu_core_count == 40` が
+/// 成立してしまう）。本関数は macOS が実機から直接返す SoC ブランド名
+/// （機種番号〈`hw.model`〉から対応表で推定するのではなく、カーネルが
+/// 実測して返す値。上記「機種識別子からの対応表推定」の却下理由〈`hw.model`
+/// だけでは binned 構成差異まで保証できない〉とは異なり、対応表を介さない
+/// 直接読み取りのため同却下理由には該当しない）を `gpu_core_count` と
+/// 組み合わせることで、世代の異なる同コア数 SoC を判別する追加シグナルと
+/// して使う（`crate::tile::verify_m4_max` 参照）。
+///
+/// **fail-safe 契約**: `sysctlbyname` 呼び出し失敗・長さ 0・異常に長い
+/// 応答（4096 バイト超。実在しうる brand string 長を大きく超える値は
+/// 取得異常とみなす）・非 UTF-8 はいずれも `None` を返す。本番経路で
+/// `panic!`／`unwrap()`／`expect()` を使わない（`.claude/rules/
+/// coding-rust.md`）。`sysctlbyname` は libSystem（macOS 標準 C
+/// ライブラリ）が提供する関数であり、追加の `#[link]` framework 指定・
+/// 依存クレート追加は不要（`deps-policy.md` の許容 8 区分を変更しない）。
+pub fn probe_soc_brand_string() -> Option<String> {
+    use std::ffi::{CString, c_char, c_void};
+
+    // SAFETY: `sysctlbyname` は libSystem（macOS の C 標準ライブラリ）が
+    // 提供する安定 C API。macOS 上の Rust バイナリは既定で libSystem を
+    // リンクするため追加の `#[link]` 指定は不要（IOKit／CoreFoundation
+    // 等の非標準 framework とは異なる）。
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+
+    let name = CString::new("machdep.cpu.brand_string").ok()?;
+    let mut len: usize = 0;
+
+    // 1 回目の呼び出し: `oldp` に null を渡し、必要バッファ長を `len` へ
+    // 書き戻させる（`sysctlbyname` の標準的な「長さ問い合わせ」呼び出し
+    // 方式）。
+    // SAFETY: `oldp`／`newp` に null、`newlen` に 0 を渡す長さ問い合わせ
+    // 呼び出しは `sysctlbyname` の契約上安全（`man 3 sysctlbyname`）。
+    // `len` は有効な `&mut usize` から取ったポインタ。
+    let rc = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len == 0 || len > 4096 {
+        return None;
+    }
+
+    let mut buf = vec![0u8; len];
+    // SAFETY: `buf` は直前に問い合わせた `len` バイトの有効な書き込み先
+    // （`Vec` の確保直後で他に別名参照なし）。`sysctlbyname` は最大 `len`
+    // バイトしか書かない契約。
+    let rc = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr() as *mut c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+
+    // `sysctlbyname` が返す文字列バッファは NUL 終端（末尾に余剰 NUL を
+    // 含みうる）。最初の NUL までを有効な文字列として扱う。
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8(buf[..end].to_vec()).ok()
+}
+
 /// `MetalDeviceProvider::probe_all` とは独立に、occupancy 目標算出
 /// （`crate::tile::OccupancyParams`）が必要とする実機値をまとめて取得する
 /// 入口（イシュー #541）。`crate::tile::actual_groups`／
@@ -417,6 +501,30 @@ mod tests {
                 "Apple Silicon 実機で probe_gpu_core_count() が None を返した \
                  （AGXAccelerator サービス・gpu-core-count プロパティが取得できない \
                  環境変化の可能性。docs/perf/metal-gemm-occupancy-target.md 参照）"
+            ),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Apple Silicon 実機（sysctl machdep.cpu.brand_string）依存。CI では実行しない"]
+    fn probe_soc_brand_string_returns_apple_prefixed_value_on_apple_silicon() {
+        // P1・codex-review 指摘・PR #1108 レビュー対応: `crate::tile::
+        // verify_m4_max` が GPU コア数と組み合わせる SoC ブランド文字列の
+        // 実測が、Apple Silicon 実機で妥当な形（`"Apple "` プレフィックス）
+        // を返すことを固定する。
+        let brand = probe_soc_brand_string();
+        println!("probe_soc_brand_string() = {brand:?}");
+        match brand {
+            Some(s) => assert!(
+                s.starts_with("Apple "),
+                "sysctl machdep.cpu.brand_string の実測値が想定外の形式: {s:?} \
+                 （Apple Silicon では \"Apple M<N>[ Pro/Max/Ultra]\" 形式のはず）"
+            ),
+            None => panic!(
+                "Apple Silicon 実機で probe_soc_brand_string() が None を返した \
+                 （sysctlbyname(\"machdep.cpu.brand_string\") が取得できない \
+                 環境変化の可能性）"
             ),
         }
     }

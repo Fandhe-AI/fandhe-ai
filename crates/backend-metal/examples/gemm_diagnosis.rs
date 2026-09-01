@@ -234,6 +234,11 @@ mod analytics {
     /// 理論トラフィックを求める（真の occupancy ではない点は
     /// [`DeviceProfile`] のドキュメント参照）。
     pub fn analyze(size: usize, profile: DeviceProfile) -> SizeAnalytics {
+        // `probe_gpu_core_count`（イシュー #1039 の厳密一致テーブルの機種
+        // ゲート）は `cfg(target_os = "macos")` 限定。本関数は Linux（CI）
+        // でも算出できる純粋関数の設計を保つため機種ゲートは常に `None`
+        // （M4 Max 実測テーブル不使用）で評価する（`tile::select`
+        // ドキュメンテーションコメント参照）。
         let tile = fandhe_ai_backend_metal::tile::select(size, size, size);
 
         let groups_m = ceil_div(size, tile.bm);

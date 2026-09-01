@@ -118,16 +118,30 @@ storage から借用で返す。`as_slice`（contiguous 限定）と異なり転
 「Metal 実機実測」は #1046 でも未消化のまま引き続き別イシュー行きで
 ある（`docs/matmul-vjp-zero-copy-decision.md` §3.2 が現時点の一覧）。
 
-## 5. 実機実測（未実施。Mac セッションで実施予定）
+## 5. 実機実測
+
+イシュー #1039（M4 Max 実機セッション）で以下を実行し、全 0 fail を確認した:
 
 ```sh
 cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release --lib -- --ignored --nocapture
 ```
 
-- `tests/gemm_strided_parity.rs`: NN/NT/TN/TT parity・NN ビット同一・
-  collapse parity
+- `tests/gemm_strided_parity.rs`: NN/NT/TN/TT parity（3 テスト）・
+  NN ビット同一（`dispatch_bias_act_prepared_nn_is_bit_identical_to_
+  strided_nn`）・collapse parity（`gemm_collapsed_lhs_matches_per_batch_
+  cpu_reference`）いずれも green
 - `src/ops.rs` の `gemm_resident_lhs_transposed_b_does_not_increment_repack_counter`:
-  転置 view 入力時に `RESIDENT_HOST_REPACK_COUNT` が増えないことの確認
-- 学習 1 ステップ（Linear + SGD 常駐）の before/after 性能比較
+  転置 view 入力時に `RESIDENT_HOST_REPACK_COUNT` が増えないことを確認
+  （green）
+- `crates/backend-metal` の実機依存テスト全体（`--ignored`。lib 15 件・
+  統合テスト各ファイル）が 0 fail
 
-（実測値は未記入。Mac 実機セッションでの実行後にこの節を更新する）
+strided classic tiled 経路（NT/TN/TT）の形状別 GFLOPS/s 実測は
+`docs/perf/metal-gemm-tile-table.md` §4（イシュー #1039）を参照。NN 最良
+候補比で概ね 15〜25% に留まり、`gemm_simdgroup_tiled` への転置ロード拡張
+（§4「スコープ外」で親 #1037 系へ引き継ぎ）の要否判断材料とした。
+
+学習 1 ステップ（Linear + SGD 常駐）の before/after 性能比較は #1039 の
+スコープに含まれず未実施のまま（別イシュー行き。out-of-scope-tracking.md
+方針に基づき、必要ならユーザー承認のうえ別途起票する）。

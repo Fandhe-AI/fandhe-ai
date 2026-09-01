@@ -29,7 +29,7 @@ use crate::buffer::MtlBuffer;
 use crate::device::MetalOccupancyInfo;
 use crate::error::MetalError;
 use crate::pool_pending;
-use crate::tile::OccupancyParams;
+use crate::tile::{self, OccupancyParams};
 
 pub(crate) type MtlDevice = ProtocolObject<dyn MTLDevice>;
 pub(crate) type MtlQueue = ProtocolObject<dyn MTLCommandQueue>;
@@ -119,6 +119,15 @@ pub struct MetalContext {
     queue: Retained<MtlQueue>,
     caps: DeviceCaps,
     occupancy_params: Option<OccupancyParams>,
+    /// SoC ブランド文字列（`crate::device::probe_soc_brand_string` の実測値。
+    /// 例: `"Apple M4 Max"`）。`new` 時に 1 回だけ取得しキャッシュする
+    /// （`occupancy_params`・`caps` と同じ判断）。[`Self::
+    /// verified_m4_max_gpu_core_count`] が `occupancy_params` の GPU コア数
+    /// と組み合わせ、イシュー #1039 の M4 Max 実測厳密一致テーブルの適用
+    /// 可否判定に使う（P1・codex-review 指摘・PR #1108 レビュー: GPU コア数
+    /// だけでは機種〈例: M3 Max との 40 コア構成の混同〉を一意に識別
+    /// できないため）。
+    soc_brand: Option<String>,
     /// コマンドバッファ共有バッチの状態（イシュー #1017）。
     /// [`MetalContext::encode`]／[`MetalContext::synchronize`]（内部
     /// ヘルパ `flush_locked` を含む）がこの `Mutex` を介してのみ
@@ -198,11 +207,14 @@ impl MetalContext {
                     max_threadgroup_memory_bytes: occupancy_info.max_threadgroup_memory_bytes,
                 });
 
+        let soc_brand = crate::device::probe_soc_brand_string();
+
         Ok(Self {
             device,
             queue,
             caps,
             occupancy_params,
+            soc_brand,
             batch: Mutex::new(BatchSlots::default()),
             diag_encode_calls: AtomicUsize::new(0),
             diag_command_buffers: AtomicUsize::new(0),
@@ -242,6 +254,24 @@ impl MetalContext {
     /// fail-safe フォールバックで形状のみの選択へ倒れる）。
     pub fn occupancy_params(&self) -> Option<OccupancyParams> {
         self.occupancy_params
+    }
+
+    /// イシュー #1039 の M4 Max 実測厳密一致テーブル（`crate::tile` の
+    /// `exact_match_cfg`）を適用してよいかどうかを、`new` 時にキャッシュ
+    /// した GPU コア数と SoC ブランド文字列の両方から検証する
+    /// （`crate::tile::verify_m4_max` への委譲。P1・codex-review 再指摘・
+    /// PR #1108 レビュー: GPU コア数だけでは機種〈M3 Max との 40 コア構成
+    /// の混同〉を一意に識別できないため）。戻り値は [`crate::tile::
+    /// VerifiedM4MaxGpuCoreCount`]（`verify_m4_max` からのみ構築可能な
+    /// opaque 型）であり、`crate::gemm::MetalGemm::dispatch_auto` 等の
+    /// 本番ディスパッチ入口は、この戻り値をそのまま `tile::
+    /// select_for_device` の `gpu_core_count` 引数へ渡す（未検証の生の
+    /// GPU コア数を渡してブランド照合を迂回することは型上できない）。
+    pub fn verified_m4_max_gpu_core_count(&self) -> Option<tile::VerifiedM4MaxGpuCoreCount> {
+        tile::verify_m4_max(
+            self.occupancy_params.map(|p| p.gpu_core_count),
+            self.soc_brand.as_deref(),
+        )
     }
 
     /// コマンドバッファ生成に使うコマンドキュー

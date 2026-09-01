@@ -161,6 +161,13 @@ mod analytics {
     /// 並列度・K ループ回数・MLX 選択域該当を求める。`gemm_diagnosis.rs::
     /// analytics::analyze` と同じ設計だが正方形状に限定しない）。
     pub fn analyze(m: usize, n: usize, k: usize) -> ShapeAnalytics {
+        // `crate::device::probe_gpu_core_count`（イシュー #1039 の厳密一致
+        // テーブルの機種ゲート）は `cfg(target_os = "macos")` 限定だが、本
+        // 関数はモジュール冒頭コメントのとおり `objc2` 系 FFI に触れない
+        // 純粋関数として Linux（CI）でも算出できる設計を保つ。よって機種
+        // ゲートは常に `None`（M4 Max 実測テーブル不使用）で評価し、形状
+        // クラス判定のみによる選択を解析対象とする（`tile::select`
+        // ドキュメンテーションコメント参照）。
         let tile = fandhe_ai_backend_metal::tile::select(m, n, k);
 
         let groups_m = ceil_div(m, tile.bm);
@@ -273,7 +280,12 @@ mod macos_impl {
         let a: Vec<f32> = rng.fill_vec(m * k);
         let b: Vec<f32> = rng.fill_vec(k * n);
 
-        let cfg = fandhe_ai_backend_metal::tile::select(m, n, k);
+        let cfg = fandhe_ai_backend_metal::tile::select_for_device(
+            m,
+            n,
+            k,
+            ctx.verified_m4_max_gpu_core_count(),
+        );
         let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
         let a_padded = pad_matrix(&a, m, k, m_eff, k_eff);
         let b_padded = pad_matrix(&b, k, n, k_eff, n_eff);
