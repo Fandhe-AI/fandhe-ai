@@ -327,3 +327,161 @@ falsification 検査群）が全て green であることを確認した。
   で申し送り**（推定値は記載しない）
 - 受け入れ基準 4「共通契約の遵守」: **遵守**（境界チェック・tolerance・
   依存関係・`docs/spec/`・REQ-8 下限のいずれも本イシューで変更していない）
+
+## 9. rmsnorm_backward_dw_split の GB10 parity 失敗の切り分け・修正（イシュー #1105）
+
+本節は §1〜8（GEMM `wmma`/`mma` 系経路専用のベースライン表・非後退契約）
+とは別スコープの追補である。対象は RMSNorm 逆伝播 `dw` の単段フォール
+バック経路（`RMSNORM_BWD_DW_F32`。`crates/backend-cuda/src/kernels_rmsnorm.rs`）
+の parity で、本節 §2 の非後退契約の対象外（GEMM 専用の
+ベースライン表・fixture に本節の経路は含まれない）。
+
+### 9.1 検出（PR #1098 実機実測。#1102 ツリー・#1105 分解 1/3）
+
+- `#[ignore]` テスト `rmsnorm_backward_dw_split_matches_cpu_across_shapes`
+  （`crates/backend-cuda/tests/rmsnorm_backward_parity.rs`）が DGX Spark
+  GB10（sm_121）実機で REQ-2 統一複合判定（相対誤差 1e-3 未満 または
+  絶対誤差 1e-5 未満。`crates/backend-cpu/src/parity.rs`）を超過して FAIL
+  した（fail 6/4096）。RTX 3060（sm_86）では同テストは pass
+- dx（先に assert される。分母 8192×4096）は pass しているため、fail は
+  ケース表 7 番目 `(rows=8192, hidden=4096, num_blocks=1)`（単段フォール
+  バック dw 経路。split-K を要しない広い `hidden`）に限定されると判断した
+
+### 9.2 切り分け（GB10 実機実測に基づく確定。#1105 実装セッションで実施）
+
+**コード根拠（実測前の仮説）**:
+
+- 単段 dw カーネル（`kernels_rmsnorm.rs` の `RMSNORM_BWD_DW_F32`）は
+  行 0..rows を serial に `acc = fmaf(dyv * r, xv, acc)` で蓄積し、
+  テスト内 CPU 参照実装（`(dy*rstd).mul_add(x, dw)`）と加算順・FMA 契約が
+  完全に一致する。両者で唯一異なりうる入力は `rstd`（GPU 側は forward
+  `run_rmsnorm_f32_train` が保存した値、CPU 参照は自前で再計算）
+- forward カーネル `RMSNORM_F32_ONEPASS`／`RMSNORM_F32_TWOPASS` は当初
+  `rstd = rsqrtf(fmaf(acc, inv_n, eps))` と近似 intrinsic `rsqrtf`
+  （MUFU.RSQ。丸めがアーキテクチャ実装依存・最大 ~2 ulp）を使っていた
+
+**GB10 実機での検証結果（2026-09-01 実測。`--release`・`--ignored`）**:
+
+1. `rsqrtf` → `1.0f / sqrtf(...)`（9.3）へ置換した修正版で
+   `rmsnorm_backward_dw_split_matches_cpu_across_shapes` を再実行したところ、
+   該当ケース `(rows=8192, hidden=4096, num_blocks=1)` は
+   `fail_count=5/4096, max_abs_diff=2.975e-4, max_rel_err=1.340e-2,
+   mean_abs_diff=4.477e-5, p50_abs_diff=3.433e-5` で **依然 FAIL**
+   （修正前は fail 6/4096。単一測定であり「改善」と主張はしない。
+   `p50_abs_diff` が絶対救済閾値 1e-5 を上回っており、4096 要素の中央値
+   ですでに閾値超過という規模の誤差である点に注意）
+2. 追加の切り分け診断（コミットしない一時テストを転送ツリー上でのみ実行。
+   受け入れ基準検証対象のテストファイル自体は変更していない）:
+   GPU forward が保存した `rstd` をそのまま CPU 参照の
+   `(dy*rstd).mul_add(x, dw)` 式（dw カーネルと同一の逐次蓄積順）に代入
+   して計算した「CPU(GPU-rstd) dw」を GPU dw 出力と比較したところ、
+   4096 要素全てが **bit 一致**（`dw_mismatch_count=0/4096`）した。
+   これにより **dw カーネル自体は無罪**と確定できる（誤差が入り得る
+   経路は `rstd` のみ）
+3. 同診断で GPU `rstd` と CPU 再計算 `rstd`（両者とも IEEE 丸めの
+   `1.0f32 / (...).sqrt()`）の行あたり最大相対差を実測したところ
+   `max_rstd_rel_delta = 2.06e-6` だった。両者とも丸め方式は同一
+   （IEEE 丸め）なため、この差は丸め方式の不一致ではなく **forward の
+   二乗和 `acc` の縮約順序の違い**に由来する: forward カーネルは
+   32 レーンのストライド部分和 + 5 段 butterfly `__shfl_xor_sync`
+   reduction（並列木構造）で `acc` を求めるのに対し、CPU 参照実装は
+   `0..hidden` の単純逐次 `mul_add` で求める。浮動小数点加算は結合則を
+   満たさないため、たとえ個々の演算が全て IEEE 丸め・`fmaf` 契約で
+   統一されていても、縮約順序が異なれば `acc`（ひいては `sqrt` の引数・
+   `rstd`）は ULP レベルで一致しない
+4. `rows = 8192` の逐次蓄積（dw カーネル）は行あたり ULP レベルの
+   `rstd` 差をランダムウォーク的に増幅し、キャンセレーションで値が
+   小さくなる `dw[j]` 要素では絶対救済・相対救済の双方を超過する
+   （`max_rel_err=1.340e-2` は `max_abs_diff=2.975e-4` の要素で相対救済も
+   破れたケース）
+
+**切り分け結論（実測で確定・訂正）**:
+
+- 実装前の仮説「`rsqrtf` の世代依存近似誤差が主因」は診断 3 の結果
+  （GPU/CPU とも IEEE 丸めに統一した後も `rstd` に ULP 差が残る）により
+  **反証された**。`rsqrtf` は丸め契約として CPU 参照・`backend-cpu` 本番
+  実装と不一致だった点で独立に是正すべき問題ではあるが、GB10 での
+  FAIL の主因ではなかった
+- 真因は **forward の warp butterfly reduction（並列木構造）と CPU 参照
+  実装の逐次和という、縮約順序の非結合性に起因する `rstd` の ULP 差**
+  （診断 2 が dw カーネル自体の無罪を bit 一致で証明済み）。これが
+  `rows = 8192` という長い逐次蓄積を持つケースでのみ複合判定を超過する
+  規模まで増幅される
+- 「カーネルの不具合」か「テスト前提の誤り」かの二択でいえば、
+  古典的な意味でのバグ（誤った計算式・境界誤り等）ではなく、**性能
+  志向の並列縮約アルゴリズムと逐次 CPU 参照実装の間に本質的に存在する
+  非結合性**が、テストケース表 7 番目（`rows` が大きく `hidden` も広い
+  単段 dw 経路）でのみ顕在化したものである。sm_86 で pass していた
+  理由は `rsqrtf` の世代依存丸め分布が偶然この特定ケースの ULP 差を
+  救済側へ寄せていたためと考えられる（両世代とも同じ縮約順序の非結合性
+  自体は抱えている）
+- この結論はテスト前提（ケース形状・シード・tolerance）が誤っていた
+  ことを意味しない。むしろ「並列縮約 forward と逐次 CPU 参照実装の
+  間で、十分長い行の逆伝播蓄積を通すと ULP 差が複合判定を超えうる」
+  という、性能重視カーネル設計に内在する制約を実測で可視化したもの
+  であり、**tolerance・テスト設計をどう扱うかはユーザー判断事項**
+  として提示する（9.4）
+
+### 9.3 適用した修正（丸め契約の是正。parity FAIL 自体は未解消）
+
+対象: `crates/backend-cuda/src/kernels_rmsnorm.rs`
+
+- `RMSNORM_F32_ONEPASS`・`RMSNORM_F32_TWOPASS` の
+  `float rstd = rsqrtf(fmaf(acc, inv_n, eps));` を
+  `float rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps));` へ変更した
+  （forward・backward 双方に共通の `rstd` 計算式。CPU 参照・`backend-cpu`
+  本番実装と丸め契約を統一）
+- この変更は 9.2 の実測で判明したとおり **GB10 での parity FAIL 自体は
+  解消しない**（真因は縮約順序の非結合性であり `rsqrtf` はその主因では
+  なかった）。それでもなお、CPU 参照・`backend-cpu` 本番実装との丸め
+  契約統一（`.claude/rules/coding-rust.md` の FMA 契約統一規約）として
+  独立に妥当な是正であり、世代依存の近似 intrinsic をカーネルに残さない
+  という意味で維持する
+- 回帰テスト `forward_kernels_do_not_use_approximate_rsqrtf`
+  （`kernels_rmsnorm.rs` の `mod tests`）を追加し、`rsqrtf(` への後退と
+  `1.0f / sqrtf(...)` 計算式の欠落を CI（実機不要の文字列 assert）で検出
+  する
+- **`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・テストのケース表
+  ／シード／判定式は一切変更していない**（`.claude/rules/security.md`
+  A08。`assert_tolerance_constants_pinned` が bit 等値で検査する契約は
+  そのまま維持）
+
+### 9.4 結論・ユーザー判断事項（イシュー #1105 は未クローズ）
+
+GB10 実機実測（9.2）の結果、受け入れ基準 3「GB10 実機で該当 parity
+テストが pass する」は**未達**である。`rmsnorm_backward_dw_split_matches_
+cpu_across_shapes` はケース `(rows=8192, hidden=4096, num_blocks=1)` で
+修正後も FAIL する（fail_count=5/4096。単一測定であり修正前 6/4096 との
+差を「改善効果」としては主張しない）。
+
+切り分け（9.2）により、残存原因は dw カーネル自体のバグではなく
+**forward の warp 並列縮約と CPU 参照実装の逐次和という、縮約順序の
+非結合性に起因する `rstd` の ULP 差が、長い逆伝播蓄積（rows=8192）で
+増幅されるもの**と確定している。この性質は現行のカーネル設計
+（warp 内 `__shfl_xor_sync` butterfly reduction。性能上の理由で採用）に
+構造的に内在するため、次のいずれも自動運転の範囲外としてユーザー判断へ
+委ねる（`.claude/rules/security.md` A08・`out-of-scope-tracking.md`）:
+
+1. **tolerance の緩和**（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`
+   またはケース単位の例外）— 変更にはユーザー承認が必須
+2. **forward の縮約順序を CPU 逐次和に近づける再設計**（性能への影響を
+   伴うアーキテクチャ変更）
+3. **テスト設計側の対応**（例: 当該ケースを parity 検証の対象形状から
+   除外する、または非後退契約〈本節 §2 と同型の仕組み〉へ切り替える）
+
+**実測記録（2026-09-01・GB10・sm_121・CUDA 13.0.88）**:
+
+| 経路 | 形状 | fail_count | max_abs_diff | max_rel_err | mean_abs_diff | p50_abs_diff | 実測コミット |
+|---|---|---|---|---|---|---|---|
+| `rmsnorm_backward_dw_split_matches_cpu_across_shapes`（修正後） | rows=8192, hidden=4096, num_blocks=1, eps=1e-5 | 5/4096 | 2.975e-4 | 1.340e-2 | 4.477e-5 | 3.433e-5 | 289622d + 本 PR の未コミット変更（rsqrtf→1.0f/sqrtf 修正版） |
+
+診断専用の一時テスト（コミットしない。転送ツリー上でのみ実行）の実測値:
+
+- dw カーネル bit 一致検査: `dw_mismatch_count=0/4096`（dw カーネル無罪の確証）
+- GPU/CPU 再計算 `rstd` の最大相対差: `2.06e-6`（縮約順序差由来。丸め方式の不一致ではない）
+
+なお `rmsnorm_backward_matches_cpu_across_shapes`（dx 側）・
+`rmsnorm_parity`（forward 側、`rmsnorm_matches_backend_cpu_directly`・
+`rmsnorm_matches_cpu_across_shapes`）は同一実機実測で全て pass しており、
+`rsqrtf` → `1.0f / sqrtf` の変更による非後退（regression）は確認されて
+いない。
