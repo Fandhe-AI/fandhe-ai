@@ -1172,3 +1172,92 @@ GB10 実機実測・解消記録を追記する（イシュー #1102 配下・�
 （`compare_uniform_probe_scaled` 等・`internal-diagnostics` 限定）の実装は
 同提案が明記するとおり別イシュー扱いとし、本イシューでは実装しない
 （`.claude/rules/out-of-scope-tracking.md`）。
+
+### 10.4 reopen: opt カーネル `assert_parity` 厳密ゼロ fail 判定の不整合を解消（2026-09-02）
+
+PR #1115 マージ後の GB10 実機再検証（2026-09-01）で `wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+`wmma_tf32_opt_kernel_k4096_stress`・`wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`
+の 3 テストが fail し、#1106 が reopen された。本節はその原因切り分け・
+対応（案 A）を記録する。
+
+#### 10.4.1 原因切り分け
+
+`wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+`wmma_tf32_opt_kernel_k4096_stress` は `assert_wmma_tf32_opt_kernel_parity`
+（内部で `fandhe_ai_backend_cpu::assert_parity`。**厳密ゼロ fail 判定**）を
+使っていたが、`assert_parity` は最初に fail したケースで panic するため、
+9 ケース中 2 ケース（64×64×64・512×512×4096）しか実機で実行されておらず、
+残り 7 ケースは未計測のままだった。
+
+reopen コメントの実測値（64x64x64 seed=3000: fail 699/4096・
+mean_abs=5.676e-4／512x512x4096 seed=0xC0FFEE: fail 43019/262144・
+mean_abs=4.463e-3）は `ParityBaseline::BASELINES` の既存記録値（同一形状・
+同一シード）と**完全一致**した。さらに `wmma_tf32_opt_kernel_parity_does_not_regress`
+（baseline 非後退方式・同一カーネル・同一形状・同一シード）は同じ実行で
+pass していた。これは「厳密ゼロ fail 判定側だけが red、baseline 非後退
+判定側は green」という状態であり、opt カーネル自体に数値バグがあるとは
+考えにくいことを示す。
+
+診断のため、同じ 9 ケースを `assert_parity` の代わりに
+`fandhe_ai_backend_cpu::compare`（panic しない集計 API）で走らせる一時
+テスト（`wmma_tf32_opt_kernel_parity_diagnostic_dump_issue_1106`。PR で
+追加後、修正確定に伴い削除済み）を用意し、GB10（sm_121）実機・GPU アイドル
+（`nvidia-smi --query-gpu=utilization.gpu` 0%）を確認したうえで 2 回実行
+（2026-09-01 初回・2026-09-02 GPU アイドル再確認のうえ再計測）し、全値の
+完全一致を確認した:
+
+| shape | seed | fail/total | max_abs_diff | max_rel_err | mean_abs_diff |
+|---|---|---|---|---|---|
+| 64×64×64 | 0xBB8 (3000) | 699/4096 | 2.561e-3 | 7.772e-1 | 5.676e-4 |
+| 128×128×128 | 0xBB9 (3001) | 2638/16384 | 4.413e-3 | 1.314e0 | 7.775e-4 |
+| 512×512×512 | 0xBBA (3002) | 42799/262144 | 9.179e-3 | 1.923e0 | 1.568e-3 |
+| 63×65×33 | 0xBBB (3003) | 698/4095 | 1.917e-3 | 7.411e-1 | 3.943e-4 |
+| 65×63×17 | 0xBBC (3004) | 635/4095 | 1.436e-3 | 2.376e-1 | 2.777e-4 |
+| 64×96×256 | 0xBBD (3005) | 967/6144 | 5.184e-3 | 1.169e0 | 1.117e-3 |
+| 1×1×1 | 0xBBE (3006) | 0/1 | 1.419e-4 | 2.340e-4 | 1.419e-4 |
+| 512×512×4096 | 0xC0FFEE | 43019/262144 | 2.408e-2 | 1.998e0 | 4.463e-3 |
+| 4096×4096×4096 | 0xBEEF | 2725617/16777216 | 3.116e-2 | 1.997e0 | 4.453e-3 |
+
+9 ケース中 8 ケースが非ゼロ fail_count を持ち、ゼロ fail が実際に成立
+するのは 1×1×1（sub-K-tile。K 方向蓄積が発生せず TF32 丸め誤差が蓄積
+しない）のみだった。この非ゼロ fail 率は
+`docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md` §5〜§7 が
+記録する opt/basic bit-identical・sm_86/GB10 世代間差分なしの既知の恒常
+特性と整合しており、opt カーネルの数値バグではなく、**TF32 丸めの既知の
+誤差特性を持つ形状に対して厳密ゼロ fail 判定（`assert_parity`）を適用して
+いたテスト設計の不整合**と結論した。
+
+`wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`（性能比較）は
+上記診断と同時に GPU アイドル状態で再実行し pass を確認した（初回計測は
+他プロセスの GPU 使用〈84%〉と重なった疑いがある計測だったための再計測。
+別イシュー化は不要と判断）。
+
+#### 10.4.2 対応（案 A。ユーザー承認 2026-09-02）
+
+tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）は変更
+せず、**形状ごとに実測特性へ合った判定方式へ再割り当てる**方針（案 A）を
+採用した:
+
+- `wmma_tf32_opt_kernel_matches_reference_across_shapes`: `cases` を
+  1×1×1（seed=3000）のみへ縮小（厳密ゼロ fail が実際に成立する唯一の
+  形状）
+- `wmma_tf32_opt_kernel_k4096_stress`: 両ケースとも baseline 側へ移管済み
+  のため削除
+- `ParityBaseline::BASELINES` へ上表の非ゼロ fail 6 形状
+  （128×128×128 seed=0xBB9・512×512×512 seed=0xBBA・63×65×33 seed=0xBBB・
+  65×63×17 seed=0xBBC・64×96×256 seed=0xBBD・4096×4096×4096 seed=0xBEEF）
+  を実測値付きで追加し、`wmma_tf32_opt_kernel_parity_does_not_regress`
+  （既存の baseline 非後退方式。`ParityPath::WmmaTf32Opt` でフィルタして
+  全件走査するためコード変更不要で対象拡大した）が検査する。ceiling
+  （`baseline_mean_abs_diff_ceiling`）は §4「表記丸め対応」と同じ規約
+  （表示 4 桁の最終桁 +1）で算出した
+- 64×64×64（seed=3000）・512×512×4096（seed=0xC0FFEE）は既存の
+  `ParityBaseline` 行がそのまま対応するため変更なし
+
+これにより本非後退ゲートが 9 形状中 8 形状（1×1×1 を除く全て）をカバー
+する。診断専用テスト（`wmma_tf32_opt_kernel_parity_diagnostic_dump_issue_1106`）
+は修正確定に伴い削除した。
+
+出典: イシュー #1106 reopen コメント（2026-09-01）・対応 PR のコミット
+履歴。実測環境は §10.1 と同一（DGX Spark GB10・sm_121・CUDA 13.0）。
+
