@@ -495,6 +495,85 @@ cpu_across_shapes` はケース `(rows=8192, hidden=4096, num_blocks=1)` で
 `rsqrtf` → `1.0f / sqrtf` の変更による非後退（regression）は確認されて
 いない。
 
+### 9.5 テスト設計側の対応（責務分離。イシュー #1102。tolerance 非変更）
+
+9.4 でユーザー判断へ委ねた 3 選択肢のうち、**選択肢 3「テスト設計側の
+対応」**を、tolerance 緩和（選択肢 1）を伴わない形で適用した。
+
+**方針**: `assert_rmsnorm_backward_dw_split_parity`
+（`crates/backend-cuda/tests/rmsnorm_backward_parity.rs`）の CPU 参照実装
+（`cpu_rmsnorm_backward_reference`）が dw／dx を計算する際に使う `rstd` を、
+CPU 側で独自に逐次和から再計算する方式から、**forward（GPU）が実際に
+生成した `rstd` を D2H で取得しそのまま供給する方式**へ変更した。
+
+- 9.2 の切り分けにより「dw カーネル自体は同一 `rstd` 下で GPU 出力と
+  bit 一致する（`dw_mismatch_count=0/4096`）」ことが実測済みであり、
+  `rstd` を GPU 側の値へ揃えることで dw（および dx）カーネルの縮約式・
+  境界処理の正しさという本来の検証責務は失われない
+- **rstd バッファ自体の parity は失わない**: 上記の切替だけでは「GPU
+  forward が保存した `rstd` バッファ自体の取り違え・破損」を検出する
+  経路が失われる（advisor レビュー指摘）ため、`assert_rmsnorm_backward_
+  dw_split_parity` 内で GPU `rstd` と CPU 独立再計算
+  （`cpu_rmsnorm_rstd_reference`。縮約順序は GPU forward の warp
+  butterfly reduction と異なる素朴な逐次和）の複合判定
+  （`fandhe_ai_backend_cpu::parity::assert_parity`。REQ-2 統一複合判定を
+  再定義せず流用）を明示的に追加した。9.2 実測の `max_rstd_rel_delta =
+  2.06e-6`（相対許容 1e-3 の 3 桁下）はこの判定を通過することを裏付ける
+- `rstd` 自体の縮約順序差（forward の warp butterfly reduction と CPU
+  逐次和という非結合性に起因する ULP 差）は REQ-2 統一複合判定の許容
+  範囲に収まる（9.2 実測で確認済み）ため、上記 rstd バッファ parity は
+  この ULP 差では fail しない。正確な言い方をすれば「この複合判定は
+  ULP 差を fail-closed に検出する」のではなく「ULP 差が複合判定の許容
+  範囲内に収まることを判定式自体が保証する」——rstd の乖離が許容範囲を
+  超える異常（実質的なバグ）であれば、この判定も forward parity テスト
+  （`rmsnorm_parity.rs::rmsnorm_matches_cpu_across_shapes`・
+  `rmsnorm_matches_backend_cpu_directly`）も同一の複合判定で fail する
+- forward parity テスト（`rmsnorm_parity.rs`）は hidden ∈
+  {8, 1024, 4096, 4097, 8192, 16384} を網羅するが、dw split 検証の
+  ケース表（9.1）は hidden ∈ {64, 128, 4096, 4097, 8, 16} も含み両者の
+  網羅形状は完全一致しない。上記 rstd バッファ parity の追加により、
+  dw split 検証自身が全ケース形状で rstd の複合判定を独立に行うため、
+  この形状網羅の差はカバレッジの穴にならない
+- `RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・複合判定式
+  （`fandhe_ai_backend_cpu::parity::assert_parity`）・ケース表・シードは
+  一切変更していない（`assert_tolerance_constants_pinned` の bit 等値検査
+  はそのまま維持。`.claude/rules/coding-rust.md` の tolerance 非緩和方針
+  を遵守）
+- `assert_rmsnorm_backward_parity`（dx 中心の `rmsnorm_backward_matches_
+  cpu_across_shapes`。実機で既に pass 実績あり）は本変更の対象外とした
+  （スコープを 9.1〜9.4 で FAIL が確定している dw split 経路に限定し、
+  無関係な既存 pass 経路への変更を避けるため）
+- **`assert_rmsnorm_backward_dw_split_parity` の dx 判定への副次影響**:
+  本関数は dw と dx を同時に検証しており、`gpu_rstd` 切替は dx 側の CPU
+  参照計算にも及ぶ（同一関数を共有するため）。dx 判定はこれまで GB10
+  実機で pass していた経路であり、rstd を GPU 側へ揃えることは非結合性
+  由来の ULP 差を縮める方向の変更であるため後退の懸念は小さいと判断する
+  が、実機未確認である旨を明記する（次回実機セッションで dx 側の非後退
+  も合わせて確認する）
+
+**検証範囲の変更を明文化するコメント**: 上記契約はテストファイル冒頭の
+モジュールコメント・`cpu_rmsnorm_backward_reference`／
+`cpu_rmsnorm_rstd_reference` のドキュメンテーションコメント・
+`assert_rmsnorm_backward_dw_split_parity` 内の呼び出し箇所コメントに記録
+した（後続の読み手が「なぜ rstd を GPU から渡すのか」「rstd バッファ
+自体の parity をどこで検証しているか」を本ファイル単体で追跡できるように
+するため。`.claude/rules/code-comment-style.md`）。
+
+**期待される実機効果（GB10 未実測。次回実機セッションで確認）**: `(rows=8192,
+hidden=4096, num_blocks=1)` ケースにおいて、CPU 参照側の `rstd` が GPU
+forward の `rstd` と一致するため、9.2 で確認された「`rows=8192` の逐次
+蓄積が `rstd` の ULP 差をランダムウォーク的に増幅する」経路が排除され、
+`rmsnorm_backward_dw_split_matches_cpu_across_shapes` は pass する見込み
+である（診断 2 の bit 一致実測が根拠）。確認コマンド:
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_backward_parity \
+  -- --ignored --nocapture rmsnorm_backward_dw_split_matches_cpu_across_shapes
+```
+
+実機確認が完了し次第、本節に実測値（fail_count・max_abs_diff 等）を追記し、
+イシュー #1102／#1105 のクローズ可否を判断する。
+
 ## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
 
 本節は §1〜8（GEMM `wmma`/`mma` 系ベースライン表・非後退契約本体）の続き

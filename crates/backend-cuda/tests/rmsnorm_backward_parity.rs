@@ -12,6 +12,21 @@
 //! （保存は行あたり `rstd` 1 本のみ）で同じ結果に到達することを検証する
 //! （実装計画 §6「受け入れ判定」）。
 //!
+//! **責務分離の契約（イシュー #1102・`docs/perf/cuda-parity-baseline.md`
+//! §9.5）**: split-K dw 検証（`assert_rmsnorm_backward_dw_split_parity`）
+//! は forward が実際に生成した `rstd` を CPU 参照側にもそのまま供給し、
+//! dw／dx カーネルの縮約式・境界処理を検証する。`rstd` バッファ自体の
+//! parity（取り違え・破損の検出）は同関数内で CPU 独立再計算
+//! （`cpu_rmsnorm_rstd_reference`）との複合判定として別立てで行う。
+//! `rstd` 自体の縮約順序差（forward の warp butterfly reduction と CPU
+//! 逐次和という非結合性に起因する ULP 差）は REQ-2 統一複合判定の許容
+//! 範囲に収まることを 9.2 実測（`max_rstd_rel_delta = 2.06e-6`）で確認
+//! 済みであり、この複合判定はその ULP 差では fail しない一方、dw／dx
+//! カーネル自体のバグ（縮約式・境界誤り）や `rstd` バッファの取り違えは
+//! 引き続き検出する。これはバックエンド間数値一致の tolerance を緩和する
+//! ものではなく（`.claude/rules/coding-rust.md`）、単に「どの経路がどの
+//! 誤差要因を検証するか」の責務を明確化したものである。
+//!
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
@@ -28,6 +43,22 @@ mod common;
 /// `dx_i = rstd·dy_i·w_i − rstd³·inv_n·x_i·Σ_j(dy_j·w_j·x_j)`・
 /// `dw_i = Σ_r dy[r,i]·x[r,i]·rstd[r]` を計算する（`f32::mul_add` で
 /// GPU 側 `fmaf` と丸め方針を揃える。`.claude/rules/coding-rust.md`）。
+///
+/// `gpu_rstd`（行ごとの `rstd`。`Some` の場合は `rows` 要素）を渡すと、
+/// CPU 参照実装は自前で二乗和を逐次縮約して `rstd` を再計算する代わりに
+/// この値をそのまま使う。**責務分離の契約**（イシュー #1102・
+/// `docs/perf/cuda-parity-baseline.md` §9.5）: forward の
+/// warp butterfly reduction（並列木構造）と CPU 側の単純逐次和は
+/// 結合則を満たさない浮動小数点演算の性質上 `rstd` に ULP 差を生み、
+/// `rows` が大きい dw の逐次蓄積（本ファイルの split-K 検証群）では
+/// この ULP 差が増幅されて複合判定を超えうる（実測: 9.2 診断）。
+/// dw・dx の逆伝播カーネル自体の正しさ（縮約式・境界処理）を検証するには、
+/// forward が実際に生成した `rstd` を両側（GPU 出力・CPU 参照）で揃えて
+/// 同一入力から比較するのが筋であり、`rstd` バッファ自体の parity は
+/// 呼び出し元（`assert_rmsnorm_backward_dw_split_parity`）が
+/// `cpu_rmsnorm_rstd_reference` との複合判定で別途検証する。`None`（呼び
+/// 出し元が独自に `rstd` を再計算させたい場合。現状は用途なし）との後方
+/// 互換のため `Option` にしている。
 fn cpu_rmsnorm_backward_reference(
     x: &[f32],
     w: Option<&[f32]>,
@@ -35,6 +66,7 @@ fn cpu_rmsnorm_backward_reference(
     eps: f32,
     rows: usize,
     hidden: usize,
+    gpu_rstd: Option<&[f32]>,
 ) -> (Vec<f32>, Option<Vec<f32>>) {
     let mut dx = vec![0.0f32; x.len()];
     let mut dw = w.map(|w_slice| vec![0.0f32; w_slice.len()]);
@@ -42,16 +74,28 @@ fn cpu_rmsnorm_backward_reference(
         return (dx, dw);
     }
     let inv_n = 1.0f32 / hidden as f32;
+    if let Some(r) = gpu_rstd {
+        assert_eq!(
+            r.len(),
+            rows,
+            "gpu_rstd は rows 要素でなければならない（呼び出し元の契約違反）"
+        );
+    }
 
     for r in 0..rows {
         let x_row = &x[r * hidden..(r + 1) * hidden];
         let dy_row = &dy[r * hidden..(r + 1) * hidden];
 
-        let mut acc = 0.0f32;
-        for &v in x_row {
-            acc = v.mul_add(v, acc);
-        }
-        let rstd = 1.0f32 / (acc.mul_add(inv_n, eps)).sqrt();
+        let rstd = match gpu_rstd {
+            Some(rstd_slice) => rstd_slice[r],
+            None => {
+                let mut acc = 0.0f32;
+                for &v in x_row {
+                    acc = v.mul_add(v, acc);
+                }
+                1.0f32 / (acc.mul_add(inv_n, eps)).sqrt()
+            }
+        };
 
         let mut dot = 0.0f32;
         for i in 0..hidden {
@@ -70,6 +114,38 @@ fn cpu_rmsnorm_backward_reference(
         }
     }
     (dx, dw)
+}
+
+/// forward の `rstd` を CPU 側で独立に逐次和から再計算する（`f32::mul_add`
+/// で GPU 側 `fmaf` と丸め契約は揃えるが、縮約順序は GPU forward の warp
+/// butterfly reduction とは異なる素朴な `0..hidden` 逐次和）。
+///
+/// `assert_rmsnorm_backward_dw_split_parity` が dw／dx カーネル検証で
+/// GPU forward の `rstd` をそのまま CPU 参照側へ供給する方式（責務分離。
+/// 本ファイル冒頭のモジュールコメント参照）に切り替えたことで失われる
+/// 検証——GPU forward が保存した `rstd` バッファ自体の取り違え・破損
+/// （行の取り違え・stale バッファ等、dw／dx の縮約式とは無関係な経路の
+/// バグ）を検出する経路——をこの関数で補う。GPU `rstd` との比較は
+/// `fandhe_ai_backend_cpu::parity::assert_parity`（REQ-2 統一複合判定）で
+/// 行い、9.2 実測の `max_rstd_rel_delta = 2.06e-6`（相対許容 1e-3 の
+/// 3 桁下）が示すとおり、縮約順序差由来の ULP レベルの不一致では
+/// fail しない一方、`rstd` バッファの取り違え等の実質的な不一致は検出する
+/// （`docs/perf/cuda-parity-baseline.md` §9.5）。
+fn cpu_rmsnorm_rstd_reference(x: &[f32], eps: f32, rows: usize, hidden: usize) -> Vec<f32> {
+    if hidden == 0 {
+        return vec![0.0f32; rows];
+    }
+    let inv_n = 1.0f32 / hidden as f32;
+    (0..rows)
+        .map(|r| {
+            let x_row = &x[r * hidden..(r + 1) * hidden];
+            let mut acc = 0.0f32;
+            for &v in x_row {
+                acc = v.mul_add(v, acc);
+            }
+            1.0f32 / (acc.mul_add(inv_n, eps)).sqrt()
+        })
+        .collect()
 }
 
 fn assert_rmsnorm_backward_parity(
@@ -101,8 +177,20 @@ fn assert_rmsnorm_backward_parity(
     let (gpu_dx, gpu_dw) = rmsnorm
         .run_rmsnorm_bwd_f32(&x_data, w_data.as_deref(), &dy_data, &rstd, shape)
         .expect("CudaRmsNorm::run_rmsnorm_bwd_f32 must succeed on CUDA-equipped test runner");
-    let (cpu_dx, cpu_dw) =
-        cpu_rmsnorm_backward_reference(&x_data, w_data.as_deref(), &dy_data, eps, rows, hidden);
+    // `gpu_rstd = None`: 本関数は `rmsnorm_backward_matches_cpu_across_shapes`
+    // （dx 中心の受け入れテスト。実機で pass 実績あり）専用であり、rstd 自体の
+    // 縮約順序差による ULP 増幅は dw split 経路（`rows` が大きい単段
+    // フォールバック）ほど顕在化しない。dw 側の責務分離は
+    // `assert_rmsnorm_backward_dw_split_parity` を参照（下記）。
+    let (cpu_dx, cpu_dw) = cpu_rmsnorm_backward_reference(
+        &x_data,
+        w_data.as_deref(),
+        &dy_data,
+        eps,
+        rows,
+        hidden,
+        None,
+    );
 
     fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
@@ -265,8 +353,46 @@ fn assert_rmsnorm_backward_dw_split_parity(
             "CudaRmsNorm::run_rmsnorm_bwd_f32_with_forced_dw_split must succeed on \
              CUDA-equipped test runner",
         );
-    let (cpu_dx, cpu_dw) =
-        cpu_rmsnorm_backward_reference(&x_data, Some(&w_data), &dy_data, eps, rows, hidden);
+
+    // `rstd` バッファ自体の parity（弱まる検証範囲の補い。advisor 指摘対応）:
+    // dw／dx カーネル検証を「同一 rstd 供給方式」へ切り替えたことで、CPU
+    // 側が自前の逐次和で rstd を再計算しなくなる。これにより GPU forward
+    // が保存した `rstd` バッファ自体の取り違え・破損（縮約式や境界処理と
+    // 無関係な経路のバグ）を検出する経路が失われないよう、CPU 独立実装
+    // （`cpu_rmsnorm_rstd_reference`。縮約順序は GPU forward の warp
+    // butterfly reduction と異なる素朴な逐次和）との複合判定を明示的に
+    // 行う。9.2 実測の `max_rstd_rel_delta = 2.06e-6` は相対許容 1e-3 の
+    // 3 桁下であり、縮約順序差由来の ULP 不一致では fail しないことを
+    // 確認済み（`docs/perf/cuda-parity-baseline.md` §9.5）。
+    let cpu_rstd = cpu_rmsnorm_rstd_reference(&x_data, eps, rows, hidden);
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!(
+            "rmsnorm backward dw cpu-cuda split-K rstd buffer parity rows={rows} \
+             hidden={hidden} num_blocks={num_blocks} eps={eps}"
+        ),
+        &rstd,
+        &cpu_rstd,
+    );
+
+    // `gpu_rstd = Some(&rstd)`: forward が実際に生成した `rstd` を CPU 参照
+    // 側にもそのまま供給し、dw（および dx）カーネルの縮約式・境界処理のみを
+    // 検証する。rstd 自体の一致（forward の warp butterfly reduction と CPU
+    // 逐次和という縮約順序の非結合性による ULP 差）は上記の rstd バッファ
+    // parity（REQ-2 統一複合判定）が別途 fail-closed に検出する（責務分離
+    // の契約。イシュー #1102・`docs/perf/cuda-parity-baseline.md` §9.5）。
+    // 同一 rstd を使うことで dw カーネル自体のバグ（誤った縮約式・境界
+    // 誤り等）は本テストが引き続き検出できる（§9.2 診断 2 で dw カーネル
+    // 自体の bit 一致・無罪を実測確認済み — 誤差の入り得る経路は rstd の
+    // 非結合性のみだった）。
+    let (cpu_dx, cpu_dw) = cpu_rmsnorm_backward_reference(
+        &x_data,
+        Some(&w_data),
+        &dy_data,
+        eps,
+        rows,
+        hidden,
+        Some(&rstd),
+    );
 
     fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
