@@ -48,7 +48,9 @@ use crate::rmsnorm::{
 
 /// exp2 ドメインの境界マスク値（有限。`f32` 版）。
 ///
-/// `kernels_softmax.rs` の `SOFTMAX_MASK_E2` マクロ（`-__FLT_MAX__`）と
+/// `kernels_softmax.rs` の `SOFTMAX_MASK_E2` マクロ（自前リテラル
+/// `-3.402823466e+38f`。NVRTC 組み込みマクロ `__FLT_MAX__` は
+/// compute_121 で未定義になり得るため不使用。イシュー #1101）と
 /// 同一の値であり、ホスト・デバイス間でビット同一の値になる
 /// （`kernels_softmax.rs` 冒頭コメント「境界マスク定数」参照）。
 /// `f32` が表現できる最小の有限値（`f32::MIN == -f32::MAX`）を使う理由・
