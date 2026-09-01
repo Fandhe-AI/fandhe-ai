@@ -156,6 +156,10 @@ fail_count・mean_abs_diff は全 262144 要素の集計値である）。
 `fail_count` は整数の実測値であり丸め対応の対象外（記録値をそのまま上限
 とする）。
 
+`baseline_max_abs_diff_ceiling`／`baseline_max_rel_err_ceiling`
+（コーディネータ指示・ユーザー承認 2026-09-02 で追加。§10.9 参照）も
+`baseline_mean_abs_diff_ceiling` と同じ「表示桁の最終桁 +1」規約に従う。
+
 ## 5. 参照値計算の経路（fixture・テストが再現する契約）
 
 - **TF32 経路**（`wmma_tf32`/`wmma_tf32_opt`）: 入力を f32 のまま
@@ -186,6 +190,14 @@ fail_count・mean_abs_diff は全 262144 要素の集計値である）。
   ゲートであり、実測値を主張しない。実機実測が完了次第、確定値へ差し替えて
   `false` へ更新する（PR #678 codex-review P1 指摘対応。`WmmaTf32`〈基本版〉
   行の既存前例と同型）
+- **`baseline_max_abs_diff_ceiling`／`baseline_max_rel_err_ceiling`
+  （`Option<f64>`。§10.9）**: `baseline_mean_abs_diff_ceiling` と同じ
+  「実測値のみ・推定値記入禁止」規約に従う。実測データがまだない既存行は
+  `None`（fail-open ではなく「この項目は未実測」を明示するだけで、他の
+  項目〈`fail_count`・`mean_abs_diff` ceiling〉の判定は引き続き行われる）。
+  `None` から実測値付きの `Some` への更新は「未計測形状・シードの行追加」
+  と同じ扱い（実機実測とセットでのみ行う）。`Some` の値を緩める変更は
+  「上方更新（緩和）」と同じくユーザー承認必須
 - tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）自体の
   変更は本契約のスコープ外（#186・REQ-2 改定側の判断。変更する場合は
   `crates/backend-cpu/src/parity.rs` のコメントに従いユーザー承認を得る）
@@ -1489,3 +1501,52 @@ fail_count=0/1 を確認済みの値）。
 
 この対応により、必要な GB10 再実測は**なし**（`context` とコメントの
 訂正のみ。数値・fail_count・ceiling は変更していない）。
+
+### 10.9 max_abs_diff・max_rel_err ceiling の追加（codex-review 指摘への補強。ユーザー承認 2026-09-02）
+
+codex-review 指摘（非後退方式の盲点: `fail_count` 同数・平均相殺で個別要素の
+大幅悪化を見逃す）への補強として、`ParityBaseline` へ
+`baseline_max_abs_diff_ceiling`・`baseline_max_rel_err_ceiling`
+（いずれも `Option<f64>`）を追加した。`assert_no_parity_regression` は
+`Some` の場合のみ `report.max_abs_diff`／`report.max_rel_err` の非後退を
+追加で fail-closed 検査する（`None` は「未実測」を明示するのみで、既存の
+`fail_count`・`mean_abs_diff` ceiling 検査は引き続き行われる）。
+
+**実測値の出典**:
+
+- TF32 系（`WmmaTf32`・`WmmaTf32Opt`・`WmmaTf32Staged`）: §10.4／§10.5／
+  §10.7 の診断ダンプ 3 表（`wmma_tf32_parity_diagnostic_dump_issue_1106`・
+  `wmma_tf32_routed_path_parity_diagnostic_dump_issue_1106`・
+  `wmma_tf32_staged_parity_diagnostic_dump_issue_1106`。いずれも修正確定
+  済みにつき削除済み）の `max_abs`・`max_rel` 列
+- f16 系（`WmmaF16`）: 2026-09-02 直列実行（`--test-threads=1`）時の
+  `wmma_f16_k4096_stress`（`assert_parity` failing message: max_abs
+  6.250e-2・max_rel 3.328e-2）・`wmma_f16_opt_k4096_stress`（max_abs
+  3.125e-2・max_rel 2.302e-1）の失敗メッセージ
+
+ceiling は既存の `baseline_mean_abs_diff_ceiling` と同じ「表示桁（4 桁）
+の最終桁 +1」規約で算出した。
+
+**実測データが存在しない既存行は `None` のまま残した**（値を捏造しない。
+`docs/perf/cuda-parity-baseline.md` §6「ベースライン更新規約」）:
+
+- `wmma_tf32_opt 512x512x512 seed=0x7A0 (tensor_core_parity_record)`
+  （記録元 `tensor_core_real_device.rs` は `max_abs_diff`／`max_rel_err`
+  を出力しない）
+- `mma_f16 256x256x4096 seed=9999`（記録元 `cpu_cuda_mma_parity.rs::
+  mma_f16_k4096_stress` の GB10 実測ログに max 系の値が残っていない）
+
+内訳: 追加した ceiling 行 27 行（`Some` を両フィールドに設定）、`None` の
+まま残した行 2 行（計 29 行の `ParityBaseline` エントリ全件を走査）。
+
+**回帰検出の falsification テスト**（`parity_nonregression.rs`）を 2 件
+追加し、`max_abs_diff`・`max_rel_err` それぞれの非後退違反を単独で
+（`fail_count`・`mean_abs_diff` は据え置きのまま）検出できることを
+合成入力で確認した:
+`assert_no_parity_regression_panics_on_max_abs_diff_regression`・
+`assert_no_parity_regression_panics_on_max_rel_err_regression`。
+
+GB10 実機は本対応の実装時点で別プロセス使用中のため、判定ロジック自体は
+上記の実機非依存 falsification テストで検証済みだが、既存 `Some` 行の
+再実測（値の再確認）・`None` 行の実測完了は本対応のスコープに含まれない
+（引き続き実機実測とセットで行う。§6「ベースライン更新規約」）。

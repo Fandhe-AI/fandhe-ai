@@ -214,6 +214,8 @@ fn assert_no_parity_regression_panics_on_unconfirmed_baseline() {
         baseline_fail_count: 4,
         baseline_mean_abs_diff_ceiling: 1.0,
         baseline_provenance_unconfirmed: true,
+        baseline_max_abs_diff_ceiling: None,
+        baseline_max_rel_err_ceiling: None,
     };
     let a = vec![0.0f32; baseline.total];
     let b = vec![0.0f32; baseline.total];
@@ -242,6 +244,8 @@ fn assert_no_parity_regression_panics_on_fail_count_regression() {
         baseline_fail_count: 2,
         baseline_mean_abs_diff_ceiling: 1e-4,
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: None,
+        baseline_max_rel_err_ceiling: None,
     };
     // fail_count がベースライン(2)を上回る合成レポート。
     let a = vec![0.0f32; baseline.total];
@@ -273,6 +277,8 @@ fn assert_no_parity_regression_panics_on_mean_abs_diff_regression() {
         baseline_fail_count: 4,
         baseline_mean_abs_diff_ceiling: 1e-6,
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: None,
+        baseline_max_rel_err_ceiling: None,
     };
     let a = vec![0.0f32; baseline.total];
     // 絶対誤差救済閾値(1e-5)未満のため複合判定は pass するが、
@@ -298,12 +304,80 @@ fn assert_no_parity_regression_panics_on_total_mismatch() {
         baseline_fail_count: 100,
         baseline_mean_abs_diff_ceiling: 1.0,
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: None,
+        baseline_max_rel_err_ceiling: None,
     };
     // total が baseline(16) と異なる合成レポート。
     let a = vec![0.0f32; 9];
     let b = vec![0.0f32; 9];
     let report = fandhe_ai_backend_cpu::compare(&a, &b).expect("length must match");
     assert_no_parity_regression("synthetic total mismatch", &report, &baseline);
+}
+
+/// max_abs_diff 側の非後退違反を単独で検知することを確認する
+/// （fail_count・mean_abs_diff は据え置き、max_abs_diff のみベースライン
+/// 超過とする合成ケース。コーディネータ指示・ユーザー承認 2026-09-02。
+/// codex-review 指摘「fail_count 同数・平均相殺で個別要素の大幅悪化を
+/// 見逃す」への補強検査の falsification テスト）。
+#[test]
+#[should_panic(expected = "max_abs_diff が後退しました")]
+fn assert_no_parity_regression_panics_on_max_abs_diff_regression() {
+    let baseline = ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "synthetic max_abs_diff",
+        m: 2,
+        n: 2,
+        k: 2,
+        seed: 1,
+        total: 4,
+        // fail_count・mean_abs_diff は緩く設定し、max_abs_diff 側のみで
+        // fail させる。
+        baseline_fail_count: 4,
+        baseline_mean_abs_diff_ceiling: 1.0,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1e-7),
+        baseline_max_rel_err_ceiling: None,
+    };
+    let a = vec![0.0f32; baseline.total];
+    // abs_diff=5e-6 は絶対誤差救済閾値(1e-5)未満のため複合判定は pass
+    // する（fail_count は増えない）が、max_abs_diff(約 5e-6) は
+    // baseline_max_abs_diff_ceiling(1e-7) を上回る。
+    let b = vec![5e-6f32; baseline.total];
+    let report = fandhe_ai_backend_cpu::compare(&a, &b).expect("length must match");
+    assert_no_parity_regression("synthetic max_abs_diff", &report, &baseline);
+}
+
+/// max_rel_err 側の非後退違反を単独で検知することを確認する
+/// （fail_count・mean_abs_diff・max_abs_diff は据え置き、max_rel_err の
+/// みベースライン超過とする合成ケース。上記
+/// `assert_no_parity_regression_panics_on_max_abs_diff_regression` と
+/// 同じ根拠）。
+#[test]
+#[should_panic(expected = "max_rel_err が後退しました")]
+fn assert_no_parity_regression_panics_on_max_rel_err_regression() {
+    let baseline = ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "synthetic max_rel_err",
+        m: 2,
+        n: 2,
+        k: 2,
+        seed: 1,
+        total: 4,
+        baseline_fail_count: 4,
+        baseline_mean_abs_diff_ceiling: 1.0,
+        baseline_provenance_unconfirmed: false,
+        // abs_diff(1e-6) は緩い上限のため通過するが、rel_err(0.5) は
+        // baseline_max_rel_err_ceiling(0.1) を上回る。
+        baseline_max_abs_diff_ceiling: Some(1.0),
+        baseline_max_rel_err_ceiling: Some(0.1),
+    };
+    let a = vec![1e-6f32; baseline.total];
+    // abs_diff=1e-6 は絶対誤差救済閾値(1e-5)未満のため複合判定は pass
+    // する（fail_count は増えない）が、rel_err = diff/max(|x|,|y|,1e-12)
+    // = 1e-6/2e-6 = 0.5 は baseline_max_rel_err_ceiling(0.1) を上回る。
+    let b = vec![2e-6f32; baseline.total];
+    let report = fandhe_ai_backend_cpu::compare(&a, &b).expect("length must match");
+    assert_no_parity_regression("synthetic max_rel_err", &report, &baseline);
 }
 
 // --- 実機必須テスト（`#[ignore]`。CUDA 実機・compute capability 8.0 以降必須） ---
