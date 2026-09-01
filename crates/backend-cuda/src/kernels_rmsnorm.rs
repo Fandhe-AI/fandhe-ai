@@ -67,10 +67,33 @@
 //!
 //! 二乗和の蓄積・正規化の積和は `fmaf` を明示使用し、CPU 参照実装
 //! （`f32::mul_add`）と丸め方針を揃える（`.claude/rules/coding-rust.md`）。
-//! `rstd = rsqrtf(fmaf(acc, inv_n, eps))`。`run_fused` 経由（`ops.rs`）で
-//! 呼ばれる場合は `inv_n = 1.0`・`eps = 0.0`・`has_weight = 0` を渡し、
-//! プランの意味論 `x * rsqrt(sum(x^2))` と厳密一致させる（`ops.rs`
-//! ドキュメンテーションコメント参照）。
+//! `rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps))`。`run_fused` 経由
+//! （`ops.rs`）で呼ばれる場合は `inv_n = 1.0`・`eps = 0.0`・
+//! `has_weight = 0` を渡し、プランの意味論 `x * rsqrt(sum(x^2))` と
+//! 厳密一致させる（`ops.rs` ドキュメンテーションコメント参照）。
+//!
+//! **近似 intrinsic `rsqrtf` を使わない理由**（イシュー #1105）:
+//! `rsqrtf`（MUFU.RSQ 近似 intrinsic。丸めがアーキテクチャ実装依存・
+//! 最大 ~2 ulp）は CPU 参照実装・`backend-cpu` 側 RMSNorm 本番実装が
+//! 共に使う `1.0f32 / (...).sqrt()`（IEEE 丸め）と丸め契約が不一致
+//! だったため `1.0f / sqrtf(...)` へ統一した（`.claude/rules/coding-rust.md`
+//! の FMA・丸め契約統一規約。NVRTC は既定で `prec-div`／`prec-sqrt` が
+//! true〈fast-math 未指定。`nvrtc.rs`〉のため IEEE 丸めになる）。forward
+//! は行あたり 1 回の演算でメモリ律速のため性能への影響は無視できる。
+//!
+//! **重要な注記**: この統一は独立に妥当な是正だが、DGX Spark GB10
+//! （sm_121）実機で観測された `RMSNORM_BWD_DW_F32`（単段フォールバック
+//! dw 経路。`dw[j] = Σ_row (dy[row,j] * rstd[row]) * x[row,j]` を行方向に
+//! serial 蓄積）の REQ-2 統一複合判定（相対 1e-3 未満 または絶対 1e-5
+//! 未満。`crates/backend-cpu/src/parity.rs`）超過 FAIL の**主因ではない**
+//! （実機実測で反証済み）。真因は本カーネルの二乗和 `acc` を求める
+//! warp 内 `__shfl_xor_sync` butterfly reduction（並列木構造）と CPU 参照
+//! 実装の逐次和という縮約順序の違いに起因する `rstd` の ULP 差（浮動小数点
+//! 加算の非結合性）で、`rows` が大きいケースで蓄積を通じて増幅される。
+//! 切り分け・実測記録・残存 FAIL の扱い（ユーザー判断事項）は
+//! `docs/perf/cuda-parity-baseline.md` §9 を参照。tolerance
+//! （`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）はこの修正で一切
+//! 変更しない（変更はユーザー承認必須。`.claude/rules/security.md`）。
 //!
 //! # 意味論の正
 //!
@@ -195,7 +218,7 @@ extern "C" __global__ void rmsnorm_f32_onepass(
             acc += __shfl_xor_sync(0xffffffffu, acc, offset);
         }
 
-        float rstd = rsqrtf(fmaf(acc, inv_n, eps));
+        float rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps));
 
         // 学習経路（`save_rstd != 0`）でのみ行あたり 1 スカラーを書く
         // （イシュー #596: 逆伝播は正規化済みテンソルを保存せず、この
@@ -271,7 +294,7 @@ extern "C" __global__ void rmsnorm_f32_twopass(
             acc += __shfl_xor_sync(0xffffffffu, acc, offset);
         }
 
-        float rstd = rsqrtf(fmaf(acc, inv_n, eps));
+        float rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps));
 
         // 学習経路のみ行あたり 1 スカラーを保存する（1 パス経路と同じ
         // 契約。本ファイル冒頭コメント「意味論」・イシュー #596 参照）。
@@ -792,6 +815,33 @@ mod tests {
             assert!(src.contains("float* __restrict__ rstd_out"));
             assert!(src.contains("int save_rstd"));
             assert!(src.contains("if (save_rstd && lane == 0)"));
+        }
+    }
+
+    /// 順伝播カーネルが近似 intrinsic `rsqrtf` を使わず、IEEE 丸めの
+    /// `1.0f / sqrtf(...)` で `rstd` を計算していることを回帰検出する。
+    /// `rsqrtf`（MUFU.RSQ 近似・丸めがアーキテクチャ実装依存）は CPU
+    /// 参照実装・`backend-cpu` 本番実装（共に IEEE 丸めの
+    /// `1.0f32 / (...).sqrt()`）と丸め契約が不一致だったため統一した
+    /// （イシュー #1105）。**注記**: DGX Spark GB10（sm_121）実機で観測
+    /// された `rmsnorm_backward_dw_split_matches_cpu_across_shapes` の
+    /// REQ-2 複合判定超過 FAIL の主因はこの丸め契約不一致ではなく、
+    /// forward の warp butterfly reduction と CPU 逐次和の縮約順序差
+    /// （非結合性）に起因する `rstd` の ULP 差であることが実機実測で
+    /// 確定している（`docs/perf/cuda-parity-baseline.md` §9）。本テストは
+    /// 独立に妥当なこの丸め契約統一が再度 `rsqrtf` へ後退しないことを
+    /// CI（実機不要）で保証するものであり、上記 FAIL の解消を主張しない。
+    #[test]
+    fn forward_kernels_do_not_use_approximate_rsqrtf() {
+        for src in [RMSNORM_F32_ONEPASS, RMSNORM_F32_TWOPASS] {
+            assert!(
+                !src.contains("rsqrtf("),
+                "近似 intrinsic rsqrtf への後退を検出（イシュー #1105 参照）"
+            );
+            assert!(
+                src.contains("float rstd = 1.0f / sqrtf(fmaf(acc, inv_n, eps));"),
+                "rstd の IEEE 丸め計算式（1.0f / sqrtf(...)）が見つからない"
+            );
         }
     }
 
