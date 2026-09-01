@@ -85,6 +85,18 @@ fn cpu_rmsnorm_backward_reference(
         );
     }
 
+    // dw の行方向蓄積は `f64` アキュムレータで行い、`dw`（`f32` の戻り値）
+    // へは全行処理後に 1 回だけ downcast する（イシュー #1102 §9.8 追補。
+    // GB10 実機実測で `rows=8192` に渡る dw の `f32` 逐次和〈GPU: `fmaf`
+    // 蓄積／CPU 参照: `mul_add` 蓄積〉の縮約順序差が支配的な誤差になる
+    // ことが判明したための対応。GPU 側もブロック内・ブロック間の縮約を
+    // `double` 化したため〈`kernels_rmsnorm.rs` の `RMSNORM_BWD_DW_
+    // PARTIAL_F32`／`RMSNORM_BWD_DW_REDUCE_F32`〉、独立 CPU 参照実装側も
+    // 精度を揃える。これは「独立参照の弱体化」ではなく「より正確な独立
+    // 参照への強化」であり、GPU 実装をコピーするものではない
+    // （codex-review 指摘・PR #1120 の趣旨: 独立参照 + 実装側修正）。
+    let mut dw_acc: Option<Vec<f64>> = dw.as_ref().map(|dw_vec| vec![0.0f64; dw_vec.len()]);
+
     for r in 0..rows {
         let x_row = &x[r * hidden..(r + 1) * hidden];
         let dy_row = &dy[r * hidden..(r + 1) * hidden];
@@ -92,14 +104,21 @@ fn cpu_rmsnorm_backward_reference(
         let rstd = match gpu_rstd {
             Some(rstd_slice) => rstd_slice[r],
             None => {
-                let mut acc = 0.0f32;
+                // 二乗和も `f64` アキュムレータ化する（GPU forward の
+                // `double` 化。`kernels_rmsnorm.rs` §9.7 追補と精度を
+                // 揃える独立参照の強化。イシュー #1102 §9.8）。
+                let mut acc = 0.0f64;
                 for &v in x_row {
+                    let v = v as f64;
                     acc = v.mul_add(v, acc);
                 }
-                1.0f32 / (acc.mul_add(inv_n, eps)).sqrt()
+                (1.0f64 / (acc.mul_add(inv_n as f64, eps as f64)).sqrt()) as f32
             }
         };
 
+        // dot（dx 用）は変更しない（コーディネータ指示: dx 参照はそのまま
+        // で可。dx は GB10 実機で既に pass している経路であり、GPU 側
+        // dx カーネル〈RMSNORM_BWD_DX_F32〉も本 PR で変更していない）。
         let mut dot = 0.0f32;
         for i in 0..hidden {
             let wv = w.map_or(1.0f32, |w_slice| w_slice[i]);
@@ -111,29 +130,40 @@ fn cpu_rmsnorm_backward_reference(
         for i in 0..hidden {
             let wv = w.map_or(1.0f32, |w_slice| w_slice[i]);
             dx_row[i] = coef.mul_add(x_row[i], rstd * dy_row[i] * wv);
-            if let Some(dw_vec) = dw.as_mut() {
-                dw_vec[i] = (dy_row[i] * rstd).mul_add(x_row[i], dw_vec[i]);
+            if let Some(dw_acc) = dw_acc.as_mut() {
+                let rstd = rstd as f64;
+                let dyv = dy_row[i] as f64;
+                let xv = x_row[i] as f64;
+                dw_acc[i] = (dyv * rstd).mul_add(xv, dw_acc[i]);
             }
+        }
+    }
+
+    if let (Some(dw_vec), Some(dw_acc)) = (dw.as_mut(), dw_acc) {
+        for (dst, acc) in dw_vec.iter_mut().zip(dw_acc) {
+            *dst = acc as f32;
         }
     }
     (dx, dw)
 }
 
-/// forward の `rstd` を CPU 側で独立に逐次和から再計算する（`f32::mul_add`
-/// で GPU 側 `fmaf` と丸め契約は揃えるが、縮約順序は GPU forward の warp
-/// butterfly reduction とは異なる素朴な `0..hidden` 逐次和）。
+/// forward の `rstd` を CPU 側で独立に逐次和から再計算する。`f64`
+/// アキュムレータ（GPU forward の `double` 化。`kernels_rmsnorm.rs`
+/// §9.7 追補と精度を揃える独立参照の強化。イシュー #1102 §9.8）で
+/// 二乗和を蓄積し、`rstd` へ代入する 1 回だけ `f32` へ downcast する。
+/// 縮約順序自体は GPU forward の warp butterfly reduction とは異なる
+/// 素朴な `0..hidden` 逐次和のままであり、GPU の内部実装詳細を模倣する
+/// ものではない（`f64` 化は精度の強化であり、GPU 縮約順序のコピーでは
+/// ない）。
 ///
 /// `assert_rmsnorm_backward_dw_split_parity` が dw／dx カーネル検証で
-/// GPU forward の `rstd` をそのまま CPU 参照側へ供給する方式（責務分離。
+/// GPU forward の `rstd` をそのまま CPU 参照側へ供給する方式（追加検査。
 /// 本ファイル冒頭のモジュールコメント参照）に切り替えたことで失われる
 /// 検証——GPU forward が保存した `rstd` バッファ自体の取り違え・破損
 /// （行の取り違え・stale バッファ等、dw／dx の縮約式とは無関係な経路の
 /// バグ）を検出する経路——をこの関数で補う。GPU `rstd` との比較は
 /// `fandhe_ai_backend_cpu::parity::assert_parity`（REQ-2 統一複合判定）で
-/// 行い、9.2 実測の `max_rstd_rel_delta = 2.06e-6`（相対許容 1e-3 の
-/// 3 桁下）が示すとおり、縮約順序差由来の ULP レベルの不一致では
-/// fail しない一方、`rstd` バッファの取り違え等の実質的な不一致は検出する
-/// （`docs/perf/cuda-parity-baseline.md` §9.5）。
+/// 行う（`docs/perf/cuda-parity-baseline.md` §9.5・§9.8）。
 fn cpu_rmsnorm_rstd_reference(x: &[f32], eps: f32, rows: usize, hidden: usize) -> Vec<f32> {
     if hidden == 0 {
         // Bugbot 指摘（PR #1120）: `hidden == 0` は GPU 側
@@ -146,15 +176,17 @@ fn cpu_rmsnorm_rstd_reference(x: &[f32], eps: f32, rows: usize, hidden: usize) -
         // なっていた）ため修正した。
         return vec![1.0f32 / eps.sqrt(); rows];
     }
-    let inv_n = 1.0f32 / hidden as f32;
+    let inv_n = 1.0f64 / hidden as f64;
+    let eps = eps as f64;
     (0..rows)
         .map(|r| {
             let x_row = &x[r * hidden..(r + 1) * hidden];
-            let mut acc = 0.0f32;
+            let mut acc = 0.0f64;
             for &v in x_row {
+                let v = v as f64;
                 acc = v.mul_add(v, acc);
             }
-            1.0f32 / (acc.mul_add(inv_n, eps)).sqrt()
+            (1.0f64 / (acc.mul_add(inv_n, eps)).sqrt()) as f32
         })
         .collect()
 }
@@ -163,26 +195,34 @@ fn cpu_rmsnorm_rstd_reference(x: &[f32], eps: f32, rows: usize, hidden: usize) -
 /// 実装。GPU 側 `RMSNORM_BWD_DW_PARTIAL_F32`／`RMSNORM_BWD_DW_REDUCE_F32`
 /// （`kernels_rmsnorm.rs`）の二段縮約と**同一の加算順序**で `dw` を計算
 /// する（イシュー #1102 GB10 実機再検証で判明した第 2 の非結合性。
-/// `docs/perf/cuda-parity-baseline.md` §9.5 追補）:
+/// `docs/perf/cuda-parity-baseline.md` §9.5・§9.8 追補）:
 ///
 /// 1. 行を `num_blocks` 個のブロック（`rows_per_block =
 ///    ceil(rows / num_blocks)`。末尾ブロックは `rows` で切り詰め。GPU の
 ///    `RMSNORM_BWD_DW_PARTIAL_F32` と同じ切り方）へ分割し、各ブロック内は
-///    行順の `mul_add`（fmaf）逐次蓄積で部分和を求める（単段カーネル・
-///    `cpu_rmsnorm_backward_reference` の dw 蓄積と同じ FMA 契約）
-/// 2. ブロック間はブロック番号 `0..num_blocks` の順に**単純な浮動小数点
-///    加算**（`+=`。GPU の `RMSNORM_BWD_DW_REDUCE_F32` が
-///    `acc += smem[buf][j][tid]` で行うのと同じ、`fmaf` を使わない結合）
-///    で縮約する
+///    行順の `mul_add`（`fma`）逐次蓄積で部分和を求める
+/// 2. ブロック間はブロック番号 `0..num_blocks` の順に単純な加算
+///    （`+=`。GPU の `RMSNORM_BWD_DW_REDUCE_F32` が
+///    `acc += smem[buf][j][tid]` で行うのと同じ結合順序）で縮約する
+///
+/// **§9.8 追補（イシュー #1102）**: ブロック内・ブロック間のいずれも
+/// `f64` アキュムレータで行い、`dw`（`f32` の戻り値）へは最終書き出し時
+/// 1 回だけ downcast する。GB10 実機実測で `f32` 蓄積のままでは
+/// （`(rows=4096, hidden=4097, num_blocks=8)` で `fail_count=1/4097,
+/// max_abs_diff=3.052e-4`。9.5 追補）縮約順序差が支配的な誤差になったため、
+/// GPU 側の対応する両カーネル（`RMSNORM_BWD_DW_PARTIAL_F32`／
+/// `RMSNORM_BWD_DW_REDUCE_F32`）を `double` アキュムレータ化したのに
+/// 合わせ、この「追加検査」用の CPU 参照実装側も精度を強化した
+/// （GPU 縮約順序の模倣という設計は変えていない。精度のみ引き上げる）。
 ///
 /// 浮動小数点加算は結合則を満たさないため、単段（`num_blocks == 1`。
-/// `RMSNORM_BWD_DW_F32` 相当）の逐次和とはこの二段縮約が一般に一致しない
-/// （GB10 実機実測: `(rows=4096, hidden=4097, num_blocks=8)` で
-/// `fail_count=1/4097, max_abs_diff=3.052e-4`。9.5 追補）。dw split 経路の
-/// parity 検証はこの関数を使うことで、GPU の実際の縮約順序と揃えた上で
-/// dw カーネル自体の正しさ（縮約式・境界処理）を検証する
-/// （`num_blocks == 1` でも本関数は単一ブロックの `RMSNORM_BWD_DW_F32`
-/// と同一順序に退化するため、単段・split-K 両方の呼び出し元で共通に使える）。
+/// `RMSNORM_BWD_DW_F32` 相当）の逐次和とはこの二段縮約が一般に一致しない。
+/// dw split 経路の parity 検証はこの関数を使うことで、GPU の実際の縮約
+/// 順序と揃えた上で dw カーネル自体の正しさ（縮約式・境界処理）を検証する
+/// （`num_blocks == 1` でも本関数は単一ブロックの逐次蓄積に退化するため、
+/// 単段・split-K 両方の呼び出し元で共通に使える。ただし単段側の実際の
+/// GPU カーネル `RMSNORM_BWD_DW_F32` は §9.8 で同じく `double` 化した
+/// ため、`num_blocks == 1` でもこの関数との精度前提は揃っている）。
 fn cpu_rmsnorm_dw_split_reference(
     x: &[f32],
     dy: &[f32],
@@ -191,9 +231,9 @@ fn cpu_rmsnorm_dw_split_reference(
     hidden: usize,
     num_blocks: u32,
 ) -> Vec<f32> {
-    let mut dw = vec![0.0f32; hidden];
+    let mut dw_acc = vec![0.0f64; hidden];
     if hidden == 0 || rows == 0 || num_blocks == 0 {
-        return dw;
+        return vec![0.0f32; hidden];
     }
     let num_blocks = num_blocks as usize;
     let rows_per_block = rows.div_ceil(num_blocks);
@@ -201,17 +241,20 @@ fn cpu_rmsnorm_dw_split_reference(
     for b in 0..num_blocks {
         let row_start = (b * rows_per_block).min(rows);
         let row_end = ((b + 1) * rows_per_block).min(rows);
-        for (i, dw_i) in dw.iter_mut().enumerate() {
-            let mut partial = 0.0f32;
+        for (i, dw_i) in dw_acc.iter_mut().enumerate() {
+            let mut partial = 0.0f64;
             for (offset, &r) in rstd[row_start..row_end].iter().enumerate() {
                 let row = row_start + offset;
                 let idx = row * hidden + i;
-                partial = (dy[idx] * r).mul_add(x[idx], partial);
+                let r = r as f64;
+                let dyv = dy[idx] as f64;
+                let xv = x[idx] as f64;
+                partial = (dyv * r).mul_add(xv, partial);
             }
             *dw_i += partial;
         }
     }
-    dw
+    dw_acc.into_iter().map(|v| v as f32).collect()
 }
 
 fn assert_rmsnorm_backward_parity(

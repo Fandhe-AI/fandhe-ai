@@ -529,7 +529,23 @@ extern "C" __global__ void rmsnorm_bwd_dx_f32(
 /// [`RMSNORM_BWD_DW_REDUCE_F32`]。イシュー #597）を新設したが、本カーネルは
 /// 小規模形状（`rmsnorm.rs::derive_dw_split` が `num_blocks <= 1` を返す
 /// 場合）のフォールバック経路として削除せず維持する（余分なカーネル起動・
-/// 部分和バッファ確保を避けるため）。
+/// 部分和バッファ確保を避けるため）。**`derive_dw_split` に加え
+/// `run_rmsnorm_bwd_f32_with_forced_dw_split` テストフックで `num_blocks
+/// == 1` を明示指定した場合も本カーネルへルーティングされる**（`rmsnorm.rs`
+/// の分岐は `num_blocks <= 1` で判定するため、split-K 側の
+/// `RMSNORM_BWD_DW_PARTIAL_F32`／`RMSNORM_BWD_DW_REDUCE_F32` は経由しない）。
+///
+/// # 精度契約（§9.8 追補・イシュー #1102）
+///
+/// GB10 実機再検証（PR #1120 コミット `0db80f6`）で観測された
+/// `rmsnorm_backward_dw_split_matches_cpu_across_shapes` の FAIL ケース
+/// `(rows=8192, hidden=4096, num_blocks=1)` は、上記のルーティングにより
+/// 実際には本カーネル（split-K の `RMSNORM_BWD_DW_PARTIAL_F32`／
+/// `RMSNORM_BWD_DW_REDUCE_F32` ではない）を経由する。したがって
+/// split-K 側だけを `double` 化しても本ケースの FAIL は解消しないため、
+/// 本カーネルの `acc`（`rows` 方向の逐次蓄積）も `double` アキュムレータ化
+/// した（`dw[i]` へ代入する 1 回だけ `float` へ downcast する）。設計判断・
+/// 実測記録は `docs/perf/cuda-parity-baseline.md` §9.8 を参照。
 pub const RMSNORM_BWD_DW_F32: &str = r#"
 extern "C" __global__ void rmsnorm_bwd_dw_f32(
     const float* __restrict__ x,
@@ -541,15 +557,16 @@ extern "C" __global__ void rmsnorm_bwd_dw_f32(
 {
     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < hidden;
          i += (long long)blockDim.x * gridDim.x) {
-        float acc = 0.0f;
+        // `acc` は double アキュムレータ（§9.8 追補）。
+        double acc = 0.0;
         for (long long row = 0; row < rows; row += 1) {
             long long idx = row * (long long)hidden + i;
             float xv = x[idx];
             float dyv = dy[idx];
             float r = rstd[row];
-            acc = fmaf(dyv * r, xv, acc);
+            acc = fma((double)dyv * (double)r, (double)xv, acc);
         }
-        dw[i] = acc;
+        dw[i] = (float)acc;
     }
 }
 "#;
@@ -571,8 +588,10 @@ pub const RMSNORM_DW_REDUCE_BLOCK_DIM: u32 = 256;
 /// [`RMSNORM_BWD_DW_REDUCE_F32`] の 2 段パイプラインが 1 イテレーションで
 /// 処理する block（`num_blocks` 次元）のバッチ数。smem double buffer の
 /// 静的サイズは「2 かける RMSNORM_DW_REDUCE_BATCH かける
-/// RMSNORM_DW_REDUCE_BLOCK_DIM かける 4」バイト（`BATCH=4`・
-/// `BLOCK_DIM=256` で 8 KiB。静的 smem 予算に常に収まる小さな固定値）。
+/// RMSNORM_DW_REDUCE_BLOCK_DIM かける 8」バイト（`BATCH=4`・
+/// `BLOCK_DIM=256` で 16 KiB。要素型が `double`〈8 byte〉のため
+/// §9.8 追補で 8 KiB から倍増したが、静的 smem 予算には常に収まる
+/// 小さな固定値のまま）。
 ///
 /// `#[allow(dead_code)]` について: 通常ビルドではカーネル文字列内の
 /// リテラル（`smem[2][4][256]`／`(num_blocks + 3) / 4`）を直接埋め込む
@@ -597,8 +616,12 @@ pub const RMSNORM_DW_REDUCE_BATCH: u32 = 4;
 /// `[b*rows_per_block, min((b+1)*rows_per_block, rows))`
 /// （`rows_per_block = ceil(rows / num_blocks)`）を **レジスタ `acc` で
 /// 蓄積し、最後に 1 回だけ** `dw_partial[b*hidden + i] = acc` を
-/// 書く（atomics 不使用。各 `(b, i)` の書き手 CTA は一意のため決定的。
-/// [`RMSNORM_BWD_DW_F32`] と同じ `fmaf` 蓄積で FMA 契約を統一する）。
+/// 書く（atomics 不使用。各 `(b, i)` の書き手 CTA は一意のため決定的）。
+/// `acc` は `double` アキュムレータ（§9.8 追補。個々の積和自体は
+/// [`RMSNORM_BWD_DW_F32`] と同じ `fma` の FMA 契約を保つが、精度は
+/// `float` から `double` へ引き上げた。`dw_partial` バッファ自体も
+/// `double`。理由は本カーネルのドキュメンテーションコメント「精度契約
+/// （§9.8 追補）」節を参照）。
 ///
 /// # §3.1 連鎖則対応付け（設計判断）
 ///
@@ -625,12 +648,29 @@ pub const RMSNORM_DW_REDUCE_BATCH: u32 = 4;
 /// `row_start`／`row_end`／`idx` は `long long`（本ファイル冒頭コメント
 /// 「ループ添字のオーバーフロー安全性」と同じ理由。`rows`／`num_blocks`
 /// は `int` の乗算前に `long long` へ昇格する）。
+/// # 精度契約（§9.8 追補・イシュー #1102）
+///
+/// GB10 実機再検証（PR #1120 コミット `0db80f6`）で、forward `rstd` の
+/// `double` 化（§9.7）だけでは `rmsnorm_backward_dw_split_matches_cpu_
+/// across_shapes` の旧ケース `(rows=8192, hidden=4096, num_blocks=1)` の
+/// FAIL が解消しないことが判明した（`fail_count=5/4096`・
+/// `max_rel_err=1.345e-2` — `rstd` 化前より相対誤差が拡大）。原因は
+/// `rows=8192` に渡る dw の `float32` 逐次和（GPU: 本カーネルの `fmaf`
+/// 蓄積／CPU 参照: `mul_add` 蓄積）の縮約順序差が、相殺を含む要素で
+/// 支配的な誤差になったことによる。このため本カーネル（ブロック内部分和）
+/// と [`RMSNORM_BWD_DW_REDUCE_F32`]（ブロック間縮約）の両方を `double`
+/// アキュムレータ化した（`dw_partial` バッファ自体も `double`。中間の
+/// `float` downcast を挟むと精度低下を招くため）。`float` への downcast
+/// は縮約カーネルの epilogue（最終 `dw[col]` 書き出し）1 回のみに限定
+/// する。詳細な実測・性能影響見積もりは `docs/perf/
+/// cuda-parity-baseline.md` §9.8 を参照。
+///
 pub const RMSNORM_BWD_DW_PARTIAL_F32: &str = r#"
 extern "C" __global__ void rmsnorm_bwd_dw_partial_f32(
     const float* __restrict__ x,
     const float* __restrict__ dy,
     const float* __restrict__ rstd,
-    float* __restrict__ dw_partial,
+    double* __restrict__ dw_partial,
     int rows,
     int hidden,
     int num_blocks)
@@ -645,16 +685,21 @@ extern "C" __global__ void rmsnorm_bwd_dw_partial_f32(
 
     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < hidden;
          i += (long long)blockDim.x * gridDim.x) {
-        float acc = 0.0f;
+        // `acc`（ブロック内部分和）は double アキュムレータ（イシュー
+        // #1102 GB10 実機再検証・§9.8 追補）。`rows=8192` に渡る f32
+        // 逐次和が GPU（fmaf 蓄積）と CPU 参照（mul_add 蓄積）で縮約順序
+        // 差により支配的な誤差を生んだため、ブロック内蓄積を double 化
+        // した（`dw_partial` バッファ自体も double。§9.8 参照）。
+        double acc = 0.0;
         // `row_start >= row_end`（末尾の空 block）ではこのループが 0 回
-        // 実行され `acc` は `0.0f` のまま。本ファイル冒頭コメント
+        // 実行され `acc` は `0.0` のまま。本ファイル冒頭コメント
         // 「末尾要素ブロックの扱い」参照。
         for (long long row = row_start; row < row_end; row += 1) {
             long long idx = row * (long long)hidden + i;
             float xv = x[idx];
             float dyv = dy[idx];
             float r = rstd[row];
-            acc = fmaf(dyv * r, xv, acc);
+            acc = fma((double)dyv * (double)r, (double)xv, acc);
         }
         // 無条件書き出し（条件分岐で省略しない。REQ-8 と同じ
         // 「最適化を理由に手動保証を省略しない」精神を空 block の扱いにも
@@ -701,12 +746,12 @@ extern "C" __global__ void rmsnorm_bwd_dw_partial_f32(
 /// `col` は `long long`（本ファイル冒頭コメントと同じ理由）。
 pub const RMSNORM_BWD_DW_REDUCE_F32: &str = r#"
 extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
-    const float* __restrict__ dw_partial,
+    const double* __restrict__ dw_partial,
     float* __restrict__ dw,
     int hidden,
     int num_blocks)
 {
-    __shared__ float smem[2][4][256];
+    __shared__ double smem[2][4][256];
     int tid = threadIdx.x;
     int num_batches = (num_blocks + 3) / 4;
 
@@ -732,17 +777,22 @@ extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
 
         // プロローグ: バッチ 0 を smem[0] へロードする（範囲外
         // `b >= num_blocks` または `!active`（列自体が範囲外）は
-        // 0.0f 充填。REQ-8 手動境界チェック）。
+        // 0.0 充填。REQ-8 手動境界チェック）。`smem`／`acc` は double
+        // アキュムレータ（イシュー #1102 §9.8 追補。ブロック間縮約の
+        // 加算順序差が支配的な誤差を生んだため、ブロック内蓄積
+        // 〈RMSNORM_BWD_DW_PARTIAL_F32〉に続きブロック間縮約も double 化
+        // した）。float への downcast は epilogue の `dw[col]` 書き出し
+        // 1 回のみ。
         #pragma unroll
         for (int j = 0; j < 4; j++) {
             int b = j;
-            float v =
-                (active && b < num_blocks) ? dw_partial[(long long)b * (long long)hidden + col] : 0.0f;
+            double v =
+                (active && b < num_blocks) ? dw_partial[(long long)b * (long long)hidden + col] : 0.0;
             smem[0][j][tid] = v;
         }
         __syncthreads();
 
-        float acc = 0.0f;
+        double acc = 0.0;
         int buf = 0;
         for (int batch = 0; batch < num_batches; batch++) {
             int next_buf = buf ^ 1;
@@ -752,9 +802,9 @@ extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
                 #pragma unroll
                 for (int j = 0; j < 4; j++) {
                     int b = (batch + 1) * 4 + j;
-                    float v = (active && b < num_blocks)
+                    double v = (active && b < num_blocks)
                                    ? dw_partial[(long long)b * (long long)hidden + col]
-                                   : 0.0f;
+                                   : 0.0;
                     smem[next_buf][j][tid] = v;
                 }
             }
@@ -769,9 +819,10 @@ extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
 
         // epilogue: 最終 dw を 1 回だけ書く（縮約結果を HBM へ往復させる
         // 第 3 パスを作らない。本ファイル冒頭コメント参照）。範囲外
-        // スレッド（`!active`）は書き出さない。
+        // スレッド（`!active`）は書き出さない。`acc`（double）は
+        // ここで初めて `float` へ downcast する。
         if (active) {
-            dw[col] = acc;
+            dw[col] = (float)acc;
         }
     }
 }
@@ -966,7 +1017,7 @@ mod tests {
             "外側ループの継続条件に tid 依存の `col` を使ってはならない（divergent barrier 回帰）"
         );
         assert!(src.contains("bool active = col < hidden;"));
-        assert!(src.contains("if (active) {\n            dw[col] = acc;\n        }"));
+        assert!(src.contains("if (active) {\n            dw[col] = (float)acc;\n        }"));
     }
 
     /// 部分和は末尾の空 block でも無条件に書かれる（受け入れ基準 1・
@@ -1032,7 +1083,7 @@ mod tests {
     #[test]
     fn split_k_dw_reduce_writes_dw_exactly_once_in_epilogue() {
         let src = RMSNORM_BWD_DW_REDUCE_F32;
-        let occurrences = src.matches("dw[col] = acc;").count();
+        let occurrences = src.matches("dw[col] = (float)acc;").count();
         assert_eq!(
             occurrences, 1,
             "epilogue の dw 書き出しは 1 回のみである契約"
@@ -1045,8 +1096,8 @@ mod tests {
         // 自体（`dw_partial[...]` が式の右辺に現れる形）はテストの前提
         // として最低 1 回存在することを確認する。
         assert!(
-            src.contains("const float* __restrict__ dw_partial"),
-            "dw_partial は const（読み出し専用）引数である契約"
+            src.contains("const double* __restrict__ dw_partial"),
+            "dw_partial は const（読み出し専用）引数である契約（§9.8 追補で double 化）"
         );
         assert!(
             src.matches("dw_partial[").count() >= 1,
@@ -1066,7 +1117,7 @@ mod tests {
     #[test]
     fn split_k_dw_reduce_smem_size_matches_batch_and_block_dim_consts() {
         let expected = format!(
-            "__shared__ float smem[2][{}][{}];",
+            "__shared__ double smem[2][{}][{}];",
             RMSNORM_DW_REDUCE_BATCH, RMSNORM_DW_REDUCE_BLOCK_DIM
         );
         assert!(

@@ -714,6 +714,120 @@ PR #1120 の codex-review が P1 として以下を指摘した:
 実測値を追記し、`rstd` 精度改善のみで解消したか、dw split-K 側の
 `double` 化が追加で必要かを判断する。
 
+### 9.8 dw 縮約自体の double 化（PR #1120 追加コミット。GB10 実機実測 2026-09-01）
+
+**GB10 実機再検証結果（0db80f6。§9.7 の rstd `double` 化のみを適用した
+コミット）**: `rmsnorm_backward_matches_cpu_across_shapes`（非 split）は
+pass した。しかし `rmsnorm_backward_dw_split_matches_cpu_across_shapes` は
+旧ケース `(rows=8192, hidden=4096, num_blocks=1)` で FAIL 継続
+（`fail_count=5/4096・max_abs_diff=3.052e-4・max_rel_err=1.345e-2`。
+`rstd` の `double` 化前〈§9.4〉の `max_rel_err=1.340e-2` とほぼ同水準——
+`rstd` 精度改善だけでは実質的な改善が見られなかった）。
+
+**切り分け**: `rstd` 自体はほぼ厳密な値になった一方、dw の
+`rows=8192` に渡る `f32` 逐次和（GPU: `fmaf` 蓄積／CPU 参照: `mul_add`
+蓄積）が、相殺を含む出力要素（列）で支配的な誤差になっていた。GPU・CPU
+とも同一の行順逐次蓄積だが、`rstd[r]`（行ごとのスカラー）が GPU
+（warp butterfly reduction 由来）と CPU（逐次和由来）で `double`
+精度でも非結合性に起因するごく僅かな差を持ち続ける限り、`rows` 方向へ
+8192 回積み上げる `f32` の逐次和はこの僅かな入力差を打ち消しきれず、
+特定の出力列（強い相殺が起きる列）で複合判定を超える絶対誤差へ増幅
+されうる。
+
+**ルーティングの実装確認（重要な訂正）**: 当初の対応方針は
+`RMSNORM_BWD_DW_PARTIAL_F32`／`RMSNORM_BWD_DW_REDUCE_F32`（split-K
+経路。`num_blocks >= 2`）の `double` 化のみを想定していたが、
+`rmsnorm.rs::run_rmsnorm_bwd_f32_inner` のホスト側分岐
+（`if num_blocks <= 1 { 単段カーネル RMSNORM_BWD_DW_F32 } else {
+split-K 二段構成 }`）を確認したところ、**GB10 で FAIL していた
+`(rows=8192, hidden=4096, num_blocks=1)` は `num_blocks <= 1` のため
+実際には単段カーネル `RMSNORM_BWD_DW_F32`（split-K 側とは別カーネル）
+を経由しており、split-K 側だけを `double` 化しても本ケースの FAIL は
+解消しない**ことが判明した。このため対応範囲を単段カーネルへ拡張した
+（`.claude/rules/out-of-scope-tracking.md` の趣旨に沿い、実装時に判明
+した前提の誤りとして本節に明記する。既存の対応方針〈split-K 側の
+`double` 化〉自体は誤りではなく、`num_blocks >= 2` の経路に引き続き
+必要な改善のため維持する）。
+
+**適用した修正（`crates/backend-cuda/src/kernels_rmsnorm.rs`。
+tolerance 非変更）**:
+
+1. **`RMSNORM_BWD_DW_F32`（単段フォールバック。`num_blocks <= 1` の
+   実効経路）**: `rows` 方向の逐次蓄積 `acc` を `float` から `double`
+   アキュムレータへ変更した（`fma((double)dyv * (double)r, (double)xv,
+   acc)`。`dw[i]` へ代入する 1 回だけ `float` へ downcast）
+2. **`RMSNORM_BWD_DW_PARTIAL_F32`（split-K 第 1 段。ブロック内蓄積）**:
+   同様に `acc` を `double` 化。**部分和バッファ `dw_partial` 自体も
+   `float` から `double` へ変更**した（ホスト側 `rmsnorm.rs` の
+   `alloc_zeros::<f64>` に対応。中間で `float` へ downcast すると
+   ブロック間縮約〈次段〉に渡す前に精度を失うため、バッファ型ごと
+   `double` 化する設計を選んだ——コーディネータ指示の「partial 出力を
+   float のまま downcast すると精度が落ちるので、可能なら partial
+   バッファを double 化」に従う）
+3. **`RMSNORM_BWD_DW_REDUCE_F32`（split-K 第 2 段。ブロック間縮約）**:
+   `dw_partial` の読み出し型を `double` に合わせ、smem double buffer
+   （`smem[2][4][256]`）・縮約アキュムレータ `acc` を `double` へ変更。
+   `dw[col]` へ書く epilogue でのみ `float` へ downcast する
+4. **ホスト側（`rmsnorm.rs`）**: `dw_partial_dev` の確保を
+   `alloc_zeros::<f32>` から `alloc_zeros::<f64>` へ変更。部分和
+   バッファのバイト数計算（`derive_dw_split` の `fits_budget`・
+   `validate_dw_split_launch` の `partial_bytes`）の乗数を `4`（`float`）
+   から `8`（`double`）へ更新した
+
+**CPU 参照実装側の強化（`crates/backend-cuda/tests/
+rmsnorm_backward_parity.rs`。テスト弱体化ではなく精度強化。codex P1
+の趣旨「独立参照 + 実装側修正」に合致）**:
+
+- `cpu_rmsnorm_backward_reference`（主検査が使う独立参照）: 二乗和
+  （`rstd` 計算。`gpu_rstd = None` の場合）・dw の行方向蓄積を
+  いずれも `f64` アキュムレータへ変更した。`dx` の計算式（`dot` の
+  蓄積・最終の `dx_row[i]` 式）は変更していない（コーディネータ指示:
+  dx 参照はそのままで可。dx は既に GB10 で pass しており、対応する
+  GPU 側 `RMSNORM_BWD_DX_F32` も本 PR で変更していない）
+- `cpu_rmsnorm_rstd_reference`（追加検査の rstd バッファ parity 用）:
+  同様に `f64` アキュムレータ化した
+- `cpu_rmsnorm_dw_split_reference`（追加検査の split-K dw カーネル単体
+  検証用）: ブロック内・ブロック間の蓄積をいずれも `f64` 化し、GPU
+  側の対応する 2 カーネルと精度前提を揃えた
+- 独立性は維持している: いずれの関数も GPU の縮約順序（`rstd` の
+  warp butterfly reduction・dw のブロック分割）を模倣するものではなく、
+  素朴な逐次和（`rstd`・`cpu_rmsnorm_backward_reference` の dw）または
+  独立に定義したブロック分割順序（`cpu_rmsnorm_dw_split_reference`。
+  これは「追加検査」専用でありこの関数自体は元々 GPU の縮約順序を
+  模倣する設計だったため対象外）のままである。変更したのは中間計算の
+  **精度**（`float` → `double`）のみであり、GPU 実装のコピーではない
+
+**回帰テストの更新**: `kernels_rmsnorm.rs` 側のソース文字列検査
+（`split_k_dw_reduce_smem_size_matches_batch_and_block_dim_consts`・
+`split_k_dw_reduce_writes_dw_exactly_once_in_epilogue` 等）を新しい
+型・計算式に合わせて更新した。`rmsnorm.rs` 側のバッファ上限テスト
+（`derive_dw_split_falls_back_when_partial_buffer_exceeds_cap`）も
+`double` 要素サイズ（8 byte）に合わせて期待値を再計算した
+（`num_blocks=16` → `8`。乗数 `4` → `8` により上限に収まる block 数が
+半減する）。テスト用の CPU 専用回帰テスト
+（`cpu_dw_split_reference_matches_naive_reference_when_num_blocks_is_one`）
+は `f64` 化後も bit-for-bit 一致を維持することをローカルで確認済み
+（`num_blocks == 1` では `0.0 + partial == partial` の加法単位元により
+精度損失なく退化するため）。
+
+**性能への影響の見積もり**: forward 同様、dw カーネル群もメモリ帯域
+律速の性質を持つ（行あたり `hidden` 要素のロード＋蓄積、または
+`num_blocks * hidden` 要素の部分和書き出し／読み出し）。`double` 演算
+自体の追加コストは軽微と見積もるが、**split-K 経路は部分和バッファの
+サイズが 2 倍化する**（`float` → `double`。`RMSNORM_DW_PARTIAL_BUFFER_
+CAP_BYTES` は 64 MiB のまま変更していないため、同一 `hidden` に対し
+選択される `num_blocks` の上限がおよそ半分になる——実測例:
+`derive_dw_split(20_000, 100_000, 1_000_000)` は `16` から `8` へ
+減少。これにより極端に広い `hidden` を持つ形状では split-K の並列度が
+下がり性能へ影響しうる）。またブロック間縮約カーネルの静的 smem
+使用量も 8 KiB から 16 KiB へ倍増したが、GPU の静的 smem 予算には
+依然余裕を持って収まる。実機での定量計測（REQ-8 性能下限との非後退
+確認を含む）は次回 GB10 セッションで実施する
+
+**実機確認コマンド（変更なし。§9.7 参照）**。実機確認完了後、本節に
+実測値（`fail_count`・`max_abs_diff` 等）を追記し、イシュー
+#1102／#1105 のクローズ可否・REQ-8 性能非後退を判断する。
+
 ## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
 
 本節は §1〜8（GEMM `wmma`/`mma` 系ベースライン表・非後退契約本体）の続き
