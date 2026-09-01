@@ -132,25 +132,24 @@ fn baseline_fixture_is_self_consistent() {
 /// 「記録値の provenance が確定していない」ケース専用であり、
 /// `WmmaTf32Opt`・`MmaF16` の記録元は opt 可用性確認済み／基本-opt 分岐が
 /// 存在しないためこの不確実性が原理的に生じない（`common/parity_baseline.rs`
-/// 各行コメント参照）。このテストは `WmmaTf32Opt`/`MmaF16` の行に
+/// 各行コメント参照）。このテストは全経路の行に
 /// `baseline_provenance_unconfirmed: true` が誤って付与されていないことを
 /// 固定し、非後退ゲートが意図せず広くスキップされる回帰を防ぐ（`WmmaTf32`
-/// は基本版カーネル単独の再測定が未了のため許容する。`WmmaTf32Staged` は
-/// イシュー #726 の実機実測で確定済みとなったため許容経路から外した —
-/// 確定後に再び unconfirmed へ戻す変更はゲートの弱体化でありこのテストが
-/// 検出する）。
+/// はイシュー #1106 の GB10 実機実測で基本版カーネル単独の確定測定が
+/// 完了したため、他経路と同じく `false` 固定の対象へ含める。`WmmaTf32Opt`・
+/// `WmmaTf32Staged`・`MmaF16` はそれぞれ #491／#726 の実機実測で確定済み。
+/// いずれかの経路が再び unconfirmed へ戻る変更はゲートの弱体化であり
+/// このテストが検出する）。
 #[test]
 fn baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only() {
     for b in BASELINES {
-        if b.path != ParityPath::WmmaTf32 {
-            assert!(
-                !b.baseline_provenance_unconfirmed,
-                "{}: baseline_provenance_unconfirmed は WmmaTf32（基本版）\
-                 行専用です。経路 {:?} で true になっており、\
-                 非後退ゲートが意図せずスキップされます",
-                b.context, b.path
-            );
-        }
+        assert!(
+            !b.baseline_provenance_unconfirmed,
+            "{}: 経路 {:?} で baseline_provenance_unconfirmed が true に \
+             なっており、非後退ゲートが意図せずスキップされます \
+             （全経路が確定済みである前提が崩れています）",
+            b.context, b.path
+        );
     }
 }
 
@@ -159,19 +158,18 @@ fn baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only() {
 ///
 /// `WmmaTf32Opt`・`MmaF16` は provenance 不確実性が原理的に生じない経路
 /// （`common/parity_baseline.rs` 各行コメント参照）、`WmmaTf32Staged` は
-/// イシュー #726 の実機実測で確定済みの経路のため、全行が
+/// イシュー #726 の実機実測で確定済みの経路、`WmmaTf32`（基本版）は
+/// イシュー #1106 の GB10 実機実測（基本版カーネル専用の単体テスト
+/// `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`
+/// の release 2 回実行で値の安定を確認）で確定済みの経路のため、全行が
 /// enforced（`baseline_provenance_unconfirmed == false`）であることを
-/// 固定する。`WmmaTf32`（基本版）は対象外（現状
-/// 2 行とも `baseline_provenance_unconfirmed: true` であり、これは
-/// `assert_no_parity_regression` の fail-closed 契約
-/// （`assert_no_parity_regression_panics_on_unconfirmed_baseline`
-/// が下で機械検査する）によって「実機必須テストが黙って green になる」
-/// ことを防いでいる。0 件を green として固定するテストは置かない
-/// —— それ自体が codex-review P1 指摘が問題視した「機能していないゲート
-/// を正常状態として固定する」パターンになるため）。
+/// 固定する。0 件を green として固定するテストは置かない —— それ自体が
+/// codex-review P1 指摘が問題視した「機能していないゲートを正常状態として
+/// 固定する」パターンになるため）。
 #[test]
 fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
     for path in [
+        ParityPath::WmmaTf32,
         ParityPath::WmmaTf32Opt,
         ParityPath::WmmaTf32Staged,
         ParityPath::MmaF16,

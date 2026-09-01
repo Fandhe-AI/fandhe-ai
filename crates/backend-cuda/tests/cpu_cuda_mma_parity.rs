@@ -30,6 +30,8 @@
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaGemm};
 use half::f16;
 
+mod common;
+
 /// 決定的シードで A・B（f16）を生成し、参照値とカーネル出力を
 /// `assert_parity` で照合する（本ファイル冒頭コメント「参照実装との
 /// 比較方法」参照）。
@@ -144,6 +146,19 @@ fn mma_f16_matches_reference_across_shapes() {
 /// K 大のストレスケース（PoC-v2-5 準拠の積和蓄積検証。
 /// `cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress` と同じ形状で mma
 /// 経路の桁落ち耐性・3 ステージパイプラインの周回耐性を確認する）。
+///
+/// **PR #1115（イシュー #1106）codex-review P1 指摘対応**: 本テストを
+/// `assert_mma_f16_parity`（REQ-2 統一複合判定）から
+/// `common::parity_baseline::assert_no_parity_regression`（既知不合格
+/// ベースライン許容の非後退判定）へ置換していた変更を revert した
+/// （AGENTS.md「数値契約の片側変更」・`.claude/rules/coding-rust.md`
+/// 「バックエンド間数値一致テストの許容誤差を単独で緩和しない」に
+/// 抵触するとの指摘）。f16 K=4096 ストレスに既知の tail 超過
+/// （`docs/backend-cuda-real-device-testing.md` §5.3。K 支配的な積和で
+/// REQ-2 統一複合判定をわずかに外れる要素が生じる）があること自体は
+/// 事実であり、その非後退監視は `mma_f16_k4096_stress_non_regression`
+/// （本ファイル下部）へ**別テストとして併設**する（codex-review の
+/// 提案どおり、元の受け入れ条件はここで維持したまま置き換えない）。
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn mma_f16_k4096_stress() {
@@ -151,6 +166,75 @@ fn mma_f16_k4096_stress() {
     let gemm = CudaMmaGemm::new(&device).expect("mma kernel compilation must succeed");
 
     assert_mma_f16_parity(&gemm, "K4096 stress 256x256x4096", 9999, 256, 256, 4096);
+}
+
+/// `mma_f16_k4096_stress`（256×256×4096・seed=9999）に対する**非後退
+/// 監視の併設テスト**（イシュー #1106・PR #1115 codex-review P1 指摘
+/// 対応）。
+///
+/// f16 K=4096 ストレスは既知の tail 超過（`docs/backend-cuda-real-device-testing.md`
+/// §5.3。K 支配的な積和で REQ-2 統一複合判定〈相対誤差 1e-3 未満または
+/// 絶対誤差 1e-5 未満〉をわずかに外れる要素が生じる）を持つため、
+/// `mma_f16_k4096_stress` 本体は `assert_parity`（green 必須。REQ-2
+/// 受け入れ条件そのもの）を維持したまま、本テストは #491 で確立した
+/// parity 非後退契約（`common::parity_baseline::assert_no_parity_regression`）
+/// で「既知の不合格分布から悪化していないか」を別観点として監視する。
+/// **`assert_parity` を置き換えるものではなく追加のゲートである**——
+/// `mma_f16_k4096_stress` が green になるまでは REQ-2 違反として扱う
+/// （本体テストの failing が本来の状態を正しく表す）。
+///
+/// 形状・シード（256×256×4096・seed=9999）は `common/parity_baseline.rs`
+/// の `ParityPath::MmaF16` 行（GB10 実機実測で確定済み・
+/// `baseline_provenance_unconfirmed: false`）と完全一致するため、新規
+/// 実機測定は不要（判定式・tolerance 定数は変更しない）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
+fn mma_f16_k4096_stress_non_regression() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaMmaGemm::new(&device).expect("mma kernel compilation must succeed");
+
+    let (m, n, k, seed) = (256u32, 256u32, 4096u32, 9999u64);
+    let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+    let a_f16: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+    let b_f16: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+    let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
+    let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
+    let mut c_ref_f32 = vec![0.0f32; (m as usize) * (n as usize)];
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a_f32,
+        &b_f32,
+        &mut c_ref_f32,
+        m as usize,
+        n as usize,
+        k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    let c_ref_rounded: Vec<f32> = c_ref_f32
+        .iter()
+        .map(|&x| f16::from_f32(x).to_f32())
+        .collect();
+    let c_gpu_f16 = gemm
+        .run_f16(&a_f16, &b_f16, m, n, k)
+        .expect("CudaMmaGemm::run_f16 must succeed on CUDA-equipped test runner");
+    let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
+
+    let baseline = common::parity_baseline::BASELINES
+        .iter()
+        .find(|b| {
+            b.path == common::parity_baseline::ParityPath::MmaF16
+                && b.m == m
+                && b.n == n
+                && b.k == k
+                && b.seed == seed
+        })
+        .expect("mma_f16 256x256x4096 seed=9999 baseline row must exist in fixture");
+    let report = fandhe_ai_backend_cpu::compare(&c_gpu_f32, &c_ref_rounded)
+        .expect("shape must match baseline fixture");
+    common::parity_baseline::assert_no_parity_regression(
+        "mma_f16_k4096_stress_non_regression 256x256x4096",
+        &report,
+        baseline,
+    );
 }
 
 /// WMMA 経路（`CudaWmmaGemm::run_f16`）との相互比較。同一入力に対し

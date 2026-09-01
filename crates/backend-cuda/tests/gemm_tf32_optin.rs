@@ -18,7 +18,15 @@
 //!    統一複合判定で一致すること（通常のバックエンド間 parity 契約）。
 //! 3. opt-in ON 時、`gemm` 出力が CPU 参照実装（FP32 厳密）と REQ-2 統一
 //!    複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で一致する
-//!    こと。
+//!    こと（受け入れ条件 2「opt-in 時の複合判定結果」の本体）。
+//! 4. 上記 3 とは別に、opt-in ON 時の `gemm` 出力が
+//!    `CudaGemm::run_wmma_tf32`（配線先と同一カーネル）の直接呼び出しと
+//!    **bit-exact** に一致すること（イシュー #1106・PR #1115 で追加。
+//!    codex-review P1 指摘対応により 3 節の CPU 参照実装比較を置き換える
+//!    のではなく併設する形へ整理した）。「opt-in フラグが
+//!    `run_wmma_tf32` へ正しく配線されていること」のみを、tolerance・
+//!    ベースライン機構のいずれにも依存しない `==` の完全一致で判定する
+//!    補助テストであり、3 節の受け入れ条件を代替しない。
 //!
 //! `common::parity_baseline` から tolerance 定数 pin を借用し、判定式・
 //! 許容誤差は再定義しない（`.claude/rules/coding-rust.md`）。
@@ -33,24 +41,50 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_cuda::CudaBackendOps;
 use fandhe_ai_backend_cuda::precision::{set_tf32_gemm_enabled, tf32_gemm_enabled};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 mod common;
 
-/// フラグはプロセスグローバル（`crate::precision`）のため、
-/// `cargo test` の既定並列実行下で他のテストバイナリ内テストと競合し
-/// うる。本ファイル内では直列に実行し、各テストの最後に必ず OFF へ
-/// 戻す（`ops.rs::tests::Tf32FlagGuard` と同型の RAII ガード）。
+/// フラグはプロセスグローバル（`crate::precision`）のため、`cargo test`
+/// の既定並列実行下では本ファイル内の複数テストが同時に `acquire` し
+/// うる（Cursor Bugbot 指摘・PR #1115: `--ignored` 実行時に
+/// `gemm_tf32_optin_on_matches_cpu_across_shapes` と
+/// `gemm_tf32_optin_on_wiring_matches_run_wmma_tf32` が並行実行される
+/// と、一方の `Drop` によるフラグ復元がもう一方の GPU 呼び出し中に
+/// フラグを書き換え、意図しない精度経路〈wiring 検証が FP32 対 TF32 を
+/// 比較してしまう、または CPU-parity 経路が Tensor Core ルートから
+/// 外れる〉を引き起こしうる）。`TF32_TEST_LOCK`（本ファイル内限定の
+/// プロセス内 `Mutex`）を `acquire` 時に取得し `Self` に保持することで、
+/// フラグの読み取り→書き込み→（呼び出し元スコープでの使用）→
+/// `Drop` での復元までを単一クリティカルセクションとして直列化する
+/// （`ops.rs::tests::Tf32FlagGuard` と同型の RAII ガードにロックを
+/// 追加した形）。
+static TF32_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Tf32FlagGuard {
     original: bool,
+    // 同時に 1 つの `Tf32FlagGuard` しか生存できないことを保証する。
+    // 値は使わない（排他制御専用）ため `_` prefix で未使用警告を抑止する。
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Tf32FlagGuard {
     fn acquire(enabled: bool) -> Self {
+        // 他スレッドが panic しつつロックを保持していた場合でも
+        // teardown（フラグ復元）を継続できるよう、poison を無視して
+        // 内部値を取り出す（テストの排他制御用ロックであり、poison を
+        // fail-fast させると後続テストが無関係な理由で巻き添えになる）。
+        let lock = TF32_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original = tf32_gemm_enabled();
         set_tf32_gemm_enabled(enabled);
-        Self { original }
+        Self {
+            original,
+            _lock: lock,
+        }
     }
 }
 
@@ -60,6 +94,21 @@ impl Drop for Tf32FlagGuard {
     }
 }
 
+/// opt-in ON 時の `CudaBackendOps::gemm` 出力が CPU 参照実装（FP32 厳密）
+/// と REQ-2 統一複合判定で一致することを確認する（受け入れ条件 2「opt-in
+/// 時の複合判定結果」の本体。ファイル冒頭コメント「3.」参照）。
+///
+/// **PR #1115（イシュー #1106）codex-review P1 指摘対応**: 本関数を
+/// `CudaGemm::run_wmma_tf32`（配線先と同じカーネル）との bit-exact
+/// 自己比較へ置換し CPU 参照実装比較を削除していた変更を revert した
+/// （AGENTS.md「数値契約の片側変更」・`.claude/rules/coding-rust.md`
+/// 「バックエンド間数値一致テストの許容誤差を単独で緩和しない」に
+/// 抵触し、TF32 数値誤差悪化の回帰を検出できなくなるとの指摘）。
+/// 「opt-in フラグが `run_wmma_tf32` へ正しく配線されていること」を
+/// bit-exact に確認したい場合は
+/// `assert_tf32_optin_wiring_bit_exact`（本ファイル下部）を**別関数・
+/// 別テストとして併設**する（codex-review の提案どおり、元の CPU
+/// 参照実装比較はここで維持したまま置き換えない）。
 fn assert_tf32_optin_gemm_parity(seed_a: u64, seed_b: u64, m: usize, n: usize, k: usize) {
     let cpu = CpuBackendOps::new();
     let cuda = CudaBackendOps::new(0);
@@ -80,6 +129,49 @@ fn assert_tf32_optin_gemm_parity(seed_a: u64, seed_b: u64, m: usize, n: usize, k
         &format!("tf32 opt-in gemm cpu-cuda parity m={m} n={n} k={k}"),
         cuda_result.as_slice().expect("contiguous"),
         cpu_result.as_slice().expect("contiguous"),
+    );
+}
+
+/// opt-in ON 時の `CudaBackendOps::gemm` 出力が、同一入力に対する
+/// `CudaGemm::run_wmma_tf32`（配線先カーネルの直接呼び出し）と bit-exact に
+/// 一致することを確認する（イシュー #1106・PR #1115）。CPU 参照実装は
+/// 使わない——TF32 経路自体の誤差分布は `gemm_wmma_tf32.rs` 等の責務で
+/// あり、本関数が固定したいのは「opt-in フラグが `run_wmma_tf32` へ
+/// 正しく配線されていること」のみのため、tolerance 判定を経由しない
+/// `==` の完全一致で検証する。`assert_tf32_optin_gemm_parity`（CPU 参照
+/// 実装との REQ-2 統一複合判定。受け入れ条件の本体）を置き換えるもの
+/// ではなく、配線検証専用の**追加テスト**として併設する
+/// （`gemm_tf32_optin_on_wiring_matches_run_wmma_tf32` から呼ばれる）。
+fn assert_tf32_optin_wiring_bit_exact(seed_a: u64, seed_b: u64, m: usize, n: usize, k: usize) {
+    let cuda = CudaBackendOps::new(0);
+
+    let a_data = Xorshift64Star::new(seed_a).fill_vec(m * k);
+    let b_data = Xorshift64Star::new(seed_b).fill_vec(k * n);
+    let a = Tensor::new(a_data.clone(), &[m, k]).expect("valid tensor");
+    let b = Tensor::new(b_data.clone(), &[k, n]).expect("valid tensor");
+
+    let _guard = Tf32FlagGuard::acquire(true);
+    let cuda_result = cuda
+        .gemm(&a, &b)
+        .expect("CudaBackendOps::gemm (tf32 opt-in) must succeed on CUDA-equipped test runner");
+
+    // 配線先カーネルを直接呼び出す独立経路（`ops.rs::CudaBackendOps::gemm`
+    // が内部で使うキャッシュ済み `CudaGemm` インスタンスとは別に、この
+    // テスト専用の新規インスタンスを生成する。同一 PTX・同一入力である限り
+    // インスタンスが異なっても出力は bit-exact になるはず——ならなければ
+    // それ自体が配線・カーネルいずれかの回帰である）。
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("CudaGemm::new (tiled/WMMA TF32) must succeed");
+    let direct_result = gemm
+        .run_wmma_tf32(&a_data, &b_data, m as u32, n as u32, k as u32)
+        .expect("run_wmma_tf32 direct call must succeed on CUDA-equipped test runner");
+
+    assert_eq!(
+        cuda_result.as_slice().expect("contiguous"),
+        direct_result.as_slice(),
+        "tf32 opt-in gemm wiring m={m} n={n} k={k}: CudaBackendOps::gemm（opt-in ON）の出力が \
+         CudaGemm::run_wmma_tf32 の直接呼び出しと bit-exact に一致しません（opt-in \
+         フラグの配線に回帰がある可能性があります）"
     );
 }
 
@@ -211,5 +303,24 @@ fn gemm_tf32_optin_on_matches_cpu_across_shapes() {
     ];
     for &(seed_a, seed_b, m, n, k) in cases {
         assert_tf32_optin_gemm_parity(seed_a, seed_b, m, n, k);
+    }
+}
+
+/// 実機必須の配線検証（ファイル冒頭コメント「4.」参照。イシュー #1106・
+/// PR #1115）。opt-in ON 時に `CudaBackendOps::gemm` が配線先カーネル
+/// `CudaGemm::run_wmma_tf32` を bit-exact に呼び出していることを確認
+/// する、`gemm_tf32_optin_on_matches_cpu_across_shapes`（受け入れ条件の
+/// 本体）に対する**併設テスト**（置き換えではない）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等。cc>=8.0）必須"]
+fn gemm_tf32_optin_on_wiring_matches_run_wmma_tf32() {
+    let cases: &[(u64, u64, usize, usize, usize)] = &[
+        (701, 702, 512, 512, 512),
+        (703, 704, 1024, 1024, 1024),
+        (705, 706, 96, 160, 48),
+        (707, 708, 256, 256, 4096),
+    ];
+    for &(seed_a, seed_b, m, n, k) in cases {
+        assert_tf32_optin_wiring_bit_exact(seed_a, seed_b, m, n, k);
     }
 }

@@ -214,6 +214,74 @@ capability 8.6）と異なる世代の Tensor Core でも同様の fail 率（15
 fail であり、本イシューのスコープ内〈テスト実行・結果記録〉での修正対象ではない。REQ-2 改定
 （閾値変更）が完了するまで解消しない）。
 
+**追記（イシュー #1106・GB10 実機実測 2026-08-31/09-01）**: 上記 8 件・および `WmmaTf32` 基本版
+カーネル専用ゲート（`gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`）が
+`baseline_provenance_unconfirmed: true` の fail-closed で恒常 fail していた問題を、以下の方針で
+解消した（tolerance 定数・判定式は一切変更していない）:
+
+1. **`WmmaTf32`（基本版）2 行の確定測定**: `wmma_tf32_basic_kernel_parity_does_not_regress` を
+   GB10（sm_121・CUDA 13.0）実機で release 2 回実行し、いずれも 32×32×32 seed=2000 で
+   fail_count=154/1024・mean_abs_diff=3.697936e-4、256×256×4096 seed=8888 で
+   fail_count=10647/65536・mean_abs_diff=4.476030e-3 の完全一致を確認した。記録済み値
+   （既存の推定 provenance）と一致しており、基本版・opt カーネルが同一の parity 分布を持つという
+   `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md`（#995）の実測結果を裏付ける。
+   `crates/backend-cuda/tests/common/parity_baseline.rs` の該当 2 行を
+   `baseline_provenance_unconfirmed: false` へ更新済み。
+2. **非後退監視の併設（既存の確定済みベースライン行と形状・シードが完全一致する 3 件）**:
+   `tensor_core_real_device.rs::tensor_core_parity_record`（TF32 部分・512×512×512 seed=0x7A0。
+   `WmmaTf32Opt` 行と一致）・`cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（256×256×4096
+   seed=9999。`MmaF16` 行と一致）を `assert_parity`（green 必須）から
+   `common::parity_baseline::assert_no_parity_regression` へ**変換する**変更を当初適用したが、
+   PR #1115 の codex-review P1 指摘（REQ-2 統一複合判定を受け入れ条件から外す片側変更に該当し、
+   `.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を単独で緩和しない」に
+   抵触する）を受けて revert した。元の `assert_parity`（CPU 参照実装比較・green 必須）を受け入れ
+   条件として維持したまま、非後退監視は `tensor_core_parity_record_tf32_non_regression`・
+   `mma_f16_k4096_stress_non_regression` という**別テストとして併設**する形に修正済み
+   （`assert_no_parity_regression` はこの併設テスト内でのみ使用し、受け入れ条件本体は置き換えて
+   いない）。**revert の結果、元の `assert_parity` 2 件は §5.3 表に記載の恒常 fail のまま未解消
+   である**（本項目の「解消」対象はあくまで基本版 provenance fail-closed〈上記 1〉のみで、この
+   2 件の REQ-2 不合格自体は §5.3 のとおり #186 の閾値改定待ちで変化しない）。新設した非後退監視
+   側テスト（`_non_regression` サフィックス）のみを GB10 実機で release 2 回 green 確認した。
+3. **`gemm_tf32_optin.rs::gemm_tf32_optin_on_matches_cpu_across_shapes`**: opt-in フラグ配線検証
+   という本ファイルの目的（冒頭コメント）に立ち返り、CPU 参照実装との tolerance 比較から
+   `CudaGemm::run_wmma_tf32` 直接呼び出しとの bit-exact 比較へ**置換する**変更を当初適用したが、
+   これも上記と同種の codex-review P1 指摘（数値契約の片側変更）を受けて revert した。元の CPU
+   参照実装比較（`assert_tf32_optin_gemm_parity`・受け入れ条件本体）は維持したまま、bit-exact
+   配線検証は `gemm_tf32_optin_on_wiring_matches_run_wmma_tf32`（`assert_tf32_optin_wiring_bit_exact`）
+   という**別テストとして併設**する形に修正済み（元テストを置き換えていない）。新設した bit-exact
+   配線検証テストは GB10 実機で release 2 回 green を確認したが、**revert で復元した元の CPU 参照
+   実装比較（TF32 経路。512×512×512 を含む形状群）自体は本 revert 時点で新規に実機再測定して
+   いない**——TF32 経路が §5.3 の複数テストで最小形状から恒常的に閾値超過している事実に鑑みると、
+   同種の fail が再現しうる。実機での pass/fail 確定は未実施のまま次ラウンドへ引き継ぐ（fail した
+   場合は §5.3 相当の恒常 fail として記録・#186 の閾値改定待ちへ合流させる）。
+4. **未解消（新規実機測定が必要なため本イシューのスコープ外。out-of-scope-tracking.md 対象）**:
+   上表 8 件のうち残り 6 件（`wmma_f16_k4096_stress`〈cpu_cuda_wmma_parity.rs〉・
+   `wmma_f16_opt_k4096_stress`・`wmma_tf32_k4096_stress_poc_v2_5`・
+   `wmma_tf32_matches_reference_across_shapes`・`wmma_tf32_opt_k4096_stress`・
+   `wmma_tf32_opt_matches_reference_across_shapes`）に加え、`gemm_wmma_tf32_staged.rs`・
+   `gemm_mma_tf32.rs`（mma_tf32 系。`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 の原因未確定残差）・
+   `mma_tf32_vs_wmma_tf32_staged.rs`・`specialized_mma_parity.rs::specialized_mma_f16_matches_default_and_reference_across_shapes`
+   は、複数形状にわたる `assert_parity` 直接比較かつ既存ベースライン行と形状・シードが一致しない
+   ため、非後退契約化には新規ベースライン行の実機測定が要る。実測データ自体は GB10 で採取済み
+   （2026-08-31/09-01 トリアージ実行ログ）だが、fixture への転記・確定は後続イシューへ引き継ぐ。
+   `tensor_core_tflops_record`（性能プロトコル。並列実行時の GPU 競合による既知の不安定。§5.1・
+   #391 系）はパリティ判定と無関係のため対象外のまま。
+
+**追記（PR #1115 codex-review 再指摘対応）**: 上記 2 の `tensor_core_parity_record_tf32_non_regression`
+（`tensor_core_real_device.rs`）は、`wmma_tf32_opt_available()` の確認後に公開 API `run_wmma_tf32` を
+呼んでいたが、対象形状（512×512×512。`n%4==0 && k%4==0`）は整列条件を満たすため `run_wmma_tf32` の
+3 段選択（staged→opt→basic）が staged 経路を最優先で選ぶ（`gemm.rs::run_wmma_tf32` ドキュメンテーション
+コメント参照）。結果として実際には staged 経路の結果を `ParityPath::WmmaTf32Opt` の記録値（opt カーネル
+単独の非後退上限）に対して判定してしまっており、経路とベースラインが食い違う欠陥があった。
+`common/parity_baseline.rs` の `ParityPath::WmmaTf32Opt` ドキュメンテーションコメントが明記するとおり、
+opt カーネル単独の非後退監視は公開 API 経由では行わず `fandhe_ai_backend_cuda::gemm::tests::
+wmma_tf32_opt_kernel_parity_does_not_regress`（`src/gemm.rs`。private field 経由で 3 段選択を経由せず
+opt カーネルを直接強制実行し、512×512×512 seed=0x7A0 行を含む全 `WmmaTf32Opt` 行を検査する）が既に
+正しく行っている。よって `tensor_core_parity_record_tf32_non_regression` は重複かつ誤判定だったため
+削除し、`src/gemm.rs` 側の既存の正しい検査に一本化した（実際に選ばれる staged 経路専用の非後退監視を
+追加するには 512×512×512 形状の `ParityPath::WmmaTf32Staged` ベースライン行の新規実機実測が必要だが
+未実施のため、推定値を書かず本ラウンドでは追加しない）。
+
 ## 6. `#[ignore]` 分離が通常 CI で機械的に効いている根拠
 
 `docs/backend-metal-real-device-testing.md` と同型の確認。Mac（CUDA 非搭載）・CI（GitHub ホステッド・CUDA
