@@ -36,7 +36,7 @@ categories = ["science", "mathematics", "hardware-support"]
 # （crates.io 公開 6 クレート間 path 依存の公開要件。イシュー #881 で確定した
 # 方針。`docs/crates-io-publishing-order.md`。workspace 公開バージョンと
 # 完全一致させる）。
-fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.5.0" }
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.6.0" }
 # CPU 並列カーネル（REQ-2）。PoC-v2-1 実測（naive/blocked 比 約 6〜8.5 倍改善）に基づく採用。
 rayon.workspace = true
 half.workspace = true
