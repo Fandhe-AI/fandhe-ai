@@ -61,7 +61,11 @@ members = [
 # 0.4.0 → 0.5.0 とする。内部依存の `version = "=0.5.0"` 併記は
 # `docs/crates-io-publishing-order.md` §4「版数運用: `workspace.version` に
 # よる lockstep」を参照。
-version = "0.5.0"
+#
+# イシュー #1007: 0.5.0 公開（2026-08-31）以降の改善（#1108 Metal 選択テーブル・
+# #1110 Metal SGD バッチング・#1111 CUDA variant selection 修正・#1113〜#1116 の
+# GB10 実機修正）を含めて crates.io へ公開するため 0.5.0 → 0.6.0 とする。
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
