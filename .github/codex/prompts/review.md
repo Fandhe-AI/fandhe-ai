@@ -126,7 +126,10 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
   緩和・変更する差分**: **P1**
 - **テストの弱体化**（受け入れ基準対応テストの削除、`#[ignore]` 追加によるごまかし、
   実機非依存テストの実機依存化。実機〈DGX Spark GB10・Metal〉依存テストの `#[ignore]`
-  分離の解除を含む）: **P1**
+  分離の解除を含む）: **P1**。**例外**: TF32/f16 Tensor Core 経路の parity テストで、
+  GB10 実機実測により厳密ゼロ fail 判定が成立しないと確認された形状を実測 baseline
+  非後退方式へ移行する変更は、AGENTS.md「数値契約の統一」節が定める明示的な例外に
+  該当し弱体化として扱わない（承認記録・移行条件は AGENTS.md 同節を正とする）
 - **CI ワークフローの規約違反**（.claude/rules/ci.md。`runs-on: self-hosted` の指定・
   self-hosted への逆戻り〈本リポジトリは public 区分のため GitHub ホステッド
   （`ubuntu-latest`）既定。例外は codex-review の codex 実行ジョブのみ。#457 Phase 1〜3
