@@ -15,10 +15,40 @@
 //! 純関数設計・判定不能時は安全側〈= 現行実装〉へフォールバック）を踏襲し、
 //! M/N/K 歪度・SM 数・アラインメントを入力に
 //! [`GemmVariantKind::Simple`]（現行 `TILED_F32`）／
-//! [`GemmVariantKind::DoubleBuffer`]（smem 2 面プリフェッチ）／
+//! [`GemmVariantKind::DoubleBuffer`]（smem 2 面プリフェッチ）のいずれかを
+//! 選ぶ [`select_f32_gemm_variant`] を提供する。
+//!
+//! # SplitK 撤退の判断（イシュー #1100）
+//!
 //! [`GemmVariantKind::SplitK`]（K 方向分割 + 決定的縮約。
-//! `rmsnorm.rs::derive_dw_split` と同型の 2 段リダクション）を選ぶ
-//! [`select_f32_gemm_variant`] を提供する。
+//! `rmsnorm.rs::derive_dw_split` と同型の 2 段リダクション）は #1035 で
+//! ヒューリスティック候補として追加したが、GB10 実機実測（#1031。
+//! `docs/perf/cuda-gemm-f32-variant-selection.md` §1a）で REQ-2 複合判定
+//! FAIL（m=n=128,k=8192,`num_splits=8`: fail_count=8/16384）を検出した。
+//! イシュー #1100 の計画セッションでホスト側 Rust シミュレーション
+//! （`tests/splitk_reorder_error_host_model.rs`）により、この不一致は
+//! カーネルのバグではなく **K 方向を複数の部分和へ分割してから縮約する
+//! という split-K の演算順序そのものが、CPU 参照実装（`backend-cpu::
+//! matmul_reference_fma`。K 方向を分割しない単一の逐次 `mul_add` 連鎖）
+//! と異なる丸め結果を生む**ことを確認した。精度を f32→f64 へ引き上げても
+//! fail 数は減らず（差分の支配項は CPU 参照実装自身の丸め誤差であり、
+//! 真値ゼロ近傍〈桁落ち〉要素では絶対誤差救済閾値を超える）、tolerance・
+//! 参照実装の変更はユーザー承認必須（`.claude/rules/security.md` A08）の
+//! ため本イシューでは行えない。よって **[`select_f32_gemm_variant`] は
+//! SplitK を選択候補から撤退させ、K 支配的形状も
+//! [`GemmVariantKind::Simple`]（`blocks < num_sms` のため
+//! [`GemmVariantKind::DoubleBuffer`] の前提〈`blocks >= num_sms`〉も
+//! 満たさない）へ倒す**（安全側＝現行本番既定と同一の数値契約）。
+//!
+//! [`GemmVariantKind::SplitK`] 型・[`derive_split_count`]・
+//! [`validate_split_k_launch`]・カーネルソース
+//! （[`crate::kernels_gemm_variants::SPLITK_PARTIAL_F32`]／
+//! [`crate::kernels_gemm_variants::SPLITK_REDUCE_F32`]）自体は削除せず、
+//! `internal-diagnostics` feature 限定の診断専用エントリ
+//! （`gemm_variant_selection.rs::CudaGemmF32VariantSelection::
+//! run_split_k_forced`）として保持する（split 順序を反映した parity
+//! 契約の是非は spec 側の議論候補として引き継ぐ。`out-of-scope-tracking.md`
+//! 準拠）。
 //!
 //! # 呼び出し元・呼び出し先の文脈
 //!
@@ -45,14 +75,16 @@
 
 use crate::error::CudaError;
 
-/// [`select_f32_gemm_variant`] が選ぶ GEMM カーネル変種。
+/// GEMM カーネル変種。[`select_f32_gemm_variant`] が選ぶのは `Simple`・
+/// `DoubleBuffer` の 2 種のみ（`SplitK` はイシュー #1100 で選択候補から
+/// 撤退した。本モジュール冒頭「SplitK 撤退の判断」参照）。
 ///
 /// `Simple` は現行本番既定の `kernels::TILED_F32`（32x32 単段 smem タイル）
-/// に対応する。`DoubleBuffer`・`SplitK` は本イシューで追加する
-/// `kernels_gemm_variants.rs` の opt-in カーネルに対応する（`internal-
-/// diagnostics` feature 限定。本モジュール自体は feature 非依存の純粋な
-/// 判定ロジックであることに注意——判定結果を実際に起動できるかどうかは
-/// 呼び出し側の feature ゲートとコンパイル成否に依存する）。
+/// に対応する。`DoubleBuffer`・`SplitK` は `kernels_gemm_variants.rs` の
+/// opt-in カーネルに対応する（`internal-diagnostics` feature 限定。本
+/// モジュール自体は feature 非依存の純粋な判定ロジックであることに注意
+/// ——判定結果を実際に起動できるかどうかは呼び出し側の feature ゲートと
+/// コンパイル成否に依存する）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GemmVariantKind {
     /// 現行本番既定（`TILED_F32`）。判定不能・境界条件のフォールバック先。
@@ -62,7 +94,10 @@ pub enum GemmVariantKind {
     /// 差し替え可能な設計としている。実装計画 §3 の 3 番）。
     DoubleBuffer,
     /// K 方向 `num_splits` 分割 + 決定的縮約（atomics 不使用。
-    /// `rmsnorm.rs` の dw split-K〈#597〉と同型）。
+    /// `rmsnorm.rs` の dw split-K〈#597〉と同型）。**[`select_f32_gemm_
+    /// variant`] は本バリアントを返さない**（イシュー #1100 で選択候補
+    /// から撤退。カーネル・型自体は `run_split_k_forced`〈診断専用〉が
+    /// 引き続き参照するため保持する）。
     SplitK {
         /// K 方向の分割数。常に 2 以上 [`SPLITK_MAX_SPLITS`] 以下の 2 冪。
         num_splits: u32,
@@ -70,23 +105,28 @@ pub enum GemmVariantKind {
 }
 
 /// grid が SM 数を埋めきれないと見なす閾値の判定に使う、SplitK 選択の
-/// 前提となる最小 K（K 歪度の基準）。この値未満では 1 分割あたりの
-/// K 削減効果が乏しく split-K の利得が薄いと判断する（暫定値。実測前）。
+/// 前提となる最小 K（K 歪度の基準）。**イシュー #1100 で
+/// [`select_f32_gemm_variant`] の選択条件からは撤退済み**（本モジュール
+/// 冒頭「SplitK 撤退の判断」参照）。`derive_split_count`・
+/// `validate_split_k_launch`・`run_split_k_forced`（診断専用）の入力
+/// レンジ検証定数として保持する。
 pub const SPLITK_MIN_K: u32 = 1024;
 
 /// split-K の 1 分割あたりの最低 K（1 分割が最低 1 タイル分の仕事量を
 /// 持つことを保証する下限。`gemm.rs::TILE` と同じ 32 を踏襲）。
+/// [`SPLITK_MIN_K`] と同じく診断専用経路でのみ参照される。
 pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
 
 /// split-K の `num_splits` 上限（部分和バッファサイズの増大を抑える
 /// 安全弁。`rmsnorm.rs::RMSNORM_DW_MAX_SPLIT`〈64〉と同系統だが、GEMM の
 /// 部分和は `m * n` 要素とより大きいため保守的に 32 とする）。
+/// [`SPLITK_MIN_K`] と同じく診断専用経路でのみ参照される。
 pub const SPLITK_MAX_SPLITS: u32 = 32;
 
 /// split-K の部分和バッファ（`num_splits * m * n * 4` bytes）が超えては
-/// ならない上限。超過時は [`GemmVariantKind::Simple`] へ fail-closed で
-/// 降格する（`rmsnorm.rs::RMSNORM_DW_SPLIT_PARTIAL_MAX_BYTES` と同型の
-/// 安全弁）。
+/// ならない上限（`rmsnorm.rs::RMSNORM_DW_SPLIT_PARTIAL_MAX_BYTES` と同型の
+/// 安全弁）。[`SPLITK_MIN_K`] と同じく診断専用経路（`validate_split_k_
+/// launch`・`run_split_k_forced`）でのみ参照される。
 pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// DoubleBuffer が成立する最小 K（2 段プリフェッチには最低 2 タイル分の
@@ -132,6 +172,48 @@ fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
     splits.min(max_by_k).max(1)
 }
 
+/// SplitK（診断専用。イシュー #1100）を明示的に起動する前に、`m`/`n`/`k`・
+/// `num_sms` から [`derive_split_count`] が導く「妥当な分割数」を計算する
+/// クレート内公開ラッパー。`gemm_variant_selection.rs::
+/// CudaGemmF32VariantSelection::recommend_split_count`（`internal-
+/// diagnostics` feature 限定）が呼ぶ唯一の呼び出し元であり、選択候補から
+/// 撤退した SplitK を `run_split_k_forced` で診断的に再現する際に
+/// `derive_split_count`／[`SPLITK_MIN_K`]／`num_blocks` を到達可能に
+/// 保つ（`select_f32_gemm_variant` 自体はこれらを呼ばなくなったため）。
+///
+/// # 戻り値の契約（イシュー #1100 codex-review 指摘で `Option<u32>` 化）
+///
+/// `derive_split_count` は分割の意義が薄い場合（`k < SPLITK_MIN_K`・
+/// `num_blocks(m, n) == 0`・`num_sms == 0`・K が小さく
+/// `SPLITK_MIN_K_PER_SPLIT` 制約で 1 分割にクランプされる場合を含む）に
+/// `1`（= 事実上分割なし）を返しうるが、[`validate_split_k_launch`] は
+/// `num_splits == 1` を常に拒否する（`[2, SPLITK_MAX_SPLITS]` のみ許容）。
+/// 内部値が `1` のまま `Some(1)` を返すと、呼び出し元が戻り値をそのまま
+/// `run_split_k_forced` へ渡す正規呼び出しが必ず `InvalidShape` になる
+/// 契約不整合が生じるため、本関数は分割不能を `None` で明示し、`Some` の
+/// 場合は必ず `[2, SPLITK_MAX_SPLITS]`（`validate_split_k_launch` が
+/// 受理可能な範囲）の値であることを保証する。
+///
+/// さらに `derive_split_count` は `num_splits` の範囲（`[2,
+/// SPLITK_MAX_SPLITS]`）のみを決定し、`m`／`n` に応じた部分和バッファ
+/// サイズ（[`SPLITK_PARTIAL_MAX_BYTES`] cap・オーバーフロー）は考慮しない。
+/// そのため範囲内の `num_splits` でも `m`／`n` が大きい形状では
+/// `validate_split_k_launch` が `InvalidShape` を返しうる（PR #1111
+/// codex-review／Cursor Bugbot 指摘）。本関数は `Some` を返す前に必ず
+/// [`validate_split_k_launch`] を適用し、失敗した場合は `None` を返す
+/// ことで「本関数が `Some` を返せば `validate_split_k_launch` を必ず
+/// 通る」契約を保証する。
+pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    if k < SPLITK_MIN_K {
+        return None;
+    }
+    match derive_split_count(num_blocks(m, n), num_sms, k) {
+        1 => None,
+        splits if validate_split_k_launch(m, n, splits).is_ok() => Some(splits),
+        _ => None,
+    }
+}
+
 /// SplitK の部分和バッファサイズ（bytes）を `u64` の checked 演算で
 /// 計算する。オーバーフロー時は `None` を返す（`.claude/rules/security.md`
 /// A03: 確保前に検証する fail-closed 設計。`rmsnorm.rs` の cap 検査と
@@ -146,6 +228,17 @@ fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
 /// M/N/K・SM 数・候補可用性から使うべき GEMM 変種を判定する（純関数・
 /// 決定的・オーバーフロー安全）。
 ///
+/// # SplitK を選択しない理由（イシュー #1100）
+///
+/// 本関数はかつて（#1035）K 支配的形状で [`GemmVariantKind::SplitK`] を
+/// 選ぶ分岐を持っていたが、GB10 実機実測（#1031）で REQ-2 複合判定 FAIL
+/// を検出し、イシュー #1100 の計画セッションでその原因が K 方向分割
+/// 縮約による累積順序の再結合誤差（CPU 参照実装との丸め方式の非両立。
+/// tolerance・参照実装の変更はユーザー承認必須のため是正不能）と判明した
+/// ため、SplitK 分岐を撤退した（本モジュール冒頭「SplitK 撤退の判断」
+/// 参照）。K 支配的形状（`blocks < num_sms`）は下記 DoubleBuffer の前提
+/// （`blocks >= num_sms`）も満たさないため、自然に Simple へ落ちる。
+///
 /// # 引数
 ///
 /// - `m`／`n`／`k`: GEMM の形状（`gemm.rs::validate_gemm_dims` 通過後の
@@ -154,34 +247,26 @@ fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
 ///   取得失敗を意味し、判定不能として常に [`GemmVariantKind::Simple`]
 ///   を返す（fail-safe。`swizzle::should_apply_swizzle` と同じ「SM 数が
 ///   取れない環境では高度な分岐をしない」方針）。
-/// - `double_buffer_available`／`split_k_available`: 呼び出し側で該当
-///   カーネルのコンパイル・ロードが成功しているか（`gemm.rs` の
+/// - `double_buffer_available`: 呼び出し側で `TILED_DB_F32` のコンパイル・
+///   ロードが成功しているか（`gemm_variant_selection.rs` の
 ///   `Option<CudaFunction>` フィールドが `Some` か）。`false` の場合は
-///   その変種を選ばず次点へフォールバックする（未コンパイルのカーネルを
-///   選んでしまう事故を防ぐ）。
+///   DoubleBuffer を選ばず Simple へフォールバックする（未コンパイルの
+///   カーネルを選んでしまう事故を防ぐ）。
 ///
-/// # 判定順序（実装計画 §3 のヒューリスティック仕様）
+/// # 判定順序（実装計画 §3 のヒューリスティック仕様。#1100 で SplitK 分岐を撤退）
 ///
-/// 1. **SplitK**: `num_blocks < num_sms`（grid が SM を埋められない）
-///    かつ K 歪度 `k >= SPLITK_MIN_K` かつ `k >= max(m, n)`
-///    （K が支配的な形状）のとき候補とする。`num_splits` を
-///    [`derive_split_count`] で導出し、`num_splits <= 1` または
-///    部分和バッファが [`SPLITK_PARTIAL_MAX_BYTES`] を超える場合は
-///    Simple へ降格する。
-/// 2. **DoubleBuffer**: SplitK 非該当かつ `num_blocks >= num_sms`
-///    （grid が SM を十分埋める）かつ `k >= DOUBLE_BUFFER_MIN_K`
-///    かつ M/N/K が `VARIANT_TILE` の倍数（アラインメント。整列時のみ
-///    利得を見込み、非整列は Simple のまま——正しさ自体は両カーネルとも
-///    手動境界チェックで担保するため、ここでのアラインメント判定は
-///    純粋に利得予測であり安全性の条件ではない）。
-/// 3. それ以外・入力不能（`num_sms.is_none()`）: **Simple**。
+/// 1. **DoubleBuffer**: `num_blocks >= num_sms`（grid が SM を十分埋める）
+///    かつ `k >= DOUBLE_BUFFER_MIN_K` かつ M/N/K が `VARIANT_TILE` の倍数
+///    （アラインメント。整列時のみ利得を見込み、非整列は Simple のまま
+///    ——正しさ自体はカーネル側の手動境界チェックで担保するため、ここでの
+///    アラインメント判定は純粋に利得予測であり安全性の条件ではない）。
+/// 2. それ以外・入力不能（`num_sms.is_none()`）: **Simple**。
 pub fn select_f32_gemm_variant(
     m: u32,
     n: u32,
     k: u32,
     num_sms: Option<u32>,
     double_buffer_available: bool,
-    split_k_available: bool,
 ) -> GemmVariantKind {
     let Some(num_sms) = num_sms else {
         return GemmVariantKind::Simple;
@@ -191,22 +276,6 @@ pub fn select_f32_gemm_variant(
     }
 
     let blocks = num_blocks(m, n);
-
-    if split_k_available && blocks < u64::from(num_sms) && k >= SPLITK_MIN_K && k >= m.max(n) {
-        let num_splits = derive_split_count(blocks, num_sms, k);
-        if num_splits > 1
-            && let Some(bytes) = split_k_partial_bytes(num_splits, m, n)
-            && bytes <= SPLITK_PARTIAL_MAX_BYTES
-        {
-            return GemmVariantKind::SplitK { num_splits };
-        }
-        // num_splits <= 1・バッファ計算オーバーフロー・cap 超過の
-        // いずれも Simple へ fail-closed で降格する（下記の DoubleBuffer
-        // 判定へは進めない設計: SplitK 候補となる形状〈grid が SM を
-        // 埋められない〉は DoubleBuffer の前提〈grid が SM を十分埋める〉
-        // と背反のため、ここで確定して return する）。
-        return GemmVariantKind::Simple;
-    }
 
     let aligned = m.is_multiple_of(VARIANT_TILE)
         && n.is_multiple_of(VARIANT_TILE)
@@ -262,7 +331,7 @@ mod tests {
     #[test]
     fn returns_simple_when_num_sms_unavailable() {
         assert_eq!(
-            select_f32_gemm_variant(4096, 4096, 4096, None, true, true),
+            select_f32_gemm_variant(4096, 4096, 4096, None, true),
             GemmVariantKind::Simple
         );
     }
@@ -270,15 +339,15 @@ mod tests {
     #[test]
     fn returns_simple_for_zero_dims() {
         assert_eq!(
-            select_f32_gemm_variant(0, 4096, 4096, Some(64), true, true),
+            select_f32_gemm_variant(0, 4096, 4096, Some(64), true),
             GemmVariantKind::Simple
         );
         assert_eq!(
-            select_f32_gemm_variant(128, 0, 4096, Some(64), true, true),
+            select_f32_gemm_variant(128, 0, 4096, Some(64), true),
             GemmVariantKind::Simple
         );
         assert_eq!(
-            select_f32_gemm_variant(128, 128, 0, Some(64), true, true),
+            select_f32_gemm_variant(128, 128, 0, Some(64), true),
             GemmVariantKind::Simple
         );
     }
@@ -286,63 +355,41 @@ mod tests {
     #[test]
     fn returns_simple_when_num_sms_is_zero() {
         assert_eq!(
-            select_f32_gemm_variant(128, 128, 4096, Some(0), true, true),
+            select_f32_gemm_variant(128, 128, 4096, Some(0), true),
             GemmVariantKind::Simple
         );
     }
 
-    // --- SplitK ---
+    // --- SplitK（イシュー #1100 で選択候補から撤退。K 支配的形状は
+    // Simple へ倒れることを検証する） ---
 
     #[test]
-    fn selects_split_k_for_small_grid_k_dominant_shape() {
+    fn k_dominant_small_grid_shape_selects_simple_not_split_k() {
         // m=n=128 → num_blocks = 4*4 = 16。num_sms=64（GB10 級）なら
-        // grid が全く埋まらない。k=8192 は m/n より十分大きい K 支配形状。
-        let variant = select_f32_gemm_variant(128, 128, 8192, Some(64), true, true);
-        match variant {
-            GemmVariantKind::SplitK { num_splits } => {
-                assert!((2..=SPLITK_MAX_SPLITS).contains(&num_splits));
-                assert!(num_splits.is_power_of_two());
-            }
-            other => panic!("expected SplitK, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn does_not_select_split_k_when_unavailable() {
-        // 候補が利用不能（コンパイル失敗）なら SplitK 条件を満たす形状でも
-        // 選ばれない。DoubleBuffer も grid 条件が背反のため選ばれず Simple。
-        let variant = select_f32_gemm_variant(128, 128, 8192, Some(64), true, false);
+        // grid が全く埋まらない。k=8192 は m/n より十分大きい K 支配形状
+        // だが、#1100 の撤退判断により SplitK は返らず、DoubleBuffer の
+        // 前提（blocks >= num_sms）も満たさないため Simple になる
+        // （GB10 実機実測で検出した複合判定 FAIL の根本原因は
+        // `tests/splitk_reorder_error_host_model.rs` 参照）。
+        let variant = select_f32_gemm_variant(128, 128, 8192, Some(64), true);
         assert_eq!(variant, GemmVariantKind::Simple);
     }
 
     #[test]
     fn does_not_select_split_k_when_k_below_threshold() {
-        let variant = select_f32_gemm_variant(128, 128, 512, Some(64), true, true);
-        assert_ne!(variant, GemmVariantKind::SplitK { num_splits: 2 });
-        // k=512 は SPLITK_MIN_K(1024) 未満のため SplitK にならない。
+        let variant = select_f32_gemm_variant(128, 128, 512, Some(64), true);
+        // k=512 は SPLITK_MIN_K(1024) 未満だった旧条件でも非該当だった
+        // 形状だが、撤退後は SplitK 自体がそもそも選ばれない。
         assert!(!matches!(variant, GemmVariantKind::SplitK { .. }));
     }
 
     #[test]
     fn does_not_select_split_k_when_k_not_dominant() {
         // grid は埋まらない（num_blocks=16 < num_sms=64）が k < max(m, n)
-        // のため K 支配形状ではない。
-        let variant = select_f32_gemm_variant(128, 128, 100, Some(64), true, true);
+        // のため旧条件でも K 支配形状ではなかった。撤退後は SplitK が
+        // そもそも選ばれない。
+        let variant = select_f32_gemm_variant(128, 128, 100, Some(64), true);
         assert!(!matches!(variant, GemmVariantKind::SplitK { .. }));
-    }
-
-    #[test]
-    fn split_k_falls_back_to_simple_when_partial_buffer_exceeds_cap() {
-        // SplitK が候補になるには blocks(m,n) < num_sms（grid が SM を
-        // 埋められない）が必要なため、部分和バッファ（num_splits*m*n*4）は
-        // 通常小さい。cap 超過を再現するには非現実的に大きい num_sms を
-        // 与え、blocks<num_sms を保ったまま m*n を大きく取る（fail-closed
-        // 分岐自体の検証が目的であり、num_sms の現実的なレンジは問わない）。
-        // m=n=8192 → blocks = 256*256 = 65536 < num_sms=100000。
-        // derive_split_count(65536, 100000, 8192) = 4。
-        // 部分和バッファ = 4 * 8192 * 8192 * 4 bytes = 1 GiB > cap(256 MiB)。
-        let variant = select_f32_gemm_variant(8192, 8192, 8192, Some(100_000), true, true);
-        assert_eq!(variant, GemmVariantKind::Simple);
     }
 
     #[test]
@@ -370,33 +417,100 @@ mod tests {
         assert!(splits <= 2);
     }
 
+    // --- recommend_split_count（イシュー #1100 codex-review 指摘: 戻り値
+    // Option<u32> 化。`Some` は必ず validate_split_k_launch が受理する
+    // [2, SPLITK_MAX_SPLITS] の範囲内であることを保証する契約） ---
+
+    #[test]
+    fn recommend_split_count_returns_none_when_k_below_min() {
+        assert_eq!(recommend_split_count(128, 128, SPLITK_MIN_K - 1, 64), None);
+    }
+
+    #[test]
+    fn recommend_split_count_returns_none_for_zero_dims_or_sms() {
+        assert_eq!(recommend_split_count(0, 128, 65536, 64), None);
+        assert_eq!(recommend_split_count(128, 128, 65536, 0), None);
+    }
+
+    #[test]
+    fn recommend_split_count_none_matches_derive_split_count_one_exhaustively() {
+        // recommend_split_count が Some を返す全ケースで derive_split_count
+        // が 1（=分割なし）を返さないこと、逆に derive_split_count が 1 を
+        // 返すケース（num_blocks==0 or num_sms==0。k>=SPLITK_MIN_K の下で
+        // max_by_k は SPLITK_MIN_K/SPLITK_MIN_K_PER_SPLIT=32 以上のため
+        // 1 にクランプされ得ない）では常に None を返すことを、
+        // derive_split_count と recommend_split_count の内部呼び出しの
+        // 一貫性として突き合わせる（Some の値が validate_split_k_launch
+        // 非受理の 1 に戻ってしまう再発を防ぐ）。
+        for (m, n, num_sms) in [(0u32, 128u32, 64u32), (128, 0, 64), (128, 128, 0)] {
+            let k = SPLITK_MIN_K;
+            assert_eq!(derive_split_count(num_blocks(m, n), num_sms, k), 1);
+            assert_eq!(recommend_split_count(m, n, k, num_sms), None);
+        }
+    }
+
+    #[test]
+    fn recommend_split_count_some_is_always_validate_split_k_launch_acceptable() {
+        // Some(num_splits) を返す場合は run_split_k_forced へそのまま
+        // 渡しても validate_split_k_launch が受理する範囲であることを
+        // 保証する（codex-review P2 指摘の再発防止）。
+        let m = 4096;
+        let n = 4096;
+        let k = 65536;
+        let num_sms = 64;
+        let recommended =
+            recommend_split_count(m, n, k, num_sms).expect("この形状では分割が推奨されるはず");
+        assert!((2..=SPLITK_MAX_SPLITS).contains(&recommended));
+        assert!(validate_split_k_launch(m, n, recommended).is_ok());
+    }
+
+    #[test]
+    fn recommend_split_count_returns_none_when_partial_buffer_exceeds_cap() {
+        // PR #1111 codex-review／Cursor Bugbot 指摘: derive_split_count が
+        // [2, SPLITK_MAX_SPLITS] 範囲内の値を返しても、m/n が大きいと
+        // 部分和バッファが SPLITK_PARTIAL_MAX_BYTES cap を超えうる。
+        // m=n=8192・num_splits=2 で 2*8192*8192*4 = 536,870,912 bytes
+        // (> cap の 268,435,456 bytes) となる形状で None を返すことを
+        // 検証する（従来は cap 検査なしで Some を返し run_split_k_forced/
+        // validate_split_k_launch で InvalidShape になっていた）。
+        let m = 8192;
+        let n = 8192;
+        let k = 65536;
+        let num_sms = 64;
+        // derive_split_count 自身は m/n の絶対値でなく num_blocks(m, n) と
+        // num_sms・k の関係から分割数を導くため、cap 超過を検査しなければ
+        // Some(2) 以上を返しうることを前提として確認する。
+        assert!(derive_split_count(num_blocks(m, n), num_sms, k) >= 2);
+        assert_eq!(recommend_split_count(m, n, k, num_sms), None);
+    }
+
     // --- DoubleBuffer ---
 
     #[test]
     fn selects_double_buffer_for_large_aligned_grid_filling_shape() {
         // m=n=4096（アラインメント OK）・num_blocks = 128*128 = 16384 は
         // num_sms=64 を大きく超える。k=4096 は K 支配ではなく m/n 以下。
-        let variant = select_f32_gemm_variant(4096, 4096, 4096, Some(64), true, true);
+        let variant = select_f32_gemm_variant(4096, 4096, 4096, Some(64), true);
         assert_eq!(variant, GemmVariantKind::DoubleBuffer);
     }
 
     #[test]
     fn does_not_select_double_buffer_when_unaligned() {
         // 1000 は 32 の倍数ではない（1000 % 32 == 8）。
-        let variant = select_f32_gemm_variant(1000, 1000, 4096, Some(64), true, true);
+        let variant = select_f32_gemm_variant(1000, 1000, 4096, Some(64), true);
         assert_eq!(variant, GemmVariantKind::Simple);
     }
 
     #[test]
     fn does_not_select_double_buffer_when_unavailable() {
-        let variant = select_f32_gemm_variant(4096, 4096, 4096, Some(64), false, true);
+        let variant = select_f32_gemm_variant(4096, 4096, 4096, Some(64), false);
         assert_eq!(variant, GemmVariantKind::Simple);
     }
 
     #[test]
     fn does_not_select_double_buffer_when_k_too_small() {
         // k=32 < DOUBLE_BUFFER_MIN_K(64) のため 2 段プリフェッチが成立しない。
-        let variant = select_f32_gemm_variant(4096, 4096, 32, Some(64), true, true);
+        let variant = select_f32_gemm_variant(4096, 4096, 32, Some(64), true);
         assert_eq!(variant, GemmVariantKind::Simple);
     }
 
@@ -404,8 +518,8 @@ mod tests {
 
     #[test]
     fn selection_is_deterministic_across_repeated_calls() {
-        let a = select_f32_gemm_variant(2048, 2048, 2048, Some(48), true, true);
-        let b = select_f32_gemm_variant(2048, 2048, 2048, Some(48), true, true);
+        let a = select_f32_gemm_variant(2048, 2048, 2048, Some(48), true);
+        let b = select_f32_gemm_variant(2048, 2048, 2048, Some(48), true);
         assert_eq!(a, b);
     }
 
@@ -418,8 +532,8 @@ mod tests {
         let k = 65536u32;
         // panic しないことのみを検証する（結果は Simple 想定だが本質は
         // オーバーフロー安全性）。
-        let _ = select_f32_gemm_variant(m, n, k, Some(64), true, true);
-        let _ = select_f32_gemm_variant(n, m, k, Some(64), true, true);
+        let _ = select_f32_gemm_variant(m, n, k, Some(64), true);
+        let _ = select_f32_gemm_variant(n, m, k, Some(64), true);
     }
 
     // --- validate_split_k_launch ---
