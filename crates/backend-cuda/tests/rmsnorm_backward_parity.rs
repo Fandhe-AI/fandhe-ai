@@ -131,10 +131,13 @@ fn cpu_rmsnorm_backward_reference(
             let wv = w.map_or(1.0f32, |w_slice| w_slice[i]);
             dx_row[i] = coef.mul_add(x_row[i], rstd * dy_row[i] * wv);
             if let Some(dw_acc) = dw_acc.as_mut() {
-                let rstd = rstd as f64;
-                let dyv = dy_row[i] as f64;
-                let xv = x_row[i] as f64;
-                dw_acc[i] = (dyv * rstd).mul_add(xv, dw_acc[i]);
+                // 契約精密化（§9.10 追補・イシュー #1102。codex-review 指摘・
+                // PR #1120）: 要素積（dy・rstd・x の 3 項）は f32 で確定して
+                // から f64 へ昇格する（GPU 側 kernels_rmsnorm.rs の同契約と
+                // 一致させる。forward の二乗和〈f64 昇格後に二乗〉とは異なる
+                // 扱い）。
+                let term = dy_row[i] * rstd * x_row[i];
+                dw_acc[i] += term as f64;
             }
         }
     }
@@ -246,10 +249,11 @@ fn cpu_rmsnorm_dw_split_reference(
             for (offset, &r) in rstd[row_start..row_end].iter().enumerate() {
                 let row = row_start + offset;
                 let idx = row * hidden + i;
-                let r = r as f64;
-                let dyv = dy[idx] as f64;
-                let xv = x[idx] as f64;
-                partial = (dyv * r).mul_add(xv, partial);
+                // 契約精密化（§9.10 追補・イシュー #1102。codex-review 指摘・
+                // PR #1120）: 要素積は f32 で確定してから f64 へ昇格する
+                // （GPU 側 RMSNORM_BWD_DW_PARTIAL_F32 の同契約と一致させる）。
+                let term = dy[idx] * r * x[idx];
+                partial += term as f64;
             }
             *dw_i += partial;
         }

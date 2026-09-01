@@ -265,3 +265,109 @@ fn rmsnorm_matches_backend_cpu_with_extreme_magnitude_values() {
         &cpu_out,
     );
 }
+
+/// `eps` が極端に大きい場合（`f32::MAX` 級）の CPU-Metal parity（イシュー
+/// #1102。codex-review 指摘・PR #1120 1 件目: `eps` を疑似要素として
+/// `scale/ssq` へ折り込む際に `sqrt(eps * n)` を素朴に計算すると、`eps`
+/// が `f32::MAX` 級・`hidden` がある程度大きい場合に `eps * n` 自体が
+/// `f32` の表現範囲を超えて `inf` になり、`rstd` が誤って `0` になって
+/// いた〈CPU/CUDA は `f64` で `sum_sq*inv_n + eps` を計算するため有限〉。
+/// `sqrt(eps) * sqrt(n)` への変形〈`rmsnorm.metal::rmsnorm_finalize_rstd`〉
+/// でこの中間 overflow を解消したことを実機で確認する）。tolerance は
+/// 変更していない。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn rmsnorm_matches_backend_cpu_with_extreme_eps() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let rmsnorm = MetalRmsNorm::new(&ctx).expect("RMSNorm パイプラインの構築に失敗した");
+
+    // hidden=17（非 4 の倍数。スカラー経路を含む）・eps=f32::MAX。通常
+    // 範囲の x に対し eps が支配的になり、真の rstd は極めて小さい有限値
+    // （1/sqrt(eps) 程度）になる。
+    let rows = 2usize;
+    let hidden = 17usize;
+    let eps = f32::MAX;
+    let x_data = Xorshift64Star::new(52_001).fill_vec(rows * hidden);
+
+    let gpu_out = rmsnorm
+        .run_rmsnorm_f32(&ctx, &x_data, None, eps, rows, hidden)
+        .expect("MetalRmsNorm::run_rmsnorm_f32 must succeed on Metal-equipped test runner");
+    assert!(
+        gpu_out.iter().all(|v| v.is_finite()),
+        "GPU 出力に非有限値（NaN/inf）が含まれている（eps*n の中間 overflow への \
+         回帰の可能性）: {gpu_out:?}"
+    );
+    assert!(
+        gpu_out.iter().all(|v| *v != 0.0f32),
+        "GPU 出力が全てゼロになっている（rstd が誤って 0 になる回帰の可能性）: {gpu_out:?}"
+    );
+
+    let cpu_out = fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, None, eps, rows, hidden)
+        .expect("fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
+
+    assert_parity(
+        "rmsnorm cpu(backend_cpu)-metal extreme eps parity",
+        &gpu_out,
+        &cpu_out,
+    );
+}
+
+/// `NaN` 要素を含む行の CPU-Metal parity（イシュー #1102。codex-review
+/// 指摘・PR #1120 2 件目: `rmsnorm_ssq_add` の `a > scale` 比較は `NaN`
+/// で常に偽になり、`scale` が未だ `0.0f`（このレーンで最初の要素が
+/// `NaN` だった場合）だと寄与が黙って捨てられ非有限値が伝播しなかった。
+/// CPU/CUDA は `f64` 逐次和のため `NaN` を含む行全体が `NaN` になる意味論
+/// であり、Metal も同じ意味論へ揃えたことを実機で確認する）。`NaN` を
+/// 含む行と含まない行を混在させ、`NaN` 要素の位置（先頭・非先頭）も
+/// 変えて検証する。tolerance は変更していない（`NaN` 同士は
+/// `assert_parity` の複合判定では比較できないため、本テストは
+/// `is_nan()`／`is_finite()` の直接検査で判定する）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn rmsnorm_propagates_nan_matching_backend_cpu() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let rmsnorm = MetalRmsNorm::new(&ctx).expect("RMSNorm パイプラインの構築に失敗した");
+
+    let rows = 3usize;
+    let hidden = 17usize; // 非 4 の倍数。スカラー経路を含む。
+    let eps = 1e-5f32;
+    let mut x_data = Xorshift64Star::new(53_001).fill_vec(rows * hidden);
+    // 行 0: 先頭要素（このレーンで最初に処理される要素）が NaN
+    // （codex-review が指摘した scale==0 のまま捨てられるケースの直撃）。
+    x_data[0] = f32::NAN;
+    // 行 1: 非先頭要素が NaN（scale が既に非ゼロになった後の NaN 遭遇）。
+    x_data[hidden + 3] = f32::NAN;
+    // 行 2: NaN なし（対照。他行への非伝播を確認する）。
+
+    let gpu_out = rmsnorm
+        .run_rmsnorm_f32(&ctx, &x_data, None, eps, rows, hidden)
+        .expect("MetalRmsNorm::run_rmsnorm_f32 must succeed on Metal-equipped test runner");
+    let cpu_out = fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, None, eps, rows, hidden)
+        .expect("fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
+
+    for row in 0..2 {
+        let gpu_row = &gpu_out[row * hidden..(row + 1) * hidden];
+        let cpu_row = &cpu_out[row * hidden..(row + 1) * hidden];
+        assert!(
+            gpu_row.iter().all(|v| v.is_nan()),
+            "行 {row}: NaN 要素を含む行の GPU 出力が NaN へ伝播していない: {gpu_row:?}"
+        );
+        assert!(
+            cpu_row.iter().all(|v| v.is_nan()),
+            "行 {row}: NaN 要素を含む行の CPU 出力が NaN へ伝播していない（テスト前提 \
+             崩れ）: {cpu_row:?}"
+        );
+    }
+    let row2_start = 2 * hidden;
+    let gpu_row2 = &gpu_out[row2_start..row2_start + hidden];
+    assert!(
+        gpu_row2.iter().all(|v| v.is_finite()),
+        "NaN を含まない行（行 2）の GPU 出力に非有限値が混入している（他行への非伝播が \
+         破れている）: {gpu_row2:?}"
+    );
+    assert_parity(
+        "rmsnorm cpu(backend_cpu)-metal nan-free row parity",
+        gpu_row2,
+        &cpu_out[row2_start..row2_start + hidden],
+    );
+}

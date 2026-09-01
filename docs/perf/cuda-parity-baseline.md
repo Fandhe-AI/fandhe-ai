@@ -948,6 +948,88 @@ dw のみが対象と確認済み。softmax の縮約〈max・sum〉は別イシ
 バックエンド実装ともに精度・overflow 安全性を引き上げることで、縮約
 順序の非結合性に由来する誤差を許容範囲内へ収める——に立つ。
 
+### 9.10 codex-review 3 件目の P1 一括是正（PR #1120。eps overflow・NaN 非伝播・契約文言の精密化）
+
+PR #1120 に対し codex-review が同時に P1 を 3 件指摘した。すべて妥当と
+判断し 1 コミットで是正した。
+
+**1. `rmsnorm.metal`: `eps * n` の中間 overflow**（`rmsnorm_finalize_
+rstd`）: `eps` を `sqrt(eps * n)` という疑似要素として `scale/ssq` へ
+折り込む際、`eps` が `f32::MAX` 級・`hidden`（`n`）がある程度大きい場合
+に、平方根を取る前の `eps * n` 自体が `f32` の表現範囲（最大約 3.4e38）
+を超えて `inf` になり、最終的な `rstd` が誤って `0` になっていた（CPU/
+CUDA は `f64` で `sum_sq*inv_n + eps` を計算するため有限値を保つ）。
+`sqrt(eps * n) = sqrt(eps) * sqrt(n)`（数学的に同値な恒等式。両辺とも
+非負）という変形を使い、`eps`・`n` をそれぞれ個別に平方根を取ってから
+掛け合わせることで中間 overflow を回避した（`eps`・`n` はいずれも個別
+には `f32` の表現範囲内の有限値であるため、それぞれの平方根も表現範囲
+内に収まる）。実機テスト
+`tests/rmsnorm_parity.rs::rmsnorm_matches_backend_cpu_with_extreme_eps`
+（`eps = f32::MAX`・`hidden = 17`）を追加し、GB10 実機実測: Apple M4 Max
+実機で pass を確認（GPU 出力が有限・非ゼロであり `backend-cpu`〈`f64`
+化済み〉と複合判定一致）。
+
+**2. `rmsnorm.metal`: NaN 入力の非伝播**（`rmsnorm_ssq_add`／
+`rmsnorm_ssq_combine`）: scale/ssq 方式の `a > scale` 比較は IEEE 754 の
+規則により `a` が `NaN` の場合常に偽になる。`scale` が未だ `0.0f`
+（このレーンで最初に処理される要素が `NaN` だった場合）だと `scale >
+0.0f` も偽になり、いずれの分岐にも入らず `NaN` 入力が黙って捨てられて
+いた（CPU/CUDA の `f64` 逐次和は `NaN` を含む行全体が `NaN` になる意味論
+のため、これは意味論の不一致だった。実測で再現・確認済み——一時的に
+NaN 検出分岐を無効化して再実行したところ、`NaN` 要素がそのまま出力へ
+素通りし他の要素は正常な正規化値になるという、まさに指摘どおりの症状を
+確認した）。`rmsnorm_ssq_add` に `isnan(a) || isnan(ssq) || isnan(scale)`
+の検出を追加し、`ssq` を `NaN` へ確定・`scale` を**有限の正値**
+（`1.0f`）へ強制する（`scale` を `0.0f` のままにすると
+`rmsnorm_ssq_combine` の `other_scale == 0.0f` 早期 return で汚染情報が
+握り潰されるため）。`rmsnorm_ssq_combine` にも同型の `isnan(ssq) ||
+isnan(other_ssq)` 検出を追加した。**inf 入力**（`scale` が `+inf`）は
+既存のアルゴリズムで自然に正しく扱える（`scale = inf` が最終的に
+`rstd = 0` へ伝播する。CPU/CUDA の `f64` 意味論と一致）が、**両者とも
+`+inf` の状態を結合する**特殊ケース（`ratio = other_scale / scale =
+inf/inf = NaN` になり誤って `NaN` へ汚染してしまう）のみ
+`isinf(scale) && isinf(other_scale)` の明示分岐で `+inf`（IEEE 754 の
+`inf + inf = inf` に倣う）のまま維持するよう対応した。実機テスト
+`tests/rmsnorm_parity.rs::rmsnorm_propagates_nan_matching_backend_cpu`
+（先頭要素が `NaN` の行・非先頭要素が `NaN` の行・`NaN` なしの対照行の
+3 行構成）を追加し、Apple M4 Max 実機で pass を確認。`crates/backend-cpu/
+src/rmsnorm.rs` にも `run_rmsnorm_f32_propagates_nan_for_row_with_nan_
+element`（CPU 単体・実機不要）を追加し、全バックエンドで NaN 伝播の
+意味論が一致することを記録した。
+
+**3. `kernels_rmsnorm.rs`: 要素積の `double` 化が契約文言と矛盾**: 「正規
+化統計・勾配の長軸縮約は `f64` アキュムレータで統一する（要素ごとの
+積和自体は `f32` のまま）」という契約文言に対し、`RMSNORM_BWD_DW_F32`・
+`RMSNORM_BWD_DW_PARTIAL_F32` の実装が `acc = fma((double)dyv *
+(double)r, (double)xv, acc);`（要素を先に `double` へ昇格してから積を
+取る）になっており、文言と不一致だった。切り分けの結果、この不一致は
+2 系統の縮約が本質的に異なる扱いを要することに起因すると判断した:
+forward の二乗和は要素を `f32` のまま二乗すると overflow しうる
+（Metal 側の scale/ssq 方式採用理由と同根）ため `f64` 昇格後に二乗する
+必要がある一方、dw の 3 項積（`dy・rstd・x`）はそのような overflow
+リスクが実用上小さいため、契約文言どおり要素積を `f32` で確定してから
+`f64` へ昇格するのが妥当と判断した。**実装を契約文言（dw 側）に合わせて
+是正**した（`float term = dyv * r * xv; acc = (double)term + acc;`）。
+forward の二乗和側は実装（`f64` 昇格後に二乗）を維持し、**契約文言の側
+をこの区別を明示する形へ精密化**した（`AGENTS.md`・`.claude/rules/
+coding-rust.md`。本節冒頭を参照）。`kernels_rmsnorm.rs` 冒頭に
+「精度契約の精密化（§9.10 追補）」節を追加し、実装の根拠をコード内にも
+記録した。回帰テスト `dw_kernels_finalize_element_product_in_f32_before_
+double_accumulation`（`RMSNORM_BWD_DW_F32`・`RMSNORM_BWD_DW_PARTIAL_F32`
+双方のソース文字列を検査。実機不要）を追加した。テスト参照側
+（`crates/backend-cuda/tests/rmsnorm_backward_parity.rs` の
+`cpu_rmsnorm_backward_reference`・`cpu_rmsnorm_dw_split_reference`）も
+同じ契約（要素積を `f32` で確定してから `f64` へ蓄積）へ統一した
+（forward の二乗和側の CPU 参照実装は変更していない）。
+
+**tolerance・ケース表・シードは一切変更していない**。実機検証は本作業
+セッションが Apple M4 Max・macOS だったため Metal 側は実機で直接確認
+できた（`cargo test -p fandhe-ai-backend-metal --release --test
+rmsnorm_parity -- --ignored --nocapture` 全 6 テスト pass。うち 3 は本節
+の是正で新規追加）。CUDA 側（`kernels_rmsnorm.rs` の要素積修正）は
+ソース文字列検査・CPU 側テストで確認済みだが、GB10 実機での最終確認は
+コーディネータに委ねる（確認コマンドは §9.7〜§9.8 と同一）。
+
 ## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
 
 本節は §1〜8（GEMM `wmma`/`mma` 系ベースライン表・非後退契約本体）の続き

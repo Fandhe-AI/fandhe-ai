@@ -397,6 +397,27 @@ mod tests {
         }
     }
 
+    /// NaN 伝播の意味論を CPU 単体で確認する回帰テスト（イシュー #1102。
+    /// codex-review 指摘・PR #1120: Metal 側 scale/ssq 方式が `NaN` 入力
+    /// を黙って捨てていた問題の是正に合わせ、全バックエンド共通の意味論
+    /// 「行内に `NaN` 要素が 1 つでもあれば行全体の出力が `NaN` になる」
+    /// を CPU 参照実装でも回帰検出する。CPU は `f64::mul_add` の逐次和
+    /// のため NaN は自然に伝播する契約であり、本テストはその契約が崩れ
+    /// ないことをロックする）。スカラー・NEON 両経路を通す
+    /// `hidden`（4 の倍数・非倍数の両方）で確認する。
+    #[test]
+    fn run_rmsnorm_f32_propagates_nan_for_row_with_nan_element() {
+        for hidden in [4usize, 5] {
+            let mut x = vec![1.0f32; hidden];
+            x[0] = f32::NAN;
+            let out = run_rmsnorm_f32(&x, None, 1e-5, 1, hidden).unwrap();
+            assert!(
+                out.iter().all(|v| v.is_nan()),
+                "hidden={hidden}: NaN 要素を含む行の出力が NaN へ伝播していない: {out:?}"
+            );
+        }
+    }
+
     #[test]
     fn match_rmsnorm_plan_accepts_canonical_plan() {
         use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan};

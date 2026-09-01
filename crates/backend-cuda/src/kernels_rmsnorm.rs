@@ -103,6 +103,31 @@
 //! `.claude/rules/security.md`）。切り分け・実測記録は
 //! `docs/perf/cuda-parity-baseline.md` §9 を参照。
 //!
+//! **精度契約の精密化（§9.10 追補・イシュー #1102。codex-review 指摘・
+//! PR #1120）**: 「正規化統計・勾配の長軸縮約は f64 アキュムレータで
+//! 統一する」契約（`AGENTS.md`・`.claude/rules/coding-rust.md`）は
+//! 「要素ごとの積和自体は `f32` のまま、蓄積のみ `f64`」と定めるが、
+//! 本ファイル内の 2 系統の縮約はこの一般原則に対し異なる扱いを要する:
+//!
+//! - **forward の二乗和**（`RMSNORM_F32_ONEPASS`／`RMSNORM_F32_TWOPASS`
+//!   の `acc`）: 要素を**先に `double` へ昇格してから二乗**する
+//!   （`fma((double)v, (double)v, acc)`）。単純な `v*v` を `float` の
+//!   まま計算すると、有限入力（例 `2e20f`）でも二乗が `float` の表現
+//!   範囲（最大約 3.4e38）を超えて `inf` になりうる（Metal 側で
+//!   codex-review が指摘した scale/ssq 方式採用の理由と同根の問題。
+//!   `crates/backend-metal/src/shaders/rmsnorm.metal` 冒頭コメント参照）。
+//!   このため二乗和については「要素演算は `f32`」の原則の**例外**として
+//!   `double` 昇格後に二乗する
+//! - **dw の行方向勾配縮約**（`RMSNORM_BWD_DW_F32`／
+//!   `RMSNORM_BWD_DW_PARTIAL_F32` の `acc`）: `dy・rstd・x` の 3 項の積
+//!   （二乗ではない）は実用上そのような overflow リスクが小さいため、
+//!   原則どおり**要素積を `float` のまま確定してから** `double` へ
+//!   昇格して蓄積する（`float term = dyv * r * xv; acc = (double)term +
+//!   acc;`）
+//!
+//! この使い分けにより、契約文言（「要素ごとの積和は `f32`」）と実装
+//! （forward は例外的に `double` 昇格後に二乗）の不一致を解消した。
+//!
 //! # 意味論の正
 //!
 //! `tests/rmsnorm_parity.rs` 内のテスト専用 CPU 参照実装（`f32::mul_add`
@@ -564,7 +589,10 @@ extern "C" __global__ void rmsnorm_bwd_dw_f32(
             float xv = x[idx];
             float dyv = dy[idx];
             float r = rstd[row];
-            acc = fma((double)dyv * (double)r, (double)xv, acc);
+            // 要素積は f32 で確定してから double へ昇格する（勾配縮約の
+            // 契約。本ファイル冒頭コメント「精度契約（§9.10 追補）」参照）。
+            float term = dyv * r * xv;
+            acc = (double)term + acc;
         }
         dw[i] = (float)acc;
     }
@@ -699,7 +727,10 @@ extern "C" __global__ void rmsnorm_bwd_dw_partial_f32(
             float xv = x[idx];
             float dyv = dy[idx];
             float r = rstd[row];
-            acc = fma((double)dyv * (double)r, (double)xv, acc);
+            // 要素積は f32 で確定してから double へ昇格する（勾配縮約の
+            // 契約。本ファイル冒頭コメント「精度契約（§9.10 追補）」参照）。
+            float term = dyv * r * xv;
+            acc = (double)term + acc;
         }
         // 無条件書き出し（条件分岐で省略しない。REQ-8 と同じ
         // 「最適化を理由に手動保証を省略しない」精神を空 block の扱いにも
@@ -954,6 +985,30 @@ mod tests {
                     "float rstd = (float)(1.0 / sqrt(fma(acc, (double)inv_n, (double)eps)));"
                 ),
                 "rstd の IEEE 丸め計算式（double 精度の 1.0 / sqrt(fma(...))）が見つからない"
+            );
+        }
+    }
+
+    /// 精度契約の精密化（§9.10 追補・イシュー #1102。codex-review 指摘・
+    /// PR #1120）: dw の行方向勾配縮約は要素積を `float` で確定してから
+    /// `double` へ昇格する契約（本ファイル冒頭コメント「精度契約
+    /// （§9.10 追補）」参照）。`(double)dyv * (double)r` のように要素を
+    /// 先に `double` へ昇格してから積を取る形（forward の二乗和専用の
+    /// 例外パターン）への後退を検出する。
+    #[test]
+    fn dw_kernels_finalize_element_product_in_f32_before_double_accumulation() {
+        for src in [RMSNORM_BWD_DW_F32, RMSNORM_BWD_DW_PARTIAL_F32] {
+            assert!(
+                src.contains("float term = dyv * r * xv;"),
+                "dw の要素積が float で確定されていない（契約後退の可能性）"
+            );
+            assert!(
+                src.contains("acc = (double)term + acc;"),
+                "dw の double 蓄積が見つからない"
+            );
+            assert!(
+                !src.contains("(double)dyv * (double)r"),
+                "dw の要素積が double 昇格後の積へ後退している（forward 二乗和専用の                  例外パターンが dw へ誤って適用されている）"
             );
         }
     }

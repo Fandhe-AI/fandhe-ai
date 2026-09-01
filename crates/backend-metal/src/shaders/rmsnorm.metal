@@ -111,7 +111,25 @@ inline void rmsnorm_kahan_add(thread float& sum, thread float& comp, float value
 // そのまま新しい `scale` として採用し `ssq = 1` になる。`a == 0` は
 // 実質的に無視される——`a > scale` が偽かつ `scale > 0` が偽なら分岐に
 // 入らず何も変化しない）。`sum(a_i^2) = scale^2 * (ssq + comp)` が不変量。
+//
+// **NaN 伝播（codex-review 指摘・PR #1120 2 件目）**: `a` が `NaN` の
+// 場合、IEEE 754 の比較規則により `a > scale` は常に偽になる。`scale`
+// が未だ `0.0f`（このレーンで最初の要素が `NaN` だった場合）だと
+// `scale > 0.0f` も偽になり、いずれの分岐にも入らず `NaN` 入力が黙って
+// 捨てられてしまう（CPU/CUDA の `f64` 逐次和は `NaN` を含む行全体が
+// `NaN` になる意味論のため、これは意味論の不一致だった）。`isnan(a)`
+// （または既に `ssq`／`scale` が汚染済み）を検出したら `ssq` を `NaN`
+// へ確定し、`scale` を**有限の正値**（`1.0f`）へ強制する（`scale` を
+// `0.0f` のままにすると `rmsnorm_ssq_combine` の `other_scale == 0.0f`
+// 早期 return で汚染情報が握り潰されるため、`scale > 0.0f` を満たす値に
+// 固定して以降のすべての結合・蓄積へ確実に伝播させる）。
 inline void rmsnorm_ssq_add(thread float& scale, thread float& ssq, thread float& comp, float a) {
+    if (isnan(a) || isnan(ssq) || isnan(scale)) {
+        scale = 1.0f;
+        ssq = NAN;
+        comp = 0.0f;
+        return;
+    }
     if (a > scale) {
         if (scale > 0.0f) {
             float ratio = scale / a;
@@ -133,8 +151,25 @@ inline void rmsnorm_ssq_add(thread float& scale, thread float& ssq, thread float
 // Neumaier 加算で取り込む（`rmsnorm_ssq_add` の「リスケール」ステップと
 // 同じ考え方をレーン間結合へ拡張したもの）。相手側 `scale` が 0（寄与
 // なし）なら何もしない。
+//
+// **NaN 伝播**: どちらかの `ssq` が既に `NaN`（`rmsnorm_ssq_add` が検出
+// 済み）なら結合結果も `NaN` にする（`rmsnorm_ssq_add` が `scale` を
+// `1.0f` へ固定しているため、この分岐は `other_scale == 0.0f` の早期
+// return より先に評価する必要がある）。
+//
+// **inf 同士の結合**（`scale` が両者とも `+inf`）: IEEE 754 の
+// `inf + inf = inf` に倣い、結合結果も `+inf` のまま維持する。通常の
+// リスケール分岐は `ratio = other_scale / scale` を計算するため
+// `inf/inf = NaN` になり誤って `NaN` へ汚染してしまう特殊ケースであり、
+// 明示的に分岐する。
 inline void rmsnorm_ssq_combine(thread float& scale, thread float& ssq, thread float& comp,
                                  float other_scale, float other_ssq, float other_comp) {
+    if (isnan(ssq) || isnan(other_ssq)) {
+        scale = 1.0f;
+        ssq = NAN;
+        comp = 0.0f;
+        return;
+    }
     if (other_scale == 0.0f) {
         return;
     }
@@ -142,6 +177,11 @@ inline void rmsnorm_ssq_combine(thread float& scale, thread float& ssq, thread f
         scale = other_scale;
         ssq = other_ssq;
         comp = other_comp;
+        return;
+    }
+    if (isinf(scale) && isinf(other_scale)) {
+        ssq = 1.0f;
+        comp = 0.0f;
         return;
     }
     if (scale >= other_scale) {
@@ -180,14 +220,24 @@ inline void rmsnorm_reduce_ssq(thread float& scale, thread float& ssq, thread fl
 // `scale`／`ssq`／`comp`（`rmsnorm_reduce_ssq` 適用後。`eps` の疑似要素
 // 折り込み前）と `eps`・`inv_n`（`= 1/hidden`。`n = 1/inv_n`）から
 // `rstd = 1/sqrt(sum(x^2)/n + eps)` を overflow-safe に導出する。`eps`
-// を `sqrt(eps * n)` という追加の疑似要素として `rmsnorm_ssq_add` へ通し
-// てから、`rstd = 1/(scale * sqrt(ssq * inv_n))`（`scale` を二乗せず
-// 最後に 1 回だけ掛ける形）で計算する（本ファイル冒頭コメント「縮約
+// を `sqrt(eps) * sqrt(n)` という追加の疑似要素として `rmsnorm_ssq_add`
+// へ通してから、`rstd = 1/(scale * sqrt(ssq * inv_n))`（`scale` を二乗
+// せず最後に 1 回だけ掛ける形）で計算する（本ファイル冒頭コメント「縮約
 // 精度契約」参照。`scale^2` を明示的に計算しないため `scale` が極端に
 // 大きい／小さい場合でも `f32` の表現範囲内で完結する）。
+//
+// **`eps * n` の中間 overflow 回避（codex-review 指摘・PR #1120 1 件目）**:
+// 疑似要素は本来 `sqrt(eps * n)` だが、`eps` が `f32::MAX` 級・`n`
+// （`hidden`）がある程度大きい場合、平方根を取る前の `eps * n` 自体が
+// `f32` の表現範囲を超えて `inf` になりうる（最終的な平方根の結果自体は
+// `f32` で表現可能な範囲内であっても）。`sqrt(eps * n) == sqrt(eps) *
+// sqrt(n)`（数学的に同値な変形。両辺とも非負）という恒等式を使い、`eps`・
+// `n` それぞれを個別に平方根を取ってから掛け合わせることで、この中間
+// overflow を避ける（`eps`・`n` はいずれも個別には `f32` の表現範囲内の
+// 有限値であるため、それぞれの平方根も表現範囲内に収まる）。
 inline float rmsnorm_finalize_rstd(float scale, float ssq, float comp, float eps, float inv_n) {
     float n = 1.0f / inv_n;
-    float eps_elem = sqrt(eps * n);
+    float eps_elem = sqrt(eps) * sqrt(n);
     rmsnorm_ssq_add(scale, ssq, comp, eps_elem);
     return 1.0f / (scale * sqrt((ssq + comp) * inv_n));
 }
