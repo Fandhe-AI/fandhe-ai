@@ -215,3 +215,53 @@ fn rmsnorm_matches_backend_cpu_directly() {
         &cpu_out,
     );
 }
+
+/// 極値入力（有限だが `f32` の二乗が overflow する大きさ・非正規化数級の
+/// 極小値）での CPU-Metal parity（イシュー #1102。codex-review 指摘・
+/// PR #1120: 単純な Kahan 補償和は `v.x * v.x` を `f32` のまま先に計算
+/// するため、有限入力〈例 `2e20f`〉でも二乗が overflow して `inf` になり、
+/// Kahan 補償計算が `inf - inf` で `NaN` を生んでいた。scale/ssq 方式
+/// 〈`rmsnorm.metal::rmsnorm_ssq_add` 等。overflow-safe な二乗和
+/// アルゴリズム〉でこれを解消したことを実機で確認する）。CPU 参照は
+/// `fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32`（本 PR で `f64`
+/// アキュムレータ化済み。同じ極値でも二乗和が overflow しない）を使う。
+/// tolerance は変更していない。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn rmsnorm_matches_backend_cpu_with_extreme_magnitude_values() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let rmsnorm = MetalRmsNorm::new(&ctx).expect("RMSNorm パイプラインの構築に失敗した");
+
+    // hidden=17（非 4 の倍数。スカラー経路を含む）で、要素の一部を
+    // 2e20f（f32 の二乗〈4e40〉が f32 表現範囲〈最大約 3.4e38〉を超えて
+    // overflow する大きさ）・1e-38f（非正規化数級の極小値）・通常範囲の
+    // 値の混在にする。
+    let rows = 2usize;
+    let hidden = 17usize;
+    let eps = 1e-5f32;
+    let mut x_data = Xorshift64Star::new(51_001).fill_vec(rows * hidden);
+    // 行 0: 先頭 2 要素を極大値へ差し替える。
+    x_data[0] = 2e20f32;
+    x_data[1] = -1.5e20f32;
+    // 行 1: 非正規化数級の極小値を先頭 2 要素へ混在させる。
+    x_data[hidden] = 1e-38f32;
+    x_data[hidden + 1] = -3e-39f32;
+
+    let gpu_out = rmsnorm
+        .run_rmsnorm_f32(&ctx, &x_data, None, eps, rows, hidden)
+        .expect("MetalRmsNorm::run_rmsnorm_f32 must succeed on Metal-equipped test runner");
+    assert!(
+        gpu_out.iter().all(|v| v.is_finite()),
+        "GPU 出力に非有限値（NaN/inf）が含まれている（scale/ssq 方式への \
+         回帰の可能性）: {gpu_out:?}"
+    );
+
+    let cpu_out = fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, None, eps, rows, hidden)
+        .expect("fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
+
+    assert_parity(
+        "rmsnorm cpu(backend_cpu)-metal extreme magnitude parity",
+        &gpu_out,
+        &cpu_out,
+    );
+}

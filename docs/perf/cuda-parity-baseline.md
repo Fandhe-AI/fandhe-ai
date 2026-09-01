@@ -885,37 +885,68 @@ dw のみが対象と確認済み。softmax の縮約〈max・sum〉は別イシ
 
 - forward の 1 パス／2 パス両カーネル（`rmsnorm_f32_onepass`／
   `rmsnorm_f32_twopass`）の二乗和蓄積を、単純な `fma()` 直接蓄積から
-  **Neumaier 改良版 Kahan 補償和**（`rmsnorm_kahan_add`）へ変更した。
-  レーン内蓄積（各レーンの `hidden/32` 要素程度の逐次和）・32 レーン間
-  butterfly 縮約（`rmsnorm_reduce_sum_kahan`。5 段シャッフルで `sum`・
-  補償項 `comp` の両方を交換し Neumaier 方式で合成）の両方に適用した
+  **Neumaier 改良版 Kahan 補償和 + scale/ssq 方式**（`rmsnorm_ssq_add`・
+  `rmsnorm_ssq_combine`・`rmsnorm_reduce_ssq`・`rmsnorm_finalize_rstd`）
+  へ変更した。レーン内蓄積（各レーンの `hidden/32` 要素程度の逐次和）・
+  32 レーン間 butterfly 縮約（5 段シャッフルで `scale`・`ssq`・補償項
+  `comp` の 3 つを交換し `rmsnorm_ssq_combine` で合成）の両方に適用した
   （CUDA 側「レーン内部分和を `double` 化・warp shuffle を `double` で
   行う」設計と対応する）
 - Apple GPU family は `double` 型をサポートしないため MSL では `f64`
-  アキュムレータを直接使えない。Kahan（Neumaier）補償和は、丸め誤差を
-  明示的な補償項として保持し毎回の加算前に打ち消すことで、単純な `f32`
-  逐次和より大幅に高い実効精度（多くの実用的なケースで倍精度相当）を
-  達成する古典的な技法であり、本契約における「`f64` 相当」の定義とする
+  アキュムレータを直接使えない。scale/ssq 方式（LAPACK SLASSQ 系の
+  overflow-safe な二乗和アルゴリズム: 最大絶対値を `scale` として括り
+  出し、残りを `(a/scale)^2`〈常に `[0,1]`〉として `ssq` へ蓄積する。
+  各ステップの `ssq` 加算に Neumaier 改良版 Kahan 補償和を併用する）を
+  「`f64` 相当」の実装形として適用する
+- **当初は scale/ssq 方式を用いず単純な Kahan 補償和のみを適用していた
+  が、codex-review が P1 として「`v.x * v.x` を `f32` のまま先に計算する
+  ため、有限入力（例 `2e20f`）でも二乗が `f32` の表現範囲（最大約
+  3.4e38）を超えて `inf` になり、`inf - inf` の Kahan 補償計算で `NaN`
+  が発生する。CUDA・CPU は要素を `f64` へ昇格してから二乗するため有限
+  値を保ち、意味論が片側で割れている」と指摘した**（2 度目の P1。1 度目
+  は本節冒頭の「CUDA と参照実装だけの片側 `f64` 化」）。この指摘を受け
+  scale/ssq 方式へ実装を訂正した。二乗を直接計算しない（比の二乗のみを
+  計算する）ため、有限入力である限り中間計算が `f32` の表現範囲を超えて
+  overflow することがない
+- 最終的な `rstd` 導出（`rmsnorm_finalize_rstd`）も `scale` を明示的に
+  二乗しない形（`rstd = 1 / (scale * sqrt(ssq * inv_n))`）へ整理した
+  （`scale` が `2e20` 級の場合 `scale^2` 自体が `f32` 表現範囲外になる
+  ため）。`eps` は最終段で別途加算するのではなく `sqrt(eps * n)` という
+  追加の疑似要素として同じ `rmsnorm_ssq_add` へ通すことで、実要素の
+  二乗和と同じ overflow-safe な経路に統一した（`scale == 0`〈実要素が
+  全て 0〉かつ `eps > 0` のケースでも、この疑似要素が `scale` を
+  `sqrt(eps * n)` へ更新するため、特別分岐なしに従来どおり
+  `rstd = 1/sqrt(eps)` へ帰着する）
+- **極値入力の実機テストを追加**（`tests/rmsnorm_parity.rs::
+  rmsnorm_matches_backend_cpu_with_extreme_magnitude_values`。`#[ignore]`
+  Metal 実機依存）: `hidden=17`（スカラー経路を含む非 4 の倍数）の行に
+  `2e20f`／`-1.5e20f`（`f32` の二乗が overflow する大きさ）・`1e-38f`／
+  `-3e-39f`（非正規化数級の極小値）を混在させ、GPU 出力が全て有限値
+  （`is_finite()`）であること、および `backend-cpu`（`f64` 化済み）との
+  複合判定一致を検証する。tolerance は変更していない
 - 実機実測（Apple M4 Max・実機 GPU。本 PR 作業環境）:
   `cargo test -p fandhe-ai-backend-metal --release --test rmsnorm_parity
-  -- --ignored --nocapture` 3 テスト全 pass（`rmsnorm_matches_cpu_
+  -- --ignored --nocapture` 4 テスト全 pass（`rmsnorm_matches_cpu_
   across_shapes`・`rmsnorm_matches_backend_cpu_directly`〈`f64` 化した
   `backend-cpu` 本番実装との直接比較〉・`rmsnorm_run_fused_matches_cpu_
-  composed`）。`cargo test -p fandhe-ai-backend-metal --release --
-  --ignored --test-threads=1`（rmsnorm 以外を含む実機依存テスト全件）も
-  全 pass（非後退確認）
+  composed`・上記の極値入力テスト）。`cargo test -p fandhe-ai-backend-
+  metal --release -- --ignored --test-threads=1`（rmsnorm 以外を含む
+  実機依存テスト全件）も全 pass（非後退確認）
 - ソース文字列証跡テスト（`tests/rmsnorm_softmax_source_evidence.rs`）を
-  更新: `rmsnorm_uses_fma_for_accumulation` を
-  `rmsnorm_uses_kahan_compensated_sum_for_accumulation` へ置き換え、
-  butterfly reduction の 5 段検査を softmax 側（展開済み 5 行。従来どおり）
-  と rmsnorm 側（Kahan ループ形式。`sum`・`comp` 両方の shuffle を検査）
-  に分離した
+  更新: `rmsnorm_uses_fma_for_accumulation` →
+  `rmsnorm_uses_overflow_safe_ssq_for_accumulation`（`rmsnorm_ssq_add`
+  ヘルパー使用の検査に加え、単純な `v.x*v.x` 直接二乗〈Kahan 補償のみ〉
+  への後退も明示的に検出する）、butterfly reduction の 5 段検査を
+  softmax 側（展開済み 5 行。従来どおり）と rmsnorm 側（`scale`・`ssq`・
+  `comp` 3 つの shuffle を検査する `rmsnorm_uses_five_stage_ssq_
+  butterfly_reduction`）に分離した
 
 **tolerance・ケース表・シードは一切変更していない**（`RELATIVE_TOLERANCE`・
 `ABSOLUTE_RESCUE_THRESHOLD`・複合判定式は不変）。本節の変更はいずれも
-「実装側の精度をより真値へ近づける」対応であり、CPU 参照実装の `f64` 化
-（9.8）と同じ精神——独立参照・各バックエンド実装ともに精度を引き上げる
-ことで、縮約順序の非結合性に由来する誤差を許容範囲内へ収める——に立つ。
+「実装側の精度をより真値へ近づける・意味論を他バックエンドと揃える」
+対応であり、CPU 参照実装の `f64` 化（9.8）と同じ精神——独立参照・各
+バックエンド実装ともに精度・overflow 安全性を引き上げることで、縮約
+順序の非結合性に由来する誤差を許容範囲内へ収める——に立つ。
 
 ## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
 

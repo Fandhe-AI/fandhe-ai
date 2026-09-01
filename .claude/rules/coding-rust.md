@@ -11,7 +11,7 @@
 - バックエンド切替は **feature フラグなしの cfg ベース**を基本とする（PoC-v2-5 実証構成）。`cudarc` は無条件依存＋動的ロード（CUDA toolkit 非搭載環境でもビルド成立）、`objc2`・`objc2-foundation`・`objc2-metal` は `cfg(target_os = "macos")` 分離
 - バックエンド間数値一致は統一複合判定「**相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満**」（全ペア共通。REQ-2 は TF32 前提の複合指標に改定済み）
 - 丸め方針（FMA 契約）をバックエンド間で統一する: CPU 参照実装は `f32::mul_add` を用い、GPU 側（CUDA NVRTC・Metal `simdgroup_multiply_accumulate`）の既定 FMA 契約と揃える（PoC-v2-5 の K=4096 ストレスケースで実測確認済み）。matmul 系の FMA 契約はこの方針のまま不変とする
-- **正規化統計・勾配の長軸縮約（rmsnorm の `rstd` 二乗和・dw の行方向蓄積等）は `f64` アキュムレータで統一する**（要素ごとの積和自体は `f32` のまま。蓄積〈複数要素・複数行にわたる合計〉のみ精度を引き上げ、最終書き出しで `f32` へ downcast する）。Metal（MSL）は `double` 型非対応のため、Kahan（Neumaier）補償和 `f32` を「`f64` 相当」の実装形として適用する。CUDA・CPU（NEON は倍精度 SIMD `float64x2_t`）は `double`／`f64` アキュムレータを直接使う。この契約は matmul 系の FMA 契約とは独立の軸であり、既存の丸め方針を変更するものではない（イシュー #1102。ユーザー承認 2026-09-01。実測記録は `docs/perf/cuda-parity-baseline.md` §9.8）
+- **正規化統計・勾配の長軸縮約（rmsnorm の `rstd` 二乗和・dw の行方向蓄積等）は `f64` アキュムレータで統一する**（要素ごとの積和自体は `f32` のまま。蓄積〈複数要素・複数行にわたる合計〉のみ精度を引き上げ、最終書き出しで `f32` へ downcast する）。Metal（MSL）は `double` 型非対応のため、Neumaier 改良版 Kahan 補償和 + **scale/ssq 方式**（LAPACK SLASSQ 系の overflow-safe な二乗和アルゴリズム。単純な Kahan 補償和のみでは要素の二乗を `f32` のまま先に計算するため、有限入力〈例 `2e20f`〉でも overflow して `NaN` を生む。scale/ssq 方式は最大絶対値を `scale` として括り出し残りを比の二乗で蓄積するため二乗を直接計算せず overflow を避ける）を「`f64` 相当」の実装形として適用する。CUDA・CPU（NEON は倍精度 SIMD `float64x2_t`）は `double`／`f64` アキュムレータを直接使う。この契約は matmul 系の FMA 契約とは独立の軸であり、既存の丸め方針を変更するものではない（イシュー #1102。ユーザー承認 2026-09-01。実測記録は `docs/perf/cuda-parity-baseline.md` §9.8・§9.9）
 
 ## コード品質
 

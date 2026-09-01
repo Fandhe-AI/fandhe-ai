@@ -15,13 +15,38 @@
 // 導出）の蓄積を `double`／`f64` アキュムレータで行うが、Apple GPU の
 // Metal Shading Language は `double` 型を持たない（Apple GPU family は
 // 倍精度浮動小数点演算をサポートしない）。そのため本カーネルは
-// **Neumaier 改良版 Kahan 補償和**（`f32` のまま、丸め誤差の補償項
-// `comp` を別に保持し毎回加算前に打ち消す）を「`f64` アキュムレータ
-// 相当」の実装形として適用する。二乗和の**レーン内蓄積**（各レーンが
-// 担当する `hidden/32` 要素程度の逐次和。CUDA 側の「レーン内部分和を
-// double 化」に対応）と、**32 レーン間の butterfly 縮約**（CUDA 側の
-// warp shuffle を double で行うのに対応）の両方に Kahan 補償を適用する
-// （`rmsnorm_reduce_sum_kahan` 参照）。
+// **Neumaier 改良版 Kahan 補償和 + scale/ssq 方式（LAPACK SLASSQ 系の
+// overflow-safe な二乗和アルゴリズム）**を「`f64` アキュムレータ相当」
+// の実装形として適用する。
+//
+// **scale/ssq 方式が必須な理由（codex-review 指摘・PR #1120。二重の
+// P1 是正）**: 当初は単純な Kahan 補償和のみを適用していたが、
+// `v.x * v.x` を `f32` のまま先に計算する実装だったため、有限入力
+// （例: `2e20f`）でも二乗が `f32` の表現範囲（最大約 3.4e38）を超えて
+// `inf` になり、`inf - inf` の Kahan 補償計算で `NaN` が発生していた。
+// CUDA・CPU は要素を `f64` へ昇格してから二乗するため有限値を保つ
+// （`kernels_rmsnorm.rs` 冒頭コメント「精度契約」・`crates/backend-cpu/
+// src/rmsnorm.rs` 冒頭コメント「縮約精度契約」参照）ため、この Metal 側
+// の単純 Kahan 実装は意味論が他バックエンドと片側で割れていた。
+// scale/ssq 方式は各要素の絶対値のうち最大値を `scale` として括り出し、
+// 残りを `scale` に対する比の二乗（`(a/scale)^2`。常に `[0, 1]` に収まる）
+// として `ssq` へ蓄積するため、`v.x * v.x` を直接計算せずに二乗和を
+// `f32` の表現範囲内で安全に求められる（`rmsnorm_ssq_add`）。二乗和の
+// **レーン内蓄積**（各レーンが担当する `hidden/32` 要素程度の逐次和。
+// CUDA 側の「レーン内部分和を double 化」に対応）でこの方式を使い、
+// **32 レーン間の butterfly 縮約**（CUDA 側の warp shuffle を double で
+// 行うのに対応）では 2 つの `(scale, ssq)` 状態を結合する
+// `rmsnorm_ssq_combine` を使う。いずれの蓄積・結合ステップも `ssq` 自体
+// の加算には Neumaier 改良版 Kahan 補償和（`rmsnorm_kahan_add`）を併用
+// し、precision を維持する。最終的な `rstd` の導出も `scale` の二乗を
+// 明示的に計算しない形（`rstd = 1 / (scale * sqrt(ssq * inv_n))`）へ
+// 整理し、`scale^2` 自体のオーバーフロー（`scale` が `2e20` 級の場合
+// `scale^2` は `f32` 表現範囲外）を避ける。`eps` は最終段で別途加算する
+// のではなく、`sqrt(eps * n)`（`n = 1/inv_n`）を追加の「疑似要素」として
+// 同じ `rmsnorm_ssq_add` へ通すことで、実要素の二乗和と同じ overflow-safe
+// な経路に統一する（`scale == 0`〈実要素が全て 0〉かつ `eps > 0` の
+// ケースでも、この疑似要素が `scale` を `sqrt(eps * n)` へ更新するため、
+// 特別分岐なしに従来どおり `rstd = 1/sqrt(eps)` へ帰着する）。
 //
 // 1 threadgroup = 1 simdgroup（32 スレッド）固定。threadgroup 全体を跨ぐ
 // バリア（barrier 系関数の threadgroup 版）は使わず、threadgroup memory の
@@ -77,28 +102,94 @@ inline void rmsnorm_kahan_add(thread float& sum, thread float& comp, float value
     sum = t;
 }
 
-// 32 レーン全体の二乗和を 5 段 butterfly で reduction する（`f64`
-// アキュムレータ相当の Kahan 補償和。本ファイル冒頭コメント「縮約精度
-// 契約」参照）。各レーンの Kahan 補償和ペア `(sum, comp)` を
-// `simd_shuffle_xor` でレーン間交換しながら Neumaier 方式で合成する
-// （2 つの既に補償済みの部分和を単純に足すと補償情報が失われるため、
-// レーン内蓄積と同じ Neumaier ステップをレーン間結合にも適用する）。
-// 全レーンが同じ合計値（`sum + comp`）を持つ状態で戻る。
-inline float rmsnorm_reduce_sum_kahan(thread float& sum, thread float& comp) {
-    for (uint offset = 16u; offset > 0u; offset >>= 1u) {
-        float other_sum = simd_shuffle_xor(sum, offset);
-        float other_comp = simd_shuffle_xor(comp, offset);
-        float t = sum + other_sum;
-        float c;
-        if (fabs(sum) >= fabs(other_sum)) {
-            c = (sum - t) + other_sum;
-        } else {
-            c = (other_sum - t) + sum;
+// scale/ssq 方式（LAPACK SLASSQ 系）による overflow-safe な二乗和蓄積の
+// 1 ステップ。非負の値 `a`（呼び出し元が `fabs(v)` を渡す）を
+// `(scale, ssq, comp)` へ取り込む: `a` が現在の `scale` を超えたら
+// `scale` を更新し、既存の `ssq`（+ 補償項 `comp`）を新旧スケール比の
+// 二乗でリスケールしてから `1.0` を Neumaier 加算する。それ以外は
+// `(a/scale)^2` を Neumaier 加算する（`scale == 0` の初期状態は `a` を
+// そのまま新しい `scale` として採用し `ssq = 1` になる。`a == 0` は
+// 実質的に無視される——`a > scale` が偽かつ `scale > 0` が偽なら分岐に
+// 入らず何も変化しない）。`sum(a_i^2) = scale^2 * (ssq + comp)` が不変量。
+inline void rmsnorm_ssq_add(thread float& scale, thread float& ssq, thread float& comp, float a) {
+    if (a > scale) {
+        if (scale > 0.0f) {
+            float ratio = scale / a;
+            float r2 = ratio * ratio;
+            ssq *= r2;
+            comp *= r2;
         }
-        sum = t;
-        comp = comp + other_comp + c;
+        scale = a;
+        rmsnorm_kahan_add(ssq, comp, 1.0f);
+    } else if (scale > 0.0f) {
+        float ratio = a / scale;
+        rmsnorm_kahan_add(ssq, comp, ratio * ratio);
     }
-    return sum + comp;
+}
+
+// 2 つの scale/ssq 状態（`sum(a_i^2) = scale^2*(ssq+comp)` を満たす組）を
+// 結合する（butterfly reduction のレーン間結合専用）。`scale` の大きい
+// 側を採用し、小さい側の `(ssq+comp)` をスケール比の二乗で縮めてから
+// Neumaier 加算で取り込む（`rmsnorm_ssq_add` の「リスケール」ステップと
+// 同じ考え方をレーン間結合へ拡張したもの）。相手側 `scale` が 0（寄与
+// なし）なら何もしない。
+inline void rmsnorm_ssq_combine(thread float& scale, thread float& ssq, thread float& comp,
+                                 float other_scale, float other_ssq, float other_comp) {
+    if (other_scale == 0.0f) {
+        return;
+    }
+    if (scale == 0.0f) {
+        scale = other_scale;
+        ssq = other_ssq;
+        comp = other_comp;
+        return;
+    }
+    if (scale >= other_scale) {
+        float ratio = other_scale / scale;
+        float r2 = ratio * ratio;
+        rmsnorm_kahan_add(ssq, comp, other_ssq * r2);
+        rmsnorm_kahan_add(ssq, comp, other_comp * r2);
+    } else {
+        float ratio = scale / other_scale;
+        float r2 = ratio * ratio;
+        float new_ssq = other_ssq;
+        float new_comp = other_comp;
+        rmsnorm_kahan_add(new_ssq, new_comp, ssq * r2);
+        rmsnorm_kahan_add(new_ssq, new_comp, comp * r2);
+        scale = other_scale;
+        ssq = new_ssq;
+        comp = new_comp;
+    }
+}
+
+// 32 レーン全体の scale/ssq 状態を 5 段 butterfly で reduction する
+// （`f64` アキュムレータ相当の overflow-safe 二乗和。本ファイル冒頭
+// コメント「縮約精度契約」参照）。各レーンの `(scale, ssq, comp)` を
+// `simd_shuffle_xor` でレーン間交換しながら `rmsnorm_ssq_combine` で
+// 合成する。全レーンが同じ状態を持つ状態で戻る（呼び出し元は `scale`・
+// `ssq`・`comp` の最終値から `rstd` を導出する）。
+inline void rmsnorm_reduce_ssq(thread float& scale, thread float& ssq, thread float& comp) {
+    for (uint offset = 16u; offset > 0u; offset >>= 1u) {
+        float other_scale = simd_shuffle_xor(scale, offset);
+        float other_ssq = simd_shuffle_xor(ssq, offset);
+        float other_comp = simd_shuffle_xor(comp, offset);
+        rmsnorm_ssq_combine(scale, ssq, comp, other_scale, other_ssq, other_comp);
+    }
+}
+
+// `scale`／`ssq`／`comp`（`rmsnorm_reduce_ssq` 適用後。`eps` の疑似要素
+// 折り込み前）と `eps`・`inv_n`（`= 1/hidden`。`n = 1/inv_n`）から
+// `rstd = 1/sqrt(sum(x^2)/n + eps)` を overflow-safe に導出する。`eps`
+// を `sqrt(eps * n)` という追加の疑似要素として `rmsnorm_ssq_add` へ通し
+// てから、`rstd = 1/(scale * sqrt(ssq * inv_n))`（`scale` を二乗せず
+// 最後に 1 回だけ掛ける形）で計算する（本ファイル冒頭コメント「縮約
+// 精度契約」参照。`scale^2` を明示的に計算しないため `scale` が極端に
+// 大きい／小さい場合でも `f32` の表現範囲内で完結する）。
+inline float rmsnorm_finalize_rstd(float scale, float ssq, float comp, float eps, float inv_n) {
+    float n = 1.0f / inv_n;
+    float eps_elem = sqrt(eps * n);
+    rmsnorm_ssq_add(scale, ssq, comp, eps_elem);
+    return 1.0f / (scale * sqrt((ssq + comp) * inv_n));
 }
 
 kernel void rmsnorm_f32_onepass(
@@ -118,10 +209,12 @@ kernel void rmsnorm_f32_onepass(
 
     for (uint row = tg_id; row < rows; row += grid_size) {
         ulong row_base = (ulong)row * (ulong)hidden;
-        // `acc`（Kahan 補償和の主項）・`acc_c`（補償項）でレーン内の
-        // 二乗和を蓄積する（縮約精度契約。本ファイル冒頭コメント参照）。
-        float acc = 0.0f;
-        float acc_c = 0.0f;
+        // `scale`／`ssq`／`ssq_c` で overflow-safe な二乗和（scale/ssq
+        // 方式 + Neumaier 補償和）をレーン内蓄積する（縮約精度契約。
+        // 本ファイル冒頭コメント参照）。
+        float scale = 0.0f;
+        float ssq = 0.0f;
+        float ssq_c = 0.0f;
 
         if (hidden % 4u == 0u) {
             for (uint base = lane * 4u; base + 3u < hidden; base += RMSNORM_SIMD_WIDTH * 4u) {
@@ -131,16 +224,16 @@ kernel void rmsnorm_f32_onepass(
                 smem[base + 1u] = v.y;
                 smem[base + 2u] = v.z;
                 smem[base + 3u] = v.w;
-                rmsnorm_kahan_add(acc, acc_c, v.x * v.x);
-                rmsnorm_kahan_add(acc, acc_c, v.y * v.y);
-                rmsnorm_kahan_add(acc, acc_c, v.z * v.z);
-                rmsnorm_kahan_add(acc, acc_c, v.w * v.w);
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v.x));
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v.y));
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v.z));
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v.w));
             }
         } else {
             for (uint idx = lane; idx < hidden; idx += RMSNORM_SIMD_WIDTH) {
                 float v = x[row_base + idx];
                 smem[idx] = v;
-                rmsnorm_kahan_add(acc, acc_c, v * v);
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v));
             }
         }
 
@@ -150,8 +243,8 @@ kernel void rmsnorm_f32_onepass(
         // 可視性バリアを置く（CUDA `__syncwarp` 相当）。
         simdgroup_barrier(mem_flags::mem_threadgroup);
 
-        float sum_sq = rmsnorm_reduce_sum_kahan(acc, acc_c);
-        float rstd = rsqrt(fma(sum_sq, inv_n, eps));
+        rmsnorm_reduce_ssq(scale, ssq, ssq_c);
+        float rstd = rmsnorm_finalize_rstd(scale, ssq, ssq_c, eps, inv_n);
 
         if (hidden % 4u == 0u) {
             for (uint base = lane * 4u; base + 3u < hidden; base += RMSNORM_SIMD_WIDTH * 4u) {
@@ -191,29 +284,31 @@ kernel void rmsnorm_f32_twopass(
 {
     for (uint row = tg_id; row < rows; row += grid_size) {
         ulong row_base = (ulong)row * (ulong)hidden;
-        // `acc`（Kahan 補償和の主項）・`acc_c`（補償項）でレーン内の
-        // 二乗和を蓄積する（縮約精度契約。本ファイル冒頭コメント参照）。
-        float acc = 0.0f;
-        float acc_c = 0.0f;
+        // `scale`／`ssq`／`ssq_c` で overflow-safe な二乗和（scale/ssq
+        // 方式 + Neumaier 補償和）をレーン内蓄積する（縮約精度契約。
+        // 本ファイル冒頭コメント参照）。
+        float scale = 0.0f;
+        float ssq = 0.0f;
+        float ssq_c = 0.0f;
 
         if (hidden % 4u == 0u) {
             for (uint base = lane * 4u; base + 3u < hidden; base += RMSNORM_SIMD_WIDTH * 4u) {
                 float4 v = float4(x[row_base + base], x[row_base + base + 1u],
                                    x[row_base + base + 2u], x[row_base + base + 3u]);
-                rmsnorm_kahan_add(acc, acc_c, v.x * v.x);
-                rmsnorm_kahan_add(acc, acc_c, v.y * v.y);
-                rmsnorm_kahan_add(acc, acc_c, v.z * v.z);
-                rmsnorm_kahan_add(acc, acc_c, v.w * v.w);
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v.x));
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v.y));
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v.z));
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v.w));
             }
         } else {
             for (uint idx = lane; idx < hidden; idx += RMSNORM_SIMD_WIDTH) {
                 float v = x[row_base + idx];
-                rmsnorm_kahan_add(acc, acc_c, v * v);
+                rmsnorm_ssq_add(scale, ssq, ssq_c, fabs(v));
             }
         }
 
-        float sum_sq = rmsnorm_reduce_sum_kahan(acc, acc_c);
-        float rstd = rsqrt(fma(sum_sq, inv_n, eps));
+        rmsnorm_reduce_ssq(scale, ssq, ssq_c);
+        float rstd = rmsnorm_finalize_rstd(scale, ssq, ssq_c, eps, inv_n);
 
         // device メモリを再読（threadgroup memory 不使用の 2 パス経路）。
         if (hidden % 4u == 0u) {
