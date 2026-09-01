@@ -259,6 +259,107 @@ pub static BASELINES: &[ParityBaseline] = &[
         // イシュー #1106・GB10 実機実測で確定（上記コメント参照）。
         baseline_provenance_unconfirmed: false,
     },
+    // wmma_tf32: 案 A（イシュー #1106・GB10 全件洗い出し）で追加した
+    // 形状網羅の残り 7 ケース。
+    //
+    // 背景: `tests/gemm_wmma_tf32.rs::wmma_tf32_matches_reference_across_shapes`・
+    // `wmma_tf32_k4096_stress_poc_v2_5` は `assert_parity`（厳密ゼロ fail
+    // 判定）を使っていたが、GB10 実機実測（2026-09-02 の診断ダンプ
+    // `wmma_tf32_parity_diagnostic_dump_issue_1106`。修正確定に伴い削除
+    // 済み）で 64x64x64・128x128x128・512x512x512・64x96x128・
+    // 17x23x19・33x31x65・512x512x4096（seed=0xFACADE）の 7 形状すべてが
+    // 非ゼロ fail_count を持つことが判明した（`wmma_tf32_opt`・
+    // `wmma_tf32_staged` と同じ TF32 丸めの既知の恒常特性）。ゼロ fail が
+    // 実際に成立するのは 1x1x1（sub-K-tile）のみであり、上記 2 テストから
+    // 当該形状を削除したうえで本 7 行をここへ移し、
+    // `tests/gemm_wmma_tf32.rs::wmma_tf32_routed_path_baselines_do_not_regress`
+    // （公開 API `run_wmma_tf32` 経由の非後退監視）の対象に含める。
+    // ceiling は §4「表記丸め対応」と同じ規約（表示 4 桁の最終桁 +1）で
+    // 算出した。
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 64x64x64 seed=2001 (#1106 diagnostic)",
+        m: 64,
+        n: 64,
+        k: 64,
+        seed: 2001,
+        total: 64 * 64,
+        baseline_fail_count: 687,
+        baseline_mean_abs_diff_ceiling: 5.542e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 128x128x128 seed=2002 (#1106 diagnostic)",
+        m: 128,
+        n: 128,
+        k: 128,
+        seed: 2002,
+        total: 128 * 128,
+        baseline_fail_count: 2559,
+        baseline_mean_abs_diff_ceiling: 7.858e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 512x512x512 seed=2003 (#1106 diagnostic)",
+        m: 512,
+        n: 512,
+        k: 512,
+        seed: 2003,
+        total: 512 * 512,
+        baseline_fail_count: 42550,
+        baseline_mean_abs_diff_ceiling: 1.565e-3,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 64x96x128 seed=2004 (#1106 diagnostic)",
+        m: 64,
+        n: 96,
+        k: 128,
+        seed: 2004,
+        total: 64 * 96,
+        baseline_fail_count: 1027,
+        baseline_mean_abs_diff_ceiling: 7.895e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 17x23x19 seed=2006 (#1106 diagnostic)",
+        m: 17,
+        n: 23,
+        k: 19,
+        seed: 2006,
+        total: 17 * 23,
+        baseline_fail_count: 52,
+        baseline_mean_abs_diff_ceiling: 3.059e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 33x31x65 seed=2007 (#1106 diagnostic)",
+        m: 33,
+        n: 31,
+        k: 65,
+        seed: 2007,
+        total: 33 * 31,
+        baseline_fail_count: 171,
+        baseline_mean_abs_diff_ceiling: 5.599e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 512x512x4096 seed=0xFACADE (#1106 diagnostic)",
+        m: 512,
+        n: 512,
+        k: 4096,
+        seed: 0xFACADE,
+        total: 512 * 512,
+        baseline_fail_count: 42688,
+        baseline_mean_abs_diff_ceiling: 4.464e-3,
+        baseline_provenance_unconfirmed: false,
+    },
     // wmma_tf32_opt: 512x512x512。記録元 `tensor_core_real_device.rs::
     // tensor_core_parity_record` TF32 部分は事前に `wmma_tf32_opt_available()`
     // を assert してから `gemm.run_wmma_tf32(...)` を計測している
@@ -444,6 +545,106 @@ pub static BASELINES: &[ParityBaseline] = &[
         total: 512 * 512,
         baseline_fail_count: 43019,
         baseline_mean_abs_diff_ceiling: 4.464e-3,
+        baseline_provenance_unconfirmed: false,
+    },
+    // wmma_tf32_staged: 案 A（イシュー #1106・GB10 全件洗い出し）で追加
+    // した形状網羅の残り 7 ケース。
+    //
+    // 背景: `tests/gemm_wmma_tf32_staged.rs::wmma_tf32_staged_matches_reference_across_shapes`・
+    // `wmma_tf32_staged_k4096_stress` は `assert_parity`（厳密ゼロ fail
+    // 判定）を使っていたが、GB10 実機実測（2026-09-02 の診断ダンプ
+    // `wmma_tf32_staged_parity_diagnostic_dump_issue_1106`。修正確定に
+    // 伴い削除済み）で 64x64x64・128x128x128・512x512x512・60x68x36・
+    // 68x60x20・64x96x256・4096x4096x4096（seed=0xBEEF）の 7 形状すべてが
+    // 非ゼロ fail_count を持つことが判明した（`wmma_tf32_opt` と同じ
+    // TF32 丸めの既知の恒常特性）。ゼロ fail が実際に成立するのは 1x1x1
+    // （sub-K-tile）のみであり、上記 2 テストから当該形状を削除したうえで
+    // 本 7 行をここへ移し、`tests/parity_nonregression.rs::
+    // parity_baselines_do_not_regress`（`check_wmma_tf32_staged_baseline`。
+    // 公開 API `run_wmma_tf32` 経由。既存の走査対象でありコード変更不要で
+    // 対象拡大した）の対象に含める。ceiling は §4 と同じ規約で算出した。
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 64x64x64 seed=0xFA0 (#1106 diagnostic)",
+        m: 64,
+        n: 64,
+        k: 64,
+        seed: 0xFA0,
+        total: 64 * 64,
+        baseline_fail_count: 633,
+        baseline_mean_abs_diff_ceiling: 5.426e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 128x128x128 seed=0xFA1 (#1106 diagnostic)",
+        m: 128,
+        n: 128,
+        k: 128,
+        seed: 0xFA1,
+        total: 128 * 128,
+        baseline_fail_count: 2631,
+        baseline_mean_abs_diff_ceiling: 7.834e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 512x512x512 seed=0xFA2 (#1106 diagnostic)",
+        m: 512,
+        n: 512,
+        k: 512,
+        seed: 0xFA2,
+        total: 512 * 512,
+        baseline_fail_count: 42782,
+        baseline_mean_abs_diff_ceiling: 1.572e-3,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 60x68x36 seed=0xFA3 (#1106 diagnostic)",
+        m: 60,
+        n: 68,
+        k: 36,
+        seed: 0xFA3,
+        total: 60 * 68,
+        baseline_fail_count: 691,
+        baseline_mean_abs_diff_ceiling: 4.096e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 68x60x20 seed=0xFA4 (#1106 diagnostic)",
+        m: 68,
+        n: 60,
+        k: 20,
+        seed: 0xFA4,
+        total: 68 * 60,
+        baseline_fail_count: 620,
+        baseline_mean_abs_diff_ceiling: 2.973e-4,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 64x96x256 seed=0xFA5 (#1106 diagnostic)",
+        m: 64,
+        n: 96,
+        k: 256,
+        seed: 0xFA5,
+        total: 64 * 96,
+        baseline_fail_count: 1008,
+        baseline_mean_abs_diff_ceiling: 1.122e-3,
+        baseline_provenance_unconfirmed: false,
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 4096x4096x4096 seed=0xBEEF (#1106 diagnostic)",
+        m: 4096,
+        n: 4096,
+        k: 4096,
+        seed: 0xBEEF,
+        total: 4096 * 4096,
+        baseline_fail_count: 2725617,
+        baseline_mean_abs_diff_ceiling: 4.454e-3,
         baseline_provenance_unconfirmed: false,
     },
     // mma_f16: K=4096 ストレスケース（256x256x4096、seed=9999）。

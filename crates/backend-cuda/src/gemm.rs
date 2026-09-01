@@ -3442,11 +3442,22 @@ mod tests {
              wmma_tf32_opt_error)",
         );
 
-        let cases: &[(u32, u32, u32)] = &[(1, 1, 1)];
-        for (idx, &(m, n, k)) in cases.iter().enumerate() {
-            let context = format!("opt kernel shape m={m} n={n} k={k}");
-            assert_wmma_tf32_opt_kernel_parity(&gemm, func, &context, 3000 + idx as u64, m, n, k);
-        }
+        // seed は 3006（元の 7 ケース配列での 1x1x1 の位置 idx=6 に対応する
+        // 3000+6）を直接指定する。案 A の縮小前は `3000 + idx` で自動算出
+        // していたが、配列を 1 要素へ縮小すると `idx` が 0 に戻り、実測して
+        // いない seed=3000（元は 64x64x64 用）が (1,1,1) 形状に誤って
+        // 適用されてしまう（イシュー #1106 GB10 全件洗い出しで発覚したバグ。
+        // 実測は seed=3006〈0xbbe〉のみ。GB10 実機で fail_count=0/1 を確認
+        // 済み。`docs/perf/cuda-parity-baseline.md` §10.5 参照）。
+        assert_wmma_tf32_opt_kernel_parity(
+            &gemm,
+            func,
+            "opt kernel shape m=1 n=1 k=1",
+            3006,
+            1,
+            1,
+            1,
+        );
     }
 
     /// #500 の目的（cp.async 多段化・fragment 先読みによる TF32 経路の性能

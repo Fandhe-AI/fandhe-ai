@@ -20,6 +20,8 @@
 
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm};
 
+mod common;
+
 /// 決定的シードで A・B（f32）を生成し、CPU 参照実装と WMMA(TF32) カーネルの
 /// 出力を [`fandhe_ai_backend_cpu::assert_parity`] で照合する。
 fn assert_wmma_tf32_parity(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n: u32, k: u32) {
@@ -110,155 +112,103 @@ fn wmma_tf32_parity_or_skip(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n
     fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
 }
 
-/// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅
-/// テスト。受け入れ条件の本体。
+/// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の厳密ゼロ
+/// fail 判定テスト（イシュー #1106 案 A で対象形状を縮小）。
 ///
-/// 形状ケース: ブロックタイル倍数（32×32×32・64×64×64）・非倍数
-/// （WMMA_TF32_BLOCK_M/N=32、WMMA_TF32_K_TILE=8 の端境界を踏む
-/// 17×23×19・33×31×65）・非正方（64×96×128）・極小（1×1×1、K タイル未満）。
-/// `tests/cpu_cuda_parity.rs::naive_f32_matches_reference_across_shapes` と
-/// 同じ形状セットを踏襲しつつ、WMMA 固有のタイル境界（32・8）を追加する。
+/// GB10 実機実測（2026-09-02 の診断ダンプ `wmma_tf32_parity_diagnostic_dump_issue_1106`。
+/// 修正確定に伴い削除済み）により、`assert_parity`（厳密ゼロ fail 判定）
+/// が実際に成立するのは 1×1×1（sub-K-tile。K 方向蓄積が発生せず TF32
+/// 丸め誤差が蓄積しない）のみと判明した。他の 7 形状（32×32×32・
+/// 64×64×64・128×128×128・512×512×512・64×96×128・17×23×19・33×31×65）は
+/// `ParityBaseline::BASELINES`（`ParityPath::WmmaTf32`）へ実測値付きで
+/// 移し、[`wmma_tf32_routed_path_baselines_do_not_regress`]（本ファイル
+/// 下部。公開 API `run_wmma_tf32` 経由の非後退監視）が検査する。
+/// tolerance 定数は変更していない（ユーザー承認 2026-09-02。詳細は
+/// `docs/perf/cuda-parity-baseline.md` §10.5）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn wmma_tf32_matches_reference_across_shapes() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
 
-    let cases: &[(u32, u32, u32)] = &[
-        (32, 32, 32),
-        (64, 64, 64),
-        (128, 128, 128),
-        (512, 512, 512),
-        (64, 96, 128),
-        (1, 1, 1),
-        (17, 23, 19),
-        (33, 31, 65),
-    ];
-    for (idx, &(m, n, k)) in cases.iter().enumerate() {
-        let context = format!("shape m={m} n={n} k={k}");
-        assert_wmma_tf32_parity(&gemm, &context, 2000 + idx as u64, m, n, k);
-    }
+    // seed は 2005（元の 8 ケース配列での 1×1×1 の位置 idx=5 に対応する
+    // 2000+5）を直接指定する。実測は seed=2005 のみで fail_count=0/1 を
+    // 確認済み（他の未測定 seed への一般化はしない。`ParityBaseline`
+    // ドキュメンテーションコメントと同じ「推定値の捏造をしない」方針）。
+    assert_wmma_tf32_parity(&gemm, "shape m=1 n=1 k=1", 2005, 1, 1, 1);
 }
 
-/// K 大のストレスケース群（PoC-v2-5 準拠。`tests/cpu_cuda_parity.rs` の
-/// naive f32 版と同じ形状・シード方針を WMMA(TF32) 経路にも適用する）。
-///
-/// TF32 経路は仮数部の丸め（23bit → 10bit）を経由するため、フル精度
-/// tiled f32 版より誤差が大きくなりうる（`docs/cuda-tensor-core-design.md`
-/// 6 節）。統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）が
-/// この丸め込みを織り込み済みとして機能するかを、この K=4096 ストレス
-/// ケースで確認する。
+/// [`wmma_tf32_matches_reference_across_shapes`] ドキュメンテーション
+/// コメントで縮小した 7 形状・旧 `wmma_tf32_k4096_stress_poc_v2_5`
+/// （両ケースとも非ゼロ fail のため全ケースがここへ移管された。削除済み）
+/// の非後退監視。`ParityPath::WmmaTf32` 行を公開 API `run_wmma_tf32`
+/// （3 段選択そのまま）経由で検査する——`common::parity_baseline::
+/// parity_baselines_do_not_regress`（`parity_nonregression.rs`）は
+/// `WmmaTf32`／`WmmaTf32Opt` 行を明示的に skip する（private 強制経路を
+/// 使う lib 側検査〈`wmma_tf32_basic_kernel_parity_does_not_regress`〉と
+/// 二重検査しないため）ため、公開 API 経由のルーティング検証はここでしか
+/// 行われない。1 行の fail で残りの行の検査を打ち切らない（`parity_nonregression.rs::
+/// parity_baselines_do_not_regress` と同じ集約方式）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
-fn wmma_tf32_k4096_stress_poc_v2_5() {
+fn wmma_tf32_routed_path_baselines_do_not_regress() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
 
-    assert_wmma_tf32_parity(&gemm, "PoC-v2-5 stress 256x256x4096", 8888, 256, 256, 4096);
-    assert_wmma_tf32_parity(
-        &gemm,
-        "PoC-v2-5 stress 512x512x4096",
-        0xFACADE,
-        512,
-        512,
-        4096,
-    );
-}
+    let mut failures: Vec<String> = Vec::new();
+    for baseline in common::parity_baseline::BASELINES
+        .iter()
+        .filter(|b| b.path == common::parity_baseline::ParityPath::WmmaTf32)
+    {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut rng = bench_harness::rng::Xorshift64Star::new(baseline.seed);
+            let a = rng.fill_vec((baseline.m as usize) * (baseline.k as usize));
+            let b = rng.fill_vec((baseline.k as usize) * (baseline.n as usize));
 
-/// **診断専用（イシュー #1106・GB10 全件洗い出し。PR 用の一時コード。
-/// 修正確定後に削除する）。**
-///
-/// [`wmma_tf32_matches_reference_across_shapes`]・
-/// [`wmma_tf32_k4096_stress_poc_v2_5`] は [`assert_wmma_tf32_parity`]
-/// （内部で `assert_parity` を呼ぶ厳密ゼロ fail 判定）を使うため、最初に
-/// fail するケースで panic して以降のケースを実行しない。GB10 実機実測
-/// （2026-09-01 の直列 `--ignored` 実行）では両テストとも先頭ケース
-/// （32×32×32 seed=2000・256×256×4096 seed=8888）のみが実測済みで、いずれも
-/// `ParityBaseline::BASELINES`（`ParityPath::WmmaTf32`）の既存記録値と
-/// 一致した。残り 7 ケース（64×64×64・128×128×128・512×512×512・
-/// 64×96×128・1×1×1・17×23×19・33×31×65・512×512×4096 seed=0xFACADE）は
-/// 未計測のまま。本テストは同じ全ケース・同じシードを
-/// `fandhe_ai_backend_cpu::compare`（panic しない集計 API）で走らせ、
-/// `fail_count`/`total`・`max_abs_diff`・`max_rel_err`・`mean_abs_diff` を
-/// 標準出力へ表として出す。**assert は一切行わない**（常に成功する。
-/// 目的は数値の可視化のみ）。
-#[test]
-#[ignore = "診断専用（イシュー #1106）。CUDA 実機（DGX Spark GB10 等、\
-            compute capability 8.0 以降）必須。修正確定後に削除する"]
-fn wmma_tf32_parity_diagnostic_dump_issue_1106() {
-    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
-    let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+            let mut c_ref = vec![0.0f32; (baseline.m as usize) * (baseline.n as usize)];
+            fandhe_ai_backend_cpu::matmul_reference_fma(
+                &a,
+                &b,
+                &mut c_ref,
+                baseline.m as usize,
+                baseline.n as usize,
+                baseline.k as usize,
+            )
+            .expect(
+                "matmul_reference_fma shape validation must pass for well-formed baseline input",
+            );
 
-    let mut cases: Vec<(String, u64, u32, u32, u32)> = [
-        (32u32, 32u32, 32u32),
-        (64, 64, 64),
-        (128, 128, 128),
-        (512, 512, 512),
-        (64, 96, 128),
-        (1, 1, 1),
-        (17, 23, 19),
-        (33, 31, 65),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(idx, (m, n, k))| {
-        (
-            format!("across_shapes[{idx}] m={m} n={n} k={k}"),
-            2000 + idx as u64,
-            m,
-            n,
-            k,
-        )
-    })
-    .collect();
-    cases.push((
-        "k4096_stress 256x256x4096".to_string(),
-        8888,
-        256,
-        256,
-        4096,
-    ));
-    cases.push((
-        "k4096_stress 512x512x4096".to_string(),
-        0xFACADE,
-        512,
-        512,
-        4096,
-    ));
+            let c_gpu = gemm
+                .run_wmma_tf32(&a, &b, baseline.m, baseline.n, baseline.k)
+                .expect(
+                    "CudaGemm::run_wmma_tf32 must succeed on a compute capability >= 8.0 test \
+                     runner",
+                );
 
-    println!(
-        "{:<34} {:>10} {:>16} {:>12} {:>12} {:>12}",
-        "case", "seed", "fail/total", "max_abs", "max_rel", "mean_abs"
-    );
-    for (label, seed, m, n, k) in &cases {
-        let (m, n, k) = (*m, *n, *k);
-        let mut rng = bench_harness::rng::Xorshift64Star::new(*seed);
-        let a = rng.fill_vec((m as usize) * (k as usize));
-        let b = rng.fill_vec((k as usize) * (n as usize));
-
-        let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-        fandhe_ai_backend_cpu::matmul_reference_fma(
-            &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
-        )
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
-
-        let c_gpu = gemm
-            .run_wmma_tf32(&a, &b, m, n, k)
-            .expect("CudaGemm::run_wmma_tf32 must succeed on this ignored test runner");
-
-        let report = fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref)
-            .expect("gpu output and reference must have matching lengths");
-
-        println!(
-            "{label:<34} {seed:>#10x} {fail:>7}/{total:<8} {max_abs:>12.3e} {max_rel:>12.3e} \
-             {mean_abs:>12.3e}",
-            fail = report.fail_count,
-            total = report.total,
-            max_abs = report.max_abs_diff,
-            max_rel = report.max_rel_err,
-            mean_abs = report.mean_abs_diff,
-        );
+            let report = fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref)
+                .expect("shape must match baseline fixture");
+            common::parity_baseline::assert_no_parity_regression(
+                baseline.context,
+                &report,
+                baseline,
+            );
+        }));
+        if let Err(err) = result {
+            let msg = err
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "panic (詳細不明)".to_string());
+            failures.push(format!("{}: {msg}", baseline.context));
+        }
     }
+
+    assert!(
+        failures.is_empty(),
+        "parity 非後退契約 FAIL（{} 件）:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 /// `k == 0`（`num_k_tiles == 0` 経路。`kernels.rs` の

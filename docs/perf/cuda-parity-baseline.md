@@ -1368,3 +1368,94 @@ A 群をさらに証跡の性質で 3 グループへ分類して対応した。
   うえ起票する）
 
 
+### 10.7 グループ1・2 の案 A 確定・実装（GB10 実機実測 2026-09-02）
+
+§10.5.3 で未計測だった約 21 ケース（`gemm_wmma_tf32.rs` 8 件・
+`gemm_wmma_tf32_opt.rs`〈routed〉9 件・`gemm_wmma_tf32_staged.rs` 9 件）
+を、`wmma_tf32_parity_diagnostic_dump_issue_1106`・
+`wmma_tf32_routed_path_parity_diagnostic_dump_issue_1106`・
+`wmma_tf32_staged_parity_diagnostic_dump_issue_1106`（診断専用テスト。
+GPU アイドル 1% で実行、いずれも ok）で GB10 実機実測した。結果:
+
+- **basic（`gemm_wmma_tf32.rs`）**: 8 ケース中 7 ケースが非ゼロ fail
+  （32×32×32 seed=2000: 154/1024・64×64×64 seed=2001: 687/4096・
+  128×128×128 seed=2002: 2559/16384・512×512×512 seed=2003: 42550/262144・
+  64×96×128 seed=2004: 1027/6144・17×23×19 seed=2006: 52/391・
+  33×31×65 seed=2007: 171/1023）。1×1×1（seed=2005）のみ 0/1。K4096
+  ストレス 2 ケースも非ゼロ（256×256×4096 seed=8888: 10647/65536・
+  512×512×4096 seed=0xFACADE: 42688/262144）
+- **routed（`gemm_wmma_tf32_opt.rs`）**: 9 ケース中 8 ケースが非ゼロ fail
+  で、**全 8 ケースが既存の `ParityPath::WmmaTf32Opt` baseline 行と
+  fail_count／mean_abs_diff 完全一致**（実効経路〈staged／opt〉の決定を
+  含め再現的）。1×1×1（seed=0xBBE）のみ 0/1
+- **staged（`gemm_wmma_tf32_staged.rs`）**: 9 ケース中 8 ケースが非ゼロ
+  fail（64×64×64 seed=0xFA0: 633/4096・128×128×128 seed=0xFA1: 2631/16384・
+  512×512×512 seed=0xFA2: 42782/262144・60×68×36 seed=0xFA3: 691/4080・
+  68×60×20 seed=0xFA4: 620/4080・64×96×256 seed=0xFA5: 1008/6144）。
+  K4096 ストレス 2 ケースも非ゼロ（512×512×4096 seed=0xC0FFEE:
+  43019/262144〈既存 `WmmaTf32Staged` 行と一致〉・4096×4096×4096
+  seed=0xBEEF: 2725617/16777216〈新規〉）。1×1×1（seed=0xFA6）のみ 0/1
+
+いずれのファイルでも「ゼロ fail が実際に成立するのは 1×1×1（sub-K-tile）
+のみ」という §10.4／§10.5 の結論が再確認された。
+
+#### 10.7.1 実装したバグ修正（案 A 適用中に発見）
+
+§10.4 で `gemm.rs::wmma_tf32_opt_kernel_matches_reference_across_shapes`
+を 7 ケースから 1×1×1 のみへ縮小した際、`cases: &[(1, 1, 1)]` とした
+うえで `3000 + idx as u64`（`idx` は縮小後の配列上のインデックス=0）で
+seed を再計算していたため、実際には**未実測の seed=3000**（元は
+64×64×64 用のシード）が (1,1,1) 形状に適用されていた（元の 7 ケース
+配列で 1×1×1 が位置していた idx=6 に対応する seed=3006 ではなかった）。
+本ラウンドでこの座標ずれに気づき、`gemm.rs`・本ラウンドで追加した
+3 ファイルすべてで **縮小後の 1×1×1 テストは `idx` 由来の自動算出ではなく、
+実測した seed を直接ハードコードする**方式へ修正した（`gemm.rs`:
+seed=3006・`gemm_wmma_tf32.rs`: seed=2005・`gemm_wmma_tf32_opt.rs`
+routed: seed=3006・`gemm_wmma_tf32_staged.rs`: seed=4006。いずれも実測で
+fail_count=0/1 を確認済みの値）。
+
+#### 10.7.2 実装内容
+
+- **`crates/backend-cuda/tests/common/parity_baseline.rs`**: `WmmaTf32`
+  へ 7 行（64×64×64・128×128×128・512×512×512・64×96×128・17×23×19・
+  33×31×65・512×512×4096 seed=0xFACADE）、`WmmaTf32Staged` へ 7 行
+  （64×64×64・128×128×128・512×512×512・60×68×36・68×60×20・64×96×256・
+  4096×4096×4096 seed=0xBEEF）を追加した。`WmmaTf32Opt` は全 8 ケースが
+  既存行と完全一致したため新規行は追加していない
+- **`gemm_wmma_tf32.rs`**: `wmma_tf32_matches_reference_across_shapes` を
+  1×1×1（seed=2005）のみへ縮小。`wmma_tf32_k4096_stress_poc_v2_5`
+  （両ケースとも非ゼロ fail）は削除。公開 API `run_wmma_tf32` 経由で
+  `ParityPath::WmmaTf32` 行を検査する非後退監視テスト
+  `wmma_tf32_routed_path_baselines_do_not_regress` を新設した（`mod
+  common;` を追加）。診断専用テストは削除
+- **`gemm_wmma_tf32_opt.rs`**: `wmma_tf32_routed_path_matches_reference_across_shapes`
+  を 1×1×1（seed=3006）のみへ縮小。`wmma_tf32_routed_path_k4096_stress`
+  （両ケースとも既存行に対応）は削除。公開 API `run_wmma_tf32` 経由で
+  `ParityPath::WmmaTf32Opt` 行を検査する非後退監視テスト
+  `wmma_tf32_routed_path_baselines_do_not_regress` を新設した（`mod
+  common;` を追加）。診断専用テストは削除
+- **`gemm_wmma_tf32_staged.rs`**: `wmma_tf32_staged_matches_reference_across_shapes`
+  を 1×1×1（seed=4006）のみへ縮小。`wmma_tf32_staged_k4096_stress`
+  （両ケースとも baseline 側で検査可能）は削除。staged 経路は既存の
+  `tests/parity_nonregression.rs::parity_baselines_do_not_regress`
+  （`check_wmma_tf32_staged_baseline`）が `ParityPath::WmmaTf32Staged`
+  を skip せず走査するため、新規の非後退監視テストは不要（コード変更
+  なしで対象拡大）。診断専用テストは削除
+- tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）は
+  変更していない（ユーザー承認 2026-09-02）
+
+#### 10.7.3 残る扱い（次の意思決定待ち）
+
+- グループ3（`gemm_mma_tf32.rs`・`mma_tf32_vs_wmma_tf32_staged.rs`）:
+  原因未確定のため未着手（§10.5.1 参照）
+- 「本体維持＋非後退監視併設」の既存 5 件（`cpu_cuda_mma_parity.rs::
+  mma_f16_k4096_stress`・`tensor_core_real_device.rs::
+  tensor_core_parity_record`〈tf32〉・`gemm_tf32_optin.rs::
+  gemm_tf32_optin_on_matches_cpu_across_shapes`・本ラウンドで同型追加
+  した `cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress`・
+  `gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress`）は意図的に red の
+  まま。案 A（本体を green にする）へ転換するかはユーザー判断
+- B 群（性能比較 2 件）は §10.6 参照
+- #1106 の受入条件「GB10 で該当テスト群が全 pass」は、上記未決定事項が
+  残る限り本 PR 単独では満たされない（スコープ分割の要否をユーザーへ
+  諮る）

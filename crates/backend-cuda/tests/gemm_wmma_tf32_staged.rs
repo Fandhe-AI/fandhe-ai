@@ -91,175 +91,38 @@ fn wmma_tf32_staged_parity_smoke_env_adaptive() {
     }
 }
 
-/// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅
-/// テスト。受け入れ条件の本体。
+/// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の厳密ゼロ
+/// fail 判定テスト（イシュー #1106 案 A で対象形状を縮小）。
 ///
-/// staged カーネル固有のタイル境界（ブロックタイル 64、共有メモリ K タイル
-/// 16、fragment 16/8、cp.async ステージ 3）を踏む、cp.async 16 バイト
-/// 整列条件（`n%4==0 && k%4==0`）を満たす形状のみを対象にする（整列非対応
-/// 形状は `tests/gemm_wmma_tf32_opt.rs` が opt カーネル経由で検証する）。
+/// GB10 実機実測（2026-09-02 の診断ダンプ
+/// `wmma_tf32_staged_parity_diagnostic_dump_issue_1106`。修正確定に伴い
+/// 削除済み）により、`assert_parity`（厳密ゼロ fail 判定）が実際に成立
+/// するのは 1×1×1（sub-K-tile）のみと判明した。他の 6 形状（64×64×64・
+/// 128×128×128・512×512×512・60×68×36・68×60×20・64×96×256）と旧
+/// `wmma_tf32_staged_k4096_stress`（512×512×4096・4096×4096×4096）は
+/// `ParityBaseline::BASELINES`（`ParityPath::WmmaTf32Staged`）へ実測値
+/// 付きで移し、`tests/parity_nonregression.rs::parity_baselines_do_not_regress`
+/// （`check_wmma_tf32_staged_baseline`。公開 API `run_wmma_tf32` 経由。
+/// この経路はもともと skip 対象ではないためコード変更なしで対象拡大
+/// 済み）が検査する。旧 `wmma_tf32_staged_k4096_stress` は全ケースが
+/// ここへ移管されたため削除した。tolerance 定数は変更していない
+/// （ユーザー承認 2026-09-02。詳細は `docs/perf/cuda-parity-baseline.md`
+/// §10.5）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn wmma_tf32_staged_matches_reference_across_shapes() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
-    // `wmma_tf32_opt_matches_reference_across_shapes` と同じ根拠（PR #256
-    // レビュー指摘対応）。`run_wmma_tf32` は staged カーネル未対応環境・
-    // 整列非対応形状で opt／基本版へ自動フォールバックするため、この
-    // 検証がここで staged カーネル固有のタイル境界を実際に踏んだことを
-    // 保証するには、staged カーネルが利用可能であることを事前に確認する
-    // 必要がある（本テストは compute capability 8.0 以降の実機必須なので
-    // staged カーネルは利用可能であるべき）。
     assert!(
         gemm.wmma_tf32_staged_available(),
         "staged kernel must be available on this ignored test runner (reason: {:?})",
         gemm.wmma_tf32_staged_unavailable_reason()
     );
 
-    let cases: &[(u32, u32, u32)] = &[
-        (64, 64, 64),
-        (128, 128, 128),
-        (512, 512, 512),
-        // ブロックタイル・K タイル非倍数だが cp.async 4 要素整列条件は
-        // 満たす形状（63 は 64 の倍数でないが 4 の倍数でもない点に注意:
-        // guarded load のゼロ充填で処理される。65/33/17 も同様）。
-        (60, 68, 36),
-        (68, 60, 20),
-        // 非正方。
-        (64, 96, 256),
-        // 極小（1 の倍数でない形状。整列条件 n%4/k%4 を満たさないため
-        // staged は選ばれず opt/基本へフォールバックする想定だが、
-        // `run_wmma_tf32` 経由で正しく処理されることを確認する）。
-        (1, 1, 1),
-    ];
-    for (idx, &(m, n, k)) in cases.iter().enumerate() {
-        let context = format!("shape m={m} n={n} k={k}");
-        assert_wmma_tf32_staged_parity(&gemm, &context, 4000 + idx as u64, m, n, k);
-    }
-}
-
-/// K 大のストレスケース（`wmma_tf32_opt_k4096_stress` と同じ形状。
-/// PoC-v2-3 の M=N=K=4096 と揃える）。
-#[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
-fn wmma_tf32_staged_k4096_stress() {
-    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
-    let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
-    assert!(
-        gemm.wmma_tf32_staged_available(),
-        "staged kernel must be available on this ignored test runner (reason: {:?})",
-        gemm.wmma_tf32_staged_unavailable_reason()
-    );
-
-    assert_wmma_tf32_staged_parity(&gemm, "K4096 stress 512x512x4096", 0xC0FFEE, 512, 512, 4096);
-    assert_wmma_tf32_staged_parity(
-        &gemm,
-        "K4096 stress 4096x4096x4096",
-        0xBEEF,
-        4096,
-        4096,
-        4096,
-    );
-}
-
-/// **診断専用（イシュー #1106・GB10 全件洗い出し。PR 用の一時コード。
-/// 修正確定後に削除する）。**
-///
-/// [`wmma_tf32_staged_matches_reference_across_shapes`]・
-/// [`wmma_tf32_staged_k4096_stress`] は `assert_wmma_tf32_staged_parity`
-/// （内部で `assert_parity` を呼ぶ厳密ゼロ fail 判定）を使うため、最初に
-/// fail するケースで panic して以降のケースを実行しない。GB10 実機実測
-/// （2026-09-01 の直列 `--ignored` 実行）では両テストとも先頭ケース
-/// （64×64×64 seed=4000: fail 633/4096・512×512×4096 seed=0xC0FFEE:
-/// fail 43019/262144）のみが実測済み。残り 7 ケース（128×128×128・
-/// 512×512×512・60×68×36・68×60×20・64×96×256・1×1×1・4096×4096×4096
-/// seed=0xBEEF）は未計測のまま。本テストは同じ全ケース・同じシードを
-/// `run_wmma_tf32`（公開 API。整列条件を満たすためすべて staged 経路が
-/// 選ばれる想定）経由で `fandhe_ai_backend_cpu::compare`（panic しない
-/// 集計 API）で走らせ、`fail_count`/`total`・`max_abs_diff`・
-/// `max_rel_err`・`mean_abs_diff` を標準出力へ表として出す。**assert は
-/// 一切行わない**（常に成功する。目的は数値の可視化のみ）。
-#[test]
-#[ignore = "診断専用（イシュー #1106）。CUDA 実機（DGX Spark GB10 等、\
-            compute capability 8.0 以降）必須。修正確定後に削除する"]
-fn wmma_tf32_staged_parity_diagnostic_dump_issue_1106() {
-    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
-    let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
-    assert!(
-        gemm.wmma_tf32_staged_available(),
-        "staged kernel must be available on this ignored test runner (reason: {:?})",
-        gemm.wmma_tf32_staged_unavailable_reason()
-    );
-
-    let mut cases: Vec<(String, u64, u32, u32, u32)> = [
-        (64u32, 64u32, 64u32),
-        (128, 128, 128),
-        (512, 512, 512),
-        (60, 68, 36),
-        (68, 60, 20),
-        (64, 96, 256),
-        (1, 1, 1),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(idx, (m, n, k))| {
-        (
-            format!("across_shapes[{idx}] m={m} n={n} k={k}"),
-            4000 + idx as u64,
-            m,
-            n,
-            k,
-        )
-    })
-    .collect();
-    cases.push((
-        "k4096_stress 512x512x4096".to_string(),
-        0xC0FFEE,
-        512,
-        512,
-        4096,
-    ));
-    cases.push((
-        "k4096_stress 4096x4096x4096".to_string(),
-        0xBEEF,
-        4096,
-        4096,
-        4096,
-    ));
-
-    println!(
-        "{:<34} {:>10} {:>16} {:>12} {:>12} {:>12}",
-        "case", "seed", "fail/total", "max_abs", "max_rel", "mean_abs"
-    );
-    for (label, seed, m, n, k) in &cases {
-        let (m, n, k) = (*m, *n, *k);
-        let mut rng = bench_harness::rng::Xorshift64Star::new(*seed);
-        let a = rng.fill_vec((m as usize) * (k as usize));
-        let b = rng.fill_vec((k as usize) * (n as usize));
-
-        let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-        fandhe_ai_backend_cpu::matmul_reference_fma(
-            &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
-        )
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
-
-        let c_gpu = gemm
-            .run_wmma_tf32(&a, &b, m, n, k)
-            .expect("CudaGemm::run_wmma_tf32 must succeed on this ignored test runner");
-
-        let report = fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref)
-            .expect("gpu output and reference must have matching lengths");
-
-        println!(
-            "{label:<34} {seed:>#10x} {fail:>7}/{total:<8} {max_abs:>12.3e} {max_rel:>12.3e} \
-             {mean_abs:>12.3e}",
-            fail = report.fail_count,
-            total = report.total,
-            max_abs = report.max_abs_diff,
-            max_rel = report.max_rel_err,
-            mean_abs = report.mean_abs_diff,
-        );
-    }
+    // seed は 4006（元の 7 ケース配列での 1×1×1 の位置 idx=6 に対応する
+    // 4000+6）を直接指定する。実測は seed=4006〈0xfa6〉のみで
+    // fail_count=0/1 を確認済み（他の未測定 seed への一般化はしない）。
+    assert_wmma_tf32_staged_parity(&gemm, "shape m=1 n=1 k=1", 4006, 1, 1, 1);
 }
 
 /// `k == 0`（`num_k_tiles == 0` 経路）で C が全 0 になることを確認する
