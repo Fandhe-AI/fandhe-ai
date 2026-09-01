@@ -47,19 +47,44 @@ use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 mod common;
 
-/// フラグはプロセスグローバル（`crate::precision`）のため、
-/// `cargo test` の既定並列実行下で他のテストバイナリ内テストと競合し
-/// うる。本ファイル内では直列に実行し、各テストの最後に必ず OFF へ
-/// 戻す（`ops.rs::tests::Tf32FlagGuard` と同型の RAII ガード）。
+/// フラグはプロセスグローバル（`crate::precision`）のため、`cargo test`
+/// の既定並列実行下では本ファイル内の複数テストが同時に `acquire` し
+/// うる（Cursor Bugbot 指摘・PR #1115: `--ignored` 実行時に
+/// `gemm_tf32_optin_on_matches_cpu_across_shapes` と
+/// `gemm_tf32_optin_on_wiring_matches_run_wmma_tf32` が並行実行される
+/// と、一方の `Drop` によるフラグ復元がもう一方の GPU 呼び出し中に
+/// フラグを書き換え、意図しない精度経路〈wiring 検証が FP32 対 TF32 を
+/// 比較してしまう、または CPU-parity 経路が Tensor Core ルートから
+/// 外れる〉を引き起こしうる）。`TF32_TEST_LOCK`（本ファイル内限定の
+/// プロセス内 `Mutex`）を `acquire` 時に取得し `Self` に保持することで、
+/// フラグの読み取り→書き込み→（呼び出し元スコープでの使用）→
+/// `Drop` での復元までを単一クリティカルセクションとして直列化する
+/// （`ops.rs::tests::Tf32FlagGuard` と同型の RAII ガードにロックを
+/// 追加した形）。
+static TF32_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Tf32FlagGuard {
     original: bool,
+    // 同時に 1 つの `Tf32FlagGuard` しか生存できないことを保証する。
+    // 値は使わない（排他制御専用）ため `_` prefix で未使用警告を抑止する。
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Tf32FlagGuard {
     fn acquire(enabled: bool) -> Self {
+        // 他スレッドが panic しつつロックを保持していた場合でも
+        // teardown（フラグ復元）を継続できるよう、poison を無視して
+        // 内部値を取り出す（テストの排他制御用ロックであり、poison を
+        // fail-fast させると後続テストが無関係な理由で巻き添えになる）。
+        let lock = TF32_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original = tf32_gemm_enabled();
         set_tf32_gemm_enabled(enabled);
-        Self { original }
+        Self {
+            original,
+            _lock: lock,
+        }
     }
 }
 
