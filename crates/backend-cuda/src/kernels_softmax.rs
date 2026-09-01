@@ -51,18 +51,22 @@
 //! - **境界マスク定数（有限値。`-INFINITY` 不使用。イシュー #594 PR #712
 //!   codex-review 指摘・Cursor Bugbot 指摘の P1 修正で `-0.875f *
 //!   __FLT_MAX__` マージン方式から本方式へ変更）**: lane の初期値は
-//!   `m = SOFTMAX_MASK_E2`（`-__FLT_MAX__`。`f32` が表現できる**最小の
-//!   有限値**。**生ドメイン**〈上記「`log2(e)` 事前スケール」参照。`m` は
+//!   `m = SOFTMAX_MASK_E2`（自前リテラル `-3.402823466e+38f`。`f32` が
+//!   表現できる**最小の有限値**であり `f32::MAX` へビット正確に丸まる。
+//!   **生ドメイン**〈上記「`log2(e)` 事前スケール」参照。`m` は
 //!   スケール未適用のため、このマスク値も生ドメインの値として機能する〉・
-//!   `l = 0`。`__FLT_MAX__` は Clang/NVRTC の
-//!   プリプロセッサ組み込みマクロ（`<cfloat>`/`<float.h>` の include を
-//!   要求しない。`kernels_rmsnorm.rs` 同様「ビルド時に nvrtc/CUDA
-//!   ヘッダを一切要求しない」契約を維持する）。
+//!   `l = 0`。当初は Clang/NVRTC のプリプロセッサ組み込みマクロ
+//!   `__FLT_MAX__`（`<cfloat>`/`<float.h>` の include を要求しない）を
+//!   使っていたが、compute_121（DGX Spark GB10）向け NVRTC コンパイルで
+//!   `__FLT_MAX__` が未定義になり softmax parity テストが失敗する実測が
+//!   あったため（イシュー #1101）、ターゲット・NVRTC バージョンに依存
+//!   しない自前の定数リテラルへ置換した（`kernels_rmsnorm.rs` 同様
+//!   「ビルド時に nvrtc/CUDA ヘッダを一切要求しない」契約は維持）。
 //!   旧実装（`-0.875f * __FLT_MAX__` のマージン値）は「行の全要素がこの
 //!   マスク値未満の正規の有限入力」（例: 全要素 `-f32::MAX`）で `m` が
 //!   一度も更新されず、`exp2f((raw - m) * scale)` が 0 へアンダーフロー
 //!   して `l == 0` のまま `inv_l == Inf`・最終出力 `0 * Inf == NaN` に
-//!   なる欠陥があった。**`-__FLT_MAX__` は `f32` の有効な値域の下限その
+//!   なる欠陥があった。**マスク値は `f32` の有効な値域の下限その
 //!   ものであるため、いかなる正規の有限入力 `raw` についても常に
 //!   `raw >= m_init` が成立する**。よって `fmaxf` によるオンライン最大値
 //!   `m` は非空の行では必ずその行の真の最大値へ収束する（`raw` が
@@ -126,7 +130,7 @@ pub const SOFTMAX_BLOCK_DIM: u32 = 32;
 /// （`rmsnorm.rs::rmsnorm_route` を共有再利用）が判定し、収まらない場合は
 /// [`SOFTMAX_F32_TWOPASS`] へルーティングする。
 pub const SOFTMAX_F32_ONEPASS: &str = r#"
-#define SOFTMAX_MASK_E2 (-__FLT_MAX__)
+#define SOFTMAX_MASK_E2 (-3.402823466e+38f)
 
 extern "C" __global__ void softmax_f32_onepass(
     const float* __restrict__ x,
@@ -239,7 +243,7 @@ extern "C" __global__ void softmax_f32_onepass(
 /// `raw = x[i]` を再計算する。決定性維持。`kernels_rmsnorm.rs` の
 /// 2 パス経路と同じ「中間テンソルを書き出さない」構造）。
 pub const SOFTMAX_F32_TWOPASS: &str = r#"
-#define SOFTMAX_MASK_E2 (-__FLT_MAX__)
+#define SOFTMAX_MASK_E2 (-3.402823466e+38f)
 
 extern "C" __global__ void softmax_f32_twopass(
     const float* __restrict__ x,
@@ -424,19 +428,41 @@ mod tests {
     }
 
     /// 境界マスク定数（本ファイル冒頭コメント「境界マスク定数」参照）:
-    /// `-INFINITY` を直接使わず、`f32` の値域下限（`-__FLT_MAX__`）を
-    /// 使うことを検査する。
+    /// `-INFINITY` を直接使わず、`f32` の値域下限（自前リテラル
+    /// `-3.402823466e+38f`）を使うことを検査する。加えて `__FLT_MAX__`
+    /// （NVRTC 組み込みマクロ。compute_121 で未定義になり NVRTC
+    /// コンパイルが失敗する実測があった。イシュー #1101）へ逆戻りして
+    /// いないことも fail-closed に検査する。
     #[test]
     fn onepass_and_twopass_use_finite_mask_not_infinity() {
         for src in [SOFTMAX_F32_ONEPASS, SOFTMAX_F32_TWOPASS] {
             assert!(
-                src.contains("#define SOFTMAX_MASK_E2 (-__FLT_MAX__)"),
-                "境界マスク定数が f32 値域下限（-__FLT_MAX__）で定義されていない"
+                src.contains("#define SOFTMAX_MASK_E2 (-3.402823466e+38f)"),
+                "境界マスク定数が f32 値域下限（-3.402823466e+38f）で定義されていない"
             );
             assert!(
                 !src.contains("-INFINITY") && !src.contains("-INFINITY)"),
                 "境界マスクに -INFINITY を直接使用している"
             );
+            assert!(
+                !src.contains("__FLT_MAX__"),
+                "境界マスクが NVRTC 組み込みマクロ __FLT_MAX__ に逆戻りしている（イシュー #1101）"
+            );
         }
+    }
+
+    /// 自前リテラル `3.402823466e+38` が `f32::MAX` へビット正確に丸まる
+    /// ことを検証する（イシュー #1101）。この性質が崩れると
+    /// `softmax.rs::SOFTMAX_MASK_E2_F32`（`-f32::MAX`）とのホスト・
+    /// デバイス間ビット同一契約（本ファイル冒頭コメント「境界マスク
+    /// 定数」参照）が破られる。
+    #[test]
+    fn mask_literal_parses_to_bit_exact_f32_max() {
+        let parsed: f32 = "3.402823466e+38".parse().unwrap();
+        assert_eq!(
+            parsed.to_bits(),
+            f32::MAX.to_bits(),
+            "自前リテラルが f32::MAX へビット正確に丸まらない"
+        );
     }
 }
