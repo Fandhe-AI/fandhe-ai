@@ -3491,6 +3491,124 @@ mod tests {
         );
     }
 
+    /// **診断専用（イシュー #1106・PR 用の一時コード。修正確定後に削除する）。**
+    ///
+    /// [`wmma_tf32_opt_kernel_matches_reference_across_shapes`]／
+    /// [`wmma_tf32_opt_kernel_k4096_stress`] は [`assert_wmma_tf32_opt_kernel_parity`]
+    /// （内部で [`fandhe_ai_backend_cpu::assert_parity`] を呼ぶ厳密ゼロ fail
+    /// 判定）を使うため、最初に fail するケースで panic して以降のケースを
+    /// 一切実行しない。イシュー #1106 の GB10 実測は先頭ケース（64x64x64・
+    /// 512x512x4096）のみで、残り 7 ケース（128x128x128・512x512x512・
+    /// 63x65x33・65x63x17・64x96x256・1x1x1・4096x4096x4096）は未計測のまま
+    /// である。本テストは同じ 9 ケース・同じシードを
+    /// [`fandhe_ai_backend_cpu::compare`]（panic しない集計 API）で走らせ、
+    /// 全ケースの `fail_count`/`total`・`max_abs_diff`・`max_rel_err`・
+    /// `mean_abs_diff` を標準出力へ表として出す。**assert は一切行わない**
+    /// （このテスト自体は常に成功する。目的は数値の可視化のみ）。
+    ///
+    /// `WMMA_TF32_OPT_DIAG_SKIP_4096X4096` を設定すると 4096x4096x4096
+    /// ケース（ホスト側バッファ約 200MiB・CPU 参照実装が約 1.4e11 FLOP を
+    /// 要し低速）をスキップする。
+    #[test]
+    #[ignore = "診断専用（イシュー #1106）。CUDA 実機（compute capability 8.0 \
+                以降）必須。修正確定後に削除する"]
+    fn wmma_tf32_opt_kernel_parity_diagnostic_dump_issue_1106() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+        let func = gemm.wmma_tf32_opt.as_ref().expect(
+            "opt WMMA(TF32) kernel must be available on this ignored test runner (reason: see \
+             wmma_tf32_opt_error)",
+        );
+
+        let skip_4096x4096 = std::env::var("WMMA_TF32_OPT_DIAG_SKIP_4096X4096").is_ok();
+
+        // [`wmma_tf32_opt_kernel_matches_reference_across_shapes`] と同一の
+        // 形状・シード起点（`3000 + idx`）。
+        let across_shapes: &[(u32, u32, u32)] = &[
+            (64, 64, 64),
+            (128, 128, 128),
+            (512, 512, 512),
+            (63, 65, 33),
+            (65, 63, 17),
+            (64, 96, 256),
+            (1, 1, 1),
+        ];
+        let mut cases: Vec<(String, u64, u32, u32, u32)> = across_shapes
+            .iter()
+            .enumerate()
+            .map(|(idx, &(m, n, k))| {
+                (
+                    format!("across_shapes[{idx}] m={m} n={n} k={k}"),
+                    3000 + idx as u64,
+                    m,
+                    n,
+                    k,
+                )
+            })
+            .collect();
+        // [`wmma_tf32_opt_kernel_k4096_stress`] と同一の形状・シード。
+        cases.push((
+            "k4096_stress 512x512x4096".to_string(),
+            0xC0FFEE,
+            512,
+            512,
+            4096,
+        ));
+        if skip_4096x4096 {
+            eprintln!(
+                "WMMA_TF32_OPT_DIAG_SKIP_4096X4096 set: skipping k4096_stress 4096x4096x4096"
+            );
+        } else {
+            cases.push((
+                "k4096_stress 4096x4096x4096".to_string(),
+                0xBEEF,
+                4096,
+                4096,
+                4096,
+            ));
+        }
+
+        println!(
+            "{:<34} {:>10} {:>16} {:>12} {:>12} {:>12}",
+            "case", "seed", "fail/total", "max_abs", "max_rel", "mean_abs"
+        );
+        for (label, seed, m, n, k) in &cases {
+            let (m, n, k) = (*m, *n, *k);
+            let mut rng = bench_harness::rng::Xorshift64Star::new(*seed);
+            let a = rng.fill_vec((m as usize) * (k as usize));
+            let b = rng.fill_vec((k as usize) * (n as usize));
+
+            let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+            fandhe_ai_backend_cpu::matmul_reference_fma(
+                &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+            )
+            .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+
+            validate_gemm_dims(a.len(), b.len(), m, n, k)
+                .expect("test shape must be a valid GEMM dimension");
+            validate_wmma_tf32_opt_k_bound(k).expect("test k must satisfy WMMA(TF32) opt k bound");
+
+            let c_gpu = gemm
+                .run_wmma_tf32_opt_kernel(func, &a, &b, m, n, k)
+                .expect("opt WMMA(TF32) kernel execution must succeed on this ignored test runner");
+
+            let report = fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref)
+                .expect("gpu output and reference must have matching lengths");
+
+            println!(
+                "{label:<34} {seed:>#10x} {fail:>7}/{total:<8} {max_abs:>12.3e} {max_rel:>12.3e} \
+                 {mean_abs:>12.3e}",
+                fail = report.fail_count,
+                total = report.total,
+                max_abs = report.max_abs_diff,
+                max_rel = report.max_rel_err,
+                mean_abs = report.mean_abs_diff,
+            );
+        }
+    }
+
     /// #500 の目的（cp.async 多段化・fragment 先読みによる TF32 経路の性能
     /// 改善）の実測本体: staged カーネルが opt カーネルを上回ることを、
     /// 同一実行内で 5 回計測した中央値で確認する（`.claude/rules/
