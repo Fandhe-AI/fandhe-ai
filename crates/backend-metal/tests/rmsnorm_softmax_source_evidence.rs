@@ -30,19 +30,44 @@ fn onepass_max_hidden_matches_row_kernel_constant() {
     }
 }
 
-/// 5 段 butterfly reduction（`simd_shuffle_xor` 幅 16/8/4/2/1）の使用を
-/// ロックする（実装計画 §4.1「reduction は 5 段 butterfly」）。
+/// softmax 側の 5 段 butterfly reduction（`simd_shuffle_xor` 幅
+/// 16/8/4/2/1 の展開済み 5 行）の使用をロックする（実装計画 §4.1
+/// 「reduction は 5 段 butterfly」）。RMSNorm 側は縮約精度契約
+/// （§9.8 追補・イシュー #1102）により Kahan 補償和のループ形式
+/// （`rmsnorm_uses_five_stage_kahan_butterfly_reduction`）へ変更した
+/// ため、本テストの対象から分離した。
 #[test]
-fn rmsnorm_and_softmax_use_five_stage_butterfly_reduction() {
-    for src in [RMSNORM_METAL_SOURCE, SOFTMAX_METAL_SOURCE] {
-        for width in ["16u", "8u", "4u", "2u", "1u"] {
-            let needle = format!("simd_shuffle_xor(v, {width})");
-            assert!(
-                src.contains(&needle),
-                "5 段 butterfly reduction の shuffle 幅 `{width}` が見つかりません: {needle}"
-            );
-        }
+fn softmax_uses_five_stage_butterfly_reduction() {
+    for width in ["16u", "8u", "4u", "2u", "1u"] {
+        let needle = format!("simd_shuffle_xor(v, {width})");
+        assert!(
+            SOFTMAX_METAL_SOURCE.contains(&needle),
+            "5 段 butterfly reduction の shuffle 幅 `{width}` が見つかりません: {needle}"
+        );
     }
+}
+
+/// RMSNorm 側の 5 段 butterfly reduction は Kahan 補償和（`f64`
+/// アキュムレータ相当。§9.8 追補・イシュー #1102）のレーン間結合へ
+/// 変更されており、`offset` を 16u→1u へ 5 回半減させるループ
+/// （softmax 側の展開済み 5 行とは異なる構造だが段数の契約は同じ）で
+/// `sum`・補償項 `comp` の両方を `simd_shuffle_xor` することをロックする
+/// （`comp` の shuffle が失われると `f64` 相当の精度契約が崩れるため
+/// 特に重要）。
+#[test]
+fn rmsnorm_uses_five_stage_kahan_butterfly_reduction() {
+    assert!(
+        RMSNORM_METAL_SOURCE.contains("for (uint offset = 16u; offset > 0u; offset >>= 1u)"),
+        "RMSNorm の Kahan butterfly ループ（16u→1u の 5 段半減）が見つかりません"
+    );
+    assert!(
+        RMSNORM_METAL_SOURCE.contains("simd_shuffle_xor(sum, offset)"),
+        "RMSNorm の Kahan butterfly が sum を shuffle していません"
+    );
+    assert!(
+        RMSNORM_METAL_SOURCE.contains("simd_shuffle_xor(comp, offset)"),
+        "RMSNorm の Kahan butterfly が補償項 comp を shuffle していません          （f64 相当の精度契約が壊れている可能性）"
+    );
 }
 
 /// `threadgroup_barrier` を使わず `simdgroup_barrier(mem_flags::
@@ -128,14 +153,22 @@ fn rmsnorm_and_softmax_row_base_is_declared_ulong() {
     }
 }
 
-/// FMA 契約: RMSNorm の累算に `fma()` を明示使用していることをロックする
-/// （REQ-2・`.claude/rules/coding-rust.md`「CPU 参照実装は `f32::mul_add`
-/// を用い、GPU 側の既定 FMA 契約と揃える」）。
+/// 縮約精度契約（§9.8 追補・イシュー #1102。ユーザー承認 2026-09-01）:
+/// RMSNorm の二乗和累算は `f64` アキュムレータ相当の Kahan 補償和へ
+/// 変更したため、単純な `fma()` 直接蓄積ではなく `rmsnorm_kahan_add`
+/// ヘルパーの使用をロックする（`.claude/rules/coding-rust.md`「正規化
+/// 統計・勾配の長軸縮約は f64 アキュムレータ（Metal は Kahan 補償和
+/// f32）で統一する」契約）。正規化出力の積算（`v * rstd * wv` 等）自体
+/// の FMA 契約は本テストの対象外（変更していない）。
 #[test]
-fn rmsnorm_uses_fma_for_accumulation() {
+fn rmsnorm_uses_kahan_compensated_sum_for_accumulation() {
     assert!(
-        RMSNORM_METAL_SOURCE.contains("fma(v.x, v.x, acc)"),
-        "RMSNorm の二乗和累算に fma() が見つかりません"
+        RMSNORM_METAL_SOURCE.contains("rmsnorm_kahan_add(acc, acc_c, v.x * v.x)"),
+        "RMSNorm の二乗和累算に Kahan 補償和ヘルパー（rmsnorm_kahan_add）が見つかりません"
+    );
+    assert!(
+        !RMSNORM_METAL_SOURCE.contains("acc = fma(v.x, v.x, acc)"),
+        "RMSNorm の二乗和累算が単純な fma() 直接蓄積へ後退している（Kahan 補償が失われる）"
     );
 }
 

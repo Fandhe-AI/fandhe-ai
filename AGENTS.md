@@ -86,7 +86,12 @@
   フラグによる切替の持ち込みは P1
 - **数値契約の統一（P1）**: バックエンド間数値一致は統一複合判定（相対誤差 1e-3 未満
   または絶対誤差 1e-5 未満、全ペア共通）。丸め方針（FMA 契約）はバックエンド間で
-  統一する（CPU 参照実装は `f32::mul_add`）。契約の片側変更は P1
+  統一する（CPU 参照実装は `f32::mul_add`）。matmul 系の FMA 契約はこのまま不変。
+  加えて、**正規化統計・勾配の長軸縮約**（rmsnorm の `rstd` 二乗和・dw の行方向蓄積等）
+  は `f64` アキュムレータ（Metal は `double` 非対応のため Kahan 補償和 `f32` を
+  「`f64` 相当」の実装形として適用する）で統一する（イシュー #1102。ユーザー承認
+  2026-09-01。GB10 実機実測: `docs/perf/cuda-parity-baseline.md` §9.8）。契約の
+  片側変更（一部バックエンドのみ精度を上げる等）は P1
 - **設計文書との整合（P1/P2）**: 方式決定済みの領域（`docs/backend-metal-wgpu-decision.md`・
   `docs/dispatch-rules-design.md`・`docs/typed-shape-design.md`・
   `docs/memory-pool-design.md` 等）と矛盾する実装は、設計文書の改訂とセットでない限り

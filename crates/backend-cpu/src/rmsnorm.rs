@@ -24,9 +24,21 @@
 //!
 //! # FMA 契約（REQ-2）
 //!
-//! 二乗和の累積は `f32::mul_add(v, v, acc)`（NEON は `vfmaq_f32`）を用いる
-//! （GPU 側 `fmaf`／`simdgroup_multiply_accumulate` の既定 FMA 契約と揃える。
-//! `.claude/rules/coding-rust.md`）。
+//! 要素ごとの積和自体は `f32::mul_add(v, v, acc)`（NEON は `vfmaq_f32`）を
+//! 用いる（GPU 側 `fmaf`／`simdgroup_multiply_accumulate` の既定 FMA 契約と
+//! 揃える。`.claude/rules/coding-rust.md`）。
+//!
+//! # 縮約精度契約（正規化統計の f64 アキュムレータ統一。イシュー #1102）
+//!
+//! 二乗和（`rstd` 導出）の**蓄積**（複数要素にわたる合計の累積）は `f64`
+//! アキュムレータで行い、`rstd` へ代入する 1 回だけ `f32` へ downcast
+//! する（要素ごとの二乗自体は `f32` のまま。`AGENTS.md`／
+//! `.claude/rules/coding-rust.md` の「正規化統計・勾配の長軸縮約は f64
+//! アキュムレータ（Metal は Kahan 補償和 f32）で統一する」契約。CUDA
+//! 側 forward の `double` アキュムレータ化〈`kernels_rmsnorm.rs` §9.7
+//! 追補〉と揃える全バックエンド統一。ユーザー承認 2026-09-01）。matmul
+//! 系の FMA 契約（`f32::mul_add`）自体は不変であり、本契約は縮約
+//! （正規化統計・勾配の長軸和）に限定して精度を引き上げるものである。
 //!
 //! # 境界検査（REQ-8）
 //!
@@ -171,7 +183,9 @@ fn rmsnorm_row(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_row: &m
 /// dead_code 判定はコンパイル単位ごとであり、テスト専用の呼び出しは
 /// 通常の `lib` ターゲットビルドには含まれないため）。
 ///
-/// `f32::mul_add` で二乗和を累積し FMA 契約（REQ-2）を GPU 側と揃える。
+/// 二乗和の**蓄積**は `f64` アキュムレータで行う（要素ごとの二乗自体は
+/// `f32::mul_add` 相当。縮約精度契約〈本ファイル冒頭コメント〉・
+/// イシュー #1102）。`rstd` へ代入する 1 回だけ `f32` へ downcast する。
 #[cfg(any(not(target_arch = "aarch64"), test))]
 pub(crate) fn rmsnorm_row_scalar(
     row: &[f32],
@@ -180,11 +194,12 @@ pub(crate) fn rmsnorm_row_scalar(
     inv_n: f32,
     out_row: &mut [f32],
 ) {
-    let mut acc = 0.0f32;
+    let mut acc = 0.0f64;
     for &v in row {
+        let v = v as f64;
         acc = v.mul_add(v, acc);
     }
-    let rstd = 1.0f32 / acc.mul_add(inv_n, eps).sqrt();
+    let rstd = (1.0f64 / acc.mul_add(inv_n as f64, eps as f64).sqrt()) as f32;
     match w {
         Some(w) => {
             for ((o, &v), &wv) in out_row.iter_mut().zip(row.iter()).zip(w.iter()) {
@@ -201,37 +216,53 @@ pub(crate) fn rmsnorm_row_scalar(
 
 /// NEON 経路（`cfg(target_arch = "aarch64")` 限定）。
 ///
-/// 二乗和は `as_chunks::<4>()` の full チャンクを `vfmaq_f32` で累積し、
-/// 端数（`hidden % 4 != 0`）はスカラー（[`rmsnorm_row_scalar`] と同一定義の
-/// `f32::mul_add`）で処理する（REQ-8 境界検査。ベクトル化ロードは検証済み
-/// full チャンクのみを対象とし `get_unchecked` は使わない）。出力パスも
-/// 同じ分割で `vmulq_f32`（+ 任意 `w` の `vmulq_f32`）を適用する。
+/// 二乗和の**蓄積**は `f64` の NEON ベクタアキュムレータ（`float64x2_t`
+/// 2 本）で行う（縮約精度契約。本ファイル冒頭コメント・イシュー #1102）。
+/// `as_chunks::<4>()` の full チャンクを `vcvt_f64_f32`／
+/// `vcvt_high_f64_f32` で下位・上位 2 要素ずつ `f64` へ拡張してから
+/// `vfmaq_f64` で二乗和を累積する（CUDA 側 forward の warp レーン内
+/// `double` アキュムレータ化〈`kernels_rmsnorm.rs` §9.7 追補〉と対応する
+/// 設計）。端数（`hidden % 4 != 0`）はスカラー（`f64` 昇格 + `f64::
+/// mul_add`）で処理する（REQ-8 境界検査。ベクトル化ロードは検証済み
+/// full チャンクのみを対象とし `get_unchecked` は使わない）。出力パスは
+/// 従来どおり `f32`（`vmulq_f32`＋任意 `w` の `vmulq_f32`）を適用する
+/// （`rstd` へ downcast した後の正規化出力自体の精度契約は変更しない）。
 #[cfg(target_arch = "aarch64")]
 fn rmsnorm_row_neon(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_row: &mut [f32]) {
-    use std::arch::aarch64::{vaddvq_f32, vfmaq_f32, vld1q_f32, vmulq_f32, vmulq_n_f32, vst1q_f32};
+    use std::arch::aarch64::{
+        vaddvq_f64, vcvt_f64_f32, vcvt_high_f64_f32, vdupq_n_f64, vfmaq_f64, vget_low_f32,
+        vld1q_f32, vmulq_f32, vmulq_n_f32, vst1q_f32,
+    };
 
     let (chunks, remainder) = row.as_chunks::<4>();
     // SAFETY: `as_chunks::<4>()` が返す各チャンクは長さ 4 の固定長配列
     // （REQ-8）。`vld1q_f32` はチャンク先頭ポインタから 4 要素（16 バイト）
     // 読み出すが、チャンク自体が 4 要素ちょうどの配列であるため範囲外
-    // 読み出しは起きない。
+    // 読み出しは起きない。ARMv8-A の Advanced SIMD は倍精度演算
+    // （`float64x2_t`／`vfmaq_f64` 等）をベースライン機能として含むため、
+    // 本ファイル内の他の NEON intrinsics 呼び出しと同様に追加の
+    // `#[target_feature]` 指定は不要（aarch64 ターゲットで常時有効）。
     let acc_vec = unsafe {
-        let mut acc = std::arch::aarch64::vdupq_n_f32(0.0);
+        let mut acc_lo = vdupq_n_f64(0.0);
+        let mut acc_hi = vdupq_n_f64(0.0);
         for c in chunks {
             let v = vld1q_f32(c.as_ptr());
-            acc = vfmaq_f32(acc, v, v);
+            let v_lo = vcvt_f64_f32(vget_low_f32(v));
+            let v_hi = vcvt_high_f64_f32(v);
+            acc_lo = vfmaq_f64(acc_lo, v_lo, v_lo);
+            acc_hi = vfmaq_f64(acc_hi, v_hi, v_hi);
         }
-        acc
+        vaddvq_f64(acc_lo) + vaddvq_f64(acc_hi)
     };
-    // 端数はスカラーで `f32::mul_add`（NEON `vfmaq_f32` と同一の FMA
-    // 契約・演算順序: ベクタ部分を先に、端数を後に累積する）。
-    let mut acc_scalar = 0.0f32;
+    // 端数は `f64` 逐次和（ベクタ部分と同じ「要素を `f64` へ昇格してから
+    // 二乗を蓄積する」方針。ベクタ部分を先に、端数を後に累積する演算順序も
+    // 従来どおり維持する）。
+    let mut acc = acc_vec;
     for &v in remainder {
-        acc_scalar = v.mul_add(v, acc_scalar);
+        let v = v as f64;
+        acc = v.mul_add(v, acc);
     }
-    // `vaddvq_f32` はレーン間水平和（NEON 標準の水平縮約命令）。
-    let acc = unsafe { vaddvq_f32(acc_vec) } + acc_scalar;
-    let rstd = 1.0f32 / acc.mul_add(inv_n, eps).sqrt();
+    let rstd = (1.0f64 / acc.mul_add(inv_n as f64, eps as f64).sqrt()) as f32;
 
     let out_chunks = out_row.as_chunks_mut::<4>().0.iter_mut();
     let row_chunks = row.as_chunks::<4>().0.iter();

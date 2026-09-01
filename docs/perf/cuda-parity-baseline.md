@@ -828,6 +828,95 @@ CAP_BYTES` は 64 MiB のまま変更していないため、同一 `hidden` に
 実測値（`fail_count`・`max_abs_diff` 等）を追記し、イシュー
 #1102／#1105 のクローズ可否・REQ-8 性能非後退を判断する。
 
+**GB10 実機再検証結果（コミット `1a356ea`。コーディネータ実行）**:
+`rmsnorm_backward_matches_cpu_across_shapes`・`rmsnorm_backward_dw_split_
+matches_cpu_across_shapes` の 2 テストが pass した。旧 FAIL ケース
+`(rows=8192, hidden=4096, num_blocks=1)` は `fail_count=5/4096 → 0` へ
+解消した。dw の `rows` 方向蓄積（単段カーネル `RMSNORM_BWD_DW_F32`。
+9.8 のルーティング確認で判明したとおり `num_blocks<=1` の実効経路）を
+`double` アキュムレータ化したことが、この特定ケースの解消に直接寄与した
+ことを実機で確認した。
+
+### 9.9 契約改定: 正規化統計・勾配の長軸縮約を全バックエンドで f64 統一（ユーザー承認 2026-09-01）
+
+**背景**: 9.7〜9.8 の対応は CUDA カーネルと CPU 参照実装（テスト専用の
+独立参照実装）のみを `f64`（`double`）化しており、`backend-cpu`・
+`backend-metal` の**本番実装**（`crates/backend-cpu/src/rmsnorm.rs`・
+`crates/backend-metal/src/shaders/rmsnorm.metal`）は `f32` のままだった。
+これは「CUDA と参照実装だけを片側で `f64` 化する」契約の非対称性であり、
+codex-review が P1 として 2 件（CUDA 側・CPU 参照実装側）指摘した内容の
+根本原因でもある。ユーザー承認（2026-09-01）により、**正規化統計・勾配
+の長軸縮約（rmsnorm の `rstd` 二乗和・dw の行方向蓄積等）は全バックエンド
+で `f64` アキュムレータ契約へ統一する**（Metal は `double` 型非対応の
+ため Kahan 補償和 `f32` を「`f64` 相当」の実装形として適用する）ことで
+この非対称性を解消した。matmul 系の FMA 契約（CPU 参照 `f32::mul_add`）
+は不変（`AGENTS.md`・`.claude/rules/coding-rust.md` に同内容を追記済み）。
+
+**実装の棚卸し**: rmsnorm 実装は 3 バックエンドすべてに存在する
+（`backend-cpu`・`backend-cuda`・`backend-metal`）。同型の「長軸縮約」を
+持つ他の演算（softmax 等）は本イシューのスコープ外（rmsnorm の `rstd`・
+dw のみが対象と確認済み。softmax の縮約〈max・sum〉は別イシューで扱う
+判断とし、本 PR では変更していない）。CPU・Metal とも rmsnorm の
+**backward（dw）専用カーネルは存在しない**（`backend-cpu`・
+`backend-metal` いずれも forward のみを自作カーネルとして持ち、backward
+は汎用 autodiff 合成〈elementwise・reduction〉経由。ダミー「同型演算の
+列挙」としてはこの事実を記録するに留め、変更は forward の `rstd` のみに
+限定した）。
+
+**`backend-cpu`（`crates/backend-cpu/src/rmsnorm.rs`）**:
+
+- スカラー経路（`rmsnorm_row_scalar`）: 二乗和の蓄積を `f32` から `f64`
+  アキュムレータへ変更（要素の二乗自体も `f64` へ昇格してから計算し、
+  CUDA 側の `fma((double)v, (double)v, acc)` と精度特性を揃えた）。
+  `rstd` へ代入する 1 回だけ `f32` へ downcast する
+- NEON 経路（`rmsnorm_row_neon`。aarch64 限定）: `vcvt_f64_f32`／
+  `vcvt_high_f64_f32` で `float32x4_t` チャンクを下位・上位 2 要素ずつ
+  `float64x2_t` へ拡張し、`vfmaq_f64`（倍精度 NEON FMA。ARMv8-A の
+  Advanced SIMD がベースラインで倍精度演算を含むため追加の
+  `#[target_feature]` 指定は不要）で二乗和を蓄積する。端数は `f64`
+  逐次和で処理する
+- 実機実測（Apple M4 Max・aarch64。本 PR 作業環境）: `cargo test -p
+  fandhe-ai-backend-cpu` 全 pass（`neon_matches_scalar_various_hidden`
+  という NEON/スカラー A/B 同値テストを含む。両経路とも `f64` 化後も
+  1e-5 の既存許容誤差内で一致することを確認済み——`f64` 化は両経路を
+  真値へ近づける変更のため、互いの差は `f64` 化前より縮む方向）
+
+**`backend-metal`（`crates/backend-metal/src/shaders/rmsnorm.metal`）**:
+
+- forward の 1 パス／2 パス両カーネル（`rmsnorm_f32_onepass`／
+  `rmsnorm_f32_twopass`）の二乗和蓄積を、単純な `fma()` 直接蓄積から
+  **Neumaier 改良版 Kahan 補償和**（`rmsnorm_kahan_add`）へ変更した。
+  レーン内蓄積（各レーンの `hidden/32` 要素程度の逐次和）・32 レーン間
+  butterfly 縮約（`rmsnorm_reduce_sum_kahan`。5 段シャッフルで `sum`・
+  補償項 `comp` の両方を交換し Neumaier 方式で合成）の両方に適用した
+  （CUDA 側「レーン内部分和を `double` 化・warp shuffle を `double` で
+  行う」設計と対応する）
+- Apple GPU family は `double` 型をサポートしないため MSL では `f64`
+  アキュムレータを直接使えない。Kahan（Neumaier）補償和は、丸め誤差を
+  明示的な補償項として保持し毎回の加算前に打ち消すことで、単純な `f32`
+  逐次和より大幅に高い実効精度（多くの実用的なケースで倍精度相当）を
+  達成する古典的な技法であり、本契約における「`f64` 相当」の定義とする
+- 実機実測（Apple M4 Max・実機 GPU。本 PR 作業環境）:
+  `cargo test -p fandhe-ai-backend-metal --release --test rmsnorm_parity
+  -- --ignored --nocapture` 3 テスト全 pass（`rmsnorm_matches_cpu_
+  across_shapes`・`rmsnorm_matches_backend_cpu_directly`〈`f64` 化した
+  `backend-cpu` 本番実装との直接比較〉・`rmsnorm_run_fused_matches_cpu_
+  composed`）。`cargo test -p fandhe-ai-backend-metal --release --
+  --ignored --test-threads=1`（rmsnorm 以外を含む実機依存テスト全件）も
+  全 pass（非後退確認）
+- ソース文字列証跡テスト（`tests/rmsnorm_softmax_source_evidence.rs`）を
+  更新: `rmsnorm_uses_fma_for_accumulation` を
+  `rmsnorm_uses_kahan_compensated_sum_for_accumulation` へ置き換え、
+  butterfly reduction の 5 段検査を softmax 側（展開済み 5 行。従来どおり）
+  と rmsnorm 側（Kahan ループ形式。`sum`・`comp` 両方の shuffle を検査）
+  に分離した
+
+**tolerance・ケース表・シードは一切変更していない**（`RELATIVE_TOLERANCE`・
+`ABSOLUTE_RESCUE_THRESHOLD`・複合判定式は不変）。本節の変更はいずれも
+「実装側の精度をより真値へ近づける」対応であり、CPU 参照実装の `f64` 化
+（9.8）と同じ精神——独立参照・各バックエンド実装ともに精度を引き上げる
+ことで、縮約順序の非結合性に由来する誤差を許容範囲内へ収める——に立つ。
+
 ## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
 
 本節は §1〜8（GEMM `wmma`/`mma` 系ベースライン表・非後退契約本体）の続き
