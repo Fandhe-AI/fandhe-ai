@@ -90,22 +90,31 @@ CPU 参照実装と直接照合する
 `wmma_tf32_routed_path_k4096_stress` へ改名し、「実効ルーティング経路の
 parity」検査として引き続き公開 API 経由で機能する。
 
-**既知の限界（`wmma_tf32` 行 2 件・PR #640 Cursor Bugbot 指摘・codex-review
-P1 指摘。未解決・実機再測定が必要）**: 上表 1〜2 行目（32×32×32 seed=2000・
-256×256×4096 seed=8888）は出典テスト `gemm_wmma_tf32.rs` が
-`CudaGemm::run_wmma_tf32` を opt 可用性の確認なしに呼び出しており、DGX
-Spark GB10 実機実測環境では opt カーネルが利用可能であった可能性が高い
-（`docs/perf/cuda-floor-remeasurement.md`「opt カーネル可用性の検証」節
-参照。同実機で `wmma_tf32_opt_available()` が概ね true であることの
-傍証）。そのため記録値が実際には opt カーネルの結果であり、基本版カーネル
+**既知の限界は解消済み（イシュー #1106・GB10 実機実測 2026-08-31/09-01。
+コミット `d39e03b`。旧内容は下記に残す）**: 上表 1〜2 行目（32×32×32
+seed=2000・256×256×4096 seed=8888）は出典テスト `gemm_wmma_tf32.rs` が
+`CudaGemm::run_wmma_tf32` を opt 可用性の確認なしに呼び出しており、記録値が
+実際には opt カーネルの結果である可能性が懸念されていた。基本版カーネル
 専用の単体テスト
 （`backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
-`crates/backend-cuda/src/gemm.rs`。§7 関連）の非後退検査と比較した際に
+`crates/backend-cuda/src/gemm.rs`。§7 関連）を DGX Spark GB10（sm_121・
+CUDA 13.0）実機で release 2 回実行し、いずれも 32×32×32 で
+fail_count=154/1024・mean_abs_diff=3.697936e-4、256×256×4096 で
+fail_count=10647/65536・mean_abs_diff=4.476030e-3 の完全一致を確認した。
+実測値は記録済みの値（上表）と一致しており、`wmma_tf32`（基本版）・
+`wmma_tf32_opt` が同一の parity 分布を持つという
+`docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md`（#995。GB10 実機で
+basic/opt/staged 数値完全一致）の結果を裏付ける。推定値の上書きではなく
+実測による確認であり、`crates/backend-cuda/tests/common/parity_baseline.rs`
+の該当 2 行を `baseline_provenance_unconfirmed: false` へ更新済み。
+
+（旧記述・履歴として保持）PR #640 Cursor Bugbot 指摘・codex-review P1 指摘の
+懸念事項: 記録値が opt カーネル実測である可能性（DGX Spark GB10 実機実測
+環境では opt カーネルが利用可能であった可能性が高いことが根拠。
+`docs/perf/cuda-floor-remeasurement.md`「opt カーネル可用性の検証」節参照）。
 K-tiling 差（基本版 8 / opt 16）由来の false-fail・false-pass を生む可能性が
-ある。実機未到達のため本 PR では再測定できず、`wmma_tf32` 行の基本版
-カーネル確定測定は実機到達時のフォローアップ課題として引き継ぐ（推定値で
-上書きしない。§6「未計測形状・シードの行追加」と同じ原則を、既存行の
-provenance 再確認にも適用する）。
+懸念されていたが、上記実測により両カーネルの parity 分布が実際には
+一致することが確認され、この懸念は解消された。
 
 **機械的な運用対応（codex-review P1 再指摘対応。fail-closed 契約への変更）**:
 この provenance 不確実性を「わかったうえで放置」せず、
@@ -271,8 +280,8 @@ falsification 検査群）が全て green であることを確認した。
 
 | 経路 | 形状・シード | 状態 | 未確定の理由 |
 |---|---|---|---|
-| `wmma_tf32`（基本版） | 32×32×32 seed=2000 | 要再測定（現行記録値は provenance 未確定） | §3 に実測値（154/1024・3.698e-4）は存在するが、記録元テストが opt 可用性を確認せず呼んでいるため opt 実測結果である疑いが残る（§「既知の限界」）。基本版カーネル専用の再測定が必要 |
-| `wmma_tf32`（基本版） | 256×256×4096 seed=8888 | 要再測定（現行記録値は provenance 未確定） | 同上（§3 実測値: 10647/65536・4.476e-3） |
+| `wmma_tf32`（基本版） | 32×32×32 seed=2000 | **確定済み（#1106・2026-08-31/09-01）** | GB10 実機 release 2 回実行で 154/1024・3.697936e-4 の完全一致を確認し `baseline_provenance_unconfirmed: false` へ更新済み（§「既知の限界」参照） |
+| `wmma_tf32`（基本版） | 256×256×4096 seed=8888 | **確定済み（#1106・2026-08-31/09-01）** | GB10 実機 release 2 回実行で 10647/65536・4.476030e-3 の完全一致を確認し `baseline_provenance_unconfirmed: false` へ更新済み（§「既知の限界」参照） |
 | `wmma_tf32_staged` | 512×512×4096 seed=0xC0FFEE | **確定済み（#726・2026-08-19）** | #500 で行のみ先行追加（プレースホルダ）→ #726 の実機実測（§3 表・8.5 表参照）で確定値へ差し替え・`baseline_provenance_unconfirmed: false` へ更新済み |
 
 ### 8.4 実機実測手順（申し送りテンプレート）
@@ -485,3 +494,69 @@ cpu_across_shapes` はケース `(rows=8192, hidden=4096, num_blocks=1)` で
 `rmsnorm_matches_cpu_across_shapes`）は同一実機実測で全て pass しており、
 `rsqrtf` → `1.0f / sqrtf` の変更による非後退（regression）は確認されて
 いない。
+
+## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
+
+本節は §1〜8（GEMM `wmma`/`mma` 系ベースライン表・非後退契約本体）の続き
+として、8.3 で実機不達のまま申し送られた `WmmaTf32`（基本版）2 行の
+provenance 未確定 fail-closed、および §5.3 記載の恒常 fail テスト群の
+GB10 実機実測・解消記録を追記する（イシュー #1102 配下・親 #1007）。
+
+### 10.1 実測環境
+
+- ノード: DGX Spark GB10（実ホスト名は `docs/real-hardware-verification-env.local.md`
+  参照。`.gitignore` 対象）。sm_121・CUDA 13.0.88・driver 580.159.03
+- 転送元コミット: `d39e03b0f6f4a6488cfdf79732351b4af256eb13`（`origin/main`。
+  `.rev-stamp` で記録）
+- 実行方式: `docs/real-hardware-verification-env.md` §3 準拠の rsync 転送
+  （`--filter=':- .gitignore'`・`--delete-excluded`・秘密情報・実ホスト名の
+  多層除外）+ `env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH cargo test
+  -p fandhe-ai-backend-cuda --release -- --ignored --nocapture`
+
+### 10.2 解消した項目
+
+1. **`WmmaTf32`（基本版）provenance fail-closed の解消**: §8.3 で申し送られた
+   2 行を基本版カーネル専用ゲート
+   （`gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`）で
+   release 2 回実測し、既存記録値との完全一致（32×32×32:
+   fail_count=154/1024・mean_abs_diff=3.697936e-4／256×256×4096:
+   fail_count=10647/65536・mean_abs_diff=4.476030e-3）を確認。
+   `baseline_provenance_unconfirmed: false` へ更新（§3・§「既知の限界」
+   参照）。`parity_nonregression.rs` の fixture 自己整合テスト
+   （`baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only`・
+   `wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced`）も全経路 enforced
+   の状態へ強化方向で更新した。
+2. **ゼロコスト非後退契約化（3 件）**: 既存の確定済みベースライン行と
+   形状・シードが完全一致するため新規実機測定が不要だった 3 件を
+   `assert_parity`（green 必須）から `assert_no_parity_regression` へ
+   変換し、GB10 実機 release 2 回で green を確認した:
+   - `tensor_core_real_device.rs::tensor_core_parity_record`（TF32 部分。
+     512×512×512 seed=0x7A0 = `WmmaTf32Opt` 既存行）
+   - `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（256×256×4096
+     seed=9999 = `MmaF16` 既存行）
+   - `gemm_tf32_optin.rs::gemm_tf32_optin_on_matches_cpu_across_shapes`
+     は CPU 参照実装との tolerance 比較ではなく `CudaGemm::run_wmma_tf32`
+     直接呼び出しとの bit-exact 比較へ構造変更（本ファイルの目的が
+     「opt-in フラグ配線検証」であり CPU 参照比較が過剰だったため。
+     ベースライン非依存）
+3. **未解消（新規実機測定を要するため本イシューのスコープ外）**: §5.3
+   記載の残り 5 件（`wmma_f16_k4096_stress`〈WMMA〉・`wmma_f16_opt_k4096_stress`・
+   `wmma_tf32_k4096_stress_poc_v2_5`・`wmma_tf32_matches_reference_across_shapes`・
+   `wmma_tf32_opt_k4096_stress`・`wmma_tf32_opt_matches_reference_across_shapes`。
+   計 6 件）に加え、`gemm_wmma_tf32_staged.rs`・`gemm_mma_tf32.rs`（mma_tf32
+   系。`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 の原因未確定残差）・
+   `mma_tf32_vs_wmma_tf32_staged.rs`・`specialized_mma_parity.rs` は複数
+   形状にわたる `assert_parity` 直接比較で、既存ベースライン行と一致しない
+   形状・シードを含むため非後退契約化には新規ベースライン行の実機測定が
+   要る。2026-08-31/09-01 のトリアージ実行で実測データ自体は採取済み
+   （fail_count・mean_abs_diff 等。ログはコミットしていない）だが、
+   fixture への転記・確定は後続イシューへ引き継ぐ。`tensor_core_tflops_record`
+   （性能プロトコル。§5.1・#391 系の既知の不安定）はパリティ判定と無関係
+   のため対象外のまま。
+
+### 10.3 REQ-2 限定救済項の扱い
+
+`docs/spec-proposal-req2-req8-revision.md` §5 が提案する専用比較関数
+（`compare_uniform_probe_scaled` 等・`internal-diagnostics` 限定）の実装は
+同提案が明記するとおり別イシュー扱いとし、本イシューでは実装しない
+（`.claude/rules/out-of-scope-tracking.md`）。

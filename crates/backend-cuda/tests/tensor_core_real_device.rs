@@ -60,6 +60,8 @@ use bench_harness::{BenchReport, Measurement, MeasurementConfig};
 use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm, CudaWmmaGemm};
 use half::f16;
 
+mod common;
+
 /// ホスト⇔デバイス転送のみ（`clone_htod`（a・b）／`alloc_zeros`（出力）／
 /// `synchronize`／`clone_dtoh`（出力）。カーネル起動を含まない）を計測する。
 ///
@@ -324,17 +326,43 @@ fn tensor_core_parity_record() {
     let c_gpu_tf32 = gemm
         .run_wmma_tf32(&a_tf32, &b_tf32, m, n, k)
         .expect("run_wmma_tf32 must succeed on CUDA-equipped test runner");
-    // 判定式・閾値は `fandhe_ai_backend_cpu::assert_parity` に一本化する（ローカル
-    // 複製しない。`.claude/rules/coding-rust.md`）。実機で外れた場合は
-    // 緩和せず #186 へ引き渡す。
-    fandhe_ai_backend_cpu::assert_parity(
+    // TF32 Tensor Core 経路は REQ-2 統一複合判定を最小形状から恒常的に
+    // 満たさない既知状態（`docs/spec/04-requirements.md` REQ-2 の
+    // 2026-08-29 追記「CUDA Tensor Core 経路の既知の不合格」・
+    // `docs/backend-cuda-real-device-testing.md` §5.3）にあるため、
+    // `assert_parity`（green 必須）ではなく #491 で確立した parity 非後退
+    // 契約（`common::parity_baseline::assert_no_parity_regression`）で
+    // 判定する（イシュー #1106）。この呼び出しは
+    // `wmma_tf32_opt_available()` を事前 assert 済みかつ入力 seed（0x7A0）・
+    // 形状（512×512×512）が `common/parity_baseline.rs` の
+    // `ParityPath::WmmaTf32Opt` 512×512×512 行（既に GB10 実機実測で
+    // `baseline_provenance_unconfirmed: false` 確定済み。同じ記録元
+    // テストからの移設）と完全一致するため、新規実機測定を要さない
+    // ゼロコスト変換（判定式・tolerance 定数は一切変更しない）。
+    let baseline = common::parity_baseline::BASELINES
+        .iter()
+        .find(|b| {
+            b.path == common::parity_baseline::ParityPath::WmmaTf32Opt
+                && b.m == m
+                && b.n == n
+                && b.k == k
+                && b.seed == 0x7A0
+        })
+        .expect("wmma_tf32_opt 512x512x512 seed=0x7A0 baseline row must exist in fixture");
+    let report = fandhe_ai_backend_cpu::compare(&c_gpu_tf32, &c_ref_tf32)
+        .expect("shape must match baseline fixture");
+    common::parity_baseline::assert_no_parity_regression(
         "tensor_core_parity_record tf32 512x512x512",
-        &c_gpu_tf32,
-        &c_ref_tf32,
+        &report,
+        baseline,
     );
     println!(
-        "parity_record path=wmma_tf32_opt shape=512x512x512 result=pass \
-         (composite tolerance: relative<1e-3 or absolute<1e-5)"
+        "parity_record path=wmma_tf32_opt shape=512x512x512 result=non-regression-pass \
+         (fail_count={}/{}, mean_abs_diff={:.6e}, baseline_ceiling={:.6e})",
+        report.fail_count,
+        report.total,
+        report.mean_abs_diff,
+        baseline.baseline_mean_abs_diff_ceiling
     );
 
     // f16 経路（`tests/cpu_cuda_wmma_parity.rs::assert_wmma_f16_parity` と

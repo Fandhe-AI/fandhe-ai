@@ -180,16 +180,22 @@ pub static BASELINES: &[ParityBaseline] = &[
     // `tests/gemm_wmma_tf32.rs::wmma_tf32_matches_reference_across_shapes` の
     // 先頭ケース（`assert_wmma_tf32_parity(&gemm, ctx, 2000 + 0, 32, 32, 32)`）。
     //
-    // 既知の限界（PR #640 Cursor Bugbot 指摘・未解決）: 出典テストは
-    // `run_wmma_tf32`（opt 可用なら opt 優先）を opt 可用性確認なしに
-    // 呼ぶため、この記録値が実際には opt カーネル計測である可能性がある
-    // （DGX Spark GB10 実機では opt が概ね利用可能。
-    // `docs/perf/cuda-parity-baseline.md` §3「既知の限界」参照）。基本版
-    // カーネル専用の単体テスト
+    // 既知の限界は解消済み（イシュー #1106・GB10 実機実測）: 記録元
+    // （`run_wmma_tf32`。opt 可用なら opt 優先）が実際に opt カーネルを
+    // 計測していた可能性を懸念していたが、基本版カーネル専用の単体テスト
     // （`fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
-    // `src/gemm.rs`）による非後退検査との比較でこの provenance 不確実性を
-    // 認識したうえで扱うこと。実機再測定でのみ解消可能（推定値での上書きは
-    // しない）。
+    // `src/gemm.rs`。private field 経由で 3 段選択を経由せず基本版
+    // カーネルを直接強制実行）を DGX Spark GB10（sm_121・CUDA 13.0）実機で
+    // release 2 回実行し、いずれも fail_count=154/1024・
+    // mean_abs_diff=3.697936e-4 の完全一致を確認した（実行間の値の安定性
+    // 確認込み。#726 の前例と同じ手順）。この実測値は記録済みの値
+    // （opt 実測の疑いがあったもの）と一致しており、基本版・opt カーネルが
+    // 同一の parity 分布を持つという #995 の GB10 実測結果（basic/opt/staged
+    // 数値完全一致）を裏付ける。よって既存の記録値をそのまま確定値として
+    // 採用し `baseline_provenance_unconfirmed: false` へ更新する（推定値の
+    // 記入ではなく実測による確認。詳細は
+    // `docs/backend-cuda-real-device-testing.md` §5.3・
+    // `docs/perf/cuda-parity-baseline.md` §3「既知の限界」参照）。
     ParityBaseline {
         path: ParityPath::WmmaTf32,
         context: "wmma_tf32 32x32x32 seed=2000",
@@ -200,16 +206,16 @@ pub static BASELINES: &[ParityBaseline] = &[
         total: 32 * 32,
         baseline_fail_count: 154,
         baseline_mean_abs_diff_ceiling: 3.699e-4,
-        // PR #640 codex-review P1 指摘対応: 記録元は opt 可用性を確認せず
-        // `run_wmma_tf32` を呼ぶため opt 実測の可能性が高く、基本版専用
-        // エントリとの比較に使えない（上記ドキュメンテーションコメント参照）。
-        baseline_provenance_unconfirmed: true,
+        // イシュー #1106・GB10 実機実測で基本版カーネル専用の確定測定を
+        // 完了（上記コメント参照）。provenance 不確実性は解消済み。
+        baseline_provenance_unconfirmed: false,
     },
     // wmma_tf32: K=4096 ストレスケース先頭（256x256x4096、seed=8888）。
     // `tests/gemm_wmma_tf32.rs::wmma_tf32_k4096_stress_poc_v2_5` の先頭呼出し。
     //
-    // 既知の限界: 上の 32x32x32 行と同じ provenance 不確実性が該当する
-    // （出典テストが opt 可用性を確認せず `run_wmma_tf32` を呼ぶため）。
+    // 既知の限界は解消済み（イシュー #1106）: 上の 32x32x32 行と同じ手順で
+    // GB10 実機 release 2 回実行し、いずれも fail_count=10647/65536・
+    // mean_abs_diff=4.476030e-3 の完全一致を確認した。記録済みの値と一致。
     ParityBaseline {
         path: ParityPath::WmmaTf32,
         context: "wmma_tf32 256x256x4096 seed=8888 (PoC-v2-5 stress)",
@@ -220,9 +226,8 @@ pub static BASELINES: &[ParityBaseline] = &[
         total: 256 * 256,
         baseline_fail_count: 10647,
         baseline_mean_abs_diff_ceiling: 4.477e-3,
-        // PR #640 codex-review P1 指摘対応: 32x32x32 行と同じ provenance
-        // 不確実性が該当する（上記ドキュメンテーションコメント参照）。
-        baseline_provenance_unconfirmed: true,
+        // イシュー #1106・GB10 実機実測で確定（上記コメント参照）。
+        baseline_provenance_unconfirmed: false,
     },
     // wmma_tf32_opt: 512x512x512。記録元 `tensor_core_real_device.rs::
     // tensor_core_parity_record` TF32 部分は事前に `wmma_tf32_opt_available()`

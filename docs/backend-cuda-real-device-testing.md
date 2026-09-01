@@ -214,6 +214,42 @@ capability 8.6）と異なる世代の Tensor Core でも同様の fail 率（15
 fail であり、本イシューのスコープ内〈テスト実行・結果記録〉での修正対象ではない。REQ-2 改定
 （閾値変更）が完了するまで解消しない）。
 
+**追記（イシュー #1106・GB10 実機実測 2026-08-31/09-01）**: 上記 8 件・および `WmmaTf32` 基本版
+カーネル専用ゲート（`gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`）が
+`baseline_provenance_unconfirmed: true` の fail-closed で恒常 fail していた問題を、以下の方針で
+解消した（tolerance 定数・判定式は一切変更していない）:
+
+1. **`WmmaTf32`（基本版）2 行の確定測定**: `wmma_tf32_basic_kernel_parity_does_not_regress` を
+   GB10（sm_121・CUDA 13.0）実機で release 2 回実行し、いずれも 32×32×32 seed=2000 で
+   fail_count=154/1024・mean_abs_diff=3.697936e-4、256×256×4096 seed=8888 で
+   fail_count=10647/65536・mean_abs_diff=4.476030e-3 の完全一致を確認した。記録済み値
+   （既存の推定 provenance）と一致しており、基本版・opt カーネルが同一の parity 分布を持つという
+   `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md`（#995）の実測結果を裏付ける。
+   `crates/backend-cuda/tests/common/parity_baseline.rs` の該当 2 行を
+   `baseline_provenance_unconfirmed: false` へ更新済み。
+2. **ゼロコスト非後退契約化（既存の確定済みベースライン行と形状・シードが完全一致する 3 件）**:
+   `tensor_core_real_device.rs::tensor_core_parity_record`（TF32 部分・512×512×512 seed=0x7A0。
+   `WmmaTf32Opt` 行と一致）・`cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（256×256×4096
+   seed=9999。`MmaF16` 行と一致）を `assert_parity`（green 必須）から
+   `common::parity_baseline::assert_no_parity_regression` へ変換し、GB10 実機で release 2 回
+   green を確認した。新規実機測定は不要だった。
+3. **`gemm_tf32_optin.rs::gemm_tf32_optin_on_matches_cpu_across_shapes`**: opt-in フラグ配線検証
+   という本ファイルの目的（冒頭コメント）に立ち返り、CPU 参照実装との tolerance 比較から
+   `CudaGemm::run_wmma_tf32` 直接呼び出しとの bit-exact 比較へ置換した（tolerance・ベースライン
+   いずれにも依存しない）。GB10 実機で release 2 回 green を確認した。
+4. **未解消（新規実機測定が必要なため本イシューのスコープ外。out-of-scope-tracking.md 対象）**:
+   上表 8 件のうち残り 5 件（`wmma_f16_k4096_stress`〈cpu_cuda_wmma_parity.rs〉・
+   `wmma_f16_opt_k4096_stress`・`wmma_tf32_k4096_stress_poc_v2_5`・
+   `wmma_tf32_matches_reference_across_shapes`・`wmma_tf32_opt_k4096_stress`・
+   `wmma_tf32_opt_matches_reference_across_shapes`）に加え、`gemm_wmma_tf32_staged.rs`・
+   `gemm_mma_tf32.rs`（mma_tf32 系。`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 の原因未確定残差）・
+   `mma_tf32_vs_wmma_tf32_staged.rs`・`specialized_mma_parity.rs::specialized_mma_f16_matches_default_and_reference_across_shapes`
+   は、複数形状にわたる `assert_parity` 直接比較かつ既存ベースライン行と形状・シードが一致しない
+   ため、非後退契約化には新規ベースライン行の実機測定が要る。実測データ自体は GB10 で採取済み
+   （2026-08-31/09-01 トリアージ実行ログ）だが、fixture への転記・確定は後続イシューへ引き継ぐ。
+   `tensor_core_tflops_record`（性能プロトコル。並列実行時の GPU 競合による既知の不安定。§5.1・
+   #391 系）はパリティ判定と無関係のため対象外のまま。
+
 ## 6. `#[ignore]` 分離が通常 CI で機械的に効いている根拠
 
 `docs/backend-metal-real-device-testing.md` と同型の確認。Mac（CUDA 非搭載）・CI（GitHub ホステッド・CUDA
