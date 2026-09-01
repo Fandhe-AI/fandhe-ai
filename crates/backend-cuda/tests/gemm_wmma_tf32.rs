@@ -165,6 +165,102 @@ fn wmma_tf32_k4096_stress_poc_v2_5() {
     );
 }
 
+/// **診断専用（イシュー #1106・GB10 全件洗い出し。PR 用の一時コード。
+/// 修正確定後に削除する）。**
+///
+/// [`wmma_tf32_matches_reference_across_shapes`]・
+/// [`wmma_tf32_k4096_stress_poc_v2_5`] は [`assert_wmma_tf32_parity`]
+/// （内部で `assert_parity` を呼ぶ厳密ゼロ fail 判定）を使うため、最初に
+/// fail するケースで panic して以降のケースを実行しない。GB10 実機実測
+/// （2026-09-01 の直列 `--ignored` 実行）では両テストとも先頭ケース
+/// （32×32×32 seed=2000・256×256×4096 seed=8888）のみが実測済みで、いずれも
+/// `ParityBaseline::BASELINES`（`ParityPath::WmmaTf32`）の既存記録値と
+/// 一致した。残り 7 ケース（64×64×64・128×128×128・512×512×512・
+/// 64×96×128・1×1×1・17×23×19・33×31×65・512×512×4096 seed=0xFACADE）は
+/// 未計測のまま。本テストは同じ全ケース・同じシードを
+/// `fandhe_ai_backend_cpu::compare`（panic しない集計 API）で走らせ、
+/// `fail_count`/`total`・`max_abs_diff`・`max_rel_err`・`mean_abs_diff` を
+/// 標準出力へ表として出す。**assert は一切行わない**（常に成功する。
+/// 目的は数値の可視化のみ）。
+#[test]
+#[ignore = "診断専用（イシュー #1106）。CUDA 実機（DGX Spark GB10 等、\
+            compute capability 8.0 以降）必須。修正確定後に削除する"]
+fn wmma_tf32_parity_diagnostic_dump_issue_1106() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+    let mut cases: Vec<(String, u64, u32, u32, u32)> = [
+        (32u32, 32u32, 32u32),
+        (64, 64, 64),
+        (128, 128, 128),
+        (512, 512, 512),
+        (64, 96, 128),
+        (1, 1, 1),
+        (17, 23, 19),
+        (33, 31, 65),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(idx, (m, n, k))| {
+        (
+            format!("across_shapes[{idx}] m={m} n={n} k={k}"),
+            2000 + idx as u64,
+            m,
+            n,
+            k,
+        )
+    })
+    .collect();
+    cases.push((
+        "k4096_stress 256x256x4096".to_string(),
+        8888,
+        256,
+        256,
+        4096,
+    ));
+    cases.push((
+        "k4096_stress 512x512x4096".to_string(),
+        0xFACADE,
+        512,
+        512,
+        4096,
+    ));
+
+    println!(
+        "{:<34} {:>10} {:>16} {:>12} {:>12} {:>12}",
+        "case", "seed", "fail/total", "max_abs", "max_rel", "mean_abs"
+    );
+    for (label, seed, m, n, k) in &cases {
+        let (m, n, k) = (*m, *n, *k);
+        let mut rng = bench_harness::rng::Xorshift64Star::new(*seed);
+        let a = rng.fill_vec((m as usize) * (k as usize));
+        let b = rng.fill_vec((k as usize) * (n as usize));
+
+        let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+        fandhe_ai_backend_cpu::matmul_reference_fma(
+            &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+        )
+        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+
+        let c_gpu = gemm
+            .run_wmma_tf32(&a, &b, m, n, k)
+            .expect("CudaGemm::run_wmma_tf32 must succeed on this ignored test runner");
+
+        let report = fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref)
+            .expect("gpu output and reference must have matching lengths");
+
+        println!(
+            "{label:<34} {seed:>#10x} {fail:>7}/{total:<8} {max_abs:>12.3e} {max_rel:>12.3e} \
+             {mean_abs:>12.3e}",
+            fail = report.fail_count,
+            total = report.total,
+            max_abs = report.max_abs_diff,
+            max_rel = report.max_rel_err,
+            mean_abs = report.mean_abs_diff,
+        );
+    }
+}
+
 /// `k == 0`（`num_k_tiles == 0` 経路。`kernels.rs` の
 /// `(k > 0) ? (k - 1) / WMMA_TF32_K_TILE + 1 : 0` 参照）で C が全 0 になる
 /// ことを確認する。`tests/gemm_tiled.rs::tiled_f32_zero_k_returns_all_zero`

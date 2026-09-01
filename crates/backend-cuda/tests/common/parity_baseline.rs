@@ -110,6 +110,24 @@ pub enum ParityPath {
     WmmaTf32Staged,
     /// `CudaMmaGemm::run_f16`（`mma.sync`/`ldmatrix`/`cp.async` 経路）。
     MmaF16,
+    /// `CudaWmmaGemm::run_f16`（基本 WMMA(f16) カーネル）。
+    ///
+    /// **イシュー #1106（GB10 全件洗い出し）で追加**: `tests/cpu_cuda_wmma_parity.rs::
+    /// wmma_f16_k4096_stress`（256×256×4096・seed=8888）は f16→f32→
+    /// `matmul_reference_fma`→f16 丸め→f32 の量子化込み参照でも K=4096
+    /// 蓄積により既知の tail 超過（`docs/backend-cuda-real-device-testing.md`
+    /// §5.3）を持つ。本体テスト自体は `assert_parity`（REQ-2 受け入れ条件）
+    /// を維持したまま、非後退監視を `wmma_f16_k4096_stress_non_regression`
+    /// として別テストで併設する（`ParityPath::MmaF16`・`tensor_core_parity_record`
+    /// tf32 行と同型の「元の受け入れ条件は置き換えない」設計。
+    /// `docs/perf/cuda-parity-baseline.md` §10.4 参照）。
+    WmmaF16,
+    /// `CudaWmmaGemm::run_f16_opt`（opt WMMA(f16) カーネル）。
+    ///
+    /// `WmmaF16` と同じ理由で追加（`tests/gemm_wmma_f16_opt.rs::
+    /// wmma_f16_opt_k4096_stress`。256×256×4096・seed=8889 の非後退監視を
+    /// `wmma_f16_opt_k4096_stress_non_regression` として併設する）。
+    WmmaF16Opt,
 }
 
 impl std::fmt::Display for ParityPath {
@@ -119,6 +137,8 @@ impl std::fmt::Display for ParityPath {
             ParityPath::WmmaTf32Opt => "wmma_tf32_opt",
             ParityPath::WmmaTf32Staged => "wmma_tf32_staged",
             ParityPath::MmaF16 => "mma_f16",
+            ParityPath::WmmaF16 => "wmma_f16",
+            ParityPath::WmmaF16Opt => "wmma_f16_opt",
         };
         f.write_str(s)
     }
@@ -440,6 +460,43 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_fail_count: 101,
         baseline_mean_abs_diff_ceiling: 7.647e-5,
         // `run_f16` は基本/opt の分岐を持たないため provenance 不確実性なし。
+        baseline_provenance_unconfirmed: false,
+    },
+    // wmma_f16: K=4096 ストレスケース（256x256x4096、seed=8888）。
+    // `tests/cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress` の唯一の
+    // 呼出し（`assert_wmma_f16_parity(&gemm, ctx, 8888, 256, 256, 4096)`）。
+    // イシュー #1106（GB10 全件洗い出し）で追加。実測: DGX Spark GB10
+    // （sm_121・CUDA 13.0）・GPU アイドル・直列実行（`--test-threads=1`）
+    // 2026-09-02。
+    ParityBaseline {
+        path: ParityPath::WmmaF16,
+        context: "wmma_f16 256x256x4096 seed=8888",
+        m: 256,
+        n: 256,
+        k: 4096,
+        seed: 8888,
+        total: 256 * 256,
+        baseline_fail_count: 99,
+        baseline_mean_abs_diff_ceiling: 7.563e-5,
+        // `run_f16`（基本 WMMA）は分岐を持たないため provenance 不確実性
+        // なし。
+        baseline_provenance_unconfirmed: false,
+    },
+    // wmma_f16_opt: K=4096 ストレスケース（256x256x4096、seed=8889）。
+    // `tests/gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress` の唯一の
+    // 呼出し（`assert_wmma_f16_opt_parity(&gemm, ctx, 8889, 256, 256,
+    // 4096)`）。イシュー #1106（GB10 全件洗い出し）で追加。実測環境は
+    // 上記 `wmma_f16` 行と同一（2026-09-02）。
+    ParityBaseline {
+        path: ParityPath::WmmaF16Opt,
+        context: "wmma_f16_opt 256x256x4096 seed=8889",
+        m: 256,
+        n: 256,
+        k: 4096,
+        seed: 8889,
+        total: 256 * 256,
+        baseline_fail_count: 81,
+        baseline_mean_abs_diff_ceiling: 7.628e-5,
         baseline_provenance_unconfirmed: false,
     },
 ];
