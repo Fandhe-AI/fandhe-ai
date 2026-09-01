@@ -24,15 +24,16 @@
 //!
 //! # FMA 契約（REQ-2）
 //!
-//! 要素ごとの積和自体は `f32::mul_add(v, v, acc)`（NEON は `vfmaq_f32`）を
-//! 用いる（GPU 側 `fmaf`／`simdgroup_multiply_accumulate` の既定 FMA 契約と
-//! 揃える。`.claude/rules/coding-rust.md`）。
+//! 正規化（`x * rstd * w`）等の要素演算は `f32::mul_add` 系の FMA を用いて
+//! GPU 側 `fmaf`／`simdgroup_multiply_accumulate` の既定 FMA 契約と揃える。
+//! 二乗和の縮約のみ下記の縮約精度契約（`f64` 昇格後に `f64::mul_add`、
+//! NEON は `vfmaq_f64`）が優先する（`.claude/rules/coding-rust.md`）。
 //!
 //! # 縮約精度契約（正規化統計の f64 アキュムレータ統一。イシュー #1102）
 //!
-//! 二乗和（`rstd` 導出）の**蓄積**（複数要素にわたる合計の累積）は `f64`
-//! アキュムレータで行い、`rstd` へ代入する 1 回だけ `f32` へ downcast
-//! する（要素ごとの二乗自体は `f32` のまま。`AGENTS.md`／
+//! 二乗和（`rstd` 導出）は要素を先に `f64` へ昇格してから二乗し、`f64`
+//! アキュムレータで蓄積して `rstd` へ代入する 1 回だけ `f32` へ downcast
+//! する（overflow 回避のため二乗前に昇格する。`AGENTS.md`／
 //! `.claude/rules/coding-rust.md` の「正規化統計・勾配の長軸縮約は f64
 //! アキュムレータ（Metal は Kahan 補償和 f32）で統一する」契約。CUDA
 //! 側 forward の `double` アキュムレータ化〈`kernels_rmsnorm.rs` §9.7
@@ -183,8 +184,8 @@ fn rmsnorm_row(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_row: &m
 /// dead_code 判定はコンパイル単位ごとであり、テスト専用の呼び出しは
 /// 通常の `lib` ターゲットビルドには含まれないため）。
 ///
-/// 二乗和の**蓄積**は `f64` アキュムレータで行う（要素ごとの二乗自体は
-/// `f32::mul_add` 相当。縮約精度契約〈本ファイル冒頭コメント〉・
+/// 二乗和は要素を先に `f64` へ昇格してから `f64::mul_add` で二乗・蓄積
+/// する（overflow 回避。縮約精度契約〈本ファイル冒頭コメント〉・
 /// イシュー #1102）。`rstd` へ代入する 1 回だけ `f32` へ downcast する。
 #[cfg(any(not(target_arch = "aarch64"), test))]
 pub(crate) fn rmsnorm_row_scalar(
