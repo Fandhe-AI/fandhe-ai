@@ -144,10 +144,11 @@ pub(crate) fn derive_persistent_grid_dw(sm_count: u32, hidden: u32) -> u32 {
     grid.clamp(1, blocks_needed as u64) as u32
 }
 
-/// dw split-K（イシュー #597）: 部分和バッファ（`num_blocks * hidden * 4`
-/// bytes）が超えてはならない上限。`derive_dw_split` の fail-closed
-/// フォールバック判定にのみ使う（`.claude/rules/security.md` A03:
-/// `checked_mul` によるホスト側 usize/u64 オーバーフロー防止）。
+/// dw split-K（イシュー #597）: 部分和バッファ（`num_blocks * hidden * 8`
+/// bytes。要素型は `double`。イシュー #1102 §9.8 追補で `float`〈4
+/// byte〉から倍増した）が超えてはならない上限。`derive_dw_split` の
+/// fail-closed フォールバック判定にのみ使う（`.claude/rules/security.md`
+/// A03: `checked_mul` によるホスト側 usize/u64 オーバーフロー防止）。
 pub(crate) const RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
 /// dw split-K の 1 CTA（`blockIdx.y`）が担当する行数の下限。これを下回る
@@ -206,10 +207,12 @@ pub(crate) fn derive_dw_split(sm_count: u32, rows: u32, hidden: u32) -> u32 {
     // 部分和バッファ上限検査。境界超過時は `num_blocks` を単調減少させる
     // （`num_blocks` は高々 `RMSNORM_DW_MAX_SPLIT` = 64 のため最大 63 回の
     // ループで確実に停止する）。
+    // `dw_partial` バッファは `double`（8 byte）要素（イシュー #1102
+    // §9.8 追補）。
     let fits_budget = |n: u32| -> bool {
         (n as u64)
             .checked_mul(hidden as u64)
-            .and_then(|v| v.checked_mul(4))
+            .and_then(|v| v.checked_mul(8))
             .is_some_and(|bytes| bytes <= RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES)
     };
     while num_blocks >= 2 && !fits_budget(num_blocks) {
@@ -285,9 +288,11 @@ pub(crate) fn validate_dw_split_launch(
     // `derive_dw_split` が正しく `1` を返すにもかかわらず、分岐前の検証で
     // 一律に拒否されていた）。
     if num_blocks > 1 {
+        // `dw_partial` バッファは `double`（8 byte）要素（イシュー #1102
+        // §9.8 追補）。
         let partial_bytes = (num_blocks as u64)
             .checked_mul(hidden as u64)
-            .and_then(|v| v.checked_mul(4))
+            .and_then(|v| v.checked_mul(8))
             .ok_or_else(|| CudaError::InvalidRmsNormShape {
                 detail: format!(
                     "rmsnorm dw split partial buffer size overflowed u64: \
@@ -1045,7 +1050,12 @@ impl CudaRmsNorm {
                         ),
                     }
                 })?;
-                let mut dw_partial_dev = self.stream.alloc_zeros::<f32>(partial_len)?;
+                // `dw_partial_dev` は double バッファ（イシュー #1102 §9.8 追補。
+                // `docs/perf/cuda-parity-baseline.md` 参照）。ブロック内・
+                // ブロック間の縮約精度を上げるため要素サイズが 4 → 8 byte へ
+                // 倍増している（バッファ上限検査の `* 4` も `* 8` へ更新済み。
+                // 下記 `validate_dw_split_launch`／`derive_dw_split` 参照）。
+                let mut dw_partial_dev = self.stream.alloc_zeros::<f64>(partial_len)?;
 
                 // SAFETY（第 1 カーネル）: `validate_dw_split_launch` で
                 // `num_blocks` が `[1, rows]` かつ部分和バッファが上限内で
@@ -1492,19 +1502,21 @@ mod tests {
         // col_tiles=ceil(1000000/256)=3907・target=320000・
         // raw_num_blocks=320000/3907=81 → rows_cap（100000/32=3125）・
         // MAX_SPLIT（64）でクランプされ num_blocks 候補は 64。しかし
-        // 64*1000000*4=256,000,000 bytes（約 244 MiB）は
-        // RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES（64 MiB）を超えるため、
-        // 上限に収まる最大値（floor(64 MiB / (hidden*4)) = 16）まで
+        // `dw_partial` は `double`（8 byte）要素（イシュー #1102 §9.8
+        // 追補。元は `float`〈4 byte〉）のため
+        // 64*1000000*8=512,000,000 bytes（約 488 MiB）は
+        // RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES（64 MiB）を超え、
+        // 上限に収まる最大値（floor(64 MiB / (hidden*8)) = 8）まで
         // 単調減少する。
         let num_blocks = derive_dw_split(20_000, 100_000, 1_000_000);
-        assert_eq!(num_blocks, 16);
-        let bytes = (num_blocks as u64) * 1_000_000 * 4;
+        assert_eq!(num_blocks, 8);
+        let bytes = (num_blocks as u64) * 1_000_000 * 8;
         assert!(bytes <= RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES);
-        // 17 block では上限を超える（= 16 が「収まる最大値」であることの
+        // 9 block では上限を超える（= 8 が「収まる最大値」であることの
         // 根拠。`clippy::assertions_on_constants` を避けるため、両辺の
         // 定数を変数へ束縛してから比較する）。
-        let bytes_at_17 = 17u64 * 1_000_000 * 4;
-        assert!(bytes_at_17 > RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES);
+        let bytes_at_9 = 9u64 * 1_000_000 * 8;
+        assert!(bytes_at_9 > RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES);
     }
 
     // --- dw_split_row_range（イシュー #597） ---
@@ -1586,7 +1598,8 @@ mod tests {
 
     #[test]
     fn validate_dw_split_launch_rejects_partial_buffer_exceeding_cap() {
-        // 64 * 300_000_000 * 4 bytes は明らかに 64 MiB を超える
+        // 64 * 300_000_000 * 8 bytes（`dw_partial` は double 要素。
+        // イシュー #1102 §9.8 追補）は明らかに 64 MiB を超える
         // （テストフック `run_rmsnorm_bwd_f32_with_forced_dw_split` が
         // 任意の `num_blocks` を渡せることに対する fail-closed 検証。
         // advisor 指摘・security.md A03）。
@@ -1598,11 +1611,12 @@ mod tests {
     fn validate_dw_split_launch_accepts_single_stage_even_if_hidden_alone_exceeds_cap() {
         // cursor[bot] 指摘（PR #716）の回帰テスト: `num_blocks == 1`
         // （単段フォールバック）は部分和バッファを一切確保しないため、
-        // `hidden * 4` 単体が cap（64 MiB = 16_777_216 要素）を超える
-        // 大きな `hidden` でも拒否してはならない。`derive_dw_split` は
-        // このような形状では正しく `1` を返す契約（本テストは呼び出し元
-        // の分岐に依らず `validate_dw_split_launch` 単体で保証する）。
-        let hidden = 20_000_000; // hidden * 4 bytes ≈ 76 MiB > 64 MiB cap
+        // `hidden * 8`（`dw_partial` は double 要素。イシュー #1102
+        // §9.8 追補で 4 byte から倍増）単体が cap を超える大きな
+        // `hidden` でも拒否してはならない。`derive_dw_split` はこのような
+        // 形状では正しく `1` を返す契約（本テストは呼び出し元の分岐に
+        // 依らず `validate_dw_split_launch` 単体で保証する）。
+        let hidden = 20_000_000; // hidden * 8 bytes ≈ 153 MiB > 64 MiB cap
         assert!(validate_dw_split_launch(1, hidden, 1).is_ok());
     }
 }

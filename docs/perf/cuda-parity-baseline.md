@@ -495,6 +495,587 @@ cpu_across_shapes` はケース `(rows=8192, hidden=4096, num_blocks=1)` で
 `rsqrtf` → `1.0f / sqrtf` の変更による非後退（regression）は確認されて
 いない。
 
+### 9.5 テスト設計側の対応（責務分離。イシュー #1102。tolerance 非変更）
+
+9.4 でユーザー判断へ委ねた 3 選択肢のうち、**選択肢 3「テスト設計側の
+対応」**を、tolerance 緩和（選択肢 1）を伴わない形で適用した。
+
+**方針**: `assert_rmsnorm_backward_dw_split_parity`
+（`crates/backend-cuda/tests/rmsnorm_backward_parity.rs`）の CPU 参照実装
+（`cpu_rmsnorm_backward_reference`）が dw／dx を計算する際に使う `rstd` を、
+CPU 側で独自に逐次和から再計算する方式から、**forward（GPU）が実際に
+生成した `rstd` を D2H で取得しそのまま供給する方式**へ変更した。
+
+- 9.2 の切り分けにより「dw カーネル自体は同一 `rstd` 下で GPU 出力と
+  bit 一致する（`dw_mismatch_count=0/4096`）」ことが実測済みであり、
+  `rstd` を GPU 側の値へ揃えることで dw（および dx）カーネルの縮約式・
+  境界処理の正しさという本来の検証責務は失われない
+- **rstd バッファ自体の parity は失わない**: 上記の切替だけでは「GPU
+  forward が保存した `rstd` バッファ自体の取り違え・破損」を検出する
+  経路が失われる（advisor レビュー指摘）ため、`assert_rmsnorm_backward_
+  dw_split_parity` 内で GPU `rstd` と CPU 独立再計算
+  （`cpu_rmsnorm_rstd_reference`。縮約順序は GPU forward の warp
+  butterfly reduction と異なる素朴な逐次和）の複合判定
+  （`fandhe_ai_backend_cpu::parity::assert_parity`。REQ-2 統一複合判定を
+  再定義せず流用）を明示的に追加した。9.2 実測の `max_rstd_rel_delta =
+  2.06e-6`（相対許容 1e-3 の 3 桁下）はこの判定を通過することを裏付ける
+- `rstd` 自体の縮約順序差（forward の warp butterfly reduction と CPU
+  逐次和という非結合性に起因する ULP 差）は REQ-2 統一複合判定の許容
+  範囲に収まる（9.2 実測で確認済み）ため、上記 rstd バッファ parity は
+  この ULP 差では fail しない。正確な言い方をすれば「この複合判定は
+  ULP 差を fail-closed に検出する」のではなく「ULP 差が複合判定の許容
+  範囲内に収まることを判定式自体が保証する」——rstd の乖離が許容範囲を
+  超える異常（実質的なバグ）であれば、この判定も forward parity テスト
+  （`rmsnorm_parity.rs::rmsnorm_matches_cpu_across_shapes`・
+  `rmsnorm_matches_backend_cpu_directly`）も同一の複合判定で fail する
+- forward parity テスト（`rmsnorm_parity.rs`）は hidden ∈
+  {8, 1024, 4096, 4097, 8192, 16384} を網羅するが、dw split 検証の
+  ケース表（9.1）は hidden ∈ {64, 128, 4096, 4097, 8, 16} も含み両者の
+  網羅形状は完全一致しない。上記 rstd バッファ parity の追加により、
+  dw split 検証自身が全ケース形状で rstd の複合判定を独立に行うため、
+  この形状網羅の差はカバレッジの穴にならない
+- `RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・複合判定式
+  （`fandhe_ai_backend_cpu::parity::assert_parity`）・ケース表・シードは
+  一切変更していない（`assert_tolerance_constants_pinned` の bit 等値検査
+  はそのまま維持。`.claude/rules/coding-rust.md` の tolerance 非緩和方針
+  を遵守）
+- `assert_rmsnorm_backward_parity`（dx 中心の `rmsnorm_backward_matches_
+  cpu_across_shapes`。実機で既に pass 実績あり）は本変更の対象外とした
+  （スコープを 9.1〜9.4 で FAIL が確定している dw split 経路に限定し、
+  無関係な既存 pass 経路への変更を避けるため）
+- **`assert_rmsnorm_backward_dw_split_parity` の dx 判定への副次影響**:
+  本関数は dw と dx を同時に検証しており、`gpu_rstd` 切替は dx 側の CPU
+  参照計算にも及ぶ（同一関数を共有するため）。dx 判定はこれまで GB10
+  実機で pass していた経路であり、rstd を GPU 側へ揃えることは非結合性
+  由来の ULP 差を縮める方向の変更であるため後退の懸念は小さいと判断する
+  が、実機未確認である旨を明記する（次回実機セッションで dx 側の非後退
+  も合わせて確認する）
+
+**検証範囲の変更を明文化するコメント**: 上記契約はテストファイル冒頭の
+モジュールコメント・`cpu_rmsnorm_backward_reference`／
+`cpu_rmsnorm_rstd_reference` のドキュメンテーションコメント・
+`assert_rmsnorm_backward_dw_split_parity` 内の呼び出し箇所コメントに記録
+した（後続の読み手が「なぜ rstd を GPU から渡すのか」「rstd バッファ
+自体の parity をどこで検証しているか」を本ファイル単体で追跡できるように
+するため。`.claude/rules/code-comment-style.md`）。
+
+**GB10 実機再検証（2026-09-01・9.5 の rstd 供給責務分離を適用したブランチ
+`fix/1102-rmsnorm-dw-parity-contract` 時点。コーディネータによる実機実行）**:
+
+- `rmsnorm_backward_matches_cpu_across_shapes`（非 split・dx 中心）: **pass**
+- `rmsnorm_backward_dw_split_matches_cpu_across_shapes`: **旧 FAIL ケース
+  （`rows=8192, hidden=4096, num_blocks=1`）は通過した**（9.2 診断
+  「dw カーネル無罪・rstd の ULP 差が真因」という切り分け、および 9.5 の
+  rstd 供給責務分離の妥当性を実機で裏付ける結果）。ただし**別ケースで
+  FAIL が新規発生**した:
+  `(rows=4096, hidden=4097, num_blocks=8, eps=1e-5)` で
+  `fail_count=1/4097, max_abs_diff=3.052e-4, max_rel_err=1.315e-3,
+  mean_abs_diff=3.147e-5`（`rmsnorm_backward_parity.rs:405` 相当）
+
+### 9.6 第 2 の非結合性: dw split-K の二段縮約順序（イシュー #1102 継続）
+
+**切り分け**: 9.5 は `rstd` の非結合性（forward の warp butterfly
+reduction 対 CPU 逐次和）を責務分離したが、`num_blocks >= 2`（split-K
+経路）では **dw 自体の縮約にも別の非結合性**が存在する。GPU 側
+（`kernels_rmsnorm.rs`）は二段構成である:
+
+1. `RMSNORM_BWD_DW_PARTIAL_F32`: 行を `num_blocks` 個のブロック
+   （`rows_per_block = ceil(rows / num_blocks)`）へ分割し、各ブロック内は
+   行順の `fmaf` 逐次蓄積で部分和 `dw_partial[b, i]` を求める
+2. `RMSNORM_BWD_DW_REDUCE_F32`: `dw_partial` をブロック番号
+   `b = 0..num_blocks` の順に**単純な浮動小数点加算**
+   （`acc += smem[buf][j][tid]`。`fmaf` ではない）で縮約し `dw` を書く
+
+一方 9.5 以前の CPU 参照実装（`cpu_rmsnorm_backward_reference` の dw 蓄積）
+は `num_blocks` に関わらず `0..rows` の単一の行順逐次 `mul_add` 蓄積で
+あり、GPU の二段（ブロック内 fmaf・ブロック間単純加算）構造を再現して
+いなかった。浮動小数点加算は結合則を満たさないため、`num_blocks` が
+大きく `hidden` が vec4 非整列（4097）な形状ほどこの縮約順序差が複合判定
+を超えうる規模まで蓄積しうる。
+
+**対応（tolerance 非変更）**: `crates/backend-cuda/tests/
+rmsnorm_backward_parity.rs` に `cpu_rmsnorm_dw_split_reference` を新設し、
+GPU の二段縮約順序（ブロック内 `mul_add` 逐次蓄積 → ブロック間
+`num_blocks` 順の単純加算）を CPU 側で明示的に再現した。
+`assert_rmsnorm_backward_dw_split_parity` の dw 判定はこの関数の出力と
+比較するよう変更し、9.5 の `cpu_rmsnorm_backward_reference`（単一の行順
+逐次和）を dw 判定には使わないことにした（dx 判定は num_blocks に依存
+しない独立カーネル `RMSNORM_BWD_DX_F32` を経由するため従来どおり
+`cpu_rmsnorm_backward_reference` を使い続けて問題ない）。
+
+- `num_blocks == 1` では `cpu_rmsnorm_dw_split_reference` は単一ブロックの
+  行順逐次 `mul_add` 蓄積へ退化し、最終加算が `0.0 + partial ==
+  partial`（浮動小数点の加法単位元。精度損失なし）となるため、
+  `cpu_rmsnorm_backward_reference` の dw 出力と bit-for-bit 一致する
+  （CPU 専用回帰テスト `cpu_dw_split_reference_matches_naive_reference_
+  when_num_blocks_is_one` で確認。実機不要・通常 CI で実行）
+- `rows` が `num_blocks` を割り切らない末尾ブロック（空範囲）の扱いも
+  GPU 側コメント「末尾要素ブロックの扱い」と対応させ、CPU 専用回帰テスト
+  `cpu_dw_split_reference_handles_non_divisible_num_blocks` で形状・
+  有限性を確認した
+- `RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・複合判定式・ケース表・
+  シードは引き続き一切変更していない
+- dx 側・非 split（`num_blocks=1` の `RMSNORM_BWD_DW_F32`）側は本対応の
+  影響を受けない（dx は独立カーネル、`num_blocks=1` は上記のとおり
+  bit-for-bit 退化）ため非後退が保たれる設計である
+
+**実機確認コマンド（次回 GB10 セッション）**:
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_backward_parity \
+  -- --ignored --nocapture rmsnorm_backward_dw_split_matches_cpu_across_shapes
+cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_backward_parity \
+  -- --ignored --nocapture rmsnorm_backward_matches_cpu_across_shapes
+make test-ignored-cuda
+```
+
+実機確認が完了し次第、本節に実測値（fail_count・max_abs_diff 等）を追記し、
+イシュー #1102／#1105 のクローズ可否を判断する。
+
+### 9.7 方針転換: テスト弱体化ではなくカーネル精度改善で解消する（PR #1120 codex P1・Bugbot Low 対応）
+
+9.5〜9.6 の対応は「CPU 参照実装を GPU の内部縮約順序（`rstd` の
+warp butterfly reduction・dw split-K の二段縮約）に合わせる」方式だった。
+PR #1120 の codex-review が P1 として以下を指摘した:
+
+> GPU forward の `rstd` を CPU 参照へ流用すると「独立 CPU 参照による
+> forward→backward end-to-end 一致」の検査が失われる。`rstd` 単体 +
+> 同一 `rstd` 下 dw/dx を別々に通しても、`rstd` の許容内差が `rows`
+> 方向に蓄積した dw 誤差を拘束できない。カーネル単体検査の追加は可だが、
+> 独立 CPU 参照の end-to-end 判定は残し、**実装側を修正して**統一複合
+> 判定を満たせ、という内容。
+
+この指摘は妥当と判断し、方針を転換した。
+
+**新方針（tolerance 変更なし・独立 end-to-end 検査を弱体化しない）**:
+
+1. **テスト側**: `assert_rmsnorm_backward_dw_split_parity`
+   （`crates/backend-cuda/tests/rmsnorm_backward_parity.rs`）の**主検査**を
+   独立 CPU 参照実装による end-to-end parity（`rstd`・dw・dx のいずれも
+   GPU の内部実装詳細を一切参照しない独立計算。9.5 以前の元の契約）へ
+   戻した。9.5・9.6 で追加した「GPU `rstd` を流用したカーネル単体検査」
+   （`rstd` バッファ parity・同一 `rstd` 供給下の dx／dw カーネル単体
+   検査。`cpu_rmsnorm_dw_split_reference` を含む）は**追加検査**として
+   残し、主検査を置き換えない構成にした（イシュー #1102／#1105 の
+   切り分けで有用性が実証済みのため削除はしない）
+2. **カーネル側の精度改善**（`crates/backend-cuda/src/kernels_rmsnorm.rs`）:
+   forward（`RMSNORM_F32_ONEPASS`／`RMSNORM_F32_TWOPASS`）の二乗和
+   `acc` を `float` から **`double` アキュムレータ**へ変更した。レーン内
+   部分和（`fma((double)v, (double)v, acc)`）・warp shuffle 縮約
+   （`__shfl_xor_sync` は CUDA の組み込みオーバーロードで `double`
+   〈8 byte〉に対応）・最終の除算＋平方根（`1.0 / sqrt(fma(acc,
+   (double)inv_n, (double)eps))`）のすべてを `double` で行い、`rstd` へ
+   代入する 1 回だけ `float` へ downcast する。SMEM への正規化前データ
+   格納・出力・`rstd` 自体の型契約（`float`）は変更していない
+3. **設計判断の根拠**: `hidden` 程度（数千要素）の総和では、`double`
+   （53 bit 仮数）の丸め誤差は最終 `float32` downcast の 1 ULP 未満に
+   収まる。9.2 実測の GPU/CPU `rstd` 相対差 `max_rstd_rel_delta =
+   2.06e-6`（float32 同士の縮約順序差由来）は `double` 化により実質的に
+   消滅する見込みであり、FAIL の余裕が僅か（9.5 実測: `max_rel_err =
+   1.315e-3` に対し許容 `1e-3`、`max_abs_diff = 3.052e-4`）だったことから
+   `rstd` 精度改善のみで複合判定を満たせる可能性が高いと判断した
+   （dw split-K の部分和・最終縮約自体の `double` 化は、この `rstd`
+   精度改善で解消しない場合の次段対応として保留する。9.6 に記録した
+   `cpu_rmsnorm_dw_split_reference`〈追加検査〉は保留中もそのまま有効）
+4. **他バックエンド・既存契約との整合**: FMA 契約統一
+   （`.claude/rules/coding-rust.md`「CPU 参照実装は `f32::mul_add`」）は
+   matmul 等の積和契約の話であり、縮約途中の**精度**（`double`
+   アキュムレータの採用）を複合判定の許容範囲内で引き上げることとは
+   独立の軸である。CPU 参照実装・`backend-cpu` 本番実装・Metal
+   バックエンドはいずれも `rstd` を `f32` で計算する契約のままであり、
+   本変更は「GPU 側の実装精度を独立 CPU 参照実装の精度により近づける」
+   ものであって、バックエンド間の丸め契約自体（FMA 使用・`f32` 型）を
+   変更するものではない。したがって既存の tolerance・複合判定の設計
+   意図（実装依存の縮約順序差を許容しつつ実質的なバグは検出する）とも
+   矛盾しない
+5. **性能への影響**: forward カーネルは行あたり 1 回の二乗和縮約（`hidden`
+   要素分のロード + 蓄積）でありメモリ帯域律速（`kernels_rmsnorm.rs`
+   モジュールコメント「設計」節）。`double` 演算は SM の FP64 ユニットを
+   使うが、演算数自体は `hidden` 要素程度でメモリロード量（`float4`
+   ベクトル化ロードは変更なし）と比べて軽微であり、帯域律速の性質上
+   全体スループットへの影響は無視できると見積もる（実機での定量計測は
+   次回 GB10 セッションで REQ-8 性能下限との非後退確認と合わせて行う）
+6. **Bugbot Low 対応**: `cpu_rmsnorm_rstd_reference`（追加検査で使う
+   rstd バッファ parity 用の独立参照）が `hidden == 0` で `0.0f32` 埋め
+   していたが、GPU 側の実際の契約（`rmsnorm.rs::run_rmsnorm_f32_inner`
+   の早期 return。`hidden == 0` では `sum(x^2) == 0` が数学的に確定する
+   ため `rstd = 1.0 / eps.sqrt()` を全行同一値で返す。カーネル自体は
+   この縮退ケースでは起動されない）と不一致だった。`1.0f32 /
+   eps.sqrt()` を返すよう修正した
+7. CUDA カーネルの変更は NVRTC ソース文字列（Rust の `&str` 定数）の
+   変更であり、Mac 環境では実機コンパイル確認ができない。ソース文字列
+   の存在検査（`forward_kernels_do_not_use_approximate_rsqrtf`。`double
+   acc = 0.0;`・新 `rstd` 計算式の文字列を回帰検出するよう更新済み）・
+   CPU 側テスト・`cargo fmt`／`cargo clippy --workspace --all-targets
+   --all-features -- -D warnings` の通過をローカルで確認した。GB10
+   実機でのコンパイル成立・数値実測はコーディネータが実施する
+
+**実機確認コマンド（変更なし。上記参照）**。実機確認完了後、本節に
+実測値を追記し、`rstd` 精度改善のみで解消したか、dw split-K 側の
+`double` 化が追加で必要かを判断する。
+
+### 9.8 dw 縮約自体の double 化（PR #1120 追加コミット。GB10 実機実測 2026-09-01）
+
+**GB10 実機再検証結果（0db80f6。§9.7 の rstd `double` 化のみを適用した
+コミット）**: `rmsnorm_backward_matches_cpu_across_shapes`（非 split）は
+pass した。しかし `rmsnorm_backward_dw_split_matches_cpu_across_shapes` は
+旧ケース `(rows=8192, hidden=4096, num_blocks=1)` で FAIL 継続
+（`fail_count=5/4096・max_abs_diff=3.052e-4・max_rel_err=1.345e-2`。
+`rstd` の `double` 化前〈§9.4〉の `max_rel_err=1.340e-2` とほぼ同水準——
+`rstd` 精度改善だけでは実質的な改善が見られなかった）。
+
+**切り分け**: `rstd` 自体はほぼ厳密な値になった一方、dw の
+`rows=8192` に渡る `f32` 逐次和（GPU: `fmaf` 蓄積／CPU 参照: `mul_add`
+蓄積）が、相殺を含む出力要素（列）で支配的な誤差になっていた。GPU・CPU
+とも同一の行順逐次蓄積だが、`rstd[r]`（行ごとのスカラー）が GPU
+（warp butterfly reduction 由来）と CPU（逐次和由来）で `double`
+精度でも非結合性に起因するごく僅かな差を持ち続ける限り、`rows` 方向へ
+8192 回積み上げる `f32` の逐次和はこの僅かな入力差を打ち消しきれず、
+特定の出力列（強い相殺が起きる列）で複合判定を超える絶対誤差へ増幅
+されうる。
+
+**ルーティングの実装確認（重要な訂正）**: 当初の対応方針は
+`RMSNORM_BWD_DW_PARTIAL_F32`／`RMSNORM_BWD_DW_REDUCE_F32`（split-K
+経路。`num_blocks >= 2`）の `double` 化のみを想定していたが、
+`rmsnorm.rs::run_rmsnorm_bwd_f32_inner` のホスト側分岐
+（`if num_blocks <= 1 { 単段カーネル RMSNORM_BWD_DW_F32 } else {
+split-K 二段構成 }`）を確認したところ、**GB10 で FAIL していた
+`(rows=8192, hidden=4096, num_blocks=1)` は `num_blocks <= 1` のため
+実際には単段カーネル `RMSNORM_BWD_DW_F32`（split-K 側とは別カーネル）
+を経由しており、split-K 側だけを `double` 化しても本ケースの FAIL は
+解消しない**ことが判明した。このため対応範囲を単段カーネルへ拡張した
+（`.claude/rules/out-of-scope-tracking.md` の趣旨に沿い、実装時に判明
+した前提の誤りとして本節に明記する。既存の対応方針〈split-K 側の
+`double` 化〉自体は誤りではなく、`num_blocks >= 2` の経路に引き続き
+必要な改善のため維持する）。
+
+**適用した修正（`crates/backend-cuda/src/kernels_rmsnorm.rs`。
+tolerance 非変更）**:
+
+1. **`RMSNORM_BWD_DW_F32`（単段フォールバック。`num_blocks <= 1` の
+   実効経路）**: `rows` 方向の逐次蓄積 `acc` を `float` から `double`
+   アキュムレータへ変更した（`fma((double)dyv * (double)r, (double)xv,
+   acc)`。`dw[i]` へ代入する 1 回だけ `float` へ downcast）
+2. **`RMSNORM_BWD_DW_PARTIAL_F32`（split-K 第 1 段。ブロック内蓄積）**:
+   同様に `acc` を `double` 化。**部分和バッファ `dw_partial` 自体も
+   `float` から `double` へ変更**した（ホスト側 `rmsnorm.rs` の
+   `alloc_zeros::<f64>` に対応。中間で `float` へ downcast すると
+   ブロック間縮約〈次段〉に渡す前に精度を失うため、バッファ型ごと
+   `double` 化する設計を選んだ——コーディネータ指示の「partial 出力を
+   float のまま downcast すると精度が落ちるので、可能なら partial
+   バッファを double 化」に従う）
+3. **`RMSNORM_BWD_DW_REDUCE_F32`（split-K 第 2 段。ブロック間縮約）**:
+   `dw_partial` の読み出し型を `double` に合わせ、smem double buffer
+   （`smem[2][4][256]`）・縮約アキュムレータ `acc` を `double` へ変更。
+   `dw[col]` へ書く epilogue でのみ `float` へ downcast する
+4. **ホスト側（`rmsnorm.rs`）**: `dw_partial_dev` の確保を
+   `alloc_zeros::<f32>` から `alloc_zeros::<f64>` へ変更。部分和
+   バッファのバイト数計算（`derive_dw_split` の `fits_budget`・
+   `validate_dw_split_launch` の `partial_bytes`）の乗数を `4`（`float`）
+   から `8`（`double`）へ更新した
+
+**CPU 参照実装側の強化（`crates/backend-cuda/tests/
+rmsnorm_backward_parity.rs`。テスト弱体化ではなく精度強化。codex P1
+の趣旨「独立参照 + 実装側修正」に合致）**:
+
+- `cpu_rmsnorm_backward_reference`（主検査が使う独立参照）: 二乗和
+  （`rstd` 計算。`gpu_rstd = None` の場合）・dw の行方向蓄積を
+  いずれも `f64` アキュムレータへ変更した。`dx` の計算式（`dot` の
+  蓄積・最終の `dx_row[i]` 式）は変更していない（コーディネータ指示:
+  dx 参照はそのままで可。dx は既に GB10 で pass しており、対応する
+  GPU 側 `RMSNORM_BWD_DX_F32` も本 PR で変更していない）
+- `cpu_rmsnorm_rstd_reference`（追加検査の rstd バッファ parity 用）:
+  同様に `f64` アキュムレータ化した
+- `cpu_rmsnorm_dw_split_reference`（追加検査の split-K dw カーネル単体
+  検証用）: ブロック内・ブロック間の蓄積をいずれも `f64` 化し、GPU
+  側の対応する 2 カーネルと精度前提を揃えた
+- 独立性は維持している: いずれの関数も GPU の縮約順序（`rstd` の
+  warp butterfly reduction・dw のブロック分割）を模倣するものではなく、
+  素朴な逐次和（`rstd`・`cpu_rmsnorm_backward_reference` の dw）または
+  独立に定義したブロック分割順序（`cpu_rmsnorm_dw_split_reference`。
+  これは「追加検査」専用でありこの関数自体は元々 GPU の縮約順序を
+  模倣する設計だったため対象外）のままである。変更したのは中間計算の
+  **精度**（`float` → `double`）のみであり、GPU 実装のコピーではない
+
+**回帰テストの更新**: `kernels_rmsnorm.rs` 側のソース文字列検査
+（`split_k_dw_reduce_smem_size_matches_batch_and_block_dim_consts`・
+`split_k_dw_reduce_writes_dw_exactly_once_in_epilogue` 等）を新しい
+型・計算式に合わせて更新した。`rmsnorm.rs` 側のバッファ上限テスト
+（`derive_dw_split_falls_back_when_partial_buffer_exceeds_cap`）も
+`double` 要素サイズ（8 byte）に合わせて期待値を再計算した
+（`num_blocks=16` → `8`。乗数 `4` → `8` により上限に収まる block 数が
+半減する）。テスト用の CPU 専用回帰テスト
+（`cpu_dw_split_reference_matches_naive_reference_when_num_blocks_is_one`）
+は `f64` 化後も bit-for-bit 一致を維持することをローカルで確認済み
+（`num_blocks == 1` では `0.0 + partial == partial` の加法単位元により
+精度損失なく退化するため）。
+
+**性能への影響の見積もり**: forward 同様、dw カーネル群もメモリ帯域
+律速の性質を持つ（行あたり `hidden` 要素のロード＋蓄積、または
+`num_blocks * hidden` 要素の部分和書き出し／読み出し）。`double` 演算
+自体の追加コストは軽微と見積もるが、**split-K 経路は部分和バッファの
+サイズが 2 倍化する**（`float` → `double`。`RMSNORM_DW_PARTIAL_BUFFER_
+CAP_BYTES` は 64 MiB のまま変更していないため、同一 `hidden` に対し
+選択される `num_blocks` の上限がおよそ半分になる——実測例:
+`derive_dw_split(20_000, 100_000, 1_000_000)` は `16` から `8` へ
+減少。これにより極端に広い `hidden` を持つ形状では split-K の並列度が
+下がり性能へ影響しうる）。またブロック間縮約カーネルの静的 smem
+使用量も 8 KiB から 16 KiB へ倍増したが、GPU の静的 smem 予算には
+依然余裕を持って収まる。実機での定量計測（REQ-8 性能下限との非後退
+確認を含む）は次回 GB10 セッションで実施する
+
+**実機確認コマンド（変更なし。§9.7 参照）**。実機確認完了後、本節に
+実測値（`fail_count`・`max_abs_diff` 等）を追記し、イシュー
+#1102／#1105 のクローズ可否・REQ-8 性能非後退を判断する。
+
+**GB10 実機再検証結果（コミット `1a356ea`。コーディネータ実行）**:
+`rmsnorm_backward_matches_cpu_across_shapes`・`rmsnorm_backward_dw_split_
+matches_cpu_across_shapes` の 2 テストが pass した。旧 FAIL ケース
+`(rows=8192, hidden=4096, num_blocks=1)` は `fail_count=5/4096 → 0` へ
+解消した。dw の `rows` 方向蓄積（単段カーネル `RMSNORM_BWD_DW_F32`。
+9.8 のルーティング確認で判明したとおり `num_blocks<=1` の実効経路）を
+`double` アキュムレータ化したことが、この特定ケースの解消に直接寄与した
+ことを実機で確認した。
+
+### 9.9 契約改定: 正規化統計・勾配の長軸縮約を全バックエンドで f64 統一（ユーザー承認 2026-09-01）
+
+**背景**: 9.7〜9.8 の対応は CUDA カーネルと CPU 参照実装（テスト専用の
+独立参照実装）のみを `f64`（`double`）化しており、`backend-cpu`・
+`backend-metal` の**本番実装**（`crates/backend-cpu/src/rmsnorm.rs`・
+`crates/backend-metal/src/shaders/rmsnorm.metal`）は `f32` のままだった。
+これは「CUDA と参照実装だけを片側で `f64` 化する」契約の非対称性であり、
+codex-review が P1 として 2 件（CUDA 側・CPU 参照実装側）指摘した内容の
+根本原因でもある。ユーザー承認（2026-09-01）により、**正規化統計・勾配
+の長軸縮約（rmsnorm の `rstd` 二乗和・dw の行方向蓄積等）は全バックエンド
+で `f64` アキュムレータ契約へ統一する**（Metal は `double` 型非対応の
+ため Kahan 補償和 `f32` を「`f64` 相当」の実装形として適用する）ことで
+この非対称性を解消した。matmul 系の FMA 契約（CPU 参照 `f32::mul_add`）
+は不変（`AGENTS.md`・`.claude/rules/coding-rust.md` に同内容を追記済み）。
+
+**実装の棚卸し**: rmsnorm 実装は 3 バックエンドすべてに存在する
+（`backend-cpu`・`backend-cuda`・`backend-metal`）。同型の「長軸縮約」を
+持つ他の演算（softmax 等）は本イシューのスコープ外（rmsnorm の `rstd`・
+dw のみが対象と確認済み。softmax の縮約〈max・sum〉は別イシューで扱う
+判断とし、本 PR では変更していない）。CPU・Metal とも rmsnorm の
+**backward（dw）専用カーネルは存在しない**（`backend-cpu`・
+`backend-metal` いずれも forward のみを自作カーネルとして持ち、backward
+は汎用 autodiff 合成〈elementwise・reduction〉経由。ダミー「同型演算の
+列挙」としてはこの事実を記録するに留め、変更は forward の `rstd` のみに
+限定した）。
+
+**`backend-cpu`（`crates/backend-cpu/src/rmsnorm.rs`）**:
+
+- スカラー経路（`rmsnorm_row_scalar`）: 二乗和の蓄積を `f32` から `f64`
+  アキュムレータへ変更（要素の二乗自体も `f64` へ昇格してから計算し、
+  CUDA 側の `fma((double)v, (double)v, acc)` と精度特性を揃えた）。
+  `rstd` へ代入する 1 回だけ `f32` へ downcast する
+- NEON 経路（`rmsnorm_row_neon`。aarch64 限定）: `vcvt_f64_f32`／
+  `vcvt_high_f64_f32` で `float32x4_t` チャンクを下位・上位 2 要素ずつ
+  `float64x2_t` へ拡張し、`vfmaq_f64`（倍精度 NEON FMA。ARMv8-A の
+  Advanced SIMD がベースラインで倍精度演算を含むため追加の
+  `#[target_feature]` 指定は不要）で二乗和を蓄積する。端数は `f64`
+  逐次和で処理する
+- 実機実測（Apple M4 Max・aarch64。本 PR 作業環境）: `cargo test -p
+  fandhe-ai-backend-cpu` 全 pass（`neon_matches_scalar_various_hidden`
+  という NEON/スカラー A/B 同値テストを含む。両経路とも `f64` 化後も
+  1e-5 の既存許容誤差内で一致することを確認済み——`f64` 化は両経路を
+  真値へ近づける変更のため、互いの差は `f64` 化前より縮む方向）
+
+**`backend-metal`（`crates/backend-metal/src/shaders/rmsnorm.metal`）**:
+
+- forward の 1 パス／2 パス両カーネル（`rmsnorm_f32_onepass`／
+  `rmsnorm_f32_twopass`）の二乗和蓄積を、単純な `fma()` 直接蓄積から
+  **Neumaier 改良版 Kahan 補償和 + scale/ssq 方式**（`rmsnorm_ssq_add`・
+  `rmsnorm_ssq_combine`・`rmsnorm_reduce_ssq`・`rmsnorm_finalize_rstd`）
+  へ変更した。レーン内蓄積（各レーンの `hidden/32` 要素程度の逐次和）・
+  32 レーン間 butterfly 縮約（5 段シャッフルで `scale`・`ssq`・補償項
+  `comp` の 3 つを交換し `rmsnorm_ssq_combine` で合成）の両方に適用した
+  （CUDA 側「レーン内部分和を `double` 化・warp shuffle を `double` で
+  行う」設計と対応する）
+- Apple GPU family は `double` 型をサポートしないため MSL では `f64`
+  アキュムレータを直接使えない。scale/ssq 方式（LAPACK SLASSQ 系の
+  overflow-safe な二乗和アルゴリズム: 最大絶対値を `scale` として括り
+  出し、残りを `(a/scale)^2`〈常に `[0,1]`〉として `ssq` へ蓄積する。
+  各ステップの `ssq` 加算に Neumaier 改良版 Kahan 補償和を併用する）を
+  「`f64` 相当」の実装形として適用する
+- **当初は scale/ssq 方式を用いず単純な Kahan 補償和のみを適用していた
+  が、codex-review が P1 として「`v.x * v.x` を `f32` のまま先に計算する
+  ため、有限入力（例 `2e20f`）でも二乗が `f32` の表現範囲（最大約
+  3.4e38）を超えて `inf` になり、`inf - inf` の Kahan 補償計算で `NaN`
+  が発生する。CUDA・CPU は要素を `f64` へ昇格してから二乗するため有限
+  値を保ち、意味論が片側で割れている」と指摘した**（2 度目の P1。1 度目
+  は本節冒頭の「CUDA と参照実装だけの片側 `f64` 化」）。この指摘を受け
+  scale/ssq 方式へ実装を訂正した。二乗を直接計算しない（比の二乗のみを
+  計算する）ため、有限入力である限り中間計算が `f32` の表現範囲を超えて
+  overflow することがない
+- 最終的な `rstd` 導出（`rmsnorm_finalize_rstd`）も `scale` を明示的に
+  二乗しない形（`rstd = 1 / (scale * sqrt(ssq * inv_n))`）へ整理した
+  （`scale` が `2e20` 級の場合 `scale^2` 自体が `f32` 表現範囲外になる
+  ため）。`eps` は最終段で別途加算するのではなく `sqrt(eps * n)` という
+  追加の疑似要素として同じ `rmsnorm_ssq_add` へ通すことで、実要素の
+  二乗和と同じ overflow-safe な経路に統一した（`scale == 0`〈実要素が
+  全て 0〉かつ `eps > 0` のケースでも、この疑似要素が `scale` を
+  `sqrt(eps * n)` へ更新するため、特別分岐なしに従来どおり
+  `rstd = 1/sqrt(eps)` へ帰着する）
+- **極値入力の実機テストを追加**（`tests/rmsnorm_parity.rs::
+  rmsnorm_matches_backend_cpu_with_extreme_magnitude_values`。`#[ignore]`
+  Metal 実機依存）: `hidden=17`（スカラー経路を含む非 4 の倍数）の行に
+  `2e20f`／`-1.5e20f`（`f32` の二乗が overflow する大きさ）・`1e-38f`／
+  `-3e-39f`（非正規化数級の極小値）を混在させ、GPU 出力が全て有限値
+  （`is_finite()`）であること、および `backend-cpu`（`f64` 化済み）との
+  複合判定一致を検証する。tolerance は変更していない
+- 実機実測（Apple M4 Max・実機 GPU。本 PR 作業環境）:
+  `cargo test -p fandhe-ai-backend-metal --release --test rmsnorm_parity
+  -- --ignored --nocapture` 4 テスト全 pass（`rmsnorm_matches_cpu_
+  across_shapes`・`rmsnorm_matches_backend_cpu_directly`〈`f64` 化した
+  `backend-cpu` 本番実装との直接比較〉・`rmsnorm_run_fused_matches_cpu_
+  composed`・上記の極値入力テスト）。`cargo test -p fandhe-ai-backend-
+  metal --release -- --ignored --test-threads=1`（rmsnorm 以外を含む
+  実機依存テスト全件）も全 pass（非後退確認）
+- ソース文字列証跡テスト（`tests/rmsnorm_softmax_source_evidence.rs`）を
+  更新: `rmsnorm_uses_fma_for_accumulation` →
+  `rmsnorm_uses_overflow_safe_ssq_for_accumulation`（`rmsnorm_ssq_add`
+  ヘルパー使用の検査に加え、単純な `v.x*v.x` 直接二乗〈Kahan 補償のみ〉
+  への後退も明示的に検出する）、butterfly reduction の 5 段検査を
+  softmax 側（展開済み 5 行。従来どおり）と rmsnorm 側（`scale`・`ssq`・
+  `comp` 3 つの shuffle を検査する `rmsnorm_uses_five_stage_ssq_
+  butterfly_reduction`）に分離した
+
+**tolerance・ケース表・シードは一切変更していない**（`RELATIVE_TOLERANCE`・
+`ABSOLUTE_RESCUE_THRESHOLD`・複合判定式は不変）。本節の変更はいずれも
+「実装側の精度をより真値へ近づける・意味論を他バックエンドと揃える」
+対応であり、CPU 参照実装の `f64` 化（9.8）と同じ精神——独立参照・各
+バックエンド実装ともに精度・overflow 安全性を引き上げることで、縮約
+順序の非結合性に由来する誤差を許容範囲内へ収める——に立つ。
+
+### 9.10 codex-review 3 件目の P1 一括是正 + 4 件目の inf+inf 追加是正（PR #1120。eps overflow・NaN 非伝播・契約文言の精密化・inf+inf 汚染）
+
+PR #1120 に対し codex-review が同時に P1 を 3 件指摘した。すべて妥当と
+判断し 1 コミットで是正した。
+
+**1. `rmsnorm.metal`: `eps * n` の中間 overflow**（`rmsnorm_finalize_
+rstd`）: `eps` を `sqrt(eps * n)` という疑似要素として `scale/ssq` へ
+折り込む際、`eps` が `f32::MAX` 級・`hidden`（`n`）がある程度大きい場合
+に、平方根を取る前の `eps * n` 自体が `f32` の表現範囲（最大約 3.4e38）
+を超えて `inf` になり、最終的な `rstd` が誤って `0` になっていた（CPU/
+CUDA は `f64` で `sum_sq*inv_n + eps` を計算するため有限値を保つ）。
+`sqrt(eps * n) = sqrt(eps) * sqrt(n)`（数学的に同値な恒等式。両辺とも
+非負）という変形を使い、`eps`・`n` をそれぞれ個別に平方根を取ってから
+掛け合わせることで中間 overflow を回避した（`eps`・`n` はいずれも個別
+には `f32` の表現範囲内の有限値であるため、それぞれの平方根も表現範囲
+内に収まる）。実機テスト
+`tests/rmsnorm_parity.rs::rmsnorm_matches_backend_cpu_with_extreme_eps`
+（`eps = f32::MAX`・`hidden = 17`）を追加し、GB10 実機実測: Apple M4 Max
+実機で pass を確認（GPU 出力が有限・非ゼロであり `backend-cpu`〈`f64`
+化済み〉と複合判定一致）。
+
+**2. `rmsnorm.metal`: NaN 入力の非伝播**（`rmsnorm_ssq_add`／
+`rmsnorm_ssq_combine`）: scale/ssq 方式の `a > scale` 比較は IEEE 754 の
+規則により `a` が `NaN` の場合常に偽になる。`scale` が未だ `0.0f`
+（このレーンで最初に処理される要素が `NaN` だった場合）だと `scale >
+0.0f` も偽になり、いずれの分岐にも入らず `NaN` 入力が黙って捨てられて
+いた（CPU/CUDA の `f64` 逐次和は `NaN` を含む行全体が `NaN` になる意味論
+のため、これは意味論の不一致だった。実測で再現・確認済み——一時的に
+NaN 検出分岐を無効化して再実行したところ、`NaN` 要素がそのまま出力へ
+素通りし他の要素は正常な正規化値になるという、まさに指摘どおりの症状を
+確認した）。`rmsnorm_ssq_add` に `isnan(a) || isnan(ssq) || isnan(scale)`
+の検出を追加し、`ssq` を `NaN` へ確定・`scale` を**有限の正値**
+（`1.0f`）へ強制する（`scale` を `0.0f` のままにすると
+`rmsnorm_ssq_combine` の `other_scale == 0.0f` 早期 return で汚染情報が
+握り潰されるため）。`rmsnorm_ssq_combine` にも同型の `isnan(ssq) ||
+isnan(other_ssq)` 検出を追加した。**inf 入力**（`scale` が `+inf`）は
+既存のアルゴリズムで自然に正しく扱える（`scale = inf` が最終的に
+`rstd = 0` へ伝播する。CPU/CUDA の `f64` 意味論と一致）が、**両者とも
+`+inf` の状態を結合する**特殊ケース（`ratio = other_scale / scale =
+inf/inf = NaN` になり誤って `NaN` へ汚染してしまう）のみ
+`isinf(scale) && isinf(other_scale)` の明示分岐で `+inf`（IEEE 754 の
+`inf + inf = inf` に倣う）のまま維持するよう対応した。実機テスト
+`tests/rmsnorm_parity.rs::rmsnorm_propagates_nan_matching_backend_cpu`
+（先頭要素が `NaN` の行・非先頭要素が `NaN` の行・`NaN` なしの対照行の
+3 行構成）を追加し、Apple M4 Max 実機で pass を確認。`crates/backend-cpu/
+src/rmsnorm.rs` にも `run_rmsnorm_f32_propagates_nan_for_row_with_nan_
+element`（CPU 単体・実機不要）を追加し、全バックエンドで NaN 伝播の
+意味論が一致することを記録した。
+
+**3. `kernels_rmsnorm.rs`: 要素積の `double` 化が契約文言と矛盾**: 「正規
+化統計・勾配の長軸縮約は `f64` アキュムレータで統一する（要素ごとの
+積和自体は `f32` のまま）」という契約文言に対し、`RMSNORM_BWD_DW_F32`・
+`RMSNORM_BWD_DW_PARTIAL_F32` の実装が `acc = fma((double)dyv *
+(double)r, (double)xv, acc);`（要素を先に `double` へ昇格してから積を
+取る）になっており、文言と不一致だった。切り分けの結果、この不一致は
+2 系統の縮約が本質的に異なる扱いを要することに起因すると判断した:
+forward の二乗和は要素を `f32` のまま二乗すると overflow しうる
+（Metal 側の scale/ssq 方式採用理由と同根）ため `f64` 昇格後に二乗する
+必要がある一方、dw の 3 項積（`dy・rstd・x`）はそのような overflow
+リスクが実用上小さいため、契約文言どおり要素積を `f32` で確定してから
+`f64` へ昇格するのが妥当と判断した。**実装を契約文言（dw 側）に合わせて
+是正**した（`float term = dyv * r * xv; acc = (double)term + acc;`）。
+forward の二乗和側は実装（`f64` 昇格後に二乗）を維持し、**契約文言の側
+をこの区別を明示する形へ精密化**した（`AGENTS.md`・`.claude/rules/
+coding-rust.md`。本節冒頭を参照）。`kernels_rmsnorm.rs` 冒頭に
+「精度契約の精密化（§9.10 追補）」節を追加し、実装の根拠をコード内にも
+記録した。回帰テスト `dw_kernels_finalize_element_product_in_f32_before_
+double_accumulation`（`RMSNORM_BWD_DW_F32`・`RMSNORM_BWD_DW_PARTIAL_F32`
+双方のソース文字列を検査。実機不要）を追加した。テスト参照側
+（`crates/backend-cuda/tests/rmsnorm_backward_parity.rs` の
+`cpu_rmsnorm_backward_reference`・`cpu_rmsnorm_dw_split_reference`）も
+同じ契約（要素積を `f32` で確定してから `f64` へ蓄積）へ統一した
+（forward の二乗和側の CPU 参照実装は変更していない）。
+
+**tolerance・ケース表・シードは一切変更していない**。実機検証は本作業
+セッションが Apple M4 Max・macOS だったため Metal 側は実機で直接確認
+できた（`cargo test -p fandhe-ai-backend-metal --release --test
+rmsnorm_parity -- --ignored --nocapture` 全 6 テスト pass。うち 3 は本節
+の是正で新規追加）。CUDA 側（`kernels_rmsnorm.rs` の要素積修正）は
+ソース文字列検査・CPU 側テストで確認済みだが、GB10 実機での最終確認は
+コーディネータに委ねる（確認コマンドは §9.7〜§9.8 と同一）。
+
+**4. `rmsnorm.metal`: `scale == +inf` の状態に `a == +inf` が続くと NaN
+汚染（codex-review P1 + Bugbot Medium。同根の 1 件。PR #1120 追加是正）**:
+上記 2 番目の NaN 是正（`isnan` 検出）とは別に、`scale` が既に `+inf`
+（先行する inf 要素で確定済み）の状態で次の要素 `a` も `+inf` だった
+場合、`a > scale` が `inf > inf` で偽になり `else if` 分岐へ入る。そこで
+計算する `ratio = a / scale = inf / inf` は IEEE 754 の不定形で `NaN`
+になり、`rmsnorm_kahan_add(ssq, comp, ratio * ratio)` を通じて `ssq` を
+`NaN` へ汚染してしまう。CPU/CUDA の `f64` 意味論では `inf + inf = inf`
+（有限の不定形にならない）ため二乗和は `inf` のまま、`rstd` は有限の
+`0` になり（`NaN` にはならない）、意味論が不一致だった。
+
+`rmsnorm_ssq_add` に `isinf(scale) && isinf(a)` の明示分岐を追加し
+（`isnan` チェックの直後・通常のリスケール分岐より前）、この場合は
+リスケール計算自体を行わず `scale` を `+inf` のまま維持して `ssq` のみ
+Neumaier 加算で更新する（呼び出し元は `fabs(v)` を渡すため `a` は常に
+非負であり `isinf(a)` は必ず `+inf` を意味する。`rmsnorm_ssq_combine`
+側は既存の `isinf(scale) && isinf(other_scale)` 分岐〈本節 3 番目是正の
+延長で既に導入済み〉がレーン間結合の同型ケースを担っており、今回の
+是正はレーン内蓄積（`rmsnorm_ssq_add`）側の抜け漏れを埋めるもの）。
+
+**実機テスト**（`tests/rmsnorm_parity.rs::
+rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row`）を追加した:
+`hidden=65`（非 4 の倍数のためスカラー経路。`hidden > 32` でレーン割当
+`idx % 32` が複数レーンにまたがる）で、**同一レーン配置**（`idx=0`・
+`idx=32`。いずれもレーン 0 が同一ループ内で逐次処理し
+`rmsnorm_ssq_add` を直撃する）と**別レーン配置**（`idx=0` はレーン 0・
+`idx=1` はレーン 1。`rmsnorm_ssq_combine` の inf+inf 分岐を経由する）の
+両方を検証する。`+inf` 要素自体の出力は `x_i * rstd(=0) = inf * 0 =
+NaN`（IEEE 754 の不定形。CPU 参照実装でも同じ `NaN` になる契約）になる
+一方、それ以外の有限要素の出力は `finite * 0 = 0.0`（厳密な等式）に
+なるという区別を踏まえ、位置ごとに直接値検査で判定する（`tolerance`
+は使わない）。
+
+**回帰の実機再現確認**: 是正前に `isinf(scale) && isinf(a)` 分岐を一時的に
+無効化して同テストを実行したところ、行 0（同一レーン配置）で有限要素の
+GPU 出力が `NaN` になる（指摘どおりの症状）ことを Apple M4 Max 実機で
+確認したうえで、是正を復元し全テスト pass を再確認した。
+
+**実機実測（Apple M4 Max・macOS。本節 4 番目の是正時点）**: `cargo test
+-p fandhe-ai-backend-metal --release --test rmsnorm_parity -- --ignored
+--nocapture` 全 7 テスト pass（新規追加の
+`rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row` を含む）。
+`cargo test -p fandhe-ai-backend-metal --release -- --ignored
+--test-threads=1`（実機依存テスト全件）も全 pass（非後退確認）。
+`tolerance`・ケース表・シードは一切変更していない。
+
 ## 10. TF32/f16 mma・wmma・tensor_core_real_device テスト群の GB10 失敗解消（イシュー #1106）
 
 本節は §1〜8（GEMM `wmma`/`mma` 系ベースライン表・非後退契約本体）の続き
