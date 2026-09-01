@@ -2250,9 +2250,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d16cd616c7b66efd8e1129b2d4a5783ca8c7e8aa21427874c84d1071428c4b9"
+checksum = "943f39ef30511265261f4b3239f56add41145cce9c6269dda60a5d3b438df5d3"
 dependencies = [
  "fandhe-ai-autodiff",
  "fandhe-ai-backend-cpu",
@@ -2263,18 +2263,18 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-autodiff"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ad0949bc32493b74e70006a8eebdee2ece93606ae28de8e8a7e6c638a5149dc"
+checksum = "209bc639713dd89b4090b14445622fbc89772e659e2757c41a0747aaeef4da43"
 dependencies = [
  "fandhe-ai-tensor-core",
 ]
 
 [[package]]
 name = "fandhe-ai-backend-cpu"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b12c906dd4c54d15d8c4eeacaf497149701f78ebb16bfb883a4b3fb6b8d4e94"
+checksum = "9f706b7aa12879051ddbfffdd6f302efa4c4019233406f0125ef83ca637d7426"
 dependencies = [
  "fandhe-ai-tensor-core",
  "half",
@@ -2283,9 +2283,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-backend-cuda"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b386b7a4ac33789dc993249c14b923253a95224607c624bd289a041f32d0408b"
+checksum = "cbf4b03cb266d91ad774bc481ca20215c691bafa54fd271ab82659d8b9c5b261"
 dependencies = [
  "cudarc 0.19.8",
  "fandhe-ai-tensor-core",
@@ -2294,9 +2294,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-backend-metal"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec881ed45305124ac57d595f11c7a185e25fcf12826fd7c8a56a6b1d1a274a30"
+checksum = "4302c6e778faea3ad7d7bdceab560f6acad1f9512c8b625c538f7eff42a7a726"
 dependencies = [
  "fandhe-ai-tensor-core",
  "half",
@@ -2307,9 +2307,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-tensor-core"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8e98dee1c2933b3120f30d009eea03f86a9459f289bc48abe1af26202c11da5"
+checksum = "738bcdea2a478f1e300c6908f948b3203d2602f9bbd09427fe10c35a2dce1a4a"
 dependencies = [
  "half",
 ]

@@ -12,4 +12,4 @@ publish = false
 [dependencies]
 bench-common = { path = "../bench-common" }
 # deps-policy.md（第 9 区分の適用範囲拡張。本 workspace 限定）に合わせ =x.y.z 完全固定
-fandhe-ai = "=0.5.0"
+fandhe-ai = "=0.6.0"
