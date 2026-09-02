@@ -156,6 +156,10 @@ fail_count・mean_abs_diff は全 262144 要素の集計値である）。
 `fail_count` は整数の実測値であり丸め対応の対象外（記録値をそのまま上限
 とする）。
 
+`baseline_max_abs_diff_ceiling`／`baseline_max_rel_err_ceiling`
+（コーディネータ指示・ユーザー承認 2026-09-02 で追加。§10.9 参照）も
+`baseline_mean_abs_diff_ceiling` と同じ「表示桁の最終桁 +1」規約に従う。
+
 ## 5. 参照値計算の経路（fixture・テストが再現する契約）
 
 - **TF32 経路**（`wmma_tf32`/`wmma_tf32_opt`）: 入力を f32 のまま
@@ -186,6 +190,14 @@ fail_count・mean_abs_diff は全 262144 要素の集計値である）。
   ゲートであり、実測値を主張しない。実機実測が完了次第、確定値へ差し替えて
   `false` へ更新する（PR #678 codex-review P1 指摘対応。`WmmaTf32`〈基本版〉
   行の既存前例と同型）
+- **`baseline_max_abs_diff_ceiling`／`baseline_max_rel_err_ceiling`
+  （`Option<f64>`。§10.9）**: `baseline_mean_abs_diff_ceiling` と同じ
+  「実測値のみ・推定値記入禁止」規約に従う。実測データがまだない既存行は
+  `None`（fail-open ではなく「この項目は未実測」を明示するだけで、他の
+  項目〈`fail_count`・`mean_abs_diff` ceiling〉の判定は引き続き行われる）。
+  `None` から実測値付きの `Some` への更新は「未計測形状・シードの行追加」
+  と同じ扱い（実機実測とセットでのみ行う）。`Some` の値を緩める変更は
+  「上方更新（緩和）」と同じくユーザー承認必須
 - tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）自体の
   変更は本契約のスコープ外（#186・REQ-2 改定側の判断。変更する場合は
   `crates/backend-cpu/src/parity.rs` のコメントに従いユーザー承認を得る）
@@ -1172,3 +1184,369 @@ GB10 実機実測・解消記録を追記する（イシュー #1102 配下・�
 （`compare_uniform_probe_scaled` 等・`internal-diagnostics` 限定）の実装は
 同提案が明記するとおり別イシュー扱いとし、本イシューでは実装しない
 （`.claude/rules/out-of-scope-tracking.md`）。
+
+### 10.4 reopen: opt カーネル `assert_parity` 厳密ゼロ fail 判定の不整合を解消（2026-09-02）
+
+PR #1115 マージ後の GB10 実機再検証（2026-09-01）で `wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+`wmma_tf32_opt_kernel_k4096_stress`・`wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`
+の 3 テストが fail し、#1106 が reopen された。本節はその原因切り分け・
+対応（案 A）を記録する。
+
+#### 10.4.1 原因切り分け
+
+`wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+`wmma_tf32_opt_kernel_k4096_stress` は `assert_wmma_tf32_opt_kernel_parity`
+（内部で `fandhe_ai_backend_cpu::assert_parity`。**厳密ゼロ fail 判定**）を
+使っていたが、`assert_parity` は最初に fail したケースで panic するため、
+9 ケース中 2 ケース（64×64×64・512×512×4096）しか実機で実行されておらず、
+残り 7 ケースは未計測のままだった。
+
+reopen コメントの実測値（64x64x64 seed=3000: fail 699/4096・
+mean_abs=5.676e-4／512x512x4096 seed=0xC0FFEE: fail 43019/262144・
+mean_abs=4.463e-3）は `ParityBaseline::BASELINES` の既存記録値（同一形状・
+同一シード）と**完全一致**した。さらに `wmma_tf32_opt_kernel_parity_does_not_regress`
+（baseline 非後退方式・同一カーネル・同一形状・同一シード）は同じ実行で
+pass していた。これは「厳密ゼロ fail 判定側だけが red、baseline 非後退
+判定側は green」という状態であり、opt カーネル自体に数値バグがあるとは
+考えにくいことを示す。
+
+診断のため、同じ 9 ケースを `assert_parity` の代わりに
+`fandhe_ai_backend_cpu::compare`（panic しない集計 API）で走らせる一時
+テスト（`wmma_tf32_opt_kernel_parity_diagnostic_dump_issue_1106`。PR で
+追加後、修正確定に伴い削除済み）を用意し、GB10（sm_121）実機・GPU アイドル
+（`nvidia-smi --query-gpu=utilization.gpu` 0%）を確認したうえで 2 回実行
+（2026-09-01 初回・2026-09-02 GPU アイドル再確認のうえ再計測）し、全値の
+完全一致を確認した:
+
+| shape | seed | fail/total | max_abs_diff | max_rel_err | mean_abs_diff |
+|---|---|---|---|---|---|
+| 64×64×64 | 0xBB8 (3000) | 699/4096 | 2.561e-3 | 7.772e-1 | 5.676e-4 |
+| 128×128×128 | 0xBB9 (3001) | 2638/16384 | 4.413e-3 | 1.314e0 | 7.775e-4 |
+| 512×512×512 | 0xBBA (3002) | 42799/262144 | 9.179e-3 | 1.923e0 | 1.568e-3 |
+| 63×65×33 | 0xBBB (3003) | 698/4095 | 1.917e-3 | 7.411e-1 | 3.943e-4 |
+| 65×63×17 | 0xBBC (3004) | 635/4095 | 1.436e-3 | 2.376e-1 | 2.777e-4 |
+| 64×96×256 | 0xBBD (3005) | 967/6144 | 5.184e-3 | 1.169e0 | 1.117e-3 |
+| 1×1×1 | 0xBBE (3006) | 0/1 | 1.419e-4 | 2.340e-4 | 1.419e-4 |
+| 512×512×4096 | 0xC0FFEE | 43019/262144 | 2.408e-2 | 1.998e0 | 4.463e-3 |
+| 4096×4096×4096 | 0xBEEF | 2725617/16777216 | 3.116e-2 | 1.997e0 | 4.453e-3 |
+
+9 ケース中 8 ケースが非ゼロ fail_count を持ち、ゼロ fail が実際に成立
+するのは 1×1×1（sub-K-tile。K 方向蓄積が発生せず TF32 丸め誤差が蓄積
+しない）のみだった。この非ゼロ fail 率は
+`docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md` §5〜§7 が
+記録する opt/basic bit-identical・sm_86/GB10 世代間差分なしの既知の恒常
+特性と整合しており、opt カーネルの数値バグではなく、**TF32 丸めの既知の
+誤差特性を持つ形状に対して厳密ゼロ fail 判定（`assert_parity`）を適用して
+いたテスト設計の不整合**と結論した。
+
+`wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`（性能比較）は
+上記診断と同時に GPU アイドル状態で再実行し pass を確認した（初回計測は
+他プロセスの GPU 使用〈84%〉と重なった疑いがある計測だったための再計測。
+別イシュー化は不要と判断）。
+
+#### 10.4.2 対応（案 A。ユーザー承認 2026-09-02）
+
+tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）は変更
+せず、**形状ごとに実測特性へ合った判定方式へ再割り当てる**方針（案 A）を
+採用した:
+
+- `wmma_tf32_opt_kernel_matches_reference_across_shapes`: `cases` を
+  1×1×1（seed=3000）のみへ縮小（厳密ゼロ fail が実際に成立する唯一の
+  形状）
+- `wmma_tf32_opt_kernel_k4096_stress`: 両ケースとも baseline 側へ移管済み
+  のため削除
+- `ParityBaseline::BASELINES` へ上表の非ゼロ fail 6 形状
+  （128×128×128 seed=0xBB9・512×512×512 seed=0xBBA・63×65×33 seed=0xBBB・
+  65×63×17 seed=0xBBC・64×96×256 seed=0xBBD・4096×4096×4096 seed=0xBEEF）
+  を実測値付きで追加し、`wmma_tf32_opt_kernel_parity_does_not_regress`
+  （既存の baseline 非後退方式。`ParityPath::WmmaTf32Opt` でフィルタして
+  全件走査するためコード変更不要で対象拡大した）が検査する。ceiling
+  （`baseline_mean_abs_diff_ceiling`）は §4「表記丸め対応」と同じ規約
+  （表示 4 桁の最終桁 +1）で算出した
+- 64×64×64（seed=3000）・512×512×4096（seed=0xC0FFEE）は既存の
+  `ParityBaseline` 行がそのまま対応するため変更なし
+
+これにより本非後退ゲートが 9 形状中 8 形状（1×1×1 を除く全て）をカバー
+する。診断専用テスト（`wmma_tf32_opt_kernel_parity_diagnostic_dump_issue_1106`）
+は修正確定に伴い削除した。
+
+出典: イシュー #1106 reopen コメント（2026-09-01）・対応 PR のコミット
+履歴。実測環境は §10.1 と同一（DGX Spark GB10・sm_121・CUDA 13.0）。
+
+### 10.5 GB10 全件洗い出し（mma/wmma/tensor_core_real_device 全体。2026-09-02）
+
+`cargo test -p fandhe-ai-backend-cuda --release --no-fail-fast -- --ignored
+--test-threads=1`（直列・GPU アイドル）で `#[ignore]` テスト全体を実行し、
+§10.4 の opt カーネル修正後に残る失敗を洗い出した結果、17 件 FAILED・
+106 件 pass だった。内訳を数値系（A 群）と性能比較系（B 群）に分け、
+A 群をさらに証跡の性質で 3 グループへ分類して対応した。
+
+#### 10.5.1 グループ分け
+
+- **グループ 1（ルーティング検証・既存記録値と一致）**: `gemm_wmma_tf32_opt.rs::
+  wmma_tf32_routed_path_matches_reference_across_shapes`・
+  `wmma_tf32_routed_path_k4096_stress`。先頭ケースの実測値（64×64×64:
+  699/4096・512×512×4096: 43019/262144）が `ParityBaseline::BASELINES`
+  の `WmmaTf32Opt` 既存行と完全一致。ただしこれらは公開 API
+  `run_wmma_tf32`（3 段選択そのまま）経由の「実効経路の parity」検査で
+  あり、opt カーネル単独強制検査とはテストの意図が異なる（ルーティング
+  正しさの検証を兼ねる）ため、単純な重複として削除せず、残り 7 ケースの
+  実測を診断テスト経由で別途確認したうえで判断する
+- **グループ 2（TF32/f16 丸めの既知特性・追加実測が必要）**:
+  `gemm_wmma_tf32.rs`（基本版。32×32×32・256×256×4096 は既存
+  `WmmaTf32` baseline と一致、残り 7 ケース未計測）・
+  `gemm_wmma_tf32_staged.rs`（staged。64×64×64: 633/4096 は新規値、
+  残り 7 ケース未計測）・`cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress`
+  （256×256×4096 seed=8888: 99/65536・単一ケースにつき実測完了）・
+  `gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress`（256×256×4096
+  seed=8889: 81/65536・単一ケースにつき実測完了）
+- **グループ 3（原因未確定・本ラウンド対象外）**: `gemm_mma_tf32.rs`・
+  `mma_tf32_vs_wmma_tf32_staged.rs`。いずれもファイル冒頭コメントが
+  明記するとおり、残存 FAIL が TF32 丸め誤差由来か機能欠陥由来かが
+  **未確定**（`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 に分析記録）。
+  `mma_tf32_vs_wmma_tf32_staged.rs` はさらに GPU-GPU 相互比較（CPU 参照
+  実装ではなく `wmma_tf32_staged` を期待値とする）であり、両経路が
+  TF32 丸めの既知特性で一致しない場合は #995 が確立した「basic/opt/staged
+  数値完全一致」という bit-identical 性の想定と矛盾する。原因不明のまま
+  baseline 化すると未解決のバグを恒久的な受け入れ上限へ変えてしまう
+  （#1106 の provenance 問題そのものの再演）ため、本ラウンドでは一切
+  変更しない
+- **既存の「本体維持＋非後退監視併設」パターン**: `cpu_cuda_mma_parity.rs::
+  mma_f16_k4096_stress`・`tensor_core_real_device.rs::tensor_core_parity_record`
+  （tf32 部分）・`gemm_tf32_optin.rs::gemm_tf32_optin_on_matches_cpu_across_shapes`
+  の 3 件は PR #1115 の codex-review P1 指摘により「元の `assert_parity`
+  受け入れ条件は維持し、非後退監視は別テストとして併設する」設計が
+  既に確定している（§10.2 項目 2）。これは「案 A」（`assert_parity` の
+  対象形状を縮小・削除する）とは異なる、より保守的な既存の確定方針
+  であるため、本ラウンドでは変更しない（変更する場合は当該 codex-review
+  指摘を明示的に覆す追加のユーザー承認が要る）
+
+#### 10.5.2 本ラウンドで実施した変更
+
+- `ParityBaseline::ParityPath` へ `WmmaF16`・`WmmaF16Opt` を追加し、
+  グループ 2 の単一ケース実測 2 件（`wmma_f16` 256×256×4096 seed=8888:
+  fail 99/65536・`wmma_f16_opt` 256×256×4096 seed=8889: fail 81/65536。
+  ceiling は §4 と同じ規約で算出）を `BASELINES` へ記録した
+- `cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress_non_regression`・
+  `gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress_non_regression` を、
+  既存の「本体維持＋非後退監視併設」パターン（`mma_f16_k4096_stress_non_regression`
+  と同型）で追加した。元の `wmma_f16_k4096_stress`／
+  `wmma_f16_opt_k4096_stress`（`assert_parity`）は変更していない
+  （引き続き red のまま。REQ-2 違反が解消されていないことを正しく表す）
+- `parity_nonregression.rs::parity_baselines_do_not_regress` の
+  `match baseline.path` を `WmmaF16`／`WmmaF16Opt` 追加に伴い更新した
+  （これらの行は各記録元ファイルの `_non_regression` テストが直接検査
+  するため、ここでは `WmmaTf32`／`WmmaTf32Opt` と同じ理由で重複検査を
+  避けて skip する）
+- グループ 1・グループ 2 の残りケース（`gemm_wmma_tf32.rs`・
+  `gemm_wmma_tf32_opt.rs`〈routed〉・`gemm_wmma_tf32_staged.rs` の
+  未計測 7 ケースずつ）を可視化する診断専用テスト（`#[ignore]`。panic
+  しない `compare()` ベース。修正確定後に削除する一時コード）を追加した:
+  `wmma_tf32_parity_diagnostic_dump_issue_1106`・
+  `wmma_tf32_routed_path_parity_diagnostic_dump_issue_1106`・
+  `wmma_tf32_staged_parity_diagnostic_dump_issue_1106`
+
+#### 10.5.3 未完了（次ラウンドへ引き継ぎ）
+
+- グループ 1・グループ 2 の残り約 21 ケース（`gemm_wmma_tf32.rs` 7 件・
+  `gemm_wmma_tf32_opt.rs`〈routed〉7 件・`gemm_wmma_tf32_staged.rs` 7 件）
+  の実測が完了次第、§10.4 と同型の「案 A」（`assert_parity` の対象を
+  ゼロ fail 成立形状のみへ縮小し、非ゼロ fail 形状は
+  `ParityBaseline::BASELINES` へ実測値付きで追加する）を適用する
+- グループ 3（`gemm_mma_tf32.rs`・`mma_tf32_vs_wmma_tf32_staged.rs`）は
+  原因切り分け自体が別イシューのスコープ（ユーザーと相談のうえ起票の
+  要否を判断する。`.claude/rules/out-of-scope-tracking.md`）
+- 「本体維持＋非後退監視併設」の既存 3 件（`mma_f16_k4096_stress`・
+  `tensor_core_parity_record` tf32・`gemm_tf32_optin_on_matches_cpu_across_shapes`）
+  を「案 A」相当（本体を green にする）へ転換するかはユーザー判断（PR
+  #1115 の codex-review P1 指摘を明示的に上書きする追加承認が要る）
+- B 群（性能比較 2 件）は §10.6 参照
+
+### 10.6 B 群（性能比較テスト）所見
+
+- `gemm.rs::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`:
+  スイート内実行で staged 3.070 vs opt 3.186 TFLOPS（3.6% 差）で fail。
+  単独実行では 2 回とも pass。ウォールクロック計測（`Instant::now()`）
+  かつ直列実行でも同一プロセス内で他テストの CUDA コンテキストが
+  残る・クロック/温度状態が引き継がれる等の影響を受けやすく、3.6% は
+  計測ノイズが厳密な `>` 比較を跨いだ結果である可能性が高い。**扱い案:
+  現状維持**（既存の受け入れ基準・実装を変更しない。スイート内での
+  不安定性は既知の計測手法の限界として記録するに留める）
+- `dispatch_boundary.rs::large_shape_mma_pipeline_vs_wmma_tflops_record`:
+  `wmma_f16_opt` dim2048 が 5.401 TFLOPS（`mma` は 50.126 TFLOPS）と
+  約 10 倍の外れ値。3.6% 差の計測ノイズとは性質が異なり、単なる
+  スイート内不安定性として片付けられない規模。**扱い案: 別イシュー化を
+  推奨**（`.claude/rules/out-of-scope-tracking.md` に従い、ユーザー確認の
+  うえ起票する）
+
+
+### 10.7 グループ1・2 の案 A 確定・実装（GB10 実機実測 2026-09-02）
+
+§10.5.3 で未計測だった約 21 ケース（`gemm_wmma_tf32.rs` 8 件・
+`gemm_wmma_tf32_opt.rs`〈routed〉9 件・`gemm_wmma_tf32_staged.rs` 9 件）
+を、`wmma_tf32_parity_diagnostic_dump_issue_1106`・
+`wmma_tf32_routed_path_parity_diagnostic_dump_issue_1106`・
+`wmma_tf32_staged_parity_diagnostic_dump_issue_1106`（診断専用テスト。
+GPU アイドル 1% で実行、いずれも ok）で GB10 実機実測した。結果:
+
+- **basic（`gemm_wmma_tf32.rs`）**: 8 ケース中 7 ケースが非ゼロ fail
+  （32×32×32 seed=2000: 154/1024・64×64×64 seed=2001: 687/4096・
+  128×128×128 seed=2002: 2559/16384・512×512×512 seed=2003: 42550/262144・
+  64×96×128 seed=2004: 1027/6144・17×23×19 seed=2006: 52/391・
+  33×31×65 seed=2007: 171/1023）。1×1×1（seed=2005）のみ 0/1。K4096
+  ストレス 2 ケースも非ゼロ（256×256×4096 seed=8888: 10647/65536・
+  512×512×4096 seed=0xFACADE: 42688/262144）
+- **routed（`gemm_wmma_tf32_opt.rs`）**: 9 ケース中 8 ケースが非ゼロ fail
+  で、**全 8 ケースが既存の `ParityPath::WmmaTf32Opt` baseline 行と
+  fail_count／mean_abs_diff 完全一致**（実効経路〈staged／opt〉の決定を
+  含め再現的）。1×1×1（seed=0xBBE）のみ 0/1
+- **staged（`gemm_wmma_tf32_staged.rs`）**: 9 ケース中 8 ケースが非ゼロ
+  fail（64×64×64 seed=0xFA0: 633/4096・128×128×128 seed=0xFA1: 2631/16384・
+  512×512×512 seed=0xFA2: 42782/262144・60×68×36 seed=0xFA3: 691/4080・
+  68×60×20 seed=0xFA4: 620/4080・64×96×256 seed=0xFA5: 1008/6144）。
+  K4096 ストレス 2 ケースも非ゼロ（512×512×4096 seed=0xC0FFEE:
+  43019/262144〈既存 `WmmaTf32Staged` 行と一致〉・4096×4096×4096
+  seed=0xBEEF: 2725617/16777216〈新規〉）。1×1×1（seed=0xFA6）のみ 0/1
+
+いずれのファイルでも「ゼロ fail が実際に成立するのは 1×1×1（sub-K-tile）
+のみ」という §10.4／§10.5 の結論が再確認された。
+
+#### 10.7.1 実装したバグ修正（案 A 適用中に発見）
+
+§10.4 で `gemm.rs::wmma_tf32_opt_kernel_matches_reference_across_shapes`
+を 7 ケースから 1×1×1 のみへ縮小した際、`cases: &[(1, 1, 1)]` とした
+うえで `3000 + idx as u64`（`idx` は縮小後の配列上のインデックス=0）で
+seed を再計算していたため、実際には**未実測の seed=3000**（元は
+64×64×64 用のシード）が (1,1,1) 形状に適用されていた（元の 7 ケース
+配列で 1×1×1 が位置していた idx=6 に対応する seed=3006 ではなかった）。
+本ラウンドでこの座標ずれに気づき、`gemm.rs`・本ラウンドで追加した
+3 ファイルすべてで **縮小後の 1×1×1 テストは `idx` 由来の自動算出ではなく、
+実測した seed を直接ハードコードする**方式へ修正した（`gemm.rs`:
+seed=3006・`gemm_wmma_tf32.rs`: seed=2005・`gemm_wmma_tf32_opt.rs`
+routed: seed=3006・`gemm_wmma_tf32_staged.rs`: seed=4006。いずれも実測で
+fail_count=0/1 を確認済みの値）。
+
+#### 10.7.2 実装内容
+
+- **`crates/backend-cuda/tests/common/parity_baseline.rs`**: `WmmaTf32`
+  へ 7 行（64×64×64・128×128×128・512×512×512・64×96×128・17×23×19・
+  33×31×65・512×512×4096 seed=0xFACADE）、`WmmaTf32Staged` へ 7 行
+  （64×64×64・128×128×128・512×512×512・60×68×36・68×60×20・64×96×256・
+  4096×4096×4096 seed=0xBEEF）を追加した。`WmmaTf32Opt` は全 8 ケースが
+  既存行と完全一致したため新規行は追加していない
+- **`gemm_wmma_tf32.rs`**: `wmma_tf32_matches_reference_across_shapes` を
+  1×1×1（seed=2005）のみへ縮小。`wmma_tf32_k4096_stress_poc_v2_5`
+  （両ケースとも非ゼロ fail）は削除。公開 API `run_wmma_tf32` 経由で
+  `ParityPath::WmmaTf32` 行を検査する非後退監視テスト
+  `wmma_tf32_routed_path_baselines_do_not_regress` を新設した（`mod
+  common;` を追加）。診断専用テストは削除
+- **`gemm_wmma_tf32_opt.rs`**: `wmma_tf32_routed_path_matches_reference_across_shapes`
+  を 1×1×1（seed=3006）のみへ縮小。`wmma_tf32_routed_path_k4096_stress`
+  （両ケースとも既存行に対応）は削除。公開 API `run_wmma_tf32` 経由で
+  `ParityPath::WmmaTf32Opt` 行を検査する非後退監視テスト
+  `wmma_tf32_routed_path_baselines_do_not_regress` を新設した（`mod
+  common;` を追加）。診断専用テストは削除
+- **`gemm_wmma_tf32_staged.rs`**: `wmma_tf32_staged_matches_reference_across_shapes`
+  を 1×1×1（seed=4006）のみへ縮小。`wmma_tf32_staged_k4096_stress`
+  （両ケースとも baseline 側で検査可能）は削除。staged 経路は既存の
+  `tests/parity_nonregression.rs::parity_baselines_do_not_regress`
+  （`check_wmma_tf32_staged_baseline`）が `ParityPath::WmmaTf32Staged`
+  を skip せず走査するため、新規の非後退監視テストは不要（コード変更
+  なしで対象拡大）。診断専用テストは削除
+- tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）は
+  変更していない（ユーザー承認 2026-09-02）
+
+#### 10.7.3 残る扱い（次の意思決定待ち）
+
+- グループ3（`gemm_mma_tf32.rs`・`mma_tf32_vs_wmma_tf32_staged.rs`）:
+  原因未確定のため未着手（§10.5.1 参照）
+- 「本体維持＋非後退監視併設」の既存 5 件（`cpu_cuda_mma_parity.rs::
+  mma_f16_k4096_stress`・`tensor_core_real_device.rs::
+  tensor_core_parity_record`〈tf32〉・`gemm_tf32_optin.rs::
+  gemm_tf32_optin_on_matches_cpu_across_shapes`・本ラウンドで同型追加
+  した `cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress`・
+  `gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress`）は意図的に red の
+  まま。案 A（本体を green にする）へ転換するかはユーザー判断
+- B 群（性能比較 2 件）は §10.6 参照
+- #1106 の受入条件「GB10 で該当テスト群が全 pass」は、上記未決定事項が
+  残る限り本 PR 単独では満たされない（スコープ分割の要否をユーザーへ
+  諮る）
+
+### 10.8 PR #1124 codex-review 指摘対応（Cursor Bugbot Medium: WmmaF16 provenance 誤り）
+
+`ParityPath::WmmaF16`（basic カーネル記録の主張）・`ParityPath::WmmaF16Opt`
+（`run_f16_opt` カーネル記録の主張）として §10.5・§10.7 で追加した 2 行は、
+実際には両方とも `CudaWmmaGemm::run_f16`（`gemm_wmma.rs`）を呼ぶのみ
+だった。`run_f16` は `wmma_f16_opt` フィールドが `CudaWmmaGemm::new`
+時点でコンパイル・ロードに成功していれば自動的にそちらへルーティング
+し、`None` の場合のみ基本版（`wmma_f16`）へフォールバックする。この
+選択を公開せず、いずれかを強制実行する API（`CudaGemm`〈TF32〉が持つ
+`wmma_tf32`／`wmma_tf32_opt` private field 経由の強制実行に相当するもの）
+は `CudaWmmaGemm` に存在しない。したがって GB10 実機（opt カーネルが
+コンパイル・ロード可能）では両テストとも同一の opt 経路を別シードで
+測っていただけであり、`WmmaF16` を「基本 WMMA(f16) カーネル」の記録と
+主張していたのは provenance の誤りだった（`run_f16_opt` という関数も
+実在しない）。この誤りを放置すると、opt がロードされない環境（cc<8.0
+等）で basic 経路の値に対して `WmmaF16` baseline が誤って fail する
+可能性、および basic 経路固有の回帰を見逃す可能性があった。
+
+**対応**: `ParityPath::WmmaF16Opt` を廃止し `WmmaF16`（「`run_f16` 実効
+経路」の意味へ再定義）へ統合した。2 行の `context` を
+`"... (run_f16 effective route; GB10: opt)"` へ改め、実測時点で opt
+経路の出力であったことを明示した。`baseline_provenance_unconfirmed` は
+`false` のまま維持する——値自体は「run_f16 実効経路の出力」という
+主張どおりに正しく実測されているため（実測し直しは不要）。basic 単独
+を強制実行する API が将来追加された場合は、独立した `ParityPath` へ
+再分離すること。
+
+この対応により、必要な GB10 再実測は**なし**（`context` とコメントの
+訂正のみ。数値・fail_count・ceiling は変更していない）。
+
+### 10.9 max_abs_diff・max_rel_err ceiling の追加（codex-review 指摘への補強。ユーザー承認 2026-09-02）
+
+codex-review 指摘（非後退方式の盲点: `fail_count` 同数・平均相殺で個別要素の
+大幅悪化を見逃す）への補強として、`ParityBaseline` へ
+`baseline_max_abs_diff_ceiling`・`baseline_max_rel_err_ceiling`
+（いずれも `Option<f64>`）を追加した。`assert_no_parity_regression` は
+`Some` の場合のみ `report.max_abs_diff`／`report.max_rel_err` の非後退を
+追加で fail-closed 検査する（`None` は「未実測」を明示するのみで、既存の
+`fail_count`・`mean_abs_diff` ceiling 検査は引き続き行われる）。
+
+**実測値の出典**:
+
+- TF32 系（`WmmaTf32`・`WmmaTf32Opt`・`WmmaTf32Staged`）: §10.4／§10.5／
+  §10.7 の診断ダンプ 3 表（`wmma_tf32_parity_diagnostic_dump_issue_1106`・
+  `wmma_tf32_routed_path_parity_diagnostic_dump_issue_1106`・
+  `wmma_tf32_staged_parity_diagnostic_dump_issue_1106`。いずれも修正確定
+  済みにつき削除済み）の `max_abs`・`max_rel` 列
+- f16 系（`WmmaF16`）: 2026-09-02 直列実行（`--test-threads=1`）時の
+  `wmma_f16_k4096_stress`（`assert_parity` failing message: max_abs
+  6.250e-2・max_rel 3.328e-2）・`wmma_f16_opt_k4096_stress`（max_abs
+  3.125e-2・max_rel 2.302e-1）の失敗メッセージ
+
+ceiling は既存の `baseline_mean_abs_diff_ceiling` と同じ「表示桁（4 桁）
+の最終桁 +1」規約で算出した。
+
+**実測データが存在しない既存行は `None` のまま残した**（値を捏造しない。
+`docs/perf/cuda-parity-baseline.md` §6「ベースライン更新規約」）:
+
+- `wmma_tf32_opt 512x512x512 seed=0x7A0 (tensor_core_parity_record)`
+  （記録元 `tensor_core_real_device.rs` は `max_abs_diff`／`max_rel_err`
+  を出力しない）
+- `mma_f16 256x256x4096 seed=9999`（記録元 `cpu_cuda_mma_parity.rs::
+  mma_f16_k4096_stress` の GB10 実測ログに max 系の値が残っていない）
+
+内訳: 追加した ceiling 行 27 行（`Some` を両フィールドに設定）、`None` の
+まま残した行 2 行（計 29 行の `ParityBaseline` エントリ全件を走査）。
+
+**回帰検出の falsification テスト**（`parity_nonregression.rs`）を 2 件
+追加し、`max_abs_diff`・`max_rel_err` それぞれの非後退違反を単独で
+（`fail_count`・`mean_abs_diff` は据え置きのまま）検出できることを
+合成入力で確認した:
+`assert_no_parity_regression_panics_on_max_abs_diff_regression`・
+`assert_no_parity_regression_panics_on_max_rel_err_regression`。
+
+GB10 実機は本対応の実装時点で別プロセス使用中のため、判定ロジック自体は
+上記の実機非依存 falsification テストで検証済みだが、既存 `Some` 行の
+再実測（値の再確認）・`None` 行の実測完了は本対応のスコープに含まれない
+（引き続き実機実測とセットで行う。§6「ベースライン更新規約」）。

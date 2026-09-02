@@ -3370,19 +3370,25 @@ mod tests {
     /// opt-staged カーネルへ横取りされず opt カーネル固有のタイル境界
     /// （ブロックタイル 64、共有メモリ K タイル 16）を確実に踏む。
     ///
-    /// `assert_no_parity_regression`（記録済みベースラインとの比較）ではなく
-    /// [`fandhe_ai_backend_cpu::assert_parity`]（複合判定そのものでの合否）を使う点が
-    /// [`wmma_tf32_opt_kernel_parity_does_not_regress`] との違いである:
-    /// 本ヘルパーが検査するのは `tests/gemm_wmma_tf32_opt.rs` から移設した
-    /// 任意形状の網羅（`docs/perf/cuda-parity-baseline.md` に記録された
-    /// 実機実測値を持たない形状を含む）であり、`ParityBaseline::BASELINES`
-    /// への未計測行追加（`baseline_provenance_unconfirmed: true` の
-    /// プレースホルダ）は fail-closed 契約により無条件 panic になってしまう
-    /// （`tests/common/parity_baseline.rs::assert_no_parity_regression`
-    /// ドキュメンテーションコメント参照）。実測値を持つ 3 形状（64×64×64・
-    /// 512×512×512・512×512×4096）の非後退検査は
-    /// [`wmma_tf32_opt_kernel_parity_does_not_regress`] に委ね、本ヘルパーは
-    /// 二重管理しない。
+    /// **イシュー #1106（案 A）**: 本ヘルパーが使う
+    /// [`fandhe_ai_backend_cpu::assert_parity`]（複合判定そのものでの厳密
+    /// ゼロ fail 判定）は、GB10 実機実測（#1106 reopen コメント・診断ダンプ
+    /// `wmma_tf32_opt_kernel_parity_diagnostic_dump_issue_1106`〈修正確定
+    /// につき削除済み〉）により、opt カーネルの大半の形状（TF32 丸めの
+    /// K 方向蓄積により非ゼロ fail_count を持つのが既知の恒常特性。
+    /// opt/basic bit-identical・sm_86/GB10 世代間差分なし。
+    /// `docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md` §5〜§7）
+    /// では原理的に成立しないことが判明した。ゼロ fail が実際に成立する
+    /// のは 1x1x1（sub-K-tile）のみであり、[`wmma_tf32_opt_kernel_matches_reference_across_shapes`]
+    /// はこの 1 形状のみを検査する。非ゼロ fail が判明した残り 8 形状
+    /// （64×64×64・128×128×128・512×512×512〈2 シード〉・63×65×33・
+    /// 65×63×17・64×96×256・512×512×4096・4096×4096×4096）は
+    /// `ParityBaseline::BASELINES` へ実測値付きで移し、
+    /// [`wmma_tf32_opt_kernel_parity_does_not_regress`]（baseline 非後退
+    /// 方式）が検査する（旧 `wmma_tf32_opt_kernel_k4096_stress` は全ケースが
+    /// この移管対象になったため削除済み）。tolerance 定数
+    /// （`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）は変更していない
+    /// （ユーザー承認 2026-09-02）。
     fn assert_wmma_tf32_opt_kernel_parity(
         gemm: &CudaGemm,
         func: &CudaFunction,
@@ -3413,20 +3419,17 @@ mod tests {
         fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
     }
 
-    /// opt カーネル**単独**の形状網羅テスト（PR #678 codex-review P1
-    /// 再指摘対応）。
+    /// opt カーネル**単独**の厳密ゼロ fail 判定テスト（PR #678
+    /// codex-review P1 再指摘対応・イシュー #1106 案 A で対象形状を縮小）。
     ///
-    /// イシュー #500 のルーティング変更で `tests/gemm_wmma_tf32_opt.rs::
-    /// wmma_tf32_opt_matches_reference_across_shapes`（公開 API
-    /// `run_wmma_tf32` 経由）が整列形状（`n%4==0 && k%4==0`）では
-    /// opt-staged カーネルへ横取りされるようになり、opt カーネル固有の
-    /// タイル境界カバレッジを失っていた。本テストは
-    /// [`assert_wmma_tf32_opt_kernel_parity`] で 3 段選択を経由せず opt
-    /// カーネルを強制実行することで、旧 `wmma_tf32_opt_matches_reference_across_shapes`
-    /// が検査していた全形状（ブロックタイル倍数・非倍数境界・非正方・
-    /// 極小）のカバレッジを復元する（シード起点 `3000 + idx` は移設元と
-    /// 同一。64×64×64・seed=3000 の 1 行目は `ParityBaseline` 記録値
-    /// 〈`wmma_tf32_opt 64x64x64 seed=3000`〉と同一入力になる）。
+    /// GB10 実機実測（[`assert_wmma_tf32_opt_kernel_parity`] ドキュメン
+    /// テーションコメント参照）により、`assert_parity`（厳密ゼロ fail
+    /// 判定）が実際に成立するのは 1x1x1（sub-K-tile。K 方向蓄積が発生
+    /// せず TF32 丸め誤差が蓄積しない）のみと判明した。他の 8 形状
+    /// （旧 `cases` に含まれていた 64×64×64・128×128×128・512×512×512・
+    /// 63×65×33・65×63×17・64×96×256 と、旧 `wmma_tf32_opt_kernel_k4096_stress`
+    /// の 512×512×4096・4096×4096×4096）は `ParityBaseline::BASELINES`
+    /// （`wmma_tf32_opt_kernel_parity_does_not_regress` が検査）へ移管した。
     #[test]
     #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
     fn wmma_tf32_opt_kernel_matches_reference_across_shapes() {
@@ -3439,55 +3442,21 @@ mod tests {
              wmma_tf32_opt_error)",
         );
 
-        let cases: &[(u32, u32, u32)] = &[
-            (64, 64, 64),
-            (128, 128, 128),
-            (512, 512, 512),
-            (63, 65, 33),
-            (65, 63, 17),
-            (64, 96, 256),
-            (1, 1, 1),
-        ];
-        for (idx, &(m, n, k)) in cases.iter().enumerate() {
-            let context = format!("opt kernel shape m={m} n={n} k={k}");
-            assert_wmma_tf32_opt_kernel_parity(&gemm, func, &context, 3000 + idx as u64, m, n, k);
-        }
-    }
-
-    /// opt カーネル**単独**の K 大ストレスケース（PR #678 codex-review P1
-    /// 再指摘対応）。旧 `tests/gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress`
-    /// からの移設（シード・形状とも同一。上記
-    /// [`wmma_tf32_opt_kernel_matches_reference_across_shapes`]
-    /// ドキュメンテーションコメント参照）。
-    #[test]
-    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
-    fn wmma_tf32_opt_kernel_k4096_stress() {
-        let device =
-            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
-        let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
-
-        let func = gemm.wmma_tf32_opt.as_ref().expect(
-            "opt WMMA(TF32) kernel must be available on this ignored test runner (reason: see \
-             wmma_tf32_opt_error)",
-        );
-
+        // seed は 3006（元の 7 ケース配列での 1x1x1 の位置 idx=6 に対応する
+        // 3000+6）を直接指定する。案 A の縮小前は `3000 + idx` で自動算出
+        // していたが、配列を 1 要素へ縮小すると `idx` が 0 に戻り、実測して
+        // いない seed=3000（元は 64x64x64 用）が (1,1,1) 形状に誤って
+        // 適用されてしまう（イシュー #1106 GB10 全件洗い出しで発覚したバグ。
+        // 実測は seed=3006〈0xbbe〉のみ。GB10 実機で fail_count=0/1 を確認
+        // 済み。`docs/perf/cuda-parity-baseline.md` §10.5 参照）。
         assert_wmma_tf32_opt_kernel_parity(
             &gemm,
             func,
-            "opt kernel K4096 stress 512x512x4096",
-            0xC0FFEE,
-            512,
-            512,
-            4096,
-        );
-        assert_wmma_tf32_opt_kernel_parity(
-            &gemm,
-            func,
-            "opt kernel K4096 stress 4096x4096x4096",
-            0xBEEF,
-            4096,
-            4096,
-            4096,
+            "opt kernel shape m=1 n=1 k=1",
+            3006,
+            1,
+            1,
+            1,
         );
     }
 

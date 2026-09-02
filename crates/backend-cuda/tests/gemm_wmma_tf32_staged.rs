@@ -91,75 +91,38 @@ fn wmma_tf32_staged_parity_smoke_env_adaptive() {
     }
 }
 
-/// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅
-/// テスト。受け入れ条件の本体。
+/// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の厳密ゼロ
+/// fail 判定テスト（イシュー #1106 案 A で対象形状を縮小）。
 ///
-/// staged カーネル固有のタイル境界（ブロックタイル 64、共有メモリ K タイル
-/// 16、fragment 16/8、cp.async ステージ 3）を踏む、cp.async 16 バイト
-/// 整列条件（`n%4==0 && k%4==0`）を満たす形状のみを対象にする（整列非対応
-/// 形状は `tests/gemm_wmma_tf32_opt.rs` が opt カーネル経由で検証する）。
+/// GB10 実機実測（2026-09-02 の診断ダンプ
+/// `wmma_tf32_staged_parity_diagnostic_dump_issue_1106`。修正確定に伴い
+/// 削除済み）により、`assert_parity`（厳密ゼロ fail 判定）が実際に成立
+/// するのは 1×1×1（sub-K-tile）のみと判明した。他の 6 形状（64×64×64・
+/// 128×128×128・512×512×512・60×68×36・68×60×20・64×96×256）と旧
+/// `wmma_tf32_staged_k4096_stress`（512×512×4096・4096×4096×4096）は
+/// `ParityBaseline::BASELINES`（`ParityPath::WmmaTf32Staged`）へ実測値
+/// 付きで移し、`tests/parity_nonregression.rs::parity_baselines_do_not_regress`
+/// （`check_wmma_tf32_staged_baseline`。公開 API `run_wmma_tf32` 経由。
+/// この経路はもともと skip 対象ではないためコード変更なしで対象拡大
+/// 済み）が検査する。旧 `wmma_tf32_staged_k4096_stress` は全ケースが
+/// ここへ移管されたため削除した。tolerance 定数は変更していない
+/// （ユーザー承認 2026-09-02。詳細は `docs/perf/cuda-parity-baseline.md`
+/// §10.5）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn wmma_tf32_staged_matches_reference_across_shapes() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
-    // `wmma_tf32_opt_matches_reference_across_shapes` と同じ根拠（PR #256
-    // レビュー指摘対応）。`run_wmma_tf32` は staged カーネル未対応環境・
-    // 整列非対応形状で opt／基本版へ自動フォールバックするため、この
-    // 検証がここで staged カーネル固有のタイル境界を実際に踏んだことを
-    // 保証するには、staged カーネルが利用可能であることを事前に確認する
-    // 必要がある（本テストは compute capability 8.0 以降の実機必須なので
-    // staged カーネルは利用可能であるべき）。
     assert!(
         gemm.wmma_tf32_staged_available(),
         "staged kernel must be available on this ignored test runner (reason: {:?})",
         gemm.wmma_tf32_staged_unavailable_reason()
     );
 
-    let cases: &[(u32, u32, u32)] = &[
-        (64, 64, 64),
-        (128, 128, 128),
-        (512, 512, 512),
-        // ブロックタイル・K タイル非倍数だが cp.async 4 要素整列条件は
-        // 満たす形状（63 は 64 の倍数でないが 4 の倍数でもない点に注意:
-        // guarded load のゼロ充填で処理される。65/33/17 も同様）。
-        (60, 68, 36),
-        (68, 60, 20),
-        // 非正方。
-        (64, 96, 256),
-        // 極小（1 の倍数でない形状。整列条件 n%4/k%4 を満たさないため
-        // staged は選ばれず opt/基本へフォールバックする想定だが、
-        // `run_wmma_tf32` 経由で正しく処理されることを確認する）。
-        (1, 1, 1),
-    ];
-    for (idx, &(m, n, k)) in cases.iter().enumerate() {
-        let context = format!("shape m={m} n={n} k={k}");
-        assert_wmma_tf32_staged_parity(&gemm, &context, 4000 + idx as u64, m, n, k);
-    }
-}
-
-/// K 大のストレスケース（`wmma_tf32_opt_k4096_stress` と同じ形状。
-/// PoC-v2-3 の M=N=K=4096 と揃える）。
-#[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
-fn wmma_tf32_staged_k4096_stress() {
-    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
-    let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
-    assert!(
-        gemm.wmma_tf32_staged_available(),
-        "staged kernel must be available on this ignored test runner (reason: {:?})",
-        gemm.wmma_tf32_staged_unavailable_reason()
-    );
-
-    assert_wmma_tf32_staged_parity(&gemm, "K4096 stress 512x512x4096", 0xC0FFEE, 512, 512, 4096);
-    assert_wmma_tf32_staged_parity(
-        &gemm,
-        "K4096 stress 4096x4096x4096",
-        0xBEEF,
-        4096,
-        4096,
-        4096,
-    );
+    // seed は 4006（元の 7 ケース配列での 1×1×1 の位置 idx=6 に対応する
+    // 4000+6）を直接指定する。実測は seed=4006〈0xfa6〉のみで
+    // fail_count=0/1 を確認済み（他の未測定 seed への一般化はしない）。
+    assert_wmma_tf32_staged_parity(&gemm, "shape m=1 n=1 k=1", 4006, 1, 1, 1);
 }
 
 /// `k == 0`（`num_k_tiles == 0` 経路）で C が全 0 になることを確認する

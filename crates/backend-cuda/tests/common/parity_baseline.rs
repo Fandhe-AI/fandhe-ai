@@ -67,20 +67,30 @@ pub enum ParityPath {
     /// と同型のパターン。`tests/parity_nonregression.rs` はこの経路を
     /// 検査しない——公開 API では opt を強制できないため）。
     ///
-    /// **PR #678 codex-review P1 再指摘対応**: 上記の非後退ゲートは
-    /// `BASELINES` に実測値を持つ 3 形状（64×64×64・512×512×512・
-    /// 512×512×4096）しか検査しない。opt カーネル固有のタイル境界
-    /// （ブロックタイル倍数・非倍数境界・非正方・極小）を網羅する検査は、
-    /// 同じ private field 経由アクセスで CPU 参照実装と直接照合する
-    /// `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
-    /// `wmma_tf32_opt_kernel_k4096_stress`（いずれも `src/gemm.rs`。
+    /// **イシュー #1106（案 A）で判定方式を形状別に再割り当て済み**: 当初
+    /// （PR #678）は `BASELINES` に実測値を持つ 3 形状（64×64×64・
+    /// 512×512×512〈seed=0x7A0〉・512×512×4096）のみを本非後退ゲートで
+    /// 検査し、残りの opt カーネル固有タイル境界網羅（ブロックタイル
+    /// 倍数・非倍数境界・非正方・極小）は `fandhe_ai_backend_cuda::
+    /// gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+    /// `wmma_tf32_opt_kernel_k4096_stress`（いずれも `src/gemm.rs`）が
     /// `assert_no_parity_regression` ではなく `fandhe_ai_backend_cpu::assert_parity`
-    /// を使う——未計測形状を `BASELINES` へ追加すると
-    /// `baseline_provenance_unconfirmed: true` の fail-closed 契約により
-    /// 無条件 panic になるため、この 2 テストは本 fixture を経由しない）
-    /// が担う。旧 `tests/gemm_wmma_tf32_opt.rs::
-    /// wmma_tf32_opt_matches_reference_across_shapes`／
-    /// `wmma_tf32_opt_k4096_stress` からの移設。
+    /// （厳密ゼロ fail 判定）で検査していた。GB10 実機実測（#1106
+    /// reopen コメント・診断ダンプ `wmma_tf32_opt_kernel_parity_diagnostic_dump_issue_1106`）
+    /// で、64x64x64・512x512x4096 を含む 8/9 ケースが TF32 丸めに由来する
+    /// 既知の非ゼロ fail_count を持ち（opt/basic bit-identical・sm_86/GB10
+    /// 世代間差分なし。`docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md`
+    /// §5〜§7）、厳密ゼロ fail 判定はそもそも成立しない（カーネルのバグでは
+    /// なくテスト設計の不整合）ことが判明した。ゼロ fail が実際に成立する
+    /// のは 1x1x1（sub-K-tile）のみ。本 PR（#1106 案 A）で、非ゼロ fail が
+    /// 判明した 6 形状（128x128x128・512x512x512〈別シード〉・63x65x33・
+    /// 65x63x17・64x96x256・4096x4096x4096）を `BASELINES` へ実測値付きで
+    /// 追加し、`wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+    /// `wmma_tf32_opt_kernel_k4096_stress` からは削除した（1x1x1 のみ残す）。
+    /// これにより本非後退ゲートが 9 形状中 8 形状（1x1x1 を除く全て）を
+    /// カバーする。tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）
+    /// は変更していない（ユーザー承認 2026-09-02。詳細は
+    /// `docs/perf/cuda-parity-baseline.md` §9.11）。
     WmmaTf32Opt,
     /// opt-staged カーネル（cp.async 多段パイプライン・fragment 先読み。
     /// イシュー #500）単独の非後退ゲート。
@@ -100,6 +110,44 @@ pub enum ParityPath {
     WmmaTf32Staged,
     /// `CudaMmaGemm::run_f16`（`mma.sync`/`ldmatrix`/`cp.async` 経路）。
     MmaF16,
+    /// `CudaWmmaGemm::run_f16`（**実効経路**。`wmma_f16_opt` が
+    /// `CudaWmmaGemm::new` 時点でコンパイル・ロードに成功していれば
+    /// 自動的にそちらが選ばれ、`None` の場合のみ基本版〈`wmma_f16`〉へ
+    /// フォールバックする。`gemm_wmma.rs::CudaWmmaGemm::run_f16` はこの
+    /// 選択を公開しない――basic／opt いずれかを強制実行する経路が存在
+    /// しない〈`CudaGemm`〈TF32〉の `wmma_tf32`／`wmma_tf32_opt` private
+    /// field 経由の強制実行とは異なる〉ため、本パスは常に「その時点で
+    /// 実際に選ばれた経路」の値を記録する）。
+    ///
+    /// **イシュー #1106（GB10 全件洗い出し）で追加・PR #1124 codex-review
+    /// 〈Cursor Bugbot Medium〉指摘で名称・provenance 記述を訂正**:
+    /// 当初 `tests/cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress`
+    /// （256×256×4096・seed=8888）を「基本 WMMA(f16) カーネル」、
+    /// `tests/gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress`
+    /// （256×256×4096・seed=8889）を「`run_f16_opt`（opt WMMA(f16)
+    /// カーネル）」として別 `ParityPath`（`WmmaF16`／`WmmaF16Opt`）で
+    /// 記録していたが、両テストとも同一の公開 API `run_f16` を呼ぶのみで
+    /// （`run_f16_opt` という関数は存在しない）、GB10 実機では opt
+    /// カーネルがロード済みのため**両方とも実際には同一の opt 経路を
+    /// 別シードで測っていただけ**だった（`WmmaF16` を basic 実測かのよう
+    /// に扱う provenance 誤り。opt がロードされない環境では
+    /// baseline_provenance_unconfirmed: false のまま basic 経路の値に
+    /// 対して誤 fail しうる欠陥もあった）。本 PR で `WmmaF16Opt` を廃止
+    /// し `WmmaF16` 1 本（「run_f16 実効経路」という正しい意味）へ統合
+    /// した。basic 単独を強制実行する経路が本クレートに存在しないため、
+    /// 実測し直しではなく名称・ドキュメンテーションコメントの訂正で
+    /// 対応する（`docs/perf/cuda-parity-baseline.md` §10.8 参照）。将来
+    /// basic 強制実行 API（`CudaGemm` の TF32 経路と同型の private
+    /// field 経由アクセス）を追加した場合は、独立した `ParityPath` へ
+    /// 再分離すること。
+    ///
+    /// 本体テスト自体は `assert_parity`（REQ-2 受け入れ条件）を維持した
+    /// まま、非後退監視を `wmma_f16_k4096_stress_non_regression`・
+    /// `wmma_f16_opt_k4096_stress_non_regression` として別テストで併設
+    /// する（`ParityPath::MmaF16`・`tensor_core_parity_record` tf32 行と
+    /// 同型の「元の受け入れ条件は置き換えない」設計。
+    /// `docs/perf/cuda-parity-baseline.md` §10.4 参照）。
+    WmmaF16,
 }
 
 impl std::fmt::Display for ParityPath {
@@ -109,6 +157,7 @@ impl std::fmt::Display for ParityPath {
             ParityPath::WmmaTf32Opt => "wmma_tf32_opt",
             ParityPath::WmmaTf32Staged => "wmma_tf32_staged",
             ParityPath::MmaF16 => "mma_f16",
+            ParityPath::WmmaF16 => "wmma_f16",
         };
         f.write_str(s)
     }
@@ -165,6 +214,27 @@ pub struct ParityBaseline {
     /// である（本リポで既知の受け入れ済み状態。
     /// `docs/backend-cuda-real-device-testing.md` §5.3・§7 参照）。
     pub baseline_provenance_unconfirmed: bool,
+    /// `max_abs_diff` の非後退天井値（コーディネータ指示・ユーザー承認
+    /// 2026-09-02。codex-review 指摘「fail_count 同数・平均相殺で個別要素
+    /// の大幅悪化を見逃す」への補強）。`baseline_mean_abs_diff_ceiling` は
+    /// 全要素の平均のみを見るため、fail_count・平均が変わらないまま特定の
+    /// 1 要素だけ誤差が急増する回帰（外れ値の悪化）を検出できない盲点が
+    /// あった。本フィールドは `report.max_abs_diff` の非後退上限を追加で
+    /// 検査することでこの盲点を塞ぐ。実測値のみから確定する
+    /// （`docs/perf/cuda-parity-baseline.md` §6「ベースライン更新規約」と
+    /// 同じ「推定値記入禁止」方針。表記丸め対応は既存の
+    /// `baseline_mean_abs_diff_ceiling` と同じ「表示桁の最終桁 +1」方式）。
+    /// 実測データが存在しない既存行（本フィールド導入前に記録済みの行）は
+    /// `None` とし、当該項目の検査を fail-open ではなく明示的にスキップ
+    /// する（`assert_no_parity_regression` は `Some` の場合のみ検査し、
+    /// `None` は「この項目は未実測」を表すだけで判定自体は他の項目〈
+    /// `fail_count`・`mean_abs_diff` ceiling〉で引き続き行われる）。
+    pub baseline_max_abs_diff_ceiling: Option<f64>,
+    /// `max_rel_err` の非後退天井値。`baseline_max_abs_diff_ceiling` と
+    /// 同じ根拠・同じ方式（実測値のみ・表記丸め対応・`None` は未実測）。
+    /// 相対誤差の外れ値悪化（絶対誤差は小さいが真値も小さいセルでの相対
+    /// 誤差急増）を検出する。
+    pub baseline_max_rel_err_ceiling: Option<f64>,
 }
 
 /// 記録済みベースライン一覧（`docs/perf/cuda-parity-baseline.md` の表・7 行）。
@@ -209,6 +279,8 @@ pub static BASELINES: &[ParityBaseline] = &[
         // イシュー #1106・GB10 実機実測で基本版カーネル専用の確定測定を
         // 完了（上記コメント参照）。provenance 不確実性は解消済み。
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.541e-3),
+        baseline_max_rel_err_ceiling: Some(3.240e-2),
     },
     // wmma_tf32: K=4096 ストレスケース先頭（256x256x4096、seed=8888）。
     // `tests/gemm_wmma_tf32.rs::wmma_tf32_k4096_stress_poc_v2_5` の先頭呼出し。
@@ -228,6 +300,123 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_mean_abs_diff_ceiling: 4.477e-3,
         // イシュー #1106・GB10 実機実測で確定（上記コメント参照）。
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.321e-2),
+        baseline_max_rel_err_ceiling: Some(1.945e0),
+    },
+    // wmma_tf32: 案 A（イシュー #1106・GB10 全件洗い出し）で追加した
+    // 形状網羅の残り 7 ケース。
+    //
+    // 背景: `tests/gemm_wmma_tf32.rs::wmma_tf32_matches_reference_across_shapes`・
+    // `wmma_tf32_k4096_stress_poc_v2_5` は `assert_parity`（厳密ゼロ fail
+    // 判定）を使っていたが、GB10 実機実測（2026-09-02 の診断ダンプ
+    // `wmma_tf32_parity_diagnostic_dump_issue_1106`。修正確定に伴い削除
+    // 済み）で 64x64x64・128x128x128・512x512x512・64x96x128・
+    // 17x23x19・33x31x65・512x512x4096（seed=0xFACADE）の 7 形状すべてが
+    // 非ゼロ fail_count を持つことが判明した（`wmma_tf32_opt`・
+    // `wmma_tf32_staged` と同じ TF32 丸めの既知の恒常特性）。ゼロ fail が
+    // 実際に成立するのは 1x1x1（sub-K-tile）のみであり、上記 2 テストから
+    // 当該形状を削除したうえで本 7 行をここへ移し、
+    // `tests/gemm_wmma_tf32.rs::wmma_tf32_routed_path_baselines_do_not_regress`
+    // （公開 API `run_wmma_tf32` 経由の非後退監視）の対象に含める。
+    // ceiling は §4「表記丸め対応」と同じ規約（表示 4 桁の最終桁 +1）で
+    // 算出した。
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 64x64x64 seed=2001 (#1106 diagnostic)",
+        m: 64,
+        n: 64,
+        k: 64,
+        seed: 2001,
+        total: 64 * 64,
+        baseline_fail_count: 687,
+        baseline_mean_abs_diff_ceiling: 5.542e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.618e-3),
+        baseline_max_rel_err_ceiling: Some(1.102e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 128x128x128 seed=2002 (#1106 diagnostic)",
+        m: 128,
+        n: 128,
+        k: 128,
+        seed: 2002,
+        total: 128 * 128,
+        baseline_fail_count: 2559,
+        baseline_mean_abs_diff_ceiling: 7.858e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(4.940e-3),
+        baseline_max_rel_err_ceiling: Some(8.872e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 512x512x512 seed=2003 (#1106 diagnostic)",
+        m: 512,
+        n: 512,
+        k: 512,
+        seed: 2003,
+        total: 512 * 512,
+        baseline_fail_count: 42550,
+        baseline_mean_abs_diff_ceiling: 1.565e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(9.248e-3),
+        baseline_max_rel_err_ceiling: Some(1.991e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 64x96x128 seed=2004 (#1106 diagnostic)",
+        m: 64,
+        n: 96,
+        k: 128,
+        seed: 2004,
+        total: 64 * 96,
+        baseline_fail_count: 1027,
+        baseline_mean_abs_diff_ceiling: 7.895e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.955e-3),
+        baseline_max_rel_err_ceiling: Some(1.779e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 17x23x19 seed=2006 (#1106 diagnostic)",
+        m: 17,
+        n: 23,
+        k: 19,
+        seed: 2006,
+        total: 17 * 23,
+        baseline_fail_count: 52,
+        baseline_mean_abs_diff_ceiling: 3.059e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.145e-3),
+        baseline_max_rel_err_ceiling: Some(1.815e-2),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 33x31x65 seed=2007 (#1106 diagnostic)",
+        m: 33,
+        n: 31,
+        k: 65,
+        seed: 2007,
+        total: 33 * 31,
+        baseline_fail_count: 171,
+        baseline_mean_abs_diff_ceiling: 5.599e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.315e-3),
+        baseline_max_rel_err_ceiling: Some(3.965e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32,
+        context: "wmma_tf32 512x512x4096 seed=0xFACADE (#1106 diagnostic)",
+        m: 512,
+        n: 512,
+        k: 4096,
+        seed: 0xFACADE,
+        total: 512 * 512,
+        baseline_fail_count: 42688,
+        baseline_mean_abs_diff_ceiling: 4.464e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.609e-2),
+        baseline_max_rel_err_ceiling: Some(1.974e0),
     },
     // wmma_tf32_opt: 512x512x512。記録元 `tensor_core_real_device.rs::
     // tensor_core_parity_record` TF32 部分は事前に `wmma_tf32_opt_available()`
@@ -253,6 +442,8 @@ pub static BASELINES: &[ParityBaseline] = &[
         // opt 可用性を計測前に assert 済み（記録元コメント参照）。
         // provenance 不確実性なし。
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: None,
+        baseline_max_rel_err_ceiling: None,
     },
     // wmma_tf32_opt: 形状網羅の先頭ケース（64x64x64、seed=3000）。
     // `tests/gemm_wmma_tf32_opt.rs::wmma_tf32_opt_matches_reference_across_shapes`
@@ -274,6 +465,8 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_fail_count: 699,
         baseline_mean_abs_diff_ceiling: 5.677e-4,
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.562e-3),
+        baseline_max_rel_err_ceiling: Some(7.773e-1),
     },
     // wmma_tf32_opt: K=4096 ストレスケース先頭（512x512x4096、seed=0xC0FFEE）。
     // `tests/gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress` の先頭呼出し。
@@ -290,6 +483,118 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_fail_count: 43019,
         baseline_mean_abs_diff_ceiling: 4.464e-3,
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.409e-2),
+        baseline_max_rel_err_ceiling: Some(1.999e0),
+    },
+    // wmma_tf32_opt: 案 A（イシュー #1106）で追加した形状網羅の残り 6 ケース。
+    //
+    // 背景: `fandhe_ai_backend_cuda::gemm::tests::
+    // wmma_tf32_opt_kernel_matches_reference_across_shapes`／
+    // `wmma_tf32_opt_kernel_k4096_stress` は `assert_parity`（厳密ゼロ fail
+    // 判定）を使っていたが、GB10 実機実測（#1106 reopen コメント・診断
+    // ダンプ `wmma_tf32_opt_kernel_parity_diagnostic_dump_issue_1106`）で
+    // 128x128x128・512x512x512（別シード）・63x65x33・65x63x17・
+    // 64x96x256・4096x4096x4096 の 6 形状すべてが非ゼロ fail_count を持つ
+    // ことが判明した（TF32 丸めによる既知の恒常特性。opt/basic カーネルで
+    // bit-identical、sm_86/GB10 世代間でも差分なし。
+    // `docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md` §5〜§7）。
+    // ゼロ fail が実際に成立するのは 1x1x1（sub-K-tile）のみであり、他は
+    // `assert_parity` を適用すること自体が誤りだった（テスト設計の不整合。
+    // カーネル側の数値バグではない）。本 6 行は上記 2 テストから当該
+    // 形状を削除したうえでここへ移し、`wmma_tf32_opt_kernel_parity_does_not_regress`
+    // （baseline 非後退方式）の対象に含める。
+    //
+    // 実測: DGX Spark GB10（sm_121・CUDA 13.0）、GPU アイドル
+    // （`nvidia-smi --query-gpu=utilization.gpu` 0%）を確認したうえで
+    // 2026-09-01 に初回計測、2026-09-02 に GPU アイドル再確認のうえ再計測し、
+    // 2 回とも fail_count・max_abs_diff・max_rel_err・mean_abs_diff が
+    // 完全一致することを確認した（`docs/perf/cuda-parity-baseline.md` §9.11
+    // 参照）。ceiling は表示 4 桁の最終桁を +1 した天井値（既存行と同じ
+    // 表記丸め対応の規約。`ParityBaseline::baseline_mean_abs_diff_ceiling`
+    // ドキュメンテーションコメント参照）。
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Opt,
+        context: "wmma_tf32_opt 128x128x128 seed=0xBB9 (#1106 diagnostic)",
+        m: 128,
+        n: 128,
+        k: 128,
+        seed: 0xBB9,
+        total: 128 * 128,
+        baseline_fail_count: 2638,
+        baseline_mean_abs_diff_ceiling: 7.776e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(4.414e-3),
+        baseline_max_rel_err_ceiling: Some(1.315e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Opt,
+        context: "wmma_tf32_opt 512x512x512 seed=0xBBA (#1106 diagnostic)",
+        m: 512,
+        n: 512,
+        k: 512,
+        seed: 0xBBA,
+        total: 512 * 512,
+        baseline_fail_count: 42799,
+        baseline_mean_abs_diff_ceiling: 1.569e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(9.180e-3),
+        baseline_max_rel_err_ceiling: Some(1.924e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Opt,
+        context: "wmma_tf32_opt 63x65x33 seed=0xBBB (#1106 diagnostic)",
+        m: 63,
+        n: 65,
+        k: 33,
+        seed: 0xBBB,
+        total: 63 * 65,
+        baseline_fail_count: 698,
+        baseline_mean_abs_diff_ceiling: 3.944e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.918e-3),
+        baseline_max_rel_err_ceiling: Some(7.412e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Opt,
+        context: "wmma_tf32_opt 65x63x17 seed=0xBBC (#1106 diagnostic)",
+        m: 65,
+        n: 63,
+        k: 17,
+        seed: 0xBBC,
+        total: 65 * 63,
+        baseline_fail_count: 635,
+        baseline_mean_abs_diff_ceiling: 2.778e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.437e-3),
+        baseline_max_rel_err_ceiling: Some(2.377e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Opt,
+        context: "wmma_tf32_opt 64x96x256 seed=0xBBD (#1106 diagnostic)",
+        m: 64,
+        n: 96,
+        k: 256,
+        seed: 0xBBD,
+        total: 64 * 96,
+        baseline_fail_count: 967,
+        baseline_mean_abs_diff_ceiling: 1.118e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(5.185e-3),
+        baseline_max_rel_err_ceiling: Some(1.170e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Opt,
+        context: "wmma_tf32_opt 4096x4096x4096 seed=0xBEEF (#1106 diagnostic)",
+        m: 4096,
+        n: 4096,
+        k: 4096,
+        seed: 0xBEEF,
+        total: 4096 * 4096,
+        baseline_fail_count: 2725617,
+        baseline_mean_abs_diff_ceiling: 4.454e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.117e-2),
+        baseline_max_rel_err_ceiling: Some(1.998e0),
     },
     // wmma_tf32_staged: K=4096 ストレスケース（512x512x4096）。既存
     // wmma_tf32_opt ストレス行（直上、seed=0xC0FFEE）と同形状に揃え、
@@ -317,6 +622,122 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_fail_count: 43019,
         baseline_mean_abs_diff_ceiling: 4.464e-3,
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.409e-2),
+        baseline_max_rel_err_ceiling: Some(1.999e0),
+    },
+    // wmma_tf32_staged: 案 A（イシュー #1106・GB10 全件洗い出し）で追加
+    // した形状網羅の残り 7 ケース。
+    //
+    // 背景: `tests/gemm_wmma_tf32_staged.rs::wmma_tf32_staged_matches_reference_across_shapes`・
+    // `wmma_tf32_staged_k4096_stress` は `assert_parity`（厳密ゼロ fail
+    // 判定）を使っていたが、GB10 実機実測（2026-09-02 の診断ダンプ
+    // `wmma_tf32_staged_parity_diagnostic_dump_issue_1106`。修正確定に
+    // 伴い削除済み）で 64x64x64・128x128x128・512x512x512・60x68x36・
+    // 68x60x20・64x96x256・4096x4096x4096（seed=0xBEEF）の 7 形状すべてが
+    // 非ゼロ fail_count を持つことが判明した（`wmma_tf32_opt` と同じ
+    // TF32 丸めの既知の恒常特性）。ゼロ fail が実際に成立するのは 1x1x1
+    // （sub-K-tile）のみであり、上記 2 テストから当該形状を削除したうえで
+    // 本 7 行をここへ移し、`tests/parity_nonregression.rs::
+    // parity_baselines_do_not_regress`（`check_wmma_tf32_staged_baseline`。
+    // 公開 API `run_wmma_tf32` 経由。既存の走査対象でありコード変更不要で
+    // 対象拡大した）の対象に含める。ceiling は §4 と同じ規約で算出した。
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 64x64x64 seed=0xFA0 (#1106 diagnostic)",
+        m: 64,
+        n: 64,
+        k: 64,
+        seed: 0xFA0,
+        total: 64 * 64,
+        baseline_fail_count: 633,
+        baseline_mean_abs_diff_ceiling: 5.426e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.499e-3),
+        baseline_max_rel_err_ceiling: Some(1.516e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 128x128x128 seed=0xFA1 (#1106 diagnostic)",
+        m: 128,
+        n: 128,
+        k: 128,
+        seed: 0xFA1,
+        total: 128 * 128,
+        baseline_fail_count: 2631,
+        baseline_mean_abs_diff_ceiling: 7.834e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.744e-3),
+        baseline_max_rel_err_ceiling: Some(8.881e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 512x512x512 seed=0xFA2 (#1106 diagnostic)",
+        m: 512,
+        n: 512,
+        k: 512,
+        seed: 0xFA2,
+        total: 512 * 512,
+        baseline_fail_count: 42782,
+        baseline_mean_abs_diff_ceiling: 1.572e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(8.685e-3),
+        baseline_max_rel_err_ceiling: Some(1.980e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 60x68x36 seed=0xFA3 (#1106 diagnostic)",
+        m: 60,
+        n: 68,
+        k: 36,
+        seed: 0xFA3,
+        total: 60 * 68,
+        baseline_fail_count: 691,
+        baseline_mean_abs_diff_ceiling: 4.096e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.845e-3),
+        baseline_max_rel_err_ceiling: Some(4.450e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 68x60x20 seed=0xFA4 (#1106 diagnostic)",
+        m: 68,
+        n: 60,
+        k: 20,
+        seed: 0xFA4,
+        total: 68 * 60,
+        baseline_fail_count: 620,
+        baseline_mean_abs_diff_ceiling: 2.973e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.483e-3),
+        baseline_max_rel_err_ceiling: Some(7.803e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 64x96x256 seed=0xFA5 (#1106 diagnostic)",
+        m: 64,
+        n: 96,
+        k: 256,
+        seed: 0xFA5,
+        total: 64 * 96,
+        baseline_fail_count: 1008,
+        baseline_mean_abs_diff_ceiling: 1.122e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(4.984e-3),
+        baseline_max_rel_err_ceiling: Some(1.035e0),
+    },
+    ParityBaseline {
+        path: ParityPath::WmmaTf32Staged,
+        context: "wmma_tf32_staged 4096x4096x4096 seed=0xBEEF (#1106 diagnostic)",
+        m: 4096,
+        n: 4096,
+        k: 4096,
+        seed: 0xBEEF,
+        total: 4096 * 4096,
+        baseline_fail_count: 2725617,
+        baseline_mean_abs_diff_ceiling: 4.454e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.117e-2),
+        baseline_max_rel_err_ceiling: Some(1.998e0),
     },
     // mma_f16: K=4096 ストレスケース（256x256x4096、seed=9999）。
     // `tests/cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` の先頭呼出し
@@ -333,6 +754,56 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_mean_abs_diff_ceiling: 7.647e-5,
         // `run_f16` は基本/opt の分岐を持たないため provenance 不確実性なし。
         baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: None,
+        baseline_max_rel_err_ceiling: None,
+    },
+    // wmma_f16: `run_f16` 実効経路の K=4096 ストレスケース（256x256x4096、
+    // seed=8888）。`tests/cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress`
+    // の唯一の呼出し（`assert_wmma_f16_parity(&gemm, ctx, 8888, 256, 256,
+    // 4096)`）。イシュー #1106（GB10 全件洗い出し）で追加。実測: DGX
+    // Spark GB10（sm_121・CUDA 13.0）・GPU アイドル・直列実行
+    // （`--test-threads=1`）2026-09-02。GB10 実機では opt カーネルが
+    // ロード済みのため、この値は opt 経由の実効出力である
+    // （`ParityPath::WmmaF16` ドキュメンテーションコメント「PR #1124
+    // codex-review〈Cursor Bugbot Medium〉指摘」参照。basic 単独を強制
+    // 実行する経路がないため、この事実を明示したうえで
+    // `baseline_provenance_unconfirmed: false` のまま維持する——値自体は
+    // 「run_f16 実効経路の出力」という主張どおりに正しく実測されている）。
+    ParityBaseline {
+        path: ParityPath::WmmaF16,
+        context: "wmma_f16 256x256x4096 seed=8888 (run_f16 effective route; GB10: opt)",
+        m: 256,
+        n: 256,
+        k: 4096,
+        seed: 8888,
+        total: 256 * 256,
+        baseline_fail_count: 99,
+        baseline_mean_abs_diff_ceiling: 7.563e-5,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(6.251e-2),
+        baseline_max_rel_err_ceiling: Some(3.329e-2),
+    },
+    // wmma_f16: `run_f16` 実効経路の K=4096 ストレスケース（256x256x4096、
+    // seed=8889）。`tests/gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress`
+    // の唯一の呼出し（`assert_wmma_f16_opt_parity(&gemm, ctx, 8889, 256,
+    // 256, 4096)`）。上記 seed=8888 行と同じ `run_f16` 実効経路を別シード
+    // で計測した行（両テストとも同一の公開 API `run_f16` を呼ぶのみで、
+    // `run_f16_opt` という専用関数は存在しない。旧 `ParityPath::WmmaF16Opt`
+    // から統合。`ParityPath::WmmaF16` ドキュメンテーションコメント参照）。
+    // 実測環境は上記行と同一（2026-09-02）。
+    ParityBaseline {
+        path: ParityPath::WmmaF16,
+        context: "wmma_f16 256x256x4096 seed=8889 (run_f16 effective route; GB10: opt)",
+        m: 256,
+        n: 256,
+        k: 4096,
+        seed: 8889,
+        total: 256 * 256,
+        baseline_fail_count: 81,
+        baseline_mean_abs_diff_ceiling: 7.628e-5,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.126e-2),
+        baseline_max_rel_err_ceiling: Some(2.303e-1),
     },
 ];
 
@@ -342,18 +813,30 @@ pub static BASELINES: &[ParityBaseline] = &[
 /// （複合判定の合否）を複製・改変しない（`.claude/rules/security.md` A08
 /// 「判定の迂回経路を作らない」）。
 ///
-/// 3 点を fail-closed で検査する:
+/// 3〜5 点を fail-closed で検査する:
 /// 1. `report.total == baseline.total`（形状・比較対象のずれの検出。
 ///    fixture の `total` 定義とテスト側の実測形状がずれていた場合に
 ///    「たまたま非後退に見える」誤判定を防ぐ）
 /// 2. `report.fail_count <= baseline.baseline_fail_count`
 /// 3. `report.mean_abs_diff <= baseline.baseline_mean_abs_diff_ceiling`
+/// 4. `baseline.baseline_max_abs_diff_ceiling` が `Some` の場合のみ:
+///    `report.max_abs_diff <= baseline_max_abs_diff_ceiling`
+/// 5. `baseline.baseline_max_rel_err_ceiling` が `Some` の場合のみ:
+///    `report.max_rel_err <= baseline_max_rel_err_ceiling`
+///
+/// 項目 4・5（コーディネータ指示・ユーザー承認 2026-09-02）は、項目 3 の
+/// 平均値のみの検査では検出できない盲点（fail_count・mean_abs_diff が
+/// 変わらないまま特定の 1 要素だけ誤差が急増する回帰）を塞ぐ追加検査
+/// である。`None` の行（実測データがまだない既存行）はこの 2 項目の検査
+/// を明示的にスキップする（fail-open にはしない——「検査していない」
+/// ことと「検査して合格した」ことを混同しない設計。`ParityBaseline::
+/// baseline_max_abs_diff_ceiling` ドキュメンテーションコメント参照）。
 ///
 /// # Panics
 ///
 /// いずれかの検査に失敗した場合、`fandhe_ai_backend_cpu::assert_parity` と同水準の
 /// 診断情報（fail_count・mean_abs_diff 等の分布統計）を付けて panic する。
-/// `baseline.baseline_provenance_unconfirmed == true` の場合は上記 3 点の
+/// `baseline.baseline_provenance_unconfirmed == true` の場合は上記の
 /// 比較を行わず、実機再測定が必要である旨のメッセージで即座に panic する
 /// （fail-closed。`ParityBaseline::baseline_provenance_unconfirmed` の
 /// ドキュメンテーションコメント参照。PR #640 codex-review P1 再指摘対応:
@@ -407,6 +890,39 @@ pub fn assert_no_parity_regression(
         report.total,
         baseline.baseline_fail_count,
     );
+    // codex-review 指摘への補強（ユーザー承認 2026-09-02。本関数
+    // ドキュメンテーションコメント「項目 4・5」参照）: fail_count・
+    // mean_abs_diff が変わらないまま特定の 1 要素だけ誤差が急増する回帰
+    // （外れ値の悪化）を検出する。実測データがまだない行（`None`）は
+    // 検査をスキップする（fail-open ではなく「未実測」を明示するだけ。
+    // `ParityBaseline::baseline_max_abs_diff_ceiling` ドキュメンテーション
+    // コメント参照）。
+    if let Some(ceiling) = baseline.baseline_max_abs_diff_ceiling {
+        assert!(
+            report.max_abs_diff <= ceiling,
+            "{context}: parity 非後退契約 FAIL — max_abs_diff が後退しました \
+             (actual={:.6e}, baseline_ceiling={:.6e}, fail_count={}/{}, \
+             mean_abs_diff={:.6e})",
+            report.max_abs_diff,
+            ceiling,
+            report.fail_count,
+            report.total,
+            report.mean_abs_diff,
+        );
+    }
+    if let Some(ceiling) = baseline.baseline_max_rel_err_ceiling {
+        assert!(
+            report.max_rel_err <= ceiling,
+            "{context}: parity 非後退契約 FAIL — max_rel_err が後退しました \
+             (actual={:.6e}, baseline_ceiling={:.6e}, fail_count={}/{}, \
+             mean_abs_diff={:.6e})",
+            report.max_rel_err,
+            ceiling,
+            report.fail_count,
+            report.total,
+            report.mean_abs_diff,
+        );
+    }
 }
 
 /// tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）の
