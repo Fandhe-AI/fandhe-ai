@@ -397,6 +397,20 @@ impl KernelModuleCache {
         // モジュールキャッシュ全体が不必要に足止めされる。`guard` を
         // ブロックの終端で drop してからロック外で `evicted` を drop
         // することで、unload はロック解放後に実行される。
+        //
+        // `is_evicted()` 判定と `evicts.fetch_add` は `guard.insert(...)`
+        // と同じ `Mutex` 保持区間内（このブロック内）で完了させる
+        // （イシュー #1107・codex-review P2 指摘）。ロック解放後に判定・
+        // 加算すると、その間隙で別スレッドが 2 回目の `CudaGemm::new`
+        // 構築と `evict_count()` の読み取りまで進みうる。実際には
+        // eviction が起きているのに `module_cache_wiring_tests.rs` の
+        // `evicted_during_window`／`evicted_since_start`（診断用の観測
+        // ウィンドウ差分）がその読み取り時点でまだ 0 のまま観測され、
+        // 「共有 LRU が汚染された」という診断ヒントを見逃す（カウンタ
+        // 自体の最終値は `Relaxed` でも到達するが、診断に使う瞬間値の
+        // 観測順序がロックと無関係にずれるのを防ぐ必要がある）。
+        // 外れた値の drop（`cuModuleUnload` に波及しうる重い処理）だけは
+        // 引き続きロック外で行う。
         let outcome = {
             let mut guard = self
                 .inner
@@ -404,15 +418,12 @@ impl KernelModuleCache {
                 .map_err(|e| CudaError::ModuleCacheUnavailable {
                     detail: format!("module cache mutex poisoned: {e}"),
                 })?;
-            guard.insert((ctx_id, key), module)
+            let outcome = guard.insert((ctx_id, key), module);
+            if outcome.is_evicted() {
+                self.evicts.fetch_add(1, Ordering::Relaxed);
+            }
+            outcome
         };
-        // 容量超過による evict（`Replaced` による同一キー置換とは区別する。
-        // イシュー #1107。`InsertOutcome` ドキュメンテーションコメント参照）
-        // のみを evict カウンタへ計上してから、外れた値をロック外で drop
-        // する（上のコメント「Bugbot 指摘」節と同じ理由）。
-        if outcome.is_evicted() {
-            self.evicts.fetch_add(1, Ordering::Relaxed);
-        }
         drop(outcome.into_displaced());
         Ok(())
     }
