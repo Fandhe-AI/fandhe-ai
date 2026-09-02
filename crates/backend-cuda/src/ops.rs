@@ -979,8 +979,9 @@ impl BackendOps for CudaBackendOps {
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
     /// #1023「R3」）。`Op::LinearResident` の VJP が `d_input^T = w @ g^T`
     /// を計算するために使う。[`Self::gemm_resident_rhs`] と同じく `w` は
-    /// download せず [`crate::gemm::CudaGemm::launch_tiled_f32_resident`]
-    /// （`CudaView` 部分ビュー起動）へそのまま渡す。
+    /// download せず `CudaGemm::launch_tiled_f32_resident`
+    /// （`CudaView` 部分ビュー起動。バックエンド crate 内部専用 API のため
+    /// intra-doc link ではなくコードスパン表記とする）へそのまま渡す。
     fn gemm_resident_lhs(
         &self,
         w: DeviceBufferView<'_>,
