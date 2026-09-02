@@ -54,7 +54,7 @@
 //!
 //! `tests/dispatch_boundary.rs` と同一の前提（compute capability 8.0
 //! 以降・NVRTC 搭載必須）の `#[ignore]` 分離テストであり、通常 CI
-//! （self-hosted・CUDA toolkit 非搭載）では実行されない
+//! （GitHub ホステッド・CUDA 実機なし）では実行されない
 //! （`.claude/rules/ci.md`「実機依存」）。
 //!
 //! ```sh

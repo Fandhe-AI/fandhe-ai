@@ -28,7 +28,7 @@
 //! ## 実機前提
 //!
 //! 両テストとも実機（DGX Spark GB10 等、compute capability 7.0 以降）必須の
-//! `#[ignore]` 分離テストであり、通常 CI（self-hosted・CUDA toolkit 非搭載）
+//! `#[ignore]` 分離テストであり、通常 CI（GitHub ホステッド・CUDA 実機なし）
 //! では実行されない（`.claude/rules/ci.md`「実機依存」）。CUDA デバイス・
 //! opt カーネルが利用できない環境では `.expect` により失敗が顕在化する
 //! 設計とし、実機以外での silent green を許さない（既存 `tests/

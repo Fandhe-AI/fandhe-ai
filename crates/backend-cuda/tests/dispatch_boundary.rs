@@ -35,8 +35,8 @@
 //!
 //! 両テストとも実機（DGX Spark GB10 等、compute capability 8.0 以降
 //! ——`CudaMmaGemm` の下限がより厳しいため両テスト共通の下限とする）・
-//! NVRTC 搭載が必須の `#[ignore]` 分離テストであり、通常 CI（self-hosted・
-//! CUDA toolkit 非搭載）では実行されない（`.claude/rules/ci.md`「実機
+//! NVRTC 搭載が必須の `#[ignore]` 分離テストであり、通常 CI（GitHub ホステッド・
+//! CUDA 実機なし）では実行されない（`.claude/rules/ci.md`「実機
 //! 依存」）。opt カーネルの可用性は `wmma_f16_opt_available`／
 //! `wmma_tf32_opt_available` で事前に断定してから計測する（PR #256
 //! レビュー指摘「opt 経路の可用性を断定せず計測すると基本版への
