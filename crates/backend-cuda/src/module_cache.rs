@@ -91,6 +91,41 @@ struct LruCache<K, V> {
     tick: u64,
 }
 
+/// [`LruCache::insert`] の結果分類（イシュー #1107）。
+///
+/// 「容量超過による LRU evict」と「同一キー再挿入による置換」を型レベルで
+/// 区別する。前者のみ [`KernelModuleCache`] の evict カウンタに計上する
+/// （後者は要素数が変わらない入れ替えであり、他プロセス・他スレッドの
+/// キャッシュ汚染〈#1107 原因〉の兆候ではないため区別する意味がある）。
+#[derive(Debug, PartialEq, Eq)]
+enum InsertOutcome<V> {
+    /// 新規キーを容量内に収まる形で追加した（evict なし）。
+    Fresh,
+    /// 既存キーへ再挿入し、旧値を置換した（evict ではない）。
+    Replaced(V),
+    /// 新規キー挿入により容量超過し、別キーの最古エントリを 1 件 evict
+    /// した。
+    Evicted(V),
+}
+
+impl<V> InsertOutcome<V> {
+    /// 呼び出し元が drop すべき「外れた値」を取り出す（`Replaced`／
+    /// `Evicted` いずれも該当。`Fresh` は `None`）。[`KernelModuleCache::insert`]
+    /// がロック解放後に drop するための共通口。
+    fn into_displaced(self) -> Option<V> {
+        match self {
+            InsertOutcome::Fresh => None,
+            InsertOutcome::Replaced(v) | InsertOutcome::Evicted(v) => Some(v),
+        }
+    }
+
+    /// 容量超過による evict であったかどうか（[`KernelModuleCache::evict_count`]
+    /// の計上判定に使う）。
+    fn is_evicted(&self) -> bool {
+        matches!(self, InsertOutcome::Evicted(_))
+    }
+}
+
 impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
     fn new(capacity: NonZeroUsize) -> Self {
         Self {
@@ -124,16 +159,22 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
 
     /// `key`/`value` を挿入する。
     ///
-    /// - 既存キーへの再挿入: 旧値を `Some` で返す（容量チェックは不要。
+    /// 戻り値は [`InsertOutcome`]（イシュー #1107。実機テストの hit/miss
+    /// 増分検査が「容量超過による LRU evict」と「同一キー再挿入による
+    /// 置換」を区別できるようにするための分岐。置換は数として現れない
+    /// （容量内で入れ替わるだけ）ため呼び出し元の evict カウンタには
+    /// 計上しない）:
+    ///
+    /// - 既存キーへの再挿入: `Replaced(旧値)`（容量チェックは不要。
     ///   要素数が変わらないため）。
     /// - 新規キーで容量超過: 挿入後に最小 tick のエントリを 1 件 evict し
-    ///   その値を `Some` で返す（挿入直後のエントリは最大 tick のため
-    ///   evict 対象になり得ない）。
-    /// - 新規キーで容量内: `None`。
-    fn insert(&mut self, key: K, value: V) -> Option<V> {
+    ///   `Evicted(その値)`（挿入直後のエントリは最大 tick のため evict
+    ///   対象になり得ない）。
+    /// - 新規キーで容量内: `Fresh`。
+    fn insert(&mut self, key: K, value: V) -> InsertOutcome<V> {
         let tick = self.next_tick();
         if let Some((old_value, _)) = self.entries.insert(key, (value, tick)) {
-            return Some(old_value);
+            return InsertOutcome::Replaced(old_value);
         }
         if self.entries.len() > self.capacity.get() {
             let evict_key = self
@@ -144,10 +185,10 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
             if let Some(evict_key) = evict_key
                 && let Some((evicted_value, _)) = self.entries.remove(&evict_key)
             {
-                return Some(evicted_value);
+                return InsertOutcome::Evicted(evicted_value);
             }
         }
-        None
+        InsertOutcome::Fresh
     }
 
     #[cfg(test)]
@@ -242,6 +283,16 @@ fn module_cache_capacity() -> Result<NonZeroUsize, CudaError> {
 ///
 /// hit/miss カウンタ（[`Self::hit_count`]／[`Self::miss_count`]）を持ち、
 /// 実機テストでの再利用検証・将来の C-12（#534）性能計測の観測点とする。
+/// さらに evict カウンタ（[`Self::evict_count`]）を持つ（イシュー #1107。
+/// プロセスワイド `static`（[`Self::global`]）の共有 LRU（既定容量 32）は
+/// 同一プロセス内で並列実行される他の実機テスト（`kernels_mma.rs`・
+/// `kernels_wmma_opt.rs` 等の shape 特化カーネル群）とも共有されるため、
+/// それらが同時に insert すると容量超過で evict が起こりうる。
+/// `module_cache_wiring_tests.rs` のように「直前の構築で insert した
+/// エントリが次の構築で確実にヒットする」ことを厳密検査するテストは、
+/// この evict カウンタで「他テストによる共有 LRU の汚染」を hit/miss
+/// アサーション失敗時の診断情報として区別できる（GB10 実測 2026-09-03。
+/// `module_cache_wiring_tests.rs` 冒頭ドキュメンテーションコメント参照）。
 ///
 /// 呼び出し元は [`load_function_cached`] 経由の
 /// `kernels_mma.rs::RenderedMmaKernel::compile`（`internal-diagnostics`
@@ -253,6 +304,7 @@ pub(crate) struct KernelModuleCache {
     inner: Mutex<LruCache<(usize, CudaKernelCacheKey), Arc<CudaModule>>>,
     hits: AtomicU64,
     misses: AtomicU64,
+    evicts: AtomicU64,
 }
 
 impl KernelModuleCache {
@@ -261,6 +313,7 @@ impl KernelModuleCache {
             inner: Mutex::new(LruCache::new(capacity)),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evicts: AtomicU64::new(0),
         }
     }
 
@@ -344,16 +397,34 @@ impl KernelModuleCache {
         // モジュールキャッシュ全体が不必要に足止めされる。`guard` を
         // ブロックの終端で drop してからロック外で `evicted` を drop
         // することで、unload はロック解放後に実行される。
-        let evicted = {
+        //
+        // `is_evicted()` 判定と `evicts.fetch_add` は `guard.insert(...)`
+        // と同じ `Mutex` 保持区間内（このブロック内）で完了させる
+        // （イシュー #1107・codex-review P2 指摘）。ロック解放後に判定・
+        // 加算すると、その間隙で別スレッドが 2 回目の `CudaGemm::new`
+        // 構築と `evict_count()` の読み取りまで進みうる。実際には
+        // eviction が起きているのに `module_cache_wiring_tests.rs` の
+        // `evicted_during_window`／`evicted_since_start`（診断用の観測
+        // ウィンドウ差分）がその読み取り時点でまだ 0 のまま観測され、
+        // 「共有 LRU が汚染された」という診断ヒントを見逃す（カウンタ
+        // 自体の最終値は `Relaxed` でも到達するが、診断に使う瞬間値の
+        // 観測順序がロックと無関係にずれるのを防ぐ必要がある）。
+        // 外れた値の drop（`cuModuleUnload` に波及しうる重い処理）だけは
+        // 引き続きロック外で行う。
+        let outcome = {
             let mut guard = self
                 .inner
                 .lock()
                 .map_err(|e| CudaError::ModuleCacheUnavailable {
                     detail: format!("module cache mutex poisoned: {e}"),
                 })?;
-            guard.insert((ctx_id, key), module)
+            let outcome = guard.insert((ctx_id, key), module);
+            if outcome.is_evicted() {
+                self.evicts.fetch_add(1, Ordering::Relaxed);
+            }
+            outcome
         };
-        drop(evicted);
+        drop(outcome.into_displaced());
         Ok(())
     }
 
@@ -373,6 +444,19 @@ impl KernelModuleCache {
     #[allow(dead_code)]
     pub(crate) fn miss_count(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
+    }
+
+    /// evict 件数（容量超過により LRU が別キーの最古エントリを追い出した
+    /// 回数。同一キー再挿入による置換は含まない。イシュー #1107）。
+    ///
+    /// 呼び出し元は `module_cache_wiring_tests.rs`（`#[cfg(test)]`）のみ。
+    /// 共有 `static` LRU（[`Self::global`]）を汚染しうる他テストとの並列
+    /// 実行が原因で hit/miss アサーションが失敗した場合に、この値を
+    /// 失敗メッセージへ含めて切り分けを助ける（`#[allow(dead_code)]` の
+    /// 理由は [`Self::hit_count`] と同じ: 既定ビルドでは未参照）。
+    #[allow(dead_code)]
+    pub(crate) fn evict_count(&self) -> u64 {
+        self.evicts.load(Ordering::Relaxed)
     }
 }
 
@@ -482,8 +566,8 @@ mod tests {
     #[test]
     fn insert_within_capacity_does_not_evict() {
         let mut lru: LruCache<&str, i32> = LruCache::new(cap(2));
-        assert_eq!(lru.insert("a", 1), None);
-        assert_eq!(lru.insert("b", 2), None);
+        assert_eq!(lru.insert("a", 1), InsertOutcome::Fresh);
+        assert_eq!(lru.insert("b", 2), InsertOutcome::Fresh);
         assert_eq!(lru.len(), 2);
     }
 
@@ -494,8 +578,8 @@ mod tests {
         lru.insert("b", 2);
         // "a" にアクセスして使用順を更新し、"b" を最古にする。
         assert_eq!(lru.get(&"a"), Some(&1));
-        let evicted = lru.insert("c", 3);
-        assert_eq!(evicted, Some(2)); // "b" が evict される
+        let outcome = lru.insert("c", 3);
+        assert_eq!(outcome, InsertOutcome::Evicted(2)); // "b" が evict される
         assert_eq!(lru.len(), 2);
         assert_eq!(lru.get(&"a"), Some(&1));
         assert_eq!(lru.get(&"c"), Some(&3));
@@ -504,8 +588,8 @@ mod tests {
     #[test]
     fn insert_same_key_replaces_and_returns_old_value_without_evicting() {
         let mut lru: LruCache<&str, i32> = LruCache::new(cap(1));
-        assert_eq!(lru.insert("a", 1), None);
-        assert_eq!(lru.insert("a", 2), Some(1));
+        assert_eq!(lru.insert("a", 1), InsertOutcome::Fresh);
+        assert_eq!(lru.insert("a", 2), InsertOutcome::Replaced(1));
         assert_eq!(lru.len(), 1);
         assert_eq!(lru.get(&"a"), Some(&2));
     }
@@ -520,8 +604,8 @@ mod tests {
     fn capacity_one_evicts_previous_entry_on_new_key() {
         let mut lru: LruCache<&str, i32> = LruCache::new(cap(1));
         lru.insert("a", 1);
-        let evicted = lru.insert("b", 2);
-        assert_eq!(evicted, Some(1));
+        let outcome = lru.insert("b", 2);
+        assert_eq!(outcome, InsertOutcome::Evicted(1));
         assert_eq!(lru.get(&"a"), None);
         assert_eq!(lru.get(&"b"), Some(&2));
     }
@@ -537,14 +621,24 @@ mod tests {
         let weak_a = Arc::downgrade(&value_a);
         lru.insert("a", value_a);
 
-        let evicted = lru.insert("b", Arc::new(()));
-        assert!(evicted.is_some());
-        drop(evicted); // `LruCache::insert` の戻り値を呼び出し元が drop する契約を模擬する
+        let outcome = lru.insert("b", Arc::new(()));
+        assert!(matches!(outcome, InsertOutcome::Evicted(_)));
+        drop(outcome.into_displaced()); // `LruCache::insert` の戻り値を呼び出し元が drop する契約を模擬する
 
         assert!(
             weak_a.upgrade().is_none(),
             "evicted value must be dropped once the caller drops the returned Option"
         );
+    }
+
+    /// [`KernelModuleCache::evict_count`] の判定条件（`InsertOutcome::is_evicted`）
+    /// を GPU 非依存で直接検証する（イシュー #1107。実機側の意味づけは
+    /// `KernelModuleCache` 構造体ドキュメンテーションコメント参照）。
+    #[test]
+    fn insert_outcome_is_evicted_matches_only_evicted_variant() {
+        assert!(!InsertOutcome::<i32>::Fresh.is_evicted());
+        assert!(!InsertOutcome::Replaced(1).is_evicted());
+        assert!(InsertOutcome::Evicted(1).is_evicted());
     }
 
     // ------------------------------------------------------------------

@@ -160,6 +160,21 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   `EINVAL` になる）。`target_arch` 分岐で修正済み（対象コメントは同ファイルの `O_NOFOLLOW`／
   `O_DIRECTORY` 定数を参照）。回避手順は不要になったため本節は記録のみ。
 
+### 4.7 module_cache 系実機テストは `--test-threads=1` 推奨（イシュー #1107）
+
+`crates/backend-cuda/src/module_cache_wiring_tests.rs`・`init_cost_diag_tests.rs` はプロセス
+ワイド `static` の共有 LRU（`module_cache::KernelModuleCache::global`。既定容量 32）の hit/miss
+増分を厳密検査する。他の `#[ignore]` 実機テスト（`kernels_mma.rs`・`kernels_wmma_opt.rs` 等の
+shape 特化カーネル群）と同一プロセスで既定の並列テストハーネスにより実行すると、それらが同じ
+共有 LRU へ並行 insert し容量超過で evict が起こり、`module_cache_wiring_tests.rs` の hit
+アサーションのみ flaky に fail しうる（GB10 実機実測 2026-09-03。実装〈キャッシュキー・容量〉
+の欠陥ではなくテストの隔離不足）。lib の `--ignored` テストをまとめて実行する場合は次のように
+直列化することを推奨する：
+
+```bash
+cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --test-threads=1
+```
+
 ## 5. PyTorch 参照値の再計測（同一実機）
 
 ### 5.1 venv の利用
