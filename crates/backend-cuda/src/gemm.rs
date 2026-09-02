@@ -3156,8 +3156,20 @@ impl CudaGemm {
     /// （`tiled_pipeline_offset_aligned`）を満たさないため常に classic
     /// 版へ fail-closed にフォールバックする。`validate_gemm_dims`
     /// 等の既存境界検証には影響しない）。
+    ///
+    /// **可視性は `pub(crate)` に限定する**（codex-review P0 再指摘・
+    /// PR #1164: `a_offset` を `a_dev` から独立した引数として受け取る
+    /// 設計上、この関数を crate 外の safe 公開 API のままにすると、
+    /// 呼び出し元が `a_dev` の実際の開始位置と無関係な `a_offset`
+    /// （例えば非整列ビューに対して偽の `a_offset = 0`）を渡すことで
+    /// 上記の cp.async 整列 fail-closed フォールバックを迂回しうる。
+    /// 現状の唯一の呼び出し元は `ops.rs::CudaBackendOps::gemm_resident_lhs`
+    /// で、`w.offset()`（`DeviceParamStore` が管理する `CudaView` 自身の
+    /// オフセット）をそのまま渡す信頼できる構築経路のみを通るため、
+    /// `pub(crate)` へ絞ることで「検証不能な外部入力では選択できない」
+    /// を型システムで保証する（REQ-8 の手動境界チェック省略禁止）。
     #[allow(clippy::too_many_arguments)]
-    pub fn launch_tiled_f32_resident(
+    pub(crate) fn launch_tiled_f32_resident(
         &self,
         a_dev: &CudaView<'_, f32>,
         a_offset: usize,
