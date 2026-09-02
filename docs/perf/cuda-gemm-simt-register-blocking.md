@@ -190,7 +190,7 @@ GB10 実機での before/after 倍率は取得できない**（旧版へ revert 
 〈計測直前 `nvidia-smi --query-gpu=utilization.gpu` 0%・`--query-compute-apps` は
 常駐サービス〈ComfyUI・Kokoro〉のみで計測競合プロセスなし〉）。
 
-### 8.1 計測環境
+### 7.1 計測環境
 
 - GPU: NVIDIA GB10（sm_121）・driver 580.173.02
 - nvcc: `Build cuda_13.0.r13.0/compiler.36424714_0`（CUDA 13.0）
@@ -199,7 +199,7 @@ GB10 実機での before/after 倍率は取得できない**（旧版へ revert 
   #1133 マージ後・PR #1111 の SplitK 撤退是正〈`caa1bdd`〉を含む）
 - 実機個体は `<cuda-node>` 表記（実ホスト名は非公開。`docs/real-hardware-verification-env.md` 参照）
 
-### 8.2 §6（2026-08-31・commit `10011cd`）以降の差分確認
+### 7.2 §6（2026-08-31・commit `10011cd`）以降の差分確認
 
 ```
 git diff 10011cd4f8ef097351c0dc1244eb55c8a021040b..1a32082e4b521d7a0bed868db3a3b0a65e2bae9a \
@@ -213,7 +213,7 @@ FP32 variant selection の SplitK parity 失敗と DoubleBuffer ヒューリス�
 性能逆転の修正）。`TILED_F32` 本体（`kernels.rs`）は §6 実測時点から不変であり、
 本節の計測は「DoubleBuffer バッファ管理是正後」の到達性能を捉える。
 
-### 8.3 parity 結果（受入基準 A）
+### 7.3 parity 結果（受入基準 A）
 
 `--test-threads=1`・`--release --locked` で 6 テストバイナリを実行。全て
 `test result: ok`（複合判定 0 fail。`fandhe_ai_backend_cpu::assert_parity` 厳密ゼロ fail 判定）。
@@ -236,7 +236,7 @@ cargo test -p fandhe-ai-backend-cuda --release --locked --test "$T" -- \
 
 生ログ: `docs/perf/logs/cuda-simt-remeasurement-1136/parity_*.log`
 
-### 8.4 GFLOPS 結果（受入基準 B）
+### 7.4 GFLOPS 結果（受入基準 B）
 
 `examples/cuda_floor_bench.rs`（`launch_tiled_f32` の GPU 実行 + 同期のみ計測。
 §6 と同一計測境界）を 5 回反復。各 run の `tiled_f32_tflops`（中央値。warmup 20 /
@@ -266,12 +266,12 @@ iters 20）と、run 間中央値（＝本節の代表値）:
 N=1024 は実質不変、N=2048 は誤差範囲内の軽微な低下。**N=4096 は -4.96% で
 「5% 超の劣化」の閾値未満だが僅差**であり、回帰の疑いとして記録する（原因調査・
 `kernels.rs::TILED_F32` 本体・DoubleBuffer 閾値のチューニングは本イシューのスコープ外。
-§8.2 のとおり `TILED_F32` 本体は §6 から不変のため、この差は同一カーネルの
+§7.2 のとおり `TILED_F32` 本体は §6 から不変のため、この差は同一カーネルの
 run-to-run 変動〈driver・熱・スケジューリング等〉である可能性が高く、PR #1111 の
 DoubleBuffer バッファ管理是正自体が N=4096 の性能を悪化させたと断定する根拠はない
 〈§6 と本節は別セッション・同一 GB10 個体だが連続実行ではない〉）。
 
-### 8.5 参考比較（限定条件付き）
+### 7.5 参考比較（限定条件付き）
 
 - 親イシュー #1031 目標（candle/Burn 比 N=4096 で 2,410 GFLOP/s 超え）との比較:
   本節 N=4096 は 6,748.5 GFLOP/s で目標を約 2.80 倍上回る（§6 の 2.95 倍からわずかに縮小）。
@@ -283,7 +283,7 @@ DoubleBuffer バッファ管理是正自体が N=4096 の性能を悪化させ�
   tape 構築・ホスト実体化を含む）ため、fandhe-ai 側に有利な方向のバイアスを含む
   参考比較であり、単純な性能向上の根拠としては扱わない。
 
-### 8.6 opt-in 診断経路（補助・PR #1111 §1b の申し送り。受入基準外）
+### 7.6 opt-in 診断経路（補助・PR #1111 §1b の申し送り。受入基準外）
 
 ```
 cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
@@ -302,14 +302,14 @@ Rust 側判定は green（`split_k_forced_…` はテスト名のとおり「GB1
 `docs/perf/logs/cuda-simt-remeasurement-1136/parity_gemm_f32_variants.log`。
 `cuda-gemm-f32-variant-selection.md` §1b の「記録欄」は別途参照。
 
-### 8.7 不変条件の宣言
+### 7.7 不変条件の宣言
 
 本節作成にあたり `crates/`・`Cargo.toml`・`Cargo.lock`・tolerance 定数
 （`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline
 （`tests/common/parity_baseline.rs`）はいずれも変更していない
 （`git diff origin/main -- crates/ Cargo.toml Cargo.lock` が無差分であることを確認済み）。
 
-### 8.8 未実施・申し送り
+### 7.8 未実施・申し送り
 
 - ncu（nsight-compute）は本ノードに未導入のため引き続き未実施（§5 と同じ）
 - N=4096 の -4.96% 差分は「回帰の疑い」として記録するのみで、原因調査・
