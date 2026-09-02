@@ -161,7 +161,7 @@ cargo run -p fandhe-ai-backend-cuda --example gemm_f32_variant_bench --release -
 
 ### 記録欄（イシュー #1136。opt-in 診断テストのみ実行。補助・受入基準外）
 
-2026-09-03 04:xx JST・DGX Spark GB10（sm_121）実機で以下 2 コマンドを実行（`docs/perf/cuda-gemm-simt-register-blocking.md` §7 の再実測セッションの一部として実施。commit `1a32082e4b521d7a0bed868db3a3b0a65e2bae9a`）:
+2026-09-03 04:xx JST・DGX Spark GB10（sm_121）実機で以下のコマンド（`gemm_f32_variants` テストバイナリを 1 回実行し、内部の 2 テストを実行）を実施（`docs/perf/cuda-gemm-simt-register-blocking.md` §7 の再実測セッションの一部として実施。commit `1a32082e4b521d7a0bed868db3a3b0a65e2bae9a`）:
 
 ```sh
 cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \

@@ -257,7 +257,12 @@ q3=…)` の転記）を併記していたが、run 間の分位値ではなく�
 `docs/perf/logs/cuda-simt-remeasurement-1136/floor_bench_run{1..5}.log` に変更なく残る）。
 
 実行コマンド: `cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release --locked`
-（PyTorch 参照 env 未設定のため `f32_best_over_pytorch` 等は `n/a`／別実測値・本イシューの対象外）。
+（`CUDA_FLOOR_BENCH_PYTORCH_SOURCE` 未設定のため `pytorch_f32`／`pytorch_f16` は PoC-v2-3
+の固定値〈`f32_ref_measured=false`／`f16_ref_measured=false`〉。このため `f32_best_over_pytorch`
+は N=512/2048/4096 では百分率が記録されている（`n/a` ではない）が、いずれも同一実機での
+再計測ではなく既定参照値との比較であり受入基準外の参考値である。N=1024 のみ
+`pytorch_f32=NaN` で `f32_best_over_pytorch=n/a`〈PoC-v2-3 固定値に N=1024 のエントリが
+存在しないため〉。生ログ: `docs/perf/logs/cuda-simt-remeasurement-1136/floor_bench_run*.log`）。
 
 生ログ: `docs/perf/logs/cuda-simt-remeasurement-1136/floor_bench_run{1..5}.log`
 
