@@ -1088,7 +1088,13 @@ impl BackendOps for CudaBackendOps {
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || {
                 gemm.launch_tiled_f32_resident(
-                    &w_view, b_slice, c_slice, p as u32, r as u32, q as u32,
+                    &w_view,
+                    w.offset(),
+                    b_slice,
+                    c_slice,
+                    p as u32,
+                    r as u32,
+                    q as u32,
                 )
             },
         )?;

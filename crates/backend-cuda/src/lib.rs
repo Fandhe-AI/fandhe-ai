@@ -366,8 +366,16 @@ pub use gemm::CudaGemm;
 // `TiledF32Kernel`（`Classic`/`Pipeline`）は `CudaGemm::run_tiled_f32` 系
 // 3 入口が実際にどちらのカーネルへ分岐したかを表す観測用の型（イシュー
 // #1137。`gemm.rs::TiledF32Kernel` 冒頭ドキュメンテーションコメント参照）。
-// `wmma_tf32_staged_swizzle_group_width` と同様、常時公開（feature ゲート
-// なし）で `CudaGemm::tiled_f32_kernel_for` の戻り値として使う。
+// `wmma_tf32_staged_swizzle_group_width`（数値ヘルパー）と異なり、こちらは
+// 内部カーネルディスパッチの実装詳細（Classic/Pipeline の二択）そのものを
+// 型として外部公開することになるため、`SpecializedMmaKernelHandle` 等と
+// 同じ `internal-diagnostics` feature（既定 off）限定で公開する
+// （codex-review P1 指摘・PR #1164。`CudaGemm::tiled_f32_kernel_for` の
+// みが本型を返す唯一の公開経路で、同メソッドも同 feature でゲートする。
+// `tests/cpu_cuda_tiled_pipeline_parity.rs` は既に `required-features =
+// ["internal-diagnostics"]`〈`Cargo.toml`〉のためこのゲート化による
+// 通常 CI ジョブへの影響はない）。
+#[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledF32Kernel;
 pub use mse::CudaMse;
 // `TiledPipelineFunction`／`CudaGemm::compile_tiled_pipeline_variant`／
