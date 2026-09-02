@@ -328,6 +328,23 @@ Rust 側判定は green（`split_k_forced_…` はテスト名のとおり「GB1
   DoubleBuffer 閾値補正（#1100 §1b・#1035 手順 4）は行わない（ユーザー承認事項）
 - cp.async パイプライン（#1033）・スウィズル（#1034）の本番結線は本節の対象外
 
+### 7.9 #1137 追記: `launch_tiled_f32`／`run_tiled_f32` の分岐について
+
+イシュー #1137（本節に続く GB10 セッション。commit `062ca1e8`）で `CudaGemm::
+run_tiled_f32`／`launch_tiled_f32`（本節・§7.4 の `cuda_floor_bench` が計測に使う
+入口）は、cp.async 16 バイト整列形状（`n % 4 == 0 && k % 4 == 0`。§7.4 の判定形状
+N=1024/2048/4096 はいずれも該当）かつ `CudaGemm::new` 時の cp.async パイプライン
+カーネルコンパイルに成功している場合、cp.async 3 stage パイプライン版
+（`kernels_tiled_pipeline.rs`）へ形状条件付きに分岐するようになった
+（`gemm.rs::CudaGemm::select_tiled_f32_kernel`）。したがって **#1137 以降の
+`cuda_floor_bench` `tiled_f32_tflops` は本節の §7.4 baseline（classic 固定）と
+は異なるカーネルの実測値**であり、両者を単純比較する場合は「本節 §7.4＝結線前
+baseline」「以後の計測＝結線後 dispatch 値」であることを踏まえる必要がある
+（実測 before/after 比較・採否判断は `docs/perf/cuda-gemm-tiled-pipeline.md`
+「#1137 本番結線判断」節を正とする。同節の GB10 実測では N=1024/2048/4096 で
+1.51〜1.74 倍の改善を確認し、bit 一致・parity 0 fail も確認済みのうえで採用
+〈ADOPT〉と判断した）。本節自体（§7.1〜§7.8）は結線前時点の記録として変更しない。
+
 ## 8. 関連
 
 - `docs/perf/cuda-gemm-kernel-improvement-policy.md`（本イシューの動機）

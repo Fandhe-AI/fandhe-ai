@@ -4,7 +4,7 @@
 親イシュー #1031（FP32 SIMT GEMM 強化）・ルート #1029「GEMM カーネルの candle 超え」Phase 2 の一環。
 受け入れ条件「N=4096 での改善値の記録（5 回計測中央値）」「カーネル側の手動境界検査の維持（REQ-8）」に対応する。
 
-## 状態: DGX Spark GB10 実機実測完了（下記「実測結果」節）。以下は実測前の実装セッションの記録として残す
+## 状態: DGX Spark GB10 実機実測完了・本番結線済み（イシュー #1137。下記「#1137 本番結線判断」節）。以下は #1033 実装セッション時点の記録として残す
 
 本実装セッションの実行環境には CUDA **driver**（`libcuda`）が実在し、`nvidia-smi` で以下の実機が確認できる:
 
@@ -131,11 +131,90 @@ gemm_tiled_pipeline_bench --release --features internal-diagnostics`（同様に
   支配的であることを示す。この転送込みオーバーヘッドの削減自体は本イシューのスコープ外
   （「スコープ外事項」節・本番既定経路への結線判断は #1035 が担う）。
 
+## #1137 本番結線判断（GB10 実測）
+
+イシュー #1137「cp.async 多段パイプライン（#1033）の GB10 実測に基づき本番結線可否を
+判断する」の実測記録・採否判断。実装は `crates/backend-cuda/src/gemm.rs::
+CudaGemm::select_tiled_f32_kernel`（`tiled_f32_kernel_kind` 純粋関数による形状条件付き
+選択）。詳細な計測コマンド・生ログは `docs/perf/logs/cuda-tiled-pipeline-wiring-1137/`
+（`env_info.txt`・`gateA_bitexact.log`・`gateB_parity.log`・
+`gateC_floor_bench_and_pipeline_bench.log`）を参照。
+
+**計測環境**: DGX Spark GB10（sm_121）・driver 580.173.02・CUDA 13.0.88・rustc 1.97.0。
+commit `062ca1e8d58ede1c50de22c5e7cbb41b7b5ee06a`（rsync `.rev-stamp` 実測一致確認済み）。
+計測前 GPU utilization 0%。
+
+### ゲート A（bit 一致・最優先）
+
+`tests/cpu_cuda_tiled_pipeline_parity.rs::tiled_pipeline_matches_tiled_f32_classic_bit_exact`
+（classic 版 `run_tiled_f32_classic` と pipeline 版 `run_tiled_pipeline_f32` の出力を
+`assert_eq!` でビット完全一致検査）**PASS**。あわせて結線の end-to-end 回帰テスト
+（`run_tiled_f32_dispatches_to_pipeline_for_aligned_shape`・
+`run_tiled_f32_falls_back_to_classic_for_unaligned_shape`）も **PASS**（計 11 件全 PASS）。
+
+これにより `docs/kernel-fusion.md` §2.2 の融合 epilogue（`gemm_bias_act`）bit 完全一致
+契約が #1137 結線後も成立することが実機で裏付けられた（下記ゲート B の
+`gemm_bias_act_parity` 0 fail と合わせて確認）。
+
+### ゲート B（parity 0 fail・境界検査）
+
+9 バイナリ（`gemm_tiled`・`gemm_bias_act_parity`・`backend_ops_real_device`・`gemm_auto`・
+`gemm_resident_real_device`・`cpu_cuda_parity`・`gemm_tf32_optin`・`transpose_parity`・
+`tensor_core_real_device`・`gemm_f32_variants`）を `--ignored --nocapture
+--test-threads=1` で実行。tiled_f32 classic/pipeline 分岐を経由する 8 バイナリは**全 PASS
+（0 failed）**。
+
+2 件の既存事象を観測したが、いずれも `run_tiled_f32`／`tiled_pipeline` を経由しない
+別カーネル系統（TF32 `mma.sync`／WMMA）に起因し #1137 と無関係と判断した:
+
+- `gemm_tf32_optin_on_matches_cpu_across_shapes`（TF32 opt-in 経路の CPU-CUDA 複合判定）:
+  既知の TF32 数値許容誤差事情（`docs/perf/cuda-tensor-core-tolerance-*.md`）。
+- `tensor_core_parity_record`（同上の TF32 WMMA 経路）・`tensor_core_tflops_record`
+  （エラーメッセージ自体が「GB10 実機実測〈2026-09-03〉で既知 red。イシュー #1131 の
+  受け入れ条件へ引き渡す」と明記する WMMA(f16) 性能事象。`docs/perf/
+  cuda-wmma-f16-perf-triage.md`・イシュー #1123/#1130/#1131）。
+
+### ゲート C（性能・同一プロトコル）
+
+`cuda_floor_bench` を §7.4 と同一プロトコルで 5 回実行した `tiled_f32_tflops`
+（#1137 結線後 = 実際の本番ディスパッチ値。判定対象の N=1024/2048/4096 はいずれも
+4 の倍数のため cp.async パイプラインへ分岐する）の中央値と、`docs/perf/
+cuda-gemm-simt-register-blocking.md` §7.4 baseline（結線前 classic 固定。commit
+`1a32082`）との比較:
+
+| N (M=N=K) | after 中央値（TFLOPS） | before baseline §7.4（TFLOPS） | after/before |
+|---|---|---|---|
+| 1024 | 11.2278 | 6.7470 | **1.664** |
+| 2048 | 12.9984 | 7.4819 | **1.737** |
+| 4096 | 10.2188 | 6.7485 | **1.514** |
+
+`gemm_tiled_pipeline_bench`（classic vs dispatch。GPU-only 起動込み・拡張形状
+N=256/512/1024/2048/4096）でも全形状で `dispatch_over_classic` ≥ 1.15（1.15〜1.44 倍）
+と後退なし。
+
+### 判定・採否
+
+事前宣言した判定基準（REQ-8 判定形状 N=2048/4096 の after/before ≥ 1.00、参考形状
+N=256/512/1024 で ≥ 0.95）を、判定形状・参考形状のいずれも大きく上回って満たした
+（最小 1.514 倍 ≫ 1.00・最小 1.15 倍 ≫ 0.95）ため、**最小形状閾値の追加なしでそのまま
+採用（ADOPT）と判断した**。ゲート A（bit 一致）が PASS したため、融合 epilogue の
+bit 完全一致契約（`docs/kernel-fusion.md` §2.2）も維持されている。結線コードは
+`gemm.rs::CudaGemm::select_tiled_f32_kernel`（`perf(backend-cuda): cp.async 多段
+パイプラインを tiled f32 経路へ形状条件付きで結線する (#1137)` コミット）として
+既に main へ取り込み済み。
+
 ## スコープ外事項（本 PR では対応しない）
 
-- **既定経路への接続・形状別選択**: 本 PR は `run_tiled_f32`（本番既定経路）を切り替えない。tiled pipeline は
-  `CudaGemm::run_tiled_pipeline_f32` で明示的に呼べる選択可能な変種として追加するに留める。形状別の経路選択・既定
-  切替は兄弟イシュー #1035（simple / double-buffer / split-K ヒューリスティック）が実測を踏まえて担う。
+- **pipeline 版 `TILED_BIAS_ACT_F32`（epilogue 融合）**: 現行の融合カーネルは classic
+  タイリングのみに対応する。pipeline 側の epilogue 融合・resident bias_act 経路への
+  横展開は別イシューで扱う（#1137 実装計画 §8）。
+- **`gemm_variant_selection`（#1035）の DoubleBuffer 閾値再補正**: Simple 経路が
+  #1137 以降 pipeline を暗黙に含むようになるため、既存の形状別ヒューリスティックとの
+  重複・閾値の妥当性は再検証が必要（#1137 実装計画 §8）。
+- **N=4096 転送込み経路の fresh オーバーヘッド**: `cuda-fresh-gemm-n2048-overhead-diagnosis.md`
+  のスコープのまま（本ファイルで追跡のみ）。
+- **ブロック実行順スウィズル（#1034）の本番結線判断**: 別イシューのスコープ（#1137
+  実装計画 §8）。
 - **レジスタブロッキング拡大・bank conflict 対策**: 兄弟イシュー #1032（並行実装の可能性あり）のスコープ。本 PR は
   #1032 のマージ状況を実装開始時に確認したが未マージだったため、既存 `kernels.rs::TILED_F32` を書き換えず新規
   モジュール（`kernels_tiled_pipeline.rs`）に自己完結した実装を追加した（コンフリクト回避）。

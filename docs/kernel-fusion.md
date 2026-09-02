@@ -140,7 +140,17 @@
   フォールバックする（CUDA は本イシューで `add`／`relu` を実装済みの
   ため CPU と異なり `Unsupported` を経由しない）。実機での実測（融合 vs
   非融合の 5 回計測中央値）は `docs/perf/cuda-gemm-epilogue-fusion.md`
-  を参照（未実施の場合はその旨が明記される）。Metal はイシュー #605 で
+  を参照（未実施の場合はその旨が明記される）。**イシュー #1137 追記**:
+  非融合合成側の `gemm`（`CudaGemm::run_tiled_f32`）は #1137 で cp.async
+  3 stage パイプラインカーネルへ形状条件付きに分岐しうるようになったが、
+  GB10 実機実測（`tests/cpu_cuda_tiled_pipeline_parity.rs::
+  tiled_pipeline_matches_tiled_f32_classic_bit_exact`）でパイプライン版と
+  classic 版（`TILED_F32`。融合カーネル `TILED_BIAS_ACT_F32` と同一の
+  タイリング・アキュムレーション順序を持つ側）がビット完全一致すること
+  を確認済みのため、本節の bit 完全一致契約（`tests/gemm_bias_act_
+  parity.rs` の `assert_eq!` 検査）は #1137 後も成立する
+  （`docs/perf/cuda-gemm-tiled-pipeline.md`「#1137 本番結線判断」節参照）。
+  Metal はイシュー #605 で
   同様の elementwise 5 演算と `gemm_bias_act` epilogue 融合カーネル
   （`shaders/gemm.metal::gemm_tiled_bias_act`・
   `MetalGemm::run_tiled_bias_act_f32`）を実装した。経路選択の分岐条件

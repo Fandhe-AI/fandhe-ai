@@ -3,7 +3,11 @@
 //!
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CUDA 実装。GEMM は
 //! `gemm::CudaGemm::run_tiled_f32` へ委譲する（既存カーネル・許容誤差・
-//! 境界検査には触れない）。elementwise（`add`／`mul`／`relu`／`exp`／
+//! 境界検査には触れない）。`run_tiled_f32` 自体は内部で cp.async 3 stage
+//! パイプラインカーネルへ形状条件付きに分岐しうる（整列形状のみ。
+//! イシュー #1137・`gemm.rs::CudaGemm::select_tiled_f32_kernel`）ため、
+//! 本ファイルのコードはこの分岐を意識せず既定 `run_tiled_f32` を呼ぶだけで
+//! よい。elementwise（`add`／`mul`／`relu`／`exp`／
 //! `tanh`）は `elementwise::CudaElementwise` へ委譲する（イシュー #599）。
 //! 汎用 reduction（`sum`／`max`）は未実装のまま
 //! [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
@@ -975,8 +979,9 @@ impl BackendOps for CudaBackendOps {
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
     /// #1023「R3」）。`Op::LinearResident` の VJP が `d_input^T = w @ g^T`
     /// を計算するために使う。[`Self::gemm_resident_rhs`] と同じく `w` は
-    /// download せず [`crate::gemm::CudaGemm::launch_tiled_f32_resident`]
-    /// （`CudaView` 部分ビュー起動）へそのまま渡す。
+    /// download せず `CudaGemm::launch_tiled_f32_resident`
+    /// （`CudaView` 部分ビュー起動。バックエンド crate 内部専用 API のため
+    /// intra-doc link ではなくコードスパン表記とする）へそのまま渡す。
     fn gemm_resident_lhs(
         &self,
         w: DeviceBufferView<'_>,
@@ -1084,7 +1089,13 @@ impl BackendOps for CudaBackendOps {
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || {
                 gemm.launch_tiled_f32_resident(
-                    &w_view, b_slice, c_slice, p as u32, r as u32, q as u32,
+                    &w_view,
+                    w.offset(),
+                    b_slice,
+                    c_slice,
+                    p as u32,
+                    r as u32,
+                    q as u32,
                 )
             },
         )?;

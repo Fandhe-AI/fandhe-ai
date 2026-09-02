@@ -1,0 +1,989 @@
+=== cuda_floor_bench build ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.43s
+=== floor_bench run 1 ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/cuda_floor_bench`
+device: name=NVIDIA GB10 compute_capability=(12, 1)
+pytorch reference provenance: PoC-v2-3 fixed values (no CUDA_FLOOR_BENCH_PYTORCH_SOURCE provided; same-hardware re-measurement not confirmed for this run).
+mma_f16 kernel: threadblock swizzle variant wired into the production constructor (CudaMmaGemm::new; issue #782); size-conditional dispatch applies for shapes with total block-tile count >= 2048 (observed swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §2/§6.2.
+  mma_f16 swizzle_applies(2048, 2048, 2048) = false
+  mma_f16 swizzle_applies(4096, 4096, 4096) = true
+  mma_f16 swizzle_applies(512, 512, 512) = false
+  mma_f16 swizzle_applies(1024, 1024, 1024) = false
+wmma_tf32_staged kernel: threadblock swizzle variant wired into the production constructor (CudaGemm::new; issue #856); size-conditional dispatch applies for M=N square shapes with M=N>=4096 and K>=4096 (observed wmma_tf32_staged_swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §7.2/§7.7.6.
+  wmma_tf32_staged swizzle_applies(2048, 2048, 2048) = false
+  wmma_tf32_staged swizzle_applies(4096, 4096, 4096) = true
+  wmma_tf32_staged swizzle_applies(512, 512, 512) = false
+  wmma_tf32_staged swizzle_applies(1024, 1024, 1024) = false
+f32 optimized kernel: WMMA(TF32) staged AVAILABLE, opt AVAILABLE (wmma_tf32 measurements below route to the staged kernel for cp.async-aligned shapes [n%4==0 && k%4==0], which includes all judged sizes; the opt kernel is available but not used for these shapes. Same path as the REQ-8 CudaF32 optimized-floor basis and the #726 parity baseline).
+f16 optimized kernel: WMMA f16 opt AVAILABLE (used for wmma_f16 measurements below).
+size=512 tiled_f32_tflops=6.9586(q1=7.0020,q3=6.9354) wmma_tf32_tflops=8.2161(q1=8.2484,q3=8.1482) wmma_f16_tflops=4.0999(q1=4.1040,q3=4.0949) mma_f16_tflops=16.9456(q1=17.2428,q3=16.8785) mma_tf32_tflops=8.5120(q1=8.5334,q3=8.4862) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=104.26% f16_candidate_over_pytorch=98.58% (pytorch_f32=7.8803 pytorch_f16=17.1898, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=413.31%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=103.60%)
+size=1024 tiled_f32_tflops=11.1782(q1=11.2476,q3=9.8241) wmma_tf32_tflops=12.7268(q1=12.7655,q3=12.7196) wmma_f16_tflops=8.9133(q1=8.9252,q3=8.8639) mma_f16_tflops=38.7688(q1=39.1534,q3=38.5905) mma_tf32_tflops=16.2510(q1=16.2767,q3=16.1435) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=n/a f16_candidate_over_pytorch=n/a (pytorch_f32=NaN pytorch_f16=NaN, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=434.95%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=127.69%)
+size=2048 tiled_f32_tflops=13.0514(q1=13.0623,q3=13.0306) wmma_tf32_tflops=14.3798(q1=14.4027,q3=14.3584) wmma_f16_tflops=7.0433(q1=7.0572,q3=7.0281) mma_f16_tflops=51.4044(q1=51.5080,q3=51.2892) mma_tf32_tflops=18.2667(q1=18.3075,q3=18.2518) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=82.53% f16_candidate_over_pytorch=56.36% (pytorch_f32=17.4241 pytorch_f16=91.2115, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=729.84%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=127.03%)
+size=4096 tiled_f32_tflops=10.2658(q1=10.4128,q3=10.1263) wmma_tf32_tflops=14.1459(q1=14.1574,q3=14.1299) wmma_f16_tflops=4.4103(q1=4.4113,q3=4.3932) mma_f16_tflops=55.6358(q1=55.7120,q3=52.5032) mma_tf32_tflops=11.8633(q1=12.1483,q3=11.1029) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=79.57% f16_candidate_over_pytorch=56.99% (pytorch_f32=17.7774 pytorch_f16=97.6308, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=1261.50%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=83.86%)
+---
+judged shapes (REQ-8): M=N=K in [2048, 4096] (sizes [512, 1024] are reference-only, excluded from candidate floor)
+CUDA f32 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 79.57% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+CUDA f16 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 56.36% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+NOTE: candidate floor values are NOT final. Final floor confirmation is a human decision (TASK-8.3 担当: 共同（計測実行は Claude Code、下限値の最終確定は人間）). Transcribe this output into docs/perf/cuda-floor-remeasurement.md and hand off to #158 (TASK-8.3d).
+=== floor_bench run 2 ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/cuda_floor_bench`
+device: name=NVIDIA GB10 compute_capability=(12, 1)
+pytorch reference provenance: PoC-v2-3 fixed values (no CUDA_FLOOR_BENCH_PYTORCH_SOURCE provided; same-hardware re-measurement not confirmed for this run).
+mma_f16 kernel: threadblock swizzle variant wired into the production constructor (CudaMmaGemm::new; issue #782); size-conditional dispatch applies for shapes with total block-tile count >= 2048 (observed swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §2/§6.2.
+  mma_f16 swizzle_applies(2048, 2048, 2048) = false
+  mma_f16 swizzle_applies(4096, 4096, 4096) = true
+  mma_f16 swizzle_applies(512, 512, 512) = false
+  mma_f16 swizzle_applies(1024, 1024, 1024) = false
+wmma_tf32_staged kernel: threadblock swizzle variant wired into the production constructor (CudaGemm::new; issue #856); size-conditional dispatch applies for M=N square shapes with M=N>=4096 and K>=4096 (observed wmma_tf32_staged_swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §7.2/§7.7.6.
+  wmma_tf32_staged swizzle_applies(2048, 2048, 2048) = false
+  wmma_tf32_staged swizzle_applies(4096, 4096, 4096) = true
+  wmma_tf32_staged swizzle_applies(512, 512, 512) = false
+  wmma_tf32_staged swizzle_applies(1024, 1024, 1024) = false
+f32 optimized kernel: WMMA(TF32) staged AVAILABLE, opt AVAILABLE (wmma_tf32 measurements below route to the staged kernel for cp.async-aligned shapes [n%4==0 && k%4==0], which includes all judged sizes; the opt kernel is available but not used for these shapes. Same path as the REQ-8 CudaF32 optimized-floor basis and the #726 parity baseline).
+f16 optimized kernel: WMMA f16 opt AVAILABLE (used for wmma_f16 measurements below).
+size=512 tiled_f32_tflops=6.9818(q1=7.0345,q3=6.9557) wmma_tf32_tflops=8.2322(q1=8.2769,q3=8.1720) wmma_f16_tflops=4.1060(q1=4.1212,q3=4.1050) mma_f16_tflops=17.9052(q1=18.1179,q3=17.7537) mma_tf32_tflops=8.5598(q1=8.5905,q3=8.5247) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=104.47% f16_candidate_over_pytorch=104.16% (pytorch_f32=7.8803 pytorch_f16=17.1898, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=436.07%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=103.98%)
+size=1024 tiled_f32_tflops=11.2306(q1=11.2485,q3=11.1727) wmma_tf32_tflops=12.5496(q1=12.6393,q3=10.7322) wmma_f16_tflops=8.8347(q1=8.8856,q3=8.8144) mma_f16_tflops=38.5683(q1=38.7569,q3=38.3698) mma_tf32_tflops=16.2667(q1=16.3579,q3=16.2079) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=n/a f16_candidate_over_pytorch=n/a (pytorch_f32=NaN pytorch_f16=NaN, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=436.55%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=129.62%)
+size=2048 tiled_f32_tflops=12.9984(q1=13.0592,q3=12.8647) wmma_tf32_tflops=14.3592(q1=14.3738,q3=14.3417) wmma_f16_tflops=6.7897(q1=6.8017,q3=6.7492) mma_f16_tflops=51.7538(q1=51.9417,q3=51.4709) mma_tf32_tflops=18.6896(q1=18.7670,q3=18.6157) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=82.41% f16_candidate_over_pytorch=56.74% (pytorch_f32=17.4241 pytorch_f16=91.2115, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=762.23%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=130.16%)
+size=4096 tiled_f32_tflops=10.2254(q1=10.4026,q3=10.1403) wmma_tf32_tflops=14.0196(q1=14.0336,q3=14.0080) wmma_f16_tflops=4.4392(q1=4.4412,q3=4.4389) mma_f16_tflops=55.2867(q1=55.4896,q3=48.2345) mma_tf32_tflops=12.0122(q1=12.1817,q3=11.9211) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=78.86% f16_candidate_over_pytorch=56.63% (pytorch_f32=17.7774 pytorch_f16=97.6308, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=1245.43%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=85.68%)
+---
+judged shapes (REQ-8): M=N=K in [2048, 4096] (sizes [512, 1024] are reference-only, excluded from candidate floor)
+CUDA f32 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 78.86% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+CUDA f16 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 56.63% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+NOTE: candidate floor values are NOT final. Final floor confirmation is a human decision (TASK-8.3 担当: 共同（計測実行は Claude Code、下限値の最終確定は人間）). Transcribe this output into docs/perf/cuda-floor-remeasurement.md and hand off to #158 (TASK-8.3d).
+=== floor_bench run 3 ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/cuda_floor_bench`
+device: name=NVIDIA GB10 compute_capability=(12, 1)
+pytorch reference provenance: PoC-v2-3 fixed values (no CUDA_FLOOR_BENCH_PYTORCH_SOURCE provided; same-hardware re-measurement not confirmed for this run).
+mma_f16 kernel: threadblock swizzle variant wired into the production constructor (CudaMmaGemm::new; issue #782); size-conditional dispatch applies for shapes with total block-tile count >= 2048 (observed swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §2/§6.2.
+  mma_f16 swizzle_applies(2048, 2048, 2048) = false
+  mma_f16 swizzle_applies(4096, 4096, 4096) = true
+  mma_f16 swizzle_applies(512, 512, 512) = false
+  mma_f16 swizzle_applies(1024, 1024, 1024) = false
+wmma_tf32_staged kernel: threadblock swizzle variant wired into the production constructor (CudaGemm::new; issue #856); size-conditional dispatch applies for M=N square shapes with M=N>=4096 and K>=4096 (observed wmma_tf32_staged_swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §7.2/§7.7.6.
+  wmma_tf32_staged swizzle_applies(2048, 2048, 2048) = false
+  wmma_tf32_staged swizzle_applies(4096, 4096, 4096) = true
+  wmma_tf32_staged swizzle_applies(512, 512, 512) = false
+  wmma_tf32_staged swizzle_applies(1024, 1024, 1024) = false
+f32 optimized kernel: WMMA(TF32) staged AVAILABLE, opt AVAILABLE (wmma_tf32 measurements below route to the staged kernel for cp.async-aligned shapes [n%4==0 && k%4==0], which includes all judged sizes; the opt kernel is available but not used for these shapes. Same path as the REQ-8 CudaF32 optimized-floor basis and the #726 parity baseline).
+f16 optimized kernel: WMMA f16 opt AVAILABLE (used for wmma_f16 measurements below).
+size=512 tiled_f32_tflops=6.9528(q1=6.9876,q3=6.9242) wmma_tf32_tflops=8.2282(q1=8.2484,q3=8.1920) wmma_f16_tflops=4.1009(q1=4.1030,q3=4.0980) mma_f16_tflops=17.2428(q1=17.2605,q3=17.1371) mma_tf32_tflops=8.5861(q1=8.6258,q3=8.5337) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=104.41% f16_candidate_over_pytorch=100.31% (pytorch_f32=7.8803 pytorch_f16=17.1898, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=420.46%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=104.35%)
+size=1024 tiled_f32_tflops=11.2428(q1=11.2987,q3=11.2016) wmma_tf32_tflops=12.6895(q1=12.7353,q3=12.6572) wmma_f16_tflops=8.7443(q1=8.8220,q3=7.5479) mma_f16_tflops=38.8354(q1=38.9037,q3=38.7129) mma_tf32_tflops=16.2965(q1=16.3519,q3=16.2293) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=n/a f16_candidate_over_pytorch=n/a (pytorch_f32=NaN pytorch_f16=NaN, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=444.12%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=128.42%)
+size=2048 tiled_f32_tflops=13.0002(q1=13.0349,q3=12.9746) wmma_tf32_tflops=14.3884(q1=14.4292,q3=14.3555) wmma_f16_tflops=7.0154(q1=7.0279,q3=6.9996) mma_f16_tflops=51.2205(q1=51.3407,q3=51.1351) mma_tf32_tflops=18.2171(q1=18.2490,q3=18.1356) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=82.58% f16_candidate_over_pytorch=56.16% (pytorch_f32=17.4241 pytorch_f16=91.2115, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=730.12%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=126.61%)
+size=4096 tiled_f32_tflops=10.1430(q1=10.2751,q3=10.0280) wmma_tf32_tflops=14.0539(q1=14.0679,q3=14.0418) wmma_f16_tflops=4.3932(q1=4.3952,q3=4.3926) mma_f16_tflops=55.3316(q1=55.4240,q3=52.0887) mma_tf32_tflops=11.4675(q1=11.7798,q3=11.2459) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=79.05% f16_candidate_over_pytorch=56.67% (pytorch_f32=17.7774 pytorch_f16=97.6308, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=1259.49%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=81.60%)
+---
+judged shapes (REQ-8): M=N=K in [2048, 4096] (sizes [512, 1024] are reference-only, excluded from candidate floor)
+CUDA f32 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 79.05% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+CUDA f16 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 56.16% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+NOTE: candidate floor values are NOT final. Final floor confirmation is a human decision (TASK-8.3 担当: 共同（計測実行は Claude Code、下限値の最終確定は人間）). Transcribe this output into docs/perf/cuda-floor-remeasurement.md and hand off to #158 (TASK-8.3d).
+=== floor_bench run 4 ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/cuda_floor_bench`
+device: name=NVIDIA GB10 compute_capability=(12, 1)
+pytorch reference provenance: PoC-v2-3 fixed values (no CUDA_FLOOR_BENCH_PYTORCH_SOURCE provided; same-hardware re-measurement not confirmed for this run).
+mma_f16 kernel: threadblock swizzle variant wired into the production constructor (CudaMmaGemm::new; issue #782); size-conditional dispatch applies for shapes with total block-tile count >= 2048 (observed swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §2/§6.2.
+  mma_f16 swizzle_applies(2048, 2048, 2048) = false
+  mma_f16 swizzle_applies(4096, 4096, 4096) = true
+  mma_f16 swizzle_applies(512, 512, 512) = false
+  mma_f16 swizzle_applies(1024, 1024, 1024) = false
+wmma_tf32_staged kernel: threadblock swizzle variant wired into the production constructor (CudaGemm::new; issue #856); size-conditional dispatch applies for M=N square shapes with M=N>=4096 and K>=4096 (observed wmma_tf32_staged_swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §7.2/§7.7.6.
+  wmma_tf32_staged swizzle_applies(2048, 2048, 2048) = false
+  wmma_tf32_staged swizzle_applies(4096, 4096, 4096) = true
+  wmma_tf32_staged swizzle_applies(512, 512, 512) = false
+  wmma_tf32_staged swizzle_applies(1024, 1024, 1024) = false
+f32 optimized kernel: WMMA(TF32) staged AVAILABLE, opt AVAILABLE (wmma_tf32 measurements below route to the staged kernel for cp.async-aligned shapes [n%4==0 && k%4==0], which includes all judged sizes; the opt kernel is available but not used for these shapes. Same path as the REQ-8 CudaF32 optimized-floor basis and the #726 parity baseline).
+f16 optimized kernel: WMMA f16 opt AVAILABLE (used for wmma_f16 measurements below).
+size=512 tiled_f32_tflops=6.9702(q1=6.9963,q3=6.9385) wmma_tf32_tflops=8.2403(q1=8.2728,q3=8.1760) wmma_f16_tflops=4.0910(q1=4.0960,q3=4.0880) mma_f16_tflops=16.9467(q1=16.9982,q3=16.8955) mma_tf32_tflops=8.4948(q1=8.5467,q3=8.4691) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=104.57% f16_candidate_over_pytorch=98.59% (pytorch_f32=7.8803 pytorch_f16=17.1898, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=414.24%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=103.09%)
+size=1024 tiled_f32_tflops=11.2278(q1=11.2523,q3=11.1978) wmma_tf32_tflops=12.6251(q1=12.6823,q3=10.6285) wmma_f16_tflops=8.8289(q1=8.8833,q3=8.8115) mma_f16_tflops=38.3253(q1=38.3918,q3=38.2605) mma_tf32_tflops=16.1261(q1=16.1493,q3=16.0758) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=n/a f16_candidate_over_pytorch=n/a (pytorch_f32=NaN pytorch_f16=NaN, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=434.09%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=127.73%)
+size=2048 tiled_f32_tflops=12.9696(q1=12.9876,q3=11.9469) wmma_tf32_tflops=14.2038(q1=14.2893,q3=13.2398) wmma_f16_tflops=6.7722(q1=6.7846,q3=6.7477) mma_f16_tflops=51.7488(q1=51.8389,q3=51.6966) mma_tf32_tflops=18.7127(q1=18.7641,q3=18.6857) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=81.52% f16_candidate_over_pytorch=56.73% (pytorch_f32=17.4241 pytorch_f16=91.2115, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=764.14%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=131.74%)
+size=4096 tiled_f32_tflops=10.0264(q1=10.2856,q3=9.9088) wmma_tf32_tflops=14.0341(q1=14.0455,q3=14.0262) wmma_f16_tflops=4.3974(q1=4.3988,q3=4.3957) mma_f16_tflops=55.3412(q1=55.4366,q3=55.1179) mma_tf32_tflops=11.9461(q1=12.1908,q3=11.4031) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=78.94% f16_candidate_over_pytorch=56.68% (pytorch_f32=17.7774 pytorch_f16=97.6308, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=1258.51%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=85.12%)
+---
+judged shapes (REQ-8): M=N=K in [2048, 4096] (sizes [512, 1024] are reference-only, excluded from candidate floor)
+CUDA f32 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 78.94% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+CUDA f16 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 56.68% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+NOTE: candidate floor values are NOT final. Final floor confirmation is a human decision (TASK-8.3 担当: 共同（計測実行は Claude Code、下限値の最終確定は人間）). Transcribe this output into docs/perf/cuda-floor-remeasurement.md and hand off to #158 (TASK-8.3d).
+=== floor_bench run 5 ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/cuda_floor_bench`
+device: name=NVIDIA GB10 compute_capability=(12, 1)
+pytorch reference provenance: PoC-v2-3 fixed values (no CUDA_FLOOR_BENCH_PYTORCH_SOURCE provided; same-hardware re-measurement not confirmed for this run).
+mma_f16 kernel: threadblock swizzle variant wired into the production constructor (CudaMmaGemm::new; issue #782); size-conditional dispatch applies for shapes with total block-tile count >= 2048 (observed swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §2/§6.2.
+  mma_f16 swizzle_applies(2048, 2048, 2048) = false
+  mma_f16 swizzle_applies(4096, 4096, 4096) = true
+  mma_f16 swizzle_applies(512, 512, 512) = false
+  mma_f16 swizzle_applies(1024, 1024, 1024) = false
+wmma_tf32_staged kernel: threadblock swizzle variant wired into the production constructor (CudaGemm::new; issue #856); size-conditional dispatch applies for M=N square shapes with M=N>=4096 and K>=4096 (observed wmma_tf32_staged_swizzle_group_width() = Some(8)) — see docs/perf/cuda-gemm-swizzle-ab.md §7.2/§7.7.6.
+  wmma_tf32_staged swizzle_applies(2048, 2048, 2048) = false
+  wmma_tf32_staged swizzle_applies(4096, 4096, 4096) = true
+  wmma_tf32_staged swizzle_applies(512, 512, 512) = false
+  wmma_tf32_staged swizzle_applies(1024, 1024, 1024) = false
+f32 optimized kernel: WMMA(TF32) staged AVAILABLE, opt AVAILABLE (wmma_tf32 measurements below route to the staged kernel for cp.async-aligned shapes [n%4==0 && k%4==0], which includes all judged sizes; the opt kernel is available but not used for these shapes. Same path as the REQ-8 CudaF32 optimized-floor basis and the #726 parity baseline).
+f16 optimized kernel: WMMA f16 opt AVAILABLE (used for wmma_f16 measurements below).
+size=512 tiled_f32_tflops=6.9644(q1=6.9934,q3=6.9471) wmma_tf32_tflops=8.1562(q1=8.2241,q3=8.1285) wmma_f16_tflops=4.0970(q1=4.0999,q3=4.0929) mma_f16_tflops=16.9982(q1=17.0674,q3=16.9125) mma_tf32_tflops=8.5380(q1=8.5729,q3=8.5164) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=103.50% f16_candidate_over_pytorch=98.89% (pytorch_f32=7.8803 pytorch_f16=17.1898, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=414.89%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=104.68%)
+size=1024 tiled_f32_tflops=11.2128(q1=11.2494,q3=11.1810) wmma_tf32_tflops=12.6883(q1=12.7328,q3=12.6465) wmma_f16_tflops=8.8272(q1=8.8295,q3=8.7689) mma_f16_tflops=38.4351(q1=38.6349,q3=37.5855) mma_tf32_tflops=16.1882(q1=16.2373,q3=16.1397) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=n/a f16_candidate_over_pytorch=n/a (pytorch_f32=NaN pytorch_f16=NaN, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=435.42%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=127.58%)
+size=2048 tiled_f32_tflops=12.9428(q1=12.9608,q3=12.9043) wmma_tf32_tflops=14.2797(q1=14.3140,q3=14.2515) wmma_f16_tflops=6.9693(q1=7.0039,q3=6.9183) mma_f16_tflops=51.0405(q1=51.2964,q3=50.8423) mma_tf32_tflops=18.1356(q1=18.1718,q3=18.0925) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=81.95% f16_candidate_over_pytorch=55.96% (pytorch_f32=17.4241 pytorch_f16=91.2115, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=732.36%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=127.00%)
+size=4096 tiled_f32_tflops=10.2188(q1=10.3065,q3=10.0779) wmma_tf32_tflops=14.0267(q1=14.0339,q3=14.0223) wmma_f16_tflops=4.4035(q1=4.4052,q3=4.4020) mma_f16_tflops=55.1076(q1=55.2902,q3=54.9574) mma_tf32_tflops=11.5258(q1=11.6915,q3=11.0127) f32_best_path=wmma_tf32 f16_candidate_path=mma_f16 f32_best_over_pytorch=78.90% f16_candidate_over_pytorch=56.44% (pytorch_f32=17.7774 pytorch_f16=97.6308, f32_ref_measured=false f16_ref_measured=false, mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=1251.44%, mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the staged kernel for this shape)=82.17%)
+---
+judged shapes (REQ-8): M=N=K in [2048, 4096] (sizes [512, 1024] are reference-only, excluded from candidate floor)
+CUDA f32 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 78.90% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+CUDA f16 candidate optimized floor: n/a (same-hardware re-measured PyTorch baseline not confirmed for all judged sizes; reference-only ratio 55.96% uses PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)
+NOTE: candidate floor values are NOT final. Final floor confirmation is a human decision (TASK-8.3 担当: 共同（計測実行は Claude Code、下限値の最終確定は人間）). Transcribe this output into docs/perf/cuda-floor-remeasurement.md and hand off to #158 (TASK-8.3d).
+=== gemm_tiled_pipeline_bench (classic vs dispatch, extended shapes) ===
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.29s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/gemm_tiled_pipeline_bench`
+size=256 tiled_f32_tflops=0.6700 tiled_f32_classic_tflops=0.5460 dispatch_over_classic=1.2271 pipeline3_tflops=0.6796 pipeline3_over_tiled=1.0143 | pipeline3_gpu_only_tflops=2.0784 pipeline4_gpu_only_tflops=2.0359 pipeline4_over_pipeline3_gpu_only=0.9796
+size=512 tiled_f32_tflops=2.3011 tiled_f32_classic_tflops=1.9139 dispatch_over_classic=1.2023 pipeline3_tflops=2.3058 pipeline3_over_tiled=1.0021 | pipeline3_gpu_only_tflops=6.9127 pipeline4_gpu_only_tflops=6.8927 pipeline4_over_pipeline3_gpu_only=0.9971
+size=1024 tiled_f32_tflops=5.0876 tiled_f32_classic_tflops=3.8798 dispatch_over_classic=1.3113 pipeline3_tflops=5.1054 pipeline3_over_tiled=1.0035 | pipeline3_gpu_only_tflops=11.1273 pipeline4_gpu_only_tflops=10.6725 pipeline4_over_pipeline3_gpu_only=0.9591
+size=2048 tiled_f32_tflops=7.8308 tiled_f32_classic_tflops=5.4332 dispatch_over_classic=1.4413 pipeline3_tflops=7.8354 pipeline3_over_tiled=1.0006 | pipeline3_gpu_only_tflops=12.8742 pipeline4_gpu_only_tflops=12.1341 pipeline4_over_pipeline3_gpu_only=0.9425
+size=4096 tiled_f32_tflops=3.1301 tiled_f32_classic_tflops=2.7120 dispatch_over_classic=1.1542 pipeline3_tflops=2.8630 pipeline3_over_tiled=0.9147 | pipeline3_gpu_only_tflops=10.2361 pipeline4_gpu_only_tflops=8.6699 pipeline4_over_pipeline3_gpu_only=0.8470
+ALL_DONE

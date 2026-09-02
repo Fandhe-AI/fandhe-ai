@@ -1,0 +1,86 @@
+イシュー #1137 実機ゲート（GB10）環境情報
+
+日時: 2026-09-03（本セッション実行）
+commit: 062ca1e8d58ede1c50de22c5e7cbb41b7b5ee06a（.rev-stamp 実測一致確認済み）
+GPU: NVIDIA GB10（compute_capability=(12, 1) / sm_121）
+driver: 580.173.02
+nvcc: Cuda compilation tools, release 13.0, V13.0.88 (Build cuda_13.0.r13.0/compiler.36424714_0)
+rustc: 1.97.0 (2d8144b78 2026-07-07)
+GPU utilization（各ゲート実行前）: 0 %（常駐サービスなし・計測競合なし確認済み）
+
+実行コマンド（rsync 転送先 ~/work/rust-ai-library-run、CARGO_TARGET_DIR=~/work/target-fandhe-ai）:
+
+ゲート A（bit 一致・最優先）:
+  cargo test -p fandhe-ai-backend-cuda --release --locked \
+    --features internal-diagnostics --test cpu_cuda_tiled_pipeline_parity \
+    -- --ignored --nocapture --test-threads=1
+  結果: gateA_bitexact.log 参照。11 passed; 0 failed
+  （tiled_pipeline_matches_tiled_f32_classic_bit_exact PASS。
+  run_tiled_f32_dispatches_to_pipeline_for_aligned_shape PASS。
+  run_tiled_f32_falls_back_to_classic_for_unaligned_shape PASS）
+
+ゲート B（parity 0 fail・境界検査。9 バイナリ）:
+  gemm_tiled / gemm_bias_act_parity / backend_ops_real_device / gemm_auto /
+  gemm_resident_real_device / cpu_cuda_parity / gemm_tf32_optin /
+  transpose_parity / tensor_core_real_device / gemm_f32_variants
+  （各 --release --locked -- --ignored --nocapture --test-threads=1。
+  gemm_tf32_optin・gemm_f32_variants は --features internal-diagnostics）
+  結果: gateB_parity.log 参照。
+  - gemm_tiled / gemm_bias_act_parity / backend_ops_real_device /
+    gemm_auto / gemm_resident_real_device / cpu_cuda_parity /
+    transpose_parity / gemm_f32_variants: 全 PASS（0 failed）
+  - gemm_tf32_optin: 1 件 FAIL（gemm_tf32_optin_on_matches_cpu_across_shapes。
+    TF32 WMMA 経路の CPU-CUDA 複合判定。run_tiled_f32／tiled_pipeline を
+    一切経由しない別カーネル系統〈run_wmma_tf32〉のため #1137 と無関係。
+    既知の TF32 数値許容誤差事情〈docs/perf/cuda-tensor-core-tolerance-*.md〉
+    に起因する既存事象と判断）
+  - tensor_core_real_device: 2 件 FAIL（tensor_core_parity_record は上記と
+    同じ TF32 WMMA 経路の既存事象。tensor_core_tflops_record はエラー
+    メッセージ自体が「GB10 実機実測〈2026-09-03〉で既知 red。イシュー
+    #1131 の受け入れ条件へ引き渡す」と明記する既知の WMMA(f16) 性能事象
+    〈docs/perf/cuda-wmma-f16-perf-triage.md・イシュー #1123/#1130/#1131〉
+    であり、いずれも tiled_f32 classic/pipeline 分岐とは無関係）
+
+ゲート C（性能・同一プロトコル）:
+  cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release --locked
+  （5 回実行。§7.4 と同一プロトコル。gateC_floor_bench_and_pipeline_bench.log 参照）
+  cargo run -p fandhe-ai-backend-cuda --example gemm_tiled_pipeline_bench \
+    --release --locked --features internal-diagnostics
+  （classic vs dispatch・GPU-only・拡張形状 N=256/512/1024/2048/4096）
+
+  cuda_floor_bench tiled_f32_tflops 5 run 中央値（#1137 結線後 = dispatch
+  値。整列形状〈全て 4 の倍数〉のためパイプラインへ分岐）:
+    N=1024: 11.1782, 11.2306, 11.2278, 11.2128, 11.2428 → 中央値 11.2278
+    N=2048: 13.0514, 12.9984, 13.0002, 12.9696, 12.9428 → 中央値 12.9984
+    N=4096: 10.2658, 10.2254, 10.1430, 10.0264, 10.2188 → 中央値 10.2188
+
+  §7.4 baseline（結線前 classic 固定。commit 1a32082・2026-09-03。
+  `docs/perf/cuda-gemm-simt-register-blocking.md` §7.4）:
+    N=1024: 6.7470 TFLOPS
+    N=2048: 7.4819 TFLOPS
+    N=4096: 6.7485 TFLOPS
+
+  before/after 比率:
+    N=1024: 11.2278 / 6.7470 = 1.664（+66.4%）
+    N=2048: 12.9984 / 7.4819 = 1.737（+73.7%）
+    N=4096: 10.2188 / 6.7485 = 1.514（+51.4%）
+
+  gemm_tiled_pipeline_bench（classic vs dispatch。1 回実行・GPU-only 列は
+  bench-harness 20 iter 中央値）:
+    size=256  tiled_f32_tflops=0.6700 classic=0.5460 dispatch_over_classic=1.2271
+    size=512  tiled_f32_tflops=2.3011 classic=1.9139 dispatch_over_classic=1.2023
+    size=1024 tiled_f32_tflops=5.0876 classic=3.8798 dispatch_over_classic=1.3113
+    size=2048 tiled_f32_tflops=7.8308 classic=5.4332 dispatch_over_classic=1.4413
+    size=4096 tiled_f32_tflops=3.1301 classic=2.7120 dispatch_over_classic=1.1542
+  （size=4096 の tiled_f32_tflops 絶対値が cuda_floor_bench と異なるのは
+  同一プロセス内で複数バイナリ・複数カーネルを連続起動する
+  gemm_tiled_pipeline_bench 側の計測条件〈他カーネルとのコンテキスト共有・
+  ウォームアップ差〉によるもので、両ベンチとも一貫して
+  dispatch ≥ classic であることが本判断の根拠。全形状で
+  dispatch_over_classic ≥ 1.15 ＞ 0.95 判定基準を満たす）
+
+判定: REQ-8 判定形状 N=2048/4096 の after/before 比率が 1.00 を大きく
+上回り（1.51〜1.74 倍）、参考形状 N=256/512/1024・非正方形状での後退も
+確認されなかったため、事前宣言した採否基準（判定形状 ≥ 1.00・参考形状
+≥ 0.95）を満たす。よって最小形状閾値の追加は不要と判断し、そのまま
+採用（ADOPT）を確定する。

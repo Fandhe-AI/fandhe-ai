@@ -179,6 +179,16 @@ thread_local! {
     /// `run_tiled_f32`）を検証するために使う。スレッドローカルにする理由も
     /// 同上（並列テスト間の偽陽性混入を避ける）。
     pub(crate) static TF32_OPTIN_GEMM_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// `run_tiled_f32`／`launch_tiled_f32`／`launch_tiled_f32_resident` の
+    /// 3 入口が [`tiled_f32_kernel_kind`] の判定で
+    /// [`TiledF32Kernel::Pipeline`] 側（cp.async 3 stage パイプライン。
+    /// #1033・#1137 で本番結線）へ実際にルーティングした回数。
+    /// `TF32_OPTIN_GEMM_LAUNCH_COUNT` と同型の可観測点で、実機なしの単体
+    /// テストが形状条件付き分岐（整列形状 → pipeline／非整列形状 →
+    /// classic）を検証するために使う。スレッドローカルにする理由も同上
+    /// （並列テスト間の偽陽性混入を避ける）。
+    pub(crate) static TILED_PIPELINE_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
@@ -580,6 +590,31 @@ pub(crate) fn tiled_pipeline_alignment_ok(n: u32, k: u32) -> bool {
     n.is_multiple_of(4) && k.is_multiple_of(4)
 }
 
+/// tiled pipeline カーネルの cp.async 16 バイト転送粒度が要求する、A
+/// バッファ**先頭ポインタ自体**の整列制約を検証する（[`tiled_pipeline_alignment_ok`]
+/// が保証するのは行内・行間ストライドの整列のみで、ビュー自体の開始位置は
+/// 別問題。codex-review P0／Cursor Bugbot High 指摘・PR #1164）。
+///
+/// `CudaGemm::launch_tiled_f32_resident` が受け取る `a_dev: &CudaView<'_,
+/// f32>` は `fandhe_ai_autodiff::optim::device_store::DeviceParamStore`
+/// が保持する 1 本の連結バッファ（cudaMalloc 由来。CUDA ドライバは
+/// `cudaMalloc`/`cuMemAlloc` の返すポインタを少なくとも 256 バイト境界に
+/// 整列することを保証する）内の任意要素オフセット `a_offset`（要素単位）
+/// から切り出した部分ビューであり、そのオフセットが 4 要素（f32 4 個 =
+/// 16 バイト）の倍数でない限り、切り出したビューの先頭ポインタ自体が
+/// cp.async の 16 バイト境界要求を満たさない（基底バッファが 256 バイト
+/// 境界に整列している前提の下で `base + a_offset * 4` が 16 バイト整列
+/// となるのは `a_offset % 4 == 0` のときのみ）。`run_tiled_f32`／
+/// `launch_tiled_f32` は毎回新規 upload/確保した全体バッファ（`a_offset`
+/// は常に 0）のみを渡すため本関数は常に真を返し実質無効化されるが、
+/// [`CudaGemm::launch_tiled_f32_resident`] 経由の呼び出しでは実際に非 0
+/// オフセットが起こりうるため、[`tiled_f32_kernel_kind`] の判定に
+/// `n`/`k` の行整列チェックと独立に組み込む（非整列オフセットでは常に
+/// classic へ fail-closed にフォールバックする契約）。
+pub(crate) fn tiled_pipeline_offset_aligned(a_offset: usize) -> bool {
+    a_offset.is_multiple_of(4)
+}
+
 /// tiled pipeline カーネル固有の `k` 追加上限検証（イシュー #1033）。
 /// [`validate_tiled_k_bound`] と同一の理由（各 K タイル反復で `t * TP_BK +
 /// col0`〈`col0` は最大 `TP_BK - 4`〉相当を C の `int` 算術で計算するため、
@@ -597,6 +632,60 @@ pub(crate) fn validate_tiled_pipeline_k_bound(k: u32) -> Result<(), CudaError> {
         });
     }
     Ok(())
+}
+
+/// tiled f32 経路（[`CudaGemm::run_tiled_f32`]／[`CudaGemm::launch_tiled_f32`]／
+/// [`CudaGemm::launch_tiled_f32_resident`] の 3 入口）が実際にどちらの
+/// カーネルへ分岐したかを表す（観測用の可観測 API。
+/// `wmma_tf32_staged_swizzle_group_width` と同型。イシュー #1137）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TiledF32Kernel {
+    /// `kernels::TILED_F32`（32×32 共有メモリタイル・同期ロード。
+    /// #1032 レジスタブロッキング版）。
+    Classic,
+    /// `kernels_tiled_pipeline::gemm_tiled_pipeline_f32`（cp.async 3 stage
+    /// パイプライン。#1033・GB10 実測に基づき #1137 で本番結線）。
+    Pipeline,
+}
+
+/// 形状・パイプラインカーネル可用性から tiled f32 経路 3 入口が使う
+/// カーネルを決定する純粋関数（GPU 不要。`gemm.rs` 内 `#[cfg(test)]` で
+/// 単体検査する。イシュー #1137）。
+///
+/// パイプラインは cp.async 16 バイト整列制約（[`tiled_pipeline_alignment_ok`]
+/// による行内・行間ストライドの整列、および [`tiled_pipeline_offset_aligned`]
+/// による A バッファ先頭ポインタ自体の整列。codex-review P0／Cursor
+/// Bugbot High 指摘・PR #1164 で `a_offset` 引数を追加）を満たし、かつ
+/// `new` 時のコンパイルに成功している（`pipeline_available` が真）場合に
+/// のみ選び、それ以外は常に classic へ fail-closed にフォールバックする
+/// （非対応環境・非整列形状・非整列オフセットのいずれでも本番既定経路が
+/// 壊れないことを保証する契約。`run_tiled_pipeline_f32`
+/// の単独選択可能変種としての fail-closed 拒否契約とは異なり、こちらは
+/// 常に成功するフォールバックを持つ）。
+///
+/// `a_offset`（要素単位）は [`CudaGemm::launch_tiled_f32_resident`]
+/// 経由でのみ非 0 になりうる（`run_tiled_f32`／`launch_tiled_f32` は
+/// 常に全体バッファ＝オフセット 0 を渡す）。
+///
+/// `k` の追加境界検証は呼び出し元（`run_tiled_f32` 等）が
+/// [`validate_tiled_k_bound`]（`TILE`=32 基準）を先に通しており、これは
+/// パイプライン側の [`validate_tiled_pipeline_k_bound`]（`TP_BK`=16 基準）
+/// より厳しい（同関数のドキュメンテーションコメント参照）ため、本関数は
+/// `k` の境界を再検証しない。
+pub(crate) fn tiled_f32_kernel_kind(
+    pipeline_available: bool,
+    a_offset: usize,
+    n: u32,
+    k: u32,
+) -> TiledF32Kernel {
+    if pipeline_available
+        && tiled_pipeline_offset_aligned(a_offset)
+        && tiled_pipeline_alignment_ok(n, k)
+    {
+        TiledF32Kernel::Pipeline
+    } else {
+        TiledF32Kernel::Classic
+    }
 }
 
 /// tiled pipeline カーネル（イシュー #1033・既定 stage 数固定）の
@@ -1401,6 +1490,19 @@ impl CudaGemm {
             .load_function("gemm_tiled_f32")?;
 
         gemm.tiled_f32 = tiled_f32;
+        // イシュー #1137: `run_tiled_f32` 系 3 入口は #1137 以降 cp.async
+        // パイプライン版へ形状条件付きで分岐しうるため（`select_tiled_f32_kernel`）、
+        // swizzle 変種を差し替えたままだと、整列形状の呼び出しが swizzle
+        // 適用前の classic パイプライン相当のパイプラインカーネルへ流れて
+        // しまい、A/B ベンチ・bit 一致テストが「swizzle が効いていない」
+        // ことに気づかず base 扱いしてしまう A/A 誤認が起きる
+        // （`new_with_tf32_staged_pads` と同じ fail-closed 判断）。
+        // パイプラインスロットを強制的に無効化し、swizzle 変種は必ず
+        // classic 側（差し替え済み `tiled_f32`）で起動されるようにする。
+        gemm.tiled_pipeline = None;
+        gemm.tiled_pipeline_error = Some(
+            "disabled by tiled_f32 swizzle variant (issue #1137 A/A confound guard)".to_string(),
+        );
         Ok(gemm)
     }
 
@@ -1645,16 +1747,98 @@ impl CudaGemm {
         self.run_f16_kernel(&self.naive_f16, a, b, m, n, k, NAIVE_BLOCK_DIM)
     }
 
+    /// tiled f32 経路 3 入口（[`Self::run_tiled_f32`]／[`Self::launch_tiled_f32`]／
+    /// [`Self::launch_tiled_f32_resident`]）が共通で使うカーネル選択
+    /// （イシュー #1137）。[`tiled_f32_kernel_kind`]（純粋関数）の判定を
+    /// `self.tiled_pipeline` の実体（`Option<TiledPipelineFunction>`）と
+    /// 突き合わせ、`&CudaFunction` と対応する `LaunchConfig` の組を返す。
+    ///
+    /// `self.tiled_pipeline` は `Self::new` で `self.stream` と同じ
+    /// `CudaDevice` に対してコンパイルされる（[`compile_tiled_pipeline`]
+    /// 参照）ため、[`Self::launch_tiled_pipeline_f32`]（外部から任意の
+    /// `TiledPipelineFunction` を受け取る公開 API）と異なり、本メソッドは
+    /// context 一致検証を行わない（常に self 由来で自己無矛盾）。
+    ///
+    /// `tiled_f32_kernel_kind` が `Pipeline` を返す場合は
+    /// `pipeline_available` 引数（`self.tiled_pipeline.is_some()`）が
+    /// 真であることが判定条件に含まれるため、通常経路では
+    /// `self.tiled_pipeline` は必ず `Some` になる。ただし本番経路で
+    /// `unwrap`/`expect` によるパニックを避ける規約
+    /// （`.claude/rules/coding-rust.md`「エラーは型付きエラーとし、
+    /// 本番経路で `unwrap()` / `expect()` を使わない」）に従い、
+    /// `None` の場合も `if let` で fail-closed に classic 版へ
+    /// フォールバックする（codex-review P1 指摘・PR #1164。理論上
+    /// 到達しない防御的分岐であり、`tiled_f32_kernel_kind` 自体の契約は
+    /// 変えない）。
+    ///
+    /// `a_offset`（要素単位。[`tiled_f32_kernel_kind`] 参照）は
+    /// [`Self::launch_tiled_f32_resident`] のみ非 0 を渡しうる。
+    fn select_tiled_f32_kernel(
+        &self,
+        a_offset: usize,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> (&CudaFunction, LaunchConfig) {
+        let kind = tiled_f32_kernel_kind(self.tiled_pipeline.is_some(), a_offset, n, k);
+        if let (TiledF32Kernel::Pipeline, Some(func)) = (kind, self.tiled_pipeline.as_ref()) {
+            TILED_PIPELINE_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+            (func.as_cuda_function(), tiled_pipeline_launch_config(m, n))
+        } else {
+            (&self.tiled_f32, tiled_f32_launch_config(m, n))
+        }
+    }
+
+    /// `select_tiled_f32_kernel` の判定結果のみを、実際の起動を
+    /// 伴わずに照会する（テスト・ベンチ・診断が事前に分岐先を確認できる
+    /// ようにするための公開 API。`wmma_tf32_opt_available` と同じ理由）。
+    /// `run_tiled_f32`／`launch_tiled_f32`（常にオフセット 0 の全体
+    /// バッファ）の分岐先照会用のため `a_offset` 引数は取らない
+    /// （`internal-diagnostics` feature 限定。`TiledF32Kernel` 冒頭
+    /// ドキュメンテーションコメント「公開範囲」参照。codex-review P1
+    /// 指摘・PR #1164）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn tiled_f32_kernel_for(&self, n: u32, k: u32) -> TiledF32Kernel {
+        tiled_f32_kernel_kind(self.tiled_pipeline.is_some(), 0, n, k)
+    }
+
     /// tiled f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
     ///
     /// ホスト側形状検証は naive 版と同じ `validate_gemm_dims` に加え、
     /// tiled カーネル固有のタイルインデックス算術を保護する
     /// `validate_tiled_k_bound` を経由する（モジュールコメント
     /// 「PoC からの変更点」3 参照）。イシュー #1032 のレジスタブロッキング
-    /// 刷新版カーネル（`kernels::TILED_F32`）を、専用の
-    /// `tiled_f32_launch_config`（ブロック次元 `TILED_F32_BLOCK_DIM`・
-    /// タイル一辺 `kernels::TILED_F32_BM`/`BN`）で起動する。
+    /// 刷新版カーネル（`kernels::TILED_F32`）を既定とし、cp.async 16
+    /// バイト整列形状（`n % 4 == 0 && k % 4 == 0`）かつ `new` 時のコン
+    /// パイルに成功している場合は cp.async 3 stage パイプライン版
+    /// （`kernels_tiled_pipeline::gemm_tiled_pipeline_f32`）へ形状条件付き
+    /// で分岐する（`select_tiled_f32_kernel`。GB10 実測に基づく
+    /// 本番結線判断はイシュー #1137・`docs/perf/cuda-gemm-tiled-pipeline.md`
+    /// 参照）。非整列形状・コンパイル失敗環境では常に classic 版へ
+    /// fail-closed にフォールバックするため、呼び出し元から見た挙動・
+    /// 検証契約（`validate_gemm_dims`・`validate_tiled_k_bound`）は変わらない。
     pub fn run_tiled_f32(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
+        self.run_f32_kernel(func, a, b, m, n, k, cfg)
+    }
+
+    /// [`Self::run_tiled_f32`] と同じ選択（`select_tiled_f32_kernel`）
+    /// を、`internal-diagnostics` feature 限定で常に classic 版
+    /// （`kernels::TILED_F32`）へ強制した版。診断・A/B ベンチ
+    /// （`examples/gemm_tiled_pipeline_bench.rs`）・bit 一致テスト
+    /// （`tests/cpu_cuda_tiled_pipeline_parity.rs`）の base 側入口として使う
+    /// （イシュー #1137）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn run_tiled_f32_classic(
         &self,
         a: &[f32],
         b: &[f32],
@@ -2712,16 +2896,23 @@ impl CudaGemm {
         validate_tiled_k_bound(k)?;
         validate_output_len(c_dev.len(), m, n)?;
 
-        let cfg = tiled_f32_launch_config(m, n);
+        // イシュー #1137: `run_tiled_f32` と同じ形状条件付き選択
+        // （`select_tiled_f32_kernel`）を GPU 実行のみの入口にも適用する。
+        // `self.tiled_pipeline` は self と同じ context 由来のため
+        // `launch_tiled_pipeline_f32`（外部ハンドル受け取り版）と異なり
+        // context 一致検証は不要（メソッドコメント参照）。
+        let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
         // （a_dev/b_dev/c_dev・m_i/n_i/k_i）は上記で検証済みの m/n/k
-        // と 1:1 対応し、カーネル内の手動境界チェック（REQ-8）と合わせて
+        // と 1:1 対応し、カーネル内の手動境界チェック（REQ-8。classic 版は
+        // `kernels.rs`、pipeline 版は `kernels_tiled_pipeline.rs` の
+        // cp.async src_size ゼロ充填・エピローグ guarded store）と合わせて
         // OOB 読み書きが起きない根拠とする。
         unsafe {
             self.stream
-                .launch_builder(&self.tiled_f32)
+                .launch_builder(func)
                 .arg(a_dev)
                 .arg(b_dev)
                 .arg(c_dev)
@@ -2733,6 +2924,41 @@ impl CudaGemm {
         // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
         // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
         // 委ねる（設計文書 §3〜§4）。
+        Ok(())
+    }
+
+    /// [`Self::launch_tiled_f32`] と同じ選択を、`internal-diagnostics`
+    /// feature 限定で常に classic 版へ強制した版（[`Self::run_tiled_f32_classic`]
+    /// と同じ理由。イシュー #1137）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn launch_tiled_f32_classic(
+        &self,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+
+        let cfg = tiled_f32_launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: launch_tiled_f32 と同一の根拠。
+        unsafe {
+            self.stream
+                .launch_builder(&self.tiled_f32)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
         Ok(())
     }
 
@@ -2918,9 +3144,35 @@ impl CudaGemm {
     /// launch_tiled_bias_act_f32_resident`] と同じ理由で `a_dev` のみ
     /// `CudaView`、`b_dev`／`c_dev` は毎回新規 upload/確保される全体
     /// バッファのまま `&CudaSlice<f32>`。
-    pub fn launch_tiled_f32_resident(
+    ///
+    /// `a_offset`（`a_dev` の連結バッファ先頭からの要素オフセット。
+    /// 呼び出し元が `CudaView` 構築に使った値をそのまま渡す）は
+    /// `select_tiled_f32_kernel` の cp.async 経路選択にのみ使う
+    /// （codex-review P0／Cursor Bugbot High 指摘・PR #1164:
+    /// `CudaView` は cudarc 側でポインタフィールドが非公開のため、この
+    /// メソッド内から `a_dev` の整列を検査できず、呼び出し元がすでに
+    /// 把握しているオフセットを明示的に受け取る形にした。オフセットが
+    /// 4 要素の倍数でない場合は cp.async 16 バイト整列制約
+    /// （`tiled_pipeline_offset_aligned`）を満たさないため常に classic
+    /// 版へ fail-closed にフォールバックする。`validate_gemm_dims`
+    /// 等の既存境界検証には影響しない）。
+    ///
+    /// **可視性は `pub(crate)` に限定する**（codex-review P0 再指摘・
+    /// PR #1164: `a_offset` を `a_dev` から独立した引数として受け取る
+    /// 設計上、この関数を crate 外の safe 公開 API のままにすると、
+    /// 呼び出し元が `a_dev` の実際の開始位置と無関係な `a_offset`
+    /// （例えば非整列ビューに対して偽の `a_offset = 0`）を渡すことで
+    /// 上記の cp.async 整列 fail-closed フォールバックを迂回しうる。
+    /// 現状の唯一の呼び出し元は `ops.rs::CudaBackendOps::gemm_resident_lhs`
+    /// で、`w.offset()`（`DeviceParamStore` が管理する `CudaView` 自身の
+    /// オフセット）をそのまま渡す信頼できる構築経路のみを通るため、
+    /// `pub(crate)` へ絞ることで「検証不能な外部入力では選択できない」
+    /// を型システムで保証する（REQ-8 の手動境界チェック省略禁止）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn launch_tiled_f32_resident(
         &self,
         a_dev: &CudaView<'_, f32>,
+        a_offset: usize,
         b_dev: &CudaSlice<f32>,
         c_dev: &mut CudaSlice<f32>,
         m: u32,
@@ -2931,13 +3183,17 @@ impl CudaGemm {
         validate_tiled_k_bound(k)?;
         validate_output_len(c_dev.len(), m, n)?;
 
-        let cfg = tiled_f32_launch_config(m, n);
+        // イシュー #1137・#1164: `launch_tiled_f32` と同じ選択
+        // （`CudaView` 引数も両カーネルとも `(a, b, c, m, n, k)` シグ
+        // ネチャで同一のため launch_builder の差し替えのみで済む）に
+        // `a_offset` の整列検査を追加する。
+        let (func, cfg) = self.select_tiled_f32_kernel(a_offset, m, n, k);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: `launch_tiled_f32` と同一の根拠。
         unsafe {
             self.stream
-                .launch_builder(&self.tiled_f32)
+                .launch_builder(func)
                 .arg(a_dev)
                 .arg(b_dev)
                 .arg(c_dev)
@@ -3123,6 +3379,106 @@ mod parity_baseline_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// イシュー #1137: `tiled_f32_kernel_kind`（GPU 不要の純粋関数）が
+    /// 整列形状・非整列形状・パイプライン非可用（`pipeline_available =
+    /// false`）の全組み合わせで fail-closed に classic へフォールバック
+    /// することを検査する。`n=0`／`k=0` は `run_tiled_f32` 側の
+    /// `validate_gemm_dims`／`run_f32_kernel` の早期 return で本関数まで
+    /// 到達しない形状だが、本関数自体は純粋な整列判定のため
+    /// `tiled_pipeline_alignment_ok(0, 0)` の契約どおり「4 の倍数」を
+    /// 満たし `Pipeline` を返す（呼び出し元の早期 return が実際の起動を
+    /// 防ぐため、本関数の判定だけを見て起動されるわけではない）。
+    #[test]
+    fn tiled_f32_kernel_kind_falls_back_to_classic_when_unavailable_or_unaligned() {
+        // 整列形状（n%4==0 && k%4==0）+ オフセット 0（整列）+ パイプライン
+        // 可用 → Pipeline。
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 0, 256, 256),
+            TiledF32Kernel::Pipeline,
+            "aligned shape with pipeline available must select Pipeline"
+        );
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 0, 4096, 4096),
+            TiledF32Kernel::Pipeline
+        );
+
+        // 非整列形状（n%4!=0 または k%4!=0）→ パイプライン可用でも
+        // classic へフォールバック（fail-closed）。
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 0, 257, 256),
+            TiledF32Kernel::Classic,
+            "n not a multiple of 4 must fall back to Classic even when pipeline is available"
+        );
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 0, 256, 257),
+            TiledF32Kernel::Classic,
+            "k not a multiple of 4 must fall back to Classic even when pipeline is available"
+        );
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 0, 61, 61),
+            TiledF32Kernel::Classic
+        );
+
+        // パイプライン非可用（`new` 時のコンパイル失敗・sm_80 未満・
+        // swizzle 変種による強制無効化）→ 整列形状でも常に classic。
+        assert_eq!(
+            tiled_f32_kernel_kind(false, 0, 256, 256),
+            TiledF32Kernel::Classic,
+            "pipeline unavailable must always select Classic regardless of alignment"
+        );
+        assert_eq!(
+            tiled_f32_kernel_kind(false, 0, 4096, 4096),
+            TiledF32Kernel::Classic
+        );
+
+        // 境界形状: n=0/k=0 は tiled_pipeline_alignment_ok の定義上
+        // 「4 の倍数」を満たすため Pipeline 判定になる（本関数自体の契約。
+        // 実際の起動は呼び出し元の m==0||n==0／k==0 早期 return で
+        // カーネルへ到達しない。関数ドキュメントコメント参照）。
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 0, 0, 0),
+            TiledF32Kernel::Pipeline
+        );
+    }
+
+    /// codex-review P0／Cursor Bugbot High 指摘（PR #1164）の回帰テスト:
+    /// `CudaGemm::launch_tiled_f32_resident` が渡す `a_offset`（`CudaView`
+    /// の連結バッファ先頭からの要素オフセット）が 4 要素（f32 4 個 = 16
+    /// バイト）の倍数でない場合、`n`/`k` が cp.async 整列形状を満たし
+    /// パイプラインが可用であっても常に classic へ fail-closed に
+    /// フォールバックすることを検査する（`tiled_pipeline_offset_aligned`
+    /// の契約）。整列オフセット（4 の倍数）では従来どおり Pipeline を
+    /// 選ぶことも合わせて確認する。
+    #[test]
+    fn tiled_f32_kernel_kind_falls_back_to_classic_for_unaligned_a_offset() {
+        // 整列形状 + 整列オフセット（4 の倍数）→ Pipeline。
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 0, 256, 256),
+            TiledF32Kernel::Pipeline
+        );
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 4, 256, 256),
+            TiledF32Kernel::Pipeline,
+            "a_offset that is a multiple of 4 elements (16 bytes) must not block Pipeline"
+        );
+        assert_eq!(
+            tiled_f32_kernel_kind(true, 1024, 256, 256),
+            TiledF32Kernel::Pipeline
+        );
+
+        // 整列形状だが非整列オフセット（4 の倍数でない）→ n/k・
+        // pipeline_available が全て条件を満たしていても classic へ
+        // fail-closed にフォールバックする（PR #1164 の主眼）。
+        for offset in [1usize, 2, 3, 5, 1023] {
+            assert_eq!(
+                tiled_f32_kernel_kind(true, offset, 256, 256),
+                TiledF32Kernel::Classic,
+                "a_offset={offset} not a multiple of 4 must fall back to Classic even when \
+                 shape is aligned and pipeline is available"
+            );
+        }
+    }
 
     /// イシュー #856。`CudaGemm::should_launch_wmma_tf32_staged_swizzle`
     /// が実際に `self` へ委譲する `swizzle::should_apply_swizzle` を、
@@ -4088,9 +4444,20 @@ mod tests {
                 let a: Vec<f32> = rng.fill_vec((m as usize) * (k as usize));
                 let b: Vec<f32> = rng.fill_vec((k as usize) * (n as usize));
 
-                let base_c = base.run_tiled_f32(&a, &b, m, n, k).unwrap_or_else(|err| {
-                    panic!("base run_tiled_f32 failed for shape (m={m}, n={n}, k={k}): {err}")
-                });
+                // イシュー #1137: base 側は常に classic 版（swizzle 非適用の
+                // `kernels::TILED_F32`）で固定する。`run_tiled_f32`（無印）
+                // は #1137 以降 cp.async パイプライン版へ形状条件付きで
+                // 分岐しうるため、整列形状では base と variant
+                // （`new_with_tiled_f32_swizzle` がパイプラインを強制無効化
+                // 済み）とでカーネル系統そのものが異なってしまい、swizzle
+                // の remap 差分のみを検査するという本テストの前提が崩れる。
+                let base_c = base
+                    .run_tiled_f32_classic(&a, &b, m, n, k)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "base run_tiled_f32_classic failed for shape (m={m}, n={n}, k={k}): {err}"
+                        )
+                    });
                 let variant_c = variant
                     .run_tiled_f32(&a, &b, m, n, k)
                     .unwrap_or_else(|err| {

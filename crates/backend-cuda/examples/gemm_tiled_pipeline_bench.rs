@@ -68,7 +68,11 @@ fn tflops(size: usize, median_secs: f64) -> f64 {
     flops / median_secs / 1e12
 }
 
-/// tiled f32（本番既定経路。転送込み）を計測する。
+/// tiled f32（本番既定経路。転送込み）を計測する。イシュー #1137 以降、
+/// 本ベンチが使う形状（すべて 4 の倍数の正方形状）では内部で cp.async
+/// パイプライン版へ分岐するため、この列は「本番ディスパッチが実際に
+/// 呼び出し元へ返す性能」を表す（`measure_tiled_f32_classic` が固定
+/// classic 版のベースラインを別途提供する）。
 fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> f64 {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f32> = rng.fill_vec(size * size);
@@ -77,6 +81,23 @@ fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
     let measurement = bench_run(config, || {
         gemm.run_tiled_f32(&a, &b, size as u32, size as u32, size as u32)
             .expect("tiled f32 GEMM must succeed on CUDA-equipped runner");
+    })
+    .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
+    tflops(size, measurement.median_secs)
+}
+
+/// tiled f32 classic 版（`kernels::TILED_F32` 固定・パイプライン非経由。
+/// イシュー #1137）を、`measure_tiled_f32` と同じ計測区間（転送込み）で
+/// 計測する。`#1137` 本番結線の before 値・A/B ベースラインとして使う
+/// （`CudaGemm::run_tiled_f32_classic`。診断専用 API）。
+fn measure_tiled_f32_classic(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> f64 {
+    let mut rng = Xorshift64Star::new(SEED);
+    let a: Vec<f32> = rng.fill_vec(size * size);
+    let b: Vec<f32> = rng.fill_vec(size * size);
+
+    let measurement = bench_run(config, || {
+        gemm.run_tiled_f32_classic(&a, &b, size as u32, size as u32, size as u32)
+            .expect("tiled f32 classic GEMM must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops(size, measurement.median_secs)
@@ -214,10 +235,11 @@ fn main() {
         }
     };
 
-    for size in [1024usize, 2048, 4096] {
+    for size in [256usize, 512, 1024, 2048, 4096] {
         let config = MeasurementConfig::default();
 
         let tiled = measure_tiled_f32(&gemm, size, &config);
+        let tiled_classic = measure_tiled_f32_classic(&gemm, size, &config);
         let pipeline3 = gemm
             .tiled_pipeline_available()
             .then(|| measure_tiled_pipeline_default(&gemm, size, &config));
@@ -246,6 +268,14 @@ fn main() {
             Some(n) if tiled != 0.0 => format!("{:.4}", n / tiled),
             _ => "n/a".to_string(),
         };
+        // イシュー #1137: 本番ディスパッチ（`tiled`。整列形状ではパイプライン
+        // 版へ分岐）と固定 classic 版（`tiled_classic`）の比率。#1137 の
+        // 採否判断における「同一プロトコルの before/after」に相当する。
+        let dispatch_over_classic = if tiled_classic != 0.0 {
+            format!("{:.4}", tiled / tiled_classic)
+        } else {
+            "n/a".to_string()
+        };
         // GPU-only 同士（`pipeline3_gpu_only` vs `pipeline4_gpu_only`）の
         // 比率。stage 数増加そのものの効果を転送有無の差から切り離して表す
         // （codex-review P2／Cursor Bugbot 指摘の是正対象）。
@@ -255,10 +285,13 @@ fn main() {
         };
 
         println!(
-            "size={size} tiled_f32_tflops={:.4} pipeline3_tflops={} \
+            "size={size} tiled_f32_tflops={:.4} tiled_f32_classic_tflops={:.4} \
+             dispatch_over_classic={} pipeline3_tflops={} \
              pipeline3_over_tiled={} | pipeline3_gpu_only_tflops={} \
              pipeline4_gpu_only_tflops={} pipeline4_over_pipeline3_gpu_only={}",
             tiled,
+            tiled_classic,
+            dispatch_over_classic,
             fmt(pipeline3),
             ratio_over_tiled(pipeline3),
             fmt(pipeline3_gpu_only),

@@ -65,7 +65,14 @@ fn forward_host(
 - `Linear::forward_host`: `ops.gemm(input, weight)` → `ops.add(&y, bias)`
   （`LinearVars::forward` が `input.matmul(&weight)` → `.add(&bias)` と
   非融合合成するのと同一。融合カーネル `gemm_bias_act` は使わない
-  — 融合 epilogue はカーネル内 tiling 次第で加算順序が変わりうるため）
+  — 融合 epilogue はカーネル内 tiling 次第で加算順序が変わりうるため）。
+  **イシュー #1137 追記**: CUDA バックエンドの `ops.gemm` は内部で
+  `CudaGemm::run_tiled_f32` を経由し、#1137 以降これは cp.async
+  パイプラインへ形状条件付きに分岐しうるが、新旧経路（`forward_host`／
+  `Module::forward`）は**いずれも同一の `ops.gemm` 呼び出し**を通るため
+  （分岐の有無自体は経路差ではなくカーネル選択の内部詳細）、本節の
+  bit-exactness 契約は #1137 の影響を受けない。
+
 - `Relu::forward_host`: `ops.relu(input)`（`Var::relu()` が
   `tape.ops().relu` を呼ぶのと同一のディスパッチ）
 - `Sigmoid::forward_host` / `Tanh::forward_host`: `eval::sigmoid`/

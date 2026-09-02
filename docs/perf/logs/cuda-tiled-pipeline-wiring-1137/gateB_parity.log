@@ -1,0 +1,1284 @@
+=== gemm_tiled ===
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling bench-harness v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/bench-harness)
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+    Finished `release` profile [optimized] target(s) in 1.97s
+     Running tests/gemm_tiled.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_tiled-7d1ee6a95b6d33e5)
+
+running 6 tests
+test tiled_f16_runs_and_returns_expected_shape ... ok
+test tiled_f32_matches_cpu_reference_across_shapes ... ok
+test tiled_f32_matches_cpu_reference_k_stress ... ok
+test tiled_f32_outperforms_naive_at_4096 ... ok
+test tiled_f32_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_f32_zero_k_returns_all_zero ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 7.75s
+
+=== gemm_tiled exit=0 ===
+=== gemm_bias_act_parity ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.35s
+     Running tests/gemm_bias_act_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_bias_act_parity-352f59197b8c920d)
+
+running 2 tests
+test elementwise_matches_cpu_across_ops ... ok
+test gemm_bias_act_matches_cpu_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.43s
+
+=== gemm_bias_act_parity exit=0 ===
+=== backend_ops_real_device ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.32s
+     Running tests/backend_ops_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/backend_ops_real_device-405fcf872dc3ee89)
+
+running 1 test
+test backend_ops_gemm_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.40s
+
+=== backend_ops_real_device exit=0 ===
+=== gemm_auto ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.35s
+     Running tests/gemm_auto.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_auto-7a3abe3094c794b4)
+
+running 3 tests
+test run_f16_matches_cpu_reference ... ok
+test run_f32_matches_cpu_reference ... ok
+test select_tile_config_for_device_succeeds_on_real_hardware ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.68s
+
+=== gemm_auto exit=0 ===
+=== gemm_resident_real_device ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.39s
+     Running tests/gemm_resident_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_resident_real_device-9d61c217a08217ac)
+
+running 2 tests
+test gemm_resident_lhs_matches_cpu_reference_on_real_device ... ok
+test gemm_resident_rhs_matches_cpu_reference_on_real_device ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+=== gemm_resident_real_device exit=0 ===
+=== cpu_cuda_parity ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.27s
+     Running tests/cpu_cuda_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/cpu_cuda_parity-05fdc8b75388bdc4)
+
+running 2 tests
+test naive_f32_k4096_stress_poc_v2_5 ... ok
+test naive_f32_matches_reference_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.66s
+
+=== cpu_cuda_parity exit=0 ===
+=== gemm_tf32_optin ===
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.33s
+     Running tests/gemm_tf32_optin.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_tf32_optin-2ea71dc08da7dcbf)
+
+running 2 tests
+test gemm_tf32_optin_on_matches_cpu_across_shapes ... 
+thread 'gemm_tf32_optin_on_matches_cpu_across_shapes' (3632363) panicked at crates/backend-cuda/tests/gemm_tf32_optin.rs:128:5:
+tf32 opt-in gemm cpu-cuda parity m=512 n=512 k=512: 複合判定 FAIL（fail_count=42298/262144, max_abs_diff=1.043e-2, max_rel_err=1.567e0, mean_abs_diff=1.569e-3, mean_rel_err=1.456e-3, p50_abs_diff=1.321e-3, p99_abs_diff=5.076e-3, p999_abs_diff=6.459e-3）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test gemm_tf32_optin_on_wiring_matches_run_wmma_tf32 ... ok
+
+failures:
+
+failures:
+    gemm_tf32_optin_on_matches_cpu_across_shapes
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.18s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_tf32_optin`
+=== gemm_tf32_optin exit=101 ===
+=== transpose_parity ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.31s
+     Running tests/transpose_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/transpose_parity-834e89f4850a01fe)
+
+running 4 tests
+test launch_tiled_transposed_f32_zero_clears_stale_buffer_when_k_is_zero ... ok
+test tiled_transposed_f32_matches_host_transposed_tiled_and_cpu_reference ... ok
+test transpose_f16_all_variants_bit_exact_match_cpu_reference ... ok
+test transpose_f32_all_variants_bit_exact_match_cpu_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.94s
+
+=== transpose_parity exit=0 ===
+=== tensor_core_real_device ===
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:708:48
+    |
+708 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:721:8
+    |
+710 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+721 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:729:8
+    |
+729 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.41s
+     Running tests/tensor_core_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/tensor_core_real_device-70821d1c4cadd5d9)
+
+running 2 tests
+test tensor_core_parity_record ... 
+thread 'tensor_core_parity_record' (3632639) panicked at crates/backend-cuda/tests/tensor_core_real_device.rs:338:5:
+tensor_core_parity_record tf32 512x512x512: 複合判定 FAIL（fail_count=42493/262144, max_abs_diff=9.045e-3, max_rel_err=1.877e0, mean_abs_diff=1.574e-3, mean_rel_err=1.489e-3, p50_abs_diff=1.333e-3, p99_abs_diff=5.094e-3, p999_abs_diff=6.503e-3）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test tensor_core_tflops_record ... environment: name="NVIDIA GB10" compute_capability=(12, 1) arch="compute_121"
+tflops_record_kernel_only path=tiled_f32 tflops=10.193 report={"schema_version":"1","name":"gemm_tiled_f32_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.013483215,"q1_secs":0.013435582,"q3_secs":0.013746177,"samples_secs":[0.013746177,0.013483215,0.013940544,0.013888305,0.01359952,0.013368798,0.013306254,0.013231966,0.013441663,0.014022001,0.013437871,0.013435582,0.013606928,0.013266862,0.013275021,0.013476655,0.013453615,0.013898289,0.01362944,0.013958865]}
+tflops_record_kernel_only path=wmma_tf32_staged tflops=13.897 report={"schema_version":"1","name":"gemm_wmma_tf32_staged_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.009889918,"q1_secs":0.009822158,"q3_secs":0.009923246,"samples_secs":[0.010607346,0.009938702,0.009923246,0.009889918,0.009912126,0.009903887,0.009912798,0.010036847,0.009860158,0.00984643,0.009804541,0.009823502,0.009925502,0.009856654,0.009822158,0.010326528,0.009795742,0.009787006,0.009776765,0.009781662]}
+tflops_record_kernel_only path=wmma_f16_opt tflops=4.484 report={"schema_version":"1","name":"gemm_wmma_f16_opt_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.030647679,"q1_secs":0.030638863,"q3_secs":0.030655583,"samples_secs":[0.030636719,0.030666975,0.030655583,0.030644222,0.030647679,0.030638863,0.030648127,0.030635375,0.030798095,0.030612895,0.031229922,0.030659567,0.030659215,0.030640574,0.030648127,0.030641855,0.030651375,0.030632079,0.030629775,0.030642543]}
+
+thread 'tensor_core_tflops_record' (3632642) panicked at crates/backend-cuda/tests/tensor_core_real_device.rs:258:5:
+WMMA f16 opt（カーネル単体 4.484 TFLOPS）が tiled f32（カーネル単体 10.193 TFLOPS）を上回りませんでした（受け入れ条件: PoC-v2-3 参考値 1.832 TFLOPS 超過。転送区間を除いたカーネル単体での比較。GB10 実機実測 〈2026-09-03〉で既知 red。緩和せずイシュー #1131 の受け入れ条件へ引き渡す。docs/perf/cuda-wmma-f16-perf-triage.md 参照）
+FAILED
+
+failures:
+
+failures:
+    tensor_core_parity_record
+    tensor_core_tflops_record
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.00s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test tensor_core_real_device`
+=== tensor_core_real_device exit=101 ===
+=== gemm_f32_variants ===
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.32s
+     Running tests/gemm_f32_variants.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_f32_variants-f25d26d5f1018f82)
+
+running 2 tests
+test run_f32_matches_cpu_reference_across_variant_shapes ... ok
+test split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 10.14s
+
+=== gemm_f32_variants exit=0 ===
+ALL_DONE
