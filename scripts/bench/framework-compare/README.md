@@ -345,10 +345,12 @@ echo $?   # 0: 全達成 / 2: --strict の無効データ判定が優先 / 3: �
   される
 - `--strict` と併用し、かつ `--strict` 側の無効データ判定（終了コード 2）にも該当する場合は、データ
   無効の解消を優先して終了コード 2 を返す（ゲート結果自体は Markdown 出力に残る）
-- fandhe-ai 0.5.0（crates.io 公開版）での実機再計測結果（DGX Spark GB10・Apple M4 Max。イシュー
-  #1052・`results/summary.md` 環境 8/9）に対する `--target candle` は**終了コード 3**（達成 1 件
-  〈gemm/CPU/N=256、Apple M4 Max〉・未達 23 件・判定不能 2 件）。未達・判定不能項目の内訳・既存
-  トラッカーとの対応は `results/summary.md`「目標達成ゲート総括」節を参照
+- fandhe-ai 0.6.0（crates.io 公開版）での実機再計測結果（DGX Spark GB10・Apple M4 Max。
+  `results/summary.md` 環境 10/11）に対する `--target candle` は**終了コード 3**（達成 3 件
+  〈DGX Spark gemm/CPU/N=256・M4 Max gemm/CPU/N=256・N=512〉・未達 21 件・判定不能 2 件）。0.5.0
+  時点（環境 8/9。達成 1 件・未達 23 件・判定不能 2 件）比では DGX Spark の CPU GEMM N=256・
+  M4 Max の CPU GEMM N=512 が新規達成に転じた。未達・判定不能項目の内訳・既存トラッカーとの
+  対応は `results/summary.md`「目標達成ゲート総括」節を参照
 - **Burn は比較対象外**: CUDA 経路が TF32 降格（#1007 系の既知制約）のため、`--target burn` で機械的に
   「達成」と判定されても性能特性の異なる経路同士の比較である点に注意する（本ツールはこの区別を自動
   判定しない。人間が判断する）

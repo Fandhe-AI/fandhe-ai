@@ -188,3 +188,27 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
     公開後の再計測とあわせた Issue 化の要否はユーザー判断（本 PR では Issue 操作を行わず、
     未追跡のまま `out-of-scope-tracking.md` に従いスコープ外として引き継ぐ）
 
+
+### 8.1 v0.6.0 追補
+
+- fandhe-ai 0.6.0（crates.io 公開版・2026-09-02 公開）での実機再計測（DGX Spark GB10・Apple
+  M4 Max。計測日 2026-09-02）に対し `python3 summarize.py --target candle` を実行した結果、
+  **達成 3 件・未達 21 件・判定不能 2 件**（終了コード 3）。0.5.0 時点（達成 1 件・未達 23 件・
+  判定不能 2 件）比では DGX Spark の CPU GEMM N=256・M4 Max の CPU GEMM N=512 が新規達成に
+  転じた。出典・詳細な (task, device, size) ごとの判定表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 10（DGX Spark GB10）・環境 11
+  （Apple M4 Max）節「〜の目標達成ゲート」および「目標達成ゲート総括」節、生データは
+  `scripts/bench/framework-compare/results/raw/results-dgx-0.6.0.jsonl`・
+  `results-m4max-0.6.0.jsonl` を参照
+- **収録範囲の限定**: `v0.5.0` タグ以降に main へ入っていた改善（#1108 Metal 選択テーブル・
+  #1110 Metal SGD バッチング・#1111 CUDA variant selection 修正）は今回初めて反映されている。
+  CUDA GEMM 改善トラッカー #1031・Metal GEMM 改善トラッカー #1037・学習/推論 candle 比未達
+  トラッカー #1118 は本計測時点で open のまま（未着手）であり、下記の未達はそれらの改善適用前の
+  現在地である
+- 未達・判定不能項目の追跡状況（詳細は `results/summary.md`「目標達成ゲート総括」節）:
+  - CUDA GEMM（N=256〜4096）: 既存トラッカー #1031（open）
+  - Metal GEMM（N=256〜4096）: 既存トラッカー #1037（open）
+  - 学習（train）・推論（infer）の全項目: 既存トラッカー #1118（open）
+  - CPU GEMM（N=512〈DGX のみ未達〉・N=1024・N=2048）: 既存の個別トラッカーなし。次回再計測と
+    あわせた Issue 化の要否はユーザー判断（本 PR では Issue 操作を行わず、未追跡のまま
+    `out-of-scope-tracking.md` に従いスコープ外として引き継ぐ）
