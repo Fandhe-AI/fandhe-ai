@@ -1,0 +1,32 @@
+===START:gemm_f32_variants===
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/<cuda-node-user>/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling bench-harness v0.6.0 (/home/<cuda-node-user>/work/rust-ai-library-run/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 2.07s
+     Running tests/gemm_f32_variants.rs (/home/<cuda-node-user>/work/target-fandhe-ai/release/deps/gemm_f32_variants-f25d26d5f1018f82)
+
+running 2 tests
+test run_f32_matches_cpu_reference_across_variant_shapes ... ok
+test split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 10.10s
+
+===END:gemm_f32_variants:0===
+===START:cpu_cuda_tiled_pipeline_parity===
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/<cuda-node-user>/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.33s
+     Running tests/cpu_cuda_tiled_pipeline_parity.rs (/home/<cuda-node-user>/work/target-fandhe-ai/release/deps/cpu_cuda_tiled_pipeline_parity-5423b964568b680b)
+
+running 9 tests
+test launch_tiled_pipeline_zero_dim_shape_is_noop_without_launch ... ok
+test tiled_pipeline_k4096_stress ... ok
+test tiled_pipeline_matches_reference_across_shapes ... ok
+test tiled_pipeline_matches_tiled_f32 ... ok
+test tiled_pipeline_rejects_misaligned_shape ... ok
+test tiled_pipeline_rejects_mismatched_context_buffers ... ok
+test tiled_pipeline_rejects_mismatched_context_handle ... ok
+test tiled_pipeline_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_pipeline_zero_k_returns_all_zero ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 10.48s
+
+===END:cpu_cuda_tiled_pipeline_parity:0===

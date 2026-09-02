@@ -1,0 +1,6 @@
+date: 2026-09-03T04:06:12+09:00 (JST)
+GPU: NVIDIA GB10 / driver 580.173.02 / utilization.gpu 0% (計測前)
+nvcc: Build cuda_13.0.r13.0/compiler.36424714_0
+rustc: 1.97.0 (2d8144b78 2026-07-07)
+commit (.rev-stamp): 1a32082e4b521d7a0bed868db3a3b0a65e2bae9a
+node: <cuda-node>（内部ホスト名は非公開。docs/real-hardware-verification-env.md 参照）

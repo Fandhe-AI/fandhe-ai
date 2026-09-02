@@ -115,6 +115,7 @@ compute_capability=(8, 6)（sm_86）。`tiled_f32_outperforms_naive_at_4096`
   （実装計画 §3.2 の段階方針）。ncu 自体は DGX Spark GB10 実機実測
   セッション（#6 節）でも未導入のため引き続き未実施。
 - **DGX Spark GB10（sm_121）実機での性能実測**: #6 節で実施済み。
+  SplitK 撤退是正（PR #1111）後の再実測は §7 節を参照。
 - **Metal M4 Max 実機比較**: 本イシューは CUDA バックエンドのみが対象の
   ためスコープ外。
 
@@ -183,7 +184,139 @@ GB10 実機での before/after 倍率は取得できない**（旧版へ revert 
   約 2.95 倍上回るという本節冒頭の**目標達成判定自体は成立する**（この判定は同一
   セッション内の絶対値比較のみに依拠しており、クロスセッション参考比較には依存しない）。
 
-## 7. 関連
+## 7. SplitK 撤退是正（PR #1111）後の GB10 再実測（イシュー #1136）
+
+**状態**: 実機実測完了（2026-09-03 04:06 JST・DGX Spark GB10・sm_121・GPU アイドル
+〈計測直前 `nvidia-smi --query-gpu=utilization.gpu` 0%・`--query-compute-apps` は
+常駐サービス〈ComfyUI・Kokoro〉のみで計測競合プロセスなし〉）。
+
+### 8.1 計測環境
+
+- GPU: NVIDIA GB10（sm_121）・driver 580.173.02
+- nvcc: `Build cuda_13.0.r13.0/compiler.36424714_0`（CUDA 13.0）
+- rustc: 1.97.0（2d8144b78 2026-07-07）
+- commit: `1a32082e4b521d7a0bed868db3a3b0a65e2bae9a`（転送前後で `.rev-stamp` 一致確認済み。
+  #1133 マージ後・PR #1111 の SplitK 撤退是正〈`caa1bdd`〉を含む）
+- 実機個体は `<cuda-node>` 表記（実ホスト名は非公開。`docs/real-hardware-verification-env.md` 参照）
+
+### 8.2 §6（2026-08-31・commit `10011cd`）以降の差分確認
+
+```
+git diff 10011cd4f8ef097351c0dc1244eb55c8a021040b..1a32082e4b521d7a0bed868db3a3b0a65e2bae9a \
+  --stat -- crates/backend-cuda/src/kernels.rs crates/backend-cuda/src/gemm.rs \
+  crates/backend-cuda/src/ops.rs crates/backend-cuda/src/gemm_auto.rs
+```
+
+結果: `crates/backend-cuda/src/gemm.rs`（41 insertions, 72 deletions）のみ変更あり。
+`kernels.rs`・`ops.rs`・`gemm_auto.rs` は無差分。変更元は PR #1111（`caa1bdd`。
+FP32 variant selection の SplitK parity 失敗と DoubleBuffer ヒューリスティックの
+性能逆転の修正）。`TILED_F32` 本体（`kernels.rs`）は §6 実測時点から不変であり、
+本節の計測は「DoubleBuffer バッファ管理是正後」の到達性能を捉える。
+
+### 8.3 parity 結果（受入基準 A）
+
+`--test-threads=1`・`--release --locked` で 6 テストバイナリを実行。全て
+`test result: ok`（複合判定 0 fail。`fandhe_ai_backend_cpu::assert_parity` 厳密ゼロ fail 判定）。
+
+| テストバイナリ | 結果 | テスト数 |
+|---|---|---|
+| `gemm_tiled` | ok | 6 passed（`tiled_f32_outperforms_naive_at_4096` 含む） |
+| `gemm_bias_act_parity` | ok | 2 passed |
+| `backend_ops_real_device` | ok | 1 passed |
+| `gemm_auto` | ok | 3 passed |
+| `gemm_resident_real_device` | ok | 2 passed |
+| `cpu_cuda_parity` | ok | 2 passed |
+
+実行コマンド（`T` に上記バイナリ名を代入）:
+
+```
+cargo test -p fandhe-ai-backend-cuda --release --locked --test "$T" -- \
+  --ignored --nocapture --test-threads=1
+```
+
+生ログ: `docs/perf/logs/cuda-simt-remeasurement-1136/parity_*.log`
+
+### 8.4 GFLOPS 結果（受入基準 B）
+
+`examples/cuda_floor_bench.rs`（`launch_tiled_f32` の GPU 実行 + 同期のみ計測。
+§6 と同一計測境界）を 5 回反復。各 run の `tiled_f32_tflops`（中央値。warmup 20 /
+iters 20）と、run 間中央値（＝本節の代表値）:
+
+| N | run1 | run2 | run3 | run4 | run5 | **run 間中央値** | GFLOP/s |
+|---|---|---|---|---|---|---|---|
+| 512（参考） | 4.5479 | 4.5640 | 4.5677 | 4.5603 | 4.5640 | **4.5640** (q1=4.5739, q3=4.5603) | 4564.0 |
+| 1024 | 6.7324 | 6.7589 | 6.7470 | 6.7497 | 6.7459 | **6.7470** (q1=6.7578, q3=6.7375) | 6747.0 |
+| 2048 | 7.5301 | 7.5320 | 7.4819 | 7.4742 | 7.4722 | **7.4819** (q1=7.5315, q3=7.4773) | 7481.9 |
+| 4096 | 6.7942 | 6.7588 | 6.7291 | 6.7485 | 6.7341 | **6.7485** (q1=6.7517, q3=6.7417) | 6748.5 |
+
+実行コマンド: `cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release --locked`
+（PyTorch 参照 env 未設定のため `f32_best_over_pytorch` 等は `n/a`／別実測値・本イシューの対象外）。
+
+生ログ: `docs/perf/logs/cuda-simt-remeasurement-1136/floor_bench_run{1..5}.log`
+
+**§6（2026-08-31・commit `10011cd`）比**:
+
+| N | §6（DoubleBuffer 是正前） | 本節（是正後） | 倍率 |
+|---|---|---|---|
+| 512 | 4.5640 | 4.5640 | 1.000x（差分なし） |
+| 1024 | 6.7469 | 6.7470 | 1.000x（差分なし） |
+| 2048 | 7.5413 | 7.4819 | 0.9921x（-0.79%） |
+| 4096 | 7.1008 | 6.7485 | 0.9504x（**-4.96%**） |
+
+N=1024 は実質不変、N=2048 は誤差範囲内の軽微な低下。**N=4096 は -4.96% で
+「5% 超の劣化」の閾値未満だが僅差**であり、回帰の疑いとして記録する（原因調査・
+`kernels.rs::TILED_F32` 本体・DoubleBuffer 閾値のチューニングは本イシューのスコープ外。
+§8.2 のとおり `TILED_F32` 本体は §6 から不変のため、この差は同一カーネルの
+run-to-run 変動〈driver・熱・スケジューリング等〉である可能性が高く、PR #1111 の
+DoubleBuffer バッファ管理是正自体が N=4096 の性能を悪化させたと断定する根拠はない
+〈§6 と本節は別セッション・同一 GB10 個体だが連続実行ではない〉）。
+
+### 8.5 参考比較（限定条件付き）
+
+- 親イシュー #1031 目標（candle/Burn 比 N=4096 で 2,410 GFLOP/s 超え）との比較:
+  本節 N=4096 は 6,748.5 GFLOP/s で目標を約 2.80 倍上回る（§6 の 2.95 倍からわずかに縮小）。
+- v0.6.0 framework-compare 再計測（PR #1127・2026-09-02。
+  `scripts/bench/framework-compare/results/summary.md` 環境 10）の `gemm/CUDA`
+  fresh N=4096 1928.7 GFLOP/s・reuse N=4096 1931.8 GFLOP/s と比べ、本節の
+  6,748.5 GFLOP/s は約 3.5 倍高い。ただしこれは §6 で既述のとおり**計測境界が異なる**
+  （本節は `launch_tiled_f32` の GPU 実行 + 同期のみ／launch-only。framework-compare は
+  tape 構築・ホスト実体化を含む）ため、fandhe-ai 側に有利な方向のバイアスを含む
+  参考比較であり、単純な性能向上の根拠としては扱わない。
+
+### 8.6 opt-in 診断経路（補助・PR #1111 §1b の申し送り。受入基準外）
+
+```
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test gemm_f32_variants -- --ignored --nocapture --test-threads=1
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture --test-threads=1
+```
+
+結果: `gemm_f32_variants`（`run_f32_matches_cpu_reference_across_variant_shapes`・
+`split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail` の 2 テストとも
+`ok`）・`cpu_cuda_tiled_pipeline_parity`（9 テスト全て `ok`）。いずれもテスト関数自体の
+Rust 側判定は green（`split_k_forced_…` はテスト名のとおり「GB10 で複合判定 FAIL を
+決定的に再現する」ことを検証する設計のテストであり、テスト結果 `ok` はその再現を
+確認できたことを意味する。テスト内部の複合判定そのものの FAIL/PASS 詳細は本節の
+スコープ外のため深追いせず、生ログを記録するに留める）。生ログ:
+`docs/perf/logs/cuda-simt-remeasurement-1136/parity_gemm_f32_variants.log`。
+`cuda-gemm-f32-variant-selection.md` §1b の「記録欄」は別途参照。
+
+### 8.7 不変条件の宣言
+
+本節作成にあたり `crates/`・`Cargo.toml`・`Cargo.lock`・tolerance 定数
+（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline
+（`tests/common/parity_baseline.rs`）はいずれも変更していない
+（`git diff origin/main -- crates/ Cargo.toml Cargo.lock` が無差分であることを確認済み）。
+
+### 8.8 未実施・申し送り
+
+- ncu（nsight-compute）は本ノードに未導入のため引き続き未実施（§5 と同じ）
+- N=4096 の -4.96% 差分は「回帰の疑い」として記録するのみで、原因調査・
+  DoubleBuffer 閾値補正（#1100 §1b・#1035 手順 4）は行わない（ユーザー承認事項）
+- cp.async パイプライン（#1033）・スウィズル（#1034）の本番結線は本節の対象外
+
+## 8. 関連
 
 - `docs/perf/cuda-gemm-kernel-improvement-policy.md`（本イシューの動機）
 - `docs/kernel-fusion.md` §2.2（`TILED_F32`/`TILED_BIAS_ACT_F32` bit 完全
