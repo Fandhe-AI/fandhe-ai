@@ -85,8 +85,9 @@ fn tolerance_constants_are_pinned() {
 }
 
 /// fixture 自体の妥当性検査: 各行の `baseline_fail_count <= total`・
-/// `total == m*n`・5 経路（`WmmaF16` を含む。codex-review P2 指摘対応・
-/// イシュー #1106 PR #1124）すべてに 1 行以上存在することを確認する。
+/// `total == m*n`・7 経路（`WmmaF16` を含む。codex-review P2 指摘対応・
+/// イシュー #1106 PR #1124。`MmaTf32`・`MmaTf32VsWmmaStaged` はイシュー
+/// #1122 の再割り当てで追加）すべてに 1 行以上存在することを確認する。
 /// fixture 値の入力ミス（転記ミス等）を CI で機械的に検出する。
 ///
 /// `baseline_max_abs_diff_ceiling`/`baseline_max_rel_err_ceiling`
@@ -141,6 +142,8 @@ fn baseline_fixture_is_self_consistent() {
         ParityPath::WmmaTf32Staged,
         ParityPath::MmaF16,
         ParityPath::WmmaF16,
+        ParityPath::MmaTf32,
+        ParityPath::MmaTf32VsWmmaStaged,
     ] {
         assert!(
             BASELINES.iter().any(|b| b.path == path),
@@ -189,7 +192,9 @@ fn baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only() {
 /// 経路のため、全行が enforced（`baseline_provenance_unconfirmed ==
 /// false`）であることを固定する。0 件を green として固定するテストは置かない
 /// —— それ自体が codex-review P1 指摘が問題視した「機能していないゲートを
-/// 正常状態として固定する」パターンになるため）。
+/// 正常状態として固定する」パターンになるため）。`MmaTf32`・
+/// `MmaTf32VsWmmaStaged` はイシュー #1122 の GB10 実機実測（2026-09-03・
+/// 2 回実行で完全一致）で確定済みの経路として追加した。
 #[test]
 fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
     for path in [
@@ -198,6 +203,8 @@ fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
         ParityPath::WmmaTf32Staged,
         ParityPath::MmaF16,
         ParityPath::WmmaF16,
+        ParityPath::MmaTf32,
+        ParityPath::MmaTf32VsWmmaStaged,
     ] {
         let total = BASELINES.iter().filter(|b| b.path == path).count();
         let enforced = BASELINES
@@ -438,9 +445,19 @@ fn parity_baselines_do_not_regress() {
         // `tests/gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress_non_regression`）
         // が同一 baseline 行を直接検査済みのため、ここでの重複検査は
         // 行わない（`WmmaTf32`／`WmmaTf32Opt` の除外と同じ理由）。
+        // `ParityPath::MmaTf32`・`ParityPath::MmaTf32VsWmmaStaged`
+        // （イシュー #1122 で追加）も同じ理由でここでは検査しない:
+        // 検査対象のカーネル（`CudaMmaTf32Gemm`）は本ファイルが構築する
+        // `CudaGemm`／`CudaMmaGemm` とは別型であり、`tests/gemm_mma_tf32.rs::
+        // mma_tf32_matches_reference_across_shapes`／`mma_tf32_k4096_stress`・
+        // `tests/mma_tf32_vs_wmma_tf32_staged.rs::
+        // mma_tf32_matches_wmma_tf32_staged_across_shapes`／
+        // `..._k4096_stress` が同一 baseline 行を直接検査済み。
         if baseline.path == ParityPath::WmmaTf32
             || baseline.path == ParityPath::WmmaTf32Opt
             || baseline.path == ParityPath::WmmaF16
+            || baseline.path == ParityPath::MmaTf32
+            || baseline.path == ParityPath::MmaTf32VsWmmaStaged
         {
             continue;
         }
@@ -452,7 +469,11 @@ fn parity_baselines_do_not_regress() {
                 ParityPath::MmaF16 => {
                     check_mma_f16_baseline(&mma_gemm, baseline);
                 }
-                ParityPath::WmmaTf32 | ParityPath::WmmaTf32Opt | ParityPath::WmmaF16 => {
+                ParityPath::WmmaTf32
+                | ParityPath::WmmaTf32Opt
+                | ParityPath::WmmaF16
+                | ParityPath::MmaTf32
+                | ParityPath::MmaTf32VsWmmaStaged => {
                     unreachable!("continue で除外済み")
                 }
             }));

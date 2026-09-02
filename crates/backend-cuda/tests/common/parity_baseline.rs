@@ -148,6 +148,38 @@ pub enum ParityPath {
     /// 同型の「元の受け入れ条件は置き換えない」設計。
     /// `docs/perf/cuda-parity-baseline.md` §10.4 参照）。
     WmmaF16,
+    /// `CudaMmaTf32Gemm::run_tf32`（生 `mma.sync`(m16n8k8)/`ldmatrix`/
+    /// `cp.async` 経路。イシュー #801）と CPU f32 参照実装
+    /// （`matmul_reference_fma`）との非後退ゲート。
+    ///
+    /// **イシュー #1122 の切り分け結果（2026-09-03・GB10 実機・2 回実行で
+    /// 全値完全一致）**: 入力を TF32 RNA へ事前丸めした CPU 参照との比較
+    /// では 16×8×8・64×64×64 が 0 fail（機能欠陥なし）、512×512×512・
+    /// K=4096 の残差は累算順序差レベルであり、fail 座標にフラグメント
+    /// 境界への偏りはなかった。一方 `run_tf32` は起動前検証で
+    /// `n%4==0 && k%4==0` の整列制約を課すため（`run_tf32_rejects_
+    /// misaligned_shape_without_launch` 参照）、最小形状である 4×4×4
+    /// （K=4 の単一累算のみ）でも 2/16 fail が生じる。したがって
+    /// `mma_tf32` vs CPU 参照の組合せには、spec REQ-2「2026-09-02 追記」
+    /// 項目 1（厳密ゼロ fail 判定の対象形状）が成立する形状が存在しない
+    /// （TF32 丸め由来であり機能欠陥ではない）。よって全形状を baseline
+    /// 非後退方式で検査する（ユーザー承認 2026-09-03。詳細は
+    /// `docs/perf/cuda-parity-baseline.md` §11）。
+    MmaTf32,
+    /// `CudaMmaTf32Gemm::run_tf32` と `CudaGemm::run_wmma_tf32`（staged
+    /// 経路。イシュー #500）の GPU-GPU 相互一致の非後退ゲート
+    /// （イシュー #801 受け入れ条件 3 項）。
+    ///
+    /// mma.sync と staged WMMA は K 分割・命令列（累算順序）が異なるため
+    /// bit-identical は期待しない契約とする（bit-identical が成立するのは
+    /// 同一 FMA 順序を持つ opt/basic カーネル間のみ。#995）。イシュー
+    /// #1122 の切り分け（2026-09-03・GB10 実機）で 512×512×512・K=4096
+    /// は非ゼロ fail（TF32 丸め由来）を確認した一方、他 7 形状
+    /// （64×64×64 等）は GB10 実機でゼロ fail（4×4×4 は bit 一致）を
+    /// 確認できたため、512×512×512・K=4096 の 2 行のみを本非後退ゲート
+    /// で検査し、残り 7 形状は引き続き `fandhe_ai_backend_cpu::assert_parity`
+    /// （厳密ゼロ fail 判定）で検査する（ユーザー承認 2026-09-03）。
+    MmaTf32VsWmmaStaged,
 }
 
 impl std::fmt::Display for ParityPath {
@@ -158,6 +190,8 @@ impl std::fmt::Display for ParityPath {
             ParityPath::WmmaTf32Staged => "wmma_tf32_staged",
             ParityPath::MmaF16 => "mma_f16",
             ParityPath::WmmaF16 => "wmma_f16",
+            ParityPath::MmaTf32 => "mma_tf32",
+            ParityPath::MmaTf32VsWmmaStaged => "mma_tf32_vs_wmma_tf32_staged",
         };
         f.write_str(s)
     }
@@ -804,6 +838,213 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_provenance_unconfirmed: false,
         baseline_max_abs_diff_ceiling: Some(3.126e-2),
         baseline_max_rel_err_ceiling: Some(2.303e-1),
+    },
+    // mma_tf32: イシュー #1122 の切り分けで再割り当てした形状網羅
+    // 9 ケース（元テスト `tests/gemm_mma_tf32.rs::
+    // mma_tf32_matches_reference_across_shapes`。厳密ゼロ fail 判定が
+    // 成立する形状は存在しないため全形状を非後退方式へ切り替える。
+    // `ParityPath::MmaTf32` ドキュメンテーションコメント参照）。
+    // 実測: DGX Spark GB10（sm_121・CUDA 13.0）、2026-09-03、2 回実行で
+    // fail_count・max_abs_diff・max_rel_err・mean_abs_diff が完全一致。
+    // ceiling は表示桁の最終桁 +1（§4 と同じ規約）。
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 16x8x8 seed=5000 (#1122 triage)",
+        m: 16,
+        n: 8,
+        k: 8,
+        seed: 5000,
+        total: 16 * 8,
+        baseline_fail_count: 12,
+        baseline_mean_abs_diff_ceiling: 1.886e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(8.535e-4),
+        baseline_max_rel_err_ceiling: Some(5.295e-2),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 64x64x64 seed=5001 (#1122 triage)",
+        m: 64,
+        n: 64,
+        k: 64,
+        seed: 5001,
+        total: 64 * 64,
+        baseline_fail_count: 652,
+        baseline_mean_abs_diff_ceiling: 5.527891e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.631546e-3),
+        baseline_max_rel_err_ceiling: Some(4.712392e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 128x128x128 seed=5002 (#1122 triage)",
+        m: 128,
+        n: 128,
+        k: 128,
+        seed: 5002,
+        total: 128 * 128,
+        baseline_fail_count: 2658,
+        baseline_mean_abs_diff_ceiling: 7.813101e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.862382e-3),
+        baseline_max_rel_err_ceiling: Some(8.963764e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 512x512x512 seed=5003 (#1122 triage)",
+        m: 512,
+        n: 512,
+        k: 512,
+        seed: 5003,
+        total: 512 * 512,
+        baseline_fail_count: 42434,
+        baseline_mean_abs_diff_ceiling: 1.572115e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(9.908677e-3),
+        baseline_max_rel_err_ceiling: Some(1.982553e0),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 60x68x36 seed=5004 (#1122 triage)",
+        m: 60,
+        n: 68,
+        k: 36,
+        seed: 5004,
+        total: 60 * 68,
+        baseline_fail_count: 620,
+        baseline_mean_abs_diff_ceiling: 4.153088e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.818420e-3),
+        baseline_max_rel_err_ceiling: Some(3.456691e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 68x60x20 seed=5005 (#1122 triage)",
+        m: 68,
+        n: 60,
+        k: 20,
+        seed: 5005,
+        total: 68 * 60,
+        baseline_fail_count: 659,
+        baseline_mean_abs_diff_ceiling: 2.946972e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.352289e-3),
+        baseline_max_rel_err_ceiling: Some(1.545301e0),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 96x68x72 seed=5006 (#1122 triage)",
+        m: 96,
+        n: 68,
+        k: 72,
+        seed: 5006,
+        total: 96 * 68,
+        baseline_fail_count: 1063,
+        baseline_mean_abs_diff_ceiling: 5.776752e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.900363e-3),
+        baseline_max_rel_err_ceiling: Some(5.599762e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 64x96x256 seed=5007 (#1122 triage)",
+        m: 64,
+        n: 96,
+        k: 256,
+        seed: 5007,
+        total: 64 * 96,
+        baseline_fail_count: 956,
+        baseline_mean_abs_diff_ceiling: 1.103098e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(5.916239e-3),
+        baseline_max_rel_err_ceiling: Some(1.433802e0),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 4x4x4 seed=5008 (#1122 triage)",
+        m: 4,
+        n: 4,
+        k: 4,
+        seed: 5008,
+        total: 4 * 4,
+        baseline_fail_count: 2,
+        baseline_mean_abs_diff_ceiling: 6.605977e-5,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.046825e-4),
+        baseline_max_rel_err_ceiling: Some(2.168238e-3),
+    },
+    // mma_tf32: K=4096 ストレスケース（元テスト
+    // `tests/gemm_mma_tf32.rs::mma_tf32_k4096_stress`）。
+    // mma_tf32: env-adaptive smoke テスト（元テスト
+    // `tests/gemm_mma_tf32.rs::mma_tf32_parity_smoke_env_adaptive`）。
+    // コーディネータ指示・ユーザー承認 2026-09-03: #1122 の切り分け結果
+    // （§11）と同根の TF32 丸め由来 FAIL のため baseline 非後退方式へ
+    // 切り替える。
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 64x64x64 seed=1 (#1122 smoke_env_adaptive)",
+        m: 64,
+        n: 64,
+        k: 64,
+        seed: 1,
+        total: 64 * 64,
+        baseline_fail_count: 666,
+        baseline_mean_abs_diff_ceiling: 5.566e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(2.544e-3),
+        baseline_max_rel_err_ceiling: Some(2.533e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::MmaTf32,
+        context: "mma_tf32 4096x4096x4096 seed=9001 (#1122 triage k4096_stress)",
+        m: 4096,
+        n: 4096,
+        k: 4096,
+        seed: 9001,
+        total: 4096 * 4096,
+        baseline_fail_count: 2723936,
+        baseline_mean_abs_diff_ceiling: 4.445815e-3,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.209306e-2),
+        baseline_max_rel_err_ceiling: Some(1.997902e0),
+    },
+    // mma_tf32_vs_wmma_tf32_staged: 512x512x512（元テスト
+    // `tests/mma_tf32_vs_wmma_tf32_staged.rs::
+    // mma_tf32_matches_wmma_tf32_staged_across_shapes` の idx=2）。
+    // 他 7 形状は GB10 実機でゼロ fail（4x4x4 は bit 一致）を確認済み
+    // のため厳密判定（`assert_parity`）を維持し、本行の対象外
+    // （`ParityPath::MmaTf32VsWmmaStaged` ドキュメンテーションコメント
+    // 参照）。
+    ParityBaseline {
+        path: ParityPath::MmaTf32VsWmmaStaged,
+        context: "mma_tf32_vs_wmma_tf32_staged 512x512x512 seed=6002 (#1122 triage)",
+        m: 512,
+        n: 512,
+        k: 512,
+        seed: 6002,
+        total: 512 * 512,
+        baseline_fail_count: 7,
+        baseline_mean_abs_diff_ceiling: 6.919439e-6,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(6.866456e-5),
+        baseline_max_rel_err_ceiling: Some(1.004198e-1),
+    },
+    // mma_tf32_vs_wmma_tf32_staged: K=4096 ストレスケース（元テスト
+    // `tests/mma_tf32_vs_wmma_tf32_staged.rs::
+    // mma_tf32_matches_wmma_tf32_staged_k4096_stress`）。
+    ParityBaseline {
+        path: ParityPath::MmaTf32VsWmmaStaged,
+        context: "mma_tf32_vs_wmma_tf32_staged 4096x4096x4096 seed=9002 (#1122 triage k4096_stress)",
+        m: 4096,
+        n: 4096,
+        k: 4096,
+        seed: 9002,
+        total: 4096 * 4096,
+        baseline_fail_count: 50074,
+        baseline_mean_abs_diff_ceiling: 1.616796e-4,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.220704e-3),
+        baseline_max_rel_err_ceiling: Some(1.977192e0),
     },
 ];
 
