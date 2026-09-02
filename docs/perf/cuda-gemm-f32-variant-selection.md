@@ -159,6 +159,30 @@ cargo run -p fandhe-ai-backend-cuda --example gemm_f32_variant_bench --release -
 - `split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail`: 2 回実行が bit 一致し、複合判定は引き続き FAIL（PASS した場合は #1100 の撤退判断の前提が崩れているため要再検討）
 - DoubleBuffer が選択される全形状（N=256/512/1024/4096・256×256×16384）で `TILED_F32` 単体比が 1.0 倍以上に改善しているか確認する。1.0 倍未満が残る場合は、実装計画 §5 手順 6 に従い（1 回限りの）閾値補正または DoubleBuffer 自体の選択除外を検討する（ユーザー承認のうえ実施）
 
+### 記録欄（イシュー #1136。opt-in 診断テストのみ実行。補助・受入基準外）
+
+2026-09-03 04:xx JST・DGX Spark GB10（sm_121）実機で以下のコマンド（`gemm_f32_variants` テストバイナリを 1 回実行し、内部の 2 テストを実行）を実施（`docs/perf/cuda-gemm-simt-register-blocking.md` §7 の再実測セッションの一部として実施。commit `1a32082e4b521d7a0bed868db3a3b0a65e2bae9a`）:
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test gemm_f32_variants -- --ignored --nocapture --test-threads=1
+```
+
+結果: `run_f32_matches_cpu_reference_across_variant_shapes` ... ok・
+`split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail` ... ok
+（2 passed; 0 failed）。上記「合格基準」の 1 点目（`run_f32_matches_cpu_reference_across_variant_shapes`
+全形状 green）は満たされたことを確認した。2 点目（`split_k_forced_…` が bit 決定的かつ
+複合判定 FAIL を再現し続けること）は、Rust テスト関数自体がその再現を検証して `ok`
+を返す設計であるため、テスト結果 `ok` は「FAIL の再現を確認できた」ことと整合する
+（複合判定の内部統計は本記録では未転記）。
+
+**未実施**: `cargo run -p fandhe-ai-backend-cuda --example gemm_f32_variant_bench --release
+--features internal-diagnostics`（DoubleBuffer の `TILED_F32` 単体比の性能比較）は
+イシュー #1136 の実装計画がこの記録欄への任意追記対象として明示していなかったため
+未実行。DoubleBuffer 閾値補正の要否判断は引き続き未実施のまま（ユーザー承認事項）。
+
+生ログ: `docs/perf/logs/cuda-simt-remeasurement-1136/parity_gemm_f32_variants.log`
+
 ### 本 PR で検証済みの事項（GPU 不要）
 
 - `cargo build --workspace`
