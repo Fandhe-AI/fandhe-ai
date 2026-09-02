@@ -28,7 +28,7 @@
 //! ## 実機前提
 //!
 //! 両テストとも実機（DGX Spark GB10 等、compute capability 7.0 以降）必須の
-//! `#[ignore]` 分離テストであり、通常 CI（self-hosted・CUDA toolkit 非搭載）
+//! `#[ignore]` 分離テストであり、通常 CI（GitHub ホステッド・CUDA 実機なし）
 //! では実行されない（`.claude/rules/ci.md`「実機依存」）。CUDA デバイス・
 //! opt カーネルが利用できない環境では `.expect` により失敗が顕在化する
 //! 設計とし、実機以外での silent green を許さない（既存 `tests/
@@ -41,72 +41,31 @@
 //! `gemm_wmma.rs::CudaWmmaGemm::wmma_f16_opt_available` ドキュメンテーション
 //! コメント参照）。
 //!
-//! ## 転送バイト数差の補正（PR #258 レビュー指摘）
+//! ## カーネル単体計測への切り替え（イシュー #1123 是正）
 //!
-//! `run_tiled_f32`／`run_wmma_tf32` は f32（4 byte/要素）、`run_f16` は f16
-//! （2 byte/要素）で ホスト⇔デバイス転送を行うため、各経路の
-//! `bench_harness::run` 計測値（転送＋カーネル実行の合算）をそのまま
-//! TFLOPS 比較すると、f16 経路は転送バイト数が半分であるだけで
-//! （最適化 Tensor Core カーネル自体が実際には遅い場合でも）有利になり
-//! うる（Cursor Bugbot 指摘「f16 benchmark rewards smaller transfers」）。
-//! これを避けるため、転送のみ（`clone_htod`／`alloc_zeros`／
-//! `clone_dtoh`。カーネル起動を含まない）を dtype ごとに個別計測し、
-//! 合算計測の中央値から差し引いた「計算のみ」の時間で TFLOPS 比較する
-//! （[`transfer_only_measurement`]）。f32 系（tiled f32・WMMA TF32）は
-//! 転送形状が同一（`a_f32`／`b_f32`／m*n 要素の f32 出力）なので 1 回の
-//! 転送計測を共用する。
+//! 旧プロトコルは `run_tiled_f32`／`run_wmma_tf32`／`run_f16`（転送＋
+//! カーネル実行の合算計測）から dtype 別の転送のみ計測を差し引いた
+//! 「計算のみ」の時間で TFLOPS を比較していた（PR #258 レビュー指摘
+//! 「f16 benchmark rewards smaller transfers」対応。f32 系は 4 byte/要素・
+//! f16 系は 2 byte/要素で転送バイト数が異なるための補正）。GB10 実機実測
+//! （2026-09-03）で、この減算プロトコルは大容量バッファ（4096 で 1 個
+//! あたり 32 MB 超）の per-call アロケーション＋転送が二峰性（0.263 s／
+//! 0.275 s と大きく乖離）を示す既知病態
+//! （`docs/perf/cuda-wmma-f16-perf-triage.md`）により破綻することが
+//! 判明した。
+//!
+//! 本ファイルは各経路の常駐バッファ API（`CudaGemm::upload_f32`／
+//! `alloc_output_f32`／`launch_tiled_f32`／`launch_wmma_tf32`、
+//! `CudaWmmaGemm::upload_f16`／`alloc_output_f16`／`launch_f16`、いずれも
+//! `synchronize`）で H2D/D2H・バッファ確保を計測区間の外へ完全に排除した
+//! 「カーネル単体」（`launch → synchronize` のみ）計測へ切り替える。
+//! 転送バイト数差の補正（差し引き）は、転送そのものを計測区間に含めない
+//! ことでより根本的に解消されるため、dtype 別の転送のみ計測・減算・
+//! 「転送のみ ≥ 合算」プロトコル整合性検査は行わない。
 
-use bench_harness::{BenchReport, Measurement, MeasurementConfig};
+use bench_harness::{BenchReport, MeasurementConfig};
 use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm, CudaWmmaGemm};
 use half::f16;
-
-/// ホスト⇔デバイス転送のみ（`clone_htod`（a・b）／`alloc_zeros`（出力）／
-/// `synchronize`／`clone_dtoh`（出力）。カーネル起動を含まない）を計測する。
-///
-/// [`tensor_core_tflops_record`] が `run_tiled_f32`／`run_wmma_tf32`／
-/// `run_f16` の合算計測（転送＋カーネル実行）から dtype 別の転送コストを
-/// 差し引き、「計算のみ」の TFLOPS で 3 経路を比較するために使う（本
-/// ファイル冒頭コメント「転送バイト数差の補正」参照。PR #258 レビュー
-/// 指摘対応）。呼び出し元の `a`／`b`／`out_len` は計測対象経路と同一の
-/// 形状・dtype を渡すこと（f32 系は `run_tiled_f32`／`run_wmma_tf32` と
-/// 同一の a_f32・b_f32・m*n を、f16 系は `run_f16` と同一の a_f16・b_f16・
-/// m*n を渡す）。
-fn transfer_only_measurement<T>(
-    device: &CudaDevice,
-    config: &MeasurementConfig,
-    a: &[T],
-    b: &[T],
-    out_len: usize,
-) -> Measurement
-where
-    T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits,
-{
-    bench_harness::run(config, || {
-        let a_dev = device
-            .stream()
-            .clone_htod(a)
-            .expect("clone_htod must succeed on CUDA-equipped test runner");
-        let b_dev = device
-            .stream()
-            .clone_htod(b)
-            .expect("clone_htod must succeed on CUDA-equipped test runner");
-        let c_dev = device
-            .stream()
-            .alloc_zeros::<T>(out_len)
-            .expect("alloc_zeros must succeed on CUDA-equipped test runner");
-        device
-            .stream()
-            .synchronize()
-            .expect("synchronize must succeed on CUDA-equipped test runner");
-        let _c_host = device
-            .stream()
-            .clone_dtoh(&c_dev)
-            .expect("clone_dtoh must succeed on CUDA-equipped test runner");
-        drop(a_dev);
-        drop(b_dev);
-    })
-    .expect("transfer-only measurement must satisfy TASK-8.1 protocol")
-}
 
 /// TFLOPS 実測記録の本体（#64 受け入れ条件の TFLOPS 実測分）。
 ///
@@ -160,144 +119,149 @@ fn tensor_core_tflops_record() {
     let a_f16: Vec<f16> = rng_f16.fill_vec_f16((m as usize) * (k as usize));
     let b_f16: Vec<f16> = rng_f16.fill_vec_f16((k as usize) * (n as usize));
 
-    // dtype 別の転送のみコスト（本ファイル冒頭コメント「転送バイト数差の
-    // 補正」参照）。f32 系（tiled f32・WMMA TF32）は a_f32・b_f32・m*n 要素の
-    // f32 出力で転送形状が同一のため 1 回の計測を共用する。
-    let out_len = (m as usize) * (n as usize);
-    let f32_transfer_measurement =
-        transfer_only_measurement::<f32>(&device, &config, &a_f32, &b_f32, out_len);
-    let f16_transfer_measurement =
-        transfer_only_measurement::<f16>(&device, &config, &a_f16, &b_f16, out_len);
+    // カーネル単体（H2D/D2H・バッファ確保を計測区間の外に置く）計測。
+    // イシュー #1123 是正（本ファイル冒頭コメント参照）: 常駐バッファ
+    // API（`upload_f32`／`alloc_output_f32`／`launch_*`／`synchronize`）で
+    // 「launch → synchronize」区間のみを計測する。転送バイト数差
+    // （f32 4 byte/要素・f16 2 byte/要素）は転送そのものを計測区間の
+    // 外に置くことで解消済みのため、dtype 別の転送のみ計測・減算は
+    // 行わない。
 
     // tiled f32（基準経路。PoC-v2-3 参考値 1.832 TFLOPS）。
-    let tiled_measurement = bench_harness::run(&config, || {
-        let _ = gemm
-            .run_tiled_f32(&a_f32, &b_f32, m, n, k)
-            .expect("run_tiled_f32 must succeed on CUDA-equipped test runner");
+    let (a_f32_dev, b_f32_dev) = gemm
+        .upload_f32(&a_f32, &b_f32)
+        .expect("upload_f32 must succeed on CUDA-equipped test runner");
+    let mut c_tiled_dev = gemm
+        .alloc_output_f32(m, n)
+        .expect("alloc_output_f32 must succeed on CUDA-equipped test runner");
+    let tiled_kernel_only = bench_harness::run(&config, || {
+        gemm.launch_tiled_f32(&a_f32_dev, &b_f32_dev, &mut c_tiled_dev, m, n, k)
+            .expect("launch_tiled_f32 must succeed on CUDA-equipped test runner");
+        gemm.synchronize()
+            .expect("synchronize must succeed on CUDA-equipped test runner");
     })
-    .expect("tiled f32 measurement must satisfy TASK-8.1 protocol");
-    let tiled_report =
-        BenchReport::from_measurement("gemm_tiled_f32_4096", "cuda", &tiled_measurement).expect(
-            "BenchReport::from_measurement must succeed for a protocol-conformant measurement",
-        );
-    let tiled_tflops = (flops / tiled_measurement.median_secs) / 1e12;
+    .expect("tiled f32 kernel-only measurement must satisfy TASK-8.1 protocol");
+    let tiled_report = BenchReport::from_measurement(
+        "gemm_tiled_f32_kernel_only_4096",
+        "cuda",
+        &tiled_kernel_only,
+    )
+    .expect("BenchReport::from_measurement must succeed for a protocol-conformant measurement");
+    let tiled_kernel_tflops = (flops / tiled_kernel_only.median_secs) / 1e12;
     println!(
-        "tflops_record path=tiled_f32 tflops={tiled_tflops:.3} report={}",
+        "tflops_record_kernel_only path=tiled_f32 tflops={tiled_kernel_tflops:.3} report={}",
         tiled_report
             .to_json()
             .expect("BenchReport::to_json must succeed for a validated report")
     );
 
     // WMMA TF32（opt もしくは opt-staged。上記 assert は opt 版の可用性の
-    // みを保証しており、`run_wmma_tf32` の 3 段選択（staged→opt→basic。
-    // `gemm.rs::run_wmma_tf32` ドキュメンテーションコメント参照）は
-    // 整列形状（`n%4==0 && k%4==0`）かつ staged 版が利用可能ならそちらを
-    // 最優先で選ぶ。M=N=K=4096 は整列形状であるため実機では staged 経路が
-    // 選ばれる可能性が高い。記録ラベルを固定文字列にすると実際に計測した
-    // カーネルと食い違う（イシュー #1106・PR #1115 codex-review P1 指摘
-    // 対応）ため、`CudaGemm::wmma_tf32_routed_path_is_staged` で実際に
-    // 選択された経路を判定してラベルへ反映する。
+    // みを保証しており、`launch_wmma_tf32` の 3 段選択（staged→opt→basic。
+    // `gemm.rs::launch_wmma_tf32`／`run_wmma_tf32` ドキュメンテーション
+    // コメント参照）は整列形状（`n%4==0 && k%4==0`）かつ staged 版が
+    // 利用可能ならそちらを最優先で選ぶ。M=N=K=4096 は整列形状であるため
+    // 実機では staged 経路が選ばれる可能性が高い。記録ラベルを固定文字列
+    // にすると実際に計測したカーネルと食い違う（イシュー #1106・
+    // PR #1115 codex-review P1 指摘対応）ため、`CudaGemm::
+    // wmma_tf32_routed_path_is_staged` で実際に選択された経路を判定して
+    // ラベルへ反映する（`launch_wmma_tf32` も `run_wmma_tf32` と同一の
+    // 3 段選択ロジックを使うため、この判定は常駐 API 経由でも引き続き
+    // 正確）。
     let tf32_path_label = if gemm.wmma_tf32_routed_path_is_staged(n, k) {
         "wmma_tf32_staged"
     } else {
         "wmma_tf32_opt"
     };
-    let tf32_measurement = bench_harness::run(&config, || {
-        let _ = gemm
-            .run_wmma_tf32(&a_f32, &b_f32, m, n, k)
-            .expect("run_wmma_tf32 must succeed on CUDA-equipped test runner");
+    let mut c_tf32_dev = gemm
+        .alloc_output_f32(m, n)
+        .expect("alloc_output_f32 must succeed on CUDA-equipped test runner");
+    let tf32_kernel_only = bench_harness::run(&config, || {
+        gemm.launch_wmma_tf32(&a_f32_dev, &b_f32_dev, &mut c_tf32_dev, m, n, k)
+            .expect("launch_wmma_tf32 must succeed on CUDA-equipped test runner");
+        gemm.synchronize()
+            .expect("synchronize must succeed on CUDA-equipped test runner");
     })
-    .expect("WMMA TF32 measurement must satisfy TASK-8.1 protocol");
+    .expect("WMMA TF32 kernel-only measurement must satisfy TASK-8.1 protocol");
     let tf32_report = BenchReport::from_measurement(
-        format!("gemm_{tf32_path_label}_4096"),
+        format!("gemm_{tf32_path_label}_kernel_only_4096"),
         "cuda",
-        &tf32_measurement,
+        &tf32_kernel_only,
     )
     .expect("BenchReport::from_measurement must succeed for a protocol-conformant measurement");
-    let tf32_tflops = (flops / tf32_measurement.median_secs) / 1e12;
+    let tf32_kernel_tflops = (flops / tf32_kernel_only.median_secs) / 1e12;
     println!(
-        "tflops_record path={tf32_path_label} tflops={tf32_tflops:.3} report={}",
+        "tflops_record_kernel_only path={tf32_path_label} tflops={tf32_kernel_tflops:.3} report={}",
         tf32_report
             .to_json()
             .expect("BenchReport::to_json must succeed for a validated report")
     );
 
     // WMMA f16（opt。上記 assert で opt 経路の実行を保証済み）。
-    let f16_measurement = bench_harness::run(&config, || {
-        let _ = wmma_gemm
-            .run_f16(&a_f16, &b_f16, m, n, k)
-            .expect("run_f16 must succeed on CUDA-equipped test runner");
+    let (a_f16_dev, b_f16_dev) = wmma_gemm
+        .upload_f16(&a_f16, &b_f16)
+        .expect("upload_f16 must succeed on CUDA-equipped test runner");
+    let mut c_f16_dev = wmma_gemm
+        .alloc_output_f16(m, n)
+        .expect("alloc_output_f16 must succeed on CUDA-equipped test runner");
+    let f16_kernel_only = bench_harness::run(&config, || {
+        wmma_gemm
+            .launch_f16(&a_f16_dev, &b_f16_dev, &mut c_f16_dev, m, n, k)
+            .expect("launch_f16 must succeed on CUDA-equipped test runner");
+        wmma_gemm
+            .synchronize()
+            .expect("synchronize must succeed on CUDA-equipped test runner");
     })
-    .expect("WMMA f16 measurement must satisfy TASK-8.1 protocol");
-    let f16_report =
-        BenchReport::from_measurement("gemm_wmma_f16_opt_4096", "cuda", &f16_measurement).expect(
-            "BenchReport::from_measurement must succeed for a protocol-conformant measurement",
-        );
-    let f16_tflops = (flops / f16_measurement.median_secs) / 1e12;
+    .expect("WMMA f16 kernel-only measurement must satisfy TASK-8.1 protocol");
+    let f16_report = BenchReport::from_measurement(
+        "gemm_wmma_f16_opt_kernel_only_4096",
+        "cuda",
+        &f16_kernel_only,
+    )
+    .expect("BenchReport::from_measurement must succeed for a protocol-conformant measurement");
+    let f16_kernel_tflops = (flops / f16_kernel_only.median_secs) / 1e12;
     println!(
-        "tflops_record path=wmma_f16_opt tflops={f16_tflops:.3} report={}",
+        "tflops_record_kernel_only path=wmma_f16_opt tflops={f16_kernel_tflops:.3} report={}",
         f16_report
             .to_json()
             .expect("BenchReport::to_json must succeed for a validated report")
     );
 
-    // 各経路の合算計測（転送＋カーネル実行）から dtype 別の転送のみコスト
-    // を差し引いた「計算のみ」時間（本ファイル冒頭コメント「転送バイト数
-    // 差の補正」参照）。転送は各経路とも合算計測に直列に含まれる
-    // （`clone_htod` → カーネル起動 → `synchronize` → `clone_dtoh` の順で
-    // 非同期オーバーラップしない。`gemm.rs::run_f32_kernel`／
-    // `run_f16_kernel` 参照）ため、単純な減算で計算のみ時間を求められる。
-    let tiled_compute_secs = tiled_measurement.median_secs - f32_transfer_measurement.median_secs;
-    let tf32_compute_secs = tf32_measurement.median_secs - f32_transfer_measurement.median_secs;
-    let f16_compute_secs = f16_measurement.median_secs - f16_transfer_measurement.median_secs;
-    assert!(
-        tiled_compute_secs > 0.0 && tf32_compute_secs > 0.0 && f16_compute_secs > 0.0,
-        "転送のみ計測（tiled/tf32 用 f32: {:.6}s, f16 用: {:.6}s）が合算計測（tiled: {:.6}s, \
-         tf32: {:.6}s, f16: {:.6}s）を下回りませんでした。計測がプロトコル前提\
-         （転送・カーネル実行の直列化）を満たしていない可能性があります",
-        f32_transfer_measurement.median_secs,
-        f16_transfer_measurement.median_secs,
-        tiled_measurement.median_secs,
-        tf32_measurement.median_secs,
-        f16_measurement.median_secs,
-    );
-    let tiled_compute_tflops = (flops / tiled_compute_secs) / 1e12;
-    let tf32_compute_tflops = (flops / tf32_compute_secs) / 1e12;
-    let f16_compute_tflops = (flops / f16_compute_secs) / 1e12;
-    println!(
-        "tflops_record_compute_only path=tiled_f32 tflops={tiled_compute_tflops:.3} \
-         (wall_clock_tflops={tiled_tflops:.3}, transfer_secs={:.6})",
-        f32_transfer_measurement.median_secs
-    );
-    println!(
-        "tflops_record_compute_only path={tf32_path_label} tflops={tf32_compute_tflops:.3} \
-         (wall_clock_tflops={tf32_tflops:.3}, transfer_secs={:.6})",
-        f32_transfer_measurement.median_secs
-    );
-    println!(
-        "tflops_record_compute_only path=wmma_f16_opt tflops={f16_compute_tflops:.3} \
-         (wall_clock_tflops={f16_tflops:.3}, transfer_secs={:.6})",
-        f16_transfer_measurement.median_secs
-    );
-
     // #64 受け入れ条件・既存 `wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`
     // と同じ判断根拠: Tensor Core 経路は tiled f32 を上回ることを実機で
-    // 確認する（相対比較。実機で外れた場合は緩和せず #186 へ引き渡す。
-    // 本ファイル冒頭コメント参照）。転送バイト数が dtype ごとに異なる
-    // （f32 系 4 byte/要素・f16 2 byte/要素）ため、比較は転送コストを
-    // 差し引いた「計算のみ」の TFLOPS で行う（PR #258 レビュー指摘
-    // 「f16 benchmark rewards smaller transfers」対応。上記コメント参照）。
+    // 確認する（相対比較。転送区間を除いたカーネル単体 TFLOPS での比較へ
+    // 切り替えた〈イシュー #1123 是正〉ため、判定式自体は変更しない
+    // 〈緩和なし〉まま比較対象の量だけをカーネル単体 TFLOPS へ差し替える。
+    // 本ファイル冒頭コメント参照）。
+    //
+    // TF32 経路: 実機で外れた場合は緩和せず #186 へ引き渡す。
+    //
+    // f16 経路: GB10 実機実測（2026-09-03・sm_121・イシュー #1123 是正版）
+    // で本 assert は **red**（wmma_f16_opt カーネル単体 4.391〜4.496
+    // TFLOPS が tiled f32 カーネル単体 6.776〜6.790 TFLOPS を下回る）。
+    // 旧プロトコル（合算計測から転送のみ計測を減算する方式）では f16 の
+    // 転送量が f32 の半分であることが「計算のみ」時間を過大評価し、
+    // 見かけ上 pass していた（`docs/perf/cuda-wmma-f16-perf-triage.md`
+    // §4.3）。カーネル単体では GB10 の `wmma_f16_opt` は tiled f32 を
+    // 恒常的に下回ることが判明したため、本 assert は `.claude/rules/
+    // coding-rust.md`「性能下限・最適化の達成を理由に…緩和しない」と
+    // 同じ方針で **緩和せず red のまま維持**し、本番 f16 Tensor Core
+    // 経路を `mma.sync` パイプラインへ結線するイシュー #1131 の受け入れ
+    // 条件へ引き渡す（#1131 完了時に本 assert が pass することを
+    // #1131 の完了条件とする。`docs/perf/cuda-wmma-f16-perf-triage.md`
+    // §5.1 参照）。
     assert!(
-        tf32_compute_tflops > tiled_compute_tflops,
-        "WMMA TF32 opt（計算のみ {tf32_compute_tflops:.3} TFLOPS）が tiled f32（計算のみ \
-         {tiled_compute_tflops:.3} TFLOPS）を上回りませんでした（受け入れ条件: PoC-v2-3 \
-         参考値 1.832 TFLOPS 超過。転送コストを除いた計算のみでの比較）"
+        tf32_kernel_tflops > tiled_kernel_tflops,
+        "WMMA TF32 opt（カーネル単体 {tf32_kernel_tflops:.3} TFLOPS）が tiled f32（カーネル単体 \
+         {tiled_kernel_tflops:.3} TFLOPS）を上回りませんでした（受け入れ条件: PoC-v2-3 \
+         参考値 1.832 TFLOPS 超過。転送区間を除いたカーネル単体での比較）"
     );
     assert!(
-        f16_compute_tflops > tiled_compute_tflops,
-        "WMMA f16 opt（計算のみ {f16_compute_tflops:.3} TFLOPS）が tiled f32（計算のみ \
-         {tiled_compute_tflops:.3} TFLOPS）を上回りませんでした（受け入れ条件: PoC-v2-3 \
-         参考値 1.832 TFLOPS 超過。転送コストを除いた計算のみでの比較）"
+        f16_kernel_tflops > tiled_kernel_tflops,
+        "WMMA f16 opt（カーネル単体 {f16_kernel_tflops:.3} TFLOPS）が tiled f32（カーネル単体 \
+         {tiled_kernel_tflops:.3} TFLOPS）を上回りませんでした（受け入れ条件: PoC-v2-3 \
+         参考値 1.832 TFLOPS 超過。転送区間を除いたカーネル単体での比較。GB10 実機実測 \
+         〈2026-09-03〉で既知 red。緩和せずイシュー #1131 の受け入れ条件へ引き渡す。\
+         docs/perf/cuda-wmma-f16-perf-triage.md 参照）"
     );
 }
 

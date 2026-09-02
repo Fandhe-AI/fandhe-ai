@@ -368,6 +368,54 @@ impl CudaWmmaGemm {
         Ok(())
     }
 
+    /// [`Self::launch_f16`] の「基本版（`Self::wmma_f16`）を強制的に使う」
+    /// 変種。opt カーネルの可用性に関わらず常に基本版を起動する点のみが
+    /// [`Self::launch_f16`] と異なり、検証・引数構成・SAFETY 根拠は共有
+    /// する（イシュー #1123: `wmma_f16_opt` の性能外れ値切り分けで、
+    /// opt 版と基本版のカーネル単体 TFLOPS を同一計測プロトコルで比較
+    /// するための診断専用入口。本番ディスパッチ〈`run_f16`／`launch_f16`
+    /// の opt 優先フォールバック〉には影響しない）。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （`gemm.rs::CudaGemm::new_with_tf32_staged_swizzle` 等と同じ feature
+    /// ゲート方針。`Cargo.toml` の `[features]` 参照。PR #1132 codex-review
+    /// P2 指摘対応: 診断専用ランチャーを恒久的な公開 API として無条件公開
+    /// しない）。`tests/wmma_f16_opt_perf_triage.rs`（`Cargo.toml` の
+    /// `required-features` で同 feature を要求）専用の入口。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn launch_f16_basic(
+        &self,
+        a_dev: &CudaSlice<f16>,
+        b_dev: &CudaSlice<f16>,
+        c_dev: &mut CudaSlice<f16>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+
+        let cfg = wmma_launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: launch_f16 と同一の根拠（基本版カーネル
+        // `Self::wmma_f16` を固定で使う点のみが異なる）。
+        unsafe {
+            self.stream
+                .launch_builder(&self.wmma_f16)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+        // 委ねる。
+        Ok(())
+    }
+
     /// C（f16）をデバイス→ホストへ転送する（[`Self::upload_f16`] と同じ
     /// 理由で公開する）。
     ///

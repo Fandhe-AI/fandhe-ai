@@ -111,7 +111,8 @@ fandhe-ai/
     │   ├── train-linear-epilogue-fusion.md # 学習 forward の Linear+ReLU epilogue 融合（gemm_bias_act／gemm_resident_rhs_act 結線）の起動数 before/after・CPU 実測・Metal/DGX Spark 未実測の明記（#1044）
     │   ├── train-step-phase-breakdown.md # CPU / CUDA / Metal 学習 1 step のフェーズ分解実機実測（M4 Max・DGX Spark GB10・5 回計測）・支配項トップ 3（backward が 83.6〜97.3% で全バックエンド共通の支配項）・#1008 配下 Issue 優先順位の更新案（#1010）
     │   ├── cuda-async-sync-removal-framework-compare-ab.md # CUDA 都度同期廃止（#1011）の framework-compare 実践規模 A/B 計測記録（DGX Spark GB10 実機計測完了。受入根拠は同一プロトコルの fresh 0.928 倍のみ。reuse 0.440 倍〈約 2.3 倍短縮〉は #1059 の resident forward/backward 経路変更との複合効果につき参考値〈codex-review P1 対応〉・checksum 複合判定 ok。#1083）
-    │   └── cuda-tf32-optin-parity.md # CUDA TF32 opt-in GEMM（`crate::precision`）の複合判定・実機実行手順・実測記入欄（本エージェント実行環境に CUDA 実機なしのため未実測明記。#1042）
+    │   ├── cuda-tf32-optin-parity.md # CUDA TF32 opt-in GEMM（`crate::precision`）の複合判定・実機実行手順・実測記入欄（本エージェント実行環境に CUDA 実機なしのため未実測明記。#1042）
+    │   └── cuda-wmma-f16-perf-triage.md # WMMA(f16) 性能外れ値（`wmma_f16_opt`≈`wmma_f16_basic` が `mma_sync_f16` を約3〜13倍〈形状依存。dim2048で約7倍・dim4096で約11〜13倍〉恒常的に下回る・tiled f32 カーネル単体も下回る〈GB10実測。#64 f16 assert red〉）の診断・GB10実機実測（2026-09-03）・大形状計測をカーネル単体プロトコルへ切替えたテスト是正記録・到達性整理（`wmma_f16`は`CudaGemmAuto::run_f16`経由でfacadeへ到達しうる一方`BackendOps::gemm`はf32 tiled固定・`mma_sync_f16`は証跡用途のみで本番非到達）・切り出し先（#1130・#1131）。#1123
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）
