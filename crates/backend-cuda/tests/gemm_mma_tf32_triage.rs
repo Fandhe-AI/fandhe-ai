@@ -421,7 +421,13 @@ fn mma_tf32_triage_all_shapes() {
 
     // --- 3. 厳密ゼロ fail が成立する最小形状・シードの探索用の独自ケース
     // （既存テストには存在しない組合せ）。
-    let minimal_shapes: &[(u32, u32, u32)] = &[(1, 1, 1), (1, 1, 8), (16, 8, 8)];
+    // `run_tf32` は整列制約 `n % 4 == 0 && k % 4 == 0` を要求する
+    // （`kernels_mma_tf32.rs`「整列制約」）ため、1×1×1 等の不整列形状は
+    // 起動拒否（`InvalidShape`）となり探索対象にならない。整列を満たす
+    // 最小形状 4×4×4 から列挙する（GB10 実測: 4×4×4 でも K=4 の累算で
+    // 非ゼロ fail が残るため、mma vs CPU 参照に厳密ゼロ fail 成立形状は
+    // ない。codex-review／Bugbot 指摘対応）。
+    let minimal_shapes: &[(u32, u32, u32)] = &[(4, 4, 4), (4, 4, 8), (16, 8, 8)];
     for &(m, n, k) in minimal_shapes {
         for seed in 7001..=7005u64 {
             let report = mma_vs_cpu_ref_report(&mma, seed, m, n, k);

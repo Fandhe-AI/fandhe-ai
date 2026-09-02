@@ -1590,7 +1590,17 @@ fail 要素の座標・`row%16`/`col%8` ヒストグラム（m16n8k8 フラグ�
 境界への偏り検出用）も出力し、機能欠陥だった場合の原因箇所を絞り込める
 ようにした。
 
-### 11.2 GB10 実測（2026-09-03・2 回実行で全値完全一致）
+### 11.2 GB10 実測（2026-09-03 JST・2 回実行で全値完全一致）
+
+診断ダンプ（`mma_tf32_triage_dump`）の入力シードは 16×8×8＝5000・
+64³＝5001・512³＝5002・256×256×4096＝9001（`across_shapes` の 5000+idx
+規則を診断用に流用）であり、**§3 の baseline 行が用いる各テスト固有の
+シードとは異なる**（例: (d) mma vs staged の 512³ は本表では seed 5002 で
+5/262144・max_abs 5.150e-5、baseline 行〈`mma_tf32_vs_wmma_tf32_staged.rs`
+の seed 6002〉では 7/262144・6.866455e-5）。本表は原因切り分け（丸め由来か
+機能欠陥か）の根拠であり、baseline の出典は診断テスト
+`mma_tf32_triage_all_shapes`（各テストと同一の形状・シードで全ケースの
+統計を出力。GB10 で 2 回実行し全値完全一致）である。
 
 | 形状 | (a) fail/total | (b) fail/total | (b) max_abs | (c) fail/total | (c) max_abs | (d) fail/total | (d) max_abs |
 |---|---|---|---|---|---|---|---|
@@ -1653,7 +1663,8 @@ baseline 非後退方式、他 7 形状は GB10 実機でゼロ fail を確認�
 
 ### 11.5 承認記録
 
-2026-09-03 ユーザー承認。判定方式の正は `docs/spec/04-requirements.md`
+2026-09-03（JST）ユーザー承認。一次記録はイシュー #1122 の承認記録コメント
+（<https://github.com/Fandhe-AI/fandhe-ai/issues/1122#issuecomment-5514068283>。承認した baseline 行の全値を列挙）。判定方式の正は `docs/spec/04-requirements.md`
 REQ-2「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」
 （fandhe-ai-spec PR #63）。先行実装の型は PR #1124
 （`crates/backend-cuda/tests/gemm_wmma_tf32*.rs`・
