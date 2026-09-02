@@ -4427,8 +4427,15 @@ mod tests {
             CudaGemm::new(&device).expect("base CudaGemm::new must succeed on ignored test runner");
 
         let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
-        let dynamic_group_width =
-            crate::swizzle::select_swizzle_group_width(num_sms, kernels::TILE, kernels::TILE);
+        // イシュー #1139: #1032（PR #1072）のレジスタブロッキング導入で
+        // `TILED_F32` のブロックタイルは `TILE`（32）ではなく `TILED_F32_BM`/
+        // `BN`（64）になったため、単位を揃えて選択する（`lib.rs::
+        // Diagnostics::tiled_f32_swizzle_group_width` と同じ是正）。
+        let dynamic_group_width = crate::swizzle::select_swizzle_group_width(
+            num_sms,
+            kernels::TILED_F32_BM,
+            kernels::TILED_F32_BN,
+        );
 
         let shapes: [(u32, u32, u32); 3] = [(256, 256, 256), (80, 136, 160), (544, 256, 2048)];
         let seed: u64 = 424_244;
@@ -4502,8 +4509,15 @@ mod tests {
             CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
 
         let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
-        let dynamic_group_width =
-            crate::swizzle::select_swizzle_group_width(num_sms, kernels::TILE, kernels::TILE);
+        // イシュー #1139: #1032（PR #1072）のレジスタブロッキング導入で
+        // `TILED_F32` のブロックタイルは `TILE`（32）ではなく `TILED_F32_BM`/
+        // `BN`（64）になったため、単位を揃えて選択する（`lib.rs::
+        // Diagnostics::tiled_f32_swizzle_group_width` と同じ是正）。
+        let dynamic_group_width = crate::swizzle::select_swizzle_group_width(
+            num_sms,
+            kernels::TILED_F32_BM,
+            kernels::TILED_F32_BN,
+        );
 
         let shapes: [(u32, u32, u32); 3] = [(256, 256, 256), (80, 136, 160), (544, 256, 2048)];
         let seed: u64 = 424_245;

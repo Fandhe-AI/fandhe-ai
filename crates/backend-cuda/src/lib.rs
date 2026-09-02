@@ -728,15 +728,28 @@ pub mod diagnostics {
 
     /// イシュー #1034: [`mma_swizzle_group_width`] の tiled f32（本番既定
     /// f32 経路 `TILED_F32`）版。`swizzle::select_swizzle_group_width` を
-    /// tiled f32 のブロックタイル（`kernels::TILE` x `kernels::TILE`。
-    /// 32×32）に対して適用する（`mma_f16`・TF32 opt-staged と異なる
-    /// ブロックタイルのため専用ラッパーが必要。`swizzle.rs` 本体は無
-    /// 変更）。`examples/gemm_tiled_f32_swizzle_bench.rs`・
+    /// tiled f32 のブロックタイル（`kernels::TILED_F32_BM` x
+    /// `kernels::TILED_F32_BN`。64×64）に対して適用する（`mma_f16`・
+    /// TF32 opt-staged と異なるブロックタイルのため専用ラッパーが必要。
+    /// `swizzle.rs` 本体は無変更）。`examples/
+    /// gemm_tiled_f32_swizzle_bench.rs`・
     /// `gemm.rs::CudaGemm::new_with_tiled_f32_swizzle`（`internal-
     /// diagnostics` feature 限定・診断用 opt-in 入口。本番既定コンスト
     /// ラクタ `CudaGemm::new` はこの経路を呼ばない）を呼ぶ側から到達する。
+    ///
+    /// 単位是正（イシュー #1139）: #1032（PR #1072）のレジスタブロッキ
+    /// ング導入で `TILED_F32` のブロックタイルは `TILE`（32。旧素朴カー
+    /// ネル基準）から `TILED_F32_BM`/`BN`（64）へ変わった。本関数は旧
+    /// `TILE` を渡しており [`tiled_f32_block_tile`] と単位が食い違って
+    /// いた（GB10・SM 数 48 では `select_swizzle_group_width` の最小候補
+    /// が 32 幅・64 幅いずれでも g8 で一致するため実測結果自体への影響
+    /// はないが、単一真実源を揃える是正）。
     pub fn tiled_f32_swizzle_group_width(num_sms: u32) -> u32 {
-        swizzle::select_swizzle_group_width(num_sms, crate::kernels::TILE, crate::kernels::TILE)
+        swizzle::select_swizzle_group_width(
+            num_sms,
+            crate::kernels::TILED_F32_BM,
+            crate::kernels::TILED_F32_BN,
+        )
     }
 
     /// イシュー #1034: `kernels::tiled_f32_source_with_swizzle`（非公開

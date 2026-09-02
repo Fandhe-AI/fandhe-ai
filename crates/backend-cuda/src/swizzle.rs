@@ -441,6 +441,23 @@ mod tests {
         assert_eq!(select_swizzle_group_width(128, 64, 64), 8);
     }
 
+    /// イシュー #1139: GB10（sm_121）実測 SM 数 48・`TILED_F32_BM`/`BN`
+    /// （#1032 以降 64。`kernels.rs` 参照）の組を直接ピン留めする。
+    /// `lib.rs::Diagnostics::tiled_f32_swizzle_group_width` が #1139 是正
+    /// 前は `kernels::TILE`（32）を単位として渡しており本組と食い違って
+    /// いたため、単位是正後の呼び出し値がこれまでの実測（32×32 単位。
+    /// `select_swizzle_group_width_pins_example_sm_count_28_to_g8` 系）と
+    /// 同じ g8 に帰着することを機械的に固定する。
+    ///
+    ///   usage(8)  = 8*64  + ceil(48/8)*64  = 512  + 6*64 = 512+384=896
+    ///   usage(16) = 16*64 + ceil(48/16)*64 = 1024 + 3*64 = 1024+192=1216
+    ///
+    /// -> 8 が最小。
+    #[test]
+    fn select_swizzle_group_width_pins_gb10_sm_count_48_tiled_f32_bm_bn_64_to_g8() {
+        assert_eq!(select_swizzle_group_width(48, 64, 64), 8);
+    }
+
     /// **全単射性の網羅テスト**（実装計画 1 節受け入れ基準 2 項）:
     /// `num_m_blocks, num_n_blocks ∈ 1..=17` x `group_width ∈ {1, 3, 8,
     /// 16}` の全組合せで、`0..num_m_blocks*num_n_blocks` の remap 結果が

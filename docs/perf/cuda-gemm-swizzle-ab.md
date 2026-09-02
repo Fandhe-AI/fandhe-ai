@@ -1001,3 +1001,10 @@ swizzle_g8_over_base(4096)=1.5439（§7.6 の 1.5434 と同水準。再現性を
 `crates/backend-cuda/examples/{wmma_tf32_staged_ptx_dump.rs（新規）,gemm_wmma_tf32_swizzle_bench.rs,
 cuda_floor_bench.rs}`・本ドキュメントに限定され、
 `ops.rs`／`gemm_auto.rs`／`swizzle.rs`（閾値定数・判定式）は無変更である。
+
+## 8. tiled f32（classic）経路への横展開（#1034・#1139）
+
+本番既定 f32 経路 `kernels::TILED_F32`（classic）への同型スウィズル横展開の設計根拠・判定基準・
+GB10 実機到達性の整理・結線可否判断（2026-09-03 時点: 実機到達不能によりブロック）は
+`docs/perf/cuda-gemm-tiled-f32-swizzle-ab.md` を正とする（本ファイルは f16 `mma.sync`・TF32
+opt-staged 経路の記録に留め、二重管理しない）。

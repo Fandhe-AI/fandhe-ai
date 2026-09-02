@@ -701,15 +701,17 @@ extern "C" __global__ void gemm_wmma_tf32(
 ///
 /// # remap の整数式（`swizzle.rs::swizzled_block_idx` と単一の設計を共有）
 ///
-/// `gemm.rs::launch_config` は `TILED_BLOCK_DIM`（`kernels::TILE` 一辺）
-/// 版のグリッドを `gridDim.x = num_n_blocks`・`gridDim.y = num_m_blocks`
-/// （`blockIdx.x` が N 方向・`blockIdx.y` が M 方向）で構築する
+/// `gemm.rs::tiled_f32_launch_config` は `TILED_F32_BLOCK_DIM`（16x16=256
+/// スレッド）版のグリッドを `gridDim.x = num_n_blocks`・`gridDim.y =
+/// num_m_blocks`（`blockIdx.x` が N 方向・`blockIdx.y` が M 方向。ブロック
+/// タイル一辺は `TILED_F32_BN`/`TILED_F32_BM`）で構築する
 /// （`kernels_mma.rs::mma_f16_source_with_swizzle` の grid レイアウトと
 /// 同一）。したがって remap 式自体は `mma_f16_source_with_swizzle` と
-/// 同一構造（`BM`/`BN` の代わりに `TILE` を単位とする）をそのまま適用
-/// できる。線形 index・ブロック数・積は `long long`（64 bit）で計算し、
-/// 最終座標を明示的に範囲検査してから `int` へ縮小する（PR #667
-/// codex-review P0 是正を踏襲。REQ-8「境界検査の省略禁止」）。
+/// 同一構造（イシュー #1139 是正: 単位は `TILE` ではなく `TILED_F32_BM`/
+/// `BN`）をそのまま適用できる。線形 index・ブロック数・積は `long long`
+/// （64 bit）で計算し、最終座標を明示的に範囲検査してから `int` へ縮小
+/// する（PR #667 codex-review P0 是正を踏襲。REQ-8「境界検査の省略
+/// 禁止」）。
 ///
 /// remap 後も、タイルロード時の三項ガード・C 書き込み時の `if (row < m &&
 /// col < n)`（`TILED_F32` 本体の既存手動境界チェック）は一切変更しない
@@ -758,7 +760,9 @@ pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::
         "    // イシュー #1034: L2 再利用のためのタイル→SM 割り当てスウィズル\n\
          \x20   // remap（swizzle.rs::swizzled_block_idx と同一式。\n\
          \x20   // kernels_mma.rs::mma_f16_source_with_swizzle と同型で\n\
-         \x20   // `BM`/`BN` の代わりに `TILE` を単位とする。本ファイル\n\
+         \x20   // `TILED_F32` のブロックタイル一辺 `BM`/`BN`（#1032 以降 64。\n\
+         \x20   // 呼び出し側 group_width の選択単位もイシュー #1139 で\n\
+         \x20   // `TILED_F32_BM`/`BN` へ揃えた）を単位とする。本ファイル\n\
          \x20   // tiled_f32_source_with_swizzle ドキュメンテーションコメント\n\
          \x20   // 参照）。PR #667 codex-review P0 是正を踏襲し、線形 index・\n\
          \x20   // ブロック数・積は `long long`（64 bit）で計算し、最終座標を\n\
@@ -991,5 +995,39 @@ mod tests {
             TILED_F32.contains("int block_row = blockIdx.y * BM;"),
             "TILED_F32 の元のアンカー行が失われています（本番カーネルは無変更のはず）"
         );
+    }
+
+    /// イシュー #1139 ゲート 0（REQ-8 境界検査の省略禁止）: swizzle は
+    /// ブロック→SM 割り当て（`block_row`/`block_col` のグローバル添字
+    /// 起点）のみを変え、タイルロード時の三項ガード・C 書き込み時の
+    /// `if (row < m) { … if (col < n) { … } }` という手動境界チェックは
+    /// 一切変更しないという契約（`tiled_f32_source_with_swizzle`
+    /// ドキュメンテーションコメント「remap 後も…変えないため」節）を
+    /// 生成ソースへ機械的にロックする。CUDA 実機を要さず Mac 含む通常
+    /// CI で常時実行できる（`.claude/rules/coding-rust.md`「カーネル
+    /// 実装の境界検査（REQ-8）」）。
+    #[test]
+    fn tiled_f32_source_with_swizzle_preserves_req8_boundary_guards() {
+        for group_width in [2u32, 8, 16] {
+            let src = tiled_f32_source_with_swizzle(group_width)
+                .unwrap_or_else(|err| panic!("group_width={group_width}: {err}"));
+
+            for needle in [
+                // A/B タイルロードの手動境界チェック（範囲外はゼロ充填）。
+                "(row < m && col < k) ? a[row * k + col] : 0.0f;",
+                "(b_row < k && b_col < n) ? b[b_row * n + b_col] : 0.0f;",
+                // エピローグ store の手動境界チェック（要素単位ガード）。
+                "if (row < m) {",
+                "if (col < n) {",
+                "c[row * n + col] = acc[i][j];",
+            ] {
+                assert!(
+                    src.contains(needle),
+                    "group_width={group_width}: REQ-8 境界検査断片 `{needle}` が \
+                     swizzle 後の生成ソースから失われています（境界検査を省略する \
+                     最適化は coding-rust.md で禁止）"
+                );
+            }
+        }
     }
 }
