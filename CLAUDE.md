@@ -113,6 +113,7 @@ fandhe-ai/
     │   ├── cuda-async-sync-removal-framework-compare-ab.md # CUDA 都度同期廃止（#1011）の framework-compare 実践規模 A/B 計測記録（DGX Spark GB10 実機計測完了。受入根拠は同一プロトコルの fresh 0.928 倍のみ。reuse 0.440 倍〈約 2.3 倍短縮〉は #1059 の resident forward/backward 経路変更との複合効果につき参考値〈codex-review P1 対応〉・checksum 複合判定 ok。#1083）
     │   ├── cuda-tf32-optin-parity.md # CUDA TF32 opt-in GEMM（`crate::precision`）の複合判定・実機実行手順・実測記入欄（本エージェント実行環境に CUDA 実機なしのため未実測明記。#1042）
     │   ├── cuda-wmma-f16-perf-triage.md # WMMA(f16) 性能外れ値（`wmma_f16_opt`≈`wmma_f16_basic` が `mma_sync_f16` を約3〜13倍〈形状依存。dim2048で約7倍・dim4096で約11〜13倍〉恒常的に下回る・tiled f32 カーネル単体も下回る〈GB10実測。#64 f16 assert red〉）の診断・GB10実機実測（2026-09-03）・大形状計測をカーネル単体プロトコルへ切替えたテスト是正記録・到達性整理（`wmma_f16`は`CudaGemmAuto::run_f16`経由でfacadeへ到達しうる一方`BackendOps::gemm`はf32 tiled固定・`mma_sync_f16`は証跡用途のみで本番非到達）・切り出し先（#1130・#1131）。#1123
+    │   ├── cuda-gemm-tiled-f32-swizzle-ab.md # tiled f32（classic）経路へのブロック実行順スウィズル（#1034）横展開の判定基準・#1164 後の到達性整理（整列N=1024/2048/4096はpipeline経路のためclassic非到達）・実機到達不能によるブロック判断記録（#1139）
     │   └── cuda-gemm-tiled-pipeline.md # cp.async 多段パイプライン（#1033）の GB10 実測記録・本番結線判断（イシュー #1137。bit 一致・parity 0 fail・N=1024/2048/4096 で 1.51〜1.74 倍改善を確認し `CudaGemm::run_tiled_f32` 系 3 入口へ形状条件付きで結線〈ADOPT〉。GB10実機実測2026-09-03）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
