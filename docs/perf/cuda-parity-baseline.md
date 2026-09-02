@@ -57,6 +57,11 @@ sm_121・2026 年 8 月時点実測）。関連: `docs/perf/cuda-tensor-core-mea
 | `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463e-3 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress`（記録元・改名前。現行は `wmma_tf32_routed_path_k4096_stress`。先頭呼出し） |
 | `wmma_tf32_staged` | `CudaGemm::run_wmma_tf32`（staged 利用可能・整列形状） | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463e-3 | `parity_nonregression.rs::parity_baselines_do_not_regress`（`check_wmma_tf32_staged_baseline`。#726・DGX Spark GB10 実機・コミット 06b24b4・2026-08-19。release/debug 各 2 回で同一値を確認。実測生値 mean_abs_diff=4.463436e-3。値は `wmma_tf32_opt` 同形状行と一致 — staged は opt と同一の FMA 契約・積和順序を保つ cp.async 二重バッファ版であることの実測裏付け） |
 | `mma_f16` | `CudaMmaGemm::run_f16` | 256×256×4096 | 9999 | 101/65536 (0.15%) | 7.646e-5 | `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（先頭呼出し） |
+| `mma_tf32` | `CudaMmaTf32Gemm::run_tf32` | 16×8×8 | 5000 | 12/128 (9.4%) | 1.885e-4 | `gemm_mma_tf32.rs::mma_tf32_matches_reference_across_shapes`（先頭ケース。イシュー #1122） |
+| `mma_tf32` | `CudaMmaTf32Gemm::run_tf32` | 64×64×64 | 1 | 666/4096 (16.3%) | 5.565e-4 | `gemm_mma_tf32.rs::mma_tf32_parity_smoke_env_adaptive`（env-adaptive smoke。イシュー #1122） |
+| `mma_tf32` | `CudaMmaTf32Gemm::run_tf32` | 4096×4096×4096 | 9001 | 2723936/16777216 (16.2%) | 4.446e-3 | `gemm_mma_tf32.rs::mma_tf32_k4096_stress`（イシュー #1122） |
+| `mma_tf32_vs_wmma_tf32_staged` | `CudaMmaTf32Gemm::run_tf32` vs `CudaGemm::run_wmma_tf32` | 512×512×512 | 6002 | 7/262144 (0.003%) | 6.919e-6 | `mma_tf32_vs_wmma_tf32_staged.rs::mma_tf32_matches_wmma_tf32_staged_across_shapes`（idx=2。イシュー #1122） |
+| `mma_tf32_vs_wmma_tf32_staged` | `CudaMmaTf32Gemm::run_tf32` vs `CudaGemm::run_wmma_tf32` | 4096×4096×4096 | 9002 | 50074/16777216 (0.30%) | 1.617e-4 | `mma_tf32_vs_wmma_tf32_staged.rs::mma_tf32_matches_wmma_tf32_staged_k4096_stress`（イシュー #1122） |
 
 **ルーティング変更（PR #678 codex-review P1 指摘対応・イシュー #500）**:
 `wmma_tf32_opt` 行は記録時点（#500 の staged カーネル追加前）ではエント
@@ -1550,3 +1555,108 @@ GB10 実機は本対応の実装時点で別プロセス使用中のため、判
 上記の実機非依存 falsification テストで検証済みだが、既存 `Some` 行の
 再実測（値の再確認）・`None` 行の実測完了は本対応のスコープに含まれない
 （引き続き実機実測とセットで行う。§6「ベースライン更新規約」）。
+
+## 11. イシュー #1122: mma_tf32 系 FAIL の切り分け（2026-09-03）
+
+`tests/gemm_mma_tf32.rs`・`tests/mma_tf32_vs_wmma_tf32_staged.rs` の
+`#[ignore]` 実機テスト（`mma_tf32_matches_reference_across_shapes`・
+`mma_tf32_k4096_stress`・`mma_tf32_matches_wmma_tf32_staged_across_shapes`・
+`..._k4096_stress`）は、`CudaMmaTf32Gemm::run_tf32`（生
+`mma.sync`(m16n8k8)/`ldmatrix`/`cp.async` 経路。イシュー #801）が
+`assert_parity`（厳密ゼロ fail 判定）に対して恒常的に FAIL する状態
+だった。残存 FAIL が「TF32 丸め誤差」（既存 tolerance が吸収しきれない
+既知の恒常特性。`wmma_tf32`／`wmma_tf32_opt`／`wmma_tf32_staged` と
+同種）か「機能欠陥」（フラグメントマッピング誤り等）かが未確定のまま
+だったため、本イシューで切り分けを行い REQ-2「2026-09-02 追記」の
+判定方式へ再割り当てした。
+
+### 11.1 切り分け方法
+
+診断専用テスト `crates/backend-cuda/tests/gemm_mma_tf32_triage.rs`
+（受け入れ判定には使わない。`.claude/rules/coding-rust.md`「TF32/f16
+Tensor Core 経路の parity テスト判定方式」の対象外）を用いた:
+
+- **(a)** GPU 出力 vs 通常の CPU 参照（`matmul_reference_fma`。丸めなし）
+- **(b)** GPU 出力 vs 「入力 A/B を PTX `cvt.rna.tf32.f32` 相当（ホスト側
+  `round_to_tf32_rna`）で事前に丸めてから計算した CPU 参照」——GPU 側
+  カーネルが TF32 丸め済み入力に対して機能的に正しい積和をしていれば、
+  (a) より (b) の乖離が大幅に縮小するはずである（f32 累算順序差レベル、
+  相対誤差 1e-6 程度以下）
+- **(c)** `CudaGemm::run_wmma_tf32`（staged 経路）出力 vs 同じ TF32 事前
+  丸め CPU 参照（(b) と同一の参照計算を staged 側にも適用）
+- **(d)** `mma.sync` 経路 vs staged 経路の直接（GPU-GPU）比較
+
+fail 要素の座標・`row%16`/`col%8` ヒストグラム（m16n8k8 フラグメント
+境界への偏り検出用）も出力し、機能欠陥だった場合の原因箇所を絞り込める
+ようにした。
+
+### 11.2 GB10 実測（2026-09-03・2 回実行で全値完全一致）
+
+| 形状 | (a) fail/total | (b) fail/total | (b) max_abs | (c) fail/total | (c) max_abs | (d) fail/total | (d) max_abs |
+|---|---|---|---|---|---|---|---|
+| 16×8×8 | — | 0/128 | 2.384e-7 | — | — | — | — |
+| 64×64×64 | — | 0/4096 | 3.815e-6 | — | — | — | — |
+| 512×512×512 | — | 6/262144 | 7.248e-5 | 101/262144 | 1.068e-4 | 5/262144 | 5.150e-5 |
+| 256×256×4096 | — | 195/65536 | 1.129e-3 | 406/65536 | 2.022e-3 | 204/65536 | 9.384e-4 |
+
+（実ホスト名は記載しない。実機環境は DGX Spark GB10・sm_121・CUDA 13.0。
+`docs/real-hardware-verification-env.md` 参照）
+
+### 11.3 結論
+
+- 16×8×8・64×64×64 は (b) で 0 fail（機能欠陥なし）。512×512×512・
+  256×256×4096（K=4096 相当規模）の (b) 残差は f32 累算順序差レベルの
+  桁であり、(a)（厳密判定・丸めなし参照）で観測される FAIL は
+  **TF32 丸め由来であり機能欠陥ではない**。
+- fail 座標は特定のフラグメント境界（`row%16`/`col%8`）へ偏っておらず、
+  フラグメントマッピング等の機能欠陥を示唆する分布は見られなかった。
+- (d)（mma.sync vs staged の直接比較）は (c)（staged vs TF32 事前丸め
+  参照）より乖離が小さい傾向があり、`mma_tf32` は staged 経路より参照値
+  （TF32 事前丸め後の理想値）に近い出力をしている。
+- 一方 `run_tf32` の起動前検証が課す整列制約（`n%4==0 && k%4==0`）に
+  より、最小形状 4×4×4（K=4 の単一累算のみ）でも `mma_tf32` vs CPU 参照
+  で 2/16 fail が生じる。よって `mma_tf32` vs CPU 参照の組合せには、
+  spec REQ-2「2026-09-02 追記」項目 1（厳密ゼロ fail 判定の対象形状）が
+  成立する形状が存在しない。
+
+### 11.4 再割り当て内容
+
+上記結論に基づき、`crates/backend-cuda/tests/common/parity_baseline.rs`
+へ `ParityPath::MmaTf32`（`mma_tf32` vs CPU f32 参照。全 10 形状〈9 形状
++ K=4096 ストレス〉を baseline 非後退方式）・`ParityPath::MmaTf32VsWmmaStaged`
+（`mma_tf32` vs `wmma_tf32_staged`。512×512×512・K=4096 の 2 形状のみ
+baseline 非後退方式、他 7 形状は GB10 実機でゼロ fail を確認済みのため
+`assert_parity` 厳密判定を維持）を追加した。§3 表・
+`tests/parity_nonregression.rs` の fixture 完全性検査（7 経路化）も
+併せて更新した。tolerance 定数（`RELATIVE_TOLERANCE`/
+`ABSOLUTE_RESCUE_THRESHOLD`）・カーネル実装は変更していない。
+
+### 11.4a `mma_tf32_parity_smoke_env_adaptive`（非 ignore・64×64×64）への
+追補適用（コーディネータ指示・ユーザー承認 2026-09-03）
+
+`gemm_mma_tf32.rs` の非 `#[ignore]` env-adaptive スモークテスト
+`mma_tf32_parity_smoke_env_adaptive`（64×64×64・seed=1）は GB10 実機で
+実行すると `assert_parity`（厳密判定）に FAIL していた。§11.2〜11.3 と
+同根の TF32 丸め由来（機能欠陥ではない）であることを踏まえ、
+`ParityPath::MmaTf32` へ 1 行追加した:
+
+- 形状 64×64×64・seed=1・GB10 実測: `fail_count=666/4096`・
+  `max_abs_diff=2.543e-3`・`max_rel_err=2.532e-1`・
+  `mean_abs_diff=5.565e-4`（ceiling は §4 と同じ「表示桁最終桁 +1」規約）
+
+テスト本体は env-adaptive の構造（CUDA 非搭載環境では `DriverUnavailable`
+等で早期 return・CUDA+NVRTC 搭載環境でのみ厳格に判定する分岐）を維持した
+まま、判定を `assert_parity` から `assert_no_parity_regression` へ切り替
+えた。コメント中の「#852 原因未特定の欠陥」という記述は「イシュー #1122
+で TF32 丸め由来と確定済み（本節参照）」へ更新した。§3 表にも本行を
+追加した。
+
+### 11.5 承認記録
+
+2026-09-03 ユーザー承認。判定方式の正は `docs/spec/04-requirements.md`
+REQ-2「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」
+（fandhe-ai-spec PR #63）。先行実装の型は PR #1124
+（`crates/backend-cuda/tests/gemm_wmma_tf32*.rs`・
+`tests/common/parity_baseline.rs::ParityBaseline`／
+`assert_no_parity_regression`・`tests/parity_nonregression.rs` の
+fixture 検査）に倣った。

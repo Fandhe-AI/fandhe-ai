@@ -27,7 +27,23 @@
 //! **実機依存の分離**: `tests/gemm_wmma_tf32_staged.rs` と同じ分岐
 //! パターン（環境適応スモークのみ通常 CI で実行、CUDA/NVRTC 非搭載・
 //! staged カーネル未対応環境では早期 return で green）。
+//!
+//! **設計判断（イシュー #1122）**: `mma.sync` と staged WMMA は K 分割・
+//! 命令列（累算順序）が異なるため、両経路の出力は bit-identical を
+//! 期待しない契約とする（bit-identical が成立するのは同一 FMA 順序を
+//! 持つ opt/basic カーネル間のみ。#995）。GB10 実機切り分け
+//! （2026-09-03・2 回実行で全値完全一致）の結果、512×512×512・K=4096 は
+//! 非ゼロ fail（TF32 丸め由来）を確認した一方、他 7 形状（64×64×64 等。
+//! 4×4×4 は bit 一致）は GB10 実機でゼロ fail を確認できた。よって
+//! 512×512×512・K=4096 の 2 ケースのみ baseline 非後退方式
+//! （`common::parity_baseline::assert_no_parity_regression`）へ切り替え、
+//! 残り 7 形状は引き続き厳密判定（`fandhe_ai_backend_cpu::assert_parity`）
+//! を維持する（ユーザー承認 2026-09-03。実測記録は
+//! `docs/perf/cuda-parity-baseline.md` §11）。
 
+mod common;
+
+use common::parity_baseline::{BASELINES, ParityBaseline, ParityPath, assert_no_parity_regression};
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaTf32Gemm};
 
 /// 決定的シードで A・B（f32）を生成し、`CudaGemm::run_wmma_tf32`
@@ -55,6 +71,32 @@ fn assert_mma_tf32_matches_wmma_tf32_staged(
     );
 
     fandhe_ai_backend_cpu::assert_parity(context, &c_mma, &c_staged);
+}
+
+/// baseline 非後退版の照合ヘルパー（イシュー #1122）。512×512×512・
+/// K=4096 のように GPU-GPU 相互比較でも非ゼロ fail（TF32 丸め由来）が
+/// 確認された形状に用いる（本ファイル冒頭コメント「設計判断」参照）。
+fn assert_mma_tf32_matches_wmma_tf32_staged_baseline(
+    mma: &CudaMmaTf32Gemm,
+    wmma: &CudaGemm,
+    baseline: &ParityBaseline,
+) {
+    let mut rng = bench_harness::rng::Xorshift64Star::new(baseline.seed);
+    let a = rng.fill_vec((baseline.m as usize) * (baseline.k as usize));
+    let b = rng.fill_vec((baseline.k as usize) * (baseline.n as usize));
+
+    let c_staged = wmma
+        .run_wmma_tf32(&a, &b, baseline.m, baseline.n, baseline.k)
+        .expect("CudaGemm::run_wmma_tf32 must succeed on a compute capability >= 8.0 test runner");
+    let c_mma = mma
+        .run_tf32(&a, &b, baseline.m, baseline.n, baseline.k)
+        .expect(
+            "CudaMmaTf32Gemm::run_tf32 must succeed on a compute capability >= 8.0 test runner",
+        );
+
+    let report = fandhe_ai_backend_cpu::compare(&c_mma, &c_staged)
+        .expect("shape must match baseline fixture");
+    assert_no_parity_regression(baseline.context, &report, baseline);
 }
 
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。
@@ -119,6 +161,10 @@ fn mma_tf32_matches_wmma_tf32_staged_across_shapes() {
     );
     let mma = CudaMmaTf32Gemm::new(&device).expect("TF32 mma.sync kernel compilation must succeed");
 
+    // 512x512x512（idx=2, seed=6002）のみ非ゼロ fail（TF32 丸め由来）が
+    // GB10 実機で確認されたため baseline 非後退方式へ切り替える
+    // （本ファイル冒頭コメント「設計判断」参照）。他 7 形状は厳密判定
+    // （ゼロ fail が成立することを実機で確認済み）を維持する。
     let cases: &[(u32, u32, u32)] = &[
         (64, 64, 64),
         (128, 128, 128),
@@ -130,13 +176,30 @@ fn mma_tf32_matches_wmma_tf32_staged_across_shapes() {
         (4, 4, 4),
     ];
     for (idx, &(m, n, k)) in cases.iter().enumerate() {
-        let context = format!("shape m={m} n={n} k={k}");
-        assert_mma_tf32_matches_wmma_tf32_staged(&mma, &wmma, &context, 6000 + idx as u64, m, n, k);
+        let seed = 6000 + idx as u64;
+        if (m, n, k) == (512, 512, 512) {
+            let baseline = BASELINES
+                .iter()
+                .find(|b| b.path == ParityPath::MmaTf32VsWmmaStaged && b.k == 512)
+                .expect("MmaTf32VsWmmaStaged の 512x512x512 baseline 行が存在しません");
+            assert_eq!(
+                baseline.seed, seed,
+                "baseline の seed がテストループの seed と一致しません"
+            );
+            assert_mma_tf32_matches_wmma_tf32_staged_baseline(&mma, &wmma, baseline);
+        } else {
+            let context = format!("shape m={m} n={n} k={k}");
+            assert_mma_tf32_matches_wmma_tf32_staged(&mma, &wmma, &context, seed, m, n, k);
+        }
     }
 }
 
 /// K 大のストレスケース（M=N=K=4096。`tests/gemm_wmma_tf32_staged.rs` の
 /// K4096 ストレスケースと揃える）。#852 で実機再実測済み。
+///
+/// イシュー #1122 の GB10 実機切り分けで非ゼロ fail（TF32 丸め由来）が
+/// 確認されたため、baseline 非後退方式へ切り替える（本ファイル冒頭
+/// コメント「設計判断」参照）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn mma_tf32_matches_wmma_tf32_staged_k4096_stress() {
@@ -148,5 +211,9 @@ fn mma_tf32_matches_wmma_tf32_staged_k4096_stress() {
         wmma.wmma_tf32_staged_unavailable_reason()
     );
     let mma = CudaMmaTf32Gemm::new(&device).expect("TF32 mma.sync kernel compilation must succeed");
-    assert_mma_tf32_matches_wmma_tf32_staged(&mma, &wmma, "K=4096 stress", 9002, 4096, 4096, 4096);
+    let baseline = BASELINES
+        .iter()
+        .find(|b| b.path == ParityPath::MmaTf32VsWmmaStaged && b.m == 4096)
+        .expect("MmaTf32VsWmmaStaged の K=4096 ストレスケース baseline 行が存在しません");
+    assert_mma_tf32_matches_wmma_tf32_staged_baseline(&mma, &wmma, baseline);
 }

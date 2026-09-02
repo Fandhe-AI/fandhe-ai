@@ -18,42 +18,61 @@
 //! は pass。`mma_tf32_matches_reference_across_shapes`・
 //! `mma_tf32_k4096_stress` は #839 時点の機能欠陥（A フラグメント象限
 //! マッピング誤り。`kernels_mma_tf32.rs::LDSM_A_FRAG` 参照）修正後も
-//! FAIL が残る。この残存 FAIL の原因は TF32 丸め誤差・機能欠陥のいずれ
-//! とも確定していない（`wmma_tf32` との GPU-GPU 相互一致誤差が CPU 参照
-//! 比較より小さいことは、両経路が共有する TF32 丸め誤差成分の相殺でも
-//! 説明でき、TF32 丸め誤差説への反証にはならない。
-//! `docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 に実測ログ・訂正経緯を記録）。
+//! FAIL が残る。
+//!
+//! **イシュー #1122 の切り分け完了（2026-09-03・GB10 実機・2 回実行で
+//! 全値完全一致）**: 入力を TF32 RNA へ事前丸めした CPU 参照との比較で
+//! 16×8×8・64×64×64 は 0 fail（機能欠陥なし）、512×512×512・K=4096 の
+//! 残差は累算順序差レベルであり、fail 座標にフラグメント境界への偏りは
+//! なかった。したがって残存 FAIL は TF32 丸め由来であり機能欠陥では
+//! ない。一方 `run_tf32` の起動前検証が課す整列制約（`n%4==0 &&
+//! k%4==0`）のため、最小形状 4×4×4（K=4 の単一累算のみ）でも 2/16 fail
+//! が生じ、`mma_tf32` vs CPU 参照の組合せには厳密ゼロ fail が成立する
+//! 形状が存在しない（spec REQ-2「2026-09-02 追記」項目 1 の対象外）。
+//! よって `mma_tf32_matches_reference_across_shapes`・
+//! `mma_tf32_k4096_stress` は GB10 実測 baseline 非後退方式
+//! （`common::parity_baseline::assert_no_parity_regression`）で判定する
+//! （ユーザー承認 2026-09-03。実測記録・承認記録は
+//! `docs/perf/cuda-parity-baseline.md` §11）。
 
+mod common;
+
+use common::parity_baseline::{BASELINES, ParityBaseline, ParityPath, assert_no_parity_regression};
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaTf32Gemm};
 
-/// 決定的シードで A・B（f32）を生成し、CPU 参照実装と `run_tf32` の出力を
-/// `fandhe_ai_backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
-/// 絶対誤差 1e-5 未満」の唯一の実体）で照合する
-/// （`tests/gemm_wmma_tf32_staged.rs::assert_wmma_tf32_staged_parity` と
-/// 同一手順）。
-fn assert_mma_tf32_parity(
-    gemm: &CudaMmaTf32Gemm,
-    context: &str,
-    seed: u64,
-    m: u32,
-    n: u32,
-    k: u32,
-) {
-    let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
-    let a = rng.fill_vec((m as usize) * (k as usize));
-    let b = rng.fill_vec((k as usize) * (n as usize));
+/// baseline 非後退版の照合ヘルパー（イシュー #1122）: CPU f32 参照との
+/// 比較を `assert_no_parity_regression` で判定する。`mma_tf32` vs CPU 参照
+/// には厳密ゼロ fail が成立する形状が存在しないため（本ファイル冒頭
+/// コメント参照）、`fandhe_ai_backend_cpu::assert_parity`（厳密判定）では
+/// なく本関数を使う。`baseline` は `common::parity_baseline::BASELINES` の
+/// `ParityPath::MmaTf32` 行を渡す（本ファイルの全 `#[test]` がこの経路
+/// 経由で判定する。厳密判定はこの経路には存在しない――全形状が非後退
+/// 方式である旨は本ファイル冒頭コメント参照）。
+fn assert_mma_tf32_baseline(gemm: &CudaMmaTf32Gemm, baseline: &ParityBaseline) {
+    let mut rng = bench_harness::rng::Xorshift64Star::new(baseline.seed);
+    let a = rng.fill_vec((baseline.m as usize) * (baseline.k as usize));
+    let b = rng.fill_vec((baseline.k as usize) * (baseline.n as usize));
 
-    let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+    let mut c_ref = vec![0.0f32; (baseline.m as usize) * (baseline.n as usize)];
     fandhe_ai_backend_cpu::matmul_reference_fma(
-        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+        &a,
+        &b,
+        &mut c_ref,
+        baseline.m as usize,
+        baseline.n as usize,
+        baseline.k as usize,
     )
-    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    .expect("matmul_reference_fma shape validation must pass for well-formed baseline input");
 
-    let c_gpu = gemm.run_tf32(&a, &b, m, n, k).expect(
-        "CudaMmaTf32Gemm::run_tf32 must succeed on a compute capability >= 8.0 test runner",
-    );
+    let c_gpu = gemm
+        .run_tf32(&a, &b, baseline.m, baseline.n, baseline.k)
+        .expect(
+            "CudaMmaTf32Gemm::run_tf32 must succeed on a compute capability >= 8.0 test runner",
+        );
 
-    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+    let report =
+        fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref).expect("shape must match baseline fixture");
+    assert_no_parity_regression(baseline.context, &report, baseline);
 }
 
 /// `CudaMmaTf32Gemm::new` は CUDA 非搭載環境で panic せず型付きエラーを
@@ -95,12 +114,13 @@ fn new_does_not_panic_and_returns_typed_result() {
 /// `DriverUnavailable` 分岐で早期 return し green のまま。コンパイル・
 /// 起動失敗を誤って parity 通過とみなす退行を防ぐため、CUDA+NVRTC
 /// 環境に限っては厳格化する。`.claude/rules/coding-rust.md` テスト・
-/// ベンチ節）。**#852 実機再実測（GB10）**: 64x64x64 形状でも原因未特定の
-/// 欠陥に起因する FAIL が残る（`fail_count=666/4096`。
-/// `docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4）。本経路は本番未結線・
-/// 凍結継続のため通常 CI（GPU 非搭載）には影響しないが、将来 GPU 搭載
-/// CI／実機セッションでこのテストを走らせると FAIL する状態が残って
-/// いる点に注意（凍結解除判断の一部として #835 系で扱う）。
+/// ベンチ節）。**#852 実機再実測（GB10）**: 64x64x64 形状でも
+/// `fail_count=666/4096` の FAIL が残る。**イシュー #1122 で TF32 丸め
+/// 由来と確定済み**（`docs/perf/cuda-parity-baseline.md` §11 の切り分け
+/// 結果。機能欠陥ではない）。本経路は本番未結線・凍結継続のため通常 CI
+/// （GPU 非搭載）には影響しないが、GPU 搭載 CI／実機セッションでこの
+/// テストを走らせる場合は baseline 非後退方式（下記 `assert_mma_tf32_
+/// baseline`）で判定する（ユーザー承認 2026-09-03）。
 #[test]
 fn mma_tf32_parity_smoke_env_adaptive() {
     let device = match CudaDevice::new(0) {
@@ -128,7 +148,15 @@ fn mma_tf32_parity_smoke_env_adaptive() {
 
     // 64x64x64: ブロックタイル（MMA_TF32_BM=64/MMA_TF32_BN=64）ちょうど 1
     // 個・K タイル（MMA_TF32_BK=16）を 4 段跨ぐ最小規模の網羅形状。
-    assert_mma_tf32_parity(&gemm, "smoke 64x64x64", 1, 64, 64, 64);
+    // TF32 丸め由来の恒常 FAIL（イシュー #1122・§11）のため、厳密判定
+    // ではなく baseline 非後退方式を使う（env-adaptive の分岐構造――
+    // CUDA 非搭載では上記で早期 return・CUDA+NVRTC ありでは厳格判定――
+    // はそのまま維持する）。
+    let baseline = BASELINES
+        .iter()
+        .find(|b| b.path == ParityPath::MmaTf32 && b.context.contains("smoke_env_adaptive"))
+        .expect("MmaTf32 の smoke_env_adaptive baseline 行が存在しません");
+    assert_mma_tf32_baseline(&gemm, baseline);
 }
 
 /// `CudaMmaTf32Gemm::new` 経由の `TensorCoreUnsupported` が `gemm_mma.rs`
@@ -295,6 +323,12 @@ fn run_tf32_rejects_misaligned_shape_without_launch() {
 /// 一致）の本体。#852 で実機再実測済み（残存 FAIL は
 /// `docs/perf/cuda-gemm-mma-tf32-ab.md` §8 参照）
 /// （#802 が実機で実行・確認する。本ファイル冒頭コメント「重要」参照）。
+///
+/// **イシュー #1122 で厳密判定から baseline 非後退判定へ再割り当て**:
+/// 整列制約により厳密ゼロ fail が成立する形状が存在しないため
+/// （本ファイル冒頭コメント参照）、`assert_mma_tf32_baseline` で
+/// `common::parity_baseline::BASELINES` の `ParityPath::MmaTf32` 行
+/// （K=4096 ストレスケースを除く 9 形状）を順に検査する。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn mma_tf32_matches_reference_across_shapes() {
@@ -302,36 +336,44 @@ fn mma_tf32_matches_reference_across_shapes() {
     let gemm =
         CudaMmaTf32Gemm::new(&device).expect("TF32 mma.sync kernel compilation must succeed");
 
-    let cases: &[(u32, u32, u32)] = &[
-        (16, 8, 8),   // 1 mma.sync 呼び出しちょうど（M=16,N=8,K=8）
-        (64, 64, 64), // ブロックタイルちょうど 1 個
-        (128, 128, 128),
-        (512, 512, 512),
-        // ブロックタイル・K タイル非倍数だが cp.async 4 要素整列条件は
-        // 満たす形状（60/68/36 等はいずれも 4 の倍数）。
-        (60, 68, 36),
-        (68, 60, 20),
-        // M 端・K タイル端を踏む非正方形状（96×68×72）。
-        (96, 68, 72),
-        // 非正方。
-        (64, 96, 256),
-        // 極小（4 の倍数の最小非自明形状）。
-        (4, 4, 4),
-    ];
-    for (idx, &(m, n, k)) in cases.iter().enumerate() {
-        let context = format!("shape m={m} n={n} k={k}");
-        assert_mma_tf32_parity(&gemm, &context, 5000 + idx as u64, m, n, k);
+    // 形状の内訳（BASELINES 側コメント参照）:
+    // 16x8x8（1 mma.sync 呼び出しちょうど）・64x64x64（ブロックタイル
+    // ちょうど 1 個）・128x128x128・512x512x512・60x68x36／68x60x20
+    // （ブロックタイル・K タイル非倍数だが 4 要素整列は満たす）・
+    // 96x68x72（M 端・K タイル端）・64x96x256（非正方）・4x4x4（極小）。
+    // 対象行は本テストのシード規則（5000 + idx）を持つ行に限定する
+    // （K=4096 ストレス〈seed 9001〉と smoke_env_adaptive〈seed 1〉は
+    // 別テストの baseline 行のため除外）。
+    let mut count = 0usize;
+    for baseline in BASELINES
+        .iter()
+        .filter(|b| b.path == ParityPath::MmaTf32 && (5000..6000).contains(&b.seed))
+    {
+        assert_mma_tf32_baseline(&gemm, baseline);
+        count += 1;
     }
+    assert_eq!(
+        count, 9,
+        "MmaTf32 fixture の形状網羅ケース数が想定（9）と異なります（K=4096 \
+         ストレスケースを除く）"
+    );
 }
 
 /// K 大のストレスケース（`tests/cpu_cuda_mma_parity.rs`
 /// `mma_f16_k4096_stress` と同じ形状。PoC-v2-3 の M=N=K=4096 と揃える）。
 /// #852 で実機再実測済み（本ファイル冒頭コメント「重要」参照）。
+///
+/// イシュー #1122 で baseline 非後退判定へ再割り当て（上記
+/// `mma_tf32_matches_reference_across_shapes` と同じ理由）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn mma_tf32_k4096_stress() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm =
         CudaMmaTf32Gemm::new(&device).expect("TF32 mma.sync kernel compilation must succeed");
-    assert_mma_tf32_parity(&gemm, "K=4096 stress", 9001, 4096, 4096, 4096);
+    let baseline = BASELINES
+        .iter()
+        .find(|b| b.path == ParityPath::MmaTf32 && b.m == 4096)
+        .expect("MmaTf32 の K=4096 ストレスケース baseline 行が存在しません");
+    assert_mma_tf32_baseline(&gemm, baseline);
 }
