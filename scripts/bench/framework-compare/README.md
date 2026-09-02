@@ -368,25 +368,28 @@ candle 超え（各 5 回計測の中央値）」の受け入れ判定には非�
 - **正式系列**（#1031 のゲート判定の正）: `bench-fandhe/Cargo.toml` の承認済み
   ピン（現行 `=0.6.0`）でビルドしたまま計測する。コミット済み manifest・
   `Cargo.lock` は変更しない
-- **参考系列**（次回 crates.io 公開前の見込み値）: ノード側でのみ
-  `cargo build --release -p bench-fandhe --config 'patch.crates-io.fandhe-ai.path="<facade 絶対パス>"'`
-  により本体 `crates/facade`（rsync 済み HEAD ツリー）へ差し替えてビルドする。
-  **`[patch]` セクション・`.cargo/config.toml` は一切コミットしない**（CLI 引数
-  のみで与える。依存ポリシー〈`.claude/rules/deps-policy.md` 第 9 区分〉の
-  「承認済みピンの完全固定」を壊さないため）。`bench-fandhe` の `VERSION`
-  定数は crates.io 版のまま変わらないため JSONL の `framework_version` では
-  両系列を区別できず、**ファイル名ラベル**（例: `head-<short sha>`）で区別する。
-  参考系列は #1031 の正式達成判定には使わない（次回ピン更新後の正式再計測で
-  確定する）
+- **参考系列**（次回 crates.io 公開前の見込み値）: `GEMM_GATE_PATCH_FACADE_PATH=
+  <facade 絶対パス>` を指定して `run_gemm_gate_cuda.sh` を呼ぶと、本体
+  `crates/facade`（rsync 済み HEAD ツリー）への path 差し替えビルド
+  （`--config 'patch.crates-io.fandhe-ai.path="<facade 絶対パス>"'`）と計測を
+  スクリプト内の 1 invocation で不可分に実行する（ビルドと計測の間に別の
+  `cargo` コマンドが割り込む窓を作らない設計。イシュー #1166 の事故対応。
+  詳細は下記「バイナリ同一性検証」節）。**`[patch]` セクション・
+  `.cargo/config.toml` は一切コミットしない**（CLI 引数のみで与える。依存
+  ポリシー〈`.claude/rules/deps-policy.md` 第 9 区分〉の「承認済みピンの完全
+  固定」を壊さないため）。`bench-fandhe` の `VERSION` 定数は crates.io 版の
+  まま変わらないため JSONL の `framework_version` では両系列を区別できず、
+  **ファイル名ラベル**（例: `head-<short sha>`）で区別する。参考系列は
+  #1031 の正式達成判定には使わない（次回ピン更新後の正式再計測で確定する）
 
 ```bash
 cd scripts/bench/framework-compare
 # 正式系列（現行ピン）:
 bash run_gemm_gate_cuda.sh 0.6.0
 
-# 参考系列（#1164 結線後 HEAD。ノード側で事前に --config patch ビルド後）:
-cargo build --release -p bench-fandhe --config 'patch.crates-io.fandhe-ai.path="'"$HOME"'/work/rust-ai-library-run/crates/facade"'
-GEMM_GATE_SKIP_BUILD=1 bash run_gemm_gate_cuda.sh head-<short sha>
+# 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
+GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
+  bash run_gemm_gate_cuda.sh head-<short sha>
 
 # 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
 python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.6.0.jsonl
@@ -396,9 +399,23 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
 - `run_gemm_gate_cuda.sh <label>` はラベル（`[A-Za-z0-9._-]+` のみ許可）ごとに
   N=1024/2048/4096 それぞれで `bench-fandhe gemm cuda <N> reuse` と
   `bench-candle gemm cuda <N> fresh`（candle は reuse 非対応）を交互に 5 回ずつ
-  起動し `results/raw/results-dgx-gemm-gate-<label>.jsonl` へ記録する。
-  `GEMM_GATE_SKIP_BUILD=1` でビルドを省略できる（参考系列用）。失敗は
+  起動し `results/raw/results-dgx-gemm-gate-<label>.jsonl` へ記録する。失敗は
   `results/raw/skipped-dgx-gemm-gate-<label>.log` に記録する（数値を捏造しない）
+- **バイナリ同一性検証（イシュー #1166）**: `bench-fandhe` をビルドした直後
+  （他の `cargo` コマンドを挟まず）に `target/release/bench-fandhe` の
+  sha256 と `fandhe-ai` の依存解決元（`cargo tree` の path/registry 判定）を
+  `results/raw/manifest-dgx-gemm-gate-<label>.json` へ記録し、計測ループ開始
+  直前に再計算した sha256 と突き合わせる。過去に、確認目的の素の
+  `cargo tree` を挟んだだけで Cargo.lock が registry 解決へ暗黙に再ロックされ、
+  意図しない登録版 binary へ差し替わって計測してしまった事故が実際に発生した
+  （`docs/perf/logs/cuda-gemm-candle-gate-1142/env_info.txt`「参考系列ビルドの
+  事故と対処」節）。この検証は fail-closed（manifest 欠落・sha256 不一致なら
+  測定を一切実行せず exit 1。security.md A08）
+  - `GEMM_GATE_SKIP_BUILD=1` は「同一 label で直前に成功した本スクリプト実行
+    が残した manifest と binary が一致する場合に限り」ビルドを省略する用途
+    （失敗 run の再実行等）。参考系列の外部事前ビルド＋`GEMM_GATE_SKIP_BUILD=1`
+    という旧 2 段構成は、ビルドと計測の間に任意の `cargo` コマンドが割り込む
+    窓を生むため廃止し、上記 `GEMM_GATE_PATCH_FACADE_PATH` に統合した
 - `compare_gemm_gate.py JSONL...` は size ごとに fandhe-ai/candle 各 5 件の
   `median_s` から中央値を算出し `fandhe_median_s <= candle_median_s` を判定する。
   以下はいずれも「判定不能」として明示し性能値を確定表示しない（fail-closed。
