@@ -99,6 +99,49 @@
   正規化統計の「`f64` 相当」実装形として適用する（イシュー #1102。ユーザー承認
   2026-09-01。GB10 実機実測・Metal 実機実測: `docs/perf/cuda-parity-baseline.md`
   §9.8〜§9.10）。契約の片側変更（一部バックエンドのみ精度を上げる等）は P1
+- **TF32/f16 Tensor Core 経路の parity テスト判定方式（P1。テストの弱体化禁止の
+  例外を明記する規約。正本仕様 `docs/spec/04-requirements.md` REQ-2「2026-09-02
+  追記・Tensor Core 経路の受け入れ判定方式」〈fandhe-ai-spec PR #63〉が正式な
+  合格条件として規定する形状別判定方式の転記であり、受け入れ基準の正は spec 側）**: `wmma_tf32`／`wmma_tf32_opt`／`wmma_tf32_staged` 等の
+  Tensor Core 経路は、DGX Spark GB10（sm_121）実機実測で厳密ゼロ fail（複合判定
+  `fandhe_ai_backend_cpu::assert_parity`。全要素が相対誤差 1e-3 未満または絶対誤差
+  1e-5 未満）が成立しない形状が存在することが判明している（TF32 丸め〈f32 仮数部
+  23bit→10bit〉に由来する K 方向蓄積誤差の既知の恒常特性。opt/basic/staged
+  カーネル間で bit-identical、sm_86/GB10 世代間でも差分なし。
+  `docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md`・
+  `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md`〈#995〉）。この既知
+  特性を持つ形状に厳密ゼロ fail 判定を適用すること自体がテスト設計の不整合で
+  あり、**カーネル側の数値バグとは区別する**。よって:
+  - **厳密ゼロ fail 判定**（`assert_parity`）は、GB10 実機実測でゼロ fail の成立が
+    確認された形状にのみ適用する
+  - **実測でゼロ fail が成立しないと判明した形状**は、実測 baseline 非後退方式
+    （`fail_count` が記録値以下・総要素数が記録値と完全一致・`mean_abs_diff`／
+    `max_abs_diff`／`max_rel_err` が記録 ceiling 以下であることを fail-closed に
+    機械検査する。max 系 ceiling は fail_count 同数のまま個別要素の誤差が大幅
+    悪化し平均で相殺される回帰を検出するための必須項目〈spec 同追記の規定〉。
+    `crates/backend-cuda/tests/common/parity_baseline.rs::
+    ParityBaseline`／`assert_no_parity_regression`）を正式な受け入れ判定とする。
+    baseline の新規追加・更新は必ず GB10 実機実測値を伴う（推定値の記入は禁止。
+    `docs/perf/cuda-parity-baseline.md` 「ベースライン更新規約」）
+  - **tolerance 定数**（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`。
+    `crates/backend-cpu/src/parity.rs`）**の変更は本規約の対象外であり、引き続き
+    ユーザー承認必須**（本規約は判定方式〈テスト個別の合否基準〉の使い分けを
+    定めるものであり、統一複合判定の閾値自体を変更するものではない）
+  - PR #1115（イシュー #1106）で確定した「本体 `assert_parity` は green 必須の
+    まま維持し、既知の不合格分布に対する非後退監視を別テストとして併設する」
+    設計（`mma_f16_k4096_stress`／`tensor_core_parity_record`〈tf32 部分〉／
+    `gemm_tf32_optin_on_matches_cpu_across_shapes`・および同型で追加した
+    `wmma_f16_k4096_stress`／`wmma_f16_opt_k4096_stress` の計 5 テスト）は
+    **本規約が覆すものではなく、現状維持**とする。本規約が定める「対象形状を
+    縮小し baseline 非後退方式へ移行する」方式（案 A。イシュー #1106・PR #1124）
+    は、上記 5 テストとは別の対応方式として並立する（どちらを適用するかは
+    テストの記録元・ヒストリーに応じて個別に判断してよく、両方式の間で優劣を
+    定めない）
+  - 承認記録: 2026-09-02 ユーザー承認（イシュー #1106 のスコープ分割コメント。
+    #995 の GB10 世代差記録が判断根拠）。spec 側の正式化は fandhe-ai-spec PR #63
+    （2026-09-02 マージ済み）・実装リポ PR #1128（`docs/spec` submodule 前進）で
+    完了しており、本節はその転記（経緯の一次記録は
+    `docs/cuda-tensor-core-parity-judgment-decision.md`）
 - **設計文書との整合（P1/P2）**: 方式決定済みの領域（`docs/backend-metal-wgpu-decision.md`・
   `docs/dispatch-rules-design.md`・`docs/typed-shape-design.md`・
   `docs/memory-pool-design.md` 等）と矛盾する実装は、設計文書の改訂とセットでない限り
