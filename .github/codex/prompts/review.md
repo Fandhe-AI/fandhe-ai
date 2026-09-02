@@ -127,9 +127,12 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 - **テストの弱体化**（受け入れ基準対応テストの削除、`#[ignore]` 追加によるごまかし、
   実機非依存テストの実機依存化。実機〈DGX Spark GB10・Metal〉依存テストの `#[ignore]`
   分離の解除を含む）: **P1**。**例外**: TF32/f16 Tensor Core 経路の parity テストで、
-  GB10 実機実測により厳密ゼロ fail 判定が成立しないと確認された形状を実測 baseline
-  非後退方式へ移行する変更は、AGENTS.md「数値契約の統一」節が定める明示的な例外に
-  該当し弱体化として扱わない（承認記録・移行条件は AGENTS.md 同節を正とする）
+  実機実測により厳密ゼロ fail 判定が成立しないと確認された形状を実測 baseline
+  非後退方式（fail_count・総要素数一致・mean_abs_diff/max_abs_diff/max_rel_err
+  ceiling の fail-closed 検査）へ移行する変更は、正本仕様 `docs/spec/04-requirements.md`
+  REQ-2「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」が正式な合格条件として
+  規定する形状別判定方式に該当し、弱体化として扱わない（受け入れ基準の正は spec 側。
+  適用条件の詳細は AGENTS.md「数値契約の統一」節に同追記へ整合させて転記する）
 - **CI ワークフローの規約違反**（.claude/rules/ci.md。`runs-on: self-hosted` の指定・
   self-hosted への逆戻り〈本リポジトリは public 区分のため GitHub ホステッド
   （`ubuntu-latest`）既定。例外は codex-review の codex 実行ジョブのみ。#457 Phase 1〜3

@@ -34,7 +34,7 @@
 - 受け入れ基準（`docs/spec/04-requirements.md`）に対応するテストを同一 PR に含める
 - 実機（DGX Spark GB10・Metal 実機）依存テストは `#[ignore]` で分離し、CI（GitHub ホステッド。[`ci.md`](./ci.md)）で実行可能なテストと区別する
 - バックエンド間数値一致テストの許容誤差（tolerance）を単独で緩和しない（ポリシー除外リストのブラインドスポット対象）
-- **TF32/f16 Tensor Core 経路の parity テスト判定方式**: GB10（sm_121）実機実測で厳密ゼロ fail（`fandhe_ai_backend_cpu::assert_parity`）が成立しないと確認済みの形状は、実測 baseline 非後退方式（`crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline`。GB10 実機実測値を伴う `fail_count`/`mean_abs_diff` ceiling の非後退検査）を正式な受け入れ判定とする。厳密ゼロ fail 判定は実測で成立が確認された形状に限る。tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）自体の変更は本規約の対象外で、引き続きユーザー承認必須（詳細・承認記録は `AGENTS.md`「数値契約の統一」節・`docs/perf/cuda-parity-baseline.md`）
+- **TF32/f16 Tensor Core 経路の parity テスト判定方式（spec REQ-2 2026-09-02 追記の形状別判定方式）**: 受け入れ基準の正は `docs/spec/04-requirements.md` REQ-2「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」（fandhe-ai-spec PR #63）。厳密ゼロ fail 判定（`fandhe_ai_backend_cpu::assert_parity`）は実機実測で成立が確認された形状に限り、成立しない形状は実測 baseline 非後退方式（`crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline`。GB10 実機実測値を伴う `fail_count`・総要素数一致・`mean_abs_diff`/`max_abs_diff`/`max_rel_err` ceiling の fail-closed 非後退検査）を正式な受け入れ判定とする。baseline の追加・更新は実機実測値のみ・人間承認必須。tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）自体の変更は本規約の対象外で、引き続きユーザー承認必須（経緯・承認記録は `docs/cuda-tensor-core-parity-judgment-decision.md`・`docs/perf/cuda-parity-baseline.md`）
 - ベンチは 5 回計測の中央値を採用し、学習系回帰テストには決定的シード設定ユーティリティを使う
 
 ## 関連ルール
