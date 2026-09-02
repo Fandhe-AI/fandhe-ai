@@ -18,7 +18,8 @@
 
 設計方針（`compare_ab.py`・`summarize.py` と同じ思想。tolerance 定数・
 `checksums_match` は `checksum_contract.py` を単一真実源として共有する）:
-- fail-closed: レコード不足（size ごとに fandhe-ai/candle 各 5 件未満）・
+- fail-closed: レコード件数が size ごとに fandhe-ai/candle 各ちょうど 5 件で
+  ない（過不足いずれも判定不能。標本差し替え防止。イシュー #1166）・
   `median_s`/`checksum` が不正値（非正・NaN・Infinity 等）・要素単位検証
   （`parity_*` フィールド。イシュー #970）が `parity_fail_count > 0` また
   は `parity_total != size*size`・checksum が本体の数値一致契約（相対
@@ -121,6 +122,22 @@ def load_rows(path):
                     f"{path}:{lineno}: JSON object ではない（{type(obj).__name__}） — skipped"
                 )
                 continue
+            # codex-review P0 指摘（PR #1166）: `tf32` は外部 JSONL 由来の値
+            # であり、`r.get("tf32", False) is True` のみで判定すると `1`・
+            # `"true"` 等の bool 以外の不正値は `is True` が常に False を
+            # 返すため「tf32 ではない」と誤って FP32 ゲートへ混入する
+            # fail-open の欠陥だった（summarize.py `load_rows` の同種検証
+            # と同じ理由。イシュー #1042 codex-review P0 指摘の再発）。
+            # キー欠損（`False` 扱い。互換規約）または厳密な `bool` 型で
+            # あることをここで検証し、不正型の行は理由付きで丸ごとスキップ
+            # する（fail-closed: `_matching_rows` の `is True` 判定へ到達
+            # させず、FP32/TF32 いずれのゲートにも黙って含めない）。
+            if "tf32" in obj and not isinstance(obj["tf32"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'tf32' フィールド型（bool を期待。"
+                    f"実際: {obj['tf32']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -204,20 +221,31 @@ def evaluate_size(rows, size):
     candle_rows = _matching_rows(rows, "candle", CANDLE_MODE, size)
     result = {"size": size, "fandhe_n": len(fandhe_rows), "candle_n": len(candle_rows)}
 
-    if len(fandhe_rows) < MIN_RECORDS:
+    # 件数は厳密に MIN_RECORDS 件と一致することを要求する（codex-review P1
+    # 指摘・PR #1166: 6 件以上ある場合に無条件で `[-MIN_RECORDS:]` の末尾を
+    # 採用する実装だと、不利な計測結果が出た後に有利な run を追記するだけで
+    # 判定対象の標本を差し替えられてしまい、fail-closed の再現性契約
+    # （coding-rust.md「ベンチは 5 回計測の中央値」・AGENTS.md「捏造しない」）
+    # が成り立たない。本ツールの入力生成元 `run_gemm_gate_cuda.sh` は 1 回の
+    # 起動ごとに `: > "$OUT"` で出力ファイルを新規作成し、N ごとに
+    # fandhe-ai/candle を厳密に 5 回ずつ起動する設計（README「計測プロトコル」
+    # 節）のため、正常な入力では過不足は生じない。改変不能な run/session ID
+    # フィールドは JSONL スキーマに存在しないため、件数の完全一致検証を
+    # 標本差し替え耐性の担保手段とする（過不足いずれも判定不能に倒す）。
+    if len(fandhe_rows) != MIN_RECORDS:
         result["status"] = "undeterminable"
-        result["reason"] = f"fandhe-ai reuse レコード不足（{len(fandhe_rows)} 件 < {MIN_RECORDS} 件必要）"
+        result["reason"] = (
+            f"fandhe-ai reuse レコード件数が {MIN_RECORDS} 件と不一致"
+            f"（{len(fandhe_rows)} 件。標本差し替え防止のため過不足いずれも判定不能）"
+        )
         return result
-    if len(candle_rows) < MIN_RECORDS:
+    if len(candle_rows) != MIN_RECORDS:
         result["status"] = "undeterminable"
-        result["reason"] = f"candle fresh レコード不足（{len(candle_rows)} 件 < {MIN_RECORDS} 件必要）"
+        result["reason"] = (
+            f"candle fresh レコード件数が {MIN_RECORDS} 件と不一致"
+            f"（{len(candle_rows)} 件。標本差し替え防止のため過不足いずれも判定不能）"
+        )
         return result
-
-    # 直近 MIN_RECORDS 件（末尾）を対象にする: run スクリプトが 5 回超を
-    # 追記した場合でも最新の計測のみを判定に使う（append 運用の JSONL に
-    # 過去分が混在しても古い記録を判定不能の原因にしない）。
-    fandhe_rows = fandhe_rows[-MIN_RECORDS:]
-    candle_rows = candle_rows[-MIN_RECORDS:]
 
     diagnostics = []
     for label, run_rows in (("fandhe-ai", fandhe_rows), ("candle", candle_rows)):

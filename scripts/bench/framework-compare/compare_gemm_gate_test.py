@@ -64,7 +64,19 @@ class EvaluateSizeTest(unittest.TestCase):
         ]
         result = compare_gemm_gate.evaluate_size(rows, 1024)
         self.assertEqual(result["status"], "undeterminable")
-        self.assertIn("レコード不足", result["reason"])
+        self.assertIn("件数が", result["reason"])
+
+    def test_excess_records_is_undeterminable(self):
+        # codex-review P1 指摘（PR #1166）: 6 件以上ある場合に無条件で末尾
+        # 5 件を採用すると、不利な run の後に有利な run を追記するだけで
+        # 判定対象を差し替えられてしまう。件数の完全一致検証で過不足いずれも
+        # 判定不能に倒すことを確認する。
+        rows = [_row("fandhe-ai", 1024, "reuse", 0.010) for _ in range(6)] + [
+            _row("candle", 1024, "fresh", 0.020) for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 1024)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("件数が", result["reason"])
 
     def test_parity_failure_is_undeterminable_with_reason(self):
         rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(4)] + [
@@ -74,6 +86,24 @@ class EvaluateSizeTest(unittest.TestCase):
         self.assertEqual(result["status"], "undeterminable")
         self.assertIn("要素単位検証が無効", result["reason"])
         self.assertIn("fail=2/", result["reason"])
+
+
+class LoadRowsTfz32Test(unittest.TestCase):
+    def test_non_bool_tf32_row_is_skipped_with_warning(self):
+        # codex-review P0 指摘（PR #1166）: `tf32` が bool 以外（`1`・
+        # `"true"` 等）だと `r.get("tf32", False) is True` が常に False を
+        # 返すため、そのまま通すと不正形式入力で FP32 ゲートへ混入できて
+        # しまう。`load_rows` の時点で行ごと除外し警告することを確認する。
+        good = _row("fandhe-ai", 1024, "reuse", 0.010)
+        bad = dict(_row("fandhe-ai", 1024, "reuse", 0.011))
+        bad["tf32"] = 1  # 不正型（bool ではない）
+        path = _write_jsonl([good, bad])
+        try:
+            rows, warnings = compare_gemm_gate.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(any("tf32" in w for w in warnings))
 
 
 class MainCliTest(unittest.TestCase):
