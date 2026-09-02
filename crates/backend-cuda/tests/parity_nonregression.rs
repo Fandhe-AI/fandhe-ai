@@ -85,8 +85,14 @@ fn tolerance_constants_are_pinned() {
 }
 
 /// fixture 自体の妥当性検査: 各行の `baseline_fail_count <= total`・
-/// `total == m*n`・4 経路すべてに 1 行以上存在することを確認する。
+/// `total == m*n`・5 経路（`WmmaF16` を含む。codex-review P2 指摘対応・
+/// イシュー #1106 PR #1124）すべてに 1 行以上存在することを確認する。
 /// fixture 値の入力ミス（転記ミス等）を CI で機械的に検出する。
+///
+/// `baseline_max_abs_diff_ceiling`/`baseline_max_rel_err_ceiling`
+/// （`Option<f64>`）は `Some` の場合に限り有限・非負であることも検査する
+/// （`Some(f64::INFINITY)` 等の混入で外れ値ゲートが静かに無効化される
+/// 回帰を防ぐ。codex-review P2 指摘対応・イシュー #1106 PR #1124）。
 #[test]
 fn baseline_fixture_is_self_consistent() {
     assert!(!BASELINES.is_empty(), "BASELINES must not be empty");
@@ -111,6 +117,22 @@ fn baseline_fixture_is_self_consistent() {
             b.context,
             b.baseline_mean_abs_diff_ceiling
         );
+        if let Some(max_abs) = b.baseline_max_abs_diff_ceiling {
+            assert!(
+                max_abs >= 0.0 && max_abs.is_finite(),
+                "{}: baseline_max_abs_diff_ceiling は Some の場合 有限の非負値である必要があります（値={}）",
+                b.context,
+                max_abs
+            );
+        }
+        if let Some(max_rel) = b.baseline_max_rel_err_ceiling {
+            assert!(
+                max_rel >= 0.0 && max_rel.is_finite(),
+                "{}: baseline_max_rel_err_ceiling は Some の場合 有限の非負値である必要があります（値={}）",
+                b.context,
+                max_rel
+            );
+        }
     }
 
     for path in [
@@ -118,6 +140,7 @@ fn baseline_fixture_is_self_consistent() {
         ParityPath::WmmaTf32Opt,
         ParityPath::WmmaTf32Staged,
         ParityPath::MmaF16,
+        ParityPath::WmmaF16,
     ] {
         assert!(
             BASELINES.iter().any(|b| b.path == path),
@@ -161,11 +184,12 @@ fn baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only() {
 /// イシュー #726 の実機実測で確定済みの経路、`WmmaTf32`（基本版）は
 /// イシュー #1106 の GB10 実機実測（基本版カーネル専用の単体テスト
 /// `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`
-/// の release 2 回実行で値の安定を確認）で確定済みの経路のため、全行が
-/// enforced（`baseline_provenance_unconfirmed == false`）であることを
-/// 固定する。0 件を green として固定するテストは置かない —— それ自体が
-/// codex-review P1 指摘が問題視した「機能していないゲートを正常状態として
-/// 固定する」パターンになるため）。
+/// の release 2 回実行で値の安定を確認）で確定済みの経路、`WmmaF16`
+/// （`run_f16` 実効経路）も同じくイシュー #1106 の GB10 実機実測で確定済みの
+/// 経路のため、全行が enforced（`baseline_provenance_unconfirmed ==
+/// false`）であることを固定する。0 件を green として固定するテストは置かない
+/// —— それ自体が codex-review P1 指摘が問題視した「機能していないゲートを
+/// 正常状態として固定する」パターンになるため）。
 #[test]
 fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
     for path in [
@@ -173,6 +197,7 @@ fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
         ParityPath::WmmaTf32Opt,
         ParityPath::WmmaTf32Staged,
         ParityPath::MmaF16,
+        ParityPath::WmmaF16,
     ] {
         let total = BASELINES.iter().filter(|b| b.path == path).count();
         let enforced = BASELINES

@@ -193,6 +193,20 @@ fn wmma_f16_k4096_stress() {
 fn wmma_f16_k4096_stress_non_regression() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaWmmaGemm::new(&device).expect("WMMA kernel compilation must succeed");
+    // codex-review P1 指摘対応（イシュー #1106 PR #1124）: run_f16 は opt
+    // カーネルのロードに失敗すると基本版へ自動フォールバックする
+    // （gemm_wmma.rs::CudaWmmaGemm::run_f16）。この baseline 行は「実効経路」
+    // （GB10 実機実測時点では opt 経路。ParityPath::WmmaF16 ドキュメンテー
+    // ションコメント参照）の記録値のため、フォールバック状態で計測すると
+    // 基本版の出力がたまたま baseline ceiling 内に収まった場合にゲートが
+    // 素通りし opt 経路の消失を検知できない（fail-closed の欠落）。
+    // wmma_f16_opt_available() で opt が実際に選択可能であることを確認する。
+    assert!(
+        gemm.wmma_f16_opt_available(),
+        "opt カーネルが利用不能なため run_f16 は基本版へフォールバックします \
+         （baseline は opt 経路の記録値のため検査不能。理由: {:?}）",
+        gemm.wmma_f16_opt_unavailable_reason()
+    );
 
     let (m, n, k, seed) = (256u32, 256u32, 4096u32, 8888u64);
     let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
