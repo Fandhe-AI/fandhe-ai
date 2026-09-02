@@ -43,14 +43,28 @@
 //! サイレントフォールバックで green になりうる」への対処。`tests/
 //! tensor_core_real_device.rs` と同じ規約）。
 //!
-//! ## 転送バイト数差の補正
+//! ## 転送バイト数差の補正（[`small_shape_matrix_unit_has_no_floor_tflops_record`] 限定）
 //!
 //! `tests/tensor_core_real_device.rs` の `transfer_only_measurement` と
 //! 同じ理由（f32 系は 4 byte/要素・f16 系は 2 byte/要素で転送バイト数が
 //! 異なり、合算計測のまま比較すると転送コストの差が TFLOPS 比較を歪める。
 //! PR #258 レビュー指摘「f16 benchmark rewards smaller transfers」）で、
-//! 本ファイルも dtype ごとの転送のみ計測を差し引いた「計算のみ」の
-//! TFLOPS で比較する。
+//! [`small_shape_matrix_unit_has_no_floor_tflops_record`] は dtype ごとの
+//! 転送のみ計測を差し引いた「計算のみ」の TFLOPS で比較する。
+//!
+//! [`large_shape_mma_pipeline_vs_wmma_tflops_record`] は本節の対象外
+//! （イシュー #1123 是正）。同関数はいずれも f16 のみを扱うため転送
+//! バイト数差の問題自体が生じない一方、GB10 実機実測（2026-09-03）で
+//! `run_f16`（転送＋カーネル実行の合算計測）から転送のみ計測を差し引く
+//! 旧プロトコルは、大容量バッファ（4096 で 1 個あたり 32 MB 超）の
+//! per-call アロケーション＋転送が二峰性（0.263 s/0.275 s と大きく
+//! 乖離）を示す既知病態（`docs/perf/cuda-wmma-f16-perf-triage.md`）により
+//! 破綻することが判明した。このため同関数は
+//! `CudaWmmaGemm::upload_f16`／`alloc_output_f16`／`launch_f16`／
+//! `synchronize`（`CudaMmaGemm` も同名 API）による常駐バッファ計測
+//! （H2D/D2H・バッファ確保を計測区間の外に置く「カーネル単体」計測）へ
+//! 切り替え、転送のみ計測の差し引き・「転送のみ ≥ 合算」プロトコル
+//! 整合性検査を行わない。
 //!
 //! ## 閾値・許容誤差の不変更
 //!
@@ -307,66 +321,75 @@ fn large_shape_mma_pipeline_vs_wmma_tflops_record() {
 
     for &dim in &LARGE_DIMS {
         let (m, n, k) = (dim, dim, dim);
-        let out_len = (m as usize) * (n as usize);
 
         let mut rng = Xorshift64Star::new(0xC000 + u64::from(dim));
         let a: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
         let b: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
 
-        let transfer = transfer_only_measurement::<f16>(&device, &config, &a, &b, out_len);
-
-        let wmma_measurement = bench_harness::run(&config, || {
-            let _ = wmma_gemm
-                .run_f16(&a, &b, m, n, k)
-                .expect("WMMA run_f16 must succeed on CUDA-equipped test runner");
+        // カーネル単体（H2D/D2H・バッファ確保を計測区間の外に置く）計測。
+        // イシュー #1123 是正: 旧プロトコル（`run_f16` 合算計測から
+        // 転送のみ計測を差し引く）は大容量バッファの per-call
+        // アロケーション＋転送の二峰性により破綻するため、常駐バッファ
+        // API（`upload_f16`／`alloc_output_f16`／`launch_f16`／
+        // `synchronize`）による「launch → synchronize」区間のみの計測へ
+        // 切り替える（本ファイル冒頭コメント参照）。
+        let (a_wmma_dev, b_wmma_dev) = wmma_gemm
+            .upload_f16(&a, &b)
+            .expect("upload_f16 must succeed on CUDA-equipped test runner");
+        let mut c_wmma_dev = wmma_gemm
+            .alloc_output_f16(m, n)
+            .expect("alloc_output_f16 must succeed on CUDA-equipped test runner");
+        let wmma_kernel_only = bench_harness::run(&config, || {
+            wmma_gemm
+                .launch_f16(&a_wmma_dev, &b_wmma_dev, &mut c_wmma_dev, m, n, k)
+                .expect("WMMA launch_f16 must succeed on CUDA-equipped test runner");
+            wmma_gemm
+                .synchronize()
+                .expect("synchronize must succeed on CUDA-equipped test runner");
         })
-        .expect("WMMA f16 measurement must satisfy TASK-8.1 protocol");
-        let mma_measurement = bench_harness::run(&config, || {
-            let _ = mma_gemm
-                .run_f16(&a, &b, m, n, k)
-                .expect("mma.sync run_f16 must succeed on CUDA-equipped test runner");
-        })
-        .expect("mma.sync pipeline measurement must satisfy TASK-8.1 protocol");
+        .expect("WMMA f16 kernel-only measurement must satisfy TASK-8.1 protocol");
 
-        let wmma_compute = wmma_measurement.median_secs - transfer.median_secs;
-        let mma_compute = mma_measurement.median_secs - transfer.median_secs;
-        // 正値ガード（`tests/tensor_core_real_device.rs:235-239` と同じ理由）。
-        // 本関数の対象形状は 2048/4096 と大きく通常は転送時間を大きく
-        // 上回るが、先例と同一の実装として揃え、負値の混入を計測時点で
-        // 検知できるようにする。
-        assert!(
-            wmma_compute > 0.0 && mma_compute > 0.0,
-            "転送のみ計測（{:.6}s）が合算計測（wmma: {:.6}s, mma.sync: {:.6}s）を下回りませんでした \
-             （dim={dim}）。計測がプロトコル前提（転送・カーネル実行の直列化）を満たしていない \
-             可能性があります",
-            transfer.median_secs,
-            wmma_measurement.median_secs,
-            mma_measurement.median_secs,
-        );
-        let wmma_tflops = (flops(dim) / wmma_compute) / 1e12;
-        let mma_tflops = (flops(dim) / mma_compute) / 1e12;
+        let (a_mma_dev, b_mma_dev) = mma_gemm
+            .upload_f16(&a, &b)
+            .expect("upload_f16 must succeed on CUDA-equipped test runner");
+        let mut c_mma_dev = mma_gemm
+            .alloc_output_f16(m, n)
+            .expect("alloc_output_f16 must succeed on CUDA-equipped test runner");
+        let mma_kernel_only = bench_harness::run(&config, || {
+            mma_gemm
+                .launch_f16(&a_mma_dev, &b_mma_dev, &mut c_mma_dev, m, n, k)
+                .expect("mma.sync launch_f16 must succeed on CUDA-equipped test runner");
+            mma_gemm
+                .synchronize()
+                .expect("synchronize must succeed on CUDA-equipped test runner");
+        })
+        .expect("mma.sync pipeline kernel-only measurement must satisfy TASK-8.1 protocol");
+
+        let wmma_tflops = (flops(dim) / wmma_kernel_only.median_secs) / 1e12;
+        let mma_tflops = (flops(dim) / mma_kernel_only.median_secs) / 1e12;
 
         let wmma_report = BenchReport::from_measurement(
-            format!("gemm_wmma_f16_opt_dim{dim}"),
+            format!("gemm_wmma_f16_opt_kernel_only_dim{dim}"),
             "cuda",
-            &wmma_measurement,
+            &wmma_kernel_only,
         )
         .expect("BenchReport::from_measurement must succeed for a protocol-conformant measurement");
         let mma_report = BenchReport::from_measurement(
-            format!("gemm_mma_f16_dim{dim}"),
+            format!("gemm_mma_f16_kernel_only_dim{dim}"),
             "cuda",
-            &mma_measurement,
+            &mma_kernel_only,
         )
         .expect("BenchReport::from_measurement must succeed for a protocol-conformant measurement");
 
         println!(
-            "dispatch_boundary_record dim={dim} path=wmma_f16_opt tflops={wmma_tflops:.3} report={}",
+            "dispatch_boundary_record_kernel_only dim={dim} path=wmma_f16_opt tflops={wmma_tflops:.3} \
+             report={}",
             wmma_report
                 .to_json()
                 .expect("BenchReport::to_json must succeed for a validated report")
         );
         println!(
-            "dispatch_boundary_record dim={dim} path=mma_sync_f16 tflops={mma_tflops:.3} \
+            "dispatch_boundary_record_kernel_only dim={dim} path=mma_sync_f16 tflops={mma_tflops:.3} \
              mma_over_wmma={:.3} report={}",
             mma_tflops / wmma_tflops,
             mma_report
