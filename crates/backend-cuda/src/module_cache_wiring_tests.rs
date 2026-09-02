@@ -21,6 +21,28 @@
 //! ローカル（libnvrtc 非搭載）では `CudaGemm::new` が
 //! `CudaError::NvrtcUnavailable` を返すため、`tests/gemm_naive.rs` と同じ
 //! パターンで早期 return し誤って fail しない（本ファイル各テスト参照）。
+//!
+//! # 実行時は必ず `--test-threads=1`（イシュー #1107・GB10 実測 2026-09-03）
+//!
+//! 本ファイルの実機テスト（とくに
+//! [`cuda_gemm_new_second_construction_reuses_module_cache`]）は
+//! プロセスワイド `static` の共有 LRU（`module_cache::KernelModuleCache::global`。
+//! 既定容量 32）の hit/miss 増分を厳密検査する。GB10 実機実測では、
+//! `cargo test --lib -- --ignored --test-threads=1`（本ファイル単体の
+//! 直列実行）は pass する一方、`kernels_mma.rs`・`kernels_wmma_opt.rs` 等
+//! shape 特化カーネル群を含む lib 全体の `#[ignore]` テスト（`--all-features`
+//! 込みで 57 件。`--all-features` なしのローカル計測では 28 件）を
+//! 既定の並列テストハーネスで実行すると、他テストが同じ共有 LRU へ
+//! 並行 insert し容量超過で `CudaGemm::new` 1 回目が登録した一部
+//! エントリが 2 回目の構築前に evict されるため、当該テストのみ flaky に
+//! fail する（`init_cost_diag_tests.rs` 冒頭ドキュメンテーションコメント
+//! 「実行時は必ず `--test-threads=1`」節と同型の注意。実装の欠陥ではなく
+//! テストの隔離不足）。実行は必ず以下のように直列化する:
+//!
+//! ```text
+//! cargo test -p fandhe-ai-backend-cuda --release --lib -- \
+//!     --ignored --test-threads=1
+//! ```
 
 use crate::context_cache;
 use crate::error::CudaError;
@@ -160,6 +182,12 @@ fn cuda_gemm_new_second_construction_reuses_module_cache() {
 
     let cache = KernelModuleCache::global().expect("module cache must be constructible");
     let misses_before = cache.miss_count();
+    // gemm1 構築中（数百 ms・9 回の NVRTC コンパイル）に他テストが共有 LRU
+    // へ並行 insert し、gemm1 自身が insert したエントリを 2nd 構築前に
+    // evict してしまう窓を検出するため、テスト開始時点から起点を取る
+    // （`evicts_before_second`〈gemm2 構築直前〉だけでは gemm1 構築中の
+    // evict を見逃す。イシュー #1107・advisor 指摘）。
+    let evicts_before = cache.evict_count();
 
     let gemm1 = match CudaGemm::new(&device) {
         Ok(g) => g,
@@ -183,10 +211,26 @@ fn cuda_gemm_new_second_construction_reuses_module_cache() {
     );
 
     let hits_before_second = cache.hit_count();
+    let evicts_before_second = cache.evict_count();
     let gemm2 = CudaGemm::new(&device)
         .expect("2nd CudaGemm::new must succeed given the 1st succeeded on the same device");
     let hits_after_second = cache.hit_count();
     let misses_after_second = cache.miss_count();
+    let evicts_after_second = cache.evict_count();
+    // 2nd 構築直前から完了までの evict 増分（狭い窓）。共有 LRU（プロセス
+    // ワイド `static`）を汚染しうるのは他プロセスではなく同一プロセス内で
+    // 並列実行される他の `#[ignore]` テストのみのため、0 でなければ
+    // それらとの並列実行が疑われる（本ファイル冒頭「実行時は必ず
+    // `--test-threads=1`」節参照）。
+    let evicted_during_window = evicts_after_second.saturating_sub(evicts_before_second);
+    // テスト開始（1st 構築前）から 2nd 構築完了までの evict 増分（広い窓）。
+    // 1st 構築自体が数百 ms・9 回の NVRTC コンパイルを要するため、gemm1 が
+    // 自身のエントリを insert している最中に他テストが割り込んで evict
+    // する事象は狭い窓（`evicted_during_window`）では捕捉できない。
+    // GB10 実測（before=9, after=15）の再現時に狭い窓が 0 でも広い窓が
+    // 非ゼロであれば「gemm1 構築中の並行 evict」が原因と切り分けられる
+    // （イシュー #1107。advisor 指摘で追加）。
+    let evicted_since_start = evicts_after_second.saturating_sub(evicts_before);
 
     // 2 回目も同一デバイス上の構築のため、TF32 WMMA 系の可用性は 1 回目
     // （`gemm1`）と一致するはず（同一環境・同一 NVRTC コンパイル結果）。
@@ -200,7 +244,16 @@ fn cuda_gemm_new_second_construction_reuses_module_cache() {
         hits_after_second >= hits_before_second + expected_kernel_count,
         "2nd CudaGemm::new on the same cached device must hit the module cache for every \
          successfully compiled kernel_specs entry: before={hits_before_second}, \
-         after={hits_after_second}, expected_kernel_count={expected_kernel_count}"
+         after={hits_after_second}, expected_kernel_count={expected_kernel_count}, \
+         evicted_during_window={evicted_during_window} (narrow: since just before the 2nd \
+         construction), evicted_since_start={evicted_since_start} (wide: since before the 1st \
+         construction — the 1st construction itself takes hundreds of ms across 9 NVRTC \
+         compiles, so a concurrent test can evict gemm1's own entries before this narrow window \
+         even starts). Either being non-zero means the shared static LRU was concurrently \
+         polluted by another #[ignore] test in the same process; re-run with \
+         `cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --test-threads=1` \
+         to serialize, per module_cache_wiring_tests.rs's top-of-file doc comment, \
+         issue #1107, GB10 measurement 2026-09-03)"
     );
     // fail-soft する optional WMMA(TF32) カーネル（未対応デバイスでは
     // `unavailable_optional_kernel_count(&gemm2)` > 0）は insert
@@ -216,7 +269,10 @@ fn cuda_gemm_new_second_construction_reuses_module_cache() {
         "2nd CudaGemm::new must not introduce new module cache misses beyond the fail-soft \
          optional WMMA(TF32) kernels that never get inserted into the cache: \
          misses_after_first={misses_after_first}, misses_after_second={misses_after_second}, \
-         expected_repeated_miss_count={expected_repeated_miss_count}"
+         expected_repeated_miss_count={expected_repeated_miss_count}, \
+         evicted_during_window={evicted_during_window}, evicted_since_start={evicted_since_start} \
+         (see previous assertion's message for the shared static LRU pollution diagnosis; \
+         issue #1107)"
     );
 
     // (b) 同一入力に対する 2 インスタンスの出力が一致することを、既存の
