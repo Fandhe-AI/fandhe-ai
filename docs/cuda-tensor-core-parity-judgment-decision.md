@@ -8,6 +8,13 @@
 `AGENTS.md`／`.claude/rules/` への反映は本ドキュメントを承認記録として参照した
 後続 PR で行う）に倣う。
 
+**spec 側の正式化は完了済み**: 本決定の判定方式は、正本仕様リポジトリ
+Fandhe-AI/fandhe-ai-spec の REQ-2「2026-09-02 追記・Tensor Core 経路の
+受け入れ判定方式」（spec PR #63・2026-09-02 マージ済み）として受け入れ
+基準へ正式に追記されており、`docs/spec/04-requirements.md`（submodule）
+から参照できる。本ドキュメントはその spec 追記に至る実装リポ側の実測・
+判断・承認の経緯を記録する一次資料である（受け入れ基準の正は spec 側）。
+
 ## 1. 背景
 
 ### 1.1 症状（イシュー #1102・#1106 の GB10 実測）
@@ -106,8 +113,9 @@ TF32/f16 Tensor Core 経路の parity テストについて、以下を正式な
 2. **実測でゼロ fail が成立しないと判明した形状**は、**実測 baseline
    非後退方式**（`crates/backend-cuda/tests/common/parity_baseline.rs::
    ParityBaseline`／`assert_no_parity_regression`。`fail_count`・
-   `mean_abs_diff` の ceiling が既存の実測値を上回っていないかを機械検査
-   する）を正式な受け入れ判定とする
+   `mean_abs_diff`・`max_abs_diff`・`max_rel_err` の ceiling が既存の
+   実測値を上回っていないかを機械検査する）を正式な受け入れ判定とする
+   （spec REQ-2 2026-09-02 追記の形状別判定方式の項目 2 と同一内容）
 3. baseline の新規追加・更新は必ず **GB10 実機実測値を伴う**（推定値の
    記入は禁止。`docs/perf/cuda-parity-baseline.md` §6「ベースライン更新
    規約」に従う）
@@ -127,6 +135,14 @@ TF32/f16 Tensor Core 経路の parity テストについて、以下を正式な
   `report.mean_abs_diff > baseline.baseline_mean_abs_diff_ceiling` を
   検査する。fail_count が変わらなくても誤差の平均値が悪化する回帰
   （境界は同じだが内部の丸め精度が劣化する等）を検出する
+- **max_abs_diff・max_rel_err ceiling の超過でも必ず fail する**: 同様に
+  `baseline_max_abs_diff_ceiling`・`baseline_max_rel_err_ceiling`
+  （`Option<f64>`。実測値が記録されている行のみ `Some` で検査し、未実測の
+  行は `None` のまま fail-open にしない〈mean/fail_count 検査は常に走る〉）
+  を検査する。fail_count 同数のまま個別要素の誤差が大幅に悪化し平均で
+  相殺される回帰（codex-review が指摘した max-regression ブラインド
+  スポット）を検出する。spec REQ-2 2026-09-02 追記が「必須項目」として
+  規定する max 系 ceiling に対応する
 - **total（形状・要素数）の不一致でも必ず fail する**: `report.total !=
   baseline.total` を検査し、記録時と異なる形状で計測してしまう取り違え
   を防ぐ
@@ -170,19 +186,28 @@ fail-closed に検査する点で回帰検出契約としては維持される�
 
 ## 5. 反映方針
 
-本ドキュメントは決定内容の一次記録であり、`AGENTS.md`（codex-review が
-参照する権威ある規約）・`.claude/rules/coding-rust.md`・
-`.github/codex/prompts/review.md` への反映（P1 分類「テストの弱体化」の
-例外条件としての明記）は**別途、本ドキュメントをベース側から確認可能な
-承認記録として参照する後続 PR で行う**（codex-review は制御ファイルを
-base コミットから読むため、当の PR 自身の変更はその PR 自身のレビューには
-反映されない特性がある。`.claude/rules/ci.md`「codex-review 判定との
-非対称性」節と同種の理由により、本 PR〈決定記録〉と後続 PR〈規約反映〉を
-分離する）。
+反映は次の順で行う（受け入れ基準の正は spec 側、という統制順序）:
+
+1. **spec 側の正式化（完了）**: Fandhe-AI/fandhe-ai-spec PR #63 で REQ-2
+   へ「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」を追記済み
+2. **submodule 前進（完了）**: 実装リポ PR #1128 で `docs/spec` を spec
+   改定後の main へ前進済み。これにより codex-review が base コミットから
+   参照する spec 本文に形状別判定方式が含まれる
+3. **規約反映（後続 PR #1125）**: `AGENTS.md`（codex-review が参照する
+   権威ある規約）・`.claude/rules/coding-rust.md`・`.github/codex/prompts/
+   review.md` へ、spec REQ-2 2026-09-02 追記を根拠とする判定方式を反映する
+   （codex-review は制御ファイルを base コミットから読むため、当の PR
+   自身の変更はその PR 自身のレビューには反映されない特性がある。
+   `.claude/rules/ci.md`「codex-review 判定との非対称性」節と同種の理由に
+   より、決定記録〈本 PR〉と規約反映〈#1125〉を分離する）
+4. **テスト実装（後続 PR #1124）**: TF32 系 parity テストの形状別再割り
+   当て・f16 provenance 修正・max 系 ceiling 補強
 
 ## 6. 関連
 
 - イシュー #1106（本決定の起点）・#1102（親トラッキング）
+- Fandhe-AI/fandhe-ai-spec PR #63（REQ-2 2026-09-02 追記。受け入れ判定
+  方式の正本）・実装リポ PR #1128（`docs/spec` submodule 前進）
 - `docs/perf/cuda-parity-baseline.md`（§3 ベースライン表・§6 ベースライン
   更新規約・§10 イシュー #1106 の実測記録本体）
 - `docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md`（opt/basic
