@@ -187,7 +187,14 @@ pass のため #186 への引き渡し対象外（TF32 経路自体に既知の�
 3. **`crates/backend-cuda/tests/wmma_f16_opt_perf_triage.rs`**（新規・診断専用）と
    `CudaWmmaGemm::launch_f16_basic`（`crates/backend-cuda/src/gemm_wmma.rs`。基本版
    カーネルを強制する診断専用の最小 `pub` 入口。本番ディスパッチには影響しない）は
-   診断専用として維持する。
+   診断専用として維持する。**PR #1132 codex-review P2 指摘対応**: 診断専用ランチャーを
+   恒久的な公開 API として無条件公開しないよう、`launch_f16_basic` は `internal-
+   diagnostics` feature（既定 off。`Cargo.toml` の `[features]`）でゲートし、
+   `wmma_f16_opt_perf_triage` テストは `Cargo.toml` の `[[test]]` セクションで
+   `required-features = ["internal-diagnostics"]` を指定する（`specialized_mma_
+   parity` 等の既存パターンと同一）。実行は
+   `cargo test -p fandhe-ai-backend-cuda --features internal-diagnostics --test
+   wmma_f16_opt_perf_triage -- --ignored --nocapture`。
 
 ### 5.1 #64 受け入れ条件（カーネル単体比較）の実測結果
 

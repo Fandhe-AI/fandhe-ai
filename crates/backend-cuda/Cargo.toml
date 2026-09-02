@@ -197,6 +197,18 @@ required-features = ["internal-diagnostics"]
 name = "cpu_cuda_tiled_pipeline_parity"
 required-features = ["internal-diagnostics"]
 
+[[test]]
+# イシュー #1123・PR #1132 codex-review P2 指摘の是正: `wmma_f16_opt_perf_
+# triage` は `CudaWmmaGemm::launch_f16_basic`（診断専用の基本版カーネル
+# 強制入口。`gemm_wmma.rs` の同 feature ゲート）を使うため、
+# `internal-diagnostics` feature なしではビルドできない。
+# `specialized_mma_parity`（上記）と同じ理由で `required-features` を
+# 指定する。`cargo test --workspace`（feature 未指定）では対象外として
+# スキップされ、`cargo test --all-features`（CI の test ジョブ・`make
+# test` が使うコマンド）でのみビルド・実行される。
+name = "wmma_f16_opt_perf_triage"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

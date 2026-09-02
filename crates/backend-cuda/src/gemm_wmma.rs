@@ -375,6 +375,14 @@ impl CudaWmmaGemm {
     /// opt 版と基本版のカーネル単体 TFLOPS を同一計測プロトコルで比較
     /// するための診断専用入口。本番ディスパッチ〈`run_f16`／`launch_f16`
     /// の opt 優先フォールバック〉には影響しない）。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （`gemm.rs::CudaGemm::new_with_tf32_staged_swizzle` 等と同じ feature
+    /// ゲート方針。`Cargo.toml` の `[features]` 参照。PR #1132 codex-review
+    /// P2 指摘対応: 診断専用ランチャーを恒久的な公開 API として無条件公開
+    /// しない）。`tests/wmma_f16_opt_perf_triage.rs`（`Cargo.toml` の
+    /// `required-features` で同 feature を要求）専用の入口。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn launch_f16_basic(
         &self,
         a_dev: &CudaSlice<f16>,

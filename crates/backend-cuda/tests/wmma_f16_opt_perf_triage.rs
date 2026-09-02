@@ -41,6 +41,15 @@
 //! 既存テスト・カーネル実装・複合判定の許容誤差はいずれも変更しない
 //! （`.claude/rules/coding-rust.md`）。
 //!
+//! `launch_f16_basic` は `internal-diagnostics` feature（既定 off）限定
+//! （PR #1132 codex-review P2 指摘対応: 診断専用ランチャーを恒久的な
+//! 公開 API として無条件公開しない。`gemm_wmma.rs::CudaWmmaGemm::
+//! launch_f16_basic` ドキュメンテーションコメント参照）のため、本テスト
+//! 自体も `Cargo.toml` の `[[test]]` セクションで `required-features =
+//! ["internal-diagnostics"]` を指定し、`cargo test --all-features`（CI の
+//! test ジョブ・`make test` が使うコマンド）でのみビルド・実行される
+//! （`tests/specialized_mma_parity.rs` と同じ契約）。
+//!
 //! ## 実機前提
 //!
 //! `tests/dispatch_boundary.rs` と同一の前提（compute capability 8.0
@@ -49,7 +58,8 @@
 //! （`.claude/rules/ci.md`「実機依存」）。
 //!
 //! ```sh
-//! cargo test -p fandhe-ai-backend-cuda --test wmma_f16_opt_perf_triage -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda --features internal-diagnostics \
+//!     --test wmma_f16_opt_perf_triage -- --ignored --nocapture
 //! ```
 
 use bench_harness::MeasurementConfig;
