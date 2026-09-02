@@ -917,17 +917,22 @@ fn main() {
                 .expect("tiled_f32 output allocation must succeed on CUDA-equipped runner");
 
             for _ in 0..args.warmup {
-                gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                gemm.launch_tiled_f32_classic(&a_dev, &b_dev, &mut c_dev, m, n, k)
                     .expect("tiled_f32 warmup launch must succeed on CUDA-equipped runner");
             }
-            // `launch_tiled_f32` は非同期投入契約（#1013 と同型）のため、
-            // 上の各分岐と同じ理由で明示的な同期を挟む
+            // イシュー #1137: `launch_tiled_f32`（無印）は整列形状で
+            // cp.async パイプライン版へ分岐しうるため、`TiledF32`
+            // プロファイル対象（classic 版のみを狙う基準経路）では
+            // `launch_tiled_f32_classic`（診断専用の強制 classic 入口）を
+            // 使い、ncu が実際に classic 版を計測することを保証する。
+            // `launch_tiled_f32_classic` は非同期投入契約（#1013 と同型）
+            // のため、上の各分岐と同じ理由で明示的な同期を挟む
             // （ncu の起動通し番号には影響しない）。
             gemm.synchronize()
                 .expect("stream synchronize must succeed on CUDA-equipped runner");
             let start = Instant::now();
             for _ in 0..args.iters {
-                gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                gemm.launch_tiled_f32_classic(&a_dev, &b_dev, &mut c_dev, m, n, k)
                     .expect("tiled_f32 measured launch must succeed on CUDA-equipped runner");
             }
             gemm.synchronize()

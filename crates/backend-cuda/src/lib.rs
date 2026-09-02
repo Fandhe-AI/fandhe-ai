@@ -363,12 +363,25 @@ pub use device::{CudaDevice, CudaDeviceProvider};
 pub use elementwise::CudaElementwise;
 pub use error::CudaError;
 pub use gemm::CudaGemm;
+// `TiledF32Kernel`（`Classic`/`Pipeline`）は `CudaGemm::run_tiled_f32` 系
+// 3 入口が実際にどちらのカーネルへ分岐したかを表す観測用の型（イシュー
+// #1137。`gemm.rs::TiledF32Kernel` 冒頭ドキュメンテーションコメント参照）。
+// `wmma_tf32_staged_swizzle_group_width` と同様、常時公開（feature ゲート
+// なし）で `CudaGemm::tiled_f32_kernel_for` の戻り値として使う。
+pub use gemm::TiledF32Kernel;
 pub use mse::CudaMse;
 // `TiledPipelineFunction`／`CudaGemm::compile_tiled_pipeline_variant`／
 // `CudaGemm::launch_tiled_pipeline_f32` はベンチ専用の常駐 API（イシュー
-// #1033。`gemm.rs::TiledPipelineFunction` 冒頭ドキュメンテーションコメント
-// 参照。本番ディスパッチ経路は `CudaGemm::run_tiled_pipeline_f32`〈選択可能
-// 変種〉／既定の `run_tiled_f32` であり、両者とも常駐ハンドルを要求しない）。
+// #1033）。**本番既定経路（`CudaGemm::new`）は #1137 で `run_tiled_f32`
+// 系 3 入口へ形状条件付きに結線済み**（`gemm.rs::CudaGemm::
+// select_tiled_f32_kernel` 参照。整列形状〈`n % 4 == 0 && k % 4 == 0`〉
+// かつ `new` 時のコンパイル成功時のみ pipeline へ分岐し、それ以外は
+// classic へ fail-closed にフォールバックする）。以下で feature ゲートする
+// のは `TiledPipelineFunction` 型そのもの・`compile_tiled_pipeline_variant`・
+// `launch_tiled_pipeline_f32`（常駐ハンドルを外部から明示的に扱う診断・
+// ベンチ専用 API）であり、本番結線自体はこれらに依存しない
+// （`gemm.rs::TiledPipelineFunction` 冒頭ドキュメンテーションコメント
+// 参照）。
 // PR #1071 codex-review P1 指摘の是正: 従来は本ブロックへ無条件 re-export
 // しており、`SpecializedMmaKernelHandle` と同じ「テスト・ベンチ専用」の
 // 意図に反して通常ビルドの安定した公開 API 面へ漏出していた。

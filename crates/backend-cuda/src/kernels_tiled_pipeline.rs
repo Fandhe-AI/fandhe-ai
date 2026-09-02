@@ -2,17 +2,24 @@
 //! Core 不使用・通常の FMA 積和）GEMM の CUDA カーネルソース（イシュー
 //! #1033・親イシュー #1031「FP32 SIMT GEMM 強化」）。
 //!
-//! # 位置づけ・非結線
+//! # 位置づけ・本番結線（#1137）
 //!
-//! 本モジュールが生成するカーネルは、本番既定経路
-//! （`ops.rs::CudaBackendOps::gemm` → `context_cache::cached_gemm` →
-//! `CudaGemm::run_tiled_f32`。`kernels.rs::TILED_F32`）を置き換えない。
-//! `gemm.rs::CudaGemm` へ選択可能な**変種**（`tiled_pipeline_available()`
-//! が真の場合にのみ [`CudaGemm::run_tiled_pipeline_f32`] で明示的に呼べる
-//! 経路）として追加するに留め、既定切替は兄弟イシュー #1035（simple /
-//! double-buffer / split-K ヒューリスティックの実測を踏まえた形状別選択）
-//! に委ねる（`kernels_mma.rs`・`kernels_mma_tf32.rs` の mma 系候補経路が
-//! 実測前は本番未接続のまま追加された先例と同型の安全側判断）。
+//! 本モジュールが生成するカーネルは、GB10 実測（bit 一致確認・parity 0
+//! fail・`cuda_floor_bench` 性能 A/B）に基づき、イシュー #1137 で本番
+//! 既定経路（`ops.rs::CudaBackendOps::gemm` → `context_cache::cached_gemm`
+//! → `CudaGemm::run_tiled_f32`）へ**形状条件付きで結線済み**である
+//! （`gemm.rs::CudaGemm::select_tiled_f32_kernel`・
+//! `gemm.rs::tiled_f32_kernel_kind`）: cp.async 16 バイト整列制約
+//! （`n % 4 == 0 && k % 4 == 0`）を満たし、かつ `CudaGemm::new` 時の
+//! コンパイルに成功している場合にのみ本モジュールのカーネルへ分岐し、
+//! それ以外（非整列形状・sm_80 未満・NVRTC コンパイル失敗環境）は常に
+//! `kernels.rs::TILED_F32`（classic 版）へ fail-closed にフォールバック
+//! する。詳細な実測記録・採否判断根拠は
+//! `docs/perf/cuda-gemm-tiled-pipeline.md`「#1137 本番結線判断」節を正とする。
+//!
+//! 明示的に classic／pipeline いずれかを強制する入口
+//! （[`CudaGemm::run_tiled_f32_classic`]／[`CudaGemm::run_tiled_pipeline_f32`]）
+//! は診断・A/B ベンチ用途として引き続き残す。
 //!
 //! # `kernels::TILED_F32` との違い
 //!

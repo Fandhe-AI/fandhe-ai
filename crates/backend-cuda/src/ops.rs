@@ -3,7 +3,11 @@
 //!
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CUDA 実装。GEMM は
 //! `gemm::CudaGemm::run_tiled_f32` へ委譲する（既存カーネル・許容誤差・
-//! 境界検査には触れない）。elementwise（`add`／`mul`／`relu`／`exp`／
+//! 境界検査には触れない）。`run_tiled_f32` 自体は内部で cp.async 3 stage
+//! パイプラインカーネルへ形状条件付きに分岐しうる（整列形状のみ。
+//! イシュー #1137・`gemm.rs::CudaGemm::select_tiled_f32_kernel`）ため、
+//! 本ファイルのコードはこの分岐を意識せず既定 `run_tiled_f32` を呼ぶだけで
+//! よい。elementwise（`add`／`mul`／`relu`／`exp`／
 //! `tanh`）は `elementwise::CudaElementwise` へ委譲する（イシュー #599）。
 //! 汎用 reduction（`sum`／`max`）は未実装のまま
 //! [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。

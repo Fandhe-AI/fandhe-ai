@@ -60,6 +60,17 @@ fn tflops(size: usize, median_secs: f64) -> f64 {
 /// （カーネル起動＋同期）のみを計測する（`gemm_wmma_tf32_swizzle_bench.rs::
 /// measure_wmma_tf32` と同じ計測方針。base／head 双方に同一方針を適用
 /// するため apples-to-apples の比較になる）。
+///
+/// **イシュー #1137 対応**: `launch_tiled_f32`（無印）ではなく
+/// `launch_tiled_f32_classic`（診断専用・常に classic 版を強制する入口）
+/// を使う。#1137 以降 `launch_tiled_f32` は整列形状（本ベンチの形状は
+/// すべて該当）で cp.async パイプライン版へ分岐しうるが、`base`
+/// （`CudaGemm::new`）はパイプライン利用可能・`variant`
+/// （`new_with_tiled_f32_swizzle`）はパイプライン強制無効化（swizzle
+/// 変種の A/A 誤認防止。`gemm.rs::CudaGemm::new_with_tiled_f32_swizzle`
+/// 参照）済みのため、無印のままでは base がパイプライン・variant が
+/// classic+swizzle という異なるカーネル系統同士を比較してしまい、本
+/// ベンチが測りたい「swizzle remap の効果のみ」から外れる。
 fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> f64 {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f32> = rng.fill_vec(size * size);
@@ -74,10 +85,10 @@ fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
         .expect("tiled f32 output allocation must succeed on CUDA-equipped runner");
 
     let measurement = bench_run(config, || {
-        gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
-            .expect("tiled f32 GEMM must succeed on CUDA-equipped runner");
-        // `launch_tiled_f32` は非同期投入のみの契約（#1013 と同型）のため、
-        // 明示的な同期で計測境界を維持する。
+        gemm.launch_tiled_f32_classic(&a_dev, &b_dev, &mut c_dev, m, n, k)
+            .expect("tiled f32 classic GEMM must succeed on CUDA-equipped runner");
+        // `launch_tiled_f32_classic` は非同期投入のみの契約（#1013 と同型）
+        // のため、明示的な同期で計測境界を維持する。
         gemm.synchronize()
             .expect("stream synchronize must succeed on CUDA-equipped runner");
     })

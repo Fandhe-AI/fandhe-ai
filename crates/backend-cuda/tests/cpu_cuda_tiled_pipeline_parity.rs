@@ -139,15 +139,28 @@ fn tiled_pipeline_k4096_stress() {
     );
 }
 
-/// 実装計画 §4「既存 tiled f32 との相互比較」: 同一入力に対する
-/// `run_tiled_f32`（本番既定経路）と `run_tiled_pipeline_f32`（本イシュー
-/// の変種）の出力が統一複合判定で一致することを確認する。両カーネルは
-/// 演算順序が異なる（`TILED_F32` は 32×32 タイル・1 スレッド 1 要素、
-/// tiled pipeline は 64×64 タイル・4×4 レジスタブロッキング）ため bit
-/// 完全一致は主張しない。
+/// イシュー #1137 本番結線ゲート A（最優先）: `run_tiled_f32_classic`
+/// （classic 版・`kernels::TILED_F32` 直接起動）と `run_tiled_pipeline_f32`
+/// （pipeline 版）の出力が**ビット完全一致**することを確認する。
+///
+/// 両カーネルはタイル（64×64×16）・4×4 レジスタブロッキング・スレッド→
+/// 要素マッピング・K 昇順の逐次積和が同一で、差は `acc += a*b`（NVRTC
+/// 既定の fmad 縮約）と `fmaf()`（明示）のみのため（`kernels_tiled_pipeline.rs`
+/// 冒頭コメント「`kernels::TILED_F32` との違い」参照）、実測で bit 一致が
+/// 成立する限り本テストは `assert_eq!` を使う。**FAIL した場合、
+/// `select_tiled_f32_kernel`（`gemm.rs`）による本番結線は
+/// `docs/kernel-fusion.md` §2.2 の融合 epilogue bit 完全一致契約
+/// （`gemm_bias_act` vs 非融合合成）と両立しない可能性があるため、
+/// 実装計画 §4 Step 5「不採用分岐」に従い結線を revert する判断材料と
+/// する**（本テスト自体は診断用に残す）。
+///
+/// 旧テスト名 `tiled_pipeline_matches_tiled_f32`（複合判定版）から
+/// bit 一致検査へ強化した（#1137）。旧版は `run_tiled_f32`（無印）を
+/// base に使っていたが、無印は #1137 以降パイプラインへ分岐しうるため
+/// base 側は常に `run_tiled_f32_classic` を使う必要がある。
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
-fn tiled_pipeline_matches_tiled_f32() {
+fn tiled_pipeline_matches_tiled_f32_classic_bit_exact() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
     assert!(
@@ -162,16 +175,103 @@ fn tiled_pipeline_matches_tiled_f32() {
         let a = rng.fill_vec((m as usize) * (k as usize));
         let b = rng.fill_vec((k as usize) * (n as usize));
 
-        let c_tiled = gemm
-            .run_tiled_f32(&a, &b, m, n, k)
-            .expect("run_tiled_f32 must succeed on CUDA-equipped test runner");
+        let c_classic = gemm
+            .run_tiled_f32_classic(&a, &b, m, n, k)
+            .expect("run_tiled_f32_classic must succeed on CUDA-equipped test runner");
         let c_pipeline = gemm
             .run_tiled_pipeline_f32(&a, &b, m, n, k)
             .expect("run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
 
-        let context = format!("tiled_f32 vs tiled_pipeline shape m={m} n={n} k={k}");
-        fandhe_ai_backend_cpu::assert_parity(&context, &c_pipeline, &c_tiled);
+        assert_eq!(
+            c_pipeline, c_classic,
+            "tiled_f32_classic vs tiled_pipeline shape m={m} n={n} k={k}: bit 完全一致しません \
+             （#1137 本番結線の前提が崩れている）"
+        );
     }
+}
+
+/// イシュー #1137 本番結線ゲート B の一部: `run_tiled_f32`（無印・本番
+/// 既定入口）が `tiled_f32_kernel_kind`（`gemm.rs` 内部の選択判定）の
+/// 契約どおり、整列形状では実際に pipeline 版と bit 一致する出力を
+/// 返すことを end-to-end で確認する（`select_tiled_f32_kernel` の結線が
+/// 機能していることの回帰テスト。`tiled_f32_kernel_for` で分岐先も確認）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn run_tiled_f32_dispatches_to_pipeline_for_aligned_shape() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    assert!(
+        gemm.tiled_pipeline_available(),
+        "tiled pipeline kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.tiled_pipeline_unavailable_reason()
+    );
+
+    let (m, n, k) = (256u32, 256u32, 256u32);
+    assert_eq!(
+        gemm.tiled_f32_kernel_for(n, k),
+        fandhe_ai_backend_cuda::TiledF32Kernel::Pipeline,
+        "aligned shape (n={n}, k={k}) must select Pipeline when pipeline is available"
+    );
+
+    let mut rng = bench_harness::rng::Xorshift64Star::new(7001);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+
+    let c_dispatch = gemm
+        .run_tiled_f32(&a, &b, m, n, k)
+        .expect("run_tiled_f32 must succeed on CUDA-equipped test runner");
+    let c_pipeline = gemm
+        .run_tiled_pipeline_f32(&a, &b, m, n, k)
+        .expect("run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
+
+    assert_eq!(
+        c_dispatch, c_pipeline,
+        "run_tiled_f32 (dispatch) must match run_tiled_pipeline_f32 bit-for-bit for an \
+         aligned shape once #1137 wiring routes it to the pipeline kernel"
+    );
+}
+
+/// イシュー #1137 本番結線ゲート B の一部: 非整列形状（cp.async 16 バイト
+/// 整列制約 `n % 4 == 0 && k % 4 == 0` を満たさない）では `run_tiled_f32`
+/// が常に classic 版へフォールバックし、`run_tiled_pipeline_f32`
+/// （フォールバックを持たない単独変種）が `InvalidShape` で拒否する形状
+/// でも `run_tiled_f32` 自体は成功することを確認する（fail-closed
+/// フォールバックの回帰テスト）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn run_tiled_f32_falls_back_to_classic_for_unaligned_shape() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+
+    // n=66（4 の倍数でない）・k=34（4 の倍数でない）: 非正方・非整列形状。
+    let (m, n, k) = (60u32, 66u32, 34u32);
+    assert_eq!(
+        gemm.tiled_f32_kernel_for(n, k),
+        fandhe_ai_backend_cuda::TiledF32Kernel::Classic,
+        "unaligned shape (n={n}, k={k}) must always select Classic"
+    );
+
+    let mut rng = bench_harness::rng::Xorshift64Star::new(7002);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+
+    let c_dispatch = gemm
+        .run_tiled_f32(&a, &b, m, n, k)
+        .expect("run_tiled_f32 must succeed for an unaligned shape via classic fallback");
+    let c_classic = gemm
+        .run_tiled_f32_classic(&a, &b, m, n, k)
+        .expect("run_tiled_f32_classic must succeed on CUDA-equipped test runner");
+    assert_eq!(
+        c_dispatch, c_classic,
+        "unaligned shape must route run_tiled_f32 to the classic kernel bit-for-bit"
+    );
+
+    // `run_tiled_pipeline_f32`（フォールバックを持たない単独変種）は
+    // 同じ非整列形状を fail-closed に拒否する（既存契約。回帰確認）。
+    let err = gemm
+        .run_tiled_pipeline_f32(&a, &b, m, n, k)
+        .expect_err("run_tiled_pipeline_f32 must reject unaligned shapes");
+    assert!(matches!(err, CudaError::InvalidShape { .. }));
 }
 
 /// `k == 0`（`num_k_tiles == 0` 経路）で C が全 0 になることを確認する
