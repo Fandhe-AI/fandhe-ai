@@ -212,3 +212,24 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   - CPU GEMM（N=512〈DGX のみ未達〉・N=1024・N=2048）: 既存の個別トラッカーなし。次回再計測と
     あわせた Issue 化の要否はユーザー判断（本 PR では Issue 操作を行わず、未追跡のまま
     `out-of-scope-tracking.md` に従いスコープ外として引き継ぐ）
+
+### 8.2 #1142 追補（CUDA GEMM N=1024/2048/4096 reuse の 5 回計測再計測・#1031 ゲート判定確定）
+
+- 本節は §8/§8.1 の `summarize.py --target candle`（単発計測）を補う、CUDA GEMM の N=1024/
+  2048/4096 reuse に限定した 5 回計測（coding-rust.md「ベンチは 5 回計測の中央値」）による
+  #1031 の受け入れ判定確定であり、**§2 の PyTorch 比段階的下限表・§3 丸め規則は変更しない**
+- DGX Spark GB10 実機で 2 系列（正式系列: 承認済みピン `fandhe-ai =0.6.0`／参考系列: #1137
+  〈cp.async 多段パイプライン本番結線〉反映後の HEAD へ `--config patch` で差し替え）を計測した
+  結果、**いずれの系列でも #1031 は未達成**（N=1024・N=4096 未達／N=2048 判定不能。candle 側
+  要素単位検証の無効データ。原因は決定的で candle-core 側にあると特定・fandhe-ai 側は
+  parity 0 fail）
+- 参考系列（#1137 反映後）は N=4096 で候補比 0.824→0.898 倍まで改善したが 1.0 倍には未達。
+  reuse 計測境界（`Tensor<f32>` ホスト常駐に起因する H2D/D2H・同期点）がカーネル改善の効果を
+  希釈する構造要因であることを確認した
+- 出典・詳細な突合表・N=2048 の原因分析は `docs/perf/cuda-gemm-candle-gate-remeasurement.md`
+  （イシュー #1142）、生データは
+  `scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-0.6.0.jsonl`・
+  `results-dgx-gemm-gate-head-7e3e4b6.jsonl`、集計表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 12 節を参照
+- #1031 のクローズ可否・後続 issue 化・crates.io 次回公開（v0.7.0 想定）の要否はユーザー判断
+  （本 PR では Issue 操作を行わない。`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §9）

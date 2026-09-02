@@ -355,6 +355,61 @@ echo $?   # 0: 全達成 / 2: --strict の無効データ判定が優先 / 3: �
   「達成」と判定されても性能特性の異なる経路同士の比較である点に注意する（本ツールはこの区別を自動
   判定しない。人間が判断する）
 
+## GEMM ゲート 5 回計測（#1031 達成判定・イシュー #1142）
+
+`summarize.py --target candle` は同一入力ファイル内の 1 レコードしか拾わない
+（1 ファイル = 1 環境の単発計測が前提）ため、#1031「N=1024/2048/4096 reuse で
+candle 超え（各 5 回計測の中央値）」の受け入れ判定には非対応。本節の
+`run_gemm_gate_cuda.sh` / `compare_gemm_gate.py` がその 5 回計測を専用に行う
+（`run_ab_train_cuda.sh` / `compare_ab.py` の GEMM 版）。
+
+**2 系列の使い分け**:
+
+- **正式系列**（#1031 のゲート判定の正）: `bench-fandhe/Cargo.toml` の承認済み
+  ピン（現行 `=0.6.0`）でビルドしたまま計測する。コミット済み manifest・
+  `Cargo.lock` は変更しない
+- **参考系列**（次回 crates.io 公開前の見込み値）: ノード側でのみ
+  `cargo build --release -p bench-fandhe --config 'patch.crates-io.fandhe-ai.path="<facade 絶対パス>"'`
+  により本体 `crates/facade`（rsync 済み HEAD ツリー）へ差し替えてビルドする。
+  **`[patch]` セクション・`.cargo/config.toml` は一切コミットしない**（CLI 引数
+  のみで与える。依存ポリシー〈`.claude/rules/deps-policy.md` 第 9 区分〉の
+  「承認済みピンの完全固定」を壊さないため）。`bench-fandhe` の `VERSION`
+  定数は crates.io 版のまま変わらないため JSONL の `framework_version` では
+  両系列を区別できず、**ファイル名ラベル**（例: `head-<short sha>`）で区別する。
+  参考系列は #1031 の正式達成判定には使わない（次回ピン更新後の正式再計測で
+  確定する）
+
+```bash
+cd scripts/bench/framework-compare
+# 正式系列（現行ピン）:
+bash run_gemm_gate_cuda.sh 0.6.0
+
+# 参考系列（#1164 結線後 HEAD。ノード側で事前に --config patch ビルド後）:
+cargo build --release -p bench-fandhe --config 'patch.crates-io.fandhe-ai.path="'"$HOME"'/work/rust-ai-library-run/crates/facade"'
+GEMM_GATE_SKIP_BUILD=1 bash run_gemm_gate_cuda.sh head-<short sha>
+
+# 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
+python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.6.0.jsonl
+echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2: 入力を読めない
+```
+
+- `run_gemm_gate_cuda.sh <label>` はラベル（`[A-Za-z0-9._-]+` のみ許可）ごとに
+  N=1024/2048/4096 それぞれで `bench-fandhe gemm cuda <N> reuse` と
+  `bench-candle gemm cuda <N> fresh`（candle は reuse 非対応）を交互に 5 回ずつ
+  起動し `results/raw/results-dgx-gemm-gate-<label>.jsonl` へ記録する。
+  `GEMM_GATE_SKIP_BUILD=1` でビルドを省略できる（参考系列用）。失敗は
+  `results/raw/skipped-dgx-gemm-gate-<label>.log` に記録する（数値を捏造しない）
+- `compare_gemm_gate.py JSONL...` は size ごとに fandhe-ai/candle 各 5 件の
+  `median_s` から中央値を算出し `fandhe_median_s <= candle_median_s` を判定する。
+  以下はいずれも「判定不能」として明示し性能値を確定表示しない（fail-closed。
+  security.md A08）: レコードが 5 件未満、要素単位検証（`parity_*`。イシュー
+  #970）が `parity_fail_count > 0` またはフィールド欠損・値域不正、checksum が
+  本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる。
+  判定不能時は run ごとの `fail_count`/`max_abs`/`max_rel` を診断表として出力
+  する（N=2048 の candle 無効データの原因調査・再現条件記録に使う。イシュー
+  #1142 R2）
+- `tf32:true` の行（イシュー #1042）は本ゲートの対象外として除外する
+
 ## A/B 計測（都度同期廃止・イシュー #1083）
 
 #1011（CUDA 都度 `stream.synchronize()` 廃止）の受入条件「MLP 学習 1 step が

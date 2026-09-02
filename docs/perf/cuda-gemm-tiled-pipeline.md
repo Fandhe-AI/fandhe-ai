@@ -203,6 +203,11 @@ bit 完全一致契約（`docs/kernel-fusion.md` §2.2）も維持されてい�
 パイプラインを tiled f32 経路へ形状条件付きで結線する (#1137)` コミット）として
 既に main へ取り込み済み。
 
+framework-compare 経由（candle 比・reuse モード）の #1137 反映後の値は
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md`（イシュー #1142）を参照。本節の
+after/before はカーネル単体（launch-only）の比較であり、framework-compare の reuse
+計測境界（H2D/D2H を含む `Tensor<f32>` ホスト常駐）とは前提が異なる点に注意する。
+
 ## スコープ外事項（本 PR では対応しない）
 
 - **pipeline 版 `TILED_BIAS_ACT_F32`（epilogue 融合）**: 現行の融合カーネルは classic
