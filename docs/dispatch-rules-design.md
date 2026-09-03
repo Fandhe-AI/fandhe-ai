@@ -266,9 +266,20 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
 
 1. **構築時（`CudaGemmAuto::new`）**: `CudaMmaGemm::new(device)` を
    `CudaWmmaGemm::new(device).ok()` と同型の fail-soft で構築する。
-   `cc < 8.0`（`TensorCoreUnsupported`）・NVRTC コンパイル失敗・SM 数取得
-   失敗等はすべて `mma = None` として握り潰す（現行 `wmma` フィールドの
-   構築方針と対称）。`wmma` フィールドはフォールバック用に維持する
+   `cc < 8.0`（`TensorCoreUnsupported`）・base カーネル（`mma_f16`）の
+   NVRTC コンパイル失敗は `CudaMmaGemm::new` 自体が `Err` を返すため
+   `mma = None` として握り潰す（現行 `wmma` フィールドの構築方針と対称）。
+   一方 **SM 数取得失敗（`device.multiprocessor_count()` が `None`）は
+   base カーネルの可用性とは独立**であり、`CudaMmaGemm::new`
+   （`gemm_mma.rs` 実装）は `mma_f16_swizzle`／`swizzle_group_width` のみ
+   を `None` へ fail-soft に縮退させて `Ok(Self)` を返す（swizzle は L2
+   再利用の性能最適化に過ぎず base カーネルの可用性とは独立であるべき、
+   という既存設計判断のまま）。したがって SM 数取得失敗単独では
+   `mma = Some`（swizzle 変種なしの base カーネルのみ）のまま
+   `CudaGemmAuto::new` に組み込まれ、後続の #1152（`CudaMmaGemm::new(
+   device).ok()` を利用する実装）はこの契約（`mma = None` になるのは
+   `cc < 8.0` または base カーネルのコンパイル失敗時のみ）を前提とする。
+   `wmma` フィールドはフォールバック用に維持する
 2. **呼び出し時（`run_f16`）**: `KernelKind::MatrixUnit` の場合、`mma` が
    `Some` **かつ** 形状が mma 固有制約（`validate_mma_alignment(n, k)`
    ＝ `n % 8 == 0 && k % 8 == 0`・`validate_mma_grid_bounds(m)` ＝
