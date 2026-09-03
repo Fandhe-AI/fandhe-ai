@@ -30,6 +30,15 @@ doc 参照）。
 引数・staged ロードの転置 scatter）は MSL コンパイル確認が Mac 実機必須の
 ため本イシューでは行わず、#1037 へ引き継ぐ。
 
+**#1138 での消化状況（追補）**: 上記の転置ロード導入自体はイシュー #1138
+で実施済み（`MetalGemm::dispatch_strided_tiled_prepared`。NN 非後退ビット
+同一・NT/TN/TT parity を M4 Max 実機で確認済み。詳細は
+`docs/perf/metal-gemm-transpose-tiled.md`）。ただし性能 A/B 計測が
+未実施のため、上表の「NT/TN/TT の既定経路」は引き続き `gemm_tiled_bias_act`
+（classic strided）のまま変更していない（`dispatch_strided_bias_act_prepared`
+への自動ルーティングは未結線）。`gemm_simdgroup_tiled` 転置ロード経路は
+明示入口としてのみ利用可能。
+
 ## 3. 設計
 
 ### 3.1 `crate::layout`（`cfg(target_os = "macos")` を付けない純粋モジュール）

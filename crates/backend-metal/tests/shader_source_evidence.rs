@@ -562,9 +562,11 @@ fn gemm_simdgroup_tiled_source_uses_float4_staged_load() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
     let needle = "reinterpret_cast<device const float4*>(";
     let occurrences = kernel_body.matches(needle).count();
+    // イシュー #1138: NN 用（A/B）2 箇所 + 転置ロード用（TRANS_A/TRANS_B
+    // 分岐。A タイル・B タイルそれぞれ 1 箇所ずつ）2 箇所の計 4 箇所。
     assert_eq!(
-        occurrences, 2,
-        "gemm_simdgroup_tiled の staged 経路の A/B タイルロードに float4 ベクトルロード `{needle}` が見つかりません（見つかった数: {occurrences}）"
+        occurrences, 4,
+        "gemm_simdgroup_tiled の staged 経路（NN・転置ロード双方）の A/B タイルロードに float4 ベクトルロード `{needle}` が見つかりません（見つかった数: {occurrences}）"
     );
 }
 
@@ -580,10 +582,12 @@ fn gemm_simdgroup_tiled_source_retains_float4_load_boundary_fallback() {
         kernel_body.contains("bool group_in_bounds ="),
         "float4 ベクトルロードのグループ単位 in-bounds 判定が見つかりません（境界チェック省略の疑い）"
     );
+    // イシュー #1138: NN 用（A/B）2 箇所 + 転置ロード用（TRANS_A/TRANS_B。
+    // A タイル・B タイルそれぞれ 1 箇所ずつ）2 箇所の計 4 箇所。
     assert_eq!(
         kernel_body.matches("bool group_in_bounds =").count(),
-        2,
-        "A タイル・B タイルの両方に group_in_bounds 判定が必要です"
+        4,
+        "A タイル・B タイルの NN・転置ロード双方に group_in_bounds 判定が必要です"
     );
 }
 
@@ -643,10 +647,11 @@ fn gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding() {
         kernel_body.contains("uint dst_idx = kk * ldb + c_;"),
         "B タイルのパディング込み書き込み先添字 dst_idx が見つかりません"
     );
+    // イシュー #1138: 上記コメントと同じ理由で 4 箇所（NN 2 + 転置 2）。
     assert_eq!(
         kernel_body.matches("bool group_in_bounds =").count(),
-        2,
-        "パディング導入後も A タイル・B タイル双方の group_in_bounds 判定が必要です"
+        4,
+        "パディング導入後も A タイル・B タイル双方（NN・転置ロード）の group_in_bounds 判定が必要です"
     );
 }
 
@@ -748,6 +753,64 @@ fn gemm_tiled_bias_act_source_retains_req8_boundary_guards() {
         assert!(
             kernel_body.contains(needle),
             "gemm_tiled_bias_act に REQ-8 境界チェック `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1138 の証跡: `gemm_simdgroup_tiled` の転置ロードゲート
+/// `TRANS_A`/`TRANS_B`（function constant index 9/10。FINE_BARRIER_ENABLED
+/// 〈#809・index 8〉の直後）が index まで含めて宣言されていることを
+/// ロックする（#540/#538 の index 衝突再発防止として本規約に沿う）。
+#[test]
+fn gemm_metal_source_declares_trans_a_trans_b_function_constants() {
+    for needle in [
+        "constant bool TRANS_A [[function_constant(9)]];",
+        "constant bool TRANS_B [[function_constant(10)]];",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal に転置ロードゲート `{needle}`（イシュー #1138）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1138 の証跡: `gemm_simdgroup_tiled` が `GemmStrides`
+/// （`gemm_tiled_bias_act` と共用のレイアウト一致テスト対象。buffer index
+/// 4）を受け取り、NT/TN/TT 用の転置フラグメントロード
+/// （`simdgroup_load(..., true)`。A タイル・B タイルそれぞれ 1 箇所）を
+/// staged 経路の kk ループに保持していることをロックする。
+#[test]
+fn gemm_simdgroup_tiled_source_retains_transpose_fragment_loads() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for needle in [
+        "constant GemmStrides& st [[buffer(4)]]",
+        "simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);",
+        "simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);",
+        "if (TRANS_A) {",
+        "if (TRANS_B) {",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled に転置フラグメントロード `{needle}`（イシュー #1138）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1138 の証跡: 転置ロード側の新規境界検査ヘルパ
+/// （`tiled_at_group_in_bounds`/`tiled_at_elem_in_bounds`/
+/// `tiled_bt_group_in_bounds`/`tiled_bt_elem_in_bounds`）が実在し、
+/// 既存 5 ヘルパの本体を変更していないことをロックする。
+#[test]
+fn gemm_metal_source_declares_transpose_boundary_helpers() {
+    for needle in [
+        "inline bool tiled_at_group_in_bounds(",
+        "inline bool tiled_at_elem_in_bounds(",
+        "inline bool tiled_bt_group_in_bounds(",
+        "inline bool tiled_bt_elem_in_bounds(",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal に転置ロード側境界ヘルパ `{needle}`（イシュー #1138）が見つかりません"
         );
     }
 }

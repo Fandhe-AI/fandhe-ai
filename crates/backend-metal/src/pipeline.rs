@@ -32,6 +32,7 @@ use objc2_metal::{
 
 use crate::context::MtlDevice;
 use crate::error::MetalError;
+use crate::layout::TransposePattern;
 use crate::tile::TileConfig;
 
 /// `shaders/gemm.metal` のソース（naive・tiled・simdgroup の 3 段カーネルを含む）。
@@ -124,6 +125,12 @@ pub(crate) fn make_pipeline(
 /// 保持する固定値を伝播する（`MetalGemm::new` は `crate::tile::
 /// FINE_BARRIER_ENABLED`〈既定 `false`〉を渡し、`MetalGemm::new_with_fine_barrier`
 /// はベンチ用途で任意値を渡せる）。
+/// `pattern`（index 9/10 の `TRANS_A`/`TRANS_B`。イシュー #1138）は
+/// `gemm_simdgroup_tiled`（NT/TN/TT 転置ロード拡張）のみが参照する。
+/// `gemm_simdgroup_tiled_f16` など未参照の関数へ特殊化する際も
+/// `swizzle_enabled`/`fine_barrier_enabled` と同じ理由で無害な no-op
+/// となるため、[`crate::gemm::MetalGemm::pipeline_for_tile_f16`] は常に
+/// [`TransposePattern::Nn`] を渡す契約（呼び出し側コメント参照）。
 pub(crate) fn make_pipeline_with_constants(
     device: &MtlDevice,
     library: &MtlLibrary,
@@ -131,6 +138,7 @@ pub(crate) fn make_pipeline_with_constants(
     cfg: TileConfig,
     swizzle_enabled: bool,
     fine_barrier_enabled: bool,
+    pattern: TransposePattern,
 ) -> Result<Retained<MtlPipeline>, MetalError> {
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -215,6 +223,22 @@ pub(crate) fn make_pipeline_with_constants(
             std::ptr::NonNull::from(&fine_barrier).cast(),
             MTLDataType::Bool,
             8,
+        );
+        // 転置ロードゲート（イシュー #1138）。index は FINE_BARRIER_ENABLED
+        // （index 8）の直後の 9/10（`shaders/gemm.metal` 冒頭 TRANS_A/TRANS_B
+        // 宣言と 1:1 対応。`tests/shader_source_evidence.rs` が index を
+        // 含めて固定する）。
+        let trans_a = matches!(pattern, TransposePattern::Tn | TransposePattern::Tt);
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&trans_a).cast(),
+            MTLDataType::Bool,
+            9,
+        );
+        let trans_b = matches!(pattern, TransposePattern::Nt | TransposePattern::Tt);
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&trans_b).cast(),
+            MTLDataType::Bool,
+            10,
         );
     }
 

@@ -116,7 +116,8 @@ fandhe-ai/
     │   ├── cuda-gemm-tiled-f32-swizzle-ab.md # tiled f32（classic）経路へのブロック実行順スウィズル（#1034）横展開の判定基準・#1164 後の到達性整理（整列N=1024/2048/4096はpipeline経路のためclassic非到達）・実機到達不能によるブロック判断記録（#1139）
     │   ├── cuda-gemm-tiled-pipeline.md # cp.async 多段パイプライン（#1033）の GB10 実測記録・本番結線判断（イシュー #1137。bit 一致・parity 0 fail・N=1024/2048/4096 で 1.51〜1.74 倍改善を確認し `CudaGemm::run_tiled_f32` 系 3 入口へ形状条件付きで結線〈ADOPT〉。GB10実機実測2026-09-03）
     │   ├── cuda-gemm-candle-gate-remeasurement.md # FP32 SIMT GEMM N=1024/2048/4096 reuse の candle 比 5 回計測中央値再計測・#1031 ゲート達成判定の確定記録（正式系列〈fandhe-ai =0.6.0〉・参考系列〈#1164 結線後 HEAD〉の 2 系列併記・N=2048 candle 無効データの原因・再現条件記録。GB10 実機実測。イシュー #1142）
-    │   └── logs/cuda-gemm-candle-gate-1142/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1142）
+    │   ├── logs/cuda-gemm-candle-gate-1142/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1142）
+    │   └── metal-gemm-transpose-tiled.md # gemm_simdgroup_tiled の転置ロード（TRANS_A/TRANS_B）拡張・NT/TN/TT へのタイル variant 選択適用の実装・実機正確性実測記録（M4 Max。NN 非後退ビット同一・NT/TN/TT parity 確認済み）。性能 A/B 未計測のため自動ルーティング（dispatch_strided_bias_act_prepared 委譲）は本 PR では未結線と明記（イシュー #1138）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）
