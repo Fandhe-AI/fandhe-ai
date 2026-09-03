@@ -853,7 +853,7 @@ kernel void gemm_simdgroup_tiled(
                     bool group_in_bounds = tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
                     if (group_in_bounds) {
                         device const float4* src = reinterpret_cast<device const float4*>(
-                            a + (size_t)global_row * (size_t)dims.k + (size_t)global_k);
+                            a + (size_t)global_row * (size_t)st.lda + (size_t)global_k);
                         threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
                         *dst = *src;
                     } else {
@@ -861,7 +861,7 @@ kernel void gemm_simdgroup_tiled(
                             uint kk_e = kk + e;
                             uint global_k_e = global_k + e;
                             tile_a[dst_idx + e] = tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)
-                                ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k_e]
+                                ? a[(size_t)global_row * (size_t)st.lda + (size_t)global_k_e]
                                 : 0.0f;
                         }
                     }
@@ -908,7 +908,7 @@ kernel void gemm_simdgroup_tiled(
                     bool group_in_bounds = tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 4, dims);
                     if (group_in_bounds) {
                         device const float4* src = reinterpret_cast<device const float4*>(
-                            b + (size_t)global_k * (size_t)dims.n + (size_t)global_col);
+                            b + (size_t)global_k * (size_t)st.ldb + (size_t)global_col);
                         threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
                         *dst = *src;
                     } else {
@@ -916,7 +916,7 @@ kernel void gemm_simdgroup_tiled(
                             uint c_e = c_ + e;
                             uint global_col_e = global_col + e;
                             tile_b[dst_idx + e] = tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)
-                                ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col_e]
+                                ? b[(size_t)global_k * (size_t)st.ldb + (size_t)global_col_e]
                                 : 0.0f;
                         }
                     }
@@ -1029,7 +1029,7 @@ kernel void gemm_simdgroup_tiled(
                         if (TRANS_A) {
                             simdgroup_load(a_tile, a + (size_t)(p0 + kk) * (size_t)st.lda + (size_t)a_row, st.lda, ulong2(0), true);
                         } else {
-                            simdgroup_load(a_tile, a + (size_t)a_row * (size_t)dims.k + (size_t)(p0 + kk), dims.k);
+                            simdgroup_load(a_tile, a + (size_t)a_row * (size_t)st.lda + (size_t)(p0 + kk), st.lda);
                         }
                     }
                     for (uint ci = 0; ci < acc_cols; ci++) {
@@ -1049,7 +1049,7 @@ kernel void gemm_simdgroup_tiled(
                             if (TRANS_B) {
                                 simdgroup_load(b_tile, b + (size_t)b_col * (size_t)st.ldb + (size_t)(p0 + kk), st.ldb, ulong2(0), true);
                             } else {
-                                simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)dims.n + (size_t)b_col, dims.n);
+                                simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)st.ldb + (size_t)b_col, st.ldb);
                             }
                         }
                         simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);

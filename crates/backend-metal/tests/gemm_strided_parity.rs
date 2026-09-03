@@ -398,3 +398,106 @@ fn dispatch_strided_tiled_prepared_rejects_non_eight_divisible_shape_while_class
     )
     .expect("classic strided 経路（gemm_tiled_bias_act）は非 8 整除形状も処理できる契約");
 }
+
+/// `logical`（行優先の論理 `[rows, cols]`）を、行あたり `ld`（`>= cols`）
+/// 要素のパディング付き行優先バッファへ埋め込む。パディング列（`cols..ld`）
+/// には論理値と大きく異なる番兵値（`f32::MAX`）を書き込み、シェーダが
+/// `st.lda`/`st.ldb`（padded leading dimension）ではなく非パディング値
+/// （`dims.k`/`dims.n`）で読み出す誤りがあれば、パディング領域を読んで
+/// 結果が大きく崩れ `assert_parity` が確実に検出できるようにする
+/// （イシュー #1138 codex-review/Cursor Bugbot 指摘の回帰テスト）。
+fn pad_dense_row_major(logical: &[f32], rows: usize, cols: usize, ld: usize) -> Vec<f32> {
+    assert!(ld >= cols, "ld は cols 以上である契約");
+    let mut out = vec![f32::MAX; rows * ld];
+    for r in 0..rows {
+        out[r * ld..r * ld + cols].copy_from_slice(&logical[r * cols..(r + 1) * cols]);
+    }
+    out
+}
+
+/// イシュー #1138（codex-review P1・Cursor Bugbot 指摘の回帰）:
+/// `gemm_simdgroup_tiled` の非転置ロード分岐（staged・direct-load 両経路）
+/// が `st.lda`/`st.ldb`（`MatrixLayout::ld`。padded leading dimension を
+/// 許容する）を無視し `dims.k`/`dims.n`（非パディング論理次元）で device
+/// メモリを読んでいたバグの回帰テスト。`strided_tiled_eligibility` は
+/// `ld` が 4 の倍数であることしか要求せず `ld == k`/`ld == n`（密行列）を
+/// 強制しないため、NN/NT/TN（非転置側を 1 つ以上含む全パターン）で
+/// padded leading dimension を持つ入力を CPU 参照実装と統一複合判定
+/// （REQ-2）で照合する。修正前は非転置側のパディング列（番兵値
+/// `f32::MAX`）を誤って読み込み結果が大きく崩れるため本テストで検出
+/// できる（TT は非転置側を持たないため対象外。修正内容は
+/// `crates/backend-metal/src/shaders/gemm.metal` の非転置ロード分岐参照）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn dispatch_strided_tiled_prepared_handles_padded_leading_dimension_for_non_transposed_side() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+    let (m, n, k) = (64usize, 96usize, 48usize); // いずれも 8 整除（適格性ゲート通過）
+    let cfg = tile::select(m, n, k);
+    let a_logical = Xorshift64Star::new(1138).fill_vec(m * k);
+    let b_logical = Xorshift64Star::new(2276).fill_vec(k * n);
+    let mut expected = vec![0.0f32; m * n];
+    matmul_reference_fma(&a_logical, &b_logical, &mut expected, m, n, k)
+        .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+    // padded ld（4 の倍数を維持したまま論理次元より大きくする）。
+    let lda_padded = k + 4;
+    let ldb_padded = n + 4;
+
+    // NN: A・B とも非転置・両方 padded ld。
+    // NT: A 非転置（padded ld）・B 転置（padded ld は転置側に非適用）。
+    // TN: A 転置・B 非転置（padded ld）。
+    // TT は非転置側を持たないため本バグの対象外（既存 all_transpose_patterns
+    // テストで別途 parity 確認済み）。
+    for (trans_a, trans_b) in [(false, false), (false, true), (true, false)] {
+        let (a_phys, a_layout): (Vec<f32>, MatrixLayout) = if trans_a {
+            (
+                transpose_dense(&a_logical, m, k),
+                classify_2d(&[m, k], &[1, m as isize]).unwrap(),
+            )
+        } else {
+            (
+                pad_dense_row_major(&a_logical, m, k, lda_padded),
+                classify_2d(&[m, k], &[lda_padded as isize, 1]).unwrap(),
+            )
+        };
+        let (b_phys, b_layout): (Vec<f32>, MatrixLayout) = if trans_b {
+            (
+                transpose_dense(&b_logical, k, n),
+                classify_2d(&[k, n], &[1, k as isize]).unwrap(),
+            )
+        } else {
+            (
+                pad_dense_row_major(&b_logical, k, n, ldb_padded),
+                classify_2d(&[k, n], &[ldb_padded as isize, 1]).unwrap(),
+            )
+        };
+
+        let a_buf = MetalBuffer::new_with_data(&ctx, &a_phys).expect("A バッファ確保に失敗した");
+        let b_buf = MetalBuffer::new_with_data(&ctx, &b_phys).expect("B バッファ確保に失敗した");
+        let c_buf = MetalBuffer::new_zeroed(&ctx, m * n).expect("C バッファ確保に失敗した");
+
+        gemm.dispatch_strided_tiled_prepared(
+            &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf, m, n, k, cfg,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "dispatch_strided_tiled_prepared failed (padded ld, trans_a={trans_a}, \
+                 trans_b={trans_b}, m={m}, n={n}, k={k}): {e}"
+            )
+        });
+        let actual = c_buf.read_to_vec();
+
+        assert_parity(
+            &format!(
+                "dispatch_strided_tiled_prepared padded-ld parity \
+                 (trans_a={trans_a}, trans_b={trans_b}, m={m}, n={n}, k={k}, \
+                 lda={}, ldb={})",
+                a_layout.ld, b_layout.ld
+            ),
+            &actual,
+            &expected,
+        );
+    }
+}
