@@ -264,8 +264,10 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
 
 **第 2 層の判定規則（決定的・fail-safe。実装は #1152/#1156 が担当）**:
 
-1. **構築時（`CudaGemmAuto::new`）**: `CudaMmaGemm::new(device)` を
-   `CudaWmmaGemm::new(device).ok()` と同型の fail-soft で構築する。
+1. **構築時（`CudaGemmAuto::new`。#1152 で実装済み。診断用
+   `mma_available`／`mma_unavailable_reason` アクセサを併設）**:
+   `CudaMmaGemm::new(device)` を `CudaWmmaGemm::new(device).ok()` と同型の
+   fail-soft で構築する。
    `cc < 8.0`（`TensorCoreUnsupported`）・base カーネル（`mma_f16`）の
    NVRTC コンパイル失敗は `CudaMmaGemm::new` 自体が `Err` を返すため
    `mma = None` として握り潰す（現行 `wmma` フィールドの構築方針と対称）。
@@ -327,10 +329,10 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
   しない（#1156 のユーザー承認条件）。TFLOPS 記録・`wmma_f16_opt` の扱い
   確定は #1160 が担当する
 
-**実装 Issue 対応表**: 構築（`mma` フィールド追加。fail-soft）は #1152、
-呼び出し分岐切替（形状ゲート込みの優先順位判定）は #1156、GB10 数値一致
-非後退検証は #1158、TFLOPS 記録・`wmma_f16_opt` 扱いの確定は #1160 が担当
-する。
+**実装 Issue 対応表**: 構築（`mma` フィールド追加。fail-soft）は #1152
+（実装済み）、呼び出し分岐切替（形状ゲート込みの優先順位判定）は #1156、
+GB10 数値一致非後退検証は #1158、TFLOPS 記録・`wmma_f16_opt` 扱いの確定は
+#1160 が担当する。
 
 ## 6. スコープ外
 
@@ -344,7 +346,7 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
 | TF32 経路の数値一致閾値の実測再評価・既定採用可否のユーザー承認 | #186（TASK-11.1g） |
 | CUDA Tensor Core（WMMA/mma）カーネル自体の実装 | #60 系列（TASK-11.1） |
 | CPU 側 ISA dispatch の変更 | 対象外（`gemm_blis/microkernel.rs` は実装済み・変更なし） |
-| f16 `MatrixUnit` 経路の mma 優先実装（`CudaGemmAuto` へのフィールド追加・分岐切替） | #1152・#1156 |
+| f16 `MatrixUnit` 経路の mma 優先実装（`CudaGemmAuto` へのフィールド追加・分岐切替） | #1152（フィールド追加は実装済み）・#1156（分岐切替） |
 | GB10 数値一致非後退（§5.6 の判定規則の実機検証） | #1158 |
 | TFLOPS 記録・`wmma_f16_opt` の扱い確定 | #1160 |
 | `gemm_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR` の `tensor-core::dispatch` への集約（未起票・候補） | 対象外（§5.6 参照。第 2 層定数のため現状維持） |

@@ -23,10 +23,12 @@
 //!
 //! **#1150 設計（`docs/dispatch-rules-design.md` §5.6）**では、
 //! `MatrixUnit` 経路内部の実装優先順位を
-//! `CudaMmaGemm → CudaWmmaGemm → Tiled → Naive` へ切替予定（`mma`
-//! フィールドの fail-soft 構築は #1152、`run_f16` の分岐拡張〈事前形状
-//! ゲート込み〉は #1156 が実装する。本モジュールのコードは #1150 時点
-//! では未変更）。
+//! `CudaMmaGemm → CudaWmmaGemm → Tiled → Naive` へ切替予定。`mma`
+//! フィールドの fail-soft 構築は #1152 で実装済み（`wmma` と同型: cc
+//! ゲート非対応・NVRTC コンパイル失敗のいずれも `None`）。`run_f16` の
+//! 分岐拡張〈事前形状ゲート込み〉は #1156 が実装するため、本モジュールの
+//! `run_f16` は #1152 時点では未変更のまま（`mma` はまだどの実行経路
+//! からも呼ばれない）。
 
 use std::num::NonZeroU32;
 
@@ -39,7 +41,7 @@ use half::f16;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
-use crate::gemm_mma::{validate_mma_alignment, validate_mma_grid_bounds};
+use crate::gemm_mma::{CudaMmaGemm, validate_mma_alignment, validate_mma_grid_bounds};
 // `SpecializedMmaKernelHandle::compile`（本ファイル下部）でのみ使う。
 // 同メソッドが `internal-diagnostics` feature（既定 off）でのみコンパイル
 // されるため、この import も同 feature でゲートしないと既定ビルドで
@@ -1595,14 +1597,25 @@ pub fn select_tile_config_for_device(
 /// （`select_gemm_kernel` の判定材料は cc のみであり、コンパイル成否は
 /// 別軸のフォールバックとして扱う。`run_f16` 内のコメント参照）。
 ///
-/// **#1150 設計予定（#1152 で実装）**: `mma: Option<`
-/// [`crate::gemm_mma::CudaMmaGemm`]`>` フィールドを追加し、`wmma` と
-/// 同型の fail-soft 構築（cc ゲート非対応・NVRTC コンパイル失敗時は
-/// `None`）とする。`wmma` は `mma` が使えない場合のフォールバック用と
-/// して維持する（`docs/dispatch-rules-design.md` §5.6）。
+/// `mma`（[`crate::gemm_mma::CudaMmaGemm`]、`mma.sync`/`ldmatrix`/
+/// `cp.async` パイプライン版 f16 Tensor Core 経路）は `wmma` と同型の
+/// fail-soft 構築（#1152。`docs/dispatch-rules-design.md` §5.6）: cc
+/// ゲート非対応（`CudaError::TensorCoreUnsupported`、cc < 8.0）・NVRTC
+/// コンパイル失敗のいずれでも `None` のまま保持する。`wmma` は `mma` が
+/// 使えない場合のフォールバック用として維持する。`mma` フィールド自体は
+/// #1156（`run_f16` の分岐拡張）まではどの実行経路からも読まれない。
 pub struct CudaGemmAuto {
     gemm: CudaGemm,
     wmma: Option<CudaWmmaGemm>,
+    /// `mma.sync` 系 f16 Tensor Core GEMM。cc ゲート非対応・NVRTC
+    /// コンパイル失敗時は `None`（fail-soft。上記構造体コメント参照）。
+    mma: Option<CudaMmaGemm>,
+    /// `mma` が `None` の場合の構築失敗理由（`CudaError` の `Display`
+    /// 文字列）。`gemm_wmma.rs::CudaWmmaGemm::wmma_f16_opt_error` と同じ
+    /// 設計判断（PR #256 レビュー指摘: サイレントフォールバックで green
+    /// になりうるため、失敗理由をテスト・診断から読める形で退避する）。
+    /// `mma` が `Some` の場合は `None`。
+    mma_construct_error: Option<String>,
     caps: DeviceCaps,
 }
 
@@ -1617,15 +1630,61 @@ impl CudaGemmAuto {
     /// `wmma = None` として握り潰し、`run_f16` を tiled へ倒す
     /// （fail-safe。`docs/dispatch-rules-design.md` §2.2）。
     ///
-    /// **#1150 設計予定（#1152 で実装）**: `CudaMmaGemm::new(device).ok()`
-    /// を `wmma` と同様の fail-soft で構築し `mma` フィールドへ保持する
-    /// （`cc < 8.0` の `TensorCoreUnsupported`・NVRTC コンパイル失敗とも
-    /// `None`。`docs/dispatch-rules-design.md` §5.6）。
+    /// `mma`（[`CudaMmaGemm`]）も `wmma` と同様の fail-soft で構築する
+    /// （#1152。`cc < 8.0` の `TensorCoreUnsupported`・NVRTC コンパイル
+    /// 失敗とも `None`。`docs/dispatch-rules-design.md` §5.6）。構築失敗
+    /// 理由は `mma_construct_error` へ退避し [`Self::mma_unavailable_reason`]
+    /// から読める（`mma` フィールド自体の値は `.ok()` と完全に同値）。
+    /// `mma` は `wmma` の後に構築する（`gemm` の構築失敗はそのまま
+    /// 呼び出し元へ伝播するため、naive/tiled すら構築できない環境で
+    /// 無駄な NVRTC コンパイルを行わない）。
+    ///
+    /// `CudaMmaGemm::new` は `compile_ptx` 直呼び（LRU カーネル
+    /// キャッシュ非経由）で base／swizzle 2 カーネルをコンパイルするため
+    /// `CudaGemmAuto::new` 自体の構築コストは増える。ただし `CudaGemmAuto`
+    /// を構築する本番経路は現状存在せず（`facade`／`backend-cuda::ops`／
+    /// `bench-harness` のいずれからも未参照。`BackendOps::gemm` は f32
+    /// tiled 固定）、到達するのは `tests/gemm_auto.rs`・
+    /// `tests/dispatch_boundary.rs` の `#[ignore]` テストのみのため、
+    /// 利用者向け起動コスト（`startup-bench`）への影響はない。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let gemm = CudaGemm::new(device)?;
         let wmma = CudaWmmaGemm::new(device).ok();
+        let (mma, mma_construct_error) = match CudaMmaGemm::new(device) {
+            Ok(mma) => (Some(mma), None),
+            Err(err) => (None, Some(err.to_string())),
+        };
         let caps = DeviceCaps::cuda(device.compute_capability());
-        Ok(Self { gemm, wmma, caps })
+        Ok(Self {
+            gemm,
+            wmma,
+            mma,
+            mma_construct_error,
+            caps,
+        })
+    }
+
+    /// `mma`（[`CudaMmaGemm`]、`mma.sync` 系 f16 Tensor Core 経路）が
+    /// [`Self::new`] 時点でコンパイル・ロードに成功しているかを返す
+    /// （`gemm_wmma.rs::CudaWmmaGemm::wmma_f16_opt_available` と同型）。
+    ///
+    /// 診断・テスト用の読み取り口であり利用者向け切替 API ではない
+    /// （REQ-11・`docs/dispatch-rules-design.md` §5.6 判定規則 7）。
+    /// `run_f16` は #1156 まで `mma` を参照しないため、現時点ではこの値は
+    /// 実行経路の選択には影響しない。
+    pub fn mma_available(&self) -> bool {
+        self.mma.is_some()
+    }
+
+    /// [`Self::mma_available`] が `false` の場合の構築失敗理由
+    /// （`mma_construct_error` の公開読み取り口。`CudaWmmaGemm::
+    /// wmma_f16_opt_unavailable_reason` と同型）。`mma` が `Some` の場合は
+    /// `None`。
+    ///
+    /// 診断・テスト用の読み取り口であり利用者向け切替 API ではない
+    /// （REQ-11・`docs/dispatch-rules-design.md` §5.6 判定規則 7）。
+    pub fn mma_unavailable_reason(&self) -> Option<&str> {
+        self.mma_construct_error.as_deref()
     }
 
     /// f32 GEMM を自動経路選択で実行する。

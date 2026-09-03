@@ -45,8 +45,10 @@ fn new_does_not_panic_and_returns_typed_result() {
 
     match CudaGemmAuto::new(&device) {
         Ok(_auto) => {
-            // CUDA 搭載環境: naive/tiled の構築成功（WMMA は cc 非対応・
-            // コンパイル失敗時 None のまま保持されるため new 自体は失敗しない）。
+            // CUDA 搭載環境: naive/tiled の構築成功（WMMA・mma
+            // 〈#1152〉はいずれも cc 非対応・コンパイル失敗時 None の
+            // まま保持され、new 自体は失敗しない。fail-soft。
+            // `docs/dispatch-rules-design.md` §5.6 判定規則 1）。
         }
         Err(CudaError::NvrtcUnavailable { detail }) => {
             assert!(!detail.is_empty(), "detail message must not be empty");
@@ -134,6 +136,47 @@ fn run_f16_matches_cpu_reference() {
         &gpu_f32,
         &reference_rounded,
     );
+}
+
+/// 実機依存: `CudaGemmAuto::new` が構築する `mma` フィールド（#1152）が
+/// cc>=8.0 ゲートに従って fail-soft に構築されることを検証する
+/// （`docs/dispatch-rules-design.md` §5.6 判定規則 1）。`run_f16` は
+/// #1156 まで `mma` を参照しないため、本テストは経路実行ではなく
+/// `mma_available`／`mma_unavailable_reason` の診断アクセサのみを検証する。
+/// 既存 `run_f16_matches_cpu_reference` は変更せず、経路が引き続き
+/// WMMA のまま数値契約が維持されることの担保として据え置く。
+#[test]
+#[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
+            test-ignored-cuda 経由で実行する"]
+fn mma_field_is_constructed_by_compute_capability_gate() {
+    let device = CudaDevice::new(0).expect("CUDA device available in ignored test environment");
+    let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
+
+    let (major, _minor) = device.compute_capability();
+    if major >= 8 {
+        assert!(
+            auto.mma_available(),
+            "cc {major}.x >= 8.0 のはずが mma が None（理由: {:?}）。\
+             CudaMmaGemm::new の NVRTC コンパイルが失敗している可能性がある",
+            auto.mma_unavailable_reason(),
+        );
+        assert!(
+            auto.mma_unavailable_reason().is_none(),
+            "mma_available() が true の場合 mma_unavailable_reason() は None のはず"
+        );
+    } else {
+        assert!(
+            !auto.mma_available(),
+            "cc {major}.x < 8.0 のはずが mma が Some（cc ゲートが機能していない）"
+        );
+        let reason = auto
+            .mma_unavailable_reason()
+            .expect("mma_available() が false の場合 mma_unavailable_reason() は Some のはず");
+        assert!(
+            reason.contains("compute capability"),
+            "cc ゲート起因の失敗理由には 'compute capability' を含むはず: {reason}"
+        );
+    }
 }
 
 /// 実機依存: `select_tile_config_for_device`（Phase C-9b・イシュー #527）
