@@ -79,10 +79,15 @@
 //! に自然に含まれる）。
 //!
 //! ```sh
-//! cargo test -p fandhe-ai-backend-cuda \
+//! cargo test -p fandhe-ai-backend-cuda --release \
 //!     --test large_buffer_percall_alloc_transfer_triage \
 //!     -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! `--release` は必須（`docs/perf/cuda-large-buffer-percall-alloc-transfer-threshold.md`
+//! §2.1 の実測値取得時と同一条件。§4.1 の P6 median 0.077 ms〈8 MiB〉等、
+//! debug ビルドでは到達不能な速さの実測値を含むため、debug ビルドで
+//! 再実行しても本ドキュメントの記録値は再現しない）。
 //!
 //! `--test-threads=1` は同一 GPU 上での計測競合を避けるための前提
 //! （`wmma_f16_opt_perf_triage.rs` 等、既存の実機診断テストと同じ規約）。
