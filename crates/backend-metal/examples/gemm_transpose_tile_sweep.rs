@@ -2,7 +2,7 @@
 //! example（イシュー #1039。親 #1037・兄弟 #1036/#1038/#1040 の後続）。
 //!
 //! - NN: `MetalGemm::dispatch_tiled_prepared`（転送非計測）で
-//!   `crate::tile::CANDIDATES` 全 8 候補を明示指定して比較する
+//!   `crate::tile::CANDIDATES` 全 9 候補を明示指定して比較する
 //!   （`gemm_tile_sweep.rs` と同じ計測境界・`resolved_matches_requested`
 //!   検証を踏襲）。
 //! - NT/TN/TT: シェーダ側にタイル variant を持たない strided classic

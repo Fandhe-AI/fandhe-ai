@@ -350,7 +350,6 @@ pub use error::MetalError;
 pub use gemm::{GemmVariant, MetalGemm};
 #[cfg(target_os = "macos")]
 pub use half_buffer::MetalHalfBuffer;
-pub use layout::TransposePattern;
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]
