@@ -25,8 +25,11 @@
 - 計測プロトコル: `docs/perf/metal-bench-noise-protocol.md` 準拠
   （`bench_harness::protocol::run`・`MeasurementConfig::default()`〈warmup 20・
   計測 20・中央値〉・決定的シード `0xC0FFEE`）
-- `pmset -g therm`: 計測前後とも「サーマル・パフォーマンス警告記録なし」
-  （`docs/perf/logs/metal-gemm-n4096-kernel-gap-1143/pmset_therm_after.txt`）
+- `pmset -g therm`: 計測前後とも目視確認した結果は「サーマル・パフォーマンス
+  警告記録なし」。ただし証跡ファイルとしてコミットしているのは計測後の実行結果
+  （`docs/perf/logs/metal-gemm-n4096-kernel-gap-1143/pmset_therm_after.txt`）の
+  みで、計測前の実行結果は保存していない（記録漏れ。実測手順・実施自体への疑義
+  ではない）
 - 生ログ: `docs/perf/logs/metal-gemm-n4096-kernel-gap-1143/sweep_run{1,2}.log`
   （`cargo run -p fandhe-ai-backend-metal --example gemm_transpose_tile_sweep
   --release` を別プロセスで 2 回実行）

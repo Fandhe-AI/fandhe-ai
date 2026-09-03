@@ -102,14 +102,20 @@ NT/TN/TT はいずれも NN 最良候補の概ね 15〜25%（大形状ほど低�
 
 **#1143 追記**: N=4096 カーネル純境界の candle 比ギャップ縮小調査（イシュー
 #1143）で `CANDIDATES` へ index 8（`(32,64,16,1,2)`。MLX steel classic 経路の
-未収録構成）を追加し、N=4096 NN で cand2（現行選択・9.65〜9.76 TFLOPS）と比較
-した。cand8 は 0.96〜0.97 TFLOPS と大幅に劣後し、他 9 形状 × 4 パターンでも
-一度も最良候補にならなかった（`docs/perf/metal-gemm-n4096-kernel-gap.md` §3・
-生ログ `logs/metal-gemm-n4096-kernel-gap-1143/sweep_run{1,2}.log`）。
+未収録構成）を追加し、N=4096 NN で cand2（現行選択）と比較した。比較対象の
+cand2 実測値は本 PR（#1143）自身の計測ではなく、本表 §3・§5（イシュー #1039・
+上記「1. 計測環境」の 2 回計測。`sweep_run{1,2}.log`）に記録済みの 9.758〜
+9.905 TFLOPS（本表 37/55 行目）を指す。#1143 自身の実測（`docs/perf/metal-gemm-n4096-kernel-gap.md`
+§3）では cand2 は run1=9.6479／run2=7.6978 TFLOPS（約 2 TFLOPS の run 間ばら
+つき）であり、両者は別々の計測キャンペーンの値であるため単純に一つの値域とし
+て扱わない。cand8 は 0.96〜0.97 TFLOPS と大幅に劣後し、他 9 形状 × 4 パターン
+でも一度も最良候補にならなかった（`docs/perf/metal-gemm-n4096-kernel-gap.md` §3・
+生ログ `logs/metal-gemm-n4096-kernel-gap-1143/sweep_run{1,2}.log`）。cand8 劣後
+という結論自体は両キャンペーンのいずれの値を基準にしても変わらない。
 `select_with_occupancy_for_device` の選択（本表 §5 の判断）は変更しない。
 
 ## 6. スコープ外（計画 §7 を踏襲）
 
 - `gemm_simdgroup_tiled` への転置ロード導入（NT/TN/TT へのタイル variant 適用）: §4 の定量化を判断材料として親 #1037 系の別イシューへ引き継ぐ
-- 親 #1037 の受け入れ条件（N=4096 で candle Metal 5,040 GFLOPS 超え）の達成判定自体: 本イシューの実測値（NN 4096 立方で 9.76〜9.91 TFLOPS）は判断材料として記録するが、達成ゲート判定は親側で行う
+- 親 #1037 の受け入れ条件（N=4096 で candle Metal 5,040 GFLOPS 超え）の達成判定自体: 本イシュー（#1039。本表 §3・§5・37/55 行目、`sweep_run{1,2}.log`。#1143 自身の計測ではない）の実測値（NN 4096 立方で 9.76〜9.91 TFLOPS）は判断材料として記録するが、達成ゲート判定は親側で行う
 - M4 Max 以外の Apple Silicon 別テーブル・DGX Spark 側作業
