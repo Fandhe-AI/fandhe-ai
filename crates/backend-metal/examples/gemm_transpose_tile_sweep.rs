@@ -325,38 +325,10 @@ mod macos_impl {
         ]
     }
 
-    /// 候補ごとの `MetalGemm::tile_pipeline_reflection`（イシュー #1143・
-    /// `crates/backend-metal/src/gemm.rs::TilePipelineReflection`）を N=4096
-    /// NN で出力する。パイプライン構築のみでディスパッチを伴わないため
-    /// 秒未満で終わる（`docs/perf/metal-gemm-n4096-kernel-gap.md` Phase A
-    /// step 3。レジスタ圧・スタック溢れの間接証跡として cand0
-    /// 〈64x64,wm2wn2。candle `TILE_64_64_16_2_2` と同一形状〉の
-    /// `max_total_threads_per_threadgroup` が [`TileConfig::thread_count`]
-    /// を下回っていないか（下回っていれば H1 を支持）を確認する）。
-    fn dump_reflection(gemm: &MetalGemm, ctx: &MetalContext) {
-        use fandhe_ai_backend_metal::TransposePattern;
-        for (label, cfg) in candidates() {
-            match gemm.tile_pipeline_reflection(ctx, cfg, TransposePattern::Nn) {
-                Ok(refl) => println!(
-                    "reflection candidate={label} requested_thread_count={} \
-                     max_total_threads_per_threadgroup={} static_threadgroup_memory_length={} \
-                     resolved_matches_requested={}",
-                    cfg.thread_count(),
-                    refl.max_total_threads_per_threadgroup,
-                    refl.static_threadgroup_memory_length,
-                    refl.resolved_cfg == cfg,
-                ),
-                Err(e) => println!("reflection candidate={label} error={e}"),
-            }
-        }
-    }
-
     pub fn main() {
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
         let config = MeasurementConfig::default();
-
-        dump_reflection(&gemm, &ctx);
 
         for (m, n, k) in shapes() {
             measure_nn(&gemm, &ctx, m, n, k, &config);

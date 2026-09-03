@@ -187,27 +187,6 @@ impl GemmStrides {
     }
 }
 
-/// [`MetalGemm::tile_pipeline_reflection`] の返り値（イシュー #1143）。
-/// `MTLComputePipelineState` 構築後にのみ取得できる反射値を、レジスタ
-/// 圧・スタック溢れの間接証跡として examples／診断コードへ渡す。
-///
-/// 診断専用の内部表現であり、本番 GEMM ディスパッチ経路（`dispatch_auto`・
-/// `dispatch_variant`）の契約には含まれない。crate root（`lib.rs`）へは
-/// 再エクスポートするが、公開 API 面としての安定性は保証しないため
-/// `#[doc(hidden)]` とする（AGENTS.md「内部表現の公開 API への漏出は P1」・
-/// PR #1168 codex-review 指摘）。
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TilePipelineReflection {
-    /// フォールバック後に実際に採用された [`TileConfig`]
-    /// （`crate::tile::fallback_chain` 経由。要求した構成と異なりうる）。
-    pub resolved_cfg: TileConfig,
-    /// スレッドグループあたりの最大スレッド数（GPU 算出値）。
-    pub max_total_threads_per_threadgroup: u32,
-    /// コンパイラが静的に確保する threadgroup メモリ量（バイト）。
-    pub static_threadgroup_memory_length: u32,
-}
-
 /// naive・tiled・simdgroup の 3 パイプラインを保持するハンドル。
 ///
 /// [`MetalContext`] とは別に保持する理由: パイプライン構築（MSL コンパイル
@@ -636,54 +615,6 @@ impl MetalGemm {
     ) -> Result<TileConfig, MetalError> {
         self.pipeline_for_tile(ctx, cfg, pattern)
             .map(|(_, resolved)| resolved)
-    }
-
-    /// [`TileConfig`] 候補が実際に構築するパイプラインの反射値
-    /// （イシュー #1143）。`gemm_simdgroup_tiled` の
-    /// `simdgroup_float8x8 acc[MAX_ACC][MAX_ACC]` 等の固定確保配列が
-    /// レジスタへ昇格できずスタックへ溢れている（スレッド占有率が
-    /// 下がる）ことの間接的な証跡として、`MTLComputePipelineState`
-    /// 構築後にのみ取得できる 2 値を公開する:
-    ///
-    /// - `max_total_threads_per_threadgroup`: レジスタ／スレッドグループ
-    ///   メモリ使用量から GPU が算出するスレッドグループあたりの
-    ///   スレッド数上限。[`TileConfig::thread_count`] が要求する値を
-    ///   下回っていれば、`Self::pipeline_for_tile` は
-    ///   `crate::tile::fallback_chain` の次候補へフォールバックする
-    ///   （本メソッドは `pipeline_for_tile` のフォールバック判定
-    ///   そのものには関与せず、実測診断専用の読み取り専用入口）。
-    /// - `static_threadgroup_memory_length`: `MTLComputePipelineState` の
-    ///   `staticThreadgroupMemoryLength`。MSL カーネルソース中で**静的に
-    ///   宣言された** `threadgroup` 変数のみをコンパイラが確保するバイト量
-    ///   であり、`Self::dispatch_tile`（`shaders/gemm.metal` の
-    ///   `gemm_simdgroup_tiled`）が実行時に
-    ///   `setThreadgroupMemoryLength_atIndex` で確保する動的 threadgroup
-    ///   メモリ（`TileConfig::shared_mem_bytes_for` が算出する A/B タイル
-    ///   分の実バイト数）とは**別の API・別の確保タイミング**の値であり、
-    ///   両者は対応しない（本カーネルは `threadgroup(0)` 引数を動的確保
-    ///   のみで満たすため、本フィールドは 0 またはごく小さい値になりうる。
-    ///   codex-review 指摘・PR #1168）。レジスタ／スタック溢れの間接証跡
-    ///   としては `max_total_threads_per_threadgroup` 側を主に参照する。
-    ///
-    /// `docs/perf/metal-gemm-n4096-kernel-gap.md`
-    /// （`examples/gemm_transpose_tile_sweep.rs`）から呼ばれる診断専用
-    /// 入口であり、本番ディスパッチ経路（`dispatch_auto`・
-    /// `dispatch_variant`）からは呼ばれない。診断専用の内部表現を返すため
-    /// `#[doc(hidden)]`（[`TilePipelineReflection`] 参照。AGENTS.md「内部
-    /// 表現の公開 API への漏出は P1」・PR #1168 codex-review 指摘）。
-    #[doc(hidden)]
-    pub fn tile_pipeline_reflection(
-        &self,
-        ctx: &MetalContext,
-        cfg: TileConfig,
-        pattern: TransposePattern,
-    ) -> Result<TilePipelineReflection, MetalError> {
-        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, pattern)?;
-        Ok(TilePipelineReflection {
-            resolved_cfg,
-            max_total_threads_per_threadgroup: pipeline.maxTotalThreadsPerThreadgroup() as u32,
-            static_threadgroup_memory_length: pipeline.staticThreadgroupMemoryLength() as u32,
-        })
     }
 
     /// [`Self::resolve_tile_config`] の f16 版（イシュー #796）。

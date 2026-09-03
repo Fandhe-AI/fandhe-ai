@@ -348,13 +348,6 @@ pub use elementwise::MetalElementwise;
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
 pub use gemm::{GemmVariant, MetalGemm};
-// `TilePipelineReflection` は `gemm::tile_pipeline_reflection` 用の
-// 診断専用内部表現（`#[doc(hidden)]`。イシュー #1143・PR #1168
-// codex-review 指摘）。examples／診断コードから `crate::` パスで
-// 到達できるよう再エクスポート自体は維持するが、公開 API の安定契約
-// には含めない。
-#[cfg(target_os = "macos")]
-pub use gemm::TilePipelineReflection;
 #[cfg(target_os = "macos")]
 pub use half_buffer::MetalHalfBuffer;
 pub use layout::TransposePattern;
