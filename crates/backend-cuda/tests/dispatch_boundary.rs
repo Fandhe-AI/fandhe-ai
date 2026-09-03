@@ -298,11 +298,12 @@ fn small_shape_matrix_unit_has_no_floor_tflops_record() {
 /// `KernelKind::MatrixUnit` に写像される。第 2 層（`CudaGemmAuto` 内部。
 /// `crates/backend-cuda/src/gemm_auto.rs::select_f16_matrix_unit_impl`）の
 /// 判定ロジックは #1156 で整列形状・cc>=8.0 時に `CudaMmaGemm` を優先する
-/// 設計どおり実装済みだが、`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`
-/// （本番既定 `false`）でゲートされ本番では未有効化（#1160 の実測・承認
-/// 待ち）。本テストは経路選択の妥当性ではなく「パイプライン差はカーネル
-/// 内部チューニング材料であり、第 1 層の分岐条件にはしない」という設計
-/// 判断の実測裏付けに限定する（計測ロジック自体は変更しない）。
+/// 設計どおり実装済みで、`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`
+/// （本番既定 `true`）は #1160 の GB10 実機実測（本テストのカーネル
+/// 単体計測値を判別証跡の一つとして使用）を経て本番結線済み。本テストは
+/// 経路選択の妥当性ではなく「パイプライン差はカーネル内部チューニング
+/// 材料であり、第 1 層の分岐条件にはしない」という設計判断の実測裏付け
+/// に限定する（計測ロジック自体は変更しない）。
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須。実測記録は docs/perf/dispatch-boundary-measurement.md"]
 fn large_shape_mma_pipeline_vs_wmma_tflops_record() {

@@ -8,7 +8,9 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 （`.claude/rules/coding-rust.md`）。
 
 ## 状態: 実機実測完了（2026-09-03・DGX Spark GB10・sm_121・GPU アイドル。
-是正後テスト〈§4.3〉も実機実測済み）
+是正後テスト〈§4.3〉も実機実測済み。イシュー #1160（2026-09-04）で
+`tensor_core_tflops_record` の f16 assert が pass に転換・本番結線・
+`wmma_f16_opt` の扱い確定。§8 参照）
 
 ## 1. 症状（発端）
 
@@ -105,17 +107,17 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 かつ整列形状（`validate_mma_alignment`／`validate_mma_grid_bounds` 充足）で
 `mma_sync_f16`（`CudaMmaGemm`）を、それ以外では `wmma_f16`（`CudaWmmaGemm`）を
 優先する `docs/dispatch-rules-design.md` §5.6 の mma 優先設計どおり実装済み（#1156）。
-ただしこの優先順位は `gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`（本番既定 `false`）
-でゲートされており、#1160 の GB10 実機実測で非後退を確認し承認を得るまでは本番では
-無効（`run_f16` は引き続き `wmma_f16` を優先して呼ぶ）。判定ロジックの実装と本番での
-優先順位有効化は別軸であり、「結線済み」は前者（ロジック実装）のみを指す。加えて
-`CudaGemmAuto` 自体は現時点で facade／`BackendOps::gemm`／`bench-harness` のいずれ
-からも呼ばれておらず本番未結線（`gemm_auto.rs::new` doc コメント参照。#1152 時点の
-記述のまま）であるため、`MMA_PRIORITY_PRODUCTION_ENABLED` が仮に `true`化されても
-`mma_sync_f16` は `CudaGemmAuto` が本番経路へ結線された時点で初めて到達する。この
-本番結線自体は本イシュー・#1156 いずれのスコープ外（ディスパッチ規則自体は変更
-しない）。TFLOPS 正式記録・`wmma_f16_opt` の維持・格下げ判断・
-`MMA_PRIORITY_PRODUCTION_ENABLED` の `true` 化判断は別イシュー（#1160。§6）で扱う。
+この優先順位は `gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED` でゲートされており、
+イシュー #1160 の GB10 実機実測（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`）で
+非後退を確認したため `true`（mma 優先）へ本番結線済みである（`run_f16` は
+cc>=8.0・整列形状で `mma_sync_f16` を優先して呼ぶ）。ただし `CudaGemmAuto` 自体は
+本イシュー #1160 の時点でも facade／`BackendOps::gemm`／`bench-harness` のいずれ
+からも呼ばれておらず本番未結線のまま（`gemm_auto.rs::new` doc コメント参照。
+`BackendOps::gemm` は引き続き f32 tiled カーネル固定）である。この
+`CudaGemmAuto` 自体の facade への結線は本イシュー・#1156 いずれのスコープ外
+（ディスパッチ規則自体は変更しない）。TFLOPS 正式記録・`wmma_f16_opt` の維持・
+格下げ判断は #1160 が §8 で扱った（結論: フォールバック限定で維持。§8「7. の
+決定」参照）。
 
 ### 4.2 dim=4096 のプロトコル検査失敗（二峰性）の原因
 
@@ -264,10 +266,12 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
   いずれも同傾向）の優位性を、
   f16 auto 経路（`CudaGemmAuto::run_f16`）へ結線するかどうかの設計判断。#1156 で
   `CudaGemmAuto::run_f16` の `MatrixUnit` 分岐へ結線済み（cc>=8.0・整列形状で優先。
-  §4.1 参照）。**完了条件を追加**（2026-09-03 GB10 実機実測後）:
-  `tensor_core_real_device.rs::tensor_core_tflops_record` の f16 assert
-  （`f16_kernel_tflops > tiled_kernel_tflops`。GB10 実機実測で FAIL・§4.3）が pass する
-  ことを #1131 の完了条件とする。
+  §4.1 参照）。完了条件（2026-09-03 GB10 実機実測後に追加）: `tensor_core_
+  real_device.rs::tensor_core_tflops_record` の f16 assert
+  （§4.3 で FAIL）が pass すること。**#1160（2026-09-04 GB10 実機実測）で
+  `MMA_PRIORITY_PRODUCTION_ENABLED` を `true` へ本番結線し、f16 assert の
+  比較対象を本番経路が実際に選ぶ実装（`mma_sync_f16`）へ差し替えた結果
+  pass に転じたことを確認した（§8）。完了条件は満たされた。**
 
 ## 7. 関連ファイル
 
@@ -276,3 +280,81 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
 - `crates/backend-cuda/tests/dispatch_boundary.rs::large_shape_mma_pipeline_vs_wmma_tflops_record`（是正）
 - `crates/backend-cuda/tests/tensor_core_real_device.rs::tensor_core_tflops_record`（是正）
 - `docs/perf/dispatch-boundary-measurement.md`・`docs/perf/cuda-tensor-core-measurement.md`（大形状行の上書き対象）
+
+## 8. f16 経路切替前後の TFLOPS 記録・f16 assert pass 転換・`wmma_f16_opt` の扱い確定（#1160）
+
+イシュー #1160「f16 経路切替前後の TFLOPS を dispatch_boundary 系で記録し
+`tensor_core_tflops_record` の f16 assert pass と `wmma_f16_opt` の扱いを
+確定する」の実測記録。GB10（sm_121・CUDA 13.0・2026-09-04・GPU アイドル。
+`nvidia-smi --query-compute-apps`／`utilization.gpu` を計測前後に確認）。
+
+### 8.1 カーネル単体（本イシューでの追加計測なし。§3.1 の既存実測を再引用）
+
+§3.1 の GB10 実機実測（2026-09-03。イシュー #1123）は本イシューの結線判断で
+そのまま参照した（同一プロトコル・カーネルソース無変更のため再計測は行って
+いない）。2048/4096 の `wmma_f16_opt` 対 `mma_sync_f16` は §4.1 記載のとおり
+（2048: 約 7.3 倍・4096: 約 10.8 倍）。
+
+### 8.2 転送込み auto 経路 A/B（`CudaGemmAuto::run_f16`。独立 5 回起動・run-median）
+
+`docs/perf/cuda-gemm-auto-f16-mma-switch.md`「実測表」に記録した（本ファイル
+では二重管理しない）。要約: 512/1024/2048 は after（mma 優先）が base（wmma
+優先）を 1.75〜4.67 倍上回り、4096 は #1130 の per-call アロケーション病態
+（本節参照）の影響で base・after とも run-median が低く出るが after の
+run-median は base の 5 run 範囲内に収まった（後退なし）。
+
+### 8.3 `tensor_core_tflops_record` の f16 assert pass 転換
+
+`tests/tensor_core_real_device.rs::tensor_core_tflops_record` の f16 計測を、
+`CudaWmmaGemm`（`wmma_f16_opt`）直接計測から「本番 f16 経路が実際に選ぶ
+実装」（`CudaGemmAuto::mma_available()` に応じて `CudaMmaGemm` または
+`CudaWmmaGemm` をカーネル単体計測。GB10 では `mma_available()=true` のため
+`mma_sync_f16`）へ差し替えた（`internal-diagnostics` feature 込みで選択器
+`f16_matrix_unit_impl` との整合性を fail-closed 検査）。GB10 実機実測結果:
+
+| path | TFLOPS |
+|---|---|
+| tiled_f32（基準） | 10.013 |
+| wmma_tf32_staged | 14.134 |
+| wmma_f16_opt（参考行・assert 対象外） | 4.522 |
+| mma_sync_f16（本番 f16 経路・assert 対象） | 55.449 |
+
+f16 assert（`production_f16_kernel_tflops > tiled_kernel_tflops`）は
+55.449 > 10.013 のため **pass**（`test result: ok. 1 passed`）。TF32 assert
+も引き続き pass（14.134 > 10.013）。イシュー #1131 の完了条件（本 assert が
+pass すること）はこれで満たされた。
+
+### 8.4 `wmma_f16_opt` の扱いの決定: フォールバック限定で維持（コード変更なし）
+
+- **根拠 1**: GB10 カーネル単体で opt≈basic（§4.1・§3.1 参照。512/2048/4096
+  は basic が僅かに速く、768〜1536 は opt が僅かに速い。一貫した優劣なし）。
+  共有メモリ最適化は f16 で効果を持たないが、後退もしていない
+- **根拠 2**: 結線後（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）の WMMA 経路
+  は「mma 事前形状ゲート非充足（`n % 8 != 0` または `k % 8 != 0`・grid 上限
+  超過）」「cc 7.x（mma 非対応）」「`CudaMmaGemm` NVRTC 失敗」時の
+  フォールバックとして本番到達性を保つため、証跡専用への格下げ（到達不能
+  化）はできない
+- **根拠 3**: `ParityPath::WmmaF16` baseline 行は opt 実効経路の実測値であり
+  （`docs/perf/cuda-parity-baseline.md`）、`CudaWmmaGemm::run_f16` の既定を
+  basic へ変える・opt を削除するには baseline 再実測とユーザー承認が必要
+  （本 PR の権限外）
+- **結論**: `wmma_f16_opt` は「フォールバック経路として維持（本番 f16 auto
+  経路の主経路からは外れる）・追加最適化投資は行わない」。将来の opt 廃止／
+  basic 一本化は承認付き別イシューの候補として PR 本文に記録する（本 PR で
+  Issue は起票しない）
+
+### 8.5 4096 転送込みの既知病態（#1130・スコープ外）
+
+4096 は base・after いずれの転送込み計測（§8.2）でも #1130（本ファイル §4.2
+「dim=4096 のプロトコル検査失敗（二峰性）の原因」）の per-call アロケーション
+病態の影響を受け run 間ばらつきが大きい。本イシューはこの病態の原因調査・
+修正を行わない（#1130 のスコープのまま）。
+
+### 8.6 関連ファイル（本節分）
+
+- `crates/backend-cuda/src/gemm_auto.rs`（`MMA_PRIORITY_PRODUCTION_ENABLED = true` 結線）
+- `crates/backend-cuda/tests/tensor_core_real_device.rs`（f16 計測の本番経路追従）
+- `crates/backend-cuda/tests/gemm_auto.rs`（`f16_matrix_unit_impl_reports_selected_implementation` 期待値更新）
+- `scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh`（`BIN` の `CARGO_TARGET_DIR` 対応是正）
+- `docs/perf/cuda-gemm-auto-f16-mma-switch.md`（転送込み auto 経路 A/B 実測表）
+- `docs/perf/cuda-parity-baseline.md` §12.6（route-aware テストの既知 red 相互参照）

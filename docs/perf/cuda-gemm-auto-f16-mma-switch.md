@@ -1,67 +1,108 @@
-# CudaGemmAuto::run_f16 の MatrixUnit 分岐 mma 優先化 前後比較（#1156）
+# CudaGemmAuto::run_f16 の MatrixUnit 分岐 mma 優先化 前後比較（#1156・#1160）
 
 イシュー #1156 の受け入れ条件 R5（ユーザー承認条件）「結線前後で同一プロトコル・
 5 回計測中央値の比較を取り、後退確認時は結線しない」に対応する記録。設計の正は
 `docs/dispatch-rules-design.md` §5.6。
 
-## 状態: 未実測・本番未結線（本エージェント実行環境に CUDA 実機なし。PR #1177 codex-review P1 指摘の是正）
+## 状態: 実測完了・本番結線済み（イシュー #1160・GB10 実機実測 2026-09-04）
 
-本 PR（#1177 是正）時点で `crates/backend-cuda/src/gemm_auto.rs::
-MMA_PRIORITY_PRODUCTION_ENABLED` を `false`（wmma 優先。#1156 以前と同じ
-本番挙動）へ戻した。mma 優先順位の判定ロジック自体（`select_f16_matrix_
-unit_impl`）は §5.6 の設計どおり実装・単体テスト済みのまま維持しており、
-`prefer_mma` 引数を渡せば有効化できる。本番結線（同定数を `true` へ）は、
-下記手順による #1160 の GB10 実機実測で全対象形状の非後退を確認し、この
-記録へ追記したうえでユーザー承認を得てから行う。
+`crates/backend-cuda/src/gemm_auto.rs::MMA_PRIORITY_PRODUCTION_ENABLED` を
+`true`（mma 優先。§5.6 の設計目標どおり `CudaMmaGemm → CudaWmmaGemm → Tiled`）
+へ本番結線した。下記実測（転送込み auto 経路・独立 5 回起動・run-median）が
+512/1024/2048/4096 いずれも §5「非後退の判定基準」を満たしたことによる。
 
 **数値一致（parity）の実測記録は #1158 で GB10 実機確認済み**
 （`docs/perf/cuda-parity-baseline.md` §12。切替前〈本番既定・WMMA 優先〉・
 切替後〈ノード側限定フリップの mma 優先〉双方で 5 回実行同値・既存
-baseline 行からの後退なしを確認。フリップ自体はコミットしていない）。
-**ただし PR #1178 レビュー対応（codex-review 指摘）で追加した
-route-aware 受け入れテスト
-（`run_f16_k4096_stress_non_regression_route_aware`）自体は、選択経路
-`MmaF16` の baseline ceiling が未承認〈`None`〉のため現 HEAD 上では
-fail-closed に必ず FAIL する意図的な red のままである（同 §12.4/§12.5）。
-上記「実測確認済み」は実測事実の記録を指し、その記録を検証する受け入れ
-テストの green を主張するものではない。** 本ドキュメントが対象とする
-**性能 A/B・恒久フリップ判断**は未実測のまま #1160 へ引き継がれている。
+baseline 行からの後退なしを確認）。本イシュー（#1160）でも `MMA_PRIORITY_
+PRODUCTION_ENABLED = true` の HEAD で `cargo test --all-features --test gemm_auto
+-- --ignored --nocapture --test-threads=1` を実行し、8 件中 7 件 pass・
+`run_f16_matches_cpu_reference_across_aligned_shapes`（厳密ゼロ fail）・
+`f16_matrix_unit_impl_reports_selected_implementation`（更新後の期待値。
+mma_available()=true・整列形状で `Mma` を返すことを確認）を含めて green を
+再確認した。唯一の FAILED は `run_f16_k4096_stress_non_regression_route_aware`
+であり、選択経路 `MmaF16` の baseline ceiling が未承認（`None`）のため
+fail-closed に panic する既知 red（`docs/perf/cuda-parity-baseline.md`
+§12.4/§12.5・§12.6）で、本 PR ではこのテスト・`BASELINES` を変更しない
+（承認・反映は別途）。直接経路の参照証跡
+`cpu_cuda_mma_parity.rs::mma_f16_k4096_stress_non_regression` は green
+（`fail_count` 等が #1158 §12.3 の記録値と一致）。
 
-**前バージョンの記録（実測完了・全形状非後退）は取り下げる。** 前バージョンが
-「5 回計測中央値」の根拠とした計測は `bench_run`（`MeasurementConfig::default`。
-warmup 20 回・計測 20 回）を各形状 1 回だけ呼び出し、その 1 回の実行内で得られた
-20 サンプルの中央値を「計測中央値」として扱ったものであり、`docs/dispatch-rules-
-design.md` §5.6・`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値を
-採用し」が求める**独立した 5 回の計測それぞれの中央値**とは異なる統計量だった
-（codex-review PR #1177 P1 指摘）。20 サンプルは同一プロセス内の反復であり、
-プロセス起動・クロック挙動・熱条件等の独立実行間ばらつきを捕捉できないため、
-この 1 回計測を根拠に非後退を確定させることはできない。
+## 実測表（転送込み auto 経路・独立 5 回起動・run-median。GB10・2026-09-04）
 
-是正（1 回目）として、計測用バイナリ `examples/gemm_auto_f16_mma_switch_
-bench.rs` を各形状で `bench_run` を同一プロセス内ループで**5 回**呼び出し、
-5 個の run 値とその中央値（run-median）を出力するよう修正したが、これも
-同一プロセス内の反復に過ぎずプロセス起動・クロック・熱条件の独立実行間
-ばらつきを捕捉できない点は変わらないとの codex-review 再指摘（PR #1177
-2 回目）を受け、**是正（2 回目）**として計測用バイナリはプロセス起動ごとに
-各形状 1 回だけ計測して終了する設計へ変更し、独立 5 回起動・run-median の
-集約は外側の `scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh`（実プロ
-セスとして 5 回起動する wrapper）へ切り出した（詳細は下記「実機実行手順」
-節）。しかし本エージェントの実行環境には CUDA 実機（DGX Spark GB10 等）が
-存在しないため、この新プロトコルでの実測を本 PR では行えていない。前
-バージョンに記載していた具体的な TFLOPS 値は上記の理由により受け入れ判定の
-根拠として使えないため本ドキュメントからは削除し、実測は行われていないと
-明記する。
+`bash scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh` の出力（プロセス
+5 回・形状ごとに `auto_f16_tflops_run_median`）。base は
+`MMA_PRIORITY_PRODUCTION_ENABLED = false`（ノード側限定フリップ。#1156 以前
+と同じ wmma 優先）、after は HEAD（同定数 `true`。mma 優先）。GPU アイドル・
+他プロセス非混在（`nvidia-smi --query-compute-apps`・`utilization.gpu` を
+各計測前後で確認済み）。
 
-先行根拠として、`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1/§4.1（イシュー
-#1123・2026-09-03 GB10 実機実測）のカーネル単体計測（`bench-harness` の
-5 回計測中央値プロトコルに準拠）が `mma_sync_f16` は `wmma_f16_opt`/
-`wmma_f16_basic` に対し形状依存で約 4.1〜10.8 倍高速であることを確認済みで
-あり、mma 優先化の方向性自体はこの参考値が支持する。ただし `CudaGemmAuto::
-run_f16` 経由の auto 経路（転送込み・§5.6 の分岐切替を経た経路）そのものの
-「独立 5 回計測中央値」による正式な非後退判定は、GB10 実機を持つ後続作業
-（#1160）へ引き継ぐ。
+| dim | base run 値（5 回） | base run-median | after run 値（5 回） | after run-median | after/base |
+|---|---|---|---|---|---|
+| 512  | [2.3373, 2.3350, 2.3192, 2.3250, 2.3302] | 2.3302 | [4.0702, 4.0398, 4.0369, 4.0761, 4.0831] | 4.0702 | 1.747 |
+| 1024 | [5.7046, 5.8007, 5.6896, 5.8037, 5.7975] | 5.7975 | [11.5845, 11.5160, 11.5576, 11.4795, 11.5516] | 11.5516 | 1.993 |
+| 2048 | [4.6330, 4.6553, 4.6082, 4.6194, 4.6219] | 4.6219 | [21.5916, 21.6420, 21.5543, 21.6007, 21.5924] | 21.5924 | 4.672 |
+| 4096 | [0.4586, 0.4475, 0.4415, 3.2734, 3.4152] | 0.4586 | [0.4433, 0.5120, 8.4268, 0.5131, 0.5219] | 0.5131 | 1.119 |
 
-## 実機実行手順（GB10 実機保有者が本ドキュメントを更新する際の手順）
+4096 は base・after とも #1130（`docs/perf/cuda-wmma-f16-perf-triage.md` §4.2
+に記録済みの per-call アロケーション病態。未解決。イシュー #1130 のスコープ）
+の影響で run 間に大きなばらつきがある（低い値の run が多数・稀に高い値の
+run が混じる二峰性）。この病態は base 側にも存在するため mma 優先化自体が
+原因ではなく、転送込み計測が病態を継承していることを示す（下記「4096 の
+判定」参照）。
+
+## 判定（§5「非後退の判定基準」の適用結果）
+
+- **512/1024/2048**: after の run-median が base の run-median を明確に上回る
+  （1.75〜4.67 倍）。一次判定を満たす
+- **4096**: after の run-median（0.5131）は base の 5 run 範囲
+  `[0.4415, 3.4152]` 内に収まっており、「病態支配下で同等・後退なし」の
+  基準を満たす。判別証跡（病態の影響を受けないカーネル単体プロトコル）は
+  `docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・
+  `tests/dispatch_boundary.rs::large_shape_mma_pipeline_vs_wmma_tflops_record`
+  の実測（dim=4096: `mma_over_wmma` = 10.81 倍。本ドキュメント §「判別証跡」
+  参照）が mma 優先化の妥当性を裏付ける
+- **総合判定**: 全形状で非後退（後退なし）。#1156 R5 のユーザー承認条件を
+  満たしたため `MMA_PRIORITY_PRODUCTION_ENABLED` を `true` へ本番結線した
+
+### 判別証跡（カーネル単体・転送区間を含まないプロトコル）
+
+`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1（イシュー #1123・GB10 実機実測
+2026-09-03。`launch → synchronize` のみの「カーネル単体」計測で per-call
+アロケーション病態〈#1130〉の影響を受けない）:
+
+| dim | wmma_f16_opt TFLOPS | mma_sync_f16 TFLOPS | mma/wmma |
+|---|---|---|---|
+| 2048 | 7.135 | 51.732 | 7.25 |
+| 4096 | 4.664 | 50.411 | 10.81 |
+
+`tensor_core_tflops_record`（本イシューで本番 f16 経路の計測へ追従させた
+バージョン。§「tensor_core_tflops_record の実測」参照）の M=N=K=4096 実測
+（`mma_sync_f16` 55.449 TFLOPS・`wmma_f16_opt` 4.522 TFLOPS）でも
+`mma_over_wmma` ≈ 12.26 倍となり、同傾向を確認した。
+
+## `tensor_core_tflops_record` の実測（本番 f16 経路への追従後）
+
+`crates/backend-cuda/tests/tensor_core_real_device.rs::tensor_core_tflops_record`
+（M=N=K=4096・カーネル単体プロトコル）を GB10 実機で実行（`--all-features`。
+`internal-diagnostics` feature 込みの選択器整合性検査を含む）した結果、
+**TF32 assert・f16 assert とも pass**（`test result: ok. 1 passed`）。
+
+| path | TFLOPS | 備考 |
+|---|---|---|
+| tiled_f32（基準） | 10.013 | — |
+| wmma_tf32_staged | 14.134 | TF32 assert 対象（pass。tiled f32 比 1.412 倍） |
+| wmma_f16_opt（参考行。本番既定では主経路から外れる） | 4.522 | assert 対象外 |
+| mma_sync_f16（本番 f16 経路。イシュー #1160） | 55.449 | f16 assert 対象（pass。tiled f32 比 5.538 倍） |
+
+f16 assert は #1123 是正版（比較対象 `wmma_f16_opt`）で GB10 実測が **red**
+（4.391〜4.496 TFLOPS < tiled f32 6.776〜6.790 TFLOPS）だったが、本イシューで
+比較対象を「本番 f16 経路が実際に選ぶ実装」（`CudaGemmAuto::mma_available()
+== true` のため `mma_sync_f16`）へ差し替えたことで **pass に転じた**。これは
+イシュー #1131 の完了条件（`docs/perf/cuda-wmma-f16-perf-triage.md` §6）を
+満たす。
+
+## 実機実行手順（再現用）
 
 転送は rsync 方式（`docs/real-hardware-verification-env.md`。ホスト名等はローカル
 管理値を使い本ドキュメントには書かない）。
@@ -69,32 +110,23 @@ run_f16` 経由の auto 経路（転送込み・§5.6 の分岐切替を経た�
 計測用バイナリは `examples/gemm_auto_f16_mma_switch_bench.rs`（`bench-harness::
 run`・`MeasurementConfig::default`〈warmup 20・計測 20〉による `bench_run` を
 プロセス起動ごとに各形状 1 回だけ実行し、`CudaGemmAuto::run_f16` を転送込み
-で計測する。`examples/gemm_mma_bench.rs` と同じ計測コア・シード）。独立 5 回
-起動・run-median の集約は wrapper スクリプト `scripts/bench/
-run_gemm_auto_f16_mma_switch_bench.sh` が担う（`cargo build` で 1 回ビルド
-した後、生成された実行ファイルを外側のシェルから 5 回 fork+exec する。
-真に独立した OS プロセスとして 5 回実行することでプロセス起動・クロック・
-熱条件の独立実行間ばらつきを反映する）。
+で計測する）。独立 5 回起動・run-median の集約は wrapper スクリプト
+`scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh` が担う（`cargo build`
+で 1 回ビルドした後、生成された実行ファイルを外側のシェルから 5 回
+fork+exec する。真に独立した OS プロセスとして 5 回実行することでプロセス
+起動・クロック・熱条件の独立実行間ばらつきを反映する。イシュー #1160 是正:
+`BIN` の探索先を `CARGO_TARGET_DIR`〈未設定時は cargo 既定の `target/`〉に
+揃え、実機手順が指定する外部ビルド成果物ディレクトリでも解決できるように
+した）。
 
 ```bash
 bash scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh
 ```
 
-同一バイナリソースを base（`0c91218`。結線前 = `MatrixUnit` 判定時に wmma を
-直接使用）／after（PR #1177 是正後の HEAD で `crates/backend-cuda/src/
-gemm_auto.rs` の `MMA_PRIORITY_PRODUCTION_ENABLED` を一時的に `true` へ
-書き換えたワークツリー。書き換えないまま HEAD をビルドすると本番既定
-〈`false`〉のため base と同じ wmma 優先経路が計測されてしまう点に注意）
-それぞれへコピーして上記 wrapper スクリプトを実行し、出力される
-`size=<dim> auto_f16_tflops_runs=[<5値>] auto_f16_tflops_run_median=<値>` の
-`auto_f16_tflops_run_median`（独立 5 回起動の run-median）同士を突き合わせる
-（base 側は `internal-diagnostics` feature 未導入のためデフォルト feature で
-ビルド。本バイナリはこの feature に依存しない）。全形状で after の
-`auto_f16_tflops_run_median` が base 以上であれば非後退と判定し、この記録へ
-実測値を追記したうえで `MMA_PRIORITY_PRODUCTION_ENABLED` の恒久的な `true`
-化を別途ユーザー承認込みで行う（#1156 R5 の承認条件）。後退する形状があれば
-`MMA_PRIORITY_PRODUCTION_ENABLED` は `false` のまま維持し、原因調査を別途
-行う。
+after（HEAD。`MMA_PRIORITY_PRODUCTION_ENABLED = true`）はそのままビルド・
+実行すれば得られる。base（同定数を一時的に `false` へ書き換えたノード側
+コピー。コミットしない）と比較する場合は、同じ手順を該当コピーで実行し
+`auto_f16_tflops_run_median` を突き合わせる。
 
 ## 補足: 転送込み計測の位置づけ
 

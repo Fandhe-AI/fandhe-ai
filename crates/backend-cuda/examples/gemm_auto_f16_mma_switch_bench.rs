@@ -10,17 +10,15 @@
 //! `CudaGemmAuto::run_f16` の H2D／カーネル起動／D2H を丸ごと計測する
 //! （切替後にユーザーが体感する経路そのものを計測する狙い）。
 //!
-//! **本番既定は wmma 優先のまま（codex-review PR #1177 P1 是正）**:
-//! `select_f16_matrix_unit_impl` の判定ロジック自体は §5.6 の mma 優先
-//! 設計どおり実装済みだが、`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`
-//! （既定 `false`）がこの優先順位を無効化しているため、本 PR（#1177）
-//! 時点の HEAD で本バイナリを素朴にビルドしても base と同じ wmma 優先
-//! 経路が計測されるだけで、mma 優先経路の A/B 比較にならない。#1160 が
-//! 「after」を計測する際は、`crates/backend-cuda/src/gemm_auto.rs` の
-//! `MMA_PRIORITY_PRODUCTION_ENABLED` を一時的に `true` へ書き換えた
-//! ワークツリーでビルドし、非後退確認後にこの記録（`docs/perf/
-//! cuda-gemm-auto-f16-mma-switch.md`）へ実測値を残したうえで、承認を
-//! 経てから同定数の恒久的な `true` 化を別途行う。
+//! **本番既定は mma 優先へ結線済み（イシュー #1160）**:
+//! `select_f16_matrix_unit_impl` の判定ロジックは §5.6 の mma 優先設計
+//! どおり実装済みで、`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`
+//! （既定 `true`）がこの優先順位を有効化している。したがって現在の
+//! HEAD で本バイナリを素朴にビルドすると mma 優先経路（after 相当）が
+//! 計測される。#1160 の A/B 実測は「after」= HEAD（既定 `true`）、
+//! 「base」= 同定数を一時的に `false` へ書き換えたノード側コピーで
+//! それぞれビルドして得た（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`
+//! に実測値を記録済み）。
 //!
 //! 計測プロトコル（codex-review PR #1177 指摘の是正。2 回目）: `docs/
 //! dispatch-rules-design.md` §5.6・`.claude/rules/coding-rust.md`
@@ -127,12 +125,11 @@ fn main() {
          （CudaGemmAuto::run_f16 の実利用経路そのもの）をこのプロセス内で \
          各形状 1 回だけ実行した値（独立 5 回起動・run-median の集約は \
          scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh が担う）。 \
-         base（0c91218・結線前 = wmma 優先）／after（HEAD の \
-         gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED を一時的に true へ \
-         書き換えたワークツリー = mma 優先）で個別にビルド・実行し、出力を \
-         docs/perf/cuda-gemm-auto-f16-mma-switch.md の表へ手動転記して \
-         比較する（HEAD をそのままビルドした場合は本番既定〈false〉のため \
-         base と同じ wmma 優先経路が計測される点に注意）。"
+         after（HEAD。gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = true \
+         = mma 優先。イシュー #1160 で結線済み）／base（同定数を一時的に \
+         false へ書き換えたノード側コピー = wmma 優先）で個別にビルド・ \
+         実行し、出力を docs/perf/cuda-gemm-auto-f16-mma-switch.md の \
+         表へ手動転記して比較した記録が同ドキュメントに残っている。"
     );
 
     for size in [512usize, 1024, 2048, 4096] {

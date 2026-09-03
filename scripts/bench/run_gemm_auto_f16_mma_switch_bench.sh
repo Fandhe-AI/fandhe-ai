@@ -14,6 +14,16 @@
 # 実行例（実機・DGX Spark GB10 等。CUDA 実機なし環境では各プロセスが
 # skip メッセージを出して終了する）:
 #   bash scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh
+#
+# イシュー #1160 是正: `BIN` をリポジトリ標準の `target/` へ固定して
+# いたため、実機手順（`docs/real-hardware-verification-env.md` §3/§4.1）
+# が指示する `CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai` 運用（複数
+# セッション・複数 worktree でビルド成果物ディレクトリを共有・分離する
+# ための外部変数）の下では `cargo build` の成果物が `CARGO_TARGET_DIR`
+# 側に置かれ、本スクリプトが探す `target/release/...` には存在せず
+# 「ビルド成果物が見つからない」で失敗していた。`cargo build` 自体は
+# 環境変数 `CARGO_TARGET_DIR` を尊重するため、`BIN` の探索先も同じ変数
+# （未設定時は cargo の既定 `target/` へフォールバック）へ揃える。
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 
@@ -30,7 +40,7 @@ if [[ $build_status -ne 0 ]]; then
   echo "gemm_auto_f16_mma_switch_bench: cargo build に失敗（exit=${build_status}）。計測を中止する。" >&2
   exit "$build_status"
 fi
-BIN="target/release/examples/gemm_auto_f16_mma_switch_bench"
+BIN="${CARGO_TARGET_DIR:-target}/release/examples/gemm_auto_f16_mma_switch_bench"
 if [[ ! -x "$BIN" ]]; then
   echo "gemm_auto_f16_mma_switch_bench: ビルド成果物 ${BIN} が見つからない。" >&2
   exit 1

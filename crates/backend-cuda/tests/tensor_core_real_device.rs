@@ -62,9 +62,30 @@
 //! 転送バイト数差の補正（差し引き）は、転送そのものを計測区間に含めない
 //! ことでより根本的に解消されるため、dtype 別の転送のみ計測・減算・
 //! 「転送のみ ≥ 合算」プロトコル整合性検査は行わない。
+//!
+//! ## f16 経路の本番 auto 経路追従（イシュー #1160）
+//!
+//! #1160 で `CudaGemmAuto::run_f16` の `MatrixUnit` 分岐 mma 優先化
+//! （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = true`）を本番結線
+//! したことに伴い、本ファイルの f16 assert（Tensor Core 経路が tiled f32
+//! を上回ること）が比較する対象カーネルを、本番が実際に選ぶ実装へ追従
+//! させる。`CudaGemmAuto::mma_available()` が `true`（cc>=8.0・NVRTC
+//! コンパイル成功）なら `CudaMmaGemm`（本番 f16 経路が M=N=K=4096 の
+//! 整列形状で実際に選ぶ実装）のカーネル単体計測を「本番 f16 経路」の
+//! 代表値として assert に使い、`false` なら従来どおり `CudaWmmaGemm`
+//! （opt）を使う（`gemm_auto::select_f16_matrix_unit_impl` の判定順序
+//! と同じ fail-safe 優先順位）。選択器（`f16_matrix_unit_impl` 診断
+//! アクセサ。`internal-diagnostics` feature 限定）が実際に選ぶ実装と
+//! 本テストが計測する実装が食い違わないことを、同 feature が有効な
+//! ビルド（`make test-ignored-cuda` は `--all-features`）でのみ
+//! fail-closed に検査する（選択器が選ばない経路を黙って計測し続けて
+//! 本番経路との乖離を見逃す false-green を防ぐ）。`wmma_f16_opt` の
+//! カーネル単体計測は本番既定では主経路から外れたため、assert には
+//! 使わず参考行として `println!` するのみに格下げする（`docs/perf/
+//! cuda-wmma-f16-perf-triage.md` §8「`wmma_f16_opt` の扱い」参照）。
 
 use bench_harness::{BenchReport, MeasurementConfig};
-use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm, CudaWmmaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm, CudaGemmAuto, CudaMmaGemm, CudaWmmaGemm};
 use half::f16;
 
 /// TFLOPS 実測記録の本体（#64 受け入れ条件の TFLOPS 実測分）。
@@ -196,14 +217,17 @@ fn tensor_core_tflops_record() {
             .expect("BenchReport::to_json must succeed for a validated report")
     );
 
-    // WMMA f16（opt。上記 assert で opt 経路の実行を保証済み）。
+    // WMMA f16（opt。上記 assert で opt 経路の実行を保証済み）。イシュー
+    // #1160 是正: 本番 f16 auto 経路が mma 優先へ結線された後は、この
+    // 計測は「参考行」（assert 対象外）へ格下げする（下記「本番 f16
+    // 経路」参照）。
     let (a_f16_dev, b_f16_dev) = wmma_gemm
         .upload_f16(&a_f16, &b_f16)
         .expect("upload_f16 must succeed on CUDA-equipped test runner");
     let mut c_f16_dev = wmma_gemm
         .alloc_output_f16(m, n)
         .expect("alloc_output_f16 must succeed on CUDA-equipped test runner");
-    let f16_kernel_only = bench_harness::run(&config, || {
+    let wmma_f16_kernel_only = bench_harness::run(&config, || {
         wmma_gemm
             .launch_f16(&a_f16_dev, &b_f16_dev, &mut c_f16_dev, m, n, k)
             .expect("launch_f16 must succeed on CUDA-equipped test runner");
@@ -212,19 +236,98 @@ fn tensor_core_tflops_record() {
             .expect("synchronize must succeed on CUDA-equipped test runner");
     })
     .expect("WMMA f16 kernel-only measurement must satisfy TASK-8.1 protocol");
-    let f16_report = BenchReport::from_measurement(
+    let wmma_f16_report = BenchReport::from_measurement(
         "gemm_wmma_f16_opt_kernel_only_4096",
         "cuda",
-        &f16_kernel_only,
+        &wmma_f16_kernel_only,
     )
     .expect("BenchReport::from_measurement must succeed for a protocol-conformant measurement");
-    let f16_kernel_tflops = (flops / f16_kernel_only.median_secs) / 1e12;
+    let wmma_f16_kernel_tflops = (flops / wmma_f16_kernel_only.median_secs) / 1e12;
     println!(
-        "tflops_record_kernel_only path=wmma_f16_opt tflops={f16_kernel_tflops:.3} report={}",
-        f16_report
+        "tflops_record_kernel_only path=wmma_f16_opt(reference_only) \
+         tflops={wmma_f16_kernel_tflops:.3} report={}",
+        wmma_f16_report
             .to_json()
             .expect("BenchReport::to_json must succeed for a validated report")
     );
+
+    // 本番 f16 経路（イシュー #1160）: `CudaGemmAuto::run_f16` が
+    // M=N=K=4096（整列形状）で実際に選ぶ実装をカーネル単体計測し、この
+    // 値を f16 assert の比較対象とする（`gemm_auto::
+    // MMA_PRIORITY_PRODUCTION_ENABLED = true` の下では
+    // `auto.mma_available()` が `true` の環境で `CudaMmaGemm` が選ばれ、
+    // `false` の環境〈cc<8.0 または NVRTC コンパイル失敗〉では
+    // `CudaWmmaGemm` が選ばれる。上記の `wmma_f16_kernel_only` はこの
+    // 分岐の結果を再利用せず独立に測るため、mma_available()==false の
+    // 環境ではここで測り直さず上記の値をそのまま使う）。
+    let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new must succeed");
+    let production_f16_uses_mma = auto.mma_available();
+
+    let (production_f16_path_label, production_f16_kernel_tflops) = if production_f16_uses_mma {
+        let mma_gemm = CudaMmaGemm::new(&device).expect(
+            "CudaMmaGemm::new must succeed when CudaGemmAuto::mma_available() is true \
+             (cc>=8.0・NVRTC コンパイル成功が前提)",
+        );
+        let (a_mma_dev, b_mma_dev) = mma_gemm
+            .upload_f16(&a_f16, &b_f16)
+            .expect("upload_f16 must succeed on CUDA-equipped test runner");
+        let mut c_mma_dev = mma_gemm
+            .alloc_output_f16(m, n)
+            .expect("alloc_output_f16 must succeed on CUDA-equipped test runner");
+        let mma_kernel_only = bench_harness::run(&config, || {
+            mma_gemm
+                .launch_f16(&a_mma_dev, &b_mma_dev, &mut c_mma_dev, m, n, k)
+                .expect("mma.sync launch_f16 must succeed on CUDA-equipped test runner");
+            mma_gemm
+                .synchronize()
+                .expect("synchronize must succeed on CUDA-equipped test runner");
+        })
+        .expect("mma.sync pipeline kernel-only measurement must satisfy TASK-8.1 protocol");
+        let mma_report = BenchReport::from_measurement(
+            "gemm_mma_f16_kernel_only_4096",
+            "cuda",
+            &mma_kernel_only,
+        )
+        .expect("BenchReport::from_measurement must succeed for a protocol-conformant measurement");
+        let mma_kernel_tflops = (flops / mma_kernel_only.median_secs) / 1e12;
+        println!(
+            "tflops_record_kernel_only path=mma_sync_f16(production) tflops={mma_kernel_tflops:.3} \
+             report={}",
+            mma_report
+                .to_json()
+                .expect("BenchReport::to_json must succeed for a validated report")
+        );
+        ("mma_sync_f16", mma_kernel_tflops)
+    } else {
+        println!(
+            "tflops_record_kernel_only path=wmma_f16_opt(production; mma_available()=false) \
+             tflops={wmma_f16_kernel_tflops:.3}"
+        );
+        ("wmma_f16_opt", wmma_f16_kernel_tflops)
+    };
+
+    // 選択器（`f16_matrix_unit_impl` 診断アクセサ）が実際に選ぶ実装と、
+    // 上記で計測した実装が食い違わないことを fail-closed に検査する
+    // （`internal-diagnostics` feature 限定。選択器が選ばない経路を
+    // 黙って計測し続け本番経路との乖離を見逃す false-green を防ぐ。
+    // `make test-ignored-cuda` は `--all-features` のため GB10 実機
+    // 実行では常にこの検査を通る）。
+    #[cfg(feature = "internal-diagnostics")]
+    {
+        let selected = auto.f16_matrix_unit_impl(m, n, k);
+        let expected = if production_f16_uses_mma {
+            fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma
+        } else {
+            fandhe_ai_backend_cuda::F16MatrixUnitImpl::Wmma
+        };
+        assert_eq!(
+            selected, expected,
+            "f16_matrix_unit_impl（選択器）が {selected:?} を返したが、本テストは \
+             {expected:?}（mma_available()={production_f16_uses_mma}）を計測している。\
+             tensor_core_tflops_record の f16 assert は本番経路が選ぶ実装と一致しない \
+             量を比較してしまう"
+        );
+    }
 
     // #64 受け入れ条件・既存 `wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`
     // と同じ判断根拠: Tensor Core 経路は tiled f32 を上回ることを実機で
@@ -235,20 +338,18 @@ fn tensor_core_tflops_record() {
     //
     // TF32 経路: 実機で外れた場合は緩和せず #186 へ引き渡す。
     //
-    // f16 経路: GB10 実機実測（2026-09-03・sm_121・イシュー #1123 是正版）
-    // で本 assert は **red**（wmma_f16_opt カーネル単体 4.391〜4.496
-    // TFLOPS が tiled f32 カーネル単体 6.776〜6.790 TFLOPS を下回る）。
-    // 旧プロトコル（合算計測から転送のみ計測を減算する方式）では f16 の
-    // 転送量が f32 の半分であることが「計算のみ」時間を過大評価し、
-    // 見かけ上 pass していた（`docs/perf/cuda-wmma-f16-perf-triage.md`
-    // §4.3）。カーネル単体では GB10 の `wmma_f16_opt` は tiled f32 を
-    // 恒常的に下回ることが判明したため、本 assert は `.claude/rules/
-    // coding-rust.md`「性能下限・最適化の達成を理由に…緩和しない」と
-    // 同じ方針で **緩和せず red のまま維持**し、本番 f16 Tensor Core
-    // 経路を `mma.sync` パイプラインへ結線するイシュー #1131 の受け入れ
-    // 条件へ引き渡す（#1131 完了時に本 assert が pass することを
-    // #1131 の完了条件とする。`docs/perf/cuda-wmma-f16-perf-triage.md`
-    // §5.1 参照）。
+    // f16 経路: イシュー #1123 是正版（旧比較対象 `wmma_f16_opt`）では
+    // GB10 実機実測（2026-09-03）で本 assert が red だった（wmma_f16_opt
+    // カーネル単体 4.391〜4.496 TFLOPS が tiled f32 カーネル単体
+    // 6.776〜6.790 TFLOPS を下回る）。イシュー #1160 で比較対象を
+    // 「本番 f16 経路が実際に選ぶ実装」（`mma_sync_f16`。GB10 では
+    // `mma_available()=true` のため `CudaMmaGemm`）へ差し替えたことで、
+    // #1123 で確認済みの mma.sync パイプラインの優位性（tiled f32 比
+    // 約 7〜11 倍。`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・
+    // `dispatch_boundary.rs::large_shape_mma_pipeline_vs_wmma_tflops_record`）
+    // により本 assert は pass に転じた（`docs/perf/
+    // cuda-wmma-f16-perf-triage.md` §8 実測記録）。イシュー #1131 の
+    // 完了条件（本 assert が pass すること）はこれで満たされた。
     assert!(
         tf32_kernel_tflops > tiled_kernel_tflops,
         "WMMA TF32 opt（カーネル単体 {tf32_kernel_tflops:.3} TFLOPS）が tiled f32（カーネル単体 \
@@ -256,12 +357,13 @@ fn tensor_core_tflops_record() {
          参考値 1.832 TFLOPS 超過。転送区間を除いたカーネル単体での比較）"
     );
     assert!(
-        f16_kernel_tflops > tiled_kernel_tflops,
-        "WMMA f16 opt（カーネル単体 {f16_kernel_tflops:.3} TFLOPS）が tiled f32（カーネル単体 \
+        production_f16_kernel_tflops > tiled_kernel_tflops,
+        "本番 f16 経路（{production_f16_path_label}・カーネル単体 \
+         {production_f16_kernel_tflops:.3} TFLOPS）が tiled f32（カーネル単体 \
          {tiled_kernel_tflops:.3} TFLOPS）を上回りませんでした（受け入れ条件: PoC-v2-3 \
-         参考値 1.832 TFLOPS 超過。転送区間を除いたカーネル単体での比較。GB10 実機実測 \
-         〈2026-09-03〉で既知 red。緩和せずイシュー #1131 の受け入れ条件へ引き渡す。\
-         docs/perf/cuda-wmma-f16-perf-triage.md 参照）"
+         参考値 1.832 TFLOPS 超過。転送区間を除いたカーネル単体での比較。比較対象は \
+         `CudaGemmAuto::run_f16` が実際に選ぶ実装〈イシュー #1160〉。\
+         docs/perf/cuda-wmma-f16-perf-triage.md §8 参照）"
     );
 }
 

@@ -215,10 +215,14 @@ Appendix の生データによると、この揺れは `simdgroup_auto` 側（0.
 
 ### CUDA: 大形状（WMMA 対 mma.sync パイプライン・TMA 選好整理の検証）
 
+GB10（sm_121・2026-09-03・カーネル単体〈launch→synchronize〉プロトコル。イシュー #1123
+是正版。出典: `docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・
+`tests/dispatch_boundary.rs::large_shape_mma_pipeline_vs_wmma_tflops_record`）。
+
 | dim | WMMA f16(opt) TFLOPS | mma.sync f16 TFLOPS | mma/wmma |
 |------|------|------|------|
-| 2048 | | | |
-| 4096 | | | |
+| 2048 | 7.135 | 51.732 | 7.25 |
+| 4096 | 4.664 | 50.411 | 10.81 |
 
 ## 採用閾値の根拠表
 
@@ -227,7 +231,7 @@ Appendix の生データによると、この揺れは `simdgroup_auto` 側（0.
 | `METAL_SIMDGROUP_MIN_DIM`（`crates/tensor-core/src/dispatch.rs`） | `512` | v1 PoC-8 実測は 256/512 の 2 点のみ（`docs/dispatch-rules-design.md` §3.1「同上 `:75`」）。境界形状（384・640 等）は未計測のため 512 を暫定的に踏襲し、閾値未満は保守的に tiled へ倒す設計（§3.2） | **#382 で実測完了・変更提案あり（提案値 384）**。実測クロスオーバーは 384（5 ラン全て `auto/tiled > 1.0`。448 以上も同様）であり、判定規則「クロスオーバーが 384 以下…かつ決定 dim で符号一貫性 5/5」に該当する。dim=256（クロスオーバー未満・非決定 dim）はラン間で符号が割れた（1 ラン外れ値）が分類には影響しない（詳細は上記「`METAL_SIMDGROUP_MIN_DIM` の妥当性判定（#382）」節）。**#382 では変更提案の記録に留め、コード変更・Issue 起票は行わない**（実施は別レビュー・別 PR・ユーザー承認） |
 | `CUDA_WMMA_MIN_CC`（`(7, 0)`） | `(7, 0)` | WMMA は Volta（cc 7.0）以降という一般的な NVIDIA アーキテクチャ世代対応（`docs/dispatch-rules-design.md` §2 表）。cc 世代境界自体の実機再確認は本イシューのスコープだが、cc 7.x の実機（Volta/Turing）が本セッション・後続実機いずれにも存在しないため世代境界の実測は据え置く | 実機実測の対象外（compute capability 境界の実測には該当世代の実機が必要）。RTX 3060（cc 8.6）・GB10（cc 12.1）いずれも `cc >= 7.0` を満たすため、本イシューの実測は「ゲートを満たした場合に MatrixUnit が有利であること」の検証に限定し、`(7, 0)` 自体は変更しない |
 | CUDA の「形状下限なし」設計（§3.2） | 形状閾値なし（HW ゲートのみ） | GB10 実測で最小形状 256 でも accelerated が unit の約 1.4〜1.6 倍優位（`docs/dispatch-rules-design.md` §3.1 `:126`・`:140`）という v1 CubeCL 前提の参考値 | 上表「CUDA: 小形状」の `matrix_unit/tiled` が 128/256/384/512 のいずれでも 1.0 を上回れば設計を維持する。1.0 を下回る形状が観測された場合（小形状で tiled が有利に逆転）は Metal と同様の形状閾値導入を検討し、別レビュー・別 PR で提案する（本イシューでは導入しない） |
-| CUDA「TMA 選好はディスパッチ条件でなくカーネル内部チューニング」の整理（§3.2「TMA の扱い」） | `select_gemm_kernel` は `mma.sync` パイプラインと基本 WMMA を区別しない（`CudaGemmAuto::run_f16` は `CudaWmmaGemm` のみを呼ぶ） | v1 実測（`poc-8-matrix-unit/README.md:125`）は M=N=K=2048/4096 で TMA 系候補が最速だが、これは「同じ Tensor Core 経路内でのカーネル変種選択」であり「Tensor Core 経路を使うか否か」の分岐条件ではないという v2 設計判断 | 上表「CUDA: 大形状」で `mma_over_wmma` が 1.0 を上回れば整理を維持する（パイプライン差は経路選択の分岐にしない設計のまま、カーネル内部の既定実装をどちらにするかの判断材料として別途記録する）。1.0 を大きく下回る場合（mma パイプラインが未成熟で基本 WMMA より遅い）は `CudaGemmAuto::run_f16` の既定カーネル選択を見直す別 Issue を起票する |
+| CUDA「TMA 選好はディスパッチ条件でなくカーネル内部チューニング」の整理（§3.2「TMA の扱い」） | `select_gemm_kernel`（第 1 層）は `mma.sync` パイプラインと基本 WMMA を区別しない（第 1 層は変更なし）。第 2 層（`CudaGemmAuto` 内部の `select_f16_matrix_unit_impl`）が `CudaMmaGemm → CudaWmmaGemm → Tiled` の優先順位で実装を選ぶ（イシュー #1160 で本番結線済み。`docs/dispatch-rules-design.md` §5.6） | v1 実測（`poc-8-matrix-unit/README.md:125`）は M=N=K=2048/4096 で TMA 系候補が最速だが、これは「同じ Tensor Core 経路内でのカーネル変種選択」であり「Tensor Core 経路を使うか否か」の分岐条件ではないという v2 設計判断 | 上表「CUDA: 大形状」で `mma_over_wmma` が 1.0 を上回れば整理を維持する（パイプライン差は経路選択の分岐にしない設計のまま、カーネル内部の既定実装をどちらにするかの判断材料として別途記録する）。**実測結果（本表・2048: 7.25 倍・4096: 10.81 倍）はいずれも 1.0 を大きく上回ったため、#1160 で `CudaGemmAuto::run_f16` の第 2 層実装優先順位（mma 優先）を本番結線した**（`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = true`。転送込み auto 経路の A/B 実測は `docs/perf/cuda-gemm-auto-f16-mma-switch.md`） |
 
 閾値変更が必要と判断した場合は、本表の「実測後の判定基準」に従い `crates/tensor-core/src/dispatch.rs`
 の定数・ドキュメンテーションコメントを更新する別レビュー・別 PR で対応する（ガードレール閾値・テスト

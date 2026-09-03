@@ -115,6 +115,18 @@ TFLOPS〉を歪めた」という推定は裏付けられたが、直列再実�
 f16 経路（他形状・K=4096 ストレスケースを含む）・その他形状での parity 実測を含む完全な内訳は
 [`../backend-cuda-real-device-testing.md`](../backend-cuda-real-device-testing.md) 5.3 節を参照。
 
+## f16 行の追記（イシュー #1160・2026-09-04）
+
+`tensor_core_tflops_record`（本ファイル「実測結果」節の TFLOPS 実測が対象とする
+テスト。M=N=K=4096）の f16 計測は、イシュー #1160 で `CudaWmmaGemm`（`wmma_f16_opt`）
+直接計測から「本番 f16 経路（`CudaGemmAuto::run_f16` が実際に選ぶ実装。GB10 では
+`mma_sync_f16`）」のカーネル単体計測へ切り替わった（カーネル単体プロトコル自体は
+イシュー #1123 で切替済み。§「実測結果」節参照）。GB10 実機実測（2026-09-04）:
+`mma_sync_f16` 55.449 TFLOPS（参考: `wmma_f16_opt` 4.522 TFLOPS）、tiled f32
+基準 10.013 TFLOPS。f16 assert（Tensor Core 経路が tiled f32 を上回ること）は
+本切替により pass に転じた。詳細・判定基準・A/B 実測は
+`docs/perf/cuda-wmma-f16-perf-triage.md` §8 を正とし本ファイルでは二重管理しない。
+
 ## 関連イシューとの役割分担（二重管理を避ける）
 
 - **#186**（Tensor Core 経路の数値一致閾値の実測再評価）: TF32/f16 経路の誤差分布実測・閾値そのものの

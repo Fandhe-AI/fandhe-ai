@@ -97,12 +97,12 @@
 //! 実装選択（第 2 層。`docs/dispatch-rules-design.md` §5.6）は
 //! `gemm_auto::select_f16_matrix_unit_impl`（事前形状ゲート込みの単一
 //! 真実源）が担う。設計目標は `CudaMmaGemm → CudaWmmaGemm → Tiled` の
-//! 優先順位だが、本番既定（`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED
-//! = false`）はこの優先順位を無効化し `CudaWmmaGemm → Tiled` のまま
-//! 動作する（codex-review PR #1177 P1 是正: #1156 のユーザー承認条件
-//! 〈切替前後を同一プロトコル・5 回計測中央値で比較し、後退時は結線
-//! しない〉は転送込みの auto 経路では未実測。GB10 実機実測は #1160 へ
-//! 引き継がれている）。TF32/f32 経路
+//! 優先順位であり、本番既定（`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED
+//! = true`）はこの優先順位で動作する（イシュー #1160: #1156 のユーザー
+//! 承認条件〈切替前後を同一プロトコル・5 回計測中央値で比較し、後退時は
+//! 結線しない〉を転送込みの auto 経路で GB10 実機実測し非後退を確認した
+//! うえで本番結線した。`docs/perf/cuda-gemm-auto-f16-mma-switch.md`）。
+//! TF32/f32 経路
 //! （`CudaGemm::run_wmma_tf32`・#62）は、決定表（設計文書 §4）が TF32
 //! 既定採用を #186（TASK-11.1g）のユーザー承認まで保留と定めているため、
 //! 現時点の `select_gemm_kernel` の自動経路には含めない（f32 は常に
