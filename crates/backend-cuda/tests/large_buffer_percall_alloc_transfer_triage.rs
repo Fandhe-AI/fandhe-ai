@@ -354,6 +354,16 @@ fn phase_p0_transfer_only(
             .expect("synchronize after D2H must succeed before host buffer is freed");
         drop(a_dev);
         drop(b_dev);
+        drop(c_dev);
+        // codex-review 指摘（PR #1169 discussion）: 上記 drop が
+        // `cuMemFreeAsync` を enqueue する場合、ここで同期しないと
+        // 解放処理は計測区間外へ逃げて次イテレーションの最初の同期へ
+        // 混入する。P3（`phase_p3_h2d_only`）と同じ是正パターンを適用し、
+        // 各サンプル内で解放完了まで確定させる。
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after free must succeed to measure free completion");
     })
 }
 
