@@ -645,9 +645,18 @@ impl MetalGemm {
     ///   `crate::tile::fallback_chain` の次候補へフォールバックする
     ///   （本メソッドは `pipeline_for_tile` のフォールバック判定
     ///   そのものには関与せず、実測診断専用の読み取り専用入口）。
-    /// - `static_threadgroup_memory_length`: コンパイラが静的に確保する
-    ///   threadgroup メモリ量（バイト）。`TileConfig::shared_mem_bytes`
-    ///   に対応する。
+    /// - `static_threadgroup_memory_length`: `MTLComputePipelineState` の
+    ///   `staticThreadgroupMemoryLength`。MSL カーネルソース中で**静的に
+    ///   宣言された** `threadgroup` 変数のみをコンパイラが確保するバイト量
+    ///   であり、`Self::dispatch_tile`（`shaders/gemm.metal` の
+    ///   `gemm_simdgroup_tiled`）が実行時に
+    ///   `setThreadgroupMemoryLength_atIndex` で確保する動的 threadgroup
+    ///   メモリ（`TileConfig::shared_mem_bytes_for` が算出する A/B タイル
+    ///   分の実バイト数）とは**別の API・別の確保タイミング**の値であり、
+    ///   両者は対応しない（本カーネルは `threadgroup(0)` 引数を動的確保
+    ///   のみで満たすため、本フィールドは 0 またはごく小さい値になりうる。
+    ///   codex-review 指摘・PR #1168）。レジスタ／スタック溢れの間接証跡
+    ///   としては `max_total_threads_per_threadgroup` 側を主に参照する。
     ///
     /// `docs/perf/metal-gemm-n4096-kernel-gap.md`
     /// （`examples/gemm_transpose_tile_sweep.rs`）から呼ばれる診断専用
