@@ -1,0 +1,14 @@
+# 補足ログ（イシュー #1139 codex-review 指摘対応・2026-09-03 追加）
+# REQ-8 境界ガード実在検査（tiled_f32_source_with_swizzle_preserves_req8_boundary_guards）は
+# 実機（GB10）を要さない静的検査のため、GB10 実測ログ（gate0_bitexact_parity.log。GB10 上で
+# bit 一致・CPU 参照複合判定の 2 テストのみ実行）とは別に、通常 CI が実行可能な環境で再実行し
+# 出力を採取した（env_info.txt に記載の実行コマンドのうち REQ-8 境界ガード実在検査コマンド）。
+$ cargo test -p fandhe-ai-backend-cuda --lib --release --locked --features internal-diagnostics -- tiled_f32_source_with_swizzle
+
+running 4 tests
+test kernels::tests::tiled_f32_source_with_swizzle_rejects_group_width_below_two ... ok
+test kernels::tests::tiled_f32_source_with_swizzle_does_not_mutate_tiled_f32_source ... ok
+test kernels::tests::tiled_f32_source_with_swizzle_preserves_req8_boundary_guards ... ok
+test kernels::tests::tiled_f32_source_with_swizzle_contains_group_define_and_remap_fragment ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 612 filtered out; finished in 0.00s

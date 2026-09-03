@@ -59,14 +59,14 @@ iters 20 の中央値）を 5 回実行して run 間中央値を採る（`.clau
 
 ### 4.1 ゲート 0（数値一致・境界検査）: PASS
 
-`--release --locked --features internal-diagnostics` で以下すべて PASS（`gate0_bitexact_parity.log`）:
+`--release --locked --features internal-diagnostics` で以下すべて PASS:
 
 - `gemm::tests::tiled_f32_swizzle_variant_matches_base_bit_exact_output` … ok（bit 一致。動的幅・g8・g16
-  × 3 形状〈(256,256,256)・(80,136,160)・(544,256,2048)〉全て）
+  × 3 形状〈(256,256,256)・(80,136,160)・(544,256,2048)〉全て。GB10 実機・`gate0_bitexact_parity.log`）
 - `gemm::tests::tiled_f32_swizzle_variant_matches_cpu_reference` … ok（統一複合判定〈相対誤差 1e-3 未満
-  または絶対誤差 1e-5 未満〉・`assert_parity` 厳密ゼロ fail）
+  または絶対誤差 1e-5 未満〉・`assert_parity` 厳密ゼロ fail。GB10 実機・`gate0_bitexact_parity.log`）
 - `kernels::tests::tiled_f32_source_with_swizzle_preserves_req8_boundary_guards` … ok（REQ-8 境界ガード
-  実在検査。同 release バイナリで再確認）
+  実在検査。実機を要さない静的検査のため GB10 実測ログとは別に採取・`gate0_req8_boundary_guard.log`）
 
 ### 4.2 ゲート 1（classic 内 A/B。swizzle remap の純効果）: **不合格**
 
@@ -82,8 +82,11 @@ iters 20 の中央値）を 5 回実行して run 間中央値を採る（`.clau
 | 2048 | ≥ 0.95  | 1.0045 | 1.0040 | 1.0058 | OK |
 | 4096 | ≥ 1.05  | 1.1280 | 1.1275 | 1.1230 | OK |
 
-N=512 は 3 幅すべて・5 run すべてで 0.9155〜0.9557 のレンジに収まり、判定基準 ≥0.95 を一貫して
-下回った（中央値で約 5.3〜5.9 ポイント不足）。単発の外れ値ではなく再現性のある劣化であり、N=4096 の
+N=512 は 3 幅 × 5 run の 15 値のうち 14 値が 0.9155〜0.9461 で判定基準 ≥0.95 を下回り、5 回中央値
+（g8〈動的〉0.9447・g8〈明示〉0.9450・g16〈明示〉0.9414）はいずれも基準未達だった（中央値で約 5.4〜5.9
+ポイント不足）。唯一 run1 の g8（明示）のみ 0.9557（`swizzle_bench_gate1_run1.log:5`）と基準を上回ったが
+単発（5 run 中 1 run）であり、判定基準§3 が採る「5 回計測中央値」では不合格側に確定する。再現性のある
+劣化であり、N=4096 の
 改善（+12.3〜12.8%）と N=512 の劣化はトレードオフの関係にある（swizzle remap の追加算術オーバーヘッドが
 小さい GEMM で相対的に効いてくるとみられる。ncu 等のプロファイラによる原因分解は未実施・本イシューの
 スコープ外）。

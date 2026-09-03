@@ -16,7 +16,8 @@ GPU utilization（実行前確認）: 0 %
     cargo test -p fandhe-ai-backend-cuda --lib --release --locked --features internal-diagnostics \
       -- --ignored --nocapture --test-threads=1 \
       tiled_f32_swizzle_variant_matches_base_bit_exact_output tiled_f32_swizzle_variant_matches_cpu_reference
-  Gate 0（REQ-8 境界ガード実在検査。実機不要だが同一 release バイナリで再確認）:
+  Gate 0（REQ-8 境界ガード実在検査。実機不要な静的検査。出力は gate0_req8_boundary_guard.log
+  へ別途採取。上記コマンドとは異なる実行のため、bit 一致・CPU 参照複合判定の出力〈gate0_bitexact_parity.log〉には含まれない）:
     cargo test -p fandhe-ai-backend-cuda --lib --release --locked --features internal-diagnostics \
       -- tiled_f32_source_with_swizzle
   Gate 1（classic 内 A/B。5 回計測。`examples/gemm_tiled_f32_swizzle_bench.rs` を本セッションで
