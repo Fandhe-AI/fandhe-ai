@@ -98,11 +98,15 @@
 //! `gemm_auto::select_f16_matrix_unit_impl`（事前形状ゲート込みの単一
 //! 真実源）が担う。設計目標は `CudaMmaGemm → CudaWmmaGemm → Tiled` の
 //! 優先順位だが、本番既定（`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED
-//! = false`）はこの優先順位を無効化し `CudaWmmaGemm → Tiled` のまま
-//! 動作する（codex-review PR #1177 P1 是正: #1156 のユーザー承認条件
-//! 〈切替前後を同一プロトコル・5 回計測中央値で比較し、後退時は結線
-//! しない〉は転送込みの auto 経路では未実測。GB10 実機実測は #1160 へ
-//! 引き継がれている）。TF32/f32 経路
+//! = false`）はこの優先順位を無効化したまま維持しており、`CudaWmmaGemm
+//! → Tiled`（#1156 以前と同じ）で動作する（イシュー #1160: #1156 の
+//! ユーザー承認条件〈切替前後を同一プロトコル・5 回計測中央値で比較し、
+//! 後退時は結線しない〉自体は転送込みの auto 経路で GB10 実機実測し
+//! 満たすことを確認済み〈`docs/perf/cuda-gemm-auto-f16-mma-switch.md`〉
+//! だが、mma 優先の本番有効化は K=4096 非後退ゲートの `MmaF16` baseline
+//! ceiling 未承認〈PR #1179 codex-review 指摘〉のため保留している。
+//! `gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED` docblock 参照）。
+//! TF32/f32 経路
 //! （`CudaGemm::run_wmma_tf32`・#62）は、決定表（設計文書 §4）が TF32
 //! 既定採用を #186（TASK-11.1g）のユーザー承認まで保留と定めているため、
 //! 現時点の `select_gemm_kernel` の自動経路には含めない（f32 は常に

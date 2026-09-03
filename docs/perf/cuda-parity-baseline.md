@@ -1808,3 +1808,35 @@ DGX Spark GB10（sm_121・CUDA 13.0）。release ビルド・`--test-threads=1`�
   `docs/backend-cuda-real-device-testing.md` §5.3 項目 4 の残作業と統合可）。
 - いずれも本 PR では実施せず、イシューコメントで提案し、push・PR 作成後の
   後続エージェント／ユーザー承認へ引き継ぐ。
+
+### 12.6 イシュー #1160 での本番結線後の状態（相互参照）
+
+イシュー #1160（2026-09-04 GB10 実機実測）で `gemm_auto::MMA_PRIORITY_
+PRODUCTION_ENABLED` を `true`（mma 優先）へ本番結線した。§12.4 の懸念どおり、
+結線後の `run_f16_k4096_stress_non_regression_route_aware`（`internal-
+diagnostics`・`#[ignore]`）は `MmaF16` 行の両 ceiling が本記録時点でも
+`None` のまま（§12.5 の提案値が未承認・`BASELINES` 未反映）のため、GB10 で
+実行すると fail-closed に panic して意図的に FAIL する（#1160 でも
+`BASELINES`・当該テストは変更していない）。代替証跡:
+
+- 直接経路 `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress_non_regression` は
+  green（#1160 の実測でも §12.3「切替後」表と同値であることを確認）
+- `run_f16_matches_cpu_reference_across_aligned_shapes`（厳密ゼロ fail・
+  12 整列形状）は green（フリップ前後どちらの経路でも green のまま維持
+  される設計どおり）
+
+§12.5 の ceiling 提案値のユーザー承認・`BASELINES` への反映は引き続き
+未実施（#1160 のスコープ外。本 PR でも実施しない）。実測記録・性能 A/B・
+`wmma_f16_opt` の扱い確定は `docs/perf/cuda-wmma-f16-perf-triage.md` §8 を
+正とし本ファイルでは二重管理しない。
+
+**追記（PR #1179 codex-review 指摘・2026-09-04）**: 上記の本番結線
+（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は、対応する route-aware
+非後退ゲートが baseline ceiling 未承認のため fail-closed に必ず FAIL
+する状態のまま行われていたとして codex-review の P1 指摘を受けた。
+`.claude/rules/coding-rust.md`「テスト・ベンチ」節（baseline の追加・
+更新は実機実測値のみ・人間承認必須）に照らし、§12.5 提案 ceiling の
+ユーザー承認・`BASELINES` 反映が完了するまで `MMA_PRIORITY_
+PRODUCTION_ENABLED` を `false`（#1156 以前と同じ wmma 優先）へ差し
+戻した（`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0）。上記の
+実測記録（性能 A/B・parity 非後退）自体は有効なまま維持する。
