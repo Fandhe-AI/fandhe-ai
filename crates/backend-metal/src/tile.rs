@@ -710,6 +710,27 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
     },
     // 微小形状: 既存 gemm_simdgroup と等価な単一 simdgroup 8x8。
     TileConfig::SINGLE_SIMDGROUP_8X8,
+    // MLX steel classic 経路の未収録構成（イシュー #1143）: `CANDIDATES[2]`
+    // （32x64、4 simdgroup 分担）の wm/wn を 1/2（2 simdgroup 分担）へ
+    // 落とした構成。N=4096 カーネル純境界の candle 比ギャップ縮小調査
+    // （`docs/perf/metal-gemm-n4096-kernel-gap.md`）で、`tile_pipeline_
+    // reflection` が `CANDIDATES[0]`（64x64、candle `TILE_64_64_16_2_2` と
+    // 同一形状）の `max_total_threads_per_threadgroup` に不足がない
+    // （H1「レジスタ圧によるスレッドグループ占有率低下」を反射値レベルでは
+    // 支持しない）ことを確認したうえで、E6（既存機構での候補追加測定）と
+    // して追加した。**index 8（末尾）に追加し、既存 index 0〜7 は不変に
+    // 保つ**（`select` の添字依存・`examples/gemm_tile_sweep.rs`・
+    // `examples/gemm_transpose_tile_sweep.rs` の複製配列・
+    // `tests/gemm_dynamic_tile_parity.rs` が index 0〜7 の並びに依存する
+    // ため）。
+    TileConfig {
+        bm: 32,
+        bn: 64,
+        bk: 16,
+        wm: 1,
+        wn: 2,
+        staged: true,
+    },
 ];
 
 /// `primary` を先頭に、常に妥当な [`TileConfig::SINGLE_SIMDGROUP_8X8`] を
@@ -3053,6 +3074,43 @@ mod tests {
                 "CANDIDATES に {cfg:?} が含まれていない"
             );
         }
+    }
+
+    #[test]
+    fn candidates_index_8_is_the_issue_1143_wm1wn2_wide_config_and_indices_0_to_7_unchanged() {
+        // イシュー #1143 で追加した `(32,64,16,1,2)` は末尾（index 8）に
+        // 収録し、既存 index 0〜7 は不変に保つ契約（`CANDIDATES` 定義
+        // コメント参照）。並び順の回帰を検知する。
+        assert_eq!(CANDIDATES.len(), 9, "CANDIDATES の長さが 9 ではない");
+        assert_eq!(
+            CANDIDATES[8],
+            TileConfig {
+                bm: 32,
+                bn: 64,
+                bk: 16,
+                wm: 1,
+                wn: 2,
+                staged: true,
+            },
+            "CANDIDATES[8] が想定の (32,64,16,1,2) ではない"
+        );
+        assert_eq!(
+            CANDIDATES[7],
+            TileConfig::SINGLE_SIMDGROUP_8X8,
+            "CANDIDATES[7]（SINGLE_SIMDGROUP_8X8）の位置が変わった"
+        );
+        assert_eq!(
+            CANDIDATES[0],
+            TileConfig {
+                bm: 64,
+                bn: 64,
+                bk: 16,
+                wm: 2,
+                wn: 2,
+                staged: true,
+            },
+            "CANDIDATES[0] の値が変わった（`select` の添字依存を壊す）"
+        );
     }
 
     #[test]

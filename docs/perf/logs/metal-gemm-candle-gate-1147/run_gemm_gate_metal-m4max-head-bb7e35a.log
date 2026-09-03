@@ -1,0 +1,63 @@
+== run_gemm_gate_metal.sh head-bb7e35a（参考系列。GEMM_GATE_PATCH_FACADE_PATH=<facade 絶対パス>） ==
+== build bench-fandhe（--config patch.crates-io.fandhe-ai.path="<facade 絶対パス>"） ==
+== build bench-candle (metal) ==
+== manifest 記録: results/raw/manifest-m4max-gemm-gate-head-bb7e35a.json ==
+bench_fandhe_sha256=a4126fcfee3cbb5600e7e50db126059698abdd511909dd9506760289ca26b83c
+fandhe_ai_source=path:<facade 絶対パス>
+bench_candle_sha256=8a9d6fa8878f8d60f40b21705924f3a711df3a46367f79c1c388d286335072e3
+candle_core_source=registry
+== バイナリ sha256 検証 OK / 依存元検証 OK（fandhe_ai_source=path:<facade 絶対パス>・
+   candle_core_source=registry） ==
+== metal status (before) ==
+Apple M4 Max
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+20:44  up 15 days,  7:57, 19 users, load averages: 3.44 3.97 3.97
+
+（注: 本ファイルはターミナル出力の直接キャプチャではなく、実行完了後に確定した
+results/raw/results-m4max-gemm-gate-head-bb7e35a.jsonl・manifest-m4max-gemm-gate-
+head-bb7e35a.json・skipped-m4max-gemm-gate-head-bb7e35a.log〈空〉から再構成した要約
+ログである。ターミナルへの直接 tee リダイレクトが本セッションのサンドボックス制約
+〈複雑な shell 構文の拒否〉に抵触したため、`bash run_gemm_gate_metal.sh head-bb7e35a`
+を通常のコマンド実行で完走させ、生成された生データを本ファイルへ書き起こした。
+数値は捏造していない — 全 30 行の実測値そのものを反映している）
+
+== bench-fandhe/bench-candle gemm metal N=1024/2048/4096 reuse/fresh × 5 run（run 内で交互実行） ==
+run 1: fandhe-ai 1024 reuse median_s=0.002910729 gflops=737.782 parity_fail_count=0
+run 1: candle    1024 fresh median_s=0.002075041 gflops=1034.911 parity_fail_count=0
+run 1: fandhe-ai 2048 reuse median_s=0.009069792 gflops=1894.186 parity_fail_count=0
+run 1: candle    2048 fresh median_s=0.006187542 gflops=2776.526 parity_fail_count=0
+run 1: fandhe-ai 4096 reuse median_s=0.039458500 gflops=3483.127 parity_fail_count=0
+run 1: candle    4096 fresh median_s=0.022665333 gflops=6063.840 parity_fail_count=0
+run 2: fandhe-ai 1024 reuse median_s=0.002948375 gflops=728.362 parity_fail_count=0
+run 2: candle    1024 fresh median_s=0.002141208 gflops=1002.931 parity_fail_count=0
+run 2: fandhe-ai 2048 reuse median_s=0.009320417 gflops=1843.251 parity_fail_count=0
+run 2: candle    2048 fresh median_s=0.006070625 gflops=2830.000 parity_fail_count=0
+run 2: fandhe-ai 4096 reuse median_s=0.038763459 gflops=3545.580 parity_fail_count=0
+run 2: candle    4096 fresh median_s=0.022792666 gflops=6029.964 parity_fail_count=0
+run 3: fandhe-ai 1024 reuse median_s=0.003057771 gflops=702.304 parity_fail_count=0
+run 3: candle    1024 fresh median_s=0.001852396 gflops=1159.301 parity_fail_count=0
+run 3: fandhe-ai 2048 reuse median_s=0.009423813 gflops=1823.027 parity_fail_count=0
+run 3: candle    2048 fresh median_s=0.007135708 gflops=2407.591 parity_fail_count=0
+run 3: fandhe-ai 4096 reuse median_s=0.038672688 gflops=3553.902 parity_fail_count=0
+run 3: candle    4096 fresh median_s=0.022762125 gflops=6038.055 parity_fail_count=0
+run 4: fandhe-ai 1024 reuse median_s=0.002365563 gflops=907.811 parity_fail_count=0
+run 4: candle    1024 fresh median_s=0.002144625 gflops=1001.333 parity_fail_count=0
+run 4: fandhe-ai 2048 reuse median_s=0.009704354 gflops=1770.326 parity_fail_count=0
+run 4: candle    2048 fresh median_s=0.006264541 gflops=2742.398 parity_fail_count=0
+run 4: fandhe-ai 4096 reuse median_s=0.038820646 gflops=3540.357 parity_fail_count=0
+run 4: candle    4096 fresh median_s=0.022698459 gflops=6054.991 parity_fail_count=0
+run 5: fandhe-ai 1024 reuse median_s=0.002915063 gflops=736.685 parity_fail_count=0
+run 5: candle    1024 fresh median_s=0.002115271 gflops=1015.229 parity_fail_count=0
+run 5: fandhe-ai 2048 reuse median_s=0.009945625 gflops=1727.380 parity_fail_count=0
+run 5: candle    2048 fresh median_s=0.006815209 gflops=2520.813 parity_fail_count=0
+run 5: fandhe-ai 4096 reuse median_s=0.038743396 gflops=3547.416 parity_fail_count=0
+run 5: candle    4096 fresh median_s=0.022648396 gflops=6068.375 parity_fail_count=0
+
+== metal status (after) ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+20:46  up 15 days,  7:58, 19 users, load averages: 5.14 4.39 4.13
+done. results in results/raw/results-m4max-gemm-gate-head-bb7e35a.jsonl ; failures (if any) in results/raw/skipped-m4max-gemm-gate-head-bb7e35a.log（空。ANY_FAILED=0）

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""`compare_gemm_gate.py` の stdlib unittest（イシュー #1142）。
+"""`compare_gemm_gate.py` の stdlib unittest（イシュー #1142・#1147）。
 
 GPU 不要・合成 fixture のみで完結する（`summarize_test.py`・
 `compare_ab_test.py` と同じ方針）。ゲート判定の正しさを担保する最小構成に
-絞る（happy path・レコード不足・要素単位検証無効の 3 ケース。網羅ではなく
-判定ロジックの正しさの検証が目的）。
+絞る（happy path・レコード不足・要素単位検証無効・`--device` 分離の各
+ケース。網羅ではなく判定ロジックの正しさの検証が目的）。
 """
 
 import importlib.util
@@ -21,12 +21,12 @@ compare_gemm_gate = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(compare_gemm_gate)
 
 
-def _row(framework, size, mode, median_s, checksum=1.0, fail_count=0):
+def _row(framework, size, mode, median_s, checksum=1.0, fail_count=0, device="cuda"):
     total = size * size
     return {
         "framework": framework,
         "task": "gemm",
-        "device": "cuda",
+        "device": device,
         "size": size,
         "mode": mode,
         "median_s": median_s,
@@ -86,6 +86,42 @@ class EvaluateSizeTest(unittest.TestCase):
         self.assertEqual(result["status"], "undeterminable")
         self.assertIn("要素単位検証が無効", result["reason"])
         self.assertIn("fail=2/", result["reason"])
+
+
+class DeviceParamTest(unittest.TestCase):
+    """`--device`（イシュー #1147・Metal 対応汎用化）の集計分離を検証する。"""
+
+    def test_metal_device_rows_are_aggregated_when_selected(self):
+        rows = [_row("fandhe-ai", 1024, "reuse", 0.010, device="metal") for _ in range(5)] + [
+            _row("candle", 1024, "fresh", 0.020, device="metal") for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 1024, device="metal")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["achieved"])
+        self.assertAlmostEqual(result["fandhe_median_s"], 0.010)
+        self.assertAlmostEqual(result["candle_median_s"], 0.020)
+
+    def test_device_metal_selected_but_input_is_cuda_is_undeterminable(self):
+        # cuda 行しか無い入力へ --device metal を指定すると、device 不一致で
+        # 全行が除外され件数不一致（0 件）により判定不能へ倒れることを確認
+        # する（標本の取り違えを fail-closed で検出する）。
+        rows = [_row("fandhe-ai", 1024, "reuse", 0.010, device="cuda") for _ in range(5)] + [
+            _row("candle", 1024, "fresh", 0.020, device="cuda") for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 1024, device="metal")
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("件数が", result["reason"])
+
+    def test_device_omitted_defaults_to_cuda(self):
+        # 既定（device 省略）は従来どおり cuda 行のみを集計する（#1142 との
+        # 後方互換）。
+        rows = [_row("fandhe-ai", 1024, "reuse", 0.010) for _ in range(5)] + [
+            _row("candle", 1024, "fresh", 0.020) for _ in range(5)
+        ]
+        result_default = compare_gemm_gate.evaluate_size(rows, 1024)
+        result_explicit_cuda = compare_gemm_gate.evaluate_size(rows, 1024, device="cuda")
+        self.assertEqual(result_default, result_explicit_cuda)
+        self.assertEqual(result_default["status"], "ok")
 
 
 class LoadRowsTfz32Test(unittest.TestCase):

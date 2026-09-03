@@ -185,13 +185,14 @@ GEMM 最適化ツリー（#479）の共通契約に対する本ドキュメン�
 場合）は、その PR 自身についても実測待ちの状態として扱い、3 章と同様に明記して停止する
 （`docs/perf/cuda-gemm-wmma-tf32-smem-staging-rounding.md` §3・#851 の運用を参照）。
 
-## §6 candle 比ゲート（#1031）の参照先
+## §6 candle 比ゲート（CUDA: #1031／Metal: #1037）の参照先
 
 本ドキュメントの §1 表は REQ-8（PyTorch 比の段階的下限）の分母・分子突合であり、
-`framework-compare`（candle・Burn との横並び）比の目標達成ゲート（#1031「N=1024/2048/4096
-reuse で candle 超え」）は対象外。candle 比の実測・判定は
+`framework-compare`（candle・Burn との横並び）比の目標達成ゲート（CUDA #1031・Metal #1037。
+いずれも「N=1024/2048/4096 reuse で candle 超え」）は対象外。candle 比の実測・判定は
 `docs/perf/cuda-gemm-candle-gate-remeasurement.md`（イシュー #1142）・
+`docs/perf/metal-gemm-candle-gate-remeasurement.md`（イシュー #1147）・
 `scripts/bench/framework-compare/results/summary.md`「目標達成ゲート」節・
-`docs/performance-targets.md` §8/§8.1/§8.2 を参照する（本ドキュメントの §1〜§5 は
+`docs/performance-targets.md` §8/§8.1/§8.2/§8.3 を参照する（本ドキュメントの §1〜§5 は
 変更しない）。
 

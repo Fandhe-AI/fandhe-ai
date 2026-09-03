@@ -1,0 +1,91 @@
+# GEMM 目標達成ゲート（#1037）5 回計測再計測（イシュー #1147）計測環境
+
+実ホスト名は `docs/real-hardware-verification-env.local.md`（Git 管理外）方式に従い記載しない
+（`docs/real-hardware-verification-env.md` §1 の Mac ノードと同一。ローカル直接実行のため
+rsync 転送は不要）。
+
+## 機種 / OS
+
+- 機種: Apple MacBook Pro（Apple M4 Max・64GB）
+- OS: macOS 26.6.2（BuildVersion 25G83）
+- CPU brand: Apple M4 Max（`sysctl -n machdep.cpu.brand_string` 実測）
+
+## ツールチェーン
+
+- rustc 1.96.0 (ac68faa20 2026-05-25)
+- cargo 1.96.0 (30a34c682 2026-05-25)
+
+## 実行方式
+
+- `docs/real-hardware-verification-env.md` §1「ローカル直接実行」に従い、本エージェントの
+  worktree 上でそのままビルド・計測を実行した（rsync 転送・SSH リモート実行は不要。転送元
+  コミット = worktree HEAD そのもの）
+- worktree HEAD（origin/main 由来）: `bb7e35a`
+
+## 系列
+
+- **正式系列**（ラベル `0.6.0`）: `bench-fandhe/Cargo.toml` の承認済みピン `fandhe-ai =0.6.0`
+  （crates.io 公開版。registry 解決。`cargo tree -p bench-fandhe --depth 1` で `fandhe-ai
+  v0.6.0`〈非 path〉を確認済み。manifest: `results/raw/manifest-m4max-gemm-gate-0.6.0.json`）
+- **参考系列**（ラベル `head-bb7e35a`）: worktree HEAD（`bb7e35a`。#1167/#1168 マージ後の
+  origin/main 直後）の `crates/facade` へ `cargo build --release -p bench-fandhe --config
+  'patch.crates-io.fandhe-ai.path="<facade 絶対パス>"'` で path 差し替えビルド。`cargo tree`
+  で `fandhe-ai v0.6.0 (<facade 絶対パス>)`（path 解決）を確認済み（manifest:
+  `results/raw/manifest-m4max-gemm-gate-head-bb7e35a.json`）。`[patch]` セクション・
+  `.cargo/config.toml` は一切コミットしていない（CLI `--config` 引数のみ）
+- `bench-candle` は両系列で共通の 1 バイナリ（`fandhe-ai` に依存しないため。両 manifest で
+  `candle_core_source=registry` を確認済み）
+- 計画立案時点（本 Issue 着手直前）で crates.io の `fandhe-ai` 最新公開版は `0.6.0` のまま
+  （`cargo search fandhe-ai --limit 1` 実測）。v0.7.0 は未公開のため、正式系列ピンの更新は
+  発生していない（`.claude/rules/deps-policy.md` 承認記録の更新不要）
+
+## 熱・負荷状態（`pmset -g therm`・`uptime`。sudo 不要コマンドのみ。
+## `docs/perf/metal-bench-noise-protocol.md`「熱・電源状態の記録」節準拠）
+
+正式系列（`0.6.0`）計測前後:
+```
+== metal status (before) ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+20:42  up 15 days,  7:55, 19 users, load averages: 6.27 4.06 3.97
+== metal status (after) ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+20:43  up 15 days,  7:56, 19 users, load averages: 6.35 4.47 4.13
+```
+
+参考系列（`head-bb7e35a`）計測前後:
+```
+== metal status (before) ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+20:44  up 15 days,  7:57, 19 users, load averages: 3.44 3.97 3.97
+== metal status (after) ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+20:46  up 15 days,  7:58, 19 users, load averages: 5.14 4.39 4.13
+```
+
+`pmset -g therm` はいずれも thermal/performance warning なし（サーマルスロットリングなし）。
+`load averages` は同一マシン上の並列セッション（複数エージェント・利用者）によるもので、
+`uptime` の `users` 数（19）が示すとおり本計測専用の占有環境ではない。GEMM 計測自体は
+GPU バウンドのタスクであり、CPU 負荷平均の変動が計測値に与える影響は本 PR では定量化して
+いない（スコープ外。ドキュメント本文 §9 参照）。
+
+## 誤操作の記録・是正（transparency。作業ログ）
+
+計測作業中に 1 回、`run_gemm_gate_metal.sh` の呼び出し引数を誤り（wrapper が既に device
+`metal` を渡すため、ラベルのみを渡すべきところを `metal head-bb7e35a` の 2 引数を渡してしまい
+`DEVICE=metal, LABEL=metal` として解釈された）、意図しないラベル `metal` で 1 round 分の
+ビルド・計測が実行された。この誤操作時に `GEMM_GATE_PATCH_FACADE_PATH` が export 済みだった
+ため `cargo build --config patch...` が実行され、`Cargo.lock` が path 解決の記述へ変化した
+（コミット差分として検出）。誤操作による生成物（`results/raw/results-m4max-gemm-gate-metal.
+jsonl`・`skipped-m4max-gemm-gate-metal.log`・`manifest-m4max-gemm-gate-metal.json`）は正式な
+参考系列データとして使用せず削除し、`git checkout -- Cargo.lock` で承認済みピンの記述へ復元
+した上で、正しい引数（ラベルのみ）で参考系列を再実行した。最終的にコミットする
+`Cargo.lock`・生データはこの復元・再実行後のものであり、承認済みピンの完全固定
+（`.claude/rules/deps-policy.md` 第 9 区分）を損なっていない。

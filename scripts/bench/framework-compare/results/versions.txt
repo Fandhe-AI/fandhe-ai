@@ -123,3 +123,19 @@ bench-candle v0.1.0 (bench-candle)
 bench-fandhe v0.1.0 (bench-fandhe)
 ├── bench-common v0.1.0 (bench-common)
 └── fandhe-ai v0.6.0 (path: crates/facade @ 7e3e4b6)
+
+# 環境 13: Apple M4 Max（GEMM 目標達成ゲート #1037 の 5 回計測再計測・イシュー #1147）
+# macOS 26.6.2 (25G83) / rustc 1.96.0 (ac68faa20 2026-05-25) / cargo 1.96.0 (30a34c682 2026-05-25)
+# 正式系列（fandhe-ai =0.6.0。registry 解決）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0
+bench-candle v0.1.0 (bench-candle)
+├── bench-common v0.1.0 (bench-common)
+└── candle-core v0.11.0
+
+# 参考系列（--config patch.crates-io.fandhe-ai.path=... で crates/facade〈worktree HEAD bb7e35a〉へ
+# path 差し替え。[patch] セクション・.cargo/config.toml はコミットしていない。CLI 引数のみで適用）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0 (path: crates/facade @ bb7e35a)
