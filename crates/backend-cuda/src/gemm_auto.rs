@@ -1718,7 +1718,7 @@ impl CudaGemmAuto {
     /// フォールバック連鎖は `MatrixUnit(mma) → MatrixUnit(wmma) → Tiled
     /// → Naive`（`docs/dispatch-rules-design.md` §5.6）。第 1 層
     /// （`select_gemm_kernel`）が `KernelKind::MatrixUnit` を返した場合、
-    /// 第 2 層の実装選択は [`Self::f16_matrix_unit_impl`]（内部で
+    /// 第 2 層の実装選択は `Self::f16_matrix_unit_impl`（内部で
     /// `select_f16_matrix_unit_impl` を呼ぶ）が担う: `mma` が `Some`
     /// かつ事前形状ゲート（`validate_mma_alignment(n, k)`・
     /// `validate_mma_grid_bounds(m)` が `Ok`）を満たす場合のみ
@@ -1731,7 +1731,7 @@ impl CudaGemmAuto {
     /// 時点で必ず存在するため、tiled 自体が失敗するケースはカーネル
     /// 起動時エラー（`CudaError`）としてそのまま呼び出し元へ返る。
     ///
-    /// 万一 [`Self::f16_matrix_unit_impl`] の判定結果と対応フィールドの
+    /// 万一 `Self::f16_matrix_unit_impl` の判定結果と対応フィールドの
     /// 有無が食い違っても（あり得ない契約だが）tiled へ倒れる fail-safe
     /// な `match` 構造とし、`unwrap()`／`unreachable!` は使わない。
     pub fn run_f16(
