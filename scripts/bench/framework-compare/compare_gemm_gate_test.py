@@ -117,6 +117,33 @@ class MainCliTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_main_fails_closed_when_input_has_invalid_lines(self):
+        # codex-review P0 指摘（PR #1166）: `load_rows` が破損 JSON・非
+        # object・不正な `tf32` 型の行を warnings として除外するのみで、
+        # `main` はそれを標準エラーへ表示するだけで終了コードを失敗に
+        # 変えなかった。全 size に正常な 5 行が揃っていれば、同じ入力
+        # ファイルに不正行が混在していても exit code 0（達成扱い）に
+        # なり得ていた fail-open な欠陥を再発防止する回帰テスト。
+        rows = []
+        for size in compare_gemm_gate.SIZES:
+            rows += [_row("fandhe-ai", size, "reuse", 0.010) for _ in range(5)]
+            rows += [_row("candle", size, "fresh", 0.020) for _ in range(5)]
+        lines = [json.dumps(r) for r in rows]
+        lines.append("{not valid json")  # 破損行（load_rows が warnings へ回収）
+        path = _write_jsonl([])
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        try:
+            exit_code = compare_gemm_gate.main([path])
+            self.assertNotEqual(
+                exit_code,
+                0,
+                "全 size 分の正常行が揃っていても、不正行混在の入力ファイルは"
+                "非ゼロ終了しなければならない（fail-open 再発防止）",
+            )
+        finally:
+            os.unlink(path)
+
 
 if __name__ == "__main__":
     unittest.main()

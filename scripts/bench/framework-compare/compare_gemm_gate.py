@@ -397,6 +397,26 @@ def main(argv=None):
         for w in warnings:
             print(f"warning: {w}", file=sys.stderr)
         results = [evaluate_size(rows, size) for size in SIZES]
+        if warnings:
+            # codex-review P0 指摘（PR #1166）: `load_rows` が破損 JSON・非
+            # object・不正な `tf32` 型の行を warnings として除外するのみで、
+            # 従来はここで標準エラーへ表示するだけに留まり終了コードへ反映
+            # されなかった。正常な 5 行さえ揃えば同一入力ファイルに破損行・
+            # 不正 tf32 行が混在していてもゲートが exit code 0 になり得る
+            # fail-open な欠陥（外部フォーマット検証失敗を受理する A03・
+            # fail-closed な性能判定を fail-open にする A08 相当）だった。
+            # warnings が 1 件でもある入力ファイルは、正常行のみで算出した
+            # 各 size の判定を丸ごと判定不能へ上書きし「達成」扱いにしない
+            # （fail-closed。#1031 のゲート達成判定を汚染された入力から
+            # 確定させない）。
+            for r in results:
+                r["status"] = "undeterminable"
+                r["reason"] = (
+                    f"入力ファイルに不正行が {len(warnings)} 件あり判定不能"
+                    "（破損 JSON・非 object・不正な 'tf32' 型のいずれか。"
+                    "詳細は上記 warning 行を参照）"
+                )
+                r.pop("achieved", None)
         out_parts.append(render(path, results))
         for r in results:
             if r["status"] != "ok":
