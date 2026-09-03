@@ -297,9 +297,16 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
    `InvalidShape` になる退行が生じる点を実装引き渡し事項として明記する
    （#1156 の受入条件は単純な `match (&self.mma, &self.wmma)` だが、
    形状ゲートを含む拡張が必要）
-4. no-op 形状（`m == 0 || n == 0 || k == 0`）は mma／WMMA／tiled のいずれも
-   同一契約（空 `Vec` を返す早期 return）で処理するため、本節の優先順位
-   判定には影響しない
+4. no-op／退化形状（`m == 0 || n == 0 || k == 0`）は mma／WMMA／tiled の
+   いずれも同一契約の早期 return で処理する。**`m == 0 || n == 0` は空
+   `Vec` を返す**が、**`k == 0`（`m, n > 0`）は GEMM の数学的定義どおり
+   `m * n` 個のゼロ（`vec![f16::ZERO; m * n]`）を返す**（A/B が空スライス
+   になるため起動を回避し C = 全 0 とする。`gemm_mma.rs::run_f16`・
+   `gemm_wmma.rs::run_f16` の早期 return と同一契約。§5.6 の実装優先順位
+   〈判定規則 1〉はこれら早期 return より前の構築時契約であり、いずれの
+   早期 return も `validate_mma_alignment`／`validate_mma_grid_bounds` 等の
+   mma 固有ゲート評価より前に行われるため、本節の優先順位判定自体には
+   影響しない
 5. §3.3「端数形状を理由に Tensor Core 経路自体を除外しない」は**第 1 層で
    引き続き維持**される（`cp.async` 整列非対応の端数形状も `MatrixUnit`
    内の WMMA で処理され、tiled へは落ちない）
