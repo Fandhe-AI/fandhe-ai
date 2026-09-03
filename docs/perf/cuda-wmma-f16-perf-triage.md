@@ -246,8 +246,13 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
 切り出し済み。
 
 - **大容量バッファ per-call アロケーション病態の調査**（#1130。#1102 配下）: §4.2 の
-  dim=4096 二峰性（`cuMemAllocAsync` プールのトリム／unified memory ページマッピングの
-  疑い）の原因特定。
+  dim=4096 二峰性の原因は
+  `docs/perf/cuda-large-buffer-percall-alloc-transfer-threshold.md`（#1146。GB10 実機
+  実測完了・2026-09-03）で特定済み。`cuMemAllocAsync` プール（H-B）・H2D ページャブル
+  転送（H-C）はいずれも棄却され、**D2H 転送先の未タッチ `Vec` に対する glibc mmap
+  しきい値（既定 32 MiB）が主因**（P6 の GPU 非関与な純ホスト計測でも同一閾値を確認）
+  と確定した。加えて、32 MiB 以上のフェーズ通過直後の降順走査でのみ確率的に発生する
+  追加スパイク（二峰性そのもの）も再現・記録済み。
 - **`mma_sync_f16`（`CudaMmaGemm`）の性能改善の本番結線検討**（#1131。#1007 配下）:
   §4.1 で確認した `mma.sync`/`ldmatrix`/`cp.async` パイプラインの約 3〜13 倍（形状依存。
   dim2048 で約 7 倍・dim4096 で約 11〜13 倍。§3.1 の初回診断計測・§4.3 の是正後実測
