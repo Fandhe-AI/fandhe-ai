@@ -233,3 +233,23 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   `scripts/bench/framework-compare/results/summary.md` 環境 12 節を参照
 - #1031 のクローズ可否・後続 issue 化・crates.io 次回公開（v0.7.0 想定）の要否はユーザー判断
   （本 PR では Issue 操作を行わない。`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §9）
+
+### 8.3 #1147 追補（Metal GEMM N=1024/2048/4096 reuse の 5 回計測再計測・#1037 ゲート判定確定）
+
+- 本節は §8.2 と同型の判定確定を Metal 側に適用したもの（`run_gemm_gate.sh <device> <label>`
+  への device 汎用化・`compare_gemm_gate.py --device` の追加は #1147 で実施）。**§2 の
+  PyTorch 比段階的下限表・§3 丸め規則は変更しない**
+- Apple M4 Max 実機で 2 系列（正式系列: 承認済みピン `fandhe-ai =0.6.0`／参考系列: #1167
+  〈転置ロード拡張。NN 経路はビット同一のまま維持・自動ルーティング未結線〉・#1168
+  〈N=4096 カーネル純境界ギャップ調査。新候補不採用・選択ロジック不変〉反映後の HEAD へ
+  `--config patch` で差し替え）を計測した結果、**いずれの系列でも #1037 は未達成**（N=1024・
+  N=2048・N=4096 いずれも未達。fandhe-ai 側は全 run `parity_fail_count=0`）
+- #1167/#1168 は `gemm metal` タスクが通る NN 正方 GEMM の本番経路自体を変更していないため、
+  参考系列は正式系列とほぼ同水準（系統的な性能改善は確認されず）
+- 出典・詳細な突合表は `docs/perf/metal-gemm-candle-gate-remeasurement.md`（イシュー #1147）、
+  生データは
+  `scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-0.6.0.jsonl`・
+  `results-m4max-gemm-gate-head-bb7e35a.jsonl`、集計表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 13 節を参照
+- #1037 のクローズ可否・後続 issue 化・crates.io 次回公開（v0.7.0 想定）の要否はユーザー判断
+  （本 PR では Issue 操作を行わない。`docs/perf/metal-gemm-candle-gate-remeasurement.md` §9）

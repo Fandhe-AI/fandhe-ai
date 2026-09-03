@@ -493,6 +493,9 @@ vs facade 経由の `bench-fandhe`）が異なるため単純に差分を「faca
   （同 doc §5「スコープ外」）
 - framework-compare `summary.md` の 0.4.0 正式更新・REQ-8 下限の再確定（人間承認タスク。計画 §6 のとおり
   本イシューのスコープ外）
+- #1147 で end-to-end reuse ゲート（#1037「N=1024/2048/4096 reuse で candle 超え」）の正式判定を
+  確定した（Apple M4 Max 実機実測。正式系列・参考系列いずれも未達成）。結果と残差は
+  `docs/perf/metal-gemm-candle-gate-remeasurement.md` を参照
 
 ## 9. 参照
 

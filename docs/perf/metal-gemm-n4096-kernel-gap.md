@@ -185,3 +185,5 @@ N=4096 NN（正方立方。中核対象）:
   本 doc の新候補 cand8 は §5 へ追記済み）
 - `docs/backend-metal-mlx-classic-nax-decision.md` §1（MLX steel classic の
   未収録構成一覧。`(32,64,16,1,2)` は同 §1 が記録していた未決事項）
+- `docs/perf/metal-gemm-candle-gate-remeasurement.md`（#1147。end-to-end reuse ゲート
+  #1037 の正式判定確定。本 doc のカーネル純境界差はその要因の一部）

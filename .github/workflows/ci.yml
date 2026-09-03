@@ -764,6 +764,13 @@ jobs:
       - name: フレームワーク横並びベンチ compare_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/compare_ab_test.py
 
+      # イシュー #1142・#1147: compare_gemm_gate.py（GEMM 目標達成ゲート
+      # CUDA #1031／Metal #1037 の 5 回計測中央値集計・`--device` 切替判定）の
+      # 回帰テスト。summarize_test.py・compare_ab_test.py と同一方針（stdlib の
+      # unittest のみ・cargo の有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ compare_gemm_gate.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/compare_gemm_gate_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
