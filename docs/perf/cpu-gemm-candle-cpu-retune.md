@@ -179,7 +179,15 @@ run 間中央値）を分子、gemm crate 列（OSS ハーネス 5 回実行の 
   側と非対称だったため是正した）。5 回とも他計測ジョブの混入なし（`loadavg-per-run.txt`。
   各回の load average は 2.5〜3.6 で計測プロセス自身〈20 スレッド〉の残留のみ）。生データ:
   `docs/perf/oss-comparison/2026-09-03/gb10-cpu-1140-ossx5/oss-run{1..5}.jsonl`
-  （`.stderr`・`.exit` も同ディレクトリに同梱）。5 回とも `exit=1` は K≥1024 の既知丸め
+  （`.stderr`・`.exit` も同ディレクトリに同梱）。各レコードの `commit` フィールドは
+  `"unknown"` になっている（`docs/real-hardware-verification-env.md` §3 の rsync 転送
+  手順どおりノード側に `.git` を置いていないため、`oss-gemm-compare` バイナリの
+  `git_commit_short()` がフォールバック値を返す既知の制約。ハーネス側の不具合ではない）。
+  代わりに転送前に記録した rev-stamp（`git rev-parse HEAD`）を同ディレクトリの
+  `env.txt`（`=== rev-stamp ===` 節）へ同梱し、5 回の実行がいずれも
+  `06ec33bbd5d1100d848d0e91d4e9a803e452647a`（本ドキュメント冒頭の環境節と同一
+  コミット）に対する計測であることを紐付けた（codex-review 指摘対応。イシュー #1140）。
+  5 回とも `exit=1` は K≥1024 の既知丸め
   不一致（`rel_diff` は 0.0012〜0.0047 で `docs/perf/oss-gemm-comparison-baseline.md` §5
   記載の既知範囲内。全 5 回で症状が同一のため実行間で不安定化してはいない）によるもので、
   性能値は有効:
