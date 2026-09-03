@@ -401,16 +401,29 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
   `bench-candle gemm cuda <N> fresh`（candle は reuse 非対応）を交互に 5 回ずつ
   起動し `results/raw/results-dgx-gemm-gate-<label>.jsonl` へ記録する。失敗は
   `results/raw/skipped-dgx-gemm-gate-<label>.log` に記録する（数値を捏造しない）
-- **バイナリ同一性検証（イシュー #1166）**: `bench-fandhe` をビルドした直後
-  （他の `cargo` コマンドを挟まず）に `target/release/bench-fandhe` の
-  sha256 と `fandhe-ai` の依存解決元（`cargo tree` の path/registry 判定）を
-  `results/raw/manifest-dgx-gemm-gate-<label>.json` へ記録し、計測ループ開始
-  直前に再計算した sha256 と突き合わせる。過去に、確認目的の素の
-  `cargo tree` を挟んだだけで Cargo.lock が registry 解決へ暗黙に再ロックされ、
-  意図しない登録版 binary へ差し替わって計測してしまった事故が実際に発生した
-  （`docs/perf/logs/cuda-gemm-candle-gate-1142/env_info.txt`「参考系列ビルドの
-  事故と対処」節）。この検証は fail-closed（manifest 欠落・sha256 不一致なら
-  測定を一切実行せず exit 1。security.md A08）
+- **バイナリ同一性検証（イシュー #1166。依存元照合は同イシューへの
+  codex-review／Cursor Bugbot 指摘で強化）**: `bench-fandhe` をビルドした
+  直後（他の `cargo` コマンドを挟まず）に `target/release/bench-fandhe` の
+  sha256 と `fandhe-ai` の依存解決元（`cargo tree -p bench-fandhe --depth 1`
+  の path/registry 判定。**ビルド時と同一の `--config`〈`GEMM_GATE_PATCH_
+  FACADE_PATH` 指定時の path patch〉を付けて実行**し、path patch 適用ビルド
+  でも `cargo tree` 側だけ patch なしで解決され registry と誤記録する事故を
+  防ぐ）を `results/raw/manifest-dgx-gemm-gate-<label>.json` へ記録し、計測
+  ループ開始直前に再計算した sha256・依存解決元と突き合わせる。過去に、
+  確認目的の素の `cargo tree` を挟んだだけで Cargo.lock が registry 解決へ
+  暗黙に再ロックされ、意図しない登録版 binary へ差し替わって計測してしまった
+  事故が実際に発生した（`docs/perf/logs/cuda-gemm-candle-gate-1142/env_info.txt`
+  「参考系列ビルドの事故と対処」節）。この検証は fail-closed（manifest 欠落・
+  sha256 不一致・依存解決元の取得失敗〈"unknown" への fail-open はしない〉・
+  依存解決元の不一致ならいずれも測定を一切実行せず exit 1。security.md A08）
+  - さらに、記録・検証いずれの時点でも `fandhe_ai_source` を「`GEMM_GATE_
+    PATCH_FACADE_PATH` を指定した invocation なら `path:<指定パス>`、
+    指定しない invocation なら `registry`」という契約に照合する。単に
+    sha256 が一致しているだけでは、記録後に `GEMM_GATE_SKIP_BUILD=1` を
+    使って `GEMM_GATE_PATCH_FACADE_PATH` の有無を変えて実行した場合の系列
+    取り違え（正式系列のラベルで参考系列の依存解決を計測してしまう等）を
+    検出できないため、README「ファイル名ラベルが唯一の系列識別手段」という
+    計測契約をこの照合で担保する
   - `GEMM_GATE_SKIP_BUILD=1` は「同一 label で直前に成功した本スクリプト実行
     が残した manifest と binary が一致する場合に限り」ビルドを省略する用途
     （失敗 run の再実行等）。参考系列の外部事前ビルド＋`GEMM_GATE_SKIP_BUILD=1`
