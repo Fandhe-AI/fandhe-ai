@@ -217,13 +217,31 @@ fn print_summary_row(
     );
 }
 
+/// [`read_mem_pool_usage`] の結果。`has_async_alloc` が偽で driver プール
+/// 自体が存在しない「非対応環境」（`Disabled`）と、対応環境であるにも
+/// かかわらず `get_mem_pool`／`get_attribute` が失敗した「API 呼び出し
+/// 異常」（`Failed`）を区別する（Review 指摘対応: 以前は両者を `None` に
+/// 一括して潰していたため、`print_pool_usage` がプール属性取得エラーを
+/// 「非対応環境」と誤表示していた。診断対象自体の計測前提が崩れている
+/// 可能性があるため、`Failed` は `print_pool_usage` でテスト失敗として
+/// 扱う）。
+enum PoolUsage {
+    /// `has_async_alloc` が偽（`pool.rs::release_cached` と同じ判断）。
+    Disabled,
+    Available {
+        reserved: u64,
+        used: u64,
+    },
+    /// `get_mem_pool`／`get_attribute` の呼び出し自体が失敗した。
+    /// 診断内容は cudarc のエラー表示（`Display`）をそのまま埋め込む。
+    Failed(String),
+}
+
 /// driver プールの `RESERVED_MEM_CURRENT`／`USED_MEM_CURRENT`（`u64`。
-/// `cuuint64_t`）を読み取る。`has_async_alloc` が偽の環境では driver
-/// プール自体が存在しないため `None` を返す（`pool.rs::release_cached`
-/// と同じ判断）。
-fn read_mem_pool_usage(ctx: &CudaContext) -> Option<(u64, u64)> {
+/// `cuuint64_t`）を読み取る。戻り値の意味は [`PoolUsage`] を参照。
+fn read_mem_pool_usage(ctx: &CudaContext) -> PoolUsage {
     if !ctx.has_async_alloc() {
-        return None;
+        return PoolUsage::Disabled;
     }
     // SAFETY: `ctx.cu_device()` は `CudaContext::new` が既に構築済みの
     // 有効なデバイスハンドルを返す。`get_mem_pool` の戻り値をそのまま
@@ -232,31 +250,46 @@ fn read_mem_pool_usage(ctx: &CudaContext) -> Option<(u64, u64)> {
     // 同一根拠）。`get_attribute` は読み取り専用（`set_attribute` は
     // 呼ばない。閾値変更を伴わない診断専用のため）。
     unsafe {
-        let mem_pool = cudarc::driver::result::device::get_mem_pool(ctx.cu_device()).ok()?;
+        let mem_pool = match cudarc::driver::result::device::get_mem_pool(ctx.cu_device()) {
+            Ok(pool) => pool,
+            Err(e) => return PoolUsage::Failed(format!("get_mem_pool 失敗: {e:?}")),
+        };
         let mut reserved: u64 = 0;
-        cudarc::driver::result::mem_pool::get_attribute(
+        if let Err(e) = cudarc::driver::result::mem_pool::get_attribute(
             mem_pool,
             cudarc::driver::sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT,
             (&mut reserved as *mut u64).cast(),
-        )
-        .ok()?;
+        ) {
+            return PoolUsage::Failed(format!("get_attribute(RESERVED_MEM_CURRENT) 失敗: {e:?}"));
+        }
         let mut used: u64 = 0;
-        cudarc::driver::result::mem_pool::get_attribute(
+        if let Err(e) = cudarc::driver::result::mem_pool::get_attribute(
             mem_pool,
             cudarc::driver::sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
             (&mut used as *mut u64).cast(),
-        )
-        .ok()?;
-        Some((reserved, used))
+        ) {
+            return PoolUsage::Failed(format!("get_attribute(USED_MEM_CURRENT) 失敗: {e:?}"));
+        }
+        PoolUsage::Available { reserved, used }
     }
 }
 
-fn print_pool_usage(label: &str, usage: Option<(u64, u64)>) {
+/// `usage` を 1 行の CSV 風ログとして出力する。`PoolUsage::Failed`（API
+/// 呼び出し自体の異常）は `has_async_alloc=false` の非対応環境と混同
+/// させないため `error(...)` として出力したうえで診断テストを失敗させる
+/// （Review 指摘対応。`Disabled` は非対応環境として正常系のまま出力する）。
+fn print_pool_usage(label: &str, usage: &PoolUsage) {
     match usage {
-        Some((reserved, used)) => {
+        PoolUsage::Available { reserved, used } => {
             println!("mem_pool_usage,{label},reserved_bytes={reserved},used_bytes={used}")
         }
-        None => println!("mem_pool_usage,{label},unavailable(has_async_alloc=false)"),
+        PoolUsage::Disabled => println!("mem_pool_usage,{label},disabled(has_async_alloc=false)"),
+        PoolUsage::Failed(err) => {
+            println!("mem_pool_usage,{label},error({err})");
+            panic!(
+                "read_mem_pool_usage({label}) が失敗した（has_async_alloc=true の環境での API 呼び出し異常）: {err}"
+            );
+        }
     }
 }
 
@@ -639,7 +672,7 @@ fn large_buffer_percall_alloc_transfer_triage_record() {
         device.context().has_async_alloc(),
     );
 
-    print_pool_usage("before_sweep", read_mem_pool_usage(device.context()));
+    print_pool_usage("before_sweep", &read_mem_pool_usage(device.context()));
 
     let config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
 
@@ -757,7 +790,7 @@ fn large_buffer_percall_alloc_transfer_triage_record() {
         }
     }
 
-    print_pool_usage("after_sweep", read_mem_pool_usage(device.context()));
+    print_pool_usage("after_sweep", &read_mem_pool_usage(device.context()));
 }
 
 #[cfg(test)]
