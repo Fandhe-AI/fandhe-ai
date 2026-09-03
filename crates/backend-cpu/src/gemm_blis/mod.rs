@@ -446,6 +446,14 @@ pub fn gemm_blis_parallel(
     // 同型。実機実測とユーザー承認を経た別 PR でのみ既定切替を検討する）。
     // 従来どおり行パネルごとに [`dispatch_region`] を独立呼び出しする
     // （B packing はタスクごとに個別実行＝共有化前の挙動）。
+    //
+    // イシュー #1041 の pc 外側候補（`dispatch_shared_b_pc_outer`。B 共有化に
+    // 加え A packing の重複〈jc 反復ごとの再 pack〉も解消する狙い）も、GB10
+    // （#1140）・Apple M4 Max（#1141）双方の実機 5 回中央値実測で現行既定
+    // `RowPanel` を大きく下回り（M4 Max: 1024 で約 33〜35%・2048/4096 で約
+    // 22〜24% 低いスループット。GB10: 1024/2048 のみ実測で約 45〜54% 低い。
+    // GB10 4096 は候補側未計測）、#1144 で本番結線しないと確定した。詳細・
+    // 数値は `docs/perf/cpu-gemm-candle-cpu-retune.md` §8 を参照。
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
@@ -1620,10 +1628,13 @@ fn gemm_blis_jr_ir_loop<K: Microkernel>(
 /// ため `blocks.mc` によるクランプを行わず `task_mc` 行ぶんの容量が
 /// 要る（[`task_a_capacity`] 参照）。
 ///
-/// **本番未結線**: [`gemm_blis_shared_b_region`] と同じ理由
-/// （実機 5 回中央値の非劣化確認・ユーザー承認が採用ゲート）で
-/// `#[cfg(test)]`。`#[cfg(test)]` の [`gemm_blis_parallel_variant`]
-/// 経由で bit 完全一致検証・A/B 一括計測ハーネスから到達する。
+/// **実機ゲート結果: 非採用（#1140／#1141／#1144）**。GB10・Apple M4 Max
+/// 双方の実機 5 回中央値実測で本番既定 `RowPanel` を大きく下回り、採用
+/// ゲート（`docs/perf/cpu-gemm-candle-cpu-retune.md` §1・§8 の受け入れ
+/// 条件）を満たさなかった。本番結線はしない。次候補（B 側 laneq の
+/// ベクトル転置化・prefetch・KC 再スイープ）の A/B 計測資産として
+/// `#[cfg(test)]` のまま維持する（[`GemmDriverVariant`] 経由で
+/// bit 完全一致検証・A/B 一括計測ハーネスから到達する）。
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn gemm_blis_shared_b_pc_outer_region<K: Microkernel>(
@@ -1816,9 +1827,12 @@ fn dispatch_shared_b_pc_outer(
 }
 
 /// A/B 一括計測ハーネス（イシュー #1041）向け: 並列 5-loop ドライバの
-/// 候補を 1 つの入口で選べるようにする列挙。「本番未結線」節と同じ
-/// `#[cfg(test)]` 限定（実機ゲート未通過のため。[`gemm_blis_shared_b_pc_outer_region`]
-/// ドキュメント参照）。
+/// 候補を 1 つの入口で選べるようにする列挙。`#[cfg(test)]` 限定。
+/// GB10（#1140）・Apple M4 Max（#1141）双方の実機実測の結果、`SharedB`・
+/// `SharedBPcOuter` は本番既定 `RowPanel` を上回れず非採用が確定した
+/// （#1144。[`gemm_blis_shared_b_pc_outer_region`] ドキュメント・
+/// `docs/perf/cpu-gemm-candle-cpu-retune.md` §8 参照）。次候補の A/B
+/// 計測資産として本列挙・ハーネスは維持する（本番未結線のまま）。
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GemmDriverVariant {

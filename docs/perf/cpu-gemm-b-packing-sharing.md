@@ -151,4 +151,4 @@ M=N=K=2048: gemm_blis_parallel median=0.040295s（対 gemm_parallel 1.801x）
   本番未結線）
 - 後続（イシュー #1041）: A packing の重複解消候補 `gemm_blis_shared_b_pc_outer_region`
   （`GemmDriverVariant::SharedBPcOuter`）を A/B 一括計測ハーネスへ統合済み。詳細は
-  `docs/perf/cpu-gemm-candle-cpu-retune.md` を参照
+  `docs/perf/cpu-gemm-candle-cpu-retune.md` を参照（#1144 で非結線確定）

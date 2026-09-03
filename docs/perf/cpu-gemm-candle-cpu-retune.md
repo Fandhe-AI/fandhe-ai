@@ -15,7 +15,9 @@
 - **本 PR のスコープ**: 実装・bit 完全一致検証・A/B 一括計測ハーネスの整備まで。実機実測・
   受け入れ条件の達成判定は Mac／DGX Spark 実機セッションへ持ち越す（下記§5 参照）。
   **GB10（DGX Spark）側の実機実測はイシュー #1140 で完了し、非採用（§5.1・§6）と結論した。
-  M4 Max 側は引き続き #1141 へ持ち越し。**
+  M4 Max 側の実機実測もイシュー #1141 で完了し、同じく非採用（§5.2・§7）と結論した。
+  両実機が出揃った結果に基づく本番結線の要否判断はイシュー #1144（§8）で「結線せず」と
+  確定している。**
 
 ## §2 診断（コード読解に基づく重複コストモデル）
 
@@ -381,6 +383,8 @@ RowPanel 列（最良候補）を分子、OSS ハーネスの gemm crate 列を�
 
 ## §6 本番結線（別 PR・ユーザー承認）・引き継ぎ
 
+**#1144 の判定: 本番結線せず（現行 `RowPanel` 既定を維持）。根拠・次候補の切り出し案は §8 参照。**
+
 `docs/cpu-gemm-b-packing-sharing-decision.md` §F・`docs/perf/cpu-gemm-b-packing-sharing.md`
 と同じ採用ゲート方針を踏襲する: 実機 5 回中央値で受け入れ条件 1 を満たす候補が確定した後、
 本番公開入口（`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`）への結線は**別 PR**（ユーザー
@@ -419,6 +423,84 @@ RowPanel 列（最良候補）を分子、OSS ハーネスの gemm crate 列を�
   判断する（`.claude/rules/out-of-scope-tracking.md`）。M4 Max 側の対 gemm crate 比が
   1.0 未満のまま残っている点（RowPanel 自身の性能ギャップ）は、次候補の要否検討時に
   合わせて考慮する参考情報として記録する
+
+## §8 本番結線の判定と次候補の切り出し（イシュー #1144）
+
+### 結論
+
+**本番結線せず**。`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
+（`crates/backend-cpu/src/gemm_blis/mod.rs`）の行パネル分割経路は変更しない。現行本番既定
+`RowPanel` を維持する。
+
+### 根拠
+
+§5 記入表の採用ゲート（§1 受け入れ条件 1・§5 手順 5「N=1024/2048 の両方で gemm crate 以上、
+かつ 4096 で非劣化」）を満たす候補は GB10・M4 Max のいずれにも存在しない。
+
+| 実機 | N | RowPanel（本番既定） | SharedB | SharedBPcOuter | gemm crate | 最良候補 ÷ gemm crate |
+|---|---|---|---|---|---|---|
+| M4 Max | 1024 | 743.8 | 494.8 | 481.7 | 837.0 | 0.889（RowPanel） |
+| M4 Max | 2048 | 851.8 | 653.8 | 651.1 | 978.0 | 0.871（RowPanel） |
+| M4 Max | 4096 | 896.8 | 697.8 | 699.6 | 1070.2 | 0.838（RowPanel） |
+| GB10 | 1024 | 536.2 | 249.3 | 260.9 | 617.8 | 0.868（RowPanel） |
+| GB10 | 2048 | 701.6 | 366.1 | 382.9 | 693.4 | 1.012（RowPanel） |
+| GB10 | 4096 | 1107.4 | 未計測 | 未計測 | 764.1 | 1.449（RowPanel） |
+
+`SharedB`・`SharedBPcOuter` はいずれも本番既定 `RowPanel` を下回り、低下率は機種・形状で
+異なる（RowPanel を分母とした低下率。§5.1「結論」1・§5.2「結論」1）:
+
+- **M4 Max**（1024/2048/4096 とも実測。§5.2）: 1024 で約 33〜35%・2048 で約 23〜24%・
+  4096 で約 22% 低い
+- **GB10**（1024/2048 のみ実測。4096 は A/B ハーネス対象外・未計測。§5.1）: 1024 で約
+  51〜54%・2048 で約 45〜48% 低い
+
+実測済みの形状（M4 Max: 1024/2048/4096、GB10: 1024/2048）のいずれでも `RowPanel` を
+上回る候補は確認できなかった（GB10 4096 は候補側未計測のため判定対象外）。したがって
+§6 の採用ゲート方針に従い、本番公開入口への結線は行わない。
+
+### `GemmDriverVariant` 系コードの扱い: 維持（削除・本番化しない）
+
+`#[cfg(test)]` 限定の `GemmDriverVariant`・`gemm_blis_parallel_variant`・
+`gemm_blis_shared_b_pc_outer_region`・`dispatch_shared_b_pc_outer`・`task_a_capacity`・
+A/B 一括計測ハーネス（`gemm_blis_variant_ab_1024_2048`／`gemm_blis_variant_ab_4096`）は、
+非採用確定後も削除せず現状のまま維持する。理由:
+
+1. 次候補（後述）の A/B 計測に同じハーネスを再利用できる
+2. bit 完全一致回帰テスト資産（`gemm_blis_parallel_variant_all_candidates_match_naive_bit_exact`
+   等）を保持できる
+3. `#[cfg(test)]` 限定のため本番ビルドの到達可能コード・バイナリサイズに影響しない
+4. 既存前例（#750 `dispatch_shared_b`・#753 `cache_params`／`partition`・#811
+   `should_serialize`）と同じ「本番未結線のまま `#[cfg(test)]` で保持」パターンに揃う
+
+### 次候補の追跡 Issue 本文案（起票はユーザー承認待ち）
+
+`.claude/rules/out-of-scope-tracking.md` に従い、以下は起票せず本ドキュメントへ本文案として
+記録するに留める。起票先は親 #1117 配下を想定する。
+
+- **タイトル案**: `perf(backend-cpu): CPU GEMM の次候補（B 側 laneq ベクトル転置化・
+  vld1q_f32_x3 経路 prefetch・KC 再スイープ）を実装・実機 A/B 計測する`
+- **候補 1**: B 側 laneq のベクトル転置化（`crates/backend-cpu/src/gemm_blis/microkernel.rs`
+  の `neon::kernel_b_laneq*` における `vfmaq_laneq_f32` レーン参照オペランドの B パック
+  配置見直し）
+- **候補 2**: `vld1q_f32_x3` 経路の prefetch（**注**: `docs/cpu-gemm-prefetch-decision.md`
+  〈#489・#751〉で aarch64 prefetch は「原則不要」へ格下げ済みのため、再挑戦には同 doc の
+  判断を覆す新たな根拠〈本イシューの M4 Max 1024/2048 実測が示す帯域律速の可能性〉を
+  先に示すことを条件とする）
+- **候補 3**: KC 再スイープ（`mod.rs` の `KC` 定数・`default_blocks()`。`#[cfg(test)]` の
+  `gemm_blis_with_kernel_and_blocks`／`gemm_blis_parallel_variant` の `BlockSizes` 引数で
+  M4 Max 実機スイープ）
+- **受け入れ条件案**: 既存 A/B ハーネス（`gemm_blis_variant_ab_1024_2048`／`_4096`）へ候補を
+  `GemmDriverVariant` 追加で統合・両実機 5 回独立プロセス中央値・bit 完全一致回帰全 pass・
+  採用ゲートは #1041 と同一（1024/2048 で gemm crate 以上かつ 4096 非劣化）・本番結線は
+  別 PR
+- **参考情報**: M4 Max は `RowPanel` 自身が対 gemm crate 比 0.838〜0.889（GB10 は 2048/4096
+  で既に 1.012／1.449 倍）。PyTorch CPU は 3.2〜3.4 TFLOPS で 3〜4 倍差（参考値・判定には
+  使わない）
+
+### #1148（candle 比再計測）への引き継ぎ
+
+本 Issue の判定により本番経路にロジック変更はない。#1148 は結線なしで現行 `RowPanel` の
+まま再計測してよい。
 
 ## 出典
 

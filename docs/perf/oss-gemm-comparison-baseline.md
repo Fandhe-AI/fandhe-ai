@@ -285,7 +285,9 @@ CLOSED だが本番カーネル定数は未変更）を受けた、対 PyTorch C
 gemm crate 未達〈対 gemm crate 比 0.838〜0.889〉のため、候補側の採用余地もなかった）。
 
 - 詳細（診断モデル・候補一覧・GB10/M4 Max 実測値・結論）は `docs/perf/
-  cpu-gemm-candle-cpu-retune.md` §5・§5.1・§5.2・§6 を正とし、本節では状態のみを記録する
+  cpu-gemm-candle-cpu-retune.md` §5・§5.1・§5.2・§6・§8 を正とし、本節では状態のみを記録する
+- **本番結線の要否判断（イシュー #1144）**: 上記の両実機非採用を受け、本番結線せず
+  現行 `RowPanel` 既定を維持すると確定した（次候補はユーザー承認待ち。同 doc §8）
 - GB10 実測の生データ: `docs/perf/oss-comparison/2026-09-03/gb10-cpu-1140/`
 - M4 Max 実測の生データ: `docs/perf/oss-comparison/2026-09-03/cpu-retune-1041/`
   （イシュー #1141。単体テスト・A/B 5 回×2 ハーネス・OSS 比較 5 回・PyTorch CPU 計測を含む）
