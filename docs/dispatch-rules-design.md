@@ -340,10 +340,17 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
   （`docs/cuda-tensor-core-parity-judgment-decision.md`。厳密ゼロ fail 判定
   が成立しない形状は実測 baseline 非後退方式）。tolerance 定数・
   `ParityBaseline` 行の追加・変更はユーザー承認必須（本節では確定しない）。
-  GB10 実機実測は #1158 で完了した（`docs/perf/cuda-parity-baseline.md`
+  GB10 実機実測は #1158 で実施した（`docs/perf/cuda-parity-baseline.md`
   §12。切替前〈WMMA 優先・本番既定〉・切替後〈ノード側限定フリップの
   mma 優先〉双方で非後退を確認。フリップ自体はコミットせず、恒久フリップ
-  判断は #1160 へ引き継ぐ）
+  判断は #1160 へ引き継ぐ）。**ただし PR #1178 レビュー対応（codex-review
+  指摘）で追加した route-aware 受け入れテスト
+  （`run_f16_k4096_stress_non_regression_route_aware`）自体は、選択経路
+  `MmaF16` の baseline ceiling が未承認〈`None`〉のため現 HEAD 上では
+  fail-closed に必ず FAIL する意図的な red のままである（詳細・ceiling
+  提案値は同 §12.4/§12.5）。「実測で非後退を確認した記録」と「その記録を
+  検証する受け入れテストが green である」は現時点で分離しており、後者は
+  ceiling 反映のユーザー承認後まで成立しない**
 - 性能: 切替前後を同一プロトコル・5 回計測中央値で比較し、後退時は結線
   しない（#1156 のユーザー承認条件）。TFLOPS 記録・`wmma_f16_opt` の扱い
   確定は #1160 が担当する
@@ -351,7 +358,9 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
 **実装 Issue 対応表**: 構築（`mma` フィールド追加。fail-soft）は #1152
 （実装済み）、呼び出し分岐切替（形状ゲート込みの優先順位判定。
 `select_f16_matrix_unit_impl`）は #1156（実装済み）、GB10 数値一致
-非後退検証は #1158（完了。`docs/perf/cuda-parity-baseline.md` §12）、
+非後退検証は #1158（実測記録は `docs/perf/cuda-parity-baseline.md` §12。
+route-aware 受け入れテストは `MmaF16` baseline ceiling 未承認のため
+現 HEAD 上では意図的に red。上記「数値一致・性能の引き渡し」節参照）、
 TFLOPS 記録・`wmma_f16_opt` 扱いの確定は #1160 が担当する。
 
 ## 6. スコープ外
