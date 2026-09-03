@@ -274,17 +274,35 @@ CLOSED だが本番カーネル定数は未変更）を受けた、対 PyTorch C
 
 （次回実機計測時に追記。列: 日付・commit・per-size 比率・前回比差分）
 
-#### CPU GEMM マイクロカーネル・packing 再チューニング（イシュー #1041・状態: 実機セッション待ち）
+#### CPU GEMM マイクロカーネル・packing 再チューニング（イシュー #1041・状態: GB10・M4 Max とも実測済み・非採用）
 
 第 0 回実機フル計測（§7.2）で判明した CPU GEMM の対 gemm crate 劣位（N=1024/2048 で
 0.84〜0.91 倍・4096 のみ 1.01 倍）に対する再チューニング枠。診断・候補実装・bit 完全一致
-検証・A/B 一括計測ハーネスは実装済みだが、実機（Apple M4 Max・DGX Spark GB10）5 回中央値
-での受け入れ条件達成判定は本 PR のスコープ外（Linux x86_64 実装セッションのため）。
+検証・A/B 一括計測ハーネスは実装済み。**DGX Spark GB10 実機での 5 回中央値実測はイシュー
+#1140 で完了し、非採用（`SharedB`・`SharedBPcOuter` はいずれも本番既定 `RowPanel` を
+大きく下回る）と結論した。Apple M4 Max 実機での 5 回中央値実測もイシュー #1141 で完了し、
+同じく非採用と結論した**（M4 Max は 1024/2048/4096 のいずれも本番既定 `RowPanel` 自身が
+gemm crate 未達〈対 gemm crate 比 0.838〜0.889〉のため、候補側の採用余地もなかった）。
 
-- 詳細（診断モデル・候補一覧・実機計測手順・記入表）は `docs/perf/
-  cpu-gemm-candle-cpu-retune.md` を正とし、本節では状態のみを記録する
+- 詳細（診断モデル・候補一覧・GB10/M4 Max 実測値・結論）は `docs/perf/
+  cpu-gemm-candle-cpu-retune.md` §5・§5.1・§5.2・§6 を正とし、本節では状態のみを記録する
+- GB10 実測の生データ: `docs/perf/oss-comparison/2026-09-03/gb10-cpu-1140/`
+- M4 Max 実測の生データ: `docs/perf/oss-comparison/2026-09-03/cpu-retune-1041/`
+  （イシュー #1141。単体テスト・A/B 5 回×2 ハーネス・OSS 比較 5 回・PyTorch CPU 計測を含む）
+- 2026-09-03 M4 Max CPU 4 サイズ結果（OSS 比較ハーネス 5 独立プロセス実行の run 間中央値。
+  `self_gemm_blis_parallel` ＝本番 `RowPanel` 相当）:
+
+  | size | self_gemm_blis_parallel (GFLOP/s) | matrixmultiply (GFLOP/s) | gemm crate (GFLOP/s) | 自作 ÷ gemm crate |
+  |---|---|---|---|---|
+  | 512 | 433.3 | 110.0 | 518.8 | 0.835 |
+  | 1024 | 786.3 | 111.7 | 837.0 | 0.939 |
+  | 2048 | 874.2 | 110.9 | 978.0 | 0.894 |
+  | 4096 | 1040.8 | 110.2 | 1070.2 | 0.973 |
+
 - 対象カーネル: `crates/backend-cpu/src/gemm_blis/mod.rs`
   `gemm_blis_shared_b_pc_outer_region`（`GemmDriverVariant::SharedBPcOuter`。`#[cfg(test)]`
   限定・本番未結線）
-- 本番結線は実機実測完了後の別 PR（ユーザー承認）で行う（`docs/cpu-gemm-b-packing-sharing-decision.md`
-  §F と同じ採用ゲート方針）
+- GB10・M4 Max とも非採用のため本番結線は不要（現行 `RowPanel` 既定を維持）。次候補
+  （B 側 laneq のベクトル転置化・`vld1q_f32_x3` 経路の prefetch・KC 再スイープ）の要否は
+  #1144 で最終判断する（`docs/cpu-gemm-b-packing-sharing-decision.md` §F と同じ採用ゲート
+  方針）

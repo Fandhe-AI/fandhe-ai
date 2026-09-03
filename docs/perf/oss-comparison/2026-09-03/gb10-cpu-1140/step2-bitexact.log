@@ -1,0 +1,252 @@
+   Compiling fandhe-ai-tensor-core v0.6.0 (~/work/rust-ai-library-run/crates/tensor-core)
+   Compiling fandhe-ai-backend-cpu v0.6.0 (~/work/rust-ai-library-run/crates/backend-cpu)
+   Compiling fandhe-ai-backend-cuda v0.6.0 (~/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.6.0 (~/work/rust-ai-library-run/crates/autodiff)
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:748:48
+    |
+748 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:761:8
+    |
+750 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+761 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling bench-harness v0.6.0 (~/work/rust-ai-library-run/crates/bench-harness)
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.18s
+     Running unittests src/lib.rs (~/work/target-fandhe-ai/debug/deps/fandhe_ai_backend_cpu-de847dda74e201b9)
+
+running 99 tests
+test gemm_blis::cache_params::tests::assemble_cache_value_le_rejects_other_lengths ... ok
+test gemm_blis::cache_params::tests::assemble_cache_value_le_accepts_8_byte_ctltype_quad ... ok
+test gemm_blis::cache_params::tests::compute_blocks_apple_m4_max_like_values_stays_within_clamp_bounds ... ok
+test gemm_blis::cache_params::tests::compute_blocks_nc_grows_monotonically_with_l2_capacity ... ok
+test gemm_blis::cache_params::tests::assemble_cache_value_le_accepts_4_byte_ctltype_int ... ok
+test gemm_blis::cache_params::tests::compute_blocks_rejects_implausibly_small_cache_sizes ... ok
+test gemm_blis::cache_params::tests::compute_blocks_mc_never_exceeds_non_degradation_cap_for_non_divisor_mr ... ok
+test gemm_blis::cache_params::tests::compute_blocks_clamped_mc_nc_stay_multiples_for_non_divisor_mr_nr ... ok
+test gemm_blis::cache_params::tests::compute_blocks_m4_max_like_values_kc_mc_cap_to_current_defaults ... ok
+test gemm_blis::cache_params::tests::compute_blocks_rejects_implausibly_large_cache_sizes ... ok
+test gemm_blis::cache_params::tests::compute_blocks_rejects_mr_exceeding_mc_max_without_overflow ... ok
+test gemm_blis::cache_params::tests::compute_blocks_rejects_mr_nr_overflowing_intermediate_arithmetic ... ok
+test gemm_blis::cache_params::tests::compute_blocks_rejects_zero_cache_sizes ... ok
+test gemm_blis::cache_params::tests::compute_blocks_small_l1d_clamps_kc_to_minimum ... ok
+test gemm_blis::cache_params::tests::compute_blocks_rejects_zero_mr_or_nr ... ok
+test gemm_blis::cache_params::tests::detected_blocks_returns_valid_block_sizes_on_any_platform ... ok
+test gemm_blis::microkernel::neon::tests::kernel_b_laneq_rejects_ldc_smaller_than_nr ... ok
+test gemm_blis::microkernel::neon::tests::kernel_b_laneq_matches_hand_computed_subset ... ok
+test gemm_blis::microkernel::neon::tests::compute_b_laneq_nan_input_does_not_panic ... ok
+test gemm_blis::microkernel::neon::tests::kernel_matches_hand_computed_subset ... ok
+test gemm_blis::microkernel::neon::tests::kernel_rejects_ldc_smaller_than_nr ... ok
+test gemm_blis::microkernel::neon::tests::kernel_b_laneq_with_larger_ldc_matches_tight_packing_and_preserves_gap ... ok
+test gemm_blis::microkernel::scalar::tests::kernel_matches_hand_computed_subset ... ok
+test gemm_blis::microkernel::scalar::tests::kernel_rejects_c_buffer_too_small_for_ldc ... ok
+test gemm_blis::microkernel::scalar::tests::kernel_rejects_ldc_smaller_than_nr ... ok
+test gemm_blis::microkernel::scalar::tests::kernel_with_larger_ldc_matches_tight_packing_and_preserves_gap ... ok
+test gemm_blis::microkernel::neon::tests::kernel_with_larger_ldc_matches_tight_packing_and_preserves_gap ... ok
+test gemm_blis::microkernel::tests::check_c_tile_bounds_rejects_mr_zero_with_explicit_message ... ok
+test gemm_blis::microkernel::neon::tests::compute_b_laneq_matches_compute_bit_exact ... ok
+test gemm_blis::microkernel::tests::check_c_tile_bounds_rejects_nr_zero_with_explicit_message ... ok
+test gemm_blis::microkernel::tests::check_c_tile_bounds_rejects_c_buffer_too_small ... ok
+test gemm_blis::microkernel::tests::check_panel_lengths_rejects_ap_and_bp_mismatch ... ok
+test gemm_blis::microkernel::tests::panel_len_matches_basic_cases ... ok
+test gemm_blis::microkernel::tests::panel_len_matches_rejects_overflowing_factors ... ok
+test gemm_blis::microkernel::scalar::tests::kernel_rejects_ap_length_mismatch - should panic ... ok
+test gemm_blis::microkernel::tests::select_isa_falls_back_to_scalar ... ok
+test gemm_blis::microkernel::tests::isa_detect_returns_consistent_result ... ok
+test gemm_blis::microkernel::tests::run_with_ldc_default_impl_delegates_to_run_when_ldc_equals_nr ... ok
+test gemm_blis::microkernel::tests::select_isa_prefers_avx2_over_scalar ... ok
+test gemm_blis::microkernel::tests::select_isa_prefers_avx512_over_avx2 ... ok
+test gemm_blis::microkernel::tests::run_with_ldc_default_impl_gather_scatter_fallback_matches_dense_result ... ok
+test gemm_blis::pack::tests::pack_a_edge_tile_zero_pads_unused_rows ... ok
+test gemm_blis::pack::tests::pack_a_full_tile_matches_source ... ok
+test gemm_blis::microkernel::tests::run_with_ldc_default_impl_slices_tile_exactly_for_dense_packing_with_excess_len ... ok
+test gemm_blis::pack::tests::pack_b_edge_tile_zero_pads_unused_cols ... ok
+test gemm_blis::pack::tests::pack_b_full_tile_matches_source ... ok
+test gemm_blis::partition::tests::bands_covers_total_without_overlap_with_remainder_tail ... ok
+test gemm_blis::microkernel::tests::run_with_ldc_returns_err_instead_of_panicking_on_ldc_too_small ... ok
+test gemm_blis::partition::tests::bands_exact_multiple_has_no_short_tail ... ok
+test gemm_blis::partition::tests::split_evenly_covers_total_contiguously_with_balanced_lengths ... ok
+test gemm_blis::microkernel::tests::select_isa_avx512_alone_selects_avx512 ... ok
+test gemm_blis::tests::default_blocks_never_returns_zero_sized_block ... ok
+test gemm_blis::partition::tests::bands_saturates_end_when_size_is_near_usize_max ... ok
+test gemm_blis::partition::tests::row_ranges_for_workers_balances_tile_count_within_one ... ok
+test gemm_blis::tests::gemm_blis_bias_act_parallel_handles_zero_n_as_noop ... ok
+test gemm_blis::partition::tests::row_ranges_for_workers_covers_m_contiguously_and_disjointly ... ok
+test gemm_blis::partition::tests::row_ranges_for_workers_returns_empty_for_zero_m ... ok
+test gemm_blis::partition::tests::split_evenly_returns_empty_for_zero_total_or_zero_workers ... ok
+test gemm_blis::partition::tests::bands_returns_empty_for_zero_total_or_zero_size ... ok
+test gemm_blis::partition::tests::split_evenly_workers_exceeding_total_yields_at_most_total_ranges ... ok
+test gemm_blis::tests::gemm_blis_bias_act_parallel_validates_before_zero_n_early_return ... ok
+test gemm_blis::tests::gemm_blis_handles_zero_dims ... ok
+test gemm_blis::tests::gemm_blis_matches_hand_computed_2x2 ... ok
+test gemm_blis::partition::tests::tile_grid_is_empty_for_zero_m_or_n ... ok
+test gemm_blis::tests::gemm_blis_parallel_handles_zero_n_as_noop ... ok
+test gemm_blis::tests::gemm_blis_rejects_a_len_mismatch ... ok
+test gemm_blis::partition::tests::tile_grid_covers_every_point_exactly_once ... ok
+test gemm_blis::tests::gemm_blis_bias_act_parallel_row_vector_matches_unfused ... ok
+test gemm_blis::tests::gemm_blis_parallel_threshold_boundary_below_matches_naive ... ok
+test gemm_blis::tests::gemm_blis_non_default_block_sizes_match_naive_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_variant_ab_1024_2048 ... ignored, 実機（M4 Max / GB10）5 回独立実行の A/B 計測専用。ローカル smoke 目的のみ （#1041。cargo test -p fandhe-ai-backend-cpu --release -- --ignored gemm_blis_variant_ab_1024_2048 --nocapture）
+test gemm_blis::tests::gemm_blis_with_kernel_and_blocks_rejects_zero_block_size ... ok
+test gemm_blis::tests::mc_kc_nc_blocking_sweep_median_throughput ... ignored, aarch64 実機（Apple M4 Max）での MC/KC/NC スイープ計測専用（--release 実行推奨。#564）
+test gemm_blis::tests::gemm_blis_shared_b_pc_outer_matches_naive_bit_exact_when_tasks_fewer_than_threads ... ok
+test gemm_blis::tests::gemm_blis_row_vector_matches_naive ... ok
+test gemm_blis::tests::neon_8x12_vs_12x8_ab_median_throughput ... ignored, aarch64 実機での A/B 性能計測専用（--release 実行推奨）
+test gemm_blis::tests::neon_8x12_vs_b_laneq_ab_median_throughput ... ignored, aarch64 実機での A/B 性能計測専用（--release 実行推奨）
+test gemm_blis::tests::runtime_cache_detect_and_2d_partition_ab_median_throughput ... ignored, 実機（対象は Apple M4 Max。#753）での A/B 計測専用。--release 推奨
+test gemm_blis::tests::gemm_blis_parallel_matches_naive_bit_exact_when_tasks_fewer_than_threads ... ok
+test gemm_blis::tests::panel_capacity_upper_bounds_all_block_iterations ... ok
+test gemm_blis::tests::should_serialize_overflow_saturates_to_parallel ... ok
+test gemm_blis::tests::should_serialize_matches_measured_table ... ok
+test gemm_blis::tests::gemm_blis_parallel_tall_skinny_matches_naive ... ok
+test gemm_blis::tests::gemm_blis_bias_act_parallel_threshold_boundary_below_matches_unfused ... ok
+test gemm_blis::tests::gemm_blis_parallel_threshold_boundary_above_matches_naive ... ok
+test gemm_blis::tests::gemm_blis_detected_isa_matches_scalar_forced_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_parallel_row_vector_matches_naive ... ok
+test gemm_blis::tests::gemm_blis_parallel_compute_blocks_m4_max_like_values_match_naive_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_scalar_kernel_all_full_tiles_matches_naive_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_parallel_detected_blocks_match_naive_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_parallel_single_thread_pool_matches_naive_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_parallel_non_default_block_sizes_match_naive_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_shared_b_pc_outer_multi_sync_point_matches_serial_bit_exact ... ok
+test gemm_blis::tests::neon_8x12_and_12x8_match_scalar_forced_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_shared_b_region_multi_sync_point_matches_serial_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_scalar_kernel_forced_matches_naive_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_parallel_variant_all_candidates_match_naive_bit_exact ... ok
+test gemm_blis::tests::gemm_blis_parallel_2d_matches_naive_bit_exact_across_thread_pools ... ok
+test gemm_blis::tests::gemm_blis_and_parallel_large_n_match_naive_bit_exact ... ok
+
+test result: ok. 94 passed; 0 failed; 5 ignored; 0 measured; 106 filtered out; finished in 6.49s
+
