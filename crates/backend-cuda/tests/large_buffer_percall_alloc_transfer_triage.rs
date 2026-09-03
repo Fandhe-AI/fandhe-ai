@@ -312,12 +312,27 @@ fn phase_p0_transfer_only(
             .stream()
             .clone_dtoh(&c_dev)
             .expect("clone_dtoh must succeed on CUDA-equipped test runner");
+        // P4／P5 と同じ理由（Cursor Bugbot 指摘 discussion_r3921118928）で、
+        // `clone_dtoh` 完了前に `_c_host` が閉包末尾で暗黙 drop されるのを
+        // 防ぐため明示的に synchronize する。
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after D2H must succeed before host buffer is freed");
         drop(a_dev);
         drop(b_dev);
     })
 }
 
 /// P1: デバイス確保＋解放のみ（コピー・memset なし）。
+///
+/// codex-review 指摘（PR #1169 discussion_r3921097911）: `cuMemAllocAsync`
+/// はストリームへ enqueue するだけで返る非同期 API のため、`synchronize`
+/// なしで計測すると「ホスト側 enqueue 時間」しか測れず、H-B（デバイス側
+/// 確保が原因）を棄却する根拠にならない。確保完了・解放完了それぞれを
+/// 明示的に待ってから計測を終える（`fresh_overhead_diag_tests.rs` の
+/// D2H フェーズと同じ「非同期 API の後には synchronize で完了を確定
+/// させる」方針）。
 fn phase_p1_alloc_only(
     device: &CudaDevice,
     config: &MeasurementConfig,
@@ -334,11 +349,24 @@ fn phase_p1_alloc_only(
                 .alloc::<f16>(numel)
                 .expect("alloc must succeed on CUDA-equipped test runner")
         };
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after alloc must succeed to measure allocation completion");
         drop(buf);
+        // `cuMemFreeAsync` も非同期 enqueue のため、解放完了まで待つ
+        // （alloc 側と対称に扱い、本フェーズの意味を「確保完了＋解放完了
+        // の合算」に統一する）。
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after free must succeed to measure free completion");
     })
 }
 
-/// P2: `alloc_zeros` のみ（memset を含む）。
+/// P2: `alloc_zeros` のみ（memset を含む）。P1 と同じ理由（上記コメント）
+/// で `alloc_zeros`（`cuMemAllocAsync` + memset の非同期 enqueue）・解放
+/// それぞれの完了を待ってから計測を終える。
 fn phase_p2_alloc_zeros(
     device: &CudaDevice,
     config: &MeasurementConfig,
@@ -349,7 +377,15 @@ fn phase_p2_alloc_zeros(
             .stream()
             .alloc_zeros::<f16>(numel)
             .expect("alloc_zeros must succeed on CUDA-equipped test runner");
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after alloc_zeros must succeed to measure completion");
         drop(buf);
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after free must succeed to measure free completion");
     })
 }
 
@@ -375,6 +411,15 @@ fn phase_p3_h2d_only(
 
 /// P4: D2H のみ・宛先が毎回新規 `Vec`（未タッチページ仮説の再現確認）。
 /// `device_src` は常駐バッファとして計測外で確保する。
+///
+/// Cursor Bugbot 指摘（PR #1169 discussion_r3921118928）: `clone_dtoh` は
+/// `cuMemcpyDtoHAsync` を発行するだけで返り、plain `Vec<T>` は
+/// `HostSlice::stream_synced_mut_slice` が `SyncOnDrop::Sync(None)` を
+/// 返すため drop 時の暗黙 sync も無い（`cudarc-0.19.8` 実装。
+/// `fresh_overhead_diag_tests.rs` の Fresh 分岐と同じ根拠）。synchronize
+/// なしで直後に drop すると、DMA 転送が進行中のままホスト宛先が解放
+/// される競合になりうる（GB10 実機で顕在化しうる）。転送完了を待って
+/// から drop する。
 fn phase_p4_d2h_fresh_vec(
     device: &CudaDevice,
     config: &MeasurementConfig,
@@ -385,6 +430,10 @@ fn phase_p4_d2h_fresh_vec(
             .stream()
             .clone_dtoh(device_src)
             .expect("clone_dtoh must succeed on CUDA-equipped test runner");
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after D2H must succeed before host buffer is freed");
         drop(host);
     })
 }
@@ -392,6 +441,11 @@ fn phase_p4_d2h_fresh_vec(
 /// P5: D2H のみ・宛先が事前タッチ済みの再利用 `Vec`（P4 の対照。
 /// `docs/perf/cuda-fresh-gemm-n2048-overhead-diagnosis.md` §6.4 の V2 と
 /// 同型）。`cudarc` の同期 D2H 相当を `memcpy_dtoh` で行う。
+///
+/// P4 と同じ理由（上記コメント）で `memcpy_dtoh` 後に synchronize する。
+/// `host_buf` は次イテレーションでも再利用されるため、転送完了前に
+/// 次回の `memcpy_dtoh` が同じバッファへ再突入するデータ競合を防ぐ
+/// 意味でも同期が必須。
 fn phase_p5_d2h_reused_vec(
     device: &CudaDevice,
     config: &MeasurementConfig,
@@ -407,6 +461,10 @@ fn phase_p5_d2h_reused_vec(
             .stream()
             .memcpy_dtoh(device_src, &mut host_buf)
             .expect("memcpy_dtoh must succeed on CUDA-equipped test runner");
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after D2H must succeed before host buffer is reused");
     })
 }
 
@@ -424,8 +482,18 @@ fn phase_p6_host_vec_touch_only(
 
 /// 固定サイズ比較（合計転送サイズの単体閾値 vs 合計閾値の切り分け。
 /// 受け入れ条件 3「発生条件」の一部）。`(16 MiB ×3 = 48 MiB 合計)` vs
-/// `(48 MiB ×1)` vs `(24 MiB ×2)` を P0 相当（htod×2・alloc_zeros・
-/// synchronize・dtoh）で比較する。
+/// `(48 MiB ×1)` vs `(24 MiB ×2)` を H2D（htod×N・synchronize）と D2H
+/// （dtoh×N・synchronize）の両方向で比較する。
+///
+/// codex-review 指摘（PR #1169 discussion_r3921097920）: 以前の実装は
+/// H2D（`clone_htod`）の繰り返しのみを計測しており、D2H（P0／P4 相当。
+/// `alloc_zeros`／D2H）を含まないため、`docs/perf/
+/// cuda-large-buffer-percall-alloc-transfer-threshold.md` の「閾値は
+/// 単体バッファサイズに働き合計転送サイズには働かない」という結論
+/// （§4.5・§6 の 2）の根拠に D2H 側が欠けていた。P4（`phase_p4_d2h_
+/// fresh_vec`）と同じ「宛先が毎回新規 `Vec`」の未タッチページ方式で、
+/// 新規 D2H 宛先を用いた対照実験を追加し、単体サイズのみ変えて D2H
+/// 総量を固定する。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 想定）必須。イシュー #1146 の診断専用テストで受け入れ判定には使わない"]
 fn large_buffer_percall_fixed_total_size_comparison() {
@@ -440,16 +508,17 @@ fn large_buffer_percall_fixed_total_size_comparison() {
     let config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
 
     println!(
-        "fixed_total_comparison,label,buffer_count,per_buffer_mib,total_mib,min_ms,median_ms,max_ms,slow_count"
+        "fixed_total_comparison,phase,label,buffer_count,per_buffer_mib,total_mib,min_ms,median_ms,max_ms,slow_count"
     );
 
-    // 各ケースは複数バッファの H2D（`clone_htod`）を連続実行した合算を
-    // 計測する。3 ケースとも合計転送量は 48 MiB で固定し、バッファの
-    // 本数・単体サイズだけを変える（「単体バッファサイズが閾値を支配
-    // するのか、合計転送量が支配するのか」を切り分ける。Review 指摘:
-    // 以前の実装は `c_mib == 0` を `a_numel.max(b_numel)` へフォール
-    // バックしていたため、`24x2` ケースの実効合計が 72 MiB・`48x1` が
-    // 96 MiB になり、ラベルと実合計が食い違っていた）。
+    // 各ケースは複数バッファの H2D（`clone_htod`）または D2H
+    // （`clone_dtoh`）を連続実行した合算を計測する。3 ケースとも合計
+    // 転送量は 48 MiB で固定し、バッファの本数・単体サイズだけを変える
+    // （「単体バッファサイズが閾値を支配するのか、合計転送量が支配する
+    // のか」を切り分ける。Review 指摘: 以前の実装は `c_mib == 0` を
+    // `a_numel.max(b_numel)` へフォールバックしていたため、`24x2` ケース
+    // の実効合計が 72 MiB・`48x1` が 96 MiB になり、ラベルと実合計が
+    // 食い違っていた）。
     let cases: [(&str, &[u64]); 3] = [
         ("16x3_total48", &[16, 16, 16]),
         ("24x2_total48", &[24, 24]),
@@ -473,7 +542,8 @@ fn large_buffer_percall_fixed_total_size_comparison() {
             })
             .collect();
 
-        let measurement = bench_harness::run(&config, || {
+        // --- H2D 側（既存） ---
+        let measurement_h2d = bench_harness::run(&config, || {
             let mut dev_bufs = Vec::with_capacity(buffers.len());
             for host_buf in &buffers {
                 dev_bufs.push(
@@ -489,18 +559,67 @@ fn large_buffer_percall_fixed_total_size_comparison() {
                 .expect("synchronize must succeed on CUDA-equipped test runner");
             drop(dev_bufs);
         })
-        .expect("fixed-total-size comparison measurement must satisfy TASK-8.1 protocol");
+        .expect("fixed-total-size H2D comparison measurement must satisfy TASK-8.1 protocol");
 
-        let s = summarize(&measurement);
+        let s_h2d = summarize(&measurement_h2d);
         println!(
-            "fixed_total_comparison,{label},{},{},{total_mib},{:.4},{:.4},{:.4},{}",
+            "fixed_total_comparison,h2d,{label},{},{},{total_mib},{:.4},{:.4},{:.4},{}",
             buffer_sizes_mib.len(),
             buffer_sizes_mib[0],
-            s.min_secs * 1000.0,
-            s.median_secs * 1000.0,
-            s.max_secs * 1000.0,
-            s.slow_count,
+            s_h2d.min_secs * 1000.0,
+            s_h2d.median_secs * 1000.0,
+            s_h2d.max_secs * 1000.0,
+            s_h2d.slow_count,
         );
+
+        // --- D2H 側（新規。codex-review 指摘対応） ---
+        // デバイス側ソースは計測外で確保する（H2D 転送時間を D2H 計測へ
+        // 混入させないため。P4 の `device_src` 常駐方式と同じ）。
+        let device_srcs: Vec<cudarc::driver::CudaSlice<f16>> = buffers
+            .iter()
+            .map(|host_buf| {
+                device.stream().clone_htod(host_buf).expect(
+                    "clone_htod (device_srcs setup) must succeed on CUDA-equipped test runner",
+                )
+            })
+            .collect();
+        device.stream().synchronize().expect(
+            "synchronize after device_srcs setup must succeed on CUDA-equipped test runner",
+        );
+
+        let measurement_d2h = bench_harness::run(&config, || {
+            let mut host_bufs = Vec::with_capacity(device_srcs.len());
+            for dev_buf in &device_srcs {
+                host_bufs.push(
+                    device
+                        .stream()
+                        .clone_dtoh(dev_buf)
+                        .expect("clone_dtoh must succeed on CUDA-equipped test runner"),
+                );
+            }
+            // P4／P5 と同じ理由（Cursor Bugbot 指摘 discussion_r3921118928）
+            // で、`clone_dtoh` 完了前に `host_bufs` が drop されるのを防ぐ
+            // ため明示的に synchronize する。
+            device
+                .stream()
+                .synchronize()
+                .expect("synchronize after D2H must succeed before host buffers are freed");
+            drop(host_bufs);
+        })
+        .expect("fixed-total-size D2H comparison measurement must satisfy TASK-8.1 protocol");
+
+        let s_d2h = summarize(&measurement_d2h);
+        println!(
+            "fixed_total_comparison,d2h,{label},{},{},{total_mib},{:.4},{:.4},{:.4},{}",
+            buffer_sizes_mib.len(),
+            buffer_sizes_mib[0],
+            s_d2h.min_secs * 1000.0,
+            s_d2h.median_secs * 1000.0,
+            s_d2h.max_secs * 1000.0,
+            s_d2h.slow_count,
+        );
+
+        drop(device_srcs);
     }
 }
 
