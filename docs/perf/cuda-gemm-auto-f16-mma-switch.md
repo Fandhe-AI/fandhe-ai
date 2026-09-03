@@ -4,12 +4,34 @@
 5 回計測中央値の比較を取り、後退確認時は結線しない」に対応する記録。設計の正は
 `docs/dispatch-rules-design.md` §5.6。
 
-## 状態: 実測完了・本番結線済み（イシュー #1160・GB10 実機実測 2026-09-04）
+## 状態: 実測完了・本番結線は保留（イシュー #1160・GB10 実機実測 2026-09-04。
+PR #1179 codex-review 指摘〈P1〉により結線を差し戻し。§0 参照）
 
 `crates/backend-cuda/src/gemm_auto.rs::MMA_PRIORITY_PRODUCTION_ENABLED` を
 `true`（mma 優先。§5.6 の設計目標どおり `CudaMmaGemm → CudaWmmaGemm → Tiled`）
-へ本番結線した。下記実測（転送込み auto 経路・独立 5 回起動・run-median）が
-512/1024/2048/4096 いずれも §5「非後退の判定基準」を満たしたことによる。
+へ本番結線し、下記実測（転送込み auto 経路・独立 5 回起動・run-median）で
+512/1024/2048/4096 いずれも §5「非後退の判定基準」を満たすことを確認した。
+性能 A/B の実測結果自体はここに記録したまま維持するが、**本番定数は
+現在 `false` へ差し戻し済み**（§0）。
+
+### §0 追記: PR #1179 codex-review 指摘による差し戻し（2026-09-04）
+
+`true` への本番結線は、K=4096 ストレス形状の非後退ゲート
+（`crates/backend-cuda/tests/gemm_auto.rs::
+run_f16_k4096_stress_non_regression_route_aware`）が参照する
+`ParityPath::MmaF16` baseline 行の `baseline_max_abs_diff_ceiling`／
+`baseline_max_rel_err_ceiling` が未承認の `None` のまま行われており、
+このゲートは fail-closed 契約上必ず FAIL する状態だった（下記「実測完了」
+節の記述どおり、コミット当時から既知の red として記録されていた）。
+codex-review はこれを「非後退ゲートが成立する前に本番経路だけを有効化
+している」として P1 指摘とした。`.claude/rules/coding-rust.md`
+「テスト・ベンチ」節が定める「baseline の追加・更新は実機実測値のみ・
+人間承認必須」に照らし、§12.5（`docs/perf/cuda-parity-baseline.md`）の
+提案 ceiling がユーザー承認・`BASELINES` へ反映されるまで、
+`MMA_PRIORITY_PRODUCTION_ENABLED` を `false`（#1156 以前と同じ wmma 優先）
+へ差し戻した。判定ロジック（`select_f16_matrix_unit_impl`）自体は無変更
+であり、承認・反映後はこの 1 行を `true` に戻すだけで有効化できる。
+下記の実測記録（性能 A/B・parity 非後退の確認）自体は有効なまま維持する。
 
 **数値一致（parity）の実測記録は #1158 で GB10 実機確認済み**
 （`docs/perf/cuda-parity-baseline.md` §12。切替前〈本番既定・WMMA 優先〉・

@@ -1829,3 +1829,14 @@ diagnostics`・`#[ignore]`）は `MmaF16` 行の両 ceiling が本記録時点�
 未実施（#1160 のスコープ外。本 PR でも実施しない）。実測記録・性能 A/B・
 `wmma_f16_opt` の扱い確定は `docs/perf/cuda-wmma-f16-perf-triage.md` §8 を
 正とし本ファイルでは二重管理しない。
+
+**追記（PR #1179 codex-review 指摘・2026-09-04）**: 上記の本番結線
+（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は、対応する route-aware
+非後退ゲートが baseline ceiling 未承認のため fail-closed に必ず FAIL
+する状態のまま行われていたとして codex-review の P1 指摘を受けた。
+`.claude/rules/coding-rust.md`「テスト・ベンチ」節（baseline の追加・
+更新は実機実測値のみ・人間承認必須）に照らし、§12.5 提案 ceiling の
+ユーザー承認・`BASELINES` 反映が完了するまで `MMA_PRIORITY_
+PRODUCTION_ENABLED` を `false`（#1156 以前と同じ wmma 優先）へ差し
+戻した（`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0）。上記の
+実測記録（性能 A/B・parity 非後退）自体は有効なまま維持する。

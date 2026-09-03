@@ -9,8 +9,13 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 
 ## 状態: 実機実測完了（2026-09-03・DGX Spark GB10・sm_121・GPU アイドル。
 是正後テスト〈§4.3〉も実機実測済み。イシュー #1160（2026-09-04）で
-`tensor_core_tflops_record` の f16 assert が pass に転換・本番結線・
-`wmma_f16_opt` の扱い確定。§8 参照）
+`tensor_core_tflops_record` の f16 assert が pass に転換・`wmma_f16_opt`
+の扱い確定。§8 参照。**本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）
+は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16` baseline
+ceiling 未承認〉により `false` へ差し戻し済み**。詳細は
+`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0・
+`docs/perf/cuda-parity-baseline.md` §12.6 追記を参照。以下 §8 の記述は
+差し戻し前の実測記録として維持する）
 
 ## 1. 症状（発端）
 
