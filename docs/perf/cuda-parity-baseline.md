@@ -1671,3 +1671,140 @@ REQ-2「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」
 `tests/common/parity_baseline.rs::ParityBaseline`／
 `assert_no_parity_regression`・`tests/parity_nonregression.rs` の
 fixture 検査）に倣った。
+
+## 12. イシュー #1158: f16 MatrixUnit 経路 mma 優先化の parity 非後退確認（GB10・2026-09-04）
+
+`crates/backend-cuda/src/gemm_auto.rs::select_f16_matrix_unit_impl`（#1156）
+が実装した `mma → wmma → tiled` 優先順位判定について、GB10 実機で
+「切替前（本番既定＝WMMA 優先）」「切替後（`MMA_PRIORITY_PRODUCTION_ENABLED`
+をノード側限定で一時的に `true` へ書き換えた mma 優先）」双方の parity 非後退
+を確認した記録。#1160（性能 A/B・恒久フリップ）の前提となる数値一致確認。
+
+### 12.1 実測環境
+
+DGX Spark GB10（sm_121・CUDA 13.0）。release ビルド・`--test-threads=1`。
+実行時 GPU utilization 0%・常駐サービスの使用メモリは計測開始前後で
+不変（`docs/real-hardware-verification-env.md` §6 の排他性確認手順）。
+
+### 12.2 方法
+
+本イシューの「切替後の数値一致」を 2 層で定義する:
+
+1. **一次証跡（コミット済みコード・フリップ不要）**: `CudaGemmAuto::
+   run_f16` が `F16MatrixUnitImpl::Mma` を選んだときに呼ぶのは
+   `CudaMmaGemm::run_f16(a, b, m, n, k)` そのもの（同一引数）。よって
+   `CudaMmaGemm::run_f16` を直接検査する既存 parity テスト群
+   （`cpu_cuda_mma_parity.rs`）が切替後経路の parity 証跡になる。WMMA 側も
+   同様に `cpu_cuda_wmma_parity.rs`・`gemm_wmma_f16_opt.rs` が証跡になる。
+2. **確認証跡（ノード側コピー限定フリップ・コミットしない）**: `crates/
+   backend-cuda/src/gemm_auto.rs` の `MMA_PRIORITY_PRODUCTION_ENABLED` を
+   ノード側の rsync 済みコピーでのみ `true` へ `sed` 書き換えし
+   （Mac 側 worktree・コミットは変更しない）、`CudaGemmAuto::run_f16`
+   経由（auto 経路）で mma 優先の parity を実測する。lib テストハーネスは
+   `const _: () = assert!(!MMA_PRIORITY_PRODUCTION_ENABLED)` を含むため
+   コンパイル不能になり、`--test gemm_auto` のみを個別指定して実行した。
+
+各実行は 5 回（直列・`--test-threads=1`）行い、決定的シード PRNG
+（`Xorshift64Star`）による parity は 5 回とも完全一致することを確認した
+（「5 回計測中央値」は性能プロトコル用であり、parity では決定的な
+「5 回同値確認」として適用する）。
+
+新規追加したテスト（`crates/backend-cuda/tests/gemm_auto.rs`）:
+
+- `run_f16_matches_cpu_reference_across_aligned_shapes`（`#[ignore]`）:
+  `cpu_cuda_mma_parity.rs::mma_f16_matches_reference_across_shapes` と
+  完全に同一の 12 整列形状・シード（`3000 + idx`）・入力生成手順を
+  `CudaGemmAuto::run_f16` 経由で実行し `assert_parity`（厳密ゼロ fail）
+  で判定する。フリップ前後どちらの経路でも green のまま維持される設計。
+- `run_f16_k4096_stress_non_regression_route_aware`（`#[ignore]`・
+  `internal-diagnostics` feature 限定）: `auto.f16_matrix_unit_impl(256,
+  256, 4096)` の戻り値で参照する baseline 行・入力シードを切り替える
+  「経路自覚型」の非後退テスト（`Mma` → `ParityPath::MmaF16` 行・
+  seed=9999、`Wmma` → `ParityPath::WmmaF16` 行・seed=8888、`Tiled` →
+  対応 baseline 行なしとして fail-closed に panic）。`common::
+  parity_baseline::assert_no_parity_regression` で判定する。新規
+  baseline 行・tolerance 変更・`BASELINES` 編集は伴わない。
+
+### 12.3 実測表
+
+**切替前（本番既定・WMMA 優先。フリップなし。5 回実行すべて完全一致）**
+
+| 対象 | 形状 | seed | fail_count/total | mean_abs_diff | max_abs_diff | max_rel_err | 判定方式 |
+|---|---|---|---|---|---|---|---|
+| `mma_f16_matches_reference_across_shapes`（12 形状） | 各種（整列形状） | `3000+idx` | 0/各 total | — | — | — | 厳密ゼロ fail（`assert_parity`） |
+| `mma_f16_cross_check_against_wmma_f16` | 48×64×64 | 5252 | 0/3072 | — | — | — | 厳密ゼロ fail |
+| `mma_f16_k4096_stress`（直接経路・本体） | 256×256×4096 | 9999 | 101/65536 | 7.646e-5 | 6.250e-2 | 5.849e-1 | 既知恒常 FAIL（`assert_parity`。変更対象外） |
+| `mma_f16_k4096_stress_non_regression`（直接経路・併設） | 256×256×4096 | 9999 | 101/65536 | 7.646e-5 | — | — | 非後退（`MmaF16` 行と一致・pass） |
+| `wmma_f16_k4096_stress`（直接経路・本体） | 256×256×4096 | 8888 | 99/65536 | 7.562e-5 | 6.250e-2 | 3.328e-2 | 既知恒常 FAIL（変更対象外） |
+| `wmma_f16_opt_k4096_stress`（直接経路・本体） | 256×256×4096 | 8889 | 81/65536 | 7.627e-5 | 3.125e-2 | 2.302e-1 | 既知恒常 FAIL（変更対象外） |
+| `specialized_mma_f16_matches_default_and_reference_across_shapes`（256×512×1024 ケース） | 256×512×1024 | 4003 | 30/131072 | 1.011e-5 | 1.562e-2 | 3.341e-2 | 既存未解消 red（`docs/backend-cuda-real-device-testing.md` §5.3 項目 4 に記載済み・本イシューのスコープ外） |
+| `parity_baselines_do_not_regress`（fixture 全体） | — | — | — | — | — | — | pass |
+| `run_f16_matches_cpu_reference_across_aligned_shapes`（新規・auto 経路） | 12 整列形状 | `3000+idx` | 0/各 total | — | — | — | 厳密ゼロ fail・pass |
+| `run_f16_k4096_stress_non_regression_route_aware`（新規・auto 経路） | 256×256×4096 | 8888（選択経路=Wmma） | ≤99/65536（`WmmaF16` 行と同値） | — | — | — | 非後退・pass |
+
+**切替後（ノード側限定フリップ・`MMA_PRIORITY_PRODUCTION_ENABLED = true`。5 回実行すべて完全一致）**
+
+| 対象 | 形状 | seed | 結果 |
+|---|---|---|---|
+| `run_f16_matches_cpu_reference` | 16×16×16 | — | pass（整列形状 → mma 選択） |
+| `mma_field_is_constructed_by_compute_capability_gate` | — | — | pass |
+| `run_f16_matches_cpu_reference_across_aligned_shapes`（新規） | 12 整列形状 | `3000+idx` | pass（フリップ前と同一結果） |
+| `run_f16_k4096_stress_non_regression_route_aware`（新規） | 256×256×4096 | 9999（選択経路=Mma） | pass（`MmaF16` 行・fail_count=101/65536・mean_abs_diff=7.646e-5 と一致——直接経路 `mma_f16_k4096_stress` と完全一致する値。**注**: 本ラウンド計測時点のテストコードに基づく結果であり、PR #1178 レビュー対応（`crates/backend-cuda/tests/gemm_auto.rs:515-533`）で `MmaF16` 行の両 ceiling が `None` の場合に fail-closed で panic するアサーションを追加した後の HEAD では、`MmaF16` 行の ceiling 未反映（12.5 未承認）のため本テストは実行すれば必ず FAIL する。§12.4 に詳細） |
+| `run_f16_misaligned_shape_falls_back_to_wmma_or_tiled` | n=12（非整列） | — | pass（mma 事前形状ゲート非充足 → wmma へフォールバック。フリップの影響を受けない契約どおり） |
+| `f16_matrix_unit_impl_reports_selected_implementation` | 16×16×16 | — | **期待どおり FAIL**（「常に非 Mma」を期待する既存アサーションが、フリップにより実際に Mma が選ばれたため不一致。期待値更新は #1160 の担当。設計上の red） |
+
+### 12.4 結論
+
+- **非後退**: 切替前・切替後とも、対応する既存 baseline 行
+  （`MmaF16`・`WmmaF16`）・厳密ゼロ fail 判定のいずれからも後退していない。
+  auto 経路（`CudaGemmAuto::run_f16`）は選択された実装（`CudaMmaGemm`／
+  `CudaWmmaGemm`）の直接呼び出しと**完全に同一の数値**を返す
+  （フリップ時の K=4096 ストレスで `fail_count=101/65536`・
+  `mean_abs_diff=7.646e-5` が直接経路 `mma_f16_k4096_stress` と一致した
+  ことで実証）。
+- **【追記・PR #1178 レビュー対応（codex-review 指摘）】上記「切替後」表の
+  `run_f16_k4096_stress_non_regression_route_aware` の pass 記録は
+  本ラウンド計測時点（`fd106ff` 以前）のテストコードによるものであり、
+  現在の HEAD では再現不能である**: 同 PR で
+  `crates/backend-cuda/tests/gemm_auto.rs:515-533`（`fd106ff`・`dc5ade4`）
+  へ、選択された baseline 行（本ケースは `MmaF16`）の
+  `baseline_max_abs_diff_ceiling`／`baseline_max_rel_err_ceiling` が
+  ともに `Some` であることを事前に fail-closed 検査するアサーションを
+  追加した。`MmaF16` 行の両 ceiling は本ラウンド終了時点で `None` のまま
+  （12.5 の提案値が未承認・`BASELINES` 未反映）のため、このアサーション
+  追加後に本テストをノード側限定フリップ（`MMA_PRIORITY_PRODUCTION_ENABLED
+  = true`）下で再実行すると、parity 比較に至る前に必ず panic して FAIL
+  する。上記表の「pass」は撤回しない（実測事実として記録は残す）が、
+  **現在の HEAD 上で「切替後も非後退」の証跡として本テストの green を
+  主張することはできない**。§12.5 の ceiling 提案値をユーザー承認のうえ
+  `common::parity_baseline::BASELINES` の `MmaF16` 行へ反映するまでの間、
+  本テストは `internal-diagnostics` feature 限定・real-hardware ignored
+  のまま意図的に red となる（`.claude/rules/coding-rust.md`
+  「テスト・ベンチ」節: baseline 値の変更は人間承認必須のため本 PR では
+  未反映）。
+- **格上げ候補（厳密ゼロ fail 判定への再割り当て）**: なし。K=4096
+  ストレス形状（mma・wmma とも）は本ラウンドでも非ゼロ fail が再現し、
+  spec REQ-2「2026-09-02 追記」項目 1（厳密ゼロ fail 判定の対象形状）は
+  成立しない。12 整列形状・48×64×64 は既に厳密ゼロ fail が成立しており
+  変更なし。
+- **`MmaF16` 行の `max_abs_diff`／`max_rel_err` ceiling 提案**（現在 `None`。
+  `BASELINES` は編集していない・提案のみ）: 本ラウンドの実測値
+  `max_abs_diff=6.250e-2`・`max_rel_err=5.849e-1` から「表示 4 桁の
+  最終桁 +1」規約に従うと `baseline_max_abs_diff_ceiling: Some(6.251e-2)`・
+  `baseline_max_rel_err_ceiling: Some(5.850e-1)` が候補値になる
+  （`WmmaF16` 行の既存 `Some` 値と同じ丸め規約）。採否・記入はユーザー
+  承認後に別 PR で行う。
+- **既存未解消 red の再確認**: `specialized_mma_f16_matches_default_and_
+  reference_across_shapes`（256×512×1024・seed=4003）は本ラウンドでも
+  FAIL を再現した（`docs/backend-cuda-real-device-testing.md` §5.3 項目 4
+  に既に記載済みの未解消事項。本イシューのスコープ外のため変更しない）。
+
+### 12.5 提案事項（未反映・承認待ち）
+
+- `ParityPath::MmaF16` 行への `baseline_max_abs_diff_ceiling: Some(6.251e-2)`・
+  `baseline_max_rel_err_ceiling: Some(5.850e-1)` 追加（上記 12.4 参照）。
+- `specialized_mma_parity.rs` の 256×512×1024 ケースの baseline 非後退方式
+  への再割り当て（新規 `ParityBaseline` 行の実機実測が必要。
+  `docs/backend-cuda-real-device-testing.md` §5.3 項目 4 の残作業と統合可）。
+- いずれも本 PR では実施せず、イシューコメントで提案し、push・PR 作成後の
+  後続エージェント／ユーザー承認へ引き継ぐ。
