@@ -93,9 +93,12 @@ fn run_f32_matches_cpu_reference() {
     );
 }
 
-/// 実機依存: f16 自動経路が（cc >= 7.0 環境では WMMA、それ以外では
-/// tiled が）参照実装と複合判定で一致することを検証する。判定方法は
-/// `cpu_cuda_wmma_parity.rs`（f16→f32→参照matmul→f16丸め→f32）と同一。
+/// 実機依存: f16 自動経路（16x16x16・整列形状）が参照実装と複合判定で
+/// 一致することを検証する。判定方法は `cpu_cuda_wmma_parity.rs`
+/// （f16→f32→参照matmul→f16丸め→f32）と同一。cc >= 8.0 環境では
+/// `select_f16_matrix_unit_impl` が `Mma` を返すため `CudaMmaGemm`
+/// 経路（#1156）を通り、cc 7.x では WMMA、それ未満では tiled を通る
+/// （`docs/dispatch-rules-design.md` §5.6）。
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
             test-ignored-cuda 経由で実行する"]
@@ -140,11 +143,13 @@ fn run_f16_matches_cpu_reference() {
 
 /// 実機依存: `CudaGemmAuto::new` が構築する `mma` フィールド（#1152）が
 /// cc>=8.0 ゲートに従って fail-soft に構築されることを検証する
-/// （`docs/dispatch-rules-design.md` §5.6 判定規則 1）。`run_f16` は
-/// #1156 まで `mma` を参照しないため、本テストは経路実行ではなく
-/// `mma_available`／`mma_unavailable_reason` の診断アクセサのみを検証する。
-/// 既存 `run_f16_matches_cpu_reference` は変更せず、経路が引き続き
-/// WMMA のまま数値契約が維持されることの担保として据え置く。
+/// （`docs/dispatch-rules-design.md` §5.6 判定規則 1）。本テストは経路
+/// 実行ではなく `mma_available`／`mma_unavailable_reason` の診断
+/// アクセサのみを検証する（`run_f16` 側が実際に `mma` を優先して呼ぶ
+/// ことの担保は `run_f16_matches_cpu_reference`・下記
+/// `run_f16_misaligned_shape_falls_back_to_wmma_or_tiled`・
+/// `f16_matrix_unit_impl_reports_selected_implementation` が担う。
+/// #1156）。
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
             test-ignored-cuda 経由で実行する"]
@@ -207,4 +212,88 @@ fn select_tile_config_for_device_succeeds_on_real_hardware() {
     assert_eq!(selection.candidate().block_n().get(), 128);
     assert_eq!(selection.candidate().block_k().get(), 32);
     assert_eq!(selection.candidate().stages().get(), 3);
+}
+
+/// 実機依存: 事前形状ゲート非充足（`n` が 8 の倍数でない）形状では
+/// `select_f16_matrix_unit_impl` が `Wmma`（cc ゲート対応環境）または
+/// `Tiled`（非対応環境）を返し、`run_f16` の出力が引き続き参照実装と
+/// 複合判定で一致することを検証する（mma → wmma/tiled フォールバック
+/// 経路の維持を実機で実証する。§5.6 判定規則 2・3・#1156）。
+#[test]
+#[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
+            test-ignored-cuda 経由で実行する"]
+fn run_f16_misaligned_shape_falls_back_to_wmma_or_tiled() {
+    let device = CudaDevice::new(0).expect("CUDA device available in ignored test environment");
+    let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
+
+    // n=12 は 8 の倍数でないため validate_mma_alignment が Err を返し、
+    // mma が構築済みでも mma 経路には入らない（wmma または tiled）。
+    let (m, n, k) = (16u32, 12u32, 16u32);
+    let a_f32: Vec<f32> = (0..(m * k)).map(|i| (i % 7) as f32 * 0.1).collect();
+    let b_f32: Vec<f32> = (0..(k * n)).map(|i| (i % 5) as f32 * 0.2).collect();
+    let a: Vec<f16> = a_f32.iter().map(|&x| f16::from_f32(x)).collect();
+    let b: Vec<f16> = b_f32.iter().map(|&x| f16::from_f32(x)).collect();
+
+    let selected = auto.f16_matrix_unit_impl(m, n, k);
+    assert_ne!(
+        selected,
+        fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
+        "n=12 は非整列のため mma 経路が選ばれてはならない"
+    );
+
+    let gpu = auto
+        .run_f16(&a, &b, m, n, k)
+        .expect("run_f16 succeeds on real hardware");
+
+    let mut reference_f32 = vec![0.0f32; (m as usize) * (n as usize)];
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a_f32,
+        &b_f32,
+        &mut reference_f32,
+        m as usize,
+        n as usize,
+        k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    let reference_rounded: Vec<f32> = reference_f32
+        .iter()
+        .map(|&x| f16::from_f32(x).to_f32())
+        .collect();
+    let gpu_f32: Vec<f32> = gpu.iter().map(|&x| x.to_f32()).collect();
+
+    fandhe_ai_backend_cpu::assert_parity(
+        "CudaGemmAuto::run_f16 (misaligned n, wmma/tiled fallback) vs CPU reference",
+        &gpu_f32,
+        &reference_rounded,
+    );
+}
+
+/// 実機依存: `f16_matrix_unit_impl`（診断アクセサ）が cc・整列形状に
+/// 応じて期待どおりの `F16MatrixUnitImpl` を返すことを検証する
+/// （純関数 `select_f16_matrix_unit_impl` 自体の網羅テストは
+/// `gemm_auto.rs::f16_matrix_unit_impl_tests`〈GPU 非依存〉が担当。
+/// 本テストは実機の `mma_available()`／`wmma` 構築結果と整合すること
+/// の統合検証に限定する）。
+#[test]
+#[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
+            test-ignored-cuda 経由で実行する"]
+fn f16_matrix_unit_impl_reports_selected_implementation() {
+    let device = CudaDevice::new(0).expect("CUDA device available in ignored test environment");
+    let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
+
+    let (major, _minor) = device.compute_capability();
+    let aligned = auto.f16_matrix_unit_impl(16, 16, 16);
+    if major >= 8 && auto.mma_available() {
+        assert_eq!(
+            aligned,
+            fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
+            "cc {major}.x >= 8.0 かつ mma 構築済みなら整列形状は Mma のはず"
+        );
+    } else {
+        assert_ne!(
+            aligned,
+            fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
+            "mma 未構築（cc 非対応または NVRTC 失敗）なら Mma は選ばれないはず"
+        );
+    }
 }

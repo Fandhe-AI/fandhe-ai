@@ -5,7 +5,7 @@
 //! 既存 GEMM 実装（`gemm.rs::CudaGemm`〈naive／tiled〉・
 //! `gemm_wmma.rs::CudaWmmaGemm`〈WMMA f16 Tensor Core〉・
 //! `gemm_mma.rs::CudaMmaGemm`〈mma.sync f16 Tensor Core。#1150 設計・
-//! #1152/#1156 で本構造体へ結線予定〉）へ結線する。
+//! #1152/#1156 で本構造体へ結線済み〉）へ結線する。
 //! `BackendOps` trait 実装（TASK-1.9c・#46）はこの `CudaGemmAuto` を
 //! `BackendOps::gemm` から呼ぶだけの構成にできる（実装計画 §3.2
 //! 「#46 との境界」）。
@@ -15,20 +15,18 @@
 //! `run_f32`／`run_f16` 呼び出しでは FFI 照会を繰り返さない
 //! （`docs/dispatch-rules-design.md` §2.1「判定タイミング」）。
 //!
-//! **現行実装**のフォールバック連鎖は `MatrixUnit → Tiled → Naive`
-//! （§5.2）。`CudaWmmaGemm::new` が cc ゲート非対応・NVRTC コンパイル
-//! 失敗のいずれかで `Err` を返した場合は WMMA を候補から外し、以降
-//! `run_f16` は常に tiled 経路を使う（fail-safe。`panic!`／`unwrap()`
-//! を使わない）。
-//!
-//! **#1150 設計（`docs/dispatch-rules-design.md` §5.6）**では、
-//! `MatrixUnit` 経路内部の実装優先順位を
-//! `CudaMmaGemm → CudaWmmaGemm → Tiled → Naive` へ切替予定。`mma`
-//! フィールドの fail-soft 構築は #1152 で実装済み（`wmma` と同型: cc
-//! ゲート非対応・NVRTC コンパイル失敗のいずれも `None`）。`run_f16` の
-//! 分岐拡張〈事前形状ゲート込み〉は #1156 が実装するため、本モジュールの
-//! `run_f16` は #1152 時点では未変更のまま（`mma` はまだどの実行経路
-//! からも呼ばれない）。
+//! **現行実装**のフォールバック連鎖は `MatrixUnit(mma) → MatrixUnit(wmma)
+//! → Tiled → Naive`（`docs/dispatch-rules-design.md` §5.6）。
+//! `select_gemm_kernel`（第 1 層。`fandhe_ai_tensor_core::dispatch`）が
+//! `KernelKind::MatrixUnit` を返した場合、`CudaGemmAuto` 内部（第 2 層）
+//! は `select_f16_matrix_unit_impl` の判定に従い
+//! `CudaMmaGemm → CudaWmmaGemm → Tiled` の優先順位で実装を選ぶ（#1152・
+//! #1156）。`mma` は cc ゲート（`cc >= 8.0`）に加え事前形状ゲート
+//! （`validate_mma_alignment(n, k)`・`validate_mma_grid_bounds(m)` が
+//! いずれも `Ok`）を満たす場合のみ選ばれ、満たさなければ `wmma`
+//! （`Some` なら）、`wmma` も `None`／非充足なら tiled へ倒す
+//! （fail-safe。`panic!`／`unwrap()` を使わない。エラー駆動フォール
+//! バック〈mma 実行の `Err` を捕捉して wmma へ再試行〉は採らない）。
 
 use std::num::NonZeroU32;
 
@@ -1588,22 +1586,22 @@ pub fn select_tile_config_for_device(
     select_tile_config(shape, dtype, smem_budget_bytes, num_sms, measured)
 }
 
-/// naive／tiled／WMMA の全 GEMM カーネルを保持し、`select_gemm_kernel`
-/// の判定結果に従って呼び分ける自動経路選択の入口。
+/// naive／tiled／WMMA／`mma.sync` の全 GEMM カーネルを保持し、
+/// `select_gemm_kernel` の判定結果に従って呼び分ける自動経路選択の入口。
 ///
 /// `wmma` は `Option` とし、cc ゲート非対応・NVRTC コンパイル失敗時は
 /// `None` のまま保持する（fail-safe。上記モジュールコメント参照）。
-/// `caps` は `wmma` の有無とは独立に「cc ゲートを満たすか」だけを表す
-/// （`select_gemm_kernel` の判定材料は cc のみであり、コンパイル成否は
-/// 別軸のフォールバックとして扱う。`run_f16` 内のコメント参照）。
+/// `caps` は `wmma`／`mma` の有無とは独立に「cc ゲートを満たすか」だけを
+/// 表す（`select_gemm_kernel` の判定材料は cc のみであり、コンパイル
+/// 成否は別軸のフォールバックとして扱う。`run_f16` 内のコメント参照）。
 ///
 /// `mma`（[`crate::gemm_mma::CudaMmaGemm`]、`mma.sync`/`ldmatrix`/
 /// `cp.async` パイプライン版 f16 Tensor Core 経路）は `wmma` と同型の
 /// fail-soft 構築（#1152。`docs/dispatch-rules-design.md` §5.6）: cc
 /// ゲート非対応（`CudaError::TensorCoreUnsupported`、cc < 8.0）・NVRTC
-/// コンパイル失敗のいずれでも `None` のまま保持する。`wmma` は `mma` が
-/// 使えない場合のフォールバック用として維持する。`mma` フィールド自体は
-/// #1156（`run_f16` の分岐拡張）まではどの実行経路からも読まれない。
+/// コンパイル失敗のいずれでも `None` のまま保持する。`run_f16` は
+/// `mma` を最優先候補として読み（事前形状ゲート込み。#1156）、`mma` が
+/// 使えない場合のフォールバックとして `wmma` を維持する。
 pub struct CudaGemmAuto {
     gemm: CudaGemm,
     wmma: Option<CudaWmmaGemm>,
@@ -1670,8 +1668,8 @@ impl CudaGemmAuto {
     ///
     /// 診断・テスト用の読み取り口であり利用者向け切替 API ではない
     /// （REQ-11・`docs/dispatch-rules-design.md` §5.6 判定規則 7）。
-    /// `run_f16` は #1156 まで `mma` を参照しないため、現時点ではこの値は
-    /// 実行経路の選択には影響しない。
+    /// `run_f16` は `MatrixUnit` 分岐で本フィールドの有無を
+    /// `select_f16_matrix_unit_impl` へ渡し実装選択に用いる（#1156）。
     pub fn mma_available(&self) -> bool {
         self.mma.is_some()
     }
@@ -1717,23 +1715,25 @@ impl CudaGemmAuto {
 
     /// f16 GEMM を自動経路選択で実行する。
     ///
-    /// **現行実装**: `select_gemm_kernel` が `MatrixUnit` を返しても
-    /// `wmma` が `None`（構築失敗。[`Self::new`] 参照）なら tiled へ
-    /// フォールバックする（`docs/dispatch-rules-design.md` §5.2 の
-    /// フォールバック連鎖 `MatrixUnit → Tiled → Naive` の中間段。
-    /// `self.gemm`〈naive／tiled〉は `new` 成功時点で必ず存在するため、
-    /// tiled 自体が失敗するケースはカーネル起動時エラー（`CudaError`）
-    /// としてそのまま呼び出し元へ返る）。
-    ///
-    /// **#1150 設計予定（#1156 で実装）**: `MatrixUnit` 分岐を
-    /// `mma → wmma → tiled` の 3 段へ拡張する。`mma` が `Some` かつ
-    /// 事前形状ゲート（`validate_mma_alignment(n, k)`・
-    /// `validate_mma_grid_bounds(m)` が `Ok`）を満たすときのみ
+    /// フォールバック連鎖は `MatrixUnit(mma) → MatrixUnit(wmma) → Tiled
+    /// → Naive`（`docs/dispatch-rules-design.md` §5.6）。第 1 層
+    /// （`select_gemm_kernel`）が `KernelKind::MatrixUnit` を返した場合、
+    /// 第 2 層の実装選択は [`Self::f16_matrix_unit_impl`]（内部で
+    /// `select_f16_matrix_unit_impl` を呼ぶ）が担う: `mma` が `Some`
+    /// かつ事前形状ゲート（`validate_mma_alignment(n, k)`・
+    /// `validate_mma_grid_bounds(m)` が `Ok`）を満たす場合のみ
     /// `CudaMmaGemm::run_f16` を呼び、満たさなければ `wmma`（`Some` なら）
-    /// へ、`wmma` も `None` なら tiled へ倒す。形状ゲートは呼び出し前の
-    /// 事前判定で行い、mma 実行の `Err` を捕捉して WMMA へ再試行する
-    /// エラー駆動フォールバックは採らない（カーネル起動失敗を静かに
-    /// 別経路で覆い隠さないため。`docs/dispatch-rules-design.md` §5.6）。
+    /// を、`wmma` も `None` なら tiled を呼ぶ。形状ゲートは呼び出し前の
+    /// 事前判定として行い、mma 実行が返す `Err` を捕捉して wmma へ
+    /// 再試行するエラー駆動フォールバックは採らない（カーネル起動失敗を
+    /// 静かに別経路で覆い隠さないため。`docs/dispatch-rules-design.md`
+    /// §5.6 判定規則 2・3）。`self.gemm`〈naive／tiled〉は `new` 成功
+    /// 時点で必ず存在するため、tiled 自体が失敗するケースはカーネル
+    /// 起動時エラー（`CudaError`）としてそのまま呼び出し元へ返る。
+    ///
+    /// 万一 [`Self::f16_matrix_unit_impl`] の判定結果と対応フィールドの
+    /// 有無が食い違っても（あり得ない契約だが）tiled へ倒れる fail-safe
+    /// な `match` 構造とし、`unwrap()`／`unreachable!` は使わない。
     pub fn run_f16(
         &self,
         a: &[f16],
@@ -1744,15 +1744,170 @@ impl CudaGemmAuto {
     ) -> Result<Vec<f16>, CudaError> {
         let shape = GemmShape::new(m, n, k);
         match select_gemm_kernel(&self.caps, shape, DType::F16) {
-            KernelKind::MatrixUnit => match &self.wmma {
-                Some(wmma) => wmma.run_f16(a, b, m, n, k),
-                // cc ゲートは満たすが WMMA 構築が失敗していた場合の
-                // fail-safe フォールバック（NVRTC コンパイル失敗等）。
-                None => self.gemm.run_tiled_f16(a, b, m, n, k),
-            },
+            KernelKind::MatrixUnit => {
+                match (self.f16_matrix_unit_impl(m, n, k), &self.mma, &self.wmma) {
+                    (F16MatrixUnitImpl::Mma, Some(mma), _) => mma.run_f16(a, b, m, n, k),
+                    (F16MatrixUnitImpl::Wmma, _, Some(wmma)) => wmma.run_f16(a, b, m, n, k),
+                    _ => self.gemm.run_tiled_f16(a, b, m, n, k),
+                }
+            }
             KernelKind::Tiled => self.gemm.run_tiled_f16(a, b, m, n, k),
             KernelKind::Naive => self.gemm.run_naive_f16(a, b, m, n, k),
         }
+    }
+
+    /// `run_f16` が `KernelKind::MatrixUnit` 判定時にどの実装
+    /// （[`F16MatrixUnitImpl`]）を選ぶかを返す診断用アクセサ。
+    ///
+    /// 内部で `select_f16_matrix_unit_impl`（単一真実源の純関数）へ
+    /// `self.mma`／`self.wmma` の有無と形状を渡すだけの薄いラッパー。
+    /// 診断・テスト用の読み取り口であり利用者向け切替 API ではない
+    /// （REQ-11・`docs/dispatch-rules-design.md` §5.6 判定規則 7）。
+    pub fn f16_matrix_unit_impl(&self, m: u32, n: u32, k: u32) -> F16MatrixUnitImpl {
+        select_f16_matrix_unit_impl(self.mma.is_some(), self.wmma.is_some(), m, n, k)
+    }
+}
+
+/// [`CudaGemmAuto::run_f16`] が `KernelKind::MatrixUnit` 判定時に選ぶ
+/// 第 2 層の実装（`docs/dispatch-rules-design.md` §5.6）。
+///
+/// `CudaMmaGemm`（`mma.sync`/`ldmatrix`/`cp.async` パイプライン）を
+/// 最優先とし、事前形状ゲート非充足または未構築時は `CudaWmmaGemm` へ、
+/// それも未構築なら `CudaGemm::run_tiled_f16` へ倒す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum F16MatrixUnitImpl {
+    /// `CudaMmaGemm::run_f16`（`mma.sync` 系パイプライン）を使う。
+    Mma,
+    /// `CudaWmmaGemm::run_f16`（WMMA）を使う。
+    Wmma,
+    /// `CudaGemm::run_tiled_f16`（tiled）を使う。
+    Tiled,
+}
+
+/// [`CudaGemmAuto::run_f16`] の `MatrixUnit` 分岐内で実装優先順位を
+/// 決める単一真実源の純関数（`docs/dispatch-rules-design.md` §5.6
+/// 判定規則 2）。GPU・`CudaDevice` に依存しないため GPU なしの CI でも
+/// 単体テスト可能（`f16_matrix_unit_impl_tests`）。
+///
+/// 判定順序:
+/// 1. `mma_available` かつ `validate_mma_alignment(n, k)` かつ
+///    `validate_mma_grid_bounds(m)` がいずれも `Ok` → [`F16MatrixUnitImpl::Mma`]
+///    （事前形状ゲート。カーネル起動後の `Err` を捕捉してのフォール
+///    バックは行わない契約と対になる。§5.6 判定規則 3）
+/// 2. 上記を満たさず `wmma_available` → [`F16MatrixUnitImpl::Wmma`]
+/// 3. いずれも満たさない → [`F16MatrixUnitImpl::Tiled`]
+///
+/// `m == 0 || n == 0 || k == 0` の no-op 形状は特別扱いしない
+/// （各経路の呼び出し先が同一契約の早期 return を持つため、判定結果が
+/// `Wmma`／`Tiled` のいずれに倒れても出力は同じ空／ゼロ Vec。§5.6
+/// 判定規則 4）。
+pub(crate) fn select_f16_matrix_unit_impl(
+    mma_available: bool,
+    wmma_available: bool,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> F16MatrixUnitImpl {
+    if mma_available && validate_mma_alignment(n, k).is_ok() && validate_mma_grid_bounds(m).is_ok()
+    {
+        return F16MatrixUnitImpl::Mma;
+    }
+    if wmma_available {
+        return F16MatrixUnitImpl::Wmma;
+    }
+    F16MatrixUnitImpl::Tiled
+}
+
+#[cfg(test)]
+mod f16_matrix_unit_impl_tests {
+    use super::*;
+
+    /// mma・wmma とも未構築なら tiled へ倒れる（fail-safe の最終段）。
+    #[test]
+    fn neither_available_selects_tiled() {
+        assert_eq!(
+            select_f16_matrix_unit_impl(false, false, 16, 16, 16),
+            F16MatrixUnitImpl::Tiled
+        );
+    }
+
+    /// mma 未構築・wmma 構築済みなら wmma を選ぶ。
+    #[test]
+    fn only_wmma_available_selects_wmma() {
+        assert_eq!(
+            select_f16_matrix_unit_impl(false, true, 16, 16, 16),
+            F16MatrixUnitImpl::Wmma
+        );
+    }
+
+    /// mma・wmma とも構築済みで整列形状なら mma を優先する。
+    #[test]
+    fn both_available_aligned_shape_selects_mma() {
+        assert_eq!(
+            select_f16_matrix_unit_impl(true, true, 16, 16, 16),
+            F16MatrixUnitImpl::Mma
+        );
+    }
+
+    /// wmma 未構築でも mma が使えて整列形状なら mma を選ぶ（wmma の
+    /// 有無は mma 選択の必要条件ではない）。
+    #[test]
+    fn mma_available_without_wmma_aligned_shape_selects_mma() {
+        assert_eq!(
+            select_f16_matrix_unit_impl(true, false, 16, 16, 16),
+            F16MatrixUnitImpl::Mma
+        );
+    }
+
+    /// n が 8 の倍数でない（`validate_mma_alignment` 非充足）場合は
+    /// mma が使えても wmma へフォールバックする。
+    #[test]
+    fn mma_available_but_n_misaligned_falls_back_to_wmma() {
+        assert_eq!(
+            select_f16_matrix_unit_impl(true, true, 16, 12, 16),
+            F16MatrixUnitImpl::Wmma
+        );
+    }
+
+    /// k が 8 の倍数でない場合も同様に wmma へフォールバックする。
+    #[test]
+    fn mma_available_but_k_misaligned_falls_back_to_wmma() {
+        assert_eq!(
+            select_f16_matrix_unit_impl(true, true, 16, 16, 12),
+            F16MatrixUnitImpl::Wmma
+        );
+    }
+
+    /// 形状ゲート非充足かつ wmma も未構築なら tiled まで倒れる。
+    #[test]
+    fn mma_available_misaligned_and_no_wmma_falls_back_to_tiled() {
+        assert_eq!(
+            select_f16_matrix_unit_impl(true, false, 16, 12, 16),
+            F16MatrixUnitImpl::Tiled
+        );
+    }
+
+    /// grid_dim.y 上限（65,535）超過時は mma が使えても wmma へ倒す。
+    #[test]
+    fn mma_available_grid_bounds_exceeded_falls_back_to_wmma() {
+        // `validate_mma_grid_bounds` は `m.div_ceil(MMA_BM) <= 65_535` を
+        // 要求する（`gemm_mma.rs`）。`MMA_BM` に依存しない形で確実に
+        // 上限超過させるため、大きめの m を直接指定する。
+        let m = 65_535u32.saturating_mul(256).saturating_add(1);
+        assert_eq!(
+            select_f16_matrix_unit_impl(true, true, m, 16, 16),
+            F16MatrixUnitImpl::Wmma
+        );
+    }
+
+    /// no-op 形状（k == 0）は特別扱いせず、通常どおり判定規則へ通す
+    /// （n = 7 は非整列のため wmma へ倒れる。§5.6 判定規則 4）。
+    #[test]
+    fn noop_shape_is_not_special_cased() {
+        assert_eq!(
+            select_f16_matrix_unit_impl(true, true, 8, 7, 0),
+            F16MatrixUnitImpl::Wmma
+        );
     }
 }
 

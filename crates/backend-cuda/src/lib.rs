@@ -93,13 +93,16 @@
 //! TASK-11.2b（#68）で GEMM 自動経路選択の入口（[`CudaGemmAuto`]）を
 //! 追加した。`fandhe_ai_tensor_core::dispatch::select_gemm_kernel`（#67 が設計した
 //! 決定的規則。`docs/dispatch-rules-design.md`）の結果に従い、naive／
-//! tiled（`CudaGemm`）・WMMA f16（`CudaWmmaGemm`）を呼び分ける。TF32/f32
-//! 経路（`CudaGemm::run_wmma_tf32`・#62）・`mma.sync` 経路（`CudaMmaGemm`・
-//! #187）は、決定表（設計文書 §4）が TF32 既定採用を #186（TASK-11.1g）の
-//! ユーザー承認まで保留と定めているため、現時点の `select_gemm_kernel` の
-//! 自動経路には含めない（f32 は常に Tiled）。既存の `CudaGemm`／
-//! `CudaWmmaGemm`／`CudaMmaGemm` の直接指定 API はテスト・証跡用途
-//! （#70）にそのまま温存する（設計文書 §5.4）。
+//! tiled（`CudaGemm`）を呼び分ける。f16 `KernelKind::MatrixUnit` 判定時は
+//! `CudaGemmAuto` 内部（第 2 層。`docs/dispatch-rules-design.md` §5.6）が
+//! `CudaMmaGemm → CudaWmmaGemm → Tiled` の優先順位で実装を選ぶ（#1152・
+//! #1156。事前形状ゲート込みの単一真実源は
+//! `gemm_auto::select_f16_matrix_unit_impl`）。TF32/f32 経路
+//! （`CudaGemm::run_wmma_tf32`・#62）は、決定表（設計文書 §4）が TF32
+//! 既定採用を #186（TASK-11.1g）のユーザー承認まで保留と定めているため、
+//! 現時点の `select_gemm_kernel` の自動経路には含めない（f32 は常に
+//! Tiled）。既存の `CudaGemm`／`CudaWmmaGemm`／`CudaMmaGemm` の直接指定
+//! API はテスト・証跡用途（#70）にそのまま温存する（設計文書 §5.4）。
 //!
 //! TASK-1.9c（#46）で `ops` モジュール（[`ops::CudaBackendOps`]）を追加した。
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
@@ -405,9 +408,10 @@ pub use mse::CudaMse;
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledPipelineFunction;
 pub use gemm_auto::{
-    CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
-    TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,
-    enumerate_tile_candidates_for_device, select_tile_config, select_tile_config_for_device,
+    CostModelParams, CudaGemmAuto, F16MatrixUnitImpl, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH,
+    TileCandidate, TileSelection, TileSelectionBasis, derive_stages_for_device,
+    enumerate_tile_candidates, enumerate_tile_candidates_for_device, select_tile_config,
+    select_tile_config_for_device,
 };
 // `SpecializedMmaKernelHandle`／`run_specialized_mma_f16` はテスト・ベンチ専用の
 // 検証用ハンドル（`gemm_auto.rs` 冒頭ドキュメンテーションコメント参照。本番

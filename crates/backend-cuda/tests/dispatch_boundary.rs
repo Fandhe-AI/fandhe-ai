@@ -25,11 +25,13 @@
 //! 2. [`large_shape_mma_pipeline_vs_wmma_tflops_record`] 関数: 大形状
 //!    2048/4096 で `mma.sync`/`ldmatrix`/`cp.async` パイプライン
 //!    （`CudaMmaGemm`。v1 TMA 選好の v2 対応物）と基本 WMMA f16（opt）を
-//!    比較し、両者とも `select_gemm_kernel` 上は同じ `KernelKind::
-//!    MatrixUnit` に写像される（`CudaGemmAuto::run_f16` は `CudaWmmaGemm`
-//!    のみを呼ぶ。`crates/backend-cuda/src/gemm_auto.rs`）ことを踏まえ、
-//!    「mma パイプラインの優劣は経路選択条件でなくカーネル内部チューニング」
-//!    の整理を実測で裏付ける記録を残す。
+//!    比較し、両者とも `select_gemm_kernel`（第 1 層）上は同じ
+//!    `KernelKind::MatrixUnit` に写像されることを踏まえ、「mma
+//!    パイプラインの優劣は経路選択条件でなくカーネル内部チューニング」
+//!    の整理を実測で裏付ける記録を残す。第 2 層（`CudaGemmAuto` 内部）は
+//!    #1156 以降 `CudaMmaGemm` を優先的に呼ぶが（整列形状・cc>=8.0）、
+//!    この整理と計測ロジック自体は変更しない（第 1 層の決定表が両者を
+//!    区別しない事実に基づく整理のため）。
 //!
 //! ## 実機前提
 //!
@@ -290,12 +292,13 @@ fn small_shape_matrix_unit_has_no_floor_tflops_record() {
 /// 大形状 2048/4096 で `mma.sync`/`ldmatrix`/`cp.async` パイプライン
 /// （`CudaMmaGemm`）と基本 WMMA f16（opt。`CudaWmmaGemm`）を比較する。
 ///
-/// 両カーネルとも `select_gemm_kernel` 上は同じ `KernelKind::MatrixUnit`
-/// に写像される（`CudaGemmAuto::run_f16` は `CudaWmmaGemm` のみを呼び
-/// `CudaMmaGemm` を経路選択の対象にしていない。`crates/backend-cuda/src/
-/// gemm_auto.rs`）ため、本テストは経路選択の妥当性ではなく「パイプライン
-/// 差はカーネル内部チューニング材料であり、経路選択の分岐条件には
-/// しない」という設計判断の実測裏付けに限定する。
+/// 両カーネルとも `select_gemm_kernel`（第 1 層）上は同じ
+/// `KernelKind::MatrixUnit` に写像される。第 2 層（`CudaGemmAuto` 内部。
+/// `crates/backend-cuda/src/gemm_auto.rs::select_f16_matrix_unit_impl`）
+/// は #1156 以降 `CudaMmaGemm` を優先的に呼ぶが（整列形状・cc>=8.0）、
+/// 本テストは経路選択の妥当性ではなく「パイプライン差はカーネル内部
+/// チューニング材料であり、第 1 層の分岐条件にはしない」という設計
+/// 判断の実測裏付けに限定する（計測ロジック自体は変更しない）。
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須。実測記録は docs/perf/dispatch-boundary-measurement.md"]
 fn large_shape_mma_pipeline_vs_wmma_tflops_record() {
