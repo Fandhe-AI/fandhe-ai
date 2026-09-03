@@ -36,11 +36,22 @@
 
 ## 2. Phase A: 反射値によるレジスタ圧仮説（H1）の検証
 
-`MetalGemm::tile_pipeline_reflection`（イシュー #1143 で追加。
-`crates/backend-metal/src/gemm.rs`）で `MTLComputePipelineState` 構築後の
-`maxTotalThreadsPerThreadgroup`／`staticThreadgroupMemoryLength` を全候補 × NN で
-取得した（`gemm_transpose_tile_sweep.rs::dump_reflection`。ディスパッチを伴わず
-秒未満で完了）。
+計測当時（イシュー #1143 実装時点）は `MetalGemm::tile_pipeline_reflection`
+（`crates/backend-metal/src/gemm.rs`）・`TilePipelineReflection` 構造体・
+`gemm_transpose_tile_sweep.rs::dump_reflection` という診断専用の入口を追加し、
+これで `MTLComputePipelineState` 構築後の `maxTotalThreadsPerThreadgroup`／
+`staticThreadgroupMemoryLength` を全候補 × NN で取得した（ディスパッチを伴わず
+秒未満で完了）。**これらの入口は本 PR の後続コミット（`fix(backend-metal):
+診断専用の TilePipelineReflection 入口を削除する`）で削除済みであり、HEAD の
+`crates/backend-metal/src/gemm.rs`・`examples/gemm_transpose_tile_sweep.rs` には
+存在しない**（`#[doc(hidden)] pub` でも内部表現の公開 API 漏出は AGENTS.md
+規約上 P1 に該当するという codex-review 指摘・PR #1168 を受け、診断完了後に
+入口を撤去したため）。したがって下表の実測値は当時のローカル変更を適用した
+状態で取得したものであり、`cargo run -p fandhe-ai-backend-metal --example
+gemm_transpose_tile_sweep --release` を HEAD 上でそのまま実行しても再現しない
+（値そのものは §1 の生ログ・下表に記録済みのため再取得の必要はない。再現する
+には削除前のコミット〈`938629c` またはその直前の追加コミット〉の
+`gemm.rs`／`gemm_transpose_tile_sweep.rs` を一時的に復元する必要がある）。
 
 | candidate | requested_thread_count | max_total_threads_per_threadgroup | static_threadgroup_memory_length |
 |---|---|---|---|
@@ -135,12 +146,14 @@ N=4096 NN（正方立方。中核対象）:
   という全候補共有カーネルへの変更・既存 200 件超のテストへの回帰リスク）
   の比較から本調査では実施しない。
 
-**本 PR での変更点**: (a) `MetalGemm::tile_pipeline_reflection`（診断専用の
-新規公開 API。`TilePipelineReflection` 構造体）の追加、(b)
-`crate::tile::CANDIDATES` への index 8 追加とその収録・不変ガードテスト、(c)
-`gemm_transpose_tile_sweep.rs` への反射値ダンプ・cand8 追加。**本番選択ロジック
-（`tile::select`／`select_with_occupancy_for_device`）は変更しない**（cand8 が
-劣後という測定結果のため）。
+**本 PR での変更点**: (a) `crate::tile::CANDIDATES` への index 8 追加とその
+収録・不変ガードテスト（HEAD に残存）、(b) 診断専用の
+`MetalGemm::tile_pipeline_reflection`／`TilePipelineReflection` 構造体・
+`gemm_transpose_tile_sweep.rs` の反射値ダンプ（`dump_reflection`）を計測用に
+一時追加し §2 の実測後に削除（内部表現の公開 API 漏出という codex-review
+指摘・PR #1168 への対応。HEAD には存在しない。上記「削除済み」の注記を参照）。
+**本番選択ロジック（`tile::select`／`select_with_occupancy_for_device`）は
+変更しない**（cand8 が劣後という測定結果のため）。
 
 ## 5. スコープ外（今後の切り出し候補）
 
