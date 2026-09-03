@@ -209,6 +209,19 @@ required-features = ["internal-diagnostics"]
 name = "wmma_f16_opt_perf_triage"
 required-features = ["internal-diagnostics"]
 
+[[test]]
+# イシュー #1155: `specialized_mma_f16_triage` は `run_specialized_mma_f16`・
+# `diagnostics::mma_f16_block_tile`（テスト・診断専用の検証用シンボル。
+# `src/lib.rs`・`src/gemm_auto.rs` の同 feature ゲート済み re-export 参照）
+# を使うため、`internal-diagnostics` feature なしではビルドできない。
+# `specialized_mma_parity`（上記）と同じ理由で `required-features` を
+# 指定する。`cargo test --workspace`（feature 未指定）では対象外として
+# スキップされ、`cargo test --all-features`（CI の test ジョブ・`make
+# test` が使うコマンド）でのみビルド・実行される。診断専用（受け入れ
+# 判定には使わない。`specialized_mma_parity.rs` は無変更）。
+name = "specialized_mma_f16_triage"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート
