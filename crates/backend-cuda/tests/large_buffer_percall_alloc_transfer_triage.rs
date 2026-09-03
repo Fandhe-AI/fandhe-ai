@@ -524,6 +524,19 @@ fn phase_p5_d2h_reused_vec(
 /// 返しうる）。P6 は「全ページタッチ」を測る phase であるため、
 /// P5 と同じ方式（`black_box` 越しの非ゼロ書き込み）で明示的に
 /// 全要素へ書き込み、各ページへの物理コミットを強制する。
+///
+/// codex-review 指摘（PR #1169 discussion "P6 page-touch stores can
+/// vanish"）: `bench_harness::run` が `black_box` で不透明化するのは
+/// `workload()` の呼び出し自体のみで、クロージャ内部の書き込みまでは
+/// 保護しない（本ファイル冒頭・`protocol.rs` のドキュメント参照）。
+/// 各要素の書き込み値を `black_box` しても `v` を後続で読まず `drop`
+/// するだけでは、書き込み先である `v` 自体は最適化で不要と判定されうる
+/// （dead store elimination）。以前の実装にあった
+/// `black_box(vec![...])`（アロケーションを不透明化して生かし続ける
+/// もの）が事前タッチ方式への変更で失われていたため、ループ後に
+/// `v`（の参照）を `black_box` へ渡し、コンパイラから見て `v` が
+/// 外部から観測されうる状態にすることで、直前の全書き込みが
+/// `drop` 前に消去されないことを保証する。
 fn phase_p6_host_vec_touch_only(
     config: &MeasurementConfig,
     numel: usize,
@@ -533,6 +546,7 @@ fn phase_p6_host_vec_touch_only(
         for x in v.iter_mut() {
             *x = std::hint::black_box(f16::from_f32(1.0));
         }
+        std::hint::black_box(&v);
         drop(v);
     })
 }
