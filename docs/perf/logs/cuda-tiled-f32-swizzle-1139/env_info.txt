@@ -1,0 +1,25 @@
+実行日時（UTC）: 2026-09-03T09:47Z 前後（Gate 0・Gate 1 実測）
+ノード: DGX Spark GB10（`docs/real-hardware-verification-env.md` §2 の `<cuda-node>`）
+GPU: NVIDIA GB10（sm_121）
+driver: 580.173.02
+nvcc: release 13.0, V13.0.88 (Build cuda_13.0.r13.0/compiler.36424714_0)
+rustc: 1.97.0 (2d8144b78 2026-07-07)
+cargo: 1.97.0 (c980f4866 2026-06-30)
+GPU utilization（実行前確認）: 0 %
+起点コミット（rsync 転送元・作業ブランチ perf/1139-tiled-f32-swizzle-gb10）: origin/main a38eedd819f8028944e1d39d73dbe5d0bc6112e0
+  （作業ツリーには本セッションの未コミット変更〈イシュー #1139 の swizzle 結線試行・
+  ゲート 1 実測後に不採用のため revert 済み〉が rsync 時点で乗っている。詳細は
+  cuda-gemm-tiled-f32-swizzle-ab.md §4 参照）
+
+実行コマンド:
+  Gate 0（bit 一致・CPU 参照複合判定）:
+    cargo test -p fandhe-ai-backend-cuda --lib --release --locked --features internal-diagnostics \
+      -- --ignored --nocapture --test-threads=1 \
+      tiled_f32_swizzle_variant_matches_base_bit_exact_output tiled_f32_swizzle_variant_matches_cpu_reference
+  Gate 0（REQ-8 境界ガード実在検査。実機不要だが同一 release バイナリで再確認）:
+    cargo test -p fandhe-ai-backend-cuda --lib --release --locked --features internal-diagnostics \
+      -- tiled_f32_source_with_swizzle
+  Gate 1（classic 内 A/B。5 回計測。`examples/gemm_tiled_f32_swizzle_bench.rs` を本セッションで
+  一時的に拡張した版で実行。拡張はゲート 1 判定後に不採用となったため最終コードには含めない）:
+    cargo run -p fandhe-ai-backend-cuda --example gemm_tiled_f32_swizzle_bench --release --locked \
+      --features internal-diagnostics

@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/gemm_tiled_f32_swizzle_bench`
+num_sms=48 dynamic_group_width=8 (candidates: {8, 16}; see swizzle.rs::select_swizzle_group_width)
+=== gate1: classic 内 A/B（swizzle remap の純効果） ===
+size=512 base_tflops=4.5320 swizzle_g8_tflops=4.2778 swizzle_g8_over_base=0.9439 swizzle_g8_tflops=4.2734 swizzle_g8_over_base=0.9429 swizzle_g16_tflops=4.2271 swizzle_g16_over_base=0.9327
+size=1024 base_tflops=6.7106 swizzle_g8_tflops=6.6310 swizzle_g8_over_base=0.9881 swizzle_g8_tflops=6.6229 swizzle_g8_over_base=0.9869 swizzle_g16_tflops=6.6369 swizzle_g16_over_base=0.9890
+size=2048 base_tflops=7.4781 swizzle_g8_tflops=7.5119 swizzle_g8_over_base=1.0045 swizzle_g8_tflops=7.5128 swizzle_g8_over_base=1.0046 swizzle_g16_tflops=7.5220 swizzle_g16_over_base=1.0059
+size=4096 base_tflops=6.7383 swizzle_g8_tflops=7.5518 swizzle_g8_over_base=1.1207 swizzle_g8_tflops=7.5471 swizzle_g8_over_base=1.1200 swizzle_g16_tflops=7.5022 swizzle_g16_over_base=1.1134
+=== gate2: 本番ディスパッチ到達性（dispatch = 無印 launch_tiled_f32） ===
+classic_reach m=4098 n=4098 k=4098 base_tflops=5.8904 dispatch_tflops=9.8221 dispatch_over_base=1.6675
+reference m=4098 n=2050 k=4098 base_tflops=8.2936 dispatch_tflops=8.2748 dispatch_over_base=0.9977

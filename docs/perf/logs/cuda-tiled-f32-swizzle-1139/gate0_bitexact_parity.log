@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (/home/fandhe/work/target-fandhe-ai/release/deps/fandhe_ai_backend_cuda-33ba6bf87379d1a1)
+
+running 2 tests
+test gemm::tests::tiled_f32_swizzle_variant_matches_base_bit_exact_output ... ok
+test gemm::tests::tiled_f32_swizzle_variant_matches_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 614 filtered out; finished in 0.78s
+
