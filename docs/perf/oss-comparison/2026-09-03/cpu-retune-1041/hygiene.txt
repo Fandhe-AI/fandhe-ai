@@ -1,0 +1,26 @@
+=== pre-run (2026-09-03 17:03 JST) ===
+date: 2026年 9月 3日 木曜日 17時03分12秒 JST
+uptime: 17:03  up 15 days,  4:15, 19 users, load averages: 8.04 4.96 4.28
+pmset -g therm: Note: No thermal warning level has been recorded
+pmset -g batt: AC attached; not charging (80%)
+top comm: 99.6% site_showcase-8d6e2f9591f03254（別 worktree wf_41d40882-c01-17 の並列イシューのテストバイナリ・単一コア専有）・90.2% fseventsd（システム）
+注記: 同一 Mac 上の並列イシュー実行（他ワークフロー）による 1 コア専有プロセスを検出。
+16 論理コアのうち 1 コア分の競合であり、rayon 側は残り 15 コアで動作しうる。
+5 回の独立プロセス計測を通じて継続的に監視し、著しい劣化（候補間の相対順位が
+不安定になる・単発run が他 4 run から大きく外れる）が見られた run は破棄・再取得する
+（`.claude/rules` に明示規約はないが、DGX Spark 側 #1140 実測記録と同方針）。
+
+=== post A/B（1024/2048・4096）計測後（2026-09-03 17:12 JST） ===
+date: 2026年 9月 3日 木曜日 17時12分51秒 JST
+uptime: 17:12  up 15 days,  4:25, 19 users, load averages: 3.41 5.62 5.57
+top comm: 28.5% WindowServer・21.2% Slack Helper・9.6% Finder（いずれもシステム／通常常駐プロセス。
+単一コア専有プロセスは解消）。load average はピーク時 8.04 から 3.41 へ低下
+
+=== OSS 比較ハーネス実行時の注記 ===
+1 回目実行が正常終了（exit=1・既知の fail-closed 仕様）。2 回目実行後、3 回目実行が
+`Bash` ツール既定タイムアウト（120s）で打ち切られた（`--sizes 512,1024,2048,4096` の
+フル実行は matrixmultiply・gemm crate 側の計測を含めて 120s を超えうる）ため、3 回目の
+不完全な出力（`oss-run3.jsonl` 9 行・exit ファイルなし）を破棄し、同一コマンドを
+タイムアウト制約のない単発呼び出しで再実行して置き換えた。4・5 回目は同様に単発
+呼び出しで完了。5 回とも exit=1（既知の fail-closed 仕様。§5.1 と同じ理由）
+
