@@ -482,6 +482,33 @@ fn run_f16_k4096_stress_non_regression_route_aware() {
         });
     let report = fandhe_ai_backend_cpu::compare(&c_gpu_f32, &c_ref_rounded)
         .expect("shape must match baseline fixture");
+    // codex-review 指摘への対応（PR #1178 review）: `assert_no_parity_regression`
+    // は `baseline_max_abs_diff_ceiling`/`baseline_max_rel_err_ceiling` が
+    // `None` の行を「未実測」として黙ってスキップする設計
+    // （`assert_no_parity_regression` 本体のコメント参照）。この
+    // route-aware ゲートは fail_count・mean_abs_diff だけでなく外れ値
+    // （1 要素だけ誤差が急増する回帰）も見逃さないことを本番経路の受け入れ
+    // 判定として要求するため、選ばれた baseline 行の両 ceiling が `Some`
+    // であることを事前に fail-closed 検査する（`None` を黙って通さない）。
+    // `MmaF16` 行は本 PR 時点で両 ceiling が `None`（実測値は
+    // `docs/perf/cuda-parity-baseline.md` §12.4 に記録済み・§12.5 で採否を
+    // ユーザー承認へ引き継ぎ中。baseline 値の追加・更新は実機実測値のみ・
+    // 人間承認必須のため本 PR では反映しない。`.claude/rules/coding-rust.md`
+    // 「テスト・ベンチ」節）ため、このゲートを real-hardware ignored test
+    // として実行すると承認・反映が完了するまで意図的に FAIL する。
+    assert!(
+        baseline.baseline_max_abs_diff_ceiling.is_some()
+            && baseline.baseline_max_rel_err_ceiling.is_some(),
+        "run_f16_k4096_stress_non_regression_route_aware 256x256x4096 \
+         (selected={selected:?}, path={path}): baseline_max_abs_diff_ceiling/\
+         baseline_max_rel_err_ceiling が None です。この route-aware ゲートは \
+         外れ値回帰の見逃しを避けるため両 ceiling の設定を必須とします。\
+         docs/perf/cuda-parity-baseline.md §12.4/§12.5 に記録済みの実測値・\
+         提案 ceiling をユーザー承認のうえ \
+         common::parity_baseline::BASELINES の該当行へ反映してください \
+         （baseline 値の変更は人間承認必須。\
+         .claude/rules/coding-rust.md「テスト・ベンチ」節）。"
+    );
     common::parity_baseline::assert_no_parity_regression(
         &format!(
             "run_f16_k4096_stress_non_regression_route_aware 256x256x4096 (selected={selected:?})"
