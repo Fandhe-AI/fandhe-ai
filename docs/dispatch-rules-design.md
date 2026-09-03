@@ -140,7 +140,7 @@ WMMA fragment（16×16×16 等）・`simdgroup_matrix`（8×8 等）の整数倍
 
 | dtype | 経路 | HW ゲート | 数値一致閾値 | 状態 |
 |---|---|---|---|---|
-| f16 | CUDA mma.sync f16（優先。§5.6）／WMMA f16（フォールバック） | mma.sync: `cc >= (8, 0)` ／ WMMA: `cc >= (7, 0)` | f16 の相対精度（~2^-11）を踏まえた既存複合判定（相対 5e-3 OR 絶対 5e-3、PoC-v2-3 実測設計。`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md:49`）に加え、spec REQ-2（2026-09-02 追記）の Tensor Core 経路 形状別判定方式（実測 baseline 非後退。`docs/cuda-tensor-core-parity-judgment-decision.md`） | 既存設計（数値一致閾値）を引用（変更なし）／実装優先順位は §5.6 で新規記録 |
+| f16 | CUDA mma.sync f16（優先。§5.6）／WMMA f16（フォールバック） | mma.sync: `cc >= (8, 0)` ／ WMMA: `cc >= (7, 0)` | 全ペア共通の統一複合判定（相対誤差 1e-3 未満 OR 絶対誤差 1e-5 未満、REQ-2・`.claude/rules/coding-rust.md`「バックエンド間数値一致」節。`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`＝`crates/backend-cpu/src/parity.rs:32,37`）を厳密ゼロ fail 判定として適用する。実機実測でこの厳密ゼロ fail が成立しない既知不合格形状に限り、spec REQ-2（2026-09-02 追記）の Tensor Core 経路 形状別判定方式（実測 baseline 非後退。`docs/cuda-tensor-core-parity-judgment-decision.md`・`ParityBaseline`）を承認済み baseline として適用する。PoC-v2-3 設計時点の暫定値（相対 5e-3 OR 絶対 5e-3、`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md:49`）は現行の統一複合判定へ置き換え済みであり、mma.sync 優先経路にも旧値は適用しない | 既存設計（数値一致閾値）を引用（変更なし）／実装優先順位は §5.6 で新規記録 |
 | f32 | CUDA TF32 | `cc >= (8, 0)` | **既定採用を保留**。#186（TASK-11.1g）の実測再評価完了までは f32 は tiled 経路を既定とする段階案 | 保留（#186 待ち） |
 | f32 | Metal `simdgroup_matrix` | Apple7 以上 | PoC-v2-4 実測（`simdgroup_matrix` f32、3.134 TFLOPS @4096、`docs/spec/03-poc/poc-v2-4-metal-gemm/README.md:93`）に基づく既存の全ペア統一複合判定（相対誤差 1e-3 未満 OR 絶対誤差 1e-5 未満、REQ-2） | 既存設計を引用（変更なし） |
 
