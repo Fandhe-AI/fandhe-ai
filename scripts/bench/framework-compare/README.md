@@ -399,8 +399,12 @@ bash run_gemm_gate_metal.sh 0.6.0
 # CUDA 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
 GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
   bash run_gemm_gate_cuda.sh head-<short sha>
-# Metal 参考系列（ローカル直接実行。worktree の crates/facade をそのまま指す）:
-GEMM_GATE_PATCH_FACADE_PATH="$(pwd)/../../../crates/facade" \
+# Metal 参考系列（ローカル直接実行。worktree の crates/facade をそのまま指す。
+# `cd ... && pwd` で `..` セグメントを含まない正規化済み絶対パスへ解決する
+# ——`$(pwd)/../../../crates/facade` のように `..` を含む生文字列を渡すと、
+# `cargo tree` の表示は正規化済み絶対パスになるため record_manifest の
+# 厳密文字列比較が必ず不一致になり fail-closed エラーで測定が中断する）:
+GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
   bash run_gemm_gate_metal.sh head-<short sha>
 
 # 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
