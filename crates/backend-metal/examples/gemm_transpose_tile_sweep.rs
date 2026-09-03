@@ -2,7 +2,7 @@
 //! example（イシュー #1039。親 #1037・兄弟 #1036/#1038/#1040 の後続）。
 //!
 //! - NN: `MetalGemm::dispatch_tiled_prepared`（転送非計測）で
-//!   `crate::tile::CANDIDATES` 全 8 候補を明示指定して比較する
+//!   `crate::tile::CANDIDATES` 全 9 候補を明示指定して比較する
 //!   （`gemm_tile_sweep.rs` と同じ計測境界・`resolved_matches_requested`
 //!   検証を踏襲）。
 //! - NT/TN/TT: シェーダ側にタイル variant を持たない strided classic
@@ -56,7 +56,7 @@ mod macos_impl {
     /// と同じ複製方式の判断）。配列順・値は `tile.rs` の `CANDIDATES` 定義
     /// と一致させる。`tile.rs` 側が変わった場合は本 example 側も追従が
     /// 必要。
-    fn candidates() -> [(&'static str, TileConfig); 8] {
+    fn candidates() -> [(&'static str, TileConfig); 9] {
         [
             (
                 "cand0_64x64_wm2wn2",
@@ -144,6 +144,25 @@ mod macos_impl {
                     wm: 1,
                     wn: 1,
                     staged: false,
+                },
+            ),
+            // MLX steel classic 経路の未収録構成（イシュー #1143）:
+            // `cand2_32x64_wm2wn2_wide` の 4 simdgroup 分担を wm1wn2（2
+            // simdgroup）へ落とし、simdgroup あたりの acc タイル
+            // （`gemm.metal` の acc_rows=(BM/WM)/8・acc_cols=(BN/WN)/8 に
+            // 従うと cand2 は 2x4〈acc_rows=2, acc_cols=4〉、本候補は
+            // 4x4〈acc_rows=4, acc_cols=4〉）を変える構成。
+            // `tile.rs::CANDIDATES` の index 8（末尾追加。既存 index 0〜7
+            // は不変）に対応する。
+            (
+                "cand8_32x64x16_wm1wn2",
+                TileConfig {
+                    bm: 32,
+                    bn: 64,
+                    bk: 16,
+                    wm: 1,
+                    wn: 2,
+                    staged: true,
                 },
             ),
         ]
