@@ -1763,7 +1763,23 @@ impl CudaGemmAuto {
     /// `self.mma`／`self.wmma` の有無と形状を渡すだけの薄いラッパー。
     /// 診断・テスト用の読み取り口であり利用者向け切替 API ではない
     /// （REQ-11・`docs/dispatch-rules-design.md` §5.6 判定規則 7）。
+    ///
+    /// codex-review PR #1177 指摘の是正: この内部ディスパッチ実装選択は
+    /// 「診断・テスト用」の意図に反して常時 `pub` になっており、
+    /// `crate::lib` の無条件 re-export と合わせて利用者が依存しうる公開
+    /// API 面へ漏出していた。`SpecializedMmaKernelHandle` 等と同じ
+    /// `internal-diagnostics` feature（既定 off）でのみ `pub` とし、
+    /// 通常ビルドでは crate 内部（`run_f16` 本体・単体テスト）限定の
+    /// `pub(crate)` に留める。戻り値型 [`F16MatrixUnitImpl`] 自体は feature
+    /// ゲートせず定義するが、`crate::lib` の re-export（同 feature ゲート
+    /// 済み）を経由しない限り crate 外からは到達できない。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn f16_matrix_unit_impl(&self, m: u32, n: u32, k: u32) -> F16MatrixUnitImpl {
+        select_f16_matrix_unit_impl(self.mma.is_some(), self.wmma.is_some(), m, n, k)
+    }
+
+    #[cfg(not(feature = "internal-diagnostics"))]
+    pub(crate) fn f16_matrix_unit_impl(&self, m: u32, n: u32, k: u32) -> F16MatrixUnitImpl {
         select_f16_matrix_unit_impl(self.mma.is_some(), self.wmma.is_some(), m, n, k)
     }
 }

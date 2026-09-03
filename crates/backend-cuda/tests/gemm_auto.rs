@@ -219,6 +219,14 @@ fn select_tile_config_for_device_succeeds_on_real_hardware() {
 /// `Tiled`（非対応環境）を返し、`run_f16` の出力が引き続き参照実装と
 /// 複合判定で一致することを検証する（mma → wmma/tiled フォールバック
 /// 経路の維持を実機で実証する。§5.6 判定規則 2・3・#1156）。
+///
+/// `F16MatrixUnitImpl`／`CudaGemmAuto::f16_matrix_unit_impl`（診断アクセサ）
+/// を直接使うため、`internal-diagnostics` feature（既定 off）限定
+/// （codex-review PR #1177 指摘の是正。`src/lib.rs`・`src/gemm_auto.rs` の
+/// 同 feature ゲート済み re-export／可視性を参照。`cargo test --all-
+/// features` でのみビルド・実行される。他のテスト関数はこの feature に
+/// 依存しないため無指定でも引き続き実行される）。
+#[cfg(feature = "internal-diagnostics")]
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
             test-ignored-cuda 経由で実行する"]
@@ -274,6 +282,11 @@ fn run_f16_misaligned_shape_falls_back_to_wmma_or_tiled() {
 /// `gemm_auto.rs::f16_matrix_unit_impl_tests`〈GPU 非依存〉が担当。
 /// 本テストは実機の `mma_available()`／`wmma` 構築結果と整合すること
 /// の統合検証に限定する）。
+///
+/// `F16MatrixUnitImpl`／`CudaGemmAuto::f16_matrix_unit_impl`（診断アクセサ）
+/// を直接使うため、`internal-diagnostics` feature（既定 off）限定
+/// （codex-review PR #1177 指摘の是正。上記テストと同じ理由）。
+#[cfg(feature = "internal-diagnostics")]
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
             test-ignored-cuda 経由で実行する"]

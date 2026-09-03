@@ -408,11 +408,27 @@ pub use mse::CudaMse;
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledPipelineFunction;
 pub use gemm_auto::{
-    CostModelParams, CudaGemmAuto, F16MatrixUnitImpl, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH,
-    TileCandidate, TileSelection, TileSelectionBasis, derive_stages_for_device,
-    enumerate_tile_candidates, enumerate_tile_candidates_for_device, select_tile_config,
-    select_tile_config_for_device,
+    CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
+    TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,
+    enumerate_tile_candidates_for_device, select_tile_config, select_tile_config_for_device,
 };
+// `F16MatrixUnitImpl`（`CudaGemmAuto::run_f16` の内部ディスパッチ実装選択を
+// 表す列挙型）・`CudaGemmAuto::f16_matrix_unit_impl`（その診断アクセサ）は
+// 「診断・テスト用」「利用者向け切替 API ではない」という意図を持つ内部
+// 表現であり、`SpecializedMmaKernelHandle`・`diagnostics` モジュールと同じ
+// 方針（本ファイル上部コメント参照）で `internal-diagnostics` feature
+// （既定 off）でゲートし、通常ビルドの安定した公開 API 面から除外する
+// （codex-review PR #1177 指摘の是正: 型を crate root から無条件 re-export
+// し、アクセサも常時 `pub` にしていたため、利用者が依存しうる公開 API に
+// なっていた。将来の内部カーネル選択変更〈mma/wmma/tiled の優先順位・
+// 実装追加〉を破壊的変更にしないため、実装選択そのものは `run_f16` の
+// 戻り値のみを通じて観測させる契約に統一する）。`tests/gemm_auto.rs` の
+// 診断アクセサ使用箇所は `Cargo.toml` の `[[test]]` セクションで
+// `required-features` を要求せず、当該テスト関数のみ同 feature で
+// `#[cfg]` ゲートする（同ファイル内の非依存テストは feature 無指定でも
+// 実行され続ける）。
+#[cfg(feature = "internal-diagnostics")]
+pub use gemm_auto::F16MatrixUnitImpl;
 // `SpecializedMmaKernelHandle`／`run_specialized_mma_f16` はテスト・ベンチ専用の
 // 検証用ハンドル（`gemm_auto.rs` 冒頭ドキュメンテーションコメント参照。本番
 // ディスパッチ経路〈`CudaGemmAuto::run_f16`〉からは呼ばれない）。PR #685
