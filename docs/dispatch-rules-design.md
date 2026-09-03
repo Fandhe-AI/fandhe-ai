@@ -394,7 +394,7 @@ ceiling 未承認のため PR #1179 codex-review 指摘を受けて保留中
 | CPU 側 ISA dispatch の変更 | 対象外（`gemm_blis/microkernel.rs` は実装済み・変更なし） |
 | f16 `MatrixUnit` 経路の mma 優先実装（`CudaGemmAuto` へのフィールド追加・分岐切替） | #1152（フィールド追加は実装済み）・#1156（分岐切替。実装済み） |
 | GB10 数値一致非後退（§5.6 の判定規則の実機検証） | #1158 |
-| TFLOPS 記録・`wmma_f16_opt` の扱い確定・本番結線 | #1160（完了。`MMA_PRIORITY_PRODUCTION_ENABLED = true`） |
+| TFLOPS 記録・`wmma_f16_opt` の扱い確定 | #1160（完了）。mma 優先の本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は baseline ceiling 未承認のため保留中（PR #1179 codex-review 指摘。承認後の後続作業） |
 | `gemm_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR` の `tensor-core::dispatch` への集約（未起票・候補） | 対象外（§5.6 参照。第 2 層定数のため現状維持） |
 
 ## 7. 出典一覧

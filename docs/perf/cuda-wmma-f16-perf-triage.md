@@ -114,8 +114,10 @@ ceiling 未承認〉により `false` へ差し戻し済み**。詳細は
 優先する `docs/dispatch-rules-design.md` §5.6 の mma 優先設計どおり実装済み（#1156）。
 この優先順位は `gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED` でゲートされており、
 イシュー #1160 の GB10 実機実測（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`）で
-非後退を確認したため `true`（mma 優先）へ本番結線済みである（`run_f16` は
-cc>=8.0・整列形状で `mma_sync_f16` を優先して呼ぶ）。ただし `CudaGemmAuto` 自体は
+非後退を確認した一方、mma 優先の本番有効化（`true`）は K=4096 非後退ゲートの
+`MmaF16` baseline ceiling 未承認（PR #1179 codex-review 指摘）により
+`false`（wmma 優先・#1156 以前と同じ従来経路）のまま保留している（`run_f16` は
+現状 cc・整列形状に関わらず `wmma_f16` を優先して呼ぶ）。ただし `CudaGemmAuto` 自体は
 本イシュー #1160 の時点でも facade／`BackendOps::gemm`／`bench-harness` のいずれ
 からも呼ばれておらず本番未結線のまま（`gemm_auto.rs::new` doc コメント参照。
 `BackendOps::gemm` は引き続き f32 tiled カーネル固定）である。この
@@ -270,13 +272,17 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
   dim2048 で約 7 倍・dim4096 で約 11〜13 倍。§3.1 の初回診断計測・§4.3 の是正後実測
   いずれも同傾向）の優位性を、
   f16 auto 経路（`CudaGemmAuto::run_f16`）へ結線するかどうかの設計判断。#1156 で
-  `CudaGemmAuto::run_f16` の `MatrixUnit` 分岐へ結線済み（cc>=8.0・整列形状で優先。
-  §4.1 参照）。完了条件（2026-09-03 GB10 実機実測後に追加）: `tensor_core_
-  real_device.rs::tensor_core_tflops_record` の f16 assert
-  （§4.3 で FAIL）が pass すること。**#1160（2026-09-04 GB10 実機実測）で
-  `MMA_PRIORITY_PRODUCTION_ENABLED` を `true` へ本番結線し、f16 assert の
-  比較対象を本番経路が実際に選ぶ実装（`mma_sync_f16`）へ差し替えた結果
-  pass に転じたことを確認した（§8）。完了条件は満たされた。**
+  `select_f16_matrix_unit_impl` の判定ロジック自体は結線済み（cc>=8.0・整列形状で
+  `mma_sync_f16` を優先する設計。§4.1 参照）。完了条件（2026-09-03 GB10 実機実測後に
+  追加）: `tensor_core_real_device.rs::tensor_core_tflops_record` の f16 assert
+  （§4.3 で FAIL）が pass すること。**#1160（2026-09-04 GB10 実機実測）で f16 assert
+  の比較対象を本番経路が実際に選ぶ実装から動的に決定する方式へ差し替え、
+  `MMA_PRIORITY_PRODUCTION_ENABLED` を一時的に `true` にした状態で pass することを
+  確認した（§8）が、mma 優先の本番有効化自体は K=4096 非後退ゲートの `MmaF16`
+  baseline ceiling 未承認（PR #1179 codex-review 指摘）により `false`（wmma 優先）へ
+  差し戻し済みである。完了条件（assert が pass すること）は「本番選択結果に追従する
+  比較方式」の整備として満たされたが、mma 優先自体の本番有効化は baseline ceiling
+  承認まで保留のままである。**
 
 ## 7. 関連ファイル
 
@@ -334,7 +340,8 @@ pass すること）はこれで満たされた。
 - **根拠 1**: GB10 カーネル単体で opt≈basic（§4.1・§3.1 参照。512/2048/4096
   は basic が僅かに速く、768〜1536 は opt が僅かに速い。一貫した優劣なし）。
   共有メモリ最適化は f16 で効果を持たないが、後退もしていない
-- **根拠 2**: 結線後（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）の WMMA 経路
+- **根拠 2**: 結線後（`MMA_PRIORITY_PRODUCTION_ENABLED = true`。その後 baseline
+  ceiling 未承認により `false` へ差し戻し済み。上記状態ブロック参照）の WMMA 経路
   は「mma 事前形状ゲート非充足（`n % 8 != 0` または `k % 8 != 0`・grid 上限
   超過）」「cc 7.x（mma 非対応）」「`CudaMmaGemm` NVRTC 失敗」時の
   フォールバックとして本番到達性を保つため、証跡専用への格下げ（到達不能
@@ -357,7 +364,8 @@ pass すること）はこれで満たされた。
 
 ### 8.6 関連ファイル（本節分）
 
-- `crates/backend-cuda/src/gemm_auto.rs`（`MMA_PRIORITY_PRODUCTION_ENABLED = true` 結線）
+- `crates/backend-cuda/src/gemm_auto.rs`（本節実測当時は `MMA_PRIORITY_PRODUCTION_ENABLED
+  = true` で計測。baseline ceiling 未承認のため現在は `false` へ差し戻し済み）
 - `crates/backend-cuda/tests/tensor_core_real_device.rs`（f16 計測の本番経路追従）
 - `crates/backend-cuda/tests/gemm_auto.rs`（`f16_matrix_unit_impl_reports_selected_implementation` 期待値更新）
 - `scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh`（`BIN` の `CARGO_TARGET_DIR` 対応是正）

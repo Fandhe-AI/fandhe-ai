@@ -66,22 +66,28 @@
 //! ## f16 経路の本番 auto 経路追従（イシュー #1160）
 //!
 //! #1160 で `CudaGemmAuto::run_f16` の `MatrixUnit` 分岐 mma 優先化
-//! （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = true`）を本番結線
-//! したことに伴い、本ファイルの f16 assert（Tensor Core 経路が tiled f32
-//! を上回ること）が比較する対象カーネルを、本番が実際に選ぶ実装へ追従
-//! させる。`CudaGemmAuto::mma_available()` が `true`（cc>=8.0・NVRTC
-//! コンパイル成功）なら `CudaMmaGemm`（本番 f16 経路が M=N=K=4096 の
-//! 整列形状で実際に選ぶ実装）のカーネル単体計測を「本番 f16 経路」の
-//! 代表値として assert に使い、`false` なら従来どおり `CudaWmmaGemm`
-//! （opt）を使う（`gemm_auto::select_f16_matrix_unit_impl` の判定順序
-//! と同じ fail-safe 優先順位）。選択器（`f16_matrix_unit_impl` 診断
-//! アクセサ。`internal-diagnostics` feature 限定）が実際に選ぶ実装と
-//! 本テストが計測する実装が食い違わないことを、同 feature が有効な
-//! ビルド（`make test-ignored-cuda` は `--all-features`）でのみ
-//! fail-closed に検査する（選択器が選ばない経路を黙って計測し続けて
-//! 本番経路との乖離を見逃す false-green を防ぐ）。`wmma_f16_opt` の
-//! カーネル単体計測は本番既定では主経路から外れたため、assert には
-//! 使わず参考行として `println!` するのみに格下げする（`docs/perf/
+//! （`gemm_auto::select_f16_matrix_unit_impl`）自体は §5.6 設計どおり
+//! 実装済みだが、mma 優先を有効化する `gemm_auto::
+//! MMA_PRIORITY_PRODUCTION_ENABLED` は K=4096 非後退ゲートの `MmaF16`
+//! baseline ceiling 未承認（PR #1179 codex-review 指摘）により
+//! **`false`（wmma 優先・#1156 以前と同じ従来経路）のまま保留**して
+//! いる（`gemm_auto.rs` 該当 docblock 参照）。本ファイルの f16 assert
+//! （Tensor Core 経路が tiled f32 を上回ること）が比較する対象カーネル
+//! は、本番が実際に選ぶ実装へ追従させる。選択器（`f16_matrix_unit_impl`
+//! 診断アクセサ。`internal-diagnostics` feature 限定）が返す実装
+//! （`Mma` なら `CudaMmaGemm`、`Wmma` なら `CudaWmmaGemm`（opt））の
+//! カーネル単体計測を「本番 f16 経路」の代表値として assert に使う
+//! （`gemm_auto::select_f16_matrix_unit_impl` の判定順序と同じ fail-safe
+//! 優先順位）。同 feature が無効なビルドでは診断アクセサへ到達できない
+//! ため、本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = false`）に基づき
+//! `Wmma` を前提に固定する（実機実行は `make test-ignored-cuda` の
+//! `--all-features` に限られるため、この固定値が実際に使われることは
+//! ない）。診断アクセサが有効な場合はさらに、選択器が実際に選ぶ実装と
+//! 本テストが計測する実装が食い違わないことを fail-closed に検査する
+//! （選択器が選ばない経路を黙って計測し続けて本番経路との乖離を見逃す
+//! false-green を防ぐ）。`wmma_f16_opt` は本番既定では現在も主経路
+//! （`MMA_PRIORITY_PRODUCTION_ENABLED = true` へ復帰するまでの間）で
+//! あり続けるため assert 対象のまま扱う（`docs/perf/
 //! cuda-wmma-f16-perf-triage.md` §8「`wmma_f16_opt` の扱い」参照）。
 
 use bench_harness::{BenchReport, MeasurementConfig};
@@ -253,20 +259,36 @@ fn tensor_core_tflops_record() {
 
     // 本番 f16 経路（イシュー #1160）: `CudaGemmAuto::run_f16` が
     // M=N=K=4096（整列形状）で実際に選ぶ実装をカーネル単体計測し、この
-    // 値を f16 assert の比較対象とする（`gemm_auto::
-    // MMA_PRIORITY_PRODUCTION_ENABLED = true` の下では
-    // `auto.mma_available()` が `true` の環境で `CudaMmaGemm` が選ばれ、
-    // `false` の環境〈cc<8.0 または NVRTC コンパイル失敗〉では
-    // `CudaWmmaGemm` が選ばれる。上記の `wmma_f16_kernel_only` はこの
-    // 分岐の結果を再利用せず独立に測るため、mma_available()==false の
-    // 環境ではここで測り直さず上記の値をそのまま使う）。
+    // 値を f16 assert の比較対象とする。本番選択結果そのもの
+    // （`f16_matrix_unit_impl` 診断アクセサが返す `F16MatrixUnitImpl`）
+    // から判定する（`auto.mma_available()` だけでは
+    // `MMA_PRIORITY_PRODUCTION_ENABLED`〈本番既定 `false`〉を無視して
+    // しまい、cc>=8.0 環境で実際は `Wmma` が選ばれるのに `Mma` を計測
+    // した扱いになってしまう。PR #1179 codex-review 指摘）。診断アクセサ
+    // は `internal-diagnostics` feature 限定のため、同 feature 無効時は
+    // 本番既定（`false`＝`Wmma`）を前提に固定する（実機実行は
+    // `make test-ignored-cuda` の `--all-features` に限られるため、この
+    // 固定値が実際に使われることはない）。上記の `wmma_f16_kernel_only`
+    // はこの分岐の結果を再利用せず独立に測るため、`Wmma` が選ばれた
+    // 環境ではここで測り直さず上記の値をそのまま使う。
+    // `internal-diagnostics` feature 無効時は `f16_matrix_unit_impl` 診断
+    // アクセサへ到達できず `auto` を使わないため（`production_f16_uses_mma`
+    // は本番既定 `false` に固定する下記 cfg 分岐）、その場合の unused
+    // warning を許容する。
+    #[cfg_attr(not(feature = "internal-diagnostics"), allow(unused_variables))]
     let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new must succeed");
-    let production_f16_uses_mma = auto.mma_available();
+    #[cfg(feature = "internal-diagnostics")]
+    let production_f16_uses_mma = matches!(
+        auto.f16_matrix_unit_impl(m, n, k),
+        fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma
+    );
+    #[cfg(not(feature = "internal-diagnostics"))]
+    let production_f16_uses_mma = false;
 
     let (production_f16_path_label, production_f16_kernel_tflops) = if production_f16_uses_mma {
         let mma_gemm = CudaMmaGemm::new(&device).expect(
-            "CudaMmaGemm::new must succeed when CudaGemmAuto::mma_available() is true \
-             (cc>=8.0・NVRTC コンパイル成功が前提)",
+            "CudaMmaGemm::new must succeed when f16_matrix_unit_impl() selects Mma \
+             (cc>=8.0・NVRTC コンパイル成功・MMA_PRIORITY_PRODUCTION_ENABLED=true が前提)",
         );
         let (a_mma_dev, b_mma_dev) = mma_gemm
             .upload_f16(&a_f16, &b_f16)
@@ -300,7 +322,8 @@ fn tensor_core_tflops_record() {
         ("mma_sync_f16", mma_kernel_tflops)
     } else {
         println!(
-            "tflops_record_kernel_only path=wmma_f16_opt(production; mma_available()=false) \
+            "tflops_record_kernel_only path=wmma_f16_opt(production; \
+             f16_matrix_unit_impl()=Wmma〈MMA_PRIORITY_PRODUCTION_ENABLED=false 保留中〉) \
              tflops={wmma_f16_kernel_tflops:.3}"
         );
         ("wmma_f16_opt", wmma_f16_kernel_tflops)
@@ -311,7 +334,10 @@ fn tensor_core_tflops_record() {
     // （`internal-diagnostics` feature 限定。選択器が選ばない経路を
     // 黙って計測し続け本番経路との乖離を見逃す false-green を防ぐ。
     // `make test-ignored-cuda` は `--all-features` のため GB10 実機
-    // 実行では常にこの検査を通る）。
+    // 実行では常にこの検査を通る。`production_f16_uses_mma` 自体も同じ
+    // 選択器の呼び出しから導出しているため、ここでの再呼び出しは
+    // 選択器が形状ごとに決定的であること・呼び出し間で結果が変わらない
+    // ことを確認する回帰検査として機能する）。
     #[cfg(feature = "internal-diagnostics")]
     {
         let selected = auto.f16_matrix_unit_impl(m, n, k);
@@ -323,9 +349,9 @@ fn tensor_core_tflops_record() {
         assert_eq!(
             selected, expected,
             "f16_matrix_unit_impl（選択器）が {selected:?} を返したが、本テストは \
-             {expected:?}（mma_available()={production_f16_uses_mma}）を計測している。\
-             tensor_core_tflops_record の f16 assert は本番経路が選ぶ実装と一致しない \
-             量を比較してしまう"
+             {expected:?}（本番選択結果から導出した production_f16_uses_mma=\
+             {production_f16_uses_mma}）を計測している。tensor_core_tflops_record の \
+             f16 assert は本番経路が選ぶ実装と一致しない量を比較してしまう"
         );
     }
 
