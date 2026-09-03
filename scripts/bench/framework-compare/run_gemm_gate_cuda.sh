@@ -61,8 +61,18 @@ OUT="results/raw/results-dgx-gemm-gate-${LABEL}.jsonl"
 SKIP="results/raw/skipped-dgx-gemm-gate-${LABEL}.log"
 MANIFEST="results/raw/manifest-dgx-gemm-gate-${LABEL}.json"
 mkdir -p results/raw
-: > "$OUT"
-: > "$SKIP"
+
+# 計測結果は一時ファイルへ書き、ビルド・manifest 検証・計測ループが完走した
+# 後にのみ最終パス（$OUT/$SKIP）へ原子的に置換する（mv）。旧実装は本行の
+# 時点で $OUT/$SKIP を直接 `: >` で切り詰めていたため、GEMM_GATE_SKIP_BUILD=1
+# で manifest 不在・不一致の場合や通常実行でビルド失敗の場合に、同じ label の
+# 直前の有効な実機計測データが検証前に失われていた（#1166 codex-review 指摘
+# PRRT_kwDOTuUCJc6euxgr）。tmp ファイル自体は使い捨てのスクラッチのためここで
+# 切り詰めてよい（security.md A08: 検証が通らない限り最終パスは変更しない）。
+OUT_TMP="${OUT}.tmp"
+SKIP_TMP="${SKIP}.tmp"
+: > "$OUT_TMP"
+: > "$SKIP_TMP"
 
 ANY_FAILED=0
 
@@ -219,9 +229,11 @@ verify_manifest() {
 run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
   local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh} extra_flag=${6:-}
   echo "== $bin $task $device size=$size mode=$mode extra=${extra_flag:-none} =="
-  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" ${extra_flag:+"$extra_flag"} --out "$OUT" 2>err.tmp; then
-    echo "$bin task=$task device=$device size=$size mode=$mode extra=${extra_flag:-none} : $(cat err.tmp)" >> "$SKIP"
-    echo "  -> FAILED (recorded in $SKIP)"
+  # $OUT_TMP/$SKIP_TMP へ書く（最終パスへの反映はループ完走後の原子的 mv。
+  # 上記コメント・#1166 参照）。
+  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" ${extra_flag:+"$extra_flag"} --out "$OUT_TMP" 2>err.tmp; then
+    echo "$bin task=$task device=$device size=$size mode=$mode extra=${extra_flag:-none} : $(cat err.tmp)" >> "$SKIP_TMP"
+    echo "  -> FAILED (recorded in $SKIP_TMP)"
     ANY_FAILED=$((ANY_FAILED + 1))
   fi
   rm -f err.tmp
@@ -256,9 +268,12 @@ if [[ "${GEMM_GATE_SKIP_BUILD:-0}" != "1" ]]; then
   FANDHE_BUILD_ARGS=(build --release -p bench-fandhe "${CARGO_CONFIG_ARGS[@]}")
   if ! cargo "${FANDHE_BUILD_ARGS[@]}" 2>build-err.tmp; then
     tail -40 build-err.tmp
-    echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >> "$SKIP"
+    # ビルド失敗はまだ検証前のため最終 $SKIP には触れず、失敗内容は標準出力
+    # （上記 tail）で可視化するに留める（#1166。$OUT/$SKIP の直前有効データを
+    # 保全する）。
+    echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')"
     rm -f build-err.tmp
-    echo "done. results in $OUT ; failures (if any) in $SKIP"
+    echo "done. build failed before any measurement; $OUT/$SKIP left untouched"
     exit 1
   fi
   rm -f build-err.tmp
@@ -272,9 +287,10 @@ if [[ "${GEMM_GATE_SKIP_BUILD:-0}" != "1" ]]; then
   echo "== build bench-candle (cuda) =="
   if ! cargo build --release -p bench-candle --no-default-features --features cuda 2>build-err.tmp; then
     tail -40 build-err.tmp
-    echo "bench-candle BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >> "$SKIP"
+    # 同上（bench-fandhe ビルド失敗時と同じ理由。#1166）。
+    echo "bench-candle BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')"
     rm -f build-err.tmp
-    echo "done. results in $OUT ; failures (if any) in $SKIP"
+    echo "done. build failed before any measurement; $OUT/$SKIP left untouched"
     exit 1
   fi
   rm -f build-err.tmp
@@ -302,6 +318,14 @@ done
 
 echo "== nvidia-smi (after) =="
 nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader 2>&1 || true
+
+# 計測ループが完走した時点で初めて、検証済みの計測結果を最終パスへ原子的に
+# 反映する（mv は同一ファイルシステム内で atomic。#1166 codex-review 指摘
+# PRRT_kwDOTuUCJc6euxgr への対処）。ここより前に exit したパス（ビルド失敗・
+# manifest 検証失敗）では $OUT/$SKIP は一切変更されず、直前の有効な計測結果
+# が保全される。
+mv -f "$OUT_TMP" "$OUT"
+mv -f "$SKIP_TMP" "$SKIP"
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
 
