@@ -340,7 +340,10 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
   （`docs/cuda-tensor-core-parity-judgment-decision.md`。厳密ゼロ fail 判定
   が成立しない形状は実測 baseline 非後退方式）。tolerance 定数・
   `ParityBaseline` 行の追加・変更はユーザー承認必須（本節では確定しない）。
-  GB10 実機実測は #1158 が担当する
+  GB10 実機実測は #1158 で完了した（`docs/perf/cuda-parity-baseline.md`
+  §12。切替前〈WMMA 優先・本番既定〉・切替後〈ノード側限定フリップの
+  mma 優先〉双方で非後退を確認。フリップ自体はコミットせず、恒久フリップ
+  判断は #1160 へ引き継ぐ）
 - 性能: 切替前後を同一プロトコル・5 回計測中央値で比較し、後退時は結線
   しない（#1156 のユーザー承認条件）。TFLOPS 記録・`wmma_f16_opt` の扱い
   確定は #1160 が担当する
@@ -348,8 +351,8 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
 **実装 Issue 対応表**: 構築（`mma` フィールド追加。fail-soft）は #1152
 （実装済み）、呼び出し分岐切替（形状ゲート込みの優先順位判定。
 `select_f16_matrix_unit_impl`）は #1156（実装済み）、GB10 数値一致
-非後退検証は #1158、TFLOPS 記録・`wmma_f16_opt` 扱いの確定は #1160 が
-担当する。
+非後退検証は #1158（完了。`docs/perf/cuda-parity-baseline.md` §12）、
+TFLOPS 記録・`wmma_f16_opt` 扱いの確定は #1160 が担当する。
 
 ## 6. スコープ外
 

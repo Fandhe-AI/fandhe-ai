@@ -20,6 +20,11 @@ use fandhe_ai_backend_cuda::{
 use fandhe_ai_tensor_core::dispatch::{DType, GemmShape};
 use half::f16;
 
+// イシュー #1158（f16 経路切替後の数値一致・非後退確認）の 2 テストが
+// `common::parity_baseline`（ベースライン fixture・非後退判定ユーティリティ）
+// を使うため読み込む（`cpu_cuda_mma_parity.rs` 等と同じ `mod common;` パターン）。
+mod common;
+
 // `fandhe_ai_backend_cpu::matmul_reference_fma`／`assert_parity` はクレートルート
 // で再エクスポートされている（`crates/backend-cpu/src/lib.rs`）。
 // `cpu_cuda_parity.rs`／`cpu_cuda_wmma_parity.rs` と同じ呼び出し規約。
@@ -314,5 +319,174 @@ fn f16_matrix_unit_impl_reports_selected_implementation() {
         "本番既定（MMA_PRIORITY_PRODUCTION_ENABLED = false）では \
          mma_available()（{mma_available}）・cc（{major}.x）に関わらず \
          Mma は選ばれないはず"
+    );
+}
+
+/// イシュー #1158: `CudaGemmAuto::run_f16` 経由（auto 経路）で
+/// `cpu_cuda_mma_parity.rs::mma_f16_matches_reference_across_shapes` と
+/// **同一の形状・シード・入力生成手順**を使い、CPU 参照実装との
+/// 厳密ゼロ fail（`assert_parity`。spec REQ-2「2026-09-02 追記」項目 1）
+/// が auto 経路でも成立することを確認する。
+///
+/// 本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = false`）では
+/// `run_f16` はこれらの整列形状で `CudaWmmaGemm::run_f16` を呼ぶ
+/// （`f16_matrix_unit_impl_reports_selected_implementation` が同じ実機で
+/// 確認済み）。将来 #1160 が同定数を `true` へ切り替えると
+/// `CudaMmaGemm::run_f16` へ切り替わるが、直接経路
+/// （`cpu_cuda_mma_parity.rs`）・WMMA 直接経路（`cpu_cuda_wmma_parity.rs`）
+/// 双方がこの 12 形状で GB10 実機ゼロ fail 済みのため、本テストは
+/// フリップ前後どちらの経路でも green のまま維持される設計とする
+/// （`docs/perf/cuda-parity-baseline.md` §12 実測記録）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn run_f16_matches_cpu_reference_across_aligned_shapes() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
+
+    // `cpu_cuda_mma_parity.rs::mma_f16_matches_reference_across_shapes` と
+    // 完全に同じ形状・idx 順（シードは `3000 + idx`）。
+    let cases: &[(u32, u32, u32)] = &[
+        (64, 128, 32),
+        (64, 128, 64),
+        (128, 256, 128),
+        (32, 64, 32),
+        (40, 24, 72),
+        (100, 40, 88),
+        (130, 72, 96),
+        (65, 136, 40),
+        (63, 120, 24),
+        (200, 264, 104),
+        (8, 8, 8),
+        (1, 136, 40),
+    ];
+
+    for (idx, &(m, n, k)) in cases.iter().enumerate() {
+        let seed = 3000 + idx as u64;
+        let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+        let a_f16: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+        let b_f16: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+        let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
+        let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
+
+        let mut c_ref_f32 = vec![0.0f32; (m as usize) * (n as usize)];
+        fandhe_ai_backend_cpu::matmul_reference_fma(
+            &a_f32,
+            &b_f32,
+            &mut c_ref_f32,
+            m as usize,
+            n as usize,
+            k as usize,
+        )
+        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+        let c_ref_rounded: Vec<f32> = c_ref_f32
+            .iter()
+            .map(|&x| f16::from_f32(x).to_f32())
+            .collect();
+
+        let c_gpu_f16 = auto
+            .run_f16(&a_f16, &b_f16, m, n, k)
+            .unwrap_or_else(|err| panic!("shape (m={m}, n={n}, k={k}): run_f16 failed: {err}"));
+        let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
+
+        fandhe_ai_backend_cpu::assert_parity(
+            &format!("CudaGemmAuto::run_f16 (aligned shape m={m} n={n} k={k}) vs CPU reference"),
+            &c_gpu_f32,
+            &c_ref_rounded,
+        );
+    }
+}
+
+/// イシュー #1158: `CudaGemmAuto::run_f16` の K=4096 ストレス形状
+/// （256×256×4096）が、**その時点で実際に選ばれている実装
+/// （[`fandhe_ai_backend_cuda::F16MatrixUnitImpl`]）に対応する既存
+/// ベースライン行**（`common::parity_baseline::ParityPath::MmaF16`／
+/// `WmmaF16`）から後退していないことを検査する「経路自覚型」の非後退
+/// テスト。
+///
+/// f16 K=4096 ストレスは K 支配的な積和で REQ-2 統一複合判定をわずかに
+/// 外れる既知の tail 超過を持つ（`docs/backend-cuda-real-device-testing.md`
+/// §5.3）ため、`assert_parity`（厳密ゼロ fail）ではなく非後退方式
+/// （spec REQ-2「2026-09-02 追記」項目 2）で判定する。
+///
+/// **選ばれた経路によって参照する baseline 行・入力生成シードを切り替える**
+/// （`Mma` → `ParityPath::MmaF16` 行・seed=9999〈`cpu_cuda_mma_parity.rs::
+/// mma_f16_k4096_stress_non_regression` と同一入力〉、`Wmma` →
+/// `ParityPath::WmmaF16` 行・seed=8888〈`cpu_cuda_wmma_parity.rs::
+/// wmma_f16_k4096_stress_non_regression` と同一入力〉）ことで、#1160 が
+/// `MMA_PRIORITY_PRODUCTION_ENABLED` を `true` へ切り替えても本テストの
+/// 期待値変更は不要になる設計とする。`Tiled` が選ばれるケースは GB10
+/// 実機では到達しない契約（対応する baseline 行を持たないため
+/// fail-closed に panic する）。
+///
+/// `F16MatrixUnitImpl`／`CudaGemmAuto::f16_matrix_unit_impl` を直接使う
+/// ため、`internal-diagnostics` feature（既定 off）限定
+/// （`f16_matrix_unit_impl_reports_selected_implementation` と同じ理由）。
+#[cfg(feature = "internal-diagnostics")]
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn run_f16_k4096_stress_non_regression_route_aware() {
+    use fandhe_ai_backend_cuda::F16MatrixUnitImpl;
+
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
+
+    let (m, n, k) = (256u32, 256u32, 4096u32);
+    let selected = auto.f16_matrix_unit_impl(m, n, k);
+    let (path, seed) = match selected {
+        F16MatrixUnitImpl::Mma => (common::parity_baseline::ParityPath::MmaF16, 9999u64),
+        F16MatrixUnitImpl::Wmma => (common::parity_baseline::ParityPath::WmmaF16, 8888u64),
+        F16MatrixUnitImpl::Tiled => panic!(
+            "CudaGemmAuto::run_f16 の K=4096 ストレス形状（m={m}, n={n}, k={k}）で \
+             F16MatrixUnitImpl::Tiled が選ばれました。この経路には対応する \
+             parity baseline 行が存在しないため非後退判定できません（GB10 \
+             実機では到達しない契約。mma_available()={}・wmma 構築有無を \
+             確認してください）",
+            auto.mma_available(),
+        ),
+    };
+
+    let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+    let a_f16: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+    let b_f16: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+    let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
+    let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
+
+    let mut c_ref_f32 = vec![0.0f32; (m as usize) * (n as usize)];
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a_f32,
+        &b_f32,
+        &mut c_ref_f32,
+        m as usize,
+        n as usize,
+        k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    let c_ref_rounded: Vec<f32> = c_ref_f32
+        .iter()
+        .map(|&x| f16::from_f32(x).to_f32())
+        .collect();
+
+    let c_gpu_f16 = auto
+        .run_f16(&a_f16, &b_f16, m, n, k)
+        .expect("CudaGemmAuto::run_f16 must succeed on CUDA-equipped test runner");
+    let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
+
+    let baseline = common::parity_baseline::BASELINES
+        .iter()
+        .find(|b| b.path == path && b.m == m && b.n == n && b.k == k && b.seed == seed)
+        .unwrap_or_else(|| {
+            panic!(
+                "{path} 256x256x4096 seed={seed} の baseline 行が \
+                 fixture に存在しません（selected={selected:?}）"
+            )
+        });
+    let report = fandhe_ai_backend_cpu::compare(&c_gpu_f32, &c_ref_rounded)
+        .expect("shape must match baseline fixture");
+    common::parity_baseline::assert_no_parity_regression(
+        &format!(
+            "run_f16_k4096_stress_non_regression_route_aware 256x256x4096 (selected={selected:?})"
+        ),
+        &report,
+        baseline,
     );
 }
