@@ -425,7 +425,7 @@ fn run_f16_matches_cpu_reference_across_aligned_shapes() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn run_f16_k4096_stress_non_regression_route_aware() {
-    use fandhe_ai_backend_cuda::F16MatrixUnitImpl;
+    use fandhe_ai_backend_cuda::{CudaWmmaGemm, F16MatrixUnitImpl};
 
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
@@ -434,7 +434,29 @@ fn run_f16_k4096_stress_non_regression_route_aware() {
     let selected = auto.f16_matrix_unit_impl(m, n, k);
     let (path, seed) = match selected {
         F16MatrixUnitImpl::Mma => (common::parity_baseline::ParityPath::MmaF16, 9999u64),
-        F16MatrixUnitImpl::Wmma => (common::parity_baseline::ParityPath::WmmaF16, 8888u64),
+        F16MatrixUnitImpl::Wmma => {
+            // codex-review P1 / Cursor Bugbot 指摘対応（PR #1178 review）:
+            // `F16MatrixUnitImpl::Wmma` は WMMA 実装が選ばれたことのみを
+            // 表し、`CudaWmmaGemm::run_f16` が opt カーネルを実際にロード
+            // できたことは保証しない（opt 利用不能時は basic へ黙って
+            // フォールバックする。`gemm_wmma.rs::CudaWmmaGemm::run_f16`）。
+            // `WmmaF16` baseline は opt 経路の実効値（`ParityPath::WmmaF16`
+            // ドキュメンテーションコメント参照）のため、フォールバック状態
+            // のまま比較すると opt 経路の消失を fail-open に見逃す。
+            // 既存 `cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress_non_regression`
+            // と同じ契約で、opt が実際に選択可能であることを fail-closed に
+            // 確認する（理由付きで検査不能を明示する）。
+            let wmma_gemm =
+                CudaWmmaGemm::new(&device).expect("WMMA kernel compilation must succeed");
+            assert!(
+                wmma_gemm.wmma_f16_opt_available(),
+                "opt カーネルが利用不能なため CudaGemmAuto::run_f16 は \
+                 CudaWmmaGemm::run_f16 経由で基本版へフォールバックします \
+                 （baseline は opt 経路の記録値のため検査不能。理由: {:?}）",
+                wmma_gemm.wmma_f16_opt_unavailable_reason()
+            );
+            (common::parity_baseline::ParityPath::WmmaF16, 8888u64)
+        }
         F16MatrixUnitImpl::Tiled => panic!(
             "CudaGemmAuto::run_f16 の K=4096 ストレス形状（m={m}, n={n}, k={k}）で \
              F16MatrixUnitImpl::Tiled が選ばれました。この経路には対応する \
