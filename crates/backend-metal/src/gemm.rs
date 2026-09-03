@@ -32,7 +32,7 @@ use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
 use crate::half_buffer::MetalHalfBuffer;
-use crate::layout::{self, MatrixLayout};
+use crate::layout::{self, MatrixLayout, TransposePattern};
 use crate::pad::{pad_matrix, pad_matrix_f16, pad8, unpad_matrix, unpad_matrix_f16};
 use crate::pipeline::{self, MtlLibrary, MtlPipeline};
 use crate::tile::{self, TileConfig};
@@ -75,6 +75,13 @@ thread_local! {
     /// スレッドローカルにすれば呼び出し元スレッドが実際に起動した回数のみを
     /// 観測できる。
     pub(crate) static BIAS_ACT_FUSED_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// [`MetalGemm::dispatch_strided_tiled_prepared`] が実際に呼ばれた回数
+    /// （イシュー #1138）。`BIAS_ACT_FUSED_LAUNCH_COUNT` と同じ設計判断
+    /// （スレッドローカル化の理由も同一。上記コメント参照）。
+    /// `dispatch_strided_bias_act_prepared` の tiled 経路ルーティングが
+    /// 実際に発火しているかをクレート内テストで確認するための可観測点。
+    pub(crate) static STRIDED_TILED_ROUTE_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
@@ -223,7 +230,14 @@ pub struct MetalGemm {
     /// `!Sync` な `RefCell` から `Mutex` へ変更した（`RefCell` のままだと
     /// `MetalGemm: !Sync` となり `Arc<MetalGemm>` を跨スレッド共有できず
     /// `context_cache` の `Send + Sync` コンパイル時アサーションが破綻する）。
-    tiled_cache: Mutex<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
+    /// イシュー #1138: キーへ [`TransposePattern`] を加えた
+    /// `(TileConfig, TransposePattern)`。`gemm_simdgroup_tiled` が
+    /// `TRANS_A`/`TRANS_B` function constant で NT/TN/TT へも特殊化される
+    /// ようになったため、同一 `TileConfig` でもパターンが異なれば別
+    /// パイプライン（MSL コンパイル結果）になる。NN（`TransposePattern::Nn`）
+    /// のみを渡す既存呼び出し元（`dispatch_variant`・`dispatch_tiled_prepared`）
+    /// の挙動・キャッシュヒット率は変わらない。
+    tiled_cache: Mutex<HashMap<(TileConfig, TransposePattern), objc2::rc::Retained<MtlPipeline>>>,
     /// `gemm_simdgroup_tiled_f16`（イシュー #796）の構成キー
     /// （[`TileConfig`]）→ パイプラインの遅延キャッシュ（[`Self::pipeline_for_tile_f16`]）。
     /// f32 版 [`Self::tiled_cache`] と同じ設計判断（候補構成は有限個のため
@@ -269,9 +283,9 @@ pub struct MetalGemm {
 /// 変換し panic させない（`crate::context_cache::lock_cache` と同じ変換
 /// 方針。`.claude/rules/coding-rust.md`「本番経路で unwrap/expect を
 /// 使わない」）。
-fn lock_tile_cache<T>(
-    mutex: &Mutex<HashMap<TileConfig, T>>,
-) -> Result<std::sync::MutexGuard<'_, HashMap<TileConfig, T>>, MetalError> {
+fn lock_tile_cache<K: std::hash::Hash + Eq, T>(
+    mutex: &Mutex<HashMap<K, T>>,
+) -> Result<std::sync::MutexGuard<'_, HashMap<K, T>>, MetalError> {
     mutex
         .lock()
         .map_err(|e| MetalError::ContextCacheUnavailable {
@@ -400,15 +414,24 @@ impl MetalGemm {
     /// の対象外）。返り値は実際に使用する構成（フォールバック後）を含み、
     /// [`Self::dispatch_variant`] がエンコード時の grid・threadgroup 計算に
     /// 使う。
+    ///
+    /// `pattern`（イシュー #1138）は `gemm_simdgroup_tiled` の `TRANS_A`/
+    /// `TRANS_B` function constant 特殊化を選ぶ。デバイス上限の事前検証は
+    /// `TileConfig::shared_mem_bytes_for(pattern)`（NN 以外は物理タイル
+    /// 配置が変わるため確保量も変わりうる）で行う。既存呼び出し元
+    /// （`dispatch_variant`・`dispatch_tiled_prepared`）は常に
+    /// `TransposePattern::Nn` を渡すため、キャッシュキー・検証結果は
+    /// 本イシュー以前と変わらない。
     fn pipeline_for_tile(
         &self,
         ctx: &MetalContext,
         cfg: TileConfig,
+        pattern: TransposePattern,
     ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
         let mut last_err: Option<MetalError> = None;
 
         for candidate in tile::fallback_chain(cfg) {
-            if let Some(pipeline) = lock_tile_cache(&self.tiled_cache)?.get(&candidate) {
+            if let Some(pipeline) = lock_tile_cache(&self.tiled_cache)?.get(&(candidate, pattern)) {
                 return Ok((Retained::clone(pipeline), candidate));
             }
 
@@ -421,6 +444,13 @@ impl MetalGemm {
             if candidate.validate(1024, max_shared_mem_bytes).is_err() {
                 continue;
             }
+            // イシュー #1138: NN 専用 `validate` の shared-mem 検査（内部で
+            // `shared_mem_bytes()`＝NN 固定式を使う）は転置パターンでは
+            // 過小評価しうるため、パターン込みの実際の確保量でも上限検査
+            // する。
+            if candidate.shared_mem_bytes_for(pattern) > max_shared_mem_bytes {
+                continue;
+            }
 
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -429,6 +459,7 @@ impl MetalGemm {
                 candidate,
                 self.swizzle_enabled,
                 self.fine_barrier_enabled,
+                pattern,
             ) {
                 Ok(pipeline) => {
                     let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
@@ -436,7 +467,7 @@ impl MetalGemm {
                         continue;
                     }
                     lock_tile_cache(&self.tiled_cache)?
-                        .insert(candidate, Retained::clone(&pipeline));
+                        .insert((candidate, pattern), Retained::clone(&pipeline));
                     return Ok((pipeline, candidate));
                 }
                 Err(err) => {
@@ -500,6 +531,12 @@ impl MetalGemm {
                 candidate,
                 self.swizzle_enabled,
                 self.fine_barrier_enabled,
+                // `gemm_simdgroup_tiled_f16` は TRANS_A/TRANS_B（index
+                // 9/10）を参照しないため、値の設定自体は無害な no-op
+                // （`swizzle_enabled`/`fine_barrier_enabled` と同じ扱い。
+                // `crate::pipeline::make_pipeline_with_constants` の
+                // `pattern` 引数ドキュメントコメント参照。イシュー #1138）。
+                TransposePattern::Nn,
             ) {
                 Ok(pipeline) => {
                     let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
@@ -562,7 +599,21 @@ impl MetalGemm {
         ctx: &MetalContext,
         cfg: TileConfig,
     ) -> Result<TileConfig, MetalError> {
-        self.pipeline_for_tile(ctx, cfg)
+        self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn)
+            .map(|(_, resolved)| resolved)
+    }
+
+    /// [`Self::resolve_tile_config`] の転置パターン版（イシュー #1138）。
+    /// `tile.rs` の `#[cfg(test)] mod tests` が `CANDIDATES` を NT/TN/TT
+    /// 込みで巡回し、フォールバックの有無をパターン別に検証するために使う。
+    #[cfg(test)]
+    pub(crate) fn resolve_tile_config_for_pattern(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+        pattern: TransposePattern,
+    ) -> Result<TileConfig, MetalError> {
+        self.pipeline_for_tile(ctx, cfg, pattern)
             .map(|(_, resolved)| resolved)
     }
 
@@ -785,19 +836,90 @@ impl MetalGemm {
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
         validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
 
-        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg)?;
+        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn)?;
         ctx.dispatch_sync(|encoder| {
             encode_dispatch_tiled(
                 encoder,
                 &pipeline,
                 a_buf,
+                0,
                 b_buf,
+                0,
                 c_buf,
                 dims,
                 resolved_cfg,
                 self.swizzle_enabled,
+                GemmStrides::nn(dims.k, dims.n),
+                TransposePattern::Nn,
             );
         })?;
+
+        Ok(resolved_cfg)
+    }
+
+    /// `gemm_simdgroup_tiled`（`TRANS_A`/`TRANS_B` 拡張。イシュー #1138）への
+    /// strided 明示入口。bias/act エピローグは持たない（[`Self::
+    /// dispatch_tiled_prepared`] と同じ「GPU 実行のみ」計測境界。呼び出し元
+    /// がバイアス無し・活性化無しの場合のみ使う契約）。`a_layout`/
+    /// `b_layout`（[`crate::layout::MatrixLayout`]）を介して NT/TN/TT・
+    /// offset 付き view をそのまま受け取り、`strided_tiled_eligibility`
+    /// を通過した入力のみ `cfg`（フォールバック解決込み）へディスパッチする。
+    /// 戻り値は fallback 解決後に実際に採用した構成。
+    ///
+    /// [`Self::dispatch_strided_bias_act_prepared`] のルーティング判断
+    /// （bias/act 無しかつ適格な入力を本関数へ委譲するか）は実測
+    /// （`docs/perf/metal-gemm-transpose-tiled.md`）に基づき別途行う（本
+    /// 関数自体は常に利用可能な明示入口として提供する）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_strided_tiled_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        let (dims, strides) = validate_strided_dims(
+            a_buf.len(),
+            a_offset,
+            a_layout,
+            b_buf.len(),
+            b_offset,
+            b_layout,
+            c_buf.len(),
+            m,
+            n,
+            k,
+        )?;
+        strided_tiled_eligibility(m, n, k, a_layout, a_offset, b_layout, b_offset)?;
+
+        let pattern = TransposePattern::from_flags(a_layout.transposed, b_layout.transposed);
+        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, pattern)?;
+        ctx.dispatch_sync(|encoder| {
+            encode_dispatch_tiled(
+                encoder,
+                &pipeline,
+                a_buf,
+                a_offset,
+                b_buf,
+                b_offset,
+                c_buf,
+                dims,
+                resolved_cfg,
+                self.swizzle_enabled,
+                strides,
+                pattern,
+            );
+        })?;
+
+        STRIDED_TILED_ROUTE_COUNT.with(|c| c.set(c.get() + 1));
 
         Ok(resolved_cfg)
     }
@@ -1411,17 +1533,22 @@ impl MetalGemm {
 
         match variant {
             GemmVariant::SimdgroupTiled(cfg) => {
-                let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg)?;
+                let (pipeline, resolved_cfg) =
+                    self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn)?;
                 ctx.dispatch_sync(|encoder| {
                     encode_dispatch_tiled(
                         encoder,
                         &pipeline,
                         &a_buf,
+                        0,
                         &b_buf,
+                        0,
                         &c_buf,
                         dims,
                         resolved_cfg,
                         self.swizzle_enabled,
+                        GemmStrides::nn(dims.k, dims.n),
+                        TransposePattern::Nn,
                     );
                 })?;
             }
@@ -1621,6 +1748,62 @@ fn validate_strided_dims(
     };
     let strides = GemmStrides::from_layouts(&a_layout, &b_layout)?;
     Ok((dims, strides))
+}
+
+/// [`MetalGemm::dispatch_strided_tiled_prepared`] の適格性ゲート（純粋
+/// 関数。GPU 非依存で Linux 上でも検証可能。イシュー #1138）。
+/// `gemm_simdgroup_tiled` の float4 ベクトルロード（staged 経路）・8x8
+/// direct-load（`simdgroup_load`/`_store`）は以下の前提に依存するため、
+/// 成立しない入力は classic strided（`gemm_tiled_bias_act`）へ
+/// フォールバックさせる（fail-closed。`.claude/rules/coding-rust.md`
+/// 「カーネル実装の境界検査」）:
+///
+/// - `m`/`n`/`k` がいずれも非 0・8 の倍数（`simdgroup_store` の 8x8
+///   直接ストア・direct-load 経路の pad8 契約前提。`gemm_simdgroup_tiled`
+///   自体は 8 の倍数でない実効次元も境界チェック込みで受理できるが、
+///   strided 入口は呼び出し元がパディングを行わないため、ここで明示的に
+///   要求する）
+/// - `a_layout.ld`/`b_layout.ld` が [`TileConfig::VEC_WIDTH`]（4）の倍数、
+///   かつ `a_offset`/`b_offset`（要素単位）も同じく 4 の倍数
+///   （float4 `reinterpret_cast` の 16 バイト境界。`setBuffer:offset:`
+///   後の device 先頭ポインタと合わせて成立させる必要があるため offset も
+///   検査する）
+fn strided_tiled_eligibility(
+    m: usize,
+    n: usize,
+    k: usize,
+    a_layout: MatrixLayout,
+    a_offset: usize,
+    b_layout: MatrixLayout,
+    b_offset: usize,
+) -> Result<(), MetalError> {
+    if m == 0 || n == 0 || k == 0 {
+        return Err(MetalError::StridedTiledIneligible {
+            detail: format!("m/n/k must be nonzero (m={m}, n={n}, k={k})"),
+        });
+    }
+    if !m.is_multiple_of(8) || !n.is_multiple_of(8) || !k.is_multiple_of(8) {
+        return Err(MetalError::StridedTiledIneligible {
+            detail: format!("m/n/k must all be multiples of 8 (m={m}, n={n}, k={k})"),
+        });
+    }
+    let vec_width = TileConfig::VEC_WIDTH as usize;
+    if !a_layout.ld.is_multiple_of(vec_width) || !b_layout.ld.is_multiple_of(vec_width) {
+        return Err(MetalError::StridedTiledIneligible {
+            detail: format!(
+                "a_layout.ld={} / b_layout.ld={} must both be multiples of {vec_width}",
+                a_layout.ld, b_layout.ld
+            ),
+        });
+    }
+    if !a_offset.is_multiple_of(vec_width) || !b_offset.is_multiple_of(vec_width) {
+        return Err(MetalError::StridedTiledIneligible {
+            detail: format!(
+                "a_offset={a_offset} / b_offset={b_offset} must both be multiples of {vec_width}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// [`validate_dims`] の f16 版（TASK-8.3b・#156）。判定ロジック自体は
@@ -2065,35 +2248,60 @@ fn encode_dispatch_f16(
 /// 呼び出し元が同一の `MetalGemm::swizzle_enabled` を両呼び出しへ渡す責務を
 /// 負う）で同期し、恒等変換（`tid_y = tgid.y`・`tid_x = tgid.x`）になる。
 /// threadgroup スレッド数は `cfg.thread_count()`（`wm*wn*32`）。
+///
+/// イシュー #1138: `a_offset`/`b_offset`（要素単位。`encode_dispatch_bias_act`
+/// と同じ規約でバイト単位へ変換して `setBuffer:offset:` へ渡す）・
+/// `strides`（`GemmStrides`。`gemm_simdgroup_tiled` の `constant
+/// GemmStrides& st [[buffer(4)]]` へ `setBytes`）・`pattern`（threadgroup
+/// 共有メモリ長を `TileConfig::shared_mem_bytes_for(pattern)` で計算する
+/// ため）を追加した。既存呼び出し元（`dispatch_variant`・
+/// `dispatch_tiled_prepared`）は `a_offset = b_offset = 0`・
+/// `GemmStrides::nn(dims.k, dims.n)`・`TransposePattern::Nn` を渡すため
+/// 挙動は非後退（`pattern == Nn` では `shared_mem_bytes_for` は
+/// `shared_mem_bytes()` と同値。`tile.rs` 末尾テスト参照）。
 #[allow(clippy::too_many_arguments)]
 fn encode_dispatch_tiled(
     encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
     a_buf: &MetalBuffer,
+    a_offset: usize,
     b_buf: &MetalBuffer,
+    b_offset: usize,
     c_buf: &MetalBuffer,
     dims: Dims,
     cfg: TileConfig,
     swizzle_enabled: bool,
+    strides: GemmStrides,
+    pattern: TransposePattern,
 ) {
     encoder.setComputePipelineState(pipeline);
+
+    let a_byte_offset = a_offset * std::mem::size_of::<f32>();
+    let b_byte_offset = b_offset * std::mem::size_of::<f32>();
 
     // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 1/2）と同一の
     // 契約。`a_buf`/`b_buf`/`c_buf` は `dispatch_sync` の同期完了まで
     // 呼び出し元スタックフレームで生存する。
     unsafe {
-        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), 0, 0);
-        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), a_byte_offset, 0);
+        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), b_byte_offset, 1);
         encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 2);
     }
 
     // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 2/2）と同一の
-    // 契約（`dims` はローカル変数、長さは `size_of::<Dims>()` と一致）。
+    // 契約（`dims`/`strides` はローカル変数、長さは各々の `size_of` と
+    // 一致）。`GemmStrides` は `gemm_tiled_bias_act` と共用のレイアウト
+    // 一致テスト対象（本ファイル `#[cfg(test)]` 参照）。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&dims).cast(),
             std::mem::size_of::<Dims>(),
             3,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&strides).cast(),
+            std::mem::size_of::<GemmStrides>(),
+            4,
         );
     }
 
@@ -2118,7 +2326,7 @@ fn encode_dispatch_tiled(
     // ドキュメント「破壊的変更を伴わない導入設計」節参照）のため、
     // `(bm*(bk+pad) + bk*(bn+pad))*4` は常に 256 以上かつ 16 の倍数になり
     // 非 staged 側の下限を上書きしない（bugbot 指摘。#253 レビュー）。
-    let shared_mem_bytes = cfg.shared_mem_bytes().max(16) as usize;
+    let shared_mem_bytes = cfg.shared_mem_bytes_for(pattern).max(16) as usize;
     debug_assert!(
         shared_mem_bytes.is_multiple_of(16),
         "Metal は setThreadgroupMemoryLength に 16 バイト境界整合を要求する"
@@ -2753,5 +2961,64 @@ mod tests {
              SIMDGROUP_THREADGROUP_WIDTH（{SIMDGROUP_THREADGROUP_WIDTH}）と \
              一致しません。`{expected_stride}` が見つかりませんでした"
         );
+    }
+
+    // --- strided_tiled_eligibility（イシュー #1138。pure・実機不要） ---
+
+    fn nn_layout(rows: usize, cols: usize, ld: usize) -> MatrixLayout {
+        MatrixLayout {
+            rows,
+            cols,
+            ld,
+            transposed: false,
+        }
+    }
+
+    #[test]
+    fn strided_tiled_eligibility_accepts_eight_divisible_nn_shape() {
+        let a = nn_layout(16, 32, 32);
+        let b = nn_layout(32, 24, 24);
+        assert!(strided_tiled_eligibility(16, 24, 32, a, 0, b, 0).is_ok());
+    }
+
+    #[test]
+    fn strided_tiled_eligibility_rejects_zero_dims() {
+        let a = nn_layout(0, 32, 32);
+        let b = nn_layout(32, 24, 24);
+        let err = strided_tiled_eligibility(0, 24, 32, a, 0, b, 0).unwrap_err();
+        assert!(matches!(err, MetalError::StridedTiledIneligible { .. }));
+    }
+
+    #[test]
+    fn strided_tiled_eligibility_rejects_non_eight_divisible_m() {
+        let a = nn_layout(15, 32, 32);
+        let b = nn_layout(32, 24, 24);
+        let err = strided_tiled_eligibility(15, 24, 32, a, 0, b, 0).unwrap_err();
+        assert!(matches!(err, MetalError::StridedTiledIneligible { .. }));
+    }
+
+    #[test]
+    fn strided_tiled_eligibility_rejects_non_four_divisible_ld() {
+        // `ld` が 8 整除の `rows`/`cols` とは独立に非 4 整除でありうる
+        // （view の元バッファが余分な列を持つ場合等）。
+        let a = nn_layout(16, 32, 33);
+        let b = nn_layout(32, 24, 24);
+        let err = strided_tiled_eligibility(16, 24, 32, a, 0, b, 0).unwrap_err();
+        assert!(matches!(err, MetalError::StridedTiledIneligible { .. }));
+    }
+
+    #[test]
+    fn strided_tiled_eligibility_rejects_non_four_divisible_offset() {
+        let a = nn_layout(16, 32, 32);
+        let b = nn_layout(32, 24, 24);
+        let err = strided_tiled_eligibility(16, 24, 32, a, 1, b, 0).unwrap_err();
+        assert!(matches!(err, MetalError::StridedTiledIneligible { .. }));
+    }
+
+    #[test]
+    fn strided_tiled_eligibility_accepts_four_divisible_offset() {
+        let a = nn_layout(16, 32, 32);
+        let b = nn_layout(32, 24, 24);
+        assert!(strided_tiled_eligibility(16, 24, 32, a, 4, b, 8).is_ok());
     }
 }

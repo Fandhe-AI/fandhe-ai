@@ -453,6 +453,51 @@ impl TileConfig {
         compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
     }
 
+    /// [`shared_mem_bytes`](Self::shared_mem_bytes)（NN 専用）の転置パターン
+    /// 一般化版（イシュー #1138）。`shaders/gemm.metal::gemm_simdgroup_tiled`
+    /// は `TRANS_A`/`TRANS_B` に応じて threadgroup タイルの物理配置を
+    /// 入れ替える（A: NN は `bm×(bk+pad)`・転置は `bk×(bm+pad)`。B: NN は
+    /// `bk×(bn+pad)`・転置は `bn×(bk+pad)`。
+    /// `docs/backend-metal-transpose-collapse-design.md` §2）。総要素数は
+    /// `bm*bk` で不変だが `pad` を加算する側の行数が変わるため合計バイト数は
+    /// パターンによって異なりうる（`pad` は固定 4 のため `bm != bk` では
+    /// `bm*(bk+pad) != bk*(bm+pad)`）。`TransposePattern::Nn` を渡した場合の
+    /// 戻り値は [`shared_mem_bytes`](Self::shared_mem_bytes) と完全に一致
+    /// する（NN 経路の非後退。本ファイル末尾テスト参照）。
+    pub fn shared_mem_bytes_for(&self, pattern: crate::layout::TransposePattern) -> u32 {
+        use crate::layout::TransposePattern;
+        if !self.staged {
+            return 0;
+        }
+        let trans_a = matches!(pattern, TransposePattern::Tn | TransposePattern::Tt);
+        let trans_b = matches!(pattern, TransposePattern::Nt | TransposePattern::Tt);
+
+        let bm = self.bm as u64;
+        let bn = self.bn as u64;
+        let bk = self.bk as u64;
+        let pad = self.pad() as u64;
+        let compute = || -> Option<u64> {
+            // A タイル: NN は `bm` 行 × `(bk+pad)` 列、転置は `bk` 行 ×
+            // `(bm+pad)` 列（本ファイル冒頭ドキュメントコメント参照）。
+            let (a_rows, a_row_len) = if trans_a {
+                (bk, bm.checked_add(pad)?)
+            } else {
+                (bm, bk.checked_add(pad)?)
+            };
+            let a_tile = a_rows.checked_mul(a_row_len)?;
+            // B タイル: NN は `bk` 行 × `(bn+pad)` 列、転置は `bn` 行 ×
+            // `(bk+pad)` 列。
+            let (b_rows, b_row_len) = if trans_b {
+                (bn, bk.checked_add(pad)?)
+            } else {
+                (bk, bn.checked_add(pad)?)
+            };
+            let b_tile = b_rows.checked_mul(b_row_len)?;
+            a_tile.checked_add(b_tile)?.checked_mul(4)
+        };
+        compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
+    }
+
     /// `bm/bn/bk/wm/wn` の整除制約・デバイス上限（`max_threads_per_tg`:
     /// `MTLComputePipelineState::maxTotalThreadsPerThreadgroup`、
     /// `max_shared_mem_bytes`: `MTLDevice::maxThreadgroupMemoryLength`）
@@ -1496,6 +1541,107 @@ mod tests {
         };
         assert_eq!(cfg.pad(), 4);
         assert_eq!(cfg.shared_mem_bytes(), 9472);
+    }
+
+    // --- shared_mem_bytes_for（イシュー #1138。転置パターン別 threadgroup
+    // 共有メモリ量。pure・実機不要） ---
+
+    #[test]
+    fn shared_mem_bytes_for_nn_matches_shared_mem_bytes() {
+        use crate::layout::TransposePattern;
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(
+            cfg.shared_mem_bytes_for(TransposePattern::Nn),
+            cfg.shared_mem_bytes()
+        );
+
+        let cfg_not_staged = TileConfig {
+            staged: false,
+            ..cfg
+        };
+        assert_eq!(
+            cfg_not_staged.shared_mem_bytes_for(TransposePattern::Nn),
+            cfg_not_staged.shared_mem_bytes()
+        );
+    }
+
+    #[test]
+    fn shared_mem_bytes_for_not_staged_is_always_zero() {
+        use crate::layout::TransposePattern;
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: false,
+        };
+        for pattern in [
+            TransposePattern::Nn,
+            TransposePattern::Nt,
+            TransposePattern::Tn,
+            TransposePattern::Tt,
+        ] {
+            assert_eq!(cfg.shared_mem_bytes_for(pattern), 0);
+        }
+    }
+
+    #[test]
+    fn shared_mem_bytes_for_trans_a_swaps_a_tile_row_col_roles() {
+        use crate::layout::TransposePattern;
+        // A: NN は bm(64) 行 x (bk(16)+4) 列 = 64x20 = 1280 要素。
+        // TRANS_A（Tn）は bk(16) 行 x (bm(64)+4) 列 = 16x68 = 1088 要素。
+        // B（NN のまま）: bk(16) 行 x (bn(64)+4) 列 = 16x68 = 1088 要素。
+        // 合計 (1088+1088)*4 = 8704 バイト（NN の 9472 バイトとは異なる値
+        // になる。`bm != bk` のため `pad` を加算する側の行数が変わるから）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes_for(TransposePattern::Tn), 8704);
+    }
+
+    #[test]
+    fn shared_mem_bytes_for_trans_b_swaps_b_tile_row_col_roles() {
+        use crate::layout::TransposePattern;
+        // B: NN は bk(16) 行 x (bn(64)+4) 列 = 1088 要素。TRANS_B（Nt）は
+        // bn(64) 行 x (bk(16)+4) 列 = 64x20 = 1280 要素。A（NN のまま）:
+        // bm(64) 行 x (bk(16)+4) 列 = 1280 要素。合計 (1280+1280)*4 =
+        // 10240 バイト。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes_for(TransposePattern::Nt), 10240);
+    }
+
+    #[test]
+    fn shared_mem_bytes_for_saturates_instead_of_wrapping_on_overflow() {
+        use crate::layout::TransposePattern;
+        let cfg = TileConfig {
+            bm: 8,
+            bn: 8,
+            bk: u32::MAX - 4,
+            wm: 1,
+            wn: 1,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes_for(TransposePattern::Tt), u32::MAX);
     }
 
     #[test]
@@ -3823,5 +3969,47 @@ mod tests {
             "direct-load 構成 {cfg:?} が実デバイス上でサイレントに {resolved:?} へ \
              フォールバックした（構成失敗を検知できていない）"
         );
+    }
+
+    /// イシュー #1138: `CANDIDATES`（`gemm_simdgroup_tiled` の全 staged
+    /// 構成）が NT/TN/TT（`crate::layout::TransposePattern`）でも
+    /// サイレントフォールバックなしにパイプライン構築・検証できることを
+    /// 確認する（`all_tile_candidates_match_cpu_reference_medium_shape` の
+    /// NN 版と同じ「フォールバック検知」目的。数値一致自体は
+    /// `tests/gemm_strided_parity.rs::
+    /// dispatch_strided_tiled_prepared_matches_cpu_reference_for_all_transpose_patterns`
+    /// が別途検証するため、本テストは fallback 不在の確認に留める）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_resolve_without_fallback_for_every_transpose_pattern() {
+        use crate::layout::TransposePattern;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        for &cfg in CANDIDATES.iter() {
+            for pattern in [
+                TransposePattern::Nn,
+                TransposePattern::Nt,
+                TransposePattern::Tn,
+                TransposePattern::Tt,
+            ] {
+                let resolved = gemm
+                    .resolve_tile_config_for_pattern(&ctx, cfg, pattern)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "候補 {cfg:?}（pattern={pattern:?}）のパイプライン構築・検証に \
+                             失敗した: {err}"
+                        )
+                    });
+                assert_eq!(
+                    resolved, cfg,
+                    "候補 {cfg:?}（pattern={pattern:?}）が実デバイス上でサイレントに \
+                     {resolved:?} へフォールバックした（構成失敗を検知できていない）"
+                );
+            }
+        }
     }
 }

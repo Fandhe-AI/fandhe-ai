@@ -145,6 +145,15 @@ pub enum MetalError {
     /// variant を分ける。`detail` は poison を検出した操作
     /// （`encode`／`flush`／`synchronize`）の内訳を保持する。
     BatchStateUnavailable { detail: String },
+    /// イシュー #1138: `crate::gemm::MetalGemm::dispatch_strided_tiled_prepared`
+    /// の適格性ゲート（`crate::gemm::strided_tiled_eligibility`）が拒否した
+    /// 入力（bias/act 付き・m/n/k 非 8 整除・leading dimension/offset 非
+    /// 4 整除等。`gemm_simdgroup_tiled` の float4 ベクトルロード・8x8
+    /// direct-load の前提を満たさない）。呼び出し元
+    /// `dispatch_strided_bias_act_prepared` はこの `Err` を classic
+    /// strided 経路（`gemm_tiled_bias_act`）へのフォールバック判断材料と
+    /// して使う（fail-closed。`.claude/rules/security.md`「A03」参照）。
+    StridedTiledIneligible { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -243,6 +252,9 @@ impl fmt::Display for MetalError {
             }
             MetalError::BatchStateUnavailable { detail } => {
                 write!(f, "Metal command batch state unavailable: {detail}")
+            }
+            MetalError::StridedTiledIneligible { detail } => {
+                write!(f, "strided tiled GEMM route ineligible: {detail}")
             }
         }
     }
