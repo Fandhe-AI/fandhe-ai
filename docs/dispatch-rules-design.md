@@ -311,8 +311,9 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
    `n % 8 != 0` 等の形状で現行 WMMA では成功していた呼び出しが
    `InvalidShape` になる退行が生じる点を実装引き渡し事項として明記する
    （#1156 で実装済み: 単一真実源の純関数
-   `gemm_auto::select_f16_matrix_unit_impl(mma_available, wmma_available,
-   m, n, k) -> F16MatrixUnitImpl` が事前形状ゲートを含む判定を担い、
+   `gemm_auto::select_f16_matrix_unit_impl(prefer_mma, mma_available,
+   wmma_available, m, n, k) -> F16MatrixUnitImpl` が事前形状ゲートを含む
+   判定を担い、
    `run_f16` はその結果に従って `match` で実装を呼び分ける）
 4. no-op／退化形状（`m == 0 || n == 0 || k == 0`）は mma／WMMA／tiled の
    いずれも同一契約の早期 return で処理する。**`m == 0 || n == 0` は空
