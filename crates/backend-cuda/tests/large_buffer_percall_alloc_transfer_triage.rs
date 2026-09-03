@@ -488,7 +488,20 @@ fn phase_p5_d2h_reused_vec(
     // 計測外でホスト側バッファを 1 回だけ確保・全ページタッチする
     // （P4 の「毎回新規 Vec」との差分がページタッチ由来であることを
     // 保証するため、確保・タッチ自体は計測ループの外に置く）。
+    //
+    // codex-review 指摘（PR #1169）: `vec![f16::ZERO; numel]` の
+    // ゼロ初期化は Rust 上の値保証のみで、glibc の `calloc` 経路が
+    // 既にゼロ化済みの demand-zero page（mmap）をそのまま返した場合、
+    // 各ページへの物理的な書き込み（page fault によるコミット）は
+    // 発生しない。P4（毎回新規 Vec）との対照が成立するには host_buf の
+    // 全ページが実際にタッチ済みである必要があるため、
+    // `fresh_overhead_diag_tests.rs` の `DownloadVariant::PreTouched`
+    // と同じ方式（`black_box` 越しの非ゼロ書き込みで LLVM による
+    // 書き込みループの消去を防ぐ）で明示的に全要素へ書き込む。
     let mut host_buf: Vec<f16> = vec![f16::ZERO; numel];
+    for x in host_buf.iter_mut() {
+        *x = std::hint::black_box(f16::from_f32(1.0));
+    }
     measure_with_cold(config, || {
         device
             .stream()
@@ -503,12 +516,23 @@ fn phase_p5_d2h_reused_vec(
 
 /// P6: ホスト `Vec` 確保＋全ページタッチ＋解放のみ（GPU 非関与）。
 /// H-A の純ホスト成分（glibc mmap しきい値の寄与）を切り分ける。
+///
+/// codex-review 指摘（PR #1169）: `vec![f16::ZERO; numel]` を
+/// `black_box` へ渡すだけでは Vec の値自体は最適化で消されなくなるが、
+/// 各要素への書き込みは発生しないため物理ページはタッチされない
+/// （`calloc` 経路が既にゼロ化済みの demand-zero page をそのまま
+/// 返しうる）。P6 は「全ページタッチ」を測る phase であるため、
+/// P5 と同じ方式（`black_box` 越しの非ゼロ書き込み）で明示的に
+/// 全要素へ書き込み、各ページへの物理コミットを強制する。
 fn phase_p6_host_vec_touch_only(
     config: &MeasurementConfig,
     numel: usize,
 ) -> (f64, bench_harness::Measurement) {
     measure_with_cold(config, || {
-        let v = std::hint::black_box(vec![f16::ZERO; numel]);
+        let mut v: Vec<f16> = vec![f16::ZERO; numel];
+        for x in v.iter_mut() {
+            *x = std::hint::black_box(f16::from_f32(1.0));
+        }
         drop(v);
     })
 }
