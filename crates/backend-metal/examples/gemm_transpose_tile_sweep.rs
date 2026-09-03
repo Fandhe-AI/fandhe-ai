@@ -149,9 +149,11 @@ mod macos_impl {
             // MLX steel classic 経路の未収録構成（イシュー #1143）:
             // `cand2_32x64_wm2wn2_wide` の 4 simdgroup 分担を wm1wn2（2
             // simdgroup）へ落とし、simdgroup あたりの acc タイル
-            // （8x8 の 2x2=4 個ではなく 4x8＝acc_rows=4,acc_cols=8）を
-            // 変える構成。`tile.rs::CANDIDATES` の index 8（末尾追加。
-            // 既存 index 0〜7 は不変）に対応する。
+            // （`gemm.metal` の acc_rows=(BM/WM)/8・acc_cols=(BN/WN)/8 に
+            // 従うと cand2 は 2x4〈acc_rows=2, acc_cols=4〉、本候補は
+            // 4x4〈acc_rows=4, acc_cols=4〉）を変える構成。
+            // `tile.rs::CANDIDATES` の index 8（末尾追加。既存 index 0〜7
+            // は不変）に対応する。
             (
                 "cand8_32x64x16_wm1wn2",
                 TileConfig {
