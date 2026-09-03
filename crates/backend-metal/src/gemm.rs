@@ -187,18 +187,16 @@ impl GemmStrides {
     }
 }
 
-/// naive・tiled・simdgroup の 3 パイプラインを保持するハンドル。
-///
-/// [`MetalContext`] とは別に保持する理由: パイプライン構築（MSL コンパイル
-/// 込み）は比較的重い処理であり、`MetalGemm::new` を 1 回呼んで使い回す
-/// ことを想定する（`MetalContext` はデバイス・キューのみの軽量ハンドル。
-/// TASK-1.8a・#38 の責務分離を維持する）。イシュー #930 で
-/// `ops::MetalBackendOps::gemm`／`gemm_bias_act` は演算呼び出しごとの
-/// 都度構築をやめ、`crate::context_cache::cached_gemm` 経由で
-/// `Arc<MetalGemm>` をプロセス内キャッシュから取得する本番経路へ移行した
 /// [`MetalGemm::tile_pipeline_reflection`] の返り値（イシュー #1143）。
 /// `MTLComputePipelineState` 構築後にのみ取得できる反射値を、レジスタ
 /// 圧・スタック溢れの間接証跡として examples／診断コードへ渡す。
+///
+/// 診断専用の内部表現であり、本番 GEMM ディスパッチ経路（`dispatch_auto`・
+/// `dispatch_variant`）の契約には含まれない。crate root（`lib.rs`）へは
+/// 再エクスポートするが、公開 API 面としての安定性は保証しないため
+/// `#[doc(hidden)]` とする（AGENTS.md「内部表現の公開 API への漏出は P1」・
+/// PR #1168 codex-review 指摘）。
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TilePipelineReflection {
     /// フォールバック後に実際に採用された [`TileConfig`]
@@ -210,6 +208,15 @@ pub struct TilePipelineReflection {
     pub static_threadgroup_memory_length: u32,
 }
 
+/// naive・tiled・simdgroup の 3 パイプラインを保持するハンドル。
+///
+/// [`MetalContext`] とは別に保持する理由: パイプライン構築（MSL コンパイル
+/// 込み）は比較的重い処理であり、`MetalGemm::new` を 1 回呼んで使い回す
+/// ことを想定する（`MetalContext` はデバイス・キューのみの軽量ハンドル。
+/// TASK-1.8a・#38 の責務分離を維持する）。イシュー #930 で
+/// `ops::MetalBackendOps::gemm`／`gemm_bias_act` は演算呼び出しごとの
+/// 都度構築をやめ、`crate::context_cache::cached_gemm` 経由で
+/// `Arc<MetalGemm>` をプロセス内キャッシュから取得する本番経路へ移行した
 /// （A/B 計測専用の `new_with_swizzle`／`new_with_fine_barrier` 入口は
 /// キャッシュ対象外のまま従来どおり直接構築する）。
 pub struct MetalGemm {
@@ -661,7 +668,10 @@ impl MetalGemm {
     /// `docs/perf/metal-gemm-n4096-kernel-gap.md`
     /// （`examples/gemm_transpose_tile_sweep.rs`）から呼ばれる診断専用
     /// 入口であり、本番ディスパッチ経路（`dispatch_auto`・
-    /// `dispatch_variant`）からは呼ばれない。
+    /// `dispatch_variant`）からは呼ばれない。診断専用の内部表現を返すため
+    /// `#[doc(hidden)]`（[`TilePipelineReflection`] 参照。AGENTS.md「内部
+    /// 表現の公開 API への漏出は P1」・PR #1168 codex-review 指摘）。
+    #[doc(hidden)]
     pub fn tile_pipeline_reflection(
         &self,
         ctx: &MetalContext,
