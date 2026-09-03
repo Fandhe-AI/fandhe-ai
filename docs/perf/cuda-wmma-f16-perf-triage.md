@@ -9,13 +9,22 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 
 ## 状態: 実機実測完了（2026-09-03・DGX Spark GB10・sm_121・GPU アイドル。
 是正後テスト〈§4.3〉も実機実測済み。イシュー #1160（2026-09-04）で
-`tensor_core_tflops_record` の f16 assert が pass に転換・`wmma_f16_opt`
-の扱い確定。§8 参照。**本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）
-は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16` baseline
-ceiling 未承認〉により `false` へ差し戻し済み**。詳細は
-`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0・
+`tensor_core_tflops_record` の f16 assert の比較対象を「本番選択結果に
+追従する方式」へ整備し、`MMA_PRIORITY_PRODUCTION_ENABLED = true`（mma
+優先）を一時的に有効化した状態での GB10 実機実測では本 assert が pass
+することを確認した（§8）。**本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED
+= true`）は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16`
+baseline ceiling 未承認〉により `false` へ差し戻し済みであり、この
+本番既定のまま本テストを実機実行すると比較対象が `wmma_f16_opt` へ
+戻るため本 assert は依然として red である**（`wmma_f16_opt` カーネル
+単体 4.391〜4.496 TFLOPS が tiled f32 カーネル単体 6.776〜6.790 TFLOPS
+を下回る。§4.3 と同一数値）。本テストは実機 `#[ignore]` 分離のため
+通常 CI には現れず、この既知 red は baseline ceiling 承認・
+`MMA_PRIORITY_PRODUCTION_ENABLED` の `true` 復帰まで持ち越しである。
+詳細は `docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0・
 `docs/perf/cuda-parity-baseline.md` §12.6 追記を参照。以下 §8 の記述は
-差し戻し前の実測記録として維持する）
+`MMA_PRIORITY_PRODUCTION_ENABLED = true` を一時的に有効化した際の
+実測記録として維持する）
 
 ## 1. 症状（発端）
 
@@ -332,8 +341,13 @@ run-median は base の 5 run 範囲内に収まった（後退なし）。
 
 f16 assert（`production_f16_kernel_tflops > tiled_kernel_tflops`）は
 55.449 > 10.013 のため **pass**（`test result: ok. 1 passed`）。TF32 assert
-も引き続き pass（14.134 > 10.013）。イシュー #1131 の完了条件（本 assert が
-pass すること）はこれで満たされた。
+も引き続き pass（14.134 > 10.013）。この計測は
+`MMA_PRIORITY_PRODUCTION_ENABLED = true`（mma 優先）を一時的に有効化した
+状態で行ったものである。イシュー #1131 の完了条件（本 assert が pass
+すること）は「本番選択結果に追従する比較方式」の整備としては満たされたが、
+本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = false`。PR #1179 codex-review
+指摘により差し戻し済み）のまま実機実行した場合は比較対象が `wmma_f16_opt`
+へ戻り、本 assert は red のままである（上記状態ブロック・§6 参照）。
 
 ### 8.4 `wmma_f16_opt` の扱いの決定: フォールバック限定で維持（コード変更なし）
 

@@ -368,14 +368,25 @@ fn tensor_core_tflops_record() {
     // GB10 実機実測（2026-09-03）で本 assert が red だった（wmma_f16_opt
     // カーネル単体 4.391〜4.496 TFLOPS が tiled f32 カーネル単体
     // 6.776〜6.790 TFLOPS を下回る）。イシュー #1160 で比較対象を
-    // 「本番 f16 経路が実際に選ぶ実装」（`mma_sync_f16`。GB10 では
-    // `mma_available()=true` のため `CudaMmaGemm`）へ差し替えたことで、
-    // #1123 で確認済みの mma.sync パイプラインの優位性（tiled f32 比
-    // 約 7〜11 倍。`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・
-    // `dispatch_boundary.rs::large_shape_mma_pipeline_vs_wmma_tflops_record`）
-    // により本 assert は pass に転じた（`docs/perf/
-    // cuda-wmma-f16-perf-triage.md` §8 実測記録）。イシュー #1131 の
-    // 完了条件（本 assert が pass すること）はこれで満たされた。
+    // 「本番 f16 経路が実際に選ぶ実装」へ動的に追従させる方式へ
+    // 差し替えたことで、`MMA_PRIORITY_PRODUCTION_ENABLED = true`
+    // （mma 優先。#1123 で確認済みの mma.sync パイプラインの優位性
+    // ・tiled f32 比約 7〜11 倍）を一時的に有効化した状態での GB10
+    // 実機実測では本 assert は pass した（`docs/perf/
+    // cuda-wmma-f16-perf-triage.md` §8.3 実測記録）。ただし本番既定は
+    // K=4096 非後退ゲートの `MmaF16` baseline ceiling 未承認（PR #1179
+    // codex-review 指摘）により `MMA_PRIORITY_PRODUCTION_ENABLED = false`
+    // （wmma 優先）へ差し戻し済みのため、この既定のまま本テストを実機
+    // 実行すると `production_f16_uses_mma = false` となり比較対象が
+    // 再び `wmma_f16_opt` へ戻り、本 assert は red のままである
+    // （§1123 是正版と同じ数値。上記参照）。イシュー #1131 の完了条件
+    // （本 assert が pass すること）は「本番選択結果に追従する比較方式」
+    // の整備としては満たされたが、本番既定（false）における実際の
+    // pass は baseline ceiling 承認・`MMA_PRIORITY_PRODUCTION_ENABLED`
+    // の `true` への復帰まで持ち越しである（`docs/perf/
+    // cuda-wmma-f16-perf-triage.md` §6・§8.3 参照。本テストは実機
+    // `#[ignore]` 分離のため通常 CI では実行されず、この既知 red は
+    // 通常 CI の合否に影響しない）。
     assert!(
         tf32_kernel_tflops > tiled_kernel_tflops,
         "WMMA TF32 opt（カーネル単体 {tf32_kernel_tflops:.3} TFLOPS）が tiled f32（カーネル単体 \
