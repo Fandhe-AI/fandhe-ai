@@ -100,17 +100,22 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 
 **本番経路への到達性**: `fandhe_ai_backend_cuda::ops::BackendOps::gemm`（本番ディスパッチ）
 は f32 tiled カーネル固定であり、`wmma_f16`／`mma_sync_f16` のいずれにも到達しない。
-`CudaGemmAuto::run_f16`（f16 auto 経路。`crates/backend-cuda/src/gemm_auto.rs`）は
-`KernelKind::MatrixUnit` 判定時、cc >= 8.0 かつ整列形状（`validate_mma_alignment`／
-`validate_mma_grid_bounds` 充足）では `mma_sync_f16`（`CudaMmaGemm`）を、それ以外では
-`wmma_f16`（`CudaWmmaGemm`）を優先的に呼ぶ（`select_f16_matrix_unit_impl`。
-`docs/dispatch-rules-design.md` §5.6・#1156 で結線済み）。ただし `CudaGemmAuto`
-自体は現時点で facade／`BackendOps::gemm`／`bench-harness` のいずれからも
-呼ばれておらず本番未結線（`gemm_auto.rs::new` doc コメント参照。#1152 時点の記述
-のまま）であるため、`mma_sync_f16` は `CudaGemmAuto` が本番経路へ結線された時点で
-初めて到達する。この本番結線自体は本イシュー・#1156 いずれのスコープ外（ディス
-パッチ規則自体は変更しない）。TFLOPS 正式記録・`wmma_f16_opt` の維持・格下げ判断は
-別イシュー（#1160。§6）で扱う。
+`CudaGemmAuto::run_f16`（f16 auto 経路。`crates/backend-cuda/src/gemm_auto.rs`）の
+`KernelKind::MatrixUnit` 判定分岐（`select_f16_matrix_unit_impl`）自体は、cc >= 8.0
+かつ整列形状（`validate_mma_alignment`／`validate_mma_grid_bounds` 充足）で
+`mma_sync_f16`（`CudaMmaGemm`）を、それ以外では `wmma_f16`（`CudaWmmaGemm`）を
+優先する `docs/dispatch-rules-design.md` §5.6 の mma 優先設計どおり実装済み（#1156）。
+ただしこの優先順位は `gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`（本番既定 `false`）
+でゲートされており、#1160 の GB10 実機実測で非後退を確認し承認を得るまでは本番では
+無効（`run_f16` は引き続き `wmma_f16` を優先して呼ぶ）。判定ロジックの実装と本番での
+優先順位有効化は別軸であり、「結線済み」は前者（ロジック実装）のみを指す。加えて
+`CudaGemmAuto` 自体は現時点で facade／`BackendOps::gemm`／`bench-harness` のいずれ
+からも呼ばれておらず本番未結線（`gemm_auto.rs::new` doc コメント参照。#1152 時点の
+記述のまま）であるため、`MMA_PRIORITY_PRODUCTION_ENABLED` が仮に `true`化されても
+`mma_sync_f16` は `CudaGemmAuto` が本番経路へ結線された時点で初めて到達する。この
+本番結線自体は本イシュー・#1156 いずれのスコープ外（ディスパッチ規則自体は変更
+しない）。TFLOPS 正式記録・`wmma_f16_opt` の維持・格下げ判断・
+`MMA_PRIORITY_PRODUCTION_ENABLED` の `true` 化判断は別イシュー（#1160。§6）で扱う。
 
 ### 4.2 dim=4096 のプロトコル検査失敗（二峰性）の原因
 

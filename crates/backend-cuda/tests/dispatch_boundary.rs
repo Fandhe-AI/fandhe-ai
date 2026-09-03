@@ -28,10 +28,12 @@
 //!    比較し、両者とも `select_gemm_kernel`（第 1 層）上は同じ
 //!    `KernelKind::MatrixUnit` に写像されることを踏まえ、「mma
 //!    パイプラインの優劣は経路選択条件でなくカーネル内部チューニング」
-//!    の整理を実測で裏付ける記録を残す。第 2 層（`CudaGemmAuto` 内部）は
-//!    #1156 以降 `CudaMmaGemm` を優先的に呼ぶが（整列形状・cc>=8.0）、
-//!    この整理と計測ロジック自体は変更しない（第 1 層の決定表が両者を
-//!    区別しない事実に基づく整理のため）。
+//!    の整理を実測で裏付ける記録を残す。第 2 層（`CudaGemmAuto` 内部）の
+//!    判定ロジックは #1156 で整列形状・cc>=8.0 時に `CudaMmaGemm` を
+//!    優先する設計どおり実装済みだが、`gemm_auto::MMA_PRIORITY_PRODUCTION_
+//!    ENABLED`（本番既定 `false`）でゲートされ本番では未有効化（#1160 の
+//!    実測・承認待ち）。この整理と計測ロジック自体は変更しない（第 1 層の
+//!    決定表が両者を区別しない事実に基づく整理のため）。
 //!
 //! ## 実機前提
 //!
@@ -294,10 +296,12 @@ fn small_shape_matrix_unit_has_no_floor_tflops_record() {
 ///
 /// 両カーネルとも `select_gemm_kernel`（第 1 層）上は同じ
 /// `KernelKind::MatrixUnit` に写像される。第 2 層（`CudaGemmAuto` 内部。
-/// `crates/backend-cuda/src/gemm_auto.rs::select_f16_matrix_unit_impl`）
-/// は #1156 以降 `CudaMmaGemm` を優先的に呼ぶが（整列形状・cc>=8.0）、
-/// 本テストは経路選択の妥当性ではなく「パイプライン差はカーネル内部
-/// チューニング材料であり、第 1 層の分岐条件にはしない」という設計
+/// `crates/backend-cuda/src/gemm_auto.rs::select_f16_matrix_unit_impl`）の
+/// 判定ロジックは #1156 で整列形状・cc>=8.0 時に `CudaMmaGemm` を優先する
+/// 設計どおり実装済みだが、`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`
+/// （本番既定 `false`）でゲートされ本番では未有効化（#1160 の実測・承認
+/// 待ち）。本テストは経路選択の妥当性ではなく「パイプライン差はカーネル
+/// 内部チューニング材料であり、第 1 層の分岐条件にはしない」という設計
 /// 判断の実測裏付けに限定する（計測ロジック自体は変更しない）。
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須。実測記録は docs/perf/dispatch-boundary-measurement.md"]

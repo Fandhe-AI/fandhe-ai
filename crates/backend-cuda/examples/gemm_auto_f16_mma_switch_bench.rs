@@ -8,11 +8,7 @@
 //! 求めていた「auto 経路（転送込み）」の計測に限定し、`examples/
 //! gemm_mma_bench.rs::measure_mma_f16`（GPU 実行のみ計測）とは異なり
 //! `CudaGemmAuto::run_f16` の H2D／カーネル起動／D2H を丸ごと計測する
-//! （切替後にユーザーが体感する経路そのものを計測する狙い。本ファイル
-//! 単体では前後比較を行わない: 同一バイナリを base（結線前コミット
-//! `0c91218`）／after（`CudaGemmAuto::run_f16` が実際に mma 優先経路を
-//! 通る構成）でそれぞれビルド・実行し、出力される run-median TFLOPS を
-//! 手動で突き合わせる）。
+//! （切替後にユーザーが体感する経路そのものを計測する狙い）。
 //!
 //! **本番既定は wmma 優先のまま（codex-review PR #1177 P1 是正）**:
 //! `select_f16_matrix_unit_impl` の判定ロジック自体は §5.6 の mma 優先
@@ -26,20 +22,24 @@
 //! cuda-gemm-auto-f16-mma-switch.md`）へ実測値を残したうえで、承認を
 //! 経てから同定数の恒久的な `true` 化を別途行う。
 //!
-//! 計測プロトコル（codex-review PR #1177 指摘の是正）: `docs/dispatch-
-//! rules-design.md` §5.6 が求める「5 回計測中央値」は**独立した 5 回の
-//! 計測それぞれの中央値**を指す（`.claude/rules/coding-rust.md`「ベンチ
-//! は 5 回計測の中央値を採用し」も同義）。単一 `bench_run` 呼び出し内の
-//! 20 サンプルから求めた中央値は「1 回の計測」に過ぎず、これを「5 回
-//! 計測中央値の上位互換」とみなしていた前バージョンは要求を満たさない
-//! （20 サンプルは同一プロセス内の反復であり、独立実行間のばらつき
-//! （プロセス起動・クロック挙動・熱条件等）を捕捉できないため）。
-//! 本バイナリは各形状で `bench_run`（`MeasurementConfig::default`。
-//! warmup 20 回・計測 20 回。REQ-8 確定実測用下限プロトコル）を
-//! **独立に 5 回**呼び出し、5 個の run 中央値 TFLOPS を個別に出力した
-//! うえで、`bench_harness::median_q1_q3` でその 5 値自体の中央値
-//! （run-median）を算出して報告する。前後比較にはこの run-median を
-//! 用いる。
+//! 計測プロトコル（codex-review PR #1177 指摘の是正。2 回目）: `docs/
+//! dispatch-rules-design.md` §5.6・`.claude/rules/coding-rust.md`
+//! 「ベンチは 5 回計測の中央値を採用し」が求める「5 回計測中央値」は
+//! **独立した 5 回のプロセス起動それぞれの計測値**を指す。前バージョン
+//! は本バイナリ内で `measure_auto_f16_once`（`bench_run` 1 回・warmup
+//! 20・計測 20）を同一プロセス内ループで 5 回呼ぶ方式を「独立 5 回」と
+//! 称していたが、これは同一プロセス内の反復に過ぎずプロセス起動・
+//! クロック・熱条件の独立実行間ばらつきを捕捉できない（本 PR 自身が
+//! 前段で取り下げた「20 サンプル内 bench_run 1 回」方式と同じ欠陥を
+//! プロセス境界で再発させていた、との codex-review 指摘）。
+//!
+//! 本バイナリは**プロセス起動ごとに各形状 1 回だけ**
+//! `measure_auto_f16_once`（`bench_run`。warmup 20・計測 20）を実行し、
+//! `size=<N> auto_f16_tflops=<value>` を 1 行ずつ標準出力へ書いて終了
+//! する（同一プロセス内でのループ・中央値集約は行わない）。独立 5 回
+//! 起動と run-median の集約は、本バイナリを**外側から 5 回起動する**
+//! `scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh` が担う（真に
+//! 独立したプロセス実行間で TFLOPS を比較するための分離）。
 //!
 //! `examples/` に置くのは通常の `cargo test`／CI では実行されず
 //! ビルド検証のみが走るようにするため（self-hosted runner をベンチ
@@ -48,25 +48,24 @@
 //! ## 実行手順
 //!
 //! ```sh
+//! # 単発（デバッグ用。5 回計測中央値の対象外）:
 //! cargo run -p fandhe-ai-backend-cuda --example gemm_auto_f16_mma_switch_bench --release
+//!
+//! # 独立 5 回起動・run-median 集約（正式な計測プロトコル）:
+//! bash scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh
 //! ```
 //!
 //! CUDA 非搭載環境・`CudaGemmAuto::new` 失敗環境では理由を表示して終了する
 //! （`gemm_mma_bench.rs` と同じ環境適応分岐）。
 
 use bench_harness::rng::Xorshift64Star;
-use bench_harness::{MeasurementConfig, median_q1_q3, run as bench_run};
+use bench_harness::{MeasurementConfig, run as bench_run};
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemmAuto};
 use half::f16;
 
 /// 決定的シード（`gemm_mma_bench.rs`・`backend-metal/examples/gemm_bench.rs`
 /// と同一値。過去 PoC・他バックエンドベンチと同じ入力分布に揃える）。
 const SEED: u64 = 0xC0FFEE;
-
-/// 独立計測の回数（`.claude/rules/coding-rust.md`「ベンチは 5 回計測の
-/// 中央値を採用し」・`docs/dispatch-rules-design.md` §5.6 の承認条件に
-/// 対応。各回は `bench_run`〈warmup 20・計測 20〉を独立に 1 回実行する）。
-const INDEPENDENT_RUNS: usize = 5;
 
 fn tflops(size: usize, median_secs: f64) -> f64 {
     let flops = 2.0 * (size as f64).powi(3);
@@ -78,7 +77,8 @@ fn tflops(size: usize, median_secs: f64) -> f64 {
 /// 求めた中央値 1 個）。base（結線前）／after（`MMA_PRIORITY_PRODUCTION_
 /// ENABLED` を一時的に `true` にしたワークツリー）のどちらでビルドしても
 /// 同じ計測境界になる（`run_f16` のシグネチャ・呼び出し規約は変わらない
-/// ため）。
+/// ため）。独立 5 回計測は本関数をプロセスごとに 1 回だけ呼ぶ形（外側の
+/// `run_gemm_auto_f16_mma_switch_bench.sh` によるプロセス分離）で担う。
 fn measure_auto_f16_once(auto: &CudaGemmAuto, size: usize, config: &MeasurementConfig) -> f64 {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f16> = rng.fill_vec_f16(size * size);
@@ -90,27 +90,6 @@ fn measure_auto_f16_once(auto: &CudaGemmAuto, size: usize, config: &MeasurementC
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops(size, measurement.median_secs)
-}
-
-/// `measure_auto_f16_once` を [`INDEPENDENT_RUNS`] 回独立に実行し、各回の
-/// TFLOPS 一覧と、その一覧自体の中央値（run-median）を返す。
-///
-/// 各回内部（`bench_run`）で既に中央値化されているため、ここで求める
-/// 中央値は「中央値の中央値」ではなく「独立試行間ばらつきに対する
-/// 中央値」であり、`docs/dispatch-rules-design.md` §5.6 が求める
-/// 「5 回計測中央値」そのものに対応する。
-fn measure_auto_f16_runs(
-    auto: &CudaGemmAuto,
-    size: usize,
-    config: &MeasurementConfig,
-) -> (Vec<f64>, f64) {
-    let per_run: Vec<f64> = (0..INDEPENDENT_RUNS)
-        .map(|_| measure_auto_f16_once(auto, size, config))
-        .collect();
-    let run_median = median_q1_q3(&per_run)
-        .expect("INDEPENDENT_RUNS 個の TFLOPS 値は非空かつ NaN を含まない")
-        .median;
-    (per_run, run_median)
 }
 
 fn main() {
@@ -144,9 +123,10 @@ fn main() {
     };
 
     println!(
-        "NOTE: auto_f16_tflops_run_median は H2D/D2H・カーネル起動を含む \
-         転送込み計測（CudaGemmAuto::run_f16 の実利用経路そのもの）を \
-         独立に {INDEPENDENT_RUNS} 回実行した run 中央値。本バイナリを \
+        "NOTE: auto_f16_tflops は H2D/D2H・カーネル起動を含む転送込み計測 \
+         （CudaGemmAuto::run_f16 の実利用経路そのもの）をこのプロセス内で \
+         各形状 1 回だけ実行した値（独立 5 回起動・run-median の集約は \
+         scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh が担う）。 \
          base（0c91218・結線前 = wmma 優先）／after（HEAD の \
          gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED を一時的に true へ \
          書き換えたワークツリー = mma 優先）で個別にビルド・実行し、出力を \
@@ -157,15 +137,7 @@ fn main() {
 
     for size in [512usize, 1024, 2048, 4096] {
         let config = MeasurementConfig::default();
-        let (per_run, run_median) = measure_auto_f16_runs(&auto, size, &config);
-        let per_run_str = per_run
-            .iter()
-            .map(|v| format!("{v:.4}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        println!(
-            "size={size} auto_f16_tflops_runs=[{per_run_str}] \
-             auto_f16_tflops_run_median={run_median:.4}"
-        );
+        let value = measure_auto_f16_once(&auto, size, &config);
+        println!("size={size} auto_f16_tflops={value:.4}");
     }
 }

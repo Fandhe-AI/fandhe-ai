@@ -24,11 +24,17 @@ design.md` §5.6・`.claude/rules/coding-rust.md`「ベンチは 5 回計測の�
 プロセス起動・クロック挙動・熱条件等の独立実行間ばらつきを捕捉できないため、
 この 1 回計測を根拠に非後退を確定させることはできない。
 
-是正として、計測用バイナリ `examples/gemm_auto_f16_mma_switch_bench.rs` を
-各形状で `bench_run` を**独立に 5 回**呼び出し、5 個の run 中央値 TFLOPS と、
-その 5 値自体の中央値（run-median）を出力するよう修正した（詳細は下記「実機
-実行手順」節）。しかし本エージェントの実行環境には CUDA 実機（DGX Spark GB10
-等）が存在しないため、この新プロトコルでの実測を本 PR では行えていない。前
+是正（1 回目）として、計測用バイナリ `examples/gemm_auto_f16_mma_switch_
+bench.rs` を各形状で `bench_run` を同一プロセス内ループで**5 回**呼び出し、
+5 個の run 値とその中央値（run-median）を出力するよう修正したが、これも
+同一プロセス内の反復に過ぎずプロセス起動・クロック・熱条件の独立実行間
+ばらつきを捕捉できない点は変わらないとの codex-review 再指摘（PR #1177
+2 回目）を受け、**是正（2 回目）**として計測用バイナリはプロセス起動ごとに
+各形状 1 回だけ計測して終了する設計へ変更し、独立 5 回起動・run-median の
+集約は外側の `scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh`（実プロ
+セスとして 5 回起動する wrapper）へ切り出した（詳細は下記「実機実行手順」
+節）。しかし本エージェントの実行環境には CUDA 実機（DGX Spark GB10 等）が
+存在しないため、この新プロトコルでの実測を本 PR では行えていない。前
 バージョンに記載していた具体的な TFLOPS 値は上記の理由により受け入れ判定の
 根拠として使えないため本ドキュメントからは削除し、実測は行われていないと
 明記する。
@@ -49,11 +55,16 @@ run_f16` 経由の auto 経路（転送込み・§5.6 の分岐切替を経た�
 
 計測用バイナリは `examples/gemm_auto_f16_mma_switch_bench.rs`（`bench-harness::
 run`・`MeasurementConfig::default`〈warmup 20・計測 20〉による `bench_run` を
-各形状で独立に 5 回（`INDEPENDENT_RUNS`）呼び出し、`CudaGemmAuto::run_f16` を
-転送込みで計測する。`examples/gemm_mma_bench.rs` と同じ計測コア・シード）。
+プロセス起動ごとに各形状 1 回だけ実行し、`CudaGemmAuto::run_f16` を転送込み
+で計測する。`examples/gemm_mma_bench.rs` と同じ計測コア・シード）。独立 5 回
+起動・run-median の集約は wrapper スクリプト `scripts/bench/
+run_gemm_auto_f16_mma_switch_bench.sh` が担う（`cargo build` で 1 回ビルド
+した後、生成された実行ファイルを外側のシェルから 5 回 fork+exec する。
+真に独立した OS プロセスとして 5 回実行することでプロセス起動・クロック・
+熱条件の独立実行間ばらつきを反映する）。
 
 ```bash
-cargo run -p fandhe-ai-backend-cuda --example gemm_auto_f16_mma_switch_bench --release
+bash scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh
 ```
 
 同一バイナリソースを base（`0c91218`。結線前 = `MatrixUnit` 判定時に wmma を
@@ -61,9 +72,9 @@ cargo run -p fandhe-ai-backend-cuda --example gemm_auto_f16_mma_switch_bench --r
 gemm_auto.rs` の `MMA_PRIORITY_PRODUCTION_ENABLED` を一時的に `true` へ
 書き換えたワークツリー。書き換えないまま HEAD をビルドすると本番既定
 〈`false`〉のため base と同じ wmma 優先経路が計測されてしまう点に注意）
-それぞれへコピーしてビルド・実行し、出力される
+それぞれへコピーして上記 wrapper スクリプトを実行し、出力される
 `size=<dim> auto_f16_tflops_runs=[<5値>] auto_f16_tflops_run_median=<値>` の
-`auto_f16_tflops_run_median`（独立 5 回計測の中央値）同士を突き合わせる
+`auto_f16_tflops_run_median`（独立 5 回起動の run-median）同士を突き合わせる
 （base 側は `internal-diagnostics` feature 未導入のためデフォルト feature で
 ビルド。本バイナリはこの feature に依存しない）。全形状で after の
 `auto_f16_tflops_run_median` が base 以上であれば非後退と判定し、この記録へ
