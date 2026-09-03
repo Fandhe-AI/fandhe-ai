@@ -274,17 +274,20 @@ CLOSED だが本番カーネル定数は未変更）を受けた、対 PyTorch C
 
 （次回実機計測時に追記。列: 日付・commit・per-size 比率・前回比差分）
 
-#### CPU GEMM マイクロカーネル・packing 再チューニング（イシュー #1041・状態: 実機セッション待ち）
+#### CPU GEMM マイクロカーネル・packing 再チューニング（イシュー #1041・状態: GB10 実測済み・M4 Max は #1141）
 
 第 0 回実機フル計測（§7.2）で判明した CPU GEMM の対 gemm crate 劣位（N=1024/2048 で
 0.84〜0.91 倍・4096 のみ 1.01 倍）に対する再チューニング枠。診断・候補実装・bit 完全一致
-検証・A/B 一括計測ハーネスは実装済みだが、実機（Apple M4 Max・DGX Spark GB10）5 回中央値
-での受け入れ条件達成判定は本 PR のスコープ外（Linux x86_64 実装セッションのため）。
+検証・A/B 一括計測ハーネスは実装済み。**DGX Spark GB10 実機での 5 回中央値実測はイシュー
+#1140 で完了し、非採用（`SharedB`・`SharedBPcOuter` はいずれも本番既定 `RowPanel` を
+大きく下回る）と結論した**。Apple M4 Max 側の実機実測は引き続き #1141 へ持ち越し。
 
-- 詳細（診断モデル・候補一覧・実機計測手順・記入表）は `docs/perf/
-  cpu-gemm-candle-cpu-retune.md` を正とし、本節では状態のみを記録する
+- 詳細（診断モデル・候補一覧・GB10 実測値・結論）は `docs/perf/
+  cpu-gemm-candle-cpu-retune.md` §5・§5.1・§6 を正とし、本節では状態のみを記録する
+- GB10 実測の生データ: `docs/perf/oss-comparison/2026-09-03/gb10-cpu-1140/`
 - 対象カーネル: `crates/backend-cpu/src/gemm_blis/mod.rs`
   `gemm_blis_shared_b_pc_outer_region`（`GemmDriverVariant::SharedBPcOuter`。`#[cfg(test)]`
   限定・本番未結線）
-- 本番結線は実機実測完了後の別 PR（ユーザー承認）で行う（`docs/cpu-gemm-b-packing-sharing-decision.md`
+- GB10 側は非採用のため本番結線は不要（現行 `RowPanel` 既定を維持）。M4 Max 側の結果が
+  出揃った後、本番結線の要否は #1144 で最終判断する（`docs/cpu-gemm-b-packing-sharing-decision.md`
   §F と同じ採用ゲート方針）
