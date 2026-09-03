@@ -424,6 +424,15 @@ fn phase_p2_alloc_zeros(
 
 /// P3: H2D のみ（`clone_htod`。ホスト側ソースは計測外で確保・書き込み
 /// 済みの `host_src` を使う）。
+/// codex-review 指摘（PR #1169 discussion。P2 の `dev`
+/// drop 後にも見つかった同型の指摘）: `clone_htod` が返す `dev`
+/// を drop すると `cudarc` は `cuMemFreeAsync` を発行するのみで
+/// 完了を待たない。drop 直後に計測を終えると、その解放コストが
+/// 次イテレーションの synchronize（このクロージャの直後の H2D 分の
+/// synchronize）へ持ち越され、P3 単体の計測値に H2D 転送以外の
+/// コストが混入する。`phase_p2_alloc_zeros` の解放計測パターン
+/// （drop 後に synchronize して完了を待つ）に合わせ、drop 後にも
+/// synchronize してから計測を終える。
 fn phase_p3_h2d_only(
     device: &CudaDevice,
     config: &MeasurementConfig,
@@ -439,6 +448,10 @@ fn phase_p3_h2d_only(
             .synchronize()
             .expect("synchronize must succeed on CUDA-equipped test runner");
         drop(dev);
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after free must succeed to measure free completion");
     })
 }
 
@@ -629,6 +642,14 @@ fn large_buffer_percall_fixed_total_size_comparison() {
                 .synchronize()
                 .expect("synchronize must succeed on CUDA-equipped test runner");
             drop(dev_bufs);
+            // codex-review 指摘（PR #1169 discussion。phase_p3_h2d_only と
+            // 同型）: `dev_bufs` drop は `cuMemFreeAsync` を発行するのみで
+            // 完了を待たない。次ケースの H2D 計測へ解放コストが持ち越され
+            // ないよう、drop 後にも synchronize して解放完了を待つ。
+            device
+                .stream()
+                .synchronize()
+                .expect("synchronize after free must succeed to measure free completion");
         })
         .expect("fixed-total-size H2D comparison measurement must satisfy TASK-8.1 protocol");
 
