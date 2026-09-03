@@ -3,7 +3,9 @@
 //! `fandhe_ai_tensor_core::dispatch::select_gemm_kernel`（規則の純関数実装。
 //! `docs/dispatch-rules-design.md` §5 の決定表）を `backend-cuda` の
 //! 既存 GEMM 実装（`gemm.rs::CudaGemm`〈naive／tiled〉・
-//! `gemm_wmma.rs::CudaWmmaGemm`〈WMMA f16 Tensor Core〉）へ結線する。
+//! `gemm_wmma.rs::CudaWmmaGemm`〈WMMA f16 Tensor Core〉・
+//! `gemm_mma.rs::CudaMmaGemm`〈mma.sync f16 Tensor Core。#1150 設計・
+//! #1152/#1156 で本構造体へ結線予定〉）へ結線する。
 //! `BackendOps` trait 実装（TASK-1.9c・#46）はこの `CudaGemmAuto` を
 //! `BackendOps::gemm` から呼ぶだけの構成にできる（実装計画 §3.2
 //! 「#46 との境界」）。
@@ -13,10 +15,18 @@
 //! `run_f32`／`run_f16` 呼び出しでは FFI 照会を繰り返さない
 //! （`docs/dispatch-rules-design.md` §2.1「判定タイミング」）。
 //!
-//! フォールバック連鎖は `MatrixUnit → Tiled → Naive`（§5.2）。
-//! `CudaWmmaGemm::new` が cc ゲート非対応・NVRTC コンパイル失敗のいずれか
-//! で `Err` を返した場合は WMMA を候補から外し、以降 `run_f16` は常に
-//! tiled 経路を使う（fail-safe。`panic!`／`unwrap()` を使わない）。
+//! **現行実装**のフォールバック連鎖は `MatrixUnit → Tiled → Naive`
+//! （§5.2）。`CudaWmmaGemm::new` が cc ゲート非対応・NVRTC コンパイル
+//! 失敗のいずれかで `Err` を返した場合は WMMA を候補から外し、以降
+//! `run_f16` は常に tiled 経路を使う（fail-safe。`panic!`／`unwrap()`
+//! を使わない）。
+//!
+//! **#1150 設計（`docs/dispatch-rules-design.md` §5.6）**では、
+//! `MatrixUnit` 経路内部の実装優先順位を
+//! `CudaMmaGemm → CudaWmmaGemm → Tiled → Naive` へ切替予定（`mma`
+//! フィールドの fail-soft 構築は #1152、`run_f16` の分岐拡張〈事前形状
+//! ゲート込み〉は #1156 が実装する。本モジュールのコードは #1150 時点
+//! では未変更）。
 
 use std::num::NonZeroU32;
 
@@ -1584,6 +1594,12 @@ pub fn select_tile_config_for_device(
 /// `caps` は `wmma` の有無とは独立に「cc ゲートを満たすか」だけを表す
 /// （`select_gemm_kernel` の判定材料は cc のみであり、コンパイル成否は
 /// 別軸のフォールバックとして扱う。`run_f16` 内のコメント参照）。
+///
+/// **#1150 設計予定（#1152 で実装）**: `mma: Option<`
+/// [`crate::gemm_mma::CudaMmaGemm`]`>` フィールドを追加し、`wmma` と
+/// 同型の fail-soft 構築（cc ゲート非対応・NVRTC コンパイル失敗時は
+/// `None`）とする。`wmma` は `mma` が使えない場合のフォールバック用と
+/// して維持する（`docs/dispatch-rules-design.md` §5.6）。
 pub struct CudaGemmAuto {
     gemm: CudaGemm,
     wmma: Option<CudaWmmaGemm>,
@@ -1600,6 +1616,11 @@ impl CudaGemmAuto {
     /// `TensorCoreUnsupported`・NVRTC コンパイル失敗のいずれも）は
     /// `wmma = None` として握り潰し、`run_f16` を tiled へ倒す
     /// （fail-safe。`docs/dispatch-rules-design.md` §2.2）。
+    ///
+    /// **#1150 設計予定（#1152 で実装）**: `CudaMmaGemm::new(device).ok()`
+    /// を `wmma` と同様の fail-soft で構築し `mma` フィールドへ保持する
+    /// （`cc < 8.0` の `TensorCoreUnsupported`・NVRTC コンパイル失敗とも
+    /// `None`。`docs/dispatch-rules-design.md` §5.6）。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let gemm = CudaGemm::new(device)?;
         let wmma = CudaWmmaGemm::new(device).ok();
@@ -1637,12 +1658,23 @@ impl CudaGemmAuto {
 
     /// f16 GEMM を自動経路選択で実行する。
     ///
-    /// `select_gemm_kernel` が `MatrixUnit` を返しても `wmma` が `None`
-    /// （構築失敗。[`Self::new`] 参照）なら tiled へフォールバックする
-    /// （§5.2 のフォールバック連鎖 `MatrixUnit → Tiled → Naive` の
-    /// 中間段。`self.gemm`〈naive／tiled〉は `new` 成功時点で必ず存在
-    /// するため、tiled 自体が失敗するケースはカーネル起動時エラー
-    /// （`CudaError`）としてそのまま呼び出し元へ返る）。
+    /// **現行実装**: `select_gemm_kernel` が `MatrixUnit` を返しても
+    /// `wmma` が `None`（構築失敗。[`Self::new`] 参照）なら tiled へ
+    /// フォールバックする（`docs/dispatch-rules-design.md` §5.2 の
+    /// フォールバック連鎖 `MatrixUnit → Tiled → Naive` の中間段。
+    /// `self.gemm`〈naive／tiled〉は `new` 成功時点で必ず存在するため、
+    /// tiled 自体が失敗するケースはカーネル起動時エラー（`CudaError`）
+    /// としてそのまま呼び出し元へ返る）。
+    ///
+    /// **#1150 設計予定（#1156 で実装）**: `MatrixUnit` 分岐を
+    /// `mma → wmma → tiled` の 3 段へ拡張する。`mma` が `Some` かつ
+    /// 事前形状ゲート（`validate_mma_alignment(n, k)`・
+    /// `validate_mma_grid_bounds(m)` が `Ok`）を満たすときのみ
+    /// `CudaMmaGemm::run_f16` を呼び、満たさなければ `wmma`（`Some` なら）
+    /// へ、`wmma` も `None` なら tiled へ倒す。形状ゲートは呼び出し前の
+    /// 事前判定で行い、mma 実行の `Err` を捕捉して WMMA へ再試行する
+    /// エラー駆動フォールバックは採らない（カーネル起動失敗を静かに
+    /// 別経路で覆い隠さないため。`docs/dispatch-rules-design.md` §5.6）。
     pub fn run_f16(
         &self,
         a: &[f16],
