@@ -1449,3 +1449,58 @@ burn(wgpu) の Metal GEMM は N=512/1024/2048/4096 で計測不可（下記「�
 「reuse で candle 超え」は未達成。** N=4096 は参考系列（#1137 反映後）で 0.824→0.898 倍まで
 改善したが 1.0 倍には届かない。詳細な突合・原因・ユーザー判断事項は
 `docs/perf/cuda-gemm-candle-gate-remeasurement.md`（イシュー #1142）を参照。
+
+## 環境 13: Apple M4 Max（GEMM 目標達成ゲート #1037 の 5 回計測再計測・イシュー #1147）
+
+- ノード: 環境 3・環境 7・環境 9・環境 11 と同一ノード（実ホスト名は
+  `docs/real-hardware-verification-env.local.md` 方式のローカル管理。ローカル直接実行のため
+  rsync 転送は不要。`docs/real-hardware-verification-env.md` §1）
+- ツールチェーン: rustc 1.96.0 (ac68faa20 2026-05-25) / cargo 1.96.0 (30a34c682 2026-05-25)（実測）
+- macOS 26.6.2（BuildVersion 25G83）・Apple M4 Max・64GB
+- 対象: GEMM の N=1024/2048/4096（fandhe-ai reuse・candle fresh）のみ。環境 11 の全タスク横並び
+  計測とは異なり、`run_gemm_gate.sh metal <label>`（本 PR で device 汎用化。旧
+  `run_gemm_gate_cuda.sh` の CUDA 専用実装を #1147 で device 汎用化し、呼び出し面は
+  device 別薄い wrapper `run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh` に分離。
+  イシュー #1142→#1147）による 5 回計測専用のスイープ
+- **2 系列**（詳細は `docs/perf/metal-gemm-candle-gate-remeasurement.md` §3）:
+  - 正式系列（ラベル `0.6.0`）: 承認済みピン `fandhe-ai =0.6.0`（registry 解決）。生データ
+    `results/raw/results-m4max-gemm-gate-0.6.0.jsonl`（30 行）・
+    `results/raw/skipped-m4max-gemm-gate-0.6.0.log`（空）・
+    `docs/perf/logs/metal-gemm-candle-gate-1147/run_gemm_gate_metal-m4max-0.6.0.log`
+  - 参考系列（ラベル `head-bb7e35a`）: worktree HEAD `bb7e35a`（#1167/#1168 マージ後）へ
+    `--config patch.crates-io.fandhe-ai.path=...` で path 差し替えビルド（`[patch]`・
+    `.cargo/config.toml` はコミットしていない）。生データ
+    `results/raw/results-m4max-gemm-gate-head-bb7e35a.jsonl`（30 行）・
+    `results/raw/skipped-m4max-gemm-gate-head-bb7e35a.log`（空）
+- 熱・電源状態確認: 両系列とも計測前後で `pmset -g therm` に thermal/performance warning なし
+  （`docs/perf/logs/metal-gemm-candle-gate-1147/env_info.txt`）
+
+### 5 回計測ゲート判定（正式系列 `0.6.0`）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| 1024 | 2.854 ms（2.673–2.966 ms） | 2.071 ms | 0.726 | 752.4 | 未達 |
+| 2048 | 10.295 ms（9.225–12.090 ms） | 6.151 ms | 0.598 | 1668.8 | 未達 |
+| 4096 | 38.941 ms（38.576–43.842 ms） | 22.948 ms | 0.589 | 3529.4 | 未達 |
+
+### 5 回計測ゲート判定（参考系列 `head-bb7e35a`。正式判定には用いない）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| 1024 | 2.915 ms（2.366–3.058 ms） | 2.115 ms | 0.726 | 736.7 | 未達 |
+| 2048 | 9.424 ms（9.070–9.946 ms） | 6.265 ms | 0.665 | 1823.0 | 未達（改善したが未達） |
+| 4096 | 38.763 ms（38.673–39.459 ms） | 22.698 ms | 0.586 | 3545.6 | 未達 |
+
+### 環境 13 のデータ有効性
+
+- 両系列とも全 30 run で `parity_fail_count=0`・checksum が同一 N で一致（CUDA 側 #1142 の
+  N=2048 candle 無効データは Metal では再現しなかった）。詳細は
+  `docs/perf/metal-gemm-candle-gate-remeasurement.md` §5 を参照。tolerance は緩めていない
+
+### 環境 13 の #1037 ゲート判定（総括）
+
+**未達 3 件（N=1024・N=2048・N=4096）。正式系列・参考系列のいずれも #1037「reuse で candle
+超え」は未達成。** N=2048 は参考系列（#1167/#1168 反映後）で 0.598→0.665 倍まで改善したが
+1.0 倍には届かない。#1167/#1168 は `gemm metal` の NN 正方 GEMM 本番経路自体を変更していない
+ため、系統的な改善は確認されなかった。詳細な突合・原因・ユーザー判断事項は
+`docs/perf/metal-gemm-candle-gate-remeasurement.md`（イシュー #1147）を参照。
