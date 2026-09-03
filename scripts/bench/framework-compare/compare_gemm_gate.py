@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""GEMM 目標達成ゲート（#1031）の 5 回計測中央値集計ツール（イシュー #1142）。
+"""GEMM 目標達成ゲート（CUDA: #1031／Metal: #1037）の 5 回計測中央値集計
+ツール（イシュー #1142・#1147 で Metal 対応汎用化）。
 
 使い方:
-    python3 compare_gemm_gate.py JSONL [JSONL ...] [--out FILE]
+    python3 compare_gemm_gate.py [--device {cuda,metal}] JSONL [JSONL ...] [--out FILE]
 
-`run_gemm_gate_cuda.sh` が出力する JSONL（`bench-fandhe gemm cuda <N> reuse`・
-`bench-candle gemm cuda <N> fresh` を N=1024/2048/4096 それぞれ 5 回起動した
-結果）を読み、N ごとに fandhe-ai（reuse）vs candle（fresh。candle は reuse
-非対応のため fresh 固定）の `median_s` を run 間中央値で集約し、#1031 の受け
-入れ条件（`fandhe_median_s <= candle_median_s`）を判定する。
+`run_gemm_gate.sh <device> <label>`（旧 `run_gemm_gate_cuda.sh`。device 別
+wrapper は `run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh`）が出力する
+JSONL（`bench-fandhe gemm <device> <N> reuse`・`bench-candle gemm <device> <N>
+fresh` を N=1024/2048/4096 それぞれ 5 回起動した結果）を読み、N ごとに
+fandhe-ai（reuse）vs candle（fresh。candle は reuse 非対応のため fresh
+固定）の `median_s` を run 間中央値で集約し、CUDA は #1031・Metal は #1037
+の受け入れ条件（`fandhe_median_s <= candle_median_s`）を判定する。
+`--device` は既定 `cuda`（#1142 時点の呼び出し元との後方互換）。
 
 `summarize.py --target candle` は同一入力ファイル内の 1 レコードのみを
 拾う設計（1 ファイル = 1 環境の単発計測が前提）のため、5 回計測の run 間
@@ -142,11 +146,14 @@ def load_rows(path):
     return rows, warnings
 
 
-def _matching_rows(rows, framework, mode, size):
-    """`(framework, task=gemm, device=cuda, size, mode)` に一致する行を返す。
+def _matching_rows(rows, framework, mode, size, device="cuda"):
+    """`(framework, task=gemm, device, size, mode)` に一致する行を返す。
 
+    `device` は既定 "cuda"（#1142 時点の呼び出し元との後方互換）。Metal
+    ゲート（#1037・イシュー #1147）は呼び出し側から "metal" を渡す。
     `tf32:true` の行は除外する（FP32 目標値との混同防止。summarize.py と
-    同じ既定）。`mode` キー欠損は "fresh" 扱い（イシュー #925 互換規約）。
+    同じ既定。Metal は TF32 経路自体が存在しないため常に該当なし）。
+    `mode` キー欠損は "fresh" 扱い（イシュー #925 互換規約）。
     """
     out = []
     for r in rows:
@@ -156,7 +163,7 @@ def _matching_rows(rows, framework, mode, size):
             continue
         if r.get("task") != "gemm":
             continue
-        if r.get("device") != "cuda":
+        if r.get("device") != device:
             continue
         if r.get("size") != size:
             continue
@@ -215,10 +222,10 @@ def _median(values):
     return (values[mid - 1] + values[mid]) / 2.0
 
 
-def evaluate_size(rows, size):
+def evaluate_size(rows, size, device="cuda"):
     """1 size 分の判定結果を辞書で返す（`status`: "ok"/"undeterminable"）。"""
-    fandhe_rows = _matching_rows(rows, "fandhe-ai", FANDHE_MODE, size)
-    candle_rows = _matching_rows(rows, "candle", CANDLE_MODE, size)
+    fandhe_rows = _matching_rows(rows, "fandhe-ai", FANDHE_MODE, size, device)
+    candle_rows = _matching_rows(rows, "candle", CANDLE_MODE, size, device)
     result = {"size": size, "fandhe_n": len(fandhe_rows), "candle_n": len(candle_rows)}
 
     # 件数は厳密に MIN_RECORDS 件と一致することを要求する（codex-review P1
@@ -329,9 +336,13 @@ def _fmt_s(s):
     return f"{s * 1e6:.1f} us"
 
 
-def render(path, results):
+_GATE_ISSUE_BY_DEVICE = {"cuda": "#1031", "metal": "#1037"}
+
+
+def render(path, results, device="cuda"):
     lines = []
-    lines.append(f"## GEMM 目標達成ゲート（#1031）: `{path}`")
+    gate_issue = _GATE_ISSUE_BY_DEVICE.get(device, "#1031")
+    lines.append(f"## GEMM 目標達成ゲート（{gate_issue}・device={device}）: `{path}`")
     lines.append("")
     lines.append(
         "| N | fandhe-ai reuse median (min–max, n) | candle fresh median (n) | "
@@ -381,7 +392,13 @@ def render(path, results):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("jsonl", nargs="+", help="run_gemm_gate_cuda.sh の出力 JSONL（複数可・独立集計）")
+    parser.add_argument("jsonl", nargs="+", help="run_gemm_gate.sh の出力 JSONL（複数可・独立集計）")
+    parser.add_argument(
+        "--device",
+        choices=("cuda", "metal"),
+        default="cuda",
+        help="集計対象の device（既定 cuda。#1142 との後方互換。Metal は #1037 ゲート・イシュー #1147）",
+    )
     parser.add_argument("--out", help="出力先ファイル（省略時は標準出力）")
     args = parser.parse_args(argv)
 
@@ -396,7 +413,7 @@ def main(argv=None):
             continue
         for w in warnings:
             print(f"warning: {w}", file=sys.stderr)
-        results = [evaluate_size(rows, size) for size in SIZES]
+        results = [evaluate_size(rows, size, args.device) for size in SIZES]
         if warnings:
             # codex-review P0 指摘（PR #1166）: `load_rows` が破損 JSON・非
             # object・不正な `tf32` 型の行を warnings として除外するのみで、
@@ -417,7 +434,7 @@ def main(argv=None):
                     "詳細は上記 warning 行を参照）"
                 )
                 r.pop("achieved", None)
-        out_parts.append(render(path, results))
+        out_parts.append(render(path, results, args.device))
         for r in results:
             if r["status"] != "ok":
                 print(f"undeterminable: {path} size={r['size']}（{r['reason']}）", file=sys.stderr)

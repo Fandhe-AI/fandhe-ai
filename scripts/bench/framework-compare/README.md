@@ -355,22 +355,29 @@ echo $?   # 0: 全達成 / 2: --strict の無効データ判定が優先 / 3: �
   「達成」と判定されても性能特性の異なる経路同士の比較である点に注意する（本ツールはこの区別を自動
   判定しない。人間が判断する）
 
-## GEMM ゲート 5 回計測（#1031 達成判定・イシュー #1142）
+## GEMM ゲート 5 回計測（CUDA: #1031 達成判定・イシュー #1142／Metal: #1037 達成判定・
+イシュー #1147）
 
 `summarize.py --target candle` は同一入力ファイル内の 1 レコードしか拾わない
-（1 ファイル = 1 環境の単発計測が前提）ため、#1031「N=1024/2048/4096 reuse で
-candle 超え（各 5 回計測の中央値）」の受け入れ判定には非対応。本節の
-`run_gemm_gate_cuda.sh` / `compare_gemm_gate.py` がその 5 回計測を専用に行う
-（`run_ab_train_cuda.sh` / `compare_ab.py` の GEMM 版）。
+（1 ファイル = 1 環境の単発計測が前提）ため、CUDA #1031・Metal #1037「N=1024/
+2048/4096 reuse で candle 超え（各 5 回計測の中央値）」の受け入れ判定には
+非対応。本節の `run_gemm_gate.sh <device> <label>`／`compare_gemm_gate.py
+--device {cuda,metal}` がその 5 回計測を専用に行う（`run_ab_train_cuda.sh` /
+`compare_ab.py` の GEMM 版）。本体ロジックはイシュー #1142 の CUDA 専用実装
+（`run_gemm_gate_cuda.sh`）を #1147 で device 汎用化したもので、呼び出し面は
+device 別の薄い wrapper `run_gemm_gate_cuda.sh`（既存呼び出しとの CLI 互換
+維持）／`run_gemm_gate_metal.sh`（新規）に分離している（両者とも内部で
+`bash run_gemm_gate.sh <device> "$@"` を呼ぶのみ）。
 
 **2 系列の使い分け**:
 
-- **正式系列**（#1031 のゲート判定の正）: `bench-fandhe/Cargo.toml` の承認済み
+- **正式系列**（#1031/#1037 のゲート判定の正）: `bench-fandhe/Cargo.toml` の承認済み
   ピン（現行 `=0.6.0`）でビルドしたまま計測する。コミット済み manifest・
   `Cargo.lock` は変更しない
 - **参考系列**（次回 crates.io 公開前の見込み値）: `GEMM_GATE_PATCH_FACADE_PATH=
-  <facade 絶対パス>` を指定して `run_gemm_gate_cuda.sh` を呼ぶと、本体
-  `crates/facade`（rsync 済み HEAD ツリー）への path 差し替えビルド
+  <facade 絶対パス>` を指定して `run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh`
+  を呼ぶと、本体 `crates/facade`（rsync 済み HEAD ツリー、または Mac の場合は
+  ローカル直接実行の worktree HEAD）への path 差し替えビルド
   （`--config 'patch.crates-io.fandhe-ai.path="<facade 絶対パス>"'`）と計測を
   スクリプト内の 1 invocation で不可分に実行する（ビルドと計測の間に別の
   `cargo` コマンドが割り込む窓を作らない設計。イシュー #1166 の事故対応。
@@ -380,27 +387,38 @@ candle 超え（各 5 回計測の中央値）」の受け入れ判定には非�
   固定」を壊さないため）。`bench-fandhe` の `VERSION` 定数は crates.io 版の
   まま変わらないため JSONL の `framework_version` では両系列を区別できず、
   **ファイル名ラベル**（例: `head-<short sha>`）で区別する。参考系列は
-  #1031 の正式達成判定には使わない（次回ピン更新後の正式再計測で確定する）
+  #1031/#1037 の正式達成判定には使わない（次回ピン更新後の正式再計測で確定する）
 
 ```bash
 cd scripts/bench/framework-compare
-# 正式系列（現行ピン）:
+# CUDA 正式系列（現行ピン）:
 bash run_gemm_gate_cuda.sh 0.6.0
+# Metal 正式系列（現行ピン。イシュー #1147）:
+bash run_gemm_gate_metal.sh 0.6.0
 
-# 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
+# CUDA 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
 GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
   bash run_gemm_gate_cuda.sh head-<short sha>
+# Metal 参考系列（ローカル直接実行。worktree の crates/facade をそのまま指す）:
+GEMM_GATE_PATCH_FACADE_PATH="$(pwd)/../../../crates/facade" \
+  bash run_gemm_gate_metal.sh head-<short sha>
 
 # 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
 python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.6.0.jsonl
+python3 compare_gemm_gate.py --device metal results/raw/results-m4max-gemm-gate-0.6.0.jsonl
 echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2: 入力を読めない
 ```
 
-- `run_gemm_gate_cuda.sh <label>` はラベル（`[A-Za-z0-9._-]+` のみ許可）ごとに
-  N=1024/2048/4096 それぞれで `bench-fandhe gemm cuda <N> reuse` と
-  `bench-candle gemm cuda <N> fresh`（candle は reuse 非対応）を交互に 5 回ずつ
-  起動し `results/raw/results-dgx-gemm-gate-<label>.jsonl` へ記録する。失敗は
-  `results/raw/skipped-dgx-gemm-gate-<label>.log` に記録する（数値を捏造しない）。
+- `run_gemm_gate.sh <device> <label>`（device は `cuda`／`metal`。通常は device
+  別 wrapper 経由で呼ぶためラベルのみを渡す）はラベル（`[A-Za-z0-9._-]+` のみ
+  許可）ごとに N=1024/2048/4096 それぞれで `bench-fandhe gemm <device> <N>
+  reuse` と `bench-candle gemm <device> <N> fresh`（candle は reuse 非対応）を
+  交互に 5 回ずつ起動し `results/raw/results-<node>-gemm-gate-<label>.jsonl`
+  （`<node>` は cuda=`dgx`／metal=`m4max`）へ記録する。失敗は
+  `results/raw/skipped-<node>-gemm-gate-<label>.log` に記録する（数値を捏造しない）。
+  Metal の熱・電源状態は `pmset -g therm`・`uptime`（`sudo` 不要。CUDA の
+  `nvidia-smi` に相当する device 別スナップショット）で実行ログへ記録する
+  （`docs/perf/metal-bench-noise-protocol.md`「熱・電源状態の記録」節準拠）。
   計測ループが完走し `ANY_FAILED == 0`（全 30 run 成功）の場合にのみ、一時
   ファイルから上記 2 パスへ原子的（同一ファイルシステム内 `mv`）に反映する。
   1 件でも run が失敗した場合はこの 2 パスを一切変更せず、直前の有効な計測
