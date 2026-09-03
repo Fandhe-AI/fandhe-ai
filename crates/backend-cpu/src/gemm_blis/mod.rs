@@ -450,9 +450,10 @@ pub fn gemm_blis_parallel(
     // イシュー #1041 の pc 外側候補（`dispatch_shared_b_pc_outer`。B 共有化に
     // 加え A packing の重複〈jc 反復ごとの再 pack〉も解消する狙い）も、GB10
     // （#1140）・Apple M4 Max（#1141）双方の実機 5 回中央値実測で現行既定
-    // `RowPanel` を大きく下回り（1024 で約 50%・2048/4096 で約 30% 低い
-    // スループット）、#1144 で本番結線しないと確定した。詳細・数値は
-    // `docs/perf/cpu-gemm-candle-cpu-retune.md` §8 を参照。
+    // `RowPanel` を大きく下回り（M4 Max: 1024 で約 33〜35%・2048/4096 で約
+    // 22〜24% 低いスループット。GB10: 1024/2048 のみ実測で約 45〜54% 低い。
+    // GB10 4096 は候補側未計測）、#1144 で本番結線しないと確定した。詳細・
+    // 数値は `docs/perf/cpu-gemm-candle-cpu-retune.md` §8 を参照。
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
