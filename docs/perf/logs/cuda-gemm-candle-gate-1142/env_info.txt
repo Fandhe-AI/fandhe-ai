@@ -1,0 +1,57 @@
+# GEMM 目標達成ゲート（#1031）5 回計測再計測（イシュー #1142）計測環境
+
+実ホスト名は `docs/real-hardware-verification-env.local.md`（Git 管理外）方式に従い記載しない
+（`docs/real-hardware-verification-env.md` §2.4 の計測ノード選定と同一ノード）。
+
+## GPU / driver
+
+- GPU: NVIDIA GB10（DGX Spark。sm_121）
+- NVIDIA driver: 580.173.02
+- CUDA (nvcc): release 13.0, V13.0.88（Build cuda_13.0.r13.0/compiler.36424714_0）
+
+## ツールチェーン
+
+- rustc 1.97.0 (2d8144b78 2026-07-07)
+- cargo 1.97.0 (c980f4866 2026-06-30)
+
+## 転送・リビジョン
+
+- 転送元コミット（`.rev-stamp`）: `7e3e4b663694e50607fd307afe516386c1e94762`
+  （`perf(backend-cuda): ブロック実行順スウィズル（#1034）の GB10 実測に基づき本番結線可否を
+  判断する (#1165)`。#1136/#1137/#1139 の成果物を含む origin/main HEAD）
+- 転送方式: `docs/real-hardware-verification-env.md` §3 の rsync（`.gitignore` フィルタ・
+  `.env*`/`settings.local.json`/`.local.md` 明示除外に加え、既存ビルドキャッシュを保持するため
+  `scripts/bench/framework-compare/target/` を除外）
+- 転送後の秘密情報・内部実値混入なし（`find . -name ".env*" -o -name "settings.local.json" -o
+  -name "real-hardware-verification-env.local.md"` が 0 件）を確認済み
+
+## 系列
+
+- **正式系列**（ラベル `0.6.0`）: `bench-fandhe/Cargo.toml` の承認済みピン `fandhe-ai =0.6.0`
+  （crates.io 公開版。registry 解決。`cargo tree -p bench-fandhe --depth 1` で
+  `fandhe-ai v0.6.0`〈非 path〉を確認済み）
+- **参考系列**（ラベル `head-7e3e4b6`）: 上記転送元コミット（#1164 cp.async パイプライン結線後
+  HEAD）を `cargo build --release -p bench-fandhe --config
+  'patch.crates-io.fandhe-ai.path="<facade 絶対パス>"'` で path 差し替えビルド。`cargo tree`
+  で `fandhe-ai v0.6.0 (<facade 絶対パス>)`（path 解決）を確認済み。`[patch]`
+  セクション・`.cargo/config.toml` はコミットしていない（CLI `--config` 引数のみ）。
+  ビルド後は `GEMM_GATE_SKIP_BUILD=1` で測定 run を実行し、以後 `cargo build`/`cargo tree` を
+  一切呼ばずに測定を完了させた（plain `cargo build`/`cargo tree` を測定 run の前後に挟むと
+  Cargo.lock の解決が registry 側へ暗黙に巻き戻り、意図しない登録版バイナリへ差し替わる事故を
+  実際に踏んだため。§「参考系列ビルドの事故と対処」参照）
+- `bench-candle` は両系列で共通の 1 バイナリ（`fandhe-ai` に依存しないため）
+
+## 参考系列ビルドの事故と対処（記録）
+
+1 回目の参考系列ビルド直後、確認のため引数なしで `cargo tree -p bench-fandhe --depth 1` を
+実行したところ、Cargo.lock が registry 解決へ暗黙に再ロックされた（`--config patch` は単発
+invocation にのみ適用され、Cargo.lock 自体には path 解決が永続化されないため）。その状態を
+知らずに `GEMM_GATE_SKIP_BUILD` なしで測定 run を起動してしまい、`run_gemm_gate_cuda.sh` の
+「build bench-fandhe」ステップが（`--config` なしのため）registry 版 binary
+（`target/release/deps/bench_fandhe-92fe7ffa143d50cf`。Phase B 正式系列ビルドと同一 hash
+のため即座に再リンクされ、見た目上ビルドが一瞬で終わった）へ差し替えて計測を開始した。
+10 レコード（N=1024/2048・run 1〜2）が誤って登録版 binary で記録された時点で気づき、
+プロセスを kill・該当 JSONL/ログを削除し、`--config patch` を再指定してビルドし直した上で
+（`target/release/deps/bench_fandhe-fe9083cb0b6ff30a`。size/mtime を hardlink 一致で確認）、
+以後は `cargo build`/`cargo tree` を挟まず `GEMM_GATE_SKIP_BUILD=1` で測定した。誤登録された
+10 レコードは正式な参考系列データとして使用していない（記録のみ・数値は本ファイルに残さない）。

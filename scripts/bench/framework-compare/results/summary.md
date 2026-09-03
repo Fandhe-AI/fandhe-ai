@@ -1397,3 +1397,55 @@ burn(wgpu) の Metal GEMM は N=512/1024/2048/4096 で計測不可（下記「�
     Issue 化）。次回再計測とあわせた Issue 化の要否はユーザー判断待ち。本 PR では Issue 操作を
     行わず `outOfScope` として引き継ぐ（`.claude/rules/out-of-scope-tracking.md` は新規 Issue
     起票・既存 Issue へのコメント追記のいずれもユーザー承認を要求するため）
+
+## 環境 12: DGX Spark GB10（GEMM 目標達成ゲート #1031 の 5 回計測再計測・イシュー #1142）
+
+- ノード: 環境 2・環境 6・環境 8・環境 10 と同一ノード（実ホスト名は
+  `docs/real-hardware-verification-env.local.md` 方式のローカル管理）
+- ツールチェーン: rustc 1.97.0 (2d8144b78 2026-07-07) / cargo 1.97.0 (c980f4866 2026-06-30)（実測）
+- NVIDIA driver 580.173.02 / CUDA (nvcc) 13.0 V13.0.88
+- 対象: GEMM の N=1024/2048/4096（fandhe-ai reuse・candle fresh）のみ。環境 10 の全タスク横並び
+  計測とは異なり、`run_gemm_gate_cuda.sh`（新規。イシュー #1142）による 5 回計測専用のスイープ
+- **2 系列**（詳細は `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §3）:
+  - 正式系列（ラベル `0.6.0`）: 承認済みピン `fandhe-ai =0.6.0`（registry 解決）。生データ
+    `results/raw/results-dgx-gemm-gate-0.6.0.jsonl`（30 行）・
+    `results/raw/skipped-dgx-gemm-gate-0.6.0.log`（空）・
+    `results/run_gemm_gate_cuda-dgx-0.6.0.log`
+  - 参考系列（ラベル `head-7e3e4b6`）: 転送元コミット `7e3e4b6`（#1164 cp.async パイプライン
+    結線後 HEAD）へ `--config patch.crates-io.fandhe-ai.path=...` で path 差し替えビルド
+    （`[patch]`・`.cargo/config.toml` はコミットしていない）。生データ
+    `results/raw/results-dgx-gemm-gate-head-7e3e4b6.jsonl`（30 行）・
+    `results/raw/skipped-dgx-gemm-gate-head-7e3e4b6.log`（空）・
+    `results/run_gemm_gate_cuda-dgx-head-7e3e4b6.log`
+- GPU 競合確認: 両系列とも計測前後で `nvidia-smi utilization.gpu` 0%
+
+### 5 回計測ゲート判定（正式系列 `0.6.0`）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| 1024 | 2.482 ms（2.391–2.617 ms） | 923.6 µs | 0.372 | 865.2 | 未達 |
+| 2048 | - | - | - | - | 判定不能（candle 無効データ。下記参照） |
+| 4096 | 68.337 ms（68.318–69.104 ms） | 56.324 ms | 0.824 | 2011.2 | 未達 |
+
+### 5 回計測ゲート判定（参考系列 `head-7e3e4b6`。正式判定には用いない）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| 1024 | 2.414 ms（2.364–2.517 ms） | 923.5 µs | 0.383 | 889.7 | 未達 |
+| 2048 | - | - | - | - | 判定不能（candle 無効データ。下記参照） |
+| 4096 | 62.600 ms（60.252–63.437 ms） | 56.216 ms | 0.898 | 2195.5 | 未達（改善したが未達） |
+
+### 環境 12 のデータ有効性（N=2048 candle 無効データ）
+
+- 両系列とも `parity_fail_count=2, parity_total=4194304, parity_max_abs_err=3.623962e-05,
+  parity_max_rel_err=2.811288e-01`（全 10 run で完全に決定的に一致。環境 10 の単発計測値とも
+  一致）。原因は candle-core 0.11.0 の CUDA GEMM カーネル側にあり fandhe-ai 側は
+  `parity_fail_count=0`（全 10 run）。詳細な分析は
+  `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5 を参照。tolerance は緩めていない
+
+### 環境 12 の #1031 ゲート判定（総括）
+
+**未達 2 件（N=1024・N=4096）・判定不能 1 件（N=2048）。正式系列・参考系列のいずれも #1031
+「reuse で candle 超え」は未達成。** N=4096 は参考系列（#1137 反映後）で 0.824→0.898 倍まで
+改善したが 1.0 倍には届かない。詳細な突合・原因・ユーザー判断事項は
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md`（イシュー #1142）を参照。

@@ -107,3 +107,19 @@ bench-candle v0.1.0 (bench-candle)
 bench-burn v0.1.0 (bench-burn)
 ├── bench-common v0.1.0 (bench-common)
 └── burn v0.21.0
+
+# 環境 12: DGX Spark GB10（GEMM 目標達成ゲート #1031 の 5 回計測再計測・イシュー #1142）
+# NVIDIA driver 580.173.02 / CUDA 13.0 V13.0.88 (nvcc) / rustc 1.97.0 (2d8144b78 2026-07-07) / cargo 1.97.0 (c980f4866 2026-06-30)
+# 正式系列（fandhe-ai =0.6.0。registry 解決）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0
+bench-candle v0.1.0 (bench-candle)
+├── bench-common v0.1.0 (bench-common)
+└── candle-core v0.11.0
+
+# 参考系列（--config patch.crates-io.fandhe-ai.path=... で crates/facade〈転送元コミット 7e3e4b6〉へ
+# path 差し替え。[patch] セクション・.cargo/config.toml はコミットしていない。CLI 引数のみで適用）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0 (path: crates/facade @ 7e3e4b6)

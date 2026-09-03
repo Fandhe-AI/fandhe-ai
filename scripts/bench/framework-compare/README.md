@@ -355,6 +355,104 @@ echo $?   # 0: 全達成 / 2: --strict の無効データ判定が優先 / 3: �
   「達成」と判定されても性能特性の異なる経路同士の比較である点に注意する（本ツールはこの区別を自動
   判定しない。人間が判断する）
 
+## GEMM ゲート 5 回計測（#1031 達成判定・イシュー #1142）
+
+`summarize.py --target candle` は同一入力ファイル内の 1 レコードしか拾わない
+（1 ファイル = 1 環境の単発計測が前提）ため、#1031「N=1024/2048/4096 reuse で
+candle 超え（各 5 回計測の中央値）」の受け入れ判定には非対応。本節の
+`run_gemm_gate_cuda.sh` / `compare_gemm_gate.py` がその 5 回計測を専用に行う
+（`run_ab_train_cuda.sh` / `compare_ab.py` の GEMM 版）。
+
+**2 系列の使い分け**:
+
+- **正式系列**（#1031 のゲート判定の正）: `bench-fandhe/Cargo.toml` の承認済み
+  ピン（現行 `=0.6.0`）でビルドしたまま計測する。コミット済み manifest・
+  `Cargo.lock` は変更しない
+- **参考系列**（次回 crates.io 公開前の見込み値）: `GEMM_GATE_PATCH_FACADE_PATH=
+  <facade 絶対パス>` を指定して `run_gemm_gate_cuda.sh` を呼ぶと、本体
+  `crates/facade`（rsync 済み HEAD ツリー）への path 差し替えビルド
+  （`--config 'patch.crates-io.fandhe-ai.path="<facade 絶対パス>"'`）と計測を
+  スクリプト内の 1 invocation で不可分に実行する（ビルドと計測の間に別の
+  `cargo` コマンドが割り込む窓を作らない設計。イシュー #1166 の事故対応。
+  詳細は下記「バイナリ同一性検証」節）。**`[patch]` セクション・
+  `.cargo/config.toml` は一切コミットしない**（CLI 引数のみで与える。依存
+  ポリシー〈`.claude/rules/deps-policy.md` 第 9 区分〉の「承認済みピンの完全
+  固定」を壊さないため）。`bench-fandhe` の `VERSION` 定数は crates.io 版の
+  まま変わらないため JSONL の `framework_version` では両系列を区別できず、
+  **ファイル名ラベル**（例: `head-<short sha>`）で区別する。参考系列は
+  #1031 の正式達成判定には使わない（次回ピン更新後の正式再計測で確定する）
+
+```bash
+cd scripts/bench/framework-compare
+# 正式系列（現行ピン）:
+bash run_gemm_gate_cuda.sh 0.6.0
+
+# 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
+GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
+  bash run_gemm_gate_cuda.sh head-<short sha>
+
+# 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
+python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.6.0.jsonl
+echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2: 入力を読めない
+```
+
+- `run_gemm_gate_cuda.sh <label>` はラベル（`[A-Za-z0-9._-]+` のみ許可）ごとに
+  N=1024/2048/4096 それぞれで `bench-fandhe gemm cuda <N> reuse` と
+  `bench-candle gemm cuda <N> fresh`（candle は reuse 非対応）を交互に 5 回ずつ
+  起動し `results/raw/results-dgx-gemm-gate-<label>.jsonl` へ記録する。失敗は
+  `results/raw/skipped-dgx-gemm-gate-<label>.log` に記録する（数値を捏造しない）。
+  計測ループが完走し `ANY_FAILED == 0`（全 30 run 成功）の場合にのみ、一時
+  ファイルから上記 2 パスへ原子的（同一ファイルシステム内 `mv`）に反映する。
+  1 件でも run が失敗した場合はこの 2 パスを一切変更せず、直前の有効な計測
+  結果（同一 label の過去の成功実行分）を保全したまま、不完全な計測データは
+  `results/raw/results-dgx-gemm-gate-<label>.failed-<UTC タイムスタンプ>.jsonl`
+  等の診断用別名ファイルへ退避する（fail-closed。#1166 codex-review 指摘
+  PRRT_kwDOTuUCJc6euxgr／PRRT_kwDOTuUCJc6evCpq 対応。security.md A08）
+- **バイナリ同一性検証（イシュー #1166。依存元照合は同イシューへの
+  codex-review／Cursor Bugbot 指摘で強化。bench-candle 側の検証は同イシュー
+  への追加 codex-review 指摘 PRRT_kwDOTuUCJc6evCpm 対応）**: `bench-fandhe`・
+  `bench-candle` 双方をビルドした直後（他の `cargo` コマンドを挟まず）に、
+  各 `target/release/<binary>` の sha256 と依存解決元（`cargo tree -p
+  <package> --depth 1` の path/registry 判定。`fandhe-ai` は**ビルド時と同一の
+  `--config`〈`GEMM_GATE_PATCH_FACADE_PATH` 指定時の path patch〉を付けて
+  実行**し、path patch 適用ビルドでも `cargo tree` 側だけ patch なしで解決
+  され registry と誤記録する事故を防ぐ。`candle-core` は patch 対象外のため
+  常に registry 解決を要求する）を `results/raw/manifest-dgx-gemm-gate-
+  <label>.json` へ記録し、計測ループ開始直前（`GEMM_GATE_SKIP_BUILD=1` を
+  含む全経路）に再計算した sha256・依存解決元と突き合わせる。bench-candle
+  側の検証がなかった旧実装では、`GEMM_GATE_SKIP_BUILD=1` 経路で candle
+  binary が別バージョンへ差し替えられていても検出できず、その性能値を
+  candle 0.11.0 の値として確定してしまう可能性があった。過去に、
+  確認目的の素の `cargo tree` を挟んだだけで Cargo.lock が registry 解決へ
+  暗黙に再ロックされ、意図しない登録版 binary へ差し替わって計測してしまった
+  事故が実際に発生した（`docs/perf/logs/cuda-gemm-candle-gate-1142/env_info.txt`
+  「参考系列ビルドの事故と対処」節）。この検証は fail-closed（manifest 欠落・
+  sha256 不一致・依存解決元の取得失敗〈"unknown" への fail-open はしない〉・
+  依存解決元の不一致ならいずれも測定を一切実行せず exit 1。security.md A08）
+  - さらに、記録・検証いずれの時点でも `fandhe_ai_source` を「`GEMM_GATE_
+    PATCH_FACADE_PATH` を指定した invocation なら `path:<指定パス>`、
+    指定しない invocation なら `registry`」という契約に照合する。単に
+    sha256 が一致しているだけでは、記録後に `GEMM_GATE_SKIP_BUILD=1` を
+    使って `GEMM_GATE_PATCH_FACADE_PATH` の有無を変えて実行した場合の系列
+    取り違え（正式系列のラベルで参考系列の依存解決を計測してしまう等）を
+    検出できないため、README「ファイル名ラベルが唯一の系列識別手段」という
+    計測契約をこの照合で担保する
+  - `GEMM_GATE_SKIP_BUILD=1` は「同一 label で直前に成功した本スクリプト実行
+    が残した manifest と binary が一致する場合に限り」ビルドを省略する用途
+    （失敗 run の再実行等）。参考系列の外部事前ビルド＋`GEMM_GATE_SKIP_BUILD=1`
+    という旧 2 段構成は、ビルドと計測の間に任意の `cargo` コマンドが割り込む
+    窓を生むため廃止し、上記 `GEMM_GATE_PATCH_FACADE_PATH` に統合した
+- `compare_gemm_gate.py JSONL...` は size ごとに fandhe-ai/candle 各 5 件の
+  `median_s` から中央値を算出し `fandhe_median_s <= candle_median_s` を判定する。
+  以下はいずれも「判定不能」として明示し性能値を確定表示しない（fail-closed。
+  security.md A08）: レコードが 5 件未満、要素単位検証（`parity_*`。イシュー
+  #970）が `parity_fail_count > 0` またはフィールド欠損・値域不正、checksum が
+  本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる。
+  判定不能時は run ごとの `fail_count`/`max_abs`/`max_rel` を診断表として出力
+  する（N=2048 の candle 無効データの原因調査・再現条件記録に使う。イシュー
+  #1142 R2）
+- `tf32:true` の行（イシュー #1042）は本ゲートの対象外として除外する
+
 ## A/B 計測（都度同期廃止・イシュー #1083）
 
 #1011（CUDA 都度 `stream.synchronize()` 廃止）の受入条件「MLP 学習 1 step が
