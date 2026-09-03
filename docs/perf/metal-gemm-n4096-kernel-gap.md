@@ -36,11 +36,22 @@
 
 ## 2. Phase A: 反射値によるレジスタ圧仮説（H1）の検証
 
-`MetalGemm::tile_pipeline_reflection`（イシュー #1143 で追加。
-`crates/backend-metal/src/gemm.rs`）で `MTLComputePipelineState` 構築後の
-`maxTotalThreadsPerThreadgroup`／`staticThreadgroupMemoryLength` を全候補 × NN で
-取得した（`gemm_transpose_tile_sweep.rs::dump_reflection`。ディスパッチを伴わず
-秒未満で完了）。
+計測当時（イシュー #1143 実装時点）は `MetalGemm::tile_pipeline_reflection`
+（`crates/backend-metal/src/gemm.rs`）・`TilePipelineReflection` 構造体・
+`gemm_transpose_tile_sweep.rs::dump_reflection` という診断専用の入口を追加し、
+これで `MTLComputePipelineState` 構築後の `maxTotalThreadsPerThreadgroup`／
+`staticThreadgroupMemoryLength` を全候補 × NN で取得した（ディスパッチを伴わず
+秒未満で完了）。**これらの入口は本 PR の後続コミット（`fix(backend-metal):
+診断専用の TilePipelineReflection 入口を削除する`）で削除済みであり、HEAD の
+`crates/backend-metal/src/gemm.rs`・`examples/gemm_transpose_tile_sweep.rs` には
+存在しない**（`#[doc(hidden)] pub` でも内部表現の公開 API 漏出は AGENTS.md
+規約上 P1 に該当するという codex-review 指摘・PR #1168 を受け、診断完了後に
+入口を撤去したため）。したがって下表の実測値は当時のローカル変更を適用した
+状態で取得したものであり、`cargo run -p fandhe-ai-backend-metal --example
+gemm_transpose_tile_sweep --release` を HEAD 上でそのまま実行しても再現しない
+（値そのものは §1 の生ログ・下表に記録済みのため再取得の必要はない。再現する
+には削除前のコミット〈`938629c` またはその直前の追加コミット〉の
+`gemm.rs`／`gemm_transpose_tile_sweep.rs` を一時的に復元する必要がある）。
 
 | candidate | requested_thread_count | max_total_threads_per_threadgroup | static_threadgroup_memory_length |
 |---|---|---|---|
@@ -61,6 +72,24 @@
 崩壊（実測 1.02〜1.03 TFLOPS。§3）は、スレッドグループの起動可否ではなく、
 スレッドあたりの実行効率（真のレジスタ spill・メモリアクセスパターン等、この
 反射 API では見えない要因）に起因する可能性が高い。
+
+**本判断の限界（codex-review 指摘・PR #1168）**: `maxTotalThreadsPerThreadgroup`
+はコンパイラがレジスタ／メモリ使用量から静的に算出する**スレッドグループ起動数の
+理論上限**であり、全候補でデバイス上限 1024 のままという実測は「起動可能な
+スレッドグループサイズを削るほどのレジスタ圧ではない」ことまでしか棄却しない。
+以下は本反射値だけでは棄却できない：(a) 実行時のレジスタ spill（thread-local
+メモリへの退避によるレイテンシ増）が理論上限に影響せずスループットのみを下げる
+経路、(b) simdgroup 単位でのスケジューリング・ウェーブ数競合による実効
+occupancy 低下。したがって「H1（レジスタ圧起因の occupancy 低下）が支持され
+ない」は**この反射値ベースの検証手法の範囲内での結論**であり、レジスタ圧に
+起因する性能劣化そのものを一般に棄却するものではない（§3 の cand0 崩壊自体が
+「スレッドあたり実行効率」側の要因＝広い意味でのレジスタ圧の可能性を排除して
+いない点は本文が明記するとおり）。この限界を前提に、E1/E2 見送り判断
+（次段落）は「反射値で H1 が完全に反証された」ことではなく「低コストな反射値
+検証で occupancy 側の明確な支持材料が得られず、E1/E2 の期待値がコスト
+（共有カーネルへの変更・既存テスト回帰リスク）に見合わないという相対的判断」
+として扱う。厳密なレジスタ spill 計測（Xcode Instruments 等）による棄却・
+確証は §5 スコープ外へ引き継ぐ。
 
 計画の判断基準（advisor 相談での確認）: H1 が反射値レベルで支持されない場合、
 E1（`_Pragma("clang loop unroll(full)")` 付与）・E2（ソーステキスト特殊化による
@@ -117,12 +146,14 @@ N=4096 NN（正方立方。中核対象）:
   という全候補共有カーネルへの変更・既存 200 件超のテストへの回帰リスク）
   の比較から本調査では実施しない。
 
-**本 PR での変更点**: (a) `MetalGemm::tile_pipeline_reflection`（診断専用の
-新規公開 API。`TilePipelineReflection` 構造体）の追加、(b)
-`crate::tile::CANDIDATES` への index 8 追加とその収録・不変ガードテスト、(c)
-`gemm_transpose_tile_sweep.rs` への反射値ダンプ・cand8 追加。**本番選択ロジック
-（`tile::select`／`select_with_occupancy_for_device`）は変更しない**（cand8 が
-劣後という測定結果のため）。
+**本 PR での変更点**: (a) `crate::tile::CANDIDATES` への index 8 追加とその
+収録・不変ガードテスト（HEAD に残存）、(b) 診断専用の
+`MetalGemm::tile_pipeline_reflection`／`TilePipelineReflection` 構造体・
+`gemm_transpose_tile_sweep.rs` の反射値ダンプ（`dump_reflection`）を計測用に
+一時追加し §2 の実測後に削除（内部表現の公開 API 漏出という codex-review
+指摘・PR #1168 への対応。HEAD には存在しない。上記「削除済み」の注記を参照）。
+**本番選択ロジック（`tile::select`／`select_with_occupancy_for_device`）は
+変更しない**（cand8 が劣後という測定結果のため）。
 
 ## 5. スコープ外（今後の切り出し候補）
 
@@ -136,6 +167,11 @@ N=4096 NN（正方立方。中核対象）:
   barrier-ab.md`・`metal-gemm-tgid-swizzle-ab.md` は本 PR では更新しない
 - cand0（candle と同一タイル形状）が 4096 で崩壊する根本原因の特定
   （スレッドあたり実行効率の直接計測手段が現状ない）
+- §2 の限界に基づく厳密なレジスタ spill 計測（Xcode Instruments の GPU
+  Counters・Shader Profiler 等）による H1 の確証・棄却。`maxTotalThreadsPerThreadgroup`
+  はスレッドグループ起動数の理論上限のみを表し、spill によるスループット低下
+  （起動数を削らない経路）を直接には検出できないため（§2 追記・codex-review
+  指摘・PR #1168）
 
 これらは本 PR 本文で読者へ提示し、Issue 起票の要否はユーザー判断に委ねる
 （`.claude/rules/out-of-scope-tracking.md`「ユーザーの承認なしに勝手に Issue を

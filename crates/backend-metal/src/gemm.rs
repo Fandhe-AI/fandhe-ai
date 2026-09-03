@@ -196,20 +196,6 @@ impl GemmStrides {
 /// `ops::MetalBackendOps::gemm`／`gemm_bias_act` は演算呼び出しごとの
 /// 都度構築をやめ、`crate::context_cache::cached_gemm` 経由で
 /// `Arc<MetalGemm>` をプロセス内キャッシュから取得する本番経路へ移行した
-/// [`MetalGemm::tile_pipeline_reflection`] の返り値（イシュー #1143）。
-/// `MTLComputePipelineState` 構築後にのみ取得できる反射値を、レジスタ
-/// 圧・スタック溢れの間接証跡として examples／診断コードへ渡す。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TilePipelineReflection {
-    /// フォールバック後に実際に採用された [`TileConfig`]
-    /// （`crate::tile::fallback_chain` 経由。要求した構成と異なりうる）。
-    pub resolved_cfg: TileConfig,
-    /// スレッドグループあたりの最大スレッド数（GPU 算出値）。
-    pub max_total_threads_per_threadgroup: u32,
-    /// コンパイラが静的に確保する threadgroup メモリ量（バイト）。
-    pub static_threadgroup_memory_length: u32,
-}
-
 /// （A/B 計測専用の `new_with_swizzle`／`new_with_fine_barrier` 入口は
 /// キャッシュ対象外のまま従来どおり直接構築する）。
 pub struct MetalGemm {
@@ -629,42 +615,6 @@ impl MetalGemm {
     ) -> Result<TileConfig, MetalError> {
         self.pipeline_for_tile(ctx, cfg, pattern)
             .map(|(_, resolved)| resolved)
-    }
-
-    /// [`TileConfig`] 候補が実際に構築するパイプラインの反射値
-    /// （イシュー #1143）。`gemm_simdgroup_tiled` の
-    /// `simdgroup_float8x8 acc[MAX_ACC][MAX_ACC]` 等の固定確保配列が
-    /// レジスタへ昇格できずスタックへ溢れている（スレッド占有率が
-    /// 下がる）ことの間接的な証跡として、`MTLComputePipelineState`
-    /// 構築後にのみ取得できる 2 値を公開する:
-    ///
-    /// - `max_total_threads_per_threadgroup`: レジスタ／スレッドグループ
-    ///   メモリ使用量から GPU が算出するスレッドグループあたりの
-    ///   スレッド数上限。[`TileConfig::thread_count`] が要求する値を
-    ///   下回っていれば、`Self::pipeline_for_tile` は
-    ///   `crate::tile::fallback_chain` の次候補へフォールバックする
-    ///   （本メソッドは `pipeline_for_tile` のフォールバック判定
-    ///   そのものには関与せず、実測診断専用の読み取り専用入口）。
-    /// - `static_threadgroup_memory_length`: コンパイラが静的に確保する
-    ///   threadgroup メモリ量（バイト）。`TileConfig::shared_mem_bytes`
-    ///   に対応する。
-    ///
-    /// `docs/perf/metal-gemm-n4096-kernel-gap.md`
-    /// （`examples/gemm_transpose_tile_sweep.rs`）から呼ばれる診断専用
-    /// 入口であり、本番ディスパッチ経路（`dispatch_auto`・
-    /// `dispatch_variant`）からは呼ばれない。
-    pub fn tile_pipeline_reflection(
-        &self,
-        ctx: &MetalContext,
-        cfg: TileConfig,
-        pattern: TransposePattern,
-    ) -> Result<TilePipelineReflection, MetalError> {
-        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, pattern)?;
-        Ok(TilePipelineReflection {
-            resolved_cfg,
-            max_total_threads_per_threadgroup: pipeline.maxTotalThreadsPerThreadgroup() as u32,
-            static_threadgroup_memory_length: pipeline.staticThreadgroupMemoryLength() as u32,
-        })
     }
 
     /// [`Self::resolve_tile_config`] の f16 版（イシュー #796）。
