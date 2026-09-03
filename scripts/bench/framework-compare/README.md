@@ -400,16 +400,29 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
   N=1024/2048/4096 それぞれで `bench-fandhe gemm cuda <N> reuse` と
   `bench-candle gemm cuda <N> fresh`（candle は reuse 非対応）を交互に 5 回ずつ
   起動し `results/raw/results-dgx-gemm-gate-<label>.jsonl` へ記録する。失敗は
-  `results/raw/skipped-dgx-gemm-gate-<label>.log` に記録する（数値を捏造しない）
+  `results/raw/skipped-dgx-gemm-gate-<label>.log` に記録する（数値を捏造しない）。
+  計測ループが完走し `ANY_FAILED == 0`（全 30 run 成功）の場合にのみ、一時
+  ファイルから上記 2 パスへ原子的（同一ファイルシステム内 `mv`）に反映する。
+  1 件でも run が失敗した場合はこの 2 パスを一切変更せず、直前の有効な計測
+  結果（同一 label の過去の成功実行分）を保全したまま、不完全な計測データは
+  `results/raw/results-dgx-gemm-gate-<label>.failed-<UTC タイムスタンプ>.jsonl`
+  等の診断用別名ファイルへ退避する（fail-closed。#1166 codex-review 指摘
+  PRRT_kwDOTuUCJc6euxgr／PRRT_kwDOTuUCJc6evCpq 対応。security.md A08）
 - **バイナリ同一性検証（イシュー #1166。依存元照合は同イシューへの
-  codex-review／Cursor Bugbot 指摘で強化）**: `bench-fandhe` をビルドした
-  直後（他の `cargo` コマンドを挟まず）に `target/release/bench-fandhe` の
-  sha256 と `fandhe-ai` の依存解決元（`cargo tree -p bench-fandhe --depth 1`
-  の path/registry 判定。**ビルド時と同一の `--config`〈`GEMM_GATE_PATCH_
-  FACADE_PATH` 指定時の path patch〉を付けて実行**し、path patch 適用ビルド
-  でも `cargo tree` 側だけ patch なしで解決され registry と誤記録する事故を
-  防ぐ）を `results/raw/manifest-dgx-gemm-gate-<label>.json` へ記録し、計測
-  ループ開始直前に再計算した sha256・依存解決元と突き合わせる。過去に、
+  codex-review／Cursor Bugbot 指摘で強化。bench-candle 側の検証は同イシュー
+  への追加 codex-review 指摘 PRRT_kwDOTuUCJc6evCpm 対応）**: `bench-fandhe`・
+  `bench-candle` 双方をビルドした直後（他の `cargo` コマンドを挟まず）に、
+  各 `target/release/<binary>` の sha256 と依存解決元（`cargo tree -p
+  <package> --depth 1` の path/registry 判定。`fandhe-ai` は**ビルド時と同一の
+  `--config`〈`GEMM_GATE_PATCH_FACADE_PATH` 指定時の path patch〉を付けて
+  実行**し、path patch 適用ビルドでも `cargo tree` 側だけ patch なしで解決
+  され registry と誤記録する事故を防ぐ。`candle-core` は patch 対象外のため
+  常に registry 解決を要求する）を `results/raw/manifest-dgx-gemm-gate-
+  <label>.json` へ記録し、計測ループ開始直前（`GEMM_GATE_SKIP_BUILD=1` を
+  含む全経路）に再計算した sha256・依存解決元と突き合わせる。bench-candle
+  側の検証がなかった旧実装では、`GEMM_GATE_SKIP_BUILD=1` 経路で candle
+  binary が別バージョンへ差し替えられていても検出できず、その性能値を
+  candle 0.11.0 の値として確定してしまう可能性があった。過去に、
   確認目的の素の `cargo tree` を挟んだだけで Cargo.lock が registry 解決へ
   暗黙に再ロックされ、意図しない登録版 binary へ差し替わって計測してしまった
   事故が実際に発生した（`docs/perf/logs/cuda-gemm-candle-gate-1142/env_info.txt`

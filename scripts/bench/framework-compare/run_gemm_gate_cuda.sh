@@ -87,18 +87,20 @@ sha256_of() {
   fi
 }
 
-# `cargo tree -p bench-fandhe --depth 1` の `fandhe-ai` 依存行から解決元
-# （path 差し替えか registry か）を抽出する。path 解決時は crate 名の直後に
-# `(<絶対パス>)` が付く（cargo 標準表示）。呼び出し時は必ずビルドと同じ
-# `${CARGO_CONFIG_ARGS[@]}`（`GEMM_GATE_PATCH_FACADE_PATH` 指定時の
-# `--config patch.crates-io.fandhe-ai.path=...`）を渡すこと。引数なしで
-# 呼ぶと path patch が適用されないまま解決され、path ビルドでも registry と
-# 誤記録しうる（#1166 codex-review 指摘・Cursor Bugbot 指摘）。
-# 取得失敗（fandhe-ai 行が見当たらない）は戻り値 1 を返す（呼び出し側で
-# fail-closed に扱う。"unknown" を返して fail-open させない。security.md A08）。
-fandhe_ai_source_desc() {
+# `cargo tree -p <package> --depth 1` の `<dep_crate>` 依存行から解決元
+# （path 差し替えか registry か）を抽出する汎用ヘルパー。path 解決時は crate
+# 名の直後に `(<絶対パス>)` が付く（cargo 標準表示）。呼び出し時は必ずビルド
+# と同じ `--config` 引数（fandhe-ai 用の `${CARGO_CONFIG_ARGS[@]}`。
+# candle-core は本スクリプトでは patch 対象外のため引数なしで呼ぶ）を渡す
+# こと。引数を欠くと path patch が適用されないまま解決され、path ビルドでも
+# registry と誤記録しうる（#1166 codex-review 指摘・Cursor Bugbot 指摘）。
+# 取得失敗（対象行が見当たらない）は戻り値 1 を返す（呼び出し側で fail-closed
+# に扱う。"unknown" を返して fail-open させない。security.md A08）。
+pkg_dep_source_desc() {
+  local package=$1 dep_crate=$2
+  shift 2
   local line path_part
-  line=$(cargo tree -p bench-fandhe --depth 1 "$@" 2>/dev/null | grep -E '^[├└]── fandhe-ai ' || true)
+  line=$(cargo tree -p "$package" --depth 1 "$@" 2>/dev/null | grep -E "^[├└]── ${dep_crate} " || true)
   if [[ -z "$line" ]]; then
     return 1
   elif [[ "$line" == *"("* ]]; then
@@ -110,22 +112,45 @@ fandhe_ai_source_desc() {
   fi
 }
 
-# ビルド直後に呼び、`target/release/bench-fandhe` の sha256・依存解決元を
-# manifest へ記録する（fail-closed 検証の基準値。#1166 対応）。
-# 依存解決元は `${CARGO_CONFIG_ARGS[@]}`（ビルド時と同一の `--config`）を
-# 付けた `cargo tree` で取得し、取得失敗時・現在の invocation の意図
-# （`GEMM_GATE_PATCH_FACADE_PATH` の有無＝参考系列か正式系列か）と矛盾する
+# bench-fandhe / fandhe-ai 用の薄いラッパー（呼び出し箇所の可読性のため維持）。
+fandhe_ai_source_desc() {
+  pkg_dep_source_desc bench-fandhe fandhe-ai "$@"
+}
+
+# bench-candle / candle-core 用の薄いラッパー。candle-core は
+# `GEMM_GATE_PATCH_FACADE_PATH` の patch 対象外（deps-policy.md 第 9 区分の
+# 承認済みピン `candle-core =0.11.0` は常に registry 解決）のため引数を渡さ
+# ない（#1166 P0 指摘: bench-candle 側が一切検証されず、GEMM_GATE_SKIP_BUILD=1
+# 経路で別バージョンへ差し替えても検出できなかったことへの対応）。
+candle_core_source_desc() {
+  pkg_dep_source_desc bench-candle candle-core
+}
+
+# ビルド直後に呼び、`target/release/bench-fandhe`・`target/release/bench-candle`
+# 双方の sha256・依存解決元を manifest へ記録する（fail-closed 検証の基準値。
+# #1166 対応）。bench-fandhe の依存解決元は `${CARGO_CONFIG_ARGS[@]}`（ビルド
+# 時と同一の `--config`）を付けた `cargo tree` で取得し、bench-candle は
+# candle-core が patch 対象外（常に registry 解決。deps-policy.md 第 9 区分の
+# 承認済みピン `candle-core =0.11.0`）のため引数なしで取得する。
+# いずれも取得失敗時・現在の invocation の意図（`GEMM_GATE_PATCH_FACADE_PATH`
+# の有無＝参考系列か正式系列か。bench-candle は常に registry 期待）と矛盾する
 # 場合は manifest を書かず fail-closed で終了する（#1166 codex-review 指摘・
 # Cursor Bugbot 指摘: ラベルだけでは系列を機械的に識別できないため、記録の
-# 時点でも系列契約を照合する）。
+# 時点でも系列契約を照合する。P0 指摘 PRRT_kwDOTuUCJc6evCpm: 従来は
+# bench-fandhe 側のみ検証・記録しており、bench-candle は `GEMM_GATE_SKIP_BUILD=1`
+# 経路で別バージョンへ差し替えられても検出できなかった）。
 record_manifest() {
-  local fandhe_sha source_desc
+  local fandhe_sha fandhe_source candle_sha candle_source
   if [[ ! -x "./target/release/bench-fandhe" ]]; then
     echo "manifest 記録失敗: ./target/release/bench-fandhe が見つからない" >&2
     exit 1
   fi
+  if [[ ! -x "./target/release/bench-candle" ]]; then
+    echo "manifest 記録失敗: ./target/release/bench-candle が見つからない" >&2
+    exit 1
+  fi
   fandhe_sha=$(sha256_of "./target/release/bench-fandhe")
-  if ! source_desc=$(fandhe_ai_source_desc "${CARGO_CONFIG_ARGS[@]}"); then
+  if ! fandhe_source=$(fandhe_ai_source_desc "${CARGO_CONFIG_ARGS[@]}"); then
     echo "ERROR: fandhe-ai の依存解決元を cargo tree から取得できない" \
          "('cargo tree -p bench-fandhe --depth 1' に fandhe-ai 行が見当たらない)。" >&2
     echo "  依存元不明のまま manifest を記録すると、後続の verify_manifest が" >&2
@@ -134,21 +159,36 @@ record_manifest() {
     exit 1
   fi
   if [[ -n "${GEMM_GATE_PATCH_FACADE_PATH:-}" ]]; then
-    if [[ "$source_desc" != "path:${GEMM_GATE_PATCH_FACADE_PATH}" ]]; then
+    if [[ "$fandhe_source" != "path:${GEMM_GATE_PATCH_FACADE_PATH}" ]]; then
       echo "ERROR: GEMM_GATE_PATCH_FACADE_PATH 指定時（参考系列）は fandhe_ai_source が" >&2
-      echo "  'path:${GEMM_GATE_PATCH_FACADE_PATH}' である必要があるが actual=$source_desc。" >&2
+      echo "  'path:${GEMM_GATE_PATCH_FACADE_PATH}' である必要があるが actual=$fandhe_source。" >&2
       echo "  ビルドと cargo tree で解決結果が食い違っている（fail-closed。#1166）。" >&2
       exit 1
     fi
-  elif [[ "$source_desc" != "registry" ]]; then
+  elif [[ "$fandhe_source" != "registry" ]]; then
     echo "ERROR: GEMM_GATE_PATCH_FACADE_PATH 未指定時（正式系列）は fandhe_ai_source が" >&2
-    echo "  'registry' である必要があるが actual=$source_desc。" >&2
+    echo "  'registry' である必要があるが actual=$fandhe_source。" >&2
     echo "  正式系列（label '${LABEL}'）として結果を確定させる場合は依存解決が" >&2
     echo "  registry になるよう Cargo.lock・環境を確認すること（fail-closed。#1166）。" >&2
     exit 1
   fi
+  candle_sha=$(sha256_of "./target/release/bench-candle")
+  if ! candle_source=$(candle_core_source_desc); then
+    echo "ERROR: candle-core の依存解決元を cargo tree から取得できない" \
+         "('cargo tree -p bench-candle --depth 1' に candle-core 行が見当たらない)。" >&2
+    echo "  依存元不明のまま manifest を記録すると、比較基準（candle 0.11.0）の" >&2
+    echo "  性能値を捏造しないため測定を中止する（fail-closed。security.md A08。#1166）。" >&2
+    exit 1
+  fi
+  if [[ "$candle_source" != "registry" ]]; then
+    echo "ERROR: bench-candle の candle_core_source は 'registry' である必要があるが" >&2
+    echo "  actual=$candle_source。deps-policy.md 第 9 区分の承認済みピン" >&2
+    echo "  'candle-core =0.11.0'（registry 解決）以外での比較基準確定はできない" >&2
+    echo "  （fail-closed。#1166）。" >&2
+    exit 1
+  fi
   cat > "$MANIFEST" <<JSON
-{"label":"${LABEL}","bench_fandhe_sha256":"${fandhe_sha}","fandhe_ai_source":"${source_desc}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"label":"${LABEL}","bench_fandhe_sha256":"${fandhe_sha}","fandhe_ai_source":"${fandhe_source}","bench_candle_sha256":"${candle_sha}","candle_core_source":"${candle_source}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
   echo "== manifest 記録: $MANIFEST =="
   cat "$MANIFEST"
@@ -224,6 +264,41 @@ verify_manifest() {
     exit 1
   fi
   echo "== 依存元検証 OK: fandhe_ai_source=${actual_source}（label '${LABEL}'） =="
+
+  # bench-candle 側の sha256・依存解決元も同様に検証する（比較基準
+  # candle 0.11.0 の同一性。P0 指摘 PRRT_kwDOTuUCJc6evCpm 対応。#1166）。
+  # `GEMM_GATE_SKIP_BUILD=1` 経路を含む全経路でここを通るため、bench-candle
+  # binary が manifest 記録後に別バージョンへ差し替えられていても検出できる。
+  if [[ ! -x "./target/release/bench-candle" ]]; then
+    echo "ERROR: ./target/release/bench-candle が見つからない。" >&2
+    exit 1
+  fi
+  local expected_candle_sha actual_candle_sha
+  expected_candle_sha=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bench_candle_sha256',''))" "$MANIFEST" 2>/dev/null || true)
+  actual_candle_sha=$(sha256_of "./target/release/bench-candle")
+  if [[ -z "$expected_candle_sha" || "$expected_candle_sha" != "$actual_candle_sha" ]]; then
+    echo "ERROR: bench-candle のバイナリ sha256 が manifest ($MANIFEST) と不一致。" >&2
+    echo "  expected=${expected_candle_sha:-<なし>} actual=$actual_candle_sha" >&2
+    echo "  比較基準（candle 0.11.0）の binary が別物へ差し替わっている可能性がある。" >&2
+    echo "  性能値を捏造しないため測定を中止する（fail-closed。security.md A08。#1166）。" >&2
+    exit 1
+  fi
+  echo "== バイナリ sha256 検証 OK: bench-candle=${actual_candle_sha}（label '${LABEL}'） =="
+
+  local expected_candle_source actual_candle_source
+  expected_candle_source=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('candle_core_source',''))" "$MANIFEST" 2>/dev/null || true)
+  if ! actual_candle_source=$(candle_core_source_desc); then
+    echo "ERROR: 検証時点で candle-core の依存解決元を cargo tree から取得できない。" >&2
+    echo "  性能値を捏造しないため測定を中止する（fail-closed。security.md A08。#1166）。" >&2
+    exit 1
+  fi
+  if [[ -z "$expected_candle_source" || "$expected_candle_source" != "$actual_candle_source" || "$actual_candle_source" != "registry" ]]; then
+    echo "ERROR: candle_core_source が manifest ($MANIFEST) または承認済み系列（registry）と不一致。" >&2
+    echo "  expected=${expected_candle_source:-<なし>} actual=$actual_candle_source" >&2
+    echo "  性能値を捏造しないため測定を中止する（fail-closed。security.md A08。#1166）。" >&2
+    exit 1
+  fi
+  echo "== 依存元検証 OK: candle_core_source=${actual_candle_source}（label '${LABEL}'） =="
 }
 
 run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
@@ -278,12 +353,6 @@ if [[ "${GEMM_GATE_SKIP_BUILD:-0}" != "1" ]]; then
   fi
   rm -f build-err.tmp
 
-  # ビルド直後（他の cargo コマンドを一切挟まず）に manifest を記録する。
-  # 参考系列ビルドの事故（cargo tree 挿入で Cargo.lock が registry 解決へ
-  # 暗黙に再ロックされた事例）を踏まえ、bench-candle のビルド前に基準値を
-  # 固定する。
-  record_manifest
-
   echo "== build bench-candle (cuda) =="
   if ! cargo build --release -p bench-candle --no-default-features --features cuda 2>build-err.tmp; then
     tail -40 build-err.tmp
@@ -294,6 +363,13 @@ if [[ "${GEMM_GATE_SKIP_BUILD:-0}" != "1" ]]; then
     exit 1
   fi
   rm -f build-err.tmp
+
+  # 両バイナリのビルド直後（他の cargo コマンドを一切挟まず）に manifest を
+  # 記録する。参考系列ビルドの事故（cargo tree 挿入で Cargo.lock が registry
+  # 解決へ暗黙に再ロックされた事例）を踏まえ、bench-fandhe/bench-candle 双方の
+  # 基準値をここで一括固定する（bench-candle 単独記録の抜け穴を塞ぐ。
+  # P0 指摘 PRRT_kwDOTuUCJc6evCpm 対応。#1166）。
+  record_manifest
 else
   echo "== GEMM_GATE_SKIP_BUILD=1: ビルドを省略（既存 ./target/release バイナリを使用） =="
 fi
@@ -319,17 +395,28 @@ done
 echo "== nvidia-smi (after) =="
 nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader 2>&1 || true
 
-# 計測ループが完走した時点で初めて、検証済みの計測結果を最終パスへ原子的に
-# 反映する（mv は同一ファイルシステム内で atomic。#1166 codex-review 指摘
-# PRRT_kwDOTuUCJc6euxgr への対処）。ここより前に exit したパス（ビルド失敗・
-# manifest 検証失敗）では $OUT/$SKIP は一切変更されず、直前の有効な計測結果
-# が保全される。
-mv -f "$OUT_TMP" "$OUT"
-mv -f "$SKIP_TMP" "$SKIP"
-
-echo "done. results in $OUT ; failures (if any) in $SKIP"
-
-if [[ "$ANY_FAILED" -gt 0 ]]; then
-  echo "FAILED: $ANY_FAILED run(s) failed; see $SKIP" >&2
+# 計測ループが完走し、かつ全 run が成功した（ANY_FAILED == 0）場合にのみ、
+# 検証済みの計測結果を最終パスへ原子的に反映する（mv は同一ファイルシステム
+# 内で atomic）。1 件でも run が失敗した場合は最終パス（$OUT/$SKIP）を一切
+# 変更せず、直前の有効な計測結果（同一 label の過去の成功実行分）を保全した
+# まま、不完全な計測データは診断用の別名ファイルへ退避する（#1166
+# codex-review 指摘 PRRT_kwDOTuUCJc6evCpq への対処。旧実装はループ完走後に
+# ANY_FAILED を確認せず常に mv していたため、GPU エラー等で 1 run でも
+# 失敗すると直前の有効な計測結果〈同一 label 30 件〉が不完全な JSONL に
+# 上書きされ、「検証済みの計測結果のみを反映」「直前の有効な計測結果を保全」
+# という fail-closed 契約に違反していた）。
+if [[ "$ANY_FAILED" -eq 0 ]]; then
+  mv -f "$OUT_TMP" "$OUT"
+  mv -f "$SKIP_TMP" "$SKIP"
+  echo "done. results in $OUT ; failures (if any) in $SKIP"
+else
+  FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
+  FAIL_OUT="results/raw/results-dgx-gemm-gate-${LABEL}.failed-${FAIL_TS}.jsonl"
+  FAIL_SKIP="results/raw/skipped-dgx-gemm-gate-${LABEL}.failed-${FAIL_TS}.log"
+  mv -f "$OUT_TMP" "$FAIL_OUT"
+  mv -f "$SKIP_TMP" "$FAIL_SKIP"
+  echo "FAILED: $ANY_FAILED run(s) failed; partial/unreliable data kept for diagnosis in" >&2
+  echo "  $FAIL_OUT / $FAIL_SKIP . $OUT / $SKIP left untouched (直前の有効な計測結果を保全。" >&2
+  echo "  fail-closed。security.md A08。#1166)。" >&2
   exit 1
 fi
