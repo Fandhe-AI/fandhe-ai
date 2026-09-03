@@ -12,6 +12,19 @@
 > #1131 系列）を追記した。上記「コード変更は含まない」は当初 #67 時点（本文
 > 初版）の記述であり、本改訂自体も設計記録のみでコード変更を伴わない
 > （§5.6 冒頭に明記）。
+>
+> **追記（codex-review PR #1177 P1 是正・2026-09-04）**: §5.6 の判定規則
+> （`select_f16_matrix_unit_impl`）自体は実装・単体テスト済みだが、その
+> 優先順位を**有効化するかどうか**は呼び出し元が渡す `prefer_mma` 引数に
+> 従う。本番既定（`crates/backend-cuda/src/gemm_auto.rs::
+> MMA_PRIORITY_PRODUCTION_ENABLED = false`）はこの優先順位を無効化して
+> おり、`CudaGemmAuto::run_f16` は #1156 以前と同じ wmma 優先で動作する
+> （§5.6「性能の引き渡し」節が求める auto 経路〈転送込み〉での切替前後
+> 5 回計測中央値比較が未実測のため。GB10 実機実測は #1160 が担当）。
+> よって「実装済み」の各記述（§5.6 冒頭・判定規則・実装 Issue 対応表）は
+> 「判定ロジックの実装」を指し、「本番既定での有効化」を意味しない。#1160
+> が非後退を確認・記録した後、`MMA_PRIORITY_PRODUCTION_ENABLED` を
+> `true` へ切り替えて本番結線する。
 
 ## 1. 判断サマリ
 
@@ -262,7 +275,7 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
   真**であり、第 2 層の実装優先順位はこの整理と矛盾しない（第 1 層の決定
   表・境界テストの対象は変わらない）
 
-**第 2 層の判定規則（決定的・fail-safe。実装は #1152/#1156 が担当）**:
+**第 2 層の判定規則（決定的・fail-safe。実装は #1152（構築）・#1156（分岐切替。実装済み）が担当）**:
 
 1. **構築時（`CudaGemmAuto::new`。#1152 で実装済み。診断用
    `mma_available`／`mma_unavailable_reason` アクセサを併設）**:
@@ -297,8 +310,11 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
    そのまま呼び出し元へ伝播する」方針との対称性。事前判定を怠ると、
    `n % 8 != 0` 等の形状で現行 WMMA では成功していた呼び出しが
    `InvalidShape` になる退行が生じる点を実装引き渡し事項として明記する
-   （#1156 の受入条件は単純な `match (&self.mma, &self.wmma)` だが、
-   形状ゲートを含む拡張が必要）
+   （#1156 で実装済み: 単一真実源の純関数
+   `gemm_auto::select_f16_matrix_unit_impl(prefer_mma, mma_available,
+   wmma_available, m, n, k) -> F16MatrixUnitImpl` が事前形状ゲートを含む
+   判定を担い、
+   `run_f16` はその結果に従って `match` で実装を呼び分ける）
 4. no-op／退化形状（`m == 0 || n == 0 || k == 0`）は mma／WMMA／tiled の
    いずれも同一契約の早期 return で処理する。**`m == 0 || n == 0` は空
    `Vec` を返す**が、**`k == 0`（`m, n > 0`）は GEMM の数学的定義どおり
@@ -330,9 +346,10 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
   確定は #1160 が担当する
 
 **実装 Issue 対応表**: 構築（`mma` フィールド追加。fail-soft）は #1152
-（実装済み）、呼び出し分岐切替（形状ゲート込みの優先順位判定）は #1156、
-GB10 数値一致非後退検証は #1158、TFLOPS 記録・`wmma_f16_opt` 扱いの確定は
-#1160 が担当する。
+（実装済み）、呼び出し分岐切替（形状ゲート込みの優先順位判定。
+`select_f16_matrix_unit_impl`）は #1156（実装済み）、GB10 数値一致
+非後退検証は #1158、TFLOPS 記録・`wmma_f16_opt` 扱いの確定は #1160 が
+担当する。
 
 ## 6. スコープ外
 
@@ -346,7 +363,7 @@ GB10 数値一致非後退検証は #1158、TFLOPS 記録・`wmma_f16_opt` 扱�
 | TF32 経路の数値一致閾値の実測再評価・既定採用可否のユーザー承認 | #186（TASK-11.1g） |
 | CUDA Tensor Core（WMMA/mma）カーネル自体の実装 | #60 系列（TASK-11.1） |
 | CPU 側 ISA dispatch の変更 | 対象外（`gemm_blis/microkernel.rs` は実装済み・変更なし） |
-| f16 `MatrixUnit` 経路の mma 優先実装（`CudaGemmAuto` へのフィールド追加・分岐切替） | #1152（フィールド追加は実装済み）・#1156（分岐切替） |
+| f16 `MatrixUnit` 経路の mma 優先実装（`CudaGemmAuto` へのフィールド追加・分岐切替） | #1152（フィールド追加は実装済み）・#1156（分岐切替。実装済み） |
 | GB10 数値一致非後退（§5.6 の判定規則の実機検証） | #1158 |
 | TFLOPS 記録・`wmma_f16_opt` の扱い確定 | #1160 |
 | `gemm_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR` の `tensor-core::dispatch` への集約（未起票・候補） | 対象外（§5.6 参照。第 2 層定数のため現状維持） |

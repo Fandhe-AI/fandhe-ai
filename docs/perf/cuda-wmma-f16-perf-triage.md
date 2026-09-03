@@ -100,12 +100,22 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 
 **本番経路への到達性**: `fandhe_ai_backend_cuda::ops::BackendOps::gemm`（本番ディスパッチ）
 は f32 tiled カーネル固定であり、`wmma_f16`／`mma_sync_f16` のいずれにも到達しない。
-`CudaGemmAuto::run_f16`（f16 auto 経路。`crates/backend-cuda/src/gemm_auto.rs`）は
-`CudaWmmaGemm`（WMMA f16）を結線しているため facade から到達しうるが、この経路が
-どの程度使われているかは本イシューのスコープ外（ディスパッチ規則自体は変更しない）。
-一方 `mma_sync_f16`（`CudaMmaGemm`）は証跡用途（`tests/dispatch_boundary.rs` の実測記録）
-のみで、facade からは到達しない。`mma_sync_f16` の結線による性能改善は別イシュー
-（#1131。§6）で扱う。
+`CudaGemmAuto::run_f16`（f16 auto 経路。`crates/backend-cuda/src/gemm_auto.rs`）の
+`KernelKind::MatrixUnit` 判定分岐（`select_f16_matrix_unit_impl`）自体は、cc >= 8.0
+かつ整列形状（`validate_mma_alignment`／`validate_mma_grid_bounds` 充足）で
+`mma_sync_f16`（`CudaMmaGemm`）を、それ以外では `wmma_f16`（`CudaWmmaGemm`）を
+優先する `docs/dispatch-rules-design.md` §5.6 の mma 優先設計どおり実装済み（#1156）。
+ただしこの優先順位は `gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`（本番既定 `false`）
+でゲートされており、#1160 の GB10 実機実測で非後退を確認し承認を得るまでは本番では
+無効（`run_f16` は引き続き `wmma_f16` を優先して呼ぶ）。判定ロジックの実装と本番での
+優先順位有効化は別軸であり、「結線済み」は前者（ロジック実装）のみを指す。加えて
+`CudaGemmAuto` 自体は現時点で facade／`BackendOps::gemm`／`bench-harness` のいずれ
+からも呼ばれておらず本番未結線（`gemm_auto.rs::new` doc コメント参照。#1152 時点の
+記述のまま）であるため、`MMA_PRIORITY_PRODUCTION_ENABLED` が仮に `true`化されても
+`mma_sync_f16` は `CudaGemmAuto` が本番経路へ結線された時点で初めて到達する。この
+本番結線自体は本イシュー・#1156 いずれのスコープ外（ディスパッチ規則自体は変更
+しない）。TFLOPS 正式記録・`wmma_f16_opt` の維持・格下げ判断・
+`MMA_PRIORITY_PRODUCTION_ENABLED` の `true` 化判断は別イシュー（#1160。§6）で扱う。
 
 ### 4.2 dim=4096 のプロトコル検査失敗（二峰性）の原因
 
@@ -252,8 +262,9 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
   §4.1 で確認した `mma.sync`/`ldmatrix`/`cp.async` パイプラインの約 3〜13 倍（形状依存。
   dim2048 で約 7 倍・dim4096 で約 11〜13 倍。§3.1 の初回診断計測・§4.3 の是正後実測
   いずれも同傾向）の優位性を、
-  f16 auto 経路（`CudaGemmAuto::run_f16`）へ結線するかどうかの設計判断。現状は証跡用途
-  のみで本番非到達。**完了条件を追加**（2026-09-03 GB10 実機実測後）:
+  f16 auto 経路（`CudaGemmAuto::run_f16`）へ結線するかどうかの設計判断。#1156 で
+  `CudaGemmAuto::run_f16` の `MatrixUnit` 分岐へ結線済み（cc>=8.0・整列形状で優先。
+  §4.1 参照）。**完了条件を追加**（2026-09-03 GB10 実機実測後）:
   `tensor_core_real_device.rs::tensor_core_tflops_record` の f16 assert
   （`f16_kernel_tflops > tiled_kernel_tflops`。GB10 実機実測で FAIL・§4.3）が pass する
   ことを #1131 の完了条件とする。

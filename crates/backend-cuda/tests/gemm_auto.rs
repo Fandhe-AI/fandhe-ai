@@ -93,9 +93,15 @@ fn run_f32_matches_cpu_reference() {
     );
 }
 
-/// 実機依存: f16 自動経路が（cc >= 7.0 環境では WMMA、それ以外では
-/// tiled が）参照実装と複合判定で一致することを検証する。判定方法は
-/// `cpu_cuda_wmma_parity.rs`（f16→f32→参照matmul→f16丸め→f32）と同一。
+/// 実機依存: f16 自動経路（16x16x16・整列形状）が参照実装と複合判定で
+/// 一致することを検証する。判定方法は `cpu_cuda_wmma_parity.rs`
+/// （f16→f32→参照matmul→f16丸め→f32）と同一。本番既定
+/// （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = false`。codex-review
+/// PR #1177 P1 是正）は `mma → wmma → tiled` の優先順位（#1156 設計、
+/// `docs/dispatch-rules-design.md` §5.6）を無効化しているため、cc に
+/// 関わらず cc >= 7.0 では WMMA、それ未満では tiled を通る（GB10 実機
+/// 実測による非後退確認〈#1160〉完了後、`MMA_PRIORITY_PRODUCTION_
+/// ENABLED` が `true` へ切り替われば cc >= 8.0 で mma を通るようになる）。
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
             test-ignored-cuda 経由で実行する"]
@@ -140,11 +146,13 @@ fn run_f16_matches_cpu_reference() {
 
 /// 実機依存: `CudaGemmAuto::new` が構築する `mma` フィールド（#1152）が
 /// cc>=8.0 ゲートに従って fail-soft に構築されることを検証する
-/// （`docs/dispatch-rules-design.md` §5.6 判定規則 1）。`run_f16` は
-/// #1156 まで `mma` を参照しないため、本テストは経路実行ではなく
-/// `mma_available`／`mma_unavailable_reason` の診断アクセサのみを検証する。
-/// 既存 `run_f16_matches_cpu_reference` は変更せず、経路が引き続き
-/// WMMA のまま数値契約が維持されることの担保として据え置く。
+/// （`docs/dispatch-rules-design.md` §5.6 判定規則 1）。本テストは経路
+/// 実行ではなく `mma_available`／`mma_unavailable_reason` の診断
+/// アクセサのみを検証する（`run_f16` 側が実際に `mma` を優先して呼ぶ
+/// ことの担保は `run_f16_matches_cpu_reference`・下記
+/// `run_f16_misaligned_shape_falls_back_to_wmma_or_tiled`・
+/// `f16_matrix_unit_impl_reports_selected_implementation` が担う。
+/// #1156）。
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
             test-ignored-cuda 経由で実行する"]
@@ -207,4 +215,104 @@ fn select_tile_config_for_device_succeeds_on_real_hardware() {
     assert_eq!(selection.candidate().block_n().get(), 128);
     assert_eq!(selection.candidate().block_k().get(), 32);
     assert_eq!(selection.candidate().stages().get(), 3);
+}
+
+/// 実機依存: 事前形状ゲート非充足（`n` が 8 の倍数でない）形状では
+/// `select_f16_matrix_unit_impl` が `Wmma`（cc ゲート対応環境）または
+/// `Tiled`（非対応環境）を返し、`run_f16` の出力が引き続き参照実装と
+/// 複合判定で一致することを検証する（mma → wmma/tiled フォールバック
+/// 経路の維持を実機で実証する。§5.6 判定規則 2・3・#1156）。
+///
+/// `F16MatrixUnitImpl`／`CudaGemmAuto::f16_matrix_unit_impl`（診断アクセサ）
+/// を直接使うため、`internal-diagnostics` feature（既定 off）限定
+/// （codex-review PR #1177 指摘の是正。`src/lib.rs`・`src/gemm_auto.rs` の
+/// 同 feature ゲート済み re-export／可視性を参照。`cargo test --all-
+/// features` でのみビルド・実行される。他のテスト関数はこの feature に
+/// 依存しないため無指定でも引き続き実行される）。
+#[cfg(feature = "internal-diagnostics")]
+#[test]
+#[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
+            test-ignored-cuda 経由で実行する"]
+fn run_f16_misaligned_shape_falls_back_to_wmma_or_tiled() {
+    let device = CudaDevice::new(0).expect("CUDA device available in ignored test environment");
+    let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
+
+    // n=12 は 8 の倍数でないため validate_mma_alignment が Err を返し、
+    // mma が構築済みでも mma 経路には入らない（wmma または tiled）。
+    let (m, n, k) = (16u32, 12u32, 16u32);
+    let a_f32: Vec<f32> = (0..(m * k)).map(|i| (i % 7) as f32 * 0.1).collect();
+    let b_f32: Vec<f32> = (0..(k * n)).map(|i| (i % 5) as f32 * 0.2).collect();
+    let a: Vec<f16> = a_f32.iter().map(|&x| f16::from_f32(x)).collect();
+    let b: Vec<f16> = b_f32.iter().map(|&x| f16::from_f32(x)).collect();
+
+    let selected = auto.f16_matrix_unit_impl(m, n, k);
+    assert_ne!(
+        selected,
+        fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
+        "n=12 は非整列のため mma 経路が選ばれてはならない"
+    );
+
+    let gpu = auto
+        .run_f16(&a, &b, m, n, k)
+        .expect("run_f16 succeeds on real hardware");
+
+    let mut reference_f32 = vec![0.0f32; (m as usize) * (n as usize)];
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a_f32,
+        &b_f32,
+        &mut reference_f32,
+        m as usize,
+        n as usize,
+        k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    let reference_rounded: Vec<f32> = reference_f32
+        .iter()
+        .map(|&x| f16::from_f32(x).to_f32())
+        .collect();
+    let gpu_f32: Vec<f32> = gpu.iter().map(|&x| x.to_f32()).collect();
+
+    fandhe_ai_backend_cpu::assert_parity(
+        "CudaGemmAuto::run_f16 (misaligned n, wmma/tiled fallback) vs CPU reference",
+        &gpu_f32,
+        &reference_rounded,
+    );
+}
+
+/// 実機依存: `f16_matrix_unit_impl`（診断アクセサ）が本番既定
+/// （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = false`。codex-review
+/// PR #1177 P1 是正）どおり、`mma_available()`・cc に関わらず整列形状で
+/// `Mma` を返さないことを検証する（純関数 `select_f16_matrix_unit_impl`
+/// 自体の `prefer_mma` 網羅テストは `gemm_auto.rs::
+/// f16_matrix_unit_impl_tests`〈GPU 非依存〉が担当。本テストは実機上で
+/// 本番既定が意図どおり mma を選ばないことを統合検証する。#1160 の GB10
+/// 実機実測で非後退を確認し `MMA_PRIORITY_PRODUCTION_ENABLED` が `true`
+/// へ切り替わった後は、本テストの期待値〈常に非 Mma〉も cc・
+/// `mma_available()` 依存の期待値へ更新する必要がある）。
+///
+/// `F16MatrixUnitImpl`／`CudaGemmAuto::f16_matrix_unit_impl`（診断アクセサ）
+/// を直接使うため、`internal-diagnostics` feature（既定 off）限定
+/// （codex-review PR #1177 指摘の是正。上記テストと同じ理由）。
+#[cfg(feature = "internal-diagnostics")]
+#[test]
+#[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
+            test-ignored-cuda 経由で実行する"]
+fn f16_matrix_unit_impl_reports_selected_implementation() {
+    let device = CudaDevice::new(0).expect("CUDA device available in ignored test environment");
+    let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
+
+    // 本番既定（MMA_PRIORITY_PRODUCTION_ENABLED = false）では
+    // mma_available()・cc に関わらず Mma は選ばれない（両者は将来
+    // #1160 が本テストを cc・mma_available() 依存の期待値へ更新する際の
+    // 参考用に取得のみ行う）。
+    let (major, _minor) = device.compute_capability();
+    let mma_available = auto.mma_available();
+    let aligned = auto.f16_matrix_unit_impl(16, 16, 16);
+    assert_ne!(
+        aligned,
+        fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
+        "本番既定（MMA_PRIORITY_PRODUCTION_ENABLED = false）では \
+         mma_available()（{mma_available}）・cc（{major}.x）に関わらず \
+         Mma は選ばれないはず"
+    );
 }
