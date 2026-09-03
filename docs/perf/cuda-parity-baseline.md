@@ -1749,7 +1749,7 @@ DGX Spark GB10（sm_121・CUDA 13.0）。release ビルド・`--test-threads=1`�
 | `run_f16_matches_cpu_reference` | 16×16×16 | — | pass（整列形状 → mma 選択） |
 | `mma_field_is_constructed_by_compute_capability_gate` | — | — | pass |
 | `run_f16_matches_cpu_reference_across_aligned_shapes`（新規） | 12 整列形状 | `3000+idx` | pass（フリップ前と同一結果） |
-| `run_f16_k4096_stress_non_regression_route_aware`（新規） | 256×256×4096 | 9999（選択経路=Mma） | pass（`MmaF16` 行・fail_count=101/65536・mean_abs_diff=7.646e-5 と一致——直接経路 `mma_f16_k4096_stress` と完全一致する値） |
+| `run_f16_k4096_stress_non_regression_route_aware`（新規） | 256×256×4096 | 9999（選択経路=Mma） | pass（`MmaF16` 行・fail_count=101/65536・mean_abs_diff=7.646e-5 と一致——直接経路 `mma_f16_k4096_stress` と完全一致する値。**注**: 本ラウンド計測時点のテストコードに基づく結果であり、PR #1178 レビュー対応（`crates/backend-cuda/tests/gemm_auto.rs:515-533`）で `MmaF16` 行の両 ceiling が `None` の場合に fail-closed で panic するアサーションを追加した後の HEAD では、`MmaF16` 行の ceiling 未反映（12.5 未承認）のため本テストは実行すれば必ず FAIL する。§12.4 に詳細） |
 | `run_f16_misaligned_shape_falls_back_to_wmma_or_tiled` | n=12（非整列） | — | pass（mma 事前形状ゲート非充足 → wmma へフォールバック。フリップの影響を受けない契約どおり） |
 | `f16_matrix_unit_impl_reports_selected_implementation` | 16×16×16 | — | **期待どおり FAIL**（「常に非 Mma」を期待する既存アサーションが、フリップにより実際に Mma が選ばれたため不一致。期待値更新は #1160 の担当。設計上の red） |
 
@@ -1762,6 +1762,26 @@ DGX Spark GB10（sm_121・CUDA 13.0）。release ビルド・`--test-threads=1`�
   （フリップ時の K=4096 ストレスで `fail_count=101/65536`・
   `mean_abs_diff=7.646e-5` が直接経路 `mma_f16_k4096_stress` と一致した
   ことで実証）。
+- **【追記・PR #1178 レビュー対応（codex-review 指摘）】上記「切替後」表の
+  `run_f16_k4096_stress_non_regression_route_aware` の pass 記録は
+  本ラウンド計測時点（`fd106ff` 以前）のテストコードによるものであり、
+  現在の HEAD では再現不能である**: 同 PR で
+  `crates/backend-cuda/tests/gemm_auto.rs:515-533`（`fd106ff`・`dc5ade4`）
+  へ、選択された baseline 行（本ケースは `MmaF16`）の
+  `baseline_max_abs_diff_ceiling`／`baseline_max_rel_err_ceiling` が
+  ともに `Some` であることを事前に fail-closed 検査するアサーションを
+  追加した。`MmaF16` 行の両 ceiling は本ラウンド終了時点で `None` のまま
+  （12.5 の提案値が未承認・`BASELINES` 未反映）のため、このアサーション
+  追加後に本テストをノード側限定フリップ（`MMA_PRIORITY_PRODUCTION_ENABLED
+  = true`）下で再実行すると、parity 比較に至る前に必ず panic して FAIL
+  する。上記表の「pass」は撤回しない（実測事実として記録は残す）が、
+  **現在の HEAD 上で「切替後も非後退」の証跡として本テストの green を
+  主張することはできない**。§12.5 の ceiling 提案値をユーザー承認のうえ
+  `common::parity_baseline::BASELINES` の `MmaF16` 行へ反映するまでの間、
+  本テストは `internal-diagnostics` feature 限定・real-hardware ignored
+  のまま意図的に red となる（`.claude/rules/coding-rust.md`
+  「テスト・ベンチ」節: baseline 値の変更は人間承認必須のため本 PR では
+  未反映）。
 - **格上げ候補（厳密ゼロ fail 判定への再割り当て）**: なし。K=4096
   ストレス形状（mma・wmma とも）は本ラウンドでも非ゼロ fail が再現し、
   spec REQ-2「2026-09-02 追記」項目 1（厳密ゼロ fail 判定の対象形状）は
