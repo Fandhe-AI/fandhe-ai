@@ -95,10 +95,13 @@ fn run_f32_matches_cpu_reference() {
 
 /// 実機依存: f16 自動経路（16x16x16・整列形状）が参照実装と複合判定で
 /// 一致することを検証する。判定方法は `cpu_cuda_wmma_parity.rs`
-/// （f16→f32→参照matmul→f16丸め→f32）と同一。cc >= 8.0 環境では
-/// `select_f16_matrix_unit_impl` が `Mma` を返すため `CudaMmaGemm`
-/// 経路（#1156）を通り、cc 7.x では WMMA、それ未満では tiled を通る
-/// （`docs/dispatch-rules-design.md` §5.6）。
+/// （f16→f32→参照matmul→f16丸め→f32）と同一。本番既定
+/// （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = false`。codex-review
+/// PR #1177 P1 是正）は `mma → wmma → tiled` の優先順位（#1156 設計、
+/// `docs/dispatch-rules-design.md` §5.6）を無効化しているため、cc に
+/// 関わらず cc >= 7.0 では WMMA、それ未満では tiled を通る（GB10 実機
+/// 実測による非後退確認〈#1160〉完了後、`MMA_PRIORITY_PRODUCTION_
+/// ENABLED` が `true` へ切り替われば cc >= 8.0 で mma を通るようになる）。
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
             test-ignored-cuda 経由で実行する"]
@@ -276,12 +279,16 @@ fn run_f16_misaligned_shape_falls_back_to_wmma_or_tiled() {
     );
 }
 
-/// 実機依存: `f16_matrix_unit_impl`（診断アクセサ）が cc・整列形状に
-/// 応じて期待どおりの `F16MatrixUnitImpl` を返すことを検証する
-/// （純関数 `select_f16_matrix_unit_impl` 自体の網羅テストは
-/// `gemm_auto.rs::f16_matrix_unit_impl_tests`〈GPU 非依存〉が担当。
-/// 本テストは実機の `mma_available()`／`wmma` 構築結果と整合すること
-/// の統合検証に限定する）。
+/// 実機依存: `f16_matrix_unit_impl`（診断アクセサ）が本番既定
+/// （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = false`。codex-review
+/// PR #1177 P1 是正）どおり、`mma_available()`・cc に関わらず整列形状で
+/// `Mma` を返さないことを検証する（純関数 `select_f16_matrix_unit_impl`
+/// 自体の `prefer_mma` 網羅テストは `gemm_auto.rs::
+/// f16_matrix_unit_impl_tests`〈GPU 非依存〉が担当。本テストは実機上で
+/// 本番既定が意図どおり mma を選ばないことを統合検証する。#1160 の GB10
+/// 実機実測で非後退を確認し `MMA_PRIORITY_PRODUCTION_ENABLED` が `true`
+/// へ切り替わった後は、本テストの期待値〈常に非 Mma〉も cc・
+/// `mma_available()` 依存の期待値へ更新する必要がある）。
 ///
 /// `F16MatrixUnitImpl`／`CudaGemmAuto::f16_matrix_unit_impl`（診断アクセサ）
 /// を直接使うため、`internal-diagnostics` feature（既定 off）限定
@@ -294,19 +301,18 @@ fn f16_matrix_unit_impl_reports_selected_implementation() {
     let device = CudaDevice::new(0).expect("CUDA device available in ignored test environment");
     let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new succeeds on real hardware");
 
+    // 本番既定（MMA_PRIORITY_PRODUCTION_ENABLED = false）では
+    // mma_available()・cc に関わらず Mma は選ばれない（両者は将来
+    // #1160 が本テストを cc・mma_available() 依存の期待値へ更新する際の
+    // 参考用に取得のみ行う）。
     let (major, _minor) = device.compute_capability();
+    let mma_available = auto.mma_available();
     let aligned = auto.f16_matrix_unit_impl(16, 16, 16);
-    if major >= 8 && auto.mma_available() {
-        assert_eq!(
-            aligned,
-            fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
-            "cc {major}.x >= 8.0 かつ mma 構築済みなら整列形状は Mma のはず"
-        );
-    } else {
-        assert_ne!(
-            aligned,
-            fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
-            "mma 未構築（cc 非対応または NVRTC 失敗）なら Mma は選ばれないはず"
-        );
-    }
+    assert_ne!(
+        aligned,
+        fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
+        "本番既定（MMA_PRIORITY_PRODUCTION_ENABLED = false）では \
+         mma_available()（{mma_available}）・cc（{major}.x）に関わらず \
+         Mma は選ばれないはず"
+    );
 }

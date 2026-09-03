@@ -4,7 +4,15 @@
 5 回計測中央値の比較を取り、後退確認時は結線しない」に対応する記録。設計の正は
 `docs/dispatch-rules-design.md` §5.6。
 
-## 状態: 未実測（本エージェント実行環境に CUDA 実機なし。PR #1177 codex-review P1 指摘の是正）
+## 状態: 未実測・本番未結線（本エージェント実行環境に CUDA 実機なし。PR #1177 codex-review P1 指摘の是正）
+
+本 PR（#1177 是正）時点で `crates/backend-cuda/src/gemm_auto.rs::
+MMA_PRIORITY_PRODUCTION_ENABLED` を `false`（wmma 優先。#1156 以前と同じ
+本番挙動）へ戻した。mma 優先順位の判定ロジック自体（`select_f16_matrix_
+unit_impl`）は §5.6 の設計どおり実装・単体テスト済みのまま維持しており、
+`prefer_mma` 引数を渡せば有効化できる。本番結線（同定数を `true` へ）は、
+下記手順による #1160 の GB10 実機実測で全対象形状の非後退を確認し、この
+記録へ追記したうえでユーザー承認を得てから行う。
 
 **前バージョンの記録（実測完了・全形状非後退）は取り下げる。** 前バージョンが
 「5 回計測中央値」の根拠とした計測は `bench_run`（`MeasurementConfig::default`。
@@ -49,14 +57,20 @@ cargo run -p fandhe-ai-backend-cuda --example gemm_auto_f16_mma_switch_bench --r
 ```
 
 同一バイナリソースを base（`0c91218`。結線前 = `MatrixUnit` 判定時に wmma を
-直接使用）／HEAD（結線後 = mma 優先・wmma フォールバック）それぞれのワーク
-ツリーへコピーしてビルド・実行し、出力される
+直接使用）／after（PR #1177 是正後の HEAD で `crates/backend-cuda/src/
+gemm_auto.rs` の `MMA_PRIORITY_PRODUCTION_ENABLED` を一時的に `true` へ
+書き換えたワークツリー。書き換えないまま HEAD をビルドすると本番既定
+〈`false`〉のため base と同じ wmma 優先経路が計測されてしまう点に注意）
+それぞれへコピーしてビルド・実行し、出力される
 `size=<dim> auto_f16_tflops_runs=[<5値>] auto_f16_tflops_run_median=<値>` の
 `auto_f16_tflops_run_median`（独立 5 回計測の中央値）同士を突き合わせる
 （base 側は `internal-diagnostics` feature 未導入のためデフォルト feature で
-ビルド。本バイナリはこの feature に依存しない）。全形状で HEAD の
-`auto_f16_tflops_run_median` が base 以上であれば非後退と判定し結線を維持する
-（#1156 R5 の承認条件）。後退する形状があれば結線せず、原因調査を別途行う。
+ビルド。本バイナリはこの feature に依存しない）。全形状で after の
+`auto_f16_tflops_run_median` が base 以上であれば非後退と判定し、この記録へ
+実測値を追記したうえで `MMA_PRIORITY_PRODUCTION_ENABLED` の恒久的な `true`
+化を別途ユーザー承認込みで行う（#1156 R5 の承認条件）。後退する形状があれば
+`MMA_PRIORITY_PRODUCTION_ENABLED` は `false` のまま維持し、原因調査を別途
+行う。
 
 ## 補足: 転送込み計測の位置づけ
 

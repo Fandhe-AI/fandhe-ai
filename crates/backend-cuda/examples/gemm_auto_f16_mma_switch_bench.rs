@@ -10,9 +10,21 @@
 //! `CudaGemmAuto::run_f16` の H2D／カーネル起動／D2H を丸ごと計測する
 //! （切替後にユーザーが体感する経路そのものを計測する狙い。本ファイル
 //! 単体では前後比較を行わない: 同一バイナリを base（結線前コミット
-//! `0c91218`）／HEAD（結線後コミット。`CudaGemmAuto::run_f16` の
-//! `MatrixUnit` 分岐を mma 優先へ切替済み）でそれぞれビルド・実行し、
-//! 出力される run-median TFLOPS を手動で突き合わせる）。
+//! `0c91218`）／after（`CudaGemmAuto::run_f16` が実際に mma 優先経路を
+//! 通る構成）でそれぞれビルド・実行し、出力される run-median TFLOPS を
+//! 手動で突き合わせる）。
+//!
+//! **本番既定は wmma 優先のまま（codex-review PR #1177 P1 是正）**:
+//! `select_f16_matrix_unit_impl` の判定ロジック自体は §5.6 の mma 優先
+//! 設計どおり実装済みだが、`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED`
+//! （既定 `false`）がこの優先順位を無効化しているため、本 PR（#1177）
+//! 時点の HEAD で本バイナリを素朴にビルドしても base と同じ wmma 優先
+//! 経路が計測されるだけで、mma 優先経路の A/B 比較にならない。#1160 が
+//! 「after」を計測する際は、`crates/backend-cuda/src/gemm_auto.rs` の
+//! `MMA_PRIORITY_PRODUCTION_ENABLED` を一時的に `true` へ書き換えた
+//! ワークツリーでビルドし、非後退確認後にこの記録（`docs/perf/
+//! cuda-gemm-auto-f16-mma-switch.md`）へ実測値を残したうえで、承認を
+//! 経てから同定数の恒久的な `true` 化を別途行う。
 //!
 //! 計測プロトコル（codex-review PR #1177 指摘の是正）: `docs/dispatch-
 //! rules-design.md` §5.6 が求める「5 回計測中央値」は**独立した 5 回の
@@ -63,9 +75,10 @@ fn tflops(size: usize, median_secs: f64) -> f64 {
 
 /// `CudaGemmAuto::run_f16` を転送込み（H2D + カーネル起動 + D2H）で 1 回分
 /// 計測する（`bench_run` 1 呼び出し＝ウォームアップ 20 回・計測 20 回で
-/// 求めた中央値 1 個）。base（結線前）／HEAD（結線後）のどちらでビルド
-/// しても同じ計測境界になる（`run_f16` のシグネチャ・呼び出し規約は本
-/// 切替で変わらないため）。
+/// 求めた中央値 1 個）。base（結線前）／after（`MMA_PRIORITY_PRODUCTION_
+/// ENABLED` を一時的に `true` にしたワークツリー）のどちらでビルドしても
+/// 同じ計測境界になる（`run_f16` のシグネチャ・呼び出し規約は変わらない
+/// ため）。
 fn measure_auto_f16_once(auto: &CudaGemmAuto, size: usize, config: &MeasurementConfig) -> f64 {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f16> = rng.fill_vec_f16(size * size);
@@ -134,9 +147,12 @@ fn main() {
         "NOTE: auto_f16_tflops_run_median は H2D/D2H・カーネル起動を含む \
          転送込み計測（CudaGemmAuto::run_f16 の実利用経路そのもの）を \
          独立に {INDEPENDENT_RUNS} 回実行した run 中央値。本バイナリを \
-         base（0c91218・結線前 = wmma 優先）／HEAD（結線後 = mma 優先）で \
-         個別にビルド・実行し、出力を docs/perf/cuda-gemm-auto-f16-mma-\
-         switch.md の表へ手動転記して比較する。"
+         base（0c91218・結線前 = wmma 優先）／after（HEAD の \
+         gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED を一時的に true へ \
+         書き換えたワークツリー = mma 優先）で個別にビルド・実行し、出力を \
+         docs/perf/cuda-gemm-auto-f16-mma-switch.md の表へ手動転記して \
+         比較する（HEAD をそのままビルドした場合は本番既定〈false〉のため \
+         base と同じ wmma 優先経路が計測される点に注意）。"
     );
 
     for size in [512usize, 1024, 2048, 4096] {
