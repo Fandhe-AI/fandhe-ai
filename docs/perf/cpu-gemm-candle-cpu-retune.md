@@ -187,10 +187,29 @@ run 間中央値）を分子、gemm crate 列（OSS ハーネス 5 回実行の 
   `env.txt`（`=== rev-stamp ===` 節）へ同梱し、5 回の実行がいずれも
   `06ec33bbd5d1100d848d0e91d4e9a803e452647a`（本ドキュメント冒頭の環境節と同一
   コミット）に対する計測であることを紐付けた（codex-review 指摘対応。イシュー #1140）。
-  5 回とも `exit=1` は K≥1024 の既知丸め
-  不一致（`rel_diff` は 0.0012〜0.0047 で `docs/perf/oss-gemm-comparison-baseline.md` §5
-  記載の既知範囲内。全 5 回で症状が同一のため実行間で不安定化してはいない）によるもので、
-  性能値は有効:
+  5 回とも `exit=1` は、ハーネスが**意図的に持つ既定 fail-closed 挙動そのもの**
+  （`docs/perf/oss-gemm-comparison-baseline.md` §5「全サイズの JSON Lines 出力を終えたうえで、
+  突合 NG を 1 件でも検出していれば非 0 終了する」。イシュー #755 で確定した仕様であり、
+  既知の限界を理由に非 fatal へ戻さない方針）であって、ハーネスの正当性検査そのものが
+  破綻・中断したことを意味しない。スループット値は非 0 終了より**前**に全サイズぶん
+  出力済みであり（同 §5 の記載どおり）、打ち切りによる欠損値ではない（codex-review P2
+  指摘対応。イシュー #1140）。
+
+  この `output_match=false` は**候補実装自身の正しさ**ではなく `matrixmultiply`・
+  `gemm` crate との**縮約順序差に由来する丸め誤差**（クロス実装間出力突合）にのみ現れる
+  ことを生データで確認した（`docs/perf/oss-comparison/2026-09-03/gb10-cpu-1140-ossx5/
+  oss-run1.jsonl` 他 4 ファイル。`self_gemm_blis_parallel` レコードは全サイズ・全 5 回で
+  `output_match=true`）。候補自身の正しさは、本ドキュメントが依拠する別軸の
+  bit 完全一致契約（受け入れ条件 1・`gemm_naive` との bit 完全一致。全 94 テスト pass。
+  `step2-bitexact.log`）で既に検証済みであり、この OSS ハーネスの `exit=1` とは独立
+  である。`rel_diff` 自体も 0.0012〜0.0047 で `docs/perf/oss-gemm-comparison-baseline.md`
+  §5 記載の既知範囲内（同 §7.2 の 2026-08-23 M4 Max 正式ベースラインでも同様の
+  `output_match=false`・`exit=1` のもとで性能値を採用済みであり、本ドキュメントは
+  その既承認プロトコルを踏襲している。全 5 回で症状が同一のため実行間で不安定化しては
+  いない）。したがって、この `exit=1` を理由に「既知誤差許容モード」を新設する、または
+  correctness gate 通過を前提に再計測することは、#755 で確定した fail-closed 方針を
+  覆す変更（`.claude/rules/coding-rust.md` の許容誤差単独緩和禁止の対象）に該当し、
+  本ドキュメントのスコープ外・ユーザー承認事項である。性能値は有効:
 
   | size | 実装 | 5 回の値（TFLOPS） | 中央値（TFLOPS） | 中央値（GFLOP/s） |
   |---|---|---|---|---|
