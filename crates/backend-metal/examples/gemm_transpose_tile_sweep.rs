@@ -56,7 +56,7 @@ mod macos_impl {
     /// と同じ複製方式の判断）。配列順・値は `tile.rs` の `CANDIDATES` 定義
     /// と一致させる。`tile.rs` 側が変わった場合は本 example 側も追従が
     /// 必要。
-    fn candidates() -> [(&'static str, TileConfig); 8] {
+    fn candidates() -> [(&'static str, TileConfig); 9] {
         [
             (
                 "cand0_64x64_wm2wn2",
@@ -144,6 +144,23 @@ mod macos_impl {
                     wm: 1,
                     wn: 1,
                     staged: false,
+                },
+            ),
+            // MLX steel classic 経路の未収録構成（イシュー #1143）:
+            // `cand2_32x64_wm2wn2_wide` の 4 simdgroup 分担を wm1wn2（2
+            // simdgroup）へ落とし、simdgroup あたりの acc タイル
+            // （8x8 の 2x2=4 個ではなく 4x8＝acc_rows=4,acc_cols=8）を
+            // 変える構成。`tile.rs::CANDIDATES` の index 8（末尾追加。
+            // 既存 index 0〜7 は不変）に対応する。
+            (
+                "cand8_32x64x16_wm1wn2",
+                TileConfig {
+                    bm: 32,
+                    bn: 64,
+                    bk: 16,
+                    wm: 1,
+                    wn: 2,
+                    staged: true,
                 },
             ),
         ]
@@ -308,10 +325,38 @@ mod macos_impl {
         ]
     }
 
+    /// 候補ごとの `MetalGemm::tile_pipeline_reflection`（イシュー #1143・
+    /// `crates/backend-metal/src/gemm.rs::TilePipelineReflection`）を N=4096
+    /// NN で出力する。パイプライン構築のみでディスパッチを伴わないため
+    /// 秒未満で終わる（`docs/perf/metal-gemm-n4096-kernel-gap.md` Phase A
+    /// step 3。レジスタ圧・スタック溢れの間接証跡として cand0
+    /// 〈64x64,wm2wn2。candle `TILE_64_64_16_2_2` と同一形状〉の
+    /// `max_total_threads_per_threadgroup` が [`TileConfig::thread_count`]
+    /// を下回っていないか（下回っていれば H1 を支持）を確認する）。
+    fn dump_reflection(gemm: &MetalGemm, ctx: &MetalContext) {
+        use fandhe_ai_backend_metal::TransposePattern;
+        for (label, cfg) in candidates() {
+            match gemm.tile_pipeline_reflection(ctx, cfg, TransposePattern::Nn) {
+                Ok(refl) => println!(
+                    "reflection candidate={label} requested_thread_count={} \
+                     max_total_threads_per_threadgroup={} static_threadgroup_memory_length={} \
+                     resolved_matches_requested={}",
+                    cfg.thread_count(),
+                    refl.max_total_threads_per_threadgroup,
+                    refl.static_threadgroup_memory_length,
+                    refl.resolved_cfg == cfg,
+                ),
+                Err(e) => println!("reflection candidate={label} error={e}"),
+            }
+        }
+    }
+
     pub fn main() {
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
         let config = MeasurementConfig::default();
+
+        dump_reflection(&gemm, &ctx);
 
         for (m, n, k) in shapes() {
             measure_nn(&gemm, &ctx, m, n, k, &config);

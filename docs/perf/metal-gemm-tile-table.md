@@ -100,6 +100,14 @@ NT/TN/TT はいずれも NN 最良候補の概ね 15〜25%（大形状ほど低�
 
 **NT/TN/TT（strided classic tiled）**: タイル variant を持たないため `tile::select_with_occupancy` の選択対象外（#1040 確定構成のまま）。本イシューでは NN 最良値との差分定量化に留め、`gemm_simdgroup_tiled` への転置ロード拡張の要否判断材料として §4 の表を記録する（実装自体は親 #1037 系の別イシューへ引き継ぐ。§6「スコープ外」参照）。
 
+**#1143 追記**: N=4096 カーネル純境界の candle 比ギャップ縮小調査（イシュー
+#1143）で `CANDIDATES` へ index 8（`(32,64,16,1,2)`。MLX steel classic 経路の
+未収録構成）を追加し、N=4096 NN で cand2（現行選択・9.65〜9.76 TFLOPS）と比較
+した。cand8 は 0.96〜0.97 TFLOPS と大幅に劣後し、他 9 形状 × 4 パターンでも
+一度も最良候補にならなかった（`docs/perf/metal-gemm-n4096-kernel-gap.md` §3・
+生ログ `logs/metal-gemm-n4096-kernel-gap-1143/sweep_run{1,2}.log`）。
+`select_with_occupancy_for_device` の選択（本表 §5 の判断）は変更しない。
+
 ## 6. スコープ外（計画 §7 を踏襲）
 
 - `gemm_simdgroup_tiled` への転置ロード導入（NT/TN/TT へのタイル variant 適用）: §4 の定量化を判断材料として親 #1037 系の別イシューへ引き継ぐ

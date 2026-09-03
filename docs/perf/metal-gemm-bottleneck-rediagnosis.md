@@ -481,8 +481,16 @@ vs facade 経由の `bench-fandhe`）が異なるため単純に差分を「faca
   → **#1103 で `--instrument 'Metal GPU Counters'` を追加試行済み**（§5.3）。カウンタプロファイルは
   活性化（`counter-profile=0`→`3`）したが GPU Service が本デバイスで非対応と報告し、実データは
   引き続き未計測。非対話環境ではこれ以上の解消不可と判断（§5.3 参照）
-- 上記 candle 側カーネル純境界差（N=4096 で candle が fandhe-ai を上回る要因）の追加切り分け
-  （カーネル実装・タイル形状・MLX steel gemm 側最適化差等。#1103 では未着手）
+- ~~上記 candle 側カーネル純境界差（N=4096 で candle が fandhe-ai を上回る要因）の追加切り分け
+  （カーネル実装・タイル形状・MLX steel gemm 側最適化差等。#1103 では未着手）~~ →
+  **#1143 で実施済み**（`docs/perf/metal-gemm-n4096-kernel-gap.md`）。candle が選ぶ
+  `TILE_64_64_16_2_2` と同一形状の `CANDIDATES[0]` を `MTLComputePipelineState`
+  反射値で調査した結果、スレッドグループレベルの占有率上限には不足がなく（レジスタ圧
+  仮説は反射値レベルでは支持されない）、MLX steel classic 経路の未収録構成
+  `(32,64,16,1,2)` を追加測定したが劣後（現行 `CANDIDATES[2]` の約 8〜10 分の 1）で
+  あったため選択ロジックは変更していない。カーネル codegen 側の変更（ソーステキスト
+  特殊化・フラグメントロード方式・協調ロード再構成）は未着手のまま引き続きスコープ外
+  （同 doc §5「スコープ外」）
 - framework-compare `summary.md` の 0.4.0 正式更新・REQ-8 下限の再確定（人間承認タスク。計画 §6 のとおり
   本イシューのスコープ外）
 

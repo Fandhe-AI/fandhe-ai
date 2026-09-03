@@ -347,9 +347,10 @@ pub use elementwise::MetalElementwise;
 #[cfg(target_os = "macos")]
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
-pub use gemm::{GemmVariant, MetalGemm};
+pub use gemm::{GemmVariant, MetalGemm, TilePipelineReflection};
 #[cfg(target_os = "macos")]
 pub use half_buffer::MetalHalfBuffer;
+pub use layout::TransposePattern;
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]
