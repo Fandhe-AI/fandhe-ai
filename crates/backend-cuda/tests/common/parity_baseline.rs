@@ -186,8 +186,12 @@ pub enum ParityPath {
     /// あり、確定した事実として記載しているものではない。
     ///
     /// baseline 行の追加はユーザー承認必須（`security.md`「ガードレール
-    /// 閾値・テスト許容誤差の変更は人間の承認を経る」）。本行の承認記録は
-    /// イシュー #1161 の実装 PR の承認コメントを一次記録とする。
+    /// 閾値・テスト許容誤差の変更は人間の承認を経る」）。**ユーザー承認
+    /// 2026-09-04**: PR #1194 の issue コメントおよびイシュー #1161 の
+    /// コメントに、3 行の承認値（`fail_count` 30/131072・
+    /// `mean_abs_diff` ceiling 1.010962e-5・`max_abs_diff` ceiling
+    /// 1.562501e-2・`max_rel_err` ceiling 3.341150e-2）と判定方式切替の
+    /// 承認を記録済み。
     /// tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）・
     /// カーネル実装は本イシューで一切変更しない。
     SpecializedMmaF16,
@@ -1100,7 +1104,8 @@ pub static BASELINES: &[ParityBaseline] = &[
     // `docs/perf/logs/specialized-mma-f16-sweep-1159/sweep_run1.log`／
     // `sweep_run2.log`（`TRIAGE_ROW … shape=256x512x1024 seed=4003`
     // 行）。ceiling は「表示桁最終桁 +1」規約（表記丸め対応のみ・
-    // tolerance 定数は不変）。
+    // tolerance 定数は不変）。ユーザー承認 2026-09-04: PR #1194 コメント
+    // およびイシュー #1161 コメントに承認値（本行と一致）を記録済み。
     ParityBaseline {
         path: ParityPath::SpecializedMmaF16,
         context: "specialized_mma_f16 256x512x1024 seed=4003 compiled=DYNAMIC_ALL (#1159 sweep)",

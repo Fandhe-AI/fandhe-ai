@@ -38,7 +38,9 @@
 //!    （`WmmaTf32Opt`〈#1106・PR #1124〉・`MmaTf32VsWmmaStaged`〈#1122・
 //!    PR #1133〉と同型の形状別分岐パターン）。tolerance 定数
 //!    （`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）・カーネル実装は
-//!    一切変更しない。
+//!    一切変更しない。baseline 行の承認記録: **ユーザー承認 2026-09-04**。
+//!    PR #1194 の issue コメントおよびイシュー #1161 のコメントに、承認値
+//!    （`fail_count` 30/131072 等 4 項目）と判定方式切替の承認を記録済み。
 //! 3. **fail-closed 検査**（負系）: `STATIC_MNK` でコンパイルしたカーネル
 //!    を不一致形状で起動すると `CudaError::InvalidKernelConfig` になる
 //!    こと（`validate_launch_shape` の実効性）。
