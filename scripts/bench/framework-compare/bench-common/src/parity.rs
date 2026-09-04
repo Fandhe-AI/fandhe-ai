@@ -266,6 +266,16 @@ pub struct DumpOutcome {
 /// [`compare_elementwise`] と同じ `BenchError::ParityLengthMismatch` を返す。
 /// 書き込み失敗は `unwrap`/`expect` せず `BenchError::Io` へ変換する
 /// （coding-rust.md「本番経路で panic させない」）。
+///
+/// `n == 0` は `BenchError::InvalidShape` として拒否する。本関数は `pub` で
+/// あり、呼び出し元が現状 [`GemmReference::compute`] 経由の `n >= 1` 保証
+/// 済み値に限られるとしても、`pub` 関数の契約としてその保証は成立しない
+/// ため、`n == 0` かつ fail 要素を含む非空入力で `idx / n` が panic するの
+/// を防ぐ（AGENTS.md「本番経路の panic 禁止」。イシュー #1183 PR #1196
+/// codex-review 指摘・P1）。あわせて `actual.len() == n*n` も検証し、
+/// row/col 診断値の健全性（`idx` が `n×n` 平面に収まること）を保証する
+/// （[`gemm_element_count`] と同じ `checked_mul` 経路。`n*n` が
+/// `usize::MAX` を超える場合は `BenchError::SizeOverflow` を返す）。
 pub fn dump_parity_failures(
     actual: &[f32],
     reference: &[f32],
@@ -277,6 +287,16 @@ pub fn dump_parity_failures(
     if actual.len() != reference.len() {
         return Err(BenchError::ParityLengthMismatch {
             expected: reference.len(),
+            actual: actual.len(),
+        });
+    }
+    if n == 0 {
+        return Err(BenchError::InvalidShape { n });
+    }
+    let expected = gemm_element_count(n)?;
+    if actual.len() != expected {
+        return Err(BenchError::ParityLengthMismatch {
+            expected,
             actual: actual.len(),
         });
     }
@@ -297,9 +317,7 @@ pub fn dump_parity_failures(
         if dumped >= cfg.limit {
             continue;
         }
-        // `n >= 1` は呼び出し元（[`GemmReference::compute`]）の検証を通じて
-        // 保証済み（`n == 0` は `BenchError::InvalidShape` で `verify` まで
-        // 到達しない）。
+        // `n >= 1`・`actual.len() == n*n` は本関数冒頭で検証済み。
         let row = idx / n;
         let col = idx % n;
         writeln!(
@@ -860,7 +878,10 @@ mod tests {
 
     #[test]
     fn dump_parity_failures_truncates_at_limit() {
-        let reference = vec![1.0f32; 5];
+        // n*n = 9 要素（3x3）。`actual.len() == n*n` 検証（イシュー #1183
+        // PR #1196 codex-review 指摘・P1）と整合させるため、要素数を n=3 の
+        // 正方行列として揃える。
+        let reference = vec![1.0f32; 9];
         let mut actual = reference.clone();
         for v in actual.iter_mut() {
             *v *= 2.0; // 全要素 fail させる。
@@ -870,14 +891,14 @@ mod tests {
         let outcome = dump_parity_failures(
             &actual,
             &reference,
-            5,
+            3,
             ParityDumpConfig { limit: 2 },
             1,
             &mut sink,
         )
         .expect("dump");
 
-        assert_eq!(outcome.fail_count, 5);
+        assert_eq!(outcome.fail_count, 9);
         assert_eq!(outcome.dumped, 2);
         assert!(outcome.truncated);
 
@@ -914,6 +935,59 @@ mod tests {
         assert_eq!(outcome.dumped, 1);
         let text = String::from_utf8(sink).expect("utf8");
         assert!(text.contains("abs=inf") || text.contains("abs=NaN"));
+    }
+
+    /// イシュー #1183 PR #1196 codex-review 指摘（P1）の回帰確認: `pub` 関数
+    /// である `dump_parity_failures` は `n == 0` かつ fail 要素を含む
+    /// 非空入力を渡されても `idx / n` で panic せず、型付きエラー
+    /// `BenchError::InvalidShape` を返す。
+    #[test]
+    fn dump_parity_failures_rejects_zero_n_without_panicking() {
+        let reference = vec![1.0f32];
+        let actual = vec![2.0f32]; // fail 要素（reference と不一致）を含む非空入力。
+
+        let mut sink = Vec::new();
+        let err = dump_parity_failures(
+            &actual,
+            &reference,
+            0,
+            ParityDumpConfig { limit: 64 },
+            1,
+            &mut sink,
+        )
+        .expect_err("n == 0 must be rejected as a typed error, not panic");
+
+        assert!(matches!(err, BenchError::InvalidShape { n: 0 }));
+        assert!(sink.is_empty());
+    }
+
+    /// `actual.len() != n*n` の不整合（`n` と実際の要素数が矛盾する呼び出し
+    /// 誤り）も型付きエラーで拒否し、`idx` が `n×n` 平面をはみ出した
+    /// row/col 診断値を書き出さないことを確認する。
+    #[test]
+    fn dump_parity_failures_rejects_length_inconsistent_with_n() {
+        let reference = vec![1.0f32, 2.0, 3.0, 4.0]; // 4 要素（n=2 相当）。
+        let actual = reference.clone();
+
+        let mut sink = Vec::new();
+        let err = dump_parity_failures(
+            &actual,
+            &reference,
+            3, // n=3 なら n*n=9 で 4 要素と矛盾する。
+            ParityDumpConfig { limit: 64 },
+            1,
+            &mut sink,
+        )
+        .expect_err("length inconsistent with n must be rejected as a typed error");
+
+        assert!(matches!(
+            err,
+            BenchError::ParityLengthMismatch {
+                expected: 9,
+                actual: 4
+            }
+        ));
+        assert!(sink.is_empty());
     }
 
     #[test]
