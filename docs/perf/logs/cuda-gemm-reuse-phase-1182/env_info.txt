@@ -1,0 +1,28 @@
+イシュー #1182 実機計測環境情報（DGX Spark GB10。実ホスト名は含めない。
+`docs/real-hardware-verification-env.md` §3〜4 準拠）。
+
+計測日: 2026-09-04
+転送元コミット: b5a2cb681b9a27d4506c71c612c00d0b2fb96e47（main。本ブランチはこの
+  コミット + 本 PR の未コミット変更ツリーを rsync 転送した。#1025/#1139 と
+  同じパターン: 単一コミットは本実測の後に作成される）
+
+$ nvidia-smi --query-gpu=name,driver_version,utilization.gpu --format=csv
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+（計測前後で 0% を確認。競合プロセスなし）
+
+$ nvcc --version
+Built on Wed_Aug_20_01:57:39_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+
+$ rustc -V
+rustc 1.97.0 (2d8144b78 2026-07-07)
+
+$ cargo -V
+cargo 1.97.0 (c980f4866 2026-06-30)
+
+Layer A（bench-fandhe）: `cargo tree -p bench-fandhe --depth 1` で
+fandhe-ai v0.6.0（registry 経由。crates.io 公開版）を確認済み。
+参考系列（HEAD path patch）は時間の都合で本ラウンドは未実施
+（AC-3 のユーザー判断事項に記載）。

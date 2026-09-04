@@ -47,6 +47,8 @@ use crate::kernels_wmma_opt;
 use crate::module_cache::load_function_cached;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
 use crate::pool::CudaAllocator;
+#[cfg(test)]
+use crate::pool::PooledCudaHandle;
 // `compile_ptx` は本番経路（`CudaGemm::new`。イシュー #1024 で
 // `load_function_cached` 経由へ結線済み）ではなく、`internal-diagnostics`
 // feature（既定 off）限定の診断用コンストラクタ
@@ -646,6 +648,24 @@ pub enum TiledF32Kernel {
     /// `kernels_tiled_pipeline::gemm_tiled_pipeline_f32`（cp.async 3 stage
     /// パイプライン。#1033・GB10 実測に基づき #1137 で本番結線）。
     Pipeline,
+}
+
+/// [`CudaGemm::launch_tiled_f32_pooled`]（イシュー #1182 診断専用）の
+/// カーネル選択トグル。用途・`Classic` 固定が必要な理由は同メソッドの
+/// doc コメントを参照。[`TiledF32Kernel`]（`select_tiled_f32_kernel` の
+/// **結果**を表す可観測型）とは別物で、こちらは**呼び出し前**の選択
+/// 指定である。`gemm_reuse_phase_diag_tests`（`#[cfg(test)]` 兄弟
+/// モジュール）専用のため `#[cfg(test)]` で本体ビルドから除外する
+/// （通常ビルドでの dead-code 化を避ける。`launch_tiled_f32_pooled` も
+/// 同様）。
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiagTiledF32Kernel {
+    /// 本番と同じ形状条件付き自動選択（[`CudaGemm::select_tiled_f32_kernel`]
+    /// をそのまま呼ぶ）。
+    Select,
+    /// 常に classic（`tiled_f32`）へ固定する。
+    Classic,
 }
 
 /// 形状・パイプラインカーネル可用性から tiled f32 経路 3 入口が使う
@@ -2924,6 +2944,75 @@ impl CudaGemm {
         // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
         // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
         // 委ねる（設計文書 §3〜§4）。
+        Ok(())
+    }
+
+    /// [`Self::launch_tiled_f32`] のプール確保出力版（イシュー #1182
+    /// `gemm_reuse_phase_diag_tests` 専用）。本番経路
+    /// （`run_f32_kernel`）は出力バッファをサイズクラス別プール
+    /// （[`PooledCudaHandle`]）経由で確保する一方、`launch_tiled_f32`
+    /// は `CudaSlice<f32>`（`alloc_output_f32`＝`alloc_zeros`。memset
+    /// を伴う）を受け取るため「本番と同じ確保方式での GPU 実行のみの
+    /// 時間」を計測できない。本メソッドは `PooledCudaHandle` を受け取り
+    /// `launch_tiled_f32` と同じ検証・SAFETY 根拠のまま起動する。
+    /// `pub(crate)` で公開 API 面には出さない（診断専用。§7 スコープ外）。
+    ///
+    /// `kernel`（[`DiagTiledF32Kernel`]）: `Select` は本番
+    /// [`Self::select_tiled_f32_kernel`] と同じ形状条件付き自動選択
+    /// （pipeline／classic）、`Classic` は
+    /// [`Self::launch_tiled_f32_classic`]（`internal-diagnostics`
+    /// feature 限定）と同じ意味で常に classic（`tiled_f32`）へ固定
+    /// する。`Classic` 固定が必要な理由: crates.io 公開版 `fandhe-ai
+    /// =0.6.0` の `kernels.rs`（TILED_F32 ソース）は本 HEAD と差分が
+    /// あり（`select_tiled_f32_kernel` の pipeline 分岐自体は 0.6.0 に
+    /// 無い）、`bench-fandhe`（0.6.0 固定）の `gemm --mode reuse
+    /// --phases`（イシュー #1182）が観測する `matmul` 区間と本診断を
+    /// 突合する際、pipeline 分岐が有効な形状（N=1024/2048/4096 は整列
+    /// のため pipeline 経由。`docs/perf/cuda-gemm-tiled-pipeline.md`
+    /// 参照）では `Select` が 0.6.0 の実測と乖離しうる。`Classic` は
+    /// その乖離を避けた近似比較用（`docs/perf/
+    /// cuda-gemm-reuse-phase-breakdown.md` §5 参照）。
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn launch_tiled_f32_pooled(
+        &self,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut PooledCudaHandle,
+        m: u32,
+        n: u32,
+        k: u32,
+        kernel: DiagTiledF32Kernel,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.as_view().len(), m, n)?;
+
+        let (func, cfg) = match kernel {
+            DiagTiledF32Kernel::Select => self.select_tiled_f32_kernel(0, m, n, k),
+            DiagTiledF32Kernel::Classic => (&self.tiled_f32, tiled_f32_launch_config(m, n)),
+        };
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: launch_tiled_f32 と同一の根拠（カーネル引数の型・個数・
+        // デバイスバッファ長は上記で検証済みの m/n/k と 1:1 対応し、
+        // カーネル内の手動境界チェック〈REQ-8〉と合わせて OOB を防ぐ）。
+        // `c_dev.as_view_mut()` は論理長 `m*n` のビュー（`run_f32_kernel`
+        // と同じ）。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(&mut c_dev.as_view_mut())
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        // 非同期投入契約（#1013）。診断テスト側が明示 `stream.synchronize()`
+        // でカーネル専有時間を分離する（`gemm_reuse_phase_diag_tests` の
+        // `kernel_wait` 区間）。
         Ok(())
     }
 

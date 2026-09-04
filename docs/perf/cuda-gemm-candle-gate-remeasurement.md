@@ -92,6 +92,13 @@ reuse でも各回の結果実体化が単一 in-order ストリーム上の同�
 #1031 の「reuse で candle 超え（1.0 倍以上）」を達成できない可能性がある**（§8 スコープ外
 事項参照）。
 
+**実測確定（イシュー #1182 追補）**: 上記の「H2D/D2H を含む固定費が希釈要因」という推定は
+`docs/perf/cuda-gemm-reuse-phase-breakdown.md`（#1182。GB10 実機フェーズ分解実測）により
+**部分的に不正確**と判明した。H2D＋カーネル＋D2H＋同期（`matmul` 区間）単体は candle の
+fresh 全体より高速（N=1024: 1.59 倍、N=4096: 1.47 倍）であり、reuse 総計を候補比未達へ
+押し下げている主因はベンチハーネス自身が追加する `host_copy`（二重ホストコピー）と
+`checksum`（診断用全要素和）であることが確定した（同ドキュメント §6・§7）。
+
 ## 5. N=2048 candle 無効データの原因・再現条件
 
 ### 5.1 再現条件（決定的）
@@ -131,6 +138,12 @@ reuse でも各回の結果実体化が単一 in-order ストリーム上の同�
   max_abs=3.623962e-05）が出ている。両者が同一の 2 要素なのか異なる要素なのかは
   本計測の範囲（要素インデックスの取得は §5.3 のとおり未実施）では特定できていない
 
+**追記（イシュー #1184。GB10 実機での実値取得により確定）**: candle/cuda（`idx=13850`・
+`idx=4130484`）と candle/cpu（`idx=1372466`・`idx=1633751`）の fail 2 要素は**異なる要素**
+であることを確認した（同一 GB10 ノード・同一バイナリ・同一入力での 1 回起動。§5.3 追記参照）。
+device 間でカーネルの累積順序が異なるため、たまたま複合判定を割る要素の位置も変わる、という
+解釈と整合する
+
 ### 5.3 仮説と限界
 
 **仮説**: N=2048 の一部要素（真値が 0 近傍と推定される要素）において、参照実装（k 昇順
@@ -150,12 +163,78 @@ FMA 逐次累積）と各フレームワークの実装（BLAS/cuBLAS/cuDNN 相�
 十分と判断し、本 PR ではその計装を追加していない（R2「原因・再現条件を記録」は本節で
 満たしていると判断）
 
+**追記（イシュー #1183）**: 上記の診断計装は `FRAMEWORK_COMPARE_PARITY_DUMP` 環境変数として
+追加済み（`scripts/bench/framework-compare/bench-common/src/parity.rs`。使い方は
+`scripts/bench/framework-compare/README.md` §「fail 要素ダンプ」）。本イシューは計装の追加のみで、
+GB10 実機での N=2048 fail 要素の実際の値取得・本節の仮説検証は別途実施する（本エージェント実行環境に
+CUDA 実機なし）
+
+**追記（イシュー #1184。GB10 実機実測完了・2026-09-03）**:
+
+- **取得方法**: `FRAMEWORK_COMPARE_PARITY_DUMP=1` で `bench-candle --task gemm --device
+  {cuda,cpu} --size 2048 --mode fresh` を GB10 実機（`~/work/rust-ai-library-run`。転送元
+  `808b4be`）で 1 回ずつ起動し、stderr の `PARITY_DUMP` 行（warmup 20 + 計測 20 = 40 call 分）
+  を取得した（`docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-{cuda,cpu}-2048.txt`）。
+  JSONL の 4 parity 値は candle/cuda が `fail=2/4194304, max_abs=3.623962e-05,
+  max_rel=2.811288e-01`、candle/cpu が `fail=2/4194304, max_abs=3.814697e-05,
+  max_rel=3.944416e-01` で、いずれも §5.1・§5.2 の既存記録・#1142 環境 10 の値と完全一致した
+  （新規ビルド・新規セッションでの再現性を追加確認）
+- **決定性**: candle/cuda・candle/cpu とも 40 call すべてで同一の 2 idx・同一の `ref_bits`/
+  `actual_bits`（bit 完全一致）が出た（`truncated=false`。実行間の非決定性なし）
+- **厳密真値との突合**: `scripts/bench/framework-compare/parity_dump_truth.py`（本イシューで
+  新規作成。標準ライブラリのみ）で `Xorshift64Star`/`fill_vec` を Python 側で厳密再現し
+  （2 進有理数として誤差ゼロ表現）、fail 要素ごとに (1) 有理数演算による厳密真値
+  `exact = Σ_k A[row,k]·B[k,col]`、(2) f64 逐次和、(3) f32 FMA 逐次累積の厳密丸め再現、
+  (4) 部分和の最大絶対値 `max|partial|` とキャンセレーション由来の期待誤差フロア
+  `√K · ulp_f32(max|partial|)` を計算した（出力: `docs/perf/logs/cuda-gemm-candle-parity-1184/truth-2048.txt`）。
+  **(3) の f32 FMA 逐次再現は 4 要素すべてで `ref_bits` と bit 完全一致**（`fma_bit_match=True`）
+  し、これが RNG 再現の正しさと「参照実装が契約どおり k 昇順 FMA 逐次累積として動作している
+  こと」の直接証拠になっている
+
+  | idx | device | row,col | exact | ref | actual | \|ref−exact\| | \|actual−exact\| | max\|partial\| | √K·ulp(max\|partial\|) |
+  |---|---|---|---|---|---|---|---|---|---|
+  | 13850 | cuda | 6,1562 | 2.166853e-03 | 2.168937e-03 | 2.157688e-03 | 2.084e-06 | 9.165e-06 | 3.969 | 1.079e-05 |
+  | 4130484 | cuda | 2016,1716 | 9.197426e-03 | 9.188101e-03 | 9.199142e-03 | 9.325e-06 | 1.717e-06 | 6.099 | 2.158e-05 |
+  | 1372466 | cpu | 670,306 | 9.918718e-03 | 9.920587e-03 | 9.933233e-03 | 1.869e-06 | 1.452e-05 | 5.613 | 2.158e-05 |
+  | 1633751 | cpu | 797,1495 | 5.382382e-03 | 5.374012e-03 | 5.385637e-03 | 8.370e-06 | 3.255e-06 | 4.748 | 2.158e-05 |
+
+- **仮説の判定: 真（部分的に再校正）**。4 要素すべてで `|ref−exact|`・`|actual−exact|` は
+  `√K·ulp(max|partial|)` と同水準（比 0.08〜0.85 倍。いずれも 1 倍未満で異常な誤差ではない）
+  であり、参照実装（k 昇順 FMA 逐次）・candle 側カーネルのどちらも通常の累積丸め誤差の範囲に
+  収まっている。**どちらか一方の実装が恒常的に他方より誤差が大きい、という片側優位の構造は
+  ない**（`|actual−exact|` が `|ref−exact|` を上回る要素〈13850・1372466〉と下回る要素
+  〈4130484・1633751〉が両方存在し、比は 0.08〜7.8 倍とばらつく）。したがって §5.1 の
+  「candle 側の丸め誤差」という表現は不正確で、**参照実装・candle 側双方が持つ通常の
+  累積丸め誤差が、たまたま同時に abs/rel 両閾値を超える形状・入力の組み合わせが N=2048 に
+  存在する**、と訂正する
+- **「0 近傍」の再評価**: §5.3 当初の仮説文言・plan 段階の見積り（`3.62e-5/0.281 ≈ 1.3e-4`）は
+  誤りだった。**`0.281`（`parity_max_rel_err`）は fail 2 要素のいずれの値でもない**
+  （fail 要素の実際の相対誤差は 1.2e-3〜5.2e-3。`compare_elementwise` は複合判定で pass した
+  要素も含めて全要素中の `max_abs_err`/`max_rel_err` を独立に追跡するため、`parity_max_rel_err`
+  は「abs 側で救済されたが rel が極端に大きい別の passing 要素」、`parity_max_abs_err` も
+  同様に「rel 側で救済されたが abs が大きい別の passing 要素」に由来しうる——`fail_count`
+  の対象要素とは限らない。これは本イシューで判明した、`summarize.py`/`compare_gemm_gate.py`
+  の既存出力を読む上での注意点であり、判定ロジック自体の不具合ではない。fail 2 要素自体の
+  `exact` は 2.2e-3〜9.2e-3 のオーダーで、機械イプシロン近傍という意味の「0 近傍」ではない。
+  一方、各要素の**部分和の最大絶対値**（3.97〜6.10）に対し最終値（`exact`）はその
+  400〜2600 分の 1 まで縮小しており、**累積過程で大きな桁のキャンセレーションが起きた
+  結果、最終値が「相対的に」小さくなっている**（これが「0 近傍」の実体）。桁が縮小した
+  分だけ、累積過程で生じた丸め誤差フロア（`√K·ulp(max|partial|)`）が最終値そのものと
+  同程度の大きさになり、abs 救済閾値 1e-5・rel 閾値 1e-3 の両方を同時に割り込む
+- **本イシューでのスコープ外**: burn/cpu（fail=5）の実値取得は別バイナリ（`bench-burn`）を
+  要し、本イシューの対象外のまま据え置く（§8）
+
 ### 5.4 tolerance の扱い
 
 **tolerance は緩めない**。本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
 `.claude/rules/coding-rust.md`）は本計測でも不変のまま適用し、N=2048 は「判定不能」の
 まま記録する。判定方式の変更（別シードでの追加計測・参考比の併記・spec 側への追記等）は
 §9「ユーザー判断事項」に列挙するのみで、本 PR では実施しない
+
+**追記（イシュー #1184）**: `PARITY_REL_TOL`/`PARITY_ABS_TOL`・`compare_elementwise`・
+`compare_gemm_gate.py`/`summarize.py` の判定ロジックは本イシューでも一切変更していない
+（`bench-common`・両 Python スクリプトへの差分なし。`git diff` で確認可能）。N=2048 は
+引き続き「判定不能」のまま記録する
 
 ## 6. #1031 受け入れ条件との突合
 
@@ -184,7 +263,9 @@ FMA 逐次累積）と各フレームワークの実装（BLAS/cuBLAS/cuDNN 相�
 - **reuse 計測境界の H2D/D2H 固定費削減**: `Tensor<f32>` のホスト常駐設計に起因する
   reuse でも残る同期点（§4.3）。カーネル最適化（#1031 のスコープ）では解消できない
   構造要因であり、#1031 の未達が今後も残る可能性がある。対処には `Tensor<f32>`
-  のデバイス常駐化等、別スコープの設計変更が必要（後続 issue 化の要否は §9 ユーザー判断）
+  のデバイス常駐化等、別スコープの設計変更が必要（後続 issue 化の要否は §9 ユーザー判断）。
+  **実測確定（#1182）**: 固定費の主因は H2D/D2H 自体ではなく `host_copy`／`checksum`
+  であることが判明した。`docs/perf/cuda-gemm-reuse-phase-breakdown.md` §6・§9 参照
 - **N=2048 の判定方式変更**（別シード追加計測・参考比の併記・spec 側 REQ-2 への追記）:
   tolerance 契約はユーザー承認必須のため本 PR では変更しない（§9）
 - **crates.io v0.7.0 公開・framework-compare ピン `=0.7.0` 更新**: 正式系列で #1137 の
@@ -203,6 +284,18 @@ FMA 逐次累積）と各フレームワークの実装（BLAS/cuBLAS/cuDNN 相�
   新規 issue を起票するかはユーザー判断（`out-of-scope-tracking.md` に従い、本 PR では
   Issue 操作を行わない）
 - **crates.io 次回公開のタイミング**: #1137 を含む正式ピン更新（v0.7.0 想定）の要否・時期
+- **N=2048 判定方式の変更（イシュー #1184 で判明した事実を踏まえた整理。ユーザー承認事項）**:
+  §5.3 追記のとおり、fail 2 要素の丸め誤差は `√K·ulp(max|partial|)` と同水準（K=2048・
+  入力 U[-0.5,0.5) の累積丸め誤差フロアそのもの）であり、「たまたま」ではなく K が大きい
+  正方 GEMM 形状で構造的に起こりうる。tolerance 自体（`PARITY_REL_TOL`/`PARITY_ABS_TOL`）の
+  変更は提案しないが、判定方式の候補として以下をユーザー判断のため列挙する（本イシューでは
+  いずれも実施しない）:
+  - (a) 別シード（`SEED_A`/`SEED_B` 以外）での追加計測により、N=2048 で同種の fail が
+    シード非依存に発生するか確認する
+    - (b) N=2048 は「判定不能」のまま、参考情報として reuse/candle 比を注記付きで併記する
+  - (c) spec（`docs/spec/04-requirements.md` REQ-2）へ「大規模 K での要素単位複合判定は、
+    キャンセレーションで最終値が縮小した要素を対象外とする」等の例外規定を追記する
+    （fandhe-ai-spec 側での対応が必要）
 
 ## 10. 関連ドキュメント
 
@@ -213,3 +306,7 @@ FMA 逐次累積）と各フレームワークの実装（BLAS/cuBLAS/cuDNN 相�
 - `scripts/bench/framework-compare/results/summary.md` 環境 10/11/12 節
 - `docs/performance-targets.md` §8/§8.1/§8.2
 - `docs/perf/logs/cuda-gemm-candle-gate-1142/`（実行ログ・env_info）
+- `docs/perf/logs/cuda-gemm-candle-parity-1184/`（イシュー #1184。fail 要素ダンプ生データ・
+  厳密真値突合結果・env_info）
+- `scripts/bench/framework-compare/parity_dump_truth.py`（イシュー #1184。`PARITY_DUMP` 行から
+  厳密真値を計算する再現用スクリプト）

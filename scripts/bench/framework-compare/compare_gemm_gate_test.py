@@ -78,6 +78,38 @@ class EvaluateSizeTest(unittest.TestCase):
         self.assertEqual(result["status"], "undeterminable")
         self.assertIn("件数が", result["reason"])
 
+    def test_gemm_phases_rows_are_ignored(self):
+        # イシュー #1182: `task:"gemm_phases"` 行（`bench-fandhe --task gemm
+        # --mode reuse --phases`）は `_matching_rows` の `task != "gemm"`
+        # 判定で除外され、判定ロジック自体（ゲート）には一切影響しない
+        # ことを固定する（診断専用の追加行が既存ゲートを汚染しないこと）。
+        phase_rows = [
+            {
+                "framework": "fandhe-ai",
+                "task": "gemm_phases",
+                "device": "cuda",
+                "size": 1024,
+                "mode": "reuse",
+                "median_s": 0.001,
+                "checksum": 1.0,
+                "phase": phase,
+                "phase_index": i,
+            }
+            for i, phase in enumerate(
+                ["matmul", "to_tensor", "host_copy", "checksum", "iter_total"]
+            )
+        ]
+        rows = (
+            [_row("fandhe-ai", 1024, "reuse", 0.010) for _ in range(5)]
+            + [_row("candle", 1024, "fresh", 0.020) for _ in range(5)]
+            + phase_rows
+        )
+        result = compare_gemm_gate.evaluate_size(rows, 1024)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["achieved"])
+        self.assertAlmostEqual(result["fandhe_median_s"], 0.010)
+        self.assertAlmostEqual(result["candle_median_s"], 0.020)
+
     def test_parity_failure_is_undeterminable_with_reason(self):
         rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(4)] + [
             _row("fandhe-ai", 2048, "reuse", 0.010, fail_count=2)
@@ -124,6 +156,84 @@ class DeviceParamTest(unittest.TestCase):
         self.assertEqual(result_default["status"], "ok")
 
 
+class CpuDeviceTest(unittest.TestCase):
+    """`--device cpu`（イシュー #1148）の集計分離・N=512 対応・fresh 参考列
+    （判定に使わないこと）を検証する。"""
+
+    def test_cpu_device_rows_are_aggregated_with_size_512(self):
+        # cuda/metal に無い N=512 が cpu の対象形状に含まれることの確認
+        # （`_SIZES_BY_DEVICE["cpu"]`）。
+        rows = [_row("fandhe-ai", 512, "reuse", 0.010, device="cpu") for _ in range(5)] + [
+            _row("candle", 512, "fresh", 0.020, device="cpu") for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 512, device="cpu")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["achieved"])
+        self.assertAlmostEqual(result["fandhe_median_s"], 0.010)
+        self.assertNotIn(512, compare_gemm_gate._SIZES_BY_DEVICE["cuda"])
+        self.assertIn(512, compare_gemm_gate._SIZES_BY_DEVICE["cpu"])
+
+    def test_cuda_rows_excluded_when_device_cpu_selected(self):
+        # cuda 行が混在していても --device cpu 指定時は除外され、cpu 行
+        # のみで判定される（標本混入防止）。
+        rows = (
+            [_row("fandhe-ai", 512, "reuse", 0.010, device="cpu") for _ in range(5)]
+            + [_row("candle", 512, "fresh", 0.020, device="cpu") for _ in range(5)]
+            + [_row("fandhe-ai", 512, "reuse", 0.999, device="cuda") for _ in range(5)]
+            + [_row("candle", 512, "fresh", 0.999, device="cuda") for _ in range(5)]
+        )
+        result = compare_gemm_gate.evaluate_size(rows, 512, device="cpu")
+        self.assertEqual(result["status"], "ok")
+        self.assertAlmostEqual(result["fandhe_median_s"], 0.010)
+
+    def test_fresh_reference_column_present_when_five_rows_and_does_not_affect_achieved(self):
+        # fandhe-ai fresh 行が 5 件そろい要素単位検証・checksum とも正式
+        # 判定と同じ検証を通る場合、参考列 `fandhe_fresh_median_s` が付与
+        # されるが `achieved` の値は fresh 行の有無に関わらず変わらない
+        # （正式判定は reuse vs candle fresh のまま）。
+        base_rows = [_row("fandhe-ai", 512, "reuse", 0.010, device="cpu") for _ in range(5)] + [
+            _row("candle", 512, "fresh", 0.020, device="cpu") for _ in range(5)
+        ]
+        result_without_fresh = compare_gemm_gate.evaluate_size(base_rows, 512, device="cpu")
+        self.assertNotIn("fandhe_fresh_median_s", result_without_fresh)
+
+        rows_with_fresh = base_rows + [
+            _row("fandhe-ai", 512, "fresh", 0.015, device="cpu") for _ in range(5)
+        ]
+        result_with_fresh = compare_gemm_gate.evaluate_size(rows_with_fresh, 512, device="cpu")
+        self.assertEqual(result_with_fresh["status"], "ok")
+        self.assertIn("fandhe_fresh_median_s", result_with_fresh)
+        self.assertAlmostEqual(result_with_fresh["fandhe_fresh_median_s"], 0.015)
+        self.assertEqual(result_with_fresh["achieved"], result_without_fresh["achieved"])
+        self.assertAlmostEqual(
+            result_with_fresh["fandhe_median_s"], result_without_fresh["fandhe_median_s"]
+        )
+
+    def test_fresh_reference_column_absent_when_row_count_insufficient(self):
+        # fresh 行が 4 件（不足）の場合は参考列を付けない（正式判定
+        # `achieved` には影響しない）。
+        base_rows = [_row("fandhe-ai", 512, "reuse", 0.010, device="cpu") for _ in range(5)] + [
+            _row("candle", 512, "fresh", 0.020, device="cpu") for _ in range(5)
+        ]
+        rows_with_short_fresh = base_rows + [
+            _row("fandhe-ai", 512, "fresh", 0.015, device="cpu") for _ in range(4)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows_with_short_fresh, 512, device="cpu")
+        self.assertEqual(result["status"], "ok")
+        self.assertNotIn("fandhe_fresh_median_s", result)
+
+    def test_main_accepts_device_cpu_flag(self):
+        rows = []
+        for size in compare_gemm_gate._SIZES_BY_DEVICE["cpu"]:
+            rows += [_row("fandhe-ai", size, "reuse", 0.010, device="cpu") for _ in range(5)]
+            rows += [_row("candle", size, "fresh", 0.020, device="cpu") for _ in range(5)]
+        path = _write_jsonl(rows)
+        try:
+            self.assertEqual(compare_gemm_gate.main(["--device", "cpu", path]), 0)
+        finally:
+            os.unlink(path)
+
+
 class LoadRowsTfz32Test(unittest.TestCase):
     def test_non_bool_tf32_row_is_skipped_with_warning(self):
         # codex-review P0 指摘（PR #1166）: `tf32` が bool 以外（`1`・
@@ -161,7 +271,7 @@ class MainCliTest(unittest.TestCase):
         # ファイルに不正行が混在していても exit code 0（達成扱い）に
         # なり得ていた fail-open な欠陥を再発防止する回帰テスト。
         rows = []
-        for size in compare_gemm_gate.SIZES:
+        for size in compare_gemm_gate._SIZES_BY_DEVICE["cuda"]:
             rows += [_row("fandhe-ai", size, "reuse", 0.010) for _ in range(5)]
             rows += [_row("candle", size, "fresh", 0.020) for _ in range(5)]
         lines = [json.dumps(r) for r in rows]

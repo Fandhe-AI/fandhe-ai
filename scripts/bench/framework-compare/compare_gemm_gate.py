@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""GEMM 目標達成ゲート（CUDA: #1031／Metal: #1037）の 5 回計測中央値集計
-ツール（イシュー #1142・#1147 で Metal 対応汎用化）。
+"""GEMM 目標達成ゲート（CUDA: #1031／Metal: #1037／CPU: #1117）の 5 回計測
+中央値集計ツール（イシュー #1142・#1147 で Metal 対応汎用化・#1148 で CPU
+対応拡張）。
 
 使い方:
-    python3 compare_gemm_gate.py [--device {cuda,metal}] JSONL [JSONL ...] [--out FILE]
+    python3 compare_gemm_gate.py [--device {cuda,metal,cpu}] JSONL [JSONL ...] [--out FILE]
 
-`run_gemm_gate.sh <device> <label>`（旧 `run_gemm_gate_cuda.sh`。device 別
-wrapper は `run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh`）が出力する
-JSONL（`bench-fandhe gemm <device> <N> reuse`・`bench-candle gemm <device> <N>
-fresh` を N=1024/2048/4096 それぞれ 5 回起動した結果）を読み、N ごとに
-fandhe-ai（reuse）vs candle（fresh。candle は reuse 非対応のため fresh
-固定）の `median_s` を run 間中央値で集約し、CUDA は #1031・Metal は #1037
-の受け入れ条件（`fandhe_median_s <= candle_median_s`）を判定する。
-`--device` は既定 `cuda`（#1142 時点の呼び出し元との後方互換）。
+`run_gemm_gate.sh <device> <label>`（device 別 wrapper は
+`run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh`／`run_gemm_gate_cpu.sh`）
+が出力する JSONL（`bench-fandhe gemm <device> <N> reuse`・`bench-candle gemm
+<device> <N> fresh` を対象形状（cuda/metal: N=1024/2048/4096、cpu:
+N=512/1024/2048。`_SIZES_BY_DEVICE`）それぞれ 5 回起動した結果。cpu のみ
+`bench-fandhe gemm cpu <N> fresh` も同数起動され、判定に使わない参考列
+として集計される）を読み、N ごとに fandhe-ai（reuse）vs candle（fresh。
+candle は reuse 非対応のため fresh 固定）の `median_s` を run 間中央値で
+集約し、CUDA は #1031・Metal は #1037・CPU は #1117 の受け入れ条件
+（`fandhe_median_s <= candle_median_s`）を判定する。`--device` は既定
+`cuda`（#1142 時点の呼び出し元との後方互換）。
 
 `summarize.py --target candle` は同一入力ファイル内の 1 レコードのみを
 拾う設計（1 ファイル = 1 環境の単発計測が前提）のため、5 回計測の run 間
@@ -58,8 +62,15 @@ _checksum_contract = importlib.util.module_from_spec(_CONTRACT_SPEC)
 _CONTRACT_SPEC.loader.exec_module(_checksum_contract)
 checksums_match = _checksum_contract.checksums_match
 
-# #1031 の対象形状（reuse candle 比再計測。イシュー #1142）。
-SIZES = (1024, 2048, 4096)
+# #1031（cuda）／#1037（metal）／#1117（cpu。#1148 で cpu 拡張）の対象
+# 形状（reuse candle 比再計測）。cpu は run_gemm_gate.sh 側の run 構成
+# （N=512/1024/2048）に合わせる（イシュー #1148。cuda/metal は #1142/#1147
+# から不変）。
+_SIZES_BY_DEVICE = {
+    "cuda": (1024, 2048, 4096),
+    "metal": (1024, 2048, 4096),
+    "cpu": (512, 1024, 2048),
+}
 # coding-rust.md「ベンチは 5 回計測の中央値」。
 MIN_RECORDS = 5
 # candle は gemm reuse モードに非対応（`bench-candle` は reuse 指定を
@@ -223,7 +234,15 @@ def _median(values):
 
 
 def evaluate_size(rows, size, device="cuda"):
-    """1 size 分の判定結果を辞書で返す（`status`: "ok"/"undeterminable"）。"""
+    """1 size 分の判定結果を辞書で返す（`status`: "ok"/"undeterminable"）。
+
+    device="cpu" のときのみ、結果に `fandhe_fresh_median_s`（と min/max）を
+    追加しうる（イシュー #1148）。これは環境 10/11 の単発 fresh 計測との
+    連続性を説明するための参考値であり、`fandhe-ai fresh` 行がちょうど
+    `MIN_RECORDS` 件かつ要素単位検証・checksum とも正式判定と同じ検証を
+    通った場合のみ付与する。`achieved`（正式判定。reuse vs candle fresh）
+    には一切使わない — fresh 行の有無・値は判定結果を変えない。
+    """
     fandhe_rows = _matching_rows(rows, "fandhe-ai", FANDHE_MODE, size, device)
     candle_rows = _matching_rows(rows, "candle", CANDLE_MODE, size, device)
     result = {"size": size, "fandhe_n": len(fandhe_rows), "candle_n": len(candle_rows)}
@@ -322,9 +341,31 @@ def evaluate_size(rows, size, device="cuda"):
     result["candle_max_s"] = max(candle_medians)
     result["ratio_candle_over_fandhe"] = candle_median / fandhe_median if fandhe_median > 0 else None
     result["gflops"] = (2.0 * size**3 / fandhe_median) / 1e9 if fandhe_median > 0 else None
-    # #1031 の受け入れ条件: reuse の fandhe-ai が candle と同等以上（中央値
-    # で candle 以下の所要時間）。
+    # #1031/#1037/#1117 の受け入れ条件: reuse の fandhe-ai が candle と同等
+    # 以上（中央値で candle 以下の所要時間）。
     result["achieved"] = fandhe_median <= candle_median
+
+    # 参考列（cpu のみ。イシュー #1148）: 環境 10/11 単発計測との連続性
+    # 説明のため、fandhe-ai の fresh 中央値（5 件ちょうどかつ要素単位検証・
+    # checksum とも正式判定と同じ検証を通った場合のみ）を付記する。判定
+    # （achieved）には一切使わない — 正式契約は reuse vs candle fresh の
+    # ままとし、fresh 行を判定母集団に混入させない（本関数 docstring・
+    # README「GEMM ゲート 5 回計測」節参照）。
+    if device == "cpu":
+        fresh_rows = _matching_rows(rows, "fandhe-ai", "fresh", size, device)
+        if len(fresh_rows) == MIN_RECORDS:
+            fresh_diag_ok = all(_parity_check(r, size)[0] for r in fresh_rows)
+            fresh_medians = [_safe_positive(r.get("median_s")) for r in fresh_rows]
+            fresh_checksums = [_safe_finite(r.get("checksum")) for r in fresh_rows]
+            if (
+                fresh_diag_ok
+                and all(v is not None for v in fresh_medians)
+                and all(v is not None for v in fresh_checksums)
+                and all(checksums_match(c, ref) for c in fresh_checksums)
+            ):
+                result["fandhe_fresh_median_s"] = _median(fresh_medians)
+                result["fandhe_fresh_min_s"] = min(fresh_medians)
+                result["fandhe_fresh_max_s"] = max(fresh_medians)
     return result
 
 
@@ -336,7 +377,7 @@ def _fmt_s(s):
     return f"{s * 1e6:.1f} us"
 
 
-_GATE_ISSUE_BY_DEVICE = {"cuda": "#1031", "metal": "#1037"}
+_GATE_ISSUE_BY_DEVICE = {"cuda": "#1031", "metal": "#1037", "cpu": "#1117"}
 
 
 def render(path, results, device="cuda"):
@@ -344,24 +385,40 @@ def render(path, results, device="cuda"):
     gate_issue = _GATE_ISSUE_BY_DEVICE.get(device, "#1031")
     lines.append(f"## GEMM 目標達成ゲート（{gate_issue}・device={device}）: `{path}`")
     lines.append("")
-    lines.append(
+    show_fresh_ref = device == "cpu"
+    header = (
         "| N | fandhe-ai reuse median (min–max, n) | candle fresh median (n) | "
         "candle/fandhe | GFLOP/s | 判定 |"
     )
-    lines.append("|---|---|---|---|---|---|")
+    sep = "|---|---|---|---|---|---|"
+    if show_fresh_ref:
+        header = header[:-1] + "| fandhe-ai fresh median（参考。n） |"
+        sep = sep + "---|"
+    lines.append(header)
+    lines.append(sep)
     for r in results:
         if r["status"] != "ok":
-            lines.append(
-                f"| {r['size']} | - | - | - | - | 判定不能: {r['reason']} |"
-            )
+            row = f"| {r['size']} | - | - | - | - | 判定不能: {r['reason']} |"
+            if show_fresh_ref:
+                row += " - |"
+            lines.append(row)
             continue
         verdict = "達成" if r["achieved"] else "未達"
-        lines.append(
+        row = (
             f"| {r['size']} | {_fmt_s(r['fandhe_median_s'])} "
             f"({_fmt_s(r['fandhe_min_s'])}–{_fmt_s(r['fandhe_max_s'])}, n=5) | "
             f"{_fmt_s(r['candle_median_s'])} (n=5) | "
             f"{r['ratio_candle_over_fandhe']:.3f} | {r['gflops']:.2f} | {verdict} |"
         )
+        if show_fresh_ref:
+            if "fandhe_fresh_median_s" in r:
+                row += (
+                    f" {_fmt_s(r['fandhe_fresh_median_s'])} "
+                    f"({_fmt_s(r['fandhe_fresh_min_s'])}–{_fmt_s(r['fandhe_fresh_max_s'])}, n=5) |"
+                )
+            else:
+                row += " - |"
+        lines.append(row)
     lines.append("")
 
     # 診断表（run ごとの要素単位検証。R2: N=2048 無効データの再現条件記録用）。
@@ -395,9 +452,12 @@ def main(argv=None):
     parser.add_argument("jsonl", nargs="+", help="run_gemm_gate.sh の出力 JSONL（複数可・独立集計）")
     parser.add_argument(
         "--device",
-        choices=("cuda", "metal"),
+        choices=("cuda", "metal", "cpu"),
         default="cuda",
-        help="集計対象の device（既定 cuda。#1142 との後方互換。Metal は #1037 ゲート・イシュー #1147）",
+        help=(
+            "集計対象の device（既定 cuda。#1142 との後方互換。Metal は #1037 ゲート・"
+            "イシュー #1147。cpu は #1117 ゲート・イシュー #1148）"
+        ),
     )
     parser.add_argument("--out", help="出力先ファイル（省略時は標準出力）")
     args = parser.parse_args(argv)
@@ -413,7 +473,7 @@ def main(argv=None):
             continue
         for w in warnings:
             print(f"warning: {w}", file=sys.stderr)
-        results = [evaluate_size(rows, size, args.device) for size in SIZES]
+        results = [evaluate_size(rows, size, args.device) for size in _SIZES_BY_DEVICE[args.device]]
         if warnings:
             # codex-review P0 指摘（PR #1166）: `load_rows` が破損 JSON・非
             # object・不正な `tf32` 型の行を warnings として除外するのみで、

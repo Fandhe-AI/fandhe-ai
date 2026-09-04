@@ -1,0 +1,61 @@
+イシュー #1184: N=2048 candle 側 parity fail 要素の実値取得・厳密真値突合の実行環境記録
+
+## 対象
+
+- 転送元コミット（`.rev-stamp`）: 808b4be7f5adee6d4c6fb42cfadc587f49df31c6
+  （`test(bench): framework-compare の parity 判定に fail 要素ダンプ計装（環境変数
+  opt-in）を追加する (#1196)`。転送先の `.rev-stamp` と一致確認済み）
+- 転送方式: `docs/real-hardware-verification-env.md` §3 の rsync（ノードに GitHub 鍵なし。
+  パッチ転送方式）。`scripts/bench/framework-compare/target/` は既存ビルドキャッシュ保護の
+  rsync protect ルールを指定したが、本回は既存キャッシュが存在せず新規（cold）ビルドと
+  なった（所要 1 分 3 秒。`cargo build --release -p bench-candle --no-default-features
+  --features cuda`）
+
+## 実機環境
+
+- GPU: NVIDIA GB10（sm_121。DGX Spark）
+- driver: 580.173.02
+- CUDA: 13.0（`nvcc` release 13.0, V13.0.88, build cuda_13.0.r13.0/compiler.36424714_0）
+- rustc: 1.97.0 (2d8144b78 2026-07-07)
+- cargo: 1.97.0 (c980f4866 2026-06-30)
+- `cargo tree -p bench-candle --depth 1 --no-default-features --features cuda` で
+  `candle-core v0.11.0`（registry 経由）を確認済み
+
+## 実行前後の GPU 空き確認
+
+- 実行前: `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader` = `0 %`
+- 常駐サービス（ComfyUI・Kokoro）の compute-apps 一覧は確認済み（本ファイルには実名パス・
+  使用メモリ量を記載しない。`docs/real-hardware-verification-env.md` の記法に従う）
+- 実行後（candle/cuda 計測直後）: `7 %`（測定完了後の残存負荷。次コマンド実行までに解消）
+
+## 実行コマンド・出力ファイル
+
+1. `FRAMEWORK_COMPARE_PARITY_DUMP=1 ./target/release/bench-candle --task gemm --device cuda
+   --size 2048 --mode fresh --out <jsonl>` （2>&1 の stderr を
+   `parity-dump-cuda-2048.txt` へ、JSONL 出力の parity 4 値を本文へ転記。exit=0）
+2. 同上 `--device cpu` → `parity-dump-cpu-2048.txt`（exit=0）
+3. Mac 側で `parity_dump_truth.py --n 2048` を両ファイルに対して実行し
+   `truth-2048.txt` を生成（標準ライブラリのみ、追加依存なし）
+
+## JSONL parity 4 値（#1142 記録との一致確認）
+
+- candle/cuda: `parity_total=4194304, parity_fail_count=2, parity_max_abs_err=3.623962e-5,
+  parity_max_rel_err=2.811288e-1`（`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.1・
+  §5.2 の既存記録・環境 10 の値と完全一致）
+- candle/cpu: `parity_total=4194304, parity_fail_count=2, parity_max_abs_err=3.814697e-5,
+  parity_max_rel_err=3.944416e-1`（同 §5.2 環境 10 の値と完全一致）
+
+## 決定性の確認
+
+- `PARITY_DUMP_SUMMARY` 40 行（call=1..40。warmup 20 + 計測 20）すべてが
+  `fail_count=2 dumped=2 truncated=false`
+- candle/cuda・candle/cpu とも 40 call 全件で同一 idx・同一 `ref_bits`/`actual_bits`
+  （bit 完全一致）。実行間の非決定性は観測されなかった
+
+## 秘密情報・内部実値の非混入確認
+
+- `find ~/work/rust-ai-library-run -maxdepth 2 -iname "*.env*" -o -iname "*local.md*"` の
+  結果は `docs/real-hardware-verification-env.local.md.example`（テンプレートのみ）で、
+  実値ファイル（`.local.md`）は転送対象から除外済みで存在しない
+- 本ファイル・回収した dump/JSONL/truth ファイルにホスト名・ノード上プロセスの絶対パス
+  （`/opt/...` 等）を含めていないことを目視確認済み

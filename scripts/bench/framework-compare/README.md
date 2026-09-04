@@ -215,6 +215,66 @@ Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
 `docs/perf/train-step-phase-breakdown.md`（イシュー #1010）を参照。
 `results/summary.md` への環境情報の統合記録は別途 #1050 に委ねる。
 
+### `gemm --mode reuse --phases`（イシュー #1182。reuse 計測境界のフェーズ分解）
+
+`#1142`（`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §4.3・§8）は、
+カーネル単体（launch-only）計測では candle を上回るのに `gemm --mode reuse` の
+計測境界では candle 比未達のままである原因を「reuse の計測境界に残る H2D／D2H／
+同期の固定費」と**推定**したまま確定していなかった。`--task gemm --mode reuse
+--phases`（値なしフラグ。`--task train --phases` と同型）はこの推定を、
+`train --phases` と同じ方法論（公開 API の呼び出し境界での区間分解）で実測確定
+するための計装である。`bench-candle`/`bench-burn`・`--mode fresh`・`--task
+train`/`--task infer` との組合せは MEASURE_ERROR で fail-fast する。
+
+`run_gemm_reuse` 1 反復の内側で `readout_var`（`to_tensor()` +
+`contiguous().as_slice().to_vec()`）を展開し、次の 5 区間を `Instant` で計測する
+（`run_gemm_reuse` 本体は変更しない。`init_s` の定義・`validate_gemm_checksum`
+を全反復で実施する点・`GemmReference::verify` を計測窓外で worst 集約する点は
+`run_gemm_reuse` と同一）:
+
+| phase | 計測対象 |
+| --- | --- |
+| `matmul` | `a.matmul(&b)`（**H2D〈A/B アップロード〉・カーネル実行・D2H〈結果ダウンロード〉・ストリーム同期が全てこの区間の内側に閉じている**。公開 API ではこれ以上分離できない） |
+| `to_tensor` | `c.to_tensor()` |
+| `host_copy` | `.contiguous().as_slice().to_vec()`（ホストへのコピー） |
+| `checksum` | 全要素和（f64 アキュムレータ） |
+| `iter_total` | 反復全体のウォールクロック時間（検算用。Σphase ≤ iter_total） |
+
+`matmul` 区間の内訳（H2D／カーネル専有時間／D2H の実測分解）は本節では取れない
+（`fandhe-ai` 0.6.0 の公開 API 面にホスト転送を伴わない完了待ちや区間別の
+カーネルタイミング API が無いため。`train --phases`「同期待ちを独立区間にできない
+理由」と同じギャップ）。内訳は `crates/backend-cuda` 側の診断テスト
+（`gemm_reuse_phase_diag_tests`。`#[ignore]` 実機専用）が別途取り、`matmul`
+区間との突合結果を `docs/perf/cuda-gemm-reuse-phase-breakdown.md` に記録する。
+
+reuse 行には `init_s`（tape 構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
+経過。`run_gemm_reuse` と同一定義）が乗る。
+
+**JSONL スキーマ**: 既存 `Record` のキー（`framework`・`version`・
+`task:"gemm_phases"`・`device`・`size`・`median_s`/`q1_s`/`q3_s`・`checksum`・
+`warmup`・`iters`・`mode:"reuse"`・`init_s`・`parity_*`）に加え、`phase`・
+`phase_index` の 2 キーを末尾に追加する（`train_phases` と同じ
+`bench_common::PhaseRecord`）。`gemm_phases` 行は `(a)` GEMM 節・`--target`
+目標達成ゲート・`compare_gemm_gate.py`（`_matching_rows` が `task != "gemm"` を
+除外する）には一切混入しない。
+
+**`summarize.py` (a'') 節の読み方**: `(device, mode, size)` ごとに `phase_index`
+昇順で表示し、`中央値`/`Q1`/`Q3` に加え `iter_total 比`（= phase 中央値 /
+`iter_total` 中央値）を表示する。検証方針（必須 phase 名の集合・順序・件数の
+完全一致・`iter_total` の一意性・phase 中央値が `iter_total` を超える不整合の
+検出・sub-ns 区間の 0 値許容）は `(b'')` train_phases 節と同一。
+
+使用例:
+
+```bash
+cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 4096 --mode reuse --phases
+```
+
+`gemm --mode reuse --phases` は診断専用であり、`run_all*.sh`／`run_gemm_gate*.sh`
+の標準スイープには組み込まない（既存ゲート判定プロトコルを変更しないため）。
+GB10 実機での計測結果・カーネル専有時間ベースの candle 比（参考値）は
+`docs/perf/cuda-gemm-reuse-phase-breakdown.md`（イシュー #1182）を参照。
+
 ### 要素単位検証（イシュー #970）
 
 `(a)` GEMM の checksum（全要素和）は、要素の入れ替わりや正負誤差の相殺で偶然一致しうる破損を
@@ -248,6 +308,60 @@ Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
   `null` を混同しない。データ有効性節・`--strict` 対象）
 - `train`/`infer` タスクは対象外（fandhe-ai の重み初期化が candle/Burn と異なる設計のため checksum
   同様に比較不能。§「計測プロトコル」重み初期化の節を参照）
+
+#### fail 要素ダンプ（イシュー #1183）
+
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 は、N=2048 で candle-core 側 CUDA GEMM
+出力が上記の複合判定で 2 要素 fail（`max_rel≈2.8e-01`）となり原因未確定のまま残っていることを
+記録している。同節が検討し未実施だった「fail 要素の値（index・reference・実測値）を取得する診断
+計装」を、環境変数 opt-in で追加した。
+
+- **環境変数**: `FRAMEWORK_COMPARE_PARITY_DUMP`（`bench-common::parity::PARITY_DUMP_ENV`）。値の
+  解釈は allowlist（`BenchError::InvalidMode` と同型の fail-fast 検証。security.md A03）:
+  - 未設定・`""`・`"0"` → 無効（既定。**JSONL 出力・判定結果・終了コードは完全に不変**）
+  - `"1"` → 有効・1 回の `verify` 呼び出しあたり既定上限 64 要素まで出力
+  - 正の整数文字列（例 `"16"`） → 有効・その値を上限に出力
+  - それ以外（`"abc"`・`"-1"` 等）→ 起動直後（warmup 前）に `MEASURE_ERROR:` prefix 付きの
+    型付きエラーで終了（20 反復後に落ちるのではなく fail-fast）
+- **出力先・形式**: **stderr 限定**（stdout は JSONL チャネルのため混入させない）。fail 要素 1 件
+  につき 1 行（`PARITY_DUMP call=<verify 呼び出し番号> n=<N> idx=<flat index> row=<i> col=<j>
+  ref=<10進> ref_bits=0x<f32 bit パターン> actual=<10進> actual_bits=0x<f32 bit パターン>
+  abs=<絶対誤差> rel=<相対誤差>`）+ 呼び出しごとの末尾サマリ 1 行
+  （`PARITY_DUMP_SUMMARY call=<k> n=<N> fail_count=<c> dumped=<d> truncated=<true|false>`）。
+  bit パターンを併記するのは、10 進表記だけでは §5.3 の「0 近傍の丸め誤差」仮説の検証に不足するため
+- **反復間の重複出力は仕様**: N=2048 のように決定的に同じ要素が毎反復 fail するケースでは、同じ
+  index が warmup・計測の各反復で繰り返しダンプされる（反復間の非決定性も可視化するための設計であり
+  バグではない）
+- **`run_gemm_gate*.sh` 経由では出力が破棄される**: 同スクリプトはバイナリを `2>err.tmp` で起動し
+  成功時に `rm -f err.tmp` するため、ゲートスクリプト経由では stderr のダンプが失われる。ダンプを
+  見るにはバイナリを直接起動すること:
+
+  ```bash
+  cd scripts/bench/framework-compare
+  FRAMEWORK_COMPARE_PARITY_DUMP=1 \
+    ./target/release/bench-candle --task gemm --device cuda --size 2048 --mode fresh \
+    --out /tmp/x.jsonl 2>parity-dump.txt
+  ```
+
+- **未変更事項**: `PARITY_REL_TOL`/`PARITY_ABS_TOL`・`compare_elementwise` の判定結果・3 バイナリの
+  JSONL 出力・`summarize.py`/`compare_gemm_gate.py` はすべて不変（判定・閾値の変更はユーザー承認
+  必須。`.claude/rules/coding-rust.md`）。**GB10 実機での N=2048 fail 要素の実際の取得・§5.3 の
+  仮説検証はイシュー #1184 で実施済み**。結果は
+  `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3「追記（イシュー #1184）」を参照
+  （fail 要素の値は参照実装・candle 側双方の通常の累積丸め誤差であり、片側優位の実装不具合では
+  ないと確定した）
+
+**厳密真値との突合**（イシュー #1184。`scripts/bench/framework-compare/parity_dump_truth.py`）:
+`PARITY_DUMP` 行は「参照実装の値」と「フレームワーク実測値」しか教えないため、どちらが
+数学的真値から離れているかは別途の突合が要る。本スクリプトは `Xorshift64Star`/`fill_vec` を
+Python の有理数演算（`fractions.Fraction`）で厳密再現し、fail 要素の厳密真値・f32 FMA 逐次
+累積の厳密丸め再現（`ref_bits` との bit 一致検証つき）・部分和最大値からの誤差フロア見積り
+（`√K·ulp(max|partial|)`）を計算する。標準ライブラリのみに依存する。
+
+```bash
+cd scripts/bench/framework-compare
+python3 parity_dump_truth.py --n 2048 < ../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cuda-2048.txt
+```
 
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
@@ -356,18 +470,24 @@ echo $?   # 0: 全達成 / 2: --strict の無効データ判定が優先 / 3: �
   判定しない。人間が判断する）
 
 ## GEMM ゲート 5 回計測（CUDA: #1031 達成判定・イシュー #1142／Metal: #1037 達成判定・
-イシュー #1147）
+イシュー #1147／CPU: #1117 達成判定・イシュー #1148）
 
 `summarize.py --target candle` は同一入力ファイル内の 1 レコードしか拾わない
 （1 ファイル = 1 環境の単発計測が前提）ため、CUDA #1031・Metal #1037「N=1024/
-2048/4096 reuse で candle 超え（各 5 回計測の中央値）」の受け入れ判定には
-非対応。本節の `run_gemm_gate.sh <device> <label>`／`compare_gemm_gate.py
---device {cuda,metal}` がその 5 回計測を専用に行う（`run_ab_train_cuda.sh` /
+2048/4096 reuse で candle 超え」・CPU #1117「N=512/1024/2048 reuse で candle
+超え」（各 5 回計測の中央値）の受け入れ判定には非対応。本節の
+`run_gemm_gate.sh <device> <label>`／`compare_gemm_gate.py --device
+{cuda,metal,cpu}` がその 5 回計測を専用に行う（`run_ab_train_cuda.sh` /
 `compare_ab.py` の GEMM 版）。本体ロジックはイシュー #1142 の CUDA 専用実装
-（`run_gemm_gate_cuda.sh`）を #1147 で device 汎用化したもので、呼び出し面は
-device 別の薄い wrapper `run_gemm_gate_cuda.sh`（既存呼び出しとの CLI 互換
-維持）／`run_gemm_gate_metal.sh`（新規）に分離している（両者とも内部で
-`bash run_gemm_gate.sh <device> "$@"` を呼ぶのみ）。
+（`run_gemm_gate_cuda.sh`）を #1147 で device 汎用化・#1148 で CPU 対応拡張
+したもので、呼び出し面は device 別の薄い wrapper `run_gemm_gate_cuda.sh`
+（既存呼び出しとの CLI 互換維持）／`run_gemm_gate_metal.sh`／
+`run_gemm_gate_cpu.sh`（いずれも内部で `bash run_gemm_gate.sh <device> "$@"`
+を呼ぶのみ）に分離している。cpu は対象形状（N=512/1024/2048。cuda/metal の
+N=1024/2048/4096 と異なる）に加え、各 run で `bench-fandhe gemm cpu <N>
+fresh` も交互起動する（環境 10/11 単発 fresh 計測との連続性を説明するための
+参考記録。**判定〈`achieved`〉には一切使わない** — 正式契約は他 device と
+同じ reuse vs candle fresh のまま）。
 
 **2 系列の使い分け**:
 
@@ -395,6 +515,24 @@ cd scripts/bench/framework-compare
 bash run_gemm_gate_cuda.sh 0.6.0
 # Metal 正式系列（現行ピン。イシュー #1147）:
 bash run_gemm_gate_metal.sh 0.6.0
+# CPU 正式系列（現行ピン。DGX Spark〈Grace CPU〉／M4 Max のいずれでも実行可。
+# bench-candle のビルド flag はホスト OS で自動選択される。イシュー #1148）。
+# GEMM_GATE_CPU_NODE_TAG（dgx-cpu／m4max-cpu の明示指定。必須）が実行ホストの
+# OS 系列と矛盾する場合は fail-closed で終了する（`uname -s` だけで正式実機の
+# ファイル名を無条件確定しない。codex-review P1 PRRT_kwDOTuUCJc6fK1Pe 対応。
+# イシュー #1148）。さらに OS 系列一致だけでは「同一 OS 系列の任意ホスト」を
+# 排除できないため、Git 管理外のローカルファイル
+# `gemm-gate-trusted-hosts.local`（`gemm-gate-trusted-hosts.local.example` を
+# コピーし、`hostname` コマンドの実出力と機体識別子〈Linux:
+# `/etc/machine-id`／Darwin: `IOPlatformUUID`。hostname 単独は実行者自身が
+# 別ホストで同名詐称できてしまうため codex-review P1 PRRT_kwDOTuUCJc6fLNFe
+# 対応で追加〉を `<hostname>|<machine-id/IOPlatformUUID>` 形式で登録して作成）
+# に登録した値との照合も必須（未作成・該当タグ未登録・hostname/機体識別子
+# いずれかの不一致はいずれも計測前に fail-closed で終了する。codex-review
+# P1 PRRT_kwDOTuUCJc6fK_lT・PRRT_kwDOTuUCJc6fLNFe 対応）:
+cp gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local  # 初回のみ。hostname・機体識別子を登録する
+GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.6.0     # DGX Spark 側
+GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.6.0  # M4 Max 側
 
 # CUDA 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
 GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
@@ -410,21 +548,32 @@ GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
 # 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
 python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.6.0.jsonl
 python3 compare_gemm_gate.py --device metal results/raw/results-m4max-gemm-gate-0.6.0.jsonl
+python3 compare_gemm_gate.py --device cpu results/raw/results-dgx-cpu-gemm-gate-0.6.0.jsonl
+python3 compare_gemm_gate.py --device cpu results/raw/results-m4max-cpu-gemm-gate-0.6.0.jsonl
 echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2: 入力を読めない
 ```
 
-- `run_gemm_gate.sh <device> <label>`（device は `cuda`／`metal`。通常は device
-  別 wrapper 経由で呼ぶためラベルのみを渡す）はラベル（`[A-Za-z0-9._-]+` のみ
-  許可）ごとに N=1024/2048/4096 それぞれで `bench-fandhe gemm <device> <N>
-  reuse` と `bench-candle gemm <device> <N> fresh`（candle は reuse 非対応）を
-  交互に 5 回ずつ起動し `results/raw/results-<node>-gemm-gate-<label>.jsonl`
-  （`<node>` は cuda=`dgx`／metal=`m4max`）へ記録する。失敗は
+- `run_gemm_gate.sh <device> <label>`（device は `cuda`／`metal`／`cpu`。通常は
+  device 別 wrapper 経由で呼ぶためラベルのみを渡す）はラベル
+  （`[A-Za-z0-9._-]+` のみ許可）ごとに対象形状（cuda/metal: N=1024/2048/4096、
+  cpu: N=512/1024/2048）それぞれで `bench-fandhe gemm <device> <N> reuse` と
+  `bench-candle gemm <device> <N> fresh`（candle は reuse 非対応）を交互に
+  5 回ずつ起動し（cpu のみ `bench-fandhe gemm cpu <N> fresh` も同数追加起動。
+  計 3 起動 × 3 サイズ × 5 run = 45 run。cuda/metal は従来どおり 2 起動 ×
+  3 サイズ × 5 run = 30 run）`results/raw/results-<node>-gemm-gate-<label>.jsonl`
+  （`<node>` は cuda=`dgx`／metal=`m4max`／cpu=`dgx-cpu`〈Linux〉・
+  `m4max-cpu`〈Darwin〉。`GEMM_GATE_CPU_NODE_TAG` の明示指定必須。`uname -s`
+  は指定値との OS 系列整合確認のみに使用し、不一致は fail-closed で
+  終了する）へ記録する。失敗は
   `results/raw/skipped-<node>-gemm-gate-<label>.log` に記録する（数値を捏造しない）。
   Metal の熱・電源状態は `pmset -g therm`・`uptime`（`sudo` 不要。CUDA の
   `nvidia-smi` に相当する device 別スナップショット）で実行ログへ記録する
   （`docs/perf/metal-bench-noise-protocol.md`「熱・電源状態の記録」節準拠）。
-  計測ループが完走し `ANY_FAILED == 0`（全 30 run 成功）の場合にのみ、一時
-  ファイルから上記 2 パスへ原子的（同一ファイルシステム内 `mv`）に反映する。
+  cpu は host OS 別に `nproc`・`/proc/loadavg`・`lscpu`（Linux）または
+  `sysctl` の機種名・P/E コア構成・`pmset -g therm`（Darwin）に加え、両者
+  共通で `RAYON_NUM_THREADS`（未設定＝両フレームワーク既定で全コア使用）を
+  記録する。計測ループが完走し `ANY_FAILED == 0`（全 run 成功）の場合にのみ、
+  一時ファイルから上記 2 パスへ原子的（同一ファイルシステム内 `mv`）に反映する。
   1 件でも run が失敗した場合はこの 2 パスを一切変更せず、直前の有効な計測
   結果（同一 label の過去の成功実行分）を保全したまま、不完全な計測データは
   `results/raw/results-dgx-gemm-gate-<label>.failed-<UTC タイムスタンプ>.jsonl`
@@ -472,7 +621,11 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
   本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる。
   判定不能時は run ごとの `fail_count`/`max_abs`/`max_rel` を診断表として出力
   する（N=2048 の candle 無効データの原因調査・再現条件記録に使う。イシュー
-  #1142 R2）
+  #1142 R2）。`--device cpu` のみ、`bench-fandhe gemm cpu <N> fresh` 行が
+  ちょうど 5 件かつ要素単位検証・checksum とも正式判定と同じ検証を通る場合
+  に限り「fandhe-ai fresh median（参考）」列を追加表示する。この列は環境
+  10/11 の単発 fresh 計測との連続性を説明するための参考記録であり
+  `achieved` の判定には一切使わない（イシュー #1148）
 - `tf32:true` の行（イシュー #1042）は本ゲートの対象外として除外する
 
 ## A/B 計測（都度同期廃止・イシュー #1083）

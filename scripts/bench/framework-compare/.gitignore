@@ -1,1 +1,5 @@
 target/
+# GEMM ゲート CPU ホスト fingerprint 照合用ローカルファイル（実ホスト名を含む。
+# 追跡対象は gemm-gate-trusted-hosts.local.example のみ。run_gemm_gate.sh
+# の codex-review P1 PRRT_kwDOTuUCJc6fK_lT 対応・イシュー #1148）。
+gemm-gate-trusted-hosts.local
