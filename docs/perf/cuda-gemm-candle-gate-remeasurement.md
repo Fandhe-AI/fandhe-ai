@@ -157,6 +157,12 @@ FMA 逐次累積）と各フレームワークの実装（BLAS/cuBLAS/cuDNN 相�
 十分と判断し、本 PR ではその計装を追加していない（R2「原因・再現条件を記録」は本節で
 満たしていると判断）
 
+**追記（イシュー #1183）**: 上記の診断計装は `FRAMEWORK_COMPARE_PARITY_DUMP` 環境変数として
+追加済み（`scripts/bench/framework-compare/bench-common/src/parity.rs`。使い方は
+`scripts/bench/framework-compare/README.md` §「fail 要素ダンプ」）。本イシューは計装の追加のみで、
+GB10 実機での N=2048 fail 要素の実際の値取得・本節の仮説検証は別途実施する（本エージェント実行環境に
+CUDA 実機なし）
+
 ### 5.4 tolerance の扱い
 
 **tolerance は緩めない**。本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。

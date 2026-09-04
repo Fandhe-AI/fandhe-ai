@@ -309,6 +309,45 @@ GB10 実機での計測結果・カーネル専有時間ベースの candle 比�
 - `train`/`infer` タスクは対象外（fandhe-ai の重み初期化が candle/Burn と異なる設計のため checksum
   同様に比較不能。§「計測プロトコル」重み初期化の節を参照）
 
+#### fail 要素ダンプ（イシュー #1183）
+
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 は、N=2048 で candle-core 側 CUDA GEMM
+出力が上記の複合判定で 2 要素 fail（`max_rel≈2.8e-01`）となり原因未確定のまま残っていることを
+記録している。同節が検討し未実施だった「fail 要素の値（index・reference・実測値）を取得する診断
+計装」を、環境変数 opt-in で追加した。
+
+- **環境変数**: `FRAMEWORK_COMPARE_PARITY_DUMP`（`bench-common::parity::PARITY_DUMP_ENV`）。値の
+  解釈は allowlist（`BenchError::InvalidMode` と同型の fail-fast 検証。security.md A03）:
+  - 未設定・`""`・`"0"` → 無効（既定。**JSONL 出力・判定結果・終了コードは完全に不変**）
+  - `"1"` → 有効・1 回の `verify` 呼び出しあたり既定上限 64 要素まで出力
+  - 正の整数文字列（例 `"16"`） → 有効・その値を上限に出力
+  - それ以外（`"abc"`・`"-1"` 等）→ 起動直後（warmup 前）に `MEASURE_ERROR:` prefix 付きの
+    型付きエラーで終了（20 反復後に落ちるのではなく fail-fast）
+- **出力先・形式**: **stderr 限定**（stdout は JSONL チャネルのため混入させない）。fail 要素 1 件
+  につき 1 行（`PARITY_DUMP call=<verify 呼び出し番号> n=<N> idx=<flat index> row=<i> col=<j>
+  ref=<10進> ref_bits=0x<f32 bit パターン> actual=<10進> actual_bits=0x<f32 bit パターン>
+  abs=<絶対誤差> rel=<相対誤差>`）+ 呼び出しごとの末尾サマリ 1 行
+  （`PARITY_DUMP_SUMMARY call=<k> n=<N> fail_count=<c> dumped=<d> truncated=<true|false>`）。
+  bit パターンを併記するのは、10 進表記だけでは §5.3 の「0 近傍の丸め誤差」仮説の検証に不足するため
+- **反復間の重複出力は仕様**: N=2048 のように決定的に同じ要素が毎反復 fail するケースでは、同じ
+  index が warmup・計測の各反復で繰り返しダンプされる（反復間の非決定性も可視化するための設計であり
+  バグではない）
+- **`run_gemm_gate*.sh` 経由では出力が破棄される**: 同スクリプトはバイナリを `2>err.tmp` で起動し
+  成功時に `rm -f err.tmp` するため、ゲートスクリプト経由では stderr のダンプが失われる。ダンプを
+  見るにはバイナリを直接起動すること:
+
+  ```bash
+  cd scripts/bench/framework-compare
+  FRAMEWORK_COMPARE_PARITY_DUMP=1 \
+    ./target/release/bench-candle --task gemm --device cuda --size 2048 --mode fresh \
+    --out /tmp/x.jsonl 2>parity-dump.txt
+  ```
+
+- **未変更事項**: `PARITY_REL_TOL`/`PARITY_ABS_TOL`・`compare_elementwise` の判定結果・3 バイナリの
+  JSONL 出力・`summarize.py`/`compare_gemm_gate.py` はすべて不変（判定・閾値の変更はユーザー承認
+  必須。`.claude/rules/coding-rust.md`）。GB10 実機での N=2048 fail 要素の実際の取得・§5.3 の仮説
+  検証は本計装を使った後続作業（本イシューの範囲外）
+
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
 `backend-cuda` の GEMM 公開経路（`fandhe-ai::gemm`）は既定で FP32 厳密（`run_tiled_f32`）だが、
