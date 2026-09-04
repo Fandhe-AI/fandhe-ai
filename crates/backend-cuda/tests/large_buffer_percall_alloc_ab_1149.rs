@@ -201,10 +201,18 @@ fn summarize(measurement: &bench_harness::Measurement) -> Summary {
 }
 
 /// 出力 1 行の書式:
-/// `condition,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count`
+/// `condition,bracket_pos,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count`
+///
+/// `bracket_pos` は [`bracket_conditions`] が返す `[Baseline, A, B, Both,
+/// Baseline]` 内での 0 始まり位置（0〜4）。先頭（0）と末尾（4）はいずれも
+/// `Condition::Baseline` で `condition` 列だけでは区別できないため
+/// （codex-review 指摘・#1149 PR #1199。前後 baseline をドリフト幅として
+/// 突き合わせるには一意な列が必要）、この列で baseline_before（0）と
+/// baseline_after（4）を機械的に判別できるようにする。
 #[allow(clippy::too_many_arguments)]
 fn print_summary_row(
     condition: Condition,
+    bracket_pos: usize,
     phase: &str,
     size_mib: u64,
     order: &str,
@@ -213,7 +221,7 @@ fn print_summary_row(
     s: &Summary,
 ) {
     println!(
-        "{},{phase},{size_mib},{order},{run_idx},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
+        "{},{bracket_pos},{phase},{size_mib},{order},{run_idx},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
         condition.label(),
         cold_ms,
         s.min_secs * 1000.0,
@@ -584,8 +592,22 @@ impl Drop for SyncDeviceBuffer {
             // 確保され、他のどこからも解放されていない（`slice.take()`
             // による一度きりの消費で二重 `free_sync` を防止）。直前の
             // `synchronize` が成功したため全アクセスが完了している。
+            //
+            // `free_sync` 自体の失敗をログのみで継続すると、各反復で
+            // デバイスメモリのリークが蓄積し、VRAM 枯渇や後続サンプルの
+            // 変動を招いて不正な A/B データを正常な結果として記録して
+            // しまう（codex-review 指摘・#1149 PR #1199）。`synchronize`
+            // 失敗時と同じ方針で、巻き戻し中（二重パニックで abort する
+            // ため）でなければ panic して fail-closed にする。
             if let Err(e) = unsafe { result::free_sync(ptr) } {
                 eprintln!("sync_device_buffer,drop,free_sync_failed,error={e:?}");
+                if !std::thread::panicking() {
+                    panic!(
+                        "SyncDeviceBuffer::drop: cuMemFree（free_sync）が失敗した \
+                         （error={e:?}）。デバイスメモリがリークし後続条件の計測が \
+                         汚染されるため、テスト失敗として顕在化させる"
+                    );
+                }
             }
         }
     }
@@ -924,7 +946,7 @@ fn runs_for_size(size_mib: u64) -> usize {
 /// 本体: サイズスイープ × 条件ブラケット × フェーズ × ラン。
 ///
 /// 出力 1 行の書式（フェーズ計測行）:
-/// `condition,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count`
+/// `condition,bracket_pos,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count`
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 想定）必須。イシュー #1149 の A/B 計測専用テストで受け入れ判定には使わない"]
 fn large_buffer_percall_alloc_ab_record() {
@@ -940,7 +962,7 @@ fn large_buffer_percall_alloc_ab_record() {
     print_pool_attrs("before_sweep", &read_mem_pool_attrs(device.context()));
 
     println!(
-        "condition,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count"
+        "condition,bracket_pos,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count"
     );
 
     // --- 昇順パス: 全フェーズ（P0〜P4） ---
@@ -953,7 +975,7 @@ fn large_buffer_percall_alloc_ab_record() {
         let runs = runs_for_size(size_mib);
         let config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
 
-        for condition in bracket_conditions() {
+        for (bracket_pos, condition) in bracket_conditions().into_iter().enumerate() {
             // 案 A（release threshold 引き上げ）はガードのスコープ内で
             // のみ有効。ブロック終端で自動的に元へ復元される
             // （`ReleaseThresholdGuard::drop`）。
@@ -963,6 +985,7 @@ fn large_buffer_percall_alloc_ab_record() {
                 let (cold, m) = phase_p1_alloc_only(&device, &config, numel, condition);
                 print_summary_row(
                     condition,
+                    bracket_pos,
                     "p1_alloc_only",
                     size_mib,
                     "asc",
@@ -974,6 +997,7 @@ fn large_buffer_percall_alloc_ab_record() {
                 let (cold, m) = phase_p2_alloc_zeros(&device, &config, numel, condition);
                 print_summary_row(
                     condition,
+                    bracket_pos,
                     "p2_alloc_zeros",
                     size_mib,
                     "asc",
@@ -985,6 +1009,7 @@ fn large_buffer_percall_alloc_ab_record() {
                 let (cold, m) = phase_p3_h2d_only(&device, &config, &a, condition);
                 print_summary_row(
                     condition,
+                    bracket_pos,
                     "p3_h2d_only",
                     size_mib,
                     "asc",
@@ -996,6 +1021,7 @@ fn large_buffer_percall_alloc_ab_record() {
                 let (cold, m) = phase_p0_transfer_only(&device, &config, &a, &b, numel, condition);
                 print_summary_row(
                     condition,
+                    bracket_pos,
                     "p0_transfer_only",
                     size_mib,
                     "asc",
@@ -1021,6 +1047,7 @@ fn large_buffer_percall_alloc_ab_record() {
                 let (cold, m) = phase_p4_d2h_fresh_vec(&device, &config, &device_src);
                 print_summary_row(
                     condition,
+                    bracket_pos,
                     "p4_d2h_fresh_vec",
                     size_mib,
                     "asc",
@@ -1054,13 +1081,14 @@ fn large_buffer_percall_alloc_ab_record() {
         let runs = runs_for_size(size_mib);
         let config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
 
-        for condition in bracket_conditions() {
+        for (bracket_pos, condition) in bracket_conditions().into_iter().enumerate() {
             let _guard = require_release_threshold_guard(condition, device.context());
 
             for run_idx in 0..runs {
                 let (cold, m) = phase_p0_transfer_only(&device, &config, &a, &b, numel, condition);
                 print_summary_row(
                     condition,
+                    bracket_pos,
                     "p0_transfer_only",
                     size_mib,
                     "desc",
@@ -1081,6 +1109,7 @@ fn large_buffer_percall_alloc_ab_record() {
                 let (cold, m) = phase_p4_d2h_fresh_vec(&device, &config, &device_src);
                 print_summary_row(
                     condition,
+                    bracket_pos,
                     "p4_d2h_fresh_vec",
                     size_mib,
                     "desc",
@@ -1100,11 +1129,16 @@ fn large_buffer_percall_alloc_ab_record() {
 
     // --- P7: 本番経路レプリカ（dim4096 相当。#1123 症状の直接再現） ---
     println!(
-        "condition,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count,checksum"
+        "condition,bracket_pos,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count,checksum"
     );
     let gemm = CudaMmaGemm::new(&device)
         .expect("CudaMmaGemm::new must succeed on CUDA-equipped test runner");
     let numel = (P7_DIM as usize) * (P7_DIM as usize);
+    // `size_mib` 列は P0〜P4 と同じく実バッファサイズ（MiB）を記録する。
+    // 以前は次元値 `P7_DIM`（4096）をそのまま出力しており、P7 の各バッファ
+    // は 32 MiB（f16 dim4096×dim4096）のため集計時に「4096 MiB」と誤読
+    // されていた（codex-review 指摘・#1149 PR #1199）。
+    let p7_size_mib = (numel * size_of::<f16>()) as u64 / (1024 * 1024);
     let mut rng = Xorshift64Star::new(0xEF00);
     let a: Vec<f16> = rng.fill_vec_f16(numel);
     let b: Vec<f16> = rng.fill_vec_f16(numel);
@@ -1117,7 +1151,7 @@ fn large_buffer_percall_alloc_ab_record() {
     // で `expect` が panic していた）。
     let p7_config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
     let mut checksums: Vec<(Condition, usize, f64)> = Vec::new();
-    for condition in bracket_conditions() {
+    for (bracket_pos, condition) in bracket_conditions().into_iter().enumerate() {
         let _guard = require_release_threshold_guard(condition, device.context());
         for run_idx in 0..P7_RUNS {
             let (cold, m, checksum) = phase_p7_gemm_replica(
@@ -1125,9 +1159,9 @@ fn large_buffer_percall_alloc_ab_record() {
             );
             let s = summarize(&m);
             println!(
-                "{},p7_gemm_replica,{},n/a,{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.6}",
+                "{},{bracket_pos},p7_gemm_replica,{},n/a,{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.6}",
                 condition.label(),
-                P7_DIM,
+                p7_size_mib,
                 run_idx,
                 cold,
                 s.min_secs * 1000.0,
