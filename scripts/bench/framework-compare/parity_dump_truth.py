@@ -169,6 +169,52 @@ class Xorshift64StarExact:
         return [self.next_element_exact() for _ in range(n)]
 
 
+def extract_rows_exact(seed: int, n: int, target_rows: set[int]) -> dict[int, list[Fraction]]:
+    """A（行優先 n×n）から `target_rows` の行だけを厳密有理数として抽出する。
+
+    フル行列を `fill_vec_exact(n * n)` で Fraction 化すると、fail 要素の解析対象
+    は通常 2 個程度の (row, col) だけにもかかわらず n=2048 で約 839 万・許容上限
+    n=8192 では約 1.34 億の重量級 `Fraction` オブジェクトを同時保持することになり
+    実行不能になる（イシュー #1197 レビュー指摘）。行はストレージ上連続
+    （`a[row*n : row*n+n]`）なので、必要な行の直前までは `next_u64()` で xorshift
+    状態のみ進めて（`Fraction` 構築を省略）、必要な行の n 要素だけ厳密化する。
+    複数行が対象でも 1 パスで済むよう最大行の直後まで走査する。
+    """
+    result: dict[int, list[Fraction]] = {r: [] for r in target_rows}
+    if not target_rows:
+        return result
+    gen = Xorshift64StarExact(seed)
+    limit = (max(target_rows) + 1) * n
+    for pos in range(limit):
+        r = pos // n
+        if r in result:
+            result[r].append(gen.next_element_exact())
+        else:
+            gen.next_u64()
+    return result
+
+
+def extract_cols_exact(seed: int, n: int, target_cols: set[int]) -> dict[int, list[Fraction]]:
+    """B（行優先 n×n）から `target_cols` の列だけを厳密有理数として抽出する。
+
+    列は `b[k*n+col]`（k=0..n-1）でストレージ上 stride n の飛び飛び位置なので、
+    xorshift の逐次性（ランダムアクセス不可）上 B 全体 n*n 要素分の走査自体は
+    避けられないが、対象外の位置は `next_u64()` のみで `Fraction` を構築しない。
+    複数列でも 1 パスで済ませる（extract_rows_exact と対称の設計）。
+    """
+    result: dict[int, list[Fraction]] = {c: [] for c in target_cols}
+    if not target_cols:
+        return result
+    gen = Xorshift64StarExact(seed)
+    for pos in range(n * n):
+        c = pos % n
+        if c in result:
+            result[c].append(gen.next_element_exact())
+        else:
+            gen.next_u64()
+    return result
+
+
 def round_half_even_to_f32(value: Fraction) -> float:
     """任意精度有理数 `value` を IEEE754 binary32（round-half-even）へ直接丸める。
 
@@ -252,8 +298,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-rows",
         type=int,
-        default=64,
-        help="解析する PARITY_DUMP 行数の上限（同一 idx の重複行は最初の 1 件のみ解析するため通常は既定で十分）",
+        default=None,
+        help=(
+            "解析するユニーク fail idx 件数の上限（重複排除後に適用。未指定なら無制限で"
+            "全ユニーク idx を解析する。入力の PARITY_DUMP 行数自体は常に全件読む——"
+            "同一 idx が複数 call にわたって重複するため行数を先に切り詰めると、"
+            "出現順が遅いユニーク idx を取りこぼしうるため）"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -262,32 +313,43 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     n = args.n
-    lines = sys.stdin.readlines()
-    rows = list(parse_dump_lines(lines, n))
-    if not rows:
+
+    # 同一 idx が複数 call にわたって重複するため、入力は必ず全行ストリーム
+    # 処理してユニーク idx 集合を抽出する（値は決定的想定なので最初の
+    # 出現を代表値として使う。`PARITY_DUMP_SUMMARY` 側の call 数・
+    # fail_count は呼び出し元が別途突合する）。行数を先に --max-rows で
+    # 切り詰めると、出現順が遅いユニーク idx を取りこぼす（イシュー
+    # #1197 レビュー指摘。README 記載の `--n 2048` だけのコマンドで
+    # 同梱の `truth-2048.txt`〈全 80 行・ユニーク idx 2 件〉を再現できな
+    # くなっていた）。--max-rows はユニーク idx 件数の上限としてのみ、
+    # 重複排除後に適用する。
+    line_count = 0
+    unique_by_idx: dict[int, ParityDumpRow] = {}
+    for r in parse_dump_lines(sys.stdin, n):
+        line_count += 1
+        if r.idx not in unique_by_idx:
+            if args.max_rows is not None and len(unique_by_idx) >= args.max_rows:
+                continue
+            unique_by_idx[r.idx] = r
+    if line_count == 0:
         print("ERROR: PARITY_DUMP 行が 1 件も見つからなかった", file=sys.stderr)
         return 2
-    if len(rows) > args.max_rows:
-        print(
-            f"WARN: PARITY_DUMP 行が {len(rows)} 件（--max-rows {args.max_rows} 超）。"
-            "先頭 --max-rows 件のみでユニーク idx を抽出する",
-            file=sys.stderr,
-        )
-        rows = rows[: args.max_rows]
 
-    # 同一 idx が複数 call にわたって重複するため、ユニークな idx 集合を
-    # 抽出する（値は決定的想定なので最初の出現を代表値として使う。
-    # `PARITY_DUMP_SUMMARY` 側の call 数・fail_count は呼び出し元が別途
-    # 突合する）。
-    unique_by_idx: dict[int, ParityDumpRow] = {}
-    for r in rows:
-        unique_by_idx.setdefault(r.idx, r)
+    print(
+        f"# n={n} ユニーク fail idx 件数={len(unique_by_idx)} "
+        f"(解析対象 PARITY_DUMP 行 {line_count} 件)"
+    )
 
-    print(f"# n={n} ユニーク fail idx 件数={len(unique_by_idx)} (解析対象 PARITY_DUMP 行 {len(rows)} 件)")
-
-    # A・B を厳密再構成（fill_vec_exact は要素ごとの厳密有理数）。
-    a_exact = Xorshift64StarExact(SEED_A).fill_vec_exact(n * n)
-    b_exact = Xorshift64StarExact(SEED_B).fill_vec_exact(n * n)
+    # A・B は必要な行・列だけを厳密有理数として抽出する（フルマトリクスを
+    # Fraction で保持すると n=2048 で約 839 万オブジェクト・許容上限
+    # n=8192 では約 1.34 億オブジェクトとなり実行不能になるため。イシュー
+    # #1197 レビュー指摘）。RNG は逐次生成のみ可能なため走査は避けられ
+    # ないが、不要な位置は `next_u64()` で状態のみ進めて Fraction 化を
+    # 省略する（`extract_rows_exact`/`extract_cols_exact`）。
+    needed_rows = {r.row for r in unique_by_idx.values()}
+    needed_cols = {r.col for r in unique_by_idx.values()}
+    a_rows = extract_rows_exact(SEED_A, n, needed_rows)
+    b_cols = extract_cols_exact(SEED_B, n, needed_cols)
 
     header = (
         f"{'idx':>10} {'row':>6} {'col':>6} {'exact':>14} {'f64_seq':>14} "
@@ -300,8 +362,8 @@ def main(argv: list[str] | None = None) -> int:
         rec = unique_by_idx[idx]
         row, col = rec.row, rec.col
 
-        a_row = a_exact[row * n : row * n + n]
-        b_col = [b_exact[k * n + col] for k in range(n)]
+        a_row = a_rows[row]
+        b_col = b_cols[col]
 
         # 厳密真値（有理数の完全和。丸め誤差ゼロ）。
         exact = sum((a * b for a, b in zip(a_row, b_col)), Fraction(0))
