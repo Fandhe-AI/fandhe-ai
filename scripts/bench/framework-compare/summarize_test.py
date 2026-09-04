@@ -1394,6 +1394,37 @@ class GemmPhasesSectionTests(unittest.TestCase):
         for run_label in ["run 1/4", "run 2/4", "run 3/4", "run 4/4"]:
             self.assertIn(f"CUDA / reuse / N=1024 / {run_label}", text)
 
+    def test_malformed_duplicate_index_does_not_reconstruct_as_valid_runs(self):
+        # codex-review 指摘（P0。PR #1195）: 旧 `_gemm_phases_split_runs`
+        # は `phase_index` の再出現を無条件に run 境界とみなしていたため、
+        # 完全な run（0..4）の直後に重複した末尾 index（4）と不完全な
+        # 残り（0..3）が続く壊れた入力を、最初の正常 run と
+        # 「4,0,1,2,3」（ソート後は完全な 0..4 に見える）という
+        # 2 つの「正常な」run に誤って再構成し、両方が
+        # `_gemm_phases_validate` を通過してしまっていた（`--strict` の
+        # fail-open）。本テストは同じ壊れた入力（[0,1,2,3,4,4,0,1,2,3]）
+        # を渡し、修正後は run 分割されず 1 run のまま
+        # `phase_index` 重複としてエラーになる（fail-closed）ことを固定
+        # する。
+        phases = summarize._GEMM_PHASES_REQUIRED_PHASES["reuse"]
+        indices = [0, 1, 2, 3, 4, 4, 0, 1, 2, 3]
+        rows = [
+            _gemm_phases_row(
+                "cuda", 1024, phases[idx], idx,
+                0.01 if phases[idx] == "iter_total" else 0.002,
+            )
+            for idx in indices
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_gemm_phases_invalid = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertTrue(has_gemm_phases_invalid)
+        self.assertIn("重複", buf.getvalue())
+        # 壊れた入力が「2 つの正常な run」として表示されてはならない
+        # （fail-open の再発防止）。
+        self.assertNotIn("run 2/2", text)
+
     def test_single_run_header_has_no_run_suffix(self):
         # run が 1 件のみの場合は従来どおりヘッダーに run 番号を付けない
         # （既存 JSONL・`test_valid_group_renders_table_in_phase_index_order`

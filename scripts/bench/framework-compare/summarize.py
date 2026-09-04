@@ -1943,7 +1943,7 @@ def _gemm_phases_groups(rows):
     return groups, skipped
 
 
-def _gemm_phases_split_runs(group_rows):
+def _gemm_phases_split_runs(group_rows, mode):
     """`_gemm_phases_groups` が返した 1 グループ（`(device, mode, size)` が
     同一）の行を、実行単位（1 回のハーネス起動が出力する
     phase 0..len(required)-1 の連番 1 セット）ごとに分割する。
@@ -1959,28 +1959,71 @@ def _gemm_phases_split_runs(group_rows):
     （Cursor Bugbot 指摘。イシュー #1182・PR #1195・
     `results/raw/results-dgx-gemm-phases-0.6.0-extra.jsonl` が実例）。
 
-    分割方針: 出現順を保ったまま、直前までの実行内で既に出現した
-    `phase_index` が再び現れた行から新しい実行として区切る
-    （`phase_index` が非負整数であることは呼び出し元 `_gemm_phases_groups`
-    が既に検証済み。ここでは値の重複判定のみ行う）。`phase_index` が
-    無い／不正な行は現在の実行にそのまま残し、`_gemm_phases_validate`
-    側の allowlist 検証に委ねる（誤って実行境界として扱わない）。
+    分割方針（fail-closed。codex-review 指摘。イシュー #1182・PR #1195）:
+    旧実装は `phase_index` の再出現を無条件に run 境界とみなしていた
+    ため、例えば完全な run（0..N-1）の直後に重複した末尾 index と
+    不完全な残り行が続く壊れた入力（ソートすると偶然もう一つの完全な
+    0..N-1 に見えてしまう）を 2 つの「正常な」run に再構成し、
+    `_gemm_phases_validate` を両方とも通過させ得た（重複・欠落を含む
+    外部 JSONL でも `--strict` が exit 0 になる fail-open。
+    security.md A03 の外部入力検証方針に反する）。これを避けるため、
+    新しい run は次の 2 条件を両方満たす場合にのみ開始する:
+      (a) 現在の行の `phase_index` が 0 である
+      (b) 直前までに集めた現在の run が `_GEMM_PHASES_REQUIRED_PHASES
+          [mode]` の必須 phase 名・順序・件数を完全一致で満たしている
+          （`_is_complete_run` で判定）
+    どちらか一方でも満たさない `phase_index` の重複は run 境界とせず
+    現在の run にそのまま残す。結果として `_gemm_phases_validate` の
+    `phase_index` 重複検査がエラーとして表面化する（無効データが
+    「正常な複数 run」に化けて `--strict` を通過することはない）。
+    `phase_index` が無い／不正な行も同様に現在の run へ残し、
+    `_gemm_phases_validate` 側の allowlist 検証に委ねる。
+
+    `mode` が `_GEMM_PHASES_REQUIRED_PHASES` に存在しない（未知の
+    mode）場合は run 境界を判定する基準（必須 phase 集合）が無いため
+    分割せず 1 run として扱う（`_gemm_phases_validate` 側の
+    mode 不明・phase 集合不一致判定に委ねる）。
 
     戻り値: [[row, ...], ...]（各要素が 1 実行分）
     """
+    required = _GEMM_PHASES_REQUIRED_PHASES.get(mode)
+    if required is None:
+        return [group_rows]
+
+    def _row_index(r):
+        idx = r.get("phase_index")
+        if _is_plain_number(idx) and not _non_integral(idx) and int(idx) >= 0:
+            return int(idx)
+        return None
+
+    def _is_complete_run(rows):
+        """`rows`（現在集めている run）が `required` の必須 phase 名・
+        順序・件数を完全一致で満たしているかを判定する。件数が異なる
+        時点で早期に False を返す（余剰行を含む run を「完了」と
+        誤判定しない）。
+        """
+        if len(rows) != len(required):
+            return False
+        indexed = []
+        for r in rows:
+            phase = r.get("phase")
+            idx = _row_index(r)
+            if idx is None or not _valid_phase_name(phase):
+                return False
+            indexed.append((idx, phase))
+        indexed.sort(key=lambda t: t[0])
+        if [i for i, _ in indexed] != list(range(len(required))):
+            return False
+        return tuple(p for _, p in indexed) == required
+
     runs = []
     current = []
-    seen_indices = set()
     for r in group_rows:
-        idx = r.get("phase_index")
-        idx_key = idx if _is_plain_number(idx) and not _non_integral(idx) and int(idx) >= 0 else None
-        if idx_key is not None and idx_key in seen_indices:
+        idx_key = _row_index(r)
+        if idx_key == 0 and current and _is_complete_run(current):
             runs.append(current)
             current = []
-            seen_indices = set()
         current.append(r)
-        if idx_key is not None:
-            seen_indices.add(idx_key)
     if current:
         runs.append(current)
     return runs
@@ -2122,7 +2165,7 @@ def _gemm_phases_section(rel, rows):
         # 単位へ分割してから 1 実行ずつ検証・表示する。単一実行のみの
         # 場合は `runs == [group_rows]` となり従来どおりヘッダーに
         # run 番号を付けない（既存 JSONL・テストとの表示互換を維持）。
-        runs = _gemm_phases_split_runs(group_rows)
+        runs = _gemm_phases_split_runs(group_rows, mode)
         multi_run = len(runs) > 1
         for run_index, run_rows in enumerate(runs, start=1):
             entries, invalid, iter_total_median, phase_set_reason = _gemm_phases_validate(run_rows, mode)
