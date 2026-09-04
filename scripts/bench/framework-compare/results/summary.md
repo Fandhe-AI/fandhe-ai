@@ -1392,11 +1392,10 @@ burn(wgpu) の Metal GEMM は N=512/1024/2048/4096 で計測不可（下記「�
   - CUDA GEMM（gemm/CUDA/N=256,512,1024,2048〈判定不能〉,4096）: 既存トラッカー #1031（open）
   - Metal GEMM（gemm/Metal/N=256〜4096）: 既存トラッカー #1037（open）
   - 学習・推論（train/infer の CPU/CUDA/Metal 全項目）: 既存トラッカー #1118（open）
-  - CPU GEMM（gemm/CPU/N=512〈環境 10 のみ未達〉,1024,2048）: 既存の CPU GEMM 個別トラッカー
-    なし（`docs/perf/cpu-gemm-candle-cpu-retune.md` に再チューニング検討はあるが未実装・未
-    Issue 化）。次回再計測とあわせた Issue 化の要否はユーザー判断待ち。本 PR では Issue 操作を
-    行わず `outOfScope` として引き継ぐ（`.claude/rules/out-of-scope-tracking.md` は新規 Issue
-    起票・既存 Issue へのコメント追記のいずれもユーザー承認を要求するため）
+  - CPU GEMM（gemm/CPU/N=512〈環境 10 のみ未達〉,1024,2048）: #1117 配下 #1148 で 5 回計測に
+    より再判定済み（環境 14〈DGX〉・環境 15〈M4 Max〉参照。両実機とも N=512/1024 は未達、
+    DGX N=2048 は candle 側要素誤差超過により判定不能、M4 Max N=2048 は未達）。詳細は
+    `docs/perf/cpu-gemm-candle-gate-remeasurement.md` を参照
 
 ## 環境 12: DGX Spark GB10（GEMM 目標達成ゲート #1031 の 5 回計測再計測・イシュー #1142）
 
@@ -1504,3 +1503,90 @@ burn(wgpu) の Metal GEMM は N=512/1024/2048/4096 で計測不可（下記「�
 1.0 倍には届かない。#1167/#1168 は `gemm metal` の NN 正方 GEMM 本番経路自体を変更していない
 ため、系統的な改善は確認されなかった。詳細な突合・原因・ユーザー判断事項は
 `docs/perf/metal-gemm-candle-gate-remeasurement.md`（イシュー #1147）を参照。
+
+
+## 環境 14: DGX Spark GB10（GEMM 目標達成ゲート #1117 の 5 回計測再計測・イシュー #1148。CPU device 拡張）
+
+- ノード: 環境 2・環境 6・環境 8・環境 10・環境 12 と同一ノード（実ホスト名は
+  `docs/real-hardware-verification-env.local.md` 方式のローカル管理）
+- ツールチェーン: rustc 1.97.0 (2d8144b78 2026-07-07) / cargo 1.97.0 (c980f4866 2026-06-30)（実測）
+- CPU: Grace（Cortex-X925 ×10 + Cortex-A725 ×10、計 20 論理コア）
+- 対象: GEMM の N=512/1024/2048（fandhe-ai reuse・candle fresh。加えて fandhe-ai fresh を
+  参考記録）のみ。`run_gemm_gate.sh cpu <label>`（本 PR で cuda/metal に続き CPU device 対応
+  拡張。呼び出し面は device 別薄い wrapper `run_gemm_gate_cpu.sh`〈新規〉）による 5 回計測
+  専用のスイープ
+- **単一系列**（正式系列 `fandhe-ai =0.6.0` のみ。詳細は
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §3）
+- **計測方式**: 共有作業ディレクトリ（`~/work/rust-ai-library-run`）に他の並列実行中セッションが
+  更新した形跡を確認したため、本 Issue 専用の隔離ディレクトリ（`~/work/fc-1148/`。計測後に削除
+  済み）へ必要なファイルのみ rsync して計測した（`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §2 参照）
+- 生データ: `results/raw/results-dgx-cpu-gemm-gate-0.6.0.jsonl`（45 行）、実行ログは
+  `results/run_gemm_gate_cpu-dgx-0.6.0.log`
+
+### 環境 14 の #1117 ゲート判定（5 回計測。`compare_gemm_gate.py --device cpu`）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s | 判定 | fandhe-ai fresh 中央値（参考。n=5） |
+| --- | --- | --- | --- | --- | --- | --- |
+| 512 | 2.376 ms（1.333–2.706 ms） | 1.805 ms | 0.760 | 113.0 | 未達 | 2.507 ms |
+| 1024 | 7.085 ms（6.818–7.419 ms） | 5.604 ms | 0.791 | 303.1 | 未達 | 7.891 ms |
+| 2048 | - | - | - | - | 判定不能（candle 無効データ。下記参照） | - |
+
+### 環境 14 のデータ有効性（N=2048 candle 無効データ）
+
+- fandhe-ai 側は全 45 run（reuse 15・candle fresh 15・fandhe fresh 15）で
+  `parity_fail_count=0`。candle 側 N=2048 fresh のみ 5 run すべてで `parity_fail_count=2,
+  parity_total=4194304, parity_max_abs_err=3.814697e-05, parity_max_rel_err=3.944416e-01`
+  （run 間で完全に決定的に一致。環境 10 の単発計測値とも一致）。原因は candle-core 0.11.0 の
+  CPU GEMM カーネル側にあり fandhe-ai 側は無関係。詳細な分析は
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §5 を参照。tolerance は緩めていない
+
+### 環境 14 の #1117 ゲート判定（総括）
+
+**未達 2 件（N=512・N=1024）・判定不能 1 件（N=2048）。正式系列で #1117「reuse で candle
+超え」は未達成。** 詳細な突合・原因・ユーザー判断事項は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md`（イシュー #1148）を参照。
+
+## 環境 15: Apple M4 Max（GEMM 目標達成ゲート #1117 の 5 回計測再計測・イシュー #1148。CPU device 拡張）
+
+- ノード: 環境 3・環境 7・環境 9・環境 11・環境 13 と同一ノード（実ホスト名は
+  `docs/real-hardware-verification-env.local.md` 方式のローカル管理。ローカル直接実行のため
+  rsync 転送は不要）
+- ツールチェーン: rustc 1.96.0 (ac68faa20 2026-05-25) / cargo 1.96.0 (30a34c682 2026-05-25)（実測）
+- CPU: Apple M4 Max（P コア 12・E コア 4）
+- 対象: GEMM の N=512/1024/2048（fandhe-ai reuse・candle fresh。加えて fandhe-ai fresh を
+  参考記録）のみ。`run_gemm_gate.sh cpu <label>` による 5 回計測専用のスイープ
+- **単一系列**（正式系列 `fandhe-ai =0.6.0` のみ。詳細は
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §3）
+- 負荷状態: 計測実行中、本マシンでは並列稼働する他の Claude Code エージェントセッションが
+  複数存在した（`uptime` load average: 計測前 7.49/5.37/4.17、計測後 9.30/6.00/4.43）。
+  計測専有ではないため GFLOP/s の絶対値には背景負荷によるノイズが乗っている可能性がある
+- 生データ: `results/raw/results-m4max-cpu-gemm-gate-0.6.0.jsonl`（45 行）、実行ログは
+  `results/run_gemm_gate_cpu-m4max-0.6.0.log`
+
+### 環境 15 の #1117 ゲート判定（5 回計測。`compare_gemm_gate.py --device cpu`）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s | 判定 | fandhe-ai fresh 中央値（参考。n=5） |
+| --- | --- | --- | --- | --- | --- | --- |
+| 512 | 744.0 µs（720.4–771.1 µs） | 699.1 µs | 0.940 | 360.8 | 未達 | 727.8 µs |
+| 1024 | 3.787 ms（3.667–3.864 ms） | 2.749 ms | 0.726 | 567.0 | 未達 | 3.494 ms |
+| 2048 | 24.098 ms（23.154–24.730 ms） | 17.694 ms | 0.734 | 712.9 | 未達 | 23.120 ms |
+
+### 環境 15 のデータ有効性
+
+- 全 45 run で `parity_fail_count=0`・checksum が同一 N で fandhe-ai/candle 間一致。
+  `compare_gemm_gate.py --device cpu` は 3 size とも「判定不能」を出さず確定判定（未達）。
+  詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §5 を参照。tolerance は緩めていない
+
+### 環境 15 の #1117 ゲート判定（総括）
+
+**未達 3 件（N=512・N=1024・N=2048）。正式系列で #1117「reuse で candle 超え」は未達成。**
+未達原因分析（計測境界固定費・並列化・マイクロカーネル効率・packing）は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §8 に記録した。詳細な突合・ユーザー判断
+事項は同ドキュメント（イシュー #1148）を参照。
+
+### 目標達成ゲート総括（CPU GEMM 追跡行の更新）
+
+環境 10/11 の「目標達成ゲート総括」節に記載していた CPU GEMM 追跡行は、#1117 配下 #1148 で
+5 回計測により再判定した（本節・環境 14/15 参照）。DGX Spark・M4 Max とも N=512/1024 は未達成、
+DGX N=2048 は candle 側要素誤差超過により判定不能、M4 Max N=2048 は未達成が確定した。

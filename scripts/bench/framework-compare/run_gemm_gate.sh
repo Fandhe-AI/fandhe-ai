@@ -1,8 +1,14 @@
 #!/bin/bash
-# GEMM 目標達成ゲート（CUDA: #1031／Metal: #1037）の 5 回計測スイープ
-# device 汎用版（イシュー #1142 の CUDA 専用実装を #1147 で Metal 対応汎用化。
-# 呼び出し面は device 別薄い wrapper `run_gemm_gate_cuda.sh`／
-# `run_gemm_gate_metal.sh` に委ねる。本体ロジックは cuda/metal で共通）。
+# GEMM 目標達成ゲート（CUDA: #1031／Metal: #1037／CPU: #1117）の 5 回計測
+# スイープ device 汎用版（イシュー #1142 の CUDA 専用実装を #1147 で Metal
+# 対応汎用化・#1148 で CPU 対応拡張。呼び出し面は device 別薄い wrapper
+# `run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh`／`run_gemm_gate_cpu.sh`
+# に委ねる。本体ロジックは cuda/metal/cpu で共通）。
+#
+# cpu の対象形状は N=512/1024/2048（cuda/metal は N=1024/2048/4096 のまま
+# 不変）。cpu のみ `bench-fandhe gemm cpu <N> fresh` も各 run 内で追加起動
+# する（環境 10/11 単発 fresh 計測との連続性説明用の参考記録。判定は
+# `compare_gemm_gate.py` 側で reuse vs candle fresh のみを見る。#1148）。
 #
 # `run_all_cuda.sh`/`run_all.sh` は GEMM を N ごとに 1 回しか起動しないため、
 # そのままでは coding-rust.md「ベンチは 5 回計測の中央値」を満たせない。本
@@ -57,24 +63,44 @@ LABEL=${2:-}
 # A03 インジェクション対策: device は allowlist（cuda/metal）、ラベルは
 # ファイル名へ直接埋め込むため英数字・`._-` のみを許可する allowlist で
 # 検証する（run_ab_train_cuda.sh と同じ方針）。
-if [[ "$DEVICE" != "cuda" && "$DEVICE" != "metal" ]]; then
-  echo "usage: $0 <device: cuda|metal> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
+if [[ "$DEVICE" != "cuda" && "$DEVICE" != "metal" && "$DEVICE" != "cpu" ]]; then
+  echo "usage: $0 <device: cuda|metal|cpu> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
   echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列）" >&2
-  echo "  通常は device 別 wrapper（run_gemm_gate_cuda.sh／run_gemm_gate_metal.sh）経由で呼ぶ" >&2
+  echo "  通常は device 別 wrapper（run_gemm_gate_cuda.sh／run_gemm_gate_metal.sh／run_gemm_gate_cpu.sh）経由で呼ぶ" >&2
   exit 1
 fi
 if [[ -z "$LABEL" || ! "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  echo "usage: $0 <device: cuda|metal> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
+  echo "usage: $0 <device: cuda|metal|cpu> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
   echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列）" >&2
   exit 1
 fi
 
 # device ごとのノードタグ（出力ファイル名の識別子。cuda=dgx〈DGX Spark
-# GB10〉／metal=m4max〈Apple M4 Max。イシュー #1147〉）。
+# GB10〉／metal=m4max〈Apple M4 Max。イシュー #1147〉／cpu=dgx-cpu・m4max-cpu
+# 〈同一ホストの CPU 経路計測。両実機で走るため `uname -s` で判定する。
+# それ以外（想定外 OS）は fail-closed で終了する。イシュー #1148〉）。
 if [[ "$DEVICE" == "cuda" ]]; then
   NODE_TAG="dgx"
-else
+elif [[ "$DEVICE" == "metal" ]]; then
   NODE_TAG="m4max"
+else
+  case "$(uname -s)" in
+    Linux) NODE_TAG="dgx-cpu" ;;
+    Darwin) NODE_TAG="m4max-cpu" ;;
+    *)
+      echo "ERROR: device=cpu は Linux（DGX Spark 側）／Darwin（M4 Max 側）のみ対応。uname -s=$(uname -s)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# 対象形状（device 別。cuda/metal は #1031/#1037 から不変の N=1024/2048/4096。
+# cpu は #1117 の対象形状 N=512/1024/2048。compare_gemm_gate.py
+# `_SIZES_BY_DEVICE` と同一集合を維持すること。イシュー #1148）。
+if [[ "$DEVICE" == "cpu" ]]; then
+  SIZES=(512 1024 2048)
+else
+  SIZES=(1024 2048 4096)
 fi
 
 OUT="results/raw/results-${NODE_TAG}-gemm-gate-${LABEL}.jsonl"
@@ -375,13 +401,24 @@ if [[ "${GEMM_GATE_SKIP_BUILD:-0}" != "1" ]]; then
 
   # bench-candle のビルド flag は device 別（cuda は `--no-default-features
   # --features cuda`。metal は Cargo.toml の既定 feature が `metal` のため
-  # 追加 flag 不要。イシュー #1147）。
+  # 追加 flag 不要。イシュー #1147）。device=cpu はホスト OS で選ぶ
+  # （Linux〈DGX Spark〉→ cuda feature ビルド、Darwin〈M4 Max〉→ 既定
+  # feature。理由: (a) 環境 10/11 の CPU 行と同一構成の binary で連続性を
+  # 保つ、(b) 同一ノードの cuda/metal ゲートが既にビルド済みの target
+  # キャッシュを再利用できる。candle の CPU GEMM 経路（gemm crate 呼び出し）
+  # は GPU feature の有無に依存しないため計測対象には影響しない。イシュー
+  # #1148）。
   echo "== build bench-candle (${DEVICE}) =="
+  BENCH_CANDLE_USE_CUDA_FEATURE=0
   if [[ "$DEVICE" == "cuda" ]]; then
-    BUILD_OK=1
+    BENCH_CANDLE_USE_CUDA_FEATURE=1
+  elif [[ "$DEVICE" == "cpu" && "$(uname -s)" == "Linux" ]]; then
+    BENCH_CANDLE_USE_CUDA_FEATURE=1
+  fi
+  BUILD_OK=1
+  if [[ "$BENCH_CANDLE_USE_CUDA_FEATURE" == "1" ]]; then
     cargo build --release -p bench-candle --no-default-features --features cuda 2>build-err.tmp || BUILD_OK=0
   else
-    BUILD_OK=1
     cargo build --release -p bench-candle 2>build-err.tmp || BUILD_OK=0
   fi
   if [[ "$BUILD_OK" != "1" ]]; then
@@ -409,35 +446,73 @@ fi
 # 〜計測の間に別プロセスが binary をすり替えた場合も検出する。#1166）。
 verify_manifest
 
-# GPU/熱状態のスナップショットを実行ログへ残す（GPU 競合検出用の参考情報。
+# GPU/CPU・熱状態のスナップショットを実行ログへ残す（競合検出用の参考情報。
 # 判定はしない。競合が疑われる run は人間・エージェントが確認して破棄する）。
 # device 別に取得手段が異なる: cuda は `nvidia-smi`、metal は `sudo` 不要の
 # `pmset -g therm`（熱状態）・`uptime`（負荷平均）・`sysctl` の機種名
 # （`docs/perf/metal-bench-noise-protocol.md`「熱・電源状態の記録」節準拠。
-# `powermetrics` 等 sudo 必須コマンドは使わない）。
+# `powermetrics` 等 sudo 必須コマンドは使わない）。cpu は host OS 別
+# （Linux〈DGX Spark〉: `nproc`・`/proc/loadavg`・`uptime`。Darwin〈M4 Max〉:
+# `sysctl` の機種名・P/E コア構成・`pmset -g therm`・`uptime`）に加え、両者
+# 共通で `RAYON_NUM_THREADS`（未設定＝両フレームワーク既定で全コア使用）を
+# 記録する（イシュー #1148。並列度スイープ分析〈Phase 3b〉の前提情報）。
 echo "== ${DEVICE} status (before) =="
 if [[ "$DEVICE" == "cuda" ]]; then
   nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader 2>&1 || true
   nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>&1 || true
-else
+elif [[ "$DEVICE" == "metal" ]]; then
   sysctl -n machdep.cpu.brand_string 2>&1 || true
   pmset -g therm 2>&1 || true
   uptime 2>&1 || true
+else
+  echo "RAYON_NUM_THREADS=${RAYON_NUM_THREADS:-<未設定=全コア既定>}"
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    nproc 2>&1 || true
+    cat /proc/loadavg 2>&1 || true
+    uptime 2>&1 || true
+    lscpu 2>&1 | head -20 || true
+  else
+    sysctl -n machdep.cpu.brand_string 2>&1 || true
+    sysctl hw.ncpu hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu 2>&1 || true
+    uptime 2>&1 || true
+    pmset -g therm 2>&1 || true
+  fi
 fi
 
-for run_i in 1 2 3 4 5; do
-  for n in 1024 2048 4096; do
-    run bench-fandhe gemm "$DEVICE" "$n" reuse
-    run bench-candle gemm "$DEVICE" "$n" fresh
+if [[ "$DEVICE" == "cpu" ]]; then
+  # cpu のみ: reuse（正式判定の分子）・candle fresh（正式判定の分母）に
+  # 加え fandhe fresh（判定に使わない参考記録。§4.1/README 参照）も同一
+  # run 内で交互起動し、熱・負荷状態を 3 起動間で揃える（イシュー #1148）。
+  for run_i in 1 2 3 4 5; do
+    for n in "${SIZES[@]}"; do
+      run bench-fandhe gemm "$DEVICE" "$n" reuse
+      run bench-candle gemm "$DEVICE" "$n" fresh
+      run bench-fandhe gemm "$DEVICE" "$n" fresh
+    done
   done
-done
+else
+  for run_i in 1 2 3 4 5; do
+    for n in "${SIZES[@]}"; do
+      run bench-fandhe gemm "$DEVICE" "$n" reuse
+      run bench-candle gemm "$DEVICE" "$n" fresh
+    done
+  done
+fi
 
 echo "== ${DEVICE} status (after) =="
 if [[ "$DEVICE" == "cuda" ]]; then
   nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader 2>&1 || true
-else
+elif [[ "$DEVICE" == "metal" ]]; then
   pmset -g therm 2>&1 || true
   uptime 2>&1 || true
+else
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    cat /proc/loadavg 2>&1 || true
+    uptime 2>&1 || true
+  else
+    pmset -g therm 2>&1 || true
+    uptime 2>&1 || true
+  fi
 fi
 
 # 計測ループが完走し、かつ全 run が成功した（ANY_FAILED == 0）場合にのみ、
