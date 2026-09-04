@@ -85,9 +85,10 @@ fn tolerance_constants_are_pinned() {
 }
 
 /// fixture 自体の妥当性検査: 各行の `baseline_fail_count <= total`・
-/// `total == m*n`・7 経路（`WmmaF16` を含む。codex-review P2 指摘対応・
+/// `total == m*n`・8 経路（`WmmaF16` を含む。codex-review P2 指摘対応・
 /// イシュー #1106 PR #1124。`MmaTf32`・`MmaTf32VsWmmaStaged` はイシュー
-/// #1122 の再割り当てで追加）すべてに 1 行以上存在することを確認する。
+/// #1122 の再割り当てで追加。`SpecializedMmaF16` はイシュー #1161 で追加）
+/// すべてに 1 行以上存在することを確認する。
 /// fixture 値の入力ミス（転記ミス等）を CI で機械的に検出する。
 ///
 /// `baseline_max_abs_diff_ceiling`/`baseline_max_rel_err_ceiling`
@@ -142,6 +143,7 @@ fn baseline_fixture_is_self_consistent() {
         ParityPath::WmmaTf32Staged,
         ParityPath::MmaF16,
         ParityPath::WmmaF16,
+        ParityPath::SpecializedMmaF16,
         ParityPath::MmaTf32,
         ParityPath::MmaTf32VsWmmaStaged,
     ] {
@@ -203,6 +205,7 @@ fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
         ParityPath::WmmaTf32Staged,
         ParityPath::MmaF16,
         ParityPath::WmmaF16,
+        ParityPath::SpecializedMmaF16,
         ParityPath::MmaTf32,
         ParityPath::MmaTf32VsWmmaStaged,
     ] {
@@ -453,9 +456,17 @@ fn parity_baselines_do_not_regress() {
         // `tests/mma_tf32_vs_wmma_tf32_staged.rs::
         // mma_tf32_matches_wmma_tf32_staged_across_shapes`／
         // `..._k4096_stress` が同一 baseline 行を直接検査済み。
+        // `ParityPath::SpecializedMmaF16`（イシュー #1161 で追加）も同じ
+        // 理由でここでは検査しない: `run_specialized_mma_f16` は
+        // `internal-diagnostics` feature ゲート下にあり、`required-features`
+        // を持たない本ファイルからは到達不能。記録元
+        // `tests/specialized_mma_parity.rs::
+        // specialized_mma_f16_matches_default_and_reference_across_shapes`
+        // が同一 baseline 行を直接検査済みのため重複検査しない。
         if baseline.path == ParityPath::WmmaTf32
             || baseline.path == ParityPath::WmmaTf32Opt
             || baseline.path == ParityPath::WmmaF16
+            || baseline.path == ParityPath::SpecializedMmaF16
             || baseline.path == ParityPath::MmaTf32
             || baseline.path == ParityPath::MmaTf32VsWmmaStaged
         {
@@ -472,6 +483,7 @@ fn parity_baselines_do_not_regress() {
                 ParityPath::WmmaTf32
                 | ParityPath::WmmaTf32Opt
                 | ParityPath::WmmaF16
+                | ParityPath::SpecializedMmaF16
                 | ParityPath::MmaTf32
                 | ParityPath::MmaTf32VsWmmaStaged => {
                     unreachable!("continue で除外済み")

@@ -20,11 +20,27 @@
 //!    （同一バックエンド内の実装詳細比較のため tolerance の対象外。
 //!    `.claude/rules/coding-rust.md` の「バックエンド間数値一致テストの
 //!    許容誤差を単独で緩和しない」契約に抵触しない）。
-//! 2. **CPU 参照との複合判定**（4096³・(512,64,4096) を除く形状）:
+//! 2. **CPU 参照との判定**（4096³・(512,64,4096) を除く形状。spec REQ-2
+//!    「2026-09-02 追記」の形状別判定方式・イシュー #1161）:
 //!    `cpu_cuda_mma_parity.rs::assert_mma_f16_parity` と同一手順
-//!    （f16→f32→`fandhe_ai_backend_cpu::matmul_reference_fma`→f16 丸め→f32、
-//!    判定は `fandhe_ai_backend_cpu::assert_parity` 一本。tolerance 定数は一切
-//!    変更しない）。
+//!    （f16→f32→`fandhe_ai_backend_cpu::matmul_reference_fma`→f16 丸め→f32）で
+//!    値を算出したうえで、判定方式を形状ごとに分岐する。GB10 実機 sweep
+//!    （イシュー #1159・PR #1181・`docs/perf/logs/
+//!    specialized-mma-f16-sweep-1159/`・2 回実行で全値完全一致）の結果、
+//!    CPU 参照検査対象 8 形状 × 3 プリセットのうち `(256, 512, 1024)` の
+//!    3 プリセットのみ恒常非ゼロ fail（`fail_count=30/131072`）を示した。
+//!    厳密ゼロ fail 判定が成立する 7 形状（`(64,128,32)`・`(128,256,128)`・
+//!    `(40,24,72)`・`(65,136,40)`・`(63,120,24)`・`(200,264,104)`・
+//!    `(1,136,40)`）は引き続き `fandhe_ai_backend_cpu::assert_parity`（厳密
+//!    ゼロ fail 判定）を維持し、`(256,512,1024)` のみ
+//!    `common::parity_baseline::assert_no_parity_regression`（実測 baseline
+//!    非後退方式・`ParityPath::SpecializedMmaF16`）へ切り替える
+//!    （`WmmaTf32Opt`〈#1106・PR #1124〉・`MmaTf32VsWmmaStaged`〈#1122・
+//!    PR #1133〉と同型の形状別分岐パターン）。tolerance 定数
+//!    （`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）・カーネル実装は
+//!    一切変更しない。baseline 行の承認記録: **ユーザー承認 2026-09-04**。
+//!    PR #1194 の issue コメントおよびイシュー #1161 のコメントに、承認値
+//!    （`fail_count` 30/131072 等 4 項目）と判定方式切替の承認を記録済み。
 //! 3. **fail-closed 検査**（負系）: `STATIC_MNK` でコンパイルしたカーネル
 //!    を不一致形状で起動すると `CudaError::InvalidKernelConfig` になる
 //!    こと（`validate_launch_shape` の実効性）。
@@ -46,6 +62,9 @@
 //! する（`.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]`
 //! で分離」）。
 
+mod common;
+
+use common::parity_baseline::{BASELINES, ParityPath, assert_no_parity_regression};
 use fandhe_ai_backend_cuda::{
     CompiledDims, CudaDevice, CudaError, CudaMmaGemm, SpecializedMmaKernelHandle,
     run_specialized_mma_f16,
@@ -241,10 +260,14 @@ fn specialized_mma_f16_matches_default_and_reference_across_shapes() {
             panic!("shape (m={m}, n={n}, k={k}): default run_f16 failed: {err}")
         });
 
-        for compiled in [
-            CompiledDims::DYNAMIC_ALL,
-            CompiledDims::STATIC_NK,
-            CompiledDims::STATIC_MNK,
+        // `CompiledDims` の `Debug` はプリセット名（`DYNAMIC_ALL` 等）を
+        // 出力しない（`CompiledDims { m: false, … }` 形式）ため、baseline
+        // fixture の `context` 文字列検索キー（下記 §「(256,512,1024) の
+        // baseline 検索」参照）用にラベルをローカルで対応付ける。
+        for (compiled, label) in [
+            (CompiledDims::DYNAMIC_ALL, "DYNAMIC_ALL"),
+            (CompiledDims::STATIC_NK, "STATIC_NK"),
+            (CompiledDims::STATIC_MNK, "STATIC_MNK"),
         ] {
             let specialized_c = run_specialized_mma_f16(&device, compiled, &a, &b, m, n, k)
                 .unwrap_or_else(|err| {
@@ -265,11 +288,42 @@ fn specialized_mma_f16_matches_default_and_reference_across_shapes() {
                 let c_ref_rounded = cpu_reference_f32(&a, &b, m, n, k);
                 let c_specialized_f32: Vec<f32> =
                     specialized_c.iter().map(|x| x.to_f32()).collect();
-                fandhe_ai_backend_cpu::assert_parity(
-                    &format!("specialized mma_f16 compiled={compiled:?} shape m={m} n={n} k={k}"),
-                    &c_specialized_f32,
-                    &c_ref_rounded,
-                );
+
+                // (256, 512, 1024) の baseline 検索: #1159 sweep で他 7
+                // 形状はゼロ fail 成立を実機確認済みだが、本形状のみ
+                // 恒常非ゼロ fail（TF32/f16 丸め由来の推定。ファイル冒頭
+                // コメント「2」参照）のため非後退方式（spec REQ-2
+                // 「2026-09-02 追記」項目 1・2）で検査する。
+                if (m, n, k) == (256, 512, 1024) {
+                    let baseline = BASELINES
+                        .iter()
+                        .find(|b| {
+                            b.path == ParityPath::SpecializedMmaF16
+                                && (b.m, b.n, b.k) == (m, n, k)
+                                && b.context.contains(label)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "SpecializedMmaF16 の 256x512x1024 {label} baseline 行が \
+                                 存在しません"
+                            )
+                        });
+                    assert_eq!(
+                        baseline.seed, seed,
+                        "baseline の seed がテストループの seed と一致しません"
+                    );
+                    let report = fandhe_ai_backend_cpu::compare(&c_specialized_f32, &c_ref_rounded)
+                        .expect("shape must match baseline fixture");
+                    assert_no_parity_regression(baseline.context, &report, baseline);
+                } else {
+                    fandhe_ai_backend_cpu::assert_parity(
+                        &format!(
+                            "specialized mma_f16 compiled={compiled:?} shape m={m} n={n} k={k}"
+                        ),
+                        &c_specialized_f32,
+                        &c_ref_rounded,
+                    );
+                }
             }
         }
     }
