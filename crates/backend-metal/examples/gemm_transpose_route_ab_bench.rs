@@ -195,6 +195,27 @@ mod macos_impl {
         all_within_gate
     }
 
+    /// [`measure_route_ab_cell`] の成功時の戻り値。`spread_a`/`spread_b`
+    /// を呼び出し元（`phase2_route_ab`）の総括判定へ伝える——本 example の
+    /// ヘッダ doc comment が約束する「安定性ゲート超過セルが残れば
+    /// `verdict=undetermined`」は、フェーズ 1 の対照カーネルだけでなく
+    /// フェーズ 2 の A/B 計測自体のラウンド間ばらつきにも適用される契約
+    /// のため、比だけでなく spread も呼び出し元へ返す必要がある。
+    struct CellResult {
+        b_over_a_tflops: f64,
+        spread_a: f64,
+        spread_b: f64,
+    }
+
+    /// フェーズ 2 総括で安定性ゲート超過セルを記録する行（`Vec` の要素型が
+    /// clippy `type_complexity` に触れるタプルにならないよう構造体化）。
+    struct GateExceededCell {
+        shape: (usize, usize, usize),
+        pattern: &'static str,
+        spread_a: f64,
+        spread_b: f64,
+    }
+
     /// 転置パターン（NT/TN/TT）1 種・1 形状について A（classic strided）/
     /// B（strided tiled variant）を [`run_ab`] で interleaved 計測する。
     /// 戻り値は B が `Err(StridedTiledIneligible)` を返した場合 `None`
@@ -218,7 +239,7 @@ mod macos_impl {
         pattern_label: &str,
         ab_config: &AbConfig,
         measurement_config: &MeasurementConfig,
-    ) -> Option<f64> {
+    ) -> Option<CellResult> {
         let mut rng = Xorshift64Star::new(SEED);
         let a_logical = rng.fill_vec(m * k);
         let b_logical = rng.fill_vec(k * n);
@@ -317,7 +338,11 @@ mod macos_impl {
             cfg.bm, cfg.bn, cfg.bk, cfg.wm, cfg.wn, result.spread_a, result.spread_b,
         );
 
-        Some(ratio)
+        Some(CellResult {
+            b_over_a_tflops: ratio,
+            spread_a: result.spread_a,
+            spread_b: result.spread_b,
+        })
     }
 
     /// フェーズ 2: 全 10 形状 × NT/TN/TT（計 30 セル）の A/B を計測し、
@@ -331,8 +356,13 @@ mod macos_impl {
             .expect("ROUNDS は偶数固定のため AbConfig::new は失敗しない");
         let measurement_config = MeasurementConfig::default();
 
+        // 安定性ゲートの値自体は `bench_harness::ab::STABILITY_SPREAD_GATE`
+        // を単一真実源とする（`phase1_stability_selfcheck` と同じ判断）。
+        const SPREAD_GATE: f64 = bench_harness::ab::STABILITY_SPREAD_GATE;
+
         let mut ratios: Vec<((usize, usize, usize), &'static str, f64)> = Vec::new();
         let mut skipped: Vec<((usize, usize, usize), &'static str)> = Vec::new();
+        let mut gate_exceeded: Vec<GateExceededCell> = Vec::new();
 
         for (m, n, k) in shapes() {
             for (trans_a, trans_b, label) in
@@ -350,7 +380,24 @@ mod macos_impl {
                     &ab_config,
                     &measurement_config,
                 ) {
-                    Some(ratio) => ratios.push(((m, n, k), label, ratio)),
+                    Some(cell) => {
+                        // 本 example のヘッダ doc comment（モジュール冒頭）が
+                        // 約束する「安定性ゲート超過セルが残れば
+                        // verdict=undetermined」契約: フェーズ 2 の各セル自体
+                        // の spread も判定材料に含める（フェーズ 1 の対照
+                        // カーネルだけを見ると、A/B 本計測自体がノイズで
+                        // 揺れているセルを route_ok/route_ng へ fail-open で
+                        // 倒してしまう）。
+                        if cell.spread_a > SPREAD_GATE || cell.spread_b > SPREAD_GATE {
+                            gate_exceeded.push(GateExceededCell {
+                                shape: (m, n, k),
+                                pattern: label,
+                                spread_a: cell.spread_a,
+                                spread_b: cell.spread_b,
+                            });
+                        }
+                        ratios.push(((m, n, k), label, cell.b_over_a_tflops));
+                    }
                     None => skipped.push(((m, n, k), label)),
                 }
             }
@@ -358,7 +405,7 @@ mod macos_impl {
 
         let below_threshold: Vec<_> = ratios.iter().filter(|(_, _, ratio)| *ratio < 1.0).collect();
 
-        let verdict = if !skipped.is_empty() {
+        let verdict = if !skipped.is_empty() || !gate_exceeded.is_empty() {
             "undetermined"
         } else if below_threshold.is_empty() {
             "route_ok"
@@ -372,16 +419,24 @@ mod macos_impl {
 
         println!("--- フェーズ 2 総括 ---");
         println!(
-            "cells_measured={} cells_skipped={} cells_below_threshold={}",
+            "cells_measured={} cells_skipped={} cells_below_threshold={} cells_gate_exceeded={}",
             ratios.len(),
             skipped.len(),
-            below_threshold.len()
+            below_threshold.len(),
+            gate_exceeded.len()
         );
         if let Some(((m, n, k), label, ratio)) = min_ratio {
             println!("min_b_over_a_tflops={ratio:.4} at shape=({m},{n},{k}) pattern={label}");
         }
         for ((m, n, k), label) in &skipped {
             println!("skipped_cell shape=({m},{n},{k}) pattern={label}");
+        }
+        for cell in &gate_exceeded {
+            let (m, n, k) = cell.shape;
+            let (label, spread_a, spread_b) = (cell.pattern, cell.spread_a, cell.spread_b);
+            println!(
+                "gate_exceeded_cell shape=({m},{n},{k}) pattern={label} spread_a={spread_a:.4} spread_b={spread_b:.4}"
+            );
         }
         for ((m, n, k), label, ratio) in &below_threshold {
             println!(
@@ -392,13 +447,19 @@ mod macos_impl {
             "verdict={verdict} ({})",
             match verdict {
                 "route_ok" => {
-                    "全形状 × NT/TN/TT で B/A(TFLOPS) >= 1.0。結線可（#1187 で \
-                     dispatch_strided_bias_act_prepared への自動ルーティングを実装しうる）"
+                    "全形状 × NT/TN/TT で B/A(TFLOPS) >= 1.0 かつ全セル spread が \
+                     gate 内。結線可（#1187 で dispatch_strided_bias_act_prepared \
+                     への自動ルーティングを実装しうる）"
                 }
                 "route_ng" => {
-                    "1 セル以上で B/A(TFLOPS) < 1.0。全形状基準未達のため現状の判断基準では結線不可"
+                    "1 セル以上で B/A(TFLOPS) < 1.0（かつ全セル spread は gate 内）。\
+                     全形状基準未達のため現状の判断基準では結線不可"
                 }
-                _ => "skip セルが残っており判定不可（適格性ゲート不成立セルあり）",
+                _ => {
+                    "skip セルまたは spread gate 超過セルが残っており判定不可\
+                     （適格性ゲート不成立、またはラウンド間ばらつきが大きく \
+                     計測値を信頼できないセルがある）"
+                }
             }
         );
         println!(

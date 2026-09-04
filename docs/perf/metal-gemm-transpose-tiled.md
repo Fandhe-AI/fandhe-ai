@@ -101,7 +101,9 @@ select_for_device` が選ぶ構成——`dispatch_auto` の本番既定経路と
 - 機種・OS: §1 と同一（Apple M4 Max・macOS 26.6.2）
 - 実行日: 2026-09-04
 - 生ログ・env_info: `docs/perf/logs/metal-gemm-transpose-route-ab-1186/`
-  （`route_ab_run1.log` は最終実行の stdout そのまま。`env_info.txt` に
+  （`route_ab_run1.log` は最終実行の stdout+stderr そのまま——`cargo run`
+  のビルド出力〈本体と無関係な `backend-cuda` の未使用コード警告を含む。
+  本 PR の変更とは無関係な既存事象〉が先頭に混在する。`env_info.txt` に
   実行前後の `pmset -g therm`／`uptime` を記録）
 
 ### 5.2 結果: フェーズ 1（安定性セルフチェック）が不成立・判定不可
@@ -148,8 +150,11 @@ A/B 計測はこのゲートを全サイズで通過しない限り実行しな�
 （イシュー #1186 本文）を満たすかどうかは実測できていない。**
 
 実装計画の fail-closed 方針（安定性ゲート不成立が解消しなければ
-「判定不可」を記録し結線可否を確定しない）に従い、本 PR では
-**`verdict=undetermined`** として記録する。`MetalGemm::
+「判定不可」を記録し結線可否を確定しない）に従い、本ドキュメントでは
+**`verdict=undetermined`** として記録する（`gemm_transpose_route_ab_bench.rs`
+自体はフェーズ 2 の `verdict=` 行を出力していない——フェーズ 1 で中断した
+ため到達していない。この呼称は本ドキュメントの判定表記であり、
+`route_ab_run1.log` を検索してもヒットしない）。`MetalGemm::
 dispatch_strided_bias_act_prepared` への自動ルーティング結線は
 （§5 旧稿と同じく）行わない——判定根拠が得られていない以上、性能低下の
 可能性がある変更を無根拠に本番経路へ入れない安全側の判断は変わらない。
