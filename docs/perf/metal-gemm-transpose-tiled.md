@@ -151,10 +151,17 @@ A/B 計測はこのゲートを全サイズで通過しない限り実行しな�
 
 実装計画の fail-closed 方針（安定性ゲート不成立が解消しなければ
 「判定不可」を記録し結線可否を確定しない）に従い、本ドキュメントでは
-**`verdict=undetermined`** として記録する（`gemm_transpose_route_ab_bench.rs`
-自体はフェーズ 2 の `verdict=` 行を出力していない——フェーズ 1 で中断した
-ため到達していない。この呼称は本ドキュメントの判定表記であり、
-`route_ab_run1.log` を検索してもヒットしない）。`MetalGemm::
+**`verdict=undetermined`** として記録する。**添付ログ `route_ab_run1.log`
+（本節 5.1 の最終試行の生 stdout+stderr）はこの修正前のコードでの実行結果
+のため `verdict=` を含まない**——当時の `gemm_transpose_route_ab_bench.rs`
+はフェーズ 1 不成立の早期 return で verdict 行を出力せず、フェーズ 2 到達時
+とログ形式が非対称だった。この非対称は codex-review 指摘（PR #1198）を受けて
+その後のコミットで解消済みであり、**現在の `gemm_transpose_route_ab_bench.rs`
+（`crates/backend-metal/examples/gemm_transpose_route_ab_bench.rs:519-530`）は
+フェーズ 1 不成立の早期 return でも `println!("verdict=undetermined ...")` を
+明示的に出力する**——ログ・添付済みの `route_ab_run1.log` はコード修正前の
+実行結果であるためこの出力を含まないが、現在のコードを再実行すれば
+`verdict=` grep で判定を機械的に読み取れる。`MetalGemm::
 dispatch_strided_bias_act_prepared` への自動ルーティング結線は
 （§5 旧稿と同じく）行わない——判定根拠が得られていない以上、性能低下の
 可能性がある変更を無根拠に本番経路へ入れない安全側の判断は変わらない。
