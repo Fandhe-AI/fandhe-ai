@@ -500,6 +500,45 @@ fn require_release_threshold_guard(
     guard
 }
 
+/// 各条件ブロック（baseline／A／B／Both のいずれも）の開始直前で driver
+/// プールを `min_bytes_to_keep=0` へトリムし、既知の空状態から計測を
+/// 開始させる（codex-review 指摘・#1149 PR #1199 P2）。
+///
+/// 是正前は [`ReleaseThresholdGuard::drop`] のみが案 A／Both 終了時に
+/// トリムしており、baseline・案 B（`raises_threshold()=false` で
+/// ガード非生成）の開始時にはトリムが走らなかった。release threshold が
+/// メモリ保持側の設定（既定値が 0 でない環境）だと、baseline は直前
+/// フェーズが残したプール状態のまま「温まった」プールで開始する一方、
+/// 案 A・Both 実行後に続く条件は強制的に空プールから開始することになり、
+/// 条件間の開始状態が非対称になる。本関数を [`bracket_conditions`] の
+/// 全 4 条件（baseline 含む）の直前で共通に呼ぶことで、対策の有無に
+/// 関わらず同一の既知状態（トリム済み・空プール）から計測を開始させ、
+/// 条件間比較・ドリフト判定（baseline_before／baseline_after の差分）を
+/// 解釈可能にする。`has_async_alloc=false` の環境では driver プール自体が
+/// 存在しないため no-op。
+fn reset_pool_state(ctx: &CudaContext) {
+    if !ctx.has_async_alloc() {
+        return;
+    }
+    // SAFETY: `ctx.cu_device()` は `CudaContext::new` 済みの有効な
+    // デバイスハンドル（[`ReleaseThresholdGuard::new`] と同一根拠）。
+    // `trim_to` は読み取り専用の統計取得を伴わない解放操作で、`mem_pool`
+    // は同じ呼び出しで取得した有効なハンドルをそのまま渡す。
+    let mem_pool = unsafe {
+        result::device::get_mem_pool(ctx.cu_device())
+            .expect("get_mem_pool must succeed on has_async_alloc=true environment")
+    };
+    // SAFETY: `mem_pool` は直前で取得した有効な pool ハンドル。
+    let trim_result = unsafe { result::mem_pool::trim_to(mem_pool, 0) };
+    if let Err(e) = trim_result {
+        panic!(
+            "reset_pool_state: 条件ブロック開始前の cuMemPoolTrimTo(0) に失敗した \
+             （error={e:?}）。プール状態を既知の空状態へ揃えられないまま計測を続けると \
+             条件間比較が非対称化するため、テスト失敗として顕在化させる"
+        );
+    }
+}
+
 /// 案 B: `cuMemAlloc`（同期割当）で確保したデバイスバッファ。確保・
 /// 解放 API のみを baseline（`cuMemAllocAsync`／`cuMemFreeAsync`）から
 /// 差し替え、memset・H2D・D2H・カーネル起動は呼び出し側が baseline と
@@ -976,6 +1015,10 @@ fn large_buffer_percall_alloc_ab_record() {
         let config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
 
         for (bracket_pos, condition) in bracket_conditions().into_iter().enumerate() {
+            // 全条件（baseline 含む）の開始直前でプール状態を既知の空
+            // 状態へ揃える（codex-review 指摘・#1149 PR #1199 P2。
+            // `reset_pool_state` ドキュメント参照）。
+            reset_pool_state(device.context());
             // 案 A（release threshold 引き上げ）はガードのスコープ内で
             // のみ有効。ブロック終端で自動的に元へ復元される
             // （`ReleaseThresholdGuard::drop`）。
@@ -1082,6 +1125,9 @@ fn large_buffer_percall_alloc_ab_record() {
         let config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
 
         for (bracket_pos, condition) in bracket_conditions().into_iter().enumerate() {
+            // 昇順パスと同じ理由で全条件開始前にプール状態を揃える
+            // （codex-review 指摘・#1149 PR #1199 P2）。
+            reset_pool_state(device.context());
             let _guard = require_release_threshold_guard(condition, device.context());
 
             for run_idx in 0..runs {
@@ -1152,6 +1198,9 @@ fn large_buffer_percall_alloc_ab_record() {
     let p7_config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
     let mut checksums: Vec<(Condition, usize, f64)> = Vec::new();
     for (bracket_pos, condition) in bracket_conditions().into_iter().enumerate() {
+        // P0〜P4 と同じ理由で全条件開始前にプール状態を揃える
+        // （codex-review 指摘・#1149 PR #1199 P2）。
+        reset_pool_state(device.context());
         let _guard = require_release_threshold_guard(condition, device.context());
         for run_idx in 0..P7_RUNS {
             let (cold, m, checksum) = phase_p7_gemm_replica(
