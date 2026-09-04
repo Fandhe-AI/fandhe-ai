@@ -161,3 +161,10 @@ bench-fandhe v0.1.0 (bench-fandhe)
 bench-candle v0.1.0 (bench-candle)
 ├── bench-common v0.1.0 (bench-common)
 └── candle-core v0.11.0
+
+# 環境 16: DGX Spark GB10（GEMM reuse 計測境界のフェーズ分解。イシュー #1182）
+# Linux / rustc 1.97.0 (2d8144b78 2026-07-07) / cargo 1.97.0 (c980f4866 2026-06-30)
+# 単一系列（fandhe-ai =0.6.0。registry 解決。参考系列〈HEAD path patch〉は本ラウンド未実施）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0

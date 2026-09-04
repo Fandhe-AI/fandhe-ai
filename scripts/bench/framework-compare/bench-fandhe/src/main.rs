@@ -53,14 +53,32 @@
 //! `train --phases`（イシュー #1009）: `run_train`/`run_train_reuse` が
 //! 1 step の合計時間しか記録しない点を補い、公開 API の呼び出し境界で
 //! 区間分解した median/Q1/Q3 を `task:"train_phases"` の JSONL 行として
-//! 出力する（`--task train` 限定。`--task gemm`/`--task infer` との組合せは
-//! MEASURE_ERROR）。区間は「公開 API のどの呼び出しに時間が乗るか」を
-//! 表し、GPU 内部（カーネル／転送）の内訳ではない（`fandhe-ai` 0.4.0 の
-//! `Tensor<f32>` はホスト常駐で CUDA/Metal は演算ごとに H2D→カーネル→D2H
-//! を行うため）。詳細な区間定義・「同期待ち」を独立区間にできない理由は
-//! README「`train --phases`」節を参照。実装は
+//! 出力する（元は `--task train` 限定だったが #1182 で `--task gemm
+//! --mode reuse` にも拡張。`--task gemm --mode fresh`／`--task infer`
+//! との組合せは引き続き MEASURE_ERROR）。区間は「公開 API のどの呼び出し
+//! に時間が乗るか」を表し、GPU 内部（カーネル／転送）の内訳ではない
+//! （`fandhe-ai` のホスト常駐 `Tensor<f32>` は CUDA/Metal で演算ごとに
+//! H2D→カーネル→D2H を行うため）。詳細な区間定義・「同期待ち」を独立
+//! 区間にできない理由は README「`train --phases`」節を参照。実装は
 //! `measure_train_phases`/`measure_train_reuse_phases`（計測本体）と
 //! `run_train_phases`/`run_train_reuse_phases`（JSONL emit）に分離する。
+//!
+//! `gemm --mode reuse --phases`（イシュー #1182）: #1142（`docs/perf/
+//! cuda-gemm-candle-gate-remeasurement.md` §4.3・§8）が「reuse の計測
+//! 境界に残る H2D／D2H／同期の固定費が candle 比を押し下げている」と
+//! **推定**したまま未確定だった内容を、`train --phases` と同じ方法論で
+//! 実測確定する。`gemm --mode reuse`（`run_gemm_reuse`）1 反復の内側
+//! （`matmul` 区間）は `readout_var`（`to_tensor()` +
+//! `contiguous().as_slice().to_vec()`）をここでは展開し、`matmul`／
+//! `to_tensor`／`host_copy`／`checksum`／`iter_total` の 5 区間として
+//! `task:"gemm_phases"` の JSONL 行に出力する（`run_gemm_reuse` 本体は
+//! 変更しない）。`matmul` 区間の内側にホスト→デバイス転送・カーネル
+//! 実行・デバイス→ホスト転送・ストリーム同期が全て閉じており、公開
+//! API ではこれ以上分離できない。内訳（H2D／カーネル専有時間／D2H の
+//! 実測分解）は `crates/backend-cuda` 側の診断テスト
+//! （`gemm_reuse_phase_diag_tests`）が別途取り、突合結果を
+//! `docs/perf/cuda-gemm-reuse-phase-breakdown.md` に記録する。詳細は
+//! README「`gemm --mode reuse --phases`」節を参照。
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
@@ -94,6 +112,20 @@ const PHASE_APPLY_PARAMS: &str = "apply_params";
 const PHASE_DEVICE_UPDATE: &str = "device_update";
 const PHASE_TAPE_DROP: &str = "tape_drop";
 const PHASE_STEP_TOTAL: &str = "step_total";
+
+// `gemm --mode reuse --phases`（イシュー #1182）の区間定数。#1142
+// §4.3 が「candle 比を押し下げている固定費は reuse 計測境界に残る
+// H2D／D2H／同期」と推定した内容を、公開 API 呼び出し境界で分解して
+// 実測確定するための計装。`matmul` 区間の内側に H2D（A/B のアップロード）
+// ・カーネル実行・D2H（結果ダウンロード）・ストリーム同期が全て閉じて
+// おり、fandhe-ai 0.6.0 の公開 API（`Var::matmul`）ではこれ以上分離
+// できない（内訳は `crates/backend-cuda` の診断テストが別途取る。
+// `docs/perf/cuda-gemm-reuse-phase-breakdown.md` 参照）。
+const PHASE_GEMM_MATMUL: &str = "matmul";
+const PHASE_GEMM_TO_TENSOR: &str = "to_tensor";
+const PHASE_GEMM_HOST_COPY: &str = "host_copy";
+const PHASE_GEMM_CHECKSUM: &str = "checksum";
+const PHASE_GEMM_ITER_TOTAL: &str = "iter_total";
 
 /// `train --phases` の 1 step 分の区間計測を保持する順序付きサンプル集合
 /// （イシュー #1009）。phase の初出順が `phase_index`（README「train
@@ -368,6 +400,135 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     .emit(&cli.out)?;
     Ok(())
+}
+
+/// `gemm --mode reuse --phases`（イシュー #1182）の計測本体。`run_gemm_reuse`
+/// と**同一の処理順・同一 API 呼び出し**（参照 GEMM を init 前に計算・
+/// init_s の定義・`validate_gemm_checksum` を全反復で実施・
+/// `GemmReference::verify` は計測窓外で worst 集約）を保ちながら、
+/// `readout_var`（`to_tensor` + `contiguous().as_slice().to_vec()` を
+/// まとめて呼ぶ）をここでは展開し、`to_tensor`／`host_copy`（ホスト
+/// コピー）／`checksum`（全要素和）を個別区間として `Instant` で計時する。
+/// `run_gemm_reuse` 本体は本関数の追加によって変更しない（AC-2）。
+fn measure_gemm_reuse_phases(
+    cli: &Cli,
+) -> Result<(PhaseSamples, f64, f64, ParityStats), Box<dyn std::error::Error>> {
+    let n = cli.size;
+    let (a_data, b_data) = gemm_inputs(n)?;
+    let a_host = a_data
+        .contiguous()
+        .as_slice()
+        .ok_or("a_data as_slice() returned None")?
+        .to_vec();
+    let b_host = b_data
+        .contiguous()
+        .as_slice()
+        .ok_or("b_data as_slice() returned None")?
+        .to_vec();
+    let reference = GemmReference::compute(n, &a_host, &b_host)?;
+
+    // init_s: `run_gemm_reuse` と同一定義（tape 構築 + 葉 Var 登録 +
+    // 初回 matmul + ホスト実体化までの経過）。区間分解の対象は warmup
+    // 残り + 計測本体のみとし、init 自体は phase を push しない
+    // （`measure_train_reuse_phases` の init と同型）。
+    let init_start = Instant::now();
+    let tape = make_tape(&cli.device)?;
+    let a = tape.var(&a_data);
+    let b = tape.var(&b_data);
+    let c0 = a.matmul(&b)?;
+    let out0 = readout_var(&c0)?;
+    let mut checksum: f64 = out0.iter().map(|&x| x as f64).sum();
+    let init_s = init_start.elapsed().as_secs_f64();
+    validate_gemm_checksum(checksum)?;
+    let mut parity = reference.verify(&out0)?;
+
+    let mut phases = PhaseSamples::new();
+    // 1 回は init 計測内で消費済み（`run_gemm_reuse` と同じ warmup 消費
+    // 規約）。
+    let total_iters = WARMUP_ITERS.saturating_sub(1) + MEASURE_ITERS;
+    for _ in 0..total_iters {
+        let iter_start = Instant::now();
+
+        let t0 = Instant::now();
+        let c = a.matmul(&b)?;
+        phases.push(PHASE_GEMM_MATMUL, t0.elapsed());
+
+        let t0 = Instant::now();
+        let t = c.to_tensor();
+        phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
+
+        let t0 = Instant::now();
+        let out = t
+            .contiguous()
+            .as_slice()
+            .ok_or("as_slice() returned None after contiguous()")?
+            .to_vec();
+        phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
+
+        let t0 = Instant::now();
+        checksum = out.iter().map(|&x| x as f64).sum();
+        phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
+
+        // `run_gemm_reuse` と同じく、elapsed の計測窓はここで閉じる
+        // （checksum 計算までを計時対象とし、以降の検証コストは含めない）。
+        phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
+
+        validate_gemm_checksum(checksum)?;
+        parity = parity.worst(reference.verify(&out)?);
+    }
+
+    Ok((phases, checksum, init_s, parity))
+}
+
+/// [`measure_gemm_reuse_phases`] の結果を phase ごとに 1 行の JSONL
+/// （`task:"gemm_phases"`）として出力する。train 側 `emit_phase_records`
+/// （`task:"train_phases"` 固定・`TRAIN_WARMUP`／`BATCH` 決め打ち）とは
+/// task・size・warmup・iters・parity の扱いが異なるため合流させず、
+/// `gemm_phases` 専用の emit 関数として並置する（`summarize.py` 側も
+/// `gemm_phases` 専用の集計節を持つ。README「`gemm --mode reuse --phases`」
+/// 節参照）。
+fn emit_gemm_phase_records(
+    cli: &Cli,
+    phases: &PhaseSamples,
+    mode: &'static str,
+    checksum: f64,
+    init_s: Option<f64>,
+    parity: ParityStats,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let warmup = WARMUP_ITERS.saturating_sub(1);
+    for (phase_index, &phase) in phases.order.iter().enumerate() {
+        let measured = &phases.durations(phase)[warmup..];
+        let st = stats(measured)?;
+        PhaseRecord {
+            base: Record {
+                framework: FRAMEWORK,
+                framework_version: VERSION,
+                task: "gemm_phases",
+                device: &cli.device,
+                size: cli.size,
+                stats: st,
+                gflops: None,
+                throughput_per_s: None,
+                checksum,
+                warmup,
+                iters: measured.len(),
+                mode,
+                init_s,
+                parity: Some(parity),
+                tf32: false,
+            },
+            phase,
+            phase_index,
+        }
+        .emit(&cli.out)?;
+    }
+    Ok(())
+}
+
+/// `--task gemm --mode reuse --phases`（イシュー #1182）。
+fn run_gemm_reuse_phases(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (phases, checksum, init_s, parity) = measure_gemm_reuse_phases(cli)?;
+    emit_gemm_phase_records(cli, &phases, "reuse", checksum, Some(init_s), parity)
 }
 
 fn mlp_data() -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::error::Error>> {
@@ -956,8 +1117,12 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     match (cli.task.as_str(), cli.mode.as_str(), cli.phases) {
         ("train", "fresh", true) => run_train_phases(cli),
         ("train", "reuse", true) => run_train_reuse_phases(cli),
-        (task, _, true) => Err(format!(
-            "MEASURE_ERROR: --phases is only implemented for task 'train' (got '{task}'; issue #1009)"
+        // イシュー #1182: `gemm --mode reuse --phases` を追加。fresh の
+        // gemm・infer との組合せは引き続き MEASURE_ERROR（下の catch-all）。
+        ("gemm", "reuse", true) => run_gemm_reuse_phases(cli),
+        (task, mode, true) => Err(format!(
+            "MEASURE_ERROR: --phases is only implemented for task 'train' or task 'gemm' with \
+             --mode reuse (got task='{task}' mode='{mode}'; issue #1009 / #1182)"
         )
         .into()),
         ("gemm", "fresh", false) => run_gemm(cli),
@@ -1197,11 +1362,13 @@ mod tests {
     }
 
     #[test]
-    fn phases_with_gemm_or_infer_is_measure_error() {
+    fn phases_with_gemm_fresh_or_infer_is_measure_error() {
         // `dispatch()`（`run()` の分岐本体。`parse_cli()` を経由せず直接
         // 呼べるよう分離してある）を通して、`--phases` が `--task train`
-        // 限定であることを固定する。gemm は fresh/reuse 両方を確認する。
-        for (task, mode) in [("gemm", "fresh"), ("gemm", "reuse"), ("infer", "fresh")] {
+        // （fresh/reuse）と `--task gemm --mode reuse`（イシュー #1182）
+        // 限定であり、`gemm --mode fresh`・`infer` は引き続き拒否される
+        // ことを固定する。
+        for (task, mode) in [("gemm", "fresh"), ("infer", "fresh")] {
             let out = temp_out_path(&format!("phases-unsupported-{task}-{mode}"));
             let cli = Cli {
                 task: task.to_string(),
@@ -1218,6 +1385,168 @@ mod tests {
             assert!(msg.contains("--phases"), "msg={msg}");
             assert!(msg.contains(task), "msg={msg}");
         }
+    }
+
+    // イシュー #1182: `gemm --mode reuse --phases` の受け入れ条件
+    // （区間別 median/Q1/Q3 を JSONL に出力する・cpu で動作する・
+    // checksum が `run_gemm_reuse` と一致する・phase 合計が iter_total を
+    // 超えない）を固定する回帰テスト群。`train --phases` の (a)〜(d) と
+    // 同型。
+
+    fn make_gemm_phases_cli(out: &std::path::Path) -> Cli {
+        Cli {
+            task: "gemm".to_string(),
+            device: "cpu".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: "reuse".to_string(),
+            phases: true,
+            tf32: false,
+        }
+    }
+
+    /// (a) `gemm --mode reuse --phases` が 5 区間（matmul/to_tensor/
+    /// host_copy/checksum/iter_total）を `phase_index` 連番・
+    /// `task:"gemm_phases"`・`init_s` あり・`parity_*` キーあり・末尾
+    /// `iter_total` で出力することを固定する。
+    #[test]
+    fn gemm_reuse_phases_emits_one_row_per_phase_in_order() {
+        let out = temp_out_path("gemm-phases-order");
+        run_gemm_reuse_phases(&make_gemm_phases_cli(&out)).expect("run_gemm_reuse_phases failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 5, "lines={lines:?}");
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.contains("\"task\":\"gemm_phases\""), "line={line}");
+            assert!(line.contains("\"mode\":\"reuse\""), "line={line}");
+            assert!(
+                line.contains(&format!("\"phase_index\":{i}")),
+                "line={line}"
+            );
+            assert!(line.contains("\"init_s\":"), "line={line}");
+            assert!(!line.contains("\"init_s\":null"), "line={line}");
+            assert!(line.contains("\"parity_total\":"), "line={line}");
+        }
+        assert!(lines.last().unwrap().contains("\"phase\":\"iter_total\""));
+    }
+
+    /// (c) `gemm --mode reuse --phases` の checksum（各行の `checksum`
+    /// フィールド）が `run_gemm_reuse` の JSONL 出力の checksum と
+    /// **JSONL-vs-JSONL** で一致することを固定する。同一入力・同一 cpu
+    /// 経路・同一 `Record::to_json_line` の `{:.6}` 整形を経るため完全
+    /// 一致する（in-memory の f64 同士は丸め誤差で比較できないため、
+    /// 複合判定ではなく文字列一致を使う。§3.1 の設計メモ参照）。
+    #[test]
+    fn gemm_reuse_phases_checksum_matches_run_gemm_reuse() {
+        let reuse_path = temp_out_path("gemm-reuse-vs-phases");
+        run_gemm_reuse(&make_cli("gemm", "reuse", &reuse_path)).expect("run_gemm_reuse failed");
+        let reuse_checksum_line = last_line_checksum(&reuse_path);
+        let _ = std::fs::remove_file(&reuse_path);
+
+        let phases_path = temp_out_path("gemm-phases-checksum");
+        run_gemm_reuse_phases(&make_gemm_phases_cli(&phases_path))
+            .expect("run_gemm_reuse_phases failed");
+        let content = std::fs::read_to_string(&phases_path).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&phases_path);
+
+        // `last_line_checksum` は文字列としてではなく f64 へパースして
+        // 返すため、`{:.6}` 整形後の値同士を比較する形になる（同一入力・
+        // 同一経路であれば bit 単位で同じ丸めを経るため完全一致する）。
+        for line in content.lines() {
+            let key = "\"checksum\":";
+            let start = line.find(key).expect("checksum field missing") + key.len();
+            let rest = &line[start..];
+            let end = rest.find([',', '}']).expect("checksum field end missing");
+            let phase_checksum: f64 = rest[..end].trim().parse().expect("checksum not f64");
+            assert_eq!(
+                phase_checksum, reuse_checksum_line,
+                "phase checksum diverges from run_gemm_reuse: line={line}"
+            );
+        }
+    }
+
+    /// (d) `gemm --mode reuse --phases` の各反復について、構成区間
+    /// （matmul/to_tensor/host_copy/checksum）の合計が `iter_total` を
+    /// 超えず、かつ計時オーバーヘッドの上限（90%）を満たすことを固定する
+    /// （`train_phases_each_step_phase_sum_does_not_exceed_total` と同型）。
+    #[test]
+    fn gemm_reuse_phases_each_iter_phase_sum_does_not_exceed_total() {
+        let cli = make_gemm_phases_cli(&temp_out_path("gemm-phases-sum"));
+        let (phases, _checksum, _init_s, _parity) =
+            measure_gemm_reuse_phases(&cli).expect("measure_gemm_reuse_phases failed");
+        let totals = phases.durations(PHASE_GEMM_ITER_TOTAL);
+        assert_eq!(totals.len(), WARMUP_ITERS.saturating_sub(1) + MEASURE_ITERS);
+        let component_phases: Vec<&str> = phases
+            .order
+            .iter()
+            .copied()
+            .filter(|&p| p != PHASE_GEMM_ITER_TOTAL)
+            .collect();
+        for (iter, &total) in totals.iter().enumerate() {
+            let sum: Duration = component_phases
+                .iter()
+                .map(|&p| phases.durations(p)[iter])
+                .sum();
+            assert!(
+                sum <= total,
+                "iter={iter}: phase sum {sum:?} exceeds iter_total {total:?}"
+            );
+            assert!(
+                sum.as_secs_f64() >= 0.9 * total.as_secs_f64(),
+                "iter={iter}: phase sum {sum:?} is less than 90% of iter_total {total:?}"
+            );
+        }
+    }
+
+    /// 実機（CUDA）依存の smoke テスト（coding-rust.md「実機依存テストは
+    /// `#[ignore]` で分離」）。
+    #[test]
+    #[ignore]
+    fn gemm_reuse_phases_cuda_smoke() {
+        let out = temp_out_path("gemm-phases-cuda-smoke");
+        let cli = Cli {
+            task: "gemm".to_string(),
+            device: "cuda".to_string(),
+            size: 1024,
+            out: out.to_string_lossy().into_owned(),
+            mode: "reuse".to_string(),
+            phases: true,
+            tf32: false,
+        };
+        dispatch(&cli).expect("cuda gemm --mode reuse --phases smoke failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(content.lines().count(), 5, "content={content}");
+        assert!(
+            content.contains("\"phase\":\"iter_total\""),
+            "content={content}"
+        );
+    }
+
+    /// 実機（Metal）依存の smoke テスト。macOS のみコンパイル対象。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn gemm_reuse_phases_metal_smoke() {
+        let out = temp_out_path("gemm-phases-metal-smoke");
+        let cli = Cli {
+            task: "gemm".to_string(),
+            device: "metal".to_string(),
+            size: 1024,
+            out: out.to_string_lossy().into_owned(),
+            mode: "reuse".to_string(),
+            phases: true,
+            tf32: false,
+        };
+        dispatch(&cli).expect("metal gemm --mode reuse --phases smoke failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(content.lines().count(), 5, "content={content}");
+        assert!(
+            content.contains("\"phase\":\"iter_total\""),
+            "content={content}"
+        );
     }
 
     /// イシュー #1042: `bench-fandhe` は `fandhe-ai =0.4.0` に完全固定

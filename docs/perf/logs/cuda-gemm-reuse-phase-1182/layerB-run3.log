@@ -1,0 +1,216 @@
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:768:48
+    |
+768 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:781:8
+    |
+770 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+781 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+warning: variant `SplitK` is never constructed
+   --> crates/backend-cuda/src/gemm_variant.rs:101:5
+    |
+ 89 | pub enum GemmVariantKind {
+    |          --------------- variant in this enum
+...
+101 |     SplitK {
+    |     ^^^^^^
+    |
+    = note: `GemmVariantKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `fandhe-ai-backend-cuda` (lib test) generated 4 warnings (3 duplicates)
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (work/rust-ai-library-run/target/release/deps/fandhe_ai_backend_cuda-687cbd219b19d395)
+
+running 2 tests
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_classic ...   N=1024 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=0.0846 ms  q1=0.0843 ms  q3=0.0851 ms
+    h2d_b: median=0.0786 ms  q1=0.0785 ms  q3=0.0790 ms
+    alloc_c: median=0.0002 ms  q1=0.0002 ms  q3=0.0002 ms
+    launch_issue: median=0.0050 ms  q1=0.0047 ms  q3=0.0052 ms
+    kernel_wait: median=0.3191 ms  q1=0.3186 ms  q3=0.3195 ms
+    d2h: median=0.0755 ms  q1=0.0753 ms  q3=0.0757 ms
+    host_copy: median=1.3395 ms  q1=1.2899 ms  q3=1.3463 ms
+    sum of medians: 1.9025 ms
+  N=2048 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=0.3029 ms  q1=0.3026 ms  q3=0.3031 ms
+    h2d_b: median=0.2923 ms  q1=0.2915 ms  q3=0.2925 ms
+    alloc_c: median=0.0004 ms  q1=0.0004 ms  q3=0.0005 ms
+    launch_issue: median=0.0078 ms  q1=0.0077 ms  q3=0.0080 ms
+    kernel_wait: median=2.2643 ms  q1=2.2637 ms  q3=2.2651 ms
+    d2h: median=0.2824 ms  q1=0.2823 ms  q3=0.2827 ms
+    host_copy: median=5.5644 ms  q1=5.3794 ms  q3=5.8083 ms
+    sum of medians: 8.7146 ms
+  N=4096 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=1.1623 ms  q1=1.1618 ms  q3=1.1631 ms
+    h2d_b: median=1.1410 ms  q1=1.1401 ms  q3=1.1420 ms
+    alloc_c: median=0.0005 ms  q1=0.0005 ms  q3=0.0005 ms
+    launch_issue: median=0.0083 ms  q1=0.0081 ms  q3=0.0084 ms
+    kernel_wait: median=20.2470 ms  q1=20.2362 ms  q3=20.9199 ms
+    d2h: median=24.9277 ms  q1=24.4409 ms  q3=27.0022 ms
+    host_copy: median=20.1600 ms  q1=19.8687 ms  q3=20.3753 ms
+    sum of medians: 67.6468 ms
+ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select ...   N=1024 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=0.0844 ms  q1=0.0836 ms  q3=0.0846 ms
+    h2d_b: median=0.0787 ms  q1=0.0783 ms  q3=0.0789 ms
+    alloc_c: median=0.0002 ms  q1=0.0002 ms  q3=0.0002 ms
+    launch_issue: median=0.0049 ms  q1=0.0047 ms  q3=0.0051 ms
+    kernel_wait: median=0.1907 ms  q1=0.1900 ms  q3=0.1920 ms
+    d2h: median=0.0754 ms  q1=0.0751 ms  q3=0.0755 ms
+    host_copy: median=1.2770 ms  q1=1.1896 ms  q3=1.2991 ms
+    sum of medians: 1.7113 ms
+  N=2048 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=0.3033 ms  q1=0.3026 ms  q3=0.3037 ms
+    h2d_b: median=0.2911 ms  q1=0.2903 ms  q3=0.2913 ms
+    alloc_c: median=0.0005 ms  q1=0.0004 ms  q3=0.0005 ms
+    launch_issue: median=0.0080 ms  q1=0.0078 ms  q3=0.0081 ms
+    kernel_wait: median=1.3132 ms  q1=1.3113 ms  q3=1.3229 ms
+    d2h: median=0.2823 ms  q1=0.2818 ms  q3=0.2887 ms
+    host_copy: median=5.0655 ms  q1=5.0259 ms  q3=5.1885 ms
+    sum of medians: 7.2640 ms
+  N=4096 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=1.1626 ms  q1=1.1611 ms  q3=1.1635 ms
+    h2d_b: median=1.1408 ms  q1=1.1403 ms  q3=1.1417 ms
+    alloc_c: median=0.0005 ms  q1=0.0005 ms  q3=0.0006 ms
+    launch_issue: median=0.0082 ms  q1=0.0081 ms  q3=0.0083 ms
+    kernel_wait: median=13.6009 ms  q1=12.9235 ms  q3=14.0762 ms
+    d2h: median=26.0104 ms  q1=25.1369 ms  q3=652.4309 ms
+    host_copy: median=20.4069 ms  q1=19.9956 ms  q3=20.7295 ms
+    sum of medians: 62.3304 ms
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 620 filtered out; finished in 23.74s
+

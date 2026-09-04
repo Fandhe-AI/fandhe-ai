@@ -215,6 +215,66 @@ Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
 `docs/perf/train-step-phase-breakdown.md`（イシュー #1010）を参照。
 `results/summary.md` への環境情報の統合記録は別途 #1050 に委ねる。
 
+### `gemm --mode reuse --phases`（イシュー #1182。reuse 計測境界のフェーズ分解）
+
+`#1142`（`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §4.3・§8）は、
+カーネル単体（launch-only）計測では candle を上回るのに `gemm --mode reuse` の
+計測境界では candle 比未達のままである原因を「reuse の計測境界に残る H2D／D2H／
+同期の固定費」と**推定**したまま確定していなかった。`--task gemm --mode reuse
+--phases`（値なしフラグ。`--task train --phases` と同型）はこの推定を、
+`train --phases` と同じ方法論（公開 API の呼び出し境界での区間分解）で実測確定
+するための計装である。`bench-candle`/`bench-burn`・`--mode fresh`・`--task
+train`/`--task infer` との組合せは MEASURE_ERROR で fail-fast する。
+
+`run_gemm_reuse` 1 反復の内側で `readout_var`（`to_tensor()` +
+`contiguous().as_slice().to_vec()`）を展開し、次の 5 区間を `Instant` で計測する
+（`run_gemm_reuse` 本体は変更しない。`init_s` の定義・`validate_gemm_checksum`
+を全反復で実施する点・`GemmReference::verify` を計測窓外で worst 集約する点は
+`run_gemm_reuse` と同一）:
+
+| phase | 計測対象 |
+| --- | --- |
+| `matmul` | `a.matmul(&b)`（**H2D〈A/B アップロード〉・カーネル実行・D2H〈結果ダウンロード〉・ストリーム同期が全てこの区間の内側に閉じている**。公開 API ではこれ以上分離できない） |
+| `to_tensor` | `c.to_tensor()` |
+| `host_copy` | `.contiguous().as_slice().to_vec()`（ホストへのコピー） |
+| `checksum` | 全要素和（f64 アキュムレータ） |
+| `iter_total` | 反復全体のウォールクロック時間（検算用。Σphase ≤ iter_total） |
+
+`matmul` 区間の内訳（H2D／カーネル専有時間／D2H の実測分解）は本節では取れない
+（`fandhe-ai` 0.6.0 の公開 API 面にホスト転送を伴わない完了待ちや区間別の
+カーネルタイミング API が無いため。`train --phases`「同期待ちを独立区間にできない
+理由」と同じギャップ）。内訳は `crates/backend-cuda` 側の診断テスト
+（`gemm_reuse_phase_diag_tests`。`#[ignore]` 実機専用）が別途取り、`matmul`
+区間との突合結果を `docs/perf/cuda-gemm-reuse-phase-breakdown.md` に記録する。
+
+reuse 行には `init_s`（tape 構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
+経過。`run_gemm_reuse` と同一定義）が乗る。
+
+**JSONL スキーマ**: 既存 `Record` のキー（`framework`・`version`・
+`task:"gemm_phases"`・`device`・`size`・`median_s`/`q1_s`/`q3_s`・`checksum`・
+`warmup`・`iters`・`mode:"reuse"`・`init_s`・`parity_*`）に加え、`phase`・
+`phase_index` の 2 キーを末尾に追加する（`train_phases` と同じ
+`bench_common::PhaseRecord`）。`gemm_phases` 行は `(a)` GEMM 節・`--target`
+目標達成ゲート・`compare_gemm_gate.py`（`_matching_rows` が `task != "gemm"` を
+除外する）には一切混入しない。
+
+**`summarize.py` (a'') 節の読み方**: `(device, mode, size)` ごとに `phase_index`
+昇順で表示し、`中央値`/`Q1`/`Q3` に加え `iter_total 比`（= phase 中央値 /
+`iter_total` 中央値）を表示する。検証方針（必須 phase 名の集合・順序・件数の
+完全一致・`iter_total` の一意性・phase 中央値が `iter_total` を超える不整合の
+検出・sub-ns 区間の 0 値許容）は `(b'')` train_phases 節と同一。
+
+使用例:
+
+```bash
+cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 4096 --mode reuse --phases
+```
+
+`gemm --mode reuse --phases` は診断専用であり、`run_all*.sh`／`run_gemm_gate*.sh`
+の標準スイープには組み込まない（既存ゲート判定プロトコルを変更しないため）。
+GB10 実機での計測結果・カーネル専有時間ベースの candle 比（参考値）は
+`docs/perf/cuda-gemm-reuse-phase-breakdown.md`（イシュー #1182）を参照。
+
 ### 要素単位検証（イシュー #970）
 
 `(a)` GEMM の checksum（全要素和）は、要素の入れ替わりや正負誤差の相殺で偶然一致しうる破損を
