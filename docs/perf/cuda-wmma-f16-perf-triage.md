@@ -296,6 +296,13 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
   「どの頻度で」発生するかのパターン自体が一致しないことが同ドキュメント §4.4 で
   明記されている。したがって二峰性の発生条件は本ドキュメント時点でも未確定のままであり、
   確定した実測記録として扱ってはならない（発生条件の特定は §7 の引き継ぎ対象）。
+  上記閾値の対策候補（driver プール release threshold 引き上げ・
+  `cuMemAlloc` 同期割当への切替）は #1149 で A/B 計測テスト
+  （`crates/backend-cuda/tests/large_buffer_percall_alloc_ab_1149.rs`。
+  P0〜P4 + `CudaMmaGemm` 本番経路レプリカ〈P7・dim4096〉）を追加した。
+  本エージェントの実行環境に CUDA 実機がないため GB10 実測は未完了
+  （計測コード・実測記入欄付き doc 骨子のみが成果物。詳細・実行手順は
+  `docs/perf/cuda-percall-alloc-pool-threshold-ab.md`）。
 - **`mma_sync_f16`（`CudaMmaGemm`）の性能改善の本番結線検討**（#1131。#1007 配下）:
   §4.1 で確認した `mma.sync`/`ldmatrix`/`cp.async` パイプラインの約 3〜13 倍（形状依存。
   dim2048 で約 7 倍・dim4096 で約 11〜13 倍。§3.1 の初回診断計測・§4.3 の是正後実測

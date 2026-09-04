@@ -160,6 +160,12 @@ cargo test -p fandhe-ai --test memory_pool_api -- --ignored --nocapture
 - `MemoryOps`（`CudaMemory`／`DeviceBuffer`）経路のプール化
 - 入力アップロード経路（`clone_htod`）の再利用・pinned ステージング
 - 複数 CUDA ストリームをまたぐ貸し出し（#1012/#1013 の確定後）
-- `CU_MEMPOOL_ATTR_RELEASE_THRESHOLD` の調整（実機比較後に判断）
+- `CU_MEMPOOL_ATTR_RELEASE_THRESHOLD` の調整（実機比較後に判断。
+  イシュー #1149 で release threshold 引き上げ・`cuMemAlloc` 同期割当
+  との A/B 計測テスト（`crates/backend-cuda/tests/
+  large_buffer_percall_alloc_ab_1149.rs`）を追加したが、本エージェント
+  の実行環境に CUDA 実機がないため GB10 実測は未完了。実測完了までは
+  本保留事項を継続する。実測手順・判定基準は
+  `docs/perf/cuda-percall-alloc-pool-threshold-ab.md` を参照）
 - `softmax.rs` の `alloc_uninit_f32` 化（persistent grid カーネルの全要素書き込み確認完了後）
 - 既存 `PooledMemory` の非推奨化・`arc_with_non_send_sync` allow 解消
