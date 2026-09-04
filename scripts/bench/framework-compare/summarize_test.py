@@ -1365,6 +1365,45 @@ class GemmPhasesSectionTests(unittest.TestCase):
         self.assertIn("CUDA / reuse / N=2048", text)
         self.assertIn("初期化(init_s): 123.000 ms", text)
 
+    def test_multiple_runs_same_device_mode_size_are_not_flagged_as_duplicates(self):
+        # Cursor Bugbot 指摘（イシュー #1182・PR #1195）: producer
+        # （`bench-fandhe`）は実行識別子を出力しないため、同一
+        # (device, mode, size) に対しハーネスを複数回実行した結果を
+        # そのまま 1 つの raw JSONL へ追記すると `phase_index` 列
+        # （各回とも 0 始まり）が同一グループへ混在する
+        # （実例: `results/raw/results-dgx-gemm-phases-0.6.0-extra.jsonl`）。
+        # `_gemm_phases_split_runs` による実行単位分割前は、2 回目以降の
+        # 行がすべて「phase_index が重複」＝無効データと誤判定され
+        # `--strict` が exit 2 になっていた。分割後は各実行が独立に
+        # 検証されて有効データのまま複数の run 表として表示されることを
+        # 固定する。
+        rows = (
+            _gemm_phases_group(device="cuda", size=1024)
+            + _gemm_phases_group(device="cuda", size=1024)
+            + _gemm_phases_group(device="cuda", size=1024)
+            + _gemm_phases_group(device="cuda", size=1024)
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_gemm_phases_invalid = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertFalse(has_gemm_phases_invalid)
+        self.assertEqual(buf.getvalue(), "")
+        self.assertNotIn("無効", text)
+        self.assertNotIn("重複", text)
+        for run_label in ["run 1/4", "run 2/4", "run 3/4", "run 4/4"]:
+            self.assertIn(f"CUDA / reuse / N=1024 / {run_label}", text)
+
+    def test_single_run_header_has_no_run_suffix(self):
+        # run が 1 件のみの場合は従来どおりヘッダーに run 番号を付けない
+        # （既存 JSONL・`test_valid_group_renders_table_in_phase_index_order`
+        # との表示互換を維持する）。
+        rows = _gemm_phases_group(device="cuda", size=1024)
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("CUDA / reuse / N=1024\n", text)
+        self.assertNotIn("run 1/1", text)
+
     def test_missing_iter_total_is_invalid_and_strict_fails(self):
         rows = [r for r in _gemm_phases_group() if r["phase"] != "iter_total"]
         buf = io.StringIO()

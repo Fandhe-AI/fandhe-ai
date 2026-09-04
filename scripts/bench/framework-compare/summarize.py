@@ -1943,6 +1943,49 @@ def _gemm_phases_groups(rows):
     return groups, skipped
 
 
+def _gemm_phases_split_runs(group_rows):
+    """`_gemm_phases_groups` が返した 1 グループ（`(device, mode, size)` が
+    同一）の行を、実行単位（1 回のハーネス起動が出力する
+    phase 0..len(required)-1 の連番 1 セット）ごとに分割する。
+
+    producer（`bench-fandhe`）は `run_id` 等の実行識別子を出力しない
+    （`bench_common::PhaseRecord::to_json_line` 参照）ため、同一
+    `(device, mode, size)` に対しハーネスを複数回実行して得た結果を
+    1 つの raw JSONL へそのまま追記すると、複数回分の `phase_index`
+    列（各回とも 0 始まりの連番）が同一グループへ混在する。
+    `_gemm_phases_validate` は 1 実行分（`phase_index` の重複なし）を
+    前提にしているため、分割せず渡すと 2 回目以降の行がすべて
+    「`phase_index` が重複」＝無効データと誤判定される
+    （Cursor Bugbot 指摘。イシュー #1182・PR #1195・
+    `results/raw/results-dgx-gemm-phases-0.6.0-extra.jsonl` が実例）。
+
+    分割方針: 出現順を保ったまま、直前までの実行内で既に出現した
+    `phase_index` が再び現れた行から新しい実行として区切る
+    （`phase_index` が非負整数であることは呼び出し元 `_gemm_phases_groups`
+    が既に検証済み。ここでは値の重複判定のみ行う）。`phase_index` が
+    無い／不正な行は現在の実行にそのまま残し、`_gemm_phases_validate`
+    側の allowlist 検証に委ねる（誤って実行境界として扱わない）。
+
+    戻り値: [[row, ...], ...]（各要素が 1 実行分）
+    """
+    runs = []
+    current = []
+    seen_indices = set()
+    for r in group_rows:
+        idx = r.get("phase_index")
+        idx_key = idx if _is_plain_number(idx) and not _non_integral(idx) and int(idx) >= 0 else None
+        if idx_key is not None and idx_key in seen_indices:
+            runs.append(current)
+            current = []
+            seen_indices = set()
+        current.append(r)
+        if idx_key is not None:
+            seen_indices.add(idx_key)
+    if current:
+        runs.append(current)
+    return runs
+
+
 def _gemm_phases_devices(groups):
     """`_gemm_phases_groups` が返した `groups` のキー `(device, mode, size)`
     を DEVICE_ORDER → size 昇順の順で返す（mode は現状 "reuse" のみ）。
@@ -2073,60 +2116,70 @@ def _gemm_phases_section(rel, rows):
         )
     for device, mode, size in _gemm_phases_devices(groups):
         group_rows = groups[(device, mode, size)]
-        entries, invalid, iter_total_median, phase_set_reason = _gemm_phases_validate(group_rows, mode)
-        any_invalid = any_invalid or invalid
-        device_label = DEVICE_LABEL.get(device, device or "?")
-        lines.append(f"#### {device_label} / {mode} / N={size}\n")
-        if invalid:
-            for e in entries:
-                if e["reason"] is not None:
+        # 同一 (device, mode, size) に複数回分のハーネス実行結果が
+        # 連結されている場合（`_gemm_phases_split_runs` docstring 参照。
+        # イシュー #1182 の Cursor Bugbot 指摘・PR #1195）に備え、実行
+        # 単位へ分割してから 1 実行ずつ検証・表示する。単一実行のみの
+        # 場合は `runs == [group_rows]` となり従来どおりヘッダーに
+        # run 番号を付けない（既存 JSONL・テストとの表示互換を維持）。
+        runs = _gemm_phases_split_runs(group_rows)
+        multi_run = len(runs) > 1
+        for run_index, run_rows in enumerate(runs, start=1):
+            entries, invalid, iter_total_median, phase_set_reason = _gemm_phases_validate(run_rows, mode)
+            any_invalid = any_invalid or invalid
+            device_label = DEVICE_LABEL.get(device, device or "?")
+            run_suffix = f" / run {run_index}/{len(runs)}" if multi_run else ""
+            lines.append(f"#### {device_label} / {mode} / N={size}{run_suffix}\n")
+            if invalid:
+                for e in entries:
+                    if e["reason"] is not None:
+                        print(
+                            f"warning: {rel}: gemm_phases {device}/{mode}/N={size}{run_suffix}/{e['phase']} "
+                            f"— {e['reason']} — 無効データとして表示",
+                            file=sys.stderr,
+                        )
+                if iter_total_median is None:
                     print(
-                        f"warning: {rel}: gemm_phases {device}/{mode}/N={size}/{e['phase']} "
-                        f"— {e['reason']} — 無効データとして表示",
+                        f"warning: {rel}: gemm_phases {device}/{mode}/N={size}{run_suffix} "
+                        "の iter_total 行が欠落または不正 — 比の算出不能",
                         file=sys.stderr,
                     )
-            if iter_total_median is None:
-                print(
-                    f"warning: {rel}: gemm_phases {device}/{mode}/N={size} "
-                    "の iter_total 行が欠落または不正 — 比の算出不能",
-                    file=sys.stderr,
-                )
-            if phase_set_reason is not None:
-                print(
-                    f"warning: {rel}: gemm_phases {device}/{mode}/N={size} — {phase_set_reason}",
-                    file=sys.stderr,
-                )
-        init_val = next(
-            (_safe_time_s(r.get("init_s")) for r in group_rows if r.get("init_s") is not None),
-            None,
-        )
-        init_col = fmt_ms(init_val) if init_val is not None else "無効な値"
-        lines.append(f"初期化(init_s): {init_col}\n")
-        lines.append("| フェーズ | 中央値 | Q1 | Q3 | iter_total 比 |")
-        lines.append("| --- | --- | --- | --- | --- |")
-        median_total = 0.0
-        median_total_valid = bool(entries)
-        for e in entries:
-            phase_col = f"{e['phase']}（無効: {e['reason']}）" if e["reason"] else e["phase"]
-            median_col = fmt_ms(e["median"]) if e["median"] is not None else "無効な値"
-            q1_col = fmt_ms(e["q1"]) if e["q1"] is not None else "無効な値"
-            q3_col = fmt_ms(e["q3"]) if e["q3"] is not None else "無効な値"
-            if e["median"] is not None and iter_total_median is not None:
-                ratio_col = f"{e['median'] / iter_total_median * 100:.1f}%"
-            else:
-                ratio_col = "-"
-            lines.append(f"| {phase_col} | {median_col} | {q1_col} | {q3_col} | {ratio_col} |")
-            if e["phase"] != "iter_total":
-                if e["median"] is None or e["reason"] is not None:
-                    median_total_valid = False
-                else:
-                    median_total += e["median"]
-        if median_total_valid:
-            lines.append(
-                f"\n- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため "
-                f"iter_total と一致しない場合がある）: {fmt_ms(median_total)}"
+                if phase_set_reason is not None:
+                    print(
+                        f"warning: {rel}: gemm_phases {device}/{mode}/N={size}{run_suffix} — {phase_set_reason}",
+                        file=sys.stderr,
+                    )
+            init_val = next(
+                (_safe_time_s(r.get("init_s")) for r in run_rows if r.get("init_s") is not None),
+                None,
             )
-        lines.append("")
+            init_col = fmt_ms(init_val) if init_val is not None else "無効な値"
+            lines.append(f"初期化(init_s): {init_col}\n")
+            lines.append("| フェーズ | 中央値 | Q1 | Q3 | iter_total 比 |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            median_total = 0.0
+            median_total_valid = bool(entries)
+            for e in entries:
+                phase_col = f"{e['phase']}（無効: {e['reason']}）" if e["reason"] else e["phase"]
+                median_col = fmt_ms(e["median"]) if e["median"] is not None else "無効な値"
+                q1_col = fmt_ms(e["q1"]) if e["q1"] is not None else "無効な値"
+                q3_col = fmt_ms(e["q3"]) if e["q3"] is not None else "無効な値"
+                if e["median"] is not None and iter_total_median is not None:
+                    ratio_col = f"{e['median'] / iter_total_median * 100:.1f}%"
+                else:
+                    ratio_col = "-"
+                lines.append(f"| {phase_col} | {median_col} | {q1_col} | {q3_col} | {ratio_col} |")
+                if e["phase"] != "iter_total":
+                    if e["median"] is None or e["reason"] is not None:
+                        median_total_valid = False
+                    else:
+                        median_total += e["median"]
+            if median_total_valid:
+                lines.append(
+                    f"\n- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため "
+                    f"iter_total と一致しない場合がある）: {fmt_ms(median_total)}"
+                )
+            lines.append("")
     return lines, any_invalid
 
 
