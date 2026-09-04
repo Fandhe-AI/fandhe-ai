@@ -83,35 +83,105 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 `--ignored` 実機テスト）はすべて非後退（green）のまま維持されている
 ことを本セッションで確認済み。
 
-## 5. 性能実測（ベンチマーク A/B）と結線判断
+## 5. 性能実測（A/B）と結線判断（イシュー #1186）
 
-**本セッションでは `docs/perf/metal-bench-noise-protocol.md` 準拠の
-2 プロセス interleaved A/B 計測（`bench_harness::ab::run_ab`。6 ラウンド・
-安定性ゲート・サーマル記録付き）を実施していない。** 実装・正確性検証
-（実機テスト全 green）を優先したため、性能比較（classic strided
-`gemm_tiled_bias_act` vs 本イシューの tiled 転置ロード経路）の
-厳密な計測は後続セッションへ持ち越す。
+イシュー #1186 で `crates/backend-metal/examples/
+gemm_transpose_route_ab_bench.rs`（`docs/perf/metal-bench-noise-protocol.md`
+準拠。`bench_harness::ab::run_ab`。同一プロセス内で A/B 2 クロージャを
+ラウンド交互に interleaved 計測する方式——本節旧稿の「2 プロセス」表記は
+`run_ab` の実態と異なる誤記のため本節で訂正する）を追加し、A（base=
+`MetalGemm::dispatch_strided_bias_act_prepared`。現状の本番経路）と
+B（head=`MetalGemm::dispatch_strided_tiled_prepared`。`tile::
+select_for_device` が選ぶ構成——`dispatch_auto` の本番既定経路と同一の
+選択ロジック）を、`gemm_transpose_tile_sweep.rs::shapes()` と同一の
+10 形状 × NT/TN/TT（計 30 セル）で計測を試みた。
 
-この状態を踏まえ、**`MetalGemm::dispatch_strided_bias_act_prepared` への
-自動ルーティング（bias/act 無し・適格な入力を無条件に
-`dispatch_strided_tiled_prepared` へ委譲する変更）は本 PR では行わない**
-（未実装のまま）。実装計画 §4 ステップ 8 の判断基準（「全形状 ×
-NT/TN/TT で B/A（TFLOPS 比）が 1.0 以上」を実測で確認できた場合のみ
-結線する）を満たす実測根拠がないため、性能低下の可能性がある変更を
-無根拠に本番経路へ入れない（安全側の判断）。
+### 5.1 計測環境
 
-`MetalGemm::dispatch_strided_tiled_prepared` は明示入口として常に
+- 機種・OS: §1 と同一（Apple M4 Max・macOS 26.6.2）
+- 実行日: 2026-09-04
+- 生ログ・env_info: `docs/perf/logs/metal-gemm-transpose-route-ab-1186/`
+  （`route_ab_run1.log` は最終実行の stdout+stderr そのまま——`cargo run`
+  のビルド出力〈本体と無関係な `backend-cuda` の未使用コード警告を含む。
+  本 PR の変更とは無関係な既存事象〉が先頭に混在する。`env_info.txt` に
+  実行前後の `pmset -g therm`／`uptime` を記録）
+
+### 5.2 結果: フェーズ 1（安定性セルフチェック）が不成立・判定不可
+
+`gemm_transpose_route_ab_bench.rs` のフェーズ 1（対照カーネル
+`dispatch_auto` を `bench_harness::ab::run_stability` で計測し、
+`STABILITY_SPREAD_GATE`〈0.05〉以内かを確認する自己検査。§5 本文の
+A/B 計測はこのゲートを全サイズで通過しない限り実行しない設計——安全側
+判断: 判定を無効化して中断する方向のみ許す）が、本セッション中の
+実行環境では**一度も成立しなかった**。
+
+- `uptime` 実測で load average 3.4〜8.6（同一マシンで並走する他セッション
+  の GPU 計測負荷。実装計画 §4 ステップ 5 が事前に想定していた「兄弟
+  イシューの GPU 計測が並走しうる」状況が実際に発生した）
+- `pmset -g therm` はサーマル警告なし（"No thermal warning level has
+  been recorded"）——スロットリングではなく、他プロセスとの GPU リソース
+  競合が spread 悪化の要因と考えられる
+- ROUNDS/COOLDOWN/MIN_WARMUP を許容される方向（増やす）のみ 3 段階で
+  調整して計 4 回計測を試みたが、いずれもいずれかのサイズで gate 超過
+  だった（プロトコル §5「調整手順」に従う。判定閾値
+  `STABILITY_SPREAD_GATE` 自体は変更していない）:
+
+| 試行 | ROUNDS | COOLDOWN | MIN_WARMUP | gate 超過サイズ（spread） |
+|---|---|---|---|---|
+| 1 | 6 | 2s | 1s | 256(0.107)・1024(0.066)・2048(0.464) |
+| 2 | 10 | 4s | 2s | 256(0.322)・512(0.085)・4096(0.343) |
+| 3 | 10 | 4s | 2s（再実行） | 256(0.262)・512(0.135)・1024(1.182)・2048(0.251)・4096(0.362) |
+| 4 | 10 | 8s | 3s | 256(0.332)・1024(0.726)・4096(0.059) |
+
+（試行ごとに gate 超過するサイズ・spread が異なる——固定パターンの
+バグではなく、実行のたびに変動する外部負荷〈他プロセスの GPU 競合〉が
+原因であることを示す。ログは `route_ab_run1.log` が最終試行〈試行 4〉の
+出力を保持する）
+
+- 全試行を通じて 1024 前後・4096 で単発の低速ラウンド（サーマル/他
+  プロセス起因の一過性スパイクと推定）が spread を押し上げるパターンが
+  繰り返し観測された。これは対照カーネル `dispatch_auto` 自体の計測
+  であり、B（`dispatch_strided_tiled_prepared`）固有の問題ではない
+
+### 5.3 判定: `undetermined`（判定不可）
+
+**フェーズ 2（30 セルの A/B 本計測）は一度も実行できておらず、
+「全形状 × NT/TN/TT で B/A（TFLOPS 比）≥ 1.0」という結線可否の判断基準
+（イシュー #1186 本文）を満たすかどうかは実測できていない。**
+
+実装計画の fail-closed 方針（安定性ゲート不成立が解消しなければ
+「判定不可」を記録し結線可否を確定しない）に従い、本ドキュメントでは
+**`verdict=undetermined`** として記録する。**添付ログ `route_ab_run1.log`
+（本節 5.1 の最終試行の生 stdout+stderr）はこの修正前のコードでの実行結果
+のため `verdict=` を含まない**——当時の `gemm_transpose_route_ab_bench.rs`
+はフェーズ 1 不成立の早期 return で verdict 行を出力せず、フェーズ 2 到達時
+とログ形式が非対称だった。この非対称は codex-review 指摘（PR #1198）を受けて
+その後のコミットで解消済みであり、**現在の `gemm_transpose_route_ab_bench.rs`
+（`crates/backend-metal/examples/gemm_transpose_route_ab_bench.rs:519-530`）は
+フェーズ 1 不成立の早期 return でも `println!("verdict=undetermined ...")` を
+明示的に出力する**——ログ・添付済みの `route_ab_run1.log` はコード修正前の
+実行結果であるためこの出力を含まないが、現在のコードを再実行すれば
+`verdict=` grep で判定を機械的に読み取れる。`MetalGemm::
+dispatch_strided_bias_act_prepared` への自動ルーティング結線は
+（§5 旧稿と同じく）行わない——判定根拠が得られていない以上、性能低下の
+可能性がある変更を無根拠に本番経路へ入れない安全側の判断は変わらない。
+
+`MetalGemm::dispatch_strided_tiled_prepared` は明示入口として引き続き
 利用可能であり、AC-4（NT/TN/TT へのタイル variant 選択適用）はこの明示
-入口で満たされる。自動ルーティングの可否判断（性能実測込み）は別イシュー
-で引き継ぐ。
+入口で満たされている（§4 の実機正確性実測が根拠）。
 
 ## 6. 引き継ぎ事項
 
-- `docs/perf/logs/metal-gemm-transpose-tiled-1138/` への生ログ配置・
-  `examples/gemm_transpose_tile_sweep.rs` の NT/TN/TT tiled 候補計測・
-  `examples/gemm_transpose_route_ab_bench.rs`（結線前後 A/B）の追加・
-  実行は未実施（§5 参照）。
-- `dispatch_strided_bias_act_prepared` への自動ルーティングの可否判断
-  （性能実測が前提）。
+- **`gemm_transpose_route_ab_bench.rs` によるフェーズ 2 A/B 本計測の
+  再実行**: 他セッションの GPU 計測負荷が小さい時間帯（`uptime` の
+  load average が低いタイミング）を選んで再実行し、フェーズ 1 の
+  安定性ゲートを通過させたうえで 30 セルの実測・`verdict` 判定を得る
+  必要がある（イシュー #1187 の前提条件）。
+- `dispatch_strided_bias_act_prepared` への自動ルーティングの結線
+  可否判断（性能実測込み。イシュー #1187）は上記の実測が前提のため
+  持ち越し。
 - パターン別タイル選択テーブル（`tile::select` を NT/TN/TT 専用へ拡張
   する要否）の判断も、上記ベンチ実測が前提のため持ち越し。
+- `examples/gemm_transpose_tile_sweep.rs` の NT/TN/TT tiled 候補計測
+  （タイル variant 別のスイープ。現状は classic strided 固定候補のみ）
+  は引き続きスコープ外。

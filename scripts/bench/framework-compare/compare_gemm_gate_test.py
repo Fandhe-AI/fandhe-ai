@@ -78,6 +78,38 @@ class EvaluateSizeTest(unittest.TestCase):
         self.assertEqual(result["status"], "undeterminable")
         self.assertIn("件数が", result["reason"])
 
+    def test_gemm_phases_rows_are_ignored(self):
+        # イシュー #1182: `task:"gemm_phases"` 行（`bench-fandhe --task gemm
+        # --mode reuse --phases`）は `_matching_rows` の `task != "gemm"`
+        # 判定で除外され、判定ロジック自体（ゲート）には一切影響しない
+        # ことを固定する（診断専用の追加行が既存ゲートを汚染しないこと）。
+        phase_rows = [
+            {
+                "framework": "fandhe-ai",
+                "task": "gemm_phases",
+                "device": "cuda",
+                "size": 1024,
+                "mode": "reuse",
+                "median_s": 0.001,
+                "checksum": 1.0,
+                "phase": phase,
+                "phase_index": i,
+            }
+            for i, phase in enumerate(
+                ["matmul", "to_tensor", "host_copy", "checksum", "iter_total"]
+            )
+        ]
+        rows = (
+            [_row("fandhe-ai", 1024, "reuse", 0.010) for _ in range(5)]
+            + [_row("candle", 1024, "fresh", 0.020) for _ in range(5)]
+            + phase_rows
+        )
+        result = compare_gemm_gate.evaluate_size(rows, 1024)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["achieved"])
+        self.assertAlmostEqual(result["fandhe_median_s"], 0.010)
+        self.assertAlmostEqual(result["candle_median_s"], 0.020)
+
     def test_parity_failure_is_undeterminable_with_reason(self):
         rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(4)] + [
             _row("fandhe-ai", 2048, "reuse", 0.010, fail_count=2)

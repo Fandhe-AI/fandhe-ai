@@ -9,8 +9,8 @@ use std::time::Duration;
 
 pub mod parity;
 pub use parity::{
-    GemmReference, PARITY_ABS_TOL, PARITY_REL_TOL, ParityStats, compare_elementwise,
-    gemm_element_count,
+    GemmReference, PARITY_ABS_TOL, PARITY_REL_TOL, ParityDumpConfig, ParityStats,
+    compare_elementwise, gemm_element_count,
 };
 
 /// Typed error for the shared bench utilities. Bench binaries propagate this
@@ -61,6 +61,12 @@ pub enum BenchError {
     /// だが、手組み JSON への文字列混入を fail-closed に遮断する
     /// （security.md A03 と同じ思想。`BenchError::InvalidMode` と同型）。
     InvalidPhaseName { value: String },
+    /// `FRAMEWORK_COMPARE_PARITY_DUMP` 環境変数の値が allowlist（未設定
+    /// 相当・`"0"`・`"1"`・正の整数文字列）を満たさない。イシュー #1183
+    /// （`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 で検討され
+    /// 未実施だった fail 要素ダンプ計装）。`BenchError::InvalidMode` と同型の
+    /// fail-fast allowlist 検証（security.md A03）。
+    InvalidParityDumpEnv { value: String },
 }
 
 impl std::fmt::Display for BenchError {
@@ -116,6 +122,12 @@ impl std::fmt::Display for BenchError {
                 write!(
                     f,
                     "MEASURE_ERROR: phase name '{value}' must match [a-z0-9_]+"
+                )
+            }
+            BenchError::InvalidParityDumpEnv { value } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: FRAMEWORK_COMPARE_PARITY_DUMP must be unset, '0', '1', or a positive integer (got '{value}')"
                 )
             }
         }

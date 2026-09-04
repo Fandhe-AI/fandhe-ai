@@ -277,3 +277,18 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   集計表は `scripts/bench/framework-compare/results/summary.md` 環境 14/15 節を参照
 - #1117 のクローズ可否・後続 issue 化の要否・N=2048 の判定方式はユーザー判断（本 PR では
   Issue 操作を行わない。`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §10）
+
+### 8.5 #1182 追補（reuse 計測境界のフェーズ分解。§2 段階的下限表・§3 丸め規則は不変）
+
+- CUDA GEMM N=1024/2048/4096 の `gemm --mode reuse`（#1142・§8.2）が候補比未達となる
+  固定費の内訳を GB10 実機で実測分解した（`docs/perf/cuda-gemm-reuse-phase-breakdown.md`。
+  イシュー #1182）。§8.2 の「H2D/D2H 固定費が希釈要因」という推定は部分的に不正確と判明:
+  H2D＋カーネル＋D2H＋同期（`matmul` 区間）単体は candle fresh 全体より高速（N=1024:
+  1.59 倍、N=4096: 1.47 倍）であり、候補比未達の主因はベンチハーネス自身が追加する
+  `host_copy`（二重ホストコピー）と `checksum`（診断用全要素和）である
+  （`iter_total` の 66〜75%。N 依存）
+- 本節は §2 の PyTorch 比段階的下限表・§3 丸め規則・既存の #1031/#1142 判定結果
+  （`compare_gemm_gate.py` の `iter_total` 相当の判定は不変）を変更しない。判定境界の
+  再定義の要否はユーザー判断事項として整理した（同ドキュメント §9）
+- N=4096 の D2H は診断テスト内で顕著な二峰性（500〜650 ms vs 25〜27 ms）を示し、production
+  経路（Layer A）とは乖離した。原因は本ラウンドでは未確定（同ドキュメント §4・§8）

@@ -337,6 +337,14 @@ mod gemm_wmma;
 // `context_cache.rs` 等）は本イシューで変更しない。
 #[cfg(test)]
 mod fresh_overhead_diag_tests;
+// イシュー #1182: `gemm --mode reuse --phases`（framework-compare）の
+// `matmul` 区間内訳（H2D／カーネル専有時間／D2H／同期）を実測分解する
+// 診断テスト。`launch_tiled_f32_pooled`（`pub(crate)`）・
+// `context_cache::{cached_device, cached_gemm, cached_allocator}` へ
+// 到達する必要があるため、`fresh_overhead_diag_tests` と同じ理由で
+// クレートルートの兄弟モジュールとして配置する。
+#[cfg(test)]
+mod gemm_reuse_phase_diag_tests;
 #[cfg(test)]
 mod init_cost_diag_tests;
 mod kernels;

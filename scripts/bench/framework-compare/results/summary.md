@@ -532,7 +532,8 @@ Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが
   max_abs=3.815e-05, max_rel=3.944e-01）・burn/cpu/size=2048/fresh（fail=5/4194304,
   max_abs=3.529e-05, max_rel=3.052e-01）。いずれも 0 近傍要素の丸め差であり、閾値
   （本体の数値一致契約と同値。`.claude/rules/coding-rust.md`）は緩めず「無効」表示のまま
-  参考値として記録する
+  参考値として記録する（candle/cuda・candle/cpu の fail 要素の実値・厳密真値との突合・
+  丸め誤差の帰属はイシュー #1184。`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 参照）
 - **無効（要素誤差超過。burn CUDA 経路の大幅超過）**: burn/cuda/size=256〜4096 の全 5 サイズ
   （fail は最大 2,729,050/16,777,216 要素、max_rel 最大 1.997e+00）。0 近傍の丸め差ではなく
   広範囲の要素で乖離しており、burn 0.21.0（cubecl-cuda 経路）が既定で TF32 相当の低精度
@@ -1590,3 +1591,70 @@ burn(wgpu) の Metal GEMM は N=512/1024/2048/4096 で計測不可（下記「�
 環境 10/11 の「目標達成ゲート総括」節に記載していた CPU GEMM 追跡行は、#1117 配下 #1148 で
 5 回計測により再判定した（本節・環境 14/15 参照）。DGX Spark・M4 Max とも N=512/1024 は未達成、
 DGX N=2048 は candle 側要素誤差超過により判定不能、M4 Max N=2048 は未達成が確定した。
+
+## 環境 16: DGX Spark GB10（GEMM reuse 計測境界のフェーズ分解・イシュー #1182）
+
+`bench-fandhe gemm --mode reuse --phases`（正式系列 `fandhe-ai =0.6.0`）の 1 ラン目
+（`results/raw/results-dgx-gemm-phases-0.6.0.jsonl`）を `summarize.py` で生成した表:
+
+### (a'') GEMM reuse 計測境界のフェーズ分解（イシュー #1182）
+
+#### CUDA / reuse / N=1024
+
+初期化(init_s): 544.048 ms
+
+| フェーズ | 中央値 | Q1 | Q3 | iter_total 比 |
+| --- | --- | --- | --- | --- |
+| matmul | 570.5 µs | 565.5 µs | 576.6 µs | 22.5% |
+| to_tensor | 0.0 µs | 0.0 µs | 0.0 µs | 0.0% |
+| host_copy | 1.437 ms | 1.274 ms | 1.470 ms | 56.6% |
+| checksum | 533.2 µs | 531.9 µs | 534.2 µs | 21.0% |
+| iter_total | 2.537 ms | 2.374 ms | 2.574 ms | 100.0% |
+
+- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため iter_total と一致しない場合がある）: 2.541 ms
+
+#### CUDA / reuse / N=2048
+
+初期化(init_s): 406.356 ms
+
+| フェーズ | 中央値 | Q1 | Q3 | iter_total 比 |
+| --- | --- | --- | --- | --- |
+| matmul | 3.214 ms | 3.210 ms | 3.358 ms | 33.8% |
+| to_tensor | 0.1 µs | 0.1 µs | 0.2 µs | 0.0% |
+| host_copy | 4.061 ms | 3.919 ms | 4.196 ms | 42.7% |
+| checksum | 2.131 ms | 2.130 ms | 2.133 ms | 22.4% |
+| iter_total | 9.514 ms | 9.260 ms | 9.716 ms | 100.0% |
+
+- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため iter_total と一致しない場合がある）: 9.406 ms
+
+#### CUDA / reuse / N=4096
+
+初期化(init_s): 467.442 ms
+
+| フェーズ | 中央値 | Q1 | Q3 | iter_total 比 |
+| --- | --- | --- | --- | --- |
+| matmul | 32.662 ms | 31.534 ms | 37.327 ms | 58.1% |
+| to_tensor | 0.0 µs | 0.0 µs | 0.0 µs | 0.0% |
+| host_copy | 14.387 ms | 14.210 ms | 14.750 ms | 25.6% |
+| checksum | 8.628 ms | 8.627 ms | 8.633 ms | 15.4% |
+| iter_total | 56.189 ms | 54.748 ms | 60.638 ms | 100.0% |
+
+- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため iter_total と一致しない場合がある）: 55.678 ms
+
+### 環境 16 の 5 回計測中央値（`results-dgx-gemm-phases-0.6.0.jsonl` + `-extra.jsonl`）
+
+| N | matmul | host_copy | checksum | iter_total |
+| --- | --- | --- | --- | --- |
+| 1024 | 0.582 ms | 1.272 ms | 0.535 ms | 2.402 ms |
+| 2048 | 3.214 ms | 4.148 ms | 2.131 ms | 9.514 ms |
+| 4096 | 38.227 ms | 18.545 ms | 8.635 ms | 65.088 ms |
+
+### 環境 16 のデータ有効性
+
+- 全 75 行（3 size × 5 phase × 5 run）で `parity_fail_count=0`。`summarize.py --strict` は
+  exit 0
+- AC-2（挙動不変）: `--phases` なしの `gemm --mode reuse`（`results-dgx-gemm-nonphases-ac2.jsonl`）
+  の checksum が phases 版 1 ラン目と完全一致（N=1024: `-1855.597736`・N=2048:
+  `-6016.774008`・N=4096: `-25768.747284`）することを確認した
+- 詳細な突合・帰属分析・ユーザー判断事項は `docs/perf/cuda-gemm-reuse-phase-breakdown.md`
+  （イシュー #1182）を参照

@@ -267,6 +267,38 @@ pub enum CudaError {
     /// 「専用 variant」方針）。`.claude/rules/coding-rust.md`「本番経路で
     /// `unwrap()`/`expect()` を使わない」に従い panic させない。
     ContextCacheUnavailable { detail: String },
+
+    /// `crate::gemm_mma::CudaMmaGemm::launch_f16_pooled`／
+    /// `crate::gemm_mma::CudaMmaGemm::download_f16_pooled`（イシュー
+    /// #1153。`internal-diagnostics` feature 限定の診断専用入口。
+    /// feature 既定 off のため intra-doc link にはしない —
+    /// `cargo doc --workspace --no-deps`〈feature 既定 off〉では
+    /// これらのアイテムが存在せず `rustdoc::broken-intra-doc-links`
+    /// で fail するため。PR #1200 CI 実測・codex-review 指摘対応）に
+    /// 渡された `crate::pool::PooledF16Buffer` が、呼び出し先
+    /// `CudaMmaGemm` インスタンスの `stream`（＝生成元 `CudaDevice`）とは
+    /// 異なる `CudaContext` から確保されたことを表す（codex-review P0
+    /// 指摘。PR #1200 レビュー）。
+    ///
+    /// `PooledF16Buffer` は不透明な公開ラッパーだが、内部の
+    /// `pool.rs::CudaAllocator`（`context_cache::cached_allocator`
+    /// 経由でプロセスワイドに複数 `CudaContext` 分キャッシュされうる）が
+    /// 確保した任意の `CudaContext` 由来のバッファを safe Rust から
+    /// どの `CudaMmaGemm` インスタンスへも渡せてしまう。複数 GPU・複数
+    /// `CudaContext` 利用時に別 context 由来のバッファを混在させると、
+    /// context 固有のデバイスポインタと本インスタンスの `stream` を
+    /// 混在させた `unsafe` kernel launch／readback に到達し、invalid
+    /// device context・実質的な UB／OOB リスクを招く（`gemm.rs::
+    /// TiledPipelineFunction` 検証・`CudaError::
+    /// TiledPipelineContextMismatch` と同型の脅威モデル・同型の対処。
+    /// `gemm.rs::CudaGemm::launch_tiled_pipeline_f32` ドキュメンテーション
+    /// コメント「バッファ生成元 context の検証」参照）。
+    ///
+    /// `launch_f16_pooled`・`download_f16_pooled` は起動・readback 前に
+    /// `PooledCudaHandle::context()`（`pool.rs`）のポインタ同一性を
+    /// `self.stream.context()` と fail-closed に検証し、不一致ならこの
+    /// variant を返して `unsafe` 呼び出しへ到達させない。
+    PooledBufferContextMismatch { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -341,6 +373,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::ContextCacheUnavailable { detail } => {
                 write!(f, "CUDA context/kernel-suite cache unavailable: {detail}")
+            }
+            CudaError::PooledBufferContextMismatch { detail } => {
+                write!(f, "pooled f16 buffer context mismatch: {detail}")
             }
         }
     }

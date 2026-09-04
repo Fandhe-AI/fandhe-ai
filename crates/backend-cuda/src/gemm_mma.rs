@@ -13,9 +13,12 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{
+    CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, LaunchConfig, PushKernelArg,
+};
 use half::f16;
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::validate_gemm_dims;
@@ -167,6 +170,17 @@ pub struct CudaMmaGemm {
     mma_f16_swizzle: Option<CudaFunction>,
     swizzle_group_width: Option<u32>,
     swizzle_compile_error: Option<String>,
+    /// `pool.rs::CudaAllocator` へのプロセスワイド共有ハンドル
+    /// （イシュー #1153。`gemm.rs::CudaGemm` と同じ取得経路
+    /// 〈`context_cache::cached_allocator`〉。`upload_f16_pooled`／
+    /// `alloc_output_f16_pooled`（`internal-diagnostics` feature 限定の
+    /// 診断専用入口。本番結線は見送った。本構造体ドキュメンテーション
+    /// コメント「pooled API」節参照）が使う。本ハンドルを保持し続ける
+    /// ことが `cached_allocator` の Weak 参照方式のもとで実質的な
+    /// singleton 維持条件になる〈`pool.rs::CudaAllocator` ドキュメン
+    /// テーションコメント参照〉。
+    #[cfg(feature = "internal-diagnostics")]
+    allocator: Arc<crate::pool::CudaAllocator>,
 }
 
 /// [`check_min_compute_capability`] のゲート検査後、`source` を NVRTC
@@ -357,12 +371,17 @@ impl CudaMmaGemm {
                 None => (None, None, None),
             };
 
+        #[cfg(feature = "internal-diagnostics")]
+        let allocator = context_cache::cached_allocator(device)?;
+
         Ok(Self {
             stream,
             mma_f16,
             mma_f16_swizzle,
             swizzle_group_width,
             swizzle_compile_error,
+            #[cfg(feature = "internal-diagnostics")]
+            allocator,
         })
     }
 
@@ -387,6 +406,8 @@ impl CudaMmaGemm {
         check_min_compute_capability(device)?;
 
         let (stream, mma_f16) = compile_mma_f16(device, kernels_mma::mma_f16_source())?;
+        #[cfg(feature = "internal-diagnostics")]
+        let allocator = context_cache::cached_allocator(device)?;
 
         Ok(Self {
             stream,
@@ -394,6 +415,8 @@ impl CudaMmaGemm {
             mma_f16_swizzle: None,
             swizzle_group_width: None,
             swizzle_compile_error: None,
+            #[cfg(feature = "internal-diagnostics")]
+            allocator,
         })
     }
 
@@ -449,6 +472,8 @@ impl CudaMmaGemm {
 
         let src = kernels_mma::mma_f16_source_with_swizzle(group_width)?;
         let (stream, mma_f16) = compile_mma_f16(device, &src)?;
+        #[cfg(feature = "internal-diagnostics")]
+        let allocator = context_cache::cached_allocator(device)?;
 
         Ok(Self {
             stream,
@@ -456,6 +481,8 @@ impl CudaMmaGemm {
             mma_f16_swizzle: None,
             swizzle_group_width: Some(group_width),
             swizzle_compile_error: None,
+            #[cfg(feature = "internal-diagnostics")]
+            allocator,
         })
     }
 
@@ -572,6 +599,15 @@ impl CudaMmaGemm {
     /// グリッド次元は `kernels_mma::MMA_BM`/`MMA_BN` 単位の `div_ceil` で
     /// 構築し、末尾タイルの余剰はカーネル内 REQ-8 境界チェック
     /// （`kernels_mma.rs` 参照）に委ねる。
+    /// **本番経路の唯一の入口**（`CudaGemmAuto::run_f16` の
+    /// `MatrixUnit`/`Mma` 分岐から呼ばれる）。per-call の H2D・出力
+    /// バッファ確保は下記の生 API（[`Self::upload_f16`]・
+    /// [`Self::alloc_output_f16`]）を使う。イシュー #1153 で
+    /// `pool.rs::CudaAllocator` 経由のプール確保（`upload_f16_pooled`・
+    /// `alloc_output_f16_pooled`。`internal-diagnostics` feature 限定）を
+    /// 試作したが、GB10 実機の before/after 計測で dim4096 が明確に
+    /// 後退したため本番結線は見送った（`docs/perf/
+    /// cuda-gemm-mma-f16-pool-wiring.md` §7）。
     pub fn run_f16(
         &self,
         a: &[f16],
@@ -596,16 +632,32 @@ impl CudaMmaGemm {
         validate_mma_alignment(n, k)?;
         validate_mma_grid_bounds(m)?;
 
+        // イシュー #1153: `SizeClassPool` 経由のプール API
+        // （`upload_f16_pooled`／`alloc_output_f16_pooled`／
+        // `launch_f16_pooled`／`download_f16_pooled`。`internal-diagnostics`
+        // feature 限定）を実装したが、GB10 実機の before/after 計測
+        // （`docs/perf/cuda-gemm-mma-f16-pool-wiring.md` §6〜§7）で
+        // dim4096（本経路の主要形状）が明確に後退したため、**本番結線は
+        // 見送る**。生 API（下記）のまま維持する。
         let (a_dev, b_dev) = self.upload_f16(a, b)?;
         let mut c_dev = self.alloc_output_f16(m, n)?;
         self.launch_f16(&a_dev, &b_dev, &mut c_dev, m, n, k)?;
         self.download_f16(&c_dev)
     }
 
-    /// A・B をホスト→デバイスへ転送する（`run_f16` の H2D 部分の切り出し。
-    /// ベンチマークが GPU 実行時間のみを計測できるよう、転送とカーネル
-    /// 実行を分離する。PR #255 レビュー指摘 —— `examples/gemm_mma_bench.rs`
-    /// が転送・バッファ確保込みで TFLOPS を算出していた問題への対処）。
+    /// A・B をホスト→デバイスへ転送する（`stream.clone_htod` 直呼びで
+    /// per-call 確保する。[`Self::run_f16`]（本番経路）が使う唯一の H2D
+    /// 手段——イシュー #1153 でプール経由化（[`Self::
+    /// upload_f16_pooled`]。`internal-diagnostics` feature 限定）を試作
+    /// したが、GB10 実機計測で dim4096 が後退したため本番結線は見送った
+    /// 〈`docs/perf/cuda-gemm-mma-f16-pool-wiring.md` §7〉）。ベンチマーク
+    /// が GPU 実行時間のみを計測できるよう、転送とカーネル実行を分離する
+    /// 目的でも公開する。PR #255 レビュー指摘 ——
+    /// `examples/gemm_mma_bench.rs` が転送・バッファ確保込みで TFLOPS を
+    /// 算出していた問題への対処。`examples/gemm_mma_bench.rs`・
+    /// `examples/cuda_floor_bench.rs`・`tests/tensor_core_real_device.rs`・
+    /// `tests/dispatch_boundary.rs`・
+    /// `tests/large_buffer_percall_alloc_ab_1149.rs` からも利用される）。
     pub fn upload_f16(
         &self,
         a: &[f16],
@@ -616,13 +668,55 @@ impl CudaMmaGemm {
         Ok((a_dev, b_dev))
     }
 
-    /// C 用のゼロ初期化デバイスバッファを確保する（`run_f16` のバッファ
-    /// 確保部分の切り出し。`upload_f16` と同じ理由でベンチマークから
-    /// 再利用できるよう公開する）。
+    /// C 用のゼロ初期化デバイスバッファを確保する（`upload_f16` と同じ
+    /// 理由・同じ位置づけで per-call `alloc_zeros` のまま維持する）。
     pub fn alloc_output_f16(&self, m: u32, n: u32) -> Result<CudaSlice<f16>, CudaError> {
         Ok(self
             .stream
             .alloc_zeros::<f16>((m as usize) * (n as usize))?)
+    }
+
+    /// A・B をプール経由でホスト→デバイスへ転送する（イシュー #1153。
+    /// `pool.rs::CudaAllocator::upload_f16` の薄い wrapper）。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）限定の診断専用入口**。
+    /// GB10 実機の before/after 計測（`docs/perf/
+    /// cuda-gemm-mma-f16-pool-wiring.md` §6〜§7）で dim4096（[`Self::
+    /// run_f16`] の主要形状）が明確に後退したため、[`Self::run_f16`]
+    /// への本番結線は見送った。[`Self::run_f16`] は生 API
+    /// （[`Self::upload_f16`] 等）を使い続ける。本 API は後続の再調査
+    /// （`docs/perf/cuda-gemm-mma-f16-pool-wiring.md` §8 の引き継ぎ事項）
+    /// 向けに、計測入口としてのみ残す（`new_with_swizzle` と同じ判断）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn upload_f16_pooled(
+        &self,
+        a: &[f16],
+        b: &[f16],
+    ) -> Result<(crate::pool::PooledF16Buffer, crate::pool::PooledF16Buffer), CudaError> {
+        let a_dev = self.allocator.upload_f16(a)?;
+        let b_dev = self.allocator.upload_f16(b)?;
+        Ok((
+            crate::pool::PooledF16Buffer(a_dev),
+            crate::pool::PooledF16Buffer(b_dev),
+        ))
+    }
+
+    /// C 用の出力バッファをプール経由で確保する（イシュー #1153。
+    /// `pool.rs::CudaAllocator::alloc_uninit_f16` の薄い wrapper。
+    /// `kernels_mma.rs` エピローグが `0..m*n` を必ず書き切り C を読まない
+    /// ことを確認済みのため `alloc_uninit`（前利用データをゼロクリア
+    /// しない）を使う〈`docs/backend-cuda-pool-allocator-decision.md`
+    /// §4「`mma_f16` 適用確認」〉）。[`Self::upload_f16_pooled`] と同じ
+    /// feature ゲート方針。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn alloc_output_f16_pooled(
+        &self,
+        m: u32,
+        n: u32,
+    ) -> Result<crate::pool::PooledF16Buffer, CudaError> {
+        self.allocator
+            .alloc_uninit_f16((m as usize) * (n as usize))
+            .map(crate::pool::PooledF16Buffer)
     }
 
     /// デバイス常駐済みの A/B/C バッファに対してカーネルを起動し、完了を
@@ -639,6 +733,35 @@ impl CudaMmaGemm {
     /// `gemm_wmma.rs::launch_f16` には同種の指摘があったが本関数は指摘に
     /// 明示されていなかった — 同一パターンの脆弱性のため一貫して修正する）。
     ///
+    /// 本体は `launch_f16_views`（view ベースの単一実装。イシュー
+    /// #1153 で raw `CudaSlice` 版・プール版の両方から共有できるよう
+    /// 集約）へ委譲する薄い wrapper。
+    pub fn launch_f16(
+        &self,
+        a_dev: &CudaSlice<f16>,
+        b_dev: &CudaSlice<f16>,
+        c_dev: &mut CudaSlice<f16>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        self.launch_f16_views(
+            &a_dev.slice(..),
+            &b_dev.slice(..),
+            &mut c_dev.slice_mut(..),
+            m,
+            n,
+            k,
+        )
+    }
+
+    /// [`Self::launch_f16`]／[`Self::launch_f16_pooled`] が共有する起動
+    /// 実装本体（イシュー #1153。view（`CudaView`/`CudaViewMut`）ベースに
+    /// 統一することで、raw `CudaSlice<f16>` （`.slice(..)` で全域 view 化）
+    /// とプール `PooledCudaHandle<f16>`（`as_view`/`as_view_mut` が返す
+    /// 論理長 view）の双方から同一の検証・カーネル選択・起動コードを
+    /// 呼べる）。
+    ///
     /// カーネル選択（イシュー #775）: `should_launch_swizzle_kernel`
     /// の判定に従い、`mma_f16`
     /// （base）または `mma_f16_swizzle`（swizzle 変種。`Some` の場合の
@@ -648,11 +771,11 @@ impl CudaMmaGemm {
     /// （swizzle はブロックがどの `(m_block, n_block)` を担当するかの
     /// 割り当てのみを変える。`kernels_mma.rs::mma_f16_source_with_swizzle`
     /// ドキュメンテーションコメント参照）、下記 SAFETY 根拠は両者で共通。
-    pub fn launch_f16(
+    fn launch_f16_views(
         &self,
-        a_dev: &CudaSlice<f16>,
-        b_dev: &CudaSlice<f16>,
-        c_dev: &mut CudaSlice<f16>,
+        a_dev: &CudaView<'_, f16>,
+        b_dev: &CudaView<'_, f16>,
+        c_dev: &mut CudaViewMut<'_, f16>,
         m: u32,
         n: u32,
         k: u32,
@@ -683,9 +806,10 @@ impl CudaMmaGemm {
         };
 
         // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/
-        // b.len()/(m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の
-        // 5 個・型・個数が、上記で検証済みの m/n/k と 1:1 対応する。
-        // カーネル内の手動境界チェック
+        // b.len()/(m*n) 要素の確保済みデバイスバッファ〈raw `CudaSlice`
+        // の全域 view、またはプール割当ハンドルの論理長 view〉）と
+        // m_i/n_i/k_i の 5 個・型・個数が、上記で検証済みの m/n/k と
+        // 1:1 対応する。カーネル内の手動境界チェック
         // （cp.async src-size ゼロ充填・エピローグ guarded store。
         // kernels_mma.rs 参照、REQ-8）と合わせて OOB 読み書きが起きない
         // 根拠とする。グリッド次元は MMA_BM/MMA_BN 単位の div_ceil で
@@ -715,6 +839,60 @@ impl CudaMmaGemm {
         Ok(())
     }
 
+    /// プール割当済みの A/B/C ハンドルに対してカーネルを起動する（イシュー
+    /// #1153。`launch_f16_views` の薄い wrapper）。[`Self::
+    /// upload_f16_pooled`] と同じ feature ゲート方針（本番未結線・
+    /// 診断専用入口）。
+    ///
+    /// **context 一致検証（codex-review P0 指摘・PR #1200）**:
+    /// `PooledF16Buffer` は不透明な公開ラッパーのため、呼び出し元は
+    /// 任意の `CudaMmaGemm`（別 `CudaDevice`／`CudaContext` 上で構築
+    /// されたインスタンスを含む）が確保したバッファを、この `self` へ
+    /// safe Rust から渡せてしまう。`gemm.rs::CudaGemm::
+    /// launch_tiled_pipeline_f32` の「バッファ生成元 context の検証」
+    /// （PR #1071 codex-review P0 是正）と同じ脅威モデルのため同じ
+    /// 対処を適用する: 起動前に 3 バッファそれぞれの確保元
+    /// `Arc<CudaContext>`（`PooledCudaHandle::context`）が `self.stream`
+    /// の context と一致するかをポインタ同一性で fail-closed に検証し、
+    /// いずれか 1 つでも不一致なら `CudaError::
+    /// PooledBufferContextMismatch` を返して `unsafe` launch
+    /// （`launch_f16_views`）へ到達させない。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn launch_f16_pooled(
+        &self,
+        a_dev: &crate::pool::PooledF16Buffer,
+        b_dev: &crate::pool::PooledF16Buffer,
+        c_dev: &mut crate::pool::PooledF16Buffer,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        let self_ctx = self.stream.context();
+        for (name, buf_ctx) in [
+            ("a_dev", a_dev.0.context()),
+            ("b_dev", b_dev.0.context()),
+            ("c_dev", c_dev.0.context()),
+        ] {
+            if !Arc::ptr_eq(buf_ctx, self_ctx) {
+                return Err(CudaError::PooledBufferContextMismatch {
+                    detail: format!(
+                        "{name} was allocated on a different CudaContext (different \
+                         CudaDevice/GPU) than this CudaMmaGemm instance's stream; \
+                         refusing to launch across mismatched CUDA contexts"
+                    ),
+                });
+            }
+        }
+        self.launch_f16_views(
+            &a_dev.0.as_view(),
+            &b_dev.0.as_view(),
+            &mut c_dev.0.as_view_mut(),
+            m,
+            n,
+            k,
+        )
+    }
+
     /// C をデバイス→ホストへ転送する（`run_f16` の D2H 部分の切り出し。
     /// `upload_f16` と同じ理由で公開する）。
     ///
@@ -722,6 +900,33 @@ impl CudaMmaGemm {
     /// ため、本関数が readback ヘルパー経由で完了を確定する。
     pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
         crate::memory::readback(&self.stream, c_dev)
+    }
+
+    /// プール割当済みの C をデバイス→ホストへ転送する（イシュー #1153。
+    /// `download_f16` と同じ理由・同じ同期契約〈#1013〉）。[`Self::
+    /// upload_f16_pooled`] と同じ feature ゲート方針（本番未結線・
+    /// 診断専用入口）。
+    ///
+    /// **context 一致検証（codex-review P0 指摘・PR #1200）**:
+    /// [`Self::launch_f16_pooled`] と同じ理由・同じ対処。`c_dev` が
+    /// `self.stream` と異なる `CudaContext` 由来の場合、別 context の
+    /// デバイスポインタをこのインスタンスの `stream` で readback する
+    /// 不正アクセスに到達しうるため、readback 前にポインタ同一性を
+    /// fail-closed に検証する。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn download_f16_pooled(
+        &self,
+        c_dev: &crate::pool::PooledF16Buffer,
+    ) -> Result<Vec<f16>, CudaError> {
+        if !Arc::ptr_eq(c_dev.0.context(), self.stream.context()) {
+            return Err(CudaError::PooledBufferContextMismatch {
+                detail: "c_dev was allocated on a different CudaContext (different \
+                         CudaDevice/GPU) than this CudaMmaGemm instance's stream; \
+                         refusing to read back across mismatched CUDA contexts"
+                    .to_string(),
+            });
+        }
+        crate::memory::readback(&self.stream, &c_dev.0.as_view())
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013。
