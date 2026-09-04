@@ -356,18 +356,24 @@ echo $?   # 0: 全達成 / 2: --strict の無効データ判定が優先 / 3: �
   判定しない。人間が判断する）
 
 ## GEMM ゲート 5 回計測（CUDA: #1031 達成判定・イシュー #1142／Metal: #1037 達成判定・
-イシュー #1147）
+イシュー #1147／CPU: #1117 達成判定・イシュー #1148）
 
 `summarize.py --target candle` は同一入力ファイル内の 1 レコードしか拾わない
 （1 ファイル = 1 環境の単発計測が前提）ため、CUDA #1031・Metal #1037「N=1024/
-2048/4096 reuse で candle 超え（各 5 回計測の中央値）」の受け入れ判定には
-非対応。本節の `run_gemm_gate.sh <device> <label>`／`compare_gemm_gate.py
---device {cuda,metal}` がその 5 回計測を専用に行う（`run_ab_train_cuda.sh` /
+2048/4096 reuse で candle 超え」・CPU #1117「N=512/1024/2048 reuse で candle
+超え」（各 5 回計測の中央値）の受け入れ判定には非対応。本節の
+`run_gemm_gate.sh <device> <label>`／`compare_gemm_gate.py --device
+{cuda,metal,cpu}` がその 5 回計測を専用に行う（`run_ab_train_cuda.sh` /
 `compare_ab.py` の GEMM 版）。本体ロジックはイシュー #1142 の CUDA 専用実装
-（`run_gemm_gate_cuda.sh`）を #1147 で device 汎用化したもので、呼び出し面は
-device 別の薄い wrapper `run_gemm_gate_cuda.sh`（既存呼び出しとの CLI 互換
-維持）／`run_gemm_gate_metal.sh`（新規）に分離している（両者とも内部で
-`bash run_gemm_gate.sh <device> "$@"` を呼ぶのみ）。
+（`run_gemm_gate_cuda.sh`）を #1147 で device 汎用化・#1148 で CPU 対応拡張
+したもので、呼び出し面は device 別の薄い wrapper `run_gemm_gate_cuda.sh`
+（既存呼び出しとの CLI 互換維持）／`run_gemm_gate_metal.sh`／
+`run_gemm_gate_cpu.sh`（いずれも内部で `bash run_gemm_gate.sh <device> "$@"`
+を呼ぶのみ）に分離している。cpu は対象形状（N=512/1024/2048。cuda/metal の
+N=1024/2048/4096 と異なる）に加え、各 run で `bench-fandhe gemm cpu <N>
+fresh` も交互起動する（環境 10/11 単発 fresh 計測との連続性を説明するための
+参考記録。**判定〈`achieved`〉には一切使わない** — 正式契約は他 device と
+同じ reuse vs candle fresh のまま）。
 
 **2 系列の使い分け**:
 
@@ -395,6 +401,24 @@ cd scripts/bench/framework-compare
 bash run_gemm_gate_cuda.sh 0.6.0
 # Metal 正式系列（現行ピン。イシュー #1147）:
 bash run_gemm_gate_metal.sh 0.6.0
+# CPU 正式系列（現行ピン。DGX Spark〈Grace CPU〉／M4 Max のいずれでも実行可。
+# bench-candle のビルド flag はホスト OS で自動選択される。イシュー #1148）。
+# GEMM_GATE_CPU_NODE_TAG（dgx-cpu／m4max-cpu の明示指定。必須）が実行ホストの
+# OS 系列と矛盾する場合は fail-closed で終了する（`uname -s` だけで正式実機の
+# ファイル名を無条件確定しない。codex-review P1 PRRT_kwDOTuUCJc6fK1Pe 対応。
+# イシュー #1148）。さらに OS 系列一致だけでは「同一 OS 系列の任意ホスト」を
+# 排除できないため、Git 管理外のローカルファイル
+# `gemm-gate-trusted-hosts.local`（`gemm-gate-trusted-hosts.local.example` を
+# コピーし、`hostname` コマンドの実出力と機体識別子〈Linux:
+# `/etc/machine-id`／Darwin: `IOPlatformUUID`。hostname 単独は実行者自身が
+# 別ホストで同名詐称できてしまうため codex-review P1 PRRT_kwDOTuUCJc6fLNFe
+# 対応で追加〉を `<hostname>|<machine-id/IOPlatformUUID>` 形式で登録して作成）
+# に登録した値との照合も必須（未作成・該当タグ未登録・hostname/機体識別子
+# いずれかの不一致はいずれも計測前に fail-closed で終了する。codex-review
+# P1 PRRT_kwDOTuUCJc6fK_lT・PRRT_kwDOTuUCJc6fLNFe 対応）:
+cp gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local  # 初回のみ。hostname・機体識別子を登録する
+GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.6.0     # DGX Spark 側
+GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.6.0  # M4 Max 側
 
 # CUDA 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
 GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
@@ -410,21 +434,32 @@ GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
 # 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
 python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.6.0.jsonl
 python3 compare_gemm_gate.py --device metal results/raw/results-m4max-gemm-gate-0.6.0.jsonl
+python3 compare_gemm_gate.py --device cpu results/raw/results-dgx-cpu-gemm-gate-0.6.0.jsonl
+python3 compare_gemm_gate.py --device cpu results/raw/results-m4max-cpu-gemm-gate-0.6.0.jsonl
 echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2: 入力を読めない
 ```
 
-- `run_gemm_gate.sh <device> <label>`（device は `cuda`／`metal`。通常は device
-  別 wrapper 経由で呼ぶためラベルのみを渡す）はラベル（`[A-Za-z0-9._-]+` のみ
-  許可）ごとに N=1024/2048/4096 それぞれで `bench-fandhe gemm <device> <N>
-  reuse` と `bench-candle gemm <device> <N> fresh`（candle は reuse 非対応）を
-  交互に 5 回ずつ起動し `results/raw/results-<node>-gemm-gate-<label>.jsonl`
-  （`<node>` は cuda=`dgx`／metal=`m4max`）へ記録する。失敗は
+- `run_gemm_gate.sh <device> <label>`（device は `cuda`／`metal`／`cpu`。通常は
+  device 別 wrapper 経由で呼ぶためラベルのみを渡す）はラベル
+  （`[A-Za-z0-9._-]+` のみ許可）ごとに対象形状（cuda/metal: N=1024/2048/4096、
+  cpu: N=512/1024/2048）それぞれで `bench-fandhe gemm <device> <N> reuse` と
+  `bench-candle gemm <device> <N> fresh`（candle は reuse 非対応）を交互に
+  5 回ずつ起動し（cpu のみ `bench-fandhe gemm cpu <N> fresh` も同数追加起動。
+  計 3 起動 × 3 サイズ × 5 run = 45 run。cuda/metal は従来どおり 2 起動 ×
+  3 サイズ × 5 run = 30 run）`results/raw/results-<node>-gemm-gate-<label>.jsonl`
+  （`<node>` は cuda=`dgx`／metal=`m4max`／cpu=`dgx-cpu`〈Linux〉・
+  `m4max-cpu`〈Darwin〉。`GEMM_GATE_CPU_NODE_TAG` の明示指定必須。`uname -s`
+  は指定値との OS 系列整合確認のみに使用し、不一致は fail-closed で
+  終了する）へ記録する。失敗は
   `results/raw/skipped-<node>-gemm-gate-<label>.log` に記録する（数値を捏造しない）。
   Metal の熱・電源状態は `pmset -g therm`・`uptime`（`sudo` 不要。CUDA の
   `nvidia-smi` に相当する device 別スナップショット）で実行ログへ記録する
   （`docs/perf/metal-bench-noise-protocol.md`「熱・電源状態の記録」節準拠）。
-  計測ループが完走し `ANY_FAILED == 0`（全 30 run 成功）の場合にのみ、一時
-  ファイルから上記 2 パスへ原子的（同一ファイルシステム内 `mv`）に反映する。
+  cpu は host OS 別に `nproc`・`/proc/loadavg`・`lscpu`（Linux）または
+  `sysctl` の機種名・P/E コア構成・`pmset -g therm`（Darwin）に加え、両者
+  共通で `RAYON_NUM_THREADS`（未設定＝両フレームワーク既定で全コア使用）を
+  記録する。計測ループが完走し `ANY_FAILED == 0`（全 run 成功）の場合にのみ、
+  一時ファイルから上記 2 パスへ原子的（同一ファイルシステム内 `mv`）に反映する。
   1 件でも run が失敗した場合はこの 2 パスを一切変更せず、直前の有効な計測
   結果（同一 label の過去の成功実行分）を保全したまま、不完全な計測データは
   `results/raw/results-dgx-gemm-gate-<label>.failed-<UTC タイムスタンプ>.jsonl`
@@ -472,7 +507,11 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
   本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる。
   判定不能時は run ごとの `fail_count`/`max_abs`/`max_rel` を診断表として出力
   する（N=2048 の candle 無効データの原因調査・再現条件記録に使う。イシュー
-  #1142 R2）
+  #1142 R2）。`--device cpu` のみ、`bench-fandhe gemm cpu <N> fresh` 行が
+  ちょうど 5 件かつ要素単位検証・checksum とも正式判定と同じ検証を通る場合
+  に限り「fandhe-ai fresh median（参考）」列を追加表示する。この列は環境
+  10/11 の単発 fresh 計測との連続性を説明するための参考記録であり
+  `achieved` の判定には一切使わない（イシュー #1148）
 - `tf32:true` の行（イシュー #1042）は本ゲートの対象外として除外する
 
 ## A/B 計測（都度同期廃止・イシュー #1083）

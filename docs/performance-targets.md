@@ -253,3 +253,27 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   `scripts/bench/framework-compare/results/summary.md` 環境 13 節を参照
 - #1037 のクローズ可否・後続 issue 化・crates.io 次回公開（v0.7.0 想定）の要否はユーザー判断
   （本 PR では Issue 操作を行わない。`docs/perf/metal-gemm-candle-gate-remeasurement.md` §9）
+
+### 8.4 #1148 追補（CPU GEMM N=512/1024/2048 reuse の 5 回計測再計測・#1117 ゲート判定）
+
+- 本節は §8.2/§8.3 と同型の判定確定を CPU 側に適用したもの（`run_gemm_gate.sh <device>
+  <label>` の CPU device 対応拡張・`compare_gemm_gate.py --device cpu` の追加は #1148 で
+  実施）。**§2 の PyTorch 比段階的下限表・§3 丸め規則は変更しない**
+- DGX Spark GB10（Grace CPU）・Apple M4 Max 実機で単一系列（正式系列: 承認済みピン
+  `fandhe-ai =0.6.0`。CPU GEMM 本番経路は crates.io 公開版と HEAD で実質同一のため参考系列は
+  計測していない。#1144 で `SharedB`／`SharedBPcOuter` 系候補が本番未結線と確定済み）を計測
+  した結果、**#1117 は判定可能な全形状で未達成**（DGX: N=512・N=1024 未達／N=2048 は candle
+  側要素誤差超過により判定不能。M4 Max: N=512・N=1024・N=2048 いずれも未達。fandhe-ai 側は
+  全 run `parity_fail_count=0`）
+- **DGX N=2048 の candle 無効データは 5 run すべてで完全に決定的に再現した**（環境 10 の
+  単発計測値とも一致）。原因は candle-core 0.11.0 の CPU GEMM カーネル側にあり fandhe-ai 側は
+  無関係。tolerance は緩めていない
+- 未達原因分析（計測境界固定費・並列化・マイクロカーネル効率・packing）は
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §8 に記録した
+- 出典・詳細な突合表は `docs/perf/cpu-gemm-candle-gate-remeasurement.md`（イシュー #1148）、
+  生データは
+  `scripts/bench/framework-compare/results/raw/results-dgx-cpu-gemm-gate-0.6.0.jsonl`・
+  `results-m4max-cpu-gemm-gate-0.6.0.jsonl`、
+  集計表は `scripts/bench/framework-compare/results/summary.md` 環境 14/15 節を参照
+- #1117 のクローズ可否・後続 issue 化の要否・N=2048 の判定方式はユーザー判断（本 PR では
+  Issue 操作を行わない。`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §10）

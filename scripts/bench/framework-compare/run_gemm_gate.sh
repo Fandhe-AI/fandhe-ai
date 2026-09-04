@@ -1,8 +1,14 @@
 #!/bin/bash
-# GEMM 目標達成ゲート（CUDA: #1031／Metal: #1037）の 5 回計測スイープ
-# device 汎用版（イシュー #1142 の CUDA 専用実装を #1147 で Metal 対応汎用化。
-# 呼び出し面は device 別薄い wrapper `run_gemm_gate_cuda.sh`／
-# `run_gemm_gate_metal.sh` に委ねる。本体ロジックは cuda/metal で共通）。
+# GEMM 目標達成ゲート（CUDA: #1031／Metal: #1037／CPU: #1117）の 5 回計測
+# スイープ device 汎用版（イシュー #1142 の CUDA 専用実装を #1147 で Metal
+# 対応汎用化・#1148 で CPU 対応拡張。呼び出し面は device 別薄い wrapper
+# `run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh`／`run_gemm_gate_cpu.sh`
+# に委ねる。本体ロジックは cuda/metal/cpu で共通）。
+#
+# cpu の対象形状は N=512/1024/2048（cuda/metal は N=1024/2048/4096 のまま
+# 不変）。cpu のみ `bench-fandhe gemm cpu <N> fresh` も各 run 内で追加起動
+# する（環境 10/11 単発 fresh 計測との連続性説明用の参考記録。判定は
+# `compare_gemm_gate.py` 側で reuse vs candle fresh のみを見る。#1148）。
 #
 # `run_all_cuda.sh`/`run_all.sh` は GEMM を N ごとに 1 回しか起動しないため、
 # そのままでは coding-rust.md「ベンチは 5 回計測の中央値」を満たせない。本
@@ -49,7 +55,15 @@
 # 出力は `run_all_cuda.sh` と同じ「失敗を捏造しない」方針（skipped ログへ
 # 記録。security.md A08）。
 set -u
-cd "$(dirname "$0")"
+# SCRIPT_DIR はここで一度だけ解決して固定する（`cd` 後に相対パス引数
+# `$0` から再度 `dirname` を計算すると、`$0` が相対パス（wrapper 経由の
+# 相対起動を含む）の場合に「新しい cwd から見た相対パス」として再解釈され
+# パスが二重化する。Cursor Bugbot 指摘: run_gemm_gate_cpu.sh 経由の相対
+# 起動で TRUSTED_HOSTS_FILE 既定値が二重化し、既存の
+# gemm-gate-trusted-hosts.local が「存在しない」扱いになって CPU ゲート
+# 計測が fail-closed で終了する不具合があった）。
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 DEVICE=${1:-}
 LABEL=${2:-}
@@ -57,24 +71,155 @@ LABEL=${2:-}
 # A03 インジェクション対策: device は allowlist（cuda/metal）、ラベルは
 # ファイル名へ直接埋め込むため英数字・`._-` のみを許可する allowlist で
 # 検証する（run_ab_train_cuda.sh と同じ方針）。
-if [[ "$DEVICE" != "cuda" && "$DEVICE" != "metal" ]]; then
-  echo "usage: $0 <device: cuda|metal> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
+if [[ "$DEVICE" != "cuda" && "$DEVICE" != "metal" && "$DEVICE" != "cpu" ]]; then
+  echo "usage: $0 <device: cuda|metal|cpu> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
   echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列）" >&2
-  echo "  通常は device 別 wrapper（run_gemm_gate_cuda.sh／run_gemm_gate_metal.sh）経由で呼ぶ" >&2
+  echo "  通常は device 別 wrapper（run_gemm_gate_cuda.sh／run_gemm_gate_metal.sh／run_gemm_gate_cpu.sh）経由で呼ぶ" >&2
   exit 1
 fi
 if [[ -z "$LABEL" || ! "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  echo "usage: $0 <device: cuda|metal> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
+  echo "usage: $0 <device: cuda|metal|cpu> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
   echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列）" >&2
   exit 1
 fi
 
 # device ごとのノードタグ（出力ファイル名の識別子。cuda=dgx〈DGX Spark
-# GB10〉／metal=m4max〈Apple M4 Max。イシュー #1147〉）。
+# GB10〉／metal=m4max〈Apple M4 Max。イシュー #1147〉／cpu=dgx-cpu・m4max-cpu
+# 〈同一ホストの CPU 経路計測。イシュー #1148〉）。
+#
+# cpu は Linux／Darwin いずれでも DGX Spark／M4 Max 以外の任意ホストで
+# 実行しうるため、`uname -s` だけを根拠に正式実機の NODE_TAG（dgx-cpu／
+# m4max-cpu）を無条件確定しない（codex-review P1 指摘
+# PRRT_kwDOTuUCJc6fK1Pe。`uname -s` の一致は同一 OS 系列であることの証明に
+# しかならず、実機の同一性は証明できない。DGX Spark／M4 Max の実ホスト名は
+# 公開版ドキュメントに含めない方針〈docs/real-hardware-verification-env.md
+# 冒頭注記〉のため、ホスト名照合による allowlist は本スクリプト単体では
+# 構成できない）。代わりに操作者に `GEMM_GATE_CPU_NODE_TAG` の明示指定を
+# 要求し（allowlist: dgx-cpu／m4max-cpu。無指定は fail-closed で終了）、
+# 指定値と実 OS 系列（Linux→dgx-cpu、Darwin→m4max-cpu）の対応が矛盾する
+# 場合も fail-closed で終了する（Mac で dgx-cpu を指定する等、明らかな
+# 誤帰属を検出する）。env_info（後述の status snapshot。CPU brand
+# string・機種情報）は run 内ログへ記録済みで、正式系列かどうかの最終確認は
+# 人間がそのログと突き合わせて行う。
 if [[ "$DEVICE" == "cuda" ]]; then
   NODE_TAG="dgx"
-else
+elif [[ "$DEVICE" == "metal" ]]; then
   NODE_TAG="m4max"
+else
+  CPU_NODE_TAG=${GEMM_GATE_CPU_NODE_TAG:-}
+  if [[ "$CPU_NODE_TAG" != "dgx-cpu" && "$CPU_NODE_TAG" != "m4max-cpu" ]]; then
+    echo "ERROR: device=cpu は GEMM_GATE_CPU_NODE_TAG の明示指定が必須（allowlist: dgx-cpu | m4max-cpu）。" >&2
+    echo "  uname -s のみから実機を確定しない（codex-review P1 PRRT_kwDOTuUCJc6fK1Pe。任意ホストが正式実機のファイル名で計測結果を生成してしまう誤帰属対策）。" >&2
+    echo "  例: GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.6.0" >&2
+    exit 1
+  fi
+  case "$CPU_NODE_TAG" in
+    dgx-cpu)
+      if [[ "$(uname -s)" != "Linux" ]]; then
+        echo "ERROR: GEMM_GATE_CPU_NODE_TAG=dgx-cpu は Linux ホスト限定（uname -s=$(uname -s)）。実機の取り違えの可能性。" >&2
+        exit 1
+      fi
+      ;;
+    m4max-cpu)
+      if [[ "$(uname -s)" != "Darwin" ]]; then
+        echo "ERROR: GEMM_GATE_CPU_NODE_TAG=m4max-cpu は Darwin ホスト限定（uname -s=$(uname -s)）。実機の取り違えの可能性。" >&2
+        exit 1
+      fi
+      ;;
+  esac
+
+  # ホスト fingerprint 照合（codex-review P1 PRRT_kwDOTuUCJc6fK_lT・
+  # PRRT_kwDOTuUCJc6fLNFe 対応）:
+  # 直前の uname -s 検査は OS 系列の一致しか示さず、当初の hostname 単独照合
+  # （$(hostname) の出力）も「実行者自身が信頼ファイルへ任意の値を書ける」
+  # 弱点を持つ（hostname は `hostnamectl set-hostname` 等で実行者が自由に
+  # 変更・詐称でき、信頼ファイル自体も同じ実行者が作成するローカルファイルの
+  # ため、正式実機以外のホストで自分の hostname を dgx-cpu/m4max-cpu 名義に
+  # 揃えて登録すれば照合を通過できてしまい、正式実機への誤帰属を防げない）。
+  # 本スクリプトが対処できるのは「別ホストで誤って実行してしまう事故」の
+  # fail-closed 検出までであり、実行者自身による意図的な詐称は正規の署名基盤
+  # なしには技術的に排除できない（実行環境はサンドボックス外の任意ホストで
+  # あり、鍵配布・署名検証基盤は本スクリプトのスコープ外）。この前提の上で
+  # 検出強度を上げるため、hostname に加え OS が発行する不揮発な機体識別子
+  # （Linux: `/etc/machine-id`〈D-Bus 仕様のホスト固有 128bit ID。OS
+  # インストール時に生成され通常は書き換えない〉、Darwin: `IOPlatformUUID`
+  # 〈`ioreg` 経由で取得するハードウェア基板固有 UUID〉）も照合する。
+  # hostname 単独より変更の心理的・手続き的コストが高い（明示的に上書きする
+  # 操作が必要）ため、誤帰属の抑止力を高める設計とする。実ホスト名・機体
+  # 識別子は公開版ドキュメントへ直接書けない方針（
+  # docs/real-hardware-verification-env.md 冒頭注記）のため、同方針を踏襲し、
+  # Git 追跡対象外のローカル限定ファイル（$TRUSTED_HOSTS_FILE）に保持した
+  # 値と実際の値を照合する。ファイル不在／該当タグの記載なし／
+  # hostname・機体識別子いずれかの不一致／機体識別子取得不能はいずれも
+  # 計測前に fail-closed で終了する（未検証の実行に正式実機のファイル名を
+  # 与えない。security.md A08）。
+  TRUSTED_HOSTS_FILE=${GEMM_GATE_TRUSTED_HOSTS_FILE:-"$SCRIPT_DIR/gemm-gate-trusted-hosts.local"}
+  if [[ ! -f "$TRUSTED_HOSTS_FILE" ]]; then
+    echo "ERROR: 正式実機ホスト照合用ファイルが見つかりません: $TRUSTED_HOSTS_FILE" >&2
+    echo "  gemm-gate-trusted-hosts.local.example をコピーし、実ホスト名・機体識別子（$CPU_NODE_TAG=<hostname>|<machine-id/IOPlatformUUID>）を記入してください（このファイルは Git 管理外）。" >&2
+    echo "  GEMM_GATE_TRUSTED_HOSTS_FILE=<絶対パス> で別ファイルを指定することもできます。" >&2
+    exit 1
+  fi
+  EXPECTED_ENTRY=""
+  while IFS='=' read -r raw_key raw_value; do
+    key="${raw_key#"${raw_key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    if [[ "$key" == "$CPU_NODE_TAG" ]]; then
+      value="${raw_value#"${raw_value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      EXPECTED_ENTRY="$value"
+      break
+    fi
+  done < "$TRUSTED_HOSTS_FILE"
+  if [[ -z "$EXPECTED_ENTRY" ]]; then
+    echo "ERROR: $TRUSTED_HOSTS_FILE に $CPU_NODE_TAG の登録がありません（例: $CPU_NODE_TAG=<hostname>|<machine-id/IOPlatformUUID>）。" >&2
+    exit 1
+  fi
+  EXPECTED_HOSTNAME="${EXPECTED_ENTRY%%|*}"
+  if [[ "$EXPECTED_ENTRY" == *"|"* ]]; then
+    EXPECTED_FINGERPRINT="${EXPECTED_ENTRY#*|}"
+  else
+    EXPECTED_FINGERPRINT=""
+  fi
+  if [[ -z "$EXPECTED_HOSTNAME" || -z "$EXPECTED_FINGERPRINT" ]]; then
+    echo "ERROR: $TRUSTED_HOSTS_FILE の $CPU_NODE_TAG 登録が旧書式（hostname のみ）です。<hostname>|<machine-id/IOPlatformUUID> 形式で機体識別子も併記してください（codex-review P1 PRRT_kwDOTuUCJc6fLNFe 対応。hostname 単独照合は実行者自身による詐称を排除できないため）。" >&2
+    exit 1
+  fi
+  ACTUAL_HOSTNAME=$(hostname 2>/dev/null || uname -n)
+  if [[ "$ACTUAL_HOSTNAME" != "$EXPECTED_HOSTNAME" ]]; then
+    echo "ERROR: 実ホスト名（${ACTUAL_HOSTNAME}）が $TRUSTED_HOSTS_FILE 内の $CPU_NODE_TAG 登録ホスト名（${EXPECTED_HOSTNAME}）と一致しません。実機の取り違えの可能性。" >&2
+    exit 1
+  fi
+  ACTUAL_FINGERPRINT=""
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ -r /etc/machine-id ]]; then
+      ACTUAL_FINGERPRINT=$(cat /etc/machine-id 2>/dev/null | tr -d '[:space:]')
+    fi
+  else
+    if command -v ioreg >/dev/null 2>&1; then
+      ACTUAL_FINGERPRINT=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
+    fi
+  fi
+  if [[ -z "$ACTUAL_FINGERPRINT" ]]; then
+    echo "ERROR: 機体識別子を取得できません（Linux: /etc/machine-id 読み取り不能／Darwin: ioreg 実行不能）。実機の同一性を検証できないため計測を中断します（fail-closed）。" >&2
+    exit 1
+  fi
+  if [[ "$ACTUAL_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]]; then
+    echo "ERROR: 実機体識別子が $TRUSTED_HOSTS_FILE 内の $CPU_NODE_TAG 登録値と一致しません。実機の取り違え、または hostname のみを詐称した別ホストの可能性。" >&2
+    exit 1
+  fi
+
+  NODE_TAG="$CPU_NODE_TAG"
+fi
+
+# 対象形状（device 別。cuda/metal は #1031/#1037 から不変の N=1024/2048/4096。
+# cpu は #1117 の対象形状 N=512/1024/2048。compare_gemm_gate.py
+# `_SIZES_BY_DEVICE` と同一集合を維持すること。イシュー #1148）。
+if [[ "$DEVICE" == "cpu" ]]; then
+  SIZES=(512 1024 2048)
+else
+  SIZES=(1024 2048 4096)
 fi
 
 OUT="results/raw/results-${NODE_TAG}-gemm-gate-${LABEL}.jsonl"
@@ -375,13 +520,24 @@ if [[ "${GEMM_GATE_SKIP_BUILD:-0}" != "1" ]]; then
 
   # bench-candle のビルド flag は device 別（cuda は `--no-default-features
   # --features cuda`。metal は Cargo.toml の既定 feature が `metal` のため
-  # 追加 flag 不要。イシュー #1147）。
+  # 追加 flag 不要。イシュー #1147）。device=cpu はホスト OS で選ぶ
+  # （Linux〈DGX Spark〉→ cuda feature ビルド、Darwin〈M4 Max〉→ 既定
+  # feature。理由: (a) 環境 10/11 の CPU 行と同一構成の binary で連続性を
+  # 保つ、(b) 同一ノードの cuda/metal ゲートが既にビルド済みの target
+  # キャッシュを再利用できる。candle の CPU GEMM 経路（gemm crate 呼び出し）
+  # は GPU feature の有無に依存しないため計測対象には影響しない。イシュー
+  # #1148）。
   echo "== build bench-candle (${DEVICE}) =="
+  BENCH_CANDLE_USE_CUDA_FEATURE=0
   if [[ "$DEVICE" == "cuda" ]]; then
-    BUILD_OK=1
+    BENCH_CANDLE_USE_CUDA_FEATURE=1
+  elif [[ "$DEVICE" == "cpu" && "$(uname -s)" == "Linux" ]]; then
+    BENCH_CANDLE_USE_CUDA_FEATURE=1
+  fi
+  BUILD_OK=1
+  if [[ "$BENCH_CANDLE_USE_CUDA_FEATURE" == "1" ]]; then
     cargo build --release -p bench-candle --no-default-features --features cuda 2>build-err.tmp || BUILD_OK=0
   else
-    BUILD_OK=1
     cargo build --release -p bench-candle 2>build-err.tmp || BUILD_OK=0
   fi
   if [[ "$BUILD_OK" != "1" ]]; then
@@ -409,35 +565,73 @@ fi
 # 〜計測の間に別プロセスが binary をすり替えた場合も検出する。#1166）。
 verify_manifest
 
-# GPU/熱状態のスナップショットを実行ログへ残す（GPU 競合検出用の参考情報。
+# GPU/CPU・熱状態のスナップショットを実行ログへ残す（競合検出用の参考情報。
 # 判定はしない。競合が疑われる run は人間・エージェントが確認して破棄する）。
 # device 別に取得手段が異なる: cuda は `nvidia-smi`、metal は `sudo` 不要の
 # `pmset -g therm`（熱状態）・`uptime`（負荷平均）・`sysctl` の機種名
 # （`docs/perf/metal-bench-noise-protocol.md`「熱・電源状態の記録」節準拠。
-# `powermetrics` 等 sudo 必須コマンドは使わない）。
+# `powermetrics` 等 sudo 必須コマンドは使わない）。cpu は host OS 別
+# （Linux〈DGX Spark〉: `nproc`・`/proc/loadavg`・`uptime`。Darwin〈M4 Max〉:
+# `sysctl` の機種名・P/E コア構成・`pmset -g therm`・`uptime`）に加え、両者
+# 共通で `RAYON_NUM_THREADS`（未設定＝両フレームワーク既定で全コア使用）を
+# 記録する（イシュー #1148。並列度スイープ分析〈Phase 3b〉の前提情報）。
 echo "== ${DEVICE} status (before) =="
 if [[ "$DEVICE" == "cuda" ]]; then
   nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader 2>&1 || true
   nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>&1 || true
-else
+elif [[ "$DEVICE" == "metal" ]]; then
   sysctl -n machdep.cpu.brand_string 2>&1 || true
   pmset -g therm 2>&1 || true
   uptime 2>&1 || true
+else
+  echo "RAYON_NUM_THREADS=${RAYON_NUM_THREADS:-<未設定=全コア既定>}"
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    nproc 2>&1 || true
+    cat /proc/loadavg 2>&1 || true
+    uptime 2>&1 || true
+    lscpu 2>&1 | head -20 || true
+  else
+    sysctl -n machdep.cpu.brand_string 2>&1 || true
+    sysctl hw.ncpu hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu 2>&1 || true
+    uptime 2>&1 || true
+    pmset -g therm 2>&1 || true
+  fi
 fi
 
-for run_i in 1 2 3 4 5; do
-  for n in 1024 2048 4096; do
-    run bench-fandhe gemm "$DEVICE" "$n" reuse
-    run bench-candle gemm "$DEVICE" "$n" fresh
+if [[ "$DEVICE" == "cpu" ]]; then
+  # cpu のみ: reuse（正式判定の分子）・candle fresh（正式判定の分母）に
+  # 加え fandhe fresh（判定に使わない参考記録。§4.1/README 参照）も同一
+  # run 内で交互起動し、熱・負荷状態を 3 起動間で揃える（イシュー #1148）。
+  for run_i in 1 2 3 4 5; do
+    for n in "${SIZES[@]}"; do
+      run bench-fandhe gemm "$DEVICE" "$n" reuse
+      run bench-candle gemm "$DEVICE" "$n" fresh
+      run bench-fandhe gemm "$DEVICE" "$n" fresh
+    done
   done
-done
+else
+  for run_i in 1 2 3 4 5; do
+    for n in "${SIZES[@]}"; do
+      run bench-fandhe gemm "$DEVICE" "$n" reuse
+      run bench-candle gemm "$DEVICE" "$n" fresh
+    done
+  done
+fi
 
 echo "== ${DEVICE} status (after) =="
 if [[ "$DEVICE" == "cuda" ]]; then
   nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader 2>&1 || true
-else
+elif [[ "$DEVICE" == "metal" ]]; then
   pmset -g therm 2>&1 || true
   uptime 2>&1 || true
+else
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    cat /proc/loadavg 2>&1 || true
+    uptime 2>&1 || true
+  else
+    pmset -g therm 2>&1 || true
+    uptime 2>&1 || true
+  fi
 fi
 
 # 計測ループが完走し、かつ全 run が成功した（ANY_FAILED == 0）場合にのみ、

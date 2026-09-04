@@ -1,0 +1,60 @@
+CPU GEMM candle 比再計測（イシュー #1148）環境情報
+
+## DGX Spark GB10（Grace CPU。実測完了）
+
+- 機種: DGX Spark（Grace CPU。Cortex-X925 ×10 + Cortex-A725 ×10、計 20 論理コア）。
+  実ホスト名は `docs/real-hardware-verification-env.local.md` 方式のローカル管理
+- OS: Linux（aarch64）
+- rustc/cargo: 1.97.0 (2d8144b78 2026-07-07) / 1.97.0 (c980f4866 2026-06-30)
+- NVIDIA driver 580.173.02 / CUDA (nvcc) 13.0 V13.0.88（本計測は CPU 経路のみ使用）
+- RAYON_NUM_THREADS: 未設定（両フレームワークとも既定で全コア使用）
+- 計測日: 2026-09-04（UTC）
+- worktree HEAD（origin/main 由来）: ea19a34
+- 系列: 正式系列のみ（`fandhe-ai =0.6.0`。§3 の diff 確認により CPU GEMM 本番経路が
+  v0.6.0 と同一のため参考系列は計測していない）
+- **計測方式**: 実機検証手順の既定共有作業ディレクトリ（`~/work/rust-ai-library-run`）に
+  他の並列実行中セッションが直近更新したと見られる `.rev-stamp`・壊れた `.git` ファイル
+  （存在しないローカル worktree パスを指す）が残存していることを確認したため、他セッションの
+  進行中の状態を破壊しないよう本 Issue 専用の隔離ディレクトリ（`~/work/fc-1148/`）を新規
+  作成し、必要なファイル（`scripts/bench/framework-compare/`・`crates/`・ルート
+  `Cargo.toml`／`Cargo.lock`・`scripts/bench/oss-gemm-compare/`）のみを rsync して計測した。
+  計測完了後 `~/work/fc-1148/` は削除済み（共有ディレクトリには一切触れていない）
+- 負荷状態: gate 計測（`run_gemm_gate_cpu.sh`）開始時 `load average: 5.07, 1.80, 0.64`・
+  終了時 `load average: 5.06, 2.31, 0.88`。1 分平均が計測前後で約 5 のまま推移して
+  いるのは、この値自体が `verify_manifest` 直後（gate 計測自身の bench-fandhe/
+  bench-candle プロセス起動前後）に取得したスナップショットのため、他の並列
+  セッションの影響と断定はできない（15 分平均が 0.64→0.88 に上昇したのは計測実行
+  自体の寄与）。RAYON スイープ（`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §8.2）実行中の load average は記録しておらず、この間の背景負荷の有無は不明
+- 生データ: `scripts/bench/framework-compare/results/raw/results-dgx-cpu-gemm-gate-0.6.0.jsonl`
+  （45 行）・`skipped-dgx-cpu-gemm-gate-0.6.0.log`（空＝失敗 0 件）・
+  `manifest-dgx-cpu-gemm-gate-0.6.0.json`
+- 実行ログ: `scripts/bench/framework-compare/results/run_gemm_gate_cpu-dgx-0.6.0.log`
+- RAYON スイープ（並列化分析用。`scripts/bench/oss-gemm-compare`）:
+  `docs/perf/logs/cpu-gemm-candle-gate-1148/rayon_sweep_dgx.log`
+  （RAYON_NUM_THREADS=1/2/4/8/10/16/20 × 3 回 × N=512/1024/2048。coding-rust.md の
+  「5 回計測中央値」原則に対し 3 回に簡略化した旨を明記）
+
+## Apple M4 Max（実測完了）
+
+- 機種: Apple M4 Max（P コア 12・E コア 4。`sysctl hw.perflevel0.logicalcpu`=12・
+  `hw.perflevel1.logicalcpu`=4・`hw.ncpu`=16）
+- OS: macOS（Darwin 25.6.0）
+- rustc/cargo: 1.96.0（stable。2026-05-25 リリース）
+- RAYON_NUM_THREADS: 未設定（両フレームワークとも既定で全コア使用）
+- 計測日: 2026-09-04（UTC）
+- worktree HEAD（origin/main 由来）: ea19a34
+- 系列: 正式系列のみ（`fandhe-ai =0.6.0`）
+- 負荷状態: 計測実行中、本マシンでは並列稼働する他の Claude Code エージェントセッションが
+  複数存在した（`uptime` load average: 計測前 7.49/5.37/4.17、計測後 9.30/6.00/4.43。
+  19 ユーザーセッション常駐）。計測専有ではないため、GFLOP/s の絶対値には背景負荷による
+  ノイズが乗っている可能性がある。fandhe-ai/candle は同一 run 内で交互実行するため、相対
+  比較（candle/fandhe 比）への影響は限定的と見て記録する
+- 生データ: `scripts/bench/framework-compare/results/raw/results-m4max-cpu-gemm-gate-0.6.0.jsonl`
+  （45 行）・`skipped-m4max-cpu-gemm-gate-0.6.0.log`（空＝失敗 0 件）・
+  `manifest-m4max-cpu-gemm-gate-0.6.0.json`
+- 実行ログ: `scripts/bench/framework-compare/results/run_gemm_gate_cpu-m4max-0.6.0.log`
+- RAYON スイープ（並列化分析用。`scripts/bench/oss-gemm-compare`）:
+  `docs/perf/logs/cpu-gemm-candle-gate-1148/rayon_sweep_m4max.log`
+  （RAYON_NUM_THREADS=1/2/4/8/12/16 × 3 回 × N=512/1024/2048。3 回へ簡略化。同マシン上の
+  背景負荷が重く〈同時実行中の他エージェント〉、この結果もノイズを含む参考値として扱う）

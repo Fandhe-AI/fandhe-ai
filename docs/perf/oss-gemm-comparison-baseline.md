@@ -308,3 +308,14 @@ gemm crate 未達〈対 gemm crate 比 0.838〜0.889〉のため、候補側の�
   （B 側 laneq のベクトル転置化・`vld1q_f32_x3` 経路の prefetch・KC 再スイープ）の要否は
   #1144 で最終判断する（`docs/cpu-gemm-b-packing-sharing-decision.md` §F と同じ採用ゲート
   方針）
+
+#### CPU GEMM N=512/1024/2048 candle 比再計測（イシュー #1148・状態: DGX Spark GB10・Apple M4 Max とも実測完了）
+
+現行 `RowPanel` 既定（#1144 で本番結線しないと確定済み）のまま、`run_gemm_gate.sh cpu
+<label>`（#1142/#1147 の CUDA/Metal ゲート実装を CPU device へ対応拡張）による 5 回計測
+中央値で #1117「reuse で candle 超え」の受け入れ判定を行った。DGX Spark（Grace CPU）は
+N=512/1024 が未達・N=2048 は candle 側要素誤差超過により判定不能（5 run で完全に決定的に
+再現）。Apple M4 Max は N=512/1024/2048 のいずれも未達（`docs/perf/
+cpu-gemm-candle-gate-remeasurement.md`）。詳細な突合表・未達原因分析（計測境界固定費・
+並列化の非単調性・マイクロカーネル効率・packing）は同ドキュメント §8 を正とし、本節では
+状態のみ記録する。

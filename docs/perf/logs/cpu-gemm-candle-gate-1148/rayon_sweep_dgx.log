@@ -1,0 +1,520 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling autocfg v1.5.1
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling libm v0.2.16
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.56
+   Compiling crossbeam-utils v0.8.22
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling rayon-core v1.13.0
+   Compiling paste v1.0.15
+   Compiling version_check v0.9.5
+   Compiling either v1.17.0
+   Compiling bitflags v2.13.1
+   Compiling dyn-stack-macros v0.1.3
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling reborrow v0.5.5
+   Compiling seq-macro v0.3.6
+   Compiling once_cell v1.21.4
+   Compiling serde_core v1.0.229
+   Compiling cudarc v0.19.8
+   Compiling zmij v1.0.23
+   Compiling raw-cpuid v11.6.0
+   Compiling libloading v0.9.0
+   Compiling fandhe-ai-backend-cpu v0.6.0 (/home/fandhe/work/fc-1148/crates/backend-cpu)
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling rawpointer v0.2.1
+   Compiling pulp v0.22.3
+   Compiling num-traits v0.2.19
+   Compiling matrixmultiply v0.3.11
+   Compiling syn v3.0.3
+   Compiling syn v2.0.119
+   Compiling rand_core v0.9.5
+   Compiling rayon v1.12.0
+   Compiling bytemuck_derive v1.12.0
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling bytemuck v1.25.2
+   Compiling num-complex v0.4.6
+   Compiling dyn-stack v0.13.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling gemm-common v0.19.0
+   Compiling fandhe-ai-tensor-core v0.6.0 (/home/fandhe/work/fc-1148/crates/tensor-core)
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-f16 v0.19.0
+   Compiling gemm v0.19.0
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/fc-1148/crates/backend-cuda)
+warning: field `1` is never read
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm.rs:748:48
+    |
+748 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm.rs:761:8
+    |
+750 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+761 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> /home/fandhe/work/fc-1148/crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling bench-harness v0.6.0 (/home/fandhe/work/fc-1148/crates/bench-harness)
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+   Compiling oss-gemm-compare v0.1.0 (/home/fandhe/work/fc-1148/scripts/bench/oss-gemm-compare)
+    Finished `release` profile [optimized] target(s) in 6.95s
+== RAYON_NUM_THREADS=1 run=1 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=1
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1290,"tflops_q1":0.1287,"tflops_q3":0.1290,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1316,"tflops_q1":0.1315,"tflops_q3":0.1316,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1272,"tflops_q1":0.1272,"tflops_q3":0.1274,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1300,"tflops_q1":0.1299,"tflops_q3":0.1300,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1323,"tflops_q1":0.1322,"tflops_q3":0.1323,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1249,"tflops_q1":0.1248,"tflops_q3":0.1259,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1266,"tflops_q1":0.1266,"tflops_q3":0.1266,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1299,"tflops_q1":0.1299,"tflops_q3":0.1300,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1247,"tflops_q1":0.1245,"tflops_q3":0.1249,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=1 run=2 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=1
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1290,"tflops_q1":0.1274,"tflops_q3":0.1291,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1340,"tflops_q1":0.1339,"tflops_q3":0.1341,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1273,"tflops_q1":0.1273,"tflops_q3":0.1274,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1299,"tflops_q1":0.1299,"tflops_q3":0.1299,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1323,"tflops_q1":0.1322,"tflops_q3":0.1324,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1263,"tflops_q1":0.1258,"tflops_q3":0.1266,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1266,"tflops_q1":0.1265,"tflops_q3":0.1266,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1300,"tflops_q1":0.1299,"tflops_q3":0.1300,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1247,"tflops_q1":0.1245,"tflops_q3":0.1248,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=1 run=3 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=1
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1291,"tflops_q1":0.1285,"tflops_q3":0.1292,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1339,"tflops_q1":0.1338,"tflops_q3":0.1340,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1274,"tflops_q1":0.1274,"tflops_q3":0.1275,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1299,"tflops_q1":0.1299,"tflops_q3":0.1299,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1322,"tflops_q1":0.1321,"tflops_q3":0.1323,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1253,"tflops_q1":0.1252,"tflops_q3":0.1259,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1263,"tflops_q1":0.1263,"tflops_q3":0.1264,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1299,"tflops_q1":0.1299,"tflops_q3":0.1300,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1248,"tflops_q1":0.1245,"tflops_q3":0.1251,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=2 run=1 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=2
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":512,"warmup":20,"iters":20,"tflops_median":0.1223,"tflops_q1":0.1164,"tflops_q3":0.1415,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1318,"tflops_q1":0.1317,"tflops_q3":0.1319,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":512,"warmup":20,"iters":20,"tflops_median":0.1658,"tflops_q1":0.1309,"tflops_q3":0.2100,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":1024,"warmup":20,"iters":20,"tflops_median":0.2311,"tflops_q1":0.2289,"tflops_q3":0.2429,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1288,"tflops_q1":0.1287,"tflops_q3":0.1288,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":1024,"warmup":20,"iters":20,"tflops_median":0.2185,"tflops_q1":0.2163,"tflops_q3":0.2228,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":2048,"warmup":20,"iters":20,"tflops_median":0.2457,"tflops_q1":0.2454,"tflops_q3":0.2460,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1266,"tflops_q1":0.1266,"tflops_q3":0.1267,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":2048,"warmup":20,"iters":20,"tflops_median":0.2351,"tflops_q1":0.2314,"tflops_q3":0.2373,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=2 run=2 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=2
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":512,"warmup":20,"iters":20,"tflops_median":0.2430,"tflops_q1":0.2062,"tflops_q3":0.2448,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1337,"tflops_q1":0.1337,"tflops_q3":0.1338,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":512,"warmup":20,"iters":20,"tflops_median":0.1690,"tflops_q1":0.1447,"tflops_q3":0.1830,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":1024,"warmup":20,"iters":20,"tflops_median":0.2382,"tflops_q1":0.2348,"tflops_q3":0.2429,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1320,"tflops_q1":0.1319,"tflops_q3":0.1320,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":1024,"warmup":20,"iters":20,"tflops_median":0.2231,"tflops_q1":0.2132,"tflops_q3":0.2368,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":2048,"warmup":20,"iters":20,"tflops_median":0.2450,"tflops_q1":0.2444,"tflops_q3":0.2453,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1300,"tflops_q1":0.1299,"tflops_q3":0.1300,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":2048,"warmup":20,"iters":20,"tflops_median":0.2298,"tflops_q1":0.2278,"tflops_q3":0.2345,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=2 run=3 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=2
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":512,"warmup":20,"iters":20,"tflops_median":0.1425,"tflops_q1":0.1335,"tflops_q3":0.1570,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1316,"tflops_q1":0.1315,"tflops_q3":0.1317,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":512,"warmup":20,"iters":20,"tflops_median":0.1906,"tflops_q1":0.1714,"tflops_q3":0.2096,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":1024,"warmup":20,"iters":20,"tflops_median":0.2263,"tflops_q1":0.2150,"tflops_q3":0.2342,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1320,"tflops_q1":0.1319,"tflops_q3":0.1320,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":1024,"warmup":20,"iters":20,"tflops_median":0.2255,"tflops_q1":0.2141,"tflops_q3":0.2394,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":2,"size":2048,"warmup":20,"iters":20,"tflops_median":0.2451,"tflops_q1":0.2447,"tflops_q3":0.2455,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1297,"tflops_q1":0.1297,"tflops_q3":0.1298,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":2,"size":2048,"warmup":20,"iters":20,"tflops_median":0.2309,"tflops_q1":0.2279,"tflops_q3":0.2329,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=4 run=1 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=4
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":512,"warmup":20,"iters":20,"tflops_median":0.4655,"tflops_q1":0.3936,"tflops_q3":0.4678,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1313,"tflops_q1":0.1309,"tflops_q3":0.1315,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":512,"warmup":20,"iters":20,"tflops_median":0.3589,"tflops_q1":0.3572,"tflops_q3":0.4057,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4223,"tflops_q1":0.4089,"tflops_q3":0.4466,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1318,"tflops_q1":0.1318,"tflops_q3":0.1319,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4093,"tflops_q1":0.3742,"tflops_q3":0.4411,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":2048,"warmup":20,"iters":20,"tflops_median":0.4753,"tflops_q1":0.4717,"tflops_q3":0.4772,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1298,"tflops_q1":0.1297,"tflops_q3":0.1298,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":2048,"warmup":20,"iters":20,"tflops_median":0.4283,"tflops_q1":0.4222,"tflops_q3":0.4383,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=4 run=2 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=4
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":512,"warmup":20,"iters":20,"tflops_median":0.3969,"tflops_q1":0.3561,"tflops_q3":0.4679,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1314,"tflops_q1":0.1314,"tflops_q3":0.1316,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":512,"warmup":20,"iters":20,"tflops_median":0.3435,"tflops_q1":0.3086,"tflops_q3":0.3452,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4489,"tflops_q1":0.3983,"tflops_q3":0.4622,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1319,"tflops_q1":0.1319,"tflops_q3":0.1320,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":1024,"warmup":20,"iters":20,"tflops_median":0.3943,"tflops_q1":0.3796,"tflops_q3":0.4362,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":2048,"warmup":20,"iters":20,"tflops_median":0.4790,"tflops_q1":0.4765,"tflops_q3":0.4817,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1299,"tflops_q1":0.1299,"tflops_q3":0.1299,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":2048,"warmup":20,"iters":20,"tflops_median":0.4185,"tflops_q1":0.3952,"tflops_q3":0.4482,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=4 run=3 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=4
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":512,"warmup":20,"iters":20,"tflops_median":0.2737,"tflops_q1":0.1868,"tflops_q3":0.3087,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1335,"tflops_q1":0.1334,"tflops_q3":0.1336,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":512,"warmup":20,"iters":20,"tflops_median":0.3552,"tflops_q1":0.3403,"tflops_q3":0.3571,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4573,"tflops_q1":0.4409,"tflops_q3":0.4648,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1318,"tflops_q1":0.1318,"tflops_q3":0.1319,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4183,"tflops_q1":0.3862,"tflops_q3":0.4452,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":4,"size":2048,"warmup":20,"iters":20,"tflops_median":0.4803,"tflops_q1":0.4776,"tflops_q3":0.4836,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1298,"tflops_q1":0.1298,"tflops_q3":0.1298,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":4,"size":2048,"warmup":20,"iters":20,"tflops_median":0.4385,"tflops_q1":0.4275,"tflops_q3":0.4574,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=8 run=1 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=8
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":512,"warmup":20,"iters":20,"tflops_median":0.2023,"tflops_q1":0.1594,"tflops_q3":0.2185,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1314,"tflops_q1":0.1314,"tflops_q3":0.1316,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":512,"warmup":20,"iters":20,"tflops_median":0.1280,"tflops_q1":0.1166,"tflops_q3":0.1635,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":1024,"warmup":20,"iters":20,"tflops_median":0.7156,"tflops_q1":0.6731,"tflops_q3":0.7790,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1279,"tflops_q1":0.1278,"tflops_q3":0.1286,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":1024,"warmup":20,"iters":20,"tflops_median":0.8659,"tflops_q1":0.8631,"tflops_q3":0.8701,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":2048,"warmup":20,"iters":20,"tflops_median":0.9291,"tflops_q1":0.9264,"tflops_q3":0.9343,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1262,"tflops_q1":0.1261,"tflops_q3":0.1262,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":2048,"warmup":20,"iters":20,"tflops_median":0.8025,"tflops_q1":0.7881,"tflops_q3":0.8575,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=8 run=2 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=8
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":512,"warmup":20,"iters":20,"tflops_median":0.2941,"tflops_q1":0.2913,"tflops_q3":0.2991,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1334,"tflops_q1":0.1333,"tflops_q3":0.1336,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":512,"warmup":20,"iters":20,"tflops_median":0.1001,"tflops_q1":0.0916,"tflops_q3":0.1668,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":1024,"warmup":20,"iters":20,"tflops_median":0.6711,"tflops_q1":0.6233,"tflops_q3":0.7405,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1283,"tflops_q1":0.1283,"tflops_q3":0.1284,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":1024,"warmup":20,"iters":20,"tflops_median":0.7172,"tflops_q1":0.6765,"tflops_q3":0.7609,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":2048,"warmup":20,"iters":20,"tflops_median":0.8993,"tflops_q1":0.8893,"tflops_q3":0.9136,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1298,"tflops_q1":0.1297,"tflops_q3":0.1298,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":2048,"warmup":20,"iters":20,"tflops_median":0.6656,"tflops_q1":0.6549,"tflops_q3":0.6732,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=8 run=3 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=8
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":512,"warmup":20,"iters":20,"tflops_median":0.1188,"tflops_q1":0.0816,"tflops_q3":0.1805,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1296,"tflops_q1":0.1295,"tflops_q3":0.1315,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":512,"warmup":20,"iters":20,"tflops_median":0.1139,"tflops_q1":0.0791,"tflops_q3":0.1607,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":1024,"warmup":20,"iters":20,"tflops_median":0.6518,"tflops_q1":0.6238,"tflops_q3":0.7131,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1321,"tflops_q1":0.1320,"tflops_q3":0.1321,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":1024,"warmup":20,"iters":20,"tflops_median":0.7203,"tflops_q1":0.6736,"tflops_q3":0.8104,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":2048,"warmup":20,"iters":20,"tflops_median":0.9120,"tflops_q1":0.9055,"tflops_q3":0.9154,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1301,"tflops_q1":0.1300,"tflops_q3":0.1302,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":2048,"warmup":20,"iters":20,"tflops_median":0.8461,"tflops_q1":0.8365,"tflops_q3":0.8623,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=10 run=1 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=10
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":512,"warmup":20,"iters":20,"tflops_median":0.1729,"tflops_q1":0.1403,"tflops_q3":0.2105,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1296,"tflops_q1":0.1296,"tflops_q3":0.1297,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":512,"warmup":20,"iters":20,"tflops_median":0.1509,"tflops_q1":0.1199,"tflops_q3":0.1885,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":1024,"warmup":20,"iters":20,"tflops_median":0.3105,"tflops_q1":0.3049,"tflops_q3":0.3229,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1285,"tflops_q1":0.1284,"tflops_q3":0.1285,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":1024,"warmup":20,"iters":20,"tflops_median":0.3208,"tflops_q1":0.3149,"tflops_q3":0.3380,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":2048,"warmup":20,"iters":20,"tflops_median":1.0710,"tflops_q1":1.0530,"tflops_q3":1.0867,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1270,"tflops_q1":0.1270,"tflops_q3":0.1271,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":2048,"warmup":20,"iters":20,"tflops_median":0.8187,"tflops_q1":0.7791,"tflops_q3":0.8529,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=10 run=2 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=10
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":512,"warmup":20,"iters":20,"tflops_median":0.1814,"tflops_q1":0.1661,"tflops_q3":0.2031,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1354,"tflops_q1":0.1334,"tflops_q3":0.1355,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":512,"warmup":20,"iters":20,"tflops_median":0.2637,"tflops_q1":0.2615,"tflops_q3":0.2851,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":1024,"warmup":20,"iters":20,"tflops_median":0.3080,"tflops_q1":0.3007,"tflops_q3":0.3219,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1288,"tflops_q1":0.1287,"tflops_q3":0.1288,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":1024,"warmup":20,"iters":20,"tflops_median":0.8099,"tflops_q1":0.7130,"tflops_q3":0.8661,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":2048,"warmup":20,"iters":20,"tflops_median":1.0641,"tflops_q1":1.0520,"tflops_q3":1.0803,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1270,"tflops_q1":0.1270,"tflops_q3":0.1271,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":2048,"warmup":20,"iters":20,"tflops_median":0.8020,"tflops_q1":0.7861,"tflops_q3":0.8429,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=10 run=3 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=10
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":512,"warmup":20,"iters":20,"tflops_median":0.1947,"tflops_q1":0.1658,"tflops_q3":0.2109,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1314,"tflops_q1":0.1313,"tflops_q3":0.1315,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":512,"warmup":20,"iters":20,"tflops_median":0.1501,"tflops_q1":0.1339,"tflops_q3":0.1745,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":1024,"warmup":20,"iters":20,"tflops_median":0.3061,"tflops_q1":0.2887,"tflops_q3":0.3315,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1287,"tflops_q1":0.1285,"tflops_q3":0.1287,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":1024,"warmup":20,"iters":20,"tflops_median":0.5732,"tflops_q1":0.5452,"tflops_q3":0.6637,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":10,"size":2048,"warmup":20,"iters":20,"tflops_median":1.0602,"tflops_q1":1.0469,"tflops_q3":1.0736,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1299,"tflops_q1":0.1299,"tflops_q3":0.1300,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":10,"size":2048,"warmup":20,"iters":20,"tflops_median":0.7821,"tflops_q1":0.7515,"tflops_q3":0.8186,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=16 run=1 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=16
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":512,"warmup":20,"iters":20,"tflops_median":0.2897,"tflops_q1":0.2479,"tflops_q3":0.3011,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1295,"tflops_q1":0.1295,"tflops_q3":0.1316,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":512,"warmup":20,"iters":20,"tflops_median":0.2998,"tflops_q1":0.2725,"tflops_q3":0.3267,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4926,"tflops_q1":0.4779,"tflops_q3":0.5299,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1288,"tflops_q1":0.1288,"tflops_q3":0.1289,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":1024,"warmup":20,"iters":20,"tflops_median":0.5214,"tflops_q1":0.4975,"tflops_q3":0.5407,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":2048,"warmup":20,"iters":20,"tflops_median":0.5747,"tflops_q1":0.5726,"tflops_q3":0.5825,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1318,"tflops_q1":0.1318,"tflops_q3":0.1319,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":2048,"warmup":20,"iters":20,"tflops_median":0.5728,"tflops_q1":0.5604,"tflops_q3":0.5818,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=16 run=2 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=16
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":512,"warmup":20,"iters":20,"tflops_median":0.3265,"tflops_q1":0.3016,"tflops_q3":0.3472,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1293,"tflops_q1":0.1292,"tflops_q3":0.1294,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":512,"warmup":20,"iters":20,"tflops_median":0.2414,"tflops_q1":0.2157,"tflops_q3":0.2758,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4938,"tflops_q1":0.4727,"tflops_q3":0.5027,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1276,"tflops_q1":0.1275,"tflops_q3":0.1276,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4971,"tflops_q1":0.4637,"tflops_q3":0.5194,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":2048,"warmup":20,"iters":20,"tflops_median":0.5746,"tflops_q1":0.5656,"tflops_q3":0.5875,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1268,"tflops_q1":0.1268,"tflops_q3":0.1269,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":2048,"warmup":20,"iters":20,"tflops_median":0.5591,"tflops_q1":0.5497,"tflops_q3":0.5694,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=16 run=3 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=16
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":512,"warmup":20,"iters":20,"tflops_median":0.2687,"tflops_q1":0.2366,"tflops_q3":0.2994,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1318,"tflops_q1":0.1318,"tflops_q3":0.1319,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":512,"warmup":20,"iters":20,"tflops_median":0.2244,"tflops_q1":0.1988,"tflops_q3":0.2595,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4881,"tflops_q1":0.4770,"tflops_q3":0.5007,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1324,"tflops_q1":0.1324,"tflops_q3":0.1324,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":1024,"warmup":20,"iters":20,"tflops_median":0.4967,"tflops_q1":0.4855,"tflops_q3":0.5243,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":2048,"warmup":20,"iters":20,"tflops_median":0.5969,"tflops_q1":0.5719,"tflops_q3":0.6604,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1273,"tflops_q1":0.1273,"tflops_q3":0.1273,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":2048,"warmup":20,"iters":20,"tflops_median":0.5685,"tflops_q1":0.5606,"tflops_q3":0.5776,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=20 run=1 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=20
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":512,"warmup":20,"iters":20,"tflops_median":0.2652,"tflops_q1":0.2590,"tflops_q3":0.3049,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1297,"tflops_q1":0.1297,"tflops_q3":0.1317,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":512,"warmup":20,"iters":20,"tflops_median":0.2612,"tflops_q1":0.2357,"tflops_q3":0.3765,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":1024,"warmup":20,"iters":20,"tflops_median":0.5305,"tflops_q1":0.5197,"tflops_q3":0.5532,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1286,"tflops_q1":0.1285,"tflops_q3":0.1287,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":1024,"warmup":20,"iters":20,"tflops_median":0.5676,"tflops_q1":0.5556,"tflops_q3":0.6094,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":2048,"warmup":20,"iters":20,"tflops_median":0.6928,"tflops_q1":0.6712,"tflops_q3":0.7071,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1298,"tflops_q1":0.1298,"tflops_q3":0.1299,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":2048,"warmup":20,"iters":20,"tflops_median":0.6907,"tflops_q1":0.6808,"tflops_q3":0.7029,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=20 run=2 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=20
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":512,"warmup":20,"iters":20,"tflops_median":0.2957,"tflops_q1":0.2568,"tflops_q3":0.3230,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1339,"tflops_q1":0.1338,"tflops_q3":0.1340,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":512,"warmup":20,"iters":20,"tflops_median":0.2558,"tflops_q1":0.2276,"tflops_q3":0.3072,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":1024,"warmup":20,"iters":20,"tflops_median":0.5347,"tflops_q1":0.5131,"tflops_q3":0.5508,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1289,"tflops_q1":0.1288,"tflops_q3":0.1289,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":1024,"warmup":20,"iters":20,"tflops_median":0.6763,"tflops_q1":0.6189,"tflops_q3":0.7314,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":2048,"warmup":20,"iters":20,"tflops_median":0.7035,"tflops_q1":0.6931,"tflops_q3":0.7126,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1270,"tflops_q1":0.1269,"tflops_q3":0.1270,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":2048,"warmup":20,"iters":20,"tflops_median":0.6886,"tflops_q1":0.6675,"tflops_q3":0.7059,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=20 run=3 ==
+oss-gemm-compare: commit=unknown hw=linux/aarch64 (20 logical cores) rayon_threads=20
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":512,"warmup":20,"iters":20,"tflops_median":0.2422,"tflops_q1":0.2296,"tflops_q3":0.2637,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":512,"warmup":20,"iters":20,"tflops_median":0.1318,"tflops_q1":0.1317,"tflops_q3":0.1319,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":512,"warmup":20,"iters":20,"tflops_median":0.3786,"tflops_q1":0.3024,"tflops_q3":0.4750,"output_match":true,"mismatch_detail":null}
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":1024,"warmup":20,"iters":20,"tflops_median":0.5406,"tflops_q1":0.5210,"tflops_q3":0.5525,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1024,"warmup":20,"iters":20,"tflops_median":0.1286,"tflops_q1":0.1285,"tflops_q3":0.1286,"output_match":false,"mismatch_detail":"matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":1024,"warmup":20,"iters":20,"tflops_median":0.5987,"tflops_q1":0.5694,"tflops_q3":0.6359,"output_match":true,"mismatch_detail":null}
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=2048 出力不一致（gemm crate）: gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":20,"size":2048,"warmup":20,"iters":20,"tflops_median":0.7078,"tflops_q1":0.7012,"tflops_q3":0.7154,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":2048,"warmup":20,"iters":20,"tflops_median":0.1268,"tflops_q1":0.1267,"tflops_q3":0.1268,"output_match":false,"mismatch_detail":"matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274"}
+{"date":"2026-09-04","commit":"unknown","hw":"linux/aarch64 (20 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":20,"size":2048,"warmup":20,"iters":20,"tflops_median":0.6987,"tflops_q1":0.6823,"tflops_q3":0.7064,"output_match":false,"mismatch_detail":"gemm: index=7264 reference=-0.004956358 candidate=-0.0049700737 abs_diff=0.000013715588 rel_diff=0.0027596347"}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+SWEEP_DONE

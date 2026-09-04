@@ -139,3 +139,25 @@ bench-candle v0.1.0 (bench-candle)
 bench-fandhe v0.1.0 (bench-fandhe)
 ├── bench-common v0.1.0 (bench-common)
 └── fandhe-ai v0.6.0 (path: crates/facade @ bb7e35a)
+
+# 環境 14: DGX Spark GB10（GEMM 目標達成ゲート #1117 の 5 回計測再計測・イシュー #1148。CPU device 拡張）
+# NVIDIA driver 580.173.02 / CUDA 13.0 V13.0.88 (nvcc) / rustc 1.97.0 (2d8144b78 2026-07-07) / cargo 1.97.0 (c980f4866 2026-06-30)
+# 単一系列（fandhe-ai =0.6.0。registry 解決。§0 の diff 確認により CPU GEMM 本番経路が
+# v0.6.0 と HEAD で同一のため参考系列は計測していない）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0
+bench-candle v0.1.0 (bench-candle)
+├── bench-common v0.1.0 (bench-common)
+└── candle-core v0.11.0
+
+# 環境 15: Apple M4 Max（GEMM 目標達成ゲート #1117 の 5 回計測再計測・イシュー #1148。CPU device 拡張）
+# macOS / rustc 1.96.0 (ac68faa20 2026-05-25) / cargo 1.96.0 (30a34c682 2026-05-25)
+# 単一系列（fandhe-ai =0.6.0。registry 解決。§0 の diff 確認により CPU GEMM 本番経路が
+# v0.6.0 と HEAD で同一のため参考系列は計測していない）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0
+bench-candle v0.1.0 (bench-candle)
+├── bench-common v0.1.0 (bench-common)
+└── candle-core v0.11.0
