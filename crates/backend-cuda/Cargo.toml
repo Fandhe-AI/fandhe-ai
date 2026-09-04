@@ -222,6 +222,23 @@ required-features = ["internal-diagnostics"]
 name = "specialized_mma_f16_triage"
 required-features = ["internal-diagnostics"]
 
+[[test]]
+# イシュー #1159・PR #1181 codex-review P2 指摘の是正: GB10 sweep 証跡
+# （`docs/perf/logs/specialized-mma-f16-sweep-1159/README.md`）を生成した
+# 一時診断テストが git 管理外のまま破棄され、ソース参照先が Issue コメント
+# のみだったため将来コメントへアクセスできない環境では再現できない、との
+# 指摘。前身ファイルと同名パスで本テストを追加し自己完結再現可能にした
+# （前身ファイルのソース自体は保存されておらずバイト単位の再現ではない。
+# 詳細は本ファイル冒頭コメント参照）。`run_specialized_mma_f16`・
+# `CudaMmaGemm` を使うため `specialized_mma_parity`（上記）と同じ理由で
+# `internal-diagnostics` feature を要求する。`cargo test --workspace`
+# （feature 未指定）では対象外としてスキップされ、`cargo test
+# --all-features`（CI の test ジョブ・`make test` が使うコマンド）でのみ
+# ビルド・実行される。診断専用（受け入れ判定には使わない。
+# `specialized_mma_parity.rs` は無変更）。
+name = "specialized_mma_f16_sweep_1159"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート
