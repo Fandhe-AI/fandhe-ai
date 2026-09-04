@@ -1,0 +1,60 @@
+イシュー #1162 GB10 実測環境（specialized_mma_f16 切り分け（#1155）・
+specialized_mma_parity バイナリ 2 回実行・全 internal-diagnostics sweep）
+
+計測日時（JST）: 2026-09-05（実行開始 07:2x〜。full_sweep.log 参照）
+
+GPU: NVIDIA GB10（sm_121）
+driver_version: 580.173.02
+nvcc: Build cuda_13.0.r13.0/compiler.36424714_0（CUDA 13.0）
+rustc: 1.97.0 (2d8144b78 2026-07-07)
+
+転送元コミット（.rev-stamp 一致確認済み）:
+  c48d5fcf6459e212e6f03dc1884a91934cfd2341
+  （origin/main HEAD。test(backend-cuda): 厳密ゼロ fail 不成立形状を
+  ParityBaseline 非後退方式へ再割り当てる〈#1194〉を含む）
+
+GPU 排他性確認（実行前。utilization.gpu = 0%）:
+  常駐プロセス（idle 判定済み・停止していない）:
+    - ComfyUI（/opt/llm-infra/comfyui-env/bin/python）: 170 MiB
+    - Kokoro（/opt/llm-infra/venvs/kokoro/bin/python3）: 870 MiB
+  他セッションの cargo/rustc アクティブプロセス: なし
+
+実行コマンド（Step 2: #1155 切り分け）:
+  cd ~/work/rust-ai-library-run
+  PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+  CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+    --test specialized_mma_f16_triage specialized_mma_f16_triage_exact_integer_inputs \
+    -- --ignored --nocapture --test-threads=1
+  （triage_exact_integer.log）
+
+  同様に specialized_mma_f16_triage_dump を実行（triage_dump.log）
+
+実行コマンド（Step 3: 対象バイナリ単独 2 回）:
+  cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+    --test specialized_mma_parity -- --ignored --nocapture --test-threads=1
+  （specialized_mma_parity_run1.log／run2.log。各回 5 passed; 0 failed）
+
+  非 ignore smoke（同バイナリ）:
+  cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+    --test specialized_mma_parity -- --test-threads=1
+  （2 passed; 0 failed; 5 ignored）
+
+実行コマンド（Step 4: 全 sweep。長時間のため setsid nohup で切り離し）:
+  setsid nohup env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+    --no-fail-fast -- --ignored --test-threads=1 \
+    > $HOME/work/sweep-1162.log 2>&1 < /dev/null &
+  （full_sweep.log。実行時間の内訳は同ログの `finished in` 行を参照。
+  `large_buffer_percall_alloc_ab_record`〈#1149〉のみで実測 2590.77 秒
+  （既知の長時間テスト。docs/perf/logs/cuda-gemm-mma-f16-pool-1153/
+  ab-1149-run1.log 参照）を要するため、sweep 全体は長時間に及ぶ）
+
+GPU 排他性確認（実行後。差分なし）:
+  utilization.gpu = 0%（sweep 完了直後の再確認値）
+  常駐プロセスのメモリ使用量は実行前と不変
+
+秘密情報・実ホスト名の混入確認: 本ディレクトリ配下を
+`grep -rniE 'spark|local\.fandhe|[0-9]{1,3}(\.[0-9]{1,3}){3}'` で検査し
+0 件（実ホスト名スクラブ済み）。

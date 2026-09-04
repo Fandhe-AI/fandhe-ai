@@ -1,0 +1,13 @@
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.38s
+     Running tests/specialized_mma_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/specialized_mma_parity-d45052ace2ff572d)
+
+running 5 tests
+test specialized_mma_f16_handles_k_zero_noop_with_misaligned_n ... ok
+test specialized_mma_f16_matches_default_and_reference_across_shapes ... ok
+test specialized_mma_f16_static_mnk_rejects_mismatched_launch_shape ... ok
+test specialized_mma_f16_static_nk_reuses_across_dynamic_m ... ok
+test specialized_mma_kernel_handle_compile_reuses_process_local_module_cache ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.71s
+

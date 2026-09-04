@@ -62,6 +62,11 @@ sm_121・2026 年 8 月時点実測）。関連: `docs/perf/cuda-tensor-core-mea
 | `mma_tf32` | `CudaMmaTf32Gemm::run_tf32` | 4096×4096×4096 | 9001 | 2723936/16777216 (16.2%) | 4.446e-3 | `gemm_mma_tf32.rs::mma_tf32_k4096_stress`（イシュー #1122） |
 | `mma_tf32_vs_wmma_tf32_staged` | `CudaMmaTf32Gemm::run_tf32` vs `CudaGemm::run_wmma_tf32` | 512×512×512 | 6002 | 7/262144 (0.003%) | 6.919e-6 | `mma_tf32_vs_wmma_tf32_staged.rs::mma_tf32_matches_wmma_tf32_staged_across_shapes`（idx=2。イシュー #1122） |
 | `mma_tf32_vs_wmma_tf32_staged` | `CudaMmaTf32Gemm::run_tf32` vs `CudaGemm::run_wmma_tf32` | 4096×4096×4096 | 9002 | 50074/16777216 (0.30%) | 1.617e-4 | `mma_tf32_vs_wmma_tf32_staged.rs::mma_tf32_matches_wmma_tf32_staged_k4096_stress`（イシュー #1122） |
+| `specialized_mma_f16` | `gemm_auto::run_specialized_mma_f16`（`internal-diagnostics` feature ゲート。`CompiledDims::DYNAMIC_ALL`） | 256×512×1024 | 4003 | 30/131072 (0.02%) | 1.011e-5 | `specialized_mma_parity.rs::specialized_mma_f16_matches_default_and_reference_across_shapes`（idx=3。#1159 sweep。`docs/perf/logs/specialized-mma-f16-sweep-1159/`） |
+| `specialized_mma_f16` | `gemm_auto::run_specialized_mma_f16`（`internal-diagnostics` feature ゲート。`CompiledDims::STATIC_NK`） | 256×512×1024 | 4003 | 30/131072 (0.02%) | 1.011e-5 | `specialized_mma_parity.rs::specialized_mma_f16_matches_default_and_reference_across_shapes`（idx=3。#1159 sweep。3 プリセット同値は bit 一致契約による） |
+| `specialized_mma_f16` | `gemm_auto::run_specialized_mma_f16`（`internal-diagnostics` feature ゲート。`CompiledDims::STATIC_MNK`） | 256×512×1024 | 4003 | 30/131072 (0.02%) | 1.011e-5 | `specialized_mma_parity.rs::specialized_mma_f16_matches_default_and_reference_across_shapes`（idx=3。#1159 sweep。3 プリセット同値は bit 一致契約による） |
+
+上表の `total`・ceiling は `crates/backend-cuda/tests/common/parity_baseline.rs::BASELINES` の該当行を正とし、表は §4 の 4 桁表記に丸めている（`specialized_mma_f16` 3 行の詳細な切り分け・#1161 再割り当て内容・GB10 最終 sweep 確認は §13 参照）。
 
 **ルーティング変更（PR #678 codex-review P1 指摘対応・イシュー #500）**:
 `wmma_tf32_opt` 行は記録時点（#500 の staged カーネル追加前）ではエント
@@ -1806,6 +1811,7 @@ DGX Spark GB10（sm_121・CUDA 13.0）。release ビルド・`--test-threads=1`�
 - `specialized_mma_parity.rs` の 256×512×1024 ケースの baseline 非後退方式
   への再割り当て（新規 `ParityBaseline` 行の実機実測が必要。
   `docs/backend-cuda-real-device-testing.md` §5.3 項目 4 の残作業と統合可）。
+  → イシュー #1161（PR #1194）で反映済み。記録は §13。
 - いずれも本 PR では実施せず、イシューコメントで提案し、push・PR 作成後の
   後続エージェント／ユーザー承認へ引き継ぐ。
 
@@ -1840,3 +1846,280 @@ diagnostics`・`#[ignore]`）は `MmaF16` 行の両 ceiling が本記録時点�
 PRODUCTION_ENABLED` を `false`（#1156 以前と同じ wmma 優先）へ差し
 戻した（`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0）。上記の
 実測記録（性能 A/B・parity 非後退）自体は有効なまま維持する。
+
+## 13. イシュー #1134: specialized_mma_f16 の GB10 fail 切り分け・baseline 再割り当て（#1155・#1159・#1161・#1162）
+
+本節は #1134（親）配下の #1155（切り分け）・#1159（残り形状 sweep）・
+#1161（baseline 再割り当て）・#1162（本節の記録・最終 sweep 確認）を
+まとめて記録する。
+
+### 13.1 検出
+
+#1102 最終 GB10 sweep（main `1a32082`・sm_121・2026-09-03・`cargo test -p
+fandhe-ai-backend-cuda --release --features internal-diagnostics
+--no-fail-fast -- --ignored --test-threads=1`）で、`specialized_mma_
+parity.rs::specialized_mma_f16_matches_default_and_reference_across_shapes`
+（`internal-diagnostics` feature 限定）が `(256, 512, 1024)` の
+`DYNAMIC_ALL` プリセットで CPU 参照との複合判定（`assert_parity`。厳密
+ゼロ fail 判定）に FAIL した（`fail_count=30/131072, max_abs_diff=1.562e-2,
+max_rel_err=3.341e-2, mean_abs_diff=1.011e-5`）。既定カーネル
+（`CudaMmaGemm::run_f16`）との bit 一致検査は当該形状でも pass しており、
+shape 特化カーネル自体の欠陥ではないことは検出時点で確認済みだった。
+`assert_parity` が最初の fail で panic する契約のため、同形状の
+`STATIC_NK`/`STATIC_MNK` と後続 6 形状は#1102 時点では未評価のまま残った。
+親イシュー #1134 がこの事象を起票し、#1155（切り分け）→ #1159（残り形状
+sweep）→ #1161（baseline 再割り当て）→ #1162（本節・最終確認）の順で
+ツリー化された。
+
+### 13.2 実測環境
+
+DGX Spark GB10（sm_121・CUDA 13.0・driver 580.173.02）。nvcc
+`Build cuda_13.0.r13.0/compiler.36424714_0`。rustc 1.97.0
+(2d8144b78 2026-07-07)。`--release`・`--locked`・`--test-threads=1`。
+実機実測は #1159（2026-09-04 08:30〜08:42 JST）・#1162（2026-09-05。
+本節）の 2 ラウンド（内部ホスト名は記載しない。`docs/real-hardware-
+verification-env.md` 参照）。
+
+### 13.3 #1155 切り分け（GB10 実機実行。2026-09-05）
+
+診断専用テスト `crates/backend-cuda/tests/specialized_mma_f16_triage.rs`
+（`#[ignore]`・`internal-diagnostics`。受け入れ判定には使わない）を
+本イシュー（#1162）で初めて GB10 実機で実行した（PR #1180 時点では
+未実行のまま申し送りされていた）。
+
+**(i) 整数厳密入力テスト（決定的証拠）**: `specialized_mma_f16_triage_
+exact_integer_inputs` は A・B の要素を `{-1, 0, +1}`（f16・f32 とも厳密
+表現・累算も |部分和| ≤ K=1024 の範囲で厳密）にした入力で、`(256,512,1024)`・
+`(128,256,128)`・`(200,264,104)` の 3 形状について既定カーネル
+（`run_f16`）・特化カーネル（`DYNAMIC_ALL`）いずれも CPU 参照との
+**mismatch 0 件**（`mismatches (up to 40): []`）を確認した（`ok`。1
+passed）。累算順序・Tensor Core 内部精度に依らず bit 一致が要求される
+入力で不一致が皆無であったため、機能欠陥（インデックス・境界・store
+誤り等）の証跡は見つからなかった。
+
+**(ii) 統計的証拠（主ダンプ）**: `specialized_mma_f16_triage_dump` は
+`(256,512,1024)` の fail 座標を厳密値（f64 逐次計算）基準で分析した:
+
+- fail_count=30/131072（seed=4003。#1134/#1159 記録値と完全一致）のうち
+  18 件が |厳密値| < 1e-2 の小さい打ち消し合いセルに集中し、全 30 件が
+  「GPU 誤差 ≤ 2×CPU 参照誤差、または極小値」の範囲に収まる
+  （`gpu_err<=2x_cpu_err_or_tiny=30`）。ULP 距離（f16 単位）は 10/30 件が
+  `ulp(gpu,exact)<=1`、最大でも 44 ULP 相当（value=3.575e-4 付近の極小値
+  セルのみ）
+  - fail 座標の `row%16` ヒストグラム: `[0,3,3,2,2,1,1,3,4,1,3,2,0,2,1,2]`、
+    `col%8`: `[4,3,2,2,5,6,5,3]`、`row%BM(64)`・`col%BN(128)` も 0〜2 件で
+    幅広く分散しており、m16n8k16 フラグメント境界・ブロックタイル境界
+    （`BM=64`/`BN=128`）への明確な偏りは観測されなかった
+  - 追加 seed（7101・7102・7103）でも fail_count は 15〜20/131072 の同水準
+    で再現し、コントロール形状 `(128,256,128)` seed=4002 は fail_count=0
+    で一貫して pass した
+
+**結論（本イシューで初めて GB10 実測により確定）**: 決定的証拠
+（整数厳密入力で mismatch 0 件）と統計的証拠（fail セルが小さい打ち消し
+合い値に集中し ULP レベルの乖離・境界への偏りなし）の双方が「機能欠陥の
+証跡なし」を支持する。`(256,512,1024)` の恒常 fail は f16 出力丸め・
+Tensor Core 内部アキュムレート順序（CPU 参照の逐次 k 昇順とは異なる部分
+和蓄積順序）に由来するという既存の推定（`ParityPath::SpecializedMmaF16`
+ドキュメンテーションコメント）と整合する結果であり、本節はこれを実機
+実測で裏付ける（`WmmaTf32Opt`〈#1106〉・`MmaTf32`〈#1122〉の同種切り分け
+と同型の結論）。ただし本切り分けは統計的傍証と決定的証拠（整数入力）の
+組合せによる推定の強化であり、TF32 の `round_to_tf32_rna` 相当のような
+f16 側の解析的な事前丸め一致証明（#1122 の (b) 手法に相当するもの）は
+実施していない点は限界として明記する。
+
+証跡: `docs/perf/logs/specialized-mma-f16-sweep-1162/triage_exact_
+integer.log`・`triage_dump.log`。
+
+### 13.4 #1159 全形状評価（先行実測・2026-09-04）
+
+`assert_parity` の panic を `catch_unwind` で捕捉して継続評価する診断
+テスト（`crates/backend-cuda/tests/specialized_mma_f16_sweep_1159.rs`）を
+GB10 実機で 2 回実行し、`check_cpu_reference=true` の 8 形状 × 3 プリセット
+（24 組）を評価した。
+
+| (形状) | プリセット | 判定 | fail_count/total | max_abs_diff | mean_abs_diff |
+|---|---|---|---|---|---|
+| (64,128,32) | 3 プリセット共通 | 厳密ゼロ fail 成立 | 0/8192 | — | — |
+| (128,256,128) | 3 プリセット共通 | 厳密ゼロ fail 成立 | 0/32768 | — | — |
+| (40,24,72) | 3 プリセット共通 | 厳密ゼロ fail 成立 | 0/960 | — | — |
+| (65,136,40) | 3 プリセット共通 | 厳密ゼロ fail 成立 | 0/8840 | — | — |
+| (63,120,24) | 3 プリセット共通 | 厳密ゼロ fail 成立 | 0/7560 | — | — |
+| (200,264,104) | 3 プリセット共通 | 厳密ゼロ fail 成立 | 0/52800 | — | — |
+| (1,136,40) | 3 プリセット共通 | 厳密ゼロ fail 成立 | 0/136 | — | — |
+| **(256,512,1024)** | DYNAMIC_ALL/STATIC_NK/STATIC_MNK 共通 | **不成立** | 30/131072 (0.02%) | 1.562500e-2 | 1.010961e-5 |
+
+21 組（7 形状 × 3 プリセット）が厳密ゼロ fail 成立、3 組
+（`(256,512,1024)` × 3 プリセット）が不成立。3 プリセットで統計が完全
+一致するのは、特化カーネルが既定カーネルと bit 一致する契約（本表全
+30 行 × 3 プリセット = 全 bit 一致検査対象で確認済み）により比較対象
+バイト列が同一だからである。2 回の実行（run1/run2）は全 `TRIAGE_ROW`/
+`SWEEP_BITMATCH`/`SWEEP_SUMMARY` 行（各 55 行）が完全一致した。詳細は
+`docs/perf/logs/specialized-mma-f16-sweep-1159/README.md` を正とし本節
+では要約に留める。
+
+### 13.5 #1161 再割り当て内容
+
+上記 13.3・13.4 の結果に基づき、`crates/backend-cuda/tests/common/
+parity_baseline.rs` へ `ParityPath::SpecializedMmaF16` を追加し、
+`(256,512,1024)`（3 プリセット分・各 `total=131072`）の baseline 行を
+`BASELINES` へ追加した:
+
+| プリセット | fail_count | mean_abs_diff ceiling | max_abs_diff ceiling | max_rel_err ceiling |
+|---|---|---|---|---|
+| DYNAMIC_ALL | 30 | 1.010962e-5 | 1.562501e-2 | 3.341150e-2 |
+| STATIC_NK | 30 | 1.010962e-5 | 1.562501e-2 | 3.341150e-2 |
+| STATIC_MNK | 30 | 1.010962e-5 | 1.562501e-2 | 3.341150e-2 |
+
+ceiling は「表示桁最終桁 +1」規約（§4）に従う。`specialized_mma_parity.rs`
+の `specialized_mma_f16_matches_default_and_reference_across_shapes` は
+`(256,512,1024)` のみ `compare` + `assert_no_parity_regression`（非後退
+方式）へ切り替え、他 7 形状は `assert_parity`（厳密ゼロ fail 判定）を
+維持した。`parity_nonregression.rs` の fixture 自己整合検査（8 経路化）
+も併せて更新した。tolerance 定数（`RELATIVE_TOLERANCE`/
+`ABSOLUTE_RESCUE_THRESHOLD`）・カーネル実装は変更していない。
+
+**承認記録**: 2026-09-04（JST）ユーザー承認。一次記録は PR #1194 の
+コメントおよびイシュー #1161 のコメント（承認した baseline 値は本表と
+一致）。判定方式の正は `docs/spec/04-requirements.md` REQ-2
+「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」（fandhe-ai-spec
+PR #63）。実装 PR は #1194（`c48d5fc`）。
+
+### 13.6 本イシュー（#1162）の GB10 最終確認
+
+#### 13.6.1 「sweep 全体が pass」の解釈（Issue 文面からの逸脱の明示）
+
+`internal-diagnostics` feature 限定の GB10 sweep（`cargo test -p
+fandhe-ai-backend-cuda --release --locked --features internal-diagnostics
+--no-fail-fast -- --ignored --test-threads=1`）は、`docs/perf/cuda-parity-
+baseline.md` §10.7.3 が「本体維持＋非後退併設」として意図的に恒常 red の
+まま確定させている 5 件（K=4096 系 f16/tf32 ストレス・opt-in 配線検証）を
+含む backend-cuda 全 integration test を実行するため、字義どおりの
+「sweep 全体が pass」は成立しない。本イシューは受け入れを次のとおり
+明示的に定義し直した（#1162 実装計画 §1.2 のとおり Issue 文面からの
+逸脱として記録する）:
+
+- **(a) `specialized_mma_parity` バイナリ単独**: `#[ignore]` 5 件・非
+  ignore 2 件が全 green で、対象テスト
+  `specialized_mma_f16_matches_default_and_reference_across_shapes`
+  を含め 2 回連続実行で pass（13.6.2）
+- **(b) 全 sweep**: FAIL はすべて既存ドキュメントに記録済みの既知 red へ
+  1 対 1 で対応づけられ、新規 FAIL がないことを確認する（13.6.3〜13.6.4）
+
+#### 13.6.2 `specialized_mma_parity` バイナリ単独 2 回実行
+
+`docs/perf/logs/specialized-mma-f16-sweep-1162/specialized_mma_parity_
+run1.log`・`run2.log`（`--ignored --nocapture --test-threads=1`）:
+
+```
+running 5 tests
+test specialized_mma_f16_handles_k_zero_noop_with_misaligned_n ... ok
+test specialized_mma_f16_matches_default_and_reference_across_shapes ... ok
+test specialized_mma_f16_static_mnk_rejects_mismatched_launch_shape ... ok
+test specialized_mma_f16_static_nk_reuses_across_dynamic_m ... ok
+test specialized_mma_kernel_handle_compile_reuses_process_local_module_cache ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out
+```
+
+2 回とも同一結果（`finished in 1.71s`／`1.32s`）。非 ignore smoke（同
+バイナリ、`--test-threads=1` のみ）も `2 passed; 0 failed; 5 ignored`
+で green。全 sweep（13.6.3）内でも同バイナリは `test result: ok. 5
+passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in
+1.32s`（`full_sweep.log`）で一致し、単独実行時と同一の pass 集合を確認
+した。
+
+#### 13.6.3 全 sweep 実測結果（`full_sweep.log`）
+
+46 テストバイナリ（lib unit test 1・integration test 42・example 3）を
+`--no-fail-fast`・`--test-threads=1` で実行し、**157 passed / 7 failed**
+（6 バイナリで FAIL を報告。残り 40 バイナリは全 green）。GPU 排他性は
+実行前後で不変（13.2・`env_info.txt`）。
+
+| # | テスト | 実測値 | 既知 red 対応（出典） |
+|---|---|---|---|
+| 1 | `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` | fail_count=101/65536, mean_abs_diff=7.646e-5 | §10.7.3・`docs/backend-cuda-real-device-testing.md` §5.3（本体維持＋非後退併設。PR #1115 codex-review P1） |
+| 2 | `cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress` | fail_count=99/65536, mean_abs_diff=7.562e-5 | 同上 |
+| 3 | `gemm_wmma_f16_opt.rs::wmma_f16_opt_k4096_stress` | fail_count=81/65536, mean_abs_diff=7.627e-5 | 同上 |
+| 4 | `gemm_tf32_optin.rs::gemm_tf32_optin_on_matches_cpu_across_shapes` | fail_count=42298/262144, mean_abs_diff=1.569e-3 | 同上（`docs/backend-cuda-real-device-testing.md` §5.3 項目 3。TF32 経路実機再測定は revert 時点で未実施のまま次ラウンドへ引き継がれていた residual） |
+| 5 | `tensor_core_real_device.rs::tensor_core_parity_record`（tf32 部分） | fail_count=42493/262144, mean_abs_diff=1.574e-3 | 同上（`WmmaTf32Opt` 512×512×512 seed=0x7A0 baseline 行と完全一致） |
+| 6 | `tensor_core_real_device.rs::tensor_core_tflops_record` | 本番 f16 経路（`wmma_f16_opt`。カーネル単体 4.539 TFLOPS）が tiled f32（10.269 TFLOPS）を上回らず FAIL | `docs/perf/cuda-wmma-f16-perf-triage.md` §8.3 に明記済みの期待挙動: `MMA_PRIORITY_PRODUCTION_ENABLED = false`（PR #1179 codex-review 指摘により差し戻し済み・§12.6 参照）のまま実行すると比較対象が `wmma_f16_opt` に戻り本 assert は red のまま。mma 優先へ一時フリップした計測（同 §8.3・#1131）でのみ pass する設計 |
+| 7 | `gemm_tiled.rs::tiled_f32_outperforms_naive_at_4096` | speedup=0.235x（要求 1.1x 以上。naive_median=0.127833s, tiled_median=0.543063s） | **新規 FAIL（既存ドキュメントに対応する記録なし）。13.6.4 参照** |
+
+上記 1〜5 は `docs/backend-cuda-real-device-testing.md` §5.3 の恒常 fail
+8 件のうち #1106 で非後退監視を併設した後も `assert_parity` 本体を
+revert 済みで維持している 5 件（同ドキュメント同節 2 番目の項目）と
+完全に一致する。6 は性能プロトコルであり `MmaF16`/`WmmaF16` の baseline
+非後退・厳密ゼロ fail 判定（parity）とは無関係の既知事象。7 のみ本イシュー
+時点で対応する既存記録がない。
+
+#### 13.6.4 新規 FAIL: `gemm_tiled.rs::tiled_f32_outperforms_naive_at_4096`
+
+`docs/backend-cuda-real-device-testing.md` §5.1 は本テストについて
+「単発（並列）実行では fail したが `--test-threads=1` 直列再実行では
+pass した（10.85s・speedup 要求 1.1x 以上を満たした）」と記録している。
+本イシューの実行はその §5.1 と同じ `--test-threads=1` 直列条件だが、
+`speedup=0.235x`（`naive_median=0.128s`・`tiled_median=0.543s`。tiled が
+naive よりも約 4.2 倍遅い）で FAIL した。事実のみを記録し、原因推定は
+行わない（本イシューのスコープ外・コード変更は行わない）:
+
+- 本テストは parity（数値一致）ではなく性能アサーション（`MIN_SPEEDUP =
+  1.1`。`gemm_tiled.rs` 冒頭）であり、tolerance 定数・`ParityBaseline`
+  とは無関係
+- GPU 排他性確認（13.2）は実行前後とも異常なし（常駐サービスのみ・
+  utilization.gpu=0%）
+- ログ順序上、本テストは重量級スイープ（`large_buffer_percall_alloc_
+  ab_1149.rs`〈702.99 秒〉・`large_buffer_percall_alloc_transfer_triage.rs`
+  〈185.29 秒〉）より**前**に実行されており、これらの重量級テストが
+  デバイスメモリプール状態に与えうる影響（`ReleaseThresholdGuard` 等）
+  との時系列的な前後関係はない
+- 是正（再実行による再現性確認・原因調査）は本イシューでは行わず、
+  イシューコメント（13.7 参照）で事実を報告するに留める
+
+#### 13.6.5 新規 FAIL の有無・受け入れ判定
+
+13.6.1 の定義に従い判定する:
+
+- (a) `specialized_mma_parity` バイナリ単独: **達成**（13.6.2）
+- (b) 全 sweep FAIL の既知 red 対応づけ: **1 件（13.6.4）を除き達成**。
+  `tiled_f32_outperforms_naive_at_4096` は本イシュー時点で新規 FAIL が
+  存在する。GEMM 性能改善・parity 非後退契約（本ドキュメントのスコープ）
+  への影響はなく、`specialized_mma_f16` 経路・`ParityPath::
+  SpecializedMmaF16` baseline・8 経路の fixture 自己整合検査（`parity_
+  nonregression.rs::parity_baselines_do_not_regress`）はいずれも green
+  である。したがって #1134 受け入れ条件 5 項目（13.7）の充足判定には
+  影響しないが、「sweep 全体 pass」の字義どおりの達成ではない点を明示
+  する
+
+### 13.7 結論・#1134 受け入れ条件の充足状況
+
+| # | #1134 受け入れ条件 | 状況 | 根拠 |
+|---|---|---|---|
+| 1 | GB10 実機で fail 要因を切り分け、カーネル欠陥でないこと（f16 出力丸め・アキュムレート順序由来）を証跡付きで確認する | **達成** | §13.3（整数厳密入力 mismatch 0 件・fail セルの統計的偏りなし。GB10 実機実行は本イシューが初回） |
+| 2 | spec REQ-2 に従い、厳密ゼロ fail が成立しない形状を `ParityBaseline` の非後退方式へ再割り当てする（baseline 行は GB10 実測値のみ・ユーザー承認必須） | **達成** | §13.5（#1161・PR #1194。ユーザー承認 2026-09-04） |
+| 3 | 同一 `cases` の残り 6 形状（3 プリセット）についても GB10 で評価し、成立形状は厳密ゼロ fail を維持する | **達成** | §13.4（#1159。21 組成立を確認。`specialized_mma_parity.rs` は該当 7 形状で `assert_parity` を維持） |
+| 4 | `docs/perf/cuda-parity-baseline.md` へ実測記録を追記する | **達成** | 本節（§13）・§3 表 3 行・§12.5 追記（本イシュー） |
+| 5 | 上記後、`--features internal-diagnostics -- --ignored --test-threads=1` の GB10 sweep で本テストが pass する | **達成（テスト単体）／sweep 全体は新規 FAIL 1 件あり** | §13.6.2（`specialized_mma_parity` バイナリ 2 回連続 green）。sweep 全体は§13.6.3〜13.6.5 のとおり `tiled_f32_outperforms_naive_at_4096`（性能・#1134 と無関係）が新規 FAIL |
+
+**結論**: #1134 の受け入れ条件 5 項目のうち、対象テスト自体
+（`specialized_mma_f16_matches_default_and_reference_across_shapes`）に
+関する 1〜5 はすべて満たされた。項目 5 の「GB10 sweep で pass する」を
+sweep 全体（backend-cuda 全 `#[ignore]` テスト）の文字どおりの意味で
+解釈すると、`docs/perf/cuda-parity-baseline.md` §10.7.3 の既知 red 5 件・
+性能プロトコルの既知事象 1 件に加え、本イシューで新規に検出した
+`tiled_f32_outperforms_naive_at_4096`（§13.6.4。parity 非後退契約・
+`specialized_mma_f16` 経路とは無関係の性能アサーション）により、字義
+どおりの「sweep 全体 pass」は未達である。#1134 のクローズ可否・新規
+FAIL の追跡要否はユーザー判断に委ねる（本イシューではクローズ操作・
+コード修正のいずれも行わない）。
+
+### 13.8 残課題・スコープ外
+
+- `ParityPath::MmaF16` 行の `max_abs_diff`／`max_rel_err` ceiling 提案
+  （§12.5）と `MMA_PRIORITY_PRODUCTION_ENABLED` の再有効化は本イシューの
+  対象外（既存の承認待ち事項。§12.6）
+- `gemm_tiled.rs::tiled_f32_outperforms_naive_at_4096` の新規 FAIL
+  （§13.6.4）の原因調査・是正・追跡 Issue 起票はユーザー判断へ委ねる
+  （本イシューでは事実の記録のみ）
+- #1155 の切り分け（§13.3）は統計的傍証と整数厳密入力の組合せによる
+  推定の強化に留まり、TF32 の `round_to_tf32_rna` 相当の解析的な事前
+  丸め一致証明（#1122 (b) 手法）は未実施

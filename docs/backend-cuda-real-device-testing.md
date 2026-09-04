@@ -267,6 +267,14 @@ fail であり、本イシューのスコープ内〈テスト実行・結果記
    `tensor_core_tflops_record`（性能プロトコル。並列実行時の GPU 競合による既知の不安定。§5.1・
    #391 系）はパリティ判定と無関係のため対象外のまま。
 
+   **追記（イシュー #1161・PR #1194）**: 上記のうち `specialized_mma_parity.rs::
+   specialized_mma_f16_matches_default_and_reference_across_shapes` は、8 形状 × 3 プリセット
+   のうち `(256,512,1024)` の 3 プリセットのみ `ParityPath::SpecializedMmaF16`（`crates/
+   backend-cuda/tests/common/parity_baseline.rs`）の baseline 非後退方式へ再割り当て済み。他 7
+   形状は厳密ゼロ fail 判定（`assert_parity`）を維持する。切り分け・全形状評価・最終 GB10 sweep
+   確認の記録は `docs/perf/cuda-parity-baseline.md` §13（イシュー #1134・#1155・#1159・#1161・
+   #1162）を参照。
+
 **追記（PR #1115 codex-review 再指摘対応）**: 上記 2 の `tensor_core_parity_record_tf32_non_regression`
 （`tensor_core_real_device.rs`）は、`wmma_tf32_opt_available()` の確認後に公開 API `run_wmma_tf32` を
 呼んでいたが、対象形状（512×512×512。`n%4==0 && k%4==0`）は整列条件を満たすため `run_wmma_tf32` の
