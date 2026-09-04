@@ -2,15 +2,28 @@
 //!
 //! `fandhe_ai_tensor_core::pool_core::SizeClassPool<H>`（ハンドル非依存の
 //! プール本体。`crates/tensor-core/src/pool_core.rs`）を `H =
-//! `[`CudaSliceHandle`]（`CudaSlice<f32>` を包む）として具体化し、
+//! `[`CudaSliceHandle`]（`CudaSlice<f32>`／`CudaSlice<f16>` のいずれかを
+//! 包む dtype 付き enum。下記「dtype 一般化」節）として具体化し、
 //! `gemm.rs`／`elementwise.rs`／`softmax.rs` の出力バッファ確保
 //! （`stream.alloc_zeros::<f32>(numel)` の直接呼び出し）を置き換える。
+//! f16 対応（`alloc_uninit_f16`／`upload_f16`。イシュー #1153）も
+//! 提供するが、`gemm_mma.rs::CudaMmaGemm::run_f16` の本番経路への結線は
+//! GB10 実機の before/after 計測で dim4096 が明確に後退したため見送った
+//! （`internal-diagnostics` feature 限定の診断入口としてのみ提供。
+//! `docs/perf/cuda-gemm-mma-f16-pool-wiring.md` §7 参照）。
 //!
 //! # 採用方式（`docs/backend-cuda-pool-allocator-decision.md` の要約）
 //!
 //! cudarc の stream-ordered 確保（driver プール。`cuMemAllocAsync`/
-//! `cuMemFreeAsync`）は本モジュールでは**能動的に使わない**（既存の
-//! `stream.alloc`/`stream.alloc_zeros` は同期 `cuMemAlloc` 系のまま）。
+//! `cuMemFreeAsync`）は本モジュールでは**能動的に使わない**（cudarc
+//! 0.19.8 の実挙動は `ctx.has_async_alloc` が真の環境では
+//! `stream.alloc`/`stream.alloc_zeros`/`clone_htod` 等も内部的に
+//! `cuMemAllocAsync` を使う〈`driver/safe/core.rs`。旧コメントは
+//! 「同期 `cuMemAlloc` 系のまま」と誤記していたが #1149
+//! 〈`docs/perf/cuda-percall-alloc-pool-threshold-ab.md` §8〉の指摘を
+//! 受けイシュー #1153 で是正〉。「能動的に使わない」の意味は、本モジュール
+//! が `cuMemAllocAsync` を明示選択する API を自ら呼ばない、という意味で
+//! あり、cudarc 内部の既定確保経路がどちらを使うかとは独立）。
 //! 代わりに自作の [`SizeClassPool`](fandhe_ai_tensor_core::pool_core::SizeClassPool)
 //! （案 B）をアプリケーション層のキャッシュとして使い、[`CudaAllocator::
 //! release_cached`] のフェーズ (iv) でのみ driver プール（存在する環境
@@ -26,12 +39,50 @@
 //! CUDA ストリームをまたぐ貸し出しは対象外（イシュー #1012/#1013 の
 //! 確定後にスコープ外事項として引き継ぐ）。
 //!
-//! # 対象は f32 出力バッファのみ（v1 スコープ）
+//! # 対象 dtype（イシュー #1153 で f16 へ拡張）
 //!
-//! f16 出力（`gemm_wmma.rs`／`gemm_mma.rs`／`gemm_auto.rs` の
-//! `alloc_zeros::<f16>`）・`MemoryOps`（`memory.rs::CudaMemory`）経由の
-//! `DeviceBuffer` はスコープ外（`CudaBufferHandle.slice.len()==numel`
-//! 前提の既存検証への影響範囲が広いため。out-of-scope-tracking.md 対象）。
+//! 元は f32 出力バッファのみ（v1 スコープ）だったが、イシュー #1153 で
+//! `gemm_mma.rs::CudaMmaGemm::run_f16` の per-call 確保（`clone_htod`／
+//! `alloc_zeros::<f16>` 直呼び）をプール経由化する試みのため f16 へ
+//! 拡張した（[`PoolDtype`] トレイトで dtype ごとの `CudaSliceHandle`
+//! 変換を切り出す設計。下記「dtype 一般化」節）。**`run_f16` への本番
+//! 結線は GB10 実機計測で見送ったため（`docs/perf/
+//! cuda-gemm-mma-f16-pool-wiring.md` §7）、f16 API は
+//! `internal-diagnostics` feature 限定の診断入口としてのみ提供する**。
+//! `MemoryOps`
+//! （`memory.rs::CudaMemory`）経由の `DeviceBuffer` は引き続きスコープ外
+//! （`CudaBufferHandle.slice.len()==numel` 前提の既存検証への影響範囲が
+//! 広いため。out-of-scope-tracking.md 対象）。
+//!
+//! # dtype 一般化（イシュー #1153・`docs/backend-cuda-pool-allocator-decision.md` §3）
+//!
+//! プールは `class_bytes`（サイズクラスの丸め後バイト数）のみをキーに
+//! 保持するため、f32／f16 のバッファは同一クラスを相互再利用しうる。
+//! **第 2 のプールは作らない**（別プールにすると `max_pool_bytes` 128 MiB
+//! の上限が実質 2 倍になり、REQ-14 の係数上限〈2 倍以内〉の安全側設定を
+//! 崩す。`release_cached`／`stats` も 1 面のまま維持する）。
+//!
+//! [`CudaSliceHandle`] を dtype 付き `enum`（`F32`／`F16`）にし、
+//! [`PooledCudaHandle<T>`] を `T: PoolDtype` で generic 化した。
+//! [`PoolDtype::into_slice`] は `take(class_bytes)` が**要求 dtype と同じ
+//! variant を返した場合はそのまま取り出す**（再型付けゼロ）。異なる
+//! variant を返した場合（他 dtype のバッファが同クラスへ返却済みだった
+//! 場合）のみ `CudaSlice::leak()` → `CudaStream::upgrade_device_ptr::<T>`
+//! で型を付け替える。**f32 のみのワークロード（既存の公開経路。
+//! `gemm.rs`／`elementwise.rs`／`softmax.rs`／`gemm_variant_selection.rs`
+//! の 6 呼び出し箇所）は、プールに f16 バッファが一度も入らない限り常に
+//! 前者（再型付けゼロ）の経路を通るため、機構としては本イシュー以前と
+//! 構造的に同一である**（イシュー #1153 の before/after 計測は f16 のみを
+//! 対象とし、f32 側の挙動は変更しない設計要件）。
+//!
+//! cudarc 0.19.8 の実挙動（`driver/safe/core.rs`）: `CudaSlice<T>::drop`
+//! は `ctx.has_async_alloc` の真偽で `free_async`／`free_sync` のどちらを
+//! 呼ぶか自身で判定する（確保 API に依存しない）。よって `leak()` +
+//! `upgrade_device_ptr::<T>` で型を付け替えても、新しい `CudaSlice<T>` の
+//! `Drop` は同じ判定式で正しい解放 API を選ぶため、案 B（`cuMemAlloc`
+//! 同期割当）で懸念された「確保・解放 API 不一致」は本経路には生じない
+//! （下記モジュール冒頭「既存の `stream.alloc`／`alloc_zeros`」節の記述も
+//! 参照）。
 //!
 //! # `pool_core` API 統合（PR #1063 マージコンフリクト解消）
 //!
@@ -47,7 +98,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaSlice, CudaStream, CudaView, CudaViewMut};
+use cudarc::driver::{
+    CudaContext, CudaSlice, CudaStream, CudaView, CudaViewMut, DeviceRepr, ValidAsZeroBits,
+};
+use half::f16;
 
 use fandhe_ai_tensor_core::pool_core::{
     PoolStats, SizeClassPool, SizeClassPoolConfig, size_class_for,
@@ -56,11 +110,16 @@ use fandhe_ai_tensor_core::pool_core::{
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 
-/// [`SizeClassPool`] が保持する CUDA 側ハンドル。`CudaSlice<f32>` は
-/// cudarc 側で `unsafe impl Send + Sync` 済み（`driver/safe/core.rs`）の
-/// ため、本ラッパーも追加の `unsafe` なしで `Send` になる
-/// （`SizeClassPool<H: Send>` の境界を満たす）。
-pub(crate) struct CudaSliceHandle(CudaSlice<f32>);
+/// [`SizeClassPool`] が保持する CUDA 側ハンドル。dtype 付き `enum`（f32／
+/// f16 のいずれか一方を包む。上記モジュールドキュメンテーションコメント
+/// 「dtype 一般化」参照）。両 `CudaSlice<T>` は cudarc 側で
+/// `unsafe impl Send + Sync` 済み（`driver/safe/core.rs`）のため、本
+/// enum も追加の `unsafe` なしで `Send` になる（`SizeClassPool<H: Send>`
+/// の境界を満たす）。
+pub(crate) enum CudaSliceHandle {
+    F32(CudaSlice<f32>),
+    F16(CudaSlice<f16>),
+}
 
 // `SizeClassPool<CudaSliceHandle>::put`／`release_cached` フェーズ (ii)
 // が返す破棄対象は本ハンドルの `Drop`（cudarc 側の `cuMemFree` 相当）で
@@ -70,7 +129,92 @@ pub(crate) struct CudaSliceHandle(CudaSlice<f32>);
 // codex P2 最終指摘対応で本番呼び出し元ゼロとなり削除済み）のいずれも
 // 呼ばない。
 
-/// プールから貸し出された出力バッファの RAII ハンドル。
+/// [`CudaSliceHandle`] と貸出対象 dtype `T` を相互変換するシールドされた
+/// トレイト（イシュー #1153。`crate::pool` モジュール外への実装を許さない
+/// ため `pub(crate)` に留め、`f32`／`f16` の 2 impl のみを持つ）。
+///
+/// [`CudaAllocator`] の各メソッドはこのトレイトを介して dtype を
+/// 抽象化し、`PooledCudaHandle<T>` を単一実装で扱う。**f32 のみの
+/// ワークロードでは `take` が常に `CudaSliceHandle::F32` を返すため
+/// [`into_slice`](PoolDtype::into_slice) は常に「そのまま取り出す」経路
+/// を通り、本イシュー以前と構造的に同一の機構になる**（モジュール
+/// ドキュメンテーションコメント「dtype 一般化」節）。
+pub(crate) trait PoolDtype: DeviceRepr + Sized {
+    /// 所有 `CudaSlice<Self>` を [`CudaSliceHandle`] へ包む
+    /// （`PooledCudaHandle::drop` がプールへ返却する際に使う）。
+    fn wrap(slice: CudaSlice<Self>) -> CudaSliceHandle;
+
+    /// プールから取り出した `handle` を `CudaSlice<Self>` へ変換する。
+    ///
+    /// `handle` が `Self` と同じ variant なら再型付けなしでそのまま
+    /// 取り出す（f32 の既存経路はこの分岐のみを通る）。異なる variant
+    /// （他 dtype のバッファが同一 `class_bytes` クラスへ返却済み
+    /// だった場合）は `CudaSlice::leak()` で所有権を生ポインタへ変換し、
+    /// `CudaStream::upgrade_device_ptr::<Self>` で型を付け替える。
+    ///
+    /// SAFETY 根拠（呼び出し元 [`CudaAllocator::alloc_zeroed`]／
+    /// [`CudaAllocator::alloc_uninit`] の `unsafe` ブロックへ記載）:
+    /// ポインタは同一 `stream` の確保由来で有効・`class_bytes` は要求時
+    /// バイト数以上（`size_class_for` は切り上げのみ）・256B 整列
+    /// （`cuMemAlloc`/`cuMemAllocAsync` の整列保証）は f32(4B)/f16(2B)
+    /// いずれの整列要件も満たす・未初期化ビットパターン問題は f32/f16
+    /// とも無効なビットパターンを持たないため生じない。
+    fn into_slice(
+        handle: CudaSliceHandle,
+        stream: &Arc<CudaStream>,
+        class_bytes: u64,
+    ) -> CudaSlice<Self>;
+}
+
+impl PoolDtype for f32 {
+    fn wrap(slice: CudaSlice<f32>) -> CudaSliceHandle {
+        CudaSliceHandle::F32(slice)
+    }
+
+    fn into_slice(
+        handle: CudaSliceHandle,
+        stream: &Arc<CudaStream>,
+        class_bytes: u64,
+    ) -> CudaSlice<f32> {
+        match handle {
+            CudaSliceHandle::F32(slice) => slice,
+            CudaSliceHandle::F16(slice) => {
+                let ptr = slice.leak();
+                let class_numel = (class_bytes / std::mem::size_of::<f32>() as u64) as usize;
+                // SAFETY: `PoolDtype::into_slice` ドキュメンテーション
+                // コメント参照。`ptr` は直前の `leak()` が返した、同じ
+                // `stream` 上で確保済みの `class_bytes` バイト分の有効な
+                // デバイス確保である。
+                unsafe { stream.upgrade_device_ptr::<f32>(ptr, class_numel) }
+            }
+        }
+    }
+}
+
+impl PoolDtype for f16 {
+    fn wrap(slice: CudaSlice<f16>) -> CudaSliceHandle {
+        CudaSliceHandle::F16(slice)
+    }
+
+    fn into_slice(
+        handle: CudaSliceHandle,
+        stream: &Arc<CudaStream>,
+        class_bytes: u64,
+    ) -> CudaSlice<f16> {
+        match handle {
+            CudaSliceHandle::F16(slice) => slice,
+            CudaSliceHandle::F32(slice) => {
+                let ptr = slice.leak();
+                let class_numel = (class_bytes / std::mem::size_of::<f16>() as u64) as usize;
+                // SAFETY: 上記 `f32` 実装と同一根拠。
+                unsafe { stream.upgrade_device_ptr::<f16>(ptr, class_numel) }
+            }
+        }
+    }
+}
+
+/// プールから貸し出された出力バッファの RAII ハンドル（dtype `T`
+/// generic。イシュー #1153 で f32 専用から一般化）。
 ///
 /// `handle` を `ManuallyDrop` で保持する設計は
 /// `fandhe_ai_tensor_core::pool::PooledBufferHandle` と同型（`Drop::drop`
@@ -78,10 +222,11 @@ pub(crate) struct CudaSliceHandle(CudaSlice<f32>);
 /// 完結させることで borrow checker の E0499 を避ける）。`logical_numel`
 /// は要求時の要素数（サイズクラス丸めによる `class_bytes` 側の余剰容量は
 /// `as_view`/`as_view_mut` の対象範囲に含めない。呼び出し元
-/// 〈`gemm.rs`／`elementwise.rs`／`softmax.rs`〉は常にこのビュー経由で
-/// アクセスするため、余剰領域を誤って読み書きすることはない）。
-pub(crate) struct PooledCudaHandle {
-    handle: std::mem::ManuallyDrop<CudaSliceHandle>,
+/// 〈`gemm.rs`／`elementwise.rs`／`softmax.rs`／`gemm_mma.rs`〉は常に
+/// このビュー経由でアクセスするため、余剰領域を誤って読み書きすることは
+/// ない）。
+pub(crate) struct PooledCudaHandle<T: PoolDtype> {
+    handle: std::mem::ManuallyDrop<CudaSlice<T>>,
     class_bytes: u64,
     // `record_allocation`／`record_reuse` に渡した値と同一でなければ
     // ならない（`pool_core.rs` 契約。`record_loan_end` 呼び出し時に
@@ -91,20 +236,45 @@ pub(crate) struct PooledCudaHandle {
     pool: Arc<SizeClassPool<CudaSliceHandle>>,
 }
 
-impl PooledCudaHandle {
+impl<T: PoolDtype> PooledCudaHandle<T> {
     /// カーネル起動の読み取り専用引数・D2H 転送（`clone_dtoh` 相当）に
     /// 使う論理長ビュー（`class_bytes` 側の余剰容量は含まない）。
-    pub(crate) fn as_view(&self) -> CudaView<'_, f32> {
-        self.handle.0.slice(0..self.logical_numel)
+    pub(crate) fn as_view(&self) -> CudaView<'_, T> {
+        self.handle.slice(0..self.logical_numel)
     }
 
     /// カーネル起動の書き込み引数に使う論理長の可変ビュー。
-    pub(crate) fn as_view_mut(&mut self) -> CudaViewMut<'_, f32> {
-        self.handle.0.slice_mut(0..self.logical_numel)
+    pub(crate) fn as_view_mut(&mut self) -> CudaViewMut<'_, T> {
+        self.handle.slice_mut(0..self.logical_numel)
+    }
+
+    /// 確保元の `CudaContext` を返す（イシュー #1153 codex-review P0
+    /// 是正・PR #1200 レビュー）。`gemm_mma.rs::CudaMmaGemm::
+    /// launch_f16_pooled`／`download_f16_pooled` が、呼び出し先
+    /// `CudaMmaGemm` インスタンスの `stream` 生成元 context との一致を
+    /// fail-closed に検証するために使う（`gemm.rs::
+    /// TiledPipelineFunction` 検証・`CudaError::
+    /// TiledPipelineContextMismatch` と同型の対処。`CudaError::
+    /// PooledBufferContextMismatch` ドキュメンテーションコメント参照）。
+    pub(crate) fn context(&self) -> &Arc<CudaContext> {
+        self.handle.context()
     }
 }
 
-impl Drop for PooledCudaHandle {
+/// [`PooledCudaHandle<f16>`] の不透明公開ラッパー（イシュー #1153）。
+///
+/// `PooledCudaHandle<T>` は `pub(crate)` のため、`gemm_mma.rs` の
+/// pooled API（`internal-diagnostics` feature 限定の診断専用入口。
+/// 本番結線は GB10 実機の before/after 計測で dim4096 が明確に後退した
+/// ため見送った。`docs/perf/cuda-gemm-mma-f16-pool-wiring.md` §7）を
+/// `pub fn` として公開するために、フィールドを隠したこの薄いラッパー型
+/// を経由させる（`private_interfaces` lint 回避。`gemm.rs` 等の本番経路
+/// は `pub(crate)` のまま `PooledCudaHandle<f32>` を直接使うため、この
+/// ラッパーは f16 診断専用入口にのみ必要）。
+#[cfg(feature = "internal-diagnostics")]
+pub struct PooledF16Buffer(pub(crate) PooledCudaHandle<f16>);
+
+impl<T: PoolDtype> Drop for PooledCudaHandle<T> {
     /// 内部ハンドルをプールへ返却する（CUDA は即時返却。モジュール冒頭
     /// 「統計契約」参照）。`class_bytes == 0`（空バッファ。`numel == 0`
     /// 契約）はプールを介さず直接解放する
@@ -126,19 +296,21 @@ impl Drop for PooledCudaHandle {
         // `put` が返す破棄対象（LRU 超過分）はロック解放後にここで drop
         // される（`pool_core.rs` モジュール冒頭「所有権契約 (b)」。ロック
         // 内で FFI 解放を伴いうる `Drop` を実行しない契約）。
-        drop(self.pool.put(self.class_bytes, inner));
+        drop(self.pool.put(self.class_bytes, T::wrap(inner)));
     }
 }
 
-/// 要求要素数 `numel` の `f32` バッファが消費するバイト数を検査付きで
+/// 要求要素数 `numel` の `T` バッファが消費するバイト数を検査付きで
 /// 計算する（`fandhe_ai_tensor_core::pool::checked_byte_len` と同種の
-/// OWASP A03 前段検証）。
-fn checked_byte_len(numel: usize) -> Result<u64, CudaError> {
-    let bytes = numel
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| CudaError::InvalidShape {
-            detail: format!("pool: allocation byte length overflows usize: numel={numel}"),
-        })?;
+/// OWASP A03 前段検証。イシュー #1153 で `f32` 専用から `T: DeviceRepr`
+/// generic へ一般化）。
+fn checked_byte_len<T: DeviceRepr>(numel: usize) -> Result<u64, CudaError> {
+    let bytes =
+        numel
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| CudaError::InvalidShape {
+                detail: format!("pool: allocation byte length overflows usize: numel={numel}"),
+            })?;
     Ok(bytes as u64)
 }
 
@@ -288,6 +460,23 @@ impl CudaAllocator {
     /// REQ-14 の係数上限〈2 倍以内〉を侵さない安全側の値。
     /// `pool_core.rs` 参照）。
     pub(crate) fn new(device: &CudaDevice) -> Self {
+        // イシュー #1149 の GB10 実機 A/B 計測（`docs/perf/
+        // cuda-percall-alloc-pool-threshold-ab.md` §5）で、driver プール
+        // の release threshold を `u64::MAX` へ引き上げる案 A は、孤立した
+        // P1/P2/P3 マイクロベンチマーク（デバイス確保のみ）では 32→33 MiB
+        // 段差を解消したが、**P7（`CudaMmaGemm::run_f16` の現実的なレプリカ。
+        // H2D + カーネル起動 + フレッシュ `Vec` への D2H を毎回反復）では
+        // median を約 27 ms → 約 270 ms へ悪化させた**（GB10 実機実測。
+        // 5 回中央値・全ラン再現）。GB10 は unified memory
+        // （`docs/real-hardware-verification-env.md` 参照）のため、driver
+        // プールが解放せず保持し続ける予約量が増えるほど、ホスト側の
+        // フレッシュ `Vec` 確保（#1146 が特定した glibc mmap しきい値
+        // 問題）と同じ物理メモリプールを取り合い、症状を悪化させたと
+        // 見られる。よって案 A の単独採用は**見送る**（`docs/perf/
+        // cuda-gemm-mma-f16-pool-wiring.md` §7 に判断根拠を記録）。
+        // 本 `CudaAllocator` はプロセスワイドな driver 設定には触れず、
+        // 引き続き自作 `SizeClassPool`（アプリ層の明示的な貸出・返却）
+        // のみで確保コストを削減する。
         Self {
             pool: Arc::new(SizeClassPool::new(SizeClassPoolConfig::default())),
             stream: Arc::clone(device.stream()),
@@ -305,13 +494,13 @@ impl CudaAllocator {
     }
 
     /// サイズクラス丸め後のクラスバイト数を計算する共通処理
-    /// （`alloc_zeroed_f32`/`alloc_uninit_f32` 共用）。
+    /// （[`Self::alloc_zeroed`]/[`Self::alloc_uninit`] 共用）。
     ///
     /// `size_class_for` は `bytes == 0` を `Ok(0)` として返す契約
     /// （`pool_core.rs` doc comment）のため、呼び出し元は戻り値の
     /// `class_bytes == 0` で「プール非経由（空バッファ）」を判定する。
-    fn class_bytes_for(&self, numel: usize) -> Result<(u64, u64), CudaError> {
-        let requested_bytes = checked_byte_len(numel)?;
+    fn class_bytes_for<T: DeviceRepr>(&self, numel: usize) -> Result<(u64, u64), CudaError> {
+        let requested_bytes = checked_byte_len::<T>(numel)?;
         let class_bytes = size_class_for(requested_bytes, &self.pool.config()).map_err(|e| {
             CudaError::InvalidShape {
                 detail: format!("pool: size_class_for failed: {e:?}"),
@@ -320,8 +509,11 @@ impl CudaAllocator {
         Ok((requested_bytes, class_bytes))
     }
 
-    /// `numel` 要素・ゼロ初期化済みの `f32` 出力バッファを確保する
-    /// （`stream.alloc_zeros::<f32>(numel)` の直接呼び出しの置換）。
+    /// `numel` 要素・ゼロ初期化済みの `T` 出力バッファを確保する
+    /// （`stream.alloc_zeros::<T>(numel)` の直接呼び出しの置換。イシュー
+    /// #1153 で `f32` 専用から `T: PoolDtype + ValidAsZeroBits` generic へ
+    /// 一般化。呼び出し元は下記 [`Self::alloc_zeroed_f32`]／
+    /// [`Self::alloc_zeroed_f16`] の薄い wrapper 経由で呼ぶ）。
     ///
     /// プールヒット時は再利用バッファの論理範囲のみを `memset_zeros` で
     /// 上書きする（OWASP A02: 前利用データの残留を防ぐ。
@@ -330,33 +522,37 @@ impl CudaAllocator {
     /// 確保する。OOM 時は [`Self::release_cached`] を 1 回試みてから
     /// 再試行し、それでも失敗すれば `Err` を返す（無限リトライしない。
     /// OWASP A04）。
-    pub(crate) fn alloc_zeroed_f32(&self, numel: usize) -> Result<PooledCudaHandle, CudaError> {
-        let (requested_bytes, class_bytes) = self.class_bytes_for(numel)?;
+    fn alloc_zeroed<T: PoolDtype + ValidAsZeroBits>(
+        &self,
+        numel: usize,
+    ) -> Result<PooledCudaHandle<T>, CudaError> {
+        let (requested_bytes, class_bytes) = self.class_bytes_for::<T>(numel)?;
         if class_bytes == 0 {
             // numel == 0: プールを介さず直接確保する（空テンソル契約。
             // `PooledCudaHandle::drop` は `class_bytes == 0` を見て
             // プールへ返却せず直接解放する）。
-            let raw = self.stream.alloc_zeros::<f32>(0)?;
+            let raw = self.stream.alloc_zeros::<T>(0)?;
             return Ok(self.wrap_handle(raw, 0, 0, 0));
         }
-        let class_numel = (class_bytes / std::mem::size_of::<f32>() as u64) as usize;
+        let class_numel = (class_bytes / std::mem::size_of::<T>() as u64) as usize;
 
-        if let Some(mut handle) = self.pool.take(class_bytes) {
+        if let Some(handle) = self.pool.take(class_bytes) {
             self.pool.record_reuse(requested_bytes, class_bytes);
+            let mut slice = T::into_slice(handle, &self.stream, class_bytes);
             // `record_reuse` 済みの貸出は、この `memset_zeros` が失敗すると
             // `PooledCudaHandle` が構築されず `Drop` 経由の `record_loan_end`
             // も走らないため、統計を明示的に巻き戻してからエラーを返す
             // （Cursor Bugbot Low 指摘。Metal 再利用経路の synchronize 失敗
             // 時の巻き戻し〈`backend-metal::pool`〉と同一契約。ハンドルは
             // drop してデバイスメモリを解放する）。
-            if let Err(e) = self.stream.memset_zeros(&mut handle.0.slice_mut(0..numel)) {
+            if let Err(e) = self.stream.memset_zeros(&mut slice.slice_mut(0..numel)) {
                 self.pool.record_loan_end(requested_bytes, class_bytes);
                 return Err(e.into());
             }
-            return Ok(self.wrap_handle_from(handle, class_bytes, requested_bytes, numel));
+            return Ok(self.wrap_handle(slice, class_bytes, requested_bytes, numel));
         }
 
-        match self.stream.alloc_zeros::<f32>(class_numel) {
+        match self.stream.alloc_zeros::<T>(class_numel) {
             Ok(raw) => {
                 self.pool.record_allocation(requested_bytes, class_bytes);
                 Ok(self.wrap_handle(raw, class_bytes, requested_bytes, numel))
@@ -365,37 +561,42 @@ impl CudaAllocator {
                 // OOM フォールバック: キャッシュ解放を 1 回試み再試行する
                 // （OWASP A04。無限リトライはしない）。
                 let _ = self.release_cached();
-                let raw = self.stream.alloc_zeros::<f32>(class_numel)?;
+                let raw = self.stream.alloc_zeros::<T>(class_numel)?;
                 self.pool.record_allocation(requested_bytes, class_bytes);
                 Ok(self.wrap_handle(raw, class_bytes, requested_bytes, numel))
             }
         }
     }
 
-    /// `numel` 要素・未初期化の `f32` 出力バッファを確保する。
+    /// `numel` 要素・未初期化の `T` バッファを確保する（イシュー #1153 で
+    /// `f32` 専用から `T: PoolDtype` generic へ一般化）。
     ///
     /// **呼び出し元は、対象カーネルが確保した全要素（`0..numel`）を
     /// 必ず書き切ることをカーネルソースで確認済みでなければならない**
     /// （`docs/backend-cuda-pool-allocator-decision.md` §「`alloc_uninit`
-    /// の適用」・OWASP A02。確認できない場合は
-    /// [`Self::alloc_zeroed_f32`] を使う）。プールヒット時は前利用データを
-    /// そのまま返す（ゼロクリアしない。これが `alloc_zeroed_f32` との
-    /// 唯一の差）。ミス時は `stream.alloc`（`unsafe`。境界チェックなしの
-    /// 生確保）で新規確保する。
-    pub(crate) fn alloc_uninit_f32(&self, numel: usize) -> Result<PooledCudaHandle, CudaError> {
-        let (requested_bytes, class_bytes) = self.class_bytes_for(numel)?;
+    /// の適用」・OWASP A02。確認できない場合は [`Self::alloc_zeroed`]
+    /// を使う）。プールヒット時は前利用データをそのまま返す（ゼロ
+    /// クリアしない。これが [`Self::alloc_zeroed`] との唯一の差）。ミス時
+    /// は `stream.alloc`（`unsafe`。境界チェックなしの生確保）で新規
+    /// 確保する。
+    fn alloc_uninit<T: PoolDtype>(&self, numel: usize) -> Result<PooledCudaHandle<T>, CudaError> {
+        let (requested_bytes, class_bytes) = self.class_bytes_for::<T>(numel)?;
         if class_bytes == 0 {
-            let raw = self.stream.alloc_zeros::<f32>(0)?;
+            // numel == 0: `T: ValidAsZeroBits` を要求しない `alloc`（0
+            // 要素なので未初期化領域自体が存在せず OWASP A02 は無関係）。
+            // SAFETY: `len == 0` のため確保領域への読み書きは発生しない。
+            let raw = unsafe { self.stream.alloc::<T>(0) }?;
             return Ok(self.wrap_handle(raw, 0, 0, 0));
         }
-        let class_numel = (class_bytes / std::mem::size_of::<f32>() as u64) as usize;
+        let class_numel = (class_bytes / std::mem::size_of::<T>() as u64) as usize;
 
         if let Some(handle) = self.pool.take(class_bytes) {
             self.pool.record_reuse(requested_bytes, class_bytes);
-            return Ok(self.wrap_handle_from(handle, class_bytes, requested_bytes, numel));
+            let slice = T::into_slice(handle, &self.stream, class_bytes);
+            return Ok(self.wrap_handle(slice, class_bytes, requested_bytes, numel));
         }
 
-        // SAFETY: `alloc::<f32>` は指定要素数分のデバイスメモリを未初期化
+        // SAFETY: `alloc::<T>` は指定要素数分のデバイスメモリを未初期化
         // のまま確保する（`cuMemAlloc` 相当）。呼び出し元契約（本メソッド
         // ドキュメンテーションコメント）により、返却するビュー
         // （`0..numel`）は起動するカーネルが必ず全要素へ書き込むため、
@@ -403,7 +604,7 @@ impl CudaAllocator {
         // （サイズクラス丸めは要求量以上にしか切り上げない。
         // `pool_core::size_class_for` 契約）により `0..numel` は確保済み
         // 範囲内に収まる。
-        let alloc_result = unsafe { self.stream.alloc::<f32>(class_numel) };
+        let alloc_result = unsafe { self.stream.alloc::<T>(class_numel) };
         match alloc_result {
             Ok(raw) => {
                 self.pool.record_allocation(requested_bytes, class_bytes);
@@ -412,37 +613,77 @@ impl CudaAllocator {
             Err(_) => {
                 let _ = self.release_cached();
                 // SAFETY: 上記と同一根拠。
-                let raw = unsafe { self.stream.alloc::<f32>(class_numel) }?;
+                let raw = unsafe { self.stream.alloc::<T>(class_numel) }?;
                 self.pool.record_allocation(requested_bytes, class_bytes);
                 Ok(self.wrap_handle(raw, class_bytes, requested_bytes, numel))
             }
         }
     }
 
-    fn wrap_handle(
+    /// `numel` 要素・ゼロ初期化済みの `f32` 出力バッファを確保する
+    /// ([`Self::alloc_zeroed`] の薄い wrapper。既存呼び出し元
+    /// 〈`gemm.rs`／`elementwise.rs`／`softmax.rs`〉は無変更でコンパイル
+    /// できる。イシュー #1153 で `alloc_zeroed_f32` から一般化した際に
+    /// 追加した wrapper）。
+    pub(crate) fn alloc_zeroed_f32(
         &self,
-        raw: CudaSlice<f32>,
-        class_bytes: u64,
-        logical_bytes: u64,
-        logical_numel: usize,
-    ) -> PooledCudaHandle {
-        self.wrap_handle_from(
-            CudaSliceHandle(raw),
-            class_bytes,
-            logical_bytes,
-            logical_numel,
-        )
+        numel: usize,
+    ) -> Result<PooledCudaHandle<f32>, CudaError> {
+        self.alloc_zeroed::<f32>(numel)
     }
 
-    fn wrap_handle_from(
+    /// `numel` 要素・未初期化の `f32` 出力バッファを確保する
+    /// （[`Self::alloc_uninit`] の薄い wrapper。上記 `alloc_zeroed_f32`
+    /// と同じ理由）。
+    pub(crate) fn alloc_uninit_f32(
         &self,
-        handle: CudaSliceHandle,
+        numel: usize,
+    ) -> Result<PooledCudaHandle<f32>, CudaError> {
+        self.alloc_uninit::<f32>(numel)
+    }
+
+    /// `numel` 要素・未初期化の `f16` 出力バッファを確保する（イシュー
+    /// #1153。`gemm_mma.rs::CudaMmaGemm::alloc_output_f16_pooled` の唯一の
+    /// 呼び出し元。`kernels_mma.rs` エピローグの guarded store が
+    /// `0..m*n` の全要素を必ず 1 回書き切り C を読まないことを確認済み
+    /// （`docs/backend-cuda-pool-allocator-decision.md` §4「`mma_f16`
+    /// 適用確認」）。
+    pub(crate) fn alloc_uninit_f16(
+        &self,
+        numel: usize,
+    ) -> Result<PooledCudaHandle<f16>, CudaError> {
+        self.alloc_uninit::<f16>(numel)
+    }
+
+    /// `a`／`b` をホスト→デバイスへ転送する（`stream.clone_htod` 直呼び
+    /// の置換。イシュー #1153。`gemm_mma.rs::CudaMmaGemm::upload_f16_pooled`
+    /// の唯一の呼び出し元）。`alloc_uninit::<f16>(src.len())` で確保した
+    /// 論理長ビューへ `memcpy_htod` するため、`memcpy_htod` 内部の
+    /// `assert!(dst.len() >= src.len())`（cudarc 0.19.8
+    /// `driver/safe/core.rs`）は `dst.len() == src.len()` として常に
+    /// 成立する。転送失敗時は統計を明示的に巻き戻す（`alloc_zeroed` の
+    /// memset 失敗時の巻き戻しと同型）。
+    pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+        let mut handle = self.alloc_uninit::<f16>(src.len())?;
+        if let Err(e) = self.stream.memcpy_htod(src, &mut handle.as_view_mut()) {
+            // `handle` はここで drop されプールへ返却される（`memcpy_htod`
+            // 失敗時点でも `PooledCudaHandle` は構築済みのため `Drop` が
+            // `record_loan_end`／`put` を正しく行う。`alloc_zeroed` の
+            // memset 失敗経路とは異なり、ここでは巻き戻し不要）。
+            return Err(e.into());
+        }
+        Ok(handle)
+    }
+
+    fn wrap_handle<T: PoolDtype>(
+        &self,
+        raw: CudaSlice<T>,
         class_bytes: u64,
         logical_bytes: u64,
         logical_numel: usize,
-    ) -> PooledCudaHandle {
+    ) -> PooledCudaHandle<T> {
         PooledCudaHandle {
-            handle: std::mem::ManuallyDrop::new(handle),
+            handle: std::mem::ManuallyDrop::new(raw),
             class_bytes,
             logical_bytes,
             logical_numel,

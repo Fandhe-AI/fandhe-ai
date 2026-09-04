@@ -1,0 +1,7 @@
+GPU: NVIDIA GB10 (sm_121)
+compute_capability: 12.1 (nvidia-smi --query-gpu=compute_cap)
+CUDA: 13.0系
+rustc: 1.97.0
+実行日: 2026-09-05
+検証対象コミット: origin/main 2250dce（Phase 0 の baseline） + イシュー #1153 作業ブランチ HEAD
+GPU占有状況: 計測前後とも nvidia-smi --query-gpu=utilization.gpu 0%

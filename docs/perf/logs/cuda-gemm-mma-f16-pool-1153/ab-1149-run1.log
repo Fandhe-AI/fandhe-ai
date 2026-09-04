@@ -1,0 +1,1201 @@
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run-1153/crates/backend-cuda)
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:768:48
+    |
+768 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:781:8
+    |
+770 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+781 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling bench-harness v0.6.0 (/home/fandhe/work/rust-ai-library-run-1153/crates/bench-harness)
+warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
+    Finished `release` profile [optimized] target(s) in 2.12s
+     Running tests/large_buffer_percall_alloc_ab_1149.rs (target/release/deps/large_buffer_percall_alloc_ab_1149-00a0b3a1c975270a)
+
+running 1 test
+test large_buffer_percall_alloc_ab_record ... environment: name="NVIDIA GB10" compute_capability=(12, 1) arch="compute_121" has_async_alloc=true
+mem_pool_attr,before_sweep,reserved_bytes=0,used_bytes=0,release_threshold=0
+condition,bracket_pos,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count
+baseline,0,p1_alloc_only,24,asc,0,7.7085,1.5782,1.5832,1.5867,1.5911,1.6001,0
+baseline,0,p2_alloc_zeros,24,asc,0,1.7698,1.7508,1.7641,1.7655,1.7687,1.8073,0
+baseline,0,p3_h2d_only,24,asc,0,2.1276,2.0955,2.1099,2.1121,2.1147,2.2040,0
+baseline,0,p0_transfer_only,24,asc,0,21.3115,6.7123,6.7401,6.7631,6.7848,6.7966,0
+baseline,0,p4_d2h_fresh_vec,24,asc,0,0.4346,0.4332,0.4334,0.4334,0.4335,0.4422,0
+baseline,0,p1_alloc_only,24,asc,1,1.6376,1.5901,1.5985,1.6027,1.6055,1.6167,0
+baseline,0,p2_alloc_zeros,24,asc,1,1.7530,1.7628,1.7737,1.7792,1.7820,1.8016,0
+baseline,0,p3_h2d_only,24,asc,1,2.1266,2.1118,2.1160,2.1219,2.1298,2.4994,0
+baseline,0,p0_transfer_only,24,asc,1,6.6390,6.7654,6.7826,6.7901,6.7925,6.8406,0
+baseline,0,p4_d2h_fresh_vec,24,asc,1,0.4347,0.4328,0.4330,0.4332,0.4333,0.4412,0
+baseline,0,p1_alloc_only,24,asc,2,1.6445,1.5944,1.5998,1.6038,1.6127,1.8920,0
+baseline,0,p2_alloc_zeros,24,asc,2,1.7658,1.7681,1.7822,1.7855,1.7891,1.9435,0
+baseline,0,p3_h2d_only,24,asc,2,2.1333,2.1046,2.1166,2.1238,2.1265,2.5417,0
+baseline,0,p0_transfer_only,24,asc,2,6.6709,6.7753,6.7922,6.8006,6.8050,6.8247,0
+baseline,0,p4_d2h_fresh_vec,24,asc,2,0.4341,0.4325,0.4333,0.4334,0.4335,0.4336,0
+mem_pool_attr,after_baseline_24mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+release_threshold,1,p1_alloc_only,24,asc,0,1.1822,0.0017,0.0017,0.0018,0.0018,0.0020,0
+release_threshold,1,p2_alloc_zeros,24,asc,0,0.1013,0.1283,0.1292,0.1296,0.1297,0.1371,0
+release_threshold,1,p3_h2d_only,24,asc,0,0.4365,0.4340,0.4347,0.4351,0.4354,0.8015,0
+release_threshold,1,p0_transfer_only,24,asc,0,4.1295,1.3819,1.3836,1.3847,1.3852,1.3945,0
+release_threshold,1,p4_d2h_fresh_vec,24,asc,0,0.4333,0.4320,0.4328,0.4329,0.4329,0.4332,0
+release_threshold,1,p1_alloc_only,24,asc,1,0.0021,0.0017,0.0017,0.0017,0.0018,0.0018,0
+release_threshold,1,p2_alloc_zeros,24,asc,1,0.1141,0.1284,0.1293,0.1299,0.1301,0.1308,0
+release_threshold,1,p3_h2d_only,24,asc,1,0.4344,0.4340,0.4350,0.4356,0.4361,0.7425,0
+release_threshold,1,p0_transfer_only,24,asc,1,1.5148,1.3824,1.3840,1.3850,1.3886,1.8882,0
+release_threshold,1,p4_d2h_fresh_vec,24,asc,1,0.4339,0.4326,0.4329,0.4330,0.4330,0.4332,0
+release_threshold,1,p1_alloc_only,24,asc,2,0.0020,0.0017,0.0017,0.0017,0.0018,0.0018,0
+release_threshold,1,p2_alloc_zeros,24,asc,2,0.1108,0.1286,0.1290,0.1295,0.1297,0.1355,0
+release_threshold,1,p3_h2d_only,24,asc,2,0.4245,0.4345,0.4352,0.4355,0.4356,0.4364,0
+release_threshold,1,p0_transfer_only,24,asc,2,1.3950,1.3830,1.3848,1.3857,1.3861,1.3906,0
+release_threshold,1,p4_d2h_fresh_vec,24,asc,2,0.4332,0.4324,0.4327,0.4329,0.4329,0.4333,0
+mem_pool_attr,after_release_threshold_24mib,reserved_bytes=100663296,used_bytes=0,release_threshold=18446744073709551615
+sync_alloc,2,p1_alloc_only,24,asc,0,1.4049,1.1668,1.1707,1.1780,1.1801,1.1855,0
+sync_alloc,2,p2_alloc_zeros,24,asc,0,1.3437,1.3820,1.3902,1.3966,1.3981,1.4039,0
+sync_alloc,2,p3_h2d_only,24,asc,0,1.7350,1.7176,1.7268,1.7299,1.7344,1.7401,0
+sync_alloc,2,p0_transfer_only,24,asc,0,5.6975,5.3514,5.3644,5.3680,5.3708,5.7261,0
+sync_alloc,2,p4_d2h_fresh_vec,24,asc,0,0.4350,0.4325,0.4329,0.4331,0.4332,0.4333,0
+sync_alloc,2,p1_alloc_only,24,asc,1,1.2339,1.1630,1.1683,1.1723,1.1757,1.1811,0
+sync_alloc,2,p2_alloc_zeros,24,asc,1,1.3385,1.3840,1.3886,1.3937,1.3960,1.4058,0
+sync_alloc,2,p3_h2d_only,24,asc,1,1.7533,1.7268,1.7315,1.7353,1.7397,1.7490,0
+sync_alloc,2,p0_transfer_only,24,asc,1,5.3571,5.3526,5.3629,5.3726,5.3751,5.3997,0
+sync_alloc,2,p4_d2h_fresh_vec,24,asc,1,0.4345,0.4330,0.4331,0.4332,0.4333,0.4335,0
+sync_alloc,2,p1_alloc_only,24,asc,2,1.2360,1.1610,1.1674,1.1733,1.1738,1.5713,0
+sync_alloc,2,p2_alloc_zeros,24,asc,2,1.3494,1.3763,1.3831,1.3879,1.3905,1.4046,0
+sync_alloc,2,p3_h2d_only,24,asc,2,1.7305,1.7095,1.7175,1.7207,1.7257,1.7335,0
+sync_alloc,2,p0_transfer_only,24,asc,2,5.3261,5.3127,5.3233,5.3299,5.3362,5.3523,0
+sync_alloc,2,p4_d2h_fresh_vec,24,asc,2,0.4351,0.4323,0.4325,0.4327,0.4328,0.4405,0
+mem_pool_attr,after_sync_alloc_24mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+both,3,p1_alloc_only,24,asc,0,1.2313,1.1591,1.1656,1.1682,1.1757,1.3510,0
+both,3,p2_alloc_zeros,24,asc,0,1.3410,1.3849,1.3955,1.3975,1.4021,1.4157,0
+both,3,p3_h2d_only,24,asc,0,1.7413,1.7191,1.7325,1.7340,1.7379,1.8915,0
+both,3,p0_transfer_only,24,asc,0,5.3811,5.3258,5.3379,5.3416,5.3509,5.3750,0
+both,3,p4_d2h_fresh_vec,24,asc,0,0.4350,0.4329,0.4330,0.4331,0.4332,0.4421,0
+both,3,p1_alloc_only,24,asc,1,1.4264,1.1619,1.1658,1.1681,1.1765,1.1849,0
+both,3,p2_alloc_zeros,24,asc,1,1.3431,1.3837,1.3910,1.3947,1.3999,1.4030,0
+both,3,p3_h2d_only,24,asc,1,1.7551,1.7229,1.7280,1.7308,1.7343,1.7456,0
+both,3,p0_transfer_only,24,asc,1,5.3591,5.3790,5.3863,5.3933,5.3994,5.6696,0
+both,3,p4_d2h_fresh_vec,24,asc,1,0.4337,0.4327,0.4329,0.4330,0.4331,0.4339,0
+both,3,p1_alloc_only,24,asc,2,1.3458,1.1598,1.1665,1.1692,1.1741,1.1851,0
+both,3,p2_alloc_zeros,24,asc,2,1.3210,1.3851,1.3929,1.3983,1.4032,1.4102,0
+both,3,p3_h2d_only,24,asc,2,1.7480,1.7241,1.7367,1.7388,1.7424,1.7472,0
+both,3,p0_transfer_only,24,asc,2,5.3652,5.4052,5.4163,5.4284,5.4328,5.5187,0
+both,3,p4_d2h_fresh_vec,24,asc,2,0.4341,0.4328,0.4330,0.4330,0.4331,0.4424,0
+mem_pool_attr,after_both_24mib,reserved_bytes=33554432,used_bytes=0,release_threshold=18446744073709551615
+baseline,4,p1_alloc_only,24,asc,0,1.7670,1.5788,1.6002,1.6058,1.6090,1.6182,0
+baseline,4,p2_alloc_zeros,24,asc,0,1.7708,1.7671,1.7773,1.7785,1.7830,1.7883,0
+baseline,4,p3_h2d_only,24,asc,0,2.1227,2.1098,2.1189,2.1221,2.1244,2.1450,0
+baseline,4,p0_transfer_only,24,asc,0,6.6747,6.7584,6.7859,6.7977,6.8152,6.8566,0
+baseline,4,p4_d2h_fresh_vec,24,asc,0,0.4353,0.4333,0.4335,0.4336,0.4337,0.4340,0
+baseline,4,p1_alloc_only,24,asc,1,1.6491,1.5923,1.6015,1.6058,1.6097,1.8099,0
+baseline,4,p2_alloc_zeros,24,asc,1,1.7785,1.7674,1.7744,1.7810,1.7826,1.7854,0
+baseline,4,p3_h2d_only,24,asc,1,2.1298,2.1056,2.1143,2.1194,2.1244,2.1390,0
+baseline,4,p0_transfer_only,24,asc,1,6.6594,6.7780,6.7862,6.7953,6.8066,6.8511,0
+baseline,4,p4_d2h_fresh_vec,24,asc,1,0.4345,0.4320,0.4329,0.4331,0.4332,0.4335,0
+baseline,4,p1_alloc_only,24,asc,2,1.6603,1.5950,1.6007,1.6046,1.6079,1.6490,0
+baseline,4,p2_alloc_zeros,24,asc,2,1.7634,1.7669,1.7736,1.7765,1.7807,1.7909,0
+baseline,4,p3_h2d_only,24,asc,2,2.1357,2.1092,2.1132,2.1221,2.1249,2.1353,0
+baseline,4,p0_transfer_only,24,asc,2,6.7014,6.7154,6.7285,6.7486,6.7507,6.7889,0
+baseline,4,p4_d2h_fresh_vec,24,asc,2,0.4357,0.4332,0.4335,0.4336,0.4338,0.4419,0
+mem_pool_attr,after_baseline_24mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+baseline,0,p1_alloc_only,28,asc,0,1.7989,1.5817,1.5872,1.5898,1.5919,1.6054,0
+baseline,0,p2_alloc_zeros,28,asc,0,1.7853,1.8096,1.8133,1.8172,1.8232,1.8355,0
+baseline,0,p3_h2d_only,28,asc,0,2.2150,2.1894,2.2003,2.2085,2.2133,2.2165,0
+baseline,0,p0_transfer_only,28,asc,0,24.5097,6.9753,6.9861,6.9986,7.0055,7.0238,0
+baseline,0,p4_d2h_fresh_vec,28,asc,0,0.5052,0.5037,0.5040,0.5041,0.5042,0.5049,0
+baseline,0,p1_alloc_only,28,asc,1,1.6614,1.5990,1.6026,1.6099,1.6117,1.6188,0
+baseline,0,p2_alloc_zeros,28,asc,1,1.7828,1.8070,1.8132,1.8190,1.8239,1.8499,0
+baseline,0,p3_h2d_only,28,asc,1,2.2054,2.1994,2.2039,2.2078,2.2102,2.2174,0
+baseline,0,p0_transfer_only,28,asc,1,6.9408,6.9713,6.9957,7.0063,7.0203,7.0430,0
+baseline,0,p4_d2h_fresh_vec,28,asc,1,0.5065,0.5039,0.5042,0.5043,0.5044,0.5115,0
+baseline,0,p1_alloc_only,28,asc,2,1.6476,1.5922,1.5978,1.6020,1.6091,1.9308,0
+baseline,0,p2_alloc_zeros,28,asc,2,1.7960,1.8022,1.8165,1.8192,1.8238,1.8540,0
+baseline,0,p3_h2d_only,28,asc,2,2.2238,2.1932,2.2009,2.2059,2.2140,2.2268,0
+baseline,0,p0_transfer_only,28,asc,2,6.8838,6.9773,7.0023,7.0147,7.0243,7.0364,0
+baseline,0,p4_d2h_fresh_vec,28,asc,2,0.5054,0.5031,0.5038,0.5040,0.5040,0.5057,0
+mem_pool_attr,after_baseline_28mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+release_threshold,1,p1_alloc_only,28,asc,0,1.1997,0.0017,0.0018,0.0018,0.0018,0.0021,0
+release_threshold,1,p2_alloc_zeros,28,asc,0,0.1246,0.1499,0.1514,0.1520,0.1602,0.1893,0
+release_threshold,1,p3_h2d_only,28,asc,0,0.5022,0.5055,0.5059,0.5064,0.5068,0.5154,0
+release_threshold,1,p0_transfer_only,28,asc,0,4.2415,1.6160,1.6176,1.6183,1.6192,1.6279,0
+release_threshold,1,p4_d2h_fresh_vec,28,asc,0,0.5032,0.5023,0.5028,0.5029,0.5030,0.5032,0
+release_threshold,1,p1_alloc_only,28,asc,1,0.0020,0.0017,0.0017,0.0018,0.0018,0.0021,0
+release_threshold,1,p2_alloc_zeros,28,asc,1,0.1360,0.1505,0.1515,0.1518,0.1521,0.1532,0
+release_threshold,1,p3_h2d_only,28,asc,1,0.4926,0.5053,0.5059,0.5061,0.5065,0.5068,0
+release_threshold,1,p0_transfer_only,28,asc,1,1.6184,1.6167,1.6179,1.6191,1.6203,1.6271,0
+release_threshold,1,p4_d2h_fresh_vec,28,asc,1,0.5030,0.5023,0.5025,0.5026,0.5029,0.5124,0
+release_threshold,1,p1_alloc_only,28,asc,2,0.0019,0.0017,0.0017,0.0017,0.0018,0.0018,0
+release_threshold,1,p2_alloc_zeros,28,asc,2,0.1341,0.1511,0.1513,0.1516,0.1519,0.1524,0
+release_threshold,1,p3_h2d_only,28,asc,2,0.4916,0.5049,0.5059,0.5064,0.5066,0.5073,0
+release_threshold,1,p0_transfer_only,28,asc,2,1.6191,1.6141,1.6178,1.6190,1.6210,1.6297,0
+release_threshold,1,p4_d2h_fresh_vec,28,asc,2,0.5102,0.5024,0.5026,0.5028,0.5029,0.5114,0
+mem_pool_attr,after_release_threshold_28mib,reserved_bytes=100663296,used_bytes=0,release_threshold=18446744073709551615
+sync_alloc,2,p1_alloc_only,28,asc,0,1.5894,1.3901,1.3945,1.4007,1.4044,1.4160,0
+sync_alloc,2,p2_alloc_zeros,28,asc,0,1.5911,1.6192,1.6249,1.6282,1.6325,1.6406,0
+sync_alloc,2,p3_h2d_only,28,asc,0,2.0244,2.0168,2.0195,2.0229,2.0262,2.0999,0
+sync_alloc,2,p0_transfer_only,28,asc,0,6.2811,6.2446,6.2574,6.2741,6.2762,6.2963,0
+sync_alloc,2,p4_d2h_fresh_vec,28,asc,0,0.5056,0.5035,0.5037,0.5037,0.5040,0.5054,0
+sync_alloc,2,p1_alloc_only,28,asc,1,1.4739,1.3911,1.3962,1.4003,1.4011,1.4199,0
+sync_alloc,2,p2_alloc_zeros,28,asc,1,1.5747,1.6142,1.6235,1.6270,1.6307,1.6695,0
+sync_alloc,2,p3_h2d_only,28,asc,1,2.0230,1.9996,2.0098,2.0123,2.0176,2.0327,0
+sync_alloc,2,p0_transfer_only,28,asc,1,6.2256,6.2416,6.2635,6.2691,6.2762,6.3032,0
+sync_alloc,2,p4_d2h_fresh_vec,28,asc,1,0.5050,0.5032,0.5039,0.5040,0.5041,0.5043,0
+sync_alloc,2,p1_alloc_only,28,asc,2,1.4836,1.3849,1.3913,1.3943,1.3999,1.4084,0
+sync_alloc,2,p2_alloc_zeros,28,asc,2,1.5765,1.6135,1.6295,1.6324,1.6370,1.6883,0
+sync_alloc,2,p3_h2d_only,28,asc,2,2.0306,2.0082,2.0165,2.0195,2.0264,2.5311,0
+sync_alloc,2,p0_transfer_only,28,asc,2,6.2472,6.2403,6.2559,6.2713,6.2781,6.3037,0
+sync_alloc,2,p4_d2h_fresh_vec,28,asc,2,0.5061,0.5041,0.5043,0.5044,0.5045,0.5140,0
+mem_pool_attr,after_sync_alloc_28mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+both,3,p1_alloc_only,28,asc,0,1.4642,1.3900,1.4013,1.4029,1.4046,1.4145,0
+both,3,p2_alloc_zeros,28,asc,0,1.5892,1.6178,1.6283,1.6303,1.6338,1.6423,0
+both,3,p3_h2d_only,28,asc,0,2.0235,2.0066,2.0177,2.0231,2.0269,2.1632,0
+both,3,p0_transfer_only,28,asc,0,6.2178,6.2275,6.2514,6.2682,6.2712,6.2789,0
+both,3,p4_d2h_fresh_vec,28,asc,0,0.5051,0.5033,0.5037,0.5038,0.5039,0.5043,0
+both,3,p1_alloc_only,28,asc,1,1.6221,1.3810,1.3846,1.3941,1.3968,1.4129,0
+both,3,p2_alloc_zeros,28,asc,1,1.5701,1.6113,1.6256,1.6300,1.6325,1.6392,0
+both,3,p3_h2d_only,28,asc,1,2.1505,2.0044,2.0146,2.0177,2.0218,2.5322,0
+both,3,p0_transfer_only,28,asc,1,6.2544,6.2954,6.3010,6.3158,6.3267,6.3580,0
+both,3,p4_d2h_fresh_vec,28,asc,1,0.5049,0.5036,0.5038,0.5041,0.5041,0.5115,0
+both,3,p1_alloc_only,28,asc,2,1.5757,1.3819,1.3919,1.3971,1.3992,1.4122,0
+both,3,p2_alloc_zeros,28,asc,2,1.5783,1.6113,1.6210,1.6236,1.6269,1.6298,0
+both,3,p3_h2d_only,28,asc,2,2.0114,2.0054,2.0097,2.0142,2.0163,2.0291,0
+both,3,p0_transfer_only,28,asc,2,6.4628,6.2759,6.3006,6.3064,6.3129,6.4018,0
+both,3,p4_d2h_fresh_vec,28,asc,2,0.5046,0.5034,0.5038,0.5039,0.5039,0.5046,0
+mem_pool_attr,after_both_28mib,reserved_bytes=33554432,used_bytes=0,release_threshold=18446744073709551615
+baseline,4,p1_alloc_only,28,asc,0,1.7433,1.5811,1.6003,1.6052,1.6112,1.6165,0
+baseline,4,p2_alloc_zeros,28,asc,0,1.7930,1.7950,1.8119,1.8172,1.8188,1.8301,0
+baseline,4,p3_h2d_only,28,asc,0,2.2237,2.1899,2.2064,2.2101,2.2120,2.6545,0
+baseline,4,p0_transfer_only,28,asc,0,6.8590,6.9658,6.9911,7.0063,7.0101,7.0268,0
+baseline,4,p4_d2h_fresh_vec,28,asc,0,0.5051,0.5028,0.5035,0.5037,0.5037,0.5040,0
+baseline,4,p1_alloc_only,28,asc,1,1.6508,1.5880,1.6011,1.6060,1.6103,1.6229,0
+baseline,4,p2_alloc_zeros,28,asc,1,1.8453,1.8085,1.8152,1.8189,1.8208,1.8307,0
+baseline,4,p3_h2d_only,28,asc,1,2.2073,2.1943,2.2070,2.2113,2.2150,2.2234,0
+baseline,4,p0_transfer_only,28,asc,1,6.8838,6.9680,6.9834,6.9954,7.0038,7.0393,0
+baseline,4,p4_d2h_fresh_vec,28,asc,1,0.5052,0.5037,0.5038,0.5039,0.5041,0.5043,0
+baseline,4,p1_alloc_only,28,asc,2,1.6654,1.5820,1.5943,1.6024,1.6068,1.6371,0
+baseline,4,p2_alloc_zeros,28,asc,2,1.9514,1.8072,1.8134,1.8207,1.8225,1.8446,0
+baseline,4,p3_h2d_only,28,asc,2,2.4221,2.1952,2.2021,2.2082,2.2141,2.2214,0
+baseline,4,p0_transfer_only,28,asc,2,6.8697,6.9682,6.9920,6.9993,7.0049,7.0241,0
+baseline,4,p4_d2h_fresh_vec,28,asc,2,0.5054,0.5032,0.5035,0.5036,0.5038,0.5041,0
+mem_pool_attr,after_baseline_28mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+baseline,0,p1_alloc_only,31,asc,0,1.8073,1.5941,1.6007,1.6059,1.6111,1.6358,0
+baseline,0,p2_alloc_zeros,31,asc,0,1.8146,1.8343,1.8425,1.8460,1.8497,1.8613,0
+baseline,0,p3_h2d_only,31,asc,0,2.2808,2.2531,2.2710,2.2766,2.2798,2.3101,0
+baseline,0,p0_transfer_only,31,asc,0,24.4987,7.0806,7.0964,7.1062,7.1113,7.6698,0
+baseline,0,p4_d2h_fresh_vec,31,asc,0,0.5589,0.5569,0.5569,0.5571,0.5572,0.5649,0
+baseline,0,p1_alloc_only,31,asc,1,1.6665,1.5890,1.6021,1.6071,1.6106,1.7271,0
+baseline,0,p2_alloc_zeros,31,asc,1,4.5589,1.8154,1.8302,1.8351,1.8382,1.8454,0
+baseline,0,p3_h2d_only,31,asc,1,2.2993,2.2684,2.2740,2.2787,2.2822,2.3088,0
+baseline,0,p0_transfer_only,31,asc,1,7.0435,7.0752,7.1056,7.1135,7.1195,7.5413,0
+baseline,0,p4_d2h_fresh_vec,31,asc,1,0.5596,0.5561,0.5564,0.5565,0.5567,0.5653,0
+baseline,0,p1_alloc_only,31,asc,2,1.6775,1.5950,1.6015,1.6045,1.6098,1.6138,0
+baseline,0,p2_alloc_zeros,31,asc,2,1.8082,1.8407,1.8472,1.8513,1.8540,1.8637,0
+baseline,0,p3_h2d_only,31,asc,2,2.2774,2.2667,2.2711,2.2768,2.2795,2.2921,0
+baseline,0,p0_transfer_only,31,asc,2,7.0402,7.0899,7.1079,7.1145,7.1170,7.1376,0
+baseline,0,p4_d2h_fresh_vec,31,asc,2,0.5599,0.5566,0.5569,0.5570,0.5571,0.5661,0
+mem_pool_attr,after_baseline_31mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+release_threshold,1,p1_alloc_only,31,asc,0,1.2141,0.0017,0.0017,0.0018,0.0018,0.0022,0
+release_threshold,1,p2_alloc_zeros,31,asc,0,0.1364,0.1676,0.1685,0.1688,0.1690,0.1699,0
+release_threshold,1,p3_h2d_only,31,asc,0,0.5535,0.5572,0.5583,0.5593,0.5595,0.5608,0
+release_threshold,1,p0_transfer_only,31,asc,0,4.3731,1.7864,1.7882,1.7889,1.7897,1.7986,0
+release_threshold,1,p4_d2h_fresh_vec,31,asc,0,0.5571,0.5560,0.5562,0.5564,0.5564,0.5567,0
+release_threshold,1,p1_alloc_only,31,asc,1,0.0023,0.0017,0.0017,0.0018,0.0018,0.0018,0
+release_threshold,1,p2_alloc_zeros,31,asc,1,0.1523,0.1676,0.1682,0.1685,0.1688,0.1779,0
+release_threshold,1,p3_h2d_only,31,asc,1,0.5457,0.5581,0.5590,0.5597,0.5674,1.0009,0
+release_threshold,1,p0_transfer_only,31,asc,1,1.7870,1.7862,1.7876,1.7884,1.7892,1.7926,0
+release_threshold,1,p4_d2h_fresh_vec,31,asc,1,0.5571,0.5559,0.5561,0.5563,0.5566,0.5651,0
+release_threshold,1,p1_alloc_only,31,asc,2,0.0019,0.0017,0.0017,0.0018,0.0018,0.0018,0
+release_threshold,1,p2_alloc_zeros,31,asc,2,0.1476,0.1672,0.1682,0.1687,0.1689,0.1699,0
+release_threshold,1,p3_h2d_only,31,asc,2,0.5433,0.5582,0.5588,0.5592,0.5594,0.5605,0
+release_threshold,1,p0_transfer_only,31,asc,2,1.7861,1.7868,1.7882,1.7886,1.7906,1.7960,0
+release_threshold,1,p4_d2h_fresh_vec,31,asc,2,0.5567,0.5559,0.5562,0.5563,0.5564,0.5650,0
+mem_pool_attr,after_release_threshold_31mib,reserved_bytes=100663296,used_bytes=0,release_threshold=18446744073709551615
+sync_alloc,2,p1_alloc_only,31,asc,0,1.7285,1.5572,1.5639,1.5712,1.5737,1.5918,0
+sync_alloc,2,p2_alloc_zeros,31,asc,0,1.7666,1.8048,1.8093,1.8143,1.8214,1.8326,0
+sync_alloc,2,p3_h2d_only,31,asc,0,2.2514,2.2248,2.2387,2.2418,2.2460,2.2519,0
+sync_alloc,2,p0_transfer_only,31,asc,0,6.9236,6.9449,6.9733,6.9802,6.9882,7.4884,0
+sync_alloc,2,p4_d2h_fresh_vec,31,asc,0,0.5583,0.5559,0.5562,0.5564,0.5565,0.5568,0
+sync_alloc,2,p1_alloc_only,31,asc,1,1.6395,1.5610,1.5688,1.5720,1.5756,1.5870,0
+sync_alloc,2,p2_alloc_zeros,31,asc,1,1.7904,1.8074,1.8135,1.8167,1.8225,1.8332,0
+sync_alloc,2,p3_h2d_only,31,asc,1,2.2530,2.2339,2.2414,2.2464,2.2550,2.2981,0
+sync_alloc,2,p0_transfer_only,31,asc,1,6.9433,6.9145,6.9233,6.9378,6.9876,11.9605,0
+sync_alloc,2,p4_d2h_fresh_vec,31,asc,1,0.5597,0.5562,0.5563,0.5564,0.5564,0.5567,0
+sync_alloc,2,p1_alloc_only,31,asc,2,1.6323,1.5290,1.5479,1.5544,1.5558,1.5727,0
+sync_alloc,2,p2_alloc_zeros,31,asc,2,1.7683,1.8022,1.8068,1.8104,1.8127,1.8190,0
+sync_alloc,2,p3_h2d_only,31,asc,2,2.2526,2.2231,2.2330,2.2356,2.2467,2.3257,0
+sync_alloc,2,p0_transfer_only,31,asc,2,7.0587,6.9781,6.9882,6.9963,7.0021,7.0353,0
+sync_alloc,2,p4_d2h_fresh_vec,31,asc,2,0.5587,0.5559,0.5562,0.5563,0.5564,0.5653,0
+mem_pool_attr,after_sync_alloc_31mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+both,3,p1_alloc_only,31,asc,0,1.6391,1.5627,1.5684,1.5808,1.5847,1.5916,0
+both,3,p2_alloc_zeros,31,asc,0,1.7840,1.8105,1.8219,1.8247,1.8303,1.8335,0
+both,3,p3_h2d_only,31,asc,0,2.2578,2.2325,2.2455,2.2475,2.2505,2.2756,0
+both,3,p0_transfer_only,31,asc,0,6.9361,6.9542,6.9739,6.9826,6.9866,6.9983,0
+both,3,p4_d2h_fresh_vec,31,asc,0,0.5584,0.5565,0.5567,0.5568,0.5569,0.5646,0
+both,3,p1_alloc_only,31,asc,1,1.7950,1.5510,1.5661,1.5744,1.5772,1.7748,0
+both,3,p2_alloc_zeros,31,asc,1,1.7767,1.8055,1.8124,1.8189,1.8221,1.8527,0
+both,3,p3_h2d_only,31,asc,1,2.2632,2.2393,2.2449,2.2492,2.2535,2.7502,0
+both,3,p0_transfer_only,31,asc,1,6.9764,6.9770,7.0030,7.0160,7.0189,7.0486,0
+both,3,p4_d2h_fresh_vec,31,asc,1,0.5576,0.5565,0.5568,0.5570,0.5571,0.5579,0
+both,3,p1_alloc_only,31,asc,2,1.7622,1.5656,1.5766,1.5792,1.5829,1.5876,0
+both,3,p2_alloc_zeros,31,asc,2,1.7856,1.8101,1.8163,1.8224,1.8256,1.8397,0
+both,3,p3_h2d_only,31,asc,2,2.2486,2.2418,2.2495,2.2534,2.2584,2.3485,0
+both,3,p0_transfer_only,31,asc,2,6.9519,6.9945,7.0122,7.0230,7.0341,7.0437,0
+both,3,p4_d2h_fresh_vec,31,asc,2,0.5578,0.5560,0.5567,0.5568,0.5570,0.5574,0
+mem_pool_attr,after_both_31mib,reserved_bytes=33554432,used_bytes=0,release_threshold=18446744073709551615
+baseline,4,p1_alloc_only,31,asc,0,1.7375,1.5941,1.6042,1.6105,1.6149,1.6886,0
+baseline,4,p2_alloc_zeros,31,asc,0,1.8868,1.8318,1.8481,1.8532,1.8550,2.1864,0
+baseline,4,p3_h2d_only,31,asc,0,2.2824,2.2563,2.2667,2.2718,2.2748,2.2885,0
+baseline,4,p0_transfer_only,31,asc,0,7.0456,7.0880,7.1041,7.1110,7.1261,7.1563,0
+baseline,4,p4_d2h_fresh_vec,31,asc,0,0.5581,0.5549,0.5559,0.5560,0.5564,0.5652,0
+baseline,4,p1_alloc_only,31,asc,1,1.6731,1.5917,1.6010,1.6045,1.6092,1.6153,0
+baseline,4,p2_alloc_zeros,31,asc,1,1.8151,1.8353,1.8447,1.8476,1.8540,1.8777,0
+baseline,4,p3_h2d_only,31,asc,1,2.2654,2.2606,2.2688,2.2722,2.2736,2.2919,0
+baseline,4,p0_transfer_only,31,asc,1,7.0308,7.0828,7.1037,7.1230,7.1274,7.2500,0
+baseline,4,p4_d2h_fresh_vec,31,asc,1,0.5589,0.5565,0.5567,0.5568,0.5569,0.5572,0
+baseline,4,p1_alloc_only,31,asc,2,1.6779,1.5818,1.5993,1.6032,1.6059,1.9024,0
+baseline,4,p2_alloc_zeros,31,asc,2,1.8064,1.8372,1.8414,1.8441,1.8486,1.8546,0
+baseline,4,p3_h2d_only,31,asc,2,2.2948,2.2623,2.2709,2.2738,2.2777,2.2844,0
+baseline,4,p0_transfer_only,31,asc,2,7.0426,7.0958,7.1042,7.1141,7.1259,7.1720,0
+baseline,4,p4_d2h_fresh_vec,31,asc,2,0.5570,0.5531,0.5537,0.5538,0.5540,0.5707,0
+mem_pool_attr,after_baseline_31mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+baseline,0,p1_alloc_only,32,asc,0,1.8216,1.5919,1.6029,1.6065,1.6128,1.6189,0
+baseline,0,p2_alloc_zeros,32,asc,0,1.8196,1.8394,1.8510,1.8561,1.8576,1.8716,0
+baseline,0,p3_h2d_only,32,asc,0,2.3024,2.2772,2.2897,2.2930,2.2966,2.3017,0
+baseline,0,p0_transfer_only,32,asc,0,26.6652,21.8731,24.6553,26.0151,26.2083,27.0613,0
+baseline,0,p4_d2h_fresh_vec,32,asc,0,18.4666,250.1004,258.0769,260.8934,262.0724,266.9618,0
+baseline,0,p1_alloc_only,32,asc,1,1.7730,1.5895,1.5999,1.6003,1.6025,1.6260,0
+baseline,0,p2_alloc_zeros,32,asc,1,1.9072,1.8412,1.8484,1.8548,1.8572,1.9802,0
+baseline,0,p3_h2d_only,32,asc,1,2.3048,2.2847,2.2924,2.2950,2.2973,2.3518,0
+baseline,0,p0_transfer_only,32,asc,1,26.6966,24.0416,25.1338,26.0549,26.1637,26.2848,0
+baseline,0,p4_d2h_fresh_vec,32,asc,1,16.8136,15.4375,255.0768,256.8768,258.3486,260.7518,19
+baseline,0,p1_alloc_only,32,asc,2,1.7618,1.5930,1.6013,1.6060,1.6120,1.6175,0
+baseline,0,p2_alloc_zeros,32,asc,2,1.9132,1.8417,1.8493,1.8562,1.8573,1.8639,0
+baseline,0,p3_h2d_only,32,asc,2,2.3117,2.2793,2.2908,2.2932,2.2966,2.3095,0
+baseline,0,p0_transfer_only,32,asc,2,26.2036,24.5412,24.9099,25.0683,25.1416,26.0982,0
+baseline,0,p4_d2h_fresh_vec,32,asc,2,18.3394,253.0513,257.0234,258.5459,259.6286,263.2207,0
+baseline,0,p1_alloc_only,32,asc,3,1.7687,1.5909,1.5987,1.6041,1.6064,1.9650,0
+baseline,0,p2_alloc_zeros,32,asc,3,1.9099,1.8364,1.8511,1.8551,1.8587,1.8847,0
+baseline,0,p3_h2d_only,32,asc,3,2.3171,2.2832,2.2892,2.2955,2.2981,2.3079,0
+baseline,0,p0_transfer_only,32,asc,3,27.1445,22.8460,25.1269,26.0285,26.1896,27.2484,0
+baseline,0,p4_d2h_fresh_vec,32,asc,3,18.2924,17.7037,246.0574,259.0712,260.0427,263.9483,15
+baseline,0,p1_alloc_only,32,asc,4,1.7518,1.5928,1.6015,1.6045,1.6071,1.6164,0
+baseline,0,p2_alloc_zeros,32,asc,4,1.8982,1.8407,1.8497,1.8531,1.8558,1.8619,0
+baseline,0,p3_h2d_only,32,asc,4,2.2907,2.2845,2.2904,2.2937,2.2945,2.3094,0
+baseline,0,p0_transfer_only,32,asc,4,27.0267,23.1912,25.1762,25.4501,26.1296,26.3884,0
+baseline,0,p4_d2h_fresh_vec,32,asc,4,16.7301,255.0866,258.4532,259.7038,260.3511,264.4313,0
+mem_pool_attr,after_baseline_32mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+release_threshold,1,p1_alloc_only,32,asc,0,1.3086,0.0017,0.0017,0.0018,0.0018,0.0019,0
+release_threshold,1,p2_alloc_zeros,32,asc,0,0.2321,0.1739,0.1746,0.1752,0.1754,0.1764,0
+release_threshold,1,p3_h2d_only,32,asc,0,0.5736,0.5760,0.5766,0.5772,0.5775,0.5783,0
+release_threshold,1,p0_transfer_only,32,asc,0,21.8140,20.5231,258.7740,262.2740,264.2504,268.8592,19
+release_threshold,1,p4_d2h_fresh_vec,32,asc,0,260.4291,16.5435,255.4149,257.5009,258.4256,261.0990,19
+release_threshold,1,p1_alloc_only,32,asc,1,0.0064,0.0017,0.0018,0.0018,0.0018,0.0021,0
+release_threshold,1,p2_alloc_zeros,32,asc,1,0.2608,0.1743,0.1750,0.1754,0.1758,0.1765,0
+release_threshold,1,p3_h2d_only,32,asc,1,0.5648,0.5762,0.5767,0.5769,0.5776,0.5789,0
+release_threshold,1,p0_transfer_only,32,asc,1,248.0808,255.1614,257.8361,259.4414,260.7218,263.9194,0
+release_threshold,1,p4_d2h_fresh_vec,32,asc,1,257.5490,18.1442,258.3440,260.0634,260.9880,264.1082,17
+release_threshold,1,p1_alloc_only,32,asc,2,0.0066,0.0017,0.0018,0.0018,0.0018,0.0021,0
+release_threshold,1,p2_alloc_zeros,32,asc,2,0.2602,0.1742,0.1751,0.1755,0.1757,0.1771,0
+release_threshold,1,p3_h2d_only,32,asc,2,0.5647,0.5765,0.5767,0.5773,0.5774,0.5782,0
+release_threshold,1,p0_transfer_only,32,asc,2,262.0518,18.0968,254.6454,257.8683,259.5461,270.2641,18
+release_threshold,1,p4_d2h_fresh_vec,32,asc,2,261.0075,253.1441,255.5333,256.8782,257.7753,262.0984,0
+release_threshold,1,p1_alloc_only,32,asc,3,0.0051,0.0017,0.0017,0.0018,0.0018,0.0022,0
+release_threshold,1,p2_alloc_zeros,32,asc,3,0.2592,0.1744,0.1749,0.1751,0.1756,0.1765,0
+release_threshold,1,p3_h2d_only,32,asc,3,0.5637,0.5763,0.5769,0.5774,0.5778,0.5792,0
+release_threshold,1,p0_transfer_only,32,asc,3,251.2869,256.4486,259.7881,260.5506,261.6645,262.8060,0
+release_threshold,1,p4_d2h_fresh_vec,32,asc,3,262.1066,18.7673,257.7182,259.5237,260.9686,266.3395,19
+release_threshold,1,p1_alloc_only,32,asc,4,0.0063,0.0017,0.0018,0.0018,0.0018,0.0021,0
+release_threshold,1,p2_alloc_zeros,32,asc,4,0.2591,0.1741,0.1749,0.1752,0.1756,0.1764,0
+release_threshold,1,p3_h2d_only,32,asc,4,0.5643,0.5757,0.5768,0.5771,0.5775,0.5814,0
+release_threshold,1,p0_transfer_only,32,asc,4,260.7119,254.6006,259.1621,259.8493,260.9207,264.5223,0
+release_threshold,1,p4_d2h_fresh_vec,32,asc,4,259.3012,256.3386,259.8559,261.8079,262.9911,269.2243,0
+mem_pool_attr,after_release_threshold_32mib,reserved_bytes=100663296,used_bytes=0,release_threshold=18446744073709551615
+sync_alloc,2,p1_alloc_only,32,asc,0,1.8080,1.6008,1.6067,1.6119,1.6153,1.6260,0
+sync_alloc,2,p2_alloc_zeros,32,asc,0,1.9051,1.8499,1.8547,1.8594,1.8615,1.8700,0
+sync_alloc,2,p3_h2d_only,32,asc,0,2.3133,2.2857,2.2991,2.3027,2.3057,2.3135,0
+sync_alloc,2,p0_transfer_only,32,asc,0,24.8676,25.0587,25.9565,26.0383,26.2151,26.5675,0
+sync_alloc,2,p4_d2h_fresh_vec,32,asc,0,19.5600,15.2905,257.5394,260.1890,261.0552,263.8808,18
+sync_alloc,2,p1_alloc_only,32,asc,1,1.7808,1.5981,1.6067,1.6114,1.6182,1.6259,0
+sync_alloc,2,p2_alloc_zeros,32,asc,1,1.9105,1.8283,1.8513,1.8551,1.8586,2.1581,0
+sync_alloc,2,p3_h2d_only,32,asc,1,2.3077,2.2867,2.2944,2.2976,2.3017,2.3071,0
+sync_alloc,2,p0_transfer_only,32,asc,1,25.7140,23.2088,24.9321,25.1804,25.8462,26.3132,0
+sync_alloc,2,p4_d2h_fresh_vec,32,asc,1,18.6235,18.1207,256.5492,259.0421,261.0553,269.1144,17
+sync_alloc,2,p1_alloc_only,32,asc,2,1.7388,1.6012,1.6055,1.6093,1.6141,1.6294,0
+sync_alloc,2,p2_alloc_zeros,32,asc,2,1.9190,1.8465,1.8548,1.8625,1.8651,1.8837,0
+sync_alloc,2,p3_h2d_only,32,asc,2,2.3129,2.2832,2.2969,2.2990,2.3038,2.3086,0
+sync_alloc,2,p0_transfer_only,32,asc,2,26.2222,23.8547,25.2684,26.1143,26.2304,26.5084,0
+sync_alloc,2,p4_d2h_fresh_vec,32,asc,2,19.5337,255.6945,258.1313,259.4072,259.9934,264.7266,0
+sync_alloc,2,p1_alloc_only,32,asc,3,1.7886,1.6004,1.6083,1.6112,1.6143,1.6235,0
+sync_alloc,2,p2_alloc_zeros,32,asc,3,1.9083,1.8450,1.8555,1.8614,1.8634,1.8826,0
+sync_alloc,2,p3_h2d_only,32,asc,3,2.3058,2.2876,2.2952,2.2991,2.3041,2.3111,0
+sync_alloc,2,p0_transfer_only,32,asc,3,27.2679,23.6864,25.0529,26.0749,26.2330,28.7243,0
+sync_alloc,2,p4_d2h_fresh_vec,32,asc,3,18.4626,16.1911,18.6231,260.1981,261.2343,266.3724,14
+sync_alloc,2,p1_alloc_only,32,asc,4,1.7830,1.5949,1.6044,1.6084,1.6089,1.6162,0
+sync_alloc,2,p2_alloc_zeros,32,asc,4,1.8971,1.8456,1.8493,1.8576,1.8610,1.9015,0
+sync_alloc,2,p3_h2d_only,32,asc,4,2.3004,2.2934,2.2968,2.3014,2.3039,2.7955,0
+sync_alloc,2,p0_transfer_only,32,asc,4,25.3320,24.5645,25.0573,25.1463,26.0930,26.3664,0
+sync_alloc,2,p4_d2h_fresh_vec,32,asc,4,16.5028,251.4115,259.8457,261.4295,262.6031,273.5897,0
+mem_pool_attr,after_sync_alloc_32mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+both,3,p1_alloc_only,32,asc,0,1.7891,1.6028,1.6119,1.6162,1.6181,1.6274,0
+both,3,p2_alloc_zeros,32,asc,0,1.9039,1.8476,1.8539,1.8610,1.8645,1.9082,0
+both,3,p3_h2d_only,32,asc,0,2.3125,2.2893,2.2936,2.2975,2.3031,2.3091,0
+both,3,p0_transfer_only,32,asc,0,25.6481,23.8890,25.2085,25.8835,26.1953,27.2606,0
+both,3,p4_d2h_fresh_vec,32,asc,0,18.4091,18.8976,257.1713,259.8332,264.1647,272.0398,19
+both,3,p1_alloc_only,32,asc,1,1.8899,1.6018,1.6086,1.6157,1.6185,1.6270,0
+both,3,p2_alloc_zeros,32,asc,1,1.9212,1.8515,1.8576,1.8622,1.8644,1.8820,0
+both,3,p3_h2d_only,32,asc,1,2.3087,2.2881,2.2961,2.2986,2.3034,2.3098,0
+both,3,p0_transfer_only,32,asc,1,26.9019,23.6701,25.4524,26.2499,26.3147,30.4337,0
+both,3,p4_d2h_fresh_vec,32,asc,1,261.0392,252.6884,259.3953,260.0316,261.1659,263.2635,0
+both,3,p1_alloc_only,32,asc,2,1.8698,1.5915,1.6047,1.6126,1.6151,1.6221,0
+both,3,p2_alloc_zeros,32,asc,2,1.8991,1.8507,1.8559,1.8632,1.8672,1.8830,0
+both,3,p3_h2d_only,32,asc,2,2.2992,2.2902,2.3003,2.3046,2.3092,2.3168,0
+both,3,p0_transfer_only,32,asc,2,27.2193,24.5812,25.8177,26.1956,26.3634,27.7143,0
+both,3,p4_d2h_fresh_vec,32,asc,2,18.7598,250.9209,259.5308,260.5737,261.4789,264.8041,0
+both,3,p1_alloc_only,32,asc,3,1.8930,1.6009,1.6083,1.6114,1.6152,1.6225,0
+both,3,p2_alloc_zeros,32,asc,3,1.9004,1.8469,1.8592,1.8607,1.8633,1.8816,0
+both,3,p3_h2d_only,32,asc,3,2.3047,2.2815,2.2957,2.3005,2.3048,2.7653,0
+both,3,p0_transfer_only,32,asc,3,25.9318,22.4042,25.0294,25.9781,26.1471,26.2868,0
+both,3,p4_d2h_fresh_vec,32,asc,3,17.3241,14.0475,14.8363,257.6996,259.7651,263.3123,14
+both,3,p1_alloc_only,32,asc,4,1.8692,1.5956,1.6013,1.6098,1.6134,1.6827,0
+both,3,p2_alloc_zeros,32,asc,4,1.9024,1.8442,1.8519,1.8583,1.8610,1.8746,0
+both,3,p3_h2d_only,32,asc,4,2.2998,2.2832,2.2950,2.2993,2.3017,2.3079,0
+both,3,p0_transfer_only,32,asc,4,25.3360,22.2836,24.6122,25.1447,26.2517,26.5327,0
+both,3,p4_d2h_fresh_vec,32,asc,4,15.5650,17.6542,257.3830,258.4928,259.4390,264.0313,18
+mem_pool_attr,after_both_32mib,reserved_bytes=33554432,used_bytes=0,release_threshold=18446744073709551615
+baseline,4,p1_alloc_only,32,asc,0,1.7596,1.5949,1.5985,1.6045,1.6069,1.6188,0
+baseline,4,p2_alloc_zeros,32,asc,0,1.9089,1.8383,1.8517,1.8564,1.8577,1.9406,0
+baseline,4,p3_h2d_only,32,asc,0,2.4032,2.2886,2.2940,2.2974,2.3004,2.3169,0
+baseline,4,p0_transfer_only,32,asc,0,25.6377,21.9605,24.5224,25.0431,25.1619,25.8141,0
+baseline,4,p4_d2h_fresh_vec,32,asc,0,18.2922,17.3370,258.5144,259.4851,262.6284,263.8831,19
+baseline,4,p1_alloc_only,32,asc,1,1.7484,1.5858,1.5993,1.6040,1.6072,1.6717,0
+baseline,4,p2_alloc_zeros,32,asc,1,1.9098,1.8431,1.8523,1.8575,1.8603,1.8951,0
+baseline,4,p3_h2d_only,32,asc,1,2.3076,2.2881,2.2922,2.2992,2.3039,2.3093,0
+baseline,4,p0_transfer_only,32,asc,1,26.3164,22.5220,25.0471,25.7324,26.1719,26.3044,0
+baseline,4,p4_d2h_fresh_vec,32,asc,1,18.4212,247.6506,257.6772,258.9996,260.6660,264.9796,0
+baseline,4,p1_alloc_only,32,asc,2,1.7624,1.5850,1.5929,1.5997,1.6038,1.6108,0
+baseline,4,p2_alloc_zeros,32,asc,2,1.9039,1.8358,1.8430,1.8501,1.8531,1.8586,0
+baseline,4,p3_h2d_only,32,asc,2,2.3001,2.2858,2.2922,2.2972,2.3002,2.3243,0
+baseline,4,p0_transfer_only,32,asc,2,26.8255,22.7691,25.1389,26.0020,26.0938,26.3916,0
+baseline,4,p4_d2h_fresh_vec,32,asc,2,19.1406,17.4555,257.2066,258.4677,259.3360,260.8960,18
+baseline,4,p1_alloc_only,32,asc,3,1.7553,1.5837,1.5973,1.6032,1.6083,1.6146,0
+baseline,4,p2_alloc_zeros,32,asc,3,1.9050,1.8367,1.8500,1.8542,1.8571,2.0076,0
+baseline,4,p3_h2d_only,32,asc,3,2.3006,2.2861,2.2902,2.2925,2.2974,2.3024,0
+baseline,4,p0_transfer_only,32,asc,3,26.3508,22.1296,24.9874,25.3348,25.9027,26.3926,0
+baseline,4,p4_d2h_fresh_vec,32,asc,3,247.4139,255.5218,258.1510,259.3924,260.9715,264.7610,0
+baseline,4,p1_alloc_only,32,asc,4,1.7841,1.5933,1.6031,1.6082,1.6115,1.6253,0
+baseline,4,p2_alloc_zeros,32,asc,4,1.9102,1.8472,1.8539,1.8591,1.8624,1.9047,0
+baseline,4,p3_h2d_only,32,asc,4,2.3135,2.2869,2.2910,2.2985,2.3015,2.3052,0
+baseline,4,p0_transfer_only,32,asc,4,25.7967,23.9876,24.5972,25.6516,26.1233,26.4029,0
+baseline,4,p4_d2h_fresh_vec,32,asc,4,19.6041,250.6465,256.1009,259.1600,260.6826,266.0602,0
+mem_pool_attr,after_baseline_32mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+baseline,0,p1_alloc_only,33,asc,0,3.6556,3.5195,3.5447,3.5587,3.5824,3.6321,0
+baseline,0,p2_alloc_zeros,33,asc,0,3.8806,3.6783,3.7148,3.7207,3.7292,3.8462,0
+baseline,0,p3_h2d_only,33,asc,0,4.2025,4.1616,4.1750,4.1856,4.1949,4.3653,0
+baseline,0,p0_transfer_only,33,asc,0,30.4593,24.0155,27.6890,28.6081,28.8047,29.2908,0
+baseline,0,p4_d2h_fresh_vec,33,asc,0,19.1692,18.5668,262.1887,264.7606,265.5358,266.6987,19
+baseline,0,p1_alloc_only,33,asc,1,3.4947,3.4914,3.5135,3.5180,3.5242,3.5341,0
+baseline,0,p2_alloc_zeros,33,asc,1,3.8454,3.6994,3.7178,3.7237,3.7346,3.7491,0
+baseline,0,p3_h2d_only,33,asc,1,4.1911,4.1661,4.1770,4.1800,4.1857,4.2642,0
+baseline,0,p0_transfer_only,33,asc,1,29.2477,25.6643,27.6058,27.8813,28.3749,29.1830,0
+baseline,0,p4_d2h_fresh_vec,33,asc,1,19.3438,254.5965,264.0120,265.2374,267.5832,273.8841,0
+baseline,0,p1_alloc_only,33,asc,2,3.5289,3.4881,3.5190,3.5235,3.5252,3.5357,0
+baseline,0,p2_alloc_zeros,33,asc,2,3.8335,3.7129,3.7218,3.7323,3.7395,4.2116,0
+baseline,0,p3_h2d_only,33,asc,2,4.1834,4.1528,4.1776,4.1824,4.1881,4.2016,0
+baseline,0,p0_transfer_only,33,asc,2,30.8350,25.5149,27.6431,28.5559,28.8422,29.9213,0
+baseline,0,p4_d2h_fresh_vec,33,asc,2,19.3692,19.1000,261.0225,262.5815,264.5185,270.3188,19
+baseline,0,p1_alloc_only,33,asc,3,3.5490,3.5068,3.5148,3.5222,3.5284,3.5410,0
+baseline,0,p2_alloc_zeros,33,asc,3,3.8244,3.7068,3.7249,3.7271,3.7302,3.7484,0
+baseline,0,p3_h2d_only,33,asc,3,4.1769,4.1566,4.1795,4.1871,4.1896,4.2637,0
+baseline,0,p0_transfer_only,33,asc,3,27.0528,25.5695,27.4193,27.7312,28.6817,29.3179,0
+baseline,0,p4_d2h_fresh_vec,33,asc,3,18.5608,18.6722,263.1744,264.9263,266.9055,268.6885,18
+baseline,0,p1_alloc_only,33,asc,4,3.5032,3.4945,3.5073,3.5139,3.5233,3.5468,0
+baseline,0,p2_alloc_zeros,33,asc,4,3.8405,3.7092,3.7186,3.7223,3.7282,3.7433,0
+baseline,0,p3_h2d_only,33,asc,4,4.1894,4.1370,4.1699,4.1754,4.1788,4.2045,0
+baseline,0,p0_transfer_only,33,asc,4,29.1825,26.3996,27.4610,27.6843,28.5236,29.1900,0
+baseline,0,p4_d2h_fresh_vec,33,asc,4,20.0410,13.7329,14.8327,14.9952,261.4003,265.3374,7
+mem_pool_attr,after_baseline_33mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+release_threshold,1,p1_alloc_only,33,asc,0,2.5226,0.0017,0.0017,0.0018,0.0018,0.0019,0
+release_threshold,1,p2_alloc_zeros,33,asc,0,0.2399,0.1803,0.1806,0.1811,0.1844,0.2570,0
+release_threshold,1,p3_h2d_only,33,asc,0,0.5932,0.5942,0.5945,0.5952,0.5954,0.5969,0
+release_threshold,1,p0_transfer_only,33,asc,0,22.8709,253.2191,263.0057,264.6713,265.3908,268.5414,0
+release_threshold,1,p4_d2h_fresh_vec,33,asc,0,261.7358,258.1408,264.1363,266.1266,267.7092,275.0215,0
+release_threshold,1,p1_alloc_only,33,asc,1,0.0057,0.0017,0.0017,0.0018,0.0018,0.0020,0
+release_threshold,1,p2_alloc_zeros,33,asc,1,0.2594,0.1797,0.1804,0.1811,0.1813,0.1824,0
+release_threshold,1,p3_h2d_only,33,asc,1,0.5850,0.5941,0.5947,0.5952,0.5953,0.6148,0
+release_threshold,1,p0_transfer_only,33,asc,1,275.5068,20.8656,267.1125,268.0609,269.1789,271.6748,19
+release_threshold,1,p4_d2h_fresh_vec,33,asc,1,268.4427,15.8883,265.0195,266.4962,267.8393,271.6483,19
+release_threshold,1,p1_alloc_only,33,asc,2,0.0065,0.0017,0.0017,0.0018,0.0018,0.0020,0
+release_threshold,1,p2_alloc_zeros,33,asc,2,0.2640,0.1798,0.1804,0.1808,0.1810,0.1818,0
+release_threshold,1,p3_h2d_only,33,asc,2,0.5821,0.5940,0.5945,0.5951,0.5953,0.5961,0
+release_threshold,1,p0_transfer_only,33,asc,2,263.3890,263.6968,267.1411,269.5722,270.5562,281.3532,0
+release_threshold,1,p4_d2h_fresh_vec,33,asc,2,268.3606,19.6271,262.3881,265.2234,265.9800,269.4686,19
+release_threshold,1,p1_alloc_only,33,asc,3,0.0061,0.0017,0.0018,0.0018,0.0018,0.0020,0
+release_threshold,1,p2_alloc_zeros,33,asc,3,0.2630,0.1802,0.1805,0.1808,0.1812,0.1821,0
+release_threshold,1,p3_h2d_only,33,asc,3,0.5824,0.5939,0.5944,0.5947,0.5953,0.5958,0
+release_threshold,1,p0_transfer_only,33,asc,3,267.5208,20.4472,262.5953,265.5668,266.7154,274.0384,19
+release_threshold,1,p4_d2h_fresh_vec,33,asc,3,267.4491,19.0289,262.7329,263.5165,265.2406,267.5252,19
+release_threshold,1,p1_alloc_only,33,asc,4,0.0059,0.0017,0.0017,0.0018,0.0018,0.0021,0
+release_threshold,1,p2_alloc_zeros,33,asc,4,0.2632,0.1800,0.1804,0.1809,0.1810,0.1841,0
+release_threshold,1,p3_h2d_only,33,asc,4,0.5817,0.5942,0.5945,0.5947,0.5952,0.5969,0
+release_threshold,1,p0_transfer_only,33,asc,4,264.4650,263.1852,265.7491,267.2298,267.9574,271.3071,0
+release_threshold,1,p4_d2h_fresh_vec,33,asc,4,262.7842,252.0705,264.4557,265.1633,266.2020,272.9063,0
+mem_pool_attr,after_release_threshold_33mib,reserved_bytes=134217728,used_bytes=0,release_threshold=18446744073709551615
+sync_alloc,2,p1_alloc_only,33,asc,0,1.8966,1.6701,1.6789,1.6834,1.6840,1.7609,0
+sync_alloc,2,p2_alloc_zeros,33,asc,0,1.9881,1.9135,1.9298,1.9347,1.9384,1.9528,0
+sync_alloc,2,p3_h2d_only,33,asc,0,2.3995,2.3802,2.3833,2.3863,2.3930,2.4019,0
+sync_alloc,2,p0_transfer_only,33,asc,0,27.9198,25.1251,26.2783,26.7878,27.0498,27.8204,0
+sync_alloc,2,p4_d2h_fresh_vec,33,asc,0,20.1999,254.5281,264.0846,265.8832,266.7719,269.1527,0
+sync_alloc,2,p1_alloc_only,33,asc,1,1.8463,1.6723,1.6778,1.6829,1.6864,1.6917,0
+sync_alloc,2,p2_alloc_zeros,33,asc,1,1.9737,1.9158,1.9317,1.9372,1.9414,1.9469,0
+sync_alloc,2,p3_h2d_only,33,asc,1,2.3776,2.3752,2.3868,2.3907,2.3942,2.3984,0
+sync_alloc,2,p0_transfer_only,33,asc,1,27.1135,23.5919,25.7317,26.0331,26.9469,27.1345,0
+sync_alloc,2,p4_d2h_fresh_vec,33,asc,1,15.5911,18.3967,263.1223,264.4423,265.6570,267.0210,18
+sync_alloc,2,p1_alloc_only,33,asc,2,1.8564,1.6764,1.6818,1.6829,1.6882,1.6934,0
+sync_alloc,2,p2_alloc_zeros,33,asc,2,1.9882,1.9119,1.9233,1.9304,1.9332,1.9377,0
+sync_alloc,2,p3_h2d_only,33,asc,2,2.3866,2.3685,2.3859,2.3893,2.3925,2.4112,0
+sync_alloc,2,p0_transfer_only,33,asc,2,27.4202,23.6996,25.9103,26.1771,26.9517,27.3544,0
+sync_alloc,2,p4_d2h_fresh_vec,33,asc,2,20.0934,254.4815,261.6539,264.8942,266.2364,269.5379,0
+sync_alloc,2,p1_alloc_only,33,asc,3,1.8481,1.6680,1.6777,1.6845,1.6894,1.7010,0
+sync_alloc,2,p2_alloc_zeros,33,asc,3,1.9944,1.9233,1.9328,1.9390,1.9437,1.9620,0
+sync_alloc,2,p3_h2d_only,33,asc,3,2.4050,2.3741,2.3838,2.3904,2.3923,2.4017,0
+sync_alloc,2,p0_transfer_only,33,asc,3,28.0729,25.6738,25.9668,26.7002,27.0058,27.2701,0
+sync_alloc,2,p4_d2h_fresh_vec,33,asc,3,20.1222,16.8379,261.5184,264.3354,265.6404,268.2771,17
+sync_alloc,2,p1_alloc_only,33,asc,4,1.8550,1.6663,1.6772,1.6834,1.6858,1.7025,0
+sync_alloc,2,p2_alloc_zeros,33,asc,4,1.9875,1.9156,1.9312,1.9398,1.9420,1.9456,0
+sync_alloc,2,p3_h2d_only,33,asc,4,2.3944,2.3737,2.3852,2.3897,2.3963,2.8556,0
+sync_alloc,2,p0_transfer_only,33,asc,4,27.4870,23.4551,25.6527,26.2785,27.0293,27.6542,0
+sync_alloc,2,p4_d2h_fresh_vec,33,asc,4,18.8930,18.9986,265.4104,268.0170,270.2344,274.1811,19
+mem_pool_attr,after_sync_alloc_33mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+both,3,p1_alloc_only,33,asc,0,1.8648,1.6721,1.6844,1.6874,1.6914,1.6979,0
+both,3,p2_alloc_zeros,33,asc,0,1.9851,1.9258,1.9337,1.9401,1.9447,1.9514,0
+both,3,p3_h2d_only,33,asc,0,2.3890,2.3847,2.3872,2.3913,2.4002,2.7491,0
+both,3,p0_transfer_only,33,asc,0,27.3929,22.4017,25.1141,25.9400,26.0106,27.3797,0
+both,3,p4_d2h_fresh_vec,33,asc,0,16.7242,14.7513,14.8426,262.8651,266.1573,274.8941,14
+both,3,p1_alloc_only,33,asc,1,1.9755,1.8309,1.8431,1.8491,1.8524,1.8587,0
+both,3,p2_alloc_zeros,33,asc,1,2.1479,2.0031,2.0070,2.0139,2.0203,2.0428,0
+both,3,p3_h2d_only,33,asc,1,2.4683,2.4458,2.4592,2.4634,2.4650,2.4807,0
+both,3,p0_transfer_only,33,asc,1,28.1584,24.0048,25.7152,26.8563,27.1275,28.2650,0
+both,3,p4_d2h_fresh_vec,33,asc,1,14.9428,262.2237,264.9748,267.2385,267.8199,270.7444,0
+both,3,p1_alloc_only,33,asc,2,1.9779,1.8389,1.8466,1.8534,1.8583,1.8803,0
+both,3,p2_alloc_zeros,33,asc,2,2.1550,1.9925,2.0080,2.0114,2.0130,2.0419,0
+both,3,p3_h2d_only,33,asc,2,2.4722,2.4520,2.4608,2.4714,2.4729,2.4776,0
+both,3,p0_transfer_only,33,asc,2,26.5978,23.6079,25.8792,26.9243,27.0782,27.2321,0
+both,3,p4_d2h_fresh_vec,33,asc,2,19.4040,256.7257,263.8938,266.2360,267.9644,278.5657,0
+both,3,p1_alloc_only,33,asc,3,1.9852,1.8402,1.8469,1.8504,1.8551,1.8596,0
+both,3,p2_alloc_zeros,33,asc,3,2.1595,1.9940,2.0063,2.0089,2.0155,2.1006,0
+both,3,p3_h2d_only,33,asc,3,2.4820,2.4527,2.4593,2.4663,2.4743,2.4806,0
+both,3,p0_transfer_only,33,asc,3,28.0209,24.1045,25.9279,26.1323,26.8895,27.2421,0
+both,3,p4_d2h_fresh_vec,33,asc,3,15.1402,18.6532,263.0119,265.4369,266.0832,272.1671,19
+both,3,p1_alloc_only,33,asc,4,2.0122,1.8356,1.8519,1.8619,1.8662,1.8954,0
+both,3,p2_alloc_zeros,33,asc,4,2.1570,1.9967,2.0101,2.0158,2.0195,2.0384,0
+both,3,p3_h2d_only,33,asc,4,2.4802,2.4517,2.4626,2.4653,2.4700,2.4830,0
+both,3,p0_transfer_only,33,asc,4,26.5631,24.0721,25.7918,26.8140,26.8988,27.1737,0
+both,3,p4_d2h_fresh_vec,33,asc,4,16.7745,18.4902,262.6817,264.9549,265.9885,269.6547,18
+mem_pool_attr,after_both_33mib,reserved_bytes=67108864,used_bytes=0,release_threshold=18446744073709551615
+baseline,4,p1_alloc_only,33,asc,0,3.5410,3.5061,3.5133,3.5202,3.5260,3.6283,0
+baseline,4,p2_alloc_zeros,33,asc,0,3.8285,3.7010,3.7166,3.7211,3.7279,3.7536,0
+baseline,4,p3_h2d_only,33,asc,0,4.1858,4.1563,4.1707,4.1768,4.1856,4.2009,0
+baseline,4,p0_transfer_only,33,asc,0,29.5145,26.4101,27.3917,27.6424,28.5093,29.8559,0
+baseline,4,p4_d2h_fresh_vec,33,asc,0,18.8409,15.0064,263.8429,265.2678,265.6401,269.4550,18
+baseline,4,p1_alloc_only,33,asc,1,3.4991,3.4940,3.5081,3.5132,3.5195,4.0408,0
+baseline,4,p2_alloc_zeros,33,asc,1,3.8327,3.7024,3.7189,3.7276,3.7284,3.7587,0
+baseline,4,p3_h2d_only,33,asc,1,4.1834,4.1467,4.1769,4.1837,4.1871,4.2055,0
+baseline,4,p0_transfer_only,33,asc,1,28.4411,24.7029,27.7123,28.5885,28.8838,29.0097,0
+baseline,4,p4_d2h_fresh_vec,33,asc,1,18.4532,259.3940,266.4012,268.6590,269.4363,275.5669,0
+baseline,4,p1_alloc_only,33,asc,2,3.5205,3.4953,3.5109,3.5188,3.5226,3.5347,0
+baseline,4,p2_alloc_zeros,33,asc,2,3.8210,3.7049,3.7226,3.7297,3.7409,4.1654,0
+baseline,4,p3_h2d_only,33,asc,2,4.2056,4.1512,4.1736,4.1774,4.1902,4.1962,0
+baseline,4,p0_transfer_only,33,asc,2,29.7804,24.3648,27.4432,28.6691,28.8092,28.9193,0
+baseline,4,p4_d2h_fresh_vec,33,asc,2,18.9968,18.4744,264.5905,267.5648,270.2839,280.5697,18
+baseline,4,p1_alloc_only,33,asc,3,3.4903,3.4954,3.5092,3.5139,3.5159,3.5383,0
+baseline,4,p2_alloc_zeros,33,asc,3,3.8102,3.7058,3.7239,3.7287,3.7357,3.7706,0
+baseline,4,p3_h2d_only,33,asc,3,4.1718,4.1573,4.1644,4.1708,4.1802,4.5402,0
+baseline,4,p0_transfer_only,33,asc,3,27.8278,26.9853,27.5310,28.4817,28.5985,28.7924,0
+baseline,4,p4_d2h_fresh_vec,33,asc,3,19.1604,254.5637,264.8697,267.2781,268.6024,270.9039,0
+baseline,4,p1_alloc_only,33,asc,4,3.4558,3.4823,3.4956,3.5078,3.5132,3.5923,0
+baseline,4,p2_alloc_zeros,33,asc,4,3.8421,3.6971,3.7141,3.7206,3.7265,3.7383,0
+baseline,4,p3_h2d_only,33,asc,4,4.1652,4.1547,4.1691,4.1735,4.1772,4.1857,0
+baseline,4,p0_transfer_only,33,asc,4,29.5927,25.6028,26.8582,28.3466,28.6642,28.8111,0
+baseline,4,p4_d2h_fresh_vec,33,asc,4,19.0316,20.1948,264.5695,266.6782,267.8766,280.3625,19
+mem_pool_attr,after_baseline_33mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+baseline,0,p1_alloc_only,36,asc,0,3.5821,3.4957,3.5051,3.5124,3.5153,3.5237,0
+baseline,0,p2_alloc_zeros,36,asc,0,3.8360,3.7080,3.7295,3.7349,3.7449,3.7549,0
+baseline,0,p3_h2d_only,36,asc,0,4.2314,4.2085,4.2206,4.2288,4.2362,4.2796,0
+baseline,0,p0_transfer_only,36,asc,0,31.4285,27.6855,28.8923,29.0117,29.1694,30.0834,0
+baseline,0,p4_d2h_fresh_vec,36,asc,0,20.2838,285.2085,289.1308,290.5557,291.9975,293.6439,0
+baseline,0,p1_alloc_only,36,asc,1,3.5377,3.5000,3.5085,3.5151,3.5247,3.6437,0
+baseline,0,p2_alloc_zeros,36,asc,1,3.8166,3.7182,3.7287,3.7355,3.7466,3.9548,0
+baseline,0,p3_h2d_only,36,asc,1,4.2444,4.2085,4.2224,4.2301,4.2371,4.2494,0
+baseline,0,p0_transfer_only,36,asc,1,31.4922,27.0955,28.8702,29.0401,29.1403,29.8633,0
+baseline,0,p4_d2h_fresh_vec,36,asc,1,20.1472,19.8039,288.4687,290.5729,291.8520,293.8008,19
+baseline,0,p1_alloc_only,36,asc,2,3.5456,3.4945,3.5032,3.5158,3.5228,3.5348,0
+baseline,0,p2_alloc_zeros,36,asc,2,3.8342,3.7202,3.7376,3.7420,3.7532,3.7632,0
+baseline,0,p3_h2d_only,36,asc,2,4.2231,4.2076,4.2181,4.2250,4.2337,4.3586,0
+baseline,0,p0_transfer_only,36,asc,2,30.6919,26.0699,28.6180,29.0732,29.1321,30.2975,0
+baseline,0,p4_d2h_fresh_vec,36,asc,2,20.1972,287.1085,289.3460,291.4000,293.7748,300.0722,0
+mem_pool_attr,after_baseline_36mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+release_threshold,1,p1_alloc_only,36,asc,0,2.5825,0.0017,0.0017,0.0018,0.0018,0.0020,0
+release_threshold,1,p2_alloc_zeros,36,asc,0,0.2554,0.1956,0.1961,0.1967,0.1971,0.1982,0
+release_threshold,1,p3_h2d_only,36,asc,0,0.6448,0.6470,0.6478,0.6484,0.6485,0.6570,0
+release_threshold,1,p0_transfer_only,36,asc,0,298.2997,278.0659,291.3333,292.4563,295.1517,298.0213,0
+release_threshold,1,p4_d2h_fresh_vec,36,asc,0,296.7373,19.7164,289.3026,291.7295,292.3646,295.7808,18
+release_threshold,1,p1_alloc_only,36,asc,1,0.0066,0.0017,0.0018,0.0018,0.0018,0.0019,0
+release_threshold,1,p2_alloc_zeros,36,asc,1,0.2835,0.1956,0.1963,0.1964,0.1968,0.1980,0
+release_threshold,1,p3_h2d_only,36,asc,1,0.6382,0.6468,0.6480,0.6485,0.6491,0.6566,0
+release_threshold,1,p0_transfer_only,36,asc,1,299.5192,288.7578,290.8189,291.5885,292.3969,295.6453,0
+release_threshold,1,p4_d2h_fresh_vec,36,asc,1,292.5911,284.7363,289.4920,289.7811,290.8698,291.9573,0
+release_threshold,1,p1_alloc_only,36,asc,2,0.0054,0.0017,0.0018,0.0018,0.0018,0.0019,0
+release_threshold,1,p2_alloc_zeros,36,asc,2,0.2766,0.1951,0.1962,0.1965,0.1968,0.1978,0
+release_threshold,1,p3_h2d_only,36,asc,2,0.6350,0.6461,0.6479,0.6481,0.6484,0.6581,0
+release_threshold,1,p0_transfer_only,36,asc,2,294.2388,280.3218,290.7830,292.7111,294.2458,298.1576,0
+release_threshold,1,p4_d2h_fresh_vec,36,asc,2,291.1089,15.9039,289.5226,292.4518,293.5577,300.5476,17
+mem_pool_attr,after_release_threshold_36mib,reserved_bytes=134217728,used_bytes=0,release_threshold=18446744073709551615
+sync_alloc,2,p1_alloc_only,36,asc,0,2.0426,1.8167,1.8233,1.8274,1.8309,1.8482,0
+sync_alloc,2,p2_alloc_zeros,36,asc,0,2.1418,2.0795,2.0893,2.0906,2.0936,2.1069,0
+sync_alloc,2,p3_h2d_only,36,asc,0,2.5854,2.5751,2.5823,2.5920,2.5936,2.6087,0
+sync_alloc,2,p0_transfer_only,36,asc,0,28.4939,26.5451,27.8098,27.9400,28.8417,29.0971,0
+sync_alloc,2,p4_d2h_fresh_vec,36,asc,0,21.5898,280.9042,289.7740,291.9836,296.8416,306.9945,0
+sync_alloc,2,p1_alloc_only,36,asc,1,2.0160,1.8143,1.8296,1.8328,1.8350,1.8457,0
+sync_alloc,2,p2_alloc_zeros,36,asc,1,2.1514,2.0883,2.0895,2.0981,2.1005,2.2631,0
+sync_alloc,2,p3_h2d_only,36,asc,1,2.5850,2.5733,2.5838,2.5869,2.5922,2.6033,0
+sync_alloc,2,p0_transfer_only,36,asc,1,29.9953,25.2892,27.4787,27.7726,27.9030,30.0510,0
+sync_alloc,2,p4_d2h_fresh_vec,36,asc,1,20.5178,15.8746,285.5656,289.6723,291.3735,294.8547,16
+sync_alloc,2,p1_alloc_only,36,asc,2,1.9599,1.8036,1.8221,1.8278,1.8316,1.8360,0
+sync_alloc,2,p2_alloc_zeros,36,asc,2,2.1362,2.0745,2.0884,2.0980,2.0998,2.1884,0
+sync_alloc,2,p3_h2d_only,36,asc,2,2.5887,2.5731,2.5815,2.5842,2.5901,2.5992,0
+sync_alloc,2,p0_transfer_only,36,asc,2,24.2550,27.1861,27.8932,27.9559,28.0223,29.2073,0
+sync_alloc,2,p4_d2h_fresh_vec,36,asc,2,20.3042,16.7082,286.5424,288.7365,289.5827,294.4983,19
+mem_pool_attr,after_sync_alloc_36mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+both,3,p1_alloc_only,36,asc,0,2.0026,1.8268,1.8319,1.8350,1.8379,1.8447,0
+both,3,p2_alloc_zeros,36,asc,0,2.1503,2.0927,2.0966,2.0998,2.1057,2.1257,0
+both,3,p3_h2d_only,36,asc,0,2.6054,2.5752,2.5908,2.5963,2.5990,2.6080,0
+both,3,p0_transfer_only,36,asc,0,29.4311,24.0007,27.7597,27.8840,28.4729,29.1697,0
+both,3,p4_d2h_fresh_vec,36,asc,0,20.3516,290.7269,293.1617,294.7965,295.3940,298.3277,0
+both,3,p1_alloc_only,36,asc,1,2.0956,1.9846,1.9915,1.9978,2.0023,2.0162,0
+both,3,p2_alloc_zeros,36,asc,1,2.3226,2.1615,2.1704,2.1736,2.1766,2.2967,0
+both,3,p3_h2d_only,36,asc,1,2.6725,2.6514,2.6610,2.6656,2.6701,2.6833,0
+both,3,p0_transfer_only,36,asc,1,30.0018,24.8006,27.4649,28.7582,29.1046,309.0665,1
+both,3,p4_d2h_fresh_vec,36,asc,1,19.7760,287.5901,289.9267,291.5434,293.1056,302.3675,0
+both,3,p1_alloc_only,36,asc,2,2.1047,1.9611,1.9703,1.9789,1.9831,2.0303,0
+both,3,p2_alloc_zeros,36,asc,2,2.3808,2.1626,2.1742,2.1817,2.1870,2.2526,0
+both,3,p3_h2d_only,36,asc,2,2.6844,2.6457,2.6616,2.6687,2.6763,2.6824,0
+both,3,p0_transfer_only,36,asc,2,30.4963,24.2995,26.3834,27.8746,28.9326,29.5325,0
+both,3,p4_d2h_fresh_vec,36,asc,2,17.3519,264.9019,291.1475,295.5524,298.8509,308.7470,0
+mem_pool_attr,after_both_36mib,reserved_bytes=67108864,used_bytes=0,release_threshold=18446744073709551615
+baseline,4,p1_alloc_only,36,asc,0,3.5512,3.4945,3.5007,3.5109,3.5190,3.5289,0
+baseline,4,p2_alloc_zeros,36,asc,0,3.8350,3.7141,3.7344,3.7398,3.7453,3.7580,0
+baseline,4,p3_h2d_only,36,asc,0,4.2267,4.2091,4.2251,4.2303,4.2322,4.2547,0
+baseline,4,p0_transfer_only,36,asc,0,32.8326,28.0440,29.9524,30.1905,30.3082,34.0974,0
+baseline,4,p4_d2h_fresh_vec,36,asc,0,22.2379,18.7088,290.9912,293.2101,296.1780,301.3862,19
+baseline,4,p1_alloc_only,36,asc,1,3.4354,3.4727,3.4793,3.4837,3.4874,3.5016,0
+baseline,4,p2_alloc_zeros,36,asc,1,3.8064,3.7100,3.7372,3.7432,3.7470,3.7601,0
+baseline,4,p3_h2d_only,36,asc,1,4.2455,4.2135,4.2226,4.2329,4.2408,4.3302,0
+baseline,4,p0_transfer_only,36,asc,1,31.3234,27.4328,28.8325,29.1328,30.1872,30.8525,0
+baseline,4,p4_d2h_fresh_vec,36,asc,1,19.7767,283.1652,290.3687,292.3753,294.8366,302.6126,0
+baseline,4,p1_alloc_only,36,asc,2,3.5369,3.4836,3.5022,3.5140,3.5214,3.5356,0
+baseline,4,p2_alloc_zeros,36,asc,2,3.8425,3.7229,3.7330,3.7425,3.7491,3.7651,0
+baseline,4,p3_h2d_only,36,asc,2,4.2206,4.2078,4.2210,4.2298,4.2343,4.2610,0
+baseline,4,p0_transfer_only,36,asc,2,29.0143,26.4457,29.1244,30.0464,30.1743,303.8924,1
+baseline,4,p4_d2h_fresh_vec,36,asc,2,20.0489,281.8968,289.3829,291.0955,292.2160,295.5491,0
+mem_pool_attr,after_baseline_36mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+baseline,0,p1_alloc_only,48,asc,0,3.6017,3.5011,3.5106,3.5150,3.5234,3.5590,0
+baseline,0,p2_alloc_zeros,48,asc,0,3.9058,3.7751,3.7913,3.7952,3.8032,4.1708,0
+baseline,0,p3_h2d_only,48,asc,0,4.4703,4.4149,4.4314,4.4354,4.4393,4.4626,0
+baseline,0,p0_transfer_only,48,asc,0,36.7769,33.9593,36.6303,37.0388,38.4718,38.6328,0
+baseline,0,p4_d2h_fresh_vec,48,asc,0,26.0827,15.2684,17.9004,18.3110,18.4657,20.0344,0
+baseline,0,p1_alloc_only,48,asc,1,3.4804,3.4893,3.5014,3.5094,3.5148,3.5762,0
+baseline,0,p2_alloc_zeros,48,asc,1,3.8044,3.7710,3.7810,3.7895,3.7977,3.8091,0
+baseline,0,p3_h2d_only,48,asc,1,4.4321,4.4053,4.4245,4.4347,4.4372,4.4497,0
+baseline,0,p0_transfer_only,48,asc,1,36.9557,32.7489,36.4577,37.1143,38.3747,38.6159,0
+baseline,0,p4_d2h_fresh_vec,48,asc,1,26.0276,23.4786,25.5987,375.3426,380.8849,408.7654,11
+baseline,0,p1_alloc_only,48,asc,2,3.5104,3.5736,3.5923,3.5973,3.6042,3.6153,0
+baseline,0,p2_alloc_zeros,48,asc,2,4.0146,3.7944,3.8418,3.8451,3.8535,4.2104,0
+baseline,0,p3_h2d_only,48,asc,2,4.5092,4.4064,4.4237,4.4327,4.4457,4.5778,0
+baseline,0,p0_transfer_only,48,asc,2,38.5314,31.5994,35.9121,36.2525,36.5894,38.2222,0
+baseline,0,p4_d2h_fresh_vec,48,asc,2,25.4607,19.2197,24.3583,35.2442,337.9250,544.7271,9
+mem_pool_attr,after_baseline_48mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+release_threshold,1,p1_alloc_only,48,asc,0,2.5183,0.0018,0.0018,0.0018,0.0018,0.0019,0
+release_threshold,1,p2_alloc_zeros,48,asc,0,0.2294,0.2583,0.2594,0.2599,0.2601,0.2608,0
+release_threshold,1,p3_h2d_only,48,asc,0,0.8580,0.8602,0.8606,0.8612,0.8615,0.8721,0
+release_threshold,1,p0_transfer_only,48,asc,0,43.2601,21.2453,23.4768,336.0883,337.2321,346.6087,11
+release_threshold,1,p4_d2h_fresh_vec,48,asc,0,346.4471,15.1327,16.1088,17.1869,26.3525,492.5092,4
+release_threshold,1,p1_alloc_only,48,asc,1,0.0061,0.0017,0.0018,0.0018,0.0018,0.0019,0
+release_threshold,1,p2_alloc_zeros,48,asc,1,0.3410,0.2592,0.2600,0.2601,0.2605,0.2613,0
+release_threshold,1,p3_h2d_only,48,asc,1,0.8501,0.8592,0.8611,0.8616,0.8623,1.2186,0
+release_threshold,1,p0_transfer_only,48,asc,1,333.1569,16.2428,20.3275,23.6844,26.4526,583.6696,3
+release_threshold,1,p4_d2h_fresh_vec,48,asc,1,14.6952,18.1755,20.0413,24.6910,29.5843,32.4947,0
+release_threshold,1,p1_alloc_only,48,asc,2,0.0064,0.0017,0.0018,0.0018,0.0018,0.0019,0
+release_threshold,1,p2_alloc_zeros,48,asc,2,0.2550,0.2588,0.2598,0.2604,0.2609,0.2623,0
+release_threshold,1,p3_h2d_only,48,asc,2,0.8548,0.8605,0.8609,0.8613,0.8617,0.8696,0
+release_threshold,1,p0_transfer_only,48,asc,2,21.5545,26.5008,337.7295,340.6886,347.3046,595.4778,17
+release_threshold,1,p4_d2h_fresh_vec,48,asc,2,585.2237,17.8855,18.3493,20.2511,20.9990,338.0826,4
+mem_pool_attr,after_release_threshold_48mib,reserved_bytes=167772160,used_bytes=0,release_threshold=18446744073709551615
+sync_alloc,2,p1_alloc_only,48,asc,0,2.5855,2.4199,2.4315,2.4388,2.4519,2.8724,0
+sync_alloc,2,p2_alloc_zeros,48,asc,0,2.8333,2.7463,2.7568,2.7614,2.7679,3.0136,0
+sync_alloc,2,p3_h2d_only,48,asc,0,3.4161,3.3918,3.4062,3.4118,3.4173,3.4437,0
+sync_alloc,2,p0_transfer_only,48,asc,0,36.3818,35.3810,37.0217,37.2454,37.4617,37.8060,0
+sync_alloc,2,p4_d2h_fresh_vec,48,asc,0,26.0044,16.9903,20.2933,386.3261,394.2743,416.1221,12
+sync_alloc,2,p1_alloc_only,48,asc,1,2.5710,2.4290,2.4374,2.4428,2.4487,2.4526,0
+sync_alloc,2,p2_alloc_zeros,48,asc,1,2.7379,2.7518,2.7667,2.7717,2.7789,2.7921,0
+sync_alloc,2,p3_h2d_only,48,asc,1,3.4257,3.4053,3.4131,3.4162,3.4218,3.4460,0
+sync_alloc,2,p0_transfer_only,48,asc,1,36.5580,34.3055,35.6688,36.5400,37.3657,38.2644,0
+sync_alloc,2,p4_d2h_fresh_vec,48,asc,1,26.8669,18.2608,385.6246,388.1222,390.5124,407.0121,17
+sync_alloc,2,p1_alloc_only,48,asc,2,2.6090,2.4242,2.4334,2.4403,2.4462,2.4598,0
+sync_alloc,2,p2_alloc_zeros,48,asc,2,2.8206,2.7470,2.7704,2.7899,3.3264,5.3231,0
+sync_alloc,2,p3_h2d_only,48,asc,2,3.4433,3.4040,3.4177,3.4218,3.4251,3.4631,0
+sync_alloc,2,p0_transfer_only,48,asc,2,35.1533,34.0523,35.0460,35.2473,36.8769,414.1245,2
+sync_alloc,2,p4_d2h_fresh_vec,48,asc,2,24.5817,18.2393,19.9796,20.0861,20.1860,20.9269,0
+mem_pool_attr,after_sync_alloc_48mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+both,3,p1_alloc_only,48,asc,0,2.5661,2.4199,2.4347,2.4382,2.4528,2.5771,0
+both,3,p2_alloc_zeros,48,asc,0,2.8338,2.7596,2.7680,2.7720,2.7763,2.7891,0
+both,3,p3_h2d_only,48,asc,0,3.4189,3.3926,3.4099,3.4138,3.4218,3.4672,0
+both,3,p0_transfer_only,48,asc,0,35.8073,31.5014,35.1730,35.8356,37.3169,37.7049,0
+both,3,p4_d2h_fresh_vec,48,asc,0,22.9214,26.2741,383.9167,388.7070,390.6747,393.3551,19
+both,3,p1_alloc_only,48,asc,1,2.7462,2.5942,2.6191,2.6226,2.6293,2.6432,0
+both,3,p2_alloc_zeros,48,asc,1,3.0123,2.8331,2.8471,2.8547,2.8606,2.8729,0
+both,3,p3_h2d_only,48,asc,1,3.5163,3.4833,3.4927,3.4983,3.5068,3.5110,0
+both,3,p0_transfer_only,48,asc,1,35.6163,30.1130,32.1042,35.5516,35.8084,37.3486,0
+both,3,p4_d2h_fresh_vec,48,asc,1,24.9376,382.4253,386.3202,387.8322,390.3431,393.2799,0
+both,3,p1_alloc_only,48,asc,2,2.7550,2.5835,2.6090,2.6155,2.6234,2.6406,0
+both,3,p2_alloc_zeros,48,asc,2,2.9961,2.8441,2.8533,2.8603,2.8651,2.8856,0
+both,3,p3_h2d_only,48,asc,2,3.5044,3.4807,3.4957,3.5021,3.5070,3.6331,0
+both,3,p0_transfer_only,48,asc,2,395.1116,33.3827,35.6455,36.0841,37.2488,38.4801,0
+both,3,p4_d2h_fresh_vec,48,asc,2,25.1478,23.3789,25.7112,391.0617,393.0849,405.5896,14
+mem_pool_attr,after_both_48mib,reserved_bytes=67108864,used_bytes=0,release_threshold=18446744073709551615
+baseline,4,p1_alloc_only,48,asc,0,3.4992,3.4984,3.5059,3.5116,3.5176,3.5365,0
+baseline,4,p2_alloc_zeros,48,asc,0,3.9037,3.7672,3.7840,3.7954,3.8071,4.0902,0
+baseline,4,p3_h2d_only,48,asc,0,4.4518,4.4264,4.4393,4.4499,4.4542,4.5781,0
+baseline,4,p0_transfer_only,48,asc,0,39.1109,32.0082,36.5771,37.1183,38.2236,38.6628,0
+baseline,4,p4_d2h_fresh_vec,48,asc,0,27.7009,17.9031,18.3359,380.0297,394.9733,399.0704,11
+baseline,4,p1_alloc_only,48,asc,1,3.5164,3.5049,3.5142,3.5244,3.5322,3.5424,0
+baseline,4,p2_alloc_zeros,48,asc,1,3.9029,3.7802,3.7924,3.7986,3.8059,3.8238,0
+baseline,4,p3_h2d_only,48,asc,1,4.4379,4.4200,4.4315,4.4395,4.4464,4.4615,0
+baseline,4,p0_transfer_only,48,asc,1,39.1798,32.5449,34.7079,36.5913,36.8052,37.6638,0
+baseline,4,p4_d2h_fresh_vec,48,asc,1,25.8714,15.1985,17.9987,18.2778,18.5734,23.3634,0
+baseline,4,p1_alloc_only,48,asc,2,3.4373,3.5028,3.5148,3.5191,3.5227,3.5609,0
+baseline,4,p2_alloc_zeros,48,asc,2,3.8388,3.7696,3.7919,3.7948,3.7976,3.8100,0
+baseline,4,p3_h2d_only,48,asc,2,4.4367,4.4230,4.4331,4.4378,4.4503,4.4615,0
+baseline,4,p0_transfer_only,48,asc,2,37.5505,32.9531,34.8929,36.7451,36.8466,45.1523,0
+baseline,4,p4_d2h_fresh_vec,48,asc,2,25.6628,25.0147,384.2824,388.6212,389.8097,417.3585,17
+mem_pool_attr,after_baseline_48mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+baseline,0,p1_alloc_only,64,asc,0,3.5873,3.4982,3.5072,3.5177,3.5226,3.5270,0
+baseline,0,p2_alloc_zeros,64,asc,0,3.9846,3.7867,3.7949,3.8076,3.8174,3.8360,0
+baseline,0,p3_h2d_only,64,asc,0,4.6551,4.6326,4.6482,4.6617,4.6662,4.6714,0
+baseline,0,p0_transfer_only,64,asc,0,49.6072,42.2391,45.6857,46.9447,47.9436,527.1193,1
+baseline,0,p4_d2h_fresh_vec,64,asc,0,31.9949,30.4603,510.9006,536.8925,542.5139,566.6079,19
+baseline,0,p1_alloc_only,64,asc,1,3.4836,3.4647,3.4788,3.4861,3.4967,3.5208,0
+baseline,0,p2_alloc_zeros,64,asc,1,3.9448,3.7935,3.8087,3.8123,3.8161,3.8244,0
+baseline,0,p3_h2d_only,64,asc,1,4.8265,4.6371,4.6472,4.6546,4.6612,4.6720,0
+baseline,0,p0_transfer_only,64,asc,1,45.1486,37.9396,41.8662,46.0304,46.1893,46.4734,0
+baseline,0,p4_d2h_fresh_vec,64,asc,1,32.9271,23.6616,25.5105,25.7555,30.4658,32.4831,0
+baseline,0,p1_alloc_only,64,asc,2,3.4668,3.5047,3.5164,3.5208,3.5263,3.7176,0
+baseline,0,p2_alloc_zeros,64,asc,2,3.9044,3.7845,3.7993,3.8076,3.8121,3.8260,0
+baseline,0,p3_h2d_only,64,asc,2,4.6601,4.5830,4.6633,4.6735,4.6784,4.6922,0
+baseline,0,p0_transfer_only,64,asc,2,48.5962,39.7610,43.7804,46.3777,46.4787,47.2916,0
+baseline,0,p4_d2h_fresh_vec,64,asc,2,26.7436,22.6249,23.4032,25.3728,25.4618,25.6850,0
+mem_pool_attr,after_baseline_64mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+release_threshold,1,p1_alloc_only,64,asc,0,2.5338,0.0017,0.0018,0.0018,0.0018,0.0022,0
+release_threshold,1,p2_alloc_zeros,64,asc,0,0.3121,0.3426,0.3435,0.3440,0.3442,0.3450,0
+release_threshold,1,p3_h2d_only,64,asc,0,1.1407,1.1454,1.1463,1.1467,1.1474,1.1557,0
+release_threshold,1,p0_transfer_only,64,asc,0,40.9037,26.9739,500.6583,513.8622,514.8345,519.2077,15
+release_threshold,1,p4_d2h_fresh_vec,64,asc,0,523.4955,22.8066,23.1265,23.3455,26.4035,518.8464,4
+release_threshold,1,p1_alloc_only,64,asc,1,0.0063,0.0017,0.0018,0.0018,0.0018,0.0020,0
+release_threshold,1,p2_alloc_zeros,64,asc,1,0.4316,0.3432,0.3437,0.3442,0.3445,0.3496,0
+release_threshold,1,p3_h2d_only,64,asc,1,1.1350,1.1455,1.1461,1.1467,1.1470,1.1566,0
+release_threshold,1,p0_transfer_only,64,asc,1,521.1073,32.6211,496.9212,518.5406,576.2929,634.1658,18
+release_threshold,1,p4_d2h_fresh_vec,64,asc,1,25.2526,22.9865,23.2685,23.4786,23.7327,638.2123,2
+release_threshold,1,p1_alloc_only,64,asc,2,0.0062,0.0017,0.0018,0.0018,0.0018,0.0020,0
+release_threshold,1,p2_alloc_zeros,64,asc,2,0.4346,0.3427,0.3434,0.3441,0.3447,0.4182,0
+release_threshold,1,p3_h2d_only,64,asc,2,1.5615,1.1456,1.1458,1.1466,1.1472,1.1567,0
+release_threshold,1,p0_transfer_only,64,asc,2,532.1946,22.9017,24.8197,25.2250,25.2743,27.7376,0
+release_threshold,1,p4_d2h_fresh_vec,64,asc,2,22.7051,23.3983,26.0213,587.0681,639.8648,649.9559,10
+mem_pool_attr,after_release_threshold_64mib,reserved_bytes=201326592,used_bytes=0,release_threshold=18446744073709551615
+sync_alloc,2,p1_alloc_only,64,asc,0,3.4905,3.3001,3.3091,3.3171,3.3213,3.6061,0
+sync_alloc,2,p2_alloc_zeros,64,asc,0,3.7837,3.6994,3.7152,3.7174,3.7263,3.7530,0
+sync_alloc,2,p3_h2d_only,64,asc,0,4.5766,4.5462,4.5638,4.5717,4.5770,4.6939,0
+sync_alloc,2,p0_transfer_only,64,asc,0,45.6646,43.9415,46.8818,47.9748,48.8387,49.8070,0
+sync_alloc,2,p4_d2h_fresh_vec,64,asc,0,33.6003,25.5299,28.2909,32.5437,627.5632,650.2328,8
+sync_alloc,2,p1_alloc_only,64,asc,1,3.4448,3.3021,3.3134,3.3192,3.3250,3.3599,0
+sync_alloc,2,p2_alloc_zeros,64,asc,1,3.7795,3.6605,3.6993,3.7073,3.7226,6.9427,0
+sync_alloc,2,p3_h2d_only,64,asc,1,4.5665,4.5397,4.5613,4.5694,4.5886,5.0653,0
+sync_alloc,2,p0_transfer_only,64,asc,1,46.5216,43.1913,46.2970,46.6463,48.1770,48.8294,0
+sync_alloc,2,p4_d2h_fresh_vec,64,asc,1,34.9361,23.0465,23.9299,516.6698,521.7013,527.8343,10
+sync_alloc,2,p1_alloc_only,64,asc,2,3.4925,3.2859,3.2972,3.3052,3.3056,3.3245,0
+sync_alloc,2,p2_alloc_zeros,64,asc,2,3.7558,3.6791,3.7015,3.7073,3.7141,3.7222,0
+sync_alloc,2,p3_h2d_only,64,asc,2,4.5693,4.5434,4.5588,4.5645,4.5705,4.5828,0
+sync_alloc,2,p0_transfer_only,64,asc,2,47.4256,43.3712,46.5253,47.4691,48.6900,51.5147,0
+sync_alloc,2,p4_d2h_fresh_vec,64,asc,2,32.4985,19.2962,21.7861,27.8270,502.7101,526.0065,7
+mem_pool_attr,after_sync_alloc_64mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+both,3,p1_alloc_only,64,asc,0,3.4332,3.2833,3.2968,3.3020,3.3064,3.3316,0
+both,3,p2_alloc_zeros,64,asc,0,3.6774,3.6871,3.6936,3.7060,3.7079,3.8207,0
+both,3,p3_h2d_only,64,asc,0,4.5560,4.5370,4.5463,4.5480,4.5581,4.5786,0
+both,3,p0_transfer_only,64,asc,0,48.4070,37.3492,43.9875,45.3238,46.3913,47.0487,0
+both,3,p4_d2h_fresh_vec,64,asc,0,33.1284,21.6440,23.3209,25.3748,28.0272,526.6533,3
+both,3,p1_alloc_only,64,asc,1,3.5941,3.4767,3.4969,3.5028,3.5131,3.5274,0
+both,3,p2_alloc_zeros,64,asc,1,3.8449,3.7912,3.8080,3.8182,3.8242,3.8506,0
+both,3,p3_h2d_only,64,asc,1,4.6730,4.6357,4.6563,4.6767,4.6845,4.7156,0
+both,3,p0_transfer_only,64,asc,1,49.4930,43.9127,46.2779,48.3194,48.5481,49.0950,0
+both,3,p4_d2h_fresh_vec,64,asc,1,29.8247,22.4035,22.9876,23.4475,23.9198,525.7637,3
+both,3,p1_alloc_only,64,asc,2,3.5958,3.4730,3.4915,3.5003,3.5144,3.5404,0
+both,3,p2_alloc_zeros,64,asc,2,3.9600,3.7719,3.7944,3.8029,3.8159,3.8344,0
+both,3,p3_h2d_only,64,asc,2,4.6422,4.6450,4.6612,4.6685,4.6753,4.9501,0
+both,3,p0_transfer_only,64,asc,2,45.9904,40.1813,47.2348,47.9676,48.1235,48.5641,0
+both,3,p4_d2h_fresh_vec,64,asc,2,33.8008,25.4883,25.8163,507.2376,522.7583,530.4863,10
+mem_pool_attr,after_both_64mib,reserved_bytes=67108864,used_bytes=0,release_threshold=18446744073709551615
+baseline,4,p1_alloc_only,64,asc,0,3.5218,3.4922,3.5058,3.5118,3.5146,3.5415,0
+baseline,4,p2_alloc_zeros,64,asc,0,4.0054,3.7843,3.7989,3.8080,3.8112,3.8474,0
+baseline,4,p3_h2d_only,64,asc,0,4.6648,4.6374,4.6524,4.6548,4.6619,4.6896,0
+baseline,4,p0_transfer_only,64,asc,0,44.5739,43.1605,45.9220,46.2712,46.4160,47.1523,0
+baseline,4,p4_d2h_fresh_vec,64,asc,0,33.2212,25.4856,27.3346,509.1784,513.5624,525.3951,13
+baseline,4,p1_alloc_only,64,asc,1,3.5271,3.4896,3.4998,3.5097,3.5165,3.5352,0
+baseline,4,p2_alloc_zeros,64,asc,1,3.9838,3.7871,3.7973,3.8069,3.8140,4.0332,0
+baseline,4,p3_h2d_only,64,asc,1,4.6617,4.6306,4.6502,4.6529,4.6622,4.6766,0
+baseline,4,p0_transfer_only,64,asc,1,49.4951,39.1796,45.8629,47.8180,47.9804,533.1779,1
+baseline,4,p4_d2h_fresh_vec,64,asc,1,33.7013,18.9096,22.8437,23.2209,25.9519,516.8080,4
+baseline,4,p1_alloc_only,64,asc,2,3.5120,3.5027,3.5157,3.5198,3.5230,3.5518,0
+baseline,4,p2_alloc_zeros,64,asc,2,3.9598,3.7876,3.7976,3.8124,3.8159,3.8551,0
+baseline,4,p3_h2d_only,64,asc,2,4.6578,4.6408,4.6519,4.6662,4.6686,4.7309,0
+baseline,4,p0_transfer_only,64,asc,2,46.7141,42.6342,45.9707,46.2165,47.9244,48.7754,0
+baseline,4,p4_d2h_fresh_vec,64,asc,2,31.6533,29.5037,514.5141,517.1055,518.9325,522.8550,19
+mem_pool_attr,after_baseline_64mib,reserved_bytes=0,used_bytes=0,release_threshold=0
+baseline,0,p0_transfer_only,64,desc,0,45.0304,42.3608,46.0492,47.2613,47.3978,47.5018,0
+baseline,0,p4_d2h_fresh_vec,64,desc,0,33.2631,23.4411,26.0923,512.4410,515.5968,520.4892,14
+baseline,0,p0_transfer_only,64,desc,1,44.7526,36.0240,43.9515,46.0193,46.2018,47.5386,0
+baseline,0,p4_d2h_fresh_vec,64,desc,1,33.2287,19.2660,23.3127,23.4704,23.8078,30.3450,0
+baseline,0,p0_transfer_only,64,desc,2,41.3592,39.8459,44.2690,46.3246,46.3560,52.1155,0
+baseline,0,p4_d2h_fresh_vec,64,desc,2,32.2016,23.1183,23.4292,23.6326,25.6083,517.1893,1
+release_threshold,1,p0_transfer_only,64,desc,0,40.4935,34.0006,34.9093,513.7358,530.4148,619.2258,12
+release_threshold,1,p4_d2h_fresh_vec,64,desc,0,613.8685,23.2433,30.4789,512.1840,531.5972,624.6475,12
+release_threshold,1,p0_transfer_only,64,desc,1,25.4687,498.0175,521.2125,526.4202,528.6504,531.6256,0
+release_threshold,1,p4_d2h_fresh_vec,64,desc,1,525.8543,19.0207,19.4326,23.0579,23.4333,30.3477,0
+release_threshold,1,p0_transfer_only,64,desc,2,21.7494,21.3644,27.9065,520.9049,524.7682,529.5770,14
+release_threshold,1,p4_d2h_fresh_vec,64,desc,2,509.2847,23.1890,24.0420,25.4581,25.6464,521.4546,5
+sync_alloc,2,p0_transfer_only,64,desc,0,42.2517,36.7592,43.5434,45.6929,45.9373,48.4632,0
+sync_alloc,2,p4_d2h_fresh_vec,64,desc,0,32.5276,18.4698,22.3466,24.8523,25.0342,29.5434,0
+sync_alloc,2,p0_transfer_only,64,desc,1,46.0804,42.0295,45.6144,45.6991,45.7447,45.9875,0
+sync_alloc,2,p4_d2h_fresh_vec,64,desc,1,31.4693,20.0847,24.9377,25.2893,25.4001,515.8542,3
+sync_alloc,2,p0_transfer_only,64,desc,2,45.7616,42.0415,43.7851,44.7479,45.6425,46.0525,0
+sync_alloc,2,p4_d2h_fresh_vec,64,desc,2,26.7165,23.3457,25.3806,32.0599,33.4788,523.1784,5
+both,3,p0_transfer_only,64,desc,0,40.7406,42.0522,44.7838,46.5102,47.1217,47.7034,0
+both,3,p4_d2h_fresh_vec,64,desc,0,34.1763,17.9528,22.1046,497.1906,522.6657,539.4534,10
+both,3,p0_transfer_only,64,desc,1,41.7779,39.6634,44.5885,45.4937,45.5982,46.2578,0
+both,3,p4_d2h_fresh_vec,64,desc,1,31.6423,19.2328,24.6367,29.3681,32.4997,518.5462,4
+both,3,p0_transfer_only,64,desc,2,46.0049,37.2171,42.0743,45.9776,46.3110,48.5054,0
+both,3,p4_d2h_fresh_vec,64,desc,2,21.0355,19.1084,21.9397,23.8477,521.9618,532.2288,9
+baseline,4,p0_transfer_only,64,desc,0,42.6536,41.7690,45.8526,47.9366,48.1324,48.3872,0
+baseline,4,p4_d2h_fresh_vec,64,desc,0,35.0483,23.2262,34.0823,514.1419,516.4435,536.1134,14
+baseline,4,p0_transfer_only,64,desc,1,43.9034,42.2745,44.1463,46.2162,46.4610,47.2474,0
+baseline,4,p4_d2h_fresh_vec,64,desc,1,34.4849,25.4497,34.4137,518.3245,521.9732,536.0979,14
+baseline,4,p0_transfer_only,64,desc,2,45.4066,42.3216,45.2798,46.1087,46.3408,47.2807,0
+baseline,4,p4_d2h_fresh_vec,64,desc,2,485.7501,18.2697,20.9272,22.1380,22.5364,24.3587,0
+baseline,0,p0_transfer_only,48,desc,0,37.5090,33.2398,33.9273,36.5449,36.9571,38.5652,0
+baseline,0,p4_d2h_fresh_vec,48,desc,0,27.6317,21.2609,377.9516,391.7889,396.9319,412.8007,16
+baseline,0,p0_transfer_only,48,desc,1,38.4580,32.1169,34.9514,36.5500,36.6811,37.1168,0
+baseline,0,p4_d2h_fresh_vec,48,desc,1,26.0843,18.3131,18.6809,23.7273,386.9365,397.3224,9
+baseline,0,p0_transfer_only,48,desc,2,32.1716,31.4546,33.2665,36.5418,36.7572,36.9514,0
+baseline,0,p4_d2h_fresh_vec,48,desc,2,21.1597,344.4749,386.0809,388.9489,390.2045,394.7895,0
+release_threshold,1,p0_transfer_only,48,desc,0,35.3109,16.8985,18.5425,21.4331,21.7058,388.8402,3
+release_threshold,1,p4_d2h_fresh_vec,48,desc,0,386.9929,17.9979,20.0205,20.5041,384.7110,392.9987,8
+release_threshold,1,p0_transfer_only,48,desc,1,390.2959,20.0454,380.9218,391.1573,391.6095,394.9678,17
+release_threshold,1,p4_d2h_fresh_vec,48,desc,1,380.0520,17.4780,18.2607,18.3498,18.4935,386.4294,1
+release_threshold,1,p0_transfer_only,48,desc,2,20.8370,19.6285,21.6023,391.8831,394.9464,401.6463,11
+release_threshold,1,p4_d2h_fresh_vec,48,desc,2,387.4155,18.1540,18.2659,18.4215,18.4836,20.1173,0
+sync_alloc,2,p0_transfer_only,48,desc,0,35.7540,30.1721,34.2711,35.5044,35.7242,37.0035,0
+sync_alloc,2,p4_d2h_fresh_vec,48,desc,0,21.4357,17.2402,380.0327,385.0188,387.0530,397.4647,18
+sync_alloc,2,p0_transfer_only,48,desc,1,32.4990,31.8747,35.1802,35.9497,37.3405,37.6173,0
+sync_alloc,2,p4_d2h_fresh_vec,48,desc,1,27.4561,15.3018,15.5293,20.2899,385.6492,392.5808,8
+sync_alloc,2,p0_transfer_only,48,desc,2,34.5475,31.2928,34.0057,35.7552,37.0305,37.5082,0
+sync_alloc,2,p4_d2h_fresh_vec,48,desc,2,26.1832,19.8223,20.3979,362.1069,389.1373,403.2864,10
+both,3,p0_transfer_only,48,desc,0,33.7304,31.1428,34.8246,35.2768,36.8323,402.5003,1
+both,3,p4_d2h_fresh_vec,48,desc,0,25.2128,345.7133,391.3142,396.4070,465.3870,485.5246,0
+both,3,p0_transfer_only,48,desc,1,37.5350,33.8544,35.6274,35.8780,37.3470,37.5174,0
+both,3,p4_d2h_fresh_vec,48,desc,1,390.5372,25.3754,368.9975,390.1547,396.7021,445.1510,17
+both,3,p0_transfer_only,48,desc,2,37.6049,33.5652,35.9447,37.3193,37.4369,37.6989,0
+both,3,p4_d2h_fresh_vec,48,desc,2,24.2358,19.9597,26.8945,386.1031,387.7292,391.4290,14
+baseline,4,p0_transfer_only,48,desc,0,37.6333,34.7661,36.6507,37.4693,38.9619,363.1121,1
+baseline,4,p4_d2h_fresh_vec,48,desc,0,361.0066,20.5382,25.3929,33.2882,376.8449,384.4072,9
+baseline,4,p0_transfer_only,48,desc,1,32.2077,35.6027,36.6698,37.0563,38.3749,38.8018,0
+baseline,4,p4_d2h_fresh_vec,48,desc,1,27.5234,15.0314,18.4405,22.5404,434.0652,480.5897,8
+baseline,4,p0_transfer_only,48,desc,2,36.3757,32.9472,34.9035,36.2514,36.5817,36.8767,0
+baseline,4,p4_d2h_fresh_vec,48,desc,2,25.3944,365.2512,396.5742,447.4527,457.9666,473.5996,0
+baseline,0,p0_transfer_only,36,desc,0,30.5130,26.6485,28.7342,29.2759,29.7296,259.5850,0
+baseline,0,p4_d2h_fresh_vec,36,desc,0,21.0532,19.5864,20.0649,291.1142,292.7747,296.6252,14
+baseline,0,p0_transfer_only,36,desc,1,27.8773,26.4445,28.8700,28.9575,29.0652,29.5200,0
+baseline,0,p4_d2h_fresh_vec,36,desc,1,20.3576,18.8526,20.5866,290.4856,294.5729,298.3322,14
+baseline,0,p0_transfer_only,36,desc,2,29.0258,26.1822,28.1821,28.9742,29.0822,29.8742,0
+baseline,0,p4_d2h_fresh_vec,36,desc,2,18.9110,14.1516,14.4661,14.6502,18.1732,287.4730,2
+release_threshold,1,p0_transfer_only,36,desc,0,27.2358,288.5980,309.5116,352.2051,359.1766,373.9348,0
+release_threshold,1,p4_d2h_fresh_vec,36,desc,0,292.2193,16.2551,17.9933,18.3329,19.3958,294.7488,5
+release_threshold,1,p0_transfer_only,36,desc,1,295.4687,18.9845,292.4544,298.6408,300.1898,366.9463,19
+release_threshold,1,p4_d2h_fresh_vec,36,desc,1,358.7244,20.1294,293.5451,297.0314,318.0218,371.8464,19
+release_threshold,1,p0_transfer_only,36,desc,2,295.9531,293.0534,295.5485,296.4263,297.9114,302.1987,0
+release_threshold,1,p4_d2h_fresh_vec,36,desc,2,291.7598,20.7691,291.4132,292.5298,293.2693,298.3503,19
+sync_alloc,2,p0_transfer_only,36,desc,0,24.5214,26.3860,27.6077,27.7972,27.8768,300.3656,1
+sync_alloc,2,p4_d2h_fresh_vec,36,desc,0,20.4970,251.6918,294.2317,299.7824,303.2124,314.4959,0
+sync_alloc,2,p0_transfer_only,36,desc,1,29.0109,25.5922,27.9624,28.8151,29.0473,29.3008,0
+sync_alloc,2,p4_d2h_fresh_vec,36,desc,1,22.2413,18.8309,286.4596,292.5848,294.3443,298.0568,17
+sync_alloc,2,p0_transfer_only,36,desc,2,26.4320,25.2900,27.7114,27.8669,27.9531,28.8050,0
+sync_alloc,2,p4_d2h_fresh_vec,36,desc,2,20.5327,20.4264,289.1795,296.5428,300.5342,305.8071,19
+both,3,p0_transfer_only,36,desc,0,27.2062,25.8028,26.8980,27.6201,27.8488,28.0671,0
+both,3,p4_d2h_fresh_vec,36,desc,0,20.3716,15.7898,18.3351,257.0895,347.2225,362.9678,10
+both,3,p0_transfer_only,36,desc,1,28.8128,24.6627,26.8616,28.1514,29.1568,29.4343,0
+both,3,p4_d2h_fresh_vec,36,desc,1,18.3873,316.3728,338.1667,343.8638,347.2208,355.8696,0
+both,3,p0_transfer_only,36,desc,2,27.8008,27.2700,27.9677,28.1839,29.2684,30.4683,0
+both,3,p4_d2h_fresh_vec,36,desc,2,19.8191,12.2454,12.5945,14.6343,14.7564,16.1684,0
+baseline,4,p0_transfer_only,36,desc,0,29.5452,28.4959,29.1856,29.4098,30.4189,32.1499,0
+baseline,4,p4_d2h_fresh_vec,36,desc,0,17.5850,13.0898,14.3320,15.2861,15.4731,15.7564,0
+baseline,4,p0_transfer_only,36,desc,1,28.9814,22.4942,26.7651,28.6734,28.9401,29.4467,0
+baseline,4,p4_d2h_fresh_vec,36,desc,1,20.0917,16.8055,282.9694,288.8381,290.4629,306.2953,17
+baseline,4,p0_transfer_only,36,desc,2,27.5209,28.6439,30.4927,284.3380,292.2655,308.7102,9
+baseline,4,p4_d2h_fresh_vec,36,desc,2,21.3005,13.4535,259.9417,294.8884,297.8361,307.5079,15
+baseline,0,p0_transfer_only,33,desc,0,28.6180,25.3842,27.5052,27.9739,28.5950,29.7588,0
+baseline,0,p4_d2h_fresh_vec,33,desc,0,20.0868,18.5409,263.6296,267.6448,271.3650,314.8899,18
+baseline,0,p0_transfer_only,33,desc,1,27.3102,25.9574,27.5514,28.3572,28.5317,29.8023,0
+baseline,0,p4_d2h_fresh_vec,33,desc,1,18.8877,232.4588,266.0387,268.1284,269.9170,310.7036,0
+baseline,0,p0_transfer_only,33,desc,2,28.9023,25.0921,27.4911,28.4026,28.6932,29.8933,0
+baseline,0,p4_d2h_fresh_vec,33,desc,2,21.2990,19.4521,263.9282,265.6753,267.1675,271.3351,19
+baseline,0,p0_transfer_only,33,desc,3,27.5480,26.3827,27.3434,27.5704,28.7662,29.0653,0
+baseline,0,p4_d2h_fresh_vec,33,desc,3,19.0665,258.7981,263.9689,266.9189,267.9576,272.6933,0
+baseline,0,p0_transfer_only,33,desc,4,28.9872,24.9589,27.4136,28.3833,29.6663,300.5491,5
+baseline,0,p4_d2h_fresh_vec,33,desc,4,18.8419,239.6227,275.4529,281.9763,282.7973,286.7096,0
+release_threshold,1,p0_transfer_only,33,desc,0,298.7660,243.9827,266.8770,267.8099,269.1159,271.8111,0
+release_threshold,1,p4_d2h_fresh_vec,33,desc,0,265.1588,260.6650,267.3851,269.9104,270.4956,272.7962,0
+release_threshold,1,p0_transfer_only,33,desc,1,269.8881,258.6178,266.6296,269.2560,269.7491,274.9154,0
+release_threshold,1,p4_d2h_fresh_vec,33,desc,1,266.7656,264.4047,312.3480,315.2538,319.9912,331.4849,0
+release_threshold,1,p0_transfer_only,33,desc,2,317.1836,17.6144,266.8734,272.7029,317.2497,324.7578,18
+release_threshold,1,p4_d2h_fresh_vec,33,desc,2,288.4772,15.8705,265.6898,281.6821,283.9582,287.0559,19
+release_threshold,1,p0_transfer_only,33,desc,3,267.3682,14.2573,14.4880,14.7450,15.9109,276.3917,4
+release_threshold,1,p4_d2h_fresh_vec,33,desc,3,12.8401,240.0086,259.9845,267.7976,268.9789,273.7961,0
+release_threshold,1,p0_transfer_only,33,desc,4,273.9735,16.6538,268.3131,280.3503,284.6227,291.8227,18
+release_threshold,1,p4_d2h_fresh_vec,33,desc,4,251.0694,243.3612,265.6491,284.1683,309.2108,325.6581,0
+sync_alloc,2,p0_transfer_only,33,desc,0,26.9692,25.8644,26.0867,26.7831,27.1334,27.3485,0
+sync_alloc,2,p4_d2h_fresh_vec,33,desc,0,20.2696,19.3149,266.0237,269.5111,276.3941,525.8825,19
+sync_alloc,2,p0_transfer_only,33,desc,1,318.6427,25.4892,27.0966,320.7855,344.6086,412.4242,10
+sync_alloc,2,p4_d2h_fresh_vec,33,desc,1,361.7962,20.8478,267.0433,283.8101,286.2882,343.0663,18
+sync_alloc,2,p0_transfer_only,33,desc,2,28.0306,24.5822,26.6485,26.8897,27.3644,319.0793,3
+sync_alloc,2,p4_d2h_fresh_vec,33,desc,2,317.3161,18.3548,289.1319,370.9219,381.1573,392.1889,18
+sync_alloc,2,p0_transfer_only,33,desc,3,25.0232,23.1945,25.6557,340.7811,358.2099,370.8632,10
+sync_alloc,2,p4_d2h_fresh_vec,33,desc,3,17.6908,326.3904,338.6924,347.3365,352.1771,373.8281,0
+sync_alloc,2,p0_transfer_only,33,desc,4,24.7882,22.7849,25.2179,26.1031,340.4061,369.0022,6
+sync_alloc,2,p4_d2h_fresh_vec,33,desc,4,17.9757,15.5724,269.5178,324.4687,333.6411,361.4835,15
+both,3,p0_transfer_only,33,desc,0,25.0501,24.0788,25.8106,26.5465,327.3281,356.2916,7
+both,3,p4_d2h_fresh_vec,33,desc,0,32.6129,15.5571,311.5813,324.4392,330.0096,357.1899,16
+both,3,p0_transfer_only,33,desc,1,349.4092,24.1983,25.9587,27.6664,324.1900,355.6456,9
+both,3,p4_d2h_fresh_vec,33,desc,1,17.8414,15.0550,257.8842,259.4762,260.7317,326.1439,18
+both,3,p0_transfer_only,33,desc,2,26.3608,21.6279,24.1010,25.6503,25.8293,26.2108,0
+both,3,p4_d2h_fresh_vec,33,desc,2,15.9875,11.5517,13.7699,15.3513,23.4899,415.4392,3
+both,3,p0_transfer_only,33,desc,3,57.7078,26.4219,76.3884,98.4902,112.7169,530.9142,3
+both,3,p4_d2h_fresh_vec,33,desc,3,268.1515,233.1039,264.1504,266.9158,297.3865,313.0958,0
+both,3,p0_transfer_only,33,desc,4,26.7932,23.0985,24.6383,25.8470,25.9938,26.6944,0
+both,3,p4_d2h_fresh_vec,33,desc,4,17.4580,15.2659,262.0669,264.0268,266.2668,271.3228,18
+baseline,4,p0_transfer_only,33,desc,0,28.7467,25.9268,27.6887,28.5493,28.7139,28.8353,0
+baseline,4,p4_d2h_fresh_vec,33,desc,0,18.8536,13.4090,13.6384,13.9136,278.8475,290.8663,9
+baseline,4,p0_transfer_only,33,desc,1,24.9935,27.3415,27.5403,28.3481,28.7605,28.9405,0
+baseline,4,p4_d2h_fresh_vec,33,desc,1,20.3741,256.4146,259.6872,263.5427,264.1561,267.7567,0
+baseline,4,p0_transfer_only,33,desc,2,26.2322,26.2096,27.4455,28.0928,28.7674,29.2051,0
+baseline,4,p4_d2h_fresh_vec,33,desc,2,20.3080,242.9530,258.9442,264.1050,265.9933,269.9838,0
+baseline,4,p0_transfer_only,33,desc,3,276.2048,27.4842,27.6632,28.6645,28.7933,274.5120,0
+baseline,4,p4_d2h_fresh_vec,33,desc,3,268.4485,18.5455,247.7790,263.1372,265.8908,271.8188,16
+baseline,4,p0_transfer_only,33,desc,4,26.7672,23.7984,27.0135,27.4757,28.5875,29.7321,0
+baseline,4,p4_d2h_fresh_vec,33,desc,4,20.0129,232.5981,263.5499,266.5282,266.9532,271.0023,0
+baseline,0,p0_transfer_only,32,desc,0,24.3449,23.2852,26.2948,27.5909,318.7125,457.7095,6
+baseline,0,p4_d2h_fresh_vec,32,desc,0,17.9522,247.1529,314.0305,321.8743,348.0871,507.8060,0
+baseline,0,p0_transfer_only,32,desc,1,25.8595,22.6658,25.1545,25.6220,26.1784,279.5142,2
+baseline,0,p4_d2h_fresh_vec,32,desc,1,18.0329,251.4276,256.4645,258.0753,261.1401,357.1870,0
+baseline,0,p0_transfer_only,32,desc,2,24.4721,22.0133,25.8976,311.5640,335.0902,353.9985,10
+baseline,0,p4_d2h_fresh_vec,32,desc,2,308.0658,17.2221,325.5227,331.3075,334.8709,345.0749,19
+baseline,0,p0_transfer_only,32,desc,3,337.9748,23.4330,25.0173,25.5515,314.5510,338.7289,6
+baseline,0,p4_d2h_fresh_vec,32,desc,3,310.8819,299.8679,312.7925,318.2181,322.5796,333.4123,0
+baseline,0,p0_transfer_only,32,desc,4,26.2947,22.0899,24.1085,25.1637,25.5237,316.8136,1
+baseline,0,p4_d2h_fresh_vec,32,desc,4,16.1515,17.1578,18.5393,18.8649,40.4886,351.5816,5
+release_threshold,1,p0_transfer_only,32,desc,0,331.0878,18.8519,323.4450,327.6508,340.5590,357.9682,18
+release_threshold,1,p4_d2h_fresh_vec,32,desc,0,303.1628,311.4143,325.7235,335.0849,341.6576,348.0848,0
+release_threshold,1,p0_transfer_only,32,desc,1,344.0193,250.5528,257.6116,317.6197,322.0372,334.8721,0
+release_threshold,1,p4_d2h_fresh_vec,32,desc,1,254.2862,12.9963,13.1514,13.2715,13.3470,13.7469,0
+release_threshold,1,p0_transfer_only,32,desc,2,14.4005,17.0164,333.4025,380.4229,446.0629,490.9275,18
+release_threshold,1,p4_d2h_fresh_vec,32,desc,2,255.4475,18.1430,235.1947,256.1745,257.9892,296.2336,17
+release_threshold,1,p0_transfer_only,32,desc,3,258.4362,19.0306,248.7606,261.6763,265.4109,290.7426,16
+release_threshold,1,p4_d2h_fresh_vec,32,desc,3,265.8579,10.9353,14.5922,15.5901,254.8686,264.5222,8
+release_threshold,1,p0_transfer_only,32,desc,4,261.2226,255.4342,258.5787,260.4471,262.9575,268.3154,0
+release_threshold,1,p4_d2h_fresh_vec,32,desc,4,257.4886,234.2077,313.7893,319.9289,330.6551,505.6684,0
+sync_alloc,2,p0_transfer_only,32,desc,0,23.5258,25.8652,25.9907,27.0541,27.1837,318.7872,3
+sync_alloc,2,p4_d2h_fresh_vec,32,desc,0,274.8626,17.6895,252.0937,285.9337,311.5655,440.5881,16
+sync_alloc,2,p0_transfer_only,32,desc,1,79.6349,25.0889,26.8216,27.7478,27.9289,28.4768,0
+sync_alloc,2,p4_d2h_fresh_vec,32,desc,1,20.6900,237.4584,260.9172,266.0138,275.5117,281.8877,0
+sync_alloc,2,p0_transfer_only,32,desc,2,25.7615,22.3823,24.7076,24.9261,24.9636,26.0433,0
+sync_alloc,2,p4_d2h_fresh_vec,32,desc,2,18.5417,17.3542,21.8474,245.8495,253.9688,289.3207,13
+sync_alloc,2,p0_transfer_only,32,desc,3,25.3311,22.1282,24.4627,24.8898,25.0087,25.3018,0
+sync_alloc,2,p4_d2h_fresh_vec,32,desc,3,18.3484,15.2804,257.0454,258.4306,261.4281,268.0511,19
+sync_alloc,2,p0_transfer_only,32,desc,4,25.7373,22.1721,24.8889,26.0230,26.1838,236.8927,1
+sync_alloc,2,p4_d2h_fresh_vec,32,desc,4,19.4661,12.9978,14.3696,252.8379,258.7502,262.3279,11
+both,3,p0_transfer_only,32,desc,0,30.1006,23.5658,26.7720,28.3905,40.1987,267.8495,1
+both,3,p4_d2h_fresh_vec,32,desc,0,16.2409,14.3159,236.1391,266.1574,270.7668,310.4483,16
+both,3,p0_transfer_only,32,desc,1,25.3927,22.0250,24.6393,25.0937,25.8149,26.6323,0
+both,3,p4_d2h_fresh_vec,32,desc,1,19.2670,14.2915,21.2673,248.0974,258.7713,377.0409,14
+both,3,p0_transfer_only,32,desc,2,26.4948,21.6394,24.1680,25.1507,25.2654,303.7636,1
+both,3,p4_d2h_fresh_vec,32,desc,2,15.7250,255.2172,257.1992,258.1664,259.4262,266.4537,0
+both,3,p0_transfer_only,32,desc,3,25.9246,23.4646,24.8326,25.0865,25.4584,26.4720,0
+both,3,p4_d2h_fresh_vec,32,desc,3,17.7362,17.8166,260.3630,263.7671,268.1881,317.2458,18
+both,3,p0_transfer_only,32,desc,4,22.8029,23.7733,25.2122,26.1902,26.2861,28.0721,0
+both,3,p4_d2h_fresh_vec,32,desc,4,17.1410,14.9302,240.5699,259.0112,261.8786,273.0205,18
+baseline,4,p0_transfer_only,32,desc,0,26.3859,23.6161,24.9595,25.4595,26.1228,26.3343,0
+baseline,4,p4_d2h_fresh_vec,32,desc,0,18.1066,248.6023,258.5064,259.1912,260.2721,262.2349,0
+baseline,4,p0_transfer_only,32,desc,1,26.0100,24.3839,25.0274,25.2470,26.0179,26.3378,0
+baseline,4,p4_d2h_fresh_vec,32,desc,1,18.3912,262.5641,320.0813,323.4481,325.5529,329.6119,0
+baseline,4,p0_transfer_only,32,desc,2,25.6988,23.5412,24.9615,25.8412,26.0272,26.8234,0
+baseline,4,p4_d2h_fresh_vec,32,desc,2,19.2445,14.4355,261.9653,270.2443,272.1532,277.3759,18
+baseline,4,p0_transfer_only,32,desc,3,25.8732,23.4521,24.8816,25.9238,26.1794,26.4355,0
+baseline,4,p4_d2h_fresh_vec,32,desc,3,18.3945,16.3952,257.1049,258.2642,260.4325,262.6368,19
+baseline,4,p0_transfer_only,32,desc,4,266.5283,23.3413,23.8954,25.0438,25.1566,25.4209,0
+baseline,4,p4_d2h_fresh_vec,32,desc,4,260.9106,217.9183,256.9674,258.7768,261.0624,268.9625,0
+baseline,0,p0_transfer_only,31,desc,0,15.5605,7.0434,7.0866,7.0976,7.1282,7.1950,0
+baseline,0,p4_d2h_fresh_vec,31,desc,0,0.5585,0.5556,0.5561,0.5562,0.5564,0.5653,0
+baseline,0,p0_transfer_only,31,desc,1,7.0936,7.0930,7.1374,7.1459,7.1522,7.1867,0
+baseline,0,p4_d2h_fresh_vec,31,desc,1,0.5592,0.5561,0.5562,0.5564,0.5565,0.5651,0
+baseline,0,p0_transfer_only,31,desc,2,7.0741,7.1068,7.1339,7.1444,7.1675,7.3120,0
+baseline,0,p4_d2h_fresh_vec,31,desc,2,0.5587,0.5553,0.5561,0.5561,0.5563,0.5565,0
+release_threshold,1,p0_transfer_only,31,desc,0,5.5852,1.7841,1.7873,1.7888,1.7890,1.7933,0
+release_threshold,1,p4_d2h_fresh_vec,31,desc,0,0.5566,0.5548,0.5557,0.5559,0.5559,0.5564,0
+release_threshold,1,p0_transfer_only,31,desc,1,1.7964,1.7859,1.7874,1.7882,1.7890,1.7994,0
+release_threshold,1,p4_d2h_fresh_vec,31,desc,1,0.5569,0.5553,0.5558,0.5559,0.5560,0.5577,0
+release_threshold,1,p0_transfer_only,31,desc,2,1.7881,1.7854,1.7863,1.7875,1.7885,1.7985,0
+release_threshold,1,p4_d2h_fresh_vec,31,desc,2,0.5564,0.5555,0.5557,0.5559,0.5561,0.5566,0
+sync_alloc,2,p0_transfer_only,31,desc,0,7.0675,6.9683,6.9794,6.9991,7.0027,7.0177,0
+sync_alloc,2,p4_d2h_fresh_vec,31,desc,0,0.5580,0.5560,0.5562,0.5564,0.5565,0.5568,0
+sync_alloc,2,p0_transfer_only,31,desc,1,6.9414,6.9729,6.9815,6.9901,6.9967,7.1861,0
+sync_alloc,2,p4_d2h_fresh_vec,31,desc,1,0.5592,0.5561,0.5561,0.5563,0.5564,0.5569,0
+sync_alloc,2,p0_transfer_only,31,desc,2,6.9696,6.9717,6.9794,6.9845,6.9907,7.1055,0
+sync_alloc,2,p4_d2h_fresh_vec,31,desc,2,0.5585,0.5555,0.5556,0.5557,0.5559,0.5650,0
+both,3,p0_transfer_only,31,desc,0,6.9742,6.9778,6.9896,6.9964,7.0029,7.0365,0
+both,3,p4_d2h_fresh_vec,31,desc,0,0.5585,0.5555,0.5557,0.5558,0.5559,0.5653,0
+both,3,p0_transfer_only,31,desc,1,7.0951,6.9956,7.0039,7.0171,7.0274,7.5491,0
+both,3,p4_d2h_fresh_vec,31,desc,1,0.5578,0.5556,0.5559,0.5561,0.5562,0.5647,0
+both,3,p0_transfer_only,31,desc,2,7.0378,6.9806,7.0010,7.0115,7.0266,7.0624,0
+both,3,p4_d2h_fresh_vec,31,desc,2,0.5566,0.5557,0.5561,0.5562,0.5565,0.5653,0
+baseline,4,p0_transfer_only,31,desc,0,7.1333,7.0876,7.1208,7.1288,7.1378,7.1667,0
+baseline,4,p4_d2h_fresh_vec,31,desc,0,0.5574,0.5556,0.5559,0.5560,0.5561,0.5651,0
+baseline,4,p0_transfer_only,31,desc,1,7.0536,7.1032,7.1199,7.1343,7.1432,7.5862,0
+baseline,4,p4_d2h_fresh_vec,31,desc,1,0.5583,0.5557,0.5559,0.5560,0.5561,0.5633,0
+baseline,4,p0_transfer_only,31,desc,2,7.0789,7.1021,7.1198,7.1428,7.1448,7.1547,0
+baseline,4,p4_d2h_fresh_vec,31,desc,2,0.5583,0.5556,0.5557,0.5558,0.5558,0.5645,0
+baseline,0,p0_transfer_only,28,desc,0,17.0714,7.0250,7.0513,7.0593,7.0733,7.0864,0
+baseline,0,p4_d2h_fresh_vec,28,desc,0,0.5474,0.5215,0.5221,0.5223,0.5226,0.5404,0
+baseline,0,p0_transfer_only,28,desc,1,6.9959,7.0378,7.0495,7.0553,7.0712,7.1223,0
+baseline,0,p4_d2h_fresh_vec,28,desc,1,0.5467,0.5205,0.5217,0.5220,0.5226,0.5288,0
+baseline,0,p0_transfer_only,28,desc,2,6.9650,7.0268,7.0447,7.0537,7.0600,7.1160,0
+baseline,0,p4_d2h_fresh_vec,28,desc,2,0.5446,0.5202,0.5212,0.5214,0.5217,0.5470,0
+release_threshold,1,p0_transfer_only,28,desc,0,5.4928,1.6360,1.6380,1.6394,1.6410,1.6841,0
+release_threshold,1,p4_d2h_fresh_vec,28,desc,0,0.5226,0.5200,0.5211,0.5216,0.5222,0.5385,0
+release_threshold,1,p0_transfer_only,28,desc,1,1.6418,1.6367,1.6386,1.6400,1.6413,1.6545,0
+release_threshold,1,p4_d2h_fresh_vec,28,desc,1,0.5251,0.5201,0.5209,0.5213,0.5216,0.5240,0
+release_threshold,1,p0_transfer_only,28,desc,2,1.6491,1.6374,1.6384,1.6401,1.6420,1.6556,0
+release_threshold,1,p4_d2h_fresh_vec,28,desc,2,0.5269,0.5201,0.5211,0.5215,0.5223,0.5388,0
+sync_alloc,2,p0_transfer_only,28,desc,0,6.4497,6.2888,6.3191,6.3357,6.3421,6.3690,0
+sync_alloc,2,p4_d2h_fresh_vec,28,desc,0,0.5454,0.5199,0.5213,0.5218,0.5221,0.5393,0
+sync_alloc,2,p0_transfer_only,28,desc,1,6.3581,6.3024,6.3144,6.3219,6.3346,6.4119,0
+sync_alloc,2,p4_d2h_fresh_vec,28,desc,1,0.5442,0.5209,0.5210,0.5215,0.5218,0.5226,0
+sync_alloc,2,p0_transfer_only,28,desc,2,6.3155,6.2921,6.3226,6.3286,6.3350,6.3768,0
+sync_alloc,2,p4_d2h_fresh_vec,28,desc,2,0.5704,0.5204,0.5214,0.5219,0.5335,0.9660,0
+both,3,p0_transfer_only,28,desc,0,6.2823,6.2899,6.3139,6.3220,6.3311,6.3679,0
+both,3,p4_d2h_fresh_vec,28,desc,0,0.5446,0.5206,0.5215,0.5219,0.5222,0.5298,0
+both,3,p0_transfer_only,28,desc,1,6.4506,6.3425,6.3607,6.3747,6.3803,6.5235,0
+both,3,p4_d2h_fresh_vec,28,desc,1,0.5253,0.5203,0.5216,0.5218,0.5223,0.5409,0
+both,3,p0_transfer_only,28,desc,2,6.4404,6.3469,6.3649,6.3765,6.3833,6.3956,0
+both,3,p4_d2h_fresh_vec,28,desc,2,0.5256,0.5210,0.5216,0.5223,0.5231,0.5385,0
+baseline,4,p0_transfer_only,28,desc,0,7.0988,7.0194,7.0390,7.0543,7.0587,7.0986,0
+baseline,4,p4_d2h_fresh_vec,28,desc,0,0.5460,0.5213,0.5222,0.5223,0.5225,0.5308,0
+baseline,4,p0_transfer_only,28,desc,1,6.9944,7.0338,7.0418,7.0489,7.0595,7.0964,0
+baseline,4,p4_d2h_fresh_vec,28,desc,1,0.5454,0.5208,0.5214,0.5216,0.5222,0.5463,0
+baseline,4,p0_transfer_only,28,desc,2,6.9309,7.0243,7.0413,7.0576,7.0650,7.0923,0
+baseline,4,p4_d2h_fresh_vec,28,desc,2,0.5512,0.5210,0.5216,0.5219,0.5224,0.5395,0
+baseline,0,p0_transfer_only,24,desc,0,18.1981,17.3786,17.4333,18.2659,18.2832,18.3199,0
+baseline,0,p4_d2h_fresh_vec,24,desc,0,10.9739,10.4548,192.1662,194.4048,194.7667,199.5748,18
+baseline,0,p0_transfer_only,24,desc,1,17.6490,16.9095,17.4633,17.6495,18.2759,19.0534,0
+baseline,0,p4_d2h_fresh_vec,24,desc,1,11.7554,181.1407,190.5136,191.1107,192.1866,197.8686,0
+baseline,0,p0_transfer_only,24,desc,2,18.2831,16.5033,17.4943,17.7509,18.2340,18.2944,0
+baseline,0,p4_d2h_fresh_vec,24,desc,2,11.8410,183.4409,193.6125,196.0690,198.7383,200.3085,0
+release_threshold,1,p0_transfer_only,24,desc,0,16.7525,188.0521,192.7431,194.1627,196.4892,202.0049,0
+release_threshold,1,p4_d2h_fresh_vec,24,desc,0,196.9339,187.2426,190.0021,190.4120,191.5346,192.8305,0
+release_threshold,1,p0_transfer_only,24,desc,1,188.8019,167.5695,192.0260,202.3839,205.3423,210.8957,0
+release_threshold,1,p4_d2h_fresh_vec,24,desc,1,206.5628,188.4160,193.9716,202.1000,203.0045,205.7523,0
+release_threshold,1,p0_transfer_only,24,desc,2,191.2760,178.9683,192.2647,193.3683,194.8359,198.1045,0
+release_threshold,1,p4_d2h_fresh_vec,24,desc,2,194.2117,161.3953,191.7645,202.1189,207.0616,211.9956,0
+sync_alloc,2,p0_transfer_only,24,desc,0,16.9978,14.3263,16.0562,16.8151,16.8908,216.7380,1
+sync_alloc,2,p4_d2h_fresh_vec,24,desc,0,10.9425,10.1002,191.2548,197.5106,199.1592,203.3512,18
+sync_alloc,2,p0_transfer_only,24,desc,1,16.4636,14.9279,16.0281,16.8259,16.8835,17.0498,0
+sync_alloc,2,p4_d2h_fresh_vec,24,desc,1,11.1899,165.5905,191.1600,192.9211,194.1097,196.5921,0
+sync_alloc,2,p0_transfer_only,24,desc,2,198.0005,13.7624,16.0127,16.3281,16.8382,16.8951,0
+sync_alloc,2,p4_d2h_fresh_vec,24,desc,2,9.0977,8.9683,174.4294,189.2866,191.1580,204.4028,17
+both,3,p0_transfer_only,24,desc,0,17.1706,14.6892,15.9763,16.8328,16.8639,200.9126,2
+both,3,p4_d2h_fresh_vec,24,desc,0,10.6867,10.9684,189.8640,191.0908,191.8513,194.5871,19
+both,3,p0_transfer_only,24,desc,1,17.2147,14.4330,16.2182,16.8390,16.8677,16.9002,0
+both,3,p4_d2h_fresh_vec,24,desc,1,10.3251,6.3977,11.0565,188.8970,193.2728,197.3057,13
+both,3,p0_transfer_only,24,desc,2,14.9609,14.1337,15.5023,16.0195,16.8474,16.8778,0
+both,3,p4_d2h_fresh_vec,24,desc,2,10.1927,187.0498,191.8716,193.8046,194.2892,196.6602,0
+baseline,4,p0_transfer_only,24,desc,0,19.1304,16.4994,17.4673,18.2763,18.3352,190.6231,2
+baseline,4,p4_d2h_fresh_vec,24,desc,0,11.5609,163.1569,181.5879,188.5718,192.0912,201.1313,0
+baseline,4,p0_transfer_only,24,desc,1,19.1736,14.6939,16.6808,17.3973,17.4380,17.8113,0
+baseline,4,p4_d2h_fresh_vec,24,desc,1,9.4655,171.3847,193.0609,196.2703,196.5341,202.2584,0
+baseline,4,p0_transfer_only,24,desc,2,18.5062,16.2473,17.4013,17.4700,17.5289,17.8871,0
+baseline,4,p4_d2h_fresh_vec,24,desc,2,10.9405,7.9522,162.9390,183.2494,192.0437,196.1764,15
+condition,bracket_pos,phase,size_mib,order,run_idx,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms,slow_count,checksum
+baseline,0,p7_gemm_replica,32,n/a,0,27.0980,22.5921,26.0819,26.9893,27.2988,28.9998,0,-132270.738122
+baseline,0,p7_gemm_replica,32,n/a,1,22.6344,23.6600,26.1051,27.0533,27.3348,28.2632,0,-132270.738122
+baseline,0,p7_gemm_replica,32,n/a,2,21.0869,24.5231,26.7154,27.7705,286.9669,302.4341,7,-132270.738122
+baseline,0,p7_gemm_replica,32,n/a,3,22.7265,24.8281,26.1766,28.3337,269.2264,284.0800,7,-132270.738122
+baseline,0,p7_gemm_replica,32,n/a,4,22.1917,23.0747,26.0585,26.4681,27.3353,237.4272,1,-132270.738122
+release_threshold,1,p7_gemm_replica,32,n/a,0,19.9265,21.1391,269.8045,272.0967,274.2917,281.0956,19,-132270.738122
+release_threshold,1,p7_gemm_replica,32,n/a,1,265.5224,277.0912,282.3764,284.8817,287.1568,293.1729,0,-132270.738122
+release_threshold,1,p7_gemm_replica,32,n/a,2,278.1489,235.7841,264.5608,282.3583,285.6091,293.0145,0,-132270.738122
+release_threshold,1,p7_gemm_replica,32,n/a,3,260.5685,233.4079,262.5071,265.2092,267.4508,272.0717,0,-132270.738122
+release_threshold,1,p7_gemm_replica,32,n/a,4,251.2039,239.5752,258.7030,265.2668,273.7415,280.8808,0,-132270.738122
+sync_alloc,2,p7_gemm_replica,32,n/a,0,21.6628,23.1761,26.2646,27.0356,27.3162,28.9948,0,-132270.738122
+sync_alloc,2,p7_gemm_replica,32,n/a,1,22.7249,25.5199,26.1113,27.0456,27.5963,32.3685,0,-132270.738122
+sync_alloc,2,p7_gemm_replica,32,n/a,2,21.3138,25.5047,26.4394,27.1723,27.4277,28.2291,0,-132270.738122
+sync_alloc,2,p7_gemm_replica,32,n/a,3,20.0715,24.6038,26.5017,27.2168,27.4602,279.5086,1,-132270.738122
+sync_alloc,2,p7_gemm_replica,32,n/a,4,21.5221,24.1329,26.9476,27.3086,27.4636,28.6022,0,-132270.738122
+both,3,p7_gemm_replica,32,n/a,0,21.7393,17.6531,20.6928,22.3677,22.7952,23.3544,0,-132270.738122
+both,3,p7_gemm_replica,32,n/a,1,18.0429,19.3120,22.2352,22.4957,22.5397,22.7661,0,-132270.738122
+both,3,p7_gemm_replica,32,n/a,2,20.0486,19.3678,22.0817,22.5868,22.8258,23.9508,0,-132270.738122
+both,3,p7_gemm_replica,32,n/a,3,17.9646,19.3557,22.1084,22.6923,23.1681,279.3020,1,-132270.738122
+both,3,p7_gemm_replica,32,n/a,4,18.3091,18.4225,20.1345,22.4587,22.5933,23.1573,0,-132270.738122
+baseline,4,p7_gemm_replica,32,n/a,0,22.1987,23.2589,25.7531,26.0872,26.3076,28.1329,0,-132270.738122
+baseline,4,p7_gemm_replica,32,n/a,1,21.6234,24.5156,26.0542,26.8865,27.3707,276.3861,4,-132270.738122
+baseline,4,p7_gemm_replica,32,n/a,2,22.7570,23.9336,26.4053,27.9101,275.9376,283.3631,6,-132270.738122
+baseline,4,p7_gemm_replica,32,n/a,3,22.3534,23.0486,26.5401,27.1535,27.5789,288.6705,3,-132270.738122
+baseline,4,p7_gemm_replica,32,n/a,4,278.4518,22.8057,25.9328,26.4310,27.3170,284.4037,3,-132270.738122
+mem_pool_attr,after_sweep,reserved_bytes=0,used_bytes=0,release_threshold=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 2590.77s
+

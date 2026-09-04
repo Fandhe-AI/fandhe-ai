@@ -22,9 +22,18 @@
 「(has_async_alloc な環境で) driver 側が裏で保持している分の解放も面倒を見る」位置づけとする
 （`crates/backend-cuda/src/pool.rs::CudaAllocator::release_cached`）。
 
-`CU_MEMPOOL_ATTR_RELEASE_THRESHOLD`（案 A 固有の driver 側パラメータ調整）は**本 PR では行わない**。
-実機比較なしに driver 予約量を増やす変更は REQ-14 係数判定に影響しうるため、安全側の判断として見送る
-（実機 A/B 後に判断する事項としてスコープ外に残す）。
+`CU_MEMPOOL_ATTR_RELEASE_THRESHOLD`（案 A 固有の driver 側パラメータ調整）は本 PR（#1020／#1061）
+時点では行わない。実機比較なしに driver 予約量を増やす変更は REQ-14 係数判定に影響しうるため、
+安全側の判断として見送った（実機 A/B 後に判断する事項としてスコープ外に残す）。**追記（イシュー
+#1153）**: イシュー #1149 の GB10 実機 A/B 計測を完走させた結果、孤立マイクロベンチマーク
+（P1〜P3。デバイス確保のみ）では「解消」判定だったが、**`CudaMmaGemm::run_f16` の現実的な
+呼び出しパターンのレプリカ（P7）では release threshold 引き上げが median を約 10 倍悪化させる
+ことが判明した**（GB10 は unified memory のため、driver プールの保持量増加がホスト側フレッシュ
+確保と物理メモリを取り合ったためと推定。詳細は `docs/perf/cuda-percall-alloc-pool-threshold-ab.md`
+§5.5・§7）。この結果を受け、一度 `CudaAllocator::new` へ実装した release threshold 引き上げは
+**差し戻し、本番結線しない**という結論で決着した（案 A の孤立ベンチでの「解消」評価を、検証なしに
+本番結線の根拠にしない、という教訓を残す）。`release_cached` フェーズ (iv) の `cuMemPoolTrimTo`
+（driver 側保持分の明示トリム）は本判断と無関係に既存のまま維持している。詳細は §8 参照。
 
 ## 2. `has_async_alloc()` の実装訂正（実装中に判明した事実）
 
@@ -49,7 +58,7 @@
 
 ## 3. 対象 dtype・対象経路の範囲（設計書 §8.2 に委ねられた事項の確定）
 
-- v1 は **f32 出力バッファのみ**対象とする。f16 出力（`gemm_wmma.rs`／`gemm_mma.rs`／
+- v1 は **f32 出力バッファのみ**対象とした。f16 出力（`gemm_wmma.rs`／`gemm_mma.rs`／
   `gemm_auto.rs` の `alloc_zeros::<f16>`）は直接確保のまま残す（型消去に伴う `unsafe` 追加を
   避ける安全側判断）。
 - 対象は `gemm.rs::run_f32_kernel`（naive/tiled 共通）・`run_tiled_bias_act_f32`・
@@ -58,6 +67,20 @@
   （実装計画が対象を `run_f32_kernel`・`run_tiled_bias_act_f32` に明示限定していたため）。
 - `MemoryOps`（`memory.rs::CudaMemory`）経由の `DeviceBuffer` は対象外（`CudaBufferHandle.slice.len()
   == numel` 前提の既存検証〈`ops.rs::gemm_resident_*`・`sgd.rs`〉への影響範囲が広いため）。
+
+### 3.1 f16 への拡張（イシュー #1153）
+
+上記 v1 スコープ外としていた f16 出力バッファのうち、`gemm_mma.rs::CudaMmaGemm::run_f16`
+（`mma.sync`/`ldmatrix`/`cp.async` 経路）の per-call 確保（`clone_htod`／`alloc_zeros::<f16>`
+直呼び）を、イシュー #1153 でプール経由へ結線した。当初懸念していた「型消去に伴う `unsafe`
+追加」は、**第 2 のプールを新設せず**（`max_pool_bytes` 上限が実質 2 倍になり REQ-14 の係数
+上限〈2 倍以内〉を崩すため）、`CudaSliceHandle` を dtype 付き `enum`（`F32`／`F16`）へ拡張し、
+`PoolDtype` トレイト（`f32`／`f16` の 2 impl のみ。`crate::pool` 内に閉じたシールド）で
+`CudaSlice::leak()` + `CudaStream::upgrade_device_ptr::<T>` による型の付け替えに限定すること
+で、`unsafe` の追加を「異なる dtype のバッファが同一サイズクラスへ返却済みだった場合のみ」に
+抑えた（f32 のみのワークロードは再型付けゼロの既存経路を通り続ける。`crates/backend-cuda/
+src/pool.rs` モジュールドキュメンテーションコメント「dtype 一般化」節）。`gemm_wmma.rs`・
+`gemm_auto.rs` Dynamic 経路の f16 出力バッファは本イシューでも引き続き対象外（§8 参照）。
 
 ## 4. `alloc_uninit` 適用箇所の確認記録（OWASP A02）
 
@@ -74,6 +97,17 @@
 かったため、**安全側判断として `alloc_zeroed_f32`（ゼロ初期化を維持）に留めた**（プール接続の
 効果〈確保コストの削減〉自体は zeroed でも得られる。全要素書き込みの確認が取れ次第、後続イシュー
 で `alloc_uninit_f32` へ切り替える）。
+
+### 4.1 `mma_f16` 適用確認（イシュー #1153）
+
+`kernels_mma.rs` のエピローグ（`crates/backend-cuda/src/kernels_mma.rs:1652-` 付近。`mi`/`nj`
+の 2 重ループ内 `if (r0 < DIM_M && c1 < DIM_N) { ... } else if (r0 < DIM_M && c0 < DIM_N) { ... }`
+の guarded store）をソース確認した。grid（`mma_launch_config` の `div_ceil(m, MMA_BM)` ×
+`div_ceil(n, MMA_BN)`）と `mi`/`nj` ループにより、全ブロックの担当タイルを合わせると
+`0 <= r < DIM_M`・`0 <= c < DIM_N` の全要素が過不足なく 1 回ずつ書き込まれる（境界外スレッドは
+guarded store で何も書かない）。C を読む（累積する）分岐は存在しない。よって
+`CudaMmaGemm::alloc_output_f16_pooled` は `alloc_uninit_f16`（前利用データをゼロクリアしない）
+を使う（`pool.rs::CudaAllocator::alloc_uninit_f16` ドキュメンテーションコメント参照）。
 
 ## 5. 既存 `PooledMemory`（`crate::pool`）との関係
 
@@ -156,16 +190,22 @@ cargo test -p fandhe-ai --test memory_pool_api -- --ignored --nocapture
 
 ## 8. スコープ外事項（PR 本文で記録・起票はユーザー承認後）
 
-- f16 出力バッファ（`gemm_wmma`／`gemm_mma`／`gemm_auto`）のプール化
+- f16 出力バッファのうち `gemm_mma.rs::CudaMmaGemm::run_f16` はイシュー #1153 で解消
+  （§3.1／§4.1 参照）。`gemm_wmma.rs`・`gemm_auto.rs` Dynamic 経路の f16 出力バッファは
+  引き続きプール化対象外（イシュー #1153 の実装計画がタイトル明示スコープを
+  `gemm_mma.rs` に限定していたため。横展開は後続イシュー候補）
 - `MemoryOps`（`CudaMemory`／`DeviceBuffer`）経路のプール化
 - 入力アップロード経路（`clone_htod`）の再利用・pinned ステージング
 - 複数 CUDA ストリームをまたぐ貸し出し（#1012/#1013 の確定後）
-- `CU_MEMPOOL_ATTR_RELEASE_THRESHOLD` の調整（実機比較後に判断。
-  イシュー #1149 で release threshold 引き上げ・`cuMemAlloc` 同期割当
-  との A/B 計測テスト（`crates/backend-cuda/tests/
-  large_buffer_percall_alloc_ab_1149.rs`）を追加したが、本エージェント
-  の実行環境に CUDA 実機がないため GB10 実測は未完了。実測完了までは
-  本保留事項を継続する。実測手順・判定基準は
-  `docs/perf/cuda-percall-alloc-pool-threshold-ab.md` を参照）
+- ~~`CU_MEMPOOL_ATTR_RELEASE_THRESHOLD` の調整~~（**判定確定・不採用**。
+  イシュー #1149 で追加した A/B 計測テスト（`crates/backend-cuda/tests/
+  large_buffer_percall_alloc_ab_1149.rs`）をイシュー #1153 で GB10 実機
+  完走実測した結果、孤立マイクロベンチマーク（P1〜P3）では解消基準
+  （段差比 1.2 未満）を満たしたが、`CudaMmaGemm::run_f16` の現実的な
+  呼び出しパターンのレプリカ（P7）では median が約 10 倍悪化した
+  （GB10 unified memory 環境での物理メモリ競合と推定）。一度
+  `CudaAllocator::new` へ本番結線したが、この反証を受けて差し戻した。
+  実測記録・判定根拠は `docs/perf/cuda-percall-alloc-pool-threshold-ab.md`
+  §5〜§7・`docs/perf/cuda-gemm-mma-f16-pool-wiring.md` §7 を参照）
 - `softmax.rs` の `alloc_uninit_f32` 化（persistent grid カーネルの全要素書き込み確認完了後）
 - 既存 `PooledMemory` の非推奨化・`arc_with_non_send_sync` allow 解消
