@@ -85,7 +85,11 @@ const KEY_RUNS: usize = 5;
 /// 抑えつつラン間の乖離は引き続き記録する）。
 const OTHER_RUNS: usize = 3;
 
-/// P7（本番経路レプリカ）で採用するラン数。key サイズと同じ扱い。
+/// P7（本番経路レプリカ）で採用する外側ラン数（各ランは
+/// `MeasurementConfig::new(20, 20)` の TASK-8.1 プロトコル最小値を満たす
+/// warmup/iters で計測する。key サイズと同じ「5 outer runs of 20/20」の
+/// 扱い。Bugbot 指摘〈`MeasurementConfig::new` は warmup/iters が 20 未満
+/// だと reject する〉対応で、`P7_RUNS` 自体を warmup/iters へ渡さない）。
 const P7_RUNS: usize = 5;
 
 /// [`count_slow_samples`] が「遅い」と判定する倍率（#1146 と同一値・同一
@@ -350,28 +354,39 @@ impl<'a> ReleaseThresholdGuard<'a> {
                 (&mut new_threshold as *mut u64).cast(),
             )
             .expect("set_attribute(RELEASE_THRESHOLD, u64::MAX) must succeed（案 A の適用）");
-            // 適用確認のため読み戻す（`set_attribute` が黙って無視される
-            // 環境がないことを保証する。読み戻し値が期待どおりであるかは
-            // 呼び出し元の `bracket_conditions` 末尾比較で確認する）。
-            let mut applied: u64 = 0;
+            (mem_pool, original)
+        };
+        // 案 A の適用（`set_attribute` 成功）直後にガードを構築する
+        // （codex-review 指摘対応）。これにより、この後の読み戻し
+        // `assert_eq!` が失敗して panic しても `ReleaseThresholdGuard`
+        // は既に構築済みのため `Drop` が実行され、release threshold が
+        // `u64::MAX` のまま残留する計測隔離契約違反を防ぐ。
+        let guard = ReleaseThresholdGuard {
+            ctx,
+            mem_pool,
+            original_threshold,
+        };
+        // 適用確認のため読み戻す（`set_attribute` が黙って無視される
+        // 環境がないことを保証する）。ここで assert が失敗しても、
+        // 上で構築済みの `guard` が drop され `original_threshold` へ
+        // 復元される。
+        let mut applied: u64 = 0;
+        // SAFETY: `mem_pool` は直前に取得した有効な pool ハンドル。
+        // `value` は `u64` 変数への生ポインタ（上と同一契約）。
+        unsafe {
             result::mem_pool::get_attribute(
                 mem_pool,
                 CUmemPool_attribute::CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
                 (&mut applied as *mut u64).cast(),
             )
             .expect("get_attribute(RELEASE_THRESHOLD) 読み戻しに失敗した");
-            assert_eq!(
-                applied,
-                u64::MAX,
-                "release threshold の適用が反映されていない（読み戻し値が u64::MAX と不一致）"
-            );
-            (mem_pool, original)
-        };
-        Some(ReleaseThresholdGuard {
-            ctx,
-            mem_pool,
-            original_threshold,
-        })
+        }
+        assert_eq!(
+            applied,
+            u64::MAX,
+            "release threshold の適用が反映されていない（読み戻し値が u64::MAX と不一致）"
+        );
+        Some(guard)
     }
 }
 
@@ -725,9 +740,25 @@ fn phase_p0_transfer_only(
 /// H2D〉のまま。C 出力側の確保・解放 API のみを差し替え、
 /// dim4096 相当での効果を見る）。checksum（f64 総和）を返し、経路差し
 /// 替えが数値結果を変えていないことを条件間で検証する材料とする。
+///
+/// `config` は呼び出し元が `MeasurementConfig::new(20, 20)`（TASK-8.1
+/// プロトコル最小値）を渡す（Bugbot 指摘対応。以前は `P7_RUNS`〈外側
+/// ラン数＝5〉をそのまま warmup/iters に渡していたため
+/// `MeasurementConfig::new` の 20 回未満 reject で `expect` が panic し
+/// dim4096 の A/B が記録されない不具合があった）。
+///
+/// checksum 用の host バッファは `last_host` へ**参照を差し替えるのみ**
+/// （`RefCell` への move）で保持し、`f64` への縮約（16M 要素の host 側
+/// reduction）は計測クロージャの外・全イテレーション終了後に 1 回だけ
+/// 行う（Bugbot 指摘対応。以前は縮約をクロージャ内で毎イテレーション
+/// 実行しており、cold／warmup／measured の全サンプルに縮約コストが
+/// 乗って P7 が単離しようとしているアロケーション効果を覆い隠しうる
+/// 状態だった。`download_f16` 自体は本番経路にも存在するためクロージャ
+/// 内に残す）。
 #[allow(clippy::too_many_arguments)]
 fn phase_p7_gemm_replica(
     device: &CudaDevice,
+    config: &MeasurementConfig,
     gemm: &CudaMmaGemm,
     a: &[f16],
     b: &[f16],
@@ -736,50 +767,53 @@ fn phase_p7_gemm_replica(
     k: u32,
     condition: Condition,
 ) -> (f64, bench_harness::Measurement, f64) {
-    let mut checksum = 0.0f64;
     let out_len = (m as usize) * (n as usize);
-    let (cold_ms, measurement) = measure_with_cold(
-        &MeasurementConfig::new(P7_RUNS, P7_RUNS)
-            .expect("P7_RUNS/P7_RUNS must satisfy TASK-8.1 minimums"),
-        || {
-            let (a_dev, b_dev) = gemm
-                .upload_f16(a, b)
-                .expect("upload_f16 must succeed on CUDA-equipped test runner");
-            let c_host = if condition.uses_sync_alloc() {
-                let mut c_dev = SyncDeviceBuffer::alloc(device.stream(), out_len)
-                    .expect("SyncDeviceBuffer::alloc(c) must succeed on CUDA-equipped test runner");
-                device
-                    .stream()
-                    .memset_zeros(c_dev.slice_mut())
-                    .expect("memset_zeros(c) must succeed on CUDA-equipped test runner");
-                gemm.launch_f16(&a_dev, &b_dev, c_dev.slice_mut(), m, n, k)
-                    .expect("launch_f16 must succeed on CUDA-equipped test runner");
-                let host = gemm
-                    .download_f16(c_dev.slice())
-                    .expect("download_f16 must succeed on CUDA-equipped test runner");
-                drop(c_dev);
-                host
-            } else {
-                let mut c_dev = gemm
-                    .alloc_output_f16(m, n)
-                    .expect("alloc_output_f16 must succeed on CUDA-equipped test runner");
-                gemm.launch_f16(&a_dev, &b_dev, &mut c_dev, m, n, k)
-                    .expect("launch_f16 must succeed on CUDA-equipped test runner");
-                let host = gemm
-                    .download_f16(&c_dev)
-                    .expect("download_f16 must succeed on CUDA-equipped test runner");
-                drop(c_dev);
-                host
-            };
-            drop(a_dev);
-            drop(b_dev);
-            gemm.synchronize()
-                .expect("synchronize after free must succeed to measure free completion");
-            // 最終イテレーションの出力のみ checksum へ反映すれば十分
-            // （全ラン同一入力・決定的カーネルのため各回同値になるはず）。
-            checksum = c_host.iter().map(|v| f64::from(v.to_f32())).sum();
-        },
-    );
+    let last_host: std::cell::RefCell<Vec<f16>> = std::cell::RefCell::new(Vec::new());
+    let (cold_ms, measurement) = measure_with_cold(config, || {
+        let (a_dev, b_dev) = gemm
+            .upload_f16(a, b)
+            .expect("upload_f16 must succeed on CUDA-equipped test runner");
+        let c_host = if condition.uses_sync_alloc() {
+            let mut c_dev = SyncDeviceBuffer::alloc(device.stream(), out_len)
+                .expect("SyncDeviceBuffer::alloc(c) must succeed on CUDA-equipped test runner");
+            device
+                .stream()
+                .memset_zeros(c_dev.slice_mut())
+                .expect("memset_zeros(c) must succeed on CUDA-equipped test runner");
+            gemm.launch_f16(&a_dev, &b_dev, c_dev.slice_mut(), m, n, k)
+                .expect("launch_f16 must succeed on CUDA-equipped test runner");
+            let host = gemm
+                .download_f16(c_dev.slice())
+                .expect("download_f16 must succeed on CUDA-equipped test runner");
+            drop(c_dev);
+            host
+        } else {
+            let mut c_dev = gemm
+                .alloc_output_f16(m, n)
+                .expect("alloc_output_f16 must succeed on CUDA-equipped test runner");
+            gemm.launch_f16(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                .expect("launch_f16 must succeed on CUDA-equipped test runner");
+            let host = gemm
+                .download_f16(&c_dev)
+                .expect("download_f16 must succeed on CUDA-equipped test runner");
+            drop(c_dev);
+            host
+        };
+        drop(a_dev);
+        drop(b_dev);
+        gemm.synchronize()
+            .expect("synchronize after free must succeed to measure free completion");
+        // 最終イテレーションの出力のみ checksum へ反映すれば十分
+        // （全ラン同一入力・決定的カーネルのため各回同値になるはず）。
+        // ここでは縮約せず host バッファの所有権を差し替えるのみ
+        // （安価な move）。実際の縮約はループ外で 1 回だけ行う。
+        *last_host.borrow_mut() = c_host;
+    });
+    let checksum: f64 = last_host
+        .borrow()
+        .iter()
+        .map(|v| f64::from(v.to_f32()))
+        .sum();
     (cold_ms, measurement, checksum)
 }
 
@@ -989,30 +1023,41 @@ fn large_buffer_percall_alloc_ab_record() {
     let a: Vec<f16> = rng.fill_vec_f16(numel);
     let b: Vec<f16> = rng.fill_vec_f16(numel);
 
-    let mut checksums: Vec<(Condition, f64)> = Vec::new();
+    // 案 A のガードは既存フェーズと同様ブラケット単位でスコープを持たせ
+    // る。各条件で `P7_RUNS`（5）回の外側ランを回し、各ランは
+    // `MeasurementConfig::new(20, 20)` の TASK-8.1 プロトコル最小値
+    // （warmup/iters 各 20）で計測する（Bugbot 指摘対応。以前は
+    // `P7_RUNS` 自体を warmup/iters に渡していたため 20 回未満 reject
+    // で `expect` が panic していた）。
+    let p7_config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
+    let mut checksums: Vec<(Condition, usize, f64)> = Vec::new();
     for condition in bracket_conditions() {
         let _guard = if condition.raises_threshold() {
             ReleaseThresholdGuard::new(device.context())
         } else {
             None
         };
-        let (cold, m, checksum) =
-            phase_p7_gemm_replica(&device, &gemm, &a, &b, P7_DIM, P7_DIM, P7_DIM, condition);
-        let s = summarize(&m);
-        println!(
-            "{},p7_gemm_replica,{},n/a,0,{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.6}",
-            condition.label(),
-            P7_DIM,
-            cold,
-            s.min_secs * 1000.0,
-            s.q1_secs * 1000.0,
-            s.median_secs * 1000.0,
-            s.q3_secs * 1000.0,
-            s.max_secs * 1000.0,
-            s.slow_count,
-            checksum,
-        );
-        checksums.push((condition, checksum));
+        for run_idx in 0..P7_RUNS {
+            let (cold, m, checksum) = phase_p7_gemm_replica(
+                &device, &p7_config, &gemm, &a, &b, P7_DIM, P7_DIM, P7_DIM, condition,
+            );
+            let s = summarize(&m);
+            println!(
+                "{},p7_gemm_replica,{},n/a,{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.6}",
+                condition.label(),
+                P7_DIM,
+                run_idx,
+                cold,
+                s.min_secs * 1000.0,
+                s.q1_secs * 1000.0,
+                s.median_secs * 1000.0,
+                s.q3_secs * 1000.0,
+                s.max_secs * 1000.0,
+                s.slow_count,
+                checksum,
+            );
+            checksums.push((condition, run_idx, checksum));
+        }
     }
 
     // 経路差し替え（baseline vs 案 B）が数値結果を変えていないことの検査
@@ -1021,8 +1066,8 @@ fn large_buffer_percall_alloc_ab_record() {
     // 入力のため条件間で完全一致するはず（絶対誤差の複合判定は不要な
     // ほど厳密に同一の計算経路のため、僅かな浮動小数点差異の余地を見て
     // 相対誤差 1e-9 を許容する）。
-    let reference = checksums[0].1;
-    for (condition, checksum) in &checksums {
+    let reference = checksums[0].2;
+    for (condition, run_idx, checksum) in &checksums {
         let rel_err = if reference.abs() > 0.0 {
             (checksum - reference).abs() / reference.abs()
         } else {
@@ -1030,8 +1075,8 @@ fn large_buffer_percall_alloc_ab_record() {
         };
         assert!(
             rel_err < 1e-9,
-            "P7 checksum が条件間で乖離した（経路差し替えが数値結果を変えている疑い）: \
-             condition={:?} checksum={checksum} reference={reference} rel_err={rel_err}",
+            "P7 checksum が条件間・ラン間で乖離した（経路差し替えが数値結果を変えている疑い）: \
+             condition={:?} run_idx={run_idx} checksum={checksum} reference={reference} rel_err={rel_err}",
             condition
         );
     }
