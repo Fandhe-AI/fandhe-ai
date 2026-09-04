@@ -534,7 +534,14 @@ impl GemmReference {
         out: &[f32],
         sink: &mut dyn std::io::Write,
     ) -> Result<ParityStats, BenchError> {
-        let call_index = self.verify_calls.get() + 1;
+        // 診断用カウンタ（`dump` 出力の `call=` ラベルにのみ使う）。
+        // `usize::MAX` 到達は現実的な反復回数では起こり得ないが、
+        // `+ 1` は overflow-checks 有効ビルドで本番経路 panic になりうる
+        // ため（本体規約「本番経路で panic させない」。`.claude/rules/coding-rust.md`）、
+        // `saturating_add` で飽和させる。診断ラベルが `usize::MAX` に
+        // 貼り付いても判定結果（`stats`）には一切影響しない
+        // （codex-review 指摘・イシュー #1183 PR #1196 P1）。
+        let call_index = self.verify_calls.get().saturating_add(1);
         self.verify_calls.set(call_index);
 
         let stats = compare_elementwise(out, &self.c)?;
