@@ -481,15 +481,35 @@ impl Drop for SyncDeviceBuffer {
         // 事前の `synchronize` は厳密には冗長だが、`leak()` が内部で待つ
         // read/write イベントとは独立に「全ストリーム操作完了後に解放
         // する」という baseline との対称性を明示するため呼ぶ。
-        if let Err(e) = self.stream.synchronize() {
+        //
+        // `synchronize` が失敗した場合、保留中の CUDA 操作がこの領域を
+        // まだ参照している可能性があり「全アクセスが完了している」という
+        // 下記 `free_sync` 呼び出しの SAFETY 前提が成立しない
+        // （codex-review P0 指摘・#1149 PR #1199）。この場合は
+        // `free_sync` を呼ばずポインタを意図的にリークし（安全側）、
+        // パニックでテスト失敗として顕在化させる（二重パニック中の
+        // abort を避けるため巻き戻し中は eprintln のみに留める）。
+        let sync_result = self.stream.synchronize();
+        if let Err(e) = &sync_result {
             eprintln!("sync_device_buffer,drop,synchronize_failed,error={e:?}");
         }
         if let Some(slice) = self.slice.take() {
             let ptr = slice.leak();
+            if sync_result.is_err() {
+                eprintln!("sync_device_buffer,drop,leaking_ptr_after_sync_failure,ptr={ptr:?}");
+                if !std::thread::panicking() {
+                    panic!(
+                        "SyncDeviceBuffer::drop: stream.synchronize() が失敗したため \
+                         free_sync の安全性前提が成立せず、ポインタを意図的にリークした \
+                         （二重解放防止のため回収はしない）"
+                    );
+                }
+                return;
+            }
             // SAFETY: `ptr` は本構造体の `alloc` で `malloc_sync` により
             // 確保され、他のどこからも解放されていない（`slice.take()`
             // による一度きりの消費で二重 `free_sync` を防止）。直前の
-            // `synchronize` により全アクセスが完了している。
+            // `synchronize` が成功したため全アクセスが完了している。
             if let Err(e) = unsafe { result::free_sync(ptr) } {
                 eprintln!("sync_device_buffer,drop,free_sync_failed,error={e:?}");
             }
