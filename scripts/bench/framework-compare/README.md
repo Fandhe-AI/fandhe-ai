@@ -402,8 +402,13 @@ bash run_gemm_gate_cuda.sh 0.6.0
 # Metal 正式系列（現行ピン。イシュー #1147）:
 bash run_gemm_gate_metal.sh 0.6.0
 # CPU 正式系列（現行ピン。DGX Spark〈Grace CPU〉／M4 Max のいずれでも実行可。
-# bench-candle のビルド flag はホスト OS で自動選択される。イシュー #1148）:
-bash run_gemm_gate_cpu.sh 0.6.0
+# bench-candle のビルド flag はホスト OS で自動選択される。イシュー #1148）。
+# GEMM_GATE_CPU_NODE_TAG（dgx-cpu／m4max-cpu の明示指定。必須）が実行ホストの
+# OS 系列と矛盾する場合は fail-closed で終了する（`uname -s` だけで正式実機の
+# ファイル名を無条件確定しない。codex-review P1 PRRT_kwDOTuUCJc6fK1Pe 対応。
+# イシュー #1148）:
+GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.6.0     # DGX Spark 側
+GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.6.0  # M4 Max 側
 
 # CUDA 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
 GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \

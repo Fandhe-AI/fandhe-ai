@@ -77,21 +77,49 @@ fi
 
 # device ごとのノードタグ（出力ファイル名の識別子。cuda=dgx〈DGX Spark
 # GB10〉／metal=m4max〈Apple M4 Max。イシュー #1147〉／cpu=dgx-cpu・m4max-cpu
-# 〈同一ホストの CPU 経路計測。両実機で走るため `uname -s` で判定する。
-# それ以外（想定外 OS）は fail-closed で終了する。イシュー #1148〉）。
+# 〈同一ホストの CPU 経路計測。イシュー #1148〉）。
+#
+# cpu は Linux／Darwin いずれでも DGX Spark／M4 Max 以外の任意ホストで
+# 実行しうるため、`uname -s` だけを根拠に正式実機の NODE_TAG（dgx-cpu／
+# m4max-cpu）を無条件確定しない（codex-review P1 指摘
+# PRRT_kwDOTuUCJc6fK1Pe。`uname -s` の一致は同一 OS 系列であることの証明に
+# しかならず、実機の同一性は証明できない。DGX Spark／M4 Max の実ホスト名は
+# 公開版ドキュメントに含めない方針〈docs/real-hardware-verification-env.md
+# 冒頭注記〉のため、ホスト名照合による allowlist は本スクリプト単体では
+# 構成できない）。代わりに操作者に `GEMM_GATE_CPU_NODE_TAG` の明示指定を
+# 要求し（allowlist: dgx-cpu／m4max-cpu。無指定は fail-closed で終了）、
+# 指定値と実 OS 系列（Linux→dgx-cpu、Darwin→m4max-cpu）の対応が矛盾する
+# 場合も fail-closed で終了する（Mac で dgx-cpu を指定する等、明らかな
+# 誤帰属を検出する）。env_info（後述の status snapshot。CPU brand
+# string・機種情報）は run 内ログへ記録済みで、正式系列かどうかの最終確認は
+# 人間がそのログと突き合わせて行う。
 if [[ "$DEVICE" == "cuda" ]]; then
   NODE_TAG="dgx"
 elif [[ "$DEVICE" == "metal" ]]; then
   NODE_TAG="m4max"
 else
-  case "$(uname -s)" in
-    Linux) NODE_TAG="dgx-cpu" ;;
-    Darwin) NODE_TAG="m4max-cpu" ;;
-    *)
-      echo "ERROR: device=cpu は Linux（DGX Spark 側）／Darwin（M4 Max 側）のみ対応。uname -s=$(uname -s)" >&2
-      exit 1
+  CPU_NODE_TAG=${GEMM_GATE_CPU_NODE_TAG:-}
+  if [[ "$CPU_NODE_TAG" != "dgx-cpu" && "$CPU_NODE_TAG" != "m4max-cpu" ]]; then
+    echo "ERROR: device=cpu は GEMM_GATE_CPU_NODE_TAG の明示指定が必須（allowlist: dgx-cpu | m4max-cpu）。" >&2
+    echo "  uname -s のみから実機を確定しない（codex-review P1 PRRT_kwDOTuUCJc6fK1Pe。任意ホストが正式実機のファイル名で計測結果を生成してしまう誤帰属対策）。" >&2
+    echo "  例: GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.6.0" >&2
+    exit 1
+  fi
+  case "$CPU_NODE_TAG" in
+    dgx-cpu)
+      if [[ "$(uname -s)" != "Linux" ]]; then
+        echo "ERROR: GEMM_GATE_CPU_NODE_TAG=dgx-cpu は Linux ホスト限定（uname -s=$(uname -s)）。実機の取り違えの可能性。" >&2
+        exit 1
+      fi
+      ;;
+    m4max-cpu)
+      if [[ "$(uname -s)" != "Darwin" ]]; then
+        echo "ERROR: GEMM_GATE_CPU_NODE_TAG=m4max-cpu は Darwin ホスト限定（uname -s=$(uname -s)）。実機の取り違えの可能性。" >&2
+        exit 1
+      fi
       ;;
   esac
+  NODE_TAG="$CPU_NODE_TAG"
 fi
 
 # 対象形状（device 別。cuda/metal は #1031/#1037 から不変の N=1024/2048/4096。
