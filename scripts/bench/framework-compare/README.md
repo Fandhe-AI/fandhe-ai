@@ -345,8 +345,23 @@ GB10 実機での計測結果・カーネル専有時間ベースの candle 比�
 
 - **未変更事項**: `PARITY_REL_TOL`/`PARITY_ABS_TOL`・`compare_elementwise` の判定結果・3 バイナリの
   JSONL 出力・`summarize.py`/`compare_gemm_gate.py` はすべて不変（判定・閾値の変更はユーザー承認
-  必須。`.claude/rules/coding-rust.md`）。GB10 実機での N=2048 fail 要素の実際の取得・§5.3 の仮説
-  検証は本計装を使った後続作業（本イシューの範囲外）
+  必須。`.claude/rules/coding-rust.md`）。**GB10 実機での N=2048 fail 要素の実際の取得・§5.3 の
+  仮説検証はイシュー #1184 で実施済み**。結果は
+  `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3「追記（イシュー #1184）」を参照
+  （fail 要素の値は参照実装・candle 側双方の通常の累積丸め誤差であり、片側優位の実装不具合では
+  ないと確定した）
+
+**厳密真値との突合**（イシュー #1184。`scripts/bench/framework-compare/parity_dump_truth.py`）:
+`PARITY_DUMP` 行は「参照実装の値」と「フレームワーク実測値」しか教えないため、どちらが
+数学的真値から離れているかは別途の突合が要る。本スクリプトは `Xorshift64Star`/`fill_vec` を
+Python の有理数演算（`fractions.Fraction`）で厳密再現し、fail 要素の厳密真値・f32 FMA 逐次
+累積の厳密丸め再現（`ref_bits` との bit 一致検証つき）・部分和最大値からの誤差フロア見積り
+（`√K·ulp(max|partial|)`）を計算する。標準ライブラリのみに依存する。
+
+```bash
+cd scripts/bench/framework-compare
+python3 parity_dump_truth.py --n 2048 < ../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cuda-2048.txt
+```
 
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
