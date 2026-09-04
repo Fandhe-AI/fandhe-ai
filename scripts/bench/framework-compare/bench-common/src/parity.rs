@@ -101,6 +101,38 @@ fn worst_f64(a: f64, b: f64) -> f64 {
     }
 }
 
+/// 1 要素分の複合判定の中間値（絶対誤差・相対誤差・pass/fail）。
+///
+/// [`compare_elementwise`]（集計のみ）と [`dump_parity_failures`]（fail
+/// 要素の値をダンプ。イシュー #1183）の双方が同じ式を使うための切り出し。
+/// 式そのもの（分母 1e-12 下支え・NaN の fail 側倒し）は変更しない
+/// （`crates/backend-cpu/src/parity.rs::compare` と同一方式）。
+#[derive(Debug, Clone, Copy)]
+struct ElementError {
+    abs: f64,
+    rel: f64,
+    pass: bool,
+}
+
+#[inline]
+fn element_error(actual: f32, reference: f32) -> ElementError {
+    let xf = actual as f64;
+    let yf = reference as f64;
+    let diff = (xf - yf).abs();
+    // 真値 0 近傍での相対誤差の跳ね上がりを避けるため、分母を 1e-12 で
+    // 下支えする（本体 `parity::compare` と同一方式）。
+    let scale = xf.abs().max(yf.abs()).max(1e-12);
+    let rel = diff / scale;
+    // NaN 混入時 `rel`/`diff` は NaN になり `<` 比較は常に false のため
+    // fail 側に倒れる（本体 `parity::compare` と同じ安全側の挙動）。
+    let pass = rel < PARITY_REL_TOL || diff < PARITY_ABS_TOL;
+    ElementError {
+        abs: diff,
+        rel,
+        pass,
+    }
+}
+
 /// 要素単位の複合判定（`crates/backend-cpu/src/parity.rs::compare` と同じ式）。
 /// `actual`・`reference` は同じ長さの flat データを想定し、長さ不一致は
 /// 呼び出し誤りの早期検出として型付きエラーを返す。
@@ -118,28 +150,18 @@ pub fn compare_elementwise(actual: &[f32], reference: &[f32]) -> Result<ParitySt
     let mut max_rel_err = 0.0f64;
 
     for (&x, &y) in actual.iter().zip(reference.iter()) {
-        let xf = x as f64;
-        let yf = y as f64;
-        let diff = (xf - yf).abs();
-        // 真値 0 近傍での相対誤差の跳ね上がりを避けるため、分母を 1e-12 で
-        // 下支えする（本体 `parity::compare` と同一方式）。
-        let scale = xf.abs().max(yf.abs()).max(1e-12);
-        let rel = diff / scale;
-
-        // NaN 混入時 `rel`/`diff` は NaN になり `<` 比較は常に false のため
-        // fail 側に倒れる（本体 `parity::compare` と同じ安全側の挙動）。
-        let pass = rel < PARITY_REL_TOL || diff < PARITY_ABS_TOL;
-        if !pass {
+        let err = element_error(x, y);
+        if !err.pass {
             fail_count += 1;
         }
 
-        max_abs_err = if diff.is_finite() {
-            max_abs_err.max(diff)
+        max_abs_err = if err.abs.is_finite() {
+            max_abs_err.max(err.abs)
         } else {
             f64::INFINITY
         };
-        max_rel_err = if rel.is_finite() {
-            max_rel_err.max(rel)
+        max_rel_err = if err.rel.is_finite() {
+            max_rel_err.max(err.rel)
         } else {
             f64::INFINITY
         };
@@ -150,6 +172,160 @@ pub fn compare_elementwise(actual: &[f32], reference: &[f32]) -> Result<ParitySt
         fail_count,
         max_abs_err,
         max_rel_err,
+    })
+}
+
+/// `FRAMEWORK_COMPARE_PARITY_DUMP` 環境変数の契約名（イシュー #1183）。
+///
+/// `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 で「fail 要素の
+/// 値（index・reference・実測値）を取得する診断計装」として検討され
+/// 未実施だったものを、opt-in の環境変数として実装する。値は
+/// [`ParityDumpConfig::parse`] の allowlist（未設定 / `""` / `"0"` で無効、
+/// `"1"` で既定上限、正の整数文字列でその上限）のみを受理し、それ以外は
+/// `BenchError::InvalidParityDumpEnv` で fail-fast する（security.md A03。
+/// `BenchError::InvalidMode` と同じ思想）。ファイルパス等は受け取らず
+/// 出力先は stderr 固定（パス注入面を増やさない）。
+pub const PARITY_DUMP_ENV: &str = "FRAMEWORK_COMPARE_PARITY_DUMP";
+
+/// [`PARITY_DUMP_ENV`] が `"1"` のときに使う既定の出力上限（1 回の
+/// [`GemmReference::verify`] 呼び出しあたりの fail 要素数）。
+pub const PARITY_DUMP_DEFAULT_LIMIT: usize = 64;
+
+/// fail 要素ダンプの有効化設定（イシュー #1183）。`limit` は 1 回の
+/// `verify` 呼び出しあたりの出力上限で、決定的に繰り返し fail する要素が
+/// 反復ごとに再ダンプされてもログが際限なく膨らまないよう bound する
+/// （`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 の N=2048
+/// ケースは毎反復同じ 2 要素が fail する想定であり、これは反復間の
+/// 非決定性も可視化するための仕様として維持する）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParityDumpConfig {
+    pub limit: usize,
+}
+
+impl ParityDumpConfig {
+    /// [`PARITY_DUMP_ENV`] の生値（`std::env::var_os` の結果を呼び出し元が
+    /// UTF-8 変換したもの）を解釈する純関数。プロセス環境を直接読まない
+    /// ため env 非依存にユニットテストできる。
+    pub fn parse(value: Option<&str>) -> Result<Option<Self>, BenchError> {
+        match value {
+            None => Ok(None),
+            Some("") | Some("0") => Ok(None),
+            Some("1") => Ok(Some(Self {
+                limit: PARITY_DUMP_DEFAULT_LIMIT,
+            })),
+            Some(other) => match other.parse::<usize>() {
+                Ok(limit) if limit >= 1 => Ok(Some(Self { limit })),
+                _ => Err(BenchError::InvalidParityDumpEnv {
+                    value: other.to_string(),
+                }),
+            },
+        }
+    }
+
+    /// プロセス環境から [`PARITY_DUMP_ENV`] を読んで [`parse`](Self::parse)
+    /// する薄いラッパー。非 UTF-8 値は診断用の固定文字列へ丸めてから渡す
+    /// （生のバイト列をエラーメッセージへ持ち込まない）。
+    /// [`GemmReference::compute`] が warmup 前に 1 回だけ呼ぶ。
+    pub fn from_env() -> Result<Option<Self>, BenchError> {
+        match std::env::var_os(PARITY_DUMP_ENV) {
+            None => Ok(None),
+            Some(raw) => match raw.to_str() {
+                Some(s) => Self::parse(Some(s)),
+                None => Err(BenchError::InvalidParityDumpEnv {
+                    value: "<non-utf8>".to_string(),
+                }),
+            },
+        }
+    }
+}
+
+/// [`dump_parity_failures`] の呼び出し結果サマリ（テスト・呼び出し元双方が
+/// 出力量を検証できるよう明示的に返す）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DumpOutcome {
+    /// 複合判定で fail だった要素数（`ParityStats::fail_count` と同値）。
+    pub fail_count: usize,
+    /// 実際に出力した要素数（`limit` で切り詰められうる）。
+    pub dumped: usize,
+    /// `fail_count > dumped` のとき `true`（上限超過で切り詰めた）。
+    pub truncated: bool,
+}
+
+/// fail 要素の index・reference・実測値を `sink` へ書き出す（イシュー
+/// #1183）。[`GemmReference::verify`] が複合判定 fail 時にのみ第 2 パスと
+/// して呼ぶ（`compare_elementwise` の判定結果・集計は変更しない。本関数は
+/// 診断出力の追加のみを担う）。
+///
+/// 出力は 1 fail 要素につき 1 行（`PARITY_DUMP ...`）+ 呼び出し末尾の
+/// サマリ行（`PARITY_DUMP_SUMMARY ...`）。f32 の bit パターン
+/// （`ref_bits`/`actual_bits`）を併記するのは、10 進表記だけでは
+/// `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 の「0 近傍の
+/// 丸め誤差」仮説を検証するのに不足するため。
+///
+/// `n` は正方行列の一辺長（`row = idx / n`・`col = idx % n`）。長さ不一致は
+/// [`compare_elementwise`] と同じ `BenchError::ParityLengthMismatch` を返す。
+/// 書き込み失敗は `unwrap`/`expect` せず `BenchError::Io` へ変換する
+/// （coding-rust.md「本番経路で panic させない」）。
+pub fn dump_parity_failures(
+    actual: &[f32],
+    reference: &[f32],
+    n: usize,
+    cfg: ParityDumpConfig,
+    call_index: usize,
+    sink: &mut dyn std::io::Write,
+) -> Result<DumpOutcome, BenchError> {
+    if actual.len() != reference.len() {
+        return Err(BenchError::ParityLengthMismatch {
+            expected: reference.len(),
+            actual: actual.len(),
+        });
+    }
+
+    let to_io_err = |source: std::io::Error| BenchError::Io {
+        path: "<stderr>".to_string(),
+        source,
+    };
+
+    let mut fail_count = 0usize;
+    let mut dumped = 0usize;
+    for (idx, (&x, &y)) in actual.iter().zip(reference.iter()).enumerate() {
+        let err = element_error(x, y);
+        if err.pass {
+            continue;
+        }
+        fail_count += 1;
+        if dumped >= cfg.limit {
+            continue;
+        }
+        // `n >= 1` は呼び出し元（[`GemmReference::compute`]）の検証を通じて
+        // 保証済み（`n == 0` は `BenchError::InvalidShape` で `verify` まで
+        // 到達しない）。
+        let row = idx / n;
+        let col = idx % n;
+        writeln!(
+            sink,
+            "PARITY_DUMP call={call_index} n={n} idx={idx} row={row} col={col} \
+             ref={y:e} ref_bits=0x{:08x} actual={x:e} actual_bits=0x{:08x} abs={:e} rel={:e}",
+            y.to_bits(),
+            x.to_bits(),
+            err.abs,
+            err.rel,
+        )
+        .map_err(to_io_err)?;
+        dumped += 1;
+    }
+
+    let truncated = fail_count > dumped;
+    writeln!(
+        sink,
+        "PARITY_DUMP_SUMMARY call={call_index} n={n} fail_count={fail_count} dumped={dumped} truncated={truncated}"
+    )
+    .map_err(to_io_err)?;
+
+    Ok(DumpOutcome {
+        fail_count,
+        dumped,
+        truncated,
     })
 }
 
@@ -179,13 +355,29 @@ pub fn gemm_element_count(n: usize) -> Result<usize, BenchError> {
 /// （`tests::compute_is_bit_identical_to_sequential_k_ascending` で固定）。
 pub struct GemmReference {
     c: Vec<f32>,
+    /// 正方行列の一辺長（[`dump_parity_failures`] の `row`/`col` 復元に使う。
+    /// イシュー #1183）。
+    n: usize,
+    /// [`ParityDumpConfig::from_env`] を [`compute`](Self::compute) 内で 1 回
+    /// だけ読んだ結果。`None` なら [`verify`](Self::verify) は従来どおり
+    /// `compare_elementwise` のみを呼び、ダンプ処理へは一切入らない
+    /// （環境変数未設定時の出力・判定・終了コード不変を構造的に保証する）。
+    dump: Option<ParityDumpConfig>,
+    /// [`verify`](Self::verify) の呼び出し回数（ダンプ出力の `call=` に
+    /// 反映。`&self` のまま数えるため `Cell` を使う）。
+    verify_calls: std::cell::Cell<usize>,
 }
 
 impl GemmReference {
     /// `a`・`b` は行優先 flat 表現の N×N 行列。`n == 0` または長さが
     /// `n*n` と一致しない場合は型付きエラーを返す（本番経路で panic
     /// させない。`.claude/rules/coding-rust.md`）。
+    ///
+    /// [`PARITY_DUMP_ENV`] を warmup 反復の前にここで 1 回だけ読み、不正な
+    /// 値は起動直後に型付きエラーとして返す（20 反復後ではなく fail-fast。
+    /// イシュー #1183）。
     pub fn compute(n: usize, a: &[f32], b: &[f32]) -> Result<Self, BenchError> {
+        let dump = ParityDumpConfig::from_env()?;
         if n == 0 {
             return Err(BenchError::InvalidShape { n });
         }
@@ -281,7 +473,12 @@ impl GemmReference {
             Ok(())
         })?;
 
-        Ok(Self { c })
+        Ok(Self {
+            c,
+            n,
+            dump,
+            verify_calls: std::cell::Cell::new(0),
+        })
     }
 
     /// 参照 GEMM の結果（flat・行優先）。
@@ -289,10 +486,48 @@ impl GemmReference {
         &self.c
     }
 
+    /// テスト用ビルダー: `dump` 設定を差し替えた同値のコピーを返す
+    /// （env 非依存にダンプ経路をユニットテストするため。イシュー #1183）。
+    #[cfg(test)]
+    fn with_dump(&self, dump: Option<ParityDumpConfig>) -> Self {
+        Self {
+            c: self.c.clone(),
+            n: self.n,
+            dump,
+            verify_calls: std::cell::Cell::new(0),
+        }
+    }
+
     /// [`compare_elementwise`] の薄い便宜メソッド（呼び出し側が参照値を
-    /// 都度 `as_slice()` する必要をなくす）。
+    /// 都度 `as_slice()` する必要をなくす）。fail 要素があり
+    /// [`ParityDumpConfig`] が有効化されている場合のみ、判定結果・戻り値を
+    /// 変えずに stderr へ第 2 パスのダンプを行う（イシュー #1183。
+    /// `dump == None`〈環境変数未設定〉のときは本メソッドは
+    /// `compare_elementwise` を呼ぶだけで従来と完全に同じ挙動になる）。
     pub fn verify(&self, out: &[f32]) -> Result<ParityStats, BenchError> {
-        compare_elementwise(out, &self.c)
+        let mut stderr = std::io::stderr();
+        self.verify_with_sink(out, &mut stderr)
+    }
+
+    /// [`verify`](Self::verify) の内部実装。`sink` を注入できるようにして
+    /// ユニットテストから stderr を経由せず検証できるようにする。
+    fn verify_with_sink(
+        &self,
+        out: &[f32],
+        sink: &mut dyn std::io::Write,
+    ) -> Result<ParityStats, BenchError> {
+        let call_index = self.verify_calls.get() + 1;
+        self.verify_calls.set(call_index);
+
+        let stats = compare_elementwise(out, &self.c)?;
+
+        if let Some(cfg) = self.dump
+            && stats.fail_count > 0
+        {
+            dump_parity_failures(out, &self.c, self.n, cfg, call_index, sink)?;
+        }
+
+        Ok(stats)
     }
 }
 
@@ -509,6 +744,250 @@ mod tests {
         let out = reference.as_slice().to_vec();
         let stats = reference.verify(&out).expect("verify");
         assert_eq!(stats.fail_count, 0);
+    }
+
+    // --- fail 要素ダンプ計装（イシュー #1183）------------------------------
+    //
+    // `std::env::set_var` を使わず（edition 2024 で `unsafe`・プロセス環境の
+    // 書き換えはテスト間の順序依存を生む）、`ParityDumpConfig::parse` と
+    // `GemmReference::with_dump`/`verify_with_sink` の純関数経路のみで
+    // 検証する。
+
+    #[test]
+    fn parity_dump_config_parse_allowlist() {
+        // 未設定・空文字・"0" は無効（既存挙動＝不変）。
+        assert_eq!(ParityDumpConfig::parse(None).expect("parse"), None);
+        assert_eq!(ParityDumpConfig::parse(Some("")).expect("parse"), None);
+        assert_eq!(ParityDumpConfig::parse(Some("0")).expect("parse"), None);
+
+        // "1" は既定上限。
+        assert_eq!(
+            ParityDumpConfig::parse(Some("1")).expect("parse"),
+            Some(ParityDumpConfig {
+                limit: PARITY_DUMP_DEFAULT_LIMIT
+            })
+        );
+
+        // 正の整数はその値を上限にする。
+        assert_eq!(
+            ParityDumpConfig::parse(Some("16")).expect("parse"),
+            Some(ParityDumpConfig { limit: 16 })
+        );
+    }
+
+    #[test]
+    fn parity_dump_config_parse_rejects_invalid_values() {
+        for bad in ["abc", "-1", "0x10", " 1", "1.5"] {
+            let err =
+                ParityDumpConfig::parse(Some(bad)).expect_err("must be rejected by the allowlist");
+            assert!(matches!(err, BenchError::InvalidParityDumpEnv { .. }));
+            // MEASURE_ERROR: prefix を持つこと（既存の InvalidMode 等と同型の
+            // fail-fast 診断メッセージであることの確認）。
+            assert!(err.to_string().starts_with("MEASURE_ERROR:"));
+        }
+    }
+
+    #[test]
+    fn dump_parity_failures_reports_index_row_col_and_values() {
+        // 既存の 1% 摂動 fixture（`compare_elementwise_detects_one_percent_perturbation`
+        // と同じ入力）を 2x2 として扱い idx=2 が row=1,col=0 になることを確認する。
+        let reference = vec![1.0f32, 2.0, 3.0, 4.0];
+        let mut actual = reference.clone();
+        actual[2] *= 1.01;
+
+        let mut sink = Vec::new();
+        let outcome = dump_parity_failures(
+            &actual,
+            &reference,
+            2,
+            ParityDumpConfig { limit: 64 },
+            1,
+            &mut sink,
+        )
+        .expect("dump");
+
+        assert_eq!(outcome.fail_count, 1);
+        assert_eq!(outcome.dumped, 1);
+        assert!(!outcome.truncated);
+
+        let text = String::from_utf8(sink).expect("utf8");
+        let dump_line = text
+            .lines()
+            .find(|l| l.starts_with("PARITY_DUMP call="))
+            .expect("dump line present");
+        assert!(dump_line.contains("idx=2"));
+        assert!(dump_line.contains("row=1"));
+        assert!(dump_line.contains("col=0"));
+        assert!(dump_line.contains(&format!("ref_bits=0x{:08x}", 3.0f32.to_bits())));
+        assert!(dump_line.contains(&format!("actual_bits=0x{:08x}", actual[2].to_bits())));
+
+        let summary_line = text
+            .lines()
+            .find(|l| l.starts_with("PARITY_DUMP_SUMMARY"))
+            .expect("summary line present");
+        assert!(summary_line.contains("fail_count=1"));
+        assert!(summary_line.contains("dumped=1"));
+        assert!(summary_line.contains("truncated=false"));
+    }
+
+    #[test]
+    fn dump_parity_failures_dumped_matches_fail_count_within_limit() {
+        let n = 6;
+        let reference = Xorshift64Star::new(0x0BAD_0001).fill_vec(n * n);
+        let mut actual = reference.clone();
+        // ランダムに複数要素を大きく摂動させ、fail_count と dumped が一致
+        // することを確認する（上限内）。
+        for idx in [0usize, 5, 11, 20] {
+            actual[idx] *= 1.5;
+        }
+
+        let stats = compare_elementwise(&actual, &reference).expect("compare");
+        let mut sink = Vec::new();
+        let outcome = dump_parity_failures(
+            &actual,
+            &reference,
+            n,
+            ParityDumpConfig { limit: 64 },
+            1,
+            &mut sink,
+        )
+        .expect("dump");
+
+        assert_eq!(outcome.fail_count, stats.fail_count);
+        assert_eq!(outcome.dumped, stats.fail_count);
+        assert!(!outcome.truncated);
+    }
+
+    #[test]
+    fn dump_parity_failures_truncates_at_limit() {
+        let reference = vec![1.0f32; 5];
+        let mut actual = reference.clone();
+        for v in actual.iter_mut() {
+            *v *= 2.0; // 全要素 fail させる。
+        }
+
+        let mut sink = Vec::new();
+        let outcome = dump_parity_failures(
+            &actual,
+            &reference,
+            5,
+            ParityDumpConfig { limit: 2 },
+            1,
+            &mut sink,
+        )
+        .expect("dump");
+
+        assert_eq!(outcome.fail_count, 5);
+        assert_eq!(outcome.dumped, 2);
+        assert!(outcome.truncated);
+
+        let text = String::from_utf8(sink).expect("utf8");
+        let dump_lines = text
+            .lines()
+            .filter(|l| l.starts_with("PARITY_DUMP call="))
+            .count();
+        assert_eq!(dump_lines, 2);
+        let summary_line = text
+            .lines()
+            .find(|l| l.starts_with("PARITY_DUMP_SUMMARY"))
+            .expect("summary line present");
+        assert!(summary_line.contains("truncated=true"));
+    }
+
+    #[test]
+    fn dump_parity_failures_handles_nan_without_panicking() {
+        let reference = vec![1.0f32];
+        let actual = vec![f32::NAN];
+
+        let mut sink = Vec::new();
+        let outcome = dump_parity_failures(
+            &actual,
+            &reference,
+            1,
+            ParityDumpConfig { limit: 64 },
+            1,
+            &mut sink,
+        )
+        .expect("dump must not panic on NaN");
+
+        assert_eq!(outcome.fail_count, 1);
+        assert_eq!(outcome.dumped, 1);
+        let text = String::from_utf8(sink).expect("utf8");
+        assert!(text.contains("abs=inf") || text.contains("abs=NaN"));
+    }
+
+    #[test]
+    fn gemm_reference_verify_without_dump_matches_compare_elementwise_and_writes_nothing() {
+        // 受け入れ条件 1（環境変数未設定時は既存の判定結果が完全に不変で
+        // あること）の構造的確認: `dump == None` のとき `verify_with_sink`
+        // は `compare_elementwise` と同一の `ParityStats` を返し、sink には
+        // 何も書かれない。
+        let n = 4;
+        let a = Xorshift64Star::new(0x1234_0001).fill_vec(n * n);
+        let b = Xorshift64Star::new(0x1234_0002).fill_vec(n * n);
+        let reference = GemmReference::compute(n, &a, &b).expect("compute");
+        let mut out = reference.as_slice().to_vec();
+        out[0] *= 1.5; // fail 要素を作る。
+
+        let expected = compare_elementwise(&out, reference.as_slice()).expect("compare");
+
+        let no_dump = reference.with_dump(None);
+        let mut sink = Vec::new();
+        let stats = no_dump
+            .verify_with_sink(&out, &mut sink)
+            .expect("verify_with_sink");
+
+        assert_eq!(stats, expected);
+        assert!(
+            sink.is_empty(),
+            "sink must stay empty when dump is disabled"
+        );
+    }
+
+    #[test]
+    fn gemm_reference_verify_with_dump_writes_nothing_on_pass() {
+        // 成功時（fail_count == 0）は dump が有効でも無出力（不要なログを
+        // 出さない）。
+        let n = 4;
+        let a = Xorshift64Star::new(0x5678_0001).fill_vec(n * n);
+        let b = Xorshift64Star::new(0x5678_0002).fill_vec(n * n);
+        let reference = GemmReference::compute(n, &a, &b).expect("compute");
+        let out = reference.as_slice().to_vec();
+
+        let with_dump = reference.with_dump(Some(ParityDumpConfig { limit: 64 }));
+        let mut sink = Vec::new();
+        let stats = with_dump
+            .verify_with_sink(&out, &mut sink)
+            .expect("verify_with_sink");
+
+        assert_eq!(stats.fail_count, 0);
+        assert!(sink.is_empty(), "no dump expected when all elements pass");
+    }
+
+    #[test]
+    fn gemm_reference_verify_with_dump_increments_call_index() {
+        let n = 2;
+        let a = Xorshift64Star::new(0x9999_0001).fill_vec(n * n);
+        let b = Xorshift64Star::new(0x9999_0002).fill_vec(n * n);
+        let reference = GemmReference::compute(n, &a, &b).expect("compute");
+        let mut out = reference.as_slice().to_vec();
+        out[0] *= 2.0;
+
+        let with_dump = reference.with_dump(Some(ParityDumpConfig { limit: 64 }));
+
+        let mut sink1 = Vec::new();
+        with_dump
+            .verify_with_sink(&out, &mut sink1)
+            .expect("verify 1");
+        let text1 = String::from_utf8(sink1).expect("utf8");
+        assert!(text1.contains("call=1"));
+
+        let mut sink2 = Vec::new();
+        with_dump
+            .verify_with_sink(&out, &mut sink2)
+            .expect("verify 2");
+        let text2 = String::from_utf8(sink2).expect("utf8");
+        assert!(text2.contains("call=2"));
     }
 
     /// [`PARITY_REL_TOL`]/[`PARITY_ABS_TOL`] は本体 `backend-cpu::parity`
