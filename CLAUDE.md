@@ -104,7 +104,7 @@ fandhe-ai/
     │   ├── metal-gemm-bottleneck-diagnosis.md # Metal GEMM 1024 以降スループット頭打ちの定量診断（#487。#744 是正前・context_cache 導入前の前提。再診断は metal-gemm-bottleneck-rediagnosis.md を参照）
     │   ├── metal-gemm-bottleneck-rediagnosis.md # Metal GEMM 1024 以降頭打ちの context_cache 後の再診断（M4 Max 実機実測完了。fandhe-ai 自系列内の転送〈アップロード＋readback〉寄与は確認したが、candle 側転送分離測定〈#1103 追補〉の結果 candle比ギャップの主因とは確定できず・GPU counters は引き続き未計測〈GPU Service が対象デバイス非対応と報告〉・タイル形状は現行 CANDIDATES[3] が 4096 で最良・1024/2048 は [5]/[6] と同等〈相対 5% 未満〉。#1036・#1103）
     │   ├── metal-gemm-splitk-shapes.md # split-K 対象形状（K 支配的非正方）の劣化定量化実測記録（#810）
-    │   ├── cuda-fresh-gemm-n2048-overhead-diagnosis.md # fresh モード CUDA GEMM N=2048 固有の約 166〜184 ms 残存オーバーヘッド診断（DGX Spark GB10 実機実測完了・HEAD 時点で非再現を確認・コード修正なし。#956・#1025）
+    │   ├── cuda-fresh-gemm-n2048-overhead-diagnosis.md # fresh モード CUDA GEMM N=2048 固有の約 166〜184 ms 残存オーバーヘッド診断（DGX Spark GB10 実機実測完了・HEAD 時点で非再現を確認・コード修正なし。#956・#1025。#1157 で §11 追記: #1130 ツリー〈#1146/#1149/#1153〉の結論と #956/#1025 非再現の関係。確定機構〈32 MiB 固定上限〉は #956 の 16 MiB を説明せず別原因・同族の可能性は推測として区別・N=4096 異常値は #1130 と整合・対策なし〈環境要因〉）
     │   ├── burn-wgpu-metal-gemm-zero-result.md # framework-compare の Burn(wgpu) Metal GEMM N>=512 全ゼロの原因切り分け（upstream 既知バグ。#965）
     │   ├── cuda-tensor-core-tolerance-opt-remeasurement.md # opt 版 WMMA TF32 カーネルの数値一致誤差分布再実測（GB10 実機計測完了・sm_86 との差分なし。#994・#995）
     │   ├── cuda-tensor-core-tolerance-gb10-scale-sweep.md # GB10（sm_121）実機での入力スケールスイープ再実測・sm_86 との世代差記録（#995）
