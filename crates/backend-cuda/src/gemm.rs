@@ -2978,7 +2978,7 @@ impl CudaGemm {
         &self,
         a_dev: &CudaSlice<f32>,
         b_dev: &CudaSlice<f32>,
-        c_dev: &mut PooledCudaHandle,
+        c_dev: &mut PooledCudaHandle<f32>,
         m: u32,
         n: u32,
         k: u32,
