@@ -1,0 +1,17 @@
+== before ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+20:29  up 16 days,  7:42, 19 users, load averages: 8.36 7.51 5.98
+== after ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+20:52  up 16 days,  8:04, 19 users, load averages: 3.41 3.91 4.65
+rustc 1.96.0 (ac68faa20 2026-05-25)
+cargo 1.96.0 (30a34c682 2026-05-25)
+4e1ad9c
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+Apple M4 Max
