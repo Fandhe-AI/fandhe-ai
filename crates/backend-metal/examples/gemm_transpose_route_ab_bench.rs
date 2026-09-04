@@ -517,6 +517,17 @@ mod macos_impl {
 
         let phase1_ok = phase1_stability_selfcheck(&ctx, &gemm);
         if !phase1_ok {
+            // codex-review 指摘対応（PR #1198）: フェーズ 1 不成立での早期
+            // return もフェーズ 2 総括（`phase2_route_ab`）と同じ
+            // `verdict=undetermined` 行を出力する。全終了経路で判定形式を
+            // 統一し、ログを機械的に `verdict=` grep するだけで判定を
+            // 一意に読み取れるようにする（フェーズ 2 到達時のみ verdict
+            // 行が出る非対称を解消する）。
+            println!(
+                "verdict=undetermined (フェーズ 1 の安定性セルフチェックで \
+                 spread ≤gate 相当を満たさないサイズが残ったため、フェーズ 2\
+                 （A/B 判定）を実行せず判定不可のまま終了する)"
+            );
             return;
         }
 
