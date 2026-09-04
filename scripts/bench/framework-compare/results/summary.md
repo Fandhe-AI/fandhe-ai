@@ -532,7 +532,8 @@ Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが
   max_abs=3.815e-05, max_rel=3.944e-01）・burn/cpu/size=2048/fresh（fail=5/4194304,
   max_abs=3.529e-05, max_rel=3.052e-01）。いずれも 0 近傍要素の丸め差であり、閾値
   （本体の数値一致契約と同値。`.claude/rules/coding-rust.md`）は緩めず「無効」表示のまま
-  参考値として記録する
+  参考値として記録する（candle/cuda・candle/cpu の fail 要素の実値・厳密真値との突合・
+  丸め誤差の帰属はイシュー #1184。`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 参照）
 - **無効（要素誤差超過。burn CUDA 経路の大幅超過）**: burn/cuda/size=256〜4096 の全 5 サイズ
   （fail は最大 2,729,050/16,777,216 要素、max_rel 最大 1.997e+00）。0 近傍の丸め差ではなく
   広範囲の要素で乖離しており、burn 0.21.0（cubecl-cuda 経路）が既定で TF32 相当の低精度

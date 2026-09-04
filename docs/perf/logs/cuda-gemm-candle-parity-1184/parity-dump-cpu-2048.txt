@@ -1,0 +1,120 @@
+PARITY_DUMP call=1 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=1 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=1 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=2 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=2 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=2 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=3 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=3 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=3 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=4 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=4 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=4 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=5 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=5 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=5 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=6 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=6 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=6 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=7 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=7 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=7 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=8 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=8 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=8 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=9 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=9 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=9 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=10 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=10 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=10 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=11 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=11 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=11 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=12 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=12 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=12 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=13 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=13 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=13 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=14 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=14 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=14 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=15 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=15 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=15 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=16 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=16 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=16 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=17 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=17 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=17 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=18 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=18 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=18 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=19 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=19 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=19 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=20 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=20 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=20 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=21 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=21 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=21 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=22 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=22 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=22 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=23 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=23 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=23 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=24 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=24 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=24 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=25 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=25 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=25 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=26 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=26 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=26 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=27 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=27 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=27 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=28 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=28 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=28 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=29 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=29 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=29 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=30 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=30 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=30 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=31 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=31 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=31 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=32 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=32 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=32 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=33 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=33 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=33 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=34 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=34 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=34 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=35 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=35 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=35 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=36 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=36 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=36 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=37 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=37 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=37 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=38 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=38 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=38 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=39 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=39 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=39 n=2048 fail_count=2 dumped=2 truncated=false
+PARITY_DUMP call=40 n=2048 idx=1372466 row=670 col=306 ref=9.920587e-3 ref_bits=0x3c2289f5 actual=9.933233e-3 actual_bits=0x3c22bf00 abs=1.2646429240703583e-5 rel=1.2731432866092216e-3
+PARITY_DUMP call=40 n=2048 idx=1633751 row=797 col=1495 ref=5.374012e-3 ref_bits=0x3bb0187b actual=5.3856373e-3 actual_bits=0x3bb07a00 abs=1.162523403763771e-5 rel=2.158562381026163e-3
+PARITY_DUMP_SUMMARY call=40 n=2048 fail_count=2 dumped=2 truncated=false

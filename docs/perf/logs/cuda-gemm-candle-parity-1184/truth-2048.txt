@@ -1,0 +1,8 @@
+# n=2048 ユニーク fail idx 件数=2 (解析対象 PARITY_DUMP 行 80 件)
+       idx    row    col          exact        f64_seq            ref         actual  |ref-exact| |actual-exact| |ref-actual| max|partial|    sqrtK*ulp fma_bit_match
+     13850      6   1562   2.166853e-03   2.166853e-03   2.168937e-03   2.157688e-03    2.084e-06      9.165e-06    1.125e-05    3.969e+00    1.079e-05          True
+   4130484   2016   1716   9.197426e-03   9.197426e-03   9.188101e-03   9.199142e-03    9.325e-06      1.717e-06    1.104e-05    6.099e+00    2.158e-05          True
+# n=2048 ユニーク fail idx 件数=2 (解析対象 PARITY_DUMP 行 80 件)
+       idx    row    col          exact        f64_seq            ref         actual  |ref-exact| |actual-exact| |ref-actual| max|partial|    sqrtK*ulp fma_bit_match
+   1372466    670    306   9.918718e-03   9.918718e-03   9.920587e-03   9.933233e-03    1.869e-06      1.452e-05    1.265e-05    5.613e+00    2.158e-05          True
+   1633751    797   1495   5.382382e-03   5.382382e-03   5.374012e-03   5.385637e-03    8.370e-06      3.255e-06    1.163e-05    4.748e+00    2.158e-05          True
