@@ -139,16 +139,86 @@ def parse_dump_lines(
             if error_count is not None:
                 error_count[0] += 1
             continue
+
+        # 数値フィールドの取り込み（イシュー #1197 codex-review 指摘・P0:
+        # 破損・改変ダンプは bit パターン・テキスト表現・abs/rel のいずれかが
+        # 単独で壊れているだけのことがあるため、各表現を突合してから使う。
+        # A03: 外部入力は使用前に検証する）。
+        ref_bits = int(m.group("ref_bits"), 16)
+        actual_bits = int(m.group("actual_bits"), 16)
+        ref_bits_f32 = struct.unpack("<f", struct.pack("<I", ref_bits))[0]
+        actual_bits_f32 = struct.unpack("<f", struct.pack("<I", actual_bits))[0]
+        try:
+            dump_abs = float(m.group("abs"))
+            dump_rel = float(m.group("rel"))
+            ref_text_f32 = struct.unpack("<f", struct.pack("<f", float(m.group("ref"))))[0]
+            actual_text_f32 = struct.unpack("<f", struct.pack("<f", float(m.group("actual"))))[0]
+        except (ValueError, OverflowError) as exc:
+            print(
+                f"WARN: line {lineno} の数値フィールドを解釈できない ({exc}) ため無視",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
+        # 有限性検証: `nan`/`inf` は破損ダンプの兆候（改行途中切断・エンコード
+        # 破損等）を無害な値として静かに解析結果へ混入させないため拒否する。
+        if not all(
+            math.isfinite(v)
+            for v in (ref_bits_f32, actual_bits_f32, dump_abs, dump_rel, ref_text_f32, actual_text_f32)
+        ):
+            print(
+                f"WARN: line {lineno} に非有限値（nan/inf）を含むため無視 "
+                f"(ref={ref_text_f32} actual={actual_text_f32} abs={dump_abs} rel={dump_rel})",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
+        # 相互整合性検証: `ref`/`actual` のテキスト表現は Rust 側 `{:e}`
+        # フォーマット（round-trip 可能な最短表現）で `ref_bits`/`actual_bits`
+        # と同一 f32 値を指すはずである。テキストと bit pattern が矛盾する
+        # 入力は改変・破損として拒否する。
+        if ref_text_f32 != ref_bits_f32 or actual_text_f32 != actual_bits_f32:
+            print(
+                f"WARN: line {lineno} のテキスト値と bit pattern が不一致 "
+                f"(ref テキスト={ref_text_f32} vs ref_bits 復元={ref_bits_f32}, "
+                f"actual テキスト={actual_text_f32} vs actual_bits 復元={actual_bits_f32}) のため無視",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
+        # 相互整合性検証: ダンプの abs/rel 自体が ref_bits/actual_bits から
+        # 再計算した値と一致するか（`element_error`〈parity.rs〉と同一式。
+        # f64 昇格で計算するため丸め誤差はごく僅かに許容する）。
+        recomputed_abs = abs(float(ref_bits_f32) - float(actual_bits_f32))
+        scale = max(abs(float(ref_bits_f32)), abs(float(actual_bits_f32)), 1e-12)
+        recomputed_rel = recomputed_abs / scale
+        if abs(recomputed_abs - dump_abs) > 1e-9 or abs(recomputed_rel - dump_rel) > 1e-9:
+            print(
+                f"WARN: line {lineno} の abs/rel がダンプ内の他フィールドと整合しない "
+                f"(再計算 abs={recomputed_abs:.6e} rel={recomputed_rel:.6e} vs "
+                f"ダンプ abs={dump_abs:.6e} rel={dump_rel:.6e}) のため無視",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
         yield ParityDumpRow(
             call=int(m.group("call")),
             n=n,
             idx=idx,
             row=row,
             col=col,
-            ref_bits=int(m.group("ref_bits"), 16),
-            actual_bits=int(m.group("actual_bits"), 16),
-            dump_abs=float(m.group("abs")),
-            dump_rel=float(m.group("rel")),
+            ref_bits=ref_bits,
+            actual_bits=actual_bits,
+            dump_abs=dump_abs,
+            dump_rel=dump_rel,
         )
 
 
@@ -360,10 +430,35 @@ def main(argv: list[str] | None = None) -> int:
     unique_by_idx: dict[int, ParityDumpRow] = {}
     for r in parse_dump_lines(sys.stdin, n, error_count=malformed_count):
         line_count += 1
-        if r.idx not in unique_by_idx:
-            if args.max_rows is not None and len(unique_by_idx) >= args.max_rows:
-                continue
-            unique_by_idx[r.idx] = r
+        if r.idx in unique_by_idx:
+            # 同一 idx の再登場（複数 call にわたる重複）。値が食い違う場合は
+            # 「40 call すべて bit 完全一致」という決定性の前提が崩れているため
+            # 黙って破棄せず fail-closed で検出する（イシュー #1197 codex-review
+            # 指摘・P0: 反復途中で結果が変化した破損・非決定的ダンプの検出）。
+            prev = unique_by_idx[r.idx]
+            if (
+                r.row != prev.row
+                or r.col != prev.col
+                or r.ref_bits != prev.ref_bits
+                or r.actual_bits != prev.actual_bits
+                or r.dump_abs != prev.dump_abs
+                or r.dump_rel != prev.dump_rel
+            ):
+                print(
+                    f"ERROR: idx={r.idx} の重複レコードが不一致（非決定的または破損したダンプ）: "
+                    f"call={prev.call} 側 row={prev.row} col={prev.col} "
+                    f"ref_bits=0x{prev.ref_bits:08x} actual_bits=0x{prev.actual_bits:08x} "
+                    f"abs={prev.dump_abs:.6e} rel={prev.dump_rel:.6e} / "
+                    f"call={r.call} 側 row={r.row} col={r.col} "
+                    f"ref_bits=0x{r.ref_bits:08x} actual_bits=0x{r.actual_bits:08x} "
+                    f"abs={r.dump_abs:.6e} rel={r.dump_rel:.6e}",
+                    file=sys.stderr,
+                )
+                malformed_count[0] += 1
+            continue
+        if args.max_rows is not None and len(unique_by_idx) >= args.max_rows:
+            continue
+        unique_by_idx[r.idx] = r
     if line_count == 0:
         print("ERROR: PARITY_DUMP 行が 1 件も見つからなかった", file=sys.stderr)
         return 2
@@ -373,16 +468,6 @@ def main(argv: list[str] | None = None) -> int:
         # #1197 codex-review 指摘）。
         print("ERROR: 解析対象のユニーク fail idx が 0 件（--max-rows 指定を確認）", file=sys.stderr)
         return 2
-    if malformed_count[0] > 0:
-        # 破損行（書式不一致・n 不一致・row/col/idx 不整合）が 1 件でも
-        # あれば、有効行が存在していても正常終了させない（A03: 破損入力を
-        # 無視して成功扱いにしない。イシュー #1197 codex-review 指摘）。
-        print(
-            f"ERROR: 不正な PARITY_DUMP 行が {malformed_count[0]} 件検出された"
-            "（詳細は上記 WARN を参照）。解析結果は出力済みだが非 0 終了する。",
-            file=sys.stderr,
-        )
-
     print(
         f"# n={n} ユニーク fail idx 件数={len(unique_by_idx)} "
         f"(解析対象 PARITY_DUMP 行 {line_count} 件)"
@@ -405,6 +490,13 @@ def main(argv: list[str] | None = None) -> int:
         f"{'|ref-actual|':>12} {'max|partial|':>12} {'sqrtK*ulp':>12} {'fma_bit_match':>13}"
     )
     print(header)
+
+    # 真値突合の不一致件数（fma_bit_match 不一致・自己整合チェック不一致）。
+    # `malformed_count` と同様、1 件でも検出したら最終的に非 0 終了させる
+    # （記録のみで成功扱いにしない。イシュー #1197 codex-review 指摘・P0:
+    # 改変・破損した外部ダンプからも成功扱いの解析結果を生成できてしまう
+    # 問題〈AGENTS.md「外部フォーマットのパース検証（P0、A03）」〉への対応）。
+    mismatch_count = 0
 
     for idx in sorted(unique_by_idx):
         rec = unique_by_idx[idx]
@@ -445,23 +537,34 @@ def main(argv: list[str] | None = None) -> int:
 
         if not fma_bit_match:
             print(
-                f"  WARN: idx={idx} の f32 FMA 逐次再現が ref_bits と bit 不一致 "
+                f"  ERROR: idx={idx} の f32 FMA 逐次再現が ref_bits と bit 不一致 "
                 f"(再現 0x{fma_bits:08x} vs ダンプ 0x{rec.ref_bits:08x})。"
-                "RNG 再現または丸め実装を見直すこと（記録のみ・処理は継続）。",
+                "RNG 再現・丸め実装のいずれかが崩れているか、ダンプが破損している疑いがあるため非 0 終了する。",
                 file=sys.stderr,
             )
+            mismatch_count += 1
 
         # 自己整合チェック: |ref-actual| がダンプの abs= と一致するか（誤差 1e-9 以内)。
         if abs(err_ref_actual - rec.dump_abs) > 1e-9:
             print(
-                f"  WARN: idx={idx} の |ref-actual|={err_ref_actual:.6e} がダンプの abs={rec.dump_abs:.6e} と不一致",
+                f"  ERROR: idx={idx} の |ref-actual|={err_ref_actual:.6e} がダンプの abs={rec.dump_abs:.6e} と不一致のため非 0 終了する",
                 file=sys.stderr,
             )
+            mismatch_count += 1
 
-    if malformed_count[0] > 0:
-        # 上でダンプ済みの解析結果は診断目的でそのまま出力するが、破損行が
-        # 1 件でも混在していた入力を成功扱いにはしない（イシュー #1197
-        # codex-review 指摘）。
+    total_errors = malformed_count[0] + mismatch_count
+    if total_errors > 0:
+        # 破損行（書式不一致・n 不一致・row/col/idx 不整合・重複 idx の値不一致・
+        # 数値フィールドの有限性/相互整合性不一致）または真値突合の不一致
+        # （fma_bit_match・自己整合チェック）が 1 件でもあれば、解析結果は
+        # 診断目的でそのまま出力しつつ、成功扱いにはしない（A03: 破損・改変
+        # 入力を無視して成功扱いにしない。イシュー #1197 codex-review 指摘）。
+        print(
+            f"ERROR: 不正な PARITY_DUMP 行 {malformed_count[0]} 件・真値突合の不一致 "
+            f"{mismatch_count} 件を検出した（詳細は上記 WARN/ERROR を参照）。"
+            "解析結果は出力済みだが非 0 終了する。",
+            file=sys.stderr,
+        )
         return 1
 
     return 0
