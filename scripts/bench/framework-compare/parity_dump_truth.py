@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+"""GEMM parity ダンプ（`PARITY_DUMP` 行）の fail 要素を厳密真値と突合する（イシュー #1184）。
+
+## 位置づけ
+
+`FRAMEWORK_COMPARE_PARITY_DUMP=1` で bench-candle/bench-fandhe/bench-burn の
+stderr に出る `PARITY_DUMP idx=... ref_bits=... actual_bits=...` 行
+（`bench-common/src/parity.rs::dump_parity_failures`。イシュー #1183）は
+「参照実装（f32 FMA・k 昇順逐次）の値」と「フレームワーク実測値」しか
+教えてくれず、**どちら側が厳密な数学的真値から離れているか**は分からない。
+本スクリプトは `bench-common::Xorshift64Star`／`fill_vec`（`lib.rs`）を Python
+で厳密再現して同じ A・B 入力行列を再構成し、fail 要素 (row, col) の
+`Σ_k A[row,k]·B[k,col]` を有理数演算（`fractions.Fraction`）で誤差ゼロに
+計算する。あわせて f32 FMA 逐次累積（k 昇順）を 1 ステップずつ厳密丸めで
+再現し、`ref_bits` と bit 一致することを確認する（一致すれば「RNG 再現が
+正しい」かつ「参照実装が契約どおり動いている」の直接証拠になる）。
+
+## 入力データの誤差ゼロ表現
+
+`fill_vec` の 1 要素は `((x >> 40) as f32) / 2^24 - 0.5` で、`x >> 40` は
+24 bit 整数 `k`（0..2^24）。`k / 2^24` は 2 のべき分母の二進有理数なので
+f32 として厳密表現でき、`Fraction(k, 2**24) - Fraction(1, 2)` で誤差なく
+保持できる（浮動小数点を経由しない）。
+
+## 呼び出し元
+
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3 の追記作業（本イシュー
+#1184）で GB10 実機ダンプ（`docs/perf/logs/cuda-gemm-candle-parity-1184/`）を
+突合するために 1 回実行する。CI では実行しない（実機ダンプが入力のため）。
+
+使い方:
+    python3 parity_dump_truth.py --n 2048 < parity-dump-cuda-2048.txt
+
+標準ライブラリのみに依存する（`.claude/rules/deps-policy.md` の対象外だが
+依存ゼロを維持する）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import re
+import struct
+import sys
+from dataclasses import dataclass
+from fractions import Fraction
+from typing import Iterable, Iterator
+
+# `dump_parity_failures` の出力書式（`parity.rs` の `writeln!` フォーマット
+# 文字列）と 1 対 1 対応する厳密パーサ。想定外の行は無視ではなく警告して
+# 打ち切る（`.claude/rules/security.md` A03: 外部入力を検証してから使う）。
+_LINE_RE = re.compile(
+    r"^PARITY_DUMP call=(?P<call>\d+) n=(?P<n>\d+) idx=(?P<idx>\d+) "
+    r"row=(?P<row>\d+) col=(?P<col>\d+) "
+    r"ref=(?P<ref>[^ ]+) ref_bits=0x(?P<ref_bits>[0-9a-fA-F]{8}) "
+    r"actual=(?P<actual>[^ ]+) actual_bits=0x(?P<actual_bits>[0-9a-fA-F]{8}) "
+    r"abs=(?P<abs>[^ ]+) rel=(?P<rel>[^ ]+)$"
+)
+
+# xorshift64* (Vigna 2016) の乗数。`bench-common/src/lib.rs::Xorshift64Star`
+# と同一。64 bit wrapping で演算する。
+_MASK64 = (1 << 64) - 1
+_MULT = 0x2545_F491_4F6C_DD1D
+_ZERO_SEED_REPLACEMENT = 0x9E37_79B9_7F4A_7C15
+
+# `bench-common/src/lib.rs` の固定シード（GEMM 入力生成用）。
+SEED_A = 0xA11CE
+SEED_B = 0xB0B
+
+
+@dataclass
+class ParityDumpRow:
+    """1 件の `PARITY_DUMP` 行（厳密パース済み）。"""
+
+    call: int
+    n: int
+    idx: int
+    row: int
+    col: int
+    ref_bits: int
+    actual_bits: int
+    dump_abs: float
+    dump_rel: float
+
+    @property
+    def ref_f32(self) -> float:
+        return struct.unpack("<f", struct.pack("<I", self.ref_bits))[0]
+
+    @property
+    def actual_f32(self) -> float:
+        return struct.unpack("<f", struct.pack("<I", self.actual_bits))[0]
+
+
+def parse_dump_lines(
+    lines: Iterable[str],
+    expected_n: int,
+    error_count: list[int] | None = None,
+) -> Iterator[ParityDumpRow]:
+    """`PARITY_DUMP` 行のみを厳密パースして yield する。
+
+    `PARITY_DUMP_SUMMARY` 行・その他の stderr 出力は無視する（サマリは
+    件数の突合に使うだけで真値計算には不要なため、本関数の対象外とし
+    呼び出し元が別途 grep する）。`row*n+col == idx` と `n*n` 範囲内を
+    検証し、想定外の行は標準エラーへ警告してスキップする（A03: 破損
+    入力を無条件に信用しない）。スキップした行数は `error_count`（呼び出し元が
+    渡す単一要素リスト。generator のため戻り値で直接返せない）へ加算する。
+    ダンプ全体が有効行と不正行の混在でも、不正行が 1 件でもあれば呼び出し元
+    （`main`）が非 0 終了させるための検出手段であり、本関数自体は打ち切らず
+    引き続き有効行を yield する（イシュー #1197 codex-review 指摘: 破損ダンプを
+    無視して正常終了することの防止）。
+    """
+    for lineno, raw in enumerate(lines, start=1):
+        line = raw.rstrip("\n")
+        if not line.startswith("PARITY_DUMP "):
+            continue
+        m = _LINE_RE.match(line)
+        if m is None:
+            print(f"WARN: line {lineno} は PARITY_DUMP 書式に一致せず無視: {line!r}", file=sys.stderr)
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+        n = int(m.group("n"))
+        if n != expected_n:
+            print(
+                f"WARN: line {lineno} の n={n} が --n {expected_n} と不一致のため無視",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+        idx = int(m.group("idx"))
+        row = int(m.group("row"))
+        col = int(m.group("col"))
+        if row * n + col != idx or idx >= n * n:
+            print(
+                f"WARN: line {lineno} の row/col/idx が整合しない（row*n+col={row * n + col}, idx={idx}, n*n={n * n}）ため無視",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
+        # 数値フィールドの取り込み（イシュー #1197 codex-review 指摘・P0:
+        # 破損・改変ダンプは bit パターン・テキスト表現・abs/rel のいずれかが
+        # 単独で壊れているだけのことがあるため、各表現を突合してから使う。
+        # A03: 外部入力は使用前に検証する）。
+        ref_bits = int(m.group("ref_bits"), 16)
+        actual_bits = int(m.group("actual_bits"), 16)
+        ref_bits_f32 = struct.unpack("<f", struct.pack("<I", ref_bits))[0]
+        actual_bits_f32 = struct.unpack("<f", struct.pack("<I", actual_bits))[0]
+        try:
+            dump_abs = float(m.group("abs"))
+            dump_rel = float(m.group("rel"))
+            ref_text_f32 = struct.unpack("<f", struct.pack("<f", float(m.group("ref"))))[0]
+            actual_text_f32 = struct.unpack("<f", struct.pack("<f", float(m.group("actual"))))[0]
+        except (ValueError, OverflowError) as exc:
+            print(
+                f"WARN: line {lineno} の数値フィールドを解釈できない ({exc}) ため無視",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
+        # 有限性検証: `nan`/`inf` は破損ダンプの兆候（改行途中切断・エンコード
+        # 破損等）を無害な値として静かに解析結果へ混入させないため拒否する。
+        if not all(
+            math.isfinite(v)
+            for v in (ref_bits_f32, actual_bits_f32, dump_abs, dump_rel, ref_text_f32, actual_text_f32)
+        ):
+            print(
+                f"WARN: line {lineno} に非有限値（nan/inf）を含むため無視 "
+                f"(ref={ref_text_f32} actual={actual_text_f32} abs={dump_abs} rel={dump_rel})",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
+        # 相互整合性検証: `ref`/`actual` のテキスト表現は Rust 側 `{:e}`
+        # フォーマット（round-trip 可能な最短表現）で `ref_bits`/`actual_bits`
+        # と同一 f32 値を指すはずである。テキストと bit pattern が矛盾する
+        # 入力は改変・破損として拒否する。
+        if ref_text_f32 != ref_bits_f32 or actual_text_f32 != actual_bits_f32:
+            print(
+                f"WARN: line {lineno} のテキスト値と bit pattern が不一致 "
+                f"(ref テキスト={ref_text_f32} vs ref_bits 復元={ref_bits_f32}, "
+                f"actual テキスト={actual_text_f32} vs actual_bits 復元={actual_bits_f32}) のため無視",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
+        # 相互整合性検証: ダンプの abs/rel 自体が ref_bits/actual_bits から
+        # 再計算した値と一致するか（`element_error`〈parity.rs〉と同一式。
+        # f64 昇格で計算するため丸め誤差はごく僅かに許容する）。
+        recomputed_abs = abs(float(ref_bits_f32) - float(actual_bits_f32))
+        scale = max(abs(float(ref_bits_f32)), abs(float(actual_bits_f32)), 1e-12)
+        recomputed_rel = recomputed_abs / scale
+        if abs(recomputed_abs - dump_abs) > 1e-9 or abs(recomputed_rel - dump_rel) > 1e-9:
+            print(
+                f"WARN: line {lineno} の abs/rel がダンプ内の他フィールドと整合しない "
+                f"(再計算 abs={recomputed_abs:.6e} rel={recomputed_rel:.6e} vs "
+                f"ダンプ abs={dump_abs:.6e} rel={dump_rel:.6e}) のため無視",
+                file=sys.stderr,
+            )
+            if error_count is not None:
+                error_count[0] += 1
+            continue
+
+        yield ParityDumpRow(
+            call=int(m.group("call")),
+            n=n,
+            idx=idx,
+            row=row,
+            col=col,
+            ref_bits=ref_bits,
+            actual_bits=actual_bits,
+            dump_abs=dump_abs,
+            dump_rel=dump_rel,
+        )
+
+
+class Xorshift64StarExact:
+    """`bench-common::Xorshift64Star` の Python 厳密再現（整数演算のみ）。"""
+
+    def __init__(self, seed: int) -> None:
+        self.state = _ZERO_SEED_REPLACEMENT if seed == 0 else (seed & _MASK64)
+
+    def next_u64(self) -> int:
+        x = self.state
+        x ^= (x >> 12)
+        x &= _MASK64
+        x ^= (x << 25) & _MASK64
+        x &= _MASK64
+        x ^= (x >> 27)
+        x &= _MASK64
+        self.state = x
+        return (x * _MULT) & _MASK64
+
+    def next_element_exact(self) -> Fraction:
+        """`fill_vec` の 1 要素を厳密有理数として返す（f32 化を経由しない）。
+
+        Rust 側は `((x >> 40) as f32) / 2^24 - 0.5`。`x >> 40` は 0..2^24 の
+        整数 `k` で、`k / 2^24` は f32 として厳密表現可能なため、
+        `Fraction(k, 2**24) - Fraction(1, 2)` で誤差ゼロに一致する。
+        """
+        x = self.next_u64()
+        k = x >> 40
+        return Fraction(k, 1 << 24) - Fraction(1, 2)
+
+    def fill_vec_exact(self, n: int) -> list[Fraction]:
+        return [self.next_element_exact() for _ in range(n)]
+
+
+def extract_rows_exact(seed: int, n: int, target_rows: set[int]) -> dict[int, list[Fraction]]:
+    """A（行優先 n×n）から `target_rows` の行だけを厳密有理数として抽出する。
+
+    フル行列を `fill_vec_exact(n * n)` で Fraction 化すると、fail 要素の解析対象
+    は通常 2 個程度の (row, col) だけにもかかわらず n=2048 で約 839 万・許容上限
+    n=8192 では約 1.34 億の重量級 `Fraction` オブジェクトを同時保持することになり
+    実行不能になる（イシュー #1197 レビュー指摘）。行はストレージ上連続
+    （`a[row*n : row*n+n]`）なので、必要な行の直前までは `next_u64()` で xorshift
+    状態のみ進めて（`Fraction` 構築を省略）、必要な行の n 要素だけ厳密化する。
+    複数行が対象でも 1 パスで済むよう最大行の直後まで走査する。
+    """
+    result: dict[int, list[Fraction]] = {r: [] for r in target_rows}
+    if not target_rows:
+        return result
+    gen = Xorshift64StarExact(seed)
+    limit = (max(target_rows) + 1) * n
+    for pos in range(limit):
+        r = pos // n
+        if r in result:
+            result[r].append(gen.next_element_exact())
+        else:
+            gen.next_u64()
+    return result
+
+
+def extract_cols_exact(seed: int, n: int, target_cols: set[int]) -> dict[int, list[Fraction]]:
+    """B（行優先 n×n）から `target_cols` の列だけを厳密有理数として抽出する。
+
+    列は `b[k*n+col]`（k=0..n-1）でストレージ上 stride n の飛び飛び位置なので、
+    xorshift の逐次性（ランダムアクセス不可）上 B 全体 n*n 要素分の走査自体は
+    避けられないが、対象外の位置は `next_u64()` のみで `Fraction` を構築しない。
+    複数列でも 1 パスで済ませる（extract_rows_exact と対称の設計）。
+    """
+    result: dict[int, list[Fraction]] = {c: [] for c in target_cols}
+    if not target_cols:
+        return result
+    gen = Xorshift64StarExact(seed)
+    for pos in range(n * n):
+        c = pos % n
+        if c in result:
+            result[c].append(gen.next_element_exact())
+        else:
+            gen.next_u64()
+    return result
+
+
+def round_half_even_to_f32(value: Fraction) -> float:
+    """任意精度有理数 `value` を IEEE754 binary32（round-half-even）へ直接丸める。
+
+    `Fraction -> float(f64) -> f32` の 2 段丸めは f64 の丸めで情報を失い
+    二重丸め誤差を生みうるため避ける（本関数は分子・分母から直接 f32 の
+    仮数・指数を決定し、一度だけ丸める）。ゼロ・非正規化数・通常数を扱う。
+    無限大・NaN は本用途の入力（GEMM 部分和）では発生しない想定のため
+    未対応とし、範囲外は `OverflowError` とする（fail-closed）。
+    """
+    if value == 0:
+        return 0.0
+    sign = -1.0 if value < 0 else 1.0
+    mag = abs(value)
+
+    # 2 進指数 e を求める: 2^e <= mag < 2^(e+1)
+    e = mag.numerator.bit_length() - mag.denominator.bit_length()
+    # bit_length の差は概算なので厳密化する。
+    while Fraction(2) ** e > mag:
+        e -= 1
+    while Fraction(2) ** (e + 1) <= mag:
+        e += 1
+
+    # binary32: 指数バイアス 127、仮数 23 bit、正規化範囲 e in [-126, 127]。
+    if e < -126:
+        # 非正規化数域: 固定スケール 2^-149 の整数倍として丸める。
+        scale = Fraction(2) ** -149
+        exp_used = -149
+    elif e > 127:
+        raise OverflowError(f"f32 表現域を超える値: {value}")
+    else:
+        scale = Fraction(2) ** (e - 23)
+        exp_used = e - 23
+
+    ratio = mag / scale  # 丸め対象の整数域比率（round-half-even する）。
+    q, r = divmod(ratio.numerator, ratio.denominator)
+    twice_r = 2 * r
+    if twice_r > ratio.denominator or (twice_r == ratio.denominator and q % 2 == 1):
+        q += 1
+
+    result = sign * q * (2.0**exp_used)
+    return float(result)
+
+
+def fma_sequential_f32_exact(a_row: list[Fraction], b_col: list[Fraction]) -> tuple[float, list[Fraction]]:
+    """f32 FMA 逐次累積（k 昇順）を厳密丸めで再現する。
+
+    `backend-cpu::parity::matmul_reference_fma` / `GemmReference` と同じ
+    契約（各ステップで `acc = a*b + acc` を f32 丸め 1 回）を、各ステップの
+    `a*b + acc` を有理数で厳密計算してから `round_half_even_to_f32` で
+    1 回だけ丸めることで再現する（f32 演算を模倣する最も直接的な方法。
+    `a`/`b` はいずれも `fill_vec_exact` の厳密表現なので `a*b` 自体には
+    丸め誤差が入らない）。
+
+    戻り値は最終 f32 値と、各ステップ後の厳密部分和（Fraction）の列
+    （後段のキャンセレーション解析で使う）。
+    """
+    acc = Fraction(0)
+    partials: list[Fraction] = []
+    acc_f32 = 0.0
+    for a, b in zip(a_row, b_col):
+        acc = Fraction(acc_f32) * 1  # 直前ステップの f32 値を厳密有理数として引き継ぐ
+        acc = a * b + acc
+        acc_f32 = round_half_even_to_f32(acc)
+        partials.append(Fraction(acc_f32))
+    return acc_f32, partials
+
+
+def ulp_f32(x: float) -> float:
+    """`|x|` の f32 ulp（1 単位最終桁）。0 の場合は最小非正規化数を返す。"""
+    ax = abs(x)
+    if ax == 0.0:
+        return 2.0**-149
+    e = math.floor(math.log2(ax))
+    e = max(e, -126)  # 非正規化数域は指数を -126 に固定
+    return 2.0 ** (e - 23)
+
+
+def _positive_int(value: str) -> int:
+    """`--max-rows` の argparse type: 1 以上の整数のみ許可する。
+
+    0 や負数を許すと `unique_by_idx` へ何も採用されないまま（下段の空判定を
+    素通りしなければ）解析結果が空でも成功扱いになりうる（イシュー #1197
+    codex-review 指摘。A03: 外部入力を検証してから使う）。argparse の型
+    バリデータとして例外を投げることで CLI 起動直後に fail-closed で拒否する。
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"整数として解釈できません: {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"1 以上の整数を指定してください（受領: {parsed}）")
+    return parsed
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--n", type=int, required=True, help="GEMM の正方行列一辺長（--size と同じ値）")
+    parser.add_argument(
+        "--max-rows",
+        type=_positive_int,
+        default=None,
+        help=(
+            "解析するユニーク fail idx 件数の上限（重複排除後に適用。未指定なら無制限で"
+            "全ユニーク idx を解析する。入力の PARITY_DUMP 行数自体は常に全件読む——"
+            "同一 idx が複数 call にわたって重複するため行数を先に切り詰めると、"
+            "出現順が遅いユニーク idx を取りこぼしうるため）"
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    if args.n < 1 or args.n > 8192:
+        print(f"ERROR: --n は 1..8192 の範囲で指定する（受領: {args.n}）", file=sys.stderr)
+        return 2
+
+    n = args.n
+
+    # 同一 idx が複数 call にわたって重複するため、入力は必ず全行ストリーム
+    # 処理してユニーク idx 集合を抽出する（値は決定的想定なので最初の
+    # 出現を代表値として使う。`PARITY_DUMP_SUMMARY` 側の call 数・
+    # fail_count は呼び出し元が別途突合する）。行数を先に --max-rows で
+    # 切り詰めると、出現順が遅いユニーク idx を取りこぼす（イシュー
+    # #1197 レビュー指摘。README 記載の `--n 2048` だけのコマンドで
+    # 同梱の `truth-2048.txt`〈全 80 行・ユニーク idx 2 件〉を再現できな
+    # くなっていた）。--max-rows はユニーク idx 件数の上限としてのみ、
+    # 重複排除後に適用する。
+    line_count = 0
+    malformed_count = [0]
+    unique_by_idx: dict[int, ParityDumpRow] = {}
+    for r in parse_dump_lines(sys.stdin, n, error_count=malformed_count):
+        line_count += 1
+        if r.idx in unique_by_idx:
+            # 同一 idx の再登場（複数 call にわたる重複）。値が食い違う場合は
+            # 「40 call すべて bit 完全一致」という決定性の前提が崩れているため
+            # 黙って破棄せず fail-closed で検出する（イシュー #1197 codex-review
+            # 指摘・P0: 反復途中で結果が変化した破損・非決定的ダンプの検出）。
+            prev = unique_by_idx[r.idx]
+            if (
+                r.row != prev.row
+                or r.col != prev.col
+                or r.ref_bits != prev.ref_bits
+                or r.actual_bits != prev.actual_bits
+                or r.dump_abs != prev.dump_abs
+                or r.dump_rel != prev.dump_rel
+            ):
+                print(
+                    f"ERROR: idx={r.idx} の重複レコードが不一致（非決定的または破損したダンプ）: "
+                    f"call={prev.call} 側 row={prev.row} col={prev.col} "
+                    f"ref_bits=0x{prev.ref_bits:08x} actual_bits=0x{prev.actual_bits:08x} "
+                    f"abs={prev.dump_abs:.6e} rel={prev.dump_rel:.6e} / "
+                    f"call={r.call} 側 row={r.row} col={r.col} "
+                    f"ref_bits=0x{r.ref_bits:08x} actual_bits=0x{r.actual_bits:08x} "
+                    f"abs={r.dump_abs:.6e} rel={r.dump_rel:.6e}",
+                    file=sys.stderr,
+                )
+                malformed_count[0] += 1
+            continue
+        if args.max_rows is not None and len(unique_by_idx) >= args.max_rows:
+            continue
+        unique_by_idx[r.idx] = r
+    if line_count == 0:
+        print("ERROR: PARITY_DUMP 行が 1 件も見つからなかった", file=sys.stderr)
+        return 2
+    if not unique_by_idx:
+        # --max-rows は _positive_int で 1 以上に制限済みだが、念のため
+        # 解析対象が空になるケース全般を fail-closed で拒否する（イシュー
+        # #1197 codex-review 指摘）。
+        print("ERROR: 解析対象のユニーク fail idx が 0 件（--max-rows 指定を確認）", file=sys.stderr)
+        return 2
+    print(
+        f"# n={n} ユニーク fail idx 件数={len(unique_by_idx)} "
+        f"(解析対象 PARITY_DUMP 行 {line_count} 件)"
+    )
+
+    # A・B は必要な行・列だけを厳密有理数として抽出する（フルマトリクスを
+    # Fraction で保持すると n=2048 で約 839 万オブジェクト・許容上限
+    # n=8192 では約 1.34 億オブジェクトとなり実行不能になるため。イシュー
+    # #1197 レビュー指摘）。RNG は逐次生成のみ可能なため走査は避けられ
+    # ないが、不要な位置は `next_u64()` で状態のみ進めて Fraction 化を
+    # 省略する（`extract_rows_exact`/`extract_cols_exact`）。
+    needed_rows = {r.row for r in unique_by_idx.values()}
+    needed_cols = {r.col for r in unique_by_idx.values()}
+    a_rows = extract_rows_exact(SEED_A, n, needed_rows)
+    b_cols = extract_cols_exact(SEED_B, n, needed_cols)
+
+    header = (
+        f"{'idx':>10} {'row':>6} {'col':>6} {'exact':>14} {'f64_seq':>14} "
+        f"{'ref':>14} {'actual':>14} {'|ref-exact|':>12} {'|actual-exact|':>14} "
+        f"{'|ref-actual|':>12} {'max|partial|':>12} {'sqrtK*ulp':>12} {'fma_bit_match':>13}"
+    )
+    print(header)
+
+    # 真値突合の不一致件数（fma_bit_match 不一致・自己整合チェック不一致）。
+    # `malformed_count` と同様、1 件でも検出したら最終的に非 0 終了させる
+    # （記録のみで成功扱いにしない。イシュー #1197 codex-review 指摘・P0:
+    # 改変・破損した外部ダンプからも成功扱いの解析結果を生成できてしまう
+    # 問題〈AGENTS.md「外部フォーマットのパース検証（P0、A03）」〉への対応）。
+    mismatch_count = 0
+
+    for idx in sorted(unique_by_idx):
+        rec = unique_by_idx[idx]
+        row, col = rec.row, rec.col
+
+        a_row = a_rows[row]
+        b_col = b_cols[col]
+
+        # 厳密真値（有理数の完全和。丸め誤差ゼロ）。
+        exact = sum((a * b for a, b in zip(a_row, b_col)), Fraction(0))
+        exact_f = float(exact)
+
+        # f64 逐次和（k 昇順。Python の float は IEEE754 binary64）。
+        acc64 = 0.0
+        for a, b in zip(a_row, b_col):
+            acc64 += float(a) * float(b)
+
+        # f32 FMA 逐次累積の厳密再現（bit 一致検証つき）。
+        fma_f32, partials = fma_sequential_f32_exact(a_row, b_col)
+        fma_bits = struct.unpack("<I", struct.pack("<f", fma_f32))[0]
+        fma_bit_match = fma_bits == rec.ref_bits
+
+        ref_f = rec.ref_f32
+        actual_f = rec.actual_f32
+
+        err_ref = abs(ref_f - exact_f)
+        err_actual = abs(actual_f - exact_f)
+        err_ref_actual = abs(ref_f - actual_f)
+
+        max_partial = max((abs(float(p)) for p in partials), default=0.0)
+        sqrtk_ulp = (n**0.5) * ulp_f32(max_partial)
+
+        print(
+            f"{idx:>10} {row:>6} {col:>6} {exact_f:>14.6e} {acc64:>14.6e} "
+            f"{ref_f:>14.6e} {actual_f:>14.6e} {err_ref:>12.3e} {err_actual:>14.3e} "
+            f"{err_ref_actual:>12.3e} {max_partial:>12.3e} {sqrtk_ulp:>12.3e} {str(fma_bit_match):>13}"
+        )
+
+        if not fma_bit_match:
+            print(
+                f"  ERROR: idx={idx} の f32 FMA 逐次再現が ref_bits と bit 不一致 "
+                f"(再現 0x{fma_bits:08x} vs ダンプ 0x{rec.ref_bits:08x})。"
+                "RNG 再現・丸め実装のいずれかが崩れているか、ダンプが破損している疑いがあるため非 0 終了する。",
+                file=sys.stderr,
+            )
+            mismatch_count += 1
+
+        # 自己整合チェック: |ref-actual| がダンプの abs= と一致するか（誤差 1e-9 以内)。
+        if abs(err_ref_actual - rec.dump_abs) > 1e-9:
+            print(
+                f"  ERROR: idx={idx} の |ref-actual|={err_ref_actual:.6e} がダンプの abs={rec.dump_abs:.6e} と不一致のため非 0 終了する",
+                file=sys.stderr,
+            )
+            mismatch_count += 1
+
+    total_errors = malformed_count[0] + mismatch_count
+    if total_errors > 0:
+        # 破損行（書式不一致・n 不一致・row/col/idx 不整合・重複 idx の値不一致・
+        # 数値フィールドの有限性/相互整合性不一致）または真値突合の不一致
+        # （fma_bit_match・自己整合チェック）が 1 件でもあれば、解析結果は
+        # 診断目的でそのまま出力しつつ、成功扱いにはしない（A03: 破損・改変
+        # 入力を無視して成功扱いにしない。イシュー #1197 codex-review 指摘）。
+        print(
+            f"ERROR: 不正な PARITY_DUMP 行 {malformed_count[0]} 件・真値突合の不一致 "
+            f"{mismatch_count} 件を検出した（詳細は上記 WARN/ERROR を参照）。"
+            "解析結果は出力済みだが非 0 終了する。",
+            file=sys.stderr,
+        )
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
