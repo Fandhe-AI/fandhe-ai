@@ -247,6 +247,18 @@ impl<T: PoolDtype> PooledCudaHandle<T> {
     pub(crate) fn as_view_mut(&mut self) -> CudaViewMut<'_, T> {
         self.handle.slice_mut(0..self.logical_numel)
     }
+
+    /// 確保元の `CudaContext` を返す（イシュー #1153 codex-review P0
+    /// 是正・PR #1200 レビュー）。`gemm_mma.rs::CudaMmaGemm::
+    /// launch_f16_pooled`／`download_f16_pooled` が、呼び出し先
+    /// `CudaMmaGemm` インスタンスの `stream` 生成元 context との一致を
+    /// fail-closed に検証するために使う（`gemm.rs::
+    /// TiledPipelineFunction` 検証・`CudaError::
+    /// TiledPipelineContextMismatch` と同型の対処。`CudaError::
+    /// PooledBufferContextMismatch` ドキュメンテーションコメント参照）。
+    pub(crate) fn context(&self) -> &Arc<CudaContext> {
+        self.handle.context()
+    }
 }
 
 /// [`PooledCudaHandle<f16>`] の不透明公開ラッパー（イシュー #1153）。

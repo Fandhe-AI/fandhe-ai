@@ -843,6 +843,20 @@ impl CudaMmaGemm {
     /// #1153。`launch_f16_views` の薄い wrapper）。[`Self::
     /// upload_f16_pooled`] と同じ feature ゲート方針（本番未結線・
     /// 診断専用入口）。
+    ///
+    /// **context 一致検証（codex-review P0 指摘・PR #1200）**:
+    /// `PooledF16Buffer` は不透明な公開ラッパーのため、呼び出し元は
+    /// 任意の `CudaMmaGemm`（別 `CudaDevice`／`CudaContext` 上で構築
+    /// されたインスタンスを含む）が確保したバッファを、この `self` へ
+    /// safe Rust から渡せてしまう。`gemm.rs::CudaGemm::
+    /// launch_tiled_pipeline_f32` の「バッファ生成元 context の検証」
+    /// （PR #1071 codex-review P0 是正）と同じ脅威モデルのため同じ
+    /// 対処を適用する: 起動前に 3 バッファそれぞれの確保元
+    /// `Arc<CudaContext>`（`PooledCudaHandle::context`）が `self.stream`
+    /// の context と一致するかをポインタ同一性で fail-closed に検証し、
+    /// いずれか 1 つでも不一致なら `CudaError::
+    /// PooledBufferContextMismatch` を返して `unsafe` launch
+    /// （`launch_f16_views`）へ到達させない。
     #[cfg(feature = "internal-diagnostics")]
     pub fn launch_f16_pooled(
         &self,
@@ -853,6 +867,22 @@ impl CudaMmaGemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
+        let self_ctx = self.stream.context();
+        for (name, buf_ctx) in [
+            ("a_dev", a_dev.0.context()),
+            ("b_dev", b_dev.0.context()),
+            ("c_dev", c_dev.0.context()),
+        ] {
+            if !Arc::ptr_eq(buf_ctx, self_ctx) {
+                return Err(CudaError::PooledBufferContextMismatch {
+                    detail: format!(
+                        "{name} was allocated on a different CudaContext (different \
+                         CudaDevice/GPU) than this CudaMmaGemm instance's stream; \
+                         refusing to launch across mismatched CUDA contexts"
+                    ),
+                });
+            }
+        }
         self.launch_f16_views(
             &a_dev.0.as_view(),
             &b_dev.0.as_view(),
@@ -876,11 +906,26 @@ impl CudaMmaGemm {
     /// `download_f16` と同じ理由・同じ同期契約〈#1013〉）。[`Self::
     /// upload_f16_pooled`] と同じ feature ゲート方針（本番未結線・
     /// 診断専用入口）。
+    ///
+    /// **context 一致検証（codex-review P0 指摘・PR #1200）**:
+    /// [`Self::launch_f16_pooled`] と同じ理由・同じ対処。`c_dev` が
+    /// `self.stream` と異なる `CudaContext` 由来の場合、別 context の
+    /// デバイスポインタをこのインスタンスの `stream` で readback する
+    /// 不正アクセスに到達しうるため、readback 前にポインタ同一性を
+    /// fail-closed に検証する。
     #[cfg(feature = "internal-diagnostics")]
     pub fn download_f16_pooled(
         &self,
         c_dev: &crate::pool::PooledF16Buffer,
     ) -> Result<Vec<f16>, CudaError> {
+        if !Arc::ptr_eq(c_dev.0.context(), self.stream.context()) {
+            return Err(CudaError::PooledBufferContextMismatch {
+                detail: "c_dev was allocated on a different CudaContext (different \
+                         CudaDevice/GPU) than this CudaMmaGemm instance's stream; \
+                         refusing to read back across mismatched CUDA contexts"
+                    .to_string(),
+            });
+        }
         crate::memory::readback(&self.stream, &c_dev.0.as_view())
     }
 
