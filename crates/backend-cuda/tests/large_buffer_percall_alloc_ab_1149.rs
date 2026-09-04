@@ -394,9 +394,7 @@ impl Drop for ReleaseThresholdGuard<'_> {
     fn drop(&mut self) {
         // SAFETY: `self.mem_pool` は `new` で取得した有効な pool ハンドル
         // （`ctx` のライフタイムに束縛されており本ガードのスコープ中は
-        // 有効）。`value` は `u64` 変数への生ポインタ。Drop 内で panic
-        // すると二重パニックでプロセスが abort しうるため、失敗は
-        // `eprintln!` に留め復元を試みるのみとする。
+        // 有効）。`value` は `u64` 変数への生ポインタ。
         let mut restore = self.original_threshold;
         let result = unsafe {
             result::mem_pool::set_attribute(
@@ -405,17 +403,93 @@ impl Drop for ReleaseThresholdGuard<'_> {
                 (&mut restore as *mut u64).cast(),
             )
         };
+        // 復元失敗（`u64::MAX` 残留）は計測隔離契約違反であり、それを
+        // 検出できないまま次の条件ブロックへ進むと後続の全条件データが
+        // 汚染されうる（codex-review 指摘・#1149 PR #1199）。
+        // `SyncDeviceBuffer::drop`（本ファイル上）と同じ方針で、巻き戻し
+        // 中（二重パニックで abort する）でなければ復元失敗を panic で
+        // 顕在化させる。
         if let Err(e) = result {
             eprintln!(
                 "release_threshold_guard,restore_failed,original={},error={e:?}（driver プール状態が u64::MAX のまま残留している可能性）",
                 self.original_threshold
             );
+            if !std::thread::panicking() {
+                panic!(
+                    "ReleaseThresholdGuard::drop: release threshold の復元（original={}）に \
+                     失敗した（error={e:?}）。driver プール状態が u64::MAX のまま残留すると \
+                     後続条件の計測隔離契約が崩れるため、テスト失敗として顕在化させる",
+                    self.original_threshold
+                );
+            }
+            return;
+        }
+        // 復元成功後、プールが案 A 有効中に保持し続けた予約メモリ
+        // （release threshold=u64::MAX の間は synchronize でも OS へ
+        // 返却されない）を明示的にトリムする（codex-review 指摘・
+        // #1149 PR #1199）。トリムしないと、次の条件（baseline／B 等）
+        // の計測が案 A 実行時に肥大化したまま残ったプール状態の上で
+        // 走ることになり、baseline→A→B→A+B→baseline の連続実行間で
+        // プール状態が持ち越されて条件間比較が汚染される
+        // （`docs/perf/cuda-percall-alloc-pool-threshold-ab.md` の事前
+        // 登録判定基準が前提とする「条件間の独立性」を壊す）。
+        // `min_bytes_to_keep=0` は driver プールを可能な限り OS へ返却
+        // させ、次条件を「案 A 未実行だった場合と同等のプール状態」から
+        // 開始させるため。失敗時は復元と同様 panic で顕在化させる。
+        //
+        // SAFETY: `self.mem_pool` は上記と同じ有効な pool ハンドル。
+        let trim_result = unsafe { result::mem_pool::trim_to(self.mem_pool, 0) };
+        if let Err(e) = trim_result {
+            eprintln!(
+                "release_threshold_guard,trim_failed,error={e:?}（保持メモリが次条件へ持ち越される可能性）"
+            );
+            if !std::thread::panicking() {
+                panic!(
+                    "ReleaseThresholdGuard::drop: 復元後の cuMemPoolTrimTo(0) に失敗した \
+                     （error={e:?}）。案 A 実行中に保持されたプールメモリが次条件へ持ち越され \
+                     条件間比較が汚染されるため、テスト失敗として顕在化させる"
+                );
+            }
         }
         // `self.ctx` は Drop 内では使わないが、ガードが `ctx` のライフ
         // タイムより長生きしないことをコンパイラに保証させるために保持
         // する（use-after-free 系の誤用防止）。
         let _ = self.ctx;
     }
+}
+
+/// `condition` に応じて [`ReleaseThresholdGuard`] を用意する（ブラケット
+/// 内の各条件ブロックで共通の呼び出し口。P0〜P4 スイープ・降順パス・P7
+/// の 3 箇所から呼ばれる）。
+///
+/// `condition.raises_threshold()`（案 A を要求する `ReleaseThreshold`／
+/// `Both`）が真なのに `ReleaseThresholdGuard::new` が `None`（環境が
+/// `has_async_alloc=false` で driver プール非対応）を返した場合、以前は
+/// そのまま計測を続行し、案 A 未適用の実測値を `release_threshold`／
+/// `both` ラベルで記録していた。これは受け入れ判定
+/// （`docs/perf/cuda-percall-alloc-pool-threshold-ab.md` の事前登録
+/// 判定基準）が「案 A の効果」として誤読しうる汚染データを生む
+/// （codex-review 指摘・#1149 PR #1199）。本テストは GB10 実機
+/// （`has_async_alloc=true` 前提。テスト冒頭の `environment:` ログで
+/// 確認可能）での実行を想定しているため、その前提が崩れている場合は
+/// fail-closed にテストを失敗させ、条件データの誤読を未然に防ぐ。
+fn require_release_threshold_guard(
+    condition: Condition,
+    ctx: &CudaContext,
+) -> Option<ReleaseThresholdGuard<'_>> {
+    if !condition.raises_threshold() {
+        return None;
+    }
+    let guard = ReleaseThresholdGuard::new(ctx);
+    assert!(
+        guard.is_some(),
+        "condition={condition:?} は案 A（release threshold 引き上げ）を要求するが \
+         has_async_alloc=false のため driver プールが存在せず案 A を適用できない。 \
+         未適用のまま release_threshold／both ラベルで計測を続けると案 A の効果として \
+         誤読される汚染データになるため、fail-closed にテストを失敗させる \
+         （本テストは has_async_alloc=true の GB10 実機前提）"
+    );
+    guard
 }
 
 /// 案 B: `cuMemAlloc`（同期割当）で確保したデバイスバッファ。確保・
@@ -883,11 +957,7 @@ fn large_buffer_percall_alloc_ab_record() {
             // 案 A（release threshold 引き上げ）はガードのスコープ内で
             // のみ有効。ブロック終端で自動的に元へ復元される
             // （`ReleaseThresholdGuard::drop`）。
-            let _guard = if condition.raises_threshold() {
-                ReleaseThresholdGuard::new(device.context())
-            } else {
-                None
-            };
+            let _guard = require_release_threshold_guard(condition, device.context());
 
             for run_idx in 0..runs {
                 let (cold, m) = phase_p1_alloc_only(&device, &config, numel, condition);
@@ -985,11 +1055,7 @@ fn large_buffer_percall_alloc_ab_record() {
         let config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
 
         for condition in bracket_conditions() {
-            let _guard = if condition.raises_threshold() {
-                ReleaseThresholdGuard::new(device.context())
-            } else {
-                None
-            };
+            let _guard = require_release_threshold_guard(condition, device.context());
 
             for run_idx in 0..runs {
                 let (cold, m) = phase_p0_transfer_only(&device, &config, &a, &b, numel, condition);
@@ -1052,11 +1118,7 @@ fn large_buffer_percall_alloc_ab_record() {
     let p7_config = MeasurementConfig::new(20, 20).expect("20/20 must satisfy TASK-8.1 minimums");
     let mut checksums: Vec<(Condition, usize, f64)> = Vec::new();
     for condition in bracket_conditions() {
-        let _guard = if condition.raises_threshold() {
-            ReleaseThresholdGuard::new(device.context())
-        } else {
-            None
-        };
+        let _guard = require_release_threshold_guard(condition, device.context());
         for run_idx in 0..P7_RUNS {
             let (cold, m, checksum) = phase_p7_gemm_replica(
                 &device, &p7_config, &gemm, &a, &b, P7_DIM, P7_DIM, P7_DIM, condition,
