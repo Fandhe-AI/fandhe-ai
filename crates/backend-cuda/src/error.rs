@@ -268,10 +268,14 @@ pub enum CudaError {
     /// `unwrap()`/`expect()` を使わない」に従い panic させない。
     ContextCacheUnavailable { detail: String },
 
-    /// [`crate::gemm_mma::CudaMmaGemm::launch_f16_pooled`]／
-    /// [`crate::gemm_mma::CudaMmaGemm::download_f16_pooled`]（イシュー
-    /// #1153。`internal-diagnostics` feature 限定の診断専用入口）に
-    /// 渡された [`crate::pool::PooledF16Buffer`] が、呼び出し先
+    /// `crate::gemm_mma::CudaMmaGemm::launch_f16_pooled`／
+    /// `crate::gemm_mma::CudaMmaGemm::download_f16_pooled`（イシュー
+    /// #1153。`internal-diagnostics` feature 限定の診断専用入口。
+    /// feature 既定 off のため intra-doc link にはしない —
+    /// `cargo doc --workspace --no-deps`〈feature 既定 off〉では
+    /// これらのアイテムが存在せず `rustdoc::broken-intra-doc-links`
+    /// で fail するため。PR #1200 CI 実測・codex-review 指摘対応）に
+    /// 渡された `crate::pool::PooledF16Buffer` が、呼び出し先
     /// `CudaMmaGemm` インスタンスの `stream`（＝生成元 `CudaDevice`）とは
     /// 異なる `CudaContext` から確保されたことを表す（codex-review P0
     /// 指摘。PR #1200 レビュー）。
