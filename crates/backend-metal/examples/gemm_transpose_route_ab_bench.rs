@@ -205,6 +205,16 @@ mod macos_impl {
         b_over_a_tflops: f64,
         spread_a: f64,
         spread_b: f64,
+        /// `tile::select_for_device` が要求した構成と
+        /// `dispatch_strided_tiled_prepared` が実際にフォールバック解決
+        /// した構成が一致したか。不一致（`false`）は「#1187 が渡す構成
+        /// そのものを測る」というベンチ契約が満たせていないセルを意味する
+        /// ため、呼び出し元（`phase2_route_ab`）は本フィールドを見て
+        /// `route_ok`/`route_ng` の判定材料（`ratios`）に含めず
+        /// `verdict=undetermined` へ倒す（fail-closed。ログ出力のみで
+        /// `ratios` へ加算すると、要求構成が使えない場合でも別のフォール
+        /// バック構成がたまたま高速なら `route_ok` になり得てしまう）。
+        resolved_matches_requested: bool,
     }
 
     /// フェーズ 2 総括で安定性ゲート超過セルを記録する行（`Vec` の要素型が
@@ -221,6 +231,10 @@ mod macos_impl {
     /// 戻り値は B が `Err(StridedTiledIneligible)` を返した場合 `None`
     /// （fail-closed skip。黙って除外せず理由を出力する。10 形状は全て
     /// 8 整除・ld 4 整除のため通常は発生しない想定だが、契約として扱う）。
+    /// B が成功しても要求構成とフォールバック解決後の構成が不一致な場合は
+    /// `CellResult::resolved_matches_requested=false` を返し、呼び出し元
+    /// が undetermined へ倒す判断材料とする（#1187 が渡す構成そのものを
+    /// 測るというベンチ契約の fail-closed 担保）。
     ///
     /// `#[allow(clippy::too_many_arguments)]`:
     /// `dispatch_strided_bias_act_prepared`／`dispatch_strided_tiled_prepared`
@@ -342,6 +356,7 @@ mod macos_impl {
             b_over_a_tflops: ratio,
             spread_a: result.spread_a,
             spread_b: result.spread_b,
+            resolved_matches_requested,
         })
     }
 
@@ -363,6 +378,11 @@ mod macos_impl {
         let mut ratios: Vec<((usize, usize, usize), &'static str, f64)> = Vec::new();
         let mut skipped: Vec<((usize, usize, usize), &'static str)> = Vec::new();
         let mut gate_exceeded: Vec<GateExceededCell> = Vec::new();
+        // 要求構成と実際にフォールバック解決された構成が不一致だったセル
+        // （`CellResult::resolved_matches_requested=false`）。`ratios` へは
+        // 加算せず undetermined 判定の材料にする（下記 codex-review 指摘
+        // 対応。#1187 が渡す構成そのものを測るというベンチ契約の担保）。
+        let mut resolution_mismatched: Vec<((usize, usize, usize), &'static str)> = Vec::new();
 
         for (m, n, k) in shapes() {
             for (trans_a, trans_b, label) in
@@ -396,7 +416,18 @@ mod macos_impl {
                                 spread_b: cell.spread_b,
                             });
                         }
-                        ratios.push(((m, n, k), label, cell.b_over_a_tflops));
+                        if cell.resolved_matches_requested {
+                            ratios.push(((m, n, k), label, cell.b_over_a_tflops));
+                        } else {
+                            // codex-review 指摘対応（PR #1198）: 要求構成
+                            // （`tile::select_for_device`）と
+                            // `dispatch_strided_tiled_prepared` が実際に
+                            // フォールバック解決した構成が不一致のセルは
+                            // 「#1187 が渡す構成そのものを測る」契約を満た
+                            // さないため `ratios` へ加算せず undetermined
+                            // へ倒す（route_ok/route_ng の判定対象から除外）。
+                            resolution_mismatched.push(((m, n, k), label));
+                        }
                     }
                     None => skipped.push(((m, n, k), label)),
                 }
@@ -405,7 +436,10 @@ mod macos_impl {
 
         let below_threshold: Vec<_> = ratios.iter().filter(|(_, _, ratio)| *ratio < 1.0).collect();
 
-        let verdict = if !skipped.is_empty() || !gate_exceeded.is_empty() {
+        let verdict = if !skipped.is_empty()
+            || !gate_exceeded.is_empty()
+            || !resolution_mismatched.is_empty()
+        {
             "undetermined"
         } else if below_threshold.is_empty() {
             "route_ok"
@@ -419,11 +453,13 @@ mod macos_impl {
 
         println!("--- フェーズ 2 総括 ---");
         println!(
-            "cells_measured={} cells_skipped={} cells_below_threshold={} cells_gate_exceeded={}",
+            "cells_measured={} cells_skipped={} cells_below_threshold={} cells_gate_exceeded={} \
+             cells_resolution_mismatched={}",
             ratios.len(),
             skipped.len(),
             below_threshold.len(),
-            gate_exceeded.len()
+            gate_exceeded.len(),
+            resolution_mismatched.len()
         );
         if let Some(((m, n, k), label, ratio)) = min_ratio {
             println!("min_b_over_a_tflops={ratio:.4} at shape=({m},{n},{k}) pattern={label}");
@@ -436,6 +472,12 @@ mod macos_impl {
             let (label, spread_a, spread_b) = (cell.pattern, cell.spread_a, cell.spread_b);
             println!(
                 "gate_exceeded_cell shape=({m},{n},{k}) pattern={label} spread_a={spread_a:.4} spread_b={spread_b:.4}"
+            );
+        }
+        for ((m, n, k), label) in &resolution_mismatched {
+            println!(
+                "resolution_mismatched_cell shape=({m},{n},{k}) pattern={label} \
+                 reason=head_resolved_config_differs_from_requested_config"
             );
         }
         for ((m, n, k), label, ratio) in &below_threshold {
@@ -456,9 +498,11 @@ mod macos_impl {
                      全形状基準未達のため現状の判断基準では結線不可"
                 }
                 _ => {
-                    "skip セルまたは spread gate 超過セルが残っており判定不可\
-                     （適格性ゲート不成立、またはラウンド間ばらつきが大きく \
-                     計測値を信頼できないセルがある）"
+                    "skip セル・spread gate 超過セル・resolution 不一致\
+                     セルのいずれかが残っており判定不可（適格性ゲート不成立、\
+                     ラウンド間ばらつきが大きく計測値を信頼できない、または\
+                     要求構成と実際にフォールバック解決された構成が不一致の\
+                     いずれか）"
                 }
             }
         );
