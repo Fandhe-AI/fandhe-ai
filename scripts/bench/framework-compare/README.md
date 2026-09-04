@@ -409,10 +409,14 @@ bash run_gemm_gate_metal.sh 0.6.0
 # イシュー #1148）。さらに OS 系列一致だけでは「同一 OS 系列の任意ホスト」を
 # 排除できないため、Git 管理外のローカルファイル
 # `gemm-gate-trusted-hosts.local`（`gemm-gate-trusted-hosts.local.example` を
-# コピーし、`hostname` コマンドの実出力を登録して作成）に登録した実ホスト名
-# との照合も必須（未作成・該当タグ未登録・不一致はいずれも計測前に
-# fail-closed で終了する。codex-review P1 PRRT_kwDOTuUCJc6fK_lT 対応）:
-cp gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local  # 初回のみ。hostname 出力を登録する
+# コピーし、`hostname` コマンドの実出力と機体識別子〈Linux:
+# `/etc/machine-id`／Darwin: `IOPlatformUUID`。hostname 単独は実行者自身が
+# 別ホストで同名詐称できてしまうため codex-review P1 PRRT_kwDOTuUCJc6fLNFe
+# 対応で追加〉を `<hostname>|<machine-id/IOPlatformUUID>` 形式で登録して作成）
+# に登録した値との照合も必須（未作成・該当タグ未登録・hostname/機体識別子
+# いずれかの不一致はいずれも計測前に fail-closed で終了する。codex-review
+# P1 PRRT_kwDOTuUCJc6fK_lT・PRRT_kwDOTuUCJc6fLNFe 対応）:
+cp gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local  # 初回のみ。hostname・機体識別子を登録する
 GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.6.0     # DGX Spark 側
 GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.6.0  # M4 Max 側
 
@@ -444,7 +448,9 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
   計 3 起動 × 3 サイズ × 5 run = 45 run。cuda/metal は従来どおり 2 起動 ×
   3 サイズ × 5 run = 30 run）`results/raw/results-<node>-gemm-gate-<label>.jsonl`
   （`<node>` は cuda=`dgx`／metal=`m4max`／cpu=`dgx-cpu`〈Linux〉・
-  `m4max-cpu`〈Darwin〉。`uname -s` で自動判定）へ記録する。失敗は
+  `m4max-cpu`〈Darwin〉。`GEMM_GATE_CPU_NODE_TAG` の明示指定必須。`uname -s`
+  は指定値との OS 系列整合確認のみに使用し、不一致は fail-closed で
+  終了する）へ記録する。失敗は
   `results/raw/skipped-<node>-gemm-gate-<label>.log` に記録する（数値を捏造しない）。
   Metal の熱・電源状態は `pmset -g therm`・`uptime`（`sudo` 不要。CUDA の
   `nvidia-smi` に相当する device 別スナップショット）で実行ログへ記録する

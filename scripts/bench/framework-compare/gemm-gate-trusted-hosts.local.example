@@ -2,11 +2,18 @@
 #
 # `run_gemm_gate.sh`（device=cpu）は GEMM_GATE_CPU_NODE_TAG（dgx-cpu／
 # m4max-cpu）の自己申告だけでは正式実機（DGX Spark GB10／Apple M4 Max）の
-# 識別を確定しない（codex-review P1 PRRT_kwDOTuUCJc6fK_lT。任意の Linux／
-# Darwin ホストが正式実機のファイル名で計測結果を生成してしまう誤帰属対策）。
-# このファイルに実ホスト名を登録し、実行時のホスト名（`hostname` コマンドの
-# 出力）と照合する。ファイル不在・該当タグ未記載・不一致はいずれも
-# fail-closed で計測を中断する。
+# 識別を確定しない（codex-review P1 PRRT_kwDOTuUCJc6fK_lT）。hostname 単独
+# 照合も、実行者自身が信頼ファイル（本ファイルのコピー先）と実行ホストの
+# 両方を用意できるため、正式実機以外のホストで hostname を dgx-cpu/
+# m4max-cpu 名義に揃えて登録すれば通過できてしまう弱点があった
+# （codex-review P1 PRRT_kwDOTuUCJc6fLNFe）。これを受け、hostname に加え
+# OS が発行する不揮発な機体識別子（Linux: `/etc/machine-id`、Darwin:
+# `IOPlatformUUID`。`hostnamectl set-hostname` 等より変更の心理的・手続き的
+# コストが高い）も照合する。なお本チェックは正規の署名基盤ではなく、実行者
+# 自身による意図的な詐称までは技術的に排除できない（別ホストでの誤実行と
+# いった事故の fail-closed 検出が目的）。
+# ファイル不在・該当タグ未記載・hostname/機体識別子いずれかの不一致・機体
+# 識別子取得不能はいずれも fail-closed で計測を中断する。
 #
 # **この `.example` ファイル自体は Git の追跡対象**であり、実値を書いては
 # ならない（docs/real-hardware-verification-env.local.md.example と同じ方針。
@@ -15,13 +22,17 @@
 #
 # 使い方:
 #   cp gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local
-#   # 各自の実機で `hostname` を実行し、その出力をそのまま右辺へ記入する
+#   # 各自の実機で以下を実行し、出力をそのまま右辺へ記入する
+#   #   hostname
+#   #   Linux:  cat /etc/machine-id
+#   #   Darwin: ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/{print $4}'
 #
-# 書式: `<GEMM_GATE_CPU_NODE_TAG の値>=<hostname コマンドの出力>`
-#   （`#` 始まりの行はコメント。空行は無視）
+# 書式: `<GEMM_GATE_CPU_NODE_TAG の値>=<hostname コマンドの出力>|<machine-id/IOPlatformUUID>`
+#   （`#` 始まりの行はコメント。空行は無視。`|` 区切りの片方でも欠けると
+#   旧書式とみなし fail-closed で終了する）
 #
-# dgx-cpu=<ここに DGX Spark GB10 の hostname 出力を記入>
-# m4max-cpu=<ここに Apple M4 Max の hostname 出力を記入>
+# dgx-cpu=<ここに DGX Spark GB10 の hostname 出力を記入>|<ここに /etc/machine-id の出力を記入>
+# m4max-cpu=<ここに Apple M4 Max の hostname 出力を記入>|<ここに IOPlatformUUID を記入>
 #
 # 別ファイルを使いたい場合は環境変数 GEMM_GATE_TRUSTED_HOSTS_FILE で
 # 絶対パスを指定できる（このディレクトリ配下に置きたくない場合等）。

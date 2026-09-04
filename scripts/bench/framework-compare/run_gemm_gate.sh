@@ -55,7 +55,15 @@
 # 出力は `run_all_cuda.sh` と同じ「失敗を捏造しない」方針（skipped ログへ
 # 記録。security.md A08）。
 set -u
-cd "$(dirname "$0")"
+# SCRIPT_DIR はここで一度だけ解決して固定する（`cd` 後に相対パス引数
+# `$0` から再度 `dirname` を計算すると、`$0` が相対パス（wrapper 経由の
+# 相対起動を含む）の場合に「新しい cwd から見た相対パス」として再解釈され
+# パスが二重化する。Cursor Bugbot 指摘: run_gemm_gate_cpu.sh 経由の相対
+# 起動で TRUSTED_HOSTS_FILE 既定値が二重化し、既存の
+# gemm-gate-trusted-hosts.local が「存在しない」扱いになって CPU ゲート
+# 計測が fail-closed で終了する不具合があった）。
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 DEVICE=${1:-}
 LABEL=${2:-}
@@ -120,25 +128,39 @@ else
       ;;
   esac
 
-  # ホスト fingerprint 照合（codex-review P1 PRRT_kwDOTuUCJc6fK_lT 対応）:
-  # 直前の uname -s 検査は OS 系列の一致しか示さず、任意の Linux/Darwin ホストが
-  # GEMM_GATE_CPU_NODE_TAG を自己申告すれば正式実機（DGX Spark／M4 Max）の
-  # ファイル名・manifest で計測結果を生成できてしまう（誤帰属。同一トピックの
-  # 過去指摘 PRRT_kwDOTuUCJc6fK1Pe は uname -s 検査で対応済みだが、それだけでは
-  # 「同一 OS 系列の任意ホスト」を排除できない）。実ホスト名は公開版
-  # ドキュメントへ直接書けない方針（docs/real-hardware-verification-env.md
-  # 冒頭注記）のため、同方針を踏襲し、Git 追跡対象外のローカル限定ファイル
-  # （$TRUSTED_HOSTS_FILE）に保持したホスト名と実ホスト名を照合する。
-  # ファイル不在／該当タグの記載なし／不一致はいずれも計測前に fail-closed で
-  # 終了する（未検証の実行に正式実機のファイル名を与えない。security.md A08）。
-  TRUSTED_HOSTS_FILE=${GEMM_GATE_TRUSTED_HOSTS_FILE:-"$(dirname "$0")/gemm-gate-trusted-hosts.local"}
+  # ホスト fingerprint 照合（codex-review P1 PRRT_kwDOTuUCJc6fK_lT・
+  # PRRT_kwDOTuUCJc6fLNFe 対応）:
+  # 直前の uname -s 検査は OS 系列の一致しか示さず、当初の hostname 単独照合
+  # （$(hostname) の出力）も「実行者自身が信頼ファイルへ任意の値を書ける」
+  # 弱点を持つ（hostname は `hostnamectl set-hostname` 等で実行者が自由に
+  # 変更・詐称でき、信頼ファイル自体も同じ実行者が作成するローカルファイルの
+  # ため、正式実機以外のホストで自分の hostname を dgx-cpu/m4max-cpu 名義に
+  # 揃えて登録すれば照合を通過できてしまい、正式実機への誤帰属を防げない）。
+  # 本スクリプトが対処できるのは「別ホストで誤って実行してしまう事故」の
+  # fail-closed 検出までであり、実行者自身による意図的な詐称は正規の署名基盤
+  # なしには技術的に排除できない（実行環境はサンドボックス外の任意ホストで
+  # あり、鍵配布・署名検証基盤は本スクリプトのスコープ外）。この前提の上で
+  # 検出強度を上げるため、hostname に加え OS が発行する不揮発な機体識別子
+  # （Linux: `/etc/machine-id`〈D-Bus 仕様のホスト固有 128bit ID。OS
+  # インストール時に生成され通常は書き換えない〉、Darwin: `IOPlatformUUID`
+  # 〈`ioreg` 経由で取得するハードウェア基板固有 UUID〉）も照合する。
+  # hostname 単独より変更の心理的・手続き的コストが高い（明示的に上書きする
+  # 操作が必要）ため、誤帰属の抑止力を高める設計とする。実ホスト名・機体
+  # 識別子は公開版ドキュメントへ直接書けない方針（
+  # docs/real-hardware-verification-env.md 冒頭注記）のため、同方針を踏襲し、
+  # Git 追跡対象外のローカル限定ファイル（$TRUSTED_HOSTS_FILE）に保持した
+  # 値と実際の値を照合する。ファイル不在／該当タグの記載なし／
+  # hostname・機体識別子いずれかの不一致／機体識別子取得不能はいずれも
+  # 計測前に fail-closed で終了する（未検証の実行に正式実機のファイル名を
+  # 与えない。security.md A08）。
+  TRUSTED_HOSTS_FILE=${GEMM_GATE_TRUSTED_HOSTS_FILE:-"$SCRIPT_DIR/gemm-gate-trusted-hosts.local"}
   if [[ ! -f "$TRUSTED_HOSTS_FILE" ]]; then
     echo "ERROR: 正式実機ホスト照合用ファイルが見つかりません: $TRUSTED_HOSTS_FILE" >&2
-    echo "  gemm-gate-trusted-hosts.local.example をコピーし、実ホスト名（$CPU_NODE_TAG=<hostname コマンドの出力>）を記入してください（このファイルは Git 管理外）。" >&2
+    echo "  gemm-gate-trusted-hosts.local.example をコピーし、実ホスト名・機体識別子（$CPU_NODE_TAG=<hostname>|<machine-id/IOPlatformUUID>）を記入してください（このファイルは Git 管理外）。" >&2
     echo "  GEMM_GATE_TRUSTED_HOSTS_FILE=<絶対パス> で別ファイルを指定することもできます。" >&2
     exit 1
   fi
-  EXPECTED_HOSTNAME=""
+  EXPECTED_ENTRY=""
   while IFS='=' read -r raw_key raw_value; do
     key="${raw_key#"${raw_key%%[![:space:]]*}"}"
     key="${key%"${key##*[![:space:]]}"}"
@@ -146,17 +168,45 @@ else
     if [[ "$key" == "$CPU_NODE_TAG" ]]; then
       value="${raw_value#"${raw_value%%[![:space:]]*}"}"
       value="${value%"${value##*[![:space:]]}"}"
-      EXPECTED_HOSTNAME="$value"
+      EXPECTED_ENTRY="$value"
       break
     fi
   done < "$TRUSTED_HOSTS_FILE"
-  if [[ -z "$EXPECTED_HOSTNAME" ]]; then
-    echo "ERROR: $TRUSTED_HOSTS_FILE に $CPU_NODE_TAG のホスト名記載がありません（例: $CPU_NODE_TAG=<hostname>）。" >&2
+  if [[ -z "$EXPECTED_ENTRY" ]]; then
+    echo "ERROR: $TRUSTED_HOSTS_FILE に $CPU_NODE_TAG の登録がありません（例: $CPU_NODE_TAG=<hostname>|<machine-id/IOPlatformUUID>）。" >&2
+    exit 1
+  fi
+  EXPECTED_HOSTNAME="${EXPECTED_ENTRY%%|*}"
+  if [[ "$EXPECTED_ENTRY" == *"|"* ]]; then
+    EXPECTED_FINGERPRINT="${EXPECTED_ENTRY#*|}"
+  else
+    EXPECTED_FINGERPRINT=""
+  fi
+  if [[ -z "$EXPECTED_HOSTNAME" || -z "$EXPECTED_FINGERPRINT" ]]; then
+    echo "ERROR: $TRUSTED_HOSTS_FILE の $CPU_NODE_TAG 登録が旧書式（hostname のみ）です。<hostname>|<machine-id/IOPlatformUUID> 形式で機体識別子も併記してください（codex-review P1 PRRT_kwDOTuUCJc6fLNFe 対応。hostname 単独照合は実行者自身による詐称を排除できないため）。" >&2
     exit 1
   fi
   ACTUAL_HOSTNAME=$(hostname 2>/dev/null || uname -n)
   if [[ "$ACTUAL_HOSTNAME" != "$EXPECTED_HOSTNAME" ]]; then
     echo "ERROR: 実ホスト名（${ACTUAL_HOSTNAME}）が $TRUSTED_HOSTS_FILE 内の $CPU_NODE_TAG 登録ホスト名（${EXPECTED_HOSTNAME}）と一致しません。実機の取り違えの可能性。" >&2
+    exit 1
+  fi
+  ACTUAL_FINGERPRINT=""
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ -r /etc/machine-id ]]; then
+      ACTUAL_FINGERPRINT=$(cat /etc/machine-id 2>/dev/null | tr -d '[:space:]')
+    fi
+  else
+    if command -v ioreg >/dev/null 2>&1; then
+      ACTUAL_FINGERPRINT=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
+    fi
+  fi
+  if [[ -z "$ACTUAL_FINGERPRINT" ]]; then
+    echo "ERROR: 機体識別子を取得できません（Linux: /etc/machine-id 読み取り不能／Darwin: ioreg 実行不能）。実機の同一性を検証できないため計測を中断します（fail-closed）。" >&2
+    exit 1
+  fi
+  if [[ "$ACTUAL_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]]; then
+    echo "ERROR: 実機体識別子が $TRUSTED_HOSTS_FILE 内の $CPU_NODE_TAG 登録値と一致しません。実機の取り違え、または hostname のみを詐称した別ホストの可能性。" >&2
     exit 1
   fi
 
