@@ -299,10 +299,24 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
   上記閾値の対策候補（driver プール release threshold 引き上げ・
   `cuMemAlloc` 同期割当への切替）は #1149 で A/B 計測テスト
   （`crates/backend-cuda/tests/large_buffer_percall_alloc_ab_1149.rs`。
-  P0〜P4 + `CudaMmaGemm` 本番経路レプリカ〈P7・dim4096〉）を追加した。
-  本エージェントの実行環境に CUDA 実機がないため GB10 実測は未完了
-  （計測コード・実測記入欄付き doc 骨子のみが成果物。詳細・実行手順は
-  `docs/perf/cuda-percall-alloc-pool-threshold-ab.md`）。
+  P0〜P4 + `CudaMmaGemm` 本番経路レプリカ〈P7・dim4096〉）を追加し、
+  イシュー #1153 の Phase 0 として GB10 実機実測を完走させた。孤立
+  マイクロベンチマーク（P1〜P3）では release threshold 引き上げ（案 A）
+  が段差比 1.00〜1.03 倍へ縮小したが、`CudaMmaGemm::run_f16` の現実的な
+  レプリカ（P7）では同じ案 A が median を約 10 倍悪化させる（26〜28 ms
+  → 265〜285 ms）という正反対の結果になり、**案 A の本番結線は不採用と
+  確定した**（案 B・A+B は本 PR では見送り。判定・実測詳細は
+  `docs/perf/cuda-percall-alloc-pool-threshold-ab.md` §5・§7）。続けて
+  #1153 は `gemm_mma.rs` の per-call デバイス確保をアプリ層
+  `SizeClassPool` 経由へ結線する A/B を GB10 実機で実施し、512〜2048
+  は改善する一方 dim4096 は同一バイナリ交互実行で fast 率が raw 50%
+  対 pooled 17% へ悪化するため `run_f16`（本番経路）への結線を見送った
+  （`docs/perf/cuda-gemm-mma-f16-pool-wiring.md` §5・§7）。#956/#1025
+  非再現事象との関係（#1146 が確定した固定 32 MiB 上限機構は #956 の
+  症状サイズ〈N=2048・16 MiB〉を直接説明せず別原因である一方、同族の
+  可能性は未検証の推測として区別）は
+  `docs/perf/cuda-fresh-gemm-n2048-overhead-diagnosis.md` §11（#1157）
+  にまとめた。
 - **`mma_sync_f16`（`CudaMmaGemm`）の性能改善の本番結線検討**（#1131。#1007 配下）:
   §4.1 で確認した `mma.sync`/`ldmatrix`/`cp.async` パイプラインの約 3〜13 倍（形状依存。
   dim2048 で約 7 倍・dim4096 で約 11〜13 倍。§3.1 の初回診断計測・§4.3 の是正後実測
@@ -401,7 +415,9 @@ f16 assert（`production_f16_kernel_tflops > tiled_kernel_tflops`）は
 4096 は base・after いずれの転送込み計測（§8.2）でも #1130（本ファイル §4.2
 「dim=4096 のプロトコル検査失敗（二峰性）の原因」）の per-call アロケーション
 病態の影響を受け run 間ばらつきが大きい。本イシューはこの病態の原因調査・
-修正を行わない（#1130 のスコープのまま）。
+修正を行わない（#1130 のスコープのまま）。#1130 ツリー（#1146・#1149・#1153）
+の最終結論・#956/#1025 非再現事象との関係は §6「切り出し先」で更新済み・
+`docs/perf/cuda-fresh-gemm-n2048-overhead-diagnosis.md` §11（#1157）に集約した。
 
 ### 8.6 関連ファイル（本節分）
 
