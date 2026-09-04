@@ -1,0 +1,568 @@
+   Compiling fandhe-ai-backend-cuda v0.6.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 3.80s
+     Running unittests src/lib.rs (/home/fandhe/work/target-fandhe-ai/release/deps/fandhe_ai_backend_cuda-33ba6bf87379d1a1)
+
+running 36 tests
+test context_cache::async_ordering_poison_tests::invalidate_with_real_stream_sync_drains_pending_launches_and_reactivates ... ok
+test context_cache::poison_recovery_real_device_tests::poison_from_real_cuda_error_fails_closed_to_unrecoverable ... ok
+test context_cache::poison_recovery_real_device_tests::poison_recovery_real_probe_restores_active_and_rejects_stale_generation ... ok
+test context_cache::tests::cached_allocator_keeps_distinct_contexts_on_same_ordinal_separate ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_g_cached_device_select_reference ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v0_fresh_drop_each_trial ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v1_keep_alive ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v2_pre_touched ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v3_pooled_output ... ok
+test gemm::tests::tiled_f32_swizzle_variant_matches_base_bit_exact_output ... ok
+test gemm::tests::tiled_f32_swizzle_variant_matches_cpu_reference ... ok
+test gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress ... ok
+test gemm::tests::wmma_tf32_diagnostic_constructors_force_expected_kernel ... ok
+test gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes ... ok
+test gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress ... ok
+test gemm::tests::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096 ... ok
+test gemm::tests::wmma_tf32_staged_new_wires_size_conditional_swizzle_into_production_constructor ... ok
+test gemm::tests::wmma_tf32_staged_pad_variant_matches_base_bit_exact_output ... ok
+test gemm::tests::wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output ... ok
+test gemm_mma::tests::mma_f16_derived_stage_count_matches_default_stage_count_bit_exact ... ok
+test gemm_mma::tests::mma_f16_new_wires_size_conditional_swizzle_into_production_constructor ... ok
+test gemm_mma::tests::mma_f16_stage_count_does_not_change_bit_exact_output ... ok
+test gemm_mma::tests::mma_f16_swizzle_variant_matches_base_bit_exact_output ... ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_classic ... ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select ... ok
+test init_cost_diag_tests::init_cost_diag_e2e_matches_framework_compare_shape ... ok
+test init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm ... ok
+test init_cost_diag_tests::init_cost_diag_phase_breakdown ... ok
+test init_cost_diag_tests::init_cost_diag_reused_handle_steady_state_reference ... ok
+test kernels_mma::tests::mma_f16_sources_compile_with_nvrtc_when_available ... ok
+test kernels_wmma_opt::tests::wmma_opt_sources_compile_with_nvrtc_when_available ... ok
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+test module_cache_wiring_tests::cuda_gemm_new_stores_disk_cache_entry_for_every_kernel ... ok
+test nvrtc::jit_cache_bench_tests::jit_cache_bench_cold_compile_vs_warm_load_latency ... ok
+test nvrtc::jit_cache_bench_tests::jit_cache_bench_module_load_and_throughput_parity ... ok
+test nvrtc::tests::nvrtc_version_returns_ok_on_real_device ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 592 filtered out; finished in 73.02s
+
+     Running tests/async_ordering_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/async_ordering_real_device-8439fc60d141c584)
+
+running 3 tests
+test forward_backward_update_chain_matches_cpu_reference_without_explicit_sync ... ok
+test many_chained_sgd_steps_then_immediate_download_matches_cpu_reference ... ok
+test probe_has_async_alloc_on_real_device ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.56s
+
+     Running tests/backend_ops_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/backend_ops_real_device-fa04208ef1385ea4)
+
+running 1 test
+test backend_ops_gemm_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.43s
+
+     Running tests/cpu_cuda_mma_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/cpu_cuda_mma_parity-bbcca1dfda71fa73)
+
+running 4 tests
+test mma_f16_cross_check_against_wmma_f16 ... ok
+test mma_f16_k4096_stress ... FAILED
+test mma_f16_k4096_stress_non_regression ... ok
+test mma_f16_matches_reference_across_shapes ... ok
+
+failures:
+
+---- mma_f16_k4096_stress stdout ----
+
+thread 'mma_f16_k4096_stress' (1740511) panicked at crates/backend-cuda/tests/cpu_cuda_mma_parity.rs:65:5:
+K4096 stress 256x256x4096: 複合判定 FAIL（fail_count=101/65536, max_abs_diff=6.250e-2, max_rel_err=5.849e-1, mean_abs_diff=7.646e-5, mean_rel_err=3.071e-5, p50_abs_diff=0.000e0, p99_abs_diff=4.883e-4, p999_abs_diff=1.562e-2）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    mma_f16_k4096_stress
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.40s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test cpu_cuda_mma_parity`
+     Running tests/cpu_cuda_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/cpu_cuda_parity-8b872702a0b80903)
+
+running 2 tests
+test naive_f32_k4096_stress_poc_v2_5 ... ok
+test naive_f32_matches_reference_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.67s
+
+     Running tests/cpu_cuda_tiled_pipeline_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/cpu_cuda_tiled_pipeline_parity-5423b964568b680b)
+
+running 11 tests
+test launch_tiled_pipeline_zero_dim_shape_is_noop_without_launch ... ok
+test run_tiled_f32_dispatches_to_pipeline_for_aligned_shape ... ok
+test run_tiled_f32_falls_back_to_classic_for_unaligned_shape ... ok
+test tiled_pipeline_k4096_stress ... ok
+test tiled_pipeline_matches_reference_across_shapes ... ok
+test tiled_pipeline_matches_tiled_f32_classic_bit_exact ... ok
+test tiled_pipeline_rejects_misaligned_shape ... ok
+test tiled_pipeline_rejects_mismatched_context_buffers ... ok
+test tiled_pipeline_rejects_mismatched_context_handle ... ok
+test tiled_pipeline_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_pipeline_zero_k_returns_all_zero ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 10.80s
+
+     Running tests/cpu_cuda_wmma_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/cpu_cuda_wmma_parity-5f6544a7c264bdb9)
+
+running 4 tests
+test wmma_f16_cross_check_against_naive_f16 ... ok
+test wmma_f16_k4096_stress ... FAILED
+test wmma_f16_k4096_stress_non_regression ... ok
+test wmma_f16_matches_reference_across_shapes ... ok
+
+failures:
+
+---- wmma_f16_k4096_stress stdout ----
+
+thread 'wmma_f16_k4096_stress' (1740559) panicked at crates/backend-cuda/tests/cpu_cuda_wmma_parity.rs:92:5:
+K4096 stress 256x256x4096: 複合判定 FAIL（fail_count=99/65536, max_abs_diff=6.250e-2, max_rel_err=3.328e-2, mean_abs_diff=7.562e-5, mean_rel_err=1.653e-5, p50_abs_diff=0.000e0, p99_abs_diff=4.883e-4, p999_abs_diff=1.562e-2）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    wmma_f16_k4096_stress
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.68s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test cpu_cuda_wmma_parity`
+     Running tests/device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/device-b228722463871a4b)
+
+running 1 test
+test select_device_zero_on_real_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.21s
+
+     Running tests/device_init.rs (/home/fandhe/work/target-fandhe-ai/release/deps/device_init-9e78bce92d3b1b55)
+
+running 1 test
+test new_returns_ok_with_valid_metadata_on_real_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.31s
+
+     Running tests/dispatch_boundary.rs (/home/fandhe/work/target-fandhe-ai/release/deps/dispatch_boundary-42ef0881f4a7ef41)
+
+running 2 tests
+test large_shape_mma_pipeline_vs_wmma_tflops_record ... ok
+test small_shape_matrix_unit_has_no_floor_tflops_record ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.52s
+
+     Running tests/gemm_auto.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_auto-9b59e839ff8b8a5e)
+
+running 8 tests
+test f16_matrix_unit_impl_reports_selected_implementation ... ok
+test mma_field_is_constructed_by_compute_capability_gate ... ok
+test run_f16_k4096_stress_non_regression_route_aware ... ok
+test run_f16_matches_cpu_reference ... ok
+test run_f16_matches_cpu_reference_across_aligned_shapes ... ok
+test run_f16_misaligned_shape_falls_back_to_wmma_or_tiled ... ok
+test run_f32_matches_cpu_reference ... ok
+test select_tile_config_for_device_succeeds_on_real_hardware ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.14s
+
+     Running tests/gemm_bias_act_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_bias_act_parity-e1426ae3bfcc12fc)
+
+running 2 tests
+test elementwise_matches_cpu_across_ops ... ok
+test gemm_bias_act_matches_cpu_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.45s
+
+     Running tests/gemm_f32_variants.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_f32_variants-f25d26d5f1018f82)
+
+running 2 tests
+test run_f32_matches_cpu_reference_across_variant_shapes ... ok
+test split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 10.92s
+
+     Running tests/gemm_mma.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_mma-c5e6db9a942c4f4f)
+
+running 5 tests
+test mma_f16_accepts_noop_shape_with_misaligned_n_when_k_is_zero ... ok
+test mma_f16_rejects_m_exceeding_grid_dim_y_limit ... ok
+test mma_f16_rejects_non_multiple_of_eight_shape ... ok
+test mma_f16_zero_dim_shape_returns_empty_without_launch ... ok
+test mma_f16_zero_k_returns_all_zero ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.65s
+
+     Running tests/gemm_mma_tf32.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_mma_tf32-589af427f56d1360)
+
+running 4 tests
+test launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch ... ok
+test mma_tf32_k4096_stress ... ok
+test mma_tf32_matches_reference_across_shapes ... ok
+test mma_tf32_zero_dim_shape_returns_empty_without_launch ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 9.94s
+
+     Running tests/gemm_mma_tf32_triage.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_mma_tf32_triage-2a3db3a72fcdde87)
+
+running 2 tests
+test mma_tf32_triage_all_shapes ... ok
+test mma_tf32_triage_dump ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 9.85s
+
+     Running tests/gemm_naive.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_naive-54885e8f6b4c29dc)
+
+running 3 tests
+test naive_f16_runs_and_returns_expected_shape ... ok
+test naive_f32_zero_dim_shape_returns_empty_without_launch ... ok
+test run_naive_f32_rejects_length_mismatch_before_launch ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.74s
+
+     Running tests/gemm_resident_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_resident_real_device-29a3d43f31fb037b)
+
+running 2 tests
+test gemm_resident_lhs_matches_cpu_reference_on_real_device ... ok
+test gemm_resident_rhs_matches_cpu_reference_on_real_device ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests/gemm_tf32_optin.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_tf32_optin-2ea71dc08da7dcbf)
+
+running 2 tests
+test gemm_tf32_optin_on_matches_cpu_across_shapes ... FAILED
+test gemm_tf32_optin_on_wiring_matches_run_wmma_tf32 ... ok
+
+failures:
+
+---- gemm_tf32_optin_on_matches_cpu_across_shapes stdout ----
+
+thread 'gemm_tf32_optin_on_matches_cpu_across_shapes' (1740920) panicked at crates/backend-cuda/tests/gemm_tf32_optin.rs:128:5:
+tf32 opt-in gemm cpu-cuda parity m=512 n=512 k=512: 複合判定 FAIL（fail_count=42298/262144, max_abs_diff=1.043e-2, max_rel_err=1.567e0, mean_abs_diff=1.569e-3, mean_rel_err=1.456e-3, p50_abs_diff=1.321e-3, p99_abs_diff=5.076e-3, p999_abs_diff=6.459e-3）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gemm_tf32_optin_on_matches_cpu_across_shapes
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.14s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_tf32_optin`
+     Running tests/gemm_tiled.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_tiled-44083fb75f5c8361)
+
+running 6 tests
+test tiled_f16_runs_and_returns_expected_shape ... ok
+test tiled_f32_matches_cpu_reference_across_shapes ... ok
+test tiled_f32_matches_cpu_reference_k_stress ... ok
+test tiled_f32_outperforms_naive_at_4096 ... FAILED
+test tiled_f32_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_f32_zero_k_returns_all_zero ... ok
+
+failures:
+
+---- tiled_f32_outperforms_naive_at_4096 stdout ----
+
+thread 'tiled_f32_outperforms_naive_at_4096' (1740950) panicked at crates/backend-cuda/tests/gemm_tiled.rs:251:5:
+tiled GEMM must outperform naive by at least 1.1x at M=N=K=4096 (PoC-v2-3 realized ~1.46x); measured speedup=0.235x (naive_median=0.127833s, tiled_median=0.543063s)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tiled_f32_outperforms_naive_at_4096
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.16s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_tiled`
+     Running tests/gemm_wmma.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_wmma-b8215faf830b33a3)
+
+running 2 tests
+test wmma_f16_zero_dim_shape_returns_empty_without_launch ... ok
+test wmma_f16_zero_k_returns_all_zero ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.74s
+
+     Running tests/gemm_wmma_f16_opt.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_wmma_f16_opt-c31d611388f04276)
+
+running 5 tests
+test wmma_f16_opt_k4096_stress ... FAILED
+test wmma_f16_opt_k4096_stress_non_regression ... ok
+test wmma_f16_opt_matches_reference_across_shapes ... ok
+test wmma_f16_opt_zero_dim_shape_returns_empty_without_launch ... ok
+test wmma_f16_opt_zero_k_returns_all_zero ... ok
+
+failures:
+
+---- wmma_f16_opt_k4096_stress stdout ----
+
+thread 'wmma_f16_opt_k4096_stress' (1741147) panicked at crates/backend-cuda/tests/gemm_wmma_f16_opt.rs:57:5:
+K4096 stress 256x256x4096: 複合判定 FAIL（fail_count=81/65536, max_abs_diff=3.125e-2, max_rel_err=2.302e-1, mean_abs_diff=7.627e-5, mean_rel_err=1.987e-5, p50_abs_diff=0.000e0, p99_abs_diff=4.883e-4, p999_abs_diff=1.562e-2）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    wmma_f16_opt_k4096_stress
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.76s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_wmma_f16_opt`
+     Running tests/gemm_wmma_tf32.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_wmma_tf32-646bc74929a42489)
+
+running 4 tests
+test wmma_tf32_matches_reference_across_shapes ... ok
+test wmma_tf32_routed_path_baselines_do_not_regress ... ok
+test wmma_tf32_zero_dim_shape_returns_empty_without_launch ... ok
+test wmma_tf32_zero_k_returns_all_zero ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.01s
+
+     Running tests/gemm_wmma_tf32_opt.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_wmma_tf32_opt-73fe5a2f26c67fa9)
+
+running 5 tests
+test wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096 ... ok
+test wmma_tf32_opt_zero_dim_shape_returns_empty_without_launch ... ok
+test wmma_tf32_opt_zero_k_returns_all_zero ... ok
+test wmma_tf32_routed_path_baselines_do_not_regress ... ok
+test wmma_tf32_routed_path_matches_reference_across_shapes ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 15.33s
+
+     Running tests/gemm_wmma_tf32_staged.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_wmma_tf32_staged-84c59b643aa54dea)
+
+running 4 tests
+test wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096 ... ok
+test wmma_tf32_staged_matches_reference_across_shapes ... ok
+test wmma_tf32_staged_zero_dim_shape_returns_empty_without_launch ... ok
+test wmma_tf32_staged_zero_k_returns_all_zero ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 5.30s
+
+     Running tests/large_buffer_percall_alloc_ab_1149.rs (/home/fandhe/work/target-fandhe-ai/release/deps/large_buffer_percall_alloc_ab_1149-a3079eb5893d1aef)
+
+running 1 test
+test large_buffer_percall_alloc_ab_record ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 702.99s
+
+     Running tests/large_buffer_percall_alloc_transfer_triage.rs (/home/fandhe/work/target-fandhe-ai/release/deps/large_buffer_percall_alloc_transfer_triage-b88bc803a1c177cd)
+
+running 2 tests
+test large_buffer_percall_alloc_transfer_triage_record ... ok
+test large_buffer_percall_fixed_total_size_comparison ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 185.29s
+
+     Running tests/memory_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/memory_real_device-12cf5522620211f3)
+
+running 5 tests
+test alloc_zeroed_returns_all_zero_on_real_hardware ... ok
+test peak_allocated_bytes_matches_known_allocation_size_on_real_hardware ... ok
+test pooled_memory_reuses_buffer_and_zero_fills_on_real_hardware ... ok
+test repeated_alloc_drop_cycles_do_not_leak_device_memory ... ok
+test upload_download_roundtrip_is_bit_exact_on_real_hardware ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+     Running tests/mma_tf32_vs_wmma_tf32_staged.rs (/home/fandhe/work/target-fandhe-ai/release/deps/mma_tf32_vs_wmma_tf32_staged-daa0261813f5dd00)
+
+running 2 tests
+test mma_tf32_matches_wmma_tf32_staged_across_shapes ... ok
+test mma_tf32_matches_wmma_tf32_staged_k4096_stress ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.27s
+
+     Running tests/mse_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/mse_parity-a6d6e56aabf25149)
+
+running 1 test
+test mse_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.36s
+
+     Running tests/parity_nonregression.rs (/home/fandhe/work/target-fandhe-ai/release/deps/parity_nonregression-0886adf58ec8524a)
+
+running 1 test
+test parity_baselines_do_not_regress ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 9.15s
+
+     Running tests/rmsnorm_backward_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/rmsnorm_backward_parity-0c37f186c138ef5c)
+
+running 2 tests
+test rmsnorm_backward_dw_split_matches_cpu_across_shapes ... ok
+test rmsnorm_backward_matches_cpu_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 4.69s
+
+     Running tests/rmsnorm_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/rmsnorm_parity-afdf2569f443ed42)
+
+running 2 tests
+test rmsnorm_matches_backend_cpu_directly ... ok
+test rmsnorm_matches_cpu_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.75s
+
+     Running tests/setmaxnreg_probe_dec_accel_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/setmaxnreg_probe_dec_accel_real_device-d4a1820b58d50f89)
+
+running 1 test
+test setmaxnreg_dec_accel_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/setmaxnreg_probe_dec_base_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/setmaxnreg_probe_dec_base_real_device-2110fd69a0c1e72b)
+
+running 1 test
+test setmaxnreg_dec_base_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/setmaxnreg_probe_incdec_accel_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/setmaxnreg_probe_incdec_accel_real_device-2a63f4d368083520)
+
+running 1 test
+test setmaxnreg_incdec_accel_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/setmaxnreg_probe_incdec_base_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/setmaxnreg_probe_incdec_base_real_device-16a1b3ee737a2838)
+
+running 1 test
+test setmaxnreg_incdec_base_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/sgd_device_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/sgd_device_real_device-c6c973741b8156a2)
+
+running 2 tests
+test momentum_sgd_matches_cpu_reference_across_100_steps ... ok
+test momentum_sgd_matches_cpu_reference_across_multiple_steps ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/softmax_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/softmax_parity-5c647cb6ac53246a)
+
+running 3 tests
+test softmax_matches_backend_cpu_directly ... ok
+test softmax_matches_cpu_across_shapes ... ok
+test softmax_numerically_stable_for_extreme_inputs ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.94s
+
+     Running tests/specialized_mma_f16_sweep_1159.rs (/home/fandhe/work/target-fandhe-ai/release/deps/specialized_mma_f16_sweep_1159-224ab182da1f92ce)
+
+running 1 test
+test specialized_mma_f16_sweep_1159_all_shapes_and_presets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.61s
+
+     Running tests/specialized_mma_f16_triage.rs (/home/fandhe/work/target-fandhe-ai/release/deps/specialized_mma_f16_triage-97116dd77435edf0)
+
+running 2 tests
+test specialized_mma_f16_triage_dump ... ok
+test specialized_mma_f16_triage_exact_integer_inputs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 1.38s
+
+     Running tests/specialized_mma_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/specialized_mma_parity-d45052ace2ff572d)
+
+running 5 tests
+test specialized_mma_f16_handles_k_zero_noop_with_misaligned_n ... ok
+test specialized_mma_f16_matches_default_and_reference_across_shapes ... ok
+test specialized_mma_f16_static_mnk_rejects_mismatched_launch_shape ... ok
+test specialized_mma_f16_static_nk_reuses_across_dynamic_m ... ok
+test specialized_mma_kernel_handle_compile_reuses_process_local_module_cache ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.32s
+
+     Running tests/splitk_reorder_error_host_model.rs (/home/fandhe/work/target-fandhe-ai/release/deps/splitk_reorder_error_host_model-69aabb3bac816056)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/tensor_core_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/tensor_core_real_device-dadbb95cc8592f87)
+
+running 2 tests
+test tensor_core_parity_record ... FAILED
+test tensor_core_tflops_record ... FAILED
+
+failures:
+
+---- tensor_core_parity_record stdout ----
+
+thread 'tensor_core_parity_record' (1809230) panicked at crates/backend-cuda/tests/tensor_core_real_device.rs:477:5:
+tensor_core_parity_record tf32 512x512x512: 複合判定 FAIL（fail_count=42493/262144, max_abs_diff=9.045e-3, max_rel_err=1.877e0, mean_abs_diff=1.574e-3, mean_rel_err=1.489e-3, p50_abs_diff=1.333e-3, p99_abs_diff=5.094e-3, p999_abs_diff=6.503e-3）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tensor_core_tflops_record stdout ----
+environment: name="NVIDIA GB10" compute_capability=(12, 1) arch="compute_121"
+tflops_record_kernel_only path=tiled_f32 tflops=10.269 report={"schema_version":"1","name":"gemm_tiled_f32_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.013384443,"q1_secs":0.013249887,"q3_secs":0.013645331,"samples_secs":[0.013395195,0.013696993,0.013200241,0.013173905,0.013263039,0.013384443,0.013217328,0.013848142,0.013436297,0.013645331,0.013968314,0.013261438,0.013280719,0.013249887,0.013205024,0.013887356,0.012990999,0.013978297,0.013342813,0.013407866]}
+tflops_record_kernel_only path=wmma_tf32_staged tflops=14.067 report={"schema_version":"1","name":"gemm_wmma_tf32_staged_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.009770136,"q1_secs":0.00976444,"q3_secs":0.009772152,"samples_secs":[0.009775577,0.009752297,0.009770136,0.009756345,0.0097702,0.010471875,0.009769353,0.009765065,0.00976444,0.009771945,0.009770696,0.009772152,0.009756649,0.009761753,0.009777272,0.009753993,0.009764633,0.010960388,0.009774504,0.009768137]}
+tflops_record_kernel_only path=wmma_f16_opt(reference_only) tflops=4.539 report={"schema_version":"1","name":"gemm_wmma_f16_opt_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.030277693,"q1_secs":0.030267038,"q3_secs":0.030285053,"samples_secs":[0.030274589,0.030277693,0.030265437,0.030284525,0.030285053,0.030248382,0.030285532,0.030285965,0.030278637,0.030296716,0.030274013,0.030809805,0.030275341,0.030288924,0.030267038,0.030253549,0.030268109,0.030247358,0.030280685,0.030261661]}
+tflops_record_kernel_only path=wmma_f16_opt(production; f16_matrix_unit_impl()=Wmma〈MMA_PRIORITY_PRODUCTION_ENABLED=false 保留中〉) tflops=4.539
+
+thread 'tensor_core_tflops_record' (1809233) panicked at crates/backend-cuda/tests/tensor_core_real_device.rs:396:5:
+本番 f16 経路（wmma_f16_opt・カーネル単体 4.539 TFLOPS）が tiled f32（カーネル単体 10.269 TFLOPS）を上回りませんでした（受け入れ条件: PoC-v2-3 参考値 1.832 TFLOPS 超過。転送区間を除いたカーネル単体での比較。比較対象は `CudaGemmAuto::run_f16` が実際に選ぶ実装〈イシュー #1160〉。docs/perf/cuda-wmma-f16-perf-triage.md §8 参照）
+
+
+failures:
+    tensor_core_parity_record
+    tensor_core_tflops_record
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.11s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test tensor_core_real_device`
+     Running tests/tma_probe_real_device.rs (/home/fandhe/work/target-fandhe-ai/release/deps/tma_probe_real_device-754cc2d79bd859ad)
+
+running 3 tests
+test tma_execution_probe ... ok
+test tma_execution_probe_cta ... ok
+test tma_nvrtc_compile_probe ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s
+
+     Running tests/transpose_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/transpose_parity-a9cfe13be163d891)
+
+running 4 tests
+test launch_tiled_transposed_f32_zero_clears_stale_buffer_when_k_is_zero ... ok
+test tiled_transposed_f32_matches_host_transposed_tiled_and_cpu_reference ... ok
+test transpose_f16_all_variants_bit_exact_match_cpu_reference ... ok
+test transpose_f32_all_variants_bit_exact_match_cpu_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.93s
+
+     Running tests/wmma_f16_opt_perf_triage.rs (/home/fandhe/work/target-fandhe-ai/release/deps/wmma_f16_opt_perf_triage-6288cee06bec4c45)
+
+running 1 test
+test wmma_f16_opt_perf_triage_record ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.30s
+
+     Running unittests examples/cuda_floor_bench.rs (/home/fandhe/work/target-fandhe-ai/release/examples/cuda_floor_bench-4d1c3c9f908a6aa7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running unittests examples/device_attributes_dump.rs (/home/fandhe/work/target-fandhe-ai/release/examples/device_attributes_dump-bba7d780a0073fe2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running unittests examples/wmma_tolerance_probe.rs (/home/fandhe/work/target-fandhe-ai/release/examples/wmma_tolerance_probe-d8308ef1bf1c2022)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+   Doc-tests fandhe_ai_backend_cuda
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 6 targets failed:
+    `-p fandhe-ai-backend-cuda --test cpu_cuda_mma_parity`
+    `-p fandhe-ai-backend-cuda --test cpu_cuda_wmma_parity`
+    `-p fandhe-ai-backend-cuda --test gemm_tf32_optin`
+    `-p fandhe-ai-backend-cuda --test gemm_tiled`
+    `-p fandhe-ai-backend-cuda --test gemm_wmma_f16_opt`
+    `-p fandhe-ai-backend-cuda --test tensor_core_real_device`

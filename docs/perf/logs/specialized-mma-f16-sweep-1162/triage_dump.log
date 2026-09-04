@@ -1,0 +1,88 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/specialized_mma_f16_triage.rs (/home/fandhe/work/target-fandhe-ai/release/deps/specialized_mma_f16_triage-97116dd77435edf0)
+
+running 1 test
+test specialized_mma_f16_triage_dump ... --- (256,512,1024) seed=4003 [FAIL repro] ---
+  DYNAMIC_ALL vs default run_f16 bit-match: true
+  [(a) gpu vs cpu_ref(f16)] fail_count=30/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=3.052e-5 max_rel_err=3.341e-2 mean_abs_diff=1.011e-5
+  [(b) gpu vs f16(exact)] fail_count=25/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=3.052e-5 max_rel_err=2.933e-2 mean_abs_diff=9.538e-6
+  [(b') cpu_ref(f16) vs f16(exact)] fail_count=2/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=1.621e-5 max_rel_err=2.159e-2 mean_abs_diff=3.930e-6
+  [(p) gpu(->f32) vs exact(f32, pre-round)] fail_count=26/131072 max_abs_diff=1.558e-2 max_fail_abs_diff=2.330e-5 max_rel_err=2.906e-2 mean_abs_diff=1.497e-3
+  [(p) cpu_ref(f32, pre-round) vs exact(f32, pre-round)] fail_count=2/131072 max_abs_diff=6.485e-5 max_fail_abs_diff=1.591e-5 max_rel_err=2.253e-2 mean_abs_diff=4.186e-6
+  [(c, reference only) chunk16-model(f16) vs gpu] fail_count=23/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=3.052e-5 max_rel_err=2.804e-2 mean_abs_diff=9.820e-6
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=256x512x1024 seed=4003 fail_count=30/131072 max_abs_diff=1.562500e-2 max_rel_err=3.341149e-2 mean_abs_diff=1.010961e-5
+  [gpu vs cpu_ref, exact-referenced] cell (row=6, col=326): gpu=3.784180e-3 cpu_ref=3.770828e-3 exact=3.772417e-3 |gpu-exact|=1.176e-5 |cpu-exact|=1.589e-6 ulp(gpu,exact)=6
+  [gpu vs cpu_ref, exact-referenced] cell (row=42, col=279): gpu=6.671906e-3 cpu_ref=6.683350e-3 exact=6.680895e-3 |gpu-exact|=8.989e-6 |cpu-exact|=2.455e-6 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=51, col=180): gpu=-4.108429e-3 cpu_ref=-4.119873e-3 exact=-4.113761e-3 |gpu-exact|=5.332e-6 |cpu-exact|=6.112e-6 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=51, col=309): gpu=-5.569458e-3 cpu_ref=-5.588531e-3 exact=-5.578046e-3 |gpu-exact|=8.588e-6 |cpu-exact|=1.049e-5 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=56, col=31): gpu=1.356506e-2 cpu_ref=1.358032e-2 exact=1.357251e-2 |gpu-exact|=7.445e-6 |cpu-exact|=7.813e-6 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=61, col=166): gpu=-7.266998e-3 cpu_ref=-7.247925e-3 exact=-7.250479e-3 |gpu-exact|=1.652e-5 |cpu-exact|=2.554e-6 ulp(gpu,exact)=4
+  [gpu vs cpu_ref, exact-referenced] cell (row=65, col=488): gpu=8.826256e-4 cpu_ref=8.935928e-4 exact=8.916951e-4 |gpu-exact|=9.070e-6 |cpu-exact|=1.898e-6 ulp(gpu,exact)=19
+  [gpu vs cpu_ref, exact-referenced] cell (row=72, col=82): gpu=-9.490967e-3 cpu_ref=-9.506226e-3 exact=-9.502884e-3 |gpu-exact|=1.192e-5 |cpu-exact|=3.342e-6 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=73, col=229): gpu=9.017944e-3 cpu_ref=9.033203e-3 exact=9.027942e-3 |gpu-exact|=9.998e-6 |cpu-exact|=5.261e-6 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=74, col=457): gpu=-1.152039e-2 cpu_ref=-1.150513e-2 exact=-1.151031e-2 |gpu-exact|=1.008e-5 |cpu-exact|=5.180e-6 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=90, col=155): gpu=-2.030945e-2 cpu_ref=-2.027893e-2 exact=-2.029003e-2 |gpu-exact|=1.942e-5 |cpu-exact|=1.110e-5 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=103, col=140): gpu=-1.330566e-2 cpu_ref=-1.332092e-2 exact=-1.331854e-2 |gpu-exact|=1.288e-5 |cpu-exact|=2.379e-6 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=104, col=22): gpu=3.471375e-4 cpu_ref=3.583431e-4 exact=3.575261e-4 |gpu-exact|=1.039e-5 |cpu-exact|=8.170e-7 ulp(gpu,exact)=44
+  [gpu vs cpu_ref, exact-referenced] cell (row=113, col=152): gpu=3.227234e-3 cpu_ref=3.248215e-3 exact=3.242015e-3 |gpu-exact|=1.478e-5 |cpu-exact|=6.200e-6 ulp(gpu,exact)=8
+  [gpu vs cpu_ref, exact-referenced] cell (row=120, col=113): gpu=2.111816e-2 cpu_ref=2.108765e-2 exact=2.109803e-2 |gpu-exact|=2.013e-5 |cpu-exact|=1.039e-5 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=146, col=422): gpu=-8.041382e-3 cpu_ref=-8.018494e-3 exact=-8.026228e-3 |gpu-exact|=1.515e-5 |cpu-exact|=7.734e-6 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=155, col=120): gpu=7.186890e-3 cpu_ref=7.175446e-3 exact=7.176888e-3 |gpu-exact|=1.000e-5 |cpu-exact|=1.442e-6 ulp(gpu,exact)=3
+  [gpu vs cpu_ref, exact-referenced] cell (row=157, col=356): gpu=1.085663e-2 cpu_ref=1.087189e-2 exact=1.087089e-2 |gpu-exact|=1.426e-5 |cpu-exact|=1.002e-6 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=164, col=210): gpu=5.496979e-3 cpu_ref=5.508423e-3 exact=5.508188e-3 |gpu-exact|=1.121e-5 |cpu-exact|=2.351e-7 ulp(gpu,exact)=3
+  [gpu vs cpu_ref, exact-referenced] cell (row=171, col=60): gpu=-7.564545e-3 cpu_ref=-7.579803e-3 exact=-7.571856e-3 |gpu-exact|=7.312e-6 |cpu-exact|=7.947e-6 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=175, col=225): gpu=-1.123047e-2 cpu_ref=-1.121521e-2 exact=-1.122336e-2 |gpu-exact|=7.114e-6 |cpu-exact|=8.145e-6 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=178, col=101): gpu=-7.057190e-3 cpu_ref=-7.041931e-3 exact=-7.044395e-3 |gpu-exact|=1.280e-5 |cpu-exact|=2.463e-6 ulp(gpu,exact)=3
+  [gpu vs cpu_ref, exact-referenced] cell (row=181, col=71): gpu=1.107788e-2 cpu_ref=1.109314e-2 exact=1.109344e-2 |gpu-exact|=1.556e-5 |cpu-exact|=2.992e-7 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=196, col=397): gpu=-4.158020e-3 cpu_ref=-4.169464e-3 exact=-4.170481e-3 |gpu-exact|=1.246e-5 |cpu-exact|=1.017e-6 ulp(gpu,exact)=3
+  [gpu vs cpu_ref, exact-referenced] cell (row=199, col=132): gpu=3.839493e-3 cpu_ref=3.826141e-3 exact=3.827518e-3 |gpu-exact|=1.197e-5 |cpu-exact|=1.377e-6 ulp(gpu,exact)=6
+  [gpu vs cpu_ref, exact-referenced] cell (row=199, col=165): gpu=1.895142e-2 cpu_ref=1.892090e-2 exact=1.892811e-2 |gpu-exact|=2.330e-5 |cpu-exact|=7.215e-6 ulp(gpu,exact)=2
+  [gpu vs cpu_ref, exact-referenced] cell (row=207, col=459): gpu=1.846313e-2 cpu_ref=1.843262e-2 exact=1.844170e-2 |gpu-exact|=2.144e-5 |cpu-exact|=9.079e-6 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=222, col=366): gpu=-1.316071e-2 cpu_ref=-1.314545e-2 exact=-1.315110e-2 |gpu-exact|=9.609e-6 |cpu-exact|=5.650e-6 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] cell (row=226, col=408): gpu=-5.462646e-3 cpu_ref=-5.481720e-3 exact=-5.475829e-3 |gpu-exact|=1.318e-5 |cpu-exact|=5.890e-6 ulp(gpu,exact)=3
+  [gpu vs cpu_ref, exact-referenced] cell (row=241, col=365): gpu=-1.136017e-2 cpu_ref=-1.137543e-2 exact=-1.136832e-2 |gpu-exact|=8.147e-6 |cpu-exact|=7.111e-6 ulp(gpu,exact)=1
+  [gpu vs cpu_ref, exact-referenced] fail_count=30 small_exact(|exact|<1e-2)=18 gpu_err<=2x_cpu_err_or_tiny=30 ulp<=1=10
+  [gpu vs cpu_ref, exact-referenced] row%16 histogram: [0, 3, 3, 2, 2, 1, 1, 3, 4, 1, 3, 2, 0, 2, 1, 2]
+  [gpu vs cpu_ref, exact-referenced] col%8  histogram: [4, 3, 2, 2, 5, 6, 5, 3]
+  [gpu vs cpu_ref, exact-referenced] row%BM(64) histogram: [0, 1, 0, 0, 1, 0, 1, 2, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 2, 1, 2, 0, 1, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0]
+  [gpu vs cpu_ref, exact-referenced] col%BN(128) histogram: [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 2, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+--- (256,512,1024) seed=7101 ---
+  DYNAMIC_ALL vs default run_f16 bit-match: true
+  [(a) gpu vs cpu_ref(f16)] fail_count=20/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=3.052e-5 max_rel_err=7.104e-2 mean_abs_diff=1.152e-5
+  [(b) gpu vs f16(exact)] fail_count=13/131072 max_abs_diff=3.125e-2 max_fail_abs_diff=2.122e-5 max_rel_err=6.873e-2 mean_abs_diff=1.132e-5
+  [(b') cpu_ref(f16) vs f16(exact)] fail_count=2/131072 max_abs_diff=3.125e-2 max_fail_abs_diff=1.526e-5 max_rel_err=1.173e-2 mean_abs_diff=5.135e-6
+  [(p) gpu(->f32) vs exact(f32, pre-round)] fail_count=13/131072 max_abs_diff=1.564e-2 max_fail_abs_diff=2.125e-5 max_rel_err=6.881e-2 mean_abs_diff=1.501e-3
+  [(p) cpu_ref(f32, pre-round) vs exact(f32, pre-round)] fail_count=1/131072 max_abs_diff=6.104e-5 max_fail_abs_diff=1.146e-5 max_rel_err=1.124e-2 mean_abs_diff=4.233e-6
+  [(c, reference only) chunk16-model(f16) vs gpu] fail_count=14/131072 max_abs_diff=3.125e-2 max_fail_abs_diff=2.074e-5 max_rel_err=6.718e-2 mean_abs_diff=1.121e-5
+TRIAGE_ROW test=specialized_mma_f16_triage_dump shape=256x512x1024 seed=7101 fail_count=20/131072 max_abs_diff=1.562500e-2 max_rel_err=7.104247e-2 mean_abs_diff=1.151802e-5
+--- (256,512,1024) seed=7102 ---
+  DYNAMIC_ALL vs default run_f16 bit-match: true
+  [(a) gpu vs cpu_ref(f16)] fail_count=20/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=3.052e-5 max_rel_err=4.326e-1 mean_abs_diff=1.153e-5
+  [(b) gpu vs f16(exact)] fail_count=14/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=2.289e-5 max_rel_err=4.831e-1 mean_abs_diff=1.133e-5
+  [(b') cpu_ref(f16) vs f16(exact)] fail_count=3/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=1.526e-5 max_rel_err=8.911e-2 mean_abs_diff=4.734e-6
+  [(p) gpu(->f32) vs exact(f32, pre-round)] fail_count=12/131072 max_abs_diff=1.559e-2 max_fail_abs_diff=2.046e-5 max_rel_err=4.844e-1 mean_abs_diff=1.497e-3
+  [(p) cpu_ref(f32, pre-round) vs exact(f32, pre-round)] fail_count=1/131072 max_abs_diff=5.341e-5 max_fail_abs_diff=1.483e-5 max_rel_err=9.123e-2 mean_abs_diff=4.212e-6
+  [(c, reference only) chunk16-model(f16) vs gpu] fail_count=13/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=2.289e-5 max_rel_err=3.315e-1 mean_abs_diff=1.112e-5
+TRIAGE_ROW test=specialized_mma_f16_triage_dump shape=256x512x1024 seed=7102 fail_count=20/131072 max_abs_diff=1.562500e-2 max_rel_err=4.325843e-1 mean_abs_diff=1.152561e-5
+--- (256,512,1024) seed=7103 ---
+  DYNAMIC_ALL vs default run_f16 bit-match: true
+  [(a) gpu vs cpu_ref(f16)] fail_count=15/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=1.621e-5 max_rel_err=4.913e-2 mean_abs_diff=1.015e-5
+  [(b) gpu vs f16(exact)] fail_count=9/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=3.052e-5 max_rel_err=2.717e-2 mean_abs_diff=1.014e-5
+  [(b') cpu_ref(f16) vs f16(exact)] fail_count=0/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=0.000e0 max_rel_err=2.258e-2 mean_abs_diff=3.615e-6
+  [(p) gpu(->f32) vs exact(f32, pre-round)] fail_count=10/131072 max_abs_diff=1.537e-2 max_fail_abs_diff=2.777e-5 max_rel_err=2.728e-2 mean_abs_diff=1.500e-3
+  [(p) cpu_ref(f32, pre-round) vs exact(f32, pre-round)] fail_count=0/131072 max_abs_diff=5.722e-5 max_fail_abs_diff=0.000e0 max_rel_err=2.246e-2 mean_abs_diff=4.211e-6
+  [(c, reference only) chunk16-model(f16) vs gpu] fail_count=10/131072 max_abs_diff=1.562e-2 max_fail_abs_diff=3.052e-5 max_rel_err=2.308e-2 mean_abs_diff=1.029e-5
+TRIAGE_ROW test=specialized_mma_f16_triage_dump shape=256x512x1024 seed=7103 fail_count=15/131072 max_abs_diff=1.562500e-2 max_rel_err=4.913295e-2 mean_abs_diff=1.014821e-5
+--- (128,256,128) seed=4002 [control, known pass] ---
+  DYNAMIC_ALL vs default run_f16 bit-match: true
+  [(a) gpu vs cpu_ref(f16)] fail_count=0/32768 max_abs_diff=7.812e-3 max_fail_abs_diff=0.000e0 max_rel_err=5.938e-3 mean_abs_diff=1.123e-6
+  [(b) gpu vs f16(exact)] fail_count=0/32768 max_abs_diff=7.812e-3 max_fail_abs_diff=0.000e0 max_rel_err=7.117e-3 mean_abs_diff=9.210e-7
+  [(b') cpu_ref(f16) vs f16(exact)] fail_count=0/32768 max_abs_diff=1.953e-3 max_fail_abs_diff=0.000e0 max_rel_err=2.005e-3 mean_abs_diff=2.883e-7
+  [(p) gpu(->f32) vs exact(f32, pre-round)] fail_count=0/32768 max_abs_diff=3.908e-3 max_fail_abs_diff=0.000e0 max_rel_err=6.823e-3 mean_abs_diff=5.319e-4
+  [(p) cpu_ref(f32, pre-round) vs exact(f32, pre-round)] fail_count=0/32768 max_abs_diff=6.676e-6 max_fail_abs_diff=0.000e0 max_rel_err=2.035e-3 mean_abs_diff=4.927e-7
+  [(c, reference only) chunk16-model(f16) vs gpu] fail_count=0/32768 max_abs_diff=7.812e-3 max_fail_abs_diff=0.000e0 max_rel_err=3.571e-3 mean_abs_diff=1.016e-6
+TRIAGE_ROW test=specialized_mma_f16_triage_dump shape=128x256x128 seed=4002 fail_count=0/32768 max_abs_diff=7.812500e-3 max_rel_err=5.938242e-3 mean_abs_diff=1.123381e-6
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 1.28s
+
