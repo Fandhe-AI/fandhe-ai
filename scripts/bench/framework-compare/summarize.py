@@ -492,6 +492,24 @@ _TRAIN_PHASES_REQUIRED_PHASES = {
     ),
 }
 
+# `gemm_phases`（(a'') 節。イシュー #1182）専用の必須 phase 名・順序・件数。
+# `bench-fandhe --task gemm --mode reuse --phases`（`bench-fandhe/src/
+# main.rs` の `PHASE_GEMM_*` 定数群）が出力する唯一の mode（`reuse`。
+# `--mode fresh --phases` は MEASURE_ERROR で dispatch が拒否するため
+# producer 側に fresh 版は存在しない）。`_TRAIN_PHASES_REQUIRED_PHASES` と
+# 同じ「集合・順序・件数の完全一致」検査方針を踏襲する
+# （`_gemm_phases_validate` 参照）。
+_GEMM_PHASES_MODES = ("reuse",)
+_GEMM_PHASES_REQUIRED_PHASES = {
+    "reuse": (
+        "matmul",
+        "to_tensor",
+        "host_copy",
+        "checksum",
+        "iter_total",
+    ),
+}
+
 
 def _valid_phase_name(value):
     """`phase` 文字列を producer 側（`bench_common::validate_phase_name`）と
@@ -1886,6 +1904,232 @@ def _train_phases_section(rel, rows):
     return lines, any_invalid
 
 
+# `task:"gemm_phases"` 行の集計（(a'') 節。イシュー #1182）。#1142 §4.3・
+# §8 が「reuse の計測境界に残る H2D／D2H／同期の固定費が candle 比を
+# 押し下げている」と推定した内容を、`_train_phases_*` と同じ検証方針
+# （必須 phase 名・順序・件数の完全一致・時間値 allowlist・
+# `step_total`（gemm 側は `iter_total`）比の 100% 超過検出）で実測確定
+# する。`train_phases` と同じく他節から独立している（(a) GEMM 節・
+# `--target` ゲート・checksum 突合・parity 集計は `task == "gemm"` のみを
+# 読み `gemm_phases` を無視する。`_matching_rows`／`gemm_checksum_mismatches`
+# の呼び出し元参照）。
+
+
+def _gemm_phases_groups(rows):
+    """`task == "gemm_phases"` 行を `(device, mode, size)` ごとにグループ化
+    する（出現順を保持）。`device`/`mode`/`size` は外部 JSONL 由来のため
+    型・allowlist 検証してからグループ化キーへ使う
+    （`_train_phases_groups` と同じ理由・同じ方針）。
+
+    戻り値: (groups, skipped)
+    """
+    groups = {}
+    skipped = []
+    for r in rows:
+        if r.get("task") != "gemm_phases":
+            continue
+        device = r.get("device")
+        mode = r.get("mode")
+        size = r.get("size")
+        size_ok = _is_plain_number(size) and not _non_integral(size) and int(size) > 0
+        if (
+            not (isinstance(device, str) and device in DEVICE_ORDER)
+            or mode not in _GEMM_PHASES_MODES
+            or not size_ok
+        ):
+            skipped.append(r)
+            continue
+        groups.setdefault((device, mode, int(size)), []).append(r)
+    return groups, skipped
+
+
+def _gemm_phases_devices(groups):
+    """`_gemm_phases_groups` が返した `groups` のキー `(device, mode, size)`
+    を DEVICE_ORDER → size 昇順の順で返す（mode は現状 "reuse" のみ）。
+    """
+
+    def rank(key):
+        device, _mode, size = key
+        device_rank = DEVICE_ORDER.index(device) if device in DEVICE_ORDER else len(DEVICE_ORDER)
+        return (device_rank, size)
+
+    return sorted(groups.keys(), key=rank)
+
+
+def _gemm_phases_validate(group_rows, mode):
+    """1 つの `(device, mode, size)` グループ内の `gemm_phases` 行を検証
+    する。`_train_phases_validate` と同じ検証方針（外部 JSONL 由来の
+    `phase`/`phase_index`/時間値の allowlist 検証・`iter_total`（本節の
+    分母。`train_phases` の `step_total` に相当）の一意性・各 phase 中央値
+    が `iter_total` を超過しないこと・必須 phase 名の集合・順序・件数の
+    完全一致）を `_GEMM_PHASES_REQUIRED_PHASES`・`"iter_total"` 分母で
+    適用する。
+
+    戻り値: (entries, invalid, iter_total_median, phase_set_reason)
+    """
+    invalid = False
+    keyed = {}
+    unresolved = []
+    for r in group_rows:
+        phase = r.get("phase")
+        phase_index = r.get("phase_index")
+        phase_ok = _valid_phase_name(phase)
+        index_ok = (
+            _is_plain_number(phase_index)
+            and not _non_integral(phase_index)
+            and int(phase_index) >= 0
+        )
+        if not phase_ok or not index_ok:
+            invalid = True
+            unresolved.append((phase if phase_ok else "?", r, "phase/phase_index が不正な値"))
+            continue
+        pi = int(phase_index)
+        if pi in keyed:
+            invalid = True
+            unresolved.append((phase, r, f"phase_index {pi} が重複"))
+            continue
+        keyed[pi] = (phase, r)
+
+    name_to_pis = {}
+    for pi, (phase, _r) in keyed.items():
+        name_to_pis.setdefault(phase, []).append(pi)
+    duplicate_names = {name for name, pis in name_to_pis.items() if len(pis) > 1}
+    if duplicate_names:
+        invalid = True
+
+    denom_pis = name_to_pis.get("iter_total", [])
+    if len(denom_pis) != 1:
+        invalid = True
+        iter_total_median = None
+    else:
+        iter_total_median = _safe_time_s(keyed[denom_pis[0]][1].get("median_s"))
+        if iter_total_median is None:
+            invalid = True
+
+    entries = []
+    for pi in sorted(keyed):
+        phase, r = keyed[pi]
+        time_validator = _safe_time_s if phase == "iter_total" else _safe_phase_time_s
+        median = time_validator(r.get("median_s"))
+        q1 = time_validator(r.get("q1_s"))
+        q3 = time_validator(r.get("q3_s"))
+        reason = None
+        if median is None or q1 is None or q3 is None:
+            reason = "時間値が不正な値"
+        if reason is None and r.get("mode") == "reuse" and _safe_time_s(r.get("init_s")) is None:
+            reason = "init_s が不正な値"
+        if reason is None and phase in duplicate_names:
+            reason = f"phase 名 '{phase}' が重複"
+        if (
+            reason is None
+            and iter_total_median is not None
+            and median is not None
+            and median > iter_total_median * (1.0 + 1e-9)
+        ):
+            reason = "iter_total 比が 100% を超過"
+        if reason is not None:
+            invalid = True
+        entries.append({"phase": phase, "median": median, "q1": q1, "q3": q3, "reason": reason})
+    for phase, r, reason in unresolved:
+        entries.append({"phase": phase, "median": None, "q1": None, "q3": None, "reason": reason})
+
+    phase_set_reason = None
+    required = _GEMM_PHASES_REQUIRED_PHASES.get(mode)
+    if required is not None:
+        actual_order = tuple(keyed[pi][0] for pi in sorted(keyed))
+        if actual_order != required:
+            invalid = True
+            missing = [p for p in required if p not in name_to_pis]
+            extra = [p for p in name_to_pis if p not in required]
+            details = []
+            if missing:
+                details.append(f"欠落: {', '.join(missing)}")
+            if extra:
+                details.append(f"未知: {', '.join(extra)}")
+            if not details:
+                details.append("phase の並び順が想定と不一致")
+            phase_set_reason = f"mode={mode!r} の必須 phase 集合と不一致（{'; '.join(details)}）"
+
+    return entries, invalid, iter_total_median, phase_set_reason
+
+
+def _gemm_phases_section(rel, rows):
+    """(a'') 節の Markdown 行を生成する。`gemm_phases` 行が無ければ
+    `([], False)`（節自体を出力しない。`_train_phases_section` と同じ
+    方針）。
+    """
+    groups, skipped = _gemm_phases_groups(rows)
+    if not groups and not skipped:
+        return [], False
+
+    lines = ["### (a'') GEMM reuse 計測境界のフェーズ分解（イシュー #1182）\n"]
+    any_invalid = False
+    for r in skipped:
+        any_invalid = True
+        print(
+            f"warning: {rel}: gemm_phases 行の device={r.get('device')!r}/"
+            f"mode={r.get('mode')!r}/size={r.get('size')!r} が不正な値 — 集計対象外",
+            file=sys.stderr,
+        )
+    for device, mode, size in _gemm_phases_devices(groups):
+        group_rows = groups[(device, mode, size)]
+        entries, invalid, iter_total_median, phase_set_reason = _gemm_phases_validate(group_rows, mode)
+        any_invalid = any_invalid or invalid
+        device_label = DEVICE_LABEL.get(device, device or "?")
+        lines.append(f"#### {device_label} / {mode} / N={size}\n")
+        if invalid:
+            for e in entries:
+                if e["reason"] is not None:
+                    print(
+                        f"warning: {rel}: gemm_phases {device}/{mode}/N={size}/{e['phase']} "
+                        f"— {e['reason']} — 無効データとして表示",
+                        file=sys.stderr,
+                    )
+            if iter_total_median is None:
+                print(
+                    f"warning: {rel}: gemm_phases {device}/{mode}/N={size} "
+                    "の iter_total 行が欠落または不正 — 比の算出不能",
+                    file=sys.stderr,
+                )
+            if phase_set_reason is not None:
+                print(
+                    f"warning: {rel}: gemm_phases {device}/{mode}/N={size} — {phase_set_reason}",
+                    file=sys.stderr,
+                )
+        init_val = next(
+            (_safe_time_s(r.get("init_s")) for r in group_rows if r.get("init_s") is not None),
+            None,
+        )
+        init_col = fmt_ms(init_val) if init_val is not None else "無効な値"
+        lines.append(f"初期化(init_s): {init_col}\n")
+        lines.append("| フェーズ | 中央値 | Q1 | Q3 | iter_total 比 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        median_total = 0.0
+        median_total_valid = bool(entries)
+        for e in entries:
+            phase_col = f"{e['phase']}（無効: {e['reason']}）" if e["reason"] else e["phase"]
+            median_col = fmt_ms(e["median"]) if e["median"] is not None else "無効な値"
+            q1_col = fmt_ms(e["q1"]) if e["q1"] is not None else "無効な値"
+            q3_col = fmt_ms(e["q3"]) if e["q3"] is not None else "無効な値"
+            if e["median"] is not None and iter_total_median is not None:
+                ratio_col = f"{e['median'] / iter_total_median * 100:.1f}%"
+            else:
+                ratio_col = "-"
+            lines.append(f"| {phase_col} | {median_col} | {q1_col} | {q3_col} | {ratio_col} |")
+            if e["phase"] != "iter_total":
+                if e["median"] is None or e["reason"] is not None:
+                    median_total_valid = False
+                else:
+                    median_total += e["median"]
+        if median_total_valid:
+            lines.append(
+                f"\n- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため "
+                f"iter_total と一致しない場合がある）: {fmt_ms(median_total)}"
+            )
+        lines.append("")
+    return lines, any_invalid
+
+
 def section(path, rows):
     lines = []
     rel = os.path.relpath(path, HERE)
@@ -2239,6 +2483,14 @@ def section(path, rows):
     train_phases_lines, has_train_phases_invalid = _train_phases_section(rel, rows)
     lines.extend(train_phases_lines)
 
+    # (a'') GEMM reuse 計測境界のフェーズ分解（イシュー #1182。`bench-fandhe
+    # --task gemm --mode reuse --phases` が出力する `task:"gemm_phases"`
+    # 行）。(a) GEMM 節・`--target` ゲート・checksum 突合・parity 集計は
+    # `task == "gemm"` のみを読むため本節の追加による既存表への影響は
+    # ない（`_train_phases_section` と同型の独立性）。
+    gemm_phases_lines, has_gemm_phases_invalid = _gemm_phases_section(rel, rows)
+    lines.extend(gemm_phases_lines)
+
     lines.append(
         "### (c) 推論スループット（同 MLP forward のみ、バッチ 64。表のスループットはバッチ/秒 = 1/中央値。1 バッチ = 64 件）\n"
     )
@@ -2351,6 +2603,7 @@ def section(path, rows):
         bool(unverified_rows),
         has_train_reuse_invalid,
         has_train_phases_invalid,
+        has_gemm_phases_invalid,
     )
 
 
@@ -2404,6 +2657,7 @@ def main():
     any_parity_unverified = False
     any_train_reuse_invalid = False
     any_train_phases_invalid = False
+    any_gemm_phases_invalid = False
     gate_section_lines_by_file = []
     gate_records_all = []
     for path in inputs:
@@ -2456,6 +2710,7 @@ def main():
             has_unverified,
             has_train_reuse_invalid,
             has_train_phases_invalid,
+            has_gemm_phases_invalid,
         ) = section(path, rows)
         lines.extend(section_lines)
         any_checksum_mismatch = any_checksum_mismatch or has_mismatch
@@ -2463,6 +2718,7 @@ def main():
         any_parity_unverified = any_parity_unverified or has_unverified
         any_train_reuse_invalid = any_train_reuse_invalid or has_train_reuse_invalid
         any_train_phases_invalid = any_train_phases_invalid or has_train_phases_invalid
+        any_gemm_phases_invalid = any_gemm_phases_invalid or has_gemm_phases_invalid
 
         # イシュー #1051: 目標達成ゲート。--target 指定時のみ計算する
         # （既存の呼び出し元は --target を渡さないため非破壊。モジュール
@@ -2573,6 +2829,7 @@ def main():
         or any_parity_unverified
         or any_train_reuse_invalid
         or any_train_phases_invalid
+        or any_gemm_phases_invalid
     ) and args.strict:
         if any_checksum_mismatch:
             print(
@@ -2605,6 +2862,13 @@ def main():
                 "error: --strict: 1 件以上の train_phases 行が無効"
                 "（phase/phase_index の不正・重複・step_total 欠落・"
                 "時間値の不正。イシュー #1009）",
+                file=sys.stderr,
+            )
+        if any_gemm_phases_invalid:
+            print(
+                "error: --strict: 1 件以上の gemm_phases 行が無効"
+                "（phase/phase_index の不正・重複・iter_total 欠落・"
+                "時間値の不正。イシュー #1182）",
                 file=sys.stderr,
             )
         # イシュー #1051 実装計画 §3: --strict の無効データ判定（終了コード
