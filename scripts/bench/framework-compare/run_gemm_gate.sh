@@ -119,6 +119,47 @@ else
       fi
       ;;
   esac
+
+  # ホスト fingerprint 照合（codex-review P1 PRRT_kwDOTuUCJc6fK_lT 対応）:
+  # 直前の uname -s 検査は OS 系列の一致しか示さず、任意の Linux/Darwin ホストが
+  # GEMM_GATE_CPU_NODE_TAG を自己申告すれば正式実機（DGX Spark／M4 Max）の
+  # ファイル名・manifest で計測結果を生成できてしまう（誤帰属。同一トピックの
+  # 過去指摘 PRRT_kwDOTuUCJc6fK1Pe は uname -s 検査で対応済みだが、それだけでは
+  # 「同一 OS 系列の任意ホスト」を排除できない）。実ホスト名は公開版
+  # ドキュメントへ直接書けない方針（docs/real-hardware-verification-env.md
+  # 冒頭注記）のため、同方針を踏襲し、Git 追跡対象外のローカル限定ファイル
+  # （$TRUSTED_HOSTS_FILE）に保持したホスト名と実ホスト名を照合する。
+  # ファイル不在／該当タグの記載なし／不一致はいずれも計測前に fail-closed で
+  # 終了する（未検証の実行に正式実機のファイル名を与えない。security.md A08）。
+  TRUSTED_HOSTS_FILE=${GEMM_GATE_TRUSTED_HOSTS_FILE:-"$(dirname "$0")/gemm-gate-trusted-hosts.local"}
+  if [[ ! -f "$TRUSTED_HOSTS_FILE" ]]; then
+    echo "ERROR: 正式実機ホスト照合用ファイルが見つかりません: $TRUSTED_HOSTS_FILE" >&2
+    echo "  gemm-gate-trusted-hosts.local.example をコピーし、実ホスト名（$CPU_NODE_TAG=<hostname コマンドの出力>）を記入してください（このファイルは Git 管理外）。" >&2
+    echo "  GEMM_GATE_TRUSTED_HOSTS_FILE=<絶対パス> で別ファイルを指定することもできます。" >&2
+    exit 1
+  fi
+  EXPECTED_HOSTNAME=""
+  while IFS='=' read -r raw_key raw_value; do
+    key="${raw_key#"${raw_key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    if [[ "$key" == "$CPU_NODE_TAG" ]]; then
+      value="${raw_value#"${raw_value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      EXPECTED_HOSTNAME="$value"
+      break
+    fi
+  done < "$TRUSTED_HOSTS_FILE"
+  if [[ -z "$EXPECTED_HOSTNAME" ]]; then
+    echo "ERROR: $TRUSTED_HOSTS_FILE に $CPU_NODE_TAG のホスト名記載がありません（例: $CPU_NODE_TAG=<hostname>）。" >&2
+    exit 1
+  fi
+  ACTUAL_HOSTNAME=$(hostname 2>/dev/null || uname -n)
+  if [[ "$ACTUAL_HOSTNAME" != "$EXPECTED_HOSTNAME" ]]; then
+    echo "ERROR: 実ホスト名（${ACTUAL_HOSTNAME}）が $TRUSTED_HOSTS_FILE 内の $CPU_NODE_TAG 登録ホスト名（${EXPECTED_HOSTNAME}）と一致しません。実機の取り違えの可能性。" >&2
+    exit 1
+  fi
+
   NODE_TAG="$CPU_NODE_TAG"
 fi
 

@@ -406,7 +406,13 @@ bash run_gemm_gate_metal.sh 0.6.0
 # GEMM_GATE_CPU_NODE_TAG（dgx-cpu／m4max-cpu の明示指定。必須）が実行ホストの
 # OS 系列と矛盾する場合は fail-closed で終了する（`uname -s` だけで正式実機の
 # ファイル名を無条件確定しない。codex-review P1 PRRT_kwDOTuUCJc6fK1Pe 対応。
-# イシュー #1148）:
+# イシュー #1148）。さらに OS 系列一致だけでは「同一 OS 系列の任意ホスト」を
+# 排除できないため、Git 管理外のローカルファイル
+# `gemm-gate-trusted-hosts.local`（`gemm-gate-trusted-hosts.local.example` を
+# コピーし、`hostname` コマンドの実出力を登録して作成）に登録した実ホスト名
+# との照合も必須（未作成・該当タグ未登録・不一致はいずれも計測前に
+# fail-closed で終了する。codex-review P1 PRRT_kwDOTuUCJc6fK_lT 対応）:
+cp gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local  # 初回のみ。hostname 出力を登録する
 GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.6.0     # DGX Spark 側
 GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.6.0  # M4 Max 側
 
