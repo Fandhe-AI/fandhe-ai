@@ -91,14 +91,23 @@ class ParityDumpRow:
         return struct.unpack("<f", struct.pack("<I", self.actual_bits))[0]
 
 
-def parse_dump_lines(lines: Iterable[str], expected_n: int) -> Iterator[ParityDumpRow]:
+def parse_dump_lines(
+    lines: Iterable[str],
+    expected_n: int,
+    error_count: list[int] | None = None,
+) -> Iterator[ParityDumpRow]:
     """`PARITY_DUMP` 行のみを厳密パースして yield する。
 
     `PARITY_DUMP_SUMMARY` 行・その他の stderr 出力は無視する（サマリは
     件数の突合に使うだけで真値計算には不要なため、本関数の対象外とし
     呼び出し元が別途 grep する）。`row*n+col == idx` と `n*n` 範囲内を
     検証し、想定外の行は標準エラーへ警告してスキップする（A03: 破損
-    入力を無条件に信用しない）。
+    入力を無条件に信用しない）。スキップした行数は `error_count`（呼び出し元が
+    渡す単一要素リスト。generator のため戻り値で直接返せない）へ加算する。
+    ダンプ全体が有効行と不正行の混在でも、不正行が 1 件でもあれば呼び出し元
+    （`main`）が非 0 終了させるための検出手段であり、本関数自体は打ち切らず
+    引き続き有効行を yield する（イシュー #1197 codex-review 指摘: 破損ダンプを
+    無視して正常終了することの防止）。
     """
     for lineno, raw in enumerate(lines, start=1):
         line = raw.rstrip("\n")
@@ -107,6 +116,8 @@ def parse_dump_lines(lines: Iterable[str], expected_n: int) -> Iterator[ParityDu
         m = _LINE_RE.match(line)
         if m is None:
             print(f"WARN: line {lineno} は PARITY_DUMP 書式に一致せず無視: {line!r}", file=sys.stderr)
+            if error_count is not None:
+                error_count[0] += 1
             continue
         n = int(m.group("n"))
         if n != expected_n:
@@ -114,6 +125,8 @@ def parse_dump_lines(lines: Iterable[str], expected_n: int) -> Iterator[ParityDu
                 f"WARN: line {lineno} の n={n} が --n {expected_n} と不一致のため無視",
                 file=sys.stderr,
             )
+            if error_count is not None:
+                error_count[0] += 1
             continue
         idx = int(m.group("idx"))
         row = int(m.group("row"))
@@ -123,6 +136,8 @@ def parse_dump_lines(lines: Iterable[str], expected_n: int) -> Iterator[ParityDu
                 f"WARN: line {lineno} の row/col/idx が整合しない（row*n+col={row * n + col}, idx={idx}, n*n={n * n}）ため無視",
                 file=sys.stderr,
             )
+            if error_count is not None:
+                error_count[0] += 1
             continue
         yield ParityDumpRow(
             call=int(m.group("call")),
@@ -292,12 +307,29 @@ def ulp_f32(x: float) -> float:
     return 2.0 ** (e - 23)
 
 
+def _positive_int(value: str) -> int:
+    """`--max-rows` の argparse type: 1 以上の整数のみ許可する。
+
+    0 や負数を許すと `unique_by_idx` へ何も採用されないまま（下段の空判定を
+    素通りしなければ）解析結果が空でも成功扱いになりうる（イシュー #1197
+    codex-review 指摘。A03: 外部入力を検証してから使う）。argparse の型
+    バリデータとして例外を投げることで CLI 起動直後に fail-closed で拒否する。
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"整数として解釈できません: {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"1 以上の整数を指定してください（受領: {parsed}）")
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, required=True, help="GEMM の正方行列一辺長（--size と同じ値）")
     parser.add_argument(
         "--max-rows",
-        type=int,
+        type=_positive_int,
         default=None,
         help=(
             "解析するユニーク fail idx 件数の上限（重複排除後に適用。未指定なら無制限で"
@@ -324,8 +356,9 @@ def main(argv: list[str] | None = None) -> int:
     # くなっていた）。--max-rows はユニーク idx 件数の上限としてのみ、
     # 重複排除後に適用する。
     line_count = 0
+    malformed_count = [0]
     unique_by_idx: dict[int, ParityDumpRow] = {}
-    for r in parse_dump_lines(sys.stdin, n):
+    for r in parse_dump_lines(sys.stdin, n, error_count=malformed_count):
         line_count += 1
         if r.idx not in unique_by_idx:
             if args.max_rows is not None and len(unique_by_idx) >= args.max_rows:
@@ -334,6 +367,21 @@ def main(argv: list[str] | None = None) -> int:
     if line_count == 0:
         print("ERROR: PARITY_DUMP 行が 1 件も見つからなかった", file=sys.stderr)
         return 2
+    if not unique_by_idx:
+        # --max-rows は _positive_int で 1 以上に制限済みだが、念のため
+        # 解析対象が空になるケース全般を fail-closed で拒否する（イシュー
+        # #1197 codex-review 指摘）。
+        print("ERROR: 解析対象のユニーク fail idx が 0 件（--max-rows 指定を確認）", file=sys.stderr)
+        return 2
+    if malformed_count[0] > 0:
+        # 破損行（書式不一致・n 不一致・row/col/idx 不整合）が 1 件でも
+        # あれば、有効行が存在していても正常終了させない（A03: 破損入力を
+        # 無視して成功扱いにしない。イシュー #1197 codex-review 指摘）。
+        print(
+            f"ERROR: 不正な PARITY_DUMP 行が {malformed_count[0]} 件検出された"
+            "（詳細は上記 WARN を参照）。解析結果は出力済みだが非 0 終了する。",
+            file=sys.stderr,
+        )
 
     print(
         f"# n={n} ユニーク fail idx 件数={len(unique_by_idx)} "
@@ -409,6 +457,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"  WARN: idx={idx} の |ref-actual|={err_ref_actual:.6e} がダンプの abs={rec.dump_abs:.6e} と不一致",
                 file=sys.stderr,
             )
+
+    if malformed_count[0] > 0:
+        # 上でダンプ済みの解析結果は診断目的でそのまま出力するが、破損行が
+        # 1 件でも混在していた入力を成功扱いにはしない（イシュー #1197
+        # codex-review 指摘）。
+        return 1
 
     return 0
 
