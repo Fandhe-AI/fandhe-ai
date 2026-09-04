@@ -98,7 +98,7 @@ fandhe-ai/
     │   ├── performance-floor-decision.md # REQ-8 段階的下限の確定判断・追補記録（#158・#386・#393・#577）
     │   ├── gemm-optimization-baseline.md # REQ-8 GEMM 5 行の分母・分子（対象カーネル・実機・PyTorch 版・出典）の突合基準（#481）
     │   ├── oss-gemm-comparison-baseline.md # OSS 直接比較の再現手順・計測境界・ベースライン・再計測キャンペーン表（#755）
-    │   ├── cuda-parity-baseline.md # CUDA Tensor Core 経路 parity 非後退契約のベースライン記録（#491）
+    │   ├── cuda-parity-baseline.md # CUDA Tensor Core 経路 parity 非後退契約のベースライン記録（#491。#1158 で f16 MatrixUnit 経路 mma 優先化の GB10 非後退確認 §12 を追記）
     │   ├── sm121-device-attributes.md # sm_121（DGX Spark GB10）デバイス属性・L1/L2 実効帯域の実測記録（#482）
     │   ├── cuda-gemm-bottleneck-diagnosis.md # CUDA GEMM M=N=K=4096 データ再利用崩壊の定量診断（#486）
     │   ├── metal-gemm-bottleneck-diagnosis.md # Metal GEMM 1024 以降スループット頭打ちの定量診断（#487。#744 是正前・context_cache 導入前の前提。再診断は metal-gemm-bottleneck-rediagnosis.md を参照）
@@ -108,17 +108,18 @@ fandhe-ai/
     │   ├── burn-wgpu-metal-gemm-zero-result.md # framework-compare の Burn(wgpu) Metal GEMM N>=512 全ゼロの原因切り分け（upstream 既知バグ。#965）
     │   ├── cuda-tensor-core-tolerance-opt-remeasurement.md # opt 版 WMMA TF32 カーネルの数値一致誤差分布再実測（GB10 実機計測完了・sm_86 との差分なし。#994・#995）
     │   ├── cuda-tensor-core-tolerance-gb10-scale-sweep.md # GB10（sm_121）実機での入力スケールスイープ再実測・sm_86 との世代差記録（#995）
-    │   ├── cpu-gemm-candle-cpu-retune.md # CPU GEMM マイクロカーネル・packing 再チューニング（pc 外側ループ・A 1 回 pack 候補〈SharedBPcOuter〉。対 gemm crate 逆転狙い。GB10・M4 Max とも実機実測完了・いずれも非採用と結論〈#1140・#1141〉。#1041）
+    │   ├── cpu-gemm-candle-cpu-retune.md # CPU GEMM マイクロカーネル・packing 再チューニング（pc 外側ループ・A 1 回 pack 候補〈SharedBPcOuter〉。対 gemm crate 逆転狙い。GB10・M4 Max とも実機実測完了・いずれも非採用と結論〈#1140・#1141〉。#1041。#1144 で本番結線不要（`RowPanel` 維持）と確定・次候補は承認待ち）
     │   ├── train-linear-epilogue-fusion.md # 学習 forward の Linear+ReLU epilogue 融合（gemm_bias_act／gemm_resident_rhs_act 結線）の起動数 before/after・CPU 実測・Metal/DGX Spark 未実測の明記（#1044）
     │   ├── train-step-phase-breakdown.md # CPU / CUDA / Metal 学習 1 step のフェーズ分解実機実測（M4 Max・DGX Spark GB10・5 回計測）・支配項トップ 3（backward が 83.6〜97.3% で全バックエンド共通の支配項）・#1008 配下 Issue 優先順位の更新案（#1010）
     │   ├── cuda-async-sync-removal-framework-compare-ab.md # CUDA 都度同期廃止（#1011）の framework-compare 実践規模 A/B 計測記録（DGX Spark GB10 実機計測完了。受入根拠は同一プロトコルの fresh 0.928 倍のみ。reuse 0.440 倍〈約 2.3 倍短縮〉は #1059 の resident forward/backward 経路変更との複合効果につき参考値〈codex-review P1 対応〉・checksum 複合判定 ok。#1083）
     │   ├── cuda-tf32-optin-parity.md # CUDA TF32 opt-in GEMM（`crate::precision`）の複合判定・実機実行手順・実測記入欄（本エージェント実行環境に CUDA 実機なしのため未実測明記。#1042）
-    │   ├── cuda-wmma-f16-perf-triage.md # WMMA(f16) 性能外れ値（`wmma_f16_opt`≈`wmma_f16_basic` が `mma_sync_f16` を約3〜13倍〈形状依存。dim2048で約7倍・dim4096で約11〜13倍〉恒常的に下回る・tiled f32 カーネル単体も下回る〈GB10実測。#64 f16 assert red〉）の診断・GB10実機実測（2026-09-03）・大形状計測をカーネル単体プロトコルへ切替えたテスト是正記録・到達性整理（`wmma_f16`は`CudaGemmAuto::run_f16`経由でfacadeへ到達しうる一方`BackendOps::gemm`はf32 tiled固定・`mma_sync_f16`は証跡用途のみで本番非到達）・切り出し先（#1130・#1131）。#1123
+    │   ├── cuda-wmma-f16-perf-triage.md # WMMA(f16) 性能外れ値（`wmma_f16_opt`≈`wmma_f16_basic` が `mma_sync_f16` を約3〜13倍〈形状依存。dim2048で約7倍・dim4096で約11〜13倍〉恒常的に下回る・tiled f32 カーネル単体も下回る〈GB10実測。#64 f16 assert red〉）の診断・GB10実機実測（2026-09-03）・大形状計測をカーネル単体プロトコルへ切替えたテスト是正記録・到達性整理・切り出し先（#1130・#1131）。§8 で `tensor_core_tflops_record` の f16 計測を本番 f16 経路（`mma_sync_f16`）へ追従させ assert pass 転換・`wmma_f16_opt` はフォールバック限定維持と確定（GB10実機実測2026-09-04・#1160）。`MMA_PRIORITY_PRODUCTION_ENABLED` 本番結線は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16` baseline ceiling 未承認〉により `false` へ差し戻し・承認待ち（`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0）。#1123
     │   ├── cuda-large-buffer-percall-alloc-transfer-threshold.md # 大容量バッファ per-call アロケーション＋転送（`clone_htod`／`alloc_zeros`／`clone_dtoh`）のP0〜P6フェーズ分解・サイズスイープ（8〜64 MiB・12段階）実機実測（GB10・2026-09-03。PR #1169 codex-review・Bugbot 指摘対応のsynchronize是正〈P0含む全フェーズ〉後にGB10実機で再実測完了）。閾値32 MiB自体（glibc mmapしきい値・H-B/H-C棄却）は事実として確定・再現済みだが、これが#1123の元のper-call D2H症状（dim4096合算約261〜263ms）の主因であることは未確定（dim4096相当規模での直接再現・降順走査限定の確率的スパイクの発生条件特定が必要）・32 MiB通過直後の降順走査でのみ確率的に発生する追加スパイク（二峰性）も記録。32→33 MiBの別段差（デバイス確保・H2D側）も新規に観測・未解明（#1146）
     │   ├── cuda-gemm-tiled-f32-swizzle-ab.md # tiled f32（classic）経路へのブロック実行順スウィズル（#1034）横展開の判定基準・#1164 後の到達性整理（整列N=1024/2048/4096はpipeline経路のためclassic非到達）・GB10実機実測（ゲート0 PASS・ゲート1がN=512で判定基準未達のため不採用〈REJECT〉。`CudaGemm::new`への結線は行わない。#1139）
     │   ├── cuda-gemm-tiled-pipeline.md # cp.async 多段パイプライン（#1033）の GB10 実測記録・本番結線判断（イシュー #1137。bit 一致・parity 0 fail・N=1024/2048/4096 で 1.51〜1.74 倍改善を確認し `CudaGemm::run_tiled_f32` 系 3 入口へ形状条件付きで結線〈ADOPT〉。GB10実機実測2026-09-03）
     │   ├── cuda-gemm-candle-gate-remeasurement.md # FP32 SIMT GEMM N=1024/2048/4096 reuse の candle 比 5 回計測中央値再計測・#1031 ゲート達成判定の確定記録（正式系列〈fandhe-ai =0.6.0〉・参考系列〈#1164 結線後 HEAD〉の 2 系列併記・N=2048 candle 無効データの原因・再現条件記録。GB10 実機実測。イシュー #1142）
     │   ├── logs/cuda-gemm-candle-gate-1142/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1142）
+    │   ├── cuda-gemm-auto-f16-mma-switch.md # CudaGemmAuto::run_f16 の MatrixUnit 分岐 mma 優先・wmma フォールバック切替（#1156）の前後比較記録。GB10実機実測完了・512/1024/2048 は非後退（1.75〜4.67倍）・4096 は#1130 病態下で base 5run範囲内。本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16` baseline ceiling 未承認〉により差し戻し・`false` で承認待ち（§0）。#1160
     │   ├── metal-gemm-transpose-tiled.md # gemm_simdgroup_tiled の転置ロード（TRANS_A/TRANS_B）拡張・NT/TN/TT へのタイル variant 選択適用の実装・実機正確性実測記録（M4 Max。NN 非後退ビット同一・NT/TN/TT parity 確認済み）。性能 A/B 未計測のため自動ルーティング（dispatch_strided_bias_act_prepared 委譲）は本 PR では未結線と明記（イシュー #1138）
     │   ├── metal-gemm-n4096-kernel-gap.md # N=4096 カーネル純境界の candle 比ギャップ（約 9.9 対 13.17 TFLOPS）縮小調査。`MTLComputePipelineState` 反射値によるレジスタ圧仮説（H1）の検証（占有率上限に不足なし・反射値レベルでは非支持）・MLX steel classic 未収録構成 `(32,64,16,1,2)`（`CANDIDATES[8]`）の追加測定（劣後のため不採用・選択ロジック変更なし）。M4 Max 実機実測 2 run（イシュー #1143）
     │   ├── metal-gemm-candle-gate-remeasurement.md # Metal GEMM N=1024/2048/4096 reuse の candle 比 5 回計測中央値再計測・#1037 ゲート達成判定の確定記録（正式系列〈fandhe-ai =0.6.0〉・参考系列〈#1167/#1168 反映後 HEAD〉の 2 系列併記。いずれも未達成。M4 Max 実機実測。イシュー #1147）

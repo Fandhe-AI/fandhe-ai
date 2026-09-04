@@ -1,0 +1,74 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/specialized_mma_f16_sweep_1159.rs (/home/fandhe/work/target-fandhe-ai/release/deps/specialized_mma_f16_sweep_1159-224ab182da1f92ce)
+
+running 1 test
+test specialized_mma_f16_sweep_all_shapes_issue_1159 ... SWEEP_BITMATCH shape=4096x4096x4096 seed=4000 compiled=DYNAMIC_ALL bit_match=true
+SWEEP_BITMATCH shape=4096x4096x4096 seed=4000 compiled=STATIC_NK bit_match=true
+SWEEP_BITMATCH shape=4096x4096x4096 seed=4000 compiled=STATIC_MNK bit_match=true
+SWEEP_BITMATCH shape=64x128x32 seed=4001 compiled=DYNAMIC_ALL bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=64x128x32 seed=4001 compiled=DYNAMIC_ALL verdict=PASS assert_parity_panicked=false fail_count=0/8192 max_abs_diff=7.629395e-6 max_rel_err=7.199424e-4 mean_abs_diff=2.837623e-9 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=64x128x32 seed=4001 compiled=STATIC_NK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=64x128x32 seed=4001 compiled=STATIC_NK verdict=PASS assert_parity_panicked=false fail_count=0/8192 max_abs_diff=7.629395e-6 max_rel_err=7.199424e-4 mean_abs_diff=2.837623e-9 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=64x128x32 seed=4001 compiled=STATIC_MNK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=64x128x32 seed=4001 compiled=STATIC_MNK verdict=PASS assert_parity_panicked=false fail_count=0/8192 max_abs_diff=7.629395e-6 max_rel_err=7.199424e-4 mean_abs_diff=2.837623e-9 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=128x256x128 seed=4002 compiled=DYNAMIC_ALL bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=128x256x128 seed=4002 compiled=DYNAMIC_ALL verdict=PASS assert_parity_panicked=false fail_count=0/32768 max_abs_diff=7.812500e-3 max_rel_err=5.938242e-3 mean_abs_diff=1.123381e-6 max_fail_abs_diff=0.000000e0 p999_abs_diff=7.629395e-6
+SWEEP_BITMATCH shape=128x256x128 seed=4002 compiled=STATIC_NK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=128x256x128 seed=4002 compiled=STATIC_NK verdict=PASS assert_parity_panicked=false fail_count=0/32768 max_abs_diff=7.812500e-3 max_rel_err=5.938242e-3 mean_abs_diff=1.123381e-6 max_fail_abs_diff=0.000000e0 p999_abs_diff=7.629395e-6
+SWEEP_BITMATCH shape=128x256x128 seed=4002 compiled=STATIC_MNK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=128x256x128 seed=4002 compiled=STATIC_MNK verdict=PASS assert_parity_panicked=false fail_count=0/32768 max_abs_diff=7.812500e-3 max_rel_err=5.938242e-3 mean_abs_diff=1.123381e-6 max_fail_abs_diff=0.000000e0 p999_abs_diff=7.629395e-6
+SWEEP_BITMATCH shape=256x512x1024 seed=4003 compiled=DYNAMIC_ALL bit_match=true
+
+thread 'specialized_mma_f16_sweep_all_shapes_issue_1159' (676800) panicked at crates/backend-cuda/tests/specialized_mma_f16_sweep_1159.rs:152:21:
+specialized mma_f16 compiled="DYNAMIC_ALL" shape m=256 n=512 k=1024: 複合判定 FAIL（fail_count=30/131072, max_abs_diff=1.562e-2, max_rel_err=3.341e-2, mean_abs_diff=1.011e-5, mean_rel_err=6.097e-6, p50_abs_diff=0.000e0, p99_abs_diff=0.000e0, p999_abs_diff=3.906e-3）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=256x512x1024 seed=4003 compiled=DYNAMIC_ALL verdict=FAIL assert_parity_panicked=true fail_count=30/131072 max_abs_diff=1.562500e-2 max_rel_err=3.341149e-2 mean_abs_diff=1.010961e-5 max_fail_abs_diff=3.051758e-5 p999_abs_diff=3.906250e-3
+SWEEP_BITMATCH shape=256x512x1024 seed=4003 compiled=STATIC_NK bit_match=true
+
+thread 'specialized_mma_f16_sweep_all_shapes_issue_1159' (676800) panicked at crates/backend-cuda/tests/specialized_mma_f16_sweep_1159.rs:152:21:
+specialized mma_f16 compiled="STATIC_NK" shape m=256 n=512 k=1024: 複合判定 FAIL（fail_count=30/131072, max_abs_diff=1.562e-2, max_rel_err=3.341e-2, mean_abs_diff=1.011e-5, mean_rel_err=6.097e-6, p50_abs_diff=0.000e0, p99_abs_diff=0.000e0, p999_abs_diff=3.906e-3）
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=256x512x1024 seed=4003 compiled=STATIC_NK verdict=FAIL assert_parity_panicked=true fail_count=30/131072 max_abs_diff=1.562500e-2 max_rel_err=3.341149e-2 mean_abs_diff=1.010961e-5 max_fail_abs_diff=3.051758e-5 p999_abs_diff=3.906250e-3
+SWEEP_BITMATCH shape=256x512x1024 seed=4003 compiled=STATIC_MNK bit_match=true
+
+thread 'specialized_mma_f16_sweep_all_shapes_issue_1159' (676800) panicked at crates/backend-cuda/tests/specialized_mma_f16_sweep_1159.rs:152:21:
+specialized mma_f16 compiled="STATIC_MNK" shape m=256 n=512 k=1024: 複合判定 FAIL（fail_count=30/131072, max_abs_diff=1.562e-2, max_rel_err=3.341e-2, mean_abs_diff=1.011e-5, mean_rel_err=6.097e-6, p50_abs_diff=0.000e0, p99_abs_diff=0.000e0, p999_abs_diff=3.906e-3）
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=256x512x1024 seed=4003 compiled=STATIC_MNK verdict=FAIL assert_parity_panicked=true fail_count=30/131072 max_abs_diff=1.562500e-2 max_rel_err=3.341149e-2 mean_abs_diff=1.010961e-5 max_fail_abs_diff=3.051758e-5 p999_abs_diff=3.906250e-3
+SWEEP_BITMATCH shape=40x24x72 seed=4004 compiled=DYNAMIC_ALL bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=40x24x72 seed=4004 compiled=DYNAMIC_ALL verdict=PASS assert_parity_panicked=false fail_count=0/960 max_abs_diff=0.000000e0 max_rel_err=0.000000e0 mean_abs_diff=0.000000e0 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=40x24x72 seed=4004 compiled=STATIC_NK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=40x24x72 seed=4004 compiled=STATIC_NK verdict=PASS assert_parity_panicked=false fail_count=0/960 max_abs_diff=0.000000e0 max_rel_err=0.000000e0 mean_abs_diff=0.000000e0 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=40x24x72 seed=4004 compiled=STATIC_MNK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=40x24x72 seed=4004 compiled=STATIC_MNK verdict=PASS assert_parity_panicked=false fail_count=0/960 max_abs_diff=0.000000e0 max_rel_err=0.000000e0 mean_abs_diff=0.000000e0 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=65x136x40 seed=4005 compiled=DYNAMIC_ALL bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=65x136x40 seed=4005 compiled=DYNAMIC_ALL verdict=PASS assert_parity_panicked=false fail_count=0/8840 max_abs_diff=4.882812e-4 max_rel_err=9.606148e-4 mean_abs_diff=9.539440e-8 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=65x136x40 seed=4005 compiled=STATIC_NK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=65x136x40 seed=4005 compiled=STATIC_NK verdict=PASS assert_parity_panicked=false fail_count=0/8840 max_abs_diff=4.882812e-4 max_rel_err=9.606148e-4 mean_abs_diff=9.539440e-8 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=65x136x40 seed=4005 compiled=STATIC_MNK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=65x136x40 seed=4005 compiled=STATIC_MNK verdict=PASS assert_parity_panicked=false fail_count=0/8840 max_abs_diff=4.882812e-4 max_rel_err=9.606148e-4 mean_abs_diff=9.539440e-8 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=63x120x24 seed=4006 compiled=DYNAMIC_ALL bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=63x120x24 seed=4006 compiled=DYNAMIC_ALL verdict=PASS assert_parity_panicked=false fail_count=0/7560 max_abs_diff=7.629395e-6 max_rel_err=6.218905e-4 mean_abs_diff=1.450695e-9 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=63x120x24 seed=4006 compiled=STATIC_NK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=63x120x24 seed=4006 compiled=STATIC_NK verdict=PASS assert_parity_panicked=false fail_count=0/7560 max_abs_diff=7.629395e-6 max_rel_err=6.218905e-4 mean_abs_diff=1.450695e-9 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=63x120x24 seed=4006 compiled=STATIC_MNK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=63x120x24 seed=4006 compiled=STATIC_MNK verdict=PASS assert_parity_panicked=false fail_count=0/7560 max_abs_diff=7.629395e-6 max_rel_err=6.218905e-4 mean_abs_diff=1.450695e-9 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=200x264x104 seed=4007 compiled=DYNAMIC_ALL bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=200x264x104 seed=4007 compiled=DYNAMIC_ALL verdict=PASS assert_parity_panicked=false fail_count=0/52800 max_abs_diff=3.906250e-3 max_rel_err=8.695652e-3 mean_abs_diff=4.591386e-7 max_fail_abs_diff=0.000000e0 p999_abs_diff=2.384186e-7
+SWEEP_BITMATCH shape=200x264x104 seed=4007 compiled=STATIC_NK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=200x264x104 seed=4007 compiled=STATIC_NK verdict=PASS assert_parity_panicked=false fail_count=0/52800 max_abs_diff=3.906250e-3 max_rel_err=8.695652e-3 mean_abs_diff=4.591386e-7 max_fail_abs_diff=0.000000e0 p999_abs_diff=2.384186e-7
+SWEEP_BITMATCH shape=200x264x104 seed=4007 compiled=STATIC_MNK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=200x264x104 seed=4007 compiled=STATIC_MNK verdict=PASS assert_parity_panicked=false fail_count=0/52800 max_abs_diff=3.906250e-3 max_rel_err=8.695652e-3 mean_abs_diff=4.591386e-7 max_fail_abs_diff=0.000000e0 p999_abs_diff=2.384186e-7
+SWEEP_BITMATCH shape=1x136x40 seed=4008 compiled=DYNAMIC_ALL bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=1x136x40 seed=4008 compiled=DYNAMIC_ALL verdict=PASS assert_parity_panicked=false fail_count=0/136 max_abs_diff=0.000000e0 max_rel_err=0.000000e0 mean_abs_diff=0.000000e0 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=1x136x40 seed=4008 compiled=STATIC_NK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=1x136x40 seed=4008 compiled=STATIC_NK verdict=PASS assert_parity_panicked=false fail_count=0/136 max_abs_diff=0.000000e0 max_rel_err=0.000000e0 mean_abs_diff=0.000000e0 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=1x136x40 seed=4008 compiled=STATIC_MNK bit_match=true
+TRIAGE_ROW test=specialized_mma_f16_matches_default_and_reference_across_shapes shape=1x136x40 seed=4008 compiled=STATIC_MNK verdict=PASS assert_parity_panicked=false fail_count=0/136 max_abs_diff=0.000000e0 max_rel_err=0.000000e0 mean_abs_diff=0.000000e0 max_fail_abs_diff=0.000000e0 p999_abs_diff=0.000000e0
+SWEEP_BITMATCH shape=512x64x4096 seed=4009 compiled=DYNAMIC_ALL bit_match=true
+SWEEP_BITMATCH shape=512x64x4096 seed=4009 compiled=STATIC_NK bit_match=true
+SWEEP_BITMATCH shape=512x64x4096 seed=4009 compiled=STATIC_MNK bit_match=true
+SWEEP_SUMMARY strict_zero_fail_holds=["(64,128,32) DYNAMIC_ALL", "(64,128,32) STATIC_NK", "(64,128,32) STATIC_MNK", "(128,256,128) DYNAMIC_ALL", "(128,256,128) STATIC_NK", "(128,256,128) STATIC_MNK", "(40,24,72) DYNAMIC_ALL", "(40,24,72) STATIC_NK", "(40,24,72) STATIC_MNK", "(65,136,40) DYNAMIC_ALL", "(65,136,40) STATIC_NK", "(65,136,40) STATIC_MNK", "(63,120,24) DYNAMIC_ALL", "(63,120,24) STATIC_NK", "(63,120,24) STATIC_MNK", "(200,264,104) DYNAMIC_ALL", "(200,264,104) STATIC_NK", "(200,264,104) STATIC_MNK", "(1,136,40) DYNAMIC_ALL", "(1,136,40) STATIC_NK", "(1,136,40) STATIC_MNK"]
+SWEEP_SUMMARY strict_zero_fail_does_not_hold=["(256,512,1024) DYNAMIC_ALL", "(256,512,1024) STATIC_NK", "(256,512,1024) STATIC_MNK"]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+

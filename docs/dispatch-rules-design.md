@@ -6,6 +6,31 @@
 > 統合**は TASK-11.2b（#68）、**境界形状の実測再検証**は TASK-11.2c（#69）、
 > **証跡整備**は TASK-11.3（#70）が担当し、本文書はそれらから参照される前提で
 > 書く。コード変更は含まない（`docs/dispatch-rules-design.md` の新規追加のみ）。
+>
+> **改訂注記（#1150・2026-09-04）**: §5.6 を新設し、CUDA f16 `MatrixUnit`
+> 経路内部の実装優先順位（`CudaMmaGemm` 優先・`CudaWmmaGemm` フォールバック。
+> #1131 系列）を追記した。上記「コード変更は含まない」は当初 #67 時点（本文
+> 初版）の記述であり、本改訂自体も設計記録のみでコード変更を伴わない
+> （§5.6 冒頭に明記）。
+>
+> **追記（イシュー #1160・2026-09-04）**: §5.6 の判定規則
+> （`select_f16_matrix_unit_impl`）の優先順位を**有効化するかどうか**は
+> 呼び出し元が渡す `prefer_mma` 引数に従う。§5.6「性能の引き渡し」節が
+> 求める auto 経路〈転送込み〉での切替前後 5 回計測中央値比較を GB10
+> 実機で実施し、全対象形状で非後退を確認した（`docs/perf/
+> cuda-gemm-auto-f16-mma-switch.md`）。
+>
+> **追記2（PR #1179 codex-review 指摘・2026-09-04）**: 上記の性能 A/B
+> は非後退を確認できたが、K=4096 非後退ゲート（`tests/gemm_auto.rs::
+> run_f16_k4096_stress_non_regression_route_aware`）が参照する
+> `ParityPath::MmaF16` baseline 行の ceiling が未承認のまま本番既定
+> （`crates/backend-cuda/src/gemm_auto.rs::
+> MMA_PRIORITY_PRODUCTION_ENABLED`）を `true` へ結線していたことが
+> codex-review で P1 指摘となった。ceiling のユーザー承認・
+> `BASELINES` 反映（`docs/perf/cuda-parity-baseline.md` §12.5）が
+> 完了するまで、本番既定は `false`（#1156 以前と同じ wmma 優先）へ
+> 差し戻し済みであり、`CudaGemmAuto::run_f16` は現状 `CudaMmaGemm` を
+> 優先しない。
 
 ## 1. 判断サマリ
 
@@ -35,6 +60,7 @@
 | バックエンド | 判定材料 | 判定条件（設計値） | 根拠・出典 | 確定度 |
 |---|---|---|---|---|
 | CUDA | `CudaDevice::compute_capability() -> (i32, i32)`（実装済み API、`crates/backend-cuda/src/device.rs:153`） | WMMA f16 経路: `cc >= (7, 0)` ／ TF32 経路: `cc >= (8, 0)`。GB10 = `cc (12, 1)`（sm_121、Blackwell）は両対応 | WMMA は Volta（cc 7.0）以降、TF32 対応 Tensor Core は Ampere（cc 8.0）以降という一般的な NVIDIA アーキテクチャ世代対応（PoC-v2-3 が GB10 = Blackwell 世代を tensor core 搭載と記述、`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md:95`）。cc 世代境界の数値自体は本イシューでの実機再検証対象外 | 暫定（世代境界は一般値、#69 で実機 cc 分岐の要否を再確認） |
+| CUDA（第 2 層。§5.6） | 同上 | `MatrixUnit` 経路内の実装優先順位として、mma.sync f16 経路（`gemm_mma.rs` の `mma.sync`/`ldmatrix`/`cp.async` 3 段パイプライン）は `cc >= (8, 0)`（LDGSTS〈cp.async/ldmatrix〉が sm_80 以降限定のため。`crates/backend-cuda/src/gemm_mma.rs:33` の独立定数）を要求し、非対応時は WMMA f16（cc>=7.0）へフォールバックする | `gemm_mma.rs:33`（`MIN_COMPUTE_CAPABILITY_MAJOR: i32 = 8`）・`gemm_mma.rs:217-229`（`check_min_compute_capability`、major のみ比較） | 確定（実装済みの独立ゲート定数。第 1 層 `CUDA_TF32_MIN_CC = (8, 0)` と値は同じだが TF32 Tensor Core 世代とは別根拠） |
 | CUDA | `CudaDevice::is_available()`（`crates/backend-cuda/src/device.rs:74`） | ドライバ不在・`cudarc` 動的ロード失敗時は CUDA 経路自体が候補外 | `cudarc` は無条件依存＋動的ロード方式（CUDA toolkit 非搭載環境でもビルド成立。`deps-policy.md`）。fail-safe 設計は 2.3 節参照 | 確定（既存実装のとおり） |
 | Metal | `MTLDevice.supportsFamily:MTLGPUFamilyApple7`（Apple GPU ファミリ判定）＋ `cfg(target_os = "macos")` | Apple7 以上（M1 世代以降）で `simdgroup_matrix` 対応。非対応ファミリは tiled → naive MSL 経路へフォールバック | PoC-v2-4 は M4 Max（Apple Silicon）実機で `simdgroup_matrix` を用いる MSL ソースがコンパイル・実行できることを確認済み（`docs/spec/03-poc/poc-v2-4-metal-gemm/README.md:19`・`:32`）。`supportsFamily:` による世代判定自体は本イシューでは未実装確認であり、実装時（#68）に `objc2-metal` API 突合が必要 | 暫定（API 呼び出し自体は #68 で `objc2-metal` 側の突合が必要） |
 | CPU | `Isa::detect()`（実装済み・`crates/backend-cpu/src/gemm_blis/microkernel.rs:252`） | 既存規則（AVX-512 → AVX2+FMA → scalar、NEON 無条件）をそのまま踏襲 | 本文書では参照のみ。変更対象外 | 確定（既存実装のとおり） |
@@ -133,7 +159,7 @@ WMMA fragment（16×16×16 等）・`simdgroup_matrix`（8×8 等）の整数倍
 
 | dtype | 経路 | HW ゲート | 数値一致閾値 | 状態 |
 |---|---|---|---|---|
-| f16 | CUDA WMMA f16 | `cc >= (7, 0)` | f16 の相対精度（~2^-11）を踏まえた既存複合判定（相対 5e-3 OR 絶対 5e-3、PoC-v2-3 実測設計。`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md:49`） | 既存設計を引用（変更なし） |
+| f16 | CUDA mma.sync f16（優先。§5.6）／WMMA f16（フォールバック） | mma.sync: `cc >= (8, 0)` ／ WMMA: `cc >= (7, 0)` | 全ペア共通の統一複合判定（相対誤差 1e-3 未満 OR 絶対誤差 1e-5 未満、REQ-2・`.claude/rules/coding-rust.md`「バックエンド間数値一致」節。`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`＝`crates/backend-cpu/src/parity.rs:32,37`）を厳密ゼロ fail 判定として適用する。実機実測でこの厳密ゼロ fail が成立しない既知不合格形状に限り、spec REQ-2（2026-09-02 追記）の Tensor Core 経路 形状別判定方式（実測 baseline 非後退。`docs/cuda-tensor-core-parity-judgment-decision.md`・`ParityBaseline`）を承認済み baseline として適用する。PoC-v2-3 設計時点の暫定値（相対 5e-3 OR 絶対 5e-3、`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md:49`）は現行の統一複合判定へ置き換え済みであり、mma.sync 優先経路にも旧値は適用しない | 既存設計（数値一致閾値）を引用（変更なし）／実装優先順位は §5.6 で新規記録 |
 | f32 | CUDA TF32 | `cc >= (8, 0)` | **既定採用を保留**。#186（TASK-11.1g）の実測再評価完了までは f32 は tiled 経路を既定とする段階案 | 保留（#186 待ち） |
 | f32 | Metal `simdgroup_matrix` | Apple7 以上 | PoC-v2-4 実測（`simdgroup_matrix` f32、3.134 TFLOPS @4096、`docs/spec/03-poc/poc-v2-4-metal-gemm/README.md:93`）に基づく既存の全ペア統一複合判定（相対誤差 1e-3 未満 OR 絶対誤差 1e-5 未満、REQ-2） | 既存設計を引用（変更なし） |
 
@@ -166,7 +192,11 @@ fn select_gemm_kernel(caps: &DeviceCaps, shape: GemmShape, dtype: DType) -> Kern
 
 ### 5.2 フォールバック連鎖
 
-- CUDA: `TensorCore → Tiled → Naive`
+- CUDA f16: `MatrixUnit(mma.sync f16) → MatrixUnit(WMMA f16) → Tiled → Naive`
+  （`MatrixUnit` 経路内部の実装優先順位は §5.6 を参照。第 1 層の決定表
+  〈本節・5.3 節〉は `MatrixUnit` までしか区別しない）
+- CUDA f32: `Tiled → Naive`（TF32 `MatrixUnit` 経路は #186 の実測再評価まで
+  既定採用を保留。4 節）
 - Metal: `Simdgroup → Tiled → Naive`
 
 PoC-v2-4 実測（`docs/spec/03-poc/poc-v2-4-metal-gemm/README.md:91-93`、
@@ -181,7 +211,7 @@ M=N=K=4096・f32）が示すとおり、tiled は naive よりも一貫して高
 
 | HW ゲート | dtype | 形状 | 選択経路 |
 |---|---|---|---|
-| CUDA `cc >= 7.0` | f16 | 任意（形状下限なし、3.2 節） | TensorCore（WMMA f16） |
+| CUDA `cc >= 7.0` | f16 | 任意（形状下限なし、3.2 節） | MatrixUnit（実装優先順位は §5.6: `cc >= 8.0` かつ `n % 8 == 0 && k % 8 == 0` かつ grid 上限内 → mma.sync f16／それ以外 → WMMA f16） |
 | CUDA `cc >= 8.0` | f32 | 任意 | Tiled（TF32 経路は #186 の実測再評価・ユーザー承認まで既定採用を保留。4 節） |
 | CUDA `cc` 非対応 or ドライバ不在 | 任意 | 任意 | Tiled → Naive |
 | Metal Apple7 以上 | f32 | `min(M,N,K) >= 512` | Simdgroup |
@@ -209,6 +239,146 @@ M=N=K=4096・f32）が示すとおり、tiled は naive よりも一貫して高
 fragment サイズ・タイル構成等のカーネル内部構成は #60（WMMA/mma API 調査・
 カーネル設計）の担当領域である。本文書は**経路選択条件（どのカーネルを
 呼ぶか）のみ**を定義し、選ばれたカーネル自体の内部実装詳細には立ち入らない。
+`MatrixUnit` 経路内で mma.sync／WMMA のどちらを呼ぶかという**実装優先順位**
+は経路選択条件の一部として本文書 §5.6 に含める。一方、各カーネル内部の構成
+（fragment・タイル・swizzle・`wmma_f16_opt`/basic 等の変種選択）は引き続き
+#60 系列の担当領域であり、本文書の対象外のままとする。
+
+### 5.6 f16 MatrixUnit 経路内の実装優先順位（#1131・#1150）
+
+**背景**: `CudaGemmAuto::run_f16`（`crates/backend-cuda/src/gemm_auto.rs`）
+は現状 `select_gemm_kernel` が `KernelKind::MatrixUnit` を返した場合に
+`CudaWmmaGemm` のみを呼ぶ（WMMA f16）。`CudaMmaGemm`（`gemm_mma.rs`。
+`mma.sync`/`ldmatrix`/`cp.async` 3 段パイプライン）は現状 `CudaGemmAuto` に
+未結線で証跡用途のみ（テスト・ベンチから直接構築される経路。本番非到達）。
+GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4.1）
+では `mma_sync_f16` が `wmma_f16_opt` に対し形状依存で約 4.1〜10.8 倍高速
+（dim 512: 約 4.1 倍／1024: 約 4.4 倍／2048: 約 7.3 倍／4096: 約 10.8 倍）
+であり、`tensor_core_tflops_record` の f16 assert（f16 カーネルが tiled を
+上回ること）が GB10 で FAIL している。本節は #1131（f16 経路を mma.sync
+パイプラインへ結線）の第 1 子 Issue（#1150）として、`MatrixUnit` 経路
+**内部**の実装優先順位を設計として確定する。
+
+**2 層構造（第 1 層＝本文書 §2〜§5.3 の決定表は変更しない）**:
+
+- **第 1 層（不変）**: `select_gemm_kernel`（`fandhe_ai_tensor_core::dispatch`）
+  は HW・形状・dtype から `KernelKind` を返す。CUDA f16 は `cc >= (7, 0)`
+  で形状下限なしの `MatrixUnit`（§3.2・§5.3 のまま）。tensor-core クレート
+  の決定表・定数は本節の変更対象外
+- **第 2 層（新規）**: `backend-cuda::CudaGemmAuto` が `MatrixUnit` の
+  **実装**を `CudaMmaGemm → CudaWmmaGemm → Tiled` の優先順位で選ぶ。判定
+  材料（LDGSTS 要件 `cc >= 8.0`・NVRTC コンパイル成否・`cp.async` 整列
+  制約・grid 上限）はいずれも `backend-cuda` 内部の事実であり `DeviceCaps`
+  へ持ち上げる必要がないため、第 1 層は変更しない
+- §3.2「閾値定数は 1 箇所（`tensor-core::dispatch`）に集約する」の原則は
+  **第 1 層の規則定数**に適用される。第 2 層の
+  `gemm_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR`（`= 8`。LDGSTS 要件の独立
+  定数、理由は同ファイル該当箇所のコメントに記載済み）を `tensor-core`
+  側へ集約する変更は**本 Issue のスコープ外**とする（6 節の表に将来候補
+  として記録するのみ。起票はユーザー承認事項のため本 PR では行わない）
+- `tests/dispatch_boundary.rs` の既存整理「mma パイプラインの優劣は経路
+  選択条件でなくカーネル内部チューニング」は**第 1 層について引き続き
+  真**であり、第 2 層の実装優先順位はこの整理と矛盾しない（第 1 層の決定
+  表・境界テストの対象は変わらない）
+
+**第 2 層の判定規則（決定的・fail-safe。実装は #1152（構築）・#1156（分岐切替。実装済み）が担当）**:
+
+1. **構築時（`CudaGemmAuto::new`。#1152 で実装済み。診断用
+   `mma_available`／`mma_unavailable_reason` アクセサを併設）**:
+   `CudaMmaGemm::new(device)` を `CudaWmmaGemm::new(device).ok()` と同型の
+   fail-soft で構築する。
+   `cc < 8.0`（`TensorCoreUnsupported`）・base カーネル（`mma_f16`）の
+   NVRTC コンパイル失敗は `CudaMmaGemm::new` 自体が `Err` を返すため
+   `mma = None` として握り潰す（現行 `wmma` フィールドの構築方針と対称）。
+   一方 **SM 数取得失敗（`device.multiprocessor_count()` が `None`）は
+   base カーネルの可用性とは独立**であり、`CudaMmaGemm::new`
+   （`gemm_mma.rs` 実装）は `mma_f16_swizzle`／`swizzle_group_width` のみ
+   を `None` へ fail-soft に縮退させて `Ok(Self)` を返す（swizzle は L2
+   再利用の性能最適化に過ぎず base カーネルの可用性とは独立であるべき、
+   という既存設計判断のまま）。したがって SM 数取得失敗単独では
+   `mma = Some`（swizzle 変種なしの base カーネルのみ）のまま
+   `CudaGemmAuto::new` に組み込まれ、後続の #1152（`CudaMmaGemm::new(
+   device).ok()` を利用する実装）はこの契約（`mma = None` になるのは
+   `cc < 8.0` または base カーネルのコンパイル失敗時のみ）を前提とする。
+   `wmma` フィールドはフォールバック用に維持する
+2. **呼び出し時（`run_f16`）**: `KernelKind::MatrixUnit` の場合、`mma` が
+   `Some` **かつ** 形状が mma 固有制約（`validate_mma_alignment(n, k)`
+   ＝ `n % 8 == 0 && k % 8 == 0`・`validate_mma_grid_bounds(m)` ＝
+   `m.div_ceil(MMA_BM) <= 65_535`。いずれも `gemm_mma.rs` 実装済み）を
+   満たすときのみ `CudaMmaGemm::run_f16` を呼ぶ。満たさなければ `wmma`
+   （`Some` なら）へ、`wmma` も `None` なら `run_tiled_f16` へフォール
+   バックする
+3. **形状ゲートは呼び出し前に事前判定し、エラー駆動のフォールバック
+   （mma 実行の `Err` を捕捉して WMMA を再実行する方式）は採らない**。
+   理由: (a) 本節冒頭の決定的規則方針との整合、(b) カーネル起動失敗・
+   poison 状態を静かに別経路で覆い隠さない（`docs/backend-cuda-async-\
+   execution-design.md` の同期契約と整合）、(c) 現行「tiled 自体の失敗は
+   そのまま呼び出し元へ伝播する」方針との対称性。事前判定を怠ると、
+   `n % 8 != 0` 等の形状で現行 WMMA では成功していた呼び出しが
+   `InvalidShape` になる退行が生じる点を実装引き渡し事項として明記する
+   （#1156 で実装済み: 単一真実源の純関数
+   `gemm_auto::select_f16_matrix_unit_impl(prefer_mma, mma_available,
+   wmma_available, m, n, k) -> F16MatrixUnitImpl` が事前形状ゲートを含む
+   判定を担い、
+   `run_f16` はその結果に従って `match` で実装を呼び分ける）
+4. no-op／退化形状（`m == 0 || n == 0 || k == 0`）は mma／WMMA／tiled の
+   いずれも同一契約の早期 return で処理する。**`m == 0 || n == 0` は空
+   `Vec` を返す**が、**`k == 0`（`m, n > 0`）は GEMM の数学的定義どおり
+   `m * n` 個のゼロ（`vec![f16::ZERO; m * n]`）を返す**（A/B が空スライス
+   になるため起動を回避し C = 全 0 とする。`gemm_mma.rs::run_f16`・
+   `gemm_wmma.rs::run_f16` の早期 return と同一契約。§5.6 の実装優先順位
+   〈判定規則 1〉はこれら早期 return より前の構築時契約であり、いずれの
+   早期 return も `validate_mma_alignment`／`validate_mma_grid_bounds` 等の
+   mma 固有ゲート評価より前に行われるため、本節の優先順位判定自体には
+   影響しない
+5. §3.3「端数形状を理由に Tensor Core 経路自体を除外しない」は**第 1 層で
+   引き続き維持**される（`cp.async` 整列非対応の端数形状も `MatrixUnit`
+   内の WMMA で処理され、tiled へは落ちない）
+6. `CudaMmaGemm` 内部の swizzle 変種選択・`wmma_f16_opt`/basic のどちらを
+   使うかは各構造体**内部**の責務（§5.5 の境界のまま）。`wmma_f16_opt`
+   の維持・格下げ判断は #1160 で確定した（結論: フォールバック限定で
+   維持・コード変更なし。`docs/perf/cuda-wmma-f16-perf-triage.md` §8.4）
+7. 利用者向けの切替 API・環境変数は本節でも新設しない（REQ-11・§1 の
+   方針を維持する）
+
+**数値一致・性能の引き渡し**:
+
+- 数値一致: REQ-2 複合判定＋spec REQ-2（2026-09-02 追記）の形状別判定方式
+  （`docs/cuda-tensor-core-parity-judgment-decision.md`。厳密ゼロ fail 判定
+  が成立しない形状は実測 baseline 非後退方式）。tolerance 定数・
+  `ParityBaseline` 行の追加・変更はユーザー承認必須（本節では確定しない）。
+  GB10 実機実測は #1158 で実施した（`docs/perf/cuda-parity-baseline.md`
+  §12。切替前〈WMMA 優先・本番既定〉・切替後〈ノード側限定フリップの
+  mma 優先〉双方で非後退を確認）。#1160 は一度 `MMA_PRIORITY_
+  PRODUCTION_ENABLED = true` へ本番結線したが、route-aware 受け入れ
+  テスト（`run_f16_k4096_stress_non_regression_route_aware`）が参照する
+  `ParityPath::MmaF16` baseline ceiling が未承認のまま結線していたこと
+  が PR #1179 codex-review 指摘（P1）となり、`false` へ差し戻し済み
+  （`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0）。**同テストは、
+  選択経路 `MmaF16` の baseline ceiling が未承認〈`None`〉のため mma
+  優先を有効化すれば fail-closed に必ず FAIL する意図的な red のまま
+  である（詳細・ceiling 提案値は `docs/perf/cuda-parity-baseline.md`
+  §12.4/§12.5/§12.6）。「実測で非後退を確認した記録」と「その記録を
+  検証する受け入れテストが green である」は分離しており、後者は
+  ceiling 反映のユーザー承認・本番有効化後まで成立しない**
+- 性能: 切替前後を同一プロトコル・5 回計測中央値で比較し、後退時は結線
+  しない（#1156 のユーザー承認条件）。#1160 が GB10 実機で全対象形状の
+  非後退を確認した（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`）。
+  本番有効化自体は上記 baseline ceiling 未承認により保留中（PR #1179
+  codex-review 指摘）。TFLOPS 記録・`wmma_f16_opt` の扱いは #1160 が
+  確定した（`docs/perf/cuda-wmma-f16-perf-triage.md` §8）
+
+**実装 Issue 対応表**: 構築（`mma` フィールド追加。fail-soft）は #1152
+（実装済み）、呼び出し分岐切替（形状ゲート込みの優先順位判定。
+`select_f16_matrix_unit_impl`）は #1156（実装済み）、GB10 数値一致
+非後退検証は #1158（実測記録は `docs/perf/cuda-parity-baseline.md` §12。
+route-aware 受け入れテストは `MmaF16` baseline ceiling 未承認のため
+mma 優先有効化時に意図的に red。上記「数値一致・性能の引き渡し」節
+参照）、TFLOPS 記録・`wmma_f16_opt` 扱いの確定は #1160 が完了した
+（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`・
+`docs/perf/cuda-wmma-f16-perf-triage.md` §8）。本番結線自体は baseline
+ceiling 未承認のため PR #1179 codex-review 指摘を受けて保留中
+（ceiling 承認後の後続作業）。
 
 ## 6. スコープ外
 
@@ -222,6 +392,10 @@ fragment サイズ・タイル構成等のカーネル内部構成は #60（WMMA
 | TF32 経路の数値一致閾値の実測再評価・既定採用可否のユーザー承認 | #186（TASK-11.1g） |
 | CUDA Tensor Core（WMMA/mma）カーネル自体の実装 | #60 系列（TASK-11.1） |
 | CPU 側 ISA dispatch の変更 | 対象外（`gemm_blis/microkernel.rs` は実装済み・変更なし） |
+| f16 `MatrixUnit` 経路の mma 優先実装（`CudaGemmAuto` へのフィールド追加・分岐切替） | #1152（フィールド追加は実装済み）・#1156（分岐切替。実装済み） |
+| GB10 数値一致非後退（§5.6 の判定規則の実機検証） | #1158 |
+| TFLOPS 記録・`wmma_f16_opt` の扱い確定 | #1160（完了）。mma 優先の本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は baseline ceiling 未承認のため保留中（PR #1179 codex-review 指摘。承認後の後続作業） |
+| `gemm_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR` の `tensor-core::dispatch` への集約（未起票・候補） | 対象外（§5.6 参照。第 2 層定数のため現状維持） |
 
 ## 7. 出典一覧
 
@@ -241,3 +415,12 @@ fragment サイズ・タイル構成等のカーネル内部構成は #60（WMMA
 - `docs/public-api-design.md` §4（`BackendOps`・`Device` シグネチャとの整合）
 - `.claude/rules/coding-rust.md`（カーネル実装の境界検査規約・REQ-8）
 - `.claude/rules/security.md`（ガードレール閾値・許容誤差変更の承認要件）
+- `crates/backend-cuda/src/gemm_auto.rs`（`CudaGemmAuto`・`run_f16` 現行実装）
+- `crates/backend-cuda/src/gemm_mma.rs`（`CudaMmaGemm`・cc ゲート・
+  `validate_mma_alignment`／`validate_mma_grid_bounds`）
+- `crates/backend-cuda/src/gemm_wmma.rs`（`CudaWmmaGemm`・cc ゲート）
+- `docs/perf/cuda-wmma-f16-perf-triage.md`（#1123・GB10 実測倍率）
+- `docs/perf/cuda-parity-baseline.md`（`ParityBaseline`・形状別判定方式）
+- `docs/cuda-tensor-core-parity-judgment-decision.md`（Tensor Core 経路の
+  受け入れ判定方式の決定記録）
+- `docs/backend-cuda-async-execution-design.md`（CUDA 非同期実行の同期契約）

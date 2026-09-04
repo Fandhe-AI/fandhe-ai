@@ -8,7 +8,23 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 （`.claude/rules/coding-rust.md`）。
 
 ## 状態: 実機実測完了（2026-09-03・DGX Spark GB10・sm_121・GPU アイドル。
-是正後テスト〈§4.3〉も実機実測済み）
+是正後テスト〈§4.3〉も実機実測済み。イシュー #1160（2026-09-04）で
+`tensor_core_tflops_record` の f16 assert の比較対象を「本番選択結果に
+追従する方式」へ整備し、`MMA_PRIORITY_PRODUCTION_ENABLED = true`（mma
+優先）を一時的に有効化した状態での GB10 実機実測では本 assert が pass
+することを確認した（§8）。**本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED
+= true`）は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16`
+baseline ceiling 未承認〉により `false` へ差し戻し済みであり、この
+本番既定のまま本テストを実機実行すると比較対象が `wmma_f16_opt` へ
+戻るため本 assert は依然として red である**（`wmma_f16_opt` カーネル
+単体 4.391〜4.496 TFLOPS が tiled f32 カーネル単体 6.776〜6.790 TFLOPS
+を下回る。§4.3 と同一数値）。本テストは実機 `#[ignore]` 分離のため
+通常 CI には現れず、この既知 red は baseline ceiling 承認・
+`MMA_PRIORITY_PRODUCTION_ENABLED` の `true` 復帰まで持ち越しである。
+詳細は `docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0・
+`docs/perf/cuda-parity-baseline.md` §12.6 追記を参照。以下 §8 の記述は
+`MMA_PRIORITY_PRODUCTION_ENABLED = true` を一時的に有効化した際の
+実測記録として維持する）
 
 ## 1. 症状（発端）
 
@@ -100,12 +116,24 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 
 **本番経路への到達性**: `fandhe_ai_backend_cuda::ops::BackendOps::gemm`（本番ディスパッチ）
 は f32 tiled カーネル固定であり、`wmma_f16`／`mma_sync_f16` のいずれにも到達しない。
-`CudaGemmAuto::run_f16`（f16 auto 経路。`crates/backend-cuda/src/gemm_auto.rs`）は
-`CudaWmmaGemm`（WMMA f16）を結線しているため facade から到達しうるが、この経路が
-どの程度使われているかは本イシューのスコープ外（ディスパッチ規則自体は変更しない）。
-一方 `mma_sync_f16`（`CudaMmaGemm`）は証跡用途（`tests/dispatch_boundary.rs` の実測記録）
-のみで、facade からは到達しない。`mma_sync_f16` の結線による性能改善は別イシュー
-（#1131。§6）で扱う。
+`CudaGemmAuto::run_f16`（f16 auto 経路。`crates/backend-cuda/src/gemm_auto.rs`）の
+`KernelKind::MatrixUnit` 判定分岐（`select_f16_matrix_unit_impl`）自体は、cc >= 8.0
+かつ整列形状（`validate_mma_alignment`／`validate_mma_grid_bounds` 充足）で
+`mma_sync_f16`（`CudaMmaGemm`）を、それ以外では `wmma_f16`（`CudaWmmaGemm`）を
+優先する `docs/dispatch-rules-design.md` §5.6 の mma 優先設計どおり実装済み（#1156）。
+この優先順位は `gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED` でゲートされており、
+イシュー #1160 の GB10 実機実測（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`）で
+非後退を確認した一方、mma 優先の本番有効化（`true`）は K=4096 非後退ゲートの
+`MmaF16` baseline ceiling 未承認（PR #1179 codex-review 指摘）により
+`false`（wmma 優先・#1156 以前と同じ従来経路）のまま保留している（`run_f16` は
+現状 cc・整列形状に関わらず `wmma_f16` を優先して呼ぶ）。ただし `CudaGemmAuto` 自体は
+本イシュー #1160 の時点でも facade／`BackendOps::gemm`／`bench-harness` のいずれ
+からも呼ばれておらず本番未結線のまま（`gemm_auto.rs::new` doc コメント参照。
+`BackendOps::gemm` は引き続き f32 tiled カーネル固定）である。この
+`CudaGemmAuto` 自体の facade への結線は本イシュー・#1156 いずれのスコープ外
+（ディスパッチ規則自体は変更しない）。TFLOPS 正式記録・`wmma_f16_opt` の維持・
+格下げ判断は #1160 が §8 で扱った（結論: フォールバック限定で維持。§8「7. の
+決定」参照）。
 
 ### 4.2 dim=4096 のプロトコル検査失敗（二峰性）の原因
 
@@ -268,11 +296,18 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
   §4.1 で確認した `mma.sync`/`ldmatrix`/`cp.async` パイプラインの約 3〜13 倍（形状依存。
   dim2048 で約 7 倍・dim4096 で約 11〜13 倍。§3.1 の初回診断計測・§4.3 の是正後実測
   いずれも同傾向）の優位性を、
-  f16 auto 経路（`CudaGemmAuto::run_f16`）へ結線するかどうかの設計判断。現状は証跡用途
-  のみで本番非到達。**完了条件を追加**（2026-09-03 GB10 実機実測後）:
-  `tensor_core_real_device.rs::tensor_core_tflops_record` の f16 assert
-  （`f16_kernel_tflops > tiled_kernel_tflops`。GB10 実機実測で FAIL・§4.3）が pass する
-  ことを #1131 の完了条件とする。
+  f16 auto 経路（`CudaGemmAuto::run_f16`）へ結線するかどうかの設計判断。#1156 で
+  `select_f16_matrix_unit_impl` の判定ロジック自体は結線済み（cc>=8.0・整列形状で
+  `mma_sync_f16` を優先する設計。§4.1 参照）。完了条件（2026-09-03 GB10 実機実測後に
+  追加）: `tensor_core_real_device.rs::tensor_core_tflops_record` の f16 assert
+  （§4.3 で FAIL）が pass すること。**#1160（2026-09-04 GB10 実機実測）で f16 assert
+  の比較対象を本番経路が実際に選ぶ実装から動的に決定する方式へ差し替え、
+  `MMA_PRIORITY_PRODUCTION_ENABLED` を一時的に `true` にした状態で pass することを
+  確認した（§8）が、mma 優先の本番有効化自体は K=4096 非後退ゲートの `MmaF16`
+  baseline ceiling 未承認（PR #1179 codex-review 指摘）により `false`（wmma 優先）へ
+  差し戻し済みである。完了条件（assert が pass すること）は「本番選択結果に追従する
+  比較方式」の整備として満たされたが、mma 優先自体の本番有効化は baseline ceiling
+  承認まで保留のままである。**
 
 ## 7. 関連ファイル
 
@@ -281,3 +316,88 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
 - `crates/backend-cuda/tests/dispatch_boundary.rs::large_shape_mma_pipeline_vs_wmma_tflops_record`（是正）
 - `crates/backend-cuda/tests/tensor_core_real_device.rs::tensor_core_tflops_record`（是正）
 - `docs/perf/dispatch-boundary-measurement.md`・`docs/perf/cuda-tensor-core-measurement.md`（大形状行の上書き対象）
+
+## 8. f16 経路切替前後の TFLOPS 記録・f16 assert pass 転換・`wmma_f16_opt` の扱い確定（#1160）
+
+イシュー #1160「f16 経路切替前後の TFLOPS を dispatch_boundary 系で記録し
+`tensor_core_tflops_record` の f16 assert pass と `wmma_f16_opt` の扱いを
+確定する」の実測記録。GB10（sm_121・CUDA 13.0・2026-09-04・GPU アイドル。
+`nvidia-smi --query-compute-apps`／`utilization.gpu` を計測前後に確認）。
+
+### 8.1 カーネル単体（本イシューでの追加計測なし。§3.1 の既存実測を再引用）
+
+§3.1 の GB10 実機実測（2026-09-03。イシュー #1123）は本イシューの結線判断で
+そのまま参照した（同一プロトコル・カーネルソース無変更のため再計測は行って
+いない）。2048/4096 の `wmma_f16_opt` 対 `mma_sync_f16` は §4.1 記載のとおり
+（2048: 約 7.3 倍・4096: 約 10.8 倍）。
+
+### 8.2 転送込み auto 経路 A/B（`CudaGemmAuto::run_f16`。独立 5 回起動・run-median）
+
+`docs/perf/cuda-gemm-auto-f16-mma-switch.md`「実測表」に記録した（本ファイル
+では二重管理しない）。要約: 512/1024/2048 は after（mma 優先）が base（wmma
+優先）を 1.75〜4.67 倍上回り、4096 は #1130 の per-call アロケーション病態
+（本節参照）の影響で base・after とも run-median が低く出るが after の
+run-median は base の 5 run 範囲内に収まった（後退なし）。
+
+### 8.3 `tensor_core_tflops_record` の f16 assert pass 転換
+
+`tests/tensor_core_real_device.rs::tensor_core_tflops_record` の f16 計測を、
+`CudaWmmaGemm`（`wmma_f16_opt`）直接計測から「本番 f16 経路が実際に選ぶ
+実装」（`CudaGemmAuto::mma_available()` に応じて `CudaMmaGemm` または
+`CudaWmmaGemm` をカーネル単体計測。GB10 では `mma_available()=true` のため
+`mma_sync_f16`）へ差し替えた（`internal-diagnostics` feature 込みで選択器
+`f16_matrix_unit_impl` との整合性を fail-closed 検査）。GB10 実機実測結果:
+
+| path | TFLOPS |
+|---|---|
+| tiled_f32（基準） | 10.013 |
+| wmma_tf32_staged | 14.134 |
+| wmma_f16_opt（参考行・assert 対象外） | 4.522 |
+| mma_sync_f16（本番 f16 経路・assert 対象） | 55.449 |
+
+f16 assert（`production_f16_kernel_tflops > tiled_kernel_tflops`）は
+55.449 > 10.013 のため **pass**（`test result: ok. 1 passed`）。TF32 assert
+も引き続き pass（14.134 > 10.013）。この計測は
+`MMA_PRIORITY_PRODUCTION_ENABLED = true`（mma 優先）を一時的に有効化した
+状態で行ったものである。イシュー #1131 の完了条件（本 assert が pass
+すること）は「本番選択結果に追従する比較方式」の整備としては満たされたが、
+本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = false`。PR #1179 codex-review
+指摘により差し戻し済み）のまま実機実行した場合は比較対象が `wmma_f16_opt`
+へ戻り、本 assert は red のままである（上記状態ブロック・§6 参照）。
+
+### 8.4 `wmma_f16_opt` の扱いの決定: フォールバック限定で維持（コード変更なし）
+
+- **根拠 1**: GB10 カーネル単体で opt≈basic（§4.1・§3.1 参照。512/2048/4096
+  は basic が僅かに速く、768〜1536 は opt が僅かに速い。一貫した優劣なし）。
+  共有メモリ最適化は f16 で効果を持たないが、後退もしていない
+- **根拠 2**: 結線後（`MMA_PRIORITY_PRODUCTION_ENABLED = true`。その後 baseline
+  ceiling 未承認により `false` へ差し戻し済み。上記状態ブロック参照）の WMMA 経路
+  は「mma 事前形状ゲート非充足（`n % 8 != 0` または `k % 8 != 0`・grid 上限
+  超過）」「cc 7.x（mma 非対応）」「`CudaMmaGemm` NVRTC 失敗」時の
+  フォールバックとして本番到達性を保つため、証跡専用への格下げ（到達不能
+  化）はできない
+- **根拠 3**: `ParityPath::WmmaF16` baseline 行は opt 実効経路の実測値であり
+  （`docs/perf/cuda-parity-baseline.md`）、`CudaWmmaGemm::run_f16` の既定を
+  basic へ変える・opt を削除するには baseline 再実測とユーザー承認が必要
+  （本 PR の権限外）
+- **結論**: `wmma_f16_opt` は「フォールバック経路として維持（本番 f16 auto
+  経路の主経路からは外れる）・追加最適化投資は行わない」。将来の opt 廃止／
+  basic 一本化は承認付き別イシューの候補として PR 本文に記録する（本 PR で
+  Issue は起票しない）
+
+### 8.5 4096 転送込みの既知病態（#1130・スコープ外）
+
+4096 は base・after いずれの転送込み計測（§8.2）でも #1130（本ファイル §4.2
+「dim=4096 のプロトコル検査失敗（二峰性）の原因」）の per-call アロケーション
+病態の影響を受け run 間ばらつきが大きい。本イシューはこの病態の原因調査・
+修正を行わない（#1130 のスコープのまま）。
+
+### 8.6 関連ファイル（本節分）
+
+- `crates/backend-cuda/src/gemm_auto.rs`（本節実測当時は `MMA_PRIORITY_PRODUCTION_ENABLED
+  = true` で計測。baseline ceiling 未承認のため現在は `false` へ差し戻し済み）
+- `crates/backend-cuda/tests/tensor_core_real_device.rs`（f16 計測の本番経路追従）
+- `crates/backend-cuda/tests/gemm_auto.rs`（`f16_matrix_unit_impl_reports_selected_implementation` 期待値更新）
+- `scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh`（`BIN` の `CARGO_TARGET_DIR` 対応是正）
+- `docs/perf/cuda-gemm-auto-f16-mma-switch.md`（転送込み auto 経路 A/B 実測表）
+- `docs/perf/cuda-parity-baseline.md` §12.6（route-aware テストの既知 red 相互参照）

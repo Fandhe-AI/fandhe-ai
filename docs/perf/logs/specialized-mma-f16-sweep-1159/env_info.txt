@@ -1,0 +1,46 @@
+イシュー #1159 GB10 実測環境（specialized_mma_f16 残り形状 × 3 プリセット sweep）
+
+計測日時（JST）: 2026-09-04T08:30〜08:42 JST 付近（sweep_run1/run2 実行時刻）
+
+GPU: NVIDIA GB10（sm_121）
+driver_version: 580.173.02
+nvcc: Build cuda_13.0.r13.0/compiler.36424714_0（CUDA 13.0）
+rustc: 1.97.0 (2d8144b78 2026-07-07)
+cargo: 1.97.0 (c980f4866 2026-06-30)
+
+転送元コミット（.rev-stamp 一致確認済み・sweep 実行前後とも同一）:
+  c72d6649f46d5348b2be56c694d9572273e91493
+  （origin/main HEAD。test(backend-cuda): specialized_mma_f16 の
+  (256,512,1024) fail を f16 丸め起因かカーネル欠陥かへ GB10 で切り分ける
+  〈#1180〉を含む）
+
+GPU 排他性確認（実行前後で共通・変化なし。utilization.gpu = 0%）:
+  常駐プロセス（idle 判定済み・停止していない）:
+    - ComfyUI（/opt/llm-infra/comfyui-env/bin/python）: 170 MiB
+    - Kokoro（/opt/llm-infra/venvs/kokoro/bin/python3）: 870 MiB
+  他セッションの cargo/rustc アクティブプロセス: なし
+    （別リポジトリ向けの完了待ちポーリングループ 1 件を検出したが、
+    当該ループ自身は cargo を実行しておらず GPU 使用率も 0% のため
+    競合と判断せず sweep を実行した）
+
+実行コマンド（before）:
+  cd ~/work/rust-ai-library-run
+  PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+  CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics \
+    --test specialized_mma_parity -- --ignored --nocapture --test-threads=1 \
+    specialized_mma_f16_matches_default_and_reference_across_shapes
+
+実行コマンド（sweep run1/run2。同一コマンドを 2 回実行）:
+  cd ~/work/rust-ai-library-run
+  PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+  CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics \
+    --test specialized_mma_f16_sweep_1159 -- --ignored --nocapture --test-threads=1
+
+再現性確認: sweep run1/run2 の TRIAGE_ROW・SWEEP_BITMATCH・SWEEP_SUMMARY
+行を diff し完全一致を確認済み（差分ゼロ）。
+
+秘密情報・実ホスト名の混入確認: 本ディレクトリ配下を
+`grep -rniE 'spark|local\.fandhe|[0-9]{1,3}(\.[0-9]{1,3}){3}'` で検査し
+0 件（実ホスト名スクラブ済み）。
