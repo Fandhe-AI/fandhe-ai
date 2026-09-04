@@ -148,6 +148,49 @@ pub enum ParityPath {
     /// 同型の「元の受け入れ条件は置き換えない」設計。
     /// `docs/perf/cuda-parity-baseline.md` §10.4 参照）。
     WmmaF16,
+    /// `gemm_auto::run_specialized_mma_f16`（`internal-diagnostics` feature
+    /// 限定の shape 特化 `mma_f16` カーネル。`CompiledDims::{DYNAMIC_ALL,
+    /// STATIC_NK, STATIC_MNK}` の 3 プリセットで NVRTC コンパイルした
+    /// カーネル）と CPU 参照実装（f16→f32→`matmul_reference_fma`→f16
+    /// 丸め→f32。`tests/specialized_mma_parity.rs::cpu_reference_f32`）
+    /// との非後退ゲート（イシュー #1161）。
+    ///
+    /// **判定根拠（spec REQ-2「2026-09-02 追記」の形状別判定方式）**:
+    /// `tests/specialized_mma_parity.rs::
+    /// specialized_mma_f16_matches_default_and_reference_across_shapes`
+    /// が検査する CPU 参照検査対象 8 形状 × 3 プリセットのうち、GB10
+    /// 実機 sweep（イシュー #1159・PR #1181・`docs/perf/logs/
+    /// specialized-mma-f16-sweep-1159/`・2 回実行で全値完全一致）で
+    /// `(256, 512, 1024)` の 3 プリセットのみが `fail_count=30/131072`
+    /// の恒常非ゼロ fail を示した。他 7 形状（`(64,128,32)`・
+    /// `(128,256,128)`・`(40,24,72)`・`(65,136,40)`・`(63,120,24)`・
+    /// `(200,264,104)`・`(1,136,40)`）は 3 プリセットいずれもゼロ fail が
+    /// 成立するため厳密判定（`fandhe_ai_backend_cpu::assert_parity`）を
+    /// 維持する。本経路は `(256,512,1024)` の 3 行のみを保持する。
+    ///
+    /// **3 プリセットの統計が完全同一である理由**: shape 特化は `#define`
+    /// によるコンパイル時定数の焼き込みのみで演算命令列・アキュムレート
+    /// 順序を変えない bit 一致契約（`kernels_mma.rs` 冒頭コメント）を持ち、
+    /// 実際に全 30 行が既定カーネル（`CudaMmaGemm::run_f16`）と bit 一致
+    /// することを sweep で確認済み。したがって 3 プリセットの
+    /// `fail_count`/`max_abs_diff`/`max_rel_err`/`mean_abs_diff` は完全に
+    /// 同一値になるが、この 3 行はプリセットごとに独立した非後退監視を
+    /// 維持するための意図した冗長であり、統合しない。
+    ///
+    /// **注意（事実の区別）**: #1155 の GB10 実機切り分け（f16 丸めに
+    /// 由来する誤差か機能欠陥かの判定）は本行の記録時点で未実施。「機能
+    /// 欠陥ではない」という見立ては、既定カーネルとの bit 一致検査が
+    /// pass すること・fail 率が約 0.02%（30/131072）と小さいこと・
+    /// `p999_abs_diff=0`（ほぼ全要素が許容内）であること・`WmmaTf32Opt`
+    /// （#1106）や `MmaTf32`（#1122）の同種事象との類推に基づく推定で
+    /// あり、確定した事実として記載しているものではない。
+    ///
+    /// baseline 行の追加はユーザー承認必須（`security.md`「ガードレール
+    /// 閾値・テスト許容誤差の変更は人間の承認を経る」）。本行の承認記録は
+    /// イシュー #1161 の実装 PR の承認コメントを一次記録とする。
+    /// tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）・
+    /// カーネル実装は本イシューで一切変更しない。
+    SpecializedMmaF16,
     /// `CudaMmaTf32Gemm::run_tf32`（生 `mma.sync`(m16n8k8)/`ldmatrix`/
     /// `cp.async` 経路。イシュー #801）と CPU f32 参照実装
     /// （`matmul_reference_fma`）との非後退ゲート。
@@ -190,6 +233,7 @@ impl std::fmt::Display for ParityPath {
             ParityPath::WmmaTf32Staged => "wmma_tf32_staged",
             ParityPath::MmaF16 => "mma_f16",
             ParityPath::WmmaF16 => "wmma_f16",
+            ParityPath::SpecializedMmaF16 => "specialized_mma_f16",
             ParityPath::MmaTf32 => "mma_tf32",
             ParityPath::MmaTf32VsWmmaStaged => "mma_tf32_vs_wmma_tf32_staged",
         };
@@ -1045,6 +1089,59 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_provenance_unconfirmed: false,
         baseline_max_abs_diff_ceiling: Some(1.220704e-3),
         baseline_max_rel_err_ceiling: Some(1.977192e0),
+    },
+    // specialized_mma_f16: `(256, 512, 1024)` shape 特化 mma_f16
+    // カーネル（イシュー #1161）。3 プリセット（DYNAMIC_ALL/STATIC_NK/
+    // STATIC_MNK）は既定カーネルと bit 一致のため統計値が完全同一
+    // （`ParityPath::SpecializedMmaF16` ドキュメンテーションコメント
+    // 参照）。実測環境: DGX Spark GB10（sm_121・CUDA 13.0・driver
+    // 580.173.02・rustc 1.97.0）・GPU アイドル・`--test-threads=1`・
+    // 2026-09-04 JST・2 回実行で全値完全一致。出典:
+    // `docs/perf/logs/specialized-mma-f16-sweep-1159/sweep_run1.log`／
+    // `sweep_run2.log`（`TRIAGE_ROW … shape=256x512x1024 seed=4003`
+    // 行）。ceiling は「表示桁最終桁 +1」規約（表記丸め対応のみ・
+    // tolerance 定数は不変）。
+    ParityBaseline {
+        path: ParityPath::SpecializedMmaF16,
+        context: "specialized_mma_f16 256x512x1024 seed=4003 compiled=DYNAMIC_ALL (#1159 sweep)",
+        m: 256,
+        n: 512,
+        k: 1024,
+        seed: 4003,
+        total: 256 * 512,
+        baseline_fail_count: 30,
+        baseline_mean_abs_diff_ceiling: 1.010962e-5,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.562501e-2),
+        baseline_max_rel_err_ceiling: Some(3.341150e-2),
+    },
+    ParityBaseline {
+        path: ParityPath::SpecializedMmaF16,
+        context: "specialized_mma_f16 256x512x1024 seed=4003 compiled=STATIC_NK (#1159 sweep)",
+        m: 256,
+        n: 512,
+        k: 1024,
+        seed: 4003,
+        total: 256 * 512,
+        baseline_fail_count: 30,
+        baseline_mean_abs_diff_ceiling: 1.010962e-5,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.562501e-2),
+        baseline_max_rel_err_ceiling: Some(3.341150e-2),
+    },
+    ParityBaseline {
+        path: ParityPath::SpecializedMmaF16,
+        context: "specialized_mma_f16 256x512x1024 seed=4003 compiled=STATIC_MNK (#1159 sweep)",
+        m: 256,
+        n: 512,
+        k: 1024,
+        seed: 4003,
+        total: 256 * 512,
+        baseline_fail_count: 30,
+        baseline_mean_abs_diff_ceiling: 1.010962e-5,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.562501e-2),
+        baseline_max_rel_err_ceiling: Some(3.341150e-2),
     },
 ];
 
