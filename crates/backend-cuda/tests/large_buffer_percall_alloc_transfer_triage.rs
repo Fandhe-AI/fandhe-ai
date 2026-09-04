@@ -727,6 +727,15 @@ fn large_buffer_percall_fixed_total_size_comparison() {
         );
 
         drop(device_srcs);
+        // codex-review 指摘（PR #1169 discussion）: H2D 側と同じ理由で、
+        // `device_srcs` drop（`cuMemFreeAsync` enqueue）の完了を待たずに
+        // 次ケースへ進むと、解放コストが次ケースの H2D 計測（本ループ
+        // 先頭の `clone_htod` 合算）へ持ち越されうる。ケース境界で同期し
+        // 解放完了を確定させる。
+        device
+            .stream()
+            .synchronize()
+            .expect("synchronize after device_srcs free must succeed to measure free completion");
     }
 }
 
@@ -849,6 +858,15 @@ fn large_buffer_percall_alloc_transfer_triage_record() {
                 );
 
                 drop(device_src);
+                // codex-review 指摘（PR #1169 discussion）: 上記 drop も
+                // `cuMemFreeAsync` を enqueue するのみで完了を待たないため、
+                // P0／P3 と同じ「drop 後同期」の契約に揃えて同期する。
+                // 未同期のままだと解放完了コストが計測区間外へ逃げ、次ラン
+                // （降順パスなら次サイズ）の P0 cold 計測へ混入しうる。
+                device
+                    .stream()
+                    .synchronize()
+                    .expect("synchronize after free must succeed to measure free completion");
 
                 // P6（ホスト Vec タッチのみ・GPU 非関与）
                 let (cold, m) = phase_p6_host_vec_touch_only(&config, numel);
