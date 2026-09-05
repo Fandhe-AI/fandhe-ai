@@ -527,8 +527,9 @@ impl BackendOps for MetalBackendOps {
     }
 
     /// GEMM 本体（f32）。片側のみが転置 view（NT: `b` が転置・TN: `a` が
-    /// 転置）の場合は [`Self::gemm_strided_nt_tn`]（`dispatch_strided_
-    /// bias_act_prepared` 経由の classic strided カーネル）へ分岐し、
+    /// 転置）の場合は `gemm_strided_nt_tn`（非公開ヘルパー。`dispatch_
+    /// strided_bias_act_prepared` 経由の classic strided カーネル）へ
+    /// 分岐し、
     /// ホスト側の転置再パックコピーを省く（イシュー #1215。呼び出し元は
     /// `autodiff::grad::matmul_vjp`／`Op::LinearResident` の VJP が
     /// `BackendOps::gemm_fp32_strict`〈既定実装から本メソッドへ委譲〉
