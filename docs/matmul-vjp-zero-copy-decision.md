@@ -101,6 +101,31 @@ CPU での前後比較実測（`backward`・`step_total` の中央値〈fresh・
 `docs/perf/train-backward-gemm-wiring.md` を参照。ガードレール閾値・テスト
 許容誤差は本追補でも変更していない。
 
+### 4.2 追補（イシュー #1213）
+
+上記 §4.1・§3.2 表 1 行目「CPU BLIS packing の stride 一般化」で残って
+いた CPU 本番経路（`backend-cpu::ops::gemm`／`gemm_resident_lhs`）の
+転置再パックを、**一般 stride 化ではなく NT（`b` が転置格納）／TN
+（`a` が転置格納）の 2 パターン限定**で解消した。判定条件は「転置
+オペランドが dense な転置格納（`Tensor::strides() == [1, shape()[0]]`。
+`transpose2d` を行優先連続テンソルへ適用した結果と同値）」であり、
+`gemm_blis::pack::{pack_a_from_transposed, pack_b_from_transposed}`
+（既存 `pack_b`／`pack_a` と役割を入れ替えた実装）が BLIS packing 側で
+転置格納から直接 panel を構築する。両方転置（TT）・一般 stride
+（`narrow` 後の転置等）は引き続き `contiguous()` フォールバックのまま
+（§3.2 表 1 行目の「一般化」自体は不採用のまま）。
+
+数値契約: NT/TN 入口が書く panel の内容は「`contiguous()` してから
+既存 `pack_a`／`pack_b` で pack した panel」と同一バイト列になる設計
+のため、計算結果は `gemm_blis_parallel`（NN 経路）と **bit 完全一致**
+する（`crates/backend-cpu/src/gemm_blis/mod.rs` のクレート内テスト・
+`crates/backend-cpu/tests/gemm_transposed_parity.rs` で検証）。tolerance
+の新設・変更は行っていない。
+
+CPU 実機実測・採否判断は `docs/perf/cpu-gemm-vjp-transposed-entry.md`
+を参照。CUDA（#1214）・Metal（#1215）は引き続き未対応（`docs/matmul-
+vjp-zero-copy-decision.md` §3.2 の該当行は変更しない）。
+
 ## 5. 実機実測（未実施）
 
 本ランは Linux x86_64（NVRTC 非搭載・Metal 実機なし）のため、以下は

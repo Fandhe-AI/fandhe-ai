@@ -81,7 +81,10 @@ use microkernel::Microkernel;
 // テストバイナリのコンパイルには必要。#185 レビュー指摘）。
 #[cfg(any(not(target_arch = "aarch64"), test))]
 use microkernel::ScalarKernel;
-use pack::{APackTile, BPackTile, pack_a, pack_b};
+use pack::{
+    APackTile, ATPackTile, BPackTile, BTPackTile, pack_a, pack_a_from_transposed, pack_b,
+    pack_b_from_transposed,
+};
 use rayon::prelude::*;
 
 /// 端タイル専用の C スタックバッファ最大要素数（`MR * NR` の全 ISA 中の
@@ -286,6 +289,57 @@ fn gemm_row_vector(a: &[f32], b: &[f32], c: &mut [f32], n: usize) {
     }
 }
 
+/// [`gemm_row_vector`] の NT パターン版（#1213。`m == 1` かつ B が転置
+/// 格納 `bt`〈論理形状 `[n, k]` の行優先〉の場合の専用経路）。
+///
+/// **bit 完全一致契約**: `gemm_row_vector` は列 `j` ごとに独立な
+/// アキュムレータへ p（K 方向）昇順の `f32::mul_add` 連鎖を適用する
+/// （どの列も他列の計算に影響しないため、ループの外側/内側を p/j
+/// どちらに取っても各列の FMA 連鎖の順序自体は不変）。本関数は
+/// ループ順を j 外側・p 内側へ入れ替えるのみで、列 `j` の連鎖内容
+/// （`c[j] = a[0]*bt[j,0] + a[1]*bt[j,1] + ... `を p 昇順 `mul_add`
+/// で評価する点）は [`gemm_row_vector`] と完全に同一である
+/// （`bt[j,p] == b[p,j]` は同じ数学的要素を指すため、読み出し元の
+/// メモリレイアウトが異なるだけで計算内容は変わらない）。よって
+/// [`gemm_row_vector`] と bit 完全一致する（`gemm_blis/mod.rs` 内の
+/// `gemm_row_vector_nt_matches_gemm_row_vector_bit_exact` で検証）。
+///
+/// # 契約
+///
+/// 呼び出し元が `m == 1` を確定した上で呼ぶ。`a` は `k` 要素、`bt` は
+/// `n * k` 要素、`c` は `n` 要素であることを呼び出し元（[`validate_dims`]
+/// 通過済みの公開入口）が保証する前提とし、本関数自体は追加の長さ検査を
+/// 行わない（[`gemm_row_vector`] と同じ設計判断）。
+fn gemm_row_vector_nt(a: &[f32], bt: &[f32], c: &mut [f32], k: usize) {
+    for (j, c_j) in c.iter_mut().enumerate() {
+        let bt_row = &bt[j * k..j * k + k];
+        let mut acc = *c_j;
+        for (&a_p, &bt_p) in a.iter().zip(bt_row.iter()) {
+            acc = a_p.mul_add(bt_p, acc);
+        }
+        *c_j = acc;
+    }
+}
+
+/// GEMM オペランドの転置パターン（VJP 専用 NT/TN 2 パターン限定入口。
+/// #1213）。
+///
+/// - `Nn`: 通常（A・B とも論理形状どおりの行優先連続）
+/// - `Nt`: A は通常、B は転置格納（`bt`。論理形状 `[n, k]` の行優先。
+///   元の B `[k, n]` を転置した view の実体）
+/// - `Tn`: A は転置格納（`at`。論理形状 `[k, m]` の行優先。元の A
+///   `[m, k]` を転置した view の実体）、B は通常
+///
+/// 両方転置（TT）は本イシューのスコープ外のため variant を持たない
+/// （呼び出し元 `backend-cpu::ops` が `contiguous()` で吸収してから
+/// `Nn` を渡す。`docs/matmul-vjp-zero-copy-decision.md` §3.2）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GemmTranspose {
+    Nn,
+    Nt,
+    Tn,
+}
+
 /// panel packing バッファ（A/B 各 1 本）を gemm 呼び出し単位で 1 回だけ
 /// 確保し、5-loop 内の全 jc×pc×ic ブロックで使い回すための保持構造体
 /// （#556。matrixmultiply 等参照実装の「gemm 呼び出しあたり 1 回確保＋
@@ -386,7 +440,7 @@ pub fn gemm_blis(
         gemm_row_vector(a, b, c, n);
         return Ok(());
     }
-    dispatch_region(a, b, c, n, k, 0..m, default_blocks())
+    dispatch_region(a, b, c, n, k, 0..m, default_blocks(), GemmTranspose::Nn)
 }
 
 /// `gemm_blis` を `rayon` で行パネル並列化した版。
@@ -394,6 +448,10 @@ pub fn gemm_blis(
 /// C を行方向にパネル分割し、各パネルを独立スレッドで `gemm_blis_region`
 /// に渡す（`crate::gemm::gemm_parallel` と同じ並列化戦略。C の書き込み
 /// 範囲がパネルごとに排他的なためデータ競合なし）。
+///
+/// 本体は [`gemm_blis_parallel_with_transpose`]（`Nn` 固定）への委譲
+/// （#1213。VJP 専用 NT/TN 2 パターン入口 [`gemm_blis_parallel_nt`]／
+/// [`gemm_blis_parallel_tn`] と実装を共有するための切り出し）。
 pub fn gemm_blis_parallel(
     a: &[f32],
     b: &[f32],
@@ -401,6 +459,27 @@ pub fn gemm_blis_parallel(
     m: usize,
     n: usize,
     k: usize,
+) -> Result<(), GemmError> {
+    gemm_blis_parallel_with_transpose(a, b, c, m, n, k, GemmTranspose::Nn)
+}
+
+/// [`gemm_blis_parallel`]／[`gemm_blis_parallel_nt`]／[`gemm_blis_parallel_tn`]
+/// （#1213）共通の実装本体。`transpose` で A・B オペランドどちらが転置
+/// 格納（`GemmTranspose` ドキュメント参照）かを指定する。
+///
+/// `Nn` 時の挙動は #1213 以前の `gemm_blis_parallel` と完全に同一
+/// （ロジックは移設のみで変更していない）。`Nt`／`Tn` は `dispatch_region`
+/// 以下（[`gemm_blis_region`]／[`gemm_blis_ic_loop`]）が転置格納から
+/// 直接 packing する経路へ分岐する（`pack.rs` モジュールドキュメント
+/// 「転置格納からの直接 packing」節参照）。
+pub(crate) fn gemm_blis_parallel_with_transpose(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    transpose: GemmTranspose,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
 
@@ -414,8 +493,15 @@ pub fn gemm_blis_parallel(
     // gemv 相当（m == 1）は rayon 分割の恩恵がなく（`par_chunks_mut` の
     // チャンク数が常に 1 になる）BLIS packing のパディング無駄だけが
     // 乗るため専用経路へ迂回する（[`gemm_row_vector`] ドキュメント参照）。
+    // `Tn`（`a` 引数は転置格納 `at`。論理形状 `[k,1]` 行優先＝通常の
+    // `[1,k]` 行ベクトルとメモリ上完全に同一）は `gemm_row_vector` を
+    // そのまま呼べる（#1213）。`Nt`（`b` 引数は転置格納 `bt`）は専用の
+    // [`gemm_row_vector_nt`] を呼ぶ。
     if m == 1 {
-        gemm_row_vector(a, b, c, n);
+        match transpose {
+            GemmTranspose::Nn | GemmTranspose::Tn => gemm_row_vector(a, b, c, n),
+            GemmTranspose::Nt => gemm_row_vector_nt(a, b, c, k),
+        }
         return Ok(());
     }
 
@@ -454,13 +540,60 @@ pub fn gemm_blis_parallel(
     // 22〜24% 低いスループット。GB10: 1024/2048 のみ実測で約 45〜54% 低い。
     // GB10 4096 は候補側未計測）、#1144 で本番結線しないと確定した。詳細・
     // 数値は `docs/perf/cpu-gemm-candle-cpu-retune.md` §8 を参照。
+    //
+    // `Nt`（`b` 引数が転置格納 `bt`）は行範囲に依存せず全パネルへ同じ
+    // `bt` を渡す（B packing は行パネル分割と無関係）。`Tn`（`a` 引数が
+    // 転置格納 `at`）も同様に全パネルへ同じ `at` を渡し、行オフセットは
+    // `gemm_blis_region` 内部（絶対行位置 `row_start + ic + ir`）で解決
+    // する（`at` は m 方向でなく k 方向が先頭軸のため `a[row_start*k..]`
+    // の単純スライスができない。#1213）。
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks, transpose)
         })
+}
+
+/// [`gemm_blis_parallel_with_transpose`] を `Nt`（B オペランドが転置
+/// 格納）で呼ぶ VJP 専用入口（#1213）。`bt` は論理形状 `[n, k]` の行優先
+/// （元の B `[k, n]` を転置した view の実体。`GemmTranspose` ドキュメント
+/// 参照）。`matmul_vjp` の d_input（`g @ Wᵀ`）・`Op::LinearResident` の
+/// d_input（`W @ gᵀ`。呼び出し元は `gemm_resident_lhs` 経由）が該当する。
+///
+/// 一般 stride（`narrow` 後の転置等）には対応しない。呼び出し元
+/// （`backend-cpu::ops`）が `Tensor::strides() == [1, shape[0]]` の dense
+/// な転置 view であることを判定してから呼ぶ契約とする
+/// （`docs/matmul-vjp-zero-copy-decision.md` §3.2）。
+pub fn gemm_blis_parallel_nt(
+    a: &[f32],
+    bt: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<(), GemmError> {
+    gemm_blis_parallel_with_transpose(a, bt, c, m, n, k, GemmTranspose::Nt)
+}
+
+/// [`gemm_blis_parallel_with_transpose`] を `Tn`（A オペランドが転置
+/// 格納）で呼ぶ VJP 専用入口（#1213）。`at` は論理形状 `[k, m]` の行優先
+/// （元の A `[m, k]` を転置した view の実体。`GemmTranspose` ドキュメント
+/// 参照）。`matmul_vjp` の d_weight（`Aᵀ @ g`）・`Op::LinearResident` の
+/// d_weight（`xᵀ @ g`）が該当する。
+///
+/// [`gemm_blis_parallel_nt`] と同じ契約（一般 stride 非対応・呼び出し元
+/// が dense 転置 view を判定済み）。
+pub fn gemm_blis_parallel_tn(
+    at: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<(), GemmError> {
+    gemm_blis_parallel_with_transpose(at, b, c, m, n, k, GemmTranspose::Tn)
 }
 
 /// `gemm_blis_parallel` に GEMM epilogue（bias 加算・activation）を融合した版
@@ -564,7 +697,16 @@ pub fn gemm_blis_bias_act_parallel(
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)?;
+            dispatch_region(
+                a,
+                b,
+                c_chunk,
+                n,
+                k,
+                row_start..row_end,
+                blocks,
+                GemmTranspose::Nn,
+            )?;
             apply_epilogue(c_chunk, n, bias, act)
         })
 }
@@ -702,6 +844,7 @@ fn apply_epilogue(
 /// introspection API として残す）。環境変数等による dispatch 上書きは
 /// 設けない（OWASP A03・`.claude/rules/security.md`）。
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_region(
     a: &[f32],
     b: &[f32],
@@ -710,6 +853,7 @@ fn dispatch_region(
     k: usize,
     rows: Range<usize>,
     blocks: BlockSizes,
+    transpose: GemmTranspose,
 ) -> Result<(), GemmError> {
     // AVX-512 経路は `avx512_stable` cfg（`backend-cpu` クレートルートの
     // `build.rs` が AVX-512F intrinsics のコンパイル可否を実測して発行。
@@ -723,14 +867,25 @@ fn dispatch_region(
     #[cfg(avx512_stable)]
     if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
         let mut bufs = PanelBuffers::new::<microkernel::Avx512Kernel>(n, k, mc_total, blocks);
-        return gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs, blocks);
+        return gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs, blocks, transpose);
     }
     if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
         let mut bufs = PanelBuffers::new::<microkernel::Avx2Kernel>(n, k, mc_total, blocks);
-        gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs, blocks)
+        gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs, blocks, transpose)
     } else {
         let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total, blocks);
-        gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs, blocks)
+        gemm_blis_region(
+            ScalarKernel,
+            a,
+            b,
+            c,
+            n,
+            k,
+            rows,
+            &mut bufs,
+            blocks,
+            transpose,
+        )
     }
 }
 
@@ -738,6 +893,7 @@ fn dispatch_region(
 /// [`microkernel::Isa::detect`] は常に `Isa::Neon` を返す（実行時検出不要。
 /// [`microkernel`] モジュールドキュメント参照）。
 #[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_region(
     a: &[f32],
     b: &[f32],
@@ -746,6 +902,7 @@ fn dispatch_region(
     k: usize,
     rows: Range<usize>,
     blocks: BlockSizes,
+    transpose: GemmTranspose,
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
     let mc_total = rows.end - rows.start;
@@ -760,12 +917,14 @@ fn dispatch_region(
         rows,
         &mut bufs,
         blocks,
+        transpose,
     )
 }
 
 /// aarch64／x86_64 以外の arch 版 [`dispatch_region`]。実行時検出対象の
 /// ISA を持たないため常に [`ScalarKernel`] を使う。
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_region(
     a: &[f32],
     b: &[f32],
@@ -774,11 +933,23 @@ fn dispatch_region(
     k: usize,
     rows: Range<usize>,
     blocks: BlockSizes,
+    transpose: GemmTranspose,
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Scalar);
     let mc_total = rows.end - rows.start;
     let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total, blocks);
-    gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs, blocks)
+    gemm_blis_region(
+        ScalarKernel,
+        a,
+        b,
+        c,
+        n,
+        k,
+        rows,
+        &mut bufs,
+        blocks,
+        transpose,
+    )
 }
 
 /// `gemm_blis`／`gemm_blis_parallel` 共通の 5-loop 本体。`c` はパネル
@@ -847,11 +1018,25 @@ fn gemm_blis_region<K: Microkernel>(
     rows: Range<usize>,
     bufs: &mut PanelBuffers,
     blocks: BlockSizes,
+    transpose: GemmTranspose,
 ) -> Result<(), GemmError> {
     let nr = K::NR;
     let row_start = rows.start;
     let mc_total = rows.end - rows.start;
-    let a = &a[row_start * k_dim..];
+
+    // `Nn`／`Nt`: `a` 引数は通常どおり行優先 `[m,k]`。従来どおり行方向
+    // オフセットぶんスライスし、以降 [`gemm_blis_ic_loop`] は「オフセット
+    // 後の a」を 0 始まりの相対行位置で読む。
+    // `Tn`: `a` 引数は実際には転置格納 `at`（論理形状 `[k_dim, m_total]`
+    // 行優先。`m_total` は行方向の飛び幅ではなく列幅であるため
+    // `a[row_start*k_dim..]` の単純スライスができない）。フルスライスの
+    // まま渡し、絶対行位置（`row_offset + ic + ir`）で `pack_a_from_transposed`
+    // を呼べるよう `row_offset`／`m_total` を [`gemm_blis_ic_loop`] へ渡す
+    // （#1213）。
+    let (a_for_loop, row_offset, m_total): (&[f32], usize, usize) = match transpose {
+        GemmTranspose::Tn => (a, row_start, a.len() / k_dim.max(1)),
+        GemmTranspose::Nn | GemmTranspose::Nt => (&a[row_start * k_dim..], 0, 0),
+    };
 
     for jc in (0..n).step_by(blocks.nc) {
         let nc_len = blocks.nc.min(n - jc);
@@ -870,23 +1055,43 @@ fn gemm_blis_region<K: Microkernel>(
             // `vec![...]` 確保をゼロにする）。直列経路（本関数）は単一
             // タスクのみが呼ぶため、B packing はここでは並列化しない
             // （並列化版は [`gemm_blis_shared_b_region`] 側。#750）。
+            //
+            // `Nt` では `b` 引数が転置格納 `bt`（論理形状 `[n, k_dim]`
+            // 行優先）のため [`pack_b_from_transposed`] へ分岐する
+            // （#1213。`pack.rs` モジュールドキュメント参照）。
             let nr_blocks = nc_len.div_ceil(nr);
             let b_panel = &mut bufs.b_panel[..nr_blocks * kc_len * nr];
             for jr_block in 0..nr_blocks {
                 let jr = jr_block * nr;
                 let nr_eff = nr.min(nc_len - jr);
-                pack_b(
-                    &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr],
-                    b,
-                    BPackTile {
-                        n_total: n,
-                        kc_start: pc,
-                        kc_len,
-                        col_start: jc + jr,
-                        nr,
-                        nr_eff,
-                    },
-                );
+                let dst = &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
+                match transpose {
+                    GemmTranspose::Nt => pack_b_from_transposed(
+                        dst,
+                        b,
+                        BTPackTile {
+                            k_total: k_dim,
+                            n_total: n,
+                            kc_start: pc,
+                            kc_len,
+                            col_start: jc + jr,
+                            nr,
+                            nr_eff,
+                        },
+                    ),
+                    GemmTranspose::Nn | GemmTranspose::Tn => pack_b(
+                        dst,
+                        b,
+                        BPackTile {
+                            n_total: n,
+                            kc_start: pc,
+                            kc_len,
+                            col_start: jc + jr,
+                            nr,
+                            nr_eff,
+                        },
+                    ),
+                }
             }
 
             // ic（行パネル）以下のループ本体は [`gemm_blis_ic_loop`] へ
@@ -906,7 +1111,17 @@ fn gemm_blis_region<K: Microkernel>(
                 nc_len,
                 blocks,
             };
-            gemm_blis_ic_loop(kernel, a, c, mc_total, &mut bufs.a_panel, &ctx)?;
+            gemm_blis_ic_loop(
+                kernel,
+                a_for_loop,
+                c,
+                mc_total,
+                &mut bufs.a_panel,
+                &ctx,
+                transpose,
+                row_offset,
+                m_total,
+            )?;
         }
     }
     Ok(())
@@ -955,6 +1170,9 @@ fn gemm_blis_ic_loop<K: Microkernel>(
     mc_total: usize,
     a_panel: &mut [f32],
     ctx: &IcLoopContext,
+    transpose: GemmTranspose,
+    row_offset: usize,
+    m_total: usize,
 ) -> Result<(), GemmError> {
     let mr = K::MR;
     let nr = K::NR;
@@ -978,23 +1196,45 @@ fn gemm_blis_ic_loop<K: Microkernel>(
         // 全体で使い回すため ic ブロックごとに 1 回のみ）。pack_a が
         // panel サブスライスへ直接書き込むため中間 Vec 確保・
         // copy_from_slice は発生しない（#554。B packing と同じ理由）。
+        //
+        // `Tn` では `a` 引数が転置格納 `at`（論理形状 `[k_dim, m_total]`
+        // 行優先。`gemm_blis_region` がフルスライスのまま渡している）
+        // のため [`pack_a_from_transposed`] へ分岐し、行位置は呼び出し元
+        // 由来の絶対オフセット `row_offset + ic + ir` を渡す（#1213。
+        // `pack.rs` モジュールドキュメント参照）。
         let mr_blocks = mc_len.div_ceil(mr);
         let a_panel = &mut a_panel[..mr_blocks * kc_len * mr];
         for ir_block in 0..mr_blocks {
             let ir = ir_block * mr;
             let mr_eff = mr.min(mc_len - ir);
-            pack_a(
-                &mut a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr],
-                a,
-                APackTile {
-                    k_total: k_dim,
-                    row_start: ic + ir,
-                    mr,
-                    mr_eff,
-                    kc_start: pc,
-                    kc_len,
-                },
-            );
+            let dst = &mut a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr];
+            match transpose {
+                GemmTranspose::Tn => pack_a_from_transposed(
+                    dst,
+                    a,
+                    ATPackTile {
+                        k_total: k_dim,
+                        m_total,
+                        row_start: row_offset + ic + ir,
+                        mr,
+                        mr_eff,
+                        kc_start: pc,
+                        kc_len,
+                    },
+                ),
+                GemmTranspose::Nn | GemmTranspose::Nt => pack_a(
+                    dst,
+                    a,
+                    APackTile {
+                        k_total: k_dim,
+                        row_start: ic + ir,
+                        mr,
+                        mr_eff,
+                        kc_start: pc,
+                        kc_len,
+                    },
+                ),
+            }
         }
 
         for jr_block in 0..nr_blocks {
@@ -1208,7 +1448,17 @@ fn gemm_blis_shared_b_region<K: Microkernel>(
                     }
                     let task_row_start = task_idx * panel_rows;
                     let a_task = &a[task_row_start * k_dim..];
-                    gemm_blis_ic_loop(kernel, a_task, c_chunk, task_mc, a_buf, &ctx)
+                    gemm_blis_ic_loop(
+                        kernel,
+                        a_task,
+                        c_chunk,
+                        task_mc,
+                        a_buf,
+                        &ctx,
+                        GemmTranspose::Nn,
+                        0,
+                        0,
+                    )
                 })?;
         }
     }
@@ -1298,7 +1548,18 @@ pub(crate) fn gemm_blis_with_kernel<K: Microkernel>(
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
     let mut bufs = PanelBuffers::new::<K>(n, k, m, default_blocks());
-    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, default_blocks())
+    gemm_blis_region(
+        kernel,
+        a,
+        b,
+        c,
+        n,
+        k,
+        0..m,
+        &mut bufs,
+        default_blocks(),
+        GemmTranspose::Nn,
+    )
 }
 
 /// [`gemm_blis_with_kernel_and_blocks`]／[`gemm_blis_parallel_with_blocks`]
@@ -1350,7 +1611,18 @@ pub(crate) fn gemm_blis_with_kernel_and_blocks<K: Microkernel>(
     validate_dims(a, b, c, m, n, k)?;
     validate_block_sizes(blocks)?;
     let mut bufs = PanelBuffers::new::<K>(n, k, m, blocks);
-    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, blocks)
+    gemm_blis_region(
+        kernel,
+        a,
+        b,
+        c,
+        n,
+        k,
+        0..m,
+        &mut bufs,
+        blocks,
+        GemmTranspose::Nn,
+    )
 }
 
 /// テスト専用: [`gemm_blis_shared_b_region`]（B パネル共有経路。#750）の
@@ -1384,7 +1656,7 @@ pub(crate) fn gemm_blis_parallel_with_blocks(
     let panel_rows = m.div_ceil(num_threads).max(1);
 
     if m <= panel_rows {
-        return dispatch_region(a, b, c, n, k, 0..m, blocks);
+        return dispatch_region(a, b, c, n, k, 0..m, blocks, GemmTranspose::Nn);
     }
     dispatch_shared_b(a, b, c, n, k, 0..m, blocks)
 }
@@ -1429,7 +1701,16 @@ pub(crate) fn gemm_blis_parallel_row_panel_with_blocks(
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+            dispatch_region(
+                a,
+                b,
+                c_chunk,
+                n,
+                k,
+                row_start..row_end,
+                blocks,
+                GemmTranspose::Nn,
+            )
         })
 }
 
@@ -1496,7 +1777,16 @@ pub(crate) fn gemm_blis_parallel_2d_with_blocks(
 
     chunks.into_par_iter().try_for_each(|(row_start, c_chunk)| {
         let row_end = row_start + c_chunk.len() / n;
-        dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+        dispatch_region(
+            a,
+            b,
+            c_chunk,
+            n,
+            k,
+            row_start..row_end,
+            blocks,
+            GemmTranspose::Nn,
+        )
     })
 }
 
@@ -3264,7 +3554,16 @@ mod tests {
                     .try_for_each(|(panel_idx, c_chunk)| {
                         let row_start = panel_idx * panel_rows;
                         let row_end = (row_start + c_chunk.len() / n).min(m);
-                        dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+                        dispatch_region(
+                            a,
+                            b,
+                            c_chunk,
+                            n,
+                            k,
+                            row_start..row_end,
+                            blocks,
+                            GemmTranspose::Nn,
+                        )
                     })
                     .unwrap();
                 start.elapsed().as_secs_f64()
@@ -3621,5 +3920,158 @@ mod tests {
         for (variant, gflops) in variants.iter().zip(gflops) {
             println!("variant={variant:?} size={n} median_gflops={gflops:.3}");
         }
+    }
+
+    // --- VJP 専用 NT/TN 2 パターン入口（#1213） ---
+
+    /// [`gemm_row_vector_nt`] が [`gemm_row_vector`] と bit 完全一致する
+    /// ことを検証する（`bt[j,p] == b[p,j]` を素朴な転置コピーで確認する）。
+    #[test]
+    fn gemm_row_vector_nt_matches_gemm_row_vector_bit_exact() {
+        let (k, n) = (513usize, 777usize);
+        let a = xorshift32_vec(0x1234_5678, k);
+        let b = xorshift32_vec(0x9abc_def0, k * n);
+        // bt[j*k+p] = b[p*n+j]（b の転置コピー。論理形状 [n,k] 行優先）。
+        let mut bt = vec![0.0f32; n * k];
+        for p in 0..k {
+            for j in 0..n {
+                bt[j * k + p] = b[p * n + j];
+            }
+        }
+
+        let mut c_ref = vec![0.0f32; n];
+        gemm_row_vector(&a, &b, &mut c_ref, n);
+        let mut c_nt = vec![0.0f32; n];
+        gemm_row_vector_nt(&a, &bt, &mut c_nt, k);
+
+        assert_eq!(
+            c_ref, c_nt,
+            "gemm_row_vector_nt は gemm_row_vector と bit 完全一致するはず"
+        );
+    }
+
+    /// 転置コピーヘルパー（テスト専用）。`src` を `[rows,cols]` 行優先と
+    /// みなし、`[cols,rows]` 行優先へ転置コピーする。
+    fn transpose_copy_row_major(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; rows * cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                out[c * rows + r] = src[r * cols + c];
+            }
+        }
+        out
+    }
+
+    /// [`gemm_blis_parallel_nt`]（`b` が転置格納 `bt`）が、`bt` を
+    /// `contiguous()` 相当（素朴な転置コピー）してから
+    /// [`gemm_blis_parallel`] へ渡した結果と bit 完全一致することを
+    /// MC/KC/NC 境界を跨ぐ複数形状で検証する（#1213 の bit 完全一致
+    /// 契約の直接検証）。
+    #[test]
+    fn gemm_blis_parallel_nt_matches_gemm_blis_parallel_of_contiguous_copy() {
+        // (m, n, k): MC=128/KC=256/NC=512（default_blocks 実測前提。#564）
+        // の境界を跨ぐ組み合わせを含む。
+        let shapes = [
+            (2usize, 3usize, 4usize),
+            (7, 11, 13),
+            (64, 64, 64),
+            (127, 129, 131),
+            (200, 300, 400),
+        ];
+        for (m, n, k) in shapes {
+            let a = xorshift32_vec(0x1111_0000 ^ (m as u32), m * k);
+            // bt: 論理形状 [n,k] 行優先（元の b [k,n] の転置）。
+            let bt = xorshift32_vec(0x2222_0000 ^ (n as u32), n * k);
+            let b = transpose_copy_row_major(&bt, n, k); // bt を転置し戻した b（コピー）。
+
+            let mut c_ref = vec![0.0f32; m * n];
+            gemm_blis_parallel(&a, &b, &mut c_ref, m, n, k).unwrap();
+
+            let mut c_nt = vec![0.0f32; m * n];
+            gemm_blis_parallel_nt(&a, &bt, &mut c_nt, m, n, k).unwrap();
+
+            assert_eq!(
+                c_ref, c_nt,
+                "gemm_blis_parallel_nt は shape ({m},{n},{k}) で gemm_blis_parallel(contiguous) と bit 完全一致するはず"
+            );
+        }
+    }
+
+    /// [`gemm_blis_parallel_tn`]（`a` が転置格納 `at`）版。
+    #[test]
+    fn gemm_blis_parallel_tn_matches_gemm_blis_parallel_of_contiguous_copy() {
+        let shapes = [
+            (2usize, 3usize, 4usize),
+            (7, 11, 13),
+            (64, 64, 64),
+            (127, 129, 131),
+            (200, 300, 400),
+        ];
+        for (m, n, k) in shapes {
+            // at: 論理形状 [k,m] 行優先（元の a [m,k] の転置）。
+            let at = xorshift32_vec(0x3333_0000 ^ (k as u32), k * m);
+            let a = transpose_copy_row_major(&at, k, m); // at を転置し戻した a（コピー）。
+            let b = xorshift32_vec(0x4444_0000 ^ (n as u32), k * n);
+
+            let mut c_ref = vec![0.0f32; m * n];
+            gemm_blis_parallel(&a, &b, &mut c_ref, m, n, k).unwrap();
+
+            let mut c_tn = vec![0.0f32; m * n];
+            gemm_blis_parallel_tn(&at, &b, &mut c_tn, m, n, k).unwrap();
+
+            assert_eq!(
+                c_ref, c_tn,
+                "gemm_blis_parallel_tn は shape ({m},{n},{k}) で gemm_blis_parallel(contiguous) と bit 完全一致するはず"
+            );
+        }
+    }
+
+    /// `m == 1`（gemv 相当）での NT/TN 経路が非 m==1 経路と同じ結果に
+    /// なることを確認する（`gemm_blis_parallel_with_transpose` の m==1
+    /// 早期分岐が正しく [`gemm_row_vector`]／[`gemm_row_vector_nt`] を
+    /// 呼び分けることの回帰検証）。
+    #[test]
+    fn gemm_blis_parallel_nt_tn_row_vector_m1_matches_reference() {
+        let (n, k) = (300usize, 250usize);
+
+        // NT: m=1
+        let a = xorshift32_vec(0x5555_0001, k);
+        let bt = xorshift32_vec(0x5555_0002, n * k);
+        let b = transpose_copy_row_major(&bt, n, k);
+        let mut c_ref = vec![0.0f32; n];
+        gemm_blis_parallel(&a, &b, &mut c_ref, 1, n, k).unwrap();
+        let mut c_nt = vec![0.0f32; n];
+        gemm_blis_parallel_nt(&a, &bt, &mut c_nt, 1, n, k).unwrap();
+        assert_eq!(c_ref, c_nt);
+
+        // TN: m=1（at は [k,1] 行優先＝a と同一メモリ内容）
+        let at = xorshift32_vec(0x6666_0001, k);
+        let b2 = xorshift32_vec(0x6666_0002, k * n);
+        let mut c_ref2 = vec![0.0f32; n];
+        gemm_blis_parallel(&at, &b2, &mut c_ref2, 1, n, k).unwrap();
+        let mut c_tn = vec![0.0f32; n];
+        gemm_blis_parallel_tn(&at, &b2, &mut c_tn, 1, n, k).unwrap();
+        assert_eq!(c_ref2, c_tn);
+    }
+
+    /// NT/TN 入口の長さ不一致が `validate_dims` により早期拒否される
+    /// ことを確認する（slice アクセス前の境界検査。REQ-8）。
+    #[test]
+    fn gemm_blis_parallel_nt_tn_reject_length_mismatch() {
+        let (m, n, k) = (4usize, 4usize, 4usize);
+        let a = vec![0.0f32; m * k];
+        let bt_short = vec![0.0f32; n * k - 1];
+        let mut c = vec![0.0f32; m * n];
+        assert!(matches!(
+            gemm_blis_parallel_nt(&a, &bt_short, &mut c, m, n, k),
+            Err(GemmError::BLenMismatch { .. })
+        ));
+
+        let at_short = vec![0.0f32; k * m - 1];
+        let b = vec![0.0f32; k * n];
+        assert!(matches!(
+            gemm_blis_parallel_tn(&at_short, &b, &mut c, m, n, k),
+            Err(GemmError::ALenMismatch { .. })
+        ));
     }
 }

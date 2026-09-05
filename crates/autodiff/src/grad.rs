@@ -283,10 +283,17 @@ pub(crate) fn vjp(
             // `ops.gemm_fp32_strict`（forward と同じ CPU BLIS／CUDA／
             // Metal カーネルを経由するが CUDA の TF32 opt-in フラグには
             // 追従しない入口。冒頭コメント参照）を経由するため、
-            // `x_t`（`transpose2d` の zero-copy view）はバックエンド側
-            // `contiguous()` で再パックされうる（#1046 が保証していた
-            // `eval::matmul` 経路でのゼロコピーは本経路には適用されない。
-            // 解消は #1213〈CPU の NT/TN 専用入口〉）。
+            // `x_t`（`transpose2d` の zero-copy view）はバックエンド側の
+            // `gemm`（`CpuBackendOps::gemm` は `gemm_fp32_strict` の既定
+            // 実装がそのまま委譲する）実装依存で扱いが変わる。CPU は
+            // イシュー #1213 で dense な転置 view（`strides() == [1,
+            // shape()[0]]`）を判定できる限り `contiguous()` の再パック
+            // コピーを経由せず BLIS packing 側で直接吸収する専用入口
+            // （TN パターン。CPU 実装クレートの `gemm_blis_parallel_tn`）
+            // へ渡す（`narrow` 後の転置・TT は一般 stride 非対応のため
+            // 従来どおり `contiguous()` フォールバック）。CUDA（#1214）・
+            // Metal（#1215）は未対応で引き続き `contiguous()` で再パック
+            // されうる。
             let x_t = transpose2d(x_val);
             let d_weight = ops
                 .gemm_fp32_strict(&x_t, g)
@@ -430,11 +437,15 @@ fn transpose2d(tensor: &Tensor<f32>) -> Tensor<f32> {
 ///
 /// `transpose2d`（下記。`Tensor::transpose` の zero-copy stride view）
 /// で作った転置オペランドはそのまま `ops.gemm_fp32_strict` へ渡す。
-/// 各バックエンドの実装は内部で `contiguous()` を呼ぶため転置 view の
-/// 再パックが発生しうるが、本イシューではこれを許容範囲とする（NT/TN
-/// 専用の zero-copy 入口は後続イシュー #1213〈CPU〉・#1214〈CUDA〉・
-/// #1215〈Metal〉のスコープ。`docs/matmul-vjp-zero-copy-decision.md`
-/// §4 追補）。
+/// CPU（イシュー #1213）は片側転置（NT/TN）かつ dense な転置格納
+/// （`strides() == [1, shape()[0]]`）と判定できる場合に限り
+/// `contiguous()` の再パックコピーを経由せず BLIS packing 側で直接
+/// 吸収する専用入口（CPU 実装クレートの `gemm_blis_parallel_nt`／
+/// `gemm_blis_parallel_tn`）へ分岐する。両方転置（TT）・一般 stride
+/// （`narrow` 後の転置等）は CPU でも従来どおり `contiguous()` を経由
+/// する（一般 stride 化はスコープ外。`docs/matmul-vjp-zero-copy-
+/// decision.md` §3.2・§4.2 追補）。CUDA（#1214）・Metal（#1215）は
+/// 未対応で引き続き `contiguous()` の再パックが発生しうる。
 ///
 /// エラーは fail-closed で `AutodiffError::Backend` として伝播し、
 /// `eval::matmul` への暗黙フォールバックは設けない（forward と backward
