@@ -2,8 +2,16 @@
 //! elementwise 5 演算・`gemm_bias_act` 実融合化を追加）。
 //!
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の Metal 実装。GEMM は
-//! `gemm::MetalGemm::dispatch_auto`（動的タイル選択済み。TASK-1.8c・#40）
-//! へ委譲する（既存カーネル・許容誤差・境界検査には触れない）。elementwise
+//! 既定で `gemm::MetalGemm::dispatch_auto`（動的タイル選択済み。
+//! TASK-1.8c・#40）へ委譲する（既存カーネル・許容誤差・境界検査には
+//! 触れない）。片側のみが転置 view（NT/TN。`autodiff::grad` の VJP が
+//! `transpose2d` した勾配を渡す形状）の場合は `dispatch_auto` の代わりに
+//! `gemm::MetalGemm::dispatch_strided_bias_act_prepared`（classic strided
+//! カーネル）へ結線し、ホスト側の転置再パックコピーを省く（イシュー
+//! #1215。`gemm_resident_lhs`〈#1040〉が確立した経路を `gemm` 本体へ
+//! 拡張したもの。NN・TT・分類不能形状は従来どおり `contiguous()` +
+//! `dispatch_auto` の bit 同一経路のまま——数値契約は
+//! `docs/matmul-vjp-zero-copy-decision.md` §4.4 参照）。elementwise
 //! （`add`／`mul`／`relu`／`exp`／`tanh`）は `elementwise::MetalElementwise`
 //! へ委譲する（イシュー #605。CUDA 側 #599 の Metal 対応版）。汎用
 //! reduction（`sum`／`max`）は未実装のまま
@@ -43,6 +51,19 @@ std::thread_local! {
     /// 内の `#[cfg(test)]` クレート内テスト（macOS 実機・`#[ignore]`）に
     /// 委ね、外部テストファイルは数値一致のみを検証する契約とする）。
     pub(crate) static RESIDENT_HOST_REPACK_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+
+    /// [`MetalBackendOps::gemm`] が NT/TN の strided 入口
+    /// （`gemm_strided_nt_tn`）に乗れず `Tensor::contiguous()`
+    /// （ホスト側転置コピー）へフォールバックした回数（イシュー #1215。
+    /// `RESIDENT_HOST_REPACK_COUNT` と同型の可観測点だが対象メソッドが
+    /// 異なるため独立カウンタとする。NN（両方行優先）・TT（両方転置）・
+    /// `classify_2d` が `None` を返す入力〈stride 0 のブロードキャスト等〉
+    /// のいずれも本カウンタを増やす。`backend-cuda::ops::
+    /// GEMM_HOST_REPACK_COUNT`〈イシュー #1214〉と同名・同意図の
+    /// クロスバックエンド可観測点。`pub(crate)`（`RESIDENT_HOST_REPACK_COUNT`
+    /// と同じ可視性方針。クレート境界外テストは数値一致のみ検証する）。
+    pub(crate) static GEMM_HOST_REPACK_COUNT: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -171,6 +192,93 @@ impl MetalBackendOps {
         let out = run(&ew, &ctx, a_slice)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`Self::gemm`] の NT/TN 専用経路（イシュー #1215）。呼び出し元が
+    /// `a`／`b` の `layout::classify_2d` 結果（`la`／`lb`）を既に取得済み
+    /// （`transposed` フラグが互いに異なることを確認済み）である前提で、
+    /// 両オペランドを `MetalMemory::upload_view`（借用スライスの
+    /// zero-copy アップロード。`upload_operand_for_resident_gemm` と同じ
+    /// 経路）でアップロードし、`gemm::MetalGemm::
+    /// dispatch_strided_bias_act_prepared`（`gemm_resident_lhs`〈#1040〉
+    /// が確立した classic strided カーネル入口。bias／activation は
+    /// 使わない）で GEMM 本体を計算する。`m == 0 || n == 0 || k == 0` は
+    /// `dispatch_auto` 経路の `validate_dims`（`ZeroDimension` を拒否）と
+    /// 挙動を揃えるため、本経路は `classify_2d` が rows/cols == 0 を
+    /// 一律 `None` とする契約（`layout.rs` doc 参照）によりそもそも
+    /// 到達しない（呼び出し元 `gemm` のガードで従来経路へ落ちる）。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`（9/7）: `&self`・`a`・`la`・
+    /// `b`・`lb`・`m`・`n`・`k`・`out_shape` はいずれも呼び出し元 `gemm`
+    /// が既に導出済みの値で、構造体へまとめると呼び出し側の一時変数が
+    /// 増えるだけで可読性が上がらない（`gemm.rs::dispatch_strided_
+    /// bias_act_prepared`〈13 引数〉と同じ判断。同ファイル冒頭の
+    /// 複数箇所で同様の `#[allow]` を使用済み）。
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_strided_nt_tn(
+        &self,
+        a: &Tensor<f32>,
+        la: MatrixLayout,
+        b: &Tensor<f32>,
+        lb: MatrixLayout,
+        m: usize,
+        n: usize,
+        k: usize,
+        out_shape: &[usize],
+    ) -> Result<Tensor<f32>, BackendError> {
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+
+        let a_slice = a
+            .as_view_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: lhs not contiguous".into()))?;
+        let a_dev_buf = mem
+            .upload_view(a_slice, a.shape())
+            .map_err(map_metal_error)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm: lhs buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let b_slice = b
+            .as_view_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
+        let b_dev_buf = mem
+            .upload_view(b_slice, b.shape())
+            .map_err(map_metal_error)?;
+        let b_handle = b_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_buf) = b_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm: rhs buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm: output buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        gemm.dispatch_strided_bias_act_prepared(
+            &ctx, a_buf, 0, la, b_buf, 0, lb, None, false, c_buf, m, n, k,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let out = mem.download(&c_dev_buf)?;
+        debug_assert_eq!(out.shape(), out_shape);
+        Ok(out)
     }
 }
 
@@ -411,11 +519,50 @@ impl BackendOps for MetalBackendOps {
         self.sgd_step_device_impl(param, grad, velocity, config, Some(token))
     }
 
+    /// GEMM 本体（f32）。片側のみが転置 view（NT: `b` が転置・TN: `a` が
+    /// 転置）の場合は [`Self::gemm_strided_nt_tn`]（`dispatch_strided_
+    /// bias_act_prepared` 経由の classic strided カーネル）へ分岐し、
+    /// ホスト側の転置再パックコピーを省く（イシュー #1215。呼び出し元は
+    /// `autodiff::grad::matmul_vjp`／`Op::LinearResident` の VJP が
+    /// `BackendOps::gemm_fp32_strict`〈既定実装から本メソッドへ委譲〉
+    /// 経由で渡す転置 view）。NN（両方行優先）・TT（両方転置）・
+    /// `layout::classify_2d` が分類できない形状（stride 0 の
+    /// ブロードキャスト等）は従来どおり `contiguous()` +
+    /// `dispatch_auto` へフォールバックする。
+    ///
+    /// **数値契約**: NN 経路は本イシュー導入前と bit 完全一致（カーネル
+    /// 不変）。NT/TN 経路は `dispatch_auto`（`gemm_simdgroup_tiled`）とは
+    /// 異なるカーネル（`gemm_tiled_bias_act`）を通るため累積順序が変わり
+    /// うる——受け入れ判定は REQ-2 統一複合判定（相対誤差 1e-3 未満 または
+    /// 絶対誤差 1e-5 未満。`gemm_resident_lhs`〈#1040〉と同じ契約）とし、
+    /// `assert_eq!` によるビット一致は要求しない
+    /// （`docs/matmul-vjp-zero-copy-decision.md` §4.4 参照）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
+
+        if let (Some(la), Some(lb)) = (
+            layout::classify_2d(a.shape(), a.strides()),
+            layout::classify_2d(b.shape(), b.strides()),
+        ) && la.transposed != lb.transposed
+            && a.as_view_slice().is_some()
+            && b.as_view_slice().is_some()
+        {
+            return self.gemm_strided_nt_tn(a, la, b, lb, m, n, k, &out_shape);
+        }
+
+        // 従来経路（NN・TT・分類不能形状）。`contiguous()` が実際に
+        // ホスト側コピーを発生させた場合のみ [`GEMM_HOST_REPACK_COUNT`]
+        // を増やす（NN は元から contiguous のため増えない。TT・非対応
+        // 形状のみ計上する）。
+        if !a.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        if !b.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
 
         // `dispatch_auto` は contiguous な `&[f32]` を要求する（CPU／CUDA
         // 実装と同じ契約）。
@@ -1520,6 +1667,90 @@ mod tests {
         assert_eq!(
             before, after,
             "transposed view input must not fall back to contiguous() host repack"
+        );
+    }
+
+    // --- gemm の NT/TN strided 入口（イシュー #1215。Metal 実機依存。
+    // `GEMM_HOST_REPACK_COUNT` は `pub(crate)` のため
+    // クレート内テストでのみ検証する。上記 `gemm_resident_lhs` 系
+    // テストと同じ方針） ---
+
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn gemm_nt_transposed_b_does_not_increment_repack_counter() {
+        let ops = MetalBackendOps::new();
+        let (m, k, n) = (4usize, 8usize, 5usize);
+        let a = Tensor::new((0..m * k).map(|i| i as f32 * 0.1).collect(), &[m, k]).unwrap();
+        // NT: `b` が転置 view（元 [n, k] 行優先データを転置して [k, n] として
+        // 読む。`Op::LinearResident` の VJP が `matmul_vjp` の d_input =
+        // `g @ Wᵀ` として渡す形と同型）。
+        let b_nk = Tensor::new((0..n * k).map(|i| i as f32 * 0.01).collect(), &[n, k]).unwrap();
+        let b_t = b_nk.transpose(0, 1).unwrap();
+        assert!(
+            b_t.as_slice().is_none(),
+            "precondition: b_t must be non-contiguous"
+        );
+
+        let before = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        let _ = ops
+            .gemm(&a, &b_t)
+            .expect("gemm(NT) must succeed on Metal-equipped test runner");
+        let after = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        assert_eq!(
+            before, after,
+            "NT (b transposed) must not fall back to contiguous() host repack"
+        );
+    }
+
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn gemm_tn_transposed_a_does_not_increment_repack_counter() {
+        let ops = MetalBackendOps::new();
+        let (m, k, n) = (4usize, 8usize, 5usize);
+        // TN: `a` が転置 view（元 [k, m] 行優先データを転置して [m, k] として
+        // 読む。`Op::LinearResident.d_weight` = `xᵀ @ g` が渡す形と同型）。
+        let a_km = Tensor::new((0..k * m).map(|i| i as f32 * 0.1).collect(), &[k, m]).unwrap();
+        let a_t = a_km.transpose(0, 1).unwrap();
+        assert!(
+            a_t.as_slice().is_none(),
+            "precondition: a_t must be non-contiguous"
+        );
+        let b = Tensor::new((0..k * n).map(|i| i as f32 * 0.01).collect(), &[k, n]).unwrap();
+
+        let before = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        let _ = ops
+            .gemm(&a_t, &b)
+            .expect("gemm(TN) must succeed on Metal-equipped test runner");
+        let after = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        assert_eq!(
+            before, after,
+            "TN (a transposed) must not fall back to contiguous() host repack"
+        );
+    }
+
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn gemm_tt_both_transposed_increments_repack_counter_twice() {
+        let ops = MetalBackendOps::new();
+        let (m, k, n) = (4usize, 8usize, 5usize);
+        // TT（両方転置）は NT/TN 分岐の対象外（`la.transposed != lb.transposed`
+        // が成り立たない）ため、従来経路（`contiguous()` 2 回）へ落ちる
+        // ことをカウンタで可観測にする。
+        let a_km = Tensor::new((0..k * m).map(|i| i as f32 * 0.1).collect(), &[k, m]).unwrap();
+        let a_t = a_km.transpose(0, 1).unwrap();
+        let b_nk = Tensor::new((0..n * k).map(|i| i as f32 * 0.01).collect(), &[n, k]).unwrap();
+        let b_t = b_nk.transpose(0, 1).unwrap();
+        assert!(a_t.as_slice().is_none() && b_t.as_slice().is_none());
+
+        let before = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        let _ = ops
+            .gemm(&a_t, &b_t)
+            .expect("gemm(TT) must succeed on Metal-equipped test runner");
+        let after = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        assert_eq!(
+            after - before,
+            2,
+            "TT (both transposed) must fall back to contiguous() host repack for both operands"
         );
     }
 }

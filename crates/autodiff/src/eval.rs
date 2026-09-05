@@ -44,11 +44,14 @@ std::thread_local! {
     /// compat 経路のゼロコピーを検証している。本番 `CpuBackendOps::
     /// gemm` 経路の転置再パックは、片側転置〈NT/TN〉かつ dense な転置
     /// 格納を判定できる場合、CPU（イシュー #1213）・CUDA（イシュー
-    /// #1214）とも解消済み（`backend-cpu::ops::GEMM_HOST_REPACK_COUNT`／
-    /// `backend-cuda::ops::GEMM_HOST_REPACK_COUNT`〈いずれも本カウンタ
-    /// とは別の crate 内部カウンタ〉で可観測）。Metal〈#1215〉は
-    /// 未解消のまま。`docs/matmul-vjp-zero-copy-decision.md` §4・§4.2・
-    /// §4.3 追補）。
+    /// #1214）・Metal（イシュー #1215）とも解消済み
+    /// （`backend-cpu::ops::GEMM_HOST_REPACK_COUNT`／`backend-cuda::
+    /// ops::GEMM_HOST_REPACK_COUNT`／`backend-metal::ops::
+    /// GEMM_HOST_REPACK_COUNT`〈いずれも本カウンタとは別の crate 内部
+    /// カウンタ〉で可観測。Metal は既存 NN 経路とは別カーネルを通る
+    /// ため数値契約が bit 一致ではなく REQ-2 複合判定である点が
+    /// CPU／CUDA と異なる）。`docs/matmul-vjp-zero-copy-decision.md`
+    /// §4・§4.2・§4.3・§4.4 追補）。
     pub(crate) static MATMUL_HOST_REPACK_COUNT: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
 }

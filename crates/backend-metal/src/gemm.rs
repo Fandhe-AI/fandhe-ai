@@ -1209,7 +1209,11 @@ impl MetalGemm {
     /// `gemm_resident_rhs` が転置 view を検出した場合にこちらを直接
     /// 呼ぶ。NN（`dispatch_bias_act_prepared` の委譲先としての利用）と
     /// 転置経路の双方をこの 1 関数に集約することで、`GemmStrides` の
-    /// 構築・検証ロジックの重複を避ける。
+    /// 構築・検証ロジックの重複を避ける。`ops::MetalBackendOps::
+    /// gemm`（片側のみ転置の NT/TN 判定分岐。イシュー #1215）も同じ
+    /// 入口を呼ぶ——`Op::MatMul`／`Op::LinearAct`／`Op::LinearResident`
+    /// の VJP が `BackendOps::gemm_fp32_strict`（既定実装が `gemm` へ
+    /// 委譲）経由で到達する呼び出し元。
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_strided_bias_act_prepared(
         &self,

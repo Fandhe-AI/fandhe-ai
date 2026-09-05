@@ -303,8 +303,14 @@ pub(crate) fn vjp(
             // 従来どおり `contiguous()` フォールバック）。CUDA（イシュー
             // #1214）も同型の判定で GPU 側 smem 転置カーネル → 既存 NN
             // GEMM カーネルへ渡す専用入口（`CudaGemm::run_tiled_f32_tn`）
-            // を持つ。Metal（#1215）は未対応で引き続き `contiguous()`
-            // で再パックされうる。
+            // を持つ。Metal（イシュー #1215）は片側転置（NT/TN）を
+            // `layout::classify_2d` で分類できる場合に限り、`contiguous()`
+            // を経由せず classic strided カーネル入口
+            // （`gemm::MetalGemm::dispatch_strided_bias_act_prepared`）へ
+            // 分岐する（既存 NN 経路 `dispatch_auto` とは別カーネルの
+            // ため、数値契約は bit 一致ではなく REQ-2 統一複合判定。
+            // `docs/matmul-vjp-zero-copy-decision.md` §4.4）。TT・分類
+            // 不能形状は Metal でも従来どおり `contiguous()` を経由する。
             let x_t = transpose2d(x_val);
 
             // イシュー #1212: d_weight をホストへ戻さずデバイス常駐の
@@ -486,7 +492,11 @@ fn transpose2d(tensor: &Tensor<f32>) -> Tensor<f32> {
 /// decision.md` §3.2・§4.2・§4.3 追補）。CUDA（イシュー #1214）も同型の
 /// NT/TN 専用入口（GPU 側 smem 転置カーネル → 既存 NN GEMM カーネル。
 /// `CudaGemm::run_tiled_f32_nt`／`run_tiled_f32_tn`）を持つ。Metal
-/// （#1215）は未対応で引き続き `contiguous()` の再パックが発生しうる。
+/// （イシュー #1215）も同型の NT/TN 判定で classic strided カーネル
+/// 入口（`gemm::MetalGemm::dispatch_strided_bias_act_prepared`）へ分岐
+/// する専用経路を持つが、既存 NN 経路（`dispatch_auto`）とは別カーネル
+/// のため数値契約は bit 一致ではなく REQ-2 統一複合判定
+/// （`docs/matmul-vjp-zero-copy-decision.md` §4.4）。
 ///
 /// エラーは fail-closed で `AutodiffError::Backend` として伝播し、
 /// `eval::matmul` への暗黙フォールバックは設けない（forward と backward
