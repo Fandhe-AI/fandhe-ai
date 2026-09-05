@@ -109,6 +109,19 @@ guarded store で何も書かない）。C を読む（累積する）分岐は�
 `CudaMmaGemm::alloc_output_f16_pooled` は `alloc_uninit_f16`（前利用データをゼロクリアしない）
 を使う（`pool.rs::CudaAllocator::alloc_uninit_f16` ドキュメンテーションコメント参照）。
 
+### 4.2 `transpose_smem_f32`（VJP 専用 NT/TN 転置入口）適用確認（イシュー #1214）
+
+`kernels_transpose.rs::transpose_smem_source_f32` のエピローグ（転置
+ストア）は `if (out_row < n && out_col < m)` の guarded store で
+`0 <= out_row < n`・`0 <= out_col < m` の全要素をちょうど 1 回ずつ
+書き込む（標準の行列転置であり、grid（`tiled_launch_config` の
+`div_ceil(n, TILE) × div_ceil(m, TILE)`）と smem タイルの組み合わせで
+重複書き込み・欠落のいずれも生じない）。`dst` を読む分岐は存在しない。
+よって `gemm.rs::CudaGemm::transpose_to_pooled`（VJP 専用 NT/TN 転置
+入口 `run_tiled_f32_nt`／`run_tiled_f32_tn`／
+`launch_tiled_f32_resident_nt` が共有する内部ヘルパー）は
+`alloc_uninit_f32`（前利用データをゼロクリアしない）を使う。
+
 ## 5. 既存 `PooledMemory`（`crate::pool`）との関係
 
 変更しない（非推奨化もしない）。`arc_with_non_send_sync` の allow も据え置く。`crate::pool_core`

@@ -138,7 +138,8 @@ fandhe-ai/
     │   ├── train-backward-gemm-wiring.md # VJP の `matmul_vjp`／`Op::LinearResident.d_weight` を `eval::matmul`（ホスト scalar 参照実装）から `BackendOps::gemm`（forward と同じ CPU BLIS／CUDA／Metal カーネル）へ切替（#1211）。CPU 実測（Apple M4 Max。before/after × fresh/reuse の全 4 系列とも厳密 5 run 中央値）で backward が fresh 11.60 倍・reuse 8.86 倍、step_total が fresh 8.71 倍・reuse 5.63 倍改善し ADOPT と確定。Metal 参考計測・CUDA 実測は後続 #1214/#1215 へ引き継ぎ
     │   ├── logs/train-backward-gemm-wiring-1211/ # 上記の before/after JSONL・env_info（内部ホスト名は含めない。イシュー #1211）
     │   ├── cpu-gemm-vjp-transposed-entry.md # CPU BLIS GEMM に VJP 専用 NT/TN 2 パターン入口（`pack_a_from_transposed`／`pack_b_from_transposed`・`gemm_blis_parallel_nt`／`_tn`）を追加し、`CpuBackendOps::gemm`／`gemm_resident_lhs` の転置オペランド再パックを一般 stride 化なしで解消（#1213）。bit 完全一致契約・M4 Max 実機実測（補助 A/B 全形状 1.07〜3.10 倍改善）・ADOPT 判断を記録。TT・一般 stride・CUDA（#1214）・Metal（#1215）は対象外
-    │   └── logs/cpu-gemm-vjp-transposed-entry-1213/ # 上記の補助 A/B 生ログ・env_info（内部ホスト名は含めない。イシュー #1213）
+    │   ├── logs/cpu-gemm-vjp-transposed-entry-1213/ # 上記の補助 A/B 生ログ・env_info（内部ホスト名は含めない。イシュー #1213）
+    │   └── cuda-gemm-vjp-transposed-entry.md # CUDA GEMM に VJP 専用 NT/TN 転置入口（GPU 側 smem 転置カーネル `transpose_smem_f32` → 既存 NN GEMM カーネル方式。`CudaGemm::run_tiled_f32_nt`／`_tn`／`launch_tiled_f32_resident_nt`）を追加し、`CudaBackendOps::gemm_fp32_strict_impl`／`gemm_resident_lhs` の転置オペランド再パックを解消（#1214）。bit 完全一致契約・GPU 非依存単体テストは実装完了・GB10 実機実測は本エージェント実行環境に CUDA 実機なしのため未実施のまま記入欄を残す（issue 本文「再分解」節で (b) として引き継ぎ）。TT・一般 stride・TF32 opt-in 経路・Metal（#1215）は対象外
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）

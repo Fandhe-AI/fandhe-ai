@@ -55,6 +55,17 @@ bench.rs` と同じ「H2D/D2H を計測区間の外へ出す」方針（`CudaTra
   `launch_tiled_transposed_f32`（融合）を、両方ともデバイス常駐済みの同一 `a_dev`/`b_dev` に対して比較
   する。差分は「中間バッファ C の HBM 書き込み・再読み出しの有無」のみに絞られる。
 
+**追記（イシュー #1214）**: 上記「未計測のまま本番カーネル・本番
+ディスパッチへ導入しない」は、smem パディングのみ変種
+（`transpose_smem_source_f32(false)`）に限り解消した。VJP 専用 NT/TN
+転置入口（`crates/backend-cuda/src/gemm.rs::CudaGemm::run_tiled_f32_nt`／
+`run_tiled_f32_tn`／`launch_tiled_f32_resident_nt`）へ、`CudaTranspose`
+とは独立にロードした専用ハンドル（`CudaGemm::transpose_smem_f32`）として
+結線した。GB10 実機 before/after は `docs/perf/cuda-gemm-vjp-transposed-
+entry.md` を参照。**スウィズル変種・GEMM epilogue 融合転置
+（`TILED_TRANSPOSED_F32`）は依然未計測のまま非結線**（本節の元の記述の
+とおり）。
+
 ## 3. 計測手順（DGX Spark GB10・sm_121 実機。#498/#499 と同じ接続・転送手順）
 
 接続・転送手順は `docs/real-hardware-verification-env.md` に従う（実ホスト名はローカル管理外ファイル

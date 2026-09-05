@@ -149,7 +149,14 @@ pub(crate) fn validate_transpose_output_len(
 
 /// `m`/`n`（転置後の出力形状は `n`×`m`）から [`TRANSPOSE_TILE_BLOCK_DIM`]
 /// 基準の `div_ceil` グリッドを構築する（`gemm.rs::launch_config` と同型）。
-fn tiled_launch_config(m: u32, n: u32) -> LaunchConfig {
+///
+/// `pub(crate)`: イシュー #1214 の `gemm.rs::CudaGemm::transpose_to_pooled`
+/// が VJP 専用 NT/TN 転置入口の smem 転置カーネル起動に同じグリッド算術を
+/// 再利用する（`CudaTranspose`（本構造体）とは独立のコンパイル単位・
+/// ハンドルだが、起動時のグリッド構成は同一カーネルソース
+/// （`kernels_transpose::transpose_smem_source_f32`）を前提にしており
+/// 重複させない）。
+pub(crate) fn tiled_launch_config(m: u32, n: u32) -> LaunchConfig {
     let grid_dim = (
         n.div_ceil(kernels_transpose::TRANSPOSE_TILE),
         m.div_ceil(kernels_transpose::TRANSPOSE_TILE),
