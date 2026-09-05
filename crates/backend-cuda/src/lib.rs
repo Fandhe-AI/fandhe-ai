@@ -97,14 +97,17 @@
 //! 実装選択（第 2 層。`docs/dispatch-rules-design.md` §5.6）は
 //! `gemm_auto::select_f16_matrix_unit_impl`（事前形状ゲート込みの単一
 //! 真実源）が担う。設計目標は `CudaMmaGemm → CudaWmmaGemm → Tiled` の
-//! 優先順位だが、本番既定（`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED
-//! = false`）はこの優先順位を無効化したまま維持しており、`CudaWmmaGemm
-//! → Tiled`（#1156 以前と同じ）で動作する（イシュー #1160: #1156 の
-//! ユーザー承認条件〈切替前後を同一プロトコル・5 回計測中央値で比較し、
-//! 後退時は結線しない〉自体は転送込みの auto 経路で GB10 実機実測し
-//! 満たすことを確認済み〈`docs/perf/cuda-gemm-auto-f16-mma-switch.md`〉
-//! だが、mma 優先の本番有効化は K=4096 非後退ゲートの `MmaF16` baseline
-//! ceiling 未承認〈PR #1179 codex-review 指摘〉のため保留している。
+//! 優先順位で、本番既定（`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED
+//! = true`。#1191 で有効化済み）はこの優先順位を有効化しており、
+//! cc>=8.0・整列形状で `mma` が構築済みなら `CudaMmaGemm` を優先し、
+//! 満たさなければ `CudaWmmaGemm → Tiled`（#1156 以前と同じ）へ倒れる
+//! （イシュー #1160: #1156 のユーザー承認条件〈切替前後を同一
+//! プロトコル・5 回計測中央値で比較し、後退時は結線しない〉自体は
+//! 転送込みの auto 経路で GB10 実機実測し満たすことを確認済み
+//! 〈`docs/perf/cuda-gemm-auto-f16-mma-switch.md`〉で、mma 優先の本番
+//! 有効化を保留していた K=4096 非後退ゲートの `MmaF16` baseline
+//! ceiling も #1190〈PR #1207〉でユーザー承認・反映済みのため
+//! 〈PR #1179 codex-review 指摘〉、#1191 で有効化した。
 //! `gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED` docblock 参照）。
 //! TF32/f32 経路
 //! （`CudaGemm::run_wmma_tf32`・#62）は、決定表（設計文書 §4）が TF32

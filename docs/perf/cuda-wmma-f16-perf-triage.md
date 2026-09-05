@@ -14,17 +14,14 @@ dim=4096 の転送のみ計測に二峰性）」の診断記録。診断専用�
 優先）を一時的に有効化した状態での GB10 実機実測では本 assert が pass
 することを確認した（§8）。**本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED
 = true`）は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16`
-baseline ceiling 未承認〉により `false` へ差し戻し済みであり、この
-本番既定のまま本テストを実機実行すると比較対象が `wmma_f16_opt` へ
-戻るため本 assert は依然として red である**（`wmma_f16_opt` カーネル
-単体 4.391〜4.496 TFLOPS が tiled f32 カーネル単体 6.776〜6.790 TFLOPS
-を下回る。§4.3 と同一数値）。本テストは実機 `#[ignore]` 分離のため
-通常 CI には現れず、この既知 red は baseline ceiling 承認・
-`MMA_PRIORITY_PRODUCTION_ENABLED` の `true` 復帰まで持ち越しである。
-詳細は `docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0・
+baseline ceiling 未承認〉により一時 `false` へ差し戻していたが、
+#1190（PR #1207）で ceiling がユーザー承認値で `BASELINES` へ反映
+された後、#1191 で `true` へ復帰した。本番既定（`true`）での GB10
+実機再実行でも f16 assert は pass する（§8.6 実測値）**。詳細は
+`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0・
 `docs/perf/cuda-parity-baseline.md` §12.6 追記を参照。以下 §8 の記述は
-`MMA_PRIORITY_PRODUCTION_ENABLED = true` を一時的に有効化した際の
-実測記録として維持する）
+`MMA_PRIORITY_PRODUCTION_ENABLED = true`（現在の本番既定）での
+実測記録である）
 
 ## 1. 症状（発端）
 
@@ -329,10 +326,11 @@ cargo test -p fandhe-ai-backend-cuda --test dispatch_boundary -- --ignored --noc
   の比較対象を本番経路が実際に選ぶ実装から動的に決定する方式へ差し替え、
   `MMA_PRIORITY_PRODUCTION_ENABLED` を一時的に `true` にした状態で pass することを
   確認した（§8）が、mma 優先の本番有効化自体は K=4096 非後退ゲートの `MmaF16`
-  baseline ceiling 未承認（PR #1179 codex-review 指摘）により `false`（wmma 優先）へ
-  差し戻し済みである。完了条件（assert が pass すること）は「本番選択結果に追従する
-  比較方式」の整備として満たされたが、mma 優先自体の本番有効化は baseline ceiling
-  承認まで保留のままである。**
+  baseline ceiling 未承認（PR #1179 codex-review 指摘）により一時 `false`（wmma 優先）へ
+  差し戻された。完了条件（assert が pass すること）は「本番選択結果に追従する
+  比較方式」の整備として満たされ、その後 #1190（PR #1207）で baseline ceiling が
+  ユーザー承認・反映されたことを受け、#1191 で `MMA_PRIORITY_PRODUCTION_ENABLED
+  = true` を本番既定として復帰した。**
 
 ## 7. 関連ファイル
 
@@ -385,22 +383,23 @@ f16 assert（`production_f16_kernel_tflops > tiled_kernel_tflops`）は
 も引き続き pass（14.134 > 10.013）。この計測は
 `MMA_PRIORITY_PRODUCTION_ENABLED = true`（mma 優先）を一時的に有効化した
 状態で行ったものである。イシュー #1131 の完了条件（本 assert が pass
-すること）は「本番選択結果に追従する比較方式」の整備としては満たされたが、
-本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = false`。PR #1179 codex-review
-指摘により差し戻し済み）のまま実機実行した場合は比較対象が `wmma_f16_opt`
-へ戻り、本 assert は red のままである（上記状態ブロック・§6 参照）。
+すること）は「本番選択結果に追従する比較方式」の整備としては満たされ、
+その後 #1191 で `MMA_PRIORITY_PRODUCTION_ENABLED` が本番既定として
+`true` へ復帰したことで、本番既定のまま GB10 実機実行しても比較対象は
+`mma_sync_f16` のままとなり f16 assert は pass を維持する（#1191 再計測:
+tiled_f32=10.174・mma_sync_f16=55.430。`docs/perf/
+cuda-gemm-auto-f16-mma-switch.md`「#1191 再計測」節参照）。
 
 ### 8.4 `wmma_f16_opt` の扱いの決定: フォールバック限定で維持（コード変更なし）
 
 - **根拠 1**: GB10 カーネル単体で opt≈basic（§4.1・§3.1 参照。512/2048/4096
   は basic が僅かに速く、768〜1536 は opt が僅かに速い。一貫した優劣なし）。
   共有メモリ最適化は f16 で効果を持たないが、後退もしていない
-- **根拠 2**: 結線後（`MMA_PRIORITY_PRODUCTION_ENABLED = true`。その後 baseline
-  ceiling 未承認により `false` へ差し戻し済み。上記状態ブロック参照）の WMMA 経路
-  は「mma 事前形状ゲート非充足（`n % 8 != 0` または `k % 8 != 0`・grid 上限
-  超過）」「cc 7.x（mma 非対応）」「`CudaMmaGemm` NVRTC 失敗」時の
-  フォールバックとして本番到達性を保つため、証跡専用への格下げ（到達不能
-  化）はできない
+- **根拠 2**: 結線後（`MMA_PRIORITY_PRODUCTION_ENABLED = true`。#1191 で
+  本番既定として有効化済み。上記状態ブロック参照）の WMMA 経路は「mma
+  事前形状ゲート非充足（`n % 8 != 0` または `k % 8 != 0`・grid 上限超過）」
+  「cc 7.x（mma 非対応）」「`CudaMmaGemm` NVRTC 失敗」時のフォールバック
+  として本番到達性を保つため、証跡専用への格下げ（到達不能化）はできない
 - **根拠 3**: `ParityPath::WmmaF16` baseline 行は opt 実効経路の実測値であり
   （`docs/perf/cuda-parity-baseline.md`）、`CudaWmmaGemm::run_f16` の既定を
   basic へ変える・opt を削除するには baseline 再実測とユーザー承認が必要
@@ -422,7 +421,7 @@ f16 assert（`production_f16_kernel_tflops > tiled_kernel_tflops`）は
 ### 8.6 関連ファイル（本節分）
 
 - `crates/backend-cuda/src/gemm_auto.rs`（本節実測当時は `MMA_PRIORITY_PRODUCTION_ENABLED
-  = true` で計測。baseline ceiling 未承認のため現在は `false` へ差し戻し済み）
+  = true` で計測。#1191 で本番既定〈`true`〉として復帰・現在も同じ設定）
 - `crates/backend-cuda/tests/tensor_core_real_device.rs`（f16 計測の本番経路追従）
 - `crates/backend-cuda/tests/gemm_auto.rs`（`f16_matrix_unit_impl_reports_selected_implementation` 期待値更新）
 - `scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh`（`BIN` の `CARGO_TARGET_DIR` 対応是正）

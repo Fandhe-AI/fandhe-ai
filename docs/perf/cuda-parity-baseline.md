@@ -1876,6 +1876,15 @@ PRODUCTION_ENABLED` を `false`（#1156 以前と同じ wmma 優先）へ差し
 戻した（`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0）。上記の
 実測記録（性能 A/B・parity 非後退）自体は有効なまま維持する。
 
+**追記（#1191・2026-09-05）**: `true` 復帰後に route-aware ゲート
+（`run_f16_k4096_stress_non_regression_route_aware`）を GB10 実機で
+実行し **green** を確認した（`cargo test -p fandhe-ai-backend-cuda
+--release --all-features --test gemm_auto -- --ignored --nocapture
+--test-threads=1` で 8 件全て pass）。`tensor_core_tflops_record` の
+f16 assert も pass（`mma_sync_f16` 55.430 TFLOPS > `tiled_f32`
+10.174 TFLOPS）。詳細は `docs/perf/cuda-gemm-auto-f16-mma-switch.md`
+「#1191 再計測」節を参照。
+
 ## 13. イシュー #1134: specialized_mma_f16 の GB10 fail 切り分け・baseline 再割り当て（#1155・#1159・#1161・#1162）
 
 本節は #1134（親）配下の #1155（切り分け）・#1159（残り形状 sweep）・

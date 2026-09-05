@@ -28,24 +28,23 @@
 //! 使わない。エラー駆動フォールバック〈mma 実行の `Err` を捕捉して wmma
 //! へ再試行〉は採らない）。
 //!
-//! **本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = false`）は上記優先
-//! 順位を無効化したままであり、`CudaGemmAuto::run_f16` は引き続き
-//! `CudaWmmaGemm → Tiled → Naive`（#1156 以前と同じ wmma 優先）で
-//! 動作する**（イシュー #1160: #1156 のユーザー承認条件「切替前後を
-//! 同一プロトコル・5 回計測中央値で比較し、後退時は結線しない」
-//! 〈§5.6〉自体は GB10 実機（転送込みの auto 経路。`docs/perf/
-//! cuda-gemm-auto-f16-mma-switch.md`）で満たすことを確認済みだが
-//! （512/1024/2048 は after が base の run-median を上回り、4096 は
-//! #1130 の per-call アロケーション病態下で after の run-median が
-//! base の 5 run 範囲内であることを確認）、mma 優先を本番有効化すると
-//! K=4096 ストレス形状の非後退ゲート（`tests/gemm_auto.rs::
+//! **本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = true`。#1191）は
+//! 上記優先順位を有効化しており、`CudaGemmAuto::run_f16` は cc>=8.0・
+//! 整列形状かつ `mma` 構築済みなら `CudaMmaGemm → CudaWmmaGemm →
+//! Tiled → Naive` の順に選ぶ**（イシュー #1160: #1156 のユーザー承認
+//! 条件「切替前後を同一プロトコル・5 回計測中央値で比較し、後退時は
+//! 結線しない」〈§5.6〉自体は GB10 実機（転送込みの auto 経路。
+//! `docs/perf/cuda-gemm-auto-f16-mma-switch.md`）で満たすことを確認
+//! 済みで（512/1024/2048 は after が base の run-median を上回り、
+//! 4096 は #1130 の per-call アロケーション病態下で after の
+//! run-median が base の 5 run 範囲内であることを確認）、PR #1179
+//! codex-review 指摘（P1）で保留していた K=4096 ストレス形状の
+//! 非後退ゲート（`tests/gemm_auto.rs::
 //! run_f16_k4096_stress_non_regression_route_aware`）が参照する
-//! `ParityPath::MmaF16` baseline 行の ceiling が未承認の `None` のため
-//! fail-closed に必ず FAIL する。PR #1179 codex-review 指摘（P1）を
-//! 受けて、§12.5 提案 ceiling のユーザー承認・`BASELINES` 反映が完了
-//! するまで本番有効化を保留し `MMA_PRIORITY_PRODUCTION_ENABLED` を
-//! `false` のまま維持する（`docs/perf/cuda-parity-baseline.md`
-//! §12.4〜§12.6）。
+//! `ParityPath::MmaF16` baseline 行の ceiling も #1190（PR #1207）で
+//! ユーザー承認値が `BASELINES` へ反映済みのため、#1191 で
+//! `MMA_PRIORITY_PRODUCTION_ENABLED` を `true` へ復帰した
+//! （`docs/perf/cuda-parity-baseline.md` §12.4〜§12.6）。
 
 use std::num::NonZeroU32;
 
@@ -1741,22 +1740,24 @@ impl CudaGemmAuto {
     /// （内部で `select_f16_matrix_unit_impl` を `MMA_PRIORITY_
     /// PRODUCTION_ENABLED` 付きで呼ぶ）が担う。
     ///
-    /// **本番既定は `MMA_PRIORITY_PRODUCTION_ENABLED = false`（wmma
-    /// 優先・#1156 以前と同じ従来経路）のまま維持している**
-    /// （イシュー #1160: #1156 のユーザー承認条件「切替前後を同一
-    /// プロトコル・5 回計測中央値で比較し、後退時は結線しない」
-    /// 〈§5.6〉自体は `run_f16` 経由〈転送込み〉の auto 経路で GB10
-    /// 実機実測し満たすことを確認済みだが（`docs/perf/
-    /// cuda-gemm-auto-f16-mma-switch.md`）、mma 優先の本番有効化は
-    /// K=4096 非後退ゲートの `MmaF16` baseline ceiling 未承認のため
-    /// 保留している（PR #1179 codex-review 指摘。[`MMA_PRIORITY_
-    /// PRODUCTION_ENABLED`] docblock 参照）。したがって現状は `mma` の
-    /// 有無・形状ゲートに関わらず優先されず、`wmma`（`Some` なら）を
-    /// 呼び、`wmma` も `None` なら tiled を呼ぶ。有効化した場合の形状ゲートは
-    /// 呼び出し前の事前判定として行い、mma 実行が
-    /// 返す `Err` を捕捉して wmma へ再試行するエラー駆動フォールバックは
-    /// 採らない（カーネル起動失敗を静かに別経路で覆い隠さないため。
-    /// `docs/dispatch-rules-design.md` §5.6 判定規則 2・3）。
+    /// **本番既定は `MMA_PRIORITY_PRODUCTION_ENABLED = true`（mma
+    /// 優先・#1191 で有効化済み）である**（イシュー #1160: #1156 の
+    /// ユーザー承認条件「切替前後を同一プロトコル・5 回計測中央値で
+    /// 比較し、後退時は結線しない」〈§5.6〉自体は `run_f16` 経由
+    /// 〈転送込み〉の auto 経路で GB10 実機実測し満たすことを確認済み
+    /// で（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`）、mma 優先の
+    /// 本番有効化を保留していた K=4096 非後退ゲートの `MmaF16`
+    /// baseline ceiling も #1190 でユーザー承認・反映済みのため
+    /// （PR #1179 codex-review 指摘・[`MMA_PRIORITY_
+    /// PRODUCTION_ENABLED`] docblock 参照）、#1191 で `true` へ復帰
+    /// した。したがって `mma` が構築済みかつ事前形状ゲート（`n`／`k`
+    /// のアラインメント・`m` のグリッド上限）を満たせば mma を優先し、
+    /// 満たさなければ `wmma`（`Some` なら）を呼び、`wmma` も `None`
+    /// なら tiled を呼ぶ。形状ゲートは呼び出し前の事前判定として行い、
+    /// mma 実行が返す `Err` を捕捉して wmma へ再試行するエラー駆動
+    /// フォールバックは採らない（カーネル起動失敗を静かに別経路で
+    /// 覆い隠さないため。`docs/dispatch-rules-design.md` §5.6
+    /// 判定規則 2・3）。
     /// `self.gemm`〈naive／tiled〉は `new` 成功時点で必ず存在するため、
     /// tiled 自体が失敗するケースはカーネル起動時エラー（`CudaError`）
     /// としてそのまま呼び出し元へ返る。
@@ -1795,12 +1796,11 @@ impl CudaGemmAuto {
     /// の読み取り口であり利用者向け切替 API ではない（REQ-11・
     /// `docs/dispatch-rules-design.md` §5.6 判定規則 7）。
     ///
-    /// `MMA_PRIORITY_PRODUCTION_ENABLED` が `true` になれば、`self.mma`
-    /// が `Some` かつ整列形状であれば `Mma` を返す（非整列形状・`mma`
-    /// 未構築時は `Wmma`／`Tiled` を返す）。本番既定は現状 `false`
-    /// のため（[`MMA_PRIORITY_PRODUCTION_ENABLED`] docblock 参照）、
-    /// この診断アクセサは常に `Mma` 以外を返す。いずれの値でも `run_f16`
-    /// が実際に呼ぶ実装と常に一致する（`run_f16` も同じ
+    /// `MMA_PRIORITY_PRODUCTION_ENABLED` は `true`（#1191 で有効化
+    /// 済み。[`MMA_PRIORITY_PRODUCTION_ENABLED`] docblock 参照）であり、
+    /// `self.mma` が `Some` かつ整列形状であれば `Mma` を返す（非整列
+    /// 形状・`mma` 未構築時は `Wmma`／`Tiled` を返す）。いずれの値でも
+    /// `run_f16` が実際に呼ぶ実装と常に一致する（`run_f16` も同じ
     /// `MMA_PRIORITY_PRODUCTION_ENABLED` を渡すため）。
     ///
     /// codex-review PR #1177 指摘の是正（feature ゲート）: この内部
@@ -1883,13 +1883,13 @@ pub enum F16MatrixUnitImpl {
 /// 5 回計測中央値で比較し、後退時は結線しない」であり、
 /// `CudaGemmAuto::run_f16` 経由の auto 経路（転送込み）でこの比較を
 /// GB10 実機で実施し非後退を確認した（`docs/perf/
-/// cuda-gemm-auto-f16-mma-switch.md`）。ただし本番既定（`CudaGemmAuto::
+/// cuda-gemm-auto-f16-mma-switch.md`）。本番既定（`CudaGemmAuto::
 /// f16_matrix_unit_impl` が渡す [`MMA_PRIORITY_PRODUCTION_ENABLED`]）は
-/// K=4096 非後退ゲートの baseline ceiling 未承認（PR #1179 codex-review
-/// 指摘）により `false`（wmma 優先・#1156 以前と同じ挙動）のまま保留
-/// している。`prefer_mma` を引数として明示する構造自体は維持しており、
-/// ceiling 承認・反映後は [`MMA_PRIORITY_PRODUCTION_ENABLED`] の 1 行を
-/// `true` へ戻すだけで mma 優先へ切り替えられる。
+/// PR #1179 codex-review 指摘（P1）を受けて K=4096 非後退ゲートの
+/// baseline ceiling 未承認の間 `false` へ差し戻していたが、#1190
+/// （PR #1207）で ceiling がユーザー承認値で `BASELINES` へ反映された
+/// ため、#1191 で `true`（mma 優先）へ復帰した。`prefer_mma` を引数
+/// として明示する構造自体は変更していない。
 pub(crate) fn select_f16_matrix_unit_impl(
     prefer_mma: bool,
     mma_available: bool,
@@ -1913,28 +1913,31 @@ pub(crate) fn select_f16_matrix_unit_impl(
 
 /// [`select_f16_matrix_unit_impl`] の `prefer_mma` 引数へ渡す本番既定値。
 ///
-/// `false`（wmma 優先・#1156 以前と同じ従来経路）。性能 A/B 自体は
+/// `true`（mma 優先・#1191 で有効化済み）。性能 A/B 自体は
 /// `CudaGemmAuto::run_f16` 経由（転送込み）の auto 経路で GB10 実機実測
 /// 済みで、512/1024/2048 は after が base の run-median 以上、4096 は
 /// #1130 の per-call アロケーション病態下で after の run-median が base
 /// の 5 run 範囲内であることを確認している（`docs/perf/
 /// cuda-gemm-auto-f16-mma-switch.md`）。
 ///
-/// 一方、mma 優先を本番有効化すると K=4096 ストレス形状の非後退ゲート
-/// （`crates/backend-cuda/tests/gemm_auto.rs::
+/// mma 優先の本番有効化を保留していた K=4096 ストレス形状の非後退
+/// ゲート（`crates/backend-cuda/tests/gemm_auto.rs::
 /// run_f16_k4096_stress_non_regression_route_aware`）が参照する
 /// `ParityPath::MmaF16` baseline 行の `baseline_max_abs_diff_ceiling`／
-/// `baseline_max_rel_err_ceiling` が本コミット時点で未承認の `None`
-/// のままであり、fail-closed 契約上このゲートは実行すれば必ず FAIL
-/// する（`docs/perf/cuda-parity-baseline.md` §12.4〜§12.6）。
+/// `baseline_max_rel_err_ceiling` は、#1190（PR #1207）でユーザー承認
+/// 済みの実機実測値が `BASELINES` へ反映されている（
+/// `docs/perf/cuda-parity-baseline.md` §12.4〜§12.6）。
 /// baseline 値の追加・更新は実機実測値のみ・人間承認必須（
-/// `.claude/rules/coding-rust.md`「テスト・ベンチ」節）のため、
-/// PR #1179 codex-review 指摘（P1）を受けて `true` への本番有効化を
-/// §12.5 提案 ceiling のユーザー承認・`BASELINES` 反映完了まで保留し、
-/// この 1 行を `false` へ戻した。判定ロジック自体
-/// （`select_f16_matrix_unit_impl`）は変更していない。承認・反映が
-/// 完了し次第、この 1 行を `true` へ戻すだけで有効化できる。
-const MMA_PRIORITY_PRODUCTION_ENABLED: bool = false;
+/// `.claude/rules/coding-rust.md`「テスト・ベンチ」節）であり、この
+/// 前提が満たされたことを受けて PR #1179 codex-review 指摘（P1）で
+/// `false` へ差し戻していた本定数を #1191 で `true` へ復帰した。
+/// 判定ロジック自体（`select_f16_matrix_unit_impl`）は変更していない。
+/// 再び `false` へ戻す場合は、この決定を覆す実測根拠を
+/// `docs/perf/cuda-gemm-auto-f16-mma-switch.md` に記録し、下記
+/// コンパイル時ガード・`tests/gemm_auto.rs::
+/// f16_matrix_unit_impl_reports_selected_implementation`・
+/// `tests/tensor_core_real_device.rs` の期待値も同時に更新すること。
+const MMA_PRIORITY_PRODUCTION_ENABLED: bool = true;
 
 #[cfg(test)]
 mod f16_matrix_unit_impl_tests {
@@ -1963,11 +1966,10 @@ mod f16_matrix_unit_impl_tests {
         );
     }
 
-    /// `prefer_mma == true`（mma 優先。ceiling 承認後の本番有効化候補。
-    /// 現状 `MMA_PRIORITY_PRODUCTION_ENABLED = false` のため本番既定
-    /// ではないが `select_f16_matrix_unit_impl` 自体の網羅テストとして
-    /// 維持する）かつ mma・wmma とも構築済みで整列形状なら mma を優先
-    /// する（§5.6 の設計目標）。
+    /// `prefer_mma == true`（mma 優先。#1191 で
+    /// `MMA_PRIORITY_PRODUCTION_ENABLED = true` として本番既定化済み）
+    /// かつ mma・wmma とも構築済みで整列形状なら mma を優先する
+    /// （§5.6 の設計目標）。
     #[test]
     fn prefer_mma_true_both_available_aligned_shape_selects_mma() {
         assert_eq!(
@@ -1976,7 +1978,9 @@ mod f16_matrix_unit_impl_tests {
         );
     }
 
-    /// `prefer_mma == false`（本番既定・#1156 以前と同じ wmma 優先）
+    /// `prefer_mma == false`（#1156 以前と同じ wmma 優先。本番既定は
+    /// #1191 で `true` へ復帰済みのため、これは
+    /// `select_f16_matrix_unit_impl` 自体の網羅テストとして維持する）
     /// では mma・wmma とも構築済み・整列形状でも mma を選ばず
     #[test]
     fn prefer_mma_false_both_available_aligned_shape_selects_wmma() {
@@ -1986,21 +1990,21 @@ mod f16_matrix_unit_impl_tests {
         );
     }
 
-    /// `MMA_PRIORITY_PRODUCTION_ENABLED` 自体が `false` であることを
-    /// コンパイル時に固定するリグレッションガード（PR #1179
-    /// codex-review 指摘〈P1〉対応: `ParityPath::MmaF16` baseline 行の
-    /// ceiling 未承認のまま `true` へ誤って書き換わっても、他のテストの
-    /// `prefer_mma` 明示引数だけでは検知できないため。
-    /// `clippy::assertions_on_constants` を避けるため `#[test]` では
-    /// なく `const` ブロックで表現する）。
+    /// `MMA_PRIORITY_PRODUCTION_ENABLED` 自体が `true`（#1191 で
+    /// ceiling 反映後に本番有効化済み）であることをコンパイル時に固定
+    /// するリグレッションガード（PR #1179 codex-review 指摘〈P1〉対応
+    /// の裏返し: `ParityPath::MmaF16` baseline 行の ceiling 反映
+    /// （#1190・PR #1207）を前提に `true` へ復帰したこの判断が、他の
+    /// テストの `prefer_mma` 明示引数だけでは検知できない形で無断で
+    /// `false` へ差し戻されるのを防ぐ。`clippy::assertions_on_constants`
+    /// を避けるため `#[test]` ではなく `const` ブロックで表現する）。
     const _: () = assert!(
-        !MMA_PRIORITY_PRODUCTION_ENABLED,
-        "MMA_PRIORITY_PRODUCTION_ENABLED を true へ戻す前に、\
-         run_f16_k4096_stress_non_regression_route_aware が参照する \
-         ParityPath::MmaF16 baseline 行の baseline_max_abs_diff_ceiling／\
-         baseline_max_rel_err_ceiling を実機実測値でユーザー承認のうえ \
-         common::parity_baseline::BASELINES へ反映すること \
-         （docs/perf/cuda-parity-baseline.md §12.5）"
+        MMA_PRIORITY_PRODUCTION_ENABLED,
+        "MMA_PRIORITY_PRODUCTION_ENABLED を false へ戻す場合は、\
+         #1191 の結線判断（docs/perf/cuda-gemm-auto-f16-mma-switch.md）\
+         を覆す実機実測根拠を記録したうえで、\
+         tests/gemm_auto.rs::f16_matrix_unit_impl_reports_selected_implementation \
+         と tests/tensor_core_real_device.rs の期待値も同時に更新すること"
     );
 
     /// wmma 未構築でも mma が使えて整列形状なら mma を選ぶ（`prefer_mma

@@ -67,27 +67,24 @@
 //!
 //! #1160 で `CudaGemmAuto::run_f16` の `MatrixUnit` 分岐 mma 優先化
 //! （`gemm_auto::select_f16_matrix_unit_impl`）自体は §5.6 設計どおり
-//! 実装済みだが、mma 優先を有効化する `gemm_auto::
+//! 実装済みで、mma 優先を有効化する `gemm_auto::
 //! MMA_PRIORITY_PRODUCTION_ENABLED` は K=4096 非後退ゲートの `MmaF16`
-//! baseline ceiling 未承認（PR #1179 codex-review 指摘）により
-//! **`false`（wmma 優先・#1156 以前と同じ従来経路）のまま保留**して
-//! いる（`gemm_auto.rs` 該当 docblock 参照）。本ファイルの f16 assert
-//! （Tensor Core 経路が tiled f32 を上回ること）が比較する対象カーネル
-//! は、本番が実際に選ぶ実装へ追従させる。選択器（`f16_matrix_unit_impl`
-//! 診断アクセサ。`internal-diagnostics` feature 限定）が返す実装
-//! （`Mma` なら `CudaMmaGemm`、`Wmma` なら `CudaWmmaGemm`（opt））の
-//! カーネル単体計測を「本番 f16 経路」の代表値として assert に使う
-//! （`gemm_auto::select_f16_matrix_unit_impl` の判定順序と同じ fail-safe
-//! 優先順位）。同 feature が無効なビルドでは診断アクセサへ到達できない
-//! ため、本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = false`）に基づき
-//! `Wmma` を前提に固定する（実機実行は `make test-ignored-cuda` の
-//! `--all-features` に限られるため、この固定値が実際に使われることは
-//! ない）。診断アクセサが有効な場合はさらに、選択器が実際に選ぶ実装と
-//! 本テストが計測する実装が食い違わないことを fail-closed に検査する
-//! （選択器が選ばない経路を黙って計測し続けて本番経路との乖離を見逃す
-//! false-green を防ぐ）。`wmma_f16_opt` は本番既定では現在も主経路
-//! （`MMA_PRIORITY_PRODUCTION_ENABLED = true` へ復帰するまでの間）で
-//! あり続けるため assert 対象のまま扱う（`docs/perf/
+//! baseline ceiling が #1190（PR #1207）でユーザー承認・反映された
+//! ことを受けて **#1191 で `true`（mma 優先）へ復帰済み**（`gemm_auto.rs`
+//! 該当 docblock 参照）。本ファイルの f16 assert（Tensor Core 経路が
+//! tiled f32 を上回ること）が比較する対象カーネルは、本番が実際に
+//! 選ぶ実装へ追従させる。選択器（`auto.mma_available()`。
+//! `internal-diagnostics` feature 無効時も使える公開 API）が示す
+//! 実装（cc>=8.0・整列形状・mma 構築済みなら `CudaMmaGemm`、それ以外
+//! は `CudaWmmaGemm`（opt））のカーネル単体計測を「本番 f16 経路」の
+//! 代表値として assert に使う（`gemm_auto::select_f16_matrix_unit_impl`
+//! の判定順序と同じ fail-safe 優先順位）。`internal-diagnostics`
+//! feature 有効時はさらに、診断アクセサ（`f16_matrix_unit_impl`）が
+//! 実際に選ぶ実装と本テストが計測する実装が食い違わないことを
+//! fail-closed に検査する（選択器が選ばない経路を黙って計測し続けて
+//! 本番経路との乖離を見逃す false-green を防ぐ）。`wmma_f16_opt` は
+//! mma 未構築（cc<8.0・NVRTC 失敗）等のフォールバック環境限定で使わ
+//! れる経路として assert 対象のまま扱う（`docs/perf/
 //! cuda-wmma-f16-perf-triage.md` §8「`wmma_f16_opt` の扱い」参照）。
 
 use bench_harness::{BenchReport, MeasurementConfig};
@@ -257,38 +254,30 @@ fn tensor_core_tflops_record() {
             .expect("BenchReport::to_json must succeed for a validated report")
     );
 
-    // 本番 f16 経路（イシュー #1160）: `CudaGemmAuto::run_f16` が
-    // M=N=K=4096（整列形状）で実際に選ぶ実装をカーネル単体計測し、この
-    // 値を f16 assert の比較対象とする。本番選択結果そのもの
-    // （`f16_matrix_unit_impl` 診断アクセサが返す `F16MatrixUnitImpl`）
-    // から判定する（`auto.mma_available()` だけでは
-    // `MMA_PRIORITY_PRODUCTION_ENABLED`〈本番既定 `false`〉を無視して
-    // しまい、cc>=8.0 環境で実際は `Wmma` が選ばれるのに `Mma` を計測
-    // した扱いになってしまう。PR #1179 codex-review 指摘）。診断アクセサ
-    // は `internal-diagnostics` feature 限定のため、同 feature 無効時は
-    // 本番既定（`false`＝`Wmma`）を前提に固定する（実機実行は
-    // `make test-ignored-cuda` の `--all-features` に限られるため、この
-    // 固定値が実際に使われることはない）。上記の `wmma_f16_kernel_only`
-    // はこの分岐の結果を再利用せず独立に測るため、`Wmma` が選ばれた
-    // 環境ではここで測り直さず上記の値をそのまま使う。
-    // `internal-diagnostics` feature 無効時は `f16_matrix_unit_impl` 診断
-    // アクセサへ到達できず `auto` を使わないため（`production_f16_uses_mma`
-    // は本番既定 `false` に固定する下記 cfg 分岐）、その場合の unused
-    // warning を許容する。
-    #[cfg_attr(not(feature = "internal-diagnostics"), allow(unused_variables))]
+    // 本番 f16 経路（イシュー #1160・#1191 で mma 優先を本番有効化
+    // 済み）: `CudaGemmAuto::run_f16` が M=N=K=4096（整列形状）で実際に
+    // 選ぶ実装をカーネル単体計測し、この値を f16 assert の比較対象と
+    // する。`MMA_PRIORITY_PRODUCTION_ENABLED = true` の下では
+    // `CudaGemmAuto::run_f16` の選択は「cc>=8.0 ゲート・事前形状ゲート
+    // を満たし mma が構築済みか」だけで決まり、これは本番選択器
+    // （`f16_matrix_unit_impl`）の判定と `auto.mma_available()`（cc ゲート
+    // 通過＋構築成功の可視化。M=N=K=4096 は整列・grid 上限内のため
+    // 事前形状ゲートも必ず通る）が一致するため、`internal-diagnostics`
+    // feature 非依存の公開 API である `auto.mma_available()` をそのまま
+    // 使う。`internal-diagnostics` 有効時はさらに診断アクセサ
+    // （`f16_matrix_unit_impl`）で選択器の実際の判定と一致することを
+    // 下記で fail-closed に検査する（両者の整合性検査は維持）。上記の
+    // `wmma_f16_kernel_only` はこの分岐の結果を再利用せず独立に測る
+    // ため、`Wmma` が選ばれた環境ではここで測り直さず上記の値を
+    // そのまま使う。
     let auto = CudaGemmAuto::new(&device).expect("CudaGemmAuto::new must succeed");
-    #[cfg(feature = "internal-diagnostics")]
-    let production_f16_uses_mma = matches!(
-        auto.f16_matrix_unit_impl(m, n, k),
-        fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma
-    );
-    #[cfg(not(feature = "internal-diagnostics"))]
-    let production_f16_uses_mma = false;
+    let production_f16_uses_mma = auto.mma_available();
 
     let (production_f16_path_label, production_f16_kernel_tflops) = if production_f16_uses_mma {
         let mma_gemm = CudaMmaGemm::new(&device).expect(
-            "CudaMmaGemm::new must succeed when f16_matrix_unit_impl() selects Mma \
-             (cc>=8.0・NVRTC コンパイル成功・MMA_PRIORITY_PRODUCTION_ENABLED=true が前提)",
+            "CudaMmaGemm::new must succeed when auto.mma_available() is true \
+             (cc>=8.0・NVRTC コンパイル成功。MMA_PRIORITY_PRODUCTION_ENABLED=true が \
+             本番既定・#1191)",
         );
         let (a_mma_dev, b_mma_dev) = mma_gemm
             .upload_f16(&a_f16, &b_f16)
@@ -322,8 +311,8 @@ fn tensor_core_tflops_record() {
         ("mma_sync_f16", mma_kernel_tflops)
     } else {
         println!(
-            "tflops_record_kernel_only path=wmma_f16_opt(production; \
-             f16_matrix_unit_impl()=Wmma〈MMA_PRIORITY_PRODUCTION_ENABLED=false 保留中〉) \
+            "tflops_record_kernel_only path=wmma_f16_opt(fallback; \
+             auto.mma_available()=false〈mma 未構築のフォールバック環境〉) \
              tflops={wmma_f16_kernel_tflops:.3}"
         );
         ("wmma_f16_opt", wmma_f16_kernel_tflops)
@@ -373,20 +362,16 @@ fn tensor_core_tflops_record() {
     // （mma 優先。#1123 で確認済みの mma.sync パイプラインの優位性
     // ・tiled f32 比約 7〜11 倍）を一時的に有効化した状態での GB10
     // 実機実測では本 assert は pass した（`docs/perf/
-    // cuda-wmma-f16-perf-triage.md` §8.3 実測記録）。ただし本番既定は
+    // cuda-wmma-f16-perf-triage.md` §8.3 実測記録）。本番既定は当時
     // K=4096 非後退ゲートの `MmaF16` baseline ceiling 未承認（PR #1179
     // codex-review 指摘）により `MMA_PRIORITY_PRODUCTION_ENABLED = false`
-    // （wmma 優先）へ差し戻し済みのため、この既定のまま本テストを実機
-    // 実行すると `production_f16_uses_mma = false` となり比較対象が
-    // 再び `wmma_f16_opt` へ戻り、本 assert は red のままである
-    // （§1123 是正版と同じ数値。上記参照）。イシュー #1131 の完了条件
-    // （本 assert が pass すること）は「本番選択結果に追従する比較方式」
-    // の整備としては満たされたが、本番既定（false）における実際の
-    // pass は baseline ceiling 承認・`MMA_PRIORITY_PRODUCTION_ENABLED`
-    // の `true` への復帰まで持ち越しである（`docs/perf/
-    // cuda-wmma-f16-perf-triage.md` §6・§8.3 参照。本テストは実機
-    // `#[ignore]` 分離のため通常 CI では実行されず、この既知 red は
-    // 通常 CI の合否に影響しない）。
+    // （wmma 優先）へ一時的に差し戻していたが、#1190（PR #1207）で
+    // ceiling がユーザー承認値で反映されたことを受け、#1191 で
+    // `true` へ復帰した。この本番既定（`true`）のまま本テストを GB10
+    // 実機実行すると `production_f16_uses_mma = true` となり比較対象は
+    // `mma_sync_f16` となって本 assert は pass する（実測値は
+    // `docs/perf/cuda-wmma-f16-perf-triage.md` §8.6 に記録）。本テストは
+    // 実機 `#[ignore]` 分離のため通常 CI では実行されない。
     assert!(
         tf32_kernel_tflops > tiled_kernel_tflops,
         "WMMA TF32 opt（カーネル単体 {tf32_kernel_tflops:.3} TFLOPS）が tiled f32（カーネル単体 \
