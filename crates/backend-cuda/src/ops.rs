@@ -1144,7 +1144,7 @@ impl BackendOps for CudaBackendOps {
     /// gemm_resident_rhs_act`]（`a` を毎回 upload・結果を毎回 download）
     /// と同じ融合カーネル（[`crate::gemm::CudaGemm::
     /// launch_tiled_bias_act_f32_resident`]）を使うが、`a` も呼び出し元が
-    /// 既にデバイスへ置いた [`DeviceBuffer`] として受け取り、結果も
+    /// 既にデバイスへ置いた [`fandhe_ai_tensor_core::buffer::DeviceBuffer`] として受け取り、結果も
     /// `DeviceBuffer` のまま返す点が異なる（`gemm_resident_rhs*` 系は
     /// 「`w`／`bias` のみ常駐」・本メソッドは「`a`／`w`／`bias`／戻り値の
     /// 全てが常駐」）。多層 MLP 推論チェーン

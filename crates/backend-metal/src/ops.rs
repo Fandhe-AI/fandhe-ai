@@ -707,9 +707,11 @@ impl BackendOps for MetalBackendOps {
     /// 任意）から `y = act(a @ w + bias)` を、入力・出力いずれも
     /// ホストへ実体化せずに計算する（イシュー #1216・`docs/inference-
     /// forward-fixed-cost-design.md` §3.2「段階 B」）。[`Self::
-    /// gemm_resident_rhs`] と同じ融合カーネル（[`crate::gemm::MetalGemm::
-    /// dispatch_strided_bias_act_prepared`]）を使うが、`a` も呼び出し元が
-    /// 既にデバイスへ置いた [`DeviceBuffer`] として受け取り、結果も
+    /// gemm_resident_rhs`] と同じ融合カーネルの encode-only 版
+    /// （[`crate::gemm::MetalGemm::encode_strided_bias_act_prepared`]。
+    /// codex-review・Cursor Bugbot 指摘対応で同期版 [`crate::gemm::
+    /// MetalGemm::dispatch_strided_bias_act_prepared`] から切替済み）を
+    /// 使うが、`a` も呼び出し元が既にデバイスへ置いた [`fandhe_ai_tensor_core::buffer::DeviceBuffer`] として受け取り、結果も
     /// `DeviceBuffer` のまま返す点が異なる（`gemm_resident_rhs*` 系は
     /// 「`w`／`bias` のみ常駐」・本メソッドは「`a`／`w`／`bias`／戻り値の
     /// 全てが常駐」）。多層 MLP 推論チェーン（`fandhe_ai_autodiff::
@@ -717,9 +719,13 @@ impl BackendOps for MetalBackendOps {
     /// ことで、層間の D2H→H2D を発生させず最終出力の 1 回の `download`
     /// へ同期点を集約できる（trait 定義側 doc comment 参照）。
     ///
-    /// **同期契約（イシュー #1017 コマンドバッファ共有との整合）**:
-    /// `dispatch_strided_bias_act_prepared` は `ctx.encode` でバッチへ
-    /// 積むのみで待たない。次層の dispatch は同一コマンドバッファ内
+    /// **同期契約（イシュー #1017 コマンドバッファ共有との整合。#1216
+    /// codex-review 指摘対応で encode-only 化）**:
+    /// [`crate::gemm::MetalGemm::encode_strided_bias_act_prepared`] は
+    /// `ctx.encode` でバッチへ積むのみで待たない（`ctx.dispatch_sync`
+    /// を呼ぶ同期版と異なり、本メソッドの呼び出しごとに
+    /// `waitUntilCompleted` が発生しない）。次層の dispatch は同一
+    /// コマンドバッファ内
     /// （または `should_auto_flush` で分割された後続コマンドバッファ。
     /// 同一キューの serial 実行順）に積まれるため、前層出力 `c` を次層の
     /// `a` として読む順序は GPU 側で保証される。CPU 側からの読み取りは
@@ -868,7 +874,13 @@ impl BackendOps for MetalBackendOps {
 
         let gemm = context_cache::cached_gemm(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-        gemm.dispatch_strided_bias_act_prepared(
+        // `encode_strided_bias_act_prepared`（encode-only・待たない）を
+        // 使う（本メソッド doc「同期契約」参照。codex-review・Cursor
+        // Bugbot 指摘対応: `dispatch_strided_bias_act_prepared`
+        //〈`ctx.dispatch_sync` 経由〉は呼ぶたびに `waitUntilCompleted`
+        // するため、多層チェーンで層ごとの同期点が生じ「同期点を最終
+        // `download` の 1 回へ集約する」契約を満たさなかった）。
+        gemm.encode_strided_bias_act_prepared(
             &ctx,
             a_buf,
             0,
@@ -885,9 +897,9 @@ impl BackendOps for MetalBackendOps {
         )
         .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
 
-        // `download` しない: 同期点は呼び出し元の `download`
-        // （`synchronize`）へ集約される（本メソッド doc「同期契約」
-        // 参照）。
+        // `download`／`synchronize` しない: 同期点は呼び出し元の
+        // `download`（`synchronize`）へ集約される（本メソッド doc
+        // 「同期契約」参照）。
         Ok(c_dev_buf)
     }
 

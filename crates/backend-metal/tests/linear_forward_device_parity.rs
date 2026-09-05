@@ -16,32 +16,22 @@ use fandhe_ai_tensor_core::buffer::DeviceBufferView;
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
-fn assert_close(actual: f32, expected: f32, ctx: &str) {
-    let abs_diff = (actual - expected).abs();
-    let rel_diff = abs_diff / expected.abs().max(1e-12);
-    assert!(
-        abs_diff < 1e-5 || rel_diff < 1e-3,
-        "{ctx}: actual={actual} expected={expected} abs_diff={abs_diff} rel_diff={rel_diff}"
-    );
-}
-
 fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).unwrap()
 }
 
+/// テンソル同士の統一複合判定（codex-review・イシュー #1216 指摘対応）。
+/// 独自の `f32` 分母固定 `assert_close` ではなく、REQ-2 の唯一の実体である
+/// [`fandhe_ai_backend_cpu::assert_parity`]（`f64` で差を計算し両値の
+/// 絶対値の最大を分母にする）へ委譲することで、`crates/backend-cuda/
+/// tests/linear_forward_device_real_device.rs` と判定方式を統一する
+/// （`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの
+/// 許容誤差を単独で緩和しない」・閾値のハードコード分散を避ける）。
 fn assert_tensor_close(actual: &Tensor<f32>, expected: &Tensor<f32>, ctx: &str) {
     assert_eq!(actual.shape(), expected.shape(), "{ctx}: shape mismatch");
     let a = actual.contiguous();
     let e = expected.contiguous();
-    for (i, (av, ev)) in a
-        .as_slice()
-        .unwrap()
-        .iter()
-        .zip(e.as_slice().unwrap())
-        .enumerate()
-    {
-        assert_close(*av, *ev, &format!("{ctx}: element {i}"));
-    }
+    fandhe_ai_backend_cpu::assert_parity(ctx, a.as_slice().unwrap(), e.as_slice().unwrap());
 }
 
 /// `Xorshift64Star` 同等の決定的疑似乱数（`-0.5` シフトで ReLU 恒等化を
