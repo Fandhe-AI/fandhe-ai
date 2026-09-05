@@ -40,6 +40,18 @@ use crate::error::AutodiffError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TapeId(u64);
 
+#[cfg(test)]
+impl TapeId {
+    /// テスト専用のダミー `TapeId` 構築子（イシュー #1212 codex-review
+    /// P0 追加是正）。`grad::vjp` の第 7・8 引数（`tape_id`／
+    /// `tape_epoch`）が実 `Tape` を経由せず単体テストできるよう、
+    /// フィールドを外部から見えなくしたまま（`NEXT_TAPE_ID` 経由の
+    /// 一意性契約は保ったまま）テストコードにのみ構築手段を与える。
+    pub(crate) fn for_test(id: u64) -> Self {
+        TapeId(id)
+    }
+}
+
 /// プロセス全体で共有する `TapeId` 発行カウンタ。`Tape::new_with_ops(ops)` からのみ
 /// インクリメントされる（`fetch_add` は複数スレッドから並行に `Tape` を
 /// 生成しても一意性を保つ）。
@@ -281,6 +293,104 @@ pub(crate) trait ResidentResolver {
         store_id: u64,
         slot: usize,
     ) -> Result<DeviceBufferView<'_>, AutodiffError>;
+
+    /// `Op::LinearResident` の VJP（`grad.rs`）が d_weight
+    /// （`x^T @ g`）をデバイス常駐のまま書き込めるか試みる入口
+    /// （イシュー #1212・`docs/device-resident-update-design.md` 追補）。
+    ///
+    /// 実装（`DeviceParamStore`）は `BackendOps::gemm_fp32_strict_into`
+    /// （`tensor-core`。既定 `Unsupported`）を使い、成功すれば自身の
+    /// grad staging バッファの `slot` に対応する範囲へ直接書き込んで
+    /// `Ok(true)` を返す。バックエンドが `gemm_fp32_strict_into`／
+    /// `MemoryOps` を実装しない場合は `Ok(false)`（呼び出し元は
+    /// `ops.gemm_fp32_strict` によるホスト経路へフォールバックする）。
+    /// `store_id`／`slot`／shape の不一致は
+    /// [`AutodiffError::InvalidArgument`] で fail-closed に拒否する
+    /// （`resident_buffer` と同じ方針。`.claude/rules/security.md` A08）。
+    ///
+    /// **`tape_id`／`epoch`／`weight_node_id` を追加した理由（codex-review
+    /// P0 是正・イシュー #1212 追加指摘）**: 従来は「今回の backward が
+    /// 書き込んだ」という時点情報（`backward_serial`・pending 世代）しか
+    /// 記録しておらず、実際に微分した葉（`weight` の `Op::ResidentLeaf`
+    /// ノード）が `step()` 側の `pending.node_ids` と同一であることは
+    /// 何も検証していなかった。`DeviceParamStore::snapshot_resident_params`
+    /// は `pending`（`register_resident_params` が持つ状態）を一切変更
+    /// せずに新しい `Op::ResidentLeaf` ノードを（同じテープにも別テープ
+    /// にも）追加できるため、「Tape A に `register_resident_params`
+    /// → Tape B に `snapshot_resident_params` してその葉で forward→
+    /// backward → `step(Tape A, Tape B 由来の grads)`」や「同じテープ内で
+    /// 別の snapshot 呼び出しの葉を使う」手順では、ストア単位のフィン
+    /// ガープリント（`resident_backward_fingerprint`）だけでは検出でき
+    /// ず fail-closed 検査を迂回できてしまう。これを塞ぐため、resident
+    /// 書き込みの由来（差分対象テープの `tape_id`／`epoch`・微分した
+    /// `weight` の `NodeId`）を呼び出し元（`grad::vjp`）から実装へ渡し、
+    /// 実装側が `slot` ごとに保持したうえで `step()` が現在の `pending`
+    /// の対応する葉と突き合わせて初めて resident 経由の値を信頼する
+    /// （`optim::device_store::GradStaging::filled` doc 参照）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// 常に `Ok(false)`（ホスト経路へフォールバック）。現時点で
+    /// `DeviceParamStore` のみがオーバーライドする。
+    #[allow(clippy::too_many_arguments)]
+    fn fill_resident_weight_grad(
+        &self,
+        _ops: &dyn BackendOps,
+        _store_id: u64,
+        _slot: usize,
+        _tape_id: TapeId,
+        _epoch: u64,
+        _weight_node_id: NodeId,
+        _x_t: &Tensor<f32>,
+        _g: &Tensor<f32>,
+    ) -> Result<bool, AutodiffError> {
+        Ok(false)
+    }
+
+    /// 「今回の `backward_impl` 走査中に resident 経路（[`Self::
+    /// fill_resident_weight_grad`]）が書き込んだ値」を一意に識別する
+    /// フィンガープリント `(store_id, 走査単位の連番, pending 世代)` を
+    /// 返す（イシュー #1212 の codex-review P0 是正・その追加是正）。
+    ///
+    /// `Tape::backward_with_resident` はこの値を `Gradients` へ
+    /// 焼き込み（`Gradients::resident_fingerprint`）、`DeviceParamStore::
+    /// step` が `GradStaging::filled` の鮮度検査と併せて「渡された
+    /// `Gradients` が本当に “今回の resident 書き込みを生んだその
+    /// backward 呼び出し” の戻り値か」を検査できるようにする。
+    ///
+    /// 従来は `GradStaging::filled[slot] == Some(現在の backward_serial)`
+    /// のみを検査していたが、これは「ストア自身の状態」だけを見ており
+    /// **呼び出し元が渡す `Gradients` 引数の正当性を一切検査しない**
+    /// 抜け穴だった（全パラメータが resident 化されたモデルでは
+    /// `grads.get()` が一度も呼ばれないため、別 `Tape`／別
+    /// `DeviceParamStore`／古い backward 呼び出しに由来する `Gradients`
+    /// を渡しても検出できず更新が成功してしまう）。
+    ///
+    /// **`(store_id, backward_serial)` のみでも不十分だった点（codex-review
+    /// 追加指摘）**: `backward_serial` は `DeviceParamStore::backward` が
+    /// 呼ばれた回数のみを数えており、`register_resident_params` の
+    /// 呼び出し（＝どの pending forward が対象か）とは独立に増える。
+    /// このため「backward → step 完了 → 新しい葉を
+    /// `register_resident_params` で再登録 → **backward を呼ばずに**
+    /// 同じ古い `Gradients` を再び `step` に渡す」という手順では、
+    /// `backward_serial` が据え置きのまま `GradStaging::filled` の
+    /// 残留値と偶然一致してしまい、新しい pending（別の葉ノード）に
+    /// 対して古い勾配で誤って更新できてしまう。この抜け穴を塞ぐため、
+    /// 3 つ目の要素として「この backward 呼び出しの時点でストアに
+    /// 登録されていた `PendingForward` の世代番号
+    /// （`DeviceParamStore::pending` が `Some` のときのみ）」を含める。
+    /// `step` 側は、この記録済み世代番号が **今まさに消費しようとしている
+    /// `pending` の世代番号と一致する場合のみ** resident 経由の `filled`
+    /// を信頼する（`register_resident_params` は呼ばれるたびに新しい
+    /// 世代番号を払い出すため、backward と step の間に新規登録が挟まると
+    /// 世代番号が食い違い fail-closed に拒否される）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// `None`（resident 機構を持たないリゾルバには意味を持たない）。
+    fn resident_backward_fingerprint(&self) -> Option<(u64, u64, Option<u64>)> {
+        None
+    }
 }
 
 impl Op {

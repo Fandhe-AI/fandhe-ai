@@ -253,6 +253,21 @@ impl MemoryOps for CpuMemory {
         }
         Tensor::new(handle.data.clone(), buffer.shape()).map_err(BackendError::ShapeMismatch)
     }
+
+    /// [`MemoryOps::upload_into`] の CPU 実装（イシュー #1212）。
+    /// `crate::ops::CpuBackendOps`（ホットパス。`memory_ops()` が
+    /// `Some(self)` を返す実装）と契約を共有するため、実体は
+    /// `crate::ops::upload_into_cpu_buffer` へ委譲する（`ops.rs`
+    /// モジュール doc「ホットパス」参照。本実装からは通常到達しない
+    /// が、契約の一貫性のため鏡像実装を置く）。
+    fn upload_into(
+        &self,
+        tensor: &Tensor<f32>,
+        dst: &mut DeviceBuffer<f32>,
+        dst_offset: usize,
+    ) -> Result<(), BackendError> {
+        crate::ops::upload_into_cpu_buffer(tensor, dst, dst_offset)
+    }
 }
 
 #[cfg(test)]

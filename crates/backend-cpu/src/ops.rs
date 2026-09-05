@@ -80,6 +80,59 @@ impl MemoryOps for CpuBackendOps {
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
         shared_cpu_memory().download(buffer)
     }
+
+    /// [`MemoryOps::upload_into`] の CPU 実装（イシュー #1212）。CPU の
+    /// 「デバイス」はホストメモリそのものであるため、実データは
+    /// `contiguous()` した `tensor` を `dst` の `CpuBufferHandle::data`
+    /// 該当範囲へ `copy_from_slice` するだけで完結する（FFI・実転送
+    /// なし。`upload` の CPU 実装と同じ位置付け）。
+    fn upload_into(
+        &self,
+        tensor: &Tensor<f32>,
+        dst: &mut DeviceBuffer<f32>,
+        dst_offset: usize,
+    ) -> Result<(), BackendError> {
+        upload_into_cpu_buffer(tensor, dst, dst_offset)
+    }
+}
+
+/// [`MemoryOps::upload_into`] の CPU 実装本体。`CpuBackendOps`・
+/// `crate::memory::CpuMemory` の両実装（本ファイルと `memory.rs`）が
+/// 同一ロジックを共有する（`impl MemoryOps for CpuBackendOps` doc
+/// 「ホットパス」参照。契約は完全に同一のため 1 箇所にまとめる）。
+///
+/// 範囲検査（REQ-8「カーネル側の手動境界チェックを省略しない」・
+/// OWASP A03）: `dst_offset + tensor.numel()` を `checked_add` で検査し、
+/// `dst.numel()` を超える場合は書き込み前に `InvalidArgument` で拒否する。
+pub(crate) fn upload_into_cpu_buffer(
+    tensor: &Tensor<f32>,
+    dst: &mut DeviceBuffer<f32>,
+    dst_offset: usize,
+) -> Result<(), BackendError> {
+    if dst.device() != Device::Cpu {
+        return Err(BackendError::DeviceMismatch);
+    }
+    let contiguous = tensor.contiguous();
+    let src = contiguous.as_slice().ok_or_else(|| {
+        gemm_contiguity_fail_safe("upload_into: tensor not contiguous after contiguous()")
+    })?;
+    let numel = src.len();
+    let end = dst_offset.checked_add(numel).ok_or_else(|| {
+        BackendError::InvalidArgument(
+            "upload_into: dst_offset + tensor.numel() overflowed usize".to_string(),
+        )
+    })?;
+    if end > dst.numel() {
+        return Err(BackendError::InvalidArgument(format!(
+            "upload_into: write range [{dst_offset}, {end}) exceeds dst buffer length {}",
+            dst.numel()
+        )));
+    }
+    let handle = dst
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    handle.data[dst_offset..end].copy_from_slice(src);
+    Ok(())
 }
 
 /// `BackendOps::gemm_resident_rhs`／`gemm_resident_rhs_act` の共有本体
@@ -282,6 +335,86 @@ impl BackendOps for CpuBackendOps {
         gemm_blis_parallel(a_slice, b_slice, &mut out, m, n, k)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict_into`] の CPU
+    /// 実装（イシュー #1212）。`gemm` と同じ [`gemm_blis_parallel`] を
+    /// 使うため数値は `gemm`/`gemm_fp32_strict` と bit 同一だが、結果を
+    /// 新規 `Tensor` として返さず `out` の `out_offset` から直接書き込む
+    /// （`DeviceParamStore` の grad staging バッファへ、d_weight の D2H を
+    /// 経由せず書き込むための入口。TF32 の概念を持たない CPU は元々
+    /// `gemm_fp32_strict` と `gemm` が同一実装のため区別を要さない）。
+    ///
+    /// **累積ではなく上書き契約**: [`gemm_blis_parallel`] は C
+    /// （`out[out_offset..out_offset+m*n]`）へ **FMA で累積**する
+    /// カーネル（`gemm_blis::mod` の `dispatch_region` doc「累積計算」）
+    /// であり、呼び出し元が確保した `Vec` を毎回ゼロ初期化してから渡す
+    /// ことで実質的な代入契約を保っている（`gemm` 参照）。`out` は
+    /// `DeviceParamStore` が使い回す**永続バッファ**（前ステップの残留値
+    /// を保持しうる）ため、`gemm` と異なりここで明示的に対象範囲を
+    /// `fill(0.0)` してから同じカーネルへ渡す（トレイト契約「上書き」を
+    /// 満たすための CPU 側の対処。CUDA/Metal のカーネルは C を代入で
+    /// 書くため対応不要。`docs/device-resident-update-design.md` 追補
+    /// 参照）。
+    fn gemm_fp32_strict_into(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+    ) -> Result<(), BackendError> {
+        if out.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+
+        // REQ-8「カーネル側の手動境界チェックを省略しない」・OWASP A03:
+        // `out_offset + m*n` を `checked_mul`/`checked_add` で検査し、
+        // `out.numel()` を超える書き込みを事前に拒否する（カーネル起動
+        // 前・`out` への可変借用取得前）。
+        let mn = m.checked_mul(n).ok_or_else(|| {
+            BackendError::InvalidArgument("gemm_fp32_strict_into: m * n overflowed usize".into())
+        })?;
+        let end = out_offset.checked_add(mn).ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "gemm_fp32_strict_into: out_offset + m * n overflowed usize".into(),
+            )
+        })?;
+        if end > out.numel() {
+            return Err(BackendError::InvalidArgument(format!(
+                "gemm_fp32_strict_into: write range [{out_offset}, {end}) exceeds out buffer \
+                 length {}",
+                out.numel()
+            )));
+        }
+
+        let a_owned = a.contiguous();
+        let b_owned = b.contiguous();
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            gemm_contiguity_fail_safe(
+                "gemm_fp32_strict_into: lhs not contiguous after contiguous()",
+            )
+        })?;
+        let b_slice = b_owned.as_slice().ok_or_else(|| {
+            gemm_contiguity_fail_safe(
+                "gemm_fp32_strict_into: rhs not contiguous after contiguous()",
+            )
+        })?;
+
+        let handle = out
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let dst = &mut handle.data[out_offset..end];
+        // 上書き契約（doc 参照）: 永続バッファの残留値を消してから
+        // 累積カーネルへ渡す。
+        dst.fill(0.0);
+        gemm_blis_parallel(a_slice, b_slice, dst, m, n, k)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let _ = out_shape; // shape 検証のみに使用（`matmul_out_shape` の失敗検出）
+        Ok(())
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合

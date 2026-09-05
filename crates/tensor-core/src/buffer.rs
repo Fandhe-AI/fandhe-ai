@@ -395,6 +395,45 @@ pub trait MemoryOps {
     /// 契約とする（モジュール冒頭「download の同期契約」参照）。
     /// `numel() == 0` の場合は FFI を呼ばず空 `Tensor` を返す。
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError>;
+
+    /// ホスト常駐の `tensor` を、既存の `dst`（呼び出し元が既に確保済みの
+    /// デバイスバッファ）の `dst_offset` 要素目から H2D 転送する（イシュー
+    /// #1212・`docs/device-resident-update-design.md` 追補）。
+    ///
+    /// [`Self::upload`] が毎回新規 `DeviceBuffer` を確保するのに対し、
+    /// 本メソッドは `fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore` が保持する grad staging バッファ（全パラメータ
+    /// 連結。イシュー #1023）へ、host 常駐の 1 パラメータぶんの勾配だけを
+    /// 直接書き込むために使う（bias 等、デバイス側で直接計算できない
+    /// 勾配の分だけ upload すればよく、`step()` が全パラメータぶんを
+    /// 都度 1 個の巨大バッファへ再確保・再 upload する必要がなくなる）。
+    ///
+    /// 非 contiguous な `tensor` は [`Self::upload`] と同じく内部で
+    /// `tensor.contiguous()` してから転送する。`dst_offset + tensor.numel()`
+    /// は `dst.numel()` 以内であることを検査し（`checked_add` による
+    /// オーバーフロー検査を含む）、範囲外は [`BackendError::InvalidArgument`]
+    /// （REQ-8「カーネル側の手動境界チェックを省略しない」・OWASP A03。
+    /// `dst.device()` が `self` のデバイスと一致しない場合は
+    /// [`BackendError::DeviceMismatch`]）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// 非破壊拡張（`BackendOps::gemm_fp32_strict_into` と同じパターン）。
+    /// 既定は [`BackendError::Unsupported`] を返す fail-safe とし、呼び
+    /// 出し元は `Unsupported` のときのみ既存の `upload`（新規確保）＋
+    /// 個別カーネル起動の経路へフォールバックする。
+    fn upload_into(
+        &self,
+        _tensor: &Tensor<f32>,
+        _dst: &mut DeviceBuffer<f32>,
+        _dst_offset: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "upload_into: default fail-safe (no in-place H2D transfer available for this \
+             backend)"
+                .into(),
+        ))
+    }
 }
 
 #[cfg(test)]
