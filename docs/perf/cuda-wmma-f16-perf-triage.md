@@ -122,8 +122,9 @@ baseline ceiling 未承認〉により一時 `false` へ差し戻していたが
 イシュー #1160 の GB10 実機実測（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`）で
 非後退を確認した一方、mma 優先の本番有効化（`true`）は K=4096 非後退ゲートの
 `MmaF16` baseline ceiling 未承認（PR #1179 codex-review 指摘）により
-`false`（wmma 優先・#1156 以前と同じ従来経路）のまま保留している（`run_f16` は
-現状 cc・整列形状に関わらず `wmma_f16` を優先して呼ぶ）。ただし `CudaGemmAuto` 自体は
+一時 `false` へ差し戻されたが、#1190（PR #1207）の ceiling 承認・反映後に
+#1191（PR #1208）で `true` へ復帰し本番有効化済み（`run_f16` は cc>=8.0・
+整列形状で `mma_sync_f16` を優先して呼ぶ）。ただし `CudaGemmAuto` 自体は
 本イシュー #1160 の時点でも facade／`BackendOps::gemm`／`bench-harness` のいずれ
 からも呼ばれておらず本番未結線のまま（`gemm_auto.rs::new` doc コメント参照。
 `BackendOps::gemm` は引き続き f32 tiled カーネル固定）である。この
