@@ -885,6 +885,12 @@ fresh:reuse ≒ 2:1）を同時に説明する仮説として提示するもの�
 VJP 形状で単体計時するミクロベンチマーク）は本 PR の作業環境では
 実施していない（未計測。実施は起票案 A の実装時に譲る）。
 
+**#1211 で結線・実測済み**: 上記 3 箇所は #1211 で `BackendOps::gemm`
+経由へ切り替わり、CPU 実測で `backward`（fresh 11.60×・reuse 8.86×）・
+`step_total`（fresh 8.71×・reuse 5.63×）の速度改善を確認した（Apple
+M4 Max。fresh・reuse とも before/after 5 run 中央値。
+詳細・注記は `docs/perf/train-backward-gemm-wiring.md` §4 を参照。
+
 ### 15.4 後続 Issue 優先順位の更新案（v0.6.0 反映後）
 
 §8 の 3 項目（0.4.0 実測時点）は #1008 クローズ（#1011/#1015/#1025

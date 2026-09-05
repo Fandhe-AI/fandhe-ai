@@ -93,6 +93,13 @@ cargo test -p fandhe-ai --release --test train_step_fusion_bench -- --nocapture
 の「複合ワークロードでは融合の効果を前提とした性能目標を設定しない」
 方針と整合する）。
 
+**#1211 で結線・実測済み**: 上記の `matmul_vjp` のホスト `eval::matmul`
+呼び出しは #1211 で `BackendOps::gemm`（forward と同じ CPU BLIS 並列
+GEMM 等）経由へ切り替わり、backward が大幅に高速化した（CPU 実測。
+`docs/perf/train-backward-gemm-wiring.md`）。本ベンチ（forward+backward
+合計）の改善幅も #1211 反映後に変わりうるが、本ドキュメントの上記
+実測値自体は再計測していない。
+
 ## 4. Metal / DGX Spark GB10 実機
 
 **未実施**（本リポの開発環境が Linux コンテナのため）。CUDA／Metal は

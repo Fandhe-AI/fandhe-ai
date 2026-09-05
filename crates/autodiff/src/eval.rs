@@ -33,10 +33,17 @@ std::thread_local! {
     /// zero-copy view）を `layout::classify_2d` で分類できず、
     /// `dense_vec`（`contiguous()` 経由のホスト側転置コピー）へ
     /// フォールバックした回数（イシュー #1046。`backend-metal::ops::
-    /// RESIDENT_HOST_REPACK_COUNT` と同型の可観測点）。matmul VJP
-    /// （`grad.rs::matmul_vjp`・`Op::LinearResident` の `d_weight`）が
-    /// 転置 view を渡しても本カウンタが増えないことをテストで確認する
-    /// ことで、「転置コピー 0 回」（受け入れ条件 (a)）を機械検証する。
+    /// RESIDENT_HOST_REPACK_COUNT` と同型の可観測点）。
+    ///
+    /// イシュー #1211 以降、本番の matmul VJP（`grad.rs::matmul_vjp`・
+    /// `Op::LinearResident` の `d_weight`）は `eval::matmul` ではなく
+    /// `BackendOps::gemm` を経由するため、本カウンタが観測するのは
+    /// `NaiveOps`／`TestOps`（compat・テストの forward 参照実装経路）
+    /// 経由の呼び出しに限られる（`grad.rs` の `matmul_vjp_does_not_
+    /// repack_transposed_operands` テストは `test_ops()` 越しにこの
+    /// compat 経路のゼロコピーを検証している。本番 `CpuBackendOps::
+    /// gemm` 経路の転置再パックは `docs/matmul-vjp-zero-copy-decision.md`
+    /// §4 追補・解消は #1213 のスコープ）。
     pub(crate) static MATMUL_HOST_REPACK_COUNT: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
 }

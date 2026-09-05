@@ -286,6 +286,31 @@ pub trait BackendOps {
     /// [`BackendError::ShapeMismatch`]）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
 
+    /// `gemm` と同じ行列積だが、**`crate::precision`（`backend-cuda`）の
+    /// TF32 opt-in フラグ（`set_cuda_tf32_gemm_enabled`）の状態に関わらず
+    /// 常に FP32 厳密で計算する**ことを契約するエントリ。
+    ///
+    /// `docs/cuda-tf32-optin-api-decision.md`・`backend-cuda::precision`
+    /// モジュール冒頭コメントの契約「適用範囲は `CudaBackendOps::gemm`
+    /// （素の公開 GEMM 入口）のみ。学習経路は本イシューのスコープ外の
+    /// まま FP32 で動作する」を、`autodiff::grad`（VJP。イシュー #1211）
+    /// のように **バックエンド非依存 `dyn BackendOps` 経由**で GEMM を
+    /// 呼ぶ学習経路が満たすための入口。`ops.gemm(..)` を直接呼ぶと、
+    /// CUDA では opt-in フラグが有効な間バックプロパゲーションが暗黙に
+    /// TF32 化してしまう（codex-review 指摘。PR #1223）。
+    ///
+    /// 既定実装は `self.gemm(a, b)` に委譲する（TF32 の概念を持たない
+    /// CPU・Metal はこれで契約を満たす）。TF32 opt-in を持つ
+    /// `backend-cuda::CudaBackendOps` のみ、フラグを一切参照しない FP32
+    /// 厳密経路（`run_tiled_f32`）へオーバーライドする。
+    fn gemm_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm(a, b)
+    }
+
     // elementwise（`docs/public-api-design.md` §4.2 と同じ 5 演算）
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
     fn mul(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
