@@ -112,12 +112,13 @@
 //! 検出されることが多い）。poison からの**回復**（`context_cache::
 //! invalidate_with` の呼び出し）は #1062 へ引き継いだままである。
 
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{Activation, DispatchFailureCell, SgdStepConfig, Tensor};
+use fandhe_ai_tensor_core::{Activation, BackendOps, DispatchFailureCell, SgdStepConfig, Tensor};
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
@@ -161,6 +162,31 @@ struct ParamLayout {
     shape: Vec<usize>,
     offset: usize,
     numel: usize,
+}
+
+/// `step()` が使う grad の永続連結バッファ（イシュー #1212・`docs/
+/// device-resident-update-design.md` 追補）。`layout` と同一のオフセット
+/// 規約（shape `[total_numel]`）を持ち、`ResidentResolver::
+/// fill_resident_weight_grad` が resident 経路成功時に `layout[slot]`
+/// のオフセットへ直接書き込む。`step()` はまだ充填されていない slot
+/// （bias 等のホスト計算勾配）だけを `MemoryOps::upload_into` で埋める。
+///
+/// `params`（パラメータ本体）とは別バッファ（同じ形状だが役割が異なる。
+/// SGD カーネルの `grad: &DeviceBuffer<f32>` 引数として渡す）。初回の
+/// resident grad 充填成功時に遅延確保する（backend が resident 経路に
+/// 一切対応しない場合は確保されず、`step()` は #1023 以来の「毎回
+/// 新規確保して 1 回 upload」経路を無変更で使う。モジュール冒頭
+/// 「パラメータ横断の単一連結バッファ化」参照）。
+#[derive(Debug)]
+struct GradStaging {
+    buf: DeviceBuffer<f32>,
+    /// `layout` と同じ添字（`slot`）。各要素は「直近このバッファへ
+    /// resident 経路で書き込んだ `backward_serial` の値」（`None` は
+    /// 未充填）。`step()` が `Some(s)` かつ `s == 現在の backward_serial`
+    /// の場合のみ「今回の backward で新鮮に充填された」と判定する
+    /// （鮮度検査。古い backward 由来の残留値をそのまま使わない。
+    /// `.claude/rules/security.md` A08）。
+    filled: Vec<Option<u64>>,
 }
 
 /// [`DeviceParamStore::register_resident_params`]／
@@ -258,6 +284,23 @@ pub struct DeviceParamStore {
     /// `ops.sgd_step_device_tracked` へ渡す共有失敗トークン
     /// （モジュール冒頭「遅延失敗トークン経由の poison」参照）。
     failure_token: DispatchFailureCell,
+    /// grad の永続 staging バッファ（イシュー #1212。[`GradStaging`]
+    /// doc 参照）。resident 経路が一度も成功しないバックエンド（CUDA／
+    /// Metal。現時点でこれに該当）では `None` のまま——`RefCell` は
+    /// `ResidentResolver::fill_resident_weight_grad` が `backward(&self,
+    /// ..)` 経由の `&self` から書き込むための内部可変性（`poisoned` と
+    /// 同じ理由）。
+    grad_staging: RefCell<Option<GradStaging>>,
+    /// `backward()` 呼び出し回数（1 起算。イシュー #1212）。
+    /// `GradStaging::filled` の鮮度検査に使う。`Cell` は `&self` から
+    /// 書き込むための内部可変性。
+    backward_serial: Cell<u64>,
+    /// `BackendOps::gemm_fp32_strict_into` が `Unsupported` を返したこと
+    /// を記録する capability memo（イシュー #1212）。`None`＝未試行、
+    /// `Some(false)`＝非対応（確定。以後 backward のたびに再試行
+    /// しない）、`Some(true)`＝対応済み。`Cell` は `&self` からの
+    /// 内部可変性。
+    resident_grad_capability: Cell<Option<bool>>,
 }
 
 /// `AutodiffError` を `BackendError` へ変換する（イシュー #1022）。
@@ -289,6 +332,102 @@ impl ResidentResolver for DeviceParamStore {
     ) -> Result<DeviceBufferView<'_>, AutodiffError> {
         self.checked_resident_buffer(store_id, slot)
             .map_err(AutodiffError::Backend)
+    }
+
+    /// `grad::vjp`（`Op::LinearResident` の VJP）から呼ばれる（イシュー
+    /// #1212）。`ops.gemm_fp32_strict_into`（`tensor-core`。既定
+    /// `Unsupported`）で d_weight を [`GradStaging`] の `layout[slot]`
+    /// オフセットへ直接書き込めるか試みる。
+    ///
+    /// 処理順（fail-closed。`.claude/rules/security.md` A08）:
+    /// ① `store_id` 一致検査 → ② capability memo（既に非対応と判明済み
+    /// なら即 `Ok(false)`） → ③ `slot` 範囲・shape 検査 → ④ staging
+    /// バッファの遅延確保（初回のみ） → ⑤ `gemm_fp32_strict_into` 実行。
+    /// ④・⑤ で `Unsupported` を検出した場合のみ capability memo を
+    /// `Some(false)` へ倒し `Ok(false)` を返す（以後の backward で
+    /// 再試行しない）。それ以外のエラーは伝播する。
+    fn fill_resident_weight_grad(
+        &self,
+        ops: &dyn BackendOps,
+        store_id: u64,
+        slot: usize,
+        x_t: &Tensor<f32>,
+        g: &Tensor<f32>,
+    ) -> Result<bool, AutodiffError> {
+        if store_id != self.store_id {
+            return Err(AutodiffError::InvalidArgument(
+                "DeviceParamStore::fill_resident_weight_grad: resident leaf belongs to a \
+                 different DeviceParamStore (store_id mismatch)"
+                    .to_string(),
+            ));
+        }
+        if self.resident_grad_capability.get() == Some(false) {
+            return Ok(false);
+        }
+        let layout = self.layout.get(slot).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "DeviceParamStore::fill_resident_weight_grad: slot {slot} is out of range \
+                 (store has {} parameters)",
+                self.layout.len()
+            ))
+        })?;
+        if x_t.shape().len() != 2 || g.shape().len() != 2 {
+            return Err(AutodiffError::InvalidArgument(
+                "DeviceParamStore::fill_resident_weight_grad: x_t/g must be rank-2".to_string(),
+            ));
+        }
+        let expected_shape = [x_t.shape()[0], g.shape()[1]];
+        if layout.shape.as_slice() != expected_shape {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "DeviceParamStore::fill_resident_weight_grad: computed d_weight shape {:?} does \
+                 not match parameter {slot} shape {:?}",
+                expected_shape, layout.shape
+            )));
+        }
+        let offset = layout.offset;
+        let total_numel = self.total_numel;
+        let param_count = self.layout.len();
+
+        let Some(mem) = ops.memory_ops() else {
+            self.resident_grad_capability.set(Some(false));
+            return Ok(false);
+        };
+
+        let mut staging_ref = self.grad_staging.borrow_mut();
+        if staging_ref.is_none() {
+            match mem.alloc_zeroed(&[total_numel]) {
+                Ok(buf) => {
+                    *staging_ref = Some(GradStaging {
+                        buf,
+                        filled: vec![None; param_count],
+                    });
+                }
+                Err(BackendError::Unsupported(_)) => {
+                    self.resident_grad_capability.set(Some(false));
+                    return Ok(false);
+                }
+                Err(e) => return Err(AutodiffError::Backend(e)),
+            }
+        }
+        // 上の分岐で `None` の場合は必ず `Some` を積んだため到達可能。
+        let staging = staging_ref.as_mut().expect(
+            "DeviceParamStore::fill_resident_weight_grad: grad_staging はこの直前に Some へ \
+             初期化したはず（契約違反）",
+        );
+
+        match ops.gemm_fp32_strict_into(x_t, g, &mut staging.buf, offset) {
+            Ok(()) => {
+                staging.filled[slot] = Some(self.backward_serial.get());
+                self.resident_grad_capability.set(Some(true));
+                Ok(true)
+            }
+            Err(BackendError::Unsupported(_)) => {
+                staging.filled[slot] = None;
+                self.resident_grad_capability.set(Some(false));
+                Ok(false)
+            }
+            Err(e) => Err(AutodiffError::Backend(e)),
+        }
     }
 }
 
@@ -353,6 +492,9 @@ impl DeviceParamStore {
             poisoned: AtomicBool::new(false),
             pending: None,
             failure_token: DispatchFailureCell::new(),
+            grad_staging: RefCell::new(None),
+            backward_serial: Cell::new(0),
+            resident_grad_capability: Cell::new(None),
         })
     }
 
@@ -772,9 +914,16 @@ impl DeviceParamStore {
     /// `AutodiffError::InvalidArgument` で拒否する（`tape::Op::
     /// LinearResident` doc 参照）。`Sequential::forward_resident` で
     /// forward したグラフは必ず本メソッドで backward すること。
+    ///
+    /// イシュー #1212: 走査開始前に `backward_serial` をインクリメント
+    /// する（`GradStaging::filled` の鮮度検査の基準値。`fill_resident_
+    /// weight_grad` が今回の走査中に書き込む値と、後続 `step()` が
+    /// 期待する値を一致させるため、逆伝播の副作用より前に確定させる）。
     pub fn backward(&self, tape: &Tape, loss: &Var<'_>) -> Result<Gradients, AutodiffError> {
         self.check_not_poisoned().map_err(AutodiffError::Backend)?;
         self.check_device(tape).map_err(AutodiffError::Backend)?;
+        self.backward_serial
+            .set(self.backward_serial.get().wrapping_add(1));
         tape.backward_with_resident(loss, self)
     }
 
@@ -864,8 +1013,43 @@ impl DeviceParamStore {
             .iter()
             .map(|&id| Var::from_raw(tape, id))
             .collect();
+
+        // イシュー #1212: 今回の backward で `ResidentResolver::
+        // fill_resident_weight_grad` がデバイス常駐のまま直接書き込んだ
+        // slot を判定する（鮮度検査。`GradStaging::filled` doc 参照）。
+        // `grad::vjp` の `Op::LinearResident` 分岐は resident 経由が
+        // 成功した weight を `Gradients` の寄与に含めない（`grad.rs` の
+        // 同分岐コメント参照）ため、そのような slot に対して
+        // `grads.get(var)` を呼ぶと誤って `MissingGradient` になる。
+        // ここで先に判定し、resident 経由の slot は後段の host gather を
+        // スキップする。
+        let current_serial = self.backward_serial.get();
+        let resident_filled: Vec<bool> = {
+            let staging_ref = self.grad_staging.borrow();
+            match staging_ref.as_ref() {
+                Some(staging) => (0..vars.len())
+                    .map(|i| staging.filled.get(i).copied().flatten() == Some(current_serial))
+                    .collect(),
+                None => vec![false; vars.len()],
+            }
+        };
+        let any_resident = resident_filled.iter().any(|&f| f);
+
         let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` の場合のみ使用: resident 経由でない slot
+        // （bias 等のホスト計算勾配）を `(slot 添字, 勾配)` で保持し、
+        // 更新フェーズで `GradStaging` の対応オフセットへ
+        // `MemoryOps::upload_into` で個別に書き込む。
+        let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
+            if resident_filled[i] {
+                // shape は `fill_resident_weight_grad` 実行時に
+                // `layout[slot].shape` との一致を検証済み（`grad.rs`
+                // `Op::LinearResident` 分岐が呼ぶ）。デバイス上に
+                // 直接書き込まれているため、ここでは `grads.get()` を
+                // 呼ばない。
+                continue;
+            }
             let grad = grads.get(var).map_err(|_| BackendError::TapeMismatch)?;
             let grad = grad.ok_or_else(|| {
                 BackendError::MissingGradient(format!(
@@ -880,8 +1064,12 @@ impl DeviceParamStore {
                     self.layout[i].shape
                 )));
             }
-            let contiguous = grad.contiguous();
-            flat_grad.extend_from_slice(contiguous.as_slice().unwrap_or(&[]));
+            if any_resident {
+                host_grads_for_staging.push((i, grad.clone()));
+            } else {
+                let contiguous = grad.contiguous();
+                flat_grad.extend_from_slice(contiguous.as_slice().unwrap_or(&[]));
+            }
         }
 
         let use_momentum = config.momentum != 0.0;
@@ -935,28 +1123,19 @@ impl DeviceParamStore {
         // の意味自体が失われるため、これより手前で `take()` しない）。
         self.pending = None;
 
-        // ② 更新フェーズ（#1023）: 連結済み grad を **1 回だけ** upload
-        // し、`sgd_step_device_tracked` を **1 回だけ** 起動する
-        // （旧実装はパラメータ数だけ upload・起動を繰り返していた。
-        // モジュール冒頭「パラメータ横断の単一連結バッファ化」参照）。
-        // 実行時エラーは最初のエラーを返しつつ `poisoned` へ遷移する
-        // （モジュール冒頭「状態機械」参照）。
-        let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
-            .map_err(BackendError::ShapeMismatch)
-        {
-            Ok(t) => t,
-            Err(e) => {
-                self.poisoned.store(true, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
-        let grad_buf = match mem.upload(&grad_tensor) {
-            Ok(buf) => buf,
-            Err(e) => {
-                self.poisoned.store(true, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+        // ② 更新フェーズ（#1023・イシュー #1212 で分岐追加）:
+        // `any_resident == false`（resident 経由が一度も成功していない
+        // バックエンド。現時点で CUDA／Metal はここに該当）は #1023 以来
+        // 無変更の経路（連結済み grad を新規バッファへ **1 回だけ**
+        // upload）を実行する。`any_resident == true`（CPU）は
+        // `GradStaging`（`fill_resident_weight_grad` が resident 経路の
+        // d_weight を直接書き込み済み）へ、host 計算分（bias 等）だけを
+        // `upload_into` で埋めてから `staging.buf` をそのまま SGD
+        // カーネルへ渡す（新規 grad バッファの確保・upload を挟まない）。
+        // いずれの経路も `sgd_step_device_tracked` は **1 回だけ**
+        // 起動する（モジュール冒頭「パラメータ横断の単一連結バッファ
+        // 化」参照）。実行時エラーは最初のエラーを返しつつ `poisoned`
+        // へ遷移する（モジュール冒頭「状態機械」参照）。
         let step_config = SgdStepConfig {
             lr: config.lr,
             momentum: config.momentum,
@@ -965,26 +1144,76 @@ impl DeviceParamStore {
             nesterov: config.nesterov,
             is_first_step,
         };
-        let velocity_ref = if use_momentum {
-            self.velocity.as_mut()
-        } else {
-            None
-        };
         // `sgd_step_device_tracked`（イシュー #1017）: Metal は encode
         // と同一ロック区間で `self.failure_token` をバッチへ登録する
         // ため、`step()` 自身の即時エラーに加え `check_not_poisoned`
         // 経由の遅延検出（モジュール冒頭コメント）でも取りこぼさない。
         // デフォルト実装（CPU／CUDA）は `sgd_step_device` へそのまま
         // 委譲するため、この呼び出し自体の挙動は変わらない。
-        if let Err(e) = ops.sgd_step_device_tracked(
-            &mut self.params,
-            &grad_buf,
-            velocity_ref,
-            &step_config,
-            &self.failure_token,
-        ) {
-            self.poisoned.store(true, Ordering::SeqCst);
-            return Err(e);
+        if !any_resident {
+            let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
+                .map_err(BackendError::ShapeMismatch)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let grad_buf = match mem.upload(&grad_tensor) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let velocity_ref = if use_momentum {
+                self.velocity.as_mut()
+            } else {
+                None
+            };
+            if let Err(e) = ops.sgd_step_device_tracked(
+                &mut self.params,
+                &grad_buf,
+                velocity_ref,
+                &step_config,
+                &self.failure_token,
+            ) {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        } else {
+            // `RefCell::borrow_mut` は `&self.grad_staging`（field 単位の
+            // 共有借用）のみを要求するため、同時に `self.layout`（別
+            // field）を読む・後段で `&mut self.params`（別 field）を
+            // 取ることと衝突しない（disjoint field borrow）。
+            let mut staging_ref = self.grad_staging.borrow_mut();
+            let staging = staging_ref.as_mut().expect(
+                "DeviceParamStore::step: any_resident は grad_staging が Some であることを含意 \
+                 する（fill_resident_weight_grad が既に確保済みのはず。契約違反）",
+            );
+            for (i, grad) in &host_grads_for_staging {
+                let offset = self.layout[*i].offset;
+                if let Err(e) = mem.upload_into(grad, &mut staging.buf, offset) {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            }
+            let velocity_ref = if use_momentum {
+                self.velocity.as_mut()
+            } else {
+                None
+            };
+            if let Err(e) = ops.sgd_step_device_tracked(
+                &mut self.params,
+                &staging.buf,
+                velocity_ref,
+                &step_config,
+                &self.failure_token,
+            ) {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
         }
 
         self.step_count += 1;

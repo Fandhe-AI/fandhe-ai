@@ -281,6 +281,35 @@ pub(crate) trait ResidentResolver {
         store_id: u64,
         slot: usize,
     ) -> Result<DeviceBufferView<'_>, AutodiffError>;
+
+    /// `Op::LinearResident` の VJP（`grad.rs`）が d_weight
+    /// （`x^T @ g`）をデバイス常駐のまま書き込めるか試みる入口
+    /// （イシュー #1212・`docs/device-resident-update-design.md` 追補）。
+    ///
+    /// 実装（`DeviceParamStore`）は `BackendOps::gemm_fp32_strict_into`
+    /// （`tensor-core`。既定 `Unsupported`）を使い、成功すれば自身の
+    /// grad staging バッファの `slot` に対応する範囲へ直接書き込んで
+    /// `Ok(true)` を返す。バックエンドが `gemm_fp32_strict_into`／
+    /// `MemoryOps` を実装しない場合は `Ok(false)`（呼び出し元は
+    /// `ops.gemm_fp32_strict` によるホスト経路へフォールバックする）。
+    /// `store_id`／`slot`／shape の不一致は
+    /// [`AutodiffError::InvalidArgument`] で fail-closed に拒否する
+    /// （`resident_buffer` と同じ方針。`.claude/rules/security.md` A08）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// 常に `Ok(false)`（ホスト経路へフォールバック）。現時点で
+    /// `DeviceParamStore` のみがオーバーライドする。
+    fn fill_resident_weight_grad(
+        &self,
+        _ops: &dyn BackendOps,
+        _store_id: u64,
+        _slot: usize,
+        _x_t: &Tensor<f32>,
+        _g: &Tensor<f32>,
+    ) -> Result<bool, AutodiffError> {
+        Ok(false)
+    }
 }
 
 impl Op {

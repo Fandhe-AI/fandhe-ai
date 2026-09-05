@@ -1781,3 +1781,75 @@ Metal 実機・DGX Spark GB10 実機での再計測は本追補の記録時点�
 Metal・CUDA 実機での再計測は本追補の記録セッションでは未実施（実機環境
 未接続。Mac／DGX Spark 実機セッションへ申し送り。`docs/perf/
 device-resident-update-bench.md` 追補参照）。
+
+## 追補: #1212 — reuse 経路の weight 勾配をデバイス常駐のまま
+`device_update` へ渡す
+
+`docs/perf/train-step-phase-breakdown.md` §15 の起票案 B。`Op::
+LinearResident` の d_weight は #1211（`docs/perf/
+train-backward-gemm-wiring.md`）で `ops.gemm_fp32_strict` を経由する
+ようになったが、GPU バックエンドではこの呼び出し自体が D2H（結果を
+ホスト `Tensor` として構築する）を伴い、`DeviceParamStore::step` は
+その後さらに全パラメータを連結して 1 回 H2D する——weight 1 個分だけを
+見ると「GPU → ホスト → GPU」という不要な往復が残っていた。
+
+### 1. 新規 API（非破壊拡張。既定 `Unsupported`）
+
+- `tensor-core::BackendOps::gemm_fp32_strict_into(a, b, out: &mut
+  DeviceBuffer<f32>, out_offset)`: `gemm_fp32_strict` と bit 同一の
+  `C = A @ B` を計算するが、結果を新規 `Tensor` として返さず `out` の
+  `out_offset` から直接上書きする。範囲外書き込みは `checked_mul`/
+  `checked_add` による事前検査で `InvalidArgument`（REQ-8・OWASP A03）
+- `tensor-core::MemoryOps::upload_into(tensor, dst: &mut
+  DeviceBuffer<f32>, dst_offset)`: `upload` と同じ H2D だが、新規確保
+  せず既存バッファの `dst_offset` から書き込む
+- `tensor-core::pool::PooledMemory<M>` は `upload_into` を `inner` へ
+  パススルーする（`upload` と同じ位置付け）
+
+### 2. autodiff 側の設計判断（計画からの縮小。詳細は `docs/perf/
+train-resident-grad-device-update.md` §0）
+
+計画（Plan フェーズ）は `Gradients` へ `resident: Vec<Option<
+ResidentGradMarker>>` を追加し `vjp()` の戻り型を `GradContribution`
+enum 化する案だったが、実装時点では単一セッション・委譲なしの制約下で
+安全側に倒し、**`Gradients` 構造体・`vjp()` の戻り型は一切変更しない**
+方式へ縮小した:
+
+- `tape::ResidentResolver` に非破壊のデフォルトメソッド
+  `fill_resident_weight_grad(ops, store_id, slot, x_t, g) -> Result<bool,
+  AutodiffError>`（既定 `Ok(false)`）を追加した。`DeviceParamStore`
+  のみがこれをオーバーライドし、自身が保持する `GradStaging`（全
+  パラメータ連結の永続 grad バッファ。`layout` と同じオフセット規約）
+  の `layout[slot]` へ `ops.gemm_fp32_strict_into` で直接書き込む
+- `grad::vjp` の `Op::LinearResident` 分岐は `fill_resident_weight_grad`
+  が `Ok(true)`（充填成功）を返した場合、**weight の寄与を `Gradients`
+  へ含めない**（`ops.gemm_fp32_strict` を呼ばない）。`Ok(false)`
+  （バックエンドが `gemm_fp32_strict_into`／`MemoryOps` を実装しない。
+  現時点で CUDA／Metal はここに該当）の場合のみ、従来どおりホスト経路
+  （`ops.gemm_fp32_strict` → `Gradients` へ格納）を通る
+- `DeviceParamStore::step` は `backward_serial`（`backward()` 呼び出し
+  ごとに単調増加する `Cell<u64>`）による鮮度検査で「今回の backward が
+  resident 経由で新鮮に充填した slot」を判定する。1 slot でも該当すれば
+  （現状は CPU のみ）、残りの slot（bias 等）を `upload_into` で
+  `GradStaging` へ個別に埋めてから `staging.buf` をそのまま SGD
+  カーネルへ渡す（新規 grad バッファの確保・upload を挟まない）。1 slot
+  も該当しない場合（CUDA／Metal）は #1023 以来の経路（連結 `flat_grad`
+  を新規バッファへ 1 回 upload）を無変更で実行する
+
+**既知の縮小点**: `grads.get()` が常駐 weight に対して `Ok(None)`
+（「未到達」相当）を返す点は計画の型付きエラー化（`Err(
+InvalidArgument)`）に達していない。公開 API から `Op::ResidentLeaf` の
+`Var` を得る経路が元々存在しないため実害はないと判断したが、内部一貫性
+としては後続で改善の余地がある（`docs/perf/
+train-resident-grad-device-update.md` §4）。
+
+### 3. バックエンド別の状態
+
+CPU（`backend-cpu`）のみ `gemm_fp32_strict_into`／`upload_into` を
+実装した（`gemm_blis_parallel` は C へ**累積**するカーネルのため、
+`gemm_fp32_strict_into` は書き込み対象範囲を明示的に `fill(0.0)` して
+から呼ぶことで「上書き」契約を満たす）。CUDA／Metal は既定
+`Unsupported` のままで、`fill_resident_weight_grad` が `Ok(false)` を
+返して既存経路へフォールバックするため挙動・性能とも本イシュー着手前と
+不変（実機なしのため未実測。§4 参照）。実測記録・Go/No-Go 判断は
+`docs/perf/train-resident-grad-device-update.md` を参照。

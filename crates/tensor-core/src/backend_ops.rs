@@ -311,6 +311,58 @@ pub trait BackendOps {
         self.gemm(a, b)
     }
 
+    /// [`Self::gemm_fp32_strict`] と同じ行列積 `C = A @ B` を計算するが、
+    /// 結果をホストへ戻さず**呼び出し元が渡す既存の [`DeviceBuffer<f32>`]
+    /// の指定オフセットへ直接書き込む**（イシュー #1212・`docs/
+    /// device-resident-update-design.md` 追補）。
+    ///
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore` が
+    /// `Op::LinearResident` の d_weight（`crate::grad::vjp` が
+    /// `gemm_fp32_strict` で計算し、GPU バックエンドでは戻り値の
+    /// `Tensor<f32>` 構築自体が D2H を伴っていた）を、自身が保持する
+    /// grad staging バッファへデバイス常駐のまま直接書き込むための入口。
+    /// D2H（本メソッドの戻り値）に続く `DeviceParamStore::step` 側の
+    /// H2D（`MemoryOps::upload`）を 1 パラメータぶん丸ごと排除する。
+    ///
+    /// # 契約
+    ///
+    /// - `out[out_offset .. out_offset + m*n]` を `A @ B` の結果で**上書き**
+    ///   する（累積ではない）。`out_offset + m*n` は呼び出し元・実装側の
+    ///   両方で `checked_mul`/`checked_add` により `out.numel()` 以内で
+    ///   あることを検査し、範囲外は [`BackendError::InvalidArgument`]
+    ///   （REQ-8「シェーダ・カーネル側の手動境界チェックを省略しない」・
+    ///   OWASP A03）。
+    /// - 数値は同 shape の [`Self::gemm_fp32_strict`] と **bit 同一**
+    ///   （同一カーネル選択・CUDA の TF32 opt-in フラグには追従しない）。
+    /// - `out.device()` は `self.device()` と一致すること
+    ///   （[`BackendError::DeviceMismatch`]）。
+    /// - `a`／`b` は 2 次元のみ（[`BackendError::ShapeMismatch`]）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張パターン。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、`grad::vjp`
+    /// の `Op::LinearResident` 分岐は `Unsupported` のときのみ既存の
+    /// ホスト経路（`gemm_fp32_strict` を呼び戻り値をそのまま勾配として
+    /// 使う）へフォールバックする（判定迂回を作らない。`.claude/rules/
+    /// security.md` A08）。現時点では `backend-cpu::CpuBackendOps` のみ
+    /// オーバーライドする（CUDA／Metal は既定 `Unsupported` のまま。
+    /// 引き継ぎは `docs/perf/train-resident-grad-device-update.md`
+    /// スコープ外節）。
+    fn gemm_fp32_strict_into(
+        &self,
+        _a: &Tensor<f32>,
+        _b: &Tensor<f32>,
+        _out: &mut DeviceBuffer<f32>,
+        _out_offset: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_fp32_strict_into: default fail-safe (no in-place device GEMM kernel \
+             available for this backend)"
+                .into(),
+        ))
+    }
+
     // elementwise（`docs/public-api-design.md` §4.2 と同じ 5 演算）
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
     fn mul(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;

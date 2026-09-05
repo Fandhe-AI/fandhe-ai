@@ -172,7 +172,7 @@ backward・パラメータ更新のどこが支配的か）を追跡できない
 | `forward_resident` | `model.forward_resident(&tape, &x, &mut store)` + `mse_loss`（`register_resident_params` 経由〈#1059〉で D2H を伴わない。`mse_loss` 自体も遅延実体化） |
 | `loss_readout` | `loss.to_tensor().get(&[])` |
 | `backward` | `tape.backward_device_param_store(&loss, &store)`（0.5.0 から `forward_resident` が積む `Op::LinearResident` の解決に必須。イシュー #1059） |
-| `device_update` | `tape.step_device_param_store(&mut store, &grads, &config)`（grad H2D + デバイス上 SGD 発行。CUDA では非同期発行のため完了待ちは次 step の `forward_resident` に計上される） |
+| `device_update` | `tape.step_device_param_store(&mut store, &grads, &config)`（grad H2D + デバイス上 SGD 発行。CUDA では非同期発行のため完了待ちは次 step の `forward_resident` に計上される。**CPU のみ #1212 以降**、`Op::LinearResident` の weight 勾配はデバイス常駐 staging へ backward 内で直接書き込み済みのため本フェーズでの H2D を含まず、bias 等の勾配のみ H2D する。CUDA／Metal は未対応のため従来どおり全パラメータぶん H2D する。`docs/perf/train-resident-grad-device-update.md` 参照） |
 | `tape_drop` | `drop(tape)` |
 | `step_total` | 検算用 |
 

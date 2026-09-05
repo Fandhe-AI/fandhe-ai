@@ -288,11 +288,32 @@ pub(crate) fn vjp(
             // `eval::matmul` 経路でのゼロコピーは本経路には適用されない。
             // 解消は #1213〈CPU の NT/TN 専用入口〉）。
             let x_t = transpose2d(x_val);
-            let d_weight = ops
-                .gemm_fp32_strict(&x_t, g)
-                .map_err(AutodiffError::Backend)?;
 
-            let mut contributions = vec![(input, d_input), (weight, d_weight)];
+            // イシュー #1212: d_weight をホストへ戻さずデバイス常駐の
+            // まま `resolver`（`DeviceParamStore`）の grad staging へ
+            // 直接書き込めるか試みる（`ResidentResolver::
+            // fill_resident_weight_grad`。既定 `Ok(false)`）。成功した
+            // 場合、`weight` の勾配は `contributions` に含めない
+            // （`Gradients::get()` からは「未到達」と区別できなくなる
+            // が、公開 API から `Op::ResidentLeaf` の `Var` を得る経路は
+            // 元々存在しないため実害はない。`tape::Op::ResidentLeaf`
+            // doc・`optim::device_store::ResidentLeaf` doc 参照。
+            // `DeviceParamStore::step` は自身の grad staging を直接
+            // 参照するため `Gradients` 経由の読み出しを必要としない）。
+            // `Unsupported`（バックエンドが `gemm_fp32_strict_into`／
+            // `MemoryOps` を実装しない。現時点で CUDA／Metal はここに
+            // 該当する）の場合のみ、従来どおりホスト経路
+            // （`ops.gemm_fp32_strict`）へフォールバックする（判定迂回
+            // を作らない。`.claude/rules/security.md` A08）。
+            let filled_resident =
+                resident.fill_resident_weight_grad(ops, store_id, slot, &x_t, g)?;
+            let mut contributions = vec![(input, d_input)];
+            if !filled_resident {
+                let d_weight = ops
+                    .gemm_fp32_strict(&x_t, g)
+                    .map_err(AutodiffError::Backend)?;
+                contributions.push((weight, d_weight));
+            }
             if let Some(bias_id) = bias {
                 // bias の勾配は `Op::Add` の VJP と同じ縮約
                 // （`reduce_to_shape`。行方向ブロードキャストの逆演算）。
