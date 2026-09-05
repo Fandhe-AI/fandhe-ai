@@ -146,20 +146,28 @@ KC/NC 境界を跨ぐ複数形状・bias 有無・activation（None/Relu）の�
 合わせで確認する。境界検査（shape 不整合・bias shape 不一致）も
 カーネル本体へ触れる前に拒否することを確認する。
 
-**CUDA／Metal 実装（out-of-scope。§4 参照）**: 設計は上記で確定済み
-だが、実装は実機検証環境（DGX Spark GB10・Metal 実機）が必要なため
-本イシューのスコープ外とし、実機セッションへ引き継ぐ。CUDA 側は
-既存 `gemm_resident_rhs`（`crates/backend-cuda/src/ops.rs`）の内部
-（H2D/D2H を含む部分を除いた GEMM 本体）を再利用できる見込み。Metal
-側も同様に `crates/backend-metal/src/ops.rs` の既存資産を再利用できる
-見込みだが、コマンドバッファ共有（#1017）の同期境界（`waitUntilCompleted`
-を download 側のみへ集約する）との整合を実機で確認する必要がある。
+**CUDA／Metal 実装（実装済み・イシュー #1216）**: `CudaBackendOps::
+linear_forward_device`（`crates/backend-cuda/src/ops.rs`）・
+`MetalBackendOps::linear_forward_device`（`crates/backend-metal/src/
+ops.rs`）は、それぞれ `gemm_resident_rhs*` と同じ融合カーネル
+（`CudaGemm::launch_tiled_bias_act_f32_resident`／`MetalGemm::
+dispatch_strided_bias_act_prepared`）を再利用し、`a`・戻り値も
+デバイス常駐のまま扱う（`w`／`bias` のみ常駐の `gemm_resident_rhs*`
+との違い）。CUDA は世代検査（poison／stale generation）の対象に `a`
+自体も追加（呼び出しを跨いで生存する常駐バッファのため）。出力
+バッファは呼び出し元へ escape するため `static_cuda_memory`／
+`static_metal_memory`（`memory_ops()` と同一インスタンス）で確保し、
+REQ-14 の単一計測系列を維持する。Metal のコマンドバッファ共有
+（#1017）の同期境界（前層出力を次層の入力として読む順序）は M4 Max
+実機の 2 層チェーンテストで確認済み（`docs/perf/linear-forward-
+device-gpu.md`）。
 
-**facade／autodiff への結線（out-of-scope）**: `DeviceParamStore` の
-推論ヘルパー（`linear_forward_device` を呼ぶチェーン）・
-`Sequential::predict_resident` の内部差し替えは、CUDA/Metal 実装が
-揃ってから行う（CPU 実装だけでは `predict_resident` の GPU 経路に
-恩恵がなく、段階 A で CPU 側の固定費は既に削減済みのため）。
+**facade／autodiff への結線（スコープ外・引き継ぎ）**: `DeviceParamStore`
+の推論ヘルパー・`Sequential::predict_resident` の内部差し替え
+（結線の実施可否は before/after 実測での非後退確認が条件）は、
+イシュー #1216 の Phase 2 として引き続きスコープ外とし、
+`docs/perf/linear-forward-device-gpu.md` §5 に判断・引き継ぎ内容を
+記録する。
 
 ### §3.3 検討結果（受け入れ条件 2 の文書化）
 
@@ -168,8 +176,9 @@ KC/NC 境界を跨ぐ複数形状・bias 有無・activation（None/Relu）の�
   bit-exactness は「旧経路が実際に呼ぶのと同一の演算を直接呼ぶ」方針
   で担保し、融合カーネルへの置き換えは行わない（累積順序が変わり
   うるため）
-- **(c) 活性化デバイス常駐チェーンの設計**: §3.2 のとおり確定。CPU の
-  みを実装し、CUDA/Metal は out-of-scope として引き継ぐ
+- **(c) 活性化デバイス常駐チェーンの設計**: §3.2 のとおり確定。CPU に
+  加え CUDA/Metal もイシュー #1216 で実装済み（実測は `docs/perf/
+  linear-forward-device-gpu.md`）
 - **(d) 不採用・保留事項**: 多層融合カーネル（GEMM+bias+act+GEMM の
   複数層またぎ融合）・CUDA Graph によるチェーン全体のグラフ化は本
   イシューでは検討していない（親イシュー #1008 の Phase 3 以降・
@@ -178,24 +187,29 @@ KC/NC 境界を跨ぐ複数形状・bias 有無・activation（None/Relu）の�
 
 ## §4 スコープ外（引き継ぎ事項）
 
-以下は本イシューのスコープ外とし、`out-of-scope-tracking.md` の規約
-に従い実機セッション側で追跡する:
+CUDA／Metal `linear_forward_device` の実装・`#[ignore]` 実機 parity
+テスト・実機実測はイシュー #1216 で完了した（`docs/perf/linear-
+forward-device-gpu.md`）。以下は引き続きスコープ外とし、
+`out-of-scope-tracking.md` の規約に従い追跡する:
 
-- CUDA `linear_forward_device` の実装 + `#[ignore]` 実機 parity テスト
-- Metal `linear_forward_device` の実装 + `#[ignore]` 実機 parity テスト
-- Metal 実機（Apple Silicon）・DGX Spark GB10 実機での推論 forward
-  中央値の実測（受け入れ条件 1 の GPU 分）
+- `facade`／`autodiff`（`DeviceParamStore` の推論ヘルパー・
+  `Sequential::predict_resident` の内部差し替え）への結線（#1216
+  実装計画 Step 9「Phase 2」。判断は `docs/perf/linear-forward-
+  device-gpu.md` §5 を参照。#1217 へ引き継ぎ）
 - `Sigmoid`/`Tanh` を含む層構成のデバイス常駐対応（段階 B は現状
   `Activation::{None,Relu}` のみ対応。`gemm_resident_rhs` と同じ制約）
-- framework-compare の推論プロトコルへの reuse モード追加（現状は
-  毎回新規 `Tape`/バッファを構築する構成のまま）
+- framework-compare の推論プロトコルへの reuse モード追加（イシュー
+  #1217 で追跡済み）
 - candle との残差ギャップ全体の解消（親イシュー #1008 Phase 3 以降）
 
 ## §5 fail-closed 検証（REQ-8・OWASP A03）
 
 - `Module::forward_host`（`Linear`）・`BackendOps::linear_forward_device`
-  （CPU）はいずれもカーネル本体（`gemm_blis_parallel` 等）へ触れる前に
-  rank・shape・デバイス一致を検証する（`gemm_resident_rhs` と同水準）
+  （CPU／CUDA／Metal）はいずれもカーネル本体（`gemm_blis_parallel`
+  等）へ触れる前に rank・shape・デバイス一致を検証する（`gemm_
+  resident_rhs` と同水準）。CUDA はさらに poison／世代検査（`a` 自身
+  も対象。`docs/perf/linear-forward-device-gpu.md` §2 参照）を driver
+  へ触れる前に通す
 - `linear_forward_device` は `act` が `Activation::{None,Relu}` 以外の
   場合（`#[non_exhaustive]` の将来 variant）を明示的に拒否する
   （`gemm_bias_act` の非融合フォールバックと同じ方針）
@@ -226,11 +240,17 @@ CPU は host-resident のまま同一プロセスで完結するため upload/do
 
 ### Metal（M4 Max 実機）
 
-未計測。実機セッションで `cargo test -p fandhe-ai --release --test
-infer_fixed_cost_bench -- --nocapture` を実行し、本節へ追記すること
-（段階 B の CUDA/Metal 実装が完了してから、`predict_resident` 経由の
-計測も追加する）。
+`facade::predict_resident` への結線は未実施（§4・Phase 2 引き継ぎ）
+のため `infer_fixed_cost_bench` 自体は未計測のまま。backend レベルの
+`linear_forward_device` 単体 before/after 実測（2 層チェーン。旧経路
+`gemm_resident_rhs_act` ×2 vs 新経路 `linear_forward_device` ×2）は
+`docs/perf/linear-forward-device-gpu.md` §4 に記録済み（M4 Max 実機・
+2026-09-06・5 回計測でいずれも speedup > 1）。
 
 ### CUDA（DGX Spark GB10 実機）
 
-未計測。実機セッションで追記すること（同上）。
+本エージェント実行環境に CUDA 実機がないため未計測。`linear_forward_
+device` の CI 実行可能ユニットテスト（poison／stale generation／
+DeviceMismatch）は実機なしで検証済み（`crates/backend-cuda/src/
+ops.rs`）。実機実測は `docs/perf/linear-forward-device-gpu.md` §4 に
+記入欄を残す。

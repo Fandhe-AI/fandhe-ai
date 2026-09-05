@@ -1227,6 +1227,48 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<(), MetalError> {
+        self.encode_strided_bias_act_prepared(
+            ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, bias, act_relu, c_buf, m, n,
+            k,
+        )?;
+        ctx.synchronize()
+    }
+
+    /// [`Self::dispatch_strided_bias_act_prepared`] の encode-only 版
+    /// （イシュー #1216・codex-review 指摘対応。`ctx.dispatch_sync` では
+    /// なく待たない `MetalContext::encode` でバッチへ積むのみで復帰
+    /// する）。`ops::MetalBackendOps::linear_forward_device` が多層 MLP
+    /// 推論チェーンの各層をこの経路で連鎖させることで、層ごとの
+    /// `waitUntilCompleted` を発生させず最終 `download` の 1 回へ
+    /// 同期点を集約する（`ops.rs::linear_forward_device` doc「同期
+    /// 契約」参照。`sgd.rs::MetalSgd::run` の `token: Some` 経路と同型の
+    /// 「`ctx.encode` に resources を渡して生存を保証する」パターン）。
+    ///
+    /// `bias` が `None` の場合に確保する一時 `zero_bias`（プール経由）は
+    /// 本メソッド復帰時に Rust 側スコープを抜けて drop されるが、
+    /// `resources` に `raw()` を渡しているため、その裏の `MTLBuffer` は
+    /// `Batch::in_flight` へ retain 済みであり、かつ
+    /// `PooledMetalHandle::drop` が `ctx.defer_pool_return` で
+    /// 「バッチが in-flight の間はプールへ返却しない」ことを保証する
+    /// （`context.rs::defer_pool_return` 参照）ため、GPU 実行完了前に
+    /// 実体が再利用されることはない。
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_strided_bias_act_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        bias: Option<(&MetalBuffer, usize)>,
+        act_relu: bool,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(), MetalError> {
         let (dims, strides) = validate_strided_dims(
             a_buf.len(),
             a_offset,
@@ -1265,23 +1307,32 @@ impl MetalGemm {
         };
         let act_i: i32 = if act_relu { 1 } else { 0 };
 
-        ctx.dispatch_sync(|encoder| {
-            encode_dispatch_bias_act(
-                encoder,
-                &self.pipeline_tiled_bias_act,
-                a_buf,
-                a_offset,
-                b_buf,
-                b_offset,
-                bias_ref,
-                bias_offset,
-                c_buf,
-                dims,
-                has_bias,
-                act_i,
-                strides,
-            );
-        })?;
+        // `resources` へ 4 本すべて（`a_buf`／`b_buf`／`bias_ref`／
+        // `c_buf`）を渡し、`ctx.encode` 復帰後も `Batch::in_flight` の
+        // retain によって GPU 完了（`ctx.synchronize()`）まで実体を
+        // 生存させる（本メソッド doc 参照）。
+        ctx.encode(
+            "gemm_bias_act_strided",
+            &[a_buf.raw(), b_buf.raw(), bias_ref.raw(), c_buf.raw()],
+            None,
+            |encoder| {
+                encode_dispatch_bias_act(
+                    encoder,
+                    &self.pipeline_tiled_bias_act,
+                    a_buf,
+                    a_offset,
+                    b_buf,
+                    b_offset,
+                    bias_ref,
+                    bias_offset,
+                    c_buf,
+                    dims,
+                    has_bias,
+                    act_i,
+                    strides,
+                );
+            },
+        )?;
 
         BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
 
