@@ -216,11 +216,12 @@ target/release/examples/gemm_mma_f16_pool_wiring_bench --pooled   # pooled
   0.19.8 の `CudaSlice::Drop`〈`has_async_alloc` の真偽で `free_async`／
   `free_sync` を自身で選ぶ〉API 不一致問題があるため所有型の新設が前提。
   `docs/perf/cuda-percall-alloc-pool-threshold-ab.md` 参照）
-- `MMA_PRIORITY_PRODUCTION_ENABLED` の再有効化（`docs/perf/cuda-gemm-
-  auto-f16-mma-switch.md` §0 の baseline ceiling 承認待ち）。有効化
-  されるまで本イシューの結線可否判断の本番実効範囲（`CudaGemmAuto::
-  run_f16` からの到達）は限定的（`gemm_auto.rs` は既定で `CudaWmmaGemm`
-  へ流れる）
+- `MMA_PRIORITY_PRODUCTION_ENABLED` はイシュー #1191 で有効化済み
+  （`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0 の baseline ceiling
+  承認・反映を経て `true` へ復帰）。これにより本イシューの結線可否
+  判断の本番実効範囲（`CudaGemmAuto::run_f16` からの到達）が有効化
+  された（cc>=8.0・整列形状・`mma` 構築済みなら `gemm_auto.rs` は
+  `CudaMmaGemm` へ到達する）
 
 ## 9. 関連ファイル
 

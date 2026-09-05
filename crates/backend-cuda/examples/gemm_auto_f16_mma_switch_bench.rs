@@ -10,19 +10,18 @@
 //! `CudaGemmAuto::run_f16` の H2D／カーネル起動／D2H を丸ごと計測する
 //! （切替後にユーザーが体感する経路そのものを計測する狙い）。
 //!
-//! **本番結線は保留中（イシュー #1160。`MMA_PRIORITY_PRODUCTION_ENABLED
-//! = false`）**:
+//! **本番結線は有効化済み（イシュー #1191。`MMA_PRIORITY_PRODUCTION_
+//! ENABLED = true`）**:
 //! `select_f16_matrix_unit_impl` の判定ロジックは §5.6 の mma 優先設計
-//! どおり実装済みだが、これを有効化する `gemm_auto::
-//! MMA_PRIORITY_PRODUCTION_ENABLED`（既定 `false`）は K=4096 非後退
-//! ゲートの `MmaF16` baseline ceiling 未承認（PR #1179 codex-review
-//! 指摘）により mma 優先を有効化していない。したがって現在の HEAD で
-//! 本バイナリを素朴にビルドしても mma 優先経路（after 相当）にはならず、
-//! wmma 優先経路（base 相当）が計測される。#1160 の A/B 実測は「after」=
-//! 同定数を一時的に `true` へ書き換えたノード側コピー、「base」= HEAD
-//! （既定 `false`）でそれぞれビルドして得た（`docs/perf/
-//! cuda-gemm-auto-f16-mma-switch.md`
-//! に実測値を記録済み）。
+//! どおり実装済みで、これを有効化する `gemm_auto::
+//! MMA_PRIORITY_PRODUCTION_ENABLED`（既定 `true`）は #1160 の A/B 実測
+//! ・#1190 の K=4096 非後退ゲート `MmaF16` baseline ceiling 承認を経て
+//! #1191 で mma 優先を本番有効化した。したがって現在の HEAD で本
+//! バイナリをそのままビルドすれば mma 優先経路（after 相当）が計測
+//! される。#1191 の再計測は「after」= HEAD（既定 `true`）、「base」=
+//! 同定数を一時的に `false` へ書き換えたノード側コピーでそれぞれ
+//! ビルドして得る（`docs/perf/cuda-gemm-auto-f16-mma-switch.md` に
+//! #1160 時点・#1191 再計測の両方の実測値を記録している）。
 //!
 //! 計測プロトコル（codex-review PR #1177 指摘の是正。2 回目）: `docs/
 //! dispatch-rules-design.md` §5.6・`.claude/rules/coding-rust.md`
@@ -129,12 +128,11 @@ fn main() {
          （CudaGemmAuto::run_f16 の実利用経路そのもの）をこのプロセス内で \
          各形状 1 回だけ実行した値（独立 5 回起動・run-median の集約は \
          scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh が担う）。 \
-         after（gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED を一時的に \
-         true へ書き換えたノード側コピー = mma 優先。本番有効化自体は \
-         baseline ceiling 未承認のため保留中〈イシュー #1160〉）／ \
-         base（HEAD。既定 false = wmma 優先）で個別にビルド・実行し、 \
-         出力を docs/perf/cuda-gemm-auto-f16-mma-switch.md の表へ手動 \
-         転記して比較した記録が同ドキュメントに残っている。"
+         after（HEAD。既定 true = mma 優先。#1191 で本番有効化済み）／ \
+         base（同定数を一時的に false へ書き換えたノード側コピー = \
+         wmma 優先）で個別にビルド・実行し、出力を docs/perf/ \
+         cuda-gemm-auto-f16-mma-switch.md の表へ手動転記して比較した \
+         記録が同ドキュメントに残っている。"
     );
 
     for size in [512usize, 1024, 2048, 4096] {

@@ -101,15 +101,16 @@ fn run_f32_matches_cpu_reference() {
 /// 実機依存: f16 自動経路（16x16x16・整列形状）が参照実装と複合判定で
 /// 一致することを検証する。判定方法は `cpu_cuda_wmma_parity.rs`
 /// （f16→f32→参照matmul→f16丸め→f32）と同一。本番既定
-/// （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = false`。イシュー
-/// #1160 の性能 A/B は GB10 実機実測で非後退を確認済みだが、K=4096
-/// 非後退ゲートの `MmaF16` baseline ceiling が未承認〈PR #1179
-/// codex-review 指摘〉のため本番有効化は保留中）は `mma → wmma → tiled`
-/// の優先順位（#1156 設計、`docs/dispatch-rules-design.md` §5.6）を
-/// 無効化したまま維持しているため、整列形状（16,16,16）は cc 7.x 以上
-/// では WMMA、cc < 7.0 では tiled を通る（有効化後は cc >= 8.0 で mma
-/// へ切り替わる）。本テストはパスの選択そのものではなく最終出力の
-/// parity のみを検証するため、いずれの経路が選ばれても意味は変わらない。
+/// （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = true`。#1191 で
+/// 有効化・GB10 green 確認済み。イシュー #1160 の性能 A/B は GB10 実機
+/// 実測で非後退を確認済みで、K=4096 非後退ゲートの `MmaF16` baseline
+/// ceiling も #1190〈PR #1207〉でユーザー承認・反映済み〈PR #1179
+/// codex-review 指摘の解消〉）は `mma → wmma → tiled` の優先順位
+/// （#1156 設計、`docs/dispatch-rules-design.md` §5.6）を有効化して
+/// いるため、整列形状（16,16,16）は cc >= 8.0 では mma、cc 7.x では
+/// WMMA、cc < 7.0 では tiled を通る。本テストはパスの選択そのもので
+/// はなく最終出力の parity のみを検証するため、いずれの経路が選ばれ
+/// ても意味は変わらない。
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
             test-ignored-cuda 経由で実行する"]
@@ -288,11 +289,12 @@ fn run_f16_misaligned_shape_falls_back_to_wmma_or_tiled() {
 }
 
 /// 実機依存: `f16_matrix_unit_impl`（診断アクセサ）が本番既定
-/// （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = false`。PR #1179
-/// codex-review 指摘〈K=4096 非後退ゲートの `MmaF16` baseline ceiling
-/// 未承認〉を受けてイシュー #1160 の本番有効化を保留し `false` を維持
-/// している）どおり、`mma_available()`・形状整列の値に関わらず常に
-/// `Mma` 以外（`Wmma`／`Tiled`）を返すことを検証する（純関数
+/// （`gemm_auto::MMA_PRIORITY_PRODUCTION_ENABLED = true`。#1191 で
+/// ceiling 反映後に有効化済み。イシュー #1160 の本番有効化を保留して
+/// いた K=4096 非後退ゲートの `MmaF16` baseline ceiling は #1190 で
+/// ユーザー承認・反映済み〈PR #1179 codex-review 指摘の解消〉）どおり、
+/// `auto.mma_available()`（`mma` が cc ゲートを満たし構築済みか）に
+/// 応じて整列形状の選択結果が変わることを検証する（純関数
 /// `select_f16_matrix_unit_impl` 自体の `prefer_mma` 網羅テストは
 /// `gemm_auto.rs::f16_matrix_unit_impl_tests`〈GPU 非依存〉が担当。本
 /// テストは実機上で本番既定の統合的な選択結果を検証する）。
@@ -310,18 +312,28 @@ fn f16_matrix_unit_impl_reports_selected_implementation() {
 
     let mma_available = auto.mma_available();
 
-    // 本番既定（MMA_PRIORITY_PRODUCTION_ENABLED = false）では
-    // mma_available()・整列形状（n%8==0 && k%8==0・m の grid 上限内）の
-    // 値に関わらず Mma は選ばれない（#1156 以前と同じ wmma 優先の従来
-    // 経路。ceiling 承認・本番有効化後は本テストの期待値更新が必要）。
+    // 本番既定（MMA_PRIORITY_PRODUCTION_ENABLED = true。#1191）では、
+    // mma が cc ゲート（cc>=8.0）を満たし構築済みなら整列形状
+    // （n%8==0 && k%8==0・m の grid 上限内）で Mma を選ぶ。cc<8.0・
+    // NVRTC 失敗環境等で mma_available() が false なら Wmma／Tiled へ
+    // 倒れる（`Mma` を無条件にハードコードしない）。
     let aligned = auto.f16_matrix_unit_impl(16, 16, 16);
-    assert_ne!(
-        aligned,
-        fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
-        "MMA_PRIORITY_PRODUCTION_ENABLED = false のため、整列形状 \
-         （16,16,16）・mma_available()（{mma_available}）に関わらず \
-         Mma は選ばれないはず"
-    );
+    if mma_available {
+        assert_eq!(
+            aligned,
+            fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
+            "MMA_PRIORITY_PRODUCTION_ENABLED = true かつ \
+             mma_available() = true のため、整列形状（16,16,16）では \
+             Mma が選ばれるはず"
+        );
+    } else {
+        assert_ne!(
+            aligned,
+            fandhe_ai_backend_cuda::F16MatrixUnitImpl::Mma,
+            "mma_available() = false のため、整列形状（16,16,16）でも \
+             Mma は選ばれないはず"
+        );
+    }
 
     // 非整列形状（n=12 は n%8!=0）では mma_available() の値に関わらず
     // 事前形状ゲート非充足のため Mma を選ばない（`validate_mma_alignment`
@@ -341,14 +353,14 @@ fn f16_matrix_unit_impl_reports_selected_implementation() {
 /// 厳密ゼロ fail（`assert_parity`。spec REQ-2「2026-09-02 追記」項目 1）
 /// が auto 経路でも成立することを確認する。
 ///
-/// mma 優先が有効な場合（`MMA_PRIORITY_PRODUCTION_ENABLED = true`。
-/// 本番既定は現状 `false` で保留中。PR #1179 codex-review 指摘参照）
-/// では `run_f16` はこれらの整列形状で `CudaMmaGemm::run_f16` を
-/// 呼ぶ。直接経路（`cpu_cuda_mma_parity.rs`）・WMMA 直接経路
-/// （`cpu_cuda_wmma_parity.rs`）双方がこの 12 形状で GB10 実機ゼロ fail
-/// 済みのため、本テストはフリップ前後どちらの経路でも green のまま
-/// 維持される設計だった（`docs/perf/cuda-parity-baseline.md` §12 実測
-/// 記録）。
+/// mma 優先が有効な本番既定（`MMA_PRIORITY_PRODUCTION_ENABLED = true`。
+/// #1191 で有効化・GB10 green 確認済み。PR #1179 codex-review 指摘は
+/// #1190 の ceiling 反映で解消済み）では `run_f16` はこれらの整列形状
+/// で `CudaMmaGemm::run_f16` を呼ぶ。直接経路（`cpu_cuda_mma_parity.rs`）・
+/// WMMA 直接経路（`cpu_cuda_wmma_parity.rs`）双方がこの 12 形状で GB10
+/// 実機ゼロ fail 済みのため、本テストはフリップ前後どちらの経路でも
+/// green のまま維持される設計だった（`docs/perf/cuda-parity-baseline.md`
+/// §12 実測記録）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn run_f16_matches_cpu_reference_across_aligned_shapes() {
@@ -528,9 +540,9 @@ fn run_f16_k4096_stress_non_regression_route_aware() {
     // （#1131 コメント 2026-09-04・実測は
     // `docs/perf/cuda-parity-baseline.md` §12.3〜§12.4）を
     // `common::parity_baseline::BASELINES` へ反映済み。mma 優先時に
-    // 本ゲートが GB10 実機で green になることの確認は
-    // `MMA_PRIORITY_PRODUCTION_ENABLED` を `true` へ復帰させる
-    // イシュー #1191（本番有効化）の受け入れ条件として引き継ぐ。
+    // 本ゲートが GB10 実機で green になることは、
+    // `MMA_PRIORITY_PRODUCTION_ENABLED` を `true` へ復帰させたイシュー
+    // #1191（本番有効化）で実機実測・確認済み。
     assert!(
         baseline.baseline_max_abs_diff_ceiling.is_some()
             && baseline.baseline_max_rel_err_ceiling.is_some(),

@@ -29,8 +29,14 @@
 > codex-review で P1 指摘となった。ceiling のユーザー承認・
 > `BASELINES` 反映（`docs/perf/cuda-parity-baseline.md` §12.5）が
 > 完了するまで、本番既定は `false`（#1156 以前と同じ wmma 優先）へ
-> 差し戻し済みであり、`CudaGemmAuto::run_f16` は現状 `CudaMmaGemm` を
-> 優先しない。
+> 差し戻し済みであり、`CudaGemmAuto::run_f16` は当時 `CudaMmaGemm` を
+> 優先していなかった。
+>
+> **追記3（#1191・2026-09-05）**: ceiling 反映（#1190・PR #1207）後に
+> `MMA_PRIORITY_PRODUCTION_ENABLED = true` へ復帰した。`CudaGemmAuto::
+> run_f16` は cc>=8.0・整列形状かつ `mma` 構築済みで `CudaMmaGemm` を
+> 優先する（GB10 実機再計測は `docs/perf/
+> cuda-gemm-auto-f16-mma-switch.md`「#1191 再計測」節）。
 
 ## 1. 判断サマリ
 
@@ -353,32 +359,28 @@ GB10 実機実測（#1123・`docs/perf/cuda-wmma-f16-perf-triage.md` §3.1・§4
   PRODUCTION_ENABLED = true` へ本番結線したが、route-aware 受け入れ
   テスト（`run_f16_k4096_stress_non_regression_route_aware`）が参照する
   `ParityPath::MmaF16` baseline ceiling が未承認のまま結線していたこと
-  が PR #1179 codex-review 指摘（P1）となり、`false` へ差し戻し済み
-  （`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0）。**同テストは、
-  選択経路 `MmaF16` の baseline ceiling が未承認〈`None`〉のため mma
-  優先を有効化すれば fail-closed に必ず FAIL する意図的な red のまま
-  である（詳細・ceiling 提案値は `docs/perf/cuda-parity-baseline.md`
-  §12.4/§12.5/§12.6）。「実測で非後退を確認した記録」と「その記録を
-  検証する受け入れテストが green である」は分離しており、後者は
-  ceiling 反映のユーザー承認・本番有効化後まで成立しない**
+  が PR #1179 codex-review 指摘（P1）となり、`false` へ一時差し戻し
+  （`docs/perf/cuda-gemm-auto-f16-mma-switch.md` §0）。その後 #1190
+  （PR #1207）で ceiling がユーザー承認値で `BASELINES` へ反映され、
+  #1191 で `true` へ復帰した。route-aware 受け入れテストは #1191 で
+  GB10 実機 green を確認済み（詳細・ceiling 値は `docs/perf/
+  cuda-parity-baseline.md` §12.4/§12.5/§12.6）
 - 性能: 切替前後を同一プロトコル・5 回計測中央値で比較し、後退時は結線
   しない（#1156 のユーザー承認条件）。#1160 が GB10 実機で全対象形状の
+  非後退を確認し、#1191 で本番有効化後も同一 HEAD base/after の再計測で
   非後退を確認した（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`）。
-  本番有効化自体は上記 baseline ceiling 未承認により保留中（PR #1179
-  codex-review 指摘）。TFLOPS 記録・`wmma_f16_opt` の扱いは #1160 が
-  確定した（`docs/perf/cuda-wmma-f16-perf-triage.md` §8）
+  TFLOPS 記録・`wmma_f16_opt` の扱いは #1160 が確定した（`docs/perf/
+  cuda-wmma-f16-perf-triage.md` §8）
 
 **実装 Issue 対応表**: 構築（`mma` フィールド追加。fail-soft）は #1152
 （実装済み）、呼び出し分岐切替（形状ゲート込みの優先順位判定。
 `select_f16_matrix_unit_impl`）は #1156（実装済み）、GB10 数値一致
 非後退検証は #1158（実測記録は `docs/perf/cuda-parity-baseline.md` §12。
-route-aware 受け入れテストは `MmaF16` baseline ceiling 未承認のため
-mma 優先有効化時に意図的に red。上記「数値一致・性能の引き渡し」節
-参照）、TFLOPS 記録・`wmma_f16_opt` 扱いの確定は #1160 が完了した
-（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`・
-`docs/perf/cuda-wmma-f16-perf-triage.md` §8）。本番結線自体は baseline
-ceiling 未承認のため PR #1179 codex-review 指摘を受けて保留中
-（ceiling 承認後の後続作業）。
+route-aware 受け入れテストは #1191 で GB10 実機 green を確認済み。
+上記「数値一致・性能の引き渡し」節参照）、TFLOPS 記録・`wmma_f16_opt`
+扱いの確定は #1160 が完了した（`docs/perf/cuda-gemm-auto-f16-mma-switch.md`・
+`docs/perf/cuda-wmma-f16-perf-triage.md` §8）。本番結線は #1191 で
+ceiling 承認・反映を経て有効化済み。
 
 ## 6. スコープ外
 
@@ -394,7 +396,7 @@ ceiling 未承認のため PR #1179 codex-review 指摘を受けて保留中
 | CPU 側 ISA dispatch の変更 | 対象外（`gemm_blis/microkernel.rs` は実装済み・変更なし） |
 | f16 `MatrixUnit` 経路の mma 優先実装（`CudaGemmAuto` へのフィールド追加・分岐切替） | #1152（フィールド追加は実装済み）・#1156（分岐切替。実装済み） |
 | GB10 数値一致非後退（§5.6 の判定規則の実機検証） | #1158 |
-| TFLOPS 記録・`wmma_f16_opt` の扱い確定 | #1160（完了）。mma 優先の本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は baseline ceiling 未承認のため保留中（PR #1179 codex-review 指摘。承認後の後続作業） |
+| TFLOPS 記録・`wmma_f16_opt` の扱い確定 | #1160（完了）。mma 優先の本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は #1191 で有効化済み（#1190 の baseline ceiling 承認・反映を経て） |
 | `gemm_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR` の `tensor-core::dispatch` への集約（未起票・候補） | 対象外（§5.6 参照。第 2 層定数のため現状維持） |
 
 ## 7. 出典一覧

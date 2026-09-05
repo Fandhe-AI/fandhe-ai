@@ -4,8 +4,10 @@
 5 回計測中央値の比較を取り、後退確認時は結線しない」に対応する記録。設計の正は
 `docs/dispatch-rules-design.md` §5.6。
 
-## 状態: 実測完了・本番結線は保留（イシュー #1160・GB10 実機実測 2026-09-04。
-PR #1179 codex-review 指摘〈P1〉により結線を差し戻し。§0 参照）
+## 状態: 実測完了・本番結線済み（イシュー #1160→#1191・GB10 実機実測
+2026-09-05。PR #1179 codex-review 指摘〈P1〉により一時差し戻し後、#1190
+での baseline ceiling 承認・反映を経て #1191 で `true` へ復帰。§0・
+「#1191 再計測」節参照）
 
 `crates/backend-cuda/src/gemm_auto.rs::MMA_PRIORITY_PRODUCTION_ENABLED` を
 `true`（mma 優先。§5.6 の設計目標どおり `CudaMmaGemm → CudaWmmaGemm → Tiled`）
@@ -13,6 +15,16 @@ PR #1179 codex-review 指摘〈P1〉により結線を差し戻し。§0 参照�
 512/1024/2048/4096 いずれも §5「非後退の判定基準」を満たすことを確認した。
 性能 A/B の実測結果自体はここに記録したまま維持するが、**本番定数は
 現在 `false` へ差し戻し済み**（§0）。
+
+### §0 追記2（#1191・2026-09-05）: ceiling 反映後に `true` へ復帰
+
+#1190（PR #1207）で `ParityPath::MmaF16`（256×256×4096・seed=9999）の
+`baseline_max_abs_diff_ceiling`／`baseline_max_rel_err_ceiling` がユーザー
+承認値（`6.251e-2`／`5.850e-1`）で `common::parity_baseline::BASELINES` へ
+反映され、下記 §0（初回差し戻し）の前提が解消された。これを受けて #1191 で
+`crates/backend-cuda/src/gemm_auto.rs::MMA_PRIORITY_PRODUCTION_ENABLED` を
+`true`（mma 優先）へ復帰し、コンパイル時ガードも「`true` であること」を
+固定する向きへ反転した。GB10 実機再計測は「#1191 再計測」節を参照。
 
 ### §0 追記: PR #1179 codex-review 指摘による差し戻し（2026-09-04）
 
@@ -123,6 +135,71 @@ f16 assert は #1123 是正版（比較対象 `wmma_f16_opt`）で GB10 実測�
 == true` のため `mma_sync_f16`）へ差し替えたことで **pass に転じた**。これは
 イシュー #1131 の完了条件（`docs/perf/cuda-wmma-f16-perf-triage.md` §6）を
 満たす。
+
+## #1191 再計測（同一 HEAD base/after。GB10・2026-09-05）
+
+#1190 の baseline ceiling 反映後、`MMA_PRIORITY_PRODUCTION_ENABLED` を
+`true` へ復帰した状態（イシュー #1191）で、受け入れ条件 A1〜A3 を GB10
+実機で再確認した。この再計測は #1200（`gemm_mma.rs` の SizeClassPool
+結線）を含む HEAD で実施しているため、**4096 の絶対値は上記「#1160
+時点」の表と直接比較しない**（#1200 の影響が混在するため。after/base
+比・非後退判定は同一 HEAD 上の base/after 比較のみで行う）。
+
+GPU 排他確認: 各計測前後で `nvidia-smi --query-compute-apps`／
+`utilization.gpu` を確認し、既存の常駐サービス（他プロセスの GPU
+メモリ使用はあるが `utilization.gpu` は計測前後とも 0%）以外に計算を
+行うプロセスがないことを確認した。
+
+### A1: route-aware 非後退ゲート
+
+`cargo test -p fandhe-ai-backend-cuda --release --all-features --test
+gemm_auto -- --ignored --nocapture --test-threads=1` を実行し、**8 件
+全て pass**（`run_f16_k4096_stress_non_regression_route_aware` を含む）。
+`MmaF16` baseline 行（`fail_count=101`・ceiling `6.251e-2`／`5.850e-1`）
+に対する非後退判定が green であることを確認した。
+
+### A2: `tensor_core_tflops_record`
+
+`cargo test -p fandhe-ai-backend-cuda --release --all-features --test
+tensor_core_real_device tensor_core_tflops_record -- --ignored
+--nocapture` を実行し、TF32 assert・f16 assert とも **pass**
+（`test result: ok. 1 passed`）。
+
+| path | TFLOPS（M=N=K=4096・カーネル単体） |
+|---|---|
+| tiled_f32（基準） | 10.174 |
+| wmma_tf32_staged | 14.155 |
+| wmma_f16_opt（フォールバック限定。assert 対象外） | 4.386 |
+| mma_sync_f16（本番 f16 経路。#1191） | 55.430 |
+
+f16 assert は `mma_sync_f16`（55.430 TFLOPS）が `tiled_f32`
+（10.174 TFLOPS）を約 5.45 倍上回り pass。
+
+### A3: 転送込み auto 経路の切替前後比較（同一 HEAD base/after）
+
+after = HEAD（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）、base = 同じ
+HEAD のノード側コピーで同定数のみ `false` へ一時的に書き換えたもの
+（コミットしない）。`scripts/bench/run_gemm_auto_f16_mma_switch_bench.sh`
+（独立 5 回起動・run-median）で計測。
+
+| dim | base run 値（5 回） | base run-median | after run 値（5 回） | after run-median | after/base | #1160 時点の after/base |
+|---|---|---|---|---|---|---|
+| 512  | [2.3422, 2.3340, 2.3237, 2.3211, 2.3208] | 2.3237 | [3.9850, 3.9272, 3.9737, 4.0165, 4.0919] | 3.9850 | 1.715 | 1.747 |
+| 1024 | [5.7919, 5.8077, 5.8085, 5.7974, 5.7087] | 5.7974 | [11.5415, 11.5197, 11.5177, 11.5098, 11.5704] | 11.5197 | 1.987 | 1.993 |
+| 2048 | [4.5740, 4.5734, 4.6343, 4.6067, 4.6068] | 4.6067 | [21.4027, 21.5929, 21.4253, 21.6574, 21.5794] | 21.5794 | 4.685 | 4.672 |
+| 4096 | [3.3723, 0.4589, 3.4482, 0.4542, 0.4566] | 0.4589 | [7.1706, 7.0949, 7.6414, 7.3165, 9.4661] | 7.3165 | 15.94（後述） | 1.119 |
+
+**判定**: 512/1024/2048 は after run-median が base run-median を
+1.715〜4.685 倍上回り、#1160 時点の記録（1.747／1.993／4.672 倍）と
+同水準（0.95 倍以上）で一次判定を満たす。4096 は base 側が #1130
+病態（per-call アロケーション由来の二峰性）で 5 run 中 3 run が
+0.45 TFLOPS 近辺まで劣化しているが、after の run-median（7.3165）は
+**base の 5 run 範囲 `[0.4542, 3.4482]` の最大値さえ上回っており**、
+「病態支配下で同等・後退なし」の基準を満たす（4096 の絶対値の解釈は
+上記のとおり #1200 混在のため #1160 表と直接比較しない）。
+
+**総合判定**: 全形状で非後退。#1191 でこの結果に基づき
+`MMA_PRIORITY_PRODUCTION_ENABLED = true` を本番結線として維持する。
 
 ## 実機実行手順（再現用）
 
