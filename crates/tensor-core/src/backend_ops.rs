@@ -608,7 +608,9 @@ pub trait BackendOps {
     /// 呼び出しでオーバーライドする。CUDA（`backend-cuda::ops::
     /// CudaBackendOps`）・Metal（`backend-metal::ops::MetalBackendOps`）
     /// は #1216 で実装済み（融合カーネル `launch_tiled_bias_act_f32_
-    /// resident`／`dispatch_strided_bias_act_prepared` を再利用し、
+    /// resident`／`encode_strided_bias_act_prepared`〈`dispatch_
+    /// strided_bias_act_prepared` の encode-only 版。`ctx.synchronize()`
+    /// を呼ばずコマンドバッファへ積むのみで待たない〉を再利用し、
     /// `a`／戻り値もデバイス常駐のまま扱う。実機実測は `docs/perf/
     /// linear-forward-device-gpu.md`）。
     fn linear_forward_device(

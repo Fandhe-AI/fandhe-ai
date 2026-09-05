@@ -20,7 +20,7 @@ D2H→H2D（`gemm_resident_rhs*` 系が持つ「`a` を毎回 upload・結果を
 | バックエンド | 実装箇所 | 再利用したカーネル |
 |---|---|---|
 | CUDA | `crates/backend-cuda/src/ops.rs::CudaBackendOps::linear_forward_device` | `CudaGemm::launch_tiled_bias_act_f32_resident`（`gemm_resident_rhs_act` と同一） |
-| Metal | `crates/backend-metal/src/ops.rs::MetalBackendOps::linear_forward_device` | `MetalGemm::dispatch_strided_bias_act_prepared`（`gemm_resident_rhs` と同一） |
+| Metal | `crates/backend-metal/src/ops.rs::MetalBackendOps::linear_forward_device` | `MetalGemm::encode_strided_bias_act_prepared`（`dispatch_strided_bias_act_prepared` の encode-only 版。`gemm_resident_rhs` は同期版 `dispatch_strided_bias_act_prepared` を使う） |
 
 `gemm_resident_rhs*` 系（`w`／`bias` のみ常駐・`a`／戻り値はホスト
 常駐）との違いは、`a` も呼び出し元が既にデバイスへ置いた
@@ -52,13 +52,15 @@ D2H→H2D（`gemm_resident_rhs*` 系が持つ「`a` を毎回 upload・結果を
   同様）ため CUDA と異なり追加の世代検査はない
 - 出力バッファは `static_metal_memory()`（`memory_ops()` と同一
   インスタンス・`context_cache::cached_context()` 共有）で確保
-- **同期契約**: `dispatch_strided_bias_act_prepared` はコマンド
-  バッファへ積むのみで待たない。次層の dispatch は同一コマンド
-  バッファ内（または `should_auto_flush` 分割後の後続コマンド
-  バッファ。同一キューの serial 実行順）に積まれるため、前層出力を
-  次層の入力として読む順序は GPU 側で保証される（イシュー #1017 の
-  設計文書が「実機で確認する必要がある」と留保していた項目。§3 (c)
-  で実機確認済み）
+- **同期契約**: `linear_forward_device` は `dispatch_strided_bias_act_prepared`
+  ではなく、その encode-only 版 `encode_strided_bias_act_prepared`
+  （イシュー #1216・codex-review 指摘対応）を使う。`ctx.synchronize()`
+  を呼ばずコマンドバッファへ積むのみで待たない。次層の encode は
+  同一コマンドバッファ内（または `should_auto_flush` 分割後の後続
+  コマンドバッファ。同一キューの serial 実行順）に積まれるため、
+  前層出力を次層の入力として読む順序は GPU 側で保証される（イシュー
+  #1017 の設計文書が「実機で確認する必要がある」と留保していた項目。
+  §3 (c) で実機確認済み）
 
 ## §3 テスト（実機必須。`#[ignore]`）
 

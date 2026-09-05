@@ -151,16 +151,18 @@ linear_forward_device`（`crates/backend-cuda/src/ops.rs`）・
 `MetalBackendOps::linear_forward_device`（`crates/backend-metal/src/
 ops.rs`）は、それぞれ `gemm_resident_rhs*` と同じ融合カーネル
 （`CudaGemm::launch_tiled_bias_act_f32_resident`／`MetalGemm::
-dispatch_strided_bias_act_prepared`）を再利用し、`a`・戻り値も
-デバイス常駐のまま扱う（`w`／`bias` のみ常駐の `gemm_resident_rhs*`
-との違い）。CUDA は世代検査（poison／stale generation）の対象に `a`
-自体も追加（呼び出しを跨いで生存する常駐バッファのため）。出力
-バッファは呼び出し元へ escape するため `static_cuda_memory`／
-`static_metal_memory`（`memory_ops()` と同一インスタンス）で確保し、
-REQ-14 の単一計測系列を維持する。Metal のコマンドバッファ共有
-（#1017）の同期境界（前層出力を次層の入力として読む順序）は M4 Max
-実機の 2 層チェーンテストで確認済み（`docs/perf/linear-forward-
-device-gpu.md`）。
+encode_strided_bias_act_prepared`。`dispatch_strided_bias_act_prepared`
+の encode-only 版で、`ctx.synchronize()` を呼ばずコマンドバッファへ
+積むのみで待たない。イシュー #1216・codex-review 指摘対応）を再利用し、
+`a`・戻り値もデバイス常駐のまま扱う（`w`／`bias` のみ常駐の
+`gemm_resident_rhs*` との違い）。CUDA は世代検査（poison／stale
+generation）の対象に `a` 自体も追加（呼び出しを跨いで生存する常駐
+バッファのため）。出力バッファは呼び出し元へ escape するため
+`static_cuda_memory`／`static_metal_memory`（`memory_ops()` と同一
+インスタンス）で確保し、REQ-14 の単一計測系列を維持する。Metal の
+コマンドバッファ共有（#1017）の同期境界（前層出力を次層の入力として
+読む順序）は M4 Max 実機の 2 層チェーンテストで確認済み（`docs/perf/
+linear-forward-device-gpu.md`）。
 
 **facade／autodiff への結線（スコープ外・引き継ぎ）**: `DeviceParamStore`
 の推論ヘルパー・`Sequential::predict_resident` の内部差し替え
