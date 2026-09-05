@@ -121,6 +121,76 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
     Some(view)
 }
 
+/// `gemm`／`gemm_fp32_strict_into` 共通の転置判定付きディスパッチ
+/// （イシュー #1213 の NT/TN 入口を #1212 の staging 直接書き込み経路
+/// でも共有する。codex-review P2・PR #1224）。`out` は呼び出し元が
+/// ゼロ初期化済みの `m*n` スライス（累積カーネル契約。`gemm` doc 参照）。
+/// `a`／`b` の片側が `dense_transposed_view` で判定できる転置格納なら
+/// `contiguous()` の再パックコピーを経由せず [`gemm_blis_parallel_tn`]／
+/// [`gemm_blis_parallel_nt`] へ渡し、それ以外は従来の
+/// [`gemm_blis_parallel`] へフォールバックする（再パック回数は
+/// `GEMM_HOST_REPACK_COUNT` へ計上）。`ctx` はエラーメッセージ先頭の
+/// 呼び出し元名。
+fn gemm_into_slice(
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    out: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    ctx: &str,
+) -> Result<(), BackendError> {
+    match (dense_transposed_view(a), dense_transposed_view(b)) {
+        (Some(at), None) => {
+            // TN: a は転置格納（at: 論理形状 [k,m] 行優先）、b は通常。
+            if !b.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            let b_owned = b.contiguous();
+            let b_slice = b_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(format!("{ctx}: rhs not contiguous after contiguous()"))
+            })?;
+            gemm_blis_parallel_tn(at, b_slice, out, m, n, k)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
+        (None, Some(bt)) => {
+            // NT: b は転置格納（bt: 論理形状 [n,k] 行優先）、a は通常。
+            if !a.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            let a_owned = a.contiguous();
+            let a_slice = a_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(format!("{ctx}: lhs not contiguous after contiguous()"))
+            })?;
+            gemm_blis_parallel_nt(a_slice, bt, out, m, n, k)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
+        _ => {
+            // TT（両方転置）・判定不能（一般 stride・broadcast 等）:
+            // 従来どおり両オペランドを contiguous() で実体化する
+            // （`Tensor::as_slice` は非 contiguous では `None` を返す
+            // 契約。`crates/tensor-core/src/tensor.rs` 参照）。
+            if !a.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            if !b.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            let a_owned = a.contiguous();
+            let b_owned = b.contiguous();
+            let a_slice = a_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(format!("{ctx}: lhs not contiguous after contiguous()"))
+            })?;
+            let b_slice = b_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(format!("{ctx}: rhs not contiguous after contiguous()"))
+            })?;
+            gemm_blis_parallel(a_slice, b_slice, out, m, n, k)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 /// [`MemoryOps`] の CPU 実装（イシュー #935）。`shared_cpu_memory()`
 /// （プロセスワイド共有 `CpuMemory`）へ委譲する薄いラッパー。
 impl MemoryOps for CpuBackendOps {
@@ -135,6 +205,59 @@ impl MemoryOps for CpuBackendOps {
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
         shared_cpu_memory().download(buffer)
     }
+
+    /// [`MemoryOps::upload_into`] の CPU 実装（イシュー #1212）。CPU の
+    /// 「デバイス」はホストメモリそのものであるため、実データは
+    /// `contiguous()` した `tensor` を `dst` の `CpuBufferHandle::data`
+    /// 該当範囲へ `copy_from_slice` するだけで完結する（FFI・実転送
+    /// なし。`upload` の CPU 実装と同じ位置付け）。
+    fn upload_into(
+        &self,
+        tensor: &Tensor<f32>,
+        dst: &mut DeviceBuffer<f32>,
+        dst_offset: usize,
+    ) -> Result<(), BackendError> {
+        upload_into_cpu_buffer(tensor, dst, dst_offset)
+    }
+}
+
+/// [`MemoryOps::upload_into`] の CPU 実装本体。`CpuBackendOps`・
+/// `crate::memory::CpuMemory` の両実装（本ファイルと `memory.rs`）が
+/// 同一ロジックを共有する（`impl MemoryOps for CpuBackendOps` doc
+/// 「ホットパス」参照。契約は完全に同一のため 1 箇所にまとめる）。
+///
+/// 範囲検査（REQ-8「カーネル側の手動境界チェックを省略しない」・
+/// OWASP A03）: `dst_offset + tensor.numel()` を `checked_add` で検査し、
+/// `dst.numel()` を超える場合は書き込み前に `InvalidArgument` で拒否する。
+pub(crate) fn upload_into_cpu_buffer(
+    tensor: &Tensor<f32>,
+    dst: &mut DeviceBuffer<f32>,
+    dst_offset: usize,
+) -> Result<(), BackendError> {
+    if dst.device() != Device::Cpu {
+        return Err(BackendError::DeviceMismatch);
+    }
+    let contiguous = tensor.contiguous();
+    let src = contiguous.as_slice().ok_or_else(|| {
+        gemm_contiguity_fail_safe("upload_into: tensor not contiguous after contiguous()")
+    })?;
+    let numel = src.len();
+    let end = dst_offset.checked_add(numel).ok_or_else(|| {
+        BackendError::InvalidArgument(
+            "upload_into: dst_offset + tensor.numel() overflowed usize".to_string(),
+        )
+    })?;
+    if end > dst.numel() {
+        return Err(BackendError::InvalidArgument(format!(
+            "upload_into: write range [{dst_offset}, {end}) exceeds dst buffer length {}",
+            dst.numel()
+        )));
+    }
+    let handle = dst
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    handle.data[dst_offset..end].copy_from_slice(src);
+    Ok(())
 }
 
 /// `BackendOps::gemm_resident_rhs`／`gemm_resident_rhs_act` の共有本体
@@ -332,56 +455,77 @@ impl BackendOps for CpuBackendOps {
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
         let mut out = vec![0.0f32; m * n];
-
-        match (dense_transposed_view(a), dense_transposed_view(b)) {
-            (Some(at), None) => {
-                // TN: a は転置格納（at: 論理形状 [k,m] 行優先）、b は通常。
-                if !b.is_contiguous() {
-                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
-                }
-                let b_owned = b.contiguous();
-                let b_slice = b_owned.as_slice().ok_or_else(|| {
-                    gemm_contiguity_fail_safe("gemm: rhs not contiguous after contiguous()")
-                })?;
-                gemm_blis_parallel_tn(at, b_slice, &mut out, m, n, k)
-                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-            }
-            (None, Some(bt)) => {
-                // NT: b は転置格納（bt: 論理形状 [n,k] 行優先）、a は通常。
-                if !a.is_contiguous() {
-                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
-                }
-                let a_owned = a.contiguous();
-                let a_slice = a_owned.as_slice().ok_or_else(|| {
-                    gemm_contiguity_fail_safe("gemm: lhs not contiguous after contiguous()")
-                })?;
-                gemm_blis_parallel_nt(a_slice, bt, &mut out, m, n, k)
-                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-            }
-            _ => {
-                // TT（両方転置）・判定不能（一般 stride・broadcast 等）:
-                // 従来どおり両オペランドを contiguous() で実体化する
-                // （`Tensor::as_slice` は非 contiguous では `None` を返す
-                // 契約。`crates/tensor-core/src/tensor.rs` 参照）。
-                if !a.is_contiguous() {
-                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
-                }
-                if !b.is_contiguous() {
-                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
-                }
-                let a_owned = a.contiguous();
-                let b_owned = b.contiguous();
-                let a_slice = a_owned.as_slice().ok_or_else(|| {
-                    gemm_contiguity_fail_safe("gemm: lhs not contiguous after contiguous()")
-                })?;
-                let b_slice = b_owned.as_slice().ok_or_else(|| {
-                    gemm_contiguity_fail_safe("gemm: rhs not contiguous after contiguous()")
-                })?;
-                gemm_blis_parallel(a_slice, b_slice, &mut out, m, n, k)
-                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-            }
-        }
+        gemm_into_slice(a, b, &mut out, m, n, k, "gemm")?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict_into`] の CPU
+    /// 実装（イシュー #1212）。`gemm` と同じ [`gemm_blis_parallel`] を
+    /// 使うため数値は `gemm`/`gemm_fp32_strict` と bit 同一だが、結果を
+    /// 新規 `Tensor` として返さず `out` の `out_offset` から直接書き込む
+    /// （`DeviceParamStore` の grad staging バッファへ、d_weight の D2H を
+    /// 経由せず書き込むための入口。TF32 の概念を持たない CPU は元々
+    /// `gemm_fp32_strict` と `gemm` が同一実装のため区別を要さない）。
+    ///
+    /// **累積ではなく上書き契約**: [`gemm_blis_parallel`] は C
+    /// （`out[out_offset..out_offset+m*n]`）へ **FMA で累積**する
+    /// カーネル（`gemm_blis::mod` の `dispatch_region` doc「累積計算」）
+    /// であり、呼び出し元が確保した `Vec` を毎回ゼロ初期化してから渡す
+    /// ことで実質的な代入契約を保っている（`gemm` 参照）。`out` は
+    /// `DeviceParamStore` が使い回す**永続バッファ**（前ステップの残留値
+    /// を保持しうる）ため、`gemm` と異なりここで明示的に対象範囲を
+    /// `fill(0.0)` してから同じカーネルへ渡す（トレイト契約「上書き」を
+    /// 満たすための CPU 側の対処。CUDA/Metal のカーネルは C を代入で
+    /// 書くため対応不要。`docs/device-resident-update-design.md` 追補
+    /// 参照）。
+    fn gemm_fp32_strict_into(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+    ) -> Result<(), BackendError> {
+        if out.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+
+        // REQ-8「カーネル側の手動境界チェックを省略しない」・OWASP A03:
+        // `out_offset + m*n` を `checked_mul`/`checked_add` で検査し、
+        // `out.numel()` を超える書き込みを事前に拒否する（カーネル起動
+        // 前・`out` への可変借用取得前）。
+        let mn = m.checked_mul(n).ok_or_else(|| {
+            BackendError::InvalidArgument("gemm_fp32_strict_into: m * n overflowed usize".into())
+        })?;
+        let end = out_offset.checked_add(mn).ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "gemm_fp32_strict_into: out_offset + m * n overflowed usize".into(),
+            )
+        })?;
+        if end > out.numel() {
+            return Err(BackendError::InvalidArgument(format!(
+                "gemm_fp32_strict_into: write range [{out_offset}, {end}) exceeds out buffer \
+                 length {}",
+                out.numel()
+            )));
+        }
+
+        let handle = out
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let dst = &mut handle.data[out_offset..end];
+        // 上書き契約（doc 参照）: 永続バッファの残留値を消してから
+        // 累積カーネルへ渡す。転置オペランド（`LinearResident` の
+        // d_weight が渡す `x_t = transpose2d(x)`）は `gemm` と同じ
+        // NT/TN 判定を共有し、`contiguous()` の転置コピーを経由しない
+        // （codex-review P2・PR #1224）。
+        dst.fill(0.0);
+        gemm_into_slice(a, b, dst, m, n, k, "gemm_fp32_strict_into")?;
+        let _ = out_shape; // shape 検証のみに使用（`matmul_out_shape` の失敗検出）
+        Ok(())
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
@@ -1004,6 +1148,34 @@ mod repack_count_tests {
             before,
             "dense な転置 view（NT）は contiguous() フォールバックを通らないはず"
         );
+    }
+
+    /// `gemm_fp32_strict_into`（#1212 の staging 直接書き込み）でも
+    /// `LinearResident` の d_weight が渡す転置 lhs（TN）を再パックせず
+    /// `gemm` と bit 同一の結果を書くこと（codex-review P2・PR #1224）。
+    #[test]
+    fn gemm_fp32_strict_into_transposed_lhs_shares_tn_entry() {
+        use fandhe_ai_tensor_core::MemoryOps;
+        reset_counter();
+        let ops = CpuBackendOps::new();
+        let mem = crate::memory::CpuMemory::new();
+        let (m, k, n) = (4usize, 6usize, 5usize);
+        let x = Tensor::new((0..k * m).map(|i| i as f32 * 0.5 - 3.0).collect(), &[k, m]).unwrap();
+        let g = Tensor::new((0..k * n).map(|i| (i % 7) as f32 - 2.0).collect(), &[k, n]).unwrap();
+        let x_t = x.transpose_2d().unwrap();
+        let expected = ops.gemm(&x_t, &g).unwrap();
+        let seed = Tensor::new(vec![0.0f32; 2 + m * n], &[2 + m * n]).unwrap();
+        let mut staging = mem.upload(&seed).unwrap();
+        let before = counter();
+        ops.gemm_fp32_strict_into(&x_t, &g, &mut staging, 2)
+            .unwrap();
+        assert_eq!(
+            counter(),
+            before,
+            "dense な転置 lhs（TN）は再パックを通らないはず"
+        );
+        let host = mem.download(&staging).unwrap().contiguous();
+        assert_eq!(&host.as_slice().unwrap()[2..], expected.as_slice().unwrap());
     }
 
     #[test]

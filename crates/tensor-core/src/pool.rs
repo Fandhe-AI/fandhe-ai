@@ -526,6 +526,18 @@ impl<M: MemoryOps + PoolZeroFill> MemoryOps for PooledMemory<M> {
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
         self.inner.download(buffer)
     }
+
+    /// パススルー（`upload` と同じ理由。イシュー #1212）。`dst` が
+    /// `PooledBufferHandle`・`inner` の生ハンドルいずれでも透過
+    /// ダウンキャストで `inner.upload_into` がそのまま動作する。
+    fn upload_into(
+        &self,
+        tensor: &Tensor<f32>,
+        dst: &mut DeviceBuffer<f32>,
+        dst_offset: usize,
+    ) -> Result<(), BackendError> {
+        self.inner.upload_into(tensor, dst, dst_offset)
+    }
 }
 
 impl<M: crate::memory_stats::MemoryStats> crate::memory_stats::MemoryStats for PooledMemory<M> {
