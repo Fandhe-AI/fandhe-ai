@@ -213,7 +213,9 @@ cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse -
 
 Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
 `docs/perf/train-step-phase-breakdown.md`（イシュー #1010）を参照。
-`results/summary.md` への環境情報の統合記録は別途 #1050 に委ねる。
+`fandhe-ai =0.6.0` ピンでの再計測は同ドキュメント §10〜（イシュー
+#1145）を参照。`results/summary.md` への環境情報の統合記録は別途
+#1050 に委ねる。
 
 ### `gemm --mode reuse --phases`（イシュー #1182。reuse 計測境界のフェーズ分解）
 
