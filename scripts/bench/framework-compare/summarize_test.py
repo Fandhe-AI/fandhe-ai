@@ -1553,10 +1553,11 @@ class InferReuseSectionTests(unittest.TestCase):
         self.assertIn("(c')", text)
         self.assertIn("20.000 ms", text)  # init_s=0.02 の fmt_ms 表示
         self.assertIn("2.00 倍", text)  # fresh 0.001 / reuse 0.0005
-        # (c') 表の行（10 列＝"|" 11 個）を fresh 表 (c. 6 列＝"|" 7 個) と
-        # 区別する。
+        # (c') 表の行（size 列追加後は 11 列＝"|" 12 個）を fresh 表
+        # (c. 6 列＝"|" 7 個) と区別する（codex-review P2 指摘・PR #1229:
+        # size 列を追加し異なるバッチサイズを区別できるようにした）。
         c_prime_row = next(
-            line for line in lines if line.startswith("| cpu |") and line.count("|") == 11
+            line for line in lines if line.startswith("| cpu |") and line.count("|") == 12
         )
         self.assertIn("一致", c_prime_row)
         self.assertIn("2000", c_prime_row)  # throughput_per_s = 1/0.0005
@@ -1818,6 +1819,22 @@ class InferPhasesSectionTests(unittest.TestCase):
         with contextlib.redirect_stderr(buf):
             *_, has_infer_phases_invalid = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_infer_phases_invalid)
+
+    def test_phase_index_non_contiguous_offset_is_invalid(self):
+        # codex-review P2 指摘（PR #1229）: `phase_index` の相対順序（名前の
+        # 並び順）が `required` と一致していても、実際の値が 0 始まりの
+        # 連番（`range(len(required))`）でなければ不正とみなす。旧実装は
+        # `actual_order`（sorted(keyed) で並べた名前列）のみを見ており、
+        # phase_index に 10,11,12,... のような一律オフセットが入っていても
+        # 名前の相対順序さえ保たれていれば誤って有効判定していた。
+        rows = [dict(r) for r in _infer_phases_group(device="cpu", mode="fresh")]
+        for r in rows:
+            r["phase_index"] += 10
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_infer_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_phases_invalid)
+        self.assertIn("0 始まり連番でない", buf.getvalue())
 
     def test_infer_phases_does_not_affect_infer_section(self):
         # イシュー #1217: `infer_phases` 行の追加が既存 (c)/(c') 節・

@@ -2493,8 +2493,20 @@ def _infer_phases_validate(group_rows, mode, device):
         )
         invalid = True
     else:
-        actual_order = tuple(keyed[pi][0] for pi in sorted(keyed))
-        if actual_order != required:
+        # codex-review P2 指摘（PR #1229）: `actual_order`（名前を
+        # `phase_index` 昇順で並べたものが `required` と一致するか）
+        # だけでは、名前の相対順序さえ正しければ `phase_index` の実値
+        # （0 始まり連番）は検証されない。例えば phase_index に
+        # 10,11,12,13（相対順序は正しいが 0 始まり連番ではない）が
+        # 入っていても `actual_order` は変化しないため誤って有効判定
+        # してしまう。producer 側（`bench-fandhe --phases`）の契約は
+        # `phase_index` が `range(len(required))` の連番であることを
+        # 前提にしており（`_TRAIN_PHASES_REQUIRED_PHASES` 等と同じ
+        # 契約）、この前提を明示的に検証する。
+        actual_keys = sorted(keyed)
+        actual_order = tuple(keyed[pi][0] for pi in actual_keys)
+        keys_contiguous = actual_keys == list(range(len(required)))
+        if actual_order != required or not keys_contiguous:
             invalid = True
             missing = [p for p in required if p not in name_to_pis]
             extra = [p for p in name_to_pis if p not in required]
@@ -2503,6 +2515,10 @@ def _infer_phases_validate(group_rows, mode, device):
                 details.append(f"欠落: {', '.join(missing)}")
             if extra:
                 details.append(f"未知: {', '.join(extra)}")
+            if actual_order == required and not keys_contiguous:
+                details.append(
+                    f"phase_index が 0 始まり連番でない（実際: {list(actual_keys)}）"
+                )
             if not details:
                 details.append("phase の並び順が想定と不一致")
             phase_set_reason = (
@@ -3000,9 +3016,9 @@ def section(path, rows):
             "### (c') 推論スループット（デバイス常駐パラメータ・`predict_resident` reuse モード。イシュー #1217）\n"
         )
         lines.append(
-            "| デバイス | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | バッチ/秒 | fresh 中央値（参考） | fresh/reuse 比 | checksum 突合（fresh） |"
+            "| デバイス | バッチ | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | バッチ/秒 | fresh 中央値（参考） | fresh/reuse 比 | checksum 突合（fresh） |"
         )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for device in devices_in(rows, "infer", mode="reuse"):
             for fw in FRAMEWORKS:
                 # `get()` は同一キー（framework/task/device/mode）に
@@ -3045,7 +3061,7 @@ def section(path, rows):
                 if invalid_size_reuse:
                     has_infer_reuse_invalid = True
                     lines.append(
-                        f"| {device} | {fw}（無効: size が不正な値 "
+                        f"| {device} | - | {fw}（無効: size が不正な値 "
                         f"{len(invalid_size_reuse)} 件） | - | 無効な値 | 無効な値 | "
                         "無効な値 | 無効な値 | - | - | 突合不能（無効値） |"
                     )
@@ -3183,7 +3199,7 @@ def section(path, rows):
                             fw_col = f"{fw}（無効: 時間値が不正な値）"
 
                     lines.append(
-                        f"| {device} | {fw_col} | {init_col} | {median_col} | "
+                        f"| {device} | {size} | {fw_col} | {init_col} | {median_col} | "
                         f"{q1_col} | {q3_col} | {tps_col} | {fresh_col} | {ratio_col} | {match_col} |"
                     )
         lines.append("")
