@@ -122,6 +122,20 @@ impl Module for Linear {
     /// bit-exactness 契約（`Module::forward_host` doc 参照）: 融合
     /// epilogue はカーネル内 tiling 次第で加算順序が変わりうるため、
     /// 旧経路と厳密に同じ累積順序を保証できるのは非融合合成のみ。
+    /// この bit-exactness 契約は本 trait メソッド（汎用 `&dyn BackendOps`
+    /// 向け）に対するもので、CUDA／Metal の融合オーバーライドは非融合
+    /// 合成との bit 一致が未保証のため今後もここを融合へ切り替えない。
+    ///
+    /// **CPU 固定経路の例外（イシュー #1218・`docs/perf/
+    /// cpu-infer-predict-profile.md`）**: CPU 融合カーネル
+    /// （CPU バックエンドクレートの `CpuBackendOps::gemm_bias_act`）は epilogue
+    /// を GEMM 完了後に適用するため非融合合成と bit 完全一致することが
+    /// `crates/backend-cpu/tests/gemm_epilogue_parity.rs` で確認済み。
+    /// `fandhe_ai_facade::compat::sequential::Sequential::predict` の
+    /// CPU 固定 tape 不要経路はこの事実を根拠に `Linear::
+    /// forward_host_with_activation`（`nn/linear.rs`。本メソッドとは別の
+    /// inherent メソッド）を Linear→ReLU 限定で使う。本 trait メソッド
+    /// 自体は汎用バックエンド向けのまま変更しない。
     ///
     /// **エラー型の一致契約（review 指摘）**: `Var::matmul`/`add`（tape
     /// 経路。`var.rs`）は shape 不整合を `matmul_out_shape`/

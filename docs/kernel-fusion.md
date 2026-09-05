@@ -250,7 +250,18 @@ sequential::Sequential::forward`／`SequentialVars::forward`）からは
   `eval::matmul` をホスト直接計算している点）の `BackendOps` 経由化・
   転置ゼロコピーはイシュー #1046 の領域。`Module::forward_host`
   （推論の tape 不要経路。#1028 の bit-exact 契約）への
-  `gemm_bias_act` 適用は未着手。
+  `gemm_bias_act` 適用はイシュー #1218 で CPU 固定経路
+  （`fandhe_ai_facade::compat::sequential::Sequential::predict`。
+  `Linear::forward_host_with_activation`〈`nn/linear.rs`〉を新設し
+  `Linear`→`ReLU` 限定で結線。`Module::forward_host` trait メソッド
+  自体は汎用バックエンド向けの非融合のまま不変）を対応した。CPU
+  融合カーネルが epilogue を GEMM 完了後に適用し非融合合成と bit
+  完全一致することは `crates/backend-cpu/tests/gemm_epilogue_parity.rs`
+  で確認済みのため、`forward_host` の bit-exactness 契約（trait レベル）
+  とは矛盾しない別経路として追加した。CUDA／Metal の
+  `forward_host` への同種結線は融合オーバーライドの bit 一致が
+  未保証のため対象外のまま。実測は `docs/perf/
+  cpu-infer-predict-profile.md`（#1218）を参照。
 
 ## 3. 限界
 

@@ -86,7 +86,7 @@ use crate::{
 };
 use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid, Tanh};
 use fandhe_ai_autodiff::nn::{Linear, Module};
-use fandhe_ai_tensor_core::Activation;
+use fandhe_ai_tensor_core::{Activation, BackendOps};
 
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
 /// チェーン（`self` を消費し `Self` を返す）で層を追加し、`predict` で
@@ -237,19 +237,68 @@ impl Sequential {
     }
 
     /// tape 不要経路（イシュー #1028）。`Tape`／`Var` を一切構築せず、
-    /// 層ごとに `Module::forward_host` を直接呼ぶ（CPU の
-    /// `fandhe_ai_backend_cpu::CpuBackendOps` に固定。[`crate::tape`] が
-    /// 常に CPU バックエンドで `Tape` を構築するのと同じ構成であり、
-    /// `predict` の既存の「CPU 固定」契約を変えない）。1 層でも
-    /// `Unsupported` を返した場合は途中結果を捨てて `Unsupported` を
-    /// そのまま伝播し、[`Self::predict`] が旧経路へ全体フォールバック
-    /// する（部分的にホストフォールバックしない。§3.2 のフォール
-    /// バック契約と同じ「黙示のフォールバックをしない」設計）。
+    /// CPU 固定 `CpuBackendOps`（[`crate::tape`] が常に CPU バックエンドで
+    /// `Tape` を構築するのと同じ構成であり、`predict` の既存の「CPU
+    /// 固定」契約を変えない）を [`Self::predict_tape_free_with_ops`] へ
+    /// 注入するだけの薄い委譲。`ops` を差し替え可能にしている理由は
+    /// テスト側で `CountingOps`（本ファイル下部のテストモジュール）を
+    /// 注入し、`Linear` → `ReLU` の融合結線が実際に `gemm_bias_act` を
+    /// 呼んでいることを機械検証するため（公開シグネチャ自体は変えない。
+    /// `predict_with_ops` を公開面へ復活させるものではない）。
     fn predict_tape_free(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
         let ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
+        self.predict_tape_free_with_ops(&ops, input)
+    }
+
+    /// [`Self::predict_tape_free`] の本体（イシュー #1218・`docs/perf/
+    /// cpu-infer-predict-profile.md`）。`Sequential::forward`／
+    /// `SequentialVars::forward`（学習 forward）と同じ「`Linear` 層に
+    /// 出会うたび次層が `ReLU` かを先読みし、続く場合のみ
+    /// `Linear::forward_host_with_activation(.., Activation::Relu)`
+    /// （`ops.gemm_bias_act` 1 回・`nn/linear.rs`）へ結線して `ReLU` 層
+    /// 自体をスキップする」方式を tape 不要経路へ適用する。
+    ///
+    /// **CPU 固定経路に限定する理由**: `Linear::forward_host_with_activation`
+    /// の doc が明記するとおり、この融合は `ops.gemm_bias_act` の融合
+    /// オーバーライドが非融合合成と bit 完全一致するバックエンドでのみ
+    /// 安全（CPU は `crates/backend-cpu/tests/gemm_epilogue_parity.rs` で
+    /// 確認済み）。本メソッドは `ops: &dyn BackendOps` を受け取るが、
+    /// [`Self::predict_tape_free`] からは常に `CpuBackendOps` のみが渡る
+    /// （呼び出し元がテスト以外で任意の `ops` を注入する経路は公開して
+    /// いない）ため、この前提は保たれる。
+    ///
+    /// **末尾 `Linear` の bias のみ融合を行わない理由**: `ReLU` が続かない
+    /// `Linear`（末尾層等）・`Sigmoid`／`Tanh` へ続く `Linear` は、
+    /// `Sequential::forward` の #1044 レビュー限定（#1079・
+    /// PRRT_kwDOTuUCJc6dgIt-）と同じ理由で従来どおり `forward_host`
+    /// （非融合）へ委譲する（融合対象を `Linear` → `ReLU` に限定）。
+    ///
+    /// 1 層でも `Unsupported` を返した場合は途中結果を捨てて
+    /// `Unsupported` をそのまま伝播し、[`Self::predict`] が旧経路へ
+    /// 全体フォールバックする（部分的にホストフォールバックしない。
+    /// `predict_tape_free` 移設前の docstring と同じ「黙示のフォール
+    /// バックをしない」設計を維持する）。
+    fn predict_tape_free_with_ops(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
         let mut current = input.clone();
-        for layer in &self.layers {
-            current = layer.forward_host(&ops, &current)?;
+        let mut i = 0;
+        while i < self.layers.len() {
+            let layer = &self.layers[i];
+            if let Some(linear) = layer.as_linear() {
+                let fuse_relu = self.layers.get(i + 1).is_some_and(|next| next.as_relu());
+                current = if fuse_relu {
+                    linear.forward_host_with_activation(ops, &current, Activation::Relu)?
+                } else {
+                    linear.forward_host(ops, &current)?
+                };
+                i += if fuse_relu { 2 } else { 1 };
+            } else {
+                current = layer.forward_host(ops, &current)?;
+                i += 1;
+            }
         }
         Ok(current)
     }
@@ -906,6 +955,142 @@ mod tests {
         let slow = model.predict_via_tape(&input).unwrap();
 
         assert_eq!(dense_vec(&fast), dense_vec(&slow));
+    }
+
+    /// イシュー #1218（`docs/perf/cpu-infer-predict-profile.md`）:
+    /// `predict`（`Linear`→`ReLU` を `gemm_bias_act` へ結線した後の tape
+    /// 不要経路）が、手動で組んだ非融合合成（`CpuBackendOps` の
+    /// `gemm`→`add`→`relu`→`gemm`→`add`）と **bit 完全一致**することを
+    /// 直接検証する（`Module::forward_host` doc の bit-exactness 契約は
+    /// `crates/backend-cpu/tests/gemm_epilogue_parity.rs` が汎用形状で
+    /// 保証済みだが、本テストは `predict` の Linear→ReLU 先読み結線
+    /// ロジック自体〈`predict_tape_free_with_ops`〉が非融合合成と
+    /// 一致する出力を組み立てていることを回帰検証する）。framework-compare
+    /// の推論形状（784→256→ReLU→10）に加え、`gemv` 専用経路に触れる
+    /// batch=1・BLIS のタイル境界（MR/NR）を跨ぐ batch=65/129 も検証する。
+    #[test]
+    fn sequential_predict_matches_manual_unfused_composition_bit_exact() {
+        let ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
+        for batch in [1usize, 3, 65, 129] {
+            let l1 = Linear::new(784, 256, true, SEED1).unwrap();
+            let l2 = Linear::new(256, 10, true, SEED2).unwrap();
+            let input_data: Vec<f32> = (0..batch * 784)
+                .map(|i| ((i % 97) as f32) * 0.01 - 0.5)
+                .collect();
+            let input = Tensor::new(input_data, &[batch, 784]).unwrap();
+
+            // 手動非融合合成: gemm -> add -> relu -> gemm -> add。
+            let h = ops.gemm(&input, l1.weight()).unwrap();
+            let h = ops.add(&h, l1.bias().unwrap()).unwrap();
+            let h = ops.relu(&h).unwrap();
+            let y = ops.gemm(&h, l2.weight()).unwrap();
+            let expected = ops.add(&y, l2.bias().unwrap()).unwrap();
+
+            let model = Sequential {
+                layers: vec![Box::new(l1), Box::new(Relu), Box::new(l2)],
+            };
+            let actual = model.predict(&input).unwrap();
+
+            assert_eq!(actual.shape(), expected.shape(), "batch={batch}");
+            assert_eq!(
+                dense_vec(&actual),
+                dense_vec(&expected),
+                "predict（Linear→ReLU 融合結線）は手動非融合合成と bit 完全一致するはず \
+                 （batch={batch}）"
+            );
+        }
+    }
+
+    /// 上記と対称の否定形: `ReLU` が続かない構成（`Linear`→`Sigmoid`→
+    /// `Linear`）では融合しないため、`predict` は末尾を除き手動非融合
+    /// 合成とそのまま一致する（`Sigmoid` は `Activation` に対応する
+    /// variant を持たないため融合対象外。`nn/module.rs::as_relu` doc
+    /// 参照）。
+    #[test]
+    fn sequential_predict_linear_sigmoid_linear_matches_manual_composition() {
+        let ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
+        let l1 = Linear::new(6, 5, true, SEED1).unwrap();
+        let l2 = Linear::new(5, 3, false, SEED2).unwrap();
+        let input = Tensor::new(vec![0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6], &[1, 6]).unwrap();
+
+        let h = ops.gemm(&input, l1.weight()).unwrap();
+        let h = ops.add(&h, l1.bias().unwrap()).unwrap();
+        let h = Sigmoid.forward_host(&ops, &h).unwrap();
+        let expected = ops.gemm(&h, l2.weight()).unwrap();
+
+        let model = Sequential {
+            layers: vec![Box::new(l1), Box::new(Sigmoid), Box::new(l2)],
+        };
+        let actual = model.predict(&input).unwrap();
+
+        assert_eq!(dense_vec(&actual), dense_vec(&expected));
+    }
+
+    /// イシュー #1218: `predict_tape_free_with_ops` が実際に
+    /// `Linear`→`ReLU` を `gemm_bias_act` 1 回へ結線し、末尾 `Linear`
+    /// （`ReLU` が続かない）は非融合合成（`gemm`→`add`）のまま・別ノードの
+    /// `relu` が発生しないことを `CountingOps`（本ファイル下部の
+    /// `#1044` 学習 forward 検証と共用するカウンタ実装）で機械検証する。
+    #[test]
+    fn sequential_predict_tape_free_fuses_linear_relu_into_single_gemm_bias_act_call() {
+        let model = Sequential::new()
+            .add_linear(4, 8, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(8, 2, SEED2)
+            .unwrap();
+
+        let counters = Counters::default();
+        let ops = CountingOps::new(counters.clone());
+        let input = Tensor::new(vec![0.25_f32; 3 * 4], &[3, 4]).unwrap();
+
+        model.predict_tape_free_with_ops(&ops, &input).unwrap();
+
+        assert_eq!(
+            Counters::get(&counters.gemm_bias_act),
+            1,
+            "Linear -> ReLU に融合された 1 個目の Linear のみ gemm_bias_act が 1 回呼ばれるはず"
+        );
+        assert_eq!(
+            Counters::get(&counters.gemm),
+            1,
+            "ReLU が続かない 2 個目の Linear は非融合合成（gemm）のままのはず"
+        );
+        assert_eq!(
+            Counters::get(&counters.add),
+            1,
+            "2 個目の Linear の bias 加算は非融合合成（add）のままのはず（tape 不要経路は \
+             Var::add の遅延がなく即時実行されるため、学習側テストと異なり 1 回計上される）"
+        );
+        assert_eq!(
+            Counters::get(&counters.relu),
+            0,
+            "ReLU は Linear へ融合され、別ノードとしての relu 呼び出しは発生しないはず"
+        );
+    }
+
+    /// `Linear`→`Sigmoid`→`Linear` 構成では `gemm_bias_act` が一切
+    /// 呼ばれないこと（融合対象は `Linear`→`ReLU` に限定）を確認する。
+    #[test]
+    fn sequential_predict_tape_free_does_not_fuse_non_relu_activation() {
+        let model = Sequential::new()
+            .add_linear(4, 5, SEED1)
+            .unwrap()
+            .add_sigmoid()
+            .add_linear(5, 2, SEED2)
+            .unwrap();
+
+        let counters = Counters::default();
+        let ops = CountingOps::new(counters.clone());
+        let input = Tensor::new(vec![0.1_f32; 3 * 4], &[3, 4]).unwrap();
+
+        model.predict_tape_free_with_ops(&ops, &input).unwrap();
+
+        assert_eq!(
+            Counters::get(&counters.gemm_bias_act),
+            0,
+            "Sigmoid は Activation に対応する variant を持たないため融合対象外のはず"
+        );
     }
 
     // =================================================================

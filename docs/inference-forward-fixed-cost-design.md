@@ -110,6 +110,39 @@ Relu・Sigmoid・Tanh 混在・複数バッチ・bias 有無混在）・
 （`Sequential::new()` の通常構築経路）が新旧経路の bit 完全一致を
 確認する。
 
+**イシュー #1218 追記（CPU 固定経路への `gemm_bias_act` 結線）**:
+`docs/perf/train-step-phase-breakdown.md` §15.5〜§15.6 が提起した
+「`predict` は非融合 3 起動のまま」を解消するため、CPU 推論経路に
+限定して `Linear`→`ReLU` を融合カーネルへ結線した。
+
+- 上記の bit-exactness 方針（`Linear::forward_host` は `ops.gemm` →
+  `ops.add` の非融合合成を維持し変更しない）自体は**trait レベル**
+  （`&dyn BackendOps` 汎用。CUDA／Metal の融合オーバーライドは非融合
+  合成との bit 一致が未保証のため）では不変
+- CPU（`fandhe_ai_backend_cpu::CpuBackendOps::gemm_bias_act`）は
+  epilogue を GEMM 完了後に適用するため非融合合成と bit 完全一致する
+  ことが `crates/backend-cpu/tests/gemm_epilogue_parity.rs` で
+  確認済み。この事実を根拠に、`nn/linear.rs` へ **inherent メソッド**
+  `Linear::forward_host_with_activation(ops, input, act)` を新設し
+  （`Module` trait のメソッドではない）、`Sequential::predict` の
+  内部（`predict_tape_free_with_ops`）が学習 forward
+  （`SequentialVars::forward`。#1044）と同じ「次層が `ReLU` かを
+  先読みし、続く場合のみ融合する」方式で `Linear`→`ReLU` 限定に
+  結線した。`ReLU` が続かない `Linear`・`Sigmoid`／`Tanh` へ続く
+  `Linear` は従来どおり非融合の `forward_host` へ委譲する（#1044 の
+  レビュー限定〈#1079〉と同じ理由）
+- **数値・エラー variant の一致契約は不変**: `predict` の bit
+  完全一致（新規テスト
+  `sequential_predict_matches_manual_unfused_composition_bit_exact`
+  が手動非融合合成〈`gemm`→`add`→`relu`→`gemm`→`add`〉と直接突合）・
+  shape 不整合時のエラー variant 一致（`forward_host_with_activation`
+  も `forward_host` と同じ順序で事前検査し `AutodiffError::Shape` を
+  返す）はいずれも維持される
+- CPU 実測（プロファイル・before/after）は `docs/perf/
+  cpu-infer-predict-profile.md` を参照。CUDA／Metal は本イシューの
+  スコープ外（`forward_host` 自体を変更していないため挙動・性能とも
+  不変）
+
 ### §3.2 段階 B: 活性化のデバイス常駐チェーン（設計確定・実装は一部）
 
 GPU（CUDA/Metal）で最終出力 1 回まで同期点を集約するには、活性化
@@ -175,9 +208,15 @@ linear-forward-device-gpu.md`）。
 
 - **(a) 現行 3 経路の固定費内訳**: §2 に記録済み
 - **(b) tape 不要経路の設計と採否判断**: §3.1 のとおり採用・実装済み。
-  bit-exactness は「旧経路が実際に呼ぶのと同一の演算を直接呼ぶ」方針
-  で担保し、融合カーネルへの置き換えは行わない（累積順序が変わり
-  うるため）
+  `Module::forward_host`（trait レベル・汎用バックエンド向け）は
+  「旧経路が実際に呼ぶのと同一の演算を直接呼ぶ」方針を維持し、融合
+  カーネルへの置き換えは行わない（累積順序が変わりうるため）。**イシュー
+  #1218 追記**: CPU 固定経路（`Sequential::predict`）に限っては、CPU
+  融合カーネルが非融合合成と bit 完全一致することを根拠に、trait とは
+  別の inherent メソッド（`Linear::forward_host_with_activation`）を
+  新設して `Linear`→`ReLU` を `gemm_bias_act` へ結線した（§3.1
+  「イシュー #1218 追記」節参照）。trait レベルの契約自体は変更して
+  いない
 - **(c) 活性化デバイス常駐チェーンの設計**: §3.2 のとおり確定。CPU に
   加え CUDA/Metal もイシュー #1216 で実装済み（実測は `docs/perf/
   linear-forward-device-gpu.md`）
