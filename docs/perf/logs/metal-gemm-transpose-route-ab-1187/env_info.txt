@@ -17,7 +17,7 @@ Note: No CPU power status has been recorded
 - 試行 1（ROUNDS=10 COOLDOWN=8s MIN_WARMUP=3s。#1186 実装計画の既定値）:
   実行直前 `14:41 load averages: 4.19 4.93 6.02`
 - 試行 2（ROUNDS=14 COOLDOWN=10s MIN_WARMUP=4s。試行 1 の gate 超過を受け増やす方向のみ一時調整）:
-  実行直前 `14:55 load averages: 5.73 7.54 6.97`（実行中に他プロセス負荷が再上昇。試行直前は 5〜8 程度だったが実行中に 12〜20 台まで上振れしたことを実行後の uptime 観測で確認）
+  実行直前 `14:55 load averages: 5.73 7.54 6.97`（実行中に他プロセス負荷が再上昇した体感があったが、実行中に取得した `uptime` の生出力は記録していないため、具体的な数値〈12〜20 台〉は出典を欠く伝聞的記述であり本ファイルでは確認済みの事実として扱わない）
 - 試行 3（同 ROUNDS=14 COOLDOWN=10s MIN_WARMUP=4s で再試行）:
   実行直前 `15:13 load averages: 9.53 10.39 9.61`
 
