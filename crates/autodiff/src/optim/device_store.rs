@@ -519,7 +519,40 @@ impl ResidentResolver for DeviceParamStore {
         })?;
 
         let current_serial = self.backward_serial.get();
-        if staging.filled[slot].is_some_and(|r| r.backward_serial == current_serial) {
+        let same_serial_fill = staging.filled[slot].filter(|r| r.backward_serial == current_serial);
+        if let Some(prev) = same_serial_fill {
+            // codex-review 指摘 P0 追加是正（#1212）: 累積条件を
+            // `backward_serial` の一致のみに頼ると、`snapshot_resident_
+            // params` が同一 tape 上（あるいは別 tape 上）に発行した
+            // 別の `Op::ResidentLeaf`（同じ store・slot を指すが
+            // `NodeId` は異なる）の寄与を、weight tying による正当な
+            // 再利用と区別できず誤って加算してしまう（モジュール冒頭・
+            // [`ResidentFill`] doc 参照。同一 tape 上で
+            // `snapshot_resident_params` の葉と `register_resident_
+            // params` の葉の両方で forward→backward し loss を合算する
+            // と、逆順走査で登録葉の書き込みの後に snapshot 葉の寄与が
+            // 混入し、`step()` の `pending` 同一性検査をすり抜けて別の
+            // 葉の勾配でパラメータを誤更新しうる）。
+            //
+            // 「同一 backward 内で同じ slot への 2 回目以降の寄与」を
+            // 正当な weight tying 由来（accumulate してよい）と認める
+            // のは、直前の書き込みが**同じ tape_id・同じ epoch・同じ
+            // weight_node_id** から来ていた場合に限る。1 つでも異なれば
+            // 別々の葉（由来不明の寄与の混入）とみなし、累積せず
+            // 型付きエラーで fail-closed に拒否する
+            // （`.claude/rules/security.md` A08）。呼び出し元
+            // （`grad::vjp`）は本エラーを伝播するのみで、通常の
+            // `contributions`（`grads.get(var)` 経由）へ迂回させない。
+            if prev.tape_id != tape_id || prev.epoch != epoch || prev.node_id != weight_node_id {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "DeviceParamStore::fill_resident_weight_grad: slot {slot} は同一 \
+                     backward 走査内で既に別の葉（tape_id={:?}, epoch={}, node_id={:?}）から \
+                     寄与を受けている（今回: tape_id={:?}, epoch={}, node_id={:?}）。異なる \
+                     `Op::ResidentLeaf` 由来の勾配を同一 slot へ加算することはできない \
+                     （fail-closed）",
+                    prev.tape_id, prev.epoch, prev.node_id, tape_id, epoch, weight_node_id
+                )));
+            }
             // 同一 backward 走査内で同じ slot（同一 `ResidentLeaf` weight）
             // へ 2 回目以降の寄与が来たケース（codex-review 指摘 P1・
             // #1212）: 同一 weight を複数の `linear_forward` で共有する
@@ -2379,6 +2412,63 @@ mod tests {
             matches!(err, BackendError::MissingGradient(_)),
             "同一テープでも別 snapshot 由来の grads は MissingGradient で拒否されるべき: \
              {err:?}"
+        );
+    }
+
+    /// codex-review 指摘 P0（PR #1224・イシュー #1212 追加是正・
+    /// `fill_resident_weight_grad` の累積判定）の直接再現: レビューが
+    /// 指摘した具体的な迂回手順——「同一 tape 上で
+    /// `snapshot_resident_params` の葉による forward を先に、
+    /// `register_resident_params` の葉による forward を後に記録し、
+    /// 両方の loss を合算して 1 回 backward する」。
+    ///
+    /// backward はテープの逆順（LIFO）に走査するため、先に
+    /// `register` 側 `Op::LinearResident` の VJP が実行され slot へ
+    /// [`ResidentFill`] を書き込み、その後 `snapshot` 側の VJP が
+    /// 同じ slot へ到達する。両者は `store_id`／slot が同じでも
+    /// `NodeId` が異なる別々の `Op::ResidentLeaf` 由来であり、
+    /// 「同一 backward 走査内で同じ slot への 2 回目の寄与」を
+    /// 無条件に加算する旧実装では、由来の異なる寄与が誤って合算され
+    /// （かつ `filled[slot]` は最初の書き込み時点の `ResidentFill` の
+    /// ままのため）、`step()` の同一性検査もすり抜けてしまっていた。
+    /// 修正後は `fill_resident_weight_grad` が由来（`tape_id`／
+    /// `epoch`／`node_id`）の不一致を検出し、`backward` 自体が
+    /// `Err` で fail-closed に拒否することを検証する。
+    #[test]
+    fn fill_resident_weight_grad_rejects_merge_across_different_leaves_in_the_same_backward() {
+        let resident_ops = MockDeviceOps::resident_capable();
+        let tape = Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+
+        // ① 別 snapshot 呼び出しの葉（`register` とは別の NodeId）で
+        // 先に forward を記録する。
+        let snapshot_leaves = store.snapshot_resident_params(&tape).unwrap();
+        let x_snapshot = tape.var(&tensor(vec![-1.0, 4.0], &[1, 2]));
+        let pred_snapshot = store
+            .linear_forward(&tape, &x_snapshot, &snapshot_leaves[0], None)
+            .unwrap();
+        let target_snapshot = tape.var(&tensor(vec![-4.0, 7.0], &[1, 2]));
+        let loss_snapshot = pred_snapshot.mse_loss(&target_snapshot).unwrap();
+
+        // ② pending を張る register 呼び出しの葉で後に forward を記録
+        // する（同じ slot 0 を指すが NodeId は snapshot 側と異なる）。
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let x_registered = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+        let pred_registered = store
+            .linear_forward(&tape, &x_registered, &leaves[0], None)
+            .unwrap();
+        let target_registered = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let loss_registered = pred_registered.mse_loss(&target_registered).unwrap();
+
+        // ③ 両方の loss を合算して 1 回だけ backward する（逆順走査で
+        // register 側 VJP → snapshot 側 VJP の順に slot 0 へ到達する）。
+        let loss = loss_snapshot.add(&loss_registered).unwrap();
+        let err = store.backward(&tape, &loss).unwrap_err();
+        assert!(
+            matches!(err, AutodiffError::InvalidArgument(_)),
+            "由来の異なる葉の寄与を同一 slot へ加算しようとした場合、backward は \
+             fail-closed に InvalidArgument で拒否されるべき: {err:?}"
         );
     }
 
