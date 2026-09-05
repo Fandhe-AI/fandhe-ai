@@ -1666,6 +1666,46 @@ class InferReuseSectionTests(unittest.TestCase):
         self.assertIsNone(dup_reason)
         self.assertFalse(used_tf32)
 
+    def test_section_flags_duplicate_infer_fresh_rows_as_invalid(self):
+        # codex-review P0 指摘（PR #1229 3 巡目）: fresh 側の取得に
+        # `get()`（最初に一致した行だけを返す）を使っていたため、同一
+        # キー（framework/task/device/mode）の fresh 行が複数存在すると
+        # 先頭の 1 行だけが reuse と突合され、残りの不一致な fresh 行が
+        # 握りつぶされていた。checksum が一致する fresh 行を先頭、不一致
+        # な fresh 行を 2 番目に置いても「一致」側へすり抜けず無効判定に
+        # なることを確認する（`_reuse_row_invalid_reason` の同種検証と
+        # 揃える）。
+        rows = [
+            _infer_row(mode="fresh", checksum=13.9, median_s=0.001),
+            _infer_row(mode="fresh", checksum=999.0, median_s=0.0011),
+            _infer_row(mode="reuse", checksum=13.9, median_s=0.0005, init_s=0.02),
+        ]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_reuse_invalid)
+
+    def test_target_gate_infer_reuse_invalid_checksum_without_fresh_is_undeterminable(self):
+        # codex-review P0 指摘（PR #1229 3 巡目）: `_reuse_row_invalid_
+        # reason`（`target_gate` が `_gate_row_invalid_reason` 経由で
+        # infer reuse 行の有効性判定に使う）は、fresh 行が存在しない
+        # 場合に checksum 検証前に `None`（有効）を返していたため、
+        # checksum が不正な reuse 行と正常な target（candle）行を
+        # 組み合わせると「達成」と誤判定していた。fresh 欠落時も
+        # reuse 自身の checksum を検証し判定不能へ倒すことを確認する。
+        rows = [
+            _infer_row(
+                framework="fandhe-ai",
+                mode="reuse",
+                checksum=float("nan"),
+                median_s=0.0001,
+                init_s=0.02,
+            ),
+            _infer_row(framework="candle", mode="fresh", median_s=0.03),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "infer" and r["size"] == 64)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+
 
 class InferPhasesSectionTests(unittest.TestCase):
     """(c'') infer_phases 節の集計（イシュー #1217）。`GemmPhasesSectionTests`

@@ -1308,9 +1308,11 @@ def _reuse_row_invalid_reason(rows, r, task):
     の `predict_resident` reuse 行にも同一規則を適用するため）。
     `section()` の (b')/(c') ループと同一の判定規則（時間値の検証・同一
     フレームワーク内 fresh 行との checksum 突合）を、表示副作用なしで
-    単一行に対して適用する。fresh 行が存在しない（比較対象なし）だけの
-    場合は値そのものの正当性を否定しないため無効扱いにしない
-    （`section()` の同節コメント参照）。
+    単一行に対して適用する。fresh 行が存在しない（比較対象なし）場合
+    でも、reuse 自身の checksum が有限値であることは独立に検証する
+    （codex-review P0 指摘・PR #1229 2 巡目。突合先が無いだけで reuse
+    計測結果そのものの正当性は別問題であり、fresh の有無に関わらず
+    fail-closed に検査する。`section()` の同節コメント参照）。
 
     fresh 側の検索は `r` と同一 `size` に限定する（Bugbot Medium 指摘・
     PR #1082: `size` を渡さず `get()` を呼ぶと `size=None`＝size 条件
@@ -1353,15 +1355,25 @@ def _reuse_row_invalid_reason(rows, r, task):
     ]
     if len(fresh_matches) > 1:
         return f"同一 size の fresh 行が {len(fresh_matches)} 件あり突合先が一意に決まらない"
+    # fresh が無い（突合対象なし）場合でも、reuse 自身の checksum が
+    # 有限値であることは fresh の有無と独立に検証する（codex-review P0
+    # 指摘・PR #1229 2 巡目: 旧実装はこの分岐（fresh 行が存在しない
+    # ケース）で reuse 自身の checksum を一切検証せず無条件に有効
+    # （`None`）を返していたため、checksum が null/NaN の reuse 行と
+    # 正常な target 側行を組み合わせると `target_gate` が達成と誤判定
+    # しうる〈`section()` の表示側検証とは独立に、ゲート判定側にも
+    # 同じ検証が必要〉。fail-closed に扱う）。
+    r_checksum = _safe_finite_number(r.get("checksum"))
+    if r_checksum is None:
+        return "checksum が不正な値"
     if not fresh_matches:
         return None
     fresh = fresh_matches[0]
     fresh_median = _safe_time_s(fresh.get("median_s"))
     if fresh_median is None:
         return "fresh 側の時間値が不正な値"
-    r_checksum = _safe_finite_number(r.get("checksum"))
     fresh_checksum = _safe_finite_number(fresh.get("checksum"))
-    if r_checksum is None or fresh_checksum is None:
+    if fresh_checksum is None:
         return "checksum が不正な値"
     if not checksums_match(r_checksum, fresh_checksum):
         return "fresh と最終値不一致"
@@ -2997,7 +3009,25 @@ def section(path, rows):
                     continue
                 r = reuse_matches[0]
                 dup_reuse_count = len(reuse_matches)
-                fresh = get(rows, fw, "infer", device, mode="fresh")
+                # fresh 側も `get()`（最初の一致行のみ）ではなく全一致行を
+                # 集める（codex-review P0 指摘・PR #1229 3 巡目:
+                # reuse 側の重複はここまでで検証済みだが、fresh 側に
+                # 同一キーの複数行〈checksum が食い違う〉が存在すると
+                # `get()` は先頭だけを見るため、たまたま先頭が reuse と
+                # 一致すれば「一致」判定になり、後続の不一致な fresh 行が
+                # 握りつぶされる fail-open があった。`_reuse_row_invalid_
+                # reason` の同種検証〈同一 size の fresh 行が複数あれば
+                # 判定不能〉と揃える）。
+                fresh_matches = [
+                    x
+                    for x in rows
+                    if x["framework"] == fw
+                    and x["task"] == "infer"
+                    and x["device"] == device
+                    and x["mode"] == "fresh"
+                ]
+                dup_fresh_count = len(fresh_matches)
+                fresh = fresh_matches[0] if fresh_matches else None
                 # (b') と同一の理由（外部 JSONL 由来の値を未検証で使わない。
                 # security.md A03）で全時間値・throughput・checksum を
                 # 使用前に検証する。
@@ -3038,8 +3068,12 @@ def section(path, rows):
                     # 同一キーの重複行自体を無効条件に含める（後述の
                     # 「全 reuse 行検証」コメント参照。`_pick_row_for_gate`
                     # と同じく一意に選べない状態を判定不能＝無効として
-                    # fail-closed に扱う）。
+                    # fail-closed に扱う）。fresh 側の重複（`dup_fresh_
+                    # count > 1`）も突合先が一意に決まらない同種の
+                    # 判定不能条件として同様に扱う（codex-review P0 指摘・
+                    # PR #1229 3 巡目）。
                     or dup_reuse_count > 1
+                    or dup_fresh_count > 1
                 )
 
                 if fresh:
@@ -3093,6 +3127,8 @@ def section(path, rows):
                 # 限り、重複であることを表示に明示する。
                 if dup_reuse_count > 1 and "（無効" not in fw_col:
                     fw_col = f"{fw}（無効: 重複キー {dup_reuse_count} 件）"
+                if dup_fresh_count > 1 and "（無効" not in fw_col:
+                    fw_col = f"{fw}（無効: fresh 側重複キー {dup_fresh_count} 件）"
 
                 if row_invalid:
                     has_infer_reuse_invalid = True
