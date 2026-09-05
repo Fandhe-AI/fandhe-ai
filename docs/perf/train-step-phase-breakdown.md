@@ -1004,6 +1004,8 @@ infer は異なるコード経路であり、backward 最適化が infer の未�
 | H | #1218 |
 | I | #1219 |
 
+I の設計判断は `docs/autodiff-nograd-leaf-dinput-skip-decision.md`（#1219）に記録済み（`requires_grad` 前方伝播案を採用・実装は別イシューへ引き継ぎ）。
+
 ### 15.7 spec 整合の確認
 
 - REQ-8（`docs/spec/04-requirements.md`）は GEMM 5 行の対 PyTorch 下限の
