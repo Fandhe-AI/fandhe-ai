@@ -169,8 +169,14 @@ impl CudaBackendOps {
         // 同じ扱い）。
         let out = if gemm.transpose_smem_f32_available() {
             match (dense_transposed_view(a), dense_transposed_view(b)) {
-                (Some(at), None) => {
-                    // TN: a は転置格納（at: 論理形状 [k,m] 行優先）、b は通常。
+                // TN: a は転置格納（at: 論理形状 [k,m] 行優先）、b は通常。
+                // `crate::transpose::transpose_rows_fit_grid_y_limit(k)` は
+                // `run_tiled_f32_tn` 内の `transpose_to_pooled(at_dev, k, m)`
+                // が構築する grid.y（`k.div_ceil(TRANSPOSE_TILE)`）が CUDA の
+                // グリッド次元上限を超えないことの事前検査（イシュー #1214
+                // codex-review 指摘）。超過する場合は NN 経路（この制約を
+                // 受けない）へフォールバックする。
+                (Some(at), None) if crate::transpose::transpose_rows_fit_grid_y_limit(k) => {
                     if !b.is_contiguous() {
                         GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
                     }
@@ -184,8 +190,11 @@ impl CudaBackendOps {
                         || gemm.run_tiled_f32_tn(at, b_slice, m, n, k),
                     )?
                 }
-                (None, Some(bt)) => {
-                    // NT: b は転置格納（bt: 論理形状 [n,k] 行優先）、a は通常。
+                // NT: b は転置格納（bt: 論理形状 [n,k] 行優先）、a は通常。
+                // 事前検査は上記 TN 分岐と同型で、対象は
+                // `run_tiled_f32_nt` 内の `transpose_to_pooled(bt_dev, n, k)`
+                // が構築する grid.y（`n.div_ceil(TRANSPOSE_TILE)`）。
+                (None, Some(bt)) if crate::transpose::transpose_rows_fit_grid_y_limit(n) => {
                     if !a.is_contiguous() {
                         GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
                     }
@@ -1225,8 +1234,13 @@ impl BackendOps for CudaBackendOps {
         // する）を経由せず転置元 storage を直接 H2D 転送し
         // `launch_tiled_f32_resident_nt` へ渡す（`gemm_fp32_strict_impl`
         // と同型の判定・fail-soft 方針。転置カーネル使用不能環境は
-        // 従来経路へフォールバックする）。
+        // 従来経路へフォールバックする）。`transpose_rows_fit_grid_y_limit(r)`
+        // は `launch_tiled_f32_resident_nt` 内の `transpose_to_pooled(
+        // bt_dev, r, q)` が構築する grid.y（`r.div_ceil(TRANSPOSE_TILE)`）
+        // の事前検査（イシュー #1214 codex-review 指摘。`gemm_fp32_strict_impl`
+        // の NT 分岐と同型）。超過する場合は従来経路へフォールバックする。
         if gemm.transpose_smem_f32_available()
+            && crate::transpose::transpose_rows_fit_grid_y_limit(r as u32)
             && let Some(bt) = dense_transposed_view(b)
         {
             let out = self.with_driver_call(

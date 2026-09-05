@@ -169,6 +169,32 @@ pub(crate) fn tiled_launch_config(m: u32, n: u32) -> LaunchConfig {
     }
 }
 
+/// CUDA のグリッド次元 y/z の上限（compute capability に依らない固定値。
+/// NVIDIA CUDA Programming Guide の `maxGridSize[1]`/`maxGridSize[2]`）。
+/// [`tiled_launch_config`] の `grid_dim.1`（`m.div_ceil(TRANSPOSE_TILE)`）は
+/// この上限を超えると `cuLaunchKernel` が起動失敗する（イシュー #1214
+/// codex-review 指摘: NT で `n`（`gemm.rs::CudaGemm::run_tiled_f32_nt` の
+/// 転置対象行数）が `65_535 * TRANSPOSE_TILE` を超える形状、TN で `k` が
+/// 同様の形状で発生しうる）。`gemm.rs::CudaGemm::transpose_to_pooled` の
+/// grid.x（`n.div_ceil(TRANSPOSE_TILE)`）は x 次元の上限（2^31-1）が
+/// 十分大きいため対象外。
+pub(crate) const MAX_GRID_DIM_Y: u32 = 65_535;
+
+/// [`tiled_launch_config`] が構築する grid.y（`rows.div_ceil(
+/// TRANSPOSE_TILE)`）が [`MAX_GRID_DIM_Y`] 以内に収まるかを判定する。
+///
+/// `gemm.rs::CudaGemm::run_tiled_f32_nt`／`run_tiled_f32_tn`／
+/// `launch_tiled_f32_resident_nt`（イシュー #1214）の呼び出し元
+/// （`ops.rs::dense_transposed_view` 判定分岐）が、GPU 側 smem 転置
+/// カーネル経由の NT/TN 入口を選ぶ前にこの検査を行い、超過する場合は
+/// 転置入口を使わず `Tensor::contiguous()` 経由の従来経路（NN GEMM の
+/// み。転置を伴わないため grid.y はこの制約を受けない）へフォール
+/// バックする。NN 経路がこの形状を処理できるにも関わらず NT/TN 入口が
+/// 起動失敗する後退を防ぐ（codex-review P2 指摘）。
+pub(crate) fn transpose_rows_fit_grid_y_limit(rows: u32) -> bool {
+    rows.div_ceil(kernels_transpose::TRANSPOSE_TILE) <= MAX_GRID_DIM_Y
+}
+
 fn naive_launch_config(m: u32, n: u32) -> LaunchConfig {
     let grid_dim = (
         n.div_ceil(NAIVE_TRANSPOSE_BLOCK_DIM.0),
@@ -781,5 +807,28 @@ mod tests {
     fn validate_tiled_transposed_gemm_dims_accepts_matching_shape() {
         // m=2, k=2, n=3: a is 2x2 (len 4), b is 2x3 (len 6).
         validate_tiled_transposed_gemm_dims(4, 6, 2, 3, 2).expect("shape matches");
+    }
+
+    /// [`transpose_rows_fit_grid_y_limit`] がグリッド次元上限 65,535 を
+    /// 正しく判定することを検査する（イシュー #1214 codex-review 指摘:
+    /// NT で `n=2_097_121`（`k=2` の形状で発生した実例）が `grid.y=65_536`
+    /// となり起動失敗する回帰の再発防止）。境界値（ちょうど上限に収まる
+    /// `rows`／ちょうど 1 超える `rows`）を機械検査する。
+    #[test]
+    fn transpose_rows_fit_grid_y_limit_rejects_reported_regression_shape() {
+        // 実際の指摘形状（NT: n=2_097_121）。65_535 * 32 = 2_097_120 が
+        // grid.y<=65_535 に収まる最大 rows で、2_097_121 は 1 超過する。
+        assert!(!transpose_rows_fit_grid_y_limit(2_097_121));
+        assert!(transpose_rows_fit_grid_y_limit(2_097_120));
+    }
+
+    #[test]
+    fn transpose_rows_fit_grid_y_limit_boundary_values() {
+        let tile = kernels_transpose::TRANSPOSE_TILE;
+        let max_rows_within_limit = MAX_GRID_DIM_Y * tile;
+        assert!(transpose_rows_fit_grid_y_limit(max_rows_within_limit));
+        assert!(!transpose_rows_fit_grid_y_limit(max_rows_within_limit + 1));
+        assert!(transpose_rows_fit_grid_y_limit(0));
+        assert!(transpose_rows_fit_grid_y_limit(1));
     }
 }
