@@ -69,4 +69,19 @@ for dev in cpu metal; do
   run bench-fandhe train "$dev" 64 reuse --phases
 done
 
+# (c') 推論 — デバイス常駐パラメータ更新モード（イシュー #1217。bench-fandhe の
+# infer タスクのみ対応。(a')/(b') と同じ理由で bench-candle / bench-burn は
+# ループに含めない）
+for dev in cpu metal; do
+  run bench-fandhe infer "$dev" 64 reuse
+done
+
+# (c'') 推論 1 反復のフェーズ分解（イシュー #1217。bench-fandhe の infer
+# タスクのみ対応。(b'') と同じ理由で bench-candle / bench-burn はループに
+# 含めない）
+for dev in cpu metal; do
+  run bench-fandhe infer "$dev" 64 fresh --phases
+  run bench-fandhe infer "$dev" 64 reuse --phases
+done
+
 echo "done. results in $OUT ; failures (if any) in $SKIP"

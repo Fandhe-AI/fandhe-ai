@@ -96,8 +96,9 @@
   を突合し、fandhe-ai が同等以上の性能（`fandhe_median_s <=
   target_median_s`）かを判定する。ファイルをまたいだ突合は環境混同になる
   ため行わない。fandhe-ai・target とも reuse 行があれば reuse を優先し
-  無ければ fresh を使う（`_pick_row_for_gate`。infer には reuse 行が
-  存在しないため常に fresh）。checksum 不一致・要素誤差超過・train reuse
+  無ければ fresh を使う（`_pick_row_for_gate`。infer も gemm/train と
+  同様に reuse 行〈`predict_resident` 経由。イシュー #1217〉があれば
+  reuse を優先する）。checksum 不一致・要素誤差超過・train/infer reuse
   の checksum 不一致等（既存の無効判定と同じ規則）に該当する行は「達成」
   と判定せず「判定不能（無効データ）」に倒す（壊れた計算の実行時間で
   達成判定しない。A08）。`--target` 指定時、1 件でも未達／判定不能が
@@ -509,6 +510,46 @@ _GEMM_PHASES_REQUIRED_PHASES = {
         "iter_total",
     ),
 }
+
+# `infer_phases`（(c'') 節。イシュー #1217）専用の必須 phase 名・順序・
+# 件数。`bench-fandhe --task infer --phases`（fresh/reuse 双方に対応する
+# `bench-fandhe/src/main.rs::measure_infer_phases`）が出力する区間集合は
+# `(mode, device_class)` で異なる（README「`infer --phases`」節の表と対応）:
+# fresh・cpu は `Sequential::predict` が公開 API 上単一呼び出しでこれ以上
+# 分解できないため `predict` 単独区間、fresh・gpu（metal/cuda）は
+# `run_infer` の非 cpu 分岐と同じく `leaf_register`/`forward` に分解でき、
+# reuse（`predict_resident`。cpu/gpu 共通）は private ヘルパー
+# `forward_from_flat_leaves` を経由するため公開 API からは分解不能で
+# `predict_resident` 単独区間となる。`device_class` は `DEVICE_ORDER`
+# allowlist から `cpu`/`gpu` へ写像する（`_infer_phases_device_class`）。
+_INFER_PHASES_MODES = ("fresh", "reuse")
+_INFER_PHASES_REQUIRED_PHASES = {
+    ("fresh", "cpu"): ("predict", "host_copy", "checksum", "iter_total"),
+    ("fresh", "gpu"): (
+        "leaf_register",
+        "forward",
+        "to_tensor",
+        "host_copy",
+        "checksum",
+        "iter_total",
+    ),
+    ("reuse", "cpu"): ("predict_resident", "host_copy", "checksum", "iter_total"),
+    ("reuse", "gpu"): ("predict_resident", "host_copy", "checksum", "iter_total"),
+}
+
+
+def _infer_phases_device_class(device):
+    """`device`（`DEVICE_ORDER` allowlist 済みが前提）を `_INFER_PHASES_
+    REQUIRED_PHASES` のキー片方（`"cpu"`/`"gpu"`）へ写像する。allowlist
+    外の値は呼び出し元（`_infer_phases_groups`）が事前に弾くため
+    `None` を返す（fail-closed。表示側は `None` を「必須 phase 集合の
+    判定不能」として扱う）。
+    """
+    if device == "cpu":
+        return "cpu"
+    if device in ("metal", "cuda"):
+        return "gpu"
+    return None
 
 
 def _valid_phase_name(value):
@@ -1192,10 +1233,11 @@ def _pick_row_for_gate(rows, fw, task, device, size):
     既定値を持たせず必須引数にしている（codex-review 指摘・PR #1082）。
 
     戻り値は `(row, mode, dup_reason, used_tf32)`。該当行が無ければ
-    `(None, None, None, False)`。gemm/train は fandhe-ai に reuse 行が
-    存在しうる（イシュー #925/#957）。infer は reuse モード自体が
-    存在しないため常に fresh へフォールバックする（`bench-fandhe` の
-    `--mode` allowlist は gemm/train 用。モジュール docstring 参照）。
+    `(None, None, None, False)`。gemm/train/infer いずれも fandhe-ai に
+    reuse 行が存在しうる（gemm はイシュー #925、train はイシュー #957、
+    infer は `predict_resident` 経由の reuse モード〈イシュー #1217〉）。
+    reuse 行が無い（他フレームワークの行・reuse 未対応のバージョンの
+    fandhe-ai 行等）場合は fresh へフォールバックする。
 
     `used_tf32`: 選ばれた行が TF32 フォールバック（後述）経由なら
     `True`。呼び出し元（`target_gate`）はこれを見て達成／未達判定に
@@ -1258,14 +1300,19 @@ def _pick_row_for_gate(rows, fw, task, device, size):
     return None, None, None, False
 
 
-def _train_reuse_row_invalid_reason(rows, r):
-    """train task・mode="reuse" 行の無効理由を返す（有効なら `None`）。
+def _reuse_row_invalid_reason(rows, r, task):
+    """`task`・mode="reuse" 行の無効理由を返す（有効なら `None`）。
 
-    `section()` の (b') ループと同一の判定規則（時間値の検証・同一
+    train 用の判定ロジック（`_train_reuse_row_invalid_reason` として
+    導入。PR #1082）を task 引数で一般化したもの（イシュー #1217。infer
+    の `predict_resident` reuse 行にも同一規則を適用するため）。
+    `section()` の (b')/(c') ループと同一の判定規則（時間値の検証・同一
     フレームワーク内 fresh 行との checksum 突合）を、表示副作用なしで
-    単一行に対して適用する。fresh 行が存在しない（比較対象なし）だけの
-    場合は値そのものの正当性を否定しないため無効扱いにしない
-    （`section()` の同節コメント参照）。
+    単一行に対して適用する。fresh 行が存在しない（比較対象なし）場合
+    でも、reuse 自身の checksum が有限値であることは独立に検証する
+    （codex-review P0 指摘・PR #1229 2 巡目。突合先が無いだけで reuse
+    計測結果そのものの正当性は別問題であり、fresh の有無に関わらず
+    fail-closed に検査する。`section()` の同節コメント参照）。
 
     fresh 側の検索は `r` と同一 `size` に限定する（Bugbot Medium 指摘・
     PR #1082: `size` を渡さず `get()` を呼ぶと `size=None`＝size 条件
@@ -1282,6 +1329,19 @@ def _train_reuse_row_invalid_reason(rows, r):
     不一致な fresh 行を握りつぶして「有効」判定してしまう fail-open が
     ありうる（`_pick_row_for_gate` の重複キー検出は reuse 側のみを見る
     ため、fresh 側 1 行を選ぶ本関数のこの箇所は独立に検証が必要）。
+
+    `task == "infer"` の行は `throughput_per_s` の有限正数チェックも
+    行う（codex-review P0 指摘・PR #1229 4 巡目: `section()` の (c')
+    表示ループは `r_tps is None or r_tps <= 0` を `row_invalid` に含めて
+    いるのに対し、本関数（`target_gate` が `--target` 達成判定に使う）
+    は時間値・checksum しか見ておらず throughput_per_s を一切検証して
+    いなかった。時間値・checksum が正常でも `throughput_per_s: null` の
+    reuse 行は表示側では無効判定になる一方、`target_gate` では比較先の
+    `median_s` を下回ってさえいれば「達成」と誤判定しうる — 表示とゲート
+    で無効条件が食い違う fail-open。`train` は `throughput_per_s` を
+    持たない行形状のため対象外とする〈`bench-fandhe` producer 契約。
+    `bench-common::Record` の `throughput_per_s` は train 系で常に
+    `None`〉）。
     """
     r_median = _safe_time_s(r.get("median_s"))
     r_q1 = _safe_time_s(r.get("q1_s"))
@@ -1289,6 +1349,10 @@ def _train_reuse_row_invalid_reason(rows, r):
     r_init = _safe_time_s(r.get("init_s"))
     if r_median is None or r_q1 is None or r_q3 is None or r_init is None:
         return "時間値が不正な値"
+    if task == "infer":
+        r_tps = _safe_finite_number(r.get("throughput_per_s"))
+        if r_tps is None or r_tps <= 0:
+            return "throughput_per_s が不正な値"
     # `x.get("size")` を `_valid_gate_size` で検証してから比較する
     # （Bugbot Medium 指摘・PR #1082 2 巡目: 直接 `x["size"]` を読むと
     # `size` キー欠損行で `KeyError`、`bool` 混入行で `True == 1` に
@@ -1300,7 +1364,7 @@ def _train_reuse_row_invalid_reason(rows, r):
         x
         for x in rows
         if x["framework"] == r["framework"]
-        and x["task"] == "train"
+        and x["task"] == task
         and x["device"] == r["device"]
         and x["mode"] == "fresh"
         and _valid_gate_size(x.get("size"))
@@ -1308,19 +1372,38 @@ def _train_reuse_row_invalid_reason(rows, r):
     ]
     if len(fresh_matches) > 1:
         return f"同一 size の fresh 行が {len(fresh_matches)} 件あり突合先が一意に決まらない"
+    # fresh が無い（突合対象なし）場合でも、reuse 自身の checksum が
+    # 有限値であることは fresh の有無と独立に検証する（codex-review P0
+    # 指摘・PR #1229 2 巡目: 旧実装はこの分岐（fresh 行が存在しない
+    # ケース）で reuse 自身の checksum を一切検証せず無条件に有効
+    # （`None`）を返していたため、checksum が null/NaN の reuse 行と
+    # 正常な target 側行を組み合わせると `target_gate` が達成と誤判定
+    # しうる〈`section()` の表示側検証とは独立に、ゲート判定側にも
+    # 同じ検証が必要〉。fail-closed に扱う）。
+    r_checksum = _safe_finite_number(r.get("checksum"))
+    if r_checksum is None:
+        return "checksum が不正な値"
     if not fresh_matches:
         return None
     fresh = fresh_matches[0]
     fresh_median = _safe_time_s(fresh.get("median_s"))
     if fresh_median is None:
         return "fresh 側の時間値が不正な値"
-    r_checksum = _safe_finite_number(r.get("checksum"))
     fresh_checksum = _safe_finite_number(fresh.get("checksum"))
-    if r_checksum is None or fresh_checksum is None:
+    if fresh_checksum is None:
         return "checksum が不正な値"
     if not checksums_match(r_checksum, fresh_checksum):
-        return "fresh と最終 loss 不一致"
+        return "fresh と最終値不一致"
     return None
+
+
+def _train_reuse_row_invalid_reason(rows, r):
+    """`_reuse_row_invalid_reason(rows, r, "train")` の薄いラッパー。
+
+    既存呼び出し元・テスト（`summarize_test.py`）との互換のため関数名を
+    維持する（イシュー #1217 で `_reuse_row_invalid_reason` へ一般化）。
+    """
+    return _reuse_row_invalid_reason(rows, r, "train")
 
 
 def _gate_row_invalid_reason(rows, gemm_mismatch_map, row):
@@ -1329,10 +1412,10 @@ def _gate_row_invalid_reason(rows, gemm_mismatch_map, row):
     task ごとに既存の無効判定規則を再適用する: gemm は checksum 不一致
     （`gemm_mismatch_map`。呼び出し側が `gemm_checksum_mismatches(rows)`
     から 1 回だけ構築し使い回す。行ごとに再計算すると size 数に対し
-    O(n^2) になるため）と要素単位検証失敗（`_parity_reason`）、train の
-    reuse 行は `_train_reuse_row_invalid_reason`。train の fresh 行・
-    infer 行には（現状 `section()` 側にも）無効判定規則が無いため
-    `None` を返す。
+    O(n^2) になるため）と要素単位検証失敗（`_parity_reason`）、train・
+    infer の reuse 行は `_reuse_row_invalid_reason`（イシュー #1217 で
+    infer にも適用）。train/infer の fresh 行には（現状 `section()` 側
+    にも）無効判定規則が無いため `None` を返す。
     """
     if row["task"] == "gemm":
         reasons = []
@@ -1342,8 +1425,8 @@ def _gate_row_invalid_reason(rows, gemm_mismatch_map, row):
         if preason is not None:
             reasons.append(preason)
         return "; ".join(reasons) if reasons else None
-    if row["task"] == "train" and row["mode"] == "reuse":
-        return _train_reuse_row_invalid_reason(rows, row)
+    if row["task"] in ("train", "infer") and row["mode"] == "reuse":
+        return _reuse_row_invalid_reason(rows, row, row["task"])
     return None
 
 
@@ -2226,6 +2309,312 @@ def _gemm_phases_section(rel, rows):
     return lines, any_invalid
 
 
+
+# `task:"infer_phases"` 行の集計（(c'') 節。イシュー #1217）。`_gemm_phases_*`
+# と同じ検証方針（必須 phase 名・順序・件数の完全一致・時間値 allowlist・
+# `iter_total` 比の 100% 超過検出）を、`(mode, device_class)` ごとに異なる
+# 必須 phase 集合（`_INFER_PHASES_REQUIRED_PHASES`）へ適用する。他節
+# （(c) infer 節・`--target` ゲート・checksum 突合）は `task == "infer"`
+# のみを読むため、本節の追加は既存表に影響しない
+# （`_gemm_phases_section` docstring と同じ独立性）。
+
+
+def _infer_phases_groups(rows):
+    """`task == "infer_phases"` 行を `(device, mode, size)` ごとにグループ化
+    する（出現順を保持）。`_gemm_phases_groups` と同じ理由・同じ方針で
+    `device`/`mode`/`size` を allowlist 検証してからグループ化キーへ
+    使う。
+
+    戻り値: (groups, skipped)
+    """
+    groups = {}
+    skipped = []
+    for r in rows:
+        if r.get("task") != "infer_phases":
+            continue
+        device = r.get("device")
+        mode = r.get("mode")
+        size = r.get("size")
+        size_ok = _is_plain_number(size) and not _non_integral(size) and int(size) > 0
+        if (
+            not (isinstance(device, str) and device in DEVICE_ORDER)
+            or mode not in _INFER_PHASES_MODES
+            or not size_ok
+        ):
+            skipped.append(r)
+            continue
+        groups.setdefault((device, mode, int(size)), []).append(r)
+    return groups, skipped
+
+
+def _infer_phases_split_runs(group_rows, required):
+    """`_infer_phases_groups` が返した 1 グループの行を、実行単位ごとに
+    分割する。`_gemm_phases_split_runs` と同一の fail-closed 分割方針
+    （新しい run は `phase_index == 0` かつ直前までの run が `required`
+    の必須 phase 名・順序・件数を完全一致で満たす場合にのみ開始する）を
+    適用する。`required` が `None`（`_INFER_PHASES_REQUIRED_PHASES` に
+    存在しない `(mode, device_class)`）の場合は分割せず 1 run として
+    扱う（`_infer_phases_validate` 側の判定に委ねる）。
+
+    戻り値: [[row, ...], ...]（各要素が 1 実行分）
+    """
+    if required is None:
+        return [group_rows]
+
+    def _row_index(r):
+        idx = r.get("phase_index")
+        if _is_plain_number(idx) and not _non_integral(idx) and int(idx) >= 0:
+            return int(idx)
+        return None
+
+    def _is_complete_run(rows):
+        if len(rows) != len(required):
+            return False
+        indexed = []
+        for r in rows:
+            phase = r.get("phase")
+            idx = _row_index(r)
+            if idx is None or not _valid_phase_name(phase):
+                return False
+            indexed.append((idx, phase))
+        indexed.sort(key=lambda t: t[0])
+        if [i for i, _ in indexed] != list(range(len(required))):
+            return False
+        return tuple(p for _, p in indexed) == required
+
+    runs = []
+    current = []
+    for r in group_rows:
+        idx_key = _row_index(r)
+        if idx_key == 0 and current and _is_complete_run(current):
+            runs.append(current)
+            current = []
+        current.append(r)
+    if current:
+        runs.append(current)
+    return runs
+
+
+def _infer_phases_devices(groups):
+    """`_infer_phases_groups` が返した `groups` のキー
+    `(device, mode, size)` を DEVICE_ORDER → mode → size 昇順の順で返す。
+    """
+
+    def rank(key):
+        device, mode, size = key
+        device_rank = DEVICE_ORDER.index(device) if device in DEVICE_ORDER else len(DEVICE_ORDER)
+        mode_rank = _INFER_PHASES_MODES.index(mode) if mode in _INFER_PHASES_MODES else 99
+        return (device_rank, mode_rank, size)
+
+    return sorted(groups.keys(), key=rank)
+
+
+def _infer_phases_validate(group_rows, mode, device):
+    """1 つの `(device, mode, size)` グループ内の `infer_phases` 行を検証
+    する。`_gemm_phases_validate` と同じ検証方針を、`device_class`
+    （`_infer_phases_device_class`）で決まる必須 phase 集合へ適用する。
+    `device_class` が判定できない（allowlist 外）場合は必須 phase 集合
+    自体を判定不能として扱う（fail-closed。`phase_set_reason` へ反映）。
+
+    戻り値: (entries, invalid, iter_total_median, phase_set_reason)
+    """
+    invalid = False
+    keyed = {}
+    unresolved = []
+    for r in group_rows:
+        phase = r.get("phase")
+        phase_index = r.get("phase_index")
+        phase_ok = _valid_phase_name(phase)
+        index_ok = (
+            _is_plain_number(phase_index)
+            and not _non_integral(phase_index)
+            and int(phase_index) >= 0
+        )
+        if not phase_ok or not index_ok:
+            invalid = True
+            unresolved.append((phase if phase_ok else "?", r, "phase/phase_index が不正な値"))
+            continue
+        pi = int(phase_index)
+        if pi in keyed:
+            invalid = True
+            unresolved.append((phase, r, f"phase_index {pi} が重複"))
+            continue
+        keyed[pi] = (phase, r)
+
+    name_to_pis = {}
+    for pi, (phase, _r) in keyed.items():
+        name_to_pis.setdefault(phase, []).append(pi)
+    duplicate_names = {name for name, pis in name_to_pis.items() if len(pis) > 1}
+    if duplicate_names:
+        invalid = True
+
+    denom_pis = name_to_pis.get("iter_total", [])
+    if len(denom_pis) != 1:
+        invalid = True
+        iter_total_median = None
+    else:
+        iter_total_median = _safe_time_s(keyed[denom_pis[0]][1].get("median_s"))
+        if iter_total_median is None:
+            invalid = True
+
+    entries = []
+    for pi in sorted(keyed):
+        phase, r = keyed[pi]
+        time_validator = _safe_time_s if phase == "iter_total" else _safe_phase_time_s
+        median = time_validator(r.get("median_s"))
+        q1 = time_validator(r.get("q1_s"))
+        q3 = time_validator(r.get("q3_s"))
+        reason = None
+        if median is None or q1 is None or q3 is None:
+            reason = "時間値が不正な値"
+        if reason is None and r.get("mode") == "reuse" and _safe_time_s(r.get("init_s")) is None:
+            reason = "init_s が不正な値"
+        if reason is None and phase in duplicate_names:
+            reason = f"phase 名 '{phase}' が重複"
+        if (
+            reason is None
+            and iter_total_median is not None
+            and median is not None
+            and median > iter_total_median * (1.0 + 1e-9)
+        ):
+            reason = "iter_total 比が 100% を超過"
+        if reason is not None:
+            invalid = True
+        entries.append({"phase": phase, "median": median, "q1": q1, "q3": q3, "reason": reason})
+    for phase, r, reason in unresolved:
+        entries.append({"phase": phase, "median": None, "q1": None, "q3": None, "reason": reason})
+
+    phase_set_reason = None
+    device_class = _infer_phases_device_class(device)
+    required = _INFER_PHASES_REQUIRED_PHASES.get((mode, device_class))
+    if required is None:
+        phase_set_reason = (
+            f"device={device!r}/mode={mode!r} の必須 phase 集合を判定できない"
+        )
+        invalid = True
+    else:
+        # codex-review P2 指摘（PR #1229）: `actual_order`（名前を
+        # `phase_index` 昇順で並べたものが `required` と一致するか）
+        # だけでは、名前の相対順序さえ正しければ `phase_index` の実値
+        # （0 始まり連番）は検証されない。例えば phase_index に
+        # 10,11,12,13（相対順序は正しいが 0 始まり連番ではない）が
+        # 入っていても `actual_order` は変化しないため誤って有効判定
+        # してしまう。producer 側（`bench-fandhe --phases`）の契約は
+        # `phase_index` が `range(len(required))` の連番であることを
+        # 前提にしており（`_TRAIN_PHASES_REQUIRED_PHASES` 等と同じ
+        # 契約）、この前提を明示的に検証する。
+        actual_keys = sorted(keyed)
+        actual_order = tuple(keyed[pi][0] for pi in actual_keys)
+        keys_contiguous = actual_keys == list(range(len(required)))
+        if actual_order != required or not keys_contiguous:
+            invalid = True
+            missing = [p for p in required if p not in name_to_pis]
+            extra = [p for p in name_to_pis if p not in required]
+            details = []
+            if missing:
+                details.append(f"欠落: {', '.join(missing)}")
+            if extra:
+                details.append(f"未知: {', '.join(extra)}")
+            if actual_order == required and not keys_contiguous:
+                details.append(
+                    f"phase_index が 0 始まり連番でない（実際: {list(actual_keys)}）"
+                )
+            if not details:
+                details.append("phase の並び順が想定と不一致")
+            phase_set_reason = (
+                f"device={device!r}/mode={mode!r} の必須 phase 集合と不一致（{'; '.join(details)}）"
+            )
+
+    return entries, invalid, iter_total_median, phase_set_reason
+
+
+def _infer_phases_section(rel, rows):
+    """(c'') 節の Markdown 行を生成する。`infer_phases` 行が無ければ
+    `([], False)`（節自体を出力しない。`_gemm_phases_section`/
+    `_train_phases_section` と同じ方針）。
+    """
+    groups, skipped = _infer_phases_groups(rows)
+    if not groups and not skipped:
+        return [], False
+
+    lines = ["### (c'') 推論 1 反復のフェーズ分解（イシュー #1217）\n"]
+    any_invalid = False
+    for r in skipped:
+        any_invalid = True
+        print(
+            f"warning: {rel}: infer_phases 行の device={r.get('device')!r}/"
+            f"mode={r.get('mode')!r}/size={r.get('size')!r} が不正な値 — 集計対象外",
+            file=sys.stderr,
+        )
+    for device, mode, size in _infer_phases_devices(groups):
+        group_rows = groups[(device, mode, size)]
+        device_class = _infer_phases_device_class(device)
+        required = _INFER_PHASES_REQUIRED_PHASES.get((mode, device_class))
+        runs = _infer_phases_split_runs(group_rows, required)
+        multi_run = len(runs) > 1
+        for run_index, run_rows in enumerate(runs, start=1):
+            entries, invalid, iter_total_median, phase_set_reason = _infer_phases_validate(
+                run_rows, mode, device
+            )
+            any_invalid = any_invalid or invalid
+            device_label = DEVICE_LABEL.get(device, device or "?")
+            run_suffix = f" / run {run_index}/{len(runs)}" if multi_run else ""
+            lines.append(f"#### {device_label} / {mode} / batch={size}{run_suffix}\n")
+            if invalid:
+                for e in entries:
+                    if e["reason"] is not None:
+                        print(
+                            f"warning: {rel}: infer_phases {device}/{mode}/batch={size}{run_suffix}/"
+                            f"{e['phase']} — {e['reason']} — 無効データとして表示",
+                            file=sys.stderr,
+                        )
+                if iter_total_median is None:
+                    print(
+                        f"warning: {rel}: infer_phases {device}/{mode}/batch={size}{run_suffix} "
+                        "の iter_total 行が欠落または不正 — 比の算出不能",
+                        file=sys.stderr,
+                    )
+                if phase_set_reason is not None:
+                    print(
+                        f"warning: {rel}: infer_phases {device}/{mode}/batch={size}{run_suffix} "
+                        f"— {phase_set_reason}",
+                        file=sys.stderr,
+                    )
+            init_val = next(
+                (_safe_time_s(r.get("init_s")) for r in run_rows if r.get("init_s") is not None),
+                None,
+            )
+            if mode == "reuse":
+                init_col = fmt_ms(init_val) if init_val is not None else "無効な値"
+                lines.append(f"初期化(init_s): {init_col}\n")
+            lines.append("| フェーズ | 中央値 | Q1 | Q3 | iter_total 比 |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            median_total = 0.0
+            median_total_valid = bool(entries)
+            for e in entries:
+                phase_col = f"{e['phase']}（無効: {e['reason']}）" if e["reason"] else e["phase"]
+                median_col = fmt_ms(e["median"]) if e["median"] is not None else "無効な値"
+                q1_col = fmt_ms(e["q1"]) if e["q1"] is not None else "無効な値"
+                q3_col = fmt_ms(e["q3"]) if e["q3"] is not None else "無効な値"
+                if e["median"] is not None and iter_total_median is not None:
+                    ratio_col = f"{e['median'] / iter_total_median * 100:.1f}%"
+                else:
+                    ratio_col = "-"
+                lines.append(f"| {phase_col} | {median_col} | {q1_col} | {q3_col} | {ratio_col} |")
+                if e["phase"] != "iter_total":
+                    if e["median"] is None or e["reason"] is not None:
+                        median_total_valid = False
+                    else:
+                        median_total += e["median"]
+            if median_total_valid:
+                lines.append(
+                    f"\n- フェーズ合計（中央値の和。参考値: 中央値は加法的でないため "
+                    f"iter_total と一致しない場合がある）: {fmt_ms(median_total)}"
+                )
+            lines.append("")
+    return lines, any_invalid
+
+
 def section(path, rows):
     lines = []
     rel = os.path.relpath(path, HERE)
@@ -2615,6 +3004,214 @@ def section(path, rows):
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - | - |")
     lines.append("")
 
+    # (c') 推論スループット — デバイス常駐パラメータ・`predict_resident`
+    # reuse モード（イシュー #1217）。reuse 行が存在するファイルにのみ
+    # 出力する（(a')/(b') と同じく本フィールド追加前の JSONL では常に
+    # スキップ）。(b') と異なり infer は `throughput_per_s`（バッチ/秒）
+    # を持つため列に加える。fresh との checksum 突合規則は (b') と同一
+    # （`_reuse_row_invalid_reason`）。
+    has_infer_reuse_invalid = False
+    if any(r["task"] == "infer" and r["mode"] == "reuse" for r in rows):
+        lines.append(
+            "### (c') 推論スループット（デバイス常駐パラメータ・`predict_resident` reuse モード。イシュー #1217）\n"
+        )
+        lines.append(
+            "| デバイス | バッチ | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | バッチ/秒 | fresh 中央値（参考） | fresh/reuse 比 | checksum 突合（fresh） |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for device in devices_in(rows, "infer", mode="reuse"):
+            for fw in FRAMEWORKS:
+                # `get()` は同一キー（framework/task/device/mode）に
+                # 一致する最初の 1 行だけを返す。producer 側の重複バグ・
+                # JSONL の手組み改変で同一キーに正常行と checksum 不正・
+                # 不一致な壊れた行が混在した場合、出現順次第で後続の
+                # 壊れた行が検証を素通りし `--strict` が不正データを
+                # 通してしまう fail-open があった（codex-review P0 指摘・
+                # PR #1229。`_pick_row_for_gate` の重複キー検出と同じ
+                # 理由でここでも全一致行を集めて検証する）。
+                #
+                # 重複判定・fresh 突合は `size` ごとに独立して行う
+                # （codex-review P2 指摘・PR #1229 4 巡目: size を区別
+                # せずキー化すると、同一 framework/device に size=64 と
+                # size=128 の正常な計測が各 1 件あるだけで「重複キー」と
+                # 誤判定され `--strict` が正常データを不正データとして
+                # 弾いてしまう。`_reuse_row_invalid_reason`／
+                # `_pick_row_for_gate` は既に size 単位で契約されている
+                # ため、表示側もそれに揃える）。size が不正な値
+                # （`_valid_gate_size` 不合格）の行は `sizes` 集合化で
+                # 例外を招かないよう分離し、専用の無効グループとして
+                # まとめて表示する（一覧から黙って漏らさない）。
+                all_reuse_for_fw = [
+                    x
+                    for x in rows
+                    if x["framework"] == fw
+                    and x["task"] == "infer"
+                    and x["device"] == device
+                    and x["mode"] == "reuse"
+                    and (x.get("tf32", False) is True) is False
+                ]
+                if not all_reuse_for_fw:
+                    continue
+                sizes = sorted(
+                    {x["size"] for x in all_reuse_for_fw if _valid_gate_size(x.get("size"))}
+                )
+                invalid_size_reuse = [
+                    x for x in all_reuse_for_fw if not _valid_gate_size(x.get("size"))
+                ]
+                if invalid_size_reuse:
+                    has_infer_reuse_invalid = True
+                    lines.append(
+                        f"| {device} | - | {fw}（無効: size が不正な値 "
+                        f"{len(invalid_size_reuse)} 件） | - | 無効な値 | 無効な値 | "
+                        "無効な値 | 無効な値 | - | - | 突合不能（無効値） |"
+                    )
+                for size in sizes:
+                    reuse_matches = [x for x in all_reuse_for_fw if x.get("size") == size]
+                    r = reuse_matches[0]
+                    dup_reuse_count = len(reuse_matches)
+                    # fresh 側も `get()`（最初の一致行のみ）ではなく同一
+                    # size の全一致行を集める（codex-review P0 指摘・
+                    # PR #1229 3 巡目: reuse 側の重複はここまでで検証
+                    # 済みだが、fresh 側に同一キーの複数行〈checksum が
+                    # 食い違う〉が存在すると `get()` は先頭だけを見る
+                    # ため、たまたま先頭が reuse と一致すれば「一致」
+                    # 判定になり、後続の不一致な fresh 行が握りつぶされる
+                    # fail-open があった。`_reuse_row_invalid_reason` の
+                    # 同種検証〈同一 size の fresh 行が複数あれば判定
+                    # 不能〉と揃える）。
+                    fresh_matches = [
+                        x
+                        for x in rows
+                        if x["framework"] == fw
+                        and x["task"] == "infer"
+                        and x["device"] == device
+                        and x["mode"] == "fresh"
+                        and _valid_gate_size(x.get("size"))
+                        and x.get("size") == size
+                    ]
+                    dup_fresh_count = len(fresh_matches)
+                    fresh = fresh_matches[0] if fresh_matches else None
+                    # (b') と同一の理由（外部 JSONL 由来の値を未検証で使わない。
+                    # security.md A03）で全時間値・throughput・checksum を
+                    # 使用前に検証する。
+                    r_median = _safe_time_s(r.get("median_s"))
+                    r_q1 = _safe_time_s(r.get("q1_s"))
+                    r_q3 = _safe_time_s(r.get("q3_s"))
+                    r_init = _safe_time_s(r.get("init_s"))
+                    r_tps = _safe_finite_number(r.get("throughput_per_s"))
+                    r_checksum = _safe_finite_number(r.get("checksum"))
+
+                    init_col = fmt_ms(r_init) if r_init is not None else "-"
+                    median_col = fmt_ms(r_median) if r_median is not None else "無効な値"
+                    q1_col = fmt_ms(r_q1) if r_q1 is not None else "無効な値"
+                    q3_col = fmt_ms(r_q3) if r_q3 is not None else "無効な値"
+                    tps_col = fmt_tps(r_tps) if r_tps is not None and r_tps > 0 else "無効な値"
+
+                    fresh_median = _safe_time_s(fresh.get("median_s")) if fresh else None
+                    fresh_checksum = _safe_finite_number(fresh.get("checksum")) if fresh else None
+
+                    if fresh:
+                        fresh_col = fmt_ms(fresh_median) if fresh_median is not None else "計測不正"
+                        if fresh_median is not None and r_median is not None:
+                            ratio_col = f"{fresh_median / r_median:.2f} 倍"
+                        else:
+                            ratio_col = "-"
+                    else:
+                        fresh_col = "未計測"
+                        ratio_col = "-"
+
+                    row_invalid = (
+                        r_median is None
+                        or r_q1 is None
+                        or r_q3 is None
+                        or r_init is None
+                        or r_tps is None
+                        or r_tps <= 0
+                        or (fresh is not None and fresh_median is None)
+                        # 同一キーの重複行自体を無効条件に含める（後述の
+                        # 「全 reuse 行検証」コメント参照。`_pick_row_for_gate`
+                        # と同じく一意に選べない状態を判定不能＝無効として
+                        # fail-closed に扱う）。fresh 側の重複（`dup_fresh_
+                        # count > 1`）も突合先が一意に決まらない同種の
+                        # 判定不能条件として同様に扱う（codex-review P0 指摘・
+                        # PR #1229 3 巡目）。
+                        or dup_reuse_count > 1
+                        or dup_fresh_count > 1
+                    )
+
+                    if fresh:
+                        if r_checksum is None or fresh_checksum is None:
+                            match_col = "突合不能（無効値）"
+                            fw_col = f"{fw}（無効: checksum が不正な値）"
+                            row_invalid = True
+                            print(
+                                f"warning: {rel}: {fw}/{device}/infer/reuse の checksum が不正な値"
+                                "（非数値・NaN・Infinity 等）のため突合不能 — 無効データとして表示",
+                                file=sys.stderr,
+                            )
+                        elif checksums_match(r_checksum, fresh_checksum):
+                            match_col = "一致"
+                            fw_col = fw
+                        else:
+                            match_col = "不一致"
+                            fw_col = f"{fw}（無効: fresh と checksum 不一致）"
+                            row_invalid = True
+                            print(
+                                f"warning: {rel}: {fw}/{device}/infer/reuse の checksum "
+                                f"{r_checksum:.6f} が fresh {fresh_checksum:.6f} と不一致 "
+                                "— 無効データとして表示",
+                                file=sys.stderr,
+                            )
+                    else:
+                        # fresh 行が無い（突合対象なし）場合でも、reuse 自身の
+                        # checksum が有限値であることは fresh の有無と独立に
+                        # 検証する（codex-review P0 指摘・PR #1229: 旧実装は
+                        # この分岐で checksum を一切検証しておらず、checksum
+                        # が null/NaN でも `has_infer_reuse_invalid` が false の
+                        # まま `--strict` を通過していた。突合先が無いだけで
+                        # reuse 計測結果そのものの正当性は別問題であるため
+                        # fail-closed に検査する）。
+                        if r_checksum is None:
+                            match_col = "突合不能（無効値）"
+                            fw_col = f"{fw}（無効: checksum が不正な値）"
+                            row_invalid = True
+                            print(
+                                f"warning: {rel}: {fw}/{device}/infer/reuse の checksum が不正な値"
+                                "（非数値・NaN・Infinity 等） — 無効データとして表示",
+                                file=sys.stderr,
+                            )
+                        else:
+                            match_col = "突合不能"
+                            fw_col = fw
+
+                    # 重複キー（同一 framework/task/device/mode の行が複数）は
+                    # 上記 row_invalid へ既に含めているが、無効理由の注記が
+                    # 他の条件（checksum 不一致等）で既に埋まっていない場合に
+                    # 限り、重複であることを表示に明示する。
+                    if dup_reuse_count > 1 and "（無効" not in fw_col:
+                        fw_col = f"{fw}（無効: 重複キー {dup_reuse_count} 件）"
+                    if dup_fresh_count > 1 and "（無効" not in fw_col:
+                        fw_col = f"{fw}（無効: fresh 側重複キー {dup_fresh_count} 件）"
+
+                    if row_invalid:
+                        has_infer_reuse_invalid = True
+                        if "（無効" not in fw_col:
+                            fw_col = f"{fw}（無効: 時間値が不正な値）"
+
+                    lines.append(
+                        f"| {device} | {size} | {fw_col} | {init_col} | {median_col} | "
+                        f"{q1_col} | {q3_col} | {tps_col} | {fresh_col} | {ratio_col} | {match_col} |"
+                    )
+        lines.append("")
+
+    # (c'') 推論 1 反復のフェーズ分解（イシュー #1217。`bench-fandhe
+    # --task infer --phases` が出力する `task:"infer_phases"` 行）。
+    # (c)/(c') と独立の節で、(c)/(c') は `task == "infer"` のみを読むため
+    # 本節の追加による既存表への影響はない（`_gemm_phases_section` と
+    # 同型の独立性）。
+    infer_phases_lines, has_infer_phases_invalid = _infer_phases_section(rel, rows)
+    lines.extend(infer_phases_lines)
+
     lines.append("#### データ有効性（checksum 突合・要素単位検証。イシュー #965・#970）\n")
     # candidate_count<=1（この JSONL 内に比較対象となる他フレームワーク／
     # 他デバイス行が無い）の行は、値そのものは正当でも相互突合が原理的に
@@ -2700,6 +3297,8 @@ def section(path, rows):
         has_train_reuse_invalid,
         has_train_phases_invalid,
         has_gemm_phases_invalid,
+        has_infer_reuse_invalid,
+        has_infer_phases_invalid,
     )
 
 
@@ -2724,7 +3323,10 @@ def main():
             "要素単位検証を受けていない旧形式行（いずれもイシュー #970）・"
             "train reuse (b') の checksum 不一致／突合不能／時間値不正"
             "（イシュー #959）・train_phases (b'') の phase/phase_index 不正・"
-            "step_total 欠落／時間値不正（イシュー #1009）が1 件以上あれば"
+            "step_total 欠落／時間値不正（イシュー #1009）・infer reuse (c') の"
+            "checksum 不一致／突合不能／時間値不正・infer_phases (c'') の"
+            "phase/phase_index 不正・iter_total 欠落／時間値不正"
+            "（いずれもイシュー #1217）が1 件以上あれば"
             "終了コード 2 を返す（既定は 0 のまま警告のみ）"
         ),
     )
@@ -2754,6 +3356,8 @@ def main():
     any_train_reuse_invalid = False
     any_train_phases_invalid = False
     any_gemm_phases_invalid = False
+    any_infer_reuse_invalid = False
+    any_infer_phases_invalid = False
     gate_section_lines_by_file = []
     gate_records_all = []
     for path in inputs:
@@ -2807,6 +3411,8 @@ def main():
             has_train_reuse_invalid,
             has_train_phases_invalid,
             has_gemm_phases_invalid,
+            has_infer_reuse_invalid,
+            has_infer_phases_invalid,
         ) = section(path, rows)
         lines.extend(section_lines)
         any_checksum_mismatch = any_checksum_mismatch or has_mismatch
@@ -2815,6 +3421,8 @@ def main():
         any_train_reuse_invalid = any_train_reuse_invalid or has_train_reuse_invalid
         any_train_phases_invalid = any_train_phases_invalid or has_train_phases_invalid
         any_gemm_phases_invalid = any_gemm_phases_invalid or has_gemm_phases_invalid
+        any_infer_reuse_invalid = any_infer_reuse_invalid or has_infer_reuse_invalid
+        any_infer_phases_invalid = any_infer_phases_invalid or has_infer_phases_invalid
 
         # イシュー #1051: 目標達成ゲート。--target 指定時のみ計算する
         # （既存の呼び出し元は --target を渡さないため非破壊。モジュール
@@ -2926,6 +3534,8 @@ def main():
         or any_train_reuse_invalid
         or any_train_phases_invalid
         or any_gemm_phases_invalid
+        or any_infer_reuse_invalid
+        or any_infer_phases_invalid
     ) and args.strict:
         if any_checksum_mismatch:
             print(
@@ -2965,6 +3575,22 @@ def main():
                 "error: --strict: 1 件以上の gemm_phases 行が無効"
                 "（phase/phase_index の不正・重複・iter_total 欠落・"
                 "時間値の不正。イシュー #1182）",
+                file=sys.stderr,
+            )
+        if any_infer_reuse_invalid:
+            # (c') infer reuse の checksum 不一致・突合不能（無効値）・
+            # 時間値の無効値を fail-closed に --strict の失敗条件へ含める
+            # （(b') train reuse と同じ方針。イシュー #1217）。
+            print(
+                "error: --strict: 1 件以上の infer reuse 行が無効"
+                "（checksum 不一致・突合不能・時間値の不正。イシュー #1217）",
+                file=sys.stderr,
+            )
+        if any_infer_phases_invalid:
+            print(
+                "error: --strict: 1 件以上の infer_phases 行が無効"
+                "（phase/phase_index の不正・重複・iter_total 欠落・"
+                "必須 phase 集合との不一致・時間値の不正。イシュー #1217）",
                 file=sys.stderr,
             )
         # イシュー #1051 実装計画 §3: --strict の無効データ判定（終了コード

@@ -754,6 +754,15 @@ Issue に引き継ぐ（out-of-scope-tracking.md に従い、本 PR では新規
 起票・既存 Issue への付け替えは行わず、PR 本文に切り出し先として記載
 する）。
 
+**追記（イシュー #1217）**: 上記の制約はイシュー #1217 で解消済み。
+`bench-fandhe --task infer` に `--mode reuse`（`Sequential::
+predict_resident` 経由）と `--phases`（fresh/reuse 双方）を追加し、
+`phases_with_gemm_fresh_or_infer_is_measure_error` テストは `gemm --mode
+fresh` のみを拒否する `phases_with_gemm_fresh_is_measure_error` へ改名
+した（`--task infer --phases` は現在受理される）。M4 Max 実機初回実測は
+`docs/perf/infer-reuse-phase-breakdown.md` を参照（DGX Spark GB10 は
+未実測のまま記入欄を残している）。
+
 ## 14. 検証結果サマリ（v0.6.0 再計測）
 
 - `cargo tree -p bench-fandhe --depth 1 --locked`: 両環境とも

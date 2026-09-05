@@ -79,6 +79,17 @@ if [[ " ${BINS[*]} " == *" bench-fandhe "* ]]; then
     run bench-fandhe train "$dev" 64 fresh --phases
     run bench-fandhe train "$dev" 64 reuse --phases
   done
+  # (c') 推論 — デバイス常駐パラメータ更新モード（イシュー #1217）。上と
+  # 同じガード・同じ理由。
+  for dev in cuda cpu; do
+    run bench-fandhe infer "$dev" 64 reuse
+  done
+  # (c'') 推論 1 反復のフェーズ分解（イシュー #1217）。上と同じガード・
+  # 同じ理由。
+  for dev in cuda cpu; do
+    run bench-fandhe infer "$dev" 64 fresh --phases
+    run bench-fandhe infer "$dev" 64 reuse --phases
+  done
 fi
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"

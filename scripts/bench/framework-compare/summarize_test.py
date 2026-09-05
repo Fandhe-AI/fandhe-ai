@@ -198,17 +198,26 @@ def _gemm_phases_group(device="cuda", size=1024, init_s=0.05):
     return rows
 
 
-def _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0005, checksum=13.9):
-    """infer タスク（(c) 節）用の合成行（イシュー #1051 のゲート判定用）。
+def _infer_row(
+    framework="fandhe-ai",
+    device="cpu",
+    median_s=0.0005,
+    checksum=13.9,
+    mode="fresh",
+    init_s=None,
+):
+    """infer タスク（(c)/(c') 節）用の合成行（イシュー #1051 のゲート判定用・
+    イシュー #1217 で reuse 行にも対応）。
 
-    `_train_row` と異なり `throughput_per_s` を持ち `gflops`/`init_s` を
-    持たない（実データ形状。results/raw/*.jsonl の infer 行を参照）。
-    infer には reuse モード自体が無い（モジュール docstring 参照）ため
-    `mode` は常に "fresh" 固定とする。
+    `_train_row` と異なり `throughput_per_s` を持ち `gflops` を持たない
+    （実データ形状。results/raw/*.jsonl の infer 行を参照）。`mode="reuse"`
+    のとき `init_s`（既定 0.0002）を含める（`_train_row` の `init_s` 引数
+    と同型。省略時 `mode="fresh"` は `init_s` キー自体を持たない、実際の
+    `bench_common::Record::to_json_line` の `init_s: None` 省略と対応）。
     """
-    return {
+    row = {
         "framework": framework,
-        "version": "0.4.0",
+        "version": "0.6.0",
         "task": "infer",
         "device": device,
         "size": 64,
@@ -219,8 +228,54 @@ def _infer_row(framework="fandhe-ai", device="cpu", median_s=0.0005, checksum=13
         "checksum": checksum,
         "warmup": 20,
         "iters": 20,
-        "mode": "fresh",
+        "mode": mode,
     }
+    if mode == "reuse":
+        row["init_s"] = 0.0002 if init_s is None else init_s
+    return row
+
+
+def _infer_phases_row(device, mode, phase, phase_index, median_s, init_s=0.0002):
+    """`infer_phases` タスク（(c'') 節。イシュー #1217）用の合成行。
+
+    `_gemm_phases_row` と同型だが `mode` が `"fresh"`/`"reuse"` の双方を
+    取りうる（`_GEMM_PHASES_REQUIRED_PHASES` は `"reuse"` 固定だが
+    `_INFER_PHASES_REQUIRED_PHASES` は `(mode, device_class)` キー）。
+    `init_s` は reuse 行にのみ含める。
+    """
+    row = {
+        "framework": "fandhe-ai",
+        "version": "0.6.0",
+        "task": "infer_phases",
+        "device": device,
+        "size": 64,
+        "median_s": median_s,
+        "q1_s": median_s * 0.9,
+        "q3_s": median_s * 1.1,
+        "checksum": 13.9,
+        "warmup": 20,
+        "iters": 20,
+        "mode": mode,
+        "phase": phase,
+        "phase_index": phase_index,
+    }
+    if mode == "reuse":
+        row["init_s"] = init_s
+    return row
+
+
+def _infer_phases_group(device="cpu", mode="fresh"):
+    """1 反復分の典型的な infer_phases 行グループを構成する
+    （`_gemm_phases_group` と同じ理由）。`device_class` は `device` から
+    `summarize._infer_phases_device_class` で決まる。
+    """
+    device_class = summarize._infer_phases_device_class(device)
+    phases = summarize._INFER_PHASES_REQUIRED_PHASES[(mode, device_class)]
+    rows = []
+    for phase_index, phase in enumerate(phases):
+        median_s = 0.001 if phase == "iter_total" else 0.0001
+        rows.append(_infer_phases_row(device, mode, phase, phase_index, median_s))
+    return rows
 
 
 class ParityStatusTests(unittest.TestCase):
@@ -527,14 +582,14 @@ class SectionRenderingTests(unittest.TestCase):
         rows = [dict(_with_parity(_base_row()), size=["not", "hashable"])]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, _, _, _, _, _, _ = summarize.section("dummy.jsonl", rows)  # 例外を送出しないこと
+            lines, _, _, _, _, _, _, _, _ = summarize.section("dummy.jsonl", rows)  # 例外を送出しないこと
         self.assertIn("### (a) GEMM", "\n".join(lines))
 
     def test_fail_row_marked_invalid_with_dash_gflops(self):
         rows = [_with_parity(_base_row(), fail_count=5, max_abs_err=1.2e-3, max_rel_err=4.5e-2)]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, has_checksum_mismatch, has_parity_failure, _, _, _, _ = summarize.section(
+            lines, has_checksum_mismatch, has_parity_failure, _, _, _, _, _, _ = summarize.section(
                 "dummy.jsonl", rows
             )
         text = "\n".join(lines)
@@ -579,7 +634,7 @@ class SectionRenderingTests(unittest.TestCase):
 
     def test_ok_row_not_marked_invalid(self):
         rows = [_with_parity(_base_row())]
-        lines, has_checksum_mismatch, has_parity_failure, _, _, _, _ = summarize.section(
+        lines, has_checksum_mismatch, has_parity_failure, _, _, _, _, _, _ = summarize.section(
             "dummy.jsonl", rows
         )
         text = "\n".join(lines)
@@ -589,7 +644,7 @@ class SectionRenderingTests(unittest.TestCase):
 
     def test_old_format_row_reported_as_unverified_not_invalid(self):
         rows = [_base_row()]
-        lines, has_checksum_mismatch, has_parity_failure, has_unverified, _, _, _ = (
+        lines, has_checksum_mismatch, has_parity_failure, has_unverified, _, _, _, _, _ = (
             summarize.section("dummy.jsonl", rows)
         )
         text = "\n".join(lines)
@@ -611,7 +666,7 @@ class SectionRenderingTests(unittest.TestCase):
                 fail_count=1,  # かつ要素誤差超過
             ),
         ]
-        lines, has_checksum_mismatch, has_parity_failure, _, _, _, _ = summarize.section(
+        lines, has_checksum_mismatch, has_parity_failure, _, _, _, _, _, _ = summarize.section(
             "dummy.jsonl", rows
         )
         text = "\n".join(lines)
@@ -631,7 +686,7 @@ class SectionRenderingTests(unittest.TestCase):
         rows = [row]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, _, has_parity_failure, _, _, _, _ = summarize.section("dummy.jsonl", rows)
+            lines, _, has_parity_failure, _, _, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertTrue(has_parity_failure)
         self.assertIn("(a')", text)
@@ -643,7 +698,7 @@ class SectionRenderingTests(unittest.TestCase):
         row = _with_parity(_base_row(mode="reuse"))
         row["init_s"] = 0.01
         rows = [row]
-        lines, _, has_parity_failure, _, _, _, _ = summarize.section("dummy.jsonl", rows)
+        lines, _, has_parity_failure, _, _, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertFalse(has_parity_failure)
         self.assertIn("(a')", text)
@@ -854,7 +909,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", checksum=0.08),
             _train_row(mode="reuse", checksum=999.0),
         ]
-        *_, has_train_reuse_invalid, _, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_invalid_checksum_as_invalid(self):
@@ -862,7 +917,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", median_s=0.02, checksum=float("inf")),
             _train_row(mode="reuse", median_s=0.01, checksum=0.08054),
         ]
-        *_, has_train_reuse_invalid, _, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_invalid_median_as_invalid(self):
@@ -870,7 +925,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
             _train_row(mode="reuse", median_s=-0.01, checksum=0.08054),
         ]
-        *_, has_train_reuse_invalid, _, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_does_not_flag_ok_train_reuse_row(self):
@@ -878,7 +933,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
             _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
         ]
-        *_, has_train_reuse_invalid, _, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertFalse(has_train_reuse_invalid)
 
     def test_section_does_not_flag_train_reuse_row_without_fresh(self):
@@ -889,7 +944,7 @@ class TrainReuseSectionTests(unittest.TestCase):
         # 検証は下の `test_section_flags_train_reuse_missing_init_s_as_invalid`
         # に分離。イシュー #959 codex-review 2 巡目 P0 指摘）。
         rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005)]
-        *_, has_train_reuse_invalid, _, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertFalse(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_missing_init_s_as_invalid(self):
@@ -898,12 +953,12 @@ class TrainReuseSectionTests(unittest.TestCase):
         # だが、旧実装は表示列（"-"）にのみ反映し `has_train_reuse_invalid`
         # へ反映していなかったため `--strict` が fail-open だった。
         rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=None)]
-        *_, has_train_reuse_invalid, _, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_invalid_init_s_as_invalid(self):
         rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=-1.0)]
-        *_, has_train_reuse_invalid, _, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_invalid_fresh_median_as_invalid(self):
@@ -918,7 +973,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", median_s=float("nan"), checksum=0.08054),
             _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
         ]
-        *_, has_train_reuse_invalid, _, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_main_strict_exit_code_reflects_train_reuse_missing_init_s(self):
@@ -1050,7 +1105,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows = [r for r in _train_phases_group() if r["phase"] != "step_total"]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("step_total", buf.getvalue())
 
@@ -1071,7 +1126,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows[0]["q3_s"] = 0.0
         buf_err = io.StringIO()
         with contextlib.redirect_stderr(buf_err):
-            lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertFalse(has_train_phases_invalid)
         text = "\n".join(lines)
         self.assertIn("0.0 µs", text)
@@ -1087,7 +1142,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
                 r["median_s"] = 0.0
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
 
     def test_init_s_zero_is_still_invalid(self):
@@ -1096,7 +1151,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows = _train_phases_group(device="cpu", mode="reuse", init_s=0.0)
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
 
     def test_phase_negative_median_is_still_invalid(self):
@@ -1105,7 +1160,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows[0]["median_s"] = -0.0001
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
 
     def test_phase_nan_median_is_still_invalid(self):
@@ -1114,7 +1169,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows[0]["median_s"] = float("nan")
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
 
     def test_safe_phase_time_s_accepts_zero_rejects_invalid(self):
@@ -1139,7 +1194,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows = [r for r in _train_phases_group(mode="fresh") if r["phase"] != "backward"]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("必須 phase 集合と不一致", buf.getvalue())
         self.assertIn("backward", buf.getvalue())
@@ -1169,7 +1224,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows = rows + [extra]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("必須 phase 集合と不一致", buf.getvalue())
 
@@ -1179,7 +1234,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows[1]["phase_index"] = rows[0]["phase_index"]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("重複", "\n".join(lines))
 
@@ -1187,7 +1242,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows = _train_phases_group()
         rows[0] = dict(rows[0])
         rows[0]["phase"] = 123
-        *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
 
     def test_phase_with_markdown_injection_chars_is_invalid(self):
@@ -1199,7 +1254,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows[0]["phase"] = "tape_build|injected\n# hijacked heading"
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         text = "\n".join(lines)
         self.assertNotIn("injected", text)
@@ -1214,7 +1269,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows[0]["device"] = ["cpu"]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("(b'')", "\n".join(lines))
 
@@ -1224,7 +1279,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows[0]["mode"] = "evil"
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("(b'')", "\n".join(lines))
 
@@ -1239,7 +1294,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows = rows + [extra]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         text = "\n".join(lines)
         self.assertIn("重複", text)
@@ -1251,14 +1306,14 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows = _train_phases_group()
         rows[0] = dict(rows[0])
         rows[0]["phase_index"] = -1
-        *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
 
     def test_non_finite_median_is_invalid(self):
         rows = _train_phases_group()
         rows[1] = dict(rows[1])
         rows[1]["median_s"] = float("nan")
-        lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+        lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("無効な値", "\n".join(lines))
 
@@ -1266,7 +1321,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows = _train_phases_group(mode="reuse", init_s=0.001)
         rows[1] = dict(rows[1])
         del rows[1]["init_s"]
-        *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+        *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
 
     def test_phase_median_exceeding_step_total_is_invalid(self):
@@ -1277,7 +1332,7 @@ class TrainPhasesSectionTests(unittest.TestCase):
         rows[1]["median_s"] = rows[-1]["median_s"] * 2  # step_total の 2 倍
         rows[1]["q1_s"] = rows[1]["median_s"] * 0.9
         rows[1]["q3_s"] = rows[1]["median_s"] * 1.1
-        lines, *_, has_train_phases_invalid, _ = summarize.section("dummy.jsonl", rows)
+        lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("100% を超過", "\n".join(lines))
 
@@ -1385,7 +1440,7 @@ class GemmPhasesSectionTests(unittest.TestCase):
         )
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, *_, has_gemm_phases_invalid = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_gemm_phases_invalid, _, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertFalse(has_gemm_phases_invalid)
         self.assertEqual(buf.getvalue(), "")
@@ -1417,7 +1472,7 @@ class GemmPhasesSectionTests(unittest.TestCase):
         ]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, *_, has_gemm_phases_invalid = summarize.section("dummy.jsonl", rows)
+            lines, *_, has_gemm_phases_invalid, _, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertTrue(has_gemm_phases_invalid)
         self.assertIn("重複", buf.getvalue())
@@ -1439,7 +1494,7 @@ class GemmPhasesSectionTests(unittest.TestCase):
         rows = [r for r in _gemm_phases_group() if r["phase"] != "iter_total"]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            *_, has_gemm_phases_invalid = summarize.section("dummy.jsonl", rows)
+            *_, has_gemm_phases_invalid, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_gemm_phases_invalid)
         self.assertIn("iter_total", buf.getvalue())
 
@@ -1457,7 +1512,7 @@ class GemmPhasesSectionTests(unittest.TestCase):
                 r["median_s"] = 1.0  # iter_total（0.01）を大幅に超過
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            *_, has_gemm_phases_invalid = summarize.section("dummy.jsonl", rows)
+            *_, has_gemm_phases_invalid, _, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_gemm_phases_invalid)
 
     def test_gemm_phases_does_not_affect_gemm_section(self):
@@ -1474,6 +1529,323 @@ class GemmPhasesSectionTests(unittest.TestCase):
         self.assertFalse(has_parity_failure)
         self.assertIn("### (a) GEMM", text)
         self.assertIn("(a'')", text)
+
+
+class InferReuseSectionTests(unittest.TestCase):
+    """(c') infer reuse 節の集計（イシュー #1217）。`TrainReuseSectionTests`
+    と同型の検証を `_reuse_row_invalid_reason` の一般化（train/infer 共通
+    ロジック）に対して行う。
+    """
+
+    def test_no_infer_reuse_rows_omits_section(self):
+        rows = [_infer_row(mode="fresh")]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertNotIn("(c')", text)
+
+    def test_reuse_row_renders_init_throughput_and_fresh_reference(self):
+        rows = [
+            _infer_row(mode="fresh", median_s=0.001, checksum=13.9),
+            _infer_row(mode="reuse", median_s=0.0005, checksum=13.9, init_s=0.02),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(c')", text)
+        self.assertIn("20.000 ms", text)  # init_s=0.02 の fmt_ms 表示
+        self.assertIn("2.00 倍", text)  # fresh 0.001 / reuse 0.0005
+        # (c') 表の行（size 列追加後は 11 列＝"|" 12 個）を fresh 表
+        # (c. 6 列＝"|" 7 個) と区別する（codex-review P2 指摘・PR #1229:
+        # size 列を追加し異なるバッチサイズを区別できるようにした）。
+        c_prime_row = next(
+            line for line in lines if line.startswith("| cpu |") and line.count("|") == 12
+        )
+        self.assertIn("一致", c_prime_row)
+        self.assertIn("2000", c_prime_row)  # throughput_per_s = 1/0.0005
+
+    def test_reuse_row_without_fresh_shows_unmeasured(self):
+        rows = [_infer_row(mode="reuse", init_s=0.02)]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(c')", text)
+        self.assertIn("未計測", text)
+        self.assertIn("突合不能", text)
+
+    def test_reuse_checksum_mismatch_marked_invalid(self):
+        rows = [
+            _infer_row(mode="fresh", checksum=13.9),
+            _infer_row(mode="reuse", checksum=99.0),
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("無効: fresh と checksum 不一致", text)
+        self.assertIn("不一致", buf.getvalue())
+
+    def test_section_flags_infer_reuse_checksum_mismatch_as_invalid(self):
+        rows = [
+            _infer_row(mode="fresh", checksum=13.9),
+            _infer_row(mode="reuse", checksum=99.0),
+        ]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_reuse_invalid)
+
+    def test_section_does_not_flag_ok_infer_reuse_row(self):
+        rows = [
+            _infer_row(mode="fresh", median_s=0.001, checksum=13.9),
+            _infer_row(mode="reuse", median_s=0.0005, checksum=13.9, init_s=0.02),
+        ]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_infer_reuse_invalid)
+
+    def test_section_does_not_flag_infer_reuse_row_without_fresh(self):
+        # fresh 欠落のみ（比較対象なしで突合不能）は値そのものの正当性を
+        # 否定しないため無効扱いにしない（(b') と同方針）。
+        rows = [_infer_row(mode="reuse", init_s=0.02)]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_infer_reuse_invalid)
+
+    def test_section_flags_infer_reuse_row_with_invalid_checksum_without_fresh(self):
+        # codex-review P0 指摘（PR #1229）: fresh 行が存在しない場合でも
+        # reuse 自身の checksum が非数値・NaN・Infinity 等で不正なら、
+        # fresh の有無と独立に無効判定に含めなければならない。旧実装は
+        # `if fresh:` 分岐の内側でしか checksum を検証しておらず、fresh
+        # 欠落時は checksum が不正でも `has_infer_reuse_invalid` が
+        # false のまま `--strict` を通過していた。
+        rows = [_infer_row(mode="reuse", checksum=float("nan"), init_s=0.02)]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertTrue(has_infer_reuse_invalid)
+        self.assertIn("無効: checksum が不正な値", text)
+
+    def test_section_flags_duplicate_infer_reuse_rows_as_invalid(self):
+        # codex-review P0 指摘（PR #1229）: `get()` は同一キー
+        # （framework/task/device/mode）に一致する最初の 1 行だけを返す
+        # ため、正常な reuse 行の後に checksum 不一致の壊れた reuse 行が
+        # 続いても後続行は一切検証されず `--strict` が不正データを通して
+        # いた。同一キーの重複自体を無効条件に含める（`_pick_row_for_gate`
+        # の重複キー検出と同じ fail-closed 方針）。
+        rows = [
+            _infer_row(mode="fresh", checksum=13.9),
+            _infer_row(mode="reuse", median_s=0.0005, checksum=13.9, init_s=0.02),
+            _infer_row(mode="reuse", median_s=0.0005, checksum=999.0, init_s=0.02),
+        ]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_reuse_invalid)
+
+    def test_section_does_not_flag_different_size_infer_reuse_rows_as_duplicate(self):
+        # codex-review P2 指摘（PR #1229 4 巡目）: reuse_matches/
+        # fresh_matches が size を区別せずキー化していたため、同一
+        # framework/device に size=64 と size=128 の正常な計測が各 1 件
+        # あるだけで「重複キー」と誤判定され `--strict` が正常データを
+        # 不正データとして弾いてしまっていた。size ごとに独立してキー化
+        # した後は、両 size とも正常なら無効判定されないことを確認する。
+        rows = [
+            dict(_infer_row(mode="fresh", checksum=1.0), size=64),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=1.0, init_s=0.02),
+                size=64,
+            ),
+            dict(_infer_row(mode="fresh", checksum=2.0), size=128),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=2.0, init_s=0.02),
+                size=128,
+            ),
+        ]
+        lines, *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_infer_reuse_invalid)
+        text = "\n".join(lines)
+        self.assertNotIn("重複キー", text)
+
+    def test_section_still_flags_same_size_duplicate_infer_reuse_rows_as_invalid(self):
+        # 上記の size 分離が本来の重複検出（同一 size 内の重複）を
+        # 無効化していないことを確認する回帰テスト。
+        rows = [
+            dict(_infer_row(mode="fresh", checksum=1.0), size=64),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=1.0, init_s=0.02),
+                size=64,
+            ),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=999.0, init_s=0.02),
+                size=64,
+            ),
+        ]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_reuse_invalid)
+
+    def test_infer_reuse_rows_do_not_affect_gemm_or_train_sections(self):
+        gemm_rows = [_with_parity(_base_row())]
+        train_rows = [_train_row(mode="fresh")]
+        infer_reuse_rows = [
+            _infer_row(mode="fresh", checksum=13.9),
+            _infer_row(mode="reuse", checksum=13.9, init_s=0.02),
+        ]
+        lines, has_checksum_mismatch, has_parity_failure, *_ = summarize.section(
+            "dummy.jsonl", gemm_rows + train_rows + infer_reuse_rows
+        )
+        text = "\n".join(lines)
+        self.assertFalse(has_checksum_mismatch)
+        self.assertFalse(has_parity_failure)
+        self.assertIn("### (a) GEMM", text)
+        self.assertIn("(c')", text)
+
+    def test_pick_row_for_gate_prefers_infer_reuse(self):
+        # `_pick_row_for_gate` は gemm/train と同様 infer でも reuse を
+        # 優先する（イシュー #1217 でモードループ自体は変更していない
+        # ため、reuse 行の存在だけで自然に優先される想定を固定する）。
+        rows = [
+            _infer_row(mode="fresh", median_s=0.001, checksum=13.9),
+            _infer_row(mode="reuse", median_s=0.0004, checksum=13.9, init_s=0.02),
+        ]
+        row, mode, dup_reason, used_tf32 = summarize._pick_row_for_gate(
+            rows, "fandhe-ai", "infer", "cpu", 64
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(mode, "reuse")
+        self.assertIsNone(dup_reason)
+        self.assertFalse(used_tf32)
+
+    def test_section_flags_duplicate_infer_fresh_rows_as_invalid(self):
+        # codex-review P0 指摘（PR #1229 3 巡目）: fresh 側の取得に
+        # `get()`（最初に一致した行だけを返す）を使っていたため、同一
+        # キー（framework/task/device/mode）の fresh 行が複数存在すると
+        # 先頭の 1 行だけが reuse と突合され、残りの不一致な fresh 行が
+        # 握りつぶされていた。checksum が一致する fresh 行を先頭、不一致
+        # な fresh 行を 2 番目に置いても「一致」側へすり抜けず無効判定に
+        # なることを確認する（`_reuse_row_invalid_reason` の同種検証と
+        # 揃える）。
+        rows = [
+            _infer_row(mode="fresh", checksum=13.9, median_s=0.001),
+            _infer_row(mode="fresh", checksum=999.0, median_s=0.0011),
+            _infer_row(mode="reuse", checksum=13.9, median_s=0.0005, init_s=0.02),
+        ]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_reuse_invalid)
+
+    def test_target_gate_infer_reuse_invalid_checksum_without_fresh_is_undeterminable(self):
+        # codex-review P0 指摘（PR #1229 3 巡目）: `_reuse_row_invalid_
+        # reason`（`target_gate` が `_gate_row_invalid_reason` 経由で
+        # infer reuse 行の有効性判定に使う）は、fresh 行が存在しない
+        # 場合に checksum 検証前に `None`（有効）を返していたため、
+        # checksum が不正な reuse 行と正常な target（candle）行を
+        # 組み合わせると「達成」と誤判定していた。fresh 欠落時も
+        # reuse 自身の checksum を検証し判定不能へ倒すことを確認する。
+        rows = [
+            _infer_row(
+                framework="fandhe-ai",
+                mode="reuse",
+                checksum=float("nan"),
+                median_s=0.0001,
+                init_s=0.02,
+            ),
+            _infer_row(framework="candle", mode="fresh", median_s=0.03),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "infer" and r["size"] == 64)
+        self.assertEqual(rec["status"], "undeterminable")
+        self.assertIn("無効データ", rec["reason"])
+
+
+class InferPhasesSectionTests(unittest.TestCase):
+    """(c'') infer_phases 節の集計（イシュー #1217）。`GemmPhasesSectionTests`
+    と同型の検証を `(mode, device_class)` ごとに異なる必須 phase 集合へ
+    適用する。
+    """
+
+    def test_no_infer_phases_rows_omits_section(self):
+        rows = [_infer_row(mode="fresh")]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertNotIn("(c'')", text)
+
+    def test_fresh_cpu_group_renders_without_init_s(self):
+        rows = _infer_phases_group(device="cpu", mode="fresh")
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(c'')", text)
+        self.assertIn("CPU / fresh / batch=64", text)
+        self.assertIn("predict", text)
+        self.assertNotIn("初期化(init_s)", text)
+        self.assertNotIn("無効", text)
+
+    def test_fresh_gpu_group_includes_leaf_register_and_forward(self):
+        rows = _infer_phases_group(device="metal", mode="fresh")
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("Metal / fresh / batch=64", text)
+        self.assertIn("leaf_register", text)
+        self.assertIn("forward", text)
+        self.assertIn("to_tensor", text)
+
+    def test_reuse_group_renders_with_init_s(self):
+        rows = _infer_phases_group(device="cpu", mode="reuse")
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("CPU / reuse / batch=64", text)
+        self.assertIn("predict_resident", text)
+        self.assertIn("初期化(init_s)", text)
+        self.assertNotIn("無効", text)
+
+    def test_missing_iter_total_is_invalid_and_strict_fails(self):
+        rows = [r for r in _infer_phases_group(device="cpu", mode="fresh") if r["phase"] != "iter_total"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_infer_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_phases_invalid)
+        self.assertIn("iter_total", buf.getvalue())
+
+    def test_phase_set_mismatch_between_device_classes_is_invalid(self):
+        # cpu fresh の必須 phase 集合（predict/host_copy/checksum/
+        # iter_total）を gpu device のラベル付きで出す（欠落: leaf_register/
+        # forward/to_tensor）と不一致検出される。
+        rows = _infer_phases_group(device="cpu", mode="fresh")
+        for r in rows:
+            r["device"] = "metal"
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_infer_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_phases_invalid)
+        self.assertIn("必須 phase 集合と不一致", buf.getvalue())
+
+    def test_phase_sum_exceeding_iter_total_is_invalid(self):
+        rows = [dict(r) for r in _infer_phases_group(device="cpu", mode="fresh")]
+        for r in rows:
+            if r["phase"] == "predict":
+                r["median_s"] = 1.0  # iter_total（0.001）を大幅に超過
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_infer_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_phases_invalid)
+
+    def test_phase_index_non_contiguous_offset_is_invalid(self):
+        # codex-review P2 指摘（PR #1229）: `phase_index` の相対順序（名前の
+        # 並び順）が `required` と一致していても、実際の値が 0 始まりの
+        # 連番（`range(len(required))`）でなければ不正とみなす。旧実装は
+        # `actual_order`（sorted(keyed) で並べた名前列）のみを見ており、
+        # phase_index に 10,11,12,... のような一律オフセットが入っていても
+        # 名前の相対順序さえ保たれていれば誤って有効判定していた。
+        rows = [dict(r) for r in _infer_phases_group(device="cpu", mode="fresh")]
+        for r in rows:
+            r["phase_index"] += 10
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_infer_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_phases_invalid)
+        self.assertIn("0 始まり連番でない", buf.getvalue())
+
+    def test_infer_phases_does_not_affect_infer_section(self):
+        # イシュー #1217: `infer_phases` 行の追加が既存 (c)/(c') 節・
+        # ゲート判定（`task == "infer"` のみ読む）に一切影響しないことを
+        # 固定する（`_gemm_phases_section` と同型の独立性テスト）。
+        infer_rows = [_infer_row(mode="fresh")]
+        phases_rows = _infer_phases_group(device="cpu", mode="fresh")
+        lines, *_ = summarize.section("dummy.jsonl", infer_rows + phases_rows)
+        text = "\n".join(lines)
+        self.assertIn("### (c) 推論スループット", text)
+        self.assertIn("(c'')", text)
 
 
 class MainStrictExitCodeTests(unittest.TestCase):
@@ -1621,6 +1993,25 @@ class TargetGateTests(unittest.TestCase):
         # gemm と同じ経路で実データの size（`_infer_row` 既定 64）を
         # 列挙するため `None` 固定ではなくなった。
         self.assertEqual(rec["size"], 64)
+
+    def test_infer_reuse_gate_rejects_invalid_throughput_even_if_faster(self):
+        # codex-review P0 指摘（PR #1229 4 巡目）: `_reuse_row_invalid_
+        # reason` は throughput_per_s を検証していなかったため、時間値・
+        # checksum が正常でも throughput_per_s が不正な reuse 行を
+        # `target_gate` が「達成」と誤判定しうる。`--target` 側より
+        # median_s が明確に小さい（=「達成」条件を満たす）infer reuse 行
+        # の throughput_per_s だけを不正値にしても、undeterminable として
+        # fail-closed に扱われることを確認する。
+        rows = [
+            dict(
+                _infer_row(framework="fandhe-ai", mode="reuse", median_s=0.0001, init_s=0.001),
+                throughput_per_s=None,
+            ),
+            _infer_row(framework="candle", mode="fresh", median_s=0.002),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "infer")
+        self.assertEqual(rec["status"], "undeterminable")
 
     def test_train_undeterminable_when_target_unmeasured(self):
         rows = [_train_row(framework="fandhe-ai", device="cuda")]
