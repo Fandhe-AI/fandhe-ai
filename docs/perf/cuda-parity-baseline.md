@@ -1833,8 +1833,8 @@ DGX Spark GB10（sm_121・CUDA 13.0）。release ビルド・`--test-threads=1`�
 更新は実機実測値のみ・人間承認必須」を満たしており、`None` → `Some` は
 既存の fail_count・mean_abs_diff 判定を緩めるものではなく、非後退検査
 （検査 5 項目のうち項目 4・5）を新たに有効化する厳格化である。2 項目目
-（`specialized_mma_parity.rs` 256×512×1024 ケース）は引き続き未実施
-（§13 で別途対応・扱いは変更なし）。`MMA_PRIORITY_PRODUCTION_ENABLED` の
+（`specialized_mma_parity.rs` 256×512×1024 ケース）はイシュー #1161
+（PR #1194）で対応済み（詳細は §13）。`MMA_PRIORITY_PRODUCTION_ENABLED` の
 `true` 復帰は本反映のスコープ外（イシュー #1191 が担当）。
 
 ### 12.6 イシュー #1160 での本番結線後の状態（相互参照）
