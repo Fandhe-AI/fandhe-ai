@@ -113,7 +113,7 @@
 
 ### 5.6 `Op::ResidentLeaf` との関係
 
-`Op::ResidentLeaf`（イシュー #1022。デバイス常駐パラメータの葉）は本設計の対象外とする。既に独立した縮小実装（§2 先行事例）を持つ別経路であり、本設計判断が扱う「非学習な**入力**（活性化データ x）」とは異なる（`Op::ResidentLeaf` は重みという学習対象そのものであり、`requires_grad` は常に `true` を維持する。省略されるのは d_weight の**計算**ではなく、常駐経路〈`ResidentResolver::fill_resident_weight_grad`〉が成功した場合の**ホスト側 `Gradients` への格納**のみである。d_weight 自体は `ops.gemm_fp32_strict(&x_t, g)` で常に計算される〈`crates/autodiff/src/grad.rs:208` 付近の `Op::LinearResident` 実装。`filled_resident` が `true` の場合のみ `contributions` へ含めず `Gradients::get` からは「未到達」と区別できなくなる〉。これは opt-in ではなく無条件の縮小実装である点も本設計判断の opt-in 方式とは異なる）。
+`Op::ResidentLeaf`（イシュー #1022。デバイス常駐パラメータの葉）は本設計の対象外とする。既に独立した縮小実装（§2 先行事例）を持つ別経路であり、本設計判断が扱う「非学習な**入力**（活性化データ x）」とは異なる（`Op::ResidentLeaf` は重みという学習対象そのものであり、`requires_grad` は常に `true` を維持する。省略されるのは d_weight の**計算**ではなく、常駐経路〈`ResidentResolver::fill_resident_weight_grad`〉が成功した場合の**ホスト側 `Gradients` への格納**のみである。d_weight は必ず 2 択のいずれかの経路で計算される〈`crates/autodiff/src/grad.rs:338-345` 付近の `Op::LinearResident` 実装〉: まず `resident.fill_resident_weight_grad(..)` を試み、成功時（`filled_resident == true`。バックエンドが `gemm_fp32_strict_into`／`MemoryOps` を実装する場合のみ）は同メソッド内部で `DeviceParamStore` が `gemm_fp32_strict_into` を使い常駐 grad staging へ直接書き込む（`contributions` へは含めない）。失敗時（`Ok(false)`。現時点で CUDA／Metal はここに該当する）はホスト経路 `ops.gemm_fp32_strict(&x_t, g)` へフォールバックし、通常どおり `contributions` へ含める。いずれの経路でも `filled_resident` が `true` の場合のみ `Gradients::get` からは「未到達」と区別できなくなる〉。これは opt-in ではなく無条件の縮小実装である点も本設計判断の opt-in 方式とは異なる）。
 
 ## 6. 数値一致・既存テストとの整合
 
