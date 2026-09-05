@@ -50,15 +50,16 @@ pub struct Gradients {
     /// この `Gradients` を生んだ backward 呼び出しが resident 勾配経路
     /// （[`ResidentResolver::fill_resident_weight_grad`]）を使った場合、
     /// `resolver.resident_backward_fingerprint()`（`(store_id,
-    /// backward_serial)`）をそのまま保持する（resolver を使わない
-    /// 素の `Tape::backward` では `None`）。イシュー #1212 の
-    /// codex-review P0 是正: `DeviceParamStore::step` がこの値を
-    /// 「渡された `Gradients` が今回のストア・今回の backward 呼び出し
-    /// の結果であること」の検査に使う（`Gradients::get` の
-    /// `tape_id`／`epoch` 検査は resident 経由でスキップされる slot に
-    /// は適用されないため、この専用フィールドで補う。`Gradients::
-    /// resident_fingerprint` doc 参照）。
-    resident_fingerprint: Option<(u64, u64)>,
+    /// backward_serial, pending 世代)`）をそのまま保持する（resolver を
+    /// 使わない素の `Tape::backward` では `None`）。イシュー #1212 の
+    /// codex-review P0 是正・その追加是正: `DeviceParamStore::step` が
+    /// この値を「渡された `Gradients` が今回のストア・今回の backward
+    /// 呼び出し・**今まさに消費しようとしている pending** の結果で
+    /// あること」の検査に使う（`Gradients::get` の `tape_id`／`epoch`
+    /// 検査は resident 経由でスキップされる slot には適用されない
+    /// ため、この専用フィールドで補う。`Gradients::resident_fingerprint`
+    /// doc 参照）。
+    resident_fingerprint: Option<(u64, u64, Option<u64>)>,
 }
 
 impl Gradients {
@@ -86,7 +87,7 @@ impl Gradients {
     /// （イシュー #1212 の codex-review P0 是正）。`crate::optim::
     /// device_store::DeviceParamStore::step` 限定の内部検査用途
     /// （`pub(crate)`。公開 API 面には出さない）。
-    pub(crate) fn resident_fingerprint(&self) -> Option<(u64, u64)> {
+    pub(crate) fn resident_fingerprint(&self) -> Option<(u64, u64, Option<u64>)> {
         self.resident_fingerprint
     }
 }

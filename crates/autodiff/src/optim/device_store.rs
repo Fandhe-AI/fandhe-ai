@@ -140,6 +140,16 @@ struct PendingForward {
     /// doc・`step` 実装参照）。
     epoch: u64,
     node_ids: Vec<NodeId>,
+    /// この `PendingForward` を発行した `register_resident_params`／
+    /// `register_resident_leaves`（非推奨版）呼び出しの世代番号
+    /// （codex-review 追加是正・イシュー #1212）。`DeviceParamStore::
+    /// next_pending_generation` から払い出す単調増加値で、登録の
+    /// たびに新しい値になる。`resident_backward_fingerprint` が
+    /// backward 実行時点の `pending` からこの値を焼き込み、`step` が
+    /// 「今まさに消費しようとしている `pending` と同じ世代の backward
+    /// 結果か」を検査する鍵になる（`ResidentResolver::
+    /// resident_backward_fingerprint` doc 参照）。
+    generation: u64,
 }
 
 /// プロセス全体で共有する `store_id` 発行カウンタ（イシュー #1022）。
@@ -301,6 +311,17 @@ pub struct DeviceParamStore {
     /// しない）、`Some(true)`＝対応済み。`Cell` は `&self` からの
     /// 内部可変性。
     resident_grad_capability: Cell<Option<bool>>,
+    /// 次に払い出す pending 世代番号（codex-review 追加是正・イシュー
+    /// #1212）。`register_resident_params`／`register_resident_leaves`
+    /// （非推奨版）が呼ばれるたびに現在値を `PendingForward::generation`
+    /// へ払い出してからインクリメントする（`&mut self` で呼ばれる
+    /// ため `Cell` は不要）。`resident_backward_fingerprint` が
+    /// backward 実行時点の `pending.generation` を焼き込み、`step` が
+    /// 現在の `pending` と世代が一致する場合のみ resident 経由の
+    /// `GradStaging::filled` を信頼する（新しい登録を挟んだ古い
+    /// `Gradients` の再利用を fail-closed に拒否する。`PendingForward::
+    /// generation` doc 参照）。
+    next_pending_generation: u64,
 }
 
 /// `AutodiffError` を `BackendError` へ変換する（イシュー #1022）。
@@ -541,13 +562,30 @@ impl ResidentResolver for DeviceParamStore {
     }
 
     /// [`ResidentResolver::resident_backward_fingerprint`] の実装
-    /// （イシュー #1212 の codex-review P0 是正）。`(store_id,
-    /// backward_serial)` を返す。`backward_serial` は `Tape::
-    /// backward_with_resident` を呼ぶ前（`Self::backward`）に
-    /// インクリメント済みのため、走査中に行われる `fill_resident_
-    /// weight_grad` の全書き込みと同じ値になる。
-    fn resident_backward_fingerprint(&self) -> Option<(u64, u64)> {
-        Some((self.store_id, self.backward_serial.get()))
+    /// （イシュー #1212 の codex-review P0 是正・その追加是正）。
+    /// `(store_id, backward_serial, pending 世代)` を返す。
+    /// `backward_serial` は `Tape::backward_with_resident` を呼ぶ前
+    /// （`Self::backward`）にインクリメント済みのため、走査中に行われる
+    /// `fill_resident_weight_grad` の全書き込みと同じ値になる。
+    ///
+    /// **3 つ目の要素（pending 世代）を追加した理由**: `backward_serial`
+    /// のみでは「`backward` → `step` 完了 → `register_resident_params`
+    /// で新しい葉を再登録 → **backward を呼ばずに**同じ古い
+    /// `Gradients` を再び `step` に渡す」という手順を検出できない
+    /// （`register_resident_params` は `backward_serial` を変更しない
+    /// ため、`current_serial` が据え置きのまま `GradStaging::filled`
+    /// の残留値と偶然一致し続ける）。この呼び出し時点（`backward` 実行
+    /// 中。`Self::backward` は `&self` のため `pending` はこの呼び出し
+    /// 前後で不変）で `self.pending` に登録されている
+    /// `PendingForward::generation` を焼き込むことで、`step` 側は
+    /// 「今まさに消費しようとしている `pending` と同じ世代の backward
+    /// 結果か」を追加検査できる（trait doc 参照）。
+    fn resident_backward_fingerprint(&self) -> Option<(u64, u64, Option<u64>)> {
+        Some((
+            self.store_id,
+            self.backward_serial.get(),
+            self.pending.as_ref().map(|p| p.generation),
+        ))
     }
 }
 
@@ -615,12 +653,26 @@ impl DeviceParamStore {
             grad_staging: RefCell::new(None),
             backward_serial: Cell::new(0),
             resident_grad_capability: Cell::new(None),
+            next_pending_generation: 0,
         })
     }
 
     /// このストアが常駐するデバイス。
     pub fn device(&self) -> Device {
         self.device
+    }
+
+    /// 新しい `PendingForward` へ払い出す世代番号を採番する（codex-review
+    /// 追加是正・イシュー #1212）。`register_resident_params`／
+    /// `register_resident_leaves`（非推奨版）が呼ばれるたびに 1 回だけ
+    /// 呼ぶ（`next_pending_generation` doc 参照）。`wrapping_add` を使う
+    /// 理由は `backward_serial`（同モジュール）と同じ: 現実的な呼び出し
+    /// 回数で `u64` が一周することはなく、fail-closed 側に倒すより
+    /// パニックしない安全側を優先する。
+    fn alloc_pending_generation(&mut self) -> u64 {
+        let generation = self.next_pending_generation;
+        self.next_pending_generation = self.next_pending_generation.wrapping_add(1);
+        generation
     }
 
     /// このストアが保持するパラメータ件数（連結バッファの要素数
@@ -742,10 +794,12 @@ impl DeviceParamStore {
                 _marker: PhantomData,
             });
         }
+        let generation = self.alloc_pending_generation();
         self.pending = Some(PendingForward {
             tape_id: tape.id,
             epoch: tape.epoch(),
             node_ids,
+            generation,
         });
         Ok(leaves)
     }
@@ -837,10 +891,12 @@ impl DeviceParamStore {
             node_ids.push(var.node_id());
             vars.push(var);
         }
+        let generation = self.alloc_pending_generation();
         self.pending = Some(PendingForward {
             tape_id: tape.id,
             epoch: tape.epoch(),
             node_ids,
+            generation,
         });
         Ok(vars)
     }
@@ -1155,17 +1211,36 @@ impl DeviceParamStore {
         // が成功してしまう）。`grads.resident_fingerprint()`
         // （`Tape::backward_with_resident` が `ResidentResolver::
         // resident_backward_fingerprint` から焼き込んだ値）が
-        // `(self.store_id, current_serial)` と一致する場合のみ、
-        // resident 経由の鮮度検査（`staging.filled`）を信頼する。
-        // 不一致（別ストア・別 backward 呼び出し・resident 未使用の
-        // 素の `Tape::backward` 等）の場合は resident 経由の slot を
-        // 一切信頼せず、全 slot を通常の `grads.get(var)` 経路へ通す
-        // （resident 経由が実際に成功していた slot は `grads` 側に
+        // `(self.store_id, current_serial, pending.generation)` と
+        // 一致する場合のみ、resident 経由の鮮度検査（`staging.filled`）
+        // を信頼する。不一致（別ストア・別 backward 呼び出し・resident
+        // 未使用の素の `Tape::backward` 等）の場合は resident 経由の
+        // slot を一切信頼せず、全 slot を通常の `grads.get(var)` 経路へ
+        // 通す（resident 経由が実際に成功していた slot は `grads` 側に
         // 対応する寄与が存在しないため、後続の `grads.get(var)` が
         // `Ok(None)` を返し `MissingGradient` で fail-closed に拒否
         // される）。
-        let grads_match_current_backward =
-            grads.resident_fingerprint() == Some((self.store_id, current_serial));
+        //
+        // **3 つ目の要素（`pending.generation`）を追加した理由（codex-
+        // review 追加指摘）**: `(store_id, current_serial)` のみでは
+        // 「backward → step 完了 → `register_resident_params` で
+        // 新しい葉を再登録 → backward を呼ばずに同じ古い `Gradients`
+        // を再び `step` に渡す」手順を検出できなかった
+        // （`register_resident_params` は `backward_serial` を変更しない
+        // ため、`current_serial` が据え置きのまま `staging.filled` の
+        // 残留値と偶然一致し続ける）。`pending.generation` は
+        // `register_resident_params`／`register_resident_leaves` の
+        // 呼び出しごとに新しい値になる（`PendingForward::generation`
+        // doc 参照）ため、`grads` が指す backward 実行時点の pending と
+        // 「今まさに `step` が消費しようとしている `pending`」が同一の
+        // 登録であることまで検査できる。新しい登録を挟んだ古い
+        // `Gradients` はこの一致が崩れ、resident 経由の slot を信頼せず
+        // `grads.get(var)` へフォールバックして `MissingGradient` で
+        // 拒否される（`vars` は現在の `pending.node_ids` から作った
+        // ものであり、新しい登録の葉に対応する寄与は古い `grads` には
+        // 存在しないため）。
+        let grads_match_current_backward = grads.resident_fingerprint()
+            == Some((self.store_id, current_serial, Some(pending.generation)));
         let resident_filled: Vec<bool> = if grads_match_current_backward {
             let staging_ref = self.grad_staging.borrow();
             match staging_ref.as_ref() {
@@ -2097,6 +2172,58 @@ mod tests {
         assert!(
             matches!(err, BackendError::MissingGradient(_)),
             "古い backward 呼び出しの Gradients は MissingGradient で拒否されるべき: {err:?}"
+        );
+    }
+
+    /// codex-review 追加指摘（PR #1224・イシュー #1212）是正の検証:
+    /// `(store_id, backward_serial)` のみのフィンガープリントでは
+    /// 検出できなかった手順を再現する——全パラメータが resident 化
+    /// されたストア（bias なし）で「① backward → step を完了する →
+    /// ② `register_resident_params` で新しい葉を再登録する（**backward
+    /// は呼ばない**）→ ③ ①で得た古い `Gradients` を再び `step` に渡す」
+    /// という順序では、`backward_serial` は①以降変化しないため
+    /// `GradStaging::filled` の残留値と偶然一致し続け、`pending.
+    /// generation` を検査に含めなければ古い勾配で②の新しい葉が誤って
+    /// 更新されてしまう（`resident_backward_fingerprint` doc・`step`
+    /// の `grads_match_current_backward` 算出コメント参照）。
+    #[test]
+    fn step_rejects_stale_gradients_reused_after_new_pending_registration_without_backward() {
+        let resident_ops = MockDeviceOps::resident_capable();
+        let tape = Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+
+        // ① 1 回目の forward → backward → step を完了させる。
+        let leaves1 = store.register_resident_params(&tape).unwrap();
+        let x1 = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+        let pred1 = store.linear_forward(&tape, &x1, &leaves1[0], None).unwrap();
+        let target1 = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let loss1 = pred1.mse_loss(&target1).unwrap();
+        let stale_grads = store.backward(&tape, &loss1).unwrap();
+        store
+            .step(&tape, &stale_grads, &SgdConfig::new(0.1))
+            .unwrap();
+
+        // ② `pending` が消費済み（`None`）の状態から、backward を挟まず
+        // 新しい葉を再登録する（`pending.generation` だけが進む。
+        // `backward_serial` は不変のまま）。
+        let leaves2 = store.register_resident_params(&tape).unwrap();
+        let x2 = tape.var(&tensor(vec![-1.0, 4.0], &[1, 2]));
+        let _pred2 = store.linear_forward(&tape, &x2, &leaves2[0], None).unwrap();
+
+        // ③ backward を一切呼ばずに、①の古い `Gradients` を②の pending
+        // に対して `step` する。`backward_serial` は①のときと同じ値の
+        // ままだが、pending の世代が食い違うため fail-closed に拒否
+        // されるべき（`MissingGradient`。resident 経由の slot を信頼
+        // せず `grads.get(var)` へフォールバックし、②の葉に対応する
+        // 寄与が①の `Gradients` に存在しないため）。
+        let err = store
+            .step(&tape, &stale_grads, &SgdConfig::new(0.1))
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::MissingGradient(_)),
+            "新しい pending 登録を挟んだ後に古い Gradients を渡すと MissingGradient で \
+             拒否されるべき（pending 世代フィンガープリント検査の直接検証）: {err:?}"
         );
     }
 

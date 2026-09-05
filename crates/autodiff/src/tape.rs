@@ -313,8 +313,8 @@ pub(crate) trait ResidentResolver {
 
     /// 「今回の `backward_impl` 走査中に resident 経路（[`Self::
     /// fill_resident_weight_grad`]）が書き込んだ値」を一意に識別する
-    /// フィンガープリント `(store_id, 走査単位の連番)` を返す（イシュー
-    /// #1212 の codex-review P0 是正）。
+    /// フィンガープリント `(store_id, 走査単位の連番, pending 世代)` を
+    /// 返す（イシュー #1212 の codex-review P0 是正・その追加是正）。
     ///
     /// `Tape::backward_with_resident` はこの値を `Gradients` へ
     /// 焼き込み（`Gradients::resident_fingerprint`）、`DeviceParamStore::
@@ -328,15 +328,31 @@ pub(crate) trait ResidentResolver {
     /// 抜け穴だった（全パラメータが resident 化されたモデルでは
     /// `grads.get()` が一度も呼ばれないため、別 `Tape`／別
     /// `DeviceParamStore`／古い backward 呼び出しに由来する `Gradients`
-    /// を渡しても検出できず更新が成功してしまう）。フィンガープリントを
-    /// `Gradients` 自身に持たせることで、resident 経由の slot について
-    /// も「この `Gradients` が今回のストア・今回の backward 呼び出しの
-    /// 結果であること」を fail-closed に検査できる。
+    /// を渡しても検出できず更新が成功してしまう）。
+    ///
+    /// **`(store_id, backward_serial)` のみでも不十分だった点（codex-review
+    /// 追加指摘）**: `backward_serial` は `DeviceParamStore::backward` が
+    /// 呼ばれた回数のみを数えており、`register_resident_params` の
+    /// 呼び出し（＝どの pending forward が対象か）とは独立に増える。
+    /// このため「backward → step 完了 → 新しい葉を
+    /// `register_resident_params` で再登録 → **backward を呼ばずに**
+    /// 同じ古い `Gradients` を再び `step` に渡す」という手順では、
+    /// `backward_serial` が据え置きのまま `GradStaging::filled` の
+    /// 残留値と偶然一致してしまい、新しい pending（別の葉ノード）に
+    /// 対して古い勾配で誤って更新できてしまう。この抜け穴を塞ぐため、
+    /// 3 つ目の要素として「この backward 呼び出しの時点でストアに
+    /// 登録されていた `PendingForward` の世代番号
+    /// （`DeviceParamStore::pending` が `Some` のときのみ）」を含める。
+    /// `step` 側は、この記録済み世代番号が **今まさに消費しようとしている
+    /// `pending` の世代番号と一致する場合のみ** resident 経由の `filled`
+    /// を信頼する（`register_resident_params` は呼ばれるたびに新しい
+    /// 世代番号を払い出すため、backward と step の間に新規登録が挟まると
+    /// 世代番号が食い違い fail-closed に拒否される）。
     ///
     /// # デフォルト実装
     ///
     /// `None`（resident 機構を持たないリゾルバには意味を持たない）。
-    fn resident_backward_fingerprint(&self) -> Option<(u64, u64)> {
+    fn resident_backward_fingerprint(&self) -> Option<(u64, u64, Option<u64>)> {
         None
     }
 }
