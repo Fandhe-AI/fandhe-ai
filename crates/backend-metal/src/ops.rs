@@ -57,9 +57,12 @@ std::thread_local! {
     /// （`gemm_strided_nt_tn`）に乗れず `Tensor::contiguous()`
     /// （ホスト側転置コピー）へフォールバックした回数（イシュー #1215。
     /// `RESIDENT_HOST_REPACK_COUNT` と同型の可観測点だが対象メソッドが
-    /// 異なるため独立カウンタとする。NN（両方行優先）・TT（両方転置）・
-    /// `classify_2d` が `None` を返す入力〈stride 0 のブロードキャスト等〉
-    /// のいずれも本カウンタを増やす。`backend-cuda::ops::
+    /// 異なるため独立カウンタとする。TT（両方転置）・`classify_2d` が
+    /// `None` を返す入力〈stride 0 のブロードキャスト等〉が実際に
+    /// `contiguous()` を要した場合（＝元から contiguous でなかった
+    /// オペランド）にのみ本カウンタを増やす。NN（両方行優先）は元から
+    /// contiguous のため増えない（`gemm` 内の `!a.is_contiguous()`／
+    /// `!b.is_contiguous()` ガード参照）。`backend-cuda::ops::
     /// GEMM_HOST_REPACK_COUNT`〈イシュー #1214〉と同名・同意図の
     /// クロスバックエンド可観測点。`pub(crate)`（`RESIDENT_HOST_REPACK_COUNT`
     /// と同じ可視性方針。クレート境界外テストは数値一致のみ検証する）。

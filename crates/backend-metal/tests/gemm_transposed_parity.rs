@@ -185,12 +185,19 @@ fn gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device() {
     assert_eq!(contiguous_slice(&actual), contiguous_slice(&expected));
 }
 
-/// `narrow` 後の転置（一般 stride）は `contiguous()` フォールバック経由
-/// でも結果自体は正しいことを確認する（一般 stride 化は本イシューの
-/// スコープ外。`docs/matmul-vjp-zero-copy-decision.md` §3.2）。
+/// `narrow` 後の転置は、`layout::classify_2d` が `ld > rows`（非対応
+/// 次元より大きい leading dimension）の列優先 view として分類できる
+/// ため、**`contiguous()` フォールバックではなく NT strided 入口を
+/// 経由する**（rank-2 の `narrow`＋`transpose_2d` は常に行優先／列優先の
+/// いずれかに分類可能——`classify_2d` doc「`ld >= rows`／`ld >= cols`」
+/// 参照。真にフォールバックする「分類不能」ケースは
+/// [`gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device`]
+/// が担う）。本テストは strided 入口が `ld` が論理次元より大きい
+/// パディング済み view を正しく扱うことを確認する。カーネルが異なる
+/// ため §2 の理由により `assert_eq!` ではなく複合判定を使う。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）必須"]
-fn gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_real_device() {
+fn gemm_narrow_then_transpose_uses_strided_entry_with_padded_ld_and_is_correct_on_real_device() {
     let ops = MetalBackendOps::new();
     let (m, k, n) = (6usize, 5usize, 4usize);
     let w0 = tensor(random_matrix(0x7000, n * (k + 2)), &[n, k + 2]);
@@ -207,7 +214,11 @@ fn gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_rea
     )
     .unwrap();
 
-    assert_eq!(contiguous_slice(&actual), contiguous_slice(&expected));
+    fandhe_ai_backend_cpu::assert_parity(
+        "gemm narrow-then-transpose (padded ld) vs contiguous()",
+        &contiguous_slice(&actual),
+        &contiguous_slice(&expected),
+    );
 }
 
 /// `&dyn BackendOps` トレイトオブジェクト経由でも NT 入口が同結果を返す
