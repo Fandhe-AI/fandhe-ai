@@ -123,10 +123,14 @@ scalar 参照実装を上回るリスクを事前に想定していたが（本�
 
 ## 6. Metal／CUDA
 
-- **Metal**: 本セッションでは未実測（M4 Max 実機は利用可能だが、CPU 主
-  計測での ADOPT 判定が明確であったため、時間配分上 Metal 参考計測は
-  実施しなかった。後続 #1215〈Metal NT/TN strided 結線〉の際に必要なら
-  改めて計測する）
+- **Metal**: 本ドキュメントの対象（`eval::matmul` → `BackendOps::gemm`
+  への切替。#1211）自体の Metal 実測は本セッションでは未実施のまま
+  （CPU 主計測での ADOPT 判定が明確であったため、時間配分上見送った）。
+  後続 #1215（Metal NT/TN strided 結線）の train phases フル A/B
+  （`docs/perf/metal-gemm-vjp-transposed-entry.md` §3.2）で本切替＋
+  #1215 の結線を合わせた M4 Max 実機実測を完了し ADOPT と確定した
+  （backward: fresh 1.649×・reuse 1.200×、step_total: fresh 1.323×・
+  reuse 1.109×。#1211 単体の寄与と #1215 の寄与は分離計測していない）
 - **CUDA**: 本セッションには CUDA 実機がないため未実測。#1214 で CUDA
   GEMM の NT/TN 転置入口自体の実装・GPU 非依存テストは完了したが、同
   セッションにも CUDA 実機がなく GB10 実測は未実施のまま
@@ -144,5 +148,6 @@ scalar 参照実装を上回るリスクを事前に想定していたが（本�
   （`docs/perf/cuda-gemm-vjp-transposed-entry.md`・`docs/matmul-vjp-
   zero-copy-decision.md` §4.3 追補）。GB10 実機実測・本変更の CUDA
   実測は同 doc §3〜§4 に記入欄を残したまま未実施
-- #1215: Metal GEMM の NT/TN strided 結線（#1187 依存）・本変更の Metal
-  実測
+- #1215: Metal GEMM の NT/TN strided 結線 → 完了（`docs/perf/metal-gemm-
+  vjp-transposed-entry.md`・`docs/matmul-vjp-zero-copy-decision.md`
+  §4.4 追補。M4 Max 実機実測で ADOPT 確定）

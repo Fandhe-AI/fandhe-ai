@@ -1,0 +1,17 @@
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+arm64
+rustc 1.96.0 (ac68faa20 2026-05-25)
+--- uptime (before) ---
+ 4:12  up 17 days, 15:25, 19 users, load averages: 3.92 3.62 5.33
+--- pmset -g therm (before) ---
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- uptime (after all measurements) ---
+ 4:15  up 17 days, 15:28, 19 users, load averages: 3.08 3.47 4.96
+--- pmset -g therm (after) ---
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

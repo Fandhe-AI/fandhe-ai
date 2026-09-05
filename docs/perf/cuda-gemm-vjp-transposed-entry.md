@@ -16,8 +16,9 @@ transpose-ab.md` §2 の結線イシュー）→ 既存 NN GEMM カーネル
 （`narrow` 後の転置等）・TF32 opt-in 経路（`run_wmma_tf32`）・
 `gemm_bias_act` の融合経路・`gemm_resident_rhs`・`Op::LinearResident.
 d_input` のデバイス側直接計算・#1212（reuse 経路の grad 常駐化）・
-#1215（Metal NT/TN strided 結線）・`dense_transposed_view` の
-`tensor-core` への昇格（公開 API 変更を伴う）。
+Metal NT/TN strided 結線（→ #1215 で完了。`docs/perf/metal-gemm-vjp-
+transposed-entry.md`）・`dense_transposed_view` の `tensor-core` への
+昇格（公開 API 変更を伴う）。
 
 ## 1. コード変更
 
@@ -141,7 +142,8 @@ backward/step_total とも非後退なら ADOPT。小形状のみ後退で train
 - 本ドキュメント §3〜§4 の GB10 実機実測・採否確定（イシュー #1214
   本文「再分解」節の (b)）
 - #1212: reuse 経路の grad をデバイス常駐のまま `device_update` へ直結
-- #1215: Metal GEMM の NT/TN strided 結線
+- #1215: Metal GEMM の NT/TN strided 結線 → 完了
+  （`docs/perf/metal-gemm-vjp-transposed-entry.md`）
 - TT（両方転置）・一般 stride 化・TF32 opt-in 経路・`gemm_bias_act`
   融合経路・`gemm_resident_rhs` への適用: 本イシューでは対象外のまま
   （`docs/matmul-vjp-zero-copy-decision.md` §3.2・§4.3 の該当行は変更

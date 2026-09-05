@@ -127,6 +127,16 @@ storage から借用で返す。`as_slice`（contiguous 限定）と異なり転
 「Metal 実機実測」は #1046 でも未消化のまま引き続き別イシュー行きで
 ある（`docs/matmul-vjp-zero-copy-decision.md` §3.2 が現時点の一覧）。
 
+**#1215 での消化状況（追補）**: 「`BackendOps::gemm`〈NT/TN 限定〉の
+Metal zero-repack 化」・「Metal 実機実測」は #1215 で消化した
+（`MetalBackendOps::gemm` を `layout::classify_2d` 分類済みの
+`MatrixLayout` から `dispatch_strided_bias_act_prepared` へ結線。
+M4 Max 実機実測で ADOPT 確定。`docs/perf/metal-gemm-vjp-transposed-
+entry.md`・`docs/matmul-vjp-zero-copy-decision.md` §4.4）。
+「`BackendOps` trait 拡張による `d_input` のデバイス側直接計算化」
+（公開 API 変更を伴う）は #1215 でも未消化のまま別イシュー行きである
+（未起票。ユーザー承認が必要）。
+
 ## 5. 実機実測
 
 イシュー #1039（M4 Max 実機セッション）で以下を実行し、全 0 fail を確認した:

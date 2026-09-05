@@ -164,6 +164,40 @@ CPU 参照実装との REQ-2 複合判定も併せて確認する）。tolerance
 CUDA（GB10）実機実測・採否判断は `docs/perf/cuda-gemm-vjp-transposed-
 entry.md` を参照。Metal（#1215）は引き続き未対応。
 
+### 4.4 追補（イシュー #1215）
+
+Metal 本番経路（`backend-metal::ops::MetalBackendOps::gemm`）の転置
+再パックを、CPU（§4.2）・CUDA（§4.3）と同じ **NT（`b` が転置格納）／
+TN（`a` が転置格納）の 2 パターン限定**で解消した。ただし CPU の
+BLIS packing 側吸収方式・CUDA の GPU 側転置カーネル方式のいずれとも
+異なり、Metal は **既存の別カーネル入口へ切り替える**方式を採る:
+`layout::classify_2d` で分類した `MatrixLayout`（#1040 で導入済み）を
+`gemm::MetalGemm::dispatch_strided_bias_act_prepared`（`gemm_resident_
+lhs` が確立済みの classic strided カーネル `gemm_tiled_bias_act`）へ
+渡し、`MetalMemory::upload_view` で両オペランドを zero-copy アップ
+ロードする。NN・TT・分類不能形状は従来どおり `contiguous()` +
+`dispatch_auto`（`gemm_simdgroup_tiled`）の bit 同一経路のまま。適用
+範囲は `MetalBackendOps::gemm` のみ（`gemm_bias_act`・
+`gemm_resident_rhs`〈#1040 で既に転置対応済み〉・
+`gemm_fp32_strict_into`〈既定 `Unsupported`のまま。#1212 引き継ぎ〉は
+対象外）。
+
+**数値契約が CPU／CUDA と異なる**: `dispatch_strided_bias_act_prepared`
+（classic strided カーネル）は従来の `dispatch_auto`（動的タイル選択）
+とは別カーネルであり、アキュムレータの蓄積順序が異なりうるため、
+NT/TN 経路は `contiguous()` 経路と bit 一致する保証がない。受け入れ
+判定は **REQ-2 統一複合判定**（`gemm_resident_lhs`〈#1040〉と同じ契約。
+`crates/backend-metal/tests/gemm_transposed_parity.rs` で検証）とし、
+`assert_eq!` によるビット一致は要求しない。NN・TT・分類不能形状の
+従来経路自体は不変のため bit 同一のまま。tolerance の新設・変更は
+行っていない。
+
+M4 Max 実機実測（補助 A/B・train phases フル A/B）・採否判断（ADOPT）は
+`docs/perf/metal-gemm-vjp-transposed-entry.md` を参照。`Op::
+LinearResident.d_input` のデバイス直接計算化（§3.2 表 4 行目）は
+引き続き未対応（`BackendOps` trait 拡張を伴う公開 API 変更のため別途
+ユーザー承認が必要）。
+
 ## 5. 実機実測（未実施）
 
 本ランは Linux x86_64（NVRTC 非搭載・Metal 実機なし）のため、以下は
