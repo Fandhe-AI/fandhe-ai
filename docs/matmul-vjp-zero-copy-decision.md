@@ -83,6 +83,23 @@ green で確認済み・許容誤差は変更していない）。
   バックエンドを使う学習ループでも既存の数値一致契約に影響しない
   （バックエンド固有の GEMM カーネル自体は変更していない）
 
+### 4.1 追補（イシュー #1211）
+
+上記 3.2 表 1 行目「CPU BLIS packing の stride 一般化」の縣念どおり、
+イシュー #1211 で `Op::MatMul`／`Op::LinearAct`（`matmul_vjp` 経由）・
+`Op::LinearResident.d_weight` は本番経路で `eval::matmul`（ホスト参照
+実装）から `BackendOps::gemm`（CPU は BLIS 並列 GEMM・CUDA/Metal は
+デバイス GEMM）へ切り替わった。`transpose2d`（zero-copy view）で作った
+転置オペランドはそのまま `ops.gemm` へ渡すため、CPU 本番経路では転置
+コピーが本ドキュメントが保証していたホスト側ゼロコピーから
+`backend-cpu::ops::gemm` 内の `contiguous()` へ移動する（受け入れ条件
+(a) はホスト参照実装〈`NaiveOps`／`TestOps` 経由の compat・テスト経路〉
+に限定されたまま。本番 CPU 経路のゼロコピー化は #1213 のスコープ）。
+
+CPU での前後比較実測（`backward`・`step_total` の 5 run 中央値。fresh
+9.24×・reuse 5.63× の速度改善）は `docs/perf/train-backward-gemm-wiring.md`
+を参照。ガードレール閾値・テスト許容誤差は本追補でも変更していない。
+
 ## 5. 実機実測（未実施）
 
 本ランは Linux x86_64（NVRTC 非搭載・Metal 実機なし）のため、以下は

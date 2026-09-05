@@ -13,9 +13,15 @@
 //!
 //! 値計算は `eval.rs`（クレート非公開の暫定 CPU 参照実装）のヘルパー
 //! を再利用し、forward と勾配計算で数式の実体を 2 か所に別実装しない
-//! （PoC-v2-2 の方針を踏襲。`eval::matmul` は `f32::mul_add` による
-//! FMA 契約統一済みのため、`MatMul` の VJP もここを経由するだけで
-//! 契約を引き継ぐ）。
+//! （PoC-v2-2 の方針を踏襲）。ただし `MatMul`／`LinearAct`／
+//! `LinearResident` の GEMM 系 VJP（`matmul_vjp`・`Op::LinearResident`
+//! の `d_weight`）はイシュー #1211 で `eval::matmul`（scalar 参照実装）
+//! から `BackendOps::gemm`（forward と同じ CPU BLIS／CUDA／Metal
+//! カーネル）へ切り替え済み。backward の支配的コスト（`docs/perf/
+//! train-step-phase-breakdown.md` §11・§15）を forward と同じ既定 FMA
+//! 契約・並列実装で計算するための変更で、`eval::matmul` は
+//! `NaiveOps`／`TestOps`（compat・テスト経路）に限り引き続き使われる
+//! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, Tensor};
 
@@ -63,7 +69,7 @@ pub(crate) fn vjp(
         Op::MatMul(a, b) => {
             let a_val = materialize_fallible(nodes, ops, a)?;
             let b_val = materialize_fallible(nodes, ops, b)?;
-            let (da, db) = matmul_vjp(a_val, b_val, upstream);
+            let (da, db) = matmul_vjp(ops, a_val, b_val, upstream)?;
             vec![(a, da), (b, db)]
         }
         Op::Add(a, b) => {
@@ -267,13 +273,14 @@ pub(crate) fn vjp(
             let d_input = transpose2d(&tmp);
 
             // d_weight = x^T @ g（既存 `matmul_vjp` の `dB` と同一式。
-            // `x`・`g` はいずれもホスト常駐のため通常の `eval::matmul` で
-            // 計算できる）。イシュー #1046: `x_t` は `transpose2d` の
-            // zero-copy view であり、`eval::matmul` 側が
-            // `layout::classify_2d` で分類して直接読み出すためホスト側
-            // 転置コピーは発生しない（`eval::MATMUL_HOST_REPACK_COUNT`）。
+            // `x`・`g` はいずれもホスト常駐）。イシュー #1211: `ops.gemm`
+            // （forward と同じ CPU BLIS／CUDA／Metal カーネル）を経由する
+            // ため、`x_t`（`transpose2d` の zero-copy view）はバックエンド
+            // `gemm` 内の `contiguous()` で再パックされうる（#1046 が
+            // 保証していた `eval::matmul` 経路でのゼロコピーは本経路には
+            // 適用されない。解消は #1213〈CPU の NT/TN 専用入口〉）。
             let x_t = transpose2d(x_val);
-            let d_weight = eval::matmul(&x_t, g);
+            let d_weight = ops.gemm(&x_t, g).map_err(AutodiffError::Backend)?;
 
             let mut contributions = vec![(input, d_input), (weight, d_weight)];
             if let Some(bias_id) = bias {
@@ -324,7 +331,7 @@ pub(crate) fn vjp(
                 }
             };
 
-            let (d_input, d_weight) = matmul_vjp(x_val, w_val, g);
+            let (d_input, d_weight) = matmul_vjp(ops, x_val, w_val, g)?;
             let mut contributions = vec![(input, d_input), (weight, d_weight)];
             if let Some(bias_id) = bias {
                 let bias_shape = &nodes[bias_id.0].shape;
@@ -398,21 +405,37 @@ fn transpose2d(tensor: &Tensor<f32>) -> Tensor<f32> {
 }
 
 /// `MatMul(A, B)` の VJP: `dA = g @ Bᵀ`、`dB = Aᵀ @ g`
-/// （`A: [m,k]`・`B: [k,n]`・`g: [m,n]`）。`eval::matmul` を再利用する
-/// ため FMA 契約（`f32::mul_add`）は forward と自動的に統一される。
+/// （`A: [m,k]`・`B: [k,n]`・`g: [m,n]`）。イシュー #1211: forward と
+/// 同じ `BackendOps::gemm`（CPU は BLIS 並列 GEMM・CUDA/Metal はデバイス
+/// GEMM）を経由するため、backward の支配的コスト（`docs/perf/
+/// train-step-phase-breakdown.md` §11・§15）がバックエンド既定の並列・
+/// デバイス実装の恩恵を受ける。FMA 契約は各バックエンドの `gemm` 既定
+/// 契約に従う（`coding-rust.md` の FMA 契約統一方針。forward の
+/// `Var::matmul` と同一カーネルを通るため経路間で分岐しない）。
 ///
-/// イシュー #1046: `transpose2d`（下記。`Tensor::transpose` の zero-copy
-/// stride view）で作った転置オペランドは、`eval::matmul` 側
-/// （`eval::matmul_operand`・`crate::layout::classify_2d`）が
-/// `ld`／`transposed` フラグの添字式で直接読み出すため、本関数を含む
-/// このホスト参照経路にホスト側転置コピー（`contiguous()` の repack）
-/// は発生しない（`eval::MATMUL_HOST_REPACK_COUNT` で機械検証）。
-fn matmul_vjp(a: &Tensor<f32>, b: &Tensor<f32>, g: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
+/// `transpose2d`（下記。`Tensor::transpose` の zero-copy stride view）
+/// で作った転置オペランドはそのまま `ops.gemm` へ渡す。各バックエンドの
+/// `gemm` 実装は内部で `contiguous()` を呼ぶため転置 view の再パックが
+/// 発生しうるが、本イシューではこれを許容範囲とする（NT/TN 専用の
+/// zero-copy 入口は後続イシュー #1213〈CPU〉・#1214〈CUDA〉・
+/// #1215〈Metal〉のスコープ。`docs/matmul-vjp-zero-copy-decision.md`
+/// §4 追補）。
+///
+/// エラーは fail-closed で `AutodiffError::Backend` として伝播し、
+/// `eval::matmul` への暗黙フォールバックは設けない（forward と backward
+/// で数値経路が分岐する判定迂回を作らないため。`.claude/rules/
+/// security.md` A08）。
+fn matmul_vjp(
+    ops: &dyn BackendOps,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    g: &Tensor<f32>,
+) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
     let b_t = transpose2d(b);
     let a_t = transpose2d(a);
-    let da = eval::matmul(g, &b_t);
-    let db = eval::matmul(&a_t, g);
-    (da, db)
+    let da = ops.gemm(g, &b_t).map_err(AutodiffError::Backend)?;
+    let db = ops.gemm(&a_t, g).map_err(AutodiffError::Backend)?;
+    Ok((da, db))
 }
 
 /// ブロードキャストの逆演算。`add`/`mul` の VJP が返す勾配は forward
@@ -836,7 +859,7 @@ mod tests {
         let s = t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]);
 
         let g = s.clone();
-        let (da, db) = matmul_vjp(&a, &b, &g);
+        let (da, db) = matmul_vjp(&test_ops(), &a, &b, &g).unwrap();
 
         let num_da = numeric_grad_unary(&a, &s, |x| eval::matmul(x, &b));
         let num_db = numeric_grad_unary(&b, &s, |x| eval::matmul(&a, x));
@@ -858,13 +881,15 @@ mod tests {
         let g = t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]);
 
         let before = eval::MATMUL_HOST_REPACK_COUNT.with(|c| c.get());
-        let _ = matmul_vjp(&a, &b, &g);
+        let _ = matmul_vjp(&test_ops(), &a, &b, &g).unwrap();
         let after = eval::MATMUL_HOST_REPACK_COUNT.with(|c| c.get());
 
         assert_eq!(
             before, after,
-            "matmul_vjp: 転置オペランド（transpose2d の zero-copy view）が \
-             eval::matmul でホスト側転置コピーへフォールバックした \
+            "matmul_vjp: test_ops()（TestOps → eval::matmul 委譲。#1211 で \
+             本番経路は BackendOps::gemm 経由になったが、この compat 経路の \
+             ゼロコピー保証は変わらない）が転置オペランド（transpose2d の \
+             zero-copy view）でホスト側転置コピーへフォールバックした \
              （MATMUL_HOST_REPACK_COUNT が増加した）"
         );
     }
@@ -1339,7 +1364,8 @@ mod tests {
         let a = t(&[1.0, 2.0, -1.0, 0.5, 3.0, -2.0], &[2, 3]);
         let b = t(&[0.5, -1.0, 2.0, 1.0, -0.5, 1.5], &[3, 2]);
         let out_value = eval::matmul(&a, &b);
-        let (expected_da, expected_db) = matmul_vjp(&a, &b, &t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]));
+        let (expected_da, expected_db) =
+            matmul_vjp(&test_ops(), &a, &b, &t(&[1.0, -0.5, 0.3, 2.0], &[2, 2])).unwrap();
         let nodes = vec![leaf_node(a), leaf_node(b)];
         let op = Op::MatMul(NodeId(0), NodeId(1));
         let g = t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]);

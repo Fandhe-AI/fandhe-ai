@@ -1,0 +1,15 @@
+CPU: Apple M4 Max
+OS: macOS 26.6.2 (BuildVersion 25G83)
+arch: arm64
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+cargo profile: release
+workspace version: 0.6.0
+bench-fandhe args: --task train --device cpu --size 64 --mode {fresh,reuse} --phases
+warmup: 20, measured iters: 80 (bench-fandhe 既定プロトコル)
+5 runs per (series, mode). before = origin/main 相当（eval::matmul 経由）・
+after = 本 PR HEAD（BackendOps::gemm 経由）。両系列とも
+scripts/bench/framework-compare/bench-fandhe への
+--config patch.crates-io.fandhe-ai.path=<facade 絶対パス> 差し替えでビルド
+（cargo tree で (path: …) を確認済み。Cargo.lock/manifest はコミットしない）。
+注意: 実行時に他 worktree のビルド等が並走していた可能性あり
+（負荷混入の値は除外せず記録する方針。#1103 等の先例に倣う）。
