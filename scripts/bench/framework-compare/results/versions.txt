@@ -175,3 +175,17 @@ bench-fandhe v0.1.0 (bench-fandhe)
 bench-fandhe v0.1.0 (bench-fandhe)
 ├── bench-common v0.1.0 (bench-common)
 └── fandhe-ai v0.6.0
+
+# 環境 18: Apple M4 Max（学習 1 step フェーズ分解の v0.6.0 再計測。イシュー #1145）
+# macOS 26.6.2 (25G83) / rustc/cargo 1.96.0
+# 単一系列（fandhe-ai =0.6.0。registry 解決。HEAD path patch 参考系列は本イシュー対象外）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0
+
+# 環境 19: DGX Spark GB10（学習 1 step フェーズ分解の v0.6.0 再計測。イシュー #1145）
+# Linux Ubuntu 24.04 aarch64 / rustc/cargo 1.97.0 / NVIDIA driver 580.173.02 / CUDA 13.0 V13.0.88 (nvcc)
+# 単一系列（fandhe-ai =0.6.0。registry 解決。HEAD path patch 参考系列は本イシュー対象外）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0
