@@ -375,22 +375,54 @@ E1 適用後の中央値は base 比 **約 +11.5%** で非後退（改善）。b
   （`crates/backend-metal/src/shaders/gemm.metal`・
   `tests/shader_source_evidence.rs`）自体は変更しない**
 
+### 7.6a 採否判断の見直し（PR #1204 codex-review 指摘。§7.7a で本番結線を撤回）
+
+**上記 §7.6 の採否判断は撤回する。** codex-review（PR #1204）指摘: 「pragma は
+`gemm_simdgroup_tiled` の全タイル候補に適用され、本番 `dispatch_auto` は
+N=4096 以外でも同じシェーダを呼ぶため、非後退判定を N=4096 に限定するのは
+他形状への影響を見落とす」。§7.5 が使ったものと同じ生ログ
+（`docs/perf/logs/metal-gemm-n4096-e1-unroll-1188-5run/{base,e1}_bench_run{1..5}.log`）
+から `dynamic_tile_auto_tflops`（本番 `dispatch_auto` が実際に返す値）の
+N=512/1024/2048 における 5 run 中央値を追加算出したところ、**いずれも E1 適用
+後に明確な後退**であることを確認した（§7.7a に算出値・スクリプトを記録）:
+
+| N | base 中央値 | E1 中央値 | 変化率 |
+|---|---|---|---|
+| 512 | 0.4484 | 0.3219 | 約 -28.2% |
+| 1024 | 1.3248 | 0.8594 | 約 -35.1% |
+| 2048 | 2.2975 | 1.9523 | 約 -15.0% |
+| 4096 | 2.5947 | 2.8932 | 約 +11.5%（§7.5 と同一） |
+
+§7.6 は N=4096 の本番経路のみを非後退判定の対象としたため、上記の N=512/1024/
+2048 における実質的な後退（本番が実際に採用する `old_tile=(64x32)` 系候補
+〈acc<=8〉に対するもの。§7.4 で「参考値」と位置づけた cand2 とは別物）を
+見落としていた。cand0/cand4/cand8（acc_rows*acc_cols>=16）が形状横断で大幅
+改善するという有効性の知見（H2 の支持根拠）自体は変わらないが、**同一シェーダ
+に無条件適用した pragma が、本番が実際に選ぶ他の候補（acc<=8 系）の性能を
+N=512/1024/2048 で 15〜35% 悪化させる**ため、「本番採用（分岐 A）」の判断は
+誤りだったと訂正する。原因（unroll(full) が小さい acc 候補ではレジスタ圧迫・
+命令キャッシュ圧迫等の逆効果を及ぼす可能性）の切り分けは未実施であり、
+codex-review の推奨（「原因切り分けまで判定保留」）に従い、**本 PR では
+pragma の本番結線を撤回する**（§7.7a）。
+
 ### 7.7 スコープ外の更新
 
 §5 の項目のうち、本イシューで扱った範囲を以下のとおり更新する:
 
 - 「`wm=1` 系構成（cand4・cand8）が `wm=2` 系より一貫して大幅に劣化する
   原因の診断」→ **本イシューで H2（unroll 未展開によるレジスタ spill）を
-  支持する強い実機実測根拠を得て解消**（3 run・5 run いずれの計測でも
-  一致）。ただし GPU counters 等による spill の直接確証（Xcode Instruments。
-  §5 従来項目）は引き続き未実施
-- E1 は本イシューで実施済み（採用）。E2〜E5（フラグメントロード方式変更・
-  協調ロード再構成・`FINE_BARRIER_ENABLED`／`SWIZZLE_ENABLED` 切替との
-  相互作用）は引き続き対象外
-- E1 採用により 4096 で cand0（candle と同一タイル形状）が cand2 に迫る
-  性能を示した。`CANDIDATES` の順位再測定・`select_with_occupancy_
-  for_device` の分岐更新（cand0 を N=4096 の推奨候補へ格上げできるか）は
-  本 PR では実施しない
+  支持する強い実機実測根拠を得た**（3 run・5 run いずれの計測でも一致。
+  有効性の知見自体は §7.6a 以降も維持）。ただし GPU counters 等による spill
+  の直接確証（Xcode Instruments。§5 従来項目）は引き続き未実施
+- **E1 は本 PR では本番結線を撤回する（§7.6a・§7.7a。初版の「採用」から
+  訂正）**。撤回理由は本番 `dispatch_auto` 経路が N=512/1024/2048 で
+  15〜35% 後退するため。E2〜E5（フラグメントロード方式変更・協調ロード
+  再構成・`FINE_BARRIER_ENABLED`／`SWIZZLE_ENABLED` 切替との相互作用）は
+  引き続き対象外
+- unroll(full) を acc_rows*acc_cols>=16 の候補にのみ適用する条件付き
+  gating（function constant 分岐でループ本体を複製する等）は、pragma 単純
+  付与よりコード複雑化・実機再検証コストが大きいため本 PR では実施せず、
+  後続 issue として整理する（§7.7a）
 - **新規**: 本節（5 run 再計測）で観測した計測ノイズの大きさ（本番経路
   N=4096 で base の run 間に約 2.3 倍の開き、N=1024 で cand2 参考計測が
   二峰的に約 2 倍変動）自体の原因診断（サーマルスロットリング・
@@ -398,6 +430,28 @@ E1 適用後の中央値は base 比 **約 +11.5%** で非後退（改善）。b
   20/計測 20 が本機ではノイズ抑制に不十分である可能性等）は未実施
 - 上記いずれも Issue 起票の要否はユーザー判断に委ねる
   （`.claude/rules/out-of-scope-tracking.md`）
+
+### 7.7a 本番結線の撤回（実施内容の記録）
+
+§7.6a の見直しに基づき、本 PR の以下のコミットで加えていた本番結線を撤回した:
+
+- `crates/backend-metal/src/shaders/gemm.metal`: `gemm_simdgroup_tiled`
+  （f32 経路）へ付与していた `#pragma clang loop unroll(full)` 全 10 箇所を
+  削除し、`f19edce`（イシュー #1188 初回コミット）以前の状態へ戻した
+- `crates/backend-metal/tests/shader_source_evidence.rs`:
+  `gemm_simdgroup_tiled_source_unrolls_accumulator_loops`・
+  `gemm_simdgroup_tiled_f16_source_does_not_unroll_accumulator_loops` の
+  証跡テスト（pragma の存在を固定するもの）を削除した
+- `docs/perf/logs/metal-gemm-n4096-e1-unroll-1188{,-5run}/` の実測ログ・
+  §7.1〜§7.5 の実測記録・分析（H2 を支持する有効性の知見）はそのまま保持
+  する（撤回するのは本番結線の判断のみ。実験自体は「実施済み・知見あり・
+  本番未採用」として §7.7 に反映済み）
+
+`dynamic_tile_auto_tflops`（本番 `dispatch_auto` 経路）の N=512/1024/2048/
+4096 各 5 run 中央値の再算出（§7.6a の表）は、§7.5 と同一の既存ログ
+（`docs/perf/logs/metal-gemm-n4096-e1-unroll-1188-5run/{base,e1}_bench_run{1..5}.log`）
+の `size=<N> ... dynamic_tile_auto_tflops=<値>` 行を N 別に抽出し中央値を
+取っただけであり、新規の実機実測は行っていない（既存ログの再集計）。
 
 ### 7.8 関連ログ
 
