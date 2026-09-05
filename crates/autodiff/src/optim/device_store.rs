@@ -1288,6 +1288,17 @@ mod tests {
         /// forward／backward が実際に `download()` を呼んでいないことを
         /// 区別して検証できる。
         download_count: Arc<AtomicUsize>,
+        /// `true` の場合のみ [`BackendOps::gemm_fp32_strict_into`] を
+        /// `Unsupported` の既定実装からオーバーライドし、`d_weight` を
+        /// `out` へ直接書き込む（イシュー #1212 review 指摘対応）。
+        /// `DeviceParamStore::step` の `any_resident == true` 分岐
+        /// （resident 経由 weight grad + host 経由 bias grad の混在
+        /// 更新）は、`resident_grad_capability` が `Some(true)` に
+        /// 倒れるバックエンドでしか到達しない。既存の `new`／
+        /// `failing_after` はこのフラグを `false` のまま維持し（既存
+        /// テストの挙動を変えない）、`resident_capable` コンストラクタ
+        /// のみ `true` にする。
+        resident_capable: bool,
     }
 
     impl MockDeviceOps {
@@ -1297,6 +1308,7 @@ mod tests {
                 call_count: Arc::new(AtomicUsize::new(0)),
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
+                resident_capable: false,
             }
         }
 
@@ -1306,6 +1318,24 @@ mod tests {
                 call_count: Arc::new(AtomicUsize::new(0)),
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
+                resident_capable: false,
+            }
+        }
+
+        /// `gemm_fp32_strict_into` をオーバーライドし resident 経由の
+        /// weight 勾配直接書き込みを有効化したモック（イシュー #1212
+        /// review 指摘対応）。`DeviceParamStore::step` の
+        /// `any_resident == true` 分岐（resident weight grad + host bias
+        /// grad の混在マージ）を `autodiff` クレート自身の単体テストで
+        /// 実行可能にする（既存の `mod tests` は本フラグ `false` の
+        /// ままのため、この分岐を一度も通っていなかった）。
+        fn resident_capable() -> Self {
+            Self {
+                fail_after: None,
+                call_count: Arc::new(AtomicUsize::new(0)),
+                upload_count: Arc::new(AtomicUsize::new(0)),
+                download_count: Arc::new(AtomicUsize::new(0)),
+                resident_capable: true,
             }
         }
 
@@ -1381,6 +1411,40 @@ mod tests {
             let data = handle.data.borrow().clone();
             Tensor::new(data, buffer.shape()).map_err(BackendError::ShapeMismatch)
         }
+
+        /// `resident_capable == true` のときのみオーバーライドする
+        /// （イシュー #1212 review 指摘対応）。`DeviceParamStore::step`
+        /// の `any_resident == true` 分岐は `gemm_fp32_strict_into` と
+        /// 同様この H2D 個別書き込みが揃って初めて成立する（本番結線の
+        /// `backend-cpu::CpuBackendOps` も両方を同時に実装している。
+        /// `crates/backend-cpu/src/ops.rs::upload_into`／
+        /// `gemm_fp32_strict_into` 参照）。`resident_capable == false`
+        /// （既定）は `MemoryOps` の既定実装と同じ `Unsupported` を返す。
+        fn upload_into(
+            &self,
+            tensor: &Tensor<f32>,
+            dst: &mut DeviceBuffer<f32>,
+            dst_offset: usize,
+        ) -> Result<(), BackendError> {
+            if !self.resident_capable {
+                return Err(BackendError::Unsupported(
+                    "MockDeviceOps: resident_capable == false (default fail-safe)".into(),
+                ));
+            }
+            let src = tensor.contiguous();
+            let src_slice = src.as_slice().unwrap_or(&[]);
+            let dst_handle = dst
+                .downcast_handle::<MockHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            let mut data = dst_handle.data.borrow_mut();
+            if dst_offset + src_slice.len() > data.len() {
+                return Err(BackendError::InvalidArgument(
+                    "MockDeviceOps::upload_into: dst_offset + numel exceeds buffer".into(),
+                ));
+            }
+            data[dst_offset..dst_offset + src_slice.len()].copy_from_slice(src_slice);
+            Ok(())
+        }
     }
 
     impl BackendOps for MockDeviceOps {
@@ -1453,6 +1517,44 @@ mod tests {
 
         fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
             Ok(crate::eval::matmul(a, b))
+        }
+
+        /// `resident_capable == true` のときのみ `x_t @ g` を `out` の
+        /// `out_offset` へ直接書き込む（イシュー #1212 review 指摘対応。
+        /// `ResidentResolver::fill_resident_weight_grad` から呼ばれ、
+        /// `DeviceParamStore::step` の `any_resident == true` 分岐を
+        /// 単体テストで到達可能にする）。`resident_capable == false`
+        /// （既定）は `BackendOps` の既定実装と同じ `Unsupported` を
+        /// 返し、既存テストの挙動（常に `any_resident == false`）を
+        /// 変えない。
+        fn gemm_fp32_strict_into(
+            &self,
+            a: &Tensor<f32>,
+            b: &Tensor<f32>,
+            out: &mut DeviceBuffer<f32>,
+            out_offset: usize,
+        ) -> Result<(), BackendError> {
+            if !self.resident_capable {
+                return Err(BackendError::Unsupported(
+                    "MockDeviceOps: resident_capable == false (default fail-safe)".into(),
+                ));
+            }
+            let result = crate::eval::matmul(a, b).contiguous();
+            let src = result.as_slice().ok_or(BackendError::Unsupported(
+                "MockDeviceOps::gemm_fp32_strict_into: non-contiguous result".into(),
+            ))?;
+            let out_handle = out
+                .downcast_handle::<MockHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            let mut data = out_handle.data.borrow_mut();
+            if out_offset + src.len() > data.len() {
+                return Err(BackendError::InvalidArgument(
+                    "MockDeviceOps::gemm_fp32_strict_into: out_offset + numel exceeds buffer"
+                        .into(),
+                ));
+            }
+            data[out_offset..out_offset + src.len()].copy_from_slice(src);
+            Ok(())
         }
 
         /// `w`（デバイス常駐）を [`MockDeviceOps::read_resident`] で直接
@@ -1598,30 +1700,43 @@ mod tests {
     /// の `matmul` 契約に合わせる。旧テストの `[2]` 要素ごとの `mul` とは
     /// 異なる形状だが、「forward→backward→step でパラメータが変化する」
     /// という検証意図は変わらない）。
-    fn train_one_step(momentum: f32) -> (Tensor<f32>, Tensor<f32>) {
-        let tape = simple_tape(None);
+    /// `train_one_step`／`train_one_step_resident_capable_matches_host_only`
+    /// 共通の本体（イシュー #1212 review 指摘対応で `tape` 引数を抽出）。
+    /// `tape` の `ops`（`MockDeviceOps::resident_capable` か否か）だけが
+    /// 両テスト間の差分であり、それ以外の入力（初期値・学習率・
+    /// step 回数）は完全に同一にすることで「resident 経由 weight grad +
+    /// host 経由 bias grad の混在マージ（`any_resident == true` 分岐）」
+    /// と「全 grad host upload（`any_resident == false` 分岐。#1023 以来
+    /// 無変更）」が同一の最終パラメータ値へ収束することを bit 単位で
+    /// 比較できるようにする。
+    fn train_one_step_on(tape: &Tape, momentum: f32) -> (Tensor<f32>, Tensor<f32>) {
         let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
         let b_init = tensor(vec![0.5, -0.5], &[2]);
-        let mut store = DeviceParamStore::new(&tape, &[&w_init, &b_init]).unwrap();
+        let mut store = DeviceParamStore::new(tape, &[&w_init, &b_init]).unwrap();
 
-        let leaves = store.register_resident_params(&tape).unwrap();
+        let leaves = store.register_resident_params(tape).unwrap();
         let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
         let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
 
         let pred = store
-            .linear_forward(&tape, &x, &leaves[0], Some(&leaves[1]))
+            .linear_forward(tape, &x, &leaves[0], Some(&leaves[1]))
             .unwrap();
         let loss = pred.mse_loss(&target).unwrap();
-        let grads = store.backward(&tape, &loss).unwrap();
+        let grads = store.backward(tape, &loss).unwrap();
 
         let mut config = SgdConfig::new(0.1);
         if momentum != 0.0 {
             config = config.with_momentum(momentum);
         }
-        store.step(&tape, &grads, &config).unwrap();
+        store.step(tape, &grads, &config).unwrap();
 
-        let synced = store.sync_to_host(&tape).unwrap();
+        let synced = store.sync_to_host(tape).unwrap();
         (synced[0].clone(), synced[1].clone())
+    }
+
+    fn train_one_step(momentum: f32) -> (Tensor<f32>, Tensor<f32>) {
+        let tape = simple_tape(None);
+        train_one_step_on(&tape, momentum)
     }
 
     #[test]
@@ -1636,6 +1751,80 @@ mod tests {
     fn full_pipeline_with_momentum_updates_parameters() {
         let (w, _b) = train_one_step(0.9);
         assert_ne!(w.get(&[0, 0]).unwrap(), 1.0);
+    }
+
+    /// イシュー #1212 review 指摘対応: 既存の `mod tests` は
+    /// `MockDeviceOps` が `gemm_fp32_strict_into` をオーバーライドせず
+    /// 既定 `Unsupported` に落ちるため `resident_grad_capability` が
+    /// 常に `Some(false)` に固定され、`DeviceParamStore::step` の
+    /// `any_resident == true` 分岐（resident 経由 weight grad の直接
+    /// 書き込み＋host 経由 bias grad の `upload_into` 個別充填という
+    /// 混在マージロジック）を一度も通っていなかった（レビュー指摘の
+    /// 事実確認）。
+    ///
+    /// 本テストは `MockDeviceOps::resident_capable()` でこの分岐を
+    /// 到達させ（1 weight + 1 bias の 2 パラメータ・2 step）、
+    /// `resident_grad_capability` が実際に `Some(true)` へ倒れたこと
+    /// （`any_resident == true` を経由したこと自体の証拠）を
+    /// `fill_resident_weight_grad` 呼び出し経由の副作用として
+    /// 間接検証したうえで、全く同一の入力・学習率・step 回数で
+    /// `any_resident == false`（既定 `MockDeviceOps::new()`。#1023 以来
+    /// 無変更の「毎回新規 grad バッファへ 1 回 upload」経路）を通した
+    /// 場合の最終パラメータ値と **bit 単位で一致**することを検証する。
+    /// 一致すれば、resident 経由 weight grad と host 経由 bias grad を
+    /// 同一 `GradStaging` バッファへマージしてから SGD カーネルへ渡す
+    /// という新規ロジック（`RefCell` 越しの状態共有・`backward_serial`
+    /// 鮮度判定・slot インデックス整合性を含む）が、経路を分けない
+    /// 素朴な実装と数値的に同じ結果を生むことの直接証拠になる。
+    #[test]
+    fn resident_weight_grad_merge_matches_host_only_grad_path() {
+        fn two_steps(tape: &Tape) -> (Tensor<f32>, Tensor<f32>) {
+            let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+            let b_init = tensor(vec![0.5, -0.5], &[2]);
+            let mut store = DeviceParamStore::new(tape, &[&w_init, &b_init]).unwrap();
+            let config = SgdConfig::new(0.1);
+
+            for _ in 0..2 {
+                let leaves = store.register_resident_params(tape).unwrap();
+                let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+                let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+                let pred = store
+                    .linear_forward(tape, &x, &leaves[0], Some(&leaves[1]))
+                    .unwrap();
+                let loss = pred.mse_loss(&target).unwrap();
+                let grads = store.backward(tape, &loss).unwrap();
+                store.step(tape, &grads, &config).unwrap();
+            }
+
+            let synced = store.sync_to_host(tape).unwrap();
+            (synced[0].clone(), synced[1].clone())
+        }
+
+        // `any_resident == false` 経路（既定。比較対象の基準値）。
+        let host_only_tape = simple_tape(None);
+        let (host_w, host_b) = two_steps(&host_only_tape);
+
+        // `any_resident == true` 経路（weight は resident 直接書き込み・
+        // bias は host 経由で `GradStaging` へ個別充填）。
+        let resident_ops = MockDeviceOps::resident_capable();
+        let resident_tape =
+            Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let (resident_w, resident_b) = two_steps(&resident_tape);
+
+        // 退化した比較（両方とも初期値のまま）でないことをまず確認する。
+        assert_ne!(resident_w.get(&[0, 0]).unwrap(), 1.0);
+        assert_ne!(resident_b.get(&[0]).unwrap(), 0.5);
+
+        assert_eq!(
+            host_w.contiguous().as_slice().unwrap(),
+            resident_w.contiguous().as_slice().unwrap(),
+            "resident weight grad マージ経路と host-only 経路で weight の最終値が食い違う"
+        );
+        assert_eq!(
+            host_b.contiguous().as_slice().unwrap(),
+            resident_b.contiguous().as_slice().unwrap(),
+            "resident weight grad マージ経路と host-only 経路で bias の最終値が食い違う"
+        );
     }
 
     /// momentum を途中で有効化すると `InvalidArgument` で拒否される
