@@ -170,16 +170,62 @@ dispatch_strided_bias_act_prepared` への自動ルーティング結線は
 利用可能であり、AC-4（NT/TN/TT へのタイル variant 選択適用）はこの明示
 入口で満たされている（§4 の実機正確性実測が根拠）。
 
+## 5.4 再計測（イシュー #1187。3 試行とも `verdict=undetermined`）
+
+イシュー #1187 で §6（旧稿）の引き継ぎ事項に従い、`uptime` の load
+average が低いタイミングを選びつつ `gemm_transpose_route_ab_bench.rs`
+のフェーズ 2 A/B 本計測を再実行した。**3 試行とも、フェーズ 1（安定性
+セルフチェック）が全サイズで成立せず、`verdict=undetermined`（判定不可）
+のまま終了した**。30 セルの A/B 本計測は本イシューでも未実行のまま。
+
+### 計測環境・実行日
+
+- 機種・OS: §1 と同一（Apple M4 Max・macOS 26.6.2）
+- 実行日: 2026-09-05
+- 生ログ・env_info: `docs/perf/logs/metal-gemm-transpose-route-ab-1187/`
+  （`route_ab_run1.log`〜`route_ab_run3.log`・`env_info.txt`）
+
+### 試行表
+
+| 試行 | ROUNDS | COOLDOWN | MIN_WARMUP | 実行直前 uptime load average | gate 超過サイズ数 |
+|---|---|---|---|---|---|
+| 1 | 10 | 8s | 3s（既定値。#1186 試行 4 と同一） | 4.19 4.93 6.02 | 5/5（256〜4096 全サイズ。spread 最大 1.6356@4096） |
+| 2 | 14 | 10s | 4s（増やす方向のみ一時調整。実行中に他プロセス負荷が再上昇し load average が一時 12〜20 台まで上振れ） | 5.73 7.54 6.97 | 5/5（spread 最大 1.2495@4096） |
+| 3 | 14 | 10s | 4s（試行 2 と同一設定で再試行） | 9.53 10.39 9.61 | 5/5（spread 最大 3.3070@256） |
+
+（試行 2・3 で使用した ROUNDS=14/COOLDOWN=10s/MIN_WARMUP=4s は実行時の
+一時調整であり、`gemm_transpose_route_ab_bench.rs` 本体へは反映していない
+——`undetermined` が確定した以上、判定不可のまま定数変更のみをコードへ
+残さない安全側の判断。`pmset -g therm` は 3 試行ともサーマル警告なし
+「No thermal warning level has been recorded」で、スロットリングではなく
+他セッション並走による GPU リソース競合が spread 悪化の主因と推定される
+点は #1186 の分析と同じ）
+
+### 判定: `verdict=undetermined`（3 試行とも判定不可のまま）
+
+**フェーズ 2（30 セルの A/B 本計測）は本イシューでも一度も実行できて
+いない。**「全形状 × NT/TN/TT で B/A（TFLOPS 比）≥ 1.0」という結線可否
+の判断基準（イシュー #1186 本文）を満たすかどうかは、引き続き実測できて
+いない。実装計画の fail-closed 方針（安定性ゲート不成立が解消しなければ
+判定を確定しない）に従い、**`MetalGemm::dispatch_strided_bias_act_prepared`
+への自動ルーティング結線は本イシューでも行わない**（判定根拠が得られて
+いない以上、性能低下の可能性がある変更を無根拠に本番経路へ入れない安全側
+の判断は #1186 から変わらず）。
+
+`MetalGemm::dispatch_strided_tiled_prepared` は引き続き明示入口として
+利用可能であり、AC-4 は §4 の実機正確性実測のとおり満たされている。
+
 ## 6. 引き継ぎ事項
 
 - **`gemm_transpose_route_ab_bench.rs` によるフェーズ 2 A/B 本計測の
-  再実行**: 他セッションの GPU 計測負荷が小さい時間帯（`uptime` の
-  load average が低いタイミング）を選んで再実行し、フェーズ 1 の
-  安定性ゲートを通過させたうえで 30 セルの実測・`verdict` 判定を得る
-  必要がある（イシュー #1187 の前提条件）。
+  再実行**: #1186・#1187 とも他セッションの GPU 計測負荷（`uptime` の
+  load average 4〜20 台で変動）によりフェーズ 1 の安定性ゲートを一度も
+  通過できていない。再実行は、複数イシューの並列実装が行われていない
+  時間帯（他セッションの GPU 計測が並走しない状態）を選んで行う必要が
+  ある（イシュー #1187 の後続。まだ結線可否の実測材料が得られていない
+  ため引き続き前提条件）。
 - `dispatch_strided_bias_act_prepared` への自動ルーティングの結線
-  可否判断（性能実測込み。イシュー #1187）は上記の実測が前提のため
-  持ち越し。
+  可否判断（性能実測込み）は上記の実測が前提のため持ち越し。
 - パターン別タイル選択テーブル（`tile::select` を NT/TN/TT 専用へ拡張
   する要否）の判断も、上記ベンチ実測が前提のため持ち越し。
 - `examples/gemm_transpose_tile_sweep.rs` の NT/TN/TT tiled 候補計測

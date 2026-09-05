@@ -1,0 +1,34 @@
+# イシュー #1187 A/B 再実行 env_info（内部ホスト名・機体識別子は含めない）
+
+- 機種: Apple M4 Max（sysctl machdep.cpu.brand_string 実測）
+- OS: macOS 26.6.2（sw_vers 実測）
+- rustc: 1.96.0 (ac68faa20 2026-05-25)
+- cargo: 1.96.0 (30a34c682 2026-05-25)
+- HEAD sha（実行時点。origin/main 直下）: febf60bd2dff5ca8201f4b889cdd029c985ff881
+
+## 実行前後の pmset -g therm（3 試行とも同一・警告なし）
+
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+
+## uptime（各試行直前の load average。他セッション並走による GPU 競合が確認された）
+
+- 試行 1（ROUNDS=10 COOLDOWN=8s MIN_WARMUP=3s。#1186 実装計画の既定値）:
+  実行直前 `14:41 load averages: 4.19 4.93 6.02`
+- 試行 2（ROUNDS=14 COOLDOWN=10s MIN_WARMUP=4s。試行 1 の gate 超過を受け増やす方向のみ一時調整）:
+  実行直前 `14:55 load averages: 5.73 7.54 6.97`（実行中に他プロセス負荷が再上昇。試行直前は 5〜8 程度だったが実行中に 12〜20 台まで上振れしたことを実行後の uptime 観測で確認）
+- 試行 3（同 ROUNDS=14 COOLDOWN=10s MIN_WARMUP=4s で再試行）:
+  実行直前 `15:13 load averages: 9.53 10.39 9.61`
+
+## 結果
+
+3 試行とも `verdict=undetermined`（フェーズ 1 安定性セルフチェック不成立。
+5 サイズ全てで spread が STABILITY_SPREAD_GATE〈0.05〉を超過し続けた）。
+詳細は `route_ab_run1.log`／`route_ab_run2.log`／`route_ab_run3.log` と
+`docs/perf/metal-gemm-transpose-tiled.md` §5.4 を参照。
+
+試行 2・3 で使用した ROUNDS=14/COOLDOWN=10s/MIN_WARMUP=4s は本リポの
+`gemm_transpose_route_ab_bench.rs` へは反映しない（`undetermined` 分岐は
+コード変更なしの方針。`docs/perf/metal-bench-noise-protocol.md` の調整は
+実行時の一時変更に留め、実測記録〈本ファイル〉へ残す）。
