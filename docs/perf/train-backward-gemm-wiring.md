@@ -127,14 +127,22 @@ scalar 参照実装を上回るリスクを事前に想定していたが（本�
   計測での ADOPT 判定が明確であったため、時間配分上 Metal 参考計測は
   実施しなかった。後続 #1215〈Metal NT/TN strided 結線〉の際に必要なら
   改めて計測する）
-- **CUDA**: 本セッションには CUDA 実機がないため未実測（実施は #1214
-  または別途の DGX Spark GB10 セッション）
+- **CUDA**: 本セッションには CUDA 実機がないため未実測。#1214 で CUDA
+  GEMM の NT/TN 転置入口自体の実装・GPU 非依存テストは完了したが、同
+  セッションにも CUDA 実機がなく GB10 実測は未実施のまま
+  `docs/perf/cuda-gemm-vjp-transposed-entry.md` に記入欄を残した
+  （実施は別途の DGX Spark GB10 セッション）
 
 ## 7. 後続イシューへの引き継ぎ
 
 - #1212: reuse 経路の grad をデバイス常駐のまま `device_update` へ直結
   （本イシューに依存）
-- #1213: CPU BLIS の NT/TN 専用入口（`contiguous()` 再パック解消）
-- #1214: CUDA GEMM の NT/TN 転置入口・本変更の CUDA 実測
+- #1213: CPU BLIS の NT/TN 専用入口（`contiguous()` 再パック解消）→
+  完了（`docs/perf/cpu-gemm-vjp-transposed-entry.md`・`docs/matmul-vjp-
+  zero-copy-decision.md` §4.2 追補）
+- #1214: CUDA GEMM の NT/TN 転置入口 → 実装・GPU 非依存テストは完了
+  （`docs/perf/cuda-gemm-vjp-transposed-entry.md`・`docs/matmul-vjp-
+  zero-copy-decision.md` §4.3 追補）。GB10 実機実測・本変更の CUDA
+  実測は同 doc §3〜§4 に記入欄を残したまま未実施
 - #1215: Metal GEMM の NT/TN strided 結線（#1187 依存）・本変更の Metal
   実測

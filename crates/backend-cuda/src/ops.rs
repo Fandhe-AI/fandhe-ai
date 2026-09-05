@@ -22,6 +22,7 @@
 //! `BackendError::CudaUnavailable` へ変換する（panic しない。
 //! `.claude/rules/coding-rust.md`）。
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
@@ -37,6 +38,63 @@ use crate::error::CudaError;
 use crate::memory::{CudaBufferHandle, CudaMemory, map_cuda_error};
 use crate::rmsnorm::match_rmsnorm_plan;
 use crate::softmax::match_softmax_plan;
+
+thread_local! {
+    /// `gemm_fp32_strict_impl`／`gemm_resident_lhs` の呼び出しのうち、
+    /// 片側オペランドが dense な転置 view（[`dense_transposed_view`] が
+    /// `Some` を返す形状）と判定できず `Tensor::contiguous()` の再パック
+    /// コピー（またはそれに相当する `MemoryOps::upload` 内部の
+    /// `contiguous()`）へフォールバックした回数（イシュー #1214）。
+    /// `backend-cpu::ops::GEMM_HOST_REPACK_COUNT`（#1213）と同型の
+    /// 可観測点で、`#[cfg(test)]` クレート内テストから「NT/TN 判定が
+    /// 効いてフォールバックを通っていないこと」を検証するために使う
+    /// （`pub(crate)`。クレート境界外の統合テストからは参照できないため、
+    /// 外部テストファイルは数値一致のみを検証する契約とする）。
+    pub(crate) static GEMM_HOST_REPACK_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// `t` が「dense な転置格納」（`Tensor::transpose_2d()` を経た zero-copy
+/// view のうち、元テンソルが行優先連続だったもの）であれば、その
+/// storage をそのまま借用したフラットスライスを返す（イシュー #1214。
+/// `backend-cpu::ops::dense_transposed_view`（#1213）と判定条件・契約が
+/// 完全に同一の複製。`tensor-core`〈crates.io 公開クレート〉の公開 API
+/// 拡張を避けるため backend-cuda 内に private 複製する。将来的な
+/// `tensor-core` への昇格候補は PR 本文の out-of-scope に記す）。
+///
+/// 判定条件は `rank() == 2 && strides() == [1, shape()[0]]`。これは
+/// `Tensor::transpose_2d`（`transpose(0,1)` の薄い委譲）が行優先連続
+/// テンソルへ適用された結果と同値であり、返るスライスは「転置元の
+/// テンソル」を行優先で並べたバイト列そのものになる（呼び出し元
+/// `gemm_fp32_strict_impl`／`gemm_resident_lhs` が
+/// `gemm::CudaGemm::run_tiled_f32_nt`／`run_tiled_f32_tn`／
+/// `launch_tiled_f32_resident_nt` の `bt`／`at` 引数としてそのまま渡す
+/// 前提）。
+///
+/// `narrow` 後の転置（一般 stride）・stride 0 の broadcast・rank ≠ 2 は
+/// `None`（従来どおり `contiguous()` へフォールバックさせる。一般 stride
+/// 化は本イシューのスコープ外。`docs/matmul-vjp-zero-copy-decision.md`
+/// §3.2）。`rows == 0 || cols == 0` も呼び出し元の分岐を単純に保つため
+/// `None` とし、`contiguous()`（`is_contiguous()` が空テンソルで常に
+/// `true` を返す契約）に委ねる。
+fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
+    if t.rank() != 2 {
+        return None;
+    }
+    let shape = t.shape();
+    let strides = t.strides();
+    let (rows, cols) = (shape[0], shape[1]);
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    if strides.len() != 2 || strides[0] != 1 || strides[1] != rows as isize {
+        return None;
+    }
+    let view = t.as_view_slice()?;
+    if view.len() != rows.checked_mul(cols)? {
+        return None;
+    }
+    Some(view)
+}
 
 /// CUDA バックエンドの `BackendOps` 実装。`ordinal` は `Device::Cuda(_)`
 /// の一致判定に使う `cudarc` のデバイス番号
@@ -72,6 +130,18 @@ impl CudaBackendOps {
     /// 契約（「適用範囲は `CudaBackendOps::gemm`（素の f32 GEMM）のみ」）
     /// に反するため、必ずこのヘルパーを経由する（`gemm_bias_act` は
     /// codex-review 指摘・PR #1091 で同様の理由により導入済み）。
+    ///
+    /// イシュー #1214: 片側オペランドが dense な転置 view（
+    /// [`dense_transposed_view`] が `Some` を返す形状）と判定できる場合、
+    /// `Tensor::contiguous()` の再パックコピーを経由せず
+    /// `gemm::CudaGemm::run_tiled_f32_nt`／`run_tiled_f32_tn`（GPU 側 smem
+    /// 転置カーネルで転置してから既存 NN GEMM カーネルへ渡す）へ直接
+    /// 渡す（CPU 版 #1213 と同型の判定・分岐）。両方転置（TT）・判定
+    /// 不能（一般 stride・broadcast 等）・転置カーネル自体が使用不能
+    /// （`new` 時のコンパイル失敗）な環境は従来どおり両オペランドを
+    /// `contiguous()` で実体化し `run_tiled_f32` を呼ぶ（フォールバック
+    /// でオペランドを再パックした回数は [`GEMM_HOST_REPACK_COUNT`] へ
+    /// 計上する。`docs/matmul-vjp-zero-copy-decision.md` §4.3）。
     fn gemm_fp32_strict_impl(
         &self,
         a: &Tensor<f32>,
@@ -82,18 +152,6 @@ impl CudaBackendOps {
         let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
         let n = b.shape()[1] as u32;
 
-        // `run_tiled_f32`／`run_wmma_tf32` はいずれも contiguous な
-        // `&[f32]` を要求する（CPU 実装と同じ契約。`ops.rs`（backend-cpu）
-        // 参照）。
-        let a_owned = a.contiguous();
-        let b_owned = b.contiguous();
-        let a_slice = a_owned
-            .as_slice()
-            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: lhs not contiguous".into()))?;
-        let b_slice = b_owned
-            .as_slice()
-            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
-
         let gemm = self.with_driver_call(
             &[],
             |e| BackendError::CudaUnavailable(e.to_string()),
@@ -102,12 +160,96 @@ impl CudaBackendOps {
                 context_cache::cached_gemm(&device)
             },
         )?;
-        let out = self.with_driver_call(
+
+        // 転置カーネル自体が使用不能（`CudaGemm::new` 時のコンパイル
+        // 失敗）な環境では NT/TN 判定結果に関わらず常に従来経路へ
+        // フォールバックする（`transpose_smem_f32_available` は driver
+        // 呼び出しを伴わない静的照会のため `with_driver_call` の外で
+        // 判定してよい。`tiled_f32_kernel_for` 等の可用性照会 API と
+        // 同じ扱い）。
+        let out = if gemm.transpose_smem_f32_available() {
+            match (dense_transposed_view(a), dense_transposed_view(b)) {
+                // TN: a は転置格納（at: 論理形状 [k,m] 行優先）、b は通常。
+                // `crate::transpose::transpose_rows_fit_grid_y_limit(k)` は
+                // `run_tiled_f32_tn` 内の `transpose_to_pooled(at_dev, k, m)`
+                // が構築する grid.y（`k.div_ceil(TRANSPOSE_TILE)`）が CUDA の
+                // グリッド次元上限を超えないことの事前検査（イシュー #1214
+                // codex-review 指摘）。超過する場合は NN 経路（この制約を
+                // 受けない）へフォールバックする。
+                (Some(at), None) if crate::transpose::transpose_rows_fit_grid_y_limit(k) => {
+                    if !b.is_contiguous() {
+                        GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+                    }
+                    let b_owned = b.contiguous();
+                    let b_slice = b_owned.as_slice().ok_or_else(|| {
+                        BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into())
+                    })?;
+                    self.with_driver_call(
+                        &[],
+                        |e| BackendError::KernelLaunchFailed(e.to_string()),
+                        || gemm.run_tiled_f32_tn(at, b_slice, m, n, k),
+                    )?
+                }
+                // NT: b は転置格納（bt: 論理形状 [n,k] 行優先）、a は通常。
+                // 事前検査は上記 TN 分岐と同型で、対象は
+                // `run_tiled_f32_nt` 内の `transpose_to_pooled(bt_dev, n, k)`
+                // が構築する grid.y（`n.div_ceil(TRANSPOSE_TILE)`）。
+                (None, Some(bt)) if crate::transpose::transpose_rows_fit_grid_y_limit(n) => {
+                    if !a.is_contiguous() {
+                        GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+                    }
+                    let a_owned = a.contiguous();
+                    let a_slice = a_owned.as_slice().ok_or_else(|| {
+                        BackendError::KernelLaunchFailed("gemm: lhs not contiguous".into())
+                    })?;
+                    self.with_driver_call(
+                        &[],
+                        |e| BackendError::KernelLaunchFailed(e.to_string()),
+                        || gemm.run_tiled_f32_nt(a_slice, bt, m, n, k),
+                    )?
+                }
+                _ => self.gemm_fp32_strict_fallback(&gemm, a, b, m, n, k)?,
+            }
+        } else {
+            self.gemm_fp32_strict_fallback(&gemm, a, b, m, n, k)?
+        };
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`Self::gemm_fp32_strict_impl`] の従来経路（両オペランドを
+    /// `contiguous()` で実体化してから `run_tiled_f32` を呼ぶ）。TT
+    /// （両方転置）・判定不能形状・転置カーネル使用不能環境の 3 通り
+    /// から共通で呼ばれる（イシュー #1214）。
+    fn gemm_fp32_strict_fallback(
+        &self,
+        gemm: &crate::gemm::CudaGemm,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, BackendError> {
+        if !a.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        if !b.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        // `run_tiled_f32` は contiguous な `&[f32]` を要求する（CPU 実装と
+        // 同じ契約。`ops.rs`（backend-cpu）参照）。
+        let a_owned = a.contiguous();
+        let b_owned = b.contiguous();
+        let a_slice = a_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: lhs not contiguous".into()))?;
+        let b_slice = b_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
+        self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || gemm.run_tiled_f32(a_slice, b_slice, m, n, k),
-        )?;
-        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+        )
     }
     /// 指定した `ordinal` に対応する `CudaBackendOps` を構築する。
     /// 構築自体は driver 初期化を行わないため常に成功する（実際の
@@ -995,6 +1137,231 @@ impl BackendOps for CudaBackendOps {
         mem.download(&c_dev_buf)
     }
 
+    /// `a`（デバイス常駐）・`w`（デバイス常駐）・`bias`（デバイス常駐・
+    /// 任意）から `y = act(a @ w + bias)` を、入力・出力いずれも
+    /// ホストへ実体化せずに計算する（イシュー #1216・`docs/inference-
+    /// forward-fixed-cost-design.md` §3.2「段階 B」）。[`Self::
+    /// gemm_resident_rhs_act`]（`a` を毎回 upload・結果を毎回 download）
+    /// と同じ融合カーネル（[`crate::gemm::CudaGemm::
+    /// launch_tiled_bias_act_f32_resident`]）を使うが、`a` も呼び出し元が
+    /// 既にデバイスへ置いた [`fandhe_ai_tensor_core::buffer::DeviceBuffer`] として受け取り、結果も
+    /// `DeviceBuffer` のまま返す点が異なる（`gemm_resident_rhs*` 系は
+    /// 「`w`／`bias` のみ常駐」・本メソッドは「`a`／`w`／`bias`／戻り値の
+    /// 全てが常駐」）。多層 MLP 推論チェーン
+    /// （`fandhe_ai_autodiff::optim::device_store` の呼び出し元）が本
+    /// メソッドを連鎖させることで、層間の D2H→H2D を発生させず最終
+    /// 出力の 1 回の `download` へ同期点を集約できる（trait 定義側の
+    /// doc comment・`tensor-core::backend_ops::BackendOps::
+    /// linear_forward_device` 参照）。
+    ///
+    /// **世代検査の対象に `a` を含む**: `gemm_resident_rhs*` は `a` を
+    /// 呼び出し内で毎回 upload するため世代検査の対象外だったが（同
+    /// ファイル `gemm_resident_rhs` doc 参照）、本メソッドの `a` は
+    /// 呼び出しを跨いで生存するデバイス常駐バッファであるため、`w`・
+    /// `bias` と同じく `resident_generations` へ含める。
+    ///
+    /// **出力バッファの確保元**: 呼び出し元へ escape する戻り値のため
+    /// `CudaMemory::new(&device)`（呼び出し内で死ぬ一時 tracker）ではなく
+    /// `static_cuda_memory`（`memory_ops()` と同一インスタンス）の
+    /// `alloc_zeroed` を使う（REQ-14 の単一計測系列。`docs/device-
+    /// resident-update-design.md` §3.3d）。CPU 実装が `shared_cpu_memory()`
+    /// を使うのと同じ判断。
+    fn linear_forward_device(
+        &self,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Cuda(self.ordinal) || w.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias {
+            if b.device() != Device::Cuda(self.ordinal) {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+        }
+        let act_relu = match act {
+            Activation::None => false,
+            Activation::Relu => true,
+            // `Activation` は `#[non_exhaustive]`。CPU 実装・
+            // `gemm_bias_act` と同じ方針で未知 variant を黙って恒等関数
+            // として扱わず明示的に拒否する。
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "linear_forward_device: unsupported activation {act:?}"
+                )));
+            }
+        };
+        if k == 0 {
+            // `gemm_resident_rhs` と同じ理由（`Linear::new` が
+            // `in_features == 0` を構築時に拒否するため到達不能）で
+            // フォールバックを設けず型付きエラーで拒否する。
+            return Err(BackendError::InvalidArgument(
+                "linear_forward_device: k == 0 is unreachable via Linear::new (in_features == 0 \
+                 is rejected at construction); a host epilogue fallback would require \
+                 downloading the resident inputs, defeating the zero-D2H contract this method \
+                 exists for"
+                    .to_string(),
+            ));
+        }
+
+        // `a` はこのメソッドでは呼び出しを跨いで生存するデバイス常駐
+        // バッファのため、`w`・`bias` と同じく世代検査の対象に含める
+        // （`gemm_resident_rhs` の doc・本メソッド doc 参照）。
+        let resident_generations = [
+            Some(a.generation()),
+            Some(w.buffer().generation()),
+            bias.map(|b| b.buffer().generation()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+        if m == 0 || n == 0 {
+            // 早期 return でも poison 状態・世代は fail-closed に検査する
+            // （`gemm_resident_rhs` の同種分岐と同じ理由。PR #1064 追補）。
+            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            let device = self.with_driver_call(
+                &resident_generations,
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || self.device_handle_raw(),
+            )?;
+            let mem = static_cuda_memory(self.ordinal, &device)?;
+            return mem.alloc_zeroed(&[m, n]);
+        }
+
+        let a_handle = a
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_full) = a_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        if a_full.len() != a.numel() {
+            // `DeviceBuffer::new` 経由で構築される限り到達しないはずだが、
+            // shape とハンドル実体のずれを本番経路で `unwrap`/`expect` に
+            // 頼らず検出する（CPU 実装 `linear_forward_device` と同種の
+            // 防御。REQ-8・OWASP A03）。
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: a.numel(),
+                    actual: a_full.len(),
+                },
+            ));
+        }
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_full) = w_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
+        let bias_handle = bias
+            .map(|b| {
+                b.buffer()
+                    .downcast_handle::<CudaBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset(), b.numel()))
+            })
+            .transpose()?;
+        let bias_view = match &bias_handle {
+            Some((h, offset, numel)) => {
+                let Some(full) = h.slice.as_ref() else {
+                    return Err(BackendError::DeviceAllocationFailed(
+                        "linear_forward_device: bias buffer has numel > 0 but no device \
+                         allocation"
+                            .into(),
+                    ));
+                };
+                Some(full.slice(*offset..*offset + *numel))
+            }
+            None => None,
+        };
+
+        // `device_handle_raw`（キャッシュミス時の `CudaDevice::new`）自体も
+        // poison 検査・観測の対象に含める（`gemm_resident_rhs` と同じ
+        // 理由。PR #1064 追補）。
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        // 出力は呼び出し元へ escape するため `static_cuda_memory`（`memory_ops()`
+        // と同一インスタンス）で確保する（本メソッド doc「出力バッファの
+        // 確保元」参照。`gemm_resident_rhs` の一時 `CudaMemory::new` とは
+        // 異なる）。
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        let mut c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_slice) = c_handle.slice.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: output buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+
+        // キャッシュ構築（`cached_gemm`）自体の driver 呼び出しも同じ
+        // 観測対象とする（`gemm_resident_rhs` と同じ理由。PR #1064
+        // 追補）。
+        let gemm = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                gemm.launch_tiled_bias_act_f32_resident(
+                    a_full,
+                    &w_view,
+                    bias_view.as_ref(),
+                    act_relu,
+                    c_slice,
+                    m as u32,
+                    n as u32,
+                    k as u32,
+                )
+            },
+        )?;
+
+        // `download` しない: 同期点は呼び出し元の `download`（`readback`
+        // の `synchronize`）へ集約される（`docs/backend-cuda-async-
+        // execution-design.md` の契約どおり。同一ストリーム FIFO により
+        // 次層カーネルは前層の出力完了後に実行される）。
+        Ok(c_dev_buf)
+    }
+
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
     /// #1023「R3」）。`Op::LinearResident` の VJP が `d_input^T = w @ g^T`
     /// を計算するために使う。[`Self::gemm_resident_rhs`] と同じく `w` は
@@ -1074,6 +1441,67 @@ impl BackendOps for CudaBackendOps {
             || self.device_handle_raw(),
         )?;
         let mem = CudaMemory::new(&device);
+
+        // キャッシュ構築（`cached_gemm`）自体の driver 呼び出し（NVRTC
+        // コンパイル・モジュールロード）も同じ観測対象とする（Cursor
+        // Bugbot 指摘・PR #1064 追補: cold-cache 構築中の sticky エラーが
+        // 観測なしで消費され fail-open になっていた）。NT 判定
+        // （イシュー #1214）に `transpose_smem_f32_available` が要るため
+        // `b` のアップロードより前に取得する。
+        let gemm = self.with_driver_call(
+            &[w.buffer().generation()],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
+
+        // イシュー #1214: `b`（`gᵀ` に相当）が dense な転置 view と判定
+        // できる場合、`MemoryOps::upload`（内部で `contiguous()` 実体化
+        // する）を経由せず転置元 storage を直接 H2D 転送し
+        // `launch_tiled_f32_resident_nt` へ渡す（`gemm_fp32_strict_impl`
+        // と同型の判定・fail-soft 方針。転置カーネル使用不能環境は
+        // 従来経路へフォールバックする）。`transpose_rows_fit_grid_y_limit(r)`
+        // は `launch_tiled_f32_resident_nt` 内の `transpose_to_pooled(
+        // bt_dev, r, q)` が構築する grid.y（`r.div_ceil(TRANSPOSE_TILE)`）
+        // の事前検査（イシュー #1214 codex-review 指摘。`gemm_fp32_strict_impl`
+        // の NT 分岐と同型）。超過する場合は従来経路へフォールバックする。
+        if gemm.transpose_smem_f32_available()
+            && crate::transpose::transpose_rows_fit_grid_y_limit(r as u32)
+            && let Some(bt) = dense_transposed_view(b)
+        {
+            let out = self.with_driver_call(
+                &[w.buffer().generation()],
+                |e| BackendError::KernelLaunchFailed(e.to_string()),
+                || {
+                    let bt_dev = device.stream().clone_htod(bt)?;
+                    let mut c_dev = device.stream().alloc_zeros::<f32>(p * r)?;
+                    // `launch_tiled_f32_resident_nt` が返す転置中間バッファ
+                    // （`PooledCudaHandle`）は `readback` 完了まで保持する
+                    // 契約（同メソッドのドキュメンテーションコメント
+                    // 参照。advisor 指摘: 早期 drop はプール返却・実解放が
+                    // GEMM カーネル完了前に走りうる）。`_b_std` として
+                    // 束縛し、`readback` 呼び出しが終わるまで生存させる。
+                    let _b_std = gemm.launch_tiled_f32_resident_nt(
+                        &w_view,
+                        w.offset(),
+                        &bt_dev,
+                        &mut c_dev,
+                        p as u32,
+                        r as u32,
+                        q as u32,
+                    )?;
+                    crate::memory::readback(device.stream(), &c_dev)
+                },
+            )?;
+            return Tensor::new(out, &[p, r]).map_err(BackendError::ShapeMismatch);
+        }
+
+        // フォールバック（TT 相当・判定不能形状・転置カーネル使用不能
+        // 環境）: 従来どおり `MemoryOps::upload` を経由する。`b` が
+        // 非 contiguous なら `upload` 内部の `contiguous()` が再パック
+        // コピーを行うため計上する。
+        if !b.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
         let b_dev_buf = mem.upload(b)?;
         let b_handle = b_dev_buf
             .downcast_handle::<CudaBufferHandle>()
@@ -1094,15 +1522,6 @@ impl BackendOps for CudaBackendOps {
             ));
         };
 
-        // キャッシュ構築（`cached_gemm`）自体の driver 呼び出し（NVRTC
-        // コンパイル・モジュールロード）も同じ観測対象とする（Cursor
-        // Bugbot 指摘・PR #1064 追補: cold-cache 構築中の sticky エラーが
-        // 観測なしで消費され fail-open になっていた）。
-        let gemm = self.with_driver_call(
-            &[w.buffer().generation()],
-            |e| BackendError::CudaUnavailable(e.to_string()),
-            || context_cache::cached_gemm(&device),
-        )?;
         self.with_driver_call(
             &[w.buffer().generation()],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
@@ -2145,5 +2564,330 @@ mod tests {
             matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
             "poison 済み ordinal では release_cached_device_memory は             device_handle_raw() が試行される前に拒否されるはず: {result:?}"
         );
+    }
+    // ---------------------------------------------------------------
+    // `CudaBackendOps::linear_forward_device`（イシュー #1216）の CI 実行
+    // 可能な回帰テスト（実機不要）。`gemm_resident_rhs` の同種テスト
+    // （poison／stale generation／DeviceMismatch）と同じ手法・同じ専用
+    // ordinal 払い出し方針。
+    // ---------------------------------------------------------------
+
+    /// poison 済み ordinal では `m == 0 || n == 0` の早期 return 分岐も
+    /// fail-closed に拒否されるはず（`gemm_resident_rhs` の同種テストと
+    /// 同じ理由。`a` の世代検査対象追加〈本メソッド固有〉があっても
+    /// poison 検査自体は変わらないことを確認する）。
+    #[test]
+    fn linear_forward_device_rejects_on_poisoned_ordinal_even_via_trivial_empty_shape_early_return()
+    {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+
+        let token = context_cache::begin_driver_call(ordinal, &[]).expect("begin succeeds");
+        let _ = context_cache::observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::Driver(sticky_driver_error())),
+        );
+        drop(token);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        // `a` は `[m, k] = [1, 1]`（k != 0 のため k==0 分岐は通らない）。
+        let a_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1, 1], Box::new(EmptyHandle));
+        // `w` は `[k, n] = [1, 0]`（n == 0 のため対象の早期 return 分岐へ
+        // 到達する）。
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では n == 0 の早期 return 分岐も fail-closed に              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// 旧世代の `w` ビューは空 shape の早期 return でも
+    /// `StaleDeviceGeneration` で拒否されるはず（`gemm_resident_rhs` の
+    /// 同種テストと同じ理由）。
+    #[test]
+    fn linear_forward_device_rejects_stale_generation_of_w_even_via_trivial_empty_shape_early_return()
+     {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        assert_eq!(
+            context_cache::current_generation(ordinal),
+            0,
+            "新規 ordinal の現行世代は既定 0 のはず"
+        );
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1, 1], Box::new(EmptyHandle));
+        // `w` を現行世代（0）とは異なる世代（1）でスタンプする。
+        let w_buffer = DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            vec![1],
+            Box::new(EmptyHandle),
+            1,
+        );
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代 w ビューは空 shape の早期 return でも StaleDeviceGeneration で              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// `a` 自体が旧世代（呼び出しを跨いで生存する常駐バッファという本
+    /// メソッド固有の性質）でも、空 shape の早期 return で
+    /// `StaleDeviceGeneration` により拒否されるはず（`gemm_resident_rhs`
+    /// は `a` を世代検査対象にしないため存在しない、本メソッド固有の
+    /// 回帰テスト。doc comment「世代検査の対象に `a` を含む」参照）。
+    #[test]
+    fn linear_forward_device_rejects_stale_generation_of_a_even_via_trivial_empty_shape_early_return()
+     {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        assert_eq!(
+            context_cache::current_generation(ordinal),
+            0,
+            "新規 ordinal の現行世代は既定 0 のはず"
+        );
+
+        let cuda = CudaBackendOps::new(ordinal);
+        // `a` を現行世代（0）とは異なる世代（1）でスタンプする。
+        let a_buffer = DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            vec![1, 1],
+            Box::new(EmptyHandle),
+            1,
+        );
+        // `w` は `[k, n] = [1, 0]`（n == 0 のため早期 return 分岐へ到達）。
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代 a バッファは空 shape の早期 return でも StaleDeviceGeneration で              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// CPU バッファ（`Device::Cpu`）を `a` に渡すと driver へ触れる前に
+    /// `DeviceMismatch` で拒否されるはず（`build-no-cuda-toolkit` ジョブ
+    /// でも実行可能。実機不要）。
+    #[test]
+    fn linear_forward_device_rejects_device_mismatch_on_a() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        // `a` は CPU デバイスのバッファ（driver へ触れる前に拒否される
+        // ことを確認するのが目的のため、CudaBufferHandle である必要は
+        // ない）。
+        let a_buffer = DeviceBuffer::new(Device::Cpu, vec![1, 1], Box::new(EmptyHandle));
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 1]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(result, Err(BackendError::DeviceMismatch)),
+            "CPU デバイスの a は DeviceMismatch で拒否されるはず: {result:?}"
+        );
+    }
+
+    /// `w` が別 ordinal（別 GPU）のバッファの場合も `DeviceMismatch` で
+    /// 拒否されるはず（実機不要）。
+    #[test]
+    fn linear_forward_device_rejects_device_mismatch_on_w() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let other_ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let a_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1, 1], Box::new(EmptyHandle));
+        let w_buffer =
+            DeviceBuffer::new(Device::Cuda(other_ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 1]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(result, Err(BackendError::DeviceMismatch)),
+            "別 ordinal の w は DeviceMismatch で拒否されるはず: {result:?}"
+        );
+    }
+}
+
+/// [`dense_transposed_view`]（イシュー #1214）の純ロジック検証（GPU
+/// 不要。`backend-cpu::ops::repack_count_tests` と同じ判定条件・入力を
+/// 使い、CPU 版と同一の判定結果になることを確認する）。
+#[cfg(test)]
+mod dense_transposed_view_tests {
+    use super::*;
+
+    #[test]
+    fn dense_transposed_view_returns_some_for_transpose_2d_of_contiguous_tensor() {
+        let w = Tensor::new(vec![1.0f32; 5 * 3], &[5, 3]).expect("valid tensor");
+        let w_t = w.transpose_2d().expect("transpose succeeds");
+        assert!(
+            dense_transposed_view(&w_t).is_some(),
+            "行優先連続テンソルの transpose_2d() は dense 転置 view と判定されるはず"
+        );
+    }
+
+    #[test]
+    fn dense_transposed_view_returns_none_for_narrow_then_transpose() {
+        // 列方向の narrow は行ストライド（= 元の列数）が narrow 後の
+        // 列数より大きくなるため、一般 stride（`ld != rows`）になる
+        // （`backend-cpu::ops::repack_count_tests` と同じ理由）。
+        let w0 = Tensor::new(vec![1.0f32; 5 * 7], &[5, 7]).expect("valid tensor");
+        let w_narrowed = w0.narrow(1, 1, 3).expect("narrow succeeds");
+        let w_t = w_narrowed.transpose_2d().expect("transpose succeeds");
+        assert!(
+            dense_transposed_view(&w_t).is_none(),
+            "narrow 後の転置（一般 stride）は None を返すはず"
+        );
+    }
+
+    #[test]
+    fn dense_transposed_view_returns_none_for_rank_mismatch() {
+        let t = Tensor::new(vec![1.0f32; 6], &[6]).expect("valid tensor");
+        assert!(
+            dense_transposed_view(&t).is_none(),
+            "rank != 2 は None を返すはず"
+        );
+    }
+
+    #[test]
+    fn dense_transposed_view_returns_none_for_zero_dim_shape() {
+        let w = Tensor::new(Vec::new(), &[0, 3]).expect("valid tensor");
+        let w_t = w.transpose_2d().expect("transpose succeeds");
+        assert!(
+            dense_transposed_view(&w_t).is_none(),
+            "rows == 0 || cols == 0 は None を返すはず（呼び出し元分岐の単純化）"
+        );
+    }
+}
+
+/// [`GEMM_HOST_REPACK_COUNT`]／[`crate::gemm::GEMM_TRANSPOSED_ENTRY_
+/// LAUNCH_COUNT`]（クレート境界外の統合テストから見えない `pub(crate)`
+/// カウンタ）が「dense 転置 view（NT/TN）では GPU 側転置カーネルへ到達し
+/// `contiguous()` フォールバックを通らない・TT／一般 stride ではフォール
+/// バックを通る」ことを検証するクレート内テスト（イシュー #1214。
+/// `backend-cpu::ops::repack_count_tests`〈#1213〉と同型）。
+///
+/// `gemm_fp32_strict_impl` は NT/TN 判定より前に `with_driver_call` で
+/// `cached_gemm` を取得するため（実装計画 §4「`gemm` 取得と実行を 1 つの
+/// `with_driver_call` クロージャ内に収める」・PR #1064 の fail-open 窓
+/// 再開防止と同じ理由でこの順序自体は変えない）、CUDA 非搭載環境では
+/// カウンタ計上より前に `BackendError::CudaUnavailable` で早期 return
+/// する。そのため本テスト群は環境適応（`gemm_bias_act_fused_path_
+/// increments_launch_counter_env_adaptive` と同じ Ok/Err(CudaUnavailable)
+/// 分岐パターン）とする。数値一致自体は統合テスト
+/// `tests/gemm_transposed_parity.rs` が担当し、本テストはルーティングの
+/// 健全性のみを確認する。
+#[cfg(test)]
+mod repack_count_tests {
+    use super::*;
+
+    fn reset_counters() {
+        GEMM_HOST_REPACK_COUNT.with(|c| c.set(0));
+        crate::gemm::GEMM_TRANSPOSED_ENTRY_LAUNCH_COUNT.with(|c| c.set(0));
+    }
+
+    #[test]
+    fn gemm_fp32_strict_dense_transposed_view_routes_to_transpose_entry_env_adaptive() {
+        reset_counters();
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0f32; 4 * 3], &[4, 3]).expect("valid tensor");
+        let w = Tensor::new(vec![1.0f32; 5 * 3], &[5, 3]).expect("valid tensor");
+        let w_t = w.transpose_2d().expect("transpose succeeds");
+
+        let repack_before = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        let entry_before = crate::gemm::GEMM_TRANSPOSED_ENTRY_LAUNCH_COUNT.with(|c| c.get());
+        match cuda.gemm_fp32_strict_impl(&a, &w_t) {
+            Ok(_) => {
+                assert_eq!(
+                    GEMM_HOST_REPACK_COUNT.with(|c| c.get()),
+                    repack_before,
+                    "dense な転置 view（NT）は contiguous() フォールバックを通らないはず"
+                );
+                assert!(
+                    crate::gemm::GEMM_TRANSPOSED_ENTRY_LAUNCH_COUNT.with(|c| c.get())
+                        > entry_before,
+                    "GPU 側転置カーネル（transpose_smem_f32）へ到達していない疑い"
+                );
+            }
+            Err(BackendError::CudaUnavailable(msg)) => {
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(other) => panic!("unexpected error variant for gemm_fp32_strict_impl: {other}"),
+        }
+    }
+
+    #[test]
+    fn gemm_fp32_strict_narrow_then_transpose_increments_repack_counter_env_adaptive() {
+        reset_counters();
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0f32; 4 * 3], &[4, 3]).expect("valid tensor");
+        let w0 = Tensor::new(vec![1.0f32; 5 * 7], &[5, 7]).expect("valid tensor");
+        let w_narrowed = w0.narrow(1, 1, 3).expect("narrow succeeds");
+        let w_t = w_narrowed.transpose_2d().expect("transpose succeeds");
+
+        let before = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        match cuda.gemm_fp32_strict_impl(&a, &w_t) {
+            Ok(_) => {
+                assert_eq!(
+                    GEMM_HOST_REPACK_COUNT.with(|c| c.get()),
+                    before + 1,
+                    "narrow 後の転置（一般 stride）は contiguous() フォールバックを通るはず"
+                );
+            }
+            Err(BackendError::CudaUnavailable(msg)) => {
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(other) => panic!("unexpected error variant for gemm_fp32_strict_impl: {other}"),
+        }
+    }
+
+    #[test]
+    fn gemm_fp32_strict_both_transposed_increments_repack_counter_twice_env_adaptive() {
+        reset_counters();
+        let cuda = CudaBackendOps::new(0);
+        let orig_a = Tensor::new(vec![1.0f32; 3 * 4], &[3, 4]).expect("valid tensor");
+        let a_t = orig_a.transpose_2d().expect("transpose succeeds");
+        let orig_b = Tensor::new(vec![1.0f32; 5 * 3], &[5, 3]).expect("valid tensor");
+        let b_t = orig_b.transpose_2d().expect("transpose succeeds");
+
+        let before = GEMM_HOST_REPACK_COUNT.with(|c| c.get());
+        match cuda.gemm_fp32_strict_impl(&a_t, &b_t) {
+            Ok(_) => {
+                assert_eq!(
+                    GEMM_HOST_REPACK_COUNT.with(|c| c.get()),
+                    before + 2,
+                    "両方転置（TT）は両オペランドとも contiguous() フォールバックを通るはず"
+                );
+            }
+            Err(BackendError::CudaUnavailable(msg)) => {
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(other) => panic!("unexpected error variant for gemm_fp32_strict_impl: {other}"),
+        }
     }
 }

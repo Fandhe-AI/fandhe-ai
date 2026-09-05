@@ -146,6 +146,20 @@ pub enum CudaError {
     /// `launch_tiled_pipeline_f32` 本体のコメント参照）。
     TiledPipelineContextMismatch { detail: String },
 
+    /// VJP 専用 NT/TN 転置入口（イシュー #1214）の smem 転置カーネル
+    /// （`gemm.rs::CudaGemm::transpose_smem_f32`）が `CudaGemm::new`
+    /// 時点でコンパイル・ロードに失敗しており、`run_tiled_f32_nt`／
+    /// `run_tiled_f32_tn`／`launch_tiled_f32_resident_nt` を呼べない
+    /// 状態であることを表す。転置カーネル自体は `#include` を使わず
+    /// 全 compute capability で成立するため通常は起きないが、`wmma_tf32`
+    /// 等と同じ fail-soft 方針（`CudaGemm::new` の早期 return には合流
+    /// させず naive/tiled 系の可用性を道連れにしない）を踏襲するため
+    /// 型としては用意する。呼び出し元（`ops.rs`）はこの variant を
+    /// 受け取った場合 `contiguous()` 経由の従来経路へフォールバックし、
+    /// `GEMM_HOST_REPACK_COUNT` を計上する契約（`docs/matmul-vjp-zero-
+    /// copy-decision.md` §4.3）。
+    TransposeEntryUnavailable { detail: String },
+
     /// カーネルソースのテンプレート展開（`kernels_mma::render_mma_f16`・
     /// `kernels_wmma_opt::render_wmma_tf32_opt`／`render_wmma_f16_opt`。
     /// イシュー #516）に渡された shape／タイル／段数の構成値が、境界検査・
@@ -340,6 +354,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::TiledPipelineContextMismatch { detail } => {
                 write!(f, "tiled pipeline kernel context mismatch: {detail}")
+            }
+            CudaError::TransposeEntryUnavailable { detail } => {
+                write!(f, "VJP transposed GEMM entry (NT/TN) unavailable: {detail}")
             }
             CudaError::InvalidKernelConfig { detail } => {
                 write!(f, "invalid kernel template config: {detail}")

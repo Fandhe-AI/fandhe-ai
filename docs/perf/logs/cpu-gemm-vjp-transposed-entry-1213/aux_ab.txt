@@ -1,0 +1,8 @@
+TN m=64 k=784 n=256 before_median_s=0.000470 after_median_s=0.000152 speedup=3.096x
+TN m=64 k=256 n=10 before_median_s=0.000091 after_median_s=0.000037 speedup=2.472x
+NT m=64 k=784 n=256 before_median_s=0.000719 after_median_s=0.000390 speedup=1.845x
+NT m=64 k=256 n=10 before_median_s=0.000052 after_median_s=0.000048 speedup=1.071x
+TN m=1024 k=1024 n=1024 before_median_s=0.006423 after_median_s=0.004919 speedup=1.306x
+NT m=1024 k=1024 n=1024 before_median_s=0.006544 after_median_s=0.004452 speedup=1.470x
+TN m=2048 k=2048 n=2048 before_median_s=0.054254 after_median_s=0.034622 speedup=1.567x
+NT m=2048 k=2048 n=2048 before_median_s=0.055449 after_median_s=0.034684 speedup=1.599x

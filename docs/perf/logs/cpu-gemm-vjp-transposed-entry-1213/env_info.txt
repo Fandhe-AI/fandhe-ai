@@ -1,0 +1,13 @@
+イシュー #1213 実測環境情報（内部ホスト名は含めない）
+
+- OS: macOS 26.6.2 (BuildVersion 25G83)
+- CPU: Apple M4 Max
+- 論理コア数: 16
+- rustc: 1.96.0 (ac68faa20 2026-05-25)
+- ビルド: cargo test -p fandhe-ai-backend-cpu --release --test gemm_transposed_perf -- --ignored --nocapture
+- 計測日: 2026-09-05
+- プロトコル: warmup 2 回・measured 5 回中央値（`crates/backend-cpu/tests/gemm_transposed_perf.rs`）
+- 補足: 本セッションでは framework-compare の train phases（fresh/reuse）
+  A/B 計測（§6.1〜§6.2 のフルプロトコル）は実施せず、変更箇所（`CpuBackendOps::gemm`
+  の NT/TN 分岐）を直接対象にした補助 A/B（§6.3 相当）のみを実測した。
+  理由・判断根拠は `docs/perf/cpu-gemm-vjp-transposed-entry.md` §5 を参照。
