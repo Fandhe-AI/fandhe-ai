@@ -186,3 +186,19 @@ test nt_transposed_entry_vs_contiguous_across_shapes ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
 
+TN m=64 k=784 n=256 before_median_s=0.001030 after_median_s=0.000588 speedup=1.751x
+NT m=64 k=784 n=256 before_median_s=0.001822 after_median_s=0.000861 speedup=2.115x
+TN m=64 k=256 n=10 before_median_s=0.000597 after_median_s=0.000483 speedup=1.237x
+NT m=64 k=256 n=10 before_median_s=0.000450 after_median_s=0.000283 speedup=1.593x
+NT m=1024 k=1024 n=1024 before_median_s=0.008873 after_median_s=0.005235 speedup=1.695x
+TN m=1024 k=1024 n=1024 before_median_s=0.013500 after_median_s=0.005208 speedup=2.592x
+TN m=2048 k=2048 n=2048 before_median_s=0.028086 after_median_s=0.025407 speedup=1.105x
+NT m=2048 k=2048 n=2048 before_median_s=0.032255 after_median_s=0.025210 speedup=1.279x
+TN m=64 k=784 n=256 before_median_s=0.000745 after_median_s=0.000285 speedup=2.612x
+NT m=64 k=784 n=256 before_median_s=0.000972 after_median_s=0.000479 speedup=2.027x
+TN m=64 k=256 n=10 before_median_s=0.000353 after_median_s=0.000343 speedup=1.031x
+NT m=64 k=256 n=10 before_median_s=0.000343 after_median_s=0.000212 speedup=1.615x
+TN m=1024 k=1024 n=1024 before_median_s=0.005559 after_median_s=0.005615 speedup=0.990x
+NT m=1024 k=1024 n=1024 before_median_s=0.005560 after_median_s=0.005617 speedup=0.990x
+TN m=2048 k=2048 n=2048 before_median_s=0.030035 after_median_s=0.025540 speedup=1.176x
+NT m=2048 k=2048 n=2048 before_median_s=0.031823 after_median_s=0.025566 speedup=1.245x

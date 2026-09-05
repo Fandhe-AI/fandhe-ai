@@ -179,7 +179,7 @@ lhs` が確立済みの classic strided カーネル `gemm_tiled_bias_act`）へ
 `dispatch_auto`（`gemm_simdgroup_tiled`）の bit 同一経路のまま。適用
 範囲は `MetalBackendOps::gemm` のみ（`gemm_bias_act`・
 `gemm_resident_rhs`〈#1040 で既に転置対応済み〉・
-`gemm_fp32_strict_into`〈既定 `Unsupported`のまま。#1212 引き継ぎ〉は
+`gemm_fp32_strict_into`〈既定 `Unsupported` のまま。#1212 引き継ぎ〉は
 対象外）。
 
 **数値契約が CPU／CUDA と異なる**: `dispatch_strided_bias_act_prepared`
