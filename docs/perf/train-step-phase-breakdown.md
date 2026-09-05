@@ -374,6 +374,15 @@ transpose コピー・小形状閾値・reduction 融合）を対象にした Is
    問題であり、本計測（学習 1 step、size=64 固定）の対象外。優先順位の
    判断材料としては別軸で扱う
 
+### 8.1 更新履歴（2026-09-05・イシュー #1151・v0.6.0 実測反映）
+
+上記の提案 1〜3 は 0.4.0 実測（イシュー #1010）時点のもの。#1008 は
+クローズ済み（配下の #1011・#1015・#1025 はいずれも完了）であり、
+本節の提案 2・3 が対象とした Issue は既に解消済みである。backward が
+支配項であるという結論・提案 1（backward 内部の最適化候補洗い出し）は
+v0.6.0 実測（§11・§12）でも変わらない。v0.6.0 実測を踏まえた更新版の
+後続 Issue 優先順位・起票案は §15.4・§15.6 を参照。
+
 ## 9. 検証結果サマリ
 
 - `scripts/bench/framework-compare/summarize_test.py`: 全 pass（新規
@@ -789,3 +798,224 @@ Issue に引き継ぐ（out-of-scope-tracking.md に従い、本 PR では新規
 - 内部情報漏えい: 新規・変更ファイルを `docs/real-hardware-
   verification-env.local.md` の実値（SSH ホスト名・IP・ユーザー名・
   常駐サービスパス等）で grep し 0 件を確認
+
+## 15. 支配項トップ 3 の確定と改善 issue 起票案（イシュー #1151）
+
+### 15.1 目的・対応
+
+親 #1118（学習・推論の candle 比未達の解消）配下、依存 #1145（本
+ドキュメント §10〜§14。v0.6.0 ピンでの学習 1 step フェーズ分解実測）が
+完了したことを受け、本節は §11 の実測値から支配項トップ 3 を確定し
+（§15.2）、backward 内部のコード事実に基づく推定（§15.3。実測ではない
+ことを明記）・infer 未達の仮説（§15.5）・改善 issue 起票案（§15.6）を
+記録する。§8.1 のとおり #1008 配下は解消済みであり、本節が v0.6.0
+実測を踏まえた後続 Issue 優先順位の更新版（§15.4）を提供する。
+
+### 15.2 train 支配項トップ 3（確定表・v0.6.0・§11 出典）
+
+判定基準は §4 と同一（(i) 5 ラン中の比率のばらつきが小さいか、
+(ii) fresh/reuse 間で同じ結論になるか、(iii) 区間の定義上その区間に
+閉じた API 呼び出しか。3 条件で「高」・1〜2 条件で「中」・前提が残れば
+「低」）。§12 で述べたとおり DGX CPU reuse の backward は 0.4.0 → 0.6.0
+で (ii) の一致の強さが弱まったため「高」から「中」へ格下げしている。
+
+| 環境 / mode | 1 位 | 2 位 | 3 位 | 確度（1 位） |
+|---|---|---|---|---|
+| CPU / M4 Max fresh | backward 96.5% | forward 3.3% | host_sgd 0.2% | 高 |
+| CPU / M4 Max reuse | backward 91.7% | forward_resident 6.3% | device_update 1.7% | 高 |
+| Metal / M4 Max fresh | backward 88.9% | forward 10.5% | tape_build/host_sgd 各 0.2% | 高 |
+| Metal / M4 Max reuse | backward 84.1% | forward_resident 15.3% | device_update 0.9% | 高 |
+| CPU / DGX GB10 fresh | backward 85.1% | forward 11.7% | host_sgd 1.9% | 中 |
+| CPU / DGX GB10 reuse | backward 75.1% | forward_resident 20.3% | device_update 3.2% | **中**（§12 で高→中に格下げ） |
+| CUDA / DGX GB10 fresh | backward 97.5% | forward 1.5% | host_sgd 0.5% | 高 |
+| CUDA / DGX GB10 reuse | backward 96.4% | forward_resident 2.8% | device_update 0.7% | 高 |
+
+バックエンド別差異（実測事実）:
+
+- **CUDA は一極集中**（1.5〜2.8% まで 2 位以下が縮小）。非同期実行
+  モデル下で forward・device_update の同期待ちが `loss_readout` へ
+  計上される §4 の制約注記のとおり、2 位以下の絶対比較には限界がある
+- **Metal・DGX CPU は forward 比が相対的に高い**（reuse で 15.3%・
+  20.3%）。§12 のとおり DGX CPU reuse は 0.4.0 比 forward_resident が
+  +9.9pt・backward が -13.9pt で、支配項の一極集中度が他系列より弱い
+- **fresh:reuse の backward 比はおよそ 2:1**（§11 各表参照。例: CPU
+  M4 Max 16.540 ms : 7.266 ms ≈ 2.28、CUDA DGX 11.500 ms : 5.398 ms ≈
+  2.13）。8 系列全てで同傾向
+
+### 15.3 backward 内部の推定（コード事実 + FLOP 算術。実測ではない）
+
+`crates/autodiff/src/grad.rs::vjp` の VJP 経路（コード事実。origin/main
+時点。`git diff v0.6.0..origin/main -- crates/autodiff crates/facade` は
+空のため v0.6.0 本番経路にそのまま当たる）:
+
+- `Op::MatMul`・`Op::LinearAct`（fresh 経路。#1044 の epilogue 融合
+  ノード）は `matmul_vjp(a, b, g)`（`crates/autodiff/src/grad.rs:410`）
+  が `d_input = eval::matmul(g, bᵀ)`・`d_weight = eval::matmul(aᵀ, g)`
+  の**両方をホスト参照実装で計算**する（呼び出しは同 327 行）
+- `Op::LinearResident`（reuse 経路）は d_input のみ
+  `ops.gemm_resident_lhs(w_dev, gᵀ)`（デバイス GEMM。同 263〜266 行）、
+  d_weight は `eval::matmul(xᵀ, g)`（同 276 行。ホスト参照実装）
+- `crates/autodiff/src/eval.rs::matmul`（218〜242 行）は **scalar 三重
+  ループ（`f32::mul_add`・`rayon` なし・`BackendOps` 非経由）** の
+  ホスト参照実装。イシュー #1046 で転置 view の repack は除去済みだが
+  演算自体は scalar のまま
+
+推定（実測ではなく FLOP 算術に基づく仮説）: 本計測の層 1
+（784→256・batch 64）の d_weight（xᵀ·g: [784,64]×[64,256]）は
+784×64×256×2 ≈ 25.7 MFLOP、fresh の d_input（g·W1ᵀ: [64,256]×[256,784]）
+も同オーダー。reuse backward ≈ scalar GEMM 呼び出し 1 個相当
+（d_weight のみホスト scalar）、fresh ≈ 2 個相当（d_input・d_weight とも
+ホスト scalar）と仮定すると:
+
+- 3 バックエンドでほぼ同値（§15.2 観察）: backward の支配的コストが
+  `eval::matmul`（バックエンド非依存のホスト参照実装）にあるなら、
+  CPU/CUDA/Metal で数値が近いことと整合する
+- fresh:reuse ≒ 2:1（§15.2 観察）: 呼び出し回数が 2 個 vs 1 個という
+  仮定と整合する
+- 実測値（reuse 5.4〜7.5 ms・fresh 11.5〜16.9 ms）を層 1 のみの
+  25.7 MFLOP に当てはめると scalar 換算で概算 3〜5 GFLOP/s 相当となり
+  （層 2〜3 分の追加 FLOP・その他区間内オーバーヘッドを含まない粗い
+  概算のため幅を持たせる）、rayon 未使用の scalar 三重ループとして
+  桁レベルでは矛盾しない
+
+この推定は §15.2 の 2 つの実測パターン（バックエンド非依存・
+fresh:reuse ≒ 2:1）を同時に説明する仮説として提示するものであり、
+#1145 のハーネス（`--phases`）は backward 区間の内部をさらに分解
+できないため実測による裏付けはない。参考計測（`eval::matmul` を層 1
+VJP 形状で単体計時するミクロベンチマーク）は本 PR の作業環境では
+実施していない（未計測。実施は起票案 A の実装時に譲る）。
+
+### 15.4 後続 Issue 優先順位の更新案（v0.6.0 反映後）
+
+§8 の 3 項目（0.4.0 実測時点）は #1008 クローズ（#1011/#1015/#1025
+完了）により対象自体が解消済みである。v0.6.0 実測（§11・§12）を踏まえた
+更新版:
+
+1. **最優先**: backward 内部の VJP GEMM をホスト scalar 参照実装
+   （`eval::matmul`）からバックエンド別 GEMM（`BackendOps::gemm` 系）へ
+   切り替える（§15.3 の推定が正しければ 3 バックエンド共通の支配項へ
+   直接効く）。起票案 A〜E
+2. reuse 経路の勾配のデバイス常駐化（D2H→H2D 往復排除）は 1 の効果測定
+   後に評価する（起票案 B）
+3. `device_update`／`host_sgd` は全系列で 3% 未満（§11）であり、
+   #1015/#1017（Metal コマンドバッファ統合）が既に縮小させている
+   （§12: Metal reuse `device_update` 6.7%→0.9%）ことも踏まえ、単独の
+   追加最適化としての優先度は低い
+
+### 15.5 infer 未達の仮説（実測不能事項を明記）
+
+§13 のとおり `--task infer --phases` は `MEASURE_ERROR`（ハーネス制約）
+のため、infer の内訳は本 issue でも実測できない。以下は既存計測値と
+コード事実に基づく仮説であり、内訳比率は実測していない。
+
+**コード事実**（`scripts/bench/framework-compare/bench-fandhe/src/
+main.rs::run_infer`。origin/main 時点）:
+
+- CPU 経路は `Sequential::predict`（facade の tape 不要経路。層ごとに
+  `forward_host` を直接呼ぶ非融合合成〈`gemm` → `add`〉であり、
+  呼び出し毎に `CpuBackendOps::new()` を構築する）
+- CUDA/Metal 経路は `make_tape` 後 `tape.var(&x_data)` +
+  `model.forward(&tape, &x)`。`Linear::bind`（facade）が `Tape::var` で
+  weight/bias を**毎回 clone**するため毎回 H2D が発生し、演算ごとの
+  戻り値も D2H される
+- `BackendOps::linear_forward_device`（活性化のデバイス常駐チェーン。
+  `docs/inference-forward-fixed-cost-design.md` §3.2 段階 B）は **CPU
+  のみ実装**（`crates/backend-cpu/src/ops.rs:493`）。CUDA/Metal は
+  同 doc §4 のスコープ外項目のまま未実装で、`Sequential::predict_
+  resident`（facade）は公開済みだが bench-fandhe の infer 計測では
+  使われていない
+- 対比として `bench-candle::run_infer` は weight・入力ともデバイス
+  常駐で計測外に構築し、計測内は forward + 1 回の readout のみ
+
+**既存計測値**（`results-dgx-0.6.0.jsonl`／`results-m4max-0.6.0.jsonl`。
+PR #1127 実測）: DGX CPU 307.0 µs vs candle 248.0 µs（0.81 倍）・CUDA
+156.9 vs 42.4 µs（0.27 倍）、M4 Max CPU 567.5 vs 202.8 µs（0.36 倍）・
+Metal 805.9 vs 409.8 µs（0.51 倍）
+
+**仮説**: GPU（CUDA/Metal）は毎回の weight clone + H2D + 演算ごとの
+D2H が固定費として重く、値が小さい形状（本計測 size=64）ほど相対的な
+未達率が大きい（CUDA 0.27 倍が最も未達）ことと整合しうる。CPU は
+非融合 3 起動 + 呼び出し毎の `CpuBackendOps::new()` が固定費として
+乗るが、train の backward（infer には存在しない区間）が支配項である
+という §15.2〜§15.3 の知見は infer には直接適用できない（train と
+infer は異なるコード経路であり、backward 最適化が infer の未達を
+解消する保証はない）。
+
+**実測不能事項（明記）**: GPU 経路の H2D/D2H が infer 総時間に占める
+実際の比率、CPU 経路の非融合合成分と `CpuBackendOps::new()` 構築分の
+内訳、CPU 1.24〜2.8 倍差（0.81/0.36 倍の逆数）の具体的な内訳。いずれも
+`--phases` の infer 対応拡張（起票案 G）なしには実測できない。
+
+### 15.6 改善 issue 起票案
+
+各 issue 本文に共通で転記する条件・注意（起票時に本文へ含めた）:
+
+- 本番結線は事前承認済み・性能低下の可能性がある変更は結線前後で
+  同一プロトコル 5 回計測中央値の比較を PR 本文と `docs/perf` に記録する
+- tolerance / baseline / 依存の変更はユーザー承認必須
+- 内部ホスト名等を書かない
+- (i) `eval::matmul`（scalar・固定 k 順）から BLIS/GPU GEMM へ
+  切り替えると累積順序が変わり勾配が bit 一致しなくなりうる。既存の
+  `assert_eq!` 系勾配テストを複合判定へ変える必要が生じた場合は
+  「許容誤差の新設」としてユーザー承認対象（勝手に緩めない）
+- (ii) framework-compare は `fandhe-ai =0.6.0` registry 固定
+  （fail-closed）のため HEAD の before/after は同ハーネスで測れない。
+  #1142/#1147 の「参考系列」手順（非コミットの一時 path 差し替え）に
+  従うか、リポ内 bench（`crates/facade/tests/*bench*` 等）で計測する
+
+| # | タイトル | スコープ | 依存 | 支配項 |
+|---|---|---|---|---|
+| A | `matmul_vjp`／`Op::LinearResident` d_weight の `eval::matmul` 呼び出しを `BackendOps::gemm` 経由へ切り替える | grad.rs の 3 箇所（LinearResident d_weight・matmul_vjp の d_input/d_weight）を `ops.gemm` へ結線。転置は当面 `contiguous()` 再パックを許容 | なし | backward（fresh・reuse 双方） |
+| B | reuse 経路の grad をホストへ落とさずデバイス常駐のまま `device_update` へ渡す | `Op::LinearResident` の d_weight を GPU 計算後 D2H せず grad upload へ直結。A の実測で寄与が小さければ見送り可 | A | backward・device_update（reuse） |
+| C | CPU BLIS GEMM に VJP 専用の NT/TN 2 パターン入口を追加する | `matmul-vjp-zero-copy-decision.md` §3.2 項目 1 を NT（d_input）／TN（d_weight）の 2 パターンに限定 | A | backward |
+| D | CUDA GEMM に NT/TN 限定の転置入口を追加し VJP 経路へ結線する | 同 §3.2 項目 2 を NT/TN 限定。GB10 実機実測必須 | A | backward（CUDA） |
+| E | Metal GEMM の NT/TN strided 結線を VJP 経路へ適用する | 同 §3.2 項目 3・4 を NT/TN 限定。#1187（転置タイル variant 自動ルーティング）を依存先として参照 | A・#1187 | backward（Metal） |
+| F | `linear_forward_device`（活性化デバイス常駐チェーン）を CUDA/Metal に実装する | `inference-forward-fixed-cost-design.md` §4 の未実装項目。`#[ignore]` parity + 実機実測 | なし | forward・infer |
+| G | bench-fandhe の infer に `predict_resident` 使用の reuse モードと `--phases` 対応を追加する | ハーネス拡張。採否・summary.md への反映方針は当該 issue で判断 | F | infer |
+| H | CPU 推論 `predict` 経路をプロファイルし融合 `gemm_bias_act` 適用可否を判断する | ホットスポット採取。bit-exactness 契約の見直しはユーザー判断事項として提示 | なし | infer（CPU） |
+| I | 非学習葉（入力 x）への d_input 伝播スキップの設計判断 | fresh の d_input（≈25.7 MFLOP）は入力 x が非学習葉のため学習には不要。`Gradients::get` の葉勾配契約との両立を検討する設計判断 issue（実装は別途） | なし | backward |
+
+起票結果（#1135 配下・`phase:5` ラベル）:
+
+| # | issue 番号 |
+|---|---|
+| A | #1211 |
+| B | #1212 |
+| C | #1213 |
+| D | #1214 |
+| E | #1215 |
+| F | #1216 |
+| G | #1217 |
+| H | #1218 |
+| I | #1219 |
+
+### 15.7 spec 整合の確認
+
+- REQ-8（`docs/spec/04-requirements.md`）は GEMM 5 行の対 PyTorch 下限の
+  みを定め、train/infer 自体には下限を置いていない。本節の candle 比
+  ゲートは #1051 のハーネス基準であり spec の受け入れ基準ではないため、
+  本節の提案は REQ-8 の受け入れ基準と矛盾しない
+- 起票案 A〜E は FMA 契約（CPU 参照実装 `f32::mul_add`・GPU 既定 FMA
+  契約）・REQ-2 複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5
+  未満）を変更しない前提で書かれている（上記 (i) の注意）。tolerance
+  定数自体の変更が必要になった場合はユーザー承認必須と明記済み
+- カーネル側の手動境界チェック省略はいずれの起票案にも含まれない
+- 依存追加は起票案に含まれない（既存の許容依存区分・自作コア方針の
+  範囲内での実装を前提とする）
+- 以上より本節は spec 変更提案を必要としないと結論する
+
+### 15.8 検証結果サマリ
+
+- §10.3 の集計スニペットを `results/raw/results-{m4max,dgx}-phases-
+  0.6.0*.jsonl` に対し再実行し、§15.2 の中央値・比率が §11 の値と
+  一致することを確認した（転記元の再計算による裏付け。exit 0）
+- `git diff origin/main -- docs/perf/train-step-phase-breakdown.md` で
+  §8 本文（既存文言）に削除行がないこと、§9〜§14 の見出し番号が不変
+  であることを確認した
+- `grep -n "^## \|^### " docs/perf/train-step-phase-breakdown.md` で
+  §8.1・§15.1〜§15.8 の見出しが想定順序どおりであることを確認した
+- 新規・変更ファイルを内部ホスト名等で grep し 0 件を確認した
+  （`docs/real-hardware-verification-env.local.md` は本作業環境に
+  存在しないため、`.example` のプレースホルダ名で代替確認した）
+- Rust コード・`results/summary.md`・`docs/spec/`・依存・tolerance
+  定数はいずれも無変更（本節は docs と GitHub issue 起票のみ）
