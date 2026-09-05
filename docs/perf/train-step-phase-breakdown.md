@@ -888,8 +888,8 @@ VJP 形状で単体計時するミクロベンチマーク）は本 PR の作業
 **#1211 で結線・実測済み**: 上記 3 箇所は #1211 で `BackendOps::gemm`
 経由へ切り替わり、CPU 実測で `backward`（fresh 12.48×・reuse 8.86×）・
 `step_total`（fresh 9.24×・reuse 5.63×）の速度改善を確認した（Apple
-M4 Max・5 run 中央値）。実測詳細は `docs/perf/train-backward-gemm-wiring.md`
-を参照。
+M4 Max。reuse・after は 5 run 中央値、before の fresh のみ 6 run 中央値。
+詳細・注記は `docs/perf/train-backward-gemm-wiring.md` §4 を参照。
 
 ### 15.4 後続 Issue 優先順位の更新案（v0.6.0 反映後）
 

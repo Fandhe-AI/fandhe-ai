@@ -96,9 +96,9 @@ green で確認済み・許容誤差は変更していない）。
 (a) はホスト参照実装〈`NaiveOps`／`TestOps` 経由の compat・テスト経路〉
 に限定されたまま。本番 CPU 経路のゼロコピー化は #1213 のスコープ）。
 
-CPU での前後比較実測（`backward`・`step_total` の 5 run 中央値。fresh
-9.24×・reuse 5.63× の速度改善）は `docs/perf/train-backward-gemm-wiring.md`
-を参照。ガードレール閾値・テスト許容誤差は本追補でも変更していない。
+CPU での前後比較実測（`backward`・`step_total` の中央値〈reuse・after は
+5 run、before の fresh のみ 6 run。詳細は同 doc §4〉。fresh 9.24×・reuse
+5.63× の速度改善）は `docs/perf/train-backward-gemm-wiring.md` を参照。ガードレール閾値・テスト許容誤差は本追補でも変更していない。
 
 ## 5. 実機実測（未実施）
 

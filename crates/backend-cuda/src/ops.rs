@@ -63,15 +63,16 @@ impl CudaBackendOps {
     /// 内部ヘルパー。`crate::precision::tf32_gemm_enabled()` の状態に
     /// 関わらず常に FP32 厳密で計算する（TF32 opt-in フラグを一切見ない）。
     ///
-    /// `gemm`（公開経路。opt-in 時は TF32 へ分岐しうる）と
-    /// `gemm_bias_act` の `ComposedFallback`（非融合合成経路）の双方から
-    /// 呼ばれる。後者が `self.gemm(a, b)` を直接呼ぶと `gemm` 側の TF32
-    /// 分岐へ意図せず波及し、`gemm_bias_act` は本イシュー（#1042）の
-    /// 適用範囲外のまま FP32 で動作するという `crate::precision` モジュール
-    /// 冒頭コメントの契約（「適用範囲は `CudaBackendOps::gemm`（素の f32
-    /// GEMM）のみ」）に反するため、`ComposedFallback` は必ずこのヘルパーを
-    /// 経由する（codex-review 指摘。PR #1091）。
-    fn gemm_fp32_strict(
+    /// `gemm`（公開経路。opt-in 時は TF32 へ分岐しうる）・`gemm_bias_act`
+    /// の `ComposedFallback`（非融合合成経路）・
+    /// `BackendOps::gemm_fp32_strict`（`dyn BackendOps` 経由の学習経路
+    /// 向け入口。イシュー #1211 codex-review 指摘・PR #1223）の 3 者から
+    /// 呼ばれる。いずれも `self.gemm(a, b)` を直接呼ぶと `gemm` 側の TF32
+    /// 分岐へ意図せず波及し、`crate::precision` モジュール冒頭コメントの
+    /// 契約（「適用範囲は `CudaBackendOps::gemm`（素の f32 GEMM）のみ」）
+    /// に反するため、必ずこのヘルパーを経由する（`gemm_bias_act` は
+    /// codex-review 指摘・PR #1091 で同様の理由により導入済み）。
+    fn gemm_fp32_strict_impl(
         &self,
         a: &Tensor<f32>,
         b: &Tensor<f32>,
@@ -638,12 +639,13 @@ impl BackendOps for CudaBackendOps {
     /// 伝播し、FP32 への黙示フォールバックはしない（fail-closed。明示
     /// opt-in の計測条件を静かに崩さない方針。`crate::precision` 参照）。
     ///
-    /// **注意**: `gemm_bias_act` の `ComposedFallback` からはこの
-    /// メソッドを呼ばない（`gemm_fp32_strict` を使う）。本メソッドは
+    /// **注意**: `gemm_bias_act` の `ComposedFallback` および
+    /// `gemm_fp32_strict`（学習経路向け入口）からはこのメソッドを
+    /// 呼ばない（`gemm_fp32_strict_impl` を使う）。本メソッドは
     /// TF32 opt-in フラグの適用対象である「素の公開 GEMM 入口」専用。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         if !crate::precision::tf32_gemm_enabled() {
-            return self.gemm_fp32_strict(a, b);
+            return self.gemm_fp32_strict_impl(a, b);
         }
 
         let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
@@ -677,6 +679,23 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict`] のオーバー
+    /// ライド。`gemm`（TF32 opt-in 分岐を持つ公開経路）を経由せず、
+    /// `gemm_fp32_strict_impl`（`crate::precision::tf32_gemm_enabled()`
+    /// を一切見ない FP32 厳密経路）へ直結する。`autodiff::grad` の VJP
+    /// （`matmul_vjp`・`Op::LinearResident` の `d_weight`）が `dyn
+    /// BackendOps` 経由で呼ぶ入口で、TF32 opt-in フラグが有効な間も
+    /// backward を暗黙に TF32 化しない契約を保証する（`crate::precision`
+    /// モジュール冒頭コメントの「学習経路は本イシューのスコープ外」契約。
+    /// codex-review 指摘・イシュー #1211・PR #1223）。
+    fn gemm_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm_fp32_strict_impl(a, b)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
     /// `gemm` → `add` → `relu` 合成）を、GEMM epilogue に bias 加算・
     /// activation を融合したカーネル
@@ -686,9 +705,9 @@ impl BackendOps for CudaBackendOps {
     /// `bias` が `None` またはブロードキャストの厳密一致形状 `[n]`
     /// の場合にのみ融合カーネルを使う。それ以外（`[1]`・`[1, n]` 等の
     /// ブロードキャスト可能だが `[n]` ちょうどでない shape）はデフォルト
-    /// 実装と同じ 3 段合成（`self.gemm_fp32_strict` → `self.add` →
+    /// 実装と同じ 3 段合成（`self.gemm_fp32_strict_impl` → `self.add` →
     /// `self.relu`）へフォールバックする。`self.gemm`（TF32 opt-in 分岐
-    /// を持つ公開経路）ではなく `gemm_fp32_strict` を使うのは、
+    /// を持つ公開経路）ではなく `gemm_fp32_strict_impl` を使うのは、
     /// `gemm_bias_act` が `crate::precision` モジュール冒頭コメントの
     /// 契約どおり本イシュー（#1042）のスコープ外のまま常に FP32 で
     /// 動作することを保証するため（codex-review 指摘。PR #1091）。
@@ -721,7 +740,7 @@ impl BackendOps for CudaBackendOps {
                     fandhe_ai_tensor_core::broadcast_shape(&out_shape, bias.shape())
                         .map_err(BackendError::ShapeMismatch)?;
                 }
-                let mut out = self.gemm_fp32_strict(a, b)?;
+                let mut out = self.gemm_fp32_strict_impl(a, b)?;
                 if let Some(bias) = bias {
                     out = self.add(&out, bias)?;
                 }
@@ -1531,6 +1550,35 @@ mod tests {
             before, after,
             "既定 OFF のはずが TF32 opt-in 経路のカウンタが増加した（フラグ OFF 時の \
              bit-exact 不変契約違反の疑い）: before={before}, after={after}"
+        );
+    }
+
+    /// `gemm_fp32_strict`（`BackendOps` トレイト経由。`autodiff::grad` の
+    /// VJP が使う入口。イシュー #1211 codex-review 指摘・PR #1223）は、
+    /// TF32 opt-in フラグを **有効化した状態でも** TF32 経路
+    /// （[`crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT`]）へ一切到達しない
+    /// ことを検証する。`crate::precision` モジュール冒頭コメントの
+    /// 「学習経路は本イシューのスコープ外のまま FP32」契約の直接検証で、
+    /// backward が opt-in フラグへ暗黙追従しないことを担保する。
+    #[test]
+    fn gemm_fp32_strict_ignores_tf32_optin_flag_even_when_enabled_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_tf32_gemm_enabled(true);
+
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+
+        let before = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        let _ = cuda.gemm_fp32_strict(&a, &b);
+        let after = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        assert_eq!(
+            before, after,
+            "TF32 opt-in フラグが有効でも gemm_fp32_strict は FP32 厳密経路のまま \
+             であるべきだが、TF32 opt-in 経路のカウンタが増加した（学習経路の \
+             FP32 契約違反の疑い）: before={before}, after={after}"
         );
     }
 

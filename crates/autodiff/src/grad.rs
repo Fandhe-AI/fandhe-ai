@@ -16,8 +16,14 @@
 //! （PoC-v2-2 の方針を踏襲）。ただし `MatMul`／`LinearAct`／
 //! `LinearResident` の GEMM 系 VJP（`matmul_vjp`・`Op::LinearResident`
 //! の `d_weight`）はイシュー #1211 で `eval::matmul`（scalar 参照実装）
-//! から `BackendOps::gemm`（forward と同じ CPU BLIS／CUDA／Metal
-//! カーネル）へ切り替え済み。backward の支配的コスト（`docs/perf/
+//! から `BackendOps::gemm_fp32_strict`（forward と同じ CPU BLIS／CUDA／
+//! Metal カーネルを使うが、CUDA の TF32 opt-in フラグ
+//! （`set_cuda_tf32_gemm_enabled`）の状態に関わらず常に FP32 厳密で
+//! 計算する入口。`ops.gemm` をそのまま使うと backward が opt-in フラグ
+//! に暗黙追従してしまい、`docs/cuda-tf32-optin-api-decision.md`・
+//! `backend-cuda::precision` モジュール冒頭コメントの「学習経路は
+//! スコープ外のまま FP32」契約に反するため区別する。codex-review
+//! 指摘・PR #1223）へ切り替え済み。backward の支配的コスト（`docs/perf/
 //! train-step-phase-breakdown.md` §11・§15）を forward と同じ既定 FMA
 //! 契約・並列実装で計算するための変更で、`eval::matmul` は
 //! `NaiveOps`／`TestOps`（compat・テスト経路）に限り引き続き使われる
@@ -273,14 +279,18 @@ pub(crate) fn vjp(
             let d_input = transpose2d(&tmp);
 
             // d_weight = x^T @ g（既存 `matmul_vjp` の `dB` と同一式。
-            // `x`・`g` はいずれもホスト常駐）。イシュー #1211: `ops.gemm`
-            // （forward と同じ CPU BLIS／CUDA／Metal カーネル）を経由する
-            // ため、`x_t`（`transpose2d` の zero-copy view）はバックエンド
-            // `gemm` 内の `contiguous()` で再パックされうる（#1046 が
-            // 保証していた `eval::matmul` 経路でのゼロコピーは本経路には
-            // 適用されない。解消は #1213〈CPU の NT/TN 専用入口〉）。
+            // `x`・`g` はいずれもホスト常駐）。イシュー #1211:
+            // `ops.gemm_fp32_strict`（forward と同じ CPU BLIS／CUDA／
+            // Metal カーネルを経由するが CUDA の TF32 opt-in フラグには
+            // 追従しない入口。冒頭コメント参照）を経由するため、
+            // `x_t`（`transpose2d` の zero-copy view）はバックエンド側
+            // `contiguous()` で再パックされうる（#1046 が保証していた
+            // `eval::matmul` 経路でのゼロコピーは本経路には適用されない。
+            // 解消は #1213〈CPU の NT/TN 専用入口〉）。
             let x_t = transpose2d(x_val);
-            let d_weight = ops.gemm(&x_t, g).map_err(AutodiffError::Backend)?;
+            let d_weight = ops
+                .gemm_fp32_strict(&x_t, g)
+                .map_err(AutodiffError::Backend)?;
 
             let mut contributions = vec![(input, d_input), (weight, d_weight)];
             if let Some(bias_id) = bias {
@@ -406,18 +416,23 @@ fn transpose2d(tensor: &Tensor<f32>) -> Tensor<f32> {
 
 /// `MatMul(A, B)` の VJP: `dA = g @ Bᵀ`、`dB = Aᵀ @ g`
 /// （`A: [m,k]`・`B: [k,n]`・`g: [m,n]`）。イシュー #1211: forward と
-/// 同じ `BackendOps::gemm`（CPU は BLIS 並列 GEMM・CUDA/Metal はデバイス
-/// GEMM）を経由するため、backward の支配的コスト（`docs/perf/
+/// 同じ `BackendOps::gemm_fp32_strict`（CPU は BLIS 並列 GEMM・CUDA/Metal
+/// はデバイス GEMM。`gemm` と同じカーネルを使うが、CUDA の TF32 opt-in
+/// フラグ〈`set_cuda_tf32_gemm_enabled`〉には追従せず常に FP32 厳密で
+/// 計算する。backward は `docs/cuda-tf32-optin-api-decision.md`・
+/// `backend-cuda::precision` モジュール冒頭コメントの契約でスコープ外の
+/// まま FP32 のため区別する。codex-review 指摘・PR #1223）を経由する
+/// ため、backward の支配的コスト（`docs/perf/
 /// train-step-phase-breakdown.md` §11・§15）がバックエンド既定の並列・
 /// デバイス実装の恩恵を受ける。FMA 契約は各バックエンドの `gemm` 既定
 /// 契約に従う（`coding-rust.md` の FMA 契約統一方針。forward の
 /// `Var::matmul` と同一カーネルを通るため経路間で分岐しない）。
 ///
 /// `transpose2d`（下記。`Tensor::transpose` の zero-copy stride view）
-/// で作った転置オペランドはそのまま `ops.gemm` へ渡す。各バックエンドの
-/// `gemm` 実装は内部で `contiguous()` を呼ぶため転置 view の再パックが
-/// 発生しうるが、本イシューではこれを許容範囲とする（NT/TN 専用の
-/// zero-copy 入口は後続イシュー #1213〈CPU〉・#1214〈CUDA〉・
+/// で作った転置オペランドはそのまま `ops.gemm_fp32_strict` へ渡す。
+/// 各バックエンドの実装は内部で `contiguous()` を呼ぶため転置 view の
+/// 再パックが発生しうるが、本イシューではこれを許容範囲とする（NT/TN
+/// 専用の zero-copy 入口は後続イシュー #1213〈CPU〉・#1214〈CUDA〉・
 /// #1215〈Metal〉のスコープ。`docs/matmul-vjp-zero-copy-decision.md`
 /// §4 追補）。
 ///
@@ -433,8 +448,12 @@ fn matmul_vjp(
 ) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
     let b_t = transpose2d(b);
     let a_t = transpose2d(a);
-    let da = ops.gemm(g, &b_t).map_err(AutodiffError::Backend)?;
-    let db = ops.gemm(&a_t, g).map_err(AutodiffError::Backend)?;
+    let da = ops
+        .gemm_fp32_strict(g, &b_t)
+        .map_err(AutodiffError::Backend)?;
+    let db = ops
+        .gemm_fp32_strict(&a_t, g)
+        .map_err(AutodiffError::Backend)?;
     Ok((da, db))
 }
 
@@ -887,7 +906,8 @@ mod tests {
         assert_eq!(
             before, after,
             "matmul_vjp: test_ops()（TestOps → eval::matmul 委譲。#1211 で \
-             本番経路は BackendOps::gemm 経由になったが、この compat 経路の \
+             本番経路は BackendOps::gemm_fp32_strict 経由になったが、この \
+             compat 経路の \
              ゼロコピー保証は変わらない）が転置オペランド（transpose2d の \
              zero-copy view）でホスト側転置コピーへフォールバックした \
              （MATMUL_HOST_REPACK_COUNT が増加した）"

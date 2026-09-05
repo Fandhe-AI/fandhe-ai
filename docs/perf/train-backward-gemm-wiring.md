@@ -81,20 +81,34 @@ A08）。
   可能性があり、値を除外せずそのまま記録する方針を取った
   （`metal-gemm-bottleneck-rediagnosis.md` 等の先例と同方針）
 
-## 4. 実測結果（CPU・5 run 中央値）
+## 4. 実測結果（CPU）
 
 | mode | phase | before（中央値, ms） | after（中央値, ms） | 倍率（before/after） |
 |------|-------|----------------------|----------------------|------------------------|
-| fresh | backward | 16.122 | 1.292 | **12.48×** |
-| fresh | step_total | 16.766 | 1.814 | **9.24×** |
+| fresh | backward | 16.122\* | 1.292 | **12.48×** |
+| fresh | step_total | 16.766\* | 1.814 | **9.24×** |
 | reuse | backward | 7.233 | 0.817 | **8.86×** |
 | reuse | step_total | 7.926 | 1.408 | **5.63×** |
 
+`reuse`・`after`（fresh・reuse とも）は計測プロトコルどおり 5 run の中央値
+（3 番目に小さい値）。**\* を付けた `before` の `fresh`（`backward`・
+`step_total`）のみ、手順確認用の追加 1 run を含む実際に記録された全 6 run
+の中央値（偶数個のため中央 2 値の平均。生データ:
+`docs/perf/logs/train-backward-gemm-wiring-1211/before.jsonl`）であり、
+「5 run 中央値」ではない（codex-review 指摘。どの 5 run を選んでも
+16.122 ms／16.766 ms には一致しない。PR #1223）。6 run から任意の 1 run
+を除いた 5 run の median は、除いた run 次第で
+`backward` が 16.095417 ms または 16.149083 ms、`step_total` が
+16.734438 ms または 16.797563 ms のいずれか 2 通りにしかならない（中央
+2 値のどちらが単独中央値になるかで決まるため）。after（1.292083 ms／
+1.813625 ms）との倍率はそれぞれ約 12.46〜12.50×・約 9.23〜9.26× の範囲に
+収まり、表に記載の 12.48×・9.24×（6 run 全体の中央値ベース）から無視
+できる小差に留まるため、採否判断（§5）は変わらない。
+
 その他フェーズ（`forward`／`forward_resident`／`host_sgd`／`device_update`・
 `param_readout`／`tape_build`／`tape_drop`／`leaf_register`／`loss_readout`／
-`apply_params`）はいずれも変化なし（µs オーダーで前後同水準。`before`
-系列の `fresh` は 6 run 分の記録が残っている〈手順確認用の追加 1 run を
-含む〉が中央値への影響は無視できる小差）。生データの全フェーズ内訳は
+`apply_params`）はいずれも変化なし（µs オーダーで前後同水準）。生データの
+全フェーズ内訳は
 `docs/perf/logs/train-backward-gemm-wiring-1211/{before,after}.jsonl` を
 参照。
 
