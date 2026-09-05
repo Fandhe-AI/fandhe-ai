@@ -168,3 +168,10 @@ bench-candle v0.1.0 (bench-candle)
 bench-fandhe v0.1.0 (bench-fandhe)
 ├── bench-common v0.1.0 (bench-common)
 └── fandhe-ai v0.6.0
+
+# 環境 17: Apple M4 Max（reuse 計測境界のフェーズ分解。イシュー #1189。CUDA #1182 の Metal 版）
+# macOS / rustc 1.96.0 (ac68faa20 2026-05-25) / cargo 1.96.0 (30a34c682 2026-05-25)
+# 単一系列（fandhe-ai =0.6.0。registry 解決。参考系列は本ラウンド未実施）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0

@@ -1658,3 +1658,27 @@ DGX N=2048 は candle 側要素誤差超過により判定不能、M4 Max N=2048
   `-6016.774008`・N=4096: `-25768.747284`）することを確認した
 - 詳細な突合・帰属分析・ユーザー判断事項は `docs/perf/cuda-gemm-reuse-phase-breakdown.md`
   （イシュー #1182）を参照
+
+### 環境 17: Apple M4 Max（reuse 計測境界のフェーズ分解。イシュー #1189）
+
+`results-m4max-gemm-phases-0.6.0.jsonl`（Metal / reuse / N=1024/2048/4096・5 run）。
+
+| N | matmul | host_copy | checksum | iter_total |
+| --- | --- | --- | --- | --- |
+| 1024 | 2.039 ms | 0.240 ms | 0.569 ms | 2.859 ms |
+| 2048 | 5.549 ms | 0.920 ms | 2.268 ms | 8.622 ms |
+| 4096 | 34.800 ms | 3.719 ms | 9.628 ms | 47.944 ms |
+
+（各セル: 5 run の各 run 内中央値をさらに中央値化した値）
+
+### 環境 17 のデータ有効性
+
+- 全 75 行（3 size × 5 phase × 5 run）で `parity_fail_count=0`。`summarize.py --strict` は
+  exit 0
+- AC-2（挙動不変）: `--phases` なしの `gemm --mode reuse`（`results-m4max-gemm-
+  nonphases-ac2.jsonl`）の checksum が phases 版 1 ラン目と完全一致（N=1024:
+  `-1855.597736`・N=2048: `-6016.774008`・N=4096: `-25768.747284`）することを確認した
+- 詳細な突合・帰属分析・ユーザー判断事項は `docs/perf/metal-gemm-reuse-phase-breakdown.md`
+  （イシュー #1189）を参照。CUDA（#1182）と異なり、Metal は N=4096 で `matmul` 単体が
+  candle fresh より 1.52 倍遅く、reuse 計測境界の見直しでは candle 比未達を解消できない
+  非対称な結論となった

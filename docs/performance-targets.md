@@ -292,3 +292,18 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   再定義の要否はユーザー判断事項として整理した（同ドキュメント §9）
 - N=4096 の D2H は診断テスト内で顕著な二峰性（500〜650 ms vs 25〜27 ms）を示し、production
   経路（Layer A）とは乖離した。原因は本ラウンドでは未確定（同ドキュメント §4・§8）
+
+### 8.6 #1189 追補（Metal GEMM reuse 計測境界のフェーズ分解。§2 段階的下限表・§3 丸め規則は不変）
+
+- Metal GEMM N=1024/2048/4096 の `gemm --mode reuse`（#1147・§8.3）が candle 比未達となる
+  固定費の内訳を M4 Max 実機で実測分解した（`docs/perf/metal-gemm-reuse-phase-
+  breakdown.md`。イシュー #1189。CUDA #1182・§8.5 の Metal 版）。CUDA とは**非対称**な
+  結論となった: N=1024/2048 は `matmul` 区間（統合メモリ upload＋カーネル＋
+  commit_wait＋readback）単体が candle fresh とほぼ同等（0.90〜0.99 倍）まで縮まるが、
+  **N=4096 は `matmul` 単体が candle fresh より 1.52 倍遅い**。ハーネス自身の
+  `host_copy`＋`checksum` は `iter_total` の約 28〜37%（CUDA の 66〜75% より小さい）で、
+  Metal の候補比未達はハーネス測定境界の産物ではなく GPU 実行自体の構造的なギャップである
+- 本節は §2 の PyTorch 比段階的下限表・§3 丸め規則・既存の #1037/#1147 判定結果
+  （`compare_gemm_gate.py` の `iter_total` 相当の判定は不変）を変更しない。CUDA と異なり、
+  Metal では reuse 計測境界の再定義は候補比未達の解消に寄与しないと判断した（同ドキュメント
+  §7・§9）

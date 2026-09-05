@@ -243,9 +243,12 @@ train`/`--task infer` との組合せは MEASURE_ERROR で fail-fast する。
 `matmul` 区間の内訳（H2D／カーネル専有時間／D2H の実測分解）は本節では取れない
 （`fandhe-ai` 0.6.0 の公開 API 面にホスト転送を伴わない完了待ちや区間別の
 カーネルタイミング API が無いため。`train --phases`「同期待ちを独立区間にできない
-理由」と同じギャップ）。内訳は `crates/backend-cuda` 側の診断テスト
+理由」と同じギャップ）。内訳は `crates/backend-cuda`（CUDA）・`crates/backend-metal`（Metal。
+`cargo run --release -p bench-fandhe -- --task gemm --device metal --size 4096 --mode
+reuse --phases`。イシュー #1189）それぞれの側の診断テスト
 （`gemm_reuse_phase_diag_tests`。`#[ignore]` 実機専用）が別途取り、`matmul`
-区間との突合結果を `docs/perf/cuda-gemm-reuse-phase-breakdown.md` に記録する。
+区間との突合結果を `docs/perf/cuda-gemm-reuse-phase-breakdown.md`（CUDA）・
+`docs/perf/metal-gemm-reuse-phase-breakdown.md`（Metal）にそれぞれ記録する。
 
 reuse 行には `init_s`（tape 構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
 経過。`run_gemm_reuse` と同一定義）が乗る。
