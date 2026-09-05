@@ -32,3 +32,19 @@ Note: No CPU power status has been recorded
 `gemm_transpose_route_ab_bench.rs` へは反映しない（`undetermined` 分岐は
 コード変更なしの方針。`docs/perf/metal-bench-noise-protocol.md` の調整は
 実行時の一時変更に留め、実測記録〈本ファイル〉へ残す）。
+
+## 追記（試行 4。イシュー #1187 継続。2026-09-05）
+
+- HEAD sha（実行時点）: 18cf7ce42c8f0d594faaa7a8a8b5d6137d538a29
+- rustc/cargo: 1.96.0（試行 1〜3 と同一）
+- 機種・OS: 変わらず（Apple M4 Max・macOS 26.6.2）
+- ROUNDS=10 COOLDOWN=8s MIN_WARMUP=3s（既定値。一時調整なし）
+- 実行直前 uptime: `load averages: 1.38 2.41 3.30`（gate。pgrep で cargo/bench/rustc の並走プロセスなしを確認済み）
+- 実行前後 `pmset -g therm`: 警告なし（試行 1〜3 と同一）
+- 実行中 30 秒間隔の uptime サンプリング（`uptime_during_run4.txt` に生記録。前回までの課題「実行中の生出力未記録」を是正）:
+  実行開始直後は load average 1.5〜2 台で推移していたが、実行中盤（4096 計測時間帯）に
+  7〜11 台まで上昇したことを raw 出力で確認した（本エージェント自身が並行して実行した
+  `cargo check`/`cargo clippy`/`cargo test --workspace`〈完了条件の検証作業〉が要因の一部と
+  推定される。他セッションの寄与は切り分けられていない）。
+- 結果: 5/5 サイズとも spread が gate（0.05）を超過し `verdict=undetermined`。
+  詳細は `route_ab_run4.log`。
