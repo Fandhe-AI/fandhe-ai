@@ -1,0 +1,269 @@
+# state: E1 (unroll(full) pragma applied) - run3 (追加確認)
+ crates/backend-metal/src/shaders/gemm.metal | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+  --> crates/backend-cuda/src/gemm_mma.rs:21:5
+   |
+21 | use crate::context_cache;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   --> crates/backend-cuda/src/gemm.rs:768:48
+    |
+768 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   --> crates/backend-cuda/src/gemm.rs:781:8
+    |
+770 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+781 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   --> crates/backend-cuda/src/pool.rs:259:19
+    |
+239 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+259 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+   --> crates/backend-cuda/src/pool.rs:651:19
+    |
+457 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+651 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+666 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+    Finished `release` profile [optimized] target(s) in 1.90s
+     Running `target/release/examples/gemm_transpose_tile_sweep`
+shape=(512,512,512) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=0.6472 resolved_matches_requested=true
+shape=(512,512,512) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=0.8048 resolved_matches_requested=true
+shape=(512,512,512) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=0.7682 resolved_matches_requested=true
+shape=(512,512,512) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=0.8777 resolved_matches_requested=true
+shape=(512,512,512) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=0.4339 resolved_matches_requested=true
+shape=(512,512,512) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=0.8067 resolved_matches_requested=true
+shape=(512,512,512) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=0.8143 resolved_matches_requested=true
+shape=(512,512,512) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=0.4140 resolved_matches_requested=true
+shape=(512,512,512) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=0.5674 resolved_matches_requested=true
+shape=(512,512,512) pattern=NT candidate=strided_classic_tiled tflops=0.2940 resolved_matches_requested=true
+shape=(512,512,512) pattern=TN candidate=strided_classic_tiled tflops=0.4678 resolved_matches_requested=true
+shape=(512,512,512) pattern=TT candidate=strided_classic_tiled tflops=0.4598 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=2.7985 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=3.4857 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=3.5294 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=3.7170 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=3.7900 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=3.9524 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=4.1461 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.8028 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=4.7310 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=NT candidate=strided_classic_tiled tflops=1.5346 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=TN candidate=strided_classic_tiled tflops=1.5093 resolved_matches_requested=true
+shape=(1024,1024,1024) pattern=TT candidate=strided_classic_tiled tflops=1.4794 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=9.5521 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=9.2539 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=8.2212 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=7.2663 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=6.6670 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=6.1567 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=5.9400 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.4368 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=4.7688 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=NT candidate=strided_classic_tiled tflops=0.6878 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=TN candidate=strided_classic_tiled tflops=0.7609 resolved_matches_requested=true
+shape=(2048,2048,2048) pattern=TT candidate=strided_classic_tiled tflops=0.8560 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=5.0750 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=3.6329 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=4.0646 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=3.6126 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=5.1198 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=4.2727 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=3.6414 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.6346 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=5.2706 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=NT candidate=strided_classic_tiled tflops=1.0192 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=TN candidate=strided_classic_tiled tflops=1.0825 resolved_matches_requested=true
+shape=(4096,4096,4096) pattern=TT candidate=strided_classic_tiled tflops=1.0513 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=2.3599 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=2.3586 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=2.4339 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=2.4152 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=2.4688 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=2.3981 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=2.4736 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.1748 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=2.3963 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=NT candidate=strided_classic_tiled tflops=0.8244 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=TN candidate=strided_classic_tiled tflops=0.8401 resolved_matches_requested=true
+shape=(2048,2048,64) pattern=TT candidate=strided_classic_tiled tflops=0.8305 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=5.9895 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=6.0663 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=2.2896 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=5.4728 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=5.8518 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=5.3489 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=2.2906 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.9323 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=6.5026 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=NT candidate=strided_classic_tiled tflops=0.6484 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=TN candidate=strided_classic_tiled tflops=1.2387 resolved_matches_requested=true
+shape=(2048,2048,512) pattern=TT candidate=strided_classic_tiled tflops=1.3162 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=6.2751 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=5.9948 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=5.8506 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=5.7949 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=5.2728 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=5.9565 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=6.0502 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.2326 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=5.7603 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=NT candidate=strided_classic_tiled tflops=1.3223 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=TN candidate=strided_classic_tiled tflops=1.2511 resolved_matches_requested=true
+shape=(1536,1024,1024) pattern=TT candidate=strided_classic_tiled tflops=1.2535 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=6.5982 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=6.7934 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=6.7555 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=6.4275 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=5.4762 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=6.1018 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=6.2076 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.9410 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=5.3782 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=NT candidate=strided_classic_tiled tflops=1.1723 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=TN candidate=strided_classic_tiled tflops=1.2167 resolved_matches_requested=true
+shape=(1024,1536,1536) pattern=TT candidate=strided_classic_tiled tflops=1.1955 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=7.4649 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=7.2286 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=6.7094 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=6.4969 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=6.1496 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=6.4052 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=6.7443 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.1654 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=7.0005 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=NT candidate=strided_classic_tiled tflops=1.3472 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=TN candidate=strided_classic_tiled tflops=1.2383 resolved_matches_requested=true
+shape=(4096,1024,1024) pattern=TT candidate=strided_classic_tiled tflops=1.2598 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand0_64x64_wm2wn2 tflops=7.5027 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand1_64x32_wm2wn2_tall tflops=6.9472 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand2_32x64_wm2wn2_wide tflops=7.0048 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand3_32x32_wm2wn2 tflops=6.2941 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand4_64x64_wm1wn2 tflops=6.9820 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand5_64x32x32_wm2wn2 tflops=6.7319 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand6_64x32x8_wm4wn1 tflops=7.0189 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand7_single_simdgroup_8x8 tflops=1.8375 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NN candidate=cand8_32x64x16_wm1wn2 tflops=6.5449 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=NT candidate=strided_classic_tiled tflops=1.2078 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=TN candidate=strided_classic_tiled tflops=1.0923 resolved_matches_requested=true
+shape=(1024,4096,1024) pattern=TT candidate=strided_classic_tiled tflops=1.0387 resolved_matches_requested=true
