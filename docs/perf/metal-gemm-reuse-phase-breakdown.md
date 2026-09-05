@@ -160,13 +160,22 @@ layerA-summarize-output.md` に全 15 run 分の詳細表を保存）。
 | 4096 | 4 | 3.8727 | 3.8134 | 0.0004 | 0.0167 | 15.6113 | 0.9382 | 3.6132 | 27.8659 |
 | 4096 | 5 | 3.7496 | 3.8409 | 0.0003 | 0.0135 | 15.7135 | 0.9452 | 3.7884 | 28.0514 |
 
+**集計方式**: `upload_a`〜`host_copy` の各列は、その列単独で 5 run の値を
+集めて中央値を取る（列ごと独立集計）。`upload_a+b` はその
+`upload_a` 中央値と `upload_b` 中央値の和（＝列ごと中央値の和）である。
+一方 `sum` 列は各 run の 7 フェーズ合計値（§4 生ログ表の `sum` 列。
+1 run 内で 20 試行の中央値を取った 7 フェーズを足し合わせた値）を
+5 run 分集めたうえでその中央値を取ったものであり、**列ごと中央値の単純
+合計とは一致しない**（run 内の相関により両者は一般に異なる。本表の
+`sum` は常に後者＝「各 run 合計の中央値」で統一する）。
+
 **中央値の中央値**:
 
 | N | upload_a+b | alloc_c | encode | commit_wait | readback | host_copy | sum |
 |---|---|---|---|---|---|---|---|
-| 1024 | 0.474 ms | ~0 ms | 0.0030 ms | 1.2449 ms | 0.0692 ms | 0.2397 ms | 2.0377 ms |
-| 2048 | 1.973 ms | ~0 ms | 0.0065 ms | 2.5519 ms | 0.2380 ms | 0.9645 ms | 5.7155 ms |
-| 4096 | 7.734 ms | ~0.0006 ms | 0.0167 ms | 15.7457 ms | 0.9412 ms | 3.7973 ms | 28.2347 ms |
+| 1024 | 0.4763 ms | ~0 ms | 0.0030 ms | 1.2449 ms | 0.0692 ms | 0.2430 ms | 2.0377 ms |
+| 2048 | 1.9557 ms | ~0 ms | 0.0065 ms | 2.5519 ms | 0.2380 ms | 0.9645 ms | 5.7155 ms |
+| 4096 | 7.7548 ms | ~0.0006 ms | 0.0167 ms | 15.7457 ms | 0.9412 ms | 3.7884 ms | 28.2347 ms |
 
 N=1024 の `commit_wait` は run3/5 のみ約 0.405 ms と run1/2/4（約
 1.25〜1.28 ms）の約 1/3 に落ちる二峰性が見られた（`docs/perf/
@@ -182,24 +191,45 @@ N=1024: `bm=64,bn=32,bk=8,wm=4,wn=1,staged=true`、N=2048:
 metal-gemm-bottleneck-rediagnosis.md` の `CANDIDATES[3]`/`[5]`/`[6]`
 と一致。§2「Metal と CUDA の対応表」参照）。
 
-## §5 突合（Layer A `matmul` vs Layer B Σ）
+## §5 突合（Layer A `matmul` vs Layer B Σ、host_copy 除外）
 
-| N | Layer A `matmul` 中央値 | Layer B Σ 中央値 | 差分 |
+Layer A の `matmul` 区間は `matmul(&b)` 完了時点で計時を終了し、
+`to_vec()`（host_copy）はハーネス側で別区間として測定される（§3）。
+したがって `matmul` 区間と境界を揃えるには、Layer B の Σ からも
+`host_copy` を除いた値（upload_a+upload_b+alloc_c+encode+commit_wait+
+readback）を使う必要がある。Σ（host_copy 除外）は各 run の
+（`sum` − `host_copy`）を 5 run 分集めた中央値として求める（§4 の
+集計方式と同じく「run 合計の中央値」方式）。
+
+| N | Layer A `matmul` 中央値 | Layer B Σ（host_copy 除外）中央値 | 差分 |
 |---|---|---|---|
-| 1024 | 2.039 ms | 2.0377 ms | +0.1%（ほぼ一致） |
-| 2048 | 5.549 ms | 5.7155 ms | -3.0%（Layer B がやや大きい） |
-| 4096 | 34.800 ms | 28.2347 ms | +18.9%（Layer A が明確に大きい） |
+| 1024 | 2.039 ms | 1.7947 ms | +13.6%（Layer A が大きい） |
+| 2048 | 5.549 ms | 4.7602 ms | +16.6%（Layer A が大きい） |
+| 4096 | 34.800 ms | 24.4327 ms | +42.4%（Layer A が大きい） |
 
-N=1024/2048 は両者ほぼ一致し、Σ（upload_a+upload_b+alloc_c+encode+
-commit_wait+readback+host_copy）が `matmul` 区間の内訳として妥当である
-ことを裏付ける。**N=4096 のみ Layer A `matmul` が Layer B Σ より約
-19% 大きい**——`docs/perf/metal-gemm-bottleneck-rediagnosis.md` §3.4
-が記録する「プロセス間で中央値が最大約 3 倍変動する」計測揺らぎ、および
-本ファイル§4 で観測した N=1024 の commit_wait 二峰性と同種の環境要因
-（GPU クロック遷移・他プロセスとの競合等）が寄与している可能性が高いが
-特定はできていない。この乖離は情報提供に留め、**固定費の帰属（§6）は
-Layer A の `iter_total` 比のみから述べる**方針を維持する（実装計画§7
-リスク節が明示的に許容する扱い）。
+**host_copy を含めた旧集計（Σ=2.0377/5.7155/28.2347 ms）は境界の異なる
+量同士を比較しており、N=1024/2048 が「ほぼ一致」に見えたのは host_copy
+分がたまたま両者の差を相殺していたことによる見かけ上の一致だった**。
+host_copy を除いて境界を揃えると、N=1024/2048/4096 いずれも Layer A
+`matmul` が Layer B Σ を明確に上回り、乖離幅は N とともに拡大する
+（13.6%→16.6%→42.4%）。**N=4096 の乖離は旧記載の約19%ではなく約
+42%であり、旧集計は乖離を過小評価していた**。
+
+この残差（Layer A `matmul` にのみ含まれ Layer B の 6 フェーズ分解には
+現れない時間）の発生源は本イシューでは特定できていない。Layer B は
+`dispatch_tiled_prepared` と同じ NN 経路の診断ヘルパ
+（`diag_encode_tiled_nn`）を通じた計測であり、本番経路
+`dispatch_auto`（タイル選択・variant 分岐・`Var`/`Tensor` ラッピング
+等を含む）の全ステップを計時していない。`docs/perf/
+metal-gemm-bottleneck-rediagnosis.md` §3.4 が記録する「プロセス間で
+中央値が最大約 3 倍変動する」計測揺らぎ、および本ファイル §4 で観測した
+N=1024 の commit_wait 二峰性と同種の環境要因（GPU クロック遷移・他
+プロセスとの競合等）に加え、`dispatch_auto` 内のタイル選択・`Var`
+ラッピング等 Layer B 診断ヘルパが計時しない本番経路固有のオーバーヘッド
+が寄与している可能性がある。いずれも特定はできていない。この乖離は
+情報提供に留め、**固定費の帰属（§6）は Layer A の `iter_total` 比のみ
+から述べる**方針を維持する（実装計画§7 リスク節が明示的に許容する
+扱い）。
 
 `commit_wait`（Layer B）を TFLOPS へ換算すると N=1024: 1.72 TFLOPS、
 N=2048: 6.57 TFLOPS、N=4096: 8.51 TFLOPS。`gemm_bench` example の
@@ -261,8 +291,9 @@ candle 比ギャップ調査。約 9.9 対 13.17 TFLOPS）と整合する。
   分離する）は本イシューでは未実装（§2「Layer B」参照。AC-2 の安全側
   判断による意図的な縮退）。`commit_wait` は commit＋カーネル専有＋
   `waitUntilCompleted` の合算値のまま
-- N=1024 の `commit_wait` 二峰性（run3/5 のみ約 1/3 に低下）・N=4096 の
-  Layer A/B 乖離（§5）はいずれも原因未特定のまま記録するにとどめる
+- N=1024 の `commit_wait` 二峰性（run3/5 のみ約 1/3 に低下）・全 N での
+  Layer A `matmul` と Layer B Σ（host_copy 除外）の乖離（§5。
+  13.6%〜42.4%）はいずれも原因未特定のまま記録するにとどめる
 - `Tensor<f32>` デバイス常駐化等の設計変更は対象外（計画共通節）
 - tolerance／baseline／依存の追加変更は行っていない
 
@@ -277,8 +308,9 @@ candle 比ギャップ調査。約 9.9 対 13.17 TFLOPS）と整合する。
    より 1.52 倍遅い**
 3. Metal の N=4096 candle 比未達（#1147: 0.589 倍）は、CUDA と異なり
    ハーネス測定境界の産物ではなく GPU 実行自体のギャップである
-4. Layer A `matmul` と Layer B Σ は N=1024/2048 でほぼ一致するが、
-   N=4096 のみ約 19% 乖離する（原因未特定の計測揺らぎ。§5）
+4. Layer A `matmul` と Layer B Σ（host_copy 除外・境界を揃えた比較）は
+   N=1024/2048/4096 いずれも Layer A が上回り、乖離幅は N とともに
+   拡大する（13.6%→16.6%→42.4%。原因未特定。§5）
 
 ### 選択肢
 
