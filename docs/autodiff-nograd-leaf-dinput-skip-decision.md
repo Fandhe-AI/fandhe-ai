@@ -46,7 +46,7 @@
 
 ### 2.3 多層時の d_input 依存
 
-`Sequential::forward`／`forward_from_flat_leaves`（`crates/facade/src/compat/sequential.rs`）は `current`（前層の出力）を次層の `input` として渡す。層 `i`（`i ≥ 2`）の `input` は**非葉ノード**（前層の出力）であり、その VJP が計算する d_input は前層の VJP が使う upstream になる。したがって「非葉ノードへの d_input は絶対にスキップ不可」であり、スキップ判定は**葉（かつ opt-in で明示された葉）に限る**必要がある。
+`Sequential::forward`／`forward_from_flat_leaves`（`crates/facade/src/compat/sequential.rs`）は `current`（前層の出力）を次層の `input` として渡す。層 `i`（`i ≥ 2`）の `input` は**非葉ノード**（前層の出力）であり、その VJP が計算する d_input は前層の VJP が使う upstream になる。したがって、スキップの禁止条件は「葉かどうか」ではなく**「`requires_grad == true` の入力ノードへの伝播をスキップしないこと」**に統一する（§5 の採用案 B は `requires_grad` を非葉ノードにも前方伝播させるため、学習対象の祖先を一つも持たない非葉ノード〈中継点〉への d_input も条件を満たせば省略可能であり、逆に葉であっても `requires_grad == true`（既定）のままなら省略不可。「非葉ノードは絶対にスキップ不可」ではない）。
 
 ### 2.4 view ノードを通過する入力
 
@@ -54,7 +54,7 @@
 
 ### 2.5 性能前提の再ベースライン
 
-起票元（#1151）が根拠とした「fresh backward の約半分」という見積もりは #1223（`eval::matmul` scalar 実装 → `BackendOps::gemm` 切替）**前**の FLOP 算術に基づく。#1223 後の CPU／M4 Max 実測（`docs/perf/train-backward-gemm-wiring.md` §4）では fresh backward 中央値 1.321 ms・step_total 中央値 1.835 ms である。層 1 の d_input GEMM（`[64,256]×[256,784]` ≈ 25.7 MFLOP）は、backward 内 GEMM FLOP 総量（層 1 d_weight 25.7 MFLOP + d_input 25.7 MFLOP + 層 2 の d_weight／d_input／d_bias 各 ≈0.33 MFLOP ≈ 合計 52 MFLOP）の**約半分**という FLOP 比自体は変わらないが、**backward 壁時間に対する比率は #1223 後は未実測**である（GEMM 呼び出し固定費・rayon 分割・packing の相対比重が変わりうるため、FLOP 比をそのまま壁時間比に読み替えられない）。CUDA・Metal は #1223 後の実測値が存在しない（`docs/perf/train-backward-gemm-wiring.md` §6）。本設計判断はこの前提の曖昧さを解消せず、**実装イシュー側で before/after の壁時間実測を必須**とする（§8・§9）。
+起票元（#1151）が根拠とした「fresh backward の約半分」という見積もりは #1223（`eval::matmul` scalar 実装 → `BackendOps::gemm` 切替）**前**の FLOP 算術に基づく。#1223 後の CPU／M4 Max 実測（`docs/perf/train-backward-gemm-wiring.md` §4）では fresh backward 中央値 1.321 ms・step_total 中央値 1.835 ms である。層 1 の d_input GEMM（`[64,256]×[256,784]` ≈ 25.7 MFLOP）は、backward 内 GEMM FLOP 総量（層 1 d_weight 25.7 MFLOP + d_input 25.7 MFLOP + 層 2 の d_weight／d_input／d_bias 各 ≈0.33 MFLOP ≈ 合計 52 MFLOP）の**約半分**という FLOP 比自体は変わらないが、**backward 壁時間に対する比率は #1223 後は未実測**である（GEMM 呼び出し固定費・rayon 分割・packing の相対比重が変わりうるため、FLOP 比をそのまま壁時間比に読み替えられない）。CUDA は #1223 後の実測値が存在しない（`docs/perf/train-backward-gemm-wiring.md` §6）。Metal は #1223（本切替）**単体**の寄与を切り分けた実測は存在しないが、後続 #1215（Metal NT/TN strided 結線）の train phases フル A/B は #1223 適用済みの `origin/main` を before として計測済みであり、切替後の壁時間自体（backward: fresh 1.649×・reuse 1.200×、step_total: fresh 1.323×・reuse 1.109×。#1215 の増分込み）は既存実測がある（`docs/perf/train-backward-gemm-wiring.md` §6・#1215）。本設計判断はこの前提の曖昧さを解消せず、**実装イシュー側で before/after の壁時間実測を必須**とする（§8・§9）。
 
 ## 3. 契約整理
 
@@ -66,8 +66,8 @@
 
 ### 3.2 多層時の d_input 依存と拾い漏れ
 
-- 非葉ノードへの d_input は前層 VJP の upstream になるため、**絶対にスキップ不可**（§2.3）
-- 葉であっても、他の消費者（`Gradients::get` を直接呼ぶ利用者）が読む可能性があるため、**利用者が明示的に opt-in した葉に限りスキップ可**とする
+- スキップの禁止条件は「`requires_grad == true` の入力ノードへの伝播をスキップしないこと」に統一する（§2.3）。前層 VJP の upstream になる非葉ノードは、学習対象の祖先を持つ限り `requires_grad == true` のままなのでスキップ不可だが、学習対象の祖先を一つも持たない非葉ノード（例: opt-in 葉のみから構成された中継点）は省略可能である
+- 葉であっても、既定（`Tape::var`）のままなら `requires_grad == true` を維持し他の消費者（`Gradients::get` を直接呼ぶ利用者）が読む可能性があるため、**利用者が明示的に opt-in して `requires_grad == false` にした葉に限りスキップ可**とする
 - 葉を包む view／elementwise ノード（例: 入力正規化を挟んでから層に渡す構成）は、葉判定だけでは opt-in の効果を追跡できない（§2.4）。採用案（§5）はこれを「`requires_grad` の前方伝播」で解決する
 
 ## 4. 設計案の比較
@@ -113,7 +113,7 @@
 
 ### 5.6 `Op::ResidentLeaf` との関係
 
-`Op::ResidentLeaf`（イシュー #1022。デバイス常駐パラメータの葉）は本設計の対象外とする。既に独立した縮小実装（§2 先行事例）を持つ別経路であり、本設計判断が扱う「非学習な**入力**（活性化データ x）」とは異なる（`Op::ResidentLeaf` は重みという学習対象そのものであり、d_weight を計算しないのは「常に」であって opt-in ではない）。
+`Op::ResidentLeaf`（イシュー #1022。デバイス常駐パラメータの葉）は本設計の対象外とする。既に独立した縮小実装（§2 先行事例）を持つ別経路であり、本設計判断が扱う「非学習な**入力**（活性化データ x）」とは異なる（`Op::ResidentLeaf` は重みという学習対象そのものであり、`requires_grad` は常に `true` を維持する。省略されるのは d_weight の**計算**ではなく、常駐経路〈`ResidentResolver::fill_resident_weight_grad`〉が成功した場合の**ホスト側 `Gradients` への格納**のみである。d_weight 自体は `ops.gemm_fp32_strict(&x_t, g)` で常に計算される〈`crates/autodiff/src/grad.rs:208` 付近の `Op::LinearResident` 実装。`filled_resident` が `true` の場合のみ `contributions` へ含めず `Gradients::get` からは「未到達」と区別できなくなる〉。これは opt-in ではなく無条件の縮小実装である点も本設計判断の opt-in 方式とは異なる）。
 
 ## 6. 数値一致・既存テストとの整合
 
@@ -144,7 +144,7 @@
 - FLOP 算術（§2.5）: 層 1 の d_input GEMM（`[64,256]×[256,784]` ≈ 25.7 MFLOP）は backward 内 GEMM FLOP 総量（≈52 MFLOP）の約半分
 - #1223 後の実測（`docs/perf/train-backward-gemm-wiring.md` §4）: CPU／M4 Max で fresh backward 中央値 1.321 ms・step_total 中央値 1.835 ms。**backward 壁時間に対する d_input GEMM の比率は未実測**
 - reuse 経路では、上記 FLOP 削減に加えてデバイス GEMM（`gemm_resident_lhs`）+ 転置 2 回 + D2H（GPU では同期点）の除去が加わるため、fresh 経路より相対的な改善余地が大きい可能性がある（未実測）
-- CUDA／Metal はいずれも #1223 後の実測値がない（`docs/perf/train-backward-gemm-wiring.md` §6）
+- CUDA は #1223 後の実測値がない。Metal は #1223 単体の寄与を切り分けた実測はないが、切替後の壁時間自体（#1215 込み）は既存実測がある（`docs/perf/train-backward-gemm-wiring.md` §6・#1215）
 - 計測方法: #1142／#1147 の参考系列手順（framework-compare の非コミット一時 path 差し替え）またはリポ内 bench（`bench-harness`）を用い、5 回計測の中央値を採用する（`.claude/rules/coding-rust.md` ベンチ規約）。実装イシューでは before/after の壁時間実測を `docs/perf/` 配下に必須で記録する
 
 ## 9. 実装イシューへの引き継ぎ（起票草案）
