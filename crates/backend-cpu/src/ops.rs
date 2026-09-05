@@ -10,6 +10,7 @@
 //! 条件「3 バックエンドが呼び分けられる」の参照実装として、CPU は常に
 //! 実カーネルを実行できることを保証する）。
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
@@ -19,7 +20,9 @@ use fandhe_ai_tensor_core::{
     require_same_shape,
 };
 
-use crate::gemm_blis::{gemm_blis_bias_act_parallel, gemm_blis_parallel};
+use crate::gemm_blis::{
+    gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt, gemm_blis_parallel_tn,
+};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::softmax::{self, match_softmax_plan};
@@ -64,6 +67,58 @@ impl CpuBackendOps {
 /// Review 指摘対応）。
 fn gemm_contiguity_fail_safe(msg: impl std::fmt::Display) -> BackendError {
     BackendError::KernelLaunchFailed(msg.to_string())
+}
+
+thread_local! {
+    /// `gemm`／`gemm_resident_lhs` の呼び出しのうち、片側オペランドが
+    /// dense な転置 view（[`dense_transposed_view`] が `Some` を返す
+    /// 形状）と判定できず `Tensor::contiguous()` の再パックコピーへ
+    /// フォールバックした回数（イシュー #1213）。`backend-metal::ops::
+    /// RESIDENT_HOST_REPACK_COUNT` と同型の可観測点で、`#[cfg(test)]`
+    /// クレート内テストから「NT/TN 判定が効いてフォールバックを通って
+    /// いないこと」を検証するために使う（`pub(crate)`。クレート境界外の
+    /// 統合テストからは参照できないため、外部テストファイルは数値一致
+    /// のみを検証する契約とする。`RESIDENT_HOST_REPACK_COUNT` ドキュメント
+    /// コメントと同じ設計判断）。
+    pub(crate) static GEMM_HOST_REPACK_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// `t` が「dense な転置格納」（`Tensor::transpose_2d()` を経た zero-copy
+/// view のうち、元テンソルが行優先連続だったもの）であれば、その
+/// storage をそのまま借用したフラットスライスを返す（イシュー #1213）。
+///
+/// 判定条件は `rank() == 2 && strides() == [1, shape()[0]]`。これは
+/// `Tensor::transpose_2d`（`transpose(0,1)` の薄い委譲）が行優先連続
+/// テンソルへ適用された結果と同値であり、返るスライスは「転置元の
+/// テンソル」を行優先で並べたバイト列そのものになる（呼び出し元が
+/// `ATPackTile`／`BTPackTile`〈`crate::gemm_blis::pack`〉の `k_total`／
+/// `m_total`／`n_total` を正しく解釈する前提。`gemm`／`gemm_resident_lhs`
+/// のみが呼ぶ）。
+///
+/// `narrow` 後の転置（一般 stride）・stride 0 の broadcast・rank ≠ 2 は
+/// `None`（従来どおり `contiguous()` へフォールバックさせる。一般 stride
+/// 化は本イシューのスコープ外。`docs/matmul-vjp-zero-copy-decision.md`
+/// §3.2）。`rows == 0 || cols == 0` も呼び出し元の分岐を単純に保つため
+/// `None` とし、`contiguous()`（`is_contiguous()` が空テンソルで常に
+/// `true` を返す契約）に委ねる。
+fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
+    if t.rank() != 2 {
+        return None;
+    }
+    let shape = t.shape();
+    let strides = t.strides();
+    let (rows, cols) = (shape[0], shape[1]);
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    if strides.len() != 2 || strides[0] != 1 || strides[1] != rows as isize {
+        return None;
+    }
+    let view = t.as_view_slice()?;
+    if view.len() != rows.checked_mul(cols)? {
+        return None;
+    }
+    Some(view)
 }
 
 /// [`MemoryOps`] の CPU 実装（イシュー #935）。`shared_cpu_memory()`
@@ -259,28 +314,73 @@ impl BackendOps for CpuBackendOps {
         Ok(())
     }
 
+    /// VJP 専用 NT/TN 2 パターン入口（イシュー #1213）: `matmul_vjp` の
+    /// d_input（`g @ Wᵀ`）・d_weight（`Aᵀ @ g`）が渡す片側転置オペランド
+    /// （`transpose2d` の zero-copy view）を `dense_transposed_view` で
+    /// 判定できる場合、`Tensor::contiguous()` の再パックコピーを経由せず
+    /// [`gemm_blis_parallel_nt`]／[`gemm_blis_parallel_tn`]（BLIS packing
+    /// が転置格納から直接吸収する）へ渡す。両方転置（TT）・一般 stride
+    /// （`narrow` 後の転置等）は判定失敗として従来の `contiguous()` 経路
+    /// （[`gemm_blis_parallel`]）へフォールバックする（`docs/matmul-vjp-
+    /// zero-copy-decision.md` §3.2。一般 stride 化は本イシューのスコープ
+    /// 外）。フォールバックでオペランドを再パックした回数は
+    /// `GEMM_HOST_REPACK_COUNT` へ計上する（可観測点。`backend-metal::
+    /// ops::upload_operand_for_resident_gemm` と同型の設計）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
-
-        // `gemm_blis_parallel` は contiguous な `&[f32]` を要求する。
-        // 非 contiguous（view・broadcast 由来）な入力は `contiguous()` で
-        // 実体化してから渡す（`Tensor::as_slice` は非 contiguous では
-        // `None` を返す契約。`crates/tensor-core/src/tensor.rs` 参照）。
-        let a_owned = a.contiguous();
-        let b_owned = b.contiguous();
-        let a_slice = a_owned.as_slice().ok_or_else(|| {
-            gemm_contiguity_fail_safe("gemm: lhs not contiguous after contiguous()")
-        })?;
-        let b_slice = b_owned.as_slice().ok_or_else(|| {
-            gemm_contiguity_fail_safe("gemm: rhs not contiguous after contiguous()")
-        })?;
-
         let mut out = vec![0.0f32; m * n];
-        gemm_blis_parallel(a_slice, b_slice, &mut out, m, n, k)
-            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        match (dense_transposed_view(a), dense_transposed_view(b)) {
+            (Some(at), None) => {
+                // TN: a は転置格納（at: 論理形状 [k,m] 行優先）、b は通常。
+                if !b.is_contiguous() {
+                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+                }
+                let b_owned = b.contiguous();
+                let b_slice = b_owned.as_slice().ok_or_else(|| {
+                    gemm_contiguity_fail_safe("gemm: rhs not contiguous after contiguous()")
+                })?;
+                gemm_blis_parallel_tn(at, b_slice, &mut out, m, n, k)
+                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+            }
+            (None, Some(bt)) => {
+                // NT: b は転置格納（bt: 論理形状 [n,k] 行優先）、a は通常。
+                if !a.is_contiguous() {
+                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+                }
+                let a_owned = a.contiguous();
+                let a_slice = a_owned.as_slice().ok_or_else(|| {
+                    gemm_contiguity_fail_safe("gemm: lhs not contiguous after contiguous()")
+                })?;
+                gemm_blis_parallel_nt(a_slice, bt, &mut out, m, n, k)
+                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+            }
+            _ => {
+                // TT（両方転置）・判定不能（一般 stride・broadcast 等）:
+                // 従来どおり両オペランドを contiguous() で実体化する
+                // （`Tensor::as_slice` は非 contiguous では `None` を返す
+                // 契約。`crates/tensor-core/src/tensor.rs` 参照）。
+                if !a.is_contiguous() {
+                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+                }
+                if !b.is_contiguous() {
+                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+                }
+                let a_owned = a.contiguous();
+                let b_owned = b.contiguous();
+                let a_slice = a_owned.as_slice().ok_or_else(|| {
+                    gemm_contiguity_fail_safe("gemm: lhs not contiguous after contiguous()")
+                })?;
+                let b_slice = b_owned.as_slice().ok_or_else(|| {
+                    gemm_contiguity_fail_safe("gemm: rhs not contiguous after contiguous()")
+                })?;
+                gemm_blis_parallel(a_slice, b_slice, &mut out, m, n, k)
+                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+            }
+        }
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -429,6 +529,15 @@ impl BackendOps for CpuBackendOps {
     /// grad`）が `d_input^T = w @ g^T` を計算するために使う。[`Self::
     /// gemm_resident_rhs`] と同じくゼロコピー（`downcast_handle` 直読み
     /// + オフセット範囲スライス）。
+    ///
+    /// `b`（`g^T` に相当。呼び出し元は `Op::LinearResident` d_input）が
+    /// `dense_transposed_view` で判定できる dense な転置格納なら
+    /// [`gemm_blis_parallel_nt`] へ渡し `contiguous()` の再パックコピー
+    /// を経由しない（イシュー #1213）。判定できない場合は従来どおり
+    /// `contiguous()` へフォールバックし `GEMM_HOST_REPACK_COUNT` を
+    /// 計上する。`w` はデバイス常駐バッファ（`DeviceBufferView`）で
+    /// `Tensor` view の転置意味論を持たないため判定対象外（従来どおり
+    /// 直読みのみ）。
     fn gemm_resident_lhs(
         &self,
         w: DeviceBufferView<'_>,
@@ -459,14 +568,23 @@ impl BackendOps for CpuBackendOps {
             .ok_or(BackendError::DeviceMismatch)?;
         let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
 
-        let b_owned = b.contiguous();
-        let b_slice = b_owned.as_slice().ok_or_else(|| {
-            gemm_contiguity_fail_safe("gemm_resident_lhs: rhs not contiguous after contiguous()")
-        })?;
-
         let mut out = vec![0.0f32; p * r];
-        gemm_blis_parallel(w_slice, b_slice, &mut out, p, r, q)
-            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        if let Some(bt) = dense_transposed_view(b) {
+            gemm_blis_parallel_nt(w_slice, bt, &mut out, p, r, q)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        } else {
+            if !b.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            let b_owned = b.contiguous();
+            let b_slice = b_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(
+                    "gemm_resident_lhs: rhs not contiguous after contiguous()",
+                )
+            })?;
+            gemm_blis_parallel(w_slice, b_slice, &mut out, p, r, q)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
         Tensor::new(out, &[p, r]).map_err(BackendError::ShapeMismatch)
     }
 
@@ -851,5 +969,82 @@ fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
         reduction::ReduceError::EmptyReduction { op } => {
             BackendError::KernelLaunchFailed(format!("empty reduction for op \"{op}\""))
         }
+    }
+}
+
+/// [`GEMM_HOST_REPACK_COUNT`]（クレート境界外の統合テストから見えない
+/// `pub(crate)` カウンタ）が「dense 転置 view では増加しない・一般
+/// stride／TT では増加する」ことを検証するクレート内テスト（イシュー
+/// #1213）。数値一致自体は統合テスト `tests/gemm_transposed_parity.rs`
+/// が担当し、本テストはフォールバック経路の健全性（NT/TN 判定が実際に
+/// 効いていること）のみを確認する。
+#[cfg(test)]
+mod repack_count_tests {
+    use super::*;
+
+    fn reset_counter() {
+        GEMM_HOST_REPACK_COUNT.with(|c| c.set(0));
+    }
+
+    fn counter() -> u64 {
+        GEMM_HOST_REPACK_COUNT.with(|c| c.get())
+    }
+
+    #[test]
+    fn gemm_dense_transposed_view_does_not_increment_repack_counter() {
+        reset_counter();
+        let ops = CpuBackendOps::new();
+        let g = Tensor::new(vec![1.0f32; 4 * 3], &[4, 3]).unwrap();
+        let w = Tensor::new(vec![1.0f32; 5 * 3], &[5, 3]).unwrap();
+        let w_t = w.transpose_2d().unwrap();
+        let before = counter();
+        ops.gemm(&g, &w_t).unwrap();
+        assert_eq!(
+            counter(),
+            before,
+            "dense な転置 view（NT）は contiguous() フォールバックを通らないはず"
+        );
+    }
+
+    #[test]
+    fn gemm_narrow_then_transpose_increments_repack_counter() {
+        reset_counter();
+        let ops = CpuBackendOps::new();
+        let g = Tensor::new(vec![1.0f32; 4 * 3], &[4, 3]).unwrap();
+        // narrow は先頭次元（行）ではなく末尾次元（列）に対して行う必要
+        // がある: 行方向の narrow は offset のみでストライドは
+        // row_major_strides のまま変わらず、transpose 後も dense 転置
+        // 判定に合致してしまう（実際に正しく NT 経路を通せるため誤りでは
+        // ないが、本テストが検証したい「一般 stride で判定に落ちる」
+        // ケースにならない）。列方向の narrow は行ストライド（= 元の
+        // 列数）が narrow 後の列数より大きくなるため、真に一般 stride
+        // （`ld != rows`）になる。
+        let w0 = Tensor::new(vec![1.0f32; 5 * 7], &[5, 7]).unwrap();
+        let w_narrowed = w0.narrow(1, 1, 3).unwrap();
+        let w_t = w_narrowed.transpose_2d().unwrap();
+        let before = counter();
+        ops.gemm(&g, &w_t).unwrap();
+        assert_eq!(
+            counter(),
+            before + 1,
+            "narrow 後の転置（一般 stride）は contiguous() フォールバックを通るはず"
+        );
+    }
+
+    #[test]
+    fn gemm_both_transposed_increments_repack_counter_twice() {
+        reset_counter();
+        let ops = CpuBackendOps::new();
+        let orig_a = Tensor::new(vec![1.0f32; 3 * 4], &[3, 4]).unwrap();
+        let a_t = orig_a.transpose_2d().unwrap();
+        let orig_b = Tensor::new(vec![1.0f32; 5 * 3], &[5, 3]).unwrap();
+        let b_t = orig_b.transpose_2d().unwrap();
+        let before = counter();
+        ops.gemm(&a_t, &b_t).unwrap();
+        assert_eq!(
+            counter(),
+            before + 2,
+            "両方転置（TT）は両オペランドとも contiguous() フォールバックを通るはず"
+        );
     }
 }

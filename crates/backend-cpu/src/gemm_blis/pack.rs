@@ -30,6 +30,32 @@
 //! 黙らせず、タイル形状パラメータを [`APackTile`]／[`BPackTile`] に
 //! まとめることで回避している（`.claude/rules/coding-rust.md`）。
 //!
+//! ## 転置格納からの直接 packing（#1213）
+//!
+//! VJP（`crates/autodiff/src/grad.rs`）の逆伝播 3 箇所（`matmul_vjp` の
+//! d_input／d_weight・`Op::LinearResident` の d_weight）が渡す片側転置
+//! オペランド（`transpose2d` の zero-copy view）を、[`super::ops`]（`ops.rs`
+//! の判定ヘルパー。転置元クレートは `backend-cpu` に閉じる）が dense な
+//! 転置格納（`strides == [1, shape[0]]`）と判定できた場合に限り、
+//! `Tensor::contiguous()` による再パックコピーを経由せず本モジュールが
+//! 直接 packing する。[`pack_a_from_transposed`]（A オペランドが転置格納
+//! ＝ TN パターン）・[`pack_b_from_transposed`]（B オペランドが転置格納
+//! ＝ NT パターン）を追加する。両方転置（TT）・一般 stride（`narrow` 後の
+//! 転置等）は本イシューのスコープ外で、従来どおり `contiguous()` へ
+//! フォールバックする（`docs/matmul-vjp-zero-copy-decision.md` §3.2）。
+//!
+//! `pack_a_from_transposed` は転置格納 `at`（論理形状 `[k_total, m_total]`
+//! の行優先。元の A `[m_total, k_total]` を転置した view）から、`pack_b`
+//! と同じ「p（K 方向）が外側行」の連続コピーで packing できる（`at` の
+//! 行そのものが K 方向に並ぶため）。逆に `pack_b_from_transposed` は転置
+//! 格納 `bt`（論理形状 `[n_total, k_total]` の行優先。元の B
+//! `[k_total, n_total]` を転置した view）から、`pack_a` と同じ「i（N 方向）
+//! が外側行」の gather で packing する。すなわち転置格納からの packing は
+//! 「pack_a と pack_b の役割が入れ替わる」形で実装でき、新規カーネル・
+//! 新規累積順序を一切導入しない（bit 完全一致契約は「`contiguous()` して
+//! から既存 `pack_a`／`pack_b` で packing した場合と同一バイト列を書く」
+//! ことで保たれる。`tests/gemm_transposed_parity.rs` で直接検証）。
+//!
 //! ## ゼロ padding が bit 完全一致契約（REQ-2）を崩さない理由
 //!
 //! padding は m／n 方向（有効レーンを超える i／j）にのみ発生し、K
@@ -135,6 +161,99 @@ pub(super) fn pack_b(dst: &mut [f32], b: &[f32], tile: BPackTile) {
     }
 }
 
+/// [`pack_a_from_transposed`] のタイル形状パラメータ（#1213。[`APackTile`]
+/// と対応するが、`k_total`／`m_total` は転置格納 `at`（論理形状
+/// `[k_total, m_total]`）の行優先レイアウトそのものを表す）。
+pub(super) struct ATPackTile {
+    pub k_total: usize,
+    pub m_total: usize,
+    pub row_start: usize,
+    pub mr: usize,
+    pub mr_eff: usize,
+    pub kc_start: usize,
+    pub kc_len: usize,
+}
+
+/// [`pack_b_from_transposed`] のタイル形状パラメータ（#1213。[`BPackTile`]
+/// と対応するが、`k_total`／`n_total` は転置格納 `bt`（論理形状
+/// `[n_total, k_total]`）の行優先レイアウトそのものを表す）。
+pub(super) struct BTPackTile {
+    pub k_total: usize,
+    pub n_total: usize,
+    pub kc_start: usize,
+    pub kc_len: usize,
+    pub col_start: usize,
+    pub nr: usize,
+    pub nr_eff: usize,
+}
+
+/// A パネルを転置格納 `at`（論理形状 `[k_total, m_total]` の行優先。
+/// 元の A `[m_total, k_total]` を転置した view）から直接 packing する
+/// （#1213）。`at` の行そのものが K 方向に並ぶため、`dst[p*mr+i]` への
+/// 書き込みは `at` の行 `kc_start+p` から `mr_eff` 要素を連続コピーする
+/// だけでよい（[`pack_b`] と同型の実装。モジュールドキュメント
+/// 「転置格納からの直接 packing」節参照）。`dst` の長さは `mr * kc_len`
+/// でなければならない（[`pack_a`] と同じ境界検査規約。REQ-8）。
+pub(super) fn pack_a_from_transposed(dst: &mut [f32], at: &[f32], tile: ATPackTile) {
+    let ATPackTile {
+        k_total,
+        m_total,
+        row_start,
+        mr,
+        mr_eff,
+        kc_start,
+        kc_len,
+    } = tile;
+    assert_eq!(
+        dst.len(),
+        mr * kc_len,
+        "pack_a_from_transposed: dst 長さが mr*kc_len と不一致"
+    );
+    let _ = k_total; // 呼び出し元の意図（at の総行数）を明示するため保持。長さ検査は dst.len() で完結する。
+    if mr_eff < mr {
+        dst.fill(0.0);
+    }
+    for p in 0..kc_len {
+        let src_row = &at
+            [(kc_start + p) * m_total + row_start..(kc_start + p) * m_total + row_start + mr_eff];
+        dst[p * mr..p * mr + mr_eff].copy_from_slice(src_row);
+    }
+}
+
+/// B パネルを転置格納 `bt`（論理形状 `[n_total, k_total]` の行優先。
+/// 元の B `[k_total, n_total]` を転置した view）から直接 packing する
+/// （#1213）。`bt` の行が N 方向に並ぶため、`dst[p*nr+j]` への書き込みは
+/// `bt` の行 `col_start+j` を p（K 方向）方向へ走査する gather になる
+/// （[`pack_a`] と同型の実装）。`dst` の長さは `kc_len * nr` でなければ
+/// ならない（[`pack_b`] と同じ境界検査規約。REQ-8）。
+pub(super) fn pack_b_from_transposed(dst: &mut [f32], bt: &[f32], tile: BTPackTile) {
+    let BTPackTile {
+        k_total,
+        n_total,
+        kc_start,
+        kc_len,
+        col_start,
+        nr,
+        nr_eff,
+    } = tile;
+    let _ = n_total; // 呼び出し元の意図（bt の総行数）を明示するため保持。長さ検査は dst.len() で完結する。
+    assert_eq!(
+        dst.len(),
+        kc_len * nr,
+        "pack_b_from_transposed: dst 長さが kc_len*nr と不一致"
+    );
+    if nr_eff < nr {
+        dst.fill(0.0);
+    }
+    for j in 0..nr_eff {
+        let src_row = &bt
+            [(col_start + j) * k_total + kc_start..(col_start + j) * k_total + kc_start + kc_len];
+        for (p, &val) in src_row.iter().enumerate() {
+            dst[p * nr + j] = val;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +340,158 @@ mod tests {
         );
         // p-major, nr=4: [p0j0,p0j1,0,0, p1j0,p1j1,0,0]
         assert_eq!(dst, vec![1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0]);
+    }
+
+    /// `at`（m_total x k_total を転置した行優先 [k_total, m_total]）から
+    /// `pack_a_from_transposed` した結果が、`a`（[m_total, k_total]、
+    /// `at` を素朴に転置コピーしたもの）から `pack_a` した結果と bit
+    /// 完全一致することを検証する（#1213 の bit 完全一致契約の直接検証）。
+    fn transpose_copy(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        // src は [cols, rows]（行優先）。戻り値は [rows, cols]（行優先）。
+        let mut out = vec![0.0f32; rows * cols];
+        for r in 0..cols {
+            for c in 0..rows {
+                out[c * cols + r] = src[r * rows + c];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn pack_a_from_transposed_full_tile_matches_pack_a_of_contiguous_copy() {
+        // at: [k_total=3, m_total=2] 行優先 → a（転置コピー）: [2,3]。
+        let at = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let a = transpose_copy(&at, 2, 3);
+        let mut dst_t = vec![0.0f32; 2 * 3];
+        pack_a_from_transposed(
+            &mut dst_t,
+            &at,
+            ATPackTile {
+                k_total: 3,
+                m_total: 2,
+                row_start: 0,
+                mr: 2,
+                mr_eff: 2,
+                kc_start: 0,
+                kc_len: 3,
+            },
+        );
+        let mut dst_ref = vec![0.0f32; 2 * 3];
+        pack_a(
+            &mut dst_ref,
+            &a,
+            APackTile {
+                k_total: 3,
+                row_start: 0,
+                mr: 2,
+                mr_eff: 2,
+                kc_start: 0,
+                kc_len: 3,
+            },
+        );
+        assert_eq!(dst_t, dst_ref);
+    }
+
+    #[test]
+    fn pack_a_from_transposed_edge_tile_zero_pads_unused_rows() {
+        let at = vec![1.0, 2.0, 3.0, 4.0]; // k_total=2, m_total=2
+        let a = transpose_copy(&at, 2, 2);
+        let mut dst_t = vec![9.9f32; 4 * 2];
+        pack_a_from_transposed(
+            &mut dst_t,
+            &at,
+            ATPackTile {
+                k_total: 2,
+                m_total: 2,
+                row_start: 0,
+                mr: 4,
+                mr_eff: 2,
+                kc_start: 0,
+                kc_len: 2,
+            },
+        );
+        let mut dst_ref = vec![9.9f32; 4 * 2];
+        pack_a(
+            &mut dst_ref,
+            &a,
+            APackTile {
+                k_total: 2,
+                row_start: 0,
+                mr: 4,
+                mr_eff: 2,
+                kc_start: 0,
+                kc_len: 2,
+            },
+        );
+        assert_eq!(dst_t, dst_ref);
+    }
+
+    #[test]
+    fn pack_b_from_transposed_full_tile_matches_pack_b_of_contiguous_copy() {
+        // bt: [n_total=3, k_total=2] 行優先 → b（転置コピー）: [2,3]。
+        let bt = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b = transpose_copy(&bt, 2, 3);
+        let mut dst_t = vec![0.0f32; 2 * 3];
+        pack_b_from_transposed(
+            &mut dst_t,
+            &bt,
+            BTPackTile {
+                k_total: 2,
+                n_total: 3,
+                kc_start: 0,
+                kc_len: 2,
+                col_start: 0,
+                nr: 3,
+                nr_eff: 3,
+            },
+        );
+        let mut dst_ref = vec![0.0f32; 2 * 3];
+        pack_b(
+            &mut dst_ref,
+            &b,
+            BPackTile {
+                n_total: 3,
+                kc_start: 0,
+                kc_len: 2,
+                col_start: 0,
+                nr: 3,
+                nr_eff: 3,
+            },
+        );
+        assert_eq!(dst_t, dst_ref);
+    }
+
+    #[test]
+    fn pack_b_from_transposed_edge_tile_zero_pads_unused_cols() {
+        let bt = vec![1.0, 2.0, 3.0, 4.0]; // n_total=2, k_total=2
+        let b = transpose_copy(&bt, 2, 2);
+        let mut dst_t = vec![9.9f32; 2 * 4];
+        pack_b_from_transposed(
+            &mut dst_t,
+            &bt,
+            BTPackTile {
+                k_total: 2,
+                n_total: 2,
+                kc_start: 0,
+                kc_len: 2,
+                col_start: 0,
+                nr: 4,
+                nr_eff: 2,
+            },
+        );
+        let mut dst_ref = vec![9.9f32; 2 * 4];
+        pack_b(
+            &mut dst_ref,
+            &b,
+            BPackTile {
+                n_total: 2,
+                kc_start: 0,
+                kc_len: 2,
+                col_start: 0,
+                nr: 4,
+                nr_eff: 2,
+            },
+        );
+        assert_eq!(dst_t, dst_ref);
     }
 }

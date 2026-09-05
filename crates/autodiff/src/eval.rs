@@ -42,8 +42,12 @@ std::thread_local! {
     /// 経由の呼び出しに限られる（`grad.rs` の `matmul_vjp_does_not_
     /// repack_transposed_operands` テストは `test_ops()` 越しにこの
     /// compat 経路のゼロコピーを検証している。本番 `CpuBackendOps::
-    /// gemm` 経路の転置再パックは `docs/matmul-vjp-zero-copy-decision.md`
-    /// §4 追補・解消は #1213 のスコープ）。
+    /// gemm` 経路の転置再パックは CPU 限定でイシュー #1213 により解消
+    /// 済み（片側転置〈NT/TN〉かつ dense な転置格納を判定できる場合、
+    /// `backend-cpu::ops::GEMM_HOST_REPACK_COUNT`〈本カウンタとは別の
+    /// crate 内部カウンタ〉で可観測。CUDA〈#1214〉・Metal〈#1215〉は
+    /// 未解消のまま。`docs/matmul-vjp-zero-copy-decision.md` §4・§4.2
+    /// 追補）。
     pub(crate) static MATMUL_HOST_REPACK_COUNT: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
 }

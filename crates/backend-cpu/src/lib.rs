@@ -123,7 +123,10 @@ pub use fused_elementwise::run_fused_elementwise;
 pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
-pub use gemm_blis::{gemm_blis, gemm_blis_bias_act_parallel, gemm_blis_parallel};
+pub use gemm_blis::{
+    gemm_blis, gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt,
+    gemm_blis_parallel_tn,
+};
 pub use memory::CpuMemory;
 pub use ops::CpuBackendOps;
 pub use parity::{

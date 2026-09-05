@@ -134,7 +134,9 @@ scalar 参照実装を上回るリスクを事前に想定していたが（本�
 
 - #1212: reuse 経路の grad をデバイス常駐のまま `device_update` へ直結
   （本イシューに依存）
-- #1213: CPU BLIS の NT/TN 専用入口（`contiguous()` 再パック解消）
+- #1213: CPU BLIS の NT/TN 専用入口（`contiguous()` 再パック解消）→
+  完了（`docs/perf/cpu-gemm-vjp-transposed-entry.md`・`docs/matmul-vjp-
+  zero-copy-decision.md` §4.2 追補）
 - #1214: CUDA GEMM の NT/TN 転置入口・本変更の CUDA 実測
 - #1215: Metal GEMM の NT/TN strided 結線（#1187 依存）・本変更の Metal
   実測
