@@ -1137,6 +1137,231 @@ impl BackendOps for CudaBackendOps {
         mem.download(&c_dev_buf)
     }
 
+    /// `a`（デバイス常駐）・`w`（デバイス常駐）・`bias`（デバイス常駐・
+    /// 任意）から `y = act(a @ w + bias)` を、入力・出力いずれも
+    /// ホストへ実体化せずに計算する（イシュー #1216・`docs/inference-
+    /// forward-fixed-cost-design.md` §3.2「段階 B」）。[`Self::
+    /// gemm_resident_rhs_act`]（`a` を毎回 upload・結果を毎回 download）
+    /// と同じ融合カーネル（[`crate::gemm::CudaGemm::
+    /// launch_tiled_bias_act_f32_resident`]）を使うが、`a` も呼び出し元が
+    /// 既にデバイスへ置いた [`DeviceBuffer`] として受け取り、結果も
+    /// `DeviceBuffer` のまま返す点が異なる（`gemm_resident_rhs*` 系は
+    /// 「`w`／`bias` のみ常駐」・本メソッドは「`a`／`w`／`bias`／戻り値の
+    /// 全てが常駐」）。多層 MLP 推論チェーン
+    /// （`fandhe_ai_autodiff::optim::device_store` の呼び出し元）が本
+    /// メソッドを連鎖させることで、層間の D2H→H2D を発生させず最終
+    /// 出力の 1 回の `download` へ同期点を集約できる（trait 定義側の
+    /// doc comment・`tensor-core::backend_ops::BackendOps::
+    /// linear_forward_device` 参照）。
+    ///
+    /// **世代検査の対象に `a` を含む**: `gemm_resident_rhs*` は `a` を
+    /// 呼び出し内で毎回 upload するため世代検査の対象外だったが（同
+    /// ファイル `gemm_resident_rhs` doc 参照）、本メソッドの `a` は
+    /// 呼び出しを跨いで生存するデバイス常駐バッファであるため、`w`・
+    /// `bias` と同じく `resident_generations` へ含める。
+    ///
+    /// **出力バッファの確保元**: 呼び出し元へ escape する戻り値のため
+    /// `CudaMemory::new(&device)`（呼び出し内で死ぬ一時 tracker）ではなく
+    /// `static_cuda_memory`（`memory_ops()` と同一インスタンス）の
+    /// `alloc_zeroed` を使う（REQ-14 の単一計測系列。`docs/device-
+    /// resident-update-design.md` §3.3d）。CPU 実装が `shared_cpu_memory()`
+    /// を使うのと同じ判断。
+    fn linear_forward_device(
+        &self,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Cuda(self.ordinal) || w.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias {
+            if b.device() != Device::Cuda(self.ordinal) {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+        }
+        let act_relu = match act {
+            Activation::None => false,
+            Activation::Relu => true,
+            // `Activation` は `#[non_exhaustive]`。CPU 実装・
+            // `gemm_bias_act` と同じ方針で未知 variant を黙って恒等関数
+            // として扱わず明示的に拒否する。
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "linear_forward_device: unsupported activation {act:?}"
+                )));
+            }
+        };
+        if k == 0 {
+            // `gemm_resident_rhs` と同じ理由（`Linear::new` が
+            // `in_features == 0` を構築時に拒否するため到達不能）で
+            // フォールバックを設けず型付きエラーで拒否する。
+            return Err(BackendError::InvalidArgument(
+                "linear_forward_device: k == 0 is unreachable via Linear::new (in_features == 0 \
+                 is rejected at construction); a host epilogue fallback would require \
+                 downloading the resident inputs, defeating the zero-D2H contract this method \
+                 exists for"
+                    .to_string(),
+            ));
+        }
+
+        // `a` はこのメソッドでは呼び出しを跨いで生存するデバイス常駐
+        // バッファのため、`w`・`bias` と同じく世代検査の対象に含める
+        // （`gemm_resident_rhs` の doc・本メソッド doc 参照）。
+        let resident_generations = [
+            Some(a.generation()),
+            Some(w.buffer().generation()),
+            bias.map(|b| b.buffer().generation()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+        if m == 0 || n == 0 {
+            // 早期 return でも poison 状態・世代は fail-closed に検査する
+            // （`gemm_resident_rhs` の同種分岐と同じ理由。PR #1064 追補）。
+            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            let device = self.with_driver_call(
+                &resident_generations,
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || self.device_handle_raw(),
+            )?;
+            let mem = static_cuda_memory(self.ordinal, &device)?;
+            return mem.alloc_zeroed(&[m, n]);
+        }
+
+        let a_handle = a
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_full) = a_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        if a_full.len() != a.numel() {
+            // `DeviceBuffer::new` 経由で構築される限り到達しないはずだが、
+            // shape とハンドル実体のずれを本番経路で `unwrap`/`expect` に
+            // 頼らず検出する（CPU 実装 `linear_forward_device` と同種の
+            // 防御。REQ-8・OWASP A03）。
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: a.numel(),
+                    actual: a_full.len(),
+                },
+            ));
+        }
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_full) = w_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
+        let bias_handle = bias
+            .map(|b| {
+                b.buffer()
+                    .downcast_handle::<CudaBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset(), b.numel()))
+            })
+            .transpose()?;
+        let bias_view = match &bias_handle {
+            Some((h, offset, numel)) => {
+                let Some(full) = h.slice.as_ref() else {
+                    return Err(BackendError::DeviceAllocationFailed(
+                        "linear_forward_device: bias buffer has numel > 0 but no device \
+                         allocation"
+                            .into(),
+                    ));
+                };
+                Some(full.slice(*offset..*offset + *numel))
+            }
+            None => None,
+        };
+
+        // `device_handle_raw`（キャッシュミス時の `CudaDevice::new`）自体も
+        // poison 検査・観測の対象に含める（`gemm_resident_rhs` と同じ
+        // 理由。PR #1064 追補）。
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        // 出力は呼び出し元へ escape するため `static_cuda_memory`（`memory_ops()`
+        // と同一インスタンス）で確保する（本メソッド doc「出力バッファの
+        // 確保元」参照。`gemm_resident_rhs` の一時 `CudaMemory::new` とは
+        // 異なる）。
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        let mut c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_slice) = c_handle.slice.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: output buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+
+        // キャッシュ構築（`cached_gemm`）自体の driver 呼び出しも同じ
+        // 観測対象とする（`gemm_resident_rhs` と同じ理由。PR #1064
+        // 追補）。
+        let gemm = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                gemm.launch_tiled_bias_act_f32_resident(
+                    a_full,
+                    &w_view,
+                    bias_view.as_ref(),
+                    act_relu,
+                    c_slice,
+                    m as u32,
+                    n as u32,
+                    k as u32,
+                )
+            },
+        )?;
+
+        // `download` しない: 同期点は呼び出し元の `download`（`readback`
+        // の `synchronize`）へ集約される（`docs/backend-cuda-async-
+        // execution-design.md` の契約どおり。同一ストリーム FIFO により
+        // 次層カーネルは前層の出力完了後に実行される）。
+        Ok(c_dev_buf)
+    }
+
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
     /// #1023「R3」）。`Op::LinearResident` の VJP が `d_input^T = w @ g^T`
     /// を計算するために使う。[`Self::gemm_resident_rhs`] と同じく `w` は
@@ -2338,6 +2563,173 @@ mod tests {
         assert!(
             matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
             "poison 済み ordinal では release_cached_device_memory は             device_handle_raw() が試行される前に拒否されるはず: {result:?}"
+        );
+    }
+    // ---------------------------------------------------------------
+    // `CudaBackendOps::linear_forward_device`（イシュー #1216）の CI 実行
+    // 可能な回帰テスト（実機不要）。`gemm_resident_rhs` の同種テスト
+    // （poison／stale generation／DeviceMismatch）と同じ手法・同じ専用
+    // ordinal 払い出し方針。
+    // ---------------------------------------------------------------
+
+    /// poison 済み ordinal では `m == 0 || n == 0` の早期 return 分岐も
+    /// fail-closed に拒否されるはず（`gemm_resident_rhs` の同種テストと
+    /// 同じ理由。`a` の世代検査対象追加〈本メソッド固有〉があっても
+    /// poison 検査自体は変わらないことを確認する）。
+    #[test]
+    fn linear_forward_device_rejects_on_poisoned_ordinal_even_via_trivial_empty_shape_early_return()
+    {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+
+        let token = context_cache::begin_driver_call(ordinal, &[]).expect("begin succeeds");
+        let _ = context_cache::observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::Driver(sticky_driver_error())),
+        );
+        drop(token);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        // `a` は `[m, k] = [1, 1]`（k != 0 のため k==0 分岐は通らない）。
+        let a_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1, 1], Box::new(EmptyHandle));
+        // `w` は `[k, n] = [1, 0]`（n == 0 のため対象の早期 return 分岐へ
+        // 到達する）。
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では n == 0 の早期 return 分岐も fail-closed に              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// 旧世代の `w` ビューは空 shape の早期 return でも
+    /// `StaleDeviceGeneration` で拒否されるはず（`gemm_resident_rhs` の
+    /// 同種テストと同じ理由）。
+    #[test]
+    fn linear_forward_device_rejects_stale_generation_of_w_even_via_trivial_empty_shape_early_return()
+     {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        assert_eq!(
+            context_cache::current_generation(ordinal),
+            0,
+            "新規 ordinal の現行世代は既定 0 のはず"
+        );
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1, 1], Box::new(EmptyHandle));
+        // `w` を現行世代（0）とは異なる世代（1）でスタンプする。
+        let w_buffer = DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            vec![1],
+            Box::new(EmptyHandle),
+            1,
+        );
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代 w ビューは空 shape の早期 return でも StaleDeviceGeneration で              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// `a` 自体が旧世代（呼び出しを跨いで生存する常駐バッファという本
+    /// メソッド固有の性質）でも、空 shape の早期 return で
+    /// `StaleDeviceGeneration` により拒否されるはず（`gemm_resident_rhs`
+    /// は `a` を世代検査対象にしないため存在しない、本メソッド固有の
+    /// 回帰テスト。doc comment「世代検査の対象に `a` を含む」参照）。
+    #[test]
+    fn linear_forward_device_rejects_stale_generation_of_a_even_via_trivial_empty_shape_early_return()
+     {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        assert_eq!(
+            context_cache::current_generation(ordinal),
+            0,
+            "新規 ordinal の現行世代は既定 0 のはず"
+        );
+
+        let cuda = CudaBackendOps::new(ordinal);
+        // `a` を現行世代（0）とは異なる世代（1）でスタンプする。
+        let a_buffer = DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            vec![1, 1],
+            Box::new(EmptyHandle),
+            1,
+        );
+        // `w` は `[k, n] = [1, 0]`（n == 0 のため早期 return 分岐へ到達）。
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代 a バッファは空 shape の早期 return でも StaleDeviceGeneration で              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// CPU バッファ（`Device::Cpu`）を `a` に渡すと driver へ触れる前に
+    /// `DeviceMismatch` で拒否されるはず（`build-no-cuda-toolkit` ジョブ
+    /// でも実行可能。実機不要）。
+    #[test]
+    fn linear_forward_device_rejects_device_mismatch_on_a() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        // `a` は CPU デバイスのバッファ（driver へ触れる前に拒否される
+        // ことを確認するのが目的のため、CudaBufferHandle である必要は
+        // ない）。
+        let a_buffer = DeviceBuffer::new(Device::Cpu, vec![1, 1], Box::new(EmptyHandle));
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 1]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(result, Err(BackendError::DeviceMismatch)),
+            "CPU デバイスの a は DeviceMismatch で拒否されるはず: {result:?}"
+        );
+    }
+
+    /// `w` が別 ordinal（別 GPU）のバッファの場合も `DeviceMismatch` で
+    /// 拒否されるはず（実機不要）。
+    #[test]
+    fn linear_forward_device_rejects_device_mismatch_on_w() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let other_ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let a_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1, 1], Box::new(EmptyHandle));
+        let w_buffer =
+            DeviceBuffer::new(Device::Cuda(other_ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 1]).expect("view construction succeeds");
+
+        let result = cuda.linear_forward_device(&a_buffer, w, None, Activation::None);
+        assert!(
+            matches!(result, Err(BackendError::DeviceMismatch)),
+            "別 ordinal の w は DeviceMismatch で拒否されるはず: {result:?}"
         );
     }
 }

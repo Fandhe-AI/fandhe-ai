@@ -605,9 +605,12 @@ pub trait BackendOps {
     /// `Unsupported` を検出した場合、層構成全体を [`Self::gemm_bias_act`]
     /// ベースの per-op 経路へフォールバックする契約とする）。CPU 実装
     /// （`backend-cpu::ops::CpuBackendOps`）はこのデフォルトをカーネル
-    /// 呼び出しでオーバーライドする。CUDA／Metal 実装は本イシューの
-    /// スコープ外（実機検証環境が必要なため。設計は同文書で確定済み・
-    /// 引き継ぎは out-of-scope-tracking.md に従う）。
+    /// 呼び出しでオーバーライドする。CUDA（`backend-cuda::ops::
+    /// CudaBackendOps`）・Metal（`backend-metal::ops::MetalBackendOps`）
+    /// は #1216 で実装済み（融合カーネル `launch_tiled_bias_act_f32_
+    /// resident`／`dispatch_strided_bias_act_prepared` を再利用し、
+    /// `a`／戻り値もデバイス常駐のまま扱う。実機実測は `docs/perf/
+    /// linear-forward-device-gpu.md`）。
     fn linear_forward_device(
         &self,
         _a: &DeviceBuffer<f32>,
