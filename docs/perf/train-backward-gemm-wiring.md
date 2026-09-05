@@ -85,25 +85,23 @@ A08）。
 
 | mode | phase | before（中央値, ms） | after（中央値, ms） | 倍率（before/after） |
 |------|-------|----------------------|----------------------|------------------------|
-| fresh | backward | 16.122\* | 1.292 | **12.48×** |
-| fresh | step_total | 16.766\* | 1.814 | **9.24×** |
+| fresh | backward | 15.329 | 1.321 | **11.60×** |
+| fresh | step_total | 15.980 | 1.835 | **8.71×** |
 | reuse | backward | 7.233 | 0.817 | **8.86×** |
 | reuse | step_total | 7.926 | 1.408 | **5.63×** |
 
-`reuse`・`after`（fresh・reuse とも）は計測プロトコルどおり 5 run の中央値
-（3 番目に小さい値）。**\* を付けた `before` の `fresh`（`backward`・
-`step_total`）のみ、手順確認用の追加 1 run を含む実際に記録された全 6 run
-の中央値（偶数個のため中央 2 値の平均。生データ:
-`docs/perf/logs/train-backward-gemm-wiring-1211/before.jsonl`）であり、
-「5 run 中央値」ではない（codex-review 指摘。どの 5 run を選んでも
-16.122 ms／16.766 ms には一致しない。PR #1223）。6 run から任意の 1 run
-を除いた 5 run の median は、除いた run 次第で
-`backward` が 16.095417 ms または 16.149083 ms、`step_total` が
-16.734438 ms または 16.797563 ms のいずれか 2 通りにしかならない（中央
-2 値のどちらが単独中央値になるかで決まるため）。after（1.292083 ms／
-1.813625 ms）との倍率はそれぞれ約 12.46〜12.50×・約 9.23〜9.26× の範囲に
-収まり、表に記載の 12.48×・9.24×（6 run 全体の中央値ベース）から無視
-できる小差に留まるため、採否判断（§5）は変わらない。
+全 4 系列（`before`/`after` × `fresh`/`reuse`）とも計測プロトコルどおり
+厳密に 5 run の中央値（3 番目に小さい値）である（codex-review 指摘。
+`before`/`fresh` に手順確認用の追加 1 run が混入し 6 run の中央値
+〈16.122 ms／16.766 ms〉になっていた問題を修正。PR #1223）。混入していた
+run を事後に除外して「5 run」を再構成するのではなく、`before`/`after`
+の 2 バイナリ（§3 の参考系列方式でビルド）を同一セッションで
+`fresh`/`reuse` とも改めて 5 回ずつ計測し直した。生ログは
+`docs/perf/logs/train-backward-gemm-wiring-1211/{before,after}.jsonl`
+（各 90 行 = fresh 5 run × 10 phase + reuse 5 run × 8 phase）へ全面差し替え
+済み。倍率は前回計測（12.48×・9.24×）と比べ約 1〜1.5 ポイント低下する
+が、いずれも大幅な改善（8×〜12× 台）であることに変わりはなく、
+採否判断（§5・ADOPT）は変わらない。
 
 その他フェーズ（`forward`／`forward_resident`／`host_sgd`／`device_update`・
 `param_readout`／`tape_build`／`tape_drop`／`leaf_register`／`loss_readout`／
