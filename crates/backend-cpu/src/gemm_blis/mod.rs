@@ -449,7 +449,7 @@ pub fn gemm_blis(
 /// に渡す（`crate::gemm::gemm_parallel` と同じ並列化戦略。C の書き込み
 /// 範囲がパネルごとに排他的なためデータ競合なし）。
 ///
-/// 本体は [`gemm_blis_parallel_with_transpose`]（`Nn` 固定）への委譲
+/// 本体は `gemm_blis_parallel_with_transpose`（`Nn` 固定）への委譲
 /// （#1213。VJP 専用 NT/TN 2 パターン入口 [`gemm_blis_parallel_nt`]／
 /// [`gemm_blis_parallel_tn`] と実装を共有するための切り出し）。
 pub fn gemm_blis_parallel(
@@ -556,7 +556,7 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
         })
 }
 
-/// [`gemm_blis_parallel_with_transpose`] を `Nt`（B オペランドが転置
+/// `gemm_blis_parallel_with_transpose` を `Nt`（B オペランドが転置
 /// 格納）で呼ぶ VJP 専用入口（#1213）。`bt` は論理形状 `[n, k]` の行優先
 /// （元の B `[k, n]` を転置した view の実体。`GemmTranspose` ドキュメント
 /// 参照）。`matmul_vjp` の d_input（`g @ Wᵀ`）・`Op::LinearResident` の
@@ -577,7 +577,7 @@ pub fn gemm_blis_parallel_nt(
     gemm_blis_parallel_with_transpose(a, bt, c, m, n, k, GemmTranspose::Nt)
 }
 
-/// [`gemm_blis_parallel_with_transpose`] を `Tn`（A オペランドが転置
+/// `gemm_blis_parallel_with_transpose` を `Tn`（A オペランドが転置
 /// 格納）で呼ぶ VJP 専用入口（#1213）。`at` は論理形状 `[k, m]` の行優先
 /// （元の A `[m, k]` を転置した view の実体。`GemmTranspose` ドキュメント
 /// 参照）。`matmul_vjp` の d_weight（`Aᵀ @ g`）・`Op::LinearResident` の

@@ -316,7 +316,7 @@ impl BackendOps for CpuBackendOps {
 
     /// VJP 専用 NT/TN 2 パターン入口（イシュー #1213）: `matmul_vjp` の
     /// d_input（`g @ Wᵀ`）・d_weight（`Aᵀ @ g`）が渡す片側転置オペランド
-    /// （`transpose2d` の zero-copy view）を [`dense_transposed_view`] で
+    /// （`transpose2d` の zero-copy view）を `dense_transposed_view` で
     /// 判定できる場合、`Tensor::contiguous()` の再パックコピーを経由せず
     /// [`gemm_blis_parallel_nt`]／[`gemm_blis_parallel_tn`]（BLIS packing
     /// が転置格納から直接吸収する）へ渡す。両方転置（TT）・一般 stride
@@ -324,7 +324,7 @@ impl BackendOps for CpuBackendOps {
     /// （[`gemm_blis_parallel`]）へフォールバックする（`docs/matmul-vjp-
     /// zero-copy-decision.md` §3.2。一般 stride 化は本イシューのスコープ
     /// 外）。フォールバックでオペランドを再パックした回数は
-    /// [`GEMM_HOST_REPACK_COUNT`] へ計上する（可観測点。`backend-metal::
+    /// `GEMM_HOST_REPACK_COUNT` へ計上する（可観測点。`backend-metal::
     /// ops::upload_operand_for_resident_gemm` と同型の設計）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
@@ -531,10 +531,10 @@ impl BackendOps for CpuBackendOps {
     /// + オフセット範囲スライス）。
     ///
     /// `b`（`g^T` に相当。呼び出し元は `Op::LinearResident` d_input）が
-    /// [`dense_transposed_view`] で判定できる dense な転置格納なら
+    /// `dense_transposed_view` で判定できる dense な転置格納なら
     /// [`gemm_blis_parallel_nt`] へ渡し `contiguous()` の再パックコピー
     /// を経由しない（イシュー #1213）。判定できない場合は従来どおり
-    /// `contiguous()` へフォールバックし [`GEMM_HOST_REPACK_COUNT`] を
+    /// `contiguous()` へフォールバックし `GEMM_HOST_REPACK_COUNT` を
     /// 計上する。`w` はデバイス常駐バッファ（`DeviceBufferView`）で
     /// `Tensor` view の転置意味論を持たないため判定対象外（従来どおり
     /// 直読みのみ）。
