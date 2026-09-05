@@ -33,7 +33,7 @@ use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, Tensor};
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
-use crate::tape::{NodeId, Op, ResidentResolver, TapeNode, materialize_fallible};
+use crate::tape::{NodeId, Op, ResidentResolver, TapeId, TapeNode, materialize_fallible};
 use crate::var::Reduction;
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
@@ -58,6 +58,7 @@ use crate::var::Reduction;
 /// （`tape::Op::LinearResident` doc「素の `Tape::backward`（resolver
 /// なし）では型付きエラー」参照）。`Op::ResidentLeaf` 自身は `Op::Leaf`
 /// と同じく入力を持たないため `resident` を参照しない。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn vjp(
     op: &Op,
     out_value: &Tensor<f32>,
@@ -65,6 +66,14 @@ pub(crate) fn vjp(
     nodes: &[TapeNode],
     ops: &dyn BackendOps,
     resident: Option<&dyn ResidentResolver>,
+    // イシュー #1212 codex-review P0 追加是正: `Op::LinearResident` の
+    // VJP が `ResidentResolver::fill_resident_weight_grad` へ「どの
+    // テープ・どの世代を今まさに微分しているか」を伝えるため
+    // （`tape::ResidentResolver::fill_resident_weight_grad` doc 参照）。
+    // `backward_impl`（`backward.rs`）から差分対象 `Tape` 自身の
+    // `id`／`epoch()` をそのまま渡す。
+    tape_id: TapeId,
+    tape_epoch: u64,
 ) -> Result<Vec<(NodeId, Tensor<f32>)>, AutodiffError> {
     // `Op` は `CrossEntropyLoss` の `targets: Tensor<i32>` payload
     // ゆえに `Copy` を持たない（`tape.rs::Op` doc 参照）。旧
@@ -305,8 +314,15 @@ pub(crate) fn vjp(
             // 該当する）の場合のみ、従来どおりホスト経路
             // （`ops.gemm_fp32_strict`）へフォールバックする（判定迂回
             // を作らない。`.claude/rules/security.md` A08）。
-            let filled_resident =
-                resident.fill_resident_weight_grad(ops, store_id, slot, &x_t, g)?;
+            // イシュー #1212 codex-review P0 追加是正: `weight`
+            // （`Op::LinearResident.weight`）は今まさに差分している
+            // `weight_node` の `NodeId` そのもの。`tape_id`／
+            // `tape_epoch` と併せて resident 書き込みの由来として
+            // 実装側（`DeviceParamStore`）へ渡す（`ResidentResolver::
+            // fill_resident_weight_grad` doc 参照）。
+            let filled_resident = resident.fill_resident_weight_grad(
+                ops, store_id, slot, tape_id, tape_epoch, weight, &x_t, g,
+            )?;
             let mut contributions = vec![(input, d_input)];
             if !filled_resident {
                 let d_weight = ops
@@ -1411,7 +1427,17 @@ mod tests {
         let op = Op::MatMul(NodeId(0), NodeId(1));
         let g = t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]);
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1429,7 +1455,17 @@ mod tests {
         let nodes = vec![leaf_node(a), leaf_node(b)];
         let op = Op::Add(NodeId(0), NodeId(1));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1447,7 +1483,17 @@ mod tests {
         let nodes = vec![leaf_node(a.clone()), leaf_node(b.clone())];
         let op = Op::Mul(NodeId(0), NodeId(1));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1464,7 +1510,17 @@ mod tests {
         let nodes = vec![leaf_node(a.clone())];
         let op = Op::Relu(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1482,7 +1538,17 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Exp(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1500,7 +1566,17 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Tanh(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1516,7 +1592,17 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Sigmoid(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1535,7 +1621,17 @@ mod tests {
             dim: Some(0),
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1554,7 +1650,17 @@ mod tests {
             dim: Some(0),
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1575,7 +1681,17 @@ mod tests {
             reduction: Reduction::Mean,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1600,7 +1716,17 @@ mod tests {
             reduction: Reduction::Sum,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1629,7 +1755,17 @@ mod tests {
             reduction: Reduction::Mean,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));

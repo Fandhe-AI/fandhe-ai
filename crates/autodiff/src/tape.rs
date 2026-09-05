@@ -40,6 +40,18 @@ use crate::error::AutodiffError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TapeId(u64);
 
+#[cfg(test)]
+impl TapeId {
+    /// テスト専用のダミー `TapeId` 構築子（イシュー #1212 codex-review
+    /// P0 追加是正）。`grad::vjp` の第 7・8 引数（`tape_id`／
+    /// `tape_epoch`）が実 `Tape` を経由せず単体テストできるよう、
+    /// フィールドを外部から見えなくしたまま（`NEXT_TAPE_ID` 経由の
+    /// 一意性契約は保ったまま）テストコードにのみ構築手段を与える。
+    pub(crate) fn for_test(id: u64) -> Self {
+        TapeId(id)
+    }
+}
+
 /// プロセス全体で共有する `TapeId` 発行カウンタ。`Tape::new_with_ops(ops)` からのみ
 /// インクリメントされる（`fetch_add` は複数スレッドから並行に `Tape` を
 /// 生成しても一意性を保つ）。
@@ -296,15 +308,39 @@ pub(crate) trait ResidentResolver {
     /// [`AutodiffError::InvalidArgument`] で fail-closed に拒否する
     /// （`resident_buffer` と同じ方針。`.claude/rules/security.md` A08）。
     ///
+    /// **`tape_id`／`epoch`／`weight_node_id` を追加した理由（codex-review
+    /// P0 是正・イシュー #1212 追加指摘）**: 従来は「今回の backward が
+    /// 書き込んだ」という時点情報（`backward_serial`・pending 世代）しか
+    /// 記録しておらず、実際に微分した葉（`weight` の `Op::ResidentLeaf`
+    /// ノード）が `step()` 側の `pending.node_ids` と同一であることは
+    /// 何も検証していなかった。`DeviceParamStore::snapshot_resident_params`
+    /// は `pending`（`register_resident_params` が持つ状態）を一切変更
+    /// せずに新しい `Op::ResidentLeaf` ノードを（同じテープにも別テープ
+    /// にも）追加できるため、「Tape A に `register_resident_params`
+    /// → Tape B に `snapshot_resident_params` してその葉で forward→
+    /// backward → `step(Tape A, Tape B 由来の grads)`」や「同じテープ内で
+    /// 別の snapshot 呼び出しの葉を使う」手順では、ストア単位のフィン
+    /// ガープリント（`resident_backward_fingerprint`）だけでは検出でき
+    /// ず fail-closed 検査を迂回できてしまう。これを塞ぐため、resident
+    /// 書き込みの由来（差分対象テープの `tape_id`／`epoch`・微分した
+    /// `weight` の `NodeId`）を呼び出し元（`grad::vjp`）から実装へ渡し、
+    /// 実装側が `slot` ごとに保持したうえで `step()` が現在の `pending`
+    /// の対応する葉と突き合わせて初めて resident 経由の値を信頼する
+    /// （`optim::device_store::GradStaging::filled` doc 参照）。
+    ///
     /// # デフォルト実装
     ///
     /// 常に `Ok(false)`（ホスト経路へフォールバック）。現時点で
     /// `DeviceParamStore` のみがオーバーライドする。
+    #[allow(clippy::too_many_arguments)]
     fn fill_resident_weight_grad(
         &self,
         _ops: &dyn BackendOps,
         _store_id: u64,
         _slot: usize,
+        _tape_id: TapeId,
+        _epoch: u64,
+        _weight_node_id: NodeId,
         _x_t: &Tensor<f32>,
         _g: &Tensor<f32>,
     ) -> Result<bool, AutodiffError> {

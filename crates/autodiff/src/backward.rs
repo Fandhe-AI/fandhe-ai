@@ -206,6 +206,11 @@ impl Tape {
                 &nodes,
                 self.ops(),
                 resolver,
+                // イシュー #1212 codex-review P0 追加是正: 差分対象
+                // テープ自身（`self`）の `id`／`epoch()` を resident 経路
+                // の由来検証用にスレッドする（`grad::vjp` doc 参照）。
+                self.id,
+                self.epoch(),
             )?;
             for (target, contribution) in contributions {
                 accumulate(&mut grads, target, contribution);

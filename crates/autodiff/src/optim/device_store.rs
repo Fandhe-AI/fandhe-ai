@@ -191,12 +191,40 @@ struct ParamLayout {
 struct GradStaging {
     buf: DeviceBuffer<f32>,
     /// `layout` と同じ添字（`slot`）。各要素は「直近このバッファへ
-    /// resident 経路で書き込んだ `backward_serial` の値」（`None` は
-    /// 未充填）。`step()` が `Some(s)` かつ `s == 現在の backward_serial`
-    /// の場合のみ「今回の backward で新鮮に充填された」と判定する
-    /// （鮮度検査。古い backward 由来の残留値をそのまま使わない。
-    /// `.claude/rules/security.md` A08）。
-    filled: Vec<Option<u64>>,
+    /// resident 経路で書き込んだ由来」（`None` は未充填）。`step()` は
+    /// [`ResidentFill::backward_serial`] が現在の `backward_serial` と
+    /// 一致するかで「今回の backward で新鮮に充填されたか」（鮮度検査。
+    /// 古い backward 由来の残留値をそのまま使わない。`.claude/rules/
+    /// security.md` A08）を、[`ResidentFill::tape_id`]／[`ResidentFill::
+    /// epoch`]／[`ResidentFill::node_id`] が現在の `pending` の対応する
+    /// 葉と一致するかで「実際に微分した葉が今まさに `step()` が消費
+    /// しようとしている登録と同一か」（同一性検査。codex-review 指摘・
+    /// イシュー #1212 追加是正）を、それぞれ検証する。
+    filled: Vec<Option<ResidentFill>>,
+}
+
+/// [`GradStaging::filled`] の 1 slot 分の記録（イシュー #1212 codex-
+/// review P0 追加是正）。`backward_serial` のみでは「別テープ・別
+/// snapshot 由来の葉で書き込まれた値を、たまたま同じストア・同じ
+/// pending 世代の下で誤って信頼する」抜け穴（`optim::device_store`
+/// モジュール冒頭・`ResidentResolver::fill_resident_weight_grad` doc
+/// 参照）を塞げないため、実際に微分した葉の同一性（`tape_id`／
+/// `epoch`／`node_id`）を併記する。
+#[derive(Debug, Clone, Copy)]
+struct ResidentFill {
+    /// 書き込み時点の `DeviceParamStore::backward_serial`（鮮度検査）。
+    backward_serial: u64,
+    /// この slot を微分した `Tape` の識別子。`step()` が受け取る
+    /// `pending.tape_id` と一致する場合のみ信頼する。
+    tape_id: TapeId,
+    /// 同上 `Tape` の `epoch()`（#1048。`tape.reset()` をまたいだ
+    /// 誤った同一視を防ぐ）。
+    epoch: u64,
+    /// 実際に微分した `weight` の `Op::ResidentLeaf` ノードの
+    /// `NodeId`。同じテープ・同じ世代でも `pending.node_ids[slot]` と
+    /// 異なれば（別 `snapshot_resident_params` 呼び出しの葉等）拒否
+    /// する。
+    node_id: NodeId,
 }
 
 /// [`DeviceParamStore::register_resident_params`]／
@@ -367,11 +395,21 @@ impl ResidentResolver for DeviceParamStore {
     /// ④・⑤ で `Unsupported` を検出した場合のみ capability memo を
     /// `Some(false)` へ倒し `Ok(false)` を返す（以後の backward で
     /// 再試行しない）。それ以外のエラーは伝播する。
+    ///
+    /// `tape_id`／`epoch`／`weight_node_id` は `grad::vjp` が差分対象
+    /// テープから直接渡す resident 書き込みの由来（`ResidentResolver::
+    /// fill_resident_weight_grad` doc・[`ResidentFill`] doc 参照）。
+    /// `staging.filled[slot]` へ [`ResidentFill`] として記録し、
+    /// `step()` が現在の `pending` の対応する葉と突き合わせる。
+    #[allow(clippy::too_many_arguments)]
     fn fill_resident_weight_grad(
         &self,
         ops: &dyn BackendOps,
         store_id: u64,
         slot: usize,
+        tape_id: TapeId,
+        epoch: u64,
+        weight_node_id: NodeId,
         x_t: &Tensor<f32>,
         g: &Tensor<f32>,
     ) -> Result<bool, AutodiffError> {
@@ -481,7 +519,7 @@ impl ResidentResolver for DeviceParamStore {
         })?;
 
         let current_serial = self.backward_serial.get();
-        if staging.filled[slot] == Some(current_serial) {
+        if staging.filled[slot].is_some_and(|r| r.backward_serial == current_serial) {
             // 同一 backward 走査内で同じ slot（同一 `ResidentLeaf` weight）
             // へ 2 回目以降の寄与が来たケース（codex-review 指摘 P1・
             // #1212）: 同一 weight を複数の `linear_forward` で共有する
@@ -548,7 +586,12 @@ impl ResidentResolver for DeviceParamStore {
 
         match ops.gemm_fp32_strict_into(x_t, g, &mut staging.buf, offset) {
             Ok(()) => {
-                staging.filled[slot] = Some(current_serial);
+                staging.filled[slot] = Some(ResidentFill {
+                    backward_serial: current_serial,
+                    tape_id,
+                    epoch,
+                    node_id: weight_node_id,
+                });
                 self.resident_grad_capability.set(Some(true));
                 Ok(true)
             }
@@ -1241,11 +1284,32 @@ impl DeviceParamStore {
         // 存在しないため）。
         let grads_match_current_backward = grads.resident_fingerprint()
             == Some((self.store_id, current_serial, Some(pending.generation)));
+        // codex-review 指摘 P0（#1212 追加是正）: 上記のストア単位の
+        // フィンガープリント一致だけでは「実際に微分した葉が
+        // `pending.node_ids[i]` と同一である」ことを検証できない
+        // （`DeviceParamStore::snapshot_resident_params` は `pending` を
+        // 変更せずに新しい `Op::ResidentLeaf` を発行できるため、別
+        // テープ・別 snapshot 呼び出しの葉で backward しても
+        // `(store_id, backward_serial, generation)` が偶然一致してしまう
+        // 場合がある。`GradStaging::filled`／[`ResidentFill`] doc 参照）。
+        // slot ごとに記録済みの由来（`tape_id`／`epoch`／`node_id`）を
+        // 現在の `pending` の対応する葉と突き合わせ、一致した slot の
+        // みを resident 経由として信頼する。不一致の slot は
+        // `grads.get(var)` へフォールバックし（後続の通常経路）、
+        // 対応する寄与が `grads` 側に存在しないため `MissingGradient`
+        // で fail-closed に拒否される。
         let resident_filled: Vec<bool> = if grads_match_current_backward {
             let staging_ref = self.grad_staging.borrow();
             match staging_ref.as_ref() {
                 Some(staging) => (0..vars.len())
-                    .map(|i| staging.filled.get(i).copied().flatten() == Some(current_serial))
+                    .map(|i| {
+                        staging.filled.get(i).copied().flatten().is_some_and(|r| {
+                            r.backward_serial == current_serial
+                                && r.tape_id == pending.tape_id
+                                && r.epoch == pending.epoch
+                                && pending.node_ids.get(i) == Some(&r.node_id)
+                        })
+                    })
                     .collect(),
                 None => vec![false; vars.len()],
             }
@@ -2224,6 +2288,97 @@ mod tests {
             matches!(err, BackendError::MissingGradient(_)),
             "新しい pending 登録を挟んだ後に古い Gradients を渡すと MissingGradient で \
              拒否されるべき（pending 世代フィンガープリント検査の直接検証）: {err:?}"
+        );
+    }
+
+    /// codex-review 指摘 P0（PR #1224・イシュー #1212 追加是正）の検証:
+    /// レビューが指摘した具体的な迂回手順を直接再現する——「① `Tape A`
+    /// に `register_resident_params` する（`pending` は `Tape A` を
+    /// 指す） → ② 別の `Tape B` に `snapshot_resident_params` する
+    /// （`pending` は変化しない） → ③ `Tape B` の葉で forward→backward
+    /// する（resident staging を書き込む。`(store_id, backward_serial,
+    /// pending.generation)` は `pending`〈①のまま〉から導出されるため
+    /// `Tape B` 由来であることを検出しない） → ④ `step(Tape A, Tape B
+    /// 由来の grads)` を呼ぶ」。旧実装ではストア単位のフィンガープリント
+    /// のみを検査しており、実際に微分した葉（`Tape B` のノード）が
+    /// `pending.node_ids`（`Tape A` のノード）と異なることを検証して
+    /// いなかったため、この手順で `step` が誤って成功していた
+    /// （`GradStaging::filled`／[`ResidentFill`] doc・`ResidentResolver::
+    /// fill_resident_weight_grad` doc 参照）。
+    #[test]
+    fn step_rejects_grads_from_a_different_tapes_snapshot_leaf() {
+        let resident_ops = MockDeviceOps::resident_capable();
+        let tape_a = Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape_a, &[&w_init]).unwrap();
+
+        // ① Tape A に register_resident_params（pending は Tape A を指す）。
+        let _leaves_a = store.register_resident_params(&tape_a).unwrap();
+
+        // ② 別の Tape B に snapshot_resident_params（pending は不変）。
+        let resident_ops_b = MockDeviceOps::resident_capable();
+        let tape_b = Tape::new_with_ops(Box::new(resident_ops_b) as Box<dyn BackendOps + Send>);
+        let leaves_b = store.snapshot_resident_params(&tape_b).unwrap();
+
+        // ③ Tape B の葉で forward → backward する。
+        let x_b = tape_b.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+        let pred_b = store
+            .linear_forward(&tape_b, &x_b, &leaves_b[0], None)
+            .unwrap();
+        let target_b = tape_b.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let loss_b = pred_b.mse_loss(&target_b).unwrap();
+        let grads_from_tape_b = store.backward(&tape_b, &loss_b).unwrap();
+
+        // ④ Tape A（＝現在の pending）に対して Tape B 由来の grads を
+        // 渡す。resident 経由の slot は同一性検査（`tape_id` 不一致）で
+        // 信頼されず通常の `grads.get(var)` 経路へ落ちるが、`var`
+        // （Tape A のノード）と `grads`（Tape B の backward 結果）が
+        // 別テープのため、`Gradients::get` 自身のクロステープ検査が
+        // 先に `TapeMismatch` で fail-closed に拒否する（`grads.get`
+        // 呼び出し箇所の `.map_err(|_| BackendError::TapeMismatch)`）。
+        let err = store
+            .step(&tape_a, &grads_from_tape_b, &SgdConfig::new(0.1))
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::TapeMismatch),
+            "別テープの snapshot 由来の grads は TapeMismatch で拒否されるべき: {err:?}"
+        );
+    }
+
+    /// codex-review 指摘 P0（PR #1224・イシュー #1212 追加是正）の検証:
+    /// 上記と同じテープ内でも、`pending` の登録（`register_resident_
+    /// params`）とは別の `snapshot_resident_params` 呼び出しの葉を使うと
+    /// `NodeId` が異なる（`tape_id`／`epoch`／`(store_id, backward_serial,
+    /// generation)` はすべて一致してしまう）ことを検証する。
+    #[test]
+    fn step_rejects_grads_from_a_different_snapshot_leaf_on_the_same_tape() {
+        let resident_ops = MockDeviceOps::resident_capable();
+        let tape = Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+
+        // pending の登録（Tape・epoch・generation はこちらを指す）。
+        let _leaves = store.register_resident_params(&tape).unwrap();
+
+        // 同じテープ上の別 snapshot 呼び出し（別 NodeId の葉を発行する。
+        // pending は変化しない）。
+        let snapshot_leaves = store.snapshot_resident_params(&tape).unwrap();
+
+        let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+        let pred = store
+            .linear_forward(&tape, &x, &snapshot_leaves[0], None)
+            .unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads_from_snapshot = store.backward(&tape, &loss).unwrap();
+
+        let err = store
+            .step(&tape, &grads_from_snapshot, &SgdConfig::new(0.1))
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::MissingGradient(_)),
+            "同一テープでも別 snapshot 由来の grads は MissingGradient で拒否されるべき: \
+             {err:?}"
         );
     }
 
