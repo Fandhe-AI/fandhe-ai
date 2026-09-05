@@ -310,6 +310,35 @@ pub(crate) trait ResidentResolver {
     ) -> Result<bool, AutodiffError> {
         Ok(false)
     }
+
+    /// 「今回の `backward_impl` 走査中に resident 経路（[`Self::
+    /// fill_resident_weight_grad`]）が書き込んだ値」を一意に識別する
+    /// フィンガープリント `(store_id, 走査単位の連番)` を返す（イシュー
+    /// #1212 の codex-review P0 是正）。
+    ///
+    /// `Tape::backward_with_resident` はこの値を `Gradients` へ
+    /// 焼き込み（`Gradients::resident_fingerprint`）、`DeviceParamStore::
+    /// step` が `GradStaging::filled` の鮮度検査と併せて「渡された
+    /// `Gradients` が本当に “今回の resident 書き込みを生んだその
+    /// backward 呼び出し” の戻り値か」を検査できるようにする。
+    ///
+    /// 従来は `GradStaging::filled[slot] == Some(現在の backward_serial)`
+    /// のみを検査していたが、これは「ストア自身の状態」だけを見ており
+    /// **呼び出し元が渡す `Gradients` 引数の正当性を一切検査しない**
+    /// 抜け穴だった（全パラメータが resident 化されたモデルでは
+    /// `grads.get()` が一度も呼ばれないため、別 `Tape`／別
+    /// `DeviceParamStore`／古い backward 呼び出しに由来する `Gradients`
+    /// を渡しても検出できず更新が成功してしまう）。フィンガープリントを
+    /// `Gradients` 自身に持たせることで、resident 経由の slot について
+    /// も「この `Gradients` が今回のストア・今回の backward 呼び出しの
+    /// 結果であること」を fail-closed に検査できる。
+    ///
+    /// # デフォルト実装
+    ///
+    /// `None`（resident 機構を持たないリゾルバには意味を持たない）。
+    fn resident_backward_fingerprint(&self) -> Option<(u64, u64)> {
+        None
+    }
 }
 
 impl Op {

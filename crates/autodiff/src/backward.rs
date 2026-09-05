@@ -47,6 +47,18 @@ pub struct Gradients {
     /// に拒否する（`tape::Tape::epoch` doc 参照）。
     epoch: u64,
     grads: Vec<Option<Tensor<f32>>>,
+    /// この `Gradients` を生んだ backward 呼び出しが resident 勾配経路
+    /// （[`ResidentResolver::fill_resident_weight_grad`]）を使った場合、
+    /// `resolver.resident_backward_fingerprint()`（`(store_id,
+    /// backward_serial)`）をそのまま保持する（resolver を使わない
+    /// 素の `Tape::backward` では `None`）。イシュー #1212 の
+    /// codex-review P0 是正: `DeviceParamStore::step` がこの値を
+    /// 「渡された `Gradients` が今回のストア・今回の backward 呼び出し
+    /// の結果であること」の検査に使う（`Gradients::get` の
+    /// `tape_id`／`epoch` 検査は resident 経由でスキップされる slot に
+    /// は適用されないため、この専用フィールドで補う。`Gradients::
+    /// resident_fingerprint` doc 参照）。
+    resident_fingerprint: Option<(u64, u64)>,
 }
 
 impl Gradients {
@@ -67,6 +79,15 @@ impl Gradients {
             return Err(AutodiffError::TapeMismatch);
         }
         Ok(self.grads.get(var.node_id().0).and_then(|g| g.as_ref()))
+    }
+
+    /// この `Gradients` を生んだ backward 呼び出しの resident
+    /// フィンガープリント（`(store_id, backward_serial)`）を返す
+    /// （イシュー #1212 の codex-review P0 是正）。`crate::optim::
+    /// device_store::DeviceParamStore::step` 限定の内部検査用途
+    /// （`pub(crate)`。公開 API 面には出さない）。
+    pub(crate) fn resident_fingerprint(&self) -> Option<(u64, u64)> {
+        self.resident_fingerprint
     }
 }
 
@@ -194,6 +215,12 @@ impl Tape {
             tape_id: self.id,
             epoch: self.epoch(),
             grads,
+            // `resolver` が `Some` のときのみフィンガープリントを焼き込む
+            // （`resolver.resident_backward_fingerprint()` は「今回の
+            // 走査で resident 経由の書き込みがあったなら、その識別子」
+            // を返す。resolver 自体を使わない素の `Tape::backward` では
+            // `resolver` が `None` のため必ず `None` になる）。
+            resident_fingerprint: resolver.and_then(|r| r.resident_backward_fingerprint()),
         })
     }
 }
