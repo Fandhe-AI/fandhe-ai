@@ -704,7 +704,34 @@ kernel void gemm_simdgroup_tiled(
     uint acc_rows = sub_bm / 8;
     uint acc_cols = sub_bn / 8;
     simdgroup_float8x8 acc[MAX_ACC][MAX_ACC];
+    // イシュー #1188（E1 実験。親 #1037・参照 #1143）: wm=1 系タイル構成
+    // （cand4/cand8）・cand0（acc_rows*acc_cols>=16 の大アキュムレータ格子）が
+    // N=4096 で著しく劣化する現象（`docs/perf/metal-gemm-n4096-kernel-gap.md`
+    // §7）に対し、`acc`/`a_frag`/`b_frag` への実行時変数添字ループが
+    // 展開されずレジスタ配列が thread-local メモリへ降格（spill）している
+    // という仮説（H2）を検証する目的で付与した loop unroll pragma。
+    // function constant（`BM`/`WM` 等）由来の `acc_rows`/`acc_cols` は
+    // パイプライン構築時に特殊化されコンパイル時定数として畳み込まれるため
+    // `unroll(full)` が有効に働く（CUDA 側 `#pragma unroll` が cosmetic では
+    // なく必須である機構と同型。
+    // `docs/perf/cuda-gemm-mma-ldmatrix-double-buffer.md` 該当節参照）。
+    // GB10/M4 Max 実機実測（`docs/perf/metal-gemm-n4096-e1-unroll-1188/`）で
+    // cand0/4/8 の N=4096 TFLOPS が 4〜16 倍改善し、`crate::tile::select` が
+    // 実運用で返す候補（cand2 等）は非後退（本番 `dispatch_auto` 経路も
+    // 5 回計測中央値で改善。`docs/perf/metal-gemm-n4096-kernel-gap.md` §7.5）
+    // を実機実測で確認したため採用した。ループ添字自体（走査順・累算
+    // オペランド列）は不変のため数値はビット単位で従来と一致する
+    // （`tests/gemm_dynamic_tile_parity.rs` 等の parity テストが実機実測で
+    // green であることを確認済み）。本カーネル内の acc 初期化・
+    // フラグメントロード・MMA 発行・ストアの全アキュムレータ系ループへ
+    // 同じ理由で付与している（各箇所には
+    // `tests/shader_source_evidence.rs::
+    // gemm_simdgroup_tiled_source_unrolls_accumulator_loops` が
+    // 位置を固定する）。
+    #pragma clang loop unroll(full)
     for (uint r = 0; r < acc_rows; r++) {
+        // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+        #pragma clang loop unroll(full)
         for (uint c_ = 0; c_ < acc_cols; c_++) {
             acc[r][c_] = simdgroup_float8x8(0.0f);
         }
@@ -948,6 +975,8 @@ kernel void gemm_simdgroup_tiled(
                 // と同じ論法）。
                 simdgroup_float8x8 a_frag[MAX_ACC];
                 simdgroup_float8x8 b_frag[MAX_ACC];
+                // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+                #pragma clang loop unroll(full)
                 for (uint r = 0; r < acc_rows; r++) {
                     // ストライドを BK ではなく lda（パディング込み）にする
                     // ことで、パディングにより実際にずれた行の先頭アドレス
@@ -967,6 +996,8 @@ kernel void gemm_simdgroup_tiled(
                         simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
                     }
                 }
+                // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+                #pragma clang loop unroll(full)
                 for (uint c_ = 0; c_ < acc_cols; c_++) {
                     // ストライドを BN ではなく ldb（パディング込み）にする
                     // （上記 A タイル側と同じ理由。イシュー #538）。
@@ -990,7 +1021,11 @@ kernel void gemm_simdgroup_tiled(
                 if (FINE_BARRIER_ENABLED) {
                     simdgroup_barrier(mem_flags::mem_none);
                 }
+                // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+                #pragma clang loop unroll(full)
                 for (uint r = 0; r < acc_rows; r++) {
+                    // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+                    #pragma clang loop unroll(full)
                     for (uint c_ = 0; c_ < acc_cols; c_++) {
                         simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
                     }
@@ -1009,6 +1044,8 @@ kernel void gemm_simdgroup_tiled(
             // （`crate::gemm::MetalGemm::dispatch_auto` 参照）。
             uint bk_full8 = (bk_eff / 8) * 8;
             for (uint kk = 0; kk < bk_full8; kk += 8) {
+                // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+                #pragma clang loop unroll(full)
                 for (uint r = 0; r < acc_rows; r++) {
                     uint a_row = sub_row0 + r * 8;
                     // 境界チェック（REQ-8）: `dims.m` は `crate::pad::pad8`
@@ -1032,6 +1069,8 @@ kernel void gemm_simdgroup_tiled(
                             simdgroup_load(a_tile, a + (size_t)a_row * (size_t)st.lda + (size_t)(p0 + kk), st.lda);
                         }
                     }
+                    // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+                    #pragma clang loop unroll(full)
                     for (uint ci = 0; ci < acc_cols; ci++) {
                         // 蛇行（serpentine）走査: staged 経路と同じ理由・出典（#536）。
                         // c_ の訪問順を変えるだけで acc[r][c_] の累算オペランド列は
@@ -1062,11 +1101,15 @@ kernel void gemm_simdgroup_tiled(
     // ストア: サブブロック原点（`sub_row0`/`sub_col0`）が実効次元を超える
     // 8x8 タイルは書き込みをスキップする（REQ-8。ブロック端の手動境界
     // チェックを維持する。最適化を理由に省略しない）。
+    // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+    #pragma clang loop unroll(full)
     for (uint r = 0; r < acc_rows; r++) {
         uint out_row = sub_row0 + r * 8;
         if (out_row >= dims.m) {
             continue;
         }
+        // E1（#1188）: 上記アキュムレータ系ループと同じ理由の unroll pragma。
+        #pragma clang loop unroll(full)
         for (uint c_ = 0; c_ < acc_cols; c_++) {
             uint out_col = sub_col0 + c_ * 8;
             if (out_col >= dims.n) {
