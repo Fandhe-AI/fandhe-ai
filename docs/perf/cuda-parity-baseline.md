@@ -1561,6 +1561,14 @@ GB10 実機は本対応の実装時点で別プロセス使用中のため、判
 再実測（値の再確認）・`None` 行の実測完了は本対応のスコープに含まれない
 （引き続き実機実測とセットで行う。§6「ベースライン更新規約」）。
 
+**追記（イシュー #1190）**: 上記「`None` のまま残した行 2 行」のうち
+`mma_f16 256x256x4096 seed=9999` は、イシュー #1158 の GB10 実機実測
+（§12.3〜§12.4）とユーザー承認（#1131 コメント 2026-09-04・イシュー
+#1190 本文）を経て `Some(6.251e-2)`／`Some(5.850e-1)` へ更新済み
+（詳細は §12.5 追記）。`None` のまま残るのは
+`wmma_tf32_opt 512x512x512 seed=0x7A0 (tensor_core_parity_record)` の
+1 行のみ（記録元が max 系の値を出力しない制約は変わっていない）。
+
 ## 11. イシュー #1122: mma_tf32 系 FAIL の切り分け（2026-09-03）
 
 `tests/gemm_mma_tf32.rs`・`tests/mma_tf32_vs_wmma_tf32_staged.rs` の
@@ -1815,6 +1823,20 @@ DGX Spark GB10（sm_121・CUDA 13.0）。release ビルド・`--test-threads=1`�
 - いずれも本 PR では実施せず、イシューコメントで提案し、push・PR 作成後の
   後続エージェント／ユーザー承認へ引き継ぐ。
 
+**追記（イシュー #1190・反映済み）**: 上記 1 項目目（`ParityPath::MmaF16`
+行の `baseline_max_abs_diff_ceiling: Some(6.251e-2)`・
+`baseline_max_rel_err_ceiling: Some(5.850e-1)`）は、#1131 コメント
+（2026-09-04）およびイシュー #1190 本文でユーザー承認を得たうえで
+`common::parity_baseline::BASELINES` の `MmaF16` 行へ反映済み。反映値は
+本節記載の提案値と同一で、実測（§12.4）から新たな丸め直しは行っていない。
+`.claude/rules/coding-rust.md`「テスト・ベンチ」節の「baseline の追加・
+更新は実機実測値のみ・人間承認必須」を満たしており、`None` → `Some` は
+既存の fail_count・mean_abs_diff 判定を緩めるものではなく、非後退検査
+（検査 5 項目のうち項目 4・5）を新たに有効化する厳格化である。2 項目目
+（`specialized_mma_parity.rs` 256×512×1024 ケース）は引き続き未実施
+（§13 で別途対応・扱いは変更なし）。`MMA_PRIORITY_PRODUCTION_ENABLED` の
+`true` 復帰は本反映のスコープ外（イシュー #1191 が担当）。
+
 ### 12.6 イシュー #1160 での本番結線後の状態（相互参照）
 
 イシュー #1160（2026-09-04 GB10 実機実測）で `gemm_auto::MMA_PRIORITY_
@@ -1835,6 +1857,13 @@ diagnostics`・`#[ignore]`）は `MmaF16` 行の両 ceiling が本記録時点�
 未実施（#1160 のスコープ外。本 PR でも実施しない）。実測記録・性能 A/B・
 `wmma_f16_opt` の扱い確定は `docs/perf/cuda-wmma-f16-perf-triage.md` §8 を
 正とし本ファイルでは二重管理しない。
+
+**追記（イシュー #1190 で反映済み）**: 上記の未実施状態は解消した。
+`ParityPath::MmaF16` 行の両 ceiling は §12.5 追記のとおりユーザー承認済み
+の実測値で `BASELINES` へ反映済みであり、`run_f16_k4096_stress_non_
+regression_route_aware` の事前 fail-closed 検査（両 ceiling が `Some`
+であることの検査）は通過する状態になった。`MMA_PRIORITY_PRODUCTION_
+ENABLED` の `true` 復帰（mma 優先の本番有効化）はイシュー #1191 が担当する。
 
 **追記（PR #1179 codex-review 指摘・2026-09-04）**: 上記の本番結線
 （`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は、対応する route-aware

@@ -824,6 +824,19 @@ pub static BASELINES: &[ParityBaseline] = &[
     // mma_f16: K=4096 ストレスケース（256x256x4096、seed=9999）。
     // `tests/cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` の先頭呼出し
     // （`assert_mma_f16_parity(&gemm, ctx, 9999, 256, 256, 4096)`）。
+    // max_abs_diff／max_rel_err ceiling: イシュー #1131（#1156 mma 優先化
+    // の GB10 実機実測トリアージ）で `MMA_PRIORITY_PRODUCTION_ENABLED`
+    // 本番結線時に route-aware 非後退ゲート
+    // （`tests/gemm_auto.rs::run_f16_k4096_stress_non_regression_route_aware`）
+    // が本行を参照することが判明。実測: DGX Spark GB10（sm_121・
+    // CUDA 13.0）、2026-09-04、`--test-threads=1` 直列実行 5 回、
+    // max_abs_diff=6.250e-2／max_rel_err=5.849e-1 で完全一致
+    // （`docs/perf/cuda-parity-baseline.md` §12.3〜§12.4）。ceiling は
+    // 表示桁の最終桁 +1（§4・`MmaTf32` 行と同じ規約）。値はユーザー承認済み
+    // （#1131 コメント 2026-09-04・イシュー #1190 本文）。fail_count・
+    // total・mean_abs_diff ceiling は既存の実測値のまま変更していない
+    // （`None` → `Some` は非後退検査の項目追加であり、既存判定の緩和では
+    // ない）。
     ParityBaseline {
         path: ParityPath::MmaF16,
         context: "mma_f16 256x256x4096 seed=9999",
@@ -836,8 +849,8 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_mean_abs_diff_ceiling: 7.647e-5,
         // `run_f16` は基本/opt の分岐を持たないため provenance 不確実性なし。
         baseline_provenance_unconfirmed: false,
-        baseline_max_abs_diff_ceiling: None,
-        baseline_max_rel_err_ceiling: None,
+        baseline_max_abs_diff_ceiling: Some(6.251e-2),
+        baseline_max_rel_err_ceiling: Some(5.850e-1),
     },
     // wmma_f16: `run_f16` 実効経路の K=4096 ストレスケース（256x256x4096、
     // seed=8888）。`tests/cpu_cuda_wmma_parity.rs::wmma_f16_k4096_stress`

@@ -524,12 +524,13 @@ fn run_f16_k4096_stress_non_regression_route_aware() {
     // （1 要素だけ誤差が急増する回帰）も見逃さないことを本番経路の受け入れ
     // 判定として要求するため、選ばれた baseline 行の両 ceiling が `Some`
     // であることを事前に fail-closed 検査する（`None` を黙って通さない）。
-    // `MmaF16` 行は本 PR 時点で両 ceiling が `None`（実測値は
-    // `docs/perf/cuda-parity-baseline.md` §12.4 に記録済み・§12.5 で採否を
-    // ユーザー承認へ引き継ぎ中。baseline 値の追加・更新は実機実測値のみ・
-    // 人間承認必須のため本 PR では反映しない。`.claude/rules/coding-rust.md`
-    // 「テスト・ベンチ」節）ため、このゲートを real-hardware ignored test
-    // として実行すると承認・反映が完了するまで意図的に FAIL する。
+    // `MmaF16` 行の両 ceiling はイシュー #1190 でユーザー承認値
+    // （#1131 コメント 2026-09-04・実測は
+    // `docs/perf/cuda-parity-baseline.md` §12.3〜§12.4）を
+    // `common::parity_baseline::BASELINES` へ反映済み。mma 優先時に
+    // 本ゲートが GB10 実機で green になることの確認は
+    // `MMA_PRIORITY_PRODUCTION_ENABLED` を `true` へ復帰させる
+    // イシュー #1191（本番有効化）の受け入れ条件として引き継ぐ。
     assert!(
         baseline.baseline_max_abs_diff_ceiling.is_some()
             && baseline.baseline_max_rel_err_ceiling.is_some(),
