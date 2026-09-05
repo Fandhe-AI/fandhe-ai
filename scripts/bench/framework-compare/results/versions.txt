@@ -189,3 +189,10 @@ bench-fandhe v0.1.0 (bench-fandhe)
 bench-fandhe v0.1.0 (bench-fandhe)
 ├── bench-common v0.1.0 (bench-common)
 └── fandhe-ai v0.6.0
+
+# 環境 20: Apple M4 Max（infer predict_resident reuse モード・フェーズ分解の初回実測。イシュー #1217）
+# macOS 26.6.2 (25G83) / rustc/cargo 1.96.0
+# 単一系列（fandhe-ai =0.6.0。registry 解決。#1216 の facade Phase 2 は未結線のため参考系列は本イシュー対象外）
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.6.0

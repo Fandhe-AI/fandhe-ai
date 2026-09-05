@@ -57,8 +57,9 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 
 - 既定は `fresh`（上記「計測ごとに新しい計算グラフを作る」プロトコルと完全に同一。既存 JSONL・集計表との互換維持。
   ただし上記のとおり Metal / CUDA では candle / Burn とプロトコル同一ではない点に注意）
-- `reuse`（`bench-fandhe` の `gemm`／`train` タスクに対応。`bench-candle` / `bench-burn` は
-  デバイス再利用が API 上の既定設計のため task に依らず対象外で MEASURE_ERROR を返す）:
+- `reuse`（`bench-fandhe` の `gemm`／`train`／`infer`〈イシュー #1217〉タスクに対応。
+  `bench-candle` / `bench-burn` はデバイス再利用が API 上の既定設計のため task に
+  依らず対象外で MEASURE_ERROR を返す）:
   tape/デバイスを 1 回だけ構築し、その構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
   経過時間を `init_s`（JSONL のフィールド。初期化 1 回分のコスト）として分離記録したうえで、
   同一 tape 上で warmup 残り 19 回 → 計測 20 回を回し、`median_s`/`q1_s`/`q3_s` を
@@ -140,7 +141,10 @@ backward・パラメータ更新のどこが支配的か）を追跡できない
 `--task train --phases`（値なしフラグ）はこの 1 step を公開 API の呼び出し境界で
 区間分解し、区間ごとの median/Q1/Q3 を `task:"train_phases"` の JSONL 行として出力する。
 **`bench-fandhe`（`--task train`）専用**であり、`bench-candle`/`bench-burn` や
-`--task gemm`/`--task infer` との組合せは MEASURE_ERROR で fail-fast する。
+`--task gemm --mode fresh` との組合せは MEASURE_ERROR で fail-fast する
+（`--task gemm --mode reuse --phases` は下記「`gemm --mode reuse --phases`」節、
+`--task infer --phases` は下記「`infer --mode reuse` / `infer --phases`」節
+〈イシュー #1217〉をそれぞれ参照）。
 
 区間は「公開 API のどの呼び出しに時間が乗るか」を表し、GPU 内部（カーネル／転送）の
 内訳ではない: fandhe-ai 0.6.0 の `Tensor<f32>` はホスト常駐で、CUDA/Metal の各演算は
@@ -225,8 +229,10 @@ Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
 同期の固定費」と**推定**したまま確定していなかった。`--task gemm --mode reuse
 --phases`（値なしフラグ。`--task train --phases` と同型）はこの推定を、
 `train --phases` と同じ方法論（公開 API の呼び出し境界での区間分解）で実測確定
-するための計装である。`bench-candle`/`bench-burn`・`--mode fresh`・`--task
-train`/`--task infer` との組合せは MEASURE_ERROR で fail-fast する。
+するための計装である。`bench-candle`/`bench-burn`・`--task gemm --mode fresh`
+との組合せは MEASURE_ERROR で fail-fast する（`--task train`/`--task infer`
+はそれぞれ別の `--phases` 対応を持つ。上記「`train --phases`」節・下記
+「`infer --mode reuse` / `infer --phases`」節参照）。
 
 `run_gemm_reuse` 1 反復の内側で `readout_var`（`to_tensor()` +
 `contiguous().as_slice().to_vec()`）を展開し、次の 5 区間を `Instant` で計測する
@@ -279,6 +285,84 @@ cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 4096 --m
 の標準スイープには組み込まない（既存ゲート判定プロトコルを変更しないため）。
 GB10 実機での計測結果・カーネル専有時間ベースの candle 比（参考値）は
 `docs/perf/cuda-gemm-reuse-phase-breakdown.md`（イシュー #1182）を参照。
+
+### `infer --mode reuse` / `infer --phases`（イシュー #1217）
+
+`docs/perf/train-step-phase-breakdown.md` §13・§15.5 の背景: `--task infer` は
+これまで CPU が `Sequential::predict`、CUDA/Metal が `make_tape` + `tape.var` +
+`model.forward` の **fresh 経路のみ**で、`--task infer --phases` は
+`dispatch()` が MEASURE_ERROR を返していた（infer の candle 比未達の内訳
+〈H2D/D2H・forward の寄与〉が実測できていなかった）。本イシューは
+`Sequential::predict_resident`（facade 公開 API。`DeviceParamStore` の
+デバイス常駐重みで forward する。0.6.0 で公開済み）を使う `--mode reuse` と、
+公開 API 呼び出し境界での区間分解（`--phases`。fresh/reuse 双方に対応）を
+`bench-fandhe` へ追加する。
+
+**`infer --mode reuse`**: `train --mode reuse`（イシュー #958）と同じ
+「初期化コストとカーネル実行の分離」の考えを推論へ適用する。`init_s` は
+`train --mode reuse` と同一定義（`make_tape` + `model.init_device_param_store`
++ `sync_device_param_store_to_host` による完了保証の同期）で、以後
+`model.predict_resident(&store, &x_data)` を `WARMUP_ITERS`（20）+
+`MEASURE_ITERS`（20）回呼ぶ（`predict_resident` 内部で tape を毎呼び出し
+生成・破棄するため、`gemm`/`train` の reuse と異なり warmup を init 側で
+消費する必要が無く、`run_infer`〈fresh〉と同じ反復数をそのまま使う）。
+
+- 数値一致確認: `cargo test --release -p bench-fandhe`
+  `infer_reuse_matches_fresh_checksum_within_composite_tolerance`（cpu・
+  実機非依存。fresh/reuse の checksum を統一複合判定で突合）
+- 使用例:
+  `cargo run --release -p bench-fandhe -- --task infer --device metal --mode reuse`
+
+**`infer --phases`**: `mode`（fresh/reuse）と `device`（cpu か否か）の
+組合せで区間集合が異なる（公開 API の呼び出し粒度が異なるため）。
+
+| mode | device | 区間（`phase_index` 順） | 計測対象 | 分離不能な内訳 |
+| --- | --- | --- | --- | --- |
+| fresh | cpu | `predict` / `host_copy` / `checksum` / `iter_total` | `model.predict(&x)` / ホストコピー / 全要素和 / 反復全体 | `predict` 内部（層ごとの `forward_host`）は公開 API 上単一呼び出しでこれ以上分離できない |
+| fresh | metal・cuda | `leaf_register` / `forward` / `to_tensor` / `host_copy` / `checksum` / `iter_total` | `tape.var(&x)` / `model.forward(&tape,&x)` / `out.to_tensor()` / ホストコピー / 全要素和 / 反復全体（`make_tape` は `run_infer` と同じく計測窓外） | `forward` の内側に `Linear::bind` の重み clone + H2D・演算ごとのカーネル実行・D2H・ストリーム同期が全て閉じる（`gemm --mode reuse --phases` の `matmul` 区間と同じギャップ） |
+| reuse | cpu・metal・cuda | `predict_resident` / `host_copy` / `checksum` / `iter_total` | `model.predict_resident(&store,&x)` / ホストコピー / 全要素和 / 反復全体 | `predict_resident` 内部（`tape_for`・`snapshot_resident_params`・層ごとの `gemm_resident_rhs_act`）は private ヘルパー `forward_from_flat_leaves` を経由するため公開 API からは分離できない |
+
+`to_tensor`/`host_copy`/`checksum`/`iter_total` は `gemm --mode reuse
+--phases`（イシュー #1182）の `readout_var` 展開と同一の意味（`Var`/
+`Tensor` のホスト実体化 → コピー → 総和）で、`bench-fandhe/src/main.rs` 側
+では同じ `PHASE_GEMM_*` 定数を再利用する（`phase` は task ごとの名前空間
+ではなく区間の意味を表す値のため）。fresh・GPU の `make_tape` を計測窓外
+に置く扱いは `run_infer` の既存プロトコル（`--phases` を付けない通常計測）
+と同一で、`(c)` 節の既存数値の前提を変えない。
+
+reuse 行には `init_s`（`infer --mode reuse` と同一定義）が乗る。`--phases`
+実行時は既存の `task:"infer"` 行は出さない（`iter_total` 行が代替する。
+`train`/`gemm` の `--phases` と同じ方針）。
+
+**JSONL スキーマ**: 既存 `Record` のキー（`framework`・`version`・
+`task:"infer_phases"`・`device`・`size`・`median_s`/`q1_s`/`q3_s`・
+`checksum`・`warmup`・`iters`・`mode`・reuse のみ `init_s`）に加え、`phase`・
+`phase_index` の 2 キーを末尾に追加する（`train_phases`/`gemm_phases` と
+同じ `bench_common::PhaseRecord`）。`infer_phases` 行は `(c)`/`(c')` 推論節・
+`--target` 目標達成ゲートには一切混入しない（`task != "infer"` の行を除外
+する既存ロジックと同型）。
+
+**`summarize.py` (c')/(c'') 節の読み方**: `(c')` は `infer --mode reuse` の
+デバイス別スループット表（`(b')` train reuse と同型に加え `throughput_per_s`
+〈バッチ/秒〉列を持つ）。`(c'')` は `(device, mode)` ごとに `phase_index`
+昇順で表示する `infer --phases` の区間分解（`iter_total 比`・フェーズ合計
+は `(a'')`/`(b'')` と同一方針）。検証方針（必須 phase 名の集合・順序・
+件数の完全一致・`iter_total` の一意性・phase 中央値が `iter_total` を
+超える不整合の検出）も同一だが、必須 phase 集合は `(mode, device_class)`
+ごとに異なる（上表参照。`device_class` は `cpu`/`gpu`〈metal・cuda〉）。
+
+使用例:
+
+```bash
+cargo run --release -p bench-fandhe -- --task infer --device metal --mode reuse
+cargo run --release -p bench-fandhe -- --task infer --device metal --mode fresh --phases
+cargo run --release -p bench-fandhe -- --task infer --device cpu --mode reuse --phases
+```
+
+`run_all*.sh` の標準スイープに `infer --mode reuse`・`infer --phases`
+（fresh/reuse 双方。batch=64）を組み込み済み（`train --mode reuse`/
+`train --phases` と同じ位置づけ）。M4 Max 実機での初回計測結果は
+`docs/perf/infer-reuse-phase-breakdown.md`（イシュー #1217）を参照。
 
 ### 要素単位検証（イシュー #970）
 
@@ -454,9 +538,10 @@ python3 summarize.py --target candle
 echo $?   # 0: 全達成 / 2: --strict の無効データ判定が優先 / 3: 未達または判定不能が 1 件以上
 ```
 
-- fandhe-ai・target とも reuse 行があれば reuse を優先し、無ければ fresh を使う（infer には reuse
-  モード自体が存在しない。モジュール docstring 参照）
-- checksum 不一致・要素単位検証の閾値超過・train reuse の checksum 不一致等（既存の無効判定と同じ規則）
+- fandhe-ai・target とも reuse 行があれば reuse を優先し、無ければ fresh を使う（infer も
+  gemm/train と同様 reuse 行〈`predict_resident` 経由。イシュー #1217〉があれば reuse を
+  優先する）
+- checksum 不一致・要素単位検証の閾値超過・train/infer reuse の checksum 不一致等（既存の無効判定と同じ規則）
   に該当する行は「達成」と判定せず「判定不能（無効データ）」に倒す（壊れた計算の実行時間で達成判定
   しない）。target 側が未計測の組合せも「判定不能（`<target>` 未計測）」として一覧に載せる（黙って
   落とさない）

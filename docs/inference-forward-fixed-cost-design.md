@@ -197,11 +197,16 @@ forward-device-gpu.md`）。以下は引き続きスコープ外とし、
 - `facade`／`autodiff`（`DeviceParamStore` の推論ヘルパー・
   `Sequential::predict_resident` の内部差し替え）への結線（#1216
   実装計画 Step 9「Phase 2」。判断は `docs/perf/linear-forward-
-  device-gpu.md` §5 を参照。#1217 へ引き継ぎ）
+  device-gpu.md` §5 を参照。#1217 では facade Phase 2 を明示的にスコープ外
+  としたため、なお未着手のまま引き続き後続 Issue へ引き継ぐ）
 - `Sigmoid`/`Tanh` を含む層構成のデバイス常駐対応（段階 B は現状
   `Activation::{None,Relu}` のみ対応。`gemm_resident_rhs` と同じ制約）
-- framework-compare の推論プロトコルへの reuse モード追加（イシュー
-  #1217 で追跡済み）
+- ~~framework-compare の推論プロトコルへの reuse モード追加~~ →
+  イシュー #1217 で実装済み（`bench-fandhe --task infer --mode reuse` /
+  `--phases`。`docs/perf/infer-reuse-phase-breakdown.md`）。ただし
+  facade Phase 2（上記）が未結線のため、reuse モードは `predict`
+  相当の重み再構築コストを削減するのみで #1216 の中間活性化デバイス
+  常駐効果は反映されていない（同ドキュメント §6）
 - candle との残差ギャップ全体の解消（親イシュー #1008 Phase 3 以降）
 
 ## §5 fail-closed 検証（REQ-8・OWASP A03）

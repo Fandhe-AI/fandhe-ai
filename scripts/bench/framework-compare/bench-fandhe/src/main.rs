@@ -127,6 +127,20 @@ const PHASE_GEMM_HOST_COPY: &str = "host_copy";
 const PHASE_GEMM_CHECKSUM: &str = "checksum";
 const PHASE_GEMM_ITER_TOTAL: &str = "iter_total";
 
+// `infer --phases`（イシュー #1217）の区間定数。CPU fresh（`predict`）・
+// GPU fresh（`leaf_register`/`forward`。上の `PHASE_LEAF_REGISTER`/
+// `PHASE_FORWARD` を再利用）・reuse（`predict_resident`）で公開 API 呼び
+// 出しの粒度が異なるため、それぞれ 1 回の呼び出しに対応する区間を持つ。
+// `to_tensor`/`host_copy`/`checksum`/`iter_total` は `gemm --mode reuse
+// --phases`（イシュー #1182）の `readout_var` 展開と同一の意味（`Var`/
+// `Tensor` のホスト実体化 → コピー → 総和）であり、上の `PHASE_GEMM_*`
+// 定数をそのまま再利用する（task が異なる JSONL 行に同じ文字列値が乗る
+// だけで、`phase` は task ごとの名前空間ではなく区間の意味を表す値の
+// ため問題ない）。README「`infer --mode reuse` / `infer --phases`」節
+// 参照。
+const PHASE_INFER_PREDICT: &str = "predict";
+const PHASE_INFER_PREDICT_RESIDENT: &str = "predict_resident";
+
 /// `train --phases` の 1 step 分の区間計測を保持する順序付きサンプル集合
 /// （イシュー #1009）。phase の初出順が `phase_index`（README「train
 /// --phases」節・summarize.py (b'') 節の表示順と一致させる）。
@@ -1073,6 +1087,300 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `infer --mode reuse`（イシュー #1217）。`train --mode reuse`（イシュー
+/// #958）の「デバイス常駐パラメータで初期化コストとカーネル実行を分離
+/// する」考えを推論へ適用する。`Sequential::predict_resident`（0.6.0 で
+/// 公開済み。facade 経由の `DeviceParamStore` 常駐重み forward）を使い、
+/// `init_s` を「1 回限りの H2D upload + その完了保証の同期」として
+/// `run_train_reuse` と同一定義で分離記録する。
+///
+/// `run_train_reuse` の `init_s` コメント（本ファイル該当箇所）が示す
+/// とおり、`sync_device_param_store_to_host` を使うのは「ホスト転送を
+/// 伴わない完了待ち」が公開 API 面に無いためであり、同じギャップが
+/// ここにも及ぶ（重複を避けるためコメントは反復しない）。
+///
+/// tape は `predict_resident` 内部で毎呼び出し生成・破棄される
+/// （`Sequential::predict_resident` doc「`Tape` はこの呼び出しのスコープ
+/// 内で破棄される」参照）ため、`run_train_reuse` と異なり reuse できる
+/// のは `DeviceParamStore` のみで warmup を init 側で消費する必要はなく、
+/// `run_infer`（fresh）と同じ `WARMUP_ITERS`/`MEASURE_ITERS` の反復数を
+/// そのまま使う。
+fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let model = build_model()?;
+    let (x_data, _) = mlp_data()?;
+
+    let init_start = Instant::now();
+    let init_tape = make_tape(&cli.device)?;
+    let store = model.init_device_param_store(&init_tape)?;
+    let _ = init_tape.sync_device_param_store_to_host(&store)?;
+    drop(init_tape);
+    let init_s = init_start.elapsed().as_secs_f64();
+
+    let mut checksum = 0.0;
+    let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let out = model.predict_resident(&store, &x_data)?;
+        *sync_checksum = checksum_tensor(&out)?;
+        Ok(start.elapsed())
+    };
+
+    for _ in 0..WARMUP_ITERS {
+        one(&mut checksum)?;
+    }
+    let mut durations = Vec::with_capacity(MEASURE_ITERS);
+    for _ in 0..MEASURE_ITERS {
+        durations.push(one(&mut checksum)?);
+    }
+
+    if !checksum.is_finite() {
+        return Err(format!("MEASURE_ERROR: final checksum not finite: {checksum}").into());
+    }
+
+    // 終端同期: `run_train_reuse`/`measure_train_reuse_phases` と同一の
+    // 検証（A08: 破損した推論結果を性能値として残さない）。
+    // `predict_resident` は `store` を `&DeviceParamStore` で読むのみで
+    // 更新しないため、init 直後との差分は生じないはずだが、reuse する
+    // store がここまでの呼び出しで壊れていないことを終端でも確認する。
+    let final_tape = make_tape(&cli.device)?;
+    let synced = final_tape.sync_device_param_store_to_host(&store)?;
+    let expected_len = model.trainable_parameters().len();
+    if synced.len() != expected_len {
+        return Err(format!(
+            "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
+            synced.len()
+        )
+        .into());
+    }
+    for t in &synced {
+        let slice = t
+            .contiguous()
+            .as_slice()
+            .ok_or("synced param as_slice() returned None")?
+            .to_vec();
+        if slice.iter().any(|v| !v.is_finite()) {
+            return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
+        }
+    }
+
+    let st = stats(&durations)?;
+    Record {
+        framework: FRAMEWORK,
+        framework_version: VERSION,
+        task: "infer",
+        device: &cli.device,
+        size: BATCH,
+        stats: st,
+        gflops: None,
+        throughput_per_s: Some(1.0 / st.median_s),
+        checksum,
+        warmup: WARMUP_ITERS,
+        iters: MEASURE_ITERS,
+        mode: "reuse",
+        init_s: Some(init_s),
+        parity: None,
+        tf32: false,
+    }
+    .emit(&cli.out)?;
+    Ok(())
+}
+
+/// `infer --phases`（イシュー #1217）の計測本体。`mode`（`"fresh"`／
+/// `"reuse"`）と `cli.device`（`"cpu"` か否か）の組合せで区間集合が
+/// 異なる（README「`infer --mode reuse` / `infer --phases`」節の表）:
+///
+/// - fresh・cpu: `predict`／`host_copy`／`checksum`／`iter_total`
+///   （`Sequential::predict` は公開 API 上単一呼び出しでこれ以上分解
+///   できない）
+/// - fresh・metal/cuda: `leaf_register`／`forward`／`to_tensor`／
+///   `host_copy`／`checksum`／`iter_total`（`run_infer` の非 cpu 分岐と
+///   同じく `make_tape` は計測窓の外。`readout_var` 相当の展開は
+///   `measure_gemm_reuse_phases` と同型）
+/// - reuse: `predict_resident`／`host_copy`／`checksum`／`iter_total`
+///   （`predict_resident` 内部は private ヘルパー
+///   `forward_from_flat_leaves` を経由し公開 API からは分解不能。
+///   README に明記）
+///
+/// `run_infer`/`run_infer_reuse` 本体は変更しない（AC-2 と同じ方針。
+/// `measure_gemm_reuse_phases` が `run_gemm_reuse` を変更しないのと同型）。
+fn measure_infer_phases(
+    cli: &Cli,
+    mode: &str,
+) -> Result<(PhaseSamples, f64, Option<f64>), Box<dyn std::error::Error>> {
+    let model = build_model()?;
+    let (x_data, _) = mlp_data()?;
+    let mut phases = PhaseSamples::new();
+    let mut checksum = 0.0f64;
+    let iters = WARMUP_ITERS + MEASURE_ITERS;
+
+    let init_s = if mode == "reuse" {
+        let init_start = Instant::now();
+        let init_tape = make_tape(&cli.device)?;
+        let store = model.init_device_param_store(&init_tape)?;
+        let _ = init_tape.sync_device_param_store_to_host(&store)?;
+        drop(init_tape);
+        let init_s = init_start.elapsed().as_secs_f64();
+
+        for _ in 0..iters {
+            let iter_start = Instant::now();
+
+            let t0 = Instant::now();
+            let out = model.predict_resident(&store, &x_data)?;
+            phases.push(PHASE_INFER_PREDICT_RESIDENT, t0.elapsed());
+
+            let t0 = Instant::now();
+            let slice = out
+                .contiguous()
+                .as_slice()
+                .ok_or("predict_resident output as_slice() returned None")?
+                .to_vec();
+            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
+
+            let t0 = Instant::now();
+            checksum = slice.iter().map(|&x| x as f64).sum();
+            phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
+
+            phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
+        }
+
+        // 終端同期（`run_infer_reuse` と同一の検証。A08）。
+        let final_tape = make_tape(&cli.device)?;
+        let synced = final_tape.sync_device_param_store_to_host(&store)?;
+        let expected_len = model.trainable_parameters().len();
+        if synced.len() != expected_len {
+            return Err(format!(
+                "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
+                synced.len()
+            )
+            .into());
+        }
+        for t in &synced {
+            let s = t
+                .contiguous()
+                .as_slice()
+                .ok_or("synced param as_slice() returned None")?
+                .to_vec();
+            if s.iter().any(|v| !v.is_finite()) {
+                return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
+            }
+        }
+        Some(init_s)
+    } else if cli.device == "cpu" {
+        for _ in 0..iters {
+            let iter_start = Instant::now();
+
+            let t0 = Instant::now();
+            let out = model.predict(&x_data)?;
+            phases.push(PHASE_INFER_PREDICT, t0.elapsed());
+
+            let t0 = Instant::now();
+            let slice = out
+                .contiguous()
+                .as_slice()
+                .ok_or("predict output as_slice() returned None")?
+                .to_vec();
+            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
+
+            let t0 = Instant::now();
+            checksum = slice.iter().map(|&x| x as f64).sum();
+            phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
+
+            phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
+        }
+        None
+    } else {
+        for _ in 0..iters {
+            // `run_infer` の非 cpu 分岐と同じく tape 構築は計測窓の外
+            // （D4。`make_tape` は fresh tape のホスト側構築で GPU
+            // カーネル実行を伴わないが、`run_infer` の既存プロトコル・
+            // 既存 (c) 数値の前提を変えないため踏襲する）。
+            let tape = make_tape(&cli.device)?;
+            let iter_start = Instant::now();
+
+            let t0 = Instant::now();
+            let x = tape.var(&x_data);
+            phases.push(PHASE_LEAF_REGISTER, t0.elapsed());
+
+            let t0 = Instant::now();
+            let out = model.forward(&tape, &x)?;
+            phases.push(PHASE_FORWARD, t0.elapsed());
+
+            let t0 = Instant::now();
+            let t = out.to_tensor();
+            phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
+
+            let t0 = Instant::now();
+            let slice = t
+                .contiguous()
+                .as_slice()
+                .ok_or("as_slice() returned None after contiguous()")?
+                .to_vec();
+            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
+
+            let t0 = Instant::now();
+            checksum = slice.iter().map(|&x| x as f64).sum();
+            phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
+
+            phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
+        }
+        None
+    };
+
+    if !checksum.is_finite() {
+        return Err(format!("MEASURE_ERROR: final checksum not finite: {checksum}").into());
+    }
+
+    Ok((phases, checksum, init_s))
+}
+
+/// [`measure_infer_phases`] の結果を phase ごとに 1 行の JSONL
+/// （`task:"infer_phases"`）として出力する。`emit_gemm_phase_records`
+/// と同型（`--phases` 実行時は既存 `task:"infer"` 行を出さない）。
+fn emit_infer_phase_records(
+    cli: &Cli,
+    phases: &PhaseSamples,
+    mode: &'static str,
+    checksum: f64,
+    init_s: Option<f64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (phase_index, &phase) in phases.order.iter().enumerate() {
+        let measured = &phases.durations(phase)[WARMUP_ITERS..];
+        let st = stats(measured)?;
+        PhaseRecord {
+            base: Record {
+                framework: FRAMEWORK,
+                framework_version: VERSION,
+                task: "infer_phases",
+                device: &cli.device,
+                size: BATCH,
+                stats: st,
+                gflops: None,
+                throughput_per_s: None,
+                checksum,
+                warmup: WARMUP_ITERS,
+                iters: measured.len(),
+                mode,
+                init_s,
+                parity: None,
+                tf32: false,
+            },
+            phase,
+            phase_index,
+        }
+        .emit(&cli.out)?;
+    }
+    Ok(())
+}
+
+/// `--task infer --phases`（fresh/reuse。イシュー #1217）。
+fn run_infer_phases(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let mode: &'static str = if cli.mode == "reuse" {
+        "reuse"
+    } else {
+        "fresh"
+    };
+    let (phases, checksum, init_s) = measure_infer_phases(cli, mode)?;
+    emit_infer_phase_records(cli, &phases, mode, checksum, init_s)
+}
 fn main() {
     if let Err(e) = run() {
         eprintln!("{e}");
@@ -1085,15 +1393,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     dispatch(&cli)
 }
 
-/// task × mode × `--phases` の分岐。reuse モードは受け入れ条件の範囲
-/// （gemm・train）に限定し、infer × reuse は MEASURE_ERROR で fail-fast
-/// する（gemm はイシュー #925 §2.1・§8、train はイシュー #958。infer への
-/// 拡張は将来対応が必要な場合は別イシューで追跡）。`--phases` は
-/// `--task train`（fresh/reuse 双方）にのみ対応し、`gemm`/`infer` との
-/// 組合せは MEASURE_ERROR とする（イシュー #1009）。`run()` から分離して
-/// あるのは `parse_cli()`（`std::env::args()` 依存）を経由せず
-/// `tests::phases_with_gemm_or_infer_is_measure_error` から直接分岐を
-/// 検証できるようにするため。
+/// task × mode × `--phases` の分岐。reuse モードは gemm（イシュー #925
+/// §2.1・§8）・train（イシュー #958）・infer（イシュー #1217）に対応する。
+/// `--phases` は `--task train`（fresh/reuse 双方。イシュー #1009）・
+/// `--task infer`（fresh/reuse 双方。イシュー #1217）・`--task gemm --mode
+/// reuse`（イシュー #1182）に対応し、`gemm --mode fresh` との組合せのみ
+/// MEASURE_ERROR とする。`run()` から分離してあるのは `parse_cli()`
+/// （`std::env::args()` 依存）を経由せず `tests::
+/// phases_with_gemm_fresh_is_measure_error` から直接分岐を検証できる
+/// ようにするため。
 ///
 /// **`--tf32`（イシュー #1042）は本バイナリでは常に MEASURE_ERROR で
 /// fail-fast する**: `bench-fandhe` は crates.io 公開版 `fandhe-ai
@@ -1118,11 +1426,16 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         ("train", "fresh", true) => run_train_phases(cli),
         ("train", "reuse", true) => run_train_reuse_phases(cli),
         // イシュー #1182: `gemm --mode reuse --phases` を追加。fresh の
-        // gemm・infer との組合せは引き続き MEASURE_ERROR（下の catch-all）。
+        // gemm との組合せは引き続き MEASURE_ERROR（下の catch-all）。
         ("gemm", "reuse", true) => run_gemm_reuse_phases(cli),
+        // イシュー #1217: `infer --phases` を fresh/reuse 双方に追加
+        // （train と異なり、fresh も対応する。README「`infer --phases`」
+        // 節参照）。
+        ("infer", "fresh", true) | ("infer", "reuse", true) => run_infer_phases(cli),
         (task, mode, true) => Err(format!(
-            "MEASURE_ERROR: --phases is only implemented for task 'train' or task 'gemm' with \
-             --mode reuse (got task='{task}' mode='{mode}'; issue #1009 / #1182)"
+            "MEASURE_ERROR: --phases is only implemented for task 'train', task 'infer', or \
+             task 'gemm' with --mode reuse (got task='{task}' mode='{mode}'; issue #1009 / \
+             #1182 / #1217)"
         )
         .into()),
         ("gemm", "fresh", false) => run_gemm(cli),
@@ -1130,8 +1443,11 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         ("train", "fresh", false) => run_train(cli),
         ("train", "reuse", false) => run_train_reuse(cli),
         ("infer", "fresh", false) => run_infer(cli),
+        // イシュー #1217: `infer --mode reuse` を追加。
+        ("infer", "reuse", false) => run_infer_reuse(cli),
         (task, "reuse", false) => Err(format!(
-            "MEASURE_ERROR: --mode reuse is not implemented for task '{task}' (gemm / train only; issue #925 / #958)"
+            "MEASURE_ERROR: --mode reuse is not implemented for task '{task}' (gemm / train / \
+             infer only; issue #925 / #958 / #1217)"
         )
         .into()),
         (other, _, false) => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
@@ -1362,29 +1678,28 @@ mod tests {
     }
 
     #[test]
-    fn phases_with_gemm_fresh_or_infer_is_measure_error() {
+    fn phases_with_gemm_fresh_is_measure_error() {
         // `dispatch()`（`run()` の分岐本体。`parse_cli()` を経由せず直接
         // 呼べるよう分離してある）を通して、`--phases` が `--task train`
-        // （fresh/reuse）と `--task gemm --mode reuse`（イシュー #1182）
-        // 限定であり、`gemm --mode fresh`・`infer` は引き続き拒否される
-        // ことを固定する。
-        for (task, mode) in [("gemm", "fresh"), ("infer", "fresh")] {
-            let out = temp_out_path(&format!("phases-unsupported-{task}-{mode}"));
-            let cli = Cli {
-                task: task.to_string(),
-                device: "cpu".to_string(),
-                size: 64,
-                out: out.to_string_lossy().into_owned(),
-                mode: mode.to_string(),
-                phases: true,
-                tf32: false,
-            };
-            let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
-            let msg = err.to_string();
-            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
-            assert!(msg.contains("--phases"), "msg={msg}");
-            assert!(msg.contains(task), "msg={msg}");
-        }
+        // （fresh/reuse）・`--task infer`（fresh/reuse。イシュー #1217）・
+        // `--task gemm --mode reuse`（イシュー #1182）限定であり、
+        // `gemm --mode fresh` のみ引き続き拒否されることを固定する。
+        let (task, mode) = ("gemm", "fresh");
+        let out = temp_out_path(&format!("phases-unsupported-{task}-{mode}"));
+        let cli = Cli {
+            task: task.to_string(),
+            device: "cpu".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: mode.to_string(),
+            phases: true,
+            tf32: false,
+        };
+        let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--phases"), "msg={msg}");
+        assert!(msg.contains(task), "msg={msg}");
     }
 
     // イシュー #1182: `gemm --mode reuse --phases` の受け入れ条件
@@ -1549,6 +1864,326 @@ mod tests {
         );
     }
 
+    // イシュー #1217: `infer --mode reuse`／`infer --phases`（fresh/reuse）
+    // の受け入れ条件を固定する回帰テスト群。`train --mode reuse`／
+    // `gemm --mode reuse --phases` と同型の検証（checksum 複合判定・
+    // JSONL フィールド・phase 順序・Σphase ≤ iter_total）を infer へ適用
+    // する。
+
+    fn make_infer_phases_cli(mode: &str, out: &std::path::Path) -> Cli {
+        Cli {
+            task: "infer".to_string(),
+            device: "cpu".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: mode.to_string(),
+            phases: true,
+            tf32: false,
+        }
+    }
+
+    /// `infer --mode reuse`（`predict_resident`）の checksum が `infer
+    /// --mode fresh`（`predict`）と統一複合判定（相対誤差 1e-3 未満また
+    /// は絶対誤差 1e-5 未満。coding-rust.md）の範囲内で一致することを
+    /// 固定する（`train_reuse_matches_fresh_final_loss_within_composite_tolerance`
+    /// と同型）。
+    #[test]
+    fn infer_reuse_matches_fresh_checksum_within_composite_tolerance() {
+        let fresh_path = temp_out_path("infer-fresh");
+        let reuse_path = temp_out_path("infer-reuse");
+
+        run_infer(&make_cli("infer", "fresh", &fresh_path)).expect("run_infer (fresh) failed");
+        run_infer_reuse(&make_cli("infer", "reuse", &reuse_path))
+            .expect("run_infer_reuse (reuse) failed");
+
+        let fresh_checksum = last_line_checksum(&fresh_path);
+        let reuse_checksum = last_line_checksum(&reuse_path);
+
+        let _ = std::fs::remove_file(&fresh_path);
+        let _ = std::fs::remove_file(&reuse_path);
+
+        assert!(
+            fresh_checksum.is_finite() && reuse_checksum.is_finite(),
+            "checksum must be finite: fresh={fresh_checksum} reuse={reuse_checksum}"
+        );
+        let abs_diff = (fresh_checksum - reuse_checksum).abs();
+        let rel_diff = abs_diff / fresh_checksum.abs().max(1e-12);
+        assert!(
+            abs_diff < 1e-5 || rel_diff < 1e-3,
+            "fresh/reuse infer checksum mismatch: fresh={fresh_checksum} reuse={reuse_checksum} \
+             abs_diff={abs_diff} rel_diff={rel_diff}"
+        );
+    }
+
+    #[test]
+    fn infer_reuse_produces_expected_record_fields() {
+        let out = temp_out_path("infer-reuse-fields");
+        run_infer_reuse(&make_cli("infer", "reuse", &out)).expect("run_infer_reuse failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        let last = content.lines().next_back().expect("test: JSONL に行がない");
+        assert!(last.contains("\"task\":\"infer\""), "line={last}");
+        assert!(last.contains("\"mode\":\"reuse\""), "line={last}");
+        assert!(last.contains("\"init_s\":"), "line={last}");
+        assert!(!last.contains("\"init_s\":null"), "line={last}");
+        assert!(last.contains("\"throughput_per_s\":"), "line={last}");
+        assert!(!last.contains("\"throughput_per_s\":null"), "line={last}");
+    }
+
+    /// (a) fresh・cpu の `infer --phases` が 4 区間（predict/host_copy/
+    /// checksum/iter_total）を `phase_index` 連番・`task:"infer_phases"`・
+    /// `init_s` なし・末尾 `iter_total` で出力することを固定する。
+    #[test]
+    fn infer_phases_fresh_cpu_emits_one_row_per_phase_in_order() {
+        let out = temp_out_path("infer-phases-fresh-cpu-order");
+        run_infer_phases(&make_infer_phases_cli("fresh", &out)).expect("run_infer_phases failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4, "lines={lines:?}");
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.contains("\"task\":\"infer_phases\""), "line={line}");
+            assert!(line.contains("\"mode\":\"fresh\""), "line={line}");
+            assert!(
+                line.contains(&format!("\"phase_index\":{i}")),
+                "line={line}"
+            );
+            // fresh は `init_s: None` のため `to_json_line` がキー自体を
+            // 省略する（`bench-common::Record::to_json_line`。reuse 側の
+            // `infer_phases_reuse_emits_one_row_per_phase_in_order_with_init_s`
+            // と対称）。
+            assert!(!line.contains("\"init_s\""), "line={line}");
+        }
+        assert!(lines.last().unwrap().contains("\"phase\":\"iter_total\""));
+        assert!(
+            lines[0].contains("\"phase\":\"predict\""),
+            "lines={lines:?}"
+        );
+    }
+
+    /// reuse の `infer --phases` が 4 区間（predict_resident/host_copy/
+    /// checksum/iter_total）を `init_s` ありで出力することを固定する
+    /// （cpu で動作する。`device_class` 区分による GPU 専用区間との違い
+    /// は README「`infer --phases`」節の表を参照）。
+    #[test]
+    fn infer_phases_reuse_emits_one_row_per_phase_in_order_with_init_s() {
+        let out = temp_out_path("infer-phases-reuse-order");
+        run_infer_phases(&make_infer_phases_cli("reuse", &out)).expect("run_infer_phases failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4, "lines={lines:?}");
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.contains("\"task\":\"infer_phases\""), "line={line}");
+            assert!(line.contains("\"mode\":\"reuse\""), "line={line}");
+            assert!(
+                line.contains(&format!("\"phase_index\":{i}")),
+                "line={line}"
+            );
+            assert!(line.contains("\"init_s\":"), "line={line}");
+            assert!(!line.contains("\"init_s\":null"), "line={line}");
+        }
+        assert!(lines.last().unwrap().contains("\"phase\":\"iter_total\""));
+        assert!(
+            lines[0].contains("\"phase\":\"predict_resident\""),
+            "lines={lines:?}"
+        );
+    }
+
+    /// (c) fresh の `infer --phases` の checksum（各行の `checksum`）が
+    /// `run_infer` の JSONL 出力の checksum と一致することを固定する
+    /// （`gemm_reuse_phases_checksum_matches_run_gemm_reuse` と同型）。
+    #[test]
+    fn infer_phases_fresh_checksum_matches_run_infer() {
+        let fresh_path = temp_out_path("infer-fresh-vs-phases");
+        run_infer(&make_cli("infer", "fresh", &fresh_path)).expect("run_infer failed");
+        let fresh_checksum = last_line_checksum(&fresh_path);
+        let _ = std::fs::remove_file(&fresh_path);
+
+        let phases_path = temp_out_path("infer-phases-fresh-checksum");
+        run_infer_phases(&make_infer_phases_cli("fresh", &phases_path))
+            .expect("run_infer_phases failed");
+        let content = std::fs::read_to_string(&phases_path).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&phases_path);
+
+        for line in content.lines() {
+            let key = "\"checksum\":";
+            let start = line.find(key).expect("checksum field missing") + key.len();
+            let rest = &line[start..];
+            let end = rest.find([',', '}']).expect("checksum field end missing");
+            let phase_checksum: f64 = rest[..end].trim().parse().expect("checksum not f64");
+            assert_eq!(
+                phase_checksum, fresh_checksum,
+                "phase checksum diverges from run_infer: line={line}"
+            );
+        }
+    }
+
+    /// (c) reuse の `infer --phases` の checksum が `run_infer_reuse` の
+    /// JSONL 出力の checksum と一致することを固定する。
+    #[test]
+    fn infer_phases_reuse_checksum_matches_run_infer_reuse() {
+        let reuse_path = temp_out_path("infer-reuse-vs-phases");
+        run_infer_reuse(&make_cli("infer", "reuse", &reuse_path)).expect("run_infer_reuse failed");
+        let reuse_checksum = last_line_checksum(&reuse_path);
+        let _ = std::fs::remove_file(&reuse_path);
+
+        let phases_path = temp_out_path("infer-phases-reuse-checksum");
+        run_infer_phases(&make_infer_phases_cli("reuse", &phases_path))
+            .expect("run_infer_phases failed");
+        let content = std::fs::read_to_string(&phases_path).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&phases_path);
+
+        for line in content.lines() {
+            let key = "\"checksum\":";
+            let start = line.find(key).expect("checksum field missing") + key.len();
+            let rest = &line[start..];
+            let end = rest.find([',', '}']).expect("checksum field end missing");
+            let phase_checksum: f64 = rest[..end].trim().parse().expect("checksum not f64");
+            assert_eq!(
+                phase_checksum, reuse_checksum,
+                "phase checksum diverges from run_infer_reuse: line={line}"
+            );
+        }
+    }
+
+    /// (d) fresh/reuse それぞれについて、各反復の構成区間合計が
+    /// `iter_total` を超えず、計時オーバーヘッドの上限（90%）を満たす
+    /// ことを固定する（`gemm_reuse_phases_each_iter_phase_sum_does_not_exceed_total`
+    /// と同型。標本数は `WARMUP_ITERS + MEASURE_ITERS`）。
+    #[test]
+    fn infer_phases_each_iter_phase_sum_does_not_exceed_total() {
+        for mode in ["fresh", "reuse"] {
+            let cli =
+                make_infer_phases_cli(mode, &temp_out_path(&format!("infer-phases-sum-{mode}")));
+            let (phases, _checksum, _init_s) =
+                measure_infer_phases(&cli, mode).expect("measure_infer_phases failed");
+            let totals = phases.durations(PHASE_GEMM_ITER_TOTAL);
+            assert_eq!(totals.len(), WARMUP_ITERS + MEASURE_ITERS, "mode={mode}");
+            let component_phases: Vec<&str> = phases
+                .order
+                .iter()
+                .copied()
+                .filter(|&p| p != PHASE_GEMM_ITER_TOTAL)
+                .collect();
+            for (iter, &total) in totals.iter().enumerate() {
+                let sum: Duration = component_phases
+                    .iter()
+                    .map(|&p| phases.durations(p)[iter])
+                    .sum();
+                assert!(
+                    sum <= total,
+                    "mode={mode} iter={iter}: phase sum {sum:?} exceeds iter_total {total:?}"
+                );
+                assert!(
+                    sum.as_secs_f64() >= 0.9 * total.as_secs_f64(),
+                    "mode={mode} iter={iter}: phase sum {sum:?} is less than 90% of iter_total \
+                     {total:?}"
+                );
+            }
+        }
+    }
+
+    /// 実機（CUDA）依存の smoke テスト。fresh は 6 区間（leaf_register/
+    /// forward/to_tensor/host_copy/checksum/iter_total）・reuse は 4 区間
+    /// （predict_resident/host_copy/checksum/iter_total）。
+    #[test]
+    #[ignore]
+    fn infer_reuse_and_phases_cuda_smoke() {
+        let reuse_out = temp_out_path("infer-reuse-cuda-smoke");
+        dispatch(&Cli {
+            task: "infer".to_string(),
+            device: "cuda".to_string(),
+            size: 64,
+            out: reuse_out.to_string_lossy().into_owned(),
+            mode: "reuse".to_string(),
+            phases: false,
+            tf32: false,
+        })
+        .expect("cuda infer --mode reuse smoke failed");
+        let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&reuse_out);
+        assert!(
+            reuse_content.contains("\"task\":\"infer\"")
+                && reuse_content.contains("\"mode\":\"reuse\""),
+            "content={reuse_content}"
+        );
+
+        for (mode, expected_rows) in [("fresh", 6usize), ("reuse", 4usize)] {
+            let out = temp_out_path(&format!("infer-phases-cuda-smoke-{mode}"));
+            dispatch(&Cli {
+                task: "infer".to_string(),
+                device: "cuda".to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: mode.to_string(),
+                phases: true,
+                tf32: false,
+            })
+            .expect("cuda infer --phases smoke failed");
+            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+            let _ = std::fs::remove_file(&out);
+            assert_eq!(
+                content.lines().count(),
+                expected_rows,
+                "mode={mode} content={content}"
+            );
+            assert!(
+                content.contains("\"phase\":\"iter_total\""),
+                "mode={mode} content={content}"
+            );
+        }
+    }
+
+    /// 実機（Metal）依存の smoke テスト。macOS のみコンパイル対象。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn infer_reuse_and_phases_metal_smoke() {
+        let reuse_out = temp_out_path("infer-reuse-metal-smoke");
+        dispatch(&Cli {
+            task: "infer".to_string(),
+            device: "metal".to_string(),
+            size: 64,
+            out: reuse_out.to_string_lossy().into_owned(),
+            mode: "reuse".to_string(),
+            phases: false,
+            tf32: false,
+        })
+        .expect("metal infer --mode reuse smoke failed");
+        let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&reuse_out);
+        assert!(
+            reuse_content.contains("\"task\":\"infer\"")
+                && reuse_content.contains("\"mode\":\"reuse\""),
+            "content={reuse_content}"
+        );
+
+        for (mode, expected_rows) in [("fresh", 6usize), ("reuse", 4usize)] {
+            let out = temp_out_path(&format!("infer-phases-metal-smoke-{mode}"));
+            dispatch(&Cli {
+                task: "infer".to_string(),
+                device: "metal".to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: mode.to_string(),
+                phases: true,
+                tf32: false,
+            })
+            .expect("metal infer --phases smoke failed");
+            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+            let _ = std::fs::remove_file(&out);
+            assert_eq!(
+                content.lines().count(),
+                expected_rows,
+                "mode={mode} content={content}"
+            );
+            assert!(
+                content.contains("\"phase\":\"iter_total\""),
+                "mode={mode} content={content}"
+            );
+        }
+    }
     /// イシュー #1042: `bench-fandhe` は `fandhe-ai =0.4.0` に完全固定
     /// されており本イシューの新 API を呼べないため、`--tf32` は task/mode
     /// の組合せに関わらず常に MEASURE_ERROR で fail-fast する

@@ -1686,6 +1686,60 @@ DGX N=2048 は candle 側要素誤差超過により判定不能、M4 Max N=2048
   candle fresh より 1.52 倍遅く、reuse 計測境界の見直しでは candle 比未達を解消できない
   非対称な結論となった
 
+## 環境 20: Apple M4 Max（infer `predict_resident` reuse モード・フェーズ分解の初回実測。イシュー #1217）
+
+`bench-fandhe --task infer` に `--mode reuse`（`Sequential::predict_resident`
+経由）・`--phases`（fresh/reuse 双方）を追加し、`summarize.py` に (c') reuse
+節・(c'') フェーズ分解節を追加した（正式系列 `fandhe-ai =0.6.0`）。
+`results-m4max-infer-reuse-0.6.0-run{1..5}.jsonl`（1 run = 1 ファイル）+
+`results-m4max-infer-reuse-0.6.0-phases.jsonl`（fresh/reuse 各 1 run）で
+M4 Max 実機実測を行った。共有・多利用者環境での計測（計測時 `uptime`:
+19 users, load averages 2.55/3.17/4.10）のため run 4・run 5 に負荷混入がある
+（詳細・range は `docs/perf/infer-reuse-phase-breakdown.md` を参照）。
+
+### (c) / (c') 推論スループット（5 run 中央値の中央値）
+
+| フレームワーク | デバイス | mode | 中央値 |
+| --- | --- | --- | --- |
+| candle 0.11.0 | cpu | fresh | 176.7 µs |
+| candle 0.11.0 | metal | fresh | 402.3 µs |
+| fandhe-ai 0.6.0 | cpu | fresh | 507.9 µs |
+| fandhe-ai 0.6.0 | cpu | reuse | 345.6 µs |
+| fandhe-ai 0.6.0 | metal | fresh | 756.4 µs |
+| fandhe-ai 0.6.0 | metal | reuse | 723.2 µs |
+
+fresh→reuse: cpu 1.47 倍・metal 1.05 倍。candle 比（reuse）: cpu 0.51 倍・
+metal 0.56 倍（未達だが fresh 比〈cpu 0.35 倍・metal 0.53 倍〉から改善）。
+
+### (c'') フェーズ分解（1 run。metal・fresh の支配項）
+
+| phase | iter_total 比 |
+| --- | --- |
+| forward | 81.0% |
+| to_tensor | 18.8% |
+| leaf_register / host_copy / checksum | 無視できる規模 |
+
+reuse は `predict_resident` 単独区間が 99.9%（`forward_from_flat_leaves` の
+private 実装のためこれ以上分解不能）。詳細・CPU 側の表・分離不能な内訳・
+DGX Spark GB10 未実測の明記は `docs/perf/infer-reuse-phase-breakdown.md`
+を参照。
+
+### 環境 20 のデータ有効性
+
+- `summarize.py --strict` は 5 run + phases ファイルとも exit 0（無効データなし）
+- `--target candle` は infer が未達のため exit 3（期待どおり。データ不正ではない）
+- `cargo test --release -p bench-fandhe`（19 passed）・
+  `python3 -m unittest summarize_test.py compare_ab_test.py
+  compare_gemm_gate_test.py`（229 passed）はいずれも green
+
+### #1216 効果との関係
+
+本環境の reuse 実測には #1216（CUDA/Metal `linear_forward_device`）の効果は
+含まれない: `predict_resident` 内部は facade Phase 2 結線が未実施で
+`gemm_resident_rhs_act`（中間活性化を層ごとにホスト実体化）のままであり、
+本ハーネスも crates.io 公開版 `fandhe-ai =0.6.0` 固定のため反映しようがない
+（`docs/perf/infer-reuse-phase-breakdown.md` §6）。
+
 ## 目標達成ゲート総括（train/infer 追跡行の更新・#1118 クローズ可否判断。イシュー #1154）
 
 環境 10/11 の「目標達成ゲート総括」節に記載していた学習・推論（train/infer）の追跡行を、
@@ -1751,3 +1805,11 @@ infer/CPU（DGX）が 0.57 → 0.81 倍へ改善し、infer/Metal が 0.68 → 0
 改善 issue の起票完了をもって親 issue の完了条件とみなし、性能改善の実装は #1211〜#1219
 （起票済み）へ引き継ぐ方針は妥当と判断する。**クローズ操作は本 PR では行わず、ユーザーの
 判断に委ねる。**
+
+**追記（イシュー #1217）**: 上表 8 行（DGX/M4 Max の infer 各 2 行を含む）は
+`--task infer --mode reuse`/`--phases` がハーネスに存在しなかった時点の
+fresh 行のみの計測である。#1217 以降、`summarize.py` の目標達成ゲート
+（`_pick_row_for_gate`）は infer でも reuse 行があれば reuse を優先するため、
+次回 infer を含む再計測では reuse 行が存在するファイルに限り本表の infer 行
+は reuse 中央値で判定される（環境 20 参照。fresh のみの旧 JSONL では従来
+どおり fresh のまま判定され本節の数値・判定を書き換えるものではない）。
