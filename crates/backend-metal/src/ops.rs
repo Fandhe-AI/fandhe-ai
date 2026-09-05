@@ -60,9 +60,13 @@ std::thread_local! {
     /// 異なるため独立カウンタとする。TT（両方転置）・`classify_2d` が
     /// `None` を返す入力〈stride 0 のブロードキャスト等〉が実際に
     /// `contiguous()` を要した場合（＝元から contiguous でなかった
-    /// オペランド）にのみ本カウンタを増やす。NN（両方行優先）は元から
-    /// contiguous のため増えない（`gemm` 内の `!a.is_contiguous()`／
-    /// `!b.is_contiguous()` ガード参照）。`backend-cuda::ops::
+    /// オペランド）にのみ本カウンタを増やす。両オペランドとも
+    /// contiguous な NN（`VJP` が渡す通常の非転置入力）は増えないが、
+    /// 両方とも `transposed: false` に分類されるが非 contiguous な
+    /// 行優先 view（`ld > cols` の narrow 等）は本経路（従来
+    /// `contiguous()` + `dispatch_auto`）に落ちるため増加しうる
+    /// （`gemm` 内の `!a.is_contiguous()`／`!b.is_contiguous()`
+    /// ガード参照）。`backend-cuda::ops::
     /// GEMM_HOST_REPACK_COUNT`〈イシュー #1214〉と同名・同意図の
     /// クロスバックエンド可観測点。`pub(crate)`（`RESIDENT_HOST_REPACK_COUNT`
     /// と同じ可視性方針。クレート境界外テストは数値一致のみ検証する）。

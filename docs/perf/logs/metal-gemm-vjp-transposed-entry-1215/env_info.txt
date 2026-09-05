@@ -15,3 +15,5 @@ Note: No CPU power status has been recorded
 Note: No thermal warning level has been recorded
 Note: No performance warning level has been recorded
 Note: No CPU power status has been recorded
+--- uptime (aux A/B 追加 2 試行再実行時。#1215 review 対応で 4:29 頃に実行) ---
+ 4:29  up 17 days, 15:42, 19 users, load averages: 3.67 8.21 7.64

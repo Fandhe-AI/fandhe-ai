@@ -11,8 +11,13 @@ d_input（`g @ Wᵀ`＝NT）・d_weight（`Aᵀ @ g`＝TN）、`Op::LinearReside
 の d_weight（`xᵀ @ g`＝TN）。
 
 対象外（本イシューのスコープ外）: 両方転置（TT）・一般 stride
-（`narrow` 後の転置等）・`gemm_bias_act` 融合経路・`gemm_resident_rhs`
-（既に #1040 で転置対応済み）・`gemm_fp32_strict_into`（Metal は既定
+（`narrow` 後の転置等）・`gemm_bias_act` の融合カーネル経路
+（`GemmBiasActRoute::Fused`。`run_tiled_bias_act_f32` を直接呼ぶため
+NT/TN 判定を経由しない。`ComposedFallback` 側は内部で `self.gemm` を
+呼ぶため NT/TN 結線を自動的に継承する——結果として `bias` が `None`
+または `[n]` 完全一致でない呼び出しのみ本イシューの効果を受ける）・
+`gemm_resident_rhs`（既に #1040 で転置対応済み）・
+`gemm_fp32_strict_into`（Metal は既定
 `Unsupported` のまま。#1212 引き継ぎ）・`dispatch_strided_tiled_prepared`
 への自動ルーティング（#1187 で判定不能につき見送り済み・再開しない）・
 `BackendOps` trait 拡張による `d_input` デバイス直接計算化（公開 API
@@ -69,9 +74,11 @@ baseline・依存は一切変更していない。
 
 環境: Apple M4 Max（macOS 26.6.2・arm64・rustc 1.96.0）。詳細・生ログは
 `docs/perf/logs/metal-gemm-vjp-transposed-entry-1215/`。実行中、他
-worktree での並行セッション作業（load average 約 3.1〜3.9、19 ログイン
-セッション）が確認されており、計測ノイズの要因になりうる（除外はせず
-そのまま記録する）。
+worktree での並行セッション作業（19 ログインセッション。load average
+は §3.2 計測時で約 3.1〜3.9、§3.1 の追加 2 試行再実行時は 5 分平均が
+約 8.2 まで上昇——`env_info.txt`）が確認されており、計測ノイズの要因に
+なりうる（除外はせずそのまま記録する。§3.1 の TN 単独形状のばらつきは
+この負荷変動と符合する）。
 
 ### 3.1 補助 A/B（`gemm_transposed_perf.rs`）
 
@@ -96,7 +103,7 @@ strided 入口）を warmup 2 回・measured 5 回中央値で比較する 1 試
 
 NT は全形状で明確な改善（1.04〜2.05 倍）。TN は非後退〜改善（1.00〜
 1.27 倍）だが、size 64 相当の層形状（`m=64, k=784, n=256`）は 3 試行間
-のばらつきが大きい（各試行の倍率は 0.814×・1.751×・2.612×。`aux_ab.txt`
+のばらつきが大きい（各試行の倍率は 0.852×・1.751×・2.612×。`aux_ab.txt`
 に全 3 試行の生データを記録）——負荷混在環境下では単独形状・単独試行
 での判定が不安定である。この補助 A/B 単独では TN の採否を確定できない
 ため、§3.2 の train phases A/B（環境ノイズの影響を受けにくい step 全体

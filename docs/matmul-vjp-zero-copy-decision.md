@@ -177,7 +177,9 @@ lhs` が確立済みの classic strided カーネル `gemm_tiled_bias_act`）へ
 渡し、`MetalMemory::upload_view` で両オペランドを zero-copy アップ
 ロードする。NN・TT・分類不能形状は従来どおり `contiguous()` +
 `dispatch_auto`（`gemm_simdgroup_tiled`）の bit 同一経路のまま。適用
-範囲は `MetalBackendOps::gemm` のみ（`gemm_bias_act`・
+範囲は `MetalBackendOps::gemm` のみ（`gemm_bias_act` は融合カーネル
+経路〈`GemmBiasActRoute::Fused`〉が対象外。`ComposedFallback` 側は
+内部で `self.gemm` を呼ぶため NT/TN 結線を自動的に継承する）・
 `gemm_resident_rhs`〈#1040 で既に転置対応済み〉・
 `gemm_fp32_strict_into`〈既定 `Unsupported` のまま。#1212 引き継ぎ〉は
 対象外）。
