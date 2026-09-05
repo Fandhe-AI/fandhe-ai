@@ -1812,8 +1812,11 @@ train-resident-grad-device-update.md` §0）
 計画（Plan フェーズ）は `Gradients` へ `resident: Vec<Option<
 ResidentGradMarker>>` を追加し `vjp()` の戻り型を `GradContribution`
 enum 化する案だったが、実装時点では単一セッション・委譲なしの制約下で
-安全側に倒し、**`Gradients` 構造体・`vjp()` の戻り型は一切変更しない**
-方式へ縮小した:
+安全側に倒し、**`vjp()` の戻り型は変更せず、`Gradients` への変更は
+由来検証用の内部フィールド `resident_fingerprint`（`pub(crate)`。公開
+API 面には出さない）1 つに限定する**方式へ縮小した（当初の実装は
+`Gradients` を一切変更しない方針だったが、codex-review P0 指摘〈PR
+#1224〉の是正で本フィールドを追加した。§2.1 参照）:
 
 - `tape::ResidentResolver` に非破壊のデフォルトメソッド
   `fill_resident_weight_grad(ops, store_id, slot, x_t, g) -> Result<bool,
@@ -1842,6 +1845,44 @@ InvalidArgument)`）に達していない。公開 API から `Op::ResidentLeaf`
 `Var` を得る経路が元々存在しないため実害はないと判断したが、内部一貫性
 としては後続で改善の余地がある（`docs/perf/
 train-resident-grad-device-update.md` §4）。
+
+#### 2.1 常駐勾配の由来検証（codex-review P0 是正の設計記録。PR #1224）
+
+resident 経由で充填された slot は `Gradients` に寄与を持たないため、
+`Gradients::get` の `tape_id`／`epoch` 検査（#1048）が適用されない。
+`DeviceParamStore::step` が「ストア自身の状態」（`GradStaging::filled`
+の鮮度）だけを見て更新すると、別 `Tape`・別ストア・古い backward
+呼び出し・別 snapshot の葉に由来する `Gradients` を渡しても検出できず
+更新が成功する抜け穴になる（`.claude/rules/security.md` A08）。これを
+塞ぐため、由来検証を 2 段で行う:
+
+1. **backward 呼び出し単位のフィンガープリント**: `ResidentResolver::
+   resident_backward_fingerprint()` が返す `(store_id, backward_serial,
+   pending.generation)` を `Tape::backward_with_resident` が
+   `Gradients::resident_fingerprint` へ焼き込む。`step` はこの値が
+   `(self.store_id, 現在の backward_serial, 消費対象 pending の
+   generation)` と一致する場合のみ resident 経由の鮮度検査を信頼する。
+   `pending.generation` を含めるのは、`register_resident_params` で葉を
+   再登録したあと backward を呼ばずに古い `Gradients` を再度 `step` へ
+   渡す手順（`backward_serial` は据え置き）を検出するため
+2. **slot 単位の葉の同一性**: `GradStaging::filled[slot]`（`ResidentFill`）
+   に `fill_resident_weight_grad` 時点の `tape_id`／`epoch`／
+   `weight_node_id` を記録し、`step` が現在の `pending` の対応する葉
+   （`pending.tape_id`／`pending.epoch`／`pending.node_ids[slot]`）と
+   突き合わせる。`snapshot_resident_params` は `pending` を変えずに
+   新しい `Op::ResidentLeaf` を発行できるため、1. の一致だけでは別
+   snapshot の葉で backward した場合を区別できない。同一 backward
+   走査内で同じ slot に異なる葉から 2 度目の寄与が来た場合は累積せず
+   `InvalidArgument` で拒否する
+
+いずれかが不一致の slot は resident 経由として信頼せず通常の
+`grads.get(var)` 経路へフォールバックし、対応する寄与が `Gradients`
+側に存在しないため `MissingGradient` で fail-closed に拒否される。
+実装の正は `crates/autodiff/src/backward.rs`（`resident_fingerprint`）・
+`crates/autodiff/src/tape.rs`（`resident_backward_fingerprint`）・
+`crates/autodiff/src/optim/device_store.rs`（`ResidentFill`・`step` の
+`grads_match_current_backward`／`resident_filled` 判定）とし、本節は
+設計意図のみを記す。
 
 ### 3. バックエンド別の状態
 

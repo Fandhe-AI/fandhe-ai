@@ -15,9 +15,14 @@ GEMM 追加・フレームワーク横並びベンチの前後 5 回計測キャ
   `flat_grad` を 1 回 upload）へ**そのままフォールバック**する。挙動・
   性能とも本イシュー着手前と完全に不変（`cargo build`／`cargo clippy`
   済み。実機なしのため Metal／CUDA の速度計測は行っていない）
-- **`Gradients` の構造体は変更しない**（`vjp()` の戻り型
-  `Vec<(NodeId, Tensor<f32>)>` も不変）。設計判断の詳細は
-  `docs/device-resident-update-design.md` 追補「#1212」§2 を参照
+- **`vjp()` の戻り型 `Vec<(NodeId, Tensor<f32>)>` は不変**。`Gradients`
+  への変更は由来検証用の内部フィールド `resident_fingerprint`
+  （`pub(crate)`。`(store_id, backward_serial, pending 世代)`）の追加
+  のみで、`DeviceParamStore::step` はこれと slot ごとの葉の同一性
+  （`tape_id`／`epoch`／`node_id`）を照合してから resident 経由の
+  slot を信頼する（codex-review P0 是正。当初は `Gradients` を一切
+  変更しない方針だった）。設計判断の詳細は
+  `docs/device-resident-update-design.md` 追補「#1212」§2・§2.1 を参照
 - **性能計測は本ファイルの軽量プロトコル**（§2）に留め、
   `scripts/bench/framework-compare` を使った候補 A/B 5 回計測キャンペーン
   （REQ-8 系の他 doc が採用する形式）は実施していない。CPU の `bias`
