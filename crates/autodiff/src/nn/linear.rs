@@ -13,7 +13,9 @@
 //! 分離する。呼び出し元は毎ステップ `Linear::bind(&tape)` で
 //! `LinearVars` を作り直し、`forward` を呼ぶ。
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{
+    Activation, BackendOps, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
+};
 
 use crate::error::AutodiffError;
 use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, uniform_init};
@@ -141,6 +143,47 @@ impl Linear {
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.bias.as_ref()
     }
+
+    /// [`crate::nn::module::Module::forward_host`]（`Linear` 実装。
+    /// `matmul_out_shape` → `ops.gemm` → `ops.add` の非融合合成。
+    /// `nn/module.rs` 参照）の epilogue 融合版（イシュー #1218・
+    /// `docs/perf/cpu-infer-predict-profile.md`）。[`LinearVars::
+    /// forward_with_activation`]（tape 経路。`Var::linear_act` 経由）と
+    /// 対をなす tape 不要版で、`y = act(input.matmul(weight) (+ bias))`
+    /// を `ops.gemm_bias_act` へ 1 呼び出しで委ねる。
+    ///
+    /// **呼び出し元が守る契約**: `ops.gemm_bias_act` の融合オーバーライドが
+    /// 非融合合成（`gemm` → `add` → `act`）と bit 完全一致するバックエンド
+    /// でのみ使うこと。CPU（CPU バックエンドクレートの `CpuBackendOps`）は
+    /// `crates/backend-cpu/tests/gemm_epilogue_parity.rs` が MR/NR/MC/KC/NC
+    /// 境界を跨ぐ形状グリッドで bit 完全一致を hard assert 済み
+    /// （`docs/perf/cpu-gemm-epilogue-fusion.md`「数値一致」節）。CUDA／
+    /// Metal の融合オーバーライドはこの一致が未保証のため（`docs/
+    /// inference-forward-fixed-cost-design.md` §3.1「段階 A」の
+    /// bit-exactness 契約は `Module::forward_host`〈trait レベル・汎用
+    /// バックエンド向け〉に適用され続ける）、汎用 `&dyn BackendOps` を
+    /// 受け取る `Module::forward_host` 自体はこのメソッドを使わず非融合
+    /// のまま維持する。呼び出し元は現状 CPU 固定経路
+    /// （`fandhe_ai_facade::compat::sequential::Sequential::
+    /// predict_tape_free_with_ops`。Linear→ReLU の先読み結線）に限定する。
+    ///
+    /// **エラー型の一致契約**: `forward_host` と同じ理由（同ファイル
+    /// `forward_host` doc 参照）で、`ops.gemm_bias_act` の `?` に検査を
+    /// 任せず `matmul_out_shape`／`broadcast_shape` を先に呼び、shape
+    /// 不整合を `forward_host` と同じ `AutodiffError::Shape` として返す
+    /// （`AutodiffError::Backend` へ variant が変わらないようにする）。
+    pub fn forward_host_with_activation(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+        act: Activation,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let out_shape = matmul_out_shape(input.shape(), self.weight.shape())?;
+        if let Some(ref bias) = self.bias {
+            broadcast_shape(&out_shape, bias.shape())?;
+        }
+        Ok(ops.gemm_bias_act(input, &self.weight, self.bias.as_ref(), act)?)
+    }
 }
 
 /// `Linear::bind` が返す、1 ステップ分のテープに登録済みパラメータ。
@@ -189,5 +232,170 @@ impl<'t> LinearVars<'t> {
         act: fandhe_ai_tensor_core::Activation,
     ) -> Result<Var<'t>, AutodiffError> {
         input.linear_act(&self.weight, self.bias.as_ref(), act)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! [`Linear::forward_host_with_activation`]（イシュー #1218・`docs/
+    //! perf/cpu-infer-predict-profile.md`）の単体テスト。ここでは
+    //! `BackendOps::gemm_bias_act` の**トレイト既定実装**（`gemm` →
+    //! `add` → `act` の合成。`tensor-core/src/backend_ops.rs` 参照）を
+    //! 経由させるため、`gemm`/`add`/`relu` を素朴に実装するだけの
+    //! テスト用 `BackendOps`（CPU バックエンドクレートへの新規依存を
+    //! 避ける。同クレートの `gemm_bias_act` 単体テストが同型の
+    //! `ComputingMockOps` を使う先例と同じ方式）を使う。
+
+    use super::*;
+    use crate::nn::module::Module;
+    use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, device::Device};
+
+    struct ComputingMockOps;
+
+    impl BackendOps for ComputingMockOps {
+        fn device(&self) -> Device {
+            Device::Cpu
+        }
+
+        fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            let (m, k) = (a.shape()[0], a.shape()[1]);
+            let n = b.shape()[1];
+            let a_data = a.as_slice().expect("test: a must be contiguous");
+            let b_data = b.as_slice().expect("test: b must be contiguous");
+            let mut out = vec![0.0f32; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for p in 0..k {
+                        acc = a_data[i * k + p].mul_add(b_data[p * n + j], acc);
+                    }
+                    out[i * n + j] = acc;
+                }
+            }
+            Tensor::new(out, &[m, n]).map_err(BackendError::ShapeMismatch)
+        }
+
+        fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            let a_shape = a.shape().to_vec();
+            let a_data = a.as_slice().expect("test: a must be contiguous");
+            let b_data = b.as_slice().expect("test: b must be contiguous");
+            let n = a_shape[1];
+            let out: Vec<f32> = a_data
+                .iter()
+                .enumerate()
+                .map(|(idx, x)| x + b_data[idx % n])
+                .collect();
+            Tensor::new(out, &a_shape).map_err(BackendError::ShapeMismatch)
+        }
+
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: mul".into()))
+        }
+
+        fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            let data = a.as_slice().expect("test: a must be contiguous");
+            let out: Vec<f32> = data.iter().map(|x| x.max(0.0)).collect();
+            Tensor::new(out, a.shape()).map_err(BackendError::ShapeMismatch)
+        }
+
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: exp".into()))
+        }
+
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: tanh".into()))
+        }
+
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: sum".into()))
+        }
+
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: max".into()))
+        }
+    }
+
+    fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
+        t.as_slice()
+            .expect("test: expected contiguous tensor")
+            .to_vec()
+    }
+
+    #[test]
+    fn forward_host_with_activation_relu_matches_forward_host_then_relu() {
+        let ops = ComputingMockOps;
+        let linear = Linear::new(4, 6, true, 7).unwrap();
+        let input = Tensor::new(
+            vec![0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8],
+            &[2, 4],
+        )
+        .unwrap();
+
+        let fused = linear
+            .forward_host_with_activation(&ops, &input, Activation::Relu)
+            .unwrap();
+        let non_fused = {
+            let y = linear.forward_host(&ops, &input).unwrap();
+            ops.relu(&y).unwrap()
+        };
+
+        assert_eq!(dense_vec(&fused), dense_vec(&non_fused));
+    }
+
+    #[test]
+    fn forward_host_with_activation_none_matches_forward_host() {
+        let ops = ComputingMockOps;
+        let linear = Linear::new(3, 5, false, 11).unwrap();
+        let input = Tensor::new(vec![0.2_f32, -0.1, 0.4, 0.3, -0.5, 0.1], &[2, 3]).unwrap();
+
+        let fused = linear
+            .forward_host_with_activation(&ops, &input, Activation::None)
+            .unwrap();
+        let non_fused = linear.forward_host(&ops, &input).unwrap();
+
+        assert_eq!(dense_vec(&fused), dense_vec(&non_fused));
+    }
+
+    #[test]
+    fn forward_host_with_activation_rejects_matmul_shape_mismatch_as_shape_error() {
+        // `forward_host` と同じエラー variant 一致契約（`nn/module.rs`
+        // doc 参照）: `ops.gemm_bias_act` の `?` に検査を任せず
+        // `matmul_out_shape` を先に呼ぶため、shape 不整合は
+        // `AutodiffError::Shape` として返る（`AutodiffError::Backend`
+        // ではない）。
+        let ops = ComputingMockOps;
+        let linear = Linear::new(4, 6, true, 7).unwrap();
+        // in_features=4 の重みに対し in_features=5 の入力を渡す。
+        let input = Tensor::new(vec![0.0_f32; 2 * 5], &[2, 5]).unwrap();
+
+        let err = linear
+            .forward_host_with_activation(&ops, &input, Activation::Relu)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
+
+        // 同じ入力で forward_host も同じ variant を返すことを併せて確認する
+        // （新旧 2 メソッド間でエラー variant が食い違わないことの回帰）。
+        let err2 = linear.forward_host(&ops, &input).unwrap_err();
+        assert!(matches!(err2, AutodiffError::Shape(_)));
+    }
+
+    #[test]
+    fn forward_host_with_activation_rejects_bias_broadcast_mismatch_as_shape_error() {
+        let ops = ComputingMockOps;
+        // bias が weight の out_features（6）と食い違う shape になる
+        // ケースを直接構築する（`Linear::new` は bias を自動導出するため
+        // `from_parameters` で意図的に壊れた bias を渡す）。
+        let weight = Tensor::new(vec![0.1_f32; 4 * 6], &[4, 6]).unwrap();
+        let bad_bias = Tensor::new(vec![0.0_f32; 3], &[3]).unwrap();
+        let linear = Linear {
+            weight,
+            bias: Some(bad_bias),
+        };
+        let input = Tensor::new(vec![0.0_f32; 2 * 4], &[2, 4]).unwrap();
+
+        let err = linear
+            .forward_host_with_activation(&ops, &input, Activation::Relu)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
     }
 }
