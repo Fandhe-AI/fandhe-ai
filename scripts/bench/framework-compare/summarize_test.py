@@ -1604,6 +1604,36 @@ class InferReuseSectionTests(unittest.TestCase):
         *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertFalse(has_infer_reuse_invalid)
 
+    def test_section_flags_infer_reuse_row_with_invalid_checksum_without_fresh(self):
+        # codex-review P0 指摘（PR #1229）: fresh 行が存在しない場合でも
+        # reuse 自身の checksum が非数値・NaN・Infinity 等で不正なら、
+        # fresh の有無と独立に無効判定に含めなければならない。旧実装は
+        # `if fresh:` 分岐の内側でしか checksum を検証しておらず、fresh
+        # 欠落時は checksum が不正でも `has_infer_reuse_invalid` が
+        # false のまま `--strict` を通過していた。
+        rows = [_infer_row(mode="reuse", checksum=float("nan"), init_s=0.02)]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertTrue(has_infer_reuse_invalid)
+        self.assertIn("無効: checksum が不正な値", text)
+
+    def test_section_flags_duplicate_infer_reuse_rows_as_invalid(self):
+        # codex-review P0 指摘（PR #1229）: `get()` は同一キー
+        # （framework/task/device/mode）に一致する最初の 1 行だけを返す
+        # ため、正常な reuse 行の後に checksum 不一致の壊れた reuse 行が
+        # 続いても後続行は一切検証されず `--strict` が不正データを通して
+        # いた。同一キーの重複自体を無効条件に含める（`_pick_row_for_gate`
+        # の重複キー検出と同じ fail-closed 方針）。
+        rows = [
+            _infer_row(mode="fresh", checksum=13.9),
+            _infer_row(mode="reuse", median_s=0.0005, checksum=13.9, init_s=0.02),
+            _infer_row(mode="reuse", median_s=0.0005, checksum=999.0, init_s=0.02),
+        ]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_reuse_invalid)
+
     def test_infer_reuse_rows_do_not_affect_gemm_or_train_sections(self):
         gemm_rows = [_with_parity(_base_row())]
         train_rows = [_train_row(mode="fresh")]
