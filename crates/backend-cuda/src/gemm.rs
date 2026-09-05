@@ -43,12 +43,18 @@ use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels;
 use crate::kernels_tiled_pipeline;
+use crate::kernels_transpose;
 use crate::kernels_wmma_opt;
 use crate::module_cache::load_function_cached;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
 use crate::pool::CudaAllocator;
-#[cfg(test)]
+// イシュー #1214: VJP 専用 NT/TN 転置入口（`transpose_to_pooled`）が
+// 転置中間バッファをプールから確保するために本番経路でも使う
+// （従来は `#[cfg(test)]` 限定のテストヘルパー専用だった）。
 use crate::pool::PooledCudaHandle;
+use crate::transpose::{
+    tiled_launch_config, validate_transpose_dims, validate_transpose_output_len,
+};
 // `compile_ptx` は本番経路（`CudaGemm::new`。イシュー #1024 で
 // `load_function_cached` 経由へ結線済み）ではなく、`internal-diagnostics`
 // feature（既定 off）限定の診断用コンストラクタ
@@ -191,6 +197,16 @@ thread_local! {
     /// classic）を検証するために使う。スレッドローカルにする理由も同上
     /// （並列テスト間の偽陽性混入を避ける）。
     pub(crate) static TILED_PIPELINE_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// VJP 専用 NT/TN 転置入口（`run_tiled_f32_nt`／`run_tiled_f32_tn`／
+    /// `launch_tiled_f32_resident_nt`。イシュー #1214）が実際に GPU 側
+    /// smem 転置カーネル（`transpose_smem_f32`）へ起動した回数。
+    /// `TILED_PIPELINE_LAUNCH_COUNT` と同型の可観測点で、実機なしの単体
+    /// テストが「NT/TN 判定が効いて `ops.rs::GEMM_HOST_REPACK_COUNT` の
+    /// `contiguous()` フォールバックを通っていないこと」を検証するために
+    /// 使う。スレッドローカルにする理由も同上（並列テスト間の偽陽性混入
+    /// を避ける）。
+    pub(crate) static GEMM_TRANSPOSED_ENTRY_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
@@ -320,6 +336,23 @@ pub struct CudaGemm {
     /// `tiled_pipeline` が `None` の場合の失敗理由。`wmma_tf32_error` と
     /// 同じ理由で文字列化して保持する。
     tiled_pipeline_error: Option<String>,
+    /// イシュー #1214。VJP 専用 NT/TN 転置入口（`run_tiled_f32_nt`／
+    /// `run_tiled_f32_tn`／`launch_tiled_f32_resident_nt`）が使う GPU 側
+    /// smem 転置カーネル（`kernels_transpose::transpose_smem_source_f32(false)`
+    /// パディングのみ変種。`transpose.rs::CudaTranspose` とは独立の
+    /// コンパイル単位・ハンドルとして本構造体に直接保持する。同一
+    /// カーネルを `CudaTranspose::new`〈7 カーネル eager コンパイル・
+    /// `load_function_cached` を経由しない〉から借用すると、fresh モード
+    /// 初回 backward に大きな固定費が乗るため採用しない
+    /// （`docs/matmul-vjp-zero-copy-decision.md` §4.3「不採用: `CudaTranspose`
+    /// キャッシュ」）。転置カーネル自体は `#include` を使わず全 compute
+    /// capability で成立するため通常は失敗しないが、`wmma_tf32` 系と同じ
+    /// fail-soft 方針（`CudaGemm::new` の早期 return には合流させず
+    /// naive/tiled 系の可用性を道連れにしない）を踏襲する。
+    transpose_smem_f32: Option<CudaFunction>,
+    /// `transpose_smem_f32` が `None` の場合の失敗理由。`wmma_tf32_error`
+    /// と同じ理由で文字列化して保持する。
+    transpose_smem_f32_error: Option<String>,
 }
 
 /// GEMM 呼び出しの `m`/`n`/`k` とホスト側スライス長の整合性を検証する。
@@ -798,6 +831,33 @@ fn compile_tiled_pipeline(device: &CudaDevice) -> Result<TiledPipelineFunction, 
     )?;
     let context_ptr = Arc::as_ptr(device.context()) as usize;
     Ok(TiledPipelineFunction(func, context_ptr))
+}
+
+/// VJP 専用 NT/TN 転置入口（イシュー #1214）の GPU 側 smem 転置カーネル
+/// （`kernels_transpose::transpose_smem_source_f32(false)`。パディングの
+/// み変種。swizzle 変種は #601 での A/B が未計測のため選ばない。
+/// `docs/perf/cuda-gemm-transpose-ab.md` §2）を [`load_function_cached`]
+/// 経由でロードする。`compile_tiled_pipeline` と同じ理由（`transpose.rs::
+/// CudaTranspose::new` の 7 カーネル一括コンパイルとは独立に、`CudaGemm::
+/// new` の早期 return には合流させず呼び出し元で `transpose_smem_f32_error`
+/// として退避する）。
+fn compile_transpose_smem_f32(device: &CudaDevice) -> Result<CudaFunction, CudaError> {
+    let descriptor = CudaKernelDescriptor::new_with_compiled_dims(
+        "transpose_smem_f32",
+        fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+        kernels_transpose::TRANSPOSE_TILE,
+        kernels_transpose::TRANSPOSE_TILE,
+        1,
+        1,
+        fandhe_ai_tensor_core::dispatch::DType::F32,
+        CompiledDims::DYNAMIC_ALL,
+    )?;
+    load_function_cached(
+        device,
+        descriptor,
+        &kernels_transpose::transpose_smem_source_f32(false),
+        "transpose_smem_f32",
+    )
 }
 
 /// [`wmma_tf32_launch_config`] の tiled pipeline 版。ブロックタイル
@@ -1320,6 +1380,16 @@ impl CudaGemm {
             Err(e) => (None, Some(e.to_string())),
         };
 
+        // イシュー #1214: VJP 専用 NT/TN 転置入口の smem 転置カーネル。
+        // 上記 `wmma_tf32`／`tiled_pipeline` 系と同じ fail-soft 方針
+        // （`transpose_smem_f32_error` フィールドのドキュメンテーション
+        // コメント参照）。
+        let (transpose_smem_f32, transpose_smem_f32_error) =
+            match compile_transpose_smem_f32(device) {
+                Ok(func) => (Some(func), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+
         let allocator = context_cache::cached_allocator(device)?;
 
         Ok(Self {
@@ -1341,6 +1411,8 @@ impl CudaGemm {
             wmma_tf32_staged_swizzle_error,
             tiled_pipeline,
             tiled_pipeline_error,
+            transpose_smem_f32,
+            transpose_smem_f32_error,
         })
     }
 
@@ -2808,6 +2880,212 @@ impl CudaGemm {
         Ok(c_host)
     }
 
+    /// VJP 専用 NT/TN 転置入口（イシュー #1214）の内部ヘルパー: `src`
+    /// （論理形状 `rows`×`cols` 行優先のデバイス常駐バッファ。転置格納
+    /// オペランドの元 storage をそのまま H2D 転送したもの。呼び出し元は
+    /// `run_tiled_f32_nt`／`run_tiled_f32_tn`）を GPU 側 smem 転置カーネル
+    /// （`transpose_smem_f32`）で転置し、結果（論理形状 `cols`×`rows`
+    /// 行優先＝標準 storage）をプール確保した中間バッファへ書き込む。
+    ///
+    /// 転置先へは既存 NN GEMM カーネル（`select_tiled_f32_kernel` が選ぶ
+    /// classic／cp.async パイプライン）をそのまま渡せるため、GEMM カーネル
+    /// 側の変更は一切不要（`docs/matmul-vjp-zero-copy-decision.md` §4.3
+    /// 「採用: GPU 側 smem 転置 → 既存 NN GEMM カーネル」）。
+    ///
+    /// # alloc_uninit の適用根拠
+    ///
+    /// 転置カーネル（`kernels_transpose::transpose_smem_source_f32`）の
+    /// epilogue ストアガード `if (out_row < n && out_col < m)`（`n`/`m`
+    /// はカーネル引数。呼び出し規約は本関数の `cols`/`rows` に対応）は、
+    /// 出力グリッド全体（`rows*cols` 要素）を標準の行列転置としてちょうど
+    /// 1 回ずつ書き切る（重複書き込み・欠落のいずれも生じない）。その
+    /// ため確保直後の未初期化領域は起動完了までに全要素が上書きされ
+    /// 呼び出し元へ露出しない（`docs/backend-cuda-pool-allocator-
+    /// decision.md` §「`alloc_uninit` の適用」の確認済みケースに準じる）。
+    ///
+    /// 呼び出し元は `rows > 0 && cols > 0` を保証する契約（`run_tiled_f32_nt`／
+    /// `run_tiled_f32_tn` は `m == 0 || n == 0`／`k == 0` を本関数呼び出し
+    /// より前に早期 return する。`run_f32_kernel` と同型の契約）。
+    fn transpose_to_pooled(
+        &self,
+        src: &CudaSlice<f32>,
+        rows: u32,
+        cols: u32,
+    ) -> Result<PooledCudaHandle<f32>, CudaError> {
+        validate_transpose_dims(src.len(), rows, cols)?;
+        let out_len = (rows as usize) * (cols as usize);
+        let mut dst = self.allocator.alloc_uninit_f32(out_len)?;
+        validate_transpose_output_len(dst.as_view().len(), cols, rows)?;
+
+        if rows == 0 || cols == 0 {
+            // 0 次元グリッドの起動を CUDA driver が拒否するため
+            // （`transpose.rs::launch_naive_f32` の `m == 0 || n == 0`
+            // 早期 return と同じ理由）。上記契約上は到達しないはずだが、
+            // safe な内部ヘルパーとして防御的に no-op で返す。
+            return Ok(dst);
+        }
+
+        let func = self.transpose_smem_f32.as_ref().ok_or_else(|| {
+            CudaError::TransposeEntryUnavailable {
+                detail: self.transpose_smem_f32_error.clone().unwrap_or_else(|| {
+                    "transpose_smem_f32 kernel unavailable for an unknown reason".to_string()
+                }),
+            }
+        })?;
+
+        let cfg = tiled_launch_config(rows, cols);
+        let (m_i, n_i) = (rows as i32, cols as i32);
+
+        // SAFETY: `src`（呼び出し元検証済み rows*cols 要素）・`dst`
+        // （同じく rows*cols 要素。プール確保直後は上記 alloc_uninit 根拠
+        // により起動完了までに全要素が上書きされる）はカーネル引数
+        // （`const float* src, float* dst, int m, int n`）と型・個数が
+        // 1:1 対応し、カーネル内の手動境界チェック（`transpose.rs::
+        // launch_f32` と同一の根拠。REQ-8）と合わせて OOB を防ぐ。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(src)
+                .arg(&mut dst.as_view_mut())
+                .arg(&m_i)
+                .arg(&n_i)
+                .launch(cfg)?;
+        }
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_*`／`MemoryOps::download`／明示 `synchronize`）へ
+        // 委ねる（設計文書 §3〜§4）。
+        GEMM_TRANSPOSED_ENTRY_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+        Ok(dst)
+    }
+
+    /// VJP 専用 NT 転置入口（イシュー #1214）: `matmul_vjp` の d_weight
+    /// （`Aᵀ @ g`。CUDA では `b`＝`g` が転置格納ではなく `a`＝`Aᵀ` を渡す
+    /// 側が該当）や、より一般に「B が転置格納」なパターンを、`b`（正確
+    /// には転置元 storage を表す `bt`。論理形状 `[n,k]` 行優先）を
+    /// `Tensor::contiguous()` の再パックコピーを経由せず GPU 側 smem
+    /// 転置カーネルで標準 `[k,n]` へ変換してから既存 NN GEMM カーネル
+    /// （`select_tiled_f32_kernel`）へ渡す。呼び出し元は `ops.rs::
+    /// CudaBackendOps::gemm_fp32_strict_impl`（`dense_transposed_view(b)`
+    /// が `Some` を返す場合のみ）。
+    ///
+    /// ホスト側形状検証は [`Self::run_tiled_f32`] と同一
+    /// （`validate_gemm_dims`・`validate_tiled_k_bound`）。`bt` の長さは
+    /// `n*k`（`a.len() == m*k` と対で `validate_gemm_dims` が検証する
+    /// `b.len() == k*n` と同じ要素数）。
+    pub(crate) fn run_tiled_f32_nt(
+        &self,
+        a: &[f32],
+        bt: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        validate_gemm_dims(a.len(), bt.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
+        }
+
+        let a_dev = self.stream.clone_htod(a)?;
+        let bt_dev = self.stream.clone_htod(bt)?;
+        // `bt`（論理形状 [n,k] 行優先）を転置して標準 `b`（[k,n] 行優先）
+        // を得る（`Self::transpose_to_pooled` ドキュメンテーションコメント
+        // 参照）。
+        let b_std = self.transpose_to_pooled(&bt_dev, n, k)?;
+
+        let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
+        let mut c_dev = self
+            .allocator
+            .alloc_uninit_f32((m as usize) * (n as usize))?;
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `run_f32_kernel` と同一の根拠。`a_dev`（m*k 要素）・
+        // `b_std`（k*n 要素。転置カーネルの出力として上記で構築済み）・
+        // `c_dev`（m*n 要素）はホスト側検証（`validate_gemm_dims`・
+        // `validate_tiled_k_bound`）済みの m/n/k と 1:1 対応し、GEMM
+        // カーネル内の手動境界チェック（REQ-8）と合わせて OOB を防ぐ。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(&a_dev)
+                .arg(&b_std.as_view())
+                .arg(&mut c_dev.as_view_mut())
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
+        Ok(c_host)
+    }
+
+    /// VJP 専用 TN 転置入口（イシュー #1214）: [`Self::run_tiled_f32_nt`]
+    /// と対称の「A が転置格納」パターン。`at`（転置元 storage。論理形状
+    /// `[k,m]` 行優先）を GPU 側 smem 転置カーネルで標準 `[m,k]` へ変換
+    /// してから既存 NN GEMM カーネルへ渡す。呼び出し元は `ops.rs::
+    /// CudaBackendOps::gemm_fp32_strict_impl`（`dense_transposed_view(a)`
+    /// が `Some` を返す場合のみ。`matmul_vjp` の d_input `g @ Bᵀ` が
+    /// 該当しうる）。
+    pub(crate) fn run_tiled_f32_tn(
+        &self,
+        at: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        validate_gemm_dims(at.len(), b.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
+        }
+
+        let at_dev = self.stream.clone_htod(at)?;
+        let b_dev = self.stream.clone_htod(b)?;
+        // `at`（論理形状 [k,m] 行優先）を転置して標準 `a`（[m,k] 行優先）
+        // を得る。
+        let a_std = self.transpose_to_pooled(&at_dev, k, m)?;
+
+        let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
+        let mut c_dev = self
+            .allocator
+            .alloc_uninit_f32((m as usize) * (n as usize))?;
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: run_tiled_f32_nt と同一の根拠。`a_std`（m*k 要素。転置
+        // カーネルの出力として上記で構築済み）・`b_dev`（k*n 要素）・
+        // `c_dev`（m*n 要素）はホスト側検証済みの m/n/k と 1:1 対応する。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(&a_std.as_view())
+                .arg(&b_dev)
+                .arg(&mut c_dev.as_view_mut())
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
+        Ok(c_host)
+    }
+
+    /// `transpose_smem_f32` フィールドが `Some` かどうか（可用性照会
+    /// API。`tiled_pipeline_available` と同型）。`ops.rs` が NT/TN 転置
+    /// 入口へ分岐する前に呼ぶことは必須ではない（`run_tiled_f32_nt`／
+    /// `run_tiled_f32_tn`／`launch_tiled_f32_resident_nt` 自身が
+    /// `CudaError::TransposeEntryUnavailable` を返すため）が、診断・
+    /// テストが事前に判定できるよう公開する。
+    pub(crate) fn transpose_smem_f32_available(&self) -> bool {
+        self.transpose_smem_f32.is_some()
+    }
+
     /// f16 カーネル共通の起動手続き。[`Self::run_f32_kernel`] と同一構造
     /// （naive/tiled 双方の `run_*_f16` から呼ばれる）。
     #[allow(clippy::too_many_arguments)]
@@ -3295,6 +3573,77 @@ impl CudaGemm {
         // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
         // 委ねる（設計文書 §3〜§4）。
         Ok(())
+    }
+
+    /// [`Self::launch_tiled_f32_resident`] の NT 版（イシュー #1214）:
+    /// `b`（`bt_dev`）が転置格納（`ops.rs::CudaBackendOps::gemm_resident_lhs`
+    /// が呼ぶ `dense_transposed_view(b)` が `Some` を返す場合）である
+    /// `Op::LinearResident` の d_input（`w @ gᵀ`）を、`b` を
+    /// `Tensor::contiguous()` の再パックコピー（`MemoryOps::upload`）を
+    /// 経由せず、`bt_dev`（転置元 storage を直接 H2D 転送した生バッファ。
+    /// 論理形状 `[n,k]` 行優先）を GPU 側 smem 転置カーネルで標準
+    /// `[k,n]` へ変換してから起動する。`a_dev`（`w`）は
+    /// [`Self::launch_tiled_f32_resident`] と同じくデバイス常駐 `CudaView`
+    /// のまま渡す（この呼び出し元は `w` を毎回 upload し直さないため）。
+    ///
+    /// `a_offset`（`select_tiled_f32_kernel` の cp.async 整列判定用）の
+    /// 意味・可視性制約（`pub(crate)` に限定する理由）は
+    /// [`Self::launch_tiled_f32_resident`] のドキュメンテーションコメント
+    /// と同一。
+    #[allow(clippy::too_many_arguments)]
+    /// 戻り値の `PooledCudaHandle<f32>`（`b_std`。転置カーネルの出力
+    /// バッファ）は**呼び出し元が保持し続けなければならない**（advisor
+    /// 指摘）: `PooledCudaHandle::Drop` はプールへの返却（`release_cached`
+    /// 経由の実解放時は `cuMemFree` 相当）を伴い、本メソッド自体は
+    /// 非同期投入のみで完了を待たないため、`b_std` をこの関数内で drop
+    /// すると GEMM カーネルの実行完了前にバッファが再利用・解放されうる
+    /// （単一ストリームの FIFO 順序保証により実際には安全な可能性が高い
+    /// が、これは検証されていない暗黙の前提であり明示的に握る）。呼び出し
+    /// 元は本ハンドルを次の同期点（`readback`／`MemoryOps::download`／
+    /// 明示 `synchronize`）まで生存させること（`run_tiled_f32_nt`／
+    /// `run_tiled_f32_tn` は関数内で readback まで完結するため同様の問題
+    /// はない）。
+    pub(crate) fn launch_tiled_f32_resident_nt(
+        &self,
+        a_dev: &CudaView<'_, f32>,
+        a_offset: usize,
+        bt_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<PooledCudaHandle<f32>, CudaError> {
+        validate_gemm_dims(a_dev.len(), bt_dev.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+
+        // `bt_dev`（論理形状 [n,k] 行優先）を転置して標準 `b`（[k,n]
+        // 行優先）を得る（`Self::transpose_to_pooled` ドキュメンテーション
+        // コメント参照）。
+        let b_std = self.transpose_to_pooled(bt_dev, n, k)?;
+
+        let (func, cfg) = self.select_tiled_f32_kernel(a_offset, m, n, k);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `launch_tiled_f32_resident` と同一の根拠。`b_std` は
+        // 転置カーネルの出力として上記で構築済みの k*n 要素バッファ。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(a_dev)
+                .arg(&b_std.as_view())
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+        // 委ねる（設計文書 §3〜§4）。`b_std` は上記 SAFETY コメントの
+        // とおり呼び出し元が同期点まで保持する契約のため、ここでは
+        // drop せずそのまま返す。
+        Ok(b_std)
     }
 
     /// デバイス常駐済みの A/B/C バッファに対して WMMA(TF32) カーネルを

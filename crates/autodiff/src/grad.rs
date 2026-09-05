@@ -291,9 +291,11 @@ pub(crate) fn vjp(
             // コピーを経由せず BLIS packing 側で直接吸収する専用入口
             // （TN パターン。CPU 実装クレートの `gemm_blis_parallel_tn`）
             // へ渡す（`narrow` 後の転置・TT は一般 stride 非対応のため
-            // 従来どおり `contiguous()` フォールバック）。CUDA（#1214）・
-            // Metal（#1215）は未対応で引き続き `contiguous()` で再パック
-            // されうる。
+            // 従来どおり `contiguous()` フォールバック）。CUDA（イシュー
+            // #1214）も同型の判定で GPU 側 smem 転置カーネル → 既存 NN
+            // GEMM カーネルへ渡す専用入口（`CudaGemm::run_tiled_f32_tn`）
+            // を持つ。Metal（#1215）は未対応で引き続き `contiguous()`
+            // で再パックされうる。
             let x_t = transpose2d(x_val);
             let d_weight = ops
                 .gemm_fp32_strict(&x_t, g)
@@ -444,8 +446,10 @@ fn transpose2d(tensor: &Tensor<f32>) -> Tensor<f32> {
 /// `gemm_blis_parallel_tn`）へ分岐する。両方転置（TT）・一般 stride
 /// （`narrow` 後の転置等）は CPU でも従来どおり `contiguous()` を経由
 /// する（一般 stride 化はスコープ外。`docs/matmul-vjp-zero-copy-
-/// decision.md` §3.2・§4.2 追補）。CUDA（#1214）・Metal（#1215）は
-/// 未対応で引き続き `contiguous()` の再パックが発生しうる。
+/// decision.md` §3.2・§4.2・§4.3 追補）。CUDA（イシュー #1214）も同型の
+/// NT/TN 専用入口（GPU 側 smem 転置カーネル → 既存 NN GEMM カーネル。
+/// `CudaGemm::run_tiled_f32_nt`／`run_tiled_f32_tn`）を持つ。Metal
+/// （#1215）は未対応で引き続き `contiguous()` の再パックが発生しうる。
 ///
 /// エラーは fail-closed で `AutodiffError::Backend` として伝播し、
 /// `eval::matmul` への暗黙フォールバックは設けない（forward と backward

@@ -126,6 +126,44 @@ CPU 実機実測・採否判断は `docs/perf/cpu-gemm-vjp-transposed-entry.md`
 を参照。CUDA（#1214）・Metal（#1215）は引き続き未対応（`docs/matmul-
 vjp-zero-copy-decision.md` §3.2 の該当行は変更しない）。
 
+### 4.3 追補（イシュー #1214）
+
+CUDA 本番 GEMM カーネル（§3.2 表 2 行目「CUDA 本番 GEMM カーネルの
+lda／転置対応」）の転置再パックを、CPU 版（§4.2）と同じ **NT（`b` が
+転置格納）／TN（`a` が転置格納）の 2 パターン限定**で解消した。ただし
+CPU の BLIS packing 側吸収方式（`pack_a_from_transposed`／
+`pack_b_from_transposed`）とは異なり、CUDA は**GPU 側 smem 転置カーネル
+（`kernels_transpose::transpose_smem_source_f32(false)`。パディングのみ
+変種。#601 で実装済み・`docs/perf/cuda-gemm-transpose-ab.md` §2 の
+「未計測のまま本番導入しない」を経て本イシューが結線イシューとなる）→
+既存 NN GEMM カーネル（`select_tiled_f32_kernel` が選ぶ classic／cp.async
+パイプライン。#1137）**方式を採る。転置オペランドの元 storage（行優先
+連続）をそのまま H2D 転送し、デバイス上で転置してから標準 GEMM カーネル
+へ渡すため、既存カーネル・カーネル選択ロジック（`kernel_specs()`）には
+一切手を入れない。
+
+判定条件は CPU 版と同一（`rank() == 2 && strides() == [1, shape()[0]]`）
+で、`crates/backend-cuda/src/ops.rs` に `dense_transposed_view`（CPU 版の
+private 複製）を新設した。適用範囲は `gemm_fp32_strict_impl`（VJP・TF32
+opt-in OFF 時の `gemm`・`gemm_bias_act` の `ComposedFallback`）と
+`gemm_resident_lhs` の 2 箇所のみ。**TF32 opt-in ON 時の `gemm`
+（`run_wmma_tf32`）・`gemm_bias_act` の融合経路・`gemm_resident_rhs` は
+対象外**（意図的な限定。転置カーネル起動を挟むと epilogue 融合の利点が
+薄れるため）。両方転置（TT）・一般 stride（`narrow` 後の転置等）・転置
+カーネル自体が使用不能な環境（`CudaGemm::new` 時のコンパイル失敗。
+fail-soft）は従来どおり `contiguous()` フォールバックへ倒す
+（`ops.rs::GEMM_HOST_REPACK_COUNT` へ計上）。
+
+数値契約: GEMM カーネルに渡るデバイス上のバイト列は「`contiguous()`
+してから upload した場合」と同一（転置カーネルは純データ移動のみで
+丸めを追加しない）ため、計算結果は既存 NN 経路と **bit 完全一致**する
+契約（`crates/backend-cuda/tests/gemm_transposed_parity.rs` で検証。
+CPU 参照実装との REQ-2 複合判定も併せて確認する）。tolerance の新設・
+変更は行っていない。
+
+CUDA（GB10）実機実測・採否判断は `docs/perf/cuda-gemm-vjp-transposed-
+entry.md` を参照。Metal（#1215）は引き続き未対応。
+
 ## 5. 実機実測（未実施）
 
 本ランは Linux x86_64（NVRTC 非搭載・Metal 実機なし）のため、以下は
