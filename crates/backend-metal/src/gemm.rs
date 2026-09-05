@@ -857,6 +857,66 @@ impl MetalGemm {
         Ok(resolved_cfg)
     }
 
+    /// [`Self::dispatch_tiled_prepared`] と同じ NN 経路（`pipeline_for_tile`
+    /// → `encode_dispatch_tiled`）を、`encode`（記録のみ）と `synchronize`
+    /// （commit + `waitUntilCompleted`）へ分離した診断専用ヘルパ（イシュー
+    /// #1189）。
+    ///
+    /// # 追加理由
+    ///
+    /// [`MetalContext::dispatch_sync`] は「encode → synchronize」を 1 回で
+    /// 行う薄いラッパーであり（`dispatch_sync` ドキュメントコメント参照）、
+    /// 公開 API からは encode（コマンドバッファへの記録）と synchronize
+    /// （commit + GPU 完了待ち）を個別に計時できない。`crates/backend-metal/
+    /// src/gemm_reuse_phase_diag_tests.rs`（reuse 計測境界の transfer／
+    /// sync／kernel 内訳一次測定）はこの 2 段の境界を区別する必要がある
+    /// ため、本メソッドを新設した。既存の [`Self::dispatch_tiled_prepared`]
+    /// 自体は無変更（本メソッドは新規追加のみで、既存関数を書き換えない）。
+    ///
+    /// `#[cfg(test)]` 限定（本体ビルドには含まれない。AC-2「既存の本番
+    /// 経路・既存テストを変更しない（読み取り計測のみ）」に対応）。
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn diag_encode_tiled_nn(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+        validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
+
+        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn)?;
+        ctx.encode(
+            "diag_encode_tiled_nn",
+            &[a_buf.raw(), b_buf.raw(), c_buf.raw()],
+            None,
+            |encoder| {
+                encode_dispatch_tiled(
+                    encoder,
+                    &pipeline,
+                    a_buf,
+                    0,
+                    b_buf,
+                    0,
+                    c_buf,
+                    dims,
+                    resolved_cfg,
+                    self.swizzle_enabled,
+                    GemmStrides::nn(dims.k, dims.n),
+                    TransposePattern::Nn,
+                );
+            },
+        )?;
+
+        Ok(resolved_cfg)
+    }
+
     /// `gemm_simdgroup_tiled`（`TRANS_A`/`TRANS_B` 拡張。イシュー #1138）への
     /// strided 明示入口。bias/act エピローグは持たない（[`Self::
     /// dispatch_tiled_prepared`] と同じ「GPU 実行のみ」計測境界。呼び出し元

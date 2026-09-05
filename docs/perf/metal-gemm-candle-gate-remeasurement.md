@@ -138,6 +138,14 @@ metal-gemm-transpose-tiled.md`「5. 性能実測（ベンチマーク A/B）と�
   指摘している fandhe-ai 自系列内の転送（アップロード＋readback）寄与。カーネル最適化のみでは
   解消できない構造要因の可能性がある。対処には CUDA 側 #1142 §8 と同型の `Tensor<f32>`
   デバイス常駐化等、別スコープの設計変更が必要（後続 issue 化の要否は §9 ユーザー判断）
+  **実測確定（#1189）**: `docs/perf/metal-gemm-reuse-phase-breakdown.md` が reuse 1 反復を
+  upload／encode／commit_wait／readback／host_copy へ分解実測した結果、CUDA（#1182）とは
+  非対称な結論となった——N=1024/2048 は `matmul` 単体（転送＋カーネル＋同期）が candle
+  fresh とほぼ同等（0.90〜0.99 倍）まで縮まるが、**N=4096 は `matmul` 単体が candle fresh
+  より 1.52 倍遅く**、reuse 計測境界の再定義（ハーネス `host_copy`／`checksum` の除去）
+  では N=4096 の未達は解消しない。Metal のギャップは GPU 実行自体（統合メモリ転送・
+  カーネル・同期の合算）に起因する構造的なものであり、上記デバイス常駐化のような別スコープ
+  の設計変更が必要という結論を裏付ける（同ドキュメント §7・§9）
 - **#1138 自動ルーティング（`dispatch_strided_bias_act_prepared` 委譲）の性能 A/B**: NN 経路
   への転置ロード拡張の結線・計測は #1138 のスコープ外として持ち越されており、本 PR でも
   実施しない

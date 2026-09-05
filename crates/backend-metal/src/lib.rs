@@ -274,6 +274,20 @@ pub mod error;
 // 非キャッシュ・poison 時 fail-closed）を検証できるようにしてある。
 #[cfg(target_os = "macos")]
 pub mod gemm;
+// イシュー #1189: `bench-fandhe --task gemm --mode reuse --phases`
+// （framework-compare。CUDA 側イシュー #1182 の Metal 版）の `matmul`
+// 区間内訳（upload／encode／commit_wait／readback／host_copy）を実測
+// 分解する診断テスト。`gemm::MetalGemm::diag_encode_tiled_nn`
+// （`#[cfg(test)] pub(crate)`）・`context_cache::{cached_context,
+// cached_gemm}` へ到達する必要があるため、CUDA 側 `gemm_reuse_phase_
+// diag_tests.rs` と同じ理由でクレートルートの兄弟モジュールとして
+// 配置する。`objc2` 系 FFI 型（`MetalBuffer`・`MetalContext`）に触れる
+// ため `cfg(target_os = "macos")` も付ける（`buffer`／`context`／`gemm`
+// と同じ判断）。プロダクションコード（`gemm.rs` の既存関数・`context.rs`・
+// `buffer.rs`）は本イシューで変更しない（`gemm.rs` への追加は新規
+// `pub(crate)` ヘルパのみ）。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_reuse_phase_diag_tests;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;

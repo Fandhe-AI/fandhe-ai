@@ -1,0 +1,22 @@
+イシュー #1189: Metal GEMM reuse 計測境界フェーズ分解 実測環境情報
+（内部ホスト名は含めない。docs/real-hardware-verification-env.md 方針）
+
+チップ: Apple M4 Max（16 コア: 12 性能 + 4 効率, GPU 40 コア）
+メモリ: 64 GB
+OS: macOS 26.6.2 (BuildVersion 25G83)
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+cargo: 1.96.0 (30a34c682 2026-05-25)
+転送元コミット（origin/main）: fff8904bccef8ef7abea1cba5e337618b972f3f1
+framework-compare fandhe-ai ピン: =0.6.0（crates.io。ルート Cargo.lock・
+framework-compare Cargo.lock とも無変更）
+
+pmset -g therm（Layer A/B/gemm_bench 計測前後で実行。サーマルスロットリング
+の有無を確認する目的。sudo 不要）:
+  Note: No thermal warning level has been recorded
+  Note: No performance warning level has been recorded
+  Note: No CPU power status has been recorded
+  （計測前後で変化なし。サーマルスロットリングの兆候なし）
+
+実行順: Layer A（bench-fandhe --phases 5 run）→ Layer A AC-2（非 phases 1 run）
+→ Layer B（診断テスト 5 run）→ gemm_bench 相互検証（1 run）。連続・GPU アイドル
+状態で実行（docs/perf/metal-bench-noise-protocol.md 準拠）。
