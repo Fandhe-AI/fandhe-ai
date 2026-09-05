@@ -121,6 +121,76 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
     Some(view)
 }
 
+/// `gemm`／`gemm_fp32_strict_into` 共通の転置判定付きディスパッチ
+/// （イシュー #1213 の NT/TN 入口を #1212 の staging 直接書き込み経路
+/// でも共有する。codex-review P2・PR #1224）。`out` は呼び出し元が
+/// ゼロ初期化済みの `m*n` スライス（累積カーネル契約。`gemm` doc 参照）。
+/// `a`／`b` の片側が `dense_transposed_view` で判定できる転置格納なら
+/// `contiguous()` の再パックコピーを経由せず [`gemm_blis_parallel_tn`]／
+/// [`gemm_blis_parallel_nt`] へ渡し、それ以外は従来の
+/// [`gemm_blis_parallel`] へフォールバックする（再パック回数は
+/// `GEMM_HOST_REPACK_COUNT` へ計上）。`ctx` はエラーメッセージ先頭の
+/// 呼び出し元名。
+fn gemm_into_slice(
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    out: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    ctx: &str,
+) -> Result<(), BackendError> {
+    match (dense_transposed_view(a), dense_transposed_view(b)) {
+        (Some(at), None) => {
+            // TN: a は転置格納（at: 論理形状 [k,m] 行優先）、b は通常。
+            if !b.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            let b_owned = b.contiguous();
+            let b_slice = b_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(format!("{ctx}: rhs not contiguous after contiguous()"))
+            })?;
+            gemm_blis_parallel_tn(at, b_slice, out, m, n, k)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
+        (None, Some(bt)) => {
+            // NT: b は転置格納（bt: 論理形状 [n,k] 行優先）、a は通常。
+            if !a.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            let a_owned = a.contiguous();
+            let a_slice = a_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(format!("{ctx}: lhs not contiguous after contiguous()"))
+            })?;
+            gemm_blis_parallel_nt(a_slice, bt, out, m, n, k)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
+        _ => {
+            // TT（両方転置）・判定不能（一般 stride・broadcast 等）:
+            // 従来どおり両オペランドを contiguous() で実体化する
+            // （`Tensor::as_slice` は非 contiguous では `None` を返す
+            // 契約。`crates/tensor-core/src/tensor.rs` 参照）。
+            if !a.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            if !b.is_contiguous() {
+                GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            let a_owned = a.contiguous();
+            let b_owned = b.contiguous();
+            let a_slice = a_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(format!("{ctx}: lhs not contiguous after contiguous()"))
+            })?;
+            let b_slice = b_owned.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe(format!("{ctx}: rhs not contiguous after contiguous()"))
+            })?;
+            gemm_blis_parallel(a_slice, b_slice, out, m, n, k)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 /// [`MemoryOps`] の CPU 実装（イシュー #935）。`shared_cpu_memory()`
 /// （プロセスワイド共有 `CpuMemory`）へ委譲する薄いラッパー。
 impl MemoryOps for CpuBackendOps {
@@ -385,55 +455,7 @@ impl BackendOps for CpuBackendOps {
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
         let mut out = vec![0.0f32; m * n];
-
-        match (dense_transposed_view(a), dense_transposed_view(b)) {
-            (Some(at), None) => {
-                // TN: a は転置格納（at: 論理形状 [k,m] 行優先）、b は通常。
-                if !b.is_contiguous() {
-                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
-                }
-                let b_owned = b.contiguous();
-                let b_slice = b_owned.as_slice().ok_or_else(|| {
-                    gemm_contiguity_fail_safe("gemm: rhs not contiguous after contiguous()")
-                })?;
-                gemm_blis_parallel_tn(at, b_slice, &mut out, m, n, k)
-                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-            }
-            (None, Some(bt)) => {
-                // NT: b は転置格納（bt: 論理形状 [n,k] 行優先）、a は通常。
-                if !a.is_contiguous() {
-                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
-                }
-                let a_owned = a.contiguous();
-                let a_slice = a_owned.as_slice().ok_or_else(|| {
-                    gemm_contiguity_fail_safe("gemm: lhs not contiguous after contiguous()")
-                })?;
-                gemm_blis_parallel_nt(a_slice, bt, &mut out, m, n, k)
-                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-            }
-            _ => {
-                // TT（両方転置）・判定不能（一般 stride・broadcast 等）:
-                // 従来どおり両オペランドを contiguous() で実体化する
-                // （`Tensor::as_slice` は非 contiguous では `None` を返す
-                // 契約。`crates/tensor-core/src/tensor.rs` 参照）。
-                if !a.is_contiguous() {
-                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
-                }
-                if !b.is_contiguous() {
-                    GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
-                }
-                let a_owned = a.contiguous();
-                let b_owned = b.contiguous();
-                let a_slice = a_owned.as_slice().ok_or_else(|| {
-                    gemm_contiguity_fail_safe("gemm: lhs not contiguous after contiguous()")
-                })?;
-                let b_slice = b_owned.as_slice().ok_or_else(|| {
-                    gemm_contiguity_fail_safe("gemm: rhs not contiguous after contiguous()")
-                })?;
-                gemm_blis_parallel(a_slice, b_slice, &mut out, m, n, k)
-                    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-            }
-        }
+        gemm_into_slice(a, b, &mut out, m, n, k, "gemm")?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -491,28 +513,17 @@ impl BackendOps for CpuBackendOps {
             )));
         }
 
-        let a_owned = a.contiguous();
-        let b_owned = b.contiguous();
-        let a_slice = a_owned.as_slice().ok_or_else(|| {
-            gemm_contiguity_fail_safe(
-                "gemm_fp32_strict_into: lhs not contiguous after contiguous()",
-            )
-        })?;
-        let b_slice = b_owned.as_slice().ok_or_else(|| {
-            gemm_contiguity_fail_safe(
-                "gemm_fp32_strict_into: rhs not contiguous after contiguous()",
-            )
-        })?;
-
         let handle = out
             .downcast_handle_mut::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
         let dst = &mut handle.data[out_offset..end];
         // 上書き契約（doc 参照）: 永続バッファの残留値を消してから
-        // 累積カーネルへ渡す。
+        // 累積カーネルへ渡す。転置オペランド（`LinearResident` の
+        // d_weight が渡す `x_t = transpose2d(x)`）は `gemm` と同じ
+        // NT/TN 判定を共有し、`contiguous()` の転置コピーを経由しない
+        // （codex-review P2・PR #1224）。
         dst.fill(0.0);
-        gemm_blis_parallel(a_slice, b_slice, dst, m, n, k)
-            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        gemm_into_slice(a, b, dst, m, n, k, "gemm_fp32_strict_into")?;
         let _ = out_shape; // shape 検証のみに使用（`matmul_out_shape` の失敗検出）
         Ok(())
     }
@@ -1137,6 +1148,34 @@ mod repack_count_tests {
             before,
             "dense な転置 view（NT）は contiguous() フォールバックを通らないはず"
         );
+    }
+
+    /// `gemm_fp32_strict_into`（#1212 の staging 直接書き込み）でも
+    /// `LinearResident` の d_weight が渡す転置 lhs（TN）を再パックせず
+    /// `gemm` と bit 同一の結果を書くこと（codex-review P2・PR #1224）。
+    #[test]
+    fn gemm_fp32_strict_into_transposed_lhs_shares_tn_entry() {
+        use fandhe_ai_tensor_core::MemoryOps;
+        reset_counter();
+        let ops = CpuBackendOps::new();
+        let mem = crate::memory::CpuMemory::new();
+        let (m, k, n) = (4usize, 6usize, 5usize);
+        let x = Tensor::new((0..k * m).map(|i| i as f32 * 0.5 - 3.0).collect(), &[k, m]).unwrap();
+        let g = Tensor::new((0..k * n).map(|i| (i % 7) as f32 - 2.0).collect(), &[k, n]).unwrap();
+        let x_t = x.transpose_2d().unwrap();
+        let expected = ops.gemm(&x_t, &g).unwrap();
+        let seed = Tensor::new(vec![0.0f32; 2 + m * n], &[2 + m * n]).unwrap();
+        let mut staging = mem.upload(&seed).unwrap();
+        let before = counter();
+        ops.gemm_fp32_strict_into(&x_t, &g, &mut staging, 2)
+            .unwrap();
+        assert_eq!(
+            counter(),
+            before,
+            "dense な転置 lhs（TN）は再パックを通らないはず"
+        );
+        let host = mem.download(&staging).unwrap().contiguous();
+        assert_eq!(&host.as_slice().unwrap()[2..], expected.as_slice().unwrap());
     }
 
     #[test]
