@@ -131,6 +131,14 @@ fn print_quartiles_ms(label: &str, q: Quartiles) {
 
 /// 1 反復分のフェーズ計測結果（ファイル冒頭「対応」表参照）。
 struct PhaseSample {
+    /// `diag_encode_tiled_nn` が実際にディスパッチした構成（`pipeline_
+    /// for_tile` のフォールバック解決後）。要求構成 `cfg`（呼び出し元が
+    /// `tile::select_for_device` で解決した値）と一致するとは限らない
+    /// （デバイス上限超過・パイプライン構築失敗時にフォールバックしうる。
+    /// `pipeline_for_tile` ドキュメンテーションコメント参照）ため、
+    /// 計測時間をどの構成の性能として記録したかを区別するために保持
+    /// する（codex-review 指摘 #1189）。
+    resolved_cfg: tile::TileConfig,
     upload_a_secs: f64,
     upload_b_secs: f64,
     alloc_c_secs: f64,
@@ -182,7 +190,8 @@ fn measure_one_phase_trial(
     // エンコード（記録のみ・commit しない。ファイル冒頭「GPU タイム
     // スタンプ変種を実装しない判断」参照）。
     let t = Instant::now();
-    gemm.diag_encode_tiled_nn(ctx, &a_buf, &b_buf, &c_buf, n, n, n, cfg)
+    let resolved_cfg = gemm
+        .diag_encode_tiled_nn(ctx, &a_buf, &b_buf, &c_buf, n, n, n, cfg)
         .expect("diag_encode_tiled_nn (record only) must succeed");
     let encode_secs = t.elapsed().as_secs_f64();
 
@@ -222,6 +231,7 @@ fn measure_one_phase_trial(
     keep_alive.push(copied);
 
     PhaseSample {
+        resolved_cfg,
         upload_a_secs,
         upload_b_secs,
         alloc_c_secs,
@@ -254,6 +264,12 @@ fn run_size(n: usize) {
     let mut commit_wait = Vec::with_capacity(MEASURED_TRIALS);
     let mut readback = Vec::with_capacity(MEASURED_TRIALS);
     let mut host_copy = Vec::with_capacity(MEASURED_TRIALS);
+    // 要求構成 `cfg` と実際にディスパッチされた構成（`pipeline_for_tile`
+    // フォールバック解決後）が全測定反復で一致するかを記録する
+    // （codex-review 指摘 #1189: フォールバック時に「実行していない
+    // 構成」の性能として誤記録することを防ぐため、両者を区別して出力
+    // する）。
+    let mut resolved_cfgs: Vec<tile::TileConfig> = Vec::with_capacity(MEASURED_TRIALS);
 
     for _ in 0..MEASURED_TRIALS {
         let s = measure_one_phase_trial(&ctx, &gemm, &a, &b, n, cfg, &mut keep_alive);
@@ -264,6 +280,7 @@ fn run_size(n: usize) {
         commit_wait.push(s.commit_wait_secs);
         readback.push(s.readback_secs);
         host_copy.push(s.host_copy_secs);
+        resolved_cfgs.push(s.resolved_cfg);
     }
 
     let total: f64 = [
@@ -279,9 +296,31 @@ fn run_size(n: usize) {
     .map(|v| median_of(v).median)
     .sum();
 
+    // 測定反復全体で解決構成が一意なら単一値、フォールバックが発生し
+    // 揺れていれば「一致しなかった」ことが分かる形で出力する（要求
+    // 構成と実行構成を混同しない）。
+    let resolved_tile_report: String = {
+        let mut distinct: Vec<tile::TileConfig> = Vec::new();
+        for &rc in &resolved_cfgs {
+            if !distinct.contains(&rc) {
+                distinct.push(rc);
+            }
+        }
+        match distinct.as_slice() {
+            [only] => format!("{only:?}"),
+            other => format!("MIXED{other:?}"),
+        }
+    };
+    let fallback_occurred = resolved_cfgs.iter().any(|&rc| rc != cfg);
+
     println!(
-        "  N={n} resolved_tile={cfg:?} (median over {MEASURED_TRIALS} trials, {WARMUP_TRIALS} warmup):"
+        "  N={n} requested_tile={cfg:?} resolved_tile={resolved_tile_report} (median over {MEASURED_TRIALS} trials, {WARMUP_TRIALS} warmup):"
     );
+    if fallback_occurred {
+        println!(
+            "    NOTE: resolved_tile diverged from requested_tile in at least one measured trial (pipeline_for_tile fallback) — below timings reflect the ACTUAL executed configuration(s), not the requested one."
+        );
+    }
     print_quartiles_ms("upload_a", median_of(&upload_a));
     print_quartiles_ms("upload_b", median_of(&upload_b));
     print_quartiles_ms("alloc_c", median_of(&alloc_c));

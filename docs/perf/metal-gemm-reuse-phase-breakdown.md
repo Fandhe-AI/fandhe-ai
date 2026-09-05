@@ -251,11 +251,26 @@ candle 比ギャップ調査）の実測レンジと同じオーダーにある�
 契約）は `iter_total` の約 28〜37% を占め、CUDA（#1182 §6: 66〜75%）
 より明確に小さい。すなわち **Metal は CUDA と異なり、`matmul` 区間
 自体が iter_total の大半（60〜73%）を占めており、ハーネス固定費が
-支配的ではない**。この違いは Metal の `matmul` 区間内部にすでに
-「転送＋カーネル＋同期」の全コストが集約されており、CUDA のように
-`clone_htod`/`clone_dtoh` が別ホスト API 呼び出しへ分離されず 1 回の
-`ctx.dispatch_sync` 呼び出しに閉じているため（§2 の対応表参照）と考え
-られる。
+支配的ではない**。
+
+**訂正（codex-review 指摘。旧稿の誤り）**: 旧稿はこの違いの原因を
+「CUDA は `clone_htod`/`clone_dtoh` が別ホスト API 呼び出しへ分離
+されるが Metal は 1 回の `ctx.dispatch_sync` 呼び出しに閉じている
+ため」と説明していたが、これは実装と一致しない。CUDA 側も
+`gemm_fp32_strict` → `CudaGemm::run_tiled_f32`（`crates/backend-cuda/
+src/gemm.rs`）が `clone_htod`（A/B）・カーネル起動・`synchronize`・
+`clone_dtoh` を**1 回の関数呼び出し内**で完了させてから `Tensor` を
+返しており、Metal の `dispatch_variant` が `upload_a`/`upload_b`・
+`encode`・`synchronize`・`readback` を 1 回の呼び出しで完結させるのと
+API 呼び出し境界の粒度は同型である（§2 の対応表のとおり、いずれの
+バックエンドも upload／kernel／sync／readback は Layer A `matmul`
+区間の内側に含まれ、ハーネス側から見た「API 呼び出しの分離」の有無に
+差はない）。したがって `matmul` が `iter_total` に占める比率が
+バックエンド間で異なる理由を「API 呼び出しの分離」に帰属させることは
+できない。実測で裏付けられているのは表の比率の違いそのものまでで
+あり、その原因（GPU 実行内部の相対コスト構成の違い等）は本イシューの
+計測範囲では特定できていない——原因未特定のまま記録するにとどめる
+（§8 参照）。
 
 ## §7 kernel 専有時間ベースの candle 比（参考値。分母は #1147 正式系列
 candle fresh 中央値）
@@ -294,6 +309,11 @@ candle 比ギャップ調査。約 9.9 対 13.17 TFLOPS）と整合する。
 - N=1024 の `commit_wait` 二峰性（run3/5 のみ約 1/3 に低下）・全 N での
   Layer A `matmul` と Layer B Σ（host_copy 除外）の乖離（§5。
   13.6%〜42.4%）はいずれも原因未特定のまま記録するにとどめる
+- `matmul` が `iter_total` に占める比率が CUDA より Metal で高い理由
+  （§6 訂正後）は、API 呼び出し境界の分離差ではないことまでは確認した
+  が、真因（GPU 実行内部の相対コスト構成の違い等）は本イシューの計測
+  範囲外であり原因未特定のまま記録するにとどめる（codex-review 指摘。
+  #1189）
 - `Tensor<f32>` デバイス常駐化等の設計変更は対象外（計画共通節）
 - tolerance／baseline／依存の追加変更は行っていない
 
