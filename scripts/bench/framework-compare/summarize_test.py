@@ -1634,6 +1634,47 @@ class InferReuseSectionTests(unittest.TestCase):
         *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_infer_reuse_invalid)
 
+    def test_section_does_not_flag_different_size_infer_reuse_rows_as_duplicate(self):
+        # codex-review P2 指摘（PR #1229 4 巡目）: reuse_matches/
+        # fresh_matches が size を区別せずキー化していたため、同一
+        # framework/device に size=64 と size=128 の正常な計測が各 1 件
+        # あるだけで「重複キー」と誤判定され `--strict` が正常データを
+        # 不正データとして弾いてしまっていた。size ごとに独立してキー化
+        # した後は、両 size とも正常なら無効判定されないことを確認する。
+        rows = [
+            dict(_infer_row(mode="fresh", checksum=1.0), size=64),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=1.0, init_s=0.02),
+                size=64,
+            ),
+            dict(_infer_row(mode="fresh", checksum=2.0), size=128),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=2.0, init_s=0.02),
+                size=128,
+            ),
+        ]
+        lines, *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_infer_reuse_invalid)
+        text = "\n".join(lines)
+        self.assertNotIn("重複キー", text)
+
+    def test_section_still_flags_same_size_duplicate_infer_reuse_rows_as_invalid(self):
+        # 上記の size 分離が本来の重複検出（同一 size 内の重複）を
+        # 無効化していないことを確認する回帰テスト。
+        rows = [
+            dict(_infer_row(mode="fresh", checksum=1.0), size=64),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=1.0, init_s=0.02),
+                size=64,
+            ),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=999.0, init_s=0.02),
+                size=64,
+            ),
+        ]
+        *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_infer_reuse_invalid)
+
     def test_infer_reuse_rows_do_not_affect_gemm_or_train_sections(self):
         gemm_rows = [_with_parity(_base_row())]
         train_rows = [_train_row(mode="fresh")]
@@ -1935,6 +1976,25 @@ class TargetGateTests(unittest.TestCase):
         # gemm と同じ経路で実データの size（`_infer_row` 既定 64）を
         # 列挙するため `None` 固定ではなくなった。
         self.assertEqual(rec["size"], 64)
+
+    def test_infer_reuse_gate_rejects_invalid_throughput_even_if_faster(self):
+        # codex-review P0 指摘（PR #1229 4 巡目）: `_reuse_row_invalid_
+        # reason` は throughput_per_s を検証していなかったため、時間値・
+        # checksum が正常でも throughput_per_s が不正な reuse 行を
+        # `target_gate` が「達成」と誤判定しうる。`--target` 側より
+        # median_s が明確に小さい（=「達成」条件を満たす）infer reuse 行
+        # の throughput_per_s だけを不正値にしても、undeterminable として
+        # fail-closed に扱われることを確認する。
+        rows = [
+            dict(
+                _infer_row(framework="fandhe-ai", mode="reuse", median_s=0.0001, init_s=0.001),
+                throughput_per_s=None,
+            ),
+            _infer_row(framework="candle", mode="fresh", median_s=0.002),
+        ]
+        records = summarize.target_gate(rows, "candle")
+        rec = next(r for r in records if r["task"] == "infer")
+        self.assertEqual(rec["status"], "undeterminable")
 
     def test_train_undeterminable_when_target_unmeasured(self):
         rows = [_train_row(framework="fandhe-ai", device="cuda")]

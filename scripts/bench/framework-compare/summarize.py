@@ -1329,6 +1329,19 @@ def _reuse_row_invalid_reason(rows, r, task):
     不一致な fresh 行を握りつぶして「有効」判定してしまう fail-open が
     ありうる（`_pick_row_for_gate` の重複キー検出は reuse 側のみを見る
     ため、fresh 側 1 行を選ぶ本関数のこの箇所は独立に検証が必要）。
+
+    `task == "infer"` の行は `throughput_per_s` の有限正数チェックも
+    行う（codex-review P0 指摘・PR #1229 4 巡目: `section()` の (c')
+    表示ループは `r_tps is None or r_tps <= 0` を `row_invalid` に含めて
+    いるのに対し、本関数（`target_gate` が `--target` 達成判定に使う）
+    は時間値・checksum しか見ておらず throughput_per_s を一切検証して
+    いなかった。時間値・checksum が正常でも `throughput_per_s: null` の
+    reuse 行は表示側では無効判定になる一方、`target_gate` では比較先の
+    `median_s` を下回ってさえいれば「達成」と誤判定しうる — 表示とゲート
+    で無効条件が食い違う fail-open。`train` は `throughput_per_s` を
+    持たない行形状のため対象外とする〈`bench-fandhe` producer 契約。
+    `bench-common::Record` の `throughput_per_s` は train 系で常に
+    `None`〉）。
     """
     r_median = _safe_time_s(r.get("median_s"))
     r_q1 = _safe_time_s(r.get("q1_s"))
@@ -1336,6 +1349,10 @@ def _reuse_row_invalid_reason(rows, r, task):
     r_init = _safe_time_s(r.get("init_s"))
     if r_median is None or r_q1 is None or r_q3 is None or r_init is None:
         return "時間値が不正な値"
+    if task == "infer":
+        r_tps = _safe_finite_number(r.get("throughput_per_s"))
+        if r_tps is None or r_tps <= 0:
+            return "throughput_per_s が不正な値"
     # `x.get("size")` を `_valid_gate_size` で検証してから比較する
     # （Bugbot Medium 指摘・PR #1082 2 巡目: 直接 `x["size"]` を読むと
     # `size` キー欠損行で `KeyError`、`bool` 混入行で `True == 1` に
@@ -2996,7 +3013,19 @@ def section(path, rows):
                 # 通してしまう fail-open があった（codex-review P0 指摘・
                 # PR #1229。`_pick_row_for_gate` の重複キー検出と同じ
                 # 理由でここでも全一致行を集めて検証する）。
-                reuse_matches = [
+                #
+                # 重複判定・fresh 突合は `size` ごとに独立して行う
+                # （codex-review P2 指摘・PR #1229 4 巡目: size を区別
+                # せずキー化すると、同一 framework/device に size=64 と
+                # size=128 の正常な計測が各 1 件あるだけで「重複キー」と
+                # 誤判定され `--strict` が正常データを不正データとして
+                # 弾いてしまう。`_reuse_row_invalid_reason`／
+                # `_pick_row_for_gate` は既に size 単位で契約されている
+                # ため、表示側もそれに揃える）。size が不正な値
+                # （`_valid_gate_size` 不合格）の行は `sizes` 集合化で
+                # 例外を招かないよう分離し、専用の無効グループとして
+                # まとめて表示する（一覧から黙って漏らさない）。
+                all_reuse_for_fw = [
                     x
                     for x in rows
                     if x["framework"] == fw
@@ -3005,140 +3034,158 @@ def section(path, rows):
                     and x["mode"] == "reuse"
                     and (x.get("tf32", False) is True) is False
                 ]
-                if not reuse_matches:
+                if not all_reuse_for_fw:
                     continue
-                r = reuse_matches[0]
-                dup_reuse_count = len(reuse_matches)
-                # fresh 側も `get()`（最初の一致行のみ）ではなく全一致行を
-                # 集める（codex-review P0 指摘・PR #1229 3 巡目:
-                # reuse 側の重複はここまでで検証済みだが、fresh 側に
-                # 同一キーの複数行〈checksum が食い違う〉が存在すると
-                # `get()` は先頭だけを見るため、たまたま先頭が reuse と
-                # 一致すれば「一致」判定になり、後続の不一致な fresh 行が
-                # 握りつぶされる fail-open があった。`_reuse_row_invalid_
-                # reason` の同種検証〈同一 size の fresh 行が複数あれば
-                # 判定不能〉と揃える）。
-                fresh_matches = [
-                    x
-                    for x in rows
-                    if x["framework"] == fw
-                    and x["task"] == "infer"
-                    and x["device"] == device
-                    and x["mode"] == "fresh"
+                sizes = sorted(
+                    {x["size"] for x in all_reuse_for_fw if _valid_gate_size(x.get("size"))}
+                )
+                invalid_size_reuse = [
+                    x for x in all_reuse_for_fw if not _valid_gate_size(x.get("size"))
                 ]
-                dup_fresh_count = len(fresh_matches)
-                fresh = fresh_matches[0] if fresh_matches else None
-                # (b') と同一の理由（外部 JSONL 由来の値を未検証で使わない。
-                # security.md A03）で全時間値・throughput・checksum を
-                # 使用前に検証する。
-                r_median = _safe_time_s(r.get("median_s"))
-                r_q1 = _safe_time_s(r.get("q1_s"))
-                r_q3 = _safe_time_s(r.get("q3_s"))
-                r_init = _safe_time_s(r.get("init_s"))
-                r_tps = _safe_finite_number(r.get("throughput_per_s"))
-                r_checksum = _safe_finite_number(r.get("checksum"))
-
-                init_col = fmt_ms(r_init) if r_init is not None else "-"
-                median_col = fmt_ms(r_median) if r_median is not None else "無効な値"
-                q1_col = fmt_ms(r_q1) if r_q1 is not None else "無効な値"
-                q3_col = fmt_ms(r_q3) if r_q3 is not None else "無効な値"
-                tps_col = fmt_tps(r_tps) if r_tps is not None and r_tps > 0 else "無効な値"
-
-                fresh_median = _safe_time_s(fresh.get("median_s")) if fresh else None
-                fresh_checksum = _safe_finite_number(fresh.get("checksum")) if fresh else None
-
-                if fresh:
-                    fresh_col = fmt_ms(fresh_median) if fresh_median is not None else "計測不正"
-                    if fresh_median is not None and r_median is not None:
-                        ratio_col = f"{fresh_median / r_median:.2f} 倍"
-                    else:
-                        ratio_col = "-"
-                else:
-                    fresh_col = "未計測"
-                    ratio_col = "-"
-
-                row_invalid = (
-                    r_median is None
-                    or r_q1 is None
-                    or r_q3 is None
-                    or r_init is None
-                    or r_tps is None
-                    or r_tps <= 0
-                    or (fresh is not None and fresh_median is None)
-                    # 同一キーの重複行自体を無効条件に含める（後述の
-                    # 「全 reuse 行検証」コメント参照。`_pick_row_for_gate`
-                    # と同じく一意に選べない状態を判定不能＝無効として
-                    # fail-closed に扱う）。fresh 側の重複（`dup_fresh_
-                    # count > 1`）も突合先が一意に決まらない同種の
-                    # 判定不能条件として同様に扱う（codex-review P0 指摘・
-                    # PR #1229 3 巡目）。
-                    or dup_reuse_count > 1
-                    or dup_fresh_count > 1
-                )
-
-                if fresh:
-                    if r_checksum is None or fresh_checksum is None:
-                        match_col = "突合不能（無効値）"
-                        fw_col = f"{fw}（無効: checksum が不正な値）"
-                        row_invalid = True
-                        print(
-                            f"warning: {rel}: {fw}/{device}/infer/reuse の checksum が不正な値"
-                            "（非数値・NaN・Infinity 等）のため突合不能 — 無効データとして表示",
-                            file=sys.stderr,
-                        )
-                    elif checksums_match(r_checksum, fresh_checksum):
-                        match_col = "一致"
-                        fw_col = fw
-                    else:
-                        match_col = "不一致"
-                        fw_col = f"{fw}（無効: fresh と checksum 不一致）"
-                        row_invalid = True
-                        print(
-                            f"warning: {rel}: {fw}/{device}/infer/reuse の checksum "
-                            f"{r_checksum:.6f} が fresh {fresh_checksum:.6f} と不一致 "
-                            "— 無効データとして表示",
-                            file=sys.stderr,
-                        )
-                else:
-                    # fresh 行が無い（突合対象なし）場合でも、reuse 自身の
-                    # checksum が有限値であることは fresh の有無と独立に
-                    # 検証する（codex-review P0 指摘・PR #1229: 旧実装は
-                    # この分岐で checksum を一切検証しておらず、checksum
-                    # が null/NaN でも `has_infer_reuse_invalid` が false の
-                    # まま `--strict` を通過していた。突合先が無いだけで
-                    # reuse 計測結果そのものの正当性は別問題であるため
-                    # fail-closed に検査する）。
-                    if r_checksum is None:
-                        match_col = "突合不能（無効値）"
-                        fw_col = f"{fw}（無効: checksum が不正な値）"
-                        row_invalid = True
-                        print(
-                            f"warning: {rel}: {fw}/{device}/infer/reuse の checksum が不正な値"
-                            "（非数値・NaN・Infinity 等） — 無効データとして表示",
-                            file=sys.stderr,
-                        )
-                    else:
-                        match_col = "突合不能"
-                        fw_col = fw
-
-                # 重複キー（同一 framework/task/device/mode の行が複数）は
-                # 上記 row_invalid へ既に含めているが、無効理由の注記が
-                # 他の条件（checksum 不一致等）で既に埋まっていない場合に
-                # 限り、重複であることを表示に明示する。
-                if dup_reuse_count > 1 and "（無効" not in fw_col:
-                    fw_col = f"{fw}（無効: 重複キー {dup_reuse_count} 件）"
-                if dup_fresh_count > 1 and "（無効" not in fw_col:
-                    fw_col = f"{fw}（無効: fresh 側重複キー {dup_fresh_count} 件）"
-
-                if row_invalid:
+                if invalid_size_reuse:
                     has_infer_reuse_invalid = True
-                    if "（無効" not in fw_col:
-                        fw_col = f"{fw}（無効: 時間値が不正な値）"
+                    lines.append(
+                        f"| {device} | {fw}（無効: size が不正な値 "
+                        f"{len(invalid_size_reuse)} 件） | - | 無効な値 | 無効な値 | "
+                        "無効な値 | 無効な値 | - | - | 突合不能（無効値） |"
+                    )
+                for size in sizes:
+                    reuse_matches = [x for x in all_reuse_for_fw if x.get("size") == size]
+                    r = reuse_matches[0]
+                    dup_reuse_count = len(reuse_matches)
+                    # fresh 側も `get()`（最初の一致行のみ）ではなく同一
+                    # size の全一致行を集める（codex-review P0 指摘・
+                    # PR #1229 3 巡目: reuse 側の重複はここまでで検証
+                    # 済みだが、fresh 側に同一キーの複数行〈checksum が
+                    # 食い違う〉が存在すると `get()` は先頭だけを見る
+                    # ため、たまたま先頭が reuse と一致すれば「一致」
+                    # 判定になり、後続の不一致な fresh 行が握りつぶされる
+                    # fail-open があった。`_reuse_row_invalid_reason` の
+                    # 同種検証〈同一 size の fresh 行が複数あれば判定
+                    # 不能〉と揃える）。
+                    fresh_matches = [
+                        x
+                        for x in rows
+                        if x["framework"] == fw
+                        and x["task"] == "infer"
+                        and x["device"] == device
+                        and x["mode"] == "fresh"
+                        and _valid_gate_size(x.get("size"))
+                        and x.get("size") == size
+                    ]
+                    dup_fresh_count = len(fresh_matches)
+                    fresh = fresh_matches[0] if fresh_matches else None
+                    # (b') と同一の理由（外部 JSONL 由来の値を未検証で使わない。
+                    # security.md A03）で全時間値・throughput・checksum を
+                    # 使用前に検証する。
+                    r_median = _safe_time_s(r.get("median_s"))
+                    r_q1 = _safe_time_s(r.get("q1_s"))
+                    r_q3 = _safe_time_s(r.get("q3_s"))
+                    r_init = _safe_time_s(r.get("init_s"))
+                    r_tps = _safe_finite_number(r.get("throughput_per_s"))
+                    r_checksum = _safe_finite_number(r.get("checksum"))
 
-                lines.append(
-                    f"| {device} | {fw_col} | {init_col} | {median_col} | "
-                    f"{q1_col} | {q3_col} | {tps_col} | {fresh_col} | {ratio_col} | {match_col} |"
-                )
+                    init_col = fmt_ms(r_init) if r_init is not None else "-"
+                    median_col = fmt_ms(r_median) if r_median is not None else "無効な値"
+                    q1_col = fmt_ms(r_q1) if r_q1 is not None else "無効な値"
+                    q3_col = fmt_ms(r_q3) if r_q3 is not None else "無効な値"
+                    tps_col = fmt_tps(r_tps) if r_tps is not None and r_tps > 0 else "無効な値"
+
+                    fresh_median = _safe_time_s(fresh.get("median_s")) if fresh else None
+                    fresh_checksum = _safe_finite_number(fresh.get("checksum")) if fresh else None
+
+                    if fresh:
+                        fresh_col = fmt_ms(fresh_median) if fresh_median is not None else "計測不正"
+                        if fresh_median is not None and r_median is not None:
+                            ratio_col = f"{fresh_median / r_median:.2f} 倍"
+                        else:
+                            ratio_col = "-"
+                    else:
+                        fresh_col = "未計測"
+                        ratio_col = "-"
+
+                    row_invalid = (
+                        r_median is None
+                        or r_q1 is None
+                        or r_q3 is None
+                        or r_init is None
+                        or r_tps is None
+                        or r_tps <= 0
+                        or (fresh is not None and fresh_median is None)
+                        # 同一キーの重複行自体を無効条件に含める（後述の
+                        # 「全 reuse 行検証」コメント参照。`_pick_row_for_gate`
+                        # と同じく一意に選べない状態を判定不能＝無効として
+                        # fail-closed に扱う）。fresh 側の重複（`dup_fresh_
+                        # count > 1`）も突合先が一意に決まらない同種の
+                        # 判定不能条件として同様に扱う（codex-review P0 指摘・
+                        # PR #1229 3 巡目）。
+                        or dup_reuse_count > 1
+                        or dup_fresh_count > 1
+                    )
+
+                    if fresh:
+                        if r_checksum is None or fresh_checksum is None:
+                            match_col = "突合不能（無効値）"
+                            fw_col = f"{fw}（無効: checksum が不正な値）"
+                            row_invalid = True
+                            print(
+                                f"warning: {rel}: {fw}/{device}/infer/reuse の checksum が不正な値"
+                                "（非数値・NaN・Infinity 等）のため突合不能 — 無効データとして表示",
+                                file=sys.stderr,
+                            )
+                        elif checksums_match(r_checksum, fresh_checksum):
+                            match_col = "一致"
+                            fw_col = fw
+                        else:
+                            match_col = "不一致"
+                            fw_col = f"{fw}（無効: fresh と checksum 不一致）"
+                            row_invalid = True
+                            print(
+                                f"warning: {rel}: {fw}/{device}/infer/reuse の checksum "
+                                f"{r_checksum:.6f} が fresh {fresh_checksum:.6f} と不一致 "
+                                "— 無効データとして表示",
+                                file=sys.stderr,
+                            )
+                    else:
+                        # fresh 行が無い（突合対象なし）場合でも、reuse 自身の
+                        # checksum が有限値であることは fresh の有無と独立に
+                        # 検証する（codex-review P0 指摘・PR #1229: 旧実装は
+                        # この分岐で checksum を一切検証しておらず、checksum
+                        # が null/NaN でも `has_infer_reuse_invalid` が false の
+                        # まま `--strict` を通過していた。突合先が無いだけで
+                        # reuse 計測結果そのものの正当性は別問題であるため
+                        # fail-closed に検査する）。
+                        if r_checksum is None:
+                            match_col = "突合不能（無効値）"
+                            fw_col = f"{fw}（無効: checksum が不正な値）"
+                            row_invalid = True
+                            print(
+                                f"warning: {rel}: {fw}/{device}/infer/reuse の checksum が不正な値"
+                                "（非数値・NaN・Infinity 等） — 無効データとして表示",
+                                file=sys.stderr,
+                            )
+                        else:
+                            match_col = "突合不能"
+                            fw_col = fw
+
+                    # 重複キー（同一 framework/task/device/mode の行が複数）は
+                    # 上記 row_invalid へ既に含めているが、無効理由の注記が
+                    # 他の条件（checksum 不一致等）で既に埋まっていない場合に
+                    # 限り、重複であることを表示に明示する。
+                    if dup_reuse_count > 1 and "（無効" not in fw_col:
+                        fw_col = f"{fw}（無効: 重複キー {dup_reuse_count} 件）"
+                    if dup_fresh_count > 1 and "（無効" not in fw_col:
+                        fw_col = f"{fw}（無効: fresh 側重複キー {dup_fresh_count} 件）"
+
+                    if row_invalid:
+                        has_infer_reuse_invalid = True
+                        if "（無効" not in fw_col:
+                            fw_col = f"{fw}（無効: 時間値が不正な値）"
+
+                    lines.append(
+                        f"| {device} | {fw_col} | {init_col} | {median_col} | "
+                        f"{q1_col} | {q3_col} | {tps_col} | {fresh_col} | {ratio_col} | {match_col} |"
+                    )
         lines.append("")
 
     # (c'') 推論 1 反復のフェーズ分解（イシュー #1217。`bench-fandhe
