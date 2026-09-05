@@ -1,0 +1,24 @@
+size=256 naive_tflops=0.0560 tiled_tflops=0.0673 simdgroup_tflops=0.0682 dynamic_tile_auto_tflops=0.0524 auto_over_simdgroup=0.7692 simdgroup_over_naive=1.2167
+size=512 naive_tflops=0.1400 tiled_tflops=0.1530 simdgroup_tflops=0.1704 dynamic_tile_auto_tflops=0.2668 auto_over_simdgroup=1.5653 simdgroup_over_naive=1.2172
+size=1024 naive_tflops=0.3537 tiled_tflops=0.2615 simdgroup_tflops=0.5592 dynamic_tile_auto_tflops=0.6276 auto_over_simdgroup=1.1222 simdgroup_over_naive=1.5810
+size=2048 naive_tflops=0.7540 tiled_tflops=0.6069 simdgroup_tflops=0.9073 dynamic_tile_auto_tflops=1.1932 auto_over_simdgroup=1.3151 simdgroup_over_naive=1.2034
+size=4096 naive_tflops=0.5939 tiled_tflops=0.8778 simdgroup_tflops=1.3432 dynamic_tile_auto_tflops=2.6071 auto_over_simdgroup=1.9410 simdgroup_over_naive=2.2617
+shape=(4096x512x512) simdgroup_tflops=0.6158 dynamic_tile_auto_tflops=0.7638 auto_over_simdgroup=1.2404
+shape=(512x4096x512) simdgroup_tflops=0.6808 dynamic_tile_auto_tflops=0.8236 auto_over_simdgroup=1.2096
+size=2048 candidate=bm64_bn64_bk16_staged tflops=8.0680 requested=(64x64x16,wm=2,wn=2,staged=true) resolved=(64x64x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=2048 candidate=bm32_bn32_bk16_staged tflops=8.9779 requested=(32x32x16,wm=2,wn=2,staged=true) resolved=(32x32x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=2048 candidate=bm32_bn32_bk16_direct tflops=2.8059 requested=(32x32x16,wm=2,wn=2,staged=false) resolved=(32x32x16,wm=2,wn=2,staged=false) resolved_matches_requested=true
+size=2048 candidate=tm8_tn4_bm128_bn64_bk16_staged tflops=7.7882 requested=(128x64x16,wm=2,wn=2,staged=true) resolved=(128x64x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=2048 candidate=tm4_tn8_bm64_bn128_bk16_staged tflops=6.6656 requested=(64x128x16,wm=2,wn=2,staged=true) resolved=(64x128x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=2048 candidate=tm8_tn8_bm128_bn128_bk16_staged tflops=3.5332 requested=(128x128x16,wm=2,wn=2,staged=true) resolved=(128x128x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=bm64_bn64_bk16_staged tflops=3.7734 requested=(64x64x16,wm=2,wn=2,staged=true) resolved=(64x64x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=bm32_bn32_bk16_staged tflops=2.8272 requested=(32x32x16,wm=2,wn=2,staged=true) resolved=(32x32x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=bm32_bn32_bk16_direct tflops=1.7299 requested=(32x32x16,wm=2,wn=2,staged=false) resolved=(32x32x16,wm=2,wn=2,staged=false) resolved_matches_requested=true
+size=4096 candidate=tm8_tn4_bm128_bn64_bk16_staged tflops=4.9668 requested=(128x64x16,wm=2,wn=2,staged=true) resolved=(128x64x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=tm4_tn8_bm64_bn128_bk16_staged tflops=4.2444 requested=(64x128x16,wm=2,wn=2,staged=true) resolved=(64x128x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+size=4096 candidate=tm8_tn8_bm128_bn128_bk16_staged tflops=3.1331 requested=(128x128x16,wm=2,wn=2,staged=true) resolved=(128x128x16,wm=2,wn=2,staged=true) resolved_matches_requested=true
+--- occupancy 判定組み込み比較（旧: select / 新: select_with_occupancy）---
+size=512 old_tile=(64x32) old_tflops=0.6278 new_tile=(64x32) new_tflops=0.6335 new_over_old=1.0091 occupancy_params=Some(OccupancyParams { gpu_core_count: 40, max_threadgroup_memory_bytes: 32768 })
+size=1024 old_tile=(64x32) old_tflops=1.5581 new_tile=(64x32) new_tflops=1.5583 new_over_old=1.0001 occupancy_params=Some(OccupancyParams { gpu_core_count: 40, max_threadgroup_memory_bytes: 32768 })
+size=2048 old_tile=(64x32) old_tflops=3.0279 new_tile=(64x32) new_tflops=3.0651 new_over_old=1.0123 occupancy_params=Some(OccupancyParams { gpu_core_count: 40, max_threadgroup_memory_bytes: 32768 })
+size=4096 old_tile=(32x64) old_tflops=3.5848 new_tile=(32x64) new_tflops=3.0614 new_over_old=0.8540 occupancy_params=Some(OccupancyParams { gpu_core_count: 40, max_threadgroup_memory_bytes: 32768 })
