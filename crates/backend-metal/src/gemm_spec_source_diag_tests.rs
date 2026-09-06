@@ -170,6 +170,26 @@ fn spec_source_kernel_gpu_ab_production_sizes() {
                     measure_one_phase_trial(&ctx, &base_gemm, &a, &b, n, cfg, &mut base_keep_alive);
                 (b_s, h_s)
             };
+            // codex-review 指摘（イシュー #1289 PR #1379）: 要求構成
+            // `cfg` と実際にディスパッチされた構成（`pipeline_for_tile`
+            // フォールバック解決後）が base/head 双方で一致することを
+            // サンプル追加前に毎反復検証する。`gemm_reuse_phase_diag_
+            // tests` の `fallback_occurred` 記録（#1189 指摘対応）は
+            // フォールバックを許容したうえで注記するだけだが、本テスト
+            // は base/head の「同一構成での」性能比較が前提のため、
+            // 片側だけフォールバックした反復を性能比較として集計する
+            // と E2 特殊化の有効性判断を誤らせる。よって記録ではなく
+            // fail-closed な assert とする。
+            assert_eq!(
+                base_sample.resolved_cfg, cfg,
+                "N={n} trial={i}: base 側で pipeline_for_tile フォールバックが発生した(requested={cfg:?}, resolved={:?})。性能比較の前提が崩れるため中断する",
+                base_sample.resolved_cfg
+            );
+            assert_eq!(
+                head_sample.resolved_cfg, cfg,
+                "N={n} trial={i}: head 側で pipeline_for_tile フォールバックが発生した(requested={cfg:?}, resolved={:?})。性能比較の前提が崩れるため中断する",
+                head_sample.resolved_cfg
+            );
             base_kernel_gpu.push(base_sample.kernel_gpu_secs);
             head_kernel_gpu.push(head_sample.kernel_gpu_secs);
             base_resolved = Some(base_sample.resolved_cfg);
