@@ -1,0 +1,56 @@
+イシュー #1277: N=1024/2048/4096 純カーネル専有時間（kernel_gpu）5 プロセス
+起動計測 実測環境情報（内部ホスト名は含めない。docs/real-hardware-
+verification-env.md 方針）
+
+チップ: Apple M4 Max（GPU 40 コア）
+メモリ: 64 GB
+OS: macOS 26.6.2 (BuildVersion 25G83)
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+cargo: 1.96.0 (30a34c682 2026-05-25)
+転送元コミット（origin/main）: c71264fb04d81be9e4ee44d5f78d2df31a58f3fa
+  （#1372 反映済み・#1276「GPU タイムスタンプ取得」#1371 マージ済み）
+
+コード変更: なし（診断テスト・診断ヘルパは #1276 で実装済み。本イシューは
+計測実行と docs 追記のみ）。
+
+実行手順:
+  1. cargo test -p fandhe-ai-backend-metal --release --no-run
+     （計測プロセス起動時にコンパイルが走らないよう事前ビルド）
+  2. pmset -g therm（計測前）
+  3. 負荷確認: 他セッションの並走 `cargo test --workspace --locked` を
+     確認（プロセス名のみ記録。実行ユーザー・絶対パスは記載しない）。
+     load average（1 分値）が 3.0 未満へ落ちるまで最大 30 分の待機方針
+     のところ、約 7 分（uptime 9.25→2.85）で 3.0 未満に到達したため
+     待機を打ち切り計測を開始した
+  4. スモーク: gpu_timestamps_within_commit_wait_window を 1 回実行し
+     pass を確認（--ignored --nocapture --test-threads=1 --release）
+  5. 本計測: gemm_reuse_phase_diag_production_batch を 5 プロセス起動
+     （run1〜run5。各回 3 サイズ × 20 warmup + 20 測定。run 間 30 秒
+     クールダウン）
+  6. pmset -g therm（計測後）
+
+pmset -g therm（前後とも同一。サーマルスロットリングの兆候なし）:
+  Note: No thermal warning level has been recorded
+  Note: No performance warning level has been recorded
+  Note: No CPU power status has been recorded
+
+各 run 直前の uptime（load averages 1/5/15分）:
+  run1: 16:40  load averages: 2.86 4.70 5.50
+  run2: 16:41  load averages: 2.84 4.38 5.32
+  run3: 16:41  load averages: 2.51 4.13 5.19
+  run4: 16:42  load averages: 2.52 3.94 5.08
+  run5: 16:43  load averages: 3.87 4.14 5.10
+  （run5 直前のみ 1 分値が待機閾値 3.0 をわずかに超えているが、5 分・
+  15 分値は安定しておりクールダウン後の一時的な揺らぎと判断し続行した）
+
+resolved_tile: 全 5 run・全 3 サイズで requested_tile と完全一致
+（フォールバック NOTE なし）。
+  N=1024: TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true }
+  N=2048: TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+  N=4096: TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+  （#1189 §4 と同一構成）
+
+備考: N=2048/4096 の commit_wait・kernel_gpu は run 間で顕著な変動幅
+（例: N=2048 kernel_gpu 1.60〜7.28 ms）を示した。これは #1189 §8 が
+記録した「N=1024 の commit_wait 二峰性」と同種の現象が N=2048/4096
+にも及んでいる可能性があるが、原因の特定は本イシューのスコープ外。

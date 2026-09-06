@@ -26,6 +26,12 @@ fresh より 1.52 倍遅い**——すなわち Metal の N=4096 ギャップは
 測定境界の産物ではなく、GPU 実行（アップロード・カーネル・readback を
 含む）自体に起因する（§6〜§7 参照）。
 
+**追記（イシュー #1277）**: `#1276` が実装した GPU タイムスタンプ変種
+`kernel_gpu` を N=1024/2048/4096 で 5 プロセス起動計測し、N=4096 の
+candle 比ギャップ（1.52 倍）のうちカーネル専有時間に帰属できる分は
+約 27.6%、残り約 72.4% は非カーネル要因（`commit_wait − kernel_gpu`・
+アップロード・readback 等）であることを確定した（§11）。
+
 ## §2 計測環境・プロトコル
 
 - 実機: Apple M4 Max（GPU 40 コア。`docs/perf/logs/metal-gemm-reuse-
@@ -314,8 +320,8 @@ candle 比ギャップ調査。約 9.9 対 13.17 TFLOPS）と整合する。
   `MetalContext::synchronize_with_gpu_timestamps`。本番 `synchronize()`
   は no-op オブザーバのため AC-2 は不変）。`commit_wait` は commit＋
   カーネル専有＋`waitUntilCompleted` の合算値のまま。N=1024/2048/4096
-  の 5 run 実測・本表への数表追記は #1276 のスコープ外のまま後続
-  sub-issue（親 #1275 配下）へ引き継ぐ
+  の 5 run 実測・本表への数表追記は #1276 のスコープ外だったが、
+  イシュー #1277 で実施済み（§11）
 - N=1024 の `commit_wait` 二峰性（run3/5 のみ約 1/3 に低下）・全 N での
   Layer A `matmul` と Layer B Σ（host_copy 除外）の乖離（§5。
   13.6%〜42.4%）はいずれも原因未特定のまま記録するにとどめる
@@ -354,6 +360,8 @@ candle 比ギャップ調査。約 9.9 対 13.17 TFLOPS）と整合する。
   継続する。本イシューの Layer B 分解（§4）は upload/encode/
   commit_wait/readback という粗い粒度に留まるため、カーネル専有時間
   自体（GPU タイムスタンプ変種。§8 参照）の分離が次の手がかりになりうる
+  ——イシュー #1277 で実施済み。§11 の分母表（Phase 2 候補評価用）を
+  参照
 - (iv) candle 側 kernel-only 計測との突合（#1103 追補）: 既存の候補と
   して残す
 - (v) 現状維持（本イシューは診断のみで完結し、本番結線・ゲート判定の
@@ -392,3 +400,146 @@ N=4096 の `matmul` 内部（カーネル専有時間そのもの）の追加分
   `synchronize` のバッチング機構。GPU タイムスタンプ変種を実装しない
   判断の根拠）
 - `docs/perf/metal-bench-noise-protocol.md`（計測衛生プロトコル）
+- `docs/perf/logs/metal-gemm-reuse-phase-1277/`（本節 §11 の実行ログ・
+  env_info・集計。イシュー #1277）
+
+## §11 GPU タイムスタンプによる純カーネル専有時間の分離（イシュー #1277）
+
+`#1276`（§8）が実装した `kernel_gpu`（`MTLCommandBuffer::GPUStartTime`/
+`GPUEndTime` の差分。`MetalContext::synchronize_with_gpu_timestamps`。
+本番 `synchronize()` は no-op オブザーバのため不変）を用い、
+`gemm_reuse_phase_diag_production_batch`（`crates/backend-metal/src/
+gemm_reuse_phase_diag_tests.rs`。`#[ignore]`）を 5 プロセス起動（各回
+20 warmup + 20 測定）して N=1024/2048/4096 の `kernel_gpu`・
+`commit_wait`・`commit_wait − kernel_gpu` を確定した。**コード変更は
+ゼロ**（診断テスト・診断ヘルパは #1276 で実装済み。本イシューは計測
+実行と本節の追記のみ）。
+
+### §11.1 環境・プロトコル
+
+- 実機: Apple M4 Max（GPU 40 コア）。転送元コミット `c71264f`
+  （origin/main。#1276「GPU タイムスタンプ取得」#1371・#1372 反映後）
+- rustc/cargo 1.96.0、macOS 26.6.2 (BuildVersion 25G83)
+- 事前ビルド（`cargo test -p fandhe-ai-backend-metal --release
+  --no-run`）→ `pmset -g therm`（前）→ 負荷確認（他セッションの
+  並走 `cargo test --workspace --locked` を検出。load average が
+  1 分値 9.25 から約 7 分で 2.85 まで低下したのを待って計測開始）→
+  スモーク（`gpu_timestamps_within_commit_wait_window` 1 回。pass）→
+  本計測（`gemm_reuse_phase_diag_production_batch` を 5 プロセス起動。
+  run 間 30 秒クールダウン、`--release --test-threads=1 --ignored
+  --nocapture`）→ `pmset -g therm`（後）
+- `pmset -g therm` は前後とも「記録なし」でサーマルスロットリングの
+  兆候なし
+- `resolved_tile` は全 5 run・全 3 サイズで `requested_tile` と完全
+  一致（フォールバック NOTE なし。§4 と同一構成: N=1024
+  `bm=64,bn=32,bk=8,wm=4,wn=1`、N=2048 `bm=64,bn=32,bk=16,wm=2,wn=2`、
+  N=4096 `bm=32,bn=64,bk=16,wm=2,wn=2`）
+- 詳細: `docs/perf/logs/metal-gemm-reuse-phase-1277/env_info.txt`（各
+  run 直前の uptime を含む）
+
+### §11.2〜§11.3 実測表・中央値の中央値
+
+各列は「run ごとの中央値」を 5 run 分集め、列ごとに独立して中央値
+（中央値の中央値）を取る（`commit_wait − kernel_gpu` は各 run が反復
+ごとの差分から算出した中央値を用いる。`median(commit_wait) −
+median(kernel_gpu)` では算出しない）。生値は
+`docs/perf/logs/metal-gemm-reuse-phase-1277/layerB-run1.log`〜
+`layerB-run5.log`、集計は `layerB-aggregate.md` を参照。
+
+| N | commit_wait 中央値 (ms) | **kernel_gpu 中央値 (ms)** | commit_wait−kernel_gpu 中央値 (ms) | kernel_gpu 基準 TFLOPS |
+|---|---|---|---|---|
+| 1024 | 1.2606 | **1.0267** | 0.2339 | 2.092 |
+| 2048 | 3.8869 | **3.1849** | 0.7020 | 5.394 |
+| 4096 | 15.7892 | **13.7051** | 2.0593 | 10.028 |
+
+**N=2048/4096 の run 間変動**: N=2048 は run 間で kernel_gpu が 1.60〜
+7.28 ms（二峰性寄り: run1/3/4 が高値側、run2/5 が低値側）と大きく
+変動した。N=4096 は run4 のみ 17.6802 ms の外れ値（他 4 run は
+13.70〜14.09 ms）。中央値集計のためこれらの変動は最終値への影響は
+限定的だが、原因は未特定のまま記録する（#1189 §8 の「N=1024
+commit_wait 二峰性」と同種の環境要因の可能性がある）。
+
+**妥当性帯チェック**: `docs/perf/metal-gemm-n4096-kernel-gap.md` の
+N=4096 カーネル純境界 9.76〜9.91 TFLOPS（2·4096³ 換算で 13.87〜14.08
+ms 帯）に対し、本計測の kernel_gpu 中央値 13.7051 ms（10.028 TFLOPS）
+はこの帯よりわずかに高速側（帯下限比 約 1.2% 短い）。計測プロトコルが
+異なる（#1143 は `gemm_bench` 系の独立ベンチ、本計測は GPU
+タイムスタンプ）ため「大きく外れる」水準ではないと判断し採用した。
+
+**セッション間ドリフト検査**: N=4096 の `commit_wait` 中央値
+15.7892 ms は #1189 §4 の実測値 15.7457 ms と乖離約 0.28%（10% 閾値を
+大きく下回る）のため、Layer A 再計測（任意項目）は実施しなかった。
+
+### §11.4 N=4096 ギャップ内訳（AC-2）
+
+2 つの数値を定義してラベル付きで併記する（分母・分子の出典は §7）。
+
+- **(a) fandhe 内部のカーネル比率**: `kernel_gpu(4096)` 13.7051 ms /
+  `matmul`（Layer A。§7）34.800 ms = **約 39.4%**。残り約 60.6%が
+  `commit_wait − kernel_gpu`（2.0593 ms）・アップロード（upload_a+b
+  中央値 7.4987 ms）・readback（0.9191 ms）・encode・Layer A/B 残差
+  （§5。N=4096 で約 42.4%）の合算に相当する
+- **(b) candle 比ギャップの帰属**（AC-2 が求める値）: ギャップ =
+  `matmul` 34.800 ms − candle fresh 22.948 ms（#1189 §7。fandhe-ai
+  `=0.6.0` 正式系列）= 11.852 ms。candle カーネル純境界（`docs/perf/
+  metal-gemm-n4096-kernel-gap.md` §0: 13.17 TFLOPS）を時間換算すると
+  2·4096³/13.17e12 ≈ 10.4358 ms。カーネル帰属分 = `kernel_gpu(4096)`
+  13.7051 ms − 10.4358 ms = **3.2693 ms（ギャップの約 27.6%）**。
+  非カーネル帰属分 = 11.852 − 3.2693 = **8.5827 ms（ギャップの約
+  72.4%）**
+
+  前提・限界:
+  - candle カーネル純境界（13.17 TFLOPS）は `metal-gemm-n4096-
+    kernel-gap.md` の別セッション・別計測境界（`gemm_bench` 系の壁時計
+    計測であり GPU タイムスタンプではない）の値である
+  - 分母のアンカー（`matmul` 34.800 ms・candle fresh 22.948 ms）は
+    fandhe-ai `=0.6.0` 正式系列（#1147・#1189）。**脚注（0.7.0 正式
+    系列との参考比較）**: `docs/perf/metal-gemm-candle-gate-
+    remeasurement.md` §11（2026-09-06・共有負荷下）の candle fresh
+    中央値は 23.100 ms（0.6.0 の 22.948 ms とほぼ同水準）で 0.509 倍。
+    本節の (a)(b) の算術には 0.6.0 系列の値のみを用い、0.7.0 の値は
+    混ぜない
+  - (b) は「候補評価で回収可能な上限」を与えるものであり、
+    `commit_wait − kernel_gpu`（commit・スケジューリング・
+    `waitUntilCompleted` 復帰の固定費。約 2.06 ms）はカーネル側変更
+    では回収できない非対象領域である
+
+### §11.5 Phase 2 候補評価の分母表
+
+`#1273` 配下の候補評価イシュー（#1286/#1291/#1297/#1323/#1324/#1325/
+#1368 等）が「Phase 1 で確定した純カーネル時間を分母に比較」する際は
+以下を分母として使う。
+
+| N | 純カーネル時間（kernel_gpu 中央値。ms） | TFLOPS | commit_wait−kernel_gpu（回収不能固定費。ms） |
+|---|---|---|---|
+| 1024 | 1.0267 | 2.092 | 0.2339 |
+| 2048 | 3.1849 | 5.394 | 0.7020 |
+| 4096 | 13.7051 | 10.028 | 2.0593 |
+
+- **計測境界**: `GPUEndTime − GPUStartTime`（`MTLCommandBuffer` の GPU
+  タイムスタンプ。`MetalContext::synchronize_with_gpu_timestamps`。
+  本番 `synchronize()` は no-op オブザーバで計測経路にのみ使う）
+- **起動経路**: `gemm_reuse_phase_diag_production_batch` →
+  `diag_encode_tiled_nn`（本番 `dispatch_tiled_prepared` と同じ NN
+  経路の診断ヘルパ）。`resolved_tile` は §11.1 のとおり本番選択と一致
+- **再現コマンド**: `cargo test -p fandhe-ai-backend-metal --release
+  gemm_reuse_phase_diag_production_batch -- --ignored --nocapture
+  --test-threads=1`
+- **比較時の規約**: 候補側も同一プロトコル（`--release`・
+  `--test-threads=1`・20 warmup + 20 測定・5 プロセス起動の中央値の
+  中央値）で `kernel_gpu` を取得し、本表と比較すること。単一プロセス・
+  少数反復の比較は §11.3 が示す run 間変動（N=2048/4096 で顕著）により
+  誤判定しうる
+
+### §11.6 未確定事項・スコープ外
+
+- Layer A/B 残差（§5。13.6%〜42.4%）は本イシューでも未解消のまま
+- candle 側の GPU タイムスタンプ計測（`kernel_gpu` 相当値の candle
+  側取得）は未実施。§11.4 (b) の candle カーネル純境界は既存の壁時計
+  計測値（#1143）を参照するに留める
+- N=2048/4096 の run 間変動（§11.3）の原因特定・N=1024 二峰性（#1189
+  §8）との関係整理は対象外
+- Phase 2 候補（E2〜E9 等）の実装・結線判断は対象外（各候補イシュー
+  が担う）
+- tolerance／baseline／依存の追加変更は行っていない
+
