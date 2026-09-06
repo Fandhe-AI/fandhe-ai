@@ -81,3 +81,11 @@ bench-harness = { path = "../bench-harness" }
 [[example]]
 name = "gemm_splitk_shapes_bench"
 test = true
+
+# 同上の理由（`cargo test` は既定で example 内の `#[cfg(test)]` を検査
+# 対象にしない）。本 example は `single_run_verdict_tests`（AC-3
+# クロスプラットフォーム純関数の回帰検知テスト。イシュー #1278・PR #1372
+# codex-review／Bugbot 指摘）を持つため `test = true` を明示する。
+[[example]]
+name = "gemm_fine_barrier_ab_bench"
+test = true

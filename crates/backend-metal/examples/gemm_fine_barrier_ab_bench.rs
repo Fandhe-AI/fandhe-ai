@@ -35,6 +35,102 @@
 //! を超過した場合、フェーズ 2 の A/B 判定には進まない（「判定不可」を出力
 //! して終了する。安全側判断: 判定を無効化して中断する方向のみ許す）。
 
+/// フェーズ 2（`macos_impl::phase2_fine_barrier_ab`）の 1 run 分の集計から
+/// 単一 run の参考 verdict を計算する純関数（`docs/perf/
+/// metal-gemm-fine-barrier-ab.md` §判断基準をそのまま定数化したもので、
+/// 新規閾値の導入ではない）。macOS 依存部分（Metal コンテキスト・計測）を
+/// 一切持たないため `#[cfg(target_os = "macos")]` の外に置き、Linux CI
+/// （`cargo test --workspace`）でもユニットテストとして検査対象にする
+/// （`gemm_transpose_route_ab_bench.rs::phase2_route_ab` の総括ロジックを
+/// 参考にした判断だが、あちらは verdict 計算がフェーズ 2 内部に閉じている
+/// のに対し、本 example は #1278 AC-3 でクロスプラットフォーム検証可能な
+/// 純関数へ切り出した点が差分）。
+///
+/// 最終的な採否判断は本関数の 1 run 出力ではなく、5 run 中央値に基づき
+/// `docs/perf/metal-gemm-fine-barrier-ab.md` で人間が確定する（実装計画
+/// §3.3）。本関数の `verdict=` ログ出力はその中間証跡（機械的
+/// `grep verdict=` で単一 run の判定を追える参考表示）にとどまる。
+// Linux CI（`cargo clippy --workspace --all-targets --all-features -- -D
+// warnings`）は本 example の `example` ターゲット（`cfg(test)` 無効・
+// `target_os = "macos"` 無効）を単独でも lint するため、macOS 実機専用の
+// `main`（`macos_impl::main`）からしか呼ばれない本型は非 macOS かつ非
+// テストの経路では文字通り到達不能になり dead_code 検知の対象になる。
+// 本体は macOS 実機（`macos_impl::main`）と `single_run_verdict_tests`
+// （Linux CI でも走る `#[cfg(test)]` ユニットテスト）の双方から使われて
+// おり未使用ではなく cfg 分岐の組み合わせが原因の誤検知にあたるため、
+// その 2 経路以外（非 macOS・非テストの `example` ターゲット単体）でのみ
+// `dead_code` を抑止する（codex-review 指摘 PR #1372）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingleRunVerdict {
+    AdoptCandidate,
+    RejectCandidate,
+    Undetermined,
+}
+
+// enum 本体（上）とは異なり、`as_str` は `single_run_verdict_tests`
+// （Linux CI の `#[cfg(test)]` ビルド）からも呼ばれない
+// （テストは `SingleRunVerdict` の等値比較のみを検証し、`as_str` の文字列
+// 表現までは検証しない）。したがって非 macOS では test cfg の有無に
+// 関わらず常に未使用となるため、`test` を除外条件に含めない
+// （codex-review 指摘 PR #1372 のフォローアップ: `not(any(.., test))` の
+// ままだと Linux の `cargo test`〈`cfg(test)` 有効〉ビルドで dead_code
+// が再発する）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl SingleRunVerdict {
+    fn as_str(self) -> &'static str {
+        match self {
+            SingleRunVerdict::AdoptCandidate => "adopt_candidate",
+            SingleRunVerdict::RejectCandidate => "reject_candidate",
+            SingleRunVerdict::Undetermined => "undetermined",
+        }
+    }
+}
+
+/// 採否判断における小サイズ（256/512/1024）の許容劣化率下限
+/// （`docs/perf/metal-gemm-fine-barrier-ab.md` §判断基準の「劣化中央値
+/// 5% 超がない」を定数化したもの。`head_over_base` 比がこの値以上であれば
+/// 劣化許容範囲内と判定する）。
+///
+/// `bench_harness::ab::STABILITY_SPREAD_GATE`（ラウンド間ばらつきの安定性
+/// spread ゲート）とは意味が異なる別軸の閾値のため流用しない
+/// （codex-review 指摘 PR #1372 discussion r3943195886）。
+// enum `SingleRunVerdict` と同じ理由（非 macOS かつ非テストの `example`
+// ターゲット単体でのみ dead_code を抑止。codex-review 指摘 PR #1372）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const SMALL_SIZE_REGRESSION_TOLERANCE_RATIO: f64 = 0.95;
+
+/// `ratios`: size ごとの `head_over_base`（TFLOPS 比。head/base）。
+/// `gate_exceeded`: フェーズ 2 の A/B 計測自体で安定性ゲート超過が 1 件
+/// でも残ったか（ラウンド間ばらつきが大きく計測値を信頼できないため
+/// `Undetermined` へ倒す安全側判断）。
+///
+/// 判断基準（`docs/perf/metal-gemm-fine-barrier-ab.md` §判断基準）:
+/// size 2048/4096 の `head_over_base` に改善（>1.0）があり、かつ size
+/// 256/512/1024 で劣化中央値が `SMALL_SIZE_REGRESSION_TOLERANCE_RATIO`
+/// 超（5% 超）がない場合に採用候補とする。
+// enum `SingleRunVerdict` と同じ理由（非 macOS かつ非テストの `example`
+// ターゲット単体でのみ dead_code を抑止。codex-review 指摘 PR #1372）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn single_run_verdict(ratios: &[(usize, f64)], gate_exceeded: bool) -> SingleRunVerdict {
+    if gate_exceeded {
+        return SingleRunVerdict::Undetermined;
+    }
+    let improved_at_large = ratios
+        .iter()
+        .filter(|(size, _)| *size == 2048 || *size == 4096)
+        .all(|(_, ratio)| *ratio > 1.0);
+    let no_regression_at_small = ratios
+        .iter()
+        .filter(|(size, _)| *size == 256 || *size == 512 || *size == 1024)
+        .all(|(_, ratio)| *ratio >= SMALL_SIZE_REGRESSION_TOLERANCE_RATIO);
+    if improved_at_large && no_regression_at_small {
+        SingleRunVerdict::AdoptCandidate
+    } else {
+        SingleRunVerdict::RejectCandidate
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use bench_harness::MeasurementConfig;
@@ -78,7 +174,10 @@ mod macos_impl {
         let head_gemm = MetalGemm::new_with_fine_barrier(ctx, true)
             .expect("head GEMM パイプラインの構築に失敗した");
 
-        for size in [256usize, 512, 1024] {
+        // イシュー #1278 AC-1: 512〜4096 まで拡張する（旧版は 256/512/1024
+        // のみだったが、受け入れ条件は判断基準の対象サイズ（256〜4096）
+        // 全域での bit 一致を要求する。256 は既存の下限確認として残す）。
+        for size in [256usize, 512, 1024, 2048, 4096] {
             let mut rng = Xorshift64Star::new(SEED);
             let a = rng.fill_vec(size * size);
             let b = rng.fill_vec(size * size);
@@ -167,6 +266,16 @@ mod macos_impl {
             .expect("ROUNDS は偶数固定のため AbConfig::new は失敗しない");
         let measurement_config = MeasurementConfig::default();
 
+        // フェーズ 2 総括（`verdict=`）の判定材料。`ratios` は size ごとの
+        // `head_over_base`（TFLOPS 比）、`gate_exceeded` はいずれかの size で
+        // `run_ab` 自体の spread が安定性ゲートを超えたか（超えた場合は
+        // ラウンド間ばらつきが大きく計測値を信頼できないため
+        // `Undetermined` に倒す。`gemm_transpose_route_ab_bench.rs::
+        // phase2_route_ab` と同じ安全側判断）。
+        const SPREAD_GATE: f64 = bench_harness::ab::STABILITY_SPREAD_GATE;
+        let mut ratios: Vec<(usize, f64)> = Vec::new();
+        let mut gate_exceeded = false;
+
         for size in [256usize, 512, 1024, 2048, 4096] {
             let cfg =
                 tile::select_for_device(size, size, size, ctx.verified_m4_max_gpu_core_count());
@@ -246,17 +355,43 @@ mod macos_impl {
                 result.spread_a,
                 result.spread_b,
             );
+
+            if result.spread_a > SPREAD_GATE || result.spread_b > SPREAD_GATE {
+                gate_exceeded = true;
+            }
+            ratios.push((size, head_over_base));
         }
 
+        // イシュー #1278 AC-3: 単一 run の参考 verdict を機械出力する
+        // （`super::single_run_verdict` は macOS 非依存の純関数。最終採否は
+        // 5 run 中央値に基づき `docs/perf/metal-gemm-fine-barrier-ab.md` へ
+        // 人間可読な形で記録する——本行はログを `grep verdict=` するだけで
+        // 単一 run の判定を追える参考表示にとどめる）。
+        let verdict = super::single_run_verdict(&ratios, gate_exceeded);
         println!(
             "--- フェーズ 2 完了。採否判定基準（size 2048/4096 の中央値改善があり、かつ他\
-             サイズで劣化中央値 5% 超がないこと。イシュー #809 計画 §3.1）に従い、\
-             `docs/perf/metal-gemm-fine-barrier-ab.md` へ記録すること。"
+             サイズで劣化中央値 5% 超がないこと。イシュー #809 計画 §3.1・#1278 で 5 run\
+             中央値運用へ拡張）に従い、`docs/perf/metal-gemm-fine-barrier-ab.md` へ記録\
+             すること。"
+        );
+        println!(
+            "verdict={} (単一 run の参考値。5 run 中央値で最終判断する)",
+            verdict.as_str()
         );
     }
 
     pub fn main() {
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+
+        // イシュー #1278: 一時調整した ROUNDS/COOLDOWN/MIN_WARMUP をコミット
+        // しない運用（`docs/perf/metal-bench-noise-protocol.md` の調整手順）
+        // のため、実効値を実行ログの先頭に残す（env_info と併せて実測記録の
+        // 証跡にする）。
+        println!(
+            "effective_rounds={ROUNDS} effective_cooldown_secs={} effective_min_warmup_secs={}",
+            COOLDOWN.as_secs_f64(),
+            MIN_WARMUP.as_secs_f64(),
+        );
 
         phase0_bit_match_selfcheck(&ctx);
 
@@ -268,6 +403,15 @@ mod macos_impl {
 
         let phase1_ok = phase1_stability_selfcheck(&ctx, &default_gemm);
         if !phase1_ok {
+            // codex-review 指摘対応（PR #1198・`gemm_transpose_route_ab_bench.rs`
+            // と同型）: 早期 return もフェーズ 2 完了時と同じ `verdict=` 行を
+            // 出力し、全終了経路でログを `grep verdict=` するだけで判定を
+            // 一意に読み取れるようにする。
+            println!(
+                "verdict=undetermined (フェーズ 1 の安定性セルフチェックで \
+                 spread ≤gate 相当を満たさないサイズが残ったため、フェーズ 2\
+                 （A/B 判定）を実行せず判定不可のまま終了する)"
+            );
             return;
         }
 
@@ -291,4 +435,69 @@ fn main() {
          See docs/perf/metal-bench-noise-protocol.md and \
          docs/perf/metal-gemm-fine-barrier-ab.md for the real-hardware execution procedure."
     );
+}
+
+#[cfg(test)]
+mod single_run_verdict_tests {
+    use super::*;
+
+    #[test]
+    fn adopts_when_large_sizes_improve_and_small_sizes_hold_within_5_percent() {
+        let ratios = vec![
+            (256, 0.96),
+            (512, 1.0),
+            (1024, 1.0),
+            (2048, 1.05),
+            (4096, 1.1),
+        ];
+        assert_eq!(
+            single_run_verdict(&ratios, false),
+            SingleRunVerdict::AdoptCandidate
+        );
+    }
+
+    #[test]
+    fn rejects_when_a_large_size_does_not_improve() {
+        let ratios = vec![
+            (256, 1.0),
+            (512, 1.0),
+            (1024, 1.0),
+            (2048, 1.0),
+            (4096, 1.1),
+        ];
+        assert_eq!(
+            single_run_verdict(&ratios, false),
+            SingleRunVerdict::RejectCandidate
+        );
+    }
+
+    #[test]
+    fn rejects_when_a_small_size_regresses_more_than_5_percent() {
+        let ratios = vec![
+            (256, 0.90),
+            (512, 1.0),
+            (1024, 1.0),
+            (2048, 1.05),
+            (4096, 1.1),
+        ];
+        assert_eq!(
+            single_run_verdict(&ratios, false),
+            SingleRunVerdict::RejectCandidate
+        );
+    }
+
+    #[test]
+    fn undetermined_when_stability_gate_exceeded_even_if_ratios_look_good() {
+        let ratios = vec![
+            (256, 1.0),
+            (512, 1.0),
+            (1024, 1.0),
+            (2048, 1.2),
+            (4096, 1.3),
+        ];
+        assert_eq!(
+            single_run_verdict(&ratios, true),
+            SingleRunVerdict::Undetermined
+        );
+    }
 }

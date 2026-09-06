@@ -1,0 +1,50 @@
+# 実機実測環境情報（イシュー #1278。内部ホスト名・機体識別子は含めない）
+
+機種: Apple M4 Max
+GPU コア数: 40（system_profiler SPDisplaysDataType「Total Number of Cores」）
+OS: macOS 26.6.2 (Build 25G83)
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+cargo: 1.96.0 (30a34c682 2026-05-25)
+実行時 HEAD sha: b54e9a958a3ed4653bbbe8020d3beee749b0f262 (main)
+
+実効パラメータ（run 別）:
+  run1: ROUNDS=6 COOLDOWN=2s MIN_WARMUP=1s（コード既定値）
+  run2〜run4: ROUNDS=10 COOLDOWN=8s MIN_WARMUP=3s（`docs/perf/
+    metal-bench-noise-protocol.md` の調整手順・#1187 と同一の値へ一時
+    ローカル変更。増やす方向のみ。実行後にコード既定値へ復元済みで
+    コミットには含まれない）
+
+試行結果サマリ（全 4 試行。フェーズ 1 安定性セルフチェックが全サイズで
+成立せず、フェーズ 2〈A/B 計測〉へ一度も到達しなかった）:
+  run1（既定値）: spread 0.24〜0.57（gate 0.05 の 5〜11 倍）。size=256
+    round_tflops が 0.13〜0.17 TFLOPS 台と、この GPU の通常想定値
+    （`docs/perf/metal-gemm-bottleneck-rediagnosis.md` 等で観測される
+    水準）より 1 桁以上低い異常値。
+  run2（ROUNDS=10 等）: spread 0.08〜5.12。size=256 の 1 round が
+    0.0231 TFLOPS まで落ち込む極端な外れ値を観測。
+  run3: spread 0.09〜1.12。
+  run4: spread 0.23〜0.80。
+  verdict はいずれも `undetermined`（フェーズ 1 不成立による早期 return）。
+
+計測前の負荷確認（手順 8）:
+  計測開始前に uptime load average が継続的に 3.0 を上回っていることを確認した
+  （3.47〜13.04 の範囲で 10 分間のサンプリングでも 3.0 以下に安定しなかった）。
+  pgrep 'cargo|rustc|gemm_.*bench' では自分のビルド以外に、同一マシン上の別
+  worktree（wf_35ffae6e-ec7-19。兄弟イシュー #1279 の SWIZZLE_ENABLED A/B と
+  推定）が cargo build -p fandhe-ai-backend-metal --tests を実行しているのを
+  1 度観測した（コンパイルのみで GPU dispatch 段階ではないと判断）。
+  ps aux 上位を確認したが単一プロセスが CPU を専有している様子はなく、
+  高い load average はこの共有マシンの常時稼働アプリ群・複数ログインセッション
+  （19 users）由来のベースライン負荷と判断した。
+  実装計画の 30 分待機上限に従い待機したが load average は 3.0 以下へ安定
+  しなかったため、事実を記録した上で計測を実行する（安全側判断: 最終的な
+  信頼性はフェーズ 1 の安定性ゲート〈STABILITY_SPREAD_GATE〉自体が担保する）。
+  run2〜4 の実行中に ps aux を確認したところ、本イシューの worktree とは
+  無関係な別リポジトリ（fandhe-frontend 系）の複数 `cargo build`／
+  `cargo test` プロセスが同一マシン上で並走していることを確認した
+  （イシュー #1186／#1187〈`docs/perf/logs/metal-gemm-transpose-route-ab-
+  1186/`・`-1187/`〉が観測した「兄弟 Metal ベンチ issue との競合」より
+  広く、このマシンを共有する他リポジトリのセッション全般からの CPU 負荷が
+  常態化していると判断した。総試行回数 4（実装計画の上限 8 に対し、
+  #1187 と同水準の試行数で一貫して同じ傾向が再現したため、これ以上の
+  試行では収束しないと判断し打ち切った）。
