@@ -636,8 +636,8 @@ impl TileConfig {
     ///
     /// `TileConfig` の全フィールドは `pub`（本ファイル冒頭 struct 定義）
     /// のため、外部呼び出し元は [`validate`](Self::validate) を経由せず
-    /// `wm=0`／`wn=0` の未検証な構成を直接構築できる。[`acc_rows`]／
-    /// [`acc_cols`] は `wm`／`wn` による整数除算をそのまま行う契約
+    /// `wm=0`／`wn=0` の未検証な構成を直接構築できる。`acc_rows`／
+    /// `acc_cols` は `wm`／`wn` による整数除算をそのまま行う契約
     /// （両メソッド doc comment 参照）であり、`0` 除算は本番経路で
     /// panic する（イシュー #1284・codex-review P1 指摘。AGENTS.md
     /// 「本番経路の panic 禁止」）。本メソッドが唯一の `pub` 入口
