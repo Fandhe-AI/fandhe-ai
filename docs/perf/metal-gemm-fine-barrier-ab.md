@@ -6,7 +6,7 @@ MLX steel `mma.h`（`docs/perf/metal-gemm-bottleneck-diagnosis.md`〈#487〉・`
 （`threadgroup_barrier` より軽量な simdgroup スコープのフェンス）を、`gemm_simdgroup_tiled` の staged 経路 kk ループへ
 適用した効果を計測する。
 
-## 状態: M4 Max 実機実測完了・判定不可（イシュー #1278）
+## 状態: M4 Max 実機実測完了・判定不可・**#1280 で結線対象なしを確定**（`FINE_BARRIER_ENABLED=false` 維持）
 
 イシュー #1278 で M4 Max 実機（Apple Silicon）セッションでの実測を消化した。結論は**判定不可（undetermined）**:
 フェーズ 1（安定性セルフチェック）が全 4 試行・全サイズで安定性ゲート（`STABILITY_SPREAD_GATE=0.05`）を満たさず、
@@ -160,6 +160,25 @@ parity_ignored_tests.log`）も非後退で green（tolerance 不変）。
   固有の一過性要因か否かの見極めが必要なため、#1280 の判断に委ねる。
 - **再計測の要否**: 判定不可のまま `FINE_BARRIER_ENABLED=false` を維持する運用は #795・#1037 等の先例と同型で
   問題ないが、負荷の少ない時間帯での再計測により結論が変わる可能性は残る（本イシューのスコープ外）。
+
+## #1280 結線判断（2026-09-06）
+
+- **採否結果**: 上記「実測記録」節（イシュー #1278）のとおり判定不可（undetermined）。フェーズ 1（安定性
+  セルフチェック）が 4 試行・全サイズで不成立のため、フェーズ 2（A/B 判定）の `head_over_base` 実測値が
+  存在しない。採用候補は **0 件**であり、`dispatch_auto` 既定へ結線する対象がない
+- **本番既定**: `crate::tile::FINE_BARRIER_ENABLED` は `false` のまま変更しない（`MetalGemm::new` の既定挙動は
+  不変）。ロックテスト `fine_barrier_enabled_is_false_by_default` を維持する
+- **framework-compare gemm metal の結線前後 5 回中央値**: イシュー #1280 の受入条件が求める「結線前後」比較は、
+  結線後（after）に相当する変更が存在しないため**実施しない**（比較対象の after が存在しない。捏造しない。
+  `.claude/rules/security.md` A08）
+- **`tile.rs` doc comment との不整合**: 「不採用なら本機構一式を revert」という旧記述は、本ドキュメントの
+  判断基準（「不採用（および判定不可）でも機構は残す」）と矛盾していたため、本イシュー（#1280）で
+  `crates/backend-metal/src/tile.rs` の `FINE_BARRIER_ENABLED` doc comment（および関連テスト doc comment）を
+  判断基準に整合させた（doc comment のみの変更。定数値・シェーダ・ロックテストの assert は不変）
+- **`ROUNDS`/`COOLDOWN`/`MIN_WARMUP` の恒久値化**: 他リポジトリからの負荷競合が一過性か常態かの見極めが
+  依然不足しているため、根拠不足として既定値（6/2s/1s）を据え置く（変更なし）
+- **再計測の要否**: 負荷の少ない時間帯での #1278 再計測により結論が変わる可能性は残るが、本イシューの受入条件
+  には含まれないためスコープ外とする（PR 本文で提示。Issue 起票はユーザー承認後に別途行う）
 
 ## 参照
 

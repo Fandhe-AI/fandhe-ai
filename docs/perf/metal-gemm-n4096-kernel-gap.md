@@ -165,6 +165,13 @@ N=4096 NN（正方立方。中核対象）:
   再構成・`FINE_BARRIER_ENABLED`／`SWIZZLE_ENABLED` の M4 Max 実測記録の空欄
   埋め）。`docs/backend-metal-async-copy-decision.md`・`metal-gemm-fine-
   barrier-ab.md`・`metal-gemm-tgid-swizzle-ab.md` は本 PR では更新しない
+  → **更新（イシュー #1278／#1279／#1280）**: E5（`FINE_BARRIER_ENABLED`／
+  `SWIZZLE_ENABLED`）は #1278／#1279 で M4 Max 実機実測済み（いずれも安定性
+  ゲート不成立により判定不可）。#1280 でこの実測結果に基づき採用候補 0 件・
+  `dispatch_auto` 既定への結線対象なしと確定し、両定数とも `false` を維持した
+  （`metal-gemm-fine-barrier-ab.md`・`metal-gemm-tgid-swizzle-ab.md` の
+  「#1280 結線判断」節）。E1〜E4（ソーステキスト特殊化 codegen・フラグメント
+  ロード方式・協調ロード再構成）は引き続き未実施のまま
 - cand0（candle と同一タイル形状）が 4096 で崩壊する根本原因の特定
   （スレッドあたり実行効率の直接計測手段が現状ない）
 - §2 の限界に基づく厳密なレジスタ spill 計測（Xcode Instruments の GPU
@@ -419,6 +426,10 @@ pragma の本番結線を撤回する**（§7.7a）。
   15〜35% 後退するため。E2〜E5（フラグメントロード方式変更・協調ロード
   再構成・`FINE_BARRIER_ENABLED`／`SWIZZLE_ENABLED` 切替との相互作用）は
   引き続き対象外
+  → **更新（イシュー #1280）**: E5（`FINE_BARRIER_ENABLED`／`SWIZZLE_ENABLED`
+  単体切替）は #1278／#1279 で M4 Max 実機実測済み・#1280 で採用候補 0 件・
+  結線対象なしと確定した（本項目の対象外扱いは E1 との相互作用診断に限り
+  維持。E2〜E4 は引き続き未実施）
 - unroll(full) を acc_rows*acc_cols>=16 の候補にのみ適用する条件付き
   gating（function constant 分岐でループ本体を複製する等）は、pragma 単純
   付与よりコード複雑化・実機再検証コストが大きいため本 PR では実施せず、

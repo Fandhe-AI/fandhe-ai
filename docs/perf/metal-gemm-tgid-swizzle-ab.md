@@ -6,7 +6,7 @@ threadgroup ID スウィズル（固定値 `SWIZZLE_LOG = 2`。`tile` = 4 thread
 （MLX steel `swizzle_log`・DeepGEMM の L2 スウィズルと同種の技法。MLX 自身は classic 経路で `swizzle_log = 0`〈無効〉のまま
 据え置いており未実証の技法である点に留意。計画「背景・目的」節）。
 
-## 状態: M4 Max 実機実測完了・判定不可（イシュー #1279）
+## 状態: M4 Max 実機実測完了・判定不可・**#1280 で結線対象なしを確定**（`SWIZZLE_ENABLED=false` 維持）
 
 イシュー #1279 で M4 Max 実機（Apple Silicon）セッションでの実測を消化した。結論は**判定不可（undetermined）**:
 フェーズ 1（安定性セルフチェック）が 4 試行・全サイズ（256〜4096。run4 の size=256 のみ 1 試行 gate 内）で
@@ -206,6 +206,26 @@ pool_reuse_interleaved_with_tracked_steps_preserves_batching` の 2 件が FAILE
 - **再計測の要否**: 判定不可のまま `SWIZZLE_ENABLED=false` を維持する運用は `FINE_BARRIER_ENABLED`〈#1278〉・
   #1037 等の先例と同型で問題ないが、負荷の少ない時間帯での再計測により結論が変わる可能性は残る
   （本イシューのスコープ外）
+
+## #1280 結線判断（2026-09-06）
+
+- **採否結果**: 上記「実測記録」節（イシュー #1279）のとおり判定不可（undetermined）。フェーズ 1（安定性
+  セルフチェック）が 4 試行・全サイズ（run4 の size=256 のみ例外）で不成立のため、フェーズ 2・3（A/B 判定）の
+  比列が存在しない。採用候補は **0 件**であり、`dispatch_auto` 既定へ結線する対象がない
+- **本番既定**: `crate::tile::SWIZZLE_ENABLED` は `false` のまま変更しない（`MetalGemm::new` の既定挙動は不変。
+  ロックテストを維持する）
+- **framework-compare gemm metal の結線前後 5 回中央値**: イシュー #1280 の受入条件が求める「結線前後」比較は、
+  結線後（after）に相当する変更が存在しないため**実施しない**（比較対象の after が存在しない。捏造しない。
+  `.claude/rules/security.md` A08）
+- **`tile.rs` doc comment との不整合**: 「不採用なら本定数を含む変更一式を revert する」という旧記述は、本
+  ドキュメントの判断基準（#795 改定版「不採用（および判定不可）でも機構は残す」）と矛盾していたため、本
+  イシュー（#1280）で `crates/backend-metal/src/tile.rs` の `SWIZZLE_LOG`/`SWIZZLE_ENABLED` doc comment（および
+  関連テスト doc comment）を判断基準に整合させた（doc comment のみの変更。定数値・シェーダ・ロックテストの
+  assert は不変）
+- **`ROUNDS`/`COOLDOWN`/`MIN_WARMUP` の恒久値化**: 他リポジトリからの負荷競合が一過性か常態かの見極めが依然
+  不足しているため、根拠不足として既定値（6/2s/1s）を据え置く（変更なし）
+- **再計測の要否**: 負荷の少ない時間帯での #1279 再計測により結論が変わる可能性は残るが、本イシューの受入条件
+  には含まれないためスコープ外とする（PR 本文で提示。Issue 起票はユーザー承認後に別途行う）
 
 ## 参照
 

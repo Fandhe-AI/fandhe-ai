@@ -1192,9 +1192,11 @@ pub fn select_with_occupancy(
 ///
 /// **実験的パラメータとして固定値のみ扱う**: `TileConfig` のフィールドには
 /// しない。採否は `docs/perf/metal-gemm-tgid-swizzle-ab.md` の A/B 計測で
-/// 判断し、不採用なら本定数を含む変更一式を revert する（既定 off の
-/// 未使用パラメータとして残さない方針。out-of-scope-tracking.md の趣旨に
-/// 反しないための意図的な二択設計）。
+/// 判断する。イシュー #1279（M4 Max 実機実測）はフェーズ 1 安定性ゲートが
+/// 4 試行・全サイズで不成立のため判定不可（undetermined）に終わり、
+/// イシュー #1280 が「不採用（および判定不可）でも機構は残す」（#795 改定版
+/// の判断基準）に従い結線対象なしと確定した。よって revert はしない
+/// （機構自体は将来の再計測に備え保持し、`false` 既定のまま維持する）。
 ///
 /// `pub(crate)` に留める（PR #661 codex-review 指摘）: `tile` モジュールは
 /// `lib.rs` で `pub mod tile;` のため公開されており、`pub` のままだと
@@ -1221,14 +1223,16 @@ pub(crate) const SWIZZLE_LOG: u32 = 2;
 /// constant）で実際に有効化するかどうかのゲート（PR #661 codex-review
 /// 指摘）。
 ///
-/// **既定は `false`（無効）**: 本イシュー（#540）は実機（Apple Silicon）
-/// での性能効果・数値一致が `docs/perf/metal-gemm-tgid-swizzle-ab.md` の
-/// 「判断基準」を満たすまで未検証のため、本番経路は従来の走査順
-/// （`tid_y = tgid.y`・`tid_x = tgid.x`。恒等変換）のままにする。A/B 計測を
-/// 実機セッションで行う際はこの値を一時的に `true` へ変更してベンチマークを
-/// 実行し、採用判断後に応じて（採用: 既定を `true` へ確定 / 不採用:
-/// スウィズル機構一式を revert）このコメントごと更新する。コミットした
-/// 状態で `true` のまま残さない。
+/// **既定は `false`（無効）**: 本イシュー（#540）は `docs/perf/
+/// metal-gemm-tgid-swizzle-ab.md` の「判断基準」を満たすまで未検証のため、
+/// 本番経路は従来の走査順（`tid_y = tgid.y`・`tid_x = tgid.x`。恒等変換）の
+/// ままにする。A/B 計測はイシュー #746 以降 `MetalGemm::new_with_swizzle`
+/// （instance フィールド方式）で base/head 双方を同一コミット上に構築して
+/// 行う（この定数自体は一時変更しない。同ファイル `MetalGemm::new_with_
+/// swizzle` doc comment 参照）。イシュー #1279（M4 Max 実機実測）はフェーズ
+/// 1 安定性ゲート不成立により判定不可（undetermined）に終わり、イシュー
+/// #1280 が結線対象なしと確定した（機構は revert せず保持。`false` 既定を
+/// 維持）。コミットした状態で `true` のまま残さない方針は不変。
 ///
 /// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
 /// doc comment を参照（同一の dead_code 誤検知回避）。
@@ -1252,9 +1256,11 @@ pub(crate) const SWIZZLE_ENABLED: bool = false;
 /// `examples/gemm_fine_barrier_ab_bench.rs` を使う（この定数自体は変更せず、
 /// `MetalGemm::new_with_fine_barrier` へ明示的に `true` を渡した head
 /// インスタンスで計測する。#540 の運用方式〈#746 で `SWIZZLE_ENABLED` を
-/// instance フィールドへ格上げした判断〉を踏襲）。採用判断後に応じて
-/// （採用: 既定を `true` へ確定 / 不採用: 本機構一式を revert）このコメント
-/// ごと更新する。
+/// instance フィールドへ格上げした判断〉を踏襲）。イシュー #1278（M4 Max
+/// 実機実測）はフェーズ 1 安定性ゲート不成立により判定不可（undetermined）
+/// に終わり、イシュー #1280 が「不採用（および判定不可）でも機構は残す」
+/// （[`SWIZZLE_ENABLED`] と同型の判断基準）に従い結線対象なしと確定した。
+/// よって revert はせず `false` 既定のまま保持する。
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const FINE_BARRIER_ENABLED: bool = false;
 
@@ -3231,16 +3237,20 @@ mod tests {
     /// `SWIZZLE_ENABLED` が実際どちらの値でコンパイルされたか」を検出する。
     ///
     /// あえてコンパイル時 `const { assert!(...) }` にはしない
-    /// （review_r3791409328 の教訓）: `docs/perf/metal-gemm-tgid-swizzle-
-    /// ab.md` の A/B 計測手順は実機セッションで `SWIZZLE_ENABLED` を一時的に
-    /// `true` へ書き換えたうえで `cargo test --release -- --ignored`
-    /// （ignored テストのみ選択実行）を叩く運用のため、コンパイル時
-    /// アサーションだとその一時変更のたびに crate 全体がビルド不能になり
-    /// 計測できなくなる。本テストは通常の `#[test]`（非 `#[ignore]`）の
-    /// ため `--ignored` フィルタでは実行対象外となり A/B 計測時の妨げには
-    /// ならない一方、通常 CI（`cargo test`。SWIZZLE_ENABLED=true のまま
-    /// 誤コミットされた状態を含む）では必ず実行され、`true` のままの
-    /// コミットを実行時 panic で確実に検出する。
+    /// （review_r3791409328 の教訓）: イシュー #746 以前は `docs/perf/
+    /// metal-gemm-tgid-swizzle-ab.md` の A/B 計測手順が実機セッションで
+    /// `SWIZZLE_ENABLED` を一時的に `true` へ書き換えたうえで
+    /// `cargo test --release -- --ignored` を叩く運用だったため、コンパイル
+    /// 時アサーションだと一時変更のたびに crate 全体がビルド不能になり
+    /// 計測できなくなる懸念があった。#746 で `MetalGemm::new_with_swizzle`
+    /// （instance フィールド方式）へ移行済みの現在はこの定数自体を一時変更
+    /// しなくても A/B 計測できるが、実行時 assert の設計は変更していない
+    /// （`true` のまま誤コミットされた場合の検出手段として引き続き有効）。
+    /// 本テストは通常の `#[test]`（非 `#[ignore]`）のため `--ignored`
+    /// フィルタでは実行対象外となり A/B 計測時の妨げにはならない一方、
+    /// 通常 CI（`cargo test`。`SWIZZLE_ENABLED=true` のまま誤コミットされた
+    /// 状態を含む）では必ず実行され、`true` のままのコミットを実行時 panic
+    /// で確実に検出する。
     #[test]
     fn tiled_dispatch_grid_is_identity_by_default() {
         let (tiles_n, tiles_m) = (3usize, 9usize);
@@ -3311,9 +3321,12 @@ mod tests {
     /// 恒等変換（`tid_y = tgid.y`・`tid_x = tgid.x`）へフォールバックする
     /// 分岐がシェーダ側に実在することを Linux CI（ubuntu-latest）上で
     /// ロックする。Mac 実機依存の A/B 計測（`docs/perf/
-    /// metal-gemm-tgid-swizzle-ab.md`）は別途実施し、改善が無ければこの
-    /// テストごと変更を撤去（revert）する運用とする（`metal-gemm-
-    /// serpentine-ab.md` と同じ運用。#536 前例踏襲）。
+    /// metal-gemm-tgid-swizzle-ab.md`）はイシュー #1279 で M4 Max 実機実測
+    /// 済み（判定不可〈undetermined〉）・イシュー #1280 で結線対象なしと
+    /// 確定した。#795 改定版の判断基準（「不採用（および判定不可）でも
+    /// 機構は残す」）により、本テストは撤去（revert）せず維持する
+    /// （旧 `metal-gemm-serpentine-ab.md`〈#536〉の revert 運用とは異なる
+    /// 扱いへ変更済み。`SWIZZLE_ENABLED`/`SWIZZLE_LOG` doc comment 参照）。
     ///
     /// PR #661 codex-review 指摘対応: 実機未検証のまま `SWIZZLE_ENABLED`
     /// を無条件 `true` で本番経路へ適用しないよう、シェーダ側が
