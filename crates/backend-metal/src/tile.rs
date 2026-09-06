@@ -621,13 +621,15 @@ impl TileConfig {
     /// （イシュー #1282）。`acc_rows * acc_cols >= UNROLL_ACC_MIN_PRODUCT`
     /// を acc 積として評価する（E1 実験〈`docs/perf/
     /// metal-gemm-n4096-kernel-gap.md` §7〉の実測境界）。インスタンスの
-    /// opt-in フラグとの AND は [`unroll_acc_loops_for`] が取る。
+    /// opt-in フラグとの AND は `unroll_acc_loops_for`（`pub(crate)`
+    /// のためここからリンクしない）が取る。
     ///
     /// `pub`（クレート外公開）である理由（イシュー #1284・codex-review
     /// P1 指摘）: `examples/gemm_unroll_acc_ab_bench.rs` は本番
     /// `dispatch_auto` 経路が実際に unroll 版を選ぶかどうかの表示用
     /// フラグを必要とするが、`examples/` は独立バイナリクレートのため
-    /// `pub(crate)` の [`UNROLL_ACC_MIN_PRODUCT`] を直接参照できない。
+    /// `pub(crate)` の `UNROLL_ACC_MIN_PRODUCT`（同様に非リンク表記）を
+    /// 直接参照できない。
     /// 閾値比較ロジックを本メソッド 1 箇所に閉じ込め、example 側で
     /// `acc_rows*acc_cols >= 16` 相当を再実装（ハードコード複製）しない
     /// ようにするため公開する。
