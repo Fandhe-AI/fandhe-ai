@@ -402,8 +402,48 @@ fn tile_class_production_select_kernel_gpu_ab() {
     // `dispatch_auto` の実測帯域（512/1024/2048/4096。`select_for_device`
     // ドキュメンテーションコメント参照）を網羅する。base/head は N ごとに
     // 逐次実行（上記 doc comment「trial 単位で交互にしない」注記参照）。
+    //
+    // codex-review 指摘（PR #1389）: `run_size_with` は要求構成と実際に
+    // 解決されたタイル構成（`pipeline_for_tile` フォールバック）の一致
+    // しか検証しない。`plan_tiled_by_class` が Edge/Interior 解決構成の
+    // 食い違いにより `TileClassMode::Split` から `Legacy` 単一 dispatch
+    // へフォールバックした場合（`crate::gemm::TILE_CLASS_SPLIT_FALLBACK_
+    // COUNT` で可観測。`resolved_cfg` 自体は不変のため `run_size_with`
+    // 単体では検出できない）、head（"split" ラベル）計測が実際には
+    // Legacy 経路の実行時間を記録してしまい、集計結果を汚染しうる。この
+    // ため head 呼び出し前後で `TILE_CLASS_SPLIT_FALLBACK_COUNT`（非増加
+    // を要求）と `TILE_CLASS_INTERIOR_DISPATCH_COUNT`／`TILE_CLASS_EDGE_
+    // DISPATCH_COUNT`（少なくとも一方の増加を要求。Split 経路が実際に
+    // dispatch されたことの直接証拠）を検査し、経路不一致を検出した時点
+    // で `panic!` して以降の集計を中断する（fail-closed。ファイル冒頭
+    // 「大小関係への assert は行わない」方針とは独立の、計測自体の妥当性
+    // に対する検証）。
     for n in [512usize, 1024, 2048, 4096] {
         crate::gemm_reuse_phase_diag_tests::run_size_with(&ctx, &base_gemm, n, "legacy");
+
+        let fallback_before = crate::gemm::TILE_CLASS_SPLIT_FALLBACK_COUNT.with(|c| c.get());
+        let interior_before = crate::gemm::TILE_CLASS_INTERIOR_DISPATCH_COUNT.with(|c| c.get());
+        let edge_before = crate::gemm::TILE_CLASS_EDGE_DISPATCH_COUNT.with(|c| c.get());
+
         crate::gemm_reuse_phase_diag_tests::run_size_with(&ctx, &head_gemm, n, "split");
+
+        let fallback_after = crate::gemm::TILE_CLASS_SPLIT_FALLBACK_COUNT.with(|c| c.get());
+        let interior_after = crate::gemm::TILE_CLASS_INTERIOR_DISPATCH_COUNT.with(|c| c.get());
+        let edge_after = crate::gemm::TILE_CLASS_EDGE_DISPATCH_COUNT.with(|c| c.get());
+
+        assert_eq!(
+            fallback_after, fallback_before,
+            "N={n}: head（\"split\"）計測中に TILE_CLASS_SPLIT_FALLBACK_COUNT が \
+             増加した（plan_tiled_by_class が Legacy へフォールバックした）。\
+             直前の legacy 計測時間との比較が Split 経路の実行を保証できない \
+             ため集計を中断する"
+        );
+        assert!(
+            interior_after > interior_before || edge_after > edge_before,
+            "N={n}: head（\"split\"）計測中に TILE_CLASS_INTERIOR_DISPATCH_COUNT \
+             ／TILE_CLASS_EDGE_DISPATCH_COUNT のいずれも増加しなかった（Split \
+             経路の dispatch が実際に発生した形跡がない）。resolved_cfg 一致の \
+             みでは Split 経路の実行を保証できないため集計を中断する"
+        );
     }
 }
