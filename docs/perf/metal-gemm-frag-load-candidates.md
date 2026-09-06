@@ -175,3 +175,12 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 274 filtered out; fi
   （本ドキュメント T2 の設計を踏襲）。
 - N=1024/2048/4096 の純カーネル時間比較・`tile::select`／本番既定への結線
   判断は本イシューのスコープ外（#1295）。
+
+### #1295 結果
+
+N=1024/2048/4096 の 5 回計測中央値実測完了（M4 Max。5 候補: `tgp-k1`〈=
+本番既定〉・`tgp-k2`・`device-legacy`・`device-hoisted-k1`・
+`device-hoisted-k2`）。**本番既定 `tgp-k1` が全 N で最速で、他 4 候補は
+いずれも `tile::select` への組み込み対象外（組み込み不可）**と判定・
+`tile::FRAG_LOAD_CONFIG` は不変のまま維持。詳細・数値は
+`docs/perf/metal-gemm-n4096-kernel-gap.md` §10 を参照。
