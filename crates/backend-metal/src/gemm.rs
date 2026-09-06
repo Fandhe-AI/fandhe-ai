@@ -983,7 +983,6 @@ impl MetalGemm {
     /// 直前）で加算していたが、`plan_tiled_by_class` は常に直後に
     /// [`Self::encode_tiled_plan`] へ渡されて即座に消費される（呼び出し元
     /// が計画だけ作って握り潰すことはない）ため、可観測な回数は不変。
-    #[allow(clippy::too_many_arguments)]
     fn plan_tiled_by_class(
         &self,
         ctx: &MetalContext,

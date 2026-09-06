@@ -24,17 +24,28 @@
 //! 全 N で staged 比 1.6〜3.3 倍**遅かった**ため、当初はこの構造的縮退が
 //! 「後退（REJECT）」に直結すると予想していた。しかし実測（本ファイル
 //! 冒頭 doc の想定に反して）は候補 0/4/8 で Split（direct-load 縮退）が
-//! Legacy（staged）より速い場面が多く、候補 5（`bk=32`）のみ逆に遅いという、
-//! E3 単体の傾向とは異なる結果が出た（形状・候補依存で単純に予測できない。
-//! 詳細な数値は `docs/perf/metal-gemm-n4096-kernel-gap.md` §12 を参照）。
+//! Legacy（staged）より速い場面が多く、候補 5 のみ逆に遅いという結果が
+//! 出た。ただし本番選択構成（下記）での追補計測が示すとおり、
+//! **改善方向は `bk` では説明できない**（本番選択構成 `[1]`/`[2]`
+//! も `bk=16` だが Split で一貫して後退する）。実際の要因は、候補
+//! 0/4/8 の `TileClassMode::Legacy`（staged）ベースライン自体が本番
+//! 選択構成に比べ極端に遅い（同一 N で約 7〜8 倍。おそらく本番選択
+//! ロジックがこれらの大タイル構成を occupancy 縮退で避けている理由と
+//! 同根）ことで、Split（direct-load）がその非効率を部分的に緩和した
+//! に過ぎないと考えられる（機構レベルでの検証は未実施）。いずれにせよ
+//! Split・Legacy どちらも本番選択構成の Legacy には及ばず、候補
+//! 0/4/8 の「改善」は本番結線の根拠にならない（詳細な数値は
+//! `docs/perf/metal-gemm-n4096-kernel-gap.md` §12 を参照）。
 //! **採否の最終判断は同 §12.4 で人間が行う。本ファイル自体は gating しない**
 //! （大小関係への `assert!` は行わず、フォールバック非経由・bit 一致
 //! のみを fail-closed に検証する）。
 //!
 //! 「現行経路」は本番 `select_for_device` の選択構成（M4 Max では
-//! N=1024→`CANDIDATES[6]`・2048→`[1]`・4096→`[2]`）ではなく、**同一候補
-//! の `TileClassMode::Legacy`（1 dispatch）** を指す（候補 0/4/5/8 は
-//! いずれも本番選択構成ではないため）。
+//! N=512→`CANDIDATES[5]`・1024→`[6]`・2048→`[1]`・4096→`[2]`）ではなく、
+//! **同一候補の `TileClassMode::Legacy`（1 dispatch）** を指す（本表の
+//! 対象 N=1024/2048/4096 では候補 0/4/5/8 のいずれも本番選択構成と一致
+//! しないが、N=512 では候補 5 が本番選択構成 `CANDIDATES[5]` そのもの
+//! と一致する点に注意。下記の本番選択構成の直接計測〈追補〉を参照）。
 //!
 //! # 配置理由（`gemm_coop_load_diag_tests.rs` と同じ判断）
 //!
@@ -358,19 +369,26 @@ fn tile_class_kernel_gpu_ab_production_sizes() {
 /// AC-(a) 追補: 候補 0/4/5/8 の実測結果が候補依存で符号が割れた
 /// （ファイル冒頭「AC 形状での構造的縮退」参照。cand0/4/8 は改善方向・
 /// cand5 は後退方向）ため、**本番 `dispatch_auto` が実際に選択する構成**
-/// （`tile::select_for_device`。M4 Max では N=512→`CANDIDATES[3]`・
-/// 1024→`[6]`・2048→`[1]`・4096→`[2]`。いずれも候補 0/4/5/8 とは異なる）
-/// で base（Legacy）/head（Split）を直接比較し、`tile::TILE_CLASS_MODE`
-/// を実際に切り替えた場合の効果を検証する（イシュー #1328 の計画
-/// 「§3.4 採否・本番結線の判断規則」が要求する「ADOPT 相当の場合の
-/// 追加 A/B」に相当。候補 0/4/5/8 の結果だけでは本番構成への外挿が
-/// できないため必須）。
+/// （`tile::select_for_device`。M4 Max では N=512→`CANDIDATES[5]`〈=
+/// cand5 そのもの〉・1024→`[6]`・2048→`[1]`・4096→`[2]`。N=1024/2048/
+/// 4096 は候補 0/4/5/8 のいずれとも異なるが、N=512 は cand5 と一致する
+/// 点に注意）で base（Legacy）/head（Split）を直接比較し、`tile::
+/// TILE_CLASS_MODE` を実際に切り替えた場合の効果を検証する（イシュー
+/// #1328 の計画「§3.4 採否・本番結線の判断規則」が要求する「ADOPT 相当
+/// の場合の追加 A/B」に相当。N=1024/2048/4096 は候補 0/4/5/8 の結果だけ
+/// では本番構成への外挿ができないため必須）。
 ///
 /// `gemm_reuse_phase_diag_tests::run_size_with`（`pub(crate)`。イシュー
 /// #1289 で base/head 比較用に汎用化済み）が `select_for_device` で
 /// 構成を解決し `kernel_gpu` を含む全フェーズを `println!` する。
-/// 大小関係への `assert!` は行わない（ファイル冒頭「gating しない方針」
-/// と同じ理由）。
+/// **`tile_class_kernel_gpu_ab_production_sizes`（AC-(a) 本表）とは異なり
+/// base/head を trial 単位で交互にしない**（`run_size_with` は 1 呼び出しで
+/// warmup 20 + 測定 20 を完結させるため、本関数は N ごとに「base を
+/// 40 反復 → head を 40 反復」の順で呼ぶ。calling-order bias を排除
+/// しないため、効果が小さい場合は解釈に注意が必要——ただし §12.2-B の
+/// N=2048/4096 の後退（2.3〜3.1 倍）は非交互測定の誤差では説明できない
+/// 規模であり、この限界の影響は小さいと判断する）。大小関係への
+/// `assert!` は行わない（ファイル冒頭「gating しない方針」と同じ理由）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn tile_class_production_select_kernel_gpu_ab() {
@@ -382,7 +400,8 @@ fn tile_class_production_select_kernel_gpu_ab() {
         .expect("head（Split）GEMM パイプラインの構築に失敗した");
 
     // `dispatch_auto` の実測帯域（512/1024/2048/4096。`select_for_device`
-    // ドキュメンテーションコメント参照）を網羅する。
+    // ドキュメンテーションコメント参照）を網羅する。base/head は N ごとに
+    // 逐次実行（上記 doc comment「trial 単位で交互にしない」注記参照）。
     for n in [512usize, 1024, 2048, 4096] {
         crate::gemm_reuse_phase_diag_tests::run_size_with(&ctx, &base_gemm, n, "legacy");
         crate::gemm_reuse_phase_diag_tests::run_size_with(&ctx, &head_gemm, n, "split");
