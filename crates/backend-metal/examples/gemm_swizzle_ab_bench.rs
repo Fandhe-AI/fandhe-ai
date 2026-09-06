@@ -109,7 +109,7 @@ impl SingleRunVerdict {
 /// `gemm_fine_barrier_ab_bench.rs::SMALL_SIZE_REGRESSION_TOLERANCE_RATIO`
 /// と同値・同じ導出根拠）。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-const SMALL_SIZE_REGRESSION_TOLERANCE_RATIO: f64 = 0.95;
+const SMALL_SIZE_REGRESSION_TOLERANCE_RATIO: f64 = 1.0 - bench_harness::ab::STABILITY_SPREAD_GATE;
 
 /// `phase2_ratios`・`phase3_ratios`: それぞれ size ごとの `head_over_base`
 /// （TFLOPS 比。head/base）。フェーズ 3 は 512/1024/2048/4096（256 を含まない。
