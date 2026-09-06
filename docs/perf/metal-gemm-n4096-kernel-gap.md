@@ -175,8 +175,13 @@ N=4096 NN（正方立方。中核対象）:
   試作・bit 一致自己検証済み（イシュー #1288。性能実測は #1289 へ
   引き継ぎ）。E3（フラグメントロード方式変更）は候補実装・bit 一致自己
   検証まで完了（イシュー #1293。`docs/perf/metal-gemm-frag-load-
-  candidates.md` 参照。性能実測・`tile::select` への組み込み判断は #1295
-  へ引き継ぎ）。E4（協調ロード再構成）は引き続き未着手のまま
+  candidates.md` 参照）。**#1295 で 5 候補（`tgp-k1`/`tgp-k2`/
+  `device-legacy`/`device-hoisted-k1`/`device-hoisted-k2`）の
+  N=1024/2048/4096 純カーネル時間を実測・判定済み**（§10）:
+  本番既定 `tgp-k1` が全 N で最速で、他 4 候補はいずれも `tgp-k1`
+  比 0.9996〜3.35 倍（`tgp-k2` の N=1024 のみ ±5% 帯内・他は全て
+  明確に後退）のため**組み込み対象なし**（`tile::select` への
+  結線は行わない）。E4（協調ロード再構成）は引き続き未着手のまま
 - cand0（candle と同一タイル形状）が 4096 で崩壊する根本原因の特定
   （スレッドあたり実行効率の直接計測手段が現状ない）
 - §2 の限界に基づく厳密なレジスタ spill 計測（Xcode Instruments の GPU
@@ -1091,3 +1096,189 @@ run 5 は改善方向・run 1/2/4 は後退方向と符号が割れており、�
 `kernel_gpu_run{1..5}.log`・`aggregate.md`・`smoke_source_specialized.log`・
 `env_info.txt`・`uptime_before_run{1..5}.txt`・`pmset_therm_before.txt`・
 `pmset_therm_after.txt`）
+
+## 10. E3 フラグメントロード方式候補の純カーネル時間比較（イシュー #1295）
+
+### 10.0 目的・範囲
+
+`docs/perf/metal-gemm-frag-load-candidates.md` §5「#1295 への引き継ぎ」の
+指示に従い、E3（フラグメントロード方式変更。イシュー #1293 で実装・bit
+一致を自己検証済み）の 5 候補（`tgp-k1`〈= 本番既定 `tile::FRAG_LOAD_
+CONFIG`〉・`tgp-k2`・`device-legacy`〈= 本番既定の direct-load 側〉・
+`device-hoisted-k1`・`device-hoisted-k2`）の N=1024/2048/4096 純カーネル
+時間（GPU タイムスタンプ。イシュー #1276 の `kernel_gpu` 変種）を M4 Max
+実機で 5 回計測し、有効性（`tile::select` への組み込み可否・採用候補）を
+判定する。**`tile::select`／本番既定への実結線は本イシューのスコープ外**
+であり、兄弟イシュー #1302（親 #1273 配下「E2〜E4 で有効な候補を
+`tile::select` の候補表へ組み込む」担当）へ判定結果を引き継ぐ。
+
+計測対象は NN・正方 3 形状（N=1024/2048/4096）のみ。NT/TN/TT・f16 経路・
+N=512 は対象外（§10.5）。
+
+### 10.1 環境・プロトコル
+
+- HEAD: `c732988792b47f1cf341ae78ca407680e90f24c8`（origin/main。PR #1380）
+- 実行方式: `crates/backend-metal/src/gemm_frag_load_diag_tests.rs`
+  （`#[cfg(all(test, target_os = "macos"))]`。新規追加）の
+  `frag_load_kernel_gpu_ab_production_sizes` を `cargo test -p
+  fandhe-ai-backend-metal --release --lib frag_load_kernel_gpu_ab_
+  production_sizes -- --ignored --nocapture --test-threads=1` で 5 プロセス
+  起動（run1〜run5）
+- **負荷状況**: `docs/real-hardware-verification-env.md` の待機方針（load
+  average 1 分値が 3.0 未満に落ちるまで最大 30 分待機）に基づき監視を
+  開始したが、**実際に観測できたのは約 5 分間（60 秒間隔 5 回ポーリング）
+  のみ**で、30 分の待機を完了する前に低下傾向が見えないと判断して打ち
+  切った。この間 load average 1 分値は 14.52 → 53.36 → 25.40 → 28.19 →
+  19.77 と推移し低下傾向は見られなかった（53.36 のピークは本セッション
+  自身の事前ビルド・スモークテスト実行と重なった時点であり、他セッション
+  のみに起因するとは断定できない）。複数の並走エージェントセッション
+  （別リポジトリの `cargo test --workspace --all-features` 等）が新規に
+  起動する共有環境で、`metal-gemm-transpose-tiled.md`（#1186/#1187）・
+  §7.10（#1284）と同種の状況。`env_info.txt` に並走プロセス名（プロセス名
+  のみ）を記録済み
+- **対処**: 5 候補すべてを同一プロセス・同一 trial ループ内で trial ごとに
+  交互（開始オフセット回転）で計測する interleave 方式（`docs/perf/
+  metal-bench-noise-protocol.md` §2 と同じ考え方）で外部負荷の影響を対称化
+  したうえで判定した（詳細は `logs/metal-gemm-e3-frag-load-ab-1295/
+  env_info.txt`）
+- **twin validate 結果**: 全 N で `TileConfig { staged: false, ..cfg }`
+  twin は `validate` を通過し、`device-legacy`/`device-hoisted-k1`/
+  `device-hoisted-k2` の 3 候補とも全 N で計測対象に含まれた（validate
+  不通過による対象外はゼロ件）
+- **keep_alive 取扱い**: N ごとのループスコープで 5 候補分の `keep_alive`
+  を保持し、次の N へ進む前に drop する方式を採用（truncate は不要。本機
+  はピーク約 13.4 GiB を確保できる空きメモリがあった）
+- **経路証跡の限界**: E2（`gemm_spec_source_diag_tests`）の
+  `source_specialized_cache_len`/`function_constant_cache_len` に相当する
+  「実際にどちらの経路の値か」を出力一致とは独立に保証する追加証跡は E3
+  には存在しない。`resolved_cfg == requested_cfg`（フォールバック非経由。
+  fail-closed 検証。全 run 全候補で違反なし）と、イシュー #1293 の bit
+  一致自己検証（本判定に先立ち `frag_load` 4 テストを `--release
+  --ignored --test-threads=1` で再実行し全 pass を確認。
+  `logs/.../smoke_frag_load_bit_match.log`）が根拠
+
+### 10.2 候補 × N の 5 run 表
+
+`logs/metal-gemm-e3-frag-load-ab-1295/aggregate.md` に全数値を記載。要約
+（5 run 中央値。ms）:
+
+| N | tgp-k1（base） | tgp-k2 | device-legacy | device-hoisted-k1 | device-hoisted-k2 |
+|---|---|---|---|---|---|
+| 1024 | 1.0238 | 1.0234 | 2.5755 | 1.6246 | 2.1554 |
+| 2048 | 2.4098 | 2.6647 | 8.0610 | 4.3095 | 6.9935 |
+| 4096 | 22.0783 | 48.2870 | 55.3520 | 35.8267 | 61.7659 |
+
+対 base（`tgp-k1`）比:
+
+| N | tgp-k2 | device-legacy | device-hoisted-k1 | device-hoisted-k2 |
+|---|---|---|---|---|
+| 1024 | 0.9996 | 2.5156 | 1.5868 | 2.1053 |
+| 2048 | 1.1058 | 3.3451 | 1.7883 | 2.9021 |
+| 4096 | 2.1871 | 2.5071 | 1.6227 | 2.7976 |
+
+対 device-legacy 比（staged→device 切替の効果と hoisting/ksteps の効果の
+帰属分析用。採否の一次指標にはしない）:
+
+| N | device-hoisted-k1 | device-hoisted-k2 |
+|---|---|---|
+| 1024 | 0.6308 | 0.8369 |
+| 2048 | 0.5346 | 0.8676 |
+| 4096 | 0.6473 | 1.1159 |
+
+hoisted-k1 は device-legacy より一貫して速い（0.53〜0.65 倍）が、device
+系そのものが staged（`tgp-*`）より大幅に遅いため base 比では改善に届かない
+（「device 系内での hoisting の効果」と「staged→device の効果」を分離して
+確認できたのみ）。
+
+### 10.3 妥当性帯チェック
+
+base（`tgp-k1`）の 5run 中央値絶対値を `docs/perf/metal-gemm-reuse-phase-
+breakdown.md` §11 の分母（N=1024: 1.0267 ms／2048: 3.1849 ms／4096:
+13.7051 ms）と突合した:
+
+| N | 本測定 | 分母 | 乖離 |
+|---|---|---|---|
+| 1024 | 1.0238 ms | 1.0267 ms | 1.00 倍（ほぼ一致） |
+| 2048 | 2.4098 ms | 3.1849 ms | 0.76 倍（本測定の方が速い） |
+| 4096 | 22.0783 ms | 13.7051 ms | 1.61 倍（本測定の方が遅い） |
+
+N=4096 の乖離（分母比 1.61 倍）は §10.1 の高負荷環境（他セッションの
+CPU/GPU 競合）による事実として記録し、分母の置き換えは行わない
+（§9.3〈#1289〉と同じ判断）。N=1024/2048 の
+乖離は分母より小さい方向で、判定（相対比較）自体には影響しない。
+
+### 10.4 採否判断
+
+§9.4（#1289）の 3 区分判定基準をそのまま候補ごとに適用する:
+
+- **候補表組み込み可**: N=2048 かつ N=4096 で改善（対 base 比 < 1.0）、
+  かつ N=1024 の後退が 5% 以内（比 <= 1.05）
+- **有効性なし → 組み込み不可**: 全 N で ±5% 帯内、または大形状（N=2048／
+  4096）で後退
+- **判定不可（undetermined）**: run 間で改善／後退の方向が一貫せず、
+  ばらつきが大きい
+
+判定結果（`device-legacy`／`device-hoisted-k1`／`device-hoisted-k2`
+は全 N・全 run で方向が一貫し undetermined には該当しない。`tgp-k2` は
+N=1024／N=4096 は全 run 一貫だが、N=2048 は 5 run 中 2 run（run2:
+2.6913/2.6957=0.998331・run4: 2.5660/2.6907=0.953637）が改善方向、
+残り 3 run（run1/3/5）が後退方向で符号が反転する。以下は候補ごとに
+この点を明記したうえでの判定）:
+
+- **`tgp-k2`**: N=1024 は全 run が ±5% 帯内（5run 中央値比 0.9996）。
+  N=2048 は 5run 中央値比では後退（1.1058）だが run 単位では改善・後退が
+  混在し（上記）、§9.4（#1289）と同じ中央値ベースの判定方針
+  （`docs/perf/metal-bench-noise-protocol.md`）に従い「改善を安定して
+  示した」とは判断しない。N=4096 は 5 run 全てで head > base
+  （2.1871 倍。符号反転なし）と一貫して明確に後退する。3 サイズ中
+  N=4096 が単独で「大形状で後退」の基準を満たし、N=2048 は「候補表
+  組み込み可」の条件（改善〈比 <1.0〉）を満たさないため、両条件から
+  **組み込み不可**と判定する（N=2048 の符号反転自体は判定を undetermined
+  へ倒す根拠とはしない。理由は N=4096 の後退方向が 5 run とも一貫して
+  おり、N=2048 が仮に改善方向で確定しても「候補表組み込み可」の 3 条件
+  〈N=2048 かつ N=4096 で改善〉を N=4096 側が構造的に満たせないため）
+- **`device-legacy`**: 全 N・全 run で base 比 2.5〜3.3 倍の大幅な後退
+  → **組み込み不可**
+- **`device-hoisted-k1`**: 全 N・全 run で base 比 1.6〜1.8 倍の後退
+  → **組み込み不可**
+- **`device-hoisted-k2`**: 全 N・全 run で base 比 2.1〜2.9 倍の大幅な後退
+  → **組み込み不可**
+
+**結論: E3 の 5 候補中、本番既定 `tgp-k1`（threadgroup 経由・K=1 段一括
+ロード。現行の staged 経路）を上回る候補は存在しなかった。`tile::select`
+候補表・本番既定への組み込み対象なし**（採用候補なし）。`tile::
+FRAG_LOAD_CONFIG`（= `FragLoadConfig::DEFAULT`）は不変のまま維持する。
+
+E1（loop unroll pragma。§7）・E2（ソーステキスト特殊化。§8-9）に続き、
+E3 も本番既定を上回らないという結果になった。3 実験とも「現行の
+`gemm_simdgroup_tiled` 実装（既存の staged 8 幅ロード・function constant
+経路）が M4 Max 上では既に局所最適に近い」ことを補強する一次情報として
+扱う（各実験のスコープ・仮説はそれぞれ独立であり、本節はこの傾向を指摘
+するに留め、新たな仮説検証は行わない）。
+
+### 10.5 スコープ外・引き継ぎ
+
+- **#1302 への引き継ぎ**: E3 は判定「組み込み対象なし」につき、#1302 の
+  E3 分担分は追加実装なしでクローズ可能（E2〈#1289 の REJECT 判定〉と
+  同型の結論）。E3 の twin 構成（`staged=false` 版 `TileConfig`）を候補表
+  へ追加する作業自体も本判定により不要と判断する
+- NT/TN/TT 転置パターンでの性能比較（bit 一致は #1293 T4 で NN 以外も
+  検証済みだが、性能実測は NN のみが対象）
+- f16 経路（`gemm_simdgroup_tiled_f16`）への E3 展開（未着手のまま）
+- N=512 の計測（`docs/perf/metal-gemm-reuse-phase-breakdown.md` 分母表が
+  N>=1024 のみを対象とするため、他の E1〜E2 実測と同じ理由で対象外）
+- N=4096 で run 間ばらつきが大きい根本原因（§10.1 の高負荷環境が主因と
+  推定するに留め、低負荷環境での再測定による定量的切り分けは行わない）
+- run2 の N=1024 のみ全 5 候補が他 4 run と比べ約半分の絶対値（例:
+  `tgp-k1` 0.5621 ms 対 他 run の約 1.02 ms）を記録した（`logs/
+  metal-gemm-e3-frag-load-ab-1295/aggregate.md` 参照）。run 内で全候補に
+  対称に現れているため §10.4 の相対比較・判定には影響しないが、原因は
+  未特定のまま記録する（run 単位のスケジューリング揺らぎと推定するに
+  留める）
+
+### 10.6 関連ログ
+
+`docs/perf/logs/metal-gemm-e3-frag-load-ab-1295/`（`env_info.txt`・
+`uptime_before_run{1..5}.txt`・`pmset_therm_before.txt`・
+`pmset_therm_after.txt`・`smoke_frag_load_bit_match.log`・
+`kernel_gpu_run{1..5}.log`・`aggregate.md`）
