@@ -16,6 +16,20 @@
 //! イシュー #1344 が担う（`docs/perf/cuda-gemm-tiled-pipeline.md`
 //! 「#1343 128×64×16 候補の追加」節）。
 //!
+//! # persistent タイルキュー版の追加（イシュー #1347）
+//!
+//! 本モジュールに [`tiled_pipeline_128x64_persistent_f32_source`]（grid=
+//! SM 数・atomic タイル取得の persistent 版。`kernels_tiled_pipeline.rs`
+//! の 64×64 persistent 版〈イシュー #1346〉と同型）を追加する。タイル内
+//! 計算本体（[`TP128_TILE_CORE`]）を非 persistent 版と完全に共有する
+//! ことで出力 bit 同一を機構として保証する（詳細は
+//! [`TP128_KERNEL_PERSISTENT_PREFIX`] ドキュメンテーションコメント
+//! 「bit 同一の根拠」参照）。本番既定経路は不変・
+//! `internal-diagnostics` feature 限定の opt-in API からのみ到達する。
+//! GB10 実機での persistent 版・非 persistent 版・64×64/128×64 の純
+//! カーネル時間比較と本番結線可否判断は本イシュー（#1347）が担う
+//! （`docs/perf/cuda-gemm-tiled-pipeline-persistent.md`）。
+//!
 //! # `kernels_tiled_pipeline.rs` との差分
 //!
 //! | 項目 | 64×64（既存） | 128×64（本モジュール） |
@@ -311,7 +325,12 @@ pub fn tiled_pipeline_128x64_f32_source_with_stages(stages: u32) -> Result<Strin
     Ok(render_source(stages))
 }
 
-fn render_source(stages: u32) -> String {
+/// [`render_source`]／[`render_persistent_source`] 共通の `#define` 群を
+/// 生成する（イシュー #1347 でカーネル本体テンプレートを非 persistent／
+/// persistent の 2 系統へ分離したのに伴い、従来 `render_source` 内に
+/// あった `format!` 冒頭部分を共有ヘルパーへ切り出した。
+/// `kernels_tiled_pipeline.rs::render_defines` と同型）。
+fn render_defines(stages: u32) -> String {
     format!(
         "\n#define TP128_BM {bm}\n\
          #define TP128_BN {bn}\n\
@@ -320,7 +339,7 @@ fn render_source(stages: u32) -> String {
          #define TP128_THREAD_N {thread_n}\n\
          #define TP128_THREADS_X {threads_x}\n\
          #define TP128_STAGES {stages}\n\
-         \n{body}",
+         \n",
         bm = TP128_BM,
         bn = TP128_BN,
         bk = TP128_BK,
@@ -328,17 +347,83 @@ fn render_source(stages: u32) -> String {
         thread_n = TP128_THREAD_N,
         threads_x = TP128_THREADS_X,
         stages = stages,
-        body = TILED_PIPELINE_128X64_F32_BODY,
     )
 }
 
-/// [`render_source`] が結合するカーネル本体テンプレート。
-///
-/// `TP128_STAGES` は `format!` で埋め込まれる `#define` のみに依存し、
-/// 本体文字列自体はステージ数に非依存（配列サイズ・`STAGES - 2` 等の
-/// 算術はすべて `TP128_STAGES` マクロ経由。`kernels_tiled_pipeline.rs::
-/// TILED_PIPELINE_F32_BODY` と同型）。
-const TILED_PIPELINE_128X64_F32_BODY: &str = r#"
+/// 非 persistent 版（既存 `gemm_tiled_pipeline_128x64_f32`）のソース全文を
+/// 生成する。[`TP128_CP_ASYNC_HELPER`]・[`TP128_NON_PERSISTENT_PREFIX`]・
+/// [`TP128_TILE_CORE`]・[`TP128_KERNEL_SUFFIX`] の連結が、分割前の
+/// `TILED_PIPELINE_128X64_F32_BODY`（旧単一定数）とバイト同一であることは
+/// 実装時に機械検証済み（イシュー #1347。`kernels_tiled_pipeline.rs`
+/// `render_source` と同型の分割）。
+fn render_source(stages: u32) -> String {
+    format!(
+        "{defines}{helper}{prefix}{core}{suffix}",
+        defines = render_defines(stages),
+        helper = TP128_CP_ASYNC_HELPER,
+        prefix = TP128_NON_PERSISTENT_PREFIX,
+        core = TP128_TILE_CORE,
+        suffix = TP128_KERNEL_SUFFIX,
+    )
+}
+
+/// persistent 版（`gemm_tiled_pipeline_128x64_persistent_f32`。イシュー
+/// #1347）のソース全文を生成する。[`render_source`] と同じ `#define`
+/// 群・同じ [`TP128_CP_ASYNC_HELPER`]／[`TP128_TILE_CORE`] を共有し、
+/// CTA→出力タイルの割り当て部分（[`TP128_KERNEL_PERSISTENT_PREFIX`]／
+/// [`TP128_KERNEL_PERSISTENT_SUFFIX`]）のみが異なる
+/// （`kernels_tiled_pipeline.rs::render_persistent_source` と同型）。
+fn render_persistent_source(stages: u32) -> String {
+    format!(
+        "{defines}{helper}{prefix}{core}{suffix}",
+        defines = render_defines(stages),
+        helper = TP128_CP_ASYNC_HELPER,
+        prefix = TP128_KERNEL_PERSISTENT_PREFIX,
+        core = TP128_TILE_CORE,
+        suffix = TP128_KERNEL_PERSISTENT_SUFFIX,
+    )
+}
+
+/// 本番結線（[`crate::gemm::CudaGemm::new_with_tiled_pipeline_128x64`]。
+/// `internal-diagnostics` feature 限定の診断入口）が既定でコンパイルする
+/// ステージ数（[`TP128_DEFAULT_STAGES`]）固定の persistent 版カーネル
+/// ソース。`internal-diagnostics` feature 限定の opt-in API
+/// （[`crate::gemm::CudaGemm::compile_tiled_pipeline_persistent_128x64_variant`]）
+/// からのみ呼ばれる。GB10 実機での純カーネル時間比較・形状条件付き結線
+/// の可否判断は本イシュー（#1347）が担う
+/// （`docs/perf/cuda-gemm-tiled-pipeline-persistent.md`）。
+pub fn tiled_pipeline_128x64_persistent_f32_source() -> &'static str {
+    &TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE
+}
+
+static TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    LazyLock::new(|| render_persistent_source(TP128_DEFAULT_STAGES));
+
+/// 任意のステージ数（[`TP128_MIN_STAGES`]..=[`TP128_MAX_STAGES`]）の
+/// persistent 版カーネルソースを生成する
+/// （[`tiled_pipeline_128x64_f32_source_with_stages`] の persistent 版。
+/// `examples/gemm_tiled_pipeline_persistent_bench.rs` が段数比較のため
+/// オンデマンドで呼ぶ）。
+pub fn tiled_pipeline_128x64_persistent_f32_source_with_stages(
+    stages: u32,
+) -> Result<String, CudaError> {
+    if !(TP128_MIN_STAGES..=TP128_MAX_STAGES).contains(&stages) {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "tiled_pipeline_128x64_persistent_f32_source_with_stages stages ({stages}) \
+                 must lie within [{TP128_MIN_STAGES}, {TP128_MAX_STAGES}]"
+            ),
+        });
+    }
+    Ok(render_persistent_source(stages))
+}
+
+/// [`render_source`]・[`render_persistent_source`] が共有する、A タイル
+/// 位置スウィズル用マクロ定義を含む `cp.async` 16 バイト転送ヘルパー
+/// （`kernels_tiled_pipeline.rs::TP_CP_ASYNC_HELPER` と同じ位置づけ。
+/// NVRTC は 1 コンパイル単位に両カーネルを同時に含めうるため関数定義・
+/// マクロ定義は 1 箇所のみ生成する）。
+const TP128_CP_ASYNC_HELPER: &str = r#"
 // REQ-8: グローバル→共有メモリの 16 バイト単位（f32 4 要素）非同期
 // コピー。src_size==16 で実データをコピーし、src_size==0 で共有メモリ側を
 // ゼロ充填する（kernels_tiled_pipeline.rs::tp_cp_async16 と同じ契約・
@@ -361,7 +446,17 @@ __device__ __forceinline__ void tp128_cp_async16(void* smem_ptr, const void* gme
 // `TP128_A_CHUNKS_PER_ROW == 4` が前提を固定する）。
 #define TP128_SWZ_A(row, chunk) (((chunk) ^ (((row) >> 3) & 3)) & 3)
 
-extern "C" __global__ void gemm_tiled_pipeline_128x64_f32(
+"#;
+
+/// 非 persistent 版（既存 `gemm_tiled_pipeline_128x64_f32`）の関数
+/// シグネチャ・共有メモリ宣言・`blockIdx` 由来の `block_row0`/
+/// `block_col0` 計算。直後（[`TP128_TILE_CORE`]）は `block_row0`/
+/// `block_col0` がスコープに存在することのみを前提にする（persistent 版
+/// は本断片を使わず、[`TP128_KERNEL_PERSISTENT_PREFIX`] が同じ 2 変数を
+/// 別の方法〈タイルキュー〉で計算してから同じ [`TP128_TILE_CORE`] を
+/// 合流させる。`kernels_tiled_pipeline.rs::TP_NON_PERSISTENT_PREFIX` と
+/// 同型）。
+const TP128_NON_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_f32(
     const float* __restrict__ a,
     const float* __restrict__ b,
     float* __restrict__ c,
@@ -377,7 +472,18 @@ extern "C" __global__ void gemm_tiled_pipeline_128x64_f32(
     int block_row0 = blockIdx.y * TP128_BM;
     int block_col0 = blockIdx.x * TP128_BN;
 
-    int tid = threadIdx.x;
+"#;
+
+/// [`render_source`]／[`render_persistent_source`] が共有するタイル内
+/// 計算本体（プロローグ→K ループ→drain→エピローグ guarded store）。
+/// `block_row0`/`block_col0`（呼び出し元プレフィックスが計算済み）・
+/// `m`/`n`/`k`/`a`/`b`/`c` のみに依存し、CTA→出力タイルの割り当て方法
+/// には依存しない。非 persistent 版・persistent 版のいずれでも同一の
+/// 命令列になることが bit 同一の根拠
+/// （[`TP128_KERNEL_PERSISTENT_PREFIX`] ドキュメンテーションコメント
+/// 「bit 同一の根拠」節参照。`kernels_tiled_pipeline.rs::TP_TILE_CORE`
+/// と同型）。
+const TP128_TILE_CORE: &str = r#"    int tid = threadIdx.x;
     int num_threads = blockDim.x;
     int tx = tid % TP128_THREADS_X;
     int ty = tid / TP128_THREADS_X;
@@ -520,8 +626,137 @@ extern "C" __global__ void gemm_tiled_pipeline_128x64_f32(
             }
         }
     }
-}
 "#;
+
+/// 非 persistent 版カーネル関数の閉じ括弧（`}`）。
+const TP128_KERNEL_SUFFIX: &str = "}\n";
+
+/// persistent 版（イシュー #1347）カーネルの関数シグネチャ・共有
+/// メモリ宣言・グローバル atomic タイルキューからの `block_row0`/
+/// `block_col0` 取得ループ。
+///
+/// # 位置づけ・非結線
+///
+/// 本カーネルは grid を SM 数 × 占有可能 block 数（またはホスト指定値）
+/// で固定起動し、各 CTA が完了するたびにグローバル `unsigned int`
+/// カウンタ（`tile_counter`）へ `atomicAdd` して次の未処理出力タイルを
+/// 取得する（K 分割なし・1 タイル = 1 CTA が K 全体を担当）。GB10
+/// （sm_121・SM 48 基）で 128×64 タイルはタイル数が SM 数の倍数から
+/// 外れやすい形状（wave quantization。モジュール冒頭コメント「共有
+/// メモリ予算・ステージ範囲」節の occupancy 訂正〈2 block/SM〉参照）
+/// において、末尾 wave の CTA 数不足による GPU 遊休時間を緩和しうる
+/// 候補として追加する（親イシュー #1345・兄弟イシュー #1346〈64×64
+/// 版〉）。**本番既定経路（[`crate::gemm::CudaGemm::new`]）は不変**で
+/// あり、本カーネルは `internal-diagnostics` feature 限定の opt-in API
+/// （[`crate::gemm::CudaGemm::compile_tiled_pipeline_persistent_128x64_variant`]）
+/// からのみコンパイルされる。実機性能比較・本番結線可否判断は本イシュー
+/// （#1347）が担う。
+///
+/// # bit 同一の根拠
+///
+/// タイル内の計算（[`TP128_TILE_CORE`]）は非 persistent 版
+/// （[`TP128_NON_PERSISTENT_PREFIX`]）と完全に共有する文字列であり、
+/// smem レイアウト・A スウィズル・cp.async ロード順・K ループの `fmaf`
+/// 蓄積順序・エピローグの guarded store はいずれも同一の命令列になる。
+/// 「出力タイル→CTA」の割り当て方法（`blockIdx` 直接 対 atomic タイル
+/// キュー）のみが異なり、これは各出力タイルの**どの CTA が計算するか**
+/// を変えるだけで**各要素がどう計算されるか**は変えない。タイルキュー
+/// 用の `atomicAdd` は `unsigned int` カウンタ（スケジューリング専用）
+/// にのみ作用し、GEMM の数値蓄積（`float` の `acc[][]`）には一切
+/// 触れない（`.claude/rules/coding-rust.md` の FMA 契約・
+/// `kernels_mse.rs`/`kernels_rmsnorm.rs` が禁止する「float `atomicAdd`
+/// による非決定的な結合順序」とは別種の atomic であり、決定性契約を
+/// 破らない）。よって同一入力に対し persistent 版と非 persistent 版は
+/// 出力 bit 同一になる
+/// （`tests/cpu_cuda_tiled_pipeline_persistent_parity.rs` が実機で
+/// これを検証する。`kernels_tiled_pipeline.rs::TP_KERNEL_PERSISTENT_PREFIX`
+/// 「bit 同一の根拠」節と同一の論拠）。
+///
+/// # 不変条件
+///
+/// - `break` はブロック一様: 全スレッドが `__syncthreads()` の後に同じ
+///   `s_tile` を読んでから判定する（一部スレッドだけが抜けるダイバー
+///   ジェンスは起きない）。
+/// - `s_tile` への WAR（次イテレーションの thread-0 書き込みと前イテ
+///   レーションの全スレッド読み出し）は [`TP128_TILE_CORE`] 末尾の
+///   drain `__syncthreads()`（cp.async 完了待ちと共用）が前イテレー
+///   ションの読み出しを完了させてから thread 0 が次の `atomicAdd` を
+///   発行する順序で安全になる。
+/// - `acc[][]` は [`TP128_TILE_CORE`] 内で毎回宣言される自動変数のため
+///   タイルごとに再初期化される。
+/// - cp.async の `wait_group`/`commit_group` 会計は各タイルの
+///   [`TP128_TILE_CORE`] 内で完結する（drain `wait_group 0` により次
+///   タイル開始時点で未完了の cp.async グループが残らない）ため、
+///   タイル境界をまたいでも会計が破綻しない。
+const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_persistent_f32(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m, int n, int k,
+    unsigned int* tile_counter)
+{
+    // パディングなし（冒頭コメント「共有メモリ予算」参照）。非
+    // persistent 版（TP128_NON_PERSISTENT_PREFIX）と同一の共有メモリ
+    // 整列要件・レイアウト。
+    __shared__ __align__(16) float as_tile[TP128_STAGES][TP128_BM][TP128_BK];
+    __shared__ __align__(16) float bs_tile[TP128_STAGES][TP128_BK][TP128_BN];
+    // タイル取得カウンタの読み出し結果を全スレッドへ配る 1 スロット
+    // （thread 0 のみが atomicAdd を発行し、__syncthreads() の後に
+    // 全スレッドが同じ値を読む。ブロック一様な break 判定のため。
+    // kernels_tiled_pipeline.rs::TP_KERNEL_PERSISTENT_PREFIX と同一契約）。
+    __shared__ unsigned int s_tile;
+
+    // 出力タイル総数（行主導: tile = row_tile * tiles_x + col_tile）。
+    // 非 persistent 版の blockIdx.y/blockIdx.x と同じ走査順
+    // （grid x = n 方向）に対応させ、gemm.rs::tiled_pipeline_launch_config
+    // が仮定するタイル→座標写像と一致させる。
+    int tiles_x = (n - 1) / TP128_BN + 1;
+    int tiles_y = (m - 1) / TP128_BM + 1;
+    int num_tiles = tiles_x * tiles_y;
+
+    // persistent CTA ループ: grid をブロックタイル数より少なく起動し
+    // （ホスト側 persistent_grid_blocks）、各 CTA が完了するたびに
+    // 次の未処理タイルをグローバル atomic カウンタから取得する
+    // （wave quantization 緩和が目的。docs/cuda-streamk-decision.md
+    // §2）。K 分割は行わない（1 タイル = 1 CTA が K 全体を担当）ため
+    // 蓄積順序・fmaf 命令列は非 persistent 版と同一であり、出力は
+    // bit 同一になる（本ファイル冒頭コメント「bit 同一の論拠」参照）。
+    for (;;) {
+        // カウンタの発行はスレッド 0 のみ（複数スレッドが同時に
+        // atomicAdd すると同一 CTA 内で異なるタイルを取り合い、後続
+        // の共有メモリロード・計算がタイル不整合になるため）。
+        if (threadIdx.x == 0) {
+            s_tile = atomicAdd(tile_counter, 1u);
+        }
+        // ブロック全体が同じ s_tile を読むまで待つ（thread 0 の書き
+        // 込みと他スレッドの読み出しの happens-before を保証。この
+        // barrier は各タイル末尾の drain barrier（TP128_TILE_CORE）と
+        // 対になり、s_tile への WAR（次イテレーションの書き込み対
+        // 前イテレーションの読み出し）を安全にする）。
+        __syncthreads();
+        unsigned int tile_u = s_tile;
+        // tile_u は unsigned のまま num_tiles と比較する（int→unsigned
+        // 昇格）。カウンタは全 CTA 分の余剰 atomicAdd により num_tiles
+        // を超えて進み続けるため、先に int へキャストすると理論上の
+        // 桁あふれで負値化し比較をすり抜けうる（REQ-8・fail-closed。
+        // 比較後にのみ int へ変換する）。
+        if (tile_u >= (unsigned int)num_tiles) {
+            break;
+        }
+        int tile = (int)tile_u;
+        // 非 persistent 版の block_row0 = blockIdx.y * TP128_BM・
+        // block_col0 = blockIdx.x * TP128_BN（grid x = n 方向）と同じ
+        // 走査順写像（gemm.rs::tiled_pipeline_launch_config 参照）。
+        int block_row0 = (tile / tiles_x) * TP128_BM;
+        int block_col0 = (tile % tiles_x) * TP128_BN;
+"#;
+
+/// persistent 版の `for (;;)` ループ・関数の閉じ括弧（[`TP128_TILE_CORE`]
+/// の drain barrier 直後にタイル取得ループの `}` を、続けて関数の `}`
+/// を閉じる。非 persistent 版の [`TP128_KERNEL_SUFFIX`] とは異なる文字列
+/// になる。`kernels_tiled_pipeline.rs::TP_KERNEL_PERSISTENT_SUFFIX` と
+/// 同型）。
+const TP128_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
 
 #[cfg(test)]
 mod tests {
@@ -837,5 +1072,209 @@ mod tests {
             }
         }
         c
+    }
+
+    /// [`fnv1a64`] で使う FNV-1a 64bit オフセットベーシス（FNV-1a 仕様
+    /// 定数。<http://www.isthe.com/chongo/tech/comp/fnv/> 準拠）。
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    /// FNV-1a 64bit 素数（同上）。
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    /// [`tiled_pipeline_128x64_fragments_reconstruct_non_persistent_source`]
+    /// が断片連結の内容一致を検査するための決定的ハッシュ関数（FNV-1a
+    /// 64bit。暗号学的強度は不要で、断片への偶発的変更を検出できる決定性
+    /// だけを要件とする。`kernels_tiled_pipeline.rs::tests::fnv1a64` と
+    /// 同一定義）。
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut hash = FNV_OFFSET_BASIS;
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    /// [`TP128_CP_ASYNC_HELPER`]・[`TP128_NON_PERSISTENT_PREFIX`]・
+    /// [`TP128_TILE_CORE`]・[`TP128_KERNEL_SUFFIX`] の連結内容が、断片
+    /// 分割時点（イシュー #1347）に分割前の単一定数
+    /// `TILED_PIPELINE_128X64_F32_BODY` から算出した固定ハッシュ
+    /// （[`EXPECTED_128X64_NON_PERSISTENT_FRAGMENTS_FNV1A64`]）と一致
+    /// することを検査する（`kernels_tiled_pipeline.rs::tests::
+    /// tiled_pipeline_fragments_reconstruct_non_persistent_source` と
+    /// 同型。PR #1383 codex-review 指摘〈自己参照の回避〉と同じ設計:
+    /// 期待値は断片の実体に依存しない独立した固定リテラルとして埋め込む）。
+    #[test]
+    fn tiled_pipeline_128x64_fragments_reconstruct_non_persistent_source() {
+        /// 分割時点（イシュー #1347 実装時）の
+        /// `TP128_CP_ASYNC_HELPER`＋`TP128_NON_PERSISTENT_PREFIX`＋
+        /// `TP128_TILE_CORE`＋`TP128_KERNEL_SUFFIX` 連結内容から算出した
+        /// FNV-1a 64bit ハッシュ（[`fnv1a64`]）。断片群のいずれかが
+        /// 意図せず変更されるとこのハッシュと一致しなくなる。意図した
+        /// 変更（カーネル改修）の際は、変更後の連結内容から再計算した値
+        /// へこの定数を更新する。
+        const EXPECTED_128X64_NON_PERSISTENT_FRAGMENTS_FNV1A64: u64 = 6_646_497_908_443_235_800;
+
+        let expected = tiled_pipeline_128x64_f32_source();
+        let reconstructed = format!(
+            "{TP128_CP_ASYNC_HELPER}{TP128_NON_PERSISTENT_PREFIX}{TP128_TILE_CORE}{TP128_KERNEL_SUFFIX}"
+        );
+        assert!(
+            expected.ends_with(&reconstructed),
+            "TP128_CP_ASYNC_HELPER/TP128_NON_PERSISTENT_PREFIX/TP128_TILE_CORE/\
+             TP128_KERNEL_SUFFIX の連結が tiled_pipeline_128x64_f32_source() の本体と \
+             一致しません"
+        );
+        let actual_hash = fnv1a64(reconstructed.as_bytes());
+        assert_eq!(
+            actual_hash, EXPECTED_128X64_NON_PERSISTENT_FRAGMENTS_FNV1A64,
+            "TP128_CP_ASYNC_HELPER/TP128_NON_PERSISTENT_PREFIX/TP128_TILE_CORE/\
+             TP128_KERNEL_SUFFIX の連結内容が分割時点の固定ハッシュと一致しません \
+             （断片への意図しない変更の可能性。意図した変更であれば \
+             EXPECTED_128X64_NON_PERSISTENT_FRAGMENTS_FNV1A64 を再計算して更新する）"
+        );
+    }
+
+    /// persistent 版ソースが `cp.async`／`fmaf`／A スウィズルマクロを
+    /// 含むこと（タイル内計算は非 persistent 版と共有のため同じ命令が
+    /// 現れる契約）を検査する
+    /// （`kernels_tiled_pipeline.rs::tests::
+    /// tiled_pipeline_persistent_source_uses_cp_async_instructions` と
+    /// 同型）。
+    #[test]
+    fn tiled_pipeline_128x64_persistent_source_uses_cp_async_and_swizzle() {
+        let source = tiled_pipeline_128x64_persistent_f32_source();
+        for needle in [
+            "cp.async.cg.shared.global",
+            "cp.async.commit_group",
+            "cp.async.wait_group",
+            "fmaf(",
+            "#define TP128_SWZ_A(row, chunk)",
+        ] {
+            assert!(
+                source.contains(needle),
+                "tiled_pipeline_128x64_persistent_f32_source() が `{needle}` を含みません"
+            );
+        }
+    }
+
+    /// REQ-8 の手動境界検査が persistent 版でも省略されていないことを
+    /// 検査する（[`tiled_pipeline_128x64_source_retains_manual_bounds_checks`]
+    /// の persistent 版。[`TP128_TILE_CORE`] 共有のため同一文字列が
+    /// 現れる）。
+    #[test]
+    fn tiled_pipeline_128x64_persistent_source_retains_manual_bounds_checks() {
+        let source = tiled_pipeline_128x64_persistent_f32_source();
+        assert!(
+            source.contains("int valid = (gr < m && gc < k) ? 16 : 0;"),
+            "A タイルロードの guarded cp.async（src_size ゼロ充填）が見当たりません"
+        );
+        assert!(
+            source.contains("int valid = (gr < k && gc < n) ? 16 : 0;"),
+            "B タイルロードの guarded cp.async（src_size ゼロ充填）が見当たりません"
+        );
+        assert!(
+            source.contains("if (r < m && cc < n) {"),
+            "エピローグの guarded store が見当たりません"
+        );
+    }
+
+    /// 決定性契約（`.claude/rules/coding-rust.md`・`atomicAdd` を使わない
+    /// 数値蓄積の原則）の機械検査: persistent 版ソースに現れる
+    /// `atomicAdd` はタイルキューカウンタ用の**ちょうど 1 箇所**であり、
+    /// 対象が `unsigned int* tile_counter` であること（float 蓄積用の
+    /// `atomicAdd` ではないこと）を検査する
+    /// （`kernels_tiled_pipeline.rs::tests::
+    /// tiled_pipeline_persistent_source_uses_single_integer_atomic_add`
+    /// と同型）。非 persistent 版ソースには `atomicAdd` が一切現れない
+    /// ことも合わせて検査する。
+    #[test]
+    fn tiled_pipeline_128x64_persistent_source_uses_single_integer_atomic_add() {
+        let persistent_source = tiled_pipeline_128x64_persistent_f32_source();
+        let atomic_add_count = persistent_source.matches("atomicAdd(").count();
+        assert_eq!(
+            atomic_add_count, 1,
+            "persistent 版ソースの atomicAdd はタイルキューカウンタ用の 1 箇所のみのはず"
+        );
+        assert!(
+            persistent_source.contains("s_tile = atomicAdd(tile_counter, 1u);"),
+            "atomicAdd の対象が unsigned int* tile_counter（スケジューリング専用）と \
+             確認できません"
+        );
+        assert!(
+            !persistent_source.contains("atomicAdd(&acc")
+                && !persistent_source.contains("atomicAdd(&c["),
+            "GEMM の数値蓄積（acc[][]／出力 c）へ atomicAdd が使われていないことを確認できません"
+        );
+
+        let non_persistent_source = tiled_pipeline_128x64_f32_source();
+        assert!(
+            !non_persistent_source.contains("atomicAdd"),
+            "非 persistent 版ソースに atomicAdd は現れないはず"
+        );
+    }
+
+    /// persistent 版カーネルのシグネチャ（`tile_counter` 引数）・タイル
+    /// キュー機構（`num_tiles`・`s_tile`・`break`）がソースに存在する
+    /// ことを検査する（関数名・シグネチャの取り違えを防ぐ粗い機械検査。
+    /// `kernels_tiled_pipeline.rs::tests::
+    /// tiled_pipeline_persistent_source_has_tile_queue_scaffolding` と
+    /// 同型）。
+    #[test]
+    fn tiled_pipeline_128x64_persistent_source_has_tile_queue_scaffolding() {
+        let source = tiled_pipeline_128x64_persistent_f32_source();
+        for needle in [
+            "gemm_tiled_pipeline_128x64_persistent_f32(",
+            "unsigned int* tile_counter",
+            "__shared__ unsigned int s_tile;",
+            "int num_tiles = tiles_x * tiles_y;",
+            "for (;;) {",
+            "if (tile_u >= (unsigned int)num_tiles) {",
+            "break;",
+        ] {
+            assert!(
+                source.contains(needle),
+                "tiled_pipeline_128x64_persistent_f32_source() が `{needle}` を含みません"
+            );
+        }
+    }
+
+    /// [`tiled_pipeline_128x64_persistent_f32_source_with_stages`] の
+    /// 範囲検証（2〜3。[`TP128_MAX_STAGES`]=3 が `kernels_tiled_pipeline::
+    /// TP_MAX_STAGES`=4 と異なることの回帰確認も兼ねる）を検査する
+    /// （`kernels_tiled_pipeline.rs::tests::
+    /// tiled_pipeline_persistent_source_with_stages_validates_range` と
+    /// 同型）。
+    #[test]
+    fn tiled_pipeline_128x64_persistent_source_with_stages_validates_range() {
+        assert!(tiled_pipeline_128x64_persistent_f32_source_with_stages(1).is_err());
+        assert!(
+            tiled_pipeline_128x64_persistent_f32_source_with_stages(TP128_MAX_STAGES + 1).is_err()
+        );
+        for stages in TP128_MIN_STAGES..=TP128_MAX_STAGES {
+            let src = tiled_pipeline_128x64_persistent_f32_source_with_stages(stages)
+                .unwrap_or_else(|e| panic!("stages={stages} must be accepted: {e}"));
+            assert!(src.contains(&format!("#define TP128_STAGES {stages}")));
+        }
+    }
+
+    /// persistent 版の `commit_group`／`wait_group` 回数が非 persistent
+    /// 版と同じ「1 タイル = 2 commit・2 wait」であることを検査する
+    /// （[`TP128_TILE_CORE`] 共有のため回数自体は不変。持続ループ自体は
+    /// 追加の commit/wait を発行しない契約の粗い機械検査。
+    /// `kernels_tiled_pipeline.rs::tests::
+    /// tiled_pipeline_persistent_commit_wait_group_counts` と同型）。
+    #[test]
+    fn tiled_pipeline_128x64_persistent_commit_wait_group_counts() {
+        let source = tiled_pipeline_128x64_persistent_f32_source();
+        let commit_count = source.matches("cp.async.commit_group;").count();
+        let wait_count = source.matches("cp.async.wait_group").count();
+        assert_eq!(
+            commit_count, 2,
+            "persistent 版でも commit_group は 2 箇所（prologue・本体末尾）"
+        );
+        assert_eq!(
+            wait_count, 2,
+            "persistent 版でも wait_group は 2 箇所（本体ループ・drain）"
+        );
     }
 }

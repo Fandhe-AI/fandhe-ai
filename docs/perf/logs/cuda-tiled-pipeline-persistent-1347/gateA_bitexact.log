@@ -1,0 +1,21 @@
+   Compiling fandhe-ai-backend-cpu v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling bench-harness v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 2.52s
+     Running tests/cpu_cuda_tiled_pipeline_persistent_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/cpu_cuda_tiled_pipeline_persistent_parity-b1b642c4813f9635)
+
+running 10 tests
+test compile_tiled_pipeline_persistent_variant_rejects_zero_blocks_per_sm ... ok
+test launch_tiled_pipeline_persistent_zero_dim_shape_is_noop_without_launch ... ok
+test tiled_pipeline_128x64_persistent_matches_64x64_persistent_bit_exact ... ok
+test tiled_pipeline_128x64_persistent_matches_non_persistent_bit_exact ... ok
+test tiled_pipeline_128x64_persistent_repeated_launch_is_deterministic ... ok
+test tiled_pipeline_persistent_matches_non_persistent_bit_exact ... ok
+test tiled_pipeline_persistent_rejects_misaligned_shape ... ok
+test tiled_pipeline_persistent_rejects_mismatched_context_handle ... ok
+test tiled_pipeline_persistent_repeated_launch_is_deterministic ... ok
+test tiled_pipeline_persistent_zero_k_returns_all_zero ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 40.97s
+
