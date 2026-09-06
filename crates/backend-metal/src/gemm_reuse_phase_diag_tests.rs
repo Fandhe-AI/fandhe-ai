@@ -50,21 +50,26 @@
 //! ため計測しない（`docs/perf/metal-gemm-reuse-phase-breakdown.md` §2
 //! に明記）。
 //!
-//! # GPU タイムスタンプ変種（`kernel_gpu`）を実装しない判断
+//! # GPU タイムスタンプ変種（`kernel_gpu`）の実装（イシュー #1276）
 //!
-//! 実装計画は `MTLCommandBuffer::GPUStartTime`/`GPUEndTime` を使う
-//! 変種 B（`commit_wait` から純カーネル専有時間を分離する）を「実装
-//! 可能なら必須」としていたが、`MetalContext::encode`/`synchronize`
-//! はバッチング機構（イシュー #1017・`docs/backend-metal-command-
-//! batching-design.md`）によりコマンドバッファを内部に閉じ込めており
-//! 呼び出し元へ公開しない。変種 B は自前のコマンドキュー経路
-//! （`ctx.queue()`。`pub`）を新設する必要があり、AC-2「既存の本番
-//! 経路・既存テストを変更しない（読み取り計測のみ）」の安全側判断
-//! （計画§7 リスク節が明示的に許容する縮退先）に従い、本イシューでは
-//! 変種 A（`ProductionBatch`。`encode`＋`synchronize` を本番同一経路で
-//! 個別計時）のみを実装する。`commit_wait` は「commit＋カーネル専有
-//! ＋`waitUntilCompleted`」の合算値として扱い、sync 単体は分離しない
-//! （`docs/perf/metal-gemm-reuse-phase-breakdown.md` §8 に明記）。
+//! `#1189`（本ファイル。旧版）は `MTLCommandBuffer::GPUStartTime`/
+//! `GPUEndTime` を使う変種 B（`commit_wait` から純カーネル専有時間を
+//! 分離する）を、`MetalContext::encode`/`synchronize` がバッチング
+//! 機構（イシュー #1017・`docs/backend-metal-command-batching-
+//! design.md`）によりコマンドバッファを内部に閉じ込めていることを
+//! 理由に見送っていた。イシュー #1276 は「自前のコマンドキュー経路を
+//! 新設する」のではなく「`MetalContext::synchronize` の内部（完了
+//! バッチを `waitUntilCompleted` した直後・drop する前）にオブザーバ
+//! を差し込む」方式（`context.rs::synchronize_observed`／
+//! `#[cfg(test)] pub(crate) synchronize_with_gpu_timestamps`）でこれを
+//! 解消した。本番 `synchronize()` は no-op オブザーバのままのため
+//! ディスパッチ挙動・数値結果は不変（AC-2）。`commit_wait` は引き続き
+//! 「commit＋カーネル専有＋`waitUntilCompleted`」の合算値として扱い、
+//! `kernel_gpu`（GPUEnd−GPUStart）はその内訳の 1 項目として別途出力
+//! する（`sum of medians` への二重計上はしない。§後述「フェーズ計測
+//! 結果」参照）。N=1024/2048/4096 の 5 run 実測・`docs/perf/metal-
+//! gemm-reuse-phase-breakdown.md` への数表転記は本イシューのスコープ
+//! 外（親 #1275 配下の実測 sub-issue が担う）。
 //!
 //! # 実行時は必ず `--test-threads=1`
 //!
@@ -79,18 +84,31 @@
 //! # gating しない方針（CUDA 側と同じ理由）
 //!
 //! 本ファイルの `#[test]` は実行が成功すること（各フェーズが例外なく
-//! 完了すること）のみを検証条件とし、フェーズ間の大小関係・絶対値への
-//! `assert!` は行わない（環境揺らぎによる flaky 化防止。`out.len()`・
-//! 有限性の sanity assert のみ行う）。数値は `println!` に残し、
-//! `docs/perf/metal-gemm-reuse-phase-breakdown.md` へ転記する一次情報
-//! とする。
+//! 完了すること）のみを検証条件とし、フェーズ間の**性能の**大小関係・
+//! 絶対値への `assert!` は行わない（環境揺らぎによる flaky 化防止。
+//! `out.len()`・有限性の sanity assert のみ行う）。数値は `println!` に
+//! 残し、`docs/perf/metal-gemm-reuse-phase-breakdown.md` へ転記する
+//! 一次情報とする。
+//!
+//! これは**正しさの不変条件**（バッチ構成・順序・タイムスタンプの
+//! 内包関係）への assert とは別物である: `gpu_timestamps_within_
+//! commit_wait_window`（イシュー #1276 で新設）は「返却バッチ数が
+//! 1」「`labels` が想定どおり」「両タイムスタンプが `Some`」
+//! 「`kernel_gpu >= 0`」「`kernel_gpu <= commit_wait`」を assert する
+//! が、これらは実行結果の**論理的整合性**の検査であり「値がどれだけ
+//! 速いか」という性能値の大小 gating ではないため、上記の gating しない
+//! 方針とは矛盾しない。
 //!
 //! # プロダクションコード不変（AC-2）
 //!
-//! 本ファイルは純新規追加であり、`gemm.rs` への変更も新規 `pub(crate)`
-//! ヘルパ `diag_encode_tiled_nn`（`#[cfg(test)]`）の追加のみに限定する
-//! （既存 `dispatch_auto`／`dispatch_variant`／`dispatch_tiled_prepared`
-//! は無変更）。
+//! `gemm.rs` への変更は新規 `pub(crate)` ヘルパ `diag_encode_tiled_nn`
+//! （`#[cfg(test)]`）の追加のみに限定する（既存 `dispatch_auto`／
+//! `dispatch_variant`／`dispatch_tiled_prepared`は無変更）。
+//! `context.rs::synchronize` はイシュー #1276 で内部を `synchronize_
+//! observed`（オブザーバ引数を取る）へ切り出したが、本番
+//! `synchronize()` は no-op オブザーバで呼ぶ薄いラッパーのため、
+//! 挙動・エラー伝播・ロック区間・`pending_pool_returns` 合流順序は
+//! 従来と完全に同一（追加の FFI 呼び出しもゼロ）。
 
 use std::time::Instant;
 
@@ -144,6 +162,11 @@ struct PhaseSample {
     alloc_c_secs: f64,
     encode_secs: f64,
     commit_wait_secs: f64,
+    /// `commit_wait_secs` の内訳（イシュー #1276。`context.rs::
+    /// synchronize_with_gpu_timestamps` が返す `GPUEndTime−GPUStartTime`）。
+    /// `commit_wait_secs` へは二重計上しない（`run_size` の `sum of
+    /// medians` は従来どおり 7 フェーズの合計のまま）。
+    kernel_gpu_secs: f64,
     readback_secs: f64,
     host_copy_secs: f64,
 }
@@ -195,12 +218,54 @@ fn measure_one_phase_trial(
         .expect("diag_encode_tiled_nn (record only) must succeed");
     let encode_secs = t.elapsed().as_secs_f64();
 
-    // commit + GPU 完了待ち（`kernel_gpu` を分離しない合算値。ファイル
-    // 冒頭コメント参照）。
+    // commit + GPU 完了待ち（壁時計は従来どおり合算値。`kernel_gpu` は
+    // この区間の内訳としてイシュー #1276 で追加。GPU タイムスタンプは
+    // 同一ホスト単調クロックではなく `CFTimeInterval`（別の時刻基準）
+    // のため、`commit_wait_secs` という壁時計と直接比較するのではなく
+    // 「この `Instant` 区間の内側に完全に収まるはず」という区間長の
+    // 大小関係のみを診断テスト側で検証する。ファイル冒頭コメント
+    // 「GPU タイムスタンプ変種」参照）。
     let t = Instant::now();
-    ctx.synchronize()
+    let batches = ctx
+        .synchronize_with_gpu_timestamps()
         .expect("synchronize (commit + waitUntilCompleted) must succeed");
     let commit_wait_secs = t.elapsed().as_secs_f64();
+    // `diag_encode_tiled_nn` の 1 回の `encode` は 1 バッチにつき
+    // ちょうど 1 ディスパッチのみを記録するため、この `synchronize` が
+    // 完了させるバッチは常にちょうど 1 個のはず（`cached_context()` は
+    // プロセスワイド singleton のため `--test-threads=1` が前提。
+    // ファイル冒頭「実行時は必ず `--test-threads=1`」参照）。他の診断
+    // テスト・並行スレッドからのディスパッチが紛れ込んでいないかを
+    // ここで検出する。
+    assert_eq!(
+        batches.len(),
+        1,
+        "synchronize_with_gpu_timestamps must complete exactly one batch per diag_encode_tiled_nn call \
+         (got {}; run with --test-threads=1)",
+        batches.len()
+    );
+    let batch = &batches[0];
+    assert_eq!(
+        batch.labels(),
+        ["diag_encode_tiled_nn"],
+        "unexpected dispatch labels in the completed batch: {:?}",
+        batch.labels()
+    );
+    let kernel_gpu_secs = batch.kernel_gpu_secs().unwrap_or_else(|| {
+        panic!(
+            "GPUStartTime/GPUEndTime must both be non-zero for a completed batch (labels={:?})",
+            batch.labels()
+        )
+    });
+    assert!(
+        kernel_gpu_secs >= 0.0,
+        "kernel_gpu_secs must be non-negative (GPUEndTime must not precede GPUStartTime): {kernel_gpu_secs}"
+    );
+    assert!(
+        kernel_gpu_secs <= commit_wait_secs,
+        "kernel_gpu_secs ({kernel_gpu_secs:.6}s) must fit inside the commit_wait wall-clock window \
+         ({commit_wait_secs:.6}s) that fully encloses commit+kernel+waitUntilCompleted"
+    );
 
     // readback: `contents()` からの memcpy（D2H 固有の同期は存在しない。
     // 直前の `synchronize` で書き込み完了済み）。
@@ -237,6 +302,7 @@ fn measure_one_phase_trial(
         alloc_c_secs,
         encode_secs,
         commit_wait_secs,
+        kernel_gpu_secs,
         readback_secs,
         host_copy_secs,
     }
@@ -262,6 +328,9 @@ fn run_size(n: usize) {
     let mut alloc_c = Vec::with_capacity(MEASURED_TRIALS);
     let mut encode = Vec::with_capacity(MEASURED_TRIALS);
     let mut commit_wait = Vec::with_capacity(MEASURED_TRIALS);
+    // `commit_wait` の内訳（イシュー #1276）。`sum of medians` へは
+    // 含めない（`commit_wait` 自身が既に合算値のため。二重計上防止）。
+    let mut kernel_gpu = Vec::with_capacity(MEASURED_TRIALS);
     let mut readback = Vec::with_capacity(MEASURED_TRIALS);
     let mut host_copy = Vec::with_capacity(MEASURED_TRIALS);
     // 要求構成 `cfg` と実際にディスパッチされた構成（`pipeline_for_tile`
@@ -278,6 +347,7 @@ fn run_size(n: usize) {
         alloc_c.push(s.alloc_c_secs);
         encode.push(s.encode_secs);
         commit_wait.push(s.commit_wait_secs);
+        kernel_gpu.push(s.kernel_gpu_secs);
         readback.push(s.readback_secs);
         host_copy.push(s.host_copy_secs);
         resolved_cfgs.push(s.resolved_cfg);
@@ -326,6 +396,17 @@ fn run_size(n: usize) {
     print_quartiles_ms("alloc_c", median_of(&alloc_c));
     print_quartiles_ms("encode", median_of(&encode));
     print_quartiles_ms("commit_wait", median_of(&commit_wait));
+    // `kernel_gpu`（GPUEndTime−GPUStartTime）は `commit_wait` の内訳
+    // （イシュー #1276）。`commit_wait_minus_kernel_gpu` はその残り
+    // （commit・スケジューリング・`waitUntilCompleted` 復帰までの
+    // オーバーヘッドに相当）。いずれも `sum of medians` には含めない
+    // （二重計上防止。ファイル冒頭コメント参照）。
+    let kernel_gpu_q = median_of(&kernel_gpu);
+    print_quartiles_ms("commit_wait.kernel_gpu", kernel_gpu_q);
+    println!(
+        "    commit_wait.commit_wait_minus_kernel_gpu: median={:.4} ms",
+        (median_of(&commit_wait).median - kernel_gpu_q.median) * 1e3
+    );
     print_quartiles_ms("readback", median_of(&readback));
     print_quartiles_ms("host_copy", median_of(&host_copy));
     println!("    sum of medians: {:.4} ms", total * 1e3);
@@ -338,5 +419,37 @@ fn run_size(n: usize) {
 fn gemm_reuse_phase_diag_production_batch() {
     for n in SIZES {
         run_size(n);
+    }
+}
+
+/// AC-3 の自己検証専用（イシュー #1276）: N=1024 のみ・少数反復で
+/// `synchronize_with_gpu_timestamps` が返す正しさ不変条件（バッチ数・
+/// ラベル・タイムスタンプの取得可否・`kernel_gpu` の非負性・
+/// `commit_wait` 内包）を単独・短時間で検証する導線。フル 3 サイズ×
+/// `MEASURED_TRIALS` 回の `gemm_reuse_phase_diag_production_batch` とは
+/// 独立に実行できる（実行方法は `Makefile` `test-ignored-metal` 相当。
+/// `--test-threads=1` 必須）。assert 自体は `measure_one_phase_trial`
+/// 内（`commit_wait_secs` 計測ブロック）にあるため、本テストは同関数を
+/// 少数回呼ぶだけでよい。
+#[test]
+#[ignore]
+fn gpu_timestamps_within_commit_wait_window() {
+    const N: usize = 1024;
+    const TRIALS: usize = 5;
+
+    let ctx = cached_context().expect("Metal device (system default) must be available");
+    let gemm = cached_gemm(&ctx).expect("MetalGemm construction must succeed");
+    let cfg = tile::select_for_device(N, N, N, ctx.verified_m4_max_gpu_core_count());
+    let (a, b) = gen_square_ab(0x1276_a000, N);
+    let mut keep_alive: Vec<Vec<f32>> = Vec::with_capacity(TRIALS);
+
+    for i in 0..TRIALS {
+        let s = measure_one_phase_trial(&ctx, &gemm, &a, &b, N, cfg, &mut keep_alive);
+        println!(
+            "  trial {i}: commit_wait={:.4}ms kernel_gpu={:.4}ms (commit_wait-kernel_gpu={:.4}ms)",
+            s.commit_wait_secs * 1e3,
+            s.kernel_gpu_secs * 1e3,
+            (s.commit_wait_secs - s.kernel_gpu_secs) * 1e3
+        );
     }
 }

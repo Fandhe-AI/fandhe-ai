@@ -98,6 +98,53 @@ struct BatchSlots {
     pending_pool_returns: pool_pending::PendingReturns<crate::pool::RawMetalBuffer>,
 }
 
+/// [`MetalContext::synchronize_with_gpu_timestamps`]（診断専用。イシュー
+/// #1276）が返す、完了したバッチ 1 個分の GPU タイムスタンプ。
+///
+/// `MTLCommandBuffer::GPUStartTime`/`GPUEndTime` は「ホスト時計上の
+/// 秒数」（`CFTimeInterval` = `f64`）で、未開始・完了通知未受領時は
+/// `0.0` を返す契約（objc2-metal 0.3.2 生成コードのコメント）。診断側
+/// はこの `0.0` を「値なし」として扱いたいため、生値をそのまま持たず
+/// [`Self::from_raw`] で `None` へ正規化してから保持する（`0.0` を
+/// 「ホスト時計の起点」と誤読して区間計算に使う事故を型で防ぐ）。
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct BatchGpuTimestamps {
+    gpu_start_secs: Option<f64>,
+    gpu_end_secs: Option<f64>,
+    /// バッチに記録されていたディスパッチのラベル列（`BatchMeta::
+    /// labels`）。診断テスト側が「想定どおり 1 個の GEMM ディスパッチ
+    /// だけが載っていたか（singleton `cached_context()` への他
+    /// ディスパッチ混入がないか）」を確認するために保持する。
+    labels: Vec<&'static str>,
+}
+
+#[cfg(test)]
+impl BatchGpuTimestamps {
+    /// `0.0`（未開始／完了通知未受領）を `None` へ変換して保持する。
+    fn from_raw(gpu_start_secs: f64, gpu_end_secs: f64, meta: &BatchMeta) -> Self {
+        Self {
+            gpu_start_secs: (gpu_start_secs != 0.0).then_some(gpu_start_secs),
+            gpu_end_secs: (gpu_end_secs != 0.0).then_some(gpu_end_secs),
+            labels: meta.labels().to_vec(),
+        }
+    }
+
+    /// このバッチに記録されていたディスパッチのラベル列。
+    pub(crate) fn labels(&self) -> &[&'static str] {
+        &self.labels
+    }
+
+    /// `GPUEndTime - GPUStartTime`（秒）。両者が取得できた場合のみ
+    /// `Some` を返す（`None` の伝播は診断テスト側の assert で検出する
+    /// 設計。ファイル冒頭「GPU タイムスタンプ変種」参照）。
+    pub(crate) fn kernel_gpu_secs(&self) -> Option<f64> {
+        let start = self.gpu_start_secs?;
+        let end = self.gpu_end_secs?;
+        Some(end - start)
+    }
+}
+
 /// Metal デバイスとコマンドキューを保持するハンドル。
 ///
 /// [`crate::buffer::MetalBuffer`] の確保・[`MetalContext::dispatch_sync`]
@@ -489,7 +536,33 @@ impl MetalContext {
     /// （`memory.rs::download_inner`／`zero_fill`・`Drop`）はそれを
     /// 経由しないため、ここで独自に `autoreleasepool` を張らないと
     /// プロセス寿命分蓄積する（Cursor Bugbot 指摘・PR #1057）。
+    ///
+    /// 本番経路は [`Self::synchronize_observed`] を no-op オブザーバで
+    /// 呼ぶ薄いラッパー（イシュー #1276）。挙動・エラー伝播・
+    /// `pending_pool_returns` 合流順序は本メソッドが唯一の実体だった
+    /// 時点から不変（AC-2）。
     pub fn synchronize(&self) -> Result<(), MetalError> {
+        self.synchronize_observed(|_cmd_buf, _meta| {})
+    }
+
+    /// [`Self::synchronize`] の本体（イシュー #1276 で切り出し）。
+    /// 完了したバッチごとに `observe` を 1 回呼ぶ点のみが違い、それ
+    /// 以外のロック区間・エラー集約・`pending_pool_returns` 合流順序は
+    /// 従来の `synchronize` と完全に同一。
+    ///
+    /// `observe` はバッチ 1 個につき `waitUntilCompleted()`＋`status()`
+    /// 判定の直後・`batch`（`in_flight` retain 列を含む）が drop される
+    /// 直前に、`self.batch` のロックを保持したまま呼ばれる（`Batch:
+    /// Send` の SAFETY コメントが要求する「`Mutex` 下でのみ `Batch` へ
+    /// 触れる」不変条件を維持したまま診断値を読む）。GPU タイムスタンプ
+    /// 変種（`gemm_reuse_phase_diag_tests.rs::synchronize_with_gpu_
+    /// timestamps`）が `MTLCommandBuffer::GPUStartTime`/`GPUEndTime` を
+    /// ここから読む。本番 `synchronize()` は no-op オブザーバを渡すため
+    /// 追加の FFI 呼び出しはゼロ（AC-2 の性能非後退根拠）。
+    fn synchronize_observed<F>(&self, mut observe: F) -> Result<(), MetalError>
+    where
+        F: FnMut(&MtlCommandBuffer, &BatchMeta),
+    {
         autoreleasepool(|_pool| {
             let mut slots = self.lock_batch("synchronize")?;
             self.flush_locked(&mut slots);
@@ -518,6 +591,10 @@ impl MetalContext {
                             Some(MetalError::CommandBufferExecutionFailed { message: formatted });
                     }
                 }
+                // 診断オブザーバ（イシュー #1276）: `waitUntilCompleted()`
+                // 完了・エラー判定後・`batch` drop 前に呼ぶ（GPU 実行が
+                // 完了済みのタイムスタンプを読める最後の地点）。
+                observe(&batch.cmd_buf, &batch.meta);
                 // `batch`（`in_flight` の retain 列を含む）はこのループの
                 // 末尾で drop される。GPU 実行は `waitUntilCompleted()`
                 // 直後の時点で完了済みのため、ここで解放してよい。
@@ -549,6 +626,41 @@ impl MetalContext {
                 None => Ok(()),
             }
         })
+    }
+
+    /// 診断専用（イシュー #1276。`#[cfg(test)] pub(crate)` の可視性は
+    /// `gemm.rs::MetalGemm::diag_encode_tiled_nn` と同じ方針）:
+    /// [`Self::synchronize_observed`] を GPU タイムスタンプ収集
+    /// オブザーバで呼び、完了した各バッチの
+    /// [`BatchGpuTimestamps`] を呼ばれた順に返す。
+    ///
+    /// `crates/backend-metal/src/gemm_reuse_phase_diag_tests.rs`
+    /// （#1189 の Layer B 分解）が `commit_wait` 区間内の純カーネル
+    /// 専有時間を分離するために使う（同ファイル冒頭コメント「GPU
+    /// タイムスタンプ変種」参照）。本番 `synchronize()` は no-op
+    /// オブザーバのままのため、本メソッドの追加は本番経路の FFI
+    /// 呼び出し回数・挙動を一切変えない（AC-2）。
+    #[cfg(test)]
+    pub(crate) fn synchronize_with_gpu_timestamps(
+        &self,
+    ) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
+        let mut collected = Vec::new();
+        let result = self.synchronize_observed(|cmd_buf, meta| {
+            // SAFETY ではなく単純な safe メソッド呼び出し: `GPUStartTime`/
+            // `GPUEndTime`（objc2-metal =0.3.2 生成コード
+            // `MTLCommandBuffer.rs:407-416`）は `unsafe fn` ではない
+            // （`unsafe(method_family = none)` 属性はコード生成マクロの
+            // 内部注釈であり呼び出し側に `unsafe` を要求しない）。
+            // `CFTimeInterval = c_double`（`objc2-core-foundation`
+            // `CFDate.rs`）で `f64` と同値。未開始／完了通知未受領時は
+            // 0.0 を返す契約（Apple ドキュメント。生成コードのコメント
+            // 参照）ため `BatchGpuTimestamps::from_raw` で `None` へ
+            // 変換する。
+            let gpu_start = cmd_buf.GPUStartTime();
+            let gpu_end = cmd_buf.GPUEndTime();
+            collected.push(BatchGpuTimestamps::from_raw(gpu_start, gpu_end, meta));
+        });
+        result.map(|()| collected)
     }
 
     /// コンピュートエンコーダを生成し `encode_fn` にディスパッチ内容の
