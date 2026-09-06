@@ -338,6 +338,18 @@ pub(crate) mod sgd;
 pub(crate) mod row_kernel;
 #[cfg(target_os = "macos")]
 pub mod softmax;
+// `gemm_simdgroup_tiled` のソーステキスト特殊化経路（イシュー #1288。
+// E2 試作。`docs/perf/metal-gemm-n4096-kernel-gap.md` §8 参照）。
+// `pad`/`tile`/`layout` と同じ設計判断で `objc2` 系 FFI に触れないため、
+// `cfg(any(test, target_os = "macos"))`（`tile::TileConfig::acc_rows`/
+// `acc_cols` と同一条件）を付け Linux（本実装環境・CI）でも生成ロジックの
+// 単体テストが回るようにしてある。`pub(crate)` に閉じる理由: 追加する
+// 唯一の外部到達可能面は `gemm::MetalGemm::new_with_source_specialization`
+// （既存 `new_with_swizzle` 等と同型の入口）であり、本モジュール自体の
+// 内部表現（`SpecializationParams`・生成関数）は公開 API へ漏らさない
+// 方針（AGENTS.md P1）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) mod spec_source;
 pub mod tile;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた

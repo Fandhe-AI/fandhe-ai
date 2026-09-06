@@ -170,8 +170,11 @@ N=4096 NN（正方立方。中核対象）:
   ゲート不成立により判定不可）。#1280 でこの実測結果に基づき採用候補 0 件・
   `dispatch_auto` 既定への結線対象なしと確定し、両定数とも `false` を維持した
   （`metal-gemm-fine-barrier-ab.md`・`metal-gemm-tgid-swizzle-ab.md` の
-  「#1280 結線判断」節）。E1〜E4（ソーステキスト特殊化 codegen・フラグメント
-  ロード方式・協調ロード再構成）は引き続き未実施のまま
+  「#1280 結線判断」節）。E1（loop unroll pragma）は §7 で軽量実験済み
+  （イシュー #1188・#1282）。E2（ソーステキスト特殊化 codegen）は §8 で
+  試作・bit 一致自己検証済み（イシュー #1288。性能実測は #1289 へ
+  引き継ぎ）。E3〜E4（フラグメントロード方式・協調ロード再構成）は
+  引き続き未実施のまま
 - cand0（candle と同一タイル形状）が 4096 で崩壊する根本原因の特定
   （スレッドあたり実行効率の直接計測手段が現状ない）
 - §2 の限界に基づく厳密なレジスタ spill 計測（Xcode Instruments の GPU
@@ -582,3 +585,130 @@ Silicon）依存。CI では実行しない"]`）:
 - `gemm_simdgroup_tiled_f16` への同機構の展開・direct-load 本体（unroll
   版・非unroll 版で重複する約 40 行）の helper 化による重複削減 →
   必要ならユーザー承認のうえ別 issue
+
+## 8. E2 ソーステキスト特殊化経路の試作（イシュー #1288）
+
+### 8.0 目的・切り出し範囲
+
+§2（H1 レジスタ圧仮説）・§5「スコープ外」節が残した未実施候補 E2
+（function constant 特殊化後もコンパイラが候補の厳密サイズでレジスタ
+割付を最適化しない可能性）を検証するため、`gemm_simdgroup_tiled` を
+候補（`tile::TileConfig`）ごとに**ソーステキストレベルで**特殊化し、
+`gemm_simdgroup_tiled` のアキュムレータ配列（`acc`／`a_frag`／`b_frag`）を
+`constexpr uint MAX_ACC = 8` の固定上限ではなく候補の厳密サイズ
+（`ACC_ROWS_CAP`/`ACC_COLS_CAP` = `TileConfig::acc_rows()`/`acc_cols()`）で
+確保するパイプライン構築経路を試作した。**本イシューは機構の実装と bit
+一致の自己検証のみを担い、性能実測（反射値・カーネル純時間の before/
+after）・本番既定への切替判断は行わない**（後続イシュー #1289〈実測〉／
+#1302〈`tile::select` への組み込み判断〉のスコープ）。
+
+### 8.1 設計
+
+- **MSL 側**（`crates/backend-metal/src/shaders/gemm.metal`）: function
+  constant 宣言ブロック（12 個。#188/#538/#540/#809/#1138/#1282）を
+  `#ifdef GEMM_SPEC_ENABLED` / `#else` の二系統化した。`#else` 側
+  （本番既定）は既存 12 行とバイト同一のまま維持し、`#ifdef` 側は
+  `crate::spec_source::specialized_gemm_source` が前置する 12 個の
+  `#define GEMM_SPEC_*` をリテラル代入する。`gemm_simdgroup_tiled`
+  本体のアキュムレータ配列は `ACC_ROWS_CAP`/`ACC_COLS_CAP`（`#ifdef` 側は
+  `GEMM_SPEC_ACC_ROWS`/`GEMM_SPEC_ACC_COLS` から、`#else` 側は従来どおり
+  `MAX_ACC=8` から導出）で確保する。特殊化側には 4 本の `static_assert`
+  （範囲 `[1,8]`・`ACC_ROWS_CAP == (BM/WM)/8` 等の整合性）を追加し、
+  リテラル値と実行時計算式（`acc_rows`/`acc_cols`。ループ境界は変更せず
+  不変のまま）の不整合をコンパイル時に fail-closed で検出する。
+  `gemm_simdgroup_tiled_f16`（f16 経路）は対象外で変更していない
+  （`tests/shader_source_evidence.rs::
+  gemm_simdgroup_tiled_f16_source_max_acc_unchanged` が固定）。
+- **bit 一致の論拠**: 配列容量は演算オペランド列に一切関与しない
+  （ループ境界 `acc_rows`/`acc_cols` は特殊化の有無に関わらず同一の
+  実行時計算式のまま）。`#else` 側は特殊化前とバイト同一のため、本番
+  既定（`SOURCE_SPECIALIZATION_ENABLED=false`）の挙動は変わらない。
+- **Rust 側**: `crates/backend-metal/src/spec_source.rs`（新規。
+  `cfg(any(test, target_os = "macos"))`。`objc2` 系 FFI 非依存のため
+  Linux でも生成ロジックの単体テストが回る）が `GEMM_MSL_SRC`
+  （`gemm.metal` 全文。従来 `pipeline.rs` の private const だったものを
+  移設し 2 経路で共有）・`SpecializationParams`・
+  `specialized_gemm_source` を持つ。`pipeline.rs` は `compile_gemm_library`
+  の本体を `compile_source`（共通実装）へ切り出し、新規
+  `make_pipeline_source_specialized`（候補ごとにソースを生成・
+  再コンパイル・パイプライン化。`unsafe` 不使用——function constant 値
+  設定〈`setConstantValue_type_atIndex`〉を経由しないため）を追加した。
+  両経路とも `compile_source` を通るため `compile_options()`
+  （`MathMode::Safe` + `Precise`）が確実に同一適用される。
+  `gemm.rs::MetalGemm` に `source_specialized: bool` フィールドと
+  独立キャッシュ `tiled_spec_cache`（function constant 経路の
+  `tiled_cache` とは別物。取り違え防止）を追加し、
+  `new_with_source_specialization(ctx, bool)`（`new_with_unroll_acc` 等と
+  同型の A/B・自己検証専用入口）を新設した。`pipeline_for_tile` は
+  `self.source_specialized` でキャッシュ・構築関数を丸ごと切り替えるが、
+  事前検証（`validate`・`shared_mem_bytes_for`）・ゲート導出
+  （`unroll_acc_loops_for`）・事後検証
+  （`maxTotalThreadsPerThreadgroup`）は両経路で完全に同一の式を使う。
+  `MetalGemm::new`（本番経路）は `tile::SOURCE_SPECIALIZATION_ENABLED`
+  （既定 `false`）を渡すため本番挙動は不変。
+
+### 8.2 実機自己検証結果
+
+`crates/backend-metal/src/gemm.rs::mod tests` に追加した実機
+`#[ignore]` テスト 3 件を Apple M4 Max 実機（本 doc の計測環境と同一機）
+で実行し、いずれも pass を確認した:
+
+```
+cargo test -p fandhe-ai-backend-metal --release --lib -- --ignored --nocapture source_specialized
+```
+
+```
+running 3 tests
+test gemm::tests::source_specialized_route_populates_only_spec_cache ... ok
+test gemm::tests::source_specialized_on_off_bit_match_dispatch_auto ... ok
+test gemm::tests::source_specialized_on_off_bit_match_all_candidates ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 3.23s
+```
+
+- `source_specialized_on_off_bit_match_all_candidates`: `tile::CANDIDATES`
+  全 9 候補 × N=512/1024/2048/4096 で、base（function constant 経路）/
+  head（ソーステキスト特殊化経路）双方が `resolve_tile_config` で
+  フォールバック非経由（検証の空振り防止）を確認したうえで、
+  `dispatch_tiled_prepared` 出力が `to_bits()` で厳密ビット一致
+- `source_specialized_route_populates_only_spec_cache`: 出力一致だけでは
+  両経路が同じ実装へ倒れた false-green を検出できないため、head は
+  `tiled_spec_cache` のみが増え `tiled_cache` は 0 のまま、base はその逆
+  であることを独立に確認し、新経路が実際に走ったことを証明
+- `source_specialized_on_off_bit_match_dispatch_auto`: 本番自動選択経路
+  （`dispatch_auto`）でも N=512/1024/2048/4096 で base/head が bit 一致
+
+既存の非後退確認（`gemm.metal` 改変の副作用がないこと）も同一実機で
+再実行し、全て pass:
+
+```
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture unroll_acc
+cargo test -p fandhe-ai-backend-metal --release --test gemm_dynamic_tile_parity -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release --test gemm_simdgroup_parity -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release --test gemm_transposed_parity -- --ignored --nocapture
+```
+
+env_info（内部ホスト名は含めない）: `sysctl -n machdep.cpu.brand_string`
+= `Apple M4 Max`、`sw_vers` = macOS 26.6.2（BuildVersion 25G83）、
+`rustc -V` = `rustc 1.96.0 (ac68faa20 2026-05-25)`、実行時 `uptime` の
+load averages は約 9.4/6.6/5.0（他セッション並走。bit 一致テストは
+負荷非依存のため判定に影響しない）。
+
+### 8.3 #1289 への引き継ぎ
+
+- 反射値（`maxTotalThreadsPerThreadgroup`・`threadExecutionWidth`・
+  `staticThreadgroupMemoryLength`）は `pipeline_for_tile` が保持する
+  `Retained<MtlPipeline>` から取得できる。公開 API 漏出（P1。§2 の
+  「削除済み」注記と同じ判断）を避けるため `#[cfg(test)]` または
+  example 専用の薄いアクセサとして #1289 側で設計すること
+- before/after は `new_with_source_specialization(false/true)` の
+  2 インスタンスを同一プロセスで interleaved 実行する
+  （`gemm_fine_barrier_ab_bench.rs`／`gemm_swizzle_ab_bench.rs` の方式）。
+  純カーネル時間は #1275/#1276 で確立した GPU タイムスタンプ経路
+  （`context.rs::synchronize_with_gpu_timestamps`）を使う
+- 本イシューでは性能未計測のため `tile::SOURCE_SPECIALIZATION_ENABLED`
+  は `false` のまま。結線可否は #1289 の 5 回計測中央値に基づき判断し、
+  後退時は結線せず理由を記録すること
+- §5「スコープ外」節の「E1〜E5（ソーステキスト特殊化 codegen…）」の
+  記述のうち、ソーステキスト特殊化 codegen（E2）は本節で試作・自己検証
+  完了。性能実測は依然未実施のまま（#1289 へ引き継ぎ）
