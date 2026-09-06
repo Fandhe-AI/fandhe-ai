@@ -163,17 +163,18 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 
 実測（2026-08-28。`fandhe-ai` を `=0.4.0` へ更新後の 2026-08-29 再実測をイシュー #982 で追記。
 `=0.5.0` へ更新後の 2026-08-31 再実測をイシュー #1011 で追記。
-`=0.6.0` へ更新後の 2026-09-02 再実測を v0.6.0 リリースサイクルで追記）:
+`=0.6.0` へ更新後の 2026-09-02 再実測を v0.6.0 リリースサイクルで追記。
+`=0.7.0` へ更新後の 2026-09-06 再実測を v0.7.0 リリースサイクル〈イシュー #1185〉で追記）:
 
 - 対象 `Cargo.lock`: `scripts/bench/framework-compare/Cargo.lock`
-- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果（2026-09-02 再実測）: `advisories ok, bans ok, licenses ok, sources ok`
-- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値。2026-09-02 再実測）:
+- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果（2026-09-06 再実測）: `advisories ok, bans ok, licenses ok, sources ok`
+- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値。2026-09-06 再実測）:
 
 | crate | version | license（`cargo metadata` 実測） |
 |-------|---------|-----------------------------------|
 | `burn` | 0.21.0 | `MIT OR Apache-2.0` |
 | `candle-core` | 0.11.0 | `MIT OR Apache-2.0` |
-| `fandhe-ai` | 0.6.0 | `MIT OR Apache-2.0`（2026-09-02 に `=0.5.0` から更新。v0.6.0 リリースサイクル。依存は自社クレートのみのためライセンス式に変更なし） |
+| `fandhe-ai` | 0.7.0 | `MIT OR Apache-2.0`（2026-09-06 に `=0.6.0` から更新。v0.7.0 リリースサイクル〈イシュー #1185〉。依存は自社クレートのみのためライセンス式に変更なし） |
 
 推移的依存を含む全域監査は CI（`ci.yml` の `deps-forbidden` ジョブ
 「フレームワーク横並びベンチの依存監査」ステップ）で毎回再実行し、本表への転記

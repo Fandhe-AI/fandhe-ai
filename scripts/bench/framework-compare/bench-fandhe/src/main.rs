@@ -86,7 +86,7 @@ use fandhe_ai::{Device, SgdConfig, Tape, Tensor};
 use std::time::{Duration, Instant};
 
 const FRAMEWORK: &str = "fandhe-ai";
-const VERSION: &str = "0.6.0";
+const VERSION: &str = "0.7.0";
 
 const BATCH: usize = 64;
 const D_IN: usize = 784;
@@ -118,7 +118,7 @@ const PHASE_STEP_TOTAL: &str = "step_total";
 // H2D／D2H／同期」と推定した内容を、公開 API 呼び出し境界で分解して
 // 実測確定するための計装。`matmul` 区間の内側に H2D（A/B のアップロード）
 // ・カーネル実行・D2H（結果ダウンロード）・ストリーム同期が全て閉じて
-// おり、fandhe-ai 0.6.0 の公開 API（`Var::matmul`）ではこれ以上分離
+// おり、fandhe-ai 0.7.0 の公開 API（`Var::matmul`）ではこれ以上分離
 // できない（内訳は `crates/backend-cuda` の診断テストが別途取る。
 // `docs/perf/cuda-gemm-reuse-phase-breakdown.md` 参照）。
 const PHASE_GEMM_MATMUL: &str = "matmul";
@@ -1405,7 +1405,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// **`--tf32`（イシュー #1042）は本バイナリでは常に MEASURE_ERROR で
 /// fail-fast する**: `bench-fandhe` は crates.io 公開版 `fandhe-ai
-/// =0.6.0` に完全固定されており（deps-policy 第 9 区分。
+/// =0.7.0` に完全固定されており（deps-policy 第 9 区分。
 /// `check_framework_compare` が registry 取得元を fail-closed 検査する
 /// ため path 依存への差し替えは不可）。`fandhe_ai::set_cuda_tf32_gemm_enabled`
 /// 自体は crates.io 公開版から呼び出し可能になったが（承認ピンは v0.5.0 公開

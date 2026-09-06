@@ -11,7 +11,7 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 
 | フレームワーク | クレート | バージョン | デバイス |
 | --- | --- | --- | --- |
-| fandhe-ai | `fandhe-ai`（facade。crates.io 版） | =0.6.0 | CPU / Metal / CUDA（`tape_for(Device::…)`） |
+| fandhe-ai | `fandhe-ai`（facade。crates.io 版） | =0.7.0 | CPU / Metal / CUDA（`tape_for(Device::…)`） |
 | candle | `candle-core` | =0.11.0 | CPU / Metal（`metal` feature）/ CUDA（`cuda` feature） |
 | Burn | `burn` | =0.21.0 | CPU（ndarray）/ Metal（wgpu）/ CUDA（cubecl） |
 | tch-rs | — | 未計測 | libtorch 依存のため省略 |
@@ -86,7 +86,7 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   同一 `DeviceParamStore` を使い回す）であり、`run_train_reuse` はその構造に揃える
 - **`init_s` の定義**: 初回 tape 構築 + `init_device_param_store`（全パラメータの 1 回限りの
   H2D upload）+ その完了を保証する明示同期点（`sync_device_param_store_to_host`）までの
-  経過時間。`bench-fandhe` が依存できる公開 API 面（`fandhe-ai =0.6.0`）には「ホスト転送を
+  経過時間。`bench-fandhe` が依存できる公開 API 面（`fandhe-ai =0.7.0`）には「ホスト転送を
   伴わない完了待ち」が公開されていないため、この同期点は D2H 実体化コストを伴う
   （codex-review PR #998 P2 指摘。`main.rs` の `run_train_reuse` init_s コメント参照）。
   これは `gemm reuse` の `init_s` が「初回 matmul + ホスト実体化」を明示的に含めている前例
@@ -147,8 +147,8 @@ backward・パラメータ更新のどこが支配的か）を追跡できない
 〈イシュー #1217〉をそれぞれ参照）。
 
 区間は「公開 API のどの呼び出しに時間が乗るか」を表し、GPU 内部（カーネル／転送）の
-内訳ではない: fandhe-ai 0.6.0 の `Tensor<f32>` はホスト常駐で、CUDA/Metal の各演算は
-演算ごとに H2D→カーネル→D2H を行う（`fandhe-ai-backend-cuda-0.6.0/src/ops.rs::gemm`）。
+内訳ではない: fandhe-ai 0.7.0 の `Tensor<f32>` はホスト常駐で、CUDA/Metal の各演算は
+演算ごとに H2D→カーネル→D2H を行う（`fandhe-ai-backend-cuda-0.7.0/src/ops.rs::gemm`）。
 また `matmul` は即時実行、elementwise（relu・mse）は実体化境界（`to_tensor()`/`get()`）まで
 遅延する（TASK-12.1d）。
 
@@ -180,7 +180,7 @@ backward・パラメータ更新のどこが支配的か）を追跡できない
 | `tape_drop` | `drop(tape)` |
 | `step_total` | 検算用 |
 
-**「同期待ち」を独立区間にできない理由**: `fandhe-ai =0.6.0` の公開 API 面には
+**「同期待ち」を独立区間にできない理由**: `fandhe-ai =0.7.0` の公開 API 面には
 ホスト転送を伴わない完了待ち（`bench-harness::sync::SyncPoint::wait_idle` 相当）が
 公開されておらず（`run_train_reuse` の `init_s` コメント・PR #998 P2 と同じギャップ）、
 同期は必ず `loss_readout`（実体化）の D2H を通じて発生する。そのため「同期待ち」は
@@ -249,7 +249,7 @@ Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
 | `iter_total` | 反復全体のウォールクロック時間（検算用。Σphase ≤ iter_total） |
 
 `matmul` 区間の内訳（H2D／カーネル専有時間／D2H の実測分解）は本節では取れない
-（`fandhe-ai` 0.6.0 の公開 API 面にホスト転送を伴わない完了待ちや区間別の
+（`fandhe-ai` 0.7.0 の公開 API 面にホスト転送を伴わない完了待ちや区間別の
 カーネルタイミング API が無いため。`train --phases`「同期待ちを独立区間にできない
 理由」と同じギャップ）。内訳は `crates/backend-cuda`（CUDA）・`crates/backend-metal`（Metal。
 `cargo run --release -p bench-fandhe -- --task gemm --device metal --size 4096 --mode
@@ -375,7 +375,7 @@ cargo run --release -p bench-fandhe -- --task infer --device cpu --mode reuse --
   と同じ FMA 契約（f32 `mul_add`・逐次 k 昇順の演算順序固定）を持つ自前 GEMM を、行ブロック分割で
   `std::thread::scope` 並列化したもの（各 `c[i][j]` の累積鎖は k 昇順のまま = 逐次実装と bit 完全
   一致。`bench-common::parity::tests::compute_is_bit_identical_to_sequential_k_ascending`）。
-  fandhe-ai 0.6.0（crates.io 版）の facade は parity API を公開しておらず、candle/Burn を参照に
+  fandhe-ai 0.7.0（crates.io 版）の facade は parity API を公開しておらず、candle/Burn を参照に
   すると別途バイナリ間で結果を受け渡す仕組みが要る。自前参照は各バイナリが自己完結で計算できる
   ため採用した（f64 累積の参照は「真値との差」という別の指標になり本体契約と整合しないため不採用。
   結果テンソルをファイルへダンプして summarize.py 側で突合する方式は N=4096 で 64 MiB/行になり
@@ -469,7 +469,8 @@ opt-in で WMMA TF32 Tensor Core 経路（`run_wmma_tf32`）へ切り替えら�
   cuda`）が必要（既定は `metal`）
 - **`bench-fandhe`**: **`--tf32` は常に `MEASURE_ERROR` で fail-fast する**。
   承認済みピンは `fandhe-ai =0.5.0`（イシュー #1011 で `=0.4.0` から更新済み）を経て
-  `fandhe-ai =0.6.0`（v0.6.0 リリースサイクルでユーザー承認済み）へ進んだが、
+  `fandhe-ai =0.6.0`（v0.6.0 リリースサイクルでユーザー承認済み）・`fandhe-ai =0.7.0`
+  （イシュー #1185 に対するユーザー指示で承認済み）へ進んだが、
   `set_cuda_tf32_gemm_enabled` は crates.io 公開版から呼び出し可能なまま、
   `bench-fandhe`（`main.rs`）側の呼び出し結線・`run_all` の tf32 スイープ追加（C-2。
   `docs/cuda-tf32-optin-api-decision.md`）は依然スコープ外で未実施のため、fail-fast
@@ -582,7 +583,7 @@ fresh` も交互起動する（環境 10/11 単発 fresh 計測との連続性�
 **2 系列の使い分け**:
 
 - **正式系列**（#1031/#1037 のゲート判定の正）: `bench-fandhe/Cargo.toml` の承認済み
-  ピン（現行 `=0.6.0`）でビルドしたまま計測する。コミット済み manifest・
+  ピン（現行 `=0.7.0`）でビルドしたまま計測する。コミット済み manifest・
   `Cargo.lock` は変更しない
 - **参考系列**（次回 crates.io 公開前の見込み値）: `GEMM_GATE_PATCH_FACADE_PATH=
   <facade 絶対パス>` を指定して `run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh`
@@ -602,9 +603,9 @@ fresh` も交互起動する（環境 10/11 単発 fresh 計測との連続性�
 ```bash
 cd scripts/bench/framework-compare
 # CUDA 正式系列（現行ピン）:
-bash run_gemm_gate_cuda.sh 0.6.0
+bash run_gemm_gate_cuda.sh 0.7.0
 # Metal 正式系列（現行ピン。イシュー #1147）:
-bash run_gemm_gate_metal.sh 0.6.0
+bash run_gemm_gate_metal.sh 0.7.0
 # CPU 正式系列（現行ピン。DGX Spark〈Grace CPU〉／M4 Max のいずれでも実行可。
 # bench-candle のビルド flag はホスト OS で自動選択される。イシュー #1148）。
 # GEMM_GATE_CPU_NODE_TAG（dgx-cpu／m4max-cpu の明示指定。必須）が実行ホストの
@@ -621,8 +622,8 @@ bash run_gemm_gate_metal.sh 0.6.0
 # いずれかの不一致はいずれも計測前に fail-closed で終了する。codex-review
 # P1 PRRT_kwDOTuUCJc6fK_lT・PRRT_kwDOTuUCJc6fLNFe 対応）:
 cp gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local  # 初回のみ。hostname・機体識別子を登録する
-GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.6.0     # DGX Spark 側
-GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.6.0  # M4 Max 側
+GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.7.0     # DGX Spark 側
+GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.7.0  # M4 Max 側
 
 # CUDA 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
 GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
@@ -636,10 +637,10 @@ GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
   bash run_gemm_gate_metal.sh head-<short sha>
 
 # 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
-python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.6.0.jsonl
-python3 compare_gemm_gate.py --device metal results/raw/results-m4max-gemm-gate-0.6.0.jsonl
-python3 compare_gemm_gate.py --device cpu results/raw/results-dgx-cpu-gemm-gate-0.6.0.jsonl
-python3 compare_gemm_gate.py --device cpu results/raw/results-m4max-cpu-gemm-gate-0.6.0.jsonl
+python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.7.0.jsonl
+python3 compare_gemm_gate.py --device metal results/raw/results-m4max-gemm-gate-0.7.0.jsonl
+python3 compare_gemm_gate.py --device cpu results/raw/results-dgx-cpu-gemm-gate-0.7.0.jsonl
+python3 compare_gemm_gate.py --device cpu results/raw/results-m4max-cpu-gemm-gate-0.7.0.jsonl
 echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2: 入力を読めない
 ```
 
@@ -731,8 +732,9 @@ before/after 比較手順。RTX 3060 トイモデルでの計測（`docs/perf/cu
 第 9 区分）上ユーザー承認必須で、イシュー #1011 のユーザー承認を得て
 `fandhe-ai =0.5.0`（2026-08-31 crates.io 公開・`release-all.yml` run 33388884217・
 tag `v0.5.0` = `a5e465d`）へ更新した（#1011 ツリー）。**ピンはその後 v0.6.0
-リリースサイクルで `=0.6.0` へさらに更新済みであり、現在のツリー（main）の
-ピンは「都度同期なし」側の延長線上（after 系列。現行 `=0.6.0`）を指すが
+リリースサイクルで `=0.6.0`、v0.7.0 リリースサイクル（イシュー #1185 に対する
+ユーザー指示）で `=0.7.0` へさらに更新済みであり、現在のツリー（main）の
+ピンは「都度同期なし」側の延長線上（after 系列。現行 `=0.7.0`）を指すが
 `after-0.5.0` の値そのものではない**。「都度同期あり」側（before = 0.4.0）・
 「都度同期なし」側（after = 0.5.0）を当時のまま再現するには、それぞれ
 対応するピンのコミット（`=0.4.0`・`=0.5.0`）を別 worktree で checkout して
@@ -766,7 +768,7 @@ echo $?   # 0: 判定完了（性能比較が成立） / 2: 判定不能（レ�
   （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる。`--phases` 行が
   両ファイルにあれば phase 別の参考表も出す（同期点の分析。単発計測のため
   5 回中央値の対象外）。
-- 計測境界の注意: fandhe-ai 0.6.0 の `Tensor<f32>` はホスト常駐で、reuse
+- 計測境界の注意: fandhe-ai 0.7.0 の `Tensor<f32>` はホスト常駐で、reuse
   モードでも各 step の `loss.to_tensor()` 実体化が単一 in-order ストリーム
   上の同期点として残る（`docs/backend-cuda-async-execution-design.md`）。
   定常状態では計測窓のずれ（1 step）を無視でき 1 step 総和と等価とみなす。
