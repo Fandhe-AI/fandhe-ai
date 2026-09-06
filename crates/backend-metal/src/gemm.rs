@@ -310,6 +310,23 @@ pub struct MetalGemm {
     /// 走ったか」を検証するために参照する。
     tiled_spec_cache:
         Mutex<HashMap<(TileConfig, TransposePattern), objc2::rc::Retained<MtlPipeline>>>,
+    /// フラグメントロード方式候補（イシュー #1293）をこのインスタンスの
+    /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]）で
+    /// どう有効化するか。`swizzle_enabled`/`fine_barrier_enabled`/
+    /// `unroll_acc_enabled`/`source_specialized` と同じ設計判断（instance
+    /// フィールド化により base（`tile::FRAG_LOAD_CONFIG`。既定）/head
+    /// （任意の [`tile::FragLoadConfig`]）の 2 `MetalGemm` を同一プロセス
+    /// 内に構築して bit 一致を自己検証できるようにする）。
+    /// `crate::pipeline::GemmGateConstants::frag_load_device_hoisted`/
+    /// `frag_load_ksteps` として `pipeline_for_tile` 経由で
+    /// `shaders/gemm.metal` の `FRAG_LOAD_DEVICE_HOISTED`（index 12）/
+    /// `FRAG_LOAD_KSTEPS`（index 13）へ畳み込まれる。`MetalGemm::new` は
+    /// 本番既定 `tile::FRAG_LOAD_CONFIG`（`device_hoisted=false`・
+    /// `ksteps=One`）を渡すため既定挙動は不変。[`Self::pipeline_for_tile_f16`]
+    /// にも同じ値を伝播するが `gemm_simdgroup_tiled_f16` はいずれの定数も
+    /// 参照しないため無害な no-op（他ゲートと同じ扱い）。性能実測・
+    /// `tile::select` への組み込み判断は兄弟イシュー #1295 のスコープ。
+    frag_load: tile::FragLoadConfig,
 }
 
 /// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
@@ -384,6 +401,44 @@ impl MetalGemm {
             tile::FINE_BARRIER_ENABLED,
             unroll_acc_enabled,
             tile::SOURCE_SPECIALIZATION_ENABLED,
+            tile::FRAG_LOAD_CONFIG,
+        )
+    }
+
+    /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の
+    /// フラグメントロード方式候補（イシュー #1293）を明示的な `frag_load`
+    /// 引数で指定する。実機 `#[ignore]` bit 一致自己検証テスト・#1295 の
+    /// A/B 計測専用の入口: 同一プロセス内で base（`tile::FRAG_LOAD_CONFIG`。
+    /// 既定）/head（任意の [`tile::FragLoadConfig`]）の 2 インスタンスを
+    /// 構築して比較する（[`Self::new_with_unroll_acc`]・
+    /// [`Self::new_with_source_specialization`] と同型の設計）。他 4 フラグ
+    /// （threadgroup ID スウィズル・simdgroup 細粒度同期・条件付き loop
+    /// unroll・ソーステキスト特殊化）は本番既定のまま据え置く。本番経路
+    /// （[`Self::new`]）は常に `tile::FRAG_LOAD_CONFIG`（`device_hoisted=false`・
+    /// `ksteps=One`）を渡すため、本関数の追加自体は既定挙動を変えない。
+    /// 性能実測・`tile::select` への組み込み判断は行わない（兄弟イシュー
+    /// #1295 のスコープ）。
+    ///
+    /// `pub`（`tile::FragLoadConfig`/`FragLoadKSteps` を `pub` にしている
+    /// 理由も同じ）にする理由: `pub(crate)` のまま `#[cfg(test)]` を
+    /// 付けない場合、他クレートからの通常の依存ビルド（`cfg(test)` が
+    /// 付かない）で「crate 内に呼び出し元が無い」dead_code 検査に抵触する
+    /// （`tile::FragLoadKSteps` doc comment 参照）。`new_with_swizzle`・
+    /// `new_with_fine_barrier`・`new_with_unroll_acc`・
+    /// `new_with_source_specialization` と同型の設計（実機 `#[ignore]`
+    /// bit 一致自己検証テスト・兄弟イシュー #1295 の A/B 計測 example の
+    /// 両方から呼べる公開入口）。
+    pub fn new_with_frag_load(
+        ctx: &MetalContext,
+        frag_load: tile::FragLoadConfig,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            tile::FINE_BARRIER_ENABLED,
+            tile::UNROLL_ACC_ENABLED,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
+            frag_load,
         )
     }
 
@@ -410,6 +465,7 @@ impl MetalGemm {
             tile::FINE_BARRIER_ENABLED,
             tile::UNROLL_ACC_ENABLED,
             source_specialized,
+            tile::FRAG_LOAD_CONFIG,
         )
     }
 
@@ -434,6 +490,7 @@ impl MetalGemm {
             fine_barrier_enabled,
             tile::UNROLL_ACC_ENABLED,
             tile::SOURCE_SPECIALIZATION_ENABLED,
+            tile::FRAG_LOAD_CONFIG,
         )
     }
 
@@ -457,6 +514,7 @@ impl MetalGemm {
             tile::FINE_BARRIER_ENABLED,
             tile::UNROLL_ACC_ENABLED,
             tile::SOURCE_SPECIALIZATION_ENABLED,
+            tile::FRAG_LOAD_CONFIG,
         )
     }
 
@@ -477,6 +535,7 @@ impl MetalGemm {
         fine_barrier_enabled: bool,
         unroll_acc_enabled: bool,
         source_specialized: bool,
+        frag_load: tile::FragLoadConfig,
     ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -509,6 +568,7 @@ impl MetalGemm {
             unroll_acc_enabled,
             source_specialized,
             tiled_spec_cache: Mutex::new(HashMap::new()),
+            frag_load,
         })
     }
 
@@ -599,6 +659,8 @@ impl MetalGemm {
                 swizzle_enabled: self.swizzle_enabled,
                 fine_barrier_enabled: self.fine_barrier_enabled,
                 unroll_acc_enabled: tile::unroll_acc_loops_for(candidate, self.unroll_acc_enabled),
+                frag_load_device_hoisted: self.frag_load.device_hoisted,
+                frag_load_ksteps: self.frag_load.ksteps.as_u32(),
             };
             let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
             let build_result = if self.source_specialized {
@@ -684,16 +746,21 @@ impl MetalGemm {
             }
 
             // `gemm_simdgroup_tiled_f16` は TRANS_A/TRANS_B（index 9/10）・
-            // UNROLL_ACC_ENABLED（index 11）のいずれも参照しないため、
+            // UNROLL_ACC_ENABLED（index 11）・FRAG_LOAD_DEVICE_HOISTED/
+            // FRAG_LOAD_KSTEPS（index 12/13）のいずれも参照しないため、
             // 値の設定自体は無害な no-op（`swizzle_enabled`/
-            // `fine_barrier_enabled` と同じ扱い。`unroll_acc_enabled` は
-            // 常に `false` 固定で f16 経路を明示的に不変と宣言する。
-            // `crate::pipeline::make_pipeline_with_constants` の `pattern`
-            // 引数ドキュメントコメント参照。イシュー #1138・#1282）。
+            // `fine_barrier_enabled` と同じ扱い。`unroll_acc_enabled`/
+            // `frag_load_device_hoisted` は常に `false` 固定・
+            // `frag_load_ksteps` は既定値固定で f16 経路を明示的に不変と
+            // 宣言する。`crate::pipeline::make_pipeline_with_constants` の
+            // `pattern` 引数ドキュメントコメント参照。イシュー #1138・
+            // #1282・#1293）。
             let gates = pipeline::GemmGateConstants {
                 swizzle_enabled: self.swizzle_enabled,
                 fine_barrier_enabled: self.fine_barrier_enabled,
                 unroll_acc_enabled: false,
+                frag_load_device_hoisted: false,
+                frag_load_ksteps: tile::FragLoadConfig::DEFAULT.ksteps.as_u32(),
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -862,6 +929,14 @@ impl MetalGemm {
     #[cfg(test)]
     pub(crate) fn unroll_acc_effective(&self, cfg: TileConfig) -> bool {
         tile::unroll_acc_loops_for(cfg, self.unroll_acc_enabled)
+    }
+
+    /// このインスタンスが `pipeline_for_tile` へ渡すフラグメントロード
+    /// 方式候補（イシュー #1293）の実効値を返す（テストからの実効値確認
+    /// 用。`unroll_acc_effective` と同型の薄いラッパー）。
+    #[cfg(test)]
+    pub(crate) fn frag_load(&self) -> tile::FragLoadConfig {
+        self.frag_load
     }
 
     /// 動的タイル選択（TASK-1.8f・#188）の自動入口。`(m, n, k)` から
@@ -3723,6 +3798,419 @@ mod tests {
                 base_bits, head_bits,
                 "size={size}: dispatch_auto でソーステキスト特殊化の有無により出力が\
                  ビット単位で一致しなかった。"
+            );
+        }
+    }
+
+    /// [`tile::CANDIDATES`] 全 9 候補 × N=512/1024/2048/4096 で、base
+    /// （`tile::FRAG_LOAD_CONFIG`。既定）と head ∈
+    /// {tgp-k2〈`{false, Two}`〉, device-hoisted-k1〈`{true, One}`〉,
+    /// device-hoisted-k2〈`{true, Two}`〉} の `dispatch_tiled_prepared`
+    /// 出力が bit 単位で一致することを確認する（イシュー #1293 AC-2 T1。
+    /// `docs/perf/metal-gemm-frag-load-candidates.md` §3.1 候補表）。
+    /// staged 候補では `device_hoisted` が no-op であることも含め検証する。
+    /// `resolve_tile_config`（`#[cfg(test)]`）でフォールバック非経由
+    /// （候補がサイレントに `SINGLE_SIMDGROUP_8X8` 等へ縮退していないこと）
+    /// も合わせて確認する（`unroll_acc_on_off_bit_match_all_candidates` と
+    /// 同型の設計）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn frag_load_on_off_bit_match_all_candidates() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_frag_load(&ctx, tile::FRAG_LOAD_CONFIG)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        assert_eq!(base_gemm.frag_load(), tile::FRAG_LOAD_CONFIG);
+
+        let head_configs = [
+            tile::FragLoadConfig {
+                device_hoisted: false,
+                ksteps: tile::FragLoadKSteps::Two,
+            },
+            tile::FragLoadConfig {
+                device_hoisted: true,
+                ksteps: tile::FragLoadKSteps::One,
+            },
+            tile::FragLoadConfig {
+                device_hoisted: true,
+                ksteps: tile::FragLoadKSteps::Two,
+            },
+        ];
+
+        const SEED: u64 = 0xC0FFEE;
+
+        for head_cfg in head_configs {
+            let head_gemm = MetalGemm::new_with_frag_load(&ctx, head_cfg)
+                .expect("head GEMM パイプラインの構築に失敗した");
+
+            for (i, cfg) in tile::CANDIDATES.iter().copied().enumerate() {
+                for size in [512usize, 1024, 2048, 4096] {
+                    let base_resolved = base_gemm
+                        .resolve_tile_config(&ctx, cfg)
+                        .expect("base 構成の解決に失敗した");
+                    assert_eq!(
+                        base_resolved, cfg,
+                        "head={head_cfg:?} index={i} size={size}: base 側でフォールバックが\
+                         発生した（検証が空振りする）"
+                    );
+                    let head_resolved = head_gemm
+                        .resolve_tile_config(&ctx, cfg)
+                        .expect("head 構成の解決に失敗した");
+                    assert_eq!(
+                        head_resolved, cfg,
+                        "head={head_cfg:?} index={i} size={size}: head 側でフォールバックが\
+                         発生した（検証が空振りする）"
+                    );
+
+                    let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                    let a = rng.fill_vec(size * size);
+                    let b = rng.fill_vec(size * size);
+
+                    let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                        .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                    let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                        .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                    let base_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                        .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+                    let head_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                        .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+                    base_gemm
+                        .dispatch_tiled_prepared(
+                            &ctx,
+                            &a_buf,
+                            &b_buf,
+                            &base_c_buf,
+                            size,
+                            size,
+                            size,
+                            cfg,
+                        )
+                        .expect(
+                            "base GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                        );
+                    head_gemm
+                        .dispatch_tiled_prepared(
+                            &ctx,
+                            &a_buf,
+                            &b_buf,
+                            &head_c_buf,
+                            size,
+                            size,
+                            size,
+                            cfg,
+                        )
+                        .expect(
+                            "head GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                        );
+
+                    let base_out = base_c_buf.read_to_vec();
+                    let head_out = head_c_buf.read_to_vec();
+                    let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+                    let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+                    assert_eq!(
+                        base_bits, head_bits,
+                        "head={head_cfg:?} index={i} size={size}: フラグメントロード方式候補の\
+                         違いにより出力がビット単位で一致しなかった。演算オペランド列が\
+                         変わっている疑いがあるため、shaders/gemm.metal の\
+                         FRAG_LOAD_DEVICE_HOISTED/FRAG_LOAD_KSTEPS 分岐箇所を確認すること。"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 各 staged 候補（`cfg.staged == true`）について、base 出力
+    /// （staged 現行。`tile::FRAG_LOAD_CONFIG`）と `TileConfig { staged:
+    /// false, ..cfg }` twin（device-legacy／device-hoisted-k1／
+    /// device-hoisted-k2 の 3 head）の出力を同一タイル形状で比較する
+    /// （イシュー #1293 AC-2 T2。「threadgroup 経由／device 直接」の
+    /// 同一形状対比。兄弟イシュー #1295 が実際に性能比較する軸）。
+    /// `validate` が通らない twin（`staged=false` では device 側の
+    /// shared_mem/thread 制約が異なりうる）は `continue` し、検証した
+    /// 候補数が 0 にならないことをアサートして空振りを検出する。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn frag_load_tgp_vs_device_same_shape_bit_match() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_frag_load(&ctx, tile::FRAG_LOAD_CONFIG)
+            .expect("base GEMM パイプラインの構築に失敗した");
+
+        let head_device_configs = [
+            tile::FragLoadConfig {
+                device_hoisted: false,
+                ksteps: tile::FragLoadKSteps::One,
+            },
+            tile::FragLoadConfig {
+                device_hoisted: true,
+                ksteps: tile::FragLoadKSteps::One,
+            },
+            tile::FragLoadConfig {
+                device_hoisted: true,
+                ksteps: tile::FragLoadKSteps::Two,
+            },
+        ];
+
+        const SEED: u64 = 0xC0FFEE;
+        const SIZE: usize = 1024;
+
+        let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
+        let mut verified_candidates = 0usize;
+
+        for cfg in tile::CANDIDATES.iter().copied().filter(|c| c.staged) {
+            let twin = TileConfig {
+                staged: false,
+                ..cfg
+            };
+            if twin.validate(1024, max_shared_mem_bytes).is_err() {
+                continue;
+            }
+
+            let base_resolved = base_gemm
+                .resolve_tile_config(&ctx, cfg)
+                .expect("staged 候補の解決に失敗した");
+            if base_resolved != cfg {
+                // フォールバックが発生した staged 候補は twin 比較の対象外
+                // （空振り防止。他候補で検証を続ける）。
+                continue;
+            }
+
+            let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+            let a = rng.fill_vec(SIZE * SIZE);
+            let b = rng.fill_vec(SIZE * SIZE);
+            let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+            let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+            let base_c_buf = MetalBuffer::new_zeroed(&ctx, SIZE * SIZE)
+                .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+            base_gemm
+                .dispatch_tiled_prepared(&ctx, &a_buf, &b_buf, &base_c_buf, SIZE, SIZE, SIZE, cfg)
+                .expect("base GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）");
+            let base_out = base_c_buf.read_to_vec();
+            let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+
+            for head_cfg in head_device_configs {
+                let head_gemm = MetalGemm::new_with_frag_load(&ctx, head_cfg)
+                    .expect("head GEMM パイプラインの構築に失敗した");
+                let head_resolved = head_gemm
+                    .resolve_tile_config(&ctx, twin)
+                    .expect("twin 構成の解決に失敗した");
+                if head_resolved != twin {
+                    continue;
+                }
+                let head_c_buf = MetalBuffer::new_zeroed(&ctx, SIZE * SIZE)
+                    .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+                head_gemm
+                    .dispatch_tiled_prepared(
+                        &ctx,
+                        &a_buf,
+                        &b_buf,
+                        &head_c_buf,
+                        SIZE,
+                        SIZE,
+                        SIZE,
+                        twin,
+                    )
+                    .expect(
+                        "head GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+                let head_out = head_c_buf.read_to_vec();
+                let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(
+                    base_bits, head_bits,
+                    "cfg={cfg:?} head={head_cfg:?}: staged/device 同一形状対比で出力が\
+                     ビット単位で一致しなかった。"
+                );
+            }
+            verified_candidates += 1;
+        }
+
+        assert!(
+            verified_candidates > 0,
+            "staged/device 同一形状対比を検証した候補が 0 件だった（検証が空振りした）"
+        );
+    }
+
+    /// 本番自動選択経路（`dispatch_auto`）でも base/head の出力が bit 単位で
+    /// 一致することを N=512/1024/2048/4096 で確認する（イシュー #1293
+    /// AC-2 T3。`unroll_acc_on_off_bit_match_dispatch_auto` と同型）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn frag_load_on_off_bit_match_dispatch_auto() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_frag_load(&ctx, tile::FRAG_LOAD_CONFIG)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_frag_load(
+            &ctx,
+            tile::FragLoadConfig {
+                device_hoisted: true,
+                ksteps: tile::FragLoadKSteps::Two,
+            },
+        )
+        .expect("head GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0xC0FFEE;
+
+        for size in [512usize, 1024, 2048, 4096] {
+            let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+            let a = rng.fill_vec(size * size);
+            let b = rng.fill_vec(size * size);
+
+            let base_out = base_gemm
+                .dispatch_auto(&ctx, &a, &b, size, size, size)
+                .expect("base GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+            let head_out = head_gemm
+                .dispatch_auto(&ctx, &a, &b, size, size, size)
+                .expect("head GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+
+            let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+            let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                base_bits, head_bits,
+                "size={size}: dispatch_auto でフラグメントロード方式候補の違いにより出力が\
+                 ビット単位で一致しなかった。"
+            );
+        }
+    }
+
+    /// NT/TN/TT（`dispatch_strided_tiled_prepared`）を N=1024 で staged
+    /// 候補 1 つ以上 + device twin 1 つで比較する（イシュー #1293 AC-2 T4。
+    /// `TRANS_A`/`TRANS_B` 分岐を含む新ブロック〈staged k2・direct-load
+    /// hoisted〉が転置ロードでも bit 一致することを確認する必須ケース）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn frag_load_transposed_bit_match() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_frag_load(&ctx, tile::FRAG_LOAD_CONFIG)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_frag_load(
+            &ctx,
+            tile::FragLoadConfig {
+                device_hoisted: false,
+                ksteps: tile::FragLoadKSteps::Two,
+            },
+        )
+        .expect("head GEMM パイプラインの構築に失敗した");
+        let head_device_gemm = MetalGemm::new_with_frag_load(
+            &ctx,
+            tile::FragLoadConfig {
+                device_hoisted: true,
+                ksteps: tile::FragLoadKSteps::Two,
+            },
+        )
+        .expect("head（device-hoisted）GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0xC0FFEE;
+        const SIZE: usize = 1024;
+        let cfg = tile::CANDIDATES[3];
+
+        for pattern in [
+            TransposePattern::Nt,
+            TransposePattern::Tn,
+            TransposePattern::Tt,
+        ] {
+            let (trans_a, trans_b) = match pattern {
+                TransposePattern::Nt => (false, true),
+                TransposePattern::Tn => (true, false),
+                TransposePattern::Tt => (true, true),
+                TransposePattern::Nn => unreachable!("NN はこのループ対象外"),
+            };
+            let a_layout = MatrixLayout {
+                rows: SIZE,
+                cols: SIZE,
+                ld: SIZE,
+                transposed: trans_a,
+            };
+            let b_layout = MatrixLayout {
+                rows: SIZE,
+                cols: SIZE,
+                ld: SIZE,
+                transposed: trans_b,
+            };
+
+            let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+            let a = rng.fill_vec(SIZE * SIZE);
+            let b = rng.fill_vec(SIZE * SIZE);
+            let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+            let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+            let base_c_buf = MetalBuffer::new_zeroed(&ctx, SIZE * SIZE)
+                .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+            let head_c_buf = MetalBuffer::new_zeroed(&ctx, SIZE * SIZE)
+                .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+            let head_device_c_buf = MetalBuffer::new_zeroed(&ctx, SIZE * SIZE).expect(
+                "head（device-hoisted）C バッファの確保に失敗した（実機でのみ実行する前提）",
+            );
+
+            base_gemm
+                .dispatch_strided_tiled_prepared(
+                    &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &base_c_buf, SIZE, SIZE, SIZE,
+                    cfg,
+                )
+                .expect(
+                    "base GEMM dispatch_strided_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                );
+            head_gemm
+                .dispatch_strided_tiled_prepared(
+                    &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &head_c_buf, SIZE, SIZE, SIZE,
+                    cfg,
+                )
+                .expect(
+                    "head GEMM dispatch_strided_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                );
+            let device_twin = TileConfig {
+                staged: false,
+                ..cfg
+            };
+            head_device_gemm
+                .dispatch_strided_tiled_prepared(
+                    &ctx,
+                    &a_buf,
+                    0,
+                    a_layout,
+                    &b_buf,
+                    0,
+                    b_layout,
+                    &head_device_c_buf,
+                    SIZE,
+                    SIZE,
+                    SIZE,
+                    device_twin,
+                )
+                .expect(
+                    "head（device-hoisted）GEMM dispatch_strided_tiled_prepared に失敗した\
+                     （実機でのみ実行する前提）",
+                );
+
+            let base_bits: Vec<u32> = base_c_buf
+                .read_to_vec()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let head_bits: Vec<u32> = head_c_buf
+                .read_to_vec()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let head_device_bits: Vec<u32> = head_device_c_buf
+                .read_to_vec()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            assert_eq!(
+                base_bits, head_bits,
+                "pattern={pattern:?}: staged K=2 ブロックの転置ロードで出力がビット単位で\
+                 一致しなかった。"
+            );
+            assert_eq!(
+                base_bits, head_device_bits,
+                "pattern={pattern:?}: device-hoisted ブロックの転置ロードで出力がビット単位で\
+                 一致しなかった。"
             );
         }
     }
