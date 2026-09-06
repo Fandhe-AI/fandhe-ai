@@ -583,6 +583,7 @@ constant bool TRANS_B = GEMM_SPEC_TRANS_B;
 constant bool UNROLL_ACC_ENABLED = GEMM_SPEC_UNROLL_ACC_ENABLED;
 constant bool FRAG_LOAD_DEVICE_HOISTED = GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED;
 constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;
+constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;
 #else
 constant uint BM [[function_constant(0)]];
 constant uint BN [[function_constant(1)]];
@@ -591,13 +592,21 @@ constant uint WM [[function_constant(3)]];
 constant uint WN [[function_constant(4)]];
 constant bool USE_TGP_STAGING [[function_constant(5)]];
 // threadgroup memory のパディング幅（イシュー #538。行末に加算する f32
-// 要素数）。`crate::tile::TileConfig::validate` が 4 の倍数（0 を含む）へ
-// 事前検証済みの契約で、staged 経路の A/B タイル行ストライドを
-// `BK+TGP_PAD`/`BN+TGP_PAD` へずらしてバンクコンフリクトを回避する
-// （MLX steel `gemm.h` の `tgp_padding_a`/`tgp_padding_b` と同族の技法。
-// direct-load 経路〈USE_TGP_STAGING=false〉では未使用。`TileConfig::validate`
-// が `staged=false` のとき `pad=0` を強制するため、値が実際に効くのは
-// staged 経路のみ）。
+// 要素数）。従来は `crate::tile::TileConfig::pad()`（`staged` からの導出値。
+// 0 または 4 固定）のみを渡していたが、イシュー #1298（協調ロードパディング
+// 候補）で `crate::tile::CoopLoadConfig::pad_elems`（`TgpPad::Zero`/`Four`/
+// `Eight`。0/4/8 の 3 択）が渡す値へ一般化した。`crate::gemm::MetalGemm::
+// pipeline_for_tile` が `self.coop_load.pad_elems(candidate)` を
+// `make_pipeline_with_constants` 経由で畳み込む契約で、staged 経路の A/B
+// タイル行ストライドを `BK+TGP_PAD`/`BN+TGP_PAD` へずらしてバンクコンフリクト
+// を回避する（MLX steel `gemm.h` の `tgp_padding_a`/`tgp_padding_b` と同族の
+// 技法。direct-load 経路〈USE_TGP_STAGING=false〉では未使用。`CoopLoadConfig::
+// pad_elems` が `staged=false` のとき常に `0` を返すため、値が実際に効くのは
+// staged 経路のみ）。`TgpPad` の 3 値はいずれも 4 の倍数（0/4/8）であり、
+// `lda`/`ldb` の 4 要素境界アラインメント前提（本ファイル `USE_TGP_STAGING`
+// 分岐のコメント参照）を崩さない（イシュー #538 の間接包含論法をそのまま
+// 適用できる。`crate::tile` の `shared_mem_bytes_for_pad` 単体テストで固定）。
+// **本番既定は `4`**（`crate::tile::COOP_LOAD_CONFIG.pad`。従来と無変更）。
 constant uint TGP_PAD [[function_constant(6)]];
 
 // threadgroup ID スウィズル（イシュー #540・実験的機構）を本番 dispatch で
@@ -715,7 +724,55 @@ constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];
 // （`crate::gemm::MetalGemm::new_with_frag_load`）。
 constant bool FRAG_LOAD_DEVICE_HOISTED [[function_constant(12)]];
 constant uint FRAG_LOAD_KSTEPS [[function_constant(13)]];
+
+// 協調ロードレイアウト候補ゲート（イシュー #1298）: `gemm_simdgroup_tiled`
+// の staged 経路（`USE_TGP_STAGING=true`）が threadgroup 全スレッドで
+// A/B タイルへ float4 単位の協調ロードを行う際の「スレッド添字 vi →
+// 非パディング平坦添字 idx」割当を切り替える。`0`（既定）は従来どおり
+// `idx = vi*4`（連続スレッドが同一行内の連続 float4 グループを担当。行
+// 優先・MLX steel `BlockLoader` 同型）。`1` は行ストライド割当
+// （`r = vi % rows; chunk = vi / rows; idx = r*row_len + chunk*4`。
+// 連続スレッドが同一列チャンク内の連続行を担当）。いずれも
+// `vi ∈ [0, rows*row_len/4)` を全 float4 グループ先頭添字（4 の倍数）へ
+// 過不足なく写す全単射であり（`crate::tile` の Rust 側モデル・単体
+// テストで固定）、共有メモリ上の各要素の値・格納位置・以降の
+// `simdgroup_load`/MMA 発行順は変えない（**bit 一致の論拠**は下記
+// `coop_load_flat_index` 直前のコメント、および #536/#538/#745/#809/
+// #1282/#1288/#1293 と同じ論法）。値は `crate::tile::CoopLoadConfig::
+// layout`（`crate::gemm::MetalGemm::new_with_coop_load` が受け取る
+// instance ゲート）が `crate::pipeline::make_pipeline_with_constants`
+// 経由で畳み込む。**本番既定は `0`**（`crate::tile::COOP_LOAD_CONFIG`）で
+// 挙動は無変更。性能実測・`tile::select` への組み込み判断は兄弟イシュー
+// #1300／#1302／#1304 のスコープ（本ファイルの変更自体は `dispatch_auto`
+// の既定挙動を変えない）。`gemm_simdgroup_tiled_f16` は本定数を参照
+// しない（`crate::gemm::MetalGemm::pipeline_for_tile_f16` は常に `0` を
+// 渡す no-op 契約。`pipeline_for_tile_f16` 呼び出し側コメント参照）。
+constant uint COOP_LOAD_LAYOUT [[function_constant(14)]];
 #endif
+
+// イシュー #1298: 協調ロードの「スレッド → float4 グループ」割当を
+// `COOP_LOAD_LAYOUT` で切り替えるヘルパ。戻り値は非パディング平坦添字
+// （行優先 `rows`×`row_len` 平面上。呼び出し側がパディング込みストライド
+// へ変換する）。`vi` は `[0, rows*row_len/4)` の範囲を仮定する
+// （`gemm_simdgroup_tiled` 呼び出し側の `a_vecs`/`b_vecs` ループ変数と
+// 1:1 対応）。
+//
+// **bit 一致の論拠**: 「どのスレッドがどの float4 グループを書くか」の
+// 割当（`vi` から `idx` への全単射）を変えるだけで、共有メモリ上の各
+// 要素の値・格納位置は不変（両レイアウトとも `idx` は同じ像集合
+// `{0, 4, 8, ..., rows*row_len-4}` を過不足なく被覆する。`crate::tile` の
+// Rust 側モデル `coop_load_flat_index_model` と単体テストで固定）。
+// `threadgroup_barrier` 後の `simdgroup_load`／MMA 発行順・オペランド列は
+// 一切変わらないため、有効化時も数値はビット単位で不変
+// （#536/#538/#745/#809/#1282/#1288/#1293 と同じ論法）。
+inline uint coop_load_flat_index(uint vi, uint rows, uint row_len) {
+    if (COOP_LOAD_LAYOUT == 1) {
+        uint r = vi % rows;
+        uint chunk = vi / rows;
+        return r * row_len + chunk * 4;
+    }
+    return vi * 4;
+}
 
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
 // `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
@@ -956,7 +1013,7 @@ kernel void gemm_simdgroup_tiled(
                 // ヘルパ群のコメント参照）。threadgroup タイルは
                 // `BK×(BM+pad)`（行=K・列=M）で確保済み（上記 `a_tile_rows`）。
                 for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
-                    uint idx = vi * 4;
+                    uint idx = coop_load_flat_index(vi, BK, BM);
                     uint kk = idx / BM;
                     uint r = idx % BM;
                     uint dst_idx = kk * lda + r;
@@ -979,7 +1036,7 @@ kernel void gemm_simdgroup_tiled(
                 }
             } else {
                 for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
-                    uint idx = vi * 4;
+                    uint idx = coop_load_flat_index(vi, BM, BK);
                     uint r = idx / BK;
                     uint kk = idx % BK;
                     uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
@@ -1010,7 +1067,7 @@ kernel void gemm_simdgroup_tiled(
                 // ヘルパは `tiled_a_*` と同型・K 方向をベクトル判定）。
                 // threadgroup タイルは `BN×(BK+pad)`（行=N・列=K）で確保済み。
                 for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
-                    uint idx = vi * 4;
+                    uint idx = coop_load_flat_index(vi, BN, BK);
                     uint c_ = idx / BK;
                     uint kk = idx % BK;
                     uint dst_idx = c_ * ldb + kk;
@@ -1034,7 +1091,7 @@ kernel void gemm_simdgroup_tiled(
                 }
             } else {
                 for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
-                    uint idx = vi * 4;
+                    uint idx = coop_load_flat_index(vi, BK, BN);
                     uint kk = idx / BN;
                     uint c_ = idx % BN;
                     uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
