@@ -1,0 +1,15 @@
+effective_rounds=6 effective_cooldown_secs=2 effective_min_warmup_secs=1
+--- フェーズ 0: base/head 出力 bit 一致の自己検証 ---
+size=256 bit-exact match: OK
+size=512 bit-exact match: OK
+size=1024 bit-exact match: OK
+size=2048 bit-exact match: OK
+size=4096 bit-exact match: OK
+--- フェーズ 1: 安定性セルフチェック（対照カーネル: SimdgroupTiled auto 選択）---
+size=256 spread=0.2424 (NG: gate 超過) round_tflops=[0.1460, 0.1437, 0.1748, 0.1404, 0.1423, 0.1347]
+size=512 spread=0.3936 (NG: gate 超過) round_tflops=[0.4289, 0.4386, 0.6785, 0.4588, 0.5762, 0.4701]
+size=1024 spread=0.0618 (NG: gate 超過) round_tflops=[1.0399, 1.0010, 1.0060, 0.9969, 1.0147, 0.9771]
+size=2048 spread=0.3087 (NG: gate 超過) round_tflops=[1.5719, 1.7201, 1.6317, 2.0203, 1.9312, 2.1895]
+size=4096 spread=0.5697 (NG: gate 超過) round_tflops=[4.4997, 4.5119, 4.5585, 4.4279, 2.8732, 4.0877]
+--- フェーズ 1 判定: 一部サイズが spread ≤0.05 相当を満たさなかった。フェーズ 2（A/B 判定）はスキップする（安全側判断: 判定不可のまま採否を確定しない）。
+verdict=undetermined (フェーズ 1 の安定性セルフチェックで spread ≤gate 相当を満たさないサイズが残ったため、フェーズ 2（A/B 判定）を実行せず判定不可のまま終了する)
