@@ -226,9 +226,120 @@ after/before はカーネル単体（launch-only）の比較であり、framewor
   #1032 のマージ状況を実装開始時に確認したが未マージだったため、既存 `kernels.rs::TILED_F32` を書き換えず新規
   モジュール（`kernels_tiled_pipeline.rs`）に自己完結した実装を追加した（コンフリクト回避）。
 
+## #1343 128×64×16 候補の追加（opt-in・未実測）
+
+親イシュー #1342（sub-issue 2 件構成）配下のイシュー #1343「perf(backend-cuda):
+128×64×16 f32 pipeline カーネル（8×4 レジスタブロック・XOR スウィズル・cp.async
+zfill 境界）を opt-in で追加し現行 64×64 経路との出力 bit 同一を全形状で自己検証
+する」の実装記録。**本イシューは実装・自己検証のみを扱い、GB10 実機の性能実測・
+本番結線可否判断は兄弟イシュー #1344 が担う**。本節時点で本番既定経路
+（`CudaGemm::new` → `select_tiled_f32_kernel`）は一切変更されていない。
+
+### タイル構成・差分（既存 64×64 版との対比）
+
+| 項目 | 64×64（既存・#1033/#1137） | 128×64（本イシュー・#1343） |
+|------|---------------------------|------------------------------|
+| ブロックタイル `BM×BN` | 64×64 | **128×64** |
+| 1 スレッド担当（`THREAD_M×THREAD_N`） | 4×4 | **8×4** |
+| ブロック内スレッド数 | 256（16×16） | 256（16×16。不変） |
+| バンク衝突対策 | 行幅パディング（`TP_A_PAD`/`TP_B_PAD`） | **A フラグメントのみ 16B チャンク単位 XOR スウィズル（パディングなし）** |
+| ステージ範囲 | 2〜4 | **2〜3**（下記「共有メモリ予算・occupancy 訂正」） |
+
+実装は `crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs`（新規モジュール。
+`kernels_tiled_pipeline.rs` と同型の位置づけ・opt-in 専用）。カーネルソース生成
+（`tiled_pipeline_128x64_f32_source`）・const assert 群・A フラグメントスウィズル
+の Rust 側参照実装（`swizzled_chunk_a`）・自己検証テストを同モジュール内に完結
+させた。
+
+### なぜパディングでなく XOR か（設計時に導出した論拠）
+
+`THREAD_M` が 4→8 になったことで、A フラグメント読みが warp 内で 8 行離れた 2
+グループへ分裂する（256 スレッド・16×16 格子・warp=32 は `ty` 2 値 × `tx` 16 値
+から成るため）。A の行幅（`BK`=16 要素=64 バイト。cp.async 16B 転送粒度の倍数
+という制約下）では、8 行差のバイトオフセット差（8×64B=512B）が常に 128B（32
+バンク×4B）の倍数になり、**パディングでは 8 行差バンク衝突を解消できない**（行幅
+をどう変えても cp.async 制約〈4 の倍数〉の下では 8×w×4 は常に 128 の倍数になる
+ため）。
+
+そこで 16 バイトチャンク（f32 4 要素）単位の XOR スウィズル `swz(row, chunk) =
+chunk ^ ((row >> 3) & 3)` を採用した。`row` と `row+8` は `(row>>3)&3` の値が
+必ず異なるため、スウィズル後は常に異なるバンクへ写る。この論拠は
+`kernels_tiled_pipeline_128x64.rs::tests::a_fragment_swizzle_resolves_8_row_bank_conflict`
+（全 row×chunk 組合せの機械検査）で固定した。B（行幅 256B）は読み・書きとも連続
+16 チャンクで元々衝突しないためスウィズル不要と判断し、A のみへ適用した。
+
+### 共有メモリ予算・occupancy 訂正（GB10 実測に基づく事実確認）
+
+パディングなしのため 1 ステージあたり `(BM*BK + BK*BN) * 4B` = `(128*16 +
+16*64) * 4` = 12,288 バイト。4 段では 49,152 バイトとなり全 compute capability
+共通の静的 48KiB per-block 上限ちょうどで余裕がなく、かつ #1137（64×64 版）の
+A/B 実測で 4 段は GB10 で劣化することが確認済みのため、**本カーネルのステージ
+範囲は 2〜3 に限定した**（3 段時点で 36,864 バイト。コンパイル時 assert で 48KiB
+上限を検査する）。
+
+**親イシュー #1342 が想定していた「3 block/SM」は GB10 では成立しない**（本
+イシューで判明した訂正）: `docs/perf/sm121-device-attributes.md` の GB10 実測
+`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 102,400` バイトに対し、3 段の 36,864
+バイト × 3 block = 110,592 バイト（> 102,400）のため、GB10 では smem 制約により
+**同時常駐は 2 block/SM（16 warp/SM）に留まる**。実測（ptxas 資源値・実効
+occupancy）による確認は #1344 の検証項目として引き継ぐ。
+
+### bit 同一の論拠・opt-in 到達経路
+
+各出力要素は `acc=+0.0` から `kk` 昇順・`t`（K タイル）昇順の単一 `fmaf()` 連鎖で
+確定し、A のスウィズルは共有メモリの物理格納位置のみを変える純粋なアドレス置換
+であるため演算順序に影響しない。したがって本カーネルは 64×64 版・classic 版
+（`kernels.rs::TILED_F32`）のいずれとも bit 完全一致すると論証できる
+（`kernels_tiled_pipeline_128x64.rs` 冒頭コメント「bit 同一の論拠」に詳細）。
+
+自己検証は GPU 非依存（ホストモデルによる `matmul_reference_fma` との bit 一致。
+`kernels_tiled_pipeline_128x64.rs::tests::host_model_matches_reference_fma_bit_exact`）
+と、実機 `#[ignore]` テスト（`tests/cpu_cuda_tiled_pipeline_parity.rs` の
+`tiled_pipeline_128x64_matches_pipeline_64x64_bit_exact`・
+`tiled_pipeline_128x64_matches_classic_bit_exact`・
+`tiled_pipeline_128x64_matches_reference_across_shapes`・
+`tiled_pipeline_128x64_k4096_stress`・
+`run_tiled_f32_optin_dispatches_128x64_for_aligned_shape`・
+`compile_tiled_pipeline_128x64_variant_matches_run_tiled_pipeline_f32`）の双方で
+用意した。**実機（DGX Spark GB10 等の compute capability 8.0 以降）は本実装セッ
+ションの実行環境に存在せず、上記 `#[ignore]` テストは未実行のまま記録する**（#1344
+で実施することを引き継ぐ）。
+
+opt-in 到達経路（本番既定 `CudaGemm::new` は不変）:
+
+- `gemm.rs::TILED_PIPELINE_128X64_PRODUCTION_ENABLED`（既定 `false`）: `true`
+  へ切り替えると `CudaGemm::new` 自体が 128×64 版をコンパイルするようになる
+  （#1344 が結線可否を判断した後にのみ切り替える運用。切替自体は本イシューの
+  スコープ外）。
+- `CudaGemm::new_with_tiled_pipeline_128x64(device)`（`internal-diagnostics`
+  feature 限定）: 既定コンストラクタと同じ手順で構築したうえで `tiled_pipeline`
+  スロットを 128×64 版へ差し替える診断専用インスタンス。`run_tiled_f32` 系
+  3 入口はこのインスタンスに対しては整列形状で自動的に 128×64 経由になる。
+- `CudaGemm::compile_tiled_pipeline_128x64_variant(device, stages)`
+  （`internal-diagnostics` feature 限定）: GPU-only 常駐 API・bench 用の
+  任意ステージ数変種。
+
+### #1344 向け実測手順（引き継ぎ）
+
+```sh
+# GPU-only 性能比較（pipeline128x64_gpu_only 列。既定 3 stage）。
+cargo run -p fandhe-ai-backend-cuda --example gemm_tiled_pipeline_bench --release \
+  --features internal-diagnostics
+
+# 実機 bit 一致自己検証（T7〜T11。本イシューで追加済み・GB10 実機未実行）。
+cargo test -p fandhe-ai-backend-cuda --release --all-features \
+  --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture
+```
+
+`--all-features` を省くと `required-features` ゲートによりテストバイナリ自体が
+ビルドされず false-green になる点は #1033 実装時と同じ注意（本節冒頭「実行手順」
+節参照）。実測時は低負荷時に `uptime` を `docs/perf/logs/` 配下の env_info へ記録
+する（`.claude/rules` の実機検証運用に準拠。内部ホスト名は含めない）。
+
 ## 関連ドキュメント
 
 - `docs/perf/cuda-gemm-mma-pipeline.md`（TF32 `mma.sync`/`ldmatrix`/`cp.async` 経路の同型記録。本ファイルの
   パイプライン骨格の移植元）
 - `docs/perf/cuda-gemm-kernel-improvement-policy.md`（FP32 SIMT 経路の背景・candle 比較基準）
 - `crates/backend-cuda/src/kernels_tiled_pipeline.rs`（カーネルソース・設計コメント）
+- `crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs`（イシュー #1343。128×64×16 候補のカーネルソース・設計コメント・自己検証テスト）
