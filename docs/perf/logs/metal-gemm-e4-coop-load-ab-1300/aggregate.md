@@ -1,6 +1,6 @@
 # E4 協調ロード候補 A/B 集計（イシュー #1300）
 
-`kernel_gpu_run{1..5}.log` から `kernel_gpu_median_ms`（1 run＝40 trial 中央値）を
+`kernel_gpu_run{1..5}.log` から `kernel_gpu_median_ms`（1 run＝20 trial のウォームアップ後、20 trial の測定中央値）を
 抽出し、N × 候補ごとに 5 run の中央値（中央値の中央値。`metal-gemm-reuse-phase-
 breakdown.md` §11.2 規約）を算出した。base は `L0-P4`（= 本番既定
 `tile::COOP_LOAD_CONFIG`）。
