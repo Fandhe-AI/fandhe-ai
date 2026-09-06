@@ -3956,7 +3956,12 @@ mod tests {
         const SIZE: usize = 1024;
 
         let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
-        let mut verified_candidates = 0usize;
+        // head_cfg ごとの実比較回数（`head_resolved != twin` でスキップされた
+        // 分は含めない）。各 head_cfg で最低 1 件は実比較が行われたことを
+        // 検査することで、outer cfg ループが空振りしなかった（=候補が
+        // 存在した）ことだけでなく、個々の head_cfg も一度も比較されずに
+        // 素通りしていないことを保証する（codex-review 指摘対応）。
+        let mut verified_per_head = [0usize; 3];
 
         for cfg in tile::CANDIDATES.iter().copied().filter(|c| c.staged) {
             let twin = TileConfig {
@@ -3991,7 +3996,7 @@ mod tests {
             let base_out = base_c_buf.read_to_vec();
             let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
 
-            for head_cfg in head_device_configs {
+            for (head_idx, head_cfg) in head_device_configs.into_iter().enumerate() {
                 let head_gemm = MetalGemm::new_with_frag_load(&ctx, head_cfg)
                     .expect("head GEMM パイプラインの構築に失敗した");
                 let head_resolved = head_gemm
@@ -4023,14 +4028,21 @@ mod tests {
                     "cfg={cfg:?} head={head_cfg:?}: staged/device 同一形状対比で出力が\
                      ビット単位で一致しなかった。"
                 );
+                // head_resolved == twin で実際に比較を行った場合のみ加算する
+                // （スキップされたケースでの無条件加算は「比較が一度も
+                // 行われなくても検査を通過する」空振りを許してしまうため
+                // 不可。codex-review 指摘対応）。
+                verified_per_head[head_idx] += 1;
             }
-            verified_candidates += 1;
         }
 
-        assert!(
-            verified_candidates > 0,
-            "staged/device 同一形状対比を検証した候補が 0 件だった（検証が空振りした）"
-        );
+        for (head_idx, head_cfg) in head_device_configs.iter().enumerate() {
+            assert!(
+                verified_per_head[head_idx] > 0,
+                "head_cfg={head_cfg:?}: staged/device 同一形状対比を検証した候補が\
+                 0 件だった（検証が空振りした）"
+            );
+        }
     }
 
     /// 本番自動選択経路（`dispatch_auto`）でも base/head の出力が bit 単位で

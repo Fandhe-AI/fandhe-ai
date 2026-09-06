@@ -1396,10 +1396,10 @@ pub enum FragLoadKSteps {
     Two,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 impl FragLoadKSteps {
     /// `shaders/gemm.metal` の `FRAG_LOAD_KSTEPS`（`constant uint`）へ渡す
     /// 実効値（1 または 2）。
-    #[cfg(any(test, target_os = "macos"))]
     pub(crate) fn as_u32(self) -> u32 {
         match self {
             FragLoadKSteps::One => 1,
@@ -1432,6 +1432,7 @@ pub struct FragLoadConfig {
     pub ksteps: FragLoadKSteps,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 impl FragLoadConfig {
     /// 本番既定（`MetalGemm::new` が渡す値）。`gemm.metal` の既存 staged/
     /// direct-load ブロック（`FRAG_LOAD_KSTEPS`/`FRAG_LOAD_DEVICE_HOISTED`
