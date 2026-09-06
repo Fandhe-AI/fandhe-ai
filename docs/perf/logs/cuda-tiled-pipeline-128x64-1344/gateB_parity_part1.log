@@ -1,0 +1,96 @@
+   Compiling fandhe-ai-backend-cuda v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.51s
+     Running tests/backend_ops_real_device.rs (work/target-fandhe-ai/release/deps/backend_ops_real_device-3439ae4d95578d03)
+
+running 1 test
+test backend_ops_gemm_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.41s
+
+     Running tests/cpu_cuda_parity.rs (work/target-fandhe-ai/release/deps/cpu_cuda_parity-f1e9a2675f42ed31)
+
+running 2 tests
+test naive_f32_k4096_stress_poc_v2_5 ... ok
+test naive_f32_matches_reference_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.72s
+
+     Running tests/cpu_cuda_tiled_pipeline_parity.rs (work/target-fandhe-ai/release/deps/cpu_cuda_tiled_pipeline_parity-f281b60f0b9b6b84)
+
+running 17 tests
+test compile_tiled_pipeline_128x64_variant_matches_run_tiled_pipeline_f32 ... ok
+test launch_tiled_pipeline_zero_dim_shape_is_noop_without_launch ... ok
+test run_tiled_f32_dispatches_to_pipeline_for_aligned_shape ... ok
+test run_tiled_f32_falls_back_to_classic_for_unaligned_shape ... ok
+test run_tiled_f32_optin_dispatches_128x64_for_aligned_shape ... ok
+test tiled_pipeline_128x64_k4096_stress ... ok
+test tiled_pipeline_128x64_matches_classic_bit_exact ... ok
+test tiled_pipeline_128x64_matches_pipeline_64x64_bit_exact ... ok
+test tiled_pipeline_128x64_matches_reference_across_shapes ... ok
+test tiled_pipeline_k4096_stress ... ok
+test tiled_pipeline_matches_reference_across_shapes ... ok
+test tiled_pipeline_matches_tiled_f32_classic_bit_exact ... ok
+test tiled_pipeline_rejects_misaligned_shape ... ok
+test tiled_pipeline_rejects_mismatched_context_buffers ... ok
+test tiled_pipeline_rejects_mismatched_context_handle ... ok
+test tiled_pipeline_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_pipeline_zero_k_returns_all_zero ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 21.52s
+
+     Running tests/gemm_auto.rs (work/target-fandhe-ai/release/deps/gemm_auto-2055efec9d7a8a79)
+
+running 8 tests
+test f16_matrix_unit_impl_reports_selected_implementation ... ok
+test mma_field_is_constructed_by_compute_capability_gate ... ok
+test run_f16_k4096_stress_non_regression_route_aware ... ok
+test run_f16_matches_cpu_reference ... ok
+test run_f16_matches_cpu_reference_across_aligned_shapes ... ok
+test run_f16_misaligned_shape_falls_back_to_wmma_or_tiled ... ok
+test run_f32_matches_cpu_reference ... ok
+test select_tile_config_for_device_succeeds_on_real_hardware ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.27s
+
+     Running tests/gemm_bias_act_parity.rs (work/target-fandhe-ai/release/deps/gemm_bias_act_parity-6b4790f4819abc83)
+
+running 2 tests
+test elementwise_matches_cpu_across_ops ... ok
+test gemm_bias_act_matches_cpu_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.46s
+
+     Running tests/gemm_f32_variants.rs (work/target-fandhe-ai/release/deps/gemm_f32_variants-7cb4d7ec8dd0be0f)
+
+running 2 tests
+test run_f32_matches_cpu_reference_across_variant_shapes ... ok
+test split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 10.30s
+
+     Running tests/gemm_resident_real_device.rs (work/target-fandhe-ai/release/deps/gemm_resident_real_device-18b825fa596cf912)
+
+running 2 tests
+test gemm_resident_lhs_matches_cpu_reference_on_real_device ... ok
+test gemm_resident_rhs_matches_cpu_reference_on_real_device ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests/gemm_tf32_optin.rs (work/target-fandhe-ai/release/deps/gemm_tf32_optin-b8ac2d9e1c01af63)
+
+running 2 tests
+test gemm_tf32_optin_on_matches_cpu_across_shapes ... 
+thread 'gemm_tf32_optin_on_matches_cpu_across_shapes' (3671964) panicked at crates/backend-cuda/tests/gemm_tf32_optin.rs:128:5:
+tf32 opt-in gemm cpu-cuda parity m=512 n=512 k=512: 複合判定 FAIL（fail_count=42298/262144, max_abs_diff=1.043e-2, max_rel_err=1.567e0, mean_abs_diff=1.569e-3, mean_rel_err=1.456e-3, p50_abs_diff=1.321e-3, p99_abs_diff=5.076e-3, p999_abs_diff=6.459e-3）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test gemm_tf32_optin_on_wiring_matches_run_wmma_tf32 ... ok
+
+failures:
+
+failures:
+    gemm_tf32_optin_on_matches_cpu_across_shapes
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.24s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_tf32_optin`

@@ -1,0 +1,54 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/gemm_tiled.rs (work/target-fandhe-ai/release/deps/gemm_tiled-0ad0d305615bedee)
+
+running 6 tests
+test tiled_f16_runs_and_returns_expected_shape ... ok
+test tiled_f32_matches_cpu_reference_across_shapes ... ok
+test tiled_f32_matches_cpu_reference_k_stress ... ok
+test tiled_f32_outperforms_naive_at_4096 ... ok
+test tiled_f32_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_f32_zero_k_returns_all_zero ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 4.70s
+
+     Running tests/gemm_transposed_parity.rs (work/target-fandhe-ai/release/deps/gemm_transposed_parity-036e1840344d7e81)
+
+running 5 tests
+test gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_real_device ... ok
+test gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test gemm_resident_lhs_nt_transposed_view_matches_contiguous_on_real_device ... ok
+test gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/parity_nonregression.rs (work/target-fandhe-ai/release/deps/parity_nonregression-ac49f534f57c8d52)
+
+running 1 test
+test parity_baselines_do_not_regress ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 9.12s
+
+     Running tests/tensor_core_real_device.rs (work/target-fandhe-ai/release/deps/tensor_core_real_device-bf20ce7143d776fb)
+
+running 2 tests
+test tensor_core_parity_record ... 
+thread 'tensor_core_parity_record' (3674195) panicked at crates/backend-cuda/tests/tensor_core_real_device.rs:462:5:
+tensor_core_parity_record tf32 512x512x512: 複合判定 FAIL（fail_count=42493/262144, max_abs_diff=9.045e-3, max_rel_err=1.877e0, mean_abs_diff=1.574e-3, mean_rel_err=1.489e-3, p50_abs_diff=1.333e-3, p99_abs_diff=5.094e-3, p999_abs_diff=6.503e-3）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test tensor_core_tflops_record ... environment: name="NVIDIA GB10" compute_capability=(12, 1) arch="compute_121"
+tflops_record_kernel_only path=tiled_f32 tflops=13.061 report={"schema_version":"1","name":"gemm_tiled_f32_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.010523,"q1_secs":0.010506632,"q3_secs":0.010536057,"samples_secs":[0.010498872,0.010523,0.010515575,0.010536057,0.010483575,0.010507048,0.010529112,0.010523304,0.010974111,0.010532888,0.010512024,0.01049684,0.010505832,0.010503863,0.01052268,0.010506632,0.010620906,0.011112417,0.011752508,0.010929646]}
+tflops_record_kernel_only path=wmma_tf32_staged tflops=14.040 report={"schema_version":"1","name":"gemm_wmma_tf32_staged_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.009788893,"q1_secs":0.009778172,"q3_secs":0.009792396,"samples_secs":[0.009777596,0.009784348,0.009782828,0.009782028,0.009777692,0.009778172,0.009790844,0.009780252,0.010223587,0.009993999,0.009788893,0.009792396,0.009772796,0.009789308,0.009789948,0.00981286,0.009864365,0.009773948,0.010275108,0.009777996]}
+tflops_record_kernel_only path=wmma_f16_opt(reference_only) tflops=4.370 report={"schema_version":"1","name":"gemm_wmma_f16_opt_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.03144842,"q1_secs":0.031441445,"q3_secs":0.031454613,"samples_secs":[0.031454613,0.031441445,0.031449637,0.031429732,0.031445589,0.031439764,0.031434661,0.031456677,0.03143338,0.031446965,0.032116447,0.031460677,0.031444261,0.03144842,0.031438949,0.031455925,0.031443428,0.031454805,0.031449381,0.031454389]}
+tflops_record_kernel_only path=mma_sync_f16(production) tflops=55.236 report={"schema_version":"1","name":"gemm_mma_f16_kernel_only_4096","backend":"cuda","warmup":20,"iters":20,"median_secs":0.0024882,"q1_secs":0.002486055,"q3_secs":0.002671178,"samples_secs":[0.002486055,0.002484568,0.002483799,0.0024882,0.003047872,0.002854798,0.002486584,0.002485111,0.002482216,0.003154674,0.002498536,0.002497639,0.003289477,0.002671178,0.002487112,0.002483639,0.002487176,0.00249212,0.002486343,0.003045537]}
+ok
+
+failures:
+
+failures:
+    tensor_core_parity_record
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.21s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test tensor_core_real_device`
