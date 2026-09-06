@@ -92,6 +92,13 @@ pub(crate) struct GemmGateConstants {
     /// `gemm_simdgroup_tiled_f16` は参照しない（`pipeline_for_tile_f16` は
     /// 常に `0` を渡す no-op 契約）。
     pub(crate) coop_load_layout: u32,
+    /// タイルクラス分割ゲート（イシュー #1327。`TILE_CLASS`。index 15。
+    /// 値は 0〈Legacy〉/1〈Interior〉/2〈Edge〉）。呼び出し元
+    /// [`crate::gemm::MetalGemm::pipeline_for_tile`] が dispatch する
+    /// タイル領域ごとの [`crate::tile::TileClass`] から渡す。
+    /// `gemm_simdgroup_tiled_f16` は参照しない（`pipeline_for_tile_f16` は
+    /// 常に `0` を渡す no-op 契約。他ゲートと同じ扱い）。
+    pub(crate) tile_class: u32,
 }
 
 /// `shaders/gemm.metal` を実行時コンパイルして `MTLLibrary` を返す。
@@ -223,6 +230,7 @@ pub(crate) fn make_pipeline_with_constants(
         frag_load_ksteps,
         tgp_pad_elems,
         coop_load_layout,
+        tile_class,
     } = gates;
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -379,6 +387,18 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::UInt,
             14,
         );
+        // タイルクラス分割ゲート（イシュー #1327）。index は
+        // COOP_LOAD_LAYOUT（index 14）の直後の 15（`shaders/gemm.metal`
+        // 冒頭 TILE_CLASS 宣言と 1:1 対応。`tests/shader_source_evidence.rs`
+        // が index を含めて固定する）。`gemm_simdgroup_tiled_f16` は参照
+        // しないため、`pipeline_for_tile_f16` からの呼び出しでは無害な
+        // no-op（他ゲートと同じ扱い）。
+        let tile_class_value = tile_class;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&tile_class_value).cast(),
+            MTLDataType::UInt,
+            15,
+        );
     }
 
     let func = library
@@ -432,15 +452,18 @@ pub(crate) fn make_pipeline_source_specialized(
         frag_load_ksteps,
         tgp_pad_elems,
         coop_load_layout,
+        tile_class,
     } = gates;
     let params = crate::spec_source::SpecializationParams {
-        // イシュー #1298: 協調ロード軸（`tgp_pad_elems`/`coop_load_layout`）
-        // は `SpecializationParams::new`（7 引数のまま不変）の既定値
-        // （`cfg.pad()`／`0`）を struct update 構文で `gates` の実効値へ
+        // イシュー #1298/#1327: 協調ロード軸（`tgp_pad_elems`/
+        // `coop_load_layout`）・タイルクラス軸（`tile_class`）は
+        // `SpecializationParams::new`（7 引数のまま不変）の既定値
+        // （`cfg.pad()`／`0`／`0`）を struct update 構文で `gates` の実効値へ
         // 上書きする（`GemmGateConstants`〈function constant 経路〉と
         // 同一の値を渡す契約を保つ）。
         tgp_pad_elems,
         coop_load_layout,
+        tile_class,
         ..crate::spec_source::SpecializationParams::new(
             cfg,
             swizzle_enabled,

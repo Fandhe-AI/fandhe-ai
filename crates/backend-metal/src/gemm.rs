@@ -82,6 +82,22 @@ thread_local! {
     /// `dispatch_strided_bias_act_prepared` の tiled 経路ルーティングが
     /// 実際に発火しているかをクレート内テストで確認するための可観測点。
     pub(crate) static STRIDED_TILED_ROUTE_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// [`MetalGemm::encode_tiled_by_class`]（`TileClassMode::Split`）が
+    /// 内部タイル（Interior）領域を実際に dispatch した回数（イシュー
+    /// #1327）。`STRIDED_TILED_ROUTE_COUNT` と同じ設計判断（スレッド
+    /// ローカル化の理由も同一）。実機テストが「Split 経路で内部クラスが
+    /// 空振りせず実際に起動した」ことを assert するための可観測点。
+    pub(crate) static TILE_CLASS_INTERIOR_DISPATCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// [`MetalGemm::encode_tiled_by_class`]（`TileClassMode::Split`）が
+    /// 端タイル（Edge）領域を実際に dispatch した回数（イシュー #1327）。
+    pub(crate) static TILE_CLASS_EDGE_DISPATCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// [`MetalGemm::encode_tiled_by_class`]（`TileClassMode::Split`）が
+    /// Interior/Edge の解決構成不一致により Legacy 単一 dispatch へ
+    /// フォールバックした回数（イシュー #1327）。
+    pub(crate) static TILE_CLASS_SPLIT_FALLBACK_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
@@ -187,6 +203,46 @@ impl GemmStrides {
     }
 }
 
+/// `shaders/gemm.metal` の `TileClassRegion` 構造体とレイアウトを一致させる
+/// （`repr(C)`・4 × u32 = 16 バイト。イシュー #1327・E6 試作）。
+/// タイルクラス分割時に threadgroup dispatch grid 上のタイル座標矩形
+/// （内部タイル／端タイル領域）を表す。`crate::tile::TileClassRegion`
+/// （純粋な `TileClassPlan` 計算専用の型）とはフィールド構成が同一だが、
+/// FFI 境界（`setBytes_length_atIndex`。buffer index 5）に直接触れる型は
+/// 本モジュール側で独立定義する契約（`crate::tile` 側 doc comment 参照）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TileClassRegion {
+    row_off: u32,
+    col_off: u32,
+    rows: u32,
+    cols: u32,
+}
+
+impl TileClassRegion {
+    /// dispatch grid 全体を覆う恒等領域（`TileClassMode::Legacy` が渡す
+    /// 値。原点 0・`tiles_m`×`tiles_n` 全体）。
+    fn full_grid(tiles_m: u32, tiles_n: u32) -> Self {
+        TileClassRegion {
+            row_off: 0,
+            col_off: 0,
+            rows: tiles_m,
+            cols: tiles_n,
+        }
+    }
+}
+
+impl From<tile::TileClassRegion> for TileClassRegion {
+    fn from(r: tile::TileClassRegion) -> Self {
+        TileClassRegion {
+            row_off: r.row_off,
+            col_off: r.col_off,
+            rows: r.rows,
+            cols: r.cols,
+        }
+    }
+}
+
 /// naive・tiled・simdgroup の 3 パイプラインを保持するハンドル。
 ///
 /// [`MetalContext`] とは別に保持する理由: パイプライン構築（MSL コンパイル
@@ -238,7 +294,9 @@ pub struct MetalGemm {
     /// パイプライン（MSL コンパイル結果）になる。NN（`TransposePattern::Nn`）
     /// のみを渡す既存呼び出し元（`dispatch_variant`・`dispatch_tiled_prepared`）
     /// の挙動・キャッシュヒット率は変わらない。
-    tiled_cache: Mutex<HashMap<(TileConfig, TransposePattern), objc2::rc::Retained<MtlPipeline>>>,
+    tiled_cache: Mutex<
+        HashMap<(TileConfig, TransposePattern, tile::TileClass), objc2::rc::Retained<MtlPipeline>>,
+    >,
     /// `gemm_simdgroup_tiled_f16`（イシュー #796）の構成キー
     /// （[`TileConfig`]）→ パイプラインの遅延キャッシュ（[`Self::pipeline_for_tile_f16`]）。
     /// f32 版 [`Self::tiled_cache`] と同じ設計判断（候補構成は有限個のため
@@ -308,8 +366,9 @@ pub struct MetalGemm {
     /// `#[cfg(test)]` の [`Self::source_specialized_cache_len`]／
     /// [`Self::function_constant_cache_len`] が「実際にどちらの経路が
     /// 走ったか」を検証するために参照する。
-    tiled_spec_cache:
-        Mutex<HashMap<(TileConfig, TransposePattern), objc2::rc::Retained<MtlPipeline>>>,
+    tiled_spec_cache: Mutex<
+        HashMap<(TileConfig, TransposePattern, tile::TileClass), objc2::rc::Retained<MtlPipeline>>,
+    >,
     /// フラグメントロード方式候補（イシュー #1293）をこのインスタンスの
     /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]）で
     /// どう有効化するか。`swizzle_enabled`/`fine_barrier_enabled`/
@@ -345,6 +404,21 @@ pub struct MetalGemm {
     /// `tile::select` への組み込み判断は行わない**（後続イシュー #1300／
     /// #1302／#1304 のスコープ）。
     coop_load: tile::CoopLoadConfig,
+    /// タイルクラス分割（イシュー #1327・E6 試作）をこのインスタンスの
+    /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]・
+    /// [`Self::encode_tiled_by_class`]）で有効化するかどうか。
+    /// `swizzle_enabled`/`fine_barrier_enabled`/`unroll_acc_enabled`/
+    /// `source_specialized`/`frag_load`/`coop_load` と同じ設計判断
+    /// （instance フィールド化により base（`TileClassMode::Legacy`。既定）/
+    /// head（`TileClassMode::Split`）の 2 `MetalGemm` を同一プロセス内に
+    /// 構築して bit 一致を自己検証できるようにする）。`MetalGemm::new` は
+    /// 本番既定 `tile::TILE_CLASS_MODE`（`Legacy`）を渡すため既定挙動は
+    /// 不変。[`Self::pipeline_for_tile_f16`] には常に `TileClass::Legacy`
+    /// のみを渡す no-op 契約（呼び出し側コメント参照）。本 sub-issue
+    /// （#1327）は機構の実装と bit 一致の自己検証のみを行い、性能実測・
+    /// `tile::select` への組み込み判断は行わない（兄弟イシュー #1328 の
+    /// スコープ）。
+    tile_class_mode: tile::TileClassMode,
 }
 
 /// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
@@ -421,6 +495,7 @@ impl MetalGemm {
             tile::SOURCE_SPECIALIZATION_ENABLED,
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
+            tile::TILE_CLASS_MODE,
         )
     }
 
@@ -459,6 +534,7 @@ impl MetalGemm {
             tile::SOURCE_SPECIALIZATION_ENABLED,
             frag_load,
             tile::COOP_LOAD_CONFIG,
+            tile::TILE_CLASS_MODE,
         )
     }
 
@@ -492,6 +568,7 @@ impl MetalGemm {
             tile::SOURCE_SPECIALIZATION_ENABLED,
             tile::FRAG_LOAD_CONFIG,
             coop_load,
+            tile::TILE_CLASS_MODE,
         )
     }
 
@@ -501,6 +578,49 @@ impl MetalGemm {
     #[cfg(test)]
     pub(crate) fn coop_load(&self) -> tile::CoopLoadConfig {
         self.coop_load
+    }
+
+    /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の 1
+    /// dispatch を内部タイル／端タイルの 2 クラスへ分割する機構
+    /// （イシュー #1327・E6 試作）を明示的な `tile_class_mode` 引数で
+    /// 指定する。実機 `#[ignore]` bit 一致自己検証テスト・兄弟イシュー
+    /// #1328 の性能実測専用の入口: 同一プロセス内で base
+    /// （`tile::TILE_CLASS_MODE`＝`Legacy`。既定）/head（`TileClassMode::
+    /// Split`）の 2 インスタンスを構築して比較する（[`Self::
+    /// new_with_coop_load`] と同型の設計）。他 6 フラグ（threadgroup ID
+    /// スウィズル・simdgroup 細粒度同期・条件付き loop unroll・ソース
+    /// テキスト特殊化・フラグメントロード方式候補・協調ロードレイアウト
+    /// 候補）は本番既定のまま据え置く。本番経路（[`Self::new`]）は常に
+    /// `tile::TILE_CLASS_MODE`（`Legacy`）を渡すため、本関数の追加自体は
+    /// 既定挙動を変えない。性能実測・`tile::select` への組み込み判断は
+    /// 行わない（兄弟イシュー #1328 のスコープ）。
+    ///
+    /// `pub` にする理由は [`Self::new_with_coop_load`] doc comment と同じ
+    /// （`tile::TileClassMode` を `pub` にしている以上、本関数も少なくとも
+    /// 同じ可視性が必要。`pub(crate)` のまま `#[cfg(test)]` を付けない
+    /// 場合の dead_code 検査抵触も同型）。
+    pub fn new_with_tile_class(
+        ctx: &MetalContext,
+        tile_class_mode: tile::TileClassMode,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            tile::FINE_BARRIER_ENABLED,
+            tile::UNROLL_ACC_ENABLED,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
+            tile::FRAG_LOAD_CONFIG,
+            tile::COOP_LOAD_CONFIG,
+            tile_class_mode,
+        )
+    }
+
+    /// テスト専用: このインスタンスが保持する [`tile::TileClassMode`] を
+    /// 取得する（実機 `#[ignore]` テストが base/head インスタンスの構成を
+    /// 突き合わせる用途。イシュー #1327）。
+    #[cfg(test)]
+    pub(crate) fn tile_class_mode(&self) -> tile::TileClassMode {
+        self.tile_class_mode
     }
 
     /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の
@@ -528,6 +648,7 @@ impl MetalGemm {
             source_specialized,
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
+            tile::TILE_CLASS_MODE,
         )
     }
 
@@ -554,6 +675,7 @@ impl MetalGemm {
             tile::SOURCE_SPECIALIZATION_ENABLED,
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
+            tile::TILE_CLASS_MODE,
         )
     }
 
@@ -579,6 +701,7 @@ impl MetalGemm {
             tile::SOURCE_SPECIALIZATION_ENABLED,
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
+            tile::TILE_CLASS_MODE,
         )
     }
 
@@ -592,7 +715,12 @@ impl MetalGemm {
     /// A/B 計測の対象軸が異なるだけで構築手順自体は独立のため、3 フラグを
     /// 引数に持つ 1 実装へ集約する（各専用入口が個別に構築ロジックを
     /// 複製すると、パイプライン構築手順の変更時に複数箇所を同期させる
-    /// 必要が生じるため）。
+    /// 必要が生じるため）。イシュー #1327 で `tile_class_mode` 引数
+    /// （`TILE_CLASS`。index 15）を追加したため 8 引数となり
+    /// `clippy::too_many_arguments` を明示的に許容する（既存の設計判断
+    /// 〈構築手順を単一実装へ集約する〉を優先し、構造体化はしない。
+    /// `GemmGateConstants`/`SpecializationParams` 側は既に構造体化済み）。
+    #[allow(clippy::too_many_arguments)]
     fn new_with_gates(
         ctx: &MetalContext,
         swizzle_enabled: bool,
@@ -601,6 +729,7 @@ impl MetalGemm {
         source_specialized: bool,
         frag_load: tile::FragLoadConfig,
         coop_load: tile::CoopLoadConfig,
+        tile_class_mode: tile::TileClassMode,
     ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -635,6 +764,7 @@ impl MetalGemm {
             tiled_spec_cache: Mutex::new(HashMap::new()),
             frag_load,
             coop_load,
+            tile_class_mode,
         })
     }
 
@@ -678,6 +808,7 @@ impl MetalGemm {
         ctx: &MetalContext,
         cfg: TileConfig,
         pattern: TransposePattern,
+        tile_class: tile::TileClass,
     ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
         let mut last_err: Option<MetalError> = None;
 
@@ -696,7 +827,7 @@ impl MetalGemm {
         };
 
         for candidate in tile::fallback_chain(cfg) {
-            if let Some(pipeline) = lock_tile_cache(cache)?.get(&(candidate, pattern)) {
+            if let Some(pipeline) = lock_tile_cache(cache)?.get(&(candidate, pattern, tile_class)) {
                 return Ok((Retained::clone(pipeline), candidate));
             }
 
@@ -735,6 +866,7 @@ impl MetalGemm {
                 frag_load_ksteps: self.frag_load.ksteps.as_u32(),
                 tgp_pad_elems,
                 coop_load_layout: self.coop_load.layout.as_u32(),
+                tile_class: tile_class.as_u32(),
             };
             let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
             let build_result = if self.source_specialized {
@@ -762,7 +894,7 @@ impl MetalGemm {
                         continue;
                     }
                     lock_tile_cache(cache)?
-                        .insert((candidate, pattern), Retained::clone(&pipeline));
+                        .insert((candidate, pattern, tile_class), Retained::clone(&pipeline));
                     return Ok((pipeline, candidate));
                 }
                 Err(err) => {
@@ -775,6 +907,168 @@ impl MetalGemm {
         Err(last_err.unwrap_or(MetalError::PipelineCreation {
             message: "no tile configuration in fallback chain was accepted".to_string(),
         }))
+    }
+
+    /// タイルクラス分割（イシュー #1327・E6 試作）を適用した NN/NT/TN/TT
+    /// 共通の tiled GEMM dispatch。[`Self::dispatch_tiled_prepared`]・
+    /// [`Self::dispatch_strided_tiled_prepared`]・[`Self::dispatch_variant`]
+    /// （`SimdgroupTiled` 分岐）の 3 入口が共有するヘルパー（重複実装を
+    /// 避ける）。
+    ///
+    /// `self.tile_class_mode` で分岐する:
+    ///
+    /// 1. [`tile::TileClassMode::Legacy`]（本番既定）: 従来どおり
+    ///    [`Self::pipeline_for_tile`] を [`tile::TileClass::Legacy`] で 1 回
+    ///    呼び、恒等領域（grid 全体）で 1 回だけ dispatch する（既存挙動と
+    ///    完全に同一）。
+    /// 2. [`tile::TileClassMode::Split`]: まず Edge クラスでパイプラインを
+    ///    解決し（`resolved_cfg` を確定）、続けてその `resolved_cfg` を
+    ///    起点に Interior クラスを要求する（`tile::fallback_chain` は
+    ///    渡した構成自身を先頭に持つため、両者が同じデバイス制約下にある
+    ///    限り同一候補で解決される契約）。**両者の解決構成が一致しない
+    ///    場合は fail-closed に [`tile::TileClassMode::Legacy`] 単一
+    ///    dispatch へフォールバックする**（`TILE_CLASS_SPLIT_FALLBACK_COUNT`
+    ///    で可観測。エラーにはしない）。一致した場合は
+    ///    `tile::tile_class_plan` が求めた領域（互いに素・grid 全体を
+    ///    過不足なく被覆する。`tile.rs` の網羅テスト参照）ごとに、
+    ///    Interior（存在すれば）→ Edge（右ストリップ・下ストリップの順）
+    ///    で `encode_dispatch_tiled` を呼ぶ。領域は互いに素なので dispatch
+    ///    順序は出力に影響しない。
+    #[allow(clippy::too_many_arguments)]
+    fn encode_tiled_by_class(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        c_buf: &MetalBuffer,
+        dims: Dims,
+        cfg: TileConfig,
+        strides: GemmStrides,
+        pattern: TransposePattern,
+    ) -> Result<TileConfig, MetalError> {
+        if self.tile_class_mode == tile::TileClassMode::Legacy {
+            let (pipeline, resolved_cfg) =
+                self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Legacy)?;
+            let tiles_m = (dims.m as usize).div_ceil(resolved_cfg.bm as usize) as u32;
+            let tiles_n = (dims.n as usize).div_ceil(resolved_cfg.bn as usize) as u32;
+            let region = TileClassRegion::full_grid(tiles_m, tiles_n);
+            let tgp_pad_elems = self.coop_load.pad_elems(resolved_cfg);
+            ctx.dispatch_sync(|encoder| {
+                encode_dispatch_tiled(
+                    encoder,
+                    &pipeline,
+                    a_buf,
+                    a_offset,
+                    b_buf,
+                    b_offset,
+                    c_buf,
+                    dims,
+                    resolved_cfg,
+                    self.swizzle_enabled,
+                    strides,
+                    pattern,
+                    tgp_pad_elems,
+                    region,
+                );
+            })?;
+            return Ok(resolved_cfg);
+        }
+
+        // `TileClassMode::Split`: Edge クラスを先に解決し、その解決構成を
+        // 起点に Interior クラスを要求する。
+        let (edge_pipeline, edge_cfg) =
+            self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Edge)?;
+        let (interior_pipeline, interior_cfg) =
+            self.pipeline_for_tile(ctx, edge_cfg, pattern, tile::TileClass::Interior)?;
+
+        if interior_cfg != edge_cfg {
+            // 解決構成が食い違う場合は Legacy 単一 dispatch へ
+            // フォールバックする（fail-closed。設計上ほぼ起こらない
+            // ケース——`TileClass` はデバイス制約〈`validate`／共有メモリ
+            // 上限〉に影響しないため——だが、将来の拡張余地として明示的に
+            // 扱う）。
+            TILE_CLASS_SPLIT_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
+            let (pipeline, resolved_cfg) =
+                self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Legacy)?;
+            let tiles_m = (dims.m as usize).div_ceil(resolved_cfg.bm as usize) as u32;
+            let tiles_n = (dims.n as usize).div_ceil(resolved_cfg.bn as usize) as u32;
+            let region = TileClassRegion::full_grid(tiles_m, tiles_n);
+            let tgp_pad_elems = self.coop_load.pad_elems(resolved_cfg);
+            ctx.dispatch_sync(|encoder| {
+                encode_dispatch_tiled(
+                    encoder,
+                    &pipeline,
+                    a_buf,
+                    a_offset,
+                    b_buf,
+                    b_offset,
+                    c_buf,
+                    dims,
+                    resolved_cfg,
+                    self.swizzle_enabled,
+                    strides,
+                    pattern,
+                    tgp_pad_elems,
+                    region,
+                );
+            })?;
+            return Ok(resolved_cfg);
+        }
+
+        let resolved_cfg = edge_cfg;
+        let plan = tile::tile_class_plan(dims.m, dims.n, dims.k, resolved_cfg);
+        let tgp_pad_interior = self.coop_load.pad_elems(interior_cfg);
+        let tgp_pad_edge = self.coop_load.pad_elems(edge_cfg);
+        let swizzle_enabled = self.swizzle_enabled;
+
+        ctx.dispatch_sync(|encoder| {
+            if let Some(interior) = plan.interior
+                && !interior.is_empty()
+            {
+                TILE_CLASS_INTERIOR_DISPATCH_COUNT.with(|c| c.set(c.get() + 1));
+                encode_dispatch_tiled(
+                    encoder,
+                    &interior_pipeline,
+                    a_buf,
+                    a_offset,
+                    b_buf,
+                    b_offset,
+                    c_buf,
+                    dims,
+                    interior_cfg,
+                    swizzle_enabled,
+                    strides,
+                    pattern,
+                    tgp_pad_interior,
+                    interior.into(),
+                );
+            }
+            for edge in plan.edges.iter().flatten() {
+                if !edge.is_empty() {
+                    TILE_CLASS_EDGE_DISPATCH_COUNT.with(|c| c.set(c.get() + 1));
+                    encode_dispatch_tiled(
+                        encoder,
+                        &edge_pipeline,
+                        a_buf,
+                        a_offset,
+                        b_buf,
+                        b_offset,
+                        c_buf,
+                        dims,
+                        edge_cfg,
+                        swizzle_enabled,
+                        strides,
+                        pattern,
+                        tgp_pad_edge,
+                        (*edge).into(),
+                    );
+                }
+            }
+        })?;
+
+        Ok(resolved_cfg)
     }
 
     /// [`TileConfig`] 候補に対する `gemm_simdgroup_tiled_f16`
@@ -844,6 +1138,11 @@ impl MetalGemm {
                 frag_load_ksteps: tile::FragLoadConfig::DEFAULT.ksteps.as_u32(),
                 tgp_pad_elems: candidate.pad(),
                 coop_load_layout: 0,
+                // イシュー #1327: f16 経路はタイルクラス分割
+                // （`TILE_CLASS`）を一切参照しないため常に `0`
+                // （`TileClass::Legacy`）を渡す no-op 契約（他ゲートと
+                // 同じ扱い）。
+                tile_class: 0,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -914,7 +1213,7 @@ impl MetalGemm {
         ctx: &MetalContext,
         cfg: TileConfig,
     ) -> Result<TileConfig, MetalError> {
-        self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn)
+        self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn, tile::TileClass::Legacy)
             .map(|(_, resolved)| resolved)
     }
 
@@ -928,7 +1227,7 @@ impl MetalGemm {
         cfg: TileConfig,
         pattern: TransposePattern,
     ) -> Result<TileConfig, MetalError> {
-        self.pipeline_for_tile(ctx, cfg, pattern)
+        self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Legacy)
             .map(|(_, resolved)| resolved)
     }
 
@@ -952,7 +1251,8 @@ impl MetalGemm {
         cfg: TileConfig,
         pattern: TransposePattern,
     ) -> Result<TilePipelineReflectionDiag, MetalError> {
-        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, pattern)?;
+        let (pipeline, resolved_cfg) =
+            self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Legacy)?;
         Ok(TilePipelineReflectionDiag {
             requested_cfg: cfg,
             resolved_cfg,
@@ -1224,26 +1524,21 @@ impl MetalGemm {
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
         validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
 
-        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn)?;
-        ctx.dispatch_sync(|encoder| {
-            encode_dispatch_tiled(
-                encoder,
-                &pipeline,
-                a_buf,
-                0,
-                b_buf,
-                0,
-                c_buf,
-                dims,
-                resolved_cfg,
-                self.swizzle_enabled,
-                GemmStrides::nn(dims.k, dims.n),
-                TransposePattern::Nn,
-                self.coop_load.pad_elems(resolved_cfg),
-            );
-        })?;
-
-        Ok(resolved_cfg)
+        // イシュー #1327: タイルクラス分割（`self.tile_class_mode`）を
+        // 適用した共通ヘルパーへ委譲する。`TileClassMode::Legacy`（本番
+        // 既定）では従来の 1 回 dispatch と完全に同一の挙動になる。
+        self.encode_tiled_by_class(
+            ctx,
+            a_buf,
+            0,
+            b_buf,
+            0,
+            c_buf,
+            dims,
+            cfg,
+            GemmStrides::nn(dims.k, dims.n),
+            TransposePattern::Nn,
+        )
     }
 
     /// [`Self::dispatch_tiled_prepared`] と同じ NN 経路（`pipeline_for_tile`
@@ -1280,7 +1575,11 @@ impl MetalGemm {
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
         validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
 
-        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn)?;
+        let (pipeline, resolved_cfg) =
+            self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn, tile::TileClass::Legacy)?;
+        let tiles_m = (dims.m as usize).div_ceil(resolved_cfg.bm as usize) as u32;
+        let tiles_n = (dims.n as usize).div_ceil(resolved_cfg.bn as usize) as u32;
+        let region = TileClassRegion::full_grid(tiles_m, tiles_n);
         ctx.encode(
             "diag_encode_tiled_nn",
             &[a_buf.raw(), b_buf.raw(), c_buf.raw()],
@@ -1300,6 +1599,7 @@ impl MetalGemm {
                     GemmStrides::nn(dims.k, dims.n),
                     TransposePattern::Nn,
                     self.coop_load.pad_elems(resolved_cfg),
+                    region,
                 );
             },
         )?;
@@ -1351,24 +1651,12 @@ impl MetalGemm {
         strided_tiled_eligibility(m, n, k, a_layout, a_offset, b_layout, b_offset)?;
 
         let pattern = TransposePattern::from_flags(a_layout.transposed, b_layout.transposed);
-        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, pattern)?;
-        ctx.dispatch_sync(|encoder| {
-            encode_dispatch_tiled(
-                encoder,
-                &pipeline,
-                a_buf,
-                a_offset,
-                b_buf,
-                b_offset,
-                c_buf,
-                dims,
-                resolved_cfg,
-                self.swizzle_enabled,
-                strides,
-                pattern,
-                self.coop_load.pad_elems(resolved_cfg),
-            );
-        })?;
+        // イシュー #1327: タイルクラス分割（`self.tile_class_mode`）を
+        // 適用した共通ヘルパーへ委譲する（`dispatch_tiled_prepared` と
+        // 同じ設計判断）。
+        let resolved_cfg = self.encode_tiled_by_class(
+            ctx, a_buf, a_offset, b_buf, b_offset, c_buf, dims, cfg, strides, pattern,
+        )?;
 
         STRIDED_TILED_ROUTE_COUNT.with(|c| c.set(c.get() + 1));
 
@@ -2039,25 +2327,21 @@ impl MetalGemm {
 
         match variant {
             GemmVariant::SimdgroupTiled(cfg) => {
-                let (pipeline, resolved_cfg) =
-                    self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn)?;
-                ctx.dispatch_sync(|encoder| {
-                    encode_dispatch_tiled(
-                        encoder,
-                        &pipeline,
-                        &a_buf,
-                        0,
-                        &b_buf,
-                        0,
-                        &c_buf,
-                        dims,
-                        resolved_cfg,
-                        self.swizzle_enabled,
-                        GemmStrides::nn(dims.k, dims.n),
-                        TransposePattern::Nn,
-                        self.coop_load.pad_elems(resolved_cfg),
-                    );
-                })?;
+                // イシュー #1327: タイルクラス分割（`self.tile_class_mode`）
+                // を適用した共通ヘルパーへ委譲する
+                // （`dispatch_tiled_prepared` と同じ設計判断）。
+                self.encode_tiled_by_class(
+                    ctx,
+                    &a_buf,
+                    0,
+                    &b_buf,
+                    0,
+                    &c_buf,
+                    dims,
+                    cfg,
+                    GemmStrides::nn(dims.k, dims.n),
+                    TransposePattern::Nn,
+                )?;
             }
             fixed_variant => {
                 let pipeline = self.pipeline_for(fixed_variant);
@@ -2781,6 +3065,13 @@ fn encode_dispatch_tiled(
     strides: GemmStrides,
     pattern: TransposePattern,
     tgp_pad_elems: u32,
+    // イシュー #1327（E6 試作）: タイルクラス分割時の担当領域（threadgroup
+    // dispatch grid 上のタイル座標矩形）。`region` に応じて grid を
+    // `region.cols`×`region.rows`（`tiles_n`/`tiles_m` 全体ではなく）で
+    // 張り、`shaders/gemm.metal::TileClassRegion`（buffer(5)）へ常に
+    // `setBytes` する（`TILE_CLASS==0`＝Legacy でも未バインド参照を作らない
+    // ため。カーネル側は Legacy では region を一切参照しない no-op）。
+    region: TileClassRegion,
 ) {
     encoder.setComputePipelineState(pipeline);
 
@@ -2810,6 +3101,13 @@ fn encode_dispatch_tiled(
             std::ptr::NonNull::from(&strides).cast(),
             std::mem::size_of::<GemmStrides>(),
             4,
+        );
+        // イシュー #1327: `region` は `TILE_CLASS==0`（Legacy）でも常に
+        // バインドする（上記関数ドキュメンテーションコメント参照）。
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&region).cast(),
+            std::mem::size_of::<TileClassRegion>(),
+            5,
         );
     }
 
@@ -2855,9 +3153,17 @@ fn encode_dispatch_tiled(
         height: 1,
         depth: 1,
     };
-    let tiles_n = (dims.n as usize).div_ceil(cfg.bn as usize);
-    let tiles_m = (dims.m as usize).div_ceil(cfg.bm as usize);
-    let (grid_w, grid_h) = crate::tile::tiled_dispatch_grid_with(tiles_n, tiles_m, swizzle_enabled);
+    // イシュー #1327: grid は `dims`/`cfg` から導出する全体タイル数では
+    // なく `region.cols`/`region.rows`（Legacy では常に全体と一致する
+    // 恒等領域）で張る。カーネル側のスウィズル変換は region ローカル
+    // 座標系（`[0, region.rows) × [0, region.cols)`）で行われ、その後
+    // `row_off`/`col_off` を加算する契約（`shaders/gemm.metal` の
+    // `TILE_CLASS` ガードのコメント参照）。
+    let (grid_w, grid_h) = crate::tile::tiled_dispatch_grid_with(
+        region.cols as usize,
+        region.rows as usize,
+        swizzle_enabled,
+    );
     let threadgroups = MTLSize {
         width: grid_w,
         height: grid_h,
@@ -4771,5 +5077,245 @@ mod tests {
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
         assert_eq!(gemm.coop_load(), tile::COOP_LOAD_CONFIG);
         assert_eq!(tile::COOP_LOAD_CONFIG, tile::CoopLoadConfig::DEFAULT);
+    }
+
+    // --- タイルクラス分割（イシュー #1327・E6 試作） ---
+
+    /// T1: [`tile::CANDIDATES`] 全 9 候補 × N∈{512,1024,2048,4096} で
+    /// base（`TileClassMode::Legacy`）/head（`TileClassMode::Split`）の
+    /// `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
+    /// （`coop_load_bit_match_all_candidates` と同型の設計）。staged 候補
+    /// （`CANDIDATES[7]`＝`SINGLE_SIMDGROUP_8X8`。`staged=false`）は
+    /// Interior/Edge どちらも direct-load へ縮退し `tile_class_plan` の
+    /// interior が構造上 0 面積になりうる形状もあるため、bit 一致のみを
+    /// 検証し空振り検査（インターカウンタ増加の assert）は他候補に限定
+    /// する。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn tile_class_split_bit_match_all_candidates() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_tile_class(&ctx, tile::TileClassMode::Legacy)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_tile_class(&ctx, tile::TileClassMode::Split)
+            .expect("head GEMM パイプラインの構築に失敗した");
+        assert_eq!(base_gemm.tile_class_mode(), tile::TileClassMode::Legacy);
+        assert_eq!(head_gemm.tile_class_mode(), tile::TileClassMode::Split);
+
+        const SEED: u64 = 0x1327C1A55;
+
+        for (i, cfg) in tile::CANDIDATES.iter().copied().enumerate() {
+            for size in [512usize, 1024, 2048, 4096] {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                let a = rng.fill_vec(size * size);
+                let b = rng.fill_vec(size * size);
+
+                let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                    .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                    .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let base_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                    .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+                let head_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                    .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+                let interior_before = TILE_CLASS_INTERIOR_DISPATCH_COUNT.with(|c| c.get());
+                let fallback_before = TILE_CLASS_SPLIT_FALLBACK_COUNT.with(|c| c.get());
+
+                base_gemm
+                    .dispatch_tiled_prepared(
+                        &ctx,
+                        &a_buf,
+                        &b_buf,
+                        &base_c_buf,
+                        size,
+                        size,
+                        size,
+                        cfg,
+                    )
+                    .expect(
+                        "base GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+                head_gemm
+                    .dispatch_tiled_prepared(
+                        &ctx,
+                        &a_buf,
+                        &b_buf,
+                        &head_c_buf,
+                        size,
+                        size,
+                        size,
+                        cfg,
+                    )
+                    .expect(
+                        "head GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+
+                let fallback_after = TILE_CLASS_SPLIT_FALLBACK_COUNT.with(|c| c.get());
+                assert_eq!(
+                    fallback_before, fallback_after,
+                    "index={i} size={size}: Split 経路が Legacy フォールバックへ\
+                     縮退した（Interior/Edge の解決構成が食い違っている疑い）"
+                );
+
+                if cfg.staged {
+                    let interior_after = TILE_CLASS_INTERIOR_DISPATCH_COUNT.with(|c| c.get());
+                    assert!(
+                        interior_after > interior_before,
+                        "index={i} size={size}: staged 候補で内部タイル（Interior）dispatch\
+                         が 1 回も起動しなかった（空振り検査）"
+                    );
+                }
+
+                let base_bits: Vec<u32> = base_c_buf
+                    .read_to_vec()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+                let head_bits: Vec<u32> = head_c_buf
+                    .read_to_vec()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+                assert_eq!(
+                    base_bits, head_bits,
+                    "index={i} size={size}: タイルクラス分割（Split）の有無により出力が\
+                     ビット単位で一致しなかった。演算オペランド列が変わっている疑いが\
+                     あるため、shaders/gemm.metal の TILE_CLASS 分岐箇所を確認すること。"
+                );
+            }
+        }
+    }
+
+    /// T2: 端あり形状（8 の倍数だが `BM`/`BN`/`BK` の倍数でない、または
+    /// `K` が `BK` の倍数でない）× 全候補で base/head の bit 一致を
+    /// 確認する（イシュー #1327）。形状ごとの領域構成（interior 有無・
+    /// edge 数）を `tile::tile_class_plan` から事前に求め、実際の
+    /// dispatch カウンタ差分と整合することも確認する（空振り検査）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn tile_class_split_bit_match_edge_shapes() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_tile_class(&ctx, tile::TileClassMode::Legacy)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_tile_class(&ctx, tile::TileClassMode::Split)
+            .expect("head GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0x1327ED6E;
+        let shapes: &[(usize, usize, usize)] = &[
+            (1032, 1048, 1032),
+            (1040, 1056, 1024),
+            (1032, 1024, 1024),
+            (1024, 1032, 1024),
+            (8, 8, 8),
+            (64, 64, 4096),
+        ];
+
+        for (i, cfg) in tile::CANDIDATES.iter().copied().enumerate() {
+            for &(m, n, k) in shapes {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                let a = rng.fill_vec(m * k);
+                let b = rng.fill_vec(k * n);
+
+                let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                    .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                    .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let base_c_buf = MetalBuffer::new_zeroed(&ctx, m * n)
+                    .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+                let head_c_buf = MetalBuffer::new_zeroed(&ctx, m * n)
+                    .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+                let base_resolved = base_gemm
+                    .dispatch_tiled_prepared(&ctx, &a_buf, &b_buf, &base_c_buf, m, n, k, cfg)
+                    .expect(
+                        "base GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+                head_gemm
+                    .dispatch_tiled_prepared(&ctx, &a_buf, &b_buf, &head_c_buf, m, n, k, cfg)
+                    .expect(
+                        "head GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+
+                let plan = tile::tile_class_plan(m as u32, n as u32, k as u32, base_resolved);
+                if plan.interior.is_none() {
+                    assert!(
+                        m % (base_resolved.bm as usize) != 0
+                            || n % (base_resolved.bn as usize) != 0
+                            || k % (base_resolved.bk as usize) != 0,
+                        "index={i} shape=({m},{n},{k}): interior が None なのに完全整列\
+                         している（tile_class_plan の分割規則が想定と食い違う）"
+                    );
+                }
+
+                let base_bits: Vec<u32> = base_c_buf
+                    .read_to_vec()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+                let head_bits: Vec<u32> = head_c_buf
+                    .read_to_vec()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+                assert_eq!(
+                    base_bits, head_bits,
+                    "index={i} shape=({m},{n},{k}): 端あり形状でタイルクラス分割の有無に\
+                     より出力がビット単位で一致しなかった。"
+                );
+            }
+        }
+    }
+
+    /// T3: 本番自動選択経路 `dispatch_auto` で N=512〜4096 の base/head
+    /// bit 一致を確認する（イシュー #1327）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn tile_class_split_bit_match_dispatch_auto() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_tile_class(&ctx, tile::TileClassMode::Legacy)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_tile_class(&ctx, tile::TileClassMode::Split)
+            .expect("head GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0x1327A0A0;
+
+        for size in [512usize, 1024, 2048, 4096] {
+            let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+            let a = rng.fill_vec(size * size);
+            let b = rng.fill_vec(size * size);
+
+            let base_out = base_gemm
+                .dispatch_auto(&ctx, &a, &b, size, size, size)
+                .expect("base GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+            let head_out = head_gemm
+                .dispatch_auto(&ctx, &a, &b, size, size, size)
+                .expect("head GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+
+            let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+            let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                base_bits, head_bits,
+                "size={size}: dispatch_auto 経路でタイルクラス分割の有無により出力が\
+                 ビット単位で一致しなかった。"
+            );
+        }
+    }
+
+    /// T6: f16 経路（`gemm_simdgroup_tiled_f16`）が `TileClassMode` に
+    /// 関わらず bit 一致する（no-op 契約の裏付け）ことと、
+    /// [`tile::TILE_CLASS_MODE`]（本番既定）が `Legacy` であり
+    /// `MetalGemm::new` が構築するインスタンスの `tile_class_mode()` も
+    /// 同じ値であることを実機上で固定する（イシュー #1327）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn tile_class_default_matches_production_constants() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+        assert_eq!(gemm.tile_class_mode(), tile::TILE_CLASS_MODE);
+        assert_eq!(tile::TILE_CLASS_MODE, tile::TileClassMode::Legacy);
     }
 }

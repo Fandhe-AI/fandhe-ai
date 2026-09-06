@@ -988,7 +988,7 @@ fn gemm_metal_source_declares_transpose_boundary_helpers() {
 /// 対応。#1298 で協調ロードレイアウト候補ゲート 1 個〈index 14〉が
 /// 追加され 14→15 へ増えた）が全て存在することをロックする。
 #[test]
-fn gemm_metal_source_declares_spec_ifdef_block_with_all_fifteen_defines() {
+fn gemm_metal_source_declares_spec_ifdef_block_with_all_sixteen_defines() {
     assert!(
         GEMM_METAL_SOURCE.contains("#ifdef GEMM_SPEC_ENABLED"),
         "gemm.metal に #ifdef GEMM_SPEC_ENABLED 分岐（イシュー #1288）が見つかりません"
@@ -1009,10 +1009,11 @@ fn gemm_metal_source_declares_spec_ifdef_block_with_all_fifteen_defines() {
         "constant bool FRAG_LOAD_DEVICE_HOISTED = GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED;",
         "constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;",
         "constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;",
+        "constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
-            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293/#1298）が見つかりません"
+            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293/#1298/#1327）が見つかりません"
         );
     }
 }
@@ -1024,7 +1025,7 @@ fn gemm_metal_source_declares_spec_ifdef_block_with_all_fifteen_defines() {
 /// `SOURCE_SPECIALIZATION_ENABLED` 既定 `false` の裏付け——`#else` 側が
 /// 変わっていなければ本番挙動は変わらない）。
 #[test]
-fn gemm_metal_source_else_branch_retains_all_fifteen_function_constants() {
+fn gemm_metal_source_else_branch_retains_all_sixteen_function_constants() {
     for needle in [
         "constant uint BM [[function_constant(0)]];",
         "constant uint BN [[function_constant(1)]];",
@@ -1041,11 +1042,12 @@ fn gemm_metal_source_else_branch_retains_all_fifteen_function_constants() {
         "constant bool FRAG_LOAD_DEVICE_HOISTED [[function_constant(12)]];",
         "constant uint FRAG_LOAD_KSTEPS [[function_constant(13)]];",
         "constant uint COOP_LOAD_LAYOUT [[function_constant(14)]];",
+        "constant uint TILE_CLASS [[function_constant(15)]];",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
             "gemm.metal の #else 側（本番既定）に function constant 宣言 `{needle}` が見つかりません。\
-             イシュー #1288/#1293/#1298 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
+             イシュー #1288/#1293/#1298/#1327 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
         );
     }
 }
@@ -1196,5 +1198,73 @@ fn gemm_simdgroup_tiled_f16_source_does_not_reference_frag_load_candidates() {
     assert!(
         !kernel_body.contains("FRAG_LOAD_KSTEPS"),
         "gemm_simdgroup_tiled_f16 が FRAG_LOAD_KSTEPS を参照しています（イシュー #1293 のスコープ外）"
+    );
+}
+
+/// イシュー #1327（E6 試作）の証跡: `gemm_simdgroup_tiled` の staged/
+/// direct-load 選択が `if (USE_TGP_STAGING) {` の直接記述から
+/// `const bool staging_active = (TILE_CLASS == 0) ? USE_TGP_STAGING :
+/// (TILE_CLASS == 2);` ＋ `if (staging_active) {` へ置き換わっており、
+/// 旧記述が本体から消えていることをロックする（2 ブロック本体〈境界
+/// チェックを含む〉自体は複製・変更していない契約の裏付け）。
+#[test]
+fn gemm_simdgroup_tiled_source_gates_tile_class_behind_function_constant() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    let predicate_needle =
+        "const bool staging_active = (TILE_CLASS == 0) ? USE_TGP_STAGING : (TILE_CLASS == 2);";
+    assert_eq!(
+        kernel_body.matches(predicate_needle).count(),
+        1,
+        "gemm_simdgroup_tiled に `{predicate_needle}`（イシュー #1327）が想定回数（1）存在しません"
+    );
+    assert_eq!(
+        kernel_body.matches("if (staging_active) {").count(),
+        1,
+        "gemm_simdgroup_tiled に `if (staging_active) {{}}`（イシュー #1327）が想定回数（1）存在しません"
+    );
+    assert_eq!(
+        kernel_body.matches("if (USE_TGP_STAGING) {").count(),
+        0,
+        "gemm_simdgroup_tiled に旧記述 `if (USE_TGP_STAGING) {{}}` がまだ残っています（イシュー #1327 で staging_active へ置き換える契約）"
+    );
+}
+
+/// イシュー #1327（E6 試作）の証跡: タイルクラス領域ガード
+/// （`if (tid_y >= region.rows || tid_x >= region.cols) { return; }`）が
+/// `row0 = tid_y * BM;`（担当ブロック原点の算出）より前に存在することを
+/// ロックする（領域外 threadgroup を row0/col0 算出前に弾く契約）。
+#[test]
+fn gemm_simdgroup_tiled_source_retains_region_guard_before_offset() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    let guard_needle = "if (tid_y >= region.rows || tid_x >= region.cols) {";
+    let guard_pos = kernel_body.find(guard_needle).unwrap_or_else(|| {
+        panic!("gemm_simdgroup_tiled に `{guard_needle}`（イシュー #1327）が見つかりません")
+    });
+    let row0_pos = kernel_body
+        .find("uint row0 = tid_y * BM;")
+        .unwrap_or_else(|| {
+            panic!("gemm_simdgroup_tiled に `uint row0 = tid_y * BM;` が見つかりません")
+        });
+    assert!(
+        guard_pos < row0_pos,
+        "タイルクラス領域ガード（イシュー #1327）が row0 算出より後ろに置かれています"
+    );
+}
+
+/// イシュー #1327 の証跡: `gemm_simdgroup_tiled_f16` は `TILE_CLASS`/
+/// `region` のいずれも参照しない（`crate::gemm::MetalGemm::
+/// pipeline_for_tile_f16` が常に `TileClass::Legacy`（`0`）を渡す no-op
+/// 契約。`UNROLL_ACC_ENABLED`/`FRAG_LOAD_*` と同型の設計判断）ことを
+/// ロックする。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_does_not_reference_tile_class() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    assert!(
+        !kernel_body.contains("TILE_CLASS"),
+        "gemm_simdgroup_tiled_f16 が TILE_CLASS を参照しています（イシュー #1327 のスコープ外）"
+    );
+    assert!(
+        !kernel_body.contains("region."),
+        "gemm_simdgroup_tiled_f16 が region を参照しています（イシュー #1327 のスコープ外）"
     );
 }

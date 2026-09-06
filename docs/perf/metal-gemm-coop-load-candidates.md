@@ -237,3 +237,11 @@ fandhe-ai-backend-metal` 実行で確認〉、少なくとも非 ignore 経路�
   経路のみ。f16 は no-op 契約）。
 - 実機（Metal・Apple Silicon）での T1〜T6 の実行・非後退確認（§3 参照。
   実機アクセスを持つ後続セッションへ引き継ぐ）。
+
+## 追記（イシュー #1327・E6 試作）
+
+index 15 は「未割当」のまま残すとした上記の記述は、イシュー #1327 で
+`TILE_CLASS`（タイルクラス分割ゲート。内部タイル direct load／端タイル
+staged の 2 クラス経路 opt-in 機構）へ割り当てられた（詳細は
+`docs/perf/metal-gemm-tile-class-split.md`）。バンク競合回避（XOR
+swizzle）軸を将来実装する場合は index 16 以降を使うこと。
