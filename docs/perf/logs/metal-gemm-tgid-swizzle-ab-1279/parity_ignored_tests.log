@@ -1,0 +1,669 @@
+warning: unused import: `crate::context_cache`
+  --> crates/backend-cuda/src/gemm_mma.rs:21:5
+   |
+21 | use crate::context_cache;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:801:48
+    |
+801 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:814:8
+    |
+803 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+814 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:259:19
+    |
+239 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+259 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:651:19
+    |
+457 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+651 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+666 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 25 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
+   Compiling fandhe-ai-backend-metal v0.7.0 (<repo-worktree>/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_metal-4099ec6cfdfe79eb)
+
+running 22 tests
+probe_soc_brand_string() = Some("Apple M4 Max")
+test device::tests::probe_soc_brand_string_returns_apple_prefixed_value_on_apple_silicon ... ok
+probe_gpu_core_count() = Some(40)
+test device::tests::probe_gpu_core_count_returns_positive_value_on_apple_silicon ... ok
+MetalOccupancyInfo = MetalOccupancyInfo { gpu_core_count: Some(40), max_threadgroup_memory_bytes: 32768 }
+test device::tests::metal_occupancy_info_reports_smem_upper_bound_at_least_32kib ... ok
+test context_cache::tests::cached_context_returns_same_instance_across_calls ... ok
+test memory::tests::pooled_alloc_zeroed_records_logical_bytes_via_shared_context ... ok
+test context_cache::tests::cached_gemm_returns_same_instance_across_calls ... ok
+test gemm::tests::run_tiled_bias_act_f32_k_zero_does_not_increment_fused_launch_counter ... ok
+test tile::tests::direct_load_path_config_resolves_without_fallback ... ok
+test tile::tests::all_tile_candidates_validate_under_actual_device_shared_memory_limit ... ok
+test tile::tests::dispatch_f16_auto_tile_select_shapes_resolve_without_fallback ... ok
+test tile::tests::all_tile_candidates_resolve_without_fallback_for_every_transpose_pattern ... ok
+test gemm::tests::run_tiled_bias_act_f32_increments_fused_launch_counter ... ok
+test ops::tests::gemm_tt_both_transposed_increments_repack_counter_twice ... ok
+test ops::tests::gemm_resident_lhs_transposed_b_does_not_increment_repack_counter ... ok
+test ops::tests::gemm_tn_transposed_a_does_not_increment_repack_counter ... ok
+test ops::tests::gemm_nt_transposed_b_does_not_increment_repack_counter ... ok
+  trial 0: commit_wait=1.3281ms kernel_gpu=1.0362ms (commit_wait-kernel_gpu=0.2919ms)
+test tile::tests::all_tile_candidates_match_cpu_reference_f16_tiled_non_multiple_boundary_shape ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_non_multiple_boundary_shape ... ok
+  trial 1: commit_wait=1.2767ms kernel_gpu=1.0294ms (commit_wait-kernel_gpu=0.2473ms)
+  trial 2: commit_wait=1.2571ms kernel_gpu=1.0416ms (commit_wait-kernel_gpu=0.2155ms)
+  trial 3: commit_wait=1.2223ms kernel_gpu=1.0428ms (commit_wait-kernel_gpu=0.1794ms)
+  trial 4: commit_wait=1.2718ms kernel_gpu=1.0526ms (commit_wait-kernel_gpu=0.2192ms)
+test gemm_reuse_phase_diag_tests::gpu_timestamps_within_commit_wait_window ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_medium_shape ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape ... ok
+  N=1024 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.2272 ms  q1=0.2222 ms  q3=0.2385 ms
+    upload_b: median=0.2263 ms  q1=0.2105 ms  q3=0.2350 ms
+    alloc_c: median=0.0001 ms  q1=0.0001 ms  q3=0.0001 ms
+    encode: median=0.0039 ms  q1=0.0030 ms  q3=0.0044 ms
+    commit_wait: median=1.2510 ms  q1=1.2219 ms  q3=1.2588 ms
+    commit_wait.kernel_gpu: median=1.0246 ms  q1=1.0234 ms  q3=1.0271 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2172 ms
+    readback: median=0.0647 ms  q1=0.0550 ms  q3=0.0845 ms
+    host_copy: median=0.2237 ms  q1=0.2161 ms  q3=0.2290 ms
+    sum of medians: 1.9967 ms
+  N=2048 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.9596 ms  q1=0.9143 ms  q3=0.9894 ms
+    upload_b: median=0.9460 ms  q1=0.8900 ms  q3=0.9898 ms
+    alloc_c: median=0.0003 ms  q1=0.0002 ms  q3=0.0005 ms
+    encode: median=0.0075 ms  q1=0.0056 ms  q3=0.0079 ms
+    commit_wait: median=2.2930 ms  q1=2.2225 ms  q3=2.8221 ms
+    commit_wait.kernel_gpu: median=1.7049 ms  q1=1.5954 ms  q3=2.1090 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.6305 ms
+    readback: median=0.2369 ms  q1=0.2317 ms  q3=0.2588 ms
+    host_copy: median=0.9108 ms  q1=0.8633 ms  q3=0.9395 ms
+    sum of medians: 5.3541 ms
+  N=4096 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.9517 ms  q1=3.7534 ms  q3=4.0754 ms
+    upload_b: median=4.0149 ms  q1=3.7503 ms  q3=4.3327 ms
+    alloc_c: median=0.0010 ms  q1=0.0008 ms  q3=0.0013 ms
+    encode: median=0.0191 ms  q1=0.0182 ms  q3=0.0231 ms
+    commit_wait: median=18.0766 ms  q1=16.7599 ms  q3=20.8471 ms
+    commit_wait.kernel_gpu: median=15.4271 ms  q1=13.7617 ms  q3=18.6874 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=2.6070 ms
+    readback: median=0.9351 ms  q1=0.9236 ms  q3=0.9694 ms
+    host_copy: median=3.7237 ms  q1=3.5326 ms  q3=3.7902 ms
+    sum of medians: 30.7220 ms
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_production_batch ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 233 filtered out; finished in 2.07s
+
+     Running tests/backend_ops_real_device.rs (target/release/deps/backend_ops_real_device-93d6f0492aba6a91)
+
+running 6 tests
+test ops_for_selects_metal_backend_and_matches_cpu ... ok
+test backend_ops_gemm_matches_cpu_mid_square_shape ... ok
+test backend_ops_gemm_matches_cpu_non_power_of_two_shape ... ok
+test backend_ops_gemm_matches_cpu_near_small_tile_threshold ... ok
+test backend_ops_gemm_matches_cpu_tall_and_wide_shapes ... ok
+test backend_ops_elementwise_matches_cpu ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.04s
+
+     Running tests/command_batching.rs (target/release/deps/command_batching-8d3e7947dff15ce9)
+
+running 5 tests
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ok
+test dependent_dispatches_in_one_batch_execute_in_order ... ok
+
+thread 'pool_reuse_zero_fill_does_not_synchronize_open_batch' (125545146) panicked at crates/backend-metal/tests/command_batching.rs:330:5:
+assertion `left == right` failed: alloc_zeroed 自体は encode() を呼ばない
+  left: 7
+ right: 6
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... FAILED
+test synchronize_after_auto_flush_at_limit ... ok
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ok
+
+failures:
+
+failures:
+    pool_reuse_zero_fill_does_not_synchronize_open_batch
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-metal --test command_batching`
+     Running tests/command_batching_bench.rs (target/release/deps/command_batching_bench-23e4af53648e80b9)
+
+running 2 tests
+
+thread 'pool_reuse_interleaved_with_tracked_steps_preserves_batching' (125545157) panicked at crates/backend-metal/tests/command_batching_bench.rs:287:5:
+assertion `left == right` failed: encode() は sgd_step_device_tracked 1 回につき 1 回のはず
+  left: 560
+ right: 50
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test pool_reuse_interleaved_with_tracked_steps_preserves_batching ... FAILED
+[command_batching_micro_bench] steps=100 numel=1024 untracked_median_s=0.014470 (q1=0.012586, q3=0.014905) tracked_median_s=0.000339 (q1=0.000331, q3=0.000459) speedup_x=42.737 tracked_faster=true — record only, non-gating（本ファイル冒頭コメント参照）
+test command_batching_micro_bench_untracked_vs_tracked ... ok
+
+failures:
+
+failures:
+    pool_reuse_interleaved_with_tracked_steps_preserves_batching
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-metal --test command_batching_bench`
+     Running tests/context_cache_bench.rs (target/release/deps/context_cache_bench-f63bb9f8c40253e1)
+
+running 2 tests
+test gemm_repeated_calls_are_deterministic_via_cache ... ok
+[context_cache_bench] cold_s=0.049234 warm_median_s=0.000175 (q1=0.000174, q3=0.000181) speedup_x=281.74 warm_faster=true — record only, non-gating（本ファイル冒頭コメント参照）
+test gemm_second_call_avoids_reconstruction_cost ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/cpu_metal_f16_parity.rs (target/release/deps/cpu_metal_f16_parity-6f9e7d6cbdd730a4)
+
+running 6 tests
+test f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs ... ok
+test f16_parity_baseline_8x8x8 ... ok
+test f16_dispatch_is_bit_deterministic_across_runs ... ok
+test f16_parity_boundary_shapes_non_multiple_of_eight ... ok
+test f16_parity_baseline_shape_512 ... ok
+test f16_k4096_stress ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/cpu_metal_f16_tiled_parity.rs (target/release/deps/cpu_metal_f16_tiled_parity-e88e941e91ab6b33)
+
+running 5 tests
+test f16_tiled_parity_boundary_shape_non_multiple_of_tile ... ok
+test f16_tiled_parity_direct_load_single_simdgroup_8x8 ... ok
+test f16_tiled_parity_matches_existing_8x8_kernel ... ok
+test f16_tiled_parity_staged_baseline_shape_512 ... ok
+test f16_tiled_k4096_stress ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/cpu_metal_parity.rs (target/release/deps/cpu_metal_parity-3c0eb7d58c6f5097)
+
+running 5 tests
+test falsification_injected_perturbation_is_detected ... ok
+test dispatch_is_bit_deterministic_across_runs ... ok
+test boundary_shapes_non_multiple_of_threadgroup ... ok
+test baseline_shape_512_matches_cpu_reference ... ok
+test k4096_stress_poc_v2_5 ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/device.rs (target/release/deps/device-a49ccd6e9786ddc4)
+
+running 1 test
+test select_metal_device_on_real_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+
+     Running tests/device_smoke.rs (target/release/deps/device_smoke-c0b85cb2a1966ffd)
+
+running 3 tests
+test zero_length_allocation_is_rejected ... ok
+test allocation_size_overflow_is_rejected ... ok
+test device_and_buffer_roundtrip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/dispatch_boundary.rs (target/release/deps/dispatch_boundary-cf310afca5618769)
+
+running 2 tests
+dispatch_boundary_route_record dim=256 min_dim_threshold=512 expected_kernel=Tiled route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=384 min_dim_threshold=512 expected_kernel=Tiled route_verified=false result=parity_pass
+dispatch_boundary_record dim=256 path=tiled tflops=0.102 report={"schema_version":"1","name":"gemm_tiled_dim256","backend":"metal","warmup":20,"iters":20,"median_secs":0.000327708,"q1_secs":0.000325708,"q3_secs":0.000334,"samples_secs":[0.000343125,0.000335416,0.000458,0.00033275,0.000327708,0.0003385,0.000334,0.000325708,0.000327416,0.000323333,0.00033175,0.000327708,0.000330458,0.00032375,0.000324667,0.000338625,0.00032625,0.0003245,0.000324541,0.00032575]}
+dispatch_boundary_route_record dim=448 min_dim_threshold=512 expected_kernel=Tiled route_verified=false result=parity_pass
+dispatch_boundary_record dim=256 path=simdgroup_auto tflops=0.125 report={"schema_version":"1","name":"gemm_dispatch_auto_dim256","backend":"metal","warmup":20,"iters":20,"median_secs":0.000267667,"q1_secs":0.000262416,"q3_secs":0.000270709,"samples_secs":[0.00027775,0.000270916,0.000270792,0.000262416,0.00026275,0.00026075,0.000268459,0.000264584,0.000261084,0.000261917,0.000264958,0.000269542,0.000271584,0.000267834,0.000261,0.000261875,0.000263917,0.000384333,0.000270709,0.000267667]}
+dispatch_boundary_record dim=256 simdgroup_auto_over_tiled=1.224
+dispatch_boundary_route_record dim=512 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=576 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+dispatch_boundary_record dim=384 path=tiled tflops=0.191 report={"schema_version":"1","name":"gemm_tiled_dim384","backend":"metal","warmup":20,"iters":20,"median_secs":0.000594208,"q1_secs":0.000586833,"q3_secs":0.00060275,"samples_secs":[0.000579291,0.000586833,0.00057225,0.000601041,0.000589584,0.000638084,0.000612667,0.000614208,0.000616375,0.000622958,0.00060275,0.000591083,0.000599,0.000594208,0.000589,0.000588625,0.000582833,0.00058625,0.000582584,0.000602625]}
+dispatch_boundary_record dim=384 path=simdgroup_auto tflops=0.302 report={"schema_version":"1","name":"gemm_dispatch_auto_dim384","backend":"metal","warmup":20,"iters":20,"median_secs":0.000375542,"q1_secs":0.000368625,"q3_secs":0.000378542,"samples_secs":[0.00037825,0.000429417,0.000368625,0.000371625,0.000379,0.000368,0.000375458,0.000367708,0.000373083,0.000376917,0.000378542,0.000363708,0.000375542,0.000366792,0.000389417,0.000623291,0.000403917,0.000370375,0.000362459,0.00037675]}
+dispatch_boundary_record dim=384 simdgroup_auto_over_tiled=1.582
+dispatch_boundary_route_record dim=640 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+dispatch_boundary_record dim=448 path=tiled tflops=0.228 report={"schema_version":"1","name":"gemm_tiled_dim448","backend":"metal","warmup":20,"iters":20,"median_secs":0.000790375,"q1_secs":0.000783084,"q3_secs":0.000801084,"samples_secs":[0.000773,0.000787542,0.000791041,0.000775417,0.00079425,0.000801084,0.000790375,0.000802667,0.000778916,0.000791542,0.000831959,0.000848459,0.000817,0.000788125,0.000784083,0.000781667,0.000778209,0.000784291,0.000783084,0.000833834]}
+dispatch_boundary_route_record dim=768 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+dispatch_boundary_record dim=448 path=simdgroup_auto tflops=0.415 report={"schema_version":"1","name":"gemm_dispatch_auto_dim448","backend":"metal","warmup":20,"iters":20,"median_secs":0.000433125,"q1_secs":0.000422542,"q3_secs":0.000435917,"samples_secs":[0.000448667,0.000436625,0.000436083,0.000570042,0.000433125,0.000437167,0.000433125,0.00042175,0.000435917,0.00042,0.000413208,0.000434166,0.000421292,0.000424875,0.000430791,0.00041975,0.000433166,0.0004235,0.000422542,0.000427459]}
+dispatch_boundary_record dim=448 simdgroup_auto_over_tiled=1.825
+dispatch_boundary_record dim=512 path=tiled tflops=0.255 report={"schema_version":"1","name":"gemm_tiled_dim512","backend":"metal","warmup":20,"iters":20,"median_secs":0.001051917,"q1_secs":0.001039833,"q3_secs":0.001065334,"samples_secs":[0.001040541,0.001065334,0.00107425,0.001215167,0.001042,0.001030042,0.001023125,0.001029209,0.001051917,0.001043375,0.0010665,0.001055917,0.001035041,0.001025084,0.001052791,0.001039833,0.001051542,0.001072666,0.001120833,0.0010635]}
+dispatch_boundary_record dim=512 path=simdgroup_auto tflops=0.473 report={"schema_version":"1","name":"gemm_dispatch_auto_dim512","backend":"metal","warmup":20,"iters":20,"median_secs":0.000567292,"q1_secs":0.000557042,"q3_secs":0.000576583,"samples_secs":[0.000559,0.000576583,0.000569583,0.000566417,0.000563084,0.000581333,0.000565875,0.000576916,0.000594334,0.001257625,0.000574083,0.000583458,0.000557042,0.000568375,0.000567292,0.000548958,0.000550917,0.000552084,0.000542583,0.000543583]}
+dispatch_boundary_record dim=512 simdgroup_auto_over_tiled=1.854
+dispatch_boundary_route_record dim=1024 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+test dispatch_backend_auto_matches_reference_at_boundary_shapes ... ok
+dispatch_boundary_record dim=576 path=tiled tflops=0.258 report={"schema_version":"1","name":"gemm_tiled_dim576","backend":"metal","warmup":20,"iters":20,"median_secs":0.001482625,"q1_secs":0.001466584,"q3_secs":0.001510583,"samples_secs":[0.001431916,0.001494375,0.001520291,0.001516333,0.001568583,0.001510583,0.001482625,0.001468875,0.001506833,0.001466584,0.001442041,0.001478167,0.001517084,0.001446875,0.001551375,0.001466833,0.001478334,0.001485292,0.001436833,0.001453791]}
+dispatch_boundary_record dim=576 path=simdgroup_auto tflops=0.557 report={"schema_version":"1","name":"gemm_dispatch_auto_dim576","backend":"metal","warmup":20,"iters":20,"median_secs":0.0006865,"q1_secs":0.000673458,"q3_secs":0.000696167,"samples_secs":[0.000755667,0.000669125,0.000736375,0.000690459,0.000671916,0.000660125,0.000669333,0.000696167,0.000692459,0.0006865,0.000678709,0.000683042,0.000673458,0.000679,0.000654291,0.000678875,0.000710666,0.000696584,0.000689375,0.000700917]}
+dispatch_boundary_record dim=576 simdgroup_auto_over_tiled=2.160
+dispatch_boundary_record dim=640 path=tiled tflops=0.279 report={"schema_version":"1","name":"gemm_tiled_dim640","backend":"metal","warmup":20,"iters":20,"median_secs":0.001879375,"q1_secs":0.001812958,"q3_secs":0.001891583,"samples_secs":[0.001795,0.001809875,0.001804958,0.001801291,0.001812958,0.001809792,0.001898042,0.001847,0.001837084,0.001958709,0.001849917,0.0018965,0.001881709,0.001887167,0.001879375,0.001884083,0.001891583,0.001893042,0.001895959,0.001877667]}
+dispatch_boundary_record dim=640 path=simdgroup_auto tflops=0.619 report={"schema_version":"1","name":"gemm_dispatch_auto_dim640","backend":"metal","warmup":20,"iters":20,"median_secs":0.0008465,"q1_secs":0.000832958,"q3_secs":0.000864625,"samples_secs":[0.000833917,0.0008725,0.0008465,0.000837625,0.000812291,0.000864625,0.000839708,0.000832958,0.000866875,0.000839834,0.000848791,0.000856958,0.000814875,0.000820916,0.000961792,0.00085675,0.000807958,0.000822292,0.00112975,0.000920875]}
+dispatch_boundary_record dim=640 simdgroup_auto_over_tiled=2.220
+dispatch_boundary_record dim=768 path=tiled tflops=0.504 report={"schema_version":"1","name":"gemm_tiled_dim768","backend":"metal","warmup":20,"iters":20,"median_secs":0.001797959,"q1_secs":0.001665041,"q3_secs":0.001990042,"samples_secs":[0.00201125,0.001969417,0.00204375,0.002038417,0.001990042,0.002050166,0.002065208,0.001878042,0.001797959,0.001796459,0.00175325,0.001816458,0.001746375,0.001637583,0.001665041,0.001644125,0.001682084,0.001662584,0.001545709,0.001498416]}
+dispatch_boundary_record dim=768 path=simdgroup_auto tflops=1.238 report={"schema_version":"1","name":"gemm_dispatch_auto_dim768","backend":"metal","warmup":20,"iters":20,"median_secs":0.000731584,"q1_secs":0.00071525,"q3_secs":0.000751792,"samples_secs":[0.0007625,0.000743209,0.000755167,0.000736291,0.000751792,0.00073825,0.00071525,0.000773042,0.000752916,0.000759417,0.000731209,0.000731584,0.000714959,0.000707959,0.000716333,0.000713833,0.000720166,0.000705417,0.000720791,0.000659333]}
+dispatch_boundary_record dim=768 simdgroup_auto_over_tiled=2.458
+dispatch_boundary_record dim=1024 path=tiled tflops=1.060 report={"schema_version":"1","name":"gemm_tiled_dim1024","backend":"metal","warmup":20,"iters":20,"median_secs":0.002026375,"q1_secs":0.002010125,"q3_secs":0.002052917,"samples_secs":[0.002010125,0.00203925,0.002088625,0.001993459,0.002013625,0.002058375,0.002013542,0.001985958,0.002016458,0.002035417,0.002087541,0.002030708,0.002021625,0.002058875,0.00209125,0.002052917,0.001958084,0.002026375,0.001990917,0.001999459]}
+dispatch_boundary_record dim=1024 path=simdgroup_auto tflops=1.985 report={"schema_version":"1","name":"gemm_dispatch_auto_dim1024","backend":"metal","warmup":20,"iters":20,"median_secs":0.001081875,"q1_secs":0.001067292,"q3_secs":0.001091833,"samples_secs":[0.001100959,0.001063833,0.001083833,0.001078792,0.001081875,0.001035042,0.0010755,0.001042708,0.001091833,0.001097917,0.001087792,0.00107175,0.001065291,0.001098834,0.001050584,0.001140791,0.001086375,0.001093375,0.001067292,0.001073167]}
+dispatch_boundary_record dim=1024 simdgroup_auto_over_tiled=1.873
+test boundary_shapes_tflops_record ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/elementwise_gemm_bias_act_source_evidence.rs (target/release/deps/elementwise_gemm_bias_act_source_evidence-e568d2b79486147e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/gemm_auto_parity.rs (target/release/deps/gemm_auto_parity-3c98f96bbd5a3422)
+
+running 3 tests
+test below_threshold_shape_matches_cpu_reference ... ok
+test threshold_boundary_511_and_512_both_match_cpu_reference ... ok
+test at_or_above_threshold_shape_matches_cpu_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/gemm_bias_act_parity.rs (target/release/deps/gemm_bias_act_parity-b3f0b11ba7f92892)
+
+running 7 tests
+test gemm_bias_act_rejects_incompatible_bias_shape_like_cpu ... ok
+test gemm_bias_act_k_zero_matches_cpu ... ok
+test gemm_bias_act_without_bias_matches_cpu ... ok
+test gemm_bias_act_broadcast_fallback_matches_cpu ... ok
+test gemm_bias_act_broadcast_fallback_zero_dim_matches_cpu ... ok
+test elementwise_matches_cpu_across_ops ... ok
+test gemm_bias_act_matches_cpu_across_shapes_and_activations ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/gemm_dynamic_tile_parity.rs (target/release/deps/gemm_dynamic_tile_parity-cd884c1e59e6ae87)
+
+running 11 tests
+test dispatch_tiled_prepared_rejects_undersized_and_misaligned_inputs ... ok
+test wm4_bk8_candidate_matches_cpu_reference_non_multiple_of_tile ... ok
+test bk32_candidate_matches_cpu_reference_non_multiple_of_tile ... ok
+test wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile ... ok
+test direct_load_path_matches_cpu_reference_non_multiple_of_tile ... ok
+test tiled_matches_cpu_reference_k_stress ... ok
+test direct_load_path_matches_cpu_reference ... ok
+test dispatch_tiled_prepared_matches_dispatch_variant ... ok
+test bk32_candidate_matches_cpu_reference_k_stress ... ok
+test tiled_matches_cpu_reference_non_multiple_of_tile ... ok
+test dispatch_auto_matches_cpu_reference_across_shape_bands ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/gemm_f16_auto_parity.rs (target/release/deps/gemm_f16_auto_parity-51c175c1bf7b7565)
+
+running 8 tests
+test dispatch_f16_auto_matches_cpu_reference_tiny_shape ... ok
+test dispatch_f16_auto_matches_existing_non_tiled_8x8_kernel ... ok
+test dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape ... ok
+test dispatch_f16_auto_matches_explicit_tile_select_dispatch ... ok
+test dispatch_f16_auto_matches_cpu_reference_square_cube_512 ... ok
+test dispatch_f16_auto_matches_cpu_reference_wide_shape ... ok
+test dispatch_f16_auto_matches_cpu_reference_tall_shape ... ok
+test dispatch_f16_auto_matches_cpu_reference_large_near_square_rectangle ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/gemm_fine_barrier_bit_match.rs (target/release/deps/gemm_fine_barrier_bit_match-f03af4ee23e5ad7c)
+
+running 2 tests
+test fine_barrier_on_off_bit_match_dispatch_tiled_prepared ... ok
+test fine_barrier_on_off_bit_match_dispatch_auto ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/gemm_naive_parity.rs (target/release/deps/gemm_naive_parity-1d1b32f4464ed53a)
+
+running 6 tests
+test dispatch_rejects_invalid_shapes ... ok
+test naive_matches_cpu_reference_medium_shape ... ok
+test dispatch_and_dispatch_variant_naive_agree ... ok
+test naive_matches_cpu_reference_non_multiple_of_threadgroup ... ok
+test naive_matches_cpu_reference_degenerate_shapes ... ok
+test naive_matches_cpu_reference_k_stress ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/gemm_resident_parity.rs (target/release/deps/gemm_resident_parity-59228b062cecee92)
+
+running 2 tests
+test gemm_resident_lhs_matches_cpu_reference ... ok
+test gemm_resident_rhs_matches_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/gemm_simdgroup_parity.rs (target/release/deps/gemm_simdgroup_parity-dab4021c6498dd91)
+
+running 9 tests
+test dispatch_variant_rejects_invalid_shapes ... ok
+test simdgroup_matches_cpu_reference_medium_shape ... ok
+test tiled_matches_cpu_reference_medium_shape ... ok
+test simdgroup_matches_cpu_reference_k_stress ... ok
+test tiled_matches_cpu_reference_k_stress ... ok
+test simdgroup_matches_cpu_reference_non_multiple_of_eight ... ok
+test tiled_matches_cpu_reference_non_multiple_of_tile ... ok
+test simdgroup_matches_cpu_reference_degenerate_shapes ... ok
+test tiled_matches_cpu_reference_degenerate_shapes ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/gemm_strided_parity.rs (target/release/deps/gemm_strided_parity-054c6752fdbba18a)
+
+running 7 tests
+test gemm_collapsed_lhs_matches_per_batch_cpu_reference ... ok
+test dispatch_strided_tiled_prepared_rejects_non_eight_divisible_shape_while_classic_succeeds ... ok
+test dispatch_strided_tiled_prepared_nn_is_bit_identical_to_dispatch_tiled_prepared ... ok
+test dispatch_bias_act_prepared_nn_is_bit_identical_to_strided_nn ... ok
+test dispatch_strided_tiled_prepared_handles_padded_leading_dimension_for_non_transposed_side ... ok
+test dispatch_strided_bias_act_prepared_matches_cpu_reference_for_all_transpose_patterns ... ok
+test dispatch_strided_tiled_prepared_matches_cpu_reference_for_all_transpose_patterns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/gemm_swizzle_bit_match.rs (target/release/deps/gemm_swizzle_bit_match-b410a1b2e2d0dc31)
+
+running 2 tests
+test swizzle_on_off_bit_match_dispatch_tiled_prepared ... ok
+test swizzle_on_off_bit_match_dispatch_auto ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/gemm_transposed_parity.rs (target/release/deps/gemm_transposed_parity-f7a854211fc16f6b)
+
+running 5 tests
+test gemm_nt_via_trait_object_matches_concrete_call_on_real_device ... ok
+test gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device ... ok
+test gemm_narrow_then_transpose_uses_strided_entry_with_padded_ld_and_is_correct_on_real_device ... ok
+test gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/gemm_transposed_perf.rs (target/release/deps/gemm_transposed_perf-505b5dfbca43d2bf)
+
+running 2 tests
+TN m=64 k=784 n=256 before_median_s=0.000451 after_median_s=0.000301 speedup=1.501x
+NT m=64 k=784 n=256 before_median_s=0.001160 after_median_s=0.000500 speedup=2.319x
+TN m=64 k=256 n=10 before_median_s=0.000422 after_median_s=0.000404 speedup=1.046x
+NT m=64 k=256 n=10 before_median_s=0.000403 after_median_s=0.000234 speedup=1.720x
+TN m=1024 k=1024 n=1024 before_median_s=0.006032 after_median_s=0.005613 speedup=1.075x
+NT m=1024 k=1024 n=1024 before_median_s=0.006058 after_median_s=0.005618 speedup=1.078x
+TN m=2048 k=2048 n=2048 before_median_s=0.022733 after_median_s=0.023331 speedup=0.974x
+test tn_transposed_entry_vs_contiguous_across_shapes ... ok
+NT m=2048 k=2048 n=2048 before_median_s=0.023825 after_median_s=0.023347 speedup=1.020x
+test nt_transposed_entry_vs_contiguous_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running tests/linear_forward_device_parity.rs (target/release/deps/linear_forward_device_parity-f0d753d2dc267869)
+
+running 5 tests
+test linear_forward_device_rejects_shape_mismatches_and_handles_empty_input ... ok
+test linear_forward_device_two_layer_chain_matches_cpu_reference ... ok
+test linear_forward_device_matches_cpu_reference ... ok
+test linear_forward_device_matches_gemm_resident_rhs_act_bit_exact ... ok
+[linear_forward_device_bench:metal] before_median_s=0.000715 after_median_s=0.000387 speedup_x=1.845
+test linear_forward_device_bench_metal ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/memory_roundtrip.rs (target/release/deps/memory_roundtrip-c97e32c6bb3ed1d9)
+
+running 6 tests
+test zero_numel_tensor_roundtrips_without_touching_ffi ... ok
+test upload_download_roundtrip_is_bit_exact ... ok
+test alloc_zeroed_returns_all_zero ... ok
+test pooled_memory_reuses_buffer_and_zero_fills ... ok
+test peak_allocated_bytes_matches_known_allocation_size ... ok
+test repeated_alloc_drop_cycles_do_not_leak_device_memory ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/mse_parity.rs (target/release/deps/mse_parity-e9fa173c464d38d2)
+
+running 1 test
+test mse_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/mse_source_evidence.rs (target/release/deps/mse_source_evidence-b4b7ceeee07f3d0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/pool_real_device.rs (target/release/deps/pool_real_device-3844d7fefd598877)
+
+running 4 tests
+test dropping_pooled_alloc_zeroed_returns_bytes_to_free_list ... ok
+test second_alloc_of_same_class_reuses_freed_handle ... ok
+test release_cached_device_memory_empties_free_list ... ok
+test gemm_via_pooled_output_buffer_matches_expected ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/rmsnorm_parity.rs (target/release/deps/rmsnorm_parity-1faac4b893a6c720)
+
+running 7 tests
+test rmsnorm_run_fused_matches_cpu_composed ... ok
+test rmsnorm_propagates_nan_matching_backend_cpu ... ok
+test rmsnorm_matches_backend_cpu_with_extreme_eps ... ok
+test rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row ... ok
+test rmsnorm_matches_backend_cpu_with_extreme_magnitude_values ... ok
+test rmsnorm_matches_backend_cpu_directly ... ok
+test rmsnorm_matches_cpu_across_shapes ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/rmsnorm_softmax_source_evidence.rs (target/release/deps/rmsnorm_softmax_source_evidence-3ba19d060ece544d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/sgd_device_parity.rs (target/release/deps/sgd_device_parity-0d65d4dadd913729)
+
+running 7 tests
+test empty_tensor_step_is_a_no_op ... ok
+test sgd_step_device_rejects_missing_velocity_when_momentum_enabled ... ok
+test sgd_step_device_rejects_shape_mismatch ... ok
+test vanilla_sgd_matches_cpu_reference ... ok
+test full_combo_matches_cpu_reference ... ok
+test momentum_sgd_matches_cpu_reference ... ok
+test full_combo_matches_cpu_reference_across_100_steps ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/shader_source_evidence.rs (target/release/deps/shader_source_evidence-981c40ba36d2a98d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/softmax_parity.rs (target/release/deps/softmax_parity-fb63b76a29bcc1b4)
+
+running 5 tests
+test softmax_run_fused_matches_cpu_reference ... ok
+test softmax_is_numerically_stable_near_f32_max_with_non_multiple_of_32_hidden ... ok
+test softmax_is_numerically_stable_at_extreme_values ... ok
+test softmax_matches_backend_cpu_directly ... ok
+test softmax_matches_cpu_across_shapes ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests examples/gemm_fine_barrier_ab_bench.rs (target/release/examples/gemm_fine_barrier_ab_bench-4f3d86d5bd6ab97e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_splitk_shapes_bench.rs (target/release/examples/gemm_splitk_shapes_bench-04c76de35d3acc7d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_swizzle_ab_bench.rs (target/release/examples/gemm_swizzle_ab_bench-1deeb047459100a2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+   Doc-tests fandhe_ai_backend_metal
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 2 targets failed:
+    `-p fandhe-ai-backend-metal --test command_batching`
+    `-p fandhe-ai-backend-metal --test command_batching_bench`
