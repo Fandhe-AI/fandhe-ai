@@ -2102,13 +2102,22 @@ impl CudaGemm {
             // イシュー #1344: `tiled_pipeline` が既に Pipeline 側と判定
             // された形状に対して、第 2 スロット（128×64）が利用可能かつ
             // 閾値条件を満たす場合のみそちらへ分岐する。第 2 スロットが
-            // `None`（既定 `TILED_PIPELINE_128X64_PRODUCTION_ENABLED =
-            // false`、または `new_with_tiled_pipeline_128x64` 診断経由で
-            // `tiled_pipeline` 自体が既に 128×64 に差し替わっている場合を
-            // 含む）の場合は常に `func64`（＝実際に `self.tiled_pipeline`
-            // に入っているハンドル。既定は 64×64、診断経由では 128×64）を
-            // そのまま使う fail-closed フォールバックで、既存の T7〜T11
-            // （`new_with_tiled_pipeline_128x64` 経由）の契約を変えない。
+            // `None` になるのは `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
+            // が `false`（既定でない特殊ビルド）の場合、または
+            // `compile_tiled_pipeline_128x64` が実行時に失敗した場合のみ
+            // （`TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true` の現行
+            // 既定では `Self::new` が `tiled_pipeline_128x64` を
+            // `tiled_pipeline` とは独立にコンパイルするため、
+            // `new_with_tiled_pipeline_128x64` 診断経由〈内部で
+            // `Self::new` を呼んだうえで `tiled_pipeline` フィールドのみ
+            // 128×64 へ差し替える〉でも `tiled_pipeline_128x64` は
+            // 通常どおり `Some`（＝第 1 スロットと同じ 128×64 ハンドル）
+            // になりうる）。`None` の場合は常に `func64`（＝実際に
+            // `self.tiled_pipeline` に入っているハンドル。既定は 64×64、
+            // 診断経由では 128×64）をそのまま使う fail-closed
+            // フォールバックで、`func.tile()` は選択されたハンドル自身の
+            // タグを見るため launch config は常に整合し、既存の T7〜T11
+            // （`new_with_tiled_pipeline_128x64` 経由）の契約も変えない。
             let tile_kind = tiled_pipeline_tile_kind(self.tiled_pipeline_128x64.is_some(), n, k);
             let func = if tile_kind == TiledPipelineTile::Bm128Bn64 {
                 self.tiled_pipeline_128x64.as_ref().unwrap_or(func64)
