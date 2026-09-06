@@ -480,3 +480,344 @@ fn launch_tiled_pipeline_zero_dim_shape_is_noop_without_launch() {
     gemm.launch_tiled_pipeline_f32(&func, &a_dev, &b_dev, &mut c_dev, 4, 0, 4)
         .expect("n==0 must be treated as a no-op, not a driver launch error");
 }
+
+// ============================================================================
+// イシュー #1343: 128×64×16 f32 pipeline カーネル（opt-in）の bit 同一
+// 自己検証。
+//
+// 本セクションのテストはすべて `CudaGemm::new_with_tiled_pipeline_128x64`
+// （`internal-diagnostics` feature 限定の診断入口。`gemm.rs` ドキュメント
+// コメント参照）で得た**別インスタンス**を使う。`Self::new`（本番既定）が
+// 保持する `tiled_pipeline` スロットは
+// `TILED_PIPELINE_128X64_PRODUCTION_ENABLED = false` の間は常に既存 64×64
+// 版のままであり、以下のテストはその不変を壊さない（`tiled_pipeline_tile`
+// 診断アクセサで確認する T12 が非 ignore の回帰防御を担う）。
+// ============================================================================
+
+/// [`fandhe_ai_backend_cuda::CudaGemm::new_with_tiled_pipeline_128x64`] で
+/// 得たインスタンスの `run_tiled_pipeline_f32`（内部的に 128×64 カーネルへ
+/// 分岐する）が、64×64 版（`run_tiled_f32_classic` 経由の既存 base
+/// インスタンス）と**ビット完全一致**することを確認する（イシュー #1343
+/// 受け入れ条件 T7。`kernels_tiled_pipeline_128x64.rs` 冒頭コメント「bit
+/// 同一の論拠」参照）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_128x64_matches_pipeline_64x64_bit_exact() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm64 =
+        CudaGemm::new(&device).expect("64x64 tiled pipeline kernel compilation must succeed");
+    assert!(
+        gemm64.tiled_pipeline_available(),
+        "64x64 tiled pipeline kernel must be available on this ignored test runner (reason: {:?})",
+        gemm64.tiled_pipeline_unavailable_reason()
+    );
+
+    let device128 =
+        CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm128 = CudaGemm::new_with_tiled_pipeline_128x64(&device128)
+        .expect("128x64 tiled pipeline kernel compilation must succeed");
+    assert_eq!(
+        gemm128.tiled_pipeline_tile(),
+        Some(fandhe_ai_backend_cuda::TiledPipelineTile::Bm128Bn64),
+        "new_with_tiled_pipeline_128x64 must tag the compiled handle as Bm128Bn64"
+    );
+
+    // 端タイル・m=1・n/k 最小 4・非正方を含む形状集合
+    // （`kernels_tiled_pipeline_128x64.rs::tests::
+    // host_model_matches_reference_fma_bit_exact` と同じ意図の集合）。
+    let cases: &[(u32, u32, u32)] = &[
+        (1, 4, 4),
+        (3, 8, 12),
+        (64, 64, 16),
+        (65, 60, 20),
+        (127, 64, 36),
+        (128, 64, 64),
+        (129, 68, 4),
+        (192, 132, 64),
+        (200, 64, 64),
+        (256, 256, 256),
+    ];
+    for (idx, &(m, n, k)) in cases.iter().enumerate() {
+        let mut rng = bench_harness::rng::Xorshift64Star::new(8000 + idx as u64);
+        let a = rng.fill_vec((m as usize) * (k as usize));
+        let b = rng.fill_vec((k as usize) * (n as usize));
+
+        let c_64 = gemm64
+            .run_tiled_pipeline_f32(&a, &b, m, n, k)
+            .expect("64x64 run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
+        let c_128 = gemm128
+            .run_tiled_pipeline_f32(&a, &b, m, n, k)
+            .expect("128x64 run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
+
+        assert_eq!(
+            c_128, c_64,
+            "128x64 vs 64x64 tiled pipeline shape m={m} n={n} k={k}: bit 完全一致しません \
+             (#1343 self-verification)"
+        );
+    }
+}
+
+/// 128×64 カーネルが classic 版（`kernels::TILED_F32`。`run_tiled_f32_classic`
+/// 経由）とも bit 完全一致することを確認する（イシュー #1343 受け入れ条件
+/// T8。#1137 の `tiled_pipeline_matches_tiled_f32_classic_bit_exact`
+/// （64×64 版）と同じ検証を 128×64 版でも独立に固定する）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_128x64_matches_classic_bit_exact() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm128 = CudaGemm::new_with_tiled_pipeline_128x64(&device)
+        .expect("128x64 tiled pipeline kernel compilation must succeed");
+
+    let cases: &[(u32, u32, u32)] = &[(64, 64, 64), (256, 256, 256), (60, 68, 36)];
+    for (idx, &(m, n, k)) in cases.iter().enumerate() {
+        let mut rng = bench_harness::rng::Xorshift64Star::new(8100 + idx as u64);
+        let a = rng.fill_vec((m as usize) * (k as usize));
+        let b = rng.fill_vec((k as usize) * (n as usize));
+
+        let c_classic = gemm128
+            .run_tiled_f32_classic(&a, &b, m, n, k)
+            .expect("run_tiled_f32_classic must succeed on CUDA-equipped test runner");
+        let c_128 = gemm128
+            .run_tiled_pipeline_f32(&a, &b, m, n, k)
+            .expect("128x64 run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
+
+        assert_eq!(
+            c_128, c_classic,
+            "128x64 tiled_pipeline vs classic shape m={m} n={n} k={k}: bit 完全一致しません \
+             (#1343 self-verification)"
+        );
+    }
+}
+
+/// 128×64 カーネルの出力が CPU 参照実装（`assert_parity` 統一複合判定）
+/// と、タイル倍数・非タイル倍数エッジ形状の網羅で一致することを確認する
+/// （イシュー #1343 受け入れ条件 T9。`tiled_pipeline_matches_reference_
+/// across_shapes`〈64×64 版〉と同じ形状集合を踏襲する）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_128x64_matches_reference_across_shapes() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm128 = CudaGemm::new_with_tiled_pipeline_128x64(&device)
+        .expect("128x64 tiled pipeline kernel compilation must succeed");
+
+    let cases: &[(u32, u32, u32)] = &[
+        (128, 64, 64),
+        (256, 128, 128),
+        (512, 512, 512),
+        (60, 68, 36),
+        (68, 60, 20),
+        (64, 96, 256),
+        (4, 4, 4),
+    ];
+    for (idx, &(m, n, k)) in cases.iter().enumerate() {
+        let mut rng = bench_harness::rng::Xorshift64Star::new(8200 + idx as u64);
+        let a = rng.fill_vec((m as usize) * (k as usize));
+        let b = rng.fill_vec((k as usize) * (n as usize));
+
+        let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+        fandhe_ai_backend_cpu::matmul_reference_fma(
+            &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+        )
+        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+
+        let c_gpu = gemm128
+            .run_tiled_pipeline_f32(&a, &b, m, n, k)
+            .expect("128x64 run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
+
+        fandhe_ai_backend_cpu::assert_parity(
+            &format!("128x64 shape m={m} n={n} k={k}"),
+            &c_gpu,
+            &c_ref,
+        );
+    }
+}
+
+/// K 大のストレスケース（(4096,4096,4096)。`tiled_pipeline_k4096_stress`
+/// 〈64×64 版〉・PoC-v2-3 の M=N=K=4096 と揃える。イシュー #1343 受け入れ
+/// 条件 T9 の一部）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_128x64_k4096_stress() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm128 = CudaGemm::new_with_tiled_pipeline_128x64(&device)
+        .expect("128x64 tiled pipeline kernel compilation must succeed");
+
+    let mut rng = bench_harness::rng::Xorshift64Star::new(0xC0FFEE ^ 0x1343);
+    let (m, n, k) = (4096u32, 4096u32, 4096u32);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+
+    let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+
+    let c_gpu = gemm128
+        .run_tiled_pipeline_f32(&a, &b, m, n, k)
+        .expect("128x64 run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
+
+    fandhe_ai_backend_cpu::assert_parity("128x64 K4096 stress 4096x4096x4096", &c_gpu, &c_ref);
+}
+
+/// `new_with_tiled_pipeline_128x64` で得たインスタンスの `run_tiled_f32`
+/// （本番既定入口。`select_tiled_f32_kernel` 経由）が、cp.async 整列形状
+/// では実際に 128×64 カーネル経由で `run_tiled_pipeline_f32` と bit 一致
+/// する出力を返し、非整列形状では classic へフォールバックすることを
+/// end-to-end で確認する（イシュー #1343 受け入れ条件 T10。#1137 の
+/// `run_tiled_f32_dispatches_to_pipeline_for_aligned_shape`〈64×64 版〉と
+/// 同じ検証パターンを 128×64 opt-in インスタンスで固定する）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn run_tiled_f32_optin_dispatches_128x64_for_aligned_shape() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm128 = CudaGemm::new_with_tiled_pipeline_128x64(&device)
+        .expect("128x64 tiled pipeline kernel compilation must succeed");
+
+    // 整列形状（n%4==0 && k%4==0）: run_tiled_f32 は 128×64 経由でも
+    // run_tiled_pipeline_f32 と bit 一致する。
+    let (m, n, k) = (256u32, 256u32, 256u32);
+    assert_eq!(
+        gemm128.tiled_f32_kernel_for(n, k),
+        fandhe_ai_backend_cuda::TiledF32Kernel::Pipeline,
+        "aligned shape (n={n}, k={k}) must select Pipeline when the 128x64 handle is available"
+    );
+    let mut rng = bench_harness::rng::Xorshift64Star::new(8300);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+    let c_dispatch = gemm128
+        .run_tiled_f32(&a, &b, m, n, k)
+        .expect("run_tiled_f32 must succeed on CUDA-equipped test runner");
+    let c_pipeline = gemm128
+        .run_tiled_pipeline_f32(&a, &b, m, n, k)
+        .expect("128x64 run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
+    assert_eq!(
+        c_dispatch, c_pipeline,
+        "run_tiled_f32 (128x64 opt-in dispatch) must match run_tiled_pipeline_f32 bit-for-bit \
+         for an aligned shape"
+    );
+
+    // 非整列形状（n%4!=0）: run_tiled_f32 は classic へ fail-closed
+    // フォールバックする（128×64 ハンドルが Some でも変わらない契約。
+    // `tiled_f32_kernel_kind` は 128×64/64×64 に依らず同一の判定関数）。
+    let (m2, n2, k2) = (60u32, 66u32, 34u32);
+    assert_eq!(
+        gemm128.tiled_f32_kernel_for(n2, k2),
+        fandhe_ai_backend_cuda::TiledF32Kernel::Classic,
+        "unaligned shape (n={n2}, k={k2}) must always select Classic even with the 128x64 \
+         handle available"
+    );
+    let a2 = rng.fill_vec((m2 as usize) * (k2 as usize));
+    let b2 = rng.fill_vec((k2 as usize) * (n2 as usize));
+    let c_dispatch2 = gemm128
+        .run_tiled_f32(&a2, &b2, m2, n2, k2)
+        .expect("run_tiled_f32 must succeed for an unaligned shape via classic fallback");
+    let c_classic2 = gemm128
+        .run_tiled_f32_classic(&a2, &b2, m2, n2, k2)
+        .expect("run_tiled_f32_classic must succeed on CUDA-equipped test runner");
+    assert_eq!(
+        c_dispatch2, c_classic2,
+        "unaligned shape must route run_tiled_f32 to the classic kernel bit-for-bit even with \
+         the 128x64 handle available"
+    );
+
+    // run_tiled_pipeline_f32（フォールバックを持たない単独変種）は
+    // 同じ非整列形状を fail-closed に拒否する（既存契約。64×64 版の
+    // `run_tiled_f32_falls_back_to_classic_for_unaligned_shape` と同じ
+    // 回帰確認を 128×64 opt-in インスタンスでも固定する）。
+    let err = gemm128
+        .run_tiled_pipeline_f32(&a2, &b2, m2, n2, k2)
+        .expect_err("run_tiled_pipeline_f32 must reject unaligned shapes");
+    assert!(matches!(err, CudaError::InvalidShape { .. }));
+}
+
+/// [`fandhe_ai_backend_cuda::CudaGemm::compile_tiled_pipeline_128x64_variant`]
+/// が返す GPU-only ハンドル（常駐 API 経由）の出力が、`run_tiled_pipeline_f32`
+/// （非常駐・既定インスタンス経由）と bit 一致することを確認する（イシュー
+/// #1343 受け入れ条件 T11。`tiled_pipeline_rejects_mismatched_context_handle`
+/// 等が確認する context 一致検証は 64×64／128×64 で共通の
+/// `TiledPipelineFunction::context_ptr` 機構のため本テストでは再検証しない）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn compile_tiled_pipeline_128x64_variant_matches_run_tiled_pipeline_f32() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm128 = CudaGemm::new_with_tiled_pipeline_128x64(&device)
+        .expect("128x64 tiled pipeline kernel compilation must succeed");
+    let variant = CudaGemm::compile_tiled_pipeline_128x64_variant(&device, 3)
+        .expect("128x64 tiled pipeline variant compilation must succeed");
+
+    let (m, n, k) = (128u32, 64u32, 64u32);
+    let mut rng = bench_harness::rng::Xorshift64Star::new(8400);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+
+    let c_run = gemm128
+        .run_tiled_pipeline_f32(&a, &b, m, n, k)
+        .expect("128x64 run_tiled_pipeline_f32 must succeed on cp.async-capable test runner");
+
+    let (a_dev, b_dev) = gemm128
+        .upload_f32(&a, &b)
+        .expect("upload_f32 must succeed for a well-formed shape");
+    let mut c_dev = gemm128
+        .alloc_output_f32(m, n)
+        .expect("alloc_output_f32 must succeed for a well-formed output shape");
+    gemm128
+        .launch_tiled_pipeline_f32(&variant, &a_dev, &b_dev, &mut c_dev, m, n, k)
+        .expect("launch_tiled_pipeline_f32 (128x64 variant) must succeed");
+    let c_launch = gemm128
+        .download_f32(&c_dev)
+        .expect("download_f32 must succeed for a well-formed device buffer");
+
+    assert_eq!(
+        c_launch, c_run,
+        "compile_tiled_pipeline_128x64_variant + launch_tiled_pipeline_f32 must match \
+         run_tiled_pipeline_f32 bit-for-bit"
+    );
+}
+
+/// [`fandhe_ai_backend_cuda::CudaGemm::new`]（本番既定コンストラクタ）が
+/// 保持する `tiled_pipeline` スロットは、
+/// `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`（既定 `false`）が有効化
+/// されない限り常に `Bm64Bn64` タグでコンパイルされることを確認する
+/// （非対応環境では `None`）。イシュー #1343 の非結線契約
+/// （`gemm.rs::TILED_PIPELINE_128X64_PRODUCTION_ENABLED` ドキュメンテー
+/// ションコメント参照）の回帰防御であり、CUDA 実機なしでも通常 CI
+/// ジョブで実行される（`#[ignore]` なし。他の環境適応スモークと同じ
+/// 分岐パターン）。
+#[test]
+fn default_new_tiled_pipeline_tile_is_never_128x64() {
+    let device = match CudaDevice::new(0) {
+        Ok(dev) => dev,
+        Err(CudaError::DriverUnavailable { detail }) => {
+            assert!(!detail.is_empty(), "detail message must not be empty");
+            return;
+        }
+        Err(CudaError::Driver(_)) => return,
+        Err(other) => panic!("unexpected CudaError variant from CudaDevice::new: {other}"),
+    };
+
+    let gemm = match CudaGemm::new(&device) {
+        Ok(gemm) => gemm,
+        Err(CudaError::NvrtcUnavailable { detail }) => {
+            assert!(!detail.is_empty());
+            return;
+        }
+        Err(other) => panic!("unexpected CudaError variant from CudaGemm::new: {other}"),
+    };
+
+    match gemm.tiled_pipeline_tile() {
+        None => {
+            // cp.async 非対応環境（sm_80 未満）。`tiled_pipeline_available`
+            // と矛盾しないことのみ確認する。
+            assert!(!gemm.tiled_pipeline_available());
+        }
+        Some(tile) => {
+            assert_eq!(
+                tile,
+                fandhe_ai_backend_cuda::TiledPipelineTile::Bm64Bn64,
+                "CudaGemm::new must never default to the 128x64 tile while \
+                 TILED_PIPELINE_128X64_PRODUCTION_ENABLED is false"
+            );
+        }
+    }
+}
