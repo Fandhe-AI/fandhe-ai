@@ -511,6 +511,7 @@ impl TileConfig {
     /// [`shared_mem_bytes_for_pad`](Self::shared_mem_bytes_for_pad) と完全に
     /// 一致する（`TileClassMode::Legacy` 経路の非後退。本ファイル末尾
     /// テスト参照）。
+    #[cfg(any(test, target_os = "macos"))]
     pub(crate) fn shared_mem_bytes_for_class(
         &self,
         pattern: crate::layout::TransposePattern,
