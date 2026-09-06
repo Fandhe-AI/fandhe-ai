@@ -1,0 +1,30 @@
+# 実行環境情報（イシュー #1284。内部ホスト名・機体識別子は含めない）
+
+機種: Apple M4 Max（GPU 40 コア。`system_profiler SPDisplaysDataType` 実測）
+OS: macOS 26.6.2（BuildVersion 25G83。`sw_vers` 実測）
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+cargo: 1.96.0 (30a34c682 2026-05-25)
+HEAD sha: 462ece9e930256a05bda9c6c3af5209d29c9c15e（base main。#1282 マージ後）
+
+実効パラメータ（run1〜5・run6_adjusted 除く）:
+  effective_rounds=6 effective_cooldown_secs=2 effective_min_warmup_secs=1
+
+run6_adjusted のみ一時調整（フェーズ1ゲート不成立への対応試行。コミット前に既定値へ復元済み）:
+  effective_rounds=10 effective_cooldown_secs=8 effective_min_warmup_secs=3
+
+負荷観測（uptime。共有マシンで他ユーザーのセッションが多数常駐。19〜20 users）:
+  run1 前: load averages 5.44 4.29 3.99
+  run2 前: load averages 3.47 5.45 4.84
+  run3 前: load averages 6.94 7.46 6.59
+  run4 前: load averages 2.54 3.69 4.97
+  run5 前: load averages 2.50 2.54 3.66
+  run6_adjusted 前: load averages 12.66 5.10 4.09（実行中にスパイクあり）
+  実行完了後: load averages 3.45 3.97 3.80
+
+pmset -g therm: 実行前後とも "No thermal warning level has been recorded"
+  （pmset_therm_before.txt / pmset_therm_after.txt 参照。サーマルスロットリングの兆候なし）
+
+競合プロセス確認: 実行直前に `pgrep -fl 'cargo|rustc|gemm_.*bench'` で
+  本 example・ビルド以外の競合プロセスなし（ただし uptime の高 load
+  average は他ユーザーセッション由来と推測。プロセス名では捕捉できない
+  共有マシン特有の負荷変動と考えられる）

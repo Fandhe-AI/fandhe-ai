@@ -582,3 +582,185 @@ Silicon）依存。CI では実行しない"]`）:
 - `gemm_simdgroup_tiled_f16` への同機構の展開・direct-load 本体（unroll
   版・非unroll 版で重複する約 40 行）の helper 化による重複削減 →
   必要ならユーザー承認のうえ別 issue
+
+### 7.10 本番 `dispatch_auto` 経路の全形状 A/B と結線判断（イシュー #1284）
+
+#### 7.10.1 前提: 本 issue が測る構造的な事実
+
+§7.9 で実装した条件付き gating（`UNROLL_ACC_ENABLED` function constant。
+acc 積 >= `UNROLL_ACC_MIN_PRODUCT`（16）の候補のみ unroll 版ループを選択）
+について、本 issue は本番 `dispatch_auto` 経路（`tile::select_with_
+occupancy_for_device` の実測テーブル経由）で M4 Max 実機の N=512/1024/
+2048/4096（正方）と、`CANDIDATES[0]`（acc 積 16）へ到達する補助形状
+（`(2048,2048,512)`・`(4096,4096,1024)`）を計測した。
+
+計測実装前に判明した構造的な事実（実装計画 §1.2。`crates/backend-metal/
+examples/gemm_unroll_acc_ab_bench.rs` 冒頭ドキュメンテーションコメントに
+同内容を記載）:
+
+- `tile::select_with_occupancy_for_device` の M4 Max 実測テーブル
+  （`exact_match_cfg`）は要求 4 形状いずれも acc 積 8 の候補
+  （`CANDIDATES[5]`／`[6]`／`[1]`／`[2]`）を返す。acc 積 16 未満のため、
+  正方 4 形状では本番経路は head（unroll 有効インスタンス）でも base と
+  **同一の非 unroll 版ループ**をコンパイルする。したがって正方 4 形状の
+  A/B は「function constant 特殊化の有無による差 ≈ 1.0」を測る計測になり、
+  §7.5 の N=4096 +11.5%（`CANDIDATES[2]` を**無条件**unroll した実験値）は
+  条件付き gating の下では設計上再現されない
+- 結線の実効が及ぶのは `_ if m >= LARGE && n >= LARGE => CANDIDATES[0]`
+  分岐（acc 積 16。非正方・非 tall/wide の大形状フォールバック）のみで
+  あるため、本 issue はこの分岐へ到達する補助形状も計測対象へ加えた
+
+このため、本 issue の採否判断基準は「正方 4 形状・補助 2 形状すべてで
+`head_over_base >= 0.95`（`docs/perf/metal-gemm-fine-barrier-ab.md` の
+`SMALL_SIZE_REGRESSION_TOLERANCE_RATIO` と同一値の再利用。新規閾値では
+ない）」とし、正方形状の**改善は要求しない**（実装計画 §3.2）。
+
+#### 7.10.2 プロトコル
+
+- example: `crates/backend-metal/examples/gemm_unroll_acc_ab_bench.rs`
+  （`gemm_fine_barrier_ab_bench.rs`・`gemm_swizzle_ab_bench.rs` と同一
+  プロトコル。`bench_harness::ab`）。フェーズ 0（bit 一致自己検証）→
+  フェーズ 1（安定性セルフチェック。対照カーネル: 本番既定
+  `dispatch_auto`）→ フェーズ 2（`dispatch_tiled_prepared` prepared
+  境界 A/B。**本判定対象**）→ フェーズ 3（`dispatch_auto` 転送込み境界
+  A/B。参考値）
+- `ROUNDS=6`・`COOLDOWN=2s`・`MIN_WARMUP=1s`（既定値。run1〜5 で使用）。
+  フェーズ 1 が不成立のため run6 のみ `ROUNDS=10`・`COOLDOWN=8s`・
+  `MIN_WARMUP=3s` へ一時調整して再試行したが、この調整も不成立だった
+  （§7.10.3）。コミット前に既定値へ復元済み（差分なし）
+- 実行環境: Apple M4 Max（GPU 40 コア）。`docs/perf/logs/metal-gemm-
+  unroll-acc-ab-1284/env_info.txt` に機種・OS・rustc/cargo・HEAD sha・
+  負荷観測（`uptime`）・サーマル観測（`pmset -g therm`）を記録
+
+#### 7.10.3 フェーズ 1（安定性セルフチェック）の結果: 6 試行すべて不成立
+
+6 回試行（run1〜5 は既定パラメータ、run6 は増量パラメータ）した結果、
+**いずれの試行でも一部形状の spread が安定性ゲート
+（`bench_harness::ab::STABILITY_SPREAD_GATE`＝0.05）を超過**し、単一 run
+の参考 verdict は 6 回とも `undetermined` となった。
+
+| run | 512 spread | 1024 | 2048 | 4096 | 2048×512 補助 | 4096×1024 補助 | 実行前 load average(1m) |
+|---|---|---|---|---|---|---|---|
+| 1 | NG (詳細は run1 ログ参照) | NG | NG | NG | NG | OK | 5.44 |
+| 2 | NG | NG | NG | OK | NG | NG | 3.47 |
+| 3 | NG | OK | NG | OK | NG | NG | 6.94 |
+| 4 | NG | NG | NG | NG | NG | OK | 2.54 |
+| 5 | NG | NG | NG | OK | NG | OK | 2.50 |
+| 6（増量） | NG | NG | NG | NG | NG | NG | 12.66 |
+
+低負荷（run4・run5。load average 1 分値 2.5 台）でも大半の形状で gate
+超過が継続しており、`docs/perf/metal-gemm-transpose-tiled.md`（イシュー
+#1187 §5.4）で観測された「低負荷開始でも gate 超過する」パターンと一致する
+（他セッション負荷のみでは説明しきれない、本共有マシン固有の変動要因が
+ある可能性を示唆。原因の特定は本 issue のスコープ外）。ROUNDS を 6→10・
+COOLDOWN を 2s→8s・MIN_WARMUP を 1s→3s へ増量した run6 でも改善しな
+かった（spread がむしろ悪化した形状もある）。
+
+サーマル状態は実行前後とも `pmset -g therm` が
+`"No thermal warning level has been recorded"` を報告しており、
+サーマルスロットリングによる説明は支持されない
+（`docs/perf/logs/metal-gemm-unroll-acc-ab-1284/pmset_therm_{before,after}.txt`）。
+
+#### 7.10.4 フェーズ 2（prepared 境界。本判定対象）の実測値
+
+フェーズ 1 が全 6 試行で不成立のため、個々の run の信頼性はフェーズ 1
+ゲートで担保されていない。参考として、6 run の `head_over_base`（TFLOPS
+比。head/base）を形状別に示す（`grep head_over_base` で各ログから再現
+可能）:
+
+| 形状 | run1 | run2 | run3 | run4 | run5 | run6 | 中央値 |
+|---|---|---|---|---|---|---|---|
+| 512³（acc 積 8。unroll 分岐非到達） | 1.0244 | 1.0089 | 0.8678 | 1.0003 | 1.3807 | 1.0180 | **1.0134** |
+| 1024³（acc 積 8） | 1.0050 | 1.0022 | 1.0209 | 1.0171 | 1.1452 | 1.0013 | **1.0111** |
+| 2048³（acc 積 8） | 1.0275 | 1.0619 | 0.9988 | 0.9837 | 1.1537 | 1.1707 | **1.0447** |
+| 4096³（acc 積 8） | 1.0135 | 1.0116 | 1.1712 | 0.9901 | 0.9990 | 1.1777 | **1.0126** |
+| 2048×2048×512 補助（acc 積 16。unroll 分岐到達） | 5.0168 | 5.3522 | 5.6598 | 5.6564 | 5.0616 | 5.3705 | **5.3613** |
+| 4096×4096×1024 補助（acc 積 16） | 5.3337 | 6.5739 | 7.3746 | 7.3968 | 7.1735 | 8.7993 | **7.2740** |
+
+参考値（フェーズ 3。転送込み境界）の中央値: 512³ 0.9950・1024³ 1.0073・
+2048³ 1.0217・4096³ 1.0028・補助 2048×2048×512 2.0701・補助
+4096×4096×1024 3.0008（いずれも `head_over_base` の 6 run 中央値）。
+
+正方 4 形状は §7.10.1 の予測どおり `median ≈ 1.0`（改善も後退もない）に
+収束している。補助 2 形状（`CANDIDATES[0]` 到達・acc 積 16）は E1
+（§7.3・§7.4）で確認した cand0 の unroll 有効性がそのまま現れ、
+prepared 境界で約 5.4〜7.3 倍という大きな改善を示した。個々の run 内で
+`head_over_base < 0.95` になった唯一の観測値は run3 の 512³
+（0.8678）で、その run3 自体は 512 の phase-1 spread も NG（不安定）
+だった試行であり、単発の高ノイズサンプルの可能性が高い（他 5 run は
+いずれも 512³ で 1.0 以上）。
+
+#### 7.10.5 実機 `#[ignore]` テスト（AC-2。#1282 §7.9.3 からの引き継ぎ）
+
+`make test-ignored-metal` 相当（`cargo test -p fandhe-ai-backend-metal
+--release --no-fail-fast -- --ignored --nocapture`）を実機で初めて実行:
+
+- `gemm::tests::unroll_acc_effective_matches_candidate_acc_product_
+  threshold`・`unroll_acc_on_off_bit_match_all_candidates`・
+  `unroll_acc_on_off_bit_match_dispatch_auto`（#1282 の 3 件。AC-1・
+  AC-2・AC-4 の一部）: 3 件とも実機 pass（`bit_match_test.log`）
+- parity 群（NN: `gemm_dynamic_tile_parity`〈11 passed〉・
+  `gemm_auto_parity`〈3 passed〉・`cpu_metal_parity`〈5 passed〉・
+  `gemm_resident_parity`〈2 passed〉・`gemm_bias_act_parity`〈7
+  passed〉、NT/TN/TT: `gemm_transposed_parity`〈5 passed〉・
+  `gemm_strided_parity`〈7 passed〉、ほか `gemm_simdgroup_parity`・
+  `gemm_naive_parity`・`gemm_f16_auto_parity`・`cpu_metal_f16_parity`・
+  `cpu_metal_f16_tiled_parity`・`rmsnorm_parity`・`sgd_device_parity`・
+  `softmax_parity`・`mse_parity`・`linear_forward_device_parity` を含む
+  全 parity テストファイル）: 全 pass（`parity_ignored_tests.log`）
+- 既知の無関係な fail 1 件: `command_batching_bench.rs::
+  pool_reuse_interleaved_with_tracked_steps_preserves_batching`
+  （`encode()` 呼び出し回数のアサーション失敗。`left: 560〜621, right:
+  50`）。本 issue の変更（`gemm.rs`・`tile.rs`・`pipeline.rs`・
+  `shaders/gemm.metal` は未編集）とは無関係のファイルであり、
+  `git stash` で本 issue の差分を除いた HEAD（462ece9）でも同一の
+  アサーション失敗が再現することを確認済み（before/after 同一。
+  tolerance には触れていない）
+
+#### 7.10.6 結線判断: 判定不可（`UNROLL_ACC_ENABLED = false` 維持）
+
+**判定不可**。6 試行すべてでフェーズ 1（安定性セルフチェック。対照
+カーネル自体のばらつき）が不成立となり、単一 run の参考 verdict は
+すべて `undetermined` だった。低負荷時（run4・run5）でも大半の形状で
+gate 超過が継続したことから、原因は他セッションの GPU/CPU 負荷だけでは
+説明しきれない本共有マシン固有の計測ノイズと考えられる
+（`docs/perf/metal-gemm-transpose-tiled.md`〈#1186/#1187〉と同種の事象。
+原因特定は本 issue のスコープ外）。
+
+フェーズ 2 の実測値（§7.10.4）自体は 6 run を通して一貫した方向性を
+示している（正方 4 形状は中央値 1.01〜1.04 倍で後退なし、補助 2 形状は
+5.4〜7.3 倍の明確な改善）。しかし判定の前提となるフェーズ 1 ゲートが
+一度も成立していないため、`docs/perf/metal-gemm-fine-barrier-ab.md`・
+`docs/perf/metal-gemm-tgid-swizzle-ab.md`（#1278・#1279）と同じ安全側の
+判断基準に従い、**この実測値のみを根拠に本番既定を切り替えない**。
+
+- `tile::UNROLL_ACC_ENABLED` は `false` のまま維持する（コード変更なし）
+- 機構自体（§7.9 の function constant 分岐・`unroll_acc_loops_for`）は
+  revert しない（#1280 と同じ判断: 判定不可は機構の破棄を意味しない）
+- 実機 `#[ignore]` テスト（#1282 の 3 件）は本 issue で初めて実機実行し
+  pass を確認したため、この検証結果自体は確定した成果として残す
+- 補助形状（`CANDIDATES[0]` 到達）で観測された 5.4〜7.3 倍という改善幅は
+  大きく、より静かな実行環境（他セッション非併走）での再計測により
+  フェーズ 1 が成立すれば採用可能性は高いと考えられる。再試行は
+  ユーザー承認のうえ後続 issue へ引き継ぐ（§7.10.7）
+
+#### 7.10.7 スコープ外・引き継ぎ
+
+- より静かな実行環境（他セッション非併走）でのフェーズ 1〜3 再試行・
+  本番既定切替の最終判断 → 必要ならユーザー承認のうえ後続 issue
+- `command_batching_bench.rs` の無関係な既知 fail
+  （`pool_reuse_interleaved_with_tracked_steps_preserves_batching`）の
+  原因調査・修正 → 必要ならユーザー承認のうえ別 issue（本 issue のスコープ
+  外・本 issue の変更と無関係であることは §7.10.5 で確認済み）
+- `select`／`CANDIDATES`／`UNROLL_ACC_MIN_PRODUCT` 自体の変更（cand0 到達
+  形状で改善が確認された場合の再チューニング） → §7.7 で既にスコープ外と
+  記録済み（変更なし）
+
+#### 7.10.8 関連ログ
+
+`docs/perf/logs/metal-gemm-unroll-acc-ab-1284/`:
+`env_info.txt`・`unroll_acc_ab_run{1..5}.log`・
+`unroll_acc_ab_run6_adjusted.log`・
+`uptime_before_run{1..3}.txt`・`pmset_therm_{before,after}.txt`・
+`bit_match_test.log`（#1282 実機テスト 3 件）・
+`parity_ignored_tests.log`（parity 群 + 既知無関係 fail 1 件）

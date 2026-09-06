@@ -1,0 +1,35 @@
+effective_rounds=6 effective_cooldown_secs=2 effective_min_warmup_secs=1
+--- フェーズ 0: base/head 出力 bit 一致の自己検証 ---
+m=512 n=512 k=512 bit-exact match: OK
+m=1024 n=1024 k=1024 bit-exact match: OK
+m=2048 n=2048 k=2048 bit-exact match: OK
+m=4096 n=4096 k=4096 bit-exact match: OK
+m=2048 n=2048 k=512 bit-exact match: OK
+m=4096 n=4096 k=1024 bit-exact match: OK
+--- フェーズ 1: 安定性セルフチェック（対照カーネル: 本番既定 dispatch_auto）---
+m=512 n=512 k=512 spread=0.4017 (NG: gate 超過) round_tflops=[0.7364, 0.4750, 0.6682, 0.4538, 0.4651, 0.6350]
+m=1024 n=1024 k=1024 spread=0.8107 (NG: gate 超過) round_tflops=[1.8393, 1.7834, 1.0595, 1.8805, 1.6879, 0.9881]
+m=2048 n=2048 k=2048 spread=0.7924 (NG: gate 超過) round_tflops=[1.7882, 3.2276, 3.2579, 3.0678, 3.2203, 3.1408]
+m=4096 n=4096 k=4096 spread=0.0200 (OK) round_tflops=[4.6711, 4.6850, 4.6438, 4.7380, 4.6630, 4.6467]
+m=2048 n=2048 k=512 spread=0.1246 (NG: gate 超過) round_tflops=[0.7916, 0.7807, 0.8347, 0.7721, 0.7365, 0.7803]
+m=4096 n=4096 k=1024 spread=0.0393 (OK) round_tflops=[0.9540, 0.9580, 0.9923, 0.9699, 0.9841, 0.9763]
+--- フェーズ 1 判定: 一部形状が spread ≤0.05 相当を満たさなかった。フェーズ 2・3（A/B 判定）は実行するが verdict は undetermined に倒す（安全側判断: 判定不可のまま採否を確定しない）。
+--- フェーズ 1 が一部形状で安定性ゲートを満たさなかったが、フェーズ 2・3 は実行を継続する（verdict は undetermined に倒す）。
+--- フェーズ 2: 条件付き loop unroll A/B（prepared 境界。base=off / head=on）---
+m=512 n=512 k=512 supplementary=false base_resolved=(64x32, resolved=requested) head_resolved=(64x32, resolved=requested) acc_product=8 head_unroll_expected=false base_median_tflops=0.9017 head_median_tflops=1.2449 head_over_base=1.3807 spread_base=0.6053 spread_head=0.7579 base_round_tflops=[2.0317, 0.9017, 1.8761, 0.8898, 1.8865, 0.8594] head_round_tflops=[0.9010, 1.8849, 0.9223, 1.9958, 1.2449, 1.8799]
+m=1024 n=1024 k=1024 supplementary=false base_resolved=(64x32, resolved=requested) head_resolved=(64x32, resolved=requested) acc_product=8 head_unroll_expected=false base_median_tflops=5.2522 head_median_tflops=6.0147 head_over_base=1.1452 spread_base=0.9829 spread_head=0.1696 base_round_tflops=[6.0287, 5.2522, 5.9728, 2.9256, 6.0656, 2.8409] head_round_tflops=[5.9542, 6.1095, 6.2632, 5.3232, 6.1138, 6.0147]
+m=2048 n=2048 k=2048 supplementary=false base_resolved=(64x32, resolved=requested) head_resolved=(64x32, resolved=requested) acc_product=8 head_unroll_expected=false base_median_tflops=8.2889 head_median_tflops=9.5632 head_over_base=1.1537 spread_base=0.1849 spread_head=0.0320 base_round_tflops=[8.1226, 8.2889, 9.6631, 9.7415, 8.0023, 9.4857] head_round_tflops=[9.5632, 9.5030, 9.5714, 9.8150, 9.5256, 9.7592]
+m=4096 n=4096 k=4096 supplementary=false base_resolved=(32x64, resolved=requested) head_resolved=(32x64, resolved=requested) acc_product=8 head_unroll_expected=false base_median_tflops=8.9302 head_median_tflops=8.9215 head_over_base=0.9990 spread_base=0.0900 spread_head=0.1792 base_round_tflops=[9.5784, 9.4348, 8.9668, 8.8889, 8.7353, 8.9302] head_round_tflops=[9.5222, 9.5078, 8.9670, 7.9930, 8.9135, 8.9215]
+m=2048 n=2048 k=512 supplementary=true base_resolved=(64x64, resolved=requested) head_resolved=(64x64, resolved=requested) acc_product=16 head_unroll_expected=true base_median_tflops=1.1801 head_median_tflops=5.9732 head_over_base=5.0616 spread_base=0.0114 spread_head=0.2663 base_round_tflops=[1.1848, 1.1768, 1.1744, 1.1801, 1.1879, 1.1809] head_round_tflops=[7.7422, 5.8240, 6.2503, 5.9732, 5.7554, 6.5597]
+m=4096 n=4096 k=1024 supplementary=true base_resolved=(64x64, resolved=requested) head_resolved=(64x64, resolved=requested) acc_product=16 head_unroll_expected=true base_median_tflops=1.1997 head_median_tflops=8.6061 head_over_base=7.1735 spread_base=0.1219 spread_head=0.9907 base_round_tflops=[1.1997, 1.2197, 1.2107, 1.1952, 1.0852, 1.2157] head_round_tflops=[9.4020, 10.2345, 9.0661, 8.6061, 4.6986, 6.2265]
+--- フェーズ 2 完了（prepared 境界。本 Issue の主判定対象）。`docs/perf/metal-gemm-n4096-kernel-gap.md` §7.10 へ記録すること。
+--- フェーズ 3: 条件付き loop unroll A/B（転送込み境界・参考値。base=off / head=on）---
+m=512 n=512 k=512 supplementary=false base_median_tflops=0.4568 head_median_tflops=0.4815 head_over_base=1.0539 spread_base=0.3834 spread_head=0.2805 base_round_tflops=[0.4568, 0.6675, 0.6773, 0.4500, 0.4778, 0.4318] head_round_tflops=[0.6532, 0.6560, 0.4746, 0.4815, 0.4768, 0.4857]
+m=1024 n=1024 k=1024 supplementary=false base_median_tflops=1.6905 head_median_tflops=1.6831 head_over_base=0.9957 spread_base=0.7222 spread_head=0.6883 base_round_tflops=[1.6905, 1.6074, 1.7916, 1.0253, 1.7793, 1.8244] head_round_tflops=[1.0567, 1.6831, 1.7447, 1.5800, 1.8297, 1.8607]
+m=2048 n=2048 k=2048 supplementary=false base_median_tflops=3.2591 head_median_tflops=3.1050 head_over_base=0.9527 spread_base=0.5452 spread_head=0.3086 base_round_tflops=[3.2638, 3.2415, 3.2775, 3.2890, 3.2591, 2.1217] head_round_tflops=[2.4744, 3.1050, 2.8763, 3.1968, 3.2812, 3.1763]
+m=4096 n=4096 k=4096 supplementary=false base_median_tflops=4.7036 head_median_tflops=4.6621 head_over_base=0.9912 spread_base=0.0808 spread_head=0.1046 base_round_tflops=[4.4037, 4.5780, 4.7036, 4.7642, 4.7316, 4.7516] head_round_tflops=[4.6621, 4.3137, 4.7542, 4.7759, 4.6217, 4.7329]
+m=2048 n=2048 k=512 supplementary=true base_median_tflops=0.8189 head_median_tflops=1.6286 head_over_base=1.9887 spread_base=0.0516 spread_head=0.5883 base_round_tflops=[0.8077, 0.8189, 0.8338, 0.7967, 0.8388, 0.8344] head_round_tflops=[1.8776, 1.6087, 1.6286, 1.9230, 1.1347, 1.9053]
+m=4096 n=4096 k=1024 supplementary=true base_median_tflops=0.9649 head_median_tflops=3.0433 head_over_base=3.1539 spread_base=0.1907 spread_head=0.2251 base_round_tflops=[0.9958, 0.9761, 0.9455, 0.9840, 0.9649, 0.8321] head_round_tflops=[3.1522, 3.1825, 3.0433, 2.5760, 3.1356, 2.9889]
+--- フェーズ 3 完了（転送込み境界。参考値）。`docs/perf/metal-gemm-n4096-kernel-gap.md` §7.10 へ記録すること。
+--- 実行完了。採否判定基準（正方 4 形状・補助 2 形状すべての head_over_base が 0.95 以上であること。改善は要求しない。実装計画§1.2(A) 参照）に従い、5 run 中央値を `docs/perf/metal-gemm-n4096-kernel-gap.md` §7.10 へ記録すること。フェーズ 3（転送込み境界）の ratios は参考値: [(512, false, 1.0538829361734185), (1024, false, 0.995657098069952), (2048, false, 0.9527007024345739), (4096, false, 0.9911720184361498), (2048, true, 1.9886874585268748), (4096, true, 3.1539099043020284)]
+verdict=undetermined (フェーズ 2〈prepared 境界〉基準・単一 run の参考値。5 run 中央値で最終判断する)
