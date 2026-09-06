@@ -465,6 +465,20 @@ impl TileConfig {
     /// 戻り値は [`shared_mem_bytes`](Self::shared_mem_bytes) と完全に一致
     /// する（NN 経路の非後退。本ファイル末尾テスト参照）。
     pub fn shared_mem_bytes_for(&self, pattern: crate::layout::TransposePattern) -> u32 {
+        self.shared_mem_bytes_for_pad(pattern, self.pad())
+    }
+
+    /// [`shared_mem_bytes_for`](Self::shared_mem_bytes_for) の pad 幅一般化版
+    /// （イシュー #1298。協調ロードパディング候補 `crate::tile::TgpPad` が
+    /// [`pad`](Self::pad) 導出の固定 2 値〈0/4〉以外〈8〉を渡せるようにする）。
+    /// `pad_elems(self.pad())` を渡した場合の戻り値は
+    /// [`shared_mem_bytes_for`](Self::shared_mem_bytes_for) と完全に一致する
+    /// （本ファイル末尾テスト参照）。
+    pub(crate) fn shared_mem_bytes_for_pad(
+        &self,
+        pattern: crate::layout::TransposePattern,
+        pad_elems: u32,
+    ) -> u32 {
         use crate::layout::TransposePattern;
         if !self.staged {
             return 0;
@@ -475,7 +489,7 @@ impl TileConfig {
         let bm = self.bm as u64;
         let bn = self.bn as u64;
         let bk = self.bk as u64;
-        let pad = self.pad() as u64;
+        let pad = pad_elems as u64;
         let compute = || -> Option<u64> {
             // A タイル: NN は `bm` 行 × `(bk+pad)` 列、転置は `bk` 行 ×
             // `(bm+pad)` 列（本ファイル冒頭ドキュメントコメント参照）。
@@ -1452,6 +1466,114 @@ impl FragLoadConfig {
 /// doc comment を参照（同一の dead_code 誤検知回避）。
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const FRAG_LOAD_CONFIG: FragLoadConfig = FragLoadConfig::DEFAULT;
+
+/// 協調ロードレイアウト候補（イシュー #1298）のうち「スレッド → float4
+/// グループ」割当軸。`shaders/gemm.metal` の `COOP_LOAD_LAYOUT` function
+/// constant（index 14）と 1:1 対応する。値域を型で保証する設計は
+/// [`FragLoadKSteps`] と同じ（`pub enum TileConfigError` への variant
+/// 追加を避ける方針・PR #672 codex-review 指摘を踏まえた設計判断）。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoopLoadLayout {
+    /// 既定（`idx = vi*4`。連続スレッドが同一行内の連続 float4 グループを
+    /// 担当。行優先・MLX steel `BlockLoader` 同型）。
+    RowLinear,
+    /// 行ストライド割当（`r = vi % rows; chunk = vi / rows; idx = r*row_len
+    /// + chunk*4`。連続スレッドが同一列チャンク内の連続行を担当）。
+    RowStrided,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl CoopLoadLayout {
+    /// `shaders/gemm.metal` の `COOP_LOAD_LAYOUT`（`constant uint`）へ渡す
+    /// 実効値（0 または 1）。
+    pub(crate) fn as_u32(self) -> u32 {
+        match self {
+            CoopLoadLayout::RowLinear => 0,
+            CoopLoadLayout::RowStrided => 1,
+        }
+    }
+}
+
+/// 協調ロードレイアウト候補（イシュー #1298）の「行末パディング要素数」軸。
+/// `shaders/gemm.metal` の既存 `TGP_PAD`（index 6）が受け取る値を、従来
+/// [`TileConfig::pad`] 導出の固定 2 値（0/4）から 0/4/8 の 3 択へ一般化する。
+/// 値域を型で保証することで、`pad_elems` が返す値が常に 4 の倍数
+/// （`gemm.metal` の float4 アラインメント前提。イシュー #538 の間接包含
+/// 論法を維持する）であることを実行時検証なしに保証する。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TgpPad {
+    /// パディングなし（0 要素）。
+    Zero,
+    /// 従来どおりの既定（4 要素 = 16 バイト。[`TileConfig::pad`] の
+    /// `staged=true` 構成と同じ値）。
+    Four,
+    /// 拡張パディング（8 要素 = 32 バイト）。
+    Eight,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl TgpPad {
+    /// `shaders/gemm.metal` の `TGP_PAD`（`constant uint`）へ渡す実効値
+    /// （f32 要素数。0・4・8 のいずれか）。
+    pub(crate) fn elems(self) -> u32 {
+        match self {
+            TgpPad::Zero => 0,
+            TgpPad::Four => 4,
+            TgpPad::Eight => 8,
+        }
+    }
+}
+
+/// 協調ロードレイアウト候補（イシュー #1298）の instance ゲート。
+/// `crate::gemm::MetalGemm::new_with_coop_load` が受け取り、
+/// `crate::pipeline::GemmGateConstants`（`tgp_pad_elems`/`coop_load_layout`）
+/// 経由で `shaders/gemm.metal` の `TGP_PAD`（index 6）/`COOP_LOAD_LAYOUT`
+/// （index 14）function constant へ畳み込まれる契約。`TileConfig` 自体へ
+/// フィールドを追加しない設計（`SWIZZLE_ENABLED`/`FINE_BARRIER_ENABLED`/
+/// `UNROLL_ACC_ENABLED`/`SOURCE_SPECIALIZATION_ENABLED`/`FragLoadConfig` と
+/// 同じ instance ゲート方式を踏襲する）。**本 sub-issue（#1298）は機構の
+/// 実装と bit 一致の自己検証のみを行い、性能実測・`tile::select` への
+/// 組み込み判断は行わない**（後続イシュー #1300／#1302／#1304 のスコープ。
+/// `docs/perf/metal-gemm-n4096-kernel-gap.md` §5）。`pub` にする理由は
+/// [`FragLoadKSteps`] doc comment と同じ（`new_with_coop_load` を `pub fn`
+/// にする以上、引数型も少なくとも同じ可視性が必要）。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CoopLoadConfig {
+    pub layout: CoopLoadLayout,
+    pub pad: TgpPad,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl CoopLoadConfig {
+    /// 本番既定（`crate::gemm::MetalGemm::new` が渡す値）。`gemm.metal` の
+    /// 既存 staged 協調ロード分岐（`COOP_LOAD_LAYOUT` の `else` 側＝
+    /// `idx = vi*4`）・`TGP_PAD`（従来どおり [`TileConfig::pad`] と同じ
+    /// 0/4）がテキスト無変更のまま走る構成と一致する。
+    pub const DEFAULT: CoopLoadConfig = CoopLoadConfig {
+        layout: CoopLoadLayout::RowLinear,
+        pad: TgpPad::Four,
+    };
+
+    /// 渡された [`TileConfig`] に対する実効パディング要素数を返す
+    /// （`!cfg.staged` の場合は常に `0`。[`TileConfig::pad`] と同じ導出
+    /// 規則をパディング幅だけ一般化したもの。`crate::gemm::MetalGemm::
+    /// pipeline_for_tile` が `GemmGateConstants::tgp_pad_elems` へ渡す値、
+    /// および `shared_mem_bytes_for_pad` の共有メモリ確保量計算の両方が
+    /// 本メソッドを経由することで、確保量とカーネルが実際にアクセスする
+    /// 範囲を常に一致させる fail-closed 契約を維持する）。
+    pub(crate) fn pad_elems(&self, cfg: TileConfig) -> u32 {
+        if cfg.staged { self.pad.elems() } else { 0 }
+    }
+}
+
+/// [`CoopLoadConfig::DEFAULT`] を本番既定として公開する定数
+/// （`FRAG_LOAD_CONFIG` 等と同型の設計。`crate::gemm::MetalGemm::new` が
+/// 本定数を渡す）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const COOP_LOAD_CONFIG: CoopLoadConfig = CoopLoadConfig::DEFAULT;
 
 /// [`TileConfig::unroll_acc_loops`] が unroll 版ループを選ぶ acc 積
 /// （`acc_rows * acc_cols`）の下限（イシュー #1282）。E1 実験（`docs/perf/
@@ -4423,5 +4545,154 @@ mod tests {
         assert_eq!(FRAG_LOAD_CONFIG.ksteps, FragLoadKSteps::One);
         assert_eq!(FragLoadKSteps::One.as_u32(), 1);
         assert_eq!(FragLoadKSteps::Two.as_u32(), 2);
+    }
+
+    /// イシュー #1298: `shaders/gemm.metal::coop_load_flat_index` と同一の
+    /// 式を Rust 側モデルとして固定する（デバイス前の唯一の全単射証明。
+    /// Linux 実行可能）。実機カーネル側の実装（`gemm.metal`）とはテキストで
+    /// 二重管理になるが、本ファイル冒頭 doc comment の「陳腐化しやすい
+    /// 実装詳細の重複」には該当しない: 両者は異なる言語・異なる実行環境
+    /// （ホスト Rust／デバイス MSL）のため機械的な単一ソース化ができず、
+    /// 全単射性の検証自体がこのモデルの目的である。
+    fn coop_load_flat_index_model(layout: CoopLoadLayout, vi: u32, rows: u32, row_len: u32) -> u32 {
+        match layout {
+            CoopLoadLayout::RowStrided => {
+                let r = vi % rows;
+                let chunk = vi / rows;
+                r * row_len + chunk * 4
+            }
+            CoopLoadLayout::RowLinear => vi * 4,
+        }
+    }
+
+    /// [`coop_load_flat_index_model`] が両レイアウトとも
+    /// `vi ∈ [0, rows*row_len/4)` を全 float4 グループ先頭添字（4 の倍数）
+    /// へ重複なく写す全単射であることを、`CANDIDATES` 全候補 × A-NN/A-T/
+    /// B-NN/B-T の `(rows, row_len)` 組合せで固定する（`gemm.metal` 側の
+    /// bit 一致論拠の前提。イシュー #1298 計画「2.2 bit 一致の論拠」節）。
+    #[test]
+    fn coop_load_flat_index_model_is_bijection_for_all_candidates_and_patterns() {
+        for &cfg in CANDIDATES.iter() {
+            if !cfg.staged {
+                continue; // 協調ロードは staged 経路専用（direct-load は本軸を参照しない）。
+            }
+            // A-NN: rows=bm, row_len=bk。A-T: rows=bk, row_len=bm。
+            // B-NN: rows=bk, row_len=bn。B-T: rows=bn, row_len=bk。
+            let shapes = [
+                (cfg.bm, cfg.bk),
+                (cfg.bk, cfg.bm),
+                (cfg.bk, cfg.bn),
+                (cfg.bn, cfg.bk),
+            ];
+            for (rows, row_len) in shapes {
+                for layout in [CoopLoadLayout::RowLinear, CoopLoadLayout::RowStrided] {
+                    let total_vecs = (rows * row_len) / 4;
+                    let mut seen = vec![false; (rows * row_len) as usize];
+                    for vi in 0..total_vecs {
+                        let idx = coop_load_flat_index_model(layout, vi, rows, row_len);
+                        assert!(
+                            idx.is_multiple_of(4),
+                            "layout={layout:?} rows={rows} row_len={row_len} vi={vi}: \
+                             idx={idx} が 4 の倍数でない"
+                        );
+                        assert!(
+                            (idx as usize) + 4 <= seen.len(),
+                            "layout={layout:?} rows={rows} row_len={row_len} vi={vi}: \
+                             idx={idx} が範囲外"
+                        );
+                        assert!(
+                            !seen[idx as usize],
+                            "layout={layout:?} rows={rows} row_len={row_len} vi={vi}: \
+                             idx={idx} が重複して写された（全単射違反）"
+                        );
+                        seen[idx as usize] = true;
+                    }
+                    assert!(
+                        seen.iter().step_by(4).all(|&v| v),
+                        "layout={layout:?} rows={rows} row_len={row_len}: \
+                         被覆されない float4 グループが存在する"
+                    );
+                }
+            }
+        }
+    }
+
+    /// イシュー #1298 T6（Linux 実行可能な部分）: [`COOP_LOAD_CONFIG`]
+    /// （本番既定）が [`CoopLoadConfig::DEFAULT`]（`RowLinear`・`Four`）と
+    /// 一致することを固定する（実機側の確認は `crate::gemm` の
+    /// `coop_load_default_matches_production_constants`）。
+    #[test]
+    fn coop_load_config_default_is_current_path() {
+        assert_eq!(COOP_LOAD_CONFIG, CoopLoadConfig::DEFAULT);
+        assert_eq!(COOP_LOAD_CONFIG.layout, CoopLoadLayout::RowLinear);
+        assert_eq!(COOP_LOAD_CONFIG.pad, TgpPad::Four);
+        assert_eq!(CoopLoadLayout::RowLinear.as_u32(), 0);
+        assert_eq!(CoopLoadLayout::RowStrided.as_u32(), 1);
+        assert_eq!(TgpPad::Zero.elems(), 0);
+        assert_eq!(TgpPad::Four.elems(), 4);
+        assert_eq!(TgpPad::Eight.elems(), 8);
+    }
+
+    /// [`CoopLoadConfig::pad_elems`] が `staged=false` の構成では常に `0`
+    /// を返す（`shaders/gemm.metal` の direct-load 経路が `TGP_PAD` を
+    /// 参照しない契約と対応。イシュー #1298）。
+    #[test]
+    fn coop_load_pad_elems_is_zero_when_not_staged() {
+        let cfg = CoopLoadConfig {
+            layout: CoopLoadLayout::RowLinear,
+            pad: TgpPad::Eight,
+        };
+        assert_eq!(cfg.pad_elems(TileConfig::SINGLE_SIMDGROUP_8X8), 0);
+    }
+
+    /// [`CoopLoadConfig::DEFAULT`] の `pad_elems` が staged 構成で
+    /// [`TileConfig::pad`] と一致する（本番既定の非後退。イシュー #1298）。
+    #[test]
+    fn coop_load_default_pad_elems_matches_tile_config_pad() {
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            assert_eq!(CoopLoadConfig::DEFAULT.pad_elems(cfg), cfg.pad());
+        }
+    }
+
+    /// [`TileConfig::shared_mem_bytes_for_pad`] へ `self.pad()` を渡した
+    /// 場合の戻り値が [`TileConfig::shared_mem_bytes_for`] と完全一致する
+    /// （イシュー #1298。既存 §1138 契約の非後退）。
+    #[test]
+    fn shared_mem_bytes_for_pad_matches_shared_mem_bytes_for_at_default_pad() {
+        use crate::layout::TransposePattern;
+        for &cfg in CANDIDATES.iter() {
+            for pattern in [
+                TransposePattern::Nn,
+                TransposePattern::Nt,
+                TransposePattern::Tn,
+                TransposePattern::Tt,
+            ] {
+                assert_eq!(
+                    cfg.shared_mem_bytes_for_pad(pattern, cfg.pad()),
+                    cfg.shared_mem_bytes_for(pattern)
+                );
+            }
+        }
+    }
+
+    /// pad=8 構成の共有メモリ確保量が pad=4（既定）以上になる（境界拡大の
+    /// 単調性。`setThreadgroupMemoryLength` が過小にならないことの
+    /// 実機非依存な事前確認。イシュー #1298）。
+    #[test]
+    fn shared_mem_bytes_for_pad_eight_is_at_least_pad_four_for_staged_candidates() {
+        use crate::layout::TransposePattern;
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            let bytes4 = cfg.shared_mem_bytes_for_pad(TransposePattern::Nn, 4);
+            let bytes8 = cfg.shared_mem_bytes_for_pad(TransposePattern::Nn, 8);
+            assert!(
+                bytes8 >= bytes4,
+                "候補 {cfg:?}: pad=8（{bytes8}）が pad=4（{bytes4}）を下回った"
+            );
+            assert_eq!(
+                bytes8 % 16,
+                0,
+                "候補 {cfg:?}: pad=8 の確保量が 16 の倍数でない"
+            );
+        }
     }
 }

@@ -982,13 +982,13 @@ fn gemm_metal_source_declares_transpose_boundary_helpers() {
     }
 }
 
-/// イシュー #1288/#1293 の証跡: ソーステキスト特殊化経路
-/// （`GEMM_SPEC_ENABLED`）が定義される `#ifdef` 分岐に 14 個の
-/// `= GEMM_SPEC_*` リテラル代入（function constant 経路 14 宣言と 1:1
-/// 対応。#1293 でフラグメントロード方式候補ゲート 2 個〈index 12/13〉が
-/// 追加され 12→14 へ増えた）が全て存在することをロックする。
+/// イシュー #1288/#1293/#1298 の証跡: ソーステキスト特殊化経路
+/// （`GEMM_SPEC_ENABLED`）が定義される `#ifdef` 分岐に 15 個の
+/// `= GEMM_SPEC_*` リテラル代入（function constant 経路 15 宣言と 1:1
+/// 対応。#1298 で協調ロードレイアウト候補ゲート 1 個〈index 14〉が
+/// 追加され 14→15 へ増えた）が全て存在することをロックする。
 #[test]
-fn gemm_metal_source_declares_spec_ifdef_block_with_all_fourteen_defines() {
+fn gemm_metal_source_declares_spec_ifdef_block_with_all_fifteen_defines() {
     assert!(
         GEMM_METAL_SOURCE.contains("#ifdef GEMM_SPEC_ENABLED"),
         "gemm.metal に #ifdef GEMM_SPEC_ENABLED 分岐（イシュー #1288）が見つかりません"
@@ -1008,22 +1008,23 @@ fn gemm_metal_source_declares_spec_ifdef_block_with_all_fourteen_defines() {
         "constant bool UNROLL_ACC_ENABLED = GEMM_SPEC_UNROLL_ACC_ENABLED;",
         "constant bool FRAG_LOAD_DEVICE_HOISTED = GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED;",
         "constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;",
+        "constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
-            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293）が見つかりません"
+            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293/#1298）が見つかりません"
         );
     }
 }
 
-/// イシュー #1288/#1293 の証跡: `#ifdef GEMM_SPEC_ENABLED` 導入後も
-/// `#else` 側の 14 個の function constant 宣言（本番既定経路。#188/#538/
-/// #540/#809/#1138/#1282/#1293 の各 index）がバイト同一で残っていることを
-/// ロックする（`crate::spec_source` へ移設した
+/// イシュー #1288/#1293/#1298 の証跡: `#ifdef GEMM_SPEC_ENABLED` 導入後も
+/// `#else` 側の 15 個の function constant 宣言（本番既定経路。#188/#538/
+/// #540/#809/#1138/#1282/#1293/#1298 の各 index）がバイト同一で残っている
+/// ことをロックする（`crate::spec_source` へ移設した
 /// `SOURCE_SPECIALIZATION_ENABLED` 既定 `false` の裏付け——`#else` 側が
 /// 変わっていなければ本番挙動は変わらない）。
 #[test]
-fn gemm_metal_source_else_branch_retains_all_fourteen_function_constants() {
+fn gemm_metal_source_else_branch_retains_all_fifteen_function_constants() {
     for needle in [
         "constant uint BM [[function_constant(0)]];",
         "constant uint BN [[function_constant(1)]];",
@@ -1039,13 +1040,77 @@ fn gemm_metal_source_else_branch_retains_all_fourteen_function_constants() {
         "constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];",
         "constant bool FRAG_LOAD_DEVICE_HOISTED [[function_constant(12)]];",
         "constant uint FRAG_LOAD_KSTEPS [[function_constant(13)]];",
+        "constant uint COOP_LOAD_LAYOUT [[function_constant(14)]];",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
             "gemm.metal の #else 側（本番既定）に function constant 宣言 `{needle}` が見つかりません。\
-             イシュー #1288/#1293 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
+             イシュー #1288/#1293/#1298 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
         );
     }
+}
+
+/// イシュー #1298 の証跡: `gemm_simdgroup_tiled` の staged 協調ロード
+/// 4 箇所（A-NN/A-T/B-NN/B-T）が `coop_load_flat_index` ヘルパを経由し、
+/// `uint idx = vi * 4;` の直接記述が本体から消えヘルパ内の `return vi * 4;`
+/// にのみ残っていることをロックする（`COOP_LOAD_LAYOUT` 分岐箇所の
+/// 存在確認）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_coop_load_flat_index_helper() {
+    for needle in [
+        "uint idx = coop_load_flat_index(vi, BK, BM);",
+        "uint idx = coop_load_flat_index(vi, BM, BK);",
+        "uint idx = coop_load_flat_index(vi, BN, BK);",
+        "uint idx = coop_load_flat_index(vi, BK, BN);",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal の gemm_simdgroup_tiled 協調ロードに `{needle}`（イシュー #1298）が見つかりません"
+        );
+    }
+    assert_eq!(
+        GEMM_METAL_SOURCE.matches("uint idx = vi * 4;").count(),
+        0,
+        "coop_load_flat_index ヘルパ導入後も `uint idx = vi * 4;` が本体側に直接残っている\
+         （ヘルパ経由への置換漏れの疑い）"
+    );
+    assert!(
+        GEMM_METAL_SOURCE
+            .contains("inline uint coop_load_flat_index(uint vi, uint rows, uint row_len) {"),
+        "gemm.metal に coop_load_flat_index ヘルパ本体（イシュー #1298）が見つかりません"
+    );
+    assert!(
+        GEMM_METAL_SOURCE.contains("return vi * 4;"),
+        "coop_load_flat_index ヘルパ内の既定（LAYOUT=0）分岐 `return vi * 4;` が見つかりません"
+    );
+}
+
+/// イシュー #1298 の証跡: `gemm_simdgroup_tiled_f16` は
+/// `COOP_LOAD_LAYOUT`／`coop_load_flat_index` のいずれも参照しない
+/// no-op 契約であることをソーステキストレベルで固定する
+/// （`crate::gemm::MetalGemm::pipeline_for_tile_f16` が常に `0` を渡す
+/// 契約の裏付け）。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_does_not_reference_coop_load_constants() {
+    let f16_start = GEMM_METAL_SOURCE
+        .find("kernel void gemm_simdgroup_tiled_f16(")
+        .expect("gemm_simdgroup_tiled_f16 の定義が見つかりません");
+    let f16_body = &GEMM_METAL_SOURCE[f16_start..];
+    // 次のトップレベル kernel/inline 定義までを本関数の本体範囲とみなす
+    // （`gemm_simdgroup_tiled_f16_source_does_not_reference_frag_load_
+    // constants` 等の既存証跡テストと同じ切り出し方針があれば揃えるが、
+    // 現状は「ファイル末尾まで」を許容範囲としても COOP_LOAD_LAYOUT/
+    // coop_load_flat_index はいずれもファイル中でこの関数より前にしか
+    // 現れないため、以下の contains 検査は f16 本体の非参照を正しく
+    // 検出できる）。
+    assert!(
+        !f16_body.contains("COOP_LOAD_LAYOUT"),
+        "gemm_simdgroup_tiled_f16 が COOP_LOAD_LAYOUT を参照している（no-op 契約違反）"
+    );
+    assert!(
+        !f16_body.contains("coop_load_flat_index"),
+        "gemm_simdgroup_tiled_f16 が coop_load_flat_index を参照している（no-op 契約違反）"
+    );
 }
 
 /// イシュー #1288 の証跡: `gemm_simdgroup_tiled` のアキュムレータ配列

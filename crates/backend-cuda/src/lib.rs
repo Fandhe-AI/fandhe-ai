@@ -436,6 +436,20 @@ pub use gemm::TiledPipelineFunction;
 // （`TiledPipelineFunction` re-export と同じ判断パターン）。
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledPipelineTile;
+// `PersistentTiledPipelineFunction`／`CudaGemm::compile_tiled_pipeline_
+// persistent_variant`／`CudaGemm::launch_tiled_pipeline_persistent_f32`
+// はベンチ・実機自己検証専用の常駐 API（イシュー #1346。persistent タイル
+// キュー版 f32 pipeline カーネルの opt-in ハンドル）。`TiledPipelineFunction`
+// と同じ判断パターン（テスト・ベンチ専用の意図に反して通常ビルドの安定
+// した公開 API 面へ漏出させない）で `internal-diagnostics` feature
+// （既定 off）でゲートする。`examples/gemm_tiled_pipeline_persistent_bench.rs`・
+// `tests/cpu_cuda_tiled_pipeline_persistent_parity.rs` の常駐 API 使用
+// 箇所は `Cargo.toml` の `[[example]]`/`[[test]]` セクションで
+// `required-features = ["internal-diagnostics"]` を指定して到達する。
+// **本番既定経路（`CudaGemm::new`）は本型を一切生成しない**（`gemm.rs::
+// PersistentTiledPipelineFunction` ドキュメンテーションコメント参照）。
+#[cfg(feature = "internal-diagnostics")]
+pub use gemm::PersistentTiledPipelineFunction;
 pub use gemm_auto::{
     CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
     TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,
