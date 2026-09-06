@@ -118,22 +118,22 @@ use crate::buffer::MetalBuffer;
 use crate::context_cache::{cached_context, cached_gemm};
 use crate::tile;
 
-const WARMUP_TRIALS: usize = 20;
-const MEASURED_TRIALS: usize = 20;
+pub(crate) const WARMUP_TRIALS: usize = 20;
+pub(crate) const MEASURED_TRIALS: usize = 20;
 
 /// `bench-fandhe --task gemm --mode reuse --phases`（イシュー #1189）が
 /// 対象とするのと同じサイズ（`docs/perf/metal-gemm-candle-gate-
 /// remeasurement.md` 対象形状。CUDA 側 `SIZES` と同一）。
 const SIZES: [usize; 3] = [1024, 2048, 4096];
 
-fn gen_square_ab(seed: u64, n: usize) -> (Vec<f32>, Vec<f32>) {
+pub(crate) fn gen_square_ab(seed: u64, n: usize) -> (Vec<f32>, Vec<f32>) {
     let mut rng = Xorshift64Star::new(seed);
     let a = rng.fill_vec(n * n);
     let b = rng.fill_vec(n * n);
     (a, b)
 }
 
-fn median_of(samples: &[f64]) -> Quartiles {
+pub(crate) fn median_of(samples: &[f64]) -> Quartiles {
     median_q1_q3(samples)
         .expect("samples collected from successful trials must be non-empty and NaN-free")
 }
@@ -148,7 +148,7 @@ fn print_quartiles_ms(label: &str, q: Quartiles) {
 }
 
 /// 1 反復分のフェーズ計測結果（ファイル冒頭「対応」表参照）。
-struct PhaseSample {
+pub(crate) struct PhaseSample {
     /// `diag_encode_tiled_nn` が実際にディスパッチした構成（`pipeline_
     /// for_tile` のフォールバック解決後）。要求構成 `cfg`（呼び出し元が
     /// `tile::select_for_device` で解決した値）と一致するとは限らない
@@ -156,19 +156,19 @@ struct PhaseSample {
     /// `pipeline_for_tile` ドキュメンテーションコメント参照）ため、
     /// 計測時間をどの構成の性能として記録したかを区別するために保持
     /// する（codex-review 指摘 #1189）。
-    resolved_cfg: tile::TileConfig,
-    upload_a_secs: f64,
-    upload_b_secs: f64,
-    alloc_c_secs: f64,
-    encode_secs: f64,
-    commit_wait_secs: f64,
+    pub(crate) resolved_cfg: tile::TileConfig,
+    pub(crate) upload_a_secs: f64,
+    pub(crate) upload_b_secs: f64,
+    pub(crate) alloc_c_secs: f64,
+    pub(crate) encode_secs: f64,
+    pub(crate) commit_wait_secs: f64,
     /// `commit_wait_secs` の内訳（イシュー #1276。`context.rs::
     /// synchronize_with_gpu_timestamps` が返す `GPUEndTime−GPUStartTime`）。
     /// `commit_wait_secs` へは二重計上しない（`run_size` の `sum of
     /// medians` は従来どおり 7 フェーズの合計のまま）。
-    kernel_gpu_secs: f64,
-    readback_secs: f64,
-    host_copy_secs: f64,
+    pub(crate) kernel_gpu_secs: f64,
+    pub(crate) readback_secs: f64,
+    pub(crate) host_copy_secs: f64,
 }
 
 /// 1 サイズの 1 反復を計測する。`ctx`／`gemm` は呼び出し元が
@@ -183,7 +183,7 @@ struct PhaseSample {
 /// auto` 呼び出しのたびに再解決するため反復間で変わらない。診断側で
 /// 反復ごとに解決し直しても結果は同じだが、解決コスト自体をフェーズへ
 /// 混入させないためループ外で 1 回だけ呼ぶ）。
-fn measure_one_phase_trial(
+pub(crate) fn measure_one_phase_trial(
     ctx: &crate::context::MetalContext,
     gemm: &crate::gemm::MetalGemm,
     a: &[f32],
@@ -308,10 +308,20 @@ fn measure_one_phase_trial(
     }
 }
 
-fn run_size(n: usize) {
-    let ctx = cached_context().expect("Metal device (system default) must be available");
-    let gemm = cached_gemm(&ctx).expect("MetalGemm construction must succeed");
-
+/// 1 サイズ分の全反復（warmup + 測定）を実行し、フェーズ内訳を
+/// `println!` する（`run_size` の本体。イシュー #1289 で `ctx`／`gemm`／
+/// `label` を引数化し、`gemm_spec_source_diag_tests` が本番
+/// `cached_gemm()` 以外の `MetalGemm` インスタンス（`new_with_source_
+/// specialization` で構築した base/head）でも同じフェーズ分解を再利用
+/// できるようにした。`run_size`（本番 `cached_gemm()` 固定）は本関数の
+/// 薄いラッパーのまま出力形式・挙動とも不変）。`label` は出力の先頭に
+/// 付与し、複数インスタンスの出力を `grep` で区別できるようにする。
+pub(crate) fn run_size_with(
+    ctx: &crate::context::MetalContext,
+    gemm: &crate::gemm::MetalGemm,
+    n: usize,
+    label: &str,
+) {
     // `dispatch_auto` と同一の構成解決（ファイル冒頭「1 サイズの 1 反復」
     // ドキュメンテーションコメント参照）。
     let cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
@@ -320,7 +330,7 @@ fn run_size(n: usize) {
     let mut keep_alive: Vec<Vec<f32>> = Vec::with_capacity(WARMUP_TRIALS + MEASURED_TRIALS);
 
     for _ in 0..WARMUP_TRIALS {
-        let _ = measure_one_phase_trial(&ctx, &gemm, &a, &b, n, cfg, &mut keep_alive);
+        let _ = measure_one_phase_trial(ctx, gemm, &a, &b, n, cfg, &mut keep_alive);
     }
 
     let mut upload_a = Vec::with_capacity(MEASURED_TRIALS);
@@ -341,7 +351,7 @@ fn run_size(n: usize) {
     let mut resolved_cfgs: Vec<tile::TileConfig> = Vec::with_capacity(MEASURED_TRIALS);
 
     for _ in 0..MEASURED_TRIALS {
-        let s = measure_one_phase_trial(&ctx, &gemm, &a, &b, n, cfg, &mut keep_alive);
+        let s = measure_one_phase_trial(ctx, gemm, &a, &b, n, cfg, &mut keep_alive);
         upload_a.push(s.upload_a_secs);
         upload_b.push(s.upload_b_secs);
         alloc_c.push(s.alloc_c_secs);
@@ -384,7 +394,7 @@ fn run_size(n: usize) {
     let fallback_occurred = resolved_cfgs.iter().any(|&rc| rc != cfg);
 
     println!(
-        "  N={n} requested_tile={cfg:?} resolved_tile={resolved_tile_report} (median over {MEASURED_TRIALS} trials, {WARMUP_TRIALS} warmup):"
+        "  [{label}] N={n} requested_tile={cfg:?} resolved_tile={resolved_tile_report} (median over {MEASURED_TRIALS} trials, {WARMUP_TRIALS} warmup):"
     );
     if fallback_occurred {
         println!(
@@ -419,6 +429,15 @@ fn run_size(n: usize) {
     print_quartiles_ms("readback", median_of(&readback));
     print_quartiles_ms("host_copy", median_of(&host_copy));
     println!("    sum of medians: {:.4} ms", total * 1e3);
+}
+
+/// [`run_size_with`] の本番既定ラッパー（従来の `run_size`。出力形式・
+/// 挙動とも従来どおり不変）: `cached_context()`／`cached_gemm()`（本番
+/// `ops::MetalBackendOps::gemm` と同じプロセス内キャッシュ）を使う。
+fn run_size(n: usize) {
+    let ctx = cached_context().expect("Metal device (system default) must be available");
+    let gemm = cached_gemm(&ctx).expect("MetalGemm construction must succeed");
+    run_size_with(&ctx, &gemm, n, "production");
 }
 
 /// 実機（Metal）依存の診断テスト。N=1024/2048/4096 の全サイズを計測

@@ -892,4 +892,200 @@ load averages は約 9.4/6.6/5.0（他セッション並走。bit 一致テス�
   後退時は結線せず理由を記録すること
 - §5「スコープ外」節の「E1〜E5（ソーステキスト特殊化 codegen…）」の
   記述のうち、ソーステキスト特殊化 codegen（E2）は本節で試作・自己検証
-  完了。性能実測は依然未実施のまま（#1289 へ引き継ぎ）
+  完了。性能実測は依然未実施のまま（#1289 へ引き継ぎ。→ §9 で実施）
+
+## 9. E2 特殊化版の反射値・純カーネル時間 before/after（イシュー #1289）
+
+### 9.0 目的・範囲
+
+§8.3「#1289 への引き継ぎ」の指示に従い、E2（ソーステキスト特殊化経路。
+`crate::spec_source`／`MetalGemm::new_with_source_specialization`）の
+(a) `MTLComputePipelineState` 反射値、(b) N=1024/2048/4096 の純カーネル
+時間（GPU タイムスタンプ `kernel_gpu`）を base（function constant 経路。
+`source_specialized=false`）/head（ソーステキスト特殊化経路。
+`source_specialized=true`）で before/after 比較し、E2 の有効性
+（`tile::select`／候補表への組み込み可否）を判断する。**本イシューでは
+`tile::SOURCE_SPECIALIZATION_ENABLED` は `false` のまま結線しない**
+（判定が「可」であっても結線・組み込み判断は #1302 へ引き継ぐ。§8.3 の
+安全側判断）。
+
+### 9.1 環境・プロトコル
+
+- 実機: Apple M4 Max（GPU 40 コア）。`sw_vers ProductVersion` 26.6.2
+  （`BuildVersion` 25G83）。`rustc -V` = `rustc 1.96.0
+  (ac68faa20 2026-05-25)`
+- HEAD: `2752ab2edb1cfca230457b4e1dee481a78efce9d`（`origin/main` 直上。
+  依存 #1288／#1277 いずれもマージ済み）
+- 追加した診断テスト（`crates/backend-metal/src/
+  gemm_spec_source_diag_tests.rs`。`#[cfg(all(test, target_os =
+  "macos"))]`）:
+  - `spec_source_reflection_dump_all_candidates`（AC-1。ディスパッチを
+    伴わず秒未満で完了。1 プロセス実行）
+  - `spec_source_kernel_gpu_ab_production_sizes`（AC-2。N=1024/2048/4096、
+    各 20 warmup + 20 測定。trial 偶奇で base→head／head→base を反転する
+    interleave で order-bias を相殺。`gemm_reuse_phase_diag_tests.rs::
+    measure_one_phase_trial`〈`pub(crate)` 化して再利用〉と同一のフェーズ
+    分解・GPU タイムスタンプ経路〈#1276〉を使う）
+  - `gemm::MetalGemm::diag_tile_pipeline_reflection`（`gemm.rs`。
+    `#[cfg(test)] pub(crate)`。反射値取得専用の薄いアクセサ。公開 API
+    面へは出さない。§8.3 の指示どおり）
+- 実行順序: (1) `#1288` の 3 実機テスト（`source_specialized_*`）の
+  非後退確認 → (2) 反射値ダンプ（1 プロセス） → (3) kernel_gpu A/B を
+  5 プロセス起動（各起動間 5 秒クールダウン）
+- 負荷状況: 各 run 直前の `uptime` load average（1 分値）は
+  6.18〜8.44（他セッション並走中の共有負荷環境。低負荷帯の確保はできな
+  かったが、interleave 方式のため base/head 双方が同一負荷条件下で計測
+  される。`docs/perf/logs/metal-gemm-e2-spec-source-ab-1289/
+  uptime_before_run{1..5}.txt`）。`pmset -g therm` は計測前後ともサーマル・
+  パフォーマンス警告記録なし
+- 生ログ・集計: `docs/perf/logs/metal-gemm-e2-spec-source-ab-1289/`
+  （`reflection.log`・`kernel_gpu_run{1..5}.log`・`aggregate.md`・
+  `smoke_source_specialized.log`・`env_info.txt`）
+
+### 9.2 反射値（AC-1）
+
+`tile::CANDIDATES` 全 9 候補 × base/head（NN）で、`requested_thread_
+count`／`max_total_threads_per_threadgroup`／`thread_execution_width`／
+`static_threadgroup_memory_length` を取得した。**全 9 候補・base/head の
+全組み合わせで反射値は完全一致**（差分なし）:
+
+| candidate | requested_thread_count | max_total_threads_per_threadgroup | thread_execution_width | static_threadgroup_memory_length |
+|---|---|---|---|---|
+| 0（64×64,wm2wn2） | 128 | 1024 | 32 | 0 |
+| 1（64×32,wm2wn2） | 128 | 1024 | 32 | 0 |
+| 2（32×64,wm2wn2） | 128 | 1024 | 32 | 0 |
+| 3（32×32,wm2wn2） | 128 | 1024 | 32 | 0 |
+| 4（64×64,wm1wn2） | 64 | 1024 | 32 | 0 |
+| 5（64×32,bk32,wm2wn2） | 128 | 1024 | 32 | 0 |
+| 6（64×32,bk8,wm4wn1） | 128 | 1024 | 32 | 0 |
+| 7（single simdgroup 8×8） | 32 | 1024 | 32 | 0 |
+| 8（32×64,wm1wn2） | 64 | 1024 | 32 | 0 |
+
+`static_threadgroup_memory_length` が全候補で 0 になるのは §2 と同じ
+構造的理由（`setThreadgroupMemoryLength_atIndex` によるランタイム指定
+方式のため、コンパイル時反射値には現れない）。全候補で `resolved_tile
+== requested`（フォールバック非経由）も確認済み。
+
+**含意**: E2（ソーステキストレベルでのアキュムレータ配列厳密サイズ化）
+は、コンパイラが `MTLComputePipelineState` に報告する占有率上限
+（`maxTotalThreadsPerThreadgroup`／`threadExecutionWidth`）・静的
+threadgroup メモリ量のいずれも変化させない。§2 が「反射値レベルでは
+H1（レジスタ圧仮説）非支持」と判定した結論は、function constant 特殊化
+だけでなくソーステキスト特殊化（E2）でも同様に成立する（反射値という
+観測粒度では両経路に差が現れない）。
+
+### 9.3 kernel_gpu 純カーネル時間（AC-2）
+
+5 プロセス起動・各 20 測定中央値の 5 run 集計（詳細は
+`docs/perf/logs/metal-gemm-e2-spec-source-ab-1289/aggregate.md`）:
+
+| N | base median 5 run range (ms) | head median 5 run range (ms) | head/base 比の 5 run 中央値 | 備考 |
+|---|---|---|---|---|
+| 1024 | 0.4759〜0.7167 | 0.5797〜0.8504 | **1.219321** | 5 run 中 4 run が比 >1.03、3 run が比 >1.2。head が一貫して遅い方向 |
+| 2048 | 2.4737〜3.7546 | 2.5985〜3.8021 | **1.011548** | ±5% 帯内（有意差なし）。base 自体の run 間ばらつきが大きい（#1277 §11 の二峰性と整合） |
+| 4096 | 14.1349〜14.3084 | 14.3358〜14.5638 | **1.015641** | ±5% 帯内だが 5 run 全てで head > base（一貫した微後退方向）。base 絶対値は安定（レンジ幅 0.17 ms） |
+
+N=4096 の base 絶対値（14.13〜14.31 ms）は `docs/perf/metal-gemm-
+reuse-phase-1277` §11 が記録した v0.6.0 ピン当時の分母（13.7051 ms）と
+近い水準で、妥当性帯として許容範囲内と判断する。一方 N=1024 の base
+絶対値（0.4759〜0.7167 ms）は同分母（1.0267 ms）より一貫して小さく、
+本イシューの計測環境（他セッション並走の共有負荷）・HEAD の違いによる
+ものと推定するが、深掘りはスコープ外とする（§9.5）。
+
+### 9.4 採否判断
+
+**組み込み不可（REJECT）** と判定する。判定基準（本イシューで新たに定めた
+以下の 3 区分。他候補〈E1 loop unroll・#1188〉で採った基準と同じ考え方を
+踏襲するが、本 doc 内に既存の §番号節としては存在しないため、ここに明文化
+する）に照らすと:
+
+- **候補表組み込み可**: N=2048 かつ N=4096 で改善（head/base 比 <1.0）、
+  かつ N=1024 の後退が 5% 以内（head/base 比 <=1.05）
+- **有効性なし → 組み込み不可**: 全 N で比が ±5% 帯内（有意差なし）、
+  または大形状（N=2048／N=4096）で後退
+- **判定不可（undetermined）**: run 間で改善／後退の方向が一貫せず
+  ばらつきが大きい場合
+
+- 「候補表組み込み可」の条件（N=2048 かつ N=4096 で改善〈比 <1.0〉、
+  N=1024 の後退が 5% 以内）は**いずれも満たさない**: N=2048／N=4096 は
+  改善方向ではなく、5 run 中央値でむしろ微後退（1.011〜1.016 倍）。
+  N=1024 は後退が 5% を明確に超える（5 run 中央値 1.219 倍、約 22%
+  後退）
+- 「有効性なし → 組み込み不可」の条件のうち「全 N で比が ±5% 帯内」は
+  N=1024 で満たさないが、「大形状で後退」は **N=4096 のみ**満たす
+  （5 run 全てで head > base、一貫して微後退方向。1.013〜1.028 倍）。
+  N=2048 は 5 run 全てで head > base ではなく、run 3（0.985772）・
+  run 5（0.913344）の 2 run は head < base（比 <1.0。head が base を
+  約 1.4〜8.7% 下回る）である。ただし N=2048 の 5 run 中央値（1.011548）
+  自体は ±5% 帯内に収まり、`aggregate.md` が記す通り base 自体の run 間
+  ばらつき（2.47〜3.75 ms。#1277 §11 の二峰性と整合）が支配的で、
+  head/base 比の符号が run ごとに反転する程度には「有意差なし」の範囲と
+  判断する（この意味で N=2048 は「大形状で後退」ではなく「±5% 帯内・
+  有意差なし」区分に該当する）。以上により本条件は N=4096 の一貫した
+  後退（区分「大形状で後退」）と N=1024／N=2048 の「±5% 帯内または
+  それを明確に超える後退」の組み合わせで成立する
+- 15 run 中、head が base を下回った（比 <1.0。改善方向を示した）run は
+  N=1024 の run 5（0.877732）・N=2048 の run 3（0.985772）・run 5
+  （0.913344）の計 3 run のみで、残り 12 run は head > base（後退方向）
+  である。この 3 run のうち N=1024 run 5 は単独では 12.2% の改善幅だが、
+  同じ N=1024 の他 4 run（run 1/2/4 が比 >1.2＝約 22〜23% 後退）と符号が
+  逆転しており run 間で方向が一致しない。N=2048 の run 3/5 も改善幅は
+  1.4〜8.7% と小さく、同じ N=2048 の run 1/2/4（比 >1.0）と符号が逆転
+  している。「判定不可（undetermined）」の基準は「run 間で改善／後退の
+  方向が一貫せずばらつきが大きい場合」だが、本判断では 5 run 中央値
+  （N=1024: 1.219321・N=2048: 1.011548・N=4096: 1.015641）を採用基準の
+  一次指標とし、run ごとの符号反転は「中央値の信頼区間内のノイズ」として
+  扱う（`docs/perf/metal-bench-noise-protocol.md` の中央値ベース判定方針
+  と同じ考え方）。N=4096 は符号反転が皆無（5 run 全て同方向）で
+  undetermined 該当性を明確に排除できるが、N=1024／N=2048 は符号反転を
+  伴う点で厳密には undetermined 基準に近い。それでも本 doc では
+  undetermined と判定せず REJECT へ倒す判断とした理由は次のとおり:
+  (a) N=1024 は中央値が 1.219321（約 22% 後退）と ±5% 帯を大きく超えて
+  おり、符号反転は 5 run 中 1 run のみでノイズとして扱っても中央値の
+  頑健性は損なわれない、(b) N=2048 は符号反転を伴い、5 run 全体の比の
+  範囲は 0.913344〜1.050447（run 5〜run 4）で、run 5 単独は ±5% 帯を
+  明確に下回る（約 8.7% の改善方向）ため「比が終始 ±5% 帯内」とは言えない。
+  ただし 5 run 中央値（1.011548）は ±5% 帯内であり、改善方向の run
+  （3・5）と後退方向の run（1・2・4）が拮抗して符号反転しているため、
+  中央値ベースの判定方針（`docs/perf/metal-bench-noise-protocol.md`）に
+  従い「改善〈比 <1.0〉」を安定して示したとは判断せず「有効性なし」
+  区分の範囲内として扱う、(c) 3 サイズ中 2 サイズ
+  （N=1024・N=4096）が明確に REJECT 側の基準を満たし、残り 1 サイズ
+  （N=2048）も「候補表組み込み可」の基準（改善〈比 <1.0〉）を満たさない
+  ため、「候補表組み込み可」の 3 条件同時成立が構造的に不可能（判定を
+  覆すには N=2048 に加え N=1024／N=4096 も改善方向へ転じる必要があるが
+  そのような run は 15 run 中に存在しない）。以上により本判断は
+  undetermined ではなく REJECT を採用する
+
+**結論**: E2（ソーステキスト特殊化によるアキュムレータ配列の厳密サイズ
+化）は、反射値レベルでも実測 kernel_gpu レベルでも性能上の利得を示さず、
+むしろ N=1024 で明確な後退（5 run 中央値 約 22%。ただし run 5 のみ約
+12% の改善方向）・N=4096 で軽微だが 5 run 全てに一貫した後退（約 1〜2%）
+を示した。N=2048 は 5 run 中央値では ±5% 帯内（有意差なし）だが run 3・
+run 5 は改善方向・run 1/2/4 は後退方向と符号が割れており、単独では
+「有効性あり」の根拠にならない。§2 の H1 仮説（function constant 特殊化後も
+コンパイラが厳密サイズでレジスタ割付を最適化しない）を反射値レベルで
+補完的に検証する目的は達成したが、E2 自体は候補表・`tile::select` への
+組み込み対象としない。`tile::SOURCE_SPECIALIZATION_ENABLED` は `false`
+のまま維持し、`#1302`（元は「E2 の `tile::select` 組み込み判断」を担う
+予定だった）は本判定（REJECT）を根拠に組み込み作業なしでクローズ可能と
+判断する（PR 本文・§9.5 に記載）。
+
+### 9.5 スコープ外・引き継ぎ
+
+- N=1024 の base 絶対値が `docs/perf/metal-gemm-reuse-phase-1277` の
+  分母より小さい理由の深掘り（本イシューの計測環境・HEAD 差異による
+  ものと推定するに留める）
+- f16 経路（`gemm_simdgroup_tiled_f16`）への E2 展開（`spec_source.rs`
+  は f32 経路のみを対象。#1288 と同じスコープ外判断）
+- NT/TN/TT 転置パターンでの反射値・性能比較（本イシューは NN のみを
+  計測対象とした。§8.1 の bit 一致自己検証は #1288 で NT/TN/TT も含めて
+  完了済みのため、性能面のみの積み残し）
+- 真のレジスタ spill 計測（Xcode Instruments 等。§5 スコープ外の継続）
+
+### 9.6 関連ログ
+
+`docs/perf/logs/metal-gemm-e2-spec-source-ab-1289/`（`reflection.log`・
+`kernel_gpu_run{1..5}.log`・`aggregate.md`・`smoke_source_specialized.log`・
+`env_info.txt`・`uptime_before_run{1..5}.txt`・`pmset_therm_before.txt`・
+`pmset_therm_after.txt`）

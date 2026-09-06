@@ -1,0 +1,7 @@
+machdep.cpu.brand_string: Apple M4 Max
+sw_vers ProductVersion: 26.6.2
+sw_vers BuildVersion: 25G83
+rustc -V: rustc 1.96.0 (ac68faa20 2026-05-25)
+cargo -V: cargo 1.96.0 (30a34c682 2026-05-25)
+base commit (origin/main at branch creation time): 2752ab2edb1cfca230457b4e1dee481a78efce9d
+branch: test/1289-metal-e2-spec-source-ab

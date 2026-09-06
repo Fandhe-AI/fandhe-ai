@@ -293,6 +293,22 @@ pub mod gemm;
 // `kernel_gpu`（GPUStartTime/GPUEndTime）変種の実体。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_reuse_phase_diag_tests;
+// E2 特殊化版（`spec_source`／`gemm::MetalGemm::new_with_source_
+// specialization`。イシュー #1288）の `MTLComputePipelineState` 反射値・
+// N=1024/2048/4096 純カーネル時間（GPU タイムスタンプ）を base（function
+// constant 経路）/head（ソーステキスト特殊化経路）で before/after 比較
+// する診断テスト（イシュー #1289）。`gemm::MetalGemm::
+// diag_tile_pipeline_reflection`（`#[cfg(test)] pub(crate)`）・
+// `gemm_reuse_phase_diag_tests::run_size_with`（`pub(crate)`。同一
+// フェーズ分解ロジックを任意の `MetalGemm` インスタンスで再利用する
+// ために本イシューで `pub(crate)` 化）へ到達するため、`gemm_reuse_
+// phase_diag_tests` と同じ理由でクレートルートの兄弟モジュールとして
+// 配置する。`objc2` 系 FFI 型に触れるため同じ `cfg(all(test,
+// target_os = "macos"))` を付ける。プロダクションコード（`gemm.rs`
+// の既存関数・`gemm_reuse_phase_diag_tests.rs` の既存フェーズ分解
+// ロジック本体）は無変更。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_spec_source_diag_tests;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
