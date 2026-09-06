@@ -1,0 +1,60 @@
+イシュー #1300: E4 協調ロードレイアウト候補（tile::CoopLoadConfig）の
+N=1024/2048/4096 純カーネル時間 5 回計測（実行環境記録。内部ホスト名は含めない）
+
+## ハードウェア・OS
+- CPU/GPU: Apple M4 Max（GPU 40 コア）
+- OS: macOS 26.6.2（BuildVersion 25G83）
+- rustc: 1.96.0 (ac68faa20 2026-05-25)
+- cargo: 1.96.0 (30a34c682 2026-05-25)
+
+## リポジトリ状態
+- base commit: 98bc216ce49c0acb55838215d9c8b8218c981a38（origin/main）
+- 作業ブランチ: test/1300-metal-e4-coop-load-ab
+- 対象イシュー: #1300（依存: #1298 CLOSED・#1277 CLOSED）
+
+## 実行コマンド
+- ゲート（T1〜T6 bit 一致）:
+  `cargo test -p fandhe-ai-backend-metal --release --lib -- --ignored --nocapture --test-threads=1 coop_load`
+  → 7 test 全 pass（gemm::tests:: の 6 bit-match テスト + 診断テスト smoke 実行）
+- 計測（5 プロセス起動）:
+  `cargo test -p fandhe-ai-backend-metal --release --lib coop_load_kernel_gpu_ab_production_sizes -- --ignored --nocapture --test-threads=1`
+
+## 負荷状況（実測。`docs/real-hardware-verification-env.md` §7.1 の load average
+   ポーリング方針に従い、着手前に 5 分間・60 秒間隔でポーリングした）
+- 開始直前: `load averages: 4.49 6.33 8.45`（1分/5分/15分）・`21 users`（同一機を
+  他セッションが共有していることを示唆。過去 #1186/#1187/#1278/#1279 と同じ状況）
+- 5 分間のポーリング推移: 2.65 → 1.96 → 2.32 → 3.89 → 3.17（1 分値）。
+  1 分値 < 3.0 に安定して収束しなかったため、5 分（5 サンプル）で打ち切って計測を
+  開始した（30 分上限まで待機しなかった。「30 分待機した」わけではない）
+- 計測直前（1 回目 run 開始時）: `load averages: 3.08 4.12 6.73`
+- pmset -g therm: 計測前後とも「No thermal warning level has been recorded」
+  （サーマルスロットリングの記録なし）
+
+## 並走プロセス（プロセス名のみ。ユーザー名・絶対パスは記録しない）
+- `pgrep -fl 'gemm_|cargo test|cargo run|bench'`: 計測直前は該当プロセスなし
+  （本エージェント自身のプロセスが起動する前の時点）
+
+## メモリ使用量
+- ホスト側キープアライブは N ごとにスコープを抜けて drop する設計
+  （`gemm_coop_load_diag_tests.rs` 冒頭コメント「メモリ使用量」参照）。
+  N=4096・6 候補同時保持時のピーク見積り ≈ 16.1 GiB（本機 64 GiB のため
+  truncate 不要）。実行中の swap 発生・OOM は観測しなかった
+
+## 共有メモリ事前フィルタの結果
+- 全 5 run・全 N（1024/2048/4096）で 6 候補すべてが
+  `shared_mem_bytes_for_pad <= maxThreadgroupMemoryLength` を満たし、
+  対象外候補は発生しなかった（ログに「共有メモリ事前フィルタで対象外」の
+  出力なし）
+
+## interleave（order-bias 相殺）
+- trial index による開始オフセット回転を実装どおり適用（`gemm_coop_load_diag_
+  tests.rs` の `offset = trial % num_active` ロジック）
+
+## 解釈上の注意（環境ノイズ）
+- 上記負荷状況が示すとおり、本機は計測期間を通じて他セッションと共有された
+  状態だった。個々の run のログで q3（第 3 四分位）が中央値の数倍に達する
+  ケース（例: N=1024 run1 の L0-P8 は q1=0.6025・median=1.0289・run3 では
+  q1=0.3240 など、run 間で q1 が大きくばらつく）が見られ、環境負荷の変動が
+  トレイル単位で計測値に混入していることを示す。5 run 中央値の中央値
+  （aggregate.md）と run 単位の符号一貫性の両方を判断材料とした
+  （§11.4 参照）
