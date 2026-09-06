@@ -1,0 +1,66 @@
+イシュー #1347 実機計測環境情報（DGX Spark GB10。実ホスト名は含めない。
+`docs/real-hardware-verification-env.md` §3〜4 準拠）。
+
+計測日: 2026-09-07
+転送元コミット: 98bc216ce49c0acb55838215d9c8b8218c981a38（main。本ブランチはこの
+  コミット + 本 PR の未コミット変更ツリーを rsync 転送した。#1182/#1189 等と
+  同じパターン: 単一コミットは本実測の後に作成される）
+
+$ nvidia-smi --query-gpu=name,driver_version,utilization.gpu --format=csv
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+（ゲート A/B/C 実行前に 0% を確認。ゲート C 実行中は自身のベンチプロセスに
+  よる占有のみで、他プロセスの競合はなし）
+
+$ uptime（実行前）
+05:26:57 up 10 days, 16:53, 5 users, load average: 0.24, 0.07, 0.04
+
+$ nvcc --version
+Built on Wed_Aug_20_01:57:39_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+
+$ rustc -V
+rustc 1.97.0 (2d8144b78 2026-07-07)
+
+$ cargo -V
+cargo 1.97.0 (c980f4866 2026-06-30)
+
+実行コマンド:
+
+# ゲート A（bit 同一自己検証。AC-2 本体）
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_persistent_parity -- --ignored --nocapture --test-threads=1
+=> gateA_bitexact.log（10 passed; 0 failed; 0 ignored; 2 filtered out（非 ignore の
+   スモーク 2 本））
+
+# ゲート B（非 persistent 版の既存回帰。128×64 ソース分割がバイト同一であることの
+# 実機確認を兼ねる）
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture --test-threads=1
+=> gateB_pipeline_parity.log（17 passed; 0 failed; 0 ignored; 2 filtered out）
+
+# ゲート C（純カーネル時間比較。auto/bpsm1 とも 5 回連続実行）
+cargo run -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --example gemm_tiled_pipeline_persistent_bench -- \
+  --sizes 256,512,1024,2048,4096 --tile both --blocks-per-sm auto
+=> gateC_persistent_auto_run{1..5}.log（判定に使う系列）
+
+cargo run -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --example gemm_tiled_pipeline_persistent_bench -- \
+  --sizes 256,512,1024,2048,4096 --tile both --blocks-per-sm 1
+=> gateC_persistent_bpsm1_run{1..5}.log（感度行。採否判定には使わない）
+
+各 run 前後で `nvidia-smi --query-gpu=utilization.gpu` が実行者以外のプロセスで
+占有されていないことを確認済み。ゲート C auto の run1 は初回実行時に別プロセス
+（本セッション自身の重複実行、直後に停止）と競合し不完全なログとなったため
+1 回撮り直した（撮り直し後のログのみを掲載。撮り直し以外の run2〜run5 は初回
+実行のログをそのまま採用）。
+
+解決済み占有率（`--blocks-per-sm auto`。ゲート C ログの起動ヘッダより）:
+- tile=64x64: num_sms=48 blocks_per_sm=3 grid_capacity=144
+  （モジュールコメント「occupancy 訂正」で 64×64 は 3 block/SM が成立すると
+  した既存記述と一致）
+- tile=128x64: num_sms=48 blocks_per_sm=2 grid_capacity=96
+  （`kernels_tiled_pipeline_128x64.rs` 冒頭コメント「GB10 occupancy 訂正」の
+  「smem 制約により同時常駐は 2 block/SM に留まる」という主張を実機で確認）
