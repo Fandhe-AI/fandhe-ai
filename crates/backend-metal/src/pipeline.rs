@@ -41,6 +41,32 @@ const GEMM_MSL_SRC: &str = include_str!("shaders/gemm.metal");
 pub(crate) type MtlLibrary = ProtocolObject<dyn MTLLibrary>;
 pub(crate) type MtlPipeline = ProtocolObject<dyn MTLComputePipelineState>;
 
+/// `gemm_simdgroup_tiled`（[`make_pipeline_with_constants`]）の実験的
+/// bool ゲート 3 個（`SWIZZLE_ENABLED`〈index 7・#540〉・
+/// `FINE_BARRIER_ENABLED`〈index 8・#809〉・`UNROLL_ACC_ENABLED`
+/// 〈index 11・#1282〉）を束ねる構造体。3 個目（`unroll_acc_enabled`）を
+/// 追加する際、[`make_pipeline_with_constants`] へ素朴に引数を 1 個
+/// 増やすと `clippy::too_many_arguments`（`-D warnings`）に抵触するため、
+/// `#[allow]` を安易に追加せず構造体へ束ねる方式で回避する
+/// （`.claude/rules/coding-rust.md`「`#[allow]` の安易な追加で黙らせない」）。
+/// 各フィールドの意味・A/B 計測用途は [`make_pipeline_with_constants`] の
+/// 同名引数ドキュメンテーションコメント（以下）を参照。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GemmGateConstants {
+    pub(crate) swizzle_enabled: bool,
+    pub(crate) fine_barrier_enabled: bool,
+    /// `gemm_simdgroup_tiled` のアキュムレータ系ループへの条件付き
+    /// loop unroll（イシュー #1282）ゲート。呼び出し元
+    /// [`crate::gemm::MetalGemm::pipeline_for_tile`] が候補ごとに
+    /// `crate::tile::unroll_acc_loops_for(candidate, instance_flag)` で
+    /// 導出した実効値を渡す契約（インスタンスの opt-in フラグと候補の
+    /// acc 積閾値の AND。`crate::tile::unroll_acc_loops_for` doc comment
+    /// 参照）。`gemm_simdgroup_tiled_f16` は index 11 を参照しないため、
+    /// `pipeline_for_tile_f16` が渡す値は無害な no-op（`swizzle_enabled`／
+    /// `fine_barrier_enabled` と同じ扱い）。
+    pub(crate) unroll_acc_enabled: bool,
+}
+
 /// `shaders/gemm.metal` を実行時コンパイルして `MTLLibrary` を返す。
 ///
 /// [`crate::gemm::MetalGemm::new`] から、パイプライン構築（[`make_pipeline`]）の
@@ -125,6 +151,16 @@ pub(crate) fn make_pipeline(
 /// 保持する固定値を伝播する（`MetalGemm::new` は `crate::tile::
 /// FINE_BARRIER_ENABLED`〈既定 `false`〉を渡し、`MetalGemm::new_with_fine_barrier`
 /// はベンチ用途で任意値を渡せる）。
+///
+/// `unroll_acc_enabled`（index 11 の function constant 値。イシュー
+/// #1282）は `gemm_simdgroup_tiled` のアキュムレータ系ループへの条件付き
+/// loop unroll ゲート。呼び出し元 `crate::gemm::MetalGemm::pipeline_for_tile`
+/// が候補（フォールバック chain 巡回中の実際の `TileConfig`）ごとに
+/// `crate::tile::unroll_acc_loops_for` で導出した実効値を渡す。`swizzle_enabled`／
+/// `fine_barrier_enabled`／`unroll_acc_enabled` の 3 個は
+/// [`GemmGateConstants`] へ束ねて渡す（`clippy::too_many_arguments`
+/// 回避。同構造体のドキュメンテーションコメント参照）。
+///
 /// `pattern`（index 9/10 の `TRANS_A`/`TRANS_B`。イシュー #1138）は
 /// `gemm_simdgroup_tiled`（NT/TN/TT 転置ロード拡張）のみが参照する。
 /// `gemm_simdgroup_tiled_f16` など未参照の関数へ特殊化する際も
@@ -136,10 +172,14 @@ pub(crate) fn make_pipeline_with_constants(
     library: &MtlLibrary,
     function_name: &'static str,
     cfg: TileConfig,
-    swizzle_enabled: bool,
-    fine_barrier_enabled: bool,
+    gates: GemmGateConstants,
     pattern: TransposePattern,
 ) -> Result<Retained<MtlPipeline>, MetalError> {
+    let GemmGateConstants {
+        swizzle_enabled,
+        fine_barrier_enabled,
+        unroll_acc_enabled,
+    } = gates;
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
 
@@ -239,6 +279,20 @@ pub(crate) fn make_pipeline_with_constants(
             std::ptr::NonNull::from(&trans_b).cast(),
             MTLDataType::Bool,
             10,
+        );
+        // 条件付き loop unroll ゲート（イシュー #1282）。`gemm_simdgroup_tiled`
+        // のアキュムレータ系ループ 6 ブロックが `if (UNROLL_ACC_ENABLED)` で
+        // 参照する。`gemm_simdgroup_tiled_f16` は参照しないため、
+        // `pipeline_for_tile_f16` からの呼び出しでは無害な no-op
+        // （`swizzle_enabled`/`fine_barrier_enabled` と同じ扱い）。index は
+        // TRANS_B（index 10）の直後の 11（`shaders/gemm.metal` 冒頭
+        // UNROLL_ACC_ENABLED 宣言と 1:1 対応。`tests/shader_source_evidence.rs`
+        // が index を含めて固定する）。
+        let unroll_acc = unroll_acc_enabled;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&unroll_acc).cast(),
+            MTLDataType::Bool,
+            11,
         );
     }
 

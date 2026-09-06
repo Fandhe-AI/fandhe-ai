@@ -476,3 +476,109 @@ pragma の本番結線を撤回する**（§7.7a）。
   `e1_sweep_run{1,2,3,4,5}.log`（`gemm_transpose_tile_sweep` 全形状・全候補）・
   `base_bench_run{1,2,3,4,5}.log`・`e1_bench_run{1,2,3,4,5}.log`（本番
   `dispatch_auto` 経路））
+
+### 7.9 条件付き gating の実装（イシュー #1282）
+
+§7.7 で「後続 issue として整理する」とした条件付き gating（function
+constant 分岐でループ本体を複製する方式）を実装した（親 #1281 配下の
+sub-issue）。**性能実測・本番既定の `true` への切替判断は本 issue のスコープ
+外**であり、兄弟イシュー #1284 が引き継ぐ。本節は機構の実装内容と、実機
+非依存の自己検証結果（AC-1・一部 AC-4）を記録する。
+
+#### 7.9.1 設計
+
+- `crates/backend-metal/src/shaders/gemm.metal` 冒頭に function constant
+  `UNROLL_ACC_ENABLED`（index 11。`TRANS_A`/`TRANS_B`〈#1138・index 9/10〉の
+  直後）を追加した
+- `gemm_simdgroup_tiled`（f32 本体）のアキュムレータ系ループ 10 箇所
+  （acc 初期化 外/内・staged `a_frag`/`b_frag` ロード・staged MMA 発行
+  外/内・direct-load MMA 発行 外/内・エピローグストア 外/内）を、E1
+  （§7.1〜§7.5）で無条件付与した `#pragma clang loop unroll(full)` を含む
+  「unroll 版」と、従来コードとバイト同一の「非 unroll 版」の 2 系統へ
+  `if (UNROLL_ACC_ENABLED) { ... } else { ... }`（計 6 ブロック）で複製した。
+  両系統とも演算オペランド列（累算順・蛇行走査順）・REQ-8 手動境界チェック
+  は不変で、`else` 側は `f19edce` 以前の状態とバイト同一を保つ契約とした
+- `crates/backend-metal/src/tile.rs`: `UNROLL_ACC_ENABLED`（本番既定
+  `false`）・`UNROLL_ACC_MIN_PRODUCT = 16`（E1 実測境界の単一真実源）・
+  `TileConfig::acc_rows`/`acc_cols`/`unroll_acc_loops`（`acc_rows*acc_cols
+  >= 16`）・純粋関数 `unroll_acc_loops_for(candidate, instance_flag)` を
+  追加した
+- `crates/backend-metal/src/pipeline.rs`: `make_pipeline_with_constants` の
+  bool ゲート引数が 3 個（`swizzle_enabled`/`fine_barrier_enabled`/
+  `unroll_acc_enabled`）になるため、`clippy::too_many_arguments`
+  （`-D warnings`）を `#[allow]` で黙らせず `GemmGateConstants` 構造体へ
+  束ねる方式で回避した
+- `crates/backend-metal/src/gemm.rs`: `MetalGemm` に `unroll_acc_enabled`
+  フィールドを追加し、`new_with_unroll_acc`（A/B 計測用の明示的入口。
+  `new_with_swizzle`/`new_with_fine_barrier` と同型）を新設した。
+  `pipeline_for_tile` は要求 `cfg` ではなく**フォールバック chain 巡回中の
+  候補（`candidate`）自身**から実効ゲート値を導出する（フォールバック先で
+  要求構成の acc 積を引きずった誤判定を避けるため）。`gemm_simdgroup_
+  tiled_f16` は本定数を参照しないため `pipeline_for_tile_f16` は常に
+  `false` を渡す
+- 本番既定（`MetalGemm::new`）は `tile::UNROLL_ACC_ENABLED`（`false`）を
+  渡すため、既定挙動（`dispatch_auto`・既存 parity）は不変
+
+#### 7.9.2 自己検証（本エージェント実行環境。Linux・CI 相当）
+
+本エージェント実行環境に macOS 実機がないため、Metal 実機依存の bit 一致
+テスト（AC-2）は追加のみ行い実行していない（`#[ignore]` 分離済みで
+`make test-ignored-metal` 相当の実機実行環境で `cargo test -p
+fandhe-ai-backend-metal --release -- --ignored --nocapture` を後続で実行
+する前提。テスト内容は 7.9.3 を参照）。以下は Linux で実行可能な範囲の
+検証結果:
+
+- `cargo build --workspace --locked`: 成功（既存の無関係な dead_code
+  警告のみ。エラーなし）
+- `cargo fmt --all -- --check`: 差分なし
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`:
+  警告なし（`GemmGateConstants` 導入により `too_many_arguments` を回避）
+- `cargo test --workspace --all-features`: 全 crate green（backend-metal
+  は 237 passed・25 ignored〈うち 3 件が本 issue の実機専用テスト〉）
+- `grep -c "pragma clang loop unroll" crates/backend-metal/src/shaders/
+  gemm.metal` = 11（うち 1 件は冒頭コメント内の文字列。実際の pragma
+  指示子は 10 箇所で E1 と同数。`tests/shader_source_evidence.rs::
+  gemm_simdgroup_tiled_source_gates_unroll_pragmas_behind_function_
+  constant` が文字列マッチベースで pragma 10・`if (UNROLL_ACC_ENABLED) {`
+  6 を固定）
+- `tile::tests::unroll_acc_candidates_are_exactly_acc_product_ge_16`
+  （Linux 実行）: `CANDIDATES` 9 件中 `acc_rows*acc_cols>=16` を満たす
+  index が `{0, 4, 8}`（E1 §7.6 の cand0/4/8 と一致）であることを確認済み
+- `tile::tests::unroll_acc_enabled_is_false_by_default`: 本番既定 `false`
+  をロック
+- `gemm_simdgroup_tiled_source_retains_req8_boundary_guards_in_both_
+  unroll_variants`: 境界チェック式（`out_row >= dims.m`・`out_col >=
+  dims.n`・`a_row < dims.m`・`b_col < dims.n`）が unroll 版・非 unroll 版
+  それぞれに 1 回ずつ（計 2 回）維持されていることを確認済み（AC-3）
+
+#### 7.9.3 実機 `#[ignore]` テスト（AC-2。macOS 実機での実行は #1284 または
+後続の実機検証セッションに引き継ぐ）
+
+`crates/backend-metal/src/gemm.rs` の `mod tests` に追加（`tile::CANDIDATES`
+が `pub(crate)` のためクレート内配置。`#[ignore = "Metal 実機（Apple
+Silicon）依存。CI では実行しない"]`）:
+
+- `unroll_acc_effective_matches_candidate_acc_product_threshold`: base
+  （`unroll_acc_enabled=false`）は全候補で `false`、head
+  （`unroll_acc_enabled=true`）は index 0/4/8 でのみ `true` を返すことを
+  実機 `MetalGemm` インスタンス経由で確認する（AC-1）
+- `unroll_acc_on_off_bit_match_all_candidates`: `CANDIDATES` 全 9 候補 ×
+  N=512/1024/2048/4096 で `resolve_tile_config` によるフォールバック非経由
+  を確認したうえで、`dispatch_tiled_prepared` の base/head 出力が
+  `to_bits()` で厳密ビット一致することを確認する（AC-2）
+- `unroll_acc_on_off_bit_match_dispatch_auto`: 本番自動選択経路
+  （`dispatch_auto`）でも N=512/1024/2048/4096 で base/head が bit 一致
+  することを確認する（AC-4 の一部。現行 `select`/`select_for_device` が
+  選ぶ候補は acc 積 >= 16 に一致しないため、この経路単体では unroll 版
+  ループを通らないが、function constant 特殊化自体が既存の自動選択経路の
+  挙動を変えないことを確認する目的）
+
+#### 7.9.4 スコープ外・引き継ぎ
+
+- 性能実測（5 回計測中央値の全形状 before/after）・本番既定の `true` への
+  切替判断 → #1284
+- 上記実機 `#[ignore]` テスト（AC-2）の macOS 実機での実際の実行・結果記録
+  → #1284 または後続の実機検証セッション
+- `gemm_simdgroup_tiled_f16` への同機構の展開・direct-load 本体（unroll
+  版・非unroll 版で重複する約 40 行）の helper 化による重複削減 →
+  必要ならユーザー承認のうえ別 issue

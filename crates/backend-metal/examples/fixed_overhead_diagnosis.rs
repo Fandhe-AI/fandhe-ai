@@ -43,7 +43,7 @@
 //! | P2 | `newCommandQueue` | 同上 |
 //! | P3 | `MetalContext::new`（P1+P2 に加え caps／occupancy 照会を含む合算） | `src/context.rs` |
 //! | P4 | `newLibraryWithSource_options_error`（MSL 実行時コンパイル。初回/2回目以降で分離集計） | `src/pipeline.rs::compile_gemm_library` |
-//! | P5 | `MetalGemm::new(&ctx)`（ライブラリコンパイル＋固定 5 パイプライン構築の合算） | `src/gemm.rs::MetalGemm::new_with_swizzle_and_fine_barrier` |
+//! | P5 | `MetalGemm::new(&ctx)`（ライブラリコンパイル＋固定 5 パイプライン構築の合算） | `src/gemm.rs::MetalGemm::new_with_gates` |
 //! | P6 | 都度構築 end-to-end（`MetalBackendOps::new()` + `BackendOps::gemm` を毎反復） | `src/ops.rs::MetalBackendOps::gemm` |
 //! | P7 | 対照: 資源再利用（`MetalContext`/`MetalGemm` を 1 回構築して `dispatch_auto` を反復） | `src/gemm.rs::MetalGemm::dispatch_auto` |
 //!

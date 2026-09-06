@@ -597,6 +597,35 @@ impl TileConfig {
 
         Ok(())
     }
+
+    /// `shaders/gemm.metal` の `gemm_simdgroup_tiled` が計算する
+    /// `acc_rows = (bm/wm)/8` と同じ式（[`validate`](Self::validate) の
+    /// 上限検査で使う式の再利用。イシュー #1282）。`wm=0` は `validate` が
+    /// 事前に拒否する契約のため、本メソッド単体では 0 除算を防御しない
+    /// （`CANDIDATES` は全候補 `validate` 済みの契約で構築されている）。
+    /// 唯一の呼び出し元 [`unroll_acc_loops`](Self::unroll_acc_loops) と
+    /// 同じ理由で `#[cfg(any(test, target_os = "macos"))]`
+    /// （[`SWIZZLE_LOG`] doc comment 参照。dead_code 誤検知回避）。
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn acc_rows(&self) -> u32 {
+        (self.bm / self.wm) / 8
+    }
+
+    /// [`acc_rows`](Self::acc_rows) の列方向版（`(bn/wn)/8`）。
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn acc_cols(&self) -> u32 {
+        (self.bn / self.wn) / 8
+    }
+
+    /// この構成のアキュムレータ系ループを unroll 対象とみなすかどうか
+    /// （イシュー #1282）。`acc_rows * acc_cols >= UNROLL_ACC_MIN_PRODUCT`
+    /// を acc 積として評価する（E1 実験〈`docs/perf/
+    /// metal-gemm-n4096-kernel-gap.md` §7〉の実測境界）。インスタンスの
+    /// opt-in フラグとの AND は [`unroll_acc_loops_for`] が取る。
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn unroll_acc_loops(&self) -> bool {
+        self.acc_rows().saturating_mul(self.acc_cols()) >= UNROLL_ACC_MIN_PRODUCT
+    }
 }
 
 /// [`select`] が候補として巡回する構成（大 → 小の優先順）。MLX steel の
@@ -1263,6 +1292,58 @@ pub(crate) const SWIZZLE_ENABLED: bool = false;
 /// よって revert はせず `false` 既定のまま保持する。
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const FINE_BARRIER_ENABLED: bool = false;
+
+/// `gemm_simdgroup_tiled` のアキュムレータ系ループ（acc 初期化・staged
+/// フラグメントロード・staged/direct-load MMA 発行・エピローグストア。
+/// 計 10 箇所）へ `#pragma clang loop unroll(full)` を適用するかどうかの
+/// ゲート（イシュー #1282。E1 実験〈#1188・PR #1204〉で無条件付与を試み
+/// `acc_rows*acc_cols>=16` の候補は改善するが本番 `dispatch_auto` が選ぶ
+/// `acc<=8` 系候補は後退したため撤回した経緯を踏まえ、function constant
+/// （`UNROLL_ACC_ENABLED`。`shaders/gemm.metal` index 11）で候補ごとに
+/// 切り替えられるようにする）。
+///
+/// [`SWIZZLE_ENABLED`]／[`FINE_BARRIER_ENABLED`] と同型のインスタンス
+/// フィールド化方式を踏襲する: 本番既定は `false`（unroll 無効）で、
+/// `crate::gemm::MetalGemm::new_with_unroll_acc` が A/B 計測用に `true` を
+/// 渡せる。実際にどの候補が unroll 版へ切り替わるかは本定数と
+/// [`TileConfig::unroll_acc_loops`]（`acc_rows*acc_cols >=
+/// UNROLL_ACC_MIN_PRODUCT`）の AND（[`unroll_acc_loops_for`]）で決まる。
+///
+/// **性能実測・本番既定の `true` への切替判断は本 sub-issue のスコープ外**
+/// （兄弟イシュー #1284 が担当。`docs/perf/metal-gemm-n4096-kernel-gap.md`
+/// §7.9）。本 sub-issue は機構の実装と bit 一致の自己検証のみを行う。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
+/// doc comment を参照（同一の dead_code 誤検知回避）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const UNROLL_ACC_ENABLED: bool = false;
+
+/// [`TileConfig::unroll_acc_loops`] が unroll 版ループを選ぶ acc 積
+/// （`acc_rows * acc_cols`）の下限（イシュー #1282）。E1 実験（`docs/perf/
+/// metal-gemm-n4096-kernel-gap.md` §7）で確認した「`acc_rows*acc_cols>=16`
+/// の候補のみ改善・それ未満は後退」という実測境界を単一真実源として
+/// 定数化する（`CANDIDATES` 追加時にこの閾値との比較のみで自動追従させ、
+/// 対象候補のハードコード列挙を避ける）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const UNROLL_ACC_MIN_PRODUCT: u32 = 16;
+
+/// `crate::gemm::MetalGemm::pipeline_for_tile` が候補（フォールバック chain
+/// 巡回中の実際の [`TileConfig`]）ごとに呼ぶ純粋関数（イシュー #1282）。
+/// インスタンスの opt-in フラグ（`unroll_acc_enabled`。[`UNROLL_ACC_ENABLED`]
+/// 本番既定）と、その候補自身の acc 積が [`UNROLL_ACC_MIN_PRODUCT`] 以上か
+/// （[`TileConfig::unroll_acc_loops`]）の AND を取る。
+///
+/// **候補から導出する理由**: 呼び出し元が要求した `cfg` ではなく、
+/// フォールバック chain 巡回中の `candidate` から導出する契約とする
+/// （`pipeline_for_tile` のフォールバック先で、要求構成の acc 積を引き
+/// ずったまま誤った unroll 判定になることを避けるため）。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
+/// doc comment を参照（同一の dead_code 誤検知回避）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn unroll_acc_loops_for(candidate: TileConfig, unroll_acc_enabled: bool) -> bool {
+    unroll_acc_enabled && candidate.unroll_acc_loops()
+}
 
 /// `encode_dispatch_tiled`（`crate::gemm`）が呼ぶ、スウィズル後の dispatch
 /// grid（`(grid_width, grid_height)` = `(threadgroups.width,
@@ -3287,6 +3368,72 @@ mod tests {
              実機未検証の simdgroup 細粒度同期は本番既定 false に固定する契約です \
              （tile.rs 冒頭 FINE_BARRIER_ENABLED doc comment・イシュー #809 参照）。"
         );
+    }
+
+    /// `UNROLL_ACC_ENABLED` の**コミット状態既定値**が `false` に固定
+    /// されていることをロックする（`fine_barrier_enabled_is_false_by_default`
+    /// と同じ設計判断・同じ dead_code 回避理由。イシュー #1282）。
+    #[test]
+    fn unroll_acc_enabled_is_false_by_default() {
+        assert!(
+            !std::hint::black_box(UNROLL_ACC_ENABLED),
+            "UNROLL_ACC_ENABLED が true のままコミットされている疑いがあります。\
+             本番既定は false（性能実測・切替判断は #1284 のスコープ）です \
+             （tile.rs 冒頭 UNROLL_ACC_ENABLED doc comment・イシュー #1282 参照）。"
+        );
+    }
+
+    /// `CANDIDATES` を巡回し、[`TileConfig::unroll_acc_loops`] が `true` を
+    /// 返す index 集合が `{0, 4, 8}`（E1 実験〈`docs/perf/
+    /// metal-gemm-n4096-kernel-gap.md` §7〉で改善を確認した acc 積 >= 16 の
+    /// 候補）と完全一致することを固定する（イシュー #1282）。`CANDIDATES`
+    /// への候補追加・変更時にこのテストが自動追従する（ハードコード列挙を
+    /// 避ける設計。`unroll_acc_loops` の doc comment 参照）。
+    #[test]
+    fn unroll_acc_candidates_are_exactly_acc_product_ge_16() {
+        let unroll_indices: Vec<usize> = CANDIDATES
+            .iter()
+            .enumerate()
+            .filter(|(_, cfg)| cfg.unroll_acc_loops())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            unroll_indices,
+            vec![0, 4, 8],
+            "CANDIDATES の acc_rows*acc_cols>=16 判定対象 index が変化しました。\
+             CANDIDATES を変更した場合は E1 実験の再評価が必要です \
+             （docs/perf/metal-gemm-n4096-kernel-gap.md §7・イシュー #1282）。"
+        );
+    }
+
+    /// [`unroll_acc_loops_for`] がインスタンスフラグ `false` では全候補
+    /// `false`、`true` では [`TileConfig::unroll_acc_loops`] と一致することを
+    /// 確認する（イシュー #1282。純粋関数の AND ロジック固定）。
+    #[test]
+    fn unroll_acc_loops_for_requires_instance_flag() {
+        for cfg in CANDIDATES {
+            assert!(
+                !unroll_acc_loops_for(*cfg, false),
+                "unroll_acc_enabled=false のとき全候補が false であるべきです"
+            );
+            assert_eq!(
+                unroll_acc_loops_for(*cfg, true),
+                cfg.unroll_acc_loops(),
+                "unroll_acc_enabled=true のときは TileConfig::unroll_acc_loops と一致すべきです"
+            );
+        }
+    }
+
+    /// [`TileConfig::acc_rows`]／[`TileConfig::acc_cols`] が
+    /// [`TileConfig::validate`] 内の上限検査式（`(bm/wm)/8`・`(bn/wn)/8`）と
+    /// 同一であることを固定する（イシュー #1282。式の重複による将来的な
+    /// ドリフトを検出する）。
+    #[test]
+    fn acc_rows_cols_match_validate_formula() {
+        for cfg in CANDIDATES {
+            assert_eq!(cfg.acc_rows(), (cfg.bm / cfg.wm) / 8);
+            assert_eq!(cfg.acc_cols(), (cfg.bn / cfg.wn) / 8);
+        }
     }
 
     // --- shaders/gemm.metal のスウィズル証跡検査（イシュー #540・PR #661
