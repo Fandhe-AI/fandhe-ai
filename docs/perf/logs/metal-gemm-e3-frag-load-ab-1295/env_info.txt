@@ -1,0 +1,62 @@
+# イシュー #1295 実機実測 env_info（M4 Max。内部ホスト名は記載しない）
+
+CPU/GPU: Apple M4 Max
+OS: macOS 26.6.2 (BuildVersion 25G83)
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+cargo: 1.96.0 (30a34c682 2026-05-25)
+base commit: c732988792b47f1cf341ae78ca407680e90f24c8 (origin/main, PR #1380)
+branch: test/1295-metal-e3-frag-load-ab
+
+## 負荷状況（待機方針の結果）
+
+計測開始前 uptime: `3:02  up 18 days, 14:14, 20 users, load averages: 14.52 8.41 7.28`
+
+`docs/real-hardware-verification-env.md` の待機方針（load average 1 分値が 3.0 未満に
+落ちるまで最大 30 分待機）に基づき、60 秒間隔のポーリングでバックグラウンド監視を開始
+したが、**実際に観測できたのは約 5 分間（5 回ポーリング）のみ**である（最大 30 分の
+待機を完了する前に、低下傾向が見えないと判断して手動で打ち切り、計測へ移行した。
+「30 分待機した」わけではない点を明記する）。この約 5 分間で load average 1 分値は
+**14.52 → 53.36 → 25.40 → 28.19 → 19.77** と推移し、低下傾向は見られなかった。なお
+53.36 のピークは、本セッション自身が同時に実行していた事前ビルド（`cargo test
+--release --no-run`）・スモークテスト（`frag_load` 4 テスト）の負荷が重なった時点と
+一致しており、他セッションの負荷のみに起因するとは言い切れない。他セッション由来の
+負荷（下記並走プロセス）と自セッションの負荷が混在した状態のまま、これ以上の待機は
+効果が薄いと判断し計測へ移行した。
+
+`pgrep -fl 'gemm_|cargo test|cargo run|bench'` で確認した並走プロセス（プロセス名のみ。
+実行ユーザー・絶対パスは記録しない）:
+- 複数の `cargo test --locked -p fandhe-frontend-*` 系（フロントエンドリポジトリ由来と
+  推定される別セッション）
+- `cargo test --workspace --all-features`
+- `tape_cuda_cache_bench`（GPU/CPU ベンチバイナリ）
+
+`docs/perf/metal-gemm-transpose-tiled.md`（#1186/#1187）・`docs/perf/metal-gemm-n4096-
+kernel-gap.md` §7.10（#1284）と同種の「複数セッションが並走する共有環境」であり、本イシュー
+でも同じ状況が観測された。
+
+## 対処方針（#1289/#1187 と同じ設計を踏襲）
+
+`gemm_frag_load_diag_tests::frag_load_kernel_gpu_ab_production_sizes` は 5 候補すべてを
+**同一プロセス・同一 trial ループ内で trial ごとに交互（開始オフセット回転）** で計測する
+ため、外部負荷による変動は全候補に対称に作用する（interleave 方式。ファイル冒頭コメント
+参照）。5 プロセス起動（run1〜run5）× 全候補の中央値集計により、対称に乗る外部負荷の影響
+を一次近似で相殺したうえで判定する。
+
+## keep_alive・メモリ
+
+各 N のループスコープで 5 候補分の `keep_alive`（`Vec<Vec<f32>>`）を保持し、N ごとに
+スコープを抜けて drop する（ファイル冒頭コメント「メモリ使用量」参照）。truncate は
+不要だった（本機は N=4096 でも 5 候補同時保持〈約 13.4 GiB〉に十分な空きメモリがあった）。
+
+## validate 結果
+
+全 N（1024/2048/4096）で `TileConfig { staged: false, ..cfg }` twin は
+`validate(1024, max_shared_mem_bytes)` を通過した（device-legacy/device-hoisted-k1/
+device-hoisted-k2 とも全 N で計測対象に含まれる。ログ中 "validate を通らなかった" 行なし）。
+
+## pmset -g therm
+
+計測前後とも:
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
