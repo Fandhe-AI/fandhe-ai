@@ -96,8 +96,13 @@ impl SingleRunVerdict {
 /// 下限（`docs/perf/metal-gemm-fine-barrier-ab.md`
 /// `SMALL_SIZE_REGRESSION_TOLERANCE_RATIO` と同一値の再利用。新規閾値の
 /// 導入ではない。実装計画 §3.2 判定基準）。
+///
+/// `gemm_swizzle_ab_bench.rs::SMALL_SIZE_REGRESSION_TOLERANCE_RATIO` と
+/// 同じ導出方式（`0.95` を独自にハードコードせず、単一真実源
+/// `bench_harness::ab::STABILITY_SPREAD_GATE`〈0.05〉から導出する）へ
+/// 揃える（イシュー #1284・codex-review P1 指摘対応。分散定義の解消）。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-const REGRESSION_TOLERANCE_RATIO: f64 = 0.95;
+const REGRESSION_TOLERANCE_RATIO: f64 = 1.0 - bench_harness::ab::STABILITY_SPREAD_GATE;
 
 /// `ratios`: 形状ごとの `head_over_base`（TFLOPS 比。head/base）。正方 4
 /// 形状・補助 2 形状のいずれも区別せず同じ基準を適用する
@@ -223,9 +228,10 @@ mod macos_impl {
 
     /// 候補の `acc_rows*acc_cols` 積（`TileConfig` の `acc_rows`/`acc_cols`
     /// は `pub(crate)` のため、`crate` 外の example からは同じ式
-    /// `(bm/wm)/8 * (bn/wn)/8` を独自に再計算する。`tile::
-    /// UNROLL_ACC_MIN_PRODUCT` との比較で unroll 分岐を通るかを表示する
-    /// 目的のみに使い、機構自体の判定ロジックには関与しない）。
+    /// `(bm/wm)/8 * (bn/wn)/8` を独自に再計算する）。ログ出力の表示専用
+    /// （`acc_product=` フィールド）であり、unroll 分岐の採否判定自体は
+    /// `TileConfig::unroll_acc_loops`（イシュー #1284 で `pub` 化。単一
+    /// 真実源）を直接呼ぶため本関数の値には依存しない。
     fn acc_product(cfg: tile::TileConfig) -> u32 {
         let acc_rows = (cfg.bm / cfg.wm) / 8;
         let acc_cols = (cfg.bn / cfg.wn) / 8;
@@ -359,7 +365,11 @@ mod macos_impl {
             } = *shape;
             let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
             let acc_product = acc_product(cfg);
-            let head_unroll_expected = acc_product >= 16;
+            // `tile::UNROLL_ACC_MIN_PRODUCT`（16）とのハードコード複製を
+            // 避けるため、本番判定と同じ単一真実源
+            // `TileConfig::unroll_acc_loops`（イシュー #1284 で `pub` 化）
+            // を直接呼ぶ（codex-review P1 指摘対応）。
+            let head_unroll_expected = cfg.unroll_acc_loops();
 
             let mut rng = Xorshift64Star::new(SEED);
             let a = rng.fill_vec(m * k);
