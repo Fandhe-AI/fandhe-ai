@@ -479,16 +479,73 @@ impl TileConfig {
         pattern: crate::layout::TransposePattern,
         pad_elems: u32,
     ) -> u32 {
-        use crate::layout::TransposePattern;
         if !self.staged {
             return 0;
         }
+        Self::tiled_bytes_for_pad(self.bm, self.bn, self.bk, pattern, pad_elems)
+    }
+
+    /// [`shared_mem_bytes_for_pad`](Self::shared_mem_bytes_for_pad) の
+    /// タイルクラス考慮版（イシュー #1327 codex-review／Bugbot 指摘対応）。
+    ///
+    /// `shaders/gemm.metal` の `staging_active = (TILE_CLASS == 0) ?
+    /// USE_TGP_STAGING : (TILE_CLASS == 2)`（本ファイル冒頭を含む
+    /// `gemm.metal` の同変数コメント参照）と厳密に同じ式で「実効 staged」
+    /// を決める。`TileClassMode::Split` 下では `TileClass::Edge`（端タイル）
+    /// が **`cfg.staged`（＝`USE_TGP_STAGING`）の値に関わらず常に staged
+    /// ロード経路を強制** し、`TileClass::Interior`（内部タイル）は逆に
+    /// 常に direct-load を強制する。`shared_mem_bytes_for_pad`（`self.staged`
+    /// のみを見る版）をこの経路の共有メモリ上限検査・確保量計算に使うと、
+    /// `cfg.staged == false` かつ `tile_class == Edge` の構成で実際には
+    /// staged 分岐（threadgroup メモリへ書き込む）が走るにもかかわらず
+    /// `0` バイトしか確保されない（`encode_dispatch_tiled` 側は
+    /// `.max(16)` の下限でしか埋まらない）という threadgroup メモリ範囲外
+    /// 書き込みに直結する（codex-review P0・Cursor Bugbot Medium 指摘・
+    /// PR #1388）。`pipeline_for_tile` の事前検証（`ExceedsSharedMemory`
+    /// 相当のオーバーフロー検査）と `encode_dispatch_tiled` の
+    /// `setThreadgroupMemoryLength` 実確保の両方が、**同じ `tile_class` を
+    /// 渡して本メソッドを呼ぶ**契約にすることで、検査対象と実際にカーネルが
+    /// アクセスする範囲を一致させる（fail-closed）。
+    ///
+    /// `TileClass::Legacy` を渡した場合の戻り値は
+    /// [`shared_mem_bytes_for_pad`](Self::shared_mem_bytes_for_pad) と完全に
+    /// 一致する（`TileClassMode::Legacy` 経路の非後退。本ファイル末尾
+    /// テスト参照）。
+    pub(crate) fn shared_mem_bytes_for_class(
+        &self,
+        pattern: crate::layout::TransposePattern,
+        pad_elems: u32,
+        tile_class: TileClass,
+    ) -> u32 {
+        let effective_staged = match tile_class {
+            TileClass::Legacy => self.staged,
+            TileClass::Interior => false,
+            TileClass::Edge => true,
+        };
+        if !effective_staged {
+            return 0;
+        }
+        Self::tiled_bytes_for_pad(self.bm, self.bn, self.bk, pattern, pad_elems)
+    }
+
+    /// [`shared_mem_bytes_for_pad`](Self::shared_mem_bytes_for_pad)・
+    /// [`shared_mem_bytes_for_class`](Self::shared_mem_bytes_for_class) が
+    /// 共有する staged タイル領域（A タイル＋B タイル）バイト数計算本体
+    /// （`staged`／実効 staged 判定を呼び出し元へ切り出した残り）。
+    fn tiled_bytes_for_pad(
+        bm: u32,
+        bn: u32,
+        bk: u32,
+        pattern: crate::layout::TransposePattern,
+        pad_elems: u32,
+    ) -> u32 {
+        use crate::layout::TransposePattern;
         let trans_a = matches!(pattern, TransposePattern::Tn | TransposePattern::Tt);
         let trans_b = matches!(pattern, TransposePattern::Nt | TransposePattern::Tt);
 
-        let bm = self.bm as u64;
-        let bn = self.bn as u64;
-        let bk = self.bk as u64;
+        let bm = bm as u64;
+        let bn = bn as u64;
+        let bk = bk as u64;
         let pad = pad_elems as u64;
         let compute = || -> Option<u64> {
             // A タイル: NN は `bm` 行 × `(bk+pad)` 列、転置は `bk` 行 ×
@@ -4871,6 +4928,102 @@ mod tests {
                 bytes8 % 16,
                 0,
                 "候補 {cfg:?}: pad=8 の確保量が 16 の倍数でない"
+            );
+        }
+    }
+
+    /// [`TileConfig::shared_mem_bytes_for_class`] に `TileClass::Legacy` を
+    /// 渡した場合の戻り値は [`TileConfig::shared_mem_bytes_for_pad`]（`self.
+    /// staged` のみを見る従来版）と完全一致する（`TileClassMode::Legacy`
+    /// 経路の非後退。codex-review／Bugbot 指摘対応・PR #1388）。
+    #[test]
+    fn shared_mem_bytes_for_class_legacy_matches_shared_mem_bytes_for_pad() {
+        use crate::layout::TransposePattern;
+        for &cfg in CANDIDATES.iter() {
+            for pattern in [
+                TransposePattern::Nn,
+                TransposePattern::Nt,
+                TransposePattern::Tn,
+                TransposePattern::Tt,
+            ] {
+                assert_eq!(
+                    cfg.shared_mem_bytes_for_class(pattern, cfg.pad(), TileClass::Legacy),
+                    cfg.shared_mem_bytes_for_pad(pattern, cfg.pad())
+                );
+            }
+        }
+    }
+
+    /// [`TileConfig::shared_mem_bytes_for_class`] に `TileClass::Edge` を
+    /// 渡すと、`cfg.staged == false` であっても常に非 0（staged タイル領域
+    /// 分）のバイト数を返す（`shaders/gemm.metal` の `staging_active =
+    /// (TILE_CLASS == 0) ? USE_TGP_STAGING : (TILE_CLASS == 2)` と同じ実効
+    /// staged 判定。codex-review P0・Cursor Bugbot Medium 指摘の再現条件
+    /// `TileConfig { bm:16, bn:16, bk:16, wm:1, wn:1, staged:false }` を
+    /// そのまま検証する。修正前は `shared_mem_bytes_for_pad`〈`self.staged`
+    /// のみを見る〉が `0` を返し、`encode_dispatch_tiled` の `.max(16)`
+    /// 下限で 16 バイトしか確保されないまま Edge シェーダー分岐が
+    /// staged タイル領域〈2,048 バイト〉へ書き込む threadgroup メモリ
+    /// 範囲外書き込みに直結していた。PR #1388）。
+    #[test]
+    fn shared_mem_bytes_for_class_edge_forces_staged_even_when_cfg_not_staged() {
+        use crate::layout::TransposePattern;
+        let cfg = TileConfig {
+            bm: 16,
+            bn: 16,
+            bk: 16,
+            wm: 1,
+            wn: 1,
+            staged: false,
+        };
+        assert_eq!(
+            cfg.shared_mem_bytes_for_pad(TransposePattern::Nn, cfg.pad()),
+            0
+        );
+
+        let edge_bytes = cfg.shared_mem_bytes_for_class(
+            TransposePattern::Nn,
+            TileConfig::TGP_PAD_ELEMS,
+            TileClass::Edge,
+        );
+        // `staged:true` の同一形状構成（`pad()` が `TGP_PAD_ELEMS` と一致する）
+        // の `shared_mem_bytes_for_pad`（既存の staged 計算式）と一致することを
+        // 期待値として使う（private ヘルパーへ直接依存しない）。
+        let staged_equivalent = TileConfig {
+            bm: 16,
+            bn: 16,
+            bk: 16,
+            wm: 1,
+            wn: 1,
+            staged: true,
+        };
+        assert_eq!(staged_equivalent.pad(), TileConfig::TGP_PAD_ELEMS);
+        assert_eq!(
+            edge_bytes,
+            staged_equivalent
+                .shared_mem_bytes_for_pad(TransposePattern::Nn, staged_equivalent.pad()),
+            "Edge クラスは cfg.staged=false でも staged タイル領域分の非 0 バイト数を返す必要がある"
+        );
+        assert!(
+            edge_bytes > 16,
+            "Edge クラスの確保量が下限 16 バイトのままでは範囲外書き込みを防げない"
+        );
+    }
+
+    /// [`TileConfig::shared_mem_bytes_for_class`] に `TileClass::Interior`
+    /// を渡すと、`cfg.staged == true` の構成であっても常に `0`（direct-load
+    /// 強制。`shaders/gemm.metal` の `staging_active` 定義と対応）を返す。
+    #[test]
+    fn shared_mem_bytes_for_class_interior_forces_direct_load_even_when_cfg_staged() {
+        use crate::layout::TransposePattern;
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            assert_eq!(
+                cfg.shared_mem_bytes_for_class(
+                    TransposePattern::Nn,
+                    cfg.pad(),
+                    TileClass::Interior
+                ),
+                0
             );
         }
     }

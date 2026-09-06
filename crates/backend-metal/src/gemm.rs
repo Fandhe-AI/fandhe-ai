@@ -850,7 +850,18 @@ impl MetalGemm {
             // `setThreadgroupMemoryLength` 呼び出しも同じ式を使う契約
             // — 下記 `tgp_pad_elems` 変数参照）。
             let tgp_pad_elems = self.coop_load.pad_elems(candidate);
-            if candidate.shared_mem_bytes_for_pad(pattern, tgp_pad_elems) > max_shared_mem_bytes {
+            // イシュー #1327 codex-review／Bugbot 指摘（PR #1388）: `TILE_CLASS
+            // == 2`（Edge）は `cfg.staged`（`USE_TGP_STAGING`）の値に関わらず
+            // 常に staged ロード経路を強制する（`shaders/gemm.metal` の
+            // `staging_active` 定義）。事前検証もこの実効値
+            // （`TileConfig::shared_mem_bytes_for_class`）で行い、
+            // `cfg.staged == false` の構成が Edge クラスとして実際に
+            // アクセスする共有メモリ量を過小評価しないようにする
+            // （`encode_dispatch_tiled` の実確保量計算と同じ式を使う
+            // fail-closed 契約）。
+            if candidate.shared_mem_bytes_for_class(pattern, tgp_pad_elems, tile_class)
+                > max_shared_mem_bytes
+            {
                 continue;
             }
 
@@ -971,6 +982,7 @@ impl MetalGemm {
                     pattern,
                     tgp_pad_elems,
                     region,
+                    tile::TileClass::Legacy,
                 );
             })?;
             return Ok(resolved_cfg);
@@ -1012,6 +1024,7 @@ impl MetalGemm {
                     pattern,
                     tgp_pad_elems,
                     region,
+                    tile::TileClass::Legacy,
                 );
             })?;
             return Ok(resolved_cfg);
@@ -1043,6 +1056,7 @@ impl MetalGemm {
                     pattern,
                     tgp_pad_interior,
                     interior.into(),
+                    tile::TileClass::Interior,
                 );
             }
             for edge in plan.edges.iter().flatten() {
@@ -1063,6 +1077,7 @@ impl MetalGemm {
                         pattern,
                         tgp_pad_edge,
                         (*edge).into(),
+                        tile::TileClass::Edge,
                     );
                 }
             }
@@ -1600,6 +1615,7 @@ impl MetalGemm {
                     TransposePattern::Nn,
                     self.coop_load.pad_elems(resolved_cfg),
                     region,
+                    tile::TileClass::Legacy,
                 );
             },
         )?;
@@ -3072,6 +3088,12 @@ fn encode_dispatch_tiled(
     // `setBytes` する（`TILE_CLASS==0`＝Legacy でも未バインド参照を作らない
     // ため。カーネル側は Legacy では region を一切参照しない no-op）。
     region: TileClassRegion,
+    // codex-review／Bugbot 指摘（PR #1388）: 共有メモリ確保量
+    // （`setThreadgroupMemoryLength`）を実効ロード方式と一致させるため、
+    // 呼び出し元がこの dispatch に使う `pipeline` を解決したのと同じ
+    // `tile::TileClass` を渡す（`pipeline_for_tile` の事前検証
+    // （`TileConfig::shared_mem_bytes_for_class`）と同一の式を使う契約）。
+    tile_class: tile::TileClass,
 ) {
     encoder.setComputePipelineState(pipeline);
 
@@ -3139,7 +3161,9 @@ fn encode_dispatch_tiled(
     // `tgp_pad_elems` を参照することで、確保量とカーネルが実際に
     // アクセスする範囲を一致させる fail-closed 契約を維持する（本番既定
     // では `cfg.pad()` と一致するため挙動は無変更）。
-    let shared_mem_bytes = cfg.shared_mem_bytes_for_pad(pattern, tgp_pad_elems).max(16) as usize;
+    let shared_mem_bytes = cfg
+        .shared_mem_bytes_for_class(pattern, tgp_pad_elems, tile_class)
+        .max(16) as usize;
     debug_assert!(
         shared_mem_bytes.is_multiple_of(16),
         "Metal は setThreadgroupMemoryLength に 16 バイト境界整合を要求する"
