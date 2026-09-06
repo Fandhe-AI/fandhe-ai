@@ -67,6 +67,16 @@ impl SingleRunVerdict {
     }
 }
 
+/// 採否判断における小サイズ（256/512/1024）の許容劣化率下限
+/// （`docs/perf/metal-gemm-fine-barrier-ab.md` §判断基準の「劣化中央値
+/// 5% 超がない」を定数化したもの。`head_over_base` 比がこの値以上であれば
+/// 劣化許容範囲内と判定する）。
+///
+/// `bench_harness::ab::STABILITY_SPREAD_GATE`（ラウンド間ばらつきの安定性
+/// spread ゲート）とは意味が異なる別軸の閾値のため流用しない
+/// （codex-review 指摘 PR #1372 discussion r3943195886）。
+const SMALL_SIZE_REGRESSION_TOLERANCE_RATIO: f64 = 0.95;
+
 /// `ratios`: size ごとの `head_over_base`（TFLOPS 比。head/base）。
 /// `gate_exceeded`: フェーズ 2 の A/B 計測自体で安定性ゲート超過が 1 件
 /// でも残ったか（ラウンド間ばらつきが大きく計測値を信頼できないため
@@ -74,7 +84,8 @@ impl SingleRunVerdict {
 ///
 /// 判断基準（`docs/perf/metal-gemm-fine-barrier-ab.md` §判断基準）:
 /// size 2048/4096 の `head_over_base` に改善（>1.0）があり、かつ size
-/// 256/512/1024 で劣化中央値 5% 超がない（>=0.95）場合に採用候補とする。
+/// 256/512/1024 で劣化中央値が `SMALL_SIZE_REGRESSION_TOLERANCE_RATIO`
+/// 超（5% 超）がない場合に採用候補とする。
 fn single_run_verdict(ratios: &[(usize, f64)], gate_exceeded: bool) -> SingleRunVerdict {
     if gate_exceeded {
         return SingleRunVerdict::Undetermined;
@@ -86,7 +97,7 @@ fn single_run_verdict(ratios: &[(usize, f64)], gate_exceeded: bool) -> SingleRun
     let no_regression_at_small = ratios
         .iter()
         .filter(|(size, _)| *size == 256 || *size == 512 || *size == 1024)
-        .all(|(_, ratio)| *ratio >= 0.95);
+        .all(|(_, ratio)| *ratio >= SMALL_SIZE_REGRESSION_TOLERANCE_RATIO);
     if improved_at_large && no_regression_at_small {
         SingleRunVerdict::AdoptCandidate
     } else {

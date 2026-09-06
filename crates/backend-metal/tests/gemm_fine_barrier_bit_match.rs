@@ -30,6 +30,23 @@ use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm, tile};
 /// プロトコルであることを明示するため揃える）。
 const SEED: u64 = 0xC0FFEE;
 
+/// AC-1 のビット単位一致検証を `to_bits()` 経由で行う（`assert_eq!` の
+/// `f32` 数値比較は IEEE 754 の `+0.0 == -0.0` を区別できず、符号ビットの
+/// 差異を見逃しうるため。PR #1372 codex-review P2 指摘
+/// discussion r3943195893）。`NaN` は `to_bits()` がビットパターンを
+/// そのまま返すため `NaN != NaN` の数値比較特性に引きずられず、
+/// ビットパターンが完全一致する場合のみ一致と判定する。
+fn assert_bit_exact(base: &[f32], head: &[f32], size: usize, dispatch_name: &str) {
+    let base_bits: Vec<u32> = base.iter().map(|v| v.to_bits()).collect();
+    let head_bits: Vec<u32> = head.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(
+        base_bits, head_bits,
+        "size={size}: {dispatch_name} で FINE_BARRIER_ENABLED の有無により出力が\
+         ビット単位で一致しなかった。演算オペランド列が変わっている疑いがあるため、\
+         shaders/gemm.metal の FINE_BARRIER_ENABLED 挿入箇所を確認すること。"
+    );
+}
+
 /// `dispatch_auto`（本番既定の自動タイル選択経路）で base/head の出力が
 /// ビット単位で一致することを size 512/1024/2048/4096 で確認する。
 /// `examples/gemm_fine_barrier_ab_bench.rs::phase0_bit_match_selfcheck`
@@ -57,12 +74,7 @@ fn fine_barrier_on_off_bit_match_dispatch_auto() {
             .dispatch_auto(&ctx, &a, &b, size, size, size)
             .expect("head GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
 
-        assert_eq!(
-            base_out, head_out,
-            "size={size}: dispatch_auto で FINE_BARRIER_ENABLED の有無により出力がビット単位で\
-             一致しなかった。演算オペランド列が変わっている疑いがあるため、shaders/gemm.metal の\
-             FINE_BARRIER_ENABLED 挿入箇所を確認すること。"
-        );
+        assert_bit_exact(&base_out, &head_out, size, "dispatch_auto");
     }
 }
 
@@ -107,11 +119,6 @@ fn fine_barrier_on_off_bit_match_dispatch_tiled_prepared() {
         let base_out = base_c_buf.read_to_vec();
         let head_out = head_c_buf.read_to_vec();
 
-        assert_eq!(
-            base_out, head_out,
-            "size={size}: dispatch_tiled_prepared で FINE_BARRIER_ENABLED の有無により出力が\
-             ビット単位で一致しなかった。演算オペランド列が変わっている疑いがあるため、\
-             shaders/gemm.metal の FINE_BARRIER_ENABLED 挿入箇所を確認すること。"
-        );
+        assert_bit_exact(&base_out, &head_out, size, "dispatch_tiled_prepared");
     }
 }

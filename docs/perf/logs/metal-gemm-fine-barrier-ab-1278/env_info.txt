@@ -20,7 +20,7 @@ cargo: 1.96.0 (30a34c682 2026-05-25)
     round_tflops が 0.13〜0.17 TFLOPS 台と、この GPU の通常想定値
     （`docs/perf/metal-gemm-bottleneck-rediagnosis.md` 等で観測される
     水準）より 1 桁以上低い異常値。
-  run2（ROUNDS=10 等）: spread 0.08〜5.31。size=256 の 1 round が
+  run2（ROUNDS=10 等）: spread 0.08〜5.12。size=256 の 1 round が
     0.0231 TFLOPS まで落ち込む極端な外れ値を観測。
   run3: spread 0.09〜1.12。
   run4: spread 0.23〜0.80。
