@@ -235,7 +235,11 @@ pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, Cuda
     Ok(render_source(stages))
 }
 
-fn render_source(stages: u32) -> String {
+/// [`render_source`]／[`render_persistent_source`] 共通の `#define` 群を
+/// 生成する（イシュー #1346 でカーネル本体テンプレートを非 persistent／
+/// persistent の 2 系統へ分離したのに伴い、従来 `render_source` 内に
+/// あった `format!` 冒頭部分を共有ヘルパーへ切り出した）。
+fn render_defines(stages: u32) -> String {
     format!(
         "\n#define TP_BM {bm}\n\
          #define TP_BN {bn}\n\
@@ -246,7 +250,7 @@ fn render_source(stages: u32) -> String {
          #define TP_A_PAD {a_pad}\n\
          #define TP_B_PAD {b_pad}\n\
          #define TP_STAGES {stages}\n\
-         \n{body}",
+         \n",
         bm = TP_BM,
         bn = TP_BN,
         bk = TP_BK,
@@ -256,8 +260,70 @@ fn render_source(stages: u32) -> String {
         a_pad = TP_A_PAD,
         b_pad = TP_B_PAD,
         stages = stages,
-        body = TILED_PIPELINE_F32_BODY,
     )
+}
+
+/// 非 persistent 版（既存 `gemm_tiled_pipeline_f32`）のソース全文を生成
+/// する。[`TP_CP_ASYNC_HELPER`]・[`TP_NON_PERSISTENT_PREFIX`]・
+/// [`TP_TILE_CORE`]・[`TP_KERNEL_SUFFIX`] の連結が、分割前の
+/// `TILED_PIPELINE_F32_BODY`（旧単一定数）とバイト同一であることは実装
+/// 時に機械検証済み（イシュー #1346 AC-3。分割は文字列の切り出し・
+/// 再結合のみで内容を変更していない）。
+fn render_source(stages: u32) -> String {
+    format!(
+        "{defines}{helper}{prefix}{core}{suffix}",
+        defines = render_defines(stages),
+        helper = TP_CP_ASYNC_HELPER,
+        prefix = TP_NON_PERSISTENT_PREFIX,
+        core = TP_TILE_CORE,
+        suffix = TP_KERNEL_SUFFIX,
+    )
+}
+
+/// persistent 版（`gemm_tiled_pipeline_persistent_f32`。イシュー #1346）
+/// のソース全文を生成する。[`render_source`] と同じ `#define` 群・同じ
+/// [`TP_CP_ASYNC_HELPER`]／[`TP_TILE_CORE`] を共有し、CTA→出力タイルの
+/// 割り当て部分（[`TP_KERNEL_PERSISTENT_PREFIX`]／
+/// [`TP_KERNEL_PERSISTENT_SUFFIX`]）のみが異なる。
+fn render_persistent_source(stages: u32) -> String {
+    format!(
+        "{defines}{helper}{prefix}{core}{suffix}",
+        defines = render_defines(stages),
+        helper = TP_CP_ASYNC_HELPER,
+        prefix = TP_KERNEL_PERSISTENT_PREFIX,
+        core = TP_TILE_CORE,
+        suffix = TP_KERNEL_PERSISTENT_SUFFIX,
+    )
+}
+
+/// 本番結線（[`crate::gemm::CudaGemm::new`]）が既定でコンパイルする
+/// ステージ数（[`TP_DEFAULT_STAGES`]）固定の persistent 版カーネルソース。
+/// `internal-diagnostics` feature 限定の opt-in API
+/// （[`crate::gemm::CudaGemm::compile_tiled_pipeline_persistent_variant`]）
+/// からのみ呼ばれる（`new` 自体は本番既定経路のためコンパイルしない。
+/// [`TP_KERNEL_PERSISTENT_PREFIX`] ドキュメンテーションコメント「位置
+/// づけ・非結線」参照）。
+pub fn tiled_pipeline_persistent_f32_source() -> &'static str {
+    &TILED_PIPELINE_PERSISTENT_F32_SOURCE
+}
+
+static TILED_PIPELINE_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    LazyLock::new(|| render_persistent_source(TP_DEFAULT_STAGES));
+
+/// 任意のステージ数（[`TP_MIN_STAGES`]..=[`TP_MAX_STAGES`]）の persistent
+/// 版カーネルソースを生成する（[`tiled_pipeline_f32_source_with_stages`]
+/// の persistent 版。`examples/gemm_tiled_pipeline_persistent_bench.rs`
+/// が段数比較のためオンデマンドで呼ぶ）。
+pub fn tiled_pipeline_persistent_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    if !(TP_MIN_STAGES..=TP_MAX_STAGES).contains(&stages) {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "tiled_pipeline_persistent_f32_source_with_stages stages ({stages}) must lie \
+                 within [{TP_MIN_STAGES}, {TP_MAX_STAGES}]"
+            ),
+        });
+    }
+    Ok(render_persistent_source(stages))
 }
 
 /// [`render_source`] が結合するカーネル本体テンプレート。
@@ -265,7 +331,12 @@ fn render_source(stages: u32) -> String {
 /// `TP_STAGES` は `format!` で埋め込まれる `#define` のみに依存し、本体
 /// 文字列自体はステージ数に非依存（配列サイズ・`STAGES - 2` 等の算術は
 /// すべて `TP_STAGES` マクロ経由）。
-const TILED_PIPELINE_F32_BODY: &str = r#"
+/// 非 persistent 版・persistent 版共有の `cp.async` 16 バイト転送
+/// ヘルパー（`tp_cp_async16`）。NVRTC は 1 コンパイル単位に両カーネル
+/// を同時に含めうるため関数定義は 1 箇所のみ生成する（
+/// [`render_source`]・[`render_persistent_source`] のどちらも本定数を
+/// 連結する）。
+const TP_CP_ASYNC_HELPER: &str = r#"
 // REQ-8: グローバル→共有メモリの 16 バイト単位（f32 4 要素）非同期
 // コピー。src_size==16 で実データをコピーし、src_size==0 で共有メモリ側を
 // ゼロ充填する（kernels_mma_tf32.rs::mma_tf32_cp_async16 と同じ契約・
@@ -281,7 +352,15 @@ __device__ __forceinline__ void tp_cp_async16(void* smem_ptr, const void* gmem_p
     );
 }
 
-extern "C" __global__ void gemm_tiled_pipeline_f32(
+"#;
+
+/// 非 persistent 版（既存 `gemm_tiled_pipeline_f32`）の関数シグネ
+/// チャ・共有メモリ宣言・`blockIdx` 由来の `block_row0`/`block_col0`
+/// 計算。直後（[`TP_TILE_CORE`]）は `block_row0`/`block_col0` が
+/// スコープに存在することのみを前提にする（persistent 版は本断片を
+/// 使わず、[`TP_KERNEL_PERSISTENT_PREFIX`] が同じ 2 変数を別の方法
+/// 〈タイルキュー〉で計算してから同じ [`TP_TILE_CORE`] を合流させる）。
+const TP_NON_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_f32(
     const float* __restrict__ a,
     const float* __restrict__ b,
     float* __restrict__ c,
@@ -296,7 +375,16 @@ extern "C" __global__ void gemm_tiled_pipeline_f32(
     int block_row0 = blockIdx.y * TP_BM;
     int block_col0 = blockIdx.x * TP_BN;
 
-    int tid = threadIdx.x;
+"#;
+
+/// [`render_source`]／[`render_persistent_source`] が共有するタイル内
+/// 計算本体（プロローグ→K ループ→drain→エピローグ guarded store）。
+/// `block_row0`/`block_col0`（呼び出し元プレフィックスが計算済み）・
+/// `m`/`n`/`k`/`a`/`b`/`c` のみに依存し、CTA→出力タイルの割り当て方法
+/// には依存しない。非 persistent 版・persistent 版のいずれでも同一の
+/// 命令列になることが bit 同一の根拠（[`TP_KERNEL_PERSISTENT_PREFIX`]
+/// ドキュメンテーションコメント「bit 同一の根拠」節参照）。
+const TP_TILE_CORE: &str = r#"    int tid = threadIdx.x;
     int num_threads = blockDim.x;
     int tx = tid % TP_THREADS_X;
     int ty = tid / TP_THREADS_X;
@@ -431,8 +519,132 @@ extern "C" __global__ void gemm_tiled_pipeline_f32(
             }
         }
     }
-}
 "#;
+
+/// 非 persistent 版カーネル関数の閉じ括弧（`}}`）。
+const TP_KERNEL_SUFFIX: &str = "}\n";
+
+/// persistent 版（イシュー #1346）カーネルの関数シグネチャ・共有
+/// メモリ宣言・グローバル atomic タイルキューからの `block_row0`/
+/// `block_col0` 取得ループ。
+///
+/// # 位置づけ・非結線
+///
+/// 本カーネルは grid を [`crate::device::CudaDevice::multiprocessor_count`]
+/// 実測 SM 数 × 占有可能 block 数（またはホスト指定値）で固定起動し、
+/// 各 CTA が完了するたびにグローバル `unsigned int` カウンタ
+/// （`tile_counter`）へ `atomicAdd` して次の未処理出力タイルを取得する
+/// （K 分割なし・1 タイル = 1 CTA が K 全体を担当）。GB10（sm_121・
+/// SM 48 基）でタイル数が SM 数の倍数から外れる形状（wave
+/// quantization。`docs/cuda-streamk-decision.md` §2）において、末尾
+/// wave の CTA 数不足による GPU 遊休時間を緩和しうる候補として追加
+/// する（親イシュー #1345・本イシュー #1346）。**本番既定経路
+/// （[`crate::gemm::CudaGemm::new`]）は不変**であり、本カーネルは
+/// `internal-diagnostics` feature 限定の opt-in API
+/// （[`crate::gemm::CudaGemm::compile_tiled_pipeline_persistent_variant`]）
+/// からのみコンパイルされる。実機性能比較・本番結線可否判断は兄弟
+/// イシュー #1347 が担う。
+///
+/// # bit 同一の根拠
+///
+/// タイル内の計算（[`TP_TILE_CORE`]）は非 persistent 版
+/// （[`TP_NON_PERSISTENT_PREFIX`]）と完全に共有する文字列であり、
+/// smem レイアウト・cp.async ロード順・K ループの `fmaf` 蓄積順序・
+/// エピローグの guarded store はいずれも同一の命令列になる。
+/// 「出力タイル→CTA」の割り当て方法（`blockIdx` 直接 対 atomic タイル
+/// キュー）のみが異なり、これは各出力タイルの**どの CTA が計算するか**
+/// を変えるだけで**各要素がどう計算されるか**は変えない。タイルキュー
+/// 用の `atomicAdd` は `unsigned int` カウンタ（スケジューリング専用）
+/// にのみ作用し、GEMM の数値蓄積（`float` の `acc[][]`）には一切
+/// 触れない（`.claude/rules/coding-rust.md` の FMA 契約・
+/// `kernels_mse.rs`/`kernels_rmsnorm.rs` が禁止する「float `atomicAdd`
+/// による非決定的な結合順序」とは別種の atomic であり、決定性契約を
+/// 破らない）。よって同一入力に対し persistent 版と非 persistent 版は
+/// 出力 bit 同一になる（`tests/cpu_cuda_tiled_pipeline_persistent_
+/// parity.rs` が実機でこれを検証する）。
+///
+/// # 不変条件
+///
+/// - `break` はブロック一様: 全スレッドが `__syncthreads()` の後に同じ
+///   `s_tile` を読んでから判定する（一部スレッドだけが抜けるダイバー
+///   ジェンスは起きない）。
+/// - `s_tile` への WAR（次イテレーションの thread-0 書き込みと前イテ
+///   レーションの全スレッド読み出し）は [`TP_TILE_CORE`] 末尾の drain
+///   `__syncthreads()`（cp.async 完了待ちと共用）が前イテレーション
+///   の読み出しを完了させてから thread 0 が次の `atomicAdd` を発行
+///   する順序で安全になる。
+/// - `acc[][]` は [`TP_TILE_CORE`] 内で毎回宣言される自動変数のため
+///   タイルごとに再初期化される。
+/// - cp.async の `wait_group`/`commit_group` 会計は各タイルの
+///   [`TP_TILE_CORE`] 内で完結する（drain `wait_group 0` により次
+///   タイル開始時点で未完了の cp.async グループが残らない）ため、
+///   タイル境界をまたいでも会計が破綻しない。
+const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_persistent_f32(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m, int n, int k,
+    unsigned int* tile_counter)
+{
+    // __align__(16): 非 persistent 版（TP_NON_PERSISTENT_PREFIX）と
+    // 同一の共有メモリ整列要件。
+    __shared__ __align__(16) float as_tile[TP_STAGES][TP_BM][TP_A_PAD];
+    __shared__ __align__(16) float bs_tile[TP_STAGES][TP_BK][TP_B_PAD];
+    // タイル取得カウンタの読み出し結果を全スレッドへ配る 1 スロット
+    // （thread 0 のみが atomicAdd を発行し、__syncthreads() の後に
+    // 全スレッドが同じ値を読む。ブロック一様な break 判定のため）。
+    __shared__ unsigned int s_tile;
+
+    // 出力タイル総数（行主導: tile = row_tile * tiles_x + col_tile）。
+    // 非 persistent 版の blockIdx.y/blockIdx.x と同じ走査順
+    // （grid x = n 方向）に対応させ、tiled_pipeline_launch_config が
+    // 仮定するタイル→座標写像と一致させる。
+    int tiles_x = (n - 1) / TP_BN + 1;
+    int tiles_y = (m - 1) / TP_BM + 1;
+    int num_tiles = tiles_x * tiles_y;
+
+    // persistent CTA ループ: grid をブロックタイル数より少なく起動し
+    // （ホスト側 persistent_grid_blocks）、各 CTA が完了するたびに
+    // 次の未処理タイルをグローバル atomic カウンタから取得する
+    // （wave quantization 緩和が目的。docs/cuda-streamk-decision.md
+    // §2）。K 分割は行わない（1 タイル = 1 CTA が K 全体を担当）ため
+    // 蓄積順序・fmaf 命令列は非 persistent 版と同一であり、出力は
+    // bit 同一になる（本ファイル冒頭コメント「persistent 版」節）。
+    for (;;) {
+        // カウンタの発行はスレッド 0 のみ（複数スレッドが同時に
+        // atomicAdd すると同一 CTA 内で異なるタイルを取り合い、後続
+        // の共有メモリロード・計算がタイル不整合になるため）。
+        if (threadIdx.x == 0) {
+            s_tile = atomicAdd(tile_counter, 1u);
+        }
+        // ブロック全体が同じ s_tile を読むまで待つ（thread 0 の書き
+        // 込みと他スレッドの読み出しの happens-before を保証。この
+        // barrier は各タイル末尾の drain barrier（TP_TILE_CORE）と
+        // 対になり、s_tile への WAR（次イテレーションの書き込み対
+        // 前イテレーションの読み出し）を安全にする）。
+        __syncthreads();
+        unsigned int tile_u = s_tile;
+        // tile_u は unsigned のまま num_tiles と比較する（int→unsigned
+        // 昇格）。カウンタは全 CTA 分の余剰 atomicAdd により num_tiles
+        // を超えて進み続けるため、先に int へキャストすると理論上の
+        // 桁あふれで負値化し比較をすり抜けうる（REQ-8・fail-closed。
+        // 比較後にのみ int へ変換する）。
+        if (tile_u >= (unsigned int)num_tiles) {
+            break;
+        }
+        int tile = (int)tile_u;
+        // 非 persistent 版の block_row0 = blockIdx.y * TP_BM・
+        // block_col0 = blockIdx.x * TP_BN（grid x = n 方向）と同じ
+        // 走査順写像（tiled_pipeline_launch_config 参照）。
+        int block_row0 = (tile / tiles_x) * TP_BM;
+        int block_col0 = (tile % tiles_x) * TP_BN;
+"#;
+
+/// persistent 版の `for (;;)` ループ・関数の閉じ括弧（[`TP_TILE_CORE`]
+/// の drain barrier 直後にタイル取得ループの `}` を、続けて関数の `}`
+/// を閉じる。非 persistent 版の [`TP_KERNEL_SUFFIX`] とは異なる文字列
+/// になる）。
+const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
 
 #[cfg(test)]
 mod tests {
@@ -535,5 +747,154 @@ mod tests {
         );
         // 本体ループ内 wait_group（固定即値） + drain（即値 0）= 2 箇所。
         assert_eq!(wait_count, 2, "wait_group は 2 箇所（本体ループ・drain）");
+    }
+
+    /// [`TP_CP_ASYNC_HELPER`]・[`TP_NON_PERSISTENT_PREFIX`]・
+    /// [`TP_TILE_CORE`]・[`TP_KERNEL_SUFFIX`] の連結が
+    /// [`tiled_pipeline_f32_source`] の出力と一致することを検査する
+    /// （イシュー #1346 AC-3。分割前後で非 persistent 版の生成結果が
+    /// 変わっていないことの実行時証跡。分割自体の正しさはビルドスクリプト
+    /// 側で機械検証済みだが、本テストは将来の断片への変更が非 persistent
+    /// 版の出力を意図せず壊さないことを継続的に守る回帰テスト）。
+    #[test]
+    fn tiled_pipeline_fragments_reconstruct_non_persistent_source() {
+        let expected = tiled_pipeline_f32_source();
+        let reconstructed = format!(
+            "{TP_CP_ASYNC_HELPER}{TP_NON_PERSISTENT_PREFIX}{TP_TILE_CORE}{TP_KERNEL_SUFFIX}"
+        );
+        assert!(
+            expected.ends_with(&reconstructed),
+            "TP_CP_ASYNC_HELPER/TP_NON_PERSISTENT_PREFIX/TP_TILE_CORE/TP_KERNEL_SUFFIX の \
+             連結が tiled_pipeline_f32_source() の本体と一致しません"
+        );
+    }
+
+    /// persistent 版ソースが `cp.async`／`fmaf` 命令を含むこと（タイル内
+    /// 計算は非 persistent 版と共有のため同じ命令が現れる契約）を検査
+    /// する。
+    #[test]
+    fn tiled_pipeline_persistent_source_uses_cp_async_instructions() {
+        let source = tiled_pipeline_persistent_f32_source();
+        for needle in [
+            "cp.async.cg.shared.global",
+            "cp.async.commit_group",
+            "cp.async.wait_group",
+            "fmaf(",
+        ] {
+            assert!(
+                source.contains(needle),
+                "tiled_pipeline_persistent_f32_source() が `{needle}` を含みません"
+            );
+        }
+    }
+
+    /// REQ-8 の手動境界検査が persistent 版でも省略されていないことを
+    /// 検査する（[`tiled_pipeline_source_retains_manual_bounds_checks`]
+    /// の persistent 版。[`TP_TILE_CORE`] 共有のため同一文字列が現れる）。
+    #[test]
+    fn tiled_pipeline_persistent_source_retains_manual_bounds_checks() {
+        let source = tiled_pipeline_persistent_f32_source();
+        assert!(
+            source.contains("int valid = (gr < m && gc < k) ? 16 : 0;"),
+            "A タイルロードの guarded cp.async（src_size ゼロ充填）が見当たりません"
+        );
+        assert!(
+            source.contains("int valid = (gr < k && gc < n) ? 16 : 0;"),
+            "B タイルロードの guarded cp.async（src_size ゼロ充填）が見当たりません"
+        );
+        assert!(
+            source.contains("if (r < m && cc < n) {"),
+            "エピローグの guarded store が見当たりません"
+        );
+    }
+
+    /// 決定性契約（`.claude/rules/coding-rust.md`・`atomicAdd` を使わない
+    /// 数値蓄積の原則）の機械検査: persistent 版ソースに現れる
+    /// `atomicAdd` はタイルキューカウンタ用の**ちょうど 1 箇所**であり、
+    /// 対象が `unsigned int* tile_counter` であること（float 蓄積用の
+    /// `atomicAdd` ではないこと）を検査する（`kernels_mse.rs`／
+    /// `kernels_rmsnorm.rs` の同種検査と同じ動機。本ファイル冒頭の
+    /// `TP_KERNEL_PERSISTENT_PREFIX` ドキュメンテーションコメント
+    /// 「bit 同一の根拠」参照）。非 persistent 版ソースには `atomicAdd`
+    /// が一切現れないことも合わせて検査する。
+    #[test]
+    fn tiled_pipeline_persistent_source_uses_single_integer_atomic_add() {
+        let persistent_source = tiled_pipeline_persistent_f32_source();
+        let atomic_add_count = persistent_source.matches("atomicAdd(").count();
+        assert_eq!(
+            atomic_add_count, 1,
+            "persistent 版ソースの atomicAdd はタイルキューカウンタ用の 1 箇所のみのはず"
+        );
+        assert!(
+            persistent_source.contains("s_tile = atomicAdd(tile_counter, 1u);"),
+            "atomicAdd の対象が unsigned int* tile_counter（スケジューリング専用）と \
+             確認できません"
+        );
+        assert!(
+            !persistent_source.contains("atomicAdd(&acc")
+                && !persistent_source.contains("atomicAdd(&c["),
+            "GEMM の数値蓄積（acc[][]／出力 c）へ atomicAdd が使われていないことを確認できません"
+        );
+
+        let non_persistent_source = tiled_pipeline_f32_source();
+        assert!(
+            !non_persistent_source.contains("atomicAdd"),
+            "非 persistent 版ソースに atomicAdd は現れないはず"
+        );
+    }
+
+    /// persistent 版カーネルのシグネチャ（`tile_counter` 引数）・タイル
+    /// キュー機構（`num_tiles`・`s_tile`・`break`）がソースに存在すること
+    /// を検査する（関数名・シグネチャの取り違えを防ぐ粗い機械検査）。
+    #[test]
+    fn tiled_pipeline_persistent_source_has_tile_queue_scaffolding() {
+        let source = tiled_pipeline_persistent_f32_source();
+        for needle in [
+            "gemm_tiled_pipeline_persistent_f32(",
+            "unsigned int* tile_counter",
+            "__shared__ unsigned int s_tile;",
+            "int num_tiles = tiles_x * tiles_y;",
+            "for (;;) {",
+            "if (tile_u >= (unsigned int)num_tiles) {",
+            "break;",
+        ] {
+            assert!(
+                source.contains(needle),
+                "tiled_pipeline_persistent_f32_source() が `{needle}` を含みません"
+            );
+        }
+    }
+
+    /// [`tiled_pipeline_persistent_f32_source_with_stages`] の範囲検証
+    /// （[`tiled_pipeline_source_with_stages_validates_range`] の
+    /// persistent 版）を検査する。
+    #[test]
+    fn tiled_pipeline_persistent_source_with_stages_validates_range() {
+        assert!(tiled_pipeline_persistent_f32_source_with_stages(1).is_err());
+        assert!(tiled_pipeline_persistent_f32_source_with_stages(TP_MAX_STAGES + 1).is_err());
+        for stages in TP_MIN_STAGES..=TP_MAX_STAGES {
+            let src = tiled_pipeline_persistent_f32_source_with_stages(stages)
+                .unwrap_or_else(|e| panic!("stages={stages} must be accepted: {e}"));
+            assert!(src.contains(&format!("#define TP_STAGES {stages}")));
+        }
+    }
+
+    /// persistent 版の `commit_group`／`wait_group` 回数が非 persistent 版
+    /// と同じ「1 タイル = 2 commit・2 wait」であることを検査する
+    /// （[`TP_TILE_CORE`] 共有のため回数自体は不変。持続ループ自体は追加
+    /// の commit/wait を発行しない契約の粗い機械検査）。
+    #[test]
+    fn tiled_pipeline_persistent_commit_wait_group_counts() {
+        let source = tiled_pipeline_persistent_f32_source();
+        let commit_count = source.matches("cp.async.commit_group;").count();
+        let wait_count = source.matches("cp.async.wait_group").count();
+        assert_eq!(
+            commit_count, 2,
+            "persistent 版でも commit_group は 2 箇所（prologue・本体末尾）"
+        );
+        assert_eq!(
+            wait_count, 2,
+            "persistent 版でも wait_group は 2 箇所（本体ループ・drain）"
+        );
     }
 }
