@@ -65,7 +65,13 @@ members = [
 # イシュー #1007: 0.5.0 公開（2026-08-31）以降の改善（#1108 Metal 選択テーブル・
 # #1110 Metal SGD バッチング・#1111 CUDA variant selection 修正・#1113〜#1116 の
 # GB10 実機修正）を含めて crates.io へ公開するため 0.5.0 → 0.6.0 とする。
-version = "0.6.0"
+#
+# イシュー #1185: 0.6.0 公開（2026-09-02）以降の改善（#1164 CUDA cp.async 多段
+# パイプライン結線・#1208 CudaGemmAuto f16 経路の mma 優先本番有効化・#1167 Metal
+# 転置タイル variant・#1174 CPU GEMM 再チューニング結線・#1211〜#1219 の学習・推論
+# 固定費改善）を含めて crates.io へ公開し、framework-compare の正式系列ゲートを
+# `fandhe-ai =0.7.0` で再判定するため 0.6.0 → 0.7.0 とする。
+version = "0.7.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false

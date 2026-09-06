@@ -46,20 +46,20 @@ categories = ["science", "mathematics"]
 #
 # `Device`／`BackendError`（公開 API の引数・戻り値型として再エクスポート）・
 # `DeviceProvider`／`select_from`（CUDA/Metal 選択時の存在検証）に使用する。
-fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.6.0" }
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.7.0" }
 # `Tape::new_with_ops`（facade 向け内部 API。crates/autodiff/src/tape.rs）を
 # composition root の唯一の呼び出し元として使う。
-fandhe-ai-autodiff = { path = "../autodiff", version = "=0.6.0" }
+fandhe-ai-autodiff = { path = "../autodiff", version = "=0.7.0" }
 # 既定バックエンド（TASK-2.5 ユーザー承認済み）である `CpuBackendOps` を
 # `facade::tape()` から構築する。
-fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.6.0" }
+fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.7.0" }
 # `Device::Cuda(_)` 指定時に `CudaBackendOps`／`CudaDeviceProvider` を解決する。
-fandhe-ai-backend-cuda = { path = "../backend-cuda", version = "=0.6.0" }
+fandhe-ai-backend-cuda = { path = "../backend-cuda", version = "=0.7.0" }
 
 # `Device::Metal` 指定時に `MetalBackendOps`／`MetalDeviceProvider` を解決する。
 # `cfg(target_os = "macos")` 限定（.claude/rules/deps-policy.md）。
 [target.'cfg(target_os = "macos")'.dependencies]
-fandhe-ai-backend-metal = { path = "../backend-metal", version = "=0.6.0" }
+fandhe-ai-backend-metal = { path = "../backend-metal", version = "=0.7.0" }
 
 # TASK-9.4（#411）: compat 層の移設に伴い追加。学習系統合テスト
 # （`tests/compat_sequential_train.rs`）が決定的シード駆動のデータ生成に
