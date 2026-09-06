@@ -678,7 +678,7 @@ constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];
 // `USE_TGP_STAGING`（index 5）が既に「threadgroup 経由／device 直接」の
 // 切替軸を担っているため、本イシューでは新しい mode 定数は増やさず、
 // 各経路の内部構造（K 方向の一括ロード幅）を切り替える 2 定数のみを
-// 追加する（`docs/perf/metal-gemm-frag-load-candidates.md` §3.1 候補表）。
+// 追加する（`docs/perf/metal-gemm-frag-load-candidates.md` §1 候補表）。
 //
 // `FRAG_LOAD_DEVICE_HOISTED`（index 12・bool）: direct-load 経路
 // （`USE_TGP_STAGING=false`）専用。`false`（既定）では従来の legacy
