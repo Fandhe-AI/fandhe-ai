@@ -336,6 +336,22 @@ mod gemm_frag_load_diag_tests;
 // （`gemm.rs`／`tile.rs`／`shaders/gemm.metal`）は無変更。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_coop_load_diag_tests;
+// E6 タイルクラス分割（`tile::TileClassMode`。イシュー #1327・PR #1388で
+// opt-in 機構を追加・bit 一致を自己検証済み）の N=1024/2048/4096 純カー
+// ネル時間（GPU タイムスタンプ）を候補 0/4/5/8（`tile::CANDIDATES`）で
+// base（`TileClassMode::Legacy`）/head（`TileClassMode::Split`）比較し
+// 有効性を判定する診断テスト（イシュー #1328）。`gemm::MetalGemm::
+// new_with_tile_class`（`pub`。イシュー #1327）・`gemm::MetalGemm::
+// tile_class_mode`（`#[cfg(test)] pub(crate)`）・`gemm_reuse_phase_diag_
+// tests::measure_one_phase_trial`（`pub(crate)`）・`tile::CANDIDATES`
+// （`pub(crate)`）へ到達するため、`gemm_coop_load_diag_tests` と同じ
+// 理由でクレートルートの兄弟モジュールとして配置する。`objc2` 系 FFI 型
+// に触れるため同じ `cfg(all(test, target_os = "macos"))` を付ける。
+// プロダクションコード（`tile.rs`／`shaders/gemm.metal`）は無変更
+// （`gemm.rs` は本イシューで `encode_tiled_by_class` を挙動不変の
+// `plan_tiled_by_class`／`encode_tiled_plan` へリファクタしたのみ）。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_tile_class_diag_tests;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
