@@ -68,8 +68,15 @@ enum SingleRunVerdict {
     Undetermined,
 }
 
-// enum 本体（上）と同じ理由で dead_code を抑止する。
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+// enum 本体（上）とは異なり、`as_str` は `single_run_verdict_tests`
+// （Linux CI の `#[cfg(test)]` ビルド）からも呼ばれない
+// （テストは `SingleRunVerdict` の等値比較のみを検証し、`as_str` の文字列
+// 表現までは検証しない）。したがって非 macOS では test cfg の有無に
+// 関わらず常に未使用となるため、`test` を除外条件に含めない
+// （codex-review 指摘 PR #1372 のフォローアップ: `not(any(.., test))` の
+// ままだと Linux の `cargo test`〈`cfg(test)` 有効〉ビルドで dead_code
+// が再発する）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl SingleRunVerdict {
     fn as_str(self) -> &'static str {
         match self {
@@ -121,71 +128,6 @@ fn single_run_verdict(ratios: &[(usize, f64)], gate_exceeded: bool) -> SingleRun
         SingleRunVerdict::AdoptCandidate
     } else {
         SingleRunVerdict::RejectCandidate
-    }
-}
-
-#[cfg(test)]
-mod single_run_verdict_tests {
-    use super::*;
-
-    #[test]
-    fn adopts_when_large_sizes_improve_and_small_sizes_hold_within_5_percent() {
-        let ratios = vec![
-            (256, 0.96),
-            (512, 1.0),
-            (1024, 1.0),
-            (2048, 1.05),
-            (4096, 1.1),
-        ];
-        assert_eq!(
-            single_run_verdict(&ratios, false),
-            SingleRunVerdict::AdoptCandidate
-        );
-    }
-
-    #[test]
-    fn rejects_when_a_large_size_does_not_improve() {
-        let ratios = vec![
-            (256, 1.0),
-            (512, 1.0),
-            (1024, 1.0),
-            (2048, 1.0),
-            (4096, 1.1),
-        ];
-        assert_eq!(
-            single_run_verdict(&ratios, false),
-            SingleRunVerdict::RejectCandidate
-        );
-    }
-
-    #[test]
-    fn rejects_when_a_small_size_regresses_more_than_5_percent() {
-        let ratios = vec![
-            (256, 0.90),
-            (512, 1.0),
-            (1024, 1.0),
-            (2048, 1.05),
-            (4096, 1.1),
-        ];
-        assert_eq!(
-            single_run_verdict(&ratios, false),
-            SingleRunVerdict::RejectCandidate
-        );
-    }
-
-    #[test]
-    fn undetermined_when_stability_gate_exceeded_even_if_ratios_look_good() {
-        let ratios = vec![
-            (256, 1.0),
-            (512, 1.0),
-            (1024, 1.0),
-            (2048, 1.2),
-            (4096, 1.3),
-        ];
-        assert_eq!(
-            single_run_verdict(&ratios, true),
-            SingleRunVerdict::Undetermined
-        );
     }
 }
 
@@ -493,4 +435,69 @@ fn main() {
          See docs/perf/metal-bench-noise-protocol.md and \
          docs/perf/metal-gemm-fine-barrier-ab.md for the real-hardware execution procedure."
     );
+}
+
+#[cfg(test)]
+mod single_run_verdict_tests {
+    use super::*;
+
+    #[test]
+    fn adopts_when_large_sizes_improve_and_small_sizes_hold_within_5_percent() {
+        let ratios = vec![
+            (256, 0.96),
+            (512, 1.0),
+            (1024, 1.0),
+            (2048, 1.05),
+            (4096, 1.1),
+        ];
+        assert_eq!(
+            single_run_verdict(&ratios, false),
+            SingleRunVerdict::AdoptCandidate
+        );
+    }
+
+    #[test]
+    fn rejects_when_a_large_size_does_not_improve() {
+        let ratios = vec![
+            (256, 1.0),
+            (512, 1.0),
+            (1024, 1.0),
+            (2048, 1.0),
+            (4096, 1.1),
+        ];
+        assert_eq!(
+            single_run_verdict(&ratios, false),
+            SingleRunVerdict::RejectCandidate
+        );
+    }
+
+    #[test]
+    fn rejects_when_a_small_size_regresses_more_than_5_percent() {
+        let ratios = vec![
+            (256, 0.90),
+            (512, 1.0),
+            (1024, 1.0),
+            (2048, 1.05),
+            (4096, 1.1),
+        ];
+        assert_eq!(
+            single_run_verdict(&ratios, false),
+            SingleRunVerdict::RejectCandidate
+        );
+    }
+
+    #[test]
+    fn undetermined_when_stability_gate_exceeded_even_if_ratios_look_good() {
+        let ratios = vec![
+            (256, 1.0),
+            (512, 1.0),
+            (1024, 1.0),
+            (2048, 1.2),
+            (4096, 1.3),
+        ];
+        assert_eq!(
+            single_run_verdict(&ratios, true),
+            SingleRunVerdict::Undetermined
+        );
+    }
 }
