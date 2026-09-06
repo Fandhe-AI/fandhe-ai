@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）
 
 ## 1. 位置づけ
 
@@ -314,6 +314,11 @@ GB10: 1024/2048 で約 45〜54% 低い）、packing の重複コスト自体は�
   確認された（§5.2）。tolerance 緩和は行わない前提で、判定方式自体の見直し
   （例: candle-core 側の既知の丸め誤差として記録した上で判定対象から除外する
   等）の要否はユーザー判断
+- **2026-09-06 更新（イシュー #1185）**: 正式系列 `fandhe-ai =0.7.0` でも両実機で
+  未達成が確定した（§12）ことを受け、ユーザー指示（2026-09-06）「未達の場合は
+  後継ツリーを新規起票し現 issue はクローズ」に従い、上記の残課題（§8.5 の次候補・
+  DGX N=2048 の判定方式・達成条件の見直し）は後継ツリー
+  #1283（CPU GEMM candle 超えトラッキング。DGX N=2048 判定不能は #1234 に依存） へ引き継ぎ、現 issue #1117 はクローズする
 
 ## 11. 関連ドキュメント
 
@@ -326,3 +331,76 @@ GB10: 1024/2048 で約 45〜54% 低い）、packing の重複コスト自体は�
 - `scripts/bench/framework-compare/results/summary.md` 環境 10/11/14/15 節
 - `docs/performance-targets.md` §8/§8.4
 - `docs/perf/logs/cpu-gemm-candle-gate-1148/`（実行ログ・env_info・RAYON スイープログ）
+- `docs/perf/logs/gemm-candle-gate-0.7.0-1185/`（イシュー #1185。=0.7.0 正式系列
+  再計測の実行ログ・env_info。CUDA / Metal / CPU 共通）
+
+## 12. 2026-09-06 追補: 正式系列 `fandhe-ai =0.7.0` 再計測（イシュー #1185）
+
+### 12.1 位置づけ・プロトコル
+
+- v0.7.0 の crates.io 公開と framework-compare の承認ピン `fandhe-ai =0.7.0` 更新
+  （PR #1233）を受け、**正式系列のみ**で N=512/1024/2048 reuse の 5 回計測中央値を
+  DGX Spark GB10（Grace CPU）・Apple M4 Max の両実機で再取得した（CUDA 側 #1185 と
+  同一プロトコルの CPU 版。§3 のとおり CPU は元より単一系列）
+- プロトコルは §2 と同一（`run_gemm_gate_cpu.sh 0.7.0`〈DGX は
+  `GEMM_GATE_CPU_NODE_TAG=dgx-cpu`〉・`compare_gemm_gate.py --device cpu`。manifest で
+  `fandhe_ai_source=registry`・`candle_core_source=registry` を確認済み）。v0.6.0 →
+  v0.7.0 の `crates/backend-cpu/src` 変更（`git log v0.6.0..v0.7.0`: #1174〈docs/
+  コメントのみ。`RowPanel` 維持を確定〉・#1225〈VJP 専用 NT/TN 入口の追加〉）に NN
+  正方 GEMM の reuse 経路を対象とした性能変更は含まれない
+- 計測環境（`docs/perf/logs/gemm-candle-gate-0.7.0-1185/env_info.txt`）:
+  - DGX Spark: rustc 1.97.0。CUDA ゲート直後に同一シェルで直列実行。計測直前の
+    load average 0.04（他負荷なし）
+  - M4 Max: rustc 1.96.0・macOS 26.6.2。thermal / performance warning なし。ただし
+    他セッションの cargo ビルドが並走する**共有マシン状態**（load average: Metal
+    ゲート完了時 7.09 → CPU ゲート完了時 7.96）で計測しており、絶対値には背景負荷の
+    ノイズが乗る（0.6.0 系列〈`results/summary.md` 環境 15。計測前 7.49・計測後 9.30〉も同様に非専有）
+- 生データ: `scripts/bench/framework-compare/results/raw/results-{dgx,m4max}-cpu-gemm-gate-0.7.0.jsonl`
+  （各 45 行）・`skipped-{dgx,m4max}-cpu-gemm-gate-0.7.0.log`（空）・
+  `manifest-{dgx,m4max}-cpu-gemm-gate-0.7.0.json`。実行ログ:
+  `docs/perf/logs/gemm-candle-gate-0.7.0-1185/run_gemm_gate_cpu-{dgx,m4max}-0.7.0.log`
+
+### 12.2 実測結果（正式系列 `0.7.0`）
+
+DGX Spark GB10（Grace CPU）:
+
+| N | fandhe-ai reuse median (min–max, n=5) | candle fresh median (n=5) | candle/fandhe | GFLOP/s（fandhe） | 判定 | fandhe-ai fresh median（参考。n=5） |
+|---|---|---|---|---|---|---|
+| 512 | 2.280 ms (2.167–2.494 ms) | 1.847 ms | 0.810 | 117.8 | 未達 | 2.402 ms |
+| 1024 | 7.063 ms (6.875–7.171 ms) | 5.551 ms | 0.786 | 304.1 | 未達 | 7.757 ms |
+| 2048 | - | - | - | - | **判定不能**（candle 側要素誤差超過。§12.3） | - |
+
+Apple M4 Max:
+
+| N | fandhe-ai reuse median (min–max, n=5) | candle fresh median (n=5) | candle/fandhe | GFLOP/s（fandhe） | 判定 | fandhe-ai fresh median（参考。n=5） |
+|---|---|---|---|---|---|---|
+| 512 | 741.9 µs (729.2–779.9 µs) | 684.0 µs | 0.922 | 361.8 | 未達 | 746.4 µs |
+| 1024 | 3.676 ms (3.581–3.729 ms) | 2.860 ms | 0.778 | 584.2 | 未達 | 3.465 ms |
+| 2048 | 24.578 ms (24.362–24.756 ms) | 20.369 ms | 0.829 | 699.0 | 未達 | 23.646 ms |
+
+fandhe-ai 側は両実機とも全 45 run（reuse 15・candle fresh 15・fandhe fresh 15）で
+`parity_fail_count=0`。M4 Max は candle 側も全 run で 0 fail。tolerance は緩めていない。
+
+0.6.0 正式系列（§4）との対比: DGX は 0.760／0.791 → 0.810／0.786、M4 Max は
+0.940／0.726／0.734 → 0.922／0.778／0.829。NN 経路を対象とした性能変更が無いため
+（§12.1）、差は run 間ばらつき・背景負荷によるものと見て、コード変更への帰属は
+行わない。
+
+### 12.3 DGX N=2048 判定不能の再現
+
+candle 側 N=2048 fresh は 5 run すべてで `parity_fail_count=2, parity_total=4194304,
+parity_max_abs_err=3.814697e-05, parity_max_rel_err=3.944416e-01`（§5.2・環境 10・
+0.6.0 系列と完全に同一の決定的な値。fandhe-ai 側は 0 fail）。原因は candle-core
+0.11.0 の CPU GEMM カーネル側にあり（§5.2）、判定方式の変更は本追補でも実施せず
+「判定不能」のまま据え置く（reuse/candle 比の参考併記も行わない）。
+
+### 12.4 #1117 ゲート判定（確定）
+
+| 実機 | N=512 | N=1024 | N=2048 | parity（fandhe-ai 側） |
+|---|---|---|---|---|
+| DGX Spark GB10（Grace） | 未達（0.810 倍） | 未達（0.786 倍） | 判定不能（candle 無効データ） | 達成（0 fail） |
+| Apple M4 Max | 未達（0.922 倍） | 未達（0.778 倍） | 未達（0.829 倍） | 達成（0 fail） |
+
+**総合判定: #1117 は正式系列 `fandhe-ai =0.7.0` においても両実機で未達成（判定可能な
+5 件すべて未達・DGX N=2048 は判定不能）。#1148 の判定を 0.7.0 で確定した。** 達成条件の
+見直し要否・後継ツリーへの引き継ぎは §10「2026-09-06 更新」を参照。

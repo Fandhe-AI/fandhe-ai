@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）
 
 ## 1. 位置づけ
 
@@ -171,6 +171,12 @@ metal-gemm-transpose-tiled.md`「5. 性能実測（ベンチマーク A/B）と�
   かはユーザー判断（`out-of-scope-tracking.md` に従い、本 PR では Issue 操作を行わない）
 - **crates.io 次回公開のタイミング**: v0.7.0 想定の正式ピン更新の要否・時期（#1138 自動
   ルーティング結線後に意味を持つ。§8）
+  （2026-09-06 更新: v0.7.0 公開・ピン更新〈PR #1233〉により解消済み。§11）
+- **2026-09-06 更新（イシュー #1185）**: 正式系列 `fandhe-ai =0.7.0` でも未達成が確定した
+  （§11）ことを受け、ユーザー指示（2026-09-06）「未達の場合は後継ツリーを新規起票し現 issue は
+  クローズ」に従い、上記の残課題（reuse 転送・同期固定費削減・#1138 自動ルーティングの性能
+  A/B・N=4096 カーネル純境界ギャップ・達成条件の見直し）は後継ツリー
+  #1269（E2〜E5 級カーネル変更トラッキング）・#1242（転置タイル variant A/B 判定不能の解消トラッキング） へ引き継ぎ、現 issue #1037 はクローズする
 
 ## 10. 関連ドキュメント
 
@@ -184,3 +190,70 @@ metal-gemm-transpose-tiled.md`「5. 性能実測（ベンチマーク A/B）と�
 - `scripts/bench/framework-compare/results/summary.md` 環境 11/13 節
 - `docs/performance-targets.md` §8/§8.1/§8.3
 - `docs/perf/logs/metal-gemm-candle-gate-1147/`（実行ログ・env_info）
+- `docs/perf/logs/gemm-candle-gate-0.7.0-1185/`（イシュー #1185。=0.7.0 正式系列再計測の
+  実行ログ・env_info。CUDA / Metal / CPU 共通）
+
+## 11. 2026-09-06 追補: 正式系列 `fandhe-ai =0.7.0` 再計測（イシュー #1185）
+
+### 11.1 位置づけ・プロトコル
+
+- v0.7.0 の crates.io 公開と framework-compare の承認ピン `fandhe-ai =0.7.0` 更新（PR #1233）
+  を受け、**正式系列のみ**で N=1024/2048/4096 reuse の 5 回計測中央値を Apple M4 Max で
+  再取得した（CUDA 側 #1185 と同一プロトコルの Metal 版。参考系列は計測していない）
+- プロトコルは §2 と同一（`run_gemm_gate_metal.sh 0.7.0`・`compare_gemm_gate.py --device metal`。
+  manifest で `fandhe_ai_source=registry`・`candle_core_source=registry` を確認済み）
+- 計測環境: M4 Max・macOS 26.6.2・rustc 1.96.0。`pmset -g therm` は計測前後とも thermal /
+  performance warning なし
+- **負荷状態の注意書き**: 計測中、同一マシンで他セッションの cargo ビルドが並走する**共有マシン
+  状態**だった（`uptime` load average: 計測前 3.39 → Metal ゲート開始時 6.40 → 完了時 7.09 →
+  後続 CPU ゲート完了時 7.96。`docs/perf/logs/gemm-candle-gate-0.7.0-1185/env_info.txt`）。
+  fandhe-ai と candle は同一負荷下で run 内交互起動しているため候補比の方向性（未達）の結論には
+  影響しないと判断するが、絶対値・0.6.0 系列との差分には背景負荷のノイズが乗る（§11.3）
+- 生データ: `scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-0.7.0.jsonl`
+  （30 行）・`skipped-m4max-gemm-gate-0.7.0.log`（空）・`manifest-m4max-gemm-gate-0.7.0.json`。
+  実行ログ: `docs/perf/logs/gemm-candle-gate-0.7.0-1185/run_gemm_gate_metal-m4max-0.7.0.log`
+
+### 11.2 実測結果（正式系列 `0.7.0`）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s（fandhe） | 判定 |
+|---|---|---|---|---|---|
+| 1024 | 2.536 ms（2.136–2.974 ms） | 2.120 ms | 0.836 | 846.7 | 未達 |
+| 2048 | 10.506 ms（10.113–11.271 ms） | 6.698 ms | 0.638 | 1635.3 | 未達 |
+| 4096 | 45.374 ms（41.004–47.129 ms） | 23.100 ms | 0.509 | 3029.0 | 未達 |
+
+fandhe-ai・candle とも全 30 run で `parity_fail_count=0`・checksum が同一 N で一致（データ
+有効性は §5 と同じ。tolerance は緩めていない）。
+
+### 11.3 0.6.0 正式系列（§4.1）との差
+
+| N | 0.6.0 正式系列（#1147） | 0.7.0 正式系列（§11.2） | 差の方向 |
+|---|---|---|---|
+| 1024 | 0.726（fandhe 2.854 ms / candle 2.071 ms） | 0.836（fandhe 2.536 ms / candle 2.120 ms） | 改善 |
+| 2048 | 0.598（fandhe 10.295 ms / candle 6.151 ms） | 0.638（fandhe 10.506 ms / candle 6.698 ms） | 改善（candle 側の悪化が主因） |
+| 4096 | 0.589（fandhe 38.941 ms / candle 22.948 ms） | 0.509（fandhe 45.374 ms / candle 23.100 ms） | 低下 |
+
+- N=1024/2048 は改善、N=4096 は低下したが、いずれも**共有負荷下の観測**であり、N=4096 の
+  fandhe-ai reuse は min–max 幅が 41.004–47.129 ms と広い（0.6.0 系列の 38.576–43.842 ms より
+  上振れ）。N=2048 の比改善は candle 側 6.151 → 6.698 ms の悪化が主因で fandhe-ai 側は
+  10.295 → 10.506 ms とほぼ同じ。**これらの差分をコード変更（0.6.0 → 0.7.0）に帰属させる
+  根拠にはしない**（0.6.0 正式系列も非専有計測。#1147 §2・
+  `docs/perf/logs/metal-gemm-candle-gate-1147/env_info.txt` の load average 3.44〜6.35）
+- v0.6.0 → v0.7.0 の `crates/backend-metal/src` 変更（`git log v0.6.0..v0.7.0`: #1167/#1168・
+  #1227 `linear_forward_device`・#1228 NT/TN strided の VJP 結線）はいずれも転置〈VJP〉経路・
+  学習 forward 向けで、NN 正方 GEMM の reuse 経路を対象とした性能変更は含まれない。系統的な
+  改善が観測されないことは §4.2 の参考系列判定とも整合する
+
+### 11.4 #1037 ゲート判定（確定）
+
+| # | #1037 の受け入れ条件 | 正式系列（0.7.0） | 出典 |
+|---|---|---|---|
+| 1 | N=1024 reuse で candle 超え | 未達（0.836 倍） | §11.2 |
+| 2 | N=2048 reuse で candle 超え | 未達（0.638 倍） | §11.2 |
+| 3 | N=4096 reuse で candle 超え | 未達（0.509 倍） | §11.2 |
+| 4 | parity 0 fail（fandhe-ai 側） | 達成（全 15 run `parity_fail_count=0`） | §11.2 |
+
+**総合判定: #1037 は正式系列 `fandhe-ai =0.7.0` においても未達成（未達 3 件）。#1147 の 2 系列
+判定を正式系列単独で確定した。** 共有負荷下の計測ではあるが、最良形状 N=1024 でも 0.836 倍で
+1.0 倍との差は負荷ノイズで説明できる範囲を超える（N=1024 の fandhe min 2.136 ms でも candle
+中央値 2.120 ms に届かない）。達成条件の見直し要否・後継ツリーへの引き継ぎは §9
+「2026-09-06 更新」を参照。
