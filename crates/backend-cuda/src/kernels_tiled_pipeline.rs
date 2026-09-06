@@ -749,15 +749,51 @@ mod tests {
         assert_eq!(wait_count, 2, "wait_group は 2 箇所（本体ループ・drain）");
     }
 
+    /// [`fnv1a64`] で使う FNV-1a 64bit オフセットベーシス（FNV-1a 仕様
+    /// 定数。<http://www.isthe.com/chongo/tech/comp/fnv/> 準拠）。
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    /// FNV-1a 64bit 素数（同上）。
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    /// [`tiled_pipeline_fragments_reconstruct_non_persistent_source`] が
+    /// 断片連結の内容一致を検査するための決定的ハッシュ関数
+    /// （FNV-1a 64bit。暗号学的強度は不要で、断片への偶発的変更を検出
+    /// できる決定性だけを要件とする）。
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut hash = FNV_OFFSET_BASIS;
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
     /// [`TP_CP_ASYNC_HELPER`]・[`TP_NON_PERSISTENT_PREFIX`]・
-    /// [`TP_TILE_CORE`]・[`TP_KERNEL_SUFFIX`] の連結が
-    /// [`tiled_pipeline_f32_source`] の出力と一致することを検査する
-    /// （イシュー #1346 AC-3。分割前後で非 persistent 版の生成結果が
-    /// 変わっていないことの実行時証跡。分割自体の正しさはビルドスクリプト
-    /// 側で機械検証済みだが、本テストは将来の断片への変更が非 persistent
-    /// 版の出力を意図せず壊さないことを継続的に守る回帰テスト）。
+    /// [`TP_TILE_CORE`]・[`TP_KERNEL_SUFFIX`] の連結内容が、分割時点で
+    /// 記録した固定ハッシュ（[`EXPECTED_NON_PERSISTENT_FRAGMENTS_FNV1A64`]）
+    /// と一致することを検査する（イシュー #1346 AC-3・PR #1383
+    /// codex-review 指摘への対応）。
+    ///
+    /// 旧実装は `expected`（[`tiled_pipeline_f32_source`]。内部で
+    /// [`render_source`] が同じ 4 断片から `format!` する）と
+    /// `reconstructed`（同じ 4 断片を直接連結）を比較する自己参照的な
+    /// 構成だった。この構成では [`TP_TILE_CORE`] 等の断片自体に偶発的な
+    /// 変更が入っても `expected`／`reconstructed` の双方に同じ変更が
+    /// 伝播するため検出できない。本テストは分割時点の連結内容から一度
+    /// だけ計算し固定リテラルとして埋め込んだハッシュ
+    /// （断片の実体に依存しない独立した期待値）と比較することで、断片
+    /// への偶発的変更を検出可能にする。
     #[test]
     fn tiled_pipeline_fragments_reconstruct_non_persistent_source() {
+        /// 分割時点（イシュー #1346 実装時）の
+        /// `TP_CP_ASYNC_HELPER`＋`TP_NON_PERSISTENT_PREFIX`＋`TP_TILE_CORE`＋
+        /// `TP_KERNEL_SUFFIX` 連結内容から算出した FNV-1a 64bit ハッシュ
+        /// （[`fnv1a64`]）。断片群のいずれかが意図せず変更されると
+        /// このハッシュと一致しなくなる。意図した変更（カーネル改修）の
+        /// 際は、変更後の連結内容から再計算した値へこの定数を更新する
+        /// （`git show` 等で分割前ソース fixture との突合も併せて行う）。
+        const EXPECTED_NON_PERSISTENT_FRAGMENTS_FNV1A64: u64 = 7_730_393_218_813_914_207;
+
         let expected = tiled_pipeline_f32_source();
         let reconstructed = format!(
             "{TP_CP_ASYNC_HELPER}{TP_NON_PERSISTENT_PREFIX}{TP_TILE_CORE}{TP_KERNEL_SUFFIX}"
@@ -766,6 +802,14 @@ mod tests {
             expected.ends_with(&reconstructed),
             "TP_CP_ASYNC_HELPER/TP_NON_PERSISTENT_PREFIX/TP_TILE_CORE/TP_KERNEL_SUFFIX の \
              連結が tiled_pipeline_f32_source() の本体と一致しません"
+        );
+        let actual_hash = fnv1a64(reconstructed.as_bytes());
+        assert_eq!(
+            actual_hash, EXPECTED_NON_PERSISTENT_FRAGMENTS_FNV1A64,
+            "TP_CP_ASYNC_HELPER/TP_NON_PERSISTENT_PREFIX/TP_TILE_CORE/TP_KERNEL_SUFFIX の \
+             連結内容が分割時点の固定ハッシュと一致しません（断片への意図しない変更の \
+             可能性。意図した変更であれば EXPECTED_NON_PERSISTENT_FRAGMENTS_FNV1A64 を \
+             再計算して更新する）"
         );
     }
 

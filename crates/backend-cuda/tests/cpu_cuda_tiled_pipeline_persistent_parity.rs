@@ -286,15 +286,35 @@ fn launch_tiled_pipeline_persistent_zero_dim_shape_is_noop_without_launch() {
     let mut func = CudaGemm::compile_tiled_pipeline_persistent_variant(&device, 3, Some(1))
         .expect("compile_tiled_pipeline_persistent_variant must succeed");
 
-    let (a_dev, b_dev) = gemm
-        .upload_f32(&[], &[])
-        .expect("upload_f32 must succeed for an empty shape");
-    let mut c_dev = gemm
-        .alloc_output_f32(0, 0)
-        .expect("alloc_output_f32 must succeed for a 0x0 output shape");
+    // `validate_gemm_dims`（`gemm.rs`）は no-op（m==0 || n==0）の早期
+    // return より前に `a_len == m*k`／`b_len == k*n` の形状要件を課す
+    // （PR #1383 Bugbot 指摘。非 persistent 版
+    // `launch_tiled_pipeline_zero_dim_shape_is_noop_without_launch`
+    // 〈`cpu_cuda_tiled_pipeline_parity.rs`〉と同じ理由で、両呼び出しを
+    // 空バッファ共用にすると必ず `InvalidShape` で失敗し no-op 経路を
+    // 検証できない）。m==0 のケースは a_dev を空（m*k==0）・b_dev を
+    // k*n==16 要素、n==0 のケースは a_dev を m*k==16 要素・b_dev を空
+    // （k*n==0）にして、呼び出しごとに形状の合ったバッファへ差し替える。
 
+    // m==0: a_dev は空（m*k==0）、b_dev は k*n==16 要素、c_dev は空
+    // （m*n==0）。
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&[], &[0.0f32; 16])
+        .expect("upload_f32 must succeed for a well-formed m==0 shape");
+    let mut c_dev = gemm
+        .alloc_output_f32(0, 4)
+        .expect("alloc_output_f32 must succeed for a well-formed m==0 output shape");
     gemm.launch_tiled_pipeline_persistent_f32(&mut func, &a_dev, &b_dev, &mut c_dev, 0, 4, 4)
         .expect("m == 0 must be treated as a no-op and return Ok(())");
+
+    // n==0: a_dev は m*k==16 要素、b_dev は空（k*n==0）、c_dev は空
+    // （m*n==0）。
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&[0.0f32; 16], &[])
+        .expect("upload_f32 must succeed for a well-formed n==0 shape");
+    let mut c_dev = gemm
+        .alloc_output_f32(4, 0)
+        .expect("alloc_output_f32 must succeed for a well-formed n==0 output shape");
     gemm.launch_tiled_pipeline_persistent_f32(&mut func, &a_dev, &b_dev, &mut c_dev, 4, 0, 4)
         .expect("n == 0 must be treated as a no-op and return Ok(())");
 }
