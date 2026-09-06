@@ -403,9 +403,18 @@ fn run_size(n: usize) {
     // （二重計上防止。ファイル冒頭コメント参照）。
     let kernel_gpu_q = median_of(&kernel_gpu);
     print_quartiles_ms("commit_wait.kernel_gpu", kernel_gpu_q);
+    // 各反復ごとに `commit_wait − kernel_gpu` の差を取ってから中央値を
+    // 求める（`median(commit_wait) − median(kernel_gpu)` は反復ごとの
+    // 揺らぎで中央値に対応する反復がずれるため一般には一致せず、GPU 外
+    // オーバーヘッドを過大・過小評価しうる。PR #1371 レビュー指摘）。
+    let commit_wait_minus_kernel_gpu: Vec<f64> = commit_wait
+        .iter()
+        .zip(kernel_gpu.iter())
+        .map(|(&cw, &kg)| cw - kg)
+        .collect();
     println!(
         "    commit_wait.commit_wait_minus_kernel_gpu: median={:.4} ms",
-        (median_of(&commit_wait).median - kernel_gpu_q.median) * 1e3
+        median_of(&commit_wait_minus_kernel_gpu).median * 1e3
     );
     print_quartiles_ms("readback", median_of(&readback));
     print_quartiles_ms("host_copy", median_of(&host_copy));

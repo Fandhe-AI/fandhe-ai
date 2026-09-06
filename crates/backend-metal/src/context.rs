@@ -537,7 +537,7 @@ impl MetalContext {
     /// 経由しないため、ここで独自に `autoreleasepool` を張らないと
     /// プロセス寿命分蓄積する（Cursor Bugbot 指摘・PR #1057）。
     ///
-    /// 本番経路は [`Self::synchronize_observed`] を no-op オブザーバで
+    /// 本番経路は `Self::synchronize_observed`（private）を no-op オブザーバで
     /// 呼ぶ薄いラッパー（イシュー #1276）。挙動・エラー伝播・
     /// `pending_pool_returns` 合流順序は本メソッドが唯一の実体だった
     /// 時点から不変（AC-2）。
