@@ -309,6 +309,19 @@ mod gemm_reuse_phase_diag_tests;
 // ロジック本体）は無変更。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_spec_source_diag_tests;
+// E3 フラグメントロード方式候補（`tile::FragLoadConfig`。イシュー #1293で
+// 実装・bit 一致を自己検証済み）の N=1024/2048/4096 純カーネル時間
+// （GPU タイムスタンプ）を 5 候補（`tgp-k1`/`tgp-k2`/`device-legacy`/
+// `device-hoisted-k1`/`device-hoisted-k2`）で計測し有効性を判定する
+// 診断テスト（イシュー #1295）。`gemm::MetalGemm::new_with_frag_load`
+// （`pub`。イシュー #1293）・`gemm_reuse_phase_diag_tests::
+// measure_one_phase_trial`（`pub(crate)`）へ到達するため、
+// `gemm_spec_source_diag_tests` と同じ理由でクレートルートの兄弟
+// モジュールとして配置する。`objc2` 系 FFI 型に触れるため同じ
+// `cfg(all(test, target_os = "macos"))` を付ける。プロダクションコード
+// （`gemm.rs`／`tile.rs`／`shaders/gemm.metal`）は無変更。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_frag_load_diag_tests;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;

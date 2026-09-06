@@ -1,0 +1,218 @@
+warning: unused import: `crate::context_cache`
+  --> crates/backend-cuda/src/gemm_mma.rs:21:5
+   |
+21 | use crate::context_cache;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:801:48
+    |
+801 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:814:8
+    |
+803 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+814 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:259:19
+    |
+239 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+259 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:651:19
+    |
+457 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+651 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+666 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 25 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_metal-4099ec6cfdfe79eb)
+
+running 5 tests
+test gemm::tests::frag_load_on_off_bit_match_all_candidates ... ok
+test gemm::tests::frag_load_on_off_bit_match_dispatch_auto ... ok
+test gemm::tests::frag_load_tgp_vs_device_same_shape_bit_match ... ok
+test gemm::tests::frag_load_transposed_bit_match ... ok
+test gemm_frag_load_diag_tests::frag_load_kernel_gpu_ab_production_sizes ... N=1024 cand=tgp-k1 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=1.0234 q1=1.0217 q3=1.0250
+N=1024 cand=tgp-k2 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=1.0245 q1=1.0236 q3=1.0264
+N=1024 cand=device-legacy requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } kernel_gpu_median_ms=2.5761 q1=2.5742 q3=2.5771
+N=1024 cand=device-hoisted-k1 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } kernel_gpu_median_ms=1.6249 q1=1.6231 q3=1.6258
+N=1024 cand=device-hoisted-k2 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } kernel_gpu_median_ms=2.1580 q1=2.1560 q3=2.1646
+N=1024 cand=tgp-k1 head_over_base_kernel_gpu=1.000000
+N=1024 cand=tgp-k2 head_over_base_kernel_gpu=1.001099
+N=1024 cand=device-legacy head_over_base_kernel_gpu=2.517283
+N=1024 cand=device-hoisted-k1 head_over_base_kernel_gpu=1.587761
+N=1024 cand=device-hoisted-k2 head_over_base_kernel_gpu=2.108709
+N=1024 cand=device-hoisted-k1 head_over_device_legacy_kernel_gpu=0.630744
+N=1024 cand=device-hoisted-k2 head_over_device_legacy_kernel_gpu=0.837692
+N=2048 cand=tgp-k1 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=1.9681 q1=1.6388 q3=2.5531
+N=2048 cand=tgp-k2 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=1.9742 q1=1.6372 q3=2.3614
+N=2048 cand=device-legacy requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=6.2017 q1=4.9044 q3=7.5048
+N=2048 cand=device-hoisted-k1 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=4.1492 q1=3.5357 q3=4.8159
+N=2048 cand=device-hoisted-k2 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=6.8640 q1=5.4444 q3=8.2656
+N=2048 cand=tgp-k1 head_over_base_kernel_gpu=1.000000
+N=2048 cand=tgp-k2 head_over_base_kernel_gpu=1.003091
+N=2048 cand=device-legacy head_over_base_kernel_gpu=3.151053
+N=2048 cand=device-hoisted-k1 head_over_base_kernel_gpu=2.108225
+N=2048 cand=device-hoisted-k2 head_over_base_kernel_gpu=3.487584
+N=2048 cand=device-hoisted-k1 head_over_device_legacy_kernel_gpu=0.669054
+N=2048 cand=device-hoisted-k2 head_over_device_legacy_kernel_gpu=1.106799
+N=4096 cand=tgp-k1 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=16.7646 q1=16.3411 q3=18.0908
+N=4096 cand=tgp-k2 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=40.0710 q1=36.0143 q3=42.9170
+N=4096 cand=device-legacy requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=43.3398 q1=40.7473 q3=48.1894
+N=4096 cand=device-hoisted-k1 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=26.8870 q1=26.3065 q3=29.6330
+N=4096 cand=device-hoisted-k2 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=49.1551 q1=43.7241 q3=50.5721
+N=4096 cand=tgp-k1 head_over_base_kernel_gpu=1.000000
+N=4096 cand=tgp-k2 head_over_base_kernel_gpu=2.390212
+N=4096 cand=device-legacy head_over_base_kernel_gpu=2.585191
+N=4096 cand=device-hoisted-k1 head_over_base_kernel_gpu=1.603794
+N=4096 cand=device-hoisted-k2 head_over_base_kernel_gpu=2.932072
+N=4096 cand=device-hoisted-k1 head_over_device_legacy_kernel_gpu=0.620377
+N=4096 cand=device-hoisted-k2 head_over_device_legacy_kernel_gpu=1.134180
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 274 filtered out; finished in 31.45s
+
