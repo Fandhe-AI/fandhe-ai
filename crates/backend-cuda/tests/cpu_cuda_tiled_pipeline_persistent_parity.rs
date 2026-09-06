@@ -358,3 +358,223 @@ fn tiled_pipeline_persistent_zero_k_returns_all_zero() {
         .expect("k == 0 must succeed and return an all-zero vector without launching the kernel");
     assert_eq!(c, vec![0.0f32; 16]);
 }
+
+// ---------------------------------------------------------------------
+// 128×64 persistent 版（イシュー #1347）。上記 64×64 版と同型のテスト。
+// ---------------------------------------------------------------------
+
+/// [`persistent_bit_exact_shapes`] の全形状で、128×64 非 persistent 版
+/// （`CudaGemm::new_with_tiled_pipeline_128x64` インスタンスの
+/// `run_tiled_pipeline_f32`。`self.tiled_pipeline` スロットが 128×64 へ
+/// 差し替え済みのため本呼び出しは 128×64 カーネルを実行する）と 128×64
+/// persistent 版（`compile_tiled_pipeline_persistent_128x64_variant` +
+/// `run_tiled_pipeline_persistent_f32`）の出力が bit 同一であること、
+/// および CPU 参照実装との複合判定を検証する（イシュー #1347。64×64 版
+/// [`tiled_pipeline_persistent_matches_non_persistent_bit_exact`] と同型）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_128x64_persistent_matches_non_persistent_bit_exact() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new_with_tiled_pipeline_128x64(&device)
+        .expect("128x64 tiled pipeline kernel compilation must succeed");
+    assert!(
+        gemm.tiled_pipeline_available(),
+        "128x64 tiled pipeline kernel must be available on this ignored test runner (reason: \
+         {:?})",
+        gemm.tiled_pipeline_unavailable_reason()
+    );
+
+    for blocks_per_sm in [Some(1u32), None] {
+        let mut persistent_func = CudaGemm::compile_tiled_pipeline_persistent_128x64_variant(
+            &device,
+            3,
+            blocks_per_sm,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "compile_tiled_pipeline_persistent_128x64_variant(blocks_per_sm={blocks_per_sm:?}) \
+                         must succeed on this ignored test runner: {e}"
+            )
+        });
+
+        for (seed, (m, n, k)) in persistent_bit_exact_shapes().into_iter().enumerate() {
+            let mut rng = bench_harness::rng::Xorshift64Star::new(seed as u64 + 101);
+            let a = rng.fill_vec((m as usize) * (k as usize));
+            let b = rng.fill_vec((k as usize) * (n as usize));
+
+            let c_non_persistent = gemm.run_tiled_pipeline_f32(&a, &b, m, n, k).unwrap_or_else(
+                |e| {
+                    panic!(
+                        "run_tiled_pipeline_f32 (128x64) must succeed for m={m},n={n},k={k}: {e}"
+                    )
+                },
+            );
+            let c_persistent = gemm
+                .run_tiled_pipeline_persistent_f32(&mut persistent_func, &a, &b, m, n, k)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "run_tiled_pipeline_persistent_f32 (128x64, blocks_per_sm={blocks_per_sm:?}) \
+                         must succeed for m={m},n={n},k={k}: {e}"
+                    )
+                });
+
+            assert_eq!(
+                c_persistent, c_non_persistent,
+                "128x64: persistent 版と非 persistent 版の出力が bit 同一ではありません \
+                 (blocks_per_sm={blocks_per_sm:?}, m={m}, n={n}, k={k})"
+            );
+
+            let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+            fandhe_ai_backend_cpu::matmul_reference_fma(
+                &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+            )
+            .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+            fandhe_ai_backend_cpu::assert_parity(
+                &format!("persistent tiled pipeline 128x64 m={m} n={n} k={k}"),
+                &c_persistent,
+                &c_ref,
+            );
+        }
+    }
+}
+
+/// 64×64 persistent 版と 128×64 persistent 版が、両タイルの共有形状
+/// （タイル境界に依存せず両タイルの `n%4==0 && k%4==0` 整列制約を満たす
+/// 任意形状）で bit 同一の出力を返すことを検証する（イシュー #1347。
+/// タイル寸法を横断しても K 昇順単一アキュムレータ規約〈`.claude/rules/
+/// coding-rust.md`〉が同じ結果を導く横断確認。両カーネルとも
+/// `kernels_tiled_pipeline*.rs` 冒頭コメント「bit 同一の論拠」参照）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_128x64_persistent_matches_64x64_persistent_bit_exact() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+
+    let mut func_64 = CudaGemm::compile_tiled_pipeline_persistent_variant(&device, 3, Some(1))
+        .expect("compile_tiled_pipeline_persistent_variant must succeed");
+    let mut func_128 =
+        CudaGemm::compile_tiled_pipeline_persistent_128x64_variant(&device, 3, Some(1))
+            .expect("compile_tiled_pipeline_persistent_128x64_variant must succeed");
+
+    for (seed, (m, n, k)) in persistent_bit_exact_shapes().into_iter().enumerate() {
+        let mut rng = bench_harness::rng::Xorshift64Star::new(seed as u64 + 201);
+        let a = rng.fill_vec((m as usize) * (k as usize));
+        let b = rng.fill_vec((k as usize) * (n as usize));
+
+        let c_64 = gemm
+            .run_tiled_pipeline_persistent_f32(&mut func_64, &a, &b, m, n, k)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "run_tiled_pipeline_persistent_f32 (64x64) failed for m={m},n={n},k={k}: {e}"
+                )
+            });
+        let c_128 = gemm
+            .run_tiled_pipeline_persistent_f32(&mut func_128, &a, &b, m, n, k)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "run_tiled_pipeline_persistent_f32 (128x64) failed for m={m},n={n},k={k}: {e}"
+                )
+            });
+
+        assert_eq!(
+            c_64, c_128,
+            "64x64 persistent 版と 128x64 persistent 版の出力が bit 同一ではありません \
+             (m={m}, n={n}, k={k})"
+        );
+    }
+}
+
+/// 同一入力に対する 128×64 persistent 版の連続 2 回起動が同一出力を返す
+/// ことを検証する（イシュー #1347。64×64 版
+/// [`tiled_pipeline_persistent_repeated_launch_is_deterministic`] と同型）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
+fn tiled_pipeline_128x64_persistent_repeated_launch_is_deterministic() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    let mut func = CudaGemm::compile_tiled_pipeline_persistent_128x64_variant(&device, 3, Some(1))
+        .expect("compile_tiled_pipeline_persistent_128x64_variant must succeed");
+
+    let mut rng = bench_harness::rng::Xorshift64Star::new(17);
+    let (m, n, k) = (512u32, 512u32, 512u32);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+
+    let first = gemm
+        .run_tiled_pipeline_persistent_f32(&mut func, &a, &b, m, n, k)
+        .expect("first run_tiled_pipeline_persistent_f32 (128x64) call must succeed");
+    let second = gemm
+        .run_tiled_pipeline_persistent_f32(&mut func, &a, &b, m, n, k)
+        .expect("second run_tiled_pipeline_persistent_f32 (128x64) call must succeed");
+
+    assert_eq!(
+        first, second,
+        "128x64 persistent 版の連続 2 回起動（同一ハンドル・同一入力）は同一出力になるはず"
+    );
+}
+
+/// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）の
+/// 128×64 版（[`tiled_pipeline_persistent_parity_smoke_env_adaptive`]
+/// と同じ分岐パターン。イシュー #1347）。
+#[test]
+fn tiled_pipeline_128x64_persistent_parity_smoke_env_adaptive() {
+    let device = match CudaDevice::new(0) {
+        Ok(dev) => dev,
+        Err(CudaError::DriverUnavailable { detail }) => {
+            assert!(!detail.is_empty(), "detail message must not be empty");
+            return;
+        }
+        Err(CudaError::Driver(_)) => return,
+        Err(other) => panic!("unexpected CudaError variant from CudaDevice::new: {other}"),
+    };
+
+    let gemm = match CudaGemm::new_with_tiled_pipeline_128x64(&device) {
+        Ok(gemm) => gemm,
+        Err(CudaError::NvrtcUnavailable { detail }) => {
+            assert!(!detail.is_empty());
+            return;
+        }
+        Err(other) => panic!(
+            "unexpected CudaError variant from CudaGemm::new_with_tiled_pipeline_128x64: {other}"
+        ),
+    };
+
+    if !gemm.tiled_pipeline_available() {
+        // cp.async は sm_80 (Ampere) 以降限定。64×64 版と同じ早期 return。
+        return;
+    }
+
+    let mut func =
+        match CudaGemm::compile_tiled_pipeline_persistent_128x64_variant(&device, 3, Some(1)) {
+            Ok(func) => func,
+            Err(err) => match err {
+                CudaError::TiledPipelineUnavailable { detail } => {
+                    assert!(!detail.is_empty());
+                    return;
+                }
+                other => panic!(
+                    "unexpected CudaError variant from \
+                 compile_tiled_pipeline_persistent_128x64_variant: {other}"
+                ),
+            },
+        };
+
+    let mut rng = bench_harness::rng::Xorshift64Star::new(1);
+    let (m, n, k) = (128u32, 64u32, 64u32);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+
+    let c_non_persistent = gemm.run_tiled_pipeline_f32(&a, &b, m, n, k).expect(
+        "CudaGemm::run_tiled_pipeline_f32 (128x64) must succeed on a cp.async-capable test runner",
+    );
+    let c_persistent = gemm
+        .run_tiled_pipeline_persistent_f32(&mut func, &a, &b, m, n, k)
+        .expect(
+            "CudaGemm::run_tiled_pipeline_persistent_f32 (128x64) must succeed on a \
+             cp.async-capable test runner",
+        );
+    assert_eq!(
+        c_persistent, c_non_persistent,
+        "smoke 128x64x64: persistent 版と非 persistent 版の出力が bit 同一ではありません"
+    );
+}

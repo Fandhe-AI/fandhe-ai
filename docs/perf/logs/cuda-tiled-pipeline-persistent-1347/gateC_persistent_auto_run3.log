@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/gemm_tiled_pipeline_persistent_bench --sizes 256,512,1024,2048,4096 --tile both --blocks-per-sm auto`
+tile=64x64 num_sms=48 blocks_per_sm=3 grid_capacity=144
+size=256 tile=64x64 pipeline3_gpu_only_tflops=1.5756 persistent_gpu_only_tflops=2.1014 persistent_over_pipeline3=1.3337
+size=512 tile=64x64 pipeline3_gpu_only_tflops=6.9527 persistent_gpu_only_tflops=6.9905 persistent_over_pipeline3=1.0054
+size=1024 tile=64x64 pipeline3_gpu_only_tflops=11.2316 persistent_gpu_only_tflops=11.3025 persistent_over_pipeline3=1.0063
+size=2048 tile=64x64 pipeline3_gpu_only_tflops=12.9724 persistent_gpu_only_tflops=12.9799 persistent_over_pipeline3=1.0006
+size=4096 tile=64x64 pipeline3_gpu_only_tflops=9.7871 persistent_gpu_only_tflops=9.6462 persistent_over_pipeline3=0.9856
+tile=128x64 num_sms=48 blocks_per_sm=2 grid_capacity=96
+size=256 tile=128x64 pipeline3_gpu_only_tflops=1.4122 persistent_gpu_only_tflops=1.3697 persistent_over_pipeline3=0.9699
+size=512 tile=128x64 pipeline3_gpu_only_tflops=6.8590 persistent_gpu_only_tflops=6.6522 persistent_over_pipeline3=0.9698
+size=1024 tile=128x64 pipeline3_gpu_only_tflops=11.7026 persistent_gpu_only_tflops=11.8850 persistent_over_pipeline3=1.0156
+size=2048 tile=128x64 pipeline3_gpu_only_tflops=14.5890 persistent_gpu_only_tflops=14.7051 persistent_over_pipeline3=1.0080
+size=4096 tile=128x64 pipeline3_gpu_only_tflops=13.0793 persistent_gpu_only_tflops=13.4854 persistent_over_pipeline3=1.0310

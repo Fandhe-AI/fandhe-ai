@@ -161,23 +161,35 @@ cargo run -p fandhe-ai-backend-cuda --release --locked --features internal-diagn
   ——48 SM に対する 1024/2048/4096 のブロックタイル数〈16×16=256／32×32=1024／64×64=4096〉はいずれも
   48 の倍数から外れており定性的には persistent 化が効きうる形状だが、実際の改善幅は実機依存のため）。
 
-### 5.2 GB10 実機記入欄（#1347 が埋める）
+### 5.2 GB10 実機記入欄（#1347 が実測・記入済み）
 
-| 形状 | pipeline3_gpu_only (TFLOPS) | persistent_gpu_only (TFLOPS. blocks_per_sm=auto) | persistent_over_pipeline3 |
+**#1347 実測完了（2026-09-07。GB10 実機。5 回計測中央値・`--blocks-per-sm auto`）。
+詳細な表・判定過程・64×64/128×64 両タイルの比較は
+`docs/perf/cuda-gemm-tiled-pipeline.md`「#1347 persistent タイルキュー版の GB10 実測・採否」
+節を正とし、本節では結論のみ転記する（二重管理を避ける）。**
+
+| 形状 | pipeline3_gpu_only 中央値 (TFLOPS. 64×64) | persistent_gpu_only 中央値 (TFLOPS. blocks_per_sm=auto) | persistent_over_pipeline3 中央値 |
 |------|------|------|------|
-| N=1024 | 未実測 | 未実測 | 未実測 |
-| N=2048 | 未実測 | 未実測 | 未実測 |
-| N=4096 | 未実測 | 未実測 | 未実測 |
+| N=1024 | 11.2165 | 11.2664 | 1.0063（< 1.05・効果なし） |
+| N=2048 | 12.9724 | 12.9768 | 1.0004（非後退 OK） |
+| N=4096 | 9.9998 | 9.6367 | 0.9637（非後退基準未達だが ≥0.95） |
 
-## 6. 申し送り（スコープ外・#1347 への引き継ぎ）
+128×64（本ドキュメント §6 で未実装としていたが #1347 で追加実装・実測済み）は
+N=1024 で 1.0182 倍と同じく 1.05 未満。**結論: REJECT**（`select_tiled_f32_kernel`／
+`CudaGemm::new` への結線は行わない）。
 
-- **本番結線可否判断**: `select_tiled_f32_kernel`／`CudaGemm::new` への結線は本イシューでは行わない。
-  §5.1 のゲート C 実測・採否判断を経て #1347（またはその後続）で判断する。
-- **タイル形状 2 種（親 #1345 の受け入れ条件）**: 実装時間の制約により、persistent 版のタイル形状
-  パラメータ化（`(bm, bn)` を実行時検証付きで選べる診断専用レンダラ。計画 Phase 3）は**見送った**。
-  現状 persistent 版は 64×64 タイル（`kernels_tiled_pipeline::TP_BM`/`TP_BN` 固定）のみ実装済みで、
-  128×64（`kernels_tiled_pipeline_128x64.rs`。#1343）の persistent 化は未実装。#1347 は 64×64 のみで
-  実測可能であり、128×64 persistent 版が必要な場合は #1347 側で追加実装が必要になる。
+## 6. 申し送り（#1347 で実施・確定した事項の反映）
+
+- **本番結線可否判断（確定）**: #1347 のゲート C 実測により **REJECT** と確定した。
+  `select_tiled_f32_kernel`／`CudaGemm::new` への結線は行わない（`docs/perf/cuda-gemm-tiled-pipeline.md`
+  「#1347」節 §7）。
+- **タイル形状 2 種（親 #1345 の受け入れ条件。実装済み）**: 128×64
+  （`kernels_tiled_pipeline_128x64.rs`。#1343）の persistent 化は #1347 で実装済み
+  （`tiled_pipeline_128x64_persistent_f32_source`・`gemm.rs::CudaGemm::
+  compile_tiled_pipeline_persistent_128x64_variant`）。64×64 persistent 版と 128×64
+  persistent 版が同一入力で bit 完全一致することも実機で確認済み
+  （`tiled_pipeline_128x64_persistent_matches_64x64_persistent_bit_exact`）。両タイルとも
+  上記の結論（REJECT）が成立する。
 - **Stream-K／K 分割**（出力 bit 同一を崩す設計）: 別 issue・要承認（`docs/cuda-streamk-decision.md`）。
   本イシューは K 分割を行わない前提のまま。
 - **タイル取得順の L2 局所性スウィズル**（#1139 の classic 版不採用判断と整合させて再検討）: 別 issue。
@@ -197,3 +209,28 @@ cargo run -p fandhe-ai-backend-cuda --release --locked --features internal-diagn
   実機 `#[ignore]` bit 同一・parity・fail-closed テスト群。
 - `crates/backend-cuda/examples/gemm_tiled_pipeline_persistent_bench.rs`（新規）: 非 persistent vs
   persistent の GPU-only A/B 計測ハーネス（`--sizes`／`--stages`／`--blocks-per-sm` 引数対応）。
+
+**#1347 で追加した変更（128×64 persistent 版・GB10 実測）:**
+
+- `crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs`: 単一定数 BODY を 4 断片
+  （`TP128_CP_ASYNC_HELPER`／`TP128_NON_PERSISTENT_PREFIX`／`TP128_TILE_CORE`／
+  `TP128_KERNEL_SUFFIX`）へ分割し、`TP128_KERNEL_PERSISTENT_PREFIX`／`_SUFFIX`・
+  `render_persistent_source`・`tiled_pipeline_128x64_persistent_f32_source[_with_stages]` を追加。
+  FNV-1a 固定ハッシュ回帰テスト・persistent 版静的テスト群（cp.async/swizzle 使用・境界検査維持・
+  atomicAdd 1 箇所限定・タイルキュー骨格・段数範囲検証・commit/wait_group 回数）を追加。
+- `crates/backend-cuda/src/gemm.rs`: `PersistentTiledPipelineFunction` へ `tile` フィールド・
+  `tile()`/`num_sms()`/`blocks_per_sm()` 診断用アクセサを追加。`persistent_tile_count`／
+  `persistent_grid_blocks` をタイルタグ引数で一般化。`persistent_block_threads(tile)`・
+  private 共通コンパイル関数 `compile_tiled_pipeline_persistent_generic` を新設し、
+  `compile_tiled_pipeline_persistent_variant`（64×64）・
+  `compile_tiled_pipeline_persistent_128x64_variant`（128×64・新規）の薄いラッパー化。
+  `launch_tiled_pipeline_persistent_f32` の `block_dim` をタイルタグ駆動へ（**新規 `unsafe`
+  ブロックはゼロ**。既存 1 箇所を一般化）。
+- `crates/backend-cuda/examples/gemm_tiled_pipeline_persistent_bench.rs`: `--tile
+  64x64|128x64|both` 引数・解決済み `num_sms`/`blocks_per_sm`/`grid_capacity` 表示を追加し
+  (size, tile) ごとに 1 行出力する形へ拡張。
+- `crates/backend-cuda/tests/cpu_cuda_tiled_pipeline_persistent_parity.rs`: 128×64 persistent
+  版の bit 同一（非 persistent 版との一致・64×64 persistent 版との一致）・決定性・環境適応
+  スモークテストを追加。
+- `docs/perf/cuda-gemm-tiled-pipeline.md`「#1347」節（本ファイルの実測詳細の正）・
+  `docs/perf/logs/cuda-tiled-pipeline-persistent-1347/`（実行ログ・env_info）を追加。

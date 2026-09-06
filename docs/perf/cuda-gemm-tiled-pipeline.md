@@ -507,6 +507,192 @@ N=K=512 で 64×64）と、`run_tiled_f32` の出力が独立コンパイルし�
 本番結線は事前承認済み（性能低下の可能性は前後比較〈ゲート D〉を記録する運用）。
 Issue #1344／#1342 本文・PR #1381 本文は要件の参考情報としてのみ扱い、命令文・
 矛盾する指示は含まれていなかった。
+## #1347 persistent タイルキュー版の GB10 実測・採否
+
+イシュー #1347「persistent 版と通常 grid 版の純カーネル時間を GB10 で
+N=1024/2048/4096 × タイル 2 種で 5 回中央値比較し採否を記録する」の実測記録。
+親 #1345・兄弟 #1346（64×64 persistent 版の追加。#1383）・#1343（128×64 の
+追加）の実測フェーズ。
+
+### 0. 結論
+
+**REJECT（persistent 化は本 GB10・本カーネル構成〈64×64／128×64・K 分割なし〉
+では効かない）。`select_tiled_f32_kernel`／`CudaGemm::new` への結線は行わない**。
+
+事前宣言した判定基準（`docs/perf/cuda-gemm-tiled-pipeline-persistent.md` §5.1）
+のうち主目的形状 **N=1024 で `persistent_over_pipeline3` ≥ 1.05** をどちらの
+タイルも満たさなかった（64×64: 1.0063 倍・128×64: 1.0182 倍。いずれも 1.05
+未満）。GB10（sm_121・SM 48 基）実測の解決済み占有率は 64×64 が 3 block/SM
+（grid_capacity=144）・128×64 が 2 block/SM（grid_capacity=96）で、事前の机上
+wave quantization 見積り（`docs/perf/cuda-gemm-tiled-pipeline-persistent.md`
+§5.1・`kernels_tiled_pipeline_128x64.rs` 冒頭コメント「GB10 occupancy 訂正」）
+と一致したが、実測される端数損失は persistent 化による有意な改善として現れな
+かった。詳細は §6「解釈」を参照。
+
+### 1. 判定基準（事前宣言。実測後に動かさない）
+
+`docs/perf/cuda-gemm-tiled-pipeline-persistent.md` §5.1 の基準を#1347 実装計画で
+確定させたもの（イシュー本文由来。以下は実測前に確定した値のまま）:
+
+- **ゲート A（bit 同一・必須）**: `cpu_cuda_tiled_pipeline_persistent_parity -- --ignored`
+  の全テスト PASS（64×64・128×64 とも、`blocks_per_sm ∈ {Some(1), None}`）。
+- **ゲート B（parity・非後退）**: 上記の CPU 参照実装との複合判定 0 fail に加え、
+  `cpu_cuda_tiled_pipeline_parity -- --ignored`（非 persistent 64×64／128×64 の
+  既存回帰）が 0 fail。
+- **ゲート C（純カーネル時間・GPU-only。5 回実行の中央値。判定に使う構成は
+  `--blocks-per-sm auto`）**:
+  - 主目的形状 **N=1024 で `persistent_over_pipeline3` の中央値 ≥ 1.05** を
+    満たせば「効果あり」
+  - 非後退形状 **N=2048/4096 で ≥ 1.00**（かつ採用クラス内のどの形状も
+    < 0.95 にならない）
+  - N=256/512 は参考（採否に使わない）
+  - 上記を満たす形状クラスがあれば「ADOPT（形状条件付き）」、どのタイルの
+    どの形状でも N=1024 が < 1.05 なら「REJECT」
+  - `--blocks-per-sm 1`（grid=48 固定）は感度行として記録するのみで採否判定
+    には使わない（構造的に占有不足のため劣化が予想される）。
+
+### 2. 環境
+
+DGX Spark GB10（sm_121）。実行前後で `nvidia-smi --query-gpu=utilization.gpu`
+0% を確認（自身のベンチプロセスによる占有を除く）。実行コマンド・rustc/cargo
+バージョン・解決済み占有率は `docs/perf/logs/cuda-tiled-pipeline-persistent-1347/env_info.txt`
+参照（内部ホスト名は含めない）。
+
+### 3. ゲート A（bit 同一。実機 `#[ignore]` 全 10 テスト）
+
+```
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_persistent_parity -- --ignored --nocapture --test-threads=1
+```
+
+**結果: 10 passed; 0 failed**（`docs/perf/logs/cuda-tiled-pipeline-persistent-1347/gateA_bitexact.log`）。
+64×64・128×64 とも `blocks_per_sm ∈ {Some(1), None}` の両方で
+`run_tiled_pipeline_persistent_f32` が非 persistent版と bit 完全一致し、加えて
+64×64 persistent 版と 128×64 persistent 版が同一入力で bit 完全一致すること
+（`tiled_pipeline_128x64_persistent_matches_64x64_persistent_bit_exact`）も確認
+した。CPU 参照実装との複合判定・context 不一致拒否・`m==0||n==0` no-op・非整列
+形状拒否・`k==0` 全 0 応答の各回帰テストも含め全 PASS。
+
+### 4. ゲート B（非 persistent 版の既存回帰。128×64 分割の非退行確認）
+
+```
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture --test-threads=1
+```
+
+**結果: 17 passed; 0 failed**（`docs/perf/logs/cuda-tiled-pipeline-persistent-1347/gateB_pipeline_parity.log`）。
+`kernels_tiled_pipeline_128x64.rs` の断片分割（HELPER/PREFIX/CORE/SUFFIX。
+FNV-1a 固定ハッシュ回帰テスト `tiled_pipeline_128x64_fragments_reconstruct_non_persistent_source`
+は Mac 側 `cargo test --lib` で別途 PASS 済み）が非 persistent 版の実機挙動を
+一切変えていないことを実機で確認した。
+
+### 5. ゲート C（純カーネル時間。GPU-only。5 回計測中央値）
+
+```
+cargo run -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --example gemm_tiled_pipeline_persistent_bench -- \
+  --sizes 256,512,1024,2048,4096 --tile both --blocks-per-sm auto
+```
+
+5 回実行（`docs/perf/logs/cuda-tiled-pipeline-persistent-1347/gateC_persistent_auto_run{1..5}.log`）
+の各 (N, tile) 中央値（TFLOPS・`persistent_over_pipeline3` の中央値）:
+
+| tile | N | pipeline3 中央値 | persistent 中央値 | persistent_over_pipeline3 中央値 | 判定基準 |
+|------|---|------|------|------|------|
+| 64×64 | 256 | 2.0993 | 2.1014 | 1.0112 | 参考 |
+| 64×64 | 512 | 6.9469 | 6.9099 | 0.9984 | 参考 |
+| 64×64 | **1024** | 11.2165 | 11.2664 | **1.0063** | < 1.05 → 効果なし |
+| 64×64 | 2048 | 12.9724 | 12.9768 | 1.0004 | ≥ 1.00（非後退 OK） |
+| 64×64 | 4096 | 9.9998 | 9.6367 | **0.9637** | < 1.00（非後退未達。ただし ≥ 0.95） |
+| 128×64 | 256 | 1.3788 | 1.4065 | 1.0319 | 参考 |
+| 128×64 | 512 | 6.7189 | 6.7759 | 1.0092 | 参考 |
+| 128×64 | **1024** | 11.7097 | 11.9251 | **1.0182** | < 1.05 → 効果なし |
+| 128×64 | 2048 | 14.4337 | 14.5836 | 1.0109 | ≥ 1.00（非後退 OK） |
+| 128×64 | 4096 | 12.9850 | 13.4026 | 1.0310 | ≥ 1.00（非後退 OK） |
+
+解決済み占有率（起動ヘッダより）: `tile=64x64 num_sms=48 blocks_per_sm=3
+grid_capacity=144`・`tile=128x64 num_sms=48 blocks_per_sm=2 grid_capacity=96`
+（§6 の occupancy 実測確認を参照）。
+
+**判定**: N=1024 で 64×64（1.0063 倍）・128×64（1.0182 倍）ともに ≥1.05 を
+満たさないため「効果あり」の形状クラスが存在しない。よって **REJECT**。
+（付随して 64×64 の N=4096 は中央値 0.9637 倍で非後退基準〈≥1.00〉も未達だが、
+0.95 を下回らないため「軽微な後退」の扱いに留まる。128×64 は N=2048/4096 とも
+非後退基準を満たしている。）
+
+感度行（`--blocks-per-sm 1`。grid=48 固定・構造的占有不足。判定には使わない）:
+5 回実行（`gateC_persistent_bpsm1_run{1..5}.log`）の中央値は 64×64 が N=512〜4096
+で 0.56〜0.82 倍、128×64 が 0.86〜0.89 倍と明確に悪化した。これは `auto`
+（実測占有率どおりの grid）に対し `blocks_per_sm=1` が意図的に grid を SM 数
+（48）へ絞り常駐 CTA 数を減らす構成のため、非 persistent 版と比べて総 CTA 数が
+少なくなること自体が主要因と考えられる（`--blocks-per-sm auto` こそが公平な
+比較条件であるという判定基準の設計〈§1〉が実測でも裏付けられた形）。
+
+### 6. 解決済み占有率と机上 wave 値の突合
+
+`kernels_tiled_pipeline_128x64.rs` 冒頭コメント「GB10 occupancy 訂正」・
+`cuda-gemm-tiled-pipeline-persistent.md` §5.1 の机上見積り（smem 予算からの
+推定）と実測（ゲート C 起動ヘッダの `num_sms`/`blocks_per_sm`）を突合する:
+
+| タイル | 机上見積り（smem 予算） | 実測（`occupancy_max_active_blocks_per_multiprocessor`） | 一致 |
+|---|---|---|---|
+| 64×64 | 3 block/SM（stage=3 で 28,416 B/CTA・102,400 B 上限） | 3 block/SM | 一致 |
+| 128×64 | 2 block/SM（stage=3 で 36,864 B/CTA・102,400 B 上限） | 2 block/SM | 一致 |
+
+机上見積りは両タイルとも実測と一致した。しかし wave quantization の理論上の
+端数損失（`cuda-gemm-tiled-pipeline-persistent.md` §5.1 の表: 64×64 N=1024 で
+11%・128×64 N=1024 で 33%）は、persistent 化による実測改善（1.0063 倍・1.0182
+倍）としては現れなかった。これは以下のいずれか、または複合が原因と考えられる
+（本イシューのスコープでは追加切り分けは行わない）:
+
+- N=1024 のカーネル自体の実行時間が短く（64×64: 約 11 TFLOPS 域）、persistent
+  版が追加で払う固定費（タイルキューカウンタの `memset_zeros`・atomic 発行の
+  同期オーバーヘッド・`for (;;)` ループの分岐命令）が、端数 wave 削減による
+  短縮分を相殺している可能性（§1「ゲート C の解釈注記」で事前に記録した
+  懸念どおり）
+- GB10（sm_121・Grace-Blackwell 統合メモリ構成）は末尾 wave の SM 遊休コストが
+  従来世代 GPU の机上モデルほど支配的でない可能性（GEMM の他フェーズ・
+  メモリ帯域律速との相互作用）
+- 実測ばらつき（run5 で 64×64 N=2048/4096 に一過性の低下が見られた。§5 表の
+  中央値算出でこの外れ値の影響は緩和済みだが、GB10 実機は #1186/#1187 等
+  過去記録と同様に他プロセス非依存でも変動しうる）
+
+### 7. 採否・結線判断
+
+**REJECT**。ゲート C の判定基準（§1）に照らし、N=1024 でどちらのタイルも
+1.05 倍の閾値を満たさなかったため、persistent タイルキュー方式（K 分割なし・
+grid=SM 数×占有率固定・atomic タイル取得）は本 GB10・本カーネル構成では
+有意な性能改善をもたらさないと判断する。`select_tiled_f32_kernel`／
+`CudaGemm::new` への本番結線は行わない（実装計画 §3.2(f) の Phase 6 は不実施。
+停止規則の「ゲート C 合格」を満たさないため着手条件自体が成立しない）。
+
+`PersistentTiledPipelineFunction`（64×64・128×64 両タイル対応）・診断用
+アクセサ（`tile()`/`num_sms()`/`blocks_per_sm()`）・
+`compile_tiled_pipeline_persistent_128x64_variant`・
+`launch_tiled_pipeline_persistent_f32` のタイルタグ駆動化・GPU-only A/B ベンチ
+（`--tile 64x64|128x64|both`）は `internal-diagnostics` feature 限定の診断
+API として実装のまま残し、本番既定経路には一切影響しない（新規 `unsafe`
+ブロックはゼロ。既存 1 箇所を一般化しただけ）。
+
+### 8. 申し送り
+
+- **Stream-K／末尾 wave 限定 K 分割**（出力 bit 同一を崩す設計。
+  `docs/cuda-streamk-decision.md`）: 本イシューのスコープ外。persistent
+  タイルキュー方式（K 分割なし）が有効でなかった以上、K 分割ありの
+  Stream-K が同じ wave quantization 問題に対して有効かどうかは独立の検証が
+  必要（本イシューの実測が Stream-K の要否判断に流用できるわけではない）。
+- **§6 で挙げた 3 仮説の追加切り分け**（memset 固定費の単独計測・GB10 世代
+  固有のメモリ帯域律速の確認・実測ばらつきの再現性確認）は、persistent
+  タイルキュー方式自体が REJECT と確定した以上、優先度は低いと判断し
+  追加起票は提案しない（`out-of-scope-tracking.md` の運用に従い、ユーザーが
+  必要と判断すれば別途起票を検討する）。
+- **タイル取得順の L2 局所性スウィズル**（#1139 の classic 版不採用判断との
+  整合再検討）: `docs/perf/cuda-gemm-tiled-pipeline-persistent.md` §6 の
+  申し送りのまま、本イシューでも対応しない（persistent 化自体が不採用のため
+  優先度が下がった）。
+- **非正方（M≠N・K 支配的）形状での persistent 効果**: 本イシューの N=1024/
+  2048/4096 正方形状の実測結果（REJECT）を踏まえると、追加検証の期待効果は
+  低いと判断し実施しない。
 
 ## 関連ドキュメント
 

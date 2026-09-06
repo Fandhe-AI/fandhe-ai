@@ -157,39 +157,52 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p fandhe-ai-backend-metal -p fandhe-ai-bac
 
 **実機（Metal・Apple Silicon）での bit 一致自己検証（T1〜T6。
 `crates/backend-metal/src/gemm.rs::tests` に実装済みの `#[ignore]` テスト）
-は本エージェントの実行環境に macOS 実機が無いため未実行のまま明記する**:
+は #1300 で M4 Max 実機実行済み。全 6 件 pass**（`docs/perf/logs/
+metal-gemm-e4-coop-load-ab-1300/smoke_coop_load_bit_match.log`）:
 
-| テスト | 内容 |
-|---|---|
-| `coop_load_bit_match_all_candidates` | `tile::CANDIDATES` 全 9 候補 × N∈{512,1024,2048,4096} × 必須 5 head（`L0-P0`/`L0-P8`/`L1-P0`/`L1-P4`/`L1-P8`）で `dispatch_tiled_prepared` の bit 一致・フォールバック非経由を検証 |
-| `coop_load_bit_match_dispatch_auto` | 本番自動選択経路 `dispatch_auto` で N=512〜4096 × 全 head |
-| `coop_load_transposed_bit_match` | NT/TN/TT を N=1024・`CANDIDATES[3]`／`CANDIDATES[5]`（bk=32）× 全 head |
-| `coop_load_bit_match_boundary_shape` | 端数形状（M=1032・N=1048・K=1032）× 全候補 × 全 head |
-| `coop_load_f16_path_is_noop` | `gemm_simdgroup_tiled_f16` が `COOP_LOAD_LAYOUT` 非参照であることの実機証明（base vs L1-P8） |
-| `coop_load_default_matches_production_constants` | `MetalGemm::new(...).coop_load() == tile::COOP_LOAD_CONFIG == CoopLoadConfig::DEFAULT` |
+| テスト | 内容 | 結果（#1300） |
+|---|---|---|
+| `coop_load_bit_match_all_candidates` | `tile::CANDIDATES` 全 9 候補 × N∈{512,1024,2048,4096} × 必須 5 head（`L0-P0`/`L0-P8`/`L1-P0`/`L1-P4`/`L1-P8`）で `dispatch_tiled_prepared` の bit 一致・フォールバック非経由を検証 | pass |
+| `coop_load_bit_match_dispatch_auto` | 本番自動選択経路 `dispatch_auto` で N=512〜4096 × 全 head | pass |
+| `coop_load_transposed_bit_match` | NT/TN/TT を N=1024・`CANDIDATES[3]`／`CANDIDATES[5]`（bk=32）× 全 head | pass |
+| `coop_load_bit_match_boundary_shape` | 端数形状（M=1032・N=1048・K=1032）× 全候補 × 全 head | pass |
+| `coop_load_f16_path_is_noop` | `gemm_simdgroup_tiled_f16` が `COOP_LOAD_LAYOUT` 非参照であることの実機証明（base vs L1-P8） | pass |
+| `coop_load_default_matches_production_constants` | `MetalGemm::new(...).coop_load() == tile::COOP_LOAD_CONFIG == CoopLoadConfig::DEFAULT` | pass |
 
-これら 6 テストの実機実行、および既存 parity／bit-match 群（swizzle・
-fine-barrier・unroll-acc・source-specialized・frag-load・transposed 各種）
-の非後退確認は、実機アクセスを持つ後続セッション（#1300 等）が
-`docs/real-hardware-verification-env.md` の手順に従って実行し、本ドキュメント
-または後続ドキュメントへ追記すること:
+実行コマンド:
 
 ```sh
-cargo test -p fandhe-ai-backend-metal --release --lib -- --ignored --nocapture coop_load
+cargo test -p fandhe-ai-backend-metal --release --lib -- --ignored --nocapture --test-threads=1 coop_load
 ```
+
+既存 parity／bit-match 群（swizzle・fine-barrier・unroll-acc・
+source-specialized・frag-load・transposed 各種）の非後退確認は、上記
+コマンドの `coop_load` フィルタ範囲外のため #1300 では対象外のまま
+（#1300 計画 S2 の「副次（ブロッカーにしない）」項目として明記のみ残す。
+`cargo test -p fandhe-ai-backend-metal` の非 ignore テスト 36 件 pass・
+既存 example 群のテストも pass しており〈#1300 実装時の `cargo test -p
+fandhe-ai-backend-metal` 実行で確認〉、少なくとも非 ignore 経路での
+回帰は生じていない）。
 
 ## 4. env_info
 
-- 本 PR の実装・型検査・Linux 実行可能テストは Linux コンテナ環境
-  （macOS 実機なし）で実施した。実機実測を含まないため CPU/GPU 型番・
-  `uptime`／load average の記録は該当なし。
-- 実機実行時は `docs/real-hardware-verification-env.md` の手順に従い、
-  実行前後の `uptime` を記録すること。bit 一致検査自体は決定的な出力
-  比較（`to_bits()` 厳密一致）のため GPU 負荷とは独立に成立する
-  （純カーネル時間の A/B 計測とは異なり、共有負荷下でも判定結果は
-  変わらない）。
+- 本ドキュメントの初回実装（機構実装・Linux 実行可能テスト）は Linux
+  コンテナ環境（macOS 実機なし）で実施した。
+- **実機（Apple M4 Max・macOS 26.6.2）実行は #1300 で実施済み**: T1〜T6
+  bit 一致自己検証・純カーネル時間 A/B 計測（6 候補 × N=1024/2048/4096
+  × 5 プロセス起動）とも完走。詳細な env_info（負荷状況・pmset・並走
+  プロセス等）は `docs/perf/logs/metal-gemm-e4-coop-load-ab-1300/
+  env_info.txt` を参照。bit 一致検査自体は決定的な出力比較
+  （`to_bits()` 厳密一致）のため GPU 負荷とは独立に成立し、共有負荷下
+  でも判定結果は変わらない。純カーネル時間の A/B 計測は共有負荷環境下
+  での実測であり、その解釈は `docs/perf/metal-gemm-n4096-kernel-gap.md`
+  §11 を参照。
 
-## 5. #1300 への引き継ぎ
+## 5. #1300 への引き継ぎ（消化済み。§11 参照）
+
+**本節は #1298 起票時点の引き継ぎ計画の記録として残す。実際の実行結果は
+`docs/perf/metal-gemm-n4096-kernel-gap.md` §11（イシュー #1300）を参照
+すること。**
 
 - `MetalGemm::new_with_coop_load(ctx, coop_load)` で base（`tile::
   COOP_LOAD_CONFIG`）/head（任意の `tile::CoopLoadConfig`）の 2
