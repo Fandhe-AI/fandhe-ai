@@ -479,16 +479,74 @@ impl TileConfig {
         pattern: crate::layout::TransposePattern,
         pad_elems: u32,
     ) -> u32 {
-        use crate::layout::TransposePattern;
         if !self.staged {
             return 0;
         }
+        Self::tiled_bytes_for_pad(self.bm, self.bn, self.bk, pattern, pad_elems)
+    }
+
+    /// [`shared_mem_bytes_for_pad`](Self::shared_mem_bytes_for_pad) の
+    /// タイルクラス考慮版（イシュー #1327 codex-review／Bugbot 指摘対応）。
+    ///
+    /// `shaders/gemm.metal` の `staging_active = (TILE_CLASS == 0) ?
+    /// USE_TGP_STAGING : (TILE_CLASS == 2)`（本ファイル冒頭を含む
+    /// `gemm.metal` の同変数コメント参照）と厳密に同じ式で「実効 staged」
+    /// を決める。`TileClassMode::Split` 下では `TileClass::Edge`（端タイル）
+    /// が **`cfg.staged`（＝`USE_TGP_STAGING`）の値に関わらず常に staged
+    /// ロード経路を強制** し、`TileClass::Interior`（内部タイル）は逆に
+    /// 常に direct-load を強制する。`shared_mem_bytes_for_pad`（`self.staged`
+    /// のみを見る版）をこの経路の共有メモリ上限検査・確保量計算に使うと、
+    /// `cfg.staged == false` かつ `tile_class == Edge` の構成で実際には
+    /// staged 分岐（threadgroup メモリへ書き込む）が走るにもかかわらず
+    /// `0` バイトしか確保されない（`encode_dispatch_tiled` 側は
+    /// `.max(16)` の下限でしか埋まらない）という threadgroup メモリ範囲外
+    /// 書き込みに直結する（codex-review P0・Cursor Bugbot Medium 指摘・
+    /// PR #1388）。`pipeline_for_tile` の事前検証（`ExceedsSharedMemory`
+    /// 相当のオーバーフロー検査）と `encode_dispatch_tiled` の
+    /// `setThreadgroupMemoryLength` 実確保の両方が、**同じ `tile_class` を
+    /// 渡して本メソッドを呼ぶ**契約にすることで、検査対象と実際にカーネルが
+    /// アクセスする範囲を一致させる（fail-closed）。
+    ///
+    /// `TileClass::Legacy` を渡した場合の戻り値は
+    /// [`shared_mem_bytes_for_pad`](Self::shared_mem_bytes_for_pad) と完全に
+    /// 一致する（`TileClassMode::Legacy` 経路の非後退。本ファイル末尾
+    /// テスト参照）。
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn shared_mem_bytes_for_class(
+        &self,
+        pattern: crate::layout::TransposePattern,
+        pad_elems: u32,
+        tile_class: TileClass,
+    ) -> u32 {
+        let effective_staged = match tile_class {
+            TileClass::Legacy => self.staged,
+            TileClass::Interior => false,
+            TileClass::Edge => true,
+        };
+        if !effective_staged {
+            return 0;
+        }
+        Self::tiled_bytes_for_pad(self.bm, self.bn, self.bk, pattern, pad_elems)
+    }
+
+    /// [`shared_mem_bytes_for_pad`](Self::shared_mem_bytes_for_pad)・
+    /// [`shared_mem_bytes_for_class`](Self::shared_mem_bytes_for_class) が
+    /// 共有する staged タイル領域（A タイル＋B タイル）バイト数計算本体
+    /// （`staged`／実効 staged 判定を呼び出し元へ切り出した残り）。
+    fn tiled_bytes_for_pad(
+        bm: u32,
+        bn: u32,
+        bk: u32,
+        pattern: crate::layout::TransposePattern,
+        pad_elems: u32,
+    ) -> u32 {
+        use crate::layout::TransposePattern;
         let trans_a = matches!(pattern, TransposePattern::Tn | TransposePattern::Tt);
         let trans_b = matches!(pattern, TransposePattern::Nt | TransposePattern::Tt);
 
-        let bm = self.bm as u64;
-        let bn = self.bn as u64;
-        let bk = self.bk as u64;
+        let bm = bm as u64;
+        let bn = bn as u64;
+        let bk = bk as u64;
         let pad = pad_elems as u64;
         let compute = || -> Option<u64> {
             // A タイル: NN は `bm` 行 × `(bk+pad)` 列、転置は `bk` 行 ×
@@ -1574,6 +1632,185 @@ impl CoopLoadConfig {
 /// 本定数を渡す）。
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const COOP_LOAD_CONFIG: CoopLoadConfig = CoopLoadConfig::DEFAULT;
+
+/// タイルクラス分割（イシュー #1327・E6 試作）の instance ゲート。
+/// `crate::gemm::MetalGemm::new_with_tile_class` が受け取る。`Legacy`
+/// （本番既定）では従来どおり `USE_TGP_STAGING` 単独でロード方式を決める
+/// 1 回の dispatch のまま不変。`Split` では `tile_class_plan` が求めた
+/// 内部タイル／端タイル領域ごとに `TileClass::Interior`/`Edge` で個別に
+/// パイプラインを構築し、`crate::gemm::MetalGemm::encode_tiled_by_class`
+/// が領域ごとに dispatch する（`SWIZZLE_ENABLED`/`FINE_BARRIER_ENABLED`/
+/// `UNROLL_ACC_ENABLED` と同じ instance ゲート方式）。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TileClassMode {
+    /// 従来どおり `USE_TGP_STAGING` 単独でロード方式を決める単一 dispatch
+    /// （本番既定）。
+    Legacy,
+    /// 内部タイル（Interior・direct-load 強制）／端タイル（Edge・staged
+    /// 強制）へ dispatch を分割する（イシュー #1327 の opt-in 経路）。
+    Split,
+}
+
+/// [`TileClassMode::Legacy`] を本番既定として公開する定数
+/// （`SWIZZLE_ENABLED` 等と同型の設計。`crate::gemm::MetalGemm::new` が
+/// 本定数を渡す）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const TILE_CLASS_MODE: TileClassMode = TileClassMode::Legacy;
+
+/// `shaders/gemm.metal` の `TILE_CLASS` function constant（index 15）が
+/// 取る 3 値（イシュー #1327）。`crate::pipeline::GemmGateConstants::
+/// tile_class`／`crate::spec_source::SpecializationParams::tile_class`
+/// （いずれも `u32`）へ [`Self::as_u32`] で変換して渡す。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TileClass {
+    /// 従来どおり `USE_TGP_STAGING` に従う（`TileClassMode::Legacy` が
+    /// 常に使う値）。
+    Legacy,
+    /// 内部タイル（M×N に完全に収まり K が BK の倍数）。direct-load
+    /// ブロックを強制する。
+    Interior,
+    /// 端タイル（M/N/K のいずれかがブロック境界に満たない残り）。staged
+    /// ブロックを強制する。
+    Edge,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl TileClass {
+    /// `shaders/gemm.metal` の `TILE_CLASS`（`constant uint`）へ渡す
+    /// 実効値（0/1/2）。
+    pub(crate) fn as_u32(self) -> u32 {
+        match self {
+            TileClass::Legacy => 0,
+            TileClass::Interior => 1,
+            TileClass::Edge => 2,
+        }
+    }
+}
+
+/// タイルクラス分割（イシュー #1327）における threadgroup dispatch grid
+/// 上のタイル座標矩形（`shaders/gemm.metal::TileClassRegion` と repr(C)
+/// レイアウトを一致させる。`crate::gemm::TileClassRegion` が本モジュールの
+/// 型をそのまま再エクスポートする設計ではなく、MSL 側の構造体は
+/// `crate::gemm` 側で独立定義する契約——共有メモリレイアウトテストは
+/// `crate::gemm` の `#[cfg(test)]` 参照）。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TileClassRegion {
+    pub(crate) row_off: u32,
+    pub(crate) col_off: u32,
+    pub(crate) rows: u32,
+    pub(crate) cols: u32,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl TileClassRegion {
+    /// dispatch grid 全体を覆う恒等領域（`TileClassMode::Legacy` が渡す
+    /// 値。原点 0・`tiles_m`×`tiles_n` 全体）。
+    pub(crate) fn full_grid(tiles_m: u32, tiles_n: u32) -> Self {
+        TileClassRegion {
+            row_off: 0,
+            col_off: 0,
+            rows: tiles_m,
+            cols: tiles_n,
+        }
+    }
+
+    /// 空領域（rows/cols のいずれかが 0。dispatch をスキップする対象）。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows == 0 || self.cols == 0
+    }
+}
+
+/// [`tile_class_plan`] が返す、内部タイル／端タイル領域の分割結果。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TileClassPlan {
+    /// 内部タイル領域（`k % bk == 0` かつ M/N 双方に整列しきれる部分が
+    /// 存在する場合のみ `Some`）。
+    pub(crate) interior: Option<TileClassRegion>,
+    /// 端タイル領域（右ストリップ・下ストリップの最大 2 領域。整列しきれ
+    /// ない場合は grid 全体を覆う 1 領域のみ）。
+    pub(crate) edges: [Option<TileClassRegion>; 2],
+}
+
+/// `m`×`n`×`k`（GEMM 実効次元。`crate::pad::pad8` 済みの値を渡す契約は
+/// 呼び出し元 `crate::gemm::MetalGemm::encode_tiled_by_class` 側）と
+/// `cfg`（解決済み [`TileConfig`]）から、内部タイル／端タイル領域を導出
+/// する純関数（イシュー #1327）。
+///
+/// **分割規則**: `k % bk != 0`（K タイル端が生じ、`gemm_simdgroup_tiled`
+/// の `bk_eff` 分岐がどの K タイルにも影響する）、または M/N いずれかの
+/// 方向に整列しきれるブロックが 1 つも無い場合、内部タイル領域は存在せず
+/// （`interior = None`）、grid 全体を単一の端タイル領域として返す（現行の
+/// 1 回 dispatch と同じ構成。呼び出し元はこの場合フォールバックせず単に
+/// 1 領域のみを Edge クラスで dispatch すればよい）。それ以外は
+/// `full_m = m/bm`・`full_n = n/bn`（整列済みブロック数）を境に、内部
+/// 領域 `(0, 0, full_m, full_n)`・右ストリップ `(0, full_n, tiles_m,
+/// tiles_n-full_n)`（`tiles_n > full_n` の場合のみ）・下ストリップ
+/// `(full_m, 0, tiles_m-full_m, full_n)`（`tiles_m > full_m` の場合のみ）
+/// へ分割する。
+///
+/// **被覆・互いに素の論拠**: 3 領域（内部・右ストリップ・下ストリップ）は
+/// `[0, tiles_m) × [0, tiles_n)` を行優先で「左上の full_m×full_n 矩形」
+/// 「右側の残り列」「下側の残り行」の 3 分割するのと同じ構成であり、
+/// 定義域が互いに重ならず（右ストリップは列 `>= full_n`・下ストリップは
+/// 行 `>= full_m` かつ列 `< full_n` のため右ストリップと重複しない）、
+/// 合計面積 `full_m*full_n + tiles_m*(tiles_n-full_n) +
+/// (tiles_m-full_m)*full_n = tiles_m*tiles_n` が全体と一致するため過不足
+/// なく被覆する（本モジュール `#[cfg(test)]` の全候補・全形状での網羅
+/// テストで固定）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn tile_class_plan(m: u32, n: u32, k: u32, cfg: TileConfig) -> TileClassPlan {
+    let bm = cfg.bm;
+    let bn = cfg.bn;
+    let bk = cfg.bk;
+    let tiles_m = m.div_ceil(bm);
+    let tiles_n = n.div_ceil(bn);
+    let full_m = m / bm;
+    let full_n = n / bn;
+
+    if !k.is_multiple_of(bk) || full_m == 0 || full_n == 0 {
+        return TileClassPlan {
+            interior: None,
+            edges: [Some(TileClassRegion::full_grid(tiles_m, tiles_n)), None],
+        };
+    }
+
+    let interior = Some(TileClassRegion {
+        row_off: 0,
+        col_off: 0,
+        rows: full_m,
+        cols: full_n,
+    });
+
+    let right_strip = if tiles_n > full_n {
+        Some(TileClassRegion {
+            row_off: 0,
+            col_off: full_n,
+            rows: tiles_m,
+            cols: tiles_n - full_n,
+        })
+    } else {
+        None
+    };
+    let bottom_strip = if tiles_m > full_m {
+        Some(TileClassRegion {
+            row_off: full_m,
+            col_off: 0,
+            rows: tiles_m - full_m,
+            cols: full_n,
+        })
+    } else {
+        None
+    };
+
+    TileClassPlan {
+        interior,
+        edges: [right_strip, bottom_strip],
+    }
+}
 
 /// [`TileConfig::unroll_acc_loops`] が unroll 版ループを選ぶ acc 積
 /// （`acc_rows * acc_cols`）の下限（イシュー #1282）。E1 実験（`docs/perf/
@@ -4694,5 +4931,217 @@ mod tests {
                 "候補 {cfg:?}: pad=8 の確保量が 16 の倍数でない"
             );
         }
+    }
+
+    /// [`TileConfig::shared_mem_bytes_for_class`] に `TileClass::Legacy` を
+    /// 渡した場合の戻り値は [`TileConfig::shared_mem_bytes_for_pad`]（`self.
+    /// staged` のみを見る従来版）と完全一致する（`TileClassMode::Legacy`
+    /// 経路の非後退。codex-review／Bugbot 指摘対応・PR #1388）。
+    #[test]
+    fn shared_mem_bytes_for_class_legacy_matches_shared_mem_bytes_for_pad() {
+        use crate::layout::TransposePattern;
+        for &cfg in CANDIDATES.iter() {
+            for pattern in [
+                TransposePattern::Nn,
+                TransposePattern::Nt,
+                TransposePattern::Tn,
+                TransposePattern::Tt,
+            ] {
+                assert_eq!(
+                    cfg.shared_mem_bytes_for_class(pattern, cfg.pad(), TileClass::Legacy),
+                    cfg.shared_mem_bytes_for_pad(pattern, cfg.pad())
+                );
+            }
+        }
+    }
+
+    /// [`TileConfig::shared_mem_bytes_for_class`] に `TileClass::Edge` を
+    /// 渡すと、`cfg.staged == false` であっても常に非 0（staged タイル領域
+    /// 分）のバイト数を返す（`shaders/gemm.metal` の `staging_active =
+    /// (TILE_CLASS == 0) ? USE_TGP_STAGING : (TILE_CLASS == 2)` と同じ実効
+    /// staged 判定。codex-review P0・Cursor Bugbot Medium 指摘の再現条件
+    /// `TileConfig { bm:16, bn:16, bk:16, wm:1, wn:1, staged:false }` を
+    /// そのまま検証する。修正前は `shared_mem_bytes_for_pad`〈`self.staged`
+    /// のみを見る〉が `0` を返し、`encode_dispatch_tiled` の `.max(16)`
+    /// 下限で 16 バイトしか確保されないまま Edge シェーダー分岐が
+    /// staged タイル領域〈2,048 バイト〉へ書き込む threadgroup メモリ
+    /// 範囲外書き込みに直結していた。PR #1388）。
+    #[test]
+    fn shared_mem_bytes_for_class_edge_forces_staged_even_when_cfg_not_staged() {
+        use crate::layout::TransposePattern;
+        let cfg = TileConfig {
+            bm: 16,
+            bn: 16,
+            bk: 16,
+            wm: 1,
+            wn: 1,
+            staged: false,
+        };
+        assert_eq!(
+            cfg.shared_mem_bytes_for_pad(TransposePattern::Nn, cfg.pad()),
+            0
+        );
+
+        let edge_bytes = cfg.shared_mem_bytes_for_class(
+            TransposePattern::Nn,
+            TileConfig::TGP_PAD_ELEMS,
+            TileClass::Edge,
+        );
+        // `staged:true` の同一形状構成（`pad()` が `TGP_PAD_ELEMS` と一致する）
+        // の `shared_mem_bytes_for_pad`（既存の staged 計算式）と一致することを
+        // 期待値として使う（private ヘルパーへ直接依存しない）。
+        let staged_equivalent = TileConfig {
+            bm: 16,
+            bn: 16,
+            bk: 16,
+            wm: 1,
+            wn: 1,
+            staged: true,
+        };
+        assert_eq!(staged_equivalent.pad(), TileConfig::TGP_PAD_ELEMS);
+        assert_eq!(
+            edge_bytes,
+            staged_equivalent
+                .shared_mem_bytes_for_pad(TransposePattern::Nn, staged_equivalent.pad()),
+            "Edge クラスは cfg.staged=false でも staged タイル領域分の非 0 バイト数を返す必要がある"
+        );
+        assert!(
+            edge_bytes > 16,
+            "Edge クラスの確保量が下限 16 バイトのままでは範囲外書き込みを防げない"
+        );
+    }
+
+    /// [`TileConfig::shared_mem_bytes_for_class`] に `TileClass::Interior`
+    /// を渡すと、`cfg.staged == true` の構成であっても常に `0`（direct-load
+    /// 強制。`shaders/gemm.metal` の `staging_active` 定義と対応）を返す。
+    #[test]
+    fn shared_mem_bytes_for_class_interior_forces_direct_load_even_when_cfg_staged() {
+        use crate::layout::TransposePattern;
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            assert_eq!(
+                cfg.shared_mem_bytes_for_class(
+                    TransposePattern::Nn,
+                    cfg.pad(),
+                    TileClass::Interior
+                ),
+                0
+            );
+        }
+    }
+
+    // --- タイルクラス分割（イシュー #1327・E6 試作） ---
+
+    /// `TileClassRegion` の repr(C) レイアウトが `shaders/gemm.metal::
+    /// TileClassRegion`（4 × uint32 = 16 バイト）と一致する。
+    #[test]
+    fn tile_class_region_layout_matches_msl_struct() {
+        assert_eq!(std::mem::size_of::<TileClassRegion>(), 16);
+        assert_eq!(std::mem::align_of::<TileClassRegion>(), 4);
+    }
+
+    #[test]
+    fn tile_class_mode_default_is_legacy() {
+        assert_eq!(TILE_CLASS_MODE, TileClassMode::Legacy);
+    }
+
+    #[test]
+    fn tile_class_as_u32_values() {
+        assert_eq!(TileClass::Legacy.as_u32(), 0);
+        assert_eq!(TileClass::Interior.as_u32(), 1);
+        assert_eq!(TileClass::Edge.as_u32(), 2);
+    }
+
+    /// `tile_class_plan` が返す領域集合（interior + edges のうち `Some`）が
+    /// `[0, tiles_m) × [0, tiles_n)` の全タイルをちょうど 1 回ずつ被覆する
+    /// （被覆・互いに素）ことを、全 `CANDIDATES` × 代表形状集合で固定する。
+    fn regions_cover_grid_exactly_once(plan: &TileClassPlan, tiles_m: u32, tiles_n: u32) {
+        let mut covered = vec![0u8; (tiles_m as usize) * (tiles_n as usize)];
+        let mut regions: Vec<TileClassRegion> = Vec::new();
+        if let Some(r) = plan.interior {
+            regions.push(r);
+        }
+        for e in plan.edges.iter().flatten() {
+            regions.push(*e);
+        }
+        for r in &regions {
+            assert!(!r.is_empty(), "空領域が返された: {r:?}");
+            for ty in r.row_off..r.row_off + r.rows {
+                for tx in r.col_off..r.col_off + r.cols {
+                    let idx = (ty as usize) * (tiles_n as usize) + (tx as usize);
+                    covered[idx] += 1;
+                }
+            }
+        }
+        for (idx, &c) in covered.iter().enumerate() {
+            assert_eq!(
+                c, 1,
+                "タイル {idx} の被覆回数が 1 でない（{c}）: plan={plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_class_plan_covers_every_tile_exactly_once_for_all_candidates_and_shapes() {
+        let shapes: &[(u32, u32, u32)] = &[
+            (512, 512, 512),
+            (1024, 1024, 1024),
+            (2048, 2048, 2048),
+            (4096, 4096, 4096),
+            (1032, 1048, 1032),
+            (1040, 1056, 1024),
+            (8, 8, 8),
+            (64, 64, 4096),
+            (1032, 1024, 1024),
+            (1024, 1032, 1024),
+        ];
+        for &cfg in CANDIDATES.iter() {
+            for &(m, n, k) in shapes {
+                let plan = tile_class_plan(m, n, k, cfg);
+                let tiles_m = m.div_ceil(cfg.bm);
+                let tiles_n = n.div_ceil(cfg.bn);
+                regions_cover_grid_exactly_once(&plan, tiles_m, tiles_n);
+            }
+        }
+    }
+
+    /// 内部タイル領域が存在する場合、その全タイルは M×N 双方に完全に
+    /// 収まり（dispatch 側が保証する整列条件）、`k % bk == 0` も成立する
+    /// （direct-load 経路が K タイル端の 0 埋め分岐を踏まない前提）。
+    #[test]
+    fn tile_class_plan_interior_region_is_fully_aligned() {
+        let shapes: &[(u32, u32, u32)] = &[
+            (1024, 1024, 1024),
+            (2048, 2048, 2048),
+            (1040, 1056, 1024),
+            (64, 64, 4096),
+        ];
+        for &cfg in CANDIDATES.iter() {
+            for &(m, n, k) in shapes {
+                let plan = tile_class_plan(m, n, k, cfg);
+                if let Some(interior) = plan.interior {
+                    assert_eq!(k % cfg.bk, 0, "候補 {cfg:?} 形状 {m}x{n}x{k}");
+                    assert!((interior.row_off + interior.rows) * cfg.bm <= m);
+                    assert!((interior.col_off + interior.cols) * cfg.bn <= n);
+                }
+            }
+        }
+    }
+
+    /// `k % bk != 0` の場合、内部タイル領域は存在せず edges が grid 全体を
+    /// 覆う単一領域になる。
+    #[test]
+    fn tile_class_plan_non_divisible_k_has_no_interior() {
+        let cfg = CANDIDATES[3];
+        // bk が 8 の倍数であることを利用し、bk の非倍数を意図的に渡す。
+        let k = cfg.bk * 3 + 4;
+        let plan = tile_class_plan(1024, 1024, k, cfg);
+        assert!(plan.interior.is_none());
+        let tiles_m = 1024u32.div_ceil(cfg.bm);
+        let tiles_n = 1024u32.div_ceil(cfg.bn);
+        assert_eq!(
+            plan.edges[0],
+            Some(TileClassRegion::full_grid(tiles_m, tiles_n))
+        );
+        assert_eq!(plan.edges[1], None);
     }
 }

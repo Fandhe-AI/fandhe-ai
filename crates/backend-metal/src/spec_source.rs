@@ -83,6 +83,11 @@ pub(crate) struct SpecializationParams {
     /// [`new`](Self::new) は本番既定 `0`（`crate::tile::CoopLoadLayout::
     /// RowLinear`）を渡す。
     pub(crate) coop_load_layout: u32,
+    /// `GEMM_SPEC_TILE_CLASS`（イシュー #1327）。
+    /// `crate::pipeline::GemmGateConstants::tile_class` と同じ意味。
+    /// [`new`](Self::new) は本番既定 `0`（`crate::tile::TileClass::Legacy`）
+    /// を渡す。
+    pub(crate) tile_class: u32,
 }
 
 impl SpecializationParams {
@@ -120,6 +125,9 @@ impl SpecializationParams {
             // （`cfg.pad()`／`0`＝`CoopLoadLayout::RowLinear`）で埋める。
             tgp_pad_elems: cfg.pad(),
             coop_load_layout: 0,
+            // イシュー #1327: 本コンストラクタは従来の 7 引数のまま据え置き、
+            // タイルクラス軸も本番既定値（`0`＝`TileClass::Legacy`）で埋める。
+            tile_class: 0,
         }
     }
 }
@@ -199,6 +207,10 @@ pub(crate) fn specialized_gemm_source(params: &SpecializationParams) -> String {
     header.push_str(&format!(
         "#define GEMM_SPEC_COOP_LOAD_LAYOUT {}\n",
         params.coop_load_layout
+    ));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_TILE_CLASS {}\n",
+        params.tile_class
     ));
     header.push_str(&format!("#define GEMM_SPEC_ACC_ROWS {acc_rows}\n"));
     header.push_str(&format!("#define GEMM_SPEC_ACC_COLS {acc_cols}\n"));

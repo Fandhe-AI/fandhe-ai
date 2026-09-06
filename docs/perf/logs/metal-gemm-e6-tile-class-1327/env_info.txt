@@ -1,0 +1,14 @@
+イシュー #1327（E6 試作: gemm_simdgroup_tiled タイルクラス分割）
+実機自己検証（bit 同一 T1〜T3・T6）の実行環境記録。
+
+機種: Apple M4 Max（Mac16,6）
+OS: macOS 26.6.2（BuildVersion 25G83）
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+uptime（実行直前）: up 18 days, 17:23, 21 users, load averages: 2.57 5.03 5.23
+
+注記: load average が高いのは他セッションの並走ビルド・プロセスによる
+（bit 一致（correctness）検証のみで性能計測は行っていないため、GPU 負荷
+自体は判定結果に影響しない。性能実測・A/B 計測は兄弟イシュー #1328 の
+スコープ）。
+
+実行コマンド・結果は smoke_tile_class_bit_match.log を参照。

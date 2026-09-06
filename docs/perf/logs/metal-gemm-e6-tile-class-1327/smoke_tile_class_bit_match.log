@@ -1,0 +1,17 @@
+$ cargo test -p fandhe-ai-backend-metal --release --lib -- --ignored --nocapture --test-threads=1 tile_class
+
+running 4 tests
+test gemm::tests::tile_class_default_matches_production_constants ... ok
+test gemm::tests::tile_class_split_bit_match_all_candidates ... ok
+test gemm::tests::tile_class_split_bit_match_dispatch_auto ... ok
+test gemm::tests::tile_class_split_bit_match_edge_shapes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 299 filtered out; finished in 2.83s
+
+---
+
+非後退確認（既存 #[ignore] 群。cargo test -p fandhe-ai-backend-metal --release --tests -- --ignored --test-threads=1）:
+全 lib テスト（46 件）・全 tests/*.rs 統合テスト（frag_load・coop_load・
+unroll_acc・source_specialized・swizzle・fine_barrier・parity 群・
+memory/pool/rmsnorm/softmax/mse/sgd 系）が 0 failed で完走した
+（実行ログはコンソール出力のみで本ファイルには要約のみ記録する）。

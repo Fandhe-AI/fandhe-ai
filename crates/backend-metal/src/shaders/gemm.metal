@@ -42,6 +42,22 @@ struct GemmStrides {
     uint trans_b;
 };
 
+// イシュー #1327（E6 試作）: `gemm_simdgroup_tiled` の 1 dispatch を
+// 内部タイル／端タイルの領域へ分割するためのタイル座標領域。
+// `row_off`/`col_off`（タイル単位オフセット）＋`rows`/`cols`（タイル単位
+// 幅）で threadgroup dispatch grid 上の矩形領域を表す。`TILE_CLASS==0`
+// （Legacy）のときも常にバインドし（未バインドバッファ参照を作らない）、
+// `crate::tile::TileClassRegion::full_grid` 相当の恒等領域（原点 0・
+// `tiles_m`×`tiles_n` 全体）を渡す契約。`crate::gemm::TileClassRegion`
+// （repr(C)）とレイアウトを一致させる（4 × uint32 = 16 バイト。
+// `crate::gemm` のレイアウト一致テスト参照）。
+struct TileClassRegion {
+    uint row_off;
+    uint col_off;
+    uint rows;
+    uint cols;
+};
+
 // === タイル化カーネル共通境界検査ヘルパ（イシュー #1038） ===
 //
 // `gemm_simdgroup_tiled`（f32・#188/#532/#538/#745）・
@@ -584,6 +600,7 @@ constant bool UNROLL_ACC_ENABLED = GEMM_SPEC_UNROLL_ACC_ENABLED;
 constant bool FRAG_LOAD_DEVICE_HOISTED = GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED;
 constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;
 constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;
+constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;
 #else
 constant uint BM [[function_constant(0)]];
 constant uint BN [[function_constant(1)]];
@@ -748,6 +765,33 @@ constant uint FRAG_LOAD_KSTEPS [[function_constant(13)]];
 // しない（`crate::gemm::MetalGemm::pipeline_for_tile_f16` は常に `0` を
 // 渡す no-op 契約。`pipeline_for_tile_f16` 呼び出し側コメント参照）。
 constant uint COOP_LOAD_LAYOUT [[function_constant(14)]];
+
+// タイルクラス分割ゲート（イシュー #1327・E6 試作）: `gemm_simdgroup_tiled`
+// の 1 dispatch を「内部タイル（M×N に完全に収まり K が BK の倍数）」と
+// 「端タイル（M/N/K のいずれかがブロック境界に満たない残り）」の 2 クラスへ
+// 分割し、内部タイルは device 直接ロード（`USE_TGP_STAGING=false` の
+// `else` ブロック）、端タイルは現行の協調ロード＋手動境界チェック
+// （`USE_TGP_STAGING=true` の staged ブロック）を強制する（親イシュー
+// #1323 の趣旨。`docs/backend-metal-aligned-load-decision.md`（#752→#808）
+// で不採用となった「per-load の境界チェック短絡」とは異なり、本機構は
+// 「タイル単位のクラス分類を dispatch 側〈`crate::tile::tile_class_plan`〉
+// へ出す」だけで、staged/direct 両ブロックの境界チェックは一切変更・
+// 短絡しない。REQ-8・`.claude/rules/coding-rust.md`「カーネル実装の
+// 境界検査」）。
+//
+// 値: `0`（Legacy・本番既定）は従来どおり `USE_TGP_STAGING` のみで
+// ロード方式を決める。`1`（Interior・内部タイル）は強制的に direct-load
+// ブロックを通る。`2`（Edge・端タイル）は強制的に staged ブロックを通る。
+// `crate::tile::TileClass::as_u32`・`crate::gemm::MetalGemm::
+// encode_tiled_by_class` がタイル領域ごとに異なる `TILE_CLASS` 値で
+// パイプラインを構築し dispatch する契約（本番既定
+// `crate::tile::TILE_CLASS_MODE = TileClassMode::Legacy` では常に `0` の
+// 単一 dispatch のまま不変）。index は COOP_LOAD_LAYOUT（#1298・index 14）
+// の直後、15（本ファイル内で未使用の最小 index。`docs/perf/
+// metal-gemm-coop-load-candidates.md` §1/§6 では index 15 を「XOR swizzle
+// 軸〈未実装〉用に未割当」と記していたが、本イシューで `TILE_CLASS` に
+// 割り当てる。XOR swizzle 軸を実装する場合は index 16 以降を使う）。
+constant uint TILE_CLASS [[function_constant(15)]];
 #endif
 
 // イシュー #1298: 協調ロードの「スレッド → float4 グループ」割当を
@@ -794,6 +838,12 @@ kernel void gemm_simdgroup_tiled(
     // テスト参照）。`crate::gemm::GemmStrides`（repr(C)。
     // `gemm_tiled_bias_act` と共用のレイアウト一致テスト対象）。
     constant GemmStrides& st [[buffer(4)]],
+    // イシュー #1327（E6 試作）: タイルクラス分割時の担当領域（threadgroup
+    // dispatch grid 上のタイル座標矩形）。`TILE_CLASS==0`（Legacy）では
+    // `crate::gemm::encode_dispatch_tiled` が常に恒等領域（原点 0・
+    // grid 全体）を渡すため、以下のガード・オフセット加算は事実上の
+    // no-op になる（下記ガードのコメント参照）。
+    constant TileClassRegion& region [[buffer(5)]],
     threadgroup float* shared_mem [[threadgroup(0)]],
     uint2 tgid [[threadgroup_position_in_grid]],
     uint simd_lane [[thread_index_in_simdgroup]],
@@ -821,6 +871,28 @@ kernel void gemm_simdgroup_tiled(
     constexpr uint SWIZZLE_TILE = 1u << SWIZZLE_LOG;
     uint tid_y = SWIZZLE_ENABLED ? ((tgid.y << SWIZZLE_LOG) + (tgid.x & (SWIZZLE_TILE - 1))) : tgid.y;
     uint tid_x = SWIZZLE_ENABLED ? (tgid.x >> SWIZZLE_LOG) : tgid.x;
+
+    // タイルクラス領域ガード（イシュー #1327。REQ-8: 一様境界検査）:
+    // `TILE_CLASS != 0`（Interior/Edge）のとき、`region` は dispatch grid
+    // の一部矩形のみを表す。`crate::gemm::encode_dispatch_tiled` は
+    // `region.rows`×`region.cols` に切り上げた grid を張るため、切り上げ
+    // 余剰分の threadgroup（`tid_y >= region.rows || tid_x >= region.cols`）
+    // が生じうる。ここで早期 return しない場合、`row0`/`col0` へのオフセット
+    // 加算後に隣接クラスの領域へ侵入し二重書き（同一 C 要素へ 2 回の
+    // ストア）を起こしうるため、他クラス領域への侵入前に必ず弾く
+    // （threadgroup 全スレッドが同一分岐を取るため一様。SIMD 内分岐にならない）。
+    // `TILE_CLASS == 0`（Legacy）ではこのブロック全体が function constant
+    // 畳み込みで消え、以降の `tid_y`/`tid_x` は従来と完全に同一のまま
+    // （`crate::gemm::encode_dispatch_tiled` が渡す恒等領域は
+    // `rows=tiles_m`・`cols=tiles_n` のため、そもそも早期 return もオフセット
+    // 加算も起こらない：数値的 no-op）。
+    if (TILE_CLASS != 0) {
+        if (tid_y >= region.rows || tid_x >= region.cols) {
+            return;
+        }
+        tid_y += region.row_off;
+        tid_x += region.col_off;
+    }
 
     // 1 threadgroup が担当する C ブロックの原点（行優先: y=行, x=列）。
     // `tid_y`/`tid_x` はスウィズル後のタイル座標であり、`tiles_m` が
@@ -941,12 +1013,22 @@ kernel void gemm_simdgroup_tiled(
     uint k_tail = dims.k - k_full_tiles * BK; // BK の倍数でない末尾（0 埋め扱い）
     uint k_tile_count = k_full_tiles + (k_tail > 0 ? 1 : 0);
 
+    // タイルクラス別ロード方式述語（イシュー #1327）: `TILE_CLASS==0`
+    // （Legacy）では従来どおり `USE_TGP_STAGING` のみで staged/direct を
+    // 決める。`TILE_CLASS==1`（Interior・内部タイル）は強制的に direct-load
+    // （`false`）、`TILE_CLASS==2`（Edge・端タイル）は強制的に staged
+    // （`true`）を通る。全項が function constant のみから成る式のため
+    // コンパイル時に畳み込まれ、per-load の実行時分岐は生じない
+    // （`if (staging_active)` は以下の 2 ブロックそのものを丸ごと選ぶだけで、
+    // ブロック本体〈境界チェックを含む〉は 1 文字も複製・変更しない）。
+    const bool staging_active = (TILE_CLASS == 0) ? USE_TGP_STAGING : (TILE_CLASS == 2);
+
     for (uint t = 0; t < k_tile_count; t++) {
         uint p0 = t * BK;
         // 末尾タイルが BK に満たない場合の有効幅（境界チェック。REQ-8）。
         uint bk_eff = min(BK, dims.k - p0);
 
-        if (USE_TGP_STAGING) {
+        if (staging_active) {
             // 協調ロード: threadgroup 内の全スレッド（WM*WN*32 個）で
             // A タイル（BM*BK 要素）・B タイル（BK*BN 要素）を分担して
             // 共有メモリへロードする。実効次元・K タイル端をはみ出す
