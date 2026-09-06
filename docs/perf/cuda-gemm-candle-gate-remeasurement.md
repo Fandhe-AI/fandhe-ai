@@ -1,6 +1,6 @@
 # CUDA GEMM N=1024/2048/4096 reuse candle 比再計測と #1031 ゲート判定の確定（イシュー #1142）
 
-## 状態: DGX Spark GB10 実機実測完了。#1031（reuse candle 超え）は正式系列・参考系列（#1164 結線後 HEAD）のいずれも未達成と判定した
+## 状態: DGX Spark GB10 実機実測完了。#1031（reuse candle 超え）は正式系列・参考系列（#1164 結線後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）
 
 ## 1. 位置づけ
 
@@ -284,6 +284,7 @@ CUDA 実機なし）
   新規 issue を起票するかはユーザー判断（`out-of-scope-tracking.md` に従い、本 PR では
   Issue 操作を行わない）
 - **crates.io 次回公開のタイミング**: #1137 を含む正式ピン更新（v0.7.0 想定）の要否・時期
+  （2026-09-06 更新: v0.7.0 公開・ピン更新〈PR #1233〉により解消済み。§11）
 - **N=2048 判定方式の変更（イシュー #1184 で判明した事実を踏まえた整理。ユーザー承認事項）**:
   §5.3 追記のとおり、fail 2 要素の丸め誤差は `√K·ulp(max|partial|)` と同水準（K=2048・
   入力 U[-0.5,0.5) の累積丸め誤差フロアそのもの）であり、「たまたま」ではなく K が大きい
@@ -296,6 +297,10 @@ CUDA 実機なし）
   - (c) spec（`docs/spec/04-requirements.md` REQ-2）へ「大規模 K での要素単位複合判定は、
     キャンセレーションで最終値が縮小した要素を対象外とする」等の例外規定を追記する
     （fandhe-ai-spec 側での対応が必要）
+- **2026-09-06 更新（イシュー #1185）**: 正式系列 `fandhe-ai =0.7.0` でも未達成が確定した
+  （§11）ことを受け、ユーザー指示（2026-09-06）「未達の場合は後継ツリーを新規起票し現 issue は
+  クローズ」に従い、上記の残課題（reuse 固定費削減・N=2048 判定方式・達成条件の見直し）は
+  後継ツリー #1234（tolerance 契約変更トラッキング。N=2048 判定不能の解消） へ引き継ぎ、現 issue #1031 はクローズする
 
 ## 10. 関連ドキュメント
 
@@ -306,7 +311,70 @@ CUDA 実機なし）
 - `scripts/bench/framework-compare/results/summary.md` 環境 10/11/12 節
 - `docs/performance-targets.md` §8/§8.1/§8.2
 - `docs/perf/logs/cuda-gemm-candle-gate-1142/`（実行ログ・env_info）
+- `docs/perf/logs/gemm-candle-gate-0.7.0-1185/`（イシュー #1185。=0.7.0 正式系列再計測の
+  実行ログ・env_info。CUDA / Metal / CPU 共通）
 - `docs/perf/logs/cuda-gemm-candle-parity-1184/`（イシュー #1184。fail 要素ダンプ生データ・
   厳密真値突合結果・env_info）
 - `scripts/bench/framework-compare/parity_dump_truth.py`（イシュー #1184。`PARITY_DUMP` 行から
   厳密真値を計算する再現用スクリプト）
+
+## 11. 2026-09-06 追補: 正式系列 `fandhe-ai =0.7.0` 再計測（イシュー #1185）
+
+### 11.1 位置づけ・プロトコル
+
+- v0.7.0 の crates.io 公開と framework-compare の承認ピン `fandhe-ai =0.7.0` 更新（PR #1233）
+  を受け、**正式系列のみ**で N=1024/2048/4096 reuse の 5 回計測中央値を DGX Spark GB10 で
+  再取得した（#1185 受け入れ条件 1 項目目）。参考系列（path 差し替えビルド）は計測していない
+- プロトコルは §2 と同一（`run_gemm_gate_cuda.sh 0.7.0`・`compare_gemm_gate.py --device cuda`。
+  manifest で `fandhe_ai_source=registry`・`candle_core_source=registry` を確認済み）
+- 計測環境: GB10・driver 580.173.02・CUDA 13.0・rustc 1.97.0。計測直前の GPU 利用率 0 %・
+  load average 0.04（実質アイドル。`docs/perf/logs/gemm-candle-gate-0.7.0-1185/env_info.txt`）
+- 生データ: `scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-0.7.0.jsonl`
+  （30 行）・`skipped-dgx-gemm-gate-0.7.0.log`（空）・`manifest-dgx-gemm-gate-0.7.0.json`。
+  実行ログ: `docs/perf/logs/gemm-candle-gate-0.7.0-1185/run_gemm_gate_cuda-dgx-0.7.0.log`
+
+### 11.2 実測結果（正式系列 `0.7.0`）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s（fandhe） | 判定 |
+|---|---|---|---|---|---|
+| 1024 | 2.424 ms（2.316–2.581 ms） | 923.7 µs | 0.381 | 886.1 | 未達 |
+| 2048 | - | - | - | - | 判定不能（candle 無効データ。§5・§11.4） |
+| 4096 | 62.301 ms（61.783–63.038 ms） | 56.296 ms | 0.904 | 2206.1 | 未達 |
+
+fandhe-ai 側は全 15 run で `parity_fail_count=0`（N=1024/2048/4096 とも）。tolerance は
+緩めていない。
+
+### 11.3 参考系列との一致確認（#1185 受け入れ条件 2 項目目）
+
+| N | 参考系列 `head-7e3e4b6`（#1142 §4.2） | 正式系列 `0.7.0`（§11.2） | 差 |
+|---|---|---|---|
+| 1024 | 0.383（fandhe 2.414 ms / candle 923.5 µs） | 0.381（fandhe 2.424 ms / candle 923.7 µs） | fandhe +0.4 %・candle +0.02 % |
+| 2048 | 判定不能 | 判定不能 | 同一の candle 無効データ（§11.4） |
+| 4096 | 0.898（fandhe 62.600 ms / candle 56.216 ms） | 0.904（fandhe 62.301 ms / candle 56.296 ms） | fandhe -0.5 %・candle +0.1 % |
+
+**参考系列（0.383／判定不能／0.898 倍）と誤差範囲内で一致する**（fandhe-ai reuse 中央値の差は
+N=1024 で +0.4 %・N=4096 で -0.5 %。いずれも 5 run の min–max 幅〈N=1024: 2.316–2.581 ms・
+N=4096: 61.783–63.038 ms〉の内側）。#1137（cp.async 多段パイプライン。#1164 結線）が
+正式系列に反映されたことで、0.6.0 正式系列（§4.1: 0.372／判定不能／0.824）からの改善
+（N=4096: 68.337 ms → 62.301 ms・0.824 → 0.904 倍）が参考系列で観測した値のとおり再現した。
+
+### 11.4 N=2048 判定不能の再現
+
+candle 側 N=2048 fresh は 5 run すべてで `parity_fail_count=2, parity_total=4194304,
+parity_max_abs_err=3.623962e-05, parity_max_rel_err=2.811288e-01`（§5.1・環境 10・#1142 の
+両系列と完全に同一の決定的な値）。原因分析は §5・イシュー #1184（fail 2 要素の実値・厳密真値
+突合。§5.3）を参照。fandhe-ai 側は 0 fail。判定方式の変更（§9 の (a)〜(c)）は本追補でも
+実施しておらず、N=2048 は「判定不能」のまま据え置く（reuse/candle 比の参考併記も行わない）。
+
+### 11.5 #1031 ゲート判定（確定）
+
+| # | #1031 の受け入れ条件 | 正式系列（0.7.0） | 出典 |
+|---|---|---|---|
+| 1 | N=1024 reuse で candle 超え | 未達（0.381 倍） | §11.2 |
+| 2 | N=2048 reuse で candle 超え | 判定不能（candle 無効データ） | §11.2・§11.4 |
+| 3 | N=4096 reuse で candle 超え | 未達（0.904 倍） | §11.2 |
+| 4 | parity 0 fail（fandhe-ai 側） | 達成（全 15 run `parity_fail_count=0`） | §11.2 |
+
+**総合判定: #1031 は正式系列 `fandhe-ai =0.7.0` においても未達成（未達 2 件・判定不能 1 件）。
+#1142 の 2 系列判定を正式系列単独で確定した（#1185 受け入れ条件 3 項目目）。** 達成条件の
+見直し要否・後継ツリーへの引き継ぎは §9「2026-09-06 更新」を参照。

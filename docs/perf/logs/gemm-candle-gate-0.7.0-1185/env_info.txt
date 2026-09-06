@@ -1,0 +1,55 @@
+# GEMM 目標達成ゲート（#1031 / #1037 / #1117）正式系列 `fandhe-ai =0.7.0` 再計測（イシュー #1185）計測環境
+
+実ホスト名・machine-id・ユーザー名等は `docs/real-hardware-verification-env.local.md`（Git 管理外）
+方式に従い記載しない（`docs/real-hardware-verification-env.md` §1〈Mac〉・§2.4〈DGX Spark〉の
+計測ノードと同一ノード）。計測日は 2026-09-06（両実機とも）。
+
+## 共通
+
+- 系列: **正式系列のみ**（ラベル `0.7.0`）。`bench-fandhe/Cargo.toml` の承認済みピン
+  `fandhe-ai =0.7.0`（crates.io 公開版。PR #1233 のピン更新を含むツリーで registry 解決）。
+  参考系列（path 差し替えビルド）は計測していない
+- 各 run の manifest（`results/raw/manifest-<node>[-cpu]-gemm-gate-0.7.0.json`）で
+  `fandhe_ai_source=registry`・`candle_core_source=registry` を確認済み（`run_gemm_gate.sh` の
+  バイナリ sha256 検証・依存元検証はすべて OK。各実行ログ冒頭参照）
+- 計測ツール: `scripts/bench/framework-compare/run_gemm_gate_cuda.sh 0.7.0`／
+  `GEMM_GATE_CPU_NODE_TAG=dgx-cpu run_gemm_gate_cpu.sh 0.7.0`（DGX Spark）、
+  `run_gemm_gate_metal.sh 0.7.0`／`run_gemm_gate_cpu.sh 0.7.0`（M4 Max）。
+  集計は `compare_gemm_gate.py --device {cuda,metal,cpu}`
+- 生データ行数: cuda 30 行・metal 30 行・cpu 45 行 ×2 ノード。`skipped-*-gemm-gate-0.7.0.log`
+  は 4 ファイルとも空（実行時失敗なし）。各スクリプトの exit code は 0
+- fandhe-ai 側は全ノード・全形状・全 run で `parity_fail_count=0`
+
+## DGX Spark GB10（CUDA・CPU〈Grace〉）
+
+- GPU: NVIDIA GB10（DGX Spark。sm_121）
+- NVIDIA driver: 580.173.02
+- CUDA (nvcc): Build cuda_13.0.r13.0/compiler.36424714_0（release 13.0）
+- rustc 1.97.0 (2d8144b78 2026-07-07)
+- 計測直前の `uptime`: load average 0.04 / 0.08 / 0.14（実質アイドル）
+- 計測直前の `nvidia-smi utilization.gpu`: 0 %。他プロセスが GPU メモリを 170 MiB・870 MiB 保持
+  していたが（実行ログ「cuda status (before)」参照）、利用率は 0 % のまま。CUDA ゲート完了直後は
+  9 %（自 run の残り。「cuda status (after)」）
+- CPU ゲート完了直後の `uptime`: load average 4.77 / 1.83 / 0.78（自 run による上昇。他負荷なし）
+- 計測順: CUDA ゲート（N=1024/2048/4096）→ CPU ゲート（N=512/1024/2048）を同一シェルで直列実行
+  （`bench-fandhe` バイナリ sha256 `590bf848…`・`bench-candle` `5e16b0f6…`）
+- 実行ログ: `run_gemm_gate_cuda-dgx-0.7.0.log`・`run_gemm_gate_cpu-dgx-0.7.0.log`
+
+## Apple M4 Max（Metal・CPU）
+
+- 機種: Apple M4 Max（macOS 26.6.2・BuildVersion 25G83）
+- rustc 1.96.0 (ac68faa20 2026-05-25)
+- `pmset -g therm`: thermal warning / performance warning / CPU power status いずれも記録なし
+  （計測前後とも）
+- **負荷状態（重要）**: 計測中、同一マシンで他セッションの cargo ビルドが並走していた
+  **共有マシン状態**で計測した。`uptime` load average の推移: 計測前 3.39 / 6.22 / 7.17 →
+  Metal ゲート開始時 6.40 / 6.71 / 7.32 → Metal 完了時 7.09 / 6.67 / 7.26 →
+  CPU ゲート完了時 7.96 / 6.90 / 7.32。計測専有ではないため絶対値には背景負荷のノイズが乗る。
+  fandhe-ai と candle は同一負荷下で run 内交互起動しているため、候補比の方向性（未達）の
+  結論には影響しないと判断するが、0.6.0 正式系列（#1147/#1148。`logs/metal-gemm-candle-gate-1147/
+  env_info.txt`・`results/summary.md` 環境 15 のとおり同じく非専有）との差分をコード変更に
+  帰属させる根拠にはしない
+- 計測時刻順（実行ログの `uptime` 記録）: Metal ゲート（N=1024/2048/4096）12:50〜12:51 →
+  CPU ゲート（N=512/1024/2048）〜12:51
+  （`bench-fandhe` バイナリ sha256 `cbd431bc…`・`bench-candle` `d91adbaf…`）
+- 実行ログ: `run_gemm_gate_metal-m4max-0.7.0.log`・`run_gemm_gate_cpu-m4max-0.7.0.log`
