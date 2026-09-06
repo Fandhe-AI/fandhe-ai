@@ -86,17 +86,24 @@ upload_a／upload_b／alloc_c／encode／commit_wait／readback／host_copy
 へ分解計測する。20 warmup＋20 測定を 1 run とし、テストバイナリを 5 回
 起動して中央値の中央値を採った（CUDA #1182 と同一プロトコル）。
 
-**GPU タイムスタンプ変種（`kernel_gpu`）を実装しない判断**: 実装計画は
-`MTLCommandBuffer::GPUStartTime`/`GPUEndTime` で `commit_wait` から
-純カーネル専有時間を分離する変種 B を「実装可能なら必須」としていたが、
-`MetalContext::encode`/`synchronize` はバッチング機構（イシュー
-#1017）によりコマンドバッファを内部に閉じ込めており、これを分離する
-には自前のコマンドキュー経路（`ctx.queue()`）を新設する必要がある。
-AC-2「既存の本番経路・既存テストを変更しない」の安全側判断（計画§7
-リスク節が明示的に許容する縮退先）に従い、本イシューでは変種 A
-（`ProductionBatch`。`encode`＋`synchronize` を本番同一経路で個別計時）
-のみを実装した。`commit_wait` は「commit＋カーネル専有＋
-`waitUntilCompleted`」の合算値として扱う（§8）。
+**GPU タイムスタンプ変種（`kernel_gpu`）を #1276 で実装済み**: 本文書
+執筆時点（#1189）は `MetalContext::encode`/`synchronize` のバッチング
+機構（イシュー #1017）がコマンドバッファを内部に閉じ込めていることを
+理由に、`MTLCommandBuffer::GPUStartTime`/`GPUEndTime` で `commit_wait`
+から純カーネル専有時間を分離する変種を見送っていた。イシュー #1276 は
+自前のコマンドキュー経路を新設するのではなく、`MetalContext::
+synchronize` の内部（完了バッチを `waitUntilCompleted` した直後・drop
+する前）へオブザーバを差し込む方式（`context.rs::synchronize_
+observed`／`#[cfg(test)] pub(crate) synchronize_with_gpu_timestamps`）
+でこれを実装した。本番 `synchronize()` は no-op オブザーバのままの
+ため、ディスパッチ挙動・数値結果は不変（AC-2。既存 parity／bit 一致
+テスト全 pass を実機確認済み）。`commit_wait` は引き続き「commit＋
+カーネル専有＋`waitUntilCompleted`」の合算値として扱い、`kernel_gpu`
+（GPUEnd−GPUStart）はその内訳として別出力する。M4 Max 実機での自己
+検証テスト（`gpu_timestamps_within_commit_wait_window`）は厳密判定
+（`kernel_gpu <= commit_wait` に slack なし）で pass した。N=1024/2048/
+4096 の 5 run 実測・本表への数表追記は本イシューのスコープ外（親
+#1275 配下の後続 sub-issue が担う）。
 
 ### 相互検証（`gemm_bench` example）
 
@@ -303,9 +310,12 @@ candle 比ギャップ調査。約 9.9 対 13.17 TFLOPS）と整合する。
 
 - GPU タイムスタンプ変種（`kernel_gpu`。`MTLCommandBuffer::
   GPUStartTime`/`GPUEndTime` で `commit_wait` から純カーネル専有時間を
-  分離する）は本イシューでは未実装（§2「Layer B」参照。AC-2 の安全側
-  判断による意図的な縮退）。`commit_wait` は commit＋カーネル専有＋
-  `waitUntilCompleted` の合算値のまま
+  分離する）はイシュー #1276 で実装済み（§2「Layer B」参照。
+  `MetalContext::synchronize_with_gpu_timestamps`。本番 `synchronize()`
+  は no-op オブザーバのため AC-2 は不変）。`commit_wait` は commit＋
+  カーネル専有＋`waitUntilCompleted` の合算値のまま。N=1024/2048/4096
+  の 5 run 実測・本表への数表追記は #1276 のスコープ外のまま後続
+  sub-issue（親 #1275 配下）へ引き継ぐ
 - N=1024 の `commit_wait` 二峰性（run3/5 のみ約 1/3 に低下）・全 N での
   Layer A `matmul` と Layer B Σ（host_copy 除外）の乖離（§5。
   13.6%〜42.4%）はいずれも原因未特定のまま記録するにとどめる

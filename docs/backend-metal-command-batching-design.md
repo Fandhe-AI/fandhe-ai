@@ -855,3 +855,18 @@ tolerance（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は変
 toolkit 由来の `internal-diagnostics` feature 依存関数群が未使用に
 なる既知の環境依存であり #1099 と無関係。`git stash` での前後比較で
 本 PR の変更前から同一であることを確認済み）。
+
+## 9. GPU タイムスタンプ診断オブザーバ（イシュー #1276）
+
+`§3.5` の唯一の同期点である `MetalContext::synchronize` の契約
+（ロック保持・エラー集約・`pending_pool_returns` 合流順序）はイシュー
+#1276 でも不変。本体を「完了バッチごとに呼ばれるオブザーバ付き内部
+関数」（`synchronize_observed`）へ切り出し、公開 `synchronize()` は
+no-op オブザーバで呼ぶ薄いラッパーへ変更した。オブザーバは
+`waitUntilCompleted()`・`status()` 判定の直後・`batch` drop 前に
+`self.batch` のロックを保持したまま呼ばれるため、`Batch: Send` の
+SAFETY コメントが要求する「`Mutex` 下でのみ `Batch` へ触れる」不変
+条件は維持される。`#[cfg(test)] pub(crate) synchronize_with_gpu_
+timestamps`（診断専用）が `MTLCommandBuffer::GPUStartTime`/
+`GPUEndTime` を読むオブザーバの実装先。本番経路は追加の FFI 呼び出し
+ゼロ（`docs/perf/metal-gemm-reuse-phase-breakdown.md` §2/§8 参照）。
