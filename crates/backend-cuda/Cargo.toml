@@ -239,6 +239,30 @@ required-features = ["internal-diagnostics"]
 name = "specialized_mma_f16_sweep_1159"
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #1346: `gemm_tiled_pipeline_persistent_bench` は
+# `PersistentTiledPipelineFunction`・`CudaGemm::compile_tiled_pipeline_
+# persistent_variant`・`CudaGemm::launch_tiled_pipeline_persistent_f32`
+# （いずれもベンチ専用の常駐 API。`gemm.rs::PersistentTiledPipelineFunction`
+# 冒頭コメント参照）を直接使うため、`gemm_tiled_pipeline_bench`（上記）と
+# 同じ理由で `internal-diagnostics` feature なしではビルドできない。
+name = "gemm_tiled_pipeline_persistent_bench"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+# イシュー #1346: `cpu_cuda_tiled_pipeline_persistent_parity` は
+# `CudaGemm::compile_tiled_pipeline_persistent_variant`・
+# `CudaGemm::launch_tiled_pipeline_persistent_f32`（上記
+# `gemm_tiled_pipeline_persistent_bench` と同じベンチ専用常駐 API）を使う
+# 回帰テスト（persistent タイルキュー版と非 persistent 版の出力 bit 同一
+# を検証する受け入れ基準本体）を含むため、`cpu_cuda_tiled_pipeline_parity`
+# （上記）と同じ理由で `internal-diagnostics` feature を要求する。
+# `cargo test --workspace`（feature 未指定）では対象外としてスキップされ、
+# `cargo test --all-features`（CI の test ジョブ・`make test` が使う
+# コマンド）でのみビルド・実行される。
+name = "cpu_cuda_tiled_pipeline_persistent_parity"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

@@ -936,6 +936,87 @@ fn compile_tiled_pipeline_128x64(device: &CudaDevice) -> Result<TiledPipelineFun
 /// 節参照）。
 pub(crate) const TILED_PIPELINE_128X64_PRODUCTION_ENABLED: bool = false;
 
+/// persistent タイルキュー版 pipeline カーネル（イシュー #1346）が起動
+/// する grid のブロック数を、出力タイル総数・実測 SM 数・SM あたり占有
+/// 可能 block 数から算出する純関数（GPU 不要。`#[cfg(test)]` で単体検査
+/// する）。
+///
+/// `capacity`（`num_sms * blocks_per_sm`）が `num_tiles` を上回る場合は
+/// `num_tiles` に頭打ちする（余分な CTA は 1 回目の `atomicAdd` で即座に
+/// `break` するだけで安全だが、無駄な起動オーバーヘッドを避けるため）。
+/// 下限は 1（`capacity == 0` の場合でも grid=0 の driver launch エラー
+/// を避ける fail-soft な安全弁。`compile_tiled_pipeline_persistent_variant`
+/// が `blocks_per_sm == 0` を事前に拒否するため、実際には `num_sms == 0`
+/// のような環境要因でのみこの安全弁に到達しうる）。
+pub(crate) fn persistent_grid_blocks(num_tiles: u32, num_sms: u32, blocks_per_sm: u32) -> u32 {
+    let capacity = num_sms.saturating_mul(blocks_per_sm);
+    capacity.min(num_tiles).max(1)
+}
+
+/// persistent タイルキュー版カーネルの出力タイル総数
+/// （`ceil(m/TP_BM) * ceil(n/TP_BN)`）を `u64` 中間精度で計算し、カーネル
+/// 側（`kernels_tiled_pipeline.rs::TP_KERNEL_PERSISTENT_PREFIX`）が
+/// `tiles_x * tiles_y` を `int` 算術で計算する前提が破綻しない範囲
+/// （`i32::MAX` 以下）に収まることを検証する純関数（GPU 不要。
+/// `validate_tiled_pipeline_k_bound` と同じ動機のオーバーフロー防止。
+/// REQ-8・fail-closed）。`m == 0 || n == 0` は呼び出し元
+/// （`run_tiled_pipeline_persistent_f32`／
+/// `launch_tiled_pipeline_persistent_f32`）が早期 return で処理するため
+/// 本関数には到達しないが、独立関数として `0` を返す契約にしておく
+/// （`u64::from(m) - 1` の桁あふれを避けるため）。
+pub(crate) fn persistent_tile_count(m: u32, n: u32) -> Result<u32, CudaError> {
+    if m == 0 || n == 0 {
+        return Ok(0);
+    }
+    let bm = u64::from(kernels_tiled_pipeline::TP_BM);
+    let bn = u64::from(kernels_tiled_pipeline::TP_BN);
+    let tiles_y = (u64::from(m) - 1) / bm + 1;
+    let tiles_x = (u64::from(n) - 1) / bn + 1;
+    let total = tiles_x * tiles_y;
+    if total > u64::from(i32::MAX as u32) {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "persistent tiled pipeline kernel tile count overflows i32 tile-index \
+                 arithmetic: m={m}, n={n}, tiles={total}, limit={}",
+                i32::MAX
+            ),
+        });
+    }
+    Ok(total as u32)
+}
+
+/// persistent タイルキュー版 pipeline カーネル（イシュー #1346）の
+/// コンパイル済みハンドル。
+///
+/// [`TiledPipelineFunction`] と異なり、ブロック→出力タイル対応が起動時
+/// に固定されず、グローバル atomic カウンタから動的に取得される
+/// （`kernels_tiled_pipeline.rs::TP_KERNEL_PERSISTENT_PREFIX` ドキュメン
+/// テーションコメント「bit 同一の根拠」参照）ため、保持する情報も異なる:
+///
+/// - `func`／`context_ptr`: [`TiledPipelineFunction`] と同じ理由（safe な
+///   launch API の前提となる `CUfunction`・生成元 context の型的封じ込め。
+///   同型ドキュメンテーションコメント参照）。
+/// - `tile_counter`: 起動のたびにゼロへリセットする長さ 1 の
+///   `CudaSlice<u32>`。[`CudaGemm::launch_tiled_pipeline_persistent_f32`]
+///   が起動直前にストリーム順序でゼロ化する。ハンドルへ封じ込めることで
+///   呼び出し元が毎回確保し直すコストを避ける。`func` と同じ `CudaDevice`
+///   （[`compile_tiled_pipeline_persistent_variant`]）から確保するため、
+///   `context_ptr` の一致検証がこのバッファの context も暗黙に保証する。
+/// - `num_sms`／`blocks_per_sm`: grid サイズ（[`persistent_grid_blocks`]）
+///   の算出に使う実測 SM 数・SM あたり占有可能 block 数（またはホスト
+///   指定値）。
+///
+/// 生成手段は [`CudaGemm::compile_tiled_pipeline_persistent_variant`]
+/// のみ（`internal-diagnostics` feature 限定の opt-in API。本番既定経路
+/// [`CudaGemm::new`] は本型を一切生成しない＝コンパイルコストなし）。
+pub struct PersistentTiledPipelineFunction {
+    func: CudaFunction,
+    context_ptr: usize,
+    tile_counter: CudaSlice<u32>,
+    num_sms: u32,
+    blocks_per_sm: u32,
+}
+
 /// VJP 専用 NT/TN 転置入口（イシュー #1214）の GPU 側 smem 転置カーネル
 /// （`kernels_transpose::transpose_smem_source_f32(false)`。パディングの
 /// み変種。swizzle 変種は #601 での A/B が未計測のため選ばない。
@@ -2248,6 +2329,126 @@ impl CudaGemm {
         ))
     }
 
+    /// persistent タイルキュー版 pipeline カーネル（イシュー #1346）の
+    /// 任意ステージ数変種を `device` 上でオンデマンドでコンパイルする。
+    /// [`Self::compile_tiled_pipeline_variant`] と同じく `&self` を取らず
+    /// `device` のみから完結し、本番オブジェクト（[`new`](Self::new)）
+    /// の初期化コストには一切影響しない。
+    ///
+    /// `blocks_per_sm`: grid サイズ（[`persistent_grid_blocks`]）の SM
+    /// あたり block 数。`Some(v)`（`v >= 1`）は明示指定（`Some(1)` は
+    /// 「grid = SM 数」を意味する。イシュー #1346 の受け入れ条件が挙げる
+    /// 構成）。`Some(0)` は `CudaError::InvalidKernelConfig` を返す
+    /// （grid=0 の driver launch エラーを未然に防ぐ）。`None` は
+    /// `cudarc` の `occupancy_max_active_blocks_per_multiprocessor`
+    /// （`CU_OCCUPANCY_DEFAULT` フラグ・動的共有メモリ 0 バイト。本カーネル
+    /// は動的共有メモリを使わない）で占有可能 block 数を実測する。
+    /// SM 数（[`crate::device::CudaDevice::multiprocessor_count`]）の取得
+    /// に失敗する環境、または占有率実測が `0` を返す環境では
+    /// `CudaError::TiledPipelineUnavailable` を返す（fail-closed。grid=0
+    /// の起動へ進めないための拒否）。
+    ///
+    /// タイルキューカウンタ（`tile_counter`）は本関数の中で `device` から
+    /// 長さ 1 の `CudaSlice<u32>` として確保し、返すハンドルへ封じ込める
+    /// （[`PersistentTiledPipelineFunction`] ドキュメンテーションコメント
+    /// 参照）。
+    ///
+    /// **公開面ゲート**: [`Self::compile_tiled_pipeline_variant`] と同じ
+    /// `internal-diagnostics` feature（既定 off）でゲートし、通常ビルドの
+    /// 安定した公開 API 面から除外する。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn compile_tiled_pipeline_persistent_variant(
+        device: &CudaDevice,
+        stages: u32,
+        blocks_per_sm: Option<u32>,
+    ) -> Result<PersistentTiledPipelineFunction, CudaError> {
+        // 既定ステージ数（`TP_DEFAULT_STAGES`）は `LazyLock` キャッシュ済み
+        // の `tiled_pipeline_persistent_f32_source()` を使い、それ以外の
+        // ステージ数はオンデマンド生成（`_with_stages`）する。診断用途
+        // （ベンチ・実機自己検証テスト）では既定ステージ数での複数回
+        // コンパイルが典型的なため、毎回の文字列再構築コストを避ける
+        // （`compile_tiled_pipeline`〈本番経路〉が既定ステージ数専用に
+        // `tiled_pipeline_f32_source()` を使うのと同じ判断）。
+        let source: std::borrow::Cow<'_, str> = if stages
+            == kernels_tiled_pipeline::TP_DEFAULT_STAGES
+        {
+            std::borrow::Cow::Borrowed(
+                kernels_tiled_pipeline::tiled_pipeline_persistent_f32_source(),
+            )
+        } else {
+            std::borrow::Cow::Owned(
+                kernels_tiled_pipeline::tiled_pipeline_persistent_f32_source_with_stages(stages)?,
+            )
+        };
+        let descriptor = CudaKernelDescriptor::new_with_compiled_dims(
+            "tiled_pipeline_f32_persistent_variant",
+            fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+            kernels_tiled_pipeline::TP_BM,
+            kernels_tiled_pipeline::TP_BN,
+            kernels_tiled_pipeline::TP_BK,
+            stages,
+            fandhe_ai_tensor_core::dispatch::DType::F32,
+            CompiledDims::DYNAMIC_ALL,
+        )?;
+        let func = load_function_cached(
+            device,
+            descriptor,
+            &source,
+            "gemm_tiled_pipeline_persistent_f32",
+        )?;
+
+        let num_sms =
+            device
+                .multiprocessor_count()
+                .ok_or_else(|| CudaError::TiledPipelineUnavailable {
+                    detail: "persistent tiled pipeline kernel requires \
+                             CudaDevice::multiprocessor_count() (SM count query failed or \
+                             unsupported on this device)"
+                        .to_string(),
+                })?;
+
+        let blocks_per_sm = match blocks_per_sm {
+            Some(0) => {
+                return Err(CudaError::InvalidKernelConfig {
+                    detail: "compile_tiled_pipeline_persistent_variant blocks_per_sm must not \
+                             be 0 (would produce a grid of 0 blocks)"
+                        .to_string(),
+                });
+            }
+            Some(v) => v,
+            None => {
+                let occupancy = func.occupancy_max_active_blocks_per_multiprocessor(
+                    kernels_tiled_pipeline::TP_BLOCK_THREADS,
+                    0,
+                    None,
+                )?;
+                if occupancy == 0 {
+                    return Err(CudaError::TiledPipelineUnavailable {
+                        detail: "persistent tiled pipeline kernel occupancy query returned 0 \
+                                 active blocks per multiprocessor"
+                            .to_string(),
+                    });
+                }
+                occupancy
+            }
+        };
+
+        let context_ptr = Arc::as_ptr(device.context()) as usize;
+        // 起動のたびに `launch_tiled_pipeline_persistent_f32` がストリーム
+        // 順序でゼロ化するため確保時点の初期値は問わないが、`alloc_zeros`
+        // で決定的な値にしておく（`internal-diagnostics` 限定の診断 API
+        // のため過度な最適化はしない）。
+        let tile_counter = device.stream().alloc_zeros::<u32>(1)?;
+
+        Ok(PersistentTiledPipelineFunction {
+            func,
+            context_ptr,
+            tile_counter,
+            num_sms,
+            blocks_per_sm,
+        })
+    }
+
     /// [`new`](Self::new) が保持する既定 3 stage の `Self::tiled_pipeline`
     /// が実際にどちらのタイル構成（[`TiledPipelineTile`]）でコンパイル
     /// されているかを返す（既定は常に `Some(Bm64Bn64)`。
@@ -2433,6 +2634,176 @@ impl CudaGemm {
         // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
         // （`download_f32`／明示 `synchronize`）へ委ねる。
         Ok(())
+    }
+
+    /// デバイス常駐済みの A/B/C バッファに対して persistent タイルキュー版
+    /// pipeline カーネル（イシュー #1346・
+    /// [`Self::compile_tiled_pipeline_persistent_variant`] が返す
+    /// ハンドル）を起動し、完了を待たずに投入する（[`Self::
+    /// launch_tiled_pipeline_f32`] と同じ「GPU 実行のみ」区間をベンチ
+    /// 計測できるよう公開する非同期投入契約〈#1013〉）。
+    ///
+    /// ホスト側形状検証・context 一致検証（`func`・`a_dev`/`b_dev`/`c_dev`
+    /// の 4 者いずれも `self.stream` と同じ `CudaContext` 由来であること）
+    /// は [`Self::launch_tiled_pipeline_f32`] と同一の理由・同一の手順
+    /// （codex-review P0/P1 指摘・PR #1071 の対応をそのまま踏襲）。
+    /// `func.tile_counter` は `compile_tiled_pipeline_persistent_variant`
+    /// が `func` と同じ `device` から確保しているため、`func` の
+    /// context 一致検証がこのバッファの context も暗黙に保証する
+    /// （[`PersistentTiledPipelineFunction`] ドキュメンテーションコメント
+    /// 参照。個別の context 検証は不要）。
+    ///
+    /// 起動前に `self.stream.memset_zeros(&mut func.tile_counter)` で
+    /// カウンタをストリーム順序でゼロ化してから起動する（CUDA のストリー
+    /// ム内順序実行契約により、この memset はカーネル起動より必ず先に
+    /// GPU 上で完了する。明示的な同期は不要。#1013 と同じ前提）。
+    ///
+    /// grid サイズは [`persistent_grid_blocks`]（`func.num_sms` ×
+    /// `func.blocks_per_sm`、出力タイル総数
+    /// [`persistent_tile_count`] に頭打ち）で決まり、ブロック次元は
+    /// [`kernels_tiled_pipeline::TP_BLOCK_THREADS`] 固定 1 次元（非
+    /// persistent 版と同じスレッド分解契約。`kernels_tiled_pipeline.rs`
+    /// 参照）。
+    ///
+    /// **公開面ゲート**: [`Self::launch_tiled_pipeline_f32`] と同じ
+    /// `internal-diagnostics` feature（既定 off）でゲートする。
+    #[cfg(feature = "internal-diagnostics")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_tiled_pipeline_persistent_f32(
+        &self,
+        func: &mut PersistentTiledPipelineFunction,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        let self_context_ptr = Arc::as_ptr(self.stream.context()) as usize;
+        if func.context_ptr != self_context_ptr {
+            return Err(CudaError::TiledPipelineContextMismatch {
+                detail: "PersistentTiledPipelineFunction was compiled against a different \
+                         CudaContext (different CudaDevice/GPU) than this CudaGemm instance's \
+                         stream; refusing to launch across mismatched CUDA contexts"
+                    .to_string(),
+            });
+        }
+        for (name, buf_context_ptr) in [
+            ("a_dev", Arc::as_ptr(a_dev.context()) as usize),
+            ("b_dev", Arc::as_ptr(b_dev.context()) as usize),
+            ("c_dev", Arc::as_ptr(c_dev.context()) as usize),
+        ] {
+            if buf_context_ptr != self_context_ptr {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: format!(
+                        "{name} was allocated on a different CudaContext (different \
+                         CudaDevice/GPU) than this CudaGemm instance's stream; refusing \
+                         to launch across mismatched CUDA contexts"
+                    ),
+                });
+            }
+        }
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_pipeline_k_bound(k)?;
+        if !tiled_pipeline_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "persistent tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 \
+                     (cp.async 16-byte transfer granularity): n={n}, k={k}"
+                ),
+            });
+        }
+        validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+
+        let num_tiles = persistent_tile_count(m, n)?;
+        let grid_blocks = persistent_grid_blocks(num_tiles, func.num_sms, func.blocks_per_sm);
+        let cfg = LaunchConfig {
+            grid_dim: (grid_blocks, 1, 1),
+            block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // ストリーム順序でのゼロ化（メソッドコメント「起動前に」参照）。
+        self.stream.memset_zeros(&mut func.tile_counter)?;
+
+        // SAFETY: `launch_tiled_pipeline_f32` と同一の根拠。カーネル引数
+        // （a_dev/b_dev/c_dev・m_i/n_i/k_i・tile_counter）は上記で検証済み
+        // の m/n/k と 1:1 対応し、カーネル内の手動境界チェック（cp.async
+        // src_size ゼロ充填・エピローグ guarded store。非 persistent 版と
+        // 共有の `TP_TILE_CORE`）と合わせて OOB 読み書きが起きない根拠と
+        // する。タイル取得ループの `break` 判定（`tile_u >=
+        // (unsigned int)num_tiles`）はカーネル側で unsigned 比較のため、
+        // 余分に起動された CTA も範囲外タイルへは到達しない。
+        //
+        // `&func.func`（不変借用）と `&mut func.tile_counter`（可変借用）
+        // は構造体の異なるフィールドへの直接アクセスであり、借用検査器は
+        // これらを独立した借用として扱う（`func.as_cuda_function()` の
+        // ような `&self` 経由のアクセサを介さず直接フィールドへアクセス
+        // することで、`func` 全体の借用に潰れないようにしている）。
+        unsafe {
+            self.stream
+                .launch_builder(&func.func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .arg(&mut func.tile_counter)
+                .launch(cfg)?;
+        }
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／明示 `synchronize`）へ委ねる。
+        Ok(())
+    }
+
+    /// ホストスライス入出力の persistent タイルキュー版 pipeline カーネル
+    /// 実行（[`Self::run_tiled_pipeline_f32`] の persistent 版。イシュー
+    /// #1346）。[`Self::upload_f32`]・[`Self::alloc_output_f32`]・
+    /// [`Self::launch_tiled_pipeline_persistent_f32`]・
+    /// `crate::memory::readback` を組み合わせた便宜 API で、新規 `unsafe`
+    /// は導入しない。
+    ///
+    /// ホスト側形状検証・`m == 0 || n == 0`／`k == 0` の no-op 契約は
+    /// [`Self::run_tiled_pipeline_f32`] と同一。
+    ///
+    /// **公開面ゲート**: [`Self::launch_tiled_pipeline_persistent_f32`]
+    /// と同じ `internal-diagnostics` feature（既定 off）でゲートする。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn run_tiled_pipeline_persistent_f32(
+        &self,
+        func: &mut PersistentTiledPipelineFunction,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_tiled_pipeline_k_bound(k)?;
+        if !tiled_pipeline_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "persistent tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 \
+                     (cp.async 16-byte transfer granularity): n={n}, k={k}"
+                ),
+            });
+        }
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
+        }
+
+        let (a_dev, b_dev) = self.upload_f32(a, b)?;
+        let mut c_dev = self.alloc_output_f32(m, n)?;
+        self.launch_tiled_pipeline_persistent_f32(func, &a_dev, &b_dev, &mut c_dev, m, n, k)?;
+        crate::memory::readback(&self.stream, &c_dev)
     }
 
     /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM を実行
@@ -4084,6 +4455,66 @@ mod tests {
         assert!(
             cfg128.grid_dim.1 <= cfg64.grid_dim.1,
             "128x64 block tile must not require more row-blocks than 64x64 for the same m"
+        );
+    }
+
+    /// イシュー #1346: [`persistent_grid_blocks`]（GPU 不要の純粋関数）が
+    /// `min(num_sms * blocks_per_sm, num_tiles)` に頭打ちし、下限 1 を
+    /// 割らないことを検査する。
+    #[test]
+    fn persistent_grid_blocks_clamps_to_tile_count_and_capacity() {
+        // capacity（48*2=96）< num_tiles（200）→ capacity に頭打ち。
+        assert_eq!(persistent_grid_blocks(200, 48, 2), 96);
+        // capacity（48*4=192）> num_tiles（10）→ num_tiles に頭打ち。
+        assert_eq!(persistent_grid_blocks(10, 48, 4), 10);
+        // capacity == num_tiles の境界。
+        assert_eq!(persistent_grid_blocks(96, 48, 2), 96);
+        // capacity が 0（num_sms 取得不能等の異常系）でも下限 1 を保つ
+        // （grid=0 の driver launch エラーを避ける fail-soft な安全弁）。
+        assert_eq!(persistent_grid_blocks(100, 0, 2), 1);
+        assert_eq!(persistent_grid_blocks(0, 48, 2), 1);
+    }
+
+    /// イシュー #1346: [`persistent_tile_count`]（GPU 不要の純粋関数）が
+    /// `ceil(m/TP_BM) * ceil(n/TP_BN)` を正しく計算し、`m == 0 || n == 0`
+    /// は `0` を返すことを検査する。
+    #[test]
+    fn persistent_tile_count_matches_ceil_division() {
+        let bm = kernels_tiled_pipeline::TP_BM;
+        let bn = kernels_tiled_pipeline::TP_BN;
+
+        // ちょうどタイル境界（1 タイル）。
+        assert_eq!(persistent_tile_count(bm, bn).unwrap(), 1);
+        // 端数（各方向 +1 タイル）。
+        assert_eq!(
+            persistent_tile_count(bm + 1, bn + 1).unwrap(),
+            2 * 2,
+            "ceil((bm+1)/bm) * ceil((bn+1)/bn) は 2*2=4 になるはず"
+        );
+        // 4096 は bm=bn=64 のちょうど 64 倍（端数なし）。
+        assert_eq!(persistent_tile_count(4096, 4096).unwrap(), 64 * 64);
+        // m/n のどちらかが 0 は no-op 形状（呼び出し元が早期 return する
+        // 契約だが、本関数自体も 0 を返すことを個別に検査する）。
+        assert_eq!(persistent_tile_count(0, bn).unwrap(), 0);
+        assert_eq!(persistent_tile_count(bm, 0).unwrap(), 0);
+    }
+
+    /// イシュー #1346: [`persistent_tile_count`] が `i32::MAX` を超える
+    /// タイル数で `CudaError::InvalidShape` を fail-closed に返すことを
+    /// 検査する（REQ-8。カーネル側 `int` 算術のオーバーフロー防止）。
+    #[test]
+    fn persistent_tile_count_rejects_i32_overflow() {
+        // m・n の両方を極端に大きくして tiles_y * tiles_x（total）を
+        // i32::MAX（約 21 億）超まで押し上げる（片方だけでは
+        // tiles_x/tiles_y が最大でも約 6700 万にしかならず足りない）。
+        let bm = kernels_tiled_pipeline::TP_BM;
+        let bn = kernels_tiled_pipeline::TP_BN;
+        let huge_m = u32::MAX - (u32::MAX % bm); // bm の倍数に切り下げ
+        let huge_n = u32::MAX - (u32::MAX % bn); // bn の倍数に切り下げ
+        let result = persistent_tile_count(huge_m, huge_n);
+        assert!(
+            matches!(result, Err(CudaError::InvalidShape { .. })),
+            "極端に大きい m・n は InvalidShape で拒否されるはず: {result:?}"
         );
     }
 
