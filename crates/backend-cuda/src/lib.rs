@@ -359,6 +359,7 @@ mod kernels_rmsnorm;
 mod kernels_sgd;
 mod kernels_softmax;
 mod kernels_tiled_pipeline;
+mod kernels_tiled_pipeline_128x64;
 mod kernels_transpose;
 mod kernels_wmma;
 mod kernels_wmma_opt;
@@ -427,6 +428,14 @@ pub use mse::CudaMse;
 // 済み）以外にこの型を公開面へ露出する経路はない。
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledPipelineFunction;
+// `TiledPipelineTile`（イシュー #1343。`TiledPipelineFunction` が保持する
+// タイル構成タグ）は `CudaGemm::tiled_pipeline_tile` の戻り値としてのみ
+// 公開面へ現れる。同メソッドが `internal-diagnostics` feature 限定
+// （`gemm.rs::CudaGemm::tiled_pipeline_tile` ドキュメンテーションコメント
+// 参照）のため、本 re-export も同じ feature でゲートする
+// （`TiledPipelineFunction` re-export と同じ判断パターン）。
+#[cfg(feature = "internal-diagnostics")]
+pub use gemm::TiledPipelineTile;
 pub use gemm_auto::{
     CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
     TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,

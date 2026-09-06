@@ -44,10 +44,23 @@
 //! 2. GPU-only 同士: `pipeline3_gpu_only`（既定 3 stage） vs
 //!    `pipeline4_gpu_only`（4 stage）。`pipeline4_over_pipeline3_gpu_only`
 //!    はこの区間の比率で、cp.async ステージ数の増加そのものの効果を表す。
+//!
+//! イシュー #1343: `pipeline128x64_gpu_only`（128×64×16・8×4 レジスタ
+//! ブロック・A フラグメント XOR スウィズル。既定 3 stage）を上記 2. と
+//! 同じ GPU-only 区間へ追加する。`pipeline128x64_over_pipeline3_gpu_only`
+//! が演算密度 2 倍化の効果を表す一次データであり、GB10 実機での結線可否
+//! 判断（兄弟イシュー #1344）の入力になる。本イシュー（#1343）自体は
+//! 実測を行わない（`docs/perf/cuda-gemm-tiled-pipeline.md`「#1343
+//! 128×64×16 候補の追加」節に未実測の旨を明記する）。
 
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, TiledPipelineFunction};
+
+/// 128×64×16 pipeline カーネル（イシュー #1343）の既定ステージ数。
+/// `kernels_tiled_pipeline_128x64::TP128_DEFAULT_STAGES` と同値（本クレート
+/// 内部定数は非公開のためベンチ側で値を複製する。`STAGE_3` と同じ判断）。
+const STAGE_128X64_DEFAULT: u32 = 3;
 
 /// 決定的シード（`gemm_mma_bench.rs` と同一値。過去 PoC・他ベンチと同じ
 /// 入力分布に揃える）。
@@ -235,6 +248,24 @@ fn main() {
         }
     };
 
+    // イシュー #1343: 128×64×16 pipeline カーネル（opt-in・#1344 の GB10
+    // 実機比較用導線）。`measure_tiled_pipeline_gpu_only` は
+    // `TiledPipelineFunction` の内部タイル構成タグ（`TiledPipelineTile`）を
+    // 見て自身の grid/block 構成を導出するため、64×64 版と同じ関数を
+    // そのまま再利用できる（計測区間は GPU-only 同士で統一。モジュール
+    // コメント「計測区間の統一」参照）。
+    let pipeline128x64_func =
+        match CudaGemm::compile_tiled_pipeline_128x64_variant(&device, STAGE_128X64_DEFAULT) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                println!(
+                    "tiled pipeline 128x64 (stages={STAGE_128X64_DEFAULT}) compilation failed \
+                     ({e}); pipeline128x64 column will be skipped."
+                );
+                None
+            }
+        };
+
     for size in [256usize, 512, 1024, 2048, 4096] {
         let config = MeasurementConfig::default();
 
@@ -261,6 +292,18 @@ fn main() {
                 }
             }
         });
+        let pipeline128x64_gpu_only = pipeline128x64_func.as_ref().and_then(|func| {
+            match measure_tiled_pipeline_gpu_only(&gemm, func, size, &config) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    println!(
+                        "size={size}: pipeline128x64 GPU-only measurement failed ({e}); \
+                         skipping."
+                    );
+                    None
+                }
+            }
+        });
 
         let fmt = |v: Option<f64>| v.map_or("n/a".to_string(), |x| format!("{x:.4}"));
         // 転送込み同士（`tiled_f32` vs `pipeline3`）の比率。
@@ -283,12 +326,22 @@ fn main() {
             (Some(p3), Some(p4)) if p3 != 0.0 => format!("{:.4}", p4 / p3),
             _ => "n/a".to_string(),
         };
+        // イシュー #1343: 128×64 版（GPU-only）と既定 3 stage の 64×64 版
+        // （GPU-only）の比率。演算密度 2 倍化そのものの効果を、#1344 が
+        // GB10 実機で結線可否を判断するための一次データとして記録する
+        // （本イシューでは未実測であることを README・docs 側に明記する）。
+        let pipeline128x64_over_pipeline3_gpu_only =
+            match (pipeline3_gpu_only, pipeline128x64_gpu_only) {
+                (Some(p3), Some(p128)) if p3 != 0.0 => format!("{:.4}", p128 / p3),
+                _ => "n/a".to_string(),
+            };
 
         println!(
             "size={size} tiled_f32_tflops={:.4} tiled_f32_classic_tflops={:.4} \
              dispatch_over_classic={} pipeline3_tflops={} \
              pipeline3_over_tiled={} | pipeline3_gpu_only_tflops={} \
-             pipeline4_gpu_only_tflops={} pipeline4_over_pipeline3_gpu_only={}",
+             pipeline4_gpu_only_tflops={} pipeline4_over_pipeline3_gpu_only={} | \
+             pipeline128x64_gpu_only_tflops={} pipeline128x64_over_pipeline3_gpu_only={}",
             tiled,
             tiled_classic,
             dispatch_over_classic,
@@ -297,6 +350,8 @@ fn main() {
             fmt(pipeline3_gpu_only),
             fmt(pipeline4_gpu_only),
             pipeline4_over_pipeline3_gpu_only,
+            fmt(pipeline128x64_gpu_only),
+            pipeline128x64_over_pipeline3_gpu_only,
         );
     }
 }
