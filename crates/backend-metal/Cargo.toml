@@ -89,3 +89,11 @@ test = true
 [[example]]
 name = "gemm_fine_barrier_ab_bench"
 test = true
+
+# 同上の理由。本 example は `single_run_verdict_tests`（フェーズ 2・3
+# 双方の比列を受け取る 4 値 verdict 純関数のクロスプラットフォーム回帰
+# 検知テスト。イシュー #1279）を持つため `test = true` を明示する
+# （`gemm_fine_barrier_ab_bench` と同型）。
+[[example]]
+name = "gemm_swizzle_ab_bench"
+test = true
