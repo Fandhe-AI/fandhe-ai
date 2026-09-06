@@ -276,6 +276,17 @@ pub struct MetalGemm {
     /// 本番既定 `tile::FINE_BARRIER_ENABLED`（`false`）を渡すため既定挙動は
     /// 不変。
     fine_barrier_enabled: bool,
+    /// `gemm_simdgroup_tiled` のアキュムレータ系ループへの条件付き
+    /// loop unroll（イシュー #1282）をこのインスタンスで opt-in するか
+    /// どうか。`swizzle_enabled`/`fine_barrier_enabled` と同じ設計判断
+    /// （instance フィールド化により base（`false`）/head（`true`）の
+    /// 2 `MetalGemm` を同一プロセス内に構築して interleaved A/B 計測できる
+    /// ようにする。性能実測・本番既定切替は兄弟イシュー #1284）。実際に
+    /// unroll 版へ切り替わるかは本フラグと候補の acc 積閾値の AND
+    /// （`crate::tile::unroll_acc_loops_for`）で決まる。`MetalGemm::new` は
+    /// 本番既定 `tile::UNROLL_ACC_ENABLED`（`false`）を渡すため既定挙動は
+    /// 不変。
+    unroll_acc_enabled: bool,
 }
 
 /// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
@@ -308,6 +319,31 @@ impl MetalGemm {
         Self::new_with_swizzle(ctx, tile::SWIZZLE_ENABLED)
     }
 
+    /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の
+    /// アキュムレータ系ループへの条件付き loop unroll（イシュー #1282）の
+    /// 有効・無効を明示的な `unroll_acc_enabled` 引数で指定する。ベンチ・
+    /// 実機 `#[ignore]` bit 一致テスト用の入口: 同一プロセス内で base
+    /// （`unroll_acc_enabled=false`）/head（`unroll_acc_enabled=true`）の
+    /// 2 インスタンスを構築して比較する（[`Self::new_with_swizzle`]・
+    /// [`Self::new_with_fine_barrier`] と同型の設計）。他 2 フラグ
+    /// （threadgroup ID スウィズル・simdgroup 細粒度同期）は本番既定
+    /// （`tile::SWIZZLE_ENABLED`／`tile::FINE_BARRIER_ENABLED`。いずれも
+    /// `false`）のまま据え置く。本番経路（[`Self::new`]）は常に
+    /// `tile::UNROLL_ACC_ENABLED`（`false`）を渡すため、本関数の追加自体は
+    /// 既定挙動を変えない。性能実測・本番既定の `true` への切替判断は
+    /// 兄弟イシュー #1284 のスコープ。
+    pub fn new_with_unroll_acc(
+        ctx: &MetalContext,
+        unroll_acc_enabled: bool,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            tile::FINE_BARRIER_ENABLED,
+            unroll_acc_enabled,
+        )
+    }
+
     /// [`Self::new`] と同じ構築を行うが、simdgroup 細粒度同期
     /// （イシュー #809）の有効・無効を明示的な `fine_barrier_enabled` 引数で
     /// 指定する。ベンチ用途専用の入口: 同一プロセス内で base
@@ -323,7 +359,12 @@ impl MetalGemm {
         ctx: &MetalContext,
         fine_barrier_enabled: bool,
     ) -> Result<Self, MetalError> {
-        Self::new_with_swizzle_and_fine_barrier(ctx, tile::SWIZZLE_ENABLED, fine_barrier_enabled)
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            fine_barrier_enabled,
+            tile::UNROLL_ACC_ENABLED,
+        )
     }
 
     /// [`Self::new`] と同じ構築を行うが、threadgroup ID スウィズル
@@ -340,21 +381,30 @@ impl MetalGemm {
     /// 設計。本番経路（`Self::new`）は常に `tile::SWIZZLE_ENABLED`（`false`）
     /// を渡すため、本関数の追加自体は既定挙動を変えない。
     pub fn new_with_swizzle(ctx: &MetalContext, swizzle_enabled: bool) -> Result<Self, MetalError> {
-        Self::new_with_swizzle_and_fine_barrier(ctx, swizzle_enabled, tile::FINE_BARRIER_ENABLED)
+        Self::new_with_gates(
+            ctx,
+            swizzle_enabled,
+            tile::FINE_BARRIER_ENABLED,
+            tile::UNROLL_ACC_ENABLED,
+        )
     }
 
-    /// [`Self::new_with_swizzle`]・[`Self::new_with_fine_barrier`] が共に
-    /// 委譲する共通実装（イシュー #809）。threadgroup ID スウィズル
-    /// （イシュー #540）と simdgroup 細粒度同期（イシュー #809）はいずれも
-    /// `crate::pipeline::make_pipeline_with_constants` の function constant
-    /// 特殊化（index 7／8）であり、A/B 計測の対象軸が異なるだけで構築手順
-    /// 自体は独立のため、両フラグを引数に持つ 1 実装へ集約する（各専用入口
-    /// が個別に構築ロジックを複製すると、パイプライン構築手順の変更時に
-    /// 複数箇所を同期させる必要が生じるため）。
-    fn new_with_swizzle_and_fine_barrier(
+    /// [`Self::new_with_swizzle`]・[`Self::new_with_fine_barrier`]・
+    /// [`Self::new_with_unroll_acc`] が共に委譲する共通実装（イシュー
+    /// #809・#1282）。threadgroup ID スウィズル（イシュー #540）・
+    /// simdgroup 細粒度同期（イシュー #809）・条件付き loop unroll
+    /// （イシュー #1282）はいずれも `crate::pipeline::
+    /// make_pipeline_with_constants` の function constant 特殊化
+    /// （index 7／8／11。`crate::pipeline::GemmGateConstants`）であり、
+    /// A/B 計測の対象軸が異なるだけで構築手順自体は独立のため、3 フラグを
+    /// 引数に持つ 1 実装へ集約する（各専用入口が個別に構築ロジックを
+    /// 複製すると、パイプライン構築手順の変更時に複数箇所を同期させる
+    /// 必要が生じるため）。
+    fn new_with_gates(
         ctx: &MetalContext,
         swizzle_enabled: bool,
         fine_barrier_enabled: bool,
+        unroll_acc_enabled: bool,
     ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -384,6 +434,7 @@ impl MetalGemm {
             tiled_f16_cache: Mutex::new(HashMap::new()),
             swizzle_enabled,
             fine_barrier_enabled,
+            unroll_acc_enabled,
         })
     }
 
@@ -452,13 +503,21 @@ impl MetalGemm {
                 continue;
             }
 
+            // イシュー #1282: unroll ゲートは要求 `cfg` ではなく、フォール
+            // バック chain 巡回中の `candidate` 自身から導出する（要求構成の
+            // acc 積を引きずったまま誤った unroll 判定になることを避ける。
+            // `crate::tile::unroll_acc_loops_for` doc comment 参照）。
+            let gates = pipeline::GemmGateConstants {
+                swizzle_enabled: self.swizzle_enabled,
+                fine_barrier_enabled: self.fine_barrier_enabled,
+                unroll_acc_enabled: tile::unroll_acc_loops_for(candidate, self.unroll_acc_enabled),
+            };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
                 &self.library,
                 GemmVariant::SimdgroupTiled(candidate).function_name(),
                 candidate,
-                self.swizzle_enabled,
-                self.fine_barrier_enabled,
+                gates,
                 pattern,
             ) {
                 Ok(pipeline) => {
@@ -524,18 +583,24 @@ impl MetalGemm {
                 continue;
             }
 
+            // `gemm_simdgroup_tiled_f16` は TRANS_A/TRANS_B（index 9/10）・
+            // UNROLL_ACC_ENABLED（index 11）のいずれも参照しないため、
+            // 値の設定自体は無害な no-op（`swizzle_enabled`/
+            // `fine_barrier_enabled` と同じ扱い。`unroll_acc_enabled` は
+            // 常に `false` 固定で f16 経路を明示的に不変と宣言する。
+            // `crate::pipeline::make_pipeline_with_constants` の `pattern`
+            // 引数ドキュメントコメント参照。イシュー #1138・#1282）。
+            let gates = pipeline::GemmGateConstants {
+                swizzle_enabled: self.swizzle_enabled,
+                fine_barrier_enabled: self.fine_barrier_enabled,
+                unroll_acc_enabled: false,
+            };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
                 &self.library,
                 "gemm_simdgroup_tiled_f16",
                 candidate,
-                self.swizzle_enabled,
-                self.fine_barrier_enabled,
-                // `gemm_simdgroup_tiled_f16` は TRANS_A/TRANS_B（index
-                // 9/10）を参照しないため、値の設定自体は無害な no-op
-                // （`swizzle_enabled`/`fine_barrier_enabled` と同じ扱い。
-                // `crate::pipeline::make_pipeline_with_constants` の
-                // `pattern` 引数ドキュメントコメント参照。イシュー #1138）。
+                gates,
                 TransposePattern::Nn,
             ) {
                 Ok(pipeline) => {
@@ -632,6 +697,19 @@ impl MetalGemm {
     ) -> Result<TileConfig, MetalError> {
         self.pipeline_for_tile_f16(ctx, cfg)
             .map(|(_, resolved)| resolved)
+    }
+
+    /// このインスタンスが `cfg`（フォールバック解決前の要求構成。呼び出し元
+    /// は事前に [`Self::resolve_tile_config`] で解決済みの構成を渡す想定）に
+    /// 対して実際に使う `UNROLL_ACC_ENABLED` 実効値を返す（イシュー
+    /// #1282）。実機 `#[ignore]` bit 一致テスト（`gemm_unroll_acc_bit_match_tests`）
+    /// が head インスタンスで「候補 0/4/8 が unroll 版を選んだこと」を
+    /// assert するために使う（`Self::pipeline_for_tile` 内部の導出式
+    /// `crate::tile::unroll_acc_loops_for` をテストから直接呼べるようにする
+    /// 薄いラッパー）。
+    #[cfg(test)]
+    pub(crate) fn unroll_acc_effective(&self, cfg: TileConfig) -> bool {
+        tile::unroll_acc_loops_for(cfg, self.unroll_acc_enabled)
     }
 
     /// 動的タイル選択（TASK-1.8f・#188）の自動入口。`(m, n, k)` から
@@ -3135,5 +3213,182 @@ mod tests {
         let a = nn_layout(16, 32, 32);
         let b = nn_layout(32, 24, 24);
         assert!(strided_tiled_eligibility(16, 24, 32, a, 4, b, 8).is_ok());
+    }
+
+    // --- 条件付き loop unroll（イシュー #1282）の自己検証 ---
+    //
+    // `UNROLL_ACC_ENABLED` function constant（`shaders/gemm.metal` index
+    // 11）が候補ごとに正しく畳み込まれ、かつ有無で出力が bit 単位で
+    // 一致することを実機で確認する（AC-1・AC-2）。`crate::tile::CANDIDATES`
+    // は `pub(crate)` のためクレート境界外の `tests/` からは参照できず、
+    // 本クレート内テストに閉じる（`resolve_tile_config`・`BIAS_ACT_FUSED_
+    // LAUNCH_COUNT` 系の既存テストと同じ配置判断）。
+
+    /// `MetalGemm::unroll_acc_effective` が [`tile::CANDIDATES`] の
+    /// acc 積が閾値以上の候補（index 0/4/8）でのみ head インスタンス
+    /// （`unroll_acc_enabled=true`）で `true` を返すことを確認する
+    /// （イシュー #1282 AC-1）。`crate::tile::unroll_acc_loops_for` の
+    /// 単体テスト（`tile.rs` 側）は純粋関数レベルの検証だが、本テストは
+    /// 実際の `MetalGemm` インスタンス経由でも同じ結果になることを実機で
+    /// 確認する（base インスタンスは常に `false` を返すことも合わせて
+    /// 検証）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn unroll_acc_effective_matches_candidate_acc_product_threshold() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_unroll_acc(&ctx, false)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_unroll_acc(&ctx, true)
+            .expect("head GEMM パイプラインの構築に失敗した");
+
+        let expected_unroll_indices = [0usize, 4, 8];
+        for (i, cfg) in tile::CANDIDATES.iter().enumerate() {
+            assert!(
+                !base_gemm.unroll_acc_effective(*cfg),
+                "index={i}: base（unroll_acc_enabled=false）は常に false であるべき"
+            );
+            let expected = expected_unroll_indices.contains(&i);
+            assert_eq!(
+                head_gemm.unroll_acc_effective(*cfg),
+                expected,
+                "index={i}: head（unroll_acc_enabled=true）の実効値が acc 積 >= 16 の\
+                 候補判定と一致しない"
+            );
+        }
+    }
+
+    /// [`tile::CANDIDATES`] 全 9 候補 × N=512/1024/2048/4096 で、
+    /// base（`unroll_acc_enabled=false`）/head（`unroll_acc_enabled=true`）
+    /// の `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
+    /// （イシュー #1282 AC-2）。`resolve_tile_config`（`#[cfg(test)]`）で
+    /// フォールバック非経由（候補がサイレントに `SINGLE_SIMDGROUP_8X8` 等へ
+    /// 縮退していないこと）も合わせて確認し、検証が空振りしないようにする
+    /// （`tests/gemm_fine_barrier_bit_match.rs` と同じ設計判断）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn unroll_acc_on_off_bit_match_all_candidates() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_unroll_acc(&ctx, false)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_unroll_acc(&ctx, true)
+            .expect("head GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0xC0FFEE;
+
+        for (i, cfg) in tile::CANDIDATES.iter().copied().enumerate() {
+            for size in [512usize, 1024, 2048, 4096] {
+                let base_resolved = base_gemm
+                    .resolve_tile_config(&ctx, cfg)
+                    .expect("base 構成の解決に失敗した");
+                assert_eq!(
+                    base_resolved, cfg,
+                    "index={i} size={size}: base 側でフォールバックが発生した（検証が空振りする）"
+                );
+                let head_resolved = head_gemm
+                    .resolve_tile_config(&ctx, cfg)
+                    .expect("head 構成の解決に失敗した");
+                assert_eq!(
+                    head_resolved, cfg,
+                    "index={i} size={size}: head 側でフォールバックが発生した（検証が空振りする）"
+                );
+
+                let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                let a = rng.fill_vec(size * size);
+                let b = rng.fill_vec(size * size);
+
+                let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                    .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                    .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let base_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                    .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+                let head_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                    .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+                base_gemm
+                    .dispatch_tiled_prepared(
+                        &ctx,
+                        &a_buf,
+                        &b_buf,
+                        &base_c_buf,
+                        size,
+                        size,
+                        size,
+                        cfg,
+                    )
+                    .expect(
+                        "base GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+                head_gemm
+                    .dispatch_tiled_prepared(
+                        &ctx,
+                        &a_buf,
+                        &b_buf,
+                        &head_c_buf,
+                        size,
+                        size,
+                        size,
+                        cfg,
+                    )
+                    .expect(
+                        "head GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+
+                let base_out = base_c_buf.read_to_vec();
+                let head_out = head_c_buf.read_to_vec();
+                let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+                let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(
+                    base_bits, head_bits,
+                    "index={i} size={size}: UNROLL_ACC_ENABLED の有無により出力がビット単位で\
+                     一致しなかった。演算オペランド列が変わっている疑いがあるため、\
+                     shaders/gemm.metal の UNROLL_ACC_ENABLED 分岐箇所を確認すること。"
+                );
+            }
+        }
+    }
+
+    /// 本番自動選択経路（`dispatch_auto`）でも base/head の出力が bit 単位で
+    /// 一致することを size 512/1024/2048/4096 で確認する（イシュー #1282
+    /// AC-2。`tests/gemm_fine_barrier_bit_match.rs::
+    /// fine_barrier_on_off_bit_match_dispatch_auto` と同型）。`select_for_
+    /// device` が選ぶ候補は現行実測範囲では acc 積 >= 16（index 0/4/8）に
+    /// 一致しないため unroll 版ループは通らないが、`UNROLL_ACC_ENABLED`
+    /// function constant 特殊化自体が既存の自動選択経路の挙動を変えない
+    /// ことを確認する目的（性能実測・本番結線判断は #1284）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn unroll_acc_on_off_bit_match_dispatch_auto() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_unroll_acc(&ctx, false)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_unroll_acc(&ctx, true)
+            .expect("head GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0xC0FFEE;
+
+        for size in [512usize, 1024, 2048, 4096] {
+            let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+            let a = rng.fill_vec(size * size);
+            let b = rng.fill_vec(size * size);
+
+            let base_out = base_gemm
+                .dispatch_auto(&ctx, &a, &b, size, size, size)
+                .expect("base GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+            let head_out = head_gemm
+                .dispatch_auto(&ctx, &a, &b, size, size, size)
+                .expect("head GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+
+            let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+            let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                base_bits, head_bits,
+                "size={size}: dispatch_auto で UNROLL_ACC_ENABLED の有無により出力が\
+                 ビット単位で一致しなかった。"
+            );
+        }
     }
 }

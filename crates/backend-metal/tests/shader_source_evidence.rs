@@ -481,14 +481,21 @@ fn gemm_simdgroup_tiled_f16_source_epilogue_uses_single_barrier() {
 /// 順序）は不変のため、既存の数値一致テスト（tolerance 変更なし）はこの
 /// 変更と独立に green であるべきという前提のもとに追加した検査（本テスト
 /// 自体は Metal 実機を必要としない文字列検査）。
+///
+/// イシュー #1282: 条件付き loop unroll（`UNROLL_ACC_ENABLED` function
+/// constant）導入により、direct-load 経路の MMA 発行ループ本体（本蛇行
+/// 走査式を含む）が `if (UNROLL_ACC_ENABLED) { ... } else { ... }` の
+/// 両ブロックへバイト同一のまま複製されたため、出現数は 1→2 へ変わる
+/// （`else` 側は従来コードとバイト同一を保つ契約。本ファイル冒頭
+/// UNROLL_ACC_ENABLED 宣言のコメント参照）。
 #[test]
 fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
     let needle = "uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;";
     let occurrences = kernel_body.matches(needle).count();
     assert_eq!(
-        occurrences, 1,
-        "gemm_simdgroup_tiled の直接ロード経路に蛇行走査式 `{needle}` が見つかりません（見つかった数: {occurrences}。イシュー #745 で staged 経路の蛇行走査はフラグメントレジスタ常駐化により撤去済み）"
+        occurrences, 2,
+        "gemm_simdgroup_tiled の直接ロード経路に蛇行走査式 `{needle}` が見つかりません（見つかった数: {occurrences}。イシュー #1282 の UNROLL_ACC_ENABLED 分岐複製で 2 箇所になる契約）"
     );
 }
 
@@ -770,6 +777,87 @@ fn gemm_metal_source_declares_trans_a_trans_b_function_constants() {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
             "gemm.metal に転置ロードゲート `{needle}`（イシュー #1138）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1282 の証跡: 条件付き loop unroll ゲート `UNROLL_ACC_ENABLED`
+/// （function constant index 11。TRANS_A/TRANS_B〈#1138・index 9/10〉の
+/// 直後）が index まで含めて宣言されていることをロックする（#540/#538/
+/// #1138 の index 衝突再発防止として本規約に沿う）。
+#[test]
+fn gemm_metal_source_declares_unroll_acc_enabled_function_constant() {
+    assert!(
+        GEMM_METAL_SOURCE.contains("constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];"),
+        "gemm.metal に条件付き loop unroll ゲート `UNROLL_ACC_ENABLED`（イシュー #1282）が見つかりません"
+    );
+}
+
+/// イシュー #1282 の証跡: `gemm_simdgroup_tiled`（f32 本体）のアキュムレータ
+/// 系ループ 6 ブロックが `if (UNROLL_ACC_ENABLED) { ... } else { ... }` で
+/// 分岐し、`#pragma clang loop unroll(full)` が計 10 箇所（acc 初期化 外/内
+/// 2・staged a_frag ロード 1・staged b_frag ロード 1・staged MMA 発行 外/内
+/// 2・direct-load MMA 発行 外/内 2・エピローグストア 外/内 2）出現すること
+/// をロックする。カーネル本体の切り出し（`gemm_simdgroup_tiled_kernel_body`）
+/// で f16 側（本定数を参照しない。下記別テスト）を除外しているため、この
+/// カウントは f32 経路の複製構造のみを検査する。
+#[test]
+fn gemm_simdgroup_tiled_source_gates_unroll_pragmas_behind_function_constant() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+
+    let if_count = kernel_body.matches("if (UNROLL_ACC_ENABLED) {").count();
+    assert_eq!(
+        if_count, 6,
+        "gemm_simdgroup_tiled の UNROLL_ACC_ENABLED 分岐ブロック数が 6 ではありません（見つかった数: {if_count}）"
+    );
+
+    let pragma_count = kernel_body
+        .matches("#pragma clang loop unroll(full)")
+        .count();
+    assert_eq!(
+        pragma_count, 10,
+        "gemm_simdgroup_tiled の #pragma clang loop unroll(full) 出現数が 10 ではありません（見つかった数: {pragma_count}）"
+    );
+}
+
+/// イシュー #1282 の証跡: `gemm_simdgroup_tiled_f16` は `UNROLL_ACC_ENABLED`
+/// を参照しない（`crate::gemm::MetalGemm::pipeline_for_tile_f16` が常に
+/// `false` を渡す no-op 契約。`shaders/gemm.metal` 側の f16 本体は本ファイル
+/// の変更対象外）ことをロックする。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_does_not_reference_unroll_acc() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    assert!(
+        !kernel_body.contains("UNROLL_ACC_ENABLED"),
+        "gemm_simdgroup_tiled_f16 が UNROLL_ACC_ENABLED を参照しています（イシュー #1282 のスコープ外）"
+    );
+    assert!(
+        !kernel_body.contains("#pragma clang loop unroll(full)"),
+        "gemm_simdgroup_tiled_f16 に #pragma clang loop unroll(full) が見つかりました（イシュー #1282 のスコープ外）"
+    );
+}
+
+/// イシュー #1282 の証跡: `UNROLL_ACC_ENABLED` 分岐複製後も REQ-8 手動境界
+/// チェック（`.claude/rules/coding-rust.md`「カーネル実装の境界検査」）が
+/// unroll 版・非 unroll 版の両方で維持されていることをロックする。
+/// エピローグストアの `out_row >= dims.m`/`out_col >= dims.n` 早期
+/// `continue` は分岐複製により出現数が 1→2 へ変わる契約（`if (UNROLL_ACC_
+/// ENABLED)` ブロックと `else` ブロックそれぞれに 1 回ずつ）。
+#[test]
+fn gemm_simdgroup_tiled_source_retains_req8_boundary_guards_in_both_unroll_variants() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for (needle, expected) in [
+        ("if (out_row >= dims.m) {", 2),
+        ("if (out_col >= dims.n) {", 2),
+        ("if (a_row < dims.m) {", 2),
+        ("if (b_col < dims.n) {", 2),
+    ] {
+        let occurrences = kernel_body.matches(needle).count();
+        assert_eq!(
+            occurrences, expected,
+            "gemm_simdgroup_tiled の境界チェック `{needle}` の出現数が期待値と異なります \
+             （見つかった数: {occurrences}、期待値: {expected}。UNROLL_ACC_ENABLED 分岐複製後も \
+             unroll 版・非 unroll 版の両方で境界チェックを維持する契約）"
         );
     }
 }

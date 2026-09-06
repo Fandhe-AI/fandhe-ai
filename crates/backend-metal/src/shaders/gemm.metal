@@ -619,6 +619,33 @@ constant bool FINE_BARRIER_ENABLED [[function_constant(8)]];
 constant bool TRANS_A [[function_constant(9)]];
 constant bool TRANS_B [[function_constant(10)]];
 
+// 条件付き loop unroll ゲート（イシュー #1282）: `gemm_simdgroup_tiled` の
+// アキュムレータ系ループ 10 箇所（acc 初期化・staged フラグメントロード・
+// staged/direct-load MMA 発行・エピローグストア）を 6 ブロックの
+// `if (UNROLL_ACC_ENABLED) { <unroll 版> } else { <非 unroll 版> }` で
+// 挟み、`#pragma clang loop unroll(full)` を適用するかどうかを実行時
+// コンパイル時定数で切り替える。E1 実験（`docs/perf/
+// metal-gemm-n4096-kernel-gap.md` §7）で無条件付与を試み、
+// `acc_rows*acc_cols>=16` の候補（`crate::tile::CANDIDATES[0]`/`[4]`/`[8]`）
+// は改善する一方、本番 `dispatch_auto` が選ぶ `acc<=8` 系候補は後退した
+// ため、`crate::tile::TileConfig::unroll_acc_loops`（acc 積 >=
+// `crate::tile::UNROLL_ACC_MIN_PRODUCT`）で判定された候補のみへ適用を
+// 限定する。値は `crate::gemm::MetalGemm::pipeline_for_tile` が
+// フォールバック chain 巡回中の候補ごとに
+// `crate::tile::unroll_acc_loops_for(candidate, instance_flag)` で導出し
+// `make_pipeline_with_constants`（`crate::pipeline::GemmGateConstants`）
+// 経由で畳み込む。**本番既定は `false`**（`crate::tile::
+// UNROLL_ACC_ENABLED`）で、既定挙動は各ブロックの `else` 側（従来の
+// 非 unroll ループとバイト同一）を通る。性能実測・本番既定の `true` への
+// 切替判断は兄弟イシュー #1284 のスコープ（本ファイルの変更自体は
+// `dispatch_auto` の既定挙動を変えない）。index は TRANS_B（#1138・
+// index 10）の直後の 11（本ファイル内で未使用の最小 index。
+// `tests/shader_source_evidence.rs` が index まで含めて固定する）。
+// `gemm_simdgroup_tiled_f16`（下方）は本定数を参照しない
+// （`crate::gemm::MetalGemm::pipeline_for_tile_f16` は常に `false` を渡す。
+// `pipeline_for_tile_f16` 呼び出し側コメント参照）。
+constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];
+
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
 // `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
 // atIndex`（`crate::gemm::encode_dispatch_tiled`）で渡す。A タイル
@@ -704,9 +731,24 @@ kernel void gemm_simdgroup_tiled(
     uint acc_rows = sub_bm / 8;
     uint acc_cols = sub_bn / 8;
     simdgroup_float8x8 acc[MAX_ACC][MAX_ACC];
-    for (uint r = 0; r < acc_rows; r++) {
-        for (uint c_ = 0; c_ < acc_cols; c_++) {
-            acc[r][c_] = simdgroup_float8x8(0.0f);
+    // 条件付き loop unroll（イシュー #1282。本ファイル冒頭
+    // UNROLL_ACC_ENABLED 宣言のコメント参照）: unroll 版・非 unroll 版は
+    // どちらも同じ acc[r][c_] = 0 の代入列を r/c_ 昇順で行うだけで、
+    // 演算オペランド列は不変（数値は unroll 有無に関わらずビット単位で
+    // 一致する）。
+    if (UNROLL_ACC_ENABLED) {
+#pragma clang loop unroll(full)
+        for (uint r = 0; r < acc_rows; r++) {
+#pragma clang loop unroll(full)
+            for (uint c_ = 0; c_ < acc_cols; c_++) {
+                acc[r][c_] = simdgroup_float8x8(0.0f);
+            }
+        }
+    } else {
+        for (uint r = 0; r < acc_rows; r++) {
+            for (uint c_ = 0; c_ < acc_cols; c_++) {
+                acc[r][c_] = simdgroup_float8x8(0.0f);
+            }
         }
     }
 
@@ -948,38 +990,86 @@ kernel void gemm_simdgroup_tiled(
                 // と同じ論法）。
                 simdgroup_float8x8 a_frag[MAX_ACC];
                 simdgroup_float8x8 b_frag[MAX_ACC];
-                for (uint r = 0; r < acc_rows; r++) {
-                    // ストライドを BK ではなく lda（パディング込み）にする
-                    // ことで、パディングにより実際にずれた行の先頭アドレス
-                    // を正しく指す（イシュー #538）。
-                    //
-                    // イシュー #1138: `TRANS_A` の場合 threadgroup タイルは
-                    // `BK×(BM+pad)`（行=K・列=M）で確保されているため、
-                    // `simdgroup_load` の `transpose_matrix=true` で
-                    // K×M ブロックを M×K へ転置して読み出す（自然読み出しの
-                    // 8x8 ブロックは K 方向 8・M 方向 8 で、transpose 後に
-                    // A_frag の期待するレイアウト〈M 方向行・K 方向列〉と
-                    // 一致する。`docs/backend-metal-transpose-collapse-design.md`
-                    // §2・本ファイル冒頭 TRANS_A 宣言のコメント参照）。
-                    if (TRANS_A) {
-                        simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
-                    } else {
-                        simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                // 条件付き loop unroll（イシュー #1282。本ファイル冒頭
+                // UNROLL_ACC_ENABLED 宣言のコメント参照）: unroll 版・非
+                // unroll 版のどちらも a_frag[r] への `simdgroup_load` を r
+                // 昇順で行うだけで、演算オペランド列は不変。
+                if (UNROLL_ACC_ENABLED) {
+#pragma clang loop unroll(full)
+                    for (uint r = 0; r < acc_rows; r++) {
+                        // ストライドを BK ではなく lda（パディング込み）にする
+                        // ことで、パディングにより実際にずれた行の先頭アドレス
+                        // を正しく指す（イシュー #538）。
+                        //
+                        // イシュー #1138: `TRANS_A` の場合 threadgroup タイルは
+                        // `BK×(BM+pad)`（行=K・列=M）で確保されているため、
+                        // `simdgroup_load` の `transpose_matrix=true` で
+                        // K×M ブロックを M×K へ転置して読み出す（自然読み出しの
+                        // 8x8 ブロックは K 方向 8・M 方向 8 で、transpose 後に
+                        // A_frag の期待するレイアウト〈M 方向行・K 方向列〉と
+                        // 一致する。`docs/backend-metal-transpose-collapse-design.md`
+                        // §2・本ファイル冒頭 TRANS_A 宣言のコメント参照）。
+                        if (TRANS_A) {
+                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
+                        } else {
+                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                        }
+                    }
+                } else {
+                    for (uint r = 0; r < acc_rows; r++) {
+                        // ストライドを BK ではなく lda（パディング込み）にする
+                        // ことで、パディングにより実際にずれた行の先頭アドレス
+                        // を正しく指す（イシュー #538）。
+                        //
+                        // イシュー #1138: `TRANS_A` の場合 threadgroup タイルは
+                        // `BK×(BM+pad)`（行=K・列=M）で確保されているため、
+                        // `simdgroup_load` の `transpose_matrix=true` で
+                        // K×M ブロックを M×K へ転置して読み出す（自然読み出しの
+                        // 8x8 ブロックは K 方向 8・M 方向 8 で、transpose 後に
+                        // A_frag の期待するレイアウト〈M 方向行・K 方向列〉と
+                        // 一致する。`docs/backend-metal-transpose-collapse-design.md`
+                        // §2・本ファイル冒頭 TRANS_A 宣言のコメント参照）。
+                        if (TRANS_A) {
+                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
+                        } else {
+                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                        }
                     }
                 }
-                for (uint c_ = 0; c_ < acc_cols; c_++) {
-                    // ストライドを BN ではなく ldb（パディング込み）にする
-                    // （上記 A タイル側と同じ理由。イシュー #538）。
-                    //
-                    // イシュー #1138: `TRANS_B` の場合 threadgroup タイルは
-                    // `BN×(BK+pad)`（行=N・列=K）で確保されているため、
-                    // 自然読み出しの 8x8 ブロック（N 方向 8・K 方向 8）を
-                    // `transpose_matrix=true` で K×N へ転置し B_frag の
-                    // 期待するレイアウト（K 方向行・N 方向列）に一致させる。
-                    if (TRANS_B) {
-                        simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);
-                    } else {
-                        simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                // 条件付き loop unroll（B フラグメントロード版。上記 A タイル
+                // 側と同じ理屈）。
+                if (UNROLL_ACC_ENABLED) {
+#pragma clang loop unroll(full)
+                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                        // ストライドを BN ではなく ldb（パディング込み）にする
+                        // （上記 A タイル側と同じ理由。イシュー #538）。
+                        //
+                        // イシュー #1138: `TRANS_B` の場合 threadgroup タイルは
+                        // `BN×(BK+pad)`（行=N・列=K）で確保されているため、
+                        // 自然読み出しの 8x8 ブロック（N 方向 8・K 方向 8）を
+                        // `transpose_matrix=true` で K×N へ転置し B_frag の
+                        // 期待するレイアウト（K 方向行・N 方向列）に一致させる。
+                        if (TRANS_B) {
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);
+                        } else {
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                        }
+                    }
+                } else {
+                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                        // ストライドを BN ではなく ldb（パディング込み）にする
+                        // （上記 A タイル側と同じ理由。イシュー #538）。
+                        //
+                        // イシュー #1138: `TRANS_B` の場合 threadgroup タイルは
+                        // `BN×(BK+pad)`（行=N・列=K）で確保されているため、
+                        // 自然読み出しの 8x8 ブロック（N 方向 8・K 方向 8）を
+                        // `transpose_matrix=true` で K×N へ転置し B_frag の
+                        // 期待するレイアウト（K 方向行・N 方向列）に一致させる。
+                        if (TRANS_B) {
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);
+                        } else {
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                        }
                     }
                 }
                 // simdgroup 細粒度同期（イシュー #809・実験的機構。本ファイル
@@ -990,9 +1080,23 @@ kernel void gemm_simdgroup_tiled(
                 if (FINE_BARRIER_ENABLED) {
                     simdgroup_barrier(mem_flags::mem_none);
                 }
-                for (uint r = 0; r < acc_rows; r++) {
-                    for (uint c_ = 0; c_ < acc_cols; c_++) {
-                        simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
+                // 条件付き loop unroll（staged MMA 発行版）: unroll 版・非
+                // unroll 版のどちらも acc[r][c_] への `simdgroup_multiply_
+                // accumulate` 発行を r/c_ 昇順で行うだけで、K 方向累算
+                // オペランド列は不変（数値はビット単位で従来と一致する）。
+                if (UNROLL_ACC_ENABLED) {
+#pragma clang loop unroll(full)
+                    for (uint r = 0; r < acc_rows; r++) {
+#pragma clang loop unroll(full)
+                        for (uint c_ = 0; c_ < acc_cols; c_++) {
+                            simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
+                        }
+                    }
+                } else {
+                    for (uint r = 0; r < acc_rows; r++) {
+                        for (uint c_ = 0; c_ < acc_cols; c_++) {
+                            simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
+                        }
                     }
                 }
             }
@@ -1009,6 +1113,61 @@ kernel void gemm_simdgroup_tiled(
             // （`crate::gemm::MetalGemm::dispatch_auto` 参照）。
             uint bk_full8 = (bk_eff / 8) * 8;
             for (uint kk = 0; kk < bk_full8; kk += 8) {
+            // 条件付き loop unroll（direct-load MMA 発行版。本ファイル冒頭
+            // UNROLL_ACC_ENABLED 宣言のコメント参照）: unroll 版・非 unroll 版の
+            // どちらも同じ蛇行走査順（#536）で acc[r][c_] への
+            // simdgroup_multiply_accumulate を発行するだけで、K 方向累算
+            // オペランド列は不変（数値はビット単位で従来と一致する）。
+            if (UNROLL_ACC_ENABLED) {
+            #pragma clang loop unroll(full)
+                for (uint r = 0; r < acc_rows; r++) {
+                    uint a_row = sub_row0 + r * 8;
+                    // 境界チェック（REQ-8）: `dims.m` は `crate::pad::pad8`
+                    // により常に 8 の倍数へ揃えられ、`a_row` も常に 8 の
+                    // 倍数（`sub_row0`・`r*8` がいずれも 8 の倍数）のため、
+                    // `a_row < dims.m` が成立すれば `a_row+8 <= dims.m` も
+                    // 常に成立し、8 行分の読み出しが実効次元内に収まる
+                    // ことが保証される。不成立時は 0 埋めタイルを使う
+                    // （協調ロード経路の 0 埋めと同じ契約。レビュー指摘。
+                    // #188 PR review）。
+                    simdgroup_float8x8 a_tile = simdgroup_float8x8(0.0f);
+                    if (a_row < dims.m) {
+                        // イシュー #1138: `TRANS_A` の direct-load 経路は
+                        // device 側 A（`[k, m]` 行優先、ld=`st.lda`）から
+                        // `transpose_matrix=true` で 8x8 ブロックを転置
+                        // 読み出しする（staged 経路のフラグメントロードと
+                        // 同じ理屈）。
+                        if (TRANS_A) {
+                            simdgroup_load(a_tile, a + (size_t)(p0 + kk) * (size_t)st.lda + (size_t)a_row, st.lda, ulong2(0), true);
+                        } else {
+                            simdgroup_load(a_tile, a + (size_t)a_row * (size_t)st.lda + (size_t)(p0 + kk), st.lda);
+                        }
+                    }
+#pragma clang loop unroll(full)
+                    for (uint ci = 0; ci < acc_cols; ci++) {
+                        // 蛇行（serpentine）走査: staged 経路と同じ理由・出典（#536）。
+                        // c_ の訪問順を変えるだけで acc[r][c_] の累算オペランド列は
+                        // 不変のため数値はビット単位で従来と一致する。
+                        uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;
+                        uint b_col = sub_col0 + c_ * 8;
+                        // 上記と同じ理屈（`dims.n` も pad8 済みで 8 の倍数、
+                        // `b_col` も常に 8 の倍数）。
+                        simdgroup_float8x8 b_tile = simdgroup_float8x8(0.0f);
+                        if (b_col < dims.n) {
+                            // イシュー #1138: `TRANS_B` の direct-load 経路は
+                            // device 側 B（`[n, k]` 行優先、ld=`st.ldb`）から
+                            // `transpose_matrix=true` で 8x8 ブロックを転置
+                            // 読み出しする（A タイル側と同じ理屈）。
+                            if (TRANS_B) {
+                                simdgroup_load(b_tile, b + (size_t)b_col * (size_t)st.ldb + (size_t)(p0 + kk), st.ldb, ulong2(0), true);
+                            } else {
+                                simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)st.ldb + (size_t)b_col, st.ldb);
+                            }
+                        }
+                        simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);
+                    }
+                }
+            } else {
                 for (uint r = 0; r < acc_rows; r++) {
                     uint a_row = sub_row0 + r * 8;
                     // 境界チェック（REQ-8）: `dims.m` は `crate::pad::pad8`
@@ -1056,23 +1215,46 @@ kernel void gemm_simdgroup_tiled(
                     }
                 }
             }
+            }
         }
     }
 
     // ストア: サブブロック原点（`sub_row0`/`sub_col0`）が実効次元を超える
     // 8x8 タイルは書き込みをスキップする（REQ-8。ブロック端の手動境界
-    // チェックを維持する。最適化を理由に省略しない）。
-    for (uint r = 0; r < acc_rows; r++) {
-        uint out_row = sub_row0 + r * 8;
-        if (out_row >= dims.m) {
-            continue;
-        }
-        for (uint c_ = 0; c_ < acc_cols; c_++) {
-            uint out_col = sub_col0 + c_ * 8;
-            if (out_col >= dims.n) {
+    // チェックを維持する。最適化を理由に省略しない）。条件付き loop
+    // unroll（イシュー #1282。本ファイル冒頭 UNROLL_ACC_ENABLED 宣言の
+    // コメント参照）: unroll 版・非 unroll 版のどちらも同じ境界チェック
+    // 付き `simdgroup_store` を r/c_ 昇順で行うだけで、書き込み先・値は
+    // 不変（数値はビット単位で従来と一致する）。
+    if (UNROLL_ACC_ENABLED) {
+#pragma clang loop unroll(full)
+        for (uint r = 0; r < acc_rows; r++) {
+            uint out_row = sub_row0 + r * 8;
+            if (out_row >= dims.m) {
                 continue;
             }
-            simdgroup_store(acc[r][c_], c + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
+#pragma clang loop unroll(full)
+            for (uint c_ = 0; c_ < acc_cols; c_++) {
+                uint out_col = sub_col0 + c_ * 8;
+                if (out_col >= dims.n) {
+                    continue;
+                }
+                simdgroup_store(acc[r][c_], c + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
+            }
+        }
+    } else {
+        for (uint r = 0; r < acc_rows; r++) {
+            uint out_row = sub_row0 + r * 8;
+            if (out_row >= dims.m) {
+                continue;
+            }
+            for (uint c_ = 0; c_ < acc_cols; c_++) {
+                uint out_col = sub_col0 + c_ * 8;
+                if (out_col >= dims.n) {
+                    continue;
+                }
+                simdgroup_store(acc[r][c_], c + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
+            }
         }
     }
 }
