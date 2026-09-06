@@ -513,8 +513,8 @@ fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
 fn gemm_simdgroup_tiled_source_uses_register_resident_fragment_arrays() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
     for needle in [
-        "simdgroup_float8x8 a_frag[MAX_ACC];",
-        "simdgroup_float8x8 b_frag[MAX_ACC];",
+        "simdgroup_float8x8 a_frag[ACC_ROWS_CAP];",
+        "simdgroup_float8x8 b_frag[ACC_COLS_CAP];",
         "simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);",
         "simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);",
         "simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);",
@@ -899,6 +899,112 @@ fn gemm_metal_source_declares_transpose_boundary_helpers() {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
             "gemm.metal に転置ロード側境界ヘルパ `{needle}`（イシュー #1138）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1288 の証跡: ソーステキスト特殊化経路（`GEMM_SPEC_ENABLED`）
+/// が定義される `#ifdef` 分岐に 12 個の `= GEMM_SPEC_*` リテラル代入
+/// （function constant 経路 12 宣言と 1:1 対応）が全て存在することを
+/// ロックする。
+#[test]
+fn gemm_metal_source_declares_spec_ifdef_block_with_all_twelve_defines() {
+    assert!(
+        GEMM_METAL_SOURCE.contains("#ifdef GEMM_SPEC_ENABLED"),
+        "gemm.metal に #ifdef GEMM_SPEC_ENABLED 分岐（イシュー #1288）が見つかりません"
+    );
+    for needle in [
+        "constant uint BM = GEMM_SPEC_BM;",
+        "constant uint BN = GEMM_SPEC_BN;",
+        "constant uint BK = GEMM_SPEC_BK;",
+        "constant uint WM = GEMM_SPEC_WM;",
+        "constant uint WN = GEMM_SPEC_WN;",
+        "constant bool USE_TGP_STAGING = GEMM_SPEC_USE_TGP_STAGING;",
+        "constant uint TGP_PAD = GEMM_SPEC_TGP_PAD;",
+        "constant bool SWIZZLE_ENABLED = GEMM_SPEC_SWIZZLE_ENABLED;",
+        "constant bool FINE_BARRIER_ENABLED = GEMM_SPEC_FINE_BARRIER_ENABLED;",
+        "constant bool TRANS_A = GEMM_SPEC_TRANS_A;",
+        "constant bool TRANS_B = GEMM_SPEC_TRANS_B;",
+        "constant bool UNROLL_ACC_ENABLED = GEMM_SPEC_UNROLL_ACC_ENABLED;",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1288 の証跡: `#ifdef GEMM_SPEC_ENABLED` 導入後も `#else` 側の
+/// 12 個の function constant 宣言（本番既定経路。#188/#538/#540/#809/
+/// #1138/#1282 の各 index）がバイト同一で残っていることをロックする
+/// （`crate::spec_source` へ移設した `SOURCE_SPECIALIZATION_ENABLED`
+/// 既定 `false` の裏付け——`#else` 側が変わっていなければ本番挙動は
+/// 変わらない）。
+#[test]
+fn gemm_metal_source_else_branch_retains_all_twelve_function_constants() {
+    for needle in [
+        "constant uint BM [[function_constant(0)]];",
+        "constant uint BN [[function_constant(1)]];",
+        "constant uint BK [[function_constant(2)]];",
+        "constant uint WM [[function_constant(3)]];",
+        "constant uint WN [[function_constant(4)]];",
+        "constant bool USE_TGP_STAGING [[function_constant(5)]];",
+        "constant uint TGP_PAD [[function_constant(6)]];",
+        "constant bool SWIZZLE_ENABLED [[function_constant(7)]];",
+        "constant bool FINE_BARRIER_ENABLED [[function_constant(8)]];",
+        "constant bool TRANS_A [[function_constant(9)]];",
+        "constant bool TRANS_B [[function_constant(10)]];",
+        "constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal の #else 側（本番既定）に function constant 宣言 `{needle}` が見つかりません。\
+             イシュー #1288 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
+        );
+    }
+}
+
+/// イシュー #1288 の証跡: `gemm_simdgroup_tiled` のアキュムレータ配列
+/// 容量が `GEMM_SPEC_ENABLED` 有無で `ACC_ROWS_CAP`/`ACC_COLS_CAP` へ切り
+/// 替わり、特殊化側に 4 本の `static_assert`（範囲・整合性検査）が存在する
+/// ことをロックする。
+#[test]
+fn gemm_simdgroup_tiled_source_declares_acc_cap_and_static_asserts() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for needle in [
+        "constexpr uint ACC_ROWS_CAP = GEMM_SPEC_ACC_ROWS;",
+        "constexpr uint ACC_COLS_CAP = GEMM_SPEC_ACC_COLS;",
+        "static_assert(ACC_ROWS_CAP >= 1 && ACC_ROWS_CAP <= 8,",
+        "static_assert(ACC_COLS_CAP >= 1 && ACC_COLS_CAP <= 8,",
+        "static_assert(ACC_ROWS_CAP == (GEMM_SPEC_BM / GEMM_SPEC_WM) / 8,",
+        "static_assert(ACC_COLS_CAP == (GEMM_SPEC_BN / GEMM_SPEC_WN) / 8,",
+        "constexpr uint MAX_ACC = 8;",
+        "constexpr uint ACC_ROWS_CAP = MAX_ACC;",
+        "constexpr uint ACC_COLS_CAP = MAX_ACC;",
+        "simdgroup_float8x8 acc[ACC_ROWS_CAP][ACC_COLS_CAP];",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled に `{needle}`（イシュー #1288）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1288 の証跡: 直接ロード（direct-load）経路の f32 版
+/// `gemm_simdgroup_tiled_f16` 側 `MAX_ACC` 固定確保（f16 経路は対象外。
+/// 本イシューのスコープ外）が変更されていないことをロックする。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_max_acc_unchanged() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for needle in [
+        "constexpr uint MAX_ACC = 8;",
+        "MM_T a_frag[MAX_ACC];",
+        "MM_T b_frag[MAX_ACC];",
+        "ACC_T acc[MAX_ACC][MAX_ACC];",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_f16 の `{needle}` が変更されています（イシュー #1288 は f16 経路を対象外とする契約）"
         );
     }
 }

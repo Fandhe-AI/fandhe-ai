@@ -1318,6 +1318,25 @@ pub(crate) const FINE_BARRIER_ENABLED: bool = false;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const UNROLL_ACC_ENABLED: bool = false;
 
+/// `gemm_simdgroup_tiled` のソーステキスト特殊化経路（イシュー #1288。
+/// E2 試作）を本番 dispatch で実際に有効化するかどうかのゲート。
+/// `SWIZZLE_ENABLED`/`FINE_BARRIER_ENABLED`/`UNROLL_ACC_ENABLED` と同じ
+/// 設計判断（instance フィールド化により base/head の 2 `MetalGemm` を
+/// 同一プロセス内に構築して bit 一致を自己検証できるようにする）。
+///
+/// **本 sub-issue（#1288）は機構の実装と bit 一致の自己検証のみを行い、
+/// 性能実測・本番既定の `true` への切替判断は行わない**（後続イシュー
+/// #1289〈反射値・カーネル純時間の before/after 実測〉／#1302〈`tile::
+/// select` への組み込み〉のスコープ。`docs/perf/
+/// metal-gemm-n4096-kernel-gap.md` §8）。コミット状態では常に `false`
+/// のままとし、実機 A/B 計測目的以外で一時的にも `true` へ書き換えて
+/// コミットしない。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
+/// doc comment を参照（同一の dead_code 誤検知回避）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const SOURCE_SPECIALIZATION_ENABLED: bool = false;
+
 /// [`TileConfig::unroll_acc_loops`] が unroll 版ループを選ぶ acc 積
 /// （`acc_rows * acc_cols`）の下限（イシュー #1282）。E1 実験（`docs/perf/
 /// metal-gemm-n4096-kernel-gap.md` §7）で確認した「`acc_rows*acc_cols>=16`
@@ -3380,6 +3399,20 @@ mod tests {
             "UNROLL_ACC_ENABLED が true のままコミットされている疑いがあります。\
              本番既定は false（性能実測・切替判断は #1284 のスコープ）です \
              （tile.rs 冒頭 UNROLL_ACC_ENABLED doc comment・イシュー #1282 参照）。"
+        );
+    }
+
+    /// `SOURCE_SPECIALIZATION_ENABLED` の**コミット状態既定値**が `false`
+    /// に固定されていることをロックする（`unroll_acc_enabled_is_false_
+    /// by_default` と同じ設計判断: 本イシュー〈#1288〉は機構の実装と
+    /// bit 一致の自己検証のみを担い、性能実測・本番既定切替は行わない）。
+    #[test]
+    fn source_specialization_enabled_is_false_by_default() {
+        assert!(
+            !std::hint::black_box(SOURCE_SPECIALIZATION_ENABLED),
+            "SOURCE_SPECIALIZATION_ENABLED が true のままコミットされている疑いがあります。\
+             本番既定は false（性能実測・本番結線判断は #1289／#1302 のスコープ）です \
+             （tile.rs 冒頭 SOURCE_SPECIALIZATION_ENABLED doc comment・イシュー #1288 参照）。"
         );
     }
 

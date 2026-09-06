@@ -33,10 +33,8 @@ use objc2_metal::{
 use crate::context::MtlDevice;
 use crate::error::MetalError;
 use crate::layout::TransposePattern;
+use crate::spec_source::GEMM_MSL_SRC;
 use crate::tile::TileConfig;
-
-/// `shaders/gemm.metal` のソース（naive・tiled・simdgroup の 3 段カーネルを含む）。
-const GEMM_MSL_SRC: &str = include_str!("shaders/gemm.metal");
 
 pub(crate) type MtlLibrary = ProtocolObject<dyn MTLLibrary>;
 pub(crate) type MtlPipeline = ProtocolObject<dyn MTLComputePipelineState>;
@@ -73,11 +71,24 @@ pub(crate) struct GemmGateConstants {
 /// 前段として呼ばれる。エラー時の `message` は `NSError` の
 /// `localizedDescription`（構文エラー等の診断文字列）を保持する。
 pub(crate) fn compile_gemm_library(device: &MtlDevice) -> Result<Retained<MtlLibrary>, MetalError> {
-    let src = NSString::from_str(GEMM_MSL_SRC);
+    compile_source(device, GEMM_MSL_SRC)
+}
+
+/// `src`（MSL ソーステキスト）を `device` 上でコンパイルし `MTLLibrary` を
+/// 返す共通実装（イシュー #1288）。[`compile_gemm_library`]（本番既定の
+/// function constant 経路。`GEMM_MSL_SRC` をそのまま渡す薄いラッパー）と
+/// `crate::spec_source::specialized_gemm_source` が生成した候補固有
+/// ソース（[`make_pipeline_source_specialized`]）の**両方**がこの関数を
+/// 経由する契約とすることで、`compile_options()`（`MathMode::Safe` +
+/// `MathFloatingPointFunctions::Precise`。本ファイル冒頭コメント参照）を
+/// 2 経路で確実に同一適用する（ここが分岐すると丸め方針が経路依存になり
+/// REQ-2 の複合判定が黙って壊れるため、単一の関数へ集約する設計判断）。
+fn compile_source(device: &MtlDevice, src: &str) -> Result<Retained<MtlLibrary>, MetalError> {
+    let ns_src = NSString::from_str(src);
     let options = compile_options();
 
     device
-        .newLibraryWithSource_options_error(&src, Some(&options))
+        .newLibraryWithSource_options_error(&ns_src, Some(&options))
         .map_err(|err| MetalError::LibraryCompilation {
             message: err.localizedDescription().to_string(),
         })
@@ -306,6 +317,54 @@ pub(crate) fn make_pipeline_with_constants(
         .map_err(|err| MetalError::PipelineCreation {
             message: err.localizedDescription().to_string(),
         })
+}
+
+/// `gemm_simdgroup_tiled` のソーステキスト特殊化経路（イシュー #1288。
+/// E2 試作）。[`make_pipeline_with_constants`]（function constant 経路。
+/// 本番既定）に対し、本関数は `crate::spec_source::specialized_gemm_source`
+/// が候補固有の `#define GEMM_SPEC_*` を前置したソースを**候補ごとに
+/// 再コンパイル**する（`newFunctionWithName_constantValues_error` の
+/// function constant 値設定を経由しないため `unsafe` を一切使わない）。
+///
+/// `library` を再利用せず毎回 [`compile_source`] を呼ぶ点が
+/// [`make_pipeline_with_constants`] との構造上の違い（function constant は
+/// 既存ライブラリから関数を「特殊化」する API だが、ソーステキスト特殊化は
+/// プリプロセッサマクロの展開結果が候補ごとに異なる別ソースになるため、
+/// ライブラリ自体を候補ごとに構築する必要がある）。呼び出し元
+/// [`crate::gemm::MetalGemm::pipeline_for_tile`] は候補（フォールバック
+/// chain 巡回中の `TileConfig`）ごとに構築したパイプラインを
+/// `tiled_spec_cache`（function constant 経路の `tiled_cache` とは独立の
+/// フィールド）へキャッシュする契約のため、本関数はコンパイル済み
+/// `MtlLibrary` を保持しない（呼び出し元がパイプラインのみキャッシュする
+/// 設計。ライブラリの重複コンパイルは候補が有限個〈`tile::CANDIDATES`〉の
+/// 遅延構築 1 回限りのコストとして許容する。性能実測は行わない
+/// `docs/perf/metal-gemm-n4096-kernel-gap.md` §8）。
+///
+/// `gates`/`pattern` の意味は [`make_pipeline_with_constants`] の同名
+/// 引数と同一（`crate::spec_source::SpecializationParams::new` が
+/// `pattern` から `trans_a`/`trans_b` を導出する）。
+pub(crate) fn make_pipeline_source_specialized(
+    device: &MtlDevice,
+    function_name: &'static str,
+    cfg: TileConfig,
+    gates: GemmGateConstants,
+    pattern: TransposePattern,
+) -> Result<Retained<MtlPipeline>, MetalError> {
+    let GemmGateConstants {
+        swizzle_enabled,
+        fine_barrier_enabled,
+        unroll_acc_enabled,
+    } = gates;
+    let params = crate::spec_source::SpecializationParams::new(
+        cfg,
+        swizzle_enabled,
+        fine_barrier_enabled,
+        unroll_acc_enabled,
+        pattern,
+    );
+    let src = crate::spec_source::specialized_gemm_source(&params);
+    let library = compile_source(device, &src)?;
+    make_pipeline(device, &library, function_name)
 }
 
 #[cfg(test)]

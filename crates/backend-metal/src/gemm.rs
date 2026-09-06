@@ -196,8 +196,9 @@ impl GemmStrides {
 /// `ops::MetalBackendOps::gemm`／`gemm_bias_act` は演算呼び出しごとの
 /// 都度構築をやめ、`crate::context_cache::cached_gemm` 経由で
 /// `Arc<MetalGemm>` をプロセス内キャッシュから取得する本番経路へ移行した
-/// （A/B 計測専用の `new_with_swizzle`／`new_with_fine_barrier` 入口は
-/// キャッシュ対象外のまま従来どおり直接構築する）。
+/// （A/B 計測・自己検証専用の `new_with_swizzle`／`new_with_fine_barrier`／
+/// `new_with_source_specialization`〈イシュー #1288〉入口はキャッシュ
+/// 対象外のまま従来どおり直接構築する）。
 pub struct MetalGemm {
     pipeline_naive: objc2::rc::Retained<MtlPipeline>,
     pipeline_tiled: objc2::rc::Retained<MtlPipeline>,
@@ -287,6 +288,28 @@ pub struct MetalGemm {
     /// 本番既定 `tile::UNROLL_ACC_ENABLED`（`false`）を渡すため既定挙動は
     /// 不変。
     unroll_acc_enabled: bool,
+    /// ソーステキスト特殊化経路（イシュー #1288。E2 試作）をこのインスタンス
+    /// の `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]）で
+    /// 有効化するかどうか。`swizzle_enabled`/`fine_barrier_enabled`/
+    /// `unroll_acc_enabled` と同じ設計判断（instance フィールド化により
+    /// base（`false`）/head（`true`）の 2 `MetalGemm` を同一プロセス内に
+    /// 構築して bit 一致を自己検証できるようにする）。`MetalGemm::new` は
+    /// 本番既定 `tile::SOURCE_SPECIALIZATION_ENABLED`（`false`）を渡すため
+    /// 既定挙動は不変。性能実測・本番既定切替は行わない（後続イシュー
+    /// #1289／#1302 のスコープ。`docs/perf/metal-gemm-n4096-kernel-gap.md`
+    /// §8）。`true` の場合、[`Self::pipeline_for_tile`] は
+    /// `self.tiled_cache`（function constant 経路のキャッシュ）を一切
+    /// 更新せず [`Self::tiled_spec_cache`] のみを使う（両経路の取り違えを
+    /// 構造的に防ぐため、`tiled_f16_cache` と同じく独立フィールドとする）。
+    source_specialized: bool,
+    /// [`Self::source_specialized`] が `true` のときに使う、ソーステキスト
+    /// 特殊化経路専用のパイプラインキャッシュ（[`Self::tiled_cache`] とは
+    /// 独立。キーは `tiled_cache` と同じ `(TileConfig, TransposePattern)`）。
+    /// `#[cfg(test)]` の [`Self::source_specialized_cache_len`]／
+    /// [`Self::function_constant_cache_len`] が「実際にどちらの経路が
+    /// 走ったか」を検証するために参照する。
+    tiled_spec_cache:
+        Mutex<HashMap<(TileConfig, TransposePattern), objc2::rc::Retained<MtlPipeline>>>,
 }
 
 /// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
@@ -341,6 +364,33 @@ impl MetalGemm {
             tile::SWIZZLE_ENABLED,
             tile::FINE_BARRIER_ENABLED,
             unroll_acc_enabled,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
+        )
+    }
+
+    /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の
+    /// ソーステキスト特殊化経路（イシュー #1288。E2 試作）の有効・無効を
+    /// 明示的な `source_specialized` 引数で指定する。実機 `#[ignore]`
+    /// bit 一致自己検証テスト専用の入口: 同一プロセス内で base
+    /// （`source_specialized=false`。function constant 経路）/head
+    /// （`source_specialized=true`。ソーステキスト特殊化経路）の 2
+    /// インスタンスを構築して比較する（[`Self::new_with_unroll_acc`] と
+    /// 同型の設計）。他 3 フラグ（threadgroup ID スウィズル・simdgroup
+    /// 細粒度同期・条件付き loop unroll）は本番既定のまま据え置く。本番
+    /// 経路（[`Self::new`]）は常に `tile::SOURCE_SPECIALIZATION_ENABLED`
+    /// （`false`）を渡すため、本関数の追加自体は既定挙動を変えない。
+    /// 性能実測・本番既定の `true` への切替判断は行わない（後続イシュー
+    /// #1289／#1302 のスコープ）。
+    pub fn new_with_source_specialization(
+        ctx: &MetalContext,
+        source_specialized: bool,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            tile::FINE_BARRIER_ENABLED,
+            tile::UNROLL_ACC_ENABLED,
+            source_specialized,
         )
     }
 
@@ -364,6 +414,7 @@ impl MetalGemm {
             tile::SWIZZLE_ENABLED,
             fine_barrier_enabled,
             tile::UNROLL_ACC_ENABLED,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
         )
     }
 
@@ -386,6 +437,7 @@ impl MetalGemm {
             swizzle_enabled,
             tile::FINE_BARRIER_ENABLED,
             tile::UNROLL_ACC_ENABLED,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
         )
     }
 
@@ -405,6 +457,7 @@ impl MetalGemm {
         swizzle_enabled: bool,
         fine_barrier_enabled: bool,
         unroll_acc_enabled: bool,
+        source_specialized: bool,
     ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -435,6 +488,8 @@ impl MetalGemm {
             swizzle_enabled,
             fine_barrier_enabled,
             unroll_acc_enabled,
+            source_specialized,
+            tiled_spec_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -481,8 +536,22 @@ impl MetalGemm {
     ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
         let mut last_err: Option<MetalError> = None;
 
+        // イシュー #1288: `source_specialized` に応じてキャッシュ・構築関数
+        // を丸ごと切り替える（`tiled_cache`/`make_pipeline_with_constants`
+        // 〈function constant 経路〉対 `tiled_spec_cache`/
+        // `make_pipeline_source_specialized`〈ソーステキスト特殊化経路〉）。
+        // 事前検証（`validate`・`shared_mem_bytes_for`）・ゲート導出
+        // （`unroll_acc_loops_for`）・事後検証（`maxTotalThreadsPerThreadgroup`）
+        // は両経路で完全に同一の式を使う（base/head を同条件で比較する
+        // ための不変条件。計画「設計」節）。
+        let cache = if self.source_specialized {
+            &self.tiled_spec_cache
+        } else {
+            &self.tiled_cache
+        };
+
         for candidate in tile::fallback_chain(cfg) {
-            if let Some(pipeline) = lock_tile_cache(&self.tiled_cache)?.get(&(candidate, pattern)) {
+            if let Some(pipeline) = lock_tile_cache(cache)?.get(&(candidate, pattern)) {
                 return Ok((Retained::clone(pipeline), candidate));
             }
 
@@ -512,20 +581,32 @@ impl MetalGemm {
                 fine_barrier_enabled: self.fine_barrier_enabled,
                 unroll_acc_enabled: tile::unroll_acc_loops_for(candidate, self.unroll_acc_enabled),
             };
-            match pipeline::make_pipeline_with_constants(
-                ctx.device(),
-                &self.library,
-                GemmVariant::SimdgroupTiled(candidate).function_name(),
-                candidate,
-                gates,
-                pattern,
-            ) {
+            let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
+            let build_result = if self.source_specialized {
+                pipeline::make_pipeline_source_specialized(
+                    ctx.device(),
+                    function_name,
+                    candidate,
+                    gates,
+                    pattern,
+                )
+            } else {
+                pipeline::make_pipeline_with_constants(
+                    ctx.device(),
+                    &self.library,
+                    function_name,
+                    candidate,
+                    gates,
+                    pattern,
+                )
+            };
+            match build_result {
                 Ok(pipeline) => {
                     let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
                     if candidate.thread_count() > actual_max_threads {
                         continue;
                     }
-                    lock_tile_cache(&self.tiled_cache)?
+                    lock_tile_cache(cache)?
                         .insert((candidate, pattern), Retained::clone(&pipeline));
                     return Ok((pipeline, candidate));
                 }
@@ -680,6 +761,27 @@ impl MetalGemm {
     ) -> Result<TileConfig, MetalError> {
         self.pipeline_for_tile(ctx, cfg, pattern)
             .map(|(_, resolved)| resolved)
+    }
+
+    /// ソーステキスト特殊化経路（イシュー #1288）のキャッシュ
+    /// （[`Self::tiled_spec_cache`]）に登録済みのパイプライン数を返す。
+    /// [`Self::function_constant_cache_len`] と対にして、実機テストが
+    /// 「head（`source_specialized=true`）は特殊化キャッシュのみが増え、
+    /// function constant キャッシュは空のまま」「base はその逆」を
+    /// assert するために使う（出力一致だけでは両者が同じ経路へ倒れた
+    /// false-green を検出できないため、新経路が実際に走ったことを
+    /// 独立に証明する）。
+    #[cfg(test)]
+    pub(crate) fn source_specialized_cache_len(&self) -> Result<usize, MetalError> {
+        Ok(lock_tile_cache(&self.tiled_spec_cache)?.len())
+    }
+
+    /// function constant 経路（[`Self::tiled_cache`]）に登録済みの
+    /// パイプライン数を返す。[`Self::source_specialized_cache_len`] の
+    /// doc comment 参照。
+    #[cfg(test)]
+    pub(crate) fn function_constant_cache_len(&self) -> Result<usize, MetalError> {
+        Ok(lock_tile_cache(&self.tiled_cache)?.len())
     }
 
     /// [`Self::resolve_tile_config`] の f16 版（イシュー #796）。
@@ -3387,6 +3489,189 @@ mod tests {
             assert_eq!(
                 base_bits, head_bits,
                 "size={size}: dispatch_auto で UNROLL_ACC_ENABLED の有無により出力が\
+                 ビット単位で一致しなかった。"
+            );
+        }
+    }
+
+    /// [`tile::CANDIDATES`] 全 9 候補 × N=512/1024/2048/4096 で、
+    /// base（function constant 経路。`source_specialized=false`）/head
+    /// （ソーステキスト特殊化経路。`source_specialized=true`）の
+    /// `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
+    /// （イシュー #1288 R-3）。`resolve_tile_config`（`#[cfg(test)]`）で
+    /// フォールバック非経由（候補がサイレントに `SINGLE_SIMDGROUP_8X8` 等へ
+    /// 縮退していないこと）も合わせて確認する
+    /// （`unroll_acc_on_off_bit_match_all_candidates` と同型の設計）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn source_specialized_on_off_bit_match_all_candidates() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_source_specialization(&ctx, false)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_source_specialization(&ctx, true)
+            .expect("head GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0xC0FFEE;
+
+        for (i, cfg) in tile::CANDIDATES.iter().copied().enumerate() {
+            for size in [512usize, 1024, 2048, 4096] {
+                let base_resolved = base_gemm
+                    .resolve_tile_config(&ctx, cfg)
+                    .expect("base 構成の解決に失敗した");
+                assert_eq!(
+                    base_resolved, cfg,
+                    "index={i} size={size}: base 側でフォールバックが発生した（検証が空振りする）"
+                );
+                let head_resolved = head_gemm
+                    .resolve_tile_config(&ctx, cfg)
+                    .expect("head 構成の解決に失敗した");
+                assert_eq!(
+                    head_resolved, cfg,
+                    "index={i} size={size}: head 側でフォールバックが発生した（検証が空振りする）"
+                );
+
+                let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                let a = rng.fill_vec(size * size);
+                let b = rng.fill_vec(size * size);
+
+                let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                    .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                    .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let base_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                    .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+                let head_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                    .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+                base_gemm
+                    .dispatch_tiled_prepared(
+                        &ctx,
+                        &a_buf,
+                        &b_buf,
+                        &base_c_buf,
+                        size,
+                        size,
+                        size,
+                        cfg,
+                    )
+                    .expect(
+                        "base GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+                head_gemm
+                    .dispatch_tiled_prepared(
+                        &ctx,
+                        &a_buf,
+                        &b_buf,
+                        &head_c_buf,
+                        size,
+                        size,
+                        size,
+                        cfg,
+                    )
+                    .expect(
+                        "head GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+
+                let base_out = base_c_buf.read_to_vec();
+                let head_out = head_c_buf.read_to_vec();
+                let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+                let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(
+                    base_bits, head_bits,
+                    "index={i} size={size}: ソーステキスト特殊化の有無により出力がビット単位で\
+                     一致しなかった。演算オペランド列が変わっている疑いがあるため、\
+                     shaders/gemm.metal の GEMM_SPEC_ENABLED 分岐箇所・\
+                     crate::spec_source::specialized_gemm_source を確認すること。"
+                );
+            }
+        }
+    }
+
+    /// [`Self::source_specialized_on_off_bit_match_all_candidates`] の
+    /// 実行後、head（`source_specialized=true`）は
+    /// [`MetalGemm::source_specialized_cache_len`] のみが増え
+    /// [`MetalGemm::function_constant_cache_len`] は 0 のまま、base は
+    /// その逆であることを確認する（イシュー #1288。新経路が実際に走った
+    /// ことを出力一致とは独立に証明する。出力一致だけでは両者が同じ経路へ
+    /// 倒れた false-green を検出できないため）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn source_specialized_route_populates_only_spec_cache() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_source_specialization(&ctx, false)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_source_specialization(&ctx, true)
+            .expect("head GEMM パイプラインの構築に失敗した");
+
+        assert_eq!(base_gemm.source_specialized_cache_len().unwrap(), 0);
+        assert_eq!(base_gemm.function_constant_cache_len().unwrap(), 0);
+        assert_eq!(head_gemm.source_specialized_cache_len().unwrap(), 0);
+        assert_eq!(head_gemm.function_constant_cache_len().unwrap(), 0);
+
+        let cfg = tile::CANDIDATES[3];
+        base_gemm
+            .resolve_tile_config(&ctx, cfg)
+            .expect("base 構成の解決に失敗した");
+        head_gemm
+            .resolve_tile_config(&ctx, cfg)
+            .expect("head 構成の解決に失敗した");
+
+        assert_eq!(
+            base_gemm.source_specialized_cache_len().unwrap(),
+            0,
+            "base（function constant 経路）が特殊化キャッシュを誤って更新した"
+        );
+        assert_eq!(
+            base_gemm.function_constant_cache_len().unwrap(),
+            1,
+            "base が function constant キャッシュを更新していない（経路が走っていない疑い）"
+        );
+        assert_eq!(
+            head_gemm.function_constant_cache_len().unwrap(),
+            0,
+            "head（ソーステキスト特殊化経路）が function constant キャッシュを誤って更新した"
+        );
+        assert_eq!(
+            head_gemm.source_specialized_cache_len().unwrap(),
+            1,
+            "head が特殊化キャッシュを更新していない（経路が走っていない疑い）"
+        );
+    }
+
+    /// 本番自動選択経路（`dispatch_auto`）でも base/head の出力が bit 単位で
+    /// 一致することを size 512/1024/2048/4096 で確認する（イシュー #1288
+    /// R-3。`unroll_acc_on_off_bit_match_dispatch_auto` と同型）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn source_specialized_on_off_bit_match_dispatch_auto() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = MetalGemm::new_with_source_specialization(&ctx, false)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm = MetalGemm::new_with_source_specialization(&ctx, true)
+            .expect("head GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0xC0FFEE;
+
+        for size in [512usize, 1024, 2048, 4096] {
+            let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+            let a = rng.fill_vec(size * size);
+            let b = rng.fill_vec(size * size);
+
+            let base_out = base_gemm
+                .dispatch_auto(&ctx, &a, &b, size, size, size)
+                .expect("base GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+            let head_out = head_gemm
+                .dispatch_auto(&ctx, &a, &b, size, size, size)
+                .expect("head GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+
+            let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+            let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                base_bits, head_bits,
+                "size={size}: dispatch_auto でソーステキスト特殊化の有無により出力が\
                  ビット単位で一致しなかった。"
             );
         }

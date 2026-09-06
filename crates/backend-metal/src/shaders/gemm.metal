@@ -558,6 +558,30 @@ kernel void gemm_simdgroup_f16(
 // 整除制約（BM は WM*8 の倍数、BN は WN*8 の倍数、BK は 8 の倍数）は
 // Rust 側 `crate::tile::TileConfig::validate` が事前検証する契約であり、
 // カーネル側では前提として扱う。
+// ソーステキスト特殊化経路（イシュー #1288。E2 試作）: `crate::
+// spec_source::specialized_gemm_source` が `#define GEMM_SPEC_ENABLED 1`
+// と下記 12 個の `#define GEMM_SPEC_*` を本ファイル先頭へ前置して
+// 別ライブラリとしてコンパイルする opt-in 経路（本番既定は `#else` 側の
+// function constant 経路のまま。`crate::tile::SOURCE_SPECIALIZATION_ENABLED`
+// 〈既定 `false`〉・`crate::gemm::MetalGemm::new_with_source_specialization`）。
+// `#ifdef` 分岐時は 12 定数がプリプロセッサ時点でリテラルへ畳み込まれる
+// （function constant を介さない）ため、下記 12 行の値・意味自体は
+// `#else` 側（本番既定・#188/#538/#540/#809/#1138/#1282 の各コメント）と
+// 完全に同一で、ここでは重複記述しない。
+#ifdef GEMM_SPEC_ENABLED
+constant uint BM = GEMM_SPEC_BM;
+constant uint BN = GEMM_SPEC_BN;
+constant uint BK = GEMM_SPEC_BK;
+constant uint WM = GEMM_SPEC_WM;
+constant uint WN = GEMM_SPEC_WN;
+constant bool USE_TGP_STAGING = GEMM_SPEC_USE_TGP_STAGING;
+constant uint TGP_PAD = GEMM_SPEC_TGP_PAD;
+constant bool SWIZZLE_ENABLED = GEMM_SPEC_SWIZZLE_ENABLED;
+constant bool FINE_BARRIER_ENABLED = GEMM_SPEC_FINE_BARRIER_ENABLED;
+constant bool TRANS_A = GEMM_SPEC_TRANS_A;
+constant bool TRANS_B = GEMM_SPEC_TRANS_B;
+constant bool UNROLL_ACC_ENABLED = GEMM_SPEC_UNROLL_ACC_ENABLED;
+#else
 constant uint BM [[function_constant(0)]];
 constant uint BN [[function_constant(1)]];
 constant uint BK [[function_constant(2)]];
@@ -645,6 +669,7 @@ constant bool TRANS_B [[function_constant(10)]];
 // （`crate::gemm::MetalGemm::pipeline_for_tile_f16` は常に `false` を渡す。
 // `pipeline_for_tile_f16` 呼び出し側コメント参照）。
 constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];
+#endif
 
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
 // `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
@@ -727,10 +752,32 @@ kernel void gemm_simdgroup_tiled(
     // 定数と 1:1 対応）が [`crate::gemm::MetalGemm::pipeline_for_tile`] の
     // パイプライン構築前に必ず検査し、超過構成を拒否してフォールバック
     // することで担保する契約（レビュー指摘。#188 PR review）。
+    // ソーステキスト特殊化経路（イシュー #1288）: `GEMM_SPEC_ENABLED` 有効時は
+    // `crate::spec_source::specialized_gemm_source` が候補固有の
+    // `GEMM_SPEC_ACC_ROWS`/`GEMM_SPEC_ACC_COLS`（`TileConfig::acc_rows()`/
+    // `acc_cols()` と同じ式で Rust 側が算出した厳密値）をリテラルとして
+    // 前置する。`static_assert` はリテラル値と実行時に計算する
+    // `acc_rows`/`acc_cols` の不整合、および `TileConfig::MAX_ACC`（8）
+    // 超過をコンパイル時に fail-closed で検出する（ループ境界
+    // `acc_rows`/`acc_cols` 自体は #else 側と同じ実行時計算式のまま変えず、
+    // 配列容量のみを候補の厳密サイズへ縮小するため演算オペランド列・
+    // 数値はビット単位で不変）。本番既定（`#else` 側。function constant
+    // 経路）は従来どおり `MAX_ACC=8` 固定確保のまま。
+#ifdef GEMM_SPEC_ENABLED
+    constexpr uint ACC_ROWS_CAP = GEMM_SPEC_ACC_ROWS;
+    constexpr uint ACC_COLS_CAP = GEMM_SPEC_ACC_COLS;
+    static_assert(ACC_ROWS_CAP >= 1 && ACC_ROWS_CAP <= 8, "GEMM_SPEC_ACC_ROWS must be within [1, TileConfig::MAX_ACC]");
+    static_assert(ACC_COLS_CAP >= 1 && ACC_COLS_CAP <= 8, "GEMM_SPEC_ACC_COLS must be within [1, TileConfig::MAX_ACC]");
+    static_assert(ACC_ROWS_CAP == (GEMM_SPEC_BM / GEMM_SPEC_WM) / 8, "GEMM_SPEC_ACC_ROWS must equal (BM/WM)/8");
+    static_assert(ACC_COLS_CAP == (GEMM_SPEC_BN / GEMM_SPEC_WN) / 8, "GEMM_SPEC_ACC_COLS must equal (BN/WN)/8");
+#else
     constexpr uint MAX_ACC = 8;
+    constexpr uint ACC_ROWS_CAP = MAX_ACC;
+    constexpr uint ACC_COLS_CAP = MAX_ACC;
+#endif
     uint acc_rows = sub_bm / 8;
     uint acc_cols = sub_bn / 8;
-    simdgroup_float8x8 acc[MAX_ACC][MAX_ACC];
+    simdgroup_float8x8 acc[ACC_ROWS_CAP][ACC_COLS_CAP];
     // 条件付き loop unroll（イシュー #1282。本ファイル冒頭
     // UNROLL_ACC_ENABLED 宣言のコメント参照）: unroll 版・非 unroll 版は
     // どちらも同じ acc[r][c_] = 0 の代入列を r/c_ 昇順で行うだけで、
@@ -988,8 +1035,8 @@ kernel void gemm_simdgroup_tiled(
                 // ロードスケジューリングを変えても c_/r の訪問順によらず
                 // 不変なため、結果はビット単位で従来と一致する（#536・#538
                 // と同じ論法）。
-                simdgroup_float8x8 a_frag[MAX_ACC];
-                simdgroup_float8x8 b_frag[MAX_ACC];
+                simdgroup_float8x8 a_frag[ACC_ROWS_CAP];
+                simdgroup_float8x8 b_frag[ACC_COLS_CAP];
                 // 条件付き loop unroll（イシュー #1282。本ファイル冒頭
                 // UNROLL_ACC_ENABLED 宣言のコメント参照）: unroll 版・非
                 // unroll 版のどちらも a_frag[r] への `simdgroup_load` を r
