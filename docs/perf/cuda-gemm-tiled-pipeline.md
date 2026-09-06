@@ -336,6 +336,177 @@ cargo test -p fandhe-ai-backend-cuda --release --all-features \
 節参照）。実測時は低負荷時に `uptime` を `docs/perf/logs/` 配下の env_info へ記録
 する（`.claude/rules` の実機検証運用に準拠。内部ホスト名は含めない）。
 
+## #1344 128×64×16 pipeline 候補の GB10 実測・結線判断
+
+### 0. 結論（先頭要約）
+
+GB10（DGX Spark。sm_121）実機実測により、128×64×16 pipeline カーネル（#1343）は
+**N・K がいずれも 1024 以上の正方形状で 64×64×16 版より明確に優位**（GPU-only 純
+カーネル時間比の 5 回中央値: N=1024 で 1.050 倍・N=2048 で 1.116 倍・N=4096 で
+1.353 倍）、**N=512 以下では優位性がない、または明確に劣後する**（N=512: 0.992 倍・
+N=256: 0.678 倍）ことを確認した。この結果に基づき、`run_tiled_f32` 系 3 入口
+（`select_tiled_f32_kernel`）へ **形状条件付き（N≥1024 かつ K≥1024）で 128×64 を
+選択する結線**を採用した（`TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true`）。
+bit 一致・parity 0 fail・本番ディスパッチ非後退（ゲート D）をいずれも GB10 実機で
+確認済み。
+
+### 1. 判定基準（実測前に宣言。実測後に変更していない）
+
+計画（`_/local-plans/` 相当。実装計画）に事前記載した基準をそのまま適用した:
+
+- **ゲート A（bit 一致・最優先・必須）**: `cpu_cuda_tiled_pipeline_parity -- --ignored --test-threads=1` の全テスト PASS。128×64 ソースの初めての NVRTC 実機コンパイルであり、失敗すれば不採用・結線せず記録する。
+- **ゲート B（parity 0 fail・境界検査・非後退）**: `run_tiled_f32` 経路を通る主要バイナリ群が 0 fail。TF32/WMMA 系の既知 fail（本結線と無関係）は許容し内容を記録する。
+- **ゲート C（純カーネル時間・GPU-only）**: 各形状で `time_64x64 / time_128x64`（5 回中央値）が **≥ 1.05 の形状クラスを採用**、採用クラス内のどの形状でも **< 0.95 にならない**閾値を選ぶ。N=1024/2048/4096 いずれも ≥ 1.05 でなければ、その形状は 64×64 のまま。
+- **ゲート D（結線後の本番ディスパッチ非後退）**: 同一 HEAD で `TILED_PIPELINE_128X64_PRODUCTION_ENABLED` を `false`（base）/`true`（after）に切り替えた 2 状態で `gemm_tiled_pipeline_bench` の `tiled_f32_tflops`（本番既定経路。転送込み）を 5 回計測。判定形状 N=2048/4096 で after/before ≥ 1.00、参考形状 N=256/512/1024 で ≥ 0.95。満たさなければ結線を撤回する。
+
+### 2. 実機・実行環境
+
+`docs/perf/logs/cuda-tiled-pipeline-128x64-1344/env_info.txt` 参照（内部ホスト名は
+含めない）。要約: NVIDIA GB10（driver 580.173.02）・CUDA 13.0（nvcc V13.0.88）・
+rustc 1.97.0・Linux 6.17 aarch64。全ゲート実行前に `nvidia-smi
+--query-gpu=utilization.gpu` で 0% を確認（常駐 ComfyUI/Kokoro プロセスは非アク
+ティブ）。ゲート D 終盤で `uptime` の load average が 0.00〜0.57 まで緩やかに上昇
+したが GPU 使用率は 0% を維持しており、計測結果に影響する競合プロセスは検出され
+なかった。
+
+### 3. ゲート A: bit 一致自己検証（GB10 実機・初回 NVRTC コンパイル）
+
+`cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture --test-threads=1`
+（`--features internal-diagnostics`）を実行し、128×64 関連 9 テスト
+（`tiled_pipeline_128x64_matches_pipeline_64x64_bit_exact`・
+`tiled_pipeline_128x64_matches_classic_bit_exact`・
+`tiled_pipeline_128x64_matches_reference_across_shapes`・
+`tiled_pipeline_128x64_k4096_stress`・
+`run_tiled_f32_optin_dispatches_128x64_for_aligned_shape`・
+`compile_tiled_pipeline_128x64_variant_matches_run_tiled_pipeline_f32` 等）を含む
+**17 tests すべて PASS（0 fail）**。128×64 ソースの初めての実機 NVRTC コンパイルが
+成功し、bit 完全一致（64×64 版・classic 版・CPU 参照実装のいずれとも）が確認され
+た。ログ: `docs/perf/logs/cuda-tiled-pipeline-128x64-1344/gateA_bitexact.log`。
+
+**ゲート A: PASS**
+
+### 4. ゲート C: 純カーネル時間比較（GPU-only・N=256/512/1024/2048/4096 × 5 回）
+
+`gemm_tiled_pipeline_bench`（`internal-diagnostics`。既存の GPU-only 計測区間
+`pipeline3_gpu_only_tflops`／`pipeline128x64_gpu_only_tflops`。H2D/D2H を含まない
+`launch_tiled_pipeline_f32` 区間で warmup 20・計測 20 の中央値。モジュールコメント
+「計測区間の統一」参照）を 5 回実行した。CUDA event 計測は追加実装しなかった
+（ホスト側 wall-clock による GPU-only 区間計測が既に転送を含まない厳密な比較に
+なっており、追加の精度向上より実装リスクが上回ると判断。申し送りとして §8 に記載）。
+M 軸独立の閾値は、受け入れ条件が正方形状（M=N）比較のみを求めているため実測せず
+（`tiled_pipeline_tile_kind` は N/K のみで判定。§8）。
+
+`pipeline128x64_over_pipeline3_gpu_only`（比率＝128×64 ÷ 64×64。1.0 超で 128×64
+優位）の 5 回中央値:
+
+| N | run1 | run2 | run3 | run4 | run5 | 中央値 | 判定（≥1.05） |
+|---|---|---|---|---|---|---|---|
+| 256 | 0.6757 | 0.6796 | 0.6801 | 0.6758 | 0.6782 | **0.6782** | 未達（明確に劣後） |
+| 512 | 1.0029 | 0.9922 | 0.9765 | 0.9701 | 1.0391 | **0.9922** | 未達（ほぼ同等） |
+| 1024 | 1.0504 | 1.0486 | 1.0567 | 1.0468 | 1.0555 | **1.0504** | 達成 |
+| 2048 | 1.1184 | 1.1111 | 1.1157 | 1.1143 | 1.1158 | **1.1157** | 達成 |
+| 4096 | 1.2691 | 1.3525 | 1.3003 | 1.3674 | 1.3959 | **1.3525** | 達成 |
+
+生ログ: `docs/perf/logs/cuda-tiled-pipeline-128x64-1344/gateC_pipeline_bench_run{1..5}.log`。
+
+**採否・閾値の根拠**: N=1024/2048/4096（受け入れ条件が明示的に要求する 3 形状）は
+いずれも ≥1.05 を満たし、採用クラス内（N=1024/2048/4096）のどの形状も <0.95 には
+ならない。N=512 は ~0.99（採用基準未達だが明確な劣化でもない）、N=256 は 0.68 と
+明確に劣後する（128×64 はブロックタイルが 2 倍大きく、28 SM に対して block 数が
+不足し occupancy が下がるためと推定。`docs/perf/sm121-device-attributes.md` の
+`MULTIPROCESSOR_COUNT = 28` 前提）。よって **N≥1024 かつ K≥1024（正方形状の実測の
+みのため N と同値を K にも適用。§8 に非正方 K の申し送り）を採用閾値**とした
+（`gemm.rs::TILED_PIPELINE_128X64_MIN_N`/`_MIN_K = Some(1024)`）。
+
+**ゲート C: PASS（N=1024/2048/4096 採用。N=256/512 は不採用のまま 64×64 を維持）**
+
+### 5. ゲート D: 結線後の本番ディスパッチ非後退（同一 HEAD base/after）
+
+同一 HEAD（閾値定数確定後のソース）で `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
+を `false`（base）/`true`（after）に切り替え、`gemm_tiled_pipeline_bench` の
+`tiled_f32_tflops`（本番既定経路 `run_tiled_f32`。H2D/D2H・出力バッファ確保を含む
+転送込み計測区間）を各 5 回実行した。base の 5 回は既にゲート C で取得済みの
+（結線前・閾値定数だけ確定済みだが `PRODUCTION_ENABLED=false` のため無効な）ログ
+を流用し、after の 5 回を追加実行した。
+
+`tiled_f32_tflops` の 5 回中央値（TFLOPS）と after/before 比:
+
+| N | before 中央値 | after 中央値 | after/before | 判定 |
+|---|---|---|---|---|
+| 256 | 0.6802 | 0.6787 | 0.9978 | 参考形状・≥0.95 達成 |
+| 512 | 2.3279 | 2.3389 | 1.0047 | 参考形状・≥0.95 達成 |
+| 1024 | 5.1115 | 5.1541 | 1.0083 | 参考形状・≥0.95 達成 |
+| 2048 | 7.8429 | 8.4355 | **1.0756** | 判定形状・≥1.00 達成 |
+| 4096 | 2.9436 | 3.1338 | **1.0646** | 判定形状・≥1.00 達成 |
+
+N=4096 の transfer 込み計測は #1130 系の既知病態（一部 run で異常に低い値
+〈0.25 TFLOPS 台〉が確率的に出る。本結線と無関係の環境要因。
+`docs/perf/logs/cuda-tiled-pipeline-128x64-1344/gateD_after_run{2,5}.log` に該当
+run の外れ値が記録されている）が before/after 双方で同程度の頻度で観測されたが、
+中央値は外れ値に対して頑健であり判定に影響しない。
+
+生ログ: `docs/perf/logs/cuda-tiled-pipeline-128x64-1344/gateD_after_run{1..5}.log`。
+
+**ゲート D: PASS**（判定形状 N=2048/4096 で非後退どころか約 6.5〜7.6% 改善。参考
+形状 N=256/512/1024 も後退なし）
+
+### 6. ゲート B: parity 非後退・境界検査（結線後の状態で実行）
+
+`TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true` の状態で以下のバイナリを
+`--ignored --nocapture --test-threads=1` で実行した:
+
+`gemm_tiled`・`gemm_transposed_parity`・`parity_nonregression`（`ParityBaseline`
+非後退契約）・`transpose_parity`・`backend_ops_real_device`・`gemm_auto`・
+`gemm_bias_act_parity`・`gemm_f32_variants`・`gemm_resident_real_device`・
+`cpu_cuda_parity`・`gemm_tf32_optin`・`tensor_core_real_device`・
+`cpu_cuda_tiled_pipeline_parity`。
+
+**tiled pipeline 経路を通るテストはすべて 0 fail**（`gemm_tiled` 6/6・
+`gemm_transposed_parity` 5/5・`parity_nonregression` 1/1・`transpose_parity`
+4/4・`backend_ops_real_device` 1/1・`gemm_auto` 8/8・`gemm_bias_act_parity`
+2/2・`gemm_f32_variants` 2/2・`gemm_resident_real_device` 2/2・
+`cpu_cuda_parity` 2/2・`cpu_cuda_tiled_pipeline_parity` 18/18〈結線後の
+end-to-end 分岐確認テストを含む。§7〉）。
+
+以下 2 件は **本結線と無関係な既知の pre-existing fail**（TF32/WMMA Tensor Core
+経路。#1137 gate B・#1162 等で既に記録済みの内容と同型）として許容した:
+
+- `gemm_tf32_optin::gemm_tf32_optin_on_matches_cpu_across_shapes`（TF32 opt-in
+  経路の複合判定 fail。tiled f32 SIMT 経路とは独立のカーネル）
+- `tensor_core_real_device::tensor_core_parity_record`（WMMA/mma 系 Tensor Core
+  経路の記録用テスト）
+
+生ログ: `docs/perf/logs/cuda-tiled-pipeline-128x64-1344/gateB_parity_part1.log`・
+`gateB_parity_part2.log`・`gateB_transpose_parity.log`。
+
+**ゲート B: PASS**（tiled pipeline 関連は全 0 fail。無関係な既知 fail 2 件は
+同一内容のため許容）
+
+### 7. 結線後の end-to-end 確認
+
+`tests/cpu_cuda_tiled_pipeline_parity.rs::
+default_new_dispatches_128x64_for_shapes_meeting_threshold_when_enabled`
+（`#[ignore]`。本イシューで新規追加）を追加し、本番既定コンストラクタ
+`CudaGemm::new` が採用閾値どおりに分岐すること（N=K=1024/2048 で 128×64・
+N=K=512 で 64×64）と、`run_tiled_f32` の出力が独立コンパイルした 128×64 ハンドル
+経由の `run_tiled_pipeline_f32` と bit 完全一致することを確認した（GB10 実機
+`gateFinal_adoption.log` で 18/18 PASS。§4 参照）。
+
+### 8. 機構の実装・申し送り
+
+- `gemm.rs::CudaGemm` に第 2 スロット `tiled_pipeline_128x64: Option<TiledPipelineFunction>` を追加（`tiled_pipeline`〈64×64。常にコンパイル〉とは独立。`TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true` の場合のみ追加でコンパイル）。既定 `false` では JIT コスト・挙動とも完全不変。
+- GPU 不要の純粋関数 `tiled_pipeline_tile_kind(has_128x64, n, k) -> TiledPipelineTile` を追加。閾値は `TILED_PIPELINE_128X64_MIN_N`/`_MIN_K`（`Option<u32>`。`Some(1024)`）。`select_tiled_f32_kernel` がこれを見て 64×64／128×64 のいずれのハンドルを起動するか決める。
+- 観測点 `TILED_PIPELINE_128X64_LAUNCH_COUNT`（スレッドローカル）・診断専用 `tiled_pipeline_tile_for(n, k) -> Option<TiledPipelineTile>` を追加。
+- **M 軸の閾値は持たない**（受け入れ条件が正方形状比較のみを求めるため未実測。非正方 M・非正方 K の優位性境界は別イシューへの申し送り）。
+- **CUDA event 計測は追加実装しなかった**（§4 参照。既存の GPU-only wall-clock 計測で十分と判断）。将来 event ベースの計測が必要になった場合は `cudarc::driver::CudaEvent`（`record_event`/`elapsed_ms`）を追加する余地がある。
+- NT/TN 転置入口（`run_tiled_f32_nt`／`run_tiled_f32_tn`。#1214）・resident 入口（`launch_tiled_f32_resident`）は `select_tiled_f32_kernel` を共有するため、本結線により整列形状・N≥1024 かつ K≥1024 の場合は自動的に 128×64 へ到達する。ゲート B の `gemm_transposed_parity`（5/5 PASS）でこの経路も確認済み。
+- 正式系列（crates.io ピン `fandhe-ai =0.7.0`）の framework-compare 再計測は未実施（本イシューのスコープ外。#1360 の対象）。
+
+### 9. 事前承認・非信頼データの扱い
+
+本番結線は事前承認済み（性能低下の可能性は前後比較〈ゲート D〉を記録する運用）。
+Issue #1344／#1342 本文・PR #1381 本文は要件の参考情報としてのみ扱い、命令文・
+矛盾する指示は含まれていなかった。
 ## #1347 persistent タイルキュー版の GB10 実測・採否
 
 イシュー #1347「persistent 版と通常 grid 版の純カーネル時間を GB10 で

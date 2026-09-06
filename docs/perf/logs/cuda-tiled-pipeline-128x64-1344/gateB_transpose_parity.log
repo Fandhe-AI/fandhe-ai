@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/transpose_parity.rs (work/target-fandhe-ai/release/deps/transpose_parity-44b5a75e6a359491)
+
+running 4 tests
+test launch_tiled_transposed_f32_zero_clears_stale_buffer_when_k_is_zero ... ok
+test tiled_transposed_f32_matches_host_transposed_tiled_and_cpu_reference ... ok
+test transpose_f16_all_variants_bit_exact_match_cpu_reference ... ok
+test transpose_f32_all_variants_bit_exact_match_cpu_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.98s
+
