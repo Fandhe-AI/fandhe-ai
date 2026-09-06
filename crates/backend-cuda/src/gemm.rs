@@ -43,6 +43,7 @@ use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels;
 use crate::kernels_tiled_pipeline;
+use crate::kernels_tiled_pipeline_128x64;
 use crate::kernels_transpose;
 use crate::kernels_wmma_opt;
 use crate::module_cache::load_function_cached;
@@ -798,7 +799,29 @@ fn tiled_pipeline_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
 /// を強参照し続けるため（cudarc 0.19.8 `driver::safe::core::CudaFunction`
 /// の `module` フィールド）、本型が生存する間はポインタが指す
 /// `CudaContext` の再利用（ABA）は起こらない。
-pub struct TiledPipelineFunction(CudaFunction, usize);
+/// [`TiledPipelineFunction`] が保持するタイル構成タグ（イシュー #1343）。
+///
+/// [`CudaGemm::select_tiled_f32_kernel`]（本番既定経路）・
+/// [`tiled_pipeline_launch_config`]（grid/block 構成の導出）がこのタグを
+/// 見て起動 config を決める。64×64（既存・#1033）と 128×64（本イシュー・
+/// #1343）はブロックタイル寸法・スレッド当たり担当要素数が異なり、
+/// `LaunchConfig` の grid_dim が別式になるため、`TiledPipelineFunction` に
+/// 埋め込むことで「別タイル構成のハンドルへ誤って旧タイル用の launch
+/// config を適用する」クラスの不整合を型で防ぐ
+/// （`kernels_tiled_pipeline_128x64.rs` 冒頭コメント「位置づけ」参照）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TiledPipelineTile {
+    /// `kernels_tiled_pipeline::gemm_tiled_pipeline_f32`（64×64×16・4×4
+    /// レジスタブロック。イシュー #1033・#1137 で本番結線済み）。
+    Bm64Bn64,
+    /// `kernels_tiled_pipeline_128x64::gemm_tiled_pipeline_128x64_f32`
+    /// （128×64×16・8×4 レジスタブロック・A フラグメント XOR スウィズル。
+    /// イシュー #1343。本番結線は
+    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] で opt-in ゲート）。
+    Bm128Bn64,
+}
+
+pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
 
 impl TiledPipelineFunction {
     /// 起動に使う内部の [`CudaFunction`] を返す。本モジュール限定
@@ -813,6 +836,22 @@ impl TiledPipelineFunction {
     /// 検証に使う（型ドキュメントコメント参照）。
     fn context_ptr(&self) -> usize {
         self.1
+    }
+
+    /// このハンドルが保持するタイル構成タグ（[`TiledPipelineTile`]）。
+    /// [`Self::launch_config`] が grid/block 構成を導出するために使う。
+    fn tile(&self) -> TiledPipelineTile {
+        self.2
+    }
+
+    /// このハンドルのタイル構成に対応する [`LaunchConfig`] を導出する
+    /// （[`tiled_pipeline_launch_config`] へ委譲。イシュー #1343 で
+    /// 64×64 固定だった呼び出し元〈`run_tiled_pipeline_f32`・
+    /// `launch_tiled_pipeline_f32`・`select_tiled_f32_kernel`〉をこの
+    /// メソッド経由へ一般化し、128×64 ハンドルでも正しい grid_dim を
+    /// 得られるようにする）。
+    fn launch_config(&self, m: u32, n: u32) -> LaunchConfig {
+        tiled_pipeline_launch_config(self.tile(), m, n)
     }
 }
 
@@ -830,8 +869,68 @@ fn compile_tiled_pipeline(device: &CudaDevice) -> Result<TiledPipelineFunction, 
         "gemm_tiled_pipeline_f32",
     )?;
     let context_ptr = Arc::as_ptr(device.context()) as usize;
-    Ok(TiledPipelineFunction(func, context_ptr))
+    Ok(TiledPipelineFunction(
+        func,
+        context_ptr,
+        TiledPipelineTile::Bm64Bn64,
+    ))
 }
+
+/// 128×64×16 pipeline カーネル（イシュー #1343）の
+/// [`crate::nvrtc::CudaKernelDescriptor`] を構築する。[`tiled_pipeline_descriptor`]
+/// の 128×64 版。`kernel_specs` の固定配列には含めない（64×64 版と同じ
+/// 理由。`kernels_tiled_pipeline_128x64.rs` 冒頭コメント「位置づけ」参照）。
+fn tiled_pipeline_128x64_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
+    CudaKernelDescriptor::new_with_compiled_dims(
+        "tiled_pipeline_f32_128x64",
+        fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+        kernels_tiled_pipeline_128x64::TP128_BM,
+        kernels_tiled_pipeline_128x64::TP128_BN,
+        kernels_tiled_pipeline_128x64::TP128_BK,
+        kernels_tiled_pipeline_128x64::TP128_DEFAULT_STAGES,
+        fandhe_ai_tensor_core::dispatch::DType::F32,
+        CompiledDims::DYNAMIC_ALL,
+    )
+}
+
+/// 128×64×16 pipeline カーネル（既定 stage 数固定）を単独でロードする
+/// （[`compile_tiled_pipeline`] の 128×64 版）。[`Self::new`](CudaGemm::new)
+/// からは [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が `true` の場合に
+/// のみ呼ばれ（既定 `false` のため通常は呼ばれない＝コンパイルコスト
+/// なし）、それ以外では [`CudaGemm::new_with_tiled_pipeline_128x64`]
+/// （`internal-diagnostics` feature 限定の診断入口）からのみ呼ばれる。
+fn compile_tiled_pipeline_128x64(device: &CudaDevice) -> Result<TiledPipelineFunction, CudaError> {
+    let descriptor = tiled_pipeline_128x64_descriptor()?;
+    let func = load_function_cached(
+        device,
+        descriptor,
+        kernels_tiled_pipeline_128x64::tiled_pipeline_128x64_f32_source(),
+        "gemm_tiled_pipeline_128x64_f32",
+    )?;
+    let context_ptr = Arc::as_ptr(device.context()) as usize;
+    Ok(TiledPipelineFunction(
+        func,
+        context_ptr,
+        TiledPipelineTile::Bm128Bn64,
+    ))
+}
+
+/// 128×64×16 pipeline カーネル（イシュー #1343）の本番結線スイッチ。
+///
+/// `false`（既定）: [`CudaGemm::new`] は従来どおり 64×64 版
+/// （[`compile_tiled_pipeline`]）のみをコンパイルし、128×64 版は一切
+/// コンパイルしない（JIT コスト・`run_tiled_f32` 系 3 入口の挙動とも
+/// 完全に不変）。128×64 版へは `internal-diagnostics` feature 限定の
+/// 診断入口（[`CudaGemm::new_with_tiled_pipeline_128x64`]・
+/// [`CudaGemm::compile_tiled_pipeline_128x64_variant`]）からのみ到達する。
+///
+/// GB10 実機での純カーネル時間比較・形状条件付き結線の可否判断は兄弟
+/// イシュー #1344 が担い、その結果に基づき `true` へ切り替える判断も
+/// #1344（またはその後続）で行う（`gemm_auto.rs::
+/// MMA_PRIORITY_PRODUCTION_ENABLED` と同型の opt-in ゲート運用。
+/// `docs/perf/cuda-gemm-tiled-pipeline.md`「#1343 128×64×16 候補の追加」
+/// 節参照）。
+pub(crate) const TILED_PIPELINE_128X64_PRODUCTION_ENABLED: bool = false;
 
 /// VJP 専用 NT/TN 転置入口（イシュー #1214）の GPU 側 smem 転置カーネル
 /// （`kernels_transpose::transpose_smem_source_f32(false)`。パディングの
@@ -867,15 +966,29 @@ fn compile_transpose_smem_f32(device: &CudaDevice) -> Result<CudaFunction, CudaE
 /// 分解する契約。`kernels_tiled_pipeline.rs` 参照）。末尾ブロックの余剰は
 /// カーネル内の手動境界チェック（REQ-8）に委ねる契約は他 GEMM カーネルと
 /// 共通。
-fn tiled_pipeline_launch_config(m: u32, n: u32) -> LaunchConfig {
-    let grid_dim = (
-        n.div_ceil(kernels_tiled_pipeline::TP_BN),
-        m.div_ceil(kernels_tiled_pipeline::TP_BM),
-        1,
-    );
+/// イシュー #1343: `tile` タグ（[`TiledPipelineTile`]）に応じてブロック
+/// タイル寸法・スレッド数を切り替える（従来は 64×64 固定だったが、128×64
+/// 版〈#1343〉の追加に伴い一般化した。`TiledPipelineFunction::launch_config`
+/// 経由でのみ呼ぶ契約とし、呼び出し元がタグと無関係な寸法を誤って選べない
+/// ようにする）。末尾ブロックの余剰はカーネル内の手動境界チェック
+/// （REQ-8）に委ねる契約はいずれのタイルでも共通。
+fn tiled_pipeline_launch_config(tile: TiledPipelineTile, m: u32, n: u32) -> LaunchConfig {
+    let (block_m, block_n, block_threads) = match tile {
+        TiledPipelineTile::Bm64Bn64 => (
+            kernels_tiled_pipeline::TP_BM,
+            kernels_tiled_pipeline::TP_BN,
+            kernels_tiled_pipeline::TP_BLOCK_THREADS,
+        ),
+        TiledPipelineTile::Bm128Bn64 => (
+            kernels_tiled_pipeline_128x64::TP128_BM,
+            kernels_tiled_pipeline_128x64::TP128_BN,
+            kernels_tiled_pipeline_128x64::TP128_BLOCK_THREADS,
+        ),
+    };
+    let grid_dim = (n.div_ceil(block_n), m.div_ceil(block_m), 1);
     LaunchConfig {
         grid_dim,
-        block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
+        block_dim: (block_threads, 1, 1),
         shared_mem_bytes: 0,
     }
 }
@@ -1375,10 +1488,21 @@ impl CudaGemm {
         // コンパイル時 const assert が保証するため、ここでは追加の const
         // アサーションを重複させない（`kernels_tiled_pipeline.rs` 冒頭の
         // 契約検査群を単一の真実源とする）。
-        let (tiled_pipeline, tiled_pipeline_error) = match compile_tiled_pipeline(device) {
-            Ok(func) => (Some(func), None),
-            Err(e) => (None, Some(e.to_string())),
-        };
+        //
+        // イシュー #1343: `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
+        // （既定 `false`）が有効化されない限り、ここでは従来どおり 64×64
+        // 版のみをコンパイルする（128×64 版は一切コンパイルしない＝JIT
+        // コスト・挙動とも不変。診断入口は `new_with_tiled_pipeline_128x64`
+        // を参照）。
+        let (tiled_pipeline, tiled_pipeline_error) =
+            match if TILED_PIPELINE_128X64_PRODUCTION_ENABLED {
+                compile_tiled_pipeline_128x64(device)
+            } else {
+                compile_tiled_pipeline(device)
+            } {
+                Ok(func) => (Some(func), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
 
         // イシュー #1214: VJP 専用 NT/TN 転置入口の smem 転置カーネル。
         // 上記 `wmma_tf32`／`tiled_pipeline` 系と同じ fail-soft 方針
@@ -1875,7 +1999,7 @@ impl CudaGemm {
         let kind = tiled_f32_kernel_kind(self.tiled_pipeline.is_some(), a_offset, n, k);
         if let (TiledF32Kernel::Pipeline, Some(func)) = (kind, self.tiled_pipeline.as_ref()) {
             TILED_PIPELINE_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
-            (func.as_cuda_function(), tiled_pipeline_launch_config(m, n))
+            (func.as_cuda_function(), func.launch_config(m, n))
         } else {
             (&self.tiled_f32, tiled_f32_launch_config(m, n))
         }
@@ -2022,7 +2146,7 @@ impl CudaGemm {
             m,
             n,
             k,
-            tiled_pipeline_launch_config(m, n),
+            func.launch_config(m, n),
         )
     }
 
@@ -2075,7 +2199,93 @@ impl CudaGemm {
         )?;
         let func = load_function_cached(device, descriptor, &source, "gemm_tiled_pipeline_f32")?;
         let context_ptr = Arc::as_ptr(device.context()) as usize;
-        Ok(TiledPipelineFunction(func, context_ptr))
+        Ok(TiledPipelineFunction(
+            func,
+            context_ptr,
+            TiledPipelineTile::Bm64Bn64,
+        ))
+    }
+
+    /// 128×64×16 pipeline カーネル（イシュー #1343）の任意ステージ数
+    /// （[`kernels_tiled_pipeline_128x64::TP128_MIN_STAGES`]..=
+    /// [`kernels_tiled_pipeline_128x64::TP128_MAX_STAGES`]）変種を
+    /// オンデマンドでコンパイルする（[`Self::compile_tiled_pipeline_variant`]
+    /// の 128×64 版。`examples/gemm_tiled_pipeline_bench.rs` の段数比較・
+    /// A/B 計測用途。`&self` を取らない理由・公開面ゲートの理由は同メソッド
+    /// と同一）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn compile_tiled_pipeline_128x64_variant(
+        device: &CudaDevice,
+        stages: u32,
+    ) -> Result<TiledPipelineFunction, CudaError> {
+        let source =
+            kernels_tiled_pipeline_128x64::tiled_pipeline_128x64_f32_source_with_stages(stages)?;
+        let descriptor = CudaKernelDescriptor::new_with_compiled_dims(
+            "tiled_pipeline_f32_128x64_variant",
+            fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+            kernels_tiled_pipeline_128x64::TP128_BM,
+            kernels_tiled_pipeline_128x64::TP128_BN,
+            kernels_tiled_pipeline_128x64::TP128_BK,
+            stages,
+            fandhe_ai_tensor_core::dispatch::DType::F32,
+            CompiledDims::DYNAMIC_ALL,
+        )?;
+        let func = load_function_cached(
+            device,
+            descriptor,
+            &source,
+            "gemm_tiled_pipeline_128x64_f32",
+        )?;
+        let context_ptr = Arc::as_ptr(device.context()) as usize;
+        Ok(TiledPipelineFunction(
+            func,
+            context_ptr,
+            TiledPipelineTile::Bm128Bn64,
+        ))
+    }
+
+    /// [`new`](Self::new) が保持する既定 3 stage の `Self::tiled_pipeline`
+    /// が実際にどちらのタイル構成（[`TiledPipelineTile`]）でコンパイル
+    /// されているかを返す（既定は常に `Some(Bm64Bn64)`。
+    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が有効化されない限り
+    /// `Bm128Bn64` にはならない。[`Self::new_with_tiled_pipeline_128x64`]
+    /// 経由で構築したインスタンスでは `Some(Bm128Bn64)` になる。cp.async
+    /// 非対応環境等でコンパイル自体に失敗している場合は `None`。診断・
+    /// テスト専用の可観測点のため `internal-diagnostics` feature 限定）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn tiled_pipeline_tile(&self) -> Option<TiledPipelineTile> {
+        self.tiled_pipeline
+            .as_ref()
+            .map(TiledPipelineFunction::tile)
+    }
+
+    /// [`Self::new`] と同じ手順で構築したうえで、`tiled_pipeline` スロット
+    /// を 128×64 版（イシュー #1343。[`compile_tiled_pipeline_128x64`]）へ
+    /// 差し替えた診断専用インスタンスを返す。
+    ///
+    /// `run_tiled_f32` 系 3 入口（[`Self::select_tiled_f32_kernel`]）は
+    /// `self.tiled_pipeline` を直接参照するため、本コンストラクタで得た
+    /// インスタンスに対しては cp.async 16 バイト整列形状（`n % 4 == 0 &&
+    /// k % 4 == 0`）で自動的に 128×64 カーネルへ分岐する（#1344 の GB10
+    /// 実機比較・`tests/cpu_cuda_tiled_pipeline_parity.rs` の bit 一致
+    /// 自己検証が使う経路）。[`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`]
+    /// の値には依存しない（常に 128×64 をコンパイルする明示的な opt-in
+    /// 経路であり、本番既定 [`Self::new`] の挙動は変えない）。
+    ///
+    /// 128×64 カーネルのコンパイルに失敗した場合は `CudaError`（NVRTC・
+    /// module ロード起因のエラー種別。`compile_tiled_pipeline_128x64` が
+    /// 返すものをそのまま伝播）を返す（fail-closed。`Self::new` 自体は
+    /// 64×64 版のコンパイル失敗を早期 return に合流させない fail-soft
+    /// 方針だが、本コンストラクタは診断用途で「呼び出し元が明示的に
+    /// 128×64 を要求した」ことが前提のため、失敗を握りつぶさず即座に
+    /// 伝える）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_with_tiled_pipeline_128x64(device: &CudaDevice) -> Result<Self, CudaError> {
+        let mut gemm = Self::new(device)?;
+        let func = compile_tiled_pipeline_128x64(device)?;
+        gemm.tiled_pipeline = Some(func);
+        gemm.tiled_pipeline_error = None;
+        Ok(gemm)
     }
 
     /// デバイス常駐済みの A/B/C バッファに対して、任意のコンパイル済み
@@ -2196,7 +2406,7 @@ impl CudaGemm {
             return Ok(());
         }
 
-        let cfg = tiled_pipeline_launch_config(m, n);
+        let cfg = func.launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: `run_f32_kernel`／`launch_tiled_f32` と同一の根拠。
@@ -3817,6 +4027,61 @@ mod parity_baseline_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// イシュー #1343: [`tiled_pipeline_launch_config`] が
+    /// [`TiledPipelineTile::Bm128Bn64`] に対して 128×64 のブロックタイル
+    /// 寸法（`kernels_tiled_pipeline_128x64::TP128_BM`/`TP128_BN`）で
+    /// grid_dim を導出し、[`TiledPipelineTile::Bm64Bn64`] は従来どおり
+    /// 64×64 の値のままであることを検査する（GPU 不要の純粋関数）。
+    /// **64×64 の launch config で 128×64 を起動すると grid_y が本来より
+    /// 2 倍多くなり、末尾ブロックの手動境界チェックにより数値上は誤りが
+    /// 隠蔽されつつも冗長な block 起動が生じる**ことへの回帰防御
+    /// （実装計画 §4 T6）。
+    #[test]
+    fn tiled_pipeline_launch_config_matches_tile_dimensions() {
+        let (m, n) = (300u32, 200u32);
+
+        let cfg64 = tiled_pipeline_launch_config(TiledPipelineTile::Bm64Bn64, m, n);
+        assert_eq!(
+            cfg64.grid_dim,
+            (
+                n.div_ceil(kernels_tiled_pipeline::TP_BN),
+                m.div_ceil(kernels_tiled_pipeline::TP_BM),
+                1,
+            ),
+            "Bm64Bn64 grid_dim must use the 64x64 block tile dimensions"
+        );
+        assert_eq!(
+            cfg64.block_dim,
+            (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1)
+        );
+
+        let cfg128 = tiled_pipeline_launch_config(TiledPipelineTile::Bm128Bn64, m, n);
+        assert_eq!(
+            cfg128.grid_dim,
+            (
+                n.div_ceil(kernels_tiled_pipeline_128x64::TP128_BN),
+                m.div_ceil(kernels_tiled_pipeline_128x64::TP128_BM),
+                1,
+            ),
+            "Bm128Bn64 grid_dim must use the 128x64 block tile dimensions"
+        );
+        assert_eq!(
+            cfg128.block_dim,
+            (kernels_tiled_pipeline_128x64::TP128_BLOCK_THREADS, 1, 1)
+        );
+
+        // 128 のブロック行タイルは 64 の 2 倍のため、同じ m に対する
+        // grid_dim.1（行方向のブロック数）は 128×64 の方が小さいか等しい
+        // （末尾ブロックの端数処理により厳密に半分にはならない場合が
+        // ある）。誤って 64×64 用の grid を 128×64 カーネルへ適用すると
+        // grid_dim.1 が本来必要な行ブロック数の約 2 倍になる、という
+        // 回帰の性質を明示的に固定する。
+        assert!(
+            cfg128.grid_dim.1 <= cfg64.grid_dim.1,
+            "128x64 block tile must not require more row-blocks than 64x64 for the same m"
+        );
+    }
 
     /// イシュー #1137: `tiled_f32_kernel_kind`（GPU 不要の純粋関数）が
     /// 整列形状・非整列形状・パイプライン非可用（`pipeline_available =
