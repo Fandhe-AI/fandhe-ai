@@ -65,7 +65,7 @@ device` で構成解決）で base（Legacy）/head（Split）を本番選択構
 | 4096 | (32,64,16,2,2)＝`CANDIDATES[2]` | 13.7657 | 32.1276 | 2.334 / 2.242 / 2.117 / 2.357 / 2.344 | **2.3339**（5/5 run とも後退方向） |
 
 N=512 は選択構成が `bk=32`（A 節の cand5 と同族）で、5 run 中 2 run が
-「legacy と同程度」・3 run が「legacy の半分」という二峰性を示し
+legacy 比 約 2.5 倍に後退（2.492／2.495）・3 run が legacy の半分という二峰性を示し
 run 間の符号が一貫しない（`docs/perf/
 cuda-large-buffer-percall-alloc-transfer-threshold.md` 等で既知の環境
 揺らぎ系と同種の可能性があるが未確定）。N=1024 は 5 run 中 4 run が
