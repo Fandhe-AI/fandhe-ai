@@ -327,6 +327,25 @@ fn lock_tile_cache<K: std::hash::Hash + Eq, T>(
         })
 }
 
+/// [`MetalGemm::diag_tile_pipeline_reflection`] の戻り値（イシュー
+/// #1289）。`MTLComputePipelineState` 構築後にのみ取得できる 3 反射値
+/// （`docs/perf/metal-gemm-n4096-kernel-gap.md` §2 の H1 仮説検証と同じ
+/// 3 値）に加え、要求構成・解決構成（`pipeline_for_tile` フォールバック
+/// 後）・要求スレッド数を並べて持つ（フォールバックが起きていないかを
+/// 反射値取得側でも独立に確認できるようにするため。`gemm_reuse_phase_
+/// diag_tests.rs::PhaseSample::resolved_cfg` と同じ設計判断）。テスト
+/// モジュール外へ漏出させない `#[cfg(test)] pub(crate)`。
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TilePipelineReflectionDiag {
+    pub(crate) requested_cfg: TileConfig,
+    pub(crate) resolved_cfg: TileConfig,
+    pub(crate) requested_thread_count: u32,
+    pub(crate) max_total_threads_per_threadgroup: u32,
+    pub(crate) thread_execution_width: u32,
+    pub(crate) static_threadgroup_memory_length: u32,
+}
+
 impl MetalGemm {
     /// `shaders/gemm.metal` を `ctx` のデバイス上でコンパイルし、
     /// `gemm_naive`/`gemm_tiled`/`gemm_simdgroup` の 3 パイプラインを
@@ -761,6 +780,37 @@ impl MetalGemm {
     ) -> Result<TileConfig, MetalError> {
         self.pipeline_for_tile(ctx, cfg, pattern)
             .map(|(_, resolved)| resolved)
+    }
+
+    /// [`Self::pipeline_for_tile`] が構築・キャッシュした
+    /// `MTLComputePipelineState` の反射値（`maxTotalThreadsPerThreadgroup`／
+    /// `threadExecutionWidth`／`staticThreadgroupMemoryLength`）を取得する
+    /// （イシュー #1289。§8.3「#1289 への引き継ぎ」の指示どおり `#[cfg(test)]
+    /// pub(crate)` の薄いアクセサとし、`TilePipelineReflection` 相当の型を
+    /// 公開 API 面へ出さない — `docs/perf/metal-gemm-n4096-kernel-gap.md`
+    /// §2 の削除記録・PR #1168 codex-review 指摘〈P1〉と同じ判断）。
+    /// `self.source_specialized` の値に応じて `pipeline_for_tile` が
+    /// function constant 経路／ソーステキスト特殊化経路のどちらを構築するか
+    /// が自動的に切り替わるため、呼び出し元は base（`source_specialized=
+    /// false`）/head（`true`）の 2 インスタンスへ同じ `cfg`／`pattern` を
+    /// 渡すだけで両経路の反射値を取得できる（`gemm_spec_source_diag_tests`
+    /// から呼ばれる）。ディスパッチを伴わないため秒未満で完了する。
+    #[cfg(test)]
+    pub(crate) fn diag_tile_pipeline_reflection(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+        pattern: TransposePattern,
+    ) -> Result<TilePipelineReflectionDiag, MetalError> {
+        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg, pattern)?;
+        Ok(TilePipelineReflectionDiag {
+            requested_cfg: cfg,
+            resolved_cfg,
+            requested_thread_count: cfg.thread_count(),
+            max_total_threads_per_threadgroup: pipeline.maxTotalThreadsPerThreadgroup() as u32,
+            thread_execution_width: pipeline.threadExecutionWidth() as u32,
+            static_threadgroup_memory_length: pipeline.staticThreadgroupMemoryLength() as u32,
+        })
     }
 
     /// ソーステキスト特殊化経路（イシュー #1288）のキャッシュ
