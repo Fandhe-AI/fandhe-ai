@@ -12,24 +12,36 @@ branch: perf/1279-metal-tgid-swizzle-ab
 | 1   | 6/2s/1s（既定）             | undetermined | フェーズ 1 全サイズ gate 超過（spread 0.09〜0.24） |
 | 2   | 10/8s/3s（増量）            | undetermined | フェーズ 1 全サイズ gate 超過（spread 0.28〜1.20） |
 | 3   | 10/8s/3s（増量）            | undetermined | フェーズ 1 全サイズ gate 超過（spread 0.31〜1.20） |
-| 4   | 6/2s/1s（既定に復元）        | (別途記録) | |
+| 4   | 6/2s/1s（既定に復元）        | undetermined | フェーズ 1 5 サイズ中 4 サイズ gate 超過（size=256 のみ spread=0.0420 で gate 内） |
 
 （gate = `bench_harness::ab::STABILITY_SPREAD_GATE` = 0.05）
 
 ## 実行前 uptime（load average）
 
 - run1 直前: 17:16  up 18 days, 4:29, 19 users, load averages: 6.69 7.15 6.29
+- run2 直前: 17:19  up 18 days, 4:32, 19 users, load averages: 3.33 5.10 5.58
 - run3 直前: 17:28  up 18 days, 4:41, 19 users, load averages: 4.70 5.02 5.25
 - run4 直前: 17:38  up 18 days, 4:50, 19 users, load averages: 2.64 3.99 4.75
 
+（load average の概観であり、実行中の連続サンプリングは行っていない。下記「プロトコルからの逸脱」節参照）
+
 ## 外部負荷の確認
 
-run2 実行中（17:19 前後）に `ps aux` で確認したところ、本 issue の worktree とは無関係な
-**別リポジトリ（fandhe-frontend）の `cargo test -p fandhe-frontend-docs-site` プロセスが
+run2 終了直後（17:28 前後）に `ps aux` で確認したところ、本 issue の worktree とは無関係な
+**別リポジトリ（fandhe-frontend）の `cargo test -p fandhe-frontend-docs-site` プロセス（17:27 開始）が
 同一マシン上で並走**していることを確認した（`docs/perf/metal-gemm-fine-barrier-ab.md`
 〈イシュー #1278〉が同日に観測したのと同型の外部要因。実際、#1278 と #1279 は同日
-2026-09-06 に同一マシンで実行されている）。run4 実行前の時点では当該プロセスは終了しており
-load average も低下傾向（2.64）だったが、run4 の結果は下記「実測記録」節を参照。
+2026-09-06 に同一マシンで実行されている）。run1 実行前後（load average 6.69。当該プロセスの確認前）の
+負荷源プロセスは個別に特定していない。run4 実行前の時点では fandhe-frontend の当該プロセスは終了しており
+load average も低下傾向（2.64）だったが、run4 の結果は下記「実測記録」節を参照（size=256 以外は依然 gate 超過）。
+
+## プロトコルからの逸脱（正直な記録）
+
+実装計画 §3.3 が定める (a) load average >3.0 時の最大 30 分待機・(b) 実行中の `uptime` 定期サンプリング
+（`uptime_during_runN.txt`）は、いずれも本イシューでは実施しなかった。同日・同一マシンで実施した
+`docs/perf/metal-gemm-fine-barrier-ab.md`〈イシュー #1278〉が 30 分待機後も spread が収束しなかった先例に
+倣い、待機を試みても同じ外部要因（他リポジトリの並走ビルド）が解消しない可能性が高いと判断し、4 試行
+（ROUNDS/COOLDOWN/MIN_WARMUP の増量・既定復元を含む）で打ち切る安全側の判断とした。
 
 ## サーマル記録（`pmset -g therm`）
 

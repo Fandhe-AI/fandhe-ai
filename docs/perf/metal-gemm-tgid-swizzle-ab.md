@@ -153,17 +153,25 @@ run4 の size=256 のみ 1 試行 gate 内〈spread=0.0420〉）で `STABILITY_S
 通常想定値より 1 桁前後低い水準（size=256 で 0.09〜0.19 TFLOPS・size=4096 で 3.8〜4.9 TFLOPS）で推移しており、
 `gemm-fine-barrier-ab.md`〈#1278〉と同様に計測自体が外部要因で圧迫されていたと判断した。
 
-**原因分析**: run1 直前の `uptime` load average は 6.69/7.15/6.29、run2 実行中に `ps aux` で確認したところ、
-本 issue の worktree とは無関係な**別リポジトリ（fandhe-frontend）の `cargo test -p fandhe-frontend-docs-site`
-プロセスが同一マシン上で並走**していることを確認した。これは `docs/perf/metal-gemm-fine-barrier-ab.md`
-（イシュー #1278）が**同日（2026-09-06）・同一マシン**で観測したのと同型の外部要因であり、単発の偶発ではなく
-このマシンを共有する他リポジトリのセッション全般からの CPU 負荷が常態化している状況と判断した。
+**原因分析**: run1 直前の `uptime` load average は 6.69/7.15/6.29（負荷源プロセスは未特定）、run2 終了直後
+（17:28 前後）に `ps aux` で確認したところ、本 issue の worktree とは無関係な**別リポジトリ（fandhe-frontend）
+の `cargo test -p fandhe-frontend-docs-site` プロセス（17:27 開始）が同一マシン上で並走**していることを
+確認した。これは `docs/perf/metal-gemm-fine-barrier-ab.md`（イシュー #1278）が**同日（2026-09-06）・同一マシン**
+で観測したのと同型の外部要因であり、単発の偶発ではなくこのマシンを共有する他リポジトリのセッション全般からの
+CPU 負荷が常態化している状況と判断した。
 `ROUNDS`/`COOLDOWN`/`MIN_WARMUP` を増やす方向へ調整（run2・run3: 10/8s/3s。#1278・#1187 と同水準）しても
 spread は改善せず、むしろ run2・run3 では単純計測（run1）より悪化した（例: size=2048 が run1 の 0.0941 から
 run2/run3 で 1.20 前後まで悪化）。run4（load average 低下傾向〈2.64〉時点で既定値へ復元して再試行）では
 size=256 のみ gate を満たしたが、他 4 サイズは依然 gate 超過だった。試行回数 4（#1278 と同水準の試行数で
 一貫して同じ傾向が再現したため、これ以上の調整では収束しないと判断し打ち切った。実装計画の上限 8 に対し
 余裕はあるが、#1278 の先例（4 試行で打ち切り・判定不可確定）に倣った安全側判断）。
+
+**プロトコルからの逸脱**: 実装計画 §3.3 が定める (a) load average >3.0 時の最大 30 分待機・(b) 実行中の
+`uptime` 定期サンプリング（`uptime_during_runN.txt`）は、いずれも本イシューでは実施しなかった。同日・
+同一マシンで実施した #1278 が 30 分待機後も spread が収束しなかった先例に倣い、待機を試みても同じ外部要因
+（他リポジトリの並走ビルド）が解消しない可能性が高いと判断し、4 試行（ROUNDS/COOLDOWN/MIN_WARMUP の増量・
+既定復元を含む）で打ち切る安全側の判断とした（詳細は `docs/perf/logs/metal-gemm-tgid-swizzle-ab-1279/
+env_info.txt` §プロトコルからの逸脱）。
 
 サーマル記録（`pmset -g therm` 実行前後）: 全試行で「No thermal warning level has been recorded」（サーマル
 スロットリングは観測されず、原因はサーマルではなく外部プロセスの CPU 負荷競合と判断した）。
@@ -173,9 +181,13 @@ size=256 のみ gate を満たしたが、他 4 サイズは依然 gate 超過�
 size 512/1024/2048/4096 で base/head 出力のビット単位一致を確認した（`docs/perf/logs/
 metal-gemm-tgid-swizzle-ab-1279/bit_match_test.log`）。既存 parity テスト（`gemm_dynamic_tile_parity`・
 `cpu_metal_parity`・`gemm_auto_parity` 等。`docs/perf/logs/metal-gemm-tgid-swizzle-ab-1279/
-parity_ignored_tests.log`）も非後退で green（tolerance 不変。同一実行ログ内の `command_batching_bench` の
-1 件の失敗は本イシューと無関係な既知の環境依存不安定性であり、`main`〈本イシューの変更前〉でも同一条件で再現する
-ことを確認済み。エンコード回数カウントのアサーションであり GEMM 数値一致・性能には無関係）。
+parity_ignored_tests.log`）も非後退で green（tolerance 不変。同一実行ログ内で `command_batching.rs::
+pool_reuse_zero_fill_does_not_synchronize_open_batch`・`command_batching_bench.rs::
+pool_reuse_interleaved_with_tracked_steps_preserves_batching` の 2 件が FAILED になっているが、いずれも本イシュー
+と無関係な既知の環境依存不安定性（エンコード回数カウントのアサーション。GEMM 数値一致・性能には無関係）。
+後者は `main`〈本イシューの変更前〉でも同一条件〈left=560 right=50〉で再現することを確認済み。前者は
+`--no-fail-fast` 実行時のみ FAILED（同一 HEAD の単独 `--test command_batching` 再実行では PASS）で、
+他の並走ビルド負荷下でのフレーキーな挙動と判断した）。
 
 環境情報・実効パラメータ・load average 推移の全詳細は `docs/perf/logs/metal-gemm-tgid-swizzle-ab-1279/env_info.txt`
 を参照。
