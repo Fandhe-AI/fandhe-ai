@@ -644,7 +644,7 @@ examples/gemm_unroll_acc_ab_bench.rs` 冒頭ドキュメンテーションコメ
 
 | run | 512 spread | 1024 | 2048 | 4096 | 2048×512 補助 | 4096×1024 補助 | 実行前 load average(1m) |
 |---|---|---|---|---|---|---|---|
-| 1 | NG (詳細は run1 ログ参照) | NG | NG | NG | NG | OK | 5.44 |
+| 1 | NG (詳細は run1 ログ参照) | OK | NG | NG | NG | OK | 5.44 |
 | 2 | NG | NG | NG | OK | NG | NG | 3.47 |
 | 3 | NG | OK | NG | OK | NG | NG | 6.94 |
 | 4 | NG | NG | NG | NG | NG | OK | 2.54 |

@@ -264,8 +264,14 @@ mod macos_impl {
                 .dispatch_auto(ctx, &a, &b, m, n, k)
                 .expect("head GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
 
+            // `assert_eq!` の `f32` 数値比較は IEEE 754 の `+0.0 == -0.0` を
+            // 区別できず符号ビットの差異を見逃しうるため、`to_bits()` 経由の
+            // ビットパターン比較で厳密に検証する（`gemm_swizzle_ab_bench.rs`
+            // と同じ理由。イシュー #1284・codex-review P2 指摘）。
+            let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+            let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
             assert_eq!(
-                base_out, head_out,
+                base_bits, head_bits,
                 "m={m} n={n} k={k}: UNROLL_ACC_ENABLED の有無で出力がビット単位で\
                  一致しなかった。演算オペランド列が変わっている疑いがあるため、\
                  A/B 計測（性能比較）は無意味になる。shaders/gemm.metal の\
