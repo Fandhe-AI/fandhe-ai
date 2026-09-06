@@ -761,44 +761,6 @@ fn tiled_pipeline_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
     )
 }
 
-/// tiled pipeline カーネルのコンパイル済みハンドル（イシュー #1033・
-/// codex-review P0〈PR #1071〉対応）。
-///
-/// [`CudaGemm::launch_tiled_pipeline_f32`] は safe 公開 API でありながら
-/// `unsafe { launch(..) }` を行うため、渡された関数ハンドルが
-/// `gemm_tiled_pipeline_f32`（`TP_BM`/`TP_BN`/`TP_BK` 固定・
-/// `tiled_pipeline_launch_config` が仮定する grid/block 構成・
-/// カーネル引数シグネチャ）と一致することを型で保証する必要がある。
-/// 生の [`CudaFunction`] を直接引数に取ると、呼び出し元が全く無関係な
-/// （別シグネチャ・別 launch config 前提の）関数ハンドルを safe に渡せて
-/// しまい、`unsafe` launch 側の GPU 範囲外アクセス等の前提が崩れる。
-///
-/// 本型はフィールドを非公開にし、[`CudaGemm::compile_tiled_pipeline_variant`]
-/// （公開コンストラクタ）と本モジュール内の `compile_tiled_pipeline`
-/// （`CudaGemm::new` 経由）以外に生成手段を持たない。両者はいずれも
-/// `tiled_pipeline_descriptor`/`compile_tiled_pipeline_variant` 内で
-/// `TP_BM`/`TP_BN`/`TP_BK` 固定・`func_name = "gemm_tiled_pipeline_f32"`
-/// を経由してのみ [`CudaFunction`] を得るため、この型の値は必ず期待する
-/// シグネチャ・タイル構成のカーネルを指すことが構築時点で保証される
-/// （検証済みハンドルへの封じ込め）。
-///
-/// `context_ptr`（codex-review P1 指摘・PR #1071）: 上記のシグネチャ・
-/// タイル構成の一致だけでは、`compile_tiled_pipeline_variant` に**別の
-/// `CudaDevice`（＝別 GPU・別 `CudaContext`）** を渡して得たハンドルを
-/// `CudaGemm::launch_tiled_pipeline_f32`（別インスタンス。別 context の
-/// `stream` を保持）へ safe Rust から渡せてしまう不変条件の穴が残る。
-/// 複数 GPU・複数 context 利用時にこれを行うと、context 固有の
-/// `CUfunction` と、別 context の `stream`／デバイスバッファを混在させた
-/// `unsafe` launch に到達し、CUDA driver レベルの未定義動作
-/// （invalid device context・実質的な OOB リスク）を招きうる。
-/// `Arc<CudaContext>` のポインタ同一性（`context_cache.rs::ContextKey` と
-/// 同じ識別方式）をハンドルへ焼き込み、`launch_tiled_pipeline_f32` が
-/// 起動直前に `self.stream.context()` と fail-closed に一致検証すること
-/// で、非公開フィールドの型保証をシグネチャだけでなく生成元 context にも
-/// 拡張する。`CudaFunction` は内部で `Arc<CudaModule>`→`Arc<CudaContext>`
-/// を強参照し続けるため（cudarc 0.19.8 `driver::safe::core::CudaFunction`
-/// の `module` フィールド）、本型が生存する間はポインタが指す
-/// `CudaContext` の再利用（ABA）は起こらない。
 /// [`TiledPipelineFunction`] が保持するタイル構成タグ（イシュー #1343）。
 ///
 /// [`CudaGemm::select_tiled_f32_kernel`]（本番既定経路）・
@@ -821,6 +783,48 @@ pub enum TiledPipelineTile {
     Bm128Bn64,
 }
 
+/// tiled pipeline カーネルのコンパイル済みハンドル（イシュー #1033・
+/// codex-review P0〈PR #1071〉対応）。
+///
+/// [`CudaGemm::launch_tiled_pipeline_f32`] は safe 公開 API でありながら
+/// `unsafe { launch(..) }` を行うため、渡された関数ハンドルが
+/// `gemm_tiled_pipeline_f32`（`TP_BM`/`TP_BN`/`TP_BK` 固定・
+/// `tiled_pipeline_launch_config` が仮定する grid/block 構成・
+/// カーネル引数シグネチャ）と一致することを型で保証する必要がある。
+/// 生の [`CudaFunction`] を直接引数に取ると、呼び出し元が全く無関係な
+/// （別シグネチャ・別 launch config 前提の）関数ハンドルを safe に渡せて
+/// しまい、`unsafe` launch 側の GPU 範囲外アクセス等の前提が崩れる。
+///
+/// 本型はフィールドを非公開にし、[`CudaGemm::compile_tiled_pipeline_variant`]
+/// （64×64・公開コンストラクタ）・[`CudaGemm::compile_tiled_pipeline_128x64_variant`]
+/// （128×64・イシュー #1343 で追加した公開コンストラクタ）と本モジュール内の
+/// `compile_tiled_pipeline`／`compile_tiled_pipeline_128x64`
+/// （`CudaGemm::new`／`CudaGemm::new_with_tiled_pipeline_128x64` 経由）以外に
+/// 生成手段を持たない。いずれも `tiled_pipeline_descriptor` 系の記述子生成
+/// 内で `TP_BM`/`TP_BN`/`TP_BK`（または 128×64 側の `TP128_BM`/`TP128_BN`/
+/// `TP128_BK`）固定・対応する `func_name`（`"gemm_tiled_pipeline_f32"` また
+/// は `"gemm_tiled_pipeline_128x64_f32"`）を経由してのみ [`CudaFunction`] を
+/// 得るため、この型の値は必ず期待するシグネチャ・タイル構成（保持する
+/// [`TiledPipelineTile`] タグと整合する側）のカーネルを指すことが構築時点
+/// で保証される（検証済みハンドルへの封じ込め）。
+///
+/// `context_ptr`（codex-review P1 指摘・PR #1071）: 上記のシグネチャ・
+/// タイル構成の一致だけでは、`compile_tiled_pipeline_variant` に**別の
+/// `CudaDevice`（＝別 GPU・別 `CudaContext`）** を渡して得たハンドルを
+/// `CudaGemm::launch_tiled_pipeline_f32`（別インスタンス。別 context の
+/// `stream` を保持）へ safe Rust から渡せてしまう不変条件の穴が残る。
+/// 複数 GPU・複数 context 利用時にこれを行うと、context 固有の
+/// `CUfunction` と、別 context の `stream`／デバイスバッファを混在させた
+/// `unsafe` launch に到達し、CUDA driver レベルの未定義動作
+/// （invalid device context・実質的な OOB リスク）を招きうる。
+/// `Arc<CudaContext>` のポインタ同一性（`context_cache.rs::ContextKey` と
+/// 同じ識別方式）をハンドルへ焼き込み、`launch_tiled_pipeline_f32` が
+/// 起動直前に `self.stream.context()` と fail-closed に一致検証すること
+/// で、非公開フィールドの型保証をシグネチャだけでなく生成元 context にも
+/// 拡張する。`CudaFunction` は内部で `Arc<CudaModule>`→`Arc<CudaContext>`
+/// を強参照し続けるため（cudarc 0.19.8 `driver::safe::core::CudaFunction`
+/// の `module` フィールド）、本型が生存する間はポインタが指す
+/// `CudaContext` の再利用（ABA）は起こらない。
 pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
 
 impl TiledPipelineFunction {
