@@ -581,6 +581,8 @@ constant bool FINE_BARRIER_ENABLED = GEMM_SPEC_FINE_BARRIER_ENABLED;
 constant bool TRANS_A = GEMM_SPEC_TRANS_A;
 constant bool TRANS_B = GEMM_SPEC_TRANS_B;
 constant bool UNROLL_ACC_ENABLED = GEMM_SPEC_UNROLL_ACC_ENABLED;
+constant bool FRAG_LOAD_DEVICE_HOISTED = GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED;
+constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;
 #else
 constant uint BM [[function_constant(0)]];
 constant uint BN [[function_constant(1)]];
@@ -669,6 +671,50 @@ constant bool TRANS_B [[function_constant(10)]];
 // （`crate::gemm::MetalGemm::pipeline_for_tile_f16` は常に `false` を渡す。
 // `pipeline_for_tile_f16` 呼び出し側コメント参照）。
 constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];
+
+// フラグメントロード方式候補ゲート（イシュー #1293）:
+// `gemm_simdgroup_tiled` の 2 経路（staged/`USE_TGP_STAGING`・direct-load）
+// それぞれで「ロード元・ロード粒度」を切り替えるための追加軸。
+// `USE_TGP_STAGING`（index 5）が既に「threadgroup 経由／device 直接」の
+// 切替軸を担っているため、本イシューでは新しい mode 定数は増やさず、
+// 各経路の内部構造（K 方向の一括ロード幅）を切り替える 2 定数のみを
+// 追加する（`docs/perf/metal-gemm-frag-load-candidates.md` §1 候補表）。
+//
+// `FRAG_LOAD_DEVICE_HOISTED`（index 12・bool）: direct-load 経路
+// （`USE_TGP_STAGING=false`）専用。`false`（既定）では従来の legacy
+// ブロック（kk ごとに a_tile を 1 回ロードし (r, ci) 内側ループで b_tile を
+// 毎回再ロードする #536 蛇行走査版）を通り、`true` では #745 型の
+// フラグメント一括ロード（`a_frag[acc_rows]`/`b_frag[acc_cols]` を kk 先頭で
+// device メモリから直接ロードしてから MMA を発行する構造）を通る。
+// staged 経路（`USE_TGP_STAGING=true`）はこの定数を一切参照しない
+// no-op（`UNROLL_ACC_ENABLED` と同じ「参照しない経路では無害」設計）。
+//
+// `FRAG_LOAD_KSTEPS`（index 13・uint。値は 1 または 2）: staged・
+// direct-load 双方の kk ループが「1 回の反復で何 kk ステップ（8 幅
+// フラグメント）分をまとめてロード・MMA 発行するか」を切り替える。
+// `1`（既定）では従来どおり 8 幅刻みの単一フラグメント処理、`2` では
+// 16 幅（8 幅 × 2）をまとめて処理する。端数（BK/bk_full8 が 16 の倍数で
+// ない残り 8 幅）は同一ループ内で ks_count を動的に 1 へ落として処理し、
+// K 方向の要素は 1 度も欠落・重複しない（8 の倍数境界は
+// `TileConfig::validate` の既存整除検査が保証する）。
+//
+// **bit 一致の論拠**（#536/#538/#745/#809/#1282/#1288 と同じ論法）:
+// いずれの組合せでも `acc[r][c_]` ごとの K 方向累算オペランド列（値・
+// kk 昇順）はロード元・一括ロード数・ループ構造を変えても不変であり、
+// `simdgroup_multiply_accumulate` の結果はビット単位で一致する。0 埋め
+// （境界外要素）の契約も staged/direct 双方で従来と同一のまま変えない。
+//
+// 非公式 `simdgroup_async_copy` 系 AIR intrinsic は使わない
+// （`docs/backend-metal-async-copy-decision.md` の不採用判断を維持）。
+//
+// `gemm_simdgroup_tiled_f16` は両定数を参照しない（`crate::gemm::
+// MetalGemm::pipeline_for_tile_f16` は常に既定値を渡す no-op 契約。
+// `pipeline_for_tile_f16` 呼び出し側コメント参照）。性能実測・
+// `tile::select` への組み込み判断は兄弟イシュー #1295 のスコープで、
+// 本イシューは機構の実装と bit 一致の自己検証のみを行う
+// （`crate::gemm::MetalGemm::new_with_frag_load`）。
+constant bool FRAG_LOAD_DEVICE_HOISTED [[function_constant(12)]];
+constant uint FRAG_LOAD_KSTEPS [[function_constant(13)]];
 #endif
 
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
@@ -1014,6 +1060,80 @@ kernel void gemm_simdgroup_tiled(
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
+            // フラグメントロード方式候補（イシュー #1293。本ファイル冒頭
+            // FRAG_LOAD_KSTEPS 宣言のコメント参照）: staged 経路の kk ループを
+            // ロード粒度で分岐する。`FRAG_LOAD_KSTEPS == 2`（K=2 段候補）では
+            // 1 回の反復で 16 幅（8 幅 x 2）のフラグメントをまとめてロード
+            // してから ks 昇順（= kk 昇順）で MMA を発行し、既定（`else` 側。
+            // 従来の 8 幅単一フラグメント処理）はテキスト無変更のまま残す。
+            // acc[r][c_] の K 方向累算オペランド列は ks/kk いずれの粒度でも
+            // 値・昇順が不変のため、結果はビット単位で一致する（#536・#538・
+            // #745 と同じ論法）。
+            if (FRAG_LOAD_KSTEPS == 2) {
+                simdgroup_float8x8 a_frag2[2][ACC_ROWS_CAP];
+                simdgroup_float8x8 b_frag2[2][ACC_COLS_CAP];
+                uint kk = 0;
+                // 主ループ: 16 幅刻み（8 幅 x 2 段）でフラグメントを一括
+                // ロードし、ks（0→1）昇順で MMA を発行する。
+                for (; kk + 16 <= BK; kk += 16) {
+                    for (uint ks = 0; ks < 2; ks++) {
+                        uint kk_s = kk + ks * 8;
+                        for (uint r = 0; r < acc_rows; r++) {
+                            if (TRANS_A) {
+                                simdgroup_load(a_frag2[ks][r], tile_a + (size_t)kk_s * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
+                            } else {
+                                simdgroup_load(a_frag2[ks][r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk_s, lda);
+                            }
+                        }
+                        for (uint c_ = 0; c_ < acc_cols; c_++) {
+                            if (TRANS_B) {
+                                simdgroup_load(b_frag2[ks][c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk_s, ldb, ulong2(0), true);
+                            } else {
+                                simdgroup_load(b_frag2[ks][c_], tile_b + (size_t)kk_s * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                            }
+                        }
+                    }
+                    if (FINE_BARRIER_ENABLED) {
+                        simdgroup_barrier(mem_flags::mem_none);
+                    }
+                    for (uint ks = 0; ks < 2; ks++) {
+                        for (uint r = 0; r < acc_rows; r++) {
+                            for (uint c_ = 0; c_ < acc_cols; c_++) {
+                                simdgroup_multiply_accumulate(acc[r][c_], a_frag2[ks][r], b_frag2[ks][c_], acc[r][c_]);
+                            }
+                        }
+                    }
+                }
+                // 端数ループ（BK が 16 の倍数でない残り 8 幅。単一フラグ
+                // メント版。主ループと同じロード式・MMA 発行式で、K 方向
+                // 累算オペランド列は不変）。
+                for (; kk < BK; kk += 8) {
+                    simdgroup_float8x8 a_frag[ACC_ROWS_CAP];
+                    simdgroup_float8x8 b_frag[ACC_COLS_CAP];
+                    for (uint r = 0; r < acc_rows; r++) {
+                        if (TRANS_A) {
+                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
+                        } else {
+                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                        }
+                    }
+                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                        if (TRANS_B) {
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);
+                        } else {
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                        }
+                    }
+                    if (FINE_BARRIER_ENABLED) {
+                        simdgroup_barrier(mem_flags::mem_none);
+                    }
+                    for (uint r = 0; r < acc_rows; r++) {
+                        for (uint c_ = 0; c_ < acc_cols; c_++) {
+                            simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
+                        }
+                    }
+                }
+            } else {
             for (uint kk = 0; kk < BK; kk += 8) {
                 // フラグメントのレジスタ常駐化（イシュー #745）: kk ステップ
                 // 先頭で A の acc_rows 個・B の acc_cols 個の simdgroup
@@ -1146,7 +1266,8 @@ kernel void gemm_simdgroup_tiled(
                         }
                     }
                 }
-            }
+            } // else (FRAG_LOAD_KSTEPS != 2) の for(kk) 閉じ
+            } // FRAG_LOAD_KSTEPS 分岐の閉じ
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
         } else {
@@ -1158,6 +1279,81 @@ kernel void gemm_simdgroup_tiled(
             // `crate::pad::pad8` で k を 8 の倍数へパディング済みの実効
             // 次元を渡す契約のため、通常この端数は発生しない
             // （`crate::gemm::MetalGemm::dispatch_auto` 参照）。
+            // フラグメントロード方式候補（イシュー #1293。本ファイル冒頭
+            // FRAG_LOAD_DEVICE_HOISTED 宣言のコメント参照）: direct-load
+            // 経路（このブロック全体）を「device メモリから simdgroup
+            // ごとに直接 `simdgroup_load` する」点は不変のまま、フラグ
+            // メントのロード構造だけを切り替える。既定（`false`。`else`
+            // 側）はテキスト無変更の legacy 経路（kk ごとに a_tile を
+            // 1 回ロードし (r, ci) の内側ループで b_tile を毎回再ロード
+            // する #536 蛇行走査版）。`true` では #745 の staged 経路と
+            // 同型の「kk 先頭で A の acc_rows 個・B の acc_cols 個の
+            // フラグメントを device メモリから直接一括ロードしてから
+            // TM×TN の外積 MMA を発行する」構造（hoisting）を使う。
+            //
+            // K 方向の一括ロード幅は `FRAG_LOAD_KSTEPS`（本ファイル冒頭
+            // 宣言参照）で 8/16 幅を切り替える。`kstep` 刻みで kk を進め、
+            // 1 反復あたりの実段数 `ks_count`（1 または 2）を
+            // `min(kstep, bk_full8 - kk) / 8` で動的に決めることで、
+            // `FRAG_LOAD_KSTEPS == 2` かつ bk_full8 が 16 の倍数でない
+            // 残り 8 幅（端数）も同一ループ内で ks_count=1 として処理する
+            // （別の端数ループを持たないため、境界チェック文言の重複が
+            // 生じない設計。`tests/shader_source_evidence.rs`
+            // `gemm_simdgroup_tiled_source_retains_req8_boundary_guards_in_both_unroll_variants`
+            // が出現数を機械検証する）。
+            //
+            // **境界チェック（REQ-8。省略禁止）**: `a_row < dims.m`・
+            // `b_col < dims.n` の判定式は legacy 経路と綴りまで完全に
+            // 同一のまま維持する。
+            //
+            // acc[r][c_] の K 方向累算オペランド列（値・kk 昇順。ks は
+            // kk_s = kk + ks*8 の昇順で走査するため kk 昇順と一致する）は
+            // ロード元・一括ロード数を変えても不変のため、結果はビット
+            // 単位で一致する（#536・#538・#745 と同じ論法）。
+            if (FRAG_LOAD_DEVICE_HOISTED) {
+                uint bk_full8 = (bk_eff / 8) * 8;
+                uint kstep = (FRAG_LOAD_KSTEPS == 2) ? 16u : 8u;
+                for (uint kk = 0; kk < bk_full8; kk += kstep) {
+                    uint ks_count = min(kstep, bk_full8 - kk) / 8;
+                    simdgroup_float8x8 a_frag[2][ACC_ROWS_CAP];
+                    simdgroup_float8x8 b_frag[2][ACC_COLS_CAP];
+                    for (uint ks = 0; ks < ks_count; ks++) {
+                        uint kk_s = kk + ks * 8;
+                        for (uint r = 0; r < acc_rows; r++) {
+                            uint a_row = sub_row0 + r * 8;
+                            a_frag[ks][r] = simdgroup_float8x8(0.0f);
+                            if (a_row < dims.m) {
+                                if (TRANS_A) {
+                                    simdgroup_load(a_frag[ks][r], a + (size_t)(p0 + kk_s) * (size_t)st.lda + (size_t)a_row, st.lda, ulong2(0), true);
+                                } else {
+                                    simdgroup_load(a_frag[ks][r], a + (size_t)a_row * (size_t)st.lda + (size_t)(p0 + kk_s), st.lda);
+                                }
+                            }
+                        }
+                        for (uint c_ = 0; c_ < acc_cols; c_++) {
+                            uint b_col = sub_col0 + c_ * 8;
+                            b_frag[ks][c_] = simdgroup_float8x8(0.0f);
+                            if (b_col < dims.n) {
+                                if (TRANS_B) {
+                                    simdgroup_load(b_frag[ks][c_], b + (size_t)b_col * (size_t)st.ldb + (size_t)(p0 + kk_s), st.ldb, ulong2(0), true);
+                                } else {
+                                    simdgroup_load(b_frag[ks][c_], b + (size_t)(p0 + kk_s) * (size_t)st.ldb + (size_t)b_col, st.ldb);
+                                }
+                            }
+                        }
+                    }
+                    if (FINE_BARRIER_ENABLED) {
+                        simdgroup_barrier(mem_flags::mem_none);
+                    }
+                    for (uint ks = 0; ks < ks_count; ks++) {
+                        for (uint r = 0; r < acc_rows; r++) {
+                            for (uint c_ = 0; c_ < acc_cols; c_++) {
+                                simdgroup_multiply_accumulate(acc[r][c_], a_frag[ks][r], b_frag[ks][c_], acc[r][c_]);
+                            }
+                        }
+                    }
+                }
+            } else {
             uint bk_full8 = (bk_eff / 8) * 8;
             for (uint kk = 0; kk < bk_full8; kk += 8) {
             // 条件付き loop unroll（direct-load MMA 発行版。本ファイル冒頭
@@ -1262,7 +1458,8 @@ kernel void gemm_simdgroup_tiled(
                     }
                 }
             }
-            }
+            } // else (FRAG_LOAD_DEVICE_HOISTED=false) の for(kk) 閉じ
+            } // FRAG_LOAD_DEVICE_HOISTED 分岐の閉じ
         }
     }
 
