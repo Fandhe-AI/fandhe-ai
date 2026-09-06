@@ -549,8 +549,11 @@ struct OrdinalState {
     /// backend-cuda-graph-step-capture-design.md` §4.2）。`Some` の間は
     /// `begin_capture_session` が同一 ordinal への再入・別スレッドからの
     /// capture 開始を拒否し、`is_capturing_on_current_thread` が
-    /// 同期点呼び出し（`memory.rs`／`gemm.rs`／`ops.rs` の各ガード）の
-    /// 判定に使う。capture モードは `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`
+    /// 同期点呼び出し（`memory.rs`／`ops.rs` の各ガード。`gemm.rs::
+    /// synchronize()` は診断専用・本番ディスパッチから呼ばれないため
+    /// 個別のガードを追加していない。`docs/backend-cuda-graph-step-
+    /// capture-design.md` §3.2）の判定に使う。capture モードは
+    /// `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`
     /// のため、capture 中の driver 呼び出しは capture を開始したスレッド
     /// からのみ意味を持つ（`thread` フィールドで判定する）。
     capture: Option<std::thread::ThreadId>,
@@ -618,8 +621,10 @@ pub(crate) fn begin_capture_session(ordinal: usize) -> Result<CaptureGuard, Back
 }
 
 /// `ordinal` が現在このスレッド上で CUDA Graph capture 中かどうかを返す
-/// （イシュー #1349）。`memory.rs`／`gemm.rs`／`ops.rs` の同期点ガード
-/// （`begin_sync_point_call`）が driver に触れる前の判定に使う。
+/// （イシュー #1349）。`memory.rs`／`ops.rs` の同期点ガード
+/// （`begin_sync_point_call`）が driver に触れる前の判定に使う（`gemm.rs::
+/// synchronize()` は診断専用・本番ディスパッチから呼ばれないため対象外。
+/// `docs/backend-cuda-graph-step-capture-design.md` §3.2）。
 /// レジストリ自体が取得できない異常時は fail-closed（capture 中扱い＝
 /// 同期点呼び出しを拒否する側）に倒す（`is_poisoned` と同じ方針）。
 pub(crate) fn is_capturing_on_current_thread(ordinal: usize) -> bool {
