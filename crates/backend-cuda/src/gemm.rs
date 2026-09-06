@@ -2180,31 +2180,7 @@ impl CudaGemm {
     ) -> (&CudaFunction, LaunchConfig) {
         let kind = tiled_f32_kernel_kind(self.tiled_pipeline.is_some(), a_offset, n, k);
         if let (TiledF32Kernel::Pipeline, Some(func64)) = (kind, self.tiled_pipeline.as_ref()) {
-            // イシュー #1344: `tiled_pipeline` が既に Pipeline 側と判定
-            // された形状に対して、第 2 スロット（128×64）が利用可能かつ
-            // 閾値条件を満たす場合のみそちらへ分岐する。第 2 スロットが
-            // `None` になるのは `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
-            // が `false`（既定でない特殊ビルド）の場合、または
-            // `compile_tiled_pipeline_128x64` が実行時に失敗した場合のみ
-            // （`TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true` の現行
-            // 既定では `Self::new` が `tiled_pipeline_128x64` を
-            // `tiled_pipeline` とは独立にコンパイルするため、
-            // `new_with_tiled_pipeline_128x64` 診断経由〈内部で
-            // `Self::new` を呼んだうえで `tiled_pipeline` フィールドのみ
-            // 128×64 へ差し替える〉でも `tiled_pipeline_128x64` は
-            // 通常どおり `Some`（＝第 1 スロットと同じ 128×64 ハンドル）
-            // になりうる）。`None` の場合は常に `func64`（＝実際に
-            // `self.tiled_pipeline` に入っているハンドル。既定は 64×64、
-            // 診断経由では 128×64）をそのまま使う fail-closed
-            // フォールバックで、`func.tile()` は選択されたハンドル自身の
-            // タグを見るため launch config は常に整合し、既存の T7〜T11
-            // （`new_with_tiled_pipeline_128x64` 経由）の契約も変えない。
-            let tile_kind = tiled_pipeline_tile_kind(self.tiled_pipeline_128x64.is_some(), n, k);
-            let func = if tile_kind == TiledPipelineTile::Bm128Bn64 {
-                self.tiled_pipeline_128x64.as_ref().unwrap_or(func64)
-            } else {
-                func64
-            };
+            let func = self.select_tiled_pipeline_handle(func64, n, k);
             TILED_PIPELINE_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
             if func.tile() == TiledPipelineTile::Bm128Bn64 {
                 TILED_PIPELINE_128X64_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
@@ -2212,6 +2188,63 @@ impl CudaGemm {
             (func.as_cuda_function(), func.launch_config(m, n))
         } else {
             (&self.tiled_f32, tiled_f32_launch_config(m, n))
+        }
+    }
+
+    /// [`Self::select_tiled_f32_kernel`] が `Pipeline` と判定した形状
+    /// （＝`self.tiled_pipeline` が `Some`）に対して、第 1 スロット
+    /// （既定では常に 64×64。`new_with_tiled_pipeline_128x64` 診断経由
+    /// では 128×64 に差し替わっている——`tiled_pipeline_128x64` フィールド
+    /// のドキュメンテーションコメント「診断専用の
+    /// `new_with_tiled_pipeline_128x64`」参照）と第 2 スロット（128×64。
+    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が `true` の場合のみ
+    /// 追加コンパイル）のどちらを実際に起動するかを 1 箇所で決める
+    /// （イシュー #1344・codex-review P2 指摘・PR #1385）。
+    ///
+    /// **`tiled_pipeline_tile_for`（照会 API）との整合**: 従来
+    /// `select_tiled_f32_kernel` と `tiled_pipeline_tile_for` はそれぞれ
+    /// 独立に `tiled_pipeline_tile_kind(self.tiled_pipeline_128x64.is_some(),
+    /// n, k)` を呼んでいたため、`new_with_tiled_pipeline_128x64` 経由
+    /// （第 1 スロット自体が 128×64 へ差し替わっている）で N/K が
+    /// `TILED_PIPELINE_128X64_MIN_N`/`_MIN_K` 未満の形状（例:
+    /// N=K=512）を照会すると、`tiled_pipeline_tile_kind` は閾値未達
+    /// として `Bm64Bn64` を返す一方、`select_tiled_f32_kernel` は
+    /// `func64`（＝差し替え後の実体は 128×64 ハンドル）をそのまま使う
+    /// ため実際には 128×64 が起動される、という不一致があった。本
+    /// メソッドへ選択ロジックを一本化し、`tiled_pipeline_tile_for` は
+    /// 本メソッドが返したハンドル自身の `tile()` タグ（＝実際に起動
+    /// されるハンドルの真の構成）を返すことで、照会結果と実起動が
+    /// 常に一致することを保証する。
+    fn select_tiled_pipeline_handle<'a>(
+        &'a self,
+        func64: &'a TiledPipelineFunction,
+        n: u32,
+        k: u32,
+    ) -> &'a TiledPipelineFunction {
+        // イシュー #1344: `tiled_pipeline` が既に Pipeline 側と判定
+        // された形状に対して、第 2 スロット（128×64）が利用可能かつ
+        // 閾値条件を満たす場合のみそちらへ分岐する。第 2 スロットが
+        // `None` になるのは `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
+        // が `false`（既定でない特殊ビルド）の場合、または
+        // `compile_tiled_pipeline_128x64` が実行時に失敗した場合のみ
+        // （`TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true` の現行
+        // 既定では `Self::new` が `tiled_pipeline_128x64` を
+        // `tiled_pipeline` とは独立にコンパイルするため、
+        // `new_with_tiled_pipeline_128x64` 診断経由〈内部で
+        // `Self::new` を呼んだうえで `tiled_pipeline` フィールドのみ
+        // 128×64 へ差し替える〉でも `tiled_pipeline_128x64` は
+        // 通常どおり `Some`（＝第 1 スロットと同じ 128×64 ハンドル）
+        // になりうる）。`None` の場合は常に `func64`（＝実際に
+        // `self.tiled_pipeline` に入っているハンドル。既定は 64×64、
+        // 診断経由では 128×64）をそのまま使う fail-closed
+        // フォールバックで、`func.tile()` は選択されたハンドル自身の
+        // タグを見るため launch config は常に整合し、既存の T7〜T11
+        // （`new_with_tiled_pipeline_128x64` 経由）の契約も変えない。
+        let tile_kind = tiled_pipeline_tile_kind(self.tiled_pipeline_128x64.is_some(), n, k);
+        if tile_kind == TiledPipelineTile::Bm128Bn64 {
+            self.tiled_pipeline_128x64.as_ref().unwrap_or(func64)
+        } else {
+            func64
         }
     }
 
@@ -2237,16 +2270,47 @@ impl CudaGemm {
     /// 向けの照会のため引数に取らない。`tiled_f32_kernel_for` と同じ
     /// 理由。`tiled_pipeline_tile_kind` が M 軸の閾値を持たないため本
     /// メソッドも `m` を取らない）。
+    ///
+    /// **実起動との整合（codex-review P2 指摘・PR #1385）**: `Pipeline`
+    /// と判定された場合の分岐先は、`select_tiled_f32_kernel` と同じ
+    /// [`Self::select_tiled_pipeline_handle`] を呼んで得たハンドル自身の
+    /// `tile()` タグを返す（閾値を独立に再計算しない）。これにより、
+    /// `new_with_tiled_pipeline_128x64`（第 1 スロット自体が 128×64 へ
+    /// 差し替わっている診断インスタンス）に対して閾値未満の形状
+    /// （例: N=K=512）を照会しても、実際に起動されるハンドル（この
+    /// 場合は差し替え後の 128×64）と一致した結果を返す
+    /// （`select_tiled_pipeline_handle` のドキュメンテーションコメント
+    /// 「`tiled_pipeline_tile_for`（照会 API）との整合」参照）。
     #[cfg(feature = "internal-diagnostics")]
     pub fn tiled_pipeline_tile_for(&self, n: u32, k: u32) -> Option<TiledPipelineTile> {
         match self.tiled_f32_kernel_for(n, k) {
             TiledF32Kernel::Classic => None,
-            TiledF32Kernel::Pipeline => Some(tiled_pipeline_tile_kind(
-                self.tiled_pipeline_128x64.is_some(),
-                n,
-                k,
-            )),
+            TiledF32Kernel::Pipeline => {
+                // `tiled_f32_kernel_for` が `Pipeline` を返した以上
+                // `self.tiled_pipeline` は必ず `Some`（`tiled_f32_kernel_kind`
+                // の契約。`select_tiled_f32_kernel` の `if let` パターンと
+                // 同じ前提）。ここでも本番経路と同じく `unwrap`/`expect`
+                // でパニックさせず、理論上到達しない `None` は
+                // fail-closed に `None`（Classic 相当の照会結果）へ
+                // 落とす（`.claude/rules/coding-rust.md`）。
+                self.tiled_pipeline
+                    .as_ref()
+                    .map(|func64| self.select_tiled_pipeline_handle(func64, n, k).tile())
+            }
         }
+    }
+
+    /// [`Self::tiled_pipeline_128x64`] スロット（第 2 スロット。
+    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が `true` の場合の
+    /// み `Self::new` が追加コンパイルする）が実際にコンパイル済みかを
+    /// 返す（`tiled_pipeline_available` の 128×64 版。イシュー #1344・
+    /// codex-review P2 指摘・PR #1385。テストが「本番結線が有効か」
+    /// （＝閾値以上の形状で 128×64 を選びうる環境か）と「選択ロジック
+    /// 自体が壊れているか」を区別できるようにするための可観測点。
+    /// `internal-diagnostics` feature 限定）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn tiled_pipeline_128x64_available(&self) -> bool {
+        self.tiled_pipeline_128x64.is_some()
     }
 
     /// tiled f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。

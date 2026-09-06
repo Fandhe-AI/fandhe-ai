@@ -856,13 +856,46 @@ fn default_new_dispatches_128x64_for_shapes_meeting_threshold_when_enabled() {
         Err(other) => panic!("unexpected CudaError variant from CudaGemm::new: {other}"),
     };
 
-    if gemm.tiled_pipeline_tile_for(1024, 1024)
-        != Some(fandhe_ai_backend_cuda::TiledPipelineTile::Bm128Bn64)
-    {
-        // TILED_PIPELINE_128X64_PRODUCTION_ENABLED が false（第 2 スロット
-        // 未コンパイル）。本テストが検証する対象がまだ存在しないため skip。
+    // 環境非対応判定（cp.async 非対応・sm_80 未満）と期待値検証を分離する
+    // （codex-review P2 指摘・PR #1385）。以前は `tiled_pipeline_tile_for
+    // (1024, 1024) != Some(Bm128Bn64)` の 1 つの条件で早期 return して
+    // いたため、本番結線解除（`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
+    // が誤って `false` へ差し戻された）・128×64 側のみのコンパイル失敗・
+    // 選択条件の回帰のいずれが起きても、このテストは黙って skip される
+    // だけで検知できなかった。
+    //
+    // `tiled_pipeline_available()`（第 1 スロット。64×64。cp.async 対応
+    // 環境なら常に `Self::new` がコンパイルする）が `false` の場合のみ
+    // 「そもそも cp.async 非対応環境」として正当な early return とする。
+    if !gemm.tiled_pipeline_available() {
+        // cp.async 非対応環境では第 2 スロット（128×64）も当然
+        // コンパイルされない（`tiled_pipeline_128x64_available` と
+        // 矛盾しないことのみ確認したうえで skip）。
+        assert!(!gemm.tiled_pipeline_128x64_available());
         return;
     }
+
+    // ここから先は cp.async 対応環境が確定している。この場合
+    // `TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true`（現行既定・
+    // 本 PR 時点で変更不可のコンパイル時定数）である限り第 2 スロット
+    // も必ずコンパイルされているはずであり、`false` は本番結線解除
+    // または 128×64 側固有のコンパイル失敗という回帰を意味する。
+    // これを早期 return で握りつぶさず、アサーション失敗として顕在化
+    // させる。
+    assert!(
+        gemm.tiled_pipeline_128x64_available(),
+        "cp.async-capable environment (tiled_pipeline_available()=true) must also have the \
+         128x64 second slot compiled when TILED_PIPELINE_128X64_PRODUCTION_ENABLED is true; \
+         a false result here indicates either the production wiring was reverted or the \
+         128x64 kernel failed to compile despite the 64x64 kernel succeeding — both are \
+         regressions this test must catch rather than silently skip"
+    );
+    assert_eq!(
+        gemm.tiled_pipeline_tile_for(1024, 1024),
+        Some(fandhe_ai_backend_cuda::TiledPipelineTile::Bm128Bn64),
+        "n=1024 k=1024 must select the 128x64 handle per the adopted GB10 threshold now that \
+         the 128x64 second slot is confirmed available"
+    );
 
     // 採用済み閾値（N=K=1024）を満たす形状は 128×64 へ、満たさない形状
     // （N=512）は 64×64 へ分岐する（`gemm.rs::TILED_PIPELINE_128X64_MIN_N`/
