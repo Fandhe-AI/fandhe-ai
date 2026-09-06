@@ -621,9 +621,35 @@ impl TileConfig {
     /// （イシュー #1282）。`acc_rows * acc_cols >= UNROLL_ACC_MIN_PRODUCT`
     /// を acc 積として評価する（E1 実験〈`docs/perf/
     /// metal-gemm-n4096-kernel-gap.md` §7〉の実測境界）。インスタンスの
-    /// opt-in フラグとの AND は [`unroll_acc_loops_for`] が取る。
+    /// opt-in フラグとの AND は `unroll_acc_loops_for`（`pub(crate)`
+    /// のためここからリンクしない）が取る。
+    ///
+    /// `pub`（クレート外公開）である理由（イシュー #1284・codex-review
+    /// P1 指摘）: `examples/gemm_unroll_acc_ab_bench.rs` は本番
+    /// `dispatch_auto` 経路が実際に unroll 版を選ぶかどうかの表示用
+    /// フラグを必要とするが、`examples/` は独立バイナリクレートのため
+    /// `pub(crate)` の `UNROLL_ACC_MIN_PRODUCT`（同様に非リンク表記）を
+    /// 直接参照できない。
+    /// 閾値比較ロジックを本メソッド 1 箇所に閉じ込め、example 側で
+    /// `acc_rows*acc_cols >= 16` 相当を再実装（ハードコード複製）しない
+    /// ようにするため公開する。
+    ///
+    /// `TileConfig` の全フィールドは `pub`（本ファイル冒頭 struct 定義）
+    /// のため、外部呼び出し元は [`validate`](Self::validate) を経由せず
+    /// `wm=0`／`wn=0` の未検証な構成を直接構築できる。`acc_rows`／
+    /// `acc_cols` は `wm`／`wn` による整数除算をそのまま行う契約
+    /// （両メソッド doc comment 参照）であり、`0` 除算は本番経路で
+    /// panic する（イシュー #1284・codex-review P1 指摘。AGENTS.md
+    /// 「本番経路の panic 禁止」）。本メソッドが唯一の `pub` 入口
+    /// のため、ここで `wm == 0 || wn == 0` を事前検出して `false`
+    /// （unroll 非対象）を返す形で防御する。`acc_rows`／`acc_cols`
+    /// 自体は `pub(crate)` のままであり、この防御は呼び出し元を
+    /// 本メソッドに限定できるという契約に依存する。
     #[cfg(any(test, target_os = "macos"))]
-    pub(crate) fn unroll_acc_loops(&self) -> bool {
+    pub fn unroll_acc_loops(&self) -> bool {
+        if self.wm == 0 || self.wn == 0 {
+            return false;
+        }
         self.acc_rows().saturating_mul(self.acc_cols()) >= UNROLL_ACC_MIN_PRODUCT
     }
 }
@@ -3437,6 +3463,34 @@ mod tests {
              CANDIDATES を変更した場合は E1 実験の再評価が必要です \
              （docs/perf/metal-gemm-n4096-kernel-gap.md §7・イシュー #1282）。"
         );
+    }
+
+    /// [`TileConfig::unroll_acc_loops`] は `wm=0`／`wn=0` の未検証な構成
+    /// （`validate` を経由しない直接構築。`TileConfig` の全フィールドが
+    /// `pub` のため外部呼び出し元が構築しうる）に対し 0 除算 panic せず
+    /// `false`（unroll 非対象）を返すことを固定する（イシュー #1284・
+    /// codex-review P1 指摘。AGENTS.md「本番経路の panic 禁止」）。
+    #[test]
+    fn unroll_acc_loops_returns_false_for_zero_wm_or_wn_without_panicking() {
+        let base = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        let zero_wm = TileConfig { wm: 0, ..base };
+        let zero_wn = TileConfig { wn: 0, ..base };
+        let zero_both = TileConfig {
+            wm: 0,
+            wn: 0,
+            ..base
+        };
+
+        assert!(!zero_wm.unroll_acc_loops());
+        assert!(!zero_wn.unroll_acc_loops());
+        assert!(!zero_both.unroll_acc_loops());
     }
 
     /// [`unroll_acc_loops_for`] がインスタンスフラグ `false` では全候補
