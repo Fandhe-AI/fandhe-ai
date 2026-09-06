@@ -23,7 +23,7 @@ dispatch」へ確実に縮退することを裏付ける（`docs/perf/
 metal-gemm-tile-class-split.md` の `TileClassMode` ドキュメンテーション
 コメント参照。Edge＝staged 強制・Interior＝direct-load 強制）。
 
-| N | cand | legacy median (ms, 5 run 中央値) | split median (ms, 5 run 中央値) | run 別比 (split/legacy) | 中央値比 |
+| N | cand | legacy median (ms, 5 run 中央値) | split median (ms, 5 run 中央値) | run 別比 (split/legacy) | run別比の中央値 |
 |---|---|---|---|---|---|
 | 1024 | 0 | 5.6569 | 3.6782 | 0.6806 / 0.6502 / 0.6501 / 0.6499 / 0.6511 | **0.6502** |
 | 1024 | 4 | 2.4562 | 2.0830 | 0.8539 / 0.8650 / 0.8530 / 0.8465 / 0.8472 | **0.8530** |
@@ -48,6 +48,15 @@ metal-gemm-tile-class-split.md` の `TileClassMode` ドキュメンテーショ�
 中で唯一の `bk=32`）は Split が一貫して legacy より遅い（2.3〜2.7 倍）。
 run 間の符号はどの (N, cand) の組でも一貫している。
 
+**表記注（codex-review 指摘対応。イシュー #1328 PR #1389）**: 本節
+（A）の最終列「run別比の中央値」は各 run の比（split/legacy）を
+5 個算出したうえでその中央値を取ったものであり、`legacy median`
+列と `split median` 列の比（両群の中央値同士の比）とは値が異なる
+（例: N=1024/cand5 は両群中央値の比では 1.1016/0.3552≈3.1014 だが
+run 別比の中央値は 2.7380）。下記 B 節の「中央値比（両群中央値の
+比）」列は逆に両群中央値の比そのものであり、算出方法が異なる別の
+指標である点に注意する。
+
 ## B. 本番 `dispatch_auto` 選択構成（`tile::select_for_device`）× N=512/1024/2048/4096（追補）
 
 候補 0/4/5/8 はいずれも本番非選択構成（M4 Max では N=512→`CANDIDATES[5]`・
@@ -57,7 +66,7 @@ run 間の符号はどの (N, cand) の組でも一貫している。
 device` で構成解決）で base（Legacy）/head（Split）を本番選択構成のまま
 直接比較した。
 
-| N | 選択構成 (bm,bn,bk,wm,wn) | legacy median (ms, 5 run) | split median (ms, 5 run) | run 別比 (split/legacy) | 中央値比 |
+| N | 選択構成 (bm,bn,bk,wm,wn) | legacy median (ms, 5 run) | split median (ms, 5 run) | run 別比 (split/legacy) | 中央値比（両群中央値の比） |
 |---|---|---|---|---|---|
 | 512  | (64,32,32,2,2)＝`CANDIDATES[5]` | 0.2015 | 0.1081 | 2.492 / 2.495 / 0.536 / 0.535 / 0.534 | 0.5365（符号不一致。後述） |
 | 1024 | (64,32,8,4,1)＝`CANDIDATES[6]`  | 0.2245 | 0.5667 | 2.517 / 0.552 / 2.495 / 2.529 / 2.524 | **2.5243**（4/5 run が後退方向。1 run 外れ値） |

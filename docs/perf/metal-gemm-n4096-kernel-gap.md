@@ -1574,7 +1574,7 @@ metal-gemm-transpose-tiled.md`）の `device-legacy` twin（`staged=false`）
 **A. 候補 0/4/5/8（AC 形状）**: `docs/perf/logs/
 metal-gemm-e6-tile-class-ab-1328/aggregate.md` §A に全 run 生値を記載。
 
-| N | cand | resolved_tile (bm,bn,bk,wm,wn) | legacy median (ms) | split median (ms) | 中央値比 (split/legacy) | run 間符号 |
+| N | cand | resolved_tile (bm,bn,bk,wm,wn) | legacy median (ms) | split median (ms) | run別比の中央値 (split/legacy) | run 間符号 |
 |---|---|---|---|---|---|---|
 | 1024 | 0 | 64,64,16,2,2 | 5.6569 | 3.6782 | **0.6502** | 一貫（改善） |
 | 1024 | 4 | 64,64,16,1,2 | 2.4562 | 2.0830 | **0.8530** | 一貫（改善） |
@@ -1600,10 +1600,19 @@ legacy 106.49 ms 対 本番選択構成 `[2]` の legacy 13.77 ms。約 7.7 倍�
 ことが特徴的であり、Split（direct-load）はこの非効率なベースラインを
 部分的に緩和したに過ぎないと考えられる（§12.4 参照）。
 
+**表記注（codex-review 指摘対応。イシュー #1328 PR #1389）**: 上表
+（A）の「run別比の中央値」は各 run の比（split/legacy）を 5 個算出
+したうえでその中央値を取ったものであり、`legacy median` 列と
+`split median` 列の比（両群の中央値同士の比）とは値が異なる
+（例: N=1024/cand5 は両群中央値の比では 1.1016/0.3552≈3.1014 だが
+run別比の中央値は 2.7380）。下記 B 節の「中央値比（両群中央値の
+比）」列は逆に両群中央値の比そのものであり、算出方法が異なる別の
+指標である点に注意する（同一の生値は `aggregate.md` §A/§B 参照）。
+
 **B. 本番 `select_for_device` 選択構成（追補）**: 同 `aggregate.md` §B に
 全 run 生値を記載。
 
-| N | 選択構成 (bm,bn,bk,wm,wn) | legacy median (ms) | split median (ms) | 中央値比 | run 間符号 |
+| N | 選択構成 (bm,bn,bk,wm,wn) | legacy median (ms) | split median (ms) | 中央値比（両群中央値の比） | run 間符号 |
 |---|---|---|---|---|---|
 | 512  | 64,32,32,2,2（`[5]`） | 0.2015 | 0.1081 | 0.5365 | **不一致**（2/5 run は legacy 比 約 2.5 倍に後退・3/5 run は半減） |
 | 1024 | 64,32,8,4,1（`[6]`）  | 0.2245 | 0.5667 | 2.5243 | 4/5 run 後退・1 run 外れ値 |
