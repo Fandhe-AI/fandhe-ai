@@ -1,0 +1,415 @@
+warning: unused import: `crate::context_cache`
+  --> crates/backend-cuda/src/gemm_mma.rs:21:5
+   |
+21 | use crate::context_cache;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:801:48
+    |
+801 | pub struct TiledPipelineFunction(CudaFunction, usize);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+    = help: consider removing this field
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:814:8
+    |
+803 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+814 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:259:19
+    |
+239 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+259 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:651:19
+    |
+457 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+651 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+666 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 25 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_metal-4099ec6cfdfe79eb)
+
+running 1 test
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_production_batch ...   N=1024 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.2448 ms  q1=0.2385 ms  q3=0.2524 ms
+    upload_b: median=0.2481 ms  q1=0.2328 ms  q3=0.2537 ms
+    alloc_c: median=0.0001 ms  q1=0.0000 ms  q3=0.0001 ms
+    encode: median=0.0030 ms  q1=0.0029 ms  q3=0.0031 ms
+    commit_wait: median=1.2606 ms  q1=1.2459 ms  q3=1.2770 ms
+    commit_wait.kernel_gpu: median=1.0267 ms  q1=1.0243 ms  q3=1.0286 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2339 ms
+    readback: median=0.0918 ms  q1=0.0888 ms  q3=0.0927 ms
+    host_copy: median=0.2527 ms  q1=0.2424 ms  q3=0.2695 ms
+    sum of medians: 2.1011 ms
+  N=2048 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=1.0949 ms  q1=1.0705 ms  q3=1.1289 ms
+    upload_b: median=1.1219 ms  q1=1.0653 ms  q3=1.1351 ms
+    alloc_c: median=0.0002 ms  q1=0.0001 ms  q3=0.0005 ms
+    encode: median=0.0087 ms  q1=0.0060 ms  q3=0.0103 ms
+    commit_wait: median=3.8869 ms  q1=2.7487 ms  q3=8.0745 ms
+    commit_wait.kernel_gpu: median=3.1849 ms  q1=2.0193 ms  q3=7.2755 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.7020 ms
+    readback: median=0.2812 ms  q1=0.2425 ms  q3=0.3151 ms
+    host_copy: median=1.0685 ms  q1=1.0283 ms  q3=1.1015 ms
+    sum of medians: 7.4624 ms
+  N=4096 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.9672 ms  q1=3.7098 ms  q3=4.0290 ms
+    upload_b: median=4.2130 ms  q1=3.9562 ms  q3=4.3961 ms
+    alloc_c: median=0.0010 ms  q1=0.0008 ms  q3=0.0011 ms
+    encode: median=0.0183 ms  q1=0.0158 ms  q3=0.0187 ms
+    commit_wait: median=16.1220 ms  q1=15.4933 ms  q3=17.1145 ms
+    commit_wait.kernel_gpu: median=14.0885 ms  q1=13.7854 ms  q3=14.5025 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=2.0581 ms
+    readback: median=0.9191 ms  q1=0.9164 ms  q3=0.9252 ms
+    host_copy: median=3.6098 ms  q1=3.5656 ms  q3=3.7464 ms
+    sum of medians: 28.8503 ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 254 filtered out; finished in 2.04s
+
+     Running tests/backend_ops_real_device.rs (target/release/deps/backend_ops_real_device-93d6f0492aba6a91)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/command_batching.rs (target/release/deps/command_batching-8d3e7947dff15ce9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/command_batching_bench.rs (target/release/deps/command_batching_bench-23e4af53648e80b9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/context_cache_bench.rs (target/release/deps/context_cache_bench-f63bb9f8c40253e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/cpu_metal_f16_parity.rs (target/release/deps/cpu_metal_f16_parity-6f9e7d6cbdd730a4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/cpu_metal_f16_tiled_parity.rs (target/release/deps/cpu_metal_f16_tiled_parity-e88e941e91ab6b33)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/cpu_metal_parity.rs (target/release/deps/cpu_metal_parity-3c0eb7d58c6f5097)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/device.rs (target/release/deps/device-a49ccd6e9786ddc4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/device_smoke.rs (target/release/deps/device_smoke-c0b85cb2a1966ffd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/dispatch_boundary.rs (target/release/deps/dispatch_boundary-cf310afca5618769)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/elementwise_gemm_bias_act_source_evidence.rs (target/release/deps/elementwise_gemm_bias_act_source_evidence-e568d2b79486147e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/gemm_auto_parity.rs (target/release/deps/gemm_auto_parity-3c98f96bbd5a3422)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/gemm_bias_act_parity.rs (target/release/deps/gemm_bias_act_parity-b3f0b11ba7f92892)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/gemm_dynamic_tile_parity.rs (target/release/deps/gemm_dynamic_tile_parity-cd884c1e59e6ae87)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/gemm_f16_auto_parity.rs (target/release/deps/gemm_f16_auto_parity-51c175c1bf7b7565)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/gemm_fine_barrier_bit_match.rs (target/release/deps/gemm_fine_barrier_bit_match-f03af4ee23e5ad7c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/gemm_naive_parity.rs (target/release/deps/gemm_naive_parity-1d1b32f4464ed53a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/gemm_resident_parity.rs (target/release/deps/gemm_resident_parity-59228b062cecee92)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/gemm_simdgroup_parity.rs (target/release/deps/gemm_simdgroup_parity-dab4021c6498dd91)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/gemm_strided_parity.rs (target/release/deps/gemm_strided_parity-054c6752fdbba18a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/gemm_transposed_parity.rs (target/release/deps/gemm_transposed_parity-f7a854211fc16f6b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/gemm_transposed_perf.rs (target/release/deps/gemm_transposed_perf-505b5dfbca43d2bf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/linear_forward_device_parity.rs (target/release/deps/linear_forward_device_parity-f0d753d2dc267869)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/memory_roundtrip.rs (target/release/deps/memory_roundtrip-c97e32c6bb3ed1d9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/mse_parity.rs (target/release/deps/mse_parity-e9fa173c464d38d2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mse_source_evidence.rs (target/release/deps/mse_source_evidence-b4b7ceeee07f3d0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/pool_real_device.rs (target/release/deps/pool_real_device-3844d7fefd598877)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/rmsnorm_parity.rs (target/release/deps/rmsnorm_parity-1faac4b893a6c720)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/rmsnorm_softmax_source_evidence.rs (target/release/deps/rmsnorm_softmax_source_evidence-3ba19d060ece544d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/sgd_device_parity.rs (target/release/deps/sgd_device_parity-0d65d4dadd913729)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/shader_source_evidence.rs (target/release/deps/shader_source_evidence-981c40ba36d2a98d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/softmax_parity.rs (target/release/deps/softmax_parity-fb63b76a29bcc1b4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_fine_barrier_ab_bench.rs (target/release/examples/gemm_fine_barrier_ab_bench-4f3d86d5bd6ab97e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_splitk_shapes_bench.rs (target/release/examples/gemm_splitk_shapes_bench-04c76de35d3acc7d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
