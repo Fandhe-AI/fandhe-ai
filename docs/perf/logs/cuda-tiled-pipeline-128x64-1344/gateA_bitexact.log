@@ -1,0 +1,28 @@
+   Compiling fandhe-ai-backend-cpu v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling bench-harness v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 2.51s
+     Running tests/cpu_cuda_tiled_pipeline_parity.rs (work/target-fandhe-ai/release/deps/cpu_cuda_tiled_pipeline_parity-f281b60f0b9b6b84)
+
+running 17 tests
+test compile_tiled_pipeline_128x64_variant_matches_run_tiled_pipeline_f32 ... ok
+test launch_tiled_pipeline_zero_dim_shape_is_noop_without_launch ... ok
+test run_tiled_f32_dispatches_to_pipeline_for_aligned_shape ... ok
+test run_tiled_f32_falls_back_to_classic_for_unaligned_shape ... ok
+test run_tiled_f32_optin_dispatches_128x64_for_aligned_shape ... ok
+test tiled_pipeline_128x64_k4096_stress ... ok
+test tiled_pipeline_128x64_matches_classic_bit_exact ... ok
+test tiled_pipeline_128x64_matches_pipeline_64x64_bit_exact ... ok
+test tiled_pipeline_128x64_matches_reference_across_shapes ... ok
+test tiled_pipeline_k4096_stress ... ok
+test tiled_pipeline_matches_reference_across_shapes ... ok
+test tiled_pipeline_matches_tiled_f32_classic_bit_exact ... ok
+test tiled_pipeline_rejects_misaligned_shape ... ok
+test tiled_pipeline_rejects_mismatched_context_buffers ... ok
+test tiled_pipeline_rejects_mismatched_context_handle ... ok
+test tiled_pipeline_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_pipeline_zero_k_returns_all_zero ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 22.33s
+

@@ -199,6 +199,13 @@ thread_local! {
     /// （並列テスト間の偽陽性混入を避ける）。
     pub(crate) static TILED_PIPELINE_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
 
+    /// `TILED_PIPELINE_LAUNCH_COUNT` のうち、実際に 128×64 側
+    /// （[`TiledPipelineTile::Bm128Bn64`]。[`tiled_pipeline_tile_kind`]
+    /// の形状条件付き選択）へルーティングした回数（イシュー #1344）。
+    /// `TILED_PIPELINE_128X64_PRODUCTION_ENABLED` が `false` の既定状態
+    /// では常に 0 のまま増加しない（第 2 スロットが常に `None` のため）。
+    pub(crate) static TILED_PIPELINE_128X64_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
     /// VJP 専用 NT/TN 転置入口（`run_tiled_f32_nt`／`run_tiled_f32_tn`／
     /// `launch_tiled_f32_resident_nt`。イシュー #1214）が実際に GPU 側
     /// smem 転置カーネル（`transpose_smem_f32`）へ起動した回数。
@@ -337,6 +344,23 @@ pub struct CudaGemm {
     /// `tiled_pipeline` が `None` の場合の失敗理由。`wmma_tf32_error` と
     /// 同じ理由で文字列化して保持する。
     tiled_pipeline_error: Option<String>,
+    /// イシュー #1344。128×64×16 pipeline カーネル（`TiledPipelineTile::
+    /// Bm128Bn64`）の第 2 スロット。`tiled_pipeline`（64×64。常に
+    /// コンパイルされる）に加えて[`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`]
+    /// が `true` の場合のみ追加でコンパイルする（「置換」ではなく
+    /// 「追加」意味論。#1343 が導入した単一スロット置換方式〈const `true`
+    /// で 64×64 の代わりに 128×64 のみをコンパイル〉から、GB10 実機の
+    /// 純カーネル時間比較（#1344）に基づく形状条件付き選択（
+    /// [`tiled_pipeline_tile_kind`]）へ拡張するために追加した）。既定
+    /// `false` では一切コンパイルされず常に `None`（JIT コスト・
+    /// `select_tiled_f32_kernel` の分岐先とも完全不変）。診断専用の
+    /// `new_with_tiled_pipeline_128x64`（`internal-diagnostics`）は本
+    /// フィールドではなく従来どおり `tiled_pipeline` を直接差し替える
+    /// （既存 bit 一致テスト T7〜T11 の契約を変えないため）。
+    tiled_pipeline_128x64: Option<TiledPipelineFunction>,
+    /// `tiled_pipeline_128x64` が `None` の場合の失敗理由。
+    /// `tiled_pipeline_error` と同じ理由で文字列化して保持する。
+    tiled_pipeline_128x64_error: Option<String>,
     /// イシュー #1214。VJP 専用 NT/TN 転置入口（`run_tiled_f32_nt`／
     /// `run_tiled_f32_tn`／`launch_tiled_f32_resident_nt`）が使う GPU 側
     /// smem 転置カーネル（`kernels_transpose::transpose_smem_source_f32(false)`
@@ -919,22 +943,75 @@ fn compile_tiled_pipeline_128x64(device: &CudaDevice) -> Result<TiledPipelineFun
     ))
 }
 
-/// 128×64×16 pipeline カーネル（イシュー #1343）の本番結線スイッチ。
+/// 128×64×16 pipeline カーネル（イシュー #1343・#1344）の本番結線スイッチ。
 ///
-/// `false`（既定）: [`CudaGemm::new`] は従来どおり 64×64 版
-/// （[`compile_tiled_pipeline`]）のみをコンパイルし、128×64 版は一切
-/// コンパイルしない（JIT コスト・`run_tiled_f32` 系 3 入口の挙動とも
-/// 完全に不変）。128×64 版へは `internal-diagnostics` feature 限定の
-/// 診断入口（[`CudaGemm::new_with_tiled_pipeline_128x64`]・
+/// `false`（既定）: [`CudaGemm::new`] は 64×64 版（[`compile_tiled_pipeline`]。
+/// `tiled_pipeline` スロット）のみをコンパイルし、128×64 版
+/// （`tiled_pipeline_128x64` 第 2 スロット）は一切コンパイルしない（JIT
+/// コスト・`run_tiled_f32` 系 3 入口の挙動とも完全に不変）。128×64 版へは
+/// `internal-diagnostics` feature 限定の診断入口
+/// （[`CudaGemm::new_with_tiled_pipeline_128x64`]・
 /// [`CudaGemm::compile_tiled_pipeline_128x64_variant`]）からのみ到達する。
 ///
-/// GB10 実機での純カーネル時間比較・形状条件付き結線の可否判断は兄弟
-/// イシュー #1344 が担い、その結果に基づき `true` へ切り替える判断も
-/// #1344（またはその後続）で行う（`gemm_auto.rs::
-/// MMA_PRIORITY_PRODUCTION_ENABLED` と同型の opt-in ゲート運用。
-/// `docs/perf/cuda-gemm-tiled-pipeline.md`「#1343 128×64×16 候補の追加」
-/// 節参照）。
-pub(crate) const TILED_PIPELINE_128X64_PRODUCTION_ENABLED: bool = false;
+/// `true`: 64×64 版に**加えて**128×64 版も第 2 スロットへ追加コンパイル
+/// する（「置換」ではなく「追加」意味論。#1343 時点の単一スロット置換
+/// 方式から #1344 で拡張）。`select_tiled_f32_kernel` は形状が
+/// [`tiled_pipeline_tile_kind`] の閾値（`TILED_PIPELINE_128X64_MIN_M`/
+/// `_MIN_N`/`_MIN_K`）を満たす場合のみ 128×64 側へ分岐し、それ以外は
+/// 64×64 側を使う。
+///
+/// GB10 実機での純カーネル時間比較・形状条件付き結線の可否判断はイシュー
+/// #1344 で実施した（`docs/perf/cuda-gemm-tiled-pipeline.md`「#1344」節。
+/// 実測記録・採否・閾値の根拠を記載）。`true` への切り替えは同節のゲート
+/// C（純カーネル時間の優位性）・ゲート D（本番ディスパッチ非後退）の
+/// 両方が成立した場合のみ行う（`gemm_auto.rs::
+/// MMA_PRIORITY_PRODUCTION_ENABLED` と同型の opt-in ゲート運用）。
+pub(crate) const TILED_PIPELINE_128X64_PRODUCTION_ENABLED: bool = true;
+
+/// [`tiled_pipeline_tile_kind`] が 128×64 側を選ぶ N の下限（要素数）。
+/// GB10 実機実測（イシュー #1344。`docs/perf/cuda-gemm-tiled-pipeline.md`
+/// 「#1344」節ゲート C。N=256/512/1024/2048/4096 の正方形状 5 回中央値
+/// 比較）で確定した値。GPU-only 純カーネル時間比（128×64 ÷ 64×64。
+/// `pipeline128x64_over_pipeline3_gpu_only`）の中央値は N=1024: 1.050・
+/// N=2048: 1.116・N=4096: 1.353（いずれもゲート C の採用基準 ≥1.05 を
+/// 満たす）に対し、N=512: 0.992・N=256: 0.678（採用基準未達。とくに
+/// N=256 は 128×64 が明確に劣後）だったため、N=1024 を下限とする
+/// （`Option<u32>` にする理由: `u32` の下限値 0 を閾値として使うと
+/// `n >= 0` が常に真になり `clippy::absurd_extreme_comparisons` に抵触
+/// するため、「常に適用」を型で表現する）。受け入れ条件が正方形状
+/// （M=N）の比較のみを求めているため、`tiled_pipeline_tile_kind` は M 軸
+/// の閾値を持たない（N/K のみで判定。将来 M 軸の非正方形状での優位性
+/// 境界が別途実測された場合は M 軸の閾値を追加する）。
+pub(crate) const TILED_PIPELINE_128X64_MIN_N: Option<u32> = Some(1024);
+
+/// [`tiled_pipeline_tile_kind`] が 128×64 側を選ぶ K の下限（要素数）。
+/// `TILED_PIPELINE_128X64_MIN_N` と同じ理由・実測根拠（実測は M=N=K の
+/// 正方形状のみのため N と同値を採用。非正方 K の独立した優位性境界は
+/// 未実測）。
+pub(crate) const TILED_PIPELINE_128X64_MIN_K: Option<u32> = Some(1024);
+
+/// `tiled_f32_kernel_kind` が [`TiledF32Kernel::Pipeline`] を返した場合に、
+/// [`CudaGemm::select_tiled_f32_kernel`] がさらにどちらのタイル構成
+/// （[`TiledPipelineTile`]）を使うかを決める GPU 不要の純粋関数
+/// （イシュー #1344。`tiled_f32_kernel_kind` と同型の設計: 形状条件を
+/// 満たさない、または 128×64 ハンドル自体が未コンパイル
+/// （`has_128x64` が偽。[`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が
+/// `false` の既定状態を含む）場合は常に安全側の 64×64 へ fail-closed
+/// フォールバックする）。
+///
+/// 閾値（`TILED_PIPELINE_128X64_MIN_N`/`_MIN_K`）は 2 軸ともを満たす場合
+/// にのみ 128×64 を選ぶ（AND 条件。`None` は無条件で満たす扱い。M 軸を
+/// 持たない理由は `TILED_PIPELINE_128X64_MIN_N` のドキュメンテーション
+/// コメント参照）。
+pub(crate) fn tiled_pipeline_tile_kind(has_128x64: bool, n: u32, k: u32) -> TiledPipelineTile {
+    let n_ok = TILED_PIPELINE_128X64_MIN_N.is_none_or(|min| n >= min);
+    let k_ok = TILED_PIPELINE_128X64_MIN_K.is_none_or(|min| k >= min);
+    if has_128x64 && n_ok && k_ok {
+        TiledPipelineTile::Bm128Bn64
+    } else {
+        TiledPipelineTile::Bm64Bn64
+    }
+}
 
 /// persistent タイルキュー版 pipeline カーネル（イシュー #1346）が起動
 /// する grid のブロック数を、出力タイル総数・実測 SM 数・SM あたり占有
@@ -1781,19 +1858,29 @@ impl CudaGemm {
         // アサーションを重複させない（`kernels_tiled_pipeline.rs` 冒頭の
         // 契約検査群を単一の真実源とする）。
         //
-        // イシュー #1343: `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
-        // （既定 `false`）が有効化されない限り、ここでは従来どおり 64×64
-        // 版のみをコンパイルする（128×64 版は一切コンパイルしない＝JIT
-        // コスト・挙動とも不変。診断入口は `new_with_tiled_pipeline_128x64`
-        // を参照）。
-        let (tiled_pipeline, tiled_pipeline_error) =
-            match if TILED_PIPELINE_128X64_PRODUCTION_ENABLED {
-                compile_tiled_pipeline_128x64(device)
+        // イシュー #1344: 64×64 版は常にコンパイルする（第 2 スロット方式
+        // への変更後は「置換」ではなく「追加」意味論のため、const の値に
+        // 依らず本番既定経路の土台として不変）。
+        let (tiled_pipeline, tiled_pipeline_error) = match compile_tiled_pipeline(device) {
+            Ok(func) => (Some(func), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+
+        // イシュー #1344: `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
+        // （既定 `false`）が有効化された場合のみ、128×64 版を
+        // `tiled_pipeline` とは独立の第 2 スロットへ追加でコンパイルする
+        // （既定 `false` では一切コンパイルされない＝JIT コスト・
+        // `select_tiled_f32_kernel` の分岐先とも完全不変。GB10 実機での
+        // 純カーネル時間比較・形状条件付き結線の可否判断は
+        // `docs/perf/cuda-gemm-tiled-pipeline.md`「#1344」節参照）。
+        let (tiled_pipeline_128x64, tiled_pipeline_128x64_error) =
+            if TILED_PIPELINE_128X64_PRODUCTION_ENABLED {
+                match compile_tiled_pipeline_128x64(device) {
+                    Ok(func) => (Some(func), None),
+                    Err(e) => (None, Some(e.to_string())),
+                }
             } else {
-                compile_tiled_pipeline(device)
-            } {
-                Ok(func) => (Some(func), None),
-                Err(e) => (None, Some(e.to_string())),
+                (None, None)
             };
 
         // イシュー #1214: VJP 専用 NT/TN 転置入口の smem 転置カーネル。
@@ -1827,6 +1914,8 @@ impl CudaGemm {
             wmma_tf32_staged_swizzle_error,
             tiled_pipeline,
             tiled_pipeline_error,
+            tiled_pipeline_128x64,
+            tiled_pipeline_128x64_error,
             transpose_smem_f32,
             transpose_smem_f32_error,
         })
@@ -2009,6 +2098,14 @@ impl CudaGemm {
         // classic 側（差し替え済み `tiled_f32`）で起動されるようにする。
         gemm.tiled_pipeline = None;
         gemm.tiled_pipeline_error = Some(
+            "disabled by tiled_f32 swizzle variant (issue #1137 A/A confound guard)".to_string(),
+        );
+        // イシュー #1344: 第 2 スロット（128×64）も同じ A/A 混同ガードで
+        // 無効化する（`TILED_PIPELINE_128X64_PRODUCTION_ENABLED` が
+        // 有効化された将来の状態でも、本診断コンストラクタは classic 側
+        // 固定を保証する契約を保つ）。
+        gemm.tiled_pipeline_128x64 = None;
+        gemm.tiled_pipeline_128x64_error = Some(
             "disabled by tiled_f32 swizzle variant (issue #1137 A/A confound guard)".to_string(),
         );
         Ok(gemm)
@@ -2289,11 +2386,72 @@ impl CudaGemm {
         k: u32,
     ) -> (&CudaFunction, LaunchConfig) {
         let kind = tiled_f32_kernel_kind(self.tiled_pipeline.is_some(), a_offset, n, k);
-        if let (TiledF32Kernel::Pipeline, Some(func)) = (kind, self.tiled_pipeline.as_ref()) {
+        if let (TiledF32Kernel::Pipeline, Some(func64)) = (kind, self.tiled_pipeline.as_ref()) {
+            let func = self.select_tiled_pipeline_handle(func64, n, k);
             TILED_PIPELINE_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+            if func.tile() == TiledPipelineTile::Bm128Bn64 {
+                TILED_PIPELINE_128X64_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+            }
             (func.as_cuda_function(), func.launch_config(m, n))
         } else {
             (&self.tiled_f32, tiled_f32_launch_config(m, n))
+        }
+    }
+
+    /// [`Self::select_tiled_f32_kernel`] が `Pipeline` と判定した形状
+    /// （＝`self.tiled_pipeline` が `Some`）に対して、第 1 スロット
+    /// （既定では常に 64×64。`new_with_tiled_pipeline_128x64` 診断経由
+    /// では 128×64 に差し替わっている——`tiled_pipeline_128x64` フィールド
+    /// のドキュメンテーションコメント「診断専用の
+    /// `new_with_tiled_pipeline_128x64`」参照）と第 2 スロット（128×64。
+    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が `true` の場合のみ
+    /// 追加コンパイル）のどちらを実際に起動するかを 1 箇所で決める
+    /// （イシュー #1344・codex-review P2 指摘・PR #1385）。
+    ///
+    /// **`tiled_pipeline_tile_for`（照会 API）との整合**: 従来
+    /// `select_tiled_f32_kernel` と `tiled_pipeline_tile_for` はそれぞれ
+    /// 独立に `tiled_pipeline_tile_kind(self.tiled_pipeline_128x64.is_some(),
+    /// n, k)` を呼んでいたため、`new_with_tiled_pipeline_128x64` 経由
+    /// （第 1 スロット自体が 128×64 へ差し替わっている）で N/K が
+    /// `TILED_PIPELINE_128X64_MIN_N`/`_MIN_K` 未満の形状（例:
+    /// N=K=512）を照会すると、`tiled_pipeline_tile_kind` は閾値未達
+    /// として `Bm64Bn64` を返す一方、`select_tiled_f32_kernel` は
+    /// `func64`（＝差し替え後の実体は 128×64 ハンドル）をそのまま使う
+    /// ため実際には 128×64 が起動される、という不一致があった。本
+    /// メソッドへ選択ロジックを一本化し、`tiled_pipeline_tile_for` は
+    /// 本メソッドが返したハンドル自身の `tile()` タグ（＝実際に起動
+    /// されるハンドルの真の構成）を返すことで、照会結果と実起動が
+    /// 常に一致することを保証する。
+    fn select_tiled_pipeline_handle<'a>(
+        &'a self,
+        func64: &'a TiledPipelineFunction,
+        n: u32,
+        k: u32,
+    ) -> &'a TiledPipelineFunction {
+        // イシュー #1344: `tiled_pipeline` が既に Pipeline 側と判定
+        // された形状に対して、第 2 スロット（128×64）が利用可能かつ
+        // 閾値条件を満たす場合のみそちらへ分岐する。第 2 スロットが
+        // `None` になるのは `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
+        // が `false`（既定でない特殊ビルド）の場合、または
+        // `compile_tiled_pipeline_128x64` が実行時に失敗した場合のみ
+        // （`TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true` の現行
+        // 既定では `Self::new` が `tiled_pipeline_128x64` を
+        // `tiled_pipeline` とは独立にコンパイルするため、
+        // `new_with_tiled_pipeline_128x64` 診断経由〈内部で
+        // `Self::new` を呼んだうえで `tiled_pipeline` フィールドのみ
+        // 128×64 へ差し替える〉でも `tiled_pipeline_128x64` は
+        // 通常どおり `Some`（＝第 1 スロットと同じ 128×64 ハンドル）
+        // になりうる）。`None` の場合は常に `func64`（＝実際に
+        // `self.tiled_pipeline` に入っているハンドル。既定は 64×64、
+        // 診断経由では 128×64）をそのまま使う fail-closed
+        // フォールバックで、`func.tile()` は選択されたハンドル自身の
+        // タグを見るため launch config は常に整合し、既存の T7〜T11
+        // （`new_with_tiled_pipeline_128x64` 経由）の契約も変えない。
+        let tile_kind = tiled_pipeline_tile_kind(self.tiled_pipeline_128x64.is_some(), n, k);
+        if tile_kind == TiledPipelineTile::Bm128Bn64 {
+            self.tiled_pipeline_128x64.as_ref().unwrap_or(func64)
+        } else {
+            func64
         }
     }
 
@@ -2308,6 +2466,58 @@ impl CudaGemm {
     #[cfg(feature = "internal-diagnostics")]
     pub fn tiled_f32_kernel_for(&self, n: u32, k: u32) -> TiledF32Kernel {
         tiled_f32_kernel_kind(self.tiled_pipeline.is_some(), 0, n, k)
+    }
+
+    /// [`Self::select_tiled_f32_kernel`] が実際に選ぶタイル構成
+    /// （[`TiledPipelineTile`]）を、起動を伴わずに照会する（イシュー
+    /// #1344。`tiled_f32_kernel_for` の一段詳細版——`Pipeline` と判定
+    /// された場合に 64×64／128×64 のどちらへ分岐するかまで返す）。
+    /// `TiledF32Kernel::Classic` と判定される形状では `None` を返す
+    /// （`a_offset` は常に 0 の入口〈`run_tiled_f32`／`launch_tiled_f32`〉
+    /// 向けの照会のため引数に取らない。`tiled_f32_kernel_for` と同じ
+    /// 理由。`tiled_pipeline_tile_kind` が M 軸の閾値を持たないため本
+    /// メソッドも `m` を取らない）。
+    ///
+    /// **実起動との整合（codex-review P2 指摘・PR #1385）**: `Pipeline`
+    /// と判定された場合の分岐先は、`select_tiled_f32_kernel` と同じ
+    /// [`Self::select_tiled_pipeline_handle`] を呼んで得たハンドル自身の
+    /// `tile()` タグを返す（閾値を独立に再計算しない）。これにより、
+    /// `new_with_tiled_pipeline_128x64`（第 1 スロット自体が 128×64 へ
+    /// 差し替わっている診断インスタンス）に対して閾値未満の形状
+    /// （例: N=K=512）を照会しても、実際に起動されるハンドル（この
+    /// 場合は差し替え後の 128×64）と一致した結果を返す
+    /// （`select_tiled_pipeline_handle` のドキュメンテーションコメント
+    /// 「`tiled_pipeline_tile_for`（照会 API）との整合」参照）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn tiled_pipeline_tile_for(&self, n: u32, k: u32) -> Option<TiledPipelineTile> {
+        match self.tiled_f32_kernel_for(n, k) {
+            TiledF32Kernel::Classic => None,
+            TiledF32Kernel::Pipeline => {
+                // `tiled_f32_kernel_for` が `Pipeline` を返した以上
+                // `self.tiled_pipeline` は必ず `Some`（`tiled_f32_kernel_kind`
+                // の契約。`select_tiled_f32_kernel` の `if let` パターンと
+                // 同じ前提）。ここでも本番経路と同じく `unwrap`/`expect`
+                // でパニックさせず、理論上到達しない `None` は
+                // fail-closed に `None`（Classic 相当の照会結果）へ
+                // 落とす（`.claude/rules/coding-rust.md`）。
+                self.tiled_pipeline
+                    .as_ref()
+                    .map(|func64| self.select_tiled_pipeline_handle(func64, n, k).tile())
+            }
+        }
+    }
+
+    /// [`Self::tiled_pipeline_128x64`] スロット（第 2 スロット。
+    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が `true` の場合の
+    /// み `Self::new` が追加コンパイルする）が実際にコンパイル済みかを
+    /// 返す（`tiled_pipeline_available` の 128×64 版。イシュー #1344・
+    /// codex-review P2 指摘・PR #1385。テストが「本番結線が有効か」
+    /// （＝閾値以上の形状で 128×64 を選びうる環境か）と「選択ロジック
+    /// 自体が壊れているか」を区別できるようにするための可観測点。
+    /// `internal-diagnostics` feature 限定）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn tiled_pipeline_128x64_available(&self) -> bool {
+        self.tiled_pipeline_128x64.is_some()
     }
 
     /// tiled f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
@@ -4809,6 +5019,60 @@ mod tests {
                  shape is aligned and pipeline is available"
             );
         }
+    }
+
+    /// イシュー #1344: `tiled_pipeline_tile_kind` の閾値判定（GPU 不要の
+    /// 純粋関数）を、プレースホルダ閾値（`u32::MAX`）の下で検査する。
+    /// GB10 実機実測で閾値定数を確定したら、本テストの期待値も実測結果に
+    /// 合わせて更新する（`tiled_f32_kernel_kind_falls_back_to_classic_*`
+    /// と同型の表テスト方針）。
+    #[test]
+    fn tiled_pipeline_tile_kind_falls_back_to_64x64_when_unavailable_or_below_threshold() {
+        // 第 2 スロット自体が未コンパイル（`has_128x64 = false`）の場合は
+        // 形状に依らず常に 64×64（既定 `TILED_PIPELINE_128X64_PRODUCTION_
+        // ENABLED = false` の本番状態と同じ）。
+        for (n, k) in [(64u32, 64u32), (4096, 4096), (0, 0)] {
+            assert_eq!(
+                tiled_pipeline_tile_kind(false, n, k),
+                TiledPipelineTile::Bm64Bn64,
+                "has_128x64=false must always fall back to Bm64Bn64 regardless of shape \
+                 (n={n}, k={k})"
+            );
+        }
+
+        // 第 2 スロットが利用可能でも、いずれかの軸が確定済み閾値
+        // （`TILED_PIPELINE_128X64_MIN_N`/`_MIN_K`。GB10 実機実測根拠は
+        // `docs/perf/cuda-gemm-tiled-pipeline.md`「#1344」節）を下回る
+        // 形状では 64×64 側になる（AND 条件の fail-closed 契約。`None`
+        // 閾値の軸は常に満たすため、その軸単体では検証しない）。
+        if let Some(min_n) = TILED_PIPELINE_128X64_MIN_N {
+            let k_floor = TILED_PIPELINE_128X64_MIN_K.unwrap_or(0);
+            assert_eq!(
+                tiled_pipeline_tile_kind(true, min_n - 1, k_floor),
+                TiledPipelineTile::Bm64Bn64,
+                "n below TILED_PIPELINE_128X64_MIN_N must fall back to Bm64Bn64"
+            );
+        }
+        if let Some(min_k) = TILED_PIPELINE_128X64_MIN_K {
+            let n_floor = TILED_PIPELINE_128X64_MIN_N.unwrap_or(0);
+            assert_eq!(
+                tiled_pipeline_tile_kind(true, n_floor, min_k - 1),
+                TiledPipelineTile::Bm64Bn64,
+                "k below TILED_PIPELINE_128X64_MIN_K must fall back to Bm64Bn64"
+            );
+        }
+
+        // 両軸とも確定済み閾値以上（`None` は無条件で満たす扱い）を
+        // 満たす場合は 128×64 が選ばれる（AND 条件・境界含む契約の確認。
+        // 閾値未確定〈両方 `None`〉の間は任意形状で検証する）。
+        let n_at_threshold = TILED_PIPELINE_128X64_MIN_N.unwrap_or(1024);
+        let k_at_threshold = TILED_PIPELINE_128X64_MIN_K.unwrap_or(1024);
+        assert_eq!(
+            tiled_pipeline_tile_kind(true, n_at_threshold, k_at_threshold),
+            TiledPipelineTile::Bm128Bn64,
+            "both axes meeting the confirmed threshold (or unconstrained) must select \
+             Bm128Bn64"
+        );
     }
 
     /// イシュー #856。`CudaGemm::should_launch_wmma_tf32_staged_swizzle`

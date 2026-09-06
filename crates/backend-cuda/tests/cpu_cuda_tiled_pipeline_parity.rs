@@ -776,14 +776,14 @@ fn compile_tiled_pipeline_128x64_variant_matches_run_tiled_pipeline_f32() {
 }
 
 /// [`fandhe_ai_backend_cuda::CudaGemm::new`]（本番既定コンストラクタ）が
-/// 保持する `tiled_pipeline` スロットは、
-/// `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`（既定 `false`）が有効化
-/// されない限り常に `Bm64Bn64` タグでコンパイルされることを確認する
-/// （非対応環境では `None`）。イシュー #1343 の非結線契約
-/// （`gemm.rs::TILED_PIPELINE_128X64_PRODUCTION_ENABLED` ドキュメンテー
-/// ションコメント参照）の回帰防御であり、CUDA 実機なしでも通常 CI
-/// ジョブで実行される（`#[ignore]` なし。他の環境適応スモークと同じ
-/// 分岐パターン）。
+/// 保持する第 1 スロット（`tiled_pipeline`）は常に `Bm64Bn64` タグで
+/// コンパイルされることを確認する（非対応環境では `None`）。イシュー
+/// #1344 で第 2 スロット方式（`tiled_pipeline_128x64`）へ拡張した後も、
+/// 第 1 スロットは `TILED_PIPELINE_128X64_PRODUCTION_ENABLED` の値に
+/// 依らず 64×64 のまま不変という契約（`gemm.rs::CudaGemm::new` の
+/// 「イシュー #1344」コメント参照）の回帰防御であり、CUDA 実機なしでも
+/// 通常 CI ジョブで実行される（`#[ignore]` なし。他の環境適応スモークと
+/// 同じ分岐パターン）。
 #[test]
 fn default_new_tiled_pipeline_tile_is_never_128x64() {
     let device = match CudaDevice::new(0) {
@@ -815,9 +815,139 @@ fn default_new_tiled_pipeline_tile_is_never_128x64() {
             assert_eq!(
                 tile,
                 fandhe_ai_backend_cuda::TiledPipelineTile::Bm64Bn64,
-                "CudaGemm::new must never default to the 128x64 tile while \
-                 TILED_PIPELINE_128X64_PRODUCTION_ENABLED is false"
+                "CudaGemm::new's primary (tiled_pipeline) slot must always compile as \
+                 Bm64Bn64 regardless of TILED_PIPELINE_128X64_PRODUCTION_ENABLED (issue \
+                 #1344 second-slot design)"
             );
         }
     }
+}
+
+/// イシュー #1344: GB10 実機実測（`docs/perf/cuda-gemm-tiled-pipeline.md`
+/// 「#1344」節ゲート C）に基づき
+/// `TILED_PIPELINE_128X64_PRODUCTION_ENABLED` を `true` へ結線した後、
+/// 本番既定コンストラクタ [`CudaGemm::new`] が形状条件付きで 128×64／
+/// 64×64 を選ぶことを end-to-end で確認する（`run_tiled_f32` が実際に
+/// 返す出力が `run_tiled_pipeline_f32`〈128×64 側。
+/// `compile_tiled_pipeline_128x64_variant` 経由で独立コンパイルした
+/// ハンドル〉と bit 完全一致することまで検証し、`tiled_pipeline_tile_for`
+/// の照会結果だけに留めない）。閾値未満の形状（N=512）では引き続き
+/// 64×64 側になることも併せて確認する（非後退の境界確認）。
+///
+/// **本テストは `TILED_PIPELINE_128X64_PRODUCTION_ENABLED`（`gemm.rs`
+/// 側 `pub(crate)` 定数のため本 external test crate からは直接参照
+/// できない）が `true` の場合にのみ意味を持つ**（`false` の間は
+/// `tiled_pipeline_128x64` が常に `None` のため、
+/// `tiled_pipeline_tile_for(1024, 1024)` は形状に依らず `Bm64Bn64` を
+/// 返す）。その場合は本テストを早期 return で skip し、定数が `true` に
+/// 切り替わった時点で実効化される（照会結果自体で有効化状態を判定する）。
+#[test]
+#[ignore]
+fn default_new_dispatches_128x64_for_shapes_meeting_threshold_when_enabled() {
+    let device = match CudaDevice::new(0) {
+        Ok(dev) => dev,
+        Err(CudaError::DriverUnavailable { .. } | CudaError::Driver(_)) => return,
+        Err(other) => panic!("unexpected CudaError variant from CudaDevice::new: {other}"),
+    };
+
+    let gemm = match CudaGemm::new(&device) {
+        Ok(gemm) => gemm,
+        Err(CudaError::NvrtcUnavailable { .. }) => return,
+        Err(other) => panic!("unexpected CudaError variant from CudaGemm::new: {other}"),
+    };
+
+    // 環境非対応判定（cp.async 非対応・sm_80 未満）と期待値検証を分離する
+    // （codex-review P2 指摘・PR #1385）。以前は `tiled_pipeline_tile_for
+    // (1024, 1024) != Some(Bm128Bn64)` の 1 つの条件で早期 return して
+    // いたため、本番結線解除（`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
+    // が誤って `false` へ差し戻された）・128×64 側のみのコンパイル失敗・
+    // 選択条件の回帰のいずれが起きても、このテストは黙って skip される
+    // だけで検知できなかった。
+    //
+    // `tiled_pipeline_available()`（第 1 スロット。64×64。cp.async 対応
+    // 環境なら常に `Self::new` がコンパイルする）が `false` の場合のみ
+    // 「そもそも cp.async 非対応環境」として正当な early return とする。
+    if !gemm.tiled_pipeline_available() {
+        // cp.async 非対応環境では第 2 スロット（128×64）も当然
+        // コンパイルされない（`tiled_pipeline_128x64_available` と
+        // 矛盾しないことのみ確認したうえで skip）。
+        assert!(!gemm.tiled_pipeline_128x64_available());
+        return;
+    }
+
+    // ここから先は cp.async 対応環境が確定している。この場合
+    // `TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true`（現行既定・
+    // 本 PR 時点で変更不可のコンパイル時定数）である限り第 2 スロット
+    // も必ずコンパイルされているはずであり、`false` は本番結線解除
+    // または 128×64 側固有のコンパイル失敗という回帰を意味する。
+    // これを早期 return で握りつぶさず、アサーション失敗として顕在化
+    // させる。
+    assert!(
+        gemm.tiled_pipeline_128x64_available(),
+        "cp.async-capable environment (tiled_pipeline_available()=true) must also have the \
+         128x64 second slot compiled when TILED_PIPELINE_128X64_PRODUCTION_ENABLED is true; \
+         a false result here indicates either the production wiring was reverted or the \
+         128x64 kernel failed to compile despite the 64x64 kernel succeeding — both are \
+         regressions this test must catch rather than silently skip"
+    );
+    assert_eq!(
+        gemm.tiled_pipeline_tile_for(1024, 1024),
+        Some(fandhe_ai_backend_cuda::TiledPipelineTile::Bm128Bn64),
+        "n=1024 k=1024 must select the 128x64 handle per the adopted GB10 threshold now that \
+         the 128x64 second slot is confirmed available"
+    );
+
+    // 採用済み閾値（N=K=1024）を満たす形状は 128×64 へ、満たさない形状
+    // （N=512）は 64×64 へ分岐する（`gemm.rs::TILED_PIPELINE_128X64_MIN_N`/
+    // `_MIN_K` の実測根拠と一致）。
+    for (n, k, expected) in [
+        (
+            1024u32,
+            1024u32,
+            fandhe_ai_backend_cuda::TiledPipelineTile::Bm128Bn64,
+        ),
+        (
+            2048,
+            2048,
+            fandhe_ai_backend_cuda::TiledPipelineTile::Bm128Bn64,
+        ),
+        (
+            512,
+            512,
+            fandhe_ai_backend_cuda::TiledPipelineTile::Bm64Bn64,
+        ),
+    ] {
+        assert_eq!(
+            gemm.tiled_pipeline_tile_for(n, k),
+            Some(expected),
+            "shape n={n} k={k} must dispatch to {expected:?} per the adopted GB10 threshold"
+        );
+    }
+
+    // 閾値を満たす形状で `run_tiled_f32`（本番既定経路）の出力が、独立
+    // コンパイルした 128×64 ハンドル経由の `run_tiled_pipeline_f32` と
+    // bit 完全一致することを end-to-end で確認する（照会 API の結果だけ
+    // でなく実際の起動結果まで検証）。
+    let m = 1024u32;
+    let n = 1024u32;
+    let k = 1024u32;
+    let mut rng = bench_harness::rng::Xorshift64Star::new(0x1344_1344);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+
+    let c_default = gemm
+        .run_tiled_f32(&a, &b, m, n, k)
+        .expect("CudaGemm::new's run_tiled_f32 must succeed for the adopted threshold shape");
+
+    let gemm128 = CudaGemm::new_with_tiled_pipeline_128x64(&device)
+        .expect("128x64 diagnostic constructor must succeed on the same runner");
+    let c_128x64 = gemm128
+        .run_tiled_pipeline_f32(&a, &b, m, n, k)
+        .expect("128x64 run_tiled_pipeline_f32 must succeed on the same runner");
+
+    assert_eq!(
+        c_default, c_128x64,
+        "default CudaGemm::new dispatch for n={n} k={k} (above the adopted threshold) must \
+         match the 128x64 kernel bit-for-bit"
+    );
 }

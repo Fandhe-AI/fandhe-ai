@@ -1,0 +1,29 @@
+イシュー #1344 実測環境情報（内部ホスト名は含めない）
+
+- 実行日時: 2026-09-07（JST）
+- 対象デバイス: NVIDIA GB10（DGX Spark。compute capability 12.1 / sm_121）
+- driver_version: 580.173.02
+- nvcc: release 13.0, V13.0.88 (build cuda_13.0.r13.0/compiler.36424714_0)
+- rustc: 1.97.0 (2d8144b78 2026-07-07)
+- OS: Linux 6.17.0-1031-nvidia aarch64
+- base commit（rsync 元 worktree の origin/main 追従先）: 1d5b620412a05903f15636ebc45d9ad742b85edc
+  （PR #1381「128×64×16 f32 pipeline カーネルを opt-in で追加する」マージ後）
+- 実行直前の負荷確認（各ゲート開始前に確認。常駐 ComfyUI/Kokoro プロセスはメモリ常駐のみで
+  GPU 使用率への寄与は 0% 継続）:
+  - nvidia-smi --query-gpu=utilization.gpu: 0 %（全ゲート開始前で確認）
+  - uptime: "up 10 days, 15:31" 〜 "up 10 days, 15:56"（load average 0.00〜0.57 の範囲。
+    ゲート D 終盤で load average 0.45〜0.57 まで上昇したが utilization.gpu は 0% を維持）
+  - nvidia-smi --query-compute-apps: comfyui-env（170 MiB）・kokoro venv（870 MiB）のみ
+    （いずれも計測中は非アクティブ）
+- 実行コマンド:
+  - ゲート A: cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+      --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture --test-threads=1
+  - ゲート C: cargo run -p fandhe-ai-backend-cuda --example gemm_tiled_pipeline_bench --release \
+      --locked --features internal-diagnostics
+  - ゲート D: 上記ゲート C コマンドを同一 HEAD で
+      TILED_PIPELINE_128X64_PRODUCTION_ENABLED=false（base）/true（after）の 2 状態で実行
+  - ゲート B: cargo test -p fandhe-ai-backend-cuda --release --locked --all-features \
+      --test <各バイナリ名> -- --ignored --nocapture --test-threads=1
+  - 最終確認: cargo test -p fandhe-ai-backend-cuda --release --locked --all-features \
+      --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture --test-threads=1
+      （結線後の状態〈const=true〉で 18 tests 実行・全 pass）

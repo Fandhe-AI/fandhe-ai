@@ -2,19 +2,23 @@
 //! XOR スウィズル・cp.async zfill 境界。イシュー #1343・親イシュー
 //! #1342）。
 //!
-//! # 位置づけ（opt-in・本番非結線）
+//! # 位置づけ（形状条件付きで本番結線済み。イシュー #1344）
 //!
 //! `kernels_tiled_pipeline.rs`（64×64×16・4×4 レジスタブロック。イシュー
-//! #1033）の演算密度を 2 倍にした**選択可能な変種**。本モジュール単独では
-//! 本番既定経路（`ops.rs::CudaBackendOps::gemm` → `gemm.rs::CudaGemm::
-//! run_tiled_f32` 系 3 入口）を一切変更しない。本番結線
-//! （`gemm.rs::TILED_PIPELINE_128X64_PRODUCTION_ENABLED`）は既定 `false`
-//! （常にコンパイルすら行わない）で、`internal-diagnostics` feature 限定の
-//! 診断入口（`CudaGemm::new_with_tiled_pipeline_128x64`／
-//! `CudaGemm::compile_tiled_pipeline_128x64_variant`）からのみ到達する。
-//! GB10 実機での純カーネル時間比較・形状条件付き結線の可否判断は兄弟
-//! イシュー #1344 が担う（`docs/perf/cuda-gemm-tiled-pipeline.md`
-//! 「#1343 128×64×16 候補の追加」節）。
+//! #1033）の演算密度を 2 倍にした変種。GB10 実機実測（イシュー #1344。
+//! `docs/perf/cuda-gemm-tiled-pipeline.md`「#1344」節）により、N・K が
+//! いずれも 1024 以上の正方形状で 64×64 版より明確に優位（GPU-only 純
+//! カーネル時間比の 5 回中央値: N=1024 で 1.05 倍・N=2048 で 1.12 倍・
+//! N=4096 で 1.35 倍）と確認されたため、`gemm.rs::CudaGemm::
+//! select_tiled_f32_kernel`（`run_tiled_f32` 系 3 入口が共有する選択
+//! ロジック）が `tiled_pipeline_tile_kind`（N≥1024 かつ K≥1024 で
+//! 128×64 を選ぶ純粋関数）経由で形状条件付きに本モジュールへ分岐する
+//! （`gemm.rs::TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true`）。
+//! N/K が閾値未満の形状（N=512 以下で優位性なし・明確に劣後）は引き続き
+//! 64×64 版のまま。`internal-diagnostics` feature 限定の診断入口
+//! （`CudaGemm::new_with_tiled_pipeline_128x64`／
+//! `CudaGemm::compile_tiled_pipeline_128x64_variant`）は変更前と同じ
+//! 挙動を維持する。
 //!
 //! # persistent タイルキュー版の追加（イシュー #1347）
 //!
