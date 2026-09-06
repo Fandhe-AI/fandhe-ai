@@ -489,6 +489,14 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > 第 9 区分）は v0.6.0 リリースサイクルの一環でユーザー承認を得て
 > `fandhe-ai =0.5.0` から `=0.6.0` へ更新した（`scripts/bench/framework-compare/`）。
 
+> **追補（2026-09-06）**: `.github/workflows/release-all.yml`
+> （[run 34009383583](https://github.com/Fandhe-AI/fandhe-ai/actions/runs/34009383583)）により公開 6 クレートの **v0.7.0 の公開を
+> 完了した**（成功・6 クレート crates.io 反映確認済み）。v0.7.0 公開と
+> framework-compare の承認ピン（`.claude/rules/deps-policy.md` 第 9 区分）の
+> 更新は、イシュー #1185（ブロッカーとして名指し）に対するユーザー指示
+> 「#1185 公開してください」（2026-09-06）に基づき、`fandhe-ai =0.6.0` から
+> `=0.7.0` へ更新した（`scripts/bench/framework-compare/`）。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -661,6 +669,12 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 ## 変更履歴
 
+- 2026-09-06（v0.7.0 リリースサイクル）: `release-all.yml` で公開 6 クレートの
+  v0.7.0 を crates.io へ公開完了（run ID は §10 追補を参照）。§10 追補に記録した。
+  framework-compare の承認ピンをイシュー #1185（ブロッカーとして名指し）に
+  対するユーザー指示「#1185 公開してください」（2026-09-06）に基づき
+  `fandhe-ai =0.6.0` → `=0.7.0` へ更新した（`.claude/rules/deps-policy.md`
+  第 9 区分・`docs/framework-compare-harness-decision.md`）。
 - 2026-09-02（v0.6.0 リリースサイクル）: `release-all.yml`（run 33503500987）で
   公開 6 クレートの v0.6.0 を crates.io へ公開完了。リリースタグ `v0.6.0`
   （`8863b09`）を付与済み。§10 追補に記録した。framework-compare の承認ピンを
