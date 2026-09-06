@@ -76,6 +76,22 @@ pub(crate) struct GemmGateConstants {
     /// staged・direct-load 双方の kk ループが参照する。
     /// `gemm_simdgroup_tiled_f16` は参照しない。
     pub(crate) frag_load_ksteps: u32,
+    /// 協調ロードレイアウト候補（イシュー #1298）の行末パディング要素数
+    /// （`TGP_PAD`。既存 index 6。値は 0・4・8 のいずれか）。従来は
+    /// `cfg.pad()` の固定 2 値（0/4）を直接渡していたが、`crate::tile::
+    /// CoopLoadConfig::pad_elems` が導出した実効値へ差し替える（本フィールド
+    /// を経由することで、共有メモリ確保量計算〈`crate::tile::TileConfig::
+    /// shared_mem_bytes_for_pad`〉と本関数が設定する function constant の
+    /// 値を単一の呼び出し元 [`crate::gemm::MetalGemm::pipeline_for_tile`] が
+    /// 一致させる契約を保つ）。
+    pub(crate) tgp_pad_elems: u32,
+    /// 協調ロードレイアウト候補（イシュー #1298）の「スレッド→float4
+    /// グループ」割当ゲート（`COOP_LOAD_LAYOUT`。index 14。値は 0 または
+    /// 1）。呼び出し元 [`crate::gemm::MetalGemm::pipeline_for_tile`] が
+    /// インスタンスの `coop_load: crate::tile::CoopLoadConfig` から渡す。
+    /// `gemm_simdgroup_tiled_f16` は参照しない（`pipeline_for_tile_f16` は
+    /// 常に `0` を渡す no-op 契約）。
+    pub(crate) coop_load_layout: u32,
 }
 
 /// `shaders/gemm.metal` を実行時コンパイルして `MTLLibrary` を返す。
@@ -205,6 +221,8 @@ pub(crate) fn make_pipeline_with_constants(
         unroll_acc_enabled,
         frag_load_device_hoisted,
         frag_load_ksteps,
+        tgp_pad_elems,
+        coop_load_layout,
     } = gates;
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -256,7 +274,14 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::Bool,
             5,
         );
-        let pad = cfg.pad();
+        // イシュー #1298: 従来は `cfg.pad()` を直接渡していたが、協調ロード
+        // パディング候補（`crate::tile::TgpPad`。0/4/8）を表現するため
+        // `tgp_pad_elems`（呼び出し元 `crate::gemm::MetalGemm::
+        // pipeline_for_tile` が `self.coop_load.pad_elems(cfg)` から渡す
+        // 実効値）へ差し替えた。本番既定（`crate::tile::COOP_LOAD_CONFIG`）
+        // では `cfg.pad()` と常に一致するため挙動は無変更（`crate::tile`
+        // `coop_load_default_pad_elems_matches_tile_config_pad` で固定）。
+        let pad = tgp_pad_elems;
         constants.setConstantValue_type_atIndex(
             std::ptr::NonNull::from(&pad).cast(),
             MTLDataType::UInt,
@@ -342,6 +367,18 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::UInt,
             13,
         );
+        // 協調ロードレイアウト候補ゲート（イシュー #1298）。index は
+        // FRAG_LOAD_KSTEPS（index 13）の直後の 14（`shaders/gemm.metal`
+        // 冒頭 COOP_LOAD_LAYOUT 宣言と 1:1 対応。`tests/shader_source_evidence.rs`
+        // が index を含めて固定する）。`gemm_simdgroup_tiled_f16` は参照
+        // しないため、`pipeline_for_tile_f16` からの呼び出しでは無害な
+        // no-op（他ゲートと同じ扱い）。
+        let coop_layout = coop_load_layout;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&coop_layout).cast(),
+            MTLDataType::UInt,
+            14,
+        );
     }
 
     let func = library
@@ -393,16 +430,27 @@ pub(crate) fn make_pipeline_source_specialized(
         unroll_acc_enabled,
         frag_load_device_hoisted,
         frag_load_ksteps,
+        tgp_pad_elems,
+        coop_load_layout,
     } = gates;
-    let params = crate::spec_source::SpecializationParams::new(
-        cfg,
-        swizzle_enabled,
-        fine_barrier_enabled,
-        unroll_acc_enabled,
-        frag_load_device_hoisted,
-        frag_load_ksteps,
-        pattern,
-    );
+    let params = crate::spec_source::SpecializationParams {
+        // イシュー #1298: 協調ロード軸（`tgp_pad_elems`/`coop_load_layout`）
+        // は `SpecializationParams::new`（7 引数のまま不変）の既定値
+        // （`cfg.pad()`／`0`）を struct update 構文で `gates` の実効値へ
+        // 上書きする（`GemmGateConstants`〈function constant 経路〉と
+        // 同一の値を渡す契約を保つ）。
+        tgp_pad_elems,
+        coop_load_layout,
+        ..crate::spec_source::SpecializationParams::new(
+            cfg,
+            swizzle_enabled,
+            fine_barrier_enabled,
+            unroll_acc_enabled,
+            frag_load_device_hoisted,
+            frag_load_ksteps,
+            pattern,
+        )
+    };
     let src = crate::spec_source::specialized_gemm_source(&params);
     let library = compile_source(device, &src)?;
     make_pipeline(device, &library, function_name)

@@ -72,6 +72,17 @@ pub(crate) struct SpecializationParams {
     /// `GEMM_SPEC_FRAG_LOAD_KSTEPS`（イシュー #1293。値は 1 または 2）。
     /// `crate::pipeline::GemmGateConstants::frag_load_ksteps` と同じ意味。
     pub(crate) frag_load_ksteps: u32,
+    /// `GEMM_SPEC_TGP_PAD`（イシュー #1298）。従来は [`new`](Self::new) 内で
+    /// `cfg.pad()` を直接埋め込んでいたが、`crate::pipeline::
+    /// GemmGateConstants::tgp_pad_elems` と同じ「呼び出し元が実効値を渡す」
+    /// 設計へ揃えた。[`new`](Self::new) は既定値として `cfg.pad()` を渡す
+    /// （挙動は無変更）。
+    pub(crate) tgp_pad_elems: u32,
+    /// `GEMM_SPEC_COOP_LOAD_LAYOUT`（イシュー #1298）。
+    /// `crate::pipeline::GemmGateConstants::coop_load_layout` と同じ意味。
+    /// [`new`](Self::new) は本番既定 `0`（`crate::tile::CoopLoadLayout::
+    /// RowLinear`）を渡す。
+    pub(crate) coop_load_layout: u32,
 }
 
 impl SpecializationParams {
@@ -104,6 +115,11 @@ impl SpecializationParams {
             trans_b,
             frag_load_device_hoisted,
             frag_load_ksteps,
+            // イシュー #1298: 本コンストラクタは従来の 7 引数のまま据え置き
+            // （既存呼び出し元を破壊しない）、協調ロード軸は本番既定値
+            // （`cfg.pad()`／`0`＝`CoopLoadLayout::RowLinear`）で埋める。
+            tgp_pad_elems: cfg.pad(),
+            coop_load_layout: 0,
         }
     }
 }
@@ -148,7 +164,10 @@ pub(crate) fn specialized_gemm_source(params: &SpecializationParams) -> String {
         "#define GEMM_SPEC_USE_TGP_STAGING {}\n",
         msl_bool(cfg.staged)
     ));
-    header.push_str(&format!("#define GEMM_SPEC_TGP_PAD {}\n", cfg.pad()));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_TGP_PAD {}\n",
+        params.tgp_pad_elems
+    ));
     header.push_str(&format!(
         "#define GEMM_SPEC_SWIZZLE_ENABLED {}\n",
         msl_bool(params.swizzle_enabled)
@@ -176,6 +195,10 @@ pub(crate) fn specialized_gemm_source(params: &SpecializationParams) -> String {
     header.push_str(&format!(
         "#define GEMM_SPEC_FRAG_LOAD_KSTEPS {}\n",
         params.frag_load_ksteps
+    ));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_COOP_LOAD_LAYOUT {}\n",
+        params.coop_load_layout
     ));
     header.push_str(&format!("#define GEMM_SPEC_ACC_ROWS {acc_rows}\n"));
     header.push_str(&format!("#define GEMM_SPEC_ACC_COLS {acc_cols}\n"));
@@ -215,6 +238,7 @@ mod tests {
                 assert!(src.contains(&format!("#define GEMM_SPEC_TGP_PAD {}\n", cfg.pad())));
                 assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED false\n"));
                 assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_KSTEPS 1\n"));
+                assert!(src.contains("#define GEMM_SPEC_COOP_LOAD_LAYOUT 0\n"));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_ROWS {}\n", cfg.acc_rows())));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_COLS {}\n", cfg.acc_cols())));
             }
@@ -314,5 +338,35 @@ mod tests {
         assert!(src.contains("#define GEMM_SPEC_TRANS_B true\n"));
         assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED true\n"));
         assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_KSTEPS 2\n"));
+    }
+
+    /// イシュー #1298: 協調ロード軸（`tgp_pad_elems`/`coop_load_layout`）を
+    /// `new()` の既定値から変更した場合、生成される `#define` が実際に
+    /// 追従することを固定する（struct update 構文で直接フィールドを
+    /// 上書きして構築。`new()` 自体は 7 引数のまま不変）。
+    #[test]
+    fn coop_load_axis_overrides_are_reflected_in_generated_defines() {
+        let base = SpecializationParams::new(
+            CANDIDATES[3],
+            false,
+            false,
+            false,
+            false,
+            1,
+            TransposePattern::Nn,
+        );
+        let overridden = SpecializationParams {
+            tgp_pad_elems: 8,
+            coop_load_layout: 1,
+            ..base
+        };
+        let src = specialized_gemm_source(&overridden);
+        assert!(src.contains("#define GEMM_SPEC_TGP_PAD 8\n"));
+        assert!(src.contains("#define GEMM_SPEC_COOP_LOAD_LAYOUT 1\n"));
+        assert_ne!(
+            specialized_gemm_source(&base),
+            src,
+            "pad/layout 差分が生成文字列へ反映されていない"
+        );
     }
 }
