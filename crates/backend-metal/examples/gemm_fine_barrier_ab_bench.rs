@@ -50,6 +50,17 @@
 /// `docs/perf/metal-gemm-fine-barrier-ab.md` で人間が確定する（実装計画
 /// §3.3）。本関数の `verdict=` ログ出力はその中間証跡（機械的
 /// `grep verdict=` で単一 run の判定を追える参考表示）にとどまる。
+// Linux CI（`cargo clippy --workspace --all-targets --all-features -- -D
+// warnings`）は本 example の `example` ターゲット（`cfg(test)` 無効・
+// `target_os = "macos"` 無効）を単独でも lint するため、macOS 実機専用の
+// `main`（`macos_impl::main`）からしか呼ばれない本型は非 macOS かつ非
+// テストの経路では文字通り到達不能になり dead_code 検知の対象になる。
+// 本体は macOS 実機（`macos_impl::main`）と `single_run_verdict_tests`
+// （Linux CI でも走る `#[cfg(test)]` ユニットテスト）の双方から使われて
+// おり未使用ではなく cfg 分岐の組み合わせが原因の誤検知にあたるため、
+// その 2 経路以外（非 macOS・非テストの `example` ターゲット単体）でのみ
+// `dead_code` を抑止する（codex-review 指摘 PR #1372）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SingleRunVerdict {
     AdoptCandidate,
@@ -57,6 +68,8 @@ enum SingleRunVerdict {
     Undetermined,
 }
 
+// enum 本体（上）と同じ理由で dead_code を抑止する。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 impl SingleRunVerdict {
     fn as_str(self) -> &'static str {
         match self {
@@ -75,6 +88,9 @@ impl SingleRunVerdict {
 /// `bench_harness::ab::STABILITY_SPREAD_GATE`（ラウンド間ばらつきの安定性
 /// spread ゲート）とは意味が異なる別軸の閾値のため流用しない
 /// （codex-review 指摘 PR #1372 discussion r3943195886）。
+// enum `SingleRunVerdict` と同じ理由（非 macOS かつ非テストの `example`
+// ターゲット単体でのみ dead_code を抑止。codex-review 指摘 PR #1372）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const SMALL_SIZE_REGRESSION_TOLERANCE_RATIO: f64 = 0.95;
 
 /// `ratios`: size ごとの `head_over_base`（TFLOPS 比。head/base）。
@@ -86,6 +102,9 @@ const SMALL_SIZE_REGRESSION_TOLERANCE_RATIO: f64 = 0.95;
 /// size 2048/4096 の `head_over_base` に改善（>1.0）があり、かつ size
 /// 256/512/1024 で劣化中央値が `SMALL_SIZE_REGRESSION_TOLERANCE_RATIO`
 /// 超（5% 超）がない場合に採用候補とする。
+// enum `SingleRunVerdict` と同じ理由（非 macOS かつ非テストの `example`
+// ターゲット単体でのみ dead_code を抑止。codex-review 指摘 PR #1372）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn single_run_verdict(ratios: &[(usize, f64)], gate_exceeded: bool) -> SingleRunVerdict {
     if gate_exceeded {
         return SingleRunVerdict::Undetermined;
