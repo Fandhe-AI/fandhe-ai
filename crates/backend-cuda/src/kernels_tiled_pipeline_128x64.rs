@@ -750,12 +750,12 @@ mod tests {
             (256, 256, 256),
         ];
         for (idx, &(m, n, k)) in shapes.iter().enumerate() {
-            let mut rng = xorshift64star(0x1343_0000 + idx as u64);
+            let mut rng = bench_harness::rng::Xorshift64Star::new(0x1343_0000 + idx as u64);
             let a: Vec<f32> = (0..(m as usize) * (k as usize))
-                .map(|_| next_f32(&mut rng))
+                .map(|_| rng.next_f32())
                 .collect();
             let b: Vec<f32> = (0..(k as usize) * (n as usize))
-                .map(|_| next_f32(&mut rng))
+                .map(|_| rng.next_f32())
                 .collect();
 
             let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
@@ -770,23 +770,6 @@ mod tests {
                 "host_model_gemm と matmul_reference_fma が bit 一致しません（m={m} n={n} k={k}）"
             );
         }
-    }
-
-    /// [`host_model_matches_reference_fma_bit_exact`] 用の決定的乱数生成
-    /// （`bench_harness::rng::Xorshift64Star` と同種のアルゴリズムを本
-    /// クレート内に軽量に再実装。`backend-cuda` は `bench-harness` に
-    /// 依存しないため独立実装する）。
-    fn xorshift64star(seed: u64) -> u64 {
-        if seed == 0 { 0x9E3779B97F4A7C15 } else { seed }
-    }
-
-    fn next_f32(state: &mut u64) -> f32 {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        let bits = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
-        // [-1.0, 1.0) の範囲へ写す（他 GEMM テストの入力レンジと同オーダー）。
-        ((bits >> 40) as i32 as f32) / (1i64 << 23) as f32
     }
 
     /// [`host_model_matches_reference_fma_bit_exact`] が呼ぶ、カーネルの
