@@ -307,6 +307,7 @@ mod elementwise;
 mod error;
 mod gemm;
 mod gemm_auto;
+pub mod graph;
 // イシュー #1035: f32 GEMM の形状別カーネル選択（simple / double-buffer /
 // split-K）ヒューリスティック。GPU 資源を要さない純関数のみで構成し、
 // `gemm.rs` の opt-in コンストラクタ（`internal-diagnostics` feature

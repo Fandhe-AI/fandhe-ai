@@ -28,7 +28,8 @@ use std::sync::Arc;
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DType, FusionPlan, MseReduction, ShapeError, Tensor, require_same_shape,
+    Activation, BackendOps, DType, FusionPlan, MseReduction, SegmentKey, SegmentResource,
+    SegmentRun, ShapeError, Tensor, require_same_shape,
 };
 
 use crate::context_cache;
@@ -768,6 +769,76 @@ impl BackendOps for CudaBackendOps {
                 &kernel_params,
             )
         })
+    }
+
+    /// 学習 step の update 区間（[`Self::sgd_step_device_tracked`]）を
+    /// CUDA Graph で capture・再利用できるかを判定する（イシュー #1349・
+    /// `docs/backend-cuda-graph-step-capture-design.md` §4.4）。
+    ///
+    /// opt-in（`crate::graph::step_graph_enabled()`）OFF・現在のデバイスが
+    /// capture 可能なストリーム（`CudaDevice::is_capturable_stream`）で
+    /// 初期化されていない場合は `Ok(None)` を返し、呼び出し元は現行の
+    /// 直接実行経路へフォールバックする——ただし後者（opt-in ON だが
+    /// 対象デバイスが legacy stream のまま）は「opt-in を最初のデバイス
+    /// 初期化より後に有効化した」設定順序の誤りを示すため、
+    /// [`BackendError::Unsupported`] を返し fail-closed に顕在化させる
+    /// （design doc §4.7。opt-in OFF 時の `Ok(None)` と区別する）。
+    fn captured_segment_key(
+        &self,
+        resources: &[&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>],
+        config_key: u64,
+    ) -> Result<Option<SegmentKey>, BackendError> {
+        if !crate::graph::step_graph_enabled() {
+            return Ok(None);
+        }
+        let device = self.device_handle()?;
+        if !device.is_capturable_stream() {
+            return Err(BackendError::Unsupported(
+                "captured_segment_key: CUDA Graph step capture is enabled but this device was \
+                 initialized before the opt-in was set (created with a non-capturable legacy \
+                 stream); enable the opt-in before the first CUDA device initialization"
+                    .to_string(),
+            ));
+        }
+        let stream = device.stream();
+        let mut segment_resources = Vec::with_capacity(resources.len());
+        for buf in resources {
+            let numel = buf.numel();
+            let addr = if numel == 0 {
+                0u64
+            } else {
+                let handle = buf
+                    .downcast_handle::<CudaBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?;
+                let slice = handle.slice.as_ref().ok_or_else(|| {
+                    BackendError::DeviceAllocationFailed(
+                        "captured_segment_key: buffer has numel > 0 but no device allocation"
+                            .to_string(),
+                    )
+                })?;
+                let (ptr, _sync) = cudarc::driver::DevicePtr::device_ptr(slice, stream);
+                ptr
+            };
+            segment_resources.push(SegmentResource { addr, numel });
+        }
+        Ok(Some(SegmentKey {
+            generation: context_cache::current_generation(self.ordinal),
+            config_key,
+            resources: segment_resources,
+        }))
+    }
+
+    /// [`Self::captured_segment_key`] が返した `key` に対応する区間を
+    /// capture・再生する（イシュー #1349）。実体は [`crate::graph::
+    /// run_captured_segment`]（thread-local graph キャッシュ・stream
+    /// capture の手順は同モジュールのドキュメント参照）。
+    fn run_captured_segment(
+        &self,
+        key: SegmentKey,
+        body: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<SegmentRun, BackendError> {
+        let device = self.device_handle()?;
+        crate::graph::run_captured_segment(self.ordinal, device.stream(), key, body)
     }
 
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、
@@ -1746,6 +1817,18 @@ impl BackendOps for CudaBackendOps {
     /// を含める（新しい `BackendError` variant は追加しない設計判断。
     /// `docs/backend-cuda-pool-allocator-decision.md` 参照）。
     fn release_cached_device_memory(&self) -> Result<(), BackendError> {
+        // イシュー #1349: プール解放は同期（`ctx.synchronize()`）を伴う
+        // 明示的な同期点であり、CUDA Graph capture 中に呼ぶと capture
+        // の前提（同一ストリーム上の driver 呼び出しのみで完結する
+        // こと）を破る。driver に触れる前に拒否する
+        // （`context_cache::begin_sync_point_call` と同じ判定）。
+        if context_cache::is_capturing_on_current_thread(self.ordinal) {
+            return Err(BackendError::Unsupported(
+                "cuda graph capture: release_cached_device_memory is a host synchronization \
+                 point and cannot be captured"
+                    .to_string(),
+            ));
+        }
         // `device_handle_raw`（キャッシュミス時の `CudaDevice::new`）自体も
         // poison 検査・観測の対象に含める（codex-review P0 指摘・PR #1064
         // 追補・`ops.rs:147` 相当）。

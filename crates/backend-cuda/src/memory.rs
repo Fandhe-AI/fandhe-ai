@@ -363,15 +363,36 @@ impl CudaMemory {
         let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
         context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
     }
+
+    /// [`Self::with_driver_call`] と同じだが、CUDA Graph capture 中
+    /// （イシュー #1349・`docs/backend-cuda-graph-step-capture-design.md`
+    /// §4.2）は driver に触れる前に拒否する（`context_cache::
+    /// begin_sync_point_call`）。ホスト⇔デバイス転送・確保・ゼロ初期化
+    /// はいずれも capture 境界を跨ぐ同期点であり、capture 中の呼び出しを
+    /// 許すと graph が「その時点のホストデータ」を焼き込んでしまい、
+    /// 2 回目以降の再生で不正な結果を生む（`what` は診断メッセージ用の
+    /// 呼び出し名）。
+    fn with_sync_point_call<T>(
+        &self,
+        resource_generations: &[u64],
+        what: &'static str,
+        map: impl FnOnce(CudaError) -> BackendError,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, BackendError> {
+        let token = context_cache::begin_sync_point_call(self.ordinal, resource_generations, what)?;
+        context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
+    }
 }
 
 impl MemoryOps for CudaMemory {
     fn alloc_zeroed(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.with_driver_call(&[], map_cuda_alloc_error, || self.alloc_zeroed_inner(shape))
+        self.with_sync_point_call(&[], "alloc_zeroed", map_cuda_alloc_error, || {
+            self.alloc_zeroed_inner(shape)
+        })
     }
 
     fn upload(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.with_driver_call(&[], map_cuda_error, || self.upload_inner(tensor))
+        self.with_sync_point_call(&[], "upload", map_cuda_error, || self.upload_inner(tensor))
     }
 
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -400,8 +421,67 @@ impl MemoryOps for CudaMemory {
         // `upload_inner` 参照）を渡し、`invalidate` による回復後の新世代に
         // 対して旧世代のバッファが誤って読まれることを検出する
         // （イシュー #1013 設計文書 §9 item 7）。
-        self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
+        self.with_sync_point_call(&[buffer.generation()], "download", map_cuda_error, || {
             self.download_inner(buffer)
+        })
+    }
+
+    /// ホスト常駐の `tensor` を既存の `dst` の `dst_offset` 要素目から
+    /// H2D 転送する（イシュー #1212・§4.5 で `DeviceParamStore::step` の
+    /// grad staging 書き込みに使う。イシュー #1349 では graph capture
+    /// 対象区間の外側〈`run_captured_segment` 呼び出し前〉で毎回呼ぶ
+    /// ことで、capture 済み graph が参照するバッファのアドレス・内容を
+    /// capture 前に確定させる契約とする。`backend-cpu::upload_into_cpu_buffer`
+    /// と同じ境界検査を行う）。
+    fn upload_into(
+        &self,
+        tensor: &Tensor<f32>,
+        dst: &mut DeviceBuffer<f32>,
+        dst_offset: usize,
+    ) -> Result<(), BackendError> {
+        if dst.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let contiguous = tensor.contiguous();
+        let numel = contiguous.numel();
+        let end = dst_offset.checked_add(numel).ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "upload_into: dst_offset + tensor.numel() overflowed usize".to_string(),
+            )
+        })?;
+        if end > dst.numel() {
+            return Err(BackendError::InvalidArgument(format!(
+                "upload_into: write range [{dst_offset}, {end}) exceeds dst buffer length {}",
+                dst.numel()
+            )));
+        }
+        let generation = dst.generation();
+        self.with_sync_point_call(&[generation], "upload_into", map_cuda_error, || {
+            if numel == 0 {
+                return Ok(());
+            }
+            let data = contiguous
+                .as_slice()
+                .ok_or_else(|| CudaError::InvalidShape {
+                    detail: "upload_into: contiguous() の直後にもかかわらず as_slice が \
+                             None を返した（tensor-core 側のロジック不整合）"
+                        .to_string(),
+                })?;
+            let handle = dst
+                .downcast_handle_mut::<CudaBufferHandle>()
+                .ok_or_else(|| CudaError::InvalidShape {
+                    detail: "upload_into: dst buffer handle is not a CudaBufferHandle".to_string(),
+                })?;
+            let slice = handle
+                .slice
+                .as_mut()
+                .ok_or_else(|| CudaError::InvalidShape {
+                    detail: "upload_into: dst buffer has numel > 0 but no device allocation"
+                        .to_string(),
+                })?;
+            let mut view = slice.slice_mut(dst_offset..end);
+            self.stream.memcpy_htod(data, &mut view)?;
+            Ok(())
         })
     }
 }
@@ -513,6 +593,63 @@ mod tests {
         assert!(
             matches!(err, BackendError::DeviceAllocationFailed(msg) if msg.contains("bad alloc shape"))
         );
+    }
+
+    /// [`CudaMemory::upload_into`]（イシュー #1349・#1212）は `dst.device()`
+    /// が `self` のデバイスと一致しない場合、driver に一切触れずに
+    /// `DeviceMismatch` を返す（`download_rejects_mismatched_device_
+    /// ordinal` と同じ「実 GPU ドライバ呼び出しを経由しない検証」方針。
+    /// numel == 0 の空バッファなので CUDA 非搭載環境でも到達可能）。
+    #[test]
+    fn upload_into_rejects_mismatched_device_ordinal() {
+        match CudaDevice::new(0) {
+            Ok(device) => {
+                let mem = CudaMemory::new(&device);
+                let other_ordinal = mem.ordinal + 1;
+                let alloc = TrackedAllocation::new(Arc::clone(&mem.tracker), 0);
+                let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+                    slice: None,
+                    _alloc: alloc,
+                    generation: 0,
+                });
+                let mut dst: DeviceBuffer<f32> =
+                    DeviceBuffer::new(Device::Cuda(other_ordinal), vec![0], handle);
+                let tensor = Tensor::<f32>::new(vec![], &[0]).unwrap();
+                let err = mem.upload_into(&tensor, &mut dst, 0).unwrap_err();
+                assert!(matches!(err, BackendError::DeviceMismatch));
+            }
+            Err(_) => {
+                // 非搭載環境: `CudaDevice::new` 自体が型付きエラーで
+                // 止まるため本テストの主張には到達しない。
+            }
+        }
+    }
+
+    /// [`CudaMemory::upload_into`] は `dst_offset + tensor.numel()` が
+    /// `dst.numel()` を超える場合、driver に触れずに `InvalidArgument`
+    /// で拒否する（REQ-8「カーネル側の手動境界チェックを省略しない」・
+    /// OWASP A03。境界検査は device 一致検査の後・driver 呼び出しの前に
+    /// 行われるため、CUDA 非搭載環境でも `CudaDevice::new` が成功する
+    /// 環境でのみ到達する。空バッファ〈`numel == 0`〉の `dst` に対して
+    /// 1 要素書き込もうとする最小ケースで検証する）。
+    #[test]
+    fn upload_into_rejects_out_of_range_write() {
+        if let Ok(device) = CudaDevice::new(0) {
+            let mem = CudaMemory::new(&device);
+            let alloc = TrackedAllocation::new(Arc::clone(&mem.tracker), 0);
+            let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+                slice: None,
+                _alloc: alloc,
+                generation: 0,
+            });
+            let mut dst: DeviceBuffer<f32> =
+                DeviceBuffer::new(Device::Cuda(mem.ordinal), vec![0], handle);
+            let tensor = Tensor::<f32>::new(vec![1.0], &[1]).unwrap();
+            let err = mem.upload_into(&tensor, &mut dst, 0).unwrap_err();
+            assert!(matches!(err, BackendError::InvalidArgument(_)));
+        }
+        // 非搭載環境: `CudaDevice::new` 自体が型付きエラーで止まるため
+        // 本テストの主張には到達しない。
     }
 
     #[test]

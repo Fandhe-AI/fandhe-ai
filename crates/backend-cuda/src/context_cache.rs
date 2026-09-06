@@ -545,6 +545,15 @@ struct OrdinalState {
     /// 診断（「現在この ordinal の回復待ちで停止しているスレッド数」）
     /// にも転用できる。
     retiring_waiters: u64,
+    /// CUDA Graph stream capture 中の区間（イシュー #1349・`docs/
+    /// backend-cuda-graph-step-capture-design.md` §4.2）。`Some` の間は
+    /// `begin_capture_session` が同一 ordinal への再入・別スレッドからの
+    /// capture 開始を拒否し、`is_capturing_on_current_thread` が
+    /// 同期点呼び出し（`memory.rs`／`gemm.rs`／`ops.rs` の各ガード）の
+    /// 判定に使う。capture モードは `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`
+    /// のため、capture 中の driver 呼び出しは capture を開始したスレッド
+    /// からのみ意味を持つ（`thread` フィールドで判定する）。
+    capture: Option<std::thread::ThreadId>,
 }
 
 impl Default for OrdinalState {
@@ -555,8 +564,99 @@ impl Default for OrdinalState {
             in_flight: 0,
             probe_retry_count: 0,
             retiring_waiters: 0,
+            capture: None,
         }
     }
+}
+
+/// CUDA Graph stream capture の区間を表す RAII ガード（イシュー #1349）。
+/// `Drop` で `capture` を必ず解放する（`body()` が `?` による早期
+/// return・panic のいずれで抜けても、capture フラグが残留して以降の
+/// 全 driver 呼び出しが `begin_sync_point_call` に拒否され続ける事態を
+/// 防ぐ。`CallToken` と同じ RAII 一本化方針。`.claude/rules/
+/// coding-rust.md`）。
+#[derive(Debug)]
+pub(crate) struct CaptureGuard {
+    ordinal: usize,
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        // レジストリ取得・ロック取得が失敗しても（プロセス末期等）
+        // panic できないため、失敗時は静かに諦める（`CallToken::drop`
+        // と同じ方針）。
+        if let Ok(cell) = ordinal_registry().entry(self.ordinal)
+            && let Ok(mut state) = cell.0.lock()
+        {
+            state.capture = None;
+        }
+    }
+}
+
+/// `graph::run_captured_segment` が stream capture 開始直前に 1 回だけ
+/// 呼ぶ（イシュー #1349）。同一 ordinal で既に capture 中（別スレッド・
+/// 同一スレッドいずれも）なら [`BackendError::InvalidArgument`] で
+/// 再入を拒否する（`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は同一
+/// ordinal・同一ストリームへの多重 capture を想定しない）。返した
+/// [`CaptureGuard`] が drop されるまで [`is_capturing_on_current_thread`]
+/// はこのスレッドに対して `true` を返す。
+pub(crate) fn begin_capture_session(ordinal: usize) -> Result<CaptureGuard, BackendError> {
+    let cell = ordinal_registry().entry(ordinal)?;
+    let mut state = cell.0.lock().map_err(|e| {
+        BackendError::DeviceContextPoisoned(format!(
+            "context_cache::OrdinalState の Mutex が poison しました（ordinal={ordinal}）: {e}"
+        ))
+    })?;
+    if state.capture.is_some() {
+        return Err(BackendError::InvalidArgument(format!(
+            "begin_capture_session: ordinal {ordinal} is already capturing on this or another \
+             thread (CUDA Graph capture does not support re-entrant capture on a single stream)"
+        )));
+    }
+    state.capture = Some(std::thread::current().id());
+    Ok(CaptureGuard { ordinal })
+}
+
+/// `ordinal` が現在このスレッド上で CUDA Graph capture 中かどうかを返す
+/// （イシュー #1349）。`memory.rs`／`gemm.rs`／`ops.rs` の同期点ガード
+/// （`begin_sync_point_call`）が driver に触れる前の判定に使う。
+/// レジストリ自体が取得できない異常時は fail-closed（capture 中扱い＝
+/// 同期点呼び出しを拒否する側）に倒す（`is_poisoned` と同じ方針）。
+pub(crate) fn is_capturing_on_current_thread(ordinal: usize) -> bool {
+    let Ok(cell) = ordinal_registry().entry(ordinal) else {
+        return true;
+    };
+    let Ok(state) = cell.0.lock() else {
+        return true;
+    };
+    state.capture == Some(std::thread::current().id())
+}
+
+/// 同期点（ホスト⇔デバイス転送・確保・解放・明示同期）となる driver
+/// 呼び出しの入口が使う（イシュー #1349・`docs/backend-cuda-graph-step-
+/// capture-design.md` §4.2）。`begin_driver_call` と同じ排他区間で
+/// `ordinal` の capture 状態を検査し、現在のスレッドが capture 中なら
+/// **driver に一切触れる前に** [`BackendError::Unsupported`] で拒否する
+/// （capture 中の同期呼び出しは `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`
+/// 等で driver 自身も拒否するが、それを待たずアプリケーション層で
+/// 早期に検出することで、driver 側のエラーを sticky 分類して意図せず
+/// ordinal を poison してしまう事態を避ける——同期点呼び出しの誤りは
+/// 呼び出し元の契約違反であり、デバイスコンテキスト自体は健全な
+/// ままにしてよいため）。`what` は診断メッセージ用の呼び出し名
+/// （`"upload"`／`"download"`／`"alloc_zeroed"`／`"synchronize"` 等）。
+///
+/// capture 中でなければ [`begin_driver_call`] へそのまま委譲する。
+pub(crate) fn begin_sync_point_call(
+    ordinal: usize,
+    resource_generations: &[u64],
+    what: &'static str,
+) -> Result<CallToken, BackendError> {
+    if is_capturing_on_current_thread(ordinal) {
+        return Err(BackendError::Unsupported(format!(
+            "cuda graph capture: {what} is a host synchronization point and cannot be captured"
+        )));
+    }
+    begin_driver_call(ordinal, resource_generations)
 }
 
 /// `invalidate` の実処理プローブの再試行上限（モジュール冒頭コメント
@@ -871,6 +971,21 @@ fn classify_cuda_result(err: &cudarc::driver::result::DriverError) -> ResultClas
         | CUDA_ERROR_NOT_FOUND
         | CUDA_ERROR_INVALID_PTX
         | CUDA_ERROR_UNSUPPORTED_PTX_VERSION => ResultClass::OperationLocal,
+        // CUDA Graph capture 系エラー（イシュー #1349）: capture の失敗は
+        // driver 内部の capture 状態機械そのものを壊しうる（NVIDIA の
+        // 規定では capture 失敗後のストリームは `end_capture` するまで
+        // 使用不能）ため sticky 側へ明示的に固定する（`_` の wildcard に
+        // 依存せず意図をコード化する。`docs/backend-cuda-graph-step-
+        // capture-design.md` §4.2 F6）。
+        CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED
+        | CUDA_ERROR_STREAM_CAPTURE_INVALIDATED
+        | CUDA_ERROR_STREAM_CAPTURE_MERGE
+        | CUDA_ERROR_STREAM_CAPTURE_UNMATCHED
+        | CUDA_ERROR_STREAM_CAPTURE_UNJOINED
+        | CUDA_ERROR_STREAM_CAPTURE_ISOLATION
+        | CUDA_ERROR_STREAM_CAPTURE_IMPLICIT
+        | CUDA_ERROR_CAPTURED_EVENT
+        | CUDA_ERROR_STREAM_CAPTURE_WRONG_THREAD => ResultClass::Sticky,
         // 上記以外（`CUDA_ERROR_ILLEGAL_ADDRESS`・`CUDA_ERROR_LAUNCH_FAILED`・
         // `CUDA_ERROR_ECC_UNCORRECTABLE`・`CUDA_ERROR_HARDWARE_STACK_ERROR`・
         // `CUDA_ERROR_MISALIGNED_ADDRESS`・`CUDA_ERROR_INVALID_ADDRESS_SPACE`・
@@ -1990,6 +2105,128 @@ mod poison_state_tests {
             state.retiring_waiters, 0,
             "テスト終了時点で駐機中のスレッドは残らないはず"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // CUDA Graph capture 状態機械（イシュー #1349）の GPU 非依存な
+    // ホストモデルテスト。実 CUDA driver・`CudaStream` を要さない
+    // `begin_capture_session`／`is_capturing_on_current_thread`／
+    // `begin_sync_point_call` の制御フローのみを検証する。
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn begin_capture_session_succeeds_and_marks_current_thread_capturing() {
+        let ordinal = unique_ordinal();
+        assert!(!is_capturing_on_current_thread(ordinal));
+        let guard = begin_capture_session(ordinal).expect("first capture session succeeds");
+        assert!(is_capturing_on_current_thread(ordinal));
+        drop(guard);
+        assert!(
+            !is_capturing_on_current_thread(ordinal),
+            "CaptureGuard の Drop で capture 状態が解除されるはず"
+        );
+    }
+
+    #[test]
+    fn begin_capture_session_rejects_reentrant_capture_on_same_ordinal() {
+        let ordinal = unique_ordinal();
+        let _guard = begin_capture_session(ordinal).expect("first capture session succeeds");
+        let second = begin_capture_session(ordinal);
+        assert!(
+            matches!(second, Err(BackendError::InvalidArgument(_))),
+            "同一 ordinal への 2 重 capture 開始は拒否されるはず: {second:?}"
+        );
+    }
+
+    #[test]
+    fn begin_capture_session_allows_reuse_after_guard_is_dropped() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("first capture session succeeds");
+        drop(guard);
+        let second = begin_capture_session(ordinal);
+        assert!(
+            second.is_ok(),
+            "先行 capture が終了（guard drop）していれば再度開始できるはず: {second:?}"
+        );
+    }
+
+    #[test]
+    fn begin_sync_point_call_rejects_before_touching_driver_while_capturing() {
+        let ordinal = unique_ordinal();
+        let _guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        let result = begin_sync_point_call(ordinal, &[], "upload");
+        assert!(
+            matches!(&result, Err(BackendError::Unsupported(msg)) if msg.contains("upload")),
+            "capture 中の同期点呼び出しは Unsupported で拒否されるはず: {result:?}"
+        );
+        // 拒否は `begin_driver_call` に到達する前（in_flight を変更しない）
+        // ことを確認する。
+        let cell = ordinal_registry().entry(ordinal).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(
+            state.in_flight, 0,
+            "同期点ガードの拒否は begin_driver_call の in_flight を変更しないはず"
+        );
+    }
+
+    #[test]
+    fn begin_sync_point_call_delegates_to_begin_driver_call_when_not_capturing() {
+        let ordinal = unique_ordinal();
+        let token = begin_sync_point_call(ordinal, &[], "upload");
+        assert!(
+            token.is_ok(),
+            "capture 中でなければ begin_driver_call と同じ挙動になるはず: {token:?}"
+        );
+    }
+
+    #[test]
+    fn is_capturing_on_current_thread_is_false_on_a_fresh_ordinal() {
+        let ordinal = unique_ordinal();
+        assert!(!is_capturing_on_current_thread(ordinal));
+    }
+
+    /// capture モード（`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`）は「この
+    /// スレッドが開始した capture」のみを検出する契約であり、別スレッド
+    /// から見た `is_capturing_on_current_thread` は capture 中でも
+    /// `false` を返す（別スレッドの同期点呼び出しは拒否されない。
+    /// capture 自体は driver 側の `THREAD_LOCAL` モードにより別スレッドの
+    /// 無関係な操作を巻き込まない設計と整合する）。
+    #[test]
+    fn is_capturing_on_current_thread_is_thread_local() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        let observed_from_other_thread =
+            std::thread::spawn(move || is_capturing_on_current_thread(ordinal))
+                .join()
+                .expect("spawned thread does not panic");
+        assert!(
+            !observed_from_other_thread,
+            "別スレッドからは capture 中と観測されないはず（THREAD_LOCAL 契約）"
+        );
+        drop(guard);
+    }
+
+    /// capture 系 CUresult（900〜908）が sticky に分類されることを固定する
+    /// （イシュー #1349・design doc §4.2 F6）。
+    #[test]
+    fn classify_capture_related_codes_are_sticky() {
+        for code in [
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_INVALIDATED,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_MERGE,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_UNMATCHED,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_UNJOINED,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_ISOLATION,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_IMPLICIT,
+            CUresult::CUDA_ERROR_CAPTURED_EVENT,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_WRONG_THREAD,
+        ] {
+            assert_eq!(
+                classify_cuda_result(&DriverError(code)),
+                ResultClass::Sticky,
+                "{code:?} は sticky に分類されるはず"
+            );
+        }
     }
 }
 

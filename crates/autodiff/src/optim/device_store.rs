@@ -369,6 +369,37 @@ fn autodiff_err_to_backend(err: AutodiffError) -> BackendError {
     }
 }
 
+/// [`SgdStepConfig`] を [`BackendOps::captured_segment_key`] の
+/// `config_key`（`u64`）へ畳み込む（イシュー #1349・`docs/backend-cuda-
+/// graph-step-capture-design.md` §4.5）。
+///
+/// CUDA Graph capture 経路が「ハイパーパラメータ変更を検出して再
+/// capture する」ために使う識別子であり、暗号学的な強度は要さない
+/// （衝突しても実害は「再利用すべきでない graph を再利用しない」方向に
+/// のみ倒れる契約——`SegmentKey` は `generation`／`resources`（バッファ
+/// アドレス）も併せて比較するため、本関数の衝突だけで誤った再利用が
+/// 起こることはない）。決定的な FNV-1a 風の畳み込みで十分とし、
+/// `std::collections::hash_map::DefaultHasher`（`Hasher` トレイト経由の
+/// 間接呼び出し）は使わない（`f32` は `Hash` を実装しないため、いずれに
+/// せよビット表現への変換が必要になる）。
+fn fold_sgd_step_config_key(config: &SgdStepConfig) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = FNV_OFFSET_BASIS;
+    for word in [
+        config.lr.to_bits() as u64,
+        config.momentum.to_bits() as u64,
+        config.dampening.to_bits() as u64,
+        config.weight_decay.to_bits() as u64,
+        config.nesterov as u64,
+        config.is_first_step as u64,
+    ] {
+        h ^= word;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 impl ResidentResolver for DeviceParamStore {
     /// `grad::vjp`（`Op::LinearResident` の VJP）から
     /// `Tape::backward_with_resident` 経由で呼ばれる（イシュー #1022）。
@@ -1467,36 +1498,167 @@ impl DeviceParamStore {
         // デフォルト実装（CPU／CUDA）は `sgd_step_device` へそのまま
         // 委譲するため、この呼び出し自体の挙動は変わらない。
         if !any_resident {
-            let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
-                .map_err(BackendError::ShapeMismatch)
-            {
-                Ok(t) => t,
-                Err(e) => {
+            // イシュー #1349: update 区間を CUDA Graph で capture・再利用
+            // できるかを安価に問い合わせる（`resources` は空スライスで
+            // よい——`captured_segment_key` の `Some`/`None` は opt-in
+            // フラグ・ストリーム種別のみで決まり、`resources` の中身には
+            // 依存しない契約。`docs/backend-cuda-graph-step-capture-
+            // design.md` §4.4。opt-in OFF・graph 機構を持たないバックエンド
+            // は常に `Ok(None)` を返すため、既定では本 `if` に入らず
+            // 直後の `else`〈本イシュー導入前と同じ直接実行〉へ進む）。
+            let config_key = fold_sgd_step_config_key(&step_config);
+            // `total_numel == 0` は `sgd_step_device` がカーネル起動なしで
+            // 早期 return する（`ops.rs::sgd_step_device` の `numel == 0`
+            // 分岐）ため、そのまま capture すると 1 個も launch されない
+            // 空 graph になり `run_captured_segment` が fail-closed
+            // エラーを返してしまう。この場合は capture 対象から常に除外
+            // する（design doc §4.5 手順 1）。
+            let graph_capture_available = self.total_numel > 0
+                && match ops.captured_segment_key(&[], config_key) {
+                    Ok(maybe_key) => maybe_key.is_some(),
+                    Err(e) => {
+                        // opt-in ON だが対象デバイスが capture 不可（legacy
+                        // stream）等、呼び出し元の設定順序の誤りを示す
+                        // fail-closed なエラー（design doc §4.7）。
+                        self.poisoned.store(true, Ordering::SeqCst);
+                        return Err(e);
+                    }
+                };
+
+            if graph_capture_available {
+                // グラフの再利用は「同じアドレスのバッファへ同じ引数で
+                // launch する」ことが前提のため、grad は毎ステップ新規
+                // 確保（`mem.upload`）ではなく永続 staging バッファへの
+                // `upload_into`（capture 対象区間の外側で行う。§4.5）へ
+                // 切り替える。`any_resident == false` のバックエンド
+                // （CUDA）は現状ここでしか `grad_staging` を使わないため
+                // 新規確保は高々 1 回（2 回目以降は再利用）。
+                let mut staging_ref = self.grad_staging.borrow_mut();
+                if staging_ref.is_none() {
+                    match mem.alloc_zeroed(&[self.total_numel]) {
+                        Ok(buf) => {
+                            *staging_ref = Some(GradStaging {
+                                buf,
+                                filled: vec![None; vars.len()],
+                            });
+                        }
+                        Err(e) => {
+                            self.poisoned.store(true, Ordering::SeqCst);
+                            return Err(e);
+                        }
+                    }
+                }
+                let staging = match staging_ref.as_mut() {
+                    Some(s) => s,
+                    None => {
+                        return Err(BackendError::InvalidArgument(
+                            "DeviceParamStore::step: graph_capture_available == true だが \
+                             grad_staging が None だった（契約違反）"
+                                .to_string(),
+                        ));
+                    }
+                };
+
+                let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
+                    .map_err(BackendError::ShapeMismatch)
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.poisoned.store(true, Ordering::SeqCst);
+                        return Err(e);
+                    }
+                };
+                if let Err(e) = mem.upload_into(&grad_tensor, &mut staging.buf, 0) {
                     self.poisoned.store(true, Ordering::SeqCst);
                     return Err(e);
                 }
-            };
-            let grad_buf = match mem.upload(&grad_tensor) {
-                Ok(buf) => buf,
-                Err(e) => {
+
+                // `key` の算出は `&self.params`／`&staging.buf`／
+                // `self.velocity.as_ref()`（いずれも一時的な共有借用。
+                // `SegmentKey` はバッファのアドレス・要素数のみを写し
+                // 取った所有値のため、借用はこの式の評価後に終わる）。
+                let key = {
+                    let mut resources: Vec<&DeviceBuffer<f32>> = vec![&self.params, &staging.buf];
+                    if let Some(v) = self.velocity.as_ref() {
+                        resources.push(v);
+                    }
+                    match ops.captured_segment_key(&resources, config_key) {
+                        Ok(Some(k)) => k,
+                        Ok(None) => {
+                            // 直前の安価な問い合わせ（空スライス）が
+                            // `Some` を返した直後に `None` へ変わるのは、
+                            // 別スレッドが opt-in をレース的に OFF へ
+                            // 変更した稀な場合のみ（同一プロセス内の
+                            // 他スレッドが `facade::set_cuda_graph_step_
+                            // enabled` を呼ぶ運用は通常想定しないが、
+                            // fail-closed に拒否する）。
+                            return Err(BackendError::Unsupported(
+                                "DeviceParamStore::step: captured_segment_key の判定が \
+                                 呼び出し間で Some から None へ変化した（別スレッドによる \
+                                 opt-in 変更の競合の可能性）"
+                                    .to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            self.poisoned.store(true, Ordering::SeqCst);
+                            return Err(e);
+                        }
+                    }
+                };
+
+                let mut velocity_ref = if use_momentum {
+                    self.velocity.as_mut()
+                } else {
+                    None
+                };
+                let params = &mut self.params;
+                let grad_ref = &staging.buf;
+                let failure_token = &self.failure_token;
+                let mut body = || -> Result<(), BackendError> {
+                    ops.sgd_step_device_tracked(
+                        params,
+                        grad_ref,
+                        velocity_ref.take(),
+                        &step_config,
+                        failure_token,
+                    )
+                };
+                if let Err(e) = ops.run_captured_segment(key, &mut body) {
                     self.poisoned.store(true, Ordering::SeqCst);
                     return Err(e);
                 }
-            };
-            let velocity_ref = if use_momentum {
-                self.velocity.as_mut()
             } else {
-                None
-            };
-            if let Err(e) = ops.sgd_step_device_tracked(
-                &mut self.params,
-                &grad_buf,
-                velocity_ref,
-                &step_config,
-                &self.failure_token,
-            ) {
-                self.poisoned.store(true, Ordering::SeqCst);
-                return Err(e);
+                let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
+                    .map_err(BackendError::ShapeMismatch)
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.poisoned.store(true, Ordering::SeqCst);
+                        return Err(e);
+                    }
+                };
+                let grad_buf = match mem.upload(&grad_tensor) {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        self.poisoned.store(true, Ordering::SeqCst);
+                        return Err(e);
+                    }
+                };
+                let velocity_ref = if use_momentum {
+                    self.velocity.as_mut()
+                } else {
+                    None
+                };
+                if let Err(e) = ops.sgd_step_device_tracked(
+                    &mut self.params,
+                    &grad_buf,
+                    velocity_ref,
+                    &step_config,
+                    &self.failure_token,
+                ) {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
             }
         } else {
             // `RefCell::borrow_mut` は `&self.grad_staging`（field 単位の
@@ -1573,6 +1735,12 @@ impl DeviceParamStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // イシュー #1349: `SegmentKey`／`SegmentResource`／`SegmentRun` は
+    // 本番経路（`step` 内）では型名を直接書かず型推論に任せるため、
+    // `#[cfg(test)]` 外の通常ビルドでは未使用 import になる
+    // （`MockDeviceOps` の graph-capture モック実装・テストのみが型名を
+    // 直接使う）。テストモック限定で import する。
+    use fandhe_ai_tensor_core::{SegmentKey, SegmentResource, SegmentRun};
     use std::any::Any;
     use std::cell::RefCell;
     use std::sync::Arc;
@@ -1629,6 +1797,24 @@ mod tests {
         /// テストの挙動を変えない）、`resident_capable` コンストラクタ
         /// のみ `true` にする。
         resident_capable: bool,
+        /// `true` の場合のみ [`BackendOps::captured_segment_key`]／
+        /// [`BackendOps::run_captured_segment`] を既定（`Ok(None)`／
+        /// `Unsupported`）からオーバーライドし、CUDA Graph capture opt-in
+        /// ON を模す（イシュー #1349）。ホスト実装のため実際の GPU graph
+        /// は持たず、`run_captured_segment` は capture・再生いずれも
+        /// `body` を実行する（副作用の再現には毎回の実行が必要なため）が、
+        /// `segment_runs`（下記）に `SegmentRun::Captured`／`Replayed` の
+        /// 判定（同一 `SegmentKey` を 2 回目以降に見たかどうか）を記録し、
+        /// `DeviceParamStore::step` が期待どおり `captured_segment_key`／
+        /// `run_captured_segment` を呼び分けていることをテストが検証
+        /// できるようにする。
+        graph_capable: bool,
+        /// `graph_capable` 時、`run_captured_segment` に渡された
+        /// `SegmentKey` を見た順に記録する（既出なら `Replayed` 相当・
+        /// 初出なら `Captured` 相当と判定して積む）。
+        segment_runs: Arc<std::sync::Mutex<Vec<fandhe_ai_tensor_core::SegmentRun>>>,
+        seen_segment_keys:
+            Arc<std::sync::Mutex<std::collections::HashSet<fandhe_ai_tensor_core::SegmentKey>>>,
     }
 
     impl MockDeviceOps {
@@ -1639,6 +1825,11 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
+                graph_capable: false,
+                segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                seen_segment_keys: Arc::new(
+                    std::sync::Mutex::new(std::collections::HashSet::new()),
+                ),
             }
         }
 
@@ -1649,7 +1840,41 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
+                graph_capable: false,
+                segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                seen_segment_keys: Arc::new(
+                    std::sync::Mutex::new(std::collections::HashSet::new()),
+                ),
             }
+        }
+
+        /// CUDA Graph capture opt-in ON を模したモック（イシュー #1349）。
+        /// `DeviceParamStore::step` の graph-capture 分岐（`any_resident
+        /// == false` かつ `captured_segment_key` が `Some` を返す経路）を
+        /// `autodiff` クレート自身の単体テストで実行可能にする。
+        fn graph_capable() -> Self {
+            Self {
+                fail_after: None,
+                call_count: Arc::new(AtomicUsize::new(0)),
+                upload_count: Arc::new(AtomicUsize::new(0)),
+                download_count: Arc::new(AtomicUsize::new(0)),
+                resident_capable: false,
+                graph_capable: true,
+                segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                seen_segment_keys: Arc::new(
+                    std::sync::Mutex::new(std::collections::HashSet::new()),
+                ),
+            }
+        }
+
+        /// 記録済みの [`SegmentRun`](fandhe_ai_tensor_core::SegmentRun) 列
+        /// の共有ハンドルを複製する（`Tape::new_with_ops` へ `self` の
+        /// 所有権を渡した後もテスト側から読み出せるようにする。
+        /// `download_counter` と同型）。
+        fn segment_runs_handle(
+            &self,
+        ) -> Arc<std::sync::Mutex<Vec<fandhe_ai_tensor_core::SegmentRun>>> {
+            self.segment_runs.clone()
         }
 
         /// `gemm_fp32_strict_into` をオーバーライドし resident 経由の
@@ -1666,6 +1891,11 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: true,
+                graph_capable: false,
+                segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                seen_segment_keys: Arc::new(
+                    std::sync::Mutex::new(std::collections::HashSet::new()),
+                ),
             }
         }
 
@@ -1742,23 +1972,27 @@ mod tests {
             Tensor::new(data, buffer.shape()).map_err(BackendError::ShapeMismatch)
         }
 
-        /// `resident_capable == true` のときのみオーバーライドする
-        /// （イシュー #1212 review 指摘対応）。`DeviceParamStore::step`
-        /// の `any_resident == true` 分岐は `gemm_fp32_strict_into` と
-        /// 同様この H2D 個別書き込みが揃って初めて成立する（本番結線の
-        /// `backend-cpu::CpuBackendOps` も両方を同時に実装している。
-        /// `crates/backend-cpu/src/ops.rs::upload_into`／
-        /// `gemm_fp32_strict_into` 参照）。`resident_capable == false`
-        /// （既定）は `MemoryOps` の既定実装と同じ `Unsupported` を返す。
+        /// `resident_capable == true`（イシュー #1212 review 指摘対応。
+        /// `any_resident == true` 分岐の resident weight grad + host bias
+        /// grad マージ）または `graph_capable == true`（イシュー #1349。
+        /// CUDA Graph capture 対象区間の grad staging 書き込み。
+        /// `DeviceParamStore::step` §4.5）のいずれかのときのみ
+        /// オーバーライドする（本番結線の `backend-cuda::CudaMemory::
+        /// upload_into` は resident 経由か graph 経路かを区別せず常に
+        /// 実装済みだが、本モックは既存テストが「upload_into 非対応
+        /// バックエンドでは resident マージ分岐を通らない」ことを
+        /// 検証できるよう、意図的に既定 `Unsupported` のままにする）。
         fn upload_into(
             &self,
             tensor: &Tensor<f32>,
             dst: &mut DeviceBuffer<f32>,
             dst_offset: usize,
         ) -> Result<(), BackendError> {
-            if !self.resident_capable {
+            if !self.resident_capable && !self.graph_capable {
                 return Err(BackendError::Unsupported(
-                    "MockDeviceOps: resident_capable == false (default fail-safe)".into(),
+                    "MockDeviceOps: resident_capable == false && graph_capable == false \
+                     (default fail-safe)"
+                        .into(),
                 ));
             }
             let src = tensor.contiguous();
@@ -1843,6 +2077,65 @@ mod tests {
                 param_data[j] = p - config.lr * g;
             }
             Ok(())
+        }
+
+        /// イシュー #1349: `graph_capable == false`（既定）では常に
+        /// `Ok(None)`（既定実装と同じ）。`graph_capable == true` のときは
+        /// バッファの参照アドレスを [`SegmentResource::addr`] として使う
+        /// （ホストモックのため実デバイスポインタは持たないが、
+        /// `DeviceParamStore` が同一フィールド〈`self.params`／
+        /// `grad_staging.buf`〉を毎回渡す限りアドレスは安定しており、
+        /// 「同じバッファなら同じキー」という契約の検証には十分）。
+        fn captured_segment_key(
+            &self,
+            resources: &[&DeviceBuffer<f32>],
+            config_key: u64,
+        ) -> Result<Option<SegmentKey>, BackendError> {
+            if !self.graph_capable {
+                return Ok(None);
+            }
+            let segment_resources = resources
+                .iter()
+                .map(|buf| SegmentResource {
+                    addr: (*buf as *const DeviceBuffer<f32>) as u64,
+                    numel: buf.numel(),
+                })
+                .collect();
+            Ok(Some(SegmentKey {
+                generation: 0,
+                config_key,
+                resources: segment_resources,
+            }))
+        }
+
+        /// イシュー #1349: 実際の GPU graph は持たないため常に `body` を
+        /// 実行する（ホストモックでは capture を「省略」すると副作用
+        /// 〈パラメータ更新〉自体が起こらなくなってしまうため）。
+        /// `segment_runs`／`seen_segment_keys` へ「このキーを初めて見た
+        /// か」を記録することで、テスト側は `DeviceParamStore::step` が
+        /// 期待どおりのタイミングで新規 capture・再利用を要求している
+        /// ことを検証できる。
+        fn run_captured_segment(
+            &self,
+            key: SegmentKey,
+            body: &mut dyn FnMut() -> Result<(), BackendError>,
+        ) -> Result<SegmentRun, BackendError> {
+            body()?;
+            let mut seen = self
+                .seen_segment_keys
+                .lock()
+                .expect("seen_segment_keys mutex must not be poisoned");
+            let run = if seen.contains(&key) {
+                SegmentRun::Replayed
+            } else {
+                seen.insert(key);
+                SegmentRun::Captured
+            };
+            self.segment_runs
+                .lock()
+                .expect("segment_runs mutex must not be poisoned")
+                .push(run);
+            Ok(run)
         }
 
         fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -2081,6 +2374,78 @@ mod tests {
     fn full_pipeline_with_momentum_updates_parameters() {
         let (w, _b) = train_one_step(0.9);
         assert_ne!(w.get(&[0, 0]).unwrap(), 1.0);
+    }
+
+    /// イシュー #1349: `DeviceParamStore::step` の CUDA Graph capture
+    /// 配線を `MockDeviceOps::graph_capable()` で検証する。
+    ///
+    /// 3 step 実行し、`SegmentRun` の記録列が
+    /// `[Captured, Captured, Replayed]` になることを確認する（1 step 目は
+    /// `is_first_step == true`、2 step 目は `false` へ変わるため
+    /// `config_key` が変化し新規 capture、3 step 目は 2 step 目と
+    /// 同一設定のため再利用——`fold_sgd_step_config_key` が
+    /// `is_first_step` を含めて畳み込む契約の裏付けでもある）。
+    ///
+    /// さらに、同一の入力・学習率・step 回数で `MockDeviceOps::new()`
+    /// （graph 非対応・既定の毎回新規 grad アップロード経路）を通した
+    /// 場合の最終パラメータ値と bit 単位で一致することを確認する
+    /// （受け入れ条件 (a)「graph 経路と通常経路で損失・勾配・パラメータ
+    /// が bit 同一」の GPU 非依存な配線検証。実機での GPU graph 込みの
+    /// 検証は `crates/backend-cuda/tests/graph_capture_real_device.rs`・
+    /// `crates/facade/tests/cuda_graph_step_bit_identity.rs` が担う）。
+    #[test]
+    fn graph_capture_wiring_replays_stable_key_and_matches_non_graph_path() {
+        fn three_steps(tape: &Tape) -> Tensor<f32> {
+            let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+            let b_init = tensor(vec![0.5, -0.5], &[2]);
+            let mut store = DeviceParamStore::new(tape, &[&w_init, &b_init]).unwrap();
+            let config = SgdConfig::new(0.1);
+            for _ in 0..3 {
+                let leaves = store.register_resident_params(tape).unwrap();
+                let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+                let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+                let pred = store
+                    .linear_forward(tape, &x, &leaves[0], Some(&leaves[1]))
+                    .unwrap();
+                let loss = pred.mse_loss(&target).unwrap();
+                let grads = store.backward(tape, &loss).unwrap();
+                store.step(tape, &grads, &config).unwrap();
+            }
+            store.sync_to_host(tape).unwrap()[0].clone()
+        }
+
+        let graph_mock = MockDeviceOps::graph_capable();
+        let segment_runs = graph_mock.segment_runs_handle();
+        let graph_tape = Tape::new_with_ops(Box::new(graph_mock) as Box<dyn BackendOps + Send>);
+        let w_graph = three_steps(&graph_tape);
+
+        let runs = segment_runs
+            .lock()
+            .expect("segment_runs mutex must not be poisoned")
+            .clone();
+        assert_eq!(
+            runs,
+            vec![
+                SegmentRun::Captured,
+                SegmentRun::Captured,
+                SegmentRun::Replayed
+            ],
+            "1 step 目・is_first_step 変化直後の 2 step 目は新規 capture、\
+             設定が安定した 3 step 目は再利用のはず: {runs:?}"
+        );
+
+        let plain_tape = simple_tape(None);
+        let w_plain = three_steps(&plain_tape);
+
+        assert_eq!(
+            w_graph.get(&[0, 0]).unwrap().to_bits(),
+            w_plain.get(&[0, 0]).unwrap().to_bits(),
+            "graph capture 経路と直接実行経路は最終パラメータが bit 同一のはず"
+        );
+        assert_eq!(
+            w_graph.get(&[1, 1]).unwrap().to_bits(),
+            w_plain.get(&[1, 1]).unwrap().to_bits(),
+        );
     }
 
     /// イシュー #1212 review 指摘対応: 既存の `mod tests` は

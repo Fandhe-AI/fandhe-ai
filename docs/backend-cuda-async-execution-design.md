@@ -21,6 +21,8 @@
 
 `CudaDevice::new`（`crates/backend-cuda/src/device.rs:98`）は `ctx.default_stream()` を 1 本だけ保持する。`crate::context_cache`（`ordinal` をキーとするプロセス内キャッシュ。`crates/backend-cuda/src/device.rs:283` 付近から参照）経由で、`CudaGemm`・`CudaElementwise`・`CudaRmsNorm`・`CudaSoftmax`・`CudaSgd`・`CudaMemory` はいずれも同一 `Arc<CudaStream>` を共有する。つまり **ordinal ごとに単一の非同期ストリームがすでに成立している**構成であり、本設計はこれを契約として明文化する（新規のストリーム分割は行わない）。
 
+**追補（イシュー #1349。CUDA Graph step capture opt-in）**: `CudaDevice` に `StreamKind`（`Legacy`／`Created`）を追加した。`crate::graph::step_graph_mode()` が opt-in ON（`StreamOnly` 以上）を返す場合に限り `ctx.new_stream()`（capture 可能な非 legacy ストリーム）を保持し、既定（opt-in OFF）では従来どおり `ctx.default_stream()`（legacy NULL stream）を保持する。「ordinal ごとに単一のストリーム」という本節の不変条件（I1〜I5）は opt-in の有無に関わらず維持される（切り替わるのはストリームの**種別**のみで、本数は変わらない）。opt-in ON 時は `cudarc` の「multi-stream mode」（`num_streams > 0`）が有効化され、以降の全 `device_ptr` 呼び出しに `cuStreamWaitEvent` が自動挿入される（cudarc 0.19.8 実装）。この追加コストは opt-in ON 時にのみ生じ、OFF 時（既定）の挙動・性能は本イシュー導入前と不変。詳細は `docs/backend-cuda-graph-step-capture-design.md` §4.1。
+
 ### 2.2 `stream.synchronize()` の棚卸し
 
 `grep -rn synchronize crates/backend-cuda/src` による本番経路の棚卸し（診断・ベンチ専用ファイルは対象外）。
@@ -94,6 +96,8 @@
 | `MemoryOps::upload` | 同期なし | 変更なし | 変更なし | ペイジャブル H2D の復帰＝ステージング完了であり完了待ちではない |
 
 同期点を増やしてよい条件は、診断・ベンチ・エラー検出目的の任意同期に限り、`internal-diagnostics` 相当のモジュールまたはテストコード内のみで許容する（本番経路の演算ラッパーには追加しない）。
+
+**追補（イシュー #1349）**: CUDA Graph capture opt-in ON かつ現在のスレッドが capture 中（`context_cache::is_capturing_on_current_thread`）の場合、上表の同期点 API（`download`／`upload`／`alloc_zeroed`／`upload_into`・`release_cached_device_memory`）は driver に触れる前に `BackendError::Unsupported` で拒否する（`context_cache::begin_sync_point_call`）。capture 対象は update 区間のみのため、通常の学習ループはこれらの同期点を capture 中に呼ばない契約（`docs/backend-cuda-graph-step-capture-design.md` §4.2）。
 
 ## 5. エラー伝播（design decision 3）
 
@@ -247,7 +251,7 @@
 | 代替案 | 採否 | 理由 |
 |---|---|---|
 | 多ストリーム化 + イベント DAG | 不採用 | 現行 API はホスト `Tensor` 中心であり並列度を活かせない。順序契約が複雑化し I1〜I5 の検証コストが増す |
-| CUDA Graph | 保留 | #1024（起動キャッシュの結線）完了後に再検討する |
+| CUDA Graph | **部分採用（イシュー #1349）** | 学習 step の update 区間（`sgd_step_device_tracked`）のみを opt-in・既定 OFF で capture・再利用する。forward／backward・step 全体の capture は既存データパス（ホスト境界・pageable H2D）が前提を満たさないため対象外のまま。詳細は `docs/backend-cuda-graph-step-capture-design.md` |
 | pinned host memory | 保留 | 別イシューで扱う。導入時は I3・`download` の同期契約（2.4）を再確認する必要がある |
 | `CudaContext::set_blocking_synchronize` | 不採用 | ホスト側のスピン待ちに切り替える効果がベンチ条件と無関係であり、影響が不明である |
 
@@ -256,7 +260,7 @@
 以下はユーザー承認なしに起票しない（`.claude/rules/out-of-scope-tracking.md`）。
 
 - pinned host memory の導入
-- CUDA Graph の導入
+- CUDA Graph の forward／backward・step 全体への拡張（イシュー #1349 は update 区間のみの部分採用。§10・`docs/backend-cuda-graph-step-capture-design.md` §3.2 参照）・`cuGraphExecUpdate_v2` による exec update（`unsafe` 導入を要するためユーザー承認事項）
 - ホスト `Tensor` API の `DeviceBuffer` 版への拡張（#1022 と重なる可能性がある）
 - `invalidate`（§5 item 4）の根本的な回復手段の強化: 本設計の `invalidate` は同一 ordinal の primary context を再 retain する前提（c 参照）であり、sticky error が実際に primary context を汚染した場合はプロセス内で解消する手段を持たない（`Poisoned { unrecoverable: true }` へ確定しプロセス再起動を要求する契約に留める）。`cuDevicePrimaryCtxReset` 等による同一プロセス内での primary context の完全破棄・再生成を伴う根本的な回復は本設計のスコープ外とし、採否の判断は #1013（実装）のタイミングへ委ねる
 
@@ -467,6 +471,15 @@ poison と fail-closed 恒久化」（T-R2）を対象とする。
   → T-R2（単独・最後）の順で実行する。いずれかの環境変数が未設定の
   まま実行すると `require_opt_in` が標準エラーへ理由を出力したうえで
   即 `return` し、テストは何も検証せず成功扱いになる点に注意）
+
+## 12d. 実装記録（#1349・CUDA Graph step capture opt-in）
+
+イシュー #1349（親 #1348）で学習 step の update 区間（`sgd_step_device_tracked`）を対象に CUDA Graph capture／instantiate／launch 経路を opt-in・既定 OFF で実装した。詳細設計・スコープ限界・F1〜F9 の事前調査・#1350 への申し送りは新規 `docs/backend-cuda-graph-step-capture-design.md` に切り出した（本設計文書との重複を避けるため、本節は要約と本文書側の不変条件への影響のみ記す）。
+
+- **本設計文書の不変条件（I1〜I5・§4 同期点一覧）への影響**: 上記 §2.1・§4・§10 の追補のとおり。ordinal ごとの単一ストリーム構成（I1）はストリーム種別が変わるだけで維持され、同期点一覧（§4）は capture 中の追加拒否条件が乗るのみで既存の同期契約自体は変更していない
+- **poison 状態機械（§5）への影響**: capture 系 `CUresult`（900〜908）を明示的に `Sticky` へ分類する arm を追加した（`context_cache::classify_cuda_result`）。既存の `Phase`（`Active`／`Retiring`／`Poisoned`）状態機械は変更せず、`OrdinalState` に `capture: Option<ThreadId>` フィールドを追加しただけの非破壊拡張
+- **実装範囲**: `backend-cuda::graph`（新規モジュール。opt-in フラグ・thread-local graph キャッシュ・capture 手順本体）・`backend-cuda::context_cache`（capture セッション・同期点ガード）・`backend-cuda::device`（`StreamKind`）・`tensor-core::BackendOps`（`captured_segment_key`／`run_captured_segment` の非破壊拡張デフォルトメソッド）・`autodiff::DeviceParamStore::step`（update 区間の結線）・`facade`（`set_cuda_graph_step_enabled`／`cuda_graph_step_enabled`）
+- **実機実測**: 本エージェント実行環境に CUDA 実機なしのため、`crates/backend-cuda/tests/graph_capture_real_device.rs`（`#[ignore]`）・`crates/facade/tests/cuda_graph_step_bit_identity.rs`（`#[ignore]`）は実装・コンパイル確認のみで未実測のまま記入欄を残す。実機実行手順は各テストファイル冒頭コメント参照
 
 ## 13. 出典
 

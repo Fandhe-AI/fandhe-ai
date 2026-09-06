@@ -55,6 +55,30 @@ pub struct CudaDevice {
     name: String,
     compute_capability: (i32, i32),
     arch: String,
+    stream_kind: StreamKind,
+}
+
+/// `CudaDevice::stream` の種別（イシュー #1349・`docs/backend-cuda-graph-
+/// step-capture-design.md` §4.1）。
+///
+/// `cudarc` の legacy NULL stream（`default_stream()`）は
+/// `cuStreamBeginCapture` の対象にできない（driver が
+/// `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` を返す）ため、CUDA Graph
+/// capture opt-in（[`crate::graph::step_graph_mode`] が
+/// [`crate::graph::GraphMode::StreamOnly`] 以上）が最初の CUDA デバイス
+/// 初期化より前に設定されている場合のみ `ctx.new_stream()`
+/// （非 legacy・capture 可能なストリーム）を保持する。opt-in OFF
+/// （既定）では常に [`StreamKind::Legacy`] のまま、本イシュー導入前と
+/// ストリーム挙動・性能とも bit・timing とも不変（`new_stream()` は
+/// `cudarc` の「multi-stream mode」を有効化し、以降の全 `device_ptr`
+/// 呼び出しに `cuStreamWaitEvent` を自動挿入するため、無条件に切り替える
+/// と opt-in OFF 時の既存経路まで変えてしまう。design doc §4.1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    /// `ctx.default_stream()`（legacy NULL stream）。capture 不可。
+    Legacy,
+    /// `ctx.new_stream()`（capture 可能な非 legacy ストリーム）。
+    Created,
 }
 
 impl CudaDevice {
@@ -95,7 +119,16 @@ impl CudaDevice {
         }
 
         let ctx = CudaContext::new(ordinal)?;
-        let stream = ctx.default_stream();
+        // イシュー #1349: CUDA Graph capture opt-in が最初のデバイス
+        // 初期化より前に設定されている場合のみ、capture 可能な
+        // `new_stream()` を保持する（`StreamKind` doc コメント参照）。
+        // opt-in OFF（既定）では現行どおり `default_stream()`
+        // （legacy NULL stream）のまま、本イシュー導入前と挙動不変。
+        let (stream, stream_kind) = if crate::graph::step_graph_mode().requires_created_stream() {
+            (ctx.new_stream()?, StreamKind::Created)
+        } else {
+            (ctx.default_stream(), StreamKind::Legacy)
+        };
         let name = ctx.name()?;
         let compute_capability = ctx.compute_capability()?;
         // nvrtc の --gpu-architecture は仮想アーキテクチャ（compute_XY）を
@@ -111,6 +144,7 @@ impl CudaDevice {
             name,
             compute_capability,
             arch,
+            stream_kind,
         })
     }
 
@@ -140,6 +174,17 @@ impl CudaDevice {
     /// #33/#34 のカーネル起動・メモリ転送が使う既定ストリーム。
     pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
+    }
+
+    /// このデバイスのストリームが CUDA Graph capture 可能（`StreamKind::
+    /// Created`）かどうかを返す（イシュー #1349）。`ops.rs::
+    /// CudaBackendOps::captured_segment_key` が opt-in ON でも実際に
+    /// capture 可能なストリームで初期化済みかを判定するために使う
+    /// （opt-in が最初のデバイス初期化より遅れて ON にされた場合、
+    /// このデバイスは `StreamKind::Legacy` のまま残り、本メソッドは
+    /// `false` を返す。`StreamKind` doc コメント参照）。
+    pub fn is_capturable_stream(&self) -> bool {
+        matches!(self.stream_kind, StreamKind::Created)
     }
 
     /// `new` に渡した GPU の ordinal（デバイス番号）。
