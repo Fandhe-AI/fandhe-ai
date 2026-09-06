@@ -65,6 +65,13 @@ pub(crate) struct SpecializationParams {
     pub(crate) trans_a: bool,
     /// `GEMM_SPEC_TRANS_B`。
     pub(crate) trans_b: bool,
+    /// `GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED`（イシュー #1293）。
+    /// `crate::pipeline::GemmGateConstants::frag_load_device_hoisted` と
+    /// 同じ意味。
+    pub(crate) frag_load_device_hoisted: bool,
+    /// `GEMM_SPEC_FRAG_LOAD_KSTEPS`（イシュー #1293。値は 1 または 2）。
+    /// `crate::pipeline::GemmGateConstants::frag_load_ksteps` と同じ意味。
+    pub(crate) frag_load_ksteps: u32,
 }
 
 impl SpecializationParams {
@@ -72,11 +79,14 @@ impl SpecializationParams {
     /// `crate::gemm::MetalGemm::pipeline_for_tile` が
     /// `TransposePattern`（呼び出し元から受け取る）を保持しているため、
     /// 変換の手間を本モジュール側に閉じる。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         cfg: TileConfig,
         swizzle_enabled: bool,
         fine_barrier_enabled: bool,
         unroll_acc_enabled: bool,
+        frag_load_device_hoisted: bool,
+        frag_load_ksteps: u32,
         pattern: TransposePattern,
     ) -> Self {
         let (trans_a, trans_b) = match pattern {
@@ -92,6 +102,8 @@ impl SpecializationParams {
             unroll_acc_enabled,
             trans_a,
             trans_b,
+            frag_load_device_hoisted,
+            frag_load_ksteps,
         }
     }
 }
@@ -157,6 +169,14 @@ pub(crate) fn specialized_gemm_source(params: &SpecializationParams) -> String {
         "#define GEMM_SPEC_UNROLL_ACC_ENABLED {}\n",
         msl_bool(params.unroll_acc_enabled)
     ));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED {}\n",
+        msl_bool(params.frag_load_device_hoisted)
+    ));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_FRAG_LOAD_KSTEPS {}\n",
+        params.frag_load_ksteps
+    ));
     header.push_str(&format!("#define GEMM_SPEC_ACC_ROWS {acc_rows}\n"));
     header.push_str(&format!("#define GEMM_SPEC_ACC_COLS {acc_cols}\n"));
     header.push_str(GEMM_MSL_SRC);
@@ -180,7 +200,7 @@ mod tests {
                 TransposePattern::Tn,
                 TransposePattern::Tt,
             ] {
-                let params = SpecializationParams::new(cfg, false, false, false, pattern);
+                let params = SpecializationParams::new(cfg, false, false, false, false, 1, pattern);
                 let src = specialized_gemm_source(&params);
                 assert!(src.starts_with(SPEC_HEADER_MARKER));
                 assert!(src.contains(&format!("#define GEMM_SPEC_BM {}\n", cfg.bm)));
@@ -193,6 +213,8 @@ mod tests {
                     msl_bool(cfg.staged)
                 )));
                 assert!(src.contains(&format!("#define GEMM_SPEC_TGP_PAD {}\n", cfg.pad())));
+                assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED false\n"));
+                assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_KSTEPS 1\n"));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_ROWS {}\n", cfg.acc_rows())));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_COLS {}\n", cfg.acc_cols())));
             }
@@ -204,7 +226,8 @@ mod tests {
     #[test]
     fn generated_source_ends_with_original_gemm_metal_source() {
         let cfg = CANDIDATES[0];
-        let params = SpecializationParams::new(cfg, false, false, false, TransposePattern::Nn);
+        let params =
+            SpecializationParams::new(cfg, false, false, false, false, 1, TransposePattern::Nn);
         let src = specialized_gemm_source(&params);
         assert!(src.ends_with(GEMM_MSL_SRC));
     }
@@ -220,6 +243,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            1,
             TransposePattern::Nn,
         ));
         let b = specialized_gemm_source(&SpecializationParams::new(
@@ -227,6 +252,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            1,
             TransposePattern::Nn,
         ));
         let c = specialized_gemm_source(&SpecializationParams::new(
@@ -234,6 +261,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            1,
             TransposePattern::Nt,
         ));
         let d = specialized_gemm_source(&SpecializationParams::new(
@@ -241,11 +270,26 @@ mod tests {
             false,
             false,
             true,
+            false,
+            1,
+            TransposePattern::Nn,
+        ));
+        let e = specialized_gemm_source(&SpecializationParams::new(
+            CANDIDATES[0],
+            false,
+            false,
+            false,
+            true,
+            2,
             TransposePattern::Nn,
         ));
         assert_ne!(a, b, "候補が異なれば生成文字列も異なるべき");
         assert_ne!(a, c, "パターンが異なれば生成文字列も異なるべき");
         assert_ne!(a, d, "ゲートが異なれば生成文字列も異なるべき");
+        assert_ne!(
+            a, e,
+            "フラグメントロード方式候補ゲート（イシュー #1293）が異なれば生成文字列も異なるべき"
+        );
     }
 
     /// bool フィールドが `1`/`0` ではなく MSL の `true`/`false` リテラルで
@@ -253,13 +297,22 @@ mod tests {
     /// 契約の機械検証）。
     #[test]
     fn bool_fields_render_as_true_false_literals() {
-        let params =
-            SpecializationParams::new(CANDIDATES[3], true, true, true, TransposePattern::Tt);
+        let params = SpecializationParams::new(
+            CANDIDATES[3],
+            true,
+            true,
+            true,
+            true,
+            2,
+            TransposePattern::Tt,
+        );
         let src = specialized_gemm_source(&params);
         assert!(src.contains("#define GEMM_SPEC_SWIZZLE_ENABLED true\n"));
         assert!(src.contains("#define GEMM_SPEC_FINE_BARRIER_ENABLED true\n"));
         assert!(src.contains("#define GEMM_SPEC_UNROLL_ACC_ENABLED true\n"));
         assert!(src.contains("#define GEMM_SPEC_TRANS_A true\n"));
         assert!(src.contains("#define GEMM_SPEC_TRANS_B true\n"));
+        assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED true\n"));
+        assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_KSTEPS 2\n"));
     }
 }

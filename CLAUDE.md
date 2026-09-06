@@ -153,7 +153,8 @@ fandhe-ai/
     │   ├── metal-gemm-fine-barrier-ab.md # `gemm_simdgroup_tiled` staged 経路 kk ループへの `simdgroup_barrier(mem_none)` 細粒度同期挿入（`FINE_BARRIER_ENABLED` function constant。#809）の M4 Max 実機 A/B 計測記録。フェーズ 1 安定性セルフチェックが 4 試行・全サイズで不成立（他リポジトリの並走ビルドによる CPU 負荷競合と判断）のため**判定不可（undetermined）**・`FINE_BARRIER_ENABLED=false` 維持。数値契約（base/head bit 一致）は `tests/gemm_fine_barrier_bit_match.rs` で size 512〜4096 実機実測 PASS 済み。**#1280 で結線対象なしを確定・既定 `false` 維持・`tile.rs` doc comment 整合済み**（イシュー #1278）
     │   ├── logs/metal-gemm-fine-barrier-ab-1278/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1278）
     │   ├── metal-gemm-tgid-swizzle-ab.md # `gemm_simdgroup_tiled` の dispatch grid 走査順を threadgroup ID スウィズル（`SWIZZLE_ENABLED` function constant。#540・#795）へ変更した効果の M4 Max 実機 A/B 計測記録。フェーズ 1 安定性セルフチェックが 4 試行・ほぼ全サイズで不成立（同日 #1278 と同じ他リポジトリ並走ビルドによる CPU 負荷競合と判断）のため**判定不可（undetermined）**・`SWIZZLE_ENABLED=false` 維持。数値契約（base/head bit 一致）は `tests/gemm_swizzle_bit_match.rs` で size 512〜4096 実機実測 PASS 済み。**#1280 で結線対象なしを確定・既定 `false` 維持・`tile.rs` doc comment 整合済み**（イシュー #1279）
-    │   └── logs/metal-gemm-tgid-swizzle-ab-1279/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1279）
+    │   ├── logs/metal-gemm-tgid-swizzle-ab-1279/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1279）
+    │   └── metal-gemm-frag-load-candidates.md # `gemm_simdgroup_tiled` のフラグメントロード方式候補（threadgroup 経由／device 直接・ロード粒度 K=1/2。`FRAG_LOAD_DEVICE_HOISTED`／`FRAG_LOAD_KSTEPS` function constant。5 候補）の実装・bit 一致自己検証（`MetalGemm::new_with_frag_load`。M4 Max 実機実測 T1〜T4 全 pass・既存 parity/bit-match 非後退確認済み）。性能実測・`tile::select` への組み込み判断は #1295 へ引き継ぎ（イシュー #1293。`docs/perf/metal-gemm-n4096-kernel-gap.md` §5 E3）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）

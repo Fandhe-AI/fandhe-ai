@@ -1363,6 +1363,96 @@ pub(crate) const UNROLL_ACC_ENABLED: bool = false;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const SOURCE_SPECIALIZATION_ENABLED: bool = false;
 
+/// `gemm_simdgroup_tiled` のフラグメントロード方式候補（イシュー #1293）の
+/// うち、staged/direct-load 両経路が共有する「K 方向の一括ロード段数」
+/// 軸。`shaders/gemm.metal` の `FRAG_LOAD_KSTEPS` function constant
+/// （index 13）と 1:1 対応する。値域を型で保証することで、実行時検証・
+/// 新しい `TileConfigError`/`MetalError` variant の追加を不要にする
+/// （`.claude/rules/coding-rust.md`「本番経路で unwrap/expect を使わない」
+/// 方針・PR #672 codex-review「`pub enum` への variant 追加は下流の
+/// 網羅的 `match` を破壊する」指摘を踏まえた設計判断）。
+///
+/// **`pub`（`SWIZZLE_ENABLED` 等の内部 `pub(crate)` 定数群とは異なる
+/// 可視性）にする理由**: [`crate::gemm::MetalGemm::new_with_frag_load`]
+/// （`Two` を実際に構築する唯一の入口）を `pub fn` にする以上、その引数型
+/// （[`FragLoadConfig`] 経由）も少なくとも同じ可視性が必要。`pub(crate)`
+/// のまま `new_with_frag_load` だけ `pub` にすると private-in-public に
+/// 抵触する。仮に `new_with_frag_load` 自体を `#[cfg(test)]` に限定
+/// すると、`Two` は crate 内のどこからも構築されない（`SWIZZLE_ENABLED`/
+/// `FINE_BARRIER_ENABLED`/`UNROLL_ACC_ENABLED` は bool のため両方の値が
+/// 型システム上つねに「構築済み」扱いになるのに対し、enum の未構築
+/// variant は dead_code 検査の対象になる）ため、他クレートから
+/// `fandhe-ai-backend-metal` を通常の依存先として lib ビルドする経路
+/// （cfg(test) が付かない）で `Two` が dead code 判定される
+/// （`.claude/rules/coding-rust.md`「`#[allow]` の安易な追加で黙らせない」
+/// 方針により `#[allow(dead_code)]` は使わない。`crate::tile::
+/// verify_m4_max` doc comment の前例と同じ判断軸）。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FragLoadKSteps {
+    /// 既定（8 幅刻み。従来どおりの単一フラグメント処理）。
+    One,
+    /// 16 幅（8 幅 x 2）をまとめてロード・MMA 発行する。
+    Two,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl FragLoadKSteps {
+    /// `shaders/gemm.metal` の `FRAG_LOAD_KSTEPS`（`constant uint`）へ渡す
+    /// 実効値（1 または 2）。
+    pub(crate) fn as_u32(self) -> u32 {
+        match self {
+            FragLoadKSteps::One => 1,
+            FragLoadKSteps::Two => 2,
+        }
+    }
+}
+
+/// フラグメントロード方式候補（イシュー #1293）の instance ゲート。
+/// `crate::gemm::MetalGemm::new_with_frag_load` が受け取り、
+/// `crate::pipeline::GemmGateConstants`（`frag_load_device_hoisted`/
+/// `frag_load_ksteps`）経由で `shaders/gemm.metal` の
+/// `FRAG_LOAD_DEVICE_HOISTED`（index 12）/`FRAG_LOAD_KSTEPS`（index 13）
+/// function constant へ畳み込まれる契約。
+///
+/// `device_hoisted`（`TileConfig.staged == false` の direct-load 経路
+/// 専用。staged 経路では no-op）と `ksteps`（staged・direct-load 双方の
+/// K 方向一括ロード段数）の組合せで、`docs/perf/
+/// metal-gemm-frag-load-candidates.md` §3.1 の 5 候補（現行 staged・
+/// tgp-k2・device-legacy〈現行〉・device-hoisted-k1・device-hoisted-k2）を
+/// 表現する。`TileConfig` 自体へフィールドを追加しない設計（`TileConfig`
+/// は `pub` フィールド構造体でキャッシュキーを兼ねるため、`SWIZZLE_ENABLED`
+/// /`FINE_BARRIER_ENABLED`/`UNROLL_ACC_ENABLED`/`SOURCE_SPECIALIZATION_ENABLED`
+/// と同じ instance ゲート方式を踏襲する）。`pub` にする理由は
+/// [`FragLoadKSteps`] doc comment を参照。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FragLoadConfig {
+    pub device_hoisted: bool,
+    pub ksteps: FragLoadKSteps,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl FragLoadConfig {
+    /// 本番既定（`MetalGemm::new` が渡す値）。`gemm.metal` の既存 staged/
+    /// direct-load ブロック（`FRAG_LOAD_KSTEPS`/`FRAG_LOAD_DEVICE_HOISTED`
+    /// の `else` 側）がテキスト無変更のまま走る構成と一致する。
+    pub const DEFAULT: FragLoadConfig = FragLoadConfig {
+        device_hoisted: false,
+        ksteps: FragLoadKSteps::One,
+    };
+}
+
+/// [`FragLoadConfig::DEFAULT`] を本番既定として公開する定数
+/// （`SWIZZLE_ENABLED`/`FINE_BARRIER_ENABLED`/`UNROLL_ACC_ENABLED`/
+/// `SOURCE_SPECIALIZATION_ENABLED` と同型の設計。`crate::gemm::MetalGemm::new`
+/// が本定数を渡す）。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
+/// doc comment を参照（同一の dead_code 誤検知回避）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const FRAG_LOAD_CONFIG: FragLoadConfig = FragLoadConfig::DEFAULT;
+
 /// [`TileConfig::unroll_acc_loops`] が unroll 版ループを選ぶ acc 積
 /// （`acc_rows * acc_cols`）の下限（イシュー #1282）。E1 実験（`docs/perf/
 /// metal-gemm-n4096-kernel-gap.md` §7）で確認した「`acc_rows*acc_cols>=16`
@@ -4316,5 +4406,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// イシュー #1293 T5: [`FRAG_LOAD_CONFIG`]（本番既定）が
+    /// [`FragLoadConfig::DEFAULT`] と一致し、既存 staged/direct-load
+    /// ブロックがテキスト無変更のまま走る構成（`device_hoisted=false`・
+    /// `ksteps=One`）であることを固定する。`FragLoadKSteps::as_u32` の
+    /// 値域（1・2）も併せて検査する（Linux 実行可能。GPU デバイス非依存）。
+    #[test]
+    fn frag_load_config_default_is_current_path() {
+        // 構造体全体の等価性（`device_hoisted`/`ksteps` 双方）を
+        // `FragLoadConfig::DEFAULT` と突き合わせて確認する（`assert!`
+        // による個別フィールド検査は clippy::assertions_on_constants に
+        // 抵触するため使わない）。
+        assert_eq!(FRAG_LOAD_CONFIG, FragLoadConfig::DEFAULT);
+        assert_eq!(FRAG_LOAD_CONFIG.ksteps, FragLoadKSteps::One);
+        assert_eq!(FragLoadKSteps::One.as_u32(), 1);
+        assert_eq!(FragLoadKSteps::Two.as_u32(), 2);
     }
 }

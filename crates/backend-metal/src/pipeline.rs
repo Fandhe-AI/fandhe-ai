@@ -63,6 +63,19 @@ pub(crate) struct GemmGateConstants {
     /// `pipeline_for_tile_f16` が渡す値は無害な no-op（`swizzle_enabled`／
     /// `fine_barrier_enabled` と同じ扱い）。
     pub(crate) unroll_acc_enabled: bool,
+    /// フラグメントロード方式候補（イシュー #1293）のうち、direct-load
+    /// 経路（`USE_TGP_STAGING=false`）専用のロード構造ゲート
+    /// （`FRAG_LOAD_DEVICE_HOISTED`。index 12）。呼び出し元
+    /// [`crate::gemm::MetalGemm::pipeline_for_tile`] がインスタンスの
+    /// `frag_load: crate::tile::FragLoadConfig` から渡す。staged 経路
+    /// （`USE_TGP_STAGING=true`）はこの定数を一切参照しないため無害な
+    /// no-op。`gemm_simdgroup_tiled_f16` も参照しない。
+    pub(crate) frag_load_device_hoisted: bool,
+    /// フラグメントロード方式候補（イシュー #1293）の K 方向一括ロード
+    /// 段数ゲート（`FRAG_LOAD_KSTEPS`。index 13。値は 1 または 2）。
+    /// staged・direct-load 双方の kk ループが参照する。
+    /// `gemm_simdgroup_tiled_f16` は参照しない。
+    pub(crate) frag_load_ksteps: u32,
 }
 
 /// `shaders/gemm.metal` を実行時コンパイルして `MTLLibrary` を返す。
@@ -190,6 +203,8 @@ pub(crate) fn make_pipeline_with_constants(
         swizzle_enabled,
         fine_barrier_enabled,
         unroll_acc_enabled,
+        frag_load_device_hoisted,
+        frag_load_ksteps,
     } = gates;
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -305,6 +320,28 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::Bool,
             11,
         );
+        // フラグメントロード方式候補ゲート（イシュー #1293）。
+        // `frag_load_device_hoisted`（direct-load 経路専用。staged 経路は
+        // 参照しない no-op）は UNROLL_ACC_ENABLED（index 11）の直後の
+        // index 12、`frag_load_ksteps`（staged・direct-load 双方が参照する
+        // K 方向一括ロード段数。1 または 2）は index 13
+        // （`shaders/gemm.metal` 冒頭 FRAG_LOAD_DEVICE_HOISTED/
+        // FRAG_LOAD_KSTEPS 宣言と 1:1 対応。`tests/shader_source_evidence.rs`
+        // が index を含めて固定する）。`gemm_simdgroup_tiled_f16` は
+        // いずれも参照しないため、`pipeline_for_tile_f16` からの呼び出し
+        // では無害な no-op（他ゲートと同じ扱い）。
+        let frag_load_hoisted = frag_load_device_hoisted;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&frag_load_hoisted).cast(),
+            MTLDataType::Bool,
+            12,
+        );
+        let frag_load_k = frag_load_ksteps;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&frag_load_k).cast(),
+            MTLDataType::UInt,
+            13,
+        );
     }
 
     let func = library
@@ -354,12 +391,16 @@ pub(crate) fn make_pipeline_source_specialized(
         swizzle_enabled,
         fine_barrier_enabled,
         unroll_acc_enabled,
+        frag_load_device_hoisted,
+        frag_load_ksteps,
     } = gates;
     let params = crate::spec_source::SpecializationParams::new(
         cfg,
         swizzle_enabled,
         fine_barrier_enabled,
         unroll_acc_enabled,
+        frag_load_device_hoisted,
+        frag_load_ksteps,
         pattern,
     );
     let src = crate::spec_source::specialized_gemm_source(&params);

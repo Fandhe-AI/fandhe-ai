@@ -688,26 +688,101 @@ fn gemm_metal_source_declares_fine_barrier_enabled_function_constant() {
 fn gemm_simdgroup_tiled_source_gates_fine_barrier_between_fragment_load_and_mma() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
 
-    assert!(
-        kernel_body.contains("if (FINE_BARRIER_ENABLED) {\n                    simdgroup_barrier(mem_flags::mem_none);\n                }"),
-        "gemm_simdgroup_tiled に FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier(mem_flags::mem_none) \
-         挿入が見つかりません"
+    // イシュー #1293: フラグメントロード方式候補（staged 経路の
+    // `FRAG_LOAD_KSTEPS == 2` 主ループ・端数ループ、direct-load 経路の
+    // `FRAG_LOAD_DEVICE_HOISTED` ブロック）にも同じ FINE_BARRIER_ENABLED
+    // ゲート付きフェンス（フラグメント一括ロード完了後・MMA 発行前という
+    // 契約）を備えたため、`if (FINE_BARRIER_ENABLED) {` 自体の出現数は
+    // 1→4 へ変わる（既定側〈staged legacy `else` 節。テキスト無変更〉1 箇所
+    // + k2 主ループ 1 箇所 + k2 端数ループ 1 箇所 + direct-load hoisted
+    // ブロック 1 箇所）。既定側のみ元のインデント（20 スペース）のまま
+    // バイト同一のため、`gate_pattern`（インデント込み厳密一致）の出現数は
+    // 1 のまま不変とする。
+    let if_count = kernel_body.matches("if (FINE_BARRIER_ENABLED) {").count();
+    assert_eq!(
+        if_count, 4,
+        "gemm_simdgroup_tiled の FINE_BARRIER_ENABLED 分岐の出現数が期待値と異なります \
+         （見つかった数: {if_count}、期待値: 4）"
+    );
+    let gate_pattern = "if (FINE_BARRIER_ENABLED) {\n                    simdgroup_barrier(mem_flags::mem_none);\n                }";
+    let occurrences = kernel_body.matches(gate_pattern).count();
+    assert_eq!(
+        occurrences, 1,
+        "gemm_simdgroup_tiled の既定側（staged legacy `else` 節。テキスト無変更）の \
+         FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier(mem_flags::mem_none) 挿入の出現数が \
+         期待値と異なります（見つかった数: {occurrences}、期待値: 1）"
     );
 
-    let b_frag_load_pos = kernel_body
-        .find("simdgroup_load(b_frag[c_],")
+    // 直接ロード（direct-load）経路の目印コメントで staged 経路部分だけを
+    // 切り出す（`gemm_simdgroup_tiled_source_uses_register_resident_fragment_arrays`
+    // と同じ手法。hoisted ブロック側の同名 needle との取り違えを防ぐ）。
+    let direct_load_marker = "// 直接ロード: device メモリから simdgroup ごとに直接";
+    let staged_scope = &kernel_body[..kernel_body.find(direct_load_marker).expect(
+        "gemm_simdgroup_tiled の direct-load 経路（else 節）の目印コメントが見つかりません",
+    )];
+
+    // 既定側（`else`。テキスト無変更のレガシー staged 経路）: staged
+    // scope 内で末尾の出現（`rfind`）が b_frag ロード直後・MMA 発行直前に
+    // 位置することを確認する（レガシー経路のテキストは #1293 で一切変更
+    // していないため、この契約は不変のまま維持される）。
+    let b_frag_load_pos = staged_scope
+        .rfind("simdgroup_load(b_frag[c_],")
         .expect("B フラグメントロード（b_frag）が見つかりません");
-    let barrier_pos = kernel_body
-        .find("simdgroup_barrier(mem_flags::mem_none);")
+    let barrier_pos = staged_scope
+        .rfind("simdgroup_barrier(mem_flags::mem_none);")
         .expect("FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier が見つかりません");
-    let mma_pos = kernel_body
-        .find("simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);")
+    let mma_pos = staged_scope
+        .rfind("simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);")
         .expect("MMA 発行（simdgroup_multiply_accumulate）が見つかりません");
 
     assert!(
         b_frag_load_pos < barrier_pos && barrier_pos < mma_pos,
         "simdgroup_barrier(mem_flags::mem_none) は B フラグメントロード直後・MMA 発行直前に \
          位置する契約です（b_frag_load={b_frag_load_pos} barrier={barrier_pos} mma={mma_pos}）"
+    );
+
+    // K=2 段ブロック（`FRAG_LOAD_KSTEPS == 2`）側: staged scope 内で
+    // `b_frag2` ロード直後・`a_frag2`/`b_frag2` を使う MMA 発行直前に位置
+    // することを確認する（先頭の出現。`find` で k2 ブロック側を特定する）。
+    let b_frag2_load_pos = staged_scope
+        .find("simdgroup_load(b_frag2[ks][c_],")
+        .expect("K=2 段ブロックの B フラグメントロード（b_frag2）が見つかりません");
+    let barrier2_pos = staged_scope
+        .find("simdgroup_barrier(mem_flags::mem_none);")
+        .expect(
+            "K=2 段ブロックの FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier が見つかりません",
+        );
+    let mma2_pos = staged_scope
+        .find("simdgroup_multiply_accumulate(acc[r][c_], a_frag2[ks][r], b_frag2[ks][c_], acc[r][c_]);")
+        .expect("K=2 段ブロックの MMA 発行（simdgroup_multiply_accumulate）が見つかりません");
+    assert!(
+        b_frag2_load_pos < barrier2_pos && barrier2_pos < mma2_pos,
+        "K=2 段ブロックの simdgroup_barrier(mem_flags::mem_none) は b_frag2 ロード直後・MMA 発行直前に \
+         位置する契約です（b_frag2_load={b_frag2_load_pos} barrier={barrier2_pos} mma={mma2_pos}）"
+    );
+
+    // direct-load hoisted ブロック側（`kernel_body` 全体を使い、staged
+    // scope より後ろに位置する `a_frag[ks][r]`/`b_frag[ks][c_]`〈2 次元
+    // 配列。staged 経路の `a_frag2`/`b_frag2` とは別名〉ロードから
+    // MMA 発行までの区間を検査する）。
+    let hoisted_a_load_pos = kernel_body
+        .find("simdgroup_load(a_frag[ks][r], a + (size_t)(p0 + kk_s)")
+        .expect("direct-load hoisted ブロックの A フラグメントロードが見つかりません");
+    let hoisted_barrier_pos = kernel_body[hoisted_a_load_pos..]
+        .find("simdgroup_barrier(mem_flags::mem_none);")
+        .map(|off| off + hoisted_a_load_pos)
+        .expect("direct-load hoisted ブロックの FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier が見つかりません");
+    let hoisted_mma_pos = kernel_body[hoisted_barrier_pos..]
+        .find(
+            "simdgroup_multiply_accumulate(acc[r][c_], a_frag[ks][r], b_frag[ks][c_], acc[r][c_]);",
+        )
+        .map(|off| off + hoisted_barrier_pos)
+        .expect("direct-load hoisted ブロックの MMA 発行が見つかりません");
+    assert!(
+        hoisted_a_load_pos < hoisted_barrier_pos && hoisted_barrier_pos < hoisted_mma_pos,
+        "direct-load hoisted ブロックの simdgroup_barrier(mem_flags::mem_none) はフラグメント \
+         ロード直後・MMA 発行直前に位置する契約です（a_load={hoisted_a_load_pos} \
+         barrier={hoisted_barrier_pos} mma={hoisted_mma_pos}）"
     );
 }
 
@@ -837,20 +912,24 @@ fn gemm_simdgroup_tiled_f16_source_does_not_reference_unroll_acc() {
     );
 }
 
-/// イシュー #1282 の証跡: `UNROLL_ACC_ENABLED` 分岐複製後も REQ-8 手動境界
-/// チェック（`.claude/rules/coding-rust.md`「カーネル実装の境界検査」）が
-/// unroll 版・非 unroll 版の両方で維持されていることをロックする。
-/// エピローグストアの `out_row >= dims.m`/`out_col >= dims.n` 早期
+/// イシュー #1282/#1293 の証跡: `UNROLL_ACC_ENABLED` 分岐複製後も REQ-8
+/// 手動境界チェック（`.claude/rules/coding-rust.md`「カーネル実装の境界
+/// 検査」）が unroll 版・非 unroll 版の両方で維持されていることをロック
+/// する。エピローグストアの `out_row >= dims.m`/`out_col >= dims.n` 早期
 /// `continue` は分岐複製により出現数が 1→2 へ変わる契約（`if (UNROLL_ACC_
-/// ENABLED)` ブロックと `else` ブロックそれぞれに 1 回ずつ）。
+/// ENABLED)` ブロックと `else` ブロックそれぞれに 1 回ずつ）。direct-load
+/// 経路の `a_row < dims.m`/`b_col < dims.n`（境界チェック本体）は #1293
+/// の device hoisted ブロック（`FRAG_LOAD_DEVICE_HOISTED` 分岐。legacy
+/// 経路と同一綴りを 1 回だけ使う設計）が追加されたことで 2→3 へ変わる
+/// 契約（legacy 経路の unroll/非 unroll 各 1 回 + hoisted ブロック 1 回）。
 #[test]
 fn gemm_simdgroup_tiled_source_retains_req8_boundary_guards_in_both_unroll_variants() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
     for (needle, expected) in [
         ("if (out_row >= dims.m) {", 2),
         ("if (out_col >= dims.n) {", 2),
-        ("if (a_row < dims.m) {", 2),
-        ("if (b_col < dims.n) {", 2),
+        ("if (a_row < dims.m) {", 3),
+        ("if (b_col < dims.n) {", 3),
     ] {
         let occurrences = kernel_body.matches(needle).count();
         assert_eq!(
@@ -903,12 +982,13 @@ fn gemm_metal_source_declares_transpose_boundary_helpers() {
     }
 }
 
-/// イシュー #1288 の証跡: ソーステキスト特殊化経路（`GEMM_SPEC_ENABLED`）
-/// が定義される `#ifdef` 分岐に 12 個の `= GEMM_SPEC_*` リテラル代入
-/// （function constant 経路 12 宣言と 1:1 対応）が全て存在することを
-/// ロックする。
+/// イシュー #1288/#1293 の証跡: ソーステキスト特殊化経路
+/// （`GEMM_SPEC_ENABLED`）が定義される `#ifdef` 分岐に 14 個の
+/// `= GEMM_SPEC_*` リテラル代入（function constant 経路 14 宣言と 1:1
+/// 対応。#1293 でフラグメントロード方式候補ゲート 2 個〈index 12/13〉が
+/// 追加され 12→14 へ増えた）が全て存在することをロックする。
 #[test]
-fn gemm_metal_source_declares_spec_ifdef_block_with_all_twelve_defines() {
+fn gemm_metal_source_declares_spec_ifdef_block_with_all_fourteen_defines() {
     assert!(
         GEMM_METAL_SOURCE.contains("#ifdef GEMM_SPEC_ENABLED"),
         "gemm.metal に #ifdef GEMM_SPEC_ENABLED 分岐（イシュー #1288）が見つかりません"
@@ -926,22 +1006,24 @@ fn gemm_metal_source_declares_spec_ifdef_block_with_all_twelve_defines() {
         "constant bool TRANS_A = GEMM_SPEC_TRANS_A;",
         "constant bool TRANS_B = GEMM_SPEC_TRANS_B;",
         "constant bool UNROLL_ACC_ENABLED = GEMM_SPEC_UNROLL_ACC_ENABLED;",
+        "constant bool FRAG_LOAD_DEVICE_HOISTED = GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED;",
+        "constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
-            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288）が見つかりません"
+            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293）が見つかりません"
         );
     }
 }
 
-/// イシュー #1288 の証跡: `#ifdef GEMM_SPEC_ENABLED` 導入後も `#else` 側の
-/// 12 個の function constant 宣言（本番既定経路。#188/#538/#540/#809/
-/// #1138/#1282 の各 index）がバイト同一で残っていることをロックする
-/// （`crate::spec_source` へ移設した `SOURCE_SPECIALIZATION_ENABLED`
-/// 既定 `false` の裏付け——`#else` 側が変わっていなければ本番挙動は
-/// 変わらない）。
+/// イシュー #1288/#1293 の証跡: `#ifdef GEMM_SPEC_ENABLED` 導入後も
+/// `#else` 側の 14 個の function constant 宣言（本番既定経路。#188/#538/
+/// #540/#809/#1138/#1282/#1293 の各 index）がバイト同一で残っていることを
+/// ロックする（`crate::spec_source` へ移設した
+/// `SOURCE_SPECIALIZATION_ENABLED` 既定 `false` の裏付け——`#else` 側が
+/// 変わっていなければ本番挙動は変わらない）。
 #[test]
-fn gemm_metal_source_else_branch_retains_all_twelve_function_constants() {
+fn gemm_metal_source_else_branch_retains_all_fourteen_function_constants() {
     for needle in [
         "constant uint BM [[function_constant(0)]];",
         "constant uint BN [[function_constant(1)]];",
@@ -955,11 +1037,13 @@ fn gemm_metal_source_else_branch_retains_all_twelve_function_constants() {
         "constant bool TRANS_A [[function_constant(9)]];",
         "constant bool TRANS_B [[function_constant(10)]];",
         "constant bool UNROLL_ACC_ENABLED [[function_constant(11)]];",
+        "constant bool FRAG_LOAD_DEVICE_HOISTED [[function_constant(12)]];",
+        "constant uint FRAG_LOAD_KSTEPS [[function_constant(13)]];",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
             "gemm.metal の #else 側（本番既定）に function constant 宣言 `{needle}` が見つかりません。\
-             イシュー #1288 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
+             イシュー #1288/#1293 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
         );
     }
 }
@@ -1007,4 +1091,45 @@ fn gemm_simdgroup_tiled_f16_source_max_acc_unchanged() {
             "gemm_simdgroup_tiled_f16 の `{needle}` が変更されています（イシュー #1288 は f16 経路を対象外とする契約）"
         );
     }
+}
+
+/// イシュー #1293 の証跡: `gemm_simdgroup_tiled` の staged 経路（kk ループ）
+/// が `FRAG_LOAD_KSTEPS == 2` ゲート、direct-load 経路（else 節）が
+/// `FRAG_LOAD_DEVICE_HOISTED` ゲートで分岐し、既定側（`else`）が従来の
+/// テキストのまま残っていることをロックする。
+#[test]
+fn gemm_simdgroup_tiled_source_gates_frag_load_candidates_behind_function_constants() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for needle in [
+        "if (FRAG_LOAD_KSTEPS == 2) {",
+        "if (FRAG_LOAD_DEVICE_HOISTED) {",
+        // staged 経路の既定（K=1）: 従来の 8 幅単一フラグメントループが
+        // else 側にテキスト無変更のまま残ることの裏付け。
+        "for (uint kk = 0; kk < BK; kk += 8) {",
+        // direct-load 経路の既定（legacy）: 従来の `bk_full8` 宣言・
+        // 蛇行走査ループが else 側にテキスト無変更のまま残ることの裏付け。
+        "uint bk_full8 = (bk_eff / 8) * 8;",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled に `{needle}`（イシュー #1293）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1293 の証跡: `gemm_simdgroup_tiled_f16` は
+/// `FRAG_LOAD_DEVICE_HOISTED`/`FRAG_LOAD_KSTEPS` のいずれも参照しない
+/// （`crate::gemm::MetalGemm::pipeline_for_tile_f16` が常に既定値を渡す
+/// no-op 契約。`UNROLL_ACC_ENABLED` と同型の設計判断）ことをロックする。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_does_not_reference_frag_load_candidates() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    assert!(
+        !kernel_body.contains("FRAG_LOAD_DEVICE_HOISTED"),
+        "gemm_simdgroup_tiled_f16 が FRAG_LOAD_DEVICE_HOISTED を参照しています（イシュー #1293 のスコープ外）"
+    );
+    assert!(
+        !kernel_body.contains("FRAG_LOAD_KSTEPS"),
+        "gemm_simdgroup_tiled_f16 が FRAG_LOAD_KSTEPS を参照しています（イシュー #1293 のスコープ外）"
+    );
 }
