@@ -335,6 +335,18 @@ name = "setmaxnreg_probe_incdec_base_real_device"
 required-features = ["internal-diagnostics"]
 
 [[test]]
+# PR #1390 マージ時是正: `managed_placement_real_device`（イシュー
+# #1352）は全テストが `#[ignore]`（実機のみ）だが、leak 検査テスト
+# （`managed_placement_does_not_leak_on_real_hardware`）が
+# `device.context().mem_get_info()` を直接呼ぶ。`device.rs::
+# CudaDevice::context` は codex-review P0 指摘対応（イシュー #1349）で
+# 既定ビルド（`internal-diagnostics` feature 無効）では `pub(crate)` に
+# 絞られているため、ファイル単位で本 feature を要求する（他の実機診断
+# テストと同じ契約）。
+name = "managed_placement_real_device"
+required-features = ["internal-diagnostics"]
+
+[[test]]
 # イシュー #1353・codex-review 指摘の是正: `managed_placement_bandwidth_
 # real_device` は managed ページへの CPU 直接アクセス帯域を実測するため
 # `CudaMemory::measure_managed_direct_read_seconds`（診断専用入口。

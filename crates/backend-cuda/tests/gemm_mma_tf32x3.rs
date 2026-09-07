@@ -197,6 +197,19 @@ fn mma_tf32x3_zero_dim_shape_returns_empty_without_launch() {
 /// 形状契約を守ることを実機で確認する（`tests/gemm_mma_tf32.rs::
 /// launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch` と
 /// 同型）。
+///
+/// **`internal-diagnostics` feature 限定（PR #1390 マージ時是正）**:
+/// 本テストは `device.stream()` を直接呼ぶ（下記コメント参照）。
+/// `crate::device::CudaDevice::stream` は codex-review P0 指摘対応
+/// （イシュー #1349）で既定ビルド（同 feature 無効）では `pub(crate)`
+/// に絞られており、このテストファイル自体は他のテスト（環境適応
+/// スモーク等）を通常 CI（feature 未指定）でも実行させるため
+/// `required-features` によるファイル単位ゲートを使わない。かわりに
+/// このテスト関数だけを `internal-diagnostics` feature（`cargo test
+/// --workspace --all-features`。CI の test ジョブ・`make test` が使う
+/// コマンド）限定でコンパイルする（`device.rs::CudaDevice::context`
+/// doc コメント参照。他の diagnostics 専用テストファイルと同じ契約）。
+#[cfg(feature = "internal-diagnostics")]
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch() {

@@ -87,6 +87,14 @@ impl GraphMode {
 
     /// `device.rs::CudaDevice::new` が created stream を選ぶべきかどうか
     /// （`StreamOnly` 以上）。
+    ///
+    /// `internal-diagnostics` feature 有効時は未使用になる（codex-review
+    /// P0 再々指摘対応・PR #1390 マージ時是正）: `device.rs::CudaDevice::
+    /// new` は同 feature が有効な間、`unsafe { ctx.disable_event_tracking()
+    /// }` を呼ぶ分岐自体を cfg でコンパイル対象から外し `StreamKind::
+    /// Legacy` に固定するため、本メソッドを呼ぶ側の分岐が存在しなくなる
+    /// （`device.rs::CudaDevice::new` の cfg 分岐コメント参照）。
+    #[cfg_attr(feature = "internal-diagnostics", allow(dead_code))]
     pub(crate) fn requires_created_stream(self) -> bool {
         !matches!(self, GraphMode::Off)
     }
@@ -179,7 +187,26 @@ struct CachedGraph {
 const MAX_CACHED_GRAPHS_PER_THREAD: usize = 8;
 
 thread_local! {
-    static STEP_GRAPHS: RefCell<HashMap<SegmentKey, CachedGraph>> = RefCell::new(HashMap::new());
+    // Cursor Bugbot Medium 指摘対応（PR #1390 マージ時是正）: 旧稿は
+    // `SegmentKey`（`generation`・`config_key`・リソース `addr`／
+    // `numel`）のみをキーとする単一 `HashMap` だったため、device
+    // ordinal を一切区別しなかった。`generation` は ordinal ごとに 0
+    // から始まる独立したカウンタ（`context_cache::current_generation`）
+    // であり、`addr`（CUDA driver の仮想アドレス）も別デバイス上の
+    // 別バッファが同じ値になりうる（driver の確保パターン次第で現実に
+    // 起こりうる）ため、同一スレッドが複数 GPU 上で capture を行うと
+    // 「別デバイスの graph を誤って replay する」「別デバイスの graph
+    // キャッシュを誤って evict する」双方が起こりえた（opt-in は
+    // プロセスワイドで全 CUDA device に適用されるため、multi-GPU 構成
+    // では実際に到達しうる経路。design doc の前提「1 スレッドが同時に
+    // 触るのは 1 ordinal」を型で保証していなかった）。
+    //
+    // 外側を ordinal でパーティションし、世代不一致の evict（下記
+    // `put_cached_graph` の `retain`）も同一 ordinal のサブマップ内に
+    // 閉じることで、別 ordinal の graph を replay・evict する経路を
+    // 構造的になくす。
+    static STEP_GRAPHS: RefCell<HashMap<usize, HashMap<SegmentKey, CachedGraph>>> =
+        RefCell::new(HashMap::new());
     static NEXT_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -191,22 +218,31 @@ fn next_seq() -> u64 {
     })
 }
 
-/// キャッシュから `key` に一致する graph を取り出す（ヒット時は
-/// エントリを一旦 map から取り除いた「所有」状態で返す。呼び出し元は
-/// launch 後に [`put_cached_graph`] で戻す。`RefCell` の borrow を
+/// キャッシュから `ordinal`／`key` に一致する graph を取り出す（ヒット
+/// 時はエントリを一旦 map から取り除いた「所有」状態で返す。呼び出し
+/// 元は launch 後に [`put_cached_graph`] で戻す。`RefCell` の borrow を
 /// `body` 実行中に保持しないための take/put 方式。design doc §4.3）。
-fn take_cached_graph(key: &SegmentKey) -> Option<CudaGraph> {
-    STEP_GRAPHS.with(|cache| cache.borrow_mut().remove(key).map(|c| c.graph))
+fn take_cached_graph(ordinal: usize, key: &SegmentKey) -> Option<CudaGraph> {
+    STEP_GRAPHS.with(|cache| {
+        cache
+            .borrow_mut()
+            .get_mut(&ordinal)
+            .and_then(|per_ordinal| per_ordinal.remove(key))
+            .map(|c| c.graph)
+    })
 }
 
 /// capture・launch 済みの graph をキャッシュへ戻す（新規挿入・世代不一致
-/// の陳腐化エントリの evict・上限超過時の最古 evict をまとめて行う）。
-fn put_cached_graph(key: SegmentKey, graph: CudaGraph) {
+/// の陳腐化エントリの evict・上限超過時の最古 evict をまとめて行う。
+/// いずれも `ordinal` に対応するサブマップ内に閉じる）。
+fn put_cached_graph(ordinal: usize, key: SegmentKey, graph: CudaGraph) {
     STEP_GRAPHS.with(|cache| {
         let mut cache = cache.borrow_mut();
+        let cache = cache.entry(ordinal).or_default();
         // 世代不一致（`invalidate` による回復後の新世代）のエントリは
         // もう再利用されないため、ついでに掃除する（無制限増加の防止。
-        // design doc §4.3）。
+        // design doc §4.3）。同一 ordinal 内に閉じるため他デバイスの
+        // エントリへは影響しない。
         cache.retain(|k, _| k.generation == key.generation);
         if cache.len() >= MAX_CACHED_GRAPHS_PER_THREAD
             && !cache.contains_key(&key)
@@ -287,12 +323,12 @@ pub(crate) fn run_captured_sgd_step_segment(
     token: &DispatchFailureCell,
 ) -> Result<SegmentRun, BackendError> {
     // ① キャッシュヒット: 既存 graph を再生する。
-    if let Some(graph) = take_cached_graph(&key) {
+    if let Some(graph) = take_cached_graph(ordinal, &key) {
         let call_token = context_cache::begin_driver_call(ordinal, &[key.generation])?;
         let launch_result = graph.launch();
         context_cache::observe_driver_result(ordinal, &call_token, launch_result)
             .map_err(|e| crate::memory::map_cuda_error(CudaError::Driver(e)))?;
-        put_cached_graph(key, graph);
+        put_cached_graph(ordinal, key, graph);
         return Ok(SegmentRun::Replayed);
     }
 
@@ -323,6 +359,18 @@ pub(crate) fn run_captured_sgd_step_segment(
         let warmup_token = context_cache::begin_driver_call(ordinal, &[key.generation])?;
         let warmup_result = context_cache::cached_device(ordinal)
             .and_then(|device| context_cache::cached_sgd(&device).map(|_| ()));
+        // Cursor Bugbot Medium 指摘対応（PR #1390 マージ時是正）: 旧稿は
+        // `warmup_token` を観測に使わず drop していたため、初回 NVRTC
+        // コンパイル・モジュールロード（`cached_sgd` がキャッシュミスの
+        // 場合に発生）が sticky な driver エラーで失敗しても、この
+        // ordinal が poison されなかった（本クレート全体の「最初の
+        // driver エラーを観測する」契約からの逸脱。`captured_segment_key`
+        // の `context_cache::observe_cuda_result(self.ordinal, &token,
+        // self.device_handle_raw())` と同じパターンをここでも適用する）。
+        // `observe_cuda_result` は `&CallToken` を要求するため、token を
+        // 消費（drop）する前に結果を通す。
+        let warmup_result =
+            context_cache::observe_cuda_result(ordinal, &warmup_token, warmup_result);
         drop(warmup_token);
         warmup_result.map_err(crate::memory::map_cuda_error)?;
     }
@@ -430,7 +478,7 @@ pub(crate) fn run_captured_sgd_step_segment(
         return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
     }
 
-    put_cached_graph(key, graph);
+    put_cached_graph(ordinal, key, graph);
     Ok(SegmentRun::Captured)
 }
 

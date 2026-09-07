@@ -878,8 +878,14 @@ impl BackendOps for CudaBackendOps {
         if !device.is_capturable_stream() {
             return Err(BackendError::Unsupported(
                 "captured_segment_key: CUDA Graph step capture is enabled but this device was \
-                 initialized before the opt-in was set (created with a non-capturable legacy \
-                 stream); enable the opt-in before the first CUDA device initialization"
+                 initialized with a non-capturable legacy stream. This happens either because \
+                 the opt-in was set after the first CUDA device initialization, or because the \
+                 `internal-diagnostics` build feature is enabled (that feature forces \
+                 StreamKind::Legacy unconditionally so that `CudaDevice::context()`/`stream()` \
+                 can be exposed as `pub` without breaking the single-stream invariant that \
+                 `disable_event_tracking()` relies on; see `device.rs::CudaDevice::new` cfg \
+                 branch comment). Enable the opt-in before the first CUDA device initialization \
+                 and build without `internal-diagnostics` to use CUDA Graph step capture."
                     .to_string(),
             ));
         }

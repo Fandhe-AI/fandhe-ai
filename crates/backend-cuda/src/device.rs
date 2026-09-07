@@ -144,6 +144,38 @@ impl CudaDevice {
         // `new_stream()` を保持する（`StreamKind` doc コメント参照）。
         // opt-in OFF（既定）では現行どおり `default_stream()`
         // （legacy NULL stream）のまま、本イシュー導入前と挙動不変。
+        //
+        // **`internal-diagnostics` feature が有効な間は常に
+        // `StreamKind::Legacy` に固定する（codex-review P0 再々指摘
+        // 対応。PR #1390）**: 下記 `unsafe { ctx.disable_event_tracking()
+        // }` の安全性根拠は「この `ctx` 上で `CudaDevice` が唯一の
+        // ストリームしか作らない」という本クレート内部の運用契約であり、
+        // `context()`/`stream()` の可視性ゲート（`internal-diagnostics`
+        // feature 有効時のみ `pub`。本ファイル下部 doc コメント参照）
+        // だけでは閉じ切れない。`internal-diagnostics` と graph capture
+        // opt-in は同一プロセス内で同時に有効化できる（CI の `cargo test
+        // --workspace --all-features` が両方を有効化する）ため、その
+        // 組合せ下では利用者が `context().clone().new_stream()` で第 2
+        // の非追跡ストリームを作れてしまい、`ctx` 上でイベント追跡が
+        // 無効化された状態と矛盾する（`AGENTS.md` の unsafe 不変条件
+        // 保証の要件違反）。そこで「イベント追跡を無効化する分岐」と
+        // 「raw context／stream を安全な公開 API として返す分岐」を
+        // **同一ビルドで両立させない**よう、`internal-diagnostics`
+        // feature が有効な間はこの分岐自体を到達不能にする（機構としては
+        // `unsafe { ctx.disable_event_tracking() }` を呼ぶコード自体が
+        // コンパイルされないため、実行時チェックに頼らず型システムの
+        // 外側〈cfg〉で不変条件を保証する）。この場合、graph capture
+        // opt-in が有効でも `stream_kind` は `Legacy` のままとなり、
+        // `ops.rs::CudaBackendOps::captured_segment_key` の
+        // `!is_capturable_stream()` 検査が `BackendError::Unsupported`
+        // を返して fail-closed にフォールバックする（design doc §4.7 の
+        // 既存の「opt-in が最初のデバイス初期化に間に合わなかった」経路
+        // と同じ扱い。`internal-diagnostics` feature は crates.io の
+        // 通常利用者が有効化しない開発者・CI 専用 feature のため、この
+        // フォールバックが本番経路の性能・挙動へ影響することはない）。
+        #[cfg(feature = "internal-diagnostics")]
+        let (stream, stream_kind) = (ctx.default_stream(), StreamKind::Legacy);
+        #[cfg(not(feature = "internal-diagnostics"))]
         let (stream, stream_kind) = if crate::graph::step_graph_mode().requires_created_stream() {
             let created = ctx.new_stream()?;
             // codex-review P1 指摘対応（PR #1390）: `ctx.new_stream()` は
@@ -244,39 +276,59 @@ impl CudaDevice {
 
     /// #33/#34 のカーネルロード・起動が使う `CudaContext` 共有ハンドル。
     ///
-    /// **可視性を `internal-diagnostics` feature でゲートする
-    /// （codex-review P0 指摘対応・PR #1390。旧稿は無条件 `pub` だった）**:
+    /// **可視性を `internal-diagnostics` feature でゲートし、かつ
+    /// `unsafe { ctx.disable_event_tracking() }` 分岐自体を同 feature
+    /// 下では到達不能にする（codex-review P0 再々指摘対応・PR #1390。
+    /// 旧稿は feature ゲートのみで `internal-diagnostics` と graph
+    /// capture opt-in の同時有効化を防げていなかった）**:
     /// `crate::graph`（イシュー #1349）が opt-in ON 時この `ctx` 上に
-    /// `unsafe { ctx.disable_event_tracking() }` を適用する根拠は
-    /// 「この `CudaDevice` はこの `ctx` 上で唯一のストリーム
-    /// （`self.stream`）しか作らない」という**本クレート内部の**運用
-    /// 契約であり、`cudarc` 自身が強制する不変条件ではない。`CudaDevice`
-    /// 自体は本クレート（crates.io 公開クレート
-    /// `fandhe-ai-backend-cuda`）から `pub use` で再公開されているため、
-    /// 本メソッドが無条件 `pub` のままだと、クレート外の利用者が安全な
-    /// 公開 API の組み合わせだけで `context().clone()` → `.new_stream()`
-    /// と呼んで**この `ctx` 上に第 2 のストリーム**を作れてしまう
-    /// （`AGENTS.md` の unsafe 不変条件保証の要件に違反）。第 2
-    /// ストリームが作られると、イベント追跡を無効化済みの `ctx` の下で
-    /// 2 本のストリーム間の読み書き順序を保証する手段がなくなり、
+    /// `disable_event_tracking()` を適用する根拠は「この `CudaDevice`
+    /// はこの `ctx` 上で唯一のストリーム（`self.stream`）しか作らない」
+    /// という**本クレート内部の**運用契約であり、`cudarc` 自身が強制
+    /// する不変条件ではない。`CudaDevice` 自体は本クレート（crates.io
+    /// 公開クレート `fandhe-ai-backend-cuda`）から `pub use` で再公開
+    /// されているため、本メソッドが無条件 `pub` のままだと、クレート外
+    /// の利用者が安全な公開 API の組み合わせだけで `context().clone()`
+    /// → `.new_stream()` と呼んで**この `ctx` 上に第 2 のストリーム**を
+    /// 作れてしまう（`AGENTS.md` の unsafe 不変条件保証の要件に違反）。
+    /// 第 2 ストリームが作られると、イベント追跡を無効化済みの `ctx` の
+    /// 下で 2 本のストリーム間の読み書き順序を保証する手段がなくなり、
     /// バッファをまたいだ競合が起こりうる。
     ///
-    /// 一方で本クレート自身の実機診断テスト・ベンチ（`tests/`・
-    /// `examples/` 配下。`large_buffer_percall_alloc_ab_1149.rs`・
-    /// `tma_probe_real_device.rs`・`device_attributes_dump.rs` 等）は
-    /// 既定 OFF（opt-in 無効。`ctx` のイベント追跡は無効化されていない）
-    /// の状態で `context()`/`stream()` へ直接アクセスして driver 属性・
-    /// pool 状態を読む正当な既存用途を持つ（`Cargo.toml` の
-    /// `internal-diagnostics` feature コメント「内部診断専用ツールの
-    /// 可視性制御」参照）。そのため既定ビルド（`internal-diagnostics`
-    /// feature 無効。crates.io の通常利用者はこの feature を有効化し
-    /// ない）では `pub(crate)` に絞る一方、同 feature 有効時（本クレート
-    /// 自身の `tests/`／`examples/` が `required-features` 経由でのみ
-    /// 要求する。CI の `cargo test --workspace --all-features` は常に
-    /// この feature を含む）だけ `pub` へ戻す。既定ビルドの公開 API 面
-    /// からは変わらず除外されるため、`AGENTS.md` が要求する不変条件
-    /// 保証は成立する（`docs/backend-cuda-graph-step-capture-design.md`
-    /// §4.1）。
+    /// 単なる可視性ゲートだけでは不十分だった理由: `internal-diagnostics`
+    /// と graph capture opt-in は同一プロセス内で**同時に有効化できる**
+    /// （CI の `cargo test --workspace --all-features` が両方を有効化
+    /// する）。そのため `new`（本ファイル上部）は `internal-diagnostics`
+    /// feature が有効な間は `stream_kind` を常に [`StreamKind::Legacy`]
+    /// に固定し、`disable_event_tracking()` を呼ぶコード自体をコンパイル
+    /// 対象から外す（`new` 内の cfg 分岐コメント参照）。これにより
+    /// 「イベント追跡が無効化された `ctx`」と「raw context／stream を
+    /// 安全な公開 API として返す」の 2 条件が**同一ビルドで両立しない**
+    /// ことが型システムの外側（cfg。コンパイル時）で保証される
+    /// （実行時チェックには依存しない）。この場合 graph capture opt-in
+    /// は事実上無効化され、`ops.rs::CudaBackendOps::captured_segment_key`
+    /// の `!is_capturable_stream()` 検査により `BackendError::
+    /// Unsupported` を返す fail-closed 経路へフォールバックする
+    /// （design doc §4.7）。`internal-diagnostics` は crates.io の通常
+    /// 利用者が有効化しない開発者・CI 専用 feature のため、本番経路
+    /// （同 feature 無効）の性能・挙動には影響しない。
+    ///
+    /// 本クレート自身の実機診断テスト・ベンチ（`tests/`・`examples/`
+    /// 配下。`large_buffer_percall_alloc_ab_1149.rs`・
+    /// `tma_probe_real_device.rs`・`device_attributes_dump.rs` 等）は、
+    /// 上記のとおり opt-in が無効化された状態（`ctx` のイベント追跡は
+    /// 無効化されていない）でのみ `context()`/`stream()` へ直接
+    /// アクセスして driver 属性・pool 状態を読む正当な既存用途を持つ
+    /// （`Cargo.toml` の `internal-diagnostics` feature コメント「内部
+    /// 診断専用ツールの可視性制御」参照）。そのため既定ビルド
+    /// （`internal-diagnostics` feature 無効。crates.io の通常利用者は
+    /// この feature を有効化しない）では `pub(crate)` に絞る一方、同
+    /// feature 有効時（本クレート自身の `tests/`／`examples/` が
+    /// `required-features` 経由でのみ要求する。CI の `cargo test
+    /// --workspace --all-features` は常にこの feature を含む）だけ
+    /// `pub` へ戻す。既定ビルドの公開 API 面からは変わらず除外される
+    /// ため、`AGENTS.md` が要求する不変条件保証は成立する
+    /// （`docs/backend-cuda-graph-step-capture-design.md` §4.1）。
     #[cfg(feature = "internal-diagnostics")]
     pub fn context(&self) -> &Arc<CudaContext> {
         &self.ctx
@@ -292,7 +344,11 @@ impl CudaDevice {
     /// #33/#34 のカーネル起動・メモリ転送が使う既定ストリーム。
     ///
     /// `internal-diagnostics` feature によるゲート（codex-review P0
-    /// 指摘対応・PR #1390）: [`Self::context`] と同じ理由。
+    /// 再々指摘対応・PR #1390）: [`Self::context`] と同じ理由。本
+    /// feature 有効時は `new` が `stream_kind` を常に
+    /// [`StreamKind::Legacy`] に固定するため、本メソッドが返す
+    /// `&Arc<CudaStream>` は capture 可能な非 legacy ストリームには
+    /// なり得ない。
     #[cfg(feature = "internal-diagnostics")]
     pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream

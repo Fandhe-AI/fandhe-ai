@@ -37,7 +37,7 @@
 6. `autodiff::DeviceParamStore::step` の update 区間結線（`!any_resident` 分岐に graph-capture 経路を追加。既存の非 capture 経路〈`else`〉は無変更）
 7. `CudaMemory::upload_into`（新規実装。既定 `Unsupported` から `MemoryOps` の非破壊拡張として CUDA 実装を追加。graph 経路の永続 staging バッファ書き込みに必須）
 8. facade 公開 API: `set_cuda_graph_step_enabled`／`cuda_graph_step_enabled`
-9. テスト: GPU 不要のホストモデルテスト（`context_cache.rs::poison_state_tests`・`graph.rs::tests`・`tensor-core::backend_ops::tests`・`autodiff::optim::device_store::tests::graph_capture_wiring_replays_stable_key_and_matches_non_graph_path`）・`#[ignore]` 実機テスト（`crates/backend-cuda/tests/graph_capture_real_device.rs`〈opt-in ON 側〉・`crates/backend-cuda/tests/graph_capture_real_device_optin_off.rs`〈opt-in OFF 側。codex-review P2／Cursor Bugbot Low 指摘対応・PR #1390 再修正で ON 側から別ファイル＝別プロセスへ分離。`context_cache::cached_device` のプロセス内キャッシュ共有によるテスト順序依存を断つため〉・`crates/facade/tests/cuda_graph_step_bit_identity.rs`）
+9. テスト: GPU 不要のホストモデルテスト（`context_cache.rs::poison_state_tests`・`graph.rs::tests`・`tensor-core::backend_ops::tests`・`autodiff::optim::device_store::tests::graph_capture_wiring_replays_stable_key_and_matches_non_graph_path`）・`#[ignore]` 実機テスト（`crates/backend-cuda/tests/graph_capture_real_device.rs`〈opt-in ON 側〉・`crates/backend-cuda/tests/graph_capture_real_device_optin_off.rs`〈opt-in OFF 側。codex-review P2／Cursor Bugbot Low 指摘対応・PR #1390 再修正で ON 側から別ファイル＝別プロセスへ分離。`context_cache::cached_device` のプロセス内キャッシュ共有によるテスト順序依存を断つため〉・`crates/facade/tests/cuda_graph_step_bit_identity.rs`〈`eager_baseline`／`graph_capture`／`graph_capture_completes_training_loop_without_error`。各 `--exact` 単独実行必須〉・`crates/facade/tests/cuda_graph_step_two_gpu_bit_identity.rs`〈2 GPU 機械比較テスト。codex-review P2 再指摘対応・PR #1390 マージ時是正で `cuda_graph_step_bit_identity.rs` から分離。3 関数名がいずれも部分文字列 `graph_capture` を含み `cargo test graph_capture` のような部分一致フィルタで同一プロセス・並行スレッドに選ばれると「opt-in OFF で開始する」前提等が崩れるため。共有ヘルパーは `crates/facade/tests/cuda_graph_step_common/mod.rs`〉）
 
 ### 3.2 スコープ外（PR 本文へ記録・起票はユーザー承認後）
 
@@ -145,12 +145,17 @@ cargo test -p fandhe-ai-backend-cuda --release --test graph_capture_real_device 
 cargo test -p fandhe-ai-backend-cuda --release --test graph_capture_real_device_optin_off \
   -- --ignored --nocapture
 
-# 3. facade 経由の 10 step bit 同一検証（2 プロセス比較。ファイル冒頭コメント参照）
+# 3. facade 経由の 10 step bit 同一検証（2 プロセス比較。--exact 必須の
+#    理由はファイル冒頭コメント参照。PR #1390 マージ時是正）
 cargo test -p fandhe-ai --release --test cuda_graph_step_bit_identity \
-  -- --ignored --nocapture eager_baseline
+  -- --ignored --nocapture --exact eager_baseline
 FANDHE_AI_CUDA_GRAPH_STEP=1 \
 cargo test -p fandhe-ai --release --test cuda_graph_step_bit_identity \
-  -- --ignored --nocapture graph_capture
+  -- --ignored --nocapture --exact graph_capture
+
+# 3b. 2 GPU 搭載機のみ: 機械比較版（別ファイル・別バイナリ）
+cargo test -p fandhe-ai --release --test cuda_graph_step_two_gpu_bit_identity \
+  -- --ignored --nocapture --exact graph_capture_matches_eager_baseline_bit_identical_across_two_gpus
 ```
 
 **§4.1 の実機プローブが失敗した場合**（`CUDA_ERROR_STREAM_CAPTURE_ISOLATION` 等。「リスクと安全側の判断」参照）: 回避策（案 A `disable_event_tracking()`〈`unsafe fn`〉・案 B 生ポインタ launch 変種）はユーザー承認事項のため、実測エビデンスとともに承認依頼を起票し、承認が得られるまで本機構は「機構としては実装済みだが実機で capture が成立しない」状態のまま残す。
