@@ -94,6 +94,7 @@
 | `launch`（カーネル起動） | 同期なし（起動時エラーのみ同期的） | 変更なし | 変更なし | 2.4 |
 | `sgd_step_device` | 同期なし | 現状 `synchronize()` あり（`sgd.rs:174`） | **除去**（最優先） | 2.2・D2H を伴わない唯一の常駐経路 |
 | `MemoryOps::upload` | 同期なし | 変更なし | 変更なし | ペイジャブル H2D の復帰＝ステージング完了であり完了待ちではない |
+| `MemoryOps::with_host_view`（イシュー #1336） | ホストブロック（契約上の同期点。`download` と同一） | N/A（#1336 で新設） | `Device` 配置: `host_staging` の再利用ホストバッファへ `memcpy_dtoh` → `synchronize` の順。`Managed` 配置: `stream.synchronize()` → `UnifiedSlice::as_slice()`（`host_view_managed`。コピーなし） | `crates/tensor-core/src/buffer.rs`「`with_host_view` の同期契約」・`docs/perf/cuda-host-view-staging-readout.md` |
 
 同期点を増やしてよい条件は、診断・ベンチ・エラー検出目的の任意同期に限り、`internal-diagnostics` 相当のモジュールまたはテストコード内のみで許容する（本番経路の演算ラッパーには追加しない）。
 

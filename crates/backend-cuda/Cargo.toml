@@ -283,6 +283,22 @@ required-features = ["internal-diagnostics"]
 name = "managed_placement_bandwidth_real_device"
 required-features = ["internal-diagnostics"]
 
+[[test]]
+# イシュー #1336・CI 実測ビルドエラー（E0599）の是正: `host_view_real_
+# device` は `CudaMemory::host_staging_stats`（`internal-diagnostics`
+# feature 限定の診断専用入口。`src/memory.rs` の同 feature ゲート参照）を
+# 呼ぶため、`specialized_mma_parity`（上記）と同じ理由で `internal-
+# diagnostics` feature を要求する。本エントリなしでは feature 未指定の
+# `cargo build`／`cargo test --workspace` でも自動検出（autotests）
+# された本テストがコンパイル対象になり、`host_staging_stats` 未定義で
+# ビルド失敗していた（codex-review P2 指摘・CI 実測 run 34114965852）。
+# `cargo test --workspace`（feature 未指定）では対象外としてスキップ
+# され、`cargo test --all-features`（CI の test ジョブ・`make test` が
+# 使うコマンド）でのみビルド・実行される（実機依存部分は引き続き
+# `#[ignore]` で分離。ファイル冒頭コメント参照）。
+name = "host_view_real_device"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

@@ -117,7 +117,12 @@ poison／invalidate 契約（`docs/backend-cuda-async-execution-design.md`
   device-only（`CudaSlice`）のまま据え置いた。opt-in 時もこの分岐は
   常に device-only で動作する。
 - `upload_into`（CUDA 未実装）・managed 対応 `SizeClassPool`（プール経由の
-  managed 再利用）・pinned host memory・multi-stream 化は対象外。
+  managed 再利用）・multi-stream 化は対象外。**pinned host memory は
+  イシュー #1336（`MemoryOps::with_host_view` の CUDA 実装。`crate::
+  host_staging`）で対応済み**（`with_host_view` の D2H 読み出し専用の
+  ホストステージングバッファであり、本イシューの `alloc_zeroed`／
+  `upload` の確保配置〈device-only／managed〉とは独立の軸。実測記録は
+  `docs/perf/cuda-host-view-staging-readout.md`）。
 
 ## unsafe（1 箇所・security-auditor レビュー対象）
 
