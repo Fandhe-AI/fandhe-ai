@@ -1472,6 +1472,26 @@ N=1024 +0.4 %・N=4096 -0.5 %）。fandhe-ai 側は全 15 run で `parity_fail_c
 0.904 倍）で未達成を確定**（同ドキュメント §11）。ユーザー指示により後継ツリーへ引き継ぎ、
 #1031 はクローズする。
 
+### 5 回計測ゲート判定（イシュー #1360。正式系列 `0.7.0-1360`＋参考系列 off/on）
+
+Phase 4／5（#1342 の 128×64 cp.async pipeline 本番結線・#1337 借用ビュー readout）反映後の
+再計測。ピン未更新のため正式系列（`0.7.0-1360`。registry）は §11 と同値の再現性確認、
+参考系列は `GEMM_GATE_PATCH_FACADE_PATH`（+ 任意で `GEMM_GATE_BENCH_FANDHE_FEATURES=
+host-view-readout`）で HEAD（`3d5e833`）を計測。生データ
+`results/raw/results-dgx-gemm-gate-{0.7.0-1360,head-3d5e833-readout-off,head-3d5e833-readout-on}.jsonl`
+（各 30 行）・実行ログ・env_info は `docs/perf/logs/cuda-gemm-candle-gate-1360/`。
+
+| N | 正式系列 `0.7.0-1360` | 参考系列 readout-off | 参考系列 readout-on |
+| --- | --- | --- | --- |
+| 1024 | 0.379 倍・未達 | 0.401 倍・未達 | 0.026 倍・未達（大幅後退） |
+| 2048 | 判定不能 | 判定不能 | 判定不能 |
+| 4096 | 0.894 倍・未達 | 0.933 倍・未達 | **1.433 倍・達成** |
+
+正式判定（registry ピン基準）は §11 の未達成を再現・変更なし。参考系列は readout-on で
+N=4096 のみ達成条件を満たすが N=1024/2048 で大幅後退（readout-off 比 15.0 倍／1.2 倍）する
+形状依存の混在結果であり、「Phase 4／5 反映後に #1031 が達成される」とは言えない。詳細は
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12 を参照。
+
 ## 環境 13: Apple M4 Max（GEMM 目標達成ゲート #1037 の 5 回計測再計測・イシュー #1147）
 
 - ノード: 環境 3・環境 7・環境 9・環境 11 と同一ノード（実ホスト名は

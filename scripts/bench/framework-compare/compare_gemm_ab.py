@@ -61,12 +61,39 @@ _VALID_SIZES = frozenset({512, 1024, 2048, 4096})
 # device 別のセル集合（イシュー #1364）。`cpu` は `compare_gemm_gate.py
 # --device cpu` と同じ N=512/1024/2048 のみ（N=4096 は CPU GEMM ゲート
 # 計測の対象外。`run_gemm_gate_cpu.sh` が発行する N 集合と揃える）。
+# `cuda` はイシュー #1337 で追加（`run_gemm_gate_cuda.sh` の対象 N
+# 集合＝1024/2048/4096 のみ。metal のような 512 込みの独自 8 セル用途
+# 〈#1306〉の前例は cuda に無いため、既定 = gate セル集合とする）。
 _VALID_SIZES_BY_DEVICE = {
     "metal": frozenset({512, 1024, 2048, 4096}),
     "cpu": frozenset({512, 1024, 2048}),
+    "cuda": frozenset({1024, 2048, 4096}),
 }
 _VALID_DEVICES = frozenset(_VALID_SIZES_BY_DEVICE)
 DEFAULT_DEVICE = "metal"
+
+# イシュー #1337: `run_gemm_gate.sh`（cuda/metal/cpu 共通ロジック）が発行
+# する N 集合（`run_gemm_gate.sh` 冒頭コメント参照）。`--sizes gate` 指定時
+# はこの集合をセル集合として使う（`metal` の既定 8 セル用途〈#1306〉とは
+# 独立に、ゲート再計測専用の入力を扱うため）。`cpu`／`cuda` は元々この集合と
+# 同一（`_VALID_SIZES_BY_DEVICE` 参照）だが、`metal` は 512 を含む 8 セルが
+# 既定のため明示的に絞り込む必要がある。
+_GATE_SIZES_BY_DEVICE = {
+    "metal": frozenset({1024, 2048, 4096}),
+    "cpu": frozenset({512, 1024, 2048}),
+    "cuda": frozenset({1024, 2048, 4096}),
+}
+
+
+def _size_set_for(device, sizes_arg):
+    """`--device`/`--sizes` から実際に使うセルサイズ集合を決める。
+
+    `sizes_arg` は `"full"`（既定・後方互換。`_VALID_SIZES_BY_DEVICE` を
+    そのまま使う）または `"gate"`（`_GATE_SIZES_BY_DEVICE` へ絞り込む）。
+    """
+    if sizes_arg == "gate":
+        return _GATE_SIZES_BY_DEVICE[device]
+    return _VALID_SIZES_BY_DEVICE[device]
 
 # 既定の非後退閾値（median 比 ratio = after/before が 1.05 以下なら非後退。
 # guardrail「劣化中央値 5% 以内」の慣例値。閾値変更は本ツールの CLI 引数
@@ -75,13 +102,18 @@ DEFAULT_DEVICE = "metal"
 DEFAULT_THRESHOLD = 1.05
 
 
-def _valid_cell_identity(obj, device):
+def _valid_cell_identity(obj, device, size_set=None):
     """`_cell_key` がグループ化に使う `task`/`device`/`size`/`mode` の型・
     値域を検証する（`compare_managed_ab.py::_valid_cell_identity` と同方針。
     未検証のまま集約すると、これらのフィールドを欠いた行が単一の偽セルへ
     迂回して集約され、比較対象が不明なまま "ok" 判定になりうる）。
 
-    `device`（`metal`／`cpu`）でセル集合の N を切り替える（イシュー #1364）。
+    `device`（`metal`／`cpu`／`cuda`）でセル集合の N を切り替える
+    （イシュー #1364・#1337）。`size_set` 省略時は `_VALID_SIZES_BY_DEVICE
+    [device]`（既定の `--sizes full`）を使う。`mode` フィールド自体の妥当性
+    （`_VALID_MODES` 内か）はここで検証するが、`--modes` による絞り込み
+    （例: `reuse` のみ）は呼び出し側（`load_rows`）が別途「無視して集約
+    しない」形で扱う（不正行としては扱わない。#1337）。
     """
     task = obj.get("task")
     if not isinstance(task, str) or task != "gemm":
@@ -93,14 +125,25 @@ def _valid_cell_identity(obj, device):
     if not isinstance(mode, str) or mode not in _VALID_MODES:
         return False
     size = obj.get("size")
-    valid_sizes = _VALID_SIZES_BY_DEVICE[device]
+    valid_sizes = size_set if size_set is not None else _VALID_SIZES_BY_DEVICE[device]
     if isinstance(size, bool) or not isinstance(size, int) or size not in valid_sizes:
         return False
     return True
 
 
-def load_rows(path, device=DEFAULT_DEVICE):
-    """JSONL を読み、不正な行は理由付きで報告しスキップする（A08）。"""
+def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None):
+    """JSONL を読み、不正な行は理由付きで報告しスキップする（A08）。
+
+    `size_set`（`--sizes` 由来。省略時 `_VALID_SIZES_BY_DEVICE[device]`）・
+    `modes`（`--modes` 由来。省略時 `_VALID_MODES`＝両方）で絞り込む。
+    `mode` フィールド自体が `_VALID_MODES` 外の不正値であれば従来どおり
+    警告付きでスキップするが、値は正しいが `modes` に含まれない行
+    （例: `--modes reuse` 指定時の `fresh` 行）は「期待セル外」として
+    警告なしで無視する（gate 出力が参考記録として fresh 行を含む場合が
+    あるため。イシュー #1337 README「借用ビュー readout」節）。
+    """
+    if modes is None:
+        modes = _VALID_MODES
     rows = []
     warnings = []
     with open(path, encoding="utf-8") as f:
@@ -146,11 +189,15 @@ def load_rows(path, device=DEFAULT_DEVICE):
                     f"{path}:{lineno}: 'managed:true' の行は本 A/B の対象外 — skipped"
                 )
                 continue
-            if not _valid_cell_identity(obj, device):
+            if not _valid_cell_identity(obj, device, size_set=size_set):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"
                     f"'mode' フィールド（行: {obj!r}） — skipped"
                 )
+                continue
+            if obj.get("mode", "fresh") not in modes:
+                # `--modes` による意図的な絞り込み。不正行ではないため
+                # warning を出さず静かに除外する（上記 docstring 参照）。
                 continue
             rows.append(obj)
     return rows, warnings
@@ -333,9 +380,10 @@ def _fmt_ms(s):
     return f"{s * 1e6:.1f} us"
 
 
-def _all_expected_cells(device=DEFAULT_DEVICE):
-    """契約上の全セル（device 別 `_VALID_SIZES_BY_DEVICE[device]` ×
-    `_VALID_MODES`。metal は 8 セル・cpu は 6 セル）を昇順で返す。
+def _all_expected_cells(device=DEFAULT_DEVICE, size_set=None, modes=None):
+    """契約上の全セル（device 別 `size_set`〈省略時 `_VALID_SIZES_BY_DEVICE
+    [device]`〉× `modes`〈省略時 `_VALID_MODES`。metal 既定は 8 セル・
+    cpu は 6 セル〉）を昇順で返す。
 
     `render_markdown`／`main` の集計対象を `cells` に実在するキーだけに
     限定すると、before/after 双方から同一セルが欠落した場合に何も表示
@@ -343,21 +391,25 @@ def _all_expected_cells(device=DEFAULT_DEVICE):
     （codex-review P2・Cursor Bugbot Medium 指摘。イシュー #1306 の
     「全セル非後退」契約に反する）。欠測セルを判定不能として明示する
     ため、実データに依らずこの固定集合を走査の基準にする。
+
+    `size_set`／`modes`（イシュー #1337「`--sizes`／`--modes`」）は
+    ゲート由来入力（`run_gemm_gate.sh`。cuda/metal は reuse のみ発行）を
+    reuse セルのみで判定する用途に使う。
     """
-    return sorted(
-        (size, mode)
-        for size in _VALID_SIZES_BY_DEVICE[device]
-        for mode in _VALID_MODES
-    )
+    if size_set is None:
+        size_set = _VALID_SIZES_BY_DEVICE[device]
+    if modes is None:
+        modes = _VALID_MODES
+    return sorted((size, mode) for size in size_set for mode in modes)
 
 
-def render_markdown(cells, threshold, device=DEFAULT_DEVICE):
+def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, modes=None):
     lines = []
     lines.append(
         "| size/mode | before median | after median | after/before | checksum | 判定 |"
     )
     lines.append("|---|---|---|---|---|---|")
-    for key in _all_expected_cells(device):
+    for key in _all_expected_cells(device, size_set=size_set, modes=modes):
         rows = cells.get(key, [])
         before_rows = [r for r in rows if not r.get("_is_after")]
         after_rows = [r for r in rows if r.get("_is_after")]
@@ -413,10 +465,45 @@ def main(argv):
         default=DEFAULT_THRESHOLD,
         help=f"non-regression ratio threshold (after/before; default {DEFAULT_THRESHOLD})",
     )
+    parser.add_argument(
+        "--sizes",
+        choices=("full", "gate"),
+        default="full",
+        help=(
+            "セルサイズ集合。'full'（既定・後方互換。device 別の "
+            "_VALID_SIZES_BY_DEVICE）または 'gate'（run_gemm_gate.sh 由来入力用。"
+            "metal は 512 を除いた 1024/2048/4096 のみに絞り込む。イシュー #1337）"
+        ),
+    )
+    parser.add_argument(
+        "--modes",
+        default="fresh,reuse",
+        help=(
+            "判定対象のカンマ区切り mode 集合（既定 'fresh,reuse'＝両方。"
+            "cuda/metal のゲート出力は reuse のみを発行するため "
+            "'--modes reuse' で fresh 参考行をセル外扱いにできる。"
+            "イシュー #1337）"
+        ),
+    )
     args = parser.parse_args(argv[1:])
 
-    before_rows, before_warnings = load_rows(args.before, args.device)
-    after_rows, after_warnings = load_rows(args.after, args.device)
+    modes = frozenset(m.strip() for m in args.modes.split(",") if m.strip())
+    invalid_modes = modes - _VALID_MODES
+    if not modes or invalid_modes:
+        print(
+            f"ERROR: --modes に不正な値が含まれる（invalid={sorted(invalid_modes)!r}・"
+            f"許容値={sorted(_VALID_MODES)!r}）",
+            file=sys.stderr,
+        )
+        return 2
+    size_set = _size_set_for(args.device, args.sizes)
+
+    before_rows, before_warnings = load_rows(
+        args.before, args.device, size_set=size_set, modes=modes
+    )
+    after_rows, after_warnings = load_rows(
+        args.after, args.device, size_set=size_set, modes=modes
+    )
     warnings = before_warnings + after_warnings
     for w in warnings:
         print(f"WARNING: {w}", file=sys.stderr)
@@ -441,10 +528,10 @@ def main(argv):
         print("判定不能: 入力ファイルに行がない", file=sys.stderr)
         return 2
 
-    print(render_markdown(cells, args.threshold, args.device))
+    print(render_markdown(cells, args.threshold, args.device, size_set=size_set, modes=modes))
 
     any_bad = False
-    for key in _all_expected_cells(args.device):
+    for key in _all_expected_cells(args.device, size_set=size_set, modes=modes):
         rows = cells.get(key, [])
         if not rows:
             any_bad = True

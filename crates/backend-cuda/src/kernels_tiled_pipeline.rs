@@ -79,6 +79,20 @@
 //!    分岐命令数を削減する最適化であり、境界チェックそのものは無効化
 //!    しないため REQ-8 の許容範囲内。`kernels.rs` 冒頭コメントの実例と
 //!    同じ判断）。
+//!
+//! # Stream-K（最終 wave 限定・固定順序 fixup。イシュー #1358）
+//!
+//! 親イシュー #1347 が persistent タイルキュー版（K 分割なし）を REJECT
+//! と確定したのを受け、末尾（最終 wave）の残タイルだけ K 反復を全 CTA へ
+//! 平坦配布する Stream-K 版（`TP_SK_KERNEL_PREFIX`／`TP_SK_TILE_CORE`／
+//! `TP_SK_FIXUP_KERNEL`）を opt-in で追加する。#812
+//! （`docs/cuda-streamk-decision.md`）が保留した fixup 加算順序の非決定性
+//! 懸念を「部分和は一意なスロットへ書く・fixup は寄与者昇順の固定順序で
+//! 直列加算する」設計で解消する。本番既定経路（`CudaGemm::new`）は本
+//! カーネル群を一切生成しない（`internal-diagnostics` feature 限定の
+//! opt-in API。詳細は `TP_SK_FIXUP_KERNEL` ドキュメンテーションコメント
+//! および `crate::gemm::streamk_plan`／`crate::gemm::
+//! compile_tiled_pipeline_streamk_variant` を参照）。
 
 use std::sync::LazyLock;
 
@@ -646,6 +660,485 @@ const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_til
 /// になる）。
 const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
 
+// =====================================================================
+// Stream-K（最終 wave 限定・固定順序 fixup。イシュー #1358）
+// =====================================================================
+//
+// 親イシュー #1357 の実測（K 分割なし persistent 化のみでは末尾 wave の
+// 遊休を縮められない。#1347 REJECT）を受け、末尾（最終 wave）の残タイル
+// （[`persistent_grid_blocks`] の容量 `G` に満たない端数タイル `R`）だけ
+// K 反復を全 CTA へ平坦配布する opt-in 版。#812
+// （`docs/cuda-streamk-decision.md`）が保留した「fixup の加算順序が
+// 非決定的になりうる」懸念を、(1) 部分和は `(タイル, 寄与者)` ごとに
+// 一意なスロットへ書く、(2) fixup は寄与者昇順の固定順序で直列加算する、
+// という設計で解消する（詳細な決定性論証は下記 [`TP_SK_FIXUP_KERNEL`]
+// ドキュメンテーションコメント末尾を参照）。
+//
+// 配布計画（GPU 不要のホスト側純関数 [`crate::gemm::streamk_plan`]）が
+// 出力タイル総数 `T`・grid 容量 `G`・K タイル数 `nk` から
+// `full_tiles`（先頭 `F` 個。1 CTA が K 全体を担当する従来どおりの
+// タイル）・`remainder_tiles`（末尾 `R` 個。K 反復を `q` 幅ずつ `U` 個の
+// 「SK 単位」へ平坦配布するタイル）・`q`・`max_contributors` を導出する。
+// 本モジュールのカーネルはこの計画をホストから受け取って実行するのみで、
+// 計画そのものの正しさ・網羅性は `gemm.rs` 側のホストシミュレータ
+// テストが担保する（GPU 不要のため通常 CI で検証可能）。
+
+/// `crate::gemm::CudaGemm::compile_tiled_pipeline_streamk_variant`
+/// （`internal-diagnostics` feature 限定）からコンパイルされる Stream-K
+/// 版 GEMM カーネルの関数シグネチャ・共有メモリ宣言・タイル取得ループ・
+/// 単位復号（最大 2 個のサブレンジへの分解。本ファイル冒頭コメント
+/// 参照）を生成する。
+///
+/// # 引数の位置づけ
+///
+/// - `unit_counter`: persistent 版の `tile_counter` と同じ役割（起動
+///   ごとにホスト側でゼロ化する `unsigned int` カウンタ 1 個。
+///   スケジューリング専用で GEMM の数値蓄積には触れない）。
+/// - `partials`: 部分和バッファ（`[slot][TP_BM*TP_BN]` 形状。ホスト側
+///   確保サイズは `3 * grid_capacity * TP_BM * TP_BN` floats固定。
+///   `crate::gemm::StreamKPlan` ドキュメンテーションコメント参照）。
+/// - `full_tiles`／`total_units`／`q`／`max_contributors`／
+///   `remainder_tiles`: いずれも [`crate::gemm::streamk_plan`] が算出する
+///   計画値をそのままホストから渡す（本カーネル自身は計画のロジックを
+///   持たず、計画に従って復号するのみ）。
+/// - `partials_capacity`: `partials` バッファの要素数（呼び出し元が
+///   確保したハンドルの `CudaSlice::len()`。REQ-8・fail-closed）。ホスト側
+///   （`streamk_plan`・起動前検査）がスロット添字は容量内であることを
+///   証明済みだが、性能下限・最適化を理由に手動境界チェックを省略しない
+///   （`.claude/rules/coding-rust.md`）ためカーネル側でも `partials` への
+///   書き込み直前に `slot * (TP_BM*TP_BN) + local` を本値と突き合わせる
+///   （[`TP_SK_TILE_CORE`] 参照）。
+const TP_SK_KERNEL_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_streamk_f32(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m, int n, int k,
+    unsigned int* unit_counter,
+    float* __restrict__ partials,
+    int full_tiles, int total_units, int q, int max_contributors,
+    int remainder_tiles, int partials_capacity)
+{
+    __shared__ __align__(16) float as_tile[TP_STAGES][TP_BM][TP_A_PAD];
+    __shared__ __align__(16) float bs_tile[TP_STAGES][TP_BK][TP_B_PAD];
+    __shared__ unsigned int s_unit;
+
+    int tiles_x = (n - 1) / TP_BN + 1;
+    int num_k_tiles = (k > 0) ? (k - 1) / TP_BK + 1 : 0;
+
+    for (;;) {
+        if (threadIdx.x == 0) {
+            s_unit = atomicAdd(unit_counter, 1u);
+        }
+        __syncthreads();
+        unsigned int unit_u = s_unit;
+        if (unit_u >= (unsigned int)total_units) {
+            break;
+        }
+        int unit = (int)unit_u;
+
+        // 1 単位は最大 2 個の「サブレンジ」（タイル境界をまたぐ場合の
+        // 前半・後半）に分解される（`q < nk` の active な構成では単位長
+        // `q` がタイル幅 `nk` を超えないため。本ファイル冒頭コメント
+        // 参照）。full タイル単位（`unit < full_tiles`）は常に 1 個の
+        // サブレンジ（K 全体）。
+        int sub_count = 0;
+        int sub_tile[2];
+        int sub_kt_begin[2];
+        int sub_kt_end[2];
+        int sub_store_to_c[2];
+        int sub_slot[2];
+
+        if (unit < full_tiles) {
+            sub_count = 1;
+            sub_tile[0] = unit;
+            sub_kt_begin[0] = 0;
+            sub_kt_end[0] = num_k_tiles;
+            sub_store_to_c[0] = 1;
+            sub_slot[0] = 0;
+        } else {
+            // 平坦添字空間 [0, remainder_tiles*num_k_tiles) を幅 q の
+            // 連続範囲へ分割した SK 単位の復号（`crate::gemm::
+            // streamk_plan` ドキュメンテーションコメント §3.1 と同じ
+            // 整数演算。ホストシミュレータテストが同じ式で全単位の
+            // 網羅性・一意性を検証する）。
+            long long u_prime = (long long)(unit - full_tiles);
+            long long flat_begin = u_prime * (long long)q;
+            long long total_flat = (long long)remainder_tiles * (long long)num_k_tiles;
+            long long flat_end = flat_begin + (long long)q;
+            if (flat_end > total_flat) {
+                flat_end = total_flat;
+            }
+            long long flat_pos = flat_begin;
+            while (flat_pos < flat_end && sub_count < 2) {
+                int r = (int)(flat_pos / (long long)num_k_tiles);
+                long long tile_flat_end = (long long)(r + 1) * (long long)num_k_tiles;
+                long long sub_end = flat_end < tile_flat_end ? flat_end : tile_flat_end;
+                long long tile_flat_begin = (long long)r * (long long)num_k_tiles;
+                int kt_begin = (int)(flat_pos - tile_flat_begin);
+                int kt_end = (int)(sub_end - tile_flat_begin);
+                long long u_first = tile_flat_begin / (long long)q;
+                int c = (int)(u_prime - u_first);
+
+                sub_tile[sub_count] = full_tiles + r;
+                sub_kt_begin[sub_count] = kt_begin;
+                sub_kt_end[sub_count] = kt_end;
+                sub_store_to_c[sub_count] = 0;
+                sub_slot[sub_count] = r * max_contributors + c;
+                sub_count += 1;
+                flat_pos = sub_end;
+            }
+        }
+
+        for (int sub = 0; sub < sub_count; ++sub) {
+            int tile = sub_tile[sub];
+            int kt_begin = sub_kt_begin[sub];
+            int kt_end = sub_kt_end[sub];
+            int store_to_c = sub_store_to_c[sub];
+            int slot = sub_slot[sub];
+            int block_row0 = (tile / tiles_x) * TP_BM;
+            int block_col0 = (tile % tiles_x) * TP_BN;
+"#;
+
+/// [`TP_SK_KERNEL_PREFIX`] の `for (int sub ...)` ループ本体（1 サブ
+/// レンジ分の K 範囲 `[kt_begin, kt_end)` に対するタイル内計算）。
+///
+/// [`crate::kernels_tiled_pipeline::TP_TILE_CORE`]
+/// （非 persistent・persistent 版共有のタイル内計算）から派生した K
+/// 範囲付き版。プロローグ・本体ループの段数会計（`commit_group`／
+/// `wait_group` の配置・`__syncthreads()` の位置）は `TP_TILE_CORE` と
+/// 同一の正しさ論証をそのまま踏襲するが、インデックスを絶対タイル番号
+/// `t` ではなく `kt_begin` からのローカルオフセット `tl` で管理する
+/// （K 全体を担当する full タイル単位では `kt_begin == 0` のため
+/// `tl == t` と一致し、`TP_TILE_CORE` と完全に同一の命令列になる——これが
+/// 「full タイル領域は非 Stream-K 版と bit 同一」という受け入れ条件の
+/// 根拠。`LOAD_A_STAGE`／`LOAD_B_STAGE` マクロ・`fmaf` 内積ループは
+/// `TP_TILE_CORE` と文字列として同一——`kt_begin + s`／`kt_begin + tl`
+/// を通じて絶対 K タイル番号を渡すのみで、マクロ自体の本文は変更しない）。
+///
+/// エピローグは `store_to_c` により分岐する:
+/// - `store_to_c != 0`（full タイル単位）: `TP_TILE_CORE` と同じ guarded
+///   store（`if (r < m && cc < n)`）で `c` へ直接書く。
+/// - `store_to_c == 0`（残タイルのサブレンジ単位）: `partials[slot *
+///   (TP_BM*TP_BN) + local]` へタイル内ローカル添字で**無条件**に書く
+///   （スロットは `crate::gemm::streamk_plan` が一意に割り当てるため、
+///   同一スロットへの書き手は本サブレンジのみ。境界外要素は cp.async の
+///   ゼロ充填ロード由来の 0 が書かれるだけで、[`TP_SK_FIXUP_KERNEL`] の
+///   guarded store が読み捨てる）。
+const TP_SK_TILE_CORE: &str = r#"            int tid = threadIdx.x;
+            int num_threads = blockDim.x;
+            int tx = tid % TP_THREADS_X;
+            int ty = tid / TP_THREADS_X;
+
+            int thread_row0 = block_row0 + ty * TP_THREAD_M;
+            int thread_col0 = block_col0 + tx * TP_THREAD_N;
+
+            float acc[TP_THREAD_M][TP_THREAD_N] = {};
+
+            int local_k_tiles = kt_end - kt_begin;
+
+            #define A_CHUNKS ((TP_BM * TP_BK) / 4)
+            #define B_CHUNKS ((TP_BK * TP_BN) / 4)
+
+            // REQ-8: 境界外チャンクでも 16 バイト整列を保ったままクランプ
+            // する（`TP_TILE_CORE` と同一のマクロ本文。`k0` に絶対 K
+            // タイル位置〈`(kt_begin + s) * TP_BK` 等〉を渡す点のみが
+            // 呼び出し側の違い）。
+            #define LOAD_A_STAGE(stage, k0) \
+                for (int idx = tid; idx < A_CHUNKS; idx += num_threads) { \
+                    int row = idx / (TP_BK / 4); \
+                    int col0 = (idx % (TP_BK / 4)) * 4; \
+                    int gr = block_row0 + row; \
+                    int gc = (k0) + col0; \
+                    int gr_c = gr < m ? gr : (m > 0 ? m - 1 : 0); \
+                    int gc_c = gc < k ? gc : (k > 0 ? ((k - 1) / 4) * 4 : 0); \
+                    int valid = (gr < m && gc < k) ? 16 : 0; \
+                    tp_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * k + gc_c], valid); \
+                }
+
+            #define LOAD_B_STAGE(stage, k0) \
+                for (int idx = tid; idx < B_CHUNKS; idx += num_threads) { \
+                    int row = idx / (TP_BN / 4); \
+                    int col0 = (idx % (TP_BN / 4)) * 4; \
+                    int gr = (k0) + row; \
+                    int gc = block_col0 + col0; \
+                    int gr_c = gr < k ? gr : (k > 0 ? k - 1 : 0); \
+                    int gc_c = gc < n ? gc : (n > 0 ? ((n - 1) / 4) * 4 : 0); \
+                    int valid = (gr < k && gc < n) ? 16 : 0; \
+                    tp_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * n + gc_c], valid); \
+                }
+
+            for (int s = 0; s < TP_STAGES - 1; ++s) {
+                if (s < local_k_tiles) {
+                    LOAD_A_STAGE(s, (kt_begin + s) * TP_BK);
+                    LOAD_B_STAGE(s, (kt_begin + s) * TP_BK);
+                }
+                asm volatile("cp.async.commit_group;\n");
+            }
+
+            for (int tl = 0; tl < local_k_tiles; ++tl) {
+                int compute_stage = tl % TP_STAGES;
+                int next_tl = tl + TP_STAGES - 1;
+                int load_stage = next_tl % TP_STAGES;
+
+                asm volatile("cp.async.wait_group %0;\n" ::"n"(TP_STAGES - 2));
+                __syncthreads();
+
+#pragma unroll
+                for (int kk = 0; kk < TP_BK; ++kk) {
+                    float a_reg[TP_THREAD_M];
+#pragma unroll
+                    for (int i = 0; i < TP_THREAD_M; ++i) {
+                        a_reg[i] = as_tile[compute_stage][ty * TP_THREAD_M + i][kk];
+                    }
+                    float b_reg[TP_THREAD_N];
+#pragma unroll
+                    for (int j = 0; j < TP_THREAD_N; ++j) {
+                        b_reg[j] = bs_tile[compute_stage][kk][tx * TP_THREAD_N + j];
+                    }
+#pragma unroll
+                    for (int i = 0; i < TP_THREAD_M; ++i) {
+#pragma unroll
+                        for (int j = 0; j < TP_THREAD_N; ++j) {
+                            acc[i][j] = fmaf(a_reg[i], b_reg[j], acc[i][j]);
+                        }
+                    }
+                }
+
+                if (next_tl < local_k_tiles) {
+                    LOAD_A_STAGE(load_stage, (kt_begin + next_tl) * TP_BK);
+                    LOAD_B_STAGE(load_stage, (kt_begin + next_tl) * TP_BK);
+                }
+
+                asm volatile("cp.async.commit_group;\n");
+                __syncthreads();
+            }
+
+            asm volatile("cp.async.wait_group 0;\n");
+            __syncthreads();
+
+            #undef LOAD_A_STAGE
+            #undef LOAD_B_STAGE
+            #undef A_CHUNKS
+            #undef B_CHUNKS
+
+            // REQ-8: エピローグの guarded store（full タイル単位）／
+            // 無条件だが一意なスロットへの書き出し（残タイルのサブ
+            // レンジ単位。上記ドキュメンテーションコメント参照）。
+            if (store_to_c) {
+#pragma unroll
+                for (int i = 0; i < TP_THREAD_M; ++i) {
+#pragma unroll
+                    for (int j = 0; j < TP_THREAD_N; ++j) {
+                        int r = thread_row0 + i;
+                        int cc = thread_col0 + j;
+                        if (r < m && cc < n) {
+                            c[(size_t)r * n + cc] = acc[i][j];
+                        }
+                    }
+                }
+            } else {
+#pragma unroll
+                for (int i = 0; i < TP_THREAD_M; ++i) {
+#pragma unroll
+                    for (int j = 0; j < TP_THREAD_N; ++j) {
+                        int local_row = ty * TP_THREAD_M + i;
+                        int local_col = tx * TP_THREAD_N + j;
+                        int local = local_row * TP_BN + local_col;
+                        // REQ-8: スロット添字はホスト側 streamk_plan／起動前
+                        // 検査（`crate::gemm::CudaGemm::
+                        // launch_tiled_pipeline_streamk_f32`）で partials
+                        // 容量内であることを証明済みだが、性能下限・最適化を
+                        // 理由に手動境界チェックを省略しない
+                        // （`.claude/rules/coding-rust.md`）ためカーネル側でも
+                        // 明示的に検査する。
+                        long long p_idx = (long long)slot * (TP_BM * TP_BN) + local;
+                        if (p_idx >= 0 && p_idx < (long long)partials_capacity) {
+                            partials[(size_t)slot * (TP_BM * TP_BN) + local] = acc[i][j];
+                        }
+                    }
+                }
+            }
+"#;
+
+/// [`TP_SK_KERNEL_PREFIX`]／[`TP_SK_TILE_CORE`] の `for (int sub ...)`
+/// ループ・タイル取得 `for (;;)` ループ・関数を閉じる（`}}}\n`）。
+const TP_SK_KERNEL_SUFFIX: &str = "        }\n    }\n}\n";
+
+/// [`TP_SK_FIXUP_KERNEL`] のブロックあたりスレッド数（1 タイル分の
+/// `TP_BM*TP_BN` 要素を `blockIdx.y` 方向へ分担する固定値。
+/// `SPLITK_REDUCE_BLOCK_DIM` と同じ「smem を使わずレジスタのみで完結する
+/// ため大きな値は不要」という判断）。カーネルソース中のリテラル `256`
+/// （`TP_SK_FIXUP_KERNEL` の `blockIdx.y * 256 + threadIdx.x`）と
+/// `crate::gemm::CudaGemm::launch_tiled_pipeline_streamk_f32` の起動
+/// `block_dim` の双方が本定数を単一の真実源として使う（起動側は本定数を
+/// 直接参照するため乖離しないが、カーネルソース側のリテラルは NVRTC
+/// コンパイル時定数のため本定数の値を変更する場合は
+/// `TP_SK_FIXUP_KERNEL` 内のリテラルも合わせて変更すること。
+/// `tiled_pipeline_streamk_fixup_block_dim_matches_kernel_source_literal`
+/// が両者の食い違いを検出する）。
+pub const TP_SK_FIXUP_BLOCK_THREADS: u32 = 256;
+
+/// Stream-K fixup カーネル（部分和の固定順序直列還元。イシュー #1358）。
+///
+/// [`TP_SK_KERNEL_PREFIX`]／[`TP_SK_TILE_CORE`] が書いた部分和バッファ
+/// `partials` を、寄与者 `c` 昇順（`c = 0..contributors`）の**固定順序**
+/// で加算し、最終 `c`（出力）へ 1 回だけ書く。`gemm_splitk_reduce_f32`
+/// （[`crate::kernels_gemm_variants::SPLITK_REDUCE_F32`]）と同じ「atomics
+/// 不使用・順序固定により決定的」という設計を踏襲する。
+///
+/// # 決定性の根拠（イシュー #1358 の受け入れ条件本体）
+///
+/// 1. full タイルの `c` 書き込みは [`TP_SK_TILE_CORE`] の `store_to_c`
+///    分岐から 1 要素につき 1 単位（1 CTA）のみが書く。
+/// 2. 部分和スロット `(r, c)` は `crate::gemm::streamk_plan` が一意に
+///    割り当てるため、各スロットの書き手はちょうど 1 サブレンジ
+///    （[`TP_SK_TILE_CORE`] の `else` 分岐）。
+/// 3. 本カーネルは寄与者 `c` について **`for (int c = 0; c < contributors;
+///    ++c) acc += partials[...]`** の固定昇順で逐次加算し、`tile =
+///    full_tiles + r` の座標へ 1 要素 1 スレッドが 1 回だけ書く。
+/// 4. `unit_counter` への `atomicAdd`（[`TP_SK_KERNEL_PREFIX`]）は
+///    `unsigned int` カウンタ 1 箇所のみに作用し、GEMM の数値蓄積
+///    （`float` の `acc[][]`・`partials[]`）には一切触れない
+///    （`.claude/rules/coding-rust.md` の FMA 契約・`kernels_mse.rs`／
+///    `kernels_rmsnorm.rs` が禁止する float atomicAdd による非決定的な
+///    結合順序とは別種の atomic）。
+/// 5. Stream-K カーネルの `c` 書き込み領域（full タイル）と本カーネルの
+///    書き込み領域（残タイル）は互いに素であり、同一ストリーム順序
+///    （Stream-K カーネル → 本カーネル。[`crate::gemm::
+///    CudaGemm::launch_tiled_pipeline_streamk_f32`] が同一ストリームへ
+///    投入する）で実行される。
+///
+/// よって同一入力・同一 `crate::gemm::StreamKPlan` に対し出力は実行の
+/// たびに bit 同一になる。**残タイルの値は非 Stream-K 版（`TP_TILE_CORE`
+/// が K 全体を 1 パスで蓄積する版）とは bit 同一ではない**（K 連鎖の
+/// 分割による丸め差。#1100 `splitk_reorder_error_host_model.rs` が示す
+/// とおり真値ゼロ近傍で複合判定 fail が出うる。合否判定は兄弟イシュー
+/// #1359 が担う。tolerance は変更しない）。
+///
+/// # 手動境界チェック（REQ-8）
+///
+/// `r`（`blockIdx.x`）は `remainder_tiles` 未満で起動するため範囲内。
+/// `local`（`blockIdx.y*256+threadIdx.x`）が `TP_BM*TP_BN` 以上のスレッド
+/// は早期 return する（smem を使わないため `SPLITK_REDUCE_F32` と同じく
+/// ブロック同期プリミティブへの到達義務がない）。出力座標は
+/// `if (row < m && col < n)` の guarded store。`contributors`（ホスト側
+/// `streamk_plan` が `max_contributors` 以下であることを証明済み）は
+/// カーネル側でも `max_contributors` へクランプし、`partials` の読み取り
+/// 添字 `slot * (TP_BM*TP_BN) + local` は呼び出し元から渡される
+/// `partials_capacity`（`CudaSlice::len()`）と突き合わせて範囲内のときのみ
+/// 読む（[`TP_SK_KERNEL_PREFIX`] の書き込み側検査と対をなす。性能下限・
+/// 最適化を理由に手動境界チェックを省略しない。
+/// `.claude/rules/coding-rust.md`）。
+///
+/// ブロックあたりスレッド数は [`TP_SK_FIXUP_BLOCK_THREADS`] 固定
+/// （`crate::gemm::CudaGemm::launch_tiled_pipeline_streamk_f32` の
+/// `block_dim` と単一の真実源を共有する）。
+const TP_SK_FIXUP_KERNEL: &str = r#"
+extern "C" __global__ void gemm_tiled_pipeline_streamk_fixup_f32(
+    const float* __restrict__ partials,
+    float* __restrict__ c,
+    int m, int n, int k,
+    int full_tiles, int remainder_tiles, int q, int max_contributors,
+    int partials_capacity)
+{
+    int r = blockIdx.x;
+    if (r >= remainder_tiles) {
+        return;
+    }
+    int local = blockIdx.y * 256 + threadIdx.x;
+    if (local >= TP_BM * TP_BN) {
+        return;
+    }
+
+    int num_k_tiles = (k > 0) ? (k - 1) / TP_BK + 1 : 0;
+    // 寄与者数 C(r)（`crate::gemm::streamk_plan` ドキュメンテーション
+    // コメント §3.1 と同一の整数演算）。
+    long long tile_flat_begin = (long long)r * (long long)num_k_tiles;
+    long long tile_flat_last = tile_flat_begin + (long long)num_k_tiles - 1;
+    int contributors =
+        (int)(tile_flat_last / (long long)q - tile_flat_begin / (long long)q + 1);
+    // REQ-8: contributors はホスト側 streamk_plan が max_contributors 以下
+    // であることを証明済みだが、性能下限・最適化を理由に手動境界チェックを
+    // 省略しない（`.claude/rules/coding-rust.md`）ためカーネル側でも
+    // クランプする。
+    if (contributors > max_contributors) {
+        contributors = max_contributors;
+    }
+    if (contributors < 0) {
+        contributors = 0;
+    }
+
+    // 固定順序（c 昇順）の逐次加算。decompose せずレジスタのみで完結する
+    // （`SPLITK_REDUCE_F32` と同じ判断）。
+    float acc = 0.0f;
+    for (int c_idx = 0; c_idx < contributors; ++c_idx) {
+        long long slot = (long long)r * (long long)max_contributors + (long long)c_idx;
+        long long p_idx = slot * (long long)(TP_BM * TP_BN) + local;
+        // REQ-8: partials 読み取り前の手動境界チェック（書き込み側の
+        // p_idx 検査と対をなす）。
+        if (p_idx >= 0 && p_idx < (long long)partials_capacity) {
+            acc += partials[p_idx];
+        }
+    }
+
+    int tile = full_tiles + r;
+    int tiles_x = (n - 1) / TP_BN + 1;
+    int block_row0 = (tile / tiles_x) * TP_BM;
+    int block_col0 = (tile % tiles_x) * TP_BN;
+    int row = block_row0 + local / TP_BN;
+    int col = block_col0 + local % TP_BN;
+    if (row < m && col < n) {
+        c[(size_t)row * n + col] = acc;
+    }
+}
+"#;
+
+/// [`render_source`]／[`render_persistent_source`] と同じ形で Stream-K
+/// 版ソース全文を組み立てる（`render_defines`・[`TP_CP_ASYNC_HELPER`]・
+/// [`TP_SK_KERNEL_PREFIX`]・[`TP_SK_TILE_CORE`]・[`TP_SK_KERNEL_SUFFIX`]・
+/// [`TP_SK_FIXUP_KERNEL`] の連結）。両カーネル（Stream-K 本体・fixup）を
+/// 同一コンパイル単位に含めるため、`crate::module_cache::
+/// load_function_cached` は同一ソース・同一記述子で 2 回呼ばれ、2 回目
+/// は（LRU がヒットしていれば）モジュール再コンパイルなしで
+/// `func_name` 違いの関数ロードのみになる
+/// （`crate::gemm::CudaGemm::compile_tiled_pipeline_streamk_variant` 参照）。
+fn render_streamk_source(stages: u32) -> String {
+    format!(
+        "{defines}{helper}{prefix}{core}{suffix}{fixup}",
+        defines = render_defines(stages),
+        helper = TP_CP_ASYNC_HELPER,
+        prefix = TP_SK_KERNEL_PREFIX,
+        core = TP_SK_TILE_CORE,
+        suffix = TP_SK_KERNEL_SUFFIX,
+        fixup = TP_SK_FIXUP_KERNEL,
+    )
+}
+
+/// ステージ数（[`TP_DEFAULT_STAGES`]）固定の Stream-K 版カーネルソース。
+/// 初回アクセス時に 1 回だけレンダーし、以降はキャッシュ済み文字列参照を
+/// 返す（[`tiled_pipeline_persistent_f32_source`] と同じ判断）。
+pub fn tiled_pipeline_streamk_f32_source() -> &'static str {
+    &TILED_PIPELINE_STREAMK_F32_SOURCE
+}
+
+static TILED_PIPELINE_STREAMK_F32_SOURCE: LazyLock<String> =
+    LazyLock::new(|| render_streamk_source(TP_DEFAULT_STAGES));
+
+/// 任意のステージ数（[`TP_MIN_STAGES`]..=[`TP_MAX_STAGES`]）の Stream-K
+/// 版ソースをオンデマンド生成する（[`tiled_pipeline_persistent_f32_source_with_stages`]
+/// と同じ範囲検証）。
+pub fn tiled_pipeline_streamk_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    if !(TP_MIN_STAGES..=TP_MAX_STAGES).contains(&stages) {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "tiled_pipeline_streamk_f32_source_with_stages stages ({stages}) must lie \
+                 within [{TP_MIN_STAGES}, {TP_MAX_STAGES}]"
+            ),
+        });
+    }
+    Ok(render_streamk_source(stages))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,6 +1432,304 @@ mod tests {
         assert_eq!(
             wait_count, 2,
             "persistent 版でも wait_group は 2 箇所（本体ループ・drain）"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Stream-K（最終 wave 限定・固定順序 fixup。イシュー #1358）。
+    // -------------------------------------------------------------------
+
+    /// Stream-K 版ソースが `cp.async`／`fmaf`（タイル内計算は
+    /// [`TP_TILE_CORE`] 由来）を含むことを検査する
+    /// （[`tiled_pipeline_persistent_source_uses_cp_async_instructions`]
+    /// と同型）。
+    #[test]
+    fn tiled_pipeline_streamk_source_uses_cp_async_instructions() {
+        let source = tiled_pipeline_streamk_f32_source();
+        for needle in [
+            "cp.async.cg.shared.global",
+            "cp.async.commit_group",
+            "cp.async.wait_group",
+            "fmaf(",
+        ] {
+            assert!(
+                source.contains(needle),
+                "tiled_pipeline_streamk_f32_source() が `{needle}` を含みません"
+            );
+        }
+    }
+
+    /// REQ-8 の手動境界検査（cp.async src_size ゼロ充填・エピローグ
+    /// guarded store）が Stream-K 版でも省略されていないことを検査する。
+    #[test]
+    fn tiled_pipeline_streamk_source_retains_manual_bounds_checks() {
+        let source = tiled_pipeline_streamk_f32_source();
+        assert!(
+            source.contains("int valid = (gr < m && gc < k) ? 16 : 0;"),
+            "A タイルロードの guarded cp.async（src_size ゼロ充填）が見当たりません"
+        );
+        assert!(
+            source.contains("int valid = (gr < k && gc < n) ? 16 : 0;"),
+            "B タイルロードの guarded cp.async（src_size ゼロ充填）が見当たりません"
+        );
+        assert!(
+            source.contains("if (r < m && cc < n) {"),
+            "full タイル単位のエピローグ guarded store が見当たりません"
+        );
+        assert!(
+            source.contains("if (row < m && col < n) {"),
+            "fixup カーネルの guarded store が見当たりません"
+        );
+    }
+
+    /// 空白（インデント幅）のみを除去する（`TP_TILE_CORE`／`TP_SK_TILE_CORE`
+    /// はネスト深さが異なるためインデント幅だけが違う。以下のテストは
+    /// この差を無視して命令列自体の同一性を検証する）。
+    fn strip_ws(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// [`TP_SK_TILE_CORE`] が [`TP_TILE_CORE`] と（インデントを除き）同一の
+    /// `LOAD_A_STAGE`／`LOAD_B_STAGE` マクロ本文・K 内積 `fmaf` ループ本文を
+    /// 含むことを検査する（決定性論証「full タイル単位は非 Stream-K 版と
+    /// 同一命令列」の機械的裏付け。実装計画 §3.2 参照。`TP_TILE_CORE` を
+    /// 単一の真実源として動的に切り出すことで、インデント幅の変更に対して
+    /// 脆くならないようにする）。
+    #[test]
+    fn tiled_pipeline_streamk_tile_core_shares_load_and_fma_fragments_with_tile_core() {
+        let core_ws = strip_ws(TP_TILE_CORE);
+        let sk_core_ws = strip_ws(TP_SK_TILE_CORE);
+
+        // LOAD_A_STAGE マクロ本文（`#define LOAD_A_STAGE(stage, k0)` から
+        // `#define LOAD_B_STAGE(stage, k0)` 直前まで）を `TP_TILE_CORE` から
+        // 動的に切り出す。
+        let load_a_marker = "#defineLOAD_A_STAGE(stage,k0)";
+        let load_b_marker = "#defineLOAD_B_STAGE(stage,k0)";
+        let load_a_start = core_ws
+            .find(load_a_marker)
+            .expect("テスト前提が崩れています: TP_TILE_CORE に LOAD_A_STAGE 定義が見当たりません");
+        let load_b_start = core_ws
+            .find(load_b_marker)
+            .expect("テスト前提が崩れています: TP_TILE_CORE に LOAD_B_STAGE 定義が見当たりません");
+        assert!(load_a_start < load_b_start);
+        let load_a_fragment = &core_ws[load_a_start..load_b_start];
+        assert!(
+            sk_core_ws.contains(load_a_fragment),
+            "TP_SK_TILE_CORE が TP_TILE_CORE と同一の LOAD_A_STAGE マクロ本文を（空白を \
+             除いて）含みません"
+        );
+
+        // LOAD_B_STAGE マクロ本文（`#define LOAD_B_STAGE` からマクロ本体の
+        // 最終行〈`tp_cp_async16(...);` を含む閉じ `}`〉まで。この直後に
+        // `TP_TILE_CORE` 側だけに存在するプロローグ導入コメントが続くため、
+        // そのコメント文字列を巻き込まないよう終端をマクロ本体の既知の末尾
+        // 文字列で明示的に区切る（コメントの有無自体は `TP_SK_TILE_CORE` と
+        // 異なりうる非本質的差異であり、本テストが検証したいのは命令列その
+        // ものの同一性）。
+        let load_b_end_marker = strip_ws(
+            "tp_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * n + gc_c], valid); \\\n        }",
+        );
+        let load_b_end_rel = core_ws[load_b_start..].find(&load_b_end_marker).expect(
+            "テスト前提が崩れています: TP_TILE_CORE に LOAD_B_STAGE 本体の末尾が見当たりません",
+        );
+        let load_b_end = load_b_start + load_b_end_rel + load_b_end_marker.len();
+        let load_b_fragment = &core_ws[load_b_start..load_b_end];
+        assert!(
+            sk_core_ws.contains(load_b_fragment),
+            "TP_SK_TILE_CORE が TP_TILE_CORE と同一の LOAD_B_STAGE マクロ本文を（空白を \
+             除いて）含みません"
+        );
+
+        let kk_fma_fragment = strip_ws("acc[i][j] = fmaf(a_reg[i], b_reg[j], acc[i][j]);");
+        assert!(core_ws.contains(&kk_fma_fragment));
+        assert!(
+            sk_core_ws.contains(&kk_fma_fragment),
+            "TP_SK_TILE_CORE が TP_TILE_CORE と同一の fmaf 内積ループ本文を含みません"
+        );
+    }
+
+    /// 決定性契約の機械検査: Stream-K 版ソースの `atomicAdd` はタイル
+    /// キューカウンタ用の**ちょうど 1 箇所**（`unit_counter`）であり、
+    /// GEMM の数値蓄積（`acc[][]`・`c[`・`partials[`）へは一切使われない
+    /// ことを検査する（[`tiled_pipeline_persistent_source_uses_single_
+    /// integer_atomic_add`] と同型）。
+    #[test]
+    fn tiled_pipeline_streamk_source_uses_single_integer_atomic_add() {
+        let source = tiled_pipeline_streamk_f32_source();
+        let atomic_add_count = source.matches("atomicAdd(").count();
+        assert_eq!(
+            atomic_add_count, 1,
+            "Stream-K 版ソースの atomicAdd はタイルキューカウンタ用の 1 箇所のみのはず"
+        );
+        assert!(
+            source.contains("s_unit = atomicAdd(unit_counter, 1u);"),
+            "atomicAdd の対象が unsigned int* unit_counter（スケジューリング専用）と \
+                 確認できません"
+        );
+        assert!(
+            !source.contains("atomicAdd(&acc")
+                && !source.contains("atomicAdd(&c[")
+                && !source.contains("atomicAdd(&partials["),
+            "GEMM の数値蓄積（acc[][]／c／partials）へ atomicAdd が使われていないことを \
+                 確認できません"
+        );
+    }
+
+    /// fixup カーネルが寄与者 `c_idx` について固定昇順（`for (int c_idx =
+    /// 0; c_idx < contributors; ++c_idx)`）で逐次加算し、`c[` への書き
+    /// 込みが 1 箇所のみであることを検査する（`SPLITK_REDUCE_F32` と同型
+    /// の決定性契約。イシュー #1358 の受け入れ条件本体）。
+    #[test]
+    fn tiled_pipeline_streamk_fixup_uses_fixed_ascending_order_reduction() {
+        assert!(
+            TP_SK_FIXUP_KERNEL.contains("for (int c_idx = 0; c_idx < contributors; ++c_idx) {"),
+            "fixup カーネルが寄与者昇順の固定順序ループを持ちません"
+        );
+        assert_eq!(
+            TP_SK_FIXUP_KERNEL
+                .matches("c[(size_t)row * n + col] = acc;")
+                .count(),
+            1,
+            "fixup カーネルの c への書き込みは 1 箇所のはずです"
+        );
+        assert!(!TP_SK_FIXUP_KERNEL.contains("atomicAdd"));
+    }
+
+    /// Stream-K 版・fixup カーネルいずれも SK 側の `c[` 書き込みが full
+    /// タイル単位（`store_to_c` 分岐）の 1 箇所のみであること、残タイル
+    /// は `partials[` への書き込みのみであることを検査する（full タイル
+    /// と残タイルの書き込み領域が互いに素であることの静的裏付け。
+    /// [`TP_SK_FIXUP_KERNEL`] ドキュメンテーションコメント「決定性の
+    /// 根拠」点 5 参照）。
+    #[test]
+    fn tiled_pipeline_streamk_c_and_partials_writes_are_disjoint_by_construction() {
+        let source = tiled_pipeline_streamk_f32_source();
+        assert_eq!(
+            source.matches("c[(size_t)r * n + cc] = acc[i][j];").count(),
+            1,
+            "Stream-K 版カーネルの c への書き込み（full タイル単位）は 1 箇所のはずです"
+        );
+        assert_eq!(
+            source
+                .matches("partials[(size_t)slot * (TP_BM * TP_BN) + local] = acc[i][j];")
+                .count(),
+            1,
+            "Stream-K 版カーネルの partials への書き込み（残タイルのサブレンジ単位）は \
+                 1 箇所のはずです"
+        );
+    }
+
+    /// Stream-K 版カーネルのシグネチャ（`unit_counter`／`partials`／
+    /// `full_tiles`／`total_units`／`q`／`max_contributors`／
+    /// `remainder_tiles` 引数）・単位取得ループの scaffolding
+    /// （[`tiled_pipeline_persistent_source_has_tile_queue_scaffolding`]
+    /// の Stream-K 版）を検査する。
+    #[test]
+    fn tiled_pipeline_streamk_source_has_unit_queue_scaffolding() {
+        let source = tiled_pipeline_streamk_f32_source();
+        for needle in [
+            "gemm_tiled_pipeline_streamk_f32(",
+            "unsigned int* unit_counter",
+            "float* __restrict__ partials",
+            "int full_tiles, int total_units, int q, int max_contributors,",
+            "int remainder_tiles",
+            "__shared__ unsigned int s_unit;",
+            "for (;;) {",
+            "if (unit_u >= (unsigned int)total_units) {",
+            "gemm_tiled_pipeline_streamk_fixup_f32(",
+        ] {
+            assert!(
+                source.contains(needle),
+                "tiled_pipeline_streamk_f32_source() が `{needle}` を含みません"
+            );
+        }
+    }
+
+    /// [`tiled_pipeline_streamk_f32_source_with_stages`] の範囲検証
+    /// （[`tiled_pipeline_source_with_stages_validates_range`] と同型）。
+    #[test]
+    fn tiled_pipeline_streamk_source_with_stages_validates_range() {
+        assert!(tiled_pipeline_streamk_f32_source_with_stages(1).is_err());
+        assert!(tiled_pipeline_streamk_f32_source_with_stages(TP_MAX_STAGES + 1).is_err());
+        for stages in TP_MIN_STAGES..=TP_MAX_STAGES {
+            let src = tiled_pipeline_streamk_f32_source_with_stages(stages)
+                .unwrap_or_else(|e| panic!("stages={stages} must be accepted: {e}"));
+            assert!(src.contains(&format!("#define TP_STAGES {stages}")));
+        }
+    }
+
+    /// Stream-K 版ソースの `commit_group`／`wait_group` 回数が非 Stream-K
+    /// 版と同じ「1 サブレンジ = 2 commit・2 wait」であることを検査する
+    /// （[`TP_SK_TILE_CORE`] が [`TP_TILE_CORE`] と同一命令列のため回数
+    /// 自体は不変。fixup カーネルは cp.async を一切使わない）。
+    #[test]
+    fn tiled_pipeline_streamk_commit_wait_group_counts() {
+        let source = tiled_pipeline_streamk_f32_source();
+        let commit_count = source.matches("cp.async.commit_group;").count();
+        let wait_count = source.matches("cp.async.wait_group").count();
+        assert_eq!(
+            commit_count, 2,
+            "Stream-K 版でも commit_group は 2 箇所（prologue・本体末尾）"
+        );
+        assert_eq!(
+            wait_count, 2,
+            "Stream-K 版でも wait_group は 2 箇所（本体ループ・drain）"
+        );
+    }
+
+    /// レンダー済み Stream-K 版ソースの構造的整合性（波括弧・`#define`／
+    /// `#undef` の対応数・`extern "C" __global__` 関数が 2 個）を検査する
+    /// 粗い機械検査（advisor 指摘: NVRTC 非搭載環境ではブレース崩れが
+    /// 実機でしか顕在化しないため、部分文字列検査に加えて構造カウントで
+    /// 保険をかける）。
+    #[test]
+    fn tiled_pipeline_streamk_source_is_structurally_balanced() {
+        let source = tiled_pipeline_streamk_f32_source();
+        let open_braces = source.matches('{').count();
+        let close_braces = source.matches('}').count();
+        assert_eq!(
+            open_braces, close_braces,
+            "Stream-K 版ソースの `{{`/`}}` 個数が一致しません（open={open_braces}, \
+                 close={close_braces}）"
+        );
+        // `render_defines` が生成する `TP_BM` 等の恒常マクロには対応する
+        // `#undef` が存在しない契約（他フラグメントと共通の前提）のため、
+        // `#define`/`#undef` の総数一致ではなく `TP_SK_TILE_CORE` がスコープ
+        // 内でのみ使う 4 マクロ（`A_CHUNKS`／`B_CHUNKS`／`LOAD_A_STAGE`／
+        // `LOAD_B_STAGE`）に限定して対応する `#undef` の存在を検査する。
+        for macro_name in ["A_CHUNKS", "B_CHUNKS", "LOAD_A_STAGE", "LOAD_B_STAGE"] {
+            assert_eq!(
+                source.matches(&format!("#define {macro_name}")).count(),
+                1,
+                "`#define {macro_name}` は 1 箇所のはずです"
+            );
+            assert_eq!(
+                source.matches(&format!("#undef {macro_name}")).count(),
+                1,
+                "`#undef {macro_name}` は 1 箇所のはずです（TP_SK_TILE_CORE スコープ内で \
+                 定義・破棄される契約）"
+            );
+        }
+        assert_eq!(
+            source.matches("extern \"C\" __global__ void").count(),
+            2,
+            "Stream-K 版ソースは Stream-K 本体・fixup の 2 関数のみを含むはずです"
+        );
+    }
+
+    /// [`TP_SK_FIXUP_BLOCK_THREADS`] と [`TP_SK_FIXUP_KERNEL`] 内のリテラル
+    /// （`blockIdx.y * 256 + threadIdx.x`）が食い違っていないことを検査
+    /// する（[`TP_SK_FIXUP_KERNEL`] ドキュメンテーションコメント参照。
+    /// `crate::gemm::CudaGemm::launch_tiled_pipeline_streamk_f32` の起動
+    /// `block_dim` は本定数を直接参照するため、ここではカーネルソース側の
+    /// リテラルとの一致のみを検査すれば足りる）。
+    #[test]
+    fn tiled_pipeline_streamk_fixup_block_dim_matches_kernel_source_literal() {
+        let expected = format!("blockIdx.y * {TP_SK_FIXUP_BLOCK_THREADS} + threadIdx.x");
+        assert!(
+            TP_SK_FIXUP_KERNEL.contains(&expected),
+            "TP_SK_FIXUP_KERNEL のリテラルが TP_SK_FIXUP_BLOCK_THREADS（{TP_SK_FIXUP_BLOCK_THREADS}）\
+             と一致しません"
         );
     }
 }

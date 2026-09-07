@@ -500,7 +500,7 @@ N=K=512 で 64×64）と、`run_tiled_f32` の出力が独立コンパイルし�
 - **M 軸の閾値は持たない**（受け入れ条件が正方形状比較のみを求めるため未実測。非正方 M・非正方 K の優位性境界は別イシューへの申し送り）。
 - **CUDA event 計測は追加実装しなかった**（§4 参照。既存の GPU-only wall-clock 計測で十分と判断）。将来 event ベースの計測が必要になった場合は `cudarc::driver::CudaEvent`（`record_event`/`elapsed_ms`）を追加する余地がある。
 - NT/TN 転置入口（`run_tiled_f32_nt`／`run_tiled_f32_tn`。#1214）・resident 入口（`launch_tiled_f32_resident`）は `select_tiled_f32_kernel` を共有するため、本結線により整列形状・N≥1024 かつ K≥1024 の場合は自動的に 128×64 へ到達する。ゲート B の `gemm_transposed_parity`（5/5 PASS）でこの経路も確認済み。
-- 正式系列（crates.io ピン `fandhe-ai =0.7.0`）の framework-compare 再計測は未実施（本イシューのスコープ外。#1360 の対象）。
+- 正式系列（crates.io ピン `fandhe-ai =0.7.0`）の framework-compare 再計測はイシュー #1360 で実施済み（`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12）。正式判定は未達成のまま（ピン未更新のため #1342 の効果は反映されない）。参考系列（HEAD への path 差し替え）は #1342 単独で N=1024 0.401／N=4096 0.933 倍まで改善したが未達継続（同 §12.3）。
 
 ### 9. 事前承認・非信頼データの扱い
 
