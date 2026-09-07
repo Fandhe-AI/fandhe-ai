@@ -20,8 +20,21 @@ https://github.com/Fandhe-AI/fandhe-ai/pull/1430#discussion_r3952477456）を
   - 基準 KC（BASELINE_KC=256）が検出された全 size に存在するか検証する
     （欠落時に黙ってその size をスキップしない）。
 
+さらに #1430 codex-review 2 巡目指摘（PR #1430 のレビュースレッド。
+「サンプル数を数える前に独立した run を検証する」）を受け、以下も検証する
+（入力ファイルの識別を捨てて行数だけを数えると、同一 run のログファイルの
+パスを 5 回渡しても「5 run median」として受理されてしまい、5 回独立プロセス
+計測という契約が崩れるため）:
+  - 同一の入力ファイルパス（`os.path.realpath` 正規化後）が引数に複数回
+    渡された場合は拒否する（同一 run の水増しを遮断）。
+  - 各ログファイル（1 run 分）が、そのファイル内で検出された各 (kc, size) を
+    ちょうど 1 回ずつ含むか検証する（同一 run 内の重複行・0 回〈欠落〉を
+    拒否し、`samples[(kc, size)]` の要素数が「file 数」＝「独立 run 数」と
+    一致することを保証する）。
+
 使い方: python3 aggregate.py "<機種名>" <ログファイル...>
 """
+import os
 import re
 import statistics
 import sys
@@ -39,10 +52,38 @@ EXPECTED_KCS = (128, 192, 256, 384, 512)
 BASELINE_KC = 256
 
 
+def check_distinct_paths(paths):
+    # fail-closed: 同一ファイルが複数回渡されていないか検証する（symlink・
+    # 相対/絶対パス表記違いを `os.path.realpath` で正規化してから比較する）。
+    # これを怠ると、同じ run1 のログを 5 回渡しても「5 run median」として
+    # 受理されてしまい、5 回独立プロセス計測という契約（本ファイル冒頭の
+    # docstring・計画 §3-4）が崩れる。
+    seen = {}
+    duplicates = []
+    for path in paths:
+        real = os.path.realpath(path)
+        if real in seen:
+            duplicates.append((path, seen[real]))
+        else:
+            seen[real] = path
+    if duplicates:
+        print(
+            "ERROR: duplicate input file path(s) detected (same run passed "
+            f"more than once): {duplicates}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def parse_files(paths):
-    # (kc, size) -> [gflops, ...]（5 run 分。プロセスごとに 1 出力行）
+    # (kc, size) -> [gflops, ...]（file 数＝独立 run 数分。プロセスごとに
+    # 1 出力行。file 単位の重複・欠落は per_file_keys で検証する）
     samples = defaultdict(list)
     for path in paths:
+        # このファイル（1 run 分）内で検出済みの (kc, size) 集合。同一 run
+        # 内で同じ候補×形状の行が複数回出力された場合（プロセス側の異常出力・
+        # ログの結合ミス等）を検出するため、行ごとに逐次照合する。
+        per_file_keys = set()
         with open(path, encoding="utf-8") as f:
             for line in f:
                 m = LINE_RE.search(line)
@@ -50,8 +91,37 @@ def parse_files(paths):
                     kc = int(m.group("kc"))
                     size = int(m.group("size"))
                     gflops = float(m.group("gflops"))
-                    samples[(kc, size)].append(gflops)
+                    key = (kc, size)
+                    if key in per_file_keys:
+                        print(
+                            f"ERROR: duplicate line for kc={kc} size={size} "
+                            f"within a single run file: {path}",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    per_file_keys.add(key)
+                    samples[key].append(gflops)
     return samples
+
+
+def check_run_identity(paths, samples):
+    # fail-closed: 各 (kc, size) のサンプル数が入力ファイル数（＝独立 run 数）
+    # と一致するか検証する。parse_files の同一 run 内重複拒否と組み合わせる
+    # ことで、「samples[(kc, size)] の要素数 == 独立プロセス起動回数」が
+    # 保証され、後段の `statistics.median`／run 単位のペアワイズ比較
+    # （zip(series, base_series)）が異なる run 同士を取り違えて比較する
+    # 余地を無くす。
+    expected_runs = len(paths)
+    mismatched = {
+        k: len(v) for k, v in samples.items() if len(v) != expected_runs
+    }
+    if mismatched:
+        print(
+            f"ERROR: sample count does not match input file count "
+            f"({expected_runs} files) for: {mismatched}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def main():
@@ -61,6 +131,12 @@ def main():
 
     machine = sys.argv[1]
     paths = sys.argv[2:]
+
+    # fail-closed: run 識別（同一ファイルの水増し）を集計より先に検証する
+    # （PR #1430 codex-review 2 巡目指摘: 「サンプル数を数える前に独立した
+    # run を検証する」）。
+    check_distinct_paths(paths)
+
     samples = parse_files(paths)
 
     # fail-closed: 入力行が 1 件もなければ拒否する（空ログ・/dev/null 等の
@@ -74,7 +150,16 @@ def main():
         )
         sys.exit(1)
 
-    # fail-closed: 5 サンプル未満の (kc, size) があれば拒否する
+    # fail-closed: 各 (kc, size) のサンプル数が入力ファイル数（独立 run 数）と
+    # 一致するか検証する（run 重複・欠落の検出。PR #1430 codex-review 2 巡目
+    # 指摘）。次の「5 サンプル未満」検査より先に行い、run 数がそもそも 5 に
+    # 満たない・一致しない場合に原因を明示する。
+    check_run_identity(paths, samples)
+
+    # fail-closed: 5 サンプル未満の (kc, size) があれば拒否する（本スイープの
+    # 契約は 5 回独立プロセス計測。上の check_run_identity により、この時点で
+    # samples の各要素数は入力ファイル数と一致していることが保証されている
+    # ため、本検査は「5 run 未満のログ集合が渡された」場合を検出する）
     incomplete = {k: len(v) for k, v in samples.items() if len(v) < 5}
     if incomplete:
         print(f"ERROR: sample count < 5 for: {incomplete}", file=sys.stderr)
