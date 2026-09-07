@@ -16,8 +16,8 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, MseReduction, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
-    reduce_out_shape, require_same_shape,
+    Activation, BackendError, ChecksumReadout, GemmChecksum, MseReduction, ShapeError, Tensor,
+    broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 
 use crate::error::AutodiffError;
@@ -206,6 +206,46 @@ impl<'t> Var<'t> {
         let value = self.tape.ops().gemm(&lhs_val, &rhs_val)?;
         let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `C = self @ other` を計算しつつ、`C` の全要素和（checksum）を
+    /// バックエンド側の `f64` reduction（`BackendOps::gemm_checksum`）で
+    /// 求める（イシュー #1339）。framework-compare の gemm 計測窓が毎
+    /// 反復行っていた「D2H → ホスト `f64` 逐次和」の 2 段を、GPU
+    /// バックエンドでは「checksum（8 バイト）のみ読み戻す」経路へ置き
+    /// 換えるための入口（`docs/perf/device-checksum-readback-ab.md`）。
+    ///
+    /// **[`Var::matmul`] との相違（tape への非記録）**: 本メソッドは
+    /// `self.tape.push_eager` を呼ばず、戻り値の `GemmChecksum` は
+    /// tape ノードを持たない生の計算結果として返す（backward の対象外。
+    /// ベンチハーネスの計測専用入口という位置づけであり、学習経路
+    /// （`Var::matmul` チェーン）とは独立している）。`readout` が
+    /// [`ChecksumReadout::ChecksumOnly`] のときバックエンド実装は `C`
+    /// をホストへ download しない契約（`BackendOps::gemm_checksum` doc
+    /// 参照）。
+    ///
+    /// 検証手順は `matmul` と同じ「①クロステープ検査 → ②shape 検査 →
+    /// ③入力実体化」までを行い、④のみ `ops().gemm` ではなく
+    /// `ops().gemm_checksum` を呼ぶ。既定実装（CUDA／Metal は本イシュー
+    /// 時点で未オーバーライド）が返す [`BackendError::Unsupported`] は
+    /// そのまま呼び出し元（framework-compare ハーネス）へ伝播する
+    /// （判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+    pub fn matmul_checksum(
+        &self,
+        other: &Var<'t>,
+        readout: ChecksumReadout,
+    ) -> Result<GemmChecksum, AutodiffError> {
+        self.check_same_tape(other)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = other.shape();
+        matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        let (lhs_val, rhs_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let rhs_val = materialize_fallible(&nodes, self.tape.ops(), other.id)?.clone();
+            (lhs_val, rhs_val)
+        };
+        Ok(self.tape.ops().gemm_checksum(&lhs_val, &rhs_val, readout)?)
     }
 
     /// `y = act(self.matmul(weight) (+ bias))` を 1 ノード

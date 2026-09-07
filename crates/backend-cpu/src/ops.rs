@@ -16,8 +16,8 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DType, FusionPlan, MseReduction, SgdStepConfig, ShapeError, Tensor,
-    require_same_shape,
+    Activation, BackendOps, ChecksumReadout, DType, FusionPlan, GemmChecksum, MseReduction,
+    SgdStepConfig, ShapeError, Tensor, require_same_shape,
 };
 
 use crate::gemm_blis::{
@@ -472,6 +472,46 @@ impl BackendOps for CpuBackendOps {
         let mut out = vec![0.0f32; m * n];
         gemm_into_slice(a, b, &mut out, m, n, k, "gemm")?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_checksum`] の CPU 実装
+    /// （イシュー #1339）。CPU はデバイス常駐バッファを持たず `gemm` 自体
+    /// が転送コストを発生させないため、本実装は「GPU バックエンドと同じ
+    /// API 面を満たす」意味論的対称の位置づけに留まる（実測上の
+    /// 読み戻し削減効果は CUDA／Metal 側が主眼）。
+    ///
+    /// `C` は [`Self::gemm`]（`gemm_into_slice`）と bit 同一（同一
+    /// カーネル呼び出し）。checksum は `C` を先頭から `f64` へ昇格して
+    /// 逐次和で求める（`out.iter().map(|&x| x as f64).sum()`。固定順序で
+    /// 決定的）。この順序は framework-compare の既存ハーネス側 checksum
+    /// 実装（`bench-common` の `checksum_f64`）と同一であり、off/on の
+    /// 複合判定で完全一致することを期待する（`docs/perf/device-
+    /// checksum-readback-ab.md` §5）。
+    fn gemm_checksum(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        readout: ChecksumReadout,
+    ) -> Result<GemmChecksum, BackendError> {
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+        let mut out = vec![0.0f32; m * n];
+        gemm_into_slice(a, b, &mut out, m, n, k, "gemm_checksum")?;
+        let checksum: f64 = out.iter().map(|&x| x as f64).sum();
+        let output = match readout {
+            ChecksumReadout::ChecksumOnly => None,
+            ChecksumReadout::WithOutput => {
+                Some(Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)?)
+            }
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "gemm_checksum: unsupported ChecksumReadout variant {readout:?}"
+                )));
+            }
+        };
+        Ok(GemmChecksum { checksum, output })
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict_into`] の CPU
@@ -1266,5 +1306,70 @@ mod with_host_view_forwarding_tests {
                 .collect::<Vec<_>>(),
             "CpuBackendOps::with_host_view は download() と bit 同一のはず"
         );
+    }
+}
+
+/// [`CpuBackendOps::gemm_checksum`]（イシュー #1339）の回帰テスト。
+#[cfg(test)]
+mod gemm_checksum_tests {
+    use super::*;
+
+    #[test]
+    fn gemm_checksum_only_matches_host_f64_sum_of_gemm_and_has_no_output() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = Tensor::new(vec![5.0f32, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+
+        let reference = ops.gemm(&a, &b).unwrap();
+        let expected: f64 = reference
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&x| x as f64)
+            .sum();
+
+        let result = ops
+            .gemm_checksum(&a, &b, ChecksumReadout::ChecksumOnly)
+            .unwrap();
+
+        assert_eq!(result.checksum, expected);
+        assert!(result.output.is_none());
+    }
+
+    #[test]
+    fn gemm_checksum_with_output_is_bit_identical_to_gemm() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, -2.5, 3.25, 0.5, -1.0, 2.0], &[2, 3]).unwrap();
+        let b = Tensor::new(vec![0.5f32, 1.5, -1.0, 2.0, 3.0, -2.0], &[3, 2]).unwrap();
+
+        let reference = ops.gemm(&a, &b).unwrap();
+        let result = ops
+            .gemm_checksum(&a, &b, ChecksumReadout::WithOutput)
+            .unwrap();
+
+        let output = result.output.expect("WithOutput は output を返すはず");
+        assert_eq!(
+            output
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            reference
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            "gemm_checksum(WithOutput).output は gemm と bit 同一のはず"
+        );
+
+        let expected: f64 = reference
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&x| x as f64)
+            .sum();
+        assert_eq!(result.checksum, expected);
     }
 }
