@@ -295,6 +295,15 @@ fn with_host_view_matches_download_on_managed_placement() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn with_host_view_using_kind_pinned_matches_pageable_and_download_bit_exact() {
+    // codex-review P2／Cursor Bugbot Medium 指摘（イシュー #1336）:
+    // 本テストのみ `PlacementFlagGuard::acquire(false)` を取得しておらず、
+    // `managed_placement_real_device_test.rs` 等の並行実行で managed
+    // 配置フラグが `true` に切り替わると `mem.upload` の配置先が
+    // `Managed` へすり替わり、本来検証したい `Device` 配置（`Pinned`／
+    // `Pageable` 経路）が空振りする恐れがあった。他の `#[test]`（本
+    // ファイル冒頭の各テスト）と同じくフラグを `false` に固定して
+    // 直列化する。
+    let _guard = PlacementFlagGuard::acquire(false);
     let device =
         CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
     let mem = CudaMemory::new(&device);

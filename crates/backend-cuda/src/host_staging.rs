@@ -316,7 +316,7 @@ impl HostStagingCache {
 /// 使用済みバッファをキャッシュへ返却する（`memory.rs::CudaMemory::
 /// return_staging` から呼ばれる。poison 後も `into_inner` で返却を試み
 /// panic しない一方、以降の新規取得〈`memory.rs::CudaMemory::
-/// take_or_alloc_staging` が直接 `lock()` する経路〉は通常どおり poison
+/// take_cached_staging` が直接 `lock()` する経路〉は通常どおり poison
 /// エラーとして fail-closed に拒否される）。
 pub(crate) fn put_back(
     cache: &std::sync::Mutex<HostStagingCache>,

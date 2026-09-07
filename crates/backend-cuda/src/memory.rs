@@ -706,43 +706,47 @@ impl CudaMemory {
     }
 
     /// [`MemoryOps::with_host_view`]（`Device` 配置分岐）が使うホスト
-    /// ステージングバッファを取得する（イシュー #1336）。`self.
-    /// host_staging` の Mutex poison は `static_cuda_memory`（`ops.rs`）
-    /// と同じ fail-closed 方針で `BackendError::DeviceUnavailable` へ
-    /// 変換する（本番経路で `unwrap`／`expect` を使わない。
-    /// `.claude/rules/coding-rust.md`）。ロック保持区間はキャッシュの
-    /// `take` 呼び出しのみに限定し（`crate::host_staging` モジュール
-    /// コメント「ロック方針」節）、driver 呼び出し（`memcpy_dtoh` 等）
-    /// は本メソッドの外側（`with_driver_call` 経由）で行う。
-    fn take_or_alloc_staging(
+    /// ステージングキャッシュから既存エントリを取り出す（イシュー #1336・
+    /// codex-review／Cursor Bugbot 指摘対応）。`self.host_staging` の
+    /// Mutex poison は `static_cuda_memory`（`ops.rs`）と同じ fail-closed
+    /// 方針で `BackendError::DeviceUnavailable` へ変換する（本番経路で
+    /// `unwrap`／`expect` を使わない。`.claude/rules/coding-rust.md`）。
+    /// ロック保持区間はキャッシュの `take` 呼び出しのみに限定し
+    /// （`crate::host_staging` モジュールコメント「ロック方針」節）、
+    /// キャッシュ miss 時の新規確保（`HostStaging::alloc`。`Pinned`
+    /// 種別では driver 呼び出し `alloc_pinned` を伴う）は本メソッドでは
+    /// 行わず、呼び出し元（`with_host_view`／`with_host_view_using_kind`）
+    /// が `with_driver_call`（poison／世代検査境界）の内側で行う。
+    /// 従来はこの alloc をロック解放直後・`with_driver_call` の外側で
+    /// 行っていたため、poison 済み・旧世代の ordinal でも `alloc_pinned`
+    /// が素通りで実行され、確保時の sticky エラーも `observe_cuda_result`
+    /// を経ず ordinal が poison されない欠陥があった（返り値を
+    /// `(Option<HostStaging>, HostStagingKind)` へ変更し、alloc の要否
+    /// 判定と実行を境界の内側へ委ねる）。
+    fn take_cached_staging(
         &self,
         numel: usize,
         generation: u64,
-    ) -> Result<HostStaging, BackendError> {
+    ) -> Result<(Option<HostStaging>, host_staging::HostStagingKind), BackendError> {
         // fail-closed: poison を検出したらここで拒否する（`static_cuda_
         // memory`〈ops.rs〉と同じ方針。`crate::host_staging::put_back`
         // 〈`return_staging` が使う返却経路〉は poison 後も `into_inner`
         // で回復する設計だが、それは使用後の返却側で無条件に使う目的の
         // 緩和策であり、新規取得側（本メソッド）では poison を素通り
         // させない）。
-        let (existing, kind) = {
-            let mut guard = self.host_staging.lock().map_err(|_| {
-                BackendError::DeviceUnavailable("host staging cache mutex poisoned".to_string())
-            })?;
-            (guard.take(numel, generation), guard.kind())
-        };
-        match existing {
-            Some(buf) => Ok(buf),
-            None => HostStaging::alloc(kind, self.stream.context(), numel).map_err(map_cuda_error),
-        }
+        let mut guard = self.host_staging.lock().map_err(|_| {
+            BackendError::DeviceUnavailable("host staging cache mutex poisoned".to_string())
+        })?;
+        Ok((guard.take(numel, generation), guard.kind()))
     }
 
-    /// [`Self::take_or_alloc_staging`] で取り出したバッファを使用後に
-    /// キャッシュへ返却する（`with_host_view` の呼び出し元クロージャ
-    /// `f` の実行後、成功・失敗いずれの経路でも呼ばれる。`crate::
-    /// host_staging::put_back` は poison 後も panic しない設計のため、
-    /// ここでは呼び出し結果を無視してよい〈以降のアクセスは
-    /// `take_or_alloc_staging` の poison 検査が fail-closed に拒否する〉）。
+    /// [`Self::take_cached_staging`] で取り出した、または `with_driver_call`
+    /// 境界の内側で新規確保したバッファを使用後にキャッシュへ返却する
+    /// （`with_host_view` の呼び出し元クロージャ `f` の実行後、成功・
+    /// 失敗いずれの経路でも呼ばれる。`crate::host_staging::put_back` は
+    /// poison 後も panic しない設計のため、ここでは呼び出し結果を無視
+    /// してよい〈以降のアクセスは `take_cached_staging` の poison 検査が
+    /// fail-closed に拒否する〉）。
     fn return_staging(&self, numel: usize, generation: u64, buf: HostStaging) {
         host_staging::put_back(&self.host_staging, numel, generation, buf);
     }
@@ -806,18 +810,21 @@ impl CudaMemory {
         };
         let numel = slice.len();
         let generation = buffer.generation();
-        let mut staging =
-            HostStaging::alloc(kind, self.stream.context(), numel).map_err(map_cuda_error)?;
-        let copy_result = self.with_driver_call(&[generation], map_cuda_error, || {
+        let ctx = self.stream.context();
+        // codex-review 指摘対応: `HostStaging::alloc`（`Pinned` では
+        // driver 呼び出し `alloc_pinned` を伴う）・D2H・`as_slice()`
+        // （`Pinned` 側は内部で `event.synchronize()`）・`f` 呼び出しの
+        // 全てを `with_driver_call`（poison／世代検査境界）の内側で行う
+        // （`take_cached_staging` ドキュメンテーションコメント参照。
+        // 本メソッドはキャッシュを経由しないため、常に新規確保する）。
+        self.with_driver_call(&[generation], map_cuda_error, || {
+            let mut staging = HostStaging::alloc(kind, ctx, numel)?;
             self.stream
                 .memcpy_dtoh(slice, staging.as_host_slice_mut())?;
             self.stream.synchronize()?;
+            let view = staging.as_slice()?;
+            f(view);
             Ok(())
-        });
-        copy_result.and_then(|()| {
-            staging.as_slice().map_err(map_cuda_error).map(|view| {
-                f(view);
-            })
         })
     }
 }
@@ -877,13 +884,19 @@ impl MemoryOps for CudaMemory {
     ///   `to_vec()` するのと異なり、managed 配置本来のゼロコピー特性を
     ///   保つ）。
     /// - `Device`: `crate::host_staging`（形状ごとに再利用するホスト
-    ///   ステージングバッファ）から確保・`memcpy_dtoh` で D2H・
-    ///   `synchronize` の後、`f` へ借用を渡す。使用後は成功・失敗いずれの
-    ///   経路でも `Self::return_staging` でキャッシュへ返却する
-    ///   （失敗時に返却したバッファの内容は不定だが、次回の
-    ///   `memcpy_dtoh` が呼び出し前に全域を上書きするため安全。
-    ///   `crate::host_staging::HostStaging::alloc` の SAFETY コメント
-    ///   参照）。
+    ///   ステージングバッファ）から取得・確保・`memcpy_dtoh` で D2H・
+    ///   `synchronize`・`f` 呼び出しまでを `with_driver_call`（poison／
+    ///   世代検査境界）の内側で行う。キャッシュ miss 時の新規確保
+    ///   （`HostStaging::alloc`。`Pinned` 種別では driver 呼び出し
+    ///   `alloc_pinned` を伴う）も同境界の内側で行い（`Self::
+    ///   take_cached_staging` ドキュメンテーションコメント参照。
+    ///   codex-review／Cursor Bugbot 指摘対応）、poison 済み・旧世代の
+    ///   ordinal に対して driver 操作が素通りで実行されることを防ぐ。
+    ///   使用後は成功・失敗いずれの経路でも `Self::return_staging` で
+    ///   キャッシュへ返却する（失敗時に返却したバッファの内容は不定
+    ///   だが、次回の `memcpy_dtoh` が呼び出し前に全域を上書きする
+    ///   ため安全。`crate::host_staging::HostStaging::alloc` の SAFETY
+    ///   コメント参照）。
     ///
     /// 同期契約は `download`（`Self::download_inner`）と同一
     /// （`with_driver_call` を唯一の driver 呼び出し境界とし、
@@ -922,20 +935,42 @@ impl MemoryOps for CudaMemory {
             Some(CudaStorage::Device(slice)) => {
                 let numel = slice.len();
                 let generation = buffer.generation();
-                let mut staging = self.take_or_alloc_staging(numel, generation)?;
+                let (cached, kind) = self.take_cached_staging(numel, generation)?;
+                let mut staging_slot = cached;
+                let ctx = self.stream.context();
+                // codex-review／Cursor Bugbot 指摘対応（イシュー #1336）:
+                // キャッシュ miss 時の新規確保（`HostStaging::alloc`。
+                // `Pinned` では driver 呼び出し `alloc_pinned` を伴う）・
+                // D2H・`as_slice()`（`Pinned` 側は内部で
+                // `event.synchronize()`）・`f` 呼び出しを、poison／世代
+                // 検査境界（`with_driver_call`）の内側へ移した（従来は
+                // alloc が境界の外側〈`take_or_alloc_staging`〉で行われ、
+                // `as_slice()`／`f` 呼び出しも境界の外側で行われていた
+                // ため、poison 済み・旧世代の ordinal でも driver 操作が
+                // 素通りで実行され得た）。`staging_slot`（`Option<
+                // HostStaging>`）は closure に可変参照で捕捉され、
+                // 成功時は必ず `Some` のまま closure を抜けるため、
+                // 成功・失敗いずれの経路でも使用後にキャッシュへ返却
+                // できる（`Managed`／`None` 分岐と同じく `f` を境界の
+                // 内側で呼ぶ設計に統一）。
                 let copy_result = self.with_driver_call(&[generation], map_cuda_error, || {
+                    if staging_slot.is_none() {
+                        staging_slot = Some(HostStaging::alloc(kind, ctx, numel)?);
+                    }
+                    let staging = staging_slot
+                        .as_mut()
+                        .expect("staging_slot は直前に Some へ設定済み、または既に Some");
                     self.stream
                         .memcpy_dtoh(slice, staging.as_host_slice_mut())?;
                     self.stream.synchronize()?;
+                    let view = staging.as_slice()?;
+                    f(view);
                     Ok(())
                 });
-                let outcome = copy_result.and_then(|()| {
-                    staging.as_slice().map_err(map_cuda_error).map(|view| {
-                        f(view);
-                    })
-                });
-                self.return_staging(numel, generation, staging);
-                outcome
+                if let Some(staging) = staging_slot {
+                    self.return_staging(numel, generation, staging);
+                }
+                copy_result
             }
         }
     }
