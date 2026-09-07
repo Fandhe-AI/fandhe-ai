@@ -64,7 +64,8 @@ fandhe-ai/
 └── docs/
     ├── autodiff-nograd-leaf-dinput-skip-decision.md # 非学習葉（活性化入力 x 等）への d_input 伝播スキップの設計判断（`requires_grad` 前方伝播案の採用・`Gradients::get` 契約整理・多層依存整理・起票草案。#1151 起票案 I・#1219）
     ├── autodiff-view-recompute-decision.md # view 系ノード（reshape / transpose）の再計算方式化の設計（push_view／resolve_view による中間バッファ非確保・融合境界化・実測記録。#1043 ツリー・#1047）
-    ├── backend-cuda-async-execution-design.md # CUDA 非同期実行モデルの同期契約（ストリーム順序・エラー伝播・D2H 境界・poison/invalidate 状態機械。#1011 ツリー・#1012）
+    ├── backend-cuda-async-execution-design.md # CUDA 非同期実行モデルの同期契約（ストリーム順序・エラー伝播・D2H 境界・poison/invalidate 状態機械。#1011 ツリー・#1012。§14 で managed 配置〈#1352〉の同期契約差分を追記）
+    ├── backend-cuda-managed-placement-decision.md # CUDA managed 配置（`cuMemAllocManaged`）を `DeviceBuffer` の opt-in 配置として実装する設計判断（host-registered／`cuMemAdvise`／`prefetch` 不採用理由・既定 OFF・fail-closed・出力 bit 同一契約・スコープ外事項・#1353 向け計測テンプレート。実機未実測明記。#1352）
     ├── backend-cuda-pool-allocator-decision.md # CUDA サイズクラス別プールアロケータ（自作 SizeClassPool<H> 案 B・driver プール〈cuMemPoolTrimTo〉併用）の採用判断・alloc_uninit 適用確認範囲・実測記入欄（#1018 ツリー・#1020）
     ├── backend-cuda-ptx-embedding-decision.md # CUDA GEMM ビルド時 PTX 事前埋め込み（candle 方式）不採用判断・JIT キャッシュ結線範囲の更新（#1024）
     ├── backend-metal-aligned-load-decision.md # Metal GEMM アラインメント特化ロード分岐（align_M/N/K function constant 方式）不採用判断（#752 保留 → #808 格下げ）
