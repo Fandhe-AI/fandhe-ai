@@ -596,6 +596,12 @@ impl Drop for CaptureGuard {
             && let Ok(mut state) = cell.0.lock()
         {
             state.capture = None;
+            // codex-review P1 指摘対応（PR #1390）: `wait_until_not_capturing`
+            // が `state.capture` の解除を待って駐機している可能性がある
+            // （他スレッドの `DeviceBuffer` drop。`wait_until_not_capturing`
+            // doc コメント参照）ため、`in_flight` の drain 待ちと同じ
+            // `Condvar` で起こす。
+            cell.1.notify_all();
         }
     }
 }
@@ -701,6 +707,59 @@ pub(crate) fn is_capturing_on_current_thread(ordinal: usize) -> bool {
         return true;
     };
     state.capture == Some(std::thread::current().id())
+}
+
+/// `memory.rs::CudaBufferHandle` の `Drop` 実装（codex-review P1 指摘
+/// 対応。PR #1390）が、実際に `cudarc::driver::CudaSlice::drop`
+/// （`cuMemFreeAsync`/`cuMemFree` をこのハンドルの `stream` へ直接
+/// 発行する。`memory.rs` モジュール冒頭コメント「解放は `CudaSlice` の
+/// `Drop` に一本化する」参照）を走らせる**前**に呼ぶ。
+///
+/// **背景**: `CudaSlice::drop` は `begin_driver_call`／
+/// `begin_capture_session` の排他機構を一切経由しない（`cudarc` 側の
+/// 実装であり本クレートが介入できない）。そのため、あるスレッドが
+/// `run_captured_sgd_step_segment`（`graph.rs`）で当該 ordinal を
+/// capture 中に、**別スレッド**が同じ ordinal 上の `DeviceBuffer`
+/// （SGD 更新区間とは無関係な、例えば古い活性化テンソル）を drop する
+/// と、その `cuMemFreeAsync` が capture 中の共有ストリームへ直接
+/// 記録されてしまい、capture 対象の graph に「本来含めるつもりのない
+/// 解放操作」が混入する（再生のたびに既に無効なポインタへ
+/// `cuMemFreeAsync` を発行する二重解放相当の破損）。
+///
+/// 本関数はそれを防ぐため、`ordinal` が**別スレッドで** capture 中
+/// （`state.capture` が `Some(current thread と異なる ThreadId)`）の間、
+/// [`CaptureGuard::drop`] の `notify_all` を待って `Condvar::wait` で
+/// 駐機する（`begin_capture_session` の in_flight ドレインと対称の
+/// 「capture 側からの排他」）。**capture 中のスレッド自身**からの
+/// 呼び出しは待たずに即座に返す（`state.capture == Some(current
+/// thread)` の場合。同一スレッドが自身の capture 中に意図して
+/// バッファを解放するケース〈capture 本体がテンポラリを確保・解放する
+/// 場合等〉を自己デッドロックさせないため。この場合の解放は「この
+/// スレッド自身が構成している capture の一部」として cudarc の
+/// `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` 契約の範囲内であり、本関数の
+/// 対象外＝呼び出し元〈`graph.rs`〉の責務とする）。
+///
+/// `Drop::drop` から呼ばれるため `Result` を返せない。レジストリ・
+/// ロック取得の失敗時は他の `Drop` 実装（[`CaptureGuard::drop`]・
+/// [`CallToken::drop`]）と同じ方針で静かに諦める（fail-open。`Drop` の
+/// 中で panic できないため、これ以上安全にできることがない）。
+pub(crate) fn wait_until_not_capturing(ordinal: usize) {
+    let Ok(cell) = ordinal_registry().entry(ordinal) else {
+        return;
+    };
+    let current = std::thread::current().id();
+    let Ok(mut state) = cell.0.lock() else {
+        return;
+    };
+    while let Some(owner) = state.capture {
+        if owner == current {
+            return;
+        }
+        state = match cell.1.wait(state) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+    }
 }
 
 /// 同期点（ホスト⇔デバイス転送・確保・解放・明示同期）となる driver

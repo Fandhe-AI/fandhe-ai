@@ -302,6 +302,31 @@ pub(crate) fn run_captured_sgd_step_segment(
             return Err(e);
         }
     };
+
+    // capture 開始前に SGD カーネルを確実にコンパイル・ロード済みにする
+    // （Cursor Bugbot 指摘対応。追記）: `sgd_step_device_tracked` は
+    // 内部で `context_cache::cached_sgd`（`ordinal` キーの NVRTC
+    // コンパイル済みカーネルの singleflight キャッシュ）を参照するが、
+    // プロセス内でこの ordinal の SGD が一度も呼ばれていない場合、
+    // キャッシュミスにより NVRTC コンパイル＋`cuModuleLoadDataEx`
+    // （driver へのモジュールロード）が初回発生する。この初回発生が
+    // `stream.begin_capture` 後（＝下記 `body_outcome` 内の
+    // `sgd_step_device_tracked` 呼び出し時）まで遅延すると、capture
+    // 領域内でモジュールロードという「ストリームに紐づかない driver
+    // 操作」が走ることになり、`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` の
+    // 下で未定義動作・capture 失敗（ordinal poison）につながりうる。
+    // そのため `cached_device`／`cached_sgd` を明示的に先行呼び出しし、
+    // 2 回目以降はキャッシュヒットで実質無償になる契約（`cached_sgd`
+    // doc コメント参照）を利用して capture 領域の外でウォームアップを
+    // 完了させる（`_token` 取得済み＝poison／世代検査は通過済みの
+    // driver 呼び出し境界内で行う）。
+    if let Err(e) = context_cache::cached_device(ordinal)
+        .and_then(|device| context_cache::cached_sgd(&device).map(|_| ()))
+    {
+        drop(guard);
+        return Err(crate::memory::map_cuda_error(e));
+    }
+
     let begin_result =
         stream.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
     if let Err(e) = context_cache::observe_driver_result(ordinal, &_token, begin_result) {

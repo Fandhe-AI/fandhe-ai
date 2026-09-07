@@ -820,7 +820,7 @@ impl BackendOps for CudaBackendOps {
     /// （design doc §4.7。opt-in OFF 時の `Ok(None)` と区別する）。
     ///
     /// **driver 呼び出し境界（codex-review P0 指摘対応）**: 旧稿は
-    /// [`Self::device_handle`]（poison 検査を経由しない。`device_handle`
+    /// `Self::device_handle`（poison 検査を経由しない。`device_handle`
     /// doc コメント参照）を driver 呼び出し境界より前に呼んでいたため、
     /// poison・Retiring・別スレッド capture 中のいずれでも拒否される前に
     /// `CudaDevice::new`（キャッシュミス時）や `segment_resources_for`
@@ -828,7 +828,7 @@ impl BackendOps for CudaBackendOps {
     /// を操作しうる fail-closed 契約違反があった。本実装は `resources`
     /// の世代収集（host-only・driver 非接触）→
     /// `context_cache::begin_driver_call`（poison／世代検査）→
-    /// `observe_cuda_result` で包んだ [`Self::device_handle_raw`] →
+    /// `observe_cuda_result` で包んだ `Self::device_handle_raw` →
     /// `segment_resources_for` の順に固定する。
     fn captured_segment_key(
         &self,
@@ -864,7 +864,7 @@ impl BackendOps for CudaBackendOps {
 
     /// [`Self::captured_segment_key`] が返した `key` に対応する SGD 更新
     /// 区間を capture・再生する（イシュー #1349）。実体は
-    /// [`crate::graph::run_captured_sgd_step_segment`]（thread-local
+    /// `crate::graph::run_captured_sgd_step_segment`（thread-local
     /// graph キャッシュ・stream capture の手順は同モジュールのドキュ
     /// メント参照）。
     ///

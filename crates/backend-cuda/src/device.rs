@@ -125,7 +125,49 @@ impl CudaDevice {
         // opt-in OFF（既定）では現行どおり `default_stream()`
         // （legacy NULL stream）のまま、本イシュー導入前と挙動不変。
         let (stream, stream_kind) = if crate::graph::step_graph_mode().requires_created_stream() {
-            (ctx.new_stream()?, StreamKind::Created)
+            let created = ctx.new_stream()?;
+            // codex-review P1 指摘対応（PR #1390）: `ctx.new_stream()` は
+            // `cudarc` を「multi-stream mode」（`CudaContext::
+            // is_in_multi_stream_mode()`）へ切り替え、以降に確保する全
+            // `CudaSlice` へ read/write 用 `CudaEvent` を付与する
+            // （既定 `is_event_tracking() == true`）。この状態では
+            // `LaunchArgs::arg()`（`sgd.rs::CudaSgd::run` 等が使う
+            // `launch_builder`）が引数バッファの直近 read/write イベント
+            // へ `CU_EVENT_WAIT_DEFAULT` で自動 `cuStreamWaitEvent` する
+            // が、この待機対象イベントは通常 capture 開始**前**（forward
+            // ／backward 等、graph 化しない区間）に記録されたものであり、
+            // capture 外で記録済みのイベントへの `CU_EVENT_WAIT_DEFAULT`
+            // 待機は stream capture 中は禁止操作（driver がエラーを返し
+            // `context_cache` の poison 機構経由でこの ordinal 全体が
+            // 使用不能になる。design doc §4.7 の poison 契約）。
+            //
+            // 本クレートはこの `CudaDevice` につき常に単一ストリーム
+            // （`self.stream`）のみを保持し、複数ストリームを実際には
+            // 使わない（`new_stream()` の呼び出しはこの 1 箇所のみ。
+            // 別ストリームを fork する経路は存在しない）ため、
+            // cudarc のイベントベース cross-stream 同期機構はそもそも
+            // 不要である——単一ストリーム上の起動順序はストリーム自体の
+            // FIFO 順序保証で足り、`CudaSlice::drop` の同期待ちも本来は
+            // 不要（同一ストリームであれば later kernel が implicit に
+            // 順序保証される）。よってここでイベント追跡自体を無効化し、
+            // `launch_builder` が waits/records を一切積まないようにして
+            // capture 中の禁止操作を構造的に発生させない。
+            //
+            // SAFETY: `CudaContext::disable_event_tracking` の契約
+            // （このコンテキストで以後確保する `CudaSlice` はイベント
+            // 追跡なしで生成される。呼び出し元がストリーム間同期を自前で
+            // 保証する必要がある）は、上記のとおり本クレートがこの
+            // `ctx` 上で唯一のストリーム（`created`）だけを使い続ける
+            // 限り満たされる。この呼び出しは `new_stream()` 直後・
+            // 他のどの `CudaSlice` 確保よりも前（`CudaDevice::new` は
+            // このあと `name()`／`compute_capability()` を呼ぶのみで
+            // デバイスメモリを確保しない）に行うため、イベント追跡が
+            // 有効なまま生成された `CudaSlice` が存在しない状態で無効化
+            // が完了する。
+            unsafe {
+                ctx.disable_event_tracking();
+            }
+            (created, StreamKind::Created)
         } else {
             (ctx.default_stream(), StreamKind::Legacy)
         };

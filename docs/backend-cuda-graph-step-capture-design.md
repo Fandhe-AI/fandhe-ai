@@ -31,9 +31,9 @@
 
 1. 共有ストリームの opt-in 時限定 `new_stream()` 化（`device.rs::StreamKind`）
 2. capture 状態機械（`context_cache.rs`）: `CaptureSession`／`CaptureGuard`・`begin_capture_session`／`begin_sync_point_call`／`is_capturing_on_current_thread`・capture 系 `CUresult` の明示 `Sticky` 化
-3. `backend-cuda::graph` モジュール: opt-in フラグ（3 状態: `Off`／`StreamOnly`／`On`）・thread-local graph キャッシュ・`run_captured_segment`（capture → instantiate → launch の手順本体）
-4. `tensor-core::BackendOps` の非破壊拡張: `SegmentResource`／`SegmentKey`／`SegmentRun`・`captured_segment_key`／`run_captured_segment`（既定 `Ok(None)`／`Unsupported`）
-5. `backend-cuda::ops::CudaBackendOps` での実装（`captured_segment_key`／`run_captured_segment`）
+3. `backend-cuda::graph` モジュール: opt-in フラグ（3 状態: `Off`／`StreamOnly`／`On`）・thread-local graph キャッシュ・`run_captured_sgd_step_segment`（capture → instantiate → launch の手順本体。§4.3 追記: 当初の任意クロージャ版 `run_captured_segment`／`CapturedSegmentBody` は codex-review P0 指摘対応で撤廃し、SGD 更新区間が触れる全リソースを直接引数として受け取る固定形へ変更）
+4. `tensor-core::BackendOps` の非破壊拡張: `SegmentResource`／`SegmentKey`／`SegmentRun`・`captured_segment_key`／`run_captured_sgd_step_segment`（既定 `Ok(None)`／`Unsupported`）
+5. `backend-cuda::ops::CudaBackendOps` での実装（`captured_segment_key`／`run_captured_sgd_step_segment`）
 6. `autodiff::DeviceParamStore::step` の update 区間結線（`!any_resident` 分岐に graph-capture 経路を追加。既存の非 capture 経路〈`else`〉は無変更）
 7. `CudaMemory::upload_into`（新規実装。既定 `Unsupported` から `MemoryOps` の非破壊拡張として CUDA 実装を追加。graph 経路の永続 staging バッファ書き込みに必須）
 8. facade 公開 API: `set_cuda_graph_step_enabled`／`cuda_graph_step_enabled`
@@ -46,13 +46,15 @@
 - **tape レベルの構造検出**（tape 長・形状・dtype ハッシュ）: step 全体 capture と同時に導入する対象であり、本イシューのキー（`SegmentKey`）は「パラメータ layout + SGD 設定 + 世代 + バッファ同一性」に限定
 - **`bench-fandhe --graph` フラグ・GB10 実測**: #1350
 - **同期点ガードの適用範囲**: `memory.rs`（`download`／`upload`／`upload_into`／`alloc_zeroed`）・`ops.rs::release_cached_device_memory` に限定した。`gemm.rs::synchronize()`（診断専用・本番ディスパッチから呼ばれない）・`pool.rs` 内部の低レベル確保（`alloc_zeroed`／`alloc_uninit`。`CudaMemory::alloc_zeroed` 経由で既に上位ガード済み）には個別のガードを追加していない。update 区間の body（`sgd_step_device_tracked`）はこれらを呼ばないため受け入れ条件には影響しないが、将来 capture 対象を拡張する場合は再検討が必要
-- **cudarc の自動 event 管理の回避策**（案 A: `disable_event_tracking()`〈`unsafe fn`〉・案 B: 生ポインタ引数の launch 変種）: 実機プローブ（§5）で必要性が判明した場合のみユーザー承認を得て実装する。本 PR では実装しない
+- **cudarc の自動 event 管理の回避策**: 当初は「実機プローブ（§5）で必要性が判明した場合のみユーザー承認を得て実装する・本 PR では実装しない」としていたが、PR #1390 の codex-review P1 指摘（`new_stream()` 有効化時、`launch_builder` が capture 外で記録された read/write イベントへ通常フラグで待機し capture 中は禁止操作としてエラー→ordinal poison につながる）を受け、**案 A（`CudaContext::disable_event_tracking()`〈`unsafe fn`〉）を採用し実装済み**（`device.rs::CudaDevice::new`。§4.1 追記）。本クレートはこの `CudaContext` につき常に単一ストリームのみを保持し複数ストリームを実際には使わないため、cudarc のイベントベース cross-stream 同期機構はそもそも不要という前提に基づく。案 B（生ポインタ引数の launch 変種）は不要となったため対象外のまま
 
 ## 4. 設計の要点
 
 ### 4.1 ストリーム切替
 
 `CudaDevice` に `StreamKind`（`Legacy`／`Created`）を追加。`crate::graph::step_graph_mode()` が `StreamOnly` 以上（opt-in ON）を返す場合のみ `ctx.new_stream()` を保持し、`Off`（既定）では現行どおり `ctx.default_stream()` を保持する。`CudaDevice` は ordinal ごとに 1 回だけ構築されプロセス生存期間中キャッシュされるため、**opt-in は最初の CUDA デバイス初期化より前に設定する必要がある**。後から ON にした場合、`captured_segment_key` は `BackendError::Unsupported` を返し fail-closed に拒否する（§4.7）。
+
+**イベント追跡の無効化（codex-review P1 指摘対応。PR #1390 追記）**: `ctx.new_stream()` は cudarc を「multi-stream mode」へ切り替え、以降に確保する全 `CudaSlice` へ read/write 用 `CudaEvent` を付与する（既定 `is_event_tracking() == true`）。この状態では `launch_builder`（`sgd.rs::CudaSgd::run` 等）が引数バッファの直近 read/write イベントへ `CU_EVENT_WAIT_DEFAULT` で自動 `cuStreamWaitEvent` するが、その待機対象イベントは通常 capture 開始前（forward／backward 等）に記録されたものであり、capture 外で記録済みのイベントへの `CU_EVENT_WAIT_DEFAULT` 待機は stream capture 中は禁止操作（driver がエラーを返し ordinal を poison する）。本クレートはこの `CudaContext` につき常に単一ストリームのみを保持し複数ストリームを実際には使わないため、イベントベース cross-stream 同期機構はそもそも不要と判断し、`new_stream()` 直後・他のどの `CudaSlice` 確保よりも前に `ctx.disable_event_tracking()`（`unsafe fn`）を呼び、以降確保する `CudaSlice` にイベントを付与しないようにした（`device.rs::CudaDevice::new`）。
 
 ### 4.2 capture 状態機械
 
@@ -64,23 +66,22 @@
 
 ### 4.3 graph モジュール
 
-`crate::graph::run_captured_segment(ordinal, stream, key, resources, body)`（`resources: &mut [&mut DeviceBuffer<f32>]`・`body: &mut CapturedSegmentBody<'_>`。§4.4 参照）:
+**任意クロージャの撤廃（codex-review P0 指摘対応。追記）**: 当初は `crate::graph::run_captured_segment(ordinal, stream, key, resources, body)`（`resources: &mut [&mut DeviceBuffer<f32>]`・`body: &mut CapturedSegmentBody<'_>` という任意クロージャ）という設計だったが、`body` が `resources` に含まれない外部 `DeviceBuffer<f32>` をクロージャキャプチャ経由で直接触れる抜け道があった。現在は `crate::graph::run_captured_sgd_step_segment(ordinal, stream, key, ops, param, grad, velocity, config, token)` へ変更し、SGD 更新区間が触れる全リソース（`param`／`grad`／`velocity`）を直接引数として受け取り、区間本体（capture 対象のカーネル起動）も本関数が固定的に `CudaBackendOps::sgd_step_device_tracked` を呼ぶことで行う（呼び出し元は任意コードを注入できない）。`CapturedSegmentBody` 型は撤廃済み。
 
-1. `begin_driver_call` で poison／世代検査
-2. thread-local キャッシュ（`STEP_GRAPHS`。上限 8・世代不一致 evict）から `key` に一致する graph を take → ヒットなら `launch()` のみ実行し `SegmentRun::Replayed`
-3. ミスなら `begin_capture_session` → `stream.begin_capture` → `body(resources)`（panic しても直後で必ず `end_capture` する。§4.2 追記）→ `stream.end_capture` → 成功時は `graph.upload()` → 初回 `launch()` → キャッシュへ格納 → `SegmentRun::Captured`
-4. `body` の `Err`・`end_capture` の `Err`・空 graph（`Ok(None)`）はいずれも fail-closed なエラーとして呼び出し元へ返す
-5. **`graph.upload()` の失敗も fail-closed で伝播する**（codex-review P0 指摘対応・追記。以前は poison 化のみで握りつぶし、直後の `launch()` が別途成功すると全体が `Ok(Captured)` 扱いになっていた——「最初に失敗した driver エラーを伝播する」という本クレート全体の契約に反する後退だった）
+**capture 開始前の in_flight ドレイン順序（codex-review P0 指摘対応。追記）**: `begin_capture_session`（他スレッドの `in_flight` をドレインしてから返る）を、呼び出しスレッド自身が当該 ordinal のトークンを 1 つも保持していない状態で先に呼び、その後に初めて `begin_driver_call` を呼ぶ順序へ変更した（逆順だと、他スレッドが capture 開始の直前に `begin_driver_call` を通過済み〈`in_flight` に計上済みだが実際の driver 呼び出しはまだ〉だった場合、その呼び出しが capture 開始後に共有ストリームへカーネル起動を発行し意図せず graph へ混入しうる窓があった）。
+
+手順:
+
+1. thread-local キャッシュ（`STEP_GRAPHS`。上限 8・世代不一致 evict）から `key` に一致する graph を take → ヒットなら `begin_driver_call` で poison／世代検査してから `launch()` のみ実行し `SegmentRun::Replayed`
+2. ミスなら `begin_capture_session` → `begin_driver_call` → `stream.begin_capture` → SGD 更新 1 回（`sgd_step_device_tracked`。panic しても直後で必ず `end_capture` する。§4.2 追記）→ `stream.end_capture` → 成功時は `graph.upload()` → 初回 `launch()` → キャッシュへ格納 → `SegmentRun::Captured`
+3. SGD 更新の `Err`・`end_capture` の `Err`・空 graph（`Ok(None)`）はいずれも fail-closed なエラーとして呼び出し元へ返す（graph はキャッシュに残さない）
+4. **`graph.upload()` の失敗も fail-closed で伝播する**（codex-review P0 指摘対応・追記。以前は poison 化のみで握りつぶし、直後の `launch()` が別途成功すると全体が `Ok(Captured)` 扱いになっていた——「最初に失敗した driver エラーを伝播する」という本クレート全体の契約に反する後退だった）
 
 ### 4.4 `BackendOps` の非破壊拡張
 
-`SegmentKey { generation, config_key, resources: Vec<SegmentResource> }`（`SegmentResource { addr, numel }`）。`CudaBackendOps::captured_segment_key` は opt-in OFF または非 capturable stream なら `Ok(None)`（後者は opt-in ON だが legacy stream のままの設定ミスを示すため実際には `Err(Unsupported)`。§4.7）、それ以外は各バッファの `device_ptr` から `SegmentKey` を構築する。
+`SegmentKey { generation, config_key, resources: Vec<SegmentResource> }`（`SegmentResource { addr, numel }`）。`CudaBackendOps::captured_segment_key` は opt-in OFF または非 capturable stream なら `Ok(None)`（後者は opt-in ON だが legacy stream のままの設定ミスを示すため実際には `Err(Unsupported)`。§4.7）、それ以外は各バッファの `device_ptr` から `SegmentKey` を構築する。**driver 呼び出し境界（codex-review P0 指摘対応。追記）**: `resources` の世代収集（host-only・driver 非接触）→ `begin_driver_call`（poison／世代検査）→ `device_handle_raw` → `segment_resources_for` の順に固定し、poison・Retiring・別スレッド capture 中のいずれでも driver に触れる前に拒否されるようにした。
 
-**replay 直前の再検証（codex-review P0 指摘対応。追記）**: `SegmentKey` 自身はバッファの所有権・借用を保持しない値型のため、当初の設計では「対応するバッファを drop した後に空の `body`／`resources` で `run_captured_segment` を呼ぶと、解放済み・別バッファへ再利用済みのアドレスを参照する古い graph を安全確認なしに再生してしまいうる」というメモリ安全性の欠陥があった。これを塞ぐため `BackendOps::run_captured_segment` のシグネチャを `(&self, key, resources: &mut [&mut DeviceBuffer<f32>], body: &mut CapturedSegmentBody<'_>)` へ変更した:
-
-- `resources` は `key` を得た `captured_segment_key` 呼び出しと**同一の借用・同一の順序**で渡す契約。`CudaBackendOps::run_captured_segment` は replay／capture のいずれの前にも `resources` から現在のアドレス集合を再計算し、`key.resources` と完全一致することを確認してから初めて `crate::graph::run_captured_segment` へ委譲する（不一致なら driver に一切触れず `InvalidArgument` で拒否）
-- `resources` を**排他借用**（`&mut`）のスライスにしているのは、`body` にも同じバッファへの書き込みアクセスが要り（例: `params` の in-place 更新）、Rust の借用規則上「検証用の共有借用」と「`body` 実行用の排他借用」を同一の関数呼び出し内で別個に両立させることができないため。両者を単一の排他借用スライスへ統合することで、この型そのものが「呼び出し元が対応するバッファをこの呼び出しの間生存かつ排他的に所有している」というコンパイル時の生存契約を兼ねる（排他借用は読み取りにも使えるため検証はこの借用を読むだけで行える）
-- `body` は `resources` と同一の排他借用スライスを**呼び出し時の引数**として受け取る（`CapturedSegmentBody<'a> = dyn FnMut(&mut [&mut DeviceBuffer<f32>]) -> Result<(), BackendError> + 'a`。呼び出し元の環境が別途 `self` フィールドへの借用を保持すると二重借用になるため、`resources` の要素から reborrow して使う契約）
+**replay 直前の再検証（codex-review P0 指摘対応。追記）**: `SegmentKey` 自身はバッファの所有権・借用を保持しない値型のため、`param`／`grad`／`velocity`（呼び出しの間ライフタイムが保証される借用）から現在のアドレス集合を再計算し `key.resources` と完全一致することを確認してから初めて `crate::graph::run_captured_sgd_step_segment` へ委譲する（不一致なら driver に一切触れず `InvalidArgument` で拒否。解放済み・別バッファへ再利用済みのアドレスを参照する古い graph を安全確認なしに再生する事態を防ぐ）。
 
 ### 4.5 `DeviceParamStore::step` の結線
 
@@ -88,7 +89,7 @@
 
 1. `ops.captured_segment_key(&[], config_key)` で安価に capability を問い合わせる（`resources` は空でよい——`Some`/`None` は opt-in・ストリーム種別のみで決まる契約）
 2. `total_numel == 0` は常に対象外（空 graph の回避）
-3. capability あり: 永続 `GradStaging`（`total_numel` 分。初回のみ確保）を用意し、`mem.upload_into` で grad を書き込んでから、実際のバッファ集合で `captured_segment_key` を再計算して `key` を確定し、`ops.run_captured_segment(key, &mut body)` で update を実行する
+3. capability あり: 永続 `GradStaging`（`total_numel` 分。初回のみ確保）を用意し、`mem.upload_into` で grad を書き込んでから、実際のバッファ集合で `captured_segment_key` を再計算して `key` を確定し、`ops.run_captured_sgd_step_segment(key, param, grad, velocity, config, token)` で update を実行する
 4. capability なし: 既存の「毎回新規 grad バッファへ upload」経路（本イシュー導入前と無変更）
 
 `config_key` は `fold_sgd_step_config_key` で `SgdStepConfig` の全フィールド（`is_first_step` を含む）から算出する。ハイパーパラメータ変更や `is_first_step` の遷移（1 step 目 → 2 step 目）で `config_key` が変わり、新規 capture が発生する。
@@ -108,7 +109,7 @@
 | capture 中の driver エラー（begin/end capture・launch・upload） | ordinal を `Poisoned{false}` へ（明示 `Sticky` 分類）。`upload` 失敗も fail-closed で伝播（§4.3 追記） |
 | `end_capture` が空 graph | fail-closed エラー |
 | `body` が panic | `end_capture` を実行してから panic を再送出（§4.2 追記） |
-| `run_captured_segment` の `resources` が `key.resources` と不一致 | `InvalidArgument`（driver に触れる前。§4.4 追記） |
+| `run_captured_sgd_step_segment` の `param`／`grad`／`velocity` が `key.resources` と不一致 | `InvalidArgument`（driver に触れる前。§4.4 追記） |
 | 世代不一致 | `StaleDeviceGeneration` |
 | opt-in ON だが legacy stream で初期化済み | `Unsupported`（設定順序の誤りを早期に顕在化） |
 
@@ -150,5 +151,6 @@ cargo test -p fandhe-ai --release --test cuda_graph_step_bit_identity \
 ## 7. リスクと安全側の判断
 
 - ストリーム切替（§4.1）が最大のリスク。opt-in 時限定にすることで OFF 時の挙動・性能を現行と同一に保つ
-- cudarc の自動 event 管理（ON 時のみ有効化される `cuStreamWaitEvent`）は capture と非互換である可能性が高い（`CU_STREAM_CAPTURE_ISOLATION` は「capture 境界を跨ぐ依存」で発生するため）。回避策は unsafe 面の判断を伴うためユーザー承認事項とし、本イシューでは実装しない
+- cudarc の自動 event 管理（ON 時のみ有効化される `cuStreamWaitEvent`）は capture と非互換であることが PR #1390 の codex-review 指摘（§3.2・§4.1 追記）で確定した。回避策（`disable_event_tracking()`）は unsafe 面の判断を伴うが、本クレートがこの `CudaContext` につき単一ストリームしか使わない前提が安全性根拠として成立するため実装・適用済み（§4.1）
+- 別スレッドが同じ ordinal の `DeviceBuffer` を drop すると `CudaSlice::drop` が capture 中の共有ストリームへ非同期解放を発行しうる問題（codex-review P1 指摘。PR #1390）に対し、`context_cache::wait_until_not_capturing` を `CudaBufferHandle::Drop` から呼び、別スレッドの capture 完了を待ってから実際の解放を行うよう対応した（`memory.rs`）
 - 「step 全体」を capture できない事実は起票時の想定との乖離であり、隠さず本文書 §0 に明記する

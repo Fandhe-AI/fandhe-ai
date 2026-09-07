@@ -47,14 +47,32 @@ use fandhe_ai_tensor_core::buffer::DeviceBuffer;
 use fandhe_ai_tensor_core::{BackendOps, DispatchFailureCell, SegmentRun, SgdStepConfig, Tensor};
 
 /// opt-in を明示的に OFF/ON へ切り替え、テスト終了時に OFF へ戻す RAII
-/// ガード（`crate::precision::tests::FlagGuard` と同型。本ファイルは
-/// `--test-threads=1` 前提のため直列化ロックは持たない）。
-struct GraphOptInGuard;
+/// ガード（`crate::precision::tests::FlagGuard` と同型）。
+///
+/// **`Makefile::test-ignored-cuda` との整合（Cursor Bugbot／codex-review
+/// P2 指摘対応。追記）**: ファイル冒頭コメントは本ファイル単体の直接
+/// 実行手順として `--test-threads=1` を前提に書いているが、実運用の
+/// `make test-ignored-cuda` は `cargo test -p fandhe-ai-backend-cuda
+/// --release --all-features -- --ignored --nocapture`（`--test-threads`
+/// 未指定＝既定の並列実行）でこのファイルを含む全 `#[ignore]` テストを
+/// 起動するため、両者は前提が食い違う。opt-in フラグ
+/// （`set_step_graph_enabled`）はプロセスグローバルであり、本ファイル
+/// 内の複数テストが並行実行されると片方が opt-in を OFF へ戻した瞬間
+/// 他方の `captured_segment_key` 判定が崩れる競合状態になりうる。その
+/// ため `crate::precision::tests::FlagGuard` と同じ「プロセスワイド
+/// `Mutex` でテスト間を直列化する」方式を採用し、`--test-threads=1` の
+/// 有無に関わらず安全にする（`Mutex` はガードの生存期間中保持し続ける
+/// ため、同一バイナリ内の本ガード使用テストは事実上直列化される）。
+struct GraphOptInGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
 
 impl GraphOptInGuard {
     fn enable() -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
         set_step_graph_enabled(true);
-        Self
+        Self { _lock: lock }
     }
 }
 
