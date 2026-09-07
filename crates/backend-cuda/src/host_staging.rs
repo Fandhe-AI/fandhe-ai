@@ -27,13 +27,18 @@
 //! 合計では `Pinned` が `Pageable` に劣る可能性がある（決め打ちしない）。
 //!
 //! **GB10 実機実測（2026-09-08。`docs/perf/cuda-host-view-staging-readout.md`
-//! §5）で `Pinned` が全計測形状（N=1024/2048/4096）で `Pageable` を一貫して
-//! 上回ることを確認したが、既定 [`HOST_STAGING_KIND`] は unsafe 経路を
-//! 通さない安全側（`Pageable`）に固定したまま維持している**（同 doc
-//! 「採否」節。unsafe 経路の既定化はユーザー承認事項のため、性能が
-//! 上回るだけでは切り替えない方針）。`Pinned` 経路自体は実装・GPU 非依存
-//! 単体テスト・`#[ignore]` 実機テストとも整備済みで、ユーザー承認を
-//! 経て切り替える想定。
+//! §5）では `Pinned` が全計測形状（N=1024/2048/4096）で `Pageable` を
+//! 一貫して上回る傾向が見られたが、この計測は計測対象クロージャの戻り値
+//! を `black_box` で保護する是正（同 doc §5.3。codex-review P1・
+//! Cursor Bugbot 指摘）より前のバイナリで取得した参考値であり、is-
+//! optimized-away の可能性を排除できていないため確定した結論ではない
+//! （再計測は未実施のまま引き継ぎ）。既定 [`HOST_STAGING_KIND`] は
+//! いずれにせよ unsafe 経路を通さない安全側（`Pageable`）に固定した
+//! まま維持している**（同 doc「採否」節。unsafe 経路の既定化は
+//! ユーザー承認事項のため、性能が上回るだけでは切り替えない方針。
+//! かつ切替の判断材料は再計測完了まで揃っていない）。`Pinned` 経路
+//! 自体は実装・GPU 非依存単体テスト・`#[ignore]` 実機テストとも整備
+//! 済みで、再計測とユーザー承認を経て切り替える想定。
 //!
 //! ## 同期契約
 //!
@@ -84,15 +89,18 @@ pub enum HostStagingKind {
     /// cudarc `alloc_pinned`（page-locked・WRITECOMBINED）。unsafe 1 箇所。
     ///
     /// GB10 実機実測（`docs/perf/cuda-host-view-staging-readout.md`
-    /// §5・2026-09-08）で本 variant が全計測形状（N=1024/2048/4096）で
-    /// `Pageable` を一貫して上回ることを確認済みだが、本番既定
+    /// §5・2026-09-08）では本 variant が全計測形状（N=1024/2048/4096）で
+    /// `Pageable` を一貫して上回る傾向が見られたが、この計測は `black_box`
+    /// による計測保護是正（同 doc §5.3）より前のバイナリで取得した参考値
+    /// であり、再計測が未実施のため確定していない。本番既定
     /// [`HOST_STAGING_KIND`] は unsafe 経路の既定化がユーザー承認事項
-    /// であるため本 variant を選ばない（常に `Pageable`）。
+    /// であることに加え、再計測が済むまで切替の判断材料が揃わないため、
+    /// 本 variant を選ばない（常に `Pageable`）。
     /// `memory::CudaMemory::with_host_view_using_kind`（`internal-
     /// diagnostics` feature 限定）を介して明示的に選べば `HostStaging::
     /// alloc` の `match` アームへ到達し、`tests/host_view_real_device.rs`
-    /// の実機 `#[ignore]` テストが実際に `Pinned` 経路を通す（ユーザー
-    /// 承認のうえ本番既定へ切り替える際は本コメントを更新する）。
+    /// の実機 `#[ignore]` テストが実際に `Pinned` 経路を通す（再計測と
+    /// ユーザー承認のうえ本番既定へ切り替える際は本コメントを更新する）。
     Pinned,
     /// 事前タッチ済み pageable `Vec<f32>`（unsafe なし）。
     Pageable,
