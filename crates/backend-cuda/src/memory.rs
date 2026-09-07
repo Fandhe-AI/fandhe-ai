@@ -17,17 +17,38 @@
 //! `cudarc-0.19.8/src/driver/safe/core.rs` の `impl<T> Drop for
 //! CudaSlice<T>` 参照）。本モジュールは明示 `free()` を持たない
 //! （`fandhe_ai_tensor_core::buffer` モジュールコメント「解放方針」と同じ RAII
-//! 一本化方針）。
+//! 一本化方針）。[`UnifiedSlice`]（下記「配置（managed 拡張）」節）も
+//! 同じ RAII 一本化方針だが、`Drop` の中身が異なる（`event.synchronize()`
+//! による同期 free。`CudaStorage` ドキュメンテーションコメント参照）。
+//!
+//! ## 配置（managed 拡張。イシュー #1352）
+//!
+//! `alloc_zeroed`／`upload` が確保する実バッファは、既定では
+//! `cuMemAlloc`（[`CudaSlice`]）だが、`crate::placement::
+//! managed_placement_enabled()` が `true` の opt-in 時は
+//! `cuMemAllocManaged`（[`UnifiedSlice`]）へ切り替わる（DGX Spark GB10
+//! のような物理統合メモリ環境向け。`crate::placement` モジュール冒頭
+//! コメントの契約参照）。`CudaStorage`（crate 内部限定型）がこの 2 配置を
+//! crate 内部で統一的に扱う列挙型で、`CudaArg`／`CudaArgMut` が両配置を
+//! 同一のカーネル起動経路（`PushKernelArg`）へ橋渡しする。既定（フラグ OFF）
+//! では常に `CudaStorage::Device` のみが生成されるため、本イシュー
+//! 導入前との出力 bit 同一性は経路の分岐自体が発生しないことにより
+//! 機構として保証される。
 
 use std::any::Any;
 use std::mem::size_of;
+use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DeviceRepr};
+use cudarc::driver::{
+    CudaSlice, CudaStream, CudaView, DevicePtr, DeviceRepr, LaunchArgs, PushKernelArg,
+    UnifiedSlice, UnifiedView,
+};
 
 use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
+use crate::placement;
 use fandhe_ai_tensor_core::Tensor;
 use fandhe_ai_tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
@@ -61,7 +82,7 @@ use fandhe_ai_tensor_core::pool::PoolZeroFill;
 /// 可視性を crate 内に広げた。`backend-cpu::CpuBufferHandle` と同じ判断）。
 #[derive(Debug)]
 pub(crate) struct CudaBufferHandle {
-    pub(crate) slice: Option<CudaSlice<f32>>,
+    pub(crate) storage: Option<CudaStorage>,
     _alloc: TrackedAllocation,
     /// 確保時点の ordinal 世代（`buffer.rs::DeviceBuffer::generation` と
     /// 同じ値をハンドル自身にも刻印する。codex-review P0 指摘・PR #1064
@@ -87,6 +108,170 @@ impl BufferHandle for CudaBufferHandle {
     }
 }
 
+/// `CudaBufferHandle` が実際に保持する確保済みメモリの配置（イシュー
+/// #1352。モジュール冒頭コメント「配置（managed 拡張）」参照）。
+///
+/// `Device`（既定・`cuMemAlloc`／[`CudaSlice`]）と `Managed`（opt-in・
+/// `cuMemAllocManaged`／[`UnifiedSlice`]）の 2 通り。`crate::placement::
+/// managed_placement_enabled()` が `false`（既定）の間は `alloc_zeroed_inner`／
+/// `upload_inner` が `Managed` を生成することはなく、`Device` 一択の経路は
+/// 本イシュー導入前と完全に同一（分岐そのものが発生しない）。
+///
+/// `Drop` の差分（呼び出し元が意識すべき唯一の非対称性）: `CudaSlice::drop`
+/// は該当ストリーム上に `cuMemFreeAsync`（デバイス側の完了を待つのみ）を
+/// 発行する非同期解放だが、`UnifiedSlice::drop`（cudarc-0.19.8
+/// `unified_memory.rs:46-53`）は `event.synchronize()` の後に同期
+/// `cuMemFree` を呼ぶ**同期解放**である。いずれも cudarc 内部の
+/// `record_err` でエラーを記録するのみで、本クレートの `with_driver_call`
+/// （poison 状態機械）を経由しない点は両者で対称（既存の `CudaSlice::drop`
+/// と同じ既知のギャップであり、本イシューが新たに導入するものではない）。
+#[derive(Debug)]
+pub(crate) enum CudaStorage {
+    Device(CudaSlice<f32>),
+    Managed(UnifiedSlice<f32>),
+}
+
+impl CudaStorage {
+    /// 要素数（配置に依らない）。
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            CudaStorage::Device(s) => s.len(),
+            CudaStorage::Managed(s) => s.len(),
+        }
+    }
+
+    /// カーネル起動の読み取り専用引数として渡せる形に変換する
+    /// （[`CudaArg`]。`ops.rs`／`gemm.rs`／`sgd.rs` の `*_arg` 系入口が
+    /// 使う）。
+    pub(crate) fn as_arg(&self) -> CudaArg<'_> {
+        match self {
+            CudaStorage::Device(s) => CudaArg::Slice(s),
+            CudaStorage::Managed(s) => CudaArg::Unified(s),
+        }
+    }
+
+    /// カーネル起動の書き込み可能引数として渡せる形に変換する
+    /// （[`CudaArgMut`]）。
+    pub(crate) fn as_arg_mut(&mut self) -> CudaArgMut<'_> {
+        match self {
+            CudaStorage::Device(s) => CudaArgMut::SliceMut(s),
+            CudaStorage::Managed(s) => CudaArgMut::UnifiedMut(s),
+        }
+    }
+
+    /// `bounds`（要素インデックス範囲）の部分ビューを読み取り専用引数
+    /// として返す（`DeviceParamStore` の連結バッファから個々のパラメータ
+    /// を切り出す `ops.rs::CudaBackendOps::gemm_resident_rhs` 等が使う。
+    /// `DeviceBufferView::new`〈tensor-core〉が offset+numel の範囲検査を
+    /// 構築時に済ませているため、ここでの追加検証は不要）。
+    pub(crate) fn view(&self, bounds: impl RangeBounds<usize>) -> CudaArg<'_> {
+        match self {
+            CudaStorage::Device(s) => CudaArg::View(s.slice(bounds)),
+            CudaStorage::Managed(s) => CudaArg::UnifiedView(s.slice(bounds)),
+        }
+    }
+}
+
+/// 配置非依存の読み取り専用カーネル引数（イシュー #1352）。
+///
+/// `cudarc` の `PushKernelArg` はカーネル起動直前に引数フィールドの
+/// アドレスをそのまま `LaunchArgs::args` へ積む実装（`cudarc-0.19.8
+/// src/driver/safe/launch.rs` の各 `PushKernelArg` 実装参照）のため、
+/// `View`／`UnifiedView`（値として保持する `CudaView`／`UnifiedView`）を
+/// 積んだ本列挙体自身が `.launch()` 呼び出しまで（ムーブされず）生存し
+/// 続けなければならない。呼び出し元は本値を `launch_builder` 呼び出しの
+/// 前に名前付きローカル変数として宣言し、`.push()` 呼び出しチェーンの中で
+/// その場限りの一時値として構築しない（`LaunchArgs<'a>` は `'a` について
+/// 不変であるため、遅延構築は借用エラーになる）。
+pub(crate) enum CudaArg<'a> {
+    Slice(&'a CudaSlice<f32>),
+    View(CudaView<'a, f32>),
+    Unified(&'a UnifiedSlice<f32>),
+    UnifiedView(UnifiedView<'a, f32>),
+}
+
+impl<'d> CudaArg<'d> {
+    /// 要素数（配置・部分ビューに依らない）。`gemm.rs`／`sgd.rs` の
+    /// `*_arg` 系入口が既存の境界検証（`validate_gemm_dims` 等。REQ-8）を
+    /// そのまま適用できるよう、`CudaSlice::len`／`CudaView::len`／
+    /// `UnifiedSlice::len`／`UnifiedView::len` へ委譲する。
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            CudaArg::Slice(s) => s.len(),
+            CudaArg::View(v) => v.len(),
+            CudaArg::Unified(s) => s.len(),
+            CudaArg::UnifiedView(v) => v.len(),
+        }
+    }
+
+    /// `builder` へ本引数を積む。`CudaArg` のバリアントに応じて
+    /// cudarc 側の対応する `PushKernelArg` 実装（`&CudaSlice`／
+    /// `&CudaView`／`&UnifiedSlice`／`&UnifiedView`）へ委譲するだけの
+    /// 薄い分岐であり、カーネル本体・起動 config は配置に依らず完全に
+    /// 共有する（出力 bit 同一契約の根拠）。
+    pub(crate) fn push<'a>(&'a self, builder: &mut LaunchArgs<'a>)
+    where
+        'd: 'a,
+    {
+        match self {
+            CudaArg::Slice(s) => {
+                builder.arg(*s);
+            }
+            CudaArg::View(v) => {
+                builder.arg(v);
+            }
+            CudaArg::Unified(s) => {
+                builder.arg(*s);
+            }
+            CudaArg::UnifiedView(v) => {
+                builder.arg(v);
+            }
+        }
+    }
+}
+
+/// 配置非依存の書き込み可能カーネル引数（[`CudaArg`] の可変版）。
+/// 呼び出し規約は [`CudaArg::push`] と同一。
+///
+/// `View`／`UnifiedView` 相当の可変部分ビュー variant は持たない
+/// （`CudaStorage::as_arg_mut` が常にバッファ全体を返す契約のため。
+/// 出力バッファ〈`c_dev`〉はいずれも `CudaMemory::alloc_zeroed` が
+/// 新規確保した全体バッファであり、`DeviceParamStore` の連結バッファの
+/// 部分範囲へ書き込む呼び出し元は本イシュー時点で存在しない。必要に
+/// なった時点で [`CudaArg::View`]／`UnifiedView` と対称な variant を
+/// 追加する）。
+pub(crate) enum CudaArgMut<'a> {
+    SliceMut(&'a mut CudaSlice<f32>),
+    UnifiedMut(&'a mut UnifiedSlice<f32>),
+}
+
+impl<'d> CudaArgMut<'d> {
+    /// [`CudaArg::len`] の可変版。
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            CudaArgMut::SliceMut(s) => s.len(),
+            CudaArgMut::UnifiedMut(s) => s.len(),
+        }
+    }
+
+    /// [`CudaArg::push`] の可変版。`'d: 'a` の理由は同じ（`self` が持つ
+    /// 参照・値の生存期間 `'d` は、`builder`〈`LaunchArgs<'a>`〉が要求する
+    /// 借用期間 `'a` より長い必要がある）。
+    pub(crate) fn push<'a>(&'a mut self, builder: &mut LaunchArgs<'a>)
+    where
+        'd: 'a,
+    {
+        match self {
+            CudaArgMut::SliceMut(s) => {
+                builder.arg(&mut **s);
+            }
+            CudaArgMut::UnifiedMut(s) => {
+                builder.arg(&mut **s);
+            }
+        }
+    }
+}
+
 /// `MemoryOps` の CUDA 実装。`CudaDevice::new` を経由して初期化済みの
 /// ハンドルからのみ構築できる（受け入れ条件「CUDA 非搭載環境で実行時に
 /// panic せず型付きエラーが返る」を、確保・転送呼び出し前の構築段階から
@@ -102,6 +287,13 @@ pub struct CudaMemory {
     stream: Arc<CudaStream>,
     ordinal: usize,
     tracker: Arc<AllocationTracker>,
+    /// `device.managed_memory_supported()` の複製（イシュー #1352）。
+    /// `alloc_zeroed_inner`／`upload_inner` が `crate::placement::
+    /// managed_placement_enabled()` の opt-in 時に、driver 呼び出し前の
+    /// fail-closed 事前検査として参照する（`CudaContext` は
+    /// `self.stream.context()` から取得できるため、別途フィールドとして
+    /// 保持しない）。
+    managed_supported: bool,
 }
 
 impl CudaMemory {
@@ -115,6 +307,7 @@ impl CudaMemory {
             stream: device.stream().clone(),
             ordinal: device.ordinal(),
             tracker: Arc::new(AllocationTracker::new()),
+            managed_supported: device.managed_memory_supported(),
         }
     }
 }
@@ -159,6 +352,31 @@ where
     let host = stream.clone_dtoh(dev)?;
     stream.synchronize()?;
     Ok(host)
+}
+
+/// `CudaStorage::Managed`（[`UnifiedSlice`]）専用の readback（イシュー
+/// #1352）。[`readback`] と異なり `cuMemcpyDtoHAsync` を発行しない
+/// （managed memory は既にホストから直接アクセス可能なアドレス空間に
+/// あるため、`clone_dtoh` 経由のコピーは managed 配置の目的〈ゼロコピー〉
+/// を損なう）。
+///
+/// **同期契約（`UnifiedSlice::as_slice` だけでは不十分な理由）**:
+/// `UnifiedSlice::as_slice`（cudarc-0.19.8 `unified_memory.rs:447-450`）は
+/// 内部の `self.event.synchronize()` のみを待つが、この `event` は
+/// `LaunchArgs::launch`（`cudarc-0.19.8 launch.rs:100-135`）が
+/// `self.stream.context().is_managing_stream_synchronization()`（複数
+/// ストリームを跨ぐ場合のみ true）の場合にだけ記録する。本クレートは
+/// `CudaDevice` が ordinal ごとに単一ストリームしか持たない構成
+/// （`docs/backend-cuda-async-execution-design.md` §3「実行モデル」）の
+/// ため、この event には何も記録されず、`as_slice()` だけでは直前に
+/// 投入したカーネルの完了を待てない。そのため本関数は `readback` と
+/// 同じく明示的に `stream.synchronize()` を先に呼んでから
+/// `as_slice()` でホストスライスを取得する（`with_driver_call` の中で
+/// 呼ばれるため、`synchronize` の sticky エラーは通常の poison 経路で
+/// 観測される）。
+fn host_readback(stream: &Arc<CudaStream>, dev: &UnifiedSlice<f32>) -> Result<Vec<f32>, CudaError> {
+    stream.synchronize()?;
+    Ok(dev.as_slice()?.to_vec())
 }
 
 /// `numel` 分の `f32` 確保が消費するバイト数を検査付きで計算する
@@ -207,6 +425,11 @@ pub(crate) fn map_cuda_error(err: CudaError) -> BackendError {
         CudaError::NvrtcUnavailable { detail } => BackendError::CudaUnavailable(detail),
         CudaError::InvalidShape { detail } => BackendError::DeviceAllocationFailed(detail),
         CudaError::Driver(e) => BackendError::TransferFailed(format!("{e:?}")),
+        // managed 配置 opt-in（`crate::placement`）が非対応デバイスで
+        // 要求された場合の fail-closed 拒否（イシュー #1352）。driver
+        // 呼び出しに到達していないため `Unsupported`（`CudaUnavailable`
+        // ほど致命的ではなく、呼び出し側の設定ミスに近い）へマップする。
+        CudaError::ManagedMemoryUnsupported { detail } => BackendError::Unsupported(detail),
         other => BackendError::KernelLaunchFailed(format!("{other}")),
     }
 }
@@ -228,6 +451,39 @@ fn map_cuda_alloc_error(err: CudaError) -> BackendError {
 }
 
 impl CudaMemory {
+    /// managed 配置 opt-in（`crate::placement::managed_placement_enabled()`）
+    /// が要求されている場合の driver 呼び出し前 fail-closed 事前検査
+    /// （イシュー #1352。`crate::error::CudaError::ManagedMemoryUnsupported`
+    /// ドキュメンテーションコメント参照）。
+    ///
+    /// **呼び出し契約**: 本関数は呼び出し元が既に `placement::
+    /// managed_placement_enabled()` を読んで managed 分岐へ入った後にのみ
+    /// 呼び出すこと（`alloc_zeroed_inner`／`upload_inner` 参照）。ここで
+    /// フラグを再読しない（codex-review 指摘。PR #1395）: フラグはプロセス
+    /// グローバル（`AtomicBool` 等）であり、外側の分岐判定と本関数呼び出し
+    /// の間に別スレッドが OFF へ変更すると、再読した場合は
+    /// `enabled() && !managed_supported` が短絡評価で `false` になり
+    /// `managed_supported == false`（非対応デバイス）でも検査を素通りして
+    /// `alloc_unified` に到達してしまう（MANAGED_MEMORY=1・
+    /// CONCURRENT_MANAGED_ACCESS=0 のデバイスで安全条件を満たさないまま
+    /// 確保する fail-open バグ）。よってここでは呼び出し元が確定させた
+    /// 分岐に従い `self.managed_supported` のみを無条件に検査する
+    /// （flag が OFF の間は本関数自体が呼ばれない設計のため、
+    /// `managed_placement_enabled()` の値に依存しない）。
+    fn check_managed_placement_supported(&self) -> Result<(), CudaError> {
+        if !self.managed_supported {
+            return Err(CudaError::ManagedMemoryUnsupported {
+                detail: format!(
+                    "managed memory placement is opt-in enabled but device (ordinal={}) does not \
+                     support CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY / \
+                     CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS",
+                    self.ordinal
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn alloc_zeroed_inner(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, CudaError> {
         let numel = checked_numel(shape)?;
         // イシュー #1013 設計文書 §9 item 7: 確保時点の ordinal 世代を
@@ -248,7 +504,32 @@ impl CudaMemory {
             // 保つため明示的に保持する。
             let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
             Box::new(CudaBufferHandle {
-                slice: None,
+                storage: None,
+                _alloc: alloc,
+                generation,
+            })
+        } else if placement::managed_placement_enabled() {
+            self.check_managed_placement_supported()?;
+            // SAFETY: `alloc_unified::<f32>` は「T が任意ビットパターンで
+            // 有効か cudarc 側で保証しない」ことのみを理由に unsafe
+            // （cudarc-0.19.8 `unified_memory.rs:88-93`）。ここでは `f32`
+            // を確保しており、`f32` に無効なビットパターンは存在しない
+            // （NaN／inf を含め全ビットパターンが有効な浮動小数点表現に
+            // なる）。加えて確保直後の内容は本節直後の `memset_zeros`
+            // でゼロ埋めしてから初めて呼び出し元へ公開する（`pool.rs::
+            // CudaAllocator::alloc_uninit` の `unsafe { stream.alloc }` と
+            // 同一クラスの安全性根拠。呼び出し元へ渡す前に必ず全域を
+            // 書き切る）。`attach_global`（`true`）は本クレートが
+            // `CudaDevice` ごとに単一ストリームしか使わない構成
+            // （`docs/backend-cuda-async-execution-design.md` §3）のため、
+            // 複数ストリーム間の所有権譲渡を要する `CU_MEM_ATTACH_HOST`／
+            // `CU_MEM_ATTACH_SINGLE` は不要。
+            let mut unified = unsafe { self.stream.context().alloc_unified::<f32>(numel, true)? };
+            self.stream.memset_zeros(&mut unified)?;
+            let bytes = checked_byte_len(numel)?;
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+            Box::new(CudaBufferHandle {
+                storage: Some(CudaStorage::Managed(unified)),
                 _alloc: alloc,
                 generation,
             })
@@ -257,7 +538,7 @@ impl CudaMemory {
             let bytes = checked_byte_len(numel)?;
             let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
             Box::new(CudaBufferHandle {
-                slice: Some(slice),
+                storage: Some(CudaStorage::Device(slice)),
                 _alloc: alloc,
                 generation,
             })
@@ -276,7 +557,7 @@ impl CudaMemory {
         if tensor.numel() == 0 {
             let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
             let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
-                slice: None,
+                storage: None,
                 _alloc: alloc,
                 generation,
             });
@@ -297,11 +578,33 @@ impl CudaMemory {
                      （tensor-core 側のロジック不整合。到達しないはずの防御経路）"
                     .to_string(),
             })?;
-        let slice = self.stream.clone_htod(data)?;
         let bytes = checked_byte_len(data.len())?;
+        let storage = if placement::managed_placement_enabled() {
+            self.check_managed_placement_supported()?;
+            // SAFETY: 上記 `alloc_zeroed_inner` の SAFETY コメントと同一
+            // 根拠（f32 は全ビットパターン有効）。ここでは新規確保
+            // 直後に `data` 全域を `copy_from_slice` で上書きするため
+            // （`alloc_unified` 直後の未初期化内容が露出することはない）、
+            // ゼロ埋め（`memset_zeros`）は不要。
+            let mut unified = unsafe {
+                self.stream
+                    .context()
+                    .alloc_unified::<f32>(data.len(), true)?
+            };
+            // managed memory はホストから直接書き込めるため、
+            // `cuMemcpyHtoD`（`clone_htod`）を発行しない（H2D 往復を
+            // 避ける本イシューの目的）。新規確保のバッファであり在飛
+            // カーネル作業は存在しないため、`as_mut_slice` の内部
+            // `event.synchronize()`（何もしていない新規 event）はコスト
+            // にならない。
+            unified.as_mut_slice()?.copy_from_slice(data);
+            CudaStorage::Managed(unified)
+        } else {
+            CudaStorage::Device(self.stream.clone_htod(data)?)
+        };
         let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
         let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
-            slice: Some(slice),
+            storage: Some(storage),
             _alloc: alloc,
             generation,
         });
@@ -319,13 +622,19 @@ impl CudaMemory {
             .ok_or_else(|| CudaError::InvalidShape {
                 detail: "buffer handle is not a CudaBufferHandle (device mismatch)".to_string(),
             })?;
-        let data = match &handle.slice {
+        let data = match &handle.storage {
             None => Vec::new(),
-            Some(slice) => {
+            Some(CudaStorage::Device(slice)) => {
                 // 同期点は本モジュール共通の `readback` ヘルパーへ集約
                 // 済み（#1013。`fandhe_ai_tensor_core::buffer` モジュール
                 // コメント「download の同期契約」参照）。
                 readback(&self.stream, slice)?
+            }
+            Some(CudaStorage::Managed(unified)) => {
+                // managed 配置は `cuMemcpyDtoHAsync` を発行しない専用の
+                // readback を使う（`host_readback` ドキュメンテーション
+                // コメント参照。イシュー #1352）。
+                host_readback(&self.stream, unified)?
             }
         };
         Tensor::new(data, buffer.shape()).map_err(|err| CudaError::InvalidShape {
@@ -441,12 +750,15 @@ impl PoolZeroFill for CudaMemory {
         // poison・世代検査は fail-closed に行う（`ops.rs::
         // gemm_resident_rhs`／`gemm_resident_lhs` の空 shape 早期 return
         // と同じ方針。codex-review P1 指摘・PR #1064 追補）。
-        let Some(slice) = cuda_handle.slice.as_mut() else {
+        let Some(storage) = cuda_handle.storage.as_mut() else {
             context_cache::begin_driver_call(self.ordinal, &[generation])?;
             return Ok(());
         };
-        self.with_driver_call(&[generation], map_cuda_error, || {
-            self.stream.memset_zeros(slice).map_err(CudaError::from)
+        self.with_driver_call(&[generation], map_cuda_error, || match storage {
+            CudaStorage::Device(slice) => self.stream.memset_zeros(slice).map_err(CudaError::from),
+            CudaStorage::Managed(unified) => {
+                self.stream.memset_zeros(unified).map_err(CudaError::from)
+            }
         })
     }
 }
@@ -536,7 +848,7 @@ mod tests {
                 let other_ordinal = mem.ordinal + 1;
                 let alloc = TrackedAllocation::new(Arc::clone(&mem.tracker), 0);
                 let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
-                    slice: None,
+                    storage: None,
                     _alloc: alloc,
                     generation: 0,
                 });
@@ -710,5 +1022,64 @@ mod tests {
             matches!(rejected, Err(BackendError::DeviceContextPoisoned(_))),
             "zero_fill 経路で観測された sticky エラーにより ordinal は poison され、             以降の呼び出しは fail-closed に拒否されるはず: {rejected:?}"
         );
+    }
+
+    // -----------------------------------------------------------
+    // managed 配置（イシュー #1352）: GPU 非依存の契約テスト。
+    // -----------------------------------------------------------
+
+    #[test]
+    fn map_cuda_error_covers_managed_memory_unsupported() {
+        let err = map_cuda_error(CudaError::ManagedMemoryUnsupported {
+            detail: "device does not support managed memory".to_string(),
+        });
+        assert!(matches!(err, BackendError::Unsupported(msg) if msg.contains("managed memory")));
+    }
+
+    #[test]
+    fn map_cuda_alloc_error_also_covers_managed_memory_unsupported() {
+        // `map_cuda_alloc_error` は `Driver` 以外を `map_cuda_error` へ
+        // 委譲するため、`ManagedMemoryUnsupported` も同じ
+        // `BackendError::Unsupported` にマップされる（`alloc_zeroed`
+        // 経由の managed 確保拒否も `upload` 経由と同じ variant になる
+        // ことを確認する）。
+        let err = map_cuda_alloc_error(CudaError::ManagedMemoryUnsupported {
+            detail: "device does not support managed memory".to_string(),
+        });
+        assert!(matches!(err, BackendError::Unsupported(_)));
+    }
+
+    /// `check_managed_placement_supported` は呼び出し元が既に opt-in
+    /// フラグを確認して managed 分岐へ入った後の事前検査であり、
+    /// **フラグを再読しない**（codex-review 指摘。PR #1395）。この契約を
+    /// GPU 非依存に検証する: `managed_supported` フィールドのみで
+    /// 判定され、opt-in フラグの現在値（テスト実行順序に依存しうる
+    /// プロセスグローバル）には一切影響されないことを、フラグを
+    /// 変更しないまま確認する（フラグ非依存の関数であるため
+    /// `crate::placement::tests` の直列化ガードは不要）。
+    #[test]
+    fn check_managed_placement_supported_depends_only_on_managed_supported_field() {
+        // `CudaMemory::new` は実 driver 初期化済みの `CudaDevice` を
+        // 要求するため、`cuda_memory_construction_follows_device_init_gate`
+        // と同じ環境適応パターンで守る（CUDA 非搭載環境では本テストの
+        // 主張自体に到達しない。panic しないことが検証対象）。
+        if let Ok(device) = CudaDevice::new(0) {
+            let mut mem = CudaMemory::new(&device);
+
+            // `managed_supported == true`（デバイスが対応）なら
+            // opt-in フラグの値に関わらず常に `Ok(())`。
+            mem.managed_supported = true;
+            assert!(mem.check_managed_placement_supported().is_ok());
+
+            // `managed_supported == false`（デバイスが非対応）なら
+            // opt-in フラグの値に関わらず常に拒否する（フラグを
+            // 再読していれば、フラグが OFF に見える瞬間だけこの
+            // 拒否がすり抜けてしまう回帰を検出する）。
+            mem.managed_supported = false;
+            let err = mem
+                .check_managed_placement_supported()
+                .expect_err("managed_supported=false は無条件で拒否されるべき");
+            assert!(matches!(err, CudaError::ManagedMemoryUnsupported { .. }));
+        }
     }
 }

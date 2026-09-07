@@ -79,8 +79,13 @@ fn invalidate_with_real_stream_sync_drains_pending_launches_and_reactivates() {
     // velocity は不要（`sgd.rs::CudaSgd::run` 参照）。lr=1.0・grad=1.0・
     // weight_decay=0.0 なので各ステップで param -= 1.0（決定的）。
     for _ in 0..STEPS {
-        sgd.run(&mut param, &grad, None, &params)
-            .expect("cuda sgd launch must succeed on real hardware");
+        sgd.run(
+            crate::memory::CudaArgMut::SliceMut(&mut param),
+            crate::memory::CudaArg::Slice(&grad),
+            None,
+            &params,
+        )
+        .expect("cuda sgd launch must succeed on real hardware");
     }
 
     // 独立レジストリ（グローバル `ordinal_registry()` とは無関係。並走

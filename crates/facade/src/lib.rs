@@ -330,3 +330,50 @@ pub fn set_cuda_tf32_gemm_enabled(enabled: bool) {
 pub fn cuda_tf32_gemm_enabled() -> bool {
     fandhe_ai_backend_cuda::precision::tf32_gemm_enabled()
 }
+
+/// CUDA `DeviceBuffer` の確保配置（`alloc_zeroed`／`upload`）を managed
+/// memory（`cuMemAllocManaged`）へ opt-in で切り替える（イシュー #1352。
+/// 親 #1351「GB10 物理統合メモリ向けゼロコピー割当の試作・実測」）。
+///
+/// `fandhe_ai_backend_cuda::placement::set_managed_placement_enabled` への
+/// 薄い委譲（[`set_cuda_tf32_gemm_enabled`] と同型の composition root。
+/// `docs/compat-api-scope.md` §0 の確定公開面）。**既定は無効
+/// （`cuMemAlloc` による device-only 配置）**。有効化すると以降の全
+/// スレッド・全 CUDA device の確保呼び出しがプロセスワイドに managed
+/// 配置へ切り替わる（`Device` 単位ではない。`fandhe_ai_backend_cuda::
+/// placement` モジュール冒頭コメントの契約参照）。
+///
+/// **本イシュー時点のスコープ**（`docs/backend-cuda-managed-placement-
+/// decision.md` 参照）: `MemoryOps::alloc_zeroed`／`upload`／`download`
+/// と、これらを経由する GEMM／SGD 常駐経路
+/// （`gemm_resident_rhs`／`gemm_resident_lhs`（NT 転置分岐を除く）／
+/// `linear_forward_device`／`sgd_step_device`）は managed 配置に対応
+/// 済み。fresh モードの素の `CudaBackendOps::gemm`（`run_tiled_f32` 系。
+/// `CudaMemory` を経由せず `clone_htod`／`alloc_zeros` を直接呼ぶ）・
+/// `gemm_resident_lhs` の NT 転置分岐・その他の演算（elementwise・
+/// rmsnorm・softmax 等）は本イシューでは managed 化していない
+/// （既定 device-only のまま変更なし。opt-in 時にこれらの経路を通ると
+/// 従来どおり device-only 配置で動作する。managed 化の可否は #1353 の
+/// 実測結果を踏まえ後続で判断する）。
+///
+/// 対象デバイスが managed memory 非対応（`CU_DEVICE_ATTRIBUTE_
+/// MANAGED_MEMORY`／`CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS` の
+/// いずれかが 0）の場合、有効時の確保呼び出しは
+/// [`BackendError::Unsupported`] を返す（fail-closed。device-only への
+/// 黙示フォールバックはしない。`set_cuda_tf32_gemm_enabled` と同じ方針）。
+///
+/// 出力の数値契約: 配置はメモリの物理的な置き場所のみを変え、確保
+/// バッファを読み書きするカーネル本体・起動 config は device-only／
+/// managed の両配置で完全に共有するため、出力は配置に依らず bit
+/// 同一となる（`fandhe_ai_backend_cuda::memory` モジュール冒頭コメント
+/// 「配置（managed 拡張）」参照）。既定（無効）時の経路・出力は本
+/// イシュー導入前と完全に不変。
+pub fn set_cuda_managed_memory_enabled(enabled: bool) {
+    fandhe_ai_backend_cuda::placement::set_managed_placement_enabled(enabled);
+}
+
+/// [`set_cuda_managed_memory_enabled`] で設定した現在の opt-in 状態を
+/// 返す（既定 `false`）。
+pub fn cuda_managed_memory_enabled() -> bool {
+    fandhe_ai_backend_cuda::placement::managed_placement_enabled()
+}

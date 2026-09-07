@@ -375,6 +375,7 @@ mod mse;
 mod module_cache_wiring_tests;
 mod nvrtc;
 mod ops;
+pub mod placement;
 mod pool;
 pub mod precision;
 mod rmsnorm;

@@ -313,6 +313,24 @@ pub enum CudaError {
     /// `self.stream.context()` と fail-closed に検証し、不一致ならこの
     /// variant を返して `unsafe` 呼び出しへ到達させない。
     PooledBufferContextMismatch { detail: String },
+
+    /// managed memory（`cuMemAllocManaged`）配置が opt-in で要求された
+    /// （`crate::placement::managed_placement_enabled()`）にもかかわらず、
+    /// 対象デバイスが非対応（`crate::device::CudaDevice::
+    /// managed_memory_supported()` が `false`）だったことを表す
+    /// （イシュー #1352）。
+    ///
+    /// **意図的に非 `Driver` variant とする**: `cudarc::driver::safe::
+    /// unified_memory::CudaContext::alloc_unified` 自身も `MANAGED_MEMORY`
+    /// 属性を検査し非対応なら `DriverError(CUDA_ERROR_NOT_PERMITTED)` を
+    /// 返すが、このエラーコードは `context_cache::classify_cuda_result`
+    /// の operation-local 一覧に含まれないため sticky（ordinal を poison
+    /// する）扱いになってしまう。`memory.rs` の managed 確保経路は driver
+    /// 呼び出しの**前**に `managed_memory_supported()` を検査し、非対応
+    /// デバイスではこの variant を driver 呼び出しに到達させず返す。
+    /// `map_cuda_error`／`map_cuda_alloc_error` は本 variant を
+    /// `BackendError::Unsupported` へマップする（`memory.rs` 参照）。
+    ManagedMemoryUnsupported { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -393,6 +411,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::PooledBufferContextMismatch { detail } => {
                 write!(f, "pooled f16 buffer context mismatch: {detail}")
+            }
+            CudaError::ManagedMemoryUnsupported { detail } => {
+                write!(
+                    f,
+                    "managed memory (cuMemAllocManaged) unsupported on this device: {detail}"
+                )
             }
         }
     }

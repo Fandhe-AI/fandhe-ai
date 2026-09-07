@@ -282,8 +282,13 @@ fn poison_recovery_real_probe_restores_active_and_rejects_stale_generation() {
                 nesterov: false,
                 is_first_step: true,
             };
-            sgd.run(&mut param, &grad, None, &params)
-                .map_err(|_| ProbeFailure::OperationLocal)?;
+            sgd.run(
+                crate::memory::CudaArgMut::SliceMut(&mut param),
+                crate::memory::CudaArg::Slice(&grad),
+                None,
+                &params,
+            )
+            .map_err(|_| ProbeFailure::OperationLocal)?;
             let host = probe_stream
                 .clone_dtoh(&param)
                 .map_err(|_| ProbeFailure::OperationLocal)?;

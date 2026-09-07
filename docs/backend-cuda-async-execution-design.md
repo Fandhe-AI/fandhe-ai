@@ -89,6 +89,8 @@
 | `bench_harness::SyncPoint::wait_idle` | ホストブロック（計測専用・ホスト転送なし） | 変更なし | 変更なし | REQ-8 計測境界（`crates/bench-harness/src/sync.rs`） |
 | `CudaDevice` 破棄時 | ホストブロック（Drop 経路依存） | `has_async_alloc` 偽時にホスト同期へフォールバック | 変更なし | 2.4 |
 | `CudaSlice::drop`（デバイス一時バッファ解放） | デバイス側 wait のみ（ホスト非ブロック） | 変更なし | 変更なし | I4 |
+| `MemoryOps::download`（`crate::placement` opt-in・managed 配置） | ホストブロック（契約上の同期点。#1352 で追加） | N/A（#1352 で新設） | `stream.synchronize()` → `UnifiedSlice::as_slice()`（`host_readback`。`clone_dtoh` は発行しない） | §14。単一ストリーム構成では `UnifiedSlice` 内部 event に何も記録されないため明示同期が必須（`docs/backend-cuda-managed-placement-decision.md`） |
+| `UnifiedSlice::drop`（managed 配置の一時バッファ解放。#1352） | **ホストブロック**（`CudaSlice::drop` と非対称） | N/A（#1352 で新設） | 変更なし（`event.synchronize()` の後に同期 `cuMemFree`。cudarc-0.19.8 の実装） | §14。学習ループ per-step の暗黙同期リスクとして記録（性能実測は #1353） |
 | `launch`（カーネル起動） | 同期なし（起動時エラーのみ同期的） | 変更なし | 変更なし | 2.4 |
 | `sgd_step_device` | 同期なし | 現状 `synchronize()` あり（`sgd.rs:174`） | **除去**（最優先） | 2.2・D2H を伴わない唯一の常駐経路 |
 | `MemoryOps::upload` | 同期なし | 変更なし | 変更なし | ペイジャブル H2D の復帰＝ステージング完了であり完了待ちではない |
@@ -486,3 +488,28 @@ poison と fail-closed 恒久化」（T-R2）を対象とする。
 - cudarc 0.19.8 `src/nvrtc/safe.rs`（`Ptx` 型が `#[derive(Clone)]` であること）
 - `docs/spec/04-requirements.md` REQ-2（バックエンド間同期方式・FMA 契約）・REQ-8（性能下限・`bench-harness` の計測境界）
 - `docs/device-resident-update-design.md`（#934・同型の設計文書構成・`DeviceParamStore` poisoned 契約）
+
+## 14. 実装記録（#1352・managed 配置の同期契約差分）
+
+イシュー #1352（managed／host-registered 割当を `DeviceBuffer` の opt-in
+配置として実装）で、§4 の同期点一覧へ managed 配置（`crate::placement`
+opt-in）固有の 2 行を追加した。詳細な設計判断・採用しなかった方式
+（host-registered・`cuMemAdvise`・`prefetch`）・スコープ外事項は
+`docs/backend-cuda-managed-placement-decision.md` を正とし、本節では
+既存の poison／invalidate 状態機械との関係のみを記す。
+
+- managed 経路の全 driver 呼び出し（`alloc_unified`・`memset_zeros`・
+  `download` 内の明示 `synchronize`）は、既存の `CudaMemory::
+  with_driver_call`（本設計文書 §9 item 2・item 9 の `begin_driver_call`／
+  `observe_cuda_result` 経由）をそのまま通る。新規 variant
+  `CudaError::ManagedMemoryUnsupported` は driver 呼び出しに到達する
+  **前**（`CudaDevice::managed_memory_supported()` の事前検査）に返す
+  ため、`observe_cuda_result`（分類表・poison 化ロジック）を素通りし、
+  誤って ordinal を poison することはない。
+- `UnifiedSlice::drop` は `CudaSlice::drop`（デバイス側 wait のみ）と
+  異なり同期 `cuMemFree` を伴う（§4 表参照）。cudarc 内部の
+  `record_err` でエラーを記録するのみで本クレートの poison 状態機械を
+  経由しない点は `CudaSlice::drop` と対称（既存の既知ギャップであり、
+  本イシューが新たに導入するものではない）。
+- 本イシュー時点で CUDA 実機（DGX Spark GB10）実測は未実施
+  （`docs/backend-cuda-managed-placement-decision.md`「実機実測」節参照）。
