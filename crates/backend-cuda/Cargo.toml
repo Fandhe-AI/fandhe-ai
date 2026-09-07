@@ -389,18 +389,6 @@ required-features = ["internal-diagnostics"]
 name = "host_view_real_device"
 required-features = ["internal-diagnostics"]
 
-[[test]]
-# イシュー #1349・codex-review 指摘の是正（PR #1390）: `launch_tf32x3_
-# c_raw`／`download_f32_raw`（`src/gemm_mma_tf32x3.rs`）を
-# `internal-diagnostics` feature 限定の診断専用入口へ変更したため、
-# それらを呼ぶ本テストも同 feature を要求する。本エントリなしでは
-# feature 未指定の `cargo build`／`cargo test --workspace` でも自動検出
-# （autotests）された本テストがコンパイル対象になり、上記 2 関数
-# 未定義でビルド失敗する（`specialized_mma_parity`・`host_view_real_
-# device`〈上記〉と同じ理由）。
-name = "gemm_mma_tf32x3"
-required-features = ["internal-diagnostics"]
-
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

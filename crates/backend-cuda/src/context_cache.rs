@@ -757,6 +757,31 @@ impl Drop for CaptureGuard {
 /// [`is_capturing_on_current_thread`] はこのスレッドに対して `true` を
 /// 返す。
 pub(crate) fn begin_capture_session(ordinal: usize) -> Result<CaptureGuard, BackendError> {
+    // codex-review P1 指摘対応（イシュー #1349・PR #1390 再修正）:
+    // 本関数 doc コメント「`in_flight` ドレイン」節が要求する契約
+    // （呼び出しスレッド自身は当該 ordinal の `CallToken` を 1 つも
+    // 保持していないこと）を、ロック取得・`state.capture` 設定より前に
+    // 明示検査する。
+    //
+    // **デッドロック経路**: `memory.rs::MemoryOps::with_host_view` は
+    // `CallToken` を保持したまま（＝ `with_driver_call` の閉じクロージャ
+    // 内で）利用者のコールバック `f` を呼ぶ。そのコールバックの中から
+    // 同じ ordinal に対して本関数が呼ばれた場合、契約検査なしでは
+    // `state.capture` を設定した直後の `while state.in_flight != 0`
+    // ドレイン待機が、まさにこの呼び出しスレッド自身が保持している
+    // 外側の `CallToken`（`f` が戻るまで解放されない）を待ち続けることに
+    // なり、`f` 自身が戻れない以上ドレインは永久に完了しない
+    // （自己デッドロック）。`has_in_flight_call_on_this_thread` は
+    // スレッドローカルな [`DRIVER_CALL_DEPTH`] のみを参照するため
+    // `state` のロックを取得する前に安全に呼べる。
+    if has_in_flight_call_on_this_thread(ordinal) {
+        return Err(BackendError::InvalidArgument(format!(
+            "begin_capture_session: ordinal {ordinal} cannot start a capture session while this \
+             thread already holds an in-flight CallToken (re-entrant call from within a \
+             with_driver_call-protected scope, e.g. MemoryOps::with_host_view's callback; this \
+             would deadlock the in_flight drain)"
+        )));
+    }
     let cell = ordinal_registry().entry(ordinal)?;
     let mut state = cell.0.lock().map_err(|e| {
         BackendError::DeviceContextPoisoned(format!(

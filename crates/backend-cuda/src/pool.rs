@@ -107,6 +107,7 @@ use fandhe_ai_tensor_core::pool_core::{
     PoolStats, SizeClassPool, SizeClassPoolConfig, size_class_for,
 };
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 
@@ -128,6 +129,65 @@ pub(crate) enum CudaSliceHandle {
 // `record_pending_return`／`put_merged`（旧 `record_pending_merge`。
 // codex P2 最終指摘対応で本番呼び出し元ゼロとなり削除済み）のいずれも
 // 呼ばない。
+
+/// [`SizeClassPool<CudaSliceHandle>`] 自体を drop する際、キャッシュ済み
+/// フリーリストに残ったハンドルの実解放を capture 排他へ参加させる薄い
+/// ラッパー（codex-review P0 指摘対応・PR #1390 再修正。イシュー #1349）。
+///
+/// **背景**: [`PooledCudaHandle::drop`] は `pool.put` でプールへ返却
+/// するだけで実解放しない（`CudaSliceHandle` は貸出中でなくキャッシュへ
+/// 留まる）。実際の `cuMemFree` 相当は、キャッシュされたハンドルが
+/// フリーリストから最終的に取り除かれる瞬間（`SizeClassPool` 自身が
+/// drop される瞬間・[`CudaAllocator::release_cached`] のフェーズ (ii)）
+/// にのみ発生する。`SizeClassPool<CudaSliceHandle>` は
+/// `CudaAllocator`（`pool` フィールド）と各 `PooledCudaHandle`（貸出中の
+/// 個体が返却時に `Arc::clone` で参照を保持する `pool` フィールド）の
+/// 双方から `Arc` 共有されるため、「最後に drop されるのがどちらか」は
+/// 呼び出しパターンに依存する。**いずれの経路でも** `Arc` の strong
+/// count がゼロになる瞬間に本ラッパーの `Drop` が走るようにすることで、
+/// フリーリストに残ったハンドルの実解放を単一箇所（本 `Drop` 実装）に
+/// 集約する。
+///
+/// `Deref` で内部の `SizeClassPool<CudaSliceHandle>` へ透過的にアクセス
+/// させる（`CudaAllocator`／`PooledCudaHandle` の既存メソッド呼び出し
+/// （`take`／`put`／`record_allocation`／`stats` 等）を変更せずに済ませる
+/// ための薄いラッパーであり、`SizeClassPool` 自体の公開面は変更しない）。
+struct GuardedPool {
+    pool: SizeClassPool<CudaSliceHandle>,
+    /// 実解放（`begin_buffer_release` 呼び出し）に必要な確保元デバイスの
+    /// ordinal（`CudaAllocator::new` が `ctx.ordinal()` から複製する。
+    /// `memory.rs::CudaBufferHandle::ordinal` と同じ設計判断）。
+    ordinal: usize,
+}
+
+impl std::ops::Deref for GuardedPool {
+    type Target = SizeClassPool<CudaSliceHandle>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pool
+    }
+}
+
+impl Drop for GuardedPool {
+    /// フリーリストに残った全ハンドルを `take_one_for_release` で 1 件
+    /// ずつ取り出し、`context_cache::begin_buffer_release` の排他トークン
+    /// を実際の `drop`（`CudaSliceHandle` 内部の `CudaSlice::drop` が
+    /// 発行する `cuMemFreeAsync`/`cuMemFree`）が完了するまで保持してから
+    /// 解放する（`memory.rs::GuardedSlice::drop`・`CudaBufferHandle::
+    /// drop` と同一の手順。`CudaAllocator::release_cached` の
+    /// フェーズ (ii)〈`release_cached_with`〉とは独立した経路——
+    /// `release_cached` は明示呼び出し時のみでプール内部からは
+    /// capture 排他を経由しなかったため、本 `Drop` で両経路とも
+    /// 保護する）。
+    fn drop(&mut self) {
+        while let Some((class_bytes, handle)) = self.pool.take_one_for_release() {
+            self.pool.record_release(class_bytes);
+            let release_token = context_cache::begin_buffer_release(self.ordinal);
+            drop(handle);
+            drop(release_token);
+        }
+    }
+}
 
 /// [`CudaSliceHandle`] と貸出対象 dtype `T` を相互変換するシールドされた
 /// トレイト（イシュー #1153。`crate::pool` モジュール外への実装を許さない
@@ -233,7 +293,7 @@ pub(crate) struct PooledCudaHandle<T: PoolDtype> {
     // 再計算せず、貸出開始時の値をそのまま保持する）。
     logical_bytes: u64,
     logical_numel: usize,
-    pool: Arc<SizeClassPool<CudaSliceHandle>>,
+    pool: Arc<GuardedPool>,
 }
 
 impl<T: PoolDtype> PooledCudaHandle<T> {
@@ -449,7 +509,7 @@ fn release_cached_with<H: Send>(
 /// モジュール冒頭「`cached_allocator` のみ Weak 参照＋刈り取り」参照。
 /// codex-review 指摘。イシュー #1020 PR #1061）。
 pub(crate) struct CudaAllocator {
-    pool: Arc<SizeClassPool<CudaSliceHandle>>,
+    pool: Arc<GuardedPool>,
     stream: Arc<CudaStream>,
     ctx: Arc<CudaContext>,
 }
@@ -477,10 +537,14 @@ impl CudaAllocator {
         // 本 `CudaAllocator` はプロセスワイドな driver 設定には触れず、
         // 引き続き自作 `SizeClassPool`（アプリ層の明示的な貸出・返却）
         // のみで確保コストを削減する。
+        let ctx = Arc::clone(device.context());
         Self {
-            pool: Arc::new(SizeClassPool::new(SizeClassPoolConfig::default())),
+            pool: Arc::new(GuardedPool {
+                pool: SizeClassPool::new(SizeClassPoolConfig::default()),
+                ordinal: ctx.ordinal(),
+            }),
             stream: Arc::clone(device.stream()),
-            ctx: Arc::clone(device.context()),
+            ctx,
         }
     }
 

@@ -3652,9 +3652,9 @@ impl CudaGemm {
     pub fn launch_tiled_pipeline_streamk_f32(
         &self,
         func: &mut StreamKTiledPipelineFunction,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
@@ -3669,10 +3669,14 @@ impl CudaGemm {
                         .to_string(),
             });
         }
+        // `GuardedSlice::as_raw`（crate 内部限定）参照:
+        // `launch_tiled_pipeline_persistent_f32` ドキュメンテーション
+        // コメントと同一の理由（codex-review P0 指摘対応・PR #1390
+        // 再修正でこの Stream-K 版も揃えた）。
         for (name, buf_context_ptr) in [
-            ("a_dev", Arc::as_ptr(a_dev.context()) as usize),
-            ("b_dev", Arc::as_ptr(b_dev.context()) as usize),
-            ("c_dev", Arc::as_ptr(c_dev.context()) as usize),
+            ("a_dev", Arc::as_ptr(a_dev.as_raw().context()) as usize),
+            ("b_dev", Arc::as_ptr(b_dev.as_raw().context()) as usize),
+            ("c_dev", Arc::as_ptr(c_dev.as_raw().context()) as usize),
         ] {
             if buf_context_ptr != self_context_ptr {
                 return Err(CudaError::TiledPipelineContextMismatch {
@@ -3684,7 +3688,7 @@ impl CudaGemm {
                 });
             }
         }
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
         validate_tiled_pipeline_k_bound(k)?;
         if !tiled_pipeline_alignment_ok(n, k) {
             return Err(CudaError::InvalidShape {
@@ -3694,7 +3698,7 @@ impl CudaGemm {
                 ),
             });
         }
-        validate_output_len(c_dev.len(), m, n)?;
+        validate_output_len(c_dev.as_raw().len(), m, n)?;
         if m == 0 || n == 0 {
             return streamk_plan(0, func.num_sms.saturating_mul(func.blocks_per_sm).max(1), 0);
         }
@@ -3754,85 +3758,91 @@ impl CudaGemm {
             "launch_tiled_pipeline_streamk_f32 partials_capacity",
         )? as i32;
 
-        // ストリーム順序でのゼロ化（メソッドコメント「起動前に」参照）。
-        // `partials` は memset しない（メソッドコメント参照）。
-        self.stream.memset_zeros(&mut func.unit_counter)?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。ストリーム順序でのゼロ化（メソッドコメント「起動前に」
+        // 参照）・SK 本体カーネル起動・fixup カーネル起動を単一の排他
+        // 区間へまとめる（`launch_tiled_pipeline_persistent_f32` と同じ
+        // 設計判断）。`partials` は memset しない（メソッドコメント参照）。
+        self.with_driver_call(|| {
+            self.stream.memset_zeros(&mut func.unit_counter)?;
 
-        let sk_cfg = LaunchConfig {
-            grid_dim: (plan.grid_blocks, 1, 1),
-            block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        // SAFETY: `launch_tiled_pipeline_persistent_f32` と同一の根拠。
-        // カーネル引数（a_dev/b_dev/c_dev・m_i/n_i/k_i・unit_counter・
-        // partials・full_tiles_i/total_units_i/q_i/max_contributors_i/
-        // remainder_tiles_i/partials_capacity_i）は上記で検証済みの
-        // m/n/k・plan と 1:1 対応し、カーネル内の手動境界チェック
-        // （cp.async src_size ゼロ充填・エピローグ guarded store・
-        // partials_capacity_i との突き合わせ。`TP_SK_TILE_CORE`）と合わせて
-        // OOB 読み書きが起きない根拠とする。単位取得ループの `break` 判定は
-        // unsigned 比較のため、余分に起動された CTA も範囲外単位へは到達
-        // しない。部分和スロットは `streamk_plan`／起動前検査（上記）で
-        // `partials` 容量内であることを確認済みだが、`partials_capacity_i`
-        // （`func.partials.len()`）をカーネルへも渡し、性能下限・最適化を
-        // 理由に手動境界チェックを省略しない（`.claude/rules/coding-rust.md`）。
-        unsafe {
-            self.stream
-                .launch_builder(&func.sk_func)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(&mut *c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .arg(&mut func.unit_counter)
-                .arg(&mut func.partials)
-                .arg(&full_tiles_i)
-                .arg(&total_units_i)
-                .arg(&q_i)
-                .arg(&max_contributors_i)
-                .arg(&remainder_tiles_i)
-                .arg(&partials_capacity_i)
-                .launch(sk_cfg)?;
-        }
-
-        if plan.is_active() {
-            let fixup_cfg = LaunchConfig {
-                grid_dim: (
-                    plan.remainder_tiles,
-                    (kernels_tiled_pipeline::TP_BM * kernels_tiled_pipeline::TP_BN)
-                        .div_ceil(kernels_tiled_pipeline::TP_SK_FIXUP_BLOCK_THREADS),
-                    1,
-                ),
-                block_dim: (kernels_tiled_pipeline::TP_SK_FIXUP_BLOCK_THREADS, 1, 1),
+            let sk_cfg = LaunchConfig {
+                grid_dim: (plan.grid_blocks, 1, 1),
+                block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
                 shared_mem_bytes: 0,
             };
-            // SAFETY: fixup カーネルは `partials`（読み取りのみ。上記起動が
-            // 同一ストリームで先に完了させる契約）と `c_dev`（残タイル領域
-            // のみへの書き込み。SK 本体カーネルが書く full タイル領域とは
-            // 互いに素）を引数に取る。`r`／`local` の範囲チェック・
-            // `contributors` のクランプ・`partials` 読み取り添字と
-            // `partials_capacity_i`（`func.partials.len()`）との突き合わせは
-            // カーネル側の手動境界チェック（`TP_SK_FIXUP_KERNEL`）が担う。
+            // SAFETY: `launch_tiled_pipeline_persistent_f32` と同一の根拠。
+            // カーネル引数（a_dev/b_dev/c_dev・m_i/n_i/k_i・unit_counter・
+            // partials・full_tiles_i/total_units_i/q_i/max_contributors_i/
+            // remainder_tiles_i/partials_capacity_i）は上記で検証済みの
+            // m/n/k・plan と 1:1 対応し、カーネル内の手動境界チェック
+            // （cp.async src_size ゼロ充填・エピローグ guarded store・
+            // partials_capacity_i との突き合わせ。`TP_SK_TILE_CORE`）と合わせて
+            // OOB 読み書きが起きない根拠とする。単位取得ループの `break` 判定は
+            // unsigned 比較のため、余分に起動された CTA も範囲外単位へは到達
+            // しない。部分和スロットは `streamk_plan`／起動前検査（上記）で
+            // `partials` 容量内であることを確認済みだが、`partials_capacity_i`
+            // （`func.partials.len()`）をカーネルへも渡し、性能下限・最適化を
+            // 理由に手動境界チェックを省略しない（`.claude/rules/coding-rust.md`）。
             unsafe {
                 self.stream
-                    .launch_builder(&func.fixup_func)
-                    .arg(&func.partials)
-                    .arg(c_dev)
+                    .launch_builder(&func.sk_func)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
                     .arg(&m_i)
                     .arg(&n_i)
                     .arg(&k_i)
+                    .arg(&mut func.unit_counter)
+                    .arg(&mut func.partials)
                     .arg(&full_tiles_i)
-                    .arg(&remainder_tiles_i)
+                    .arg(&total_units_i)
                     .arg(&q_i)
                     .arg(&max_contributors_i)
+                    .arg(&remainder_tiles_i)
                     .arg(&partials_capacity_i)
-                    .launch(fixup_cfg)?;
+                    .launch(sk_cfg)?;
             }
-        }
 
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
-        // （`download_f32`／明示 `synchronize`）へ委ねる。
+            if plan.is_active() {
+                let fixup_cfg = LaunchConfig {
+                    grid_dim: (
+                        plan.remainder_tiles,
+                        (kernels_tiled_pipeline::TP_BM * kernels_tiled_pipeline::TP_BN)
+                            .div_ceil(kernels_tiled_pipeline::TP_SK_FIXUP_BLOCK_THREADS),
+                        1,
+                    ),
+                    block_dim: (kernels_tiled_pipeline::TP_SK_FIXUP_BLOCK_THREADS, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                // SAFETY: fixup カーネルは `partials`（読み取りのみ。上記起動が
+                // 同一ストリームで先に完了させる契約）と `c_dev`（残タイル領域
+                // のみへの書き込み。SK 本体カーネルが書く full タイル領域とは
+                // 互いに素）を引数に取る。`r`／`local` の範囲チェック・
+                // `contributors` のクランプ・`partials` 読み取り添字と
+                // `partials_capacity_i`（`func.partials.len()`）との突き合わせは
+                // カーネル側の手動境界チェック（`TP_SK_FIXUP_KERNEL`）が担う。
+                unsafe {
+                    self.stream
+                        .launch_builder(&func.fixup_func)
+                        .arg(&func.partials)
+                        .arg(c_dev.as_raw_mut())
+                        .arg(&m_i)
+                        .arg(&n_i)
+                        .arg(&k_i)
+                        .arg(&full_tiles_i)
+                        .arg(&remainder_tiles_i)
+                        .arg(&q_i)
+                        .arg(&max_contributors_i)
+                        .arg(&partials_capacity_i)
+                        .launch(fixup_cfg)?;
+                }
+            }
+
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+            // （`download_f32`／明示 `synchronize`）へ委ねる。
+            Ok(())
+        })?;
         Ok(plan)
     }
 
@@ -3884,7 +3894,11 @@ impl CudaGemm {
         let mut c_dev = self.alloc_output_f32(m, n)?;
         let plan =
             self.launch_tiled_pipeline_streamk_f32(func, &a_dev, &b_dev, &mut c_dev, m, n, k)?;
-        let c = crate::memory::readback(&self.stream, &c_dev)?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照（`upload_f32`／`launch_tiled_pipeline_streamk_f32` は
+        // それぞれ内部で既に排他区間へ参加済み。本行の readback も同様に
+        // 参加させる）。
+        let c = self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))?;
         Ok((c, plan))
     }
 

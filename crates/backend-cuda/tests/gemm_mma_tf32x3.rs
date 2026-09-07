@@ -17,12 +17,20 @@
 //! 未確定であり、本ファイルの実機テストは「未実測」のまま `#[ignore]`
 //! 分離する。
 //!
-//! **`internal-diagnostics` feature 依存（codex-review 指摘・PR #1390）**:
-//! `launch_tf32x3_c_raw`／`download_f32_raw` は `internal-diagnostics`
-//! feature（既定 off）限定の診断専用入口へ変更したため、本ファイルも
-//! 同 feature を要求する（`Cargo.toml` の `required-features`）。
-//! `cargo test -p fandhe-ai-backend-cuda --test gemm_mma_tf32x3 --features
-//! internal-diagnostics` から実行する。
+//! **`internal-diagnostics` feature 依存（Bugbot 指摘対応・PR #1390
+//! 再修正）**: `launch_tf32x3_c_raw`／`download_f32_raw` は
+//! `internal-diagnostics` feature（既定 off）限定の診断専用入口である。
+//! 旧稿はファイル単位（`Cargo.toml` の `required-features`）で本
+//! feature を要求していたが、それだと本ファイルの他のテスト（no-CUDA
+//! 契約テスト・環境適応スモークテスト）まで既定ビルド（`cargo build
+//! --no-cuda`／`cargo test --workspace` 等の feature 未指定コマンド）
+//! から丸ごとスキップされてしまう（Bugbot Medium 指摘）。よって本
+//! ファイル自体は `required-features` を持たず、上記 2 関数を直接呼ぶ
+//! `launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch`
+//! 1 関数だけを `#[cfg(feature = "internal-diagnostics")]` で個別に
+//! ゲートする（同関数の doc コメント参照。`cargo test -p
+//! fandhe-ai-backend-cuda --test gemm_mma_tf32x3 --all-features` で
+//! フル実行できる）。
 
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaTf32x3Gemm};
 

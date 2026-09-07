@@ -405,12 +405,26 @@ pub(crate) fn run_captured_sgd_step_segment(
     }
 
     // SGD 更新本体の実行を `catch_unwind` で包み、panic（unwind）した
-    // 場合でも直後で必ず `end_capture` を呼んでから panic を再送出する
-    // （codex-review P1・Cursor Bugbot 指摘: body が panic すると
-    // driver 側の stream capture が終了されないまま残り、以後その
-    // ストリームへの通常呼び出しが `CUDA_ERROR_STREAM_CAPTURE_*` 系で
-    // 恒久的に失敗しうる整合性違反になる。design doc §4.3 手順 3 の
+    // 場合でも直後で必ず `end_capture` を呼んでから、panic を
+    // `BackendError` へ変換して呼び出し元の `Result` 経由の失敗処理へ
+    // 合流させる（codex-review P1・Cursor Bugbot 指摘: body が panic
+    // すると driver 側の stream capture が終了されないまま残り、以後
+    // その ストリームへの通常呼び出しが `CUDA_ERROR_STREAM_CAPTURE_*`
+    // 系で恒久的に失敗しうる整合性違反になる。design doc §4.3 手順 3 の
     // 拡張）。
+    //
+    // codex-review P1 再指摘対応（PR #1390 再修正）: 旧稿は
+    // `end_capture` 実行後に `std::panic::resume_unwind(payload)` で
+    // panic をライブラリ境界外へ再送出していたが、これは
+    // `.claude/rules/coding-rust.md`「本番経路で panic しない」規約
+    // （AGENTS.md 同旨）に反し、呼び出し元（`fandhe_ai_autodiff::optim::
+    // device_store::DeviceParamStore::step`）の `Result` ベースの
+    // poison・pending 復元処理を丸ごと迂回してしまう。捕捉した panic は
+    // 下記 `body_result` を `Err(BackendError::KernelLaunchFailed(..))`
+    // にすることで、直後の「body 成功・グラフ空・end_capture 失敗」判定
+    // ロジック（`body_err` 変数。このコメントの下）へそのまま合流させ、
+    // panic 発生時も end_capture の失敗を観測したうえで `Result` として
+    // 返す。
     let body_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ops.sgd_step_device_tracked(param, grad, velocity.as_deref_mut(), config, token)
     }));
@@ -424,10 +438,23 @@ pub(crate) fn run_captured_sgd_step_segment(
     let body_result = match body_outcome {
         Ok(r) => r,
         Err(payload) => {
-            // 直前で end_capture 済み（driver 側の capture 状態は整合
-            // している）。end_capture 自体の成否は body の panic という
-            // 一次情報の前では捨て、panic をそのまま呼び出し元へ伝播する。
-            std::panic::resume_unwind(payload);
+            // panic ペイロードから可読なメッセージを抽出する
+            // （`&str`／`String` のいずれかで panic した一般的なケースを
+            // カバーする。それ以外の型で panic した場合は詳細不明の
+            // 定型文にフォールバックする。`gemm.rs` の parity 回帰
+            // ハーネス〈`downcast_ref::<String>()`／`downcast_ref::<&str>()`
+            // の同型抽出〉と同じ設計判断だが、本経路は本番経路のため
+            // `BackendError` として型付きで返す）。
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "panic payload of unknown type".to_string());
+            Err(BackendError::KernelLaunchFailed(format!(
+                "run_captured_sgd_step_segment: sgd_step_device_tracked panicked during CUDA \
+                 Graph capture (end_capture has already been called to keep driver state \
+                 consistent): {msg}"
+            )))
         }
     };
 
