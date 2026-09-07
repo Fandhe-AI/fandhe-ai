@@ -131,6 +131,40 @@ pub enum MseReduction {
     Sum,
 }
 
+/// [`BackendOps::gemm_checksum`] の読み戻しモード（イシュー #1339）。
+///
+/// framework-compare の gemm 計測窓では、GEMM 出力 `C = A@B` を毎反復
+/// ホストへ D2H した上で「縮退検出用の全要素和（checksum）」をホスト側
+/// `f64` 逐次和で求め直しており、`docs/perf/cuda-gemm-reuse-phase-
+/// breakdown.md`・`metal-gemm-reuse-phase-breakdown.md` の実測でこの
+/// `host_copy`＋`checksum` の 2 段がハーネス計測窓の 66〜75% を占める
+/// ことが確定した（イシュー #1338 承認）。本 enum は「毎反復は checksum
+/// のみ 8 バイト読み戻す」（`ChecksumOnly`）か「加えて `C` 自体もホストへ
+/// download する」（`WithOutput`。末尾反復の parity 検証用）かを選ぶ。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumReadout {
+    /// checksum（8 バイト）のみ読み戻す。`output` は `None`。
+    ChecksumOnly,
+    /// checksum に加えて `C` 全体もホストへ download する。
+    WithOutput,
+}
+
+/// [`BackendOps::gemm_checksum`] の戻り値。`checksum` は `C = A@B`
+/// （論理領域 `m×n`）の全要素和を **`f64`（Metal は Neumaier 補償和で
+/// `f64` 相当）アキュムレータ・固定順序**で求めた値（決定的。同一入力・
+/// 同一カーネル選択であれば bit 決定的に同じ値を返す契約。CPU／CUDA／
+/// Metal の各実装 doc 参照）。`output` は
+/// [`ChecksumReadout::WithOutput`] のときのみ `Some`（[`BackendOps::gemm`]
+/// と bit 同一の `Tensor<f32>`）。
+#[derive(Debug, Clone)]
+pub struct GemmChecksum {
+    /// `C` の全要素和（f64 アキュムレータ・固定順序で決定的）。
+    pub checksum: f64,
+    /// [`ChecksumReadout::WithOutput`] のときのみ `Some`。
+    pub output: Option<Tensor<f32>>,
+}
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -754,6 +788,42 @@ pub trait BackendOps {
     fn device_memory_pool_stats(&self) -> Option<PoolStats> {
         None
     }
+
+    /// `C = A @ B` を [`Self::gemm`] と**同一カーネル・同一選択ロジック**
+    /// で計算し（`output` を返す場合は `gemm` と bit 同一）、`C` の論理
+    /// 領域 `m×n` 全要素和（checksum）を `f64` アキュムレータ（Metal は
+    /// Neumaier 補償和で `f64` 相当）・固定順序で決定的に求める（イシュー
+    /// #1339・親イシュー #1338）。
+    ///
+    /// `readout` が [`ChecksumReadout::ChecksumOnly`] のとき、GPU
+    /// バックエンド（CUDA／Metal）は `C` をホストへ download せず
+    /// checksum（8 バイト）のみ読み戻す契約とする（framework-compare の
+    /// 毎反復計測窓から `host_copy` を排除する目的。`docs/perf/
+    /// device-checksum-readback-ab.md` 参照）。[`ChecksumReadout::
+    /// WithOutput`] のときは続けて `C` も download し
+    /// [`GemmChecksum::output`] へ格納する。
+    ///
+    /// # デフォルト実装
+    ///
+    /// 本メソッドは `gemm_bias_act`・`linear_forward_device` と同じ
+    /// 非破壊拡張パターン（`BackendOps` トレイトへのデフォルトメソッド
+    /// 追加。公開 API 非破壊はガードレール条件・`.claude/rules/
+    /// security.md`）であり、既定は [`BackendError::Unsupported`] を
+    /// 返す fail-safe とする。`fandhe_ai_autodiff::var::Var::
+    /// matmul_checksum` は `Unsupported` を透過し呼び出し元（framework-
+    /// compare のハーネス）が判定する契約とする（判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。`backend-cpu`・`backend-cuda`・
+    /// `backend-metal` の各実装はこのデフォルトをオーバーライドする。
+    fn gemm_checksum(
+        &self,
+        _a: &Tensor<f32>,
+        _b: &Tensor<f32>,
+        _readout: ChecksumReadout,
+    ) -> Result<GemmChecksum, BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_checksum: default fail-safe (no device-side reduction kernel available)".into(),
+        ))
+    }
 }
 
 /// 複数の `&dyn BackendOps` を横断して `device` に一致する実装を選択する。
@@ -1130,5 +1200,19 @@ mod tests {
 
         assert!(matches!(forward, Err(BackendError::Unsupported(_))));
         assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::gemm_checksum`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する（イシュー
+    /// #1339。`mse_loss_default_is_unsupported` と同型のガード）。
+    #[test]
+    fn gemm_checksum_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0, 2.0], &[1, 2]).unwrap();
+        let b = Tensor::new(vec![1.0, 2.0], &[2, 1]).unwrap();
+
+        let result = ops.gemm_checksum(&a, &b, ChecksumReadout::ChecksumOnly);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 }
