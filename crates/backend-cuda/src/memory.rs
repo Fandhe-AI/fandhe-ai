@@ -853,10 +853,19 @@ impl MemoryOps for CudaMemory {
             return Err(BackendError::DeviceMismatch);
         }
         match &handle.storage {
-            None => {
+            // 空バッファ（`storage == None`）でも FFI を伴わない
+            // クロージャとして `with_driver_call` を経由させる
+            // （codex-review 指摘 P0: 従来は `with_driver_call` を
+            // 素通りしていたため、`Poisoned`／`Retiring` 状態や
+            // invalidate 後の旧世代バッファに対しても無条件でクロー
+            // ジャが実行され、`download` 経由に存在する fail-closed な
+            // poison／世代検査を迂回できてしまっていた）。内部では
+            // driver 呼び出しを一切行わず `f(&[])` を実行するだけだが、
+            // `begin_driver_call` による検査は他分岐と同じく必ず通す。
+            None => self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
                 f(&[]);
                 Ok(())
-            }
+            }),
             Some(CudaStorage::Managed(unified)) => {
                 self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
                     host_view_managed(&self.stream, unified, f)

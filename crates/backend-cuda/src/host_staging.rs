@@ -266,13 +266,34 @@ impl HostStagingCache {
 
     /// 使用済みバッファをキャッシュへ返却する。`cap_bytes` を超える
     /// 場合は登録せず破棄する（DoS 対策。モジュール冒頭コメント参照）。
+    ///
+    /// 同一 `numel` キーへ既存エントリがある状態（再入・並行
+    /// `with_host_view` により同一形状のバッファが `take` されずに
+    /// 複数回 `put` されうる）で `HashMap::insert` が既存エントリを
+    /// 置換する場合、置換前の既存分バイト数を `cached_bytes` から
+    /// 差し引いてから新規分を加算する。差し引かずに加算のみを行うと
+    /// `cached_bytes` が実際の保持量（`entries` の総バイト数）より
+    /// 過大計上され、以降の上限判定（本メソッド冒頭の cap 比較）が
+    /// 不当に返却を拒否し、`release_all`（`CudaMemory::
+    /// release_host_staging` 経由）の返却値も過大になる
+    /// （codex-review 指摘 P2・Cursor Bugbot Medium 指摘。両者は
+    /// 同一箇所・同一問題）。
     fn put(&mut self, numel: usize, generation: u64, buf: HostStaging) {
         let bytes = buf.byte_len();
-        if self.cached_bytes.saturating_add(bytes) > self.cap_bytes {
+        let existing_bytes = self
+            .entries
+            .get(&numel)
+            .map(|entry| entry.buf.byte_len())
+            .unwrap_or(0);
+        let projected_cached_bytes = self
+            .cached_bytes
+            .saturating_sub(existing_bytes)
+            .saturating_add(bytes);
+        if projected_cached_bytes > self.cap_bytes {
             self.stats.evicted += 1;
             return;
         }
-        self.cached_bytes += bytes;
+        self.cached_bytes = projected_cached_bytes;
         self.entries.insert(numel, StagingEntry { buf, generation });
     }
 
@@ -401,6 +422,62 @@ mod tests {
         assert_eq!(cache.stats().cached_bytes, 16, "cap 超過分は登録されない");
         assert_eq!(cache.stats().evicted, 1);
         assert!(cache.take(2, 0).is_none(), "cap 超過で破棄されたため miss");
+    }
+
+    #[test]
+    fn cache_put_same_numel_twice_does_not_overcount_cached_bytes() {
+        // 回帰テスト（codex-review P2 指摘・Cursor Bugbot Medium 指摘。
+        // 同一箇所・同一問題）: 同一 numel キーへ `take` を挟まず 2 回
+        // `put` すると、`HashMap::insert` が既存エントリを置換する際に
+        // 旧エントリ分のバイト数を差し引かずに新規分だけ加算していた
+        // ため `cached_bytes` が実体（`entries` の総バイト数）より過大
+        // 計上されていた。修正後は置換時に旧分を差し引くため、2 回目の
+        // `put` 後も `cached_bytes` は最新エントリの実バイト数と一致
+        // する。
+        let mut cache = HostStagingCache::new(HostStagingKind::Pageable);
+        cache.put(4, 0, HostStaging::Pageable(vec![0.0; 4]));
+        assert_eq!(cache.stats().cached_bytes, 16);
+
+        // take を挟まず同一 numel へ再入で put（並行 with_host_view を
+        // 模す）。旧エントリが破棄され新エントリに置換される。
+        cache.put(4, 1, HostStaging::Pageable(vec![1.0; 4]));
+        assert_eq!(
+            cache.stats().cached_bytes,
+            16,
+            "同一 numel の置換では合計バイト数は変わらないはず（過大計上の回帰検知）"
+        );
+
+        // 実体との整合を release_all の返却値でも確認する。
+        let freed = cache.release_all();
+        assert_eq!(freed, 16, "release_all の返却値も実体と一致するはず");
+    }
+
+    #[test]
+    fn cache_put_same_numel_twice_respects_cap_with_replacement() {
+        // 置換時に旧分を差し引いたうえで cap 判定することを検証する
+        // （旧分を差し引かずに加算のみだと、実際には cap 内に収まる
+        // 置換でも不当に拒否されうる）。
+        let mut cache = HostStagingCache::with_cap(HostStagingKind::Pageable, 16);
+        cache.put(4, 0, HostStaging::Pageable(vec![0.0; 4]));
+        assert_eq!(cache.stats().cached_bytes, 16);
+
+        // 同一 numel（同じ 16 バイト）への置換は cap ちょうどのため
+        // 受理されるはず（旧分を差し引かず加算のみだと 32 > 16 で
+        // 不当に拒否されていた）。
+        cache.put(4, 1, HostStaging::Pageable(vec![1.0; 4]));
+        assert_eq!(
+            cache.stats().cached_bytes,
+            16,
+            "置換は cap 内で受理されるはず"
+        );
+        assert_eq!(
+            cache.stats().evicted,
+            0,
+            "置換は cap 超過ではないため evicted は増えない"
+        );
+
+        let hit = cache.take(4, 1).expect("置換後の世代 1 で take できるはず");
+        assert_eq!(hit.as_slice().unwrap(), &[1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
