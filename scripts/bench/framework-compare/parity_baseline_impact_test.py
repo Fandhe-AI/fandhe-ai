@@ -512,6 +512,58 @@ class ParseBaselinesTest(unittest.TestCase):
             with self.assertRaises(pbi.BaselineParseError):
                 pbi.parse_baselines(path)
 
+    def test_newline_style_block_start_is_detected(self):
+        """codex-review 指摘（PR #1421 P2 再指摘）の回帰テスト。
+
+        `ParityBaseline` と `{` の間に改行を挟む合法な書式
+        （`ParityBaseline\\n    {`）でもブロック開始が正しく検出され、
+        通常書式のエントリと合算した行数（2 件）が両方パースされること
+        を確認する。旧実装（`ParityBaseline \\{` の単一スペース固定）
+        ではこの書式のブロックが `_BLOCK_START_RE.findall` から脱落し、
+        `_FIELD_RE`（`path:` 以降のみに依存し block header 書式非依存）
+        側は正しく 2 件抽出するため件数不一致となり fail-closed で
+        中断していた（＝本来検出すべき欠陥が誤って「検出できていた」
+        側の回帰確認）。今回の修正後は両者の件数が一致し 2 件とも
+        正しくパースされることを検証する。
+        """
+        import tempfile
+
+        newline_style_entry = (
+            "    ParityBaseline\n"
+            "    {\n"
+            "        path: ParityPath::WmmaTf32,\n"
+            '        context: "newline-style",\n'
+            "        m: 4,\n"
+            "        n: 4,\n"
+            "        k: 4,\n"
+            "        seed: 2,\n"
+            "        total: 4 * 4,\n"
+            "        baseline_fail_count: 0,\n"
+            "        baseline_mean_abs_diff_ceiling: 1.0e-4,\n"
+            "        baseline_provenance_unconfirmed: false,\n"
+            "        baseline_max_abs_diff_ceiling: None,\n"
+            "        baseline_max_rel_err_ceiling: None,\n"
+            "    },"
+        )
+        body = _synthetic_entry(context="normal-style") + "\n" + newline_style_entry
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(os.path.join(d, "fixture.rs"), body)
+            rows = pbi.parse_baselines(path)
+        self.assertEqual(len(rows), 2)
+        contexts = {r.context for r in rows}
+        self.assertEqual(contexts, {"normal-style", "newline-style"})
+
+    def test_block_start_regex_matches_newline_and_no_space_variants(self):
+        """`_BLOCK_START_RE` 自体の単体検証（`\\s*` への緩和確認）。"""
+        self.assertEqual(len(pbi._BLOCK_START_RE.findall("ParityBaseline {")), 1)
+        self.assertEqual(len(pbi._BLOCK_START_RE.findall("ParityBaseline{")), 1)
+        self.assertEqual(
+            len(pbi._BLOCK_START_RE.findall("ParityBaseline\n    {")), 1
+        )
+        self.assertEqual(
+            len(pbi._BLOCK_START_RE.findall("ParityBaseline   \n\t{")), 1
+        )
+
 
 class RealFileSmokeTest(unittest.TestCase):
     """実ファイル（`crates/backend-cuda/tests/common/parity_baseline.rs`）

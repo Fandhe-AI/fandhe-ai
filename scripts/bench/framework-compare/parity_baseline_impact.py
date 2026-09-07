@@ -288,7 +288,16 @@ _ARRAY_START = "pub static BASELINES: &[ParityBaseline] = &["
 # 定義より後ろから始まる）ため、`ParityBaseline {` という短いリテラルの
 # 出現数だけで安全にブロック数を数えられる（実測: 45。本ファイル冒頭
 # docstring「fail-closed 契約」参照）。
-_BLOCK_START_RE = re.compile(r"ParityBaseline \{")
+#
+# **追加修正（codex-review 指摘・PR #1421 P2 再指摘）**: 上記の初回修正は
+# `ParityBaseline` と `{` の間に単一スペースを要求する `ParityBaseline \{`
+# のままだったため、`ParityBaseline\n    {` のような改行を挟む合法な書式
+# ではブロック開始が検出漏れし、`_FIELD_RE` 側も同時に該当エントリを拾え
+# なければ両者の件数が同じだけ減って一致してしまい、fail-closed 契約が
+# 機能しない再発条件が残っていた。`\s*`（改行・タブを含む任意の空白 0 個
+# 以上）へ緩め、`ParityBaseline` の直後に任意個の空白を挟んで `{` が続く
+# 書式を独立に検出できるようにする。
+_BLOCK_START_RE = re.compile(r"ParityBaseline\s*\{")
 
 _FIELD_RE = re.compile(
     r"path: ParityPath::(?P<path>\w+),\s*"
