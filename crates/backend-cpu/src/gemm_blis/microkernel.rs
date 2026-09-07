@@ -662,6 +662,48 @@ impl Microkernel for NeonBLaneqKernel {
     }
 }
 
+/// aarch64 NEON B 側 laneq ベクトル転置版トークン（イシュー #1317）。
+/// [`NeonBLaneqKernel`]（#748・スカラー gather/scatter 転置）の C タイル
+/// 転置を `neon::transpose_4x4` によるベクトル化転置へ置き換えた候補で、
+/// [`neon::kernel_b_laneq_vec_with_ldc`] へ委譲する。MR/NR・累積契約は
+/// [`NeonBLaneqKernel`] と同一（[`neon`] モジュール冒頭 #1317 節参照）。
+/// [`NeonBLaneqKernel`] と同じ理由（[`Neon12x8Kernel`] のヒープ確保
+/// 非対称問題を避ける）で strided 直接ロード/ストア経路を `run_with_ldc`
+/// で直接呼び、デフォルト実装のヒープ確保ギャザー/スキャッタに頼らない。
+/// `super::dispatch_region` の既定駆動経路には接続せず、`gemm_blis::mod`
+/// の `#[cfg(test)]` A/B 計測テスト専用（採否・実機実測は #1318 へ
+/// 引き継ぐ）。
+///
+/// ## `#[cfg(test)]` 限定
+///
+/// [`NeonBLaneqKernel`] と同じ理由（本番ビルドの到達可能経路を持たない
+/// トークンに対応する `assert!` 検査版委譲先を本番へコンパイルさせない
+/// ため）で `#[cfg(test)]` を付ける。
+#[cfg(all(target_arch = "aarch64", test))]
+#[derive(Clone, Copy)]
+pub struct NeonBLaneqVecKernel;
+
+#[cfg(all(target_arch = "aarch64", test))]
+impl Microkernel for NeonBLaneqVecKernel {
+    const MR: usize = neon::MR;
+    const NR: usize = neon::NR;
+
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+        neon::kernel_b_laneq_vec(ap, bp, c_tile, kc_len);
+    }
+
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
+        neon::kernel_b_laneq_vec_with_ldc(ap, bp, c, ldc, kc_len)
+    }
+}
+
 /// x86_64 AVX2+FMA トークン。`Avx2Kernel::try_new` 経由でのみ構築でき、
 /// これが実行 CPU の AVX2+FMA 対応を保証する（[`Microkernel::run`] 内部の
 /// `unsafe { avx2::kernel_unchecked(...) }` の SAFETY 根拠）。

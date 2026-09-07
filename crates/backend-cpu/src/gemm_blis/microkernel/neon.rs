@@ -111,7 +111,8 @@
 //! 新規 unsafe 面を広げないため、スカラーによる gather/scatter
 //! （スタック上 `[f32; 4]` 経由）で実装し、`vzip`/`vtrn` 系ベクトル化
 //! 転置は導入しない（実測で入口/出口コストが支配的と判明した場合の
-//! 追加最適化候補として計画時点で out-of-scope とした）。
+//! 追加最適化候補として計画時点で out-of-scope とした。**#1317 で
+//! `compute_b_laneq_vec` として実装済み**。§下部参照）。
 //!
 //! k ループの A/B ロードは `vld1q_f32_x2`（A: 8 行を 1 命令）・
 //! `vld1q_f32_x3`（B: 12 列を 1 命令）による複数レジスタ同時ロードを
@@ -124,9 +125,30 @@
 //! 既定ディスパッチ（[`super::NeonKernel`]）への接続は実機での bit
 //! 一致・非劣化確認後に判断する（fail-closed。未接続の間は
 //! `super::NeonBLaneqKernel` 経由の A/B 計測専用）。
+//!
+//! ## B 側 laneq ベクトル転置版（イシュー #1317）
+//!
+//! `compute_b_laneq`（#748）の C タイル転置（スカラー gather/scatter）
+//! を、`vtrn1q_f32`/`vtrn2q_f32`/`vtrn1q_f64`/`vtrn2q_f64` による
+//! in-register 4×4 転置（`transpose_4x4`）へ置き換えた候補
+//! `compute_b_laneq_vec` を追加する。k ループ本体（FMA 連鎖・
+//! k=4 アンロール・端数処理）は `b_laneq_k_loop` へ抽出し
+//! `compute_b_laneq`・`compute_b_laneq_vec` の両方から呼ばれる
+//! ため、両者の差分は C タイル入口/出口の転置方式のみに限定される
+//! （挙動不変のリファクタは `compute_b_laneq_matches_compute_bit_exact`
+//! が保護する）。転置はデータ移動のみ（丸めなし・bit 保存）であるため、
+//! `compute_b_laneq` とは NaN を含む全入力で bit 完全一致し、
+//! `compute`（既定）とは #748 と同じ乗数可換性の理由により有限値
+//! 入力に限り bit 完全一致する。詳細設計は
+//! `docs/perf/cpu-gemm-b-laneq-vec-transpose.md`。[`kernel`]・
+//! [`kernel_with_ldc`]・[`kernel_12x8`]・`compute_b_laneq` は本変種の
+//! 追加により一切変更しない。既定ディスパッチへの接続は行わず
+//! （`super::NeonBLaneqVecKernel` 経由の A/B 計測専用）、両実機での
+//! 採否判断は #1318 へ引き継ぐ。
 
 use std::arch::aarch64::{
-    float32x4_t, vfmaq_laneq_f32, vld1q_f32, vld1q_f32_x2, vld1q_f32_x3, vst1q_f32,
+    float32x4_t, vfmaq_laneq_f32, vld1q_f32, vld1q_f32_x2, vld1q_f32_x3, vreinterpretq_f32_f64,
+    vreinterpretq_f64_f32, vst1q_f32, vtrn1q_f32, vtrn1q_f64, vtrn2q_f32, vtrn2q_f64,
 };
 
 /// マイクロカーネルタイルの行数（既定カーネル。BLIS armv8a 型）。
@@ -384,6 +406,47 @@ fn compute_b_laneq(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: us
             })
         });
 
+        b_laneq_k_loop(&mut acc, ap, bp, kc_len);
+
+        // 出口ストア＋転置: acc[j][h]（列 j・行 4h..4h+4）を row-major の
+        // `c[i*ldc+j]` へスカッタで書き戻す（入口ロードと対の転置）。
+        for j in 0..NR {
+            for h in 0..2 {
+                let mut lane = [0.0f32; 4];
+                vst1q_f32(lane.as_mut_ptr(), acc[j][h]);
+                for (r, &v) in lane.iter().enumerate() {
+                    c[(4 * h + r) * ldc + j] = v;
+                }
+            }
+        }
+    }
+}
+
+/// [`compute_b_laneq`]（#748）・[`compute_b_laneq_vec`]（イシュー #1317）が
+/// 共有する k ループ本体（FMA 連鎖・k=4 アンロール＋ソフトウェアパイプ
+/// ライン・端数ループ）。両関数は C タイルの入口転置（row-major ↔ 列
+/// 優先 acc）方式のみが異なり、`acc` を受け取った後の演算は完全に同一の
+/// コードパスを通る（レジスタへ移された時点で acc の由来〈スカラー
+/// gather 版かベクトル転置版か〉は区別されないため、この共有により両者の
+/// bit 完全一致契約〈冒頭モジュールコメント §748/#1317 節〉が構造的に
+/// 保証される。#748 実装時点ではローカル `macro_rules!` として
+/// `compute_b_laneq` 内に閉じていたが、#1317 でこの関数へ抽出した
+/// （挙動は不変・字面の移動のみ）。
+///
+/// # SAFETY
+///
+/// 呼び出し元（[`compute_b_laneq`]・[`compute_b_laneq_vec`]）がそれぞれの
+/// 入口で証明済みの `ap`/`bp` オフセット上界（`p*MR..p*MR+8`・
+/// `p*NR..p*NR+12`、最大 p=kc_len-1 でも各スライス長を超えない）を
+/// そのまま引き継ぐ。`acc` はレジスタ内のみで完結し境界検査の対象外。
+#[inline(always)]
+unsafe fn b_laneq_k_loop(acc: &mut [[float32x4_t; 2]; NR], ap: &[f32], bp: &[f32], kc_len: usize) {
+    // SAFETY: edition 2024 は `unsafe fn` 内であっても `#[target_feature]`
+    // 付き intrinsic 呼び出しに明示 `unsafe {}` を要求するため、本関数全体を
+    // 包む（呼び出し元 [`compute_b_laneq`]／[`compute_b_laneq_vec`] が
+    // 保証する SAFETY 契約をそのまま引き継ぐのみで、追加の安全性条件は
+    // ない）。
+    unsafe {
         // レーン対応表: b0 は列 0..3（レーン k = 列 k）・b1 は列 4..7
         // （レーン k = 列 4+k）・b2 は列 8..11（レーン k = 列 8+k）。
         // `vfmaq_laneq_f32::<LANE>(acc, a, b)` は `acc + a * b[LANE]` の
@@ -507,19 +570,175 @@ fn compute_b_laneq(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: us
 
             p += 1;
         }
+    }
+}
 
-        // 出口ストア＋転置: acc[j][h]（列 j・行 4h..4h+4）を row-major の
-        // `c[i*ldc+j]` へスカッタで書き戻す（入口ロードと対の転置）。
-        for j in 0..NR {
-            for h in 0..2 {
-                let mut lane = [0.0f32; 4];
-                vst1q_f32(lane.as_mut_ptr(), acc[j][h]);
-                for (r, &v) in lane.iter().enumerate() {
-                    c[(4 * h + r) * ldc + j] = v;
-                }
+/// 4×4 の in-register 転置（NEON 標準技法。`vtrn1q_f32`/`vtrn2q_f32` で
+/// 32 bit 単位のペア転置を行い、`f64` へ bit-cast してから
+/// `vtrn1q_f64`/`vtrn2q_f64` で 64 bit（= f32 2 個ぶん）単位のペア転置を
+/// 行うことで 4×4 全体の転置を得る。`vreinterpretq_*` は純粋な bit-cast、
+/// `vtrn*` は要素の並べ替えのみで丸め演算を一切含まないため、入力が
+/// 有限値・NaN・inf のいずれであっても全 32 bit を保存する（イシュー
+/// #1317 の bit 完全一致契約の基盤）。
+///
+/// `r0..r3` を行 0..4 とみなすと `[o0, o1, o2, o3]`（戻り値）は列
+/// 0..4（各要素 `oj = (r0[j], r1[j], r2[j], r3[j])`）を返す。転置は
+/// 対合（自己逆写像）であるため、同じ関数を [`compute_b_laneq_vec`] の
+/// 入口（行→列）・出口（列→行）の両方へ適用できる。
+#[inline(always)]
+unsafe fn transpose_4x4(
+    r0: float32x4_t,
+    r1: float32x4_t,
+    r2: float32x4_t,
+    r3: float32x4_t,
+) -> [float32x4_t; 4] {
+    // SAFETY: edition 2024 は `unsafe fn` の内部であっても `#[target_feature]`
+    // 付き intrinsic 呼び出しに明示 `unsafe {}` を要求する（呼び出し元の
+    // unsafe fn 境界だけでは暗黙に許可されない）。本関数自体は呼び出し元
+    // （[`compute_b_laneq_vec`]）が保証する SAFETY 契約をそのまま引き継ぐ
+    // だけで、以下のブロック内に追加の安全性条件はない。
+    unsafe {
+        // 32 bit 単位のペア転置: t0=(a0,b0,a2,b2)・t1=(a1,b1,a3,b3)・
+        // t2=(c0,d0,c2,d2)・t3=(c1,d1,c3,d3)（a=r0,b=r1,c=r2,d=r3）。
+        let t0 = vtrn1q_f32(r0, r1);
+        let t1 = vtrn2q_f32(r0, r1);
+        let t2 = vtrn1q_f32(r2, r3);
+        let t3 = vtrn2q_f32(r2, r3);
+
+        // 64 bit（f32 ペア）単位のペア転置で残りの軸を揃える。f64 への
+        // bit-cast は値の解釈を変えず、レーン幅を 32→64 bit にするための
+        // 型変換に過ぎない（丸めなし）。
+        let t0d = vreinterpretq_f64_f32(t0);
+        let t1d = vreinterpretq_f64_f32(t1);
+        let t2d = vreinterpretq_f64_f32(t2);
+        let t3d = vreinterpretq_f64_f32(t3);
+
+        let o0 = vreinterpretq_f32_f64(vtrn1q_f64(t0d, t2d));
+        let o1 = vreinterpretq_f32_f64(vtrn1q_f64(t1d, t3d));
+        let o2 = vreinterpretq_f32_f64(vtrn2q_f64(t0d, t2d));
+        let o3 = vreinterpretq_f32_f64(vtrn2q_f64(t1d, t3d));
+
+        [o0, o1, o2, o3]
+    }
+}
+
+/// [`compute_b_laneq`]（#748）の C タイル転置をスカラー gather/scatter
+/// から `transpose_4x4` によるベクトル化転置へ置き換えた候補（イシュー
+/// #1317・`docs/perf/cpu-gemm-b-laneq-vec-transpose.md`）。k ループ
+/// （FMA 連鎖・アンロール・端数処理）は [`b_laneq_k_loop`] を通じて
+/// [`compute_b_laneq`] と完全に共有しており、両関数の差分は C タイルの
+/// 入口/出口転置方式のみである。
+///
+/// 転置がデータ移動のみ（丸めなし・NaN payload/符号も保存する
+/// bit-cast・置換のみ）であるため、この差分は演算結果に一切影響せず、
+/// [`compute_b_laneq`] とは NaN を含む全入力で bit 完全一致する
+/// （`compute_b_laneq_vec_matches_compute_b_laneq_bit_exact_including_nan`
+/// で検証）。[`compute`]（既定・A レーン参照）との bit 一致は #748 と
+/// 同じ乗数可換性の理由により有限値入力に限る（冒頭モジュールコメント
+/// §748 節）。
+fn compute_b_laneq_vec(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    // SAFETY: オフセット上界の証明は [`compute_b_laneq`] と同一
+    // （呼び出し元が `check_panel_lengths`／`check_c_tile_bounds` を
+    // 通す入口契約）。C タイルアクセスは 4 要素連続の行セグメント
+    // `c[(4h+r)*ldc + 4g .. +4]`（h∈0..2・r∈0..4・g∈0..3）単位で、
+    // 最大オフセットは r=3,h=1,g=2 のとき `(MR-1)*ldc + NR-1` に一致し、
+    // [`compute`]／[`compute_b_laneq`] と同じ上界（`c.len()` 以内である
+    // ことが `check_c_tile_bounds` 済み）に収まる。各 4 要素は row-major
+    // レイアウトで連続しているため `vld1q_f32`／`vst1q_f32` で直接
+    // ロード/ストアでき、スタック経由のスカラー gather/scatter を経ない
+    // （[`compute_b_laneq`] からの差分）。k ループの上界は
+    // [`b_laneq_k_loop`] の SAFETY コメントを参照。
+    unsafe {
+        // `acc[j][h]` は [`compute_b_laneq`] と同じ列優先レイアウト
+        // （列 j・行 4h..4h+4）。ゼロ初期化してから入口転置ループで
+        // 埋める（`vdupq_n_f32` 等の追加 intrinsic を避けるため
+        // `float32x4_t` の 0 埋めは transpose 経由で得る代わりに、
+        // 単純に転置結果をそのまま代入するループのみで済ませる）。
+        let mut acc: [[float32x4_t; 2]; NR] =
+            std::array::from_fn(|_| std::array::from_fn(|_| vld1q_f32([0.0f32; 4].as_ptr())));
+
+        // 入口転置: 行グループ h（4 行単位。MR=8 固定につき h∈{0,1}が
+        // モジュール冒頭 `assert!(MR == 8 && NR == 12)` で保証されるため
+        // ループではなく明示 2 回展開とする）× 列グループ g（4 列単位）の
+        // 6 ブロックそれぞれについて、row-major の 4 行（各 4 要素連続）
+        // を直接ロードし `transpose_4x4` で列ベクトル 4 本へ変換して
+        // `acc[4g+j][h]` へ格納する。
+        for &h in &[0usize, 1] {
+            let row_base = 4 * h;
+            for g in 0..3 {
+                let col_base = 4 * g;
+                let r0 = vld1q_f32(c[row_base * ldc + col_base..].as_ptr());
+                let r1 = vld1q_f32(c[(row_base + 1) * ldc + col_base..].as_ptr());
+                let r2 = vld1q_f32(c[(row_base + 2) * ldc + col_base..].as_ptr());
+                let r3 = vld1q_f32(c[(row_base + 3) * ldc + col_base..].as_ptr());
+                let cols = transpose_4x4(r0, r1, r2, r3);
+                acc[col_base][h] = cols[0];
+                acc[col_base + 1][h] = cols[1];
+                acc[col_base + 2][h] = cols[2];
+                acc[col_base + 3][h] = cols[3];
+            }
+        }
+
+        b_laneq_k_loop(&mut acc, ap, bp, kc_len);
+
+        // 出口転置: 入口と対の変換（転置は対合のため同一関数を適用する
+        // だけで列優先 acc → row-major C へ戻せる）。
+        for &h in &[0usize, 1] {
+            let row_base = 4 * h;
+            for g in 0..3 {
+                let col_base = 4 * g;
+                let rows = transpose_4x4(
+                    acc[col_base][h],
+                    acc[col_base + 1][h],
+                    acc[col_base + 2][h],
+                    acc[col_base + 3][h],
+                );
+                vst1q_f32(c[row_base * ldc + col_base..].as_mut_ptr(), rows[0]);
+                vst1q_f32(c[(row_base + 1) * ldc + col_base..].as_mut_ptr(), rows[1]);
+                vst1q_f32(c[(row_base + 2) * ldc + col_base..].as_mut_ptr(), rows[2]);
+                vst1q_f32(c[(row_base + 3) * ldc + col_base..].as_mut_ptr(), rows[3]);
             }
         }
     }
+}
+
+/// `compute_b_laneq_vec` の検査つき公開入口（[`kernel_b_laneq_with_ldc`]
+/// と同型・同じ `ldc` 契約。イシュー #1317）。`super::super::dispatch_region`
+/// の既定駆動経路には接続しない（採否・実機実測は #1318 が引き継ぐ。
+/// 未接続の間は `super::NeonBLaneqVecKernel` 経由の A/B 計測専用）。
+pub fn kernel_b_laneq_vec_with_ldc(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    ldc: usize,
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
+    super::check_panel_lengths(MR, NR, kc_len, ap.len(), bp.len())?;
+    super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
+    compute_b_laneq_vec(ap, bp, c, ldc, kc_len);
+    Ok(())
+}
+
+/// [`kernel_b_laneq_vec_with_ldc`] の `ldc = NR` 密パッキング契約固定版
+/// （[`kernel_b_laneq`] と同型。`#[cfg(test)]` 限定の理由も同一 —
+/// [`super::NeonBLaneqVecKernel`] は `dispatch_region` の既定駆動経路に
+/// 接続しない `gemm_blis::mod` の `#[cfg(test)]` A/B 計測テスト専用
+/// トークンであり、本番ビルドへの到達可能経路を持たないため、対になる
+/// 本関数も本番ビルドから完全に除外する）。
+#[cfg(test)]
+pub fn kernel_b_laneq_vec(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+    assert!(
+        super::panel_len_matches(ap.len(), MR, kc_len),
+        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR),
+        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
+        bp.len()
+    );
+    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
+    compute_b_laneq_vec(ap, bp, c_tile, NR, kc_len);
 }
 
 /// `compute_b_laneq` の検査つき公開入口（[`kernel_with_ldc`] と同型・
@@ -1036,6 +1255,242 @@ mod tests {
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
         let err = kernel_b_laneq_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            super::super::TileBoundsError::LdcTooSmall {
+                ldc: NR - 1,
+                nr: NR
+            }
+        );
+    }
+
+    // --- B 側 laneq ベクトル転置版（イシュー #1317）のローカル検証 ---
+    //
+    // 最重要検証は [`compute_b_laneq`]（#748・スカラー転置版）との
+    // NaN 込み bit 完全一致（`compute_b_laneq_vec_matches_compute_b_laneq_bit_exact_including_nan`）
+    // である。k ループは [`b_laneq_k_loop`] を共有するため、この一致は
+    // 転置方式（`transpose_4x4` vs スカラー gather/scatter）がデータ移動
+    // のみであることの直接検証になる。
+
+    /// [`transpose_4x4`] を 2 回適用すると恒等（元の 16 要素へ戻る）こと、
+    /// および NaN payload（符号・仮数部）が bit 単位で保存されることを
+    /// 検証する（`vtrn`/`vreinterpretq_*` は置換・bit-cast のみで丸めを
+    /// 含まないという §1317 節の前提を裏付ける）。
+    #[test]
+    fn transpose_4x4_roundtrip_preserves_bits() {
+        let nan1 = f32::from_bits(0x7fc0_1234);
+        let nan2 = f32::from_bits(0xffc0_5678);
+        let vals: [f32; 16] = [
+            1.0,
+            -2.0,
+            3.5,
+            nan1,
+            f32::INFINITY,
+            -0.0,
+            0.0,
+            nan2,
+            42.0,
+            -42.0,
+            1e30,
+            -1e-30,
+            7.0,
+            8.0,
+            9.0,
+            10.0,
+        ];
+        // SAFETY: `vals` は 16 要素の固定長配列で `i` は `0..4` の範囲しか
+        // 取らないため、各 `vals[i * 4..]` スライスには `vld1q_f32` が読む
+        // 4 要素（`i * 4 + 3` まで）が必ず残っている。ストア先 `out` も
+        // 4 要素の固定長配列（`[0.0f32; 4]`）であり `vst1q_f32` の書き込み
+        // 幅と一致する。
+        unsafe {
+            let rows: [float32x4_t; 4] = std::array::from_fn(|i| vld1q_f32(vals[i * 4..].as_ptr()));
+            let transposed = transpose_4x4(rows[0], rows[1], rows[2], rows[3]);
+            let roundtrip =
+                transpose_4x4(transposed[0], transposed[1], transposed[2], transposed[3]);
+
+            for (i, &r) in roundtrip.iter().enumerate() {
+                let mut out = [0.0f32; 4];
+                vst1q_f32(out.as_mut_ptr(), r);
+                for (j, &v) in out.iter().enumerate() {
+                    assert_eq!(
+                        v.to_bits(),
+                        vals[i * 4 + j].to_bits(),
+                        "2 回転置後は bit 単位で恒等のはず（i={i}, j={j}）"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 手計算 2x2（[`kernel_b_laneq_matches_hand_computed_subset`] と
+    /// 同一ケース）で [`kernel_b_laneq_vec_with_ldc`] の FMA 累積が
+    /// 正しいことを確認する。
+    #[test]
+    fn kernel_b_laneq_vec_matches_hand_computed_subset() {
+        let kc_len = 2;
+        let mut ap = vec![0.0f32; MR * kc_len];
+        let mut bp = vec![0.0f32; kc_len * NR];
+        ap[0] = 1.0;
+        ap[1] = 3.0;
+        ap[MR] = 2.0;
+        ap[MR + 1] = 4.0;
+        bp[0] = 5.0;
+        bp[1] = 6.0;
+        bp[NR] = 7.0;
+        bp[NR + 1] = 8.0;
+
+        let mut c_tile = vec![0.0f32; MR * NR];
+        kernel_b_laneq_vec_with_ldc(&ap, &bp, &mut c_tile, NR, kc_len).unwrap();
+
+        assert_eq!(c_tile[0], 19.0);
+        assert_eq!(c_tile[1], 22.0);
+        assert_eq!(c_tile[NR], 43.0);
+        assert_eq!(c_tile[NR + 1], 50.0);
+    }
+
+    /// [`kernel_b_laneq_vec_with_ldc`]（ベクトル転置版）は
+    /// [`kernel_with_ldc`]（既定・A 側レーン参照）と有限値入力で
+    /// bit 完全一致する（#748 と同じ乗数可換性の理由。冒頭モジュール
+    /// コメント §1317 節）。k%4 の剰余（0/1/2/3）を網羅する kc_len を
+    /// 用いる。
+    #[test]
+    fn compute_b_laneq_vec_matches_compute_bit_exact() {
+        for (i, &kc_len) in [4usize, 5, 6, 7, 32, 33, 34, 35].iter().enumerate() {
+            let ap = xorshift32_vec(0xB1A2_2001 + i as u32, MR * kc_len);
+            let bp = xorshift32_vec(0xB1A2_2002 + i as u32, kc_len * NR);
+            let c_init = xorshift32_vec(0xB1A2_2003 + i as u32, MR * NR);
+
+            let mut c_default = c_init.clone();
+            kernel_with_ldc(&ap, &bp, &mut c_default, NR, kc_len).unwrap();
+
+            let mut c_b_laneq_vec = c_init.clone();
+            kernel_b_laneq_vec_with_ldc(&ap, &bp, &mut c_b_laneq_vec, NR, kc_len).unwrap();
+
+            assert_eq!(
+                c_default, c_b_laneq_vec,
+                "kernel_b_laneq_vec_with_ldc（ベクトル転置・kc_len={kc_len}）は \
+                 kernel_with_ldc（既定・A レーン参照）と bit 完全一致するはず"
+            );
+        }
+    }
+
+    /// [`compute_b_laneq_vec`]（ベクトル転置版）は [`compute_b_laneq`]
+    /// （#748・スカラー gather/scatter 転置版）と、NaN（複数 payload・
+    /// 符号違いを含む）を混ぜた入力でも bit 完全一致する。両者は
+    /// [`b_laneq_k_loop`] を共有し FMA 連鎖が同一であり、転置は
+    /// データ移動のみであるため、この一致が §1317 節の bit 完全一致
+    /// 契約の直接検証になる（冒頭モジュールコメント参照）。
+    #[test]
+    fn compute_b_laneq_vec_matches_compute_b_laneq_bit_exact_including_nan() {
+        let nan_variants = [
+            f32::NAN,
+            -f32::NAN,
+            f32::from_bits(0x7fc0_1234),
+            f32::from_bits(0xffc0_5678),
+        ];
+        for (i, &kc_len) in [4usize, 5, 6, 7, 32, 33, 34, 35].iter().enumerate() {
+            let mut ap = xorshift32_vec(0xB1A2_3001 + i as u32, MR * kc_len);
+            let mut bp = xorshift32_vec(0xB1A2_3002 + i as u32, kc_len * NR);
+            let mut c_init = xorshift32_vec(0xB1A2_3003 + i as u32, MR * NR);
+
+            // 決定的な位置へ NaN を混入する（xorshift32_vec は有限値のみ
+            // 生成するため）。A/B/C いずれにも撒き、伝播経路を網羅する。
+            let (ap_len, bp_len, c_init_len) = (ap.len(), bp.len(), c_init.len());
+            for (j, &nan) in nan_variants.iter().enumerate() {
+                ap[(i + j) % ap_len] = nan;
+                bp[(i + j + 1) % bp_len] = nan;
+                c_init[(i + j + 2) % c_init_len] = nan;
+            }
+
+            let mut c_b_laneq = c_init.clone();
+            kernel_b_laneq_with_ldc(&ap, &bp, &mut c_b_laneq, NR, kc_len).unwrap();
+
+            let mut c_b_laneq_vec = c_init.clone();
+            kernel_b_laneq_vec_with_ldc(&ap, &bp, &mut c_b_laneq_vec, NR, kc_len).unwrap();
+
+            for idx in 0..MR * NR {
+                assert_eq!(
+                    c_b_laneq_vec[idx].to_bits(),
+                    c_b_laneq[idx].to_bits(),
+                    "kc_len={kc_len}, idx={idx}: ベクトル転置版はスカラー転置版と \
+                     NaN 込みで bit 完全一致するはず"
+                );
+            }
+        }
+    }
+
+    /// NaN を含む入力に対し [`kernel_b_laneq_vec_with_ldc`] がパニック
+    /// せず完了することのみを確認する（[`compute_b_laneq_nan_input_does_not_panic`]
+    /// と同一パターン。[`compute`]（既定）との NaN 一致は主張しない）。
+    #[test]
+    fn compute_b_laneq_vec_nan_input_does_not_panic() {
+        let kc_len = 4;
+        let mut ap = vec![1.0f32; MR * kc_len];
+        let bp = vec![1.0f32; kc_len * NR];
+        ap[0] = f32::NAN;
+        let mut c_tile = vec![0.0f32; MR * NR];
+
+        kernel_b_laneq_vec_with_ldc(&ap, &bp, &mut c_tile, NR, kc_len).unwrap();
+
+        for (j, &v) in c_tile.iter().enumerate().take(NR) {
+            assert!(
+                v.is_nan(),
+                "NaN 入力（ap[0]）は C の行 0・列 {j} へ伝播するはず"
+            );
+        }
+    }
+
+    /// [`kernel_b_laneq_vec_with_ldc`] も `ldc > NR`（完全タイル C 直接
+    /// 経路）で `ldc = NR` と bit 完全一致し、ギャップ列を破壊しない
+    /// ことを検証する（
+    /// [`kernel_b_laneq_with_larger_ldc_matches_tight_packing_and_preserves_gap`]
+    /// と同一パターン）。
+    #[test]
+    fn kernel_b_laneq_vec_with_larger_ldc_matches_tight_packing_and_preserves_gap() {
+        let kc_len = 5;
+        let ap = xorshift32_vec(0xB1A2_4001, MR * kc_len);
+        let bp = xorshift32_vec(0xB1A2_4002, kc_len * NR);
+        let c_init = xorshift32_vec(0xB1A2_4003, MR * NR);
+
+        let mut c_tight = c_init.clone();
+        kernel_b_laneq_vec_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len).unwrap();
+
+        let ldc = NR + 5;
+        let sentinel = -777.0f32;
+        let mut c_gapped = vec![sentinel; (MR - 1) * ldc + ldc];
+        for i in 0..MR {
+            c_gapped[i * ldc..i * ldc + NR].copy_from_slice(&c_init[i * NR..i * NR + NR]);
+        }
+        kernel_b_laneq_vec_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len).unwrap();
+
+        for i in 0..MR {
+            for j in 0..NR {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    c_tight[i * NR + j],
+                    "ldc={ldc} 経路と ldc=NR 経路は bit 完全一致するはず（i={i}, j={j}）"
+                );
+            }
+            for j in NR..ldc {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    sentinel,
+                    "ギャップ列（i={i}, j={j}）は直接ストアで破壊されてはならない"
+                );
+            }
+        }
+    }
+
+    /// [`kernel_b_laneq_vec_with_ldc`] も `ldc < NR` を panic ではなく
+    /// `Result::Err` として返す（[`kernel_b_laneq_rejects_ldc_smaller_than_nr`]
+    /// と同一パターン）。
+    #[test]
+    fn kernel_b_laneq_vec_rejects_ldc_smaller_than_nr() {
+        let ap = vec![0.0f32; MR * 2];
+        let bp = vec![0.0f32; 2 * NR];
+        let mut c_tile = vec![0.0f32; MR * NR];
+        let err = kernel_b_laneq_vec_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2).unwrap_err();
         assert_eq!(
             err,
             super::super::TileBoundsError::LdcTooSmall {
