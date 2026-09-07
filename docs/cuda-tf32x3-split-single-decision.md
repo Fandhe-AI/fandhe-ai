@@ -121,35 +121,23 @@ mma_tf32x3_source_issues_mma_sync_from_single_macro_site_called_three_times`）
 - 適用範囲は素の `CudaBackendOps::gemm` のみ（`gemm_bias_act`・
   `gemm_resident_*`・学習経路は対象外）。
 
-## 8. #1356 へ引き継ぐ実測記入欄
+## 8. #1356 実測記入欄の引き継ぎ先
 
-本イシュー時点では GB10 実機実測は未実施（本エージェント実行環境に CUDA
-実機なし）。以下は #1356 が実測後に追記する想定の記入欄。
+イシュー #1356（本節を引き継いだ実装。誤差分布プローブ `--routes mma`
+拡張・純カーネル時間ベンチ `gemm_tf32x3_kernel_time_bench` を追加）は
+コード実装（`crates/backend-cuda/examples/wmma_tolerance_probe.rs`・
+`crates/backend-cuda/examples/gemm_tf32x3_kernel_time_bench.rs`）まで
+完了したが、**本エージェント実行環境に CUDA 実機（GB10）が接続されて
+いなかったため実測値は未取得のまま**である（`docs/real-hardware-
+verification-env.local.md` 不在。数値の推定・外挿・捏造はしない）。
 
-### 8.1 誤差分布（`docs/perf/cuda-tensor-core-tolerance-*.md` と同形式）
-
-- 対象形状: 16×8×8・64×64×64・128×128×128・512×512×512・非正方（例
-  60×68×36）・K=4096 ストレス（`tests/gemm_mma_tf32x3.rs::
-  mma_tf32x3_matches_reference_across_shapes`／`mma_tf32x3_k4096_stress`
-  と同一形状。ソースは `crates/backend-cuda/tests/gemm_mma_tf32x3.rs`）。
-- 単発 TF32 との誤差分布比較（`fail_count`・`mean_abs_diff`・
-  `max_abs_diff`・`max_rel_err`）: 未実測。
-- CPU f32 参照実装との厳密ゼロ fail 成立可否（
-  `fandhe_ai_backend_cpu::assert_parity`）: 未実測。成立しない形状が
-  あった場合、baseline 非後退方式（`ParityPath` 追加）への再割り当ては
-  ユーザー承認を得たうえで #1356 が判断する（本イシューでは baseline
-  行・`ParityPath` 変種を追加していない）。
-
-### 8.2 純カーネル時間
-
-- 単発 TF32・FP32 厳密（`run_tiled_f32`）との比較: 未実測。
-- 対象形状・計測境界（H2D／カーネル／D2H の分離）: `gemm_mma_tf32x3.rs::
-  CudaMmaTf32x3Gemm` の `upload_f32`／`launch_tf32x3`／`download_f32` 分離
-  API を使う（`docs/perf/cuda-gemm-reuse-phase-breakdown.md` と同型の
-  フェーズ分解が可能）。
-
-### 8.3 GB10 実機実測記録（env_info・実行ログ）
-
-未実施。実測時は `docs/real-hardware-verification-env.md` の手順に従い
-`docs/perf/logs/cuda-gemm-tf32x3-<issue>/` へ実行ログ・env_info（内部ホスト
-名は含めない）を記録する。
+誤差分布（8.1）・純カーネル時間（8.2）・GB10 実機実測記録（8.3）の
+記入欄は本節に残さず、`docs/perf/cuda-tensor-core-tolerance-tf32x3-gb10.md`
+（実測記入欄のスケルトン・再現手順・集計スクリプトを含む独立ドキュメント）
+へ一本化して引き継いだ。同ドキュメント §0 が実測状況を明記し、§11 に
+3 択語彙（「opt-in 維持・推奨」／「opt-in 維持・条件付き推奨」／
+「opt-in 維持・非推奨」）による採否判定欄（未確定のまま）を持つ。
+CPU f32 参照実装との厳密ゼロ fail 成立可否
+（`assert_parity`）が不成立の場合の baseline 非後退方式（`ParityPath`
+追加）への再割り当ては、引き続きユーザー承認を得たうえで判断する（本
+イシューでは baseline 行・`ParityPath` 変種を追加していない）。
