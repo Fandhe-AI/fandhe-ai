@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/host_view_real_device.rs (/home/<cuda-node-user>/work/target-fandhe-ai/release/deps/host_view_real_device-8ba6ba440231f4ac)
+
+running 7 tests
+test pooled_memory_with_host_view_matches_download_bit_exact ... ok
+test release_host_staging_clears_cache_and_frees_reported_bytes ... ok
+test with_host_view_cached_pinned_matches_download_bit_exact ... ok
+test with_host_view_matches_download_and_upload_source_bit_exact ... ok
+test with_host_view_matches_download_on_managed_placement ... ok
+test with_host_view_reuses_staging_buffer_for_same_shape ... ok
+test with_host_view_using_kind_pinned_matches_pageable_and_download_bit_exact ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.95s
+

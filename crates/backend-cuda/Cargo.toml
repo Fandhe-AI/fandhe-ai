@@ -313,6 +313,15 @@ required-features = ["internal-diagnostics"]
 name = "host_view_real_device"
 required-features = ["internal-diagnostics"]
 
+[[test]]
+# イシュー #1336（reopen 後の実機実測フェーズ）: `host_view_staging_
+# readout_ab_1336` は `CudaMemory::new_with_host_staging_kind`（診断専用
+# コンストラクタ）・`host_staging_stats`（いずれも `internal-diagnostics`
+# feature 限定）を使うため、`host_view_real_device`（上記）と同じ理由で
+# `internal-diagnostics` feature を要求する。
+name = "host_view_staging_readout_ab_1336"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

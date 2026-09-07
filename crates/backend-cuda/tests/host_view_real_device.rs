@@ -353,3 +353,71 @@ fn with_host_view_using_kind_pinned_matches_pageable_and_download_bit_exact() {
         "Pinned 経路は Pageable 経路と bit 完全一致するはず（種別による内容差異は許容しない）"
     );
 }
+
+/// `CudaMemory::new_with_host_staging_kind`（`internal-diagnostics`
+/// feature 限定・イシュー #1336 実機実測フェーズ追加）でキャッシュ種別を
+/// `Pinned` に固定した `CudaMemory` が、`with_host_view`（キャッシュ経由・
+/// 本番と同じ呼び出し経路）を介して `download` と bit 完全一致し、かつ
+/// 2 回目以降は `host_staging_stats().hits` が増加する（本番 `Pageable`
+/// 系列の `with_host_view_reuses_staging_buffer_for_same_shape` と同型の
+/// キャッシュ再利用契約が `Pinned` でも成立する）ことを確認する。
+/// `with_host_view_using_kind`（毎回新規確保・非キャッシュ）と異なり、
+/// A/B 計測ハーネス（`tests/host_view_staging_readout_ab_1336.rs`）が
+/// 本番同様の「2 回目以降 hit」条件下で `Pinned` と `Pageable` を公平に
+/// 比較できることの前提を保証する。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn with_host_view_cached_pinned_matches_download_bit_exact() {
+    // `Device` 配置（`host_staging` 経由）前提のため `false` 固定で直列化
+    // する（他テストと同じ理由）。
+    let _guard = PlacementFlagGuard::acquire(false);
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let mem = CudaMemory::new_with_host_staging_kind(&device, HostStagingKind::Pinned);
+
+    let data: Vec<f32> = (0..1024)
+        .map(|i| match i % 5 {
+            0 => f32::NAN,
+            1 => f32::INFINITY,
+            2 => f32::NEG_INFINITY,
+            3 => f32::MIN_POSITIVE,
+            _ => (i as f32) * 0.25 - 50.0,
+        })
+        .collect();
+    let tensor = Tensor::<f32>::new(data, &[1024]).unwrap();
+    let buf = mem
+        .upload(&tensor)
+        .expect("upload must succeed on real hardware");
+
+    let downloaded = mem.download(&buf).expect("download must succeed");
+    let download_bits: Vec<u32> = downloaded
+        .as_slice()
+        .expect("download returns a contiguous tensor")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+
+    let stats_before = mem.host_staging_stats();
+
+    let mut first_bits: Option<Vec<u32>> = None;
+    mem.with_host_view(&buf, &mut |slice| {
+        first_bits = Some(slice.iter().map(|v| v.to_bits()).collect());
+    })
+    .expect("with_host_view must succeed on real hardware");
+    let first_bits = first_bits.expect("closure must be invoked exactly once");
+    assert_eq!(
+        first_bits, download_bits,
+        "キャッシュ経由 Pinned は download().as_slice() と bit 完全一致するはず"
+    );
+
+    for _ in 0..2 {
+        mem.with_host_view(&buf, &mut |_slice| {})
+            .expect("with_host_view must succeed");
+    }
+
+    let stats_after = mem.host_staging_stats();
+    assert!(
+        stats_after.hits > stats_before.hits,
+        "キャッシュ経由 Pinned も 2 回目以降は hit を観測するはず: before={stats_before:?} after={stats_after:?}"
+    );
+}

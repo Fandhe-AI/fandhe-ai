@@ -12,11 +12,18 @@ API）の #1335（PR #1404）で `tensor-core::MemoryOps::with_host_view` を
 本イシュー（#1336）は CUDA 側を実装する: 形状（要素数）ごとに再利用する
 ホストステージングバッファへ `memcpy_dtoh` 1 回で D2H し、そのスライスを
 呼び出し元クロージャへ借用として渡す。実装は完了し GPU 非依存の単体
-テスト・受け入れ条件を検証する `#[ignore]` 実機テストを整備したが、
-**本エージェント実行環境に CUDA 実機（DGX Spark GB10 等）がないため
-D2H＋読み出し時間の before/after 実測（R3）は未完了**。既定の
-`HOST_STAGING_KIND` は unsafe 経路（`Pinned`）を通さない安全側
-（`Pageable`）に固定してある。
+テスト・受け入れ条件を検証する `#[ignore]` 実機テストを整備し、
+GB10 実機（DGX Spark GB10・sm_121）で D2H＋読み出し時間の before/after
+5 回計測中央値（R3）を実行した（§5・§6）。**この計測はホスト読み出しを
+`black_box` で保護する是正（§5.3。codex-review P1・Cursor Bugbot 指摘）
+より前のバイナリで取得したものであり、release 最適化で計測対象が消え
+ていた可能性を排除できないため、以下の数値は是正後の再計測が済むまで
+参考値として扱う**（§5.3・「採否」節）。是正前の参考値では glibc mmap
+閾値（32 MiB）を超える N=4096（64 MiB）で約 10.3 倍改善・閾値未満の
+N=1024/2048 は想定どおり差なし相当だった。既定の `HOST_STAGING_KIND` は
+参考値の傾向に関わらず、unsafe 経路（`Pinned`）を通さない安全側
+（`Pageable`）のまま維持する（§6。`Pinned` への切替は再計測後にユーザー
+承認事項として引き継ぐ）。
 
 ## 1. 背景（実測根拠）
 
@@ -154,6 +161,16 @@ green（本エージェント実行環境で確認済み）。
 - managed 配置（`crate::placement::set_managed_placement_enabled(true)`）
   での `with_host_view` が `download` と bit 同一であること（デバイスが
   managed memory 非対応の場合はスキップ）。
+- `with_host_view_using_kind`（`internal-diagnostics` feature 限定の
+  診断専用入口）が `Pageable`／`Pinned` いずれも `download` と bit 完全
+  一致すること。
+- **（実機実測フェーズ追加）** `CudaMemory::new_with_host_staging_kind`
+  （同じく `internal-diagnostics` feature 限定・§5 の A/B 計測が使う
+  診断専用コンストラクタ）でキャッシュ種別を `Pinned` に固定した場合も、
+  本番と同じ `with_host_view`（キャッシュ経由）経路で `download` と
+  bit 完全一致し、2 回目以降は `host_staging_stats().hits` が増加する
+  こと（`with_host_view_using_kind` は毎回新規確保のため公平な A/B の
+  前提にならず、本コンストラクタで補った。§5.1 参照）。
 
 実行コマンド:
 
@@ -162,48 +179,115 @@ cargo test -p fandhe-ai-backend-cuda --release --all-features \
     --test host_view_real_device -- --ignored --nocapture --test-threads=1
 ```
 
-## 5. 実機実測（R3・未実施）
+## 5. 実機実測（R3・完了）
 
-**本エージェント実行環境に CUDA 実機（DGX Spark GB10 等）がないため、
-D2H＋読み出し時間の before/after 5 回計測中央値は未実施のまま記入欄のみ
-残す**（`docs/cuda-gemm-vjp-transposed-entry.md`・`docs/perf/
-linear-forward-device-gpu.md` の CUDA 実測欄と同じ先例に従う）。
+GB10 実機（DGX Spark GB10・sm_121・CUDA 13.0・rustc 1.97.0）で 2026-09-08
+に実施した。実行ログ・env_info・集計スクリプトは
+`docs/perf/logs/cuda-host-view-staging-1336/`（README.md に再現手順あり。
+内部ホスト名は含めない）。
 
-### 5.1 実行手順（実施時に埋める）
+### 5.1 実行手順（実施済み）
 
 1. `docs/real-hardware-verification-env.md` §3・§4・§6 に従い DGX Spark
-   へ rsync 転送する。
-2. 計測前後に `nvidia-smi` で利用率 0%・`uptime`／load average を
-   `docs/perf/logs/cuda-host-view-staging-1336/env_info.txt` へ記録する
-   （内部ホスト名は書かない）。
-3. `#[ignore]` 実機テスト（4.2 節）を実行し bit 同一を確認する。
-4. D2H＋読み出し時間の A/B（`before` = 既定実装相当の `download`＋読み出し
-   ／`after-Pageable`／`after-Pinned`）を N=1024/2048/4096（4/16/64 MiB）
-   で計測する。各 run = 20 warmup + 20 計測の中央値、5 run の中央値を
-   採用する。
+   へ rsync 転送した（イシュー専用ディレクトリ
+   `~/work/rust-ai-library-run-1336/`）。転送前後で秘密ファイル
+   （`*.local.md`・`.env*`）が含まれないことを確認済み。
+2. 計測前後に `nvidia-smi`（utilization／compute-apps）・`uptime`・
+   `rustc -V`・`nvcc --version` を `env_info.txt` へ記録した（内部
+   ホスト名は含めない）。常駐サービス（ComfyUI・Kokoro）以外に GPU を
+   使うプロセスがないことを毎回確認してから計測した。
+3. `#[ignore]` 実機テスト（4.2 節。新規追加分含め全 7 件）を実行し
+   bit 同一を確認した（ゲート A）。
+4. D2H＋読み出し時間の A/B（`before` = `download()`＋読み出し／
+   `after_pageable` = 本番既定 `with_host_view`／`after_pinned` =
+   `new_with_host_staging_kind(Pinned)` 経由のキャッシュ経由 `with_host_
+   view`）を N=1024/2048/4096（4/16/64 MiB）で計測した。各 run = 20
+   warmup + 20 計測の中央値、独立 5 プロセス起動の中央値を採用
+   （`host_view_staging_readout_ab_1336.rs`）。
 
-### 5.2 実測値（未実施）
+**事前宣言した判定基準**（実測前に本節へ記載・計測後に変更していない）:
 
-| N | before（`download`＋読み出し・ms） | after `Pageable`（ms） | after `Pinned`（ms） | 判定 |
-|---|---|---|---|---|
-| 1024 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 2048 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 4096 | 未実測 | 未実測 | 未実測 | 未実測 |
+- ゲート A（必須）: `#[ignore]` 全件 pass。
+- ゲート B（本番 `Pageable` の非後退）: 全 N で `before` 比 median +5%
+  以内、または改善。改善が期待できるのは glibc mmap 閾値（32 MiB）を
+  超える N=4096 のみで、N=1024/2048 は差なしでも失敗と読まない。
+- ゲート C（情報のみ）: キャッシュ経由 `Pinned` vs `Pageable`。結果に
+  関わらず `HOST_STAGING_KIND` は本ラン単独では切り替えない。
 
-env_info（`uptime`／load average・実行時間帯）: 未実測。
+### 5.2 実測値（5 プロセス起動・中央値。詳細は `aggregate.md`。**§5.3 の計測保護是正前の参考値・再計測待ち**）
+
+| N | bytes(MiB) | before（`download`＋読み出し・ms） | after `Pageable`（ms） | after `Pinned`（ms） | pageable/before | pinned/before |
+|---|---|---|---|---|---|---|
+| 1024 | 4 | 0.2616 | 0.2598 | 0.2076 | 0.993x | 0.794x |
+| 2048 | 16 | 0.9016 | 0.9180 | 0.7780 | 1.018x | 0.863x |
+| 4096 | 64 | 33.5578 | 3.2441 | 3.0391 | **0.097x**（約 10.3 倍高速） | 0.091x（約 11.0 倍高速） |
+
+- **ゲート A**: `host_view_real_device` の `#[ignore]` 7/7 件 pass
+  （`docs/perf/logs/cuda-host-view-staging-1336/ignored-host_view_real_device.log`）。
+- **ゲート B**: 全 N で満たす（N=1024: 0.993x・N=2048: 1.018x はいずれも
+  +5% 以内、N=4096 は大幅改善）。
+- **ゲート C（情報のみ）**: キャッシュ経由 `Pinned` は全 N で `Pageable`
+  よりさらに速い（N=1024 で約 20%・N=2048 で約 15%・N=4096 で約 6%）。
+  WRITECOMBINED メモリの CPU 読み出し劣化（2.2 節の懸念）は本ワーク
+  ロード（線形逐次読み出し＋XOR 畳み込み）では顕在化しなかった。ただし
+  `HOST_STAGING_KIND` は本ラン単独では切り替えない（6 節）。
+
+env_info: GB10・utilization.gpu 0%（計測前後とも）・load average
+1.0〜1.5 台（常駐 ComfyUI・Kokoro のみ、計測対象の GPU 使用プロセス
+なし）・rustc 1.97.0・nvcc 13.0.88。5 run とも他プロセスの介入なしを
+確認済み（`docs/perf/logs/cuda-host-view-staging-1336/env_info.txt`）。
+
+**注意（再掲。§5.3 参照）**: 上記ゲート A〜C・表の数値は `workload()` の
+戻り値を `black_box` で保護する是正より前のバイナリで取得した参考値で
+あり、is-optimized-away の可能性を排除できていない。ゲート B／C の
+「非後退」「上回る」という判定文言は是正後の再計測が済むまで確定した
+結論として扱わない。
+
+### 5.3 計測保護の是正（codex-review P1・Cursor Bugbot 指摘。未再実測）
+
+`host_view_staging_readout_ab_1336.rs::measure_with_cold` の計測区間
+（`bench_harness::run` へ渡すクロージャ）が `workload()` の戻り値
+（`fold_bits` による XOR 畳み込み値。`u32`）を `let _ = workload();` で
+破棄していた。`fold_bits` は副作用を持たない純粋計算のため、
+`bench_harness::run` 自体が呼び出しを `black_box` で包む契約（`bench-
+harness::protocol::run` のドキュメンテーションコメント）だけでは
+クロージャ内部の計算過程（D2H＋要素走査）までは保護されず、release
+最適化でホスト読み出し全体が除去されうる状態だった（codex-review・
+Cursor Bugbot が同一箇所を独立に指摘。一致度が高い）。
+
+`std::hint::black_box(workload())` へ修正し戻り値を消費するよう是正
+した（本コミット）。**この是正は 5.2 節の実測値を得た計測より後に
+行っており、本エージェント実行環境に CUDA 実機（GB10）が無いため
+是正後の再計測は未実施のまま記入欄を残す**。5.2 節の数値は是正前の
+バイナリでの実測であり、除去が実際に発生していたかは不明（是正後の
+再計測で before/after 比が大きく変わらなければ除去は起きていなかった
+と判断できる。別セッション・別イシューで GB10 実機に接続できる
+エージェントが再実行し本節を更新すること）。
+
+再計測手順は README.md の「再現手順」節をそのまま使える
+（`ab-run1.log`〜`ab-run5.log` を上書きし `aggregate.py` を再実行、
+5.2 節の表と本節の記述を更新する）。
 
 ## 6. 採否
 
 - **本番既定は `HostStagingKind::Pageable`（unsafe 経路を通さない安全側）
-  のまま維持する**。5 節の実測が完了し、`Pageable` を一貫して上回る種が
-  確認できた場合にのみ、ユーザー承認を経て `HOST_STAGING_KIND` を切り替
-  える（`.claude/rules/security.md`「unsafe は必要最小限」・本番結線の
-  事前承認方針〈性能低下の可能性は前後比較を記録〉と整合させるため、
-  実測なしの `Pinned` 既定化は行わない）。
-- 実装自体（`HostStagingCache`・`with_host_view` の 3 分岐・GPU 非依存
-  テスト・`#[ignore]` 実機テスト）は完了しており、既定 `Pageable` 種の
-  下でも #1146 が示した「事前タッチ済み再利用 `Vec`」の段差回避効果は
-  機構として反映されている（実測なしに効果量は主張しない）。
+  のまま維持する**（実測完了後も変更しない）。5 節の参考値では `Pinned`
+  が全 N で `Pageable` を上回る傾向が見られたが（ゲート C）、これは
+  §5.3 の計測保護是正前の値であり確定した結論ではない。unsafe 経路の
+  既定化は「性能で押し切らず必要最小限に留める」方針
+  （`.claude/rules/security.md`）に基づきユーザー承認事項として残す。
+  **`Pinned` への切替の判断材料は、§5.3 の是正後の再計測が完了するまで
+  揃っていない**（is-optimized-away の可能性を排除できていない値を
+  根拠に別イシューへ進めない）。再計測完了後、ユーザーが承認すれば
+  `HOST_STAGING_KIND` の切替は本節を更新のうえ別イシューで実施できる。
+- 実装（`HostStagingCache`・`with_host_view` の 3 分岐・GPU 非依存
+  テスト・`#[ignore]` 実機テスト）は完了し（ゲート A は bit 同一等の
+  受け入れ条件検査のため §5.3 の計測保護是正の影響を受けず確定
+  済み）、既定 `Pageable` 種の下で #1146 が示した「事前タッチ済み
+  再利用 `Vec`」の段差回避効果は**是正前の参考値では**確認できた
+  （N=4096・64 MiB で `before` 比約 10.3 倍改善。32 MiB 未満の
+  N=1024/2048 は想定どおり差なし相当）。是正後の再計測でこの傾向が
+  維持されるかは未確認のまま引き継ぐ（§5.3）。
 
 ## 7. 引き継ぎ（対象外事項。ユーザー承認・別イシュー起票が必要）
 
@@ -222,8 +306,16 @@ env_info（`uptime`／load average・実行時間帯）: 未実測。
    Issue 起票はしない。将来 issue 化を検討）。
 3. **キャッシュ可能 pinned（フラグ 0）**: `driver::result::malloc_host` +
    自作 `HostSlice` 実装は unsafe 面が広がるため本イシューでは実装しない
-   （2.2 節）。実測で `Pinned`（WRITECOMBINED）が有望だった場合のみ
-   ユーザー承認を得て検討する。
-4. **5 節の実機実測そのもの**: 本エージェント実行環境に CUDA 実機がない
-   ため未実施。DGX Spark GB10 実機にアクセス可能な環境で 5.1 節の手順を
-   実行し、5.2 節の表・6 節の採否判断を更新する。
+   （2.2 節）。5 節の**是正前の参考値**では `Pinned`（WRITECOMBINED）が
+   全 N で `Pageable` を上回る傾向だったが、§5.3 の計測保護是正後の
+   再計測が未実施のため確定していない。再計測に加え、より広い読み出し
+   パターン（ストライドアクセス・複数スレッド同時読み出し等）での追加
+   実測を経てユーザー承認を得れば検討候補になる。
+4. **`HOST_STAGING_KIND` の `Pinned` への切替可否**: 5 節（ゲート C）の
+   **是正前の参考値**では `Pinned` が全 N で `Pageable` を一貫して
+   上回る傾向だった（N=1024 約 20%・N=2048 約 15%・N=4096 約 6% 高速）。
+   ただし §5.3 の計測保護是正（`black_box` 適用）後の再計測が未実施の
+   ため、この傾向自体が最適化除去の産物でないかは未確認。再計測で傾向
+   が維持されることを確認し、かつ unsafe 経路の既定化についてユーザー
+   承認が得られれば（6 節）、`HOST_STAGING_KIND` の切替は別イシューで
+   実施できる。
