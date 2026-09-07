@@ -110,10 +110,27 @@ checksum（`bench-common::Record.checksum`。GEMM 要素和／train 最終 loss 
 
 ## §6 帯域（`managed_placement_bandwidth_real_device.rs`。§2.2 相当）
 
+**未確定（github-actions レビュー指摘・#1397）**: 下表・帯域面の結論は
+`measure_one` の readback 計測ロジックが「managed も含め `download()` が
+返した通常ホスト `Vec`（既にコピー済み）を逐次読む」実装だった時点の
+実測値である。同ロジックはその後
+`CudaMemory::measure_managed_direct_read_seconds`（`internal-diagnostics`
+feature 限定）を用いて managed 配置時は upload 直後の `UnifiedSlice` へ
+コピーなしで直接アクセスする方式へ是正した（コード修正のみ。本イシューの
+GB10 実機実測はこの是正の**前**に取得したもので、是正後の実装での
+再計測は未実施）。したがって下表の on 側 readback 値は managed ページ
+自体への CPU 直接アクセス帯域を表しておらず、**managed 配置の CPU 直接
+読み取りに帯域低下が無いとは現時点では断言できない**（本エージェント
+実行環境には GB10 実機アクセスが無く再計測できないため、この節は
+是正後の実装での再実測を要する未決事項として明記する。既定化可否判定
+自体は §8 のとおり train reuse の後退のみを根拠に REJECT 済みで、この
+未決事項の影響を受けない）。
+
 `docs/perf/logs/cuda-managed-placement-ab-1353/1353-bandwidth.log` に生ログ。
 サイズ {4, 16, 32, 33, 64} MiB（#1146/#1149 の 32→33 MiB 段差を含む）で
 upload／download／download 結果のホスト側逐次全読み（ページ経由アクセスの
-実効帯域）を計測（各 5 run 中央値。bit 一致は全サイズで assert pass）:
+実効帯域。上記のとおり是正前実装での計測）を計測（各 5 run 中央値。bit 一致
+は全サイズで assert pass）:
 
 | MiB | off upload (GiB/s) | off download | off readback | on upload | on download | on readback |
 |---|---|---|---|---|---|---|
@@ -128,10 +145,13 @@ upload／download／download 結果のホスト側逐次全読み（ページ経
 依存と推定するが未確定のまま記録する。32 MiB 以上では off/on とも
 安定した値になる。）
 
-**帯域面の結論**: `readback`（ホスト側ページ経由の逐次読み取り。managed か
-device-only かに関わらず最終的にホスト可視のバッファを読む区間）は
-off/on でほぼ同一（7.1〜7.4 GiB/s、差 5% 未満）であり、**managed 配置に
-よる CPU 側ページ経由アクセスの帯域低下は確認されなかった**。一方
+**帯域面の結論（是正前実装での実測。上記の未確定注記を参照）**:
+`readback`（ホスト側ページ経由の逐次読み取り。是正前実装のためこの計測
+自体は managed 側もコピー済みホスト `Vec` を読んでいた）は off/on で
+ほぼ同一（7.1〜7.4 GiB/s、差 5% 未満）だった。ただしこれは managed
+ページ自体への CPU 直接アクセスの計測ではないため、**managed 配置の
+CPU 側ページ経由アクセスに帯域低下が無いとまでは、この実測から結論
+づけない**（是正後実装での再計測が必要）。一方
 `upload` は managed（ホスト → `UnifiedSlice` memcpy）が device-only
 （DMA H2D）の約 1/10（4.7〜5.1 対 45.5〜53.7 GiB/s）と大幅に遅い。これは
 本イシューの主結論（train reuse の `upload(grad)` を含む `device_update`

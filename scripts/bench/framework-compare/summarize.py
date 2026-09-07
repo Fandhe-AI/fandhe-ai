@@ -791,8 +791,21 @@ def _devices_in_train_infer(rows, task, mode="fresh"):
     順）。`devices_in()` と異なり `tf32` の値を問わず union で集める
     （`_get_train_infer_row` と対になるヘルパー。理由は同関数の
     docstring 参照）。
+
+    イシュー #1353（Cursor Bugbot 指摘）: `managed:true` 行は除外する。
+    `_get_train_infer_row` は `get()`（managed 行を除外済み）を使うため、
+    ここで除外しないと `--managed` 限定計測しか存在しないデバイスが
+    「計測済み」として一覧に挙がる一方 `_get_train_infer_row` は
+    device-only 行が無く `None` を返し、(b)/(c) 節が当該デバイスを
+    「計測不可」と誤表示する（一覧には載るのに行が引けない不整合）。
     """
-    present = {r["device"] for r in rows if r["task"] == task and r["mode"] == mode}
+    present = {
+        r["device"]
+        for r in rows
+        if r["task"] == task
+        and r["mode"] == mode
+        and r.get("managed", False) is not True
+    }
     return [d for d in DEVICE_ORDER if d in present]
 
 
@@ -894,11 +907,21 @@ def gemm_checksum_reference(rows):
     # checksum に引きずられ、正当な FP32 行を「孤立した誤値」と誤判定
     # しうる（fail-open のおそれ）。TF32 行自身の checksum 妥当性検証は
     # `section()` の TF32 専用節（`_tf32_gemm_reference`）が別途担う。
+    #
+    # イシュー #1353（github-actions レビュー指摘）: `managed:true` 行も
+    # ここで除外する。除外しないと `_row_key` が managed を区別しないため
+    # 同一 `(framework, device, size, mode)` の managed 行と device-only
+    # 行が checksum 突合で衝突し、片方の checksum 相違がもう片方（正常な
+    # 既定配置）にまで「不一致」として誤伝播しうる（`get()`／
+    # `devices_in()` に既に適用済みの除外条件と揃える）。
     sizes = sorted(
         {
             r["size"]
             for r in rows
-            if r["task"] == "gemm" and _valid_gate_size(r.get("size")) and r.get("tf32", False) is not True
+            if r["task"] == "gemm"
+            and _valid_gate_size(r.get("size"))
+            and r.get("tf32", False) is not True
+            and r.get("managed", False) is not True
         }
     )
     result = {}
@@ -910,6 +933,7 @@ def gemm_checksum_reference(rows):
             and r["size"] == size
             and r["mode"] == "fresh"
             and r.get("tf32", False) is not True
+            and r.get("managed", False) is not True
         ]
 
         # 相互一致するクラスタのうち最大のものを先に求める（多数派の把握）。
@@ -979,6 +1003,16 @@ def gemm_checksum_mismatches(rows):
         # （`gemm_checksum_reference` のコメント参照。専用の妥当性検証は
         # `section()` の TF32 節が別途担う）。
         if r.get("tf32", False) is True:
+            continue
+        # イシュー #1353（github-actions レビュー指摘）: `managed:true` 行も
+        # ここで除外する。`gemm_checksum_reference` が managed 行を候補から
+        # 除外済みでも、本関数がそのまま managed 行自身を突合対象に含めると
+        # `_row_key` を介した下流の辞書（`mismatch_by_key`／
+        # `gemm_mismatch_map`）で device-only 行と同一キーに登録され、
+        # managed 行固有の checksum 相違が正常な device-only 行の「不一致」
+        # として誤伝播しうる。managed 配置固有の checksum 妥当性検証（off/on
+        # 完全一致）は `compare_managed_ab.py::evaluate_cell` が別途担う。
+        if r.get("managed", False) is True:
             continue
         # `reference` のキーは `_valid_gate_size` 検証済みの size のみ
         # （`gemm_checksum_reference` docstring 参照）。`r["size"]` が不正
@@ -1234,7 +1268,21 @@ def _row_key(r):
     # `mismatch_by_key`/`unverifiable_keys` 等の辞書で片方が上書きされ、
     # 無効判定（checksum 不一致・parity 失敗）の付記先を取り違える
     # （fail-open のおそれ）。
-    return (r["framework"], r["device"], r["size"], r["mode"], r.get("tf32", False) is True)
+    #
+    # イシュー #1353（github-actions レビュー指摘）: 同じ理由で `managed`
+    # もキーへ含める。`gemm_checksum_mismatches` 側で managed 行自体は
+    # 除外済みだが、`_row_key` 自体が managed を区別しないままだと、他の
+    # 呼び出し元（将来 managed 行を対象に含める変更が入った場合や、
+    # `unverifiable_keys` 等の別集合）で同一キー衝突が再発しうるため、
+    # 多重防御として明示的に区別する。
+    return (
+        r["framework"],
+        r["device"],
+        r["size"],
+        r["mode"],
+        r.get("tf32", False) is True,
+        r.get("managed", False) is True,
+    )
 
 
 # イシュー #1051: 目標達成ゲート（--target）専用のヘルパー群。既存の

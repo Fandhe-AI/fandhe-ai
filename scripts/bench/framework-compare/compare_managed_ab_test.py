@@ -212,6 +212,58 @@ class EvaluateCellTest(unittest.TestCase):
         self.assertEqual(result["status"], "undeterminable")
         self.assertIn("有限正数", result["reason"])
 
+    def test_undeterminable_when_warmup_is_negative(self):
+        # イシュー #1353（github-actions レビュー指摘）: off/on 双方で
+        # 揃ってさえいれば `warmup=-1` のような不正値でも旧実装は「一致」
+        # として素通りしていた。型・値域検証を明示的に要求する。
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(5)]
+        for r in off_rows + on_rows:
+            r["warmup"] = -1
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("warmup", result["reason"])
+        self.assertIn("不正な値", result["reason"])
+
+    def test_undeterminable_when_iters_is_zero(self):
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(5)]
+        for r in off_rows + on_rows:
+            r["iters"] = 0
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("iters", result["reason"])
+
+    def test_undeterminable_when_version_is_empty_string(self):
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(5)]
+        for r in off_rows + on_rows:
+            r["version"] = ""
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("version", result["reason"])
+
+    def test_undeterminable_when_warmup_is_bool(self):
+        # `bool` は `int` のサブクラス（`True == 1`）のため、型検査を
+        # `isinstance(v, int)` のみで行うと `warmup=True` を素通りしうる。
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(5)]
+        for r in off_rows + on_rows:
+            r["warmup"] = True
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("warmup", result["reason"])
+
+    def test_undeterminable_when_checksum_is_bool(self):
+        # イシュー #1353（github-actions レビュー指摘）: `checksum=True`
+        # は `int` として `1` と等価になるため、明示的な型検証が無いと
+        # 参照値が `1` の行と「完全一致」に誤判定されうる。
+        off_rows = [_rec(False, 0.001, checksum=1) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009, checksum=True) for _ in range(5)]
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("checksum", result["reason"])
+
 
 class RenderMarkdownAdoptVerdictTest(unittest.TestCase):
     """codex-review 指摘: ADOPT 候補判定は時間比だけでなく checksum 完全

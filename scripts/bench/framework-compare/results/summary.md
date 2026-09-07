@@ -1909,8 +1909,10 @@ HEAD。#1352 実装込み）への path patch でビルドした `bench-fandhe` 
 後退（`--phases` 単発診断では `device_update` フェーズが 2.82 倍後退し、
 `UnifiedSlice::drop` の同期解放が per-step の暗黙同期点になる事前仮説と
 整合）。gemm・train fresh は managed の影響を構造的に受けない設計どおり
-差なし。CPU 側ページ経由アクセスの帯域（readback）は off/on でほぼ同一
-（差 5% 未満）で低下は確認されず、一方 upload（H2D 相当）は managed が
+差なし。CPU 側ページ経由アクセスの帯域（readback）は是正前実装での計測
+では off/on でほぼ同一（差 5% 未満）だったが、managed ページ直接読み取り
+を計測する是正後実装での再計測は未実施のため低下有無は未確定（#1397
+レビュー指摘）。一方 upload（H2D 相当）は managed が
 device-only の約 1/10 で主要因と推定される。詳細・env_info・スコープ外
 事項は `docs/perf/cuda-managed-placement-ab.md`・
 `docs/perf/logs/cuda-managed-placement-ab-1353/` を参照。

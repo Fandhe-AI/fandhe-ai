@@ -2549,6 +2549,70 @@ class GetDevicesInManagedExclusionTests(unittest.TestCase):
         self.assertIn("cpu", devices)
         self.assertNotIn("cuda", devices)
 
+    def test_devices_in_train_infer_excludes_device_with_only_managed_rows(self):
+        # イシュー #1353（Cursor Bugbot 指摘）: `_devices_in_train_infer`
+        # が managed 行を除外しないと、cuda が「計測済み」として一覧に
+        # 挙がる一方 `_get_train_infer_row`（`get()` 経由で managed 行を
+        # 除外済み）は該当なしで `None` を返し、(b)/(c) 節が
+        # 「計測不可」と誤表示する不整合が起こる。
+        managed_row = dict(
+            _train_row(framework="fandhe-ai", device="cuda", mode="fresh")
+        )
+        managed_row["managed"] = True
+        normal_row = dict(_train_row(framework="fandhe-ai", device="cpu", mode="fresh"))
+        rows = [managed_row, normal_row]
+        devices = summarize._devices_in_train_infer(rows, "train", mode="fresh")
+        self.assertIn("cpu", devices)
+        self.assertNotIn("cuda", devices)
+
+
+class GemmChecksumManagedExclusionTests(unittest.TestCase):
+    """イシュー #1353（github-actions レビュー指摘）: `managed:true` 行を
+    `gemm_checksum_reference`／`gemm_checksum_mismatches` からも除外する。
+    除外しないと `_row_key` が managed を区別しない旧実装のもとで、同一
+    `(framework, device, size, mode)` の managed 行の checksum 相違が
+    正常な device-only 行の「不一致」判定へ誤伝播しうる（`get()`／
+    `devices_in()` に既に適用済みの除外条件と揃える）。
+    """
+
+    def test_reference_ignores_managed_row_with_divergent_checksum(self):
+        # 参照値は fandhe-ai/cpu 優先（`_REFERENCE_PRIORITY`）。managed
+        # 行（checksum 999.0 で孤立した誤値）が候補に混入しても、参照値
+        # 算出・多数決クラスタ判定へ影響しないことを確認する。
+        cpu_fresh = _base_row(framework="fandhe-ai", device="cpu", size=1024, checksum=1.0)
+        candle_fresh = _base_row(framework="candle", device="cpu", size=1024, checksum=1.0)
+        managed_fresh = dict(
+            _base_row(framework="fandhe-ai", device="cuda", size=1024, checksum=999.0)
+        )
+        managed_fresh["managed"] = True
+        rows = [cpu_fresh, candle_fresh, managed_fresh]
+        reference = summarize.gemm_checksum_reference(rows)
+        ref, ref_label, candidate_count = reference[1024]
+        self.assertEqual(ref, 1.0)
+        # managed 行が候補集合から除外されていれば候補は 2 件
+        # （cpu_fresh・candle_fresh のみ）。
+        self.assertEqual(candidate_count, 2)
+
+    def test_mismatches_do_not_flag_normal_row_due_to_managed_collision(self):
+        # 除外前の実装では、managed 行の checksum 相違が同一キーに登録
+        # され device-only 行まで不一致扱いされ得た。除外後は
+        # device-only 行（checksum 一致）が mismatches に現れないことを
+        # 確認する。managed 行自体も突合対象から除外されるため現れない。
+        cpu_fresh = _base_row(framework="fandhe-ai", device="cpu", size=1024, checksum=1.0)
+        candle_fresh = _base_row(framework="candle", device="cpu", size=1024, checksum=1.0)
+        cuda_device_only = _base_row(
+            framework="fandhe-ai", device="cuda", size=1024, checksum=1.0
+        )
+        managed_divergent = dict(
+            _base_row(framework="fandhe-ai", device="cuda", size=1024, checksum=999.0)
+        )
+        managed_divergent["managed"] = True
+        rows = [cpu_fresh, candle_fresh, cuda_device_only, managed_divergent]
+        mismatches = summarize.gemm_checksum_mismatches(rows)
+        mismatched_rows = [r for r, _ref, _label in mismatches]
+        self.assertNotIn(cuda_device_only, mismatched_rows)
+        self.assertNotIn(managed_divergent, mismatched_rows)
+
 
 class MainTargetExitCodeTests(unittest.TestCase):
     def _run_main(self, path, target=None, strict=False):

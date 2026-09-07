@@ -207,8 +207,12 @@ managed_placement_real_device.log`。
 解放が per-step の暗黙同期点になるという上記「同期契約の差分」の事前仮説
 と整合）、**既定 OFF を維持（REJECT）**と確定した。gemm・train fresh は
 managed の影響を構造的に受けない設計どおり差なし。CPU 側ページ経由アクセス
-の帯域（readback）は off/on でほぼ同一（差 5% 未満）で低下は確認されな
-かった。詳細は `docs/perf/cuda-managed-placement-ab.md` を参照。
+の帯域（readback）は是正前の計測実装（managed 側もコピー済みホスト `Vec`
+を読む実装）では off/on でほぼ同一（差 5% 未満）だったが、managed ページ
+自体への CPU 直接読み取りを計測する是正後実装での再計測は未実施のため、
+低下の有無は未確定のまま残る（#1397 レビュー指摘。既定化可否判定自体は
+train reuse の後退のみを根拠にしており影響を受けない）。詳細は
+`docs/perf/cuda-managed-placement-ab.md` §6 を参照。
 
 ## フォローアップ・出典
 

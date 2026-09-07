@@ -97,6 +97,27 @@ def split_off_on(rows):
     return cells
 
 
+def _valid_field_value(field, v):
+    """`warmup`／`iters`／`version` 1 値の型・値域を検証する（イシュー
+    #1353・github-actions レビュー指摘）。
+
+    `bool` は Python では `int` のサブクラス（`True == 1`）のため、
+    `isinstance(v, int)` だけでは `warmup=True` のような型混入を弾けない。
+    明示的に `bool` を除外したうえで、`warmup` は 0 以上・`iters` は
+    1 以上（0 回計測は無意味）の整数、`version` は非空文字列であることを
+    要求する（fail-closed。`compare_gemm_gate.py` と同様の方針）。
+    """
+    if isinstance(v, bool):
+        return False
+    if field == "warmup":
+        return isinstance(v, int) and v >= 0
+    if field == "iters":
+        return isinstance(v, int) and v >= 1
+    if field == "version":
+        return isinstance(v, str) and v != ""
+    return True
+
+
 def _median(values):
     values = sorted(values)
     n = len(values)
@@ -133,6 +154,19 @@ def evaluate_cell(off_rows, on_rows):
             return {
                 "status": "undeterminable",
                 "reason": f"'{field}' が off または on の行に欠損している",
+            }
+        # イシュー #1353（github-actions レビュー指摘）: 型・値域を検証する。
+        # 欠損チェック（上）と一致チェック（下）だけでは
+        # `warmup=-1`／`iters=0`／`version=""` のような不正値でも off/on
+        # 双方で揃ってさえいれば「一致」として素通りしてしまう（fail-open
+        # のおそれ）。集合化・比較の前に明示的に妥当性を検証する。
+        invalid_values = {
+            v for v in off_values | on_values if not _valid_field_value(field, v)
+        }
+        if invalid_values:
+            return {
+                "status": "undeterminable",
+                "reason": f"'{field}' に不正な値がある（{invalid_values!r}）",
             }
         if len(off_values) != 1 or len(on_values) != 1:
             return {
@@ -171,8 +205,19 @@ def evaluate_cell(off_rows, on_rows):
 
     off_checksums = [r.get("checksum") for r in off_rows]
     on_checksums = [r.get("checksum") for r in on_rows]
-    if any(c is None for c in off_checksums + on_checksums):
-        return {"status": "undeterminable", "reason": "checksum 欠損行あり"}
+    # イシュー #1353（github-actions レビュー指摘）: `bool` は `int` の
+    # サブクラス（`True == 1`）のため、`checksum` に `bool` が混入すると
+    # `checksums_match`／`==` が数値として扱ってしまい「完全一致」と
+    # 誤判定されうる。欠損（`None`）に加え非数値・`bool` も明示的に拒否
+    # する（fail-closed）。
+    if any(
+        c is None or isinstance(c, bool) or not isinstance(c, (int, float))
+        for c in off_checksums + on_checksums
+    ):
+        return {
+            "status": "undeterminable",
+            "reason": "checksum 欠損または非数値の行あり",
+        }
     ref_checksum = off_checksums[0]
     composite_ok = all(
         checksum_contract.checksums_match(ref_checksum, c)
