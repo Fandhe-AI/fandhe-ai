@@ -669,6 +669,56 @@ reuse とも `a.matmul(&b)`（`CudaBackendOps::gemm` の `clone_htod`／`alloc_z
   `(task, device, size, mode)` セルごとに 5 回計測中央値・checksum 一致（複合判定＋完全一致）を
   集計する。実測記録・既定化可否の判定は `docs/perf/cuda-managed-placement-ab.md` を参照
 
+### `--device-checksum`（イシュー #1339。checksum のデバイス側 f64 reduction 化）
+
+`docs/perf/cuda-gemm-reuse-phase-breakdown.md`・`metal-gemm-reuse-phase-breakdown.md` の
+実測で、gemm 計測窓のうち `host_copy`（`C` の D2H）と `checksum`（全要素和をホスト側 `f64`
+逐次和で求め直す処理）がハーネス計測窓の 66〜75% を占めることが確定した（縮退検出契約自体は
+維持したいがハーネスの診断コストが支配的、という問題）。`--device-checksum` は checksum を
+バックエンド側の `f64` reduction（`fandhe_ai::Var::matmul_checksum`／candle 側は
+`sum_all().to_dtype(F64)`）で求め、毎反復の読み戻しを「checksum のみ（8 バイト）」へ縮小する
+値なしフラグ。要素単位 parity（`GemmReference::verify`）は毎反復では検証せず、計測ループ後の
+未計時 1 反復（`ChecksumReadout::WithOutput`）でのみ検証する。
+
+- **対応範囲**: `--task gemm`（`--phases` なし。fresh／reuse とも）限定。`train`／`infer`・
+  `--phases` との併用は常に `MEASURE_ERROR`
+- **`bench-fandhe`**: `device-checksum` cargo feature（既定無効）を有効化したビルドでなければ
+  `MEASURE_ERROR` になる。crates.io 公開版 `fandhe-ai =0.7.0` ピンには `Var::matmul_checksum`／
+  `ChecksumReadout`／`GemmChecksum` API 自体が未収録（本イシューは未リリースの HEAD で追加）の
+  ため、`--managed` と同じく **`device-checksum` feature ＋ `[patch.crates-io.fandhe-ai]`
+  による未リリース HEAD `crates/facade` への path patch**の両方が必要:
+
+  ```sh
+  cargo build --release -p bench-fandhe --features device-checksum \
+    --config 'patch.crates-io.fandhe-ai.path="/absolute/path/to/crates/facade"'
+  ```
+
+  `[patch]`／`.cargo/config.toml` は本 workspace の `Cargo.toml`・`Cargo.lock` へコミットしない
+  （計測後は `git checkout -- scripts/bench/framework-compare/Cargo.lock` で復元する）。
+  **実装状況（本イシュー時点）**: `BackendOps::gemm_checksum` は `backend-cpu` のみ実装済み
+  （`gemm` と bit 同一の `C`・checksum はホスト f64 逐次和と bit 一致）。`backend-cuda`／
+  `backend-metal` はデフォルト実装（常に `BackendError::Unsupported`）のままのため、
+  `--device cuda`／`--device metal --device-checksum` は現状 `MEASURE_ERROR` になる
+  （GPU 側デバイス reduction カーネルの実装・実機実測は後続イシューへ引き継ぐ）
+- **`bench-candle`**: `--task gemm` 限定（`--mode reuse`／`--phases` の既存拒否は不変）。
+  `--device cuda`／`--device cpu` は `to_dtype(F64)` 経由で checksum を求め、
+  **`--device metal` は candle 0.11 の Metal が `F64` dtype の reduction を持たないため
+  `f32` のまま `sum_all()` した値を checksum とする**（8 バイトではなく 4 バイト。この非対称は
+  `docs/perf/device-checksum-readback-ab.md` に明記する）
+- **`bench-burn`**: 対応する結線がないため常に `MEASURE_ERROR`
+- **JSONL**: `--device-checksum` で計測した行は `"device_checksum":true` を emit する
+  （既定は emit しないキー欠損 = `false` の互換規約。`bench_common::Record::device_checksum`。
+  `tf32`／`managed` と同型）
+- **`summarize.py`／`compare_gemm_gate.py`／`compare_ab.py`／`compare_gemm_ab.py`／
+  `compare_managed_ab.py`**: `device_checksum:true` 行は目標達成ゲート・A/B 比較から
+  **既定で除外**する（既存プロトコル計測との速度混同防止。正式ゲート〈#1031/#1037/#1117〉の
+  既定判定は device_checksum 経路へ切り替えない）
+- **実測記録**: 実機（DGX Spark GB10・M4 Max）での前後比較・on/off checksum 一致確認は
+  `docs/perf/device-checksum-readback-ab.md` を参照（GPU バックエンド未実装のため CUDA／Metal
+  は現時点で未実測。CPU の on/off checksum 一致は `bench-fandhe` の単体テスト
+  `device_checksum_matches_legacy_checksum_fresh_and_reuse`〈`device-checksum` feature 限定〉
+  で自動検証済み）
+
 ## 使い方
 
 ```bash

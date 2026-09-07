@@ -189,6 +189,20 @@ def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None):
                     f"{path}:{lineno}: 'managed:true' の行は本 A/B の対象外 — skipped"
                 )
                 continue
+            # イシュー #1339: `device_checksum` も `tf32`／`managed` と同じ
+            # 型検証・除外を適用する。
+            if "device_checksum" in obj and not isinstance(obj["device_checksum"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'device_checksum' フィールド型（bool を"
+                    f"期待。実際: {obj['device_checksum']!r}） — skipped"
+                )
+                continue
+            if obj.get("device_checksum", False) is True:
+                warnings.append(
+                    f"{path}:{lineno}: 'device_checksum:true' の行は本 A/B の対象外 "
+                    "— skipped"
+                )
+                continue
             if not _valid_cell_identity(obj, device, size_set=size_set):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"

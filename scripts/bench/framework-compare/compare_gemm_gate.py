@@ -162,6 +162,15 @@ def load_rows(path):
                     f"実際: {obj['managed']!r}） — skipped"
                 )
                 continue
+            # イシュー #1339: `device_checksum` も同じ「キー欠損 = False」
+            # 互換規約を持つ外部 JSONL 由来の値のため、同じ fail-closed
+            # 型検証を適用する。
+            if "device_checksum" in obj and not isinstance(obj["device_checksum"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'device_checksum' フィールド型（bool を"
+                    f"期待。実際: {obj['device_checksum']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -195,6 +204,13 @@ def _matching_rows(rows, framework, mode, size, device="cuda"):
         # 既定 device-only 配置とのゲート混同を防ぐため除外する
         # （summarize.py `_pick_row_for_gate` と同じ既定）。
         if r.get("managed", False) is True:
+            continue
+        # イシュー #1339: `device_checksum:true` 行は既定プロトコル計測
+        # とのゲート混同を防ぐため除外する（正式ゲート〈#1031/#1037/
+        # #1117〉の既定判定は device_checksum 経路へ切り替えない。採否は
+        # ユーザー判断事項。`docs/perf/device-checksum-readback-ab.md`
+        # 参照）。
+        if r.get("device_checksum", False) is True:
             continue
         out.append(r)
     return out
