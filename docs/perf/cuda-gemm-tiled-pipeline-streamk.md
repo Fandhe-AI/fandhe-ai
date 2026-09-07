@@ -143,9 +143,12 @@ q=15, nk=128` → 末尾 wave が `15/128 ≈ 0.117` タイル時間へ縮むが
 - **ゲート C（性能。`--blocks-per-sm auto`・GPU-only・各 5 回実行の中央値）**: N=1024 の
   `streamk_over_pipeline3` 中央値 ≥ 1.05、N=2048 で ≥ 1.00（かつ 0.95 未満の形状がないこと）。
 - **ゲート D（結線専用。本イシューで追加）**: N=1024/N=2048 の本番経路実体は 128×64 pipeline
-  （`TILED_PIPELINE_128X64_MIN_N/_MIN_K = Some(1024)`）であるため、同一 run ログの
-  `pipeline128x64_gpu_only` 列に対し `streamk_gpu_only_tflops / pipeline128x64_gpu_only_tflops` の
-  5 回中央値が N=1024・N=2048 とも ≥ 1.00 であること。
+  （`TILED_PIPELINE_128X64_MIN_N/_MIN_K = Some(1024)`）であるため、`--tile both` 実行時に同一 run・
+  同一 size の出力から分子を `tile=64x64` 行の `streamk_gpu_only_tflops`、分母を `tile=128x64` 行の
+  `pipeline3_gpu_only_tflops`（`gemm_tiled_pipeline_persistent_bench` は tile 幅ごとに独立した
+  `tile=<label>` 行を出力し、128×64 の非 persistent 基準値もラベルに依らず列名
+  `pipeline3_gpu_only_tflops` で出す。`pipeline128x64_gpu_only_tflops` という列は存在しない）として
+  読み取り、その比の 5 回中央値が N=1024・N=2048 とも ≥ 1.00 であること。
 - **結線の総合条件**: A PASS ∧ B-1 全行 0 fail ∧ B-2 PASS ∧ C 合格 ∧ D 合格。1 つでも欠ければ結線しない。
 
 ### 2. 環境
