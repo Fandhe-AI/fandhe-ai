@@ -37,7 +37,7 @@ docs(requirements): REQ-2 統一複合判定へのスケール付き絶対誤差
 
 **本文案**:
 
-```markdown
+````markdown
 ## 背景
 
 実装リポ（Fandhe-AI/fandhe-ai）の framework-compare GEMM ゲート（candle 比 5 回計測
@@ -171,7 +171,7 @@ fail 要素ダンプ計装: #1183。
 
 - 実装リポ main 上の本提案 draft: `https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/spec-proposal-req2-candle-parity-tolerance.md`
 - 決定記録 draft（候補比較・推奨案・ユーザー承認待ち事項）: `https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/candle-parity-tolerance-contract-decision.md`
-```
+````
 
 ---
 
