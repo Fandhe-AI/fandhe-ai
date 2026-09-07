@@ -137,6 +137,8 @@ fandhe-ai/
     │   ├── logs/cuda-gemm-candle-gate-1142/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1142）
     │   ├── logs/cuda-gemm-candle-gate-1360/ # 上記 §12（Phase 4／5 反映後）の正式系列・参考系列 off/on 3 本の実行ログ・env_info（内部ホスト名は含めない。イシュー #1360）
     │   ├── logs/cuda-gemm-candle-parity-1184/ # N=2048 candle 側 parity fail 2 要素の実値ダンプ・厳密真値突合結果・env_info（内部ホスト名は含めない。イシュー #1184）
+    │   ├── candle-parity-tolerance-candidates.md # #1184 ダンプ実値からスケール付き絶対誤差／ULP 判定候補（候補 A/B）を現行複合判定へ OR 追加した場合の fail 数を机上計算（`scripts/bench/framework-compare/parity_tolerance_candidates.py`。K=N=2048・正方・入力 U[-0.5,0.5) の 1 条件限定・「候補で置き換える」判定は本ダンプから評価不能と明記）。推奨・採否は含まない事実（fail 数・緩和上限）のみの記録・#1238／#1239 への引き継ぎを含む（イシュー #1237）
+    │   ├── logs/candle-parity-tolerance-candidates-1237/ # 上記の生出力（candidates-2048.md）・env_info（内部ホスト名は含めない。イシュー #1237）
     │   ├── cuda-gemm-reuse-phase-breakdown.md # GEMM reuse 計測境界を H2D／カーネル／D2H／同期でフェーズ分解し、#1142 §4.3 の「H2D/D2H 固定費が希釈要因」推定を精緻化（実際の主因は host_copy／checksum というハーネス診断コスト）。matmul 単体は candle fresh を上回る（N=1024: 1.59倍・N=4096: 1.47倍）ことを確定。N=4096 D2H の二峰性（#1169 関連）は未確定のまま記録。GB10実機実測。イシュー #1182
     │   ├── logs/cuda-gemm-reuse-phase-1182/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1182）
     │   ├── cuda-gemm-auto-f16-mma-switch.md # CudaGemmAuto::run_f16 の MatrixUnit 分岐 mma 優先・wmma フォールバック切替（#1156）の前後比較記録。GB10実機実測完了・512/1024/2048 は非後退（1.75〜4.67倍）・4096 は#1130 病態下で base 5run範囲内。本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16` baseline ceiling 未承認〉により一時差し戻し後、#1190 の ceiling 承認・反映を経て #1191 で `true` へ本番有効化済み（同一 HEAD base/after 再計測で非後退確認。GB10実機実測2026-09-05。§0・「#1191 再計測」節）。#1160
