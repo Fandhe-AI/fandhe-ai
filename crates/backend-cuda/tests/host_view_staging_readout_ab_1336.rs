@@ -120,7 +120,13 @@ fn measure_with_cold<F: FnMut() -> u32>(
     let cold_folded = workload();
     let cold_ms = cold_start.elapsed().as_secs_f64() * 1000.0;
     let measurement = bench_harness::run(config, || {
-        let _ = workload();
+        // `workload()` は副作用を持たない純粋な XOR fold（`fold_bits`）を返すため、
+        // 戻り値を捨てると release 最適化でホスト読み出し（D2H＋要素走査）全体が
+        // 除去されうる（codex-review P1・Cursor Bugbot 指摘。`bench_harness::run`
+        // 自体は呼び出しを `black_box` で包むだけで内部計算までは保護しない契約
+        // ―― `protocol.rs` の `run` ドキュメンテーションコメント参照）。
+        // 呼び出し側の責務として戻り値を `black_box` に渡し計測対象を保護する。
+        std::hint::black_box(workload());
     })
     .expect("phase measurement must satisfy TASK-8.1 protocol");
     (cold_ms, cold_folded, measurement)

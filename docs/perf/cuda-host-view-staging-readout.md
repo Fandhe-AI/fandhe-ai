@@ -232,6 +232,31 @@ env_info: GB10・utilization.gpu 0%（計測前後とも）・load average
 なし）・rustc 1.97.0・nvcc 13.0.88。5 run とも他プロセスの介入なしを
 確認済み（`docs/perf/logs/cuda-host-view-staging-1336/env_info.txt`）。
 
+### 5.3 計測保護の是正（codex-review P1・Cursor Bugbot 指摘。未再実測）
+
+`host_view_staging_readout_ab_1336.rs::measure_with_cold` の計測区間
+（`bench_harness::run` へ渡すクロージャ）が `workload()` の戻り値
+（`fold_bits` による XOR 畳み込み値。`u32`）を `let _ = workload();` で
+破棄していた。`fold_bits` は副作用を持たない純粋計算のため、
+`bench_harness::run` 自体が呼び出しを `black_box` で包む契約（`bench-
+harness::protocol::run` のドキュメンテーションコメント）だけでは
+クロージャ内部の計算過程（D2H＋要素走査）までは保護されず、release
+最適化でホスト読み出し全体が除去されうる状態だった（codex-review・
+Cursor Bugbot が同一箇所を独立に指摘。一致度が高い）。
+
+`std::hint::black_box(workload())` へ修正し戻り値を消費するよう是正
+した（本コミット）。**この是正は 5.2 節の実測値を得た計測より後に
+行っており、本エージェント実行環境に CUDA 実機（GB10）が無いため
+是正後の再計測は未実施のまま記入欄を残す**。5.2 節の数値は是正前の
+バイナリでの実測であり、除去が実際に発生していたかは不明（是正後の
+再計測で before/after 比が大きく変わらなければ除去は起きていなかった
+と判断できる。別セッション・別イシューで GB10 実機に接続できる
+エージェントが再実行し本節を更新すること）。
+
+再計測手順は README.md の「再現手順」節をそのまま使える
+（`ab-run1.log`〜`ab-run5.log` を上書きし `aggregate.py` を再実行、
+5.2 節の表と本節の記述を更新する）。
+
 ## 6. 採否
 
 - **本番既定は `HostStagingKind::Pageable`（unsafe 経路を通さない安全側）
