@@ -1,10 +1,10 @@
-   (GEMM_GATE_PATCH_FACADE_PATH=/home/fandhe/work/rust-ai-library-run/crates/facade)
+   (GEMM_GATE_PATCH_FACADE_PATH=<facade 絶対パス>)
 == build bench-fandhe ==
 == build bench-candle (cuda) ==
 == manifest 記録: results/raw/manifest-dgx-gemm-gate-head-3d5e833-readout-off.json ==
-{"label":"head-3d5e833-readout-off","device":"cuda","bench_fandhe_sha256":"da7926cea1befff6c3c3e99d1cfd971cb482a1ebaeeb0f30ac887e38fc75bed4","fandhe_ai_source":"path:/home/fandhe/work/rust-ai-library-run/crates/facade","bench_fandhe_features":"","bench_candle_sha256":"c2dc8a1ebfffee3c50875cc020a739e20fdb162dc157720f54fe3592b2f81a58","candle_core_source":"registry","recorded_at":"2026-09-07T13:27:19Z"}
+{"label":"head-3d5e833-readout-off","device":"cuda","bench_fandhe_sha256":"da7926cea1befff6c3c3e99d1cfd971cb482a1ebaeeb0f30ac887e38fc75bed4","fandhe_ai_source":"path:<facade 絶対パス>","bench_fandhe_features":"","bench_candle_sha256":"c2dc8a1ebfffee3c50875cc020a739e20fdb162dc157720f54fe3592b2f81a58","candle_core_source":"registry","recorded_at":"2026-09-07T13:27:19Z"}
 == バイナリ sha256 検証 OK: bench-fandhe=da7926cea1befff6c3c3e99d1cfd971cb482a1ebaeeb0f30ac887e38fc75bed4（label 'head-3d5e833-readout-off'・device 'cuda'） ==
-== 依存元検証 OK: fandhe_ai_source=path:/home/fandhe/work/rust-ai-library-run/crates/facade（label 'head-3d5e833-readout-off'） ==
+== 依存元検証 OK: fandhe_ai_source=path:<facade 絶対パス>（label 'head-3d5e833-readout-off'） ==
 == feature 検証 OK: bench_fandhe_features=''（label 'head-3d5e833-readout-off'） ==
 == バイナリ sha256 検証 OK: bench-candle=c2dc8a1ebfffee3c50875cc020a739e20fdb162dc157720f54fe3592b2f81a58（label 'head-3d5e833-readout-off'） ==
 == 依存元検証 OK: candle_core_source=registry（label 'head-3d5e833-readout-off'） ==
