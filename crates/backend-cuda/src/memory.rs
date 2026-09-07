@@ -454,10 +454,24 @@ impl CudaMemory {
     /// managed 配置 opt-in（`crate::placement::managed_placement_enabled()`）
     /// が要求されている場合の driver 呼び出し前 fail-closed 事前検査
     /// （イシュー #1352。`crate::error::CudaError::ManagedMemoryUnsupported`
-    /// ドキュメンテーションコメント参照）。opt-in が OFF なら常に `Ok(())`
-    /// （本イシュー導入前と分岐そのものが発生しない）。
+    /// ドキュメンテーションコメント参照）。
+    ///
+    /// **呼び出し契約**: 本関数は呼び出し元が既に `placement::
+    /// managed_placement_enabled()` を読んで managed 分岐へ入った後にのみ
+    /// 呼び出すこと（`alloc_zeroed_inner`／`upload_inner` 参照）。ここで
+    /// フラグを再読しない（codex-review 指摘。PR #1395）: フラグはプロセス
+    /// グローバル（`AtomicBool` 等）であり、外側の分岐判定と本関数呼び出し
+    /// の間に別スレッドが OFF へ変更すると、再読した場合は
+    /// `enabled() && !managed_supported` が短絡評価で `false` になり
+    /// `managed_supported == false`（非対応デバイス）でも検査を素通りして
+    /// `alloc_unified` に到達してしまう（MANAGED_MEMORY=1・
+    /// CONCURRENT_MANAGED_ACCESS=0 のデバイスで安全条件を満たさないまま
+    /// 確保する fail-open バグ）。よってここでは呼び出し元が確定させた
+    /// 分岐に従い `self.managed_supported` のみを無条件に検査する
+    /// （flag が OFF の間は本関数自体が呼ばれない設計のため、
+    /// `managed_placement_enabled()` の値に依存しない）。
     fn check_managed_placement_supported(&self) -> Result<(), CudaError> {
-        if placement::managed_placement_enabled() && !self.managed_supported {
+        if !self.managed_supported {
             return Err(CudaError::ManagedMemoryUnsupported {
                 detail: format!(
                     "managed memory placement is opt-in enabled but device (ordinal={}) does not \
@@ -1035,31 +1049,37 @@ mod tests {
         assert!(matches!(err, BackendError::Unsupported(_)));
     }
 
-    /// `check_managed_placement_supported` は opt-in フラグが OFF の間は
-    /// `managed_supported` の値に関わらず常に `Ok(())` を返す（既定
-    /// 経路は本イシュー導入前と分岐しない、という契約を GPU 非依存に
-    /// 検証する）。opt-in フラグはプロセスグローバルのため
-    /// `crate::placement::tests` と同じ直列化ガードを経由する。
+    /// `check_managed_placement_supported` は呼び出し元が既に opt-in
+    /// フラグを確認して managed 分岐へ入った後の事前検査であり、
+    /// **フラグを再読しない**（codex-review 指摘。PR #1395）。この契約を
+    /// GPU 非依存に検証する: `managed_supported` フィールドのみで
+    /// 判定され、opt-in フラグの現在値（テスト実行順序に依存しうる
+    /// プロセスグローバル）には一切影響されないことを、フラグを
+    /// 変更しないまま確認する（フラグ非依存の関数であるため
+    /// `crate::placement::tests` の直列化ガードは不要）。
     #[test]
-    fn check_managed_placement_supported_is_noop_when_flag_disabled() {
-        let _lock = crate::placement::test_support::placement_flag_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let original = placement::managed_placement_enabled();
-        placement::set_managed_placement_enabled(false);
-
+    fn check_managed_placement_supported_depends_only_on_managed_supported_field() {
         // `CudaMemory::new` は実 driver 初期化済みの `CudaDevice` を
         // 要求するため、`cuda_memory_construction_follows_device_init_gate`
         // と同じ環境適応パターンで守る（CUDA 非搭載環境では本テストの
         // 主張自体に到達しない。panic しないことが検証対象）。
-        // `managed_supported` の実値に関わらず、opt-in フラグが OFF の
-        // 間は常に `Ok(())`（既定経路は本イシュー導入前と分岐しない、
-        // という契約）。
         if let Ok(device) = CudaDevice::new(0) {
-            let mem = CudaMemory::new(&device);
-            assert!(mem.check_managed_placement_supported().is_ok());
-        }
+            let mut mem = CudaMemory::new(&device);
 
-        placement::set_managed_placement_enabled(original);
+            // `managed_supported == true`（デバイスが対応）なら
+            // opt-in フラグの値に関わらず常に `Ok(())`。
+            mem.managed_supported = true;
+            assert!(mem.check_managed_placement_supported().is_ok());
+
+            // `managed_supported == false`（デバイスが非対応）なら
+            // opt-in フラグの値に関わらず常に拒否する（フラグを
+            // 再読していれば、フラグが OFF に見える瞬間だけこの
+            // 拒否がすり抜けてしまう回帰を検出する）。
+            mem.managed_supported = false;
+            let err = mem
+                .check_managed_placement_supported()
+                .expect_err("managed_supported=false は無条件で拒否されるべき");
+            assert!(matches!(err, CudaError::ManagedMemoryUnsupported { .. }));
+        }
     }
 }
