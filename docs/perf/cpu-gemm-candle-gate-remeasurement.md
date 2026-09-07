@@ -1030,7 +1030,9 @@ readout コピーの往復コストを避けられる）と `checksum`（残存�
 である（削減しても実運用の性能改善にはならない）。**実運用コードパスで
 削減効果が見込める本番経路固定費は DGX N=2048 の `alloc_c`（出力バッファ
 確保）が最有力候補**であり、後続イシュー（#1294）が調査候補として引き継ぐ。
-autodiff・`tensor_wrap` は優先度が低い。
+autodiff・`tensor_wrap` は優先度が低い。#1294 の設計記録は
+`docs/cpu-matmul-fixed-cost-design.md` を参照（呼び出しチェーン・変更案・
+bit 一致契約への影響・期待削減量の上限を記載）。
 
 ### 15.7 スコープ外
 
@@ -1041,6 +1043,8 @@ autodiff・`tensor_wrap` は優先度が低い。
   必要）
 - `host-view-readout` feature on との比較（既定 OFF のまま計測）
 - 本番結線を伴うコード変更（本追補は docs／実測ログのみ）
+- `alloc_c` 削減の設計自体は #1294 が引き継いだ
+  （`docs/cpu-matmul-fixed-cost-design.md`）
 
 ### 15.8 出典
 
