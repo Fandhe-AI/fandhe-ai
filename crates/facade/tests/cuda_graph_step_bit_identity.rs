@@ -64,10 +64,19 @@
 //!   -- --ignored --nocapture --exact graph_capture_completes_training_loop_without_error
 //! ```
 //!
-//! 両者の標準出力（loss 列・最終パラメータのビット表現）を比較し、
-//! 完全一致することを目視・スクリプトで確認する（本ファイル自体は
-//! 環境変数の有無に応じて同じ手順を実行するだけであり、プロセスを
-//! 跨いだ比較の自動化はハーネス側〈#1350 等の後続〉に委ねる）。
+//! 両者の標準出力（loss 列・各 step 完了直後のパラメータ・最終
+//! パラメータのビット表現）を比較し、完全一致することを確認する。
+//!
+//! **単一 GPU 環境での自動比較（codex-review P2 指摘対応・PR #1390
+//! 再修正）**: 上記 2 コマンドを手動で実行し目視・手動 diff するのは
+//! 本ファイル自体（2 プロセス構成の制約は変わらない）では検出漏れの
+//! リスクがあるため、`scripts/verify-cuda-graph-step-bit-identity.sh`
+//! （CUDA 実機限定・通常 CI では実行しない）が両プロセスを順に実行し
+//! `step[...].loss.bits`／`step[...].param[...][...].bits`／
+//! `final.param[...][...].bits` の全行を機械的に diff する。不一致が
+//! あれば非ゼロ終了する（fail-closed）。2 GPU 搭載機での機械比較は
+//! 別途 `cuda_graph_step_two_gpu_bit_identity.rs`（`assert_eq!` に
+//! よる同一プロセス内比較）が担う。
 
 #[path = "cuda_graph_step_common/mod.rs"]
 mod cuda_graph_step_common;
