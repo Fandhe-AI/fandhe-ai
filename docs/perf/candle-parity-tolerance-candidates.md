@@ -201,18 +201,27 @@ $ git diff --stat main -- crates/ scripts/bench/framework-compare/bench-common/ 
   `ParityBaseline` 側で採用する場合、GEMM の A・B 全体（対象要素の行・列に
   限らない）からどう `max_ab` を求めるか（全体の `max|A|·max|B|` を 1 回だけ
   事前計算して全要素で共有する案が有力。行・列ごとの計算は候補要素が
-  多い場合にコスト増）は #1238 で検討する
+  多い場合にコスト増）は #1238 で検討する。**→ 結果は
+  `docs/perf/candle-parity-tolerance-baseline-impact.md` §3.3 を参照**
+  （凸関数の性質を使い `bits` の min/max 2 値だけを追跡する O(1) 空間の
+  導出方法として確定。全体の `max|A|·max|B|` を 1 回だけ事前計算して全要素
+  で共有する案を採用）
 - **B-1（`max|partial|` 基準）の部分和トレース要否**: 実行時に `max|partial|`
   を得るには GEMM 累積ループ内で部分和の絶対値最大を追跡する追加コストが
   要る（現状の `assert_parity` は最終値のみ受け取る）。カーネル側の変更を
   伴うため、CPU 参照実装（`f32::mul_add` 逐次）限定でも可否・コストを
-  #1238 で検討する
+  #1238 で検討する。**→ 行単位の集計値（`BASELINES`）には部分和トレースが
+  存在しないため机上分類は不能と判明。実装可否・コスト自体の検討は
+  `docs/perf/candle-parity-tolerance-baseline-impact.md` §8 経由で #1254 へ
+  さらに引き継ぐ**
 - **定数ピン止めテストとの関係**: `scripts/bench/framework-compare/bench-common/src/parity.rs`
   には `RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD` からの乖離を検出する
   ピン止めテスト（`extract_f64_const` 経由）がある。候補 A/B いずれを採用
   する場合も、既存の複合判定（相対 or 絶対）への **OR 追加**として実装する
   想定であり、既存 2 定数自体は変更しない前提（#1238 で契約整理の一部として
-  再確認する）
+  再確認する）。**→ 定数ピンは判定式そのものを検査しないという盲点を確認
+  済み（`docs/perf/candle-parity-tolerance-baseline-impact.md` §7.1。同時
+  更新が必要な箇所一覧・#1254 へ引き継ぎ）**
 
 ## 8. 再現手順
 
