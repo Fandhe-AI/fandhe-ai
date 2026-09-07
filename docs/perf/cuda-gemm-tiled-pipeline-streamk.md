@@ -121,10 +121,18 @@ q=15, nk=128` → 末尾 wave が `15/128 ≈ 0.117` タイル時間へ縮むが
 
 ### 0. 結論（先頭）
 
-**未実測（ブロッカー: 本エージェント実行環境に CUDA 実機〈GB10〉への接続手段なし）**。§3・§4 に記す
-とおり Mac 側で実行可能な範囲（ホストシミュレータテスト・静的テスト・ビルド整合性）はすべて green
-であることを確認した。GB10 実機でのゲート A〜D（`#[ignore]` 実機テスト・`--streamk on` ベンチ 5 回計測）
-は未実施であり、実測値を捏造せずここに記録する。§7 に再開手順を記す。
+**REJECT（本番結線〈`select_tiled_f32_kernel`／`CudaGemm::new`〉は行わない。opt-in 実装
+〈`internal-diagnostics` feature 限定〉はそのまま維持し、既定経路は不変）**。
+
+GB10（DGX Spark GB10・sm_121）実機で §5 の判定基準（ゲート A〜C）に加え本節で追加した
+ゲート D を実測した。ゲート A（決定性・正確性）とゲート B-2（既存経路の非後退）は PASS
+したが、**ゲート B-1（残タイル複合判定統計）は 16 行中 12 行で `fail_count > 0`**（全行
+0 fail の green ではない）であり、**ゲート C（`streamk_over_pipeline3` 5 回中央値）は
+N=1024 で 1.0271 倍（< 1.05）・N=2048 で 0.9395 倍（< 1.00）**といずれも判定基準未達、
+**ゲート D（64×64 streamk / 128×64 pipeline3 の 5 回中央値）も N=1024 で 0.9801 倍・
+N=2048 で 0.8394 倍**（いずれも < 1.00）で未達だった。§5「結線の総合条件」（A ∧ B-1 全行
+0 fail ∧ B-2 ∧ C 合格 ∧ D 合格）のうち B-1・C・D の 3 つが不成立のため、実測は捏造せず
+記録した上で **REJECT** と確定する。
 
 ### 1. 判定基準の再掲
 
@@ -145,63 +153,187 @@ q=15, nk=128` → 末尾 wave が `15/128 ≈ 0.117` タイル時間へ縮むが
 - **ゲート D（結線専用。本イシューで追加）**: N=1024/N=2048 の本番経路実体は 128×64 pipeline
   （`TILED_PIPELINE_128X64_MIN_N/_MIN_K = Some(1024)`）であるため、`--tile both` 実行時に同一 run・
   同一 size の出力から分子を `tile=64x64` 行の `streamk_gpu_only_tflops`、分母を `tile=128x64` 行の
-  `pipeline3_gpu_only_tflops`（`gemm_tiled_pipeline_persistent_bench` は tile 幅ごとに独立した
-  `tile=<label>` 行を出力し、128×64 の非 persistent 基準値もラベルに依らず列名
-  `pipeline3_gpu_only_tflops` で出す。`pipeline128x64_gpu_only_tflops` という列は存在しない）として
-  読み取り、その比の 5 回中央値が N=1024・N=2048 とも ≥ 1.00 であること。
+  `pipeline3_gpu_only_tflops` として読み取り、その比の 5 回中央値が N=1024・N=2048 とも ≥ 1.00
+  であること。
 - **結線の総合条件**: A PASS ∧ B-1 全行 0 fail ∧ B-2 PASS ∧ C 合格 ∧ D 合格。1 つでも欠ければ結線しない。
 
 ### 2. 環境
 
-- 実行環境: 本エージェントの作業 worktree（Mac、CUDA 実機なし）。
-- `docs/real-hardware-verification-env.local.md`（GB10 実機接続情報。Git 管理外）が本 worktree に
-  存在しないため `CUDA_NODE` を解決できず、GB10 への rsync 転送・SSH 実行に着手できなかった
-  （`docs/real-hardware-verification-env.local.md.example` はテンプレートのみで実値を含まない）。
-- ネットワーク経由の CUDA 実機（DGX Spark GB10）への代替アクセス手段も本セッションには与えられていない。
+DGX Spark GB10（sm_121）。実行前後で `nvidia-smi --query-gpu=utilization.gpu` 0% を確認
+（自身のベンチプロセスによる占有を除く。既知の常駐サービス〈ComfyUI・Kokoro〉は GPU compute を
+占有しない）。実行コマンド・rustc/nvcc バージョン・uptime（load average）・破棄 run の有無は
+`docs/perf/logs/cuda-tiled-pipeline-streamk-1359/env_info.txt` を参照（内部ホスト名は含めない）。
 
-### 3. ゲート A（実機未到達のため未実施）
+### 3. ゲート A（決定性・正確性。実機 `#[ignore]` 全 8 テスト）
 
-未実施。Mac 側で代替として `cargo test -p fandhe-ai-backend-cuda --lib --locked` を実行し、Stream-K の
-GPU 不要ホストシミュレータテスト・静的テスト（`gemm::tests::streamk_plan_*`・
-`kernels_tiled_pipeline::tests::tiled_pipeline_streamk_*`）を含む 696 tests が全て green（0 failed）
-であることを確認した（`streamk` 部分一致フィルタで 15 tests 抽出・全 PASS）。これは §3「決定性の根拠」
-の設計時静的検査の再確認であり、ゲート A（実機での bit 同一性・繰り返し起動の決定性）の代替にはならない。
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_streamk_parity -- --ignored --nocapture --test-threads=1
+```
 
-### 4. ゲート B（実機未到達のため未実施）
+**結果: 8 passed; 0 failed**
+（`docs/perf/logs/cuda-tiled-pipeline-streamk-1359/gateA_streamk_parity.log`）。
+`compile_tiled_pipeline_streamk_variant_rejects_zero_blocks_per_sm`・
+`launch_tiled_pipeline_streamk_zero_dim_shape_is_noop_without_launch`・
+`streamk_full_tiles_match_non_persistent_bit_exact`・
+`streamk_inactive_matches_non_streamk_bit_exact`・`streamk_rejects_misaligned_shape`・
+`streamk_rejects_mismatched_context_handle`・**`streamk_repeated_launch_is_deterministic`**
+（AC 本体。決定性の実機確認）・`streamk_zero_k_returns_all_zero` の全 8 本が PASS した。
+`docs/cuda-streamk-decision.md` §6 の再評価条件 2（fixup のアキュムレート順序変更が
+非決定的にならないこと）は本ゲートの実機実行をもって充足した。
 
-未実施。残タイル複合判定統計・既存経路の非後退確認はいずれも GB10 実機での `#[ignore]` テスト実行を
-前提とするため、記録すべき実測値がない。
+### 4. ゲート B-1・B-2
 
-### 5. ゲート C・D（実機未到達のため未実施）
+#### B-1: 残タイル複合判定統計（informational。合否ゲートではないが結線の前提条件）
 
-未実施。`gemm_tiled_pipeline_persistent_bench --streamk on` による 5 回計測・TFLOPS 中央値比較は
-GB10 実機を前提とするため、記録すべき実測値がない。
+`streamk_full_tiles_match_non_persistent_bit_exact` が出力した全 16 行
+（`blocks_per_sm ∈ {Some(1), None}` × 8 形状）:
+
+| m | n | k | blocks_per_sm | remainder_tiles | q | max_contributors | fail_count | total | max_abs_diff | max_rel_err |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1024 | 1024 | 1024 | Some(1) | 16 | 22 | 4 | 3 | 65536 | 0.0000553131 | 0.015133 |
+| 2048 | 2048 | 2048 | Some(1) | 16 | 43 | 4 | 4 | 65536 | 0.0001201630 | 0.005681 |
+| 4096 | 4096 | 4096 | Some(1) | 16 | 86 | 4 | 21 | 65536 | 0.0002059937 | 0.024527 |
+| 256 | 256 | 4096 | Some(1) | 16 | 86 | 4 | 15 | 65536 | 0.0001983643 | 0.021975 |
+| 448 | 448 | 1024 | Some(1) | 1 | 2 | 33 | 1 | 4096 | 0.0000391006 | 0.007318 |
+| 60 | 68 | 36 | Some(1) | 2 | 1 | 4 | 0 | 4080 | 0.0000014305 | 0.000485 |
+| 544 | 256 | 2048 | Some(1) | 36 | 96 | 3 | 20 | 139264 | 0.0001144409 | 0.602669 |
+| 4100 | 1028 | 64 | Some(1) | 1 | 1 | 5 | 0 | 16 | 0.0000023842 | 0.0000013 |
+| 1024 | 1024 | 1024 | None | 112 | 50 | 3 | 9 | 458752 | 0.0000648499 | 0.200332 |
+| 2048 | 2048 | 2048 | None | 16 | 15 | 10 | 4 | 65536 | 0.0001182556 | 0.017021 |
+| 4096 | 4096 | 4096 | None | 64 | 114 | 4 | 85 | 262144 | 0.0003585815 | 0.085903 |
+| 256 | 256 | 4096 | None | 16 | 29 | 10 | 25 | 65536 | 0.0001792908 | 0.064796 |
+| 448 | 448 | 1024 | None | 49 | 22 | 4 | 11 | 200704 | 0.0000648499 | 0.139074 |
+| 60 | 68 | 36 | None | 2 | 1 | 4 | 0 | 4080 | 0.0000014305 | 0.000485 |
+| 544 | 256 | 2048 | None | 36 | 32 | 5 | 24 | 139264 | 0.0001220703 | 0.602669 |
+| 4100 | 1028 | 64 | None | 97 | 3 | 3 | 0 | 312592 | 0.0000038147 | 0.009984 |
+
+**16 行中 4 行（`60×68×36`・`4100×1028×64` の各 blocks_per_sm 2 通り）のみ `fail_count == 0`**。
+残る 12 行はいずれも `fail_count > 0`（最大 `fail_count=85`／`total=262144`。§5「本イシューでは
+統計出力に留め、合否判定・baseline 行追加の要否は #1359 が判断する」で事前宣言したとおり、K 連鎖の
+分割による丸め差が真値ゼロ近傍の要素で複合判定 fail を起こす〈§3「決定性の根拠」節で事前に
+言及した性質どおり〉）。tolerance 定数・`ParityBaseline` の変更は行っていない。この結果は
+「承認候補」として記録するに留め、**結線は保留**する（§5 の事前宣言どおり）。
+
+#### B-2: 既存経路の非後退
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture --test-threads=1
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_persistent_parity -- --ignored --nocapture --test-threads=1
+```
+
+**結果: `cpu_cuda_tiled_pipeline_parity` 18 passed; 0 failed**
+（`docs/perf/logs/cuda-tiled-pipeline-streamk-1359/gateB2_pipeline_parity.log`）、
+**`cpu_cuda_tiled_pipeline_persistent_parity` 10 passed; 0 failed**
+（`docs/perf/logs/cuda-tiled-pipeline-streamk-1359/gateB2_persistent_parity.log`）。
+#1358 の Stream-K 追加が非 Stream-K・persistent 両経路の実機挙動を変えていないことを確認した。
+
+### 5. ゲート C・D（純カーネル時間。GPU-only。5 回独立プロセス起動）
+
+```sh
+cargo run -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --example gemm_tiled_pipeline_persistent_bench -- \
+  --sizes 1024,2048,4096 --tile both --blocks-per-sm auto --streamk on
+```
+
+5 回独立プロセス起動
+（`docs/perf/logs/cuda-tiled-pipeline-streamk-1359/gateC_streamk_auto_run{1..5}.log`。
+各 run 前に `nvidia-smi --query-gpu=utilization.gpu` 0% を確認。撮り直しは発生せず）の
+集計（`docs/perf/logs/cuda-tiled-pipeline-streamk-1359/aggregate.py`・`aggregate.md`）:
+
+**ゲート C（64×64 タイル `streamk_over_pipeline3`。5 回中央値）**
+
+| N | 5 run 値 | 中央値 | 判定基準 | 結果 |
+|---|---|---|---|---|
+| 1024 | 1.0169, 1.0271, 1.0189, 1.0295, 1.0350 | **1.0271** | ≥ 1.05 | **FAIL** |
+| 2048 | 1.0157, 0.9355, 0.9050, 1.0145, 0.9395 | **0.9395** | ≥ 1.00 | **FAIL** |
+| 4096 | 0.9799, 0.9464, 0.9823, 0.9368, 0.9613 | 0.9613 | 参考 | 参考 |
+
+**ゲート D（64×64.`streamk_gpu_only_tflops` / 128×64.`pipeline3_gpu_only_tflops`。5 回中央値）**
+
+| N | 5 run 値 | 中央値 | 判定基準 | 結果 |
+|---|---|---|---|---|
+| 1024 | 0.9735, 0.9801, 0.9701, 0.9819, 0.9829 | **0.9801** | ≥ 1.00 | **FAIL** |
+| 2048 | 1.2295, 0.8394, 0.8132, 0.9015, 0.8377 | **0.8394** | ≥ 1.00 | **FAIL** |
+| 4096 | 0.7027, 0.7194, 0.7486, 0.7177, 0.7295 | 0.7194 | 参考 | 参考 |
+
+参考: 各 TFLOPS 列の 5 回中央値（起動ヘッダ: `tile=64x64 num_sms=48 blocks_per_sm=3
+grid_capacity=144`・`tile=128x64 num_sms=48 blocks_per_sm=2 grid_capacity=96`。5 run とも同一）:
+
+| N | tile | pipeline3 中央値 | persistent 中央値 | streamk 中央値 |
+|---|---|---|---|---|
+| 1024 | 64x64 | 11.1875 | 11.2522 | 11.4705 |
+| 1024 | 128x64 | 11.7107 | 11.7993 | n/a（64×64 限定実装） |
+| 2048 | 64x64 | 12.9367 | 12.9651 | 12.1509 |
+| 2048 | 128x64 | 14.4284 | 14.6118 | n/a |
+| 4096 | 64x64 | 9.6601 | 9.0707 | 9.1562 |
+| 4096 | 128x64 | 12.6254 | 13.0581 | n/a |
+
+N=2048 では `streamk_gpu_only_tflops`（64×64）の中央値（12.1509）が同一タイルの
+`pipeline3_gpu_only_tflops`（12.9367）を下回っており、ゲート C の
+`streamk_over_pipeline3` 中央値が 1.00 未満（0.9395）になっている一因である。
 
 ### 6. 机上見積りとの突合
 
-実測値がないため突合不能。§5「fixup 固定費の事前見積り」「末尾 wave 短縮の理論上限」の机上値
-（N=1024: 理論改善見込み約 10% 前後・N=2048: 数% 程度、fixup 往復 N=1024 で約 5.25 MiB）は本節時点で
-未検証のまま残る。
+§5「fixup 固定費の事前見積り」「末尾 wave 短縮の理論上限」の机上値
+（N=1024: 理論改善見込み約 10% 前後・N=2048: 数% 程度、fixup 往復 N=1024 で約 5.25 MiB）と実測を
+突合する:
+
+- **N=1024**: 実測 `streamk_over_pipeline3` 中央値は 1.0271 倍（約 2.7% 改善）で、机上見積り
+  （約 10% 前後）の 3 分の 1 以下に留まった。実測の `streamk_plan` は
+  `remainder_tiles=112 q=50 sk_units=144 max_contributors=3 grid_blocks=144`
+  （`gateC_streamk_auto_run1.log`）で §5 の想定 machine plan 例（`remainder_tiles=112,
+  max_contributors=3`）と一致し、fixup 往復（約 5.25 MiB）自体は事前見積りどおりだった。
+  末尾 wave 短縮の理論上限（`Q/nk = 50/64 ≈ 0.781`）に対し実測改善が小さいのは、fixup
+  カーネル起動の固定費（追加カーネル起動・`atomicAdd` によるスケジューリングカウンタ経由の
+  同期）が、§1「ゲート C の解釈注記」で事前に記録した懸念どおり短縮分の大半を相殺している
+  ためと考えられる（#1347 の persistent 化単独でも同様の相殺が観測されており、本イシューの
+  スコープでは追加切り分けを行わない）。
+- **N=2048**: 実測 `streamk_over_pipeline3` 中央値は 0.9395 倍（**約 6% の後退**）で、机上見積り
+  （数% 程度の改善見込み）とは符号が逆転した。`streamk_plan` は
+  `remainder_tiles=16 q=15 sk_units=137 max_contributors=10`（`gateC_streamk_auto_run1.log`）
+  で `max_contributors=10` と N=1024（3）より大幅に多く、fixup の寄与者数が多いほど固定順序
+  逐次加算（§3「決定性の根拠」）のオーバーヘッドが増える構造が、末尾 wave 短縮分
+  （`q/nk = 15/128 ≈ 0.117`。全体 8 wave 中の 1 wave 分のみ）を上回ったと考えられる。
+- 総じて、**fixup 固定費（カーネル起動・寄与者数に比例する逐次加算コスト）が末尾 wave
+  短縮による理論改善を実測では相殺・逆転させており**、§5 で事前に明記した懸念
+  「fixup 往復（上記）が短縮分を相殺しうる」が両形状で実現した。
 
 ### 7. 採否・結線判断
 
-**保留（実機未到達のため判定不能）**。ADOPT／REJECT のいずれも実測なしには確定できない。本番結線
-（`select_tiled_f32_kernel`／`CudaGemm::new`）は行わない（既存方針を変更せず不変のまま）。
+**REJECT（本番結線は行わない）**。判定根拠:
 
-### 8. 申し送り・再開手順
+- ゲート A: PASS（8/8）。
+- ゲート B-1: **不成立**（16 行中 12 行で `fail_count > 0`。全行 0 fail という結線の前提条件を
+  満たさない）。
+- ゲート B-2: PASS（18/18・10/10）。
+- ゲート C: **不成立**（N=1024 1.0271 倍 < 1.05・N=2048 0.9395 倍 < 1.00）。
+- ゲート D: **不成立**（N=1024 0.9801 倍 < 1.00・N=2048 0.8394 倍 < 1.00）。
 
-- **再開手順**: GB10（または同等の CUDA 実機）へ SSH 到達可能なセッションで、
-  `docs/real-hardware-verification-env.local.md`（`docs/real-hardware-verification-env.local.md.example`
-  をコピーして `CUDA_NODE` 等を実値で埋めたもの）を用意したうえで、§5 の実行コマンド（ゲート A・B は
-  `--ignored --nocapture --test-threads=1`、ゲート C・D は `--sizes 1024,2048,4096 --tile both
-  --blocks-per-sm auto --streamk on` を独立 5 回）を実行し、本節（0〜7 節）を実測値で置き換えること。
-  実行前後の `uptime`（load average）・`nvidia-smi --query-gpu=name,driver_version,utilization.gpu`・
-  `nvidia-smi --query-compute-apps` を記録し、生ログは
-  `docs/perf/logs/cuda-tiled-pipeline-streamk-1359/` 配下へ保存すること（内部ホスト名・ユーザー名を
-  含めない）。
-- 本節の記入自体は #1359 の受入条件（「parity 結果・5 回中央値・env_info が記録されていること」）を
-  満たしていない。再開後の実測完了をもって受入条件を充足させる必要がある。
-- `docs/cuda-streamk-decision.md` §6 は本節の状態（未実測・保留）に対応する形で追記した。
+§5「結線の総合条件」（A ∧ B-1 全行 0 fail ∧ B-2 ∧ C 合格 ∧ D 合格）はゲート B-1・C・D の
+3 つが不成立のため成立しない。`select_tiled_f32_kernel`／`CudaGemm::new` への結線は行わない
+（既存方針を変更せず不変のまま）。opt-in 実装（`internal-diagnostics` feature 限定の
+`compile_tiled_pipeline_streamk_variant`／`run_tiled_pipeline_streamk_f32` 等）自体は削除せず
+そのまま維持する（実機実測の再現・将来の再評価のため）。
+
+### 8. 申し送り・今後の検討候補
+
+- **fixup 固定費の削減**: N=2048（`max_contributors=10`）のように寄与者数が多い形状ほど
+  fixup オーバーヘッドが大きい傾向が見られた。fixup カーネル自体の起動オーバーヘッド削減
+  （例: 別カーネル方式ではなく同一カーネル内での処理・グリッド構成の見直し）は本イシューの
+  スコープ外（§7「申し送り（対象外）」に既出の「最後の寄与 CTA が in-kernel で fixup する」
+  方式はデッドロックリスクにより不採用と設計時に判断済み）。
+- **B-1 の複合判定 fail の扱い**: `fail_count > 0` の 12 行について、tolerance 緩和や
+  `ParityBaseline` 行追加が必要かどうかはユーザー承認事項として本イシューでは判断しない
+  （§5 の事前宣言どおり）。仮に将来 Stream-K を再検討する場合は、この統計を出発点に
+  K 連鎖分割の丸め差の影響範囲（真値ゼロ近傍の要素数・形状依存性）を先に切り分ける必要がある。
+- **128×64 タイルへの Stream-K 拡張**: 本番経路の実体（N≥1024 かつ K≥1024 で 128×64 pipeline）
+  に対し Stream-K は 64×64 タイル限定実装のため、ゲート D は「異なるタイル同士の比較」に
+  ならざるを得なかった。128×64 版 Stream-K を実装すれば同一タイルでの比較（64×64 pipeline
+  改善効果の直接検証）が可能になるが、ゲート C 自体が両形状で FAIL のため優先度は低いと判断する
+  （§7「申し送り（対象外）」に既出）。
 
 ## 7. 申し送り（対象外）
 
