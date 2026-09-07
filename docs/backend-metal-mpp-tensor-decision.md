@@ -67,9 +67,14 @@ Route C は `objc2-metal =0.3.2` の既定 feature（依存追加・feature 変�
 - カーネル `mpp_gemm_nn_f32`: `device float* A_ptr/B_ptr/C_ptr [[buffer(0..2)]]` + `constant uint& N_DIM
   [[buffer(3)]]`（正方形状限定。§7 のスコープ判断）を受け取り、`tensor_inline` を構築して
   `matmul2d_descriptor(64, 32, dynamic_extent, false, false, false)`・`execution_simdgroups<4>` で `run` する
-  （`MPPTensorOpsMatMul2d.h` 冒頭の基本例と同一のタイル・並列度）。境界検査は `matmul2d::run` 自体が
-  呼び出し側 tensor の extents に対して行う契約（ヘッダ冒頭コメント）を採用し、`coding-rust.md`
-  「境界検査を省略しない」を満たす。
+  （`MPPTensorOpsMatMul2d.h` 冒頭の基本例と同一のタイル・並列度）。`coding-rust.md`「境界検査を省略しない」
+  （性能下限・最適化の達成を理由にカーネル側の手動境界チェックを省略しない。CPU/CUDA/Metal 全カーネルに
+  適用）を満たすため、`tgid` から算出したタイルオフセットが行列サイズ以上の threadgroup を早期 return する
+  明示的な境界検査をカーネル本体へ追加した（未検査のまま `slice()`／`matmulOp.run` へ渡さない。
+  codex-review 指摘・イシュー #1326 対応）。端タイル（n が 64/32 で割り切れない場合の残余サイズ）自体の
+  縮約処理は `matmul2d_descriptor` の `dynamic_extent` 契約に基づき `matmul2d::run` 側で行われる
+  （ヘッダ冒頭コメント。MPP が公開する dynamic extent API を使う設計であり、上記の明示的な早期 return
+  ガードと役割分担する）。
 - ホスト側ディスパッチ（`encode_mpp_nn`）は `gemm.rs::encode_dispatch_tiled` と同一形の
   `setBuffer_offset_atIndex`／`setBytes_length_atIndex`／`dispatchThreadgroups_threadsPerThreadgroup` のみ。
   `MTLTensor`／`MTL4*` 型は一切使わない。

@@ -84,10 +84,17 @@ use crate::pipeline::{MtlLibrary, MtlPipeline};
 /// `M`/`N`/`K` は正方形状前提のため単一の `constant uint&`（buffer(3)）
 /// で渡す。`matmul2d_descriptor` のタイル（64×32）・`execution_
 /// simdgroups<4>` は `MetalPerformancePrimitives.framework/Headers/
-/// MPPTensorOpsMatMul2d.h` 冒頭の基本例をそのまま採用する（境界検査
-/// 込みの `slice()` 版。`coding-rust.md`「境界検査を省略しない」を
-/// 満たす — `matmul2d::run` 自体が呼び出し側 tensor の extents に
-/// 対して端タイルの境界検査を行う契約。ヘッダ冒頭コメント参照）。
+/// MPPTensorOpsMatMul2d.h` 冒頭の基本例をベースに、`coding-rust.md`
+/// 「境界検査を省略しない」（性能下限・最適化の達成を理由にカーネル側の
+/// 手動境界チェックを省略しない。CPU/CUDA/Metal 全カーネルに適用）を
+/// 満たすため、`tgid` から算出したタイルオフセットをカーネル本体側で
+/// 明示的に検査する早期 return ガードを追加した（`slice()`／
+/// `matmulOp.run` へ未検査のまま渡さない）。端タイル（n が 64/32 で
+/// 割り切れない場合の残余サイズ）の実際の縮約処理自体は
+/// `matmul2d_descriptor` の `dynamic_extent` 契約に基づき
+/// `matmul2d::run` 側で行われる（ヘッダ冒頭コメント。MPP 自身が公開
+/// する dynamic extent API を使う設計であり、本カーネル側の明示的な
+/// 早期 return ガードと役割分担する）。
 ///
 /// **`tgid.x`/`tgid.y` の割当はヘッダ冒頭のコメント例（`A.slice(0,
 /// tgid.y*64)`／`B.slice(tgid.x*32, 0)`）をそのまま採用すると M4 Max
@@ -118,6 +125,20 @@ kernel void mpp_gemm_nn_f32(
     uint2 tgid [[threadgroup_position_in_grid]])
 {
     const int32_t n = static_cast<int32_t>(N_DIM);
+    const int32_t m_offset = static_cast<int32_t>(tgid.x) * 64;
+    const int32_t n_offset = static_cast<int32_t>(tgid.y) * 32;
+
+    // 手動境界チェック（REQ-8。coding-rust.md「カーネル実装の境界検査」）:
+    // タイル (tgid.x, tgid.y) の M/N 方向オフセットが行列サイズ n 以上の
+    // threadgroup は計算対象範囲外のため早期 return する。dispatch grid は
+    // n.div_ceil(64) / n.div_ceil(32) タイル数で発行するため、n が
+    // 64/32 で割り切れない場合でもこのチェック単体では常に false
+    // （offset < n が保証される）だが、tgid の生成元・dispatch grid 計算を
+    // 変更しても安全な状態を保つ明示的なガードとして維持する。
+    if (m_offset >= n || n_offset >= n) {
+        return;
+    }
+
     tensor<device float, dextents<int32_t, 2>, tensor_inline> A(A_ptr, dextents<int32_t, 2>(n, n));
     tensor<device float, dextents<int32_t, 2>, tensor_inline> B(B_ptr, dextents<int32_t, 2>(n, n));
     tensor<device float, dextents<int32_t, 2>, tensor_inline> C(C_ptr, dextents<int32_t, 2>(n, n));
@@ -126,9 +147,15 @@ kernel void mpp_gemm_nn_f32(
         matmul2d_descriptor(64, 32, static_cast<int>(dynamic_extent), false, false, false);
     matmul2d<matmulDescriptor, execution_simdgroups<4>> matmulOp;
 
-    auto mA = A.slice(0, tgid.x * 64);
-    auto mB = B.slice(tgid.y * 32, 0);
-    auto mC = C.slice(tgid.y * 32, tgid.x * 64);
+    // 端タイル（n が 64/32 で割り切れない場合の最終タイル）は offset のみを
+    // 渡す slice() により残余サイズ（n - offset）の部分ビューになる
+    // （固定 64/32 の slice ではない）。この残余サイズ分は matmul2d::run
+    // 自身が descriptor の dynamic_extent 契約に基づき処理する
+    // （ヘッダ冒頭コメント。上記の早期 return と合わせ、境界検査を
+    // MPP 内部へ全面委任せず本カーネル側でも明示的に検査する）。
+    auto mA = A.slice(0, m_offset);
+    auto mB = B.slice(n_offset, 0);
+    auto mC = C.slice(n_offset, m_offset);
 
     matmulOp.run(mA, mB, mC);
 }
