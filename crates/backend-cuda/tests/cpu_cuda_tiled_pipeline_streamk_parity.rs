@@ -46,10 +46,15 @@ fn streamk_shapes() -> Vec<(u32, u32, u32)> {
 /// （`run_tiled_pipeline_f32`）と bit 同一であることを検証する
 /// （`kernels_tiled_pipeline.rs::TP_SK_TILE_CORE` ドキュメンテーション
 /// コメントの決定性論証点 1 の実機裏付け）。full タイルはタイル走査順
-/// （行主導）の先頭 `full_tiles` 個であるため、出力配列の先頭から
-/// `full_tiles` タイル分の行を比較する（`n` がタイル幅の倍数でない
-/// 端数形状は最終行タイルが列方向に跨るため、要素単位ではなく行単位
-/// （`TP_BM` 行区切り）で比較する）。
+/// （行主導の 2 次元タイルグリッド。`tiles_x = ceil(n / TP_BN)` 列 ×
+/// `tiles_y = ceil(m / TP_BM)` 行で、タイル番号は `(row / TP_BM) *
+/// tiles_x + col / TP_BN`）の先頭 `full_tiles` 個であるため、出力配列を
+/// タイル行単位で走査し、各タイル行のうち先頭何タイル分が
+/// `full_tiles` に含まれるかを求めて、その列範囲だけを比較する（`n`
+/// がタイル幅の倍数でない場合や `full_tiles` がタイル行の境界と
+/// 一致しない場合でも、単純な「先頭 full_tiles*TP_BM 行」抽出では
+/// bit 一致が設計上保証されない残タイルが混入するため、2 次元タイル
+/// グリッドとして正しく抽出する）。
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以降、cp.async 対応）必須"]
 fn streamk_full_tiles_match_non_persistent_bit_exact() {
@@ -96,26 +101,60 @@ fn streamk_full_tiles_match_non_persistent_bit_exact() {
                 "出力長が一致しません (m={m}, n={n}, k={k})"
             );
 
-            // full タイル領域（先頭 full_tiles*TP_BM 行。TP_BM=64 は
-            // internal-diagnostics 限定の公開定数がないため、64x64 版
-            // 固定という契約〈実装計画 §2 対象外「128x64 は対象外」〉
-            // から直接埋め込む。行末が m 未満に切り詰められる可能性が
-            // あるため min で clamp する）。
+            // full タイル領域: 行主導の 2 次元タイルグリッド
+            // （TP_BM=64・TP_BN=64 は internal-diagnostics 限定の公開
+            // 定数がないため、64x64 版固定という契約〈実装計画 §2 対象外
+            // 「128x64 は対象外」〉から直接埋め込む）でタイル番号
+            // `(row/TP_BM)*tiles_x + col/TP_BN` が `full_tiles` 未満の
+            // タイルだけを抽出する。単純に先頭 `full_tiles*TP_BM` 行を
+            // 比較すると、`full_tiles` がタイル行の境界と一致しない
+            // 場合に bit 一致が設計上保証されない残タイルの列が混入し
+            // 誤って false-fail しうるため、タイル行ごとに「先頭何タイル
+            // 分が full か」を求めてその列範囲だけを比較する。
             const TP_BM: usize = 64;
-            let full_rows = ((plan.full_tiles as usize) * TP_BM).min(m as usize);
-            let full_elems = full_rows * (n as usize);
-            assert_eq!(
-                c_streamk[..full_elems],
-                c_non_streamk[..full_elems],
-                "full タイル領域が非 Stream-K 版と bit 同一ではありません \
-                 (blocks_per_sm={blocks_per_sm:?}, m={m}, n={n}, k={k}, \
-                 full_tiles={}, remainder_tiles={})",
-                plan.full_tiles,
-                plan.remainder_tiles,
-            );
+            const TP_BN: usize = 64;
+            let m_usize = m as usize;
+            let n_usize = n as usize;
+            let tiles_x = n_usize.div_ceil(TP_BN);
+            let tiles_y = m_usize.div_ceil(TP_BM);
+            let full_tiles = plan.full_tiles as usize;
+            // タイル行ごとに「先頭何タイル分が full か」を求め、その
+            // 列範囲を bit 同一と assert すると同時に、残タイル領域の
+            // 複合判定統計（下記）で使う要素マスク（`is_full`）を
+            // 構築する。full 判定はタイル番号（行主導）が `full_tiles`
+            // 未満かどうかであり、単純な行境界の先頭スライスでは
+            // 表現できない（`n` % `TP_BN` != 0 や `full_tiles` がタイル
+            // 行境界と不一致の場合に残タイルの列が混入するため）。
+            let mut is_full = vec![false; m_usize * n_usize];
+            for tile_row in 0..tiles_y {
+                let row_tile_start = tile_row * tiles_x;
+                let full_cols_tiles = full_tiles.saturating_sub(row_tile_start).min(tiles_x);
+                if full_cols_tiles == 0 {
+                    continue;
+                }
+                let full_cols = (full_cols_tiles * TP_BN).min(n_usize);
+                let row_start = tile_row * TP_BM;
+                let row_end = ((tile_row + 1) * TP_BM).min(m_usize);
+                for row in row_start..row_end {
+                    let base = row * n_usize;
+                    assert_eq!(
+                        c_streamk[base..base + full_cols],
+                        c_non_streamk[base..base + full_cols],
+                        "full タイル領域が非 Stream-K 版と bit 同一ではありません \
+                         (blocks_per_sm={blocks_per_sm:?}, m={m}, n={n}, k={k}, row={row}, \
+                         full_tiles={}, remainder_tiles={})",
+                        plan.full_tiles,
+                        plan.remainder_tiles,
+                    );
+                    is_full[base..base + full_cols].fill(true);
+                }
+            }
 
             // 残タイル領域は CPU 参照実装との複合判定統計のみ出力する
-            // （合否判定は行わない。ファイル冒頭コメント参照）。
+            // （合否判定は行わない。ファイル冒頭コメント参照）。上記の
+            // 要素マスク（`is_full`）で full 要素を除外して抽出する
+            // （全体形状に渡る非連続領域のため、単純なスライス分割では
+            // 表現できない）。
             if plan.is_active() {
                 let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
                 fandhe_ai_backend_cpu::matmul_reference_fma(
@@ -124,9 +163,18 @@ fn streamk_full_tiles_match_non_persistent_bit_exact() {
                 .expect(
                     "matmul_reference_fma shape validation must pass for well-formed test input",
                 );
-                let report =
-                    fandhe_ai_backend_cpu::compare(&c_streamk[full_elems..], &c_ref[full_elems..])
-                        .expect("compare must succeed for equal-length well-formed slices");
+                let remainder_streamk: Vec<f32> = c_streamk
+                    .iter()
+                    .zip(is_full.iter())
+                    .filter_map(|(&v, &full)| (!full).then_some(v))
+                    .collect();
+                let remainder_ref: Vec<f32> = c_ref
+                    .iter()
+                    .zip(is_full.iter())
+                    .filter_map(|(&v, &full)| (!full).then_some(v))
+                    .collect();
+                let report = fandhe_ai_backend_cpu::compare(&remainder_streamk, &remainder_ref)
+                    .expect("compare must succeed for equal-length well-formed slices");
                 eprintln!(
                     "streamk remainder-tile composite check (informational, not a pass/fail \
                      gate; see #1359): m={m} n={n} k={k} blocks_per_sm={blocks_per_sm:?} \
@@ -439,7 +487,14 @@ fn tiled_pipeline_streamk_parity_smoke_env_adaptive() {
     };
 
     let mut rng = bench_harness::rng::Xorshift64Star::new(1);
-    let (m, n, k) = (64u32, 64u32, 64u32);
+    // 単一タイル（T=1）であること自体は非活性を保証しない（`streamk_plan`
+    // の `Q >= nk` フォールバックは K タイル数 `nk` に依存するため、
+    // 例えば T=1・nk=4 の形状は `grid_capacity` によって活性化しうる。
+    // `nk == 1`（K == TP_BK == 16）なら `flat = r*nk = r < g` より
+    // `q = ceil(r/g) <= 1 <= nk` が常に成立し、`r == 0` の非活性分岐と
+    // 合わせて `grid_capacity` の値に依らず非活性が保証される
+    // （`streamk_plan` 本体コメント §3.1 点 3 参照）。
+    let (m, n, k) = (64u32, 64u32, 16u32);
     let a = rng.fill_vec((m as usize) * (k as usize));
     let b = rng.fill_vec((k as usize) * (n as usize));
 
@@ -452,10 +507,12 @@ fn tiled_pipeline_streamk_parity_smoke_env_adaptive() {
             "CudaGemm::run_tiled_pipeline_streamk_f32 must succeed on a cp.async-capable test \
              runner",
         );
-    // 64x64x64 は単一タイル（T=1）のため常に非活性（full タイルのみ）。
-    assert!(!plan.is_active());
+    assert!(
+        !plan.is_active(),
+        "64x64x16 (nk=1) は grid_capacity に依らず非活性のはずでした: {plan:?}"
+    );
     assert_eq!(
         c_streamk, c_non_streamk,
-        "smoke 64x64x64: Stream-K 版と非 Stream-K 版の出力が bit 同一ではありません"
+        "smoke 64x64x16: Stream-K 版と非 Stream-K 版の出力が bit 同一ではありません"
     );
 }
