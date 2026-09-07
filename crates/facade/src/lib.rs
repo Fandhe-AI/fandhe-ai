@@ -120,6 +120,10 @@ pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 // 上記コメント「1 文 1 行を維持する」参照）。
 pub use fandhe_ai_autodiff::VarHostView;
 pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
+// `ChecksumReadout`／`GemmChecksum`（イシュー #1339・`Var::matmul_checksum`
+// の戻り値・引数型）も 1 文 1 行で再エクスポートする（上記コメント
+// 「1 文 1 行を維持する」と同じ理由）。
+pub use fandhe_ai_tensor_core::{ChecksumReadout, GemmChecksum};
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
 /// newtype ラッパー（codex-review PR #424 P1 是正）。

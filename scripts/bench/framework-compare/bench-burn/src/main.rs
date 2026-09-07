@@ -142,6 +142,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -257,6 +258,7 @@ fn run_train<B: AutodiffBackend>(
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -305,6 +307,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -373,6 +376,18 @@ fn validate_unsupported_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
                 .into(),
         );
     }
+    // イシュー #1339: `--device-checksum` は fandhe-ai／candle 側の GEMM
+    // checksum device reduction を指す概念であり、burn には対応する結線が
+    // ない（burn の Metal〈wgpu〉経路は #965 既知バグの対象でもあるため
+    // 対象外と明記する。`docs/perf/device-checksum-readback-ab.md` 参照）。
+    // `--managed` と同型の allowlist 方式で常に拒否する。
+    if cli.device_checksum {
+        return Err(
+            "MEASURE_ERROR: --device-checksum is not supported by burn (fandhe-ai/candle-only \
+             GEMM checksum device reduction; issue #1339)"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -408,6 +423,7 @@ mod tests {
             phases: false,
             tf32,
             managed: false,
+            device_checksum: false,
         }
     }
 

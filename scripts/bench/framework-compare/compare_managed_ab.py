@@ -164,6 +164,20 @@ def load_rows(path):
                     "ため） — skipped"
                 )
                 continue
+            # イシュー #1339: `device_checksum` も `tf32` と同じ理由（別軸の
+            # フラグ違いを managed 配置の違いと取り違えない）で除外する。
+            if "device_checksum" in obj and not isinstance(obj["device_checksum"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'device_checksum' フィールド型（bool を"
+                    f"期待。実際: {obj['device_checksum']!r}） — skipped"
+                )
+                continue
+            if obj.get("device_checksum", False) is True:
+                warnings.append(
+                    f"{path}:{lineno}: 'device_checksum:true' の行は managed 配置 "
+                    "A/B の対象外 — skipped"
+                )
+                continue
             if not _valid_cell_identity(obj):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"
