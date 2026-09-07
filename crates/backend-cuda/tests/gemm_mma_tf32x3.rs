@@ -70,8 +70,11 @@ fn run_tf32x3_rejects_misaligned_shape_without_launch() {
     };
 
     // n=9 は 4 の倍数でない（cp.async 16B = f32 4 要素整列制約違反）。
+    // m=4, k=4 のため A は m*k=16 要素（k*n=36 要素にすると
+    // validate_gemm_dims の長さ検証が先に InvalidShape で早期リターンし、
+    // 意図した整列制約検証パスへ到達しない。codex-review 指摘・PR #1400）。
     let err = gemm
-        .run_tf32x3(&[0.0; 4 * 9], &[0.0; 4 * 9], 4, 9, 4)
+        .run_tf32x3(&[0.0; 4 * 4], &[0.0; 4 * 9], 4, 9, 4)
         .expect_err("misaligned n must be rejected before any kernel launch");
     assert!(matches!(err, CudaError::InvalidShape { .. }));
 
