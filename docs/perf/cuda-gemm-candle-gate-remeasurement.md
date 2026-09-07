@@ -1,6 +1,6 @@
 # CUDA GEMM N=1024/2048/4096 reuse candle 比再計測と #1031 ゲート判定の確定（イシュー #1142）
 
-## 状態: DGX Spark GB10 実機実測完了。#1031（reuse candle 超え）は正式系列・参考系列（#1164 結線後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1360 で Phase 4／5（#1342 の 128×64 cp.async pipeline 本番結線・#1337 借用ビュー readout）反映後の GB10 再計測を実施し、正式系列（ピン未更新のため §11 と同値。再現性確認）は未達成が継続、参考系列（path 差し替え HEAD）は readout off で未達成継続・on で N=4096 のみ達成（N=1024/2048 は大幅後退）を記録した（§12。正式判定はピン更新後に確定）
+## 状態: DGX Spark GB10 実機実測完了。#1031（reuse candle 超え）は正式系列・参考系列（#1164 結線後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1360 で Phase 4／5（#1342 の 128×64 cp.async pipeline 本番結線・#1337 借用ビュー readout）反映後の GB10 再計測を実施し、正式系列（ピン未更新のため §11 と同値。再現性確認）は未達成が継続、参考系列（path 差し替え HEAD）は readout off で未達成継続・on で N=4096 のみ達成（N=1024/2048 は大幅後退）を記録した（§12。正式判定はピン更新後に確定）。#1337 の正式記録・公正性の論点は §13 参照（独自再現も同一符号で確認）
 
 ## 1. 位置づけ
 
@@ -522,3 +522,93 @@ N=2048 は「判定不能」のまま据え置く。
 - **N=2048 判定不能の解消**: #1258／#1234 Phase 2（tolerance 契約変更。ユーザー承認必須）
 - **N=1024/2048 の readout-on 後退の原因調査**: 本イシューのスコープ外（§12.4）。追跡する
   新規 issue を起票するかはユーザー判断
+
+## 13. 2026-09-07 追補: #1337 の正式記録・独自再現・公正性の論点
+
+### 13.1 位置づけ
+
+- CUDA 側の readout off/on 効果は既に §12（イシュー #1360）で実測済み。**本節はその記録を
+  #1337 の正式な受け入れ記録として整理し**、加えて #1337 独自の実行（両実機横断計測の一部と
+  して DGX で off/on を再実行）による再現性を追記する。§12 が採用する判定・数値そのものは
+  再導出しない（同じ機構の結果を重複して結論化しない）
+- #1337 は Metal（§12〈metal doc〉）・CPU（§15〈cpu doc〉両実機）・CUDA（本節）の 3
+  バックエンド横断で実測を揃えることが受け入れ条件であり、CUDA 単体の判定は既に §12（本
+  ドキュメント）で完結している
+- **13.2 の位置づけ（重要な限定）**: §12.3 の readout off/on は `head-3d5e833-readout-off`／
+  `head-3d5e833-readout-on` のとおり**両腕とも同一 sha の path 差し替え HEAD**（
+  `fandhe_ai_source=path:<facade 絶対パス>`）で揃えており、readout feature 単独の効果を
+  分離できている。一方 13.2 の独自実行（`docs/perf/logs/gemm-candle-gate-readout-1337/`
+  配下の manifest・実行ログで確認済み）は **off 腕が `fandhe_ai_source=registry`（crates.io
+  `fandhe-ai =0.7.0`）・on 腕のみ `fandhe_ai_source=path:<facade 絶対パス>`〈HEAD
+  `1c298ff...`〉**であり、off/on 間でライブラリのソース（バージョン・ビルド）自体が異なる。
+  13.2 の off/on 差分には readout feature の効果に加え、v0.7.0 公開後にマージされた
+  #1342（128×64 cp.async pipeline 本番結線）等のコード差分が混入しており、**13.2 単独の
+  データからは readout（#1337）への効果を分離帰属できない**。13.2 は「§12.3 の on 腕
+  （HEAD path・readout-on）との再現性確認」の範囲でのみ有効な参考値として扱い、13.2 の
+  off 腕・off/on 比較（「符号が一致」を含む）は #1337 の効果としては撤回する（本欄が本来
+  比較すべき対象は §12.3 の readout-off 腕であり、13.2 の off 腕〈registry〉ではない）。
+  同一 HEAD source での 13.2 off 腕の再計測は本エージェント実行環境に CUDA 実機接続手段が
+  ないため未実施のまま残す
+
+### 13.2 #1337 独自実行による再現性確認（DGX Spark GB10）
+
+- 転送元 sha: `1c298ff5641b948dae3c1c65699930054af8f747`（§12 の `3d5e833` より後、PR #1420
+  まで含む HEAD。両 sha 間の `crates/backend-cuda/src` 差分は #1415/#1420 の checksum
+  device 側 reduction・テスト追加のみで GEMM 本体カーネル・readout 経路には変更なし）
+- ラベル: `head-1c298ff-readout-off`／`head-1c298ff-readout-on`。**off/on 間でソースが揃って
+  いない**（13.1 参照）: manifest 実測（`docs/perf/logs/gemm-candle-gate-readout-1337/
+  run_gemm_gate_cuda-dgx-readout-{off,on}.log` の `依存元検証 OK` 行）で off 腕は
+  `fandhe_ai_source=registry`（`GEMM_GATE_PATCH_FACADE_PATH` 未使用。crates.io
+  `fandhe-ai =0.7.0`）、on 腕のみ `fandhe_ai_source=path:<facade 絶対パス>`（
+  `GEMM_GATE_PATCH_FACADE_PATH` 使用・HEAD `1c298ff...`）＋
+  `GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout` であることを確認した。§12 と同一
+  プロトコルなのは on 腕（HEAD path + feature）のみで、off 腕は §12.3 の
+  `head-3d5e833-readout-off`（HEAD path・feature なし）とは異なる
+- 実機: 計測前後とも `nvidia-smi utilization.gpu` 0〜8%・load average 1 桁台前半（他ジョブ
+  混入なし。`docs/perf/logs/gemm-candle-gate-readout-1337/env_info.txt`）
+- 実測結果:
+
+  | N | readout-off 中央値（min–max, n=5） | readout-on 中央値（min–max, n=5） | candle fresh 中央値（n=5） | off の candle 比 | on の candle 比 | off 判定 | on 判定 |
+  |---|---|---|---|---|---|---|---|
+  | 1024 | 2.190 ms（2.125–2.307 ms） | 36.033 ms（34.787–36.162 ms） | 923.9 / 923.4 µs | 0.422 | 0.026 | 未達 | 未達（大幅後退） |
+  | 2048 | 8.744 ms（8.368–8.764 ms） | 11.850 ms（11.788–11.942 ms） | - | 判定不能 | 判定不能 | 判定不能 | 判定不能 |
+  | 4096 | 54.438 ms（52.367–60.003 ms） | 40.957 ms（40.848–41.547 ms） | 53.537 / 56.228 ms | 0.983 | **1.373** | 未達 | **達成** |
+
+  fandhe-ai 側は全 30 run で `parity_fail_count=0`。checksum は off/on 全セル完全一致
+  （`docs/perf/logs/gemm-candle-gate-readout-1337/compare_gemm_ab-cuda.md`）。N=2048 は
+  candle 側が両腕とも決定的 `parity_fail_count=2`（§5・§12.5 と同一の既知事象）
+
+- **on 腕（readout-on。HEAD path + feature）の符号は §12.3/§12.4 と完全に一致**（N=1024
+  大幅後退・N=4096 のみ達成・N=2048 判定不能）。絶対値は run 間ノイズで多少異なる（本節
+  N=4096: 1.373 倍 vs §12.3: 1.433 倍。いずれも 5 run の min–max 幅の内側で説明できる差）。
+  **独立した invocation・わずかに後の sha による on 腕の再現性が確認できた**ことで、§12 の
+  on 腕（readout 適用後）の頑健性が補強される
+- **off 腕（本節。registry v0.7.0）と on 腕（本節。HEAD path + feature）の比較・「off/on
+  candle 比」列・「off 判定」列は #1337 の readout 効果としては使わない**（13.1 の限定
+  参照）。off 腕は §12.2 の正式系列 `0.7.0-1360`（同じく registry。N=1024: 2.445 ms・
+  N=4096: 62.281 ms）とおおむね近い値（本節 N=1024: 2.190 ms・N=4096: 54.438 ms）であり、
+  §12.3 の readout-off 腕（HEAD path・feature なし。N=1024: 2.382 ms・N=4096: 60.011 ms）
+  とも大きくは外れないが、ソースが異なる以上厳密な A/B としては扱わない。#1337
+  （readout 単独）への正式な帰属は §12.3／§12.4（同一 sha 揃え）を正とする
+
+### 13.3 公正性の論点（親 #1334 受け入れ条件）
+
+- candle 側ハーネス（`bench-candle`）は #1337 で変更していない（`to_vec2` のまま）。読み出し
+  経路は各ライブラリの公開 API の一部であり、fandhe-ai 側の `host-view-readout` feature
+  切替はハーネスの偏向ではなく製品側実装（借用ビュー readout。#1335/#1336 が用意した
+  `VarHostView`／`Tensor::host_slice`）の測定である。checksum 完全一致・parity 0 fail
+  （fandhe-ai 側）を根拠として、切替が数値契約を変えていないことも確認済み（§12.3・本節
+  13.2）
+- 一方、candle には対応する借用 API が無い／使用していないため、`iter_total` 境界の比較が
+  「読み出し方式そのものの差」を一部含むことは限界として明記する（§12.4 のとおり）
+- **#1336 の非到達**: `Var::matmul` 出力は `gemm` 内部readback で既にホスト常駐 `Tensor`
+  のため、CUDA pinned host staging（`MemoryOps::with_host_view`。#1336）はこの readout
+  経路を通らない。本節・§12 で観測した効果は `#1337`（borrowed-view readout そのもの）に
+  帰属し `#1336` には帰属しない（`docs/perf/cuda-host-view-staging-readout.md` §7 と整合）
+
+### 13.4 スコープ・ユーザー判断事項
+
+- `host-view-readout` 既定化の可否は本節では判断しない（N=1024/2048 の大幅後退が未解決。
+  §12.7 のユーザー判断事項を参照。据え置き）
+- N=1024/2048 readout-on 後退の原因調査は本イシューのスコープ外（§12.4・§12.7 と同じ）
+- #1031 の正式判定（registry ピン）は §11 のまま不変（本節・§12 とも参考系列のみ）
