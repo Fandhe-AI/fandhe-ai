@@ -677,6 +677,15 @@ def load_rows(path):
                 f"{path}: 不正な 'tf32' フィールド型（bool を期待）: "
                 f"{r['tf32']!r}（行: {r!r}）"
             )
+        # イシュー #1353: `managed`（`Record.managed`。CUDA managed memory
+        # 配置での計測を示す）も `tf32` と同型の「キー欠損 = False」互換
+        # 規約を持つ外部 JSONL 由来の値のため、同じ fail-closed 型検証を
+        # 適用する（bool 以外はロード全体をエラー終了。A08）。
+        if "managed" in r and not isinstance(r["managed"], bool):
+            raise ValueError(
+                f"{path}: 不正な 'managed' フィールド型（bool を期待）: "
+                f"{r['managed']!r}（行: {r!r}）"
+            )
     return rows
 
 
@@ -1281,6 +1290,13 @@ def _pick_row_for_gate(rows, fw, task, device, size):
                 and r["device"] == device
                 and r["mode"] == mode
                 and (r.get("tf32", False) is True) == tf32_value
+                # イシュー #1353: `managed:true`（CUDA managed memory 配置）
+                # 行はゲート判定の対象外（既定 device-only 配置との速度
+                # 混同・fail-open 防止）。`tf32` と異なり TF32 強制
+                # フレームワークのような「他に FP32/device-only 行が無い」
+                # フォールバック事情がないため、無条件に除外する
+                # （`docs/backend-cuda-managed-placement-decision.md`）。
+                and r.get("managed", False) is not True
                 and _valid_gate_size(r.get("size"))
                 and r.get("size") == size
             ]
@@ -1523,6 +1539,11 @@ def target_gate(rows, target):
                 and r["device"] == device
                 and r["framework"] in ("fandhe-ai", target)
                 and (task != "gemm" or r.get("tf32", False) is not True)
+                # イシュー #1353: `_pick_row_for_gate` が managed:true 行を
+                # 無条件除外するため、size 集合の導出元も揃える（除外先の
+                # size のみが混入して両フレームワーク側とも「該当行なし」
+                # の判定不能を誤生成するのを防ぐ。上記 tf32 除外と同じ理由）。
+                and r.get("managed", False) is not True
             ]
             # 外部 JSONL 由来の `size` を検証せず set 内包・`sorted()` へ
             # 渡すと、配列／オブジェクト混入で `unhashable type`、文字列と

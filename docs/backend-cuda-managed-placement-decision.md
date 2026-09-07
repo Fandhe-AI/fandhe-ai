@@ -182,9 +182,7 @@ observe_cuda_result` の `match` の `other => other` 節）ため、この
 
 ## 実機実測
 
-本エージェント実行環境に CUDA 実機（DGX Spark GB10）が存在しないため、
-`crates/backend-cuda/tests/managed_placement_real_device.rs`（`#[ignore]`）
-は実装済みだが未実行のまま引き継ぐ。実行手順:
+**実測完了（イシュー #1353・2026-09-07・GB10 実機）**。
 
 ```sh
 export PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH
@@ -197,11 +195,20 @@ cargo test -p fandhe-ai-backend-cuda --release --all-features \
     -- --ignored --nocapture   # 既存契約テストの非後退確認
 ```
 
-合格条件: 新規テスト全 pass（`to_bits()` 完全一致）・既存 `#[ignore]`
-テスト非後退・リークなし。実機実行結果は本ドキュメントへ追記する
-（未実測欄）。
+結果: 新規 `managed_placement_real_device.rs` 5 テスト全 pass（`to_bits()`
+完全一致・リークなし）。既存 `#[ignore]` 契約テスト（`memory_real_device`
+5 件・`async_ordering_real_device` 3 件・`gemm_resident_real_device` 2 件・
+`linear_forward_device_real_device` 5 件、計 15 件）も全 pass・非後退。
+生ログは `docs/perf/logs/cuda-managed-placement-ab-1353/
+managed_placement_real_device.log`。
 
-<!-- 実測記入欄（#1353 または実機アクセス可能なセッションが追記） -->
+**性能実測・既定化可否判断は #1353 で完了**: train reuse が 1.71 倍後退し
+（`device_update` フェーズ単独では 2.82 倍。`UnifiedSlice::drop` の同期
+解放が per-step の暗黙同期点になるという上記「同期契約の差分」の事前仮説
+と整合）、**既定 OFF を維持（REJECT）**と確定した。gemm・train fresh は
+managed の影響を構造的に受けない設計どおり差なし。CPU 側ページ経由アクセス
+の帯域（readback）は off/on でほぼ同一（差 5% 未満）で低下は確認されな
+かった。詳細は `docs/perf/cuda-managed-placement-ab.md` を参照。
 
 ## フォローアップ・出典
 

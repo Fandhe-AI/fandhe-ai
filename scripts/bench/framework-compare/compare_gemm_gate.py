@@ -153,6 +153,15 @@ def load_rows(path):
                     f"実際: {obj['tf32']!r}） — skipped"
                 )
                 continue
+            # イシュー #1353: `managed`（CUDA managed memory 配置）も
+            # `tf32` と同じ「キー欠損 = False」互換規約を持つ外部 JSONL
+            # 由来の値のため、同じ fail-closed 型検証を適用する。
+            if "managed" in obj and not isinstance(obj["managed"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'managed' フィールド型（bool を期待。"
+                    f"実際: {obj['managed']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -181,6 +190,11 @@ def _matching_rows(rows, framework, mode, size, device="cuda"):
         if r.get("mode", "fresh") != mode:
             continue
         if r.get("tf32", False) is True:
+            continue
+        # イシュー #1353: `managed:true`（CUDA managed memory 配置）行は
+        # 既定 device-only 配置とのゲート混同を防ぐため除外する
+        # （summarize.py `_pick_row_for_gate` と同じ既定）。
+        if r.get("managed", False) is True:
             continue
         out.append(r)
     return out

@@ -1890,3 +1890,27 @@ fresh 行のみの計測である。#1217 以降、`summarize.py` の目標達�
 次回 infer を含む再計測では reuse 行が存在するファイルに限り本表の infer 行
 は reuse 中央値で判定される（環境 20 参照。fresh のみの旧 JSONL では従来
 どおり fresh のまま判定され本節の数値・判定を書き換えるものではない）。
+
+## 環境 21: DGX Spark GB10（CUDA managed memory 配置 A/B。イシュー #1353）
+
+`--managed`（`fandhe_ai::set_cuda_managed_memory_enabled`。イシュー #1352）
+有無の A/B 計測。`managed-placement` feature ＋ `crates/facade`（未リリース
+HEAD。#1352 実装込み）への path patch でビルドした `bench-fandhe` を GB10
+実機で off/on 交互起動（各セル 5 回計測。`compare_managed_ab.py` で集計）。
+
+| cell | off median | on median | on/off | checksum | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| gemm cuda N=2048 fresh | 136.573 ms | 137.261 ms | 1.0050 | 完全一致 | 差なし（ノイズ範囲） |
+| gemm cuda N=2048 reuse | 9.522 ms | 9.502 ms | 0.9979 | 完全一致 | 差なし（ノイズ範囲） |
+| train cuda size=64 fresh | 509.5 us | 508.5 us | 0.9981 | 完全一致 | 差なし |
+| **train cuda size=64 reuse** | **451.5 us** | **772.5 us** | **1.7110** | 完全一致 | **明確な後退** |
+
+**既定化判定: REJECT**（既定 OFF を維持）。主対象の train reuse が 1.71 倍
+後退（`--phases` 単発診断では `device_update` フェーズが 2.82 倍後退し、
+`UnifiedSlice::drop` の同期解放が per-step の暗黙同期点になる事前仮説と
+整合）。gemm・train fresh は managed の影響を構造的に受けない設計どおり
+差なし。CPU 側ページ経由アクセスの帯域（readback）は off/on でほぼ同一
+（差 5% 未満）で低下は確認されず、一方 upload（H2D 相当）は managed が
+device-only の約 1/10 で主要因と推定される。詳細・env_info・スコープ外
+事項は `docs/perf/cuda-managed-placement-ab.md`・
+`docs/perf/logs/cuda-managed-placement-ab-1353/` を参照。

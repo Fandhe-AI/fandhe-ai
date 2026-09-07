@@ -484,6 +484,48 @@ opt-in で WMMA TF32 Tensor Core 経路（`run_wmma_tf32`）へ切り替えら�
   FP32 参照値算出から**既定で除外**する（fail-open 防止。FP32 目標値との混同を防ぐ）。`--tf32` 行が
   存在するファイルには専用節「`(a-tf32) GEMM TF32`」を追加表示する
 
+### `--managed`（イシュー #1353。CUDA managed memory 配置 A/B）
+
+CUDA managed memory 配置（`cuMemAllocManaged` 経由の `DeviceBuffer` opt-in 配置。
+`fandhe_ai::set_cuda_managed_memory_enabled`。イシュー #1352・`docs/backend-cuda-managed-
+placement-decision.md`）を有効化して計測する値なしフラグ。GB10（ホスト・GPU 物理統合メモリ）で
+H2D/D2H 転送を消せるかを実測するための A/B 用フラグであり、既定 OFF・fail-closed 方針は不変。
+
+**経路上の重要事実**: managed 配置が効くのは `CudaMemory::alloc_zeroed`／`upload`／`download` を
+通る経路（`gemm_resident_rhs`／`gemm_resident_lhs`〈NT 分岐除く〉／`linear_forward_device`／
+`sgd_step_device` = `DeviceParamStore` 系）のみである。**`bench-fandhe --task gemm` は fresh／
+reuse とも `a.matmul(&b)`（`CudaBackendOps::gemm` の `clone_htod`／`alloc_zeros`／`clone_dtoh`
+直呼び経路）であり managed フラグの影響を構造的に受けない**（`--managed` を付けても gemm の
+計測時間自体は変化しない設計上の前提。差なしを実測で裏取りする位置づけ）。主対象は
+**`train --mode reuse`**（`DeviceParamStore` の `upload(grad)`／`alloc_zeroed`／`download`）。
+
+- **`bench-fandhe`**: `--device cuda` 以外は常に `MEASURE_ERROR`（プロセスワイドフラグが cpu
+  計測で無音 no-op になるのを防ぐ）。`--device cuda` でも、`managed-placement` cargo feature
+  （既定無効）を有効化したビルドでなければ `MEASURE_ERROR` になる。crates.io 公開版
+  `fandhe-ai =0.7.0` ピンには `set_cuda_managed_memory_enabled` API 自体が未収録（#1352 は
+  未リリースの HEAD で追加）のため、有効化するには **`managed-placement` feature ＋
+  `[patch.crates-io.fandhe-ai]` による未リリース HEAD `crates/facade` への path patch**の
+  両方が必要:
+
+  ```sh
+  cargo build --release -p bench-fandhe --features managed-placement \
+    --config 'patch.crates-io.fandhe-ai.path="/absolute/path/to/crates/facade"'
+  ```
+
+  `[patch]`／`.cargo/config.toml` は本 workspace の `Cargo.toml`・`Cargo.lock` へコミットしない
+  （deps-policy.md 第 9 区分は registry 取得元のみを許容するため、patch は CLI 引数として都度
+  与える。計測後は `git checkout -- scripts/bench/framework-compare/Cargo.lock` で復元する）
+- **`bench-candle`／`bench-burn`**: `--managed` は fandhe-ai 固有の CUDA managed memory opt-in
+  API を指す概念であり対応する公開 API がないため、常に `MEASURE_ERROR` で fail-fast する
+- **JSONL**: `--managed` で計測した行は `"managed":true` を emit する（既定は emit しないキー
+  欠損 = `false` の互換規約。`bench_common::Record::managed`。`tf32` と同型）
+- **`summarize.py`／`compare_gemm_gate.py`／`compare_ab.py`**: `managed:true` 行は目標達成
+  ゲート・A/B 比較から**既定で除外**する（既定 device-only 配置との速度混同防止）
+- **A/B 計測**: `run_ab_managed_cuda.sh`（`AB_PATCH_FACADE_PATH` 環境変数必須。上記 path patch
+  先の絶対パスを指定）が同一バイナリで off/on を交互起動し、`compare_managed_ab.py` が
+  `(task, device, size, mode)` セルごとに 5 回計測中央値・checksum 一致（複合判定＋完全一致）を
+  集計する。実測記録・既定化可否の判定は `docs/perf/cuda-managed-placement-ab.md` を参照
+
 ## 使い方
 
 ```bash

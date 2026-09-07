@@ -771,6 +771,13 @@ jobs:
       - name: フレームワーク横並びベンチ compare_gemm_gate.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/compare_gemm_gate_test.py
 
+      # イシュー #1353: compare_managed_ab.py（CUDA managed memory 配置
+      # 〈#1352〉有無の A/B 比較ヘルパー）の回帰テスト。summarize_test.py・
+      # compare_ab_test.py・compare_gemm_gate_test.py と同一方針（stdlib の
+      # unittest のみ・cargo の有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ compare_managed_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/compare_managed_ab_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ

@@ -141,6 +141,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -255,6 +256,7 @@ fn run_train<B: AutodiffBackend>(
         // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -302,6 +304,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -360,6 +363,16 @@ fn validate_unsupported_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
                 .into(),
         );
     }
+    // イシュー #1353: `--managed` は fandhe-ai 固有の CUDA managed memory
+    // opt-in API を指す概念であり、burn には対応する公開 API が存在しない。
+    // `--tf32` と同型の allowlist 方式で常に拒否する。
+    if cli.managed {
+        return Err(
+            "MEASURE_ERROR: --managed is not supported by burn (fandhe-ai-only CUDA managed \
+             memory opt-in; issue #1353)"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -394,6 +407,7 @@ mod tests {
             mode: "fresh".to_string(),
             phases: false,
             tf32,
+            managed: false,
         }
     }
 
@@ -411,6 +425,25 @@ mod tests {
 
     #[test]
     fn tf32_flag_absent_passes_the_guard() {
+        assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
+    }
+
+    /// イシュー #1353: `--managed` は fandhe-ai 固有の CUDA managed memory
+    /// opt-in API を指す概念であり、burn には対応する公開 API がないため
+    /// 常に MEASURE_ERROR で fail-fast する。
+    #[test]
+    fn managed_flag_is_always_measure_error() {
+        let mut cli = base_cli(false);
+        cli.managed = true;
+        let err =
+            validate_unsupported_flags(&cli).expect_err("--managed must be rejected on bench-burn");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--managed"), "msg={msg}");
+    }
+
+    #[test]
+    fn managed_flag_absent_passes_the_guard() {
         assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
     }
 }
