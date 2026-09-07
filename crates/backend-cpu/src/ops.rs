@@ -480,7 +480,7 @@ impl BackendOps for CpuBackendOps {
     /// API 面を満たす」意味論的対称の位置づけに留まる（実測上の
     /// 読み戻し削減効果は CUDA／Metal 側が主眼）。
     ///
-    /// `C` は [`Self::gemm`]（[`gemm_into_slice`]）と bit 同一（同一
+    /// `C` は [`Self::gemm`]（`gemm_into_slice`）と bit 同一（同一
     /// カーネル呼び出し）。checksum は `C` を先頭から `f64` へ昇格して
     /// 逐次和で求める（`out.iter().map(|&x| x as f64).sum()`。固定順序で
     /// 決定的）。この順序は framework-compare の既存ハーネス側 checksum
