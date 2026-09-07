@@ -1,0 +1,75 @@
+B 側 laneq ベクトル転置版（`GemmDriverVariant::RowPanelBLaneqVec`。イシュー #1317・
+本 A/B #1318）両実機実測の環境情報（内部ホスト名は含めない）。
+
+計測日: 2026-09-08（UTC+9・実施セッション内で連続実行）
+対象コミット: 698f740（origin/main。作業ブランチ docs/1318-b-laneq-vec-ab の分岐元）
+
+## 事前宣言ゲート（計測前に確定。以後変更しない。#1318 計画 §2 を転記）
+
+**Tier 1（結線判定。ADOPT を決める）** — `RowPanelBLaneqVec / RowPanel`
+（同一プロセス内 round-robin 計測の 5 回独立プロセス中央値比）:
+
+1. N=1024・N=2048 の両方で ratio ≥ 1.00、かつ N=4096 で ratio ≥ 0.95
+2. 上記を M4 Max・GB10 の両方で満たす場合のみ ADOPT。片方のみは REJECT
+3. ノイズガード: N=1024 または 2048 で中央値比 ≥ 1.00 でもペアワイズ勝ち run 数が
+   5 中 3 未満なら「判定不可（undetermined）」とし結線しない
+4. 前提: 両実機で `gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_large`
+   （`#[ignore]`・release）が pass
+
+**Tier 2（#1041 ゲート。#1321 への報告値）** — 候補の GFLOP/s（A/B ハーネス中央値）÷
+gemm crate（`oss-gemm-compare` 5 独立プロセスの `tflops_median` run 間中央値 × 1000）を
+N=1024/2048 で算出。4096 は非劣化（Tier 1 と同じ ratio）で見る。
+
+結線判断は Tier 1 で行う。
+
+## 実行環境
+
+### Apple M4 Max（ローカル worktree）
+
+- CPU: Apple M4 Max
+- OS: Darwin（arm64）
+- rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+- RAYON_NUM_THREADS: 未設定
+- BIG_CORE_LIMIT_ENABLED: false（#1364 確定のまま不変）
+- 転送方式: ローカル worktree で直接実行（rsync 不要）
+- 負荷状態: 共有負荷下（他セッションの並列実装ジョブと同居する M4 Max。実測開始前
+  `uptime` は load averages 1.14/1.63/2.56。1024/2048 系列実行中に load averages が
+  一時的に 5〜6.4 台まで上昇（`uptime-m4max.log` 参照）。共有負荷下である旨は
+  ノイズガード判定・結論の解釈に反映する
+
+### DGX Spark GB10（Grace CPU。実ホスト名はローカル管理外ファイル参照）
+
+- CPU: aarch64・20 論理コア（`lscpu-dgx.txt` 参照）
+- rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+- RAYON_NUM_THREADS: 未設定
+- BIG_CORE_LIMIT_ENABLED: false（#1364 確定のまま不変）
+- 転送方式: `docs/real-hardware-verification-env.md` §3 の rsync 手順（`.rev-stamp` で
+  リビジョン一致確認済み・秘密情報混入なしを事前確認済み）
+- 負荷状態: 計測開始前 `uptime` は load average 0.11/0.10/0.04（低負荷ゲート
+  〈1 分 load average < 6〉を満たす）。計測（自身の GEMM 計算がフルコア使用する
+  ワークロードのため）中に load average が一時的に 10 台まで上昇するが、これは
+  他プロセスの干渉ではなく計測対象自身の CPU 使用によるもの（`uptime-dgx.log` 参照）
+
+## テスト実行
+
+- 両実機とも `cargo test -p fandhe-ai-backend-cpu --lib gemm_blis --release`
+  （通常テスト。117 passed）が pass（`unit-test-{m4max,dgx}.txt`）
+- 両実機とも `#[ignore]` 大形状 bit 一致
+  `gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_large` が pass
+  （`bit-exact-large-{m4max,dgx}.txt`）
+
+## ログファイル一覧
+
+- `ab-1024-2048-{m4max,dgx}-run{1..5}.txt` / `ab-4096-{m4max,dgx}-run{1..5}.txt`:
+  A/B ハーネス（`gemm_blis_variant_ab_1024_2048`／`_4096`）の 5 回独立プロセス実行ログ
+- `oss-{m4max,dgx}-run{1..5}.jsonl`: `oss-gemm-compare --sizes 1024,2048,4096` の
+  5 回独立プロセス実行ログ（Tier 2 分母。gemm crate・matrixmultiply・
+  self_gemm_blis_parallel の tflops_median を含む）。`oss-m4max-run{2..5}.err` の
+  警告・エラーは matrixmultiply／gemm crate との既知の出力不一致
+  （`docs/oss-comparison-harness-decision.md`「出力突合とその限界」節に記載済みの
+  既知の限界。本 A/B の採否判定には影響しない）
+- `aggregate.md` / `aggregate.py`: Tier 1（対 RowPanel 比・勝ち run 数）の集計結果・
+  集計スクリプト（fail-closed・Python3 標準ライブラリのみ）
+- `lscpu-dgx.txt` / `rustc-version-{m4max,dgx}.txt` / `cpu-brand-m4max.txt`:
+  ハードウェア・ツールチェーン情報
+- `uptime-{m4max,dgx}.log`: 負荷状態のサンプル（計測前・各 run 後）
