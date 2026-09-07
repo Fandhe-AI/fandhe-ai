@@ -16,6 +16,15 @@
 5 サンプル未満・候補欠落での集計を fail-closed で拒否する
 （実測値の捏造・不完全データでの判定確定を防ぐ）。Python3 標準ライブラリのみ。
 
+ペアワイズ勝ち run 数の算出は「同一プロセス内比較」というノイズガードの契約
+（#1318 計画 §2 Tier 1 条件 3）を厳密に満たすため、値を (variant, size) 単位で
+フラットに集約せず、**ファイル（= 1 プロセス実行）単位でレコードを保持し、
+同一ファイル内の値同士のみを対応付けて**勝敗を数える（同一サイズについて
+異なるファイルが異なる候補集合を欠落させていても、値の対応がファイルを跨いで
+ズレたまま「5 件ずつ」の見かけ上のサンプル数一致検査を通過し、実際には
+異なるプロセスの値同士を比較してしまう事故を防ぐ。codex-review 指摘・
+イシュー #1318 PR #1433）。
+
 使い方: python3 aggregate.py "<機種名>" <ログファイル...>
 """
 import os
@@ -36,7 +45,8 @@ EXPECTED_SAMPLES = 5
 
 
 def parse(path):
-    # (variant, size) -> [gflops, ...]（1 ファイル = 1 run 分の出力）。
+    # (variant, size) -> [gflops, ...]（1 ファイル = 1 run 分の出力。
+    # 正常なファイルは各 (variant, size) につき厳密に 1 件のみ持つ）。
     out = defaultdict(list)
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -77,9 +87,13 @@ def main():
         )
         sys.exit(1)
 
-    data = defaultdict(list)
+    # per_file[path] = {(variant, size): gflops}（1 ファイル = 1 プロセス実行分）。
+    # 後段の勝敗判定を「同一ファイル（= 同一プロセス）内の値同士」に限定する
+    # ため、(variant, size) へフラットに集約する前にファイル単位で保持する。
+    per_file = {}
     for path in paths:
         d = parse(path)
+        record = {}
         for k, v in d.items():
             # fail-closed: 同一ファイル内で同じ (variant, size) が複数回
             # 出力された場合（プロセス側の異常出力等）を検出する。
@@ -90,9 +104,11 @@ def main():
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            data[k].extend(v)
+            record[k] = v[0]
+        per_file[path] = record
 
-    if not data:
+    all_records = [rec for rec in per_file.values() if rec]
+    if not all_records:
         print(
             f"ERROR: no `variant=... size=... median_gflops=...` lines found "
             f"in input files: {paths}",
@@ -100,7 +116,52 @@ def main():
         )
         sys.exit(1)
 
-    sizes = sorted({size for (_, size) in data})
+    sizes = sorted({size for rec in all_records for (_, size) in rec})
+
+    # fail-closed: 各ファイルが、そのファイルが言及する size について
+    # EXPECTED_VARIANTS を過不足なく含むことを検証する（同一プロセス内
+    # 比較の前提。ファイルによって欠落する候補が異なると、後段の
+    # (variant, size) 単位フラット集約でサンプル数だけは一致しつつ実際には
+    # 異なるプロセスの値同士が対応してしまうため、ファイル単位で先に
+    # 完全性を確認する）。
+    incomplete = []
+    for path, rec in per_file.items():
+        sizes_in_file = sorted({size for (_, size) in rec})
+        for size in sizes_in_file:
+            present = {variant for (variant, s) in rec if s == size}
+            missing_variants = set(EXPECTED_VARIANTS) - present
+            extra_variants = present - set(EXPECTED_VARIANTS)
+            if missing_variants or extra_variants:
+                incomplete.append((path, size, sorted(missing_variants), sorted(extra_variants)))
+
+    if incomplete:
+        print(f"=== {machine} ===", file=sys.stderr)
+        for path, size, missing_variants, extra_variants in incomplete:
+            print(
+                f"ERROR: {path} size={size} does not contain exactly "
+                f"EXPECTED_VARIANTS (missing={missing_variants}, "
+                f"extra={extra_variants})",
+                file=sys.stderr,
+            )
+        print(
+            "集計を中止しました（ファイル内候補欠落。同一プロセス内比較という"
+            "ノイズガードの前提を満たさないファイルが含まれるため中央値・"
+            "比較比・勝ち run 数は算出しません）。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ここまでの検証により、各ファイルは自身が言及する各 size について
+    # EXPECTED_VARIANTS を過不足なく 1 件ずつ持つことが保証されている。
+    # よって size ごとに「その size を含むファイル」を入力順に走査すれば、
+    # 同じ添字位置の値は必ず同一ファイル（= 同一プロセス実行）由来になり、
+    # ペアワイズ比較の対応関係が保たれる。
+    data = defaultdict(list)
+    for size in sizes:
+        files_for_size = [rec for rec in per_file.values() if any(s == size for (_, s) in rec)]
+        for rec in files_for_size:
+            for variant in EXPECTED_VARIANTS:
+                data[(variant, size)].append(rec[(variant, size)])
 
     # fail-closed: 各 (variant, size) のサンプル数が EXPECTED_SAMPLES と
     # 一致することを確認する（5 回独立プロセス計測という契約。#1367 と同方針）。
@@ -141,6 +202,10 @@ def main():
             if variant == BASELINE_VARIANT:
                 print(f"| {variant} | {med:.3f} | {ratio:.4f} | — |")
                 continue
+            # `series[i]` と `base_series[i]` は上記のファイル単位検証により
+            # 同一ファイル（= 同一プロセス実行）内の値であることが保証されて
+            # いるため、この zip はノイズガード契約どおり同一プロセス内比較
+            # になる。
             wins = sum(1 for a, b in zip(series, base_series) if a > b)
             print(f"| {variant} | {med:.3f} | {ratio:.4f} | {wins}/{len(series)} |")
         print()
