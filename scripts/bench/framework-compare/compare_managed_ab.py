@@ -54,23 +54,43 @@ _VALID_MODES = frozenset({"fresh", "reuse"})
 
 
 def _valid_cell_identity(obj):
-    """`_cell_key` がグループ化キーへ使う `task`/`device`/`size`/`mode` の
-    型・値域を検証する（イシュー #1353・github-actions レビュー指摘）。
+    """`_cell_key` がグループ化キーへ使う `task`/`device`/`size`/`mode`/
+    `phase` の型・値域を検証する（イシュー #1353・github-actions レビュー
+    指摘）。
 
     これらを検証せずに読み込むと、正常な off/on 各 5 件からこれらの
     フィールドを削除した行でも `_cell_key` が `(None, None, None,
     "fresh", None)` のような単一セルへ迂回して集約され、比較対象が
     実際には不明であるにもかかわらず判定 "ok" となりうる（fail-open の
     おそれ。`managed` フィールド自体の型検証だけでは防げない）。
+
+    `task`/`device`/`mode` は `frozenset` への `in`/`not in` 判定の前に
+    必ず `isinstance(..., str)` で型を確認する（codex-review 指摘・
+    イシュー #1353 3 巡目）。JSON の配列・オブジェクト（Python では
+    list/dict）は非 hashable なため、型確認なしに `not in _VALID_TASKS`
+    等の集合メンバーシップ判定へ直接渡すと、`False` を返す前に
+    `TypeError` を送出してクラッシュする（`load_rows` は「不正な行は
+    理由付きでスキップする」契約〈A08〉のため、判定不能な行が
+    プロセス全体を落とすのは fail-open ではなく可用性の欠陥だが、
+    いずれにせよここで通常の「不正行スキップ」経路へ倒す必要がある）。
+    `phase` も `_cell_key` のグループ化キーに含まれるため同様に検証する
+    （list/dict のまま `cells.setdefault(key, ...)` の辞書キーに使われると
+    `split_off_on` 側で同種の `TypeError` を招く）。
     """
-    if obj.get("task") not in _VALID_TASKS:
+    task = obj.get("task")
+    if not isinstance(task, str) or task not in _VALID_TASKS:
         return False
-    if obj.get("device") not in _VALID_DEVICES:
+    device = obj.get("device")
+    if not isinstance(device, str) or device not in _VALID_DEVICES:
         return False
-    if obj.get("mode", "fresh") not in _VALID_MODES:
+    mode = obj.get("mode", "fresh")
+    if not isinstance(mode, str) or mode not in _VALID_MODES:
         return False
     size = obj.get("size")
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return False
+    phase = obj.get("phase")
+    if phase is not None and not isinstance(phase, str):
         return False
     return True
 
@@ -210,9 +230,19 @@ def evaluate_cell(off_rows, on_rows):
         # `warmup=-1`／`iters=0`／`version=""` のような不正値でも off/on
         # 双方で揃ってさえいれば「一致」として素通りしてしまう（fail-open
         # のおそれ）。生値リストの各要素に対して明示的に妥当性を検証する。
-        invalid_values = {
+        #
+        # `invalid_values` は `set` ではなく `list` として構築する
+        # （codex-review 指摘・イシュー #1353 3 巡目）: 外部 JSONL の
+        # `warmup`/`iters`/`version` は任意の JSON 値になりうり、配列・
+        # オブジェクト（Python の list/dict）は非 hashable。`_valid_field_value`
+        # がそれらを「不正」と正しく判定しても、判定結果を `set` 内包表記へ
+        # 集めようとした時点で当の値自体をハッシュ化しようとして
+        # `TypeError` を送出し、「判定不能として拒否する」という設計契約
+        # 通りに動かずクラッシュしてしまう。`list` は非 hashable な要素も
+        # 保持できるため、ここでは順序付きリストのまま収集する。
+        invalid_values = [
             v for v in off_raw + on_raw if not _valid_field_value(field, v)
-        }
+        ]
         if invalid_values:
             return {
                 "status": "undeterminable",
@@ -220,7 +250,8 @@ def evaluate_cell(off_rows, on_rows):
             }
         # 型・値域検証を通過した生値のみをここで集合化する（`bool`／`int`
         # の同値吸収問題は上記の生値検証で既に弾いているため、ここでの
-        # 集合化は安全）。
+        # 集合化は安全。加えて `_valid_field_value` が通過させる値は
+        # int/str のみで list/dict は上で弾かれているため hashable）。
         off_values = set(off_raw)
         on_values = set(on_raw)
         if len(off_values) != 1 or len(on_values) != 1:

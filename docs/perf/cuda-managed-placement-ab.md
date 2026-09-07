@@ -126,6 +126,25 @@ GB10 実機実測はこの是正の**前**に取得したもので、是正後�
 自体は §8 のとおり train reuse の後退のみを根拠に REJECT 済みで、この
 未決事項の影響を受けない）。
 
+**upload／download も同一の理由で再計測待ちである（github-actions レビュー
+指摘・#1397 3 巡目）**: `measure_one` は当初 device-only（off）側の upload
+区間でストリーム同期を取っていなかった。`clone_htod` は `cuMemcpyHtoDAsync`
+を発行する非同期コピーのため、`upload()` の呼び出し復帰は転送完了を意味
+せず、未完了の H2D 転送の残り待機時間が後続の区間 2（`download()`）側へ
+混入していた（managed 側は同一位置でホスト → `UnifiedSlice` の同期
+memcpy が完了してから復帰するため、この非対称のまま両者を比較すると
+off upload が実際より速く・off download が実際より遅く見えていたおそれが
+ある）。このストリーム同期はその後
+`managed_placement_bandwidth_real_device.rs::measure_one` へ追加されたが
+（コード修正のみ）、readback 是正と同じく本イシューの GB10 実機実測は
+この是正の**前**に取得したものであり、是正後の実装での upload／download
+再計測は未実施である。したがって下表の off upload／off download 値
+（および、その比率として導出している「upload は managed が device-only の
+約 1/10」「32 MiB 以上で download は managed が高帯域」という帯域面の結論）
+も、readback と同様に**是正後の実装での再計測が必要な未決事項**として
+扱う（既定化可否判定自体は §8 のとおり train reuse の後退のみを根拠に
+REJECT 済みで、この未決事項の影響を受けない）。
+
 `docs/perf/logs/cuda-managed-placement-ab-1353/1353-bandwidth.log` に生ログ。
 サイズ {4, 16, 32, 33, 64} MiB（#1146/#1149 の 32→33 MiB 段差を含む）で
 upload／download／download 結果のホスト側逐次全読み（ページ経由アクセスの
@@ -151,16 +170,25 @@ upload／download／download 結果のホスト側逐次全読み（ページ経
 ほぼ同一（7.1〜7.4 GiB/s、差 5% 未満）だった。ただしこれは managed
 ページ自体への CPU 直接アクセスの計測ではないため、**managed 配置の
 CPU 側ページ経由アクセスに帯域低下が無いとまでは、この実測から結論
-づけない**（是正後実装での再計測が必要）。一方
-`upload` は managed（ホスト → `UnifiedSlice` memcpy）が device-only
-（DMA H2D）の約 1/10（4.7〜5.1 対 45.5〜53.7 GiB/s）と大幅に遅い。これは
-本イシューの主結論（train reuse の `upload(grad)` を含む `device_update`
-区間の後退）と整合する一次要因と考えられる。`download` は
+づけない**（是正後実装での再計測が必要）。同様に `upload`／`download`
+も是正前実装（off 側 upload 区間のストリーム同期を追加する前）での計測
+であり、**この表の数値・以下の比較（1/10・高帯域等）は断定ではなく
+是正前実装での参考値として扱い、是正後実装での再計測が必要**である
+（上記「upload／download も同一の理由で再計測待ちである」注記を参照）。
+参考値としては、`upload` は managed（ホスト → `UnifiedSlice` memcpy）が
+device-only（DMA H2D）の約 1/10（4.7〜5.1 対 45.5〜53.7 GiB/s）と大幅に
+遅く、これは本イシューの主結論（train reuse の `upload(grad)` を含む
+`device_update` 区間の後退）と整合する一次要因と考えられるが、off 側
+upload 計測にストリーム同期が欠けていた影響（off upload が実際より短く
+計測されていた可能性）を排除できていない。`download` は
 **32 MiB 以上（安定した計測が得られたサイズ）では managed（on）が
 device-only（off）より一貫して高帯域**（on 2.8〜3.0 対 off 2.0〜2.4 GiB/s。
 codex-review 指摘の是正: 従来の記述はこの表の数値と符号が逆で
 「managed が不利」としていたが、実測値は managed が有利であることを
-示している）。4/16 MiB は off 自体が run 間で大きくばらつく（上記）ため
+示している）という参考値だが、これも off upload の同期欠落が off
+download 側の待機時間混入を通じて off download を実際より長く見せていた
+可能性を排除できていないため、参考値の位置づけを変えない。4/16 MiB は
+off 自体が run 間で大きくばらつく（上記）ため
 比較の参考値に留める（4 MiB は on が off を大きく上回るが、16 MiB は
 off の単発高値〈53.4〉が on を上回る）。原因（managed のページ
 フォールト挙動・確保パス差等）は未確定のまま記録する。

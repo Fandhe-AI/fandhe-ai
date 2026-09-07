@@ -142,6 +142,58 @@ class LoadRowsTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_array_typed_task_is_skipped_without_crashing(self):
+        # イシュー #1353（github-actions レビュー指摘・3 巡目）: `task` が
+        # JSON 配列（Python では非 hashable な list）の場合、型確認なしに
+        # `frozenset` への `not in` 判定を行うと `TypeError` でクラッシュ
+        # する。ここでは正常に「不正行としてスキップ」される（クラッシュ
+        # しない）ことを検証する。
+        r = _rec(False, 0.001)
+        r["task"] = ["gemm"]
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+        finally:
+            os.unlink(path)
+
+    def test_object_typed_device_is_skipped_without_crashing(self):
+        r = _rec(False, 0.001)
+        r["device"] = {"name": "cuda"}
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+        finally:
+            os.unlink(path)
+
+    def test_array_typed_mode_is_skipped_without_crashing(self):
+        r = _rec(False, 0.001)
+        r["mode"] = ["fresh"]
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+        finally:
+            os.unlink(path)
+
+    def test_array_typed_phase_is_skipped_without_crashing(self):
+        # `phase` は `_cell_key` のグループ化キーに含まれるため、list を
+        # そのまま通すと `split_off_on` の `cells.setdefault(key, ...)`
+        # が辞書キーのハッシュ計算で `TypeError` を送出する。
+        r = _rec(False, 0.001)
+        r["phase"] = ["tape_build"]
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+        finally:
+            os.unlink(path)
+
 
 class SplitOffOnTest(unittest.TestCase):
     def test_splits_by_managed_field(self):
@@ -309,6 +361,27 @@ class EvaluateCellTest(unittest.TestCase):
         result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
         self.assertEqual(result["status"], "undeterminable")
         self.assertIn("checksum", result["reason"])
+
+    def test_undeterminable_when_iters_is_array_without_crashing(self):
+        # イシュー #1353（github-actions レビュー指摘・3 巡目）: 旧実装は
+        # `_valid_field_value` が不正と判定した生値を `set` 内包表記へ
+        # 集めていたため、list（非 hashable）が混ざると「判定不能として
+        # 拒否する」より先に `TypeError` でクラッシュしていた。ここでは
+        # 例外を送出せず正常に判定不能を返すことを検証する。
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(5)]
+        off_rows[0]["iters"] = [1, 2, 3]
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("iters", result["reason"])
+
+    def test_undeterminable_when_version_is_object_without_crashing(self):
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(5)]
+        on_rows[0]["version"] = {"tag": "0.1.0"}
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("version", result["reason"])
 
 
 class RenderMarkdownAdoptVerdictTest(unittest.TestCase):

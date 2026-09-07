@@ -1912,7 +1912,10 @@ HEAD。#1352 実装込み）への path patch でビルドした `bench-fandhe` 
 差なし。CPU 側ページ経由アクセスの帯域（readback）は是正前実装での計測
 では off/on でほぼ同一（差 5% 未満）だったが、managed ページ直接読み取り
 を計測する是正後実装での再計測は未実施のため低下有無は未確定（#1397
-レビュー指摘）。一方 upload（H2D 相当）は managed が
-device-only の約 1/10 で主要因と推定される。詳細・env_info・スコープ外
+レビュー指摘）。upload／download（H2D／D2H 相当）も、off 側 upload 区間に
+ストリーム同期が欠けていた是正前実装での計測であり、同一の理由で是正後
+実装での再計測が必要な参考値に留まる（#1397 レビュー指摘 3 巡目）。
+参考値としては upload は managed が device-only の約 1/10 で train reuse
+後退の一次要因と推定されるが、断定はしない。詳細・env_info・スコープ外
 事項は `docs/perf/cuda-managed-placement-ab.md`・
 `docs/perf/logs/cuda-managed-placement-ab-1353/` を参照。

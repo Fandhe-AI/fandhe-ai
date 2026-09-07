@@ -3177,6 +3177,12 @@ def section(path, rows):
                     and x["device"] == device
                     and x["mode"] == "reuse"
                     and (x.get("tf32", False) is True) is False
+                    # イシュー #1353（codex-review 指摘）: managed:true 行は
+                    # `compare_managed_ab.py::evaluate_cell` が別途 A/B
+                    # 集計するため、ここで除外しないと通常行と混在して
+                    # 重複キー判定（`dup_reuse_count`/`--strict`）を誤って
+                    # 招く（他の managed 除外箇所と同一方針。例: L3377）。
+                    and x.get("managed", False) is not True
                 ]
                 if not all_reuse_for_fw:
                     continue
@@ -3216,6 +3222,9 @@ def section(path, rows):
                         and x["mode"] == "fresh"
                         and _valid_gate_size(x.get("size"))
                         and x.get("size") == size
+                        # イシュー #1353（codex-review 指摘）: reuse 側と同じ
+                        # 理由で managed:true 行を fresh 突合対象から除外する。
+                        and x.get("managed", False) is not True
                     ]
                     dup_fresh_count = len(fresh_matches)
                     fresh = fresh_matches[0] if fresh_matches else None

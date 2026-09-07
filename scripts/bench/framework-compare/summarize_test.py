@@ -1698,6 +1698,54 @@ class InferReuseSectionTests(unittest.TestCase):
         *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_infer_reuse_invalid)
 
+    def test_managed_reuse_row_does_not_trigger_false_duplicate(self):
+        # イシュー #1353（github-actions レビュー指摘）: `--managed` A/B
+        # 計測（`run_ab_managed_cuda.sh`）が出力する JSONL には同一
+        # framework/task/device/size/mode の行が `managed:true`（on）／
+        # `managed` キー欠損（off）で交互に混在する。(c') 節の集計が
+        # managed 行を除外せず通常行と同一グループへ混ぜると、正常な
+        # 2 行（off・on）が「重複キー」と誤判定され `--strict` を
+        # 誤って失敗させる。managed:true 行を除外すれば off 単独では
+        # 重複にならないことを確認する。
+        rows = [
+            dict(_infer_row(mode="fresh", checksum=1.0), size=64),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=1.0, init_s=0.02),
+                size=64,
+            ),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0009, checksum=999.0, init_s=0.02),
+                size=64,
+                managed=True,
+            ),
+        ]
+        lines, *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_infer_reuse_invalid)
+        text = "\n".join(lines)
+        self.assertNotIn("重複", text)
+
+    def test_managed_fresh_row_is_excluded_from_reuse_checksum_match(self):
+        # 上記と対の観点: fresh 側に managed:true 行が混在していても、
+        # reuse 側（off）の突合先として誤って選ばれない（checksum が
+        # 異なる managed fresh 行と誤って「不一致」判定されない）ことを
+        # 確認する。
+        rows = [
+            dict(
+                _infer_row(mode="fresh", checksum=999.0),
+                size=64,
+                managed=True,
+            ),
+            dict(_infer_row(mode="fresh", checksum=1.0), size=64),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=1.0, init_s=0.02),
+                size=64,
+            ),
+        ]
+        lines, *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_infer_reuse_invalid)
+        text = "\n".join(lines)
+        self.assertIn("一致", text)
+
     def test_infer_reuse_rows_do_not_affect_gemm_or_train_sections(self):
         gemm_rows = [_with_parity(_base_row())]
         train_rows = [_train_row(mode="fresh")]
