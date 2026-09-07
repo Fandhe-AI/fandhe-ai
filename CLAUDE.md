@@ -81,6 +81,7 @@ fandhe-ai/
     ├── backend-metal-wgpu-decision.md  # Metal バックエンド実装方式（wgpu 非採用）の決定記録
     ├── backend-switching-design.md     # cfg ベースバックエンド切替の設計
     ├── candle-parity-tolerance-contract-decision.md # tolerance 契約変更（N=2048 candle 比 GEMM parity 判定不能の解消）の決定記録 draft。候補 A（スケール付き絶対誤差）／B（ULP ベース）の比較表・推奨 A-1〈係数 c=0.5／1.0 の 2 案。未承認〉・fandhe-ai 側 0 fail 不変の根拠・spec 提案要否（#1240 対応）・Phase 2 反映範囲を整理。tolerance 定数・判定式・`BASELINES`・`docs/spec/` は不変のまま。採否・係数値・適用スコープはイシュー #1241 でユーザー承認（#1237／#1238 引き継ぎ・イシュー #1239）
+    ├── cpu-gemm-2d-dynamic-partition-design.md # `gemm_blis_parallel` の (mc, nc) 2D タイル動的分配（rayon work stealing）設計・bit 完全一致条件・C 列分割の unsafe 非導入主案／raw pointer 代替案（#1338 承認済み）・job 粒度算出・`GemmDriverVariant::TwoDDynamic` の A/B 統合方針・#1305（DGX N=1024 の異種コア由来非単調性）を受けた採用ゲート・中止条件を確定（設計記録のみ・コード変更なし。#1307）
     ├── cpu-gemm-b-packing-sharing-decision.md # B パネル packing のスレッド間共有化の設計検討・適用可否判断（#565）
     ├── cpu-gemm-prefetch-decision.md   # aarch64 プリフェッチ intrinsics 到達可能性調査・E-7 保留判断→原則不要へ格下げ（#489・#751）
     ├── crates-io-naming-decision.md # crates.io 公開クレート名（fandhe-ai prefix）の空き確認・最終名ユーザー承認記録（#878/#879）
