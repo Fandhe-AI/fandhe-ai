@@ -1076,7 +1076,8 @@ stream の event 管理コスト」と「capture 自体の効果」を分離計�
   （design doc §6「後退が観測されても結線撤回は不要」）。「既定 ON
   推奨」と判定する条件は「`step_total` ON/OFF 中央値比 ≤ 0.95 **かつ**
   `device_update` ON/OFF 中央値比 < 1.0（5/5 run 符号一貫）**かつ**
-  checksum 完全一致（bit 同一）」。いずれか未達なら「既定 OFF 維持
+  checksum 完全一致（`compare_graph_ab.py` の丸め後一致判定。後述の
+  注記参照）」。いずれか未達なら「既定 OFF 維持
   （中立／後退）」
 
 ### 16.3 実行環境
@@ -1130,13 +1131,29 @@ off/stream-only/on を交互起動し、(a) `train cuda 64 reuse`
 | train_phases: tape_drop | 0.9 us | 0.9 us | 0.9 us | 0.9153 | 0.9322 | 1.0185 | 完全一致 | 2/98/100/2 |
 | **train_phases: step_total** | **451.1 us** | **432.6 us** | **430.9 us** | **0.9589** | **0.9552** | **0.9962** | 完全一致 | 2/98/100/2 |
 
+（codex-review 指摘・PR #1425・P2）上表の「checksum」列の「完全一致」は
+`bench-common::Record::to_json_line` が checksum を `{:.6}`（小数第 6 位）
+で丸めて JSON へ emit した後の値どうしの一致（`compare_graph_ab.py::
+_check_checksums` の `exact_ok`）であり、丸め前の元の浮動小数点値が
+bit 同一であることまでは保証しない。丸め前の値まで含めた bit 同一
+検証は §16.4 の `scripts/verify-cuda-graph-step-bit-identity.sh`
+（stdout の 2662 行を直接比較）が別途担っている。
+
 launch カウンタ（`on` 状態。5 run 内で完全一致）: `captured=2`
 （`is_first_step` 遷移により 1 ではなく 2。design doc の想定範囲内）・
 `replayed=98`（100 step のうち capture 分 2 を除いた残り）・
 `graph_launches=100`（`captured+replayed`）・`sgd_kernel_launches=2`
 （capture 時のウォームアップ launch + capture 内 1 回のみ。B6 の想定
-どおり replay では SGD カーネル自体は launch されない）。`off`/
-`stream-only` の `sgd_kernel_launches=100`（毎 step 1 回、想定どおり）。
+どおり replay では SGD カーネル自体は launch されない）。`stream-only`
+の `sgd_kernel_launches=100`（毎 step 1 回）は JSONL に記録された実測値
+（`results-dgx-graph-ab-head-5a66e11.jsonl` の `graph_sgd_kernel_launches`
+フィールド）。一方 `off`（`--graph` 未指定）は `Record.graph` が `None`
+のため `graph_stats` 自体が JSONL に emit されず（`bench-common::Record`
+のキー欠損規約）、`sgd_kernel_launches=100` は実測していない。この値は
+「毎 step 通常経路で SGD カーネルが 1 回 launch される」という
+`DeviceParamStore::step` のコード（`graph_capture_available` 分岐に
+入らない通常経路）から導いた期待値であり、codex-review 指摘（PR #1425・
+P2）を踏まえ本節でも実測値と区別して明記する。
 `train`（fresh・対照）の launch カウンタは 4 系列とも 0（`DeviceParam
 Store::step` 非到達・capture 機構に触れていないことの裏付け）。
 
@@ -1153,12 +1170,23 @@ Store::step` 非到達・capture 機構に触れていないことの裏付け�
 符号一貫していない**（1 run で ON がわずかに後退）。`stream-only`
 （created stream 化のみ・capture なし）単独でも on/off 比 0.9866 と
 既に改善方向を示しており、`device_update` 全体の改善のうち一定割合は
-「created stream 化」（要因 ii 寄りの「毎 step 新規バッファ確保 +
-`upload`」→「永続 staging への `upload_into`」という OFF/ON 経路差、
-もしくは stream 種別自体の event 管理コスト差）に由来し、capture
-自体（要因 i）の寄与は on/stream-only 比 0.9851 とさらに小さいことを
-示唆する。ただし checksum・launch カウンタとも全セル完全一致・整合
-しており、機構自体の正しさに疑義はない。
+「created stream 化」（stream 種別自体の event 管理コスト差）に由来
+すると考えられる。
+
+（codex-review 指摘・PR #1425・P2）`DeviceParamStore::step`
+（`crates/autodiff/src/optim/device_store.rs`）を確認すると、永続
+staging バッファへの `upload_into` 切替（要因 ii）は
+`graph_capture_available`（`step_graph_enabled() == true` かつ
+capturable stream）が成立する `on` 側でのみ発生する分岐に限られる。
+`stream-only` は `step_graph_enabled() == false` のため
+`graph_capture_available` が常に `false` となり、`off` と同じ
+「毎 step 新規バッファ確保 + `mem.upload`」経路（`else` 節）を通る。
+したがって on/stream-only 比 0.9851 は capture 自体（要因 i）**単独**
+の寄与ではなく、capture（i）と staging 切替（ii）の**複合効果**を
+反映した比である（stream-only は i・ii いずれの変更も含まないため、
+on と stream-only の差分全体が i と ii の合算になる）。要因 i・ii を
+本計測だけで分離することはできない。ただし checksum・launch カウンタ
+とも全セル完全一致・整合しており、機構自体の正しさに疑義はない。
 
 ### 16.7 採否判定（事前宣言基準に基づく）
 
@@ -1166,7 +1194,7 @@ Store::step` 非到達・capture 機構に触れていないことの裏付け�
 |---|---|---|
 | `step_total` ON/OFF 中央値比 ≤ 0.95 | train_phases: 0.9552／train（非 phases）: 0.9644 | **未達**（いずれも 0.95 超） |
 | `device_update` ON/OFF 中央値比 < 1.0（5/5 run 符号一貫） | 中央値 0.9719（< 1.0）だが個別 run は 1/5 が > 1.0 | **未達**（符号非一貫） |
-| checksum 完全一致（bit 同一） | 全 10 セルとも `完全一致` | 達成 |
+| checksum 完全一致（{:.6} 丸め後の一致。上記注記参照） | 全 10 セルとも `完全一致` | 達成 |
 
 3 条件のうち 2 つが未達のため、**「既定 OFF 維持（中立）」と確定する**
 （`docs/backend-cuda-graph-step-capture-design.md` §6 が事前に述べた
@@ -1179,10 +1207,17 @@ run 符号一貫」の閾値には届かず、GB10 の計測ノイズ（数 µs 
 ### 16.8 launch 削減余地の構造的上限（事前宣言の裏付け）
 
 §16.2 で事前宣言したとおり、update 区間は SGD カーネル 1 個のみを
-含むため、launch 回数自体（`graph_launches`〈ON〉対 
-`sgd_kernel_launches`〈OFF〉）はいずれも 100（step 数）で同数——本計測
-はこれを実測で確認した。graph capture が短絡できるのは「カーネル
-launch のドライバ側オーバーヘッド」のみであり、本計測形状
+含むため、launch 回数自体（`graph_launches`〈ON〉対
+`sgd_kernel_launches`〈OFF〉）はいずれも 100（step 数）で同数となる
+はずである。ON／`stream-only` 側は JSONL 実測値（§16.5 の launch
+カウンタ）で 100（`graph_launches`）／100（`sgd_kernel_launches`）を
+確認済みだが、OFF 側は `--graph` 未指定のため `graph_stats` が記録
+されず（§16.5 訂正済みのとおり）実測していない。OFF 側の 100 は
+`DeviceParamStore::step` のコードから導いた期待値であり、本計測が
+実測で確認したのは ON／`stream-only` の launch カウンタ一致と、OFF
+との構造的な対称性（コード上そのはずである）にとどまる。graph
+capture が短絡できるのは「カーネル launch のドライバ側オーバー
+ヘッド」のみであり、本計測形状
 （BATCH=64・D_IN=784・D_HIDDEN=256・D_OUT=10 の小規模 MLP）では
 `device_update` 自体が step_total の一部（約 20%）に留まるため、
 launch 固定費削減の効果が `step_total` へ波及する余地は構造的に小さい。
