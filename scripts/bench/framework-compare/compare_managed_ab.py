@@ -40,12 +40,48 @@ def _import_from_path(name, filename):
 
 checksum_contract = _import_from_path("checksum_contract", "checksum_contract.py")
 
+# `_cell_key` がグループ化に使う識別フィールドの許容値（イシュー #1353・
+# github-actions レビュー指摘）。`run_ab_managed_cuda.sh` が起動する
+# `bench-fandhe` の task（`--phases` 指定時は `<task>_phases`）・device
+# （`summarize.py::DEVICE_ORDER` と同じ許容集合。本ツールは CUDA managed
+# 配置専用のため `cuda` のみだが、将来の拡張余地を残し他デバイスも許容する）・
+# mode の値をここで固定する。
+_VALID_TASKS = frozenset(
+    {"gemm", "gemm_phases", "train", "train_phases", "infer", "infer_phases"}
+)
+_VALID_DEVICES = frozenset({"cpu", "metal", "cuda"})
+_VALID_MODES = frozenset({"fresh", "reuse"})
+
+
+def _valid_cell_identity(obj):
+    """`_cell_key` がグループ化キーへ使う `task`/`device`/`size`/`mode` の
+    型・値域を検証する（イシュー #1353・github-actions レビュー指摘）。
+
+    これらを検証せずに読み込むと、正常な off/on 各 5 件からこれらの
+    フィールドを削除した行でも `_cell_key` が `(None, None, None,
+    "fresh", None)` のような単一セルへ迂回して集約され、比較対象が
+    実際には不明であるにもかかわらず判定 "ok" となりうる（fail-open の
+    おそれ。`managed` フィールド自体の型検証だけでは防げない）。
+    """
+    if obj.get("task") not in _VALID_TASKS:
+        return False
+    if obj.get("device") not in _VALID_DEVICES:
+        return False
+    if obj.get("mode", "fresh") not in _VALID_MODES:
+        return False
+    size = obj.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return False
+    return True
+
 
 def load_rows(path):
     """JSONL を読み、不正な行は理由付きで報告しスキップする（A08）。
 
     `managed` フィールドの型検証は summarize.py/compare_gemm_gate.py と同じ
-    fail-closed 方針（bool 以外はスキップ）。
+    fail-closed 方針（bool 以外はスキップ）。`task`/`device`/`size`/`mode`
+    （`_cell_key` が使う識別フィールド）も `_valid_cell_identity` で検証する
+    （イシュー #1353・github-actions レビュー指摘。詳細は同関数 docstring）。
     """
     rows = []
     warnings = []
@@ -68,6 +104,12 @@ def load_rows(path):
                 warnings.append(
                     f"{path}:{lineno}: 不正な 'managed' フィールド型（bool を期待。"
                     f"実際: {obj['managed']!r}） — skipped"
+                )
+                continue
+            if not _valid_cell_identity(obj):
+                warnings.append(
+                    f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"
+                    f"'mode' フィールド（行: {obj!r}） — skipped"
                 )
                 continue
             rows.append(obj)
@@ -145,12 +187,20 @@ def evaluate_cell(off_rows, on_rows):
             ),
         }
     for field in ("warmup", "iters", "version"):
-        off_values = {r.get(field) for r in off_rows}
-        on_values = {r.get(field) for r in on_rows}
-        # 全行欠損（`r.get(field)` が None）でも `len(...) == 1` は成立し
-        # off/on 双方が `{None}` なら一致判定を素通りしてしまう
-        # （codex-review 指摘）。欠損・不正値を明示的に判定不能として拒否する。
-        if None in off_values or None in on_values:
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）: `bool` は
+        # Python では `int` のサブクラスで `True == 1`／`hash(True) ==
+        # hash(1)` が成立するため、型検証より先に `set` 化すると
+        # `iters=[1, True, 1, 1, 1]` のような入力で `True` が同値の `1` に
+        # 吸収されて集合から消え、後段の `_valid_field_value` が `bool`
+        # 混入を検出できずに素通りしてしまう（fail-open のおそれ）。
+        # 集合化する前に各行の生値（リストのまま。重複除去しない）を
+        # 個別に検証する。
+        off_raw = [r.get(field) for r in off_rows]
+        on_raw = [r.get(field) for r in on_rows]
+        # 全行欠損（`r.get(field)` が None）でも生値リストの一致判定は
+        # 通ってしまう（codex-review 指摘）。欠損・不正値を明示的に
+        # 判定不能として拒否する。
+        if None in off_raw or None in on_raw:
             return {
                 "status": "undeterminable",
                 "reason": f"'{field}' が off または on の行に欠損している",
@@ -159,15 +209,20 @@ def evaluate_cell(off_rows, on_rows):
         # 欠損チェック（上）と一致チェック（下）だけでは
         # `warmup=-1`／`iters=0`／`version=""` のような不正値でも off/on
         # 双方で揃ってさえいれば「一致」として素通りしてしまう（fail-open
-        # のおそれ）。集合化・比較の前に明示的に妥当性を検証する。
+        # のおそれ）。生値リストの各要素に対して明示的に妥当性を検証する。
         invalid_values = {
-            v for v in off_values | on_values if not _valid_field_value(field, v)
+            v for v in off_raw + on_raw if not _valid_field_value(field, v)
         }
         if invalid_values:
             return {
                 "status": "undeterminable",
                 "reason": f"'{field}' に不正な値がある（{invalid_values!r}）",
             }
+        # 型・値域検証を通過した生値のみをここで集合化する（`bool`／`int`
+        # の同値吸収問題は上記の生値検証で既に弾いているため、ここでの
+        # 集合化は安全）。
+        off_values = set(off_raw)
+        on_values = set(on_raw)
         if len(off_values) != 1 or len(on_values) != 1:
             return {
                 "status": "undeterminable",

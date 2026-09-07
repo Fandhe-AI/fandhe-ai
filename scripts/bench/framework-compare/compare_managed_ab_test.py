@@ -114,6 +114,34 @@ class LoadRowsTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_rows_missing_identity_fields_are_skipped_with_warning(self):
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）:
+        # `task`/`device`/`size` を削除した行は `_cell_key` が
+        # `(None, None, None, "fresh", None)` へ迂回して集約されうる。
+        # `load_rows` 単体でこれらの行を除外できることを検証する。
+        r = _rec(False, 0.001)
+        del r["task"]
+        del r["device"]
+        del r["size"]
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("task", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_rows_with_unknown_device_are_skipped_with_warning(self):
+        r = _rec(False, 0.001, device="tpu")
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+        finally:
+            os.unlink(path)
+
 
 class SplitOffOnTest(unittest.TestCase):
     def test_splits_by_managed_field(self):
@@ -243,6 +271,24 @@ class EvaluateCellTest(unittest.TestCase):
         self.assertEqual(result["status"], "undeterminable")
         self.assertIn("version", result["reason"])
 
+    def test_undeterminable_when_bool_mixed_with_equal_int_before_set(self):
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）: `bool` は
+        # Python では `int` のサブクラスで `True == 1`／`hash(True) ==
+        # hash(1)` が成立するため、型検証より先に `set` 化すると
+        # `iters=[1, True, 1, 1, 1]` のような入力で `True` が同値の `1` に
+        # 吸収されて集合から消え、後段の bool 拒否チェックを通過しうる
+        # （fail-open のおそれ）。1 件だけ `True` を混入させても不正値と
+        # して検出できることを検証する（全行 `True` にする既存の
+        # `test_undeterminable_when_warmup_is_bool` は退行検出の対象が
+        # 異なる：この集合吸収バグは全行一致では再現しない）。
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(5)]
+        on_rows[0]["iters"] = True
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("iters", result["reason"])
+        self.assertIn("不正な値", result["reason"])
+
     def test_undeterminable_when_warmup_is_bool(self):
         # `bool` は `int` のサブクラス（`True == 1`）のため、型検査を
         # `isinstance(v, int)` のみで行うと `warmup=True` を素通りしうる。
@@ -315,6 +361,28 @@ class MainTest(unittest.TestCase):
                 code = compare_managed_ab.main(["prog", path])
             self.assertEqual(code, 3)
             self.assertIn("判定不能", buf_out.getvalue())
+        finally:
+            os.unlink(path)
+
+    def test_main_returns_nonzero_when_identity_fields_are_stripped(self):
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）: 正常な
+        # off/on 各 5 件から `task`/`device`/`size` を削除しても、以前は
+        # `_cell_key` が `(None, None, None, "fresh", None)` として集約され
+        # 判定 "ok"・終了コード 0 になっていた。`load_rows` の識別フィールド
+        # 検証で全行がスキップされ「行がない」判定不能となることを確認する。
+        rows = [_rec(False, 0.001 + i * 1e-6) for i in range(5)] + [
+            _rec(True, 0.0009 + i * 1e-6) for i in range(5)
+        ]
+        for r in rows:
+            del r["task"]
+            del r["device"]
+            del r["size"]
+        path = _write_jsonl(rows)
+        try:
+            buf_out, buf_err = io.StringIO(), io.StringIO()
+            with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                code = compare_managed_ab.main(["prog", path])
+            self.assertEqual(code, 3)
         finally:
             os.unlink(path)
 

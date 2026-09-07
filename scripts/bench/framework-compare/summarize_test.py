@@ -1336,6 +1336,28 @@ class TrainPhasesSectionTests(unittest.TestCase):
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("100% を超過", "\n".join(lines))
 
+    def test_managed_group_does_not_invalidate_normal_group(self):
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）:
+        # `_train_phases_groups` が `managed` を区別しないと、`managed:true`
+        # の train_phases 行が正常な device-only グループと同一
+        # `(device, mode)` へ混在し、`_train_phases_validate` の
+        # `phase_index`/`phase` 名重複検査を誤って発火させ、正常な行まで
+        # 無効化されてしまう。同一 `(device="cuda", mode="fresh")` の
+        # 正常グループと managed グループを混在させても、正常グループが
+        # 無効化されないことを確認する。
+        normal_group = _train_phases_group(device="cuda", mode="fresh")
+        managed_group = []
+        for r in _train_phases_group(device="cuda", mode="fresh"):
+            r = dict(r)
+            r["managed"] = True
+            managed_group.append(r)
+        rows = normal_group + managed_group
+        lines, *_, has_train_phases_invalid, _, _, _ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertFalse(has_train_phases_invalid)
+        self.assertNotIn("無効", text)
+        self.assertIn("CUDA / fresh", text)
+
     def test_train_phases_rows_do_not_affect_train_section(self):
         # (b)/(b') は task == "train" のみを読むため、train_phases 行を
         # 混ぜても (b)/(b') の集計結果に影響しないことを固定する。
@@ -2612,6 +2634,46 @@ class GemmChecksumManagedExclusionTests(unittest.TestCase):
         mismatched_rows = [r for r, _ref, _label in mismatches]
         self.assertNotIn(cuda_device_only, mismatched_rows)
         self.assertNotIn(managed_divergent, mismatched_rows)
+
+    def test_unverifiable_excludes_managed_row(self):
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）:
+        # `gemm_checksum_unverifiable` は `gemm_checksum_mismatches` と
+        # 同じ理由で managed 行を除外すべき。除外しないと、managed 行が
+        # 突合対象から外れている（`gemm_checksum_reference` の候補集合に
+        # 含まれない）にもかかわらず、本関数がそのまま managed 行自身を
+        # 突合不能候補として返しうる。
+        cpu_fresh = _base_row(framework="fandhe-ai", device="cpu", size=1024, checksum=1.0)
+        candle_fresh = _base_row(framework="candle", device="cpu", size=1024, checksum=1.0)
+        managed_fresh = dict(
+            _base_row(framework="fandhe-ai", device="cuda", size=1024, checksum=999.0)
+        )
+        managed_fresh["managed"] = True
+        rows = [cpu_fresh, candle_fresh, managed_fresh]
+        unverifiable = summarize.gemm_checksum_unverifiable(rows)
+        self.assertNotIn(managed_fresh, unverifiable)
+
+    def test_verified_total_excludes_managed_row_with_divergent_checksum(self):
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）:
+        # `section()` の `verified_total`（`gemm_checksum_unverifiable` の
+        # 除外キー集合 `unverifiable_keys` に含まれない gemm 行の件数）が
+        # managed 行を除外しないと、同一 size に一致する通常行が 2 件
+        # 以上存在する場合、checksum が異なる managed 行も
+        # `unverifiable_keys` に現れず（`gemm_checksum_unverifiable` が
+        # managed 行を除外済みのため管理下候補にすらならない）、実際には
+        # 一度も checksum 突合していないにもかかわらず「相互突合できた」
+        # 件数へ誤って計上されうる（fail-open のおそれ）。
+        cpu_fresh = _base_row(framework="fandhe-ai", device="cpu", size=1024, checksum=1.0)
+        candle_fresh = _base_row(framework="candle", device="cpu", size=1024, checksum=1.0)
+        managed_divergent = dict(
+            _base_row(framework="fandhe-ai", device="cuda", size=1024, checksum=999.0)
+        )
+        managed_divergent["managed"] = True
+        rows = [cpu_fresh, candle_fresh, managed_divergent]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        # 相互突合できたのは cpu_fresh・candle_fresh の 2 行のみ（managed
+        # 行を含めた 3 行ではない）。
+        self.assertIn("相互突合できた 2 行の checksum が参照値と一致", text)
 
 
 class MainTargetExitCodeTests(unittest.TestCase):

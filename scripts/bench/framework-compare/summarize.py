@@ -1055,6 +1055,19 @@ def gemm_checksum_unverifiable(rows):
         # 除外する。
         if r.get("tf32", False) is True:
             continue
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）:
+        # `gemm_checksum_mismatches` と同じ理由で `managed:true` 行も
+        # ここで除外する。除外しないと managed 行が checksum 突合対象
+        # から外れているにもかかわらず（`gemm_checksum_reference` の
+        # `candidates` が既に managed 行を除外済み）、本関数がそのまま
+        # 突合不能候補・ひいては `section()` の `verified_total`
+        # （突合不能キーに含まれない行を「相互突合できた」と計上する集計）
+        # へ managed 行を混入させてしまい、実際には checksum 突合して
+        # いない managed 行を「検証済み」と誤表示しうる（fail-open の
+        # おそれ）。managed 配置固有の checksum 妥当性検証（off/on 完全
+        # 一致）は `compare_managed_ab.py::evaluate_cell` が別途担う。
+        if r.get("managed", False) is True:
+            continue
         # `gemm_checksum_mismatches` と同じ理由（不正 size での
         # `dict.get()` 例外終了防止。イシュー #1051 codex-review P0
         # 指摘 2 巡目・PR #1082）で、不正な size の行はここでは扱わない。
@@ -1846,6 +1859,16 @@ def _train_phases_groups(rows):
     for r in rows:
         if r.get("task") != "train_phases":
             continue
+        # イシュー #1353（github-actions レビュー指摘）: `managed:true` 行
+        # （CUDA managed memory 配置。`compare_managed_ab.py` が別途 A/B
+        # 集計する）は本節（フレームワーク横断ではなく fandhe-ai 単独の
+        # `(device, mode)` 集計）が区別しないままだと、同一 `(device,
+        # mode)` に device-only 行と混在し `_train_phases_validate` の
+        # `phase_index` 重複検査を誤って発火させ、正常な行まで無効化
+        # されうる。無効行ではないため `skipped`（不正値扱い）には含めず
+        # 静かに除外する。
+        if r.get("managed", False) is True:
+            continue
         device = r.get("device")
         mode = r.get("mode")
         if not (isinstance(device, str) and device in DEVICE_ORDER) or mode not in _TRAIN_PHASES_MODES:
@@ -2105,6 +2128,11 @@ def _gemm_phases_groups(rows):
     skipped = []
     for r in rows:
         if r.get("task") != "gemm_phases":
+            continue
+        # イシュー #1353（github-actions レビュー指摘）: `_train_phases_
+        # groups` と同じ理由で `managed:true` 行を無効行扱いせず静かに
+        # 除外する（`compare_managed_ab.py` が別途 A/B 集計する）。
+        if r.get("managed", False) is True:
             continue
         device = r.get("device")
         mode = r.get("mode")
@@ -2426,6 +2454,11 @@ def _infer_phases_groups(rows):
     skipped = []
     for r in rows:
         if r.get("task") != "infer_phases":
+            continue
+        # イシュー #1353（github-actions レビュー指摘）: `_train_phases_
+        # groups` と同じ理由で `managed:true` 行を無効行扱いせず静かに
+        # 除外する（`compare_managed_ab.py` が別途 A/B 集計する）。
+        if r.get("managed", False) is True:
             continue
         device = r.get("device")
         mode = r.get("mode")
@@ -3333,6 +3366,15 @@ def section(path, rows):
         # 除かないと「相互突合できた」件数へ誤って計上されてしまう
         # （fail-open のおそれ）。
         and r.get("tf32", False) is not True
+        # イシュー #1353（github-actions レビュー指摘・2 巡目）: 同じ理由
+        # で `managed:true` 行も除外する。`gemm_checksum_unverifiable` が
+        # managed 行を除外したことで `unverifiable_keys` にも managed 行は
+        # 現れなくなったが、本 `sum()` 側でも明示的に除かないと、同一
+        # size に一致する通常行が 2 件以上存在する場合に checksum が異なる
+        # managed 行まで「相互突合できた（一致）」件数へ誤って計上され
+        # うる（`gemm_checksum_mismatches` が managed 行自体を突合対象と
+        # せず素通りするため、実際には一度も checksum 突合していない）。
+        and r.get("managed", False) is not True
         and _valid_gate_size(r.get("size"))
         and _row_key(r) not in unverifiable_keys
     )

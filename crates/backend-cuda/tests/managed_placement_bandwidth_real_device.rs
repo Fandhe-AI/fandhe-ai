@@ -135,7 +135,12 @@ fn assert_bit_exact(actual: &Tensor<f32>, expected: &Tensor<f32>, ctx: &str) {
 /// device-only は従来どおり `download()` が返した通常ホスト `Tensor` を
 /// 読む（これは実際に device-only 配置が使う唯一のホスト側読み取り経路
 /// であり、コピー後の読み取りで正しい）。
-fn measure_one(mem: &CudaMemory, tensor: &Tensor<f32>, managed: bool) -> (f64, f64, f64) {
+fn measure_one(
+    mem: &CudaMemory,
+    device: &CudaDevice,
+    tensor: &Tensor<f32>,
+    managed: bool,
+) -> (f64, f64, f64) {
     let contiguous = tensor.contiguous();
     let bytes = std::mem::size_of_val(contiguous.as_slice().unwrap());
 
@@ -148,6 +153,21 @@ fn measure_one(mem: &CudaMemory, tensor: &Tensor<f32>, managed: bool) -> (f64, f
         let buf = mem
             .upload(tensor)
             .expect("upload must succeed on real hardware");
+        if !managed {
+            // device-only: `upload_inner` の `clone_htod` は `cuMemcpyHtoDAsync`
+            // を発行する非同期コピー（`memory.rs::readback` ドキュメンテーション
+            // コメント「唯一の同期点」参照）のため、`upload()` の呼び出し復帰は
+            // 転送完了を意味しない。managed 側は同一位置でホスト → `UnifiedSlice`
+            // の同期 memcpy（`upload_inner` 内 `copy_from_slice`）が完了してから
+            // 復帰するため、この非対称のまま両者を同じ区間として計測すると比較
+            // 範囲がずれる（未完了 H2D の残り待機時間が後続の区間 2 `download()`
+            // 側へ混入する。codex-review 指摘）。ストリーム同期をここで挟み、
+            // upload 完了までを upload_s に含める。
+            device
+                .stream()
+                .synchronize()
+                .expect("stream synchronize must succeed on real hardware");
+        }
         upload_s.push(t0.elapsed().as_secs_f64());
 
         if managed {
@@ -225,11 +245,11 @@ fn managed_vs_device_only_bandwidth_sweep_on_real_hardware() {
 
         let (off_up, off_down, off_read) = {
             let _guard = PlacementFlagGuard::acquire(false);
-            measure_one(&mem, &tensor, false)
+            measure_one(&mem, &device, &tensor, false)
         };
         let (on_up, on_down, on_read) = {
             let _guard = PlacementFlagGuard::acquire(true);
-            measure_one(&mem, &tensor, true)
+            measure_one(&mem, &device, &tensor, true)
         };
 
         println!(
