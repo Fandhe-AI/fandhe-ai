@@ -35,6 +35,6 @@ pmset -g therm: 熱・電源警告レベルの記録なし
 変わらない（詳細は compare_gemm_ab.md）。
 
 manifest（原本）: scripts/bench/framework-compare/results/raw/manifest-m4max-gemm-ab-head-f396784.json
-生データ: scripts/bench/framework-compare/results/raw/results-m4max-gemm-ab-before-0.7.0.jsonl
+生データ: scripts/bench/framework-compare/results/raw/results-m4max-gemm-ab-before-0.7.0-head-f396784.jsonl
           scripts/bench/framework-compare/results/raw/results-m4max-gemm-ab-after-head-f396784.jsonl
 skipped ログ（空。全 80 起動成功）: scripts/bench/framework-compare/results/raw/skipped-m4max-gemm-ab-head-f396784.log

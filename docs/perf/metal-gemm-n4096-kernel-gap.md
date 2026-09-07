@@ -2465,6 +2465,6 @@ M4 Max（GPU 40 コア）・macOS 26.6.2・rustc 1.96.0。計測中の
 `compare_gemm_ab.md`・`diff_b2a5fcb_f396784_backend_metal_src.txt`）。
 生データ（JSONL・manifest）は
 `scripts/bench/framework-compare/results/raw/results-m4max-gemm-ab-
-before-0.7.0.jsonl`・`results-m4max-gemm-ab-after-head-f396784.jsonl`・
+before-0.7.0-head-f396784.jsonl`・`results-m4max-gemm-ab-after-head-f396784.jsonl`・
 `manifest-m4max-gemm-ab-head-f396784.json`・
 `skipped-m4max-gemm-ab-head-f396784.log`（空）。

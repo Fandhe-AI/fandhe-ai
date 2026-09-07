@@ -787,8 +787,11 @@ function constant・候補追加等）が本番既定経路の性能を後退さ
   `results/raw/manifest-m4max-gemm-ab-<label>.json` へ記録する。N=512/1024/
   2048/4096 × fresh/reuse を 5 run（run 単位で before/after を交互起動。
   偶数 run では順序を反転し起動順序の系統誤差を均す）計測し、
-  `results/raw/results-m4max-gemm-ab-before-0.7.0.jsonl`／
-  `results-m4max-gemm-ab-after-<label>.jsonl` へ記録する。`[patch]` は CLI
+  `results/raw/results-m4max-gemm-ab-before-0.7.0-<label>.jsonl`／
+  `results-m4max-gemm-ab-after-<label>.jsonl` へ記録する（before 側の
+  保存先も `<label>` でスコープする。別 label で再実行した際に過去の
+  before データを上書きせず、当該 label の交互計測ペアを追跡できる
+  ようにするため）。`[patch]` は CLI
   引数のみで与え `Cargo.lock`／`.cargo/config.toml` はコミットしない
   （`Cargo.lock` は trap で復元。deps-policy.md 第 9 区分）。全 run 成功時
   にのみ一時ファイルを正規パスへ原子的に反映し、1 件でも失敗すれば正規

@@ -137,10 +137,27 @@ fandhe_ai_source_desc() {
 # `Cargo.lock` を退避し、異常終了含め終了時に必ず復元する（trap。
 # `[patch]` は CLI 引数のみで与え Cargo.lock／.cargo/config.toml は変更
 # しない契約。deps-policy.md 第 9 区分）。
+# codex-review P2 指摘: cp の終了状態を確認しないと、一時領域の容量
+#不足等で退避が不完全なまま終了時に Cargo.lock へ上書きしうる。退避
+# 成功（sha256 一致で内容確認まで行う）を確認できた場合にのみ計測を
+# 開始し、復元に失敗した場合はバックアップを削除せず残してエラー通知
+# する（fail-closed。バックアップを消すと復元の再試行手段が失われる）。
 LOCK_BACKUP="$(mktemp)"
-cp Cargo.lock "$LOCK_BACKUP"
+if ! cp Cargo.lock "$LOCK_BACKUP"; then
+  echo "error: cp Cargo.lock '$LOCK_BACKUP' (backup) に失敗した" >&2
+  rm -f "$LOCK_BACKUP"
+  exit 1
+fi
+if [[ "$(sha256_of Cargo.lock)" != "$(sha256_of "$LOCK_BACKUP")" ]]; then
+  echo "error: Cargo.lock のバックアップ内容が元ファイルと一致しない（不完全な退避の可能性）" >&2
+  rm -f "$LOCK_BACKUP"
+  exit 1
+fi
 restore_lock() {
-  cp "$LOCK_BACKUP" Cargo.lock
+  if ! cp "$LOCK_BACKUP" Cargo.lock; then
+    echo "error: Cargo.lock の復元に失敗した。バックアップを保持する: $LOCK_BACKUP" >&2
+    return 1
+  fi
   rm -f "$LOCK_BACKUP"
 }
 trap restore_lock EXIT
@@ -188,6 +205,13 @@ fi
 # `cp` の終了状態を確認する（codex-review P2 指摘）: 失敗を無視すると
 # 前回実行の古い bench-fandhe-ab-before が残ったまま計測が進み、
 # 「新しいバイナリの hash」として誤って記録・報告されうる。
+# コピー先ディレクトリを明示的に作る（Cursor Bugbot 指摘）:
+# `build_bench_fandhe` は `--message-format=json` の成果物パスを直接
+# 使うため `CARGO_BUILD_TARGET` 環境変数や `.cargo/config.toml` の
+# `build.target` が有効な環境でも実ビルドは成功するが、本スクリプトの
+# コピー先は固定で `target/release/` のため、そのようなクロス設定の
+# クリーンツリーでは `target/release/` 自体が存在せず `cp` が失敗しうる。
+mkdir -p target/release
 if ! cp "$BEFORE_EXE" target/release/bench-fandhe-ab-before; then
   echo "error: cp '$BEFORE_EXE' target/release/bench-fandhe-ab-before に失敗した" >&2
   exit 1
@@ -292,14 +316,81 @@ mv_checked() { # mv_checked <src> <dst>
 }
 
 if [[ "$ANY_FAILED" -eq 0 ]]; then
-  mv_checked "$OUT_BEFORE_TMP" "$OUT_BEFORE"
-  mv_checked "$OUT_AFTER_TMP" "$OUT_AFTER"
-  mv_checked "$SKIP_TMP" "$SKIP"
-  mv_checked "$MANIFEST_TMP" "$MANIFEST"
+  # 個別の mv 失敗による計測世代混在の防止（codex-review P2 指摘）:
+  # before/after/skip/manifest の 4 ファイルを個別に mv すると、途中で
+  # 1 件だけ失敗した場合に「一部は新世代・残りは旧世代」のまま正規パス
+  # に残り、`compare_gemm_ab.py` はこれを検出しないため誤った比較に
+  # 使われうる。反映前に既存の正規ファイル（あれば）を退避し、1 件でも
+  # mv が失敗したら成功した分だけ退避内容へ巻き戻すことで、正規パス
+  # 全体を「反映前の状態（4 ファイルとも旧世代、または全て未生成）」へ
+  # 揃える（bash 3.2〈macOS 既定〉互換のため連想配列は使わない）。
+  # bash 3.2 は `declare -a`/`local -a` に配列リテラル代入すると要素が
+  # うまく渡らない実装があるため、インデックス代入で構築する。
+  AB_TMPS=()
+  AB_TMPS[0]="$OUT_BEFORE_TMP"
+  AB_TMPS[1]="$OUT_AFTER_TMP"
+  AB_TMPS[2]="$SKIP_TMP"
+  AB_TMPS[3]="$MANIFEST_TMP"
+  AB_DSTS=()
+  AB_DSTS[0]="$OUT_BEFORE"
+  AB_DSTS[1]="$OUT_AFTER"
+  AB_DSTS[2]="$SKIP"
+  AB_DSTS[3]="$MANIFEST"
+  AB_BACKUPS=()
+  AB_OKS=()
+
+  ab_i=0
+  while [[ "$ab_i" -lt "${#AB_DSTS[@]}" ]]; do
+    dst="${AB_DSTS[$ab_i]}"
+    if [[ -f "$dst" ]]; then
+      b="${dst}.prev-backup"
+      if cp "$dst" "$b"; then
+        AB_BACKUPS[$ab_i]="$b"
+      else
+        echo "error: 既存 '$dst' の rollback 用バックアップ作成（cp）に失敗した" >&2
+        exit 1
+      fi
+    else
+      AB_BACKUPS[$ab_i]=""
+    fi
+    ab_i=$((ab_i + 1))
+  done
+
+  ab_i=0
+  while [[ "$ab_i" -lt "${#AB_DSTS[@]}" ]]; do
+    if mv -f "${AB_TMPS[$ab_i]}" "${AB_DSTS[$ab_i]}"; then
+      AB_OKS[$ab_i]=1
+    else
+      echo "error: mv -f '${AB_TMPS[$ab_i]}' '${AB_DSTS[$ab_i]}' に失敗した" >&2
+      AB_OKS[$ab_i]=0
+      MV_FAILED=$((MV_FAILED + 1))
+    fi
+    ab_i=$((ab_i + 1))
+  done
+
   if [[ "$MV_FAILED" -ne 0 ]]; then
-    echo "error: $MV_FAILED 件の mv が失敗し、正規パスへの反映が不完全な可能性がある（fail-closed。新旧結果混在を防ぐため成功と報告しない）。" >&2
+    echo "error: $MV_FAILED 件の mv が失敗した。計測世代の混在を防ぐため、成功した反映分を反映前の状態へ巻き戻す（fail-closed。新旧結果混在を防ぐため成功と報告しない）。" >&2
+    ab_i=0
+    while [[ "$ab_i" -lt "${#AB_DSTS[@]}" ]]; do
+      if [[ "${AB_OKS[$ab_i]}" == "1" ]]; then
+        if [[ -n "${AB_BACKUPS[$ab_i]}" ]]; then
+          if ! mv -f "${AB_BACKUPS[$ab_i]}" "${AB_DSTS[$ab_i]}"; then
+            echo "error: rollback 用バックアップ '${AB_BACKUPS[$ab_i]}' から '${AB_DSTS[$ab_i]}' への復元に失敗した（正規パスが新世代のまま残っている可能性がある）。" >&2
+          fi
+        else
+          rm -f "${AB_DSTS[$ab_i]}"
+        fi
+      fi
+      ab_i=$((ab_i + 1))
+    done
+    for b in "${AB_BACKUPS[@]}"; do
+      [[ -n "$b" ]] && rm -f "$b"
+    done
     exit 1
   fi
+  for b in "${AB_BACKUPS[@]}"; do
+    [[ -n "$b" ]] && rm -f "$b"
+  done
   echo "done. before results in $OUT_BEFORE ; after results in $OUT_AFTER ; failures (if any) in $SKIP ; manifest in $MANIFEST"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
