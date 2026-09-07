@@ -773,21 +773,26 @@ impl BackendOps for CudaBackendOps {
 
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、
     /// 本イシュー導入前と bit-exact に不変（`crate::precision` モジュール
-    /// 冒頭コメントの契約）。`crate::precision::tf32_gemm_enabled()` が
-    /// opt-in（`true`）の場合のみ WMMA TF32 Tensor Core 経路
-    /// （[`crate::gemm::CudaGemm::run_wmma_tf32`]）へ分岐する（イシュー
-    /// #1042。親ツリー #1029 Phase 2）。opt-in 時に TF32 カーネルが使用
-    /// 不能（cc<8.0・NVRTC コンパイル失敗等）な場合は
-    /// `CudaError::WmmaUnavailable` をそのまま `BackendError` へ変換して
-    /// 伝播し、FP32 への黙示フォールバックはしない（fail-closed。明示
-    /// opt-in の計測条件を静かに崩さない方針。`crate::precision` 参照）。
+    /// 冒頭コメントの契約）。`crate::precision::gemm_precision()` が
+    /// [`crate::precision::CudaGemmPrecision::Tf32`] の場合は WMMA TF32
+    /// Tensor Core 単発経路（[`crate::gemm::CudaGemm::run_wmma_tf32`]。
+    /// イシュー #1042）、[`crate::precision::CudaGemmPrecision::Tf32x3`]
+    /// の場合は 3×TF32 split-single 経路
+    /// （[`crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm::run_tf32x3`]。
+    /// イシュー #1355）へそれぞれ分岐する。opt-in 時にモード固有の
+    /// カーネルが使用不能（cc<8.0・NVRTC コンパイル失敗・整列制約
+    /// 不成立等）な場合は型付きエラーをそのまま `BackendError` へ変換
+    /// して伝播し、FP32 への黙示フォールバックはしない（fail-closed。
+    /// 明示 opt-in の計測条件を静かに崩さない方針。`crate::precision`
+    /// 参照）。
     ///
     /// **注意**: `gemm_bias_act` の `ComposedFallback` および
     /// `gemm_fp32_strict`（学習経路向け入口）からはこのメソッドを
     /// 呼ばない（`gemm_fp32_strict_impl` を使う）。本メソッドは
-    /// TF32 opt-in フラグの適用対象である「素の公開 GEMM 入口」専用。
+    /// 精度モードの適用対象である「素の公開 GEMM 入口」専用。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        if !crate::precision::tf32_gemm_enabled() {
+        let mode = crate::precision::gemm_precision();
+        if mode == crate::precision::CudaGemmPrecision::Fp32Strict {
             return self.gemm_fp32_strict_impl(a, b);
         }
 
@@ -805,20 +810,62 @@ impl BackendOps for CudaBackendOps {
             .as_slice()
             .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
 
-        let gemm = self.with_driver_call(
-            &[],
-            |e| BackendError::CudaUnavailable(e.to_string()),
-            || {
-                let device = self.device_handle_raw()?;
-                context_cache::cached_gemm(&device)
-            },
-        )?;
-        let out = self.with_driver_call(
-            &[],
-            |e| BackendError::KernelLaunchFailed(e.to_string()),
-            || gemm.run_wmma_tf32(a_slice, b_slice, m, n, k),
-        )?;
-        crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+        let out = match mode {
+            crate::precision::CudaGemmPrecision::Tf32 => {
+                let gemm = self.with_driver_call(
+                    &[],
+                    |e| BackendError::CudaUnavailable(e.to_string()),
+                    || {
+                        let device = self.device_handle_raw()?;
+                        context_cache::cached_gemm(&device)
+                    },
+                )?;
+                let out = self.with_driver_call(
+                    &[],
+                    |e| BackendError::KernelLaunchFailed(e.to_string()),
+                    || gemm.run_wmma_tf32(a_slice, b_slice, m, n, k),
+                )?;
+                crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+                out
+            }
+            crate::precision::CudaGemmPrecision::Tf32x3 => {
+                let gemm = self.with_driver_call(
+                    &[],
+                    |e| {
+                        BackendError::KernelLaunchFailed(format!(
+                            "3xTF32 gemm unavailable (fail-closed): {e}"
+                        ))
+                    },
+                    || {
+                        let device = self.device_handle_raw()?;
+                        context_cache::cached_mma_tf32x3(&device)
+                    },
+                )?;
+                let out = self.with_driver_call(
+                    &[],
+                    |e| {
+                        BackendError::KernelLaunchFailed(format!(
+                            "3xTF32 gemm unavailable (fail-closed): {e}"
+                        ))
+                    },
+                    || gemm.run_tf32x3(a_slice, b_slice, m, n, k),
+                )?;
+                crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+                out
+            }
+            // `Fp32Strict` はこの `match` に到達する前に早期 return 済み
+            // （関数冒頭）。ここでの唯一の残り経路は理論上到達しないが、
+            // `#[non_exhaustive]` の `CudaGemmPrecision`（`precision.rs`
+            // 参照。将来モード追加に備える）は同一クレート内でも将来の
+            // 変更で列挙し忘れうるため、ワイルドカードで fail-closed に
+            // エラーを返す（未知モードへ黙示フォールバックしない）。
+            _ => {
+                return Err(BackendError::KernelLaunchFailed(format!(
+                    "gemm: unsupported CudaGemmPrecision mode {mode:?} (fail-closed; \
+                     no implicit fallback to FP32)"
+                )));
+            }
+        };
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -1924,21 +1971,28 @@ mod tests {
     /// フラグはプロセスグローバル（`crate::precision`）のため、他の
     /// テストとの競合を避けて直列化・原状復帰する RAII ガード
     /// （`precision.rs::tests::FlagGuard` と同型。イシュー #1042）。
+    ///
+    /// **enum 保存/復元（イシュー #1355）**: `original` を `bool` ではなく
+    /// [`crate::precision::CudaGemmPrecision`] で保存する。`bool` のまま
+    /// では `Tf32x3` 状態が `set_tf32_gemm_enabled` の互換ラッパー経由で
+    /// `Fp32Strict`／`Tf32` の 2 値へ lossy に丸められて復元され、テスト
+    /// 間で `Tf32x3` 状態が意図せず消える干渉を招く（実装計画 §4 ステップ
+    /// 1）。
     struct Tf32FlagGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
-        original: bool,
+        original: crate::precision::CudaGemmPrecision,
     }
 
     impl Tf32FlagGuard {
         fn acquire() -> Self {
             // `precision.rs::tests::FlagGuard` と単一ロックを共有する
             // （codex-review P2・Cursor Bugbot Medium 指摘。別々の
-            // `static LOCK` を持つと直列化が効かず `TF32_GEMM_ENABLED`
+            // `static LOCK` を持つと直列化が効かず `GEMM_PRECISION`
             // を巡るレースが起こりうる。PR #1091）。
             let lock = crate::precision::test_support::tf32_flag_test_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let original = crate::precision::tf32_gemm_enabled();
+            let original = crate::precision::gemm_precision();
             Self {
                 _lock: lock,
                 original,
@@ -1948,7 +2002,7 @@ mod tests {
 
     impl Drop for Tf32FlagGuard {
         fn drop(&mut self) {
-            crate::precision::set_tf32_gemm_enabled(self.original);
+            crate::precision::set_gemm_precision(self.original);
         }
     }
 
@@ -2048,6 +2102,106 @@ mod tests {
             }
             Err(other) => panic!("unexpected error variant for tf32 opt-in gemm: {other}"),
         }
+    }
+
+    /// 環境適応: `crate::precision::gemm_precision()` が
+    /// [`crate::precision::CudaGemmPrecision::Tf32x3`] のとき、`gemm` は
+    /// 単発 TF32 経路（[`crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT`]）
+    /// ではなく 3×TF32 経路
+    /// （[`crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT`]）へのみ到達する
+    /// ことを検証する（イシュー #1355）。CUDA 非搭載環境・カーネル使用
+    /// 不能環境では `BackendError::CudaUnavailable`／
+    /// `KernelLaunchFailed`（fail-closed 伝播）の型のみ確認する。
+    #[test]
+    fn gemm_routes_to_tf32x3_path_when_precision_is_tf32x3_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_gemm_precision(crate::precision::CudaGemmPrecision::Tf32x3);
+
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+
+        let before_tf32 = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        let before_tf32x3 = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        match cuda.gemm(&a, &b) {
+            Ok(_) => {
+                let after_tf32 = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+                let after_tf32x3 = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+                assert_eq!(
+                    before_tf32, after_tf32,
+                    "Tf32x3 opt-in 時に単発 TF32 経路のカウンタが増加した（誤配線の疑い）"
+                );
+                assert!(
+                    after_tf32x3 > before_tf32x3,
+                    "Tf32x3 opt-in 時に 3×TF32 経路の起動カウンタが増加していない: \
+                     before={before_tf32x3}, after={after_tf32x3}"
+                );
+            }
+            Err(BackendError::CudaUnavailable(msg)) => {
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(BackendError::KernelLaunchFailed(msg)) => {
+                // 3×TF32 カーネル使用不能環境（cc<8.0 等）の fail-closed
+                // 伝播。FP32 への黙示フォールバックはしない契約
+                // （`crate::precision` モジュール冒頭コメント参照）。
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(other) => panic!("unexpected error variant for tf32x3 opt-in gemm: {other}"),
+        }
+    }
+
+    /// `Fp32Strict`／`Tf32` のいずれでも `gemm` が 3×TF32 経路
+    /// （[`crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT`]）へ到達しない
+    /// ことを検証する（イシュー #1355。3 モード分岐の相互排他性）。
+    #[test]
+    fn gemm_does_not_route_to_tf32x3_path_for_other_precision_modes_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+        let cuda = CudaBackendOps::new(0);
+
+        for mode in [
+            crate::precision::CudaGemmPrecision::Fp32Strict,
+            crate::precision::CudaGemmPrecision::Tf32,
+        ] {
+            crate::precision::set_gemm_precision(mode);
+            let before = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+            let _ = cuda.gemm(&a, &b);
+            let after = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+            assert_eq!(
+                before, after,
+                "mode={mode:?} で 3×TF32 経路のカウンタが増加した（誤配線の疑い）"
+            );
+        }
+    }
+
+    /// `gemm_fp32_strict`（VJP が使う入口）は `Tf32x3` opt-in 時にも
+    /// 3×TF32 経路へ到達しない（`gemm_fp32_strict_ignores_tf32_optin_
+    /// flag_even_when_enabled_env_adaptive` の Tf32x3 版。学習経路の
+    /// FP32 契約は精度モードに関わらず一貫して守られる）。
+    #[test]
+    fn gemm_fp32_strict_ignores_tf32x3_precision_mode_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_gemm_precision(crate::precision::CudaGemmPrecision::Tf32x3);
+
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+
+        let before = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        let _ = cuda.gemm_fp32_strict(&a, &b);
+        let after = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        assert_eq!(
+            before, after,
+            "Tf32x3 opt-in 時でも gemm_fp32_strict は FP32 厳密経路のままであるべきだが、\
+             3×TF32 経路のカウンタが増加した: before={before}, after={after}"
+        );
     }
 
     /// `run_fused` の canonical RMSNorm プラン検出（`rmsnorm.rs::

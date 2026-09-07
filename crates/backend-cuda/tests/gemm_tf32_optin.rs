@@ -40,7 +40,7 @@
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_cuda::CudaBackendOps;
-use fandhe_ai_backend_cuda::precision::{set_tf32_gemm_enabled, tf32_gemm_enabled};
+use fandhe_ai_backend_cuda::precision::set_tf32_gemm_enabled;
 use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
@@ -63,8 +63,15 @@ mod common;
 /// 追加した形）。
 static TF32_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// **enum 保存/復元（イシュー #1355）**: `original` を `bool` ではなく
+/// `CudaGemmPrecision` で保存する。`bool` のままでは `Tf32x3` 状態が
+/// `set_tf32_gemm_enabled` 経由で `Fp32Strict`／`Tf32` の 2 値へ lossy に
+/// 丸められて復元され、`--ignored` 実行時に本ファイルの `Tf32x3` 用
+/// テストと既存の `Tf32` 用テストが並行実行された場合にフラグ状態が
+/// 意図せず壊れうる（`ops.rs::tests::Tf32FlagGuard` と同じ理由。実装
+/// 計画 §4 ステップ 1）。
 struct Tf32FlagGuard {
-    original: bool,
+    original: fandhe_ai_backend_cuda::precision::CudaGemmPrecision,
     // 同時に 1 つの `Tf32FlagGuard` しか生存できないことを保証する。
     // 値は使わない（排他制御専用）ため `_` prefix で未使用警告を抑止する。
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -79,8 +86,26 @@ impl Tf32FlagGuard {
         let lock = TF32_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = tf32_gemm_enabled();
+        let original = fandhe_ai_backend_cuda::precision::gemm_precision();
         set_tf32_gemm_enabled(enabled);
+        Self {
+            original,
+            _lock: lock,
+        }
+    }
+
+    /// 3×TF32（[`fandhe_ai_backend_cuda::precision::CudaGemmPrecision::
+    /// Tf32x3`]。イシュー #1355）を明示的に opt-in するバリアント。
+    /// `acquire(bool)`（単発 TF32 のみを切り替える既存 API。互換維持の
+    /// ため変更しない）とは別の入口として追加する。
+    fn acquire_tf32x3() -> Self {
+        let lock = TF32_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = fandhe_ai_backend_cuda::precision::gemm_precision();
+        fandhe_ai_backend_cuda::precision::set_gemm_precision(
+            fandhe_ai_backend_cuda::precision::CudaGemmPrecision::Tf32x3,
+        );
         Self {
             original,
             _lock: lock,
@@ -90,7 +115,7 @@ impl Tf32FlagGuard {
 
 impl Drop for Tf32FlagGuard {
     fn drop(&mut self) {
-        set_tf32_gemm_enabled(self.original);
+        fandhe_ai_backend_cuda::precision::set_gemm_precision(self.original);
     }
 }
 
@@ -322,5 +347,134 @@ fn gemm_tf32_optin_on_wiring_matches_run_wmma_tf32() {
     ];
     for &(seed_a, seed_b, m, n, k) in cases {
         assert_tf32_optin_wiring_bit_exact(seed_a, seed_b, m, n, k);
+    }
+}
+
+/// 環境適応スモーク: `Tf32x3` opt-in 時も `gemm` の既定 OFF
+/// （`Fp32Strict`）経路には一切影響しないことを bit-exact に確認する
+/// （イシュー #1355。`gemm_tf32_optin_off_matches_default_fp32_path_env_
+/// adaptive` の Tf32x3 版。既定 OFF 非後退契約は精度モードの選択肢が
+/// 増えても不変であることの直接検証）。
+#[test]
+fn gemm_tf32x3_optin_off_matches_default_fp32_path_env_adaptive() {
+    let _guard = Tf32FlagGuard::acquire(false);
+    fandhe_ai_backend_cuda::precision::set_gemm_precision(
+        fandhe_ai_backend_cuda::precision::CudaGemmPrecision::Fp32Strict,
+    );
+    let cuda = CudaBackendOps::new(0);
+    let mut rng = Xorshift64Star::new(0x1355_C0FF_EE00);
+    let a_data = rng.fill_vec(4);
+    let b_data = rng.fill_vec(4);
+    let a = Tensor::new(a_data, &[2, 2]).expect("valid tensor");
+    let b = Tensor::new(b_data, &[2, 2]).expect("valid tensor");
+    let zero_bias = Tensor::new(vec![0.0], &[1]).expect("valid tensor");
+
+    let direct = cuda.gemm(&a, &b);
+    let via_fallback = cuda.gemm_bias_act(&a, &b, Some(&zero_bias), Activation::None);
+
+    match (direct, via_fallback) {
+        (Ok(direct_result), Ok(fallback_result)) => {
+            assert_eq!(
+                direct_result.as_slice().expect("contiguous"),
+                fallback_result.as_slice().expect("contiguous"),
+                "Fp32Strict（既定）時の gemm 出力が gemm_fp32_strict 経由の \
+                 参照値と bit-exact に一致しない（非後退契約違反）"
+            );
+        }
+        (
+            Err(BackendError::CudaUnavailable(direct_msg)),
+            Err(BackendError::CudaUnavailable(fallback_msg)),
+        ) => {
+            assert!(!direct_msg.is_empty());
+            assert!(!fallback_msg.is_empty());
+        }
+        (direct_res, fallback_res) => panic!(
+            "unexpected result combination for CudaBackendOps::gemm vs gemm_bias_act \
+             fallback (Fp32Strict): direct={direct_res:?}, fallback={fallback_res:?}"
+        ),
+    }
+}
+
+/// 実機必須の形状網羅: `Tf32x3` opt-in 時に `gemm` 出力が CPU 参照実装
+/// （FP32 厳密）と REQ-2 統一複合判定で一致することを確認する
+/// （`gemm_tf32_optin_on_matches_cpu_across_shapes` の Tf32x3 版。イシュー
+/// #1355）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等。cc>=8.0）必須"]
+fn gemm_tf32x3_optin_on_matches_cpu_across_shapes() {
+    common::parity_baseline::assert_tolerance_constants_pinned();
+
+    let cuda = CudaBackendOps::new(0);
+    let cpu = CpuBackendOps::new();
+
+    let cases: &[(u64, u64, usize, usize, usize)] = &[
+        (711, 712, 512, 512, 512),
+        (713, 714, 1024, 1024, 1024),
+        (715, 716, 96, 160, 48),
+        (717, 718, 256, 256, 4096),
+    ];
+    for &(seed_a, seed_b, m, n, k) in cases {
+        let a_data = Xorshift64Star::new(seed_a).fill_vec(m * k);
+        let b_data = Xorshift64Star::new(seed_b).fill_vec(k * n);
+        let a = Tensor::new(a_data, &[m, k]).expect("valid tensor");
+        let b = Tensor::new(b_data, &[k, n]).expect("valid tensor");
+
+        let cpu_result = cpu.gemm(&a, &b).expect("cpu gemm always succeeds");
+
+        let _guard = Tf32FlagGuard::acquire_tf32x3();
+        let cuda_result = cuda.gemm(&a, &b).expect(
+            "CudaBackendOps::gemm (tf32x3 opt-in) must succeed on CUDA-equipped test runner",
+        );
+        assert_eq!(cuda_result.shape(), cpu_result.shape());
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            &format!("tf32x3 opt-in gemm cpu-cuda parity m={m} n={n} k={k}"),
+            cuda_result.as_slice().expect("contiguous"),
+            cpu_result.as_slice().expect("contiguous"),
+        );
+    }
+}
+
+/// 実機必須の配線検証: `Tf32x3` opt-in 時に `CudaBackendOps::gemm` が
+/// 配線先カーネル `CudaMmaTf32x3Gemm::run_tf32x3` を bit-exact に
+/// 呼び出していることを確認する（`gemm_tf32_optin_on_wiring_matches_
+/// run_wmma_tf32` の Tf32x3 版。イシュー #1355）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等。cc>=8.0）必須"]
+fn gemm_tf32x3_optin_on_wiring_matches_run_tf32x3() {
+    use fandhe_ai_backend_cuda::CudaMmaTf32x3Gemm;
+
+    let cuda = CudaBackendOps::new(0);
+    let cases: &[(u64, u64, usize, usize, usize)] = &[
+        (711, 712, 512, 512, 512),
+        (713, 714, 1024, 1024, 1024),
+        (715, 716, 96, 160, 48),
+        (717, 718, 256, 256, 4096),
+    ];
+    for &(seed_a, seed_b, m, n, k) in cases {
+        let a_data = Xorshift64Star::new(seed_a).fill_vec(m * k);
+        let b_data = Xorshift64Star::new(seed_b).fill_vec(k * n);
+        let a = Tensor::new(a_data.clone(), &[m, k]).expect("valid tensor");
+        let b = Tensor::new(b_data.clone(), &[k, n]).expect("valid tensor");
+
+        let _guard = Tf32FlagGuard::acquire_tf32x3();
+        let cuda_result = cuda.gemm(&a, &b).expect(
+            "CudaBackendOps::gemm (tf32x3 opt-in) must succeed on CUDA-equipped test runner",
+        );
+
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let gemm =
+            CudaMmaTf32x3Gemm::new(&device).expect("CudaMmaTf32x3Gemm::new (3xTF32) must succeed");
+        let direct_result = gemm
+            .run_tf32x3(&a_data, &b_data, m as u32, n as u32, k as u32)
+            .expect("run_tf32x3 direct call must succeed on CUDA-equipped test runner");
+
+        assert_eq!(
+            cuda_result.as_slice().expect("contiguous"),
+            direct_result.as_slice(),
+            "tf32x3 opt-in gemm wiring m={m} n={n} k={k}: CudaBackendOps::gemm（Tf32x3 opt-in）\
+             の出力が CudaMmaTf32x3Gemm::run_tf32x3 の直接呼び出しと bit-exact に一致しません \
+             （opt-in 配線に回帰がある可能性があります）"
+        );
     }
 }
