@@ -114,6 +114,71 @@ class LoadRowsTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_missing_framework_is_skipped_with_warning(self):
+        # イシュー #1353（PR #1397 codex-review 指摘）: `framework` が
+        # 欠損・不一致の行は「同一実装のみを比較する」契約から外れるため
+        # 判定不能として拒否する。
+        r = _rec(False, 0.001)
+        del r["framework"]
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("framework", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_other_framework_is_skipped_with_warning(self):
+        r = _rec(False, 0.001)
+        r["framework"] = "candle"
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("framework", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_tf32_true_row_is_skipped_with_warning(self):
+        # イシュー #1353（PR #1397 codex-review 指摘）: `tf32:true` は
+        # 数値モードの違いであり配置フラグ（`managed`）の違いとは別軸の
+        # ため、混入すると A/B 比較契約が崩れる。
+        r = _rec(False, 0.001)
+        r["tf32"] = True
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("tf32", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_invalid_tf32_type_is_skipped_with_warning(self):
+        r = _rec(False, 0.001)
+        r["tf32"] = "true"
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("tf32", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_tf32_false_row_is_accepted(self):
+        r = _rec(False, 0.001)
+        r["tf32"] = False
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(warnings, [])
+        finally:
+            os.unlink(path)
+
     def test_rows_missing_identity_fields_are_skipped_with_warning(self):
         # イシュー #1353（github-actions レビュー指摘・2 巡目）:
         # `task`/`device`/`size` を削除した行は `_cell_key` が

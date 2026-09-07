@@ -14,6 +14,9 @@ fail-closed で拒否する（同一バージョンの A/B は before/after 比�
 「同一バイナリ・off/on を run 単位で交互起動」の設計）。
 
 fail-closed 方針（security.md A08。`compare_gemm_gate.py` と同方針）:
+- `framework != "fandhe-ai"` の行、`tf32:true` の行は判定不能行として除外
+  する（本ツールは「同一実装・同一バイナリで配置フラグのみを変える」
+  A/B 比較契約に限定されるため。イシュー #1353・PR #1397 codex-review 指摘）
 - 各セル off/on とも「ちょうど 5 件」でなければ「判定不能」
 - `warmup`/`iters`/`version` が off/on で不一致なら「判定不能」
 - checksum が複合判定（`checksum_contract.checksums_match`）を外れれば
@@ -102,6 +105,17 @@ def load_rows(path):
     fail-closed 方針（bool 以外はスキップ）。`task`/`device`/`size`/`mode`
     （`_cell_key` が使う識別フィールド）も `_valid_cell_identity` で検証する
     （イシュー #1353・github-actions レビュー指摘。詳細は同関数 docstring）。
+
+    加えて `framework`/`tf32` を検証する（イシュー #1353・PR #1397
+    codex-review 指摘）。本ツールは「同一実装（`fandhe-ai`）の同一バイナリで
+    `--managed` 配置フラグのみを変える」A/B 比較契約（モジュール docstring）
+    に限定される。この検証を欠くと、`framework` が全行で欠損した記録
+    （他フレームワークとの取り違え）や、一方の行にのみ `tf32:true` が混入
+    した記録（数値モードの違いを配置フラグの違いと取り違え）でも、件数・
+    warmup/iters/version 一致・checksum の条件さえ揃えば「ADOPT 候補」を
+    表示してしまう（fail-open）。`framework == "fandhe-ai"` を必須とし、
+    `tf32` は欠損または `false` のみ受理し、それ以外は判定不能な行として
+    fail-closed に拒否する。
     """
     rows = []
     warnings = []
@@ -124,6 +138,30 @@ def load_rows(path):
                 warnings.append(
                     f"{path}:{lineno}: 不正な 'managed' フィールド型（bool を期待。"
                     f"実際: {obj['managed']!r}） — skipped"
+                )
+                continue
+            if obj.get("framework") != "fandhe-ai":
+                warnings.append(
+                    f"{path}:{lineno}: 'framework' が 'fandhe-ai' ではない"
+                    f"（実際: {obj.get('framework')!r}） — skipped"
+                )
+                continue
+            # `tf32` は `compare_gemm_gate.py`/`summarize.py` と同じ「キー
+            # 欠損 = False」互換規約を持つ外部 JSONL フィールド。`bool` は
+            # Python では `int` のサブクラス（`True == 1`）のため、
+            # `obj.get("tf32") is True` のみで判定すると `1` のような値が
+            # 素通りしうる。まず型検証し、次いで `True` を明示的に拒否する。
+            if "tf32" in obj and not isinstance(obj["tf32"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'tf32' フィールド型（bool を期待。"
+                    f"実際: {obj['tf32']!r}） — skipped"
+                )
+                continue
+            if obj.get("tf32", False) is True:
+                warnings.append(
+                    f"{path}:{lineno}: 'tf32:true' の行は managed 配置 A/B の"
+                    "対象外（数値モードの違いを配置フラグの違いと取り違える"
+                    "ため） — skipped"
                 )
                 continue
             if not _valid_cell_identity(obj):
