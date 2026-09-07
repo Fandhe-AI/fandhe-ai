@@ -20,9 +20,11 @@
   `~/work/rust-ai-library-run` には触れていない。孤児プロセスなしを
   `pgrep -af oss-gemm-compare`／`pgrep -af dgx_orchestrate` で確認済み）
 - **専有状態ゲート**: 1 分平均 load average < 2.0 を 2 回連続（attempt=0
-  load1=0.48・attempt=1 load1=0.18）で計測開始前に通過（`out-dgx/gate-dgx.log`）。
+  load1=0.06・attempt=1 load1=0.53）で計測開始前に通過（`out-dgx/gate-dgx.log`）。
   スイープ実行中の 1 分平均 load average は 0.06〜4.72 で推移（`out-dgx/uptime-dgx.log`。
-  30 秒間隔サンプリング341件。上昇分は計測対象プロセス自身の rayon 占有）。
+  30 秒間隔サンプリング170件〈タイムスタンプ行と uptime 行を組にした実際の測定件数。
+  ファイルの総行数は各サンプルがタイムスタンプ行・uptime 行の 2 行を占めるため341行〉。
+  上昇分は計測対象プロセス自身の rayon 占有）。
   他プロセスからの外部負荷なし（gate 時点の `ps` トップに計測プロセス以外の
   高 CPU プロセスなし）
 - 主スイープ: `THREADS="8 10 20 1 2 4 12 16"`・`SIZES=1024,2048,4096`・
@@ -54,7 +56,9 @@
   4.0 未満になることはなく、ゲートは**不通過**のまま「共有負荷下として続行」
   （`out-m4max/gate-m4max.log` 末尾 `gate NOT PASSED after max wait`）。
   スイープ実行中の 1 分平均 load average は 2.42〜28.74 で推移
-  （`out-m4max/uptime-m4max.log`。30 秒間隔サンプリング 513 件）。#1147／#1367
+  （`out-m4max/uptime-m4max.log`。30 秒間隔サンプリング 256 件〈タイムスタンプ行と
+  uptime 行を組にした実際の測定件数。ファイルの総行数は各サンプル 2 行 + 末尾の
+  完了マーカー 1 行のため 513 行〉）。#1147／#1367
   等の既存記録（load average 20〜31 前後）と比べるとやや低いレンジだが、
   引き続き高負荷帯を含む
 - 主スイープ: `THREADS="8 12 16 1 2 4 10 14"`・`SIZES=1024,2048,4096`・

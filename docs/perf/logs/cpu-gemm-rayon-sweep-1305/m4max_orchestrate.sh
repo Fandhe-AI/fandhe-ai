@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
 # イシュー #1305: Apple M4 Max ローカル実行のスイープ一括実行オーケストレーションスクリプト。
+#
+# 実行時の実測記録（アーカイブ）であり、当時の worktree の絶対パスを既定値として
+# 残すが、再実行環境ではパスが異なるため WORKDIR／BIN／LOGDIR／SCRIPTDIR を
+# 環境変数で上書き可能にし、実行前に BIN・SCRIPTDIR の存在を確認する
+# （base AGENTS.md「ハードコード回避」・codex-review 指摘 #1429 対応）。
 set -uo pipefail
 
-WORKDIR="/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_f889d48c-a2d-87"
-BIN="$WORKDIR/scripts/bench/oss-gemm-compare/target/release/oss-gemm-compare"
-LOGDIR="$WORKDIR/docs/perf/logs/cpu-gemm-rayon-sweep-1305/out-m4max"
-SCRIPTDIR="$WORKDIR/docs/perf/logs/cpu-gemm-rayon-sweep-1305"
+WORKDIR="${WORKDIR:-/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_f889d48c-a2d-87}"
+BIN="${BIN:-$WORKDIR/scripts/bench/oss-gemm-compare/target/release/oss-gemm-compare}"
+LOGDIR="${LOGDIR:-$WORKDIR/docs/perf/logs/cpu-gemm-rayon-sweep-1305/out-m4max}"
+SCRIPTDIR="${SCRIPTDIR:-$WORKDIR/docs/perf/logs/cpu-gemm-rayon-sweep-1305}"
+
+if [ ! -x "$BIN" ]; then
+  echo "エラー: BIN='$BIN' が存在しないか実行可能ではない。WORKDIR または BIN を指定すること" >&2
+  exit 1
+fi
+if [ ! -f "$SCRIPTDIR/run_sweep.sh" ]; then
+  echo "エラー: SCRIPTDIR='$SCRIPTDIR' に run_sweep.sh が見つからない。WORKDIR または SCRIPTDIR を指定すること" >&2
+  exit 1
+fi
+
 mkdir -p "$LOGDIR"
 
 ( while :; do date -u +"%Y-%m-%dT%H:%M:%SZ" >> "$LOGDIR/uptime-m4max.log"; uptime >> "$LOGDIR/uptime-m4max.log"; sleep 30; done ) &
