@@ -1,10 +1,10 @@
-   (GEMM_GATE_PATCH_FACADE_PATH=/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_2243c296-206-37/crates/facade)
+   (GEMM_GATE_PATCH_FACADE_PATH=<local-worktree path redacted>/crates/facade)
 == build bench-fandhe ==
 == build bench-candle (metal) ==
 == manifest 記録: results/raw/manifest-m4max-gemm-gate-head-1c298ff-readout-on.json ==
-{"label":"head-1c298ff-readout-on","device":"metal","bench_fandhe_sha256":"f2a1324f5976fd5f6e5ce6d005a413b7dd8693d3df3a59c7c707956f5932af2a","fandhe_ai_source":"path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_2243c296-206-37/crates/facade","bench_fandhe_features":"host-view-readout","bench_candle_sha256":"730e79f3188968a92be31746aba287a6192711f35378b351b064f767d52b1b74","candle_core_source":"registry","recorded_at":"2026-09-07T16:16:12Z"}
+{"label":"head-1c298ff-readout-on","device":"metal","bench_fandhe_sha256":"f2a1324f5976fd5f6e5ce6d005a413b7dd8693d3df3a59c7c707956f5932af2a","fandhe_ai_source":"path:<local-worktree path redacted>/crates/facade","bench_fandhe_features":"host-view-readout","bench_candle_sha256":"730e79f3188968a92be31746aba287a6192711f35378b351b064f767d52b1b74","candle_core_source":"registry","recorded_at":"2026-09-07T16:16:12Z"}
 == バイナリ sha256 検証 OK: bench-fandhe=f2a1324f5976fd5f6e5ce6d005a413b7dd8693d3df3a59c7c707956f5932af2a（label 'head-1c298ff-readout-on'・device 'metal'） ==
-== 依存元検証 OK: fandhe_ai_source=path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_2243c296-206-37/crates/facade（label 'head-1c298ff-readout-on'） ==
+== 依存元検証 OK: fandhe_ai_source=path:<local-worktree path redacted>/crates/facade（label 'head-1c298ff-readout-on'） ==
 == feature 検証 OK: bench_fandhe_features='host-view-readout'（label 'head-1c298ff-readout-on'） ==
 == バイナリ sha256 検証 OK: bench-candle=730e79f3188968a92be31746aba287a6192711f35378b351b064f767d52b1b74（label 'head-1c298ff-readout-on'） ==
 == 依存元検証 OK: candle_core_source=registry（label 'head-1c298ff-readout-on'） ==
