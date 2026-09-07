@@ -10,7 +10,7 @@
 //! の指示に従い、以下 2 点を本ファイルの入口とする:
 //!
 //! 1. [`spec_source_reflection_dump_all_candidates`][]: `tile::CANDIDATES`
-//!    全 9 候補 × base/head × NN で `MetalGemm::
+//!    全 10 候補 × base/head × NN で `MetalGemm::
 //!    diag_tile_pipeline_reflection`（`gemm.rs`。`#[cfg(test)]
 //!    pub(crate)`。本イシューで新設）を呼び、`maxTotalThreadsPerThreadgroup`／
 //!    `threadExecutionWidth`／`staticThreadgroupMemoryLength` を取得する。
@@ -80,7 +80,7 @@ use crate::tile;
 /// §8.3「#1289 への引き継ぎ」参照）。
 const SIZES: [usize; 3] = [1024, 2048, 4096];
 
-/// AC-1: `tile::CANDIDATES` 全 9 候補 × base/head（NN）の
+/// AC-1: `tile::CANDIDATES` 全 10 候補 × base/head（NN）の
 /// `MTLComputePipelineState` 反射値をダンプする。ディスパッチを伴わない
 /// ため 1 プロセス実行で足りる（プロトコル文書化は
 /// `docs/perf/metal-gemm-n4096-kernel-gap.md` §9.1 を正とする）。
@@ -114,6 +114,63 @@ fn spec_source_reflection_dump_all_candidates() {
                 r.resolved_cfg,
             );
         }
+    }
+}
+
+/// イシュー #1329 の AC (d): `CANDIDATES[9]`（64,64,32,2,2。E7・親 #1324）の
+/// `MTLComputePipelineState` 反射値を NN/NT/TN/TT の 4 転置パターンで取得し、
+/// フォールバックが発生していないこと（`resolved_cfg == requested_cfg`）・
+/// `max_total_threads_per_threadgroup >= 128`（`thread_count()`＝
+/// `wm*wn*32`＝128 を満たすこと）・`thread_execution_width == 32`
+/// （Apple GPU SIMD 幅の定数値）を確認する。`base`（function constant
+/// 経路。`SOURCE_SPECIALIZATION_ENABLED` 本番既定）のみで十分
+/// （`spec_source_reflection_dump_all_candidates` が base/head 両方を
+/// 巡回する形と異なり、本テストは E7 候補固有の反射値証跡が目的）。
+/// `static_threadgroup_memory_length` と `TileConfig::shared_mem_bytes_for`
+/// の値（`tile.rs::candidate_9_shared_mem_bytes_for_every_transpose_
+/// pattern_within_32kib_and_16_aligned` で固定済み）を並べて出力し、
+/// `docs/perf/metal-gemm-n4096-kernel-gap.md` §13.2 へ転記する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn candidate_9_reflection_shows_no_fallback_for_every_transpose_pattern() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let cfg = tile::CANDIDATES[9];
+
+    println!(
+        "pattern requested_thread_count max_total_threads_per_threadgroup thread_execution_width static_threadgroup_memory_length shared_mem_bytes_for resolved_tile"
+    );
+    for pattern in [
+        TransposePattern::Nn,
+        TransposePattern::Nt,
+        TransposePattern::Tn,
+        TransposePattern::Tt,
+    ] {
+        let r = gemm
+            .diag_tile_pipeline_reflection(&ctx, cfg, pattern)
+            .unwrap_or_else(|e| panic!("pattern={pattern:?}: 反射値取得に失敗した: {e:?}"));
+        assert_eq!(
+            r.resolved_cfg, r.requested_cfg,
+            "pattern={pattern:?}: フォールバックが発生した（検証が空振りする）"
+        );
+        assert!(
+            r.max_total_threads_per_threadgroup >= 128,
+            "pattern={pattern:?}: max_total_threads_per_threadgroup={} が 128 未満",
+            r.max_total_threads_per_threadgroup
+        );
+        assert_eq!(
+            r.thread_execution_width, 32,
+            "pattern={pattern:?}: thread_execution_width が 32 ではない"
+        );
+        println!(
+            "{pattern:?} {} {} {} {} {} {:?}",
+            r.requested_thread_count,
+            r.max_total_threads_per_threadgroup,
+            r.thread_execution_width,
+            r.static_threadgroup_memory_length,
+            cfg.shared_mem_bytes_for(pattern),
+            r.resolved_cfg,
+        );
     }
 }
 

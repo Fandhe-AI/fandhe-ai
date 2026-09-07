@@ -858,6 +858,27 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         wn: 2,
         staged: true,
     },
+    // E7（イシュー #1324/#1329）: `CANDIDATES[0]`（64x64、bk=16、wm2wn2）の
+    // bk=32 版。K ループ 1 反復あたりの `threadgroup_barrier` 往復を半減
+    // させる狙い（理論根拠。純カーネル時間の before/after 実測・
+    // `select` への組み込み判断は後続イシュー #1330）。SMEM は
+    // `shared_mem_bytes_for` により NN 17920 / NT 18432 / TN 17408 /
+    // TT 17920 バイトで、32KiB 上限内（`TileConfig::validate` で機械
+    // 検証。`docs/perf/metal-gemm-n4096-kernel-gap.md` §13）。
+    // **index 9（末尾）に追加し、既存 index 0〜8 は不変に保つ**
+    // （`select` の添字依存・`examples/gemm_transpose_tile_sweep.rs` の
+    // 複製配列・`tests/gemm_dynamic_tile_parity.rs`／
+    // `tests/gemm_strided_parity.rs` が index 0〜8 の並びに依存するため）。
+    // `select`／`select_with_occupancy_for_device` の選択ロジックには
+    // 組み込まない（明示指定でのみ到達可能。#1330 で性能比較後に判断）。
+    TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    },
 ];
 
 /// `primary` を先頭に、常に妥当な [`TileConfig::SINGLE_SIMDGROUP_8X8`] を
@@ -2247,6 +2268,48 @@ mod tests {
     }
 
     #[test]
+    fn candidate_9_shared_mem_bytes_for_every_transpose_pattern_within_32kib_and_16_aligned() {
+        // イシュー #1329 で追加した `CANDIDATES[9]`（64,64,32,2,2）の
+        // 転置パターン別 threadgroup 共有メモリ量を固定する（AC (d) の
+        // 反射値確認の前提となる純関数側の証跡。`docs/perf/
+        // metal-gemm-n4096-kernel-gap.md` §13 に転記）。4 パターンとも
+        // 32KiB 上限内・16 バイト整合であることを既存候補と同じ形式で
+        // 確認する。
+        use crate::layout::TransposePattern;
+        let cfg = CANDIDATES[9];
+        assert_eq!(
+            cfg,
+            TileConfig {
+                bm: 64,
+                bn: 64,
+                bk: 32,
+                wm: 2,
+                wn: 2,
+                staged: true,
+            }
+        );
+        let expected = [
+            (TransposePattern::Nn, 17920u32),
+            (TransposePattern::Nt, 18432u32),
+            (TransposePattern::Tn, 17408u32),
+            (TransposePattern::Tt, 17920u32),
+        ];
+        for (pattern, want) in expected {
+            let bytes = cfg.shared_mem_bytes_for(pattern);
+            assert_eq!(
+                bytes, want,
+                "pattern={pattern:?} の shared_mem_bytes_for が想定と異なる"
+            );
+            assert!(bytes <= 32 * 1024, "pattern={pattern:?} が 32KiB を超過");
+            assert!(
+                bytes.is_multiple_of(16),
+                "pattern={pattern:?} が 16 の倍数でない"
+            );
+        }
+        assert_eq!(cfg.shared_mem_bytes_f16(), 25344);
+    }
+
+    #[test]
     fn shared_mem_bytes_saturates_instead_of_wrapping_on_overflow() {
         // codex-review 指摘（P0・#538 PR レビュー）: `bm`/`bn`/`bk` は任意の
         // `u32` を受け取れる公開フィールドのため、以前の `u32` のみの演算
@@ -2318,7 +2381,10 @@ mod tests {
         // 静的に固定する（超過構成は `pipeline_for_tile_f16` の
         // `shared_mem_bytes_f16() > max_shared_mem_bytes` 検査で拒否・
         // フォールバックされるが、その前提が崩れていないことをここで
-        // 明示的に保証する。計画「設計方針」節の最大値実測 21120 バイト参照）。
+        // 明示的に保証する。計画「設計方針」節の最大値実測 21120 バイト参照。
+        // イシュー #1329 で index 9（64,64,32,2,2）を追加後の最大値は
+        // 25344 バイトへ更新〈`candidate_9_shared_mem_bytes_for_every_
+        // transpose_pattern_within_32kib_and_16_aligned` で固定〉）。
         for cfg in CANDIDATES {
             let bytes = cfg.shared_mem_bytes_f16();
             assert!(
@@ -3659,10 +3725,23 @@ mod tests {
 
     #[test]
     fn candidates_index_8_is_the_issue_1143_wm1wn2_wide_config_and_indices_0_to_7_unchanged() {
-        // イシュー #1143 で追加した `(32,64,16,1,2)` は末尾（index 8）に
-        // 収録し、既存 index 0〜7 は不変に保つ契約（`CANDIDATES` 定義
-        // コメント参照）。並び順の回帰を検知する。
-        assert_eq!(CANDIDATES.len(), 9, "CANDIDATES の長さが 9 ではない");
+        // イシュー #1143 で追加した `(32,64,16,1,2)` は index 8 に収録。
+        // イシュー #1329 で `(64,64,32,2,2)` を末尾（index 9）へ追加し
+        // 既存 index 0〜8 は不変に保つ契約（`CANDIDATES` 定義コメント
+        // 参照）。並び順の回帰を検知する。
+        assert_eq!(CANDIDATES.len(), 10, "CANDIDATES の長さが 10 ではない");
+        assert_eq!(
+            CANDIDATES[9],
+            TileConfig {
+                bm: 64,
+                bn: 64,
+                bk: 32,
+                wm: 2,
+                wn: 2,
+                staged: true,
+            },
+            "CANDIDATES[9] が想定の (64,64,32,2,2)（イシュー #1329）ではない"
+        );
         assert_eq!(
             CANDIDATES[8],
             TileConfig {
@@ -3892,11 +3971,18 @@ mod tests {
     }
 
     /// `CANDIDATES` を巡回し、[`TileConfig::unroll_acc_loops`] が `true` を
-    /// 返す index 集合が `{0, 4, 8}`（E1 実験〈`docs/perf/
+    /// 返す index 集合が `{0, 4, 8, 9}`（E1 実験〈`docs/perf/
     /// metal-gemm-n4096-kernel-gap.md` §7〉で改善を確認した acc 積 >= 16 の
     /// 候補）と完全一致することを固定する（イシュー #1282）。`CANDIDATES`
     /// への候補追加・変更時にこのテストが自動追従する（ハードコード列挙を
     /// 避ける設計。`unroll_acc_loops` の doc comment 参照）。
+    ///
+    /// index 9（イシュー #1329 で追加した `(64,64,32,2,2)`）は
+    /// `acc_rows=(64/2)/8=4`・`acc_cols=(64/2)/8=4` で `CANDIDATES[0]` と
+    /// 同じ acc 積 16 を持つため構造的に対象へ入る。ただし本番既定は
+    /// `UNROLL_ACC_ENABLED=false`（本ファイル冒頭）かつ index 9 自体も
+    /// `select` 非組み込み（明示指定限定）のため、この変化は本番挙動に
+    /// 影響しない。E1 の再評価（性能実測）は後続イシュー #1330 へ引き継ぐ。
     #[test]
     fn unroll_acc_candidates_are_exactly_acc_product_ge_16() {
         let unroll_indices: Vec<usize> = CANDIDATES
@@ -3907,7 +3993,7 @@ mod tests {
             .collect();
         assert_eq!(
             unroll_indices,
-            vec![0, 4, 8],
+            vec![0, 4, 8, 9],
             "CANDIDATES の acc_rows*acc_cols>=16 判定対象 index が変化しました。\
              CANDIDATES を変更した場合は E1 実験の再評価が必要です \
              （docs/perf/metal-gemm-n4096-kernel-gap.md §7・イシュー #1282）。"

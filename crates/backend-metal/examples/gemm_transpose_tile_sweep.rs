@@ -2,7 +2,7 @@
 //! example（イシュー #1039。親 #1037・兄弟 #1036/#1038/#1040 の後続）。
 //!
 //! - NN: `MetalGemm::dispatch_tiled_prepared`（転送非計測）で
-//!   `crate::tile::CANDIDATES` 全 9 候補を明示指定して比較する
+//!   `crate::tile::CANDIDATES` 全 10 候補を明示指定して比較する
 //!   （`gemm_tile_sweep.rs` と同じ計測境界・`resolved_matches_requested`
 //!   検証を踏襲）。
 //! - NT/TN/TT: シェーダ側にタイル variant を持たない strided classic
@@ -56,7 +56,7 @@ mod macos_impl {
     /// と同じ複製方式の判断）。配列順・値は `tile.rs` の `CANDIDATES` 定義
     /// と一致させる。`tile.rs` 側が変わった場合は本 example 側も追従が
     /// 必要。
-    fn candidates() -> [(&'static str, TileConfig); 9] {
+    fn candidates() -> [(&'static str, TileConfig); 10] {
         [
             (
                 "cand0_64x64_wm2wn2",
@@ -161,6 +161,20 @@ mod macos_impl {
                     bn: 64,
                     bk: 16,
                     wm: 1,
+                    wn: 2,
+                    staged: true,
+                },
+            ),
+            // E7（イシュー #1324/#1329）: `cand0_64x64_wm2wn2` の bk=32 版。
+            // `tile.rs::CANDIDATES` の index 9（末尾追加。既存 index 0〜8
+            // は不変）に対応する。
+            (
+                "cand9_64x64x32_wm2wn2",
+                TileConfig {
+                    bm: 64,
+                    bn: 64,
+                    bk: 32,
+                    wm: 2,
                     wn: 2,
                     staged: true,
                 },
