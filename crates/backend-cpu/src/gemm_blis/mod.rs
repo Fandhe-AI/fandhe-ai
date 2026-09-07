@@ -1744,6 +1744,62 @@ pub(crate) fn gemm_blis_parallel_row_panel_with_blocks(
         })
 }
 
+/// [`gemm_blis_parallel_row_panel_with_blocks`] の任意マイクロカーネル版
+/// （イシュー #1317・`GemmDriverVariant::RowPanelBLaneqVec` 用）。
+/// `dispatch_region`（本番駆動経路。実行時 ISA 検出で `NeonKernel` 等を
+/// 選ぶ）を経由せず、呼び出し元が指定した `K: Microkernel` へ直接
+/// `gemm_blis_region` を呼ぶ点のみが差分（行パネル分割・rayon 並列化の
+/// ロジックは完全に同一）。これにより `RowPanel`（本番既定）との A/B
+/// 比較の差分をマイクロカーネル自体（laneq のベクトル転置化）だけに
+/// 限定できる（計画 §3.4）。`#[cfg(test)]` の A/B 計測専用入口であり
+/// `dispatch_region`／本番公開入口は変更しない。aarch64 限定（唯一の
+/// 呼び出し元 [`gemm_blis_parallel_variant`] の `RowPanelBLaneqVec`
+/// アームが aarch64 限定のため、他アーキでは未使用関数になり
+/// `-D warnings` の `dead_code` lint に抵触する）。
+#[cfg(all(test, target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_parallel_row_panel_with_kernel<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    validate_block_sizes(blocks)?;
+
+    if n == 0 {
+        return Ok(());
+    }
+
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+    let panel_rows = m.div_ceil(num_threads).max(1);
+
+    c.par_chunks_mut(panel_rows * n)
+        .enumerate()
+        .try_for_each(|(panel_idx, c_chunk)| {
+            let row_start = panel_idx * panel_rows;
+            let row_end = (row_start + c_chunk.len() / n).min(m);
+            let mc_total = row_end - row_start;
+            let mut bufs = PanelBuffers::new::<K>(n, k, mc_total, blocks);
+            gemm_blis_region(
+                kernel,
+                a,
+                b,
+                c_chunk,
+                n,
+                k,
+                row_start..row_end,
+                &mut bufs,
+                blocks,
+                GemmTranspose::Nn,
+            )
+        })
+}
+
 /// #753: MC タイル境界に整列した行範囲分配（[`partition::row_ranges_for_workers`]）
 /// を使う `gemm_blis_parallel` の 2 次元タイルジョブ分配版。
 ///
@@ -2475,6 +2531,16 @@ pub(crate) enum GemmDriverVariant {
     /// `docs/perf/cpu-gemm-ic-dynamic-variant.md` §6）。本番未結線のまま
     /// `#[cfg(test)]` 限定を維持する。
     IcDynamic,
+    /// B 側 laneq ベクトル転置版マイクロカーネル（[`microkernel::NeonBLaneqVecKernel`]。
+    /// イシュー #1317）を [`RowPanel`](Self::RowPanel) と同一の行パネル
+    /// 分割・並列化ロジックへ差し込んだ候補（[`gemm_blis_parallel_row_panel_with_kernel`]
+    /// 経由）。差分をマイクロカーネル自体（C タイル転置のベクトル化）に
+    /// 限定した A/B 計測基準線であり、`RowPanel` との bit 完全一致
+    /// （有限値入力）が理論契約として成り立つ（`neon` モジュール冒頭
+    /// #1317 節）。採否・実機実測は #1318 が引き継ぐ。aarch64 限定
+    /// （`NeonBLaneqVecKernel` 自体が aarch64 限定トークンのため）。
+    #[cfg(target_arch = "aarch64")]
+    RowPanelBLaneqVec,
 }
 
 /// [`GemmDriverVariant`] で指定した候補を強制実行する A/B 計測専用入口
@@ -2515,12 +2581,51 @@ pub(crate) fn gemm_blis_parallel_variant(
             dispatch_shared_b_pc_outer(a, b, c, n, k, 0..m, blocks)
         }
         GemmDriverVariant::IcDynamic => dispatch_ic_dynamic(a, b, c, n, k, 0..m, blocks),
+        #[cfg(target_arch = "aarch64")]
+        GemmDriverVariant::RowPanelBLaneqVec => gemm_blis_parallel_row_panel_with_kernel(
+            microkernel::NeonBLaneqVecKernel,
+            a,
+            b,
+            c,
+            m,
+            n,
+            k,
+            blocks,
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`GemmDriverVariant`] の全候補一覧（A/B 一括計測ハーネス・全候補
+    /// bit 完全一致回帰の 3 箇所で共用。イシュー #1317）。
+    /// `RowPanelBLaneqVec`（[`microkernel::NeonBLaneqVecKernel`] 経由）は
+    /// aarch64 限定トークンに依存するため aarch64 版のみ追加する
+    /// （`x86_64` で `let mut v = vec![…]; #[cfg(aarch64)] v.push(…)` と
+    /// すると `unused_mut` lint が `-D warnings` で落ちる罠を避けるため、
+    /// 2 定義に分ける方式を採る。計画 §3.4）。
+    #[cfg(target_arch = "aarch64")]
+    fn all_gemm_driver_variants() -> Vec<GemmDriverVariant> {
+        vec![
+            GemmDriverVariant::RowPanel,
+            GemmDriverVariant::SharedB,
+            GemmDriverVariant::SharedBPcOuter,
+            GemmDriverVariant::IcDynamic,
+            GemmDriverVariant::RowPanelBLaneqVec,
+        ]
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn all_gemm_driver_variants() -> Vec<GemmDriverVariant> {
+        vec![
+            GemmDriverVariant::RowPanel,
+            GemmDriverVariant::SharedB,
+            GemmDriverVariant::SharedBPcOuter,
+            GemmDriverVariant::IcDynamic,
+        ]
+    }
 
     #[test]
     fn gemm_blis_matches_hand_computed_2x2() {
@@ -3464,7 +3569,7 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_8x12_and_12x8_match_scalar_forced_bit_exact() {
-        use microkernel::{Neon12x8Kernel, NeonBLaneqKernel, NeonKernel};
+        use microkernel::{Neon12x8Kernel, NeonBLaneqKernel, NeonBLaneqVecKernel, NeonKernel};
 
         for (i, &(m, n, k)) in [
             (200usize, 600usize, 700usize),
@@ -3505,6 +3610,27 @@ mod tests {
             assert_eq!(
                 c_scalar, c_neon_b_laneq,
                 "NeonBLaneqKernel（B レーン参照変種・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
+            );
+
+            // イシュー #1317: B 側 laneq ベクトル転置版（[`compute_b_laneq`]
+            // の C タイル転置をベクトル化した候補）も ScalarKernel 強制
+            // 経路と bit 完全一致するはず（k%4 の剰余網羅は上記グリッドを
+            // 共用）。
+            let mut c_neon_b_laneq_vec = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(
+                NeonBLaneqVecKernel,
+                &a,
+                &b,
+                &mut c_neon_b_laneq_vec,
+                m,
+                n,
+                k,
+            )
+            .unwrap();
+            assert_eq!(
+                c_scalar, c_neon_b_laneq_vec,
+                "NeonBLaneqVecKernel（B laneq ベクトル転置版・k={k}）は ScalarKernel 強制経路と \
+                 bit 完全一致するはず"
             );
         }
     }
@@ -4085,12 +4211,7 @@ mod tests {
                         panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
                     });
 
-                for variant in [
-                    GemmDriverVariant::RowPanel,
-                    GemmDriverVariant::SharedB,
-                    GemmDriverVariant::SharedBPcOuter,
-                    GemmDriverVariant::IcDynamic,
-                ] {
+                for variant in all_gemm_driver_variants() {
                     let mut c = vec![0.0f32; m * n];
                     pool.install(|| {
                         gemm_blis_parallel_variant(
@@ -4330,6 +4451,134 @@ mod tests {
         }
     }
 
+    /// イシュー #1317: `RowPanelBLaneqVec`（B 側 laneq ベクトル転置版
+    /// マイクロカーネル）が `RowPanel`（本番既定）と bit 完全一致する
+    /// ことを、MC/KC/NC 境界を跨ぐ複数形状（端タイル・`n % NR != 0`・
+    /// `k % KC != 0`・`k == 0` no-op を含む）× 複数スレッド数で直接検証
+    /// する（[`gemm_blis_ic_dynamic_matches_row_panel_bit_exact_across_shapes_and_threads`]
+    /// と同一パターン）。両 variant の唯一の差分がマイクロカーネル（C タイル
+    /// 転置方式）であることを、`gemm_blis_parallel_row_panel_with_kernel`
+    /// が `RowPanel` と行パネル分割・並列化ロジックを共有することで保証
+    /// する（§3.4）。端タイル（`ldc=NR` スタックバッファ経路）・完全タイル
+    /// （`ldc=n` 直接経路）の両方を通す形状を含む。aarch64 限定
+    /// （`RowPanelBLaneqVec` 自体が aarch64 限定 variant のため）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_across_shapes_and_threads() {
+        let shapes: &[(usize, usize, usize)] = &[
+            (5, 7, 3),
+            (64, 64, 64),
+            (128, 128, 96),
+            (129, 130, 257),
+            (1000, 96, 300),
+            (523, 600, 700),
+            (2, 3, 0),
+            (512, 512, 512),
+        ];
+        let thread_counts = [1usize, 2, 3, 16];
+
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0xb1a2_1111 ^ (m as u32), m * k);
+            let b = xorshift32_vec(0xb1a2_2222 ^ (n as u32), k * n);
+            let c_init = xorshift32_vec(0xb1a2_3333 ^ (k as u32), m * n);
+
+            for &num_threads in &thread_counts {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap_or_else(|e| {
+                        panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
+                    });
+
+                let mut c_row_panel = c_init.clone();
+                pool.install(|| {
+                    gemm_blis_parallel_variant(
+                        GemmDriverVariant::RowPanel,
+                        &a,
+                        &b,
+                        &mut c_row_panel,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
+                    .unwrap()
+                });
+
+                let mut c_b_laneq_vec = c_init.clone();
+                pool.install(|| {
+                    gemm_blis_parallel_variant(
+                        GemmDriverVariant::RowPanelBLaneqVec,
+                        &a,
+                        &b,
+                        &mut c_b_laneq_vec,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
+                    .unwrap()
+                });
+
+                assert_eq!(
+                    c_row_panel, c_b_laneq_vec,
+                    "shape=({m},{n},{k}) num_threads={num_threads} は \
+                     RowPanelBLaneqVec と RowPanel が bit 完全一致するはず（#1317）"
+                );
+            }
+        }
+    }
+
+    /// イシュー #1317: 大形状（1024/2048/4096 正方）でも
+    /// `RowPanelBLaneqVec` が `RowPanel` と bit 完全一致することを実機で
+    /// 確認する（release ビルド・プール既定スレッド数。#1318 の実機実測
+    /// に先立つ事前確認用。[`gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large`]
+    /// と同一パターン）。デバッグビルドでの計算量が大きいため通常 CI
+    /// では実行しない。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）での大形状 bit 一致確認専用（#1317。cargo test \
+                -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_large --nocapture）"]
+    fn gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_large() {
+        for &dim in &[1024usize, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xb1a2_4444 ^ (dim as u32), m * k);
+            let b = xorshift32_vec(0xb1a2_5555 ^ (dim as u32), k * n);
+
+            let mut c_row_panel = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanel,
+                &a,
+                &b,
+                &mut c_row_panel,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            let mut c_b_laneq_vec = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanelBLaneqVec,
+                &a,
+                &b,
+                &mut c_b_laneq_vec,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                c_row_panel, c_b_laneq_vec,
+                "dim={dim} は RowPanelBLaneqVec と RowPanel が bit 完全一致するはず（#1317）"
+            );
+        }
+    }
+
     /// [`ic_dynamic_panel_rows`] の純関数契約を検証する（イシュー #1366）。
     #[test]
     fn ic_dynamic_panel_rows_bounds_and_alignment() {
@@ -4494,12 +4743,7 @@ mod tests {
                 （#1041。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
                 gemm_blis_variant_ab_1024_2048 --nocapture）"]
     fn gemm_blis_variant_ab_1024_2048() {
-        let variants = [
-            GemmDriverVariant::RowPanel,
-            GemmDriverVariant::SharedB,
-            GemmDriverVariant::SharedBPcOuter,
-            GemmDriverVariant::IcDynamic,
-        ];
+        let variants = all_gemm_driver_variants();
 
         for &dim in &[1024usize, 2048] {
             let (m, n, k) = (dim, dim, dim);
@@ -4525,12 +4769,7 @@ mod tests {
                 #1141。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
                 gemm_blis_variant_ab_4096 --nocapture）"]
     fn gemm_blis_variant_ab_4096() {
-        let variants = [
-            GemmDriverVariant::RowPanel,
-            GemmDriverVariant::SharedB,
-            GemmDriverVariant::SharedBPcOuter,
-            GemmDriverVariant::IcDynamic,
-        ];
+        let variants = all_gemm_driver_variants();
 
         let (m, n, k) = (4096usize, 4096usize, 4096usize);
         let a = xorshift32_vec(0xdede_dede, m * k);

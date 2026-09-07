@@ -481,7 +481,8 @@ A/B 一括計測ハーネス（`gemm_blis_variant_ab_1024_2048`／`gemm_blis_var
   vld1q_f32_x3 経路 prefetch・KC 再スイープ）を実装・実機 A/B 計測する`
 - **候補 1**: B 側 laneq のベクトル転置化（`crates/backend-cpu/src/gemm_blis/microkernel.rs`
   の `neon::kernel_b_laneq*` における `vfmaq_laneq_f32` レーン参照オペランドの B パック
-  配置見直し）
+  配置見直し）。**イシュー #1317 で候補実装（`GemmDriverVariant::RowPanelBLaneqVec`）済み
+  （`docs/perf/cpu-gemm-b-laneq-vec-transpose.md`）。両実機実測・採否は #1318 が引き継ぐ**
 - **候補 2**: `vld1q_f32_x3` 経路の prefetch（**注**: `docs/cpu-gemm-prefetch-decision.md`
   〈#489・#751〉で aarch64 prefetch は「原則不要」へ格下げ済みのため、再挑戦には同 doc の
   判断を覆す新たな根拠〈本イシューの M4 Max 1024/2048 実測が示す帯域律速の可能性〉を
