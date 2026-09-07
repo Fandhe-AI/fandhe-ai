@@ -1,0 +1,14 @@
+0 %, NVIDIA GB10, 580.173.02
+---compute-apps---
+427276, /opt/llm-infra/comfyui-env/bin/python, 170 MiB
+1241474, /opt/llm-infra/venvs/kokoro/bin/python3, 870 MiB
+---uptime---
+ 00:14:43 up 11 days, 11:41,  5 users,  load average: 1.37, 0.90, 0.63
+---rustc---
+rustc 1.97.0 (2d8144b78 2026-07-07)
+---nvcc---
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Aug_20_01:57:39_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
