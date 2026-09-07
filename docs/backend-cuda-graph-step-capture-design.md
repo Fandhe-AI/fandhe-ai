@@ -58,18 +58,29 @@
 
 `context_cache::OrdinalState` に `capture: Option<ThreadId>` を追加。`begin_capture_session`（同一 ordinal への再入を拒否）・`is_capturing_on_current_thread`（同期点ガードの判定）・`begin_sync_point_call`（`begin_driver_call` と同じ排他区間で、capture 中なら driver に触れる前に `Unsupported` で拒否）を実装した。capture モードは `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`。
 
+**cross-thread 排他（codex-review P0 指摘対応。追記）**: `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は「capture を乱しうる driver API 呼び出し」の判定を capture 開始スレッドに限定する目的のモードであり、**別スレッドが同じ共有ストリームへ直接カーネル起動すること自体を driver 側が防いでくれる保証ではない**。そのため `begin_driver_call`（`captured_segment_key`／`sgd_step_device_tracked` 等、通常の driver 呼び出し全般が通る唯一の入口）自身が `state.capture` を検査し、capture 中は**capture を開始したスレッド以外**からの呼び出しを `Unsupported` で一律拒否するよう変更した（capture を開始したスレッド自身は通す——`body` 実行がこの入口を再度通るため）。
+
+**body の panic 対応（codex-review P1・Cursor Bugbot 指摘対応。追記）**: `body` が panic（unwind）した場合でも `stream.end_capture` を必ず呼んでから panic を再送出するよう `run_captured_segment` を変更した（`std::panic::catch_unwind` で包み、`end_capture` 実行後に `resume_unwind`）。以前は `body()` の panic が `end_capture` 呼び出しをスキップし、driver 側の capture 状態が終了されないまま残る整合性違反があった。
+
 ### 4.3 graph モジュール
 
-`crate::graph::run_captured_segment(ordinal, stream, key, body)`:
+`crate::graph::run_captured_segment(ordinal, stream, key, resources, body)`（`resources: &mut [&mut DeviceBuffer<f32>]`・`body: &mut CapturedSegmentBody<'_>`。§4.4 参照）:
 
 1. `begin_driver_call` で poison／世代検査
 2. thread-local キャッシュ（`STEP_GRAPHS`。上限 8・世代不一致 evict）から `key` に一致する graph を take → ヒットなら `launch()` のみ実行し `SegmentRun::Replayed`
-3. ミスなら `begin_capture_session` → `stream.begin_capture` → `body()` → `stream.end_capture`（成否に関わらず必ず呼び capture を終了）→ 成功時は `graph.upload()` → 初回 `launch()` → キャッシュへ格納 → `SegmentRun::Captured`
+3. ミスなら `begin_capture_session` → `stream.begin_capture` → `body(resources)`（panic しても直後で必ず `end_capture` する。§4.2 追記）→ `stream.end_capture` → 成功時は `graph.upload()` → 初回 `launch()` → キャッシュへ格納 → `SegmentRun::Captured`
 4. `body` の `Err`・`end_capture` の `Err`・空 graph（`Ok(None)`）はいずれも fail-closed なエラーとして呼び出し元へ返す
+5. **`graph.upload()` の失敗も fail-closed で伝播する**（codex-review P0 指摘対応・追記。以前は poison 化のみで握りつぶし、直後の `launch()` が別途成功すると全体が `Ok(Captured)` 扱いになっていた——「最初に失敗した driver エラーを伝播する」という本クレート全体の契約に反する後退だった）
 
 ### 4.4 `BackendOps` の非破壊拡張
 
 `SegmentKey { generation, config_key, resources: Vec<SegmentResource> }`（`SegmentResource { addr, numel }`）。`CudaBackendOps::captured_segment_key` は opt-in OFF または非 capturable stream なら `Ok(None)`（後者は opt-in ON だが legacy stream のままの設定ミスを示すため実際には `Err(Unsupported)`。§4.7）、それ以外は各バッファの `device_ptr` から `SegmentKey` を構築する。
+
+**replay 直前の再検証（codex-review P0 指摘対応。追記）**: `SegmentKey` 自身はバッファの所有権・借用を保持しない値型のため、当初の設計では「対応するバッファを drop した後に空の `body`／`resources` で `run_captured_segment` を呼ぶと、解放済み・別バッファへ再利用済みのアドレスを参照する古い graph を安全確認なしに再生してしまいうる」というメモリ安全性の欠陥があった。これを塞ぐため `BackendOps::run_captured_segment` のシグネチャを `(&self, key, resources: &mut [&mut DeviceBuffer<f32>], body: &mut CapturedSegmentBody<'_>)` へ変更した:
+
+- `resources` は `key` を得た `captured_segment_key` 呼び出しと**同一の借用・同一の順序**で渡す契約。`CudaBackendOps::run_captured_segment` は replay／capture のいずれの前にも `resources` から現在のアドレス集合を再計算し、`key.resources` と完全一致することを確認してから初めて `crate::graph::run_captured_segment` へ委譲する（不一致なら driver に一切触れず `InvalidArgument` で拒否）
+- `resources` を**排他借用**（`&mut`）のスライスにしているのは、`body` にも同じバッファへの書き込みアクセスが要り（例: `params` の in-place 更新）、Rust の借用規則上「検証用の共有借用」と「`body` 実行用の排他借用」を同一の関数呼び出し内で別個に両立させることができないため。両者を単一の排他借用スライスへ統合することで、この型そのものが「呼び出し元が対応するバッファをこの呼び出しの間生存かつ排他的に所有している」というコンパイル時の生存契約を兼ねる（排他借用は読み取りにも使えるため検証はこの借用を読むだけで行える）
+- `body` は `resources` と同一の排他借用スライスを**呼び出し時の引数**として受け取る（`CapturedSegmentBody<'a> = dyn FnMut(&mut [&mut DeviceBuffer<f32>]) -> Result<(), BackendError> + 'a`。呼び出し元の環境が別途 `self` フィールドへの借用を保持すると二重借用になるため、`resources` の要素から reborrow して使う契約）
 
 ### 4.5 `DeviceParamStore::step` の結線
 
@@ -80,7 +91,9 @@
 3. capability あり: 永続 `GradStaging`（`total_numel` 分。初回のみ確保）を用意し、`mem.upload_into` で grad を書き込んでから、実際のバッファ集合で `captured_segment_key` を再計算して `key` を確定し、`ops.run_captured_segment(key, &mut body)` で update を実行する
 4. capability なし: 既存の「毎回新規 grad バッファへ upload」経路（本イシュー導入前と無変更）
 
-`config_key` は `fold_sgd_step_config_key`（FNV-1a 風の畳み込み）で `SgdStepConfig` の全フィールド（`is_first_step` を含む）から算出する。ハイパーパラメータ変更や `is_first_step` の遷移（1 step 目 → 2 step 目）で `config_key` が変わり、新規 capture が発生する。
+`config_key` は `fold_sgd_step_config_key` で `SgdStepConfig` の全フィールド（`is_first_step` を含む）から算出する。ハイパーパラメータ変更や `is_first_step` の遷移（1 step 目 → 2 step 目）で `config_key` が変わり、新規 capture が発生する。
+
+**衝突耐性（codex-review P1 指摘対応。追記）**: 当初は単語単位の XOR→乗算という弱い畳み込み（手書き FNV-1a 風）を使っていたが、`nesterov`／`is_first_step` の 1 ビット値が上位ビットへほとんど拡散せず、実際に**異なる設定同士が衝突する具体例**が確認された。これは「衝突しても実害は再利用が起きない方向にのみ倒れる」という当初の想定を裏切る——`SegmentKey` は `generation`／`resources`（バッファアドレス）が同一パラメータ列を使い続ける限り不変のため、`config_key` の衝突は「古い設定〈例: 変更前の `lr`〉で capture 済みの graph を新しい設定のまま気づかず再生する」という契約違反（設定変更の無視）に直結する。現在は `std::collections::hash_map::DefaultHasher`（SipHash 系。バイト単位で逐次混合するため単語単位の弱い混合より衝突耐性が大幅に高い）へ切り替えた。
 
 ### 4.6 facade 公開 API
 
@@ -91,8 +104,11 @@
 | 事象 | 結果 |
 |---|---|
 | body 内で同期点（download／upload／alloc／release）を呼ぶ | `Unsupported`（driver に触れる前）。ordinal は poison しない |
-| capture 中の driver エラー（begin/end capture・launch） | ordinal を `Poisoned{false}` へ（明示 `Sticky` 分類） |
+| capture 中に capture 開始スレッド以外から driver 呼び出し | `Unsupported`（driver に触れる前。§4.2 追記） |
+| capture 中の driver エラー（begin/end capture・launch・upload） | ordinal を `Poisoned{false}` へ（明示 `Sticky` 分類）。`upload` 失敗も fail-closed で伝播（§4.3 追記） |
 | `end_capture` が空 graph | fail-closed エラー |
+| `body` が panic | `end_capture` を実行してから panic を再送出（§4.2 追記） |
+| `run_captured_segment` の `resources` が `key.resources` と不一致 | `InvalidArgument`（driver に触れる前。§4.4 追記） |
 | 世代不一致 | `StaleDeviceGeneration` |
 | opt-in ON だが legacy stream で初期化済み | `Unsupported`（設定順序の誤りを早期に顕在化） |
 
