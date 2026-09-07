@@ -81,7 +81,7 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
     let mut param = mem
         .upload(&Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[numel]).unwrap())
         .expect("param upload succeeds");
-    let grad = mem
+    let mut grad = mem
         .upload(&Tensor::new(vec![0.1, 0.1, 0.1, 0.1], &[numel]).unwrap())
         .expect("grad upload succeeds");
 
@@ -107,18 +107,22 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
 
     let mut call_count = 0usize;
     {
-        let param_ptr: *mut DeviceBuffer<f32> = &mut param;
-        let grad_ref = &grad;
-        let mut body = || -> Result<(), BackendError> {
+        // `resources` は `body` にも `param`／`grad` への排他借用を渡す
+        // ための単一スライス（codex-review P0 指摘対応。トレイト
+        // `BackendOps::run_captured_segment` doc コメント参照）。以前は
+        // `*mut DeviceBuffer<f32>` への `unsafe` 生ポインタ経由で `param`
+        // への `&mut` を得ていたが、新シグネチャでは `resources` から
+        // 素直に reborrow できるため `unsafe` は不要になった。
+        let mut resources: [&mut DeviceBuffer<f32>; 2] = [&mut param, &mut grad];
+        let mut body = |resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
             call_count += 1;
-            // SAFETY: `param_ptr` は同一スコープの `param` を指し、
-            // capture 中は他に借用されない（`body` は capture 中に 1 回
-            // だけ呼ばれる契約。`run_captured_segment` doc 参照）。
-            let param_mut = unsafe { &mut *param_ptr };
+            let (head, tail) = resources.split_at_mut(1);
+            let param_mut: &mut DeviceBuffer<f32> = &mut *head[0];
+            let grad_ref: &DeviceBuffer<f32> = &*tail[0];
             cuda.sgd_step_device(param_mut, grad_ref, None, &config)
         };
         let run1 = cuda
-            .run_captured_segment(key.clone(), &mut body)
+            .run_captured_segment(key.clone(), &mut resources, &mut body)
             .expect("first run_captured_segment call must succeed (capture)");
         assert_eq!(run1, SegmentRun::Captured);
     }
@@ -136,12 +140,13 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
     );
 
     {
-        let mut body = || -> Result<(), BackendError> {
+        let mut resources: [&mut DeviceBuffer<f32>; 2] = [&mut param, &mut grad];
+        let mut body = |_resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
             call_count += 1;
             Ok(())
         };
         let run2 = cuda
-            .run_captured_segment(key, &mut body)
+            .run_captured_segment(key, &mut resources, &mut body)
             .expect("second run_captured_segment call must succeed (replay)");
         assert_eq!(run2, SegmentRun::Replayed);
     }
@@ -198,23 +203,31 @@ fn sync_point_call_during_capture_is_rejected_without_poisoning() {
 
     let cuda = CudaBackendOps::new(0);
     let mem = cuda.memory_ops().expect("memory_ops must be Some");
-    let param = mem
+    let mut param = mem
         .upload(&Tensor::new(vec![1.0], &[1]).unwrap())
         .expect("upload succeeds");
-    let grad = mem
+    let mut grad = mem
         .upload(&Tensor::new(vec![0.1], &[1]).unwrap())
         .expect("upload succeeds");
-    let refs: [&DeviceBuffer<f32>; 2] = [&param, &grad];
-    let key = cuda
-        .captured_segment_key(&refs, 1)
-        .expect("captured_segment_key must succeed")
-        .expect("must be Some when opt-in is on");
-
-    let mut body = || -> Result<(), BackendError> {
-        // capture 中に同期点（download）を呼ぶ契約違反。
-        mem.download(&param).map(|_| ())
+    let key = {
+        let refs: [&DeviceBuffer<f32>; 2] = [&param, &grad];
+        cuda.captured_segment_key(&refs, 1)
+            .expect("captured_segment_key must succeed")
+            .expect("must be Some when opt-in is on")
     };
-    let result = cuda.run_captured_segment(key, &mut body);
+
+    let mut resources: [&mut DeviceBuffer<f32>; 2] = [&mut param, &mut grad];
+    // `body` は `mem`（`DeviceBuffer` 自体を借用しないハンドル）と、
+    // 呼び出し時に**渡される** `resources` 引数（外側の `resources`
+    // 変数ではなく、クロージャのパラメータとして同名でシャドウする）
+    // のみを使う。外側の `param`／`grad` を直接キャプチャすると、
+    // `resources`（排他借用）と二重に借用することになり
+    // コンパイルできない（トレイト doc コメント参照）。
+    let mut body = |resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
+        // capture 中に同期点（download）を呼ぶ契約違反。
+        mem.download(&*resources[0]).map(|_| ())
+    };
+    let result = cuda.run_captured_segment(key, &mut resources, &mut body);
     assert!(
         matches!(result, Err(BackendError::Unsupported(_))),
         "capture 中の同期点呼び出しは Unsupported で拒否されるはず: {result:?}"

@@ -64,8 +64,8 @@ pub struct CudaDevice {
 /// `cudarc` の legacy NULL stream（`default_stream()`）は
 /// `cuStreamBeginCapture` の対象にできない（driver が
 /// `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` を返す）ため、CUDA Graph
-/// capture opt-in（[`crate::graph::step_graph_mode`] が
-/// [`crate::graph::GraphMode::StreamOnly`] 以上）が最初の CUDA デバイス
+/// capture opt-in（`crate::graph::step_graph_mode` が
+/// `crate::graph::GraphMode::StreamOnly` 以上）が最初の CUDA デバイス
 /// 初期化より前に設定されている場合のみ `ctx.new_stream()`
 /// （非 legacy・capture 可能なストリーム）を保持する。opt-in OFF
 /// （既定）では常に [`StreamKind::Legacy`] のまま、本イシュー導入前と

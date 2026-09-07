@@ -28,8 +28,8 @@ use std::sync::Arc;
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DType, FusionPlan, MseReduction, SegmentKey, SegmentResource,
-    SegmentRun, ShapeError, Tensor, require_same_shape,
+    Activation, BackendOps, CapturedSegmentBody, DType, FusionPlan, MseReduction, SegmentKey,
+    SegmentResource, SegmentRun, ShapeError, Tensor, require_same_shape,
 };
 
 use crate::context_cache;
@@ -280,6 +280,41 @@ impl CudaBackendOps {
     fn device_handle(&self) -> Result<Arc<CudaDevice>, BackendError> {
         self.device_handle_raw()
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))
+    }
+
+    /// `resources` から [`SegmentResource`] 列を導出する（イシュー
+    /// #1349）。`captured_segment_key`（capture 対象キーの新規発行）・
+    /// `run_captured_segment`（replay 直前の再検証。codex-review P0
+    /// 指摘対応）の双方が同じロジックを使う必要がある——**2 箇所で
+    /// アドレス導出ロジックが乖離すると、片方だけを見て再検証が
+    /// 「常に一致する」だけの無意味な処理へ形骸化しうる**ため、本関数へ
+    /// 一本化する。`numel == 0`（空バッファ）は `addr == 0` とする契約
+    /// （`SegmentResource` doc コメント参照）。
+    fn segment_resources_for(
+        resources: &[&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>],
+        stream: &Arc<cudarc::driver::CudaStream>,
+    ) -> Result<Vec<SegmentResource>, BackendError> {
+        let mut segment_resources = Vec::with_capacity(resources.len());
+        for buf in resources {
+            let numel = buf.numel();
+            let addr = if numel == 0 {
+                0u64
+            } else {
+                let handle = buf
+                    .downcast_handle::<CudaBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?;
+                let slice = handle.slice.as_ref().ok_or_else(|| {
+                    BackendError::DeviceAllocationFailed(
+                        "segment_resources_for: buffer has numel > 0 but no device allocation"
+                            .to_string(),
+                    )
+                })?;
+                let (ptr, _sync) = cudarc::driver::DevicePtr::device_ptr(slice, stream);
+                ptr
+            };
+            segment_resources.push(SegmentResource { addr, numel });
+        }
+        Ok(segment_resources)
     }
 
     /// [`Self::device_handle`] の `CudaError` 版。`with_driver_call` の
@@ -801,26 +836,7 @@ impl BackendOps for CudaBackendOps {
             ));
         }
         let stream = device.stream();
-        let mut segment_resources = Vec::with_capacity(resources.len());
-        for buf in resources {
-            let numel = buf.numel();
-            let addr = if numel == 0 {
-                0u64
-            } else {
-                let handle = buf
-                    .downcast_handle::<CudaBufferHandle>()
-                    .ok_or(BackendError::DeviceMismatch)?;
-                let slice = handle.slice.as_ref().ok_or_else(|| {
-                    BackendError::DeviceAllocationFailed(
-                        "captured_segment_key: buffer has numel > 0 but no device allocation"
-                            .to_string(),
-                    )
-                })?;
-                let (ptr, _sync) = cudarc::driver::DevicePtr::device_ptr(slice, stream);
-                ptr
-            };
-            segment_resources.push(SegmentResource { addr, numel });
-        }
+        let segment_resources = Self::segment_resources_for(resources, stream)?;
         Ok(Some(SegmentKey {
             generation: context_cache::current_generation(self.ordinal),
             config_key,
@@ -832,13 +848,48 @@ impl BackendOps for CudaBackendOps {
     /// capture・再生する（イシュー #1349）。実体は [`crate::graph::
     /// run_captured_segment`]（thread-local graph キャッシュ・stream
     /// capture の手順は同モジュールのドキュメント参照）。
+    ///
+    /// **replay 直前の再検証（codex-review P0 指摘対応。`docs/backend-
+    /// cuda-graph-step-capture-design.md` §4.4 追記）**: `SegmentKey`
+    /// 自身はバッファの所有権・借用を保持しない値型のため、`resources`
+    /// （`&mut [&mut DeviceBuffer<f32>]`。この呼び出しの間ライフタイムが
+    /// 保証される**排他**借用——`body` にも同じバッファへの書き込み
+    /// アクセスが要るため、検証用の共有借用とは別に確保できず、単一の
+    /// 排他借用スライスへ統合している。トレイト doc コメント参照）から
+    /// 現在のアドレス集合を再計算し、`key.resources` と完全一致すること
+    /// を確認してから初めて `crate::graph::run_captured_segment` へ委譲
+    /// する。不一致（呼び出し元が `key` を取得した [`Self::
+    /// captured_segment_key`] 呼び出しと異なる `resources` を渡した契約
+    /// 違反、または `key` 自体が別ドメインの値）なら、driver に一切
+    /// 触れずキャッシュ参照も行わず [`BackendError::InvalidArgument`] で
+    /// 拒否する（fail-closed。解放済み・別バッファへ再利用済みのアドレス
+    /// を参照する古い graph を安全確認なしに再生する事態を防ぐ）。
     fn run_captured_segment(
         &self,
         key: SegmentKey,
-        body: &mut dyn FnMut() -> Result<(), BackendError>,
+        resources: &mut [&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>],
+        body: &mut CapturedSegmentBody<'_>,
     ) -> Result<SegmentRun, BackendError> {
         let device = self.device_handle()?;
-        crate::graph::run_captured_segment(self.ordinal, device.stream(), key, body)
+        let stream = device.stream();
+        // 排他借用スライスを読み取り専用ビューへ一時変換する（読み取りは
+        // 排他借用でも常に可能。`&mut DeviceBuffer<f32>` から `&DeviceBuffer
+        // <f32>` への reborrow で、`resources` 自体の排他性は変えない）。
+        let shared_view: Vec<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>> =
+            resources.iter().map(|buf| &**buf).collect();
+        let current_resources = Self::segment_resources_for(&shared_view, stream)?;
+        drop(shared_view);
+        if current_resources != key.resources {
+            return Err(BackendError::InvalidArgument(
+                "run_captured_segment: the live `resources` passed to this call do not \
+                 match the resources recorded in `key` (the buffers used to obtain `key` \
+                 via `captured_segment_key` must be the exact same borrows, in the same \
+                 order, passed here); refusing to replay or capture against a possibly \
+                 stale/freed buffer address"
+                    .to_string(),
+            ));
+        }
+        crate::graph::run_captured_segment(self.ordinal, stream, key, resources, body)
     }
 
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、

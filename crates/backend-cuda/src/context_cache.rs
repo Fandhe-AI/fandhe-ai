@@ -552,10 +552,14 @@ struct OrdinalState {
     /// 同期点呼び出し（`memory.rs`／`ops.rs` の各ガード。`gemm.rs::
     /// synchronize()` は診断専用・本番ディスパッチから呼ばれないため
     /// 個別のガードを追加していない。`docs/backend-cuda-graph-step-
-    /// capture-design.md` §3.2）の判定に使う。capture モードは
-    /// `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`
-    /// のため、capture 中の driver 呼び出しは capture を開始したスレッド
-    /// からのみ意味を持つ（`thread` フィールドで判定する）。
+    /// capture-design.md` §3.2）の判定に使う。**さらに `begin_driver_call`
+    /// 自身も本フィールドを検査し（codex-review P0 指摘対応）、capture
+    /// を開始したスレッド以外からの driver 呼び出し全般を一律拒否する**
+    /// （`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は「capture を乱しうる
+    /// driver API 呼び出し」の判定をスレッドローカルにする目的のモード
+    /// であり、別スレッドが共有ストリームへ直接カーネル起動すること
+    /// 自体を driver 側が防いでくれる保証ではないため、ホスト側で
+    /// 明示的に排他する。`begin_driver_call` doc コメント参照）。
     capture: Option<std::thread::ThreadId>,
 }
 
@@ -758,6 +762,24 @@ impl Drop for CallToken {
 /// [`BackendError::DeviceContextUnrecoverable`]、`Retiring` →
 /// [`BackendError::DeviceContextRetiring`]。`Active` かつ世代一致なら
 /// `in_flight += 1` して [`CallToken`] を返す。
+///
+/// **CUDA Graph capture 中の排他制御（イシュー #1349・codex-review P0
+/// 指摘・`docs/backend-cuda-graph-step-capture-design.md` §4.2）**:
+/// `state.capture`（capture 開始スレッドの [`std::thread::ThreadId`]）が
+/// `Some` の間、**capture を開始したスレッド以外**からの本関数呼び出しは
+/// [`BackendError::Unsupported`] で拒否する（driver に一切触れる前。
+/// `begin_sync_point_call` と同じ「早期拒否」方針）。`CU_STREAM_
+/// CAPTURE_MODE_THREAD_LOCAL` は「capture を乱しうる driver API 呼び
+/// 出し」を capture 開始スレッドに限定する目的のモードであり、
+/// **別スレッドが同じ共有ストリームへ直接カーネル起動すること自体を
+/// driver 側が防いでくれる保証ではない**（起動する演算・driver バージョン
+/// 依存の未定義動作になりうる）。そのため本関数がホスト側で明示的に
+/// 排他する: 別スレッドの呼び出しは capture 完了（[`CaptureGuard`] の
+/// drop）まで一律拒否し、SGD 更新等が capture 中の graph へ意図せず
+/// 混入する事態を防ぐ。**capture を開始したスレッド自身**の呼び出しは
+/// 通す（`graph::run_captured_segment` の `body()` 実行自体が同一
+/// スレッドから `begin_driver_call` 経由で実カーネルを起動する契約の
+/// ため。再入拒否ではなく同一スレッドの正常フロー）。
 pub(crate) fn begin_driver_call(
     ordinal: usize,
     resource_generations: &[u64],
@@ -789,6 +811,13 @@ pub(crate) fn begin_driver_call(
             return Err(BackendError::DeviceContextRetiring { ordinal });
         }
         Phase::Active => {}
+    }
+    if let Some(owner) = state.capture
+        && owner != std::thread::current().id()
+    {
+        return Err(BackendError::Unsupported(format!(
+            "cuda graph capture: ordinal {ordinal} is currently being captured by another              thread; concurrent driver calls on the shared stream during capture are not              supported"
+        )));
     }
     let current_generation = state.generation;
     if let Some(&stale) = resource_generations
@@ -2193,9 +2222,13 @@ mod poison_state_tests {
     /// capture モード（`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`）は「この
     /// スレッドが開始した capture」のみを検出する契約であり、別スレッド
     /// から見た `is_capturing_on_current_thread` は capture 中でも
-    /// `false` を返す（別スレッドの同期点呼び出しは拒否されない。
-    /// capture 自体は driver 側の `THREAD_LOCAL` モードにより別スレッドの
-    /// 無関係な操作を巻き込まない設計と整合する）。
+    /// `false` を返す——これは `begin_sync_point_call`（同期点の早期
+    /// 拒否判定）が別スレッドを対象にしない、という**この関数専用**の
+    /// 契約であり、別スレッドの driver 呼び出し一般が野放しという意味
+    /// ではない（codex-review P0 指摘対応で `begin_driver_call` 自体が
+    /// 別途、capture 中は capture 開始スレッド以外を一律拒否するように
+    /// なった。上記 `begin_driver_call_rejects_other_thread_while_
+    /// capturing` 参照。design doc §4.2 追記）。
     #[test]
     fn is_capturing_on_current_thread_is_thread_local() {
         let ordinal = unique_ordinal();
@@ -2232,6 +2265,41 @@ mod poison_state_tests {
                 "{code:?} は sticky に分類されるはず"
             );
         }
+    }
+
+    /// codex-review P0 指摘（イシュー #1349）: capture 中は capture を
+    /// 開始したスレッド以外からの `begin_driver_call` を拒否し、共有
+    /// ストリームへの意図しないカーネル起動混入を防ぐ（`design doc`
+    /// §4.2 追記）。
+    #[test]
+    fn begin_driver_call_rejects_other_thread_while_capturing() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        let other_thread_result =
+            std::thread::spawn(move || begin_driver_call(ordinal, &[0]).map(|_| ()))
+                .join()
+                .expect("spawned thread does not panic");
+        assert!(
+            matches!(other_thread_result, Err(BackendError::Unsupported(_))),
+            "capture 中の別スレッドからの driver 呼び出しは Unsupported で拒否されるはず:              {other_thread_result:?}"
+        );
+        drop(guard);
+    }
+
+    /// capture を開始した**同一スレッド**の `begin_driver_call` は通す
+    /// （`graph::run_captured_segment` の `body()` 実行契約。上記テストの
+    /// 対照ケース）。
+    #[test]
+    fn begin_driver_call_allows_capturing_thread_itself() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        let token = begin_driver_call(ordinal, &[0]);
+        assert!(
+            token.is_ok(),
+            "capture を開始した本人のスレッドは引き続き driver 呼び出しできるはず: {token:?}"
+        );
+        drop(token);
+        drop(guard);
     }
 }
 

@@ -14,15 +14,15 @@
 //!
 //! # opt-in フラグと共有ストリーム（`device.rs` との契約）
 //!
-//! `STEP_GRAPH_MODE` は 3 値（[`GraphMode::Off`]／[`GraphMode::StreamOnly`]／
-//! [`GraphMode::On`]）。`device.rs::CudaDevice::new` は
-//! [`step_graph_mode`] が `StreamOnly` 以上のときのみ `ctx.new_stream()`
+//! `STEP_GRAPH_MODE` は 3 値（`GraphMode::Off`／`GraphMode::StreamOnly`／
+//! `GraphMode::On`）。`device.rs::CudaDevice::new` は
+//! `step_graph_mode` が `StreamOnly` 以上のときのみ `ctx.new_stream()`
 //! （capture 可能な非 legacy ストリーム）を保持し、`Off` のときは現行の
 //! `default_stream()`（legacy NULL stream。capture 不可）を維持する。
 //! `StreamOnly` は「created stream の event 管理コストのみを計測したい」
 //! 診断用の中間状態（イシュー #1350 が「ストリーム種別の効果」と
 //! 「capture の効果」を分離計測するために使う。design doc §9）で、
-//! capture 自体は行わない（[`captured_segment_key`] 相当の判定は `On`
+//! capture 自体は行わない（`captured_segment_key`（`ops.rs::CudaBackendOps::captured_segment_key`）相当の判定は `On`
 //! のみ `Some` を返す）。
 //!
 //! **フラグは最初の CUDA デバイス初期化より前に設定する必要がある**
@@ -34,8 +34,8 @@
 //! `CudaGraph`（`cudarc::driver::CudaGraph`）は `Send`/`Sync` を実装せず
 //! （NVIDIA の規定でも graph オブジェクトはスレッド非安全）、プロセス
 //! ワイド static へは `unsafe impl Send` なしに置けない。そのため
-//! [`STEP_GRAPHS`] は `thread_local!` とし、[`SegmentKey`] をキーに
-//! 最大 [`MAX_CACHED_GRAPHS_PER_THREAD`] 件まで保持する（超過時は挿入順
+//! `STEP_GRAPHS` は `thread_local!` とし、[`SegmentKey`] をキーに
+//! 最大 `MAX_CACHED_GRAPHS_PER_THREAD` 件まで保持する（超過時は挿入順
 //! 最古を evict）。
 
 use std::cell::RefCell;
@@ -46,8 +46,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use cudarc::driver::CudaGraph;
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 
+use fandhe_ai_tensor_core::buffer::DeviceBuffer;
 use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{SegmentKey, SegmentRun};
+use fandhe_ai_tensor_core::{CapturedSegmentBody, SegmentKey, SegmentRun};
 
 use crate::context_cache;
 use crate::error::CudaError;
@@ -136,7 +137,7 @@ pub(crate) fn step_graph_mode() -> GraphMode {
 
 /// `facade::set_cuda_graph_step_enabled` から委譲される opt-in スイッチ
 /// （`crate::precision::set_tf32_gemm_enabled` と同型）。`true` で
-/// [`GraphMode::On`]・`false` で [`GraphMode::Off`] を明示設定する
+/// `GraphMode::On`・`false` で `GraphMode::Off` を明示設定する
 /// （`stream-only` は API からは選べない診断専用値。環境変数のみで
 /// 選択する）。
 pub fn set_step_graph_enabled(enabled: bool) {
@@ -230,7 +231,7 @@ fn put_cached_graph(key: SegmentKey, graph: CudaGraph) {
 /// 1. `begin_driver_call` で poison／世代検査（`ordinal`）。
 /// 2. thread-local キャッシュに `key` があれば `graph.launch()` して
 ///    [`SegmentRun::Replayed`] を返す。
-/// 3. なければ `stream.begin_capture` → `body()` → `stream.end_capture`
+/// 3. なければ `stream.begin_capture` → `body(resources)` → `stream.end_capture`
 ///    （成功時は `graph.upload()` を 1 回）→ 初回 `graph.launch()` →
 ///    キャッシュへ格納して [`SegmentRun::Captured`] を返す。
 ///
@@ -242,7 +243,8 @@ pub(crate) fn run_captured_segment(
     ordinal: usize,
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     key: SegmentKey,
-    body: &mut dyn FnMut() -> Result<(), BackendError>,
+    resources: &mut [&mut DeviceBuffer<f32>],
+    body: &mut CapturedSegmentBody<'_>,
 ) -> Result<SegmentRun, BackendError> {
     // ① poison／世代検査。`key.generation` はこの区間が触れるバッファの
     // 世代（呼び出し元が `captured_segment_key` で確定済み）。
@@ -266,12 +268,32 @@ pub(crate) fn run_captured_segment(
         return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
     }
 
-    let body_result = body();
+    // `body` の実行を `catch_unwind` で包み、panic（unwind）した場合でも
+    // 直後で必ず `end_capture` を呼んでから panic を再送出する
+    // （codex-review P1・Cursor Bugbot 指摘: body が panic すると
+    // driver 側の stream capture が終了されないまま残り、以後その
+    // ストリームへの通常呼び出しが `CUDA_ERROR_STREAM_CAPTURE_*` 系で
+    // 恒久的に失敗しうる整合性違反になる。`AssertUnwindSafe` は
+    // `body: &mut dyn FnMut` が内部状態を持ちうる前提だが、panic 時は
+    // 即座に `resume_unwind` で呼び出し元へ伝播するのみで本関数内では
+    // 使い続けないため安全。design doc §4.3 手順 3 の拡張）。
+    let body_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(resources)));
 
-    // capture は body の成否に関わらず必ず終了させる（design doc §4.3
-    // 手順 3。driver 状態を capture 中のまま残さない）。
+    // capture は body の成否（正常終了・Err・panic のいずれか）に関わらず
+    // 必ず終了させる（design doc §4.3 手順 3。driver 状態を capture 中の
+    // まま残さない）。
     let end_result = stream.end_capture(instantiate_flags());
     drop(guard);
+
+    let body_result = match body_outcome {
+        Ok(r) => r,
+        Err(payload) => {
+            // 直前で end_capture 済み（driver 側の capture 状態は整合
+            // している）。end_capture 自体の成否は body の panic という
+            // 一次情報の前では捨て、panic をそのまま呼び出し元へ伝播する。
+            std::panic::resume_unwind(payload);
+        }
+    };
 
     let body_err = body_result.err();
 
@@ -301,11 +323,16 @@ pub(crate) fn run_captured_segment(
     }
 
     // instantiate 直後に 1 回 upload しておく（初回 launch の setup 費を
-    // 前倒しする。design doc F5）。失敗しても致命的ではないため poison
-    // 化のみ行い、初回 launch へ進む（`upload` はリソース事前転送の
-    // 最適化であり、失敗しても `launch` 自体は成立しうる）。
+    // 前倒しする。design doc F5）。**upload 失敗は fail-closed で伝播する**
+    // （codex-review P0 指摘: 以前は失敗を poison 化のみで握りつぶし、
+    // 直後の `launch` が別途成功すると全体が `Ok(Captured)` 扱いになって
+    // いた——「最初に失敗した driver エラーを伝播する」という本クレート
+    // 全体の契約〈`context_cache.rs::observe_cuda_result` doc コメント
+    // 参照〉に反する後退だった。graph はキャッシュへ入れず、poison 化は
+    // 行ったうえでこのエラーをそのまま返す）。
     if let Err(e) = graph.upload() {
         context_cache::observe_cuda_error_ref(ordinal, &_token, &CudaError::Driver(e));
+        return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
     }
 
     let launch_result = graph.launch();
