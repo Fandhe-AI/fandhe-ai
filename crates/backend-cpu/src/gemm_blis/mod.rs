@@ -138,6 +138,13 @@ const MAX_TILE: usize = 256;
 /// ベース MC/KC/NC 動的算出〉で機種識別を含めて再検討する）。
 const MC: usize = 128;
 /// 縮約次元（K）のブロックサイズ。B パネル（KC×NC×4B）が L1/L2 に収まる値。
+///
+/// **KC=128〜512 の細粒度再スイープ（イシュー #1315）**: #749 は KC=4096 への大幅拡大
+/// （単独）のみを M4 Max 単独で検証していたが、#1315 は現行値近傍のグリッド
+/// （KC ∈ {128, 192, 256, 384, 512}）を Apple M4 Max・DGX Spark GB10（Grace CPU）の
+/// 両実機で 5 回独立プロセス中央値スイープした。いずれの実機・KC 値でも N=1024・2048
+/// の両方で現行 KC=256 を上回る候補は確認できず（`docs/perf/cpu-gemm-candle-cpu-retune.md`
+/// §8.1 実測表）、KC=256 を維持する（REJECT・不採用確定）。
 const KC: usize = 256;
 /// 列方向ブロックサイズ（B のパネル幅）。本 PR 時点の唯一の適用値
 /// （上記 NC 拡大の未有効化理由を参照）。
@@ -4400,14 +4407,23 @@ mod tests {
         xs[xs.len() / 2]
     }
 
-    /// `variants` の全候補を 1 プロセス内で計測するが、ウォームアップ・
-    /// 本計測ともサンプル単位で round-robin し、走査開始位置を反復
-    /// ごとにローテーションする。これにより「候補 X は常に他候補より
-    /// 先に（＝周波数ブースト前や熱の低い状態で）測られる」といった
-    /// 順序バイアスを均す（PR #1075 codex-review 指摘）。戻り値は
-    /// `variants` と同じ順序の中央値 GFLOP/s。
-    fn run_variants_interleaved(
-        variants: &[GemmDriverVariant],
+    /// `candidates`（`(GemmDriverVariant, BlockSizes)` の組）の全候補を
+    /// 1 プロセス内で計測するが、ウォームアップ・本計測ともサンプル単位で
+    /// round-robin し、走査開始位置を反復ごとにローテーションする。これに
+    /// より「候補 X は常に他候補より先に（＝周波数ブースト前や熱の低い
+    /// 状態で）測られる」といった順序バイアスを均す（PR #1075 codex-review
+    /// 指摘）。戻り値は `candidates` と同じ順序の中央値 GFLOP/s。
+    ///
+    /// イシュー #1315（KC 再スイープ）で [`run_variants_interleaved`]
+    /// （`variant` のみを変え `blocks` は常に [`default_blocks`] 固定）から
+    /// 一般化した。`blocks` も候補ごとに変えられるようにすることで、KC の
+    /// ような `BlockSizes` フィールド単位のスイープを同一ハーネスで計測
+    /// できる（`GemmDriverVariant` に KC 専用 variant を追加しない設計判断は
+    /// 計画 §1.4-2 を参照。KC は driver の分岐ロジックではなく
+    /// `gemm_blis_parallel_variant` へ渡す `blocks` 引数のパラメータに過ぎ
+    /// ないため）。
+    fn run_candidates_interleaved(
+        candidates: &[(GemmDriverVariant, BlockSizes)],
         a: &[f32],
         b: &[f32],
         m: usize,
@@ -4417,55 +4433,60 @@ mod tests {
     ) -> Vec<f64> {
         use std::time::Instant;
 
-        let mut outputs: Vec<Vec<f32>> = variants.iter().map(|_| vec![0.0f32; m * n]).collect();
+        let mut outputs: Vec<Vec<f32>> = candidates.iter().map(|_| vec![0.0f32; m * n]).collect();
 
         // ウォームアップも round-robin＋反復ごとの開始位置ローテーションで
         // 実行し、ウォームアップ順自体が本計測のキャッシュ・熱状態に
         // 与える偏りを避ける。
         for w in 0..3 {
-            for offset in 0..variants.len() {
-                let idx = (offset + w) % variants.len();
-                gemm_blis_parallel_variant(
-                    variants[idx],
-                    a,
-                    b,
-                    &mut outputs[idx],
-                    m,
-                    n,
-                    k,
-                    default_blocks(),
-                )
-                .unwrap();
+            for offset in 0..candidates.len() {
+                let idx = (offset + w) % candidates.len();
+                let (variant, blocks) = candidates[idx];
+                gemm_blis_parallel_variant(variant, a, b, &mut outputs[idx], m, n, k, blocks)
+                    .unwrap();
             }
         }
 
-        let mut samples: Vec<Vec<f64>> =
-            variants.iter().map(|_| Vec::with_capacity(iters)).collect();
+        let mut samples: Vec<Vec<f64>> = candidates
+            .iter()
+            .map(|_| Vec::with_capacity(iters))
+            .collect();
         let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
         for it in 0..iters {
             // 反復ごとに走査開始位置を 1 つずつずらす。1 回の反復内では
             // 全候補を測るため合計サンプル数は候補間で完全に揃ったまま、
             // 「常に同じ候補が先に測られる」偏りだけを取り除く。
-            for offset in 0..variants.len() {
-                let idx = (offset + it) % variants.len();
+            for offset in 0..candidates.len() {
+                let idx = (offset + it) % candidates.len();
+                let (variant, blocks) = candidates[idx];
                 let start = Instant::now();
-                gemm_blis_parallel_variant(
-                    variants[idx],
-                    a,
-                    b,
-                    &mut outputs[idx],
-                    m,
-                    n,
-                    k,
-                    default_blocks(),
-                )
-                .unwrap();
+                gemm_blis_parallel_variant(variant, a, b, &mut outputs[idx], m, n, k, blocks)
+                    .unwrap();
                 let elapsed = start.elapsed().as_secs_f64();
                 samples[idx].push(flops / elapsed / 1e9);
             }
         }
 
         samples.into_iter().map(median).collect()
+    }
+
+    /// [`run_candidates_interleaved`] を `variant` のみ変えて既定
+    /// `BlockSizes`（[`default_blocks`]）で計測する互換ラッパー（#1041
+    /// 導入時点の元シグネチャを維持する。既存呼び出し元
+    /// [`gemm_blis_variant_ab_1024_2048`]／[`gemm_blis_variant_ab_4096`]
+    /// の出力形式・値を不変に保つ）。
+    fn run_variants_interleaved(
+        variants: &[GemmDriverVariant],
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        iters: usize,
+    ) -> Vec<f64> {
+        let candidates: Vec<(GemmDriverVariant, BlockSizes)> =
+            variants.iter().map(|&v| (v, default_blocks())).collect();
+        run_candidates_interleaved(&candidates, a, b, m, n, k, iters)
     }
 
     #[test]
@@ -4518,6 +4539,182 @@ mod tests {
         let gflops = run_variants_interleaved(&variants, &a, &b, m, n, k, 20);
         for (variant, gflops) in variants.iter().zip(gflops) {
             println!("variant={variant:?} size={n} median_gflops={gflops:.3}");
+        }
+    }
+
+    // --- KC 再スイープ（イシュー #1315。候補 3・`docs/perf/cpu-gemm-candle-cpu-retune.md`
+    //     §8「候補 3 KC 再スイープ」の実測資産） ---
+
+    /// KC 再スイープの対象グリッド。現行本番既定 `KC`（256）を含む
+    /// 128〜512 の 5 点（計画 §3 で計測前に確定した固定グリッド。実測後の
+    /// 追加・削除は行わない）。
+    const KC_SWEEP_GRID: [usize; 5] = [128, 192, 256, 384, 512];
+
+    /// KC 再スイープの候補列（`RowPanel` 固定・`MC`/`NC` は
+    /// [`default_blocks`] を継承し `kc` のみ [`KC_SWEEP_GRID`] で差し替え）
+    /// を [`run_candidates_interleaved`] へ渡せる形で構築する。KC は
+    /// [`GemmDriverVariant`] の分岐対象ではなく `BlockSizes` のフィールドの
+    /// ため、driver variant を追加せず `blocks` 側で表現する（計画 §1.4-2）。
+    fn kc_sweep_candidates() -> Vec<(GemmDriverVariant, BlockSizes)> {
+        let base = default_blocks();
+        KC_SWEEP_GRID
+            .iter()
+            .map(|&kc| {
+                (
+                    GemmDriverVariant::RowPanel,
+                    BlockSizes {
+                        mc: base.mc,
+                        kc,
+                        nc: base.nc,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用（KC 再スイープ・イシュー \
+                #1315。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_kc_sweep_ab_1024_2048 --nocapture）"]
+    fn gemm_blis_kc_sweep_ab_1024_2048() {
+        let candidates = kc_sweep_candidates();
+
+        for &dim in &[1024usize, 2048] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xdede_dede, m * k);
+            let b = xorshift32_vec(0xefef_efef, k * n);
+
+            let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 20);
+            for ((variant, blocks), gflops) in candidates.iter().zip(gflops) {
+                println!(
+                    "variant={variant:?} kc={} size={dim} median_gflops={gflops:.3}",
+                    blocks.kc
+                );
+            }
+        }
+    }
+
+    /// N=4096 版の KC 再スイープ（イシュー #1315。#1141 の
+    /// `gemm_blis_variant_ab_4096` と同じ理由〈4096 非劣化ゲートの分子を
+    /// 独立に計測する必要〉で 1024/2048 版と分離する）。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用（KC 再スイープ・4096 非劣化 \
+                ゲート用。イシュー #1315。cargo test -p fandhe-ai-backend-cpu --release -- \
+                --ignored gemm_blis_kc_sweep_ab_4096 --nocapture）"]
+    fn gemm_blis_kc_sweep_ab_4096() {
+        let candidates = kc_sweep_candidates();
+
+        let (m, n, k) = (4096usize, 4096usize, 4096usize);
+        let a = xorshift32_vec(0xdede_dede, m * k);
+        let b = xorshift32_vec(0xefef_efef, k * n);
+
+        let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 20);
+        for ((variant, blocks), gflops) in candidates.iter().zip(gflops) {
+            println!(
+                "variant={variant:?} kc={} size={n} median_gflops={gflops:.3}",
+                blocks.kc
+            );
+        }
+    }
+
+    /// [`KC_SWEEP_GRID`] の全 KC 値で `RowPanel` が [`crate::gemm::gemm_naive`]
+    /// と bit 完全一致することを検証する（REQ-2 の bit 一致契約。
+    /// `docs/perf/cpu-gemm-blocking-sweep.md` §3.2「C タイルは pc（K
+    /// ブロック）をまたいで現在値をロードして FMA 連鎖を継続するため、
+    /// 累積順序は KC の値に依らず常に p 昇順」により KC の変更は縮約順序を
+    /// 変えない、という主張を KC 再スイープの候補グリッドで直接確認する）。
+    /// `k` は境界を跨ぐ値（`KC_SWEEP_GRID` のどの値でも割り切れない・末尾
+    /// `kc_len` が `k % 4 ∈ {1,2,3}` を含むよう choose）にして端タイル
+    /// 処理の bit 一致もあわせて検証する。x86_64 でも実行可能（CI 対象）。
+    #[test]
+    fn gemm_blis_row_panel_kc_grid_matches_naive_bit_exact() {
+        let (m, n, k) = (37, 53, 1099);
+        let a = xorshift32_vec(0x1111_2222, m * k);
+        let b = xorshift32_vec(0x3333_4444, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        for &kc in &KC_SWEEP_GRID {
+            let blocks = BlockSizes {
+                mc: default_blocks().mc,
+                kc,
+                nc: default_blocks().nc,
+            };
+            let mut c_blocked = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanel,
+                &a,
+                &b,
+                &mut c_blocked,
+                m,
+                n,
+                k,
+                blocks,
+            )
+            .unwrap();
+
+            assert_eq!(
+                c_naive, c_blocked,
+                "kc={kc} は gemm_naive と bit 完全一致するはず（#1315）"
+            );
+        }
+    }
+
+    /// イシュー #1315: KC 再スイープ候補グリッド（[`KC_SWEEP_GRID`]）が、
+    /// 大形状（1024/2048/4096 正方）でも本番既定 KC（256・[`default_blocks`]）
+    /// の `RowPanel` 出力と bit 完全一致することを実機で確認する（release
+    /// ビルド。#1366 の `gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large`
+    /// と同型）。KC=256 自体はグリッドに含まれるため自明に一致するが、
+    /// グリッド全点を大形状でも横断することで小形状テストでは踏まない
+    /// メモリレイアウト・並列分割経路を確認する。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）での大形状 bit 一致確認専用（KC 再スイープ・イシュー \
+                #1315。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_row_panel_kc_grid_matches_default_kc_bit_exact_large --nocapture）"]
+    fn gemm_blis_row_panel_kc_grid_matches_default_kc_bit_exact_large() {
+        for &dim in &[1024usize, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xaaaa_1111 ^ (dim as u32), m * k);
+            let b = xorshift32_vec(0xbbbb_2222 ^ (dim as u32), k * n);
+
+            let mut c_default_kc = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanel,
+                &a,
+                &b,
+                &mut c_default_kc,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            for &kc in &KC_SWEEP_GRID {
+                let blocks = BlockSizes {
+                    mc: default_blocks().mc,
+                    kc,
+                    nc: default_blocks().nc,
+                };
+                let mut c_kc = vec![0.0f32; m * n];
+                gemm_blis_parallel_variant(
+                    GemmDriverVariant::RowPanel,
+                    &a,
+                    &b,
+                    &mut c_kc,
+                    m,
+                    n,
+                    k,
+                    blocks,
+                )
+                .unwrap();
+
+                assert_eq!(
+                    c_default_kc, c_kc,
+                    "dim={dim} kc={kc} は既定 KC=256 と bit 完全一致するはず（#1315）"
+                );
+            }
         }
     }
 
