@@ -56,3 +56,16 @@ python3 parity_baseline_impact.py --scale-mode exact \
 
 - 本ファイル・`baseline-impact.md` にホスト名・ノード上プロセスの絶対
   パスを含めていないことを目視確認済み
+
+## 追補（PR #1421 codex-review 指摘反映後の再生成）
+
+`baseline-impact.md` は PR #1421 の codex-review 指摘（P1: `classify` の
+既存救済閾値ハードコード分離・P2-2: no-op 判定を `ceiling is None` より
+先に行う・P2-1: A-4／B-2／`--scale-mode upper-bound` 由来の `bound` は
+「全救済」を確定できず「部分／未確定」へ downgrade する）反映後の
+`parity_baseline_impact.py` で再生成した（入力ソース
+`crates/backend-cuda/tests/common/parity_baseline.rs` は無変更。上記
+「バージョン・commit」節の commit と同一）。差分は分類結果・
+`ABSOLUTE_RESCUE_THRESHOLD` を反映した集計値のみで、行別入力規模
+（`S_A`・`S_B`）等の PRNG 由来の値は不変。詳細は
+`docs/perf/candle-parity-tolerance-baseline-impact.md` §5 を参照。

@@ -105,6 +105,50 @@ _CAND_SPEC.loader.exec_module(parity_tolerance_candidates)
 
 
 # ---------------------------------------------------------------------------
+# 既存救済（既存複合判定）の絶対誤差閾値を正本 `crates/backend-cpu/src/
+# parity.rs::ABSOLUTE_RESCUE_THRESHOLD` から直接抽出する（ハードコード
+# 分離・乖離検出のため。`summarize_test.py::_extract_f64_const` と同じ
+# 抽出方式を用いる。codex-review 指摘・PR #1421 P1。値そのものの変更は
+# `.claude/rules/coding-rust.md` によりユーザー承認必須のためこの
+# スクリプトは読み取り専用）。
+# ---------------------------------------------------------------------------
+
+_BACKEND_CPU_PARITY_PATH = os.path.join(
+    _HERE, "..", "..", "..", "crates", "backend-cpu", "src", "parity.rs"
+)
+
+
+def _extract_f64_const(source: str, name: str) -> float:
+    """`pub const <name>: f64 = <value>;` 形式の宣言から数値を取り出す。
+
+    正規表現クレート追加を避けるため stdlib `re` のみで済む簡易パーサー
+    （本体の宣言スタイル固定が前提）。宣言が見つからない・数値化できない
+    場合は fail-closed に例外を送出する。
+    """
+    match = re.search(rf"pub const {re.escape(name)}: f64 = ([^;]+);", source)
+    if match is None:
+        raise BaselineParseError(
+            f"本体 parity.rs に `pub const {name}: f64 = ...;` の宣言が"
+            "見つからない（宣言スタイルが変わった可能性）"
+        )
+    return float(match.group(1).strip())
+
+
+def load_absolute_rescue_threshold(path: str = _BACKEND_CPU_PARITY_PATH) -> float:
+    """正本 `ABSOLUTE_RESCUE_THRESHOLD`（既存複合判定の絶対誤差救済閾値）
+    を本体ソースから読み取る。読み取り失敗も fail-closed（例外送出）。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            source = f.read()
+    except OSError as err:
+        raise BaselineParseError(
+            f"本体 parity.rs を読めない（{path}）: {err}。パスがずれていないか確認すること"
+        ) from err
+    return _extract_f64_const(source, "ABSOLUTE_RESCUE_THRESHOLD")
+
+
+# ---------------------------------------------------------------------------
 # `Xorshift64Star`（`crates/bench-harness/src/rng.rs`）の Python 移植。
 #
 # baseline 行の入力（A・B）を生成した実際の PRNG と同一のアルゴリズムを
@@ -233,7 +277,18 @@ def compute_scale(
 # ---------------------------------------------------------------------------
 
 _ARRAY_START = "pub static BASELINES: &[ParityBaseline] = &["
-_BLOCK_START_RE = re.compile(r"ParityBaseline \{\n        path: ParityPath::")
+# ブロック境界の検出は `_FIELD_RE`（フィールド抽出）が前提とするフィールド
+# 並び・空白書式から独立させる（codex-review 指摘・PR #1421 P2-3: 旧実装は
+# `ParityBaseline {\n        path: ParityPath::` という `_FIELD_RE` とほぼ
+# 同じリテラルを要求していたため、フィールド書式が変わると block_starts 側
+# も同時に減り、構造的な行数とフィールド抽出成功数の不一致という
+# fail-closed 契約自体が機能しなくなる欠陥があった）。`BASELINES` 配列
+# 区間（`arr`）には `pub struct ParityBaseline {` という定義行は含まれない
+# （区間は `pub static BASELINES: &[ParityBaseline] = &[` 以降なので構造体
+# 定義より後ろから始まる）ため、`ParityBaseline {` という短いリテラルの
+# 出現数だけで安全にブロック数を数えられる（実測: 45。本ファイル冒頭
+# docstring「fail-closed 契約」参照）。
+_BLOCK_START_RE = re.compile(r"ParityBaseline \{")
 
 _FIELD_RE = re.compile(
     r"path: ParityPath::(?P<path>\w+),\s*"
@@ -373,27 +428,65 @@ PARTIAL = "部分／未確定"
 UNCLASSIFIABLE_CEILING = "分類不能（ceiling 未実測）"
 UNCLASSIFIABLE_RUNTIME = "机上分類不能（実行時適用不可／要トレース）"
 
+_ABS_RESCUE_THRESHOLD_CACHE: Optional[float] = None
 
-def classify(bound: float, ceiling: Optional[float]) -> str:
+
+def get_absolute_rescue_threshold() -> float:
+    """`ABSOLUTE_RESCUE_THRESHOLD` をプロセス内で 1 回だけ本体ソースから
+    読み取りキャッシュする（`classify` の既定閾値として使う）。
+    """
+    global _ABS_RESCUE_THRESHOLD_CACHE
+    if _ABS_RESCUE_THRESHOLD_CACHE is None:
+        _ABS_RESCUE_THRESHOLD_CACHE = load_absolute_rescue_threshold()
+    return _ABS_RESCUE_THRESHOLD_CACHE
+
+
+def classify(
+    bound: float,
+    ceiling: Optional[float],
+    bound_is_upper: bool = False,
+    threshold: Optional[float] = None,
+) -> str:
     """`bound` に対する 1 行の 3 クラス分類。
 
+    `threshold` は既存救済（既存複合判定）の絶対誤差閾値。省略時は正本
+    `crates/backend-cpu/src/parity.rs::ABSOLUTE_RESCUE_THRESHOLD` から
+    読み取った値（`get_absolute_rescue_threshold()`）を使う。値を直書き
+    すると正本が変更された際に無断で乖離するため（codex-review 指摘・
+    PR #1421 P1）、呼び出し側でのハードコードは避けること。
+
+    - `bound < threshold`（厳密不等号）: 既存救済（`diff < threshold`）に
+      完全に包含されるため `fail_count` は厳密に不変（no-op）。
+      `bound == threshold` は境界の要素（`d == threshold`）が候補側でのみ
+      救済されうるため no-op に含めない。この no-op 判定は `ceiling` の
+      有無に関わらず確定できるため、`ceiling is None` の判定より**先に**
+      行う（codex-review 指摘・PR #1421 P2-2: 旧実装は `ceiling is None`
+      を先に判定していたため、ceiling 未実測かつ no-op の行
+      〈`WmmaTf32Opt 512x512x512 seed=0x7A0` 等〉が誤って「分類不能」に
+      なっていた）
     - `ceiling is None`: この行は `baseline_max_abs_diff_ceiling` が未実測
-      （`BASELINES` 中 1 行のみ。`WmmaTf32Opt 512x512x512 seed=0x7A0`）ため
-      全救済判定ができない
-    - `bound < 1e-5`（厳密不等号）: 既存救済（`diff < ABSOLUTE_RESCUE_THRESHOLD
-      == 1e-5`）に完全に包含されるため `fail_count` は厳密に不変（no-op）。
-      `bound == 1e-5` は境界の要素（`d == 1e-5`）が候補側でのみ救済されうる
-      ため no-op に含めない
+      （`BASELINES` 中 1 行のみ）ため全救済判定ができない
     - `ceiling <= bound`: ceiling は「表示桁の最終桁 +1」で切り上げた保守的
-      な値のため、これを下回るなら行内の全要素が候補で救済される
+      な値のため、これを下回るなら行内の全要素が候補で救済される。
+      ただし `bound_is_upper=True`（`--scale-mode upper-bound` 由来。`M=1`
+      という入力規模の事前上界で計算した `bound`）の場合、`bound` 自体が
+      実際の閾値を過大評価しているため「全救済」を確定できない
+      （codex-review 指摘・PR #1421 P2-1）。この場合は「部分／未確定」へ
+      落とす。no-op 判定は `bound` が過大評価であっても真の bound
+      （<= 表示 bound）がさらに小さいだけなので `bound < threshold` から
+      `真の bound < threshold` が導け、引き続き安全に確定できる
     - それ以外: 行内の一部要素のみ救済されるか、確定できない
       （要素単位ダンプが `BASELINES` には存在しないため）
     """
+    if threshold is None:
+        threshold = get_absolute_rescue_threshold()
+    if bound < threshold:
+        return NO_OP
     if ceiling is None:
         return UNCLASSIFIABLE_CEILING
-    if bound < 1e-5:
-        return NO_OP
     if ceiling <= bound:
+        if bound_is_upper:
+            return PARTIAL
         return FULL_RESCUE
     return PARTIAL
 
@@ -442,6 +535,11 @@ def build_candidate_a_specs() -> list[CandidateASpec]:
 def a4_bound(k: int, s_a: float, s_b: float) -> float:
     """A-4: `K * u * Σ|a_k・b_k|` の上界近似（`Σ|ab| <= K * S_A * S_B`）。
     緩すぎる参考値（`parity_tolerance_candidates.py::CandidateA4` 参照）。
+
+    真の `Σ|ab|` は行内で要素依存であり `K * S_A * S_B` はその上界のため、
+    この関数が返す `bound` は真の閾値以上（過大評価）。呼び出し側は
+    `classify(..., bound_is_upper=True)` を渡し「全救済」の誤確定を防ぐ
+    こと（codex-review 指摘・PR #1421 P2-1）。
     """
     u_f32 = 2.0**-24
     return float(k) * u_f32 * (float(k) * s_a * s_b)
@@ -450,6 +548,10 @@ def a4_bound(k: int, s_a: float, s_b: float) -> float:
 def b2_bound(t: float, k: int, s_a: float, s_b: float) -> float:
     """B-2: `t * ulp(Σ|a_k・b_k|)` の上界近似（`Σ|ab|` を `K*S_A*S_B` で
     代表する。`parity_dump_truth.ulp_f32` を再利用）。
+
+    `a4_bound` と同じ理由（`Σ|ab| <= K*S_A*S_B` の上界代用・`ulp` の単調性
+    により真の bound 以上を返す）で、呼び出し側は
+    `classify(..., bound_is_upper=True)` を渡すこと。
     """
     sum_abs_ab_upper = float(k) * s_a * s_b
     return t * parity_tolerance_candidates.parity_dump_truth.ulp_f32(sum_abs_ab_upper)
@@ -465,6 +567,11 @@ def _escape_md_cell(text: str) -> str:
 
 
 def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
+    # `upper-bound` モード（M=1 の事前上界）では `bound` 自体が実際の閾値を
+    # 過大評価するため、`classify` の「全救済」確定を「部分／未確定」へ
+    # 落とす（codex-review 指摘・PR #1421 P2-1。docstring 参照）。
+    bound_is_upper = scale_mode == "upper-bound"
+
     lines: list[str] = []
     lines.append("# candle-parity-tolerance-baseline-impact 生出力（イシュー #1238）")
     lines.append("")
@@ -504,12 +611,15 @@ def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
         for i, row in enumerate(rows):
             s_a, s_b = scales[i]
             bound = spec.bound(row.k, s_a * s_b)
-            cls = classify(bound, row.max_abs_diff_ceiling)
+            cls = classify(bound, row.max_abs_diff_ceiling, bound_is_upper=bound_is_upper)
             cells.append(f"{bound:.3e}/{cls}")
         lines.append(f"| {_escape_md_cell(spec.name)} | " + " | ".join(cells) + " |")
     lines.append("")
 
-    # A-4（参考値のみ）。
+    # A-4（参考値のみ）。`a4_bound` は `Σ|ab| <= K*S_A*S_B` という上界近似
+    # を経由するため、`--scale-mode` に関わらず常に真の閾値を過大評価する
+    # （codex-review 指摘・PR #1421 P2-1。`bound_is_upper=True` を無条件で
+    # 渡し「全救済」の誤確定を防ぐ）。
     lines.append("## 候補 A-4（緩すぎる参考値。K*u*(K*S_A*S_B) 上界）")
     lines.append("")
     lines.append("| row | bound | class |")
@@ -517,11 +627,12 @@ def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
     for i, row in enumerate(rows):
         s_a, s_b = scales[i]
         bound = a4_bound(row.k, s_a, s_b)
-        cls = classify(bound, row.max_abs_diff_ceiling)
+        cls = classify(bound, row.max_abs_diff_ceiling, bound_is_upper=True)
         lines.append(f"| {i} ({_escape_md_cell(row.context)}) | {bound:.3e} | {cls} |")
     lines.append("")
 
-    # 候補 B-2。
+    # 候補 B-2。`b2_bound` も `Σ|ab| <= K*S_A*S_B` の上界近似を経由するため
+    # A-4 と同じ理由で常に `bound_is_upper=True`。
     lines.append("## 候補 B-2（ULP ベース。t*ulp(K*S_A*S_B) 上界）")
     lines.append("")
     lines.append("| t | row | bound | class |")
@@ -530,7 +641,7 @@ def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
         for i, row in enumerate(rows):
             s_a, s_b = scales[i]
             bound = b2_bound(t, row.k, s_a, s_b)
-            cls = classify(bound, row.max_abs_diff_ceiling)
+            cls = classify(bound, row.max_abs_diff_ceiling, bound_is_upper=True)
             lines.append(f"| {t:.0f} | {i} ({_escape_md_cell(row.context)}) | {bound:.3e} | {cls} |")
     lines.append("")
 
@@ -553,7 +664,7 @@ def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
         for i, row in enumerate(rows):
             s_a, s_b = scales[i]
             bound = spec.bound(row.k, s_a * s_b)
-            counts[classify(bound, row.max_abs_diff_ceiling)] += 1
+            counts[classify(bound, row.max_abs_diff_ceiling, bound_is_upper=bound_is_upper)] += 1
         lines.append(
             f"| {_escape_md_cell(spec.name)} | {counts[NO_OP]} | {counts[FULL_RESCUE]} | "
             f"{counts[PARTIAL]} | {counts[UNCLASSIFIABLE_CEILING]} |"
@@ -561,11 +672,20 @@ def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
     lines.append("")
 
     # 契約 5 項目への影響（構造的事実。全候補・全行共通で不変）。
+    # provenance 未確定件数はパース済み行から実測する（codex-review 指摘・
+    # PR #1421 P2-5: 旧実装は「1 行のみ true」と固定文言で出力していたが、
+    # 現在の `BASELINES` は 45 行全てが `baseline_provenance_unconfirmed:
+    # false`〈ceiling が `None` の行を含む〉であり、固定文言は実データと
+    # 乖離した別状態の記述だった）。
+    unconfirmed_count = sum(1 for row in rows if row.provenance_unconfirmed)
     lines.append("## 契約 5 項目への影響（構造的事実。OR 追加の単調性による）")
     lines.append("")
     lines.append("| 契約検査項目（`assert_no_parity_regression`） | 影響 |")
     lines.append("|---|---|")
-    lines.append("| provenance 確定（1 行のみ true） | 無影響（候補追加とは独立） |")
+    lines.append(
+        f"| provenance 確定（`baseline_provenance_unconfirmed=true` の行数: "
+        f"{unconfirmed_count}/{len(rows)}） | 無影響（候補追加とは独立） |"
+    )
     lines.append("| `total` 完全一致 | 無影響（要素数は不変） |")
     lines.append(
         "| `fail_count <= baseline_fail_count` | 単調非増加のため恒常成立 "

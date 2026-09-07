@@ -247,7 +247,18 @@ class ComputeScaleTest(unittest.TestCase):
 
 class ClassifyTest(unittest.TestCase):
     def test_ceiling_none_is_unclassifiable(self):
-        self.assertEqual(pbi.classify(1e-6, None), pbi.UNCLASSIFIABLE_CEILING)
+        # bound は既存救済閾値（既定 1e-5）以上でないと no-op 判定が先に
+        # 確定してしまう（`test_ceiling_none_but_noop_is_still_noop` 参照）
+        # ため、ここでは 1e-5 以上の bound を使う。
+        self.assertEqual(pbi.classify(1e-4, None), pbi.UNCLASSIFIABLE_CEILING)
+
+    def test_ceiling_none_but_noop_is_still_noop(self):
+        # codex-review 指摘・PR #1421 P2-2: `ceiling is None` の判定は
+        # no-op 判定より後に行う。bound が既存救済閾値未満なら ceiling の
+        # 有無に関わらず no-op が確定する（実データでは
+        # `WmmaTf32Opt 512x512x512 seed=0x7A0` がこのケースに該当し、旧
+        # 実装では誤って「分類不能」になっていた）。
+        self.assertEqual(pbi.classify(1e-6, None), pbi.NO_OP)
 
     def test_bound_below_1e5_strict_is_noop(self):
         self.assertEqual(pbi.classify(9.999e-6, 1e-3), pbi.NO_OP)
@@ -263,6 +274,61 @@ class ClassifyTest(unittest.TestCase):
 
     def test_ceiling_gt_bound_is_partial(self):
         self.assertEqual(pbi.classify(1e-4, 1e-3), pbi.PARTIAL)
+
+    def test_bound_is_upper_downgrades_full_rescue_to_partial(self):
+        # codex-review 指摘・PR #1421 P2-1: `--scale-mode upper-bound`
+        # （M=1 の事前上界）由来の `bound` は実際の閾値を過大評価するため、
+        # `ceiling <= bound` が成立しても「全救済」を確定できない。
+        self.assertEqual(
+            pbi.classify(1e-3, 1e-3, bound_is_upper=True), pbi.PARTIAL
+        )
+        self.assertEqual(
+            pbi.classify(2e-3, 1e-3, bound_is_upper=True), pbi.PARTIAL
+        )
+
+    def test_bound_is_upper_does_not_affect_noop(self):
+        # no-op 判定は `bound` が過大評価であっても安全に確定できる
+        # （真の bound はさらに小さいだけなので `bound < threshold` から
+        # `真の bound < threshold` が導ける）。
+        self.assertEqual(
+            pbi.classify(9.999e-6, 1e-3, bound_is_upper=True), pbi.NO_OP
+        )
+
+    def test_explicit_threshold_overrides_extracted_default(self):
+        # `threshold` を明示すれば `ABSOLUTE_RESCUE_THRESHOLD` の実ファイル
+        # 読み取りに依存せず境界値を検査できる。
+        self.assertEqual(pbi.classify(0.4, None, threshold=0.5), pbi.NO_OP)
+        self.assertEqual(pbi.classify(0.6, None, threshold=0.5), pbi.UNCLASSIFIABLE_CEILING)
+
+
+class AbsoluteRescueThresholdTest(unittest.TestCase):
+    """`ABSOLUTE_RESCUE_THRESHOLD` の抽出（codex-review 指摘・PR #1421
+    P1）が正本 `crates/backend-cpu/src/parity.rs` の値と一致することを
+    機械照合する。`summarize_test.py::ToleranceDriftTests` と同趣旨。
+    """
+
+    def test_matches_backend_cpu_contract(self):
+        backend_cpu_parity_path = os.path.join(
+            HERE, "..", "..", "..", "crates", "backend-cpu", "src", "parity.rs"
+        )
+        if not os.path.isfile(backend_cpu_parity_path):
+            self.skipTest(
+                f"本体 parity.rs が見つからない（{backend_cpu_parity_path}）。"
+                "crates/ を含まない実行環境のため skip（実行環境制約）"
+            )
+        with open(backend_cpu_parity_path, encoding="utf-8") as f:
+            source = f.read()
+        expected = pbi._extract_f64_const(source, "ABSOLUTE_RESCUE_THRESHOLD")
+        self.assertEqual(pbi.load_absolute_rescue_threshold(), expected)
+        self.assertEqual(expected, 1e-5)
+
+    def test_missing_const_is_fail_closed(self):
+        with self.assertRaises(pbi.BaselineParseError):
+            pbi._extract_f64_const("no such constant here", "ABSOLUTE_RESCUE_THRESHOLD")
+
+    def test_missing_file_is_fail_closed(self):
+        with self.assertRaises(pbi.BaselineParseError):
+            pbi.load_absolute_rescue_threshold(path="/nonexistent/parity.rs")
 
 
 _SYNTHETIC_BASELINES_HEADER = "pub static BASELINES: &[ParityBaseline] = &[\n"
