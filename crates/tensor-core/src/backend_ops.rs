@@ -189,6 +189,14 @@ pub struct SegmentKey {
     pub resources: Vec<SegmentResource>,
 }
 
+/// [`BackendOps::run_captured_segment`] の `body` パラメータ型（イシュー
+/// #1349・codex-review P0 指摘対応）。`clippy::type_complexity` の警告を
+/// 避けるための型エイリアスであり、意味は「`resources`（`&mut [&mut
+/// DeviceBuffer<f32>]`）を受け取り区間本体を 1 回実行するクロージャ」
+/// （`run_captured_segment` doc コメント参照）。
+pub type CapturedSegmentBody<'a> =
+    dyn FnMut(&mut [&mut DeviceBuffer<f32>]) -> Result<(), BackendError> + 'a;
+
 /// [`BackendOps::run_captured_segment`] が実際に capture したか、既存の
 /// graph を再生（replay）しただけかを呼び出し元へ伝える（イシュー
 /// #1349。呼び出し元の launch 回数計測・テストでの制御フロー検証に使う）。
@@ -373,17 +381,46 @@ pub trait BackendOps {
     /// [`Self::captured_segment_key`] が返した `key` に対応する区間を
     /// capture（初回）または再生（2 回目以降）する（イシュー #1349）。
     ///
-    /// `body` は「区間本体を 1 回実行するクロージャ」（例:
-    /// `sgd_step_device_tracked` の呼び出し）。初回（キャッシュミス）は
-    /// stream capture を開始し `body` を 1 回呼んでから capture を終了・
-    /// instantiate し、得られた graph をキーへ紐づけてキャッシュしたのち
-    /// 初回 launch する（[`SegmentRun::Captured`]）。2 回目以降
-    /// （キャッシュヒット）は `body` を呼ばず、キャッシュ済み graph を
-    /// そのまま launch する（[`SegmentRun::Replayed`]）——**`body` に副作用
-    /// があっても、再生時にはその副作用は実行されない**（graph が
-    /// capture 時点でカーネル起動を焼き込み済みのため。呼び出し元は
-    /// `body` 内で「このバッファへ書き込む」以外の副作用〈ログ出力等〉を
-    /// 行わない契約とする）。
+    /// `resources` は `key` を得た [`Self::captured_segment_key`] 呼び出し
+    /// と**同一の借用・同一の順序**で渡す契約（codex-review P0 指摘対応。
+    /// `docs/backend-cuda-graph-step-capture-design.md` §4.4 追記）:
+    /// `SegmentKey` 自身はバッファの所有権・借用を保持しない値型
+    /// （`addr`／`numel` のみを畳み込んだ識別子）であるため、呼び出し元が
+    /// 対応するバッファを drop した後に本メソッドを呼ぶと、解放済み
+    /// （または別バッファへ再利用済み）のアドレスを参照する古い graph を
+    /// 安全確認なしに再生してしまいうる（メモリ安全性違反）。実装は
+    /// **replay 直前に** `resources` から導出した現在のアドレス集合が
+    /// `key.resources`（capture 時点で刻印済み）と一致することを再検証
+    /// し、不一致（呼び出し元の借用が `key` 発行時と異なる＝契約違反）
+    /// なら [`BackendError::InvalidArgument`] で replay も新規 capture も
+    /// 行わず拒否する（fail-closed）。
+    ///
+    /// `resources` を `&mut [&mut DeviceBuffer<f32>]`（**排他借用**の
+    /// スライス）としているのは、`body` にも同じバッファへの書き込み
+    /// アクセスが必要であり（例: `params` を in-place 更新する）、かつ
+    /// Rust の借用規則上「検証用の共有借用」と「`body` 実行用の排他
+    /// 借用」を**同一の関数呼び出し内で別個に**両立させることはできない
+    /// ため（片方が生存している間はもう片方を取れない）。両者を単一の
+    /// 排他借用スライスへ統合することで、`&mut [&mut DeviceBuffer<f32>]`
+    /// という型そのものが「呼び出し元が対応するバッファをこの呼び出しの
+    /// 間生存かつ排他的に所有している」というコンパイル時の生存契約を
+    /// 兼ねる（排他借用は読み取りにも使えるため、検証はこの借用を読む
+    /// だけで行える。設計判断の詳細は codex-review P0 指摘対応時の
+    /// PR 記録・design doc §4.4 追記を参照）。
+    ///
+    /// `body` は「区間本体を 1 回実行するクロージャ」で、`resources` と
+    /// **同一の**排他借用スライスを引数として受け取る（例:
+    /// `sgd_step_device_tracked` の呼び出しに必要な `param`／`grad`／
+    /// `velocity` を `resources` の要素から reborrow して渡す）。初回
+    /// （キャッシュミス）は stream capture を開始し `body` を 1 回呼んで
+    /// から capture を終了・instantiate し、得られた graph をキーへ
+    /// 紐づけてキャッシュしたのち初回 launch する（[`SegmentRun::
+    /// Captured`]）。2 回目以降（キャッシュヒット）は `body` を呼ばず、
+    /// キャッシュ済み graph をそのまま launch する（[`SegmentRun::
+    /// Replayed`]）——**`body` に副作用があっても、再生時にはその副作用は
+    /// 実行されない**（graph が capture 時点でカーネル起動を焼き込み
+    /// 済みのため。呼び出し元は `body` 内で「このバッファへ書き込む」
+    /// 以外の副作用〈ログ出力等〉を行わない契約とする）。
     ///
     /// `body` が `Err` を返した場合、capture 自体は安全に終了させたうえで
     /// その `Err` を呼び出し元へ返す（capture 失敗の graph はキャッシュに
@@ -400,7 +437,8 @@ pub trait BackendOps {
     fn run_captured_segment(
         &self,
         _key: SegmentKey,
-        _body: &mut dyn FnMut() -> Result<(), BackendError>,
+        _resources: &mut [&mut DeviceBuffer<f32>],
+        _body: &mut CapturedSegmentBody<'_>,
     ) -> Result<SegmentRun, BackendError> {
         Err(BackendError::Unsupported(
             "run_captured_segment: default fail-safe (no CUDA Graph capture mechanism \
@@ -1287,11 +1325,11 @@ mod tests {
             resources: vec![SegmentResource { addr: 0, numel: 0 }],
         };
         let mut call_count = 0usize;
-        let mut body = || -> Result<(), BackendError> {
+        let mut body = |_resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
             call_count += 1;
             Ok(())
         };
-        let result = ops.run_captured_segment(key, &mut body);
+        let result = ops.run_captured_segment(key, &mut [], &mut body);
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
         assert_eq!(call_count, 0, "default fail-safe must not invoke body");
     }
