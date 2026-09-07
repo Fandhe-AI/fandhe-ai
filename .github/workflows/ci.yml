@@ -786,6 +786,15 @@ jobs:
       - name: フレームワーク横並びベンチ compare_gemm_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/compare_gemm_ab_test.py
 
+      # イシュー #1237: parity_tolerance_candidates.py（#1184 ダンプ実値から
+      # スケール付き絶対誤差／ULP 判定候補の fail 数を机上計算するスクリプト）
+      # の回帰テスト。summarize_test.py・compare_gemm_ab_test.py 等と同一方針
+      # （stdlib の unittest のみ・cargo の有無に関わらず常時実行）。実ダンプに
+      # 対する正式計算（`docs/perf/logs/candle-parity-tolerance-candidates-1237/`
+      # 生成）は CI では行わない（実機ダンプが入力のため）。
+      - name: フレームワーク横並びベンチ parity_tolerance_candidates.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/parity_tolerance_candidates_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ

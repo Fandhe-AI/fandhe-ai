@@ -595,6 +595,23 @@ cd scripts/bench/framework-compare
 python3 parity_dump_truth.py --n 2048 < ../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cuda-2048.txt
 ```
 
+**候補判定の机上評価**（イシュー #1237。`scripts/bench/framework-compare/parity_tolerance_candidates.py`）:
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5 の N=2048 fail 要素（現行複合判定を
+外れる 2 要素×2 device）について、候補判定（スケール付き絶対誤差・ULP ベース）を現行複合判定へ
+OR 追加した場合の fail 数を、`parity_dump_truth.py` のダンプ実値のみを入力に機械的に算出する
+（`parity_dump_truth.py` 自体は importlib で再利用するのみで変更しない）。標準ライブラリのみに
+依存する。CI（`ci.yml` の `deps-forbidden` ジョブ）では単体テスト
+（`parity_tolerance_candidates_test.py`）のみを実行し、実ダンプに対する計算は行わない。
+**契約変更（`PARITY_REL_TOL`/`PARITY_ABS_TOL` 等）自体はユーザー承認事項**であり、本スクリプトは
+承認判断に使う定量根拠の算出に閉じる（`docs/perf/candle-parity-tolerance-candidates.md`）。
+
+```bash
+cd scripts/bench/framework-compare
+python3 parity_tolerance_candidates.py --n 2048 \
+  --dump cuda=../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cuda-2048.txt \
+  --dump cpu=../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cpu-2048.txt
+```
+
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
 `backend-cuda` の GEMM 公開経路（`fandhe-ai::gemm`）は既定で FP32 厳密（`run_tiled_f32`）だが、
