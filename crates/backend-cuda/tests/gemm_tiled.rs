@@ -210,6 +210,21 @@ fn tiled_f16_runs_and_returns_expected_shape() {
 /// 変更にはユーザー承認が必要（`.claude/rules/coding-rust.md`
 /// 「バックエンド間数値一致テストの許容誤差を単独で緩和しない」と同じ
 /// 精神をベンチ閾値にも適用する）。
+///
+/// **イシュー #1203 追記**: #1162 の GB10 実機 sweep（2026-09-05・
+/// `--test-threads=1` 直列）で本テストが speedup=0.235x で FAIL した
+/// （`docs/backend-cuda-real-device-testing.md` §5.1 が記す「並列実行のみ
+/// fail」という従来の帰属では説明できない直列条件での FAIL）。原因切り
+/// 分けの一次資料として、各サンプルの生値・分位点を無条件（assert の
+/// 成否に関わらず）で標準エラー出力へ記録する（assert・`MIN_SPEEDUP`・
+/// 計測プロトコル自体は変更しない）。**libtest の既定挙動により、成功
+/// したテストの標準出力／標準エラー出力はキャプチャされ通常表示され
+/// ない**（表示されるのは失敗時、または `--nocapture` 指定時のみ）ため、
+/// 本テストが FAIL せず生サンプルを確認したい場合は
+/// `cargo test -p fandhe-ai-backend-cuda --release --locked \
+/// --test gemm_tiled -- --ignored --nocapture` のように `--nocapture` を
+/// 明示する必要がある（codex-review P2 指摘・PR #1428）。詳細な切り分け
+/// 結果は `docs/perf/cuda-gemm-tiled-naive-speedup-4096-triage.md` 参照。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn tiled_f32_outperforms_naive_at_4096() {
@@ -229,7 +244,17 @@ fn tiled_f32_outperforms_naive_at_4096() {
     // `run_*_f32` シグネチャを同一クロージャ引数として受けるための共通型）。
     type GemmRunFn<'a> = dyn Fn(&[f32], &[f32], u32, u32, u32) -> Result<Vec<f32>, CudaError> + 'a;
 
-    let measure = |run: &GemmRunFn<'_>| -> f64 {
+    // イシュー #1203: naive/tiled それぞれの 5 サンプル生値・分位点を
+    // eprintln! で出力する。#1130 系が確定した「64 MiB D2H 二峰性」
+    // （約 40 ms 帯と約 540 ms 帯の混在）が発生しているかどうかは分位点
+    // だけでは判別できず、生値の並びが唯一の一次証拠になるため
+    // （`docs/perf/cuda-large-buffer-percall-alloc-transfer-threshold.md`
+    // 参照）。ただし libtest は成功したテストの標準エラー出力を既定で
+    // キャプチャするため、FAIL しない実行でこの生値を確認するには
+    // `--nocapture` の明示指定が必須（本関数冒頭ドキュメンテーション
+    // コメント参照。codex-review P2 指摘・PR #1428）。assert・
+    // MIN_SPEEDUP・warmup/samples 回数・計測区間は不変。
+    let measure = |label: &str, run: &GemmRunFn<'_>| -> f64 {
         for _ in 0..WARMUP {
             run(&a, &b, m, n, k).expect("warmup run must succeed on CUDA-equipped test runner");
         }
@@ -239,15 +264,22 @@ fn tiled_f32_outperforms_naive_at_4096() {
             run(&a, &b, m, n, k).expect("measured run must succeed on CUDA-equipped test runner");
             samples.push(start.elapsed().as_secs_f64());
         }
-        bench_harness::median_q1_q3(&samples)
-            .expect("5 non-NaN samples must yield quartiles")
-            .median
+        let q =
+            bench_harness::median_q1_q3(&samples).expect("5 non-NaN samples must yield quartiles");
+        eprintln!(
+            "[#1203 diag] {label}: samples={samples:?}s median={:.6}s q1={:.6}s q3={:.6}s",
+            q.median, q.q1, q.q3
+        );
+        q.median
     };
 
-    let naive_median = measure(&|a, b, m, n, k| gemm.run_naive_f32(a, b, m, n, k));
-    let tiled_median = measure(&|a, b, m, n, k| gemm.run_tiled_f32(a, b, m, n, k));
+    let naive_median = measure("naive", &|a, b, m, n, k| gemm.run_naive_f32(a, b, m, n, k));
+    let tiled_median = measure("tiled", &|a, b, m, n, k| gemm.run_tiled_f32(a, b, m, n, k));
 
     let speedup = naive_median / tiled_median;
+    eprintln!(
+        "[#1203 diag] speedup={speedup:.6}x (naive_median={naive_median:.6}s, tiled_median={tiled_median:.6}s)"
+    );
     assert!(
         speedup >= MIN_SPEEDUP,
         "tiled GEMM must outperform naive by at least {MIN_SPEEDUP}x at M=N=K=4096 \
