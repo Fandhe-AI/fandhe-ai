@@ -14,21 +14,21 @@
 - crates.io 承認済みピン: `fandhe-ai =0.7.0`（更新なし。`gh api repos/Fandhe-AI/fandhe-ai/tags --jq '.[0].name'` = v0.7.0）
 
 ## 計測前後のアイドル確認
-- 計測開始前（22:23 UTC）: utilization.gpu 0%・load average 0.02/0.03/0.02
+- 計測開始前（13:23 UTC）: utilization.gpu 0%・load average 0.02/0.03/0.02
   - 常駐サービス（`docs/real-hardware-verification-env.local.md` 記載の ComfyUI・Kokoro）はプロセス在中だが 0% util（同 doc の空き判定基準に合致）
 - run 1（正式系列 `0.7.0-1360`）直前: utilization.gpu 0%・load average 0.06/0.04/0.02
 - run 2（参考系列 `head-3d5e833-readout-off`）直前: utilization.gpu 0%・load average 3.42/2.17/0.91
 - run 3（参考系列 `head-3d5e833-readout-on`）直前: utilization.gpu 0%・load average 3.97/2.81/1.32
-- 全計測完了後（22:32 UTC）: utilization.gpu 0%・load average 1.61/2.52/1.48
+- 全計測完了後（13:32 UTC）: utilization.gpu 0%・load average 1.61/2.52/1.48
 - compute-apps は一貫して ComfyUI（`/opt/llm-infra/comfyui-env`）・Kokoro（`/opt/llm-infra/venvs/kokoro`）のみ（計測対象プロセスの割り込みなし）
 
 ## 実行順序・所要時間
 1. `bash run_gemm_gate_cuda.sh 0.7.0-1360`（registry ピン。既存キャッシュにより高速・約 2 分）
-   - 開始 2026-09-07T22:24 UTC / 完了 2026-09-07T22:26 UTC
+   - 開始 2026-09-07T13:24 UTC / 完了 2026-09-07T13:26 UTC
 2. `GEMM_GATE_PATCH_FACADE_PATH=<facade 絶対パス> bash run_gemm_gate_cuda.sh head-3d5e833-readout-off`
-   - 開始 2026-09-07T22:27 UTC / 完了 2026-09-07T22:29 UTC
+   - 開始 2026-09-07T13:27 UTC / 完了 2026-09-07T13:29 UTC
 3. `GEMM_GATE_PATCH_FACADE_PATH=<facade 絶対パス> GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout bash run_gemm_gate_cuda.sh head-3d5e833-readout-on`
-   - 開始 2026-09-07T22:29 UTC / 完了 2026-09-07T22:31 UTC
+   - 開始 2026-09-07T13:29 UTC / 完了 2026-09-07T13:31 UTC
 - 系列間に別の `cargo` コマンドを挟んでいない（#1166 の事故防止方針を遵守）
 
 ## manifest 突合（`fandhe_ai_source`／`bench_fandhe_features`）
