@@ -287,8 +287,15 @@ fn job_grid(
 - `tiles` は `tile_grid(m, n, mc_job, nc_job)` と同一（被覆完全・互いに素。§3 条件 3）
 - `row_bands * col_bands >= min(jobs_per_worker * num_threads, 到達可能最大 job 数)`。
   `到達可能最大 job 数 = ceil(m/mr) * ceil(n/nr)`（各行帯・列帯を `mr`／`nr` 単位まで
-  細分した場合の上限。§5.2 の選択規則はこの下限を**必ず満たす** (rb, cb) のみを
-  コスト比較の候補とする契約とする — 下限を満たさない候補が誤って選ばれないことを保証する）
+  細分した場合の上限）。この `row_bands`／`col_bands` は `align_up` 後に `tile_grid` が
+  実際に生成する帯数（`row_bands = ceil(m/mc_job)`・`col_bands = ceil(n/nc_job)`）を指す。
+  `mc_job`／`nc_job` は `mr`／`nr` の倍数へ切り上げられるため、選択規則が意図した分割数
+  （後述の `rb`／`cb`）より少ない帯数しか実際には生成されない場合がある（`align_up` による
+  丸め上げの結果、意図した帯より 1 帯あたりの担当範囲が広がり、帯数自体が減るため。
+  codex-review #1431／Cursor Bugbot 指摘）。§5.2 の選択規則はこの実帯数の積が
+  **`bound` 以上になる** (rb, cb) のみをコスト比較の候補とする契約とする — 意図した
+  `rb * cb` ではなく `align_up` 後の実帯数の積で下限を再検査し、下限を満たさない候補が
+  誤って選ばれないことを保証する
 - 寸法計算は全て `checked_mul`／`saturating_add` を用い、オーバーフロー時は型付きエラー
   （`GemmError::DimProductOverflow` 相当）を返す fail-closed 設計とする
   （`partition::bands`〈`partition.rs:52`〉の既存方針を踏襲）
@@ -306,36 +313,69 @@ fn job_grid(
 `num_threads >= 2` のとき、目標 job 数 `J = jobs_per_worker × num_threads`・
 `cap = ceil(m/mr)`（行帯方向に到達可能な最大帯数）・
 `到達可能最大 job 数 = cap * ceil(n/nr)`・
-`bound = min(J, 到達可能最大 job 数)`（§5.1 の下限）を求める。pack 総量モデル
+`bound = min(J, 到達可能最大 job 数)`（§5.1 の下限。**`align_up` 後の実帯数の積で判定する**）
+を求める。
+
+**候補ごとに `align_up` 後の実帯数を先に求める**（意図した `cb`／`rb` そのものではなく、
+これらの実帯数を下限判定・コスト計算の両方に使う。§5.1 の契約）:
+
+- 列側: `cb ∈ 1..=ceil(n/nr)` の各候補について `nc_job(cb) = align_up(ceil(n/cb), nr)`・
+  `real_cb(cb) = ceil(n / nc_job(cb))` を求める。`align_up` により `nc_job(cb)` が
+  意図したより大きく切り上げられると `real_cb(cb) <= cb` になり得る（実際に生成される
+  列帯数が意図した `cb` を下回る = **alignment collapse**）
+- 行側: `rb ∈ 1..=cap` の各候補について `mc_job(rb) = align_up(ceil(m/rb), mr)`・
+  `real_rb(rb) = ceil(m / mc_job(rb))` を求める（同様に `real_rb(rb) <= rb` になり得る）
+
+`cb` の候補ごとに次の手順で `rb` を決め、**実帯数の積で下限を再検査してから**候補として残す:
+
+- `nc_job = align_up(ceil(n/cb), nr)`・`real_cb = ceil(n/nc_job)`
+- `rb = min(cap, max(ceil(J/real_cb), ceil(bound/real_cb)))`（意図した `cb` ではなく
+  `real_cb` を分母に使う。`real_cb` が `cb` より小さい場合に必要な `rb` が大きくなる方向へ
+  自動的に補正される）
+- `mc_job = align_up(ceil(m/rb), mr)`・`real_rb = ceil(m/mc_job)`
+- **`real_rb * real_cb >= bound` を満たさない候補は棄却する**（`rb` を `cap` まで
+  大きくしても `real_cb` 自体が `align_up` で頭打ちのため解消しない場合がある。これが
+  codex-review #1431／Cursor Bugbot が指摘した欠陥そのもの — 意図した `cb` に基づく
+  `cap * cb >= bound` の検査だけでは、この頭打ちを検出できない）
+
+残った候補について pack 総量モデル
 
 ```text
-cost(rb, cb) = cb_eff * m * k + rb * k * n
+cost(rb, cb) = real_cb_eff * m * k + real_rb * k * n
 ```
 
-（`cb_eff = cb * ceil(nc_job / NC)`。A は列帯ごと・B は行帯ごとに重複する）を最小化する
-(rb, cb) を決める。**探索対象の `cb` は `cb ∈ 1..=ceil(n/nr)` のうち
-`cap * cb >= bound` を満たすものに限定する**（`cap * cb` はその `cb` における `rb` の
-最大到達可能値〈`rb <= cap`〉との積であり、これが `bound` 未満の `cb` は `rb` をどれだけ
-大きくしても job 数の下限 `bound` を満たせないため候補から除外する。除外しないと、
-下限を満たせない `cb` のほうが `cb_eff` が小さくコストで有利になり得て、下限を満たす
-候補より低コストとして誤って選ばれる場合がある）。絞り込んだ候補について:
+（`real_cb_eff = real_cb * ceil(nc_job / NC)`。A は列帯ごと・B は行帯ごとに重複するため、
+コスト計算にも意図した `cb`／`rb` ではなく実帯数 `real_cb`／`real_rb` を使う）を最小化する
+(rb, cb) を決める。同コストなら `nc_job` の大きい方（A 再利用回数が多く端タイルが少ない）を
+選ぶ。全候補が棄却された場合（`bound` 自体が `到達可能最大 job 数` を超えないため理論上
+発生しないが、fail-closed の防御として）は `rb = cap`・`cb = ceil(n/nr)`（最大分割）を採用する。
 
-- `nc_job = align_up(ceil(n/cb), nr)`
-- `rb = min(cap, max(ceil(J/cb), ceil(bound/cb)))`（`cap * cb >= bound` により
-  `ceil(bound/cb) <= cap` が保証されるため、この `rb` は `rb * cb >= bound` を満たしたまま
-  `cap` を超えない）
-- `mc_job = align_up(ceil(m/rb), mr)`
+**具体例 1（cb 絞り込みのみでは不十分なケース。cb=1 除外だけでは足りない反例）**:
+`m=n=24`・`mr=8`・`nr=12`・`NC=512`・`num_threads=8`・`jobs_per_worker=2` のとき
+`J=16`・`cap=ceil(24/8)=3`・`到達可能最大 job 数=3*ceil(24/12)=3*2=6`・`bound=min(16,6)=6`。
+`cb=1`: `nc_job=align_up(24,12)=24`・`real_cb=ceil(24/24)=1`。`rb=min(3, max(ceil(16/1)=16,
+ceil(6/1)=6))=3`。`mc_job=align_up(ceil(24/3)=8,8)=8`・`real_rb=ceil(24/8)=3`。
+`real_rb*real_cb=3*1=3 < bound=6` のため棄却。
+`cb=2`: `nc_job=align_up(ceil(24/2)=12,12)=12`・`real_cb=ceil(24/12)=2`（この形状では
+alignment collapse は起きず `real_cb=cb`）。`rb=min(3, max(ceil(16/2)=8, ceil(6/2)=3))=3`。
+`mc_job=align_up(ceil(24/3)=8,8)=8`・`real_rb=3`。`real_rb*real_cb=3*2=6=bound` を満たし採用。
 
-同コストなら `nc_job` の大きい方（A 再利用回数が多く端タイルが少ない）を選ぶ。
-
-**具体例（codex-review #1431 指摘の反例で検証）**: `m=n=24`・`mr=8`・`nr=12`・`NC=512`・
-`num_threads=8`・`jobs_per_worker=2` のとき `J=16`・`cap=ceil(24/8)=3`・
-`到達可能最大 job 数=3*ceil(24/12)=3*2=6`・`bound=min(16,6)=6`。`cb` の絞り込みなしでは
-`cb=1`（`cap*cb=3<6` のため本来は除外すべき）で `rb=min(3, ceil(16/1))=3` となり
-`rb*cb=3` の job しか生成せず `bound=6` を満たさない。絞り込みにより `cb=1` は
-`cap*cb=3 < bound=6` で候補から除外され、`cb=2`（`cap*cb=6>=6`）のみが残る。
-`cb=2` では `rb=min(3, max(ceil(16/2), ceil(6/2)))=min(3, max(8,3))=3` となり
-`rb*cb=6=bound` を満たす。
+**具体例 2（alignment collapse が実際に発生し `cap * cb >= bound` の検査だけでは
+防げないケース。codex-review #1431／Cursor Bugbot 指摘の反例）**:
+`m=16`・`n=108`・`mr=8`・`nr=12`・`NC=512`・`num_threads=8`・`jobs_per_worker=2` のとき
+`J=16`・`cap=ceil(16/8)=2`・`到達可能最大 job 数=2*ceil(108/12)=2*9=18`・
+`bound=min(16,18)=16`。
+`cb=8`（`cap*cb=16>=bound=16` を満たすため、意図した `cb` だけを見る検査では通過してしまう）:
+`nc_job=align_up(ceil(108/8)=14,12)=24`・`real_cb=ceil(108/24)=5`（`align_up` が 14 を
+24 へ切り上げたため、意図した 8 帯ではなく実際には 5 帯しか生成されない）。
+`rb=min(2, max(ceil(16/5)=4, ceil(16/5)=4))=2`。`mc_job=align_up(ceil(16/2)=8,8)=8`・
+`real_rb=ceil(16/8)=2`。`real_rb*real_cb=2*5=10 < bound=16` のため棄却（意図した `rb*cb=16`
+は下限を満たすように見えるが、実際に生成される job は 10 個のみ）。
+`cb=9`（`n/nr` の上限）: `nc_job=align_up(ceil(108/9)=12,12)=12`・`real_cb=ceil(108/12)=9`
+（この `cb` では `align_up` の切り上げが `ceil(n/nr)` と一致し collapse しない）。
+`rb=min(2, max(ceil(16/9)=2, ceil(16/9)=2))=2`。`mc_job=8`・`real_rb=2`。
+`real_rb*real_cb=2*9=18>=bound=16` を満たし採用（`cb=8` では `bound` を満たせず、`cb=9` まで
+上げて初めて満たすことが `real_cb` 経由の検査で判明する）。
 
 `jobs_per_worker` は const（既定 2。§5.3 の表で `RowPanel` の pack 総量を全形状で下回る側）。
 `#[cfg(test)]` のパラメータ化入口 `gemm_blis_parallel_2d_dynamic_with_params(..., jobs_per_worker)`
@@ -438,7 +478,8 @@ pack 総量は §5 の表のとおり `RowPanel` 以下。
 
 | テスト | 目的 |
 |---|---|
-| `partition::tests::job_grid_*` | 被覆完全・互いに素・`mr`/`nr` 整列・job 数下限・`num_threads=1`／`m<mr`／`n<nr`／`m==0`／`n==0`／オーバーフロー近傍の全域性・`jobs_per_worker` 単調性 |
+| `partition::tests::job_grid_*` | 被覆完全・互いに素・`mr`/`nr` 整列・job 数下限（`ceil(m/mc_job) * ceil(n/nc_job)` という **`align_up` 後の実帯数の積**で判定。意図した `rb`／`cb` 自体では判定しない）・`num_threads=1`／`m<mr`／`n<nr`／`m==0`／`n==0`／オーバーフロー近傍の全域性・`jobs_per_worker` 単調性 |
+| `partition::tests::job_grid_lower_bound_survives_alignment_collapse` | §5.2 具体例 2（`m=16,n=108,mr=8,nr=12,num_threads=8,jobs_per_worker=2`）を固定入力として再現し、`ceil(m/mc_job) * ceil(n/nc_job) >= bound` が実際に成立することを検証する回帰テスト（codex-review #1431／Cursor Bugbot 指摘の反例固定化） |
 | `microkernel::tests::run_rows_matches_run_with_ldc_bit_exact_*`（ISA ごと） | 新入口と既存入口の bit 同一（乱数タイル・`ldc=n`／`ldc=NR` 双方・境界エラーの fail-closed） |
 | `gemm_blis_parallel_variant_all_candidates_match_naive_bit_exact` 拡張 | `TwoDDynamic` を配列へ追加（5 形状 × スレッド数 1/2/3/16） |
 | `gemm_blis_two_d_dynamic_matches_row_panel_bit_exact_across_shapes_and_threads` | C 初期値非ゼロ・端あり形状（`m`/`n` が MR/NR 非倍数・`m<mr`・`n<nr`・`k=0`・`k<kc`・非正方・512³）× スレッド数 1/2/3/16 × `jobs_per_worker` {1,2,4,8} |
