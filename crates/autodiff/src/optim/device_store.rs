@@ -374,30 +374,35 @@ fn autodiff_err_to_backend(err: AutodiffError) -> BackendError {
 /// graph-step-capture-design.md` §4.5）。
 ///
 /// CUDA Graph capture 経路が「ハイパーパラメータ変更を検出して再
-/// capture する」ために使う識別子であり、暗号学的な強度は要さない
-/// （衝突しても実害は「再利用すべきでない graph を再利用しない」方向に
-/// のみ倒れる契約——`SegmentKey` は `generation`／`resources`（バッファ
-/// アドレス）も併せて比較するため、本関数の衝突だけで誤った再利用が
-/// 起こることはない）。決定的な FNV-1a 風の畳み込みで十分とし、
-/// `std::collections::hash_map::DefaultHasher`（`Hasher` トレイト経由の
-/// 間接呼び出し）は使わない（`f32` は `Hash` を実装しないため、いずれに
-/// せよビット表現への変換が必要になる）。
+/// capture する」ために使う識別子である。**この畳み込みの衝突は
+/// `SegmentKey` の誤った再利用に直結する**（codex-review P1 指摘。
+/// `generation`／`resources`（バッファアドレス）は同一パラメータ列を
+/// 使い続ける限り不変のため、`config_key` だけが異なる設定を区別する
+/// 唯一の軸になる。したがって「衝突しても実害は再利用が起きない方向に
+/// のみ倒れる」という以前の想定は誤りで、衝突は「古い設定〈例: 変更前の
+/// `lr`〉で capture 済みの graph を新しい設定のまま気づかず再生する」
+/// という契約違反〈設定変更が無視される〉を引き起こしうる）。
+///
+/// そのため単語単位の XOR→乗算という弱い混合（旧実装。`nesterov`／
+/// `is_first_step` の 1 ビット値が上位ビットへほとんど拡散せず、実際に
+/// 異なる設定同士が衝突する具体例が確認された）ではなく、
+/// `std::collections::hash_map::DefaultHasher`（SipHash 系。バイト単位で
+/// 逐次混合するため単語単位の弱い混合より衝突耐性が大幅に高い）を使う。
+/// SGD ハイパーパラメータは信頼境界の外側から来る値ではなく（OWASP A03
+/// の対象外）、暗号学的な強度そのものは要さないが、実運用で起こりうる
+/// 程度の入力に対して事実上衝突しない十分な強度が要る（`.claude/rules/
+/// security.md` の A08 の趣旨——設定変更が意図せず無視される事態は
+/// ソフトウェア・データ整合性の問題）。
 fn fold_sgd_step_config_key(config: &SgdStepConfig) -> u64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut h = FNV_OFFSET_BASIS;
-    for word in [
-        config.lr.to_bits() as u64,
-        config.momentum.to_bits() as u64,
-        config.dampening.to_bits() as u64,
-        config.weight_decay.to_bits() as u64,
-        config.nesterov as u64,
-        config.is_first_step as u64,
-    ] {
-        h ^= word;
-        h = h.wrapping_mul(FNV_PRIME);
-    }
-    h
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    config.lr.to_bits().hash(&mut hasher);
+    config.momentum.to_bits().hash(&mut hasher);
+    config.dampening.to_bits().hash(&mut hasher);
+    config.weight_decay.to_bits().hash(&mut hasher);
+    config.nesterov.hash(&mut hasher);
+    config.is_first_step.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl ResidentResolver for DeviceParamStore {
@@ -1606,24 +1611,52 @@ impl DeviceParamStore {
                     }
                 };
 
-                let mut velocity_ref = if use_momentum {
-                    self.velocity.as_mut()
-                } else {
-                    None
-                };
-                let params = &mut self.params;
-                let grad_ref = &staging.buf;
+                // `resources` は `key` を得た直前の `captured_segment_key`
+                // 呼び出し（`&self.params`／`&staging.buf`／
+                // `self.velocity.as_ref()` の共有借用）と**同一の対象・
+                // 同一の順序**で構築する（`BackendOps::run_captured_
+                // segment` トレイト doc コメント・codex-review P0 指摘
+                // 対応。今度は `body` の実行にも使うため排他借用）。
+                // `body` は `resources` を**呼び出し時の引数**として受け
+                // 取り、外側の `self` フィールドを直接キャプチャしない
+                // （`resources` が既に `self.params`／`self.velocity` を
+                // 排他借用しているため、`body` の環境が別途 `&mut self.
+                // params` 等を捕捉すると二重借用になりコンパイルできない）。
                 let failure_token = &self.failure_token;
-                let mut body = || -> Result<(), BackendError> {
-                    ops.sgd_step_device_tracked(
-                        params,
-                        grad_ref,
-                        velocity_ref.take(),
-                        &step_config,
-                        failure_token,
-                    )
-                };
-                if let Err(e) = ops.run_captured_segment(key, &mut body) {
+                let mut resources: Vec<&mut DeviceBuffer<f32>> =
+                    vec![&mut self.params, &mut staging.buf];
+                if let Some(v) = self.velocity.as_mut() {
+                    resources.push(v);
+                }
+                let mut body =
+                    |resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
+                        // `head[0]`／`head[1]` の repeated indexing は `Index`／
+                        // `IndexMut` トレイト呼び出しが毎回 `head` 全体を借用
+                        // するため、`&mut head[0]` と `&head[1]` を同時に得る
+                        // ことができない（E0502）。`split_first_mut` の連鎖で
+                        // 明示的に素片へ分割し、各素片を独立に借用する。
+                        let (p0, rest) = resources
+                            .split_first_mut()
+                            .expect("resources must have at least 2 entries (param, grad)");
+                        let (p1, tail) = rest
+                            .split_first_mut()
+                            .expect("resources must have at least 2 entries (param, grad)");
+                        let param_mut: &mut DeviceBuffer<f32> = p0;
+                        let grad_ref: &DeviceBuffer<f32> = p1;
+                        let velocity_ref: Option<&mut DeviceBuffer<f32>> = if use_momentum {
+                            tail.first_mut().map(|v| &mut **v)
+                        } else {
+                            None
+                        };
+                        ops.sgd_step_device_tracked(
+                            param_mut,
+                            grad_ref,
+                            velocity_ref,
+                            &step_config,
+                            failure_token,
+                        )
+                    };
+                if let Err(e) = ops.run_captured_segment(key, &mut resources, &mut body) {
                     self.poisoned.store(true, Ordering::SeqCst);
                     return Err(e);
                 }
@@ -1740,7 +1773,7 @@ mod tests {
     // `#[cfg(test)]` 外の通常ビルドでは未使用 import になる
     // （`MockDeviceOps` の graph-capture モック実装・テストのみが型名を
     // 直接使う）。テストモック限定で import する。
-    use fandhe_ai_tensor_core::{SegmentKey, SegmentResource, SegmentRun};
+    use fandhe_ai_tensor_core::{CapturedSegmentBody, SegmentKey, SegmentResource, SegmentRun};
     use std::any::Any;
     use std::cell::RefCell;
     use std::sync::Arc;
@@ -2115,12 +2148,32 @@ mod tests {
         /// か」を記録することで、テスト側は `DeviceParamStore::step` が
         /// 期待どおりのタイミングで新規 capture・再利用を要求している
         /// ことを検証できる。
+        ///
+        /// **replay 直前の再検証**（codex-review P0 指摘対応。
+        /// `crate-cuda::ops::CudaBackendOps::run_captured_segment` と
+        /// 同じ契約をホストモックでも再現する。`resources` から現在の
+        /// アドレス集合を再計算し `key.resources` と不一致なら `body` を
+        /// 呼ばず・`SegmentRun` も記録せず `InvalidArgument` を返す）。
         fn run_captured_segment(
             &self,
             key: SegmentKey,
-            body: &mut dyn FnMut() -> Result<(), BackendError>,
+            resources: &mut [&mut DeviceBuffer<f32>],
+            body: &mut CapturedSegmentBody<'_>,
         ) -> Result<SegmentRun, BackendError> {
-            body()?;
+            let current_resources: Vec<SegmentResource> = resources
+                .iter()
+                .map(|buf| SegmentResource {
+                    addr: (*buf as *const DeviceBuffer<f32>) as u64,
+                    numel: buf.numel(),
+                })
+                .collect();
+            if current_resources != key.resources {
+                return Err(BackendError::InvalidArgument(
+                    "MockDeviceOps::run_captured_segment: resources do not match key.resources"
+                        .into(),
+                ));
+            }
+            body(resources)?;
             let mut seen = self
                 .seen_segment_keys
                 .lock()
@@ -2445,6 +2498,54 @@ mod tests {
         assert_eq!(
             w_graph.get(&[1, 1]).unwrap().to_bits(),
             w_plain.get(&[1, 1]).unwrap().to_bits(),
+        );
+    }
+
+    /// codex-review P1 指摘（イシュー #1349）の回帰テスト:
+    /// `fold_sgd_step_config_key` は `lr`／`momentum`／`dampening` の
+    /// いずれか 1 フィールドだけが異なる設定を区別できなければならない
+    /// （区別できないと、古い設定で capture 済みの graph を新しい設定の
+    /// まま気づかず再生してしまう。上のモジュール doc コメント参照）。
+    /// 実運用で起こりうる値の格子（学習率の等比列・momentum／
+    /// dampening の代表値・`nesterov`／`is_first_step` の全組合せ）に
+    /// 対して `config_key` が全て相異なることを確認する（旧・単語単位
+    /// XOR→乗算実装ではこの格子中に実際の衝突例が存在した）。
+    #[test]
+    fn fold_sgd_step_config_key_has_no_collisions_over_representative_grid() {
+        let lrs = [0.001_f32, 0.01, 0.1, 0.5, 1.0];
+        let momenta = [0.0_f32, 0.5, 0.9, 0.99];
+        let dampenings = [0.0_f32, 0.1, 0.5];
+        let weight_decays = [0.0_f32, 1e-4];
+
+        let mut seen = std::collections::HashMap::new();
+        let mut collisions = Vec::new();
+        for &lr in &lrs {
+            for &momentum in &momenta {
+                for &dampening in &dampenings {
+                    for &weight_decay in &weight_decays {
+                        for &nesterov in &[false, true] {
+                            for &is_first_step in &[false, true] {
+                                let config = SgdStepConfig {
+                                    lr,
+                                    momentum,
+                                    dampening,
+                                    weight_decay,
+                                    nesterov,
+                                    is_first_step,
+                                };
+                                let key = fold_sgd_step_config_key(&config);
+                                if let Some(prev) = seen.insert(key, config) {
+                                    collisions.push((prev, config, key));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            collisions.is_empty(),
+            "異なる SgdStepConfig 同士が config_key で衝突した（誤った graph              再生を招く契約違反）: {collisions:?}"
         );
     }
 
