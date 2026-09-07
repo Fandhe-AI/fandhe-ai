@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""`compare_gemm_ab.py` の単体テスト（イシュー #1306）。
+
+`compare_managed_ab_test.py`・`compare_ab_test.py` と同じ方式（ファイルパス
+指定 import・tempfile への合成 JSONL 書き出し）。CI（`ci.yml` の
+`deps-forbidden` ジョブ）は
+`python3 -m unittest scripts/bench/framework-compare/compare_gemm_ab_test.py`
+で本ファイルを実行する。
+
+検証観点:
+- 正常系: 8 セル（size×mode）とも非後退（ratio<=threshold・checksum 完全
+  一致）。
+- 後退セル（ratio>threshold）は「後退」判定。
+- 件数不足（5 件未満／超過）は判定不能。
+- checksum 複合判定 pass だが完全一致でない場合は「複合判定 ok」表示・
+  非後退セルでも `checksum_exact_match` は False として区別される。
+- checksum が複合判定を外れる場合は判定不能。
+- 不正行（`framework` 不一致・`tf32:true`・`managed:true`・`task`/
+  `device`/`size`/`mode` 不正）は理由付きで警告しスキップし、main() は
+  終了コード 2（入力不能）を返す。
+- 終了コード: 全セル非後退なら 0、後退または判定不能ありなら 3、入力自体
+  が不能なら 2。
+"""
+
+import importlib.util
+import io
+import json
+import os
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+_SPEC = importlib.util.spec_from_file_location(
+    "compare_gemm_ab", os.path.join(HERE, "compare_gemm_ab.py")
+)
+compare_gemm_ab = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(compare_gemm_ab)
+
+
+def _rec(median_s, checksum=1.23456, size=1024, mode="reuse", version="0.7.0",
+         warmup=20, iters=20, task="gemm", device="metal", framework="fandhe-ai",
+         tf32=None, managed=None, parity_fail_count=0):
+    r = {
+        "framework": framework,
+        "version": version,
+        "task": task,
+        "device": device,
+        "size": size,
+        "median_s": median_s,
+        "q1_s": median_s,
+        "q3_s": median_s,
+        "checksum": checksum,
+        "warmup": warmup,
+        "iters": iters,
+        "mode": mode,
+        "parity_fail_count": parity_fail_count,
+    }
+    if tf32 is not None:
+        r["tf32"] = tf32
+    if managed is not None:
+        r["managed"] = managed
+    return r
+
+
+def _write_jsonl(rows):
+    f = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+    )
+    for r in rows:
+        f.write(json.dumps(r) + "\n")
+    f.close()
+    return f.name
+
+
+_SIZES = (512, 1024, 2048, 4096)
+_MODES = ("fresh", "reuse")
+
+
+def _all_cells_rows(before_median, after_median, checksum=1.23456):
+    """8 セル（4 size × 2 mode）分の before/after 各 5 件を生成する。"""
+    before = []
+    after = []
+    for size in _SIZES:
+        for mode in _MODES:
+            for _ in range(5):
+                before.append(_rec(before_median, checksum=checksum, size=size, mode=mode))
+                after.append(_rec(after_median, checksum=checksum, size=size, mode=mode))
+    return before, after
+
+
+class LoadRowsTest(unittest.TestCase):
+    def test_valid_rows_are_loaded(self):
+        rows = [_rec(0.001), _rec(0.0009)]
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(len(loaded), 2)
+            self.assertEqual(warnings, [])
+        finally:
+            os.unlink(path)
+
+    def test_invalid_json_line_is_skipped_with_warning(self):
+        path = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+        ).name
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{not valid json\n")
+            f.write(json.dumps(_rec(0.001)) + "\n")
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("invalid JSON", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_non_fandhe_ai_framework_is_skipped(self):
+        rows = [_rec(0.001, framework="candle")]
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("framework", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_tf32_true_is_skipped(self):
+        rows = [_rec(0.001, tf32=True)]
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertIn("tf32:true", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_managed_true_is_skipped(self):
+        rows = [_rec(0.001, managed=True)]
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertIn("managed:true", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_wrong_task_or_device_or_size_is_skipped(self):
+        rows = [
+            _rec(0.001, task="train"),
+            _rec(0.001, device="cuda"),
+            _rec(0.001, size=999),
+            _rec(0.001, mode="bogus"),
+        ]
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 4)
+        finally:
+            os.unlink(path)
+
+
+class EvaluateCellTest(unittest.TestCase):
+    def test_non_regression_exact_checksum_match(self):
+        before = [_rec(0.002) for _ in range(5)]
+        after = [_rec(0.0019) for _ in range(5)]
+        result = compare_gemm_ab.evaluate_cell(before, after, 1.05)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["verdict"], "非後退")
+        self.assertTrue(result["checksum_exact_match"])
+        self.assertAlmostEqual(result["ratio"], 0.95, places=6)
+
+    def test_regression_ratio_over_threshold(self):
+        before = [_rec(0.002) for _ in range(5)]
+        after = [_rec(0.0025) for _ in range(5)]
+        result = compare_gemm_ab.evaluate_cell(before, after, 1.05)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["verdict"], "後退")
+        self.assertAlmostEqual(result["ratio"], 1.25, places=6)
+
+    def test_count_mismatch_is_undeterminable(self):
+        before = [_rec(0.002) for _ in range(4)]
+        after = [_rec(0.002) for _ in range(5)]
+        result = compare_gemm_ab.evaluate_cell(before, after, 1.05)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("5 件を要求", result["reason"])
+
+    def test_checksum_composite_ok_but_not_exact(self):
+        before = [_rec(0.002, checksum=1.0) for _ in range(5)]
+        # 相対誤差 1e-3 未満だが完全一致ではない値。
+        after = [_rec(0.002, checksum=1.0000005) for _ in range(5)]
+        result = compare_gemm_ab.evaluate_cell(before, after, 1.05)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["checksum_composite_match"])
+        self.assertFalse(result["checksum_exact_match"])
+
+    def test_checksum_outside_composite_is_undeterminable(self):
+        before = [_rec(0.002, checksum=1.0) for _ in range(5)]
+        after = [_rec(0.002, checksum=2.0) for _ in range(5)]
+        result = compare_gemm_ab.evaluate_cell(before, after, 1.05)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("checksum", result["reason"])
+
+    def test_version_mismatch_is_undeterminable(self):
+        before = [_rec(0.002, version="0.7.0") for _ in range(5)]
+        after = [_rec(0.002, version="0.6.0") for _ in range(5)]
+        result = compare_gemm_ab.evaluate_cell(before, after, 1.05)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("version", result["reason"])
+
+    def test_parity_fail_count_positive_is_undeterminable(self):
+        before = [_rec(0.002, parity_fail_count=1) for _ in range(5)]
+        after = [_rec(0.002) for _ in range(5)]
+        result = compare_gemm_ab.evaluate_cell(before, after, 1.05)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("parity_fail_count", result["reason"])
+
+
+class MainTest(unittest.TestCase):
+    def test_all_cells_non_regression_exit_zero(self):
+        before, after = _all_cells_rows(0.002, 0.0019)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 0)
+            self.assertEqual(out.getvalue().count("非後退"), 8)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_one_cell_regression_exit_three(self):
+        before, after = _all_cells_rows(0.002, 0.0019)
+        # 1 セル（4096/reuse）だけ後退させる。
+        for r in after:
+            if r["size"] == 4096 and r["mode"] == "reuse":
+                r["median_s"] = 0.01
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 3)
+            self.assertIn("後退", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_invalid_rows_exit_two(self):
+        before_path = _write_jsonl([_rec(0.002, framework="candle")])
+        after_path = _write_jsonl([_rec(0.002)])
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 2)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_empty_input_exit_two(self):
+        before_path = _write_jsonl([])
+        after_path = _write_jsonl([])
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 2)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+
+if __name__ == "__main__":
+    unittest.main()
