@@ -406,6 +406,22 @@ mod gemm_bm128_diag_tests;
 // スコープ外）。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_mpp_diag_tests;
+// hfrag 候補（half フラグメント／f32 累算。イシュー #1369・親 #1368
+// E9）の純カーネル専有時間（GPU タイムスタンプ）を M4 Max で 5 回中央値
+// 比較し、opt-in 候補として前進させる価値があるかを判定する診断テスト
+// 群（イシュー #1370）。`gemm::MetalGemm::diag_encode_tiled_hfrag_nn`
+// （`#[cfg(test)] pub(crate)`。イシュー #1369）・`gemm_reuse_phase_diag_
+// tests::{DiagKernel, measure_one_phase_trial_with}`（イシュー #1370 で
+// 新設）・`gemm_bk32_diag_tests::run_ab_pair_kernels`（同じくイシュー
+// #1370 で一般化）・`tile::{CANDIDATES, select_for_device}` へ到達する
+// ため、既存診断テスト群と同じ理由でクレートルートの兄弟モジュールと
+// して配置する。`objc2` 系 FFI 型に触れるため同じ
+// `cfg(all(test, target_os = "macos"))` を付ける。プロダクションコード
+// （`tile.rs`／`gemm.rs`／`shaders/gemm.metal`）は無変更（診断テスト
+// 追加のみ。opt-in 候補としての前進可否は `docs/perf/
+// metal-gemm-hfrag-candidate.md` §9 側で判断する）。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_hfrag_diag_tests;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
