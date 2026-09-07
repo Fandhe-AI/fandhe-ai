@@ -1919,3 +1919,32 @@ HEAD。#1352 実装込み）への path patch でビルドした `bench-fandhe` 
 後退の一次要因と推定されるが、断定はしない。詳細・env_info・スコープ外
 事項は `docs/perf/cuda-managed-placement-ab.md`・
 `docs/perf/logs/cuda-managed-placement-ab-1353/` を参照。
+
+## 環境 22: DGX Spark GB10・Apple M4 Max（既定スレッド数の大コア限定 on/off 比較。イシュー #1364）
+
+`crates/backend-cpu/src/thread_limit.rs`（#1363）の
+`BIG_CORE_LIMIT_ENABLED` on/off を同一バイナリ（`crates/facade` HEAD への
+path patch・`RAYON_NUM_THREADS` の有無のみ切替）で両実機比較。
+`compare_gemm_ab.py --device cpu`（本イシューで追加）で N=512/1024/2048 ×
+fresh/reuse を before=off・after=on として突合。
+
+| cell | M4 Max ratio | DGX ratio | 判定 |
+|---|---|---|---|
+| 512/fresh | 0.8831 | 1.3503 | M4: 非後退 / DGX: 後退 |
+| 512/reuse | 0.9149 | 1.1936 | M4: 非後退 / DGX: 後退 |
+| 1024/fresh | 0.8193 | 2.8368 | M4: 非後退 / DGX: 後退 |
+| 1024/reuse | 0.8275 | 2.7648 | M4: 非後退 / DGX: 後退 |
+| 2048/fresh | 0.8038 | 4.4243 | M4: 非後退 / DGX: 後退 |
+| **2048/reuse** | **0.8147** | **4.3406** | **M4: 非後退 / DGX: 重大な後退** |
+
+**既定化判定: REJECT**（`BIG_CORE_LIMIT_ENABLED` を `false` へ差し戻し済み）。
+DGX の `cpu_capacity` sysfs 値（5 段階の非一様分布）は `lscpu` の
+「X925×10+A725×10」構成と一致せず、検出ロジックが最大値を持つコア 1 個
+のみを大コアと誤検出（`detected_big_cores=Some(1)`）し、限定 ON 時に
+実質シングルスレッド（`effective=1`）へ縮退したことが後退の原因。M4 Max
+単独では改善（0.80〜0.91 倍）したが、決定規則（両実機で reuse 全セル
+非後退）を満たさないため不採用とした。checksum は両実機・全セル完全一致。
+詳細・env_info・診断・スコープ外事項は
+`docs/perf/cpu-gemm-default-thread-limit.md` §6・
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13・
+`docs/perf/logs/cpu-gemm-thread-limit-1364/` を参照。
