@@ -115,7 +115,8 @@ fandhe-ai/
     │   ├── burn-wgpu-metal-gemm-zero-result.md # framework-compare の Burn(wgpu) Metal GEMM N>=512 全ゼロの原因切り分け（upstream 既知バグ。#965）
     │   ├── cuda-tensor-core-tolerance-opt-remeasurement.md # opt 版 WMMA TF32 カーネルの数値一致誤差分布再実測（GB10 実機計測完了・sm_86 との差分なし。#994・#995）
     │   ├── cuda-tensor-core-tolerance-gb10-scale-sweep.md # GB10（sm_121）実機での入力スケールスイープ再実測・sm_86 との世代差記録（#995）
-    │   ├── cpu-gemm-candle-cpu-retune.md # CPU GEMM マイクロカーネル・packing 再チューニング（pc 外側ループ・A 1 回 pack 候補〈SharedBPcOuter〉。対 gemm crate 逆転狙い。GB10・M4 Max とも実機実測完了・いずれも非採用と結論〈#1140・#1141〉。#1041。#1144 で本番結線不要（`RowPanel` 維持）と確定・次候補は承認待ち）
+    │   ├── cpu-gemm-candle-cpu-retune.md # CPU GEMM マイクロカーネル・packing 再チューニング（pc 外側ループ・A 1 回 pack 候補〈SharedBPcOuter〉。対 gemm crate 逆転狙い。GB10・M4 Max とも実機実測完了・いずれも非採用と結論〈#1140・#1141〉。#1041。#1144 で本番結線不要（`RowPanel` 維持）と確定・次候補は承認待ち）。§8.1 で候補 3（KC=128〜512 再スイープ。`BlockSizes` 経由）を両実機 5 回中央値実測し REJECT 確定（`docs/perf/logs/cpu-gemm-kc-sweep-1315/`。KC=256 現行既定を維持。イシュー #1315）
+    │   ├── logs/cpu-gemm-kc-sweep-1315/ # KC 再スイープ（候補 3。#1315）両実機 5 回独立プロセス中央値実測（bit 一致確認・`kc_sweep_ab_1024_2048`／`_4096` 各 5 run）の生ログ・env_info・集計スクリプト（Python3 標準ライブラリのみ。内部ホスト名は含めない）
     │   ├── cpu-gemm-ic-dynamic-variant.md # ic 限定動的配布 variant（`GemmDriverVariant::IcDynamic`。atomic 行パネルカウンタ・pc ごとの B パネル共有 pack）の実装記録・`RowPanel` との bit 完全一致回帰（`unsafe` 非導入。イシュー #1366）。#1367 で両実機（M4 Max・GB10）5 回中央値実測完了・REJECT（不採用）確定（DGX N=1024/2048 が対 RowPanel 比 0.63／0.85 と大きく後退）・本番未結線のまま
     │   ├── logs/cpu-gemm-ic-dynamic-ab-1367/ # 上記（#1367）両実機 5 回中央値実測（bit 一致確認・`ab_1024_2048`／`ab_4096` 各 5 run）の生ログ・env_info・集計スクリプト（Python3 標準ライブラリのみ。内部ホスト名は含めない。イシュー #1367）
     │   ├── logs/cpu-gemm-reuse-phase-1292/ # CPU gemm reuse 境界のフェーズ分解（Layer A `--phases`・Layer B `gemm_reuse_phase_diag_cpu`。両実機 5 回計測中央値）の生ログ・env_info（内部ホスト名は含めない。イシュー #1292）

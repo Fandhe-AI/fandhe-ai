@@ -1,0 +1,65 @@
+KC 再スイープ（イシュー #1315）実機実測環境情報
+
+## 対象
+`crates/backend-cpu/src/gemm_blis/mod.rs` の KC_SWEEP_GRID = [128, 192, 256, 384, 512]
+（RowPanel variant・MC/NC は default_blocks() 継承）を、両実機で 5 回独立プロセス
+中央値計測した。対 KC=256（現行本番既定）比を算出。
+
+## 計測日
+2026-09-08（JST）
+
+## worktree HEAD（両実機とも同一 patch を適用。コミット前のワーキングツリー差分）
+63340272ded08f5e88fb4efb763bfab2f2781646（origin/main 由来。本イシューの変更はこの HEAD への
+ワーキングツリー差分として両実機へ配布した。コミットは実測完了後に作成する）
+
+## Apple M4 Max（このセッションのローカル worktree で直接実行）
+- OS: Darwin 25.6.0 (arm64)
+- CPU: Apple M4 Max
+- rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+- RAYON_NUM_THREADS: 未設定（既定値）
+- BIG_CORE_LIMIT_ENABLED: false（#1364 REJECT 確定のまま不変）
+- 負荷状態: uptime-m4max.log 参照（計測開始前 1 サンプルのみ記録・load average 0 台。
+  計測後の再サンプリングは行っていない。同一マシンで並走する他セッションの有無は本セッション
+  からは確認できないため「共有負荷下」の可能性は排除しない）
+- 計測方式: `cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored
+  gemm_blis_kc_sweep_ab_{1024_2048,4096} --nocapture` を各 5 回、独立プロセス起動で実行
+
+## DGX Spark GB10（Grace CPU。SSH 経由リモート実行）
+- OS/CPU: lscpu-dgx.txt 参照（Cortex-X925 ×10 + Cortex-A725 ×10・aarch64）
+- rustc: rustc-version-dgx.txt 参照（rustc 1.97.0）
+- RAYON_NUM_THREADS: 未設定（既定値）
+- BIG_CORE_LIMIT_ENABLED: false（#1364 REJECT 確定のまま不変）
+- 負荷状態: uptime-dgx.log 参照（計測前後とも load average 1 分値 0.1 台。低負荷ゲート
+  〈1 分 load average < 6〉を満たす）
+- 転送方式: メイン worktree の `docs/real-hardware-verification-env.local.md`
+  （gitignore 対象・.local.md は転送していない）から解決した SSH ホストへ、
+  `crates/`・ルート `Cargo.toml`／`Cargo.lock`・`rust-toolchain.toml` を rsync で
+  隔離ディレクトリ `~/work/ab-1315/`（共有ディレクトリ `~/work/rust-ai-library-run` とは
+  別）へ転送し、`setsid nohup` で切り離し実行した。計測完了後に `~/work/ab-1315/` を
+  削除済み
+- CARGO_TARGET_DIR: `~/work/target-fandhe-ai-1315`（同期ツリー外・他セッションと分離。
+  `~/work/ab-1315/` と合わせて計測完了後に削除済み）
+
+## 生ログ一覧
+- bit-exact-large-{m4max,dgx}.txt: `gemm_blis_row_panel_kc_grid_matches_default_kc_bit_exact_large`
+  （#[ignore] 大形状 bit 一致テスト。両実機 pass）
+- kc-1024-2048-{m4max,dgx}-run{1..5}.txt: `gemm_blis_kc_sweep_ab_1024_2048` の 5 回独立実行
+- kc-4096-{m4max,dgx}-run{1..5}.txt: `gemm_blis_kc_sweep_ab_4096` の 5 回独立実行
+- aggregate.py: 集計スクリプト（Python3 標準ライブラリのみ。5 サンプル未満は fail-closed 拒否）
+- aggregate.md: aggregate.py の出力（本ドキュメントと `cpu-gemm-candle-cpu-retune.md` §8.1 の
+  数値の出典）
+
+## 採否判定（計画 §3 の事前宣言ゲートを機械的に適用）
+
+Stage 1 ゲート（ある単一 KC の対 KC=256 比が N=1024・2048 の両方で ≥ 1.00、かつ N=4096 で
+≥ 0.95 を **両実機で**満たすこと）を満たす KC は存在しない。
+
+- M4 Max: 全 KC 値が N=1024・2048 のいずれかで 256 未満（最大でも 0.9956 倍〈KC=192・
+  N=1024〉）
+- DGX Spark GB10: 全 KC 値が N=1024・2048 のいずれかで 256 未満（最大でも 0.9950 倍〈KC=192・
+  N=2048〉）
+
+したがって **REJECT（不採用）** と確定する。`const KC` は変更しない（Stage 2〈oss-gemm-compare
+前後比較〉・backend-cpu 全テスト再実行は Stage 1 未通過のため実施しない）。
+
+詳細な採否記録・根拠は `docs/perf/cpu-gemm-candle-cpu-retune.md` §8.1 を参照。
