@@ -184,6 +184,13 @@ fn parse_env_num_threads(raw: Option<&str>) -> Option<usize> {
 /// `sysctl -n <name>` の stdout（末尾改行あり）から大コア数を parse する
 /// 純関数。空・非数値・0・上限（4096。実在しない CPU 数のガード値）
 /// 超過はすべて `None`（判定不能）として扱う。
+///
+/// 本番経路では macOS の [`read_sysctl`] からのみ呼ばれるため
+/// `cfg(any(target_os = "macos", test))` で条件付きコンパイルする
+/// （macOS 以外の単体ビルドでは未使用になり `dead_code` を誤検出する
+/// ため。`cfg(test)` を残すのは `mod tests` から直接ユニットテスト
+/// するため）。
+#[cfg(any(target_os = "macos", test))]
 fn parse_sysctl_stdout(bytes: &[u8]) -> Option<usize> {
     let text = std::str::from_utf8(bytes).ok()?;
     let value: usize = text.trim().parse().ok()?;
@@ -198,6 +205,11 @@ fn parse_sysctl_stdout(bytes: &[u8]) -> Option<usize> {
 /// `total`（全論理コア数）より真に小さい場合のみ P コア数を大コア数と
 /// する。等しい場合（同種コア構成。`perflevel0` 自体が存在しない旧
 /// アーキテクチャ等）は非対称でないため `None` を返す。
+///
+/// 本番経路では macOS の [`detect_big_cores`] からのみ呼ばれるため
+/// `cfg(any(target_os = "macos", test))` で条件付きコンパイルする
+/// （[`parse_sysctl_stdout`] と同じ理由）。
+#[cfg(any(target_os = "macos", test))]
 fn big_cores_from_sysctl(perflevel0: Option<usize>, total: Option<usize>) -> Option<usize> {
     match (perflevel0, total) {
         (Some(p), Some(t)) if p > 0 && p < t => Some(p),
