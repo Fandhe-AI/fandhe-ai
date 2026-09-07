@@ -1473,7 +1473,23 @@ impl DeviceParamStore {
         // デバイス側パラメータを更新するフェーズへ入る。ここで初めて
         // `pending` を消費する（以降のエラーは `poisoned` 遷移で `pending`
         // の意味自体が失われるため、これより手前で `take()` しない）。
-        self.pending = None;
+        //
+        // **一過性の capture 競合からの回復（codex-review P2 指摘対応・
+        // PR #1390 是正）**: `take()` の戻り値を `pending_backup` として
+        // 保持しておく。以降 `BackendError::DeviceContextCaptureInProgress`
+        // （一過性の別スレッド capture 競合。`poisoned` へ遷移させない
+        // 各分岐。下記コメント参照）を検出した早期 return では、
+        // `self.pending = pending_backup` で登録を復元してから返す。
+        // 復元しないと、まだどのデバイスバッファも変更していない段階の
+        // 一過性エラーであっても `pending`（forward で登録済みの葉ノード
+        // 集合）が失われ、呼び出し元が次回 `step()` を再試行しても
+        // `PendingForwardUnconsumed` とは異なる形で登録情報が消えたまま
+        // 拒否される（本来「再試行すれば通常は解消する」契約〈上記
+        // `graph_capture_available` 分岐コメント参照〉が守られない）。
+        // `poisoned` へ遷移する分岐（＝恒久的失敗）では `pending_backup`
+        // を復元せず破棄する（`poisoned` 後は `pending` の意味自体が
+        // 失われる契約は不変）。
+        let pending_backup = self.pending.take();
 
         // ② 更新フェーズ（#1023・イシュー #1212 で分岐追加）:
         // `any_resident == false`（resident 経由が一度も成功していない
@@ -1562,6 +1578,22 @@ impl DeviceParamStore {
                                 filled: vec![None; vars.len()],
                             });
                         }
+                        // codex-review P1 指摘対応（PR #1390 是正）:
+                        // `DeviceContextCaptureInProgress`（一過性の別
+                        // スレッド capture 競合）は恒久的失敗ではない
+                        // ため `poisoned` へ遷移させない（`captured_
+                        // segment_key` の同型分岐と同じ理由。この確保は
+                        // まだどのデバイスバッファも変更していない新規
+                        // scratch 確保のため、失敗しても既存の
+                        // `self.params`／`self.velocity` は無傷）。
+                        // `pending` も復元し、呼び出し元が次回 `step()`
+                        // を再試行できるようにする（`pending_backup`
+                        // doc コメント参照）。
+                        Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => {
+                            drop(staging_ref);
+                            self.pending = pending_backup;
+                            return Err(e);
+                        }
                         Err(e) => {
                             self.poisoned.store(true, Ordering::SeqCst);
                             return Err(e);
@@ -1589,6 +1621,16 @@ impl DeviceParamStore {
                     }
                 };
                 if let Err(e) = mem.upload_into(&grad_tensor, &mut staging.buf, 0) {
+                    // codex-review P1 指摘対応（PR #1390 是正）: 直前の
+                    // `mem.alloc_zeroed` 分岐と同じ理由（`staging.buf`
+                    // への upload はまだ `self.params`／`self.velocity` を
+                    // 変更しないため、一過性の capture 競合は恒久的失敗
+                    // として扱わない）。
+                    if matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
+                        drop(staging_ref);
+                        self.pending = pending_backup;
+                        return Err(e);
+                    }
                     self.poisoned.store(true, Ordering::SeqCst);
                     return Err(e);
                 }
@@ -1640,6 +1682,12 @@ impl DeviceParamStore {
                         // 失敗させても、ストア自体は次回 `step()` で
                         // 引き続き使用できる。
                         Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => {
+                            // codex-review P2 指摘対応（PR #1390 是正）:
+                            // `pending`（forward で登録済みの葉ノード
+                            // 集合）も復元し、呼び出し元が次回 `step()`
+                            // を再試行できるようにする（`pending_backup`
+                            // doc コメント参照）。
+                            self.pending = pending_backup;
                             return Err(e);
                         }
                         Err(e) => {
@@ -1676,6 +1724,22 @@ impl DeviceParamStore {
                     &step_config,
                     &self.failure_token,
                 ) {
+                    // codex-review P1 指摘対応（PR #1390 是正）:
+                    // `ops.rs::CudaBackendOps::run_captured_sgd_step_segment`
+                    // は世代収集（host-only）→ `begin_driver_call`（poison／
+                    // 世代検査）→ アドレス再検証、の順に固定されており
+                    // （同メソッド doc コメント「driver 呼び出し境界」
+                    // 節）、`DeviceContextCaptureInProgress` はこの
+                    // `begin_driver_call` が driver に一切触れる前に
+                    // 早期拒否した場合にのみ発生しうる（同関数 doc
+                    // コメント「早期拒否」節）。つまりこのエラーが出た
+                    // 時点で `self.params`／`self.velocity` はまだ変更
+                    // されていないため、他の分岐と同じ理由で `poisoned`
+                    // へ遷移させない。
+                    if matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
+                        self.pending = pending_backup;
+                        return Err(e);
+                    }
                     self.poisoned.store(true, Ordering::SeqCst);
                     return Err(e);
                 }
@@ -1691,6 +1755,15 @@ impl DeviceParamStore {
                 };
                 let grad_buf = match mem.upload(&grad_tensor) {
                     Ok(buf) => buf,
+                    // codex-review P1 指摘対応（PR #1390 是正）: `mem.upload`
+                    // はまだ `self.params`／`self.velocity` を変更しない
+                    // 新規バッファ確保・転送のため、graph capture 経路の
+                    // 同型分岐と同じ理由で一過性の capture 競合を
+                    // 恒久的失敗として扱わない。
+                    Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => {
+                        self.pending = pending_backup;
+                        return Err(e);
+                    }
                     Err(e) => {
                         self.poisoned.store(true, Ordering::SeqCst);
                         return Err(e);
@@ -1708,6 +1781,18 @@ impl DeviceParamStore {
                     &step_config,
                     &self.failure_token,
                 ) {
+                    // codex-review P1 指摘対応（PR #1390 是正）: デフォルト
+                    // 実装（CPU／CUDA）は `sgd_step_device` へそのまま
+                    // 委譲する（本関数コメント「デフォルト実装」参照）が、
+                    // CUDA 実装は `run_captured_sgd_step_segment` と同じ
+                    // `begin_driver_call` 早期拒否契約に従うため、
+                    // `DeviceContextCaptureInProgress` はこの時点で
+                    // `self.params`／`self.velocity` が未変更であることを
+                    // 意味する。同じ理由で `poisoned` へ遷移させない。
+                    if matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
+                        self.pending = pending_backup;
+                        return Err(e);
+                    }
                     self.poisoned.store(true, Ordering::SeqCst);
                     return Err(e);
                 }

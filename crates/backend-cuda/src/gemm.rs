@@ -236,6 +236,23 @@ thread_local! {
 /// `run_naive_*`／`run_tiled_*` 呼び出しのたびに再コンパイルしない。
 pub struct CudaGemm {
     stream: Arc<CudaStream>,
+    /// 構築元 `CudaDevice` の ordinal（イシュー #1349・codex-review P0
+    /// 指摘・PR #1390 是正）。`with_driver_call`（本 impl 内で下部に定義）
+    /// が `context_cache::begin_driver_call` を呼ぶ際のキーとして使う。
+    /// `run_naive_f32`／`run_tiled_f32` 等の公開低レベル API は
+    /// `CudaBackendOps`（`ops.rs`）の `with_driver_call` 経由の場合と
+    /// crate 外から `CudaGemm::new` を直接構築して呼ばれる場合の両方が
+    /// あるため、driver 呼び出し（H2D／カーネル起動／D2H／解放）自体を
+    /// この構造体側でも capture 排他へ参加させ、`ops.rs` を経由しない
+    /// 直接呼び出しが SGD capture の drain／拒否を迂回できないようにする
+    /// （codex-review 指摘: 公開低レベル演算が capture 排他に参加しない
+    /// 欠陥）。`ops.rs` 経由の呼び出しは外側の `with_driver_call` と
+    /// 二重に排他区間へ入るが、`begin_driver_call` は同一スレッドからの
+    /// 再入を拒否しない設計（`context_cache::begin_driver_call` doc
+    /// コメント「別スレッドの呼び出しは...」節参照。capture 中の拒否は
+    /// 別スレッドのみが対象）のため、二重の排他は安全側の重複であり
+    /// 挙動を変えない。
+    ordinal: usize,
     /// 出力バッファのサイズクラス別プール（イシュー #1020・REQ-14）。
     /// `run_f32_kernel`／`run_tiled_bias_act_f32` の `alloc_zeros::<f32>`
     /// 直接呼び出しを置換する（`crate::pool` モジュール冒頭参照）。
@@ -1907,6 +1924,7 @@ impl CudaGemm {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             allocator,
             naive_f32,
             naive_f16,
@@ -2988,26 +3006,31 @@ impl CudaGemm {
         let cfg = func.launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        //
         // SAFETY: `run_f32_kernel`／`launch_tiled_f32` と同一の根拠。
         // カーネル引数（a_dev/b_dev/c_dev・m_i/n_i/k_i）は上記で検証済みの
         // m/n/k と 1:1 対応し、カーネル内の手動境界チェック（cp.async
         // src_size ゼロ充填・エピローグ guarded store。
         // `kernels_tiled_pipeline.rs` 冒頭コメント「REQ-8」参照）と合わせて
         // OOB 読み書きが起きない根拠とする。
-        unsafe {
-            self.stream
-                .launch_builder(func.as_cuda_function())
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
-        // （`download_f32`／明示 `synchronize`）へ委ねる。
-        Ok(())
+        self.with_driver_call(|| {
+            unsafe {
+                self.stream
+                    .launch_builder(func.as_cuda_function())
+                    .arg(a_dev)
+                    .arg(b_dev)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+            // （`download_f32`／明示 `synchronize`）へ委ねる。
+            Ok(())
+        })
     }
 
     /// デバイス常駐済みの A/B/C バッファに対して persistent タイルキュー版
@@ -3107,9 +3130,10 @@ impl CudaGemm {
         };
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // ストリーム順序でのゼロ化（メソッドコメント「起動前に」参照）。
-        self.stream.memset_zeros(&mut func.tile_counter)?;
-
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。ストリーム順序でのゼロ化（メソッドコメント「起動前に」
+        // 参照）もカーネル起動と同じ排他区間に含める。
+        //
         // SAFETY: `launch_tiled_pipeline_f32` と同一の根拠。カーネル引数
         // （a_dev/b_dev/c_dev・m_i/n_i/k_i・tile_counter）は上記で検証済み
         // の m/n/k と 1:1 対応し、カーネル内の手動境界チェック（cp.async
@@ -3124,21 +3148,24 @@ impl CudaGemm {
         // これらを独立した借用として扱う（`func.as_cuda_function()` の
         // ような `&self` 経由のアクセサを介さず直接フィールドへアクセス
         // することで、`func` 全体の借用に潰れないようにしている）。
-        unsafe {
-            self.stream
-                .launch_builder(&func.func)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .arg(&mut func.tile_counter)
-                .launch(cfg)?;
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
-        // （`download_f32`／明示 `synchronize`）へ委ねる。
-        Ok(())
+        self.with_driver_call(|| {
+            self.stream.memset_zeros(&mut func.tile_counter)?;
+            unsafe {
+                self.stream
+                    .launch_builder(&func.func)
+                    .arg(a_dev)
+                    .arg(b_dev)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .arg(&mut func.tile_counter)
+                    .launch(cfg)?;
+            }
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+            // （`download_f32`／明示 `synchronize`）へ委ねる。
+            Ok(())
+        })
     }
 
     /// ホストスライス入出力の persistent タイルキュー版 pipeline カーネル
@@ -3183,7 +3210,11 @@ impl CudaGemm {
         let (a_dev, b_dev) = self.upload_f32(a, b)?;
         let mut c_dev = self.alloc_output_f32(m, n)?;
         self.launch_tiled_pipeline_persistent_f32(func, &a_dev, &b_dev, &mut c_dev, m, n, k)?;
-        crate::memory::readback(&self.stream, &c_dev)
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照（`upload_f32`／`launch_tiled_pipeline_persistent_f32` は
+        // それぞれ内部で既に排他区間へ参加済み。本行の readback も同様に
+        // 参加させる）。
+        self.with_driver_call(|| crate::memory::readback(&self.stream, &c_dev))
     }
 
     /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM を実行
@@ -3267,52 +3298,57 @@ impl CudaGemm {
 
         BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        // `bias` が `None` の場合はダミーの 1 要素バッファを渡す（null
-        // ポインタをカーネル引数へ渡す経路を作らない。`has_bias == 0` の
-        // ガードによりカーネル側は実際にはこのバッファを参照しない。
-        // `kernels::TILED_BIAS_ACT_F32` ドキュメンテーションコメント参照）。
-        let (bias_dev, has_bias): (CudaSlice<f32>, i32) = match bias {
-            Some(bias) => (self.stream.clone_htod(bias)?, 1),
-            None => (self.stream.alloc_zeros::<f32>(1)?, 0),
-        };
-        // イシュー #1020: `run_f32_kernel` と同じ理由（epilogue も
-        // `row < m && col < n` ガード内で全 `m*n` 要素を必ず埋める。
-        // `kernels::TILED_BIAS_ACT_F32` 参照）でプール経由 `alloc_uninit_f32`
-        // を使う。
-        let mut c_dev = self
-            .allocator
-            .alloc_uninit_f32((m as usize) * (n as usize))?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照（`run_f32_kernel` と同じくデバイスバッファの確保・起動・
+        // 解放を丸ごと排他区間に収める）。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            // `bias` が `None` の場合はダミーの 1 要素バッファを渡す（null
+            // ポインタをカーネル引数へ渡す経路を作らない。`has_bias == 0` の
+            // ガードによりカーネル側は実際にはこのバッファを参照しない。
+            // `kernels::TILED_BIAS_ACT_F32` ドキュメンテーションコメント参照）。
+            let (bias_dev, has_bias): (CudaSlice<f32>, i32) = match bias {
+                Some(bias) => (self.stream.clone_htod(bias)?, 1),
+                None => (self.stream.alloc_zeros::<f32>(1)?, 0),
+            };
+            // イシュー #1020: `run_f32_kernel` と同じ理由（epilogue も
+            // `row < m && col < n` ガード内で全 `m*n` 要素を必ず埋める。
+            // `kernels::TILED_BIAS_ACT_F32` 参照）でプール経由 `alloc_uninit_f32`
+            // を使う。
+            let mut c_dev = self
+                .allocator
+                .alloc_uninit_f32((m as usize) * (n as usize))?;
 
-        let cfg = tiled_f32_launch_config(m, n);
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
-        let act_i: i32 = if act_relu { 1 } else { 0 };
+            let cfg = tiled_f32_launch_config(m, n);
+            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+            let act_i: i32 = if act_relu { 1 } else { 0 };
 
-        // SAFETY: run_f32_kernel と同一の根拠（該当コメント参照）。
-        // 追加引数（bias_dev・has_bias・act_i）は上記で検証済みの `n`／
-        // `bias` の有無と 1:1 対応し、カーネル内 epilogue は書き込み
-        // ガード（`row < m && col < n`）の内側でのみ `bias[col]` を
-        // 参照するため OOB は発生しない（REQ-8）。
-        unsafe {
-            self.stream
-                .launch_builder(&self.tiled_bias_act_f32)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&bias_dev)
-                .arg(&mut c_dev.as_view_mut())
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .arg(&has_bias)
-                .arg(&act_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
-        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
-        // ため、論理長ビュー（`as_view()`）を渡す。
-        let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
-        Ok(c_host)
+            // SAFETY: run_f32_kernel と同一の根拠（該当コメント参照）。
+            // 追加引数（bias_dev・has_bias・act_i）は上記で検証済みの `n`／
+            // `bias` の有無と 1:1 対応し、カーネル内 epilogue は書き込み
+            // ガード（`row < m && col < n`）の内側でのみ `bias[col]` を
+            // 参照するため OOB は発生しない（REQ-8）。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.tiled_bias_act_f32)
+                    .arg(&a_dev)
+                    .arg(&b_dev)
+                    .arg(&bias_dev)
+                    .arg(&mut c_dev.as_view_mut())
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .arg(&has_bias)
+                    .arg(&act_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+            // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+            // ため、論理長ビュー（`as_view()`）を渡す。
+            let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
+            Ok(c_host)
+        })
     }
 
     /// WMMA（Tensor Core）を用いた TF32 GEMM を実行する。C = A @ B（`m x k` @
@@ -3603,36 +3639,39 @@ impl CudaGemm {
             return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        let mut c_dev = self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            let mut c_dev = self
+                .stream
+                .alloc_zeros::<f32>((m as usize) * (n as usize))?;
 
-        let cfg = wmma_tf32_launch_config(m, n);
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+            let cfg = wmma_tf32_launch_config(m, n);
+            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
-        // （a_dev/b_dev/c_dev・m_i/n_i/k_i）はホスト側検証
-        // （validate_gemm_dims・validate_wmma_tf32_k_bound）済みの m/n/k から
-        // 導出しており、カーネル内の手動境界チェック（guarded load・
-        // エピローグ store のガード付きコピー。kernels.rs の
-        // WMMA_TF32_F32 ドキュメンテーションコメント参照、REQ-8）と
-        // 合わせて OOB 読み書きが起きない根拠とする。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&mut c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。
-        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
-        Ok(c_host)
+            // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
+            // （a_dev/b_dev/c_dev・m_i/n_i/k_i）はホスト側検証
+            // （validate_gemm_dims・validate_wmma_tf32_k_bound）済みの m/n/k から
+            // 導出しており、カーネル内の手動境界チェック（guarded load・
+            // エピローグ store のガード付きコピー。kernels.rs の
+            // WMMA_TF32_F32 ドキュメンテーションコメント参照、REQ-8）と
+            // 合わせて OOB 読み書きが起きない根拠とする。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&a_dev)
+                    .arg(&b_dev)
+                    .arg(&mut c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。
+            crate::memory::readback(&self.stream, &c_dev)
+        })
     }
 
     /// WMMA TF32 opt カーネル専用の起動手続き（TASK-11.1d・#63）。
@@ -3656,36 +3695,39 @@ impl CudaGemm {
             return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        let mut c_dev = self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            let mut c_dev = self
+                .stream
+                .alloc_zeros::<f32>((m as usize) * (n as usize))?;
 
-        let cfg = wmma_tf32_opt_launch_config(m, n);
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+            let cfg = wmma_tf32_opt_launch_config(m, n);
+            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: run_wmma_f32_kernel と同一の根拠。カーネル引数
-        // （a_dev/b_dev/c_dev・m_i/n_i/k_i）はホスト側検証
-        // （validate_gemm_dims・validate_wmma_tf32_opt_k_bound）済みの
-        // m/n/k から導出しており、opt カーネル内の手動境界チェック
-        // （guarded load・エピローグ store のガード付きコピー。
-        // kernels_wmma_opt.rs 参照、REQ-8）と合わせて OOB 読み書きが
-        // 起きない根拠とする。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&mut c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。
-        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
-        Ok(c_host)
+            // SAFETY: run_wmma_f32_kernel と同一の根拠。カーネル引数
+            // （a_dev/b_dev/c_dev・m_i/n_i/k_i）はホスト側検証
+            // （validate_gemm_dims・validate_wmma_tf32_opt_k_bound）済みの
+            // m/n/k から導出しており、opt カーネル内の手動境界チェック
+            // （guarded load・エピローグ store のガード付きコピー。
+            // kernels_wmma_opt.rs 参照、REQ-8）と合わせて OOB 読み書きが
+            // 起きない根拠とする。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&a_dev)
+                    .arg(&b_dev)
+                    .arg(&mut c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。
+            crate::memory::readback(&self.stream, &c_dev)
+        })
     }
 
     /// WMMA TF32 opt-staged カーネル専用の起動手続き（イシュー #500）。
@@ -3709,36 +3751,39 @@ impl CudaGemm {
             return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        let mut c_dev = self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            let mut c_dev = self
+                .stream
+                .alloc_zeros::<f32>((m as usize) * (n as usize))?;
 
-        let cfg = wmma_tf32_staged_launch_config(m, n);
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+            let cfg = wmma_tf32_staged_launch_config(m, n);
+            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: run_wmma_tf32_opt_kernel と同一の根拠。カーネル引数
-        // （a_dev/b_dev/c_dev・m_i/n_i/k_i）はホスト側検証
-        // （validate_gemm_dims・validate_wmma_tf32_staged_k_bound）済みの
-        // m/n/k から導出しており、staged カーネル内の手動境界チェック
-        // （cp.async src-size ゼロ充填・エピローグ store のガード付き
-        // コピー。kernels_wmma_opt.rs::WMMA_TF32_F32_STAGED_BODY 参照、
-        // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&mut c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。
-        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
-        Ok(c_host)
+            // SAFETY: run_wmma_tf32_opt_kernel と同一の根拠。カーネル引数
+            // （a_dev/b_dev/c_dev・m_i/n_i/k_i）はホスト側検証
+            // （validate_gemm_dims・validate_wmma_tf32_staged_k_bound）済みの
+            // m/n/k から導出しており、staged カーネル内の手動境界チェック
+            // （cp.async src-size ゼロ充填・エピローグ store のガード付き
+            // コピー。kernels_wmma_opt.rs::WMMA_TF32_F32_STAGED_BODY 参照、
+            // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&a_dev)
+                    .arg(&b_dev)
+                    .arg(&mut c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。
+            crate::memory::readback(&self.stream, &c_dev)
+        })
     }
 
     /// f32 カーネル共通の起動手続き（naive/tiled/tiled pipeline 共通から
@@ -3764,6 +3809,44 @@ impl CudaGemm {
     /// `launch_tiled_pipeline_f32` と同じ `tiled_pipeline_launch_config`
     /// を使うようにした。naive/tiled は従来どおり `launch_config(m, n,
     /// NAIVE_BLOCK_DIM/TILED_BLOCK_DIM)` を呼び出し元で構築する。
+    /// `CudaGemm` の driver 呼び出し（H2D 転送・カーネル起動・D2H
+    /// readback・確保・解放）を CUDA Graph capture 排他へ参加させる共通
+    /// ヘルパー（`ops.rs::CudaBackendOps::with_driver_call`／
+    /// `memory.rs::CudaMemory::with_driver_call` と同じ設計。codex-review
+    /// P0 指摘対応・PR #1390 是正）。
+    ///
+    /// `run_naive_f32`／`run_tiled_f32` 等の公開低レベル API は
+    /// `CudaBackendOps` を経由せず crate 外から直接呼び出せるため、
+    /// 従来はこれらの呼び出しが `context_cache::begin_driver_call` の
+    /// capture 排他検査を一切通らず、共有ストリームへ直接転送・確保・
+    /// カーネル起動を発行していた（別スレッドが SGD capture 中でも
+    /// 拒否されず、drain・拒否を迂回して一時バッファ等の無関係な操作が
+    /// graph に混入しうる欠陥。codex-review 指摘）。本ヘルパーを各公開
+    /// エントリの本体先頭で呼ぶことで、直接構築・`ops.rs` 経由いずれの
+    /// 呼び出し経路でも同じ排他区間を通るようにする。
+    ///
+    /// `resource_generations` は空スライス（`self` が保持する `stream`／
+    /// `allocator` はホスト `Tensor`／`&[f32]` 引数のみを読み書きし、
+    /// 呼び出しを跨いで生存する既存 `DeviceBuffer` を検査対象に持たない
+    /// ため。`memory.rs`／`ops.rs` の host-only 演算と同じ扱い）。
+    ///
+    /// `f` の呼び出しより先に `CallToken` を束縛することで、Rust の drop
+    /// 順序（宣言の逆順）により `f` 内部で確保するデバイスバッファ
+    /// （`a_dev`／`b_dev`／`c_dev` 等。`run_f32_kernel` 参照）の解放が
+    /// 必ずこのトークンの生存区間の内側で起こる（`ops.rs::with_driver_call`
+    /// のコメント「解放」節と同じ設計判断）。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        let token = context_cache::begin_driver_call(self.ordinal, &[]).map_err(|e| {
+            CudaError::CaptureExclusionRejected {
+                detail: e.to_string(),
+            }
+        })?;
+        context_cache::observe_cuda_result(self.ordinal, &token, f())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_f32_kernel(
         &self,
@@ -3799,50 +3882,59 @@ impl CudaGemm {
             return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        // イシュー #1020: 出力バッファはサイズクラス別プール
-        // （`crate::pool::CudaAllocator`）経由で確保する（都度
-        // `alloc_zeros`／解放していた固定費の削減。#1008 実測が主因の
-        // 1 つとして指摘）。naive/tiled いずれのカーネルも `if (row < m
-        // && col < n)` の書き込みガード内で全 `m*n` 要素を必ず埋める
-        // （`kernels.rs` 参照）ため `alloc_uninit_f32` を使う（前利用
-        // データの残留は起動直後に全要素上書きされ露出しない。OWASP A02
-        // ではなく `docs/backend-cuda-pool-allocator-decision.md` §「`
-        // alloc_uninit` の適用」の確認済みケース）。
-        let mut c_dev = self
-            .allocator
-            .alloc_uninit_f32((m as usize) * (n as usize))?;
+        // codex-review P0 指摘対応（PR #1390 是正）: 以降が実際に driver へ
+        // 触れる区間（H2D 転送・確保・カーネル起動・readback）のため
+        // `Self::with_driver_call` で capture 排他へ参加させる（本関数
+        // doc コメント「共通の起動手続き」参照。`with_driver_call` doc
+        // コメント「解放」節のとおり、`_token`〈クロージャの捕獲経由で
+        // `f` 実行中ずっと生存〉により a_dev/b_dev/c_dev の解放もこの
+        // 排他区間の内側に収まる）。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            // イシュー #1020: 出力バッファはサイズクラス別プール
+            // （`crate::pool::CudaAllocator`）経由で確保する（都度
+            // `alloc_zeros`／解放していた固定費の削減。#1008 実測が主因の
+            // 1 つとして指摘）。naive/tiled いずれのカーネルも `if (row < m
+            // && col < n)` の書き込みガード内で全 `m*n` 要素を必ず埋める
+            // （`kernels.rs` 参照）ため `alloc_uninit_f32` を使う（前利用
+            // データの残留は起動直後に全要素上書きされ露出しない。OWASP A02
+            // ではなく `docs/backend-cuda-pool-allocator-decision.md` §「`
+            // alloc_uninit` の適用」の確認済みケース）。
+            let mut c_dev = self
+                .allocator
+                .alloc_uninit_f32((m as usize) * (n as usize))?;
 
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/b.len()/
-        // (m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の 5 個・型・
-        // 個数がホスト側検証（validate_gemm_dims、tiled はさらに
-        // validate_tiled_k_bound）済みの m/n/k と 1:1 対応し、カーネル内の
-        // 手動境界チェック（naive: `if (row < m && col < n)`。tiled: タイル
-        // ロード時の三項ガード＋書き込み時の同条件。kernels.rs 参照、
-        // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。グリッド
-        // 次元は `div_ceil` で m/n を包含するよう構築しており
-        // （launch_config）、末尾ブロックの余剰スレッドはカーネル内境界
-        // チェックで弾かれる。`c_dev.as_view_mut()` は論理長 `m*n` の
-        // ビュー（サイズクラス丸めによる余剰容量は含まない）。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&mut c_dev.as_view_mut())
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
-        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
-        // ため、論理長ビュー（`as_view()`）を渡す。
-        let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
-        Ok(c_host)
+            // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/b.len()/
+            // (m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の 5 個・型・
+            // 個数がホスト側検証（validate_gemm_dims、tiled はさらに
+            // validate_tiled_k_bound）済みの m/n/k と 1:1 対応し、カーネル内の
+            // 手動境界チェック（naive: `if (row < m && col < n)`。tiled: タイル
+            // ロード時の三項ガード＋書き込み時の同条件。kernels.rs 参照、
+            // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。グリッド
+            // 次元は `div_ceil` で m/n を包含するよう構築しており
+            // （launch_config）、末尾ブロックの余剰スレッドはカーネル内境界
+            // チェックで弾かれる。`c_dev.as_view_mut()` は論理長 `m*n` の
+            // ビュー（サイズクラス丸めによる余剰容量は含まない）。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&a_dev)
+                    .arg(&b_dev)
+                    .arg(&mut c_dev.as_view_mut())
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+            // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+            // ため、論理長ビュー（`as_view()`）を渡す。
+            let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
+            Ok(c_host)
+        })
     }
 
     /// VJP 専用 NT/TN 転置入口（イシュー #1214）の内部ヘルパー: `src`
@@ -4075,34 +4167,39 @@ impl CudaGemm {
             return Ok(vec![f16::ZERO; (m as usize) * (n as usize)]);
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        let mut c_dev = self
-            .stream
-            .alloc_zeros::<f16>((m as usize) * (n as usize))?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `run_f32_kernel` と
+        // 同一の根拠で `Self::with_driver_call` を経由する（上記コメント
+        // 参照）。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            let mut c_dev = self
+                .stream
+                .alloc_zeros::<f16>((m as usize) * (n as usize))?;
 
-        let cfg = launch_config(m, n, block_dim);
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+            let cfg = launch_config(m, n, block_dim);
+            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: run_f32_kernel と同一の根拠（上記コメント参照）。カーネル
-        // 引数の型（__half*/int）・個数・デバイスバッファ長は
-        // validate_gemm_dims（tiled はさらに validate_tiled_k_bound）で
-        // 検証済みの m/n/k から導出しており、カーネル内手動境界チェック
-        // （REQ-8）と合わせて OOB を防ぐ。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&mut c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。
-        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
-        Ok(c_host)
+            // SAFETY: run_f32_kernel と同一の根拠（上記コメント参照）。カーネル
+            // 引数の型（__half*/int）・個数・デバイスバッファ長は
+            // validate_gemm_dims（tiled はさらに validate_tiled_k_bound）で
+            // 検証済みの m/n/k から導出しており、カーネル内手動境界チェック
+            // （REQ-8）と合わせて OOB を防ぐ。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&a_dev)
+                    .arg(&b_dev)
+                    .arg(&mut c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。
+            let c_host = crate::memory::readback(&self.stream, &c_dev)?;
+            Ok(c_host)
+        })
     }
 
     /// A・B（f32）をホスト→デバイスへ転送する（tiled f32／WMMA(TF32) の
@@ -4119,17 +4216,25 @@ impl CudaGemm {
         a: &[f32],
         b: &[f32],
     ) -> Result<(CudaSlice<f32>, CudaSlice<f32>), CudaError> {
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        Ok((a_dev, b_dev))
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            Ok((a_dev, b_dev))
+        })
     }
 
     /// C 用のゼロ初期化デバイスバッファを確保する（[`Self::upload_f32`] と
     /// 同じ理由で公開する。tiled f32・WMMA(TF32) で共有）。
     pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<CudaSlice<f32>, CudaError> {
-        Ok(self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?)
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        self.with_driver_call(|| {
+            Ok(self
+                .stream
+                .alloc_zeros::<f32>((m as usize) * (n as usize))?)
+        })
     }
 
     /// デバイス常駐済みの A/B/C バッファに対して tiled f32 カーネルを
@@ -4167,27 +4272,32 @@ impl CudaGemm {
         let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        //
         // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
         // （a_dev/b_dev/c_dev・m_i/n_i/k_i）は上記で検証済みの m/n/k
         // と 1:1 対応し、カーネル内の手動境界チェック（REQ-8。classic 版は
         // `kernels.rs`、pipeline 版は `kernels_tiled_pipeline.rs` の
         // cp.async src_size ゼロ充填・エピローグ guarded store）と合わせて
         // OOB 読み書きが起きない根拠とする。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
-        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
-        // 委ねる（設計文書 §3〜§4）。
-        Ok(())
+        self.with_driver_call(|| {
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(a_dev)
+                    .arg(b_dev)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+            // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+            // 委ねる（設計文書 §3〜§4）。
+            Ok(())
+        })
     }
 
     /// [`Self::launch_tiled_f32`] のプール確保出力版（イシュー #1182
@@ -4279,19 +4389,24 @@ impl CudaGemm {
         let cfg = tiled_f32_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        //
         // SAFETY: launch_tiled_f32 と同一の根拠。
-        unsafe {
-            self.stream
-                .launch_builder(&self.tiled_f32)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        Ok(())
+        self.with_driver_call(|| {
+            unsafe {
+                self.stream
+                    .launch_builder(&self.tiled_f32)
+                    .arg(a_dev)
+                    .arg(b_dev)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            Ok(())
+        })
     }
 
     /// デバイス常駐済みの A/B/C バッファに対して bias 加算・activation
@@ -4359,29 +4474,34 @@ impl CudaGemm {
 
         BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
 
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        //
         // SAFETY: run_f32_kernel と同一の根拠（`launch_tiled_f32` の
         // 該当コメント参照）。追加引数（bias_arg・has_bias・act_i）は
         // 上記で検証済みの `n`／`bias_dev` の有無と 1:1 対応し、カーネル
         // 内 epilogue は書き込みガード（`row < m && col < n`）の内側でのみ
         // `bias[col]` を参照するため OOB は発生しない（REQ-8）。
-        unsafe {
-            self.stream
-                .launch_builder(&self.tiled_bias_act_f32)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(bias_arg)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .arg(&has_bias)
-                .arg(&act_i)
-                .launch(cfg)?;
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
-        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
-        // 委ねる（設計文書 §3〜§4）。
-        Ok(())
+        self.with_driver_call(|| {
+            unsafe {
+                self.stream
+                    .launch_builder(&self.tiled_bias_act_f32)
+                    .arg(a_dev)
+                    .arg(b_dev)
+                    .arg(bias_arg)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .arg(&has_bias)
+                    .arg(&act_i)
+                    .launch(cfg)?;
+            }
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+            // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+            // 委ねる（設計文書 §3〜§4）。
+            Ok(())
+        })
     }
 
     /// [`Self::launch_tiled_bias_act_f32`] の常駐ビュー版（イシュー
@@ -4655,75 +4775,81 @@ impl CudaGemm {
         validate_output_len(c_dev.len(), m, n)?;
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        //
         // SAFETY: run_wmma_f32_kernel／run_wmma_tf32_opt_kernel／
         // run_wmma_tf32_staged_kernel と同一の根拠。カーネル引数は
         // 上記・各分岐内で検証済みの m/n/k と 1:1 対応し、カーネル内の
         // 手動境界チェック（REQ-8）と合わせて OOB 読み書きが起きない
         // 根拠とする。
-        if let Some(func) = self
-            .wmma_tf32_staged
-            .as_ref()
-            .filter(|_| wmma_tf32_staged_alignment_ok(n, k))
-        {
-            validate_wmma_tf32_staged_k_bound(k)?;
-            // イシュー #856: run_wmma_tf32 と同じサイズ条件付き swizzle
-            // 選択（`should_launch_wmma_tf32_staged_swizzle`）を適用する。
-            let kernel = if self.should_launch_wmma_tf32_staged_swizzle(m, n, k) {
-                self.wmma_tf32_staged_swizzle.as_ref().unwrap_or(func)
+        self.with_driver_call(|| {
+            if let Some(func) = self
+                .wmma_tf32_staged
+                .as_ref()
+                .filter(|_| wmma_tf32_staged_alignment_ok(n, k))
+            {
+                validate_wmma_tf32_staged_k_bound(k)?;
+                // イシュー #856: run_wmma_tf32 と同じサイズ条件付き swizzle
+                // 選択（`should_launch_wmma_tf32_staged_swizzle`）を適用する。
+                let kernel = if self.should_launch_wmma_tf32_staged_swizzle(m, n, k) {
+                    self.wmma_tf32_staged_swizzle.as_ref().unwrap_or(func)
+                } else {
+                    func
+                };
+                let cfg = wmma_tf32_staged_launch_config(m, n);
+                unsafe {
+                    self.stream
+                        .launch_builder(kernel)
+                        .arg(a_dev)
+                        .arg(b_dev)
+                        .arg(c_dev)
+                        .arg(&m_i)
+                        .arg(&n_i)
+                        .arg(&k_i)
+                        .launch(cfg)?;
+                }
+            } else if let Some(func) = self.wmma_tf32_opt.as_ref() {
+                validate_wmma_tf32_opt_k_bound(k)?;
+                let cfg = wmma_tf32_opt_launch_config(m, n);
+                unsafe {
+                    self.stream
+                        .launch_builder(func)
+                        .arg(a_dev)
+                        .arg(b_dev)
+                        .arg(c_dev)
+                        .arg(&m_i)
+                        .arg(&n_i)
+                        .arg(&k_i)
+                        .launch(cfg)?;
+                }
+            } else if let Some(func) = self.wmma_tf32.as_ref() {
+                validate_wmma_tf32_k_bound(k)?;
+                let cfg = wmma_tf32_launch_config(m, n);
+                unsafe {
+                    self.stream
+                        .launch_builder(func)
+                        .arg(a_dev)
+                        .arg(b_dev)
+                        .arg(c_dev)
+                        .arg(&m_i)
+                        .arg(&n_i)
+                        .arg(&k_i)
+                        .launch(cfg)?;
+                }
             } else {
-                func
-            };
-            let cfg = wmma_tf32_staged_launch_config(m, n);
-            unsafe {
-                self.stream
-                    .launch_builder(kernel)
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
-                    .arg(&m_i)
-                    .arg(&n_i)
-                    .arg(&k_i)
-                    .launch(cfg)?;
+                return Err(CudaError::WmmaUnavailable {
+                    detail: "WMMA(TF32) kernel unavailable (neither opt nor basic kernel \
+                             loaded); launch_wmma_tf32 called without a prior successful \
+                             run_wmma_tf32 probe"
+                        .to_string(),
+                });
             }
-        } else if let Some(func) = self.wmma_tf32_opt.as_ref() {
-            validate_wmma_tf32_opt_k_bound(k)?;
-            let cfg = wmma_tf32_opt_launch_config(m, n);
-            unsafe {
-                self.stream
-                    .launch_builder(func)
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
-                    .arg(&m_i)
-                    .arg(&n_i)
-                    .arg(&k_i)
-                    .launch(cfg)?;
-            }
-        } else if let Some(func) = self.wmma_tf32.as_ref() {
-            validate_wmma_tf32_k_bound(k)?;
-            let cfg = wmma_tf32_launch_config(m, n);
-            unsafe {
-                self.stream
-                    .launch_builder(func)
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
-                    .arg(&m_i)
-                    .arg(&n_i)
-                    .arg(&k_i)
-                    .launch(cfg)?;
-            }
-        } else {
-            return Err(CudaError::WmmaUnavailable {
-                detail: "WMMA(TF32) kernel unavailable (neither opt nor basic kernel loaded); \
-                         launch_wmma_tf32 called without a prior successful run_wmma_tf32 probe"
-                    .to_string(),
-            });
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
-        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
-        // 委ねる（設計文書 §3〜§4）。
-        Ok(())
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+            // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+            // 委ねる（設計文書 §3〜§4）。
+            Ok(())
+        })
     }
 
     /// C（f32）をデバイス→ホストへ転送する（[`Self::upload_f32`] と同じ
@@ -4732,7 +4858,9 @@ impl CudaGemm {
     /// 同期点（#1013）: 常駐 `launch_*` は非同期投入のみで完了を待たない
     /// ため、本関数が readback ヘルパー経由で完了を確定する。
     pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        crate::memory::readback(&self.stream, c_dev)
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013）。
@@ -4744,7 +4872,9 @@ impl CudaGemm {
     /// 明示的に復元するための公開 API であり、本番ディスパッチ
     /// （`ops.rs`）からは呼ばれない。
     pub fn synchronize(&self) -> Result<(), CudaError> {
-        Ok(self.stream.synchronize()?)
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // 参照。
+        self.with_driver_call(|| Ok(self.stream.synchronize()?))
     }
 }
 
