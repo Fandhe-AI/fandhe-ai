@@ -239,22 +239,67 @@ DGX N=2048（16 MiB）で 2.8〜3.0 ms・M4 Max で 79 µs という実機非対
 
 ### 計測方法
 
-- **Layer B（区間別）**: `cargo test -p fandhe-ai-backend-cpu --release --
-  --ignored gemm_reuse_phase_diag_cpu --nocapture` を before/after で実行し
-  `alloc_c`／`ops_gemm`／`tape_matmul` 区間を比較する
-  （`crates/backend-cpu/src/gemm_reuse_phase_diag_tests.rs`）
-- **Layer A（実践規模）**: `scripts/bench/framework-compare/run_gemm_gate_cpu.sh`
-  を `GEMM_GATE_PATCH_FACADE_PATH` で HEAD への path patch を当てて
-  `--phases` を含め実行する。ピンは `fandhe-ai =0.7.0`（registry 版）を
-  比較対象として維持する。両実機（DGX Spark GB10・Apple M4 Max）で実施し、
-  `RAYON_NUM_THREADS` 未設定・`host-view-readout` OFF・`--device-checksum`
-  不使用という §2（#1292 に同じ）の計測プロトコルを踏襲する
+- **Layer B（区間別）の接続に必要な変更（#1299 実装時に必須）**:
+  `gemm_reuse_phase_diag_tests.rs` の `alloc_c`／`kernel`／`tensor_wrap`
+  の 3 区間（`measure_one_phase_trial`。本ファイル冒頭「対応」表参照）は
+  `CpuBackendOps::gemm` を呼ばず `vec![0.0f32; n*n]` → `gemm_blis_parallel`
+  → `Tensor::new` を**独立に再現**したコードであるため、案 1a／1b の
+  変更（`ops.rs:472`・`mod.rs:483`）を `CpuBackendOps::gemm` 側にのみ
+  適用しても、この 3 区間の実測値は旧実装のまま変わらない。したがって
+  before/after 比較は次のいずれかの手順を踏む必要がある:
+  - (i) `alloc_c`／`kernel`／`tensor_wrap` の 3 区間を**変更後の確保・
+    ゼロ埋め方式を反映するよう `measure_one_phase_trial` 自体を
+    #1299 で更新**したうえで比較する（`ops_gemm`／`tape_matmul` は
+    `CpuBackendOps::gemm`／`Var::matmul` を直接呼ぶため無改修で追従
+    する）、または
+  - (ii) 3 区間を更新しない場合は、本番経路をそのまま呼ぶ
+    `ops_gemm`（`ops.gemm(a_tensor, b_tensor)` 呼び出し 1 回。
+    `alloc_c`+`kernel`+`tensor_wrap` の本番合成値に相当）のみを
+    before/after 比較の基準とし、`alloc_c` 単独の増減は参考値
+    （旧実装のレプリカのまま）として扱う
+  #1299 は診断テストの更新方針（(i)/(ii) のどちらを採るか）を明記した
+  うえで `cargo test -p fandhe-ai-backend-cpu --release -- --ignored
+  gemm_reuse_phase_diag_cpu --nocapture` を before/after で実行する。
+- **Layer A（実践規模）**: `--phases` は診断専用フラグであり
+  `run_gemm_gate_cpu.sh`（`run_gemm_gate.sh` 経由）の標準スイープには
+  組み込まれていない（`scripts/bench/framework-compare/README.md`
+  「`gemm --mode reuse --phases`」節）。そのため `run_gemm_gate_cpu.sh`
+  ではなく `bench-fandhe` バイナリを直接、`run_gemm_gate.sh` と同じ
+  `--config patch.crates-io.fandhe-ai.path="<crates/facade 絶対パス>"`
+  を付けてビルド・実行する:
+
+  ```bash
+  cargo build --release -p bench-fandhe \
+    --config 'patch.crates-io.fandhe-ai.path="<crates/facade 絶対パス>"'
+  cargo run --release -p bench-fandhe --config \
+    'patch.crates-io.fandhe-ai.path="<crates/facade 絶対パス>"' -- \
+    --task gemm --device cpu --size <N> --mode reuse --phases
+  ```
+
+  `<N>` は 512/1024/2048 を before/after で実行する。ピンは
+  `fandhe-ai =0.7.0`（registry 版）を比較対象として維持する（この直接
+  実行は path patch 適用時〈参考系列〉のみが対象で、registry 版
+  〈正式系列〉との比較は既存 gate 判定〈#1041 指標。後述〉に委ねる）。
+  両実機（DGX Spark GB10・Apple M4 Max）で実施し、`RAYON_NUM_THREADS`
+  未設定・`host-view-readout` OFF・`--device-checksum` 不使用という
+  §2（#1292 に同じ）の計測プロトコルを踏襲する
 
 ### 判定基準
 
 - N=512 で非後退（rayon 起動オーバーヘッドによる劣化がないこと）
 - DGX N=2048 で `alloc_c` 区間が削減されること
-- checksum が全 N で bit 一致（`parity_fail_count == 0`）
+- **本設計の変更前後で出力が bit 完全一致すること**: §5 の回帰テスト
+  （`to_bits()` 全要素比較）で検証する。`--phases` 実行時に得られる
+  checksum（f64 全要素和）は decimal 表示のため桁落ちで一致しても
+  bit 一致の証明にはならず、あくまで目視での粗い非回帰確認に留める
+  （bit 完全一致の正は §5 のテストであり checksum ではない）
+- **`parity_fail_count == 0`（gemm crate 比較）は上記の bit 一致とは
+  別の指標**であり、CPU バックエンドと `gemm` crate の出力を要素単位で
+  相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満の複合判定で突合する
+  既存の parity テスト（`.claude/rules/coding-rust.md`「バックエンド間
+  数値一致は統一複合判定」節）の合格を指す。本設計は同一実装内の
+  ゼロ埋め方式変更のみで `gemm` crate 側には触れないため、この判定は
+  bit 一致（本設計変更前後）が成立すれば自動的に非後退となる
 - #1041 が定義する gate 指標（gemm crate 比）が非後退であること
   （本設計単独での達成は見込まないが、後退させないことを条件とする）
 
