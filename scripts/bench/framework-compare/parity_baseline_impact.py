@@ -731,7 +731,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    print(render_markdown(rows, args.scale_mode))
+    # `render_markdown` は内部の `classify()` 経由で `threshold` 省略時に
+    # `get_absolute_rescue_threshold()`（正本 `crates/backend-cpu/src/
+    # parity.rs` を実ファイル読み取り）を呼ぶため、`parse_baselines` とは
+    # 別に `BaselineParseError` を送出しうる（正本ファイル欠落・宣言スタイル
+    # 変更）。`parse_baselines` 同様 fail-closed で捕捉する（PR #1421
+    # レビュー指摘）。
+    try:
+        output = render_markdown(rows, args.scale_mode)
+    except BaselineParseError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(output)
     return 0
 
 

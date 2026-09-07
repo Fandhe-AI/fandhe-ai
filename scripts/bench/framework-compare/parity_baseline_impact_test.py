@@ -246,11 +246,26 @@ class ComputeScaleTest(unittest.TestCase):
 
 
 class ClassifyTest(unittest.TestCase):
+    """`threshold` は既定 `None` だと `classify()` 内部で
+    `get_absolute_rescue_threshold()`（正本 `crates/backend-cpu/src/
+    parity.rs` を実ファイル読み取り）へフォールバックし、本テストが前提と
+    する fixture-only 環境（実ファイル非依存）が崩れる（codex-review
+    指摘・PR #1421）。本クラスの全ケースは実測済みの正本値（1e-5。
+    `AbsoluteRescueThresholdTest.test_matches_backend_cpu_contract` で
+    別途機械照合済み）を `threshold=` として明示し、実ファイル読み取りに
+    依存しない。
+    """
+
+    _THRESHOLD = 1e-5  # 正本 ABSOLUTE_RESCUE_THRESHOLD の実測値と同一。
+
     def test_ceiling_none_is_unclassifiable(self):
-        # bound は既存救済閾値（既定 1e-5）以上でないと no-op 判定が先に
+        # bound は既存救済閾値（1e-5）以上でないと no-op 判定が先に
         # 確定してしまう（`test_ceiling_none_but_noop_is_still_noop` 参照）
         # ため、ここでは 1e-5 以上の bound を使う。
-        self.assertEqual(pbi.classify(1e-4, None), pbi.UNCLASSIFIABLE_CEILING)
+        self.assertEqual(
+            pbi.classify(1e-4, None, threshold=self._THRESHOLD),
+            pbi.UNCLASSIFIABLE_CEILING,
+        )
 
     def test_ceiling_none_but_noop_is_still_noop(self):
         # codex-review 指摘・PR #1421 P2-2: `ceiling is None` の判定は
@@ -258,32 +273,46 @@ class ClassifyTest(unittest.TestCase):
         # 有無に関わらず no-op が確定する（実データでは
         # `WmmaTf32Opt 512x512x512 seed=0x7A0` がこのケースに該当し、旧
         # 実装では誤って「分類不能」になっていた）。
-        self.assertEqual(pbi.classify(1e-6, None), pbi.NO_OP)
+        self.assertEqual(
+            pbi.classify(1e-6, None, threshold=self._THRESHOLD), pbi.NO_OP
+        )
 
     def test_bound_below_1e5_strict_is_noop(self):
-        self.assertEqual(pbi.classify(9.999e-6, 1e-3), pbi.NO_OP)
+        self.assertEqual(
+            pbi.classify(9.999e-6, 1e-3, threshold=self._THRESHOLD), pbi.NO_OP
+        )
 
     def test_bound_equal_1e5_is_not_noop(self):
         # 境界（bound == 1e-5）は no-op に含めない（`d == 1e-5` の要素が
         # 候補側でのみ救済されうるため。既存救済は `d < 1e-5` の厳密不等号）。
-        self.assertNotEqual(pbi.classify(1e-5, 1e-3), pbi.NO_OP)
+        self.assertNotEqual(
+            pbi.classify(1e-5, 1e-3, threshold=self._THRESHOLD), pbi.NO_OP
+        )
 
     def test_ceiling_le_bound_is_full_rescue(self):
-        self.assertEqual(pbi.classify(1e-3, 1e-3), pbi.FULL_RESCUE)
-        self.assertEqual(pbi.classify(2e-3, 1e-3), pbi.FULL_RESCUE)
+        self.assertEqual(
+            pbi.classify(1e-3, 1e-3, threshold=self._THRESHOLD), pbi.FULL_RESCUE
+        )
+        self.assertEqual(
+            pbi.classify(2e-3, 1e-3, threshold=self._THRESHOLD), pbi.FULL_RESCUE
+        )
 
     def test_ceiling_gt_bound_is_partial(self):
-        self.assertEqual(pbi.classify(1e-4, 1e-3), pbi.PARTIAL)
+        self.assertEqual(
+            pbi.classify(1e-4, 1e-3, threshold=self._THRESHOLD), pbi.PARTIAL
+        )
 
     def test_bound_is_upper_downgrades_full_rescue_to_partial(self):
         # codex-review 指摘・PR #1421 P2-1: `--scale-mode upper-bound`
         # （M=1 の事前上界）由来の `bound` は実際の閾値を過大評価するため、
         # `ceiling <= bound` が成立しても「全救済」を確定できない。
         self.assertEqual(
-            pbi.classify(1e-3, 1e-3, bound_is_upper=True), pbi.PARTIAL
+            pbi.classify(1e-3, 1e-3, bound_is_upper=True, threshold=self._THRESHOLD),
+            pbi.PARTIAL,
         )
         self.assertEqual(
-            pbi.classify(2e-3, 1e-3, bound_is_upper=True), pbi.PARTIAL
+            pbi.classify(2e-3, 1e-3, bound_is_upper=True, threshold=self._THRESHOLD),
+            pbi.PARTIAL,
         )
 
     def test_bound_is_upper_does_not_affect_noop(self):
@@ -291,7 +320,10 @@ class ClassifyTest(unittest.TestCase):
         # （真の bound はさらに小さいだけなので `bound < threshold` から
         # `真の bound < threshold` が導ける）。
         self.assertEqual(
-            pbi.classify(9.999e-6, 1e-3, bound_is_upper=True), pbi.NO_OP
+            pbi.classify(
+                9.999e-6, 1e-3, bound_is_upper=True, threshold=self._THRESHOLD
+            ),
+            pbi.NO_OP,
         )
 
     def test_explicit_threshold_overrides_extracted_default(self):
