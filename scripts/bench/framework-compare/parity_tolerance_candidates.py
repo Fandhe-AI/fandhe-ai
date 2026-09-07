@@ -290,6 +290,17 @@ def evaluate_b(metrics: list[ElementMetrics], candidate: CandidateB, use: str) -
     return sum(1 for m in metrics if m.d_ex <= bound_fn(m))
 
 
+def _escape_md_cell(text: str) -> str:
+    """Markdown テーブルのセル値中の `|` をエスケープする。
+
+    候補名（例: `CandidateA4.name` の `"A-4 (K*u*sum|ab|)"`）は英語表記の
+    数式表現として `|`（絶対値記号）を含みうる。エスケープせず表セルへ
+    埋め込むと `|` が列区切りとして解釈され、後続列（bound・fail 数）が
+    ずれて壊れた表になる（イシュー #1237 codex-review 指摘・P2）。
+    """
+    return text.replace("|", "\\|")
+
+
 def render_markdown(
     metrics_by_label: dict[str, list[ElementMetrics]],
     k: int,
@@ -344,7 +355,7 @@ def render_markdown(
         sample_metric = next(iter(metrics_by_label.values()))[0]
         bound_repr = f"{cand.bound(sample_metric, k):.3e}"
         lines.append(
-            f"| {cand.name} | {bound_repr} | " + " | ".join(row_cells) + " | 適用可能 |"
+            f"| {_escape_md_cell(cand.name)} | {bound_repr} | " + " | ".join(row_cells) + " | 適用可能 |"
         )
     a4 = CandidateA4()
     row_cells = []
@@ -355,7 +366,7 @@ def render_markdown(
         row_cells.append(f"{fail}/{len(metrics)}")
     sample_metric = next(iter(metrics_by_label.values()))[0]
     lines.append(
-        f"| {a4.name} | {a4.bound(sample_metric, k):.3e} | " + " | ".join(row_cells) + " | 適用可能（緩すぎる参考値） |"
+        f"| {_escape_md_cell(a4.name)} | {a4.bound(sample_metric, k):.3e} | " + " | ".join(row_cells) + " | 適用可能（緩すぎる参考値） |"
     )
     lines.append("")
 
@@ -393,7 +404,7 @@ def render_markdown(
             cells_dex.append(f"{len(metrics) - rescued_dex}/{len(metrics)}")
         applicable, phase2 = runtime_note[cand.base_mode]
         lines.append(
-            f"| {cand.name} | " + " | ".join(cells_d) + " | " + " | ".join(cells_dex)
+            f"| {_escape_md_cell(cand.name)} | " + " | ".join(cells_d) + " | " + " | ".join(cells_dex)
             + f" | {applicable} | {phase2} |"
         )
     lines.append("")
@@ -428,6 +439,28 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.n < 1 or args.n > 8192:
         print(f"ERROR: --n は 1..8192 の範囲で指定する（受領: {args.n}）", file=sys.stderr)
+        return 2
+
+    # 同じ LABEL で --dump を複数指定すると、後段の dict 代入
+    # （`metrics_by_label[label] = ...`）で先の入力の計算結果が無言で
+    # 上書きされたまま正常終了してしまう（CUDA・CPU の入力に誤って同じ
+    # ラベルを付けた場合、一方の要素と fail 数が報告から静かに消える）。
+    # 引数解析の直後、実データ処理に入る前に重複を検出して fail-closed
+    # で拒否する（イシュー #1237 codex-review 指摘・P2）。
+    seen_labels: dict[str, str] = {}
+    dup_labels: set[str] = set()
+    for label, path in args.dump:
+        if label in seen_labels:
+            dup_labels.add(label)
+        else:
+            seen_labels[label] = path
+    if dup_labels:
+        for label in sorted(dup_labels):
+            print(
+                f"ERROR: --dump のラベル {label!r} が複数回指定されている"
+                "（LABEL は一意でなければならない）",
+                file=sys.stderr,
+            )
         return 2
 
     n = args.n

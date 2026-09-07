@@ -21,6 +21,7 @@ import importlib.util
 import io
 import math
 import os
+import re
 import struct
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -176,6 +177,55 @@ class ComputeMetricsSmokeTest(unittest.TestCase):
         self.assertAlmostEqual(metrics[0].d, abs_err, places=6)
 
 
+class EscapeMdCellTest(unittest.TestCase):
+    """`_escape_md_cell` が Markdown テーブルの列区切り `|` を破壊しないことを
+    確認する（イシュー #1237 codex-review 指摘・P2。`CandidateA4.name` の
+    `"A-4 (K*u*sum|ab|)"` が実例）。
+    """
+
+    def test_pipe_escaped(self):
+        self.assertEqual(ptc._escape_md_cell("A-4 (K*u*sum|ab|)"), "A-4 (K*u*sum\\|ab\\|)")
+
+    def test_no_pipe_unchanged(self):
+        self.assertEqual(ptc._escape_md_cell("A-1 c=1.0 eps=2^-23 K*0.25"), "A-1 c=1.0 eps=2^-23 K*0.25")
+
+    def test_render_markdown_a4_row_has_expected_column_count(self):
+        # `render_markdown` が生成する候補 A 表で、A-4 行の `|` 区切り数が
+        # 他候補行と一致すること（エスケープ漏れがあれば列がずれて検出
+        # できる）を end-to-end で確認する。
+        n = 8
+        row, col = 2, 5
+        a_rows = parity_dump_truth.extract_rows_exact(parity_dump_truth.SEED_A, n, {row})
+        b_cols = parity_dump_truth.extract_cols_exact(parity_dump_truth.SEED_B, n, {col})
+        fma_f32, _partials = parity_dump_truth.fma_sequential_f32_exact(a_rows[row], b_cols[col])
+        ref_bits = struct.unpack("<I", struct.pack("<f", fma_f32))[0]
+        idx = row * n + col
+        line = (
+            f"PARITY_DUMP call=1 n={n} idx={idx} row={row} col={col} "
+            f"ref={fma_f32!r} ref_bits=0x{ref_bits:08x} "
+            f"actual={fma_f32!r} actual_bits=0x{ref_bits:08x} "
+            "abs=0.0 rel=0.0"
+        )
+        error_count = [0]
+        rows = list(parity_dump_truth.parse_dump_lines([line], n, error_count=error_count))
+        metrics = ptc.compute_metrics(rows, n)
+        doc = ptc.render_markdown({"cuda": metrics}, n)
+        table_lines = [ln for ln in doc.splitlines() if ln.startswith("| A-")]
+        self.assertTrue(table_lines, "候補 A 表の行が見つからない")
+        # エスケープされた `\|` は列区切りではないため数えない
+        # （`_escape_md_cell` が正しく機能していれば A-4 行の `sum|ab|` 由来
+        # の `|` はすべて `\|` になり、生の列区切り数が他候補行と一致する）。
+        unescaped_pipe_re = re.compile(r"(?<!\\)\|")
+        pipe_counts = {len(unescaped_pipe_re.findall(ln)) for ln in table_lines}
+        self.assertEqual(
+            len(pipe_counts), 1, f"候補 A 表の列区切り数が行ごとに異なる: {table_lines}"
+        )
+        a4_lines = [ln for ln in table_lines if "A-4" in ln]
+        self.assertEqual(len(a4_lines), 1)
+        self.assertIn("sum\\|ab\\|", a4_lines[0])
+        self.assertNotIn("sum|ab|", a4_lines[0])
+
+
 class CliFailClosedTest(unittest.TestCase):
     def _run(self, args):
         out, err = io.StringIO(), io.StringIO()
@@ -262,6 +312,27 @@ class CliFailClosedTest(unittest.TestCase):
             self.assertEqual(code, 0, err)
         finally:
             os.unlink(f.name)
+
+    def test_duplicate_label_rejected(self):
+        # 同じ LABEL で --dump を複数指定すると、後段の
+        # `metrics_by_label[label] = ...` 代入で先の入力が無言で上書き
+        # される（CUDA・CPU に誤って同じラベルを付けると一方の要素と
+        # fail 数が報告から静かに消える）。引数解析後・実データ処理前に
+        # 重複を検出して fail-closed で拒否することを確認する（イシュー
+        # #1237 codex-review 指摘・P2）。
+        real_path = os.path.join(HERE, "parity_dump_truth.py")
+        code, _out, err = self._run(
+            [
+                "--n",
+                "8",
+                "--dump",
+                f"cuda={real_path}",
+                "--dump",
+                f"cuda={real_path}",
+            ]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("複数回指定", err)
 
     def test_corrupted_dump_rejected(self):
         n = 8
