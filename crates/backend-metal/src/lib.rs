@@ -390,6 +390,22 @@ mod gemm_bk32_diag_tests;
 // 追加のみ。ADOPT 時の `tile.rs` 変更は別途 docs 判断を経て行う）。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_bm128_diag_tests;
+// イシュー #1326 調査: Metal 4 `tensor<>`＋Metal Performance Primitives
+// （`matmul2d`）の可用性・`objc2-metal =0.3.2` バインディングからの
+// 到達性・純カーネル時間（GPU タイムスタンプ）を実測し、「完全自作
+// コア」（REQ-1）との整合をユーザーが判断するための材料を整備する
+// 診断テスト群。`crate::context::MetalContext`・`crate::buffer::
+// MetalBuffer`・`crate::pipeline::{compile_options, make_pipeline}`・
+// `crate::gemm_reuse_phase_diag_tests::{gen_square_ab, median_of}`・
+// `crate::gemm::MetalGemm::diag_encode_tiled_nn`・`crate::tile::
+// select_for_device` へ到達するため、既存診断テスト群と同じ理由で
+// クレートルートの兄弟モジュールとして配置する。`objc2` 系 FFI 型に
+// 触れるため同じ `cfg(all(test, target_os = "macos"))` を付ける。
+// プロダクションコード（`tile.rs`／`gemm.rs`／`shaders/gemm.metal`）は
+// 無変更（調査限定・診断テスト追加のみ。本番結線は本イシューの
+// スコープ外）。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_mpp_diag_tests;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
