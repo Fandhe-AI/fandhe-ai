@@ -171,6 +171,38 @@ pub(crate) struct PhaseSample {
     pub(crate) host_copy_secs: f64,
 }
 
+/// [`measure_one_phase_trial_with`] が呼び分けるカーネル種別（イシュー
+/// #1370。兄弟イシュー #1369 が追加した `MetalGemm::diag_encode_tiled_
+/// hfrag_nn`〈half フラグメント／f32 累算候補〉の純カーネル時間を、
+/// 本番 f32 経路 `diag_encode_tiled_nn` と同一の計測境界・同一の交互
+/// 測定ハーネス（`gemm_bk32_diag_tests::run_ab_pair` 系）で比較するため
+/// の切替。両バリアントとも `gemm::MetalGemm` の `#[cfg(test)]
+/// pub(crate)` 診断専用入口（1 バッチ・1 ラベルでのみエンコードし、
+/// バッファ確保・readback を計測対象に含めない契約）を呼ぶだけであり、
+/// `gemm.rs`／`tile.rs`／`shaders/gemm.metal` 側の本番経路は変更しない
+/// （AC-2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiagKernel {
+    /// 本番 f32 経路の診断入口（`MetalGemm::diag_encode_tiled_nn`）。
+    F32Tiled,
+    /// half フラグメント／f32 累算候補（イシュー #1369。
+    /// `MetalGemm::diag_encode_tiled_hfrag_nn`）。
+    Hfrag,
+}
+
+impl DiagKernel {
+    /// `measure_one_phase_trial_with` が完了バッチのラベルを検証する際
+    /// に使う期待値（`gemm.rs` 側の `ctx.encode` 第 1 引数と一致させる
+    /// 契約。両関数のラベル文字列自体が計測結果の識別子でもあるため、
+    /// ここで 1 箇所に集約しズレを防ぐ）。
+    fn expected_label(self) -> &'static str {
+        match self {
+            DiagKernel::F32Tiled => "diag_encode_tiled_nn",
+            DiagKernel::Hfrag => "diag_encode_tiled_hfrag_nn",
+        }
+    }
+}
+
 /// 1 サイズの 1 反復を計測する。`ctx`／`gemm` は呼び出し元が
 /// `context_cache` 経由で取得したハンドル（本番 `ops::MetalBackendOps
 /// ::gemm` と同じキャッシュ経由。プールヒットを定常化するため
@@ -183,7 +215,12 @@ pub(crate) struct PhaseSample {
 /// auto` 呼び出しのたびに再解決するため反復間で変わらない。診断側で
 /// 反復ごとに解決し直しても結果は同じだが、解決コスト自体をフェーズへ
 /// 混入させないためループ外で 1 回だけ呼ぶ）。
-pub(crate) fn measure_one_phase_trial(
+///
+/// `kernel` でエンコード対象のカーネルを切り替える（イシュー #1370。
+/// [`DiagKernel`] 参照）。既定の f32 経路は [`measure_one_phase_trial`]
+/// （本関数の 1 行ラッパー。既存呼び出し元・出力形式は不変）を使う。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn measure_one_phase_trial_with(
     ctx: &crate::context::MetalContext,
     gemm: &crate::gemm::MetalGemm,
     a: &[f32],
@@ -191,6 +228,7 @@ pub(crate) fn measure_one_phase_trial(
     n: usize,
     cfg: tile::TileConfig,
     keep_alive: &mut Vec<Vec<f32>>,
+    kernel: DiagKernel,
 ) -> PhaseSample {
     let t = Instant::now();
     let a_buf =
@@ -211,11 +249,19 @@ pub(crate) fn measure_one_phase_trial(
     let alloc_c_secs = t.elapsed().as_secs_f64();
 
     // エンコード（記録のみ・commit しない。ファイル冒頭「GPU タイム
-    // スタンプ変種を実装しない判断」参照）。
+    // スタンプ変種を実装しない判断」参照）。`kernel` により本番 f32
+    // 経路／hfrag 候補のどちらの `#[cfg(test)]` 診断入口を呼ぶかを
+    // 切り替える（イシュー #1370。両入口とも同一の 1 バッチ・1 ラベル
+    // 計測境界契約を持つ）。
     let t = Instant::now();
-    let resolved_cfg = gemm
-        .diag_encode_tiled_nn(ctx, &a_buf, &b_buf, &c_buf, n, n, n, cfg)
-        .expect("diag_encode_tiled_nn (record only) must succeed");
+    let resolved_cfg = match kernel {
+        DiagKernel::F32Tiled => gemm
+            .diag_encode_tiled_nn(ctx, &a_buf, &b_buf, &c_buf, n, n, n, cfg)
+            .expect("diag_encode_tiled_nn (record only) must succeed"),
+        DiagKernel::Hfrag => gemm
+            .diag_encode_tiled_hfrag_nn(ctx, &a_buf, &b_buf, &c_buf, n, n, n, cfg)
+            .expect("diag_encode_tiled_hfrag_nn (record only) must succeed"),
+    };
     let encode_secs = t.elapsed().as_secs_f64();
 
     // commit + GPU 完了待ち（壁時計は従来どおり合算値。`kernel_gpu` は
@@ -247,7 +293,7 @@ pub(crate) fn measure_one_phase_trial(
     let batch = &batches[0];
     assert_eq!(
         batch.labels(),
-        ["diag_encode_tiled_nn"],
+        [kernel.expected_label()],
         "unexpected dispatch labels in the completed batch: {:?}",
         batch.labels()
     );
@@ -306,6 +352,22 @@ pub(crate) fn measure_one_phase_trial(
         readback_secs,
         host_copy_secs,
     }
+}
+
+/// [`measure_one_phase_trial_with`] の本番 f32 経路固定ラッパー（従来の
+/// `measure_one_phase_trial`。E2〜E8 の既存呼び出し元・出力形式・挙動
+/// とも不変。イシュー #1370 で `kernel` 引数を新設した際、既存呼び出し
+/// 元を書き換えずに済むよう本関数として残した）。
+pub(crate) fn measure_one_phase_trial(
+    ctx: &crate::context::MetalContext,
+    gemm: &crate::gemm::MetalGemm,
+    a: &[f32],
+    b: &[f32],
+    n: usize,
+    cfg: tile::TileConfig,
+    keep_alive: &mut Vec<Vec<f32>>,
+) -> PhaseSample {
+    measure_one_phase_trial_with(ctx, gemm, a, b, n, cfg, keep_alive, DiagKernel::F32Tiled)
 }
 
 /// 1 サイズ分の全反復（warmup + 測定）を実行し、フェーズ内訳を
