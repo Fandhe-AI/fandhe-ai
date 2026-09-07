@@ -122,8 +122,13 @@ const MAX_THREADS_PER_TG_ESTIMATE: u32 = 1024;
 ///
 /// `pair_label` は出力の識別子（`aggregate.md` の抽出パターンに
 /// 対応。例: `cand0` や `production_select`）。
+///
+/// `pub(crate)`: E8（`gemm_bm128_diag_tests.rs`。イシュー #1332）も
+/// 同じ交互測定・fail-closed 検証ロジックを必要とするため、E7 専用の
+/// private ヘルパから兄弟モジュール間で共有する `pub(crate)` ヘルパへ
+/// 昇格した（ロジックの複製を避ける）。
 #[allow(clippy::too_many_arguments)]
-fn run_ab_pair(
+pub(crate) fn run_ab_pair(
     ctx: &MetalContext,
     gemm: &MetalGemm,
     a: &[f32],

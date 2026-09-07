@@ -2077,3 +2077,156 @@ compare` で直接比較。全ケース `report.passes()==true`（`fail_count=0`
 `full_ignored_serial.log`（`cargo test -p fandhe-ai-backend-metal
 --release -- --ignored --nocapture --test-threads=1` 全件））。内部
 ホスト名は含めない。
+
+## §16 E8 実測 — `CANDIDATES[10]`（128×64×16）純カーネル時間比較・採否判断（イシュー #1332）
+
+### 16.0 目的・範囲・イシュー文言の注記
+
+§15（イシュー #1331）で追加した `CANDIDATES[10]`（`bm=128, bn=64, bk=16,
+wm=2, wn=2, staged`）の純カーネル時間（GPU タイムスタンプ。`kernel_gpu`
+変種。イシュー #1276）を E7（§14）と同型の A/B 2 系列で計測し、
+`tile::select` への組み込み可否を判定する。
+
+イシュー #1332 本文は「現行 N=4096 最良候補（`CANDIDATES[3]`／`[0]`）」
+と書くが、これは #744 時点の古い記述である。`tile.rs` の M4 Max
+厳密一致テーブル（`select_with_occupancy_for_device`）と §14.3 実測では
+**2048→`CANDIDATES[1]`（64,32,16,2,2）・4096→`CANDIDATES[2]`
+（32,64,16,2,2）** が現行本番選択構成であり、`[3]` は #1039 以降最良
+ではない。したがって本節では「現行最良候補」を B 系列（`select_for_
+device` の実選択構成）で表現し、`[0]`（構造上の直接対応。§15.6 の
+引き継ぎ）を A 系列の主対象、`[3]` をイシュー文言突合用の参考ペアと
+して追加した。
+
+### 16.1 環境・プロトコル
+
+- 実機: Apple M4 Max（本エージェント実行環境自体。macOS 26.6.2・
+  rustc 1.96.0）
+- 計測対象コミット: `93c6107b42d3984ecd14a6325b045e8792fb2296`
+  （origin/main。PR #1393 マージ済み。イシュー #1332 の診断テスト
+  追加自体はこのコミットに対する変更であり、本番コード〈`tile.rs`／
+  `gemm.rs`／`shaders/gemm.metal`〉は無変更のまま計測）
+- 事前スモーク: `bm128_candidate_matches_cpu_reference_k_stress`・
+  `bm128_candidate_matches_cpu_reference_non_multiple_of_tile`・
+  `bm128_candidate_agrees_with_bm64_counterpart_within_composite_
+  tolerance`・`bm128_candidate_matches_cpu_reference_for_all_shapes_
+  and_transpose_patterns`・`bm128_candidate_matches_cpu_reference_
+  for_n4096_cubic_shape` の 5 件全 pass（`smoke_bm128_parity.log`）
+- A 系列: `bm128_kernel_gpu_ab_vs_candidate0`（N=1024/2048/4096 ×
+  `cand10_vs_cand0`／`cand10_vs_cand3` の 2 ペア）を 5 プロセス起動
+  （`--release --lib -- --ignored --nocapture --test-threads=1`）
+- B 系列: `bm128_kernel_gpu_ab_vs_production_select`（N=512/1024/
+  2048/4096 × `tile::select_for_device` 解決構成）を同様に 5 プロセス
+  起動
+- warmup 20・測定 20（trial 交互回転）・fail-closed 検証
+  （`resolved_cfg == cfg` によるフォールバック非経由・trial 0 出力の
+  複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉pass）は
+  全 run で違反なし（`assert_eq!`／`assert!` が 1 件も panic せず全
+  run が `test result: ok`）
+- 負荷帯: `uptime` load average は計測前後で 3.1〜4.9（他セッション
+  との共有負荷下。`docs/perf/logs/metal-gemm-e8-bm128-ab-1332/
+  uptime_before_*.txt`）。#1330（E7）と同様「負荷はあるが符号完全
+  一致のため判定不可とはしない」方針を適用する（A 系列 30/30・B 系列
+  20/20 の全反復が同一符号のため、この負荷帯でも結論は揺るがない）
+
+### 16.2 A 系列結果（`CANDIDATES[10]` vs `[0]`／`[3]`）
+
+`head_over_base_kernel_gpu`（5 run 中央値。詳細は
+`docs/perf/logs/metal-gemm-e8-bm128-ab-1332/aggregate.md`）:
+
+| N | vs `CANDIDATES[0]` | vs `CANDIDATES[3]` |
+|---|---|---|
+| 1024 | 1.65 倍後退（5/5 符号一貫） | 10.52 倍後退（5/5 符号一貫） |
+| 2048 | 1.89 倍後退（5/5 符号一貫） | 13.45 倍後退（5/5 符号一貫） |
+| 4096 | 2.40 倍後退（5/5 符号一貫） | 14.15 倍後退（5/5 符号一貫） |
+
+`[10]` は #1325 の「threadgroup タイル拡張によるタイル再利用率向上」
+仮説に反し、構造上の直接対応である `[0]`（同じ `bk=16`・2×2
+simdgroup）に対しても全 N で一貫して遅い。
+
+### 16.3 B 系列結果（`CANDIDATES[10]` vs 本番選択構成。結線判断の唯一の根拠）
+
+`production_select_resolved`（全 run で一致・フォールバック非経由）:
+
+| N | 解決構成 |
+|---|---|
+| 512 | `CANDIDATES[5]`（64,32,32,2,2） |
+| 1024 | `CANDIDATES[6]`（64,32,8,4,1） |
+| 2048 | `CANDIDATES[1]`（64,32,16,2,2） |
+| 4096 | `CANDIDATES[2]`（32,64,16,2,2） |
+
+`head_over_base_kernel_gpu`（5 run 中央値）:
+
+| N | 比 | 符号一貫性 |
+|---|---|---|
+| 512 | 9.72 倍後退 | 5/5 |
+| 1024 | 10.04 倍後退 | 5/5 |
+| 2048 | 12.98 倍後退 | 5/5 |
+| 4096 | 12.46 倍後退 | 5/5 |
+
+N=512〜4096 の全帯域で `[10]` が本番選択構成より 1 桁近く遅い
+（20/20 反復すべて後退方向で符号一貫）。
+
+### 16.4 妥当性帯チェック
+
+`docs/perf/metal-gemm-reuse-phase-breakdown.md` §11.5 の `kernel_gpu`
+分母（本番選択構成。N=1024 1.0267 ms・N=2048 3.1849 ms・N=4096
+13.7051 ms）と、本計測の B 系列 base（production_select）絶対値
+5 run 中央値（N=1024 0.3769 ms・N=2048 1.6105 ms・N=4096 15.8216 ms）
+を突合した。N=4096 は近い値（約 1.15 倍差）だが N=1024/2048 は
+乖離があり、これは同ファイル §9.4 が記録する「N=1024 の既知の乖離
+（約 4.6 倍）」と同種の計測プロトコル間差（本計測は warmup 20／
+測定 20 の交互測定、§11.5 は単発 5 プロセス起動）に起因すると考え
+られる。**採否判定は base/head を同一 run・同一プロトコル内で比較した
+run 別比（`head_over_base_kernel_gpu`）の符号一貫性で行っており、
+base 絶対値のプロトコル間差は判定そのものへ影響しない**（詳細は
+`docs/perf/logs/metal-gemm-e8-bm128-ab-1332/aggregate.md`「妥当性帯
+チェック」節）。
+
+### 16.5 採否判断
+
+- 採否判定基準（`(m,n,k)` キー単位）:
+  - **ADOPT（行置換）**: B 系列で当該 N の run 別比中央値が < 0.95
+    かつ 5/5 run 符号一貫
+  - **REJECT**: 当該 N で後退方向（比 ≥ 1.0）が 5/5 符号一貫、または
+    ±5% 帯内で有意差なし
+  - **undetermined**: run 間で符号が反転
+- B 系列は N=512/1024/2048/4096 のすべてで「後退方向（比 9.7〜13.0）
+  が 5/5 符号一貫」に該当する。ノイズ帯（±5%）を 1 桁近く超える一貫
+  した後退のため、undetermined の余地はない。
+- **結論: 組み込み不可（REJECT）**。`tile.rs`／`gemm.rs`／
+  `shaders/gemm.metal` は一切変更しない（`tile::select`／
+  `select_with_occupancy_for_device` の候補表は `[0]`〜`[9]` の既存
+  構成のまま不変維持）。`CANDIDATES[10]` は §15 で確立した「明示
+  指定でのみ到達可能」な状態のまま残す（反射値・parity 群が既に
+  green のため候補自体の削除はしない）。
+- **示唆**: threadgroup タイルを 128×64 へ拡張しても、レジスタ／
+  occupancy 上の負担が K ループの再利用率向上を上回り純カーネル
+  時間が大幅に悪化する（#1325 の仮説は本 GPU 世代・本タイル形状の
+  組合せでは支持されない）。128 系タイルの探索は本結果をもって
+  打ち切りとし、後続の探索は 64 系タイルの周辺（E4〜E7 の知見）へ
+  戻すことを推奨する（下記 16.6 参照）。
+
+### 16.6 スコープ外・引き継ぎ
+
+- NT/TN/TT・端あり形状・f16 経路（§15.2 のとおり構造的に不可）での
+  `[10]` 性能比較（REJECT が明確なため実施しない）
+- ダブルバッファ（2 面）SMEM 化・E1 unroll pragma の index 10
+  再評価（§15.6 の引き継ぎ。REJECT により優先度は大幅に低下したと
+  判断する。実施する場合は親 #1325 系列の後続 issue とする）
+- M4 Max 以外の機種向けテーブル・後退の機構レベル切り分け
+  （レジスタ圧・occupancy 低下の定量診断。反射値〈§15〉からの推定に
+  留め、`MTLComputePipelineState` 実測〈§7 の H1 検証と同型の手法〉
+  は本 issue のスコープ外）
+- 本節の知見（128 系タイルは本 GPU 世代で不利）を親 #1325 へコメント
+  として記録することを推奨する（自動運転のため本 issue 側では追加
+  issue 起票は行わない）
+
+### 16.7 関連ログ
+
+`docs/perf/logs/metal-gemm-e8-bm128-ab-1332/`（`env_info.txt`・
+`uptime_before_run{1..5}.txt`・`uptime_before_prod_run{1..5}.txt`・
+`pmset_therm_before.txt`／`pmset_therm_after.txt`・
+`smoke_bm128_parity.log`・`kernel_gpu_run{1..5}.log`（A 系列）・
+`kernel_gpu_production_select_run{1..5}.log`（B 系列）・
+`aggregate.md`（抽出コマンド・5 run 表・妥当性帯チェック・判定を
+記載））。内部ホスト名・絶対パスは含めない。
