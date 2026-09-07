@@ -38,7 +38,7 @@
 use std::any::Any;
 use std::mem::size_of;
 use std::ops::RangeBounds;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cudarc::driver::{
     CudaSlice, CudaStream, CudaView, DevicePtr, DeviceRepr, LaunchArgs, PushKernelArg,
@@ -48,6 +48,9 @@ use cudarc::driver::{
 use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
+#[cfg(feature = "internal-diagnostics")]
+use crate::host_staging::HostStagingStats;
+use crate::host_staging::{self, HostStaging, HostStagingCache};
 use crate::placement;
 use fandhe_ai_tensor_core::Tensor;
 use fandhe_ai_tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
@@ -294,6 +297,14 @@ pub struct CudaMemory {
     /// `self.stream.context()` から取得できるため、別途フィールドとして
     /// 保持しない）。
     managed_supported: bool,
+    /// [`MemoryOps::with_host_view`] の CUDA 実装（イシュー #1336）が
+    /// 使う、形状（要素数）ごとに再利用するホストステージングバッファの
+    /// キャッシュ（`crate::host_staging` モジュール参照）。`Arc<Mutex<_>>`
+    /// で保持する理由は `tracker` と同じ「`Clone` は同一計測系列／同一
+    /// キャッシュ系列への参照複製」契約を保つため（`Mutex` 自体は
+    /// `Clone` を持たないため素の `Mutex<HostStagingCache>` フィールドは
+    /// `derive(Clone)` を壊す）。
+    host_staging: Arc<Mutex<HostStagingCache>>,
 }
 
 impl CudaMemory {
@@ -308,6 +319,9 @@ impl CudaMemory {
             ordinal: device.ordinal(),
             tracker: Arc::new(AllocationTracker::new()),
             managed_supported: device.managed_memory_supported(),
+            host_staging: Arc::new(Mutex::new(HostStagingCache::new(
+                host_staging::HOST_STAGING_KIND,
+            ))),
         }
     }
 }
@@ -377,6 +391,24 @@ where
 fn host_readback(stream: &Arc<CudaStream>, dev: &UnifiedSlice<f32>) -> Result<Vec<f32>, CudaError> {
     stream.synchronize()?;
     Ok(dev.as_slice()?.to_vec())
+}
+
+/// `CudaStorage::Managed`（[`UnifiedSlice`]）専用の [`MemoryOps::
+/// with_host_view`] 実装（イシュー #1336）。[`host_readback`] と同じ
+/// 同期契約（`stream.synchronize()` を先に呼ぶ理由は同関数のドキュメン
+/// テーションコメント参照）を保ったまま、`to_vec()` によるホストコピーを
+/// 経由せず `UnifiedSlice::as_slice()` が返す借用をそのまま `f` へ渡す
+/// （managed 配置はホストから直接アクセス可能なため、`Device` 配置向け
+/// の `host_staging` キャッシュ経由 D2H は不要かつ目的〈ゼロコピー〉に
+/// 反する）。
+fn host_view_managed(
+    stream: &Arc<CudaStream>,
+    dev: &UnifiedSlice<f32>,
+    f: &mut dyn FnMut(&[f32]),
+) -> Result<(), CudaError> {
+    stream.synchronize()?;
+    f(dev.as_slice()?);
+    Ok(())
 }
 
 /// `numel` 分の `f32` 確保が消費するバイト数を検査付きで計算する
@@ -672,6 +704,74 @@ impl CudaMemory {
         let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
         context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
     }
+
+    /// [`MemoryOps::with_host_view`]（`Device` 配置分岐）が使うホスト
+    /// ステージングバッファを取得する（イシュー #1336）。`self.
+    /// host_staging` の Mutex poison は `static_cuda_memory`（`ops.rs`）
+    /// と同じ fail-closed 方針で `BackendError::DeviceUnavailable` へ
+    /// 変換する（本番経路で `unwrap`／`expect` を使わない。
+    /// `.claude/rules/coding-rust.md`）。ロック保持区間はキャッシュの
+    /// `take` 呼び出しのみに限定し（`crate::host_staging` モジュール
+    /// コメント「ロック方針」節）、driver 呼び出し（`memcpy_dtoh` 等）
+    /// は本メソッドの外側（`with_driver_call` 経由）で行う。
+    fn take_or_alloc_staging(
+        &self,
+        numel: usize,
+        generation: u64,
+    ) -> Result<HostStaging, BackendError> {
+        // fail-closed: poison を検出したらここで拒否する（`static_cuda_
+        // memory`〈ops.rs〉と同じ方針。`crate::host_staging::put_back`
+        // 〈`return_staging` が使う返却経路〉は poison 後も `into_inner`
+        // で回復する設計だが、それは使用後の返却側で無条件に使う目的の
+        // 緩和策であり、新規取得側（本メソッド）では poison を素通り
+        // させない）。
+        let (existing, kind) = {
+            let mut guard = self.host_staging.lock().map_err(|_| {
+                BackendError::DeviceUnavailable("host staging cache mutex poisoned".to_string())
+            })?;
+            (guard.take(numel, generation), guard.kind())
+        };
+        match existing {
+            Some(buf) => Ok(buf),
+            None => HostStaging::alloc(kind, self.stream.context(), numel).map_err(map_cuda_error),
+        }
+    }
+
+    /// [`Self::take_or_alloc_staging`] で取り出したバッファを使用後に
+    /// キャッシュへ返却する（`with_host_view` の呼び出し元クロージャ
+    /// `f` の実行後、成功・失敗いずれの経路でも呼ばれる。`crate::
+    /// host_staging::put_back` は poison 後も panic しない設計のため、
+    /// ここでは呼び出し結果を無視してよい〈以降のアクセスは
+    /// `take_or_alloc_staging` の poison 検査が fail-closed に拒否する〉）。
+    fn return_staging(&self, numel: usize, generation: u64, buf: HostStaging) {
+        host_staging::put_back(&self.host_staging, numel, generation, buf);
+    }
+
+    /// `host_staging` の統計スナップショット（実機診断用。`crate::
+    /// host_staging::HostStagingStats` ドキュメンテーションコメント
+    /// 参照）。poison 時は既定値（全 0）を返す（診断専用の補助 API の
+    /// ため fail-closed にせず観測可能な最善値を返す）。`gemm_profile_
+    /// target` 等と同じ `internal-diagnostics` feature（既定 off）限定で
+    /// 公開 API 面から除外する（`lib.rs` の `pub use host_staging::
+    /// HostStagingStats` re-export と同一ゲート。イシュー #1336）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn host_staging_stats(&self) -> HostStagingStats {
+        match self.host_staging.lock() {
+            Ok(guard) => guard.stats(),
+            Err(poisoned) => poisoned.into_inner().stats(),
+        }
+    }
+
+    /// `host_staging` の全エントリを破棄し、解放したバイト数を返す
+    /// （REQ-14 `release_cached` 系と同型の明示解放 API。page-locked
+    /// メモリ〈`Pinned` 種〉はホスト RAM を固定するため、長時間常駐する
+    /// `CudaMemory` インスタンスに対する明示解放手段として公開する）。
+    pub fn release_host_staging(&self) -> u64 {
+        match self.host_staging.lock() {
+            Ok(mut guard) => guard.release_all(),
+            Err(poisoned) => poisoned.into_inner().release_all(),
+        }
+    }
 }
 
 impl MemoryOps for CudaMemory {
@@ -712,6 +812,75 @@ impl MemoryOps for CudaMemory {
         self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
             self.download_inner(buffer)
         })
+    }
+
+    /// [`MemoryOps::with_host_view`] の CUDA 実装（イシュー #1336）。
+    ///
+    /// 既定実装（`tensor_core::buffer` モジュールの同トレイト
+    /// ドキュメンテーションコメント「デフォルト実装」節）は毎回
+    /// `download`（`readback` 経由で D2H 宛先を都度新規確保）を経由する
+    /// ため、`docs/perf/cuda-large-buffer-percall-alloc-transfer-
+    /// threshold.md` が実測した 31→32 MiB 段差の対象になりうる。本実装は
+    /// `handle.storage` の配置ごとに以下へ分岐する:
+    ///
+    /// - `None`（空テンソル）: `f(&[])`（FFI を呼ばない）。
+    /// - `Managed`: [`host_view_managed`] へ委譲し、`UnifiedSlice::
+    ///   as_slice()` の借用をコピーなしでそのまま渡す（`download` が
+    ///   `to_vec()` するのと異なり、managed 配置本来のゼロコピー特性を
+    ///   保つ）。
+    /// - `Device`: `crate::host_staging`（形状ごとに再利用するホスト
+    ///   ステージングバッファ）から確保・`memcpy_dtoh` で D2H・
+    ///   `synchronize` の後、`f` へ借用を渡す。使用後は成功・失敗いずれの
+    ///   経路でも [`Self::return_staging`] でキャッシュへ返却する
+    ///   （失敗時に返却したバッファの内容は不定だが、次回の
+    ///   `memcpy_dtoh` が呼び出し前に全域を上書きするため安全。
+    ///   `crate::host_staging::HostStaging::alloc` の SAFETY コメント
+    ///   参照）。
+    ///
+    /// 同期契約は `download`（[`Self::download_inner`]）と同一
+    /// （`with_driver_call` を唯一の driver 呼び出し境界とし、
+    /// `buffer.generation()` を検査対象へ渡す。イシュー #1013 設計文書
+    /// §9 item 7）。
+    fn with_host_view(
+        &self,
+        buffer: &DeviceBuffer<f32>,
+        f: &mut dyn FnMut(&[f32]),
+    ) -> Result<(), BackendError> {
+        let handle = buffer
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        if buffer.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        match &handle.storage {
+            None => {
+                f(&[]);
+                Ok(())
+            }
+            Some(CudaStorage::Managed(unified)) => {
+                self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
+                    host_view_managed(&self.stream, unified, f)
+                })
+            }
+            Some(CudaStorage::Device(slice)) => {
+                let numel = slice.len();
+                let generation = buffer.generation();
+                let mut staging = self.take_or_alloc_staging(numel, generation)?;
+                let copy_result = self.with_driver_call(&[generation], map_cuda_error, || {
+                    self.stream
+                        .memcpy_dtoh(slice, staging.as_host_slice_mut())?;
+                    self.stream.synchronize()?;
+                    Ok(())
+                });
+                let outcome = copy_result.and_then(|()| {
+                    staging.as_slice().map_err(map_cuda_error).map(|view| {
+                        f(view);
+                    })
+                });
+                self.return_staging(numel, generation, staging);
+                outcome
+            }
+        }
     }
 }
 
@@ -914,6 +1083,113 @@ mod tests {
                 // 検証対象）。
             }
         }
+    }
+
+    /// [`MemoryOps::with_host_view`]（イシュー #1336）のハンドル型・
+    /// device ordinal 不一致検出が `download`（`download_rejects_
+    /// mismatched_device_ordinal` 上記）と同一の `DeviceMismatch` 契約を
+    /// 保つことを検証する。実 GPU ドライバ呼び出しは行わない
+    /// （`numel == 0` の空バッファは `handle.storage: None` で
+    /// `memcpy_dtoh` 等を経由しない）。
+    #[test]
+    fn with_host_view_rejects_mismatched_device_ordinal() {
+        match CudaDevice::new(0) {
+            Ok(device) => {
+                let mem = CudaMemory::new(&device);
+                let other_ordinal = mem.ordinal + 1;
+                let alloc = TrackedAllocation::new(Arc::clone(&mem.tracker), 0);
+                let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+                    storage: None,
+                    _alloc: alloc,
+                    generation: 0,
+                });
+                let buffer: DeviceBuffer<f32> =
+                    DeviceBuffer::new(Device::Cuda(other_ordinal), vec![0], handle);
+                let mut observed: Option<Vec<f32>> = None;
+                let err = mem
+                    .with_host_view(&buffer, &mut |slice| observed = Some(slice.to_vec()))
+                    .unwrap_err();
+                assert!(matches!(err, BackendError::DeviceMismatch));
+                assert!(
+                    observed.is_none(),
+                    "DeviceMismatch で拒否される場合、呼び出し元クロージャは呼ばれないはず"
+                );
+            }
+            Err(_) => {
+                // 非搭載環境: `CudaDevice::new` 自体が型付きエラーで止まる
+                // ため本テストの主張には到達しない（panic しないことが
+                // 検証対象）。
+            }
+        }
+    }
+
+    /// [`MemoryOps::with_host_view`] が他バックエンド由来のハンドル型
+    /// （`CudaBufferHandle` 以外）を `DeviceMismatch` で拒否することを
+    /// 検証する（`download` の同種チェックと対称。`MockHandle` を使い
+    /// `CudaDevice` すら要求しない完全な GPU 非依存テスト）。
+    #[derive(Debug)]
+    struct OtherBackendHandle;
+
+    impl BufferHandle for OtherBackendHandle {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn with_host_view_rejects_foreign_handle_type_without_gpu() {
+        if let Ok(device) = CudaDevice::new(0) {
+            let mem = CudaMemory::new(&device);
+            let handle: Box<dyn BufferHandle> = Box::new(OtherBackendHandle);
+            let buffer: DeviceBuffer<f32> = DeviceBuffer::new(Device::Cuda(0), vec![0], handle);
+            let err = mem
+                .with_host_view(&buffer, &mut |_slice| {
+                    panic!("foreign handle must be rejected before f is invoked")
+                })
+                .unwrap_err();
+            assert!(matches!(err, BackendError::DeviceMismatch));
+        }
+    }
+
+    /// [`MemoryOps::with_host_view`] の空テンソル契約（`handle.storage
+    /// == None`）は FFI を呼ばず空スライスを `f` へ渡す（`buffer.rs`
+    /// モジュールコメント「空テンソルの契約」）。`CudaDevice::new` に
+    /// 依存しない完全な GPU 非依存テスト（`CudaMemory` は環境適応
+    /// フィールドを直接構築できないため、`download` 側の空バッファ
+    /// テスト〈`download_rejects_mismatched_device_ordinal` 等〉と同じ
+    /// 環境適応ゲートを使う）。
+    #[test]
+    fn with_host_view_empty_buffer_invokes_f_with_empty_slice_and_no_ffi() {
+        if let Ok(device) = CudaDevice::new(0) {
+            let mem = CudaMemory::new(&device);
+            let alloc = TrackedAllocation::new(Arc::clone(&mem.tracker), 0);
+            let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+                storage: None,
+                _alloc: alloc,
+                generation: 0,
+            });
+            let buffer: DeviceBuffer<f32> =
+                DeviceBuffer::new(Device::Cuda(mem.ordinal), vec![0], handle);
+            let mut observed: Option<usize> = None;
+            mem.with_host_view(&buffer, &mut |slice| observed = Some(slice.len()))
+                .expect("空バッファは常に成功するはず");
+            assert_eq!(observed, Some(0));
+        }
+    }
+
+    /// `CudaMemory`（`host_staging: Arc<Mutex<HostStagingCache>>` を含む）
+    /// が `Send + Sync` であることの静的検査（`with_host_view` の
+    /// `host_staging` キャッシュ導入がスレッド安全性を壊していないことを
+    /// コンパイル時に保証する。`PinnedHostSlice<f32>` は cudarc-0.19.8
+    /// `core.rs:1394-1395` で `unsafe impl Send`／`Sync` 済み）。
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn cuda_memory_is_send_and_sync() {
+        assert_send_sync::<CudaMemory>();
     }
 
     #[test]

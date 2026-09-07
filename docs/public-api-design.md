@@ -626,8 +626,8 @@ pub trait BackendOps {
 - **同期契約**: [`Self::download`] と同一（復帰時点でデバイス側の書き込みが完了していること）。既定実装は `download` を経由するフェイルセーフ（コピーを 1 回伴う）。
 - **CPU 実装**（`backend-cpu::CpuMemory`）: 既定実装を上書きし、`CpuBufferHandle::data`（既存ホストバッファ）をそのまま借用する（コピーなし）。
 - **Metal 実装**（`backend-metal::MetalMemory`）: 既定実装を上書きし、`self.context.synchronize()`（`download_inner` と同一の同期点。イシュー #1017）の直後に `MetalBuffer::as_host_slice`（`StorageModeShared` バッファの `contents()` を直接借用。旧 `read_to_vec` の `unsafe` ブロックをそのまま移設したのみで新規 `unsafe` は追加していない）を呼び、`read_to_vec`（`Vec` 確保 + memcpy）を経由しない。
-- **CUDA**: 本イシューでは上書きしない（既定実装のまま）。pinned host バッファ経由の借用化はイシュー #1336 のスコープ。
-- **facade 到達経路**: `Var::host_view`（3.1）／`Tensor::host_slice`（2.2）が内部実装として使う想定の backend レイヤー API。`memory_ops()` が `None` を返す実装（`Tape`／`Var::matmul` 等が直接消費する経路ではない）からは到達しない——`Var::matmul` の出力（テープ値）は演算の内部で `download` 済みのホスト常駐 `Tensor` として保持されるため（6 節「新規論点」参照）。
+- **CUDA**: イシュー #1336 で既定実装を上書きした（`backend-cuda::CudaMemory`）。`handle.storage` の配置ごとに 3 分岐する: (1) 空テンソル（`None`）は FFI を呼ばず `f(&[])`。(2) `Managed`（イシュー #1352 opt-in 配置）は `UnifiedSlice::as_slice()` の借用をコピーなしでそのまま渡す。(3) `Device`（既定配置）は形状（要素数）ごとに再利用するホストステージングバッファ（`crate::host_staging::HostStagingCache`。take/put 方式・世代検査つき）へ `memcpy_dtoh` 1 回で D2H した後、そのスライスを渡す。ステージング種は `Pageable`（事前タッチ済み `Vec<f32>`。unsafe なし）と `Pinned`（cudarc `alloc_pinned`。page-locked・unsafe 1 箇所）の 2 種を実装したが、実機実測が未完了（本エージェント実行環境に CUDA 実機なし）のため既定は unsafe 経路を通さない `Pageable` に固定している。設計判断・unsafe の安全性根拠・実測記入欄は `docs/perf/cuda-host-view-staging-readout.md` を参照。
+- **facade 到達経路**: `Var::host_view`（3.1）／`Tensor::host_slice`（2.2）が内部実装として使う想定の backend レイヤー API。`memory_ops()` が `None` を返す実装（`Tape`／`Var::matmul` 等が直接消費する経路ではない）からは到達しない——`Var::matmul` の出力（テープ値）は演算の内部で `download` 済みのホスト常駐 `Tensor` として保持されるため（6 節「新規論点」参照）。CUDA 実装（イシュー #1336）についても同様に、`autodiff`／`facade` は現状 `with_host_view` を呼ばないため直接の受益者ではない（`docs/perf/cuda-host-view-staging-readout.md` §7「引き継ぎ」節）。
 
 ### 4.3 API 契約として明記する数値仕様
 
