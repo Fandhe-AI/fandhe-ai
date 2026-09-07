@@ -311,17 +311,38 @@ def _fmt_ms(s):
     return f"{s * 1e6:.1f} us"
 
 
+def _all_expected_cells():
+    """契約上の全 8 セル（`_VALID_SIZES` × `_VALID_MODES`）を昇順で返す。
+
+    `render_markdown`／`main` の集計対象を `cells` に実在するキーだけに
+    限定すると、before/after 双方から同一セルが欠落した場合に何も表示
+    されず・`any_bad` 判定にも寄与しないまま終了コード 0 になりうる
+    （codex-review P2・Cursor Bugbot Medium 指摘。イシュー #1306 の
+    「全 8 セル非後退」契約に反する）。欠測セルを判定不能として明示する
+    ため、実データに依らずこの固定集合を走査の基準にする。
+    """
+    return sorted(
+        (size, mode) for size in _VALID_SIZES for mode in _VALID_MODES
+    )
+
+
 def render_markdown(cells, threshold):
     lines = []
     lines.append(
         "| size/mode | before median | after median | after/before | checksum | 判定 |"
     )
     lines.append("|---|---|---|---|---|---|")
-    for key in sorted(cells.keys(), key=lambda k: (k[0], k[1])):
-        rows = cells[key]
+    for key in _all_expected_cells():
+        rows = cells.get(key, [])
         before_rows = [r for r in rows if not r.get("_is_after")]
         after_rows = [r for r in rows if r.get("_is_after")]
-        result = evaluate_cell(before_rows, after_rows, threshold)
+        if not rows:
+            result = {
+                "status": "undeterminable",
+                "reason": "before/after 双方にこのセルの行がない（欠測セル）",
+            }
+        else:
+            result = evaluate_cell(before_rows, after_rows, threshold)
         cell_label = "/".join(str(v) for v in key)
         if result["status"] != "ok":
             lines.append(
@@ -389,7 +410,11 @@ def main(argv):
     print(render_markdown(cells, args.threshold))
 
     any_bad = False
-    for key, rows in cells.items():
+    for key in _all_expected_cells():
+        rows = cells.get(key, [])
+        if not rows:
+            any_bad = True
+            continue
         before_rows_k = [r for r in rows if not r.get("_is_after")]
         after_rows_k = [r for r in rows if r.get("_is_after")]
         result = evaluate_cell(before_rows_k, after_rows_k, args.threshold)

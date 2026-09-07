@@ -79,7 +79,12 @@ fi
 SIZES=(512 1024 2048 4096)
 MODES=(fresh reuse)
 
-OUT_BEFORE="results/raw/results-m4max-gemm-ab-before-0.7.0.jsonl"
+# before 側の保存先も LABEL でスコープする（codex-review P2 指摘。
+# LABEL 非依存だと別 label で次の A/B を実行した際に過去の before が
+# 上書きされ、当該 label の交互計測ペア〈before/after〉を再現できなく
+# なる。before バイナリ自体は常に registry pin fandhe-ai =0.7.0 だが、
+# 「どの label 実行で計測した before データか」を追跡できることが目的）。
+OUT_BEFORE="results/raw/results-m4max-gemm-ab-before-0.7.0-${LABEL}.jsonl"
 OUT_AFTER="results/raw/results-m4max-gemm-ab-after-${LABEL}.jsonl"
 SKIP="results/raw/skipped-m4max-gemm-ab-${LABEL}.log"
 MANIFEST="results/raw/manifest-m4max-gemm-ab-${LABEL}.json"
@@ -133,7 +138,13 @@ restore_lock() {
 trap restore_lock EXIT
 
 echo "== build bench-fandhe (before: registry pin fandhe-ai =0.7.0) =="
-if ! cargo build --release -p bench-fandhe 2>build-err.tmp; then
+# `--target-dir target` を明示（codex-review P2 指摘）: CARGO_TARGET_DIR
+# 環境変数や .cargo/config.toml の build.target-dir 設定が有効な環境では
+# cargo の実際の出力先が本スクリプトが固定コピー元とする
+# `target/release/bench-fandhe` と一致せず、以降の `cp` が古いバイナリを
+# 拾ったまま before/after 双方を計測しうる（cargo tree・sha256 検証の
+# いずれでも検出不能）。target-dir を明示固定することで一致を保証する。
+if ! cargo build --release -p bench-fandhe --target-dir target 2>build-err.tmp; then
   tail -40 build-err.tmp
   echo "bench-fandhe (before) BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
   rm -f build-err.tmp
@@ -151,7 +162,8 @@ BEFORE_SHA="$(sha256_of target/release/bench-fandhe-ab-before)"
 echo "bench-fandhe-ab-before sha256: $BEFORE_SHA (source: $BEFORE_SOURCE)"
 
 echo "== build bench-fandhe (after: HEAD path patch) =="
-if ! cargo build --release -p bench-fandhe --config "$PATCH_CONFIG" 2>build-err.tmp; then
+# 同上（codex-review P2 指摘。#1306:166 相当箇所）。
+if ! cargo build --release -p bench-fandhe --target-dir target --config "$PATCH_CONFIG" 2>build-err.tmp; then
   tail -40 build-err.tmp
   echo "bench-fandhe (after) BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
   rm -f build-err.tmp
@@ -167,12 +179,24 @@ cp target/release/bench-fandhe target/release/bench-fandhe-ab-after
 AFTER_SHA="$(sha256_of target/release/bench-fandhe-ab-after)"
 echo "bench-fandhe-ab-after sha256: $AFTER_SHA (source: $AFTER_SOURCE)"
 
-HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null || echo unknown)"
-cat > "$MANIFEST" <<JSON
-{"label":"${LABEL}","device":"metal","head_sha":"${HEAD_SHA}","before_sha256":"${BEFORE_SHA}","before_source":"${BEFORE_SOURCE}","after_sha256":"${AFTER_SHA}","after_source":"${AFTER_SOURCE}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null || echo unknown)"
+# after ビルドが実際に取り込んだ facade のコミット（AB_PATCH_FACADE_PATH
+# 側の worktree の HEAD）。$AB_PATCH_FACADE_PATH は $SCRIPT_DIR と異なる
+# worktree／コミットを指しうるため、`git -C "$AB_PATCH_FACADE_PATH"` で
+# 個別に取得する（`git rev-parse --show-toplevel` でリポジトリルートを
+# 解決してから rev-parse HEAD する。crates/facade 配下からでも解決可能）。
+AFTER_SOURCE_HEAD_SHA="$(git -C "$AB_PATCH_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
+MANIFEST_TMP="${MANIFEST}.tmp"
+cat > "$MANIFEST_TMP" <<JSON
+{"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","after_source_head_sha":"${AFTER_SOURCE_HEAD_SHA}","before_sha256":"${BEFORE_SHA}","before_source":"${BEFORE_SOURCE}","after_sha256":"${AFTER_SHA}","after_source":"${AFTER_SOURCE}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
-echo "== manifest 記録: $MANIFEST =="
-cat "$MANIFEST"
+# manifest は計測開始前に確定させず一時ファイルへ書く。
+# 全 run 成功後に原子的に正規パスへ反映する。同一 label 再実行時に
+# 計測前上書きした正規 manifest が計測失敗後も残存し、旧成功結果へ
+# 新しいバイナリ hash・コミット情報が誤って紐付く問題を解消する
+#〈codex-review P2 指摘〉）。
+echo "== manifest（一時ファイル）記録: $MANIFEST_TMP =="
+cat "$MANIFEST_TMP"
 
 verify_binaries() {
   local now_before now_after
@@ -229,12 +253,17 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
   mv -f "$OUT_BEFORE_TMP" "$OUT_BEFORE"
   mv -f "$OUT_AFTER_TMP" "$OUT_AFTER"
   mv -f "$SKIP_TMP" "$SKIP"
-  echo "done. before results in $OUT_BEFORE ; after results in $OUT_AFTER ; failures (if any) in $SKIP"
+  mv -f "$MANIFEST_TMP" "$MANIFEST"
+  echo "done. before results in $OUT_BEFORE ; after results in $OUT_AFTER ; failures (if any) in $SKIP ; manifest in $MANIFEST"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
-  mv -f "$OUT_BEFORE_TMP" "results/raw/results-m4max-gemm-ab-before-0.7.0.failed-${FAIL_TS}.jsonl"
+  mv -f "$OUT_BEFORE_TMP" "results/raw/results-m4max-gemm-ab-before-0.7.0-${LABEL}.failed-${FAIL_TS}.jsonl"
   mv -f "$OUT_AFTER_TMP" "results/raw/results-m4max-gemm-ab-after-${LABEL}.failed-${FAIL_TS}.jsonl"
   mv -f "$SKIP_TMP" "results/raw/skipped-m4max-gemm-ab-${LABEL}.failed-${FAIL_TS}.log"
-  echo "FAILED: $ANY_FAILED run(s) failed; partial/unreliable data kept for diagnosis (${FAIL_TS}). $OUT_BEFORE/$OUT_AFTER left untouched (fail-closed. security.md A08)." >&2
+  mv -f "$MANIFEST_TMP" "results/raw/manifest-m4max-gemm-ab-${LABEL}.failed-${FAIL_TS}.json"
+  # 正規 $MANIFEST は計測前に一切書き換えないため（一時ファイルのみ更新）、
+  # 同一 label 再実行が失敗しても直前の成功結果に紐づく正規 manifest は
+  # 保持されたまま残る（codex-review P2 指摘の解消）。
+  echo "FAILED: $ANY_FAILED run(s) failed; partial/unreliable data kept for diagnosis (${FAIL_TS}). $OUT_BEFORE/$OUT_AFTER/$MANIFEST left untouched (fail-closed. security.md A08)." >&2
   exit 1
 fi

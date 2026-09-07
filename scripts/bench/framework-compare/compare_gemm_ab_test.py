@@ -267,6 +267,26 @@ class MainTest(unittest.TestCase):
             os.unlink(before_path)
             os.unlink(after_path)
 
+    def test_missing_cell_is_undeterminable_and_exit_three(self):
+        # 8 セル中 1 セル（4096/reuse）を before/after 双方から欠落させる
+        # （codex-review P2・Cursor Bugbot Medium 指摘。イシュー #1306）。
+        before, after = _all_cells_rows(0.002, 0.0019)
+        before = [r for r in before if not (r["size"] == 4096 and r["mode"] == "reuse")]
+        after = [r for r in after if not (r["size"] == 4096 and r["mode"] == "reuse")]
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 3)
+            self.assertIn("欠測セル", out.getvalue())
+            self.assertEqual(out.getvalue().count("非後退"), 7)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
     def test_empty_input_exit_two(self):
         before_path = _write_jsonl([])
         after_path = _write_jsonl([])
