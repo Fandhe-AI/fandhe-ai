@@ -64,7 +64,8 @@ fandhe-ai/
 └── docs/
     ├── autodiff-nograd-leaf-dinput-skip-decision.md # 非学習葉（活性化入力 x 等）への d_input 伝播スキップの設計判断（`requires_grad` 前方伝播案の採用・`Gradients::get` 契約整理・多層依存整理・起票草案。#1151 起票案 I・#1219）
     ├── autodiff-view-recompute-decision.md # view 系ノード（reshape / transpose）の再計算方式化の設計（push_view／resolve_view による中間バッファ非確保・融合境界化・実測記録。#1043 ツリー・#1047）
-    ├── backend-cuda-async-execution-design.md # CUDA 非同期実行モデルの同期契約（ストリーム順序・エラー伝播・D2H 境界・poison/invalidate 状態機械。#1011 ツリー・#1012）
+    ├── backend-cuda-async-execution-design.md # CUDA 非同期実行モデルの同期契約（ストリーム順序・エラー伝播・D2H 境界・poison/invalidate 状態機械。#1011 ツリー・#1012。§12d で #1349 の CUDA Graph step capture opt-in 実装記録を追記）
+    ├── backend-cuda-graph-step-capture-design.md # 学習 step の update 区間（`sgd_step_device_tracked`）を対象とした CUDA Graph capture／instantiate／launch 経路の opt-in・既定 OFF 実装（`StreamKind`・capture 状態機械・`backend-cuda::graph`・`BackendOps::captured_segment_key`／`run_captured_segment`・`DeviceParamStore::step` 結線）。step 全体 capture は既存データパスの制約により不可能と判明しスコープを update 区間へ限定した経緯・exec update／forward・backward capture のスコープ外整理・#1350 への計測手順申し送り・実機実測記入欄（本エージェント実行環境に CUDA 実機なしのため未実測明記。イシュー #1349・親 #1348・ルート #1341 → #1269）
     ├── backend-cuda-pool-allocator-decision.md # CUDA サイズクラス別プールアロケータ（自作 SizeClassPool<H> 案 B・driver プール〈cuMemPoolTrimTo〉併用）の採用判断・alloc_uninit 適用確認範囲・実測記入欄（#1018 ツリー・#1020）
     ├── backend-cuda-ptx-embedding-decision.md # CUDA GEMM ビルド時 PTX 事前埋め込み（candle 方式）不採用判断・JIT キャッシュ結線範囲の更新（#1024）
     ├── backend-metal-aligned-load-decision.md # Metal GEMM アラインメント特化ロード分岐（align_M/N/K function constant 方式）不採用判断（#752 保留 → #808 格下げ）

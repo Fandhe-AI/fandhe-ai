@@ -35,8 +35,18 @@ categories = ["science", "mathematics", "hardware-support"]
 # した `bw_grid_dim`・`bandwidth_gbps`・`bytes_per_cycle` の単体テストを
 # CI で確実に実行するため `test = true` を明示する（イシュー #482 Review
 # 指摘）。
+#
+# `required-features`（codex-review P0 指摘対応・PR #1390 再修正）:
+# `device.rs::CudaDevice::context`/`stream` を `internal-diagnostics`
+# feature 限定の `pub`（既定ビルドは `pub(crate)`）へ絞った
+# （`device.rs::CudaDevice::context` doc コメント参照）ため、本 example
+# の driver 属性ダンプ処理（`device.context().attribute(..)` 等）は本
+# feature なしではビルドできない。CI の `cargo test --workspace
+# --all-features`（rust-ci test ジョブ・`make test`）は常にこの feature
+# を含むため、テスト実行カバレッジは変わらない。
 name = "device_attributes_dump"
 test = true
+required-features = ["internal-diagnostics"]
 
 [[example]]
 # PR #692 Bugbot 指摘（Medium, test-coverage）対応: `cuda_floor_bench` は
@@ -261,6 +271,60 @@ required-features = ["internal-diagnostics"]
 # `cargo test --all-features`（CI の test ジョブ・`make test` が使う
 # コマンド）でのみビルド・実行される。
 name = "cpu_cuda_tiled_pipeline_persistent_parity"
+required-features = ["internal-diagnostics"]
+
+# 以下 5 件（codex-review P0 指摘対応・PR #1390 再修正）: `device.rs::
+# CudaDevice::context`/`stream` を `internal-diagnostics` feature 限定の
+# `pub`（既定ビルドは `pub(crate)`）へ絞った（`device.rs::CudaDevice::
+# context` doc コメント参照）ため、これらの実機診断テスト（いずれも
+# `#[ignore]` のみで構成され通常 CI では実行されない。実行は `make
+# test-ignored-cuda` 等の `--all-features` 経由）は本 feature なしでは
+# ビルドできない。`cargo test --workspace`（feature 未指定）では対象外
+# としてスキップされ、`cargo test --all-features`（CI の test ジョブ・
+# `make test`／`make test-ignored-cuda` が使うコマンド）でのみビルド・
+# 実行される（`specialized_mma_parity` 等、上記の既存エントリと同じ
+# 契約）。
+
+[[test]]
+name = "async_ordering_real_device"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "dispatch_boundary"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "large_buffer_percall_alloc_ab_1149"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "large_buffer_percall_alloc_transfer_triage"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "tma_probe_real_device"
+required-features = ["internal-diagnostics"]
+
+# `tests/setmaxnreg_common/mod.rs`（`device.context()`/`device.stream()` を
+# 使う共有ヘルパー）を `mod setmaxnreg_common;` で取り込む 4 ファイル。
+# 直接 grep では検出されない間接使用のため見落としやすい（PR #1390 再修正
+# codex-review 再指摘で発覚）。同じ理由で `internal-diagnostics` feature を
+# 要求する。
+
+[[test]]
+name = "setmaxnreg_probe_dec_base_real_device"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "setmaxnreg_probe_dec_accel_real_device"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "setmaxnreg_probe_incdec_accel_real_device"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "setmaxnreg_probe_incdec_base_real_device"
 required-features = ["internal-diagnostics"]
 
 [dev-dependencies]

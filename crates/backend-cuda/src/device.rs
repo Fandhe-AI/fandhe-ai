@@ -55,6 +55,30 @@ pub struct CudaDevice {
     name: String,
     compute_capability: (i32, i32),
     arch: String,
+    stream_kind: StreamKind,
+}
+
+/// `CudaDevice::stream` の種別（イシュー #1349・`docs/backend-cuda-graph-
+/// step-capture-design.md` §4.1）。
+///
+/// `cudarc` の legacy NULL stream（`default_stream()`）は
+/// `cuStreamBeginCapture` の対象にできない（driver が
+/// `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` を返す）ため、CUDA Graph
+/// capture opt-in（`crate::graph::step_graph_mode` が
+/// `crate::graph::GraphMode::StreamOnly` 以上）が最初の CUDA デバイス
+/// 初期化より前に設定されている場合のみ `ctx.new_stream()`
+/// （非 legacy・capture 可能なストリーム）を保持する。opt-in OFF
+/// （既定）では常に [`StreamKind::Legacy`] のまま、本イシュー導入前と
+/// ストリーム挙動・性能とも bit・timing とも不変（`new_stream()` は
+/// `cudarc` の「multi-stream mode」を有効化し、以降の全 `device_ptr`
+/// 呼び出しに `cuStreamWaitEvent` を自動挿入するため、無条件に切り替える
+/// と opt-in OFF 時の既存経路まで変えてしまう。design doc §4.1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    /// `ctx.default_stream()`（legacy NULL stream）。capture 不可。
+    Legacy,
+    /// `ctx.new_stream()`（capture 可能な非 legacy ストリーム）。
+    Created,
 }
 
 impl CudaDevice {
@@ -95,7 +119,58 @@ impl CudaDevice {
         }
 
         let ctx = CudaContext::new(ordinal)?;
-        let stream = ctx.default_stream();
+        // イシュー #1349: CUDA Graph capture opt-in が最初のデバイス
+        // 初期化より前に設定されている場合のみ、capture 可能な
+        // `new_stream()` を保持する（`StreamKind` doc コメント参照）。
+        // opt-in OFF（既定）では現行どおり `default_stream()`
+        // （legacy NULL stream）のまま、本イシュー導入前と挙動不変。
+        let (stream, stream_kind) = if crate::graph::step_graph_mode().requires_created_stream() {
+            let created = ctx.new_stream()?;
+            // codex-review P1 指摘対応（PR #1390）: `ctx.new_stream()` は
+            // `cudarc` を「multi-stream mode」（`CudaContext::
+            // is_in_multi_stream_mode()`）へ切り替え、以降に確保する全
+            // `CudaSlice` へ read/write 用 `CudaEvent` を付与する
+            // （既定 `is_event_tracking() == true`）。この状態では
+            // `LaunchArgs::arg()`（`sgd.rs::CudaSgd::run` 等が使う
+            // `launch_builder`）が引数バッファの直近 read/write イベント
+            // へ `CU_EVENT_WAIT_DEFAULT` で自動 `cuStreamWaitEvent` する
+            // が、この待機対象イベントは通常 capture 開始**前**（forward
+            // ／backward 等、graph 化しない区間）に記録されたものであり、
+            // capture 外で記録済みのイベントへの `CU_EVENT_WAIT_DEFAULT`
+            // 待機は stream capture 中は禁止操作（driver がエラーを返し
+            // `context_cache` の poison 機構経由でこの ordinal 全体が
+            // 使用不能になる。design doc §4.7 の poison 契約）。
+            //
+            // 本クレートはこの `CudaDevice` につき常に単一ストリーム
+            // （`self.stream`）のみを保持し、複数ストリームを実際には
+            // 使わない（`new_stream()` の呼び出しはこの 1 箇所のみ。
+            // 別ストリームを fork する経路は存在しない）ため、
+            // cudarc のイベントベース cross-stream 同期機構はそもそも
+            // 不要である——単一ストリーム上の起動順序はストリーム自体の
+            // FIFO 順序保証で足り、`CudaSlice::drop` の同期待ちも本来は
+            // 不要（同一ストリームであれば later kernel が implicit に
+            // 順序保証される）。よってここでイベント追跡自体を無効化し、
+            // `launch_builder` が waits/records を一切積まないようにして
+            // capture 中の禁止操作を構造的に発生させない。
+            //
+            // SAFETY: `CudaContext::disable_event_tracking` の契約
+            // （このコンテキストで以後確保する `CudaSlice` はイベント
+            // 追跡なしで生成される。呼び出し元がストリーム間同期を自前で
+            // 保証する必要がある）は、上記のとおり本クレートがこの
+            // `ctx` 上で唯一のストリーム（`created`）だけを使い続ける
+            // 限り満たされる。この呼び出しは `new_stream()` 直後・
+            // 他のどの `CudaSlice` 確保よりも前（`CudaDevice::new` は
+            // このあと `name()`／`compute_capability()` を呼ぶのみで
+            // デバイスメモリを確保しない）に行うため、イベント追跡が
+            // 有効なまま生成された `CudaSlice` が存在しない状態で無効化
+            // が完了する。
+            unsafe {
+                ctx.disable_event_tracking();
+            }
+            (created, StreamKind::Created)
+        } else {
+            (ctx.default_stream(), StreamKind::Legacy)
+        };
         let name = ctx.name()?;
         let compute_capability = ctx.compute_capability()?;
         // nvrtc の --gpu-architecture は仮想アーキテクチャ（compute_XY）を
@@ -111,6 +186,7 @@ impl CudaDevice {
             name,
             compute_capability,
             arch,
+            stream_kind,
         })
     }
 
@@ -133,13 +209,77 @@ impl CudaDevice {
     }
 
     /// #33/#34 のカーネルロード・起動が使う `CudaContext` 共有ハンドル。
+    ///
+    /// **可視性を `internal-diagnostics` feature でゲートする
+    /// （codex-review P0 指摘対応・PR #1390。旧稿は無条件 `pub` だった）**:
+    /// `crate::graph`（イシュー #1349）が opt-in ON 時この `ctx` 上に
+    /// `unsafe { ctx.disable_event_tracking() }` を適用する根拠は
+    /// 「この `CudaDevice` はこの `ctx` 上で唯一のストリーム
+    /// （`self.stream`）しか作らない」という**本クレート内部の**運用
+    /// 契約であり、`cudarc` 自身が強制する不変条件ではない。`CudaDevice`
+    /// 自体は本クレート（crates.io 公開クレート
+    /// `fandhe-ai-backend-cuda`）から `pub use` で再公開されているため、
+    /// 本メソッドが無条件 `pub` のままだと、クレート外の利用者が安全な
+    /// 公開 API の組み合わせだけで `context().clone()` → `.new_stream()`
+    /// と呼んで**この `ctx` 上に第 2 のストリーム**を作れてしまう
+    /// （`AGENTS.md` の unsafe 不変条件保証の要件に違反）。第 2
+    /// ストリームが作られると、イベント追跡を無効化済みの `ctx` の下で
+    /// 2 本のストリーム間の読み書き順序を保証する手段がなくなり、
+    /// バッファをまたいだ競合が起こりうる。
+    ///
+    /// 一方で本クレート自身の実機診断テスト・ベンチ（`tests/`・
+    /// `examples/` 配下。`large_buffer_percall_alloc_ab_1149.rs`・
+    /// `tma_probe_real_device.rs`・`device_attributes_dump.rs` 等）は
+    /// 既定 OFF（opt-in 無効。`ctx` のイベント追跡は無効化されていない）
+    /// の状態で `context()`/`stream()` へ直接アクセスして driver 属性・
+    /// pool 状態を読む正当な既存用途を持つ（`Cargo.toml` の
+    /// `internal-diagnostics` feature コメント「内部診断専用ツールの
+    /// 可視性制御」参照）。そのため既定ビルド（`internal-diagnostics`
+    /// feature 無効。crates.io の通常利用者はこの feature を有効化し
+    /// ない）では `pub(crate)` に絞る一方、同 feature 有効時（本クレート
+    /// 自身の `tests/`／`examples/` が `required-features` 経由でのみ
+    /// 要求する。CI の `cargo test --workspace --all-features` は常に
+    /// この feature を含む）だけ `pub` へ戻す。既定ビルドの公開 API 面
+    /// からは変わらず除外されるため、`AGENTS.md` が要求する不変条件
+    /// 保証は成立する（`docs/backend-cuda-graph-step-capture-design.md`
+    /// §4.1）。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn context(&self) -> &Arc<CudaContext> {
         &self.ctx
     }
 
+    /// [`Self::context`] doc コメント参照。既定ビルド（`internal-diagnostics`
+    /// feature 無効）ではクレート内部限定に絞る。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    pub(crate) fn context(&self) -> &Arc<CudaContext> {
+        &self.ctx
+    }
+
     /// #33/#34 のカーネル起動・メモリ転送が使う既定ストリーム。
+    ///
+    /// `internal-diagnostics` feature によるゲート（codex-review P0
+    /// 指摘対応・PR #1390）: [`Self::context`] と同じ理由。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
+    }
+
+    /// [`Self::stream`] doc コメント参照。既定ビルド（`internal-diagnostics`
+    /// feature 無効）ではクレート内部限定に絞る。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    pub(crate) fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+
+    /// このデバイスのストリームが CUDA Graph capture 可能（`StreamKind::
+    /// Created`）かどうかを返す（イシュー #1349）。`ops.rs::
+    /// CudaBackendOps::captured_segment_key` が opt-in ON でも実際に
+    /// capture 可能なストリームで初期化済みかを判定するために使う
+    /// （opt-in が最初のデバイス初期化より遅れて ON にされた場合、
+    /// このデバイスは `StreamKind::Legacy` のまま残り、本メソッドは
+    /// `false` を返す。`StreamKind` doc コメント参照）。
+    pub fn is_capturable_stream(&self) -> bool {
+        matches!(self.stream_kind, StreamKind::Created)
     }
 
     /// `new` に渡した GPU の ordinal（デバイス番号）。
