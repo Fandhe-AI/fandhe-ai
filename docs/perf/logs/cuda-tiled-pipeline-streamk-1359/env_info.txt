@@ -1,0 +1,14 @@
+# GB10 実機実測 env_info（イシュー #1359）
+#
+# 状態: 未実測（ブロッカー）
+#
+# 理由: 本エージェント実行環境（Mac 側 worktree）に
+# docs/real-hardware-verification-env.local.md（GB10 実機接続用のローカル実値ファイル。
+# Git 管理外）が存在せず、CUDA_NODE を解決できなかったため、GB10 実機への rsync 転送・
+# SSH 経由でのビルド・テスト・ベンチ実行のいずれにも着手できなかった。
+#
+# 実測値は捏造せず未記入のまま残す。判定基準・再開手順の詳細は
+# docs/perf/cuda-gemm-tiled-pipeline-streamk.md §6 を参照。
+#
+# 再開時にこのファイルを実測の env_info（計測日・.rev-stamp・nvidia-smi 出力・
+# 実行前後の uptime・nvcc/rustc/cargo バージョン・streamk_plan 要約）で置き換えること。

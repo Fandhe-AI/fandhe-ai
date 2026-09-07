@@ -2461,8 +2461,12 @@ pub(crate) enum GemmDriverVariant {
     /// B パネル共有（pc ごとに列全幅を 1 回 pack）・行パネルを
     /// `AtomicUsize` カウンタで動的配布（イシュー #1366・
     /// [`dispatch_ic_dynamic`]）。`SharedBPcOuter` の静的等分割による
-    /// 負荷不均衡（issue #1366 実装計画 §1）への対処候補。採否は
-    /// 両実機実測（#1367）待ち・本番未結線。
+    /// 負荷不均衡（issue #1366 実装計画 §1）への対処候補。両実機実測
+    /// （#1367）の結果 REJECT（不採用）確定。DGX Spark GB10 で N=1024/2048
+    /// の対 `RowPanel` 比が 0.63／0.85 と大きく後退し採用ゲートを満たさない
+    /// （`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §14・
+    /// `docs/perf/cpu-gemm-ic-dynamic-variant.md` §6）。本番未結線のまま
+    /// `#[cfg(test)]` 限定を維持する。
     IcDynamic,
 }
 
