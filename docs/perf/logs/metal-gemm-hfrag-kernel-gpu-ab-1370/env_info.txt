@@ -1,0 +1,16 @@
+sw_vers:
+ProductName:  macOS
+ProductVersion: 26.6.2
+BuildVersion: 25G83
+
+rustc -V:
+rustc 1.96.0 (ac68faa20 2026-05-25)
+
+hw.model:
+Mac16,6 (Apple M4 Max)
+
+base HEAD SHA (branch point, origin/main):
+65e6cadceeb3e795588b166637af0510bc9e8c1f
+
+uptime (before smoke test):
+13:57  up 19 days,  1:10, 20 users, load averages: 6.54 4.70 4.62

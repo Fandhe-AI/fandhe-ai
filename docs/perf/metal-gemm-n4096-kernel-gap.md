@@ -2233,3 +2233,16 @@ base 絶対値のプロトコル間差は判定そのものへ影響しない**�
 `kernel_gpu_production_select_run{1..5}.log`（B 系列）・
 `aggregate.md`（抽出コマンド・5 run 表・妥当性帯チェック・判定を
 記載））。内部ホスト名・絶対パスは含めない。
+
+## §17 E9 hfrag 実測（イシュー #1370）
+
+E7〜E8 と同型の候補評価が E9（half フラグメント／f32 累算候補
+`gemm_simdgroup_tiled_hfrag`。親 #1368・イシュー #1369/#1370）でも
+実施された。詳細（S 系列の N 別最良タイル・A 系列の同一タイル比較・
+B 系列の結線判断・採否）は `docs/perf/metal-gemm-hfrag-candidate.md`
+§9 を正とし、本節では二重管理しない。要旨: N=4096 のみ本番選択構成
+比 約 10〜12% 高速（ADOPT-as-opt-in-candidate）だが、これは「hfrag
+固有の演算スループット向上」ではなく「hfrag の SMEM 使用量が f32 の
+半分であるため f32 では選ばれない `bk=32` 構成が viable になる」という
+間接効果であり（同一タイル比較では hfrag は f32 より一貫して遅い）、
+無条件の opt-in 候補前進は推奨しない（同 doc §9.6）。
