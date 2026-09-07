@@ -200,6 +200,69 @@ class CliFailClosedTest(unittest.TestCase):
         code, _out, err = self._run(["--n", "0", "--dump", f"cuda={real_path}"])
         self.assertEqual(code, 2)
 
+    def test_duplicate_idx_mismatch_rejected(self):
+        # 同一 idx が複数 call にわたって再登場し、かつ値（ref_bits）が食い違う
+        # 破損・非決定的ダンプ。`parse_dump_lines` 自体は個々の行として妥当
+        # （書式・自己整合性は満たす）ため malformed としては検出されない。
+        # `main` 側の重複 idx 突合（`parity_dump_truth.py::main` と同じ防御）
+        # が先勝ち破棄せず fail-closed で検出することを確認する（イシュー
+        # #1237 codex-review 指摘・P0）。
+        n = 8
+        row, col = 1, 1
+        idx = row * n + col
+        line1 = (
+            f"PARITY_DUMP call=1 n={n} idx={idx} row={row} col={col} "
+            "ref=1.0 ref_bits=0x3f800000 "
+            "actual=1.0 actual_bits=0x3f800000 "
+            "abs=0.0 rel=0.0"
+        )
+        line2 = (
+            f"PARITY_DUMP call=2 n={n} idx={idx} row={row} col={col} "
+            "ref=2.0 ref_bits=0x40000000 "
+            "actual=2.0 actual_bits=0x40000000 "
+            "abs=0.0 rel=0.0"
+        )
+        import tempfile
+
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+        f.write(line1 + "\n" + line2 + "\n")
+        f.close()
+        try:
+            code, _out, err = self._run(["--n", str(n), "--dump", f"cuda={f.name}"])
+            self.assertNotEqual(code, 0)
+            self.assertIn("重複レコードが不一致", err)
+        finally:
+            os.unlink(f.name)
+
+    def test_duplicate_idx_consistent_accepted(self):
+        # 同一 idx の再登場でも値が完全一致（決定的な再計測）なら先頭の
+        # 出現を代表値として黙って採用し、エラーにしない（従来挙動の維持）。
+        # `ComputeMetricsSmokeTest` と同じ手順で `fma_bit_match=True` となる
+        # ref/actual を実データ同様の乱数源から構成する。
+        n = 8
+        row, col = 2, 5
+        a_rows = parity_dump_truth.extract_rows_exact(parity_dump_truth.SEED_A, n, {row})
+        b_cols = parity_dump_truth.extract_cols_exact(parity_dump_truth.SEED_B, n, {col})
+        fma_f32, _partials = parity_dump_truth.fma_sequential_f32_exact(a_rows[row], b_cols[col])
+        ref_bits = struct.unpack("<I", struct.pack("<f", fma_f32))[0]
+        idx = row * n + col
+        line_tpl = (
+            "PARITY_DUMP call={call} n=" + str(n) + f" idx={idx} row={row} col={col} "
+            f"ref={fma_f32!r} ref_bits=0x{ref_bits:08x} "
+            f"actual={fma_f32!r} actual_bits=0x{ref_bits:08x} "
+            "abs=0.0 rel=0.0"
+        )
+        import tempfile
+
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+        f.write(line_tpl.format(call=1) + "\n" + line_tpl.format(call=2) + "\n")
+        f.close()
+        try:
+            code, _out, err = self._run(["--n", str(n), "--dump", f"cuda={f.name}"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.unlink(f.name)
+
     def test_corrupted_dump_rejected(self):
         n = 8
         row, col = 1, 1

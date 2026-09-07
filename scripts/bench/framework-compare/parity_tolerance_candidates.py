@@ -441,6 +441,33 @@ def main(argv: list[str] | None = None) -> int:
         unique_by_idx: dict[int, "parity_dump_truth.ParityDumpRow"] = {}
         for r in parity_dump_truth.parse_dump_lines(lines, n, error_count=error_count):
             if r.idx in unique_by_idx:
+                # 同一 idx の再登場（複数 call にわたる重複）。値が食い違う場合は
+                # 「call 間で bit 完全一致」という決定性の前提が崩れているため
+                # 先勝ちで黙って破棄せず fail-closed で検出する（parity_dump_truth.py
+                # main の重複 idx 不一致検出〈イシュー #1197 codex-review 指摘・P0〉と
+                # 同じ防御をこの呼び出し経路にも適用する。イシュー #1237 codex-review
+                # 指摘・P0）。
+                prev = unique_by_idx[r.idx]
+                if (
+                    r.row != prev.row
+                    or r.col != prev.col
+                    or r.ref_bits != prev.ref_bits
+                    or r.actual_bits != prev.actual_bits
+                    or r.dump_abs != prev.dump_abs
+                    or r.dump_rel != prev.dump_rel
+                ):
+                    print(
+                        f"ERROR: label={label} idx={r.idx} の重複レコードが不一致"
+                        "（非決定的または破損したダンプ）: "
+                        f"call={prev.call} 側 row={prev.row} col={prev.col} "
+                        f"ref_bits=0x{prev.ref_bits:08x} actual_bits=0x{prev.actual_bits:08x} "
+                        f"abs={prev.dump_abs:.6e} rel={prev.dump_rel:.6e} / "
+                        f"call={r.call} 側 row={r.row} col={r.col} "
+                        f"ref_bits=0x{r.ref_bits:08x} actual_bits=0x{r.actual_bits:08x} "
+                        f"abs={r.dump_abs:.6e} rel={r.dump_rel:.6e}",
+                        file=sys.stderr,
+                    )
+                    error_count[0] += 1
                 continue
             unique_by_idx[r.idx] = r
         if error_count[0] > 0:
