@@ -82,6 +82,7 @@ fandhe-ai/
     ├── backend-switching-design.md     # cfg ベースバックエンド切替の設計
     ├── cpu-gemm-b-packing-sharing-decision.md # B パネル packing のスレッド間共有化の設計検討・適用可否判断（#565）
     ├── cpu-gemm-prefetch-decision.md   # aarch64 プリフェッチ intrinsics 到達可能性調査・E-7 保留判断→原則不要へ格下げ（#489・#751）
+    ├── cpu-matmul-fixed-cost-design.md # facade 経由 CPU matmul（tape 経路）の固定費（contiguous コピー・tape 登録・出力アロケーション）削減設計・bit 一致契約への影響・#1299/#1301 向け受入基準（#1294）
     ├── crates-io-naming-decision.md # crates.io 公開クレート名（fandhe-ai prefix）の空き確認・最終名ユーザー承認記録（#878/#879）
     ├── crates-io-publishing-order.md # crates.io 公開 6 クレート間 path 依存の version 併記方針（[dependencies] は付与・[dev-dependencies] は strip）・公開順序（トポロジカル順）・workspace.version 一括バンプ運用（#881）
     ├── cuda-streamk-decision.md        # CUDA GEMM StreamK スケジューリングの機構要約・wave 定量化・採否判断（保留。#812。§6 で最終 wave 限定・固定順序 fixup 版〈イシュー #1358〉の opt-in 実装完了・再評価条件 2〈決定性〉充足を追記。条件 1〈実機実測〉は #1359 が引き継いだが本エージェント実行環境に CUDA 実機接続手段がなく未実測・保留のまま追記〈「#1359 実測結果」節〉）
@@ -96,7 +97,6 @@ fandhe-ai/
     ├── guardrail-change-policy.md    # TASK-6.2 判定器変更時フローの明文化（#149）
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
     ├── inference-forward-fixed-cost-design.md # 推論 forward の固定費削減（tape 不要経路・活性化デバイス常駐チェーン）の設計・bit-exactness 契約・実測記録（#1028）
-    ├── cpu-matmul-fixed-cost-design.md # facade 経由 CPU matmul（tape 経路）の固定費（contiguous コピー・tape 登録・出力アロケーション）削減設計・bit 一致契約への影響・#1299/#1301 向け受入基準（#1294）
     ├── kernel-fusion.md     # TASK-12.2b カーネル融合の適用範囲・限界（複合WLで融合を性能目標の前提にしない。#168）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
     ├── matmul-vjp-zero-copy-decision.md # matmul VJP の転置ゼロコピー化（`eval::matmul` の stride 対応）・CPU BLIS／CUDA／Metal gemm 結線を別イシューへ引き継ぐスコープ判断・実測記入欄（#1043 ツリー・#1046）
