@@ -286,6 +286,51 @@ cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 4096 --m
 GB10 実機での計測結果・カーネル専有時間ベースの candle 比（参考値）は
 `docs/perf/cuda-gemm-reuse-phase-breakdown.md`（イシュー #1182）を参照。
 
+#### 借用ビュー readout（イシュー #1337。`host-view-readout` feature）
+
+上記 `#1182` が確定した結論（`host_copy`〈`.to_vec()` の memcpy〉が
+`iter_total` の 25.6〜53.0%〈CUDA〉を占める＝ハーネス自身の診断コストが
+candle 比未達の主因）を受け、`readout_var`（`to_tensor` + `host_copy` の
+2 区間の実装）自体を `bench-fandhe` の cargo feature `host-view-readout`
+（既定 OFF）で借用ビュー（`fandhe_ai::VarHostView::host_view()`／
+`Tensor::host_slice()`。イシュー #1335・#1336）へ切り替え可能にした。
+
+- **crates.io 公開版 `fandhe-ai =0.7.0` には該当 API が未収録**のため、
+  feature を有効化する場合は `managed-placement`（イシュー #1353）と同じ
+  方式で `crates/facade` への path patch を CLI `--config` 経由で併用する
+  必要がある:
+  ```bash
+  cargo test -p bench-fandhe --features host-view-readout     --config 'patch.crates-io.fandhe-ai.path="<絶対パス>/crates/facade"'
+  ```
+  `[patch]` は Cargo.lock・`.cargo/config.toml` へは一切書かず invocation
+  限定（deps-policy.md 第 9 区分の承認済みピン `fandhe-ai =0.7.0` を壊さない）。
+- **区間の再定義**（`host-view-readout` 有効時のみ。区間名・順序・件数
+  〈5 区間〉は不変）:
+  - `to_tensor` 区間 = `Var::host_view()` の構築（`materialize_non_fallible
+    (..).contiguous()`。contiguous な場合は `Tensor` 内部 `Arc` の複製のみ）
+  - `host_copy` 区間 = 借用スライスの取得（`Deref::deref`。追加コピーなし。
+    想定値 ≈0）
+  - `checksum`／`matmul`／`iter_total` は無変更
+- **checksum／parity 契約は不変**（`readout_var` の戻り値は feature 有無に
+  関わらず `Deref<Target=[f32]>` で、`checksum_var`／`GemmReference::verify`
+  の呼び出し側は無変更）。`readout_var_matches_legacy_to_vec_bit_exact`
+  （`main.rs` テスト）が feature 有無いずれのビルドでも legacy 経路
+  （`to_tensor()` + `to_vec()`）と bit 同一であることを固定する。
+- **CUDA `#1336` の pinned host staging（`MemoryOps::with_host_view`）は
+  本経路に到達しない**: `Var::matmul` の出力は `gemm` バックエンド内部の
+  readback で既にホスト常駐 `Tensor` になっているため（`docs/perf/
+  cuda-host-view-staging-readout.md` §7）。誤帰属を避けるため実測記録
+  （`docs/perf/{cuda,metal,cpu}-gemm-candle-gate-remeasurement.md`）にも
+  明記する。
+- **`run_gemm_gate.sh`** は `GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout`
+  （`GEMM_GATE_PATCH_FACADE_PATH` 併用必須。allowlist 検証・fail-closed）で
+  この feature を有効化したビルドを計測できる（下記「GEMM ゲート 5 回計測」
+  節参照）。
+- **`compare_gemm_ab.py`** は `--device cuda`・`--sizes gate`（cpu={512,1024,2048}・
+  cuda/metal={1024,2048,4096}への絞り込み）・`--modes reuse`（cuda/metal の
+  ゲート出力が reuse のみのため fresh 参考行をセル外扱いにする）に対応する
+  （下記「GEMM ゲート 5 回計測」節参照）。
+
 ### `infer --mode reuse` / `infer --phases`（イシュー #1217）
 
 `docs/perf/train-step-phase-breakdown.md` §13・§15.5 の背景: `--task infer` は
@@ -678,6 +723,16 @@ GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
 GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
   bash run_gemm_gate_metal.sh head-<short sha>
 
+# 借用ビュー readout（イシュー #1337）を有効化した参考系列（GEMM_GATE_PATCH_
+# FACADE_PATH の併用必須。allowlist 検証・fail-closed。上記「gemm --mode
+# reuse --phases」節「借用ビュー readout」小節参照）:
+GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
+  GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout \
+  bash run_gemm_gate_cuda.sh head-<short sha>-readout-on
+# 同一 label・feature 無効（off。切替前後比較用）:
+GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
+  bash run_gemm_gate_cuda.sh head-<short sha>-readout-off
+
 # 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
 python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.7.0.jsonl
 python3 compare_gemm_gate.py --device metal results/raw/results-m4max-gemm-gate-0.7.0.jsonl
@@ -712,6 +767,16 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
   `results/raw/results-dgx-gemm-gate-<label>.failed-<UTC タイムスタンプ>.jsonl`
   等の診断用別名ファイルへ退避する（fail-closed。#1166 codex-review 指摘
   PRRT_kwDOTuUCJc6euxgr／PRRT_kwDOTuUCJc6evCpq 対応。security.md A08）
+- **`GEMM_GATE_BENCH_FANDHE_FEATURES`（イシュー #1337）**: `bench-fandhe`
+  の cargo feature（現状 allowlist は空文字または `host-view-readout` の
+  みで、他の値は fail-closed で拒否する。将来 feature 追加時は
+  `run_gemm_gate.sh` 側 allowlist の明示拡張が必要）をビルドへ反映する。
+  指定時は `GEMM_GATE_PATCH_FACADE_PATH` の併用が必須（未指定は早期に
+  明示エラー。crates.io 公開版 `fandhe-ai =0.7.0` には該当 feature が使う
+  API が未収録なため）。manifest（`bench_fandhe_features` フィールド）に
+  記録され、`GEMM_GATE_SKIP_BUILD=1` 経路を含め計測直前に現在の env と
+  fail-closed で突合する（off/on 取り違えたまま性能値を確定させない。
+  旧 manifest〈キー欠損〉は「空文字＝feature 無効」として後方互換に扱う）。
 - **バイナリ同一性検証（イシュー #1166。依存元照合は同イシューへの
   codex-review／Cursor Bugbot 指摘で強化。bench-candle 側の検証は同イシュー
   への追加 codex-review 指摘 PRRT_kwDOTuUCJc6evCpm 対応）**: `bench-fandhe`・
@@ -879,6 +944,41 @@ before=限定なし・after=限定あり（`ratio = after/before`）として渡
 FACADE_PATH` と一致していることで確認する（結果記録・採否は
 `docs/perf/cpu-gemm-default-thread-limit.md` §6・
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13 を参照）。
+
+### `compare_gemm_ab.py --device cuda --sizes gate --modes reuse`（借用ビュー readout・イシュー #1337）
+
+`compare_gemm_ab.py` は `--device cuda`（新規。N=1024/2048/4096 の 6 セル。
+`metal`／`cpu` と異なり cuda には 512 込みの独自 8 セル用途の前例が無いため
+既定セル集合＝gate セル集合）・`--sizes gate`（`--device metal` の既定 8 セル
+から 512 を除いた 6 セルへ絞り込み。`run_gemm_gate.sh` の出力形状に合わせる
+用途）・`--modes`（既定 `fresh,reuse`。カンマ区切り。cuda/metal のゲート
+出力は reuse のみのため `--modes reuse` で fresh 参考行をセル外扱いにできる）
+に対応する。
+
+`readout_var` 借用ビュー切替（上記「gemm --mode reuse --phases」節「借用
+ビュー readout」小節）の off/on A/B に本ツールを流用する:
+
+```bash
+cd scripts/bench/framework-compare
+FACADE="$(cd ../../../crates/facade && pwd)"
+
+# off（feature 無効）・on（host-view-readout 有効）を同一 label 系列で計測
+GEMM_GATE_PATCH_FACADE_PATH="$FACADE"   bash run_gemm_gate_cuda.sh head-<short sha>-readout-off
+GEMM_GATE_PATCH_FACADE_PATH="$FACADE" GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout   bash run_gemm_gate_cuda.sh head-<short sha>-readout-on
+
+# fandhe-ai 行のみ抽出（cpu の thread-limit A/B と同じ手順。上記参照）
+for label in head-<short sha>-readout-off head-<short sha>-readout-on; do
+  jq -c 'select(.framework == "fandhe-ai")'     "results/raw/results-dgx-gemm-gate-${label}.jsonl"     > "results/raw/results-dgx-gemm-gate-${label}.fandhe-only.jsonl"
+done
+
+python3 compare_gemm_ab.py --device cuda --sizes gate --modes reuse   results/raw/results-dgx-gemm-gate-head-<short sha>-readout-off.fandhe-only.jsonl   results/raw/results-dgx-gemm-gate-head-<short sha>-readout-on.fandhe-only.jsonl
+```
+
+`metal`・`cpu` でも device を差し替えて同様に使う（`metal`／`cpu` の
+`--sizes gate` は既存の gate セル集合と一致する。上記「`--device cuda`
+セル集合」参照）。判定基準（`parity_fail_count=0`・checksum 完全一致・
+`ratio = after/before <= 1.05`）は他 A/B ツールと同じ。結果記録は
+`docs/perf/{cuda,metal,cpu}-gemm-candle-gate-remeasurement.md` を参照。
 
 ## A/B 計測（都度同期廃止・イシュー #1083）
 
