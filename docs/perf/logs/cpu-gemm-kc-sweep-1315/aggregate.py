@@ -29,8 +29,22 @@ https://github.com/Fandhe-AI/fandhe-ai/pull/1430#discussion_r3952477456）を
     渡された場合は拒否する（同一 run の水増しを遮断）。
   - 各ログファイル（1 run 分）が、そのファイル内で検出された各 (kc, size) を
     ちょうど 1 回ずつ含むか検証する（同一 run 内の重複行・0 回〈欠落〉を
-    拒否し、`samples[(kc, size)]` の要素数が「file 数」＝「独立 run 数」と
-    一致することを保証する）。
+    拒否する）。
+
+さらに #1430 codex-review 3 巡目指摘（PR #1430 のレビュースレッド
+https://github.com/Fandhe-AI/fandhe-ai/pull/1430#discussion_r3952477456。
+「形状セットごとに独立 run 数を検証する」）を受け、run 数の検証を
+**形状（size）単位**に改めた（本スイープは 1024/2048 用と 4096 用で
+`kc_sweep_ab_1024_2048`／`_4096` の 2 つの独立プロセス起動系列に分かれ、
+それぞれ 5 ファイルずつ出力するため、同一機種の全形状ログをまとめて渡すと
+入力ファイル総数〈10〉が「1 形状あたりの独立 run 数」と一致しなくなる。
+旧実装は `expected_runs = len(paths)`〈全ファイル数〉を size を問わず
+一律の期待 run 数として使っていたため、各形状に正常な 5 run が揃っていても
+「サンプル数がファイル数〈10 files〉と一致しない」と誤って拒否していた）:
+  - 各 size の期待 run 数は「その size を含むログファイルの数」（形状セット
+    をまたいで sizes を突き合わせるのではなく、size ごとに独立して求める）
+    とする。`samples[(kc, size)]` の要素数はこの size 別期待 run 数と
+    一致するか検証する。
 
 使い方: python3 aggregate.py "<機種名>" <ログファイル...>
 """
@@ -76,14 +90,20 @@ def check_distinct_paths(paths):
 
 
 def parse_files(paths):
-    # (kc, size) -> [gflops, ...]（file 数＝独立 run 数分。プロセスごとに
-    # 1 出力行。file 単位の重複・欠落は per_file_keys で検証する）
+    # (kc, size) -> [gflops, ...]（file 単位の重複・欠落は per_file_keys で
+    # 検証する）。あわせて size -> その size を含むファイル数（形状セット
+    # ごとの独立 run 数）を file_size_counts に積み上げる。1 形状セット
+    # （例: 1024/2048 用 5 ファイル）内では各ファイルが同じ size 集合を
+    # 含む前提のため、size を含むファイル数を数えるだけで
+    # 「その size を計測した独立 run 数」が求まる。
     samples = defaultdict(list)
+    file_size_counts = defaultdict(int)
     for path in paths:
         # このファイル（1 run 分）内で検出済みの (kc, size) 集合。同一 run
         # 内で同じ候補×形状の行が複数回出力された場合（プロセス側の異常出力・
         # ログの結合ミス等）を検出するため、行ごとに逐次照合する。
         per_file_keys = set()
+        sizes_in_file = set()
         with open(path, encoding="utf-8") as f:
             for line in f:
                 m = LINE_RE.search(line)
@@ -101,24 +121,31 @@ def parse_files(paths):
                         sys.exit(1)
                     per_file_keys.add(key)
                     samples[key].append(gflops)
-    return samples
+                    sizes_in_file.add(size)
+        for size in sizes_in_file:
+            file_size_counts[size] += 1
+    return samples, file_size_counts
 
 
-def check_run_identity(paths, samples):
-    # fail-closed: 各 (kc, size) のサンプル数が入力ファイル数（＝独立 run 数）
-    # と一致するか検証する。parse_files の同一 run 内重複拒否と組み合わせる
-    # ことで、「samples[(kc, size)] の要素数 == 独立プロセス起動回数」が
-    # 保証され、後段の `statistics.median`／run 単位のペアワイズ比較
-    # （zip(series, base_series)）が異なる run 同士を取り違えて比較する
-    # 余地を無くす。
-    expected_runs = len(paths)
+def check_run_identity(samples, file_size_counts):
+    # fail-closed: 各 (kc, size) のサンプル数が、その size を含むログ
+    # ファイル数（＝その形状セットの独立 run 数）と一致するか検証する。
+    # size 単位で期待 run 数を求めることで、機種単位で複数の形状セット
+    # （例: 1024/2048 用 5 ファイル・4096 用 5 ファイル）をまとめて渡した
+    # 場合でも、形状セットをまたいで期待 run 数を合算しない
+    # （#1430 codex-review 3 巡目指摘）。parse_files の同一 run 内重複拒否
+    # と組み合わせることで、「samples[(kc, size)] の要素数 ==
+    # その size を対象にした独立プロセス起動回数」が保証され、後段の
+    # `statistics.median`／run 単位のペアワイズ比較（zip(series, base_series)）
+    # が異なる run 同士を取り違えて比較する余地を無くす。
     mismatched = {
-        k: len(v) for k, v in samples.items() if len(v) != expected_runs
+        k: (len(v), file_size_counts.get(k[1], 0)) for k, v in samples.items()
+        if len(v) != file_size_counts.get(k[1], 0)
     }
     if mismatched:
         print(
-            f"ERROR: sample count does not match input file count "
-            f"({expected_runs} files) for: {mismatched}",
+            "ERROR: sample count does not match per-size input file count "
+            f"(observed, expected) for: {mismatched}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -137,7 +164,7 @@ def main():
     # run を検証する」）。
     check_distinct_paths(paths)
 
-    samples = parse_files(paths)
+    samples, file_size_counts = parse_files(paths)
 
     # fail-closed: 入力行が 1 件もなければ拒否する（空ログ・/dev/null 等の
     # 与えられたログファイル集合が丸ごと欠落した入力を、見出しのみ出力し
@@ -150,11 +177,12 @@ def main():
         )
         sys.exit(1)
 
-    # fail-closed: 各 (kc, size) のサンプル数が入力ファイル数（独立 run 数）と
-    # 一致するか検証する（run 重複・欠落の検出。PR #1430 codex-review 2 巡目
-    # 指摘）。次の「5 サンプル未満」検査より先に行い、run 数がそもそも 5 に
-    # 満たない・一致しない場合に原因を明示する。
-    check_run_identity(paths, samples)
+    # fail-closed: 各 (kc, size) のサンプル数が、その size を含むファイル数
+    # （形状セットごとの独立 run 数）と一致するか検証する（run 重複・欠落の
+    # 検出。PR #1430 codex-review 2/3 巡目指摘）。次の「5 サンプル未満」検査
+    # より先に行い、run 数がそもそも 5 に満たない・一致しない場合に原因を
+    # 明示する。
+    check_run_identity(samples, file_size_counts)
 
     # fail-closed: 5 サンプル未満の (kc, size) があれば拒否する（本スイープの
     # 契約は 5 回独立プロセス計測。上の check_run_identity により、この時点で
