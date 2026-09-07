@@ -129,9 +129,15 @@ N=512/1024 の head タイルは S 系列対象外のため base（本番選択�
 A 系列（同一タイル比較）が示すとおり同一タイルでは hfrag は f32 より
 遅い。つまり「half MMA 自体の演算スループット向上」ではなく「hfrag の
 SMEM 使用量が f32 のちょうど半分（`shared_mem_bytes_hfrag_for`）である
-ため、f32 では選ばれない bk=32・64×64 構成が hfrag では viable かつ
-最速になる」という**間接効果**である（`docs/perf/metal-gemm-hfrag-
-candidate.md` §9.6 参照）。
+ため、f32 の本番選択では選ばれない bk=32・64×64 構成が hfrag では最速に
+なる」という**間接効果だと推測される**（A 系列・B 系列は SMEM 使用量
+だけを対照した比較ではないため、この帰属は仮説であり、cand9 高速化を
+SMEM 節約のみに帰属させる断定でも half MMA 自体の優位性を否定する
+断定でもない点に注意。`CANDIDATES[9]`〈f32・bk=32〉自体は実行可能
+〈viable〉であり本番選択構成比 4.5〜7.6 倍遅いという理由で REJECT
+されている——SMEM 不足で実行不能という意味の非 viable ではない。
+`docs/perf/metal-gemm-hfrag-candidate.md` §9.6・
+`docs/perf/metal-gemm-n4096-kernel-gap.md` §14 参照）。
 
 ## 妥当性帯チェック（#1275 分母との突合。副次）
 

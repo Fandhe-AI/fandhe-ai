@@ -146,8 +146,10 @@ tiled_hfrag`。親 #1368・イシュー #1369/#1370）の純カーネル時間 5
 half へ変換して MMA する精度低下を伴う経路）のため `CANDIDATES` 自体
 への追加ではなく既存候補を hfrag カーネルで再ディスパッチする形の
 評価であり、N=4096 のみ本番選択構成比 約 10〜12% 高速（ADOPT-as-
-opt-in-candidate）だがこれは間接効果（hfrag の SMEM 使用量が f32 の
-半分であるため viable なタイルが変わることに起因）と判明し、無条件の
+opt-in-candidate）だがこれは仮説段階の間接効果（hfrag の SMEM 使用量
+が f32 の半分であるため異なるタイルが最速になることに起因すると
+推測されるが、SMEM 使用量のみを対照した比較ではないため断定はできない。
+`docs/perf/metal-gemm-hfrag-candidate.md` §9.6）と考えられ、無条件の
 opt-in 候補前進は推奨しないと結論した。`select_with_occupancy_for_
 device` の選択ロジック・本表 §5 の判断は変更しない（詳細は
 `docs/perf/metal-gemm-hfrag-candidate.md` §9）。
