@@ -28,6 +28,14 @@
 //!    ベースライン機構のいずれにも依存しない `==` の完全一致で判定する
 //!    補助テストであり、3 節の受け入れ条件を代替しない。
 //!
+//! **イシュー #1355 追記**: `crate::precision::CudaGemmPrecision` の第 3
+//! モード `Tf32x3`（3×TF32 split-single 法）についても、上記 1・3・4 と
+//! 同型のテスト（`gemm_tf32x3_optin_off_matches_default_fp32_path_env_
+//! adaptive`・`gemm_tf32x3_optin_on_matches_cpu_across_shapes`・
+//! `gemm_tf32x3_optin_on_wiring_matches_run_tf32x3`）を本ファイル末尾に
+//! 追加した（上記 2 相当の CPU 参照実装との複合判定 smoke は Tf32x3 では
+//! 追加しない。1・3・4 の Tf32x3 版で必要な検証は尽くされる）。
+//!
 //! `common::parity_baseline` から tolerance 定数 pin を借用し、判定式・
 //! 許容誤差は再定義しない（`.claude/rules/coding-rust.md`）。
 //!

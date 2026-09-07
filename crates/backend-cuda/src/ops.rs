@@ -118,10 +118,12 @@ pub struct CudaBackendOps {
 
 impl CudaBackendOps {
     /// GEMM 本体（f32）の FP32 厳密経路（`run_tiled_f32`）のみを実行する
-    /// 内部ヘルパー。`crate::precision::tf32_gemm_enabled()` の状態に
-    /// 関わらず常に FP32 厳密で計算する（TF32 opt-in フラグを一切見ない）。
+    /// 内部ヘルパー。`crate::precision::gemm_precision()` の状態に
+    /// 関わらず常に FP32 厳密で計算する（`Tf32`／`Tf32x3` いずれの
+    /// opt-in モードも一切見ない）。
     ///
-    /// `gemm`（公開経路。opt-in 時は TF32 へ分岐しうる）・`gemm_bias_act`
+    /// `gemm`（公開経路。opt-in 時は `Tf32`／`Tf32x3` へ分岐しうる）・
+    /// `gemm_bias_act`
     /// の `ComposedFallback`（非融合合成経路）・
     /// `BackendOps::gemm_fp32_strict`（`dyn BackendOps` 経由の学習経路
     /// 向け入口。イシュー #1211 codex-review 指摘・PR #1223）の 3 者から
@@ -829,6 +831,20 @@ impl BackendOps for CudaBackendOps {
                 out
             }
             crate::precision::CudaGemmPrecision::Tf32x3 => {
+                // デバイスハンドル取得（driver 不在等）は他モードと同じ
+                // `CudaUnavailable` へ写像し、続くカーネル構築
+                // （`cached_mma_tf32x3`。cc<8.0・NVRTC コンパイル失敗等）
+                // のみを 3×TF32 固有の fail-closed メッセージ
+                // （`KernelLaunchFailed`）へ写像する（`Tf32` 分岐は両者を
+                // 区別せず一括で `CudaUnavailable` にしているが、driver
+                // そのものが不在の場合に「3xTF32 gemm unavailable」と
+                // 誤解を招くメッセージを返さないよう、本分岐では意図的に
+                // 分離する）。
+                let device = self.with_driver_call(
+                    &[],
+                    |e| BackendError::CudaUnavailable(e.to_string()),
+                    || self.device_handle_raw(),
+                )?;
                 let gemm = self.with_driver_call(
                     &[],
                     |e| {
@@ -836,10 +852,7 @@ impl BackendOps for CudaBackendOps {
                             "3xTF32 gemm unavailable (fail-closed): {e}"
                         ))
                     },
-                    || {
-                        let device = self.device_handle_raw()?;
-                        context_cache::cached_mma_tf32x3(&device)
-                    },
+                    || context_cache::cached_mma_tf32x3(&device),
                 )?;
                 let out = self.with_driver_call(
                     &[],
@@ -870,14 +883,15 @@ impl BackendOps for CudaBackendOps {
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict`] のオーバー
-    /// ライド。`gemm`（TF32 opt-in 分岐を持つ公開経路）を経由せず、
-    /// `gemm_fp32_strict_impl`（`crate::precision::tf32_gemm_enabled()`
-    /// を一切見ない FP32 厳密経路）へ直結する。`autodiff::grad` の VJP
+    /// ライド。`gemm`（精度モード分岐を持つ公開経路）を経由せず、
+    /// `gemm_fp32_strict_impl`（`crate::precision::gemm_precision()` を
+    /// 一切見ない FP32 厳密経路）へ直結する。`autodiff::grad` の VJP
     /// （`matmul_vjp`・`Op::LinearResident` の `d_weight`）が `dyn
-    /// BackendOps` 経由で呼ぶ入口で、TF32 opt-in フラグが有効な間も
-    /// backward を暗黙に TF32 化しない契約を保証する（`crate::precision`
-    /// モジュール冒頭コメントの「学習経路は本イシューのスコープ外」契約。
-    /// codex-review 指摘・イシュー #1211・PR #1223）。
+    /// BackendOps` 経由で呼ぶ入口で、`Tf32`／`Tf32x3` いずれの opt-in
+    /// モードが有効な間も backward を暗黙に精度変更しない契約を保証する
+    /// （`crate::precision` モジュール冒頭コメントの「学習経路は本
+    /// モジュールのスコープ外」契約。codex-review 指摘・イシュー #1211・
+    /// PR #1223。3 モード化はイシュー #1355）。
     fn gemm_fp32_strict(
         &self,
         a: &Tensor<f32>,

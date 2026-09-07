@@ -14,10 +14,14 @@
 //!   `Fp32Strict` の間の `CudaBackendOps::gemm` の経路・出力は本モジュール
 //!   導入前と bit-exact に不変（`ops.rs::gemm` のドキュメンテーション
 //!   コメント参照）。
-//! - `Tf32`／`Tf32x3` いずれの opt-in 時も、バックエンド間数値一致は
+//! - `Tf32` は opt-in 時、バックエンド間数値一致が
 //!   `.claude/rules/coding-rust.md` の統一複合判定「相対誤差 1e-3 未満
 //!   または 絶対誤差 1e-5 未満」（TF32 前提へ改定済みの REQ-2）の範囲内で
-//!   動作する。許容誤差そのものは変更しない。
+//!   動作することを実機実測済み（`docs/perf/cuda-tensor-core-tolerance-*
+//!   .md`）。`Tf32x3` は同一の統一複合判定を目標とするが、本モジュール
+//!   導入時点（イシュー #1355）では GB10 実機未実測であり、実測・採否
+//!   判断は #1356 が引き継ぐ（`docs/cuda-tf32x3-split-single-decision.md`
+//!   §8）。いずれのモードも許容誤差そのものは変更しない。
 //! - `Tf32x3`（3×TF32・split-single 法。hi/lo 分割・3 回の `mma.sync`
 //!   累積で f32 相当精度を Tensor Core 上で近似する。CUTLASS
 //!   `mma_tensor_op_fast_f32` 相当）は f32 SIMT と **bit 一致しない**

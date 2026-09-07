@@ -44,13 +44,14 @@
 //!
 //! # 3 回の累積順序
 //!
-//! `(a_hi, b_lo) → (a_lo, b_hi) → (a_hi, b_hi)`（小さい項を先に累積し
-//! `hi·hi` を最後に累積する。CUTLASS `mma_tensor_op_fast_f32`
-//! （`include/cutlass/gemm/warp/mma_tensor_op_fast_f32.h`）の
-//! `mma(d, a[1], b[0], c); mma(d, a[0], b[1], d); mma(d, a[0], b[0],
-//! d);`（`a[0]`/`b[0]` が hi、`a[1]`/`b[1]` が lo の命名規約）と同一の
-//! 累積順序）。`mma.sync` 命令文字列自体は
-//! [`MMA_TF32X3_ISSUE`]（本ファイル内マクロ。ソース上 1 箇所）から 3 回
+//! `(a_hi, b_lo) → (a_lo, b_hi) → (a_hi, b_hi)`（小さい寄与 2 項
+//! （`hi·lo`・`lo·hi`）を先に累積し、大きい寄与 `hi·hi` を最後に累積する。
+//! CUTLASS `mma_tensor_op_fast_f32` が採る 3-pass split-single 近似と
+//! 同じ設計意図。詳細・出典の扱いは
+//! `docs/cuda-tf32x3-split-single-decision.md` §4 を参照）。`mma.sync`
+//! 命令文字列自体は
+//! `MMA_TF32X3_ISSUE`（本ファイル内 CUDA C マクロ。カーネルソース文字列
+//! 内の定義であり Rust アイテムではない。ソース上 1 箇所）から 3 回
 //! 呼び出す（コピペ増殖の回帰検出テスト参照）。
 //!
 //! # FMA 契約の例外（重要）
@@ -562,6 +563,33 @@ mod tests {
             call_count, 3,
             "expected exactly 3 call sites of MMA_TF32X3_ISSUE (hi·lo, lo·hi, \
              hi·hi accumulation), found {call_count}"
+        );
+    }
+
+    /// 3 回の呼び出しサイトの出現順序が設計どおり
+    /// `(a_hi,b_lo) → (a_lo,b_hi) → (a_hi,b_hi)` であることをソース上の
+    /// 文字列位置でロックする（`kernels_mma_tf32.rs::
+    /// mma_tf32_source_uses_mma_fragment_quadrant_order_for_a` と同型の
+    /// 位置ロック手法。本ファイル冒頭コメント「3 回の累積順序」参照）。
+    #[test]
+    fn mma_tf32x3_source_issue_call_order_matches_hi_lo_lo_hi_hi_hi() {
+        let src = mma_tf32x3_source();
+        let needles = [
+            "a_hi_frag[cur][mi][0], a_hi_frag[cur][mi][1],\n                        a_hi_frag[cur][mi][2], a_hi_frag[cur][mi][3],\n                        b_lo_frag[cur][nj][0], b_lo_frag[cur][nj][1],",
+            "a_lo_frag[cur][mi][0], a_lo_frag[cur][mi][1],\n                        a_lo_frag[cur][mi][2], a_lo_frag[cur][mi][3],\n                        b_hi_frag[cur][nj][0], b_hi_frag[cur][nj][1],",
+            "a_hi_frag[cur][mi][0], a_hi_frag[cur][mi][1],\n                        a_hi_frag[cur][mi][2], a_hi_frag[cur][mi][3],\n                        b_hi_frag[cur][nj][0], b_hi_frag[cur][nj][1],",
+        ];
+        let positions: Vec<usize> = needles
+            .iter()
+            .map(|needle| {
+                src.find(needle)
+                    .unwrap_or_else(|| panic!("expected call-site text not found: {needle:?}"))
+            })
+            .collect();
+        assert!(
+            positions[0] < positions[1] && positions[1] < positions[2],
+            "MMA_TF32X3_ISSUE の呼び出しサイト順序が hi·lo → lo·hi → hi·hi \
+             になっていません: positions={positions:?}"
         );
     }
 
