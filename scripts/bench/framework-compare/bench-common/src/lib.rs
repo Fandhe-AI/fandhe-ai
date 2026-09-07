@@ -277,6 +277,18 @@ pub struct Record<'a> {
     /// `true` の行を除外する（`docs/backend-cuda-managed-placement-decision.md`
     /// 参照。既定 OFF・fail-closed 方針は変更しない）。
     pub managed: bool,
+    /// `--device-checksum`（イシュー #1339）。GEMM の checksum（全要素和）
+    /// をホスト D2H を経由せずバックエンド側 `f64` reduction で求める
+    /// 経路（`fandhe_ai::Var::matmul_checksum`／candle 側は
+    /// `sum_all().to_dtype(F64)`）で計測したかを示す。既定 `false`
+    /// （従来どおりホスト実体化 → `f64` 逐次和。`tf32`／`managed` と同型の
+    /// 「キー欠損 = false」後方互換規約）。`true` のときのみ JSON に
+    /// `"device_checksum":true` を emit する。summarize.py・
+    /// compare_gemm_gate.py・compare_ab.py・compare_gemm_ab.py・
+    /// compare_managed_ab.py の目標達成ゲート・既存 A/B 比較は既定でこの
+    /// フィールドが `true` の行を除外する（正式ゲート・既存 A/B へ
+    /// 混入させない。`docs/perf/device-checksum-readback-ab.md` 参照）。
+    pub device_checksum: bool,
 }
 
 impl Record<'_> {
@@ -324,6 +336,9 @@ impl Record<'_> {
         }
         if self.managed {
             s.push_str(",\"managed\":true");
+        }
+        if self.device_checksum {
+            s.push_str(",\"device_checksum\":true");
         }
         s.push('}');
         s
@@ -441,6 +456,14 @@ pub struct Cli {
     /// 「`--managed`」節参照）が有効なビルドでのみ受理する（`--tf32` と
     /// 同型の allowlist 方式）。
     pub managed: bool,
+    /// `--device-checksum`（値なしフラグ。イシュー #1339）。GEMM checksum
+    /// をバックエンド側 `f64` reduction で求める経路を要求する。既定
+    /// `false`（従来どおりホスト実体化 → `f64` 逐次和）。対応は `gemm`
+    /// タスク（`--phases` なし）に限定し、`bench-fandhe` は
+    /// `device-checksum` feature（crates.io 公開版 fandhe-ai には未収録の
+    /// `Var::matmul_checksum` API のため path patch 前提）が有効なビルド
+    /// でのみ受理する（`--managed` と同型の allowlist 方式）。
+    pub device_checksum: bool,
 }
 
 /// Parse the CLI arguments from `std::env::args()`. 薄いラッパーで、実体は
@@ -484,6 +507,7 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         phases: has_flag("--phases"),
         tf32: has_flag("--tf32"),
         managed: has_flag("--managed"),
+        device_checksum: has_flag("--device-checksum"),
     })
 }
 
@@ -571,6 +595,7 @@ mod tests {
             parity: None,
             tf32: false,
             managed: false,
+            device_checksum: false,
         }
     }
 
@@ -767,6 +792,30 @@ mod tests {
         assert_eq!(cli.device, "cuda");
     }
 
+    // イシュー #1339: `--device-checksum`（`parse_cli_from`）・
+    // `Record.device_checksum` の契約（`--managed` と同型）。
+
+    #[test]
+    fn parse_cli_from_defaults_device_checksum_to_false() {
+        let cli = parse_cli_from(&args(&["--task", "gemm"])).expect("parse should succeed");
+        assert!(!cli.device_checksum);
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_device_checksum_flag() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--device-checksum"]))
+            .expect("parse should succeed");
+        assert!(cli.device_checksum);
+    }
+
+    #[test]
+    fn parse_cli_from_device_checksum_flag_is_order_independent() {
+        let cli = parse_cli_from(&args(&["--device-checksum", "--task", "gemm"]))
+            .expect("parse should succeed");
+        assert!(cli.device_checksum);
+        assert_eq!(cli.task, "gemm");
+    }
+
     #[test]
     fn json_line_without_managed_omits_managed_key() {
         let line = sample_record("fresh", None).to_json_line();
@@ -778,6 +827,21 @@ mod tests {
         let mut r = sample_record("fresh", None);
         r.managed = true;
         assert!(r.to_json_line().contains("\"managed\":true"));
+    }
+
+    /// イシュー #1339: `device_checksum`（既定 `false`）はキー欠損 = false
+    /// の後方互換規約（`tf32`／`managed` と同型）。
+    #[test]
+    fn json_line_without_device_checksum_omits_device_checksum_key() {
+        let line = sample_record("fresh", None).to_json_line();
+        assert!(!line.contains("\"device_checksum\""));
+    }
+
+    #[test]
+    fn json_line_with_device_checksum_includes_device_checksum_true() {
+        let mut r = sample_record("fresh", None);
+        r.device_checksum = true;
+        assert!(r.to_json_line().contains("\"device_checksum\":true"));
     }
 
     #[test]

@@ -116,6 +116,15 @@ mod elementwise;
 pub mod fused_elementwise;
 pub mod gemm;
 pub mod gemm_blis;
+// イシュー #1290: `gemm --mode reuse --phases`（framework-compare。
+// #1182）の `matmul` 区間内訳（alloc_c／kernel／tensor_wrap／host_copy／
+// checksum）を実測分解する CPU 側診断テスト。`crate::gemm_blis::
+// gemm_blis_parallel`（`pub`）・`crate::ops::CpuBackendOps`（`pub(crate)`
+// フィールドは使わないが `crate::ops` 内部の型として到達）へ結線する
+// ため、CUDA `gemm_reuse_phase_diag_tests`（#1182）・Metal 同名ファイル
+// （#1189）と同じ理由でクレートルートの兄弟モジュールとして配置する。
+#[cfg(test)]
+mod gemm_reuse_phase_diag_tests;
 pub mod memory;
 mod mse;
 mod ops;

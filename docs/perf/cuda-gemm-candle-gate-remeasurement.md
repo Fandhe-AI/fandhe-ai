@@ -321,6 +321,13 @@ CUDA 実機なし）
   実行ログ・env_info）
 - `docs/perf/cuda-gemm-tiled-pipeline.md` §8（#1342 の 128×64 cp.async pipeline 本番結線）
 - `scripts/bench/framework-compare/README.md`「借用ビュー readout（イシュー #1337）」節
+- `docs/perf/candle-parity-tolerance-candidates.md`（イシュー #1237。#1184 ダンプ実値から
+  スケール付き絶対誤差／ULP 判定候補の fail 数を机上計算した結果。tolerance 契約変更の
+  ユーザー承認判断に使う定量根拠）
+- `scripts/bench/framework-compare/parity_tolerance_candidates.py`（イシュー #1237。上記の
+  計算スクリプト）
+- `docs/perf/logs/candle-parity-tolerance-candidates-1237/`（イシュー #1237。上記の実行ログ・
+  env_info）
 
 ## 11. 2026-09-06 追補: 正式系列 `fandhe-ai =0.7.0` 再計測（イシュー #1185）
 

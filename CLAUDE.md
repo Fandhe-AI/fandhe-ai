@@ -64,6 +64,7 @@ fandhe-ai/
 └── docs/
     ├── autodiff-nograd-leaf-dinput-skip-decision.md # 非学習葉（活性化入力 x 等）への d_input 伝播スキップの設計判断（`requires_grad` 前方伝播案の採用・`Gradients::get` 契約整理・多層依存整理・起票草案。#1151 起票案 I・#1219）
     ├── autodiff-view-recompute-decision.md # view 系ノード（reshape / transpose）の再計算方式化の設計（push_view／resolve_view による中間バッファ非確保・融合境界化・実測記録。#1043 ツリー・#1047）
+    ├── backend-abstraction-amd-readiness-decision.md # 将来の AMD（ROCm/HIP）追加に備えた抽象境界の設計記録（warp 幅の実行時パラメータ化・シャッフルのマスク差異吸収・起動種別〈通常／persistent／cooperative〉の区別・stream 優先 API。32 固定箇所の棚卸し。コード変更なし。#1340）
     ├── backend-cuda-async-execution-design.md # CUDA 非同期実行モデルの同期契約（ストリーム順序・エラー伝播・D2H 境界・poison/invalidate 状態機械。#1011 ツリー・#1012。§12d で #1349 の CUDA Graph step capture opt-in 実装記録を追記・§14 で managed 配置〈#1352〉の同期契約差分を追記）
     ├── backend-cuda-graph-step-capture-design.md # 学習 step の update 区間（`sgd_step_device_tracked`）を対象とした CUDA Graph capture／instantiate／launch 経路の opt-in・既定 OFF 実装（`StreamKind`・capture 状態機械・`backend-cuda::graph`・`BackendOps::captured_segment_key`／`run_captured_segment`・`DeviceParamStore::step` 結線）。step 全体 capture は既存データパスの制約により不可能と判明しスコープを update 区間へ限定した経緯・exec update／forward・backward capture のスコープ外整理・#1350 への計測手順申し送り・実機実測記入欄（本エージェント実行環境に CUDA 実機なしのため未実測明記。イシュー #1349・親 #1348・ルート #1341 → #1269）
     ├── backend-cuda-managed-placement-decision.md # CUDA managed 配置（`cuMemAllocManaged`）を `DeviceBuffer` の opt-in 配置として実装する設計判断（host-registered／`cuMemAdvise`／`prefetch` 不採用理由・既定 OFF・fail-closed・出力 bit 同一契約・スコープ外事項。#1352。実機実測完了（GB10・#1353）: 契約テスト 20 件全 pass・非後退確認。性能実測・既定化可否判断〈REJECT〉は `docs/perf/cuda-managed-placement-ab.md` を参照）
@@ -137,6 +138,8 @@ fandhe-ai/
     │   ├── logs/cuda-gemm-candle-gate-1142/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1142）
     │   ├── logs/cuda-gemm-candle-gate-1360/ # 上記 §12（Phase 4／5 反映後）の正式系列・参考系列 off/on 3 本の実行ログ・env_info（内部ホスト名は含めない。イシュー #1360）
     │   ├── logs/cuda-gemm-candle-parity-1184/ # N=2048 candle 側 parity fail 2 要素の実値ダンプ・厳密真値突合結果・env_info（内部ホスト名は含めない。イシュー #1184）
+    │   ├── candle-parity-tolerance-candidates.md # #1184 ダンプ実値からスケール付き絶対誤差／ULP 判定候補（候補 A/B）を現行複合判定へ OR 追加した場合の fail 数を机上計算（`scripts/bench/framework-compare/parity_tolerance_candidates.py`。K=N=2048・正方・入力 U[-0.5,0.5) の 1 条件限定・「候補で置き換える」判定は本ダンプから評価不能と明記）。推奨・採否は含まない事実（fail 数・緩和上限）のみの記録・#1238／#1239 への引き継ぎを含む（イシュー #1237）
+    │   ├── logs/candle-parity-tolerance-candidates-1237/ # 上記の生出力（candidates-2048.md）・env_info（内部ホスト名は含めない。イシュー #1237）
     │   ├── cuda-gemm-reuse-phase-breakdown.md # GEMM reuse 計測境界を H2D／カーネル／D2H／同期でフェーズ分解し、#1142 §4.3 の「H2D/D2H 固定費が希釈要因」推定を精緻化（実際の主因は host_copy／checksum というハーネス診断コスト）。matmul 単体は candle fresh を上回る（N=1024: 1.59倍・N=4096: 1.47倍）ことを確定。N=4096 D2H の二峰性（#1169 関連）は未確定のまま記録。GB10実機実測。イシュー #1182
     │   ├── logs/cuda-gemm-reuse-phase-1182/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1182）
     │   ├── cuda-gemm-auto-f16-mma-switch.md # CudaGemmAuto::run_f16 の MatrixUnit 分岐 mma 優先・wmma フォールバック切替（#1156）の前後比較記録。GB10実機実測完了・512/1024/2048 は非後退（1.75〜4.67倍）・4096 は#1130 病態下で base 5run範囲内。本番結線（`MMA_PRIORITY_PRODUCTION_ENABLED = true`）は PR #1179 codex-review 指摘〈K=4096 非後退ゲートの `MmaF16` baseline ceiling 未承認〉により一時差し戻し後、#1190 の ceiling 承認・反映を経て #1191 で `true` へ本番有効化済み（同一 HEAD base/after 再計測で非後退確認。GB10実機実測2026-09-05。§0・「#1191 再計測」節）。#1160
@@ -190,7 +193,8 @@ fandhe-ai/
     │   ├── logs/metal-gemm-select-closure-framework-compare-1306/ # 候補表更新後の framework-compare gemm metal 結線前後 A/B（before=`fandhe-ai =0.7.0` registry・after=HEAD path patch。全 8 セル非後退・checksum 完全一致）の `run_ab_gemm_metal.sh` 実行ログ・`compare_gemm_ab.md`・env_info（uptime・load average 推移含む）・`diff_b2a5fcb_f396784_backend_metal_src.txt`（内部ホスト名は含めない。イシュー #1306）
     │   ├── logs/cuda-gemm-tf32x3-1356/ # 3×TF32 誤差分布（`--routes mma`。2 回実行）・`#[ignore]` テスト実行ログ（2 件 FAIL）・純カーネル時間 5 回プロセス起動 CSV・集計スクリプト（Python3 標準ライブラリのみ）・env_info（内部ホスト名は含めない。イシュー #1356）
     │   ├── cuda-host-view-staging-readout.md # `MemoryOps::with_host_view`（イシュー #1335）の CUDA 実装を追加し、形状ごとに再利用するホストステージングバッファ（`crate::host_staging::HostStagingCache`。take/put 方式・世代検査つき）へ `memcpy_dtoh` 1 回で D2H して借用を返す設計（`Pageable`／`Pinned` 2 種・unsafe 1 箇所〈`Pinned` 確保のみ〉・既定は unsafe 経路を通さない `Pageable`）。GPU 非依存単体テスト・`#[ignore]` 実機テスト（bit 同一・キャッシュ再利用・`release_host_staging`・`PooledMemory` 透過・managed 配置）を整備したが、本エージェント実行環境に CUDA 実機なしのため D2H＋読み出し時間の before/after 実測は未実施のまま記入欄のみ整備（イシュー #1336）
-    │   └── logs/cuda-host-view-staging-1336/ # 上記の実機実測記入欄（未実施。実施時に env_info・run ログを追加する。イシュー #1336）
+    │   ├── logs/cuda-host-view-staging-1336/ # 上記の実機実測記入欄（未実施。実施時に env_info・run ログを追加する。イシュー #1336）
+    │   └── device-checksum-readback-ab.md # checksum（全要素和）をデバイス側 f64 reduction で求め読み戻しを 8 バイトにする経路を bench-fandhe（`Var::matmul_checksum`・`device-checksum` cargo feature）と bench-candle（`sum_all().to_dtype(F64)`。Metal は F64 reduction 非対応のため f32 のまま）へ実装。`tensor-core::BackendOps::gemm_checksum`／`autodiff::Var::matmul_checksum` の公開 API 追加・`backend-cpu` 実装（`gemm` と bit 同一・checksum はホスト f64 逐次和と bit 一致）・python 集計ツール群（summarize.py 等）の `device_checksum` 除外を完了。`backend-cuda`／`backend-metal` の GPU 側 reduction カーネル実装は本イシューのスコープ外（デフォルト `Unsupported` のまま）で後続イシューへ引き継ぎ・実機 A/B 実測は未実施のまま記入欄を残す（イシュー #1339）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）

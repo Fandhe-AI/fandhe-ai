@@ -286,6 +286,104 @@ cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 4096 --m
 GB10 実機での計測結果・カーネル専有時間ベースの candle 比（参考値）は
 `docs/perf/cuda-gemm-reuse-phase-breakdown.md`（イシュー #1182）を参照。
 
+#### CPU での区間定義と Layer B（イシュー #1290）
+
+CPU は上記 5 区間（`matmul`／`to_tensor`／`host_copy`／`checksum`／
+`iter_total`）を **コード変更なしで** 計測できる（`--device cpu` は
+`dispatch` の `("gemm","reuse",true)` 分岐に device 分岐が無いため）。
+CPU gate 対象形状の下限（README「GEMM ゲート 5 回計測」節。
+`cpu={512,1024,2048}`）で完走することを `gemm_reuse_phases_cpu_smoke_n512`
+（`bench-fandhe/src/main.rs` テスト）が固定している:
+
+```bash
+cargo run --release -p bench-fandhe -- --task gemm --device cpu --size 512 --mode reuse --phases
+```
+
+`matmul` 区間の内訳は CPU では次のように対応する（CUDA #1182 の
+H2D A/B・alloc_c（プール経由）・launch_issue・kernel_wait・d2h、Metal
+#1189 の upload_a/b・alloc_c・encode・commit_wait・readback と対比）。
+CPU にはホスト⇄デバイス転送・ストリーム同期が存在しない（ホスト常駐の
+まま演算する）ため、`matmul` 区間は「Arc clone（`materialize_fallible`
+の実体化）」＋「C 確保（`vec![0.0f32; n*n]`）」＋「マイクロカーネル本体
+（`gemm_blis_parallel`）」＋「`Tensor::new` によるラップ」＋「autodiff
+ノード push（`push_eager`）」の合成である:
+
+| Layer A `matmul` の内訳 | CPU 実体 | 対応する Layer B 区間（`crates/backend-cpu`） |
+| --- | --- | --- |
+| （H2D 相当なし。値渡しではなく `Arc` 共有） | `Var::matmul` 冒頭の `materialize_fallible(..).clone()`（A・B 各 1 回） | 計測対象外（診断側では呼び出し元でループ外に 1 回だけ `contiguous().as_slice()` した結果を渡し、`kernel` 計時窓から除外する） |
+| C 確保 | `vec![0.0f32; n*n]` | `alloc_c` |
+| カーネル実行 | `gemm_blis_parallel`（本番 NN 経路。RowPanel・既定スレッド数） | `kernel` |
+| （D2H 相当なし） | `Tensor::new(out, &out_shape)` | `tensor_wrap` |
+| （同期相当なし） | `push_eager`（tape ノード追加） | `tape_matmul` − `ops_gemm` の残差（autodiff オーバーヘッドの近似） |
+
+`to_tensor`／`host_copy`／`checksum` は Layer A と 1:1 で対応する
+（`c_var.to_tensor()` → `.contiguous().as_slice().to_vec()` → f64 全要素
+和。§下記表参照）。
+
+**何を固定費に含めるか**（CUDA §6／Metal §6 と同じ切り分け）:
+
+- `host_copy`＋`checksum` は **ハーネス自身の診断コスト**（#965/#970 の
+  既存契約と同じ。本番経路には乗らない）。
+- `alloc_c` と autodiff 残差（`tape_matmul` − `ops_gemm`）は
+  **facade/autodiff 呼び出しの固定費**（削減対象候補。イシュー #1294）。
+- `kernel` が実ペイロード。`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §8.1 の「カーネル単体 GFLOP/s」（`gemm_blis_variant_ab_*`・OSS 直接
+  比較ハーネス）との突合には `kernel` 区間の値を使う。
+
+**実行コマンド**（実機・5 回独立プロセス起動・中央値。
+`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値」）:
+
+```bash
+cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+  gemm_reuse_phase_diag_cpu --nocapture --test-threads=1
+```
+
+**忠実性の注意点**（`crates/backend-cpu/src/gemm_reuse_phase_diag_tests.rs`
+冒頭コメントに同一内容あり）:
+
+- **keep-alive**: 本番 reuse（`run_gemm_reuse`）は matmul の出力
+  `Tensor` をアロケータへ返却せず毎反復新規ページに書く一方、readout
+  （ホストコピー `Vec<f32>`）は反復ごとに破棄する。診断側もこれに揃え、
+  `kernel`／`ops_gemm` 各パスの出力 `Tensor`（`wrapped`／`ops_out`）
+  のみを保持しアロケータのページ再利用でコストが消える乖離を避け、
+  readout コピーは保持しない（`tape_matmul` パスの出力は tape 自身が
+  内部で保持するため追加の保持は不要）。
+- **calloc／first-touch の帰属**: `vec![0.0; n*n]` は大サイズでは OS の
+  遅延ゼロページに倒れうるため、初回書き込みの page-fault コストは
+  `alloc_c` ではなく `kernel`（実際に書き込む側）に計上されうる。
+  `alloc_c` を「確保コストの上限」と読まない。
+
+**突合前提**（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` への
+転記時に明記する）: Layer A（`gemm --mode reuse --phases`）は
+crates.io 公開版 `fandhe-ai =0.7.0` で計測する一方、Layer B（本節の
+診断テスト）は HEAD で計測する。突合には CPU GEMM 本番経路
+（`gemm_blis_parallel`・`CpuBackendOps::gemm`・`Var::matmul`）に
+`fandhe-ai =0.7.0` タグ以降の非コメント差分が無いことの確認が前提で、
+`git diff v0.7.0..HEAD -- crates/backend-cpu/src crates/autodiff/src
+crates/facade/src crates/tensor-core/src` を確認した結果（2026-09-07・
+本イシュー #1290 時点）:
+`crates/autodiff/src/var.rs`（`Var::matmul` 自体は変更なし・別メソッド
+の追加のみ）・`crates/backend-cpu/src/ops.rs`（`CpuBackendOps::gemm`
+自体は変更なし・`MemoryOps` へのメソッド追加のみ）・
+`crates/facade/src/lib.rs`・`crates/tensor-core/src/{buffer,pool,tensor}.rs`
+はいずれも既存関数の呼び出し経路を変えない**追加のみ**。
+`crates/backend-cpu/src/gemm_blis/mod.rs`（627 行差分）は
+`gemm_blis_parallel` を含む複数箇所の並列度算出を
+`rayon::current_num_threads()` から `crate::thread_limit::
+effective_num_threads(...)`（イシュー #1363）へ差し替えているが、
+同関数は既定ゲート `thread_limit::BIG_CORE_LIMIT_ENABLED = false`
+（#1364 の両実機実測で REJECT・差し戻し確定済み。
+`docs/perf/cpu-gemm-default-thread-limit.md` §6）のときは
+`rayon::current_num_threads()` をそのまま返す恒等写像であり、
+`gemm_blis_parallel` の NN 経路（本診断が計測する経路）の挙動は
+`fandhe-ai =0.7.0` と不変。したがって突合前提は成立する。
+
+実測（両実機・5 回独立プロセス中央値）は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` へ記録する
+（イシュー #1292）。`gemm --mode reuse --phases`（CPU 含む）は診断専用
+であり、上記のとおり `run_all*.sh`／`run_gemm_gate*.sh` の標準スイープ
+には組み込まない。
+
 #### 借用ビュー readout（イシュー #1337。`host-view-readout` feature）
 
 上記 `#1182` が確定した結論（`host_copy`〈`.to_vec()` の memcpy〉が
@@ -497,6 +595,23 @@ cd scripts/bench/framework-compare
 python3 parity_dump_truth.py --n 2048 < ../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cuda-2048.txt
 ```
 
+**候補判定の机上評価**（イシュー #1237。`scripts/bench/framework-compare/parity_tolerance_candidates.py`）:
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5 の N=2048 fail 要素（現行複合判定を
+外れる 2 要素×2 device）について、候補判定（スケール付き絶対誤差・ULP ベース）を現行複合判定へ
+OR 追加した場合の fail 数を、`parity_dump_truth.py` のダンプ実値のみを入力に機械的に算出する
+（`parity_dump_truth.py` 自体は importlib で再利用するのみで変更しない）。標準ライブラリのみに
+依存する。CI（`ci.yml` の `deps-forbidden` ジョブ）では単体テスト
+（`parity_tolerance_candidates_test.py`）のみを実行し、実ダンプに対する計算は行わない。
+**契約変更（`PARITY_REL_TOL`/`PARITY_ABS_TOL` 等）自体はユーザー承認事項**であり、本スクリプトは
+承認判断に使う定量根拠の算出に閉じる（`docs/perf/candle-parity-tolerance-candidates.md`）。
+
+```bash
+cd scripts/bench/framework-compare
+python3 parity_tolerance_candidates.py --n 2048 \
+  --dump cuda=../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cuda-2048.txt \
+  --dump cpu=../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cpu-2048.txt
+```
+
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
 `backend-cuda` の GEMM 公開経路（`fandhe-ai::gemm`）は既定で FP32 厳密（`run_tiled_f32`）だが、
@@ -570,6 +685,56 @@ reuse とも `a.matmul(&b)`（`CudaBackendOps::gemm` の `clone_htod`／`alloc_z
   先の絶対パスを指定）が同一バイナリで off/on を交互起動し、`compare_managed_ab.py` が
   `(task, device, size, mode)` セルごとに 5 回計測中央値・checksum 一致（複合判定＋完全一致）を
   集計する。実測記録・既定化可否の判定は `docs/perf/cuda-managed-placement-ab.md` を参照
+
+### `--device-checksum`（イシュー #1339。checksum のデバイス側 f64 reduction 化）
+
+`docs/perf/cuda-gemm-reuse-phase-breakdown.md`・`metal-gemm-reuse-phase-breakdown.md` の
+実測で、gemm 計測窓のうち `host_copy`（`C` の D2H）と `checksum`（全要素和をホスト側 `f64`
+逐次和で求め直す処理）がハーネス計測窓の 66〜75% を占めることが確定した（縮退検出契約自体は
+維持したいがハーネスの診断コストが支配的、という問題）。`--device-checksum` は checksum を
+バックエンド側の `f64` reduction（`fandhe_ai::Var::matmul_checksum`／candle 側は
+`sum_all().to_dtype(F64)`）で求め、毎反復の読み戻しを「checksum のみ（8 バイト）」へ縮小する
+値なしフラグ。要素単位 parity（`GemmReference::verify`）は毎反復では検証せず、計測ループ後の
+未計時 1 反復（`ChecksumReadout::WithOutput`）でのみ検証する。
+
+- **対応範囲**: `--task gemm`（`--phases` なし。fresh／reuse とも）限定。`train`／`infer`・
+  `--phases` との併用は常に `MEASURE_ERROR`
+- **`bench-fandhe`**: `device-checksum` cargo feature（既定無効）を有効化したビルドでなければ
+  `MEASURE_ERROR` になる。crates.io 公開版 `fandhe-ai =0.7.0` ピンには `Var::matmul_checksum`／
+  `ChecksumReadout`／`GemmChecksum` API 自体が未収録（本イシューは未リリースの HEAD で追加）の
+  ため、`--managed` と同じく **`device-checksum` feature ＋ `[patch.crates-io.fandhe-ai]`
+  による未リリース HEAD `crates/facade` への path patch**の両方が必要:
+
+  ```sh
+  cargo build --release -p bench-fandhe --features device-checksum \
+    --config 'patch.crates-io.fandhe-ai.path="/absolute/path/to/crates/facade"'
+  ```
+
+  `[patch]`／`.cargo/config.toml` は本 workspace の `Cargo.toml`・`Cargo.lock` へコミットしない
+  （計測後は `git checkout -- scripts/bench/framework-compare/Cargo.lock` で復元する）。
+  **実装状況（本イシュー時点）**: `BackendOps::gemm_checksum` は `backend-cpu` のみ実装済み
+  （`gemm` と bit 同一の `C`・checksum はホスト f64 逐次和と bit 一致）。`backend-cuda`／
+  `backend-metal` はデフォルト実装（常に `BackendError::Unsupported`）のままのため、
+  `--device cuda`／`--device metal --device-checksum` は現状 `MEASURE_ERROR` になる
+  （GPU 側デバイス reduction カーネルの実装・実機実測は後続イシューへ引き継ぐ）
+- **`bench-candle`**: `--task gemm` 限定（`--mode reuse`／`--phases` の既存拒否は不変）。
+  `--device cuda`／`--device cpu` は `to_dtype(F64)` 経由で checksum を求め、
+  **`--device metal` は candle 0.11 の Metal が `F64` dtype の reduction を持たないため
+  `f32` のまま `sum_all()` した値を checksum とする**（8 バイトではなく 4 バイト。この非対称は
+  `docs/perf/device-checksum-readback-ab.md` に明記する）
+- **`bench-burn`**: 対応する結線がないため常に `MEASURE_ERROR`
+- **JSONL**: `--device-checksum` で計測した行は `"device_checksum":true` を emit する
+  （既定は emit しないキー欠損 = `false` の互換規約。`bench_common::Record::device_checksum`。
+  `tf32`／`managed` と同型）
+- **`summarize.py`／`compare_gemm_gate.py`／`compare_ab.py`／`compare_gemm_ab.py`／
+  `compare_managed_ab.py`**: `device_checksum:true` 行は目標達成ゲート・A/B 比較から
+  **既定で除外**する（既存プロトコル計測との速度混同防止。正式ゲート〈#1031/#1037/#1117〉の
+  既定判定は device_checksum 経路へ切り替えない）
+- **実測記録**: 実機（DGX Spark GB10・M4 Max）での前後比較・on/off checksum 一致確認は
+  `docs/perf/device-checksum-readback-ab.md` を参照（GPU バックエンド未実装のため CUDA／Metal
+  は現時点で未実測。CPU の on/off checksum 一致は `bench-fandhe` の単体テスト
+  `device_checksum_matches_legacy_checksum_fresh_and_reuse`〈`device-checksum` feature 限定〉
+  で自動検証済み）
 
 ## 使い方
 

@@ -1,0 +1,42 @@
+イシュー #1237: #1184 ダンプ実値からスケール付き絶対誤差／ULP 判定候補の fail 数を机上計算する
+実行環境記録
+
+## 位置づけ
+
+本ディレクトリの `candidates-2048.md` は実機ベンチではなく、既存の実機ダンプ
+（`docs/perf/logs/cuda-gemm-candle-parity-1184/`。イシュー #1184。転送元コミット
+`4e1ad9cdb809969be3b98602a9d8f9cd23006c1f`）に対する机上計算（純粋関数の適用）
+の出力である。GPU 実機は使用していない（本エージェント実行環境は CUDA/Metal
+実機なし）。
+
+## 実行コマンド
+
+```bash
+cd scripts/bench/framework-compare
+python3 parity_tolerance_candidates.py --n 2048 \
+  --dump cuda=../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cuda-2048.txt \
+  --dump cpu=../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cpu-2048.txt \
+  > ../../../docs/perf/logs/candle-parity-tolerance-candidates-1237/candidates-2048.md
+```
+
+## バージョン・commit
+
+- python3: `Python 3.12.12`
+- 入力ダンプ側 commit（転送元 `.rev-stamp` と一致確認済み。イシュー #1184
+  env_info.txt 参照）: `4e1ad9cdb809969be3b98602a9d8f9cd23006c1f`
+- 本計算を実行した作業ツリーの HEAD（コミット前時点）: `a659d0497f09cbafc2f31b821ff133d96bcb80b7`
+
+## 再現性の確認
+
+- 出力（`candidates-2048.md`）は入力ダンプ（`parity-dump-cuda-2048.txt`・
+  `parity-dump-cpu-2048.txt`）と `parity_tolerance_candidates.py` の内容のみで
+  決定される純粋関数の適用結果であり、実機依存の非決定性は含まない。同一
+  コマンドの再実行で bit 完全一致することを確認済み
+- `parity_dump_truth.py --n 2048` を両ダンプに対して再実行し、同梱
+  `truth-2048.txt`（イシュー #1184 生成物）と完全一致することを確認済み
+  （`parity_dump_truth.py` 自体は本イシューで変更していない）
+
+## 秘密情報・内部実値の非混入確認
+
+- 本ファイル・`candidates-2048.md` にホスト名・ノード上プロセスの絶対パスを
+  含めていないことを目視確認済み
