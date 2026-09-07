@@ -2,6 +2,8 @@
 
 イシュー #1366（親: #1365。兄弟: #1367「両実機実測・採否判定」）。
 
+**採否（2026-09-07 追補・#1367）**: 両実機実測の結果 **REJECT（不採用）**。DGX Spark GB10 で N=1024/2048 の対 RowPanel 比が 0.6263／0.8492 と大きく後退し、Apple M4 Max も N=1024 が僅かに未達（0.9878）のため採用ゲートを満たさない。本番結線は行わない。詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §14 を参照。
+
 ## 1. 目的・位置づけ
 
 `crates/backend-cpu/src/gemm_blis/mod.rs` の並列 GEMM 本番既定 `RowPanel`
@@ -128,17 +130,20 @@ cargo test -p fandhe-ai-backend-cpu --release -- --ignored gemm_blis_variant_ab_
 実行し、`IcDynamic` の行が出力されることのみを確認した（動作確認目的。値は本 PR の
 採用根拠にしない・#1367 の実機実測を待つ）。
 
-## 6. 実機実測（未実施・#1367 で記入）
+## 6. 実機実測（実施済み・#1367。2026-09-07）
 
-| 実機 | N=1024 | N=2048 | N=4096 | 実施日 |
-|---|---|---|---|---|
-| Apple M4 Max | 未実測 | 未実測 | 未実測 | - |
-| DGX Spark GB10 | 未実測 | 未実測 | 未実測 | - |
+5 回独立プロセス中央値（GFLOP/s）。
 
-`cargo test -p fandhe-ai-backend-cpu --release -- --ignored gemm_blis_variant_ab_1024_2048 --nocapture`・
-`cargo test -p fandhe-ai-backend-cpu --release -- --ignored gemm_blis_variant_ab_4096 --nocapture`
-を 5 回独立実行し中央値を記録する（`docs/perf/cpu-gemm-candle-cpu-retune.md` と同じ
-運用）。採否判定基準は #1367 側で定める。
+| 実機 | N=1024 | N=2048 | N=4096 | IcDynamic/RowPanel(1024/2048/4096) | 実施日 |
+|---|---|---|---|---|---|
+| Apple M4 Max | RowPanel 635.868 / IcDynamic 628.141 | RowPanel 736.337 / IcDynamic 742.778 | RowPanel 812.951 / IcDynamic 902.014 | 0.9878 / 1.0087 / 1.1096 | 2026-09-07 |
+| DGX Spark GB10 | RowPanel 530.338 / IcDynamic 332.159 | RowPanel 699.913 / IcDynamic 594.350 | RowPanel 1136.666 / IcDynamic 1111.147 | 0.6263 / 0.8492 / 0.9775 | 2026-09-07 |
+
+**採否: REJECT（不採用）**。両実機で採用ゲート（N=1024/2048 で ratio≥1.00・
+N=4096 で ratio≥0.95・両実機一致）を満たさない。DGX の N=1024/2048 が
+特に大きく後退している。判定根拠・原因推定・生ログは
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §14・
+`docs/perf/logs/cpu-gemm-ic-dynamic-ab-1367/` を参照。
 
 ## 出典
 

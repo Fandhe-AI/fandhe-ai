@@ -1,0 +1,67 @@
+CPU GEMM `IcDynamic` 両実機 A/B 計測（イシュー #1367）環境情報
+
+## DGX Spark GB10（Grace CPU。実測完了）
+
+- 機種: DGX Spark（Grace CPU。Cortex-X925 ×10 + Cortex-A725 ×10、計 20 論理コア。
+  `lscpu` 実測は `env_info_raw-dgx.txt` 参照）。実ホスト名は
+  `docs/real-hardware-verification-env.local.md` 方式のローカル管理
+- OS: Linux（aarch64・6.17.0-1031-nvidia）
+- rustc/cargo: 1.97.0 (2d8144b78 2026-07-07) / 1.97.0 (c980f4866 2026-06-30)
+- RAYON_NUM_THREADS: 未設定（既定で全 20 論理コア使用。`thread_limit::BIG_CORE_LIMIT_ENABLED=false`。#1364）
+- 計測日: 2026-09-07（UTC）
+- worktree HEAD（`.rev-stamp`）: `e82320f`（`IcDynamic` 導入コミット #1409。この時点で
+  CPU GEMM 本番経路・`IcDynamic` variant とも HEAD `0e9110f` と同一のため計測対象として妥当）
+- **計測方式**: 本イシュー専用の隔離ディレクトリ（`~/work/ab-1367/`）へ `crates/`・
+  ルート `Cargo.toml`／`Cargo.lock`・`scripts/bench/oss-gemm-compare/` のみを rsync し、
+  計測完了後に削除済み（共有ディレクトリ `~/work/rust-ai-library-run` には触れていない）
+- 負荷状態: 低負荷ゲート（1 分 load average < 6 を 2 回連続）を計測開始前に通過
+  （`uptime-dgx.log` 記録）。5 回計測中は 1 分平均が 0.35 → 10.17 まで上昇しているが、
+  これは計測対象プロセス自身（rayon 全 20 スレッド使用の GEMM ベンチ）の CPU 占有による
+  ものであり、他プロセスからの外部負荷ではない（`pgrep cargo` は計測プロセス自身のみ）
+- bit 完全一致: `unit-test-dgx.txt` に `gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large`
+  の pass ログを含む（`--release --lib -- --ignored`。1024/2048/4096 正方）
+- 生ログ: `ab-1024-2048-dgx-run{1..5}.txt`・`ab-4096-dgx-run{1..5}.txt`
+  （`variant=… size=… median_gflops=…` 形式。各テストは 20 iteration の中央値）
+- OSS 直接比較（gemm crate 等）: 本イシューでは未計測（§2 の主判定は対 RowPanel。
+  DGX 側が主判定で明確に REJECT〈N=1024 比 0.63・N=2048 比 0.85〉のため、
+  時間予算の関係で参考値の 5 回計測は実施しなかった。**RowPanel 対 gemm crate の
+  5 回計測中央値基準線は存在しない**（`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §12 は candle-core 比のみで gemm crate 比を含まず、`docs/perf/logs/
+  cpu-gemm-candle-gate-1148/` にも gemm crate 比の記録はない。既存の対 gemm crate
+  参考値は同ファイル §8.2 の `RAYON_NUM_THREADS` スイープ〈各 3 回計測・N=1024
+  限定のノイズ含み参考値〉のみ）
+
+## Apple M4 Max（実測完了）
+
+- 機種: Apple M4 Max（P コア 12・E コア 4、計 16 論理コア）
+- OS: macOS（Darwin 25.6.0）
+- rustc/cargo: stable（`rustc --version` は `bit-exact-large-m4max.txt` 参照）
+- RAYON_NUM_THREADS: 未設定（既定で全 16 論理コア使用）
+- 計測日: 2026-09-07（UTC）
+- worktree HEAD: `0e9110f`（`origin/main` 追従。`IcDynamic` を含む）
+- 負荷状態: 本マシン上で並列稼働する他の Claude Code エージェントセッションが多数
+  存在し、計測中の `uptime` load average は 22.18〜31.11（16 論理コアに対し極めて
+  高い共有負荷）で推移した（`uptime-m4max.log`）。計測を専有できる低負荷窓が
+  取れなかったため、計画（plan §Step 1-1）に従い「共有負荷下」として実行した。
+  M4 Max の値は DGX と比較しノイズが大きい点に留意する（N=2048 の RowPanel は
+  609〜786 GFLOP/s の範囲で run 間ばらつきが大きい）
+- bit 完全一致: `bit-exact-large-m4max.txt` に pass ログを含む
+- 生ログ: `ab-1024-2048-m4max-run{1..5}.txt`・`ab-4096-m4max-run{1..5}.txt`
+- OSS 直接比較参考値: `oss-m4max-run1.txt`（1 回のみ・`self_gemm_blis_parallel` は
+  本番 `RowPanel` 経路。`oss-gemm-compare` ハーネスは variant 選択に非対応のため
+  `IcDynamic` 単体の対 gemm crate 比は計測不能。matrixmultiply 側の
+  `output_match=false` は既知の丸め差〈rel_diff 〜0.005〉で fail-closed 仕様どおりの
+  想定内挙動）
+
+## 集計
+
+`aggregate.py`（python3 標準ライブラリのみ）で両実機の生ログから中央値・比を再計算
+できる。実行例:
+
+```
+python3 aggregate.py "DGX Spark GB10" ab-1024-2048-dgx-run1.txt ab-1024-2048-dgx-run2.txt \
+  ab-1024-2048-dgx-run3.txt ab-1024-2048-dgx-run4.txt ab-1024-2048-dgx-run5.txt \
+  ab-4096-dgx-run1.txt ab-4096-dgx-run2.txt ab-4096-dgx-run3.txt ab-4096-dgx-run4.txt ab-4096-dgx-run5.txt
+```
+
+結果は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §14.4／§14.5 の表と一致する。
