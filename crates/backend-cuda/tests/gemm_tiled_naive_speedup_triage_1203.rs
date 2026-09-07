@@ -52,7 +52,7 @@
 
 #![cfg(feature = "internal-diagnostics")]
 
-use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, TiledF32Kernel};
 
 const M: u32 = 4096;
 const N: u32 = 4096;
@@ -87,6 +87,40 @@ fn eprint_samples(label: &str, samples: &[f64]) {
     );
 }
 
+/// `run_tiled_f32` は pipeline カーネルの `new` 時コンパイル失敗時
+/// （cp.async 非対応環境・sm_80 未満等）に classic 版へ fail-closed で
+/// フォールバックする（`run_tiled_f32` doc コメント）。診断 (1)・(2) は
+/// `run_tiled_f32` を「本番 pipeline 経路」の代表として naive と対比
+/// するため、この計測前に実際の分岐先を確認しないと、フォールバック
+/// 環境では意図せず classic 同士の比較になり「pipeline 対 classic」と
+/// 誤表示しうる（codex-review P2 指摘・PR #1428）。
+///
+/// 分岐が `TiledF32Kernel::Pipeline` でなければ診断を中止する
+/// （`expect` で panic させ、`tiled_pipeline_available`／
+/// `tiled_pipeline_128x64_available` の状態を理由に含める）。
+/// `Pipeline` の場合は実際に選ばれるタイル構成（64×64／128×64）も
+/// 診断出力へ明示する。
+fn assert_run_tiled_f32_uses_pipeline(gemm: &CudaGemm) {
+    let kernel = gemm.tiled_f32_kernel_for(N, K);
+    assert_eq!(
+        kernel,
+        TiledF32Kernel::Pipeline,
+        "run_tiled_f32(M={M}, N={N}, K={K}) はこの実行環境で pipeline \
+         カーネルへ分岐しない（classic へフォールバック済み。診断中止。\
+         tiled_pipeline_available={} tiled_pipeline_128x64_available={} \
+         tiled_pipeline_unavailable_reason={:?}）。この状態で naive と \
+         対比すると classic 同士の比較を pipeline 対 classic として \
+         誤表示するため測定を行わない。",
+        gemm.tiled_pipeline_available(),
+        gemm.tiled_pipeline_128x64_available(),
+        gemm.tiled_pipeline_unavailable_reason(),
+    );
+    let tile = gemm.tiled_pipeline_tile_for(N, K);
+    eprintln!(
+        "[#1203 triage] run_tiled_f32 confirmed path: TiledF32Kernel::Pipeline tile={tile:?}"
+    );
+}
+
 fn make_inputs(seed: u64) -> (Vec<f32>, Vec<f32>) {
     let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
     let a = rng.fill_vec((M as usize) * (K as usize));
@@ -102,6 +136,7 @@ fn make_inputs(seed: u64) -> (Vec<f32>, Vec<f32>) {
 fn triage_reversed_order_tiled_then_naive() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("naive/tiled kernel compilation must succeed");
+    assert_run_tiled_f32_uses_pipeline(&gemm);
     let (a, b) = make_inputs(31415);
 
     let tiled = measure_samples(&a, &b, &|a, b, m, n, k| gemm.run_tiled_f32(a, b, m, n, k));
@@ -128,6 +163,7 @@ fn triage_reversed_order_tiled_then_naive() {
 fn triage_interleaved_naive_tiled() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("naive/tiled kernel compilation must succeed");
+    assert_run_tiled_f32_uses_pipeline(&gemm);
     let (a, b) = make_inputs(31415);
 
     // warmup（各カーネル 2 回ずつ、本番テストと同じ回数）。
@@ -184,6 +220,7 @@ fn triage_interleaved_naive_tiled() {
 fn triage_classic_vs_pipeline_tiled() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("naive/tiled kernel compilation must succeed");
+    assert_run_tiled_f32_uses_pipeline(&gemm);
     let (a, b) = make_inputs(31415);
 
     let pipeline = measure_samples(&a, &b, &|a, b, m, n, k| gemm.run_tiled_f32(a, b, m, n, k));
