@@ -1,0 +1,26 @@
+   Compiling fandhe-ai-backend-cuda v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.37s
+     Running tests/gemm_mma_tf32x3.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_mma_tf32x3-1f0cde88215f2d88)
+
+running 4 tests
+test launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch ... ok
+
+thread 'mma_tf32x3_matches_reference_across_shapes' (158685) panicked at crates/backend-cuda/tests/gemm_mma_tf32x3.rs:284:9:
+mma_tf32x3 m=512 n=512 k=512: 複合判定 FAIL（fail_count=212/262144, max_abs_diff=1.469e-4, max_rel_err=4.970e-1, mean_abs_diff=2.152e-5, mean_rel_err=1.517e-5, p50_abs_diff=1.786e-5, p99_abs_diff=7.343e-5, p999_abs_diff=1.011e-4）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mma_tf32x3_matches_reference_across_shapes ... FAILED
+test mma_tf32x3_zero_dim_shape_returns_empty_without_launch ... ok
+
+thread 'mma_tf32x3_k4096_stress' (158684) panicked at crates/backend-cuda/tests/gemm_mma_tf32x3.rs:316:5:
+mma_tf32x3 k4096 stress: 複合判定 FAIL（fail_count=151916/16777216, max_abs_diff=3.731e-3, max_rel_err=1.985e0, mean_abs_diff=4.872e-4, mean_rel_err=1.191e-4, p50_abs_diff=4.101e-4, p99_abs_diff=1.606e-3, p999_abs_diff=1.991e-3）
+test mma_tf32x3_k4096_stress ... FAILED
+
+failures:
+
+failures:
+    mma_tf32x3_k4096_stress
+    mma_tf32x3_matches_reference_across_shapes
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 4 filtered out; finished in 9.89s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_mma_tf32x3`

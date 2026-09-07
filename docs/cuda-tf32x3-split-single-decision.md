@@ -126,18 +126,24 @@ mma_tf32x3_source_issues_mma_sync_from_single_macro_site_called_three_times`）
 イシュー #1356（本節を引き継いだ実装。誤差分布プローブ `--routes mma`
 拡張・純カーネル時間ベンチ `gemm_tf32x3_kernel_time_bench` を追加）は
 コード実装（`crates/backend-cuda/examples/wmma_tolerance_probe.rs`・
-`crates/backend-cuda/examples/gemm_tf32x3_kernel_time_bench.rs`）まで
-完了したが、**本エージェント実行環境に CUDA 実機（GB10）が接続されて
-いなかったため実測値は未取得のまま**である（`docs/real-hardware-
-verification-env.local.md` 不在。数値の推定・外挿・捏造はしない）。
+`crates/backend-cuda/examples/gemm_tf32x3_kernel_time_bench.rs`）に加えて
+**GB10 実機実測を完了した（2026-09-07。イシュー #1356 reopen 対応）**。
 
 誤差分布（8.1）・純カーネル時間（8.2）・GB10 実機実測記録（8.3）の
 記入欄は本節に残さず、`docs/perf/cuda-tensor-core-tolerance-tf32x3-gb10.md`
-（実測記入欄のスケルトン・再現手順・集計スクリプトを含む独立ドキュメント）
-へ一本化して引き継いだ。同ドキュメント §0 が実測状況を明記し、§11 に
-3 択語彙（「opt-in 維持・推奨」／「opt-in 維持・条件付き推奨」／
-「opt-in 維持・非推奨」）による採否判定欄（未確定のまま）を持つ。
-CPU f32 参照実装との厳密ゼロ fail 成立可否
-（`assert_parity`）が不成立の場合の baseline 非後退方式（`ParityPath`
-追加）への再割り当ては、引き続きユーザー承認を得たうえで判断する（本
-イシューでは baseline 行・`ParityPath` 変種を追加していない）。
+（実測記入欄・再現手順・集計スクリプトを含む独立ドキュメント）へ一本化
+して引き継いだ。実測結果の要約は同ドキュメント §0・§11 を正とする:
+
+- **P1（`#[ignore]` テスト 2 件。REQ-2 判定・厳密ゼロ fail）は FAIL した**
+  （`mma_tf32x3_matches_reference_across_shapes` は 512×512×512 で FAIL・
+  `mma_tf32x3_k4096_stress` も FAIL）。P1 不成立のため §11 の 3 択語彙
+  （「opt-in 維持・推奨」／「opt-in 維持・条件付き推奨」／「opt-in
+  維持・非推奨」）は**選択していない**。実測 `fail_count`／
+  `max_abs_diff`／`max_rel_err` を「baseline 提案値（未承認）」として
+  記録し、baseline 非後退方式（`ParityPath` 追加）への切り替え可否の
+  判断はユーザーへ回している（本イシューでは baseline 行・
+  `ParityPath` 変種を追加していない）。
+- 参考所見: P2（対 f64 精度）は K 支配的形状で部分的に不成立、P3（ス
+  ケール依存）は成立、P4（純カーネル時間）は 5 形状すべてで
+  `mma_tf32x3 / f32_simt` < 1.0（0.721〜0.930 倍）。詳細は上記ドキュメ
+  ント §11 を参照。
