@@ -1,0 +1,117 @@
+既定スレッド数の大コア限定 on/off 両実機比較（イシュー #1364）環境情報
+
+## 共通
+
+- worktree HEAD（origin/main 由来）: 90ea1cb（#1363 マージ直後。PR #1405）
+- 系列: 参考系列（`GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス>` の
+  path patch。`fandhe-ai` の workspace.package.version は 0.7.0 のまま不変）
+- 計測日: 2026-09-07（UTC）
+- 計測方式: `run_gemm_gate_cpu.sh` を同一バイナリで 2 回起動（on 腕は
+  `env -u RAYON_NUM_THREADS`・off 腕は `RAYON_NUM_THREADS=<全論理コア数>`
+  を明示）。両腕とも `manifest-*.json` の `bench_fandhe_sha256` が実機ごとに
+  完全一致することを確認済み（同一バイナリの証拠）
+- 判定ツール: `compare_gemm_ab.py --device cpu`（本イシューで追加。
+  before=off・after=on。`ratio=after/before`）。fandhe-ai 行のみを抽出した
+  `.fandhe-only.jsonl`（`framework != fandhe-ai` の行が 1 件でもあると
+  `compare_gemm_ab.py` が fail-closed 判定不能を返すため。元の gate 出力
+  jsonl は candle 行を含む正規の 45 行のまま変更していない）を作成して
+  比較した
+
+## Apple M4 Max（実測完了）
+
+- 機種: Apple M4 Max。`sysctl hw.perflevel0.logicalcpu`=12・
+  `hw.perflevel1.logicalcpu`=4・`hw.ncpu`=16・`hw.logicalcpu`=16
+- OS: macOS 26.6.2（Darwin 25.6.0 arm64）
+- rustc: 1.96.0 (2026-05-25)
+- `thread_limit_report()` 生値（`gemm_blis_parity::thread_limit_report_effective_within_current_bounds`
+  `--nocapture`。`thread_limit_report-m4max.log`）:
+  `ThreadLimitReport { current: 16, detected_big_cores: Some(12), env_override: false, effective: 12 }`
+  （BIG_CORE_LIMIT_ENABLED=true 時点。検出は正しく P コア数 12 を捉えている）
+- 負荷状態: **共有負荷下**。計測開始前 `load average: 6.15 10.95 16.73`
+  （21 ユーザーセッション常駐、他エージェントの `cargo test` プロセスが並走
+  していることを `pgrep` で確認）。計測中も load average 11〜12 のまま推移。
+  M4 Max は 16 論理コアのため 1 分平均が 2 桁は明確な背景負荷であり、
+  絶対値にはノイズが乗っている（相対比較〈on/off 比・fandhe/candle 比〉は
+  同一 run 内・同一条件で交互計測しているため影響は限定的と見て記録する）
+- 生データ:
+  `scripts/bench/framework-compare/results/raw/results-m4max-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.jsonl`
+  （各 45 行）・`skipped-m4max-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.log`
+  （空）・`manifest-m4max-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.json`
+  （`bench_fandhe_sha256` 実機内で完全一致）
+- 実行ログ:
+  `scripts/bench/framework-compare/results/run_gemm_gate_cpu-m4max-head-90ea1cb-limit-{on,off}.log`
+
+## DGX Spark GB10（Grace CPU。実測完了）
+
+- 機種: DGX Spark（Grace CPU。Cortex-X925 ×10（big。最大 3900 MHz）＋
+  Cortex-A725 ×10（little。最大 2808 MHz）、計 20 論理コア。`lscpu` 実測）。
+  実ホスト名・IP は `docs/real-hardware-verification-env.local.md` 方式の
+  ローカル管理（本ファイルには書かない）
+- OS: Linux aarch64
+- NVIDIA driver・CUDA (nvcc) は #1148 時点と同じ環境（本計測は CPU 経路の
+  みで CUDA feature を持つ `bench-candle` のビルドにのみ `nvcc` が必要）
+- **`thread_limit_report()` 生値**（`--nocapture`。`thread_limit_report-dgx.log`）:
+  `ThreadLimitReport { current: 20, detected_big_cores: Some(1), env_override: false, effective: 1 }`
+  （BIG_CORE_LIMIT_ENABLED=true 時点）
+- **重要な診断結果**: `/sys/devices/system/cpu/cpu<N>/cpu_capacity` の実測値は
+  `lscpu` が報告する「X925 ×10 + A725 ×10」の 2 群構成と一致しない、5 段階
+  の非一様な分布だった（cpu0-4=718・cpu5-9=997・cpu10-14=731・cpu15-18=1017・
+  cpu19=1024。DVFS ブースト状態等を反映した容量値と見られ、単純な big/little
+  2 分類ではない）。`thread_limit.rs::big_cores_from_capacities` は「最大値と
+  一致するコア数」を大コア数とするため、この分布では cpu19 の 1 個のみを
+  「大コア」と誤検出し、`effective_num_threads` が実質シングルスレッド
+  （`effective=1`）へ縮退した。これが #1364 の on/off 比較で DGX が甚大な
+  後退を示した直接原因である
+- 負荷状態: on 腕開始前 `load average: 0.06, 0.02, 0.00`（ほぼ専有）。
+  off 腕（ビルドキャッシュ再利用のため高速）完了時 `load average: 6.64, 3.26,
+  1.46`（本計測自体〈bench-fandhe reuse/fresh と bench-candle fresh の交互
+  実行〉の寄与と見られる。他セッションのプロセスは事前確認で無し）
+- 生データ:
+  `scripts/bench/framework-compare/results/raw/results-dgx-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.jsonl`
+  （各 45 行）・`skipped-dgx-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.log`
+  （空）・`manifest-dgx-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.json`
+  （`bench_fandhe_sha256` 実機内で完全一致）
+- 実行ログ:
+  `scripts/bench/framework-compare/results/run_gemm_gate_cpu-dgx-head-90ea1cb-limit-{on,off}.log`
+- 計測方式の注記: 実機検証手順の既定共有作業ディレクトリを使わず、本イシュー
+  専用の隔離ディレクトリ（`~/work/fc-1364/`）を新規作成して計測し、計測完了後
+  に削除済み（#1148 と同じ方式。共有ディレクトリには一切触れていない）
+
+## on/off A/B 判定結果（`compare_gemm_ab.py --device cpu`。before=off・after=on）
+
+### Apple M4 Max
+
+| size/mode | before(off) median | after(on) median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 512/fresh | 739.5 us | 653.1 us | 0.8831 | 完全一致 | 非後退（改善） |
+| 512/reuse | 732.6 us | 670.2 us | 0.9149 | 完全一致 | 非後退（改善） |
+| 1024/fresh | 3.401 ms | 2.787 ms | 0.8193 | 完全一致 | 非後退（改善） |
+| 1024/reuse | 3.610 ms | 2.987 ms | 0.8275 | 完全一致 | 非後退（改善） |
+| 2048/fresh | 21.674 ms | 17.421 ms | 0.8038 | 完全一致 | 非後退（改善） |
+| 2048/reuse | 22.308 ms | 18.175 ms | 0.8147 | 完全一致 | 非後退（改善） |
+
+### DGX Spark GB10
+
+| size/mode | before(off) median | after(on) median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 512/fresh | 2.272 ms | 3.068 ms | 1.3503 | 完全一致 | 後退 |
+| 512/reuse | 2.305 ms | 2.751 ms | 1.1936 | 完全一致 | 後退（before spread>1.5x 注記あり。負荷ノイズの疑いを含むが方向は明確） |
+| 1024/fresh | 7.729 ms | 21.924 ms | 2.8368 | 完全一致 | 後退 |
+| 1024/reuse | 7.133 ms | 19.722 ms | 2.7648 | 完全一致 | 後退 |
+| 2048/fresh | 36.554 ms | 161.725 ms | 4.4243 | 完全一致 | 後退 |
+| 2048/reuse | 35.010 ms | 151.965 ms | 4.3406 | 完全一致 | 後退 |
+
+## 採否
+
+**REJECT（不採用）**。決定規則（両実機・全判定可能セルで reuse の ratio<=1.05
+を要求）に対し、DGX の reuse 全セルが 1.19〜4.34 倍の重大な後退を示した。
+M4 Max 単独では 0.80〜0.91 倍の改善が確認できたが、DGX の後退が上記診断結果
+（`cpu_capacity` 分布の誤検出による実質シングルスレッド化）という明確な原因を
+伴う重大な後退であるため、両実機総合で不採用と判断した。
+`crates/backend-cpu/src/thread_limit.rs::BIG_CORE_LIMIT_ENABLED` を `false`
+へ差し戻し済み（本イシューのコミット。#1362 の受入条件を充足）。
+
+Linux 側の大コア検出手段（`cpu_capacity` 以外の指標。例: `/sys/devices/system/
+cpu/cpu*/topology/*` の `capacity_dmips_mhz` や `lscpu` のモデル名グルーピング
+等）の見直しはスコープ外事項として PR 本文に記録する（ユーザー承認前提の
+Issue 起票は本エージェントでは行わない）。

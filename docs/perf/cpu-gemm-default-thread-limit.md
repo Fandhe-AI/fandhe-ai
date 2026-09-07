@@ -93,14 +93,48 @@ sysctl stdout parse テストで網羅する。
 に 1 回分の検出コストが乗りうる。`make startup-bench` への影響の実測は
 本 PR では行っていない（時間制約。#1364 の実測時に併せて確認する）。
 
-## 6. 実機実測（記入欄）
+## 6. 実機実測（イシュー #1364 で実施・採否確定）
 
-本エージェント実行環境には macOS／Linux 実機（DGX Spark GB10・Apple
-M4 Max）へのアクセスがないため、`thread_limit_report()` の検出生値
-（`perflevel0`／`logicalcpu`・`cpu_capacity` 分布）は本 PR 時点では
-**未実測**。#1364 が両実機で `thread_limit_report()` の生値・
-`RAYON_NUM_THREADS` on/off の framework-compare 前後比較を実施し、本節
-へ追記する。
+両実機で `thread_limit_report()` の検出生値・`RAYON_NUM_THREADS` on/off の
+framework-compare 前後比較（`run_gemm_gate_cpu.sh` 同一バイナリ 5 回計測・
+`compare_gemm_ab.py --device cpu`）を実施した。詳細な結果表・env_info は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13・
+`docs/perf/logs/cpu-gemm-thread-limit-1364/` を参照し、本節では要点のみ記す。
+
+### 6.1 検出生値
+
+- **Apple M4 Max**: `hw.perflevel0.logicalcpu`=12・`hw.logicalcpu`=16 →
+  `detected_big_cores=Some(12)`（P コア数を正しく検出）
+- **DGX Spark GB10（Grace CPU）**: `lscpu` は Cortex-X925 ×10（big）＋
+  Cortex-A725 ×10（little）の 2 群構成を報告するが、実際の
+  `/sys/devices/system/cpu/cpu<N>/cpu_capacity` は 5 段階の非一様な分布
+  （718×5・997×5・731×5・1017×4・1024×1）であり 2 群と一致しない。
+  `big_cores_from_capacities` は「最大値と一致するコア数」を大コア数と
+  するため、この分布では最大値 1024 を持つコア 1 個のみを検出してしまい
+  `detected_big_cores=Some(1)` となった。§1 の判定方式（②）が前提とする
+  「非一様なら 2 群」という単純化が、この実機の capacity 値の粒度
+  （おそらく DVFS ブースト状態を反映した多段階値）とは整合しない
+
+### 6.2 on/off 比較結果と採否
+
+- **Apple M4 Max**: 全 6 セル（N=512/1024/2048 × fresh/reuse）で
+  on（限定あり。effective=12）が off（限定なし。effective=16）に対し
+  0.80〜0.91 倍（非後退・改善）。checksum 完全一致
+- **DGX Spark GB10**: `detected_big_cores=Some(1)` により on 腕が実質
+  シングルスレッド（effective=1）へ縮退し、全 6 セルで 1.19〜4.34 倍の
+  重大な性能後退（N=2048 reuse: 35.0 ms→152.0 ms）。checksum 完全一致
+  （並列度は結果に影響しない設計どおり）
+- **総合判定: REJECT（不採用）**。決定規則（両実機・全判定可能セルで
+  reuse の ratio<=1.05 を要求）に対し DGX が明確に不合格。§0 で位置づけ
+  たとおり本イシュー（#1363）は実装のみで勝敗判断を含まないとしていたが、
+  #1364 の実測により「大コア数＝谷」であった §8.2 のスイープ結果と整合する
+  形で不採用が確定した
+- **反映**: `BIG_CORE_LIMIT_ENABLED` を `false` へ差し戻し済み
+  （`crates/backend-cpu/src/thread_limit.rs`。#1364 のコミット）。
+  `effective_num_threads` は常に `current`（rayon 既定値）をそのまま返す
+- **スコープ外**: DGX（Linux 非対称コア構成）の検出手段の見直し
+  （`cpu_capacity` 以外の指標。例: `topology/capacity_dmips_mhz`・モデル名
+  グルーピング）は本イシューでは対応しない
 
 ## 7. セキュリティ考慮（OWASP Top 10）
 
