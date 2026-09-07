@@ -78,15 +78,22 @@ _SIZES = (512, 1024, 2048, 4096)
 _MODES = ("fresh", "reuse")
 
 
-def _all_cells_rows(before_median, after_median, checksum=1.23456):
-    """8 セル（4 size × 2 mode）分の before/after 各 5 件を生成する。"""
+def _all_cells_rows(before_median, after_median, checksum=1.23456, sizes=_SIZES, device="metal"):
+    """指定 device のセル（`sizes` × `_MODES`）分の before/after 各 5 件を
+    生成する（既定は metal の 8 セル。イシュー #1364 で `device`／`sizes`
+    を引数化し cpu の 6 セル生成にも流用する）。
+    """
     before = []
     after = []
-    for size in _SIZES:
+    for size in sizes:
         for mode in _MODES:
             for _ in range(5):
-                before.append(_rec(before_median, checksum=checksum, size=size, mode=mode))
-                after.append(_rec(after_median, checksum=checksum, size=size, mode=mode))
+                before.append(
+                    _rec(before_median, checksum=checksum, size=size, mode=mode, device=device)
+                )
+                after.append(
+                    _rec(after_median, checksum=checksum, size=size, mode=mode, device=device)
+                )
     return before, after
 
 
@@ -296,6 +303,105 @@ class MainTest(unittest.TestCase):
             with redirect_stdout(out), redirect_stderr(err):
                 code = compare_gemm_ab.main(["prog", before_path, after_path])
             self.assertEqual(code, 2)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+
+class DeviceCpuTest(unittest.TestCase):
+    """`--device cpu`（イシュー #1364。既定スレッド数限定 on/off 比較にも
+    流用する N=512/1024/2048 限定セル集合）の挙動を検証する。
+    """
+
+    _CPU_SIZES = (512, 1024, 2048)
+
+    def test_device_defaults_to_metal(self):
+        # `--device` 省略時は既存 8 セル（metal）のまま（後方互換）。
+        before, after = _all_cells_rows(0.002, 0.0019)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 0)
+            self.assertEqual(out.getvalue().count("非後退"), 8)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_device_cpu_uses_three_size_six_cells(self):
+        before, after = _all_cells_rows(
+            0.002, 0.0019, sizes=self._CPU_SIZES, device="cpu"
+        )
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--device", "cpu", before_path, after_path]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(out.getvalue().count("非後退"), 6)
+            # 4096 は cpu のセル集合に含まれない。
+            self.assertNotIn("4096", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_device_cpu_regression_cell_exit_three(self):
+        before, after = _all_cells_rows(
+            0.002, 0.0019, sizes=self._CPU_SIZES, device="cpu"
+        )
+        for r in after:
+            if r["size"] == 2048 and r["mode"] == "reuse":
+                r["median_s"] = 0.01
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--device", "cpu", before_path, after_path]
+                )
+            self.assertEqual(code, 3)
+            self.assertIn("後退", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_metal_rows_rejected_when_device_cpu_requested(self):
+        # device=metal 指定の行は --device cpu 実行では判定不能行として
+        # 除外される（`_valid_cell_identity` の row_device != device 分岐）。
+        before, after = _all_cells_rows(0.002, 0.0019)  # device="metal"
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--device", "cpu", before_path, after_path]
+                )
+            self.assertEqual(code, 2)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_invalid_device_value_rejected(self):
+        before_path = _write_jsonl([_rec(0.002)])
+        after_path = _write_jsonl([_rec(0.002)])
+        try:
+            err = io.StringIO()
+            with self.assertRaises(SystemExit):
+                with redirect_stderr(err):
+                    compare_gemm_ab.main(
+                        ["prog", "--device", "cuda", before_path, after_path]
+                    )
         finally:
             os.unlink(before_path)
             os.unlink(after_path)

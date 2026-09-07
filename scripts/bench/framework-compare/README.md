@@ -814,6 +814,39 @@ function constant・候補追加等）が本番既定経路の性能を後退さ
   既定は切り替えない（安全側）。判断の記録先は
   `docs/perf/metal-gemm-n4096-kernel-gap.md` §19
 
+### `compare_gemm_ab.py --device cpu`（既定スレッド数限定 on/off 比較・イシュー #1364）
+
+`compare_gemm_ab.py` は既定で `--device metal`（上記 #1306 用途・8 セル）を
+使うが、`--device cpu` を指定すると N=512/1024/2048 の 6 セル
+（`compare_gemm_gate.py --device cpu` と同じ N 集合。CPU GEMM ゲート計測は
+N=4096 を対象にしないため）に切り替わる。判定ロジック（threshold・
+checksum 複合判定・parity fail-closed）は device に関わらず不変。
+
+`crates/backend-cpu/src/thread_limit.rs`（大コア数限定。イシュー #1363）の
+既定有効化 on/off を**同一バイナリ**（`GEMM_GATE_PATCH_FACADE_PATH=<crates/
+facade 絶対パス>` の path patch を固定し `RAYON_NUM_THREADS` の有無のみ
+切り替える）で比較する用途にも本ツールを流用する:
+
+```bash
+FACADE="$(cd ../../../crates/facade && pwd)"
+# 限定あり（既定。RAYON_NUM_THREADS 未設定を明示）
+env -u RAYON_NUM_THREADS GEMM_GATE_CPU_NODE_TAG=<node> GEMM_GATE_PATCH_FACADE_PATH="$FACADE" \
+  bash run_gemm_gate_cpu.sh head-limit-on
+# 限定なし（全論理コア数を明示。実機の論理コア総数を与える）
+RAYON_NUM_THREADS=<全論理コア数> GEMM_GATE_CPU_NODE_TAG=<node> GEMM_GATE_PATCH_FACADE_PATH="$FACADE" \
+  bash run_gemm_gate_cpu.sh head-limit-off
+
+python3 compare_gemm_ab.py --device cpu \
+  results/raw/results-<node>-gemm-gate-head-limit-off.jsonl \
+  results/raw/results-<node>-gemm-gate-head-limit-on.jsonl
+```
+
+before=限定なし・after=限定あり（`ratio = after/before`）として渡す。
+同一実機の on/off 両 invocation で `manifest-*.json` の
+`bench_fandhe_sha256` が一致することが「同一バイナリ」の証拠になる
+（結果記録・採否は `docs/perf/cpu-gemm-default-thread-limit.md` §6・
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13 を参照）。
+
 ## A/B 計測（都度同期廃止・イシュー #1083）
 
 #1011（CUDA 都度 `stream.synchronize()` 廃止）の受入条件「MLP 学習 1 step が

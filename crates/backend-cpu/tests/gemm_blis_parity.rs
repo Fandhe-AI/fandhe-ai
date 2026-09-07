@@ -411,6 +411,10 @@ fn gemm_blis_and_parallel_reject_same_shape_errors() {
 #[test]
 fn thread_limit_report_effective_within_current_bounds() {
     let report = thread_limit_report();
+    // イシュー #1364 の実機実測（env_info 記録）用に判定結果の生値を
+    // stderr へ出す（`--nocapture` 実行時のみ観測される。アサーション
+    // 自体は本テストの既存契約から変更しない）。
+    eprintln!("thread_limit_report={report:?}");
     assert!(report.effective >= 1);
     assert!(report.effective <= report.current.max(1));
     if let Some(detected) = report.detected_big_cores {
