@@ -1,0 +1,58 @@
+イシュー #1238: 候補判定の fandhe-ai 側 parity 非後退契約（ParityBaseline）
+への影響を確認する
+実行環境記録
+
+## 位置づけ
+
+本ディレクトリの `baseline-impact.md` は実機ベンチではなく、リポジトリに
+コミット済みの `crates/backend-cuda/tests/common/parity_baseline.rs`
+（`BASELINES` 配列。45 行）に対する机上計算（決定的な純粋関数の適用）の
+出力である。GPU 実機は使用していない（本エージェント実行環境は CUDA/Metal
+実機なし）。`--scale-mode exact` は各行の入力（Xorshift64Star の Rust 実装
+と同一の Python 移植で再現した `A`・`B`）を実際に生成して `max|A|`・
+`max|B|` を求める（合計で約 1.2 億要素の生成。重複する `(seed, m, k, n,
+dtype)` の組はプロセス内メモ化）。
+
+## 実行コマンド
+
+```bash
+cd scripts/bench/framework-compare
+python3 parity_baseline_impact.py --scale-mode exact \
+  > ../../../docs/perf/logs/candle-parity-tolerance-baseline-impact-1238/baseline-impact.md
+```
+
+## バージョン・commit
+
+- python3: `Python 3.12.12`
+- 入力ソース（`crates/backend-cuda/tests/common/parity_baseline.rs`）側
+  commit: `e6f2619946d1c69e32be4f9e78626e724ce8eb4c`（前段イシュー #1237・
+  PR #1417 マージ後の `origin/main` HEAD。本イシューはこのコミットから
+  作業ブランチを作成し、`crates/`・`docs/spec/` を変更していない）
+- 本計算を実行した作業ツリーの HEAD（コミット前時点）:
+  `e6f2619946d1c69e32be4f9e78626e724ce8eb4c`（上記と同一。本イシューは
+  Rust 側変更を含まないため）
+
+## 実行時間
+
+- `--scale-mode exact`: 約 40 秒（36.00s user + 0.12s system。ローカル
+  CPU 実行。実機 GPU 計測ではない）
+- `--scale-mode upper-bound`: 即時（`M=1` の定数で計算をスキップ）
+
+## 再現性の確認
+
+- 出力（`baseline-impact.md`）は入力ソース（`parity_baseline.rs`）と
+  `parity_baseline_impact.py`/`parity_tolerance_candidates.py` の内容のみ
+  で決定される純粋関数の適用結果であり、実機依存の非決定性は含まない。
+  同一コマンドを 2 回実行し、出力が bit 完全一致することを確認済み（`diff`
+  で差分なし）
+- `Xorshift64Star` の Python 移植は固定値照合で検証済み
+  （`parity_baseline_impact_test.py::XorshiftPortTest`。出典コマンドは
+  同テストクラスの docstring 参照）
+- `parse_baselines` の実ファイルスモークテスト
+  （`RealFileSmokeTest::test_real_file_parses_and_totals_45_rows`）で
+  45 行・`ParityPath` 別内訳が期待どおりであることを確認済み
+
+## 秘密情報・内部実値の非混入確認
+
+- 本ファイル・`baseline-impact.md` にホスト名・ノード上プロセスの絶対
+  パスを含めていないことを目視確認済み
