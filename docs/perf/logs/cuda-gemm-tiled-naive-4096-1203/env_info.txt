@@ -1,0 +1,9 @@
+# イシュー #1203 実機実測環境記録（GB10。内部ホスト名は含めない）
+
+- 実行日時（UTC）: 2026-09-07T19:03:39Z 前後（実行前確認）
+- HEAD: 8bfdb20778ca7bf1bde86241d073be65bb4ef12b
+- driver_version: 580.173.02（`docs/real-hardware-verification-env.local.md` 記録の 580.159.03 から更新あり。世代差の影響は本調査のスコープ外）
+- 実行前 GPU utilization.gpu: 0 %
+- 実行前 nvidia-smi --query-compute-apps: comfyui-env python（170 MiB）・kokoro python3（870 MiB）常駐（計測に不向きなノードではなく計測ノード自体の既知常駐サービス。docs/real-hardware-verification-env.local.md 参照）
+- 実行前 uptime: up 11 days, load average 0.02, 0.90, 1.82
+- HEAD の 4096 ディスパッチ: `select_tiled_f32_kernel` は N=4096・K=4096 で 128×64 pipeline（`TILED_PIPELINE_128X64_PRODUCTION_ENABLED = true`・`_MIN_N`/`_MIN_K = Some(1024)`）を選択する（#1162 実行時点の 64×64 pipeline とは異なる。gemm.rs L996-1018 参照）
