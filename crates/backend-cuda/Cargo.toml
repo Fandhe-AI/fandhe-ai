@@ -59,6 +59,13 @@ test = true
 name = "wmma_tolerance_probe"
 test = true
 
+[[example]]
+# イシュー #1356: `gemm_tf32x3_kernel_time_bench` に純カーネル時間換算
+# （`tflops`）の `#[cfg(test)] mod tests` を追加した。上記の各 example と
+# 同じ理由で `test = true` を明示する。
+name = "gemm_tf32x3_kernel_time_bench"
+test = true
+
 [dependencies]
 # workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
 # ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu/Cargo.toml` の #29 先例と
