@@ -352,6 +352,24 @@ mod gemm_coop_load_diag_tests;
 // `plan_tiled_by_class`／`encode_tiled_plan` へリファクタしたのみ）。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_tile_class_diag_tests;
+// E7 実測（イシュー #1324/#1329 に続く採否判断。イシュー #1330）:
+// `tile::CANDIDATES[9]`（64×64・`bk=32`。イシュー #1329・PR #1391 で
+// 追加。K ループ 1 反復あたりの `threadgroup_barrier` 往復を半減させる
+// 狙い）の N=1024/2048/4096 純カーネル時間（GPU タイムスタンプ）を
+// A 系列（`CANDIDATES[0]`。同じ 64×64・`bk=16`）・B 系列（`tile::
+// select_for_device` の本番選択構成）で比較し、`tile::select` への
+// `CANDIDATES[9]` 組み込み可否を判定する診断テスト。`gemm::MetalGemm::
+// diag_encode_tiled_nn`（`#[cfg(test)] pub(crate)`）・
+// `gemm_reuse_phase_diag_tests::{measure_one_phase_trial, WARMUP_TRIALS,
+// MEASURED_TRIALS, gen_square_ab, median_of}`（いずれも `pub(crate)`）・
+// `tile::{CANDIDATES, select_for_device}` へ到達するため、
+// `gemm_tile_class_diag_tests` と同じ理由でクレートルートの兄弟
+// モジュールとして配置する。`objc2` 系 FFI 型に触れるため同じ
+// `cfg(all(test, target_os = "macos"))` を付ける。プロダクションコード
+// （`tile.rs`／`gemm.rs`／`shaders/gemm.metal`）は無変更（診断テスト
+// 追加のみ。ADOPT 時の `tile.rs` 変更は別途 docs 判断を経て行う）。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_bk32_diag_tests;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;

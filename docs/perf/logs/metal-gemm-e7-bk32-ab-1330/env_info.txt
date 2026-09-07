@@ -1,0 +1,8 @@
+env_info（イシュー #1330。内部ホスト名は含めない）
+cpu: Apple M4 Max
+os: macOS 26.6.2 (build 25G83)
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+head_sha: 263cf5f (base) + local branch perf/1330-metal-e7-bk32-ab
+branch: perf/1330-metal-e7-bk32-ab
+date_utc: 2026-09-07 (実測開始)
+uptime_初回: 21 users, load averages: 7.79 7.48 6.90 → 4.81 6.72 6.66（3 分観測。他イシューが並列実行中の共有環境）

@@ -1819,3 +1819,120 @@ assert 契約に含めていない（K の分割粒度が異なるため丸め�
 FAILED。§13.1 の `--test-threads=1` 版〈`full_ignored_serial.log`〉では
 全 pass）・`full_ignored_serial.log`（`cargo test -p fandhe-ai-backend-
 metal --release -- --ignored --nocapture --test-threads=1` 全件。ok）
+
+## §14 E7 実測 — `CANDIDATES[9]`（bk=32）純カーネル時間の採否判定（イシュー #1330）
+
+§13.5 からの引き継ぎ事項（純カーネル時間 before/after・`tile::select` 組み込み判断）
+を本節で閉じる。
+
+### 14.0 目的・範囲
+
+`CANDIDATES[9]`（64×64・`bk=32`・wm2wn2。§13・PR #1391）の純カーネル時間
+（GPU タイムスタンプ。`kernel_gpu`）を M4 Max 実機で 2 系列・5 プロセス起動・
+5 回計測中央値で比較し、`tile::select`／`select_with_occupancy_for_device`
+への組み込み可否を判定する。
+
+- **A 系列**: `CANDIDATES[9]`（head）vs `CANDIDATES[0]`（base。同じ 64×64・
+  `bk=16`）。#1324「K ループ 1 反復あたりの `threadgroup_barrier` 往復半減」
+  仮説への直接回答
+- **B 系列**: `CANDIDATES[9]`（head）vs `tile::select_for_device` の本番選択
+  構成（base）。A 系列単独では `select` の組み込み根拠にならない（`[0]` は
+  本番選択構成に対し N=4096 で約 7.7 倍遅い。§9.4／§12 実測）ため、B 系列を
+  組み込み判断の唯一の根拠とする
+
+### 14.1 環境・プロトコル
+
+- 実機: Apple M4 Max・macOS 26.6.2（build 25G83）・rustc 1.96.0
+- HEAD: `263cf5f`（PR #1391 マージ済み main）上のブランチ
+  `perf/1330-metal-e7-bk32-ab`
+- 実行前 uptime: 1 分 load average 7.79（開始時）〜2.76（終了時）で推移。
+  21 ユーザーセッション並走の**共有負荷下**（他イシューの並列実行。
+  `env_info.txt` 参照）。`pmset -g therm` は開始・終了とも thermal/
+  performance warning なし
+- ハーネス: `crates/backend-metal/src/gemm_bk32_diag_tests.rs`（新規。
+  `#[ignore]`）。`--release --test-threads=1` で 5 プロセス起動
+- 事前スモーク: §13.3 の parity テスト（`bk32_64x64_*`）を HEAD 上で
+  再実行し全 pass を確認（`smoke_bk32_parity.log`）
+- ログ: `docs/perf/logs/metal-gemm-e7-bk32-ab-1330/`
+
+### 14.2 A 系列（`[9]` vs `[0]`）結果
+
+| N | base（cand0）median [ms・run代表] | head（cand9）median [ms・run代表] | run別比中央値（head/base） | 符号一貫性 |
+|---|---|---|---|---|
+| 1024 | 約 1.53〜1.69（外れ値 run 除く） | 約 1.70〜1.76（外れ値 run 除く） | **1.107607** | 5/5 正（head が遅い） |
+| 2048 | 12.21〜12.47 | 14.05〜14.34 | **1.151341** | 5/5 正 |
+| 4096 | 105.19〜105.80 | 121.94〜122.22 | **1.158354** | 5/5 正 |
+
+詳細は `docs/perf/logs/metal-gemm-e7-bk32-ab-1330/aggregate.md` 参照。
+**`CANDIDATES[9]`（bk=32）は `CANDIDATES[0]`（bk=16）に対し、N=1024/2048/4096
+のいずれも 10.8〜15.8% 一貫して遅い**（5/5 run 符号一貫）。#1324 の「バリア
+半減で高速化する」仮説は本実測では支持されない（理論上の同期回数削減効果を、
+`bk=32`化に伴う何らかの副作用——レジスタ／SMEM アクセスパターンの変化、
+ロード粒度の変化等——が上回ったと推測されるが、機構レベルでの追加切り分けは
+本イシューの範囲外とする）。
+
+### 14.3 B 系列（`[9]` vs 本番選択構成）結果
+
+| N | 本番選択構成（base） | run別比中央値（head/base） | 符号一貫性 |
+|---|---|---|---|
+| 512 | `CANDIDATES[5]`相当（64,32,32,2,2） | **4.543226** | 5/5 正 |
+| 1024 | `(64,32,8,4,1)`（occupancy 縮退構成） | **6.590084** | 5/5 正 |
+| 2048 | `(64,32,16,2,2)` | **7.571432** | 5/5 正 |
+| 4096 | `CANDIDATES[2]`相当（32,64,16,2,2） | **7.518255** | 5/5 正 |
+
+詳細は同 `aggregate.md` 参照。**`CANDIDATES[9]` は本番選択構成に対し全帯域
+（N=512〜4096）で 4.5〜7.6 倍遅い**（20/20 反復すべて符号一貫）。
+
+### 14.4 妥当性帯チェック
+
+`docs/perf/metal-gemm-reuse-phase-breakdown.md` §11.5 分母（N=1024 1.0267 /
+2048 3.1849 / 4096 13.7051 ms）と B 系列 base 列（AGENTS.md「5 回計測中央値」
+規約に沿い 5 run 中央値: N=1024 0.2243 ms／N=2048 1.6006 ms／N=4096
+13.7372 ms。当初記録は run1 のみの値〈約 1.02 ms〉を誤って base 代表値として
+使用していたため訂正）を突合した結果、N=2048/4096 は概ね同オーダーで整合。
+N=1024 は分母 1.0267 ms に対し中央値 0.2243 ms と約 4.6 倍の乖離があり、
+run1（1.0245 ms・この base 列内でも外れ値）だけを見て「概ね整合」としていた
+旧記述は誤りだった。乖離の要因は計測境界差・本番選択構成の変遷（#1039 以降の
+テーブル更新）による差と考えられるが、分母自体は置換しない。この乖離は B 系列
+の run別比（同一 run 内で base・head を対応付けて計算）自体の妥当性・採否判断
+（REJECT）には影響しない（`aggregate.md` 「妥当性帯チェック」節に詳細）。
+
+### 14.5 採否判断
+
+**REJECT（`tile::select`／`select_with_occupancy_for_device` への
+`CANDIDATES[9]` 組み込みは行わない）**。判断根拠:
+
+1. A 系列: `[9]` は `[0]` 単体比較でも改善せず、全 N で 10.8〜15.8% 後退
+   （5/5 run 符号一貫）。#1324 の理論的仮説（バリア半減による高速化）は
+   実測で反証された
+2. B 系列: `[9]` は本番選択構成に対し全帯域で 4.5〜7.6 倍後退（20/20 反復
+   符号一貫）。判定基準（§9.4〜§12.4 と同一の「N=2048 かつ 4096 で
+   head/base 比 < 1.0・N=1024 後退 ≤5%・run 間符号一貫」）に対し、後退方向
+   かつ後退幅が判定基準の許容範囲（5%）を大幅に超えるため、明確に不採用
+3. 符号のばらつきがなく（A 系列 15/15・B 系列 20/20 反復すべて同方向）、
+   共有負荷下の計測ノイズでは結論を覆せない規模の後退のため `undetermined`
+   ではなく確定 REJECT とする
+
+`tile::CANDIDATES[9]` 自体（配列要素）は§13 のとおり不変のまま維持する
+（明示指定でのみ到達可能な状態を継続。`tile.rs`／`gemm.rs`／
+`shaders/gemm.metal` への変更なし）。
+
+### 14.6 スコープ外・引き継ぎ
+
+- `bk=32` 化がなぜ理論上の同期削減効果を上回る後退を招くかの機構レベルの
+  追加切り分け（レジスタ圧・SMEM アクセスパターン・ロード粒度変化等の
+  仮説検証）は本イシューの範囲外。新規 Issue は自動運転のため起票せず、
+  親 #1324 へのコメント候補として記録する
+- E1 unroll pragma（`UNROLL_ACC_ENABLED`）の index 9 再評価: 本判断（REJECT）
+  により `CANDIDATES[9]` 自体が `select` 非組み込みのままのため、再評価の
+  優先度は低いと判断し対象外とする
+- ダブルバッファ（2 面）SMEM 化・端あり形状・NT/TN/TT・f16 経路の性能比較:
+  §13.5 から引き続き対象外
+
+### 14.7 関連ログ
+
+`docs/perf/logs/metal-gemm-e7-bk32-ab-1330/`（`env_info.txt`・
+`pmset_therm_before.txt`／`pmset_therm_after.txt`・`uptime_before_run{1..5}.txt`・
+`smoke_bk32_parity.log`・`kernel_gpu_run{1..5}.log`（A 系列）・
+`kernel_gpu_production_select_run{1..5}.log`（B 系列）・`aggregate.md`）。
+内部ホスト名は含めない。
