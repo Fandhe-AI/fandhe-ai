@@ -328,6 +328,11 @@ CUDA 実機なし）
   計算スクリプト）
 - `docs/perf/logs/candle-parity-tolerance-candidates-1237/`（イシュー #1237。上記の実行ログ・
   env_info）
+- `docs/perf/candle-parity-tolerance-baseline-impact.md`（イシュー #1238。上記候補判定を
+  fandhe-ai 本体側の parity 非後退契約〈`BASELINES`。45 行〉へ適用した場合の影響の机上確認。
+  `BASELINES`・tolerance 定数は不変のまま）
+- `docs/perf/logs/candle-parity-tolerance-baseline-impact-1238/`（イシュー #1238。上記の実行
+  ログ・env_info）
 
 ## 11. 2026-09-06 追補: 正式系列 `fandhe-ai =0.7.0` 再計測（イシュー #1185）
 

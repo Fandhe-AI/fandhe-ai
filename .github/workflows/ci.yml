@@ -795,6 +795,17 @@ jobs:
       - name: フレームワーク横並びベンチ parity_tolerance_candidates.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/parity_tolerance_candidates_test.py
 
+      # イシュー #1238: parity_baseline_impact.py（上記候補判定を fandhe-ai
+      # 本体側の parity 非後退契約〈`crates/backend-cuda/tests/common/
+      # parity_baseline.rs::BASELINES`。45 行〉へ適用した場合の影響を机上
+      # 確認するスクリプト）の回帰テスト。同一方針（stdlib の unittest の
+      # み・cargo の有無に関わらず常時実行）。実ファイルに対する
+      # `--scale-mode exact` の正式計算（`docs/perf/logs/
+      # candle-parity-tolerance-baseline-impact-1238/` 生成。約 1.2 億要素
+      # の生成を伴う）は CI では行わない。
+      - name: フレームワーク横並びベンチ parity_baseline_impact.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/parity_baseline_impact_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
