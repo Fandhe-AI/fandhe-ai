@@ -1,0 +1,13 @@
+NVIDIA GB10, 580.173.02, 0 %
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Aug_20_01:57:39_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo 1.97.0 (c980f4866 2026-06-30)
+9c3b286eef0c53df6acf16dde70413f698531219
+compute capability: compute_121 (sm_121)
+build features: --features internal-diagnostics (--release, --example wmma_tolerance_probe --example gemm_tf32x3_kernel_time_bench)
+GPU busy state before run: 0% utilization, compute-apps = comfyui-env (170 MiB), kokoro venv (870 MiB) [resident services only, no interference]
+GPU busy state after run: 0% utilization, same resident services, no interference
