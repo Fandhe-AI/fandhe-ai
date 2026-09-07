@@ -135,8 +135,11 @@ const PHASE_STEP_TOTAL: &str = "step_total";
 // 実測確定するための計装。`matmul` 区間の内側に H2D（A/B のアップロード）
 // ・カーネル実行・D2H（結果ダウンロード）・ストリーム同期が全て閉じて
 // おり、fandhe-ai 0.7.0 の公開 API（`Var::matmul`）ではこれ以上分離
-// できない（内訳は `crates/backend-cuda` の診断テストが別途取る。
-// `docs/perf/cuda-gemm-reuse-phase-breakdown.md` 参照）。
+// できない（内訳は CUDA／Metal／CPU 各バックエンドの
+// `gemm_reuse_phase_diag_tests` が別途取る。`docs/perf/
+// cuda-gemm-reuse-phase-breakdown.md`・`docs/perf/
+// metal-gemm-reuse-phase-breakdown.md` 参照。CPU はイシュー #1290
+// で診断テストを追加し実測は #1292 へ引き継ぐ）。
 const PHASE_GEMM_MATMUL: &str = "matmul";
 const PHASE_GEMM_TO_TENSOR: &str = "to_tensor";
 const PHASE_GEMM_HOST_COPY: &str = "host_copy";
@@ -1971,6 +1974,82 @@ mod tests {
             assert!(
                 sum.as_secs_f64() >= 0.9 * total.as_secs_f64(),
                 "iter={iter}: phase sum {sum:?} is less than 90% of iter_total {total:?}"
+            );
+        }
+    }
+
+    /// イシュー #1290: `make_gemm_phases_cli`（size 64 固定）の size 可変版。
+    /// CPU gate 対象形状（README「GEMM ゲート 5 回計測」節。cpu={512,1024,2048}）
+    /// の下限に近い N=512 でのスモーク・checksum 一致検証に使う（AC-1/AC-2）。
+    fn make_gemm_phases_cli_sized(out: &std::path::Path, size: usize) -> Cli {
+        Cli {
+            size,
+            ..make_gemm_phases_cli(out)
+        }
+    }
+
+    /// イシュー #1290 受け入れ条件 3: `gemm --mode reuse --phases` が
+    /// CPU gate 対象形状の下限（N=512）でも size=64 の既存スモーク
+    /// （`gemm_reuse_phases_emits_one_row_per_phase_in_order`）と同じ
+    /// 5 区間・スキーマで完走することを固定する。実機非依存（cpu）の
+    /// ため `#[ignore]` は付けない。
+    #[test]
+    fn gemm_reuse_phases_cpu_smoke_n512() {
+        let out = temp_out_path("gemm-phases-cpu-smoke-n512");
+        let cli = make_gemm_phases_cli_sized(&out, 512);
+        run_gemm_reuse_phases(&cli).expect("run_gemm_reuse_phases (N=512) failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 5, "lines={lines:?}");
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.contains("\"task\":\"gemm_phases\""), "line={line}");
+            assert!(line.contains("\"device\":\"cpu\""), "line={line}");
+            assert!(line.contains("\"size\":512"), "line={line}");
+            assert!(line.contains("\"mode\":\"reuse\""), "line={line}");
+            assert!(
+                line.contains(&format!("\"phase_index\":{i}")),
+                "line={line}"
+            );
+            assert!(line.contains("\"init_s\":"), "line={line}");
+            assert!(!line.contains("\"init_s\":null"), "line={line}");
+            assert!(!line.contains("\"checksum\":null"), "line={line}");
+        }
+        assert!(
+            lines.last().unwrap().contains("\"phase\":\"iter_total\""),
+            "content={content}"
+        );
+    }
+
+    /// イシュー #1290 受け入れ条件 3: `gemm_reuse_phases_checksum_matches_
+    /// run_gemm_reuse`（size 64）と同じ検証を N=512 でも固定する
+    /// （AC-2 の bit 一致契約が CPU gate 対象形状の下限でも崩れないこと）。
+    #[test]
+    fn gemm_reuse_phases_checksum_matches_run_gemm_reuse_n512() {
+        let reuse_path = temp_out_path("gemm-reuse-vs-phases-n512");
+        let reuse_cli = Cli {
+            size: 512,
+            ..make_cli("gemm", "reuse", &reuse_path)
+        };
+        run_gemm_reuse(&reuse_cli).expect("run_gemm_reuse (N=512) failed");
+        let reuse_checksum_line = last_line_checksum(&reuse_path);
+        let _ = std::fs::remove_file(&reuse_path);
+
+        let phases_path = temp_out_path("gemm-phases-checksum-n512");
+        let phases_cli = make_gemm_phases_cli_sized(&phases_path, 512);
+        run_gemm_reuse_phases(&phases_cli).expect("run_gemm_reuse_phases (N=512) failed");
+        let content = std::fs::read_to_string(&phases_path).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&phases_path);
+
+        for line in content.lines() {
+            let key = "\"checksum\":";
+            let start = line.find(key).expect("checksum field missing") + key.len();
+            let rest = &line[start..];
+            let end = rest.find([',', '}']).expect("checksum field end missing");
+            let phase_checksum: f64 = rest[..end].trim().parse().expect("checksum not f64");
+            assert_eq!(
+                phase_checksum, reuse_checksum_line,
+                "phase checksum diverges from run_gemm_reuse (N=512): line={line}"
             );
         }
     }
