@@ -277,6 +277,15 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   集計表は `scripts/bench/framework-compare/results/summary.md` 環境 14/15 節を参照
 - #1117 のクローズ可否・後続 issue 化の要否・N=2048 の判定方式はユーザー判断（本 PR では
   Issue 操作を行わない。`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §10）
+- **2026-09-07 追補（イシュー #1364）**: §8.2 の非単調性仮説の実装（#1363「既定
+  スレッド数の大コア限定」）を両実機・同一バイナリの `RAYON_NUM_THREADS` on/off
+  で 5 回計測比較した結果、Apple M4 Max は 0.80〜0.91 倍（非後退・改善）だったが
+  DGX Spark GB10 は `cpu_capacity` sysfs の誤検出（実質シングルスレッド化）により
+  1.19〜4.34 倍の重大な後退を示し、**REJECT（不採用）**と確定した。
+  `BIG_CORE_LIMIT_ENABLED` を `false` へ差し戻し済みのため、本節（§8.4）の
+  `fandhe-ai =0.6.0`／`=0.7.0` 実測値・#1117 未達成の結論には影響しない
+  （限定は既定 OFF のまま。詳細: `docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §13・`docs/perf/cpu-gemm-default-thread-limit.md` §6）
 
 ### 8.5 #1182 追補（reuse 計測境界のフェーズ分解。§2 段階的下限表・§3 丸め規則は不変）
 

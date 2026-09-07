@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）
 
 ## 1. 位置づけ
 
@@ -404,3 +404,96 @@ parity_max_abs_err=3.814697e-05, parity_max_rel_err=3.944416e-01`（§5.2・環�
 **総合判定: #1117 は正式系列 `fandhe-ai =0.7.0` においても両実機で未達成（判定可能な
 5 件すべて未達・DGX N=2048 は判定不能）。#1148 の判定を 0.7.0 で確定した。** 達成条件の
 見直し要否・後継ツリーへの引き継ぎは §10「2026-09-06 更新」を参照。
+
+## 13. 2026-09-07 追補: 既定スレッド数の大コア限定 on/off 比較（イシュー #1364）
+
+### 13.1 位置づけ
+
+`docs/perf/cpu-gemm-default-thread-limit.md`（イシュー #1363・origin/main
+`90ea1cb`）が実装した「`RAYON_NUM_THREADS` 未指定時の既定並列度を物理大コア数へ
+限定する」制御について、§8.2 の `RAYON_NUM_THREADS` スイープが示した非単調性
+（大コア数付近が谷）の仮説を、両実機・同一バイナリ（`GEMM_GATE_PATCH_FACADE_PATH`
+の path patch。`crates/facade` HEAD＝#1363 反映後）・`RAYON_NUM_THREADS` の
+on（未設定＝限定あり）/off（全論理コア数を明示＝限定なし）5 回計測中央値
+比較で検証した。判定は `run_gemm_gate_cpu.sh` の出力を `compare_gemm_ab.py
+--device cpu`（本イシューで N=512/1024/2048 の 6 セルに対応拡張）で突合する。
+
+### 13.2 検出生値
+
+| 実機 | current | detected_big_cores | effective（限定 ON 時） |
+|---|---|---|---|
+| Apple M4 Max | 16 | Some(12) | 12（正しく P コア数を検出） |
+| DGX Spark GB10 | 20 | **Some(1)** | **1**（誤検出。§13.3 参照） |
+
+DGX の `cpu_capacity` sysfs 値は `lscpu` が報告する「Cortex-X925 ×10 ＋
+Cortex-A725 ×10」の 2 群構成と一致しない 5 段階の非一様分布
+（718×5・997×5・731×5・1017×4・1024×1）であり、`big_cores_from_capacities`
+の「最大値と一致するコア数」判定が cpu19 の 1 個のみを大コアとして誤検出した。
+
+### 13.3 on/off A/B 結果（before=off・after=on・ratio=after/before）
+
+Apple M4 Max（checksum 全セル完全一致）:
+
+| N/mode | off median | on median | ratio | 判定 |
+|---|---|---|---|---|
+| 512/fresh | 739.5 us | 653.1 us | 0.8831 | 非後退（改善） |
+| 512/reuse | 732.6 us | 670.2 us | 0.9149 | 非後退（改善） |
+| 1024/fresh | 3.401 ms | 2.787 ms | 0.8193 | 非後退（改善） |
+| 1024/reuse | 3.610 ms | 2.987 ms | 0.8275 | 非後退（改善） |
+| 2048/fresh | 21.674 ms | 17.421 ms | 0.8038 | 非後退（改善） |
+| 2048/reuse | 22.308 ms | 18.175 ms | 0.8147 | 非後退（改善） |
+
+DGX Spark GB10（checksum 全セル完全一致）:
+
+| N/mode | off median | on median | ratio | 判定 |
+|---|---|---|---|---|
+| 512/fresh | 2.272 ms | 3.068 ms | 1.3503 | 後退 |
+| 512/reuse | 2.305 ms | 2.751 ms | 1.1936 | 後退 |
+| 1024/fresh | 7.729 ms | 21.924 ms | 2.8368 | 後退 |
+| 1024/reuse | 7.133 ms | 19.722 ms | 2.7648 | 後退 |
+| 2048/fresh | 36.554 ms | 161.725 ms | 4.4243 | 後退 |
+| 2048/reuse | 35.010 ms | 151.965 ms | 4.3406 | 後退 |
+
+両実機とも各腕で `manifest-*.json` の `bench_fandhe_sha256` が完全一致（同一
+バイナリの証拠）。fandhe-ai 側は全 run `parity_fail_count=0`。
+
+### 13.4 §8.2 非単調性仮説との整合
+
+M4 Max の結果は「大コア数へ限定すると改善する」という §8.2 の一部の観察
+（8 スレッド→12 スレッドで谷、という非単調性のうち大コア数=12 が谷だった点とは
+逆方向）と単純には一致しないが、これは §8.2 のスイープが**静的な固定値
+指定**（`RAYON_NUM_THREADS=12`）である一方、本 A/B は`effective_num_threads`
+の判定ロジック自体を経由した値であり、条件が異なるため直接比較はできない。
+DGX の結果は「大コア数（0 判定不能）付近」ではなく「誤検出による実質 1
+スレッド」という全く別の病態であり、§8.2 の非単調性仮説（little コア律速）を
+検証したことにはならない。
+
+### 13.5 #1117 ゲート（candle 比）への参考影響
+
+on 腕（DGX, effective=1）は candle 比が著しく悪化した（例: N=1024
+candle/fandhe=0.281。§12 の 0.6.0/0.7.0 系列の 0.786〜0.810 から大幅後退）。
+これは thread_limit の誤検出の症状であり、#1117 の判定（§12.4）自体は
+BIG_CORE_LIMIT_ENABLED=false の状態（本追補の off 腕相当）で行われている
+ため §12 の結論に影響しない。
+
+### 13.6 採否（確定）
+
+**REJECT（不採用）**。決定規則（両実機・全判定可能セルで reuse の
+ratio<=1.05 を要求）に対し、DGX の reuse 全セルが 1.19〜4.34 倍の重大な
+後退を示したため、M4 Max 単独の改善（0.80〜0.91 倍）があっても総合で不採用
+と判断した。`crates/backend-cpu/src/thread_limit.rs::BIG_CORE_LIMIT_ENABLED`
+を `false` へ差し戻し済み（#1364 のコミット）。親 #1362 の受入条件を本追補で
+充足した。
+
+DGX（Linux 非対称コア構成）の検出手段の見直し（`cpu_capacity` 以外の指標）は
+本イシューのスコープ外として記録する（ユーザー承認前提の Issue 起票は本
+PR では行わない）。
+
+### 13.7 出典
+
+env_info・実行ログ・生データ:
+`docs/perf/logs/cpu-gemm-thread-limit-1364/`（`env_info.txt`・
+`thread_limit_report-{m4max,dgx}.log`・`run_gemm_gate_cpu-{m4max,dgx}-head-90ea1cb-limit-{on,off}.log`）、
+`scripts/bench/framework-compare/results/raw/results-{m4max,dgx}-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.jsonl`・
+`manifest-{m4max,dgx}-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.json`。
+集計は `scripts/bench/framework-compare/results/summary.md` 環境 22 節を参照。
