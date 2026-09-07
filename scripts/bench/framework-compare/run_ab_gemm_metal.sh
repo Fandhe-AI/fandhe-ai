@@ -388,16 +388,20 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
 
   if [[ "$MV_FAILED" -ne 0 ]]; then
     echo "error: $MV_FAILED 件の mv が失敗した。計測世代の混在を防ぐため、成功した反映分を反映前の状態へ巻き戻す（fail-closed。新旧結果混在を防ぐため成功と報告しない）。" >&2
-    # Cursor Bugbot 指摘: この巻き戻し自体（`.prev-backup` → 正規パスへの
-    # mv）が失敗した場合に、それを気付かせないまま後続の
-    # `for b in "${AB_BACKUPS[@]}"; do rm -f "$b"; done` で無条件削除すると、
-    # このロールバックが本来防ぐはずだった「新旧結果混在」ケースが
-    # 発生した状態のまま復元手段（バックアップ）まで失われる。
-    # 復元に失敗した要素だけバックアップを保持し、成功／不要な要素のみ
-    # 削除する（保持したバックアップの保存先は明示的に通知する）。
+    # codex-review P0 指摘・Cursor Bugbot 指摘: この巻き戻し自体
+    # （`.prev-backup` → 正規パスへの mv）が失敗した場合に、それを
+    # 気付かせないまま後続のクリーンアップで `AB_BACKUPS` を無条件削除
+    # すると、このロールバックが本来防ぐはずだった「新旧結果混在」ケース
+    # が発生した状態のまま復元手段（バックアップ）まで失われる。
+    # 復元に失敗した要素はインデックス単位で AB_KEEP_BACKUP に印を付け、
+    # 最終クリーンアップ（インデックスベースの走査）でそのインデックスの
+    # バックアップだけ削除対象から除外する（復元に成功・不要と確認できた
+    # 要素のみ削除する。保持したバックアップの保存先は明示的に通知する）。
     ROLLBACK_RESTORE_FAILED=0
+    AB_KEEP_BACKUP=()
     ab_i=0
     while [[ "$ab_i" -lt "${#AB_DSTS[@]}" ]]; do
+      AB_KEEP_BACKUP[$ab_i]=0
       if [[ "${AB_OKS[$ab_i]}" == "1" ]]; then
         if [[ -n "${AB_BACKUPS[$ab_i]}" ]]; then
           if mv -f "${AB_BACKUPS[$ab_i]}" "${AB_DSTS[$ab_i]}"; then
@@ -405,6 +409,7 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
           else
             echo "error: rollback 用バックアップ '${AB_BACKUPS[$ab_i]}' から '${AB_DSTS[$ab_i]}' への復元に失敗した（正規パスが新世代のまま残っている可能性がある）。バックアップは削除せず保持する: ${AB_BACKUPS[$ab_i]}" >&2
             ROLLBACK_RESTORE_FAILED=$((ROLLBACK_RESTORE_FAILED + 1))
+            AB_KEEP_BACKUP[$ab_i]=1
           fi
         else
           rm -f "${AB_DSTS[$ab_i]}"
@@ -412,8 +417,12 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
       fi
       ab_i=$((ab_i + 1))
     done
-    for b in "${AB_BACKUPS[@]}"; do
-      [[ -n "$b" ]] && rm -f "$b"
+    ab_i=0
+    while [[ "$ab_i" -lt "${#AB_DSTS[@]}" ]]; do
+      if [[ "${AB_KEEP_BACKUP[$ab_i]}" != "1" ]]; then
+        [[ -n "${AB_BACKUPS[$ab_i]}" ]] && rm -f "${AB_BACKUPS[$ab_i]}"
+      fi
+      ab_i=$((ab_i + 1))
     done
     if [[ "$ROLLBACK_RESTORE_FAILED" -ne 0 ]]; then
       echo "error: $ROLLBACK_RESTORE_FAILED 件のロールバック用バックアップ復元に失敗した。上記に列挙した保存先から手動で復元すること（fail-closed。復元手段を失わないためバックアップは自動削除しない）。" >&2
