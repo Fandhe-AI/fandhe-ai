@@ -311,10 +311,13 @@ fn non_staged_candidate_is_rejected() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
-    assert!(
-        !TileConfig::SINGLE_SIMDGROUP_8X8.staged,
-        "本テストの前提（SINGLE_SIMDGROUP_8X8 は非 staged）が崩れています"
-    );
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(
+            !TileConfig::SINGLE_SIMDGROUP_8X8.staged,
+            "本テストの前提（SINGLE_SIMDGROUP_8X8 は非 staged）が崩れています"
+        );
+    }
 
     let mut rng_a = Xorshift64Star::new(0x1369_9001);
     let mut rng_b = Xorshift64Star::new(0x1369_9002);
