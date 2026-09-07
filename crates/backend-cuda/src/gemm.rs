@@ -1372,6 +1372,403 @@ fn persistent_block_threads(tile: TiledPipelineTile) -> u32 {
     }
 }
 
+// =====================================================================
+// Stream-K（最終 wave 限定・固定順序 fixup。イシュー #1358）。
+// =====================================================================
+//
+// `kernels_tiled_pipeline.rs`（Stream-K 本体・fixup カーネルソース）の
+// ホスト側ハンドル・配布計画・起動 API。全て `internal-diagnostics`
+// feature（既定 off）限定の opt-in 診断 API であり、本番既定経路
+// （[`CudaGemm::new`]）は本節の型・関数を一切生成しない。
+
+/// Stream-K 配布計画（出力タイル総数 `T`・grid 容量 `G`・K タイル数
+/// `nk` から算出する GPU 不要の純粋データ）。
+///
+/// `full_tiles`（先頭 `F` 個。1 CTA が K 全体を担当する従来どおりの
+/// タイル）と `remainder_tiles`（末尾 `R` 個。K 反復を `q` 幅ずつ
+/// `sk_units` 個の SK 単位へ平坦配布するタイル）への分割・各 SK 単位の
+/// 幅（`q`）・部分和スロットのストライド（`max_contributors`）を保持
+/// する。生成は `streamk_plan`（`pub(crate)`。crate 内部限定のため doc link 化しない）
+/// のみ。
+///
+/// # 決定性への関わり
+///
+/// 本構造体自体は数値計算を一切行わない（`u32` の整数のみ）。
+/// `kernels_tiled_pipeline::TP_SK_KERNEL_PREFIX`（private const。doc link 化しない）
+/// ドキュメンテーション
+/// コメント「決定性の根拠」参照。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamKPlan {
+    /// 出力タイル総数 `T`（`persistent_tile_count`（private fn）と同じ
+    /// `ceil(m/TP_BM) * ceil(n/TP_BN)`）。
+    pub num_tiles: u32,
+    /// grid 容量 `G`（`num_sms * blocks_per_sm`。`persistent_grid_blocks`
+    /// （private fn）と異なり `num_tiles` へ頭打ちしない生値）。
+    pub grid_capacity: u32,
+    /// K タイル数 `nk`（`ceil(k / TP_BK)`。`k == 0` は 0）。
+    pub num_k_tiles: u32,
+    /// 先頭 `F` 個。1 CTA が K 全体を担当する full タイル数。
+    pub full_tiles: u32,
+    /// 末尾 `R` 個。K 反復を分割する残タイル数（0 なら非活性）。
+    pub remainder_tiles: u32,
+    /// SK 単位あたりの平坦 K タイル幅 `q`（非活性時は 0）。
+    pub q: u32,
+    /// SK 単位数 `U`（非活性時は 0）。
+    pub sk_units: u32,
+    /// 部分和スロットのタイルあたりストライド `MAXC`（非活性時は 0）。
+    pub max_contributors: u32,
+    /// 起動する grid のブロック数（`min(grid_capacity, total_units)` の
+    /// 下限 1 クランプ。`persistent_grid_blocks`（private fn）と同じ判断）。
+    pub grid_blocks: u32,
+    /// タイル取得ループが配る単位総数（`full_tiles + sk_units`）。
+    pub total_units: u32,
+}
+
+impl StreamKPlan {
+    /// 残タイルの K 分割が実際に発生する（`remainder_tiles > 0`）かを
+    /// 返す。`false` の場合、[`CudaGemm::launch_tiled_pipeline_streamk_f32`]
+    /// は fixup カーネルの起動を省略する（全タイルが full タイル単位で
+    /// `c` へ直接書かれるため、fixup が読む部分和が存在しない）。
+    pub fn is_active(&self) -> bool {
+        self.remainder_tiles > 0
+    }
+}
+
+/// [`StreamKPlan`] を算出する GPU 不要の純関数（`#[cfg(test)]` の
+/// ホストシミュレータテストで単位列の網羅性・一意性を検証する）。
+///
+/// `num_tiles`（`T`）・`grid_capacity`（`G`）・`num_k_tiles`（`nk`）から
+/// [`kernels_tiled_pipeline`] モジュール冒頭コメント「Stream-K」節・
+/// `TP_SK_KERNEL_PREFIX` ドキュメンテーションコメントと同一の整数演算で
+/// 配布計画を導出する。`grid_capacity == 0` は
+/// [`CudaGemm::compile_tiled_pipeline_streamk_variant`] が SM 数照会・
+/// 占有率照会を経て渡すため実際には到達しないが、独立関数として
+/// `CudaError::InvalidKernelConfig` を返す契約にしておく（fail-closed。
+/// `persistent_grid_blocks` が同種の 0 除算防止を安全弁で行うのと異なり、
+/// 本関数は `Result` を返せるため明示的に拒否する）。
+///
+/// `num_tiles == 0 || num_k_tiles == 0` は非活性（`remainder_tiles == 0`）
+/// として扱い、[`CudaGemm::launch_tiled_pipeline_streamk_f32`]・
+/// [`CudaGemm::run_tiled_pipeline_streamk_f32`] の `m == 0 || n == 0 || k
+/// == 0` 早期 return 契約と整合させる（`persistent_tile_count` が
+/// `m == 0 || n == 0` で `0` を返す契約と同型）。
+///
+/// 全ての中間計算は `u64` で行い、カーネル引数として渡す `int`
+/// パラメータ（`full_tiles`／`total_units`／`q`／`max_contributors`／
+/// `remainder_tiles`）・部分和スロット総数×`TP_BM*TP_BN` の `usize` 容量
+/// が `i32::MAX` を超える場合は `CudaError::InvalidShape` で拒否する
+/// （REQ-8・fail-closed。`persistent_tile_count` の同種オーバーフロー
+/// 防止と同じ判断）。
+pub(crate) fn streamk_plan(
+    num_tiles: u32,
+    grid_capacity: u32,
+    num_k_tiles: u32,
+) -> Result<StreamKPlan, CudaError> {
+    if grid_capacity == 0 {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: "streamk_plan: grid_capacity must not be 0".to_string(),
+        });
+    }
+
+    let t = u64::from(num_tiles);
+    let g = u64::from(grid_capacity);
+    let nk = u64::from(num_k_tiles);
+
+    // 非活性となる 3 通り（`num_tiles == 0`／`num_k_tiles == 0`／
+    // `T mod G == 0`〈端数タイルなし〉／`Q >= nk`〈平坦分割が単一タイル
+    // 内に収まりタイル境界と完全整列するため split-K として無意味〉）を
+    // 単一の `inactive` 分岐へ集約する（本ファイル冒頭コメント §3.1
+    // 点 2〜3 の論証）。
+    let inactive = |total: u64, g: u64| -> Result<StreamKPlan, CudaError> {
+        let grid_blocks = total.min(g).max(1);
+        Ok(StreamKPlan {
+            num_tiles,
+            grid_capacity,
+            num_k_tiles,
+            full_tiles: u32_from_u64_bounded(total, "streamk_plan full_tiles")?,
+            remainder_tiles: 0,
+            q: 0,
+            sk_units: 0,
+            max_contributors: 0,
+            grid_blocks: u32_from_u64_bounded(grid_blocks, "streamk_plan grid_blocks")?,
+            total_units: u32_from_u64_bounded(total, "streamk_plan total_units")?,
+        })
+    };
+
+    if t == 0 || nk == 0 {
+        return inactive(t, g);
+    }
+
+    let r = t % g;
+    if r == 0 {
+        return inactive(t, g);
+    }
+
+    let flat = r * nk;
+    // ceil(flat / g)。`g >= 1` は関数冒頭で検証済み。
+    let q = flat.div_ceil(g);
+    if q == 0 || q >= nk {
+        // Q >= nk: 平坦分割は各 SK 単位がちょうど 1 タイルに整列し
+        // split-K として意味を持たない（本ファイル冒頭コメント §3.1
+        // 点 3 の論証）。R := 0 として非活性へフォールバックする。
+        return inactive(t, g);
+    }
+
+    let full_tiles = t - r;
+    let u = flat.div_ceil(q);
+    let total_units = full_tiles + u;
+    // MAXC = floor((nk-1)/q) + 2（本ファイル冒頭コメント §3.1 点 5 の
+    // 上限式。C(r) の実最大値以上であることをホストシミュレータテスト
+    // が全域探索で確認する）。
+    let max_contributors = (nk - 1) / q + 2;
+
+    // REQ-8・fail-closed: 部分和スロット総数（`remainder_tiles *
+    // max_contributors`）が [`CudaGemm::compile_tiled_pipeline_streamk_variant`]
+    // が確保するバッファ容量（`3 * grid_capacity` スロット。§3.1 点 6
+    // `R*MAXC < 3G` の証明）を超えないことを検査する。理論上は常に
+    // 成立するはずだが、証明の実装ミスを検出する安全弁として起動前に
+    // 検査する（実際のバッファ長との突合は
+    // `CudaGemm::compile_tiled_pipeline_streamk_variant`／
+    // `launch_tiled_pipeline_streamk_f32` 側で別途行う）。
+    let total_slots = r * max_contributors;
+    if total_slots > 3 * g {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "streamk_plan: computed slot count {total_slots} exceeds the proven upper \
+                 bound 3*grid_capacity={} (num_tiles={num_tiles}, grid_capacity={grid_capacity}, \
+                 num_k_tiles={num_k_tiles}); this indicates a logic error in the distribution \
+                 plan, not an environment condition",
+                3 * g
+            ),
+        });
+    }
+
+    let grid_blocks = total_units.min(g).max(1);
+
+    Ok(StreamKPlan {
+        num_tiles,
+        grid_capacity,
+        num_k_tiles,
+        full_tiles: u32_from_u64_bounded(full_tiles, "streamk_plan full_tiles")?,
+        remainder_tiles: u32_from_u64_bounded(r, "streamk_plan remainder_tiles")?,
+        q: u32_from_u64_bounded(q, "streamk_plan q")?,
+        sk_units: u32_from_u64_bounded(u, "streamk_plan sk_units")?,
+        max_contributors: u32_from_u64_bounded(max_contributors, "streamk_plan max_contributors")?,
+        grid_blocks: u32_from_u64_bounded(grid_blocks, "streamk_plan grid_blocks")?,
+        total_units: u32_from_u64_bounded(total_units, "streamk_plan total_units")?,
+    })
+}
+
+/// `u64` 中間値を `i32::MAX` 以下（カーネル `int` 引数として安全に渡せる
+/// 範囲）で `u32` へ変換する。[`persistent_tile_count`] の同種オーバー
+/// フロー検査と同じ判断（REQ-8・fail-closed）。
+fn u32_from_u64_bounded(value: u64, context: &str) -> Result<u32, CudaError> {
+    if value > u64::from(i32::MAX as u32) {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "{context}: value {value} overflows i32 (kernel launch argument bound, limit={})",
+                i32::MAX
+            ),
+        });
+    }
+    Ok(value as u32)
+}
+
+/// `kernels_tiled_pipeline::TP_SK_KERNEL_PREFIX`／
+/// `kernels_tiled_pipeline::TP_SK_FIXUP_KERNEL`（いずれも private const。doc link 化
+/// しない）のコンパイル済みハンドル
+/// （イシュー #1358）。64×64 タイル固定（`kernels_tiled_pipeline::TP_BM`／
+/// `TP_BN`。128×64 版は対象外。実装計画 §2「対象外」）。
+///
+/// - `sk_func`／`fixup_func`: 同一ソース（Stream-K 本体・fixup 両方を
+///   含む 1 コンパイル単位）から `func_name` のみ変えてロードした 2 個の
+///   `CudaFunction`（[`CudaGemm::compile_tiled_pipeline_streamk_variant`] 参照）。
+/// - `context_ptr`: [`PersistentTiledPipelineFunction`] と同じ理由
+///   （生成元 context の型的封じ込め）。
+/// - `unit_counter`: `PersistentTiledPipelineFunction::tile_counter`（private field。
+///   doc link 化しない）と
+///   同じ役割（起動ごとにゼロ化する `unsigned int` カウンタ 1 個）。
+/// - `partials`: 部分和バッファ。長さ固定 `3 * grid_capacity * TP_BM *
+///   TP_BN`（`grid_capacity = num_sms * blocks_per_sm`）floats。`R*MAXC
+///   < 3*grid_capacity` の証明（`streamk_plan`（`pub(crate)`）ドキュメンテーション
+///   コメント参照）により、任意の形状で per-launch 再確保・memset なしに
+///   使い回せる（`unit_counter` のみ起動ごとにゼロ化する。`partials` は
+///   各起動で書かれるスロットが必ず先に書かれてから読まれるため memset
+///   不要。実装計画 §3.1 点 6・advisor 指摘）。
+/// - `num_sms`／`blocks_per_sm`: [`PersistentTiledPipelineFunction`] と
+///   同じ意味（`grid_capacity = num_sms * blocks_per_sm`）。
+pub struct StreamKTiledPipelineFunction {
+    sk_func: CudaFunction,
+    fixup_func: CudaFunction,
+    context_ptr: usize,
+    unit_counter: CudaSlice<u32>,
+    partials: CudaSlice<f32>,
+    num_sms: u32,
+    blocks_per_sm: u32,
+}
+
+impl StreamKTiledPipelineFunction {
+    /// このハンドルの起動 grid 容量（`num_sms * blocks_per_sm`。
+    /// [`StreamKPlan::grid_capacity`] に渡す値）。ベンチ・実機自己検証
+    /// テストが配布計画を事前計算するための診断用アクセサ
+    /// （[`PersistentTiledPipelineFunction::num_sms`] と同じ動機）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn grid_capacity(&self) -> u32 {
+        self.num_sms.saturating_mul(self.blocks_per_sm)
+    }
+
+    /// このハンドルが確保した部分和バッファの容量（要素数。診断用。
+    /// `3 * grid_capacity() * TP_BM * TP_BN`）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn partials_capacity_len(&self) -> usize {
+        self.partials.len()
+    }
+}
+
+/// [`StreamKTiledPipelineFunction`] をコンパイルする（イシュー #1358）。
+/// `compile_tiled_pipeline_persistent_generic` と同じロジック
+/// （ソース生成の `LazyLock` 既定ステージ最適化・SM 数照会・占有率照会・
+/// `blocks_per_sm` 明示指定）に加え、Stream-K 固有の 2 点を行う:
+///
+/// 1. Stream-K 本体・fixup の 2 関数を同一ソース・同一記述子で
+///    `load_function_cached`（`crate::module_cache` の private fn）へ 2 回渡す。ソース・記述子（キー）が
+///    同一のため 2 回目の呼び出しは（プロセス内 LRU がヒットしていれば）
+///    モジュール再コンパイルなしで `func_name` 違いの関数ロードのみに
+///    なる（`module_cache.rs::load_function_cached` のキャッシュキーが
+///    `descriptor` と `source` のみに依存する契約。advisor 指摘: fixup
+///    にも同一記述子を使うことでキャッシュヒットを活かす）。
+/// 2. 部分和バッファ `partials`（`3 * grid_capacity * TP_BM * TP_BN`
+///    floats。[`StreamKTiledPipelineFunction`] ドキュメンテーション
+///    コメント参照）を確保する。`u64` で確保サイズを計算し `usize` へ
+///    収まることを検証する（REQ-8・fail-closed）。
+///
+/// **公開面ゲート**: `compile_tiled_pipeline_persistent_variant` と同じ
+/// `internal-diagnostics` feature（既定 off）でゲートする。
+#[cfg(feature = "internal-diagnostics")]
+impl CudaGemm {
+    pub fn compile_tiled_pipeline_streamk_variant(
+        device: &CudaDevice,
+        stages: u32,
+        blocks_per_sm: Option<u32>,
+    ) -> Result<StreamKTiledPipelineFunction, CudaError> {
+        let source: std::borrow::Cow<'_, str> = if stages
+            == kernels_tiled_pipeline::TP_DEFAULT_STAGES
+        {
+            std::borrow::Cow::Borrowed(kernels_tiled_pipeline::tiled_pipeline_streamk_f32_source())
+        } else {
+            std::borrow::Cow::Owned(
+                kernels_tiled_pipeline::tiled_pipeline_streamk_f32_source_with_stages(stages)?,
+            )
+        };
+
+        let descriptor = CudaKernelDescriptor::new_with_compiled_dims(
+            "tiled_pipeline_f32_streamk_variant",
+            fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+            kernels_tiled_pipeline::TP_BM,
+            kernels_tiled_pipeline::TP_BN,
+            kernels_tiled_pipeline::TP_BK,
+            stages,
+            fandhe_ai_tensor_core::dispatch::DType::F32,
+            CompiledDims::DYNAMIC_ALL,
+        )?;
+        // 同一ソース・同一記述子で 2 回ロードする（本関数ドキュメンテーション
+        // コメント点 1 参照）。
+        let sk_func = load_function_cached(
+            device,
+            descriptor.clone(),
+            &source,
+            "gemm_tiled_pipeline_streamk_f32",
+        )?;
+        let fixup_func = load_function_cached(
+            device,
+            descriptor,
+            &source,
+            "gemm_tiled_pipeline_streamk_fixup_f32",
+        )?;
+
+        let num_sms =
+            device
+                .multiprocessor_count()
+                .ok_or_else(|| CudaError::TiledPipelineUnavailable {
+                    detail: "streamk tiled pipeline kernel requires \
+                             CudaDevice::multiprocessor_count() (SM count query failed or \
+                             unsupported on this device)"
+                        .to_string(),
+                })?;
+
+        let block_threads = kernels_tiled_pipeline::TP_BLOCK_THREADS;
+        let blocks_per_sm = match blocks_per_sm {
+            Some(0) => {
+                return Err(CudaError::InvalidKernelConfig {
+                    detail: "compile_tiled_pipeline_streamk_variant blocks_per_sm must not be 0 \
+                             (would produce a grid of 0 blocks)"
+                        .to_string(),
+                });
+            }
+            Some(v) => v,
+            None => {
+                let occupancy = sk_func.occupancy_max_active_blocks_per_multiprocessor(
+                    block_threads,
+                    0,
+                    None,
+                )?;
+                if occupancy == 0 {
+                    return Err(CudaError::TiledPipelineUnavailable {
+                        detail: "streamk tiled pipeline kernel occupancy query returned 0 active \
+                                 blocks per multiprocessor"
+                            .to_string(),
+                    });
+                }
+                occupancy
+            }
+        };
+
+        let grid_capacity_u64 = u64::from(num_sms) * u64::from(blocks_per_sm);
+        // partials 容量 = 3 * grid_capacity * TP_BM * TP_BN（[`streamk_plan`]
+        // が証明する R*MAXC < 3*grid_capacity の上限。u64 で計算してから
+        // usize へ収まることを検証する）。
+        let partials_elems_u64 = grid_capacity_u64
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(u64::from(kernels_tiled_pipeline::TP_BM)))
+            .and_then(|v| v.checked_mul(u64::from(kernels_tiled_pipeline::TP_BN)))
+            .ok_or_else(|| CudaError::InvalidShape {
+                detail: format!(
+                    "compile_tiled_pipeline_streamk_variant: partials buffer element count \
+                     overflows u64 (num_sms={num_sms}, blocks_per_sm={blocks_per_sm})"
+                ),
+            })?;
+        let partials_elems =
+            usize::try_from(partials_elems_u64).map_err(|_| CudaError::InvalidShape {
+                detail: format!(
+                    "compile_tiled_pipeline_streamk_variant: partials buffer element count \
+                 {partials_elems_u64} does not fit in usize on this platform"
+                ),
+            })?;
+
+        let context_ptr = Arc::as_ptr(device.context()) as usize;
+        // 起動のたびに `launch_tiled_pipeline_streamk_f32` がストリーム順序で
+        // ゼロ化するため確保時点の初期値は問わないが、`alloc_zeros` で
+        // 決定的な値にしておく（`compile_tiled_pipeline_persistent_generic`
+        // と同じ判断）。
+        let unit_counter = device.stream().alloc_zeros::<u32>(1)?;
+        // `partials` はスロットが必ず先に書かれてから読まれる契約
+        // （[`StreamKTiledPipelineFunction`] ドキュメンテーションコメント
+        // 参照）のため memset は不要だが、確保時点の値を決定的にしておく
+        // 判断は `unit_counter` と揃える（診断 API のため過度な最適化はしない）。
+        let partials = device.stream().alloc_zeros::<f32>(partials_elems)?;
+
+        Ok(StreamKTiledPipelineFunction {
+            sk_func,
+            fixup_func,
+            context_ptr,
+            unit_counter,
+            partials,
+            num_sms,
+            blocks_per_sm,
+        })
+    }
+}
+
 /// [`kernel_specs`] の要素型。診断・ログ用ラベル（`label`）・NVRTC ソース
 /// （`source`）・ロードする関数名（`func_name`）に加え、イシュー #1024 で
 /// `module_cache`／NVRTC ディスクキャッシュへ結線するためのキー識別
@@ -3186,6 +3583,274 @@ impl CudaGemm {
         crate::memory::readback(&self.stream, &c_dev)
     }
 
+    /// デバイス常駐済みの A/B/C バッファに対して Stream-K 版 pipeline カーネル
+    /// （イシュー #1358・[`CudaGemm::compile_tiled_pipeline_streamk_variant`] が返す
+    /// ハンドル）を起動し、完了を待たずに投入する（[`CudaGemm::
+    /// launch_tiled_pipeline_persistent_f32`] と同じ「GPU 実行のみ」区間を
+    /// ベンチ計測できるよう公開する非同期投入契約〈#1013〉）。
+    ///
+    /// ホスト側形状検証・context 一致検証は
+    /// [`CudaGemm::launch_tiled_pipeline_persistent_f32`] と同一の理由・
+    /// 同一の手順（`func`・`a_dev`/`b_dev`/`c_dev` の 4 者いずれも
+    /// `self.stream` と同じ `CudaContext` 由来であること）。`func.unit_counter`／
+    /// `func.partials` は `compile_tiled_pipeline_streamk_variant` が `func`
+    /// と同じ `device` から確保しているため、`func` の context 一致検証が
+    /// これらのバッファの context も暗黙に保証する。
+    ///
+    /// 起動前に `self.stream.memset_zeros(&mut func.unit_counter)` でカウンタ
+    /// をゼロ化してから Stream-K 本体カーネルを起動する（`partials` は
+    /// memset しない。[`StreamKTiledPipelineFunction`] ドキュメンテーション
+    /// コメント参照）。[`StreamKPlan::is_active`] が `true`
+    /// （`remainder_tiles > 0`）の場合のみ、同一ストリームへ続けて fixup
+    /// カーネルを投入する（`remainder_tiles == 0` の形状では部分和が一切
+    /// 書かれないため fixup は不要かつ `blockIdx.x` 0 の grid 起動を避ける）。
+    ///
+    /// 返り値は実際に使った [`StreamKPlan`]（呼び出し元が分割の有無・単位数
+    /// 等を検査できるようにする。`internal-diagnostics` 診断用途）。
+    ///
+    /// **公開面ゲート**: `internal-diagnostics` feature（既定 off）でゲート
+    /// する。
+    #[cfg(feature = "internal-diagnostics")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_tiled_pipeline_streamk_f32(
+        &self,
+        func: &mut StreamKTiledPipelineFunction,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<StreamKPlan, CudaError> {
+        let self_context_ptr = Arc::as_ptr(self.stream.context()) as usize;
+        if func.context_ptr != self_context_ptr {
+            return Err(CudaError::TiledPipelineContextMismatch {
+                detail:
+                    "StreamKTiledPipelineFunction was compiled against a different CudaContext \
+                     (different CudaDevice/GPU) than this CudaGemm instance's stream; refusing \
+                     to launch across mismatched CUDA contexts"
+                        .to_string(),
+            });
+        }
+        for (name, buf_context_ptr) in [
+            ("a_dev", Arc::as_ptr(a_dev.context()) as usize),
+            ("b_dev", Arc::as_ptr(b_dev.context()) as usize),
+            ("c_dev", Arc::as_ptr(c_dev.context()) as usize),
+        ] {
+            if buf_context_ptr != self_context_ptr {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: format!(
+                        "{name} was allocated on a different CudaContext (different \
+                     CudaDevice/GPU) than this CudaGemm instance's stream; refusing to \
+                     launch across mismatched CUDA contexts"
+                    ),
+                });
+            }
+        }
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_pipeline_k_bound(k)?;
+        if !tiled_pipeline_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "streamk tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 (cp.async \
+                 16-byte transfer granularity): n={n}, k={k}"
+                ),
+            });
+        }
+        validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return streamk_plan(0, func.num_sms.saturating_mul(func.blocks_per_sm).max(1), 0);
+        }
+
+        let num_tiles = persistent_tile_count(TiledPipelineTile::Bm64Bn64, m, n)?;
+        let num_k_tiles = if k > 0 {
+            (k - 1) / kernels_tiled_pipeline::TP_BK + 1
+        } else {
+            0
+        };
+        let grid_capacity = func.num_sms.saturating_mul(func.blocks_per_sm);
+        let plan = streamk_plan(num_tiles, grid_capacity, num_k_tiles)?;
+
+        // REQ-8・fail-closed: `compile_tiled_pipeline_streamk_variant` が
+        // 確保した `partials` 容量を、この起動の計画が要求するスロット数×
+        // `TP_BM*TP_BN` が超えないことを検査する（`streamk_plan` 内の
+        // `3*grid_capacity` 上限検査に対する、実際のバッファ長との突合。
+        // 二重検査だが `compile_*` 時点の `grid_capacity` とこの起動の
+        // `grid_capacity` は同一ハンドルのため通常は一致する——不一致が
+        // あるとすれば型的に到達不能なバグのため、ここでも fail-closed に
+        // 拒否する）。
+        let required_slots = u64::from(plan.remainder_tiles) * u64::from(plan.max_contributors);
+        let required_elems = required_slots
+            .checked_mul(u64::from(kernels_tiled_pipeline::TP_BM))
+            .and_then(|v| v.checked_mul(u64::from(kernels_tiled_pipeline::TP_BN)))
+            .ok_or_else(|| CudaError::InvalidShape {
+                detail: "launch_tiled_pipeline_streamk_f32: required partials element count \
+                      overflows u64"
+                    .to_string(),
+            })?;
+        if required_elems > func.partials.len() as u64 {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "launch_tiled_pipeline_streamk_f32: plan requires {required_elems} partials \
+                 elements but the compiled handle only reserved {} \
+                 (m={m}, n={n}, k={k})",
+                    func.partials.len()
+                ),
+            });
+        }
+
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+        let full_tiles_i = plan.full_tiles as i32;
+        let total_units_i = plan.total_units as i32;
+        let q_i = plan.q as i32;
+        let max_contributors_i = plan.max_contributors as i32;
+        let remainder_tiles_i = plan.remainder_tiles as i32;
+        // REQ-8: カーネル側の手動境界チェック（`TP_SK_TILE_CORE` の部分和
+        // 書き込み・`TP_SK_FIXUP_KERNEL` の部分和読み取り）が参照する
+        // `partials` バッファの実際の要素数。上記のホスト側 fail-closed
+        // 検査（`required_elems > func.partials.len()`）とは独立の防御線
+        // として、カーネル自身にも容量を渡し `slot * (TP_BM*TP_BN) +
+        // local` を都度この値と突き合わせる（性能下限・最適化を理由に
+        // 手動境界チェックを省略しない。`.claude/rules/coding-rust.md`）。
+        let partials_capacity_i = u32_from_u64_bounded(
+            func.partials.len() as u64,
+            "launch_tiled_pipeline_streamk_f32 partials_capacity",
+        )? as i32;
+
+        // ストリーム順序でのゼロ化（メソッドコメント「起動前に」参照）。
+        // `partials` は memset しない（メソッドコメント参照）。
+        self.stream.memset_zeros(&mut func.unit_counter)?;
+
+        let sk_cfg = LaunchConfig {
+            grid_dim: (plan.grid_blocks, 1, 1),
+            block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: `launch_tiled_pipeline_persistent_f32` と同一の根拠。
+        // カーネル引数（a_dev/b_dev/c_dev・m_i/n_i/k_i・unit_counter・
+        // partials・full_tiles_i/total_units_i/q_i/max_contributors_i/
+        // remainder_tiles_i/partials_capacity_i）は上記で検証済みの
+        // m/n/k・plan と 1:1 対応し、カーネル内の手動境界チェック
+        // （cp.async src_size ゼロ充填・エピローグ guarded store・
+        // partials_capacity_i との突き合わせ。`TP_SK_TILE_CORE`）と合わせて
+        // OOB 読み書きが起きない根拠とする。単位取得ループの `break` 判定は
+        // unsigned 比較のため、余分に起動された CTA も範囲外単位へは到達
+        // しない。部分和スロットは `streamk_plan`／起動前検査（上記）で
+        // `partials` 容量内であることを確認済みだが、`partials_capacity_i`
+        // （`func.partials.len()`）をカーネルへも渡し、性能下限・最適化を
+        // 理由に手動境界チェックを省略しない（`.claude/rules/coding-rust.md`）。
+        unsafe {
+            self.stream
+                .launch_builder(&func.sk_func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(&mut *c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .arg(&mut func.unit_counter)
+                .arg(&mut func.partials)
+                .arg(&full_tiles_i)
+                .arg(&total_units_i)
+                .arg(&q_i)
+                .arg(&max_contributors_i)
+                .arg(&remainder_tiles_i)
+                .arg(&partials_capacity_i)
+                .launch(sk_cfg)?;
+        }
+
+        if plan.is_active() {
+            let fixup_cfg = LaunchConfig {
+                grid_dim: (
+                    plan.remainder_tiles,
+                    (kernels_tiled_pipeline::TP_BM * kernels_tiled_pipeline::TP_BN)
+                        .div_ceil(kernels_tiled_pipeline::TP_SK_FIXUP_BLOCK_THREADS),
+                    1,
+                ),
+                block_dim: (kernels_tiled_pipeline::TP_SK_FIXUP_BLOCK_THREADS, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: fixup カーネルは `partials`（読み取りのみ。上記起動が
+            // 同一ストリームで先に完了させる契約）と `c_dev`（残タイル領域
+            // のみへの書き込み。SK 本体カーネルが書く full タイル領域とは
+            // 互いに素）を引数に取る。`r`／`local` の範囲チェック・
+            // `contributors` のクランプ・`partials` 読み取り添字と
+            // `partials_capacity_i`（`func.partials.len()`）との突き合わせは
+            // カーネル側の手動境界チェック（`TP_SK_FIXUP_KERNEL`）が担う。
+            unsafe {
+                self.stream
+                    .launch_builder(&func.fixup_func)
+                    .arg(&func.partials)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .arg(&full_tiles_i)
+                    .arg(&remainder_tiles_i)
+                    .arg(&q_i)
+                    .arg(&max_contributors_i)
+                    .arg(&partials_capacity_i)
+                    .launch(fixup_cfg)?;
+            }
+        }
+
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／明示 `synchronize`）へ委ねる。
+        Ok(plan)
+    }
+
+    /// ホストスライス入出力の Stream-K 版 pipeline カーネル実行
+    /// （[`CudaGemm::run_tiled_pipeline_f32`] の Stream-K 版。イシュー
+    /// #1358）。[`CudaGemm::upload_f32`]・[`CudaGemm::alloc_output_f32`]・
+    /// [`CudaGemm::launch_tiled_pipeline_streamk_f32`]・`crate::memory::readback` を
+    /// 組み合わせた便宜 API で、新規 `unsafe` は導入しない。
+    ///
+    /// ホスト側形状検証・`m == 0 || n == 0`／`k == 0` の no-op 契約は
+    /// [`CudaGemm::run_tiled_pipeline_f32`] と同一。
+    ///
+    /// **公開面ゲート**: [`CudaGemm::launch_tiled_pipeline_streamk_f32`] と同じ
+    /// `internal-diagnostics` feature（既定 off）でゲートする。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn run_tiled_pipeline_streamk_f32(
+        &self,
+        func: &mut StreamKTiledPipelineFunction,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(Vec<f32>, StreamKPlan), CudaError> {
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_tiled_pipeline_k_bound(k)?;
+        if !tiled_pipeline_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "streamk tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 (cp.async \
+                 16-byte transfer granularity): n={n}, k={k}"
+                ),
+            });
+        }
+        if m == 0 || n == 0 {
+            let plan = streamk_plan(0, func.num_sms.saturating_mul(func.blocks_per_sm).max(1), 0)?;
+            return Ok((Vec::new(), plan));
+        }
+        if k == 0 {
+            let plan = streamk_plan(
+                persistent_tile_count(TiledPipelineTile::Bm64Bn64, m, n)?,
+                func.num_sms.saturating_mul(func.blocks_per_sm).max(1),
+                0,
+            )?;
+            return Ok((vec![0.0f32; (m as usize) * (n as usize)], plan));
+        }
+
+        let (a_dev, b_dev) = self.upload_f32(a, b)?;
+        let mut c_dev = self.alloc_output_f32(m, n)?;
+        let plan =
+            self.launch_tiled_pipeline_streamk_f32(func, &a_dev, &b_dev, &mut c_dev, m, n, k)?;
+        let c = crate::memory::readback(&self.stream, &c_dev)?;
+        Ok((c, plan))
+    }
+
     /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM を実行
     /// する。`act(A @ B + bias)`（イシュー #599・TASK-12.1f）。
     ///
@@ -4946,6 +5611,274 @@ mod tests {
                 matches!(result, Err(CudaError::InvalidShape { .. })),
                 "tile={tile:?}: 極端に大きい m・n は InvalidShape で拒否されるはず: {result:?}"
             );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Stream-K（最終 wave 限定・固定順序 fixup。イシュー #1358）。
+    // ---------------------------------------------------------------------
+
+    /// [`streamk_plan`] の境界（`grid_capacity == 0` 拒否・`num_tiles == 0`／
+    /// `num_k_tiles == 0` は非活性・`T mod G == 0` は非活性・`R < G` は
+    /// `R == T`・机上表〈実装計画 §3.1〉との一致）を検査する。
+    #[test]
+    fn streamk_plan_boundary_and_desk_check_table() {
+        // grid_capacity == 0 は fail-closed に拒否する。
+        assert!(matches!(
+            streamk_plan(100, 0, 10),
+            Err(CudaError::InvalidKernelConfig { .. })
+        ));
+
+        // num_tiles == 0 は非活性（remainder_tiles == 0）。
+        let p = streamk_plan(0, 144, 64).unwrap();
+        assert!(!p.is_active());
+        assert_eq!(p.full_tiles, 0);
+        assert_eq!(p.total_units, 0);
+        assert_eq!(
+            p.grid_blocks, 1,
+            "grid=0 の driver launch エラーを避ける下限 1"
+        );
+
+        // num_k_tiles == 0（k == 0）は非活性。
+        let p = streamk_plan(256, 144, 0).unwrap();
+        assert!(!p.is_active());
+        assert_eq!(p.full_tiles, 256);
+        assert_eq!(p.total_units, 256);
+
+        // T < G（実装計画 §3.1: 「T < G なら R = T」）: T=5, G=144 は
+        // 5 % 144 == 5 で R == T のまま活性判定に入る。nk が十分大きければ
+        // 分割が発生する。
+        let p = streamk_plan(5, 144, 64).unwrap();
+        assert!(p.is_active());
+        assert_eq!(p.remainder_tiles, 5);
+        assert_eq!(p.full_tiles, 0);
+
+        // T mod G == 0（端数タイルなし）は非活性。
+        let p = streamk_plan(288, 144, 64).unwrap();
+        assert!(!p.is_active());
+        assert_eq!(p.full_tiles, 288);
+
+        // 実装計画 §3.1 机上表: N=1024, G=144, nk=64 → T=256
+        // R=256%144=112, flat=112*64=7168, Q=ceil(7168/144)=50,
+        // U=ceil(7168/50)=144, MAXC=floor(63/50)+2=3.
+        let p = streamk_plan(256, 144, 64).unwrap();
+        assert!(p.is_active());
+        assert_eq!(p.full_tiles, 144);
+        assert_eq!(p.remainder_tiles, 112);
+        assert_eq!(p.q, 50);
+        assert_eq!(p.sk_units, 144);
+        assert_eq!(p.max_contributors, 3);
+        assert_eq!(p.total_units, 144 + 144);
+        assert_eq!(p.grid_blocks, 144.min(p.total_units).max(1));
+
+        // 実装計画 §3.1 机上表: N=1024, G=48, nk=64 → T=256
+        // R=256%48=16, flat=16*64=1024, Q=ceil(1024/48)=22,
+        // U=ceil(1024/22)=47, MAXC=floor(63/22)+2=4.
+        let p = streamk_plan(256, 48, 64).unwrap();
+        assert!(p.is_active());
+        assert_eq!(p.full_tiles, 240);
+        assert_eq!(p.remainder_tiles, 16);
+        assert_eq!(p.q, 22);
+        assert_eq!(p.sk_units, 47);
+        assert_eq!(p.max_contributors, 4);
+
+        // 実装計画 §3.1 机上表: N=2048, G=144, nk=128 → T=1024
+        // R=1024%144=16, flat=16*128=2048, Q=ceil(2048/144)=15,
+        // U=ceil(2048/15)=137, MAXC=floor(127/15)+2=10.
+        let p = streamk_plan(1024, 144, 128).unwrap();
+        assert!(p.is_active());
+        assert_eq!(p.full_tiles, 1008);
+        assert_eq!(p.remainder_tiles, 16);
+        assert_eq!(p.q, 15);
+        assert_eq!(p.sk_units, 137);
+        assert_eq!(p.max_contributors, 10);
+
+        // 実装計画 §3.1 机上表: N=2048, G=48, nk=128 → T=1024
+        // R=1024%48=16, flat=16*128=2048, Q=ceil(2048/48)=43,
+        // U=ceil(2048/43)=48, MAXC=floor(127/43)+2=4.
+        let p = streamk_plan(1024, 48, 128).unwrap();
+        assert!(p.is_active());
+        assert_eq!(p.full_tiles, 1008);
+        assert_eq!(p.remainder_tiles, 16);
+        assert_eq!(p.q, 43);
+        assert_eq!(p.sk_units, 48);
+        assert_eq!(p.max_contributors, 4);
+    }
+
+    /// `Q >= nk` になる構成（分割が単一タイルに整列してしまい split-K として
+    /// 無意味）が非活性へフォールバックすることを検査する（実装計画 §3.1
+    /// 点 3。`R` が小さく `nk` も小さい構成で発生させる）。
+    #[test]
+    fn streamk_plan_falls_back_to_inactive_when_q_at_least_nk() {
+        // T=100, G=99 -> R=1, nk=1 -> flat=1, Q=ceil(1/99)=1, Q>=nk(=1) ->
+        // 非活性。
+        let p = streamk_plan(100, 99, 1).unwrap();
+        assert!(!p.is_active());
+        assert_eq!(p.full_tiles, 100);
+        assert_eq!(p.total_units, 100);
+    }
+
+    /// [`streamk_plan`] が `i32::MAX` を超える中間値（`full_tiles`／
+    /// `total_units`／`q`／`max_contributors`／`remainder_tiles`）を
+    /// `CudaError::InvalidShape` で拒否することを検査する（[`persistent_tile_count_rejects_i32_overflow`]
+    /// と同型の REQ-8・fail-closed 検査）。
+    #[test]
+    fn streamk_plan_rejects_i32_overflow() {
+        // num_tiles 自体が i32::MAX を大きく超えると full_tiles（非活性時は
+        // num_tiles と同値）が u32_from_u64_bounded で拒否される。
+        let result = streamk_plan(u32::MAX, 144, 0);
+        assert!(
+            matches!(result, Err(CudaError::InvalidShape { .. })),
+            "num_tiles=u32::MAX, num_k_tiles=0（非活性 full_tiles=num_tiles）は \
+             InvalidShape で拒否されるはず: {result:?}"
+        );
+    }
+
+    /// [`streamk_plan`] が算出した配布計画をホスト側で「実行」し、
+    /// `kernels_tiled_pipeline::TP_SK_KERNEL_PREFIX`（private const）の単位復号ロジック
+    /// （`crates/backend-cuda/src/kernels_tiled_pipeline.rs` の Stream-K
+    /// カーネル本体と同一の整数演算）を Rust で再実装したシミュレータで、
+    /// 広範な `(T, G, nk)` の組み合わせについて次を検証する
+    /// （advisor 指摘・実装計画 §3.4「ホスト側シミュレータ」）:
+    ///
+    /// 1. 残タイルの全 `(r, kt)` ペアがちょうど 1 回カバーされる。
+    /// 2. 各 `(r, c)` スロットの書き手はちょうど 1 単位（サブレンジ）。
+    /// 3. `c < C(r)`・`slot < remainder_tiles * max_contributors`。
+    /// 4. fixup 側の寄与者数 `C(r)`（[`kernels_tiled_pipeline::
+    ///    TP_SK_FIXUP_KERNEL`] と同一の式）が、SK 側が実際に書いた寄与者
+    ///    集合（`0..C(r)` の連続範囲）と一致する。
+    /// 5. `Q == nk` になるケース（非活性フォールバック）を明示的に含める。
+    #[test]
+    fn streamk_plan_host_simulator_covers_units_exactly_once() {
+        for t in [1u32, 2, 3, 47, 48, 49, 143, 144, 145, 256, 300] {
+            for g in [1u32, 2, 3, 47, 48, 144, 200] {
+                for nk in [0u32, 1, 2, 3, 15, 16, 63, 64, 128] {
+                    let plan = streamk_plan(t, g, nk).unwrap_or_else(|e| {
+                        panic!("streamk_plan(t={t}, g={g}, nk={nk}) must succeed: {e}")
+                    });
+
+                    if !plan.is_active() {
+                        // 非活性の契約: full_tiles == num_tiles、追加スロットなし。
+                        assert_eq!(plan.full_tiles, t);
+                        assert_eq!(plan.remainder_tiles, 0);
+                        assert_eq!(plan.total_units, t);
+                        continue;
+                    }
+
+                    let r = plan.remainder_tiles;
+                    let q = plan.q;
+                    let max_c = plan.max_contributors;
+                    assert!(q < nk, "活性時は Q < nk のはず (t={t}, g={g}, nk={nk})");
+
+                    // (r, kt) -> どの単位が書いたかを記録する被覆表。
+                    let mut covered = vec![false; (r as usize) * (nk as usize)];
+                    // (r, c) -> 書き手の有無を記録する一意性表。
+                    let mut slot_written = vec![false; (r as usize) * (max_c as usize)];
+
+                    for u_prime in 0..plan.sk_units {
+                        let flat_begin = u64::from(u_prime) * u64::from(q);
+                        let total_flat = u64::from(r) * u64::from(nk);
+                        let mut flat_end = flat_begin + u64::from(q);
+                        if flat_end > total_flat {
+                            flat_end = total_flat;
+                        }
+                        assert!(
+                            flat_begin < flat_end,
+                            "空の SK 単位が生成されています (t={t}, g={g}, nk={nk}, \
+                             u_prime={u_prime})"
+                        );
+
+                        let mut flat_pos = flat_begin;
+                        let mut sub_count = 0u32;
+                        while flat_pos < flat_end {
+                            sub_count += 1;
+                            assert!(
+                                sub_count <= 2,
+                                "1 単位が 3 個以上のサブレンジへ分解されています \
+                                 (t={t}, g={g}, nk={nk}, u_prime={u_prime})"
+                            );
+
+                            let rr = (flat_pos / u64::from(nk)) as u32;
+                            let tile_flat_end = u64::from(rr + 1) * u64::from(nk);
+                            let sub_end = flat_end.min(tile_flat_end);
+                            let tile_flat_begin = u64::from(rr) * u64::from(nk);
+                            let kt_begin = (flat_pos - tile_flat_begin) as u32;
+                            let kt_end = (sub_end - tile_flat_begin) as u32;
+                            let u_first = tile_flat_begin / u64::from(q);
+                            let c = (u64::from(u_prime) - u_first) as u32;
+
+                            assert!(rr < r, "残タイル番号が範囲外 (rr={rr}, r={r})");
+                            assert!(
+                                c < max_c,
+                                "寄与者番号が max_contributors 以上 (c={c}, max_c={max_c})"
+                            );
+
+                            for kt in kt_begin..kt_end {
+                                let idx = (rr as usize) * (nk as usize) + kt as usize;
+                                assert!(
+                                    !covered[idx],
+                                    "(r={rr}, kt={kt}) が複数単位から重複して書かれています \
+                                     (t={t}, g={g}, nk={nk})"
+                                );
+                                covered[idx] = true;
+                            }
+
+                            let slot_idx = (rr as usize) * (max_c as usize) + c as usize;
+                            assert!(
+                                !slot_written[slot_idx],
+                                "スロット (r={rr}, c={c}) が複数単位から重複して書かれています \
+                                 (t={t}, g={g}, nk={nk})"
+                            );
+                            slot_written[slot_idx] = true;
+
+                            flat_pos = sub_end;
+                        }
+                    }
+
+                    // 全 (r, kt) がちょうど 1 回カバーされていること。
+                    assert!(
+                        covered.iter().all(|&c| c),
+                        "一部の (r, kt) が未カバーです (t={t}, g={g}, nk={nk})"
+                    );
+
+                    // fixup 側の C(r) 式（TP_SK_FIXUP_KERNEL と同一）が、SK 側
+                    // が実際に書いた寄与者集合（0..C(r) の連続範囲）と一致する
+                    // ことを検証する。
+                    for rr in 0..r {
+                        let tile_flat_begin = u64::from(rr) * u64::from(nk);
+                        let tile_flat_last = tile_flat_begin + u64::from(nk) - 1;
+                        let contributors = (tile_flat_last / u64::from(q)
+                            - tile_flat_begin / u64::from(q)
+                            + 1) as u32;
+                        assert!(
+                            contributors <= max_c,
+                            "C(r={rr}) が max_contributors を超えています (t={t}, g={g}, nk={nk})"
+                        );
+                        for c in 0..contributors {
+                            let slot_idx = (rr as usize) * (max_c as usize) + c as usize;
+                            assert!(
+                                slot_written[slot_idx],
+                                "fixup が加算対象とする (r={rr}, c={c}) を SK 側が書いていません \
+                                 (t={t}, g={g}, nk={nk})"
+                            );
+                        }
+                        for c in contributors..max_c {
+                            let slot_idx = (rr as usize) * (max_c as usize) + c as usize;
+                            assert!(
+                                !slot_written[slot_idx],
+                                "fixup が加算しない (r={rr}, c={c}) を SK 側が書いています \
+                                 （余剰スロット。t={t}, g={g}, nk={nk})"
+                            );
+                        }
+                    }
+
+                    // 3G 上限の証明（実装計画 §3.1 点 6）の実測裏付け。
+                    assert!(
+                        u64::from(r) * u64::from(max_c) < 3 * u64::from(g),
+                        "R*MAXC が 3*G 未満という証明が崩れています (t={t}, g={g}, nk={nk})"
+                    );
+                }
+            }
         }
     }
 

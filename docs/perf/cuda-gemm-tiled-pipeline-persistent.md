@@ -191,7 +191,8 @@ N=1024 で 1.0182 倍と同じく 1.05 未満。**結論: REJECT**（`select_til
   （`tiled_pipeline_128x64_persistent_matches_64x64_persistent_bit_exact`）。両タイルとも
   上記の結論（REJECT）が成立する。
 - **Stream-K／K 分割**（出力 bit 同一を崩す設計）: 別 issue・要承認（`docs/cuda-streamk-decision.md`）。
-  本イシューは K 分割を行わない前提のまま。
+  本イシューは K 分割を行わない前提のまま。イシュー #1358 で最終 wave 限定・固定順序 fixup 版を opt-in
+  実装済み（`docs/perf/cuda-gemm-tiled-pipeline-streamk.md`。GB10 実機実測・本番結線可否は #1359）。
 - **タイル取得順の L2 局所性スウィズル**（#1139 の classic 版不採用判断と整合させて再検討）: 別 issue。
 
 ## 7. 変更ファイル一覧
