@@ -482,7 +482,8 @@ A/B 一括計測ハーネス（`gemm_blis_variant_ab_1024_2048`／`gemm_blis_var
 - **候補 1**: B 側 laneq のベクトル転置化（`crates/backend-cpu/src/gemm_blis/microkernel.rs`
   の `neon::kernel_b_laneq*` における `vfmaq_laneq_f32` レーン参照オペランドの B パック
   配置見直し）。**イシュー #1317 で候補実装（`GemmDriverVariant::RowPanelBLaneqVec`）済み
-  （`docs/perf/cpu-gemm-b-laneq-vec-transpose.md`）。両実機実測・採否は #1318 が引き継ぐ**
+  （`docs/perf/cpu-gemm-b-laneq-vec-transpose.md`）。#1318 で両実機実測・REJECT 確定
+  （§8.2。N=1024/2048 で対 RowPanel 比 1.00 未達）**
 - **候補 2**: `vld1q_f32_x3` 経路の prefetch（**注**: `docs/cpu-gemm-prefetch-decision.md`
   〈#489・#751〉で aarch64 prefetch は「原則不要」へ格下げ済みのため、再挑戦には同 doc の
   判断を覆す新たな根拠〈本イシューの M4 Max 1024/2048 実測が示す帯域律速の可能性〉を
@@ -639,11 +640,166 @@ KC=192 の 0.4〜0.5% 差の点は暫定扱いであり、低負荷条件下（1
   条件下で KC=192 のみを対象に 5 run 再計測し、Stage 1 ゲート（N=1024・2048 とも ≥ 1.00 倍）
   の再判定を行うことを推奨する（未着手・引き継ぎ事項）
 
+## §8.2 候補 1 B 側 laneq ベクトル転置版（イシュー #1318）
+
+`GemmDriverVariant::RowPanelBLaneqVec`（B 側 laneq のベクトル転置化。#1317 で実装・
+`docs/perf/cpu-gemm-b-laneq-vec-transpose.md` 参照）の両実機 A/B 計測・採否判定。
+
+### 事前宣言ゲート（計測前に確定・以後変更しない）
+
+`docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/env_info.txt` に転記済み（§8.1 の前例に倣う）。
+
+**Tier 1（結線判定。ADOPT を決める）** — `RowPanelBLaneqVec / RowPanel`
+（同一プロセス内 round-robin 計測の 5 回独立プロセス中央値比）:
+
+1. N=1024・N=2048 の両方で ratio ≥ 1.00、かつ N=4096 で ratio ≥ 0.95
+2. 上記を M4 Max・GB10 の両方で満たす場合のみ ADOPT。片方のみは REJECT
+3. ノイズガード: N=1024 または 2048 で中央値比 ≥ 1.00 でもペアワイズ勝ち run 数が
+   5 中 3 未満なら「判定不可（undetermined）」とし結線しない
+4. 前提: 両実機で `gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_large`
+   （`#[ignore]`・release）が pass
+
+**Tier 2（#1041 ゲート。#1321 への報告値）** — 候補の GFLOP/s（A/B ハーネス中央値）÷
+gemm crate（`oss-gemm-compare` 5 独立プロセスの `tflops_median` run 間中央値 × 1000）を
+N=1024/2048 で算出。4096 は非劣化（Tier 1 と同じ ratio）で見る。結線判断は Tier 1 で行う。
+
+### プロトコル
+
+- `RAYON_NUM_THREADS` 未設定・`BIG_CORE_LIMIT_ENABLED=false`（#1364 確定のまま不変）
+- 各形状セット（1024/2048・4096）を 5 回独立プロセス起動
+  （`cargo test --release … -- --ignored gemm_blis_variant_ab_1024_2048/_4096 --nocapture`）
+  で実行し中央値を採用
+- 詳細な実行ログ・env_info は `docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/`
+  （内部ホスト名は含めない）
+
+### bit 一致結果
+
+両実機で `cargo test -p fandhe-ai-backend-cpu --lib gemm_blis --release`（通常テスト。
+117 passed）・`gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_large`
+（`#[ignore]`・release）が pass（`docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/
+unit-test-{m4max,dgx}.txt`・`bit-exact-large-{m4max,dgx}.txt`）。
+
+### 実測表（5 run 中央値・対 RowPanel 比・RowPanel に勝った run 数。GFLOP/s）
+
+**Apple M4 Max**（共有負荷下。実測開始前 load averages 1.14/1.63/2.56、1024/2048 系列
+実行中に一時的に 5〜6.4 台まで上昇。`env_info.txt` 参照）
+
+| N | RowPanel（既定） | RowPanelBLaneqVec | 対 RowPanel 比 | 勝ち run 数 |
+|---|---|---|---|---|
+| 1024 | 799.250 | 782.563 | 0.9791 | 0/5 |
+| 2048 | 914.455 | 910.700 | 0.9959 | 2/5 |
+| 4096 | 1034.145 | 1047.375 | 1.0128 | 4/5 |
+
+**DGX Spark GB10（Grace CPU）**（計測開始前 load average 0.11/0.10/0.04。低負荷ゲート
+成立。自身の計算負荷で計測中に load average が一時上昇するのは想定内。`env_info.txt` 参照）
+
+| N | RowPanel（既定） | RowPanelBLaneqVec | 対 RowPanel 比 | 勝ち run 数 |
+|---|---|---|---|---|
+| 1024 | 535.388 | 515.485 | 0.9628 | 0/5 |
+| 2048 | 701.226 | 697.408 | 0.9946 | 2/5 |
+| 4096 | 1098.415 | 1256.580 | 1.1440 | 5/5 |
+
+生値・集計スクリプトは `docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/aggregate.md`・
+`aggregate.py` を参照。
+
+### Tier 2（#1041 ゲート・対 gemm crate 比。参考値）
+
+`oss-gemm-compare --sizes 1024,2048,4096` 5 回独立プロセスの `tflops_median` run 間中央値
+（`docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/oss-{m4max,dgx}-run{1..5}.jsonl`）:
+
+| 実機 | N | gemm crate（TFLOPS） | RowPanel÷gemm | RowPanelBLaneqVec÷gemm |
+|---|---|---|---|---|
+| M4 Max | 1024 | 0.8752 | 0.9132 | 0.8942 |
+| M4 Max | 2048 | 0.9800 | 0.9331 | 0.9293 |
+| M4 Max | 4096 | 1.1013 | 0.9391 | 0.9510 |
+| GB10 | 1024 | 0.6029 | 0.8880 | 0.8550 |
+| GB10 | 2048 | 0.6868 | 1.0210 | 1.0154 |
+| GB10 | 4096 | 0.7679 | 1.4304 | 1.6364 |
+
+いずれの実機・形状でも `RowPanelBLaneqVec` は #1041 ゲート（N=1024/2048 で gemm crate 以上）
+を満たさない（既定 `RowPanel` 自身が同ゲートを満たしていないのと同じ状況。§8 の実測結果と
+整合）。
+
+### 採否: REJECT（不採用）
+
+Tier 1 条件 1（N=1024・N=2048 の両方で対 RowPanel 比 ≥ 1.00 を両実機で満たす）は成立しない。
+
+- **M4 Max**: N=1024 で 0.9791 倍（0/5 勝ち）・N=2048 で 0.9959 倍（2/5 勝ち）といずれも
+  1.00 未達。N=4096 のみ 1.0128 倍（4/5 勝ち）で条件 1 の N=4096 側（≥0.95）は満たすが、
+  N=1024/2048 の未達により候補として成立しない
+- **GB10**: N=1024 で 0.9628 倍（0/5 勝ち）・N=2048 で 0.9946 倍（2/5 勝ち）といずれも
+  1.00 未達。N=4096 は 1.1440 倍（5/5 勝ち）と明確な改善だが、同じく N=1024/2048 の未達で
+  候補として成立しない
+
+N=1024 は両実機とも 0/5 勝ちで run 間の符号が完全に一貫しており（ratio が 0.96〜0.98 と
+1.00 との差も 2〜4% とノイズ幅では説明しにくい規模）、負荷変動由来のノイズガード
+（条件 3）を適用するまでもなく明確な後退と判断する。N=2048 は両実機とも 2/5 勝ちに留まり
+条件 3 のノイズガード相当の弱いシグナルだが、ratio 自体が 1.00 を下回っているため
+（条件 1 が先に不成立）「判定不可（undetermined）」ではなく素直に条件 1 未達として扱う。
+N=4096 は両実機で明確な改善（4/5・5/5 勝ち）だが、Tier 1 条件 1 は **N=1024・2048 の両方**
+での対 `RowPanel` 比 ≥ 1.00 を必須条件としており、N=4096 側の改善はこれを代替しない
+（条件を「いずれかの形状で満たせばよい」ものとして緩めることはできない）。1024/2048 の
+後退により全体として ADOPT できない。
+
+したがって現行本番既定 `RowPanel`（`neon::compute`。A レーン参照カーネル）を維持し、
+`NeonKernel::run_with_ldc` の委譲先は変更しない（コード変更なし）。
+
+**負荷条件についての留保**: M4 Max は §8.1 と同様に共有負荷下（他セッションの並列実装
+ジョブと同居）での計測であり、計測時間全体を通じた低負荷条件の成立は確認できていない。
+ただし N=1024 の後退（0/5 勝ち・ratio 0.96〜0.98）は GB10（低負荷ゲート成立）でも同様の
+方向・規模で再現しており、M4 Max の共有負荷のみに起因する見かけの後退とは考えにくい。
+N=2048 の 2/5 勝ちについても両実機で一致した挙動であり、機種固有のノイズよりも
+`RowPanelBLaneqVec` 自体の特性（後述）を反映していると判断する。加えて、ログ回収時の
+事故により `uptime-m4max.log` は 1024/2048 系列後半・4096 系列 run2〜5 の負荷サンプルを
+欠く（詳細・原因は `docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/env_info.txt` の該当節を
+参照。A/B ハーネスの計測値自体〈`ab-*-m4max-run*.txt`〉には影響なし）。このため本 REJECT
+判定は低負荷ゲートが確認でき uptime ログも完全な **DGX Spark GB10 側の結果を主根拠**とし、
+M4 Max は同方向の結果による補強と位置づける。
+
+### 後退の考察（参考。判定には使わない）
+
+N=1024/2048 で後退し N=4096 で改善するという形状依存の非単調な挙動について、当初
+「大きい N ほど転置 1 回あたりの償却対象となる FMA 数が多い」という説明を記載していたが、
+これは `default_blocks()`（縮約次元 K のブロックサイズ KC=256 固定・`gemm_blis/mod.rs:148`）
+の実装と整合しない（codex-review 指摘。#1318 PR #1433）。実装は K を KC=256 単位で固定
+ブロック化しており（N は NC=512 単位で別途ブロック化されるが、これは転置 1 回あたりの
+K 反復数とは無関係）、各 `pc` ブロックで渡される `kc_len` は K 全体を 256 単位で割った値
+（末尾ブロックのみ端数）で、N=1024/2048/4096 のいずれでも同一である。すなわち
+`compute_b_laneq_vec` の入口/出口 `transpose_4x4` は呼び出しごと（各 `pc`×`jc` ブロック
+単位）に発生し、1 回の呼び出しあたりの K 反復数（≈ kc_len 分の FMA 数）は N に依存せず
+一定であるため、「大きい N ほど転置 1 回あたりの償却 FMA 数が増える」という説明は成立
+しない。N が大きいほど変化するのは `pc`×`jc` ブロックの総呼び出し回数（＝転置呼び出し
+回数の合計）であり、1 回あたりの償却量ではない。
+
+したがって、N=1024/2048 で後退し N=4096 で改善する形状依存の原因は本ドキュメント時点では
+**未特定**とする。転置オーバーヘッド自体（在レジスタ 4×4 転置 8 命令 vs 旧来のスカラー
+gather/scatter）が寄与している可能性は残るが、その寄与が N とともにどう変化するかの
+機構は上記の誤った償却説明では説明できず、追加の実測（下記「転置コスト分離のための独立
+variant 併記」）による切り分けが必要である。
+
+### 次候補への引き継ぎ・起票案（`out-of-scope-tracking.md` に従い未起票のまま記録）
+
+- **`RowPanelBLaneqVec` 系コードは維持**（削除・本番化しない）。§8「`GemmDriverVariant` 系
+  コードの扱い」と同方針（`#[cfg(test)]` 限定のため本番ビルドへの影響なし・bit 完全一致
+  回帰資産として保持）
+- **転置コスト分離のための独立 variant 併記**: 上記「後退の考察」を検証するため、
+  `compute_b_laneq`（#748 のスカラー転置版。既存）と `compute_b_laneq_vec`（本イシューの
+  ベクトル転置版）を N=512 以下を含めた広いグリッドで A/B し、転置方式単独の寄与を
+  分離する対応（`neon_8x12_vs_b_laneq_ab_median_throughput` の拡張が候補）
+- **候補 2（`vld1q_f32_x3` 経路の prefetch）**: 依然未着手（§8 参照）
+- **低負荷専有条件下（1 分 load average < 6 を計測全体で維持）での M4 Max 再計測**:
+  N=2048 の 2/5 勝ちが負荷ノイズにどこまで起因するかの切り分けに有用（未着手）
+- **#1321（candle 比ゲート再判定）への影響**: 本イシューでコード変更がないため、#1321 は
+  本追補の影響を受けずに現行 `RowPanel` のまま再計測してよい
+
 ## 出典
 
 - イシュー #1041（本ドキュメントの起票元）・#1117（親 issue）・#1140（GB10 実機実測。本追補）・
-  #1141（M4 Max 実機実測。本追補）・#1144（本番結線の要否判断）
+  #1141（M4 Max 実機実測。本追補）・#1144（本番結線の要否判断）・#1315（候補 3 KC 再スイープ・
+  §8.1）・#1317（候補 1 実装。`GemmDriverVariant::RowPanelBLaneqVec`）・#1318（候補 1 両実機
+  A/B・採否判定。§8.2）
 - `docs/perf/oss-gemm-comparison-baseline.md` §7.2・§7.3（対 gemm crate 比較ベースライン）
+- `docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/`（§8.2 実測資産・生ログ・env_info）
 - `docs/cpu-gemm-b-packing-sharing-decision.md`（B 共有化の設計判断・採用ゲート方針の前例）
 - `crates/backend-cpu/src/gemm_blis/mod.rs`（`GemmDriverVariant`・
   `gemm_blis_shared_b_pc_outer_region`・`gemm_blis_parallel_variant`）

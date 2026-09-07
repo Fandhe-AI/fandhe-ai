@@ -178,6 +178,13 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
    の 1 行変更）、`gemm_blis_parity` を実機で再実行し、既定経路の 5 回中央値を再計測する。
    劣化時は既定切り替えを行わず変種併設のまま計測結果を記録する（安全側。#748 実装計画
    §2 の fail-closed 方針）。
+   **関連（イシュー #1318）**: 本項目のスカラー転置版 `compute_b_laneq` 自体の A/B は
+   未実施のまま残るが、C タイル転置をベクトル化した派生版 `compute_b_laneq_vec`
+   （#1317・`docs/perf/cpu-gemm-b-laneq-vec-transpose.md`）を両実機 5 回中央値 A/B した
+   結果は REJECT（N=1024/2048 で対 `RowPanel` 比 1.00 未達。
+   `docs/perf/cpu-gemm-candle-cpu-retune.md` §8.2）。ベクトル化した派生版でも本番既定
+   （A レーン参照 `compute`）を上回らなかったため、`NeonKernel::run_with_ldc` の委譲先は
+   変更していない。
 3. **レジスタスピル静的検査**: 上記「検証済み事項」注記のとおり `llvm-objdump` が利用可能な
    環境で `cargo build -p fandhe-ai-backend-cpu --release --target aarch64-unknown-linux-gnu` の成果物
    を `compute_b_laneq`／`kernel_b_laneq` シンボルについて逆アセンブルし、`[sp` 参照
