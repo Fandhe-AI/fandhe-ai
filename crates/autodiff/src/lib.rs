@@ -135,4 +135,4 @@ mod var;
 pub use backward::Gradients;
 pub use error::AutodiffError;
 pub use tape::{NodeId, Tape, TapeId};
-pub use var::{Reduction, Var};
+pub use var::{Reduction, Var, VarHostView};

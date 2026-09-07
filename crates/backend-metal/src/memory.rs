@@ -415,6 +415,33 @@ impl MemoryOps for MetalMemory {
         }
         self.download_inner(buffer).map_err(map_metal_error)
     }
+
+    /// [`MemoryOps::with_host_view`] の Metal 実装（イシュー #1335）。
+    ///
+    /// `download_inner` と同じ同期契約（`self.context.synchronize()` を
+    /// `contents()` 借用の前に必ず挟む。イシュー #1017・モジュール冒頭
+    /// コメント参照）を保ったまま、`MetalBuffer::as_host_slice` で
+    /// `StorageModeShared` バッファの CPU 可視アドレスを**直接借用**し
+    /// `read_to_vec`（`Vec` 確保 + memcpy）を経由しない（`docs/perf/
+    /// metal-gemm-reuse-phase-breakdown.md` §4 が指摘する `host_copy`
+    /// コストの削減経路そのもの）。`numel == 0`（`handle.buffer ==
+    /// None`）は空スライスをそのまま渡す（モジュール冒頭「空テンソルの
+    /// 契約」）。
+    fn with_host_view(
+        &self,
+        buffer: &DeviceBuffer<f32>,
+        f: &mut dyn FnMut(&[f32]),
+    ) -> Result<(), BackendError> {
+        let handle = buffer
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        self.context.synchronize().map_err(map_metal_error)?;
+        match &handle.buffer {
+            None => f(&[]),
+            Some(buf) => f(buf.as_host_slice()),
+        }
+        Ok(())
+    }
 }
 
 /// `fandhe_ai_tensor_core::pool::PooledMemory<MetalMemory>`（TASK-#201・REQ-14

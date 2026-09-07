@@ -308,6 +308,28 @@ impl<T: Element> Tensor<T> {
         self.storage.data.get(start..end)
     }
 
+    /// ホスト可視の値を借用で読み出す（イシュー #1335）。
+    ///
+    /// contiguous な場合は [`Self::as_slice`] の借用をそのまま
+    /// `Cow::Borrowed` として返す（コピーなし）。非 contiguous な場合
+    /// （`transpose`/`narrow` 後の view）のみ [`Self::contiguous`] で
+    /// 1 回だけ実体化し `Cow::Owned` として返す（`Var::host_view`／
+    /// facade 再エクスポートの内部実装が使う想定。`docs/public-api-
+    /// design.md` §2.2 参照）。
+    pub fn host_slice(&self) -> std::borrow::Cow<'_, [T]> {
+        if let Some(slice) = self.as_slice() {
+            std::borrow::Cow::Borrowed(slice)
+        } else {
+            // `contiguous()` は非 contiguous な場合に必ず新規 storage を
+            // 実体化するため、その直後の `as_slice()` は常に `Some` に
+            // なる（`contiguous()` のドキュメンテーションコメント参照）。
+            // ただし `Tensor` を返した後に呼び出し元へ渡すため、ここでは
+            // 一時変数を経由して `to_vec()`（`Cow::Owned` へ格納する
+            // ための所有データ化）する。
+            std::borrow::Cow::Owned(self.contiguous().as_slice().unwrap_or(&[]).to_vec())
+        }
+    }
+
     /// 非 contiguous な view でも、全 strides が非負である限り
     /// `[offset, offset + span)`（`span = 1 + Σ (shape_i − 1)·stride_i`）を
     /// storage から借用で返す（イシュー #1040）。

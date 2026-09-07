@@ -434,6 +434,48 @@ pub trait MemoryOps {
                 .into(),
         ))
     }
+
+    /// `buffer` の内容をホスト可視の `&[f32]` として `f` に借用させる
+    /// （イシュー #1335・`docs/public-api-design.md` §4.2）。
+    ///
+    /// `Var::host_view`／`Tensor::host_slice`（`autodiff`／`facade`
+    /// レイヤーの borrowed view API。本メソッドは backend レイヤーの
+    /// 対応物）の内部実装で使う想定の非破壊拡張。**復帰時点でデバイス側
+    /// の書き込みが完了していることを全バックエンド共通の契約とする**
+    /// （[`Self::download`] の同期契約と同一。Metal 実装は
+    /// `synchronize()` 後に `contents()` を直接借用しコピーを介さない
+    /// ことで `download` 経由の既定実装よりホストコピーを 1 回省く。
+    /// CPU 実装は既存ホストバッファをそのまま借用する。CUDA は本
+    /// メソッドを上書きしない限り既定実装のまま——pinned host バッファ
+    /// 経由の借用化はイシュー #1336 のスコープ）。
+    ///
+    /// # なぜクロージャ方式か（`R` を返さず `FnMut(&[f32])` を渡す形）
+    ///
+    /// 借用の寿命をクロージャ実行区間に閉じることで、CUDA pinned
+    /// キャッシュのように内部で `Mutex` 等のガードを取る実装が
+    /// 自己参照 guard 型を新設せずに済む（イシュー #1336 で解消予定の
+    /// 制約を先取りして本トレイトの形を決めている）。また、ジェネリック
+    /// 戻り値 `R` を持つメソッドは object-safe でなく
+    /// `BackendOps::memory_ops(&self) -> Option<&dyn MemoryOps>`
+    /// （モジュール冒頭コメント参照）が返す `&dyn MemoryOps` から呼び
+    /// 出せなくなるため、戻り値なし（結果はクロージャ側で外部変数へ
+    /// 書き出す形で捕捉する）にして object-safety を保つ。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::download`] を経由するフェイルセーフ実装（`download` は
+    /// 常に contiguous な `Tensor` を返す契約のため `as_slice()` は
+    /// 必ず `Some` になるが、防御的に `unwrap_or(&[])` で空スライスへ
+    /// フォールバックする）。
+    fn with_host_view(
+        &self,
+        buffer: &DeviceBuffer<f32>,
+        f: &mut dyn FnMut(&[f32]),
+    ) -> Result<(), BackendError> {
+        let tensor = self.download(buffer)?;
+        f(tensor.as_slice().unwrap_or(&[]));
+        Ok(())
+    }
 }
 
 #[cfg(test)]

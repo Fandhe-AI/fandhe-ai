@@ -109,6 +109,39 @@ impl<'t> Var<'t> {
         materialize_non_fallible(&nodes, self.tape.ops(), self.id).clone()
     }
 
+    /// ホスト可視の値を借用で読み出す（イシュー #1335・`docs/public-api-
+    /// design.md` §3.1「`VarHostView`」）。
+    ///
+    /// 実体化した値が contiguous ならテープの `RefCell` 借用
+    /// （`Ref<'_, [f32]>`）をそのまま返しコピーしない。非 contiguous な
+    /// 場合のみ [`Tensor::contiguous`] で 1 回だけ実体化した所有 `Vec`
+    /// を返す（`fandhe_ai_tensor_core::Tensor::host_slice` と同じ
+    /// 「contiguous なら借用・そうでなければ 1 回コピー」の方針を
+    /// `Var` 側にも適用）。
+    ///
+    /// **借用注意**（[`Self::value`] と同じ制約）: 返す
+    /// [`VarHostView`] を保持したまま、同じ `Tape` に対して
+    /// `borrow_mut()` を要する演算（`matmul`/`add` 等のノード追加）を
+    /// 呼ぶと `RefCell` の二重可変借用で実行時 panic になる。値を
+    /// 持ち越したい場合は `to_tensor()` を使うこと。
+    pub fn host_view(&self) -> VarHostView<'_> {
+        let nodes = self.tape.nodes.borrow();
+        let tensor_ref = Ref::map(nodes, |nodes| {
+            materialize_non_fallible(nodes, self.tape.ops(), self.id)
+        });
+        match Ref::filter_map(tensor_ref, |t| t.as_slice()) {
+            Ok(slice_ref) => VarHostView {
+                inner: VarHostViewInner::Borrowed(slice_ref),
+            },
+            Err(tensor_ref) => {
+                let owned = tensor_ref.contiguous().as_slice().unwrap_or(&[]).to_vec();
+                VarHostView {
+                    inner: VarHostViewInner::Owned(owned),
+                }
+            }
+        }
+    }
+
     /// 実体化なしに読める構造的な出力 shape（`TapeNode.shape`。
     /// TASK-12.1d・#164）。演算入口の shape 検査は本メソッドを使い、
     /// `value()`/`materialize_fallible` を呼ばない（`docs/
@@ -632,6 +665,43 @@ impl<'t> Var<'t> {
             out_shape,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+}
+
+/// [`Var::host_view`] が返す借用ビュー（イシュー #1335）。
+///
+/// `Deref<Target = [f32]>` でスライスとして使う。内部 variant
+/// （`Borrowed`/`Owned`）は非公開とし、将来 CUDA pinned host 借用
+/// （イシュー #1336）等の追加 variant を破壊的変更なしに導入できる
+/// 余地を残す。
+///
+/// **寿命契約**: `Borrowed` variant は `Tape` の `RefCell` 借用
+/// （`Ref<'a, [f32]>`）を保持するため、生存中は同じ `Tape` に対する
+/// `borrow_mut()` を要する操作（ノード追加演算・`Tape::reset`）を
+/// 呼べない（コンパイルエラーにはならず実行時 panic になる制約は
+/// [`Var::value`] と同じ。値を持ち越したい場合は `to_tensor()` を
+/// 使うこと）。テープ値自体は一度確定すると不変（`TapeNode.value:
+/// OnceCell`）であり、`VarHostView` 生存中にデバイス側から後続書き込み
+/// されることはない。
+#[derive(Debug)]
+pub struct VarHostView<'a> {
+    inner: VarHostViewInner<'a>,
+}
+
+#[derive(Debug)]
+enum VarHostViewInner<'a> {
+    Borrowed(Ref<'a, [f32]>),
+    Owned(Vec<f32>),
+}
+
+impl std::ops::Deref for VarHostView<'_> {
+    type Target = [f32];
+
+    fn deref(&self) -> &[f32] {
+        match &self.inner {
+            VarHostViewInner::Borrowed(slice_ref) => slice_ref,
+            VarHostViewInner::Owned(vec) => vec,
+        }
     }
 }
 
