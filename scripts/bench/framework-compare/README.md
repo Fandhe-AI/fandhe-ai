@@ -755,6 +755,59 @@ reuse とも `a.matmul(&b)`（`CudaBackendOps::gemm` の `clone_htod`／`alloc_z
   `device_checksum_matches_legacy_checksum_fresh_and_reuse`〈`device-checksum` feature 限定〉
   で自動検証済み）
 
+### `--graph <on|stream-only>`（イシュー #1350。学習 step の CUDA Graph capture A/B）
+
+学習 step の update 区間（`BackendOps::sgd_step_device_tracked`。`DeviceParamStore::step`）を
+CUDA Graph で capture・再利用する経路（`fandhe_ai::set_cuda_graph_step_enabled`。イシュー
+#1349・`docs/backend-cuda-graph-step-capture-design.md`）の launch 固定費を実測するための
+3 状態（`off`／`stream-only`／`on`）A/B 用フラグ。既定 OFF・fail-closed 方針は不変。
+
+**経路上の重要事実**: capture 対象は update 区間の SGD カーネル 1 個のみ（forward／backward は
+対象外）。**対応は `--device cuda --task train` 限定**（gemm／infer は `DeviceParamStore::step`
+に到達しないため常に `MEASURE_ERROR`）。`train --mode fresh` はホスト側で `p - lr*g` を計算する
+経路のため `DeviceParamStore::step` へ到達せず、stream 種別変更のプロセスワイド効果のみを見る
+対照計測として使う（`train --mode reuse` が主対象）。
+
+- **3 状態の意味**（`fandhe_ai_backend_cuda::graph` モジュール冒頭コメントに詳しい）:
+  - `off`（既定・`--graph` 省略）: legacy stream・capture なし
+  - `stream-only`: created stream で初期化するが capture はしない（「created stream の event
+    管理コストのみ」を分離計測する診断状態）
+  - `on`: created stream で初期化し update 区間を capture・再利用する
+- **`stream-only` は API から選べない**: `set_cuda_graph_step_enabled` を一度でも呼ぶと以後
+  環境変数が無視される契約のため、`bench-fandhe` は `--graph stream-only` 起動時に API を呼ばず
+  代わりに起動側が事前に `FANDHE_AI_CUDA_GRAPH_STEP=stream-only` を export していることを
+  `fandhe_ai::cuda_graph_step_mode()` で確認する（未 export なら `MEASURE_ERROR`）。`--graph`
+  省略時も環境変数が漏れて off 以外のモードのまま計測されないことを同様に確認する
+- **`bench-fandhe`**: `--device cuda --task train` 以外は常に `MEASURE_ERROR`。`--device cuda
+  --task train` でも、`graph-step` cargo feature（既定無効）を有効化したビルドでなければ
+  `MEASURE_ERROR` になる。crates.io 公開版 `fandhe-ai =0.7.0` ピンには
+  `cuda_graph_step_mode`/`cuda_graph_step_stats` API 自体が未収録（#1349 は未リリースの HEAD で
+  追加）のため、`--managed` と同じく **`graph-step` feature ＋ `[patch.crates-io.fandhe-ai]`
+  による未リリース HEAD `crates/facade` への path patch**の両方が必要:
+
+  ```sh
+  cargo build --release -p bench-fandhe --features graph-step \
+    --config 'patch.crates-io.fandhe-ai.path="/absolute/path/to/crates/facade"'
+  ```
+
+  `[patch]`／`.cargo/config.toml` は本 workspace の `Cargo.toml`・`Cargo.lock` へコミットしない
+  （計測後は `git checkout -- scripts/bench/framework-compare/Cargo.lock` で復元する）
+- **`bench-candle`／`bench-burn`**: `--graph` は fandhe-ai 固有の CUDA Graph capture opt-in API
+  を指す概念であり対応する公開 API がないため、常に `MEASURE_ERROR` で fail-fast する
+- **JSONL**: `--graph on`／`--graph stream-only` で計測した行は `"graph":"on"`／
+  `"graph":"stream-only"` を emit する（既定は emit しないキー欠損 = off の互換規約。
+  `bench_common::Record::graph`。`tf32`／`managed` と同型）。`--graph on` で `--task train`
+  計測した行は launch 固定費の診断カウンタ（`fandhe_ai::cuda_graph_step_stats()` の再公開。
+  `"graph_captured"`／`"graph_replayed"`／`"graph_launches"`／`"graph_sgd_kernel_launches"`）も
+  併せて emit する
+- **`summarize.py`／`compare_gemm_gate.py`／`compare_ab.py`／`compare_managed_ab.py`**: `graph`
+  キーを持つ行は目標達成ゲート・A/B 比較から**既定で除外**する（既定 off 計測との速度混同防止）
+- **A/B 計測**: `run_ab_graph_cuda.sh`（`AB_PATCH_FACADE_PATH` 環境変数必須。上記 path patch 先の
+  絶対パスを指定）が同一バイナリで off/stream-only/on を交互起動し、`compare_graph_ab.py` が
+  `(task, device, size, mode, phase)` セルごとに 5 回計測中央値・比・checksum 一致（複合判定＋
+  完全一致）・launch カウンタの 5 run 内一致を集計する。実測記録・既定化可否の判定は
+  `docs/perf/train-step-phase-breakdown.md` §16 を参照
+
 ## 使い方
 
 ```bash

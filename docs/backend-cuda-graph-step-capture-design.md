@@ -125,14 +125,44 @@
 
 ## 5. 実機実測
 
-本エージェント実行環境に CUDA 実機が存在しないため、以下は **未実測**のまま記入欄を残す:
+**#1350（GB10 実機実測。2026-09-08）で実測完了**。§4.1 の実機プローブ
+（cudarc の自動 event 管理と capture の互換性）は失敗せず、
+`disable_event_tracking()`（案 A）採用済みの現行実装のまま capture が
+成立することを確認した——「§4.1 の実機プローブが失敗した場合」の回避策
+検討は不要だった。
 
-- §4.1 の実機プローブ（cudarc の自動 event 管理と capture の互換性。「リスクと安全側の判断」参照）
-- `crates/backend-cuda/tests/graph_capture_real_device.rs`（opt-in ON 側。`#[ignore]`）・`crates/backend-cuda/tests/graph_capture_real_device_optin_off.rs`（opt-in OFF 側。`#[ignore]`）の実行結果
-- `crates/facade/tests/cuda_graph_step_bit_identity.rs`（`#[ignore]`）の実行結果（受け入れ条件 (a)）
-- `make test-ignored-cuda` による非後退確認（ストリーム切替が opt-in OFF 時の既存動作を壊していないことの実機確認）
+- `make test-ignored-cuda` 1 段目（`--all-features`。graph 系 2 テストを
+  `--skip`）: 34 passed・2 failed。2 件の失敗（`init_cost_diag_gemm_
+  new_lru_cold_vs_warm`・`cuda_gemm_new_second_construction_reuses_
+  module_cache`）はいずれも `#[ignore]` テスト並行実行時のモジュール
+  キャッシュ LRU 相互汚染という失敗メッセージ自体が明記する既知の
+  非決定性（イシュー #1107）で、本イシューの変更（launch カウンタ
+  追加）とは無関係——ストリーム切替（§4.1）が opt-in OFF 時の既存動作
+  を壊していないことの非後退確認としては成立している
+- `cargo test -p fandhe-ai-backend-cuda --release --test
+  graph_capture_real_device -- --ignored --nocapture --test-threads=1`
+  （opt-in ON 側）: **2 passed・0 failed**
+  （`sgd_update_segment_captures_then_replays_bit_identically`・
+  `different_config_key_produces_a_different_segment_key`）。#1350 が
+  追加した launch カウンタ assert（capture で `captured`+1・
+  `graph_launches`+1・`replayed` 不変／replay で `replayed`+1・
+  `graph_launches`+1・`captured` 不変）を含めて自己検証済み
+- `scripts/verify-cuda-graph-step-bit-identity.sh`
+  （`crates/facade/tests/cuda_graph_step_bit_identity.rs` の eager_
+  baseline／graph_capture 2 プロセス比較の自動化版。受け入れ条件 (a)）:
+  **OK: eager_baseline（opt-in OFF）と graph_capture（opt-in ON）は
+  2662 行すべて bit 同一**
+- `graph_capture_real_device_optin_off.rs`・`cuda_graph_step_two_gpu_
+  bit_identity.rs`（2 GPU 機のみ）は #1350 の実測範囲外のまま（GB10
+  は単一 GPU のため後者は本来スコープ外）
 
-実機セッションで最初に実行すべき手順:
+実測ログは `docs/perf/logs/cuda-graph-step-ab-1350/`
+（`test-ignored-cuda-first-invocation.log`・
+`graph_capture_real_device_optin_off.log`・
+`verify-cuda-graph-step-bit-identity.log`）。性能実測（A/B）・採否
+判定は `docs/perf/train-step-phase-breakdown.md` §16 を参照。
+
+以下は上記実測を実行する際に用いた手順（再現用に維持する）:
 
 ```sh
 # 1. 既存回帰の非後退確認
@@ -160,11 +190,12 @@ cargo test -p fandhe-ai --release --test cuda_graph_step_two_gpu_bit_identity \
 
 **§4.1 の実機プローブが失敗した場合**（`CUDA_ERROR_STREAM_CAPTURE_ISOLATION` 等。「リスクと安全側の判断」参照）: 回避策（案 A `disable_event_tracking()`〈`unsafe fn`〉・案 B 生ポインタ launch 変種）はユーザー承認事項のため、実測エビデンスとともに承認依頼を起票し、承認が得られるまで本機構は「機構としては実装済みだが実機で capture が成立しない」状態のまま残す。
 
-## 6. #1350 への申し送り
+## 6. #1350 への申し送り（完了。実測結果は `docs/perf/train-step-phase-breakdown.md` §16）
 
 - 計測は `--phases` の `device_update` 区間に効果が閉じることを前提に、`FANDHE_AI_CUDA_GRAPH_STEP` の 3 状態（未設定＝OFF／`stream-only`／`1`）で比較し、「created stream の event 管理コスト」と「capture の効果」を分離して記録する
 - `step_total` は中立見込み（update が step の 0.5〜0.7% のため）。後退が観測されても opt-in 既定 OFF のため結線撤回は不要
 - launch 回数の比較は `SegmentRun::Captured`／`Replayed` の計数、または既存の launch カウンタ基盤を流用する
+- **結果（GB10 実機実測・2026-09-08）**: `step_total` ON/OFF 中央値比 0.9552〜0.9644（事前宣言の ADOPT 基準 ≤0.95 未達）・`device_update` ON/OFF 中央値比は中央値 0.9719 と改善方向だが 5 run 中 1 run で符号反転（5/5 一貫の基準未達）・checksum は全セル完全一致。事前宣言基準により**既定 OFF 維持（中立）と確定**。`stream-only` 単独でも on/off 相当の改善が見られたため、`device_update` 改善の一部は capture 自体でなく created stream 化（F9 の (ii)）由来の可能性を示唆する。launch 回数自体（update 区間はカーネル 1 個のみ）は減らないという構造上の事前宣言も実測で確認した（詳細は同 §16）
 
 ## 7. リスクと安全側の判断
 

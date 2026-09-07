@@ -375,6 +375,35 @@ pub fn cuda_graph_step_enabled() -> bool {
     fandhe_ai_backend_cuda::graph::step_graph_enabled()
 }
 
+/// [`fandhe_ai_backend_cuda::graph::StepGraphMode`] の再公開（composition
+/// root。イシュー #1350）。`framework-compare` の `bench-fandhe` が
+/// `--graph stream-only` 起動時に「環境変数 `FANDHE_AI_CUDA_GRAPH_STEP=
+/// stream-only` が実際に反映されたか」を確認するために使う診断用途の
+/// 公開面（`docs/compat-api-scope.md` §0）。`set_cuda_graph_step_enabled`
+/// と異なり API からモードを設定する手段はない（`stream-only` は環境
+/// 変数専用の中間状態。`fandhe_ai_backend_cuda::graph` モジュール冒頭
+/// コメント参照）。
+pub type CudaGraphStepMode = fandhe_ai_backend_cuda::graph::StepGraphMode;
+
+/// [`fandhe_ai_backend_cuda::graph::StepGraphStats`] の再公開（同上。
+/// launch 固定費の診断用スナップショット）。
+pub type CudaGraphStepStats = fandhe_ai_backend_cuda::graph::StepGraphStats;
+
+/// 現在の CUDA Graph step capture の opt-in モードを返す（イシュー
+/// #1350。[`CudaGraphStepMode`] 参照）。
+pub fn cuda_graph_step_mode() -> CudaGraphStepMode {
+    fandhe_ai_backend_cuda::graph::step_graph_mode_public()
+}
+
+/// launch 固定費の診断用スナップショットを返す（イシュー #1350。
+/// [`CudaGraphStepStats`] 参照）。計測ウィンドウの外（`framework-compare`
+/// の record 生成時）で 1 回だけ呼ぶことを想定しており、呼び出し自体は
+/// 計測時間へ計上されない設計（`fandhe_ai_backend_cuda::graph::
+/// step_graph_stats` doc コメント参照）。
+pub fn cuda_graph_step_stats() -> CudaGraphStepStats {
+    fandhe_ai_backend_cuda::graph::step_graph_stats()
+}
+
 /// CUDA GEMM 精度モード（既定 `Fp32Strict`・単発 `Tf32`・3×TF32
 /// `Tf32x3`。イシュー #1355。親ツリー #1354・承認元 #1338）の再公開。
 /// `set_cuda_gemm_precision`／`cuda_gemm_precision` の戻り値・引数型
