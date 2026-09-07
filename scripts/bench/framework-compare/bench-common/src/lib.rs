@@ -554,12 +554,26 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
     // 含めるとログインジェクションの経路になりうるため、`BenchError::
     // InvalidArg` の `value` フィールドには渡すが、呼び出し元がそのまま
     // シェルへ展開しない契約は `run_ab_graph_cuda.sh` 側で別途担保する）。
+    // codex-review 指摘（PR #1425・P2）: `get("--graph")` は `--graph` が
+    // 引数列の末尾（後続値なし）のとき `args.get(i + 1)` が `None` を
+    // 返すため、フラグ自体を渡さなかった場合と区別できず「未指定＝off」
+    // として静かに通ってしまう（値の書き忘れを検知できない）。`--mode`
+    // 同型の値付きフラグ契約を保つため、`has_flag` も併用して「フラグは
+    // あるが値が取れない」場合を fail-closed で `InvalidArg` にする
+    // （エコーする `value` は空文字列。渡された値をそのまま返す他の
+    // 分岐と同じ契約）。
     let graph = match get("--graph") {
         Some(v) if v == "on" || v == "stream-only" => Some(v),
         Some(v) => {
             return Err(BenchError::InvalidArg {
                 flag: "--graph",
                 value: v,
+            });
+        }
+        None if has_flag("--graph") => {
+            return Err(BenchError::InvalidArg {
+                flag: "--graph",
+                value: String::new(),
             });
         }
         None => None,
@@ -912,6 +926,21 @@ mod tests {
     #[test]
     fn parse_cli_from_rejects_unknown_graph_value() {
         let result = parse_cli_from(&args(&["--task", "train", "--graph", "off"]));
+        assert!(matches!(
+            result,
+            Err(BenchError::InvalidArg {
+                flag: "--graph",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    // codex-review 指摘（PR #1425・P2）: `--graph` が引数列の末尾で値を
+    // 伴わない（次のトークンが存在しない）場合、フラグ非指定と誤認せず
+    // `InvalidArg` で fail-closed 拒否することを確認する。
+    fn parse_cli_from_rejects_graph_flag_without_trailing_value() {
+        let result = parse_cli_from(&args(&["--task", "train", "--graph"]));
         assert!(matches!(
             result,
             Err(BenchError::InvalidArg {

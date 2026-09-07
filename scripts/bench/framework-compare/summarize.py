@@ -694,6 +694,18 @@ def load_rows(path):
                 f"{path}: 不正な 'device_checksum' フィールド型（bool を期待）: "
                 f"{r['device_checksum']!r}（行: {r!r}）"
             )
+        # イシュー #1350: `graph`（`Record.graph`。CUDA Graph step capture
+        # 経路〈off/stream-only/on〉での計測を示す）は `tf32`／`managed` と
+        # 異なり文字列値の「キー欠損 = off」互換規約を持つ。既存の目標達成
+        # ゲート・A/B 比較の判定意味論を汚染しないよう、`graph` キーを持つ
+        # 行は本ファイル内の全ゲート・突合経路から除外する（`compare_graph_ab.py`
+        # が専用の A/B 比較を別途担う。`docs/perf/train-step-phase-
+        # breakdown.md` §16 参照）。
+        if "graph" in r and not isinstance(r["graph"], str):
+            raise ValueError(
+                f"{path}: 不正な 'graph' フィールド型（str を期待）: "
+                f"{r['graph']!r}（行: {r!r}）"
+            )
     return rows
 
 
@@ -733,6 +745,7 @@ def get(rows, fw, task, device, size=None, mode="fresh", tf32=False):
             and (r.get("tf32", False) is True) == tf32
             and r.get("managed", False) is not True
             and r.get("device_checksum", False) is not True
+            and "graph" not in r
         ):
             if size is None:
                 return r
@@ -765,6 +778,7 @@ def devices_in(rows, task, mode="fresh", tf32=False):
         and (r.get("tf32", False) is True) == tf32
         and r.get("managed", False) is not True
         and r.get("device_checksum", False) is not True
+        and "graph" not in r
     }
     return [d for d in DEVICE_ORDER if d in present]
 
@@ -816,6 +830,7 @@ def _devices_in_train_infer(rows, task, mode="fresh"):
         and r["mode"] == mode
         and r.get("managed", False) is not True
         and r.get("device_checksum", False) is not True
+        and "graph" not in r
     }
     return [d for d in DEVICE_ORDER if d in present]
 
@@ -934,6 +949,7 @@ def gemm_checksum_reference(rows):
             and r.get("tf32", False) is not True
             and r.get("managed", False) is not True
             and r.get("device_checksum", False) is not True
+            and "graph" not in r
         }
     )
     result = {}
@@ -947,6 +963,7 @@ def gemm_checksum_reference(rows):
             and r.get("tf32", False) is not True
             and r.get("managed", False) is not True
             and r.get("device_checksum", False) is not True
+            and "graph" not in r
         ]
 
         # 相互一致するクラスタのうち最大のものを先に求める（多数派の把握）。
@@ -1025,7 +1042,7 @@ def gemm_checksum_mismatches(rows):
         # managed 行固有の checksum 相違が正常な device-only 行の「不一致」
         # として誤伝播しうる。managed 配置固有の checksum 妥当性検証（off/on
         # 完全一致）は `compare_managed_ab.py::evaluate_cell` が別途担う。
-        if r.get("managed", False) is True or r.get("device_checksum", False) is True:
+        if r.get("managed", False) is True or r.get("device_checksum", False) is True or "graph" in r:
             continue
         # `reference` のキーは `_valid_gate_size` 検証済みの size のみ
         # （`gemm_checksum_reference` docstring 参照）。`r["size"]` が不正
@@ -1079,7 +1096,7 @@ def gemm_checksum_unverifiable(rows):
         # いない managed 行を「検証済み」と誤表示しうる（fail-open の
         # おそれ）。managed 配置固有の checksum 妥当性検証（off/on 完全
         # 一致）は `compare_managed_ab.py::evaluate_cell` が別途担う。
-        if r.get("managed", False) is True or r.get("device_checksum", False) is True:
+        if r.get("managed", False) is True or r.get("device_checksum", False) is True or "graph" in r:
             continue
         # `gemm_checksum_mismatches` と同じ理由（不正 size での
         # `dict.get()` 例外終了防止。イシュー #1051 codex-review P0
@@ -1309,6 +1326,7 @@ def _row_key(r):
         r.get("tf32", False) is True,
         r.get("managed", False) is True,
         r.get("device_checksum", False) is True,
+        r.get("graph"),
     )
 
 
@@ -1391,6 +1409,7 @@ def _pick_row_for_gate(rows, fw, task, device, size):
                 # （`docs/backend-cuda-managed-placement-decision.md`）。
                 and r.get("managed", False) is not True
                 and r.get("device_checksum", False) is not True
+                and "graph" not in r
                 and _valid_gate_size(r.get("size"))
                 and r.get("size") == size
             ]
@@ -1647,6 +1666,7 @@ def target_gate(rows, target):
                 # の判定不能を誤生成するのを防ぐ。上記 tf32 除外と同じ理由）。
                 and r.get("managed", False) is not True
                 and r.get("device_checksum", False) is not True
+                and "graph" not in r
             ]
             # 外部 JSONL 由来の `size` を検証せず set 内包・`sorted()` へ
             # 渡すと、配列／オブジェクト混入で `unhashable type`、文字列と
@@ -1883,7 +1903,7 @@ def _train_phases_groups(rows):
         # `phase_index` 重複検査を誤って発火させ、正常な行まで無効化
         # されうる。無効行ではないため `skipped`（不正値扱い）には含めず
         # 静かに除外する。
-        if r.get("managed", False) is True or r.get("device_checksum", False) is True:
+        if r.get("managed", False) is True or r.get("device_checksum", False) is True or "graph" in r:
             continue
         device = r.get("device")
         mode = r.get("mode")
@@ -2148,7 +2168,7 @@ def _gemm_phases_groups(rows):
         # イシュー #1353（github-actions レビュー指摘）: `_train_phases_
         # groups` と同じ理由で `managed:true` 行を無効行扱いせず静かに
         # 除外する（`compare_managed_ab.py` が別途 A/B 集計する）。
-        if r.get("managed", False) is True or r.get("device_checksum", False) is True:
+        if r.get("managed", False) is True or r.get("device_checksum", False) is True or "graph" in r:
             continue
         device = r.get("device")
         mode = r.get("mode")
@@ -2474,7 +2494,7 @@ def _infer_phases_groups(rows):
         # イシュー #1353（github-actions レビュー指摘）: `_train_phases_
         # groups` と同じ理由で `managed:true` 行を無効行扱いせず静かに
         # 除外する（`compare_managed_ab.py` が別途 A/B 集計する）。
-        if r.get("managed", False) is True or r.get("device_checksum", False) is True:
+        if r.get("managed", False) is True or r.get("device_checksum", False) is True or "graph" in r:
             continue
         device = r.get("device")
         mode = r.get("mode")
@@ -3401,6 +3421,7 @@ def section(path, rows):
         # せず素通りするため、実際には一度も checksum 突合していない）。
         and r.get("managed", False) is not True
         and r.get("device_checksum", False) is not True
+        and "graph" not in r
         and _valid_gate_size(r.get("size"))
         and _row_key(r) not in unverifiable_keys
     )

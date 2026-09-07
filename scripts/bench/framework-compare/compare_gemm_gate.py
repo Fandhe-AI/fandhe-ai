@@ -171,6 +171,15 @@ def load_rows(path):
                     f"期待。実際: {obj['device_checksum']!r}） — skipped"
                 )
                 continue
+            # イシュー #1350: `graph`（CUDA Graph step capture 経路）行も
+            # 同じ理由（別軸の計測で既定ゲート判定を汚染させない）で型検証
+            # する（値は文字列。`tf32`／`managed` の bool とは異なる）。
+            if "graph" in obj and not isinstance(obj["graph"], str):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'graph' フィールド型（str を期待。"
+                    f"実際: {obj['graph']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -211,6 +220,11 @@ def _matching_rows(rows, framework, mode, size, device="cuda"):
         # ユーザー判断事項。`docs/perf/device-checksum-readback-ab.md`
         # 参照）。
         if r.get("device_checksum", False) is True:
+            continue
+        # イシュー #1350: `graph` キーを持つ行（CUDA Graph step capture
+        # 経路での計測）は既定プロトコル計測とのゲート混同を防ぐため除外
+        # する（`compare_graph_ab.py` が専用の A/B 比較を別途担う）。
+        if "graph" in r:
             continue
         out.append(r)
     return out

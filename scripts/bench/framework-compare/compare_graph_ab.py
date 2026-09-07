@@ -245,14 +245,26 @@ def _check_common_fields(groups):
 def _check_checksums(groups):
     """全状態を横断した checksum 突合。戻り値は
     `(composite_ok, exact_ok, reason_if_undeterminable)`。
+
+    codex-review 指摘（PR #1425・P1）: 以前は `checksums[0]`（先頭 1 件）
+    のみを基準にした「星型」比較（他の全要素を ref とだけ突合）だった。
+    `checksum_contract.checksums_match` は許容誤差つきの比較のため
+    厳密には推移的ではなく（A〜ref・B〜ref が成立しても A〜B が成立する
+    保証はない）、星型比較では non-off 状態同士（例: stream-only と on）
+    の不一致を見逃しうる。3 状態（off/stream-only/on）は最大でも 15 件
+    （5 run × 3 状態）程度のため、計算コストを気にせず全ペア突合へ
+    変更し、off/stream-only/on の全ペアで一致していることを保証する。
     """
     all_rows = [r for rows in groups.values() for r in rows]
     checksums = [r.get("checksum") for r in all_rows]
     if any(c is None or isinstance(c, bool) or not isinstance(c, (int, float)) for c in checksums):
         return False, False, "checksum 欠損または非数値の行あり"
-    ref = checksums[0]
-    composite_ok = all(checksum_contract.checksums_match(ref, c) for c in checksums)
-    exact_ok = all(c == ref for c in checksums)
+    composite_ok = all(
+        checksum_contract.checksums_match(a, b)
+        for i, a in enumerate(checksums)
+        for b in checksums[i + 1 :]
+    )
+    exact_ok = all(a == b for i, a in enumerate(checksums) for b in checksums[i + 1 :])
     if not composite_ok:
         return False, False, f"checksum が複合判定を外れる（{checksums!r}）"
     return composite_ok, exact_ok, None

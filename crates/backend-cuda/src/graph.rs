@@ -138,7 +138,7 @@ pub(crate) fn record_sgd_kernel_launch() {
 }
 
 /// 公開 API（`facade::cuda_graph_step_mode` 経由で再公開）向けの
-/// [`GraphMode`] 写像。内部 `GraphMode` をそのまま公開すると
+/// `GraphMode`（クレート内部限定）写像。内部 `GraphMode` をそのまま公開すると
 /// `pub(crate)` の可視性契約が崩れるため、値が同じだけの独立した
 /// 公開 enum を用意する（`crate::precision` の公開型と同型の設計）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,8 +190,8 @@ pub struct StepGraphStats {
     /// `CudaGraph::launch()` が成功した回数（capture 直後の初回 launch
     /// ＋以後の replay launch の合計。`captured + replayed` と一致する）。
     pub graph_launches: u64,
-    /// SGD カーネル自体の launch 成功回数（[`record_sgd_kernel_launch`]
-    /// 参照。OFF では毎 step 1・ON では capture 時のみ増える）。
+    /// SGD カーネル自体の launch 成功回数（`record_sgd_kernel_launch`
+    /// 〈クレート内部限定〉参照。OFF では毎 step 1・ON では capture 時のみ増える）。
     pub sgd_kernel_launches: u64,
 }
 

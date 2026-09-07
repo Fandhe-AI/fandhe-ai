@@ -214,6 +214,8 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: cli.tf32,
         managed: cli.managed,
         device_checksum: cli.device_checksum,
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -338,6 +340,8 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             tf32: cli.tf32,
             managed: cli.managed,
             device_checksum: false,
+            graph: None,
+            graph_stats: None,
         }
         .emit(&cli.out)?;
     }
@@ -402,6 +406,8 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             tf32: cli.tf32,
             managed: cli.managed,
             device_checksum: false,
+            graph: None,
+            graph_stats: None,
         }
         .emit(&cli.out)?;
     }
@@ -501,6 +507,8 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: false,
         managed: cli.managed,
         device_checksum: false,
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -545,6 +553,8 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: false,
         managed: cli.managed,
         device_checksum: false,
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -613,6 +623,17 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    // イシュー #1350: `--graph`（CUDA Graph step capture 経路）も
+    // fandhe-ai 固有の opt-in API（`set_cuda_graph_step_enabled`）を指す
+    // 概念であり、candle には対応する公開 API が存在しない。`--managed`
+    // と同型の allowlist 方式で常に拒否する。
+    if cli.graph.is_some() {
+        return Err(
+            "MEASURE_ERROR: --graph is not supported by candle (fandhe-ai-only CUDA Graph step \
+             capture opt-in; issue #1350)"
+                .into(),
+        );
+    }
     // イシュー #1339: `--device-checksum` は `--task gemm` 限定（`run_gemm`
     // 内でのみ device reduction 分岐を持つ）。`gemm-transfer-split`
     // （#1103 の Metal 転送分離診断）・`train`／`infer` は対象外。
@@ -648,6 +669,7 @@ mod tests {
             tf32,
             managed: false,
             device_checksum: false,
+            graph: None,
         }
     }
 
@@ -707,5 +729,24 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
         assert!(msg.contains("--managed"), "msg={msg}");
+    }
+
+    /// イシュー #1350: `--graph` は fandhe-ai 固有の opt-in であり
+    /// candle には対応する公開 API が存在しないため、`--managed` と
+    /// 同様に常に MEASURE_ERROR で拒否されることを確認する。
+    #[test]
+    fn graph_flag_is_always_measure_error() {
+        let mut cli = base_cli("train", "cuda", false);
+        cli.graph = Some("on".to_string());
+        let err = dispatch(&cli).expect_err("--graph must be rejected on bench-candle");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--graph"), "msg={msg}");
+    }
+
+    #[test]
+    fn graph_flag_absent_passes_the_guard() {
+        let cli = base_cli("gemm", "cuda", false);
+        assert!(cli.graph.is_none());
     }
 }
