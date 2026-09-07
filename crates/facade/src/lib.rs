@@ -115,6 +115,10 @@ pub mod optim;
 // `compat`／`optim` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
 pub use fandhe_ai_autodiff::optim::{DeviceParamStore, ResidentLeaf, SgdConfig};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
+// `VarHostView`（借用ビュー読み出し API。イシュー #1335）は 1 文 1 行を
+// 維持する（`tests/api_surface.rs` が `pub use` を行単位で走査するため。
+// 上記コメント「1 文 1 行を維持する」参照）。
+pub use fandhe_ai_autodiff::VarHostView;
 pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
