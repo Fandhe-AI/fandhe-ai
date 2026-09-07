@@ -2122,10 +2122,13 @@ device` の実選択構成）で表現し、`[0]`（構造上の直接対応。�
   複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉pass）は
   全 run で違反なし（`assert_eq!`／`assert!` が 1 件も panic せず全
   run が `test result: ok`）
-- 負荷帯: `uptime` load average は計測前後で 3.1〜4.9（他セッション
-  との共有負荷下。`docs/perf/logs/metal-gemm-e8-bm128-ab-1332/
-  uptime_before_*.txt`）。#1330（E7）と同様「負荷はあるが符号完全
-  一致のため判定不可とはしない」方針を適用する（A 系列 30/30・B 系列
+- 負荷帯: `uptime` load average（1 分値）は A 系列（`uptime_before_
+  run{1..5}.txt`）が 3.42〜7.97、B 系列（`uptime_before_prod_
+  run{1..5}.txt`）が 2.87〜2.97 で、全 10 ファイル通しの範囲は
+  2.87〜7.97（他セッションとの共有負荷下。`docs/perf/logs/
+  metal-gemm-e8-bm128-ab-1332/uptime_before_*.txt`）。#1330（E7）と
+  同様「負荷はあるが符号完全一致のため判定不可とはしない」方針を
+  適用する（A 系列 30/30・B 系列
   20/20 の全反復が同一符号のため、この負荷帯でも結論は揺るがない）
 
 ### 16.2 A 系列結果（`CANDIDATES[10]` vs `[0]`／`[3]`）
