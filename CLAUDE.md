@@ -206,6 +206,7 @@ fandhe-ai/
     ├── real-hardware-verification-env.local.md.example # 上記の実値（内部ホスト名等）を書くローカル用テンプレート（#461。実体は .gitignore 対象）
     ├── self-repair-candidate-isolation.md # 候補実行の OS レベル縦深防御の調査結果・採否判断（#414）
     ├── self-repair-revalidation-plan.md # TASK-3.3a 自己修復ループ再実証の実証計画・題材選定（#140）
+    ├── spec-proposal-req2-candle-parity-tolerance.md # REQ-2 統一複合判定へのスケール付き絶対誤差救済項（線形 K 形式・案 1′〈√K 形式〉との相違を明記）の追加／比較対象側（candle 等）fail の「判定不能」規定を fandhe-ai-spec へ提案する draft。spec リポへそのまま起票可能な本文案を含むが、実起票はイシュー #1241 でのユーザー承認後に限る（`docs/spec/` は不変・未起票。イシュー #1240）
     └── spec/                # 正本 submodule（fandhe-ai-spec。編集禁止）
         ├── 04-requirements.md  # REQ-1〜14
         ├── 05-tasks.md         # TASK 一覧（4h 粒度）
