@@ -324,6 +324,37 @@ impl CudaMemory {
             ))),
         }
     }
+
+    /// **`internal-diagnostics` feature（既定 off）限定の診断専用
+    /// コンストラクタ**（イシュー #1336 実機実測フェーズで追加）。
+    ///
+    /// [`Self::with_host_view_using_kind`] は呼び出しごとに `kind` を
+    /// 直接 `HostStaging::alloc` するためキャッシュを経由せず、
+    /// `Pinned` 系列の A/B 計測に使うと「毎回新規確保」という
+    /// `with_host_view_using_kind` 自身の設計（ドキュメンテーション
+    /// コメント参照）により本番 `with_host_view`（`self.host_staging`
+    /// キャッシュ経由・2 回目以降は `take` が hit する）と不公平な
+    /// 比較になってしまう。本コンストラクタは `self.host_staging` の
+    /// 初期種別だけを差し替えた `CudaMemory` を返すことで、`Pageable`
+    /// （本番既定）と `Pinned` の両方を**同じキャッシュ経由の
+    /// `with_host_view` 経路**で比較できるようにする
+    /// （`docs/perf/cuda-host-view-staging-readout.md` §5.1 のゲート C
+    /// 計測が使う入口）。`unsafe` は追加しない（`kind` に応じた
+    /// `unsafe` 呼び出し自体は既存の `HostStaging::alloc` 内に閉じて
+    /// おり、本コンストラクタはそこへ渡す初期値を選ぶだけ）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_with_host_staging_kind(
+        device: &CudaDevice,
+        kind: host_staging::HostStagingKind,
+    ) -> Self {
+        Self {
+            stream: device.stream().clone(),
+            ordinal: device.ordinal(),
+            tracker: Arc::new(AllocationTracker::new()),
+            managed_supported: device.managed_memory_supported(),
+            host_staging: Arc::new(Mutex::new(HostStagingCache::new(kind))),
+        }
+    }
 }
 
 /// [`MemoryStats`] の CUDA 実装（TASK-14.1b・#175）。`backend-cpu::
