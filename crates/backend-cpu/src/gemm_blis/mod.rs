@@ -511,7 +511,15 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
     // 再スイープ未実施のため。`should_serialize` は `#[cfg(test)]`
     // 限定で実装・実測突合テストのみ保持する）。
 
-    let num_threads = rayon::current_num_threads().max(1);
+    // 行パネル分割数を rayon の既定スレッド数ではなく実効スレッド数
+    // （`crate::thread_limit::effective_num_threads`）から算出する
+    // （イシュー #1363。macOS `hw.perflevel0.logicalcpu`／Linux sysfs
+    // `cpu_capacity` による大コア数判定で `RAYON_NUM_THREADS` 未指定時の
+    // 既定並列度を大コア数へ限定し、判定不能時は従来どおり
+    // `rayon::current_num_threads()` へフォールバックする。異種コア
+    // 構成での非単調性仮説の検証が目的で、性能上の採否は #1364 が
+    // 判断する。詳細は `docs/perf/cpu-gemm-default-thread-limit.md`）。
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
     let panel_rows = m.div_ceil(num_threads).max(1);
     // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
     // キャプチャして渡す（既定ブロックサイズは n に依存しないため
@@ -675,7 +683,9 @@ pub fn gemm_blis_bias_act_parallel(
     // `gemm_blis_parallel` と同じ理由（[`GEMM_THREADING_THRESHOLD`]
     // ドキュメント「本番未結線」参照）で本番結線しない。
 
-    let num_threads = rayon::current_num_threads().max(1);
+    // 行パネル分割数の実効スレッド数への差し替えは `gemm_blis_parallel`
+    // と同じ理由（イシュー #1363。上記実装コメント参照）。
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
     let panel_rows = m.div_ceil(num_threads).max(1);
     // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
     // キャプチャして渡す（`gemm_blis_parallel` と同じ理由）。
@@ -1371,7 +1381,7 @@ fn gemm_blis_shared_b_region<K: Microkernel>(
     let mc_total = rows.end - rows.start;
     let a = &a[row_start * k_dim..];
 
-    let num_threads = rayon::current_num_threads().max(1);
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
     let panel_rows = mc_total.div_ceil(num_threads).max(1);
     let num_tasks = mc_total.div_ceil(panel_rows);
 
@@ -1652,7 +1662,7 @@ pub(crate) fn gemm_blis_parallel_with_blocks(
         return Ok(());
     }
 
-    let num_threads = rayon::current_num_threads().max(1);
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
     let panel_rows = m.div_ceil(num_threads).max(1);
 
     if m <= panel_rows {
@@ -1693,7 +1703,7 @@ pub(crate) fn gemm_blis_parallel_row_panel_with_blocks(
         return Ok(());
     }
 
-    let num_threads = rayon::current_num_threads().max(1);
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
     let panel_rows = m.div_ceil(num_threads).max(1);
 
     c.par_chunks_mut(panel_rows * n)
@@ -1757,7 +1767,7 @@ pub(crate) fn gemm_blis_parallel_2d_with_blocks(
         return Ok(());
     }
 
-    let num_threads = rayon::current_num_threads().max(1);
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
     let row_ranges = partition::row_ranges_for_workers(m, blocks.mc, num_threads);
 
     // 安全な disjoint 分割: `row_ranges` は `[0, m)` を隙間なく連続分割
@@ -1943,7 +1953,7 @@ fn gemm_blis_shared_b_pc_outer_region<K: Microkernel>(
     let mc_total = rows.end - rows.start;
     let a = &a[row_start * k_dim..];
 
-    let num_threads = rayon::current_num_threads().max(1);
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
     let panel_rows = mc_total.div_ceil(num_threads).max(1);
     let num_tasks = mc_total.div_ceil(panel_rows);
 
@@ -3547,7 +3557,8 @@ mod tests {
             ) -> f64 {
                 let mut c = vec![0.0f32; m * n];
                 let start = Instant::now();
-                let num_threads = rayon::current_num_threads().max(1);
+                let num_threads =
+                    crate::thread_limit::effective_num_threads(rayon::current_num_threads());
                 let panel_rows = m.div_ceil(num_threads).max(1);
                 c.par_chunks_mut(panel_rows * n)
                     .enumerate()

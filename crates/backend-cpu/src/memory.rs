@@ -268,6 +268,27 @@ impl MemoryOps for CpuMemory {
     ) -> Result<(), BackendError> {
         crate::ops::upload_into_cpu_buffer(tensor, dst, dst_offset)
     }
+
+    /// [`MemoryOps::with_host_view`] の CPU 実装（イシュー #1335）。
+    ///
+    /// CPU バックエンドはそもそもホスト常駐（`CpuBufferHandle::data`）
+    /// のため、既定の `download` 経由実装（`Tensor::new(handle.data
+    /// .clone(), ...)` を経て `as_slice()` する）にある clone コピーを
+    /// 経由せず、`handle.data` を直接借用する（コピーなし）。
+    fn with_host_view(
+        &self,
+        buffer: &DeviceBuffer<f32>,
+        f: &mut dyn FnMut(&[f32]),
+    ) -> Result<(), BackendError> {
+        if buffer.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let handle = buffer
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        f(&handle.data);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -347,6 +368,70 @@ mod tests {
         let mem = CpuMemory::new();
         let err = mem.alloc_zeroed(&[usize::MAX, 2]).unwrap_err();
         assert!(matches!(err, BackendError::DeviceAllocationFailed(_)));
+    }
+
+    /// `with_host_view` と `download().as_slice()` が bit 同一であること
+    /// を確認する（イシュー #1335・AC2）。
+    #[test]
+    fn with_host_view_matches_download_bit_exact() {
+        let mem = CpuMemory::new();
+        let data = vec![1.0f32, -2.5, 3.25, f32::MIN_POSITIVE, f32::MAX];
+        let tensor = Tensor::<f32>::new(data.clone(), &[5]).unwrap();
+        let buf = mem.upload(&tensor).unwrap();
+
+        let via_download = mem.download(&buf).unwrap();
+        let via_download_bits: Vec<u32> = via_download
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+
+        let mut via_view_bits = Vec::new();
+        mem.with_host_view(&buf, &mut |slice| {
+            via_view_bits = slice.iter().map(|v| v.to_bits()).collect();
+        })
+        .unwrap();
+
+        assert_eq!(
+            via_view_bits, via_download_bits,
+            "with_host_view は download().as_slice() と bit 同一のはず"
+        );
+    }
+
+    /// 空バッファ（`numel == 0`）は FFI を経由せず空スライスを渡す
+    /// （モジュール冒頭「空テンソルの契約」）。
+    #[test]
+    fn with_host_view_on_empty_buffer_yields_empty_slice() {
+        let mem = CpuMemory::new();
+        let empty = Tensor::<f32>::zeros(&[0, 3]).unwrap();
+        let buf = mem.upload(&empty).unwrap();
+
+        let mut seen_len = usize::MAX;
+        mem.with_host_view(&buf, &mut |slice| {
+            seen_len = slice.len();
+        })
+        .unwrap();
+        assert_eq!(seen_len, 0);
+    }
+
+    #[test]
+    fn with_host_view_rejects_mismatched_handle_type() {
+        #[derive(Debug)]
+        struct OtherHandle;
+        impl BufferHandle for OtherHandle {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn Any {
+                self
+            }
+        }
+        let mem = CpuMemory::new();
+        let buf: DeviceBuffer<f32> = DeviceBuffer::new(Device::Cpu, vec![1], Box::new(OtherHandle));
+        let err = mem.with_host_view(&buf, &mut |_| {}).unwrap_err();
+        assert!(matches!(err, BackendError::DeviceMismatch));
     }
 
     #[test]

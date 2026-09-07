@@ -538,6 +538,22 @@ impl<M: MemoryOps + PoolZeroFill> MemoryOps for PooledMemory<M> {
     ) -> Result<(), BackendError> {
         self.inner.upload_into(tensor, dst, dst_offset)
     }
+
+    /// パススルー（`upload`／`upload_into` と同じ理由。イシュー #1335
+    /// codex-review P2 指摘）。委譲しないまま既定実装（`download` 経由
+    /// のコピー）へフォールバックすると、`inner`（`CpuMemory`／
+    /// `MetalMemory` 等）がコピーなしで実装した `with_host_view` の
+    /// 効果がプール越しの呼び出しでは失われるため、`buffer` の
+    /// ハンドルが `PooledBufferHandle`・`inner` の生ハンドルいずれでも
+    /// 透過ダウンキャストで `inner.with_host_view` がそのまま動作する
+    /// 本メソッドを明示的に転送する。
+    fn with_host_view(
+        &self,
+        buffer: &DeviceBuffer<f32>,
+        f: &mut dyn FnMut(&[f32]),
+    ) -> Result<(), BackendError> {
+        self.inner.with_host_view(buffer, f)
+    }
 }
 
 impl<M: crate::memory_stats::MemoryStats> crate::memory_stats::MemoryStats for PooledMemory<M> {
@@ -597,6 +613,10 @@ mod tests {
     struct MockMemory {
         alloc_count: Cell<usize>,
         zero_fill_count: Cell<usize>,
+        /// `with_host_view` 呼び出し回数（イシュー #1335 codex-review P2
+        /// 是正の回帰テスト用。`PooledMemory::with_host_view` が
+        /// `inner.with_host_view` へ実際に転送していることを検証する）。
+        with_host_view_count: Cell<usize>,
         tracker: Arc<AllocationTracker>,
     }
 
@@ -605,6 +625,7 @@ mod tests {
             Self {
                 alloc_count: Cell::new(0),
                 zero_fill_count: Cell::new(0),
+                with_host_view_count: Cell::new(0),
                 tracker: Arc::new(AllocationTracker::new()),
             }
         }
@@ -633,6 +654,20 @@ mod tests {
                 .downcast_handle::<MockHandle>()
                 .expect("MockMemory から生成した DeviceBuffer は MockHandle を持つはず");
             Tensor::new(handle.payload.clone(), buffer.shape()).map_err(BackendError::ShapeMismatch)
+        }
+
+        fn with_host_view(
+            &self,
+            buffer: &DeviceBuffer<f32>,
+            f: &mut dyn FnMut(&[f32]),
+        ) -> Result<(), BackendError> {
+            self.with_host_view_count
+                .set(self.with_host_view_count.get() + 1);
+            let handle = buffer
+                .downcast_handle::<MockHandle>()
+                .expect("MockMemory から生成した DeviceBuffer は MockHandle を持つはず");
+            f(&handle.payload);
+            Ok(())
         }
     }
 
@@ -955,5 +990,40 @@ mod tests {
     fn release_on_empty_pool_returns_zero() {
         let mem = PooledMemory::new(MockMemory::new(), Device::Cpu, PoolConfig::default());
         assert_eq!(mem.release_all_pooled(), 0);
+    }
+
+    /// `PooledMemory::with_host_view`（イシュー #1335 codex-review P2
+    /// 是正）が `inner.with_host_view` へ実際に転送されること（プール
+    /// 経由のパススルーを迂回して既定実装〈`download` 経由コピー〉へ
+    /// フォールバックしていないこと）を検証する。`inner` の
+    /// `with_host_view_count` が増加することで転送されたことを確認し、
+    /// 渡された内容が `download()` と bit 同一であることも併せて検証
+    /// する。
+    #[test]
+    fn pooled_memory_with_host_view_forwards_to_inner_and_is_bit_exact() {
+        let mem = PooledMemory::new(MockMemory::new(), Device::Cpu, PoolConfig::default());
+        let buf = mem.alloc_zeroed(&[4]).unwrap();
+
+        let before = mem.inner().with_host_view_count.get();
+        let mut observed = Vec::new();
+        mem.with_host_view(&buf, &mut |slice| observed = slice.to_vec())
+            .unwrap();
+        assert_eq!(
+            mem.inner().with_host_view_count.get(),
+            before + 1,
+            "PooledMemory::with_host_view は inner.with_host_view へ転送するはず"
+        );
+
+        let downloaded = mem.download(&buf).unwrap();
+        assert_eq!(
+            observed.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            downloaded
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            "PooledMemory::with_host_view は download() と bit 同一のはず"
+        );
     }
 }
