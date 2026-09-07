@@ -35,7 +35,6 @@
 | `crates/backend-cuda/src/kernels_mma_tf32.rs:349-350` | 同上（TF32 版。`MMA_TF32_WARP_M`／`MMA_TF32_WARP_N` は `:183-184`） |
 | `crates/backend-cuda/src/kernels_mma_tf32x3.rs:220-221` | 同上（TF32x3 版） |
 | `crates/backend-cuda/src/kernels_wmma_opt.rs:888`, `:2367`, `:2881` | `warp_id = tid / 32` |
-| `crates/backend-cuda/src/kernels_wmma_opt.rs:3518-3519` | `warp_grid_m = base.block_m / 32`／`warp_grid_n = base.block_n / 32`（Rust 側ホストコード） |
 | `crates/backend-cuda/src/kernels.rs:596` | `warp_id = tid / 32`（WMMA TF32 basic） |
 
 ### (B) butterfly reduction の初期 offset = 16（warp 幅 32 の半分を前提）
@@ -47,6 +46,12 @@
 | `crates/backend-cuda/src/kernels_rmsnorm.rs:268`, `:364`, `:483`, `:495` | 同上 |
 | `crates/backend-metal/src/shaders/softmax.metal:69-73`, `:79-83` | `simd_shuffle_xor(v, 16u)` 〜 `simd_shuffle_xor(v, 1u)`（5 段展開済み） |
 | `crates/backend-metal/src/shaders/rmsnorm.metal:88`, `:221-228` | `RMSNORM_SIMD_WIDTH = 32u` を参照するループで `simd_shuffle_xor` |
+
+### (B') ブロック内 2 段目 reduction のサイズ（1 ブロックあたりの warp 数に依存。butterfly 初期 offset とは別の依存箇所）
+
+| file_path:line | 内容 |
+|---|---|
+| `crates/backend-cuda/src/kernels_mse.rs:100`, `:143`（`__shared__ float warp_sums[8]`）／`:121`, `:162`（`lane < 8 ? warp_sums[lane] : 0.0f`） | `8` は `MSE_BLOCK_DIM`（`:77`。`256`）を warp 幅 `32` で割った「1 ブロックあたりの warp 数」（`:45` の doc コメント「`MSE_BLOCK_DIM = 256`（8 warp）」）。(A)(B) の「レーン導出式」「butterfly 初期 offset」とは別に、各 warp の代表値を集約する 2 段目 reduction のバッファ長・読み出し境界としても warp 幅が埋め込まれている。256 スレッド固定のまま warp 幅だけを 64（CDNA 相当）へ置換すると warp 数は 4 になり、`warp_sums[8]` のうち後半 4 要素が未初期化のまま `lane < 8` の判定で読み出されてしまう（`lane` は 0-63 まで動きうるため境界も変わる）。この箇所はバッファ長・読み出し境界を `MSE_BLOCK_DIM / warp_width` として導出する形に変更する必要があり、単純な `WARP_SIZE` 置換だけでは正しさを壊す |
 
 ### (C) フルマスク `0xffffffff`（`__shfl_xor_sync`／`__syncwarp`。CUDA 固有引数）
 
@@ -72,6 +77,7 @@
 - `crates/backend-cuda/src/kernels_mma.rs:240` 付近（`MMA_BK = 32`）
 - `crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:947`（`BANKS = 32`。共有メモリバンク数であり warp 幅と無関係）
 - `crates/backend-cuda/src/kernels_transpose.rs:55-58`（32×32 タイルの転置。バンクコンフリクト回避の文脈）
+- `crates/backend-cuda/src/kernels_wmma_opt.rs:3518-3519`（`warp_grid_m = base.block_m / 32`／`warp_grid_n = base.block_n / 32`）の `32` は 1 warp が担当するタイル辺長（タイル分割の設計値）であり、warp 幅（レーン数）そのものではない。誤って (A) のレーン導出式と同一視すると、置換時にタイル分割まで変更してしまう。ただし同じ行の直後 `:3521`（`launch_config.block_dim` の `warp_grid_m * warp_grid_n * 32`）に現れる末尾の `* 32` は warp 数→スレッド数換算であり、こちらは warp 幅に依存するため置換対象（(A) 相当）。同一行に「タイル辺長としての 32」と「レーン数としての 32」が両方現れる箇所として、実装時に区別を要する
 
 ### (E) Metal 側 simdgroup 幅 32 前提（実測取得と手動定数の二重管理）
 
@@ -103,7 +109,7 @@ Apple GPU の simdgroup 幅は 32 固定であり、実測（`threadExecutionWid
 | warp／wave 幅 | **移す**（実行時デバイス属性） | `crates/tensor-core/src/device.rs` の `DeviceInfo`（`#[non_exhaustive]`。既存フィールドは `device`・`name`・`total_memory_bytes`・`compute_units` 等）へ `warp_width: Option<u32>` を追加する案。CUDA は既存の `multiprocessor_count()`（`crates/backend-cuda/src/device.rs:229`）と同じ層で `CU_DEVICE_ATTRIBUTE_WARP_SIZE`（`cudarc =0.19.8` の `sys` に存在。属性値は実装時に cudarc のバージョン固定ドキュメントで再確認する）から取得する案。Metal は既存の `threadExecutionWidth()` 実測＋不一致エラー（`gemm.rs:1467`・`error.rs:244`）を「検証付き定数」パターンとしてそのまま `DeviceInfo` 経由に一般化する。CPU は `None` |
 | カーネル文字列への幅注入 | **移す**（レンダリング時 `#define`） | `kernels_tiled_pipeline*.rs` の `render_source` が既に整数パラメータを `#define` プレフィクスとしてソースへ埋め込む方式を採用している（NVRTC ソース生成への外部入力混入防止のため、文字列ではなく数値〈`u32`〉のみを埋め込む設計を踏襲する）。この方式を横展開し、`WARP_SIZE`／`WARP_HALF`（butterfly 初期 offset）をレンダリング時定数として注入する。§2 (A)(B)(D) のリテラル `32`・`16` が置換対象になる |
 | シャッフル・warp 同期のマスク差異 | **移す**（薄いマクロ） | `WARP_SHFL_XOR(v, off)`／`WARP_SYNC()` 相当をソースプレフィクスのマクロとして定義する案。CUDA 側は `__shfl_xor_sync(FULL_MASK, …)`（マスク型は wave64 で 64 bit 化が必要になりうる。`porting-cuda-to-hip.md:24`「lane-mask bit operations may need 64-bit integers on 64-wide warps」）、HIP 側は `__shfl_xor(v, off)`（マスク引数なし。`cpp-language-extensions.md:27`）として定義する。**`__syncwarp` に対応する HIP API は本ドキュメントが参照した `.claude/skills/amd-rocm/references/hip/*.md` の範囲では確認できなかった**ため、「要出典確認」として断定しない（§6 起票案でロックステップ実行前提の妥当性を含め確認する） |
-| ブロック次元定数（rmsnorm／softmax の 1 行 = 1 warp 型） | **移す**（幅から導出） | `RMSNORM_BLOCK_DIM`／`SOFTMAX_BLOCK_DIM` を固定値ではなく `DeviceInfo::warp_width` から導出する形へ変更する案（RDNA なら 32・CDNA なら 64）。`derive_persistent_grid_*`（`crates/backend-cuda/src/rmsnorm.rs:96/115/138`）は SM 数ベースの grid-stride 導出であり幅に依存しないため、この変更でも契約は不変 |
+| ブロック次元定数（rmsnorm／softmax の 1 行 = 1 warp 型） | **移す**（幅から導出） | `RMSNORM_BLOCK_DIM`／`SOFTMAX_BLOCK_DIM` を固定値ではなく `DeviceInfo::warp_width` から導出する形へ変更する案（`kernels_mse.rs` の `warp_sums` バッファ長・`lane < 8` 読み出し境界〈§2 (B')〉も同様に `MSE_BLOCK_DIM / warp_width` から導出する対象に含める）（RDNA なら 32・CDNA なら 64）。`derive_persistent_grid_*`（`crates/backend-cuda/src/rmsnorm.rs:96/115/138`）は SM 数ベースの grid-stride 導出であり幅に依存しないため、この変更でも契約は不変 |
 | Metal の simdgroup 幅 | **移す（同じパラメータ経路を通すが値は 32 固定）** | Apple GPU は世代によらず simdgroup 幅 32 固定。抽象層の `warp_width` には常に 32 を報告させ、既存の実測検証（`UnexpectedThreadExecutionWidth`）はそのまま維持する |
 | タイル寸法の 32（`TILE`・`MMA_BK`・`BANKS` 等） | **移さない** | warp 幅と独立のブロッキング設計値であり、§2 (D) 直後の「参考」欄で述べたとおり誤って同一視しない |
 | Tensor Core ISA（§2 (F)） | **移さない** | バックエンド別カーネル族として維持する。抽象層が担うのは「Tensor Core 経路の選択インターフェース」（既存の `MatrixUnit` 分岐相当）のみで、カーネル本体（`mma.sync`／`wmma::` 等）は移さない。HIP では MFMA／rocWMMA 相当の別カーネル族になる想定だが、本ドキュメントではその実装可否を評価しない |
@@ -116,7 +122,7 @@ Apple GPU の simdgroup 幅は 32 固定であり、実測（`threadExecutionWid
 |------|------|----------------|---------|
 | 通常起動 | CTA（thread block）間の待ち合わせがない | 全カーネルの大半（`stream.launch_builder(func).launch(cfg)` 方式。例: `crates/backend-cuda/src/elementwise.rs:186`・`crates/backend-cuda/src/gemm_mma.rs:828`・`crates/backend-cuda/src/gemm.rs` の多数箇所） | CUDA `cuLaunchKernel` 相当（`launch_builder`）／HIP `hipModuleLaunchKernel`（module-API 経由。`porting-cuda-to-hip.md:25` が挙げる stream-based API に相当） |
 | persistent（同期なし） | grid 次元を SM 数などに固定し、atomic 操作でタイルを動的配布するが、CTA 間で完了を待ち合わせる同期はない | `crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:733`（`s_tile = atomicAdd(tile_counter, 1u)`。`docs/perf/cuda-gemm-tiled-pipeline-persistent.md` 参照）、`crates/backend-cuda/src/rmsnorm.rs` の `derive_persistent_grid_*`（grid-stride ループ、SM 数ベースで幅に依存しない） | 通常起動 API で正しい。複数 CTA の同時実行（co-residency）は性能上の期待にすぎず、正しさの前提条件ではないことをここに明記する |
-| cooperative（grid 全体同期） | fixup 等の目的で、あるカーネル実行内から他 CTA の完了を明示的に待ち合わせる（`grid.sync()` 相当を含む） | 本ドキュメント執筆時点の HEAD（`a659d049`）の `crates/backend-cuda/src/*.rs` には `launch_cooperative` の使用は見つからなかった（`grep -n launch_cooperative crates/backend-cuda/src/*.rs` が空）。Stream-K の fixup（`docs/cuda-streamk-decision.md`。関連イシュー #1357 は本ドキュメント執筆時点で open）が「他 CTA の部分和をスピン待ちする」設計を採る場合はこの区分に該当しうるが、現行実装は該当しない | CUDA `cuLaunchCooperativeKernel`（`cudarc =0.19.8` の `src/driver/safe/launch.rs` に `launch_cooperative` として存在し、シグネチャは **`unsafe fn`**）／HIP `hipLaunchCooperativeKernel`＋デバイスのcooperative launch対応可否の属性検査（`cooperative-groups.md:24,36`）。Metal に相当する概念はなく、Metal バックエンドでは cooperative 区分は使用されず通常起動へ退化する |
+| cooperative（grid 全体同期） | fixup 等の目的で、あるカーネル実行内から他 CTA の完了を明示的に待ち合わせる（`grid.sync()` 相当を含む） | 本ドキュメント執筆時点の HEAD（`a659d049`）の `crates/backend-cuda/src/*.rs` には `launch_cooperative` の使用は見つからなかった（`grep -n launch_cooperative crates/backend-cuda/src/*.rs` が空）。Stream-K の fixup（`docs/cuda-streamk-decision.md`。関連イシュー #1357 は本ドキュメント執筆時点で open）が「他 CTA の部分和をスピン待ちする」設計を採る場合はこの区分に該当しうるが、現行実装は該当しない | CUDA `cuLaunchCooperativeKernel`（`cudarc =0.19.8` の `src/driver/safe/launch.rs` に `launch_cooperative` として存在し、シグネチャは **`unsafe fn`**）／HIP `hipLaunchCooperativeKernel`＋デバイスのcooperative launch対応可否の属性検査（`cooperative-groups.md:24,36`）。Metal に相当する概念はなく、Metal バックエンドは `Cooperative` を要求された時点で「対応可否の fail-closed 検査」（§4「方針」1）により未対応デバイスとしてエラーを返す。通常起動への黙示的な degrade はしない（§4「方針」3「`Cooperative` を要求されたカーネルは通常起動 API へは絶対に落とさない」と整合させる。Metal バックエンドは現状 `Cooperative` を要求するカーネルを持たないため、この境界は実害を伴わない） |
 
 ### 方針
 
