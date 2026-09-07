@@ -18,6 +18,14 @@ fail-closed 検証（#1367 と同方針）:
     検証する（同一 run の重複実行・run id の欠落を検出する。run id を
     見ず単純にサンプル数のみで判定すると、重複と欠落が互いを相殺して
     期待件数を満たしてしまう検出漏れを防ぐ）。
+  - 各 JSON レコードには、直前に出現した run ヘッダの run id を保持する
+    （#1429 codex-review 追加指摘）。これにより (a) ある run 内での JSON
+    行の重複・別 run での対応行の欠落が互いを相殺してサンプル数検査を
+    通過してしまう事態を、グループ内の run id 集合が {1..expected_samples}
+    と完全一致することを直接検証することで検出する。(b) 末尾の run 単位
+    符号一貫性比較（taskset=none, T8 比）は、ファイル中の出現順に基づく
+    位置的な zip ではなく run id で明示的に対応付ける（run ブロックの並び
+    順が条件間で異なるログでも、異なる run 同士を比較しないようにする）。
   - 各 (impl, size, T, taskset) の組み合わせのサンプル数が期待値
     （既定 5）と一致しない場合は集計を中止する。判定対象の組み合わせは
     「ログ中に出現した (T, taskset) の全組」×「ログ中に出現した size の
@@ -42,13 +50,17 @@ TARGET_IMPLS = ["self_gemm_blis_parallel", "gemm"]
 def parse_log(path):
     """1 ログファイルをパースし records・headers を返す。
 
-    records: [(T, taskset, size, impl, impl_threads, tflops_median), ...]
+    records: [(T, taskset, run_id, size, impl, impl_threads, tflops_median), ...]
+        run_id は直前に出現した run ヘッダの run id（#1429 codex-review 指摘対応。
+        重複・欠落の相殺検出とサンプル数検査・run 単位符号一貫性比較の run id 対応
+        付けに使う）。
     headers: [(T, taskset, run_id), ...]（出現順そのまま。重複・欠落検証用）
     """
     records = []
     headers = []
     cur_t = None
     cur_taskset = None
+    cur_run_id = None
     with open(path) as f:
         for line in f:
             line = line.rstrip("\n")
@@ -56,12 +68,13 @@ def parse_log(path):
             if m:
                 cur_t = int(m.group(1))
                 cur_taskset = m.group(3)
-                run_id = int(m.group(2))
-                headers.append((cur_t, cur_taskset, run_id))
+                cur_run_id = int(m.group(2))
+                headers.append((cur_t, cur_taskset, cur_run_id))
                 continue
             m = RC_RE.match(line)
             if m:
                 cur_t = None
+                cur_run_id = None
                 continue
             if line.startswith("{"):
                 try:
@@ -72,7 +85,15 @@ def parse_log(path):
                     print(f"WARN: {path}: JSON 行がヘッダ外に出現: {line[:80]}", file=sys.stderr)
                     continue
                 records.append(
-                    (cur_t, cur_taskset, obj["size"], obj["impl"], obj["impl_threads"], obj["tflops_median"])
+                    (
+                        cur_t,
+                        cur_taskset,
+                        cur_run_id,
+                        obj["size"],
+                        obj["impl"],
+                        obj["impl_threads"],
+                        obj["tflops_median"],
+                    )
                 )
     return records, headers
 
@@ -95,7 +116,7 @@ def main():
 
     # fail-closed 検証 1: impl_threads と T の整合性（self/gemm のみ）
     mismatches = []
-    for t, taskset, size, impl, impl_threads, tflops in records:
+    for t, taskset, run_id, size, impl, impl_threads, tflops in records:
         if impl in TARGET_IMPLS and impl_threads != t:
             mismatches.append((t, taskset, size, impl, impl_threads))
     if mismatches:
@@ -123,12 +144,12 @@ def main():
         print("集計を中止しました（同一 run の重複実行または run id 欠落の疑い）。", file=sys.stderr)
         sys.exit(1)
 
-    # グルーピング: (taskset, size, T, impl) -> [tflops_median, ...]
+    # グルーピング: (taskset, size, T, impl) -> [(run_id, tflops_median), ...]
     grouped = {}
-    for t, taskset, size, impl, impl_threads, tflops in records:
+    for t, taskset, run_id, size, impl, impl_threads, tflops in records:
         if impl not in TARGET_IMPLS:
             continue
-        grouped.setdefault((taskset, size, t, impl), []).append(tflops)
+        grouped.setdefault((taskset, size, t, impl), []).append((run_id, tflops))
 
     # fail-closed 検証 3: サンプル数（全欠落条件を含む網羅的チェック）。
     # 判定対象は「ログに出現した (T, taskset) の全組」×「ログに出現した
@@ -137,7 +158,7 @@ def main():
     # grouped.items() のみを走査すると、ある組み合わせでサンプルが
     # 1 件も出力されなかった場合にそのキー自体が存在せず検知できない。
     conditions = sorted({(t, taskset) for t, taskset, _ in headers})
-    all_sizes = sorted({r[2] for r in records})
+    all_sizes = sorted({r[3] for r in records})
     expected_keys = [
         (taskset, size, t, impl)
         for (t, taskset) in conditions
@@ -148,7 +169,7 @@ def main():
     for k in expected_keys:
         n = len(grouped.get(k, []))
         if n != expected_samples:
-            bad.append((k, n, grouped.get(k, [])))
+            bad.append((k, n, [v for _, v in grouped.get(k, [])]))
     if bad:
         print(f"=== {machine}: サンプル数不一致（期待 {expected_samples}）===", file=sys.stderr)
         for (taskset, size, t, impl), n, vals in bad:
@@ -156,7 +177,24 @@ def main():
         print("集計を中止しました。", file=sys.stderr)
         sys.exit(1)
 
-    medians = {k: statistics.median(v) for k, v in grouped.items()}
+    # fail-closed 検証 4: グループ内 run id 集合の完全一致（#1429 codex-review
+    # 追加指摘）。検証 3（件数一致）だけでは、ある run の JSON 行が重複し別の
+    # run の対応行が欠落しても件数は期待値のまま変わらず検出できない。ここでは
+    # 各グループの run id 集合が {1..expected_samples} と完全一致することを
+    # 直接検証し、重複・欠落の相殺を検出する。
+    run_id_bad = []
+    for k in expected_keys:
+        ids = sorted(run_id for run_id, _ in grouped.get(k, []))
+        if ids != list(range(1, expected_samples + 1)):
+            run_id_bad.append((k, ids))
+    if run_id_bad:
+        print(f"=== {machine}: グループ内 run id 不一致（期待 1..{expected_samples}）===", file=sys.stderr)
+        for (taskset, size, t, impl), ids in run_id_bad:
+            print(f"  taskset={taskset} size={size} T={t} impl={impl}: run_ids={ids}", file=sys.stderr)
+        print("集計を中止しました（run の重複・欠落が相殺されサンプル数検査を通過した疑い）。", file=sys.stderr)
+        sys.exit(1)
+
+    medians = {k: statistics.median(v for _, v in vs) for k, vs in grouped.items()}
 
     print(f"=== {machine}: 中央値表（n={expected_samples}）===")
     tasksets = sorted({k[0] for k in medians})
@@ -186,16 +224,28 @@ def main():
     # 人間 (ドキュメント執筆時) が run ごとの生値と突合して判定する。
     print("=== run 単位の T8 比（符号一貫性確認用。taskset=none）===")
     for size in sizes:
-        base_vals = grouped.get(("none", size, 8, "self_gemm_blis_parallel"))
-        if not base_vals:
+        base_entries = grouped.get(("none", size, 8, "self_gemm_blis_parallel"))
+        if not base_entries:
             continue
+        # run id -> tflops の辞書化。位置的な zip ではなく run id で明示的に
+        # 対応付けることで、run ブロックの並び順が条件間で異なるログでも
+        # 異なる run 同士を比較しない（#1429 codex-review 指摘対応）。
+        base_by_run = dict(base_entries)
         for t in threads:
             if t == 8:
                 continue
-            vals = grouped.get(("none", size, t, "self_gemm_blis_parallel"))
-            if not vals:
+            entries = grouped.get(("none", size, t, "self_gemm_blis_parallel"))
+            if not entries:
                 continue
-            ratios = [v / b for v, b in zip(vals, base_vals)]
+            vals_by_run = dict(entries)
+            common_run_ids = sorted(set(base_by_run) & set(vals_by_run))
+            if set(base_by_run) != set(vals_by_run):
+                print(
+                    f"WARN: size={size} T={t}: base run_ids={sorted(base_by_run)} と "
+                    f"vals run_ids={sorted(vals_by_run)} が不一致（共通分のみ比較）",
+                    file=sys.stderr,
+                )
+            ratios = [vals_by_run[rid] / base_by_run[rid] for rid in common_run_ids]
             below_1 = sum(1 for r in ratios if r < 1.0)
             print(f"  size={size} T={t}: ratios={['%.4f' % r for r in ratios]} below_1_count={below_1}/{len(ratios)}")
 
