@@ -114,11 +114,13 @@ impl CudaMmaTf32x3Gemm {
     /// （`gemm_mma_tf32.rs::CudaMmaTf32Gemm::run_tf32` と同一の検証順序・
     /// 同一のゼロ次元形状契約。ドキュメンテーションコメント参照）。
     ///
-    /// 形状検証群に加え、[`validate_tf32x3_finite_input`] で A・B の
-    /// 非有限値（`NaN`／`±inf`）を起動前に検査し、含まれていれば
-    /// [`crate::error::CudaError::NonFiniteInput`] で fail-closed に
-    /// 拒否する（本経路固有。`CudaError::NonFiniteInput` ドキュメン
-    /// テーションコメント参照）。
+    /// 形状検証群に加え、内部で呼ぶ `upload_f32` が `validate_tf32x3_
+    /// finite_input` で A・B の非有限値（`NaN`／`±inf`）を起動前に検査
+    /// し、含まれていれば [`crate::error::CudaError::NonFiniteInput`]
+    /// で fail-closed に拒否する（本経路固有。分離 API 経路
+    /// `upload_f32` → `launch_tf32x3` → `download_f32` でも同じ検証を
+    /// 通る。`CudaError::NonFiniteInput` ドキュメンテーションコメント
+    /// 参照）。
     pub fn run_tf32x3(
         &self,
         a: &[f32],
@@ -139,7 +141,6 @@ impl CudaMmaTf32x3Gemm {
         validate_mma_tf32_alignment(n, k)?;
         validate_mma_tf32_grid_bounds(m)?;
         validate_mma_tf32_k_bound(k)?;
-        validate_tf32x3_finite_input(a, b)?;
 
         let (a_dev, b_dev) = self.upload_f32(a, b)?;
         let mut c_dev = self.alloc_output_f32(m, n)?;
@@ -150,11 +151,20 @@ impl CudaMmaTf32x3Gemm {
     /// A・B をホスト→デバイスへ転送する（`run_tf32x3` の H2D 部分の
     /// 切り出し。#1356 のベンチマークが GPU 実行時間のみを計測できる
     /// よう、転送とカーネル実行を分離する）。
+    ///
+    /// 非有限入力の拒否（`validate_tf32x3_finite_input`）はここで行う
+    /// （`run_tf32x3` 単体ではなく、分離された公開 API 経路
+    /// `upload_f32` → `launch_tf32x3` → `download_f32` を含む全公開
+    /// 起動経路が唯一のホスト→デバイス取り込み点である本関数を必ず通る
+    /// ため。`launch_tf32x3` はデバイス常駐スライスしか受け取らずホスト
+    /// 側で有限性を再検査できないため、ここでの検証を迂回できない
+    /// fail-closed 境界とする。codex-review 指摘・PR #1400）。
     pub fn upload_f32(
         &self,
         a: &[f32],
         b: &[f32],
     ) -> Result<(CudaSlice<f32>, CudaSlice<f32>), CudaError> {
+        validate_tf32x3_finite_input(a, b)?;
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
         Ok((a_dev, b_dev))

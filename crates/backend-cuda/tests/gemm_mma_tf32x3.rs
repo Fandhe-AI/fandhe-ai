@@ -82,6 +82,45 @@ fn run_tf32x3_rejects_misaligned_shape_without_launch() {
     assert!(matches!(err, CudaError::InvalidShape { .. }));
 }
 
+/// 起動前検証（fail-closed）の実機非依存契約テスト: 分離された公開
+/// 起動 API（`upload_f32` → `launch_tf32x3` → `download_f32`）でも
+/// 非有限入力が `run_tf32x3` と同じく `NonFiniteInput` で拒否される
+/// ことを確認する（codex-review 指摘・PR #1400。回帰: 修正前は
+/// `run_tf32x3` にしか検証がなく、分離 API 経由では
+/// `upload_f32` がそのまま `+inf` を含む A をデバイスへ転送できて
+/// しまい、`launch_tf32x3` まで到達しえた）。
+#[test]
+fn upload_f32_rejects_non_finite_input_in_separated_api() {
+    let device = match CudaDevice::new(0) {
+        Ok(dev) => dev,
+        Err(CudaError::DriverUnavailable { .. }) | Err(CudaError::Driver(_)) => return,
+        Err(other) => panic!("unexpected CudaError variant from CudaDevice::new: {other}"),
+    };
+    let gemm = match CudaMmaTf32x3Gemm::new(&device) {
+        Ok(gemm) => gemm,
+        Err(CudaError::NvrtcUnavailable { .. }) | Err(CudaError::TensorCoreUnsupported { .. }) => {
+            return;
+        }
+        Err(other) => panic!("unexpected CudaError variant from CudaMmaTf32x3Gemm::new: {other}"),
+    };
+
+    // m=n=k=4 の整列済み形状で A を全て +inf にする（指摘の再現条件）。
+    let a = [f32::INFINITY; 16];
+    let b = [1.0f32; 16];
+    let err = gemm
+        .upload_f32(&a, &b)
+        .expect_err("non-finite lhs must be rejected by upload_f32 before any H2D transfer");
+    assert!(matches!(err, CudaError::NonFiniteInput { .. }));
+
+    // rhs 側の非有限値も同様に拒否される。
+    let a = [1.0f32; 16];
+    let b = [f32::NAN; 16];
+    let err = gemm
+        .upload_f32(&a, &b)
+        .expect_err("non-finite rhs must be rejected by upload_f32 before any H2D transfer");
+    assert!(matches!(err, CudaError::NonFiniteInput { .. }));
+}
+
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。
 /// CUDA 非搭載環境では `DriverUnavailable`／`NvrtcUnavailable`／
 /// `TensorCoreUnsupported` の型のみ確認して早期 return する。CUDA+NVRTC
