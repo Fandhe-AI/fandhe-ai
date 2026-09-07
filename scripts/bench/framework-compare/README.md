@@ -761,6 +761,59 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
   `achieved` の判定には一切使わない（イシュー #1148）
 - `tf32:true` の行（イシュー #1042）は本ゲートの対象外として除外する
 
+### Metal GEMM 結線前後 A/B（`run_ab_gemm_metal.sh`／`compare_gemm_ab.py`。イシュー #1306）
+
+`run_gemm_gate_metal.sh` が対 candle の性能ゲート判定なのに対し、本ツールは
+**fandhe-ai 自身の 2 ビルド**（before=正式系列 `fandhe-ai =0.7.0`〈crates.io
+registry 解決〉・after=参考系列 HEAD〈`crates/facade` への path patch〉）を
+比較する。依存 #1304 が `tile::CANDIDATES`／`tile::select`／
+`select_for_device` を一切変更していない（本番既定は不変。
+`docs/perf/metal-gemm-n4096-kernel-gap.md` §19.1）ため、本ツールは字義通りの
+「結線前後」の差分計測ではなく、**v0.7.0 → HEAD の Metal 側変更群（E2〜E8 の
+function constant・候補追加等）が本番既定経路の性能を後退させていないかを
+確認する 0.7.0 ↔ HEAD 非後退確認**である。`compare_ab.py` は
+`framework_version` が before/after で同一だと fail-closed 拒否するため
+（同一バージョンの A/B は意味を持たないという前提）、before/after とも
+`fandhe-ai =0.7.0` を名乗る本用途には流用できない。`compare_managed_ab.py`
+は同一バイナリのフラグ切替専用で 2 本の異なるバイナリを比較する構造を
+持たないため、こちらも流用できない。
+
+- `run_ab_gemm_metal.sh <label>`（`AB_PATCH_FACADE_PATH=<HEAD の crates/facade
+  絶対パス>` 必須。`AB_ROUNDS`〈既定 5〉で計測回数を調整可能だが判定は 5
+  固定）は before（registry）・after（path patch）の 2 バイナリを
+  `target/release/bench-fandhe-ab-before`／`-ab-after` としてビルドし、
+  ビルド直後に `cargo tree` で依存解決元（before=registry・after=
+  `path:<AB_PATCH_FACADE_PATH>`）を検証したうえで sha256・依存解決元を
+  `results/raw/manifest-m4max-gemm-ab-<label>.json` へ記録する。N=512/1024/
+  2048/4096 × fresh/reuse を 5 run（run 単位で before/after を交互起動。
+  偶数 run では順序を反転し起動順序の系統誤差を均す）計測し、
+  `results/raw/results-m4max-gemm-ab-before-0.7.0-<label>.jsonl`／
+  `results-m4max-gemm-ab-after-<label>.jsonl` へ記録する（before 側の
+  保存先も `<label>` でスコープする。別 label で再実行した際に過去の
+  before データを上書きせず、当該 label の交互計測ペアを追跡できる
+  ようにするため）。`[patch]` は CLI
+  引数のみで与え `Cargo.lock`／`.cargo/config.toml` はコミットしない
+  （`Cargo.lock` は trap で復元。deps-policy.md 第 9 区分）。全 run 成功時
+  にのみ一時ファイルを正規パスへ原子的に反映し、1 件でも失敗すれば正規
+  パスを変更せず `.failed-<UTC>` へ退避する（fail-closed。security.md A08）
+- `compare_gemm_ab.py BEFORE.jsonl AFTER.jsonl [--threshold 1.05]` は
+  `(size, mode)` セルごとに before/after 各ちょうど 5 件を要求し、
+  `median_s` 中央値比（`ratio = after/before`。既定閾値 1.05 以下なら
+  非後退）・checksum 複合判定（`checksum_contract.checksums_match`）＋
+  完全一致列を Markdown 表で出力する。本番カーネル・選択結果は不変のため
+  bit 完全一致が期待値であり、複合判定 pass のみ（完全一致でない）は
+  「複合判定 ok」として区別する。`framework != "fandhe-ai"`・`tf32:true`・
+  `managed:true`・`task != "gemm"`・`device != "metal"`・`parity_fail_count
+  > 0` の行は判定不能として除外する。終了コード: 0=全セル非後退、
+  3=後退または判定不能あり、2=入力不能
+- 結線判断: 全 8 セル非後退なら現行 `select_for_device` 既定（#1304 完了
+  時点の候補表）を本番既定として確定しコード変更なし。1 セル以上後退した
+  場合も結線対象（unwire 対象）は存在しないためコード変更なしで、後退を
+  v0.7.0 → HEAD の Metal 変更群のいずれかによる（切り分け未実施）と
+  帰属して記録する。判定不能（負荷ノイズ・checksum 不一致）の場合も本番
+  既定は切り替えない（安全側）。判断の記録先は
+  `docs/perf/metal-gemm-n4096-kernel-gap.md` §19
+
 ## A/B 計測（都度同期廃止・イシュー #1083）
 
 #1011（CUDA 都度 `stream.synchronize()` 廃止）の受入条件「MLP 学習 1 step が

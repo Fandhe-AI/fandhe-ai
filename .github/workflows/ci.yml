@@ -778,6 +778,14 @@ jobs:
       - name: フレームワーク横並びベンチ compare_managed_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/compare_managed_ab_test.py
 
+      # イシュー #1306: compare_gemm_ab.py（Metal GEMM の before〈正式系列
+      # fandhe-ai =0.7.0〉/after〈参考系列 HEAD path patch〉2 バイナリ A/B
+      # 比較ヘルパー）の回帰テスト。summarize_test.py・compare_ab_test.py・
+      # compare_gemm_gate_test.py・compare_managed_ab_test.py と同一方針
+      # （stdlib の unittest のみ・cargo の有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ compare_gemm_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/compare_gemm_ab_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
