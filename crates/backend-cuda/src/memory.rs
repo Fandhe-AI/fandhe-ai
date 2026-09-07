@@ -715,6 +715,57 @@ impl MemoryOps for CudaMemory {
     }
 }
 
+impl CudaMemory {
+    /// **`internal-diagnostics` feature（既定 off）限定の診断専用入口**。
+    /// イシュー #1353（codex-review 指摘）: `download()`（`MemoryOps` 実装。
+    /// 本ファイル上部）は managed 配置でも `host_readback` が
+    /// `UnifiedSlice::as_slice().to_vec()` で通常ホストメモリへコピーして
+    /// から `Tensor` を返すため、`tests/managed_placement_bandwidth_
+    /// real_device.rs` が測っていた「readback」区間はこのコピー後の
+    /// 通常 `Vec<f32>` を読むだけになり、managed ページへの CPU 直接
+    /// アクセス帯域を計測できていなかった。本関数は `UnifiedSlice::
+    /// as_slice()` が返す借用スライスを**コピーせずそのまま**逐次合計
+    /// して読み取り時間（秒）を返すことで、managed ページ自体への CPU
+    /// アクセス帯域を計測可能にする。同期契約は `host_readback` と同一
+    /// （`stream.synchronize()` を先に呼ぶ理由は同関数のドキュメンテー
+    /// ションコメント参照）。`Device`（device-only）配置のバッファは
+    /// ホストから直接アクセス可能なアドレスを持たないため
+    /// `BackendError::Unsupported` を返す。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn measure_managed_direct_read_seconds(
+        &self,
+        buffer: &DeviceBuffer<f32>,
+    ) -> Result<f64, BackendError> {
+        let handle = buffer
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        if buffer.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
+            let unified = match &handle.storage {
+                Some(CudaStorage::Managed(unified)) => unified,
+                Some(CudaStorage::Device(_)) => {
+                    return Err(CudaError::ManagedMemoryUnsupported {
+                        detail: "measure_managed_direct_read_seconds は Managed 配置限定"
+                            .to_string(),
+                    });
+                }
+                None => return Ok(0.0),
+            };
+            self.stream.synchronize()?;
+            let slice = unified.as_slice()?;
+            let t0 = std::time::Instant::now();
+            let mut acc = 0.0f64;
+            for &v in slice {
+                acc += v as f64;
+            }
+            std::hint::black_box(acc);
+            Ok(t0.elapsed().as_secs_f64())
+        })
+    }
+}
+
 /// `fandhe_ai_tensor_core::pool::PooledMemory<CudaMemory>`（TASK-#201・REQ-14 14-3）
 /// が再利用バッファを返す前に呼ぶゼロ初期化フック。プール保持中も
 /// `CudaBufferHandle::_alloc`（`TrackedAllocation`）は生存し続けるため、

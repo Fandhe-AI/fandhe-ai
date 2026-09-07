@@ -168,6 +168,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: None,
         parity,
         tf32: cli.tf32,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -290,6 +291,7 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             init_s: None,
             parity,
             tf32: cli.tf32,
+            managed: cli.managed,
         }
         .emit(&cli.out)?;
     }
@@ -352,6 +354,7 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             init_s: None,
             parity,
             tf32: cli.tf32,
+            managed: cli.managed,
         }
         .emit(&cli.out)?;
     }
@@ -449,6 +452,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: None,
         parity: None,
         tf32: false,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -491,6 +495,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: None,
         parity: None,
         tf32: false,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -548,6 +553,17 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    // イシュー #1353: `--managed`（CUDA managed memory 配置）は fandhe-ai
+    // 固有の opt-in API（`set_cuda_managed_memory_enabled`）を指す概念で
+    // あり、candle には対応する公開 API が存在しない。`--phases`／
+    // `--mode reuse` と同型の allowlist 方式で常に拒否する。
+    if cli.managed {
+        return Err(
+            "MEASURE_ERROR: --managed is not supported by candle (fandhe-ai-only CUDA managed \
+             memory opt-in; issue #1353)"
+                .into(),
+        );
+    }
     match cli.task.as_str() {
         "gemm" => run_gemm(cli),
         "gemm-transfer-split" => run_gemm_transfer_split(cli),
@@ -570,6 +586,7 @@ mod tests {
             mode: "fresh".to_string(),
             phases: false,
             tf32,
+            managed: false,
         }
     }
 
@@ -616,5 +633,18 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
         assert!(msg.contains("--mode reuse"), "msg={msg}");
+    }
+
+    /// イシュー #1353: `--managed` は fandhe-ai 固有の CUDA managed memory
+    /// opt-in API を指す概念であり、candle には対応する公開 API がないため
+    /// 常に MEASURE_ERROR で fail-fast する。
+    #[test]
+    fn managed_flag_is_always_measure_error() {
+        let mut cli = base_cli("gemm", "cuda", false);
+        cli.managed = true;
+        let err = dispatch(&cli).expect_err("--managed must be rejected on bench-candle");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--managed"), "msg={msg}");
     }
 }
