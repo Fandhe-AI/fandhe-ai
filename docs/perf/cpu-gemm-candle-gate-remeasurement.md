@@ -834,6 +834,19 @@ DGX は概ね近い（N=1024: 5.069 対 5.349 ms・約 5% 差、N=2048: 26.056 �
 受けた可能性がある」という**仮説**にとどめ、乖離の全量を単一の外れ値・
 load average のみに帰属させる断定はしない（未特定のまま記録）。
 
+**M4 Max N=2048 は Layer B `kernel` 自体が Layer A `iter_total` を上回る**:
+Layer B の N=2048 `kernel` 中央値 23.842 ms は、同一形状の Layer A
+`iter_total`（`matmul`＋`to_tensor`＋`host_copy`＋`checksum` の合計）中央値
+22.608 ms を上回る。`kernel` は本来 `matmul`（ひいては `iter_total`）に
+包含される部分区間であり、包含関係が保たれるなら `kernel` が全体を
+超えることはない。この逆転は Layer A・Layer B が別プロセス・別時点の
+計測（§15.1 のとおり系列は同一 HEAD だが実行自体は独立）であるために
+生じた計測条件差（負荷変動を含む）由来と考えられるが、原因は本追補では
+未特定のまま記録する。この逆転がある以上、**M4 Max N=2048 について
+Layer B（`kernel`・`ops_gemm`・retune baseline との比較）から導く結論は、
+Layer A 単体で直接確認できる事実（`host_copy`・`checksum` の比率等）とは
+異なり、あくまで仮説として扱う**（§15.5 で区別する）。
+
 **(ii) `ops_gemm` vs `alloc_c+kernel+tensor_wrap`**: `ops_gemm` は
 イテレーションごとに `alloc_c+kernel+tensor_wrap` を直接計測した独立の
 区間であり、表の `alloc_c`／`kernel`／`tensor_wrap` 列（各区間を個別に
@@ -853,12 +866,34 @@ load average のみに帰属させる断定はしない（未特定のまま記�
 してから合計した値とは一致しない。`ops_gemm`／`tape_matmul` は含まない）。
 `ops_gemm` や `tape_matmul` の重複計上は無い。例えば DGX N=2048 は
 `Σ`=37.082 ms に対し `ops_gemm`=26.872 ms であり、両者には約 1.38 倍の
-差があるが、これは重複計上ではなく `Σ` が `ops_gemm`（`alloc_c+kernel+
-tensor_wrap` の合成計測）を含まず、代わりに `alloc_c`・`kernel`・
-`tensor_wrap` を個別区間として直接合算しているために生じる差である。
-本番経路の実コスト指標としては `ops_gemm`（本番合成レプリカ）を用いる
-べきで、`Σ` をそのまま `ops_gemm` の代替や本番経路コストの指標として
-扱わない。
+差（10.210 ms）があるが、これは重複計上ではなく `Σ` が `ops_gemm`
+（`alloc_c+kernel+tensor_wrap` の合成計測）を含まず、代わりに `alloc_c`・
+`kernel`・`tensor_wrap` を個別区間として直接合算しているために生じる差
+である。この 10.210 ms は単一の原因ではなく、性質の異なる 2 つの要素へ
+分けられる:
+
+- **主因（計測範囲の違い）**: `Σ` は `host_copy`（5.625 ms）・`checksum`
+  （3.007 ms）の 2 区間を含むが、`ops_gemm` はこの 2 区間を含まない
+  （`alloc_c+kernel+tensor_wrap` のみを計測する独立区間のため）。この
+  差分は 5.625+3.007=**8.632 ms**（約 8.63 ms）で、10.210 ms のうち
+  最大の寄与を占める
+- **残差（中央値の非加法性・独立計測由来）**: 表の `alloc_c`（2.881 ms）・
+  `kernel`（25.611 ms）・`tensor_wrap`（0.0054 ms）を単純合計すると
+  **28.497 ms**（約 28.50 ms）となり、これは `ops_gemm` 自体の中央値
+  26.872 ms と厳密には一致しない（差 **1.625 ms**・約 1.63 ms）。原因は
+  §15.3 冒頭で述べた中央値の非加法性（`median(a)+median(b)+... ≠
+  median(a+b+...)`）に加え、`alloc_c`／`kernel`／`tensor_wrap` が
+  `Σ` 側では run 内 20 trials それぞれで 3 区間を個別計測した値である
+  のに対し、`ops_gemm` はイテレーションごとに 3 区間分をまとめて 1 回で
+  独立計測した値であり、両者は同一コード経路を指しつつも計測手続きが
+  異なる（個別区間の直接比較ではない）ことにも起因する
+
+8.632 ms（主因）＋1.625 ms（残差）＝10.257 ms は実測差 10.210 ms と
+端数の丸めの範囲でおおむね一致する。**主因は `host_copy`／`checksum`
+という計測範囲の違いであり、残差（中央値の非加法性・独立計測の手続き差）
+はこれよりも一桁小さい**。本番経路の実コスト指標としては `ops_gemm`
+（本番合成レプリカ）を用いるべきで、`Σ` をそのまま `ops_gemm` の代替や
+本番経路コストの指標として扱わない。
 
 **(iii) Layer A ⊃ Layer B の妥当性**: Layer A `iter_total` を `2N³/t` へ
 換算した値は §12.2（イシュー #1185・`fandhe-ai =0.7.0` reuse）の GFLOP/s と
@@ -884,13 +919,32 @@ checksum の固定費」と推定していた。本追補で分解した結果�
 本追補の `kernel` 区間は診断ハーネス下（毎反復 `alloc_c` で新規 C ページを
 確保する構成。§15.3 のとおり first-touch がどちらの区間に計上されるかは
 未特定）の値であり、retune §5 の A/B ハーネス（C バッファを反復間で
-使い回す想定）とは計測条件が異なる点に注意。それでも両者は
-85〜96%（DGX N=2048 のみ）の範囲で近く、§8.1 が観測した「本計測 reuse」対
-「カーネル単体」の 16〜48% という大きな差の**大部分はカーネル自体の効率
-差ではなく、`kernel` 区間の外側**（`alloc_c`・autodiff 残差・`to_tensor`・
-`host_copy`・`checksum`）**に乗っていることが本追補で確定した**。
+使い回す想定）とは計測条件が異なる点に注意。
 
-内訳で見ると、`iter_total`（Layer A）に対する寄与は:
+**この節の結論は、条件のそろった Layer A 単体から直接確認できる事実と、
+条件の異なる Layer A/Layer B・retune baseline 間比較に基づく仮説とを
+分けて記述する。** §15.4 のとおり M4 Max N=2048 は Layer B `kernel`
+（23.842 ms）が同一形状の Layer A `iter_total`（22.608 ms）を上回るという
+包含関係の逆転があり、Layer B（`kernel`・retune baseline）を参照する比較は
+少なくとも M4 Max N=2048 について確度を主張できない。DGX（`kernel`
+単体が Layer A `iter_total` を上回る逆転は観測されていない）・M4 Max
+N=1024 以下は Layer B・retune baseline とも大きな矛盾は見られないが、
+本追補ではこの逆転が生じた条件差自体を特定していないため、逆転が
+生じていない形状・実機についても Layer B 由来の結論は同じ性質の仮説
+として扱う。
+
+- **仮説（Layer B・retune baseline との比較に基づく）**: `kernel` 単体の
+  GFLOP/s は retune §5 RowPanel の 85〜96%（DGX N=2048 のみ）の範囲で
+  近く、この近さが実機・形状全体で成り立つなら、§8.1 が観測した「本計測
+  reuse」対「カーネル単体」の 16〜48% という差の大部分はカーネル自体の
+  効率差ではなく `kernel` 区間の外側（`alloc_c`・autodiff 残差・
+  `to_tensor`・`host_copy`・`checksum`）に乗っていると解釈できる。ただし
+  上記の逆転により、この解釈を「本追補で確定した」とは言えず、次項の
+  Layer A 直接確認分で裏付けられる範囲（`host_copy`／`checksum`）を除き
+  仮説にとどめる
+
+**確認済みの事実（Layer A 単体・比較なしで直接計測）**: `iter_total`
+（Layer A）に対する寄与は:
 
 - **M4 Max**: `matmul`（`kernel` 相当を含む本番経路）が 72〜84%（既に
   カーネル自体を含む）、`host_copy` が 2.0〜7.1%、`checksum` が
