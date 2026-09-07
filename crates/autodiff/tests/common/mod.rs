@@ -16,7 +16,8 @@
 #![allow(dead_code)] // テストファイルごとに使う関数が異なるため。
 
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, Device, ShapeError, Tensor, reduce_out_shape,
+    BackendError, BackendOps, ChecksumReadout, Device, GemmChecksum, ShapeError, Tensor,
+    reduce_out_shape,
 };
 
 pub struct NaiveOps;
@@ -122,6 +123,32 @@ impl BackendOps for NaiveOps {
             }
         }
         Ok(build(out, &[m, n]))
+    }
+
+    /// [`Var::matmul_checksum`]（イシュー #1339）の統合テスト向けフィク
+    /// スチャ。`Self::gemm` と同じ演算を行い、checksum は結果を先頭から
+    /// `f64` へ昇格して逐次和で求める（`backend-cpu::CpuBackendOps::
+    /// gemm_checksum` と同じ意味論。`crates/autodiff` は具体バックエンド
+    /// クレートへ依存しない設計制約〈本ファイル冒頭コメント〉のため、
+    /// ここでも独立実装する）。
+    fn gemm_checksum(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        readout: ChecksumReadout,
+    ) -> Result<GemmChecksum, BackendError> {
+        let out = self.gemm(a, b)?;
+        let checksum: f64 = dense(&out).iter().map(|&x| x as f64).sum();
+        let output = match readout {
+            ChecksumReadout::ChecksumOnly => None,
+            ChecksumReadout::WithOutput => Some(out),
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "NaiveOps::gemm_checksum: unsupported ChecksumReadout variant {readout:?}"
+                )));
+            }
+        };
+        Ok(GemmChecksum { checksum, output })
     }
 
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {

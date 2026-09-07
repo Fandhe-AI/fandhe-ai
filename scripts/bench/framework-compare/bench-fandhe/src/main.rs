@@ -339,6 +339,15 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .to_vec();
     let reference = GemmReference::compute(n, &a_host, &b_host)?;
 
+    // イシュー #1339: `--device-checksum` は fresh モードでも計測窓を
+    // 「tape 構築 → 葉登録 → `matmul_checksum(ChecksumOnly)`」へ置換する
+    // （`device-checksum` feature 有効時のみ到達。`dispatch` が feature
+    // 無効ビルドでは事前に MEASURE_ERROR にする）。
+    #[cfg(feature = "device-checksum")]
+    if cli.device_checksum {
+        return run_gemm_device_checksum(cli, &a_data, &b_data, &reference);
+    }
+
     let mut checksum = 0.0;
     let mut parity: Option<ParityStats> = None;
 
@@ -405,6 +414,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity,
         tf32: false,
         managed: cli.managed,
+        device_checksum: cli.device_checksum,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -433,6 +443,14 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("b_data as_slice() returned None")?
         .to_vec();
     let reference = GemmReference::compute(n, &a_host, &b_host)?;
+
+    // イシュー #1339: reuse モードも `--device-checksum` で init_s の定義を
+    // 「tape 構築 + 葉登録 + 初回 `matmul_checksum` + 8 バイト読み戻し」へ
+    // 置換する（`device-checksum` feature 有効時のみ到達）。
+    #[cfg(feature = "device-checksum")]
+    if cli.device_checksum {
+        return run_gemm_reuse_device_checksum(cli, &a_data, &b_data, &reference);
+    }
 
     // init_s: tape 構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
     // 経過（CUDA コンテキスト作成・NVRTC コンパイル等の一度きりのコストを
@@ -491,6 +509,169 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity: Some(parity),
         tf32: false,
         managed: cli.managed,
+        device_checksum: cli.device_checksum,
+    }
+    .emit(&cli.out)?;
+    Ok(())
+}
+
+/// `run_gemm` の `--device-checksum` 分岐（イシュー #1339。`device-checksum`
+/// feature 有効時のみコンパイルされる）。計測窓を「fresh tape 構築 → 葉
+/// 登録 → `matmul_checksum(ChecksumOnly)`」へ置換し、GPU バックエンドでは
+/// `C` のホスト download を毎反復回避する契約（`BackendOps::gemm_checksum`
+/// doc 参照。CUDA／Metal は本イシュー時点で未実装のため
+/// `BackendError::Unsupported` がそのまま伝播し MEASURE_ERROR になる）。
+/// ループ後の未計時 1 反復（`ChecksumReadout::WithOutput`）で要素単位
+/// parity（`GemmReference::verify`）と、決定的カーネルであれば成り立つ
+/// はずの「末尾 checksum と最終計時反復の checksum の bit 一致」を検証
+/// する（AC-2）。
+#[cfg(feature = "device-checksum")]
+fn run_gemm_device_checksum(
+    cli: &Cli,
+    a_data: &Tensor<f32>,
+    b_data: &Tensor<f32>,
+    reference: &GemmReference,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use fandhe_ai::ChecksumReadout;
+    let n = cli.size;
+    let mut checksum = 0.0;
+    let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let tape = make_tape(&cli.device)?;
+        let a = tape.var(a_data);
+        let b = tape.var(b_data);
+        let result = a.matmul_checksum(&b, ChecksumReadout::ChecksumOnly)?;
+        *sync_checksum = result.checksum;
+        let elapsed = start.elapsed();
+        validate_gemm_checksum(*sync_checksum)?;
+        Ok(elapsed)
+    };
+    for _ in 0..WARMUP_ITERS {
+        one(&mut checksum)?;
+    }
+    let mut durations = Vec::with_capacity(MEASURE_ITERS);
+    for _ in 0..MEASURE_ITERS {
+        durations.push(one(&mut checksum)?);
+    }
+    let tape = make_tape(&cli.device)?;
+    let a = tape.var(a_data);
+    let b = tape.var(b_data);
+    let tail = a.matmul_checksum(&b, ChecksumReadout::WithOutput)?;
+    let output = tail
+        .output
+        .ok_or("MEASURE_ERROR: matmul_checksum(WithOutput) returned output=None (issue #1339)")?;
+    let out = output.as_slice().ok_or(
+        "MEASURE_ERROR: matmul_checksum(WithOutput).output.as_slice() returned None \
+         (issue #1339)",
+    )?;
+    let parity = reference.verify(out)?;
+    if tail.checksum.to_bits() != checksum.to_bits() {
+        return Err(format!(
+            "MEASURE_ERROR: tail matmul_checksum ({}) is not bit-identical to the last timed \
+             iteration's checksum ({}); GEMM kernel selection may be non-deterministic \
+             (issue #1339)",
+            tail.checksum, checksum
+        )
+        .into());
+    }
+    let st = stats(&durations)?;
+    Record {
+        framework: FRAMEWORK,
+        framework_version: VERSION,
+        task: "gemm",
+        device: &cli.device,
+        size: n,
+        stats: st,
+        gflops: Some(gemm_gflops(n, st.median_s)),
+        throughput_per_s: None,
+        checksum,
+        warmup: WARMUP_ITERS,
+        iters: MEASURE_ITERS,
+        mode: "fresh",
+        init_s: None,
+        parity: Some(parity),
+        tf32: false,
+        managed: cli.managed,
+        device_checksum: true,
+    }
+    .emit(&cli.out)?;
+    Ok(())
+}
+
+/// `run_gemm_reuse` の `--device-checksum` 分岐（イシュー #1339。
+/// [`run_gemm_device_checksum`] の reuse 版）。`init_s` は「tape 構築 +
+/// 葉登録 + 初回 `matmul_checksum` + 8 バイト読み戻し」までの経過時間
+/// と再定義する（README「計測プロトコル」節に明記する契約差分）。
+#[cfg(feature = "device-checksum")]
+fn run_gemm_reuse_device_checksum(
+    cli: &Cli,
+    a_data: &Tensor<f32>,
+    b_data: &Tensor<f32>,
+    reference: &GemmReference,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use fandhe_ai::ChecksumReadout;
+    let n = cli.size;
+    let init_start = Instant::now();
+    let tape = make_tape(&cli.device)?;
+    let a = tape.var(a_data);
+    let b = tape.var(b_data);
+    let r0 = a.matmul_checksum(&b, ChecksumReadout::ChecksumOnly)?;
+    let mut checksum = r0.checksum;
+    let init_s = init_start.elapsed().as_secs_f64();
+    validate_gemm_checksum(checksum)?;
+
+    let mut one = || -> Result<Duration, Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let result = a.matmul_checksum(&b, ChecksumReadout::ChecksumOnly)?;
+        checksum = result.checksum;
+        let elapsed = start.elapsed();
+        validate_gemm_checksum(checksum)?;
+        Ok(elapsed)
+    };
+    for _ in 0..WARMUP_ITERS.saturating_sub(1) {
+        one()?;
+    }
+    let mut durations = Vec::with_capacity(MEASURE_ITERS);
+    for _ in 0..MEASURE_ITERS {
+        durations.push(one()?);
+    }
+    let tail = a.matmul_checksum(&b, ChecksumReadout::WithOutput)?;
+    let output = tail
+        .output
+        .ok_or("MEASURE_ERROR: matmul_checksum(WithOutput) returned output=None (issue #1339)")?;
+    let out = output.as_slice().ok_or(
+        "MEASURE_ERROR: matmul_checksum(WithOutput).output.as_slice() returned None \
+         (issue #1339)",
+    )?;
+    let parity = reference.verify(out)?;
+    if tail.checksum.to_bits() != checksum.to_bits() {
+        return Err(format!(
+            "MEASURE_ERROR: tail matmul_checksum ({}) is not bit-identical to the last timed \
+             iteration's checksum ({}); GEMM kernel selection may be non-deterministic \
+             (issue #1339)",
+            tail.checksum, checksum
+        )
+        .into());
+    }
+    let st = stats(&durations)?;
+    Record {
+        framework: FRAMEWORK,
+        framework_version: VERSION,
+        task: "gemm",
+        device: &cli.device,
+        size: n,
+        stats: st,
+        gflops: Some(gemm_gflops(n, st.median_s)),
+        throughput_per_s: None,
+        checksum,
+        warmup: WARMUP_ITERS,
+        iters: MEASURE_ITERS,
+        mode: "reuse",
+        init_s: Some(init_s),
+        parity: Some(parity),
+        tf32: false,
+        managed: cli.managed,
+        device_checksum: true,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -641,6 +822,7 @@ fn emit_gemm_phase_records(
                 parity: Some(parity),
                 tf32: false,
                 managed: cli.managed,
+                device_checksum: false,
             },
             phase,
             phase_index,
@@ -739,6 +921,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity: None,
         tf32: false,
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -895,6 +1078,7 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity: None,
         tf32: false,
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1125,6 +1309,7 @@ fn emit_phase_records(
                 parity: None,
                 tf32: false,
                 managed: cli.managed,
+                device_checksum: false,
             },
             phase,
             phase_index,
@@ -1197,6 +1382,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity: None,
         tf32: false,
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1295,6 +1481,7 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity: None,
         tf32: false,
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1479,6 +1666,7 @@ fn emit_infer_phase_records(
                 parity: None,
                 tf32: false,
                 managed: cli.managed,
+                device_checksum: false,
             },
             phase,
             phase_index,
@@ -1579,6 +1767,31 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    // イシュー #1339: `--device-checksum` は `--task gemm`（`--phases` なし。
+    // `run_gemm`／`run_gemm_reuse` のみが device reduction 分岐を持つ）
+    // 限定の allowlist 方式。`device-checksum` feature（crates.io 公開版
+    // `fandhe-ai =0.7.0` には `Var::matmul_checksum` API が未収録のため
+    // path patch 前提）が無効なビルドでは常に MEASURE_ERROR とする
+    // （`--managed` と同型）。
+    if cli.device_checksum {
+        if cli.task != "gemm" || cli.phases {
+            return Err(format!(
+                "MEASURE_ERROR: --device-checksum is only supported for --task gemm without \
+                 --phases (got task='{}' phases={}; issue #1339)",
+                cli.task, cli.phases
+            )
+            .into());
+        }
+        #[cfg(not(feature = "device-checksum"))]
+        {
+            return Err(
+                "MEASURE_ERROR: --device-checksum requires fandhe-ai >= 0.8.0 or a \
+                 path-patched facade built with --features device-checksum (issue #1339; see \
+                 scripts/bench/framework-compare/README.md \"--device-checksum\" section)"
+                    .into(),
+            );
+        }
+    }
     match (cli.task.as_str(), cli.mode.as_str(), cli.phases) {
         ("train", "fresh", true) => run_train_phases(cli),
         ("train", "reuse", true) => run_train_reuse_phases(cli),
@@ -1643,6 +1856,7 @@ mod tests {
             phases: false,
             tf32: false,
             managed: false,
+            device_checksum: false,
         }
     }
 
@@ -1722,6 +1936,7 @@ mod tests {
             phases: true,
             tf32: false,
             managed: false,
+            device_checksum: false,
         }
     }
 
@@ -1854,6 +2069,7 @@ mod tests {
             phases: true,
             tf32: false,
             managed: false,
+            device_checksum: false,
         };
         let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
         let msg = err.to_string();
@@ -1878,6 +2094,7 @@ mod tests {
             phases: true,
             tf32: false,
             managed: false,
+            device_checksum: false,
         }
     }
 
@@ -2066,6 +2283,7 @@ mod tests {
             phases: true,
             tf32: false,
             managed: false,
+            device_checksum: false,
         };
         dispatch(&cli).expect("cuda gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2092,6 +2310,7 @@ mod tests {
             phases: true,
             tf32: false,
             managed: false,
+            device_checksum: false,
         };
         dispatch(&cli).expect("metal gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2119,6 +2338,7 @@ mod tests {
             phases: true,
             tf32: false,
             managed: false,
+            device_checksum: false,
         }
     }
 
@@ -2340,6 +2560,7 @@ mod tests {
             phases: false,
             tf32: false,
             managed: false,
+            device_checksum: false,
         })
         .expect("cuda infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -2361,6 +2582,7 @@ mod tests {
                 phases: true,
                 tf32: false,
                 managed: false,
+                device_checksum: false,
             })
             .expect("cuda infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2392,6 +2614,7 @@ mod tests {
             phases: false,
             tf32: false,
             managed: false,
+            device_checksum: false,
         })
         .expect("metal infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -2413,6 +2636,7 @@ mod tests {
                 phases: true,
                 tf32: false,
                 managed: false,
+                device_checksum: false,
             })
             .expect("metal infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2445,6 +2669,7 @@ mod tests {
                 phases: false,
                 tf32: true,
                 managed: false,
+                device_checksum: false,
             };
             let err = dispatch(&cli).expect_err("--tf32 must be rejected on bench-fandhe");
             let msg = err.to_string();
@@ -2470,6 +2695,7 @@ mod tests {
                 phases: false,
                 tf32: false,
                 managed: true,
+                device_checksum: false,
             };
             let err = dispatch(&cli).expect_err("--managed must be rejected on non-cuda device");
             let msg = err.to_string();
@@ -2498,6 +2724,7 @@ mod tests {
             phases: false,
             tf32: false,
             managed: true,
+            device_checksum: false,
         };
         let err = dispatch(&cli)
             .expect_err("--managed must be rejected without managed-placement feature");
@@ -2505,6 +2732,116 @@ mod tests {
         assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
         assert!(msg.contains("--managed"), "msg={msg}");
         assert!(msg.contains("0.8.0"), "msg={msg}");
+    }
+
+    /// イシュー #1339: `--device-checksum` は `--task gemm`（`--phases`
+    /// なし）限定の allowlist 方式で、それ以外の task／`--phases` 併用は
+    /// 常に MEASURE_ERROR で fail-fast する。
+    #[test]
+    fn device_checksum_flag_on_non_gemm_task_is_measure_error() {
+        for task in ["train", "infer"] {
+            let out = temp_out_path(&format!("device-checksum-non-gemm-{task}"));
+            let cli = Cli {
+                task: task.to_string(),
+                device: "cpu".to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: "fresh".to_string(),
+                phases: false,
+                tf32: false,
+                managed: false,
+                device_checksum: true,
+            };
+            let err =
+                dispatch(&cli).expect_err("--device-checksum must be rejected for non-gemm tasks");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--device-checksum"), "msg={msg}");
+        }
+    }
+
+    /// イシュー #1339: `--device-checksum --phases` の併用は常に
+    /// MEASURE_ERROR（`run_gemm`／`run_gemm_reuse` のみが対応し、
+    /// `gemm --mode reuse --phases` は対象外）。
+    #[test]
+    fn device_checksum_flag_with_phases_is_measure_error() {
+        let out = temp_out_path("device-checksum-phases");
+        let cli = Cli {
+            task: "gemm".to_string(),
+            device: "cpu".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: "reuse".to_string(),
+            phases: true,
+            tf32: false,
+            managed: false,
+            device_checksum: true,
+        };
+        let err = dispatch(&cli).expect_err("--device-checksum --phases must be rejected");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--device-checksum"), "msg={msg}");
+    }
+
+    /// イシュー #1339: `device-checksum` feature が無効な既定ビルド
+    /// （`fandhe-ai =0.7.0` ピンには `Var::matmul_checksum` API 自体が
+    /// 未収録）では、`--task gemm` でも `--device-checksum` は常に
+    /// MEASURE_ERROR で fail-fast する。本テストはこのビルド構成（既定
+    /// feature）でのみ意味を持つ（`device-checksum` feature 有効ビルドは
+    /// 本ファイル冒頭の手動確認手順・README「`--device-checksum`」節を
+    /// 参照。CPU 経由の実測は同 feature 有効ビルドで別途確認済み）。
+    #[test]
+    #[cfg(not(feature = "device-checksum"))]
+    fn device_checksum_flag_without_feature_is_measure_error() {
+        let out = temp_out_path("device-checksum-no-feature");
+        let cli = Cli {
+            task: "gemm".to_string(),
+            device: "cpu".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: "fresh".to_string(),
+            phases: false,
+            tf32: false,
+            managed: false,
+            device_checksum: true,
+        };
+        let err = dispatch(&cli)
+            .expect_err("--device-checksum must be rejected without device-checksum feature");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--device-checksum"), "msg={msg}");
+        assert!(msg.contains("0.8.0"), "msg={msg}");
+    }
+
+    /// イシュー #1339: `device-checksum` feature 有効ビルド（`--config
+    /// patch.crates-io.fandhe-ai.path=...` 併用。README「`--device-checksum`」
+    /// 節参照）でのみコンパイル・実行される cpu 経由の end-to-end 検証。
+    /// `--device-checksum` あり／なしで同一入力の checksum が一致すること
+    /// （`gemm_checksum` は `gemm` と同一カーネル・同一縮約順序の契約）を
+    /// fresh／reuse 双方で確認する。実機非依存（cpu）のため `#[ignore]` は
+    /// 付けない。
+    #[test]
+    #[cfg(feature = "device-checksum")]
+    fn device_checksum_matches_legacy_checksum_fresh_and_reuse() {
+        for mode in ["fresh", "reuse"] {
+            let out_off = temp_out_path(&format!("device-checksum-off-{mode}"));
+            let mut cli_off = make_cli("gemm", mode, &out_off);
+            cli_off.device_checksum = false;
+            dispatch(&cli_off).expect("--device-checksum off は成功するはず");
+            let checksum_off = last_line_checksum(&out_off);
+
+            let out_on = temp_out_path(&format!("device-checksum-on-{mode}"));
+            let mut cli_on = make_cli("gemm", mode, &out_on);
+            cli_on.device_checksum = true;
+            dispatch(&cli_on).expect("--device-checksum on は cpu バックエンドで成功するはず");
+            let checksum_on = last_line_checksum(&out_on);
+
+            assert_eq!(
+                checksum_off, checksum_on,
+                "mode={mode}: --device-checksum の有無で checksum が一致するはず \
+                 （gemm_checksum は gemm と同一カーネル・同一縮約順序の契約）"
+            );
+        }
     }
 
     /// 実機（CUDA）依存の smoke テスト（coding-rust.md「実機依存テストは
@@ -2524,6 +2861,7 @@ mod tests {
                 phases: true,
                 tf32: false,
                 managed: false,
+                device_checksum: false,
             };
             dispatch(&cli).expect("cuda train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2553,6 +2891,7 @@ mod tests {
                 phases: true,
                 tf32: false,
                 managed: false,
+                device_checksum: false,
             };
             dispatch(&cli).expect("metal train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");

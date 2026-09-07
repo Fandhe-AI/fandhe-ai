@@ -36,3 +36,14 @@ managed-placement = []
 # `crates/facade` への path patch を CLI `--config` 経由で併用する
 # 前提（README「借用ビュー readout（#1337）」節参照）。
 host-view-readout = []
+
+# イシュー #1339: `--device-checksum`（GEMM checksum をバックエンド側
+# `f64` reduction で求め読み戻しを 8 バイトへ縮小する経路）の実計測結線用。
+# crates.io 公開版 `fandhe-ai =0.7.0` には `Var::matmul_checksum`/
+# `ChecksumReadout`/`GemmChecksum` API が未収録（本イシューは未リリースの
+# HEAD で追加）のため、既定ビルド（feature 無効）ではこの feature 配下の
+# コードはコンパイルされず `=0.7.0` ピンのままビルド可能である。有効化する
+# 場合は `managed-placement` と同じく `[patch.crates-io.fandhe-ai]` で
+# `crates/facade` への path patch を CLI `--config` 経由で併用する前提
+# （README「`--device-checksum`」節参照）。
+device-checksum = []

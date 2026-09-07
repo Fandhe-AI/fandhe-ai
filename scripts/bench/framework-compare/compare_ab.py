@@ -217,6 +217,14 @@ def load_rows(path):
                     f"実際: {obj['managed']!r}） — skipped"
                 )
                 continue
+            # イシュー #1339: `device_checksum`（`Record.device_checksum`）も
+            # 同じ fail-closed 型検証を適用する。
+            if "device_checksum" in obj and not isinstance(obj["device_checksum"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'device_checksum' フィールド型（bool を"
+                    f"期待。実際: {obj['device_checksum']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -250,6 +258,11 @@ def _train_records(rows, mode):
         # 防止。managed 有無の A/B 自体は専用ツール `compare_managed_ab.py`
         # で行う）。
         if r.get("managed", False) is True:
+            continue
+        # イシュー #1339: `device_checksum:true` 行も本ツールの A/B 比較
+        # 対象外（既存プロトコル計測とのゲート混同防止。`docs/perf/
+        # device-checksum-readback-ab.md` 参照）。
+        if r.get("device_checksum", False) is True:
             continue
         out.append(r)
     return out

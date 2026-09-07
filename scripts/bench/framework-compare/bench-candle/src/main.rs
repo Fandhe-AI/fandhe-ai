@@ -144,13 +144,57 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Ok(elapsed)
     };
 
-    for _ in 0..WARMUP_ITERS {
-        one(&mut checksum, &mut parity)?;
-    }
-    let mut durations = Vec::with_capacity(MEASURE_ITERS);
-    for _ in 0..MEASURE_ITERS {
-        durations.push(one(&mut checksum, &mut parity)?);
-    }
+    // イシュー #1339: `--device-checksum` は checksum をホスト側 O(n^2)
+    // 走査（`to_vec2` の全要素展開）ではなく candle 側の device reduction
+    // で求め、毎反復の readback を「checksum のみ」（cuda/cpu は f64・
+    // metal は f64 reduction 非対応〈`DType::F64` の Metal 未実装〉のため
+    // f32 のまま `sum_all`）へ縮小する（`docs/perf/device-checksum-
+    // readback-ab.md` §5「Metal candle は 8 バイトではない」）。要素単位
+    // parity は毎反復では検証せず、ループ後の未計時 1 反復
+    // （`device_checksum_tail_verify`）でのみ検証する（AC-2）。
+    let one_device_checksum =
+        |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
+            let start = Instant::now();
+            let c = a.matmul(&b)?;
+            *sync_checksum = if cli.device == "metal" {
+                c.sum_all()?.to_scalar::<f32>()? as f64
+            } else {
+                c.to_dtype(DType::F64)?.sum_all()?.to_scalar::<f64>()?
+            };
+            let elapsed = start.elapsed();
+            validate_gemm_checksum(*sync_checksum)?;
+            Ok(elapsed)
+        };
+
+    let durations = if cli.device_checksum {
+        for _ in 0..WARMUP_ITERS {
+            one_device_checksum(&mut checksum)?;
+        }
+        let mut durations = Vec::with_capacity(MEASURE_ITERS);
+        for _ in 0..MEASURE_ITERS {
+            durations.push(one_device_checksum(&mut checksum)?);
+        }
+        // AC-2: 未計時の末尾反復でのみ要素単位 parity を検証する
+        // （`GemmReference::verify`）。fandhe 側（`bench-fandhe::run_gemm`）
+        // の末尾反復検証と同じ位置づけ（`docs/perf/device-checksum-
+        // readback-ab.md` §3 参照）。
+        let c = a.matmul(&b)?;
+        let rows = readout2(&c)?;
+        let out: Vec<f32> = rows.into_iter().flatten().collect();
+        let tail_checksum: f64 = out.iter().map(|&x| x as f64).sum();
+        validate_gemm_checksum(tail_checksum)?;
+        parity = Some(reference.verify(&out)?);
+        durations
+    } else {
+        for _ in 0..WARMUP_ITERS {
+            one(&mut checksum, &mut parity)?;
+        }
+        let mut durations = Vec::with_capacity(MEASURE_ITERS);
+        for _ in 0..MEASURE_ITERS {
+            durations.push(one(&mut checksum, &mut parity)?);
+        }
+        durations
+    };
     let st = stats(&durations)?;
     Record {
         framework: FRAMEWORK,
@@ -169,6 +213,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity,
         tf32: cli.tf32,
         managed: cli.managed,
+        device_checksum: cli.device_checksum,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -292,6 +337,7 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             parity,
             tf32: cli.tf32,
             managed: cli.managed,
+            device_checksum: false,
         }
         .emit(&cli.out)?;
     }
@@ -355,6 +401,7 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             parity,
             tf32: cli.tf32,
             managed: cli.managed,
+            device_checksum: false,
         }
         .emit(&cli.out)?;
     }
@@ -453,6 +500,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity: None,
         tf32: false,
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -496,6 +544,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         parity: None,
         tf32: false,
         managed: cli.managed,
+        device_checksum: false,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -564,6 +613,17 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    // イシュー #1339: `--device-checksum` は `--task gemm` 限定（`run_gemm`
+    // 内でのみ device reduction 分岐を持つ）。`gemm-transfer-split`
+    // （#1103 の Metal 転送分離診断）・`train`／`infer` は対象外。
+    if cli.device_checksum && cli.task != "gemm" {
+        return Err(format!(
+            "MEASURE_ERROR: --device-checksum is only supported for --task gemm on candle (got \
+             task='{}'; issue #1339)",
+            cli.task
+        )
+        .into());
+    }
     match cli.task.as_str() {
         "gemm" => run_gemm(cli),
         "gemm-transfer-split" => run_gemm_transfer_split(cli),
@@ -587,6 +647,7 @@ mod tests {
             phases: false,
             tf32,
             managed: false,
+            device_checksum: false,
         }
     }
 
