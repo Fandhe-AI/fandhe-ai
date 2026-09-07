@@ -1504,6 +1504,14 @@ def _reuse_row_invalid_reason(rows, r, task):
         # 判定不能になってしまう。`_pick_row_for_gate` と同じ除外条件を
         # ここにも適用する。
         and x.get("managed", False) is not True
+        # イシュー #1350（PR #1425 fix-up・Cursor Bugbot Medium 指摘）:
+        # `_pick_row_for_gate` は `graph` キーを持つ行（CUDA Graph
+        # capture A/B 計測。`compare_graph_ab.py` が別途 A/B 集計）を
+        # 候補から除外するが、本関数の fresh 側突合はその除外を適用して
+        # いなかった。正式 train fresh 行と `graph:"on"` の train fresh
+        # 行が同一 size で同居すると「同一 size の fresh 行が複数」判定
+        # に化け、本来判定可能な正常な reuse 行が判定不能になる。
+        and "graph" not in x
         and _valid_gate_size(x.get("size"))
         and x.get("size") == r.get("size")
     ]
@@ -3219,6 +3227,11 @@ def section(path, rows):
                     # 重複キー判定（`dup_reuse_count`/`--strict`）を誤って
                     # 招く（他の managed 除外箇所と同一方針。例: L3377）。
                     and x.get("managed", False) is not True
+                    # イシュー #1350（PR #1425 fix-up・Cursor Bugbot Medium
+                    # 指摘）: `graph` キーを持つ行（CUDA Graph capture A/B
+                    # 計測。`compare_graph_ab.py` が別途 A/B 集計）も同じ
+                    # 理由で除外する。
+                    and "graph" not in x
                 ]
                 if not all_reuse_for_fw:
                     continue
@@ -3261,6 +3274,10 @@ def section(path, rows):
                         # イシュー #1353（codex-review 指摘）: reuse 側と同じ
                         # 理由で managed:true 行を fresh 突合対象から除外する。
                         and x.get("managed", False) is not True
+                        # イシュー #1350（PR #1425 fix-up・Cursor Bugbot
+                        # Medium 指摘）: reuse 側と同じ理由で graph 行を
+                        # fresh 突合対象から除外する。
+                        and "graph" not in x
                     ]
                     dup_fresh_count = len(fresh_matches)
                     fresh = fresh_matches[0] if fresh_matches else None
