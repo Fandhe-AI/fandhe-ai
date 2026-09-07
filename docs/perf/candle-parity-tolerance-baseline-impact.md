@@ -17,7 +17,7 @@ fail 数を、要素単位のダンプ実値から算出した。本 issue は�
 までであり、推奨案・採否は #1239（決定記録 draft）が扱う**。tolerance
 契約（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・`BASELINES` の
 値は本 issue では一切変更しない（変更にはユーザー承認が必須。イシュー
-#1241）。
+#1241）。→ `docs/candle-parity-tolerance-contract-decision.md`（draft。イシュー #1239）
 
 ## 2. #1237 との違い（重要）
 
