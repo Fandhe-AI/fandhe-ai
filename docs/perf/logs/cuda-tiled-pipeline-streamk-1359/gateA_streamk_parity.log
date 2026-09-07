@@ -1,0 +1,35 @@
+   Compiling fandhe-ai-backend-cpu v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling bench-harness v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 2.87s
+     Running tests/cpu_cuda_tiled_pipeline_streamk_parity.rs (/home/fandhe/work/target-fandhe-ai/release/deps/cpu_cuda_tiled_pipeline_streamk_parity-66b2069dd05cd6dc)
+
+running 8 tests
+test compile_tiled_pipeline_streamk_variant_rejects_zero_blocks_per_sm ... ok
+test launch_tiled_pipeline_streamk_zero_dim_shape_is_noop_without_launch ... ok
+test streamk_full_tiles_match_non_persistent_bit_exact ... streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=1024 n=1024 k=1024 blocks_per_sm=Some(1) remainder_tiles=16 q=22 max_contributors=4 fail_count=3 total=65536 max_abs_diff=0.0000553131103515625 max_rel_err=0.015132912966366837
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=2048 n=2048 k=2048 blocks_per_sm=Some(1) remainder_tiles=16 q=43 max_contributors=4 fail_count=4 total=65536 max_abs_diff=0.0001201629638671875 max_rel_err=0.005681322009051951
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=4096 n=4096 k=4096 blocks_per_sm=Some(1) remainder_tiles=16 q=86 max_contributors=4 fail_count=21 total=65536 max_abs_diff=0.00020599365234375 max_rel_err=0.02452697471804971
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=256 n=256 k=4096 blocks_per_sm=Some(1) remainder_tiles=16 q=86 max_contributors=4 fail_count=15 total=65536 max_abs_diff=0.0001983642578125 max_rel_err=0.021975108971316177
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=448 n=448 k=1024 blocks_per_sm=Some(1) remainder_tiles=1 q=2 max_contributors=33 fail_count=1 total=4096 max_abs_diff=0.00003910064697265625 max_rel_err=0.007317939631920227
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=60 n=68 k=36 blocks_per_sm=Some(1) remainder_tiles=2 q=1 max_contributors=4 fail_count=0 total=4080 max_abs_diff=0.000001430511474609375 max_rel_err=0.0004853463635583033
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=544 n=256 k=2048 blocks_per_sm=Some(1) remainder_tiles=36 q=96 max_contributors=3 fail_count=20 total=139264 max_abs_diff=0.00011444091796875 max_rel_err=0.602669413309735
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=4100 n=1028 k=64 blocks_per_sm=Some(1) remainder_tiles=1 q=1 max_contributors=5 fail_count=0 total=16 max_abs_diff=0.000002384185791015625 max_rel_err=0.0000012585980602067163
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=1024 n=1024 k=1024 blocks_per_sm=None remainder_tiles=112 q=50 max_contributors=3 fail_count=9 total=458752 max_abs_diff=0.000064849853515625 max_rel_err=0.20033204555511475
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=2048 n=2048 k=2048 blocks_per_sm=None remainder_tiles=16 q=15 max_contributors=10 fail_count=4 total=65536 max_abs_diff=0.000118255615234375 max_rel_err=0.01702098770847094
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=4096 n=4096 k=4096 blocks_per_sm=None remainder_tiles=64 q=114 max_contributors=4 fail_count=85 total=262144 max_abs_diff=0.00035858154296875 max_rel_err=0.08590310518858862
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=256 n=256 k=4096 blocks_per_sm=None remainder_tiles=16 q=29 max_contributors=10 fail_count=25 total=65536 max_abs_diff=0.000179290771484375 max_rel_err=0.06479592691097144
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=448 n=448 k=1024 blocks_per_sm=None remainder_tiles=49 q=22 max_contributors=4 fail_count=11 total=200704 max_abs_diff=0.000064849853515625 max_rel_err=0.13907384679066107
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=60 n=68 k=36 blocks_per_sm=None remainder_tiles=2 q=1 max_contributors=4 fail_count=0 total=4080 max_abs_diff=0.000001430511474609375 max_rel_err=0.0004853463635583033
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=544 n=256 k=2048 blocks_per_sm=None remainder_tiles=36 q=32 max_contributors=5 fail_count=24 total=139264 max_abs_diff=0.0001220703125 max_rel_err=0.602669413309735
+streamk remainder-tile composite check (informational, not a pass/fail gate; see #1359): m=4100 n=1028 k=64 blocks_per_sm=None remainder_tiles=97 q=3 max_contributors=3 fail_count=0 total=312592 max_abs_diff=0.000003814697265625 max_rel_err=0.009984296633873457
+ok
+test streamk_inactive_matches_non_streamk_bit_exact ... ok
+test streamk_rejects_misaligned_shape ... ok
+test streamk_rejects_mismatched_context_handle ... ok
+test streamk_repeated_launch_is_deterministic ... ok
+test streamk_zero_k_returns_all_zero ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 24.27s
+
