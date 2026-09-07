@@ -706,6 +706,15 @@ def get(rows, fw, task, device, size=None, mode="fresh", tf32=False):
     通常の呼び出し元（`section()` の (a) GEMM 節・`target_gate` 系）が
     明示指定なしに TF32 opt-in 行を誤って FP32 行として拾わないようにする
     （fail-open 防止）。
+
+    イシュー #1353（Cursor Bugbot 指摘）: `managed:true`（CUDA managed
+    memory 配置）行は既定 device-only 配置の行と `(framework, task,
+    device, size, mode, tf32)` キーが完全に一致しうる。本関数を除外なし
+    のまま使うと `_pick_row_for_gate` が managed 行を弾いているのと
+    不整合になり、JSONL 内の出現順次第で表示が managed 行の値を拾ったり
+    device-only 行の値を拾ったりして表とゲート判定が食い違いうる。
+    `_pick_row_for_gate`／`_reuse_row_invalid_reason` と同じ除外条件を
+    ここにも適用する。
     """
     for r in rows:
         if (
@@ -714,6 +723,7 @@ def get(rows, fw, task, device, size=None, mode="fresh", tf32=False):
             and r["device"] == device
             and r["mode"] == mode
             and (r.get("tf32", False) is True) == tf32
+            and r.get("managed", False) is not True
         ):
             if size is None:
                 return r
@@ -732,11 +742,19 @@ def devices_in(rows, task, mode="fresh", tf32=False):
     計測されたデバイス（FP32 gemm 行を持たない）まで拾って「計測不可」
     プレースホルダ行を作らないようにするため（Cursor Bugbot Low
     指摘・PR #1091。TF32 専用行は別途 (a-tf32) 節が表示する）。
+
+    イシュー #1353（Cursor Bugbot 指摘）: `get()` と同じ理由で
+    `managed:true` 行を除外する。除外しないと managed 計測のみ存在し
+    device-only 計測が存在しない（本来「計測不可」であるべき）デバイスを
+    「計測済み」として一覧に含めてしまいうる。
     """
     present = {
         r["device"]
         for r in rows
-        if r["task"] == task and r["mode"] == mode and (r.get("tf32", False) is True) == tf32
+        if r["task"] == task
+        and r["mode"] == mode
+        and (r.get("tf32", False) is True) == tf32
+        and r.get("managed", False) is not True
     }
     return [d for d in DEVICE_ORDER if d in present]
 
@@ -1383,6 +1401,14 @@ def _reuse_row_invalid_reason(rows, r, task):
         and x["task"] == task
         and x["device"] == r["device"]
         and x["mode"] == "fresh"
+        # イシュー #1353: `_pick_row_for_gate` は managed:true 行を候補
+        # から除外するが、本関数の fresh 側突合はその除外を適用して
+        # いなかった（codex-review 指摘）。通常 fresh・managed fresh が
+        # 各 1 件ずつ存在する通常の A/B 計測結果では「同一 size の fresh
+        # 行が複数」判定に化け、本来判定可能な正常な reuse 行が
+        # 判定不能になってしまう。`_pick_row_for_gate` と同じ除外条件を
+        # ここにも適用する。
+        and x.get("managed", False) is not True
         and _valid_gate_size(x.get("size"))
         and x.get("size") == r.get("size")
     ]

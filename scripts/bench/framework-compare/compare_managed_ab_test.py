@@ -181,6 +181,61 @@ class EvaluateCellTest(unittest.TestCase):
         self.assertEqual(result["status"], "undeterminable")
         self.assertIn("warmup", result["reason"])
 
+    def test_undeterminable_when_warmup_missing_from_all_rows_both_sides(self):
+        # codex-review 指摘: `warmup`/`iters`/`version` が off/on 双方の
+        # 全行で欠損すると `{r.get(field) for r in rows}` は双方
+        # `{None}` になり、旧実装は「一致」として素通りしていた。
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(5)]
+        for r in off_rows + on_rows:
+            del r["warmup"]
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("warmup", result["reason"])
+        self.assertIn("欠損", result["reason"])
+
+    def test_undeterminable_when_on_median_is_negative(self):
+        # codex-review 指摘: 旧実装は off_median_s の正数性のみを検査して
+        # おり on 側の負数を弾けなかった。
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, -0.0009) for _ in range(5)]
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("on", result["reason"])
+
+    def test_undeterminable_when_on_median_is_infinite(self):
+        off_rows = [_rec(False, 0.001) for _ in range(5)]
+        on_rows = [_rec(True, 0.0009) for _ in range(4)] + [
+            _rec(True, float("inf")) for _ in range(1)
+        ]
+        result = compare_managed_ab.evaluate_cell(off_rows, on_rows)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("有限正数", result["reason"])
+
+
+class RenderMarkdownAdoptVerdictTest(unittest.TestCase):
+    """codex-review 指摘: ADOPT 候補判定は時間比だけでなく checksum 完全
+    一致も要求するべき（docs の採用条件「checksum 完全一致」との整合）。
+    """
+
+    def test_adopt_requires_exact_checksum_match_not_just_ratio(self):
+        off_rows = [_rec(False, 1.0, checksum=1.0) for _ in range(5)]
+        # ratio < 1.0（on が速い）だが checksum は複合判定内の僅差
+        # （厳密には不一致）。
+        on_rows = [_rec(True, 0.999999, checksum=1.000001) for _ in range(5)]
+        cells = compare_managed_ab.split_off_on(off_rows + on_rows)
+        md = compare_managed_ab.render_markdown(cells)
+        self.assertIn("複合判定 ok", md)
+        self.assertNotIn("ADOPT 候補", md)
+        self.assertIn("後退（REJECT 方向）", md)
+
+    def test_adopt_when_ratio_le_one_and_checksum_exact(self):
+        off_rows = [_rec(False, 1.0, checksum=1.0) for _ in range(5)]
+        on_rows = [_rec(True, 0.9, checksum=1.0) for _ in range(5)]
+        cells = compare_managed_ab.split_off_on(off_rows + on_rows)
+        md = compare_managed_ab.render_markdown(cells)
+        self.assertIn("ADOPT 候補", md)
+
 
 class MainTest(unittest.TestCase):
     def test_main_returns_zero_on_all_ok_cells(self):

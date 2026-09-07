@@ -2483,6 +2483,72 @@ class TargetGateTests(unittest.TestCase):
         self.assertEqual(rec["status"], "undeterminable")
         self.assertIn("無効データ", rec["reason"])
 
+    def test_reuse_row_invalid_reason_ignores_managed_fresh_duplicate(self):
+        # イシュー #1353・codex-review 指摘: `_pick_row_for_gate` は
+        # `managed:true` 行を候補から除外するが、`_reuse_row_invalid_
+        # reason` の fresh 側突合（`fresh_matches`）はその除外を適用して
+        # いなかったため、通常 fresh・managed fresh が各 1 件ずつ存在する
+        # （managed A/B 計測で自然に生じる）通常のデータでも「同一 size
+        # の fresh 行が複数」判定に化け、本来 checksum が一致し達成する
+        # はずの reuse 行が判定不能になっていた。managed fresh 行の
+        # checksum を意図的に不一致（999.0）にしても、除外により無視され
+        # 通常 fresh（checksum 一致）とだけ突合されることを確認する。
+        normal_fresh = dict(
+            _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.01),
+            size=64,
+        )
+        managed_fresh = dict(
+            _train_row(framework="fandhe-ai", mode="fresh", checksum=999.0, median_s=0.01),
+            size=64,
+        )
+        managed_fresh["managed"] = True
+        reuse = dict(
+            _train_row(
+                framework="fandhe-ai", mode="reuse", checksum=0.08, init_s=0.001, median_s=0.005
+            ),
+            size=64,
+        )
+        rows = [normal_fresh, managed_fresh, reuse]
+        reason = summarize._reuse_row_invalid_reason(rows, reuse, "train")
+        self.assertIsNone(reason)
+
+
+class GetDevicesInManagedExclusionTests(unittest.TestCase):
+    """イシュー #1353・Cursor Bugbot 指摘: `get()`／`devices_in()` は
+    `_pick_row_for_gate` と同じ理由で `managed:true` 行を除外すべき
+    （除外しないと表とゲート判定が食い違いうる）。
+    """
+
+    def test_get_skips_managed_row_and_returns_device_only_row(self):
+        managed_row = dict(_base_row(framework="fandhe-ai", device="cuda", size=1024))
+        managed_row["checksum"] = 999.0
+        managed_row["managed"] = True
+        device_only_row = dict(_base_row(framework="fandhe-ai", device="cuda", size=1024))
+        device_only_row["checksum"] = 1.0
+        # managed 行を先に置き、`get()` が最初の一致行をそのまま返す旧
+        # 実装ならこちらを拾ってしまうことを確認する配置。
+        rows = [managed_row, device_only_row]
+        found = summarize.get(rows, "fandhe-ai", "gemm", "cuda", size=1024, mode="fresh")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["checksum"], 1.0)
+
+    def test_get_returns_none_when_only_managed_row_present(self):
+        managed_row = dict(_base_row(framework="fandhe-ai", device="cuda", size=1024))
+        managed_row["managed"] = True
+        found = summarize.get([managed_row], "fandhe-ai", "gemm", "cuda", size=1024, mode="fresh")
+        self.assertIsNone(found)
+
+    def test_devices_in_excludes_device_with_only_managed_rows(self):
+        # cuda は managed 行しか持たない（device-only 計測なし）ため
+        # 「計測不可」として扱われるべきで一覧に含まれてはならない。
+        managed_row = dict(_base_row(framework="fandhe-ai", device="cuda", size=1024))
+        managed_row["managed"] = True
+        normal_row = dict(_base_row(framework="fandhe-ai", device="cpu", size=1024))
+        rows = [managed_row, normal_row]
+        devices = summarize.devices_in(rows, "gemm", mode="fresh")
+        self.assertIn("cpu", devices)
+        self.assertNotIn("cuda", devices)
+
 
 class MainTargetExitCodeTests(unittest.TestCase):
     def _run_main(self, path, target=None, strict=False):

@@ -24,6 +24,7 @@ fail-closed 方針（security.md A08。`compare_gemm_gate.py` と同方針）:
 
 import importlib.util
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -125,6 +126,14 @@ def evaluate_cell(off_rows, on_rows):
     for field in ("warmup", "iters", "version"):
         off_values = {r.get(field) for r in off_rows}
         on_values = {r.get(field) for r in on_rows}
+        # 全行欠損（`r.get(field)` が None）でも `len(...) == 1` は成立し
+        # off/on 双方が `{None}` なら一致判定を素通りしてしまう
+        # （codex-review 指摘）。欠損・不正値を明示的に判定不能として拒否する。
+        if None in off_values or None in on_values:
+            return {
+                "status": "undeterminable",
+                "reason": f"'{field}' が off または on の行に欠損している",
+            }
         if len(off_values) != 1 or len(on_values) != 1:
             return {
                 "status": "undeterminable",
@@ -138,6 +147,22 @@ def evaluate_cell(off_rows, on_rows):
                     f"on={on_values!r}）"
                 ),
             }
+
+    # 計測時間の有限性・正数性を off/on 両方について検証する（codex-review
+    # 指摘: off 側のみ検査していると on 側の負数・Infinity/NaN を弾けない）。
+    for label, group_rows in (("off", off_rows), ("on", on_rows)):
+        for r in group_rows:
+            v = r.get("median_s")
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return {
+                    "status": "undeterminable",
+                    "reason": f"{label} 側 median_s が数値ではない（{v!r}）",
+                }
+            if not math.isfinite(v) or v <= 0:
+                return {
+                    "status": "undeterminable",
+                    "reason": f"{label} 側 median_s が有限正数ではない（{v!r}）",
+                }
 
     off_medians = _median([r["median_s"] for r in off_rows])
     on_medians = _median([r["median_s"] for r in on_rows])
@@ -208,7 +233,16 @@ def render_markdown(cells):
             if result["checksum_exact_match"]
             else ("複合判定 ok" if result["checksum_composite_match"] else "不一致")
         )
-        verdict = "ADOPT 候補" if result["ratio"] <= 1.0 else "後退（REJECT 方向）"
+        # ADOPT 候補の判定は時間比だけでなく checksum 完全一致も要求する
+        # （codex-review 指摘: docs の採用条件「checksum 完全一致」との整合。
+        # 複合判定 ok に留まる僅差〈例 off=1.0/on=1.000001〉を ADOPT 候補と
+        # 表示してしまうと、採用条件を満たしていないのに満たしたかのように
+        # 読める）。
+        verdict = (
+            "ADOPT 候補"
+            if result["ratio"] <= 1.0 and result["checksum_exact_match"]
+            else "後退（REJECT 方向）"
+        )
         lines.append(
             f"| {cell_label} | {_fmt_ms(result['off_median_s'])} "
             f"(min {_fmt_ms(result['off_min_s'])} / max {_fmt_ms(result['off_max_s'])}) | "

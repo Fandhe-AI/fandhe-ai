@@ -68,8 +68,14 @@ infer 副次計測）は時間制約により一部省略**し、既知の到達
 | train/cuda/64/fresh | 509.5 us (min 493.5 / max 535.8 us) | 508.5 us (min 493.6 / max 513.7 us) | 0.9981 | 完全一致 | 差なし |
 | **train/cuda/64/reuse** | **451.5 us (min 439.8 / max 453.9 us)** | **772.5 us (min 736.6 / max 819.0 us)** | **1.7110** | 完全一致 | **明確な後退（約 1.71 倍）** |
 
-checksum は全セルで**完全一致**（bit 同一。#1352 の核心契約「配置に依らず
-出力は bit 同一」を実測でも裏取り）。gemm・train fresh は on/off 比が
+checksum（`bench-common::Record.checksum`。GEMM 要素和／train 最終 loss を
+小数点以下 6 桁に丸めてシリアライズした値。`bench-common/src/lib.rs`
+`":\"checksum\":{:.6}"`）は全セルで**完全一致**（codex-review 指摘の是正:
+この一致は丸め後の checksum 値どうしの一致であり、出力全要素の `to_bits()`
+一致〈真の bit 同一〉そのものではない。真の bit 同一の裏取りは §7 の
+`managed_placement_real_device.rs`／本ファイル §6 の
+`managed_placement_bandwidth_real_device.rs`〈`assert_bit_exact`〉が別途
+担う）。gemm・train fresh は on/off 比が
 0.998〜1.005 で計測ノイズの範囲内（§2 のとおり gemm は構造的に managed
 非到達、train fresh も `DeviceParamStore` を経由しないホスト経由 SGD の
 ため managed の影響を受けない設計と整合する）。
@@ -129,13 +135,21 @@ off/on でほぼ同一（7.1〜7.4 GiB/s、差 5% 未満）であり、**managed
 `upload` は managed（ホスト → `UnifiedSlice` memcpy）が device-only
 （DMA H2D）の約 1/10（4.7〜5.1 対 45.5〜53.7 GiB/s）と大幅に遅い。これは
 本イシューの主結論（train reuse の `upload(grad)` を含む `device_update`
-区間の後退）と整合する一次要因と考えられる。`download` は managed が
-小サイズ（4/16 MiB）で有利・大サイズ（32 MiB 以上）で不利という非単調な
-挙動を示し、原因は未確定のまま記録する。
+区間の後退）と整合する一次要因と考えられる。`download` は
+**32 MiB 以上（安定した計測が得られたサイズ）では managed（on）が
+device-only（off）より一貫して高帯域**（on 2.8〜3.0 対 off 2.0〜2.4 GiB/s。
+codex-review 指摘の是正: 従来の記述はこの表の数値と符号が逆で
+「managed が不利」としていたが、実測値は managed が有利であることを
+示している）。4/16 MiB は off 自体が run 間で大きくばらつく（上記）ため
+比較の参考値に留める（4 MiB は on が off を大きく上回るが、16 MiB は
+off の単発高値〈53.4〉が on を上回る）。原因（managed のページ
+フォールト挙動・確保パス差等）は未確定のまま記録する。
 
 ## §7 数値一致
 
-全セル（gemm/train・off/on）で checksum 完全一致（bit 同一）を確認。
+全セル（gemm/train・off/on）で checksum 完全一致（§4 の脚注のとおり
+小数点以下 6 桁丸め後の値の一致であり、真の bit 同一の裏取りは以下の
+`to_bits()` 比較テストが担う）を確認。
 `managed_placement_real_device.rs`（#1352 の契約テスト。5 件）も GB10 実機
 で全 pass（`docs/perf/logs/cuda-managed-placement-ab-1353/
 managed_placement_real_device.log`）。配置は出力に影響しないという #1352

@@ -18,9 +18,18 @@
 //! 計測する 3 区間（各 5 run 中央値）:
 //! 1. upload（device-only: H2D DMA／managed: ホスト → `UnifiedSlice` memcpy）
 //! 2. download（device-only: D2H DMA／managed: `synchronize` + `as_slice`
-//!    による host_readback）
-//! 3. download 結果のホスト側逐次全読み（ページ経由アクセスの実効帯域。
-//!    `Tensor` の要素を単純合計して読み飛ばしを防ぐ）
+//!    による host_readback。managed は `to_vec()` でホスト `Vec` へ
+//!    コピーする分、本区間自体は managed ページを直接読む区間ではない）
+//! 3. ページ経由アクセスの実効帯域（`Tensor` の要素を単純合計して読み
+//!    飛ばしを防ぐ）。**device-only は区間 2 が返した通常ホスト `Tensor`
+//!    を読むが、managed は区間 2 とは別に `CudaMemory::
+//!    measure_managed_direct_read_seconds`（`internal-diagnostics`
+//!    feature 限定の診断専用入口）でアップロード直後の `UnifiedSlice` を
+//!    コピーせず直接読む**（codex-review 指摘の是正: 区間 2 の
+//!    `host_readback` が既にホスト `Vec` へコピー済みのため、そこから
+//!    読むだけでは managed ページへの CPU 直接アクセス帯域を計測でき
+//!    ない。`crate::memory::CudaMemory::measure_managed_direct_read_
+//!    seconds` ドキュメンテーションコメント参照）
 //!
 //! 出力に先立ち各サイズで upload → download の bit 一致（`to_bits`）を
 //! 検証する（性能値のみを出力せず、数値契約〈配置に依らず bit 同一〉を
@@ -111,8 +120,22 @@ fn assert_bit_exact(actual: &Tensor<f32>, expected: &Tensor<f32>, ctx: &str) {
 
 /// 1 サイズ分の upload/download/host-readback を `RUNS` 回計測し中央値
 /// GB/s を返す。呼び出し前に `PlacementFlagGuard` で配置を確定しておく
-/// こと（本関数はフラグを変更しない）。
-fn measure_one(mem: &CudaMemory, tensor: &Tensor<f32>) -> (f64, f64, f64) {
+/// こと（本関数はフラグを変更しない）。`managed` は現在の配置が managed
+/// かどうかを呼び出し元から明示的に渡す（フラグは
+/// `crate::placement::managed_placement_enabled()` で読めるが、本関数は
+/// 純粋にバッファの実配置に基づいて読み取り経路を切り替えたいため引数化
+/// する）。
+///
+/// 読み取り経路（区間 3・codex-review 指摘の是正）: managed 配置では
+/// `download()` が既にホスト `Vec` へコピー済みの `Tensor` を返すため、
+/// そこから読んでも managed ページへの CPU 直接アクセス帯域は測れない。
+/// managed の場合は upload 直後の `buf`（`UnifiedSlice` を保持したまま）
+/// を `CudaMemory::measure_managed_direct_read_seconds`
+/// （`internal-diagnostics` feature 限定）へ渡し、コピーなしで直接読む。
+/// device-only は従来どおり `download()` が返した通常ホスト `Tensor` を
+/// 読む（これは実際に device-only 配置が使う唯一のホスト側読み取り経路
+/// であり、コピー後の読み取りで正しい）。
+fn measure_one(mem: &CudaMemory, tensor: &Tensor<f32>, managed: bool) -> (f64, f64, f64) {
     let contiguous = tensor.contiguous();
     let bytes = std::mem::size_of_val(contiguous.as_slice().unwrap());
 
@@ -127,6 +150,18 @@ fn measure_one(mem: &CudaMemory, tensor: &Tensor<f32>) -> (f64, f64, f64) {
             .expect("upload must succeed on real hardware");
         upload_s.push(t0.elapsed().as_secs_f64());
 
+        if managed {
+            // managed ページ自体への CPU 直接アクセス帯域（コピーなし）。
+            // `download()`（区間 2）より先に計測する: `download()` 自体は
+            // 副作用として `buf` の中身を変更しないため順序は結果に影響
+            // しないが、「アップロード直後の生きた `UnifiedSlice` を読む」
+            // という意図を明確にするため upload の直後に置く。
+            let direct_read_s = mem
+                .measure_managed_direct_read_seconds(&buf)
+                .expect("managed direct read must succeed on real hardware");
+            readback_s.push(direct_read_s);
+        }
+
         let t1 = Instant::now();
         let back = mem
             .download(&buf)
@@ -135,18 +170,21 @@ fn measure_one(mem: &CudaMemory, tensor: &Tensor<f32>) -> (f64, f64, f64) {
 
         assert_bit_exact(&back, tensor, "upload/download roundtrip");
 
-        // ページ経由アクセスの実効帯域: 全要素を逐次読んで合計する
-        // （コンパイラによる読み飛ばし最適化を防ぐため合計を
-        // `std::hint::black_box` へ渡す）。
-        let t2 = Instant::now();
-        let contiguous = back.contiguous();
-        let data = contiguous.as_slice().expect("contiguous tensor slice");
-        let mut acc = 0.0f64;
-        for &v in data {
-            acc += v as f64;
+        if !managed {
+            // device-only: `download()` が返した通常ホスト `Tensor` を
+            // 逐次読んで合計する（コンパイラによる読み飛ばし最適化を
+            // 防ぐため合計を `std::hint::black_box` へ渡す）。これが
+            // device-only 配置における唯一のホスト側読み取り経路。
+            let t2 = Instant::now();
+            let contiguous = back.contiguous();
+            let data = contiguous.as_slice().expect("contiguous tensor slice");
+            let mut acc = 0.0f64;
+            for &v in data {
+                acc += v as f64;
+            }
+            std::hint::black_box(acc);
+            readback_s.push(t2.elapsed().as_secs_f64());
         }
-        std::hint::black_box(acc);
-        readback_s.push(t2.elapsed().as_secs_f64());
     }
 
     (
@@ -187,11 +225,11 @@ fn managed_vs_device_only_bandwidth_sweep_on_real_hardware() {
 
         let (off_up, off_down, off_read) = {
             let _guard = PlacementFlagGuard::acquire(false);
-            measure_one(&mem, &tensor)
+            measure_one(&mem, &tensor, false)
         };
         let (on_up, on_down, on_read) = {
             let _guard = PlacementFlagGuard::acquire(true);
-            measure_one(&mem, &tensor)
+            measure_one(&mem, &tensor, true)
         };
 
         println!(
