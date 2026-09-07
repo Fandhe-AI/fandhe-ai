@@ -75,6 +75,23 @@ fn validate_tf32x3_finite_input(a: &[f32], b: &[f32]) -> Result<(), CudaError> {
     Ok(())
 }
 
+/// `CudaMmaTf32x3Gemm::upload_f32` でのみ構築できる、非有限入力の
+/// 拒否（`validate_tf32x3_finite_input`）を通過済みの A/B デバイス
+/// バッファのペア。フィールドは非公開（`super`〈本モジュール〉限定）
+/// のため、外部クレートはもちろん本クレート内でも本モジュール外から
+/// 未検証の `CudaSlice<f32>` を差し込んで構築することはできない。
+/// `CudaMmaTf32x3Gemm::launch_tf32x3` はこの型のみを受け取り、生の
+/// `CudaSlice<f32>` を受け付けないことで、公開されている
+/// `device.stream().clone_htod()` 等で作った未検証バッファが起動境界
+/// まで到達する経路自体を型で排除する（codex-review 指摘・PR #1400
+/// スレッド PRRT_kwDOTuUCJc6f0YV_。`upload_f32` ドキュメンテーション
+/// コメント参照）。
+#[derive(Debug)]
+pub struct ValidatedTf32x3Inputs {
+    a: CudaSlice<f32>,
+    b: CudaSlice<f32>,
+}
+
 /// 3×TF32 `mma.sync`(m16n8k8) GEMM カーネルのコンパイル済みハンドルを
 /// 保持する。`stream` は `CudaDevice` から `Arc` クローンで受け取る
 /// （`gemm_mma_tf32.rs::CudaMmaTf32Gemm` と同じ共有契約）。
@@ -142,9 +159,9 @@ impl CudaMmaTf32x3Gemm {
         validate_mma_tf32_grid_bounds(m)?;
         validate_mma_tf32_k_bound(k)?;
 
-        let (a_dev, b_dev) = self.upload_f32(a, b)?;
+        let inputs = self.upload_f32(a, b)?;
         let mut c_dev = self.alloc_output_f32(m, n)?;
-        self.launch_tf32x3(&a_dev, &b_dev, &mut c_dev, m, n, k)?;
+        self.launch_tf32x3(&inputs, &mut c_dev, m, n, k)?;
         self.download_f32(&c_dev)
     }
 
@@ -152,22 +169,25 @@ impl CudaMmaTf32x3Gemm {
     /// 切り出し。#1356 のベンチマークが GPU 実行時間のみを計測できる
     /// よう、転送とカーネル実行を分離する）。
     ///
-    /// 非有限入力の拒否（`validate_tf32x3_finite_input`）はここで行う
-    /// （`run_tf32x3` 単体ではなく、分離された公開 API 経路
-    /// `upload_f32` → `launch_tf32x3` → `download_f32` を含む全公開
-    /// 起動経路が唯一のホスト→デバイス取り込み点である本関数を必ず通る
-    /// ため。`launch_tf32x3` はデバイス常駐スライスしか受け取らずホスト
-    /// 側で有限性を再検査できないため、ここでの検証を迂回できない
-    /// fail-closed 境界とする。codex-review 指摘・PR #1400）。
-    pub fn upload_f32(
-        &self,
-        a: &[f32],
-        b: &[f32],
-    ) -> Result<(CudaSlice<f32>, CudaSlice<f32>), CudaError> {
+    /// 非有限入力の拒否（`validate_tf32x3_finite_input`）はここで行い、
+    /// 検証済みであることを型で保証する [`ValidatedTf32x3Inputs`] を返す
+    /// （`run_tf32x3` 単体ではなく、分離された公開 API 経路 `upload_f32`
+    /// → `launch_tf32x3` → `download_f32` を含む全公開起動経路が唯一の
+    /// ホスト→デバイス取り込み点である本関数を必ず通るため）。
+    ///
+    /// `launch_tf32x3` は生の `CudaSlice<f32>` ではなく本関数が返す
+    /// `ValidatedTf32x3Inputs` のみを受け取る。同型はフィールド非公開で
+    /// 本関数以外に構築手段がないため、呼び出し元が公開されている
+    /// `device.stream().clone_htod()` 等で未検証バッファを作って
+    /// `launch_tf32x3` へ直接差し込む経路が存在しない（codex-review
+    /// 指摘・PR #1400 スレッド PRRT_kwDOTuUCJc6f0YV_。以前の実装は
+    /// `launch_tf32x3` が生スライスを受け取っており、この経路で
+    /// `upload_f32` の検証を迂回できた）。
+    pub fn upload_f32(&self, a: &[f32], b: &[f32]) -> Result<ValidatedTf32x3Inputs, CudaError> {
         validate_tf32x3_finite_input(a, b)?;
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
-        Ok((a_dev, b_dev))
+        Ok(ValidatedTf32x3Inputs { a: a_dev, b: b_dev })
     }
 
     /// C 用のゼロ初期化デバイスバッファを確保する（`run_tf32x3` のバッファ
@@ -178,26 +198,40 @@ impl CudaMmaTf32x3Gemm {
             .alloc_zeros::<f32>((m as usize) * (n as usize))?)
     }
 
-    /// デバイス常駐済みの A/B/C バッファに対してカーネルをストリームへ
-    /// 非同期投入する（H2D/D2H を含まない「GPU 実行のみ」の区間）。
-    /// 形状検証・no-op/`k==0` 契約・起動引数の組み立ては
+    /// 検証済みの A/B（[`ValidatedTf32x3Inputs`]。`upload_f32` でのみ
+    /// 構築できる）と C バッファに対してカーネルをストリームへ非同期
+    /// 投入する（H2D/D2H を含まない「GPU 実行のみ」の区間）。形状検証・
+    /// no-op/`k==0` 契約・起動引数の組み立ては
     /// `gemm_mma_tf32.rs::launch_mma_tf32_family` へ委譲する（複製しない。
     /// 両カーネルはシグネチャ・タイル・境界検査契約が完全に同一である
     /// ことが根拠。`launch_mma_tf32_family` ドキュメンテーションコメント
     /// 参照）。
     ///
+    /// 引数を生の `&CudaSlice<f32>` ではなく `&ValidatedTf32x3Inputs` に
+    /// することで、`upload_f32` の非有限値検査を経ていないバッファが
+    /// 本関数へ到達しえない（`upload_f32` ドキュメンテーションコメント
+    /// 参照。codex-review 指摘・PR #1400）。
+    ///
     /// 非同期投入契約（イシュー #1013 と同型）: 本関数は完了を待たない。
     /// 完了保証は呼び出し元の次の同期点（`download_f32` 等）に委ねる。
     pub fn launch_tf32x3(
         &self,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
+        inputs: &ValidatedTf32x3Inputs,
         c_dev: &mut CudaSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        launch_mma_tf32_family(&self.stream, &self.mma_tf32x3, a_dev, b_dev, c_dev, m, n, k)
+        launch_mma_tf32_family(
+            &self.stream,
+            &self.mma_tf32x3,
+            &inputs.a,
+            &inputs.b,
+            c_dev,
+            m,
+            n,
+            k,
+        )
     }
 
     /// C をデバイス→ホストへ転送する（`run_tf32x3` の D2H 部分の切り出

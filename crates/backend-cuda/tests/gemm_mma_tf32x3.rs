@@ -201,31 +201,40 @@ fn launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch() {
     let gemm =
         CudaMmaTf32x3Gemm::new(&device).expect("3xTF32 mma.sync kernel compilation must succeed");
 
-    let (a_dev, b_dev) = gemm
+    let inputs = gemm
         .upload_f32(&[], &[0.0f32; 16])
         .expect("upload_f32 must succeed");
     let mut c_dev = gemm
         .alloc_output_f32(0, 4)
         .expect("alloc_output_f32 must succeed");
-    gemm.launch_tf32x3(&a_dev, &b_dev, &mut c_dev, 0, 4, 4)
+    gemm.launch_tf32x3(&inputs, &mut c_dev, 0, 4, 4)
         .expect("launch_tf32x3 must succeed as a no-op for m==0");
     assert_eq!(gemm.download_f32(&c_dev).unwrap(), Vec::<f32>::new());
 
-    let (a_dev, b_dev) = gemm
+    let inputs = gemm
         .upload_f32(&[0.0f32; 16], &[])
         .expect("upload_f32 must succeed");
     let mut c_dev = gemm
         .alloc_output_f32(4, 0)
         .expect("alloc_output_f32 must succeed");
-    gemm.launch_tf32x3(&a_dev, &b_dev, &mut c_dev, 4, 0, 4)
+    gemm.launch_tf32x3(&inputs, &mut c_dev, 4, 0, 4)
         .expect("launch_tf32x3 must succeed as a no-op for n==0");
     assert_eq!(gemm.download_f32(&c_dev).unwrap(), Vec::<f32>::new());
 
-    let (a_dev, b_dev) = gemm.upload_f32(&[], &[]).expect("upload_f32 must succeed");
-    let (mut c_dev, _unused) = gemm
-        .upload_f32(&[9.0f32; 16], &[])
+    let inputs = gemm.upload_f32(&[], &[]).expect("upload_f32 must succeed");
+    // c_dev を未初期化のゼロ以外の値で事前汚染し、k==0 の zero-fill 契約
+    // が実際にゼロで上書きすることを確認する（`ValidatedTf32x3Inputs`
+    // 経由に限定した `upload_f32` はもう任意バッファの生成に流用でき
+    // ないため、ここは本経路が明示的に許容する公開 API
+    // `device.stream().clone_htod()` を直接使う。codex-review 指摘・
+    // PR #1400 スレッド PRRT_kwDOTuUCJc6f0YV_ が名指ししたのと同じ
+    // 経路だが、ここではテスト用の C バッファ生成に限定して使用して
+    // おり、`launch_tf32x3` へは A/B として渡らない）。
+    let mut c_dev = device
+        .stream()
+        .clone_htod(&[9.0f32; 16])
         .expect("uploading a pre-populated c buffer must succeed");
-    gemm.launch_tf32x3(&a_dev, &b_dev, &mut c_dev, 4, 4, 0)
+    gemm.launch_tf32x3(&inputs, &mut c_dev, 4, 4, 0)
         .expect("launch_tf32x3 must succeed and zero-fill c_dev for k==0");
     assert_eq!(gemm.download_f32(&c_dev).unwrap(), vec![0.0f32; 16]);
 }

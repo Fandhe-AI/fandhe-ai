@@ -499,7 +499,7 @@ pub use gemm_auto::F16MatrixUnitImpl;
 pub use gemm_auto::{SpecializedMmaKernelHandle, run_specialized_mma_f16};
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_mma_tf32::CudaMmaTf32Gemm;
-pub use gemm_mma_tf32x3::CudaMmaTf32x3Gemm;
+pub use gemm_mma_tf32x3::{CudaMmaTf32x3Gemm, ValidatedTf32x3Inputs};
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
 pub use nvrtc::{
