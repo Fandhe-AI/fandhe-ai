@@ -141,6 +141,12 @@ struct PhaseSample {
 /// `ops` は毎反復新規構築する（`CpuBackendOps::new()` は ZST でホット
 /// スポットではないと `docs/perf/cpu-infer-predict-profile.md` で確認
 /// 済みのため `ops_gemm` の計測に影響しない）。
+// 各引数は 1 反復の各フェーズ計測に必要な独立した入力（呼び出し元で
+// 1 回だけ準備済みの Var／Tensor／スライス・サイズ・keep_alive バッ
+// ファ）であり、構造体へ束ねると呼び出し元での使い分け（フェーズ毎に
+// 異なる組み合わせで再利用）が読みにくくなるため、テスト専用ヘルパー
+// として引数個数の lint を明示的に許容する。
+#[allow(clippy::too_many_arguments)]
 fn measure_one_phase_trial(
     a_var: &fandhe_ai_autodiff::Var<'_>,
     b_var: &fandhe_ai_autodiff::Var<'_>,
