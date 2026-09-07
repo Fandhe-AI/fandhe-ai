@@ -193,6 +193,7 @@ $ git diff --stat main -- crates/ scripts/bench/framework-compare/bench-common/ 
   救済する。`exact`（出力値）基準は非現実的に大きい `t`
   が必要で、かつ実行時に使えない値のため候補として不適格
 - 推奨案・採否・定数値の提案は本 issue の範囲外（#1239 で扱う）
+  → `docs/candle-parity-tolerance-contract-decision.md`（draft。イシュー #1239）
 
 ## 7. #1238 への引き継ぎ
 

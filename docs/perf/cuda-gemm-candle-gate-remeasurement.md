@@ -333,6 +333,8 @@ CUDA 実機なし）
   `BASELINES`・tolerance 定数は不変のまま）
 - `docs/perf/logs/candle-parity-tolerance-baseline-impact-1238/`（イシュー #1238。上記の実行
   ログ・env_info）
+- `docs/candle-parity-tolerance-contract-decision.md`（イシュー #1239。tolerance 契約変更の
+  決定記録 draft。候補比較・推奨案〈未承認〉・ユーザー承認待ち事項〈#1241〉の整理）
 
 ## 11. 2026-09-06 追補: 正式系列 `fandhe-ai =0.7.0` 再計測（イシュー #1185）
 
