@@ -772,6 +772,54 @@ impl CudaMemory {
             Err(poisoned) => poisoned.into_inner().release_all(),
         }
     }
+
+    /// **`internal-diagnostics` feature（既定 off）限定の診断専用入口**。
+    /// イシュー #1336 codex-review 指摘: 本番既定 [`host_staging::
+    /// HOST_STAGING_KIND`] は `Pageable` に固定されているため、`Pinned`
+    /// （page-locked・WRITECOMBINED）経路は実機テスト・`Pageable` との
+    /// A/B 比較のいずれからも到達できていなかった。本メソッドは
+    /// [`MemoryOps::with_host_view`]（`Device` 配置分岐）と同じ D2H・
+    /// `f` 呼び出し手順を踏みつつ、`self.host_staging`（本番既定種別で
+    /// 固定された共有キャッシュ）を経由せず、呼び出しごとに指定
+    /// `kind` で [`HostStaging::alloc`] を直接呼ぶ（キャッシュに
+    /// 登録しないため統計〈[`Self::host_staging_stats`]〉には現れず、
+    /// `kind` ごとの独立比較を単純にする）。`None`（空バッファ）・
+    /// `Managed` 配置は種別に依存しないため [`MemoryOps::
+    /// with_host_view`]（本 struct の実装）へそのまま委譲する。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn with_host_view_using_kind(
+        &self,
+        buffer: &DeviceBuffer<f32>,
+        kind: host_staging::HostStagingKind,
+        f: &mut dyn FnMut(&[f32]),
+    ) -> Result<(), BackendError> {
+        let handle = buffer
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        if buffer.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let Some(CudaStorage::Device(slice)) = &handle.storage else {
+            // `None`／`Managed` は `kind` に依存しない分岐のため、通常
+            // 経路（`MemoryOps::with_host_view`）へそのまま委譲する。
+            return <Self as MemoryOps>::with_host_view(self, buffer, f);
+        };
+        let numel = slice.len();
+        let generation = buffer.generation();
+        let mut staging =
+            HostStaging::alloc(kind, self.stream.context(), numel).map_err(map_cuda_error)?;
+        let copy_result = self.with_driver_call(&[generation], map_cuda_error, || {
+            self.stream
+                .memcpy_dtoh(slice, staging.as_host_slice_mut())?;
+            self.stream.synchronize()?;
+            Ok(())
+        });
+        copy_result.and_then(|()| {
+            staging.as_slice().map_err(map_cuda_error).map(|view| {
+                f(view);
+            })
+        })
+    }
 }
 
 impl MemoryOps for CudaMemory {
@@ -824,20 +872,20 @@ impl MemoryOps for CudaMemory {
     /// `handle.storage` の配置ごとに以下へ分岐する:
     ///
     /// - `None`（空テンソル）: `f(&[])`（FFI を呼ばない）。
-    /// - `Managed`: [`host_view_managed`] へ委譲し、`UnifiedSlice::
+    /// - `Managed`: `host_view_managed` へ委譲し、`UnifiedSlice::
     ///   as_slice()` の借用をコピーなしでそのまま渡す（`download` が
     ///   `to_vec()` するのと異なり、managed 配置本来のゼロコピー特性を
     ///   保つ）。
     /// - `Device`: `crate::host_staging`（形状ごとに再利用するホスト
     ///   ステージングバッファ）から確保・`memcpy_dtoh` で D2H・
     ///   `synchronize` の後、`f` へ借用を渡す。使用後は成功・失敗いずれの
-    ///   経路でも [`Self::return_staging`] でキャッシュへ返却する
+    ///   経路でも `Self::return_staging` でキャッシュへ返却する
     ///   （失敗時に返却したバッファの内容は不定だが、次回の
     ///   `memcpy_dtoh` が呼び出し前に全域を上書きするため安全。
     ///   `crate::host_staging::HostStaging::alloc` の SAFETY コメント
     ///   参照）。
     ///
-    /// 同期契約は `download`（[`Self::download_inner`]）と同一
+    /// 同期契約は `download`（`Self::download_inner`）と同一
     /// （`with_driver_call` を唯一の driver 呼び出し境界とし、
     /// `buffer.generation()` を検査対象へ渡す。イシュー #1013 設計文書
     /// §9 item 7）。

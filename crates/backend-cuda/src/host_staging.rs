@@ -69,22 +69,27 @@ pub(crate) const HOST_STAGING_KIND: HostStagingKind = HostStagingKind::Pageable;
 /// できる程度の余裕を持たせた既定値。
 pub(crate) const HOST_STAGING_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
-/// ホストステージングバッファの実装種別。
+/// ホストステージングバッファの実装種別。`Pageable`・`Pinned` いずれも
+/// `pub`（`pub(crate)` から変更。codex-review 指摘: 本番既定
+/// （[`HOST_STAGING_KIND`]）は `Pageable` に固定されているため、`Pinned`
+/// 経路を実機で検証する・両者を A/B 比較する手段が診断入口から
+/// 提供されていなかった）で、`internal-diagnostics` feature（既定
+/// off）限定の `memory::CudaMemory::with_host_view_using_kind`
+/// （`lib.rs` の `pub use host_staging::HostStagingKind` re-export と
+/// 対）から crate 外部（実機 `#[ignore]` テスト）が明示的に選べる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostStagingKind {
+pub enum HostStagingKind {
     /// cudarc `alloc_pinned`（page-locked・WRITECOMBINED）。unsafe 1 箇所。
     ///
-    /// `#[allow(dead_code)]`: 本エージェント実行環境に CUDA 実機がなく
-    /// `docs/perf/cuda-host-view-staging-readout.md`「採否」節の実測が
-    /// 未完了のため、[`HOST_STAGING_KIND`] は本 variant を選ばない
-    /// （常に `Pageable`）。値としては `HostStaging::alloc` の
-    /// `match` アーム・`tests/host_view_real_device.rs`（実機
-    /// `#[ignore]` テスト。`with_host_view_using` 系の A/B 経由）で
-    /// 到達可能だが、`cargo clippy --all-targets`（`--lib` 単体の
-    /// 非テストビルド）の dead-code 検査は「値として構築される箇所」を
-    /// 静的に見つけられないため許容する（実機実測を経てユーザー承認の
-    /// うえ本番既定へ切り替える際に本 allow を外す想定）。
-    #[allow(dead_code)]
+    /// 本エージェント実行環境に CUDA 実機がなく `docs/perf/
+    /// cuda-host-view-staging-readout.md`「採否」節の実測が未完了のため、
+    /// 本番既定 [`HOST_STAGING_KIND`] は本 variant を選ばない（常に
+    /// `Pageable`）。`memory::CudaMemory::with_host_view_using_kind`
+    /// （`internal-diagnostics` feature 限定）を介して明示的に選べば
+    /// `HostStaging::alloc` の `match` アームへ到達し、
+    /// `tests/host_view_real_device.rs` の実機 `#[ignore]` テストが
+    /// 実際に `Pinned` 経路を通す（実機実測を経てユーザー承認のうえ
+    /// 本番既定へ切り替える際は本コメントを更新する）。
     Pinned,
     /// 事前タッチ済み pageable `Vec<f32>`（unsafe なし）。
     Pageable,

@@ -20,7 +20,7 @@
 //! ドキュメンテーションコメント参照）。
 
 use fandhe_ai_backend_cuda::placement::{managed_placement_enabled, set_managed_placement_enabled};
-use fandhe_ai_backend_cuda::{CudaDevice, CudaMemory};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaMemory, HostStagingKind};
 use fandhe_ai_tensor_core::Tensor;
 use fandhe_ai_tensor_core::buffer::MemoryOps;
 use fandhe_ai_tensor_core::device::Device;
@@ -65,6 +65,14 @@ impl Drop for PlacementFlagGuard {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn with_host_view_matches_download_and_upload_source_bit_exact() {
+    // 既定並列度実行下では `with_host_view_matches_download_on_managed_
+    // placement`（プロセスグローバル `crate::placement` フラグを一時的に
+    // `true` へ切り替える）と並行実行されうる。本テストは `Device`
+    // 配置（`host_staging` 経由）を前提とするため、`false` 固定で
+    // 直列化する（codex-review 指摘: managed 配置テストのみがガードを
+    // 取得しており、他テストが並行して managed 配置へ切り替わりうる
+    // 競合を防ぐ）。
+    let _guard = PlacementFlagGuard::acquire(false);
     let device =
         CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
     let mem = CudaMemory::new(&device);
@@ -121,6 +129,10 @@ fn with_host_view_matches_download_and_upload_source_bit_exact() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn with_host_view_reuses_staging_buffer_for_same_shape() {
+    // `Device` 配置（`host_staging` 経由）前提のため `false` 固定で直列化
+    // する（上記 `with_host_view_matches_download_and_upload_source_bit_
+    // exact` と同じ理由）。
+    let _guard = PlacementFlagGuard::acquire(false);
     let device =
         CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
     let mem = CudaMemory::new(&device);
@@ -149,6 +161,10 @@ fn with_host_view_reuses_staging_buffer_for_same_shape() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn release_host_staging_clears_cache_and_frees_reported_bytes() {
+    // `Device` 配置（`host_staging` 経由）前提のため `false` 固定で直列化
+    // する（`with_host_view_matches_download_and_upload_source_bit_exact`
+    // と同じ理由）。
+    let _guard = PlacementFlagGuard::acquire(false);
     let device =
         CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
     let mem = CudaMemory::new(&device);
@@ -193,6 +209,10 @@ fn release_host_staging_clears_cache_and_frees_reported_bytes() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn pooled_memory_with_host_view_matches_download_bit_exact() {
+    // `Device` 配置（`host_staging` 経由）前提のため `false` 固定で直列化
+    // する（`with_host_view_matches_download_and_upload_source_bit_exact`
+    // と同じ理由）。
+    let _guard = PlacementFlagGuard::acquire(false);
     let device =
         CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
     let inner = CudaMemory::new(&device);
@@ -260,5 +280,67 @@ fn with_host_view_matches_download_on_managed_placement() {
             .map(|v| v.to_bits())
             .collect::<Vec<_>>(),
         "with_host_view (managed) must match download().as_slice() bit-for-bit"
+    );
+}
+
+/// codex-review 指摘（イシュー #1336）: 本番既定 [`HostStagingKind::
+/// Pageable`] のみが `with_host_view` の通常経路を通り、`Pinned`
+/// （page-locked・WRITECOMBINED）経路は実機テスト・A/B 比較のいずれから
+/// も到達できていなかった。本テストは `CudaMemory::
+/// with_host_view_using_kind`（`internal-diagnostics` feature 限定の
+/// 診断専用入口）を介して `Pinned` を明示的に選び、`download()` および
+/// `Pageable` 経由の結果と bit 完全一致することを確認する（`Pinned`
+/// 経路が実際に driver へ到達し、かつ両種別が同じ D2H 内容を返すことの
+/// 直接検証。tolerance は使わない）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn with_host_view_using_kind_pinned_matches_pageable_and_download_bit_exact() {
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let mem = CudaMemory::new(&device);
+
+    let data: Vec<f32> = (0..4096)
+        .map(|i| match i % 7 {
+            0 => f32::NAN,
+            1 => f32::INFINITY,
+            2 => f32::NEG_INFINITY,
+            3 => f32::MIN_POSITIVE,
+            _ => (i as f32) * 0.5 - 100.0,
+        })
+        .collect();
+    let tensor = Tensor::<f32>::new(data, &[64, 64]).unwrap();
+    let buf = mem
+        .upload(&tensor)
+        .expect("upload must succeed on real hardware");
+
+    let downloaded = mem.download(&buf).expect("download must succeed");
+    let download_bits: Vec<u32> = downloaded
+        .as_slice()
+        .expect("download returns a contiguous tensor")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+
+    let mut pageable_bits: Option<Vec<u32>> = None;
+    mem.with_host_view_using_kind(&buf, HostStagingKind::Pageable, &mut |slice| {
+        pageable_bits = Some(slice.iter().map(|v| v.to_bits()).collect());
+    })
+    .expect("with_host_view_using_kind(Pageable) must succeed on real hardware");
+    let pageable_bits = pageable_bits.expect("closure must be invoked exactly once");
+
+    let mut pinned_bits: Option<Vec<u32>> = None;
+    mem.with_host_view_using_kind(&buf, HostStagingKind::Pinned, &mut |slice| {
+        pinned_bits = Some(slice.iter().map(|v| v.to_bits()).collect());
+    })
+    .expect("with_host_view_using_kind(Pinned) must succeed on real hardware");
+    let pinned_bits = pinned_bits.expect("closure must be invoked exactly once");
+
+    assert_eq!(
+        pinned_bits, download_bits,
+        "Pinned 経路は download().as_slice() と bit 完全一致するはず"
+    );
+    assert_eq!(
+        pinned_bits, pageable_bits,
+        "Pinned 経路は Pageable 経路と bit 完全一致するはず（種別による内容差異は許容しない）"
     );
 }

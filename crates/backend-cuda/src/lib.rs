@@ -515,6 +515,14 @@ pub use memory::CudaMemory;
 // 通じて到達可能になる。
 #[cfg(feature = "internal-diagnostics")]
 pub use host_staging::HostStagingStats;
+// `HostStagingKind`（`Pinned`／`Pageable`）は `CudaMemory::
+// with_host_view_using_kind`（同じく `internal-diagnostics` feature
+// 限定。イシュー #1336 codex-review 指摘: `HOST_STAGING_KIND` 固定で
+// `Pinned` 経路の実機検証・A/B 比較入口がなかった対応）の引数型として
+// crate 外部（実機 `#[ignore]` テスト）へ公開する。`HostStagingStats`
+// re-export と同一ゲート・同一理由。
+#[cfg(feature = "internal-diagnostics")]
+pub use host_staging::HostStagingKind;
 pub use nvrtc::{
     CompiledDims, CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
     derive_pipeline_stages, nvrtc_version,
