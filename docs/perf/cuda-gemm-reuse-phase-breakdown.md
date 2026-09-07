@@ -242,3 +242,29 @@ fandhe に有利な方向に偏っている点に注意（§9 の「candle 側 k
   二峰性と同一現象の可能性がある既知事象）
 - `scripts/bench/framework-compare/README.md`「`gemm --mode reuse --phases`」節
 - `docs/performance-targets.md` §8.5
+
+## §11 借用ビュー readout の実装（イシュー #1337）
+
+§9 の選択肢 (ii)「`host_copy`／`checksum` をハーネス側で削減する」のうち、
+**#965/#970 の縮退検出契約（checksum 全反復計算・要素単位 parity 検証）を
+一切弱めずに `host_copy`（`.to_vec()` の memcpy）のみを消す**形を
+`scripts/bench/framework-compare/bench-fandhe`（`readout_var`）へ実装した
+（cargo feature `host-view-readout`。既定 OFF・`fandhe_ai::VarHostView`／
+`Tensor::host_slice`〈#1335・#1336〉利用・crates.io 公開版 `fandhe-ai
+=0.7.0` には該当 API が未収録のため `managed-placement` と同じ path patch
+分離方式）。詳細な設計・区間再定義・A/B 手順は
+`scripts/bench/framework-compare/README.md`「gemm --mode reuse --phases」
+節「借用ビュー readout（イシュー #1337）」小節を正とする。
+
+`readout_var` の借用ビュー切替は checksum／parity 契約・legacy 経路との
+bit 同一性を `main.rs` の単体テスト（`readout_var_matches_legacy_to_vec_
+bit_exact`・`host_view_readout_keeps_tape_usable`）で自己検証済み（feature
+有効・無効いずれのビルドでも green）。CUDA/Metal/CPU 3 バックエンド ×
+対象形状での切替前後・candle 比の実機実測記録（本 issue の受入条件）は、
+本エージェント実行環境に CUDA/Metal 実機が無いため未実施のまま記入欄を
+残す（`docs/perf/{cuda,metal,cpu}-gemm-candle-gate-remeasurement.md` への
+追補は実機を持つセッションが引き継ぐ）。
+
+`#1336`（CUDA pinned host staging）は本経路に到達しない点（`Var::matmul`
+の出力は `gemm` バックエンド内部の readback で既にホスト常駐 `Tensor` に
+なっているため）は README 側に明記済み（誤帰属防止）。

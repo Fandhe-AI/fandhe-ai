@@ -23,3 +23,16 @@ fandhe-ai = "=0.7.0"
 # 併用する前提（README「`--managed`」節・`run_ab_managed_cuda.sh` 参照）。
 [features]
 managed-placement = []
+
+# イシュー #1337: `readout_var`（`Var::to_tensor()` + `.to_vec()` の
+# host_copy memcpy）を借用ビュー（`fandhe_ai::VarHostView`/
+# `Tensor::host_slice`）へ切り替える計測専用 feature（既定 OFF）。
+# crates.io 公開版 `fandhe-ai =0.7.0` には `Var::host_view`/
+# `VarHostView`/`Tensor::host_slice` API が未収録（#1335・#1336 は
+# 未リリースの HEAD で追加）のため、既定ビルド（feature 無効）では
+# `HostReadout` 型・呼び出しは `Vec<f32>` 経路のままコンパイルされ
+# `=0.7.0` ピンのままビルド可能である。有効化する場合は
+# `managed-placement` と同じく `[patch.crates-io.fandhe-ai]` で
+# `crates/facade` への path patch を CLI `--config` 経由で併用する
+# 前提（README「借用ビュー readout（#1337）」節参照）。
+host-view-readout = []

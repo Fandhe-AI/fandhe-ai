@@ -271,6 +271,20 @@ name = "cpu_cuda_tiled_pipeline_persistent_parity"
 required-features = ["internal-diagnostics"]
 
 [[test]]
+# イシュー #1358: `cpu_cuda_tiled_pipeline_streamk_parity` は
+# `CudaGemm::compile_tiled_pipeline_streamk_variant`・
+# `CudaGemm::launch_tiled_pipeline_streamk_f32`（最終 wave 限定 Stream-K・
+# 固定順序 fixup 版の常駐 API）を使う回帰テスト（決定性・full タイル
+# 領域の bit 同一を検証する受け入れ基準本体）を含むため、
+# `cpu_cuda_tiled_pipeline_persistent_parity`（上記）と同じ理由で
+# `internal-diagnostics` feature を要求する。`cargo test --workspace`
+# （feature 未指定）では対象外としてスキップされ、
+# `cargo test --all-features`（CI の test ジョブ・`make test` が使う
+# コマンド）でのみビルド・実行される。
+name = "cpu_cuda_tiled_pipeline_streamk_parity"
+required-features = ["internal-diagnostics"]
+
+[[test]]
 # イシュー #1353・codex-review 指摘の是正: `managed_placement_bandwidth_
 # real_device` は managed ページへの CPU 直接アクセス帯域を実測するため
 # `CudaMemory::measure_managed_direct_read_seconds`（診断専用入口。

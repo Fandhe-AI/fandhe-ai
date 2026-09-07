@@ -35,11 +35,24 @@
 //! の範囲外だとそのタイルをスキップして理由を表示する）・
 //! `--blocks-per-sm auto|<n>`（既定 `auto`）・`--tile 64x64|128x64|both`
 //! （既定 `both`）を指定できる。
+//!
+//! `--streamk on|off`（既定 `off`。イシュー #1358）で、64×64 タイルの
+//! 起動時に最終 wave 限定 Stream-K（固定順序 fixup）版
+//! （`CudaGemm::compile_tiled_pipeline_streamk_variant`／
+//! `CudaGemm::launch_tiled_pipeline_streamk_f32`）も同一区間契約
+//! （fixup 起動を含む GPU-only。`docs/perf/
+//! cuda-gemm-tiled-pipeline-streamk.md` §5「実行コマンド」参照）で計測し
+//! `streamk_gpu_only_tflops`・`streamk_over_pipeline3`・配布計画要約
+//! （`remainder_tiles`/`q`/`sk_units`/`max_contributors`/`grid_blocks`）を
+//! 追加出力する。128×64 タイルでは Stream-K 版は未実装のため
+//! `streamk_gpu_only_tflops=n/a` を出す（実装計画 §2「対象外」）。既定
+//! `off` では既存の出力列・挙動を一切変えない。
 
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
 use fandhe_ai_backend_cuda::{
-    CudaDevice, CudaError, CudaGemm, PersistentTiledPipelineFunction, TiledPipelineFunction,
+    CudaDevice, CudaError, CudaGemm, PersistentTiledPipelineFunction, StreamKPlan,
+    StreamKTiledPipelineFunction, TiledPipelineFunction,
 };
 
 /// 決定的シード（`gemm_tiled_pipeline_bench.rs::SEED` と同一値。過去
@@ -160,15 +173,69 @@ fn measure_persistent_gpu_only(
     Ok(tflops(size, measurement.median_secs))
 }
 
-/// `--sizes`／`--stages`／`--blocks-per-sm`／`--tile` の 4 引数のみを扱う
-/// 最小限のパーサ（外部依存を増やさない。値は整数パース・固定語彙照合
-/// のみ行い、シェル呼び出し等へは渡さない。`.claude/rules/security.md`
-/// A03）。
+/// Stream-K 版（イシュー #1358）の GPU-only 計測（`&mut` ハンドル経由。
+/// fixup 起動を含む区間。`measure_persistent_gpu_only` と同じ「タイル
+/// キューカウンタのゼロ化を計測区間に含める」判断を踏襲する）。実際に
+/// 使った [`StreamKPlan`]（最終起動分）も返す（出力列「配布計画要約」の
+/// ため）。
+fn measure_streamk_gpu_only(
+    gemm: &CudaGemm,
+    func: &mut StreamKTiledPipelineFunction,
+    size: usize,
+    config: &MeasurementConfig,
+) -> Result<(f64, StreamKPlan), CudaError> {
+    let mut rng = Xorshift64Star::new(SEED);
+    let a: Vec<f32> = rng.fill_vec(size * size);
+    let b: Vec<f32> = rng.fill_vec(size * size);
+
+    let (a_dev, b_dev) = gemm.upload_f32(&a, &b)?;
+    let mut c_dev = gemm.alloc_output_f32(size as u32, size as u32)?;
+
+    let mut first_err: Option<CudaError> = None;
+    let mut last_plan: Option<StreamKPlan> = None;
+    let measurement = bench_run(config, || {
+        if first_err.is_some() {
+            return;
+        }
+        match gemm.launch_tiled_pipeline_streamk_f32(
+            func,
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+            size as u32,
+            size as u32,
+            size as u32,
+        ) {
+            Ok(plan) => last_plan = Some(plan),
+            Err(e) => {
+                first_err = Some(e);
+                return;
+            }
+        }
+        if let Err(e) = gemm.synchronize() {
+            first_err = Some(e);
+        }
+    })
+    .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok((
+        tflops(size, measurement.median_secs),
+        last_plan.expect("bench_run must invoke the closure at least once"),
+    ))
+}
+
+/// `--sizes`／`--stages`／`--blocks-per-sm`／`--tile`／`--streamk` の 5
+/// 引数のみを扱う最小限のパーサ（外部依存を増やさない。値は整数パース・
+/// 固定語彙照合のみ行い、シェル呼び出し等へは渡さない。
+/// `.claude/rules/security.md` A03）。
 struct Args {
     sizes: Vec<usize>,
     stages: u32,
     blocks_per_sm: Option<u32>,
     tiles: Vec<TileSelect>,
+    streamk: bool,
 }
 
 fn parse_args() -> Args {
@@ -176,6 +243,7 @@ fn parse_args() -> Args {
     let mut stages = 3u32;
     let mut blocks_per_sm: Option<u32> = None;
     let mut tiles = vec![TileSelect::Bm64Bn64, TileSelect::Bm128Bn64];
+    let mut streamk = false;
 
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -222,6 +290,15 @@ fn parse_args() -> Args {
                 };
                 i += 2;
             }
+            "--streamk" if i + 1 < raw.len() => {
+                let v = raw[i + 1].trim();
+                streamk = match v {
+                    "on" => true,
+                    "off" => false,
+                    other => panic!("--streamk は on|off のいずれかである必要があります: {other}"),
+                };
+                i += 2;
+            }
             other => {
                 println!("unknown argument `{other}`; ignoring.");
                 i += 1;
@@ -234,6 +311,7 @@ fn parse_args() -> Args {
         stages,
         blocks_per_sm,
         tiles,
+        streamk,
     }
 }
 
@@ -310,6 +388,27 @@ fn run_tile(gemm: &CudaGemm, device: &CudaDevice, args: &Args, tile: TileSelect)
         num_sms.saturating_mul(blocks_per_sm)
     );
 
+    // イシュー #1358: `--streamk on` かつ 64×64 タイルの場合のみ Stream-K
+    // 版ハンドルを追加コンパイルする（128×64 版は実装対象外。実装計画
+    // §2「対象外」）。既定 `off` では本節に到達せず既存出力・挙動は不変。
+    let mut streamk_func: Option<StreamKTiledPipelineFunction> = None;
+    if args.streamk && tile == TileSelect::Bm64Bn64 {
+        match CudaGemm::compile_tiled_pipeline_streamk_variant(
+            device,
+            args.stages,
+            args.blocks_per_sm,
+        ) {
+            Ok(f) => streamk_func = Some(f),
+            Err(e) => {
+                println!(
+                    "tile={label} streamk tiled pipeline (stages={}, blocks_per_sm={:?}) \
+                     compilation failed ({e}); streamk column will be skipped for this tile.",
+                    args.stages, args.blocks_per_sm
+                );
+            }
+        }
+    }
+
     for size in &args.sizes {
         let config = MeasurementConfig::default();
         let non_persistent = measure_pipeline_gpu_only(gemm, &non_persistent_func, *size, &config);
@@ -334,6 +433,49 @@ fn run_tile(gemm: &CudaGemm, device: &CudaDevice, args: &Args, tile: TileSelect)
             fmt(&persistent),
             ratio,
         );
+
+        // イシュー #1358: Stream-K 列（既存 3 列とは別行。既存出力の
+        // パース互換性を壊さないため追加行にする）。
+        if let Some(func) = streamk_func.as_mut() {
+            let streamk_result = measure_streamk_gpu_only(gemm, func, *size, &config);
+            let (streamk_str, plan_str) = match &streamk_result {
+                Ok((v, plan)) => (
+                    format!("{v:.4}"),
+                    format!(
+                        "remainder_tiles={} q={} sk_units={} max_contributors={} \
+                         grid_blocks={} active={}",
+                        plan.remainder_tiles,
+                        plan.q,
+                        plan.sk_units,
+                        plan.max_contributors,
+                        plan.grid_blocks,
+                        plan.is_active(),
+                    ),
+                ),
+                Err(e) => {
+                    println!("size={size} tile={label}: streamk measurement failed ({e})");
+                    ("n/a".to_string(), "n/a".to_string())
+                }
+            };
+            let streamk_ratio = match (&non_persistent, &streamk_result) {
+                (Ok(np), Ok((v, _))) if *np != 0.0 => format!("{:.4}", v / np),
+                _ => "n/a".to_string(),
+            };
+            println!(
+                "size={size} tile={label} streamk_gpu_only_tflops={streamk_str} \
+                 streamk_over_pipeline3={streamk_ratio} streamk_plan=[{plan_str}]"
+            );
+        } else if args.streamk && tile == TileSelect::Bm64Bn64 {
+            println!(
+                "size={size} tile={label} streamk_gpu_only_tflops=n/a \
+                 streamk_over_pipeline3=n/a streamk_plan=[n/a]"
+            );
+        } else if args.streamk {
+            println!(
+                "size={size} tile={label} streamk_gpu_only_tflops=n/a \
+                 (streamk not implemented for this tile)"
+            );
+        }
     }
 }
 
