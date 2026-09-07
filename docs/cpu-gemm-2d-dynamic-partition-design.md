@@ -285,29 +285,57 @@ fn job_grid(
 
 - `mc_job` は `mr` の倍数・`nc_job` は `nr` の倍数（端は `tile_grid` の端数として許容）
 - `tiles` は `tile_grid(m, n, mc_job, nc_job)` と同一（被覆完全・互いに素。§3 条件 3）
-- `row_bands * col_bands >= min(jobs_per_worker * num_threads, 到達可能最大 job 数)`
+- `row_bands * col_bands >= min(jobs_per_worker * num_threads, 到達可能最大 job 数)`。
+  `到達可能最大 job 数 = ceil(m/mr) * ceil(n/nr)`（各行帯・列帯を `mr`／`nr` 単位まで
+  細分した場合の上限。§5.2 の選択規則はこの下限を**必ず満たす** (rb, cb) のみを
+  コスト比較の候補とする契約とする — 下限を満たさない候補が誤って選ばれないことを保証する）
 - 寸法計算は全て `checked_mul`／`saturating_add` を用い、オーバーフロー時は型付きエラー
   （`GemmError::DimProductOverflow` 相当）を返す fail-closed 設計とする
   （`partition::bands`〈`partition.rs:52`〉の既存方針を踏襲）
-- `m==0`／`n==0`／`num_threads==1` で全域的に正しく動作する（`num_threads==1` は job 1 個＝
-  直列と同一経路になる）
+- `m==0`／`n==0`／`num_threads==1` で全域的に正しく動作する。**`num_threads==1` は下限式・
+  選択規則の双方で明示的に job 1 個（`rb=cb=1`・`mc_job=align_up(m, mr)`・
+  `nc_job=align_up(n, nr)`）の特例とし、§5.2 のコスト最小化探索を経由しない**（直列実行と
+  同一経路になる。並列コスト比較を 1 スレッドに対して行う意味がないため）
 
 ### §5.2 選択規則
 
-目標 job 数 `J = jobs_per_worker × num_threads` に対し、pack 総量モデル
+**`num_threads == 1` の特例**: 下限式（§5.1）どおり job 1 個に固定する
+（`rb = cb = 1`・`mc_job = align_up(m, mr)`・`nc_job = align_up(n, nr)`）。
+以下のコスト最小化探索は経由しない（1 スレッドに対して並列コスト比較を行う意味がないため）。
+
+`num_threads >= 2` のとき、目標 job 数 `J = jobs_per_worker × num_threads`・
+`cap = ceil(m/mr)`（行帯方向に到達可能な最大帯数）・
+`到達可能最大 job 数 = cap * ceil(n/nr)`・
+`bound = min(J, 到達可能最大 job 数)`（§5.1 の下限）を求める。pack 総量モデル
 
 ```text
 cost(rb, cb) = cb_eff * m * k + rb * k * n
 ```
 
 （`cb_eff = cb * ceil(nc_job / NC)`。A は列帯ごと・B は行帯ごとに重複する）を最小化する
-(rb, cb) を、`cb ∈ 1..=ceil(n/nr)` の全探索で決める:
+(rb, cb) を決める。**探索対象の `cb` は `cb ∈ 1..=ceil(n/nr)` のうち
+`cap * cb >= bound` を満たすものに限定する**（`cap * cb` はその `cb` における `rb` の
+最大到達可能値〈`rb <= cap`〉との積であり、これが `bound` 未満の `cb` は `rb` をどれだけ
+大きくしても job 数の下限 `bound` を満たせないため候補から除外する。除外しないと、
+下限を満たせない `cb` のほうが `cb_eff` が小さくコストで有利になり得て、下限を満たす
+候補より低コストとして誤って選ばれる場合がある）。絞り込んだ候補について:
 
 - `nc_job = align_up(ceil(n/cb), nr)`
-- `rb = min(ceil(m/mr), ceil(J/cb))`
+- `rb = min(cap, max(ceil(J/cb), ceil(bound/cb)))`（`cap * cb >= bound` により
+  `ceil(bound/cb) <= cap` が保証されるため、この `rb` は `rb * cb >= bound` を満たしたまま
+  `cap` を超えない）
 - `mc_job = align_up(ceil(m/rb), mr)`
 
 同コストなら `nc_job` の大きい方（A 再利用回数が多く端タイルが少ない）を選ぶ。
+
+**具体例（codex-review #1431 指摘の反例で検証）**: `m=n=24`・`mr=8`・`nr=12`・`NC=512`・
+`num_threads=8`・`jobs_per_worker=2` のとき `J=16`・`cap=ceil(24/8)=3`・
+`到達可能最大 job 数=3*ceil(24/12)=3*2=6`・`bound=min(16,6)=6`。`cb` の絞り込みなしでは
+`cb=1`（`cap*cb=3<6` のため本来は除外すべき）で `rb=min(3, ceil(16/1))=3` となり
+`rb*cb=3` の job しか生成せず `bound=6` を満たさない。絞り込みにより `cb=1` は
+`cap*cb=3 < bound=6` で候補から除外され、`cb=2`（`cap*cb=6>=6`）のみが残る。
+`cb=2` では `rb=min(3, max(ceil(16/2), ceil(6/2)))=min(3, max(8,3))=3` となり
+`rb*cb=6=bound` を満たす。
 
 `jobs_per_worker` は const（既定 2。§5.3 の表で `RowPanel` の pack 総量を全形状で下回る側）。
 `#[cfg(test)]` のパラメータ化入口 `gemm_blis_parallel_2d_dynamic_with_params(..., jobs_per_worker)`
