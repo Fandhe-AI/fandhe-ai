@@ -73,11 +73,11 @@ security-auditor レビュー必須を条件にユーザー承認済み（イシ
 | 観点 | `RowPanel`（本番既定） | 2D 動的分配（本設計） |
 |---|---|---|
 | 分配単位 | 行パネル `T` 個（静的・行数のみ均等） | (行帯 × 列帯) タイル job `J` 個（`J > T`。§5） |
-| 分配方式 | `par_chunks_mut` によるチャンク分割（rayon 静的分割。§2.3） | rayon `into_par_iter` の適応分割（work stealing。§6） |
+| 分配方式 | `par_chunks_mut` によるチャンク分割（job 数 ≈ T。rayon の work-stealing スケジューラは 2D と同一で、違いは job 数のみ） | rayon `into_par_iter`（job 数 J > T。§6） |
 | packing 重複 | B: タスク（≈T）ごと個別 pack（Q 倍重複） | B: job（≈J）ごと個別 pack。§5 の解析では `RowPanel` 以下（表参照） |
 | 同期点 | パネル完了後の join のみ | job 完了後の join のみ（**pc ごとのバリアなし**。`IcDynamic` との違い） |
 | `unsafe` | なし | 主案 S: なし／代替 U: raw pointer（#1338 承認済み。§4） |
-| 異種コア吸収 | なし（静的固定割当） | job 数を worker 数より増やし work stealing で吸収（§8） |
+| 異種コア吸収 | job 数 ≈ T（worker 数程度）のため吸収余地が乏しい（rayon スケジューラ自体は work stealing だが分割が粗く再配分の機会が少ない） | job 数を worker 数より増やし work stealing による吸収余地を広げる（§8） |
 | 既存 variant との関係 | — | #753 の `gemm_blis_parallel_2d_with_blocks`（行範囲のみ分配）を**包含**する（cb=1 の特殊形。削除・置換しない） |
 
 - **job 空間**: [`partition::tile_grid`](../crates/backend-cpu/src/gemm_blis/partition.rs)（`partition.rs:67`）
