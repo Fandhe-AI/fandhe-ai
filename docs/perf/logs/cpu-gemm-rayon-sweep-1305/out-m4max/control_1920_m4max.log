@@ -1,0 +1,121 @@
+== RAYON_NUM_THREADS=8 run=1 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=8
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7632,"tflops_q1":0.7588,"tflops_q3":0.7855,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1086,"tflops_q1":0.1081,"tflops_q3":0.1091,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7928,"tflops_q1":0.7850,"tflops_q3":0.7981,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=8 run=1 rc=1 ==
+== RAYON_NUM_THREADS=8 run=2 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=8
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8119,"tflops_q1":0.7932,"tflops_q3":0.8174,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1085,"tflops_q1":0.1079,"tflops_q3":0.1091,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7929,"tflops_q1":0.7853,"tflops_q3":0.8050,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=8 run=2 rc=1 ==
+== RAYON_NUM_THREADS=8 run=3 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=8
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8152,"tflops_q1":0.8109,"tflops_q3":0.8257,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1092,"tflops_q1":0.1085,"tflops_q3":0.1095,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8064,"tflops_q1":0.8019,"tflops_q3":0.8124,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=8 run=3 rc=1 ==
+== RAYON_NUM_THREADS=8 run=4 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=8
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7861,"tflops_q1":0.7620,"tflops_q3":0.7939,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1086,"tflops_q1":0.1084,"tflops_q3":0.1091,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8093,"tflops_q1":0.8024,"tflops_q3":0.8150,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=8 run=4 rc=1 ==
+== RAYON_NUM_THREADS=8 run=5 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=8
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8225,"tflops_q1":0.8168,"tflops_q3":0.8315,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1089,"tflops_q1":0.1082,"tflops_q3":0.1095,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":8,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8126,"tflops_q1":0.7986,"tflops_q3":0.8199,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=8 run=5 rc=1 ==
+== RAYON_NUM_THREADS=12 run=1 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=12
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":1.1173,"tflops_q1":0.9333,"tflops_q3":1.1731,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1072,"tflops_q1":0.1067,"tflops_q3":0.1081,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7927,"tflops_q1":0.7634,"tflops_q3":0.8279,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=12 run=1 rc=1 ==
+== RAYON_NUM_THREADS=12 run=2 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=12
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7503,"tflops_q1":0.7414,"tflops_q3":0.7686,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.0922,"tflops_q1":0.0880,"tflops_q3":0.0960,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.5737,"tflops_q1":0.4966,"tflops_q3":0.6206,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=12 run=2 rc=1 ==
+== RAYON_NUM_THREADS=12 run=3 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=12
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.5901,"tflops_q1":0.5123,"tflops_q3":0.7078,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.0875,"tflops_q1":0.0824,"tflops_q3":0.0911,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.6721,"tflops_q1":0.6362,"tflops_q3":0.6937,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=12 run=3 rc=1 ==
+== RAYON_NUM_THREADS=12 run=4 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=12
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.2523,"tflops_q1":0.2301,"tflops_q3":0.3389,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1075,"tflops_q1":0.1065,"tflops_q3":0.1079,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7689,"tflops_q1":0.7443,"tflops_q3":0.7886,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=12 run=4 rc=1 ==
+== RAYON_NUM_THREADS=12 run=5 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=12
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7420,"tflops_q1":0.7210,"tflops_q3":0.7714,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1081,"tflops_q1":0.1078,"tflops_q3":0.1087,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":12,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8060,"tflops_q1":0.8004,"tflops_q3":0.8245,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=12 run=5 rc=1 ==
+== RAYON_NUM_THREADS=16 run=1 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=16
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8068,"tflops_q1":0.7806,"tflops_q3":0.8474,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1080,"tflops_q1":0.1076,"tflops_q3":0.1084,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8435,"tflops_q1":0.8132,"tflops_q3":0.9319,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=16 run=1 rc=1 ==
+== RAYON_NUM_THREADS=16 run=2 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=16
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8199,"tflops_q1":0.6884,"tflops_q3":0.8834,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1081,"tflops_q1":0.1051,"tflops_q3":0.1094,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7765,"tflops_q1":0.7741,"tflops_q3":0.7789,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=16 run=2 rc=1 ==
+== RAYON_NUM_THREADS=16 run=3 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=16
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.7838,"tflops_q1":0.7739,"tflops_q3":0.8350,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1077,"tflops_q1":0.1074,"tflops_q3":0.1081,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8342,"tflops_q1":0.8096,"tflops_q3":0.9243,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=16 run=3 rc=1 ==
+== RAYON_NUM_THREADS=16 run=4 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=16
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8261,"tflops_q1":0.7919,"tflops_q3":0.9029,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1083,"tflops_q1":0.1080,"tflops_q3":0.1088,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.9632,"tflops_q1":0.9037,"tflops_q3":1.0045,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=16 run=4 rc=1 ==
+== RAYON_NUM_THREADS=16 run=5 taskset=none ==
+oss-gemm-compare: commit=4bf092f hw=macos/aarch64 (16 logical cores) rayon_threads=16
+::warning::size=1920 出力不一致（matrixmultiply）: matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"self_gemm_blis_parallel","lib_version":"0.1.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.8999,"tflops_q1":0.8352,"tflops_q3":0.9118,"output_match":true,"mismatch_detail":null}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"matrixmultiply","lib_version":"0.3.11","impl_threads":1,"size":1920,"warmup":20,"iters":20,"tflops_median":0.1084,"tflops_q1":0.1080,"tflops_q3":0.1095,"output_match":false,"mismatch_detail":"matrixmultiply: index=1063 reference=0.0025112743 candidate=0.002501011 abs_diff=0.000010263408 rel_diff=0.004086932"}
+{"date":"2026-09-07","commit":"4bf092f","hw":"macos/aarch64 (16 logical cores)","boundary":"device_resident","impl":"gemm","lib_version":"0.19.0","impl_threads":16,"size":1920,"warmup":20,"iters":20,"tflops_median":0.9653,"tflops_q1":0.9493,"tflops_q3":0.9963,"output_match":true,"mismatch_detail":null}
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。
+== RAYON_NUM_THREADS=16 run=5 rc=1 ==
+done.
