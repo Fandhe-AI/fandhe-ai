@@ -46,6 +46,7 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::{Device, SgdConfig as FacadeSgdConfig};
 use fandhe_ai_autodiff::nn::loss::{MseLoss, Reduction};
+use fandhe_ai_backend_cuda::device::CudaDevice;
 use fandhe_ai_tensor_core::Tensor;
 
 const BATCH: usize = 4;
@@ -84,14 +85,23 @@ fn build_model() -> Sequential {
 }
 
 /// `device_param_store_train.rs::train_with_device_param_store` の CUDA
-/// 版（`Device::Cuda(0)` 固定）。各 step の loss（`f32` そのまま。ビット
-/// 比較は呼び出し元が `to_bits()` で行う）と、最終的にホストへ同期した
-/// パラメータ列を返す。
-fn train_on_cuda(steps: usize, lr: f32) -> (Vec<f32>, Vec<Tensor<f32>>) {
+/// 版。各 step の loss（`f32` そのまま。ビット比較は呼び出し元が
+/// `to_bits()` で行う）と、最終的にホストへ同期したパラメータ列を返す。
+///
+/// `ordinal` を引数化している理由（codex-review P2 指摘対応。イシュー
+/// #1349）: opt-in（`FANDHE_AI_CUDA_GRAPH_STEP`／
+/// `set_cuda_graph_step_enabled`）はプロセス内最初の CUDA デバイス
+/// 初期化より前に固定される必要があるため（モジュール冒頭コメント）、
+/// 同一プロセス内で「opt-in OFF の基準値」と「opt-in ON の capture 経路」
+/// を機械比較するには**異なる ordinal**を使う必要がある
+/// （[`graph_capture_matches_eager_baseline_bit_identical_across_two_gpus`]
+/// 参照）。
+fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> (Vec<f32>, Vec<Tensor<f32>>) {
     let model = build_model();
     let (x_data, y_data) = gen_regression_data(SEED_DATA);
 
-    let init_tape = fandhe_ai::tape_for(Device::Cuda(0)).expect("CUDA device 0 must be available");
+    let init_tape =
+        fandhe_ai::tape_for(Device::Cuda(ordinal)).expect("CUDA device must be available");
     let mut store = model.init_device_param_store(&init_tape).unwrap();
     drop(init_tape);
 
@@ -99,7 +109,8 @@ fn train_on_cuda(steps: usize, lr: f32) -> (Vec<f32>, Vec<Tensor<f32>>) {
     let mut log = Vec::with_capacity(steps);
 
     for _ in 0..steps {
-        let tape = fandhe_ai::tape_for(Device::Cuda(0)).expect("CUDA device 0 must be available");
+        let tape =
+            fandhe_ai::tape_for(Device::Cuda(ordinal)).expect("CUDA device must be available");
         let x = tape.var(&x_data);
         let y = tape.var(&y_data);
 
@@ -112,7 +123,8 @@ fn train_on_cuda(steps: usize, lr: f32) -> (Vec<f32>, Vec<Tensor<f32>>) {
             .unwrap();
     }
 
-    let final_tape = fandhe_ai::tape_for(Device::Cuda(0)).expect("CUDA device 0 must be available");
+    let final_tape =
+        fandhe_ai::tape_for(Device::Cuda(ordinal)).expect("CUDA device must be available");
     let synced = final_tape.sync_device_param_store_to_host(&store).unwrap();
     (log, synced)
 }
@@ -147,7 +159,7 @@ fn eager_baseline() {
         "本テストは opt-in OFF（既定）の基準値を記録する。環境変数 \
          FANDHE_AI_CUDA_GRAPH_STEP を設定せずに実行すること"
     );
-    let (log, params) = train_on_cuda(STEPS, LR);
+    let (log, params) = train_on_cuda(0, STEPS, LR);
     print_bit_identity_report("eager (opt-in OFF)", &log, &params);
 }
 
@@ -164,7 +176,7 @@ fn graph_capture() {
         "本テストは opt-in ON（環境変数 FANDHE_AI_CUDA_GRAPH_STEP=1）の \
          別プロセスとして実行すること"
     );
-    let (log, params) = train_on_cuda(STEPS, LR);
+    let (log, params) = train_on_cuda(0, STEPS, LR);
     print_bit_identity_report("graph capture (opt-in ON)", &log, &params);
 }
 
@@ -180,10 +192,94 @@ fn graph_capture() {
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須。単独プロセスで実行すること（opt-in をプロセスワイドに変更するため）"]
 fn graph_capture_completes_training_loop_without_error() {
     fandhe_ai::set_cuda_graph_step_enabled(true);
-    let (log, _params) = train_on_cuda(STEPS, LR);
+    let (log, _params) = train_on_cuda(0, STEPS, LR);
     assert_eq!(log.len(), STEPS);
     for loss in &log {
         assert!(loss.is_finite(), "loss must remain finite: {loss}");
     }
     fandhe_ai::set_cuda_graph_step_enabled(false);
+}
+
+/// 受け入れ条件 (a) の**機械比較版**（codex-review P2 指摘対応。イシュー
+/// #1349）: `eager_baseline`／`graph_capture` は出力を印字するのみで
+/// 自動比較しない（目視・スクリプト任せ）ため、2 GPU 搭載機では本テスト
+/// 単独で「損失・最終パラメータが bit 同一」を `assert_eq!` により機械
+/// 検証する。
+///
+/// **前提**: opt-in はプロセス内最初の CUDA デバイス初期化より前に固定
+/// される必要がある（`fandhe_ai::set_cuda_graph_step_enabled` doc・本
+/// ファイル冒頭コメント参照）ため、同一プロセス内で両経路を機械比較
+/// するには異なる ordinal が要る: ordinal 0 で opt-in OFF（eager）を
+/// 先に完走させたあと opt-in を ON にし、ordinal 1（この時点で初めて
+/// 初期化される）で capture 経路を走らせる。
+///
+/// **単一 GPU 環境（DGX Spark GB10 等）では成立しない**（`CudaDevice::
+/// device_count()` が 2 未満なら、コンテキスト非構築の軽量プローブ〈
+/// `tape_cuda_cache_bench.rs` と同じ理由で選定〉で検出し早期 return
+/// する。単一 GPU 環境の受け入れ検証は既存の 2 プロセス比較
+/// （`eager_baseline`／`graph_capture`。モジュール冒頭コメント）に委ねる）。
+#[test]
+#[ignore = "CUDA 実機（2 GPU 構成）必須。単独プロセスで実行すること（opt-in をプロセスワイドに             変更するため）。単一 GPU 環境では device_count() < 2 のため早期 return する"]
+fn graph_capture_matches_eager_baseline_bit_identical_across_two_gpus() {
+    let device_count = CudaDevice::device_count().unwrap_or(0);
+    if device_count < 2 {
+        eprintln!(
+            "device_count()={device_count} < 2: 単一 GPU 環境のため本テストの機械比較は成立しない              （2 プロセス構成の eager_baseline／graph_capture に委ねる）。早期 return する。"
+        );
+        return;
+    }
+
+    assert!(
+        !fandhe_ai::cuda_graph_step_enabled(),
+        "ordinal 0 の eager baseline は opt-in OFF のまま初期化する必要がある"
+    );
+    let (eager_log, eager_params) = train_on_cuda(0, STEPS, LR);
+
+    fandhe_ai::set_cuda_graph_step_enabled(true);
+    let (graph_log, graph_params) = train_on_cuda(1, STEPS, LR);
+    fandhe_ai::set_cuda_graph_step_enabled(false);
+
+    print_bit_identity_report("eager (opt-in OFF, ordinal 0)", &eager_log, &eager_params);
+    print_bit_identity_report(
+        "graph capture (opt-in ON, ordinal 1)",
+        &graph_log,
+        &graph_params,
+    );
+
+    assert_eq!(
+        eager_log.len(),
+        graph_log.len(),
+        "loss 列の長さが一致しないはず（STEPS は共通の定数）"
+    );
+    for (i, (e, g)) in eager_log.iter().zip(graph_log.iter()).enumerate() {
+        assert_eq!(
+            e.to_bits(),
+            g.to_bits(),
+            "step[{i}] の loss が bit 同一でない: eager={e:#010x?}／graph={g:#010x?}"
+        );
+    }
+
+    assert_eq!(
+        eager_params.len(),
+        graph_params.len(),
+        "パラメータ列の個数が一致しないはず（同一モデル構成）"
+    );
+    for (p, (ep, gp)) in eager_params.iter().zip(graph_params.iter()).enumerate() {
+        let e_contig = ep.contiguous();
+        let g_contig = gp.contiguous();
+        let e_slice = e_contig.as_slice().unwrap_or(&[]);
+        let g_slice = g_contig.as_slice().unwrap_or(&[]);
+        assert_eq!(
+            e_slice.len(),
+            g_slice.len(),
+            "param[{p}] の要素数が一致しないはず"
+        );
+        for (i, (ev, gv)) in e_slice.iter().zip(g_slice.iter()).enumerate() {
+            assert_eq!(
+                ev.to_bits(),
+                gv.to_bits(),
+                "param[{p}][{i}] が bit 同一でない: eager={ev:#010x?}／graph={gv:#010x?}"
+            );
+        }
+    }
 }
