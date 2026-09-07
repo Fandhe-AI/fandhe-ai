@@ -143,6 +143,8 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         tf32: cli.device == "cuda",
         managed: cli.managed,
         device_checksum: false,
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -259,6 +261,8 @@ fn run_train<B: AutodiffBackend>(
         tf32: cli.device == "cuda",
         managed: cli.managed,
         device_checksum: false,
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -308,6 +312,8 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         tf32: cli.device == "cuda",
         managed: cli.managed,
         device_checksum: false,
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -388,6 +394,16 @@ fn validate_unsupported_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
                 .into(),
         );
     }
+    // イシュー #1350: `--graph` は fandhe-ai 固有の CUDA Graph step
+    // capture opt-in API を指す概念であり、burn には対応する公開 API が
+    // 存在しない。`--managed` と同型の allowlist 方式で常に拒否する。
+    if cli.graph.is_some() {
+        return Err(
+            "MEASURE_ERROR: --graph is not supported by burn (fandhe-ai-only CUDA Graph step \
+             capture opt-in; issue #1350)"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -424,6 +440,7 @@ mod tests {
             tf32,
             managed: false,
             device_checksum: false,
+            graph: None,
         }
     }
 
@@ -460,6 +477,25 @@ mod tests {
 
     #[test]
     fn managed_flag_absent_passes_the_guard() {
+        assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
+    }
+
+    /// イシュー #1350: `--graph` は fandhe-ai 固有の opt-in であり burn
+    /// には対応する公開 API が存在しないため、`--managed` と同様に常に
+    /// MEASURE_ERROR で拒否されることを確認する。
+    #[test]
+    fn graph_flag_is_always_measure_error() {
+        let mut cli = base_cli(false);
+        cli.graph = Some("on".to_string());
+        let err =
+            validate_unsupported_flags(&cli).expect_err("--graph must be rejected on bench-burn");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--graph"), "msg={msg}");
+    }
+
+    #[test]
+    fn graph_flag_absent_passes_the_guard() {
         assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
     }
 }

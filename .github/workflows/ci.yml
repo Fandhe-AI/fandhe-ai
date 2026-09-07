@@ -786,6 +786,15 @@ jobs:
       - name: フレームワーク横並びベンチ compare_gemm_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/compare_gemm_ab_test.py
 
+      # イシュー #1350: compare_graph_ab.py（学習 1 step の CUDA Graph capture
+      # 〈#1348/#1349〉有無の A/B 比較ヘルパー。件数・checksum 全ペア・launch
+      # カウンタ一致の fail-closed 判定）の回帰テスト。summarize_test.py・
+      # compare_ab_test.py・compare_gemm_gate_test.py・compare_managed_ab_test.py・
+      # compare_gemm_ab_test.py と同一方針（stdlib の unittest のみ・cargo の
+      # 有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ compare_graph_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/compare_graph_ab_test.py
+
       # イシュー #1237: parity_tolerance_candidates.py（#1184 ダンプ実値から
       # スケール付き絶対誤差／ULP 判定候補の fail 数を机上計算するスクリプト）
       # の回帰テスト。summarize_test.py・compare_gemm_ab_test.py 等と同一方針

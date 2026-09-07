@@ -1746,6 +1746,32 @@ class InferReuseSectionTests(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("一致", text)
 
+    def test_graph_fresh_row_is_excluded_from_infer_reuse_checksum_match(self):
+        # イシュー #1350（PR #1425 fix-up・Cursor Bugbot Medium 指摘）:
+        # (c') 節の fresh 側突合（`all_reuse_for_fw`／`fresh_matches`）は
+        # managed:true 行の除外（`test_managed_fresh_row_is_excluded_
+        # from_reuse_checksum_match` 参照）はあったが `graph` キーを持つ
+        # 行の除外が抜けていた。fresh 側に graph 行（checksum 不一致）が
+        # 混在していても、reuse 側（graph なし）の突合先として誤って
+        # 選ばれない（「同一 size の fresh 行が複数」で判定不能に化けない）
+        # ことを確認する。
+        rows = [
+            dict(
+                _infer_row(mode="fresh", checksum=999.0),
+                size=64,
+                graph="on",
+            ),
+            dict(_infer_row(mode="fresh", checksum=1.0), size=64),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=1.0, init_s=0.02),
+                size=64,
+            ),
+        ]
+        lines, *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_infer_reuse_invalid)
+        text = "\n".join(lines)
+        self.assertIn("一致", text)
+
     def test_infer_reuse_rows_do_not_affect_gemm_or_train_sections(self):
         gemm_rows = [_with_parity(_base_row())]
         train_rows = [_train_row(mode="fresh")]
@@ -2579,6 +2605,39 @@ class TargetGateTests(unittest.TestCase):
             size=64,
         )
         rows = [normal_fresh, managed_fresh, reuse]
+        reason = summarize._reuse_row_invalid_reason(rows, reuse, "train")
+        self.assertIsNone(reason)
+
+    def test_reuse_row_invalid_reason_ignores_graph_fresh_duplicate(self):
+        # イシュー #1350（PR #1425 fix-up・Cursor Bugbot Medium 指摘）:
+        # `_pick_row_for_gate` は `graph` キーを持つ行（CUDA Graph
+        # capture A/B 計測。`compare_graph_ab.py` が別途 A/B 集計）を
+        # 候補から除外するが、`_reuse_row_invalid_reason` の fresh 側
+        # 突合（`fresh_matches`）はその除外を適用していなかったため、
+        # 正式 train fresh 行と `graph:"on"` の train fresh 行が同一
+        # size で同居すると「同一 size の fresh 行が複数」判定に化け、
+        # 本来 checksum が一致し達成するはずの reuse 行が判定不能に
+        # なっていた（managed 除外と同型の回帰。上記
+        # `test_reuse_row_invalid_reason_ignores_managed_fresh_duplicate`
+        # を graph 版へ写した固定化）。graph fresh 行の checksum を
+        # 意図的に不一致（999.0）にしても、除外により無視され通常
+        # fresh（checksum 一致）とだけ突合されることを確認する。
+        normal_fresh = dict(
+            _train_row(framework="fandhe-ai", mode="fresh", checksum=0.08, median_s=0.01),
+            size=64,
+        )
+        graph_fresh = dict(
+            _train_row(framework="fandhe-ai", mode="fresh", checksum=999.0, median_s=0.01),
+            size=64,
+        )
+        graph_fresh["graph"] = "on"
+        reuse = dict(
+            _train_row(
+                framework="fandhe-ai", mode="reuse", checksum=0.08, init_s=0.001, median_s=0.005
+            ),
+            size=64,
+        )
+        rows = [normal_fresh, graph_fresh, reuse]
         reason = summarize._reuse_row_invalid_reason(rows, reuse, "train")
         self.assertIsNone(reason)
 

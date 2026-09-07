@@ -1,0 +1,81 @@
+イシュー #1350: CUDA Graph step capture（`--graph`）3 状態 A/B 計測 env_info
+（内部ホスト名は含めない。DGX Spark GB10 実機実測。2026-09-08）
+
+## 実機
+- GPU: DGX Spark GB10（sm_121）
+- rustc: 1.97.0 (2d8144b78 2026-07-07)
+- nvcc: Cuda compilation tools, release 13.0, V13.0.88
+  (Build cuda_13.0.r13.0/compiler.36424714_0)
+- nproc: 20 / メモリ 121 GiB / 空きディスク 3.0 TiB
+
+## 対象 HEAD
+- ローカル `main`（このイシューの起点）: 5a66e110ba8fbcd1e32102de83f8436a3de04ef0
+  （PR #1390「学習 step の CUDA Graph capture 経路を opt-in で実装する」
+  #1349 のマージコミット）
+- 本ラベル: head-5a66e11
+
+## 負荷確認（計測前後）
+- 計測前 `uptime`: 01:47:46 up 11 days, 13:14, 5 users, load average: 0.00, 0.04, 0.38
+- 計測前 `nvidia-smi --query-gpu=utilization.gpu`: 0 %
+- 計測前 `nvidia-smi --query-compute-apps`:
+  - pid 427276, /opt/llm-infra/comfyui-env/bin/python, 170 MiB
+  - pid 1241474, /opt/llm-infra/venvs/kokoro/bin/python3, 870 MiB
+  （常駐サービス。docs/real-hardware-verification-env.local.md に記載の既知プロセス）
+- 計測後 `uptime`: 02:09:13 up 11 days, 13:36, 5 users, load average: 1.00, 0.79, 0.46
+  （A/B 計測プロセス自体の CPU 使用による load average 上昇。GPU 使用率は 0% のまま
+  ＝計測中も GPU は本計測以外にビジー状態ではなかったと判断）
+
+## ビルド
+```
+cd scripts/bench/framework-compare
+AB_PATCH_FACADE_PATH=$HOME/work/rust-ai-library-run-1350/crates/facade \
+  ./run_ab_graph_cuda.sh head-5a66e11
+```
+- `cargo build --release -p bench-fandhe --features graph-step --config
+  'patch.crates-io.fandhe-ai.path="<abs>/crates/facade"'`
+- `cargo tree -p bench-fandhe --depth 1 --config …` で `fandhe-ai` が
+  `<abs>/crates/facade` へ path 解決されていることを確認済み（ハードゲート
+  として `run_ab_graph_cuda.sh` 内で自動検査・PASS）
+- `bench-fandhe` sha256:
+  `bc7991aa2ddf39e6537a0102b7b2ae0d9c858dbd0bd42cbc4f2def91e99ccc62`
+  （計測全 150 run で sha256 再照合ゲートを通過。バイナリ差し替えなし）
+- `scripts/bench/framework-compare/Cargo.lock` は計測前後で md5sum
+  `a47810aead05c90be71cf96dd3ce3e6e` のまま不変（`[patch]` は CLI 引数限定・
+  `run_ab_graph_cuda.sh` の trap による退避・復元を確認）
+
+## Phase 0（実機実測前提の消化）
+1. `make test-ignored-cuda`:
+   - 1 段目（`cargo test -p fandhe-ai-backend-cuda --release --all-features
+     -- --ignored --nocapture --skip sgd_update_segment_captures_then_replays_bit_identically
+     --skip different_config_key_produces_a_different_segment_key`）:
+     34 passed・2 failed（`init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm`・
+     `module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache`）。
+     いずれも同一プロセス内 `#[ignore]` テストの並行実行によるモジュールキャッシュ LRU
+     の相互汚染が原因と失敗メッセージ自体が明記する既知の非決定性（イシュー #1107。
+     本イシュー #1350 の変更〈launch カウンタ追加〉とは無関係）。ログ:
+     `test-ignored-cuda-first-invocation.log`
+   - 2 段目（`cargo test -p fandhe-ai-backend-cuda --release --test
+     graph_capture_real_device -- --ignored --nocapture --test-threads=1`）:
+     **2 passed・0 failed**（`sgd_update_segment_captures_then_replays_bit_identically`・
+     `different_config_key_produces_a_different_segment_key`）。本イシューで追加した
+     launch カウンタ assert（capture で `captured`+1・`graph_launches`+1・
+     `replayed` 不変／replay で `replayed`+1・`graph_launches`+1・`captured` 不変）
+     を含めて実機で自己検証済み。ログ: `graph_capture_real_device_optin_off.log`
+2. `scripts/verify-cuda-graph-step-bit-identity.sh`:
+   **OK: eager_baseline（opt-in OFF）と graph_capture（opt-in ON）は 2662 行すべて bit 同一**。
+   ログ: `verify-cuda-graph-step-bit-identity.log`
+
+いずれも capture 機構が GB10 で成立していることを確認済み（設計判断 doc の
+「停止条件（機構未成立時は判定不可）」には該当しない）。
+
+## A/B 本体
+- 実行ログ: `run_ab_graph_cuda-dgx-head-5a66e11.log`
+- JSONL: `results-dgx-graph-ab-head-5a66e11.jsonl`（150 行。5 run × 3 状態
+  × 10 セル〈(a) train reuse step_total・(b) train_phases reuse 8 phase・
+  (c) train fresh〉）
+- skipped ログ: 空（`skipped-dgx-graph-ab-head-5a66e11.log`。0 行＝失敗なし）
+- 集計: `compare_graph_ab.md`（`compare_graph_ab.py` 出力そのまま）。
+  全 10 セルとも `status: ok`（判定不能セルなし）・checksum 全セル完全一致
+
+## 実測ツールのバージョン
+- python3: `python3 --version` は本ドキュメント作成側（macOS）で 3.x（標準ライブラリのみ使用）

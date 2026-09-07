@@ -1,0 +1,281 @@
+cargo test -p fandhe-ai-backend-cuda --release --all-features -- --ignored --nocapture \
+	--skip sgd_update_segment_captures_then_replays_bit_identically \
+	--skip different_config_key_produces_a_different_segment_key
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.56
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling crossbeam-utils v0.8.22
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling serde_core v1.0.229
+   Compiling rayon-core v1.13.0
+   Compiling cudarc v0.19.8
+   Compiling zmij v1.0.23
+   Compiling fandhe-ai-backend-cpu v0.7.0 (<abs>/work/rust-ai-library-run-1350/crates/backend-cpu)
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling either v1.17.0
+   Compiling libloading v0.9.0
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling rand_core v0.9.5
+   Compiling rayon v1.12.0
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.7.0 (<abs>/work/rust-ai-library-run-1350/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.7.0 (<abs>/work/rust-ai-library-run-1350/crates/backend-cuda)
+   Compiling bench-harness v0.7.0 (<abs>/work/rust-ai-library-run-1350/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 11.23s
+     Running unittests src/lib.rs (target-1350/release/deps/fandhe_ai_backend_cuda-43f0a4432d0e2556)
+
+running 36 tests
+skipping poison_from_real_cuda_error_fails_closed_to_unrecoverable: set FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1 to opt in (単独プロセス・単独 テスト名フィルタでの実行を前提とする運用契約。モジュール冒頭コメント 「運用契約」参照)
+skipping poison_recovery_real_probe_restores_active_and_rejects_stale_generation: set FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1 to opt in (単独プロセス・単独 テスト名フィルタでの実行を前提とする運用契約。モジュール冒頭コメント 「運用契約」参照)
+test context_cache::poison_recovery_real_device_tests::poison_from_real_cuda_error_fails_closed_to_unrecoverable ... ok
+test context_cache::poison_recovery_real_device_tests::poison_recovery_real_probe_restores_active_and_rejects_stale_generation ... ok
+test context_cache::tests::cached_allocator_keeps_distinct_contexts_on_same_ordinal_separate ... ok
+=== (g) context_cache::cached_device(0) 参照値（イシュー #956 H4）===
+  cached_device(0) [warm]: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+test fresh_overhead_diag_tests::fresh_overhead_diag_g_cached_device_select_reference ... ok
+test context_cache::async_ordering_poison_tests::invalidate_with_real_stream_sync_drains_pending_launches_and_reactivates ... ok
+test gemm_mma::tests::mma_f16_new_wires_size_conditional_swizzle_into_production_constructor ... ok
+test gemm_mma::tests::mma_f16_derived_stage_count_matches_default_stage_count_bit_exact ... ok
+test gemm_mma::tests::mma_f16_stage_count_does_not_change_bit_exact_output ... ok
+test gemm_mma::tests::mma_f16_swizzle_variant_matches_base_bit_exact_output ... ok
+=== fresh GEMM D2H フェーズ分解: variant=V0-fresh(drop each trial) (イシュー #956) ===
+=== fresh GEMM D2H フェーズ分解: variant=V1-keep_alive(reuse相当) (イシュー #956) ===
+=== fresh GEMM D2H フェーズ分解: variant=V2-pre_touched (イシュー #956) ===
+=== fresh GEMM (c) C 確保フェーズ: V3-pooled（イシュー #1020）===
+=== CUDA tape 初期化コスト e2e（本番 CudaBackendOps::gemm 経路）===
+--- N=1024 ---
+  run_tiled_f32 [pool miss on first C alloc, warmup]: 39.732 ms
+    (c) alloc_zeroed_f32 [pool hit]: median=0.002 ms  q1=0.002 ms  q3=0.003 ms
+  pool stats after N=1024: PoolStats { alloc_count: 3, reuse_count: 13, cached_bytes: 8650752, pending_return_bytes: 0, capacity_waste_bytes: 0, released_bytes: 0 }
+ -- N=1024 --
+  (a) H2D A: median=0.077 ms  q1=0.077 ms  q3=0.083 ms
+  (b) H2D B: median=0.077 ms  q1=0.076 ms  q3=0.079 ms
+  (c) C 確保: median=0.004 ms  q1=0.003 ms  q3=0.004 ms
+  (d) launch+synchronize: median=0.003 ms  q1=0.002 ms  q3=0.003 ms
+  (e) D2H: median=0.266 ms  q1=0.263 ms  q3=0.271 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.001 ms
+  (a+b+c+d+e+f) 再構成合計: median=0.430 ms  q1=0.423 ms  q3=0.445 ms
+--- N=2048 ---
+  run_tiled_f32 [pool miss on first C alloc, warmup]: 42.904 ms
+    (c) alloc_zeroed_f32 [pool hit]: median=0.002 ms  q1=0.002 ms  q3=0.003 ms
+  pool stats after N=2048: PoolStats { alloc_count: 5, reuse_count: 35, cached_bytes: 21233664, pending_return_bytes: 0, capacity_waste_bytes: 0, released_bytes: 0 }
+  N=256: median=1.389 ms  q1=0.067 ms  q3=6.991 ms
+ -- N=1024 --
+  (a) H2D A: median=0.089 ms  q1=0.084 ms  q3=0.112 ms
+  (b) H2D B: median=0.084 ms  q1=0.079 ms  q3=0.084 ms
+  (c) C 確保: median=0.008 ms  q1=0.005 ms  q3=0.012 ms
+  (d) launch+synchronize: median=0.005 ms  q1=0.003 ms  q3=0.008 ms
+  (e) D2H: median=1.429 ms  q1=1.324 ms  q3=6.044 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=1.697 ms  q1=1.540 ms  q3=10.502 ms
+ -- N=2048 --
+  (a) H2D A: median=0.284 ms  q1=0.283 ms  q3=0.285 ms
+  (b) H2D B: median=0.296 ms  q1=0.296 ms  q3=0.297 ms
+  (c) C 確保: median=0.003 ms  q1=0.003 ms  q3=0.003 ms
+  (d) launch+synchronize: median=0.002 ms  q1=0.002 ms  q3=0.002 ms
+  (e) D2H: median=1.509 ms  q1=1.501 ms  q3=1.512 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=2.092 ms  q1=2.086 ms  q3=2.097 ms
+--- N=4096 ---
+  run_tiled_f32 [pool miss on first C alloc, warmup]: 740.504 ms
+    (c) alloc_zeroed_f32 [pool hit]: median=0.003 ms  q1=0.003 ms  q3=0.003 ms
+  pool stats after N=4096: PoolStats { alloc_count: 6, reuse_count: 53, cached_bytes: 88342528, pending_return_bytes: 0, capacity_waste_bytes: 0, released_bytes: 0 }
+test gemm::tests::wmma_tf32_staged_new_wires_size_conditional_swizzle_into_production_constructor ... ok
+ -- N=2048 --
+  (a) H2D A: median=0.302 ms  q1=0.298 ms  q3=0.304 ms
+  (b) H2D B: median=0.295 ms  q1=0.293 ms  q3=0.295 ms
+  (c) C 確保: median=0.009 ms  q1=0.003 ms  q3=0.009 ms
+  (d) launch+synchronize: median=0.005 ms  q1=0.003 ms  q3=0.006 ms
+  (e) D2H: median=38.879 ms  q1=5.793 ms  q3=141.823 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=39.512 ms  q1=6.405 ms  q3=142.435 ms
+=== release_cached: freed_bytes=96731136 ===
+test fresh_overhead_diag_tests::fresh_overhead_diag_v3_pooled_output ... ok
+ -- N=1024 --
+  (a) H2D A: median=0.086 ms  q1=0.080 ms  q3=0.096 ms
+  (b) H2D B: median=0.079 ms  q1=0.076 ms  q3=0.080 ms
+  (c) C 確保: median=0.011 ms  q1=0.005 ms  q3=0.014 ms
+  (d) launch+synchronize: median=0.006 ms  q1=0.004 ms  q3=0.008 ms
+  (e) D2H: median=0.083 ms  q1=0.079 ms  q3=10.199 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.839 ms  q1=0.833 ms  q3=0.840 ms
+  (a+b+c+d+e+f) 再構成合計: median=1.096 ms  q1=1.085 ms  q3=25.185 ms
+  N=1024: median=42.280 ms  q1=2.379 ms  q3=97.974 ms
+test kernels_wmma_opt::tests::wmma_opt_sources_compile_with_nvrtc_when_available ... ok
+test kernels_mma::tests::mma_f16_sources_compile_with_nvrtc_when_available ... ok
+ -- N=4096 --
+  (a) H2D A: median=1.150 ms  q1=1.149 ms  q3=1.159 ms
+  (b) H2D B: median=1.150 ms  q1=1.148 ms  q3=1.151 ms
+  (c) C 確保: median=0.004 ms  q1=0.003 ms  q3=0.010 ms
+  (d) launch+synchronize: median=0.003 ms  q1=0.002 ms  q3=0.005 ms
+  (e) D2H: median=662.370 ms  q1=605.937 ms  q3=669.122 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=664.671 ms  q1=608.492 ms  q3=671.428 ms
+test fresh_overhead_diag_tests::fresh_overhead_diag_v1_keep_alive ... ok
+[jit_cache_bench:cold_vs_warm] descriptor=c12-static-mnk-1024 compile_median_s=0.015951 (q1=0.015950, q3=0.059100) store_median_s=0.012346 (q1=0.012073, q3=0.012832) cold_total_median_s=0.028765 (q1=0.028024, q3=0.071446) warm_load_median_s=0.000067 (q1=0.000067, q3=0.000069) speedup_x=429.89 warm_faster=true — record only, non-gating (see module doc comment)
+[jit_cache_bench:cold_vs_warm] descriptor=c12-static-mnk-4096 compile_median_s=0.015946 (q1=0.015911, q3=0.015957) store_median_s=0.011958 (q1=0.011126, q3=0.013004) cold_total_median_s=0.027904 (q1=0.027084, q3=0.028964) warm_load_median_s=0.000066 (q1=0.000066, q3=0.000067) speedup_x=421.66 warm_faster=true — record only, non-gating (see module doc comment)
+ -- N=2048 --
+  (a) H2D A: median=0.342 ms  q1=0.303 ms  q3=0.581 ms
+  (b) H2D B: median=0.296 ms  q1=0.294 ms  q3=0.299 ms
+  (c) C 確保: median=0.020 ms  q1=0.018 ms  q3=0.021 ms
+  (d) launch+synchronize: median=0.009 ms  q1=0.009 ms  q3=0.010 ms
+  (e) D2H: median=12.793 ms  q1=4.007 ms  q3=33.553 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=3.334 ms  q1=3.313 ms  q3=3.339 ms
+  (a+b+c+d+e+f) 再構成合計: median=23.456 ms  q1=14.134 ms  q3=46.211 ms
+test gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes ... ok
+[jit_cache_bench:module_load] fresh_ptx_load_and_resolve_median_s=0.000104 (q1=0.000102, q3=0.000105) cached_ptx_load_and_resolve_median_s=0.000101 (q1=0.000100, q3=0.000110)
+test gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress ... ok
+test nvrtc::tests::nvrtc_version_returns_ok_on_real_device ... ok
+ -- N=4096 --
+  (a) H2D A: median=1.572 ms  q1=1.180 ms  q3=6.294 ms
+  (b) H2D B: median=1.208 ms  q1=1.162 ms  q3=6.848 ms
+  (c) C 確保: median=4.352 ms  q1=0.023 ms  q3=13.632 ms
+  (d) launch+synchronize: median=0.011 ms  q1=0.009 ms  q3=0.012 ms
+  (e) D2H: median=63.832 ms  q1=39.374 ms  q3=77.078 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=18.251 ms  q1=10.707 ms  q3=25.273 ms
+  (a+b+c+d+e+f) 再構成合計: median=112.745 ms  q1=76.751 ms  q3=172.742 ms
+test fresh_overhead_diag_tests::fresh_overhead_diag_v0_fresh_drop_each_trial ... ok
+[jit_cache_bench:cold_vs_warm] descriptor=c12-dynamic-all-4096 compile_median_s=0.178537 (q1=0.015947, q3=0.348545) store_median_s=0.020172 (q1=0.016715, q3=0.021015) cold_total_median_s=0.199552 (q1=0.032619, q3=0.369883) warm_load_median_s=0.000146 (q1=0.000101, q3=0.000158) speedup_x=1369.50 warm_faster=true — record only, non-gating (see module doc comment)
+test nvrtc::jit_cache_bench_tests::jit_cache_bench_cold_compile_vs_warm_load_latency ... ok
+=== CudaGemm::new module_cache LRU cold/warm（イシュー #1024）===
+  1st CudaGemm::new (LRU cold; 9 kernels NVRTC-compiled): median=2566.981 ms  q1=2566.981 ms  q3=2566.981 ms
+  2nd CudaGemm::new (LRU warm; module_cache hit for every kernel): median=8032.934 ms  q1=8032.934 ms  q3=8032.934 ms
+
+thread 'init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm' (524654) panicked at crates/backend-cuda/src/init_cost_diag_tests.rs:484:5:
+2nd (LRU warm) CudaGemm::new must not be slower than the 1st (LRU cold) call: cold=2.5669813379999997s, warm=8.032933658s
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm ... FAILED
+test module_cache_wiring_tests::cuda_gemm_new_stores_disk_cache_entry_for_every_kernel ... ok
+=== CUDA GEMM 再利用ハンドルの定常状態 1 回あたりコスト（参照値）===
+  reused-handle run_tiled_f32(N=1024) per-call: median=7.568 ms  q1=0.426 ms  q3=42.098 ms
+test init_cost_diag_tests::init_cost_diag_reused_handle_steady_state_reference ... ok
+test gemm::tests::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096 ... ok
+  N=4096: median=136.763 ms  q1=86.019 ms  q3=164.624 ms
+test init_cost_diag_tests::init_cost_diag_e2e_matches_framework_compare_shape ... ok
+  N=1024 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=0.3999 ms  q1=0.1349 ms  q3=4.5776 ms
+    h2d_b: median=0.0912 ms  q1=0.0841 ms  q3=0.2612 ms
+    alloc_c: median=0.0013 ms  q1=0.0013 ms  q3=0.0016 ms
+    launch_issue: median=0.0197 ms  q1=0.0181 ms  q3=0.0281 ms
+    kernel_wait: median=0.7608 ms  q1=0.1943 ms  q3=4.6340 ms
+    d2h: median=7.8447 ms  q1=5.5742 ms  q3=15.7377 ms
+    host_copy: median=3.7663 ms  q1=3.3626 ms  q3=20.7456 ms
+    sum of medians: 12.8840 ms
+  N=1024 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=3.2487 ms  q1=0.1209 ms  q3=5.7052 ms
+    h2d_b: median=0.0891 ms  q1=0.0839 ms  q3=0.1200 ms
+    alloc_c: median=0.0015 ms  q1=0.0015 ms  q3=0.0017 ms
+    launch_issue: median=0.0213 ms  q1=0.0193 ms  q3=0.0221 ms
+    kernel_wait: median=0.3444 ms  q1=0.3354 ms  q3=3.7754 ms
+    d2h: median=5.3092 ms  q1=4.6689 ms  q3=13.1902 ms
+    host_copy: median=15.5583 ms  q1=3.8693 ms  q3=20.6344 ms
+    sum of medians: 24.5725 ms
+ -- N=4096 --
+  (a) H2D A: median=10.731 ms  q1=1.525 ms  q3=13.848 ms
+  (b) H2D B: median=5.932 ms  q1=1.163 ms  q3=21.038 ms
+  (c) C 確保: median=2.729 ms  q1=0.026 ms  q3=2.964 ms
+  (d) launch+synchronize: median=0.012 ms  q1=0.009 ms  q3=0.015 ms
+  (e) D2H: median=25.377 ms  q1=8.321 ms  q3=35.809 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=86.645 ms  q1=78.531 ms  q3=105.845 ms
+  (a+b+c+d+e+f) 再構成合計: median=143.092 ms  q1=107.033 ms  q3=194.504 ms
+test gemm::tests::wmma_tf32_diagnostic_constructors_force_expected_kernel ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v2_pre_touched ... ok
+  N=2048 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=4.5422 ms  q1=0.3224 ms  q3=5.2720 ms
+    h2d_b: median=0.2938 ms  q1=0.2904 ms  q3=0.2961 ms
+    alloc_c: median=0.0012 ms  q1=0.0007 ms  q3=0.0014 ms
+    launch_issue: median=0.0152 ms  q1=0.0147 ms  q3=0.0157 ms
+    kernel_wait: median=1.2317 ms  q1=1.2104 ms  q3=1.2909 ms
+    d2h: median=5.2768 ms  q1=4.7300 ms  q3=6.3814 ms
+    host_copy: median=12.0052 ms  q1=11.4335 ms  q3=14.7745 ms
+    sum of medians: 23.3660 ms
+
+thread 'module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache' (524661) panicked at crates/backend-cuda/src/module_cache_wiring_tests.rs:243:5:
+2nd CudaGemm::new on the same cached device must hit the module cache for every successfully compiled kernel_specs entry: before=16, after=16, expected_kernel_count=9, evicted_during_window=72 (narrow: since just before the 2nd construction), evicted_since_start=142 (wide: since before the 1st construction — the 1st construction itself takes hundreds of ms across 9 NVRTC compiles, so a concurrent test can evict gemm1's own entries before this narrow window even starts). Either being non-zero means the shared static LRU was concurrently polluted by another #[ignore] test in the same process; re-run with `cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --test-threads=1` to serialize, per module_cache_wiring_tests.rs's top-of-file doc comment, issue #1107, GB10 measurement 2026-09-03)
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... FAILED
+  N=2048 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=2.9671 ms  q1=2.2313 ms  q3=4.4461 ms
+    h2d_b: median=0.2919 ms  q1=0.2899 ms  q3=0.2992 ms
+    alloc_c: median=0.0010 ms  q1=0.0008 ms  q3=0.0014 ms
+    launch_issue: median=0.0166 ms  q1=0.0153 ms  q3=0.0175 ms
+    kernel_wait: median=2.3755 ms  q1=2.3448 ms  q3=2.4424 ms
+    d2h: median=6.9274 ms  q1=4.7491 ms  q3=10.3707 ms
+    host_copy: median=13.6971 ms  q1=13.0249 ms  q3=15.2629 ms
+    sum of medians: 26.2767 ms
+test gemm::tests::tiled_f32_swizzle_variant_matches_cpu_reference ... ok
+test gemm::tests::wmma_tf32_staged_pad_variant_matches_base_bit_exact_output ... ok
+test gemm::tests::tiled_f32_swizzle_variant_matches_base_bit_exact_output ... ok
+test gemm::tests::wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output ... ok
+  N=4096 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=5.9151 ms  q1=4.5105 ms  q3=6.2143 ms
+    h2d_b: median=8.4122 ms  q1=1.6864 ms  q3=13.6350 ms
+    alloc_c: median=0.0019 ms  q1=0.0017 ms  q3=0.0021 ms
+    launch_issue: median=0.0178 ms  q1=0.0170 ms  q3=0.0186 ms
+    kernel_wait: median=10.4425 ms  q1=10.1406 ms  q3=10.5371 ms
+    d2h: median=40.8473 ms  q1=38.3137 ms  q3=42.4692 ms
+    host_copy: median=45.9185 ms  q1=44.4158 ms  q3=47.4917 ms
+    sum of medians: 111.5554 ms
+[jit_cache_bench:throughput] shape=(4096,4096,4096) fresh_tflops=21.88 (median_s=0.006282) cached_tflops=24.66 (median_s=0.005573) — kernel launch + sync only (excludes buffer alloc/D2H; comparable with gemm_mma_bench::measure_mma_f16), record only, non-gating (see module doc comment), ABBA counter-balanced order within each round (ROUNDS=5, see comment above)
+test nvrtc::jit_cache_bench_tests::jit_cache_bench_module_load_and_throughput_parity ... ok
+  N=4096 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=6.6501 ms  q1=4.9116 ms  q3=11.8928 ms
+    h2d_b: median=7.0414 ms  q1=1.5636 ms  q3=7.4553 ms
+    alloc_c: median=0.0019 ms  q1=0.0017 ms  q3=0.0020 ms
+    launch_issue: median=0.0174 ms  q1=0.0166 ms  q3=0.0180 ms
+    kernel_wait: median=21.8853 ms  q1=21.6722 ms  q3=21.9534 ms
+    d2h: median=40.6288 ms  q1=36.7714 ms  q3=41.1956 ms
+    host_copy: median=39.2833 ms  q1=28.3907 ms  q3=40.5280 ms
+    sum of medians: 115.5081 ms
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select ... ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_classic ... ok
+test gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress ... ok
+=== CUDA tape 初期化コスト フェーズ分解（イシュー #926） ===
+  (p1) CudaDevice::new: median=0.049 ms  q1=0.045 ms  q3=0.055 ms
+  (p2) compile_ptx[naive_f32]: median=6.180 ms  q1=5.738 ms  q3=8.503 ms
+  (p3) load_module+load_function[naive_f32]: median=0.106 ms  q1=0.090 ms  q3=15.144 ms
+  (p2) compile_ptx[naive_f16]: median=16.775 ms  q1=15.890 ms  q3=22.464 ms
+  (p3) load_module+load_function[naive_f16]: median=0.123 ms  q1=0.095 ms  q3=6.274 ms
+  (p2) compile_ptx[tiled_f32]: median=6.711 ms  q1=6.206 ms  q3=8.407 ms
+  (p3) load_module+load_function[tiled_f32]: median=0.132 ms  q1=0.118 ms  q3=19.277 ms
+  (p2) compile_ptx[tiled_f16]: median=17.143 ms  q1=16.172 ms  q3=21.847 ms
+  (p3) load_module+load_function[tiled_f16]: median=0.108 ms  q1=0.093 ms  q3=7.745 ms
+  (p2) compile_ptx[tiled_bias_act_f32]: median=6.840 ms  q1=6.176 ms  q3=9.677 ms
+  (p3) load_module+load_function[tiled_bias_act_f32]: median=0.160 ms  q1=0.147 ms  q3=2.487 ms
+  (p2) compile_ptx[wmma_tf32]: median=32.562 ms  q1=32.060 ms  q3=34.845 ms
+  (p3) load_module+load_function[wmma_tf32]: median=0.138 ms  q1=0.128 ms  q3=9.481 ms
+  (p2) compile_ptx[wmma_tf32_opt]: median=32.607 ms  q1=31.657 ms  q3=41.787 ms
+  (p3) load_module+load_function[wmma_tf32_opt]: median=0.156 ms  q1=0.147 ms  q3=28.343 ms
+  (p2) compile_ptx[wmma_tf32_staged]: median=32.707 ms  q1=32.226 ms  q3=38.800 ms
+  (p3) load_module+load_function[wmma_tf32_staged]: median=0.165 ms  q1=0.147 ms  q3=12.672 ms
+  (p2+p3 本番同一呼び出し) CudaGemm::new: median=203.085 ms  q1=193.440 ms  q3=659.706 ms
+  (p4) run_tiled_f32(N=1024): median=2.433 ms  q1=0.480 ms  q3=4.039 ms
+  (p1+p2+p3+p4 再構成合計。診断用の個別計測経路): median=162.979 ms  q1=148.594 ms  q3=329.780 ms
+test init_cost_diag_tests::init_cost_diag_phase_breakdown ... ok
+
+failures:
+
+failures:
+    init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm
+    module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache
+
+test result: FAILED. 34 passed; 2 failed; 0 ignored; 0 measured; 718 filtered out; finished in 24.45s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --lib`
+make: *** [Makefile:146: test-ignored-cuda] エラー 101
