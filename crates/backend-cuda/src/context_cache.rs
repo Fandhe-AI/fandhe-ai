@@ -516,9 +516,68 @@ pub(crate) fn cached_allocator(device: &CudaDevice) -> Result<Arc<CudaAllocator>
 //   Retiring --プローブが operation-local・再試行余地あり--> Poisoned{false}（同一世代）
 //   Poisoned{true} は恒久状態（プロセス内に回復手段なし）
 
+use std::cell::RefCell;
 use std::sync::Condvar;
 
 use fandhe_ai_tensor_core::device::BackendError;
+
+thread_local! {
+    /// このスレッドが現在保持している ordinal ごとの未解放 [`CallToken`]
+    /// 数（ネスト深度。Cursor Bugbot High 指摘対応・PR #1390 再々修正）。
+    ///
+    /// **背景**: `ops.rs::CudaBackendOps::with_driver_call` が確立した
+    /// 排他区間の内側から、`gemm.rs::CudaGemm::with_driver_call`（本 PR
+    /// で追加した sub-struct 側の排他区間。`gemm_wmma.rs` 等も同型）が
+    /// 二重に [`begin_driver_call`] を呼ぶネスト経路が実在する
+    /// （`ops.rs::CudaBackendOps::gemm` の `Tf32`／`Tf32x3` 分岐が
+    /// 外側の `with_driver_call` の中で `gemm.run_wmma_tf32`／
+    /// `gemm.run_tf32x3` を呼び、その内部が今度は自分自身の
+    /// `with_driver_call` を呼ぶ）。この状態で**別スレッド**が
+    /// [`begin_capture_session`] を呼ぶと、`state.capture` はドレイン
+    /// 完了前（＝この外側呼び出しの `in_flight` がまだ残っている段階）
+    /// に設定されるため、内側のネスト呼び出しが「別スレッドが capture
+    /// 中」の判定に該当し [`BackendError::DeviceContextCaptureInProgress`]
+    /// で拒否されてしまう。しかしこの内側呼び出しは**外側の呼び出しが
+    /// 既に `in_flight` へ計上済みの、まさに `begin_capture_session` の
+    /// drain が完了を待っている作業そのもの**であり、ここで拒否すると
+    /// 外側の呼び出しがエラーで異常終了し、capture 開始より前に始まって
+    /// いた正当な非 capture 処理が失敗する（Cursor Bugbot 指摘）。
+    ///
+    /// **対策**: このスレッドがこの ordinal で既に 1 つ以上
+    /// [`CallToken`] を保持している（＝外側の `begin_driver_call` を
+    /// 通過済みで `in_flight` に計上済み）場合に限り、[`begin_driver_call`]
+    /// の capture-in-progress 拒否検査をスキップする（poison／世代検査は
+    /// 引き続き通す。fail-closed の他の判定を弱めない）。`state.capture
+    /// == Some(current thread)`（capture 開始スレッド自身）の既存の通過
+    /// 条件とは独立で、こちらは「別スレッドが capture 中でも、このスレッド
+    /// 自身が capture 開始より前から続けている作業は継続を許す」という
+    /// 補完条件。`begin_driver_call` 冒頭コメント参照。
+    static DRIVER_CALL_DEPTH: RefCell<HashMap<usize, u32>> = RefCell::new(HashMap::new());
+}
+
+/// このスレッドが `ordinal` 上で既に 1 つ以上 [`CallToken`] を保持して
+/// いるか（[`DRIVER_CALL_DEPTH`] 参照）。
+fn has_in_flight_call_on_this_thread(ordinal: usize) -> bool {
+    DRIVER_CALL_DEPTH.with(|depth| depth.borrow().get(&ordinal).copied().unwrap_or(0) > 0)
+}
+
+/// [`DRIVER_CALL_DEPTH`] のこのスレッド・`ordinal` の値を 1 増やす
+/// （[`begin_driver_call`] が [`CallToken`] を発行する直前に呼ぶ）。
+fn increment_driver_call_depth(ordinal: usize) {
+    DRIVER_CALL_DEPTH.with(|depth| {
+        *depth.borrow_mut().entry(ordinal).or_insert(0) += 1;
+    });
+}
+
+/// [`DRIVER_CALL_DEPTH`] のこのスレッド・`ordinal` の値を 1 減らす
+/// （[`CallToken::drop`] から呼ぶ。`saturating_sub` で下振れを防ぐ）。
+fn decrement_driver_call_depth(ordinal: usize) {
+    DRIVER_CALL_DEPTH.with(|depth| {
+        if let Some(count) = depth.borrow_mut().get_mut(&ordinal) {
+            *count = count.saturating_sub(1);
+        }
+    });
+}
 
 /// [`OrdinalState::phase`] の値。ordinal 単位の poison 状態機械
 /// （モジュール冒頭「非同期実行の遅延エラー伝播」参照）。
@@ -567,6 +626,50 @@ struct OrdinalState {
     /// 診断（「現在この ordinal の回復待ちで停止しているスレッド数」）
     /// にも転用できる。
     retiring_waiters: u64,
+    /// CUDA Graph stream capture 中の区間（イシュー #1349・`docs/
+    /// backend-cuda-graph-step-capture-design.md` §4.2）。`Some` の間は
+    /// `begin_capture_session` が同一 ordinal への再入・別スレッドからの
+    /// capture 開始を拒否し、`is_capturing_on_current_thread` が
+    /// 同期点呼び出し（`memory.rs`／`ops.rs` の各ガード。`gemm.rs::
+    /// synchronize()` は診断専用・本番ディスパッチから呼ばれないため
+    /// 個別のガードを追加していない。`docs/backend-cuda-graph-step-
+    /// capture-design.md` §3.2）の判定に使う。**さらに `begin_driver_call`
+    /// 自身も本フィールドを検査し（codex-review P0 指摘対応）、capture
+    /// を開始したスレッド以外からの driver 呼び出し全般を一律拒否する**
+    /// （`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は「capture を乱しうる
+    /// driver API 呼び出し」の判定をスレッドローカルにする目的のモード
+    /// であり、別スレッドが共有ストリームへ直接カーネル起動すること
+    /// 自体を driver 側が防いでくれる保証ではないため、ホスト側で
+    /// 明示的に排他する。`begin_driver_call` doc コメント参照）。
+    capture: Option<std::thread::ThreadId>,
+    /// `capture` が `Some` の区間のうち、**in_flight ドレインが完了した
+    /// 後**だけ `true` になるサブフラグ（Cursor Bugbot High 指摘対応・
+    /// PR #1390 再修正）。[`begin_capture_session`] がドレイン完了と
+    /// **同一ロック区間内**で立てる（ロックを一旦手放してから別関数で
+    /// 立てる設計は、drain 完了から本フラグ設定までの間に他スレッドの
+    /// `begin_buffer_release` が素通りしてしまう競合窓を生むため不採用。
+    /// `begin_capture_session` doc コメント「P0 再修正」参照）。
+    ///
+    /// **この区別が必要な理由（デッドロック回避）**: [`begin_buffer_release`]
+    /// （`memory.rs::CudaBufferHandle::Drop` が使う）は「別スレッドが
+    /// 実際に driver capture 中」の間だけ駐機し、`capture` が
+    /// `Some`（ドレイン待機中を含む）というだけでは駐機しない。もし
+    /// ドレイン待機中も駐機してしまうと、あるスレッド B が既に
+    /// [`CallToken`] を保持したまま（＝ `in_flight` に計上済みのまま）
+    /// 一時バッファを drop し、その `Drop` が `begin_buffer_release` 経由で
+    /// 別スレッド A の capture 完了を待つ一方、A は
+    /// `begin_capture_session` の drain で B の `in_flight` が 0 になるのを
+    /// 待ち続ける——という相互待機（AB-BA デッドロック）が生じる。
+    /// ドレイン中（`capturing_active == false`）は driver 側で実際に
+    /// capture が始まっていないため、この間に他スレッドの
+    /// `cuMemFreeAsync` が共有ストリームへ発行されても捕獲対象の graph を
+    /// 汚染しない（捕獲はまだ始まっていない）。よってこの間は
+    /// [`begin_buffer_release`] を通し、B の `in_flight` が速やかに
+    /// 減ってドレインが完了できるようにする。真に危険な区間
+    /// （driver capture が実際に進行中）でのみ [`begin_buffer_release`]
+    /// を駐機させれば、`memory.rs` P0 の脆弱性（capture 中の共有
+    /// ストリームへの無関係な解放混入）は防げる。
+    capturing_active: bool,
 }
 
 impl Default for OrdinalState {
@@ -577,8 +680,356 @@ impl Default for OrdinalState {
             in_flight: 0,
             probe_retry_count: 0,
             retiring_waiters: 0,
+            capture: None,
+            capturing_active: false,
         }
     }
+}
+
+/// CUDA Graph stream capture の区間を表す RAII ガード（イシュー #1349）。
+/// `Drop` で `capture` を必ず解放する（`body()` が `?` による早期
+/// return・panic のいずれで抜けても、capture フラグが残留して以降の
+/// 全 driver 呼び出しが `begin_sync_point_call` に拒否され続ける事態を
+/// 防ぐ。`CallToken` と同じ RAII 一本化方針。`.claude/rules/
+/// coding-rust.md`）。
+#[derive(Debug)]
+pub(crate) struct CaptureGuard {
+    ordinal: usize,
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        // レジストリ取得・ロック取得が失敗しても（プロセス末期等）
+        // panic できないため、失敗時は静かに諦める（`CallToken::drop`
+        // と同じ方針）。
+        if let Ok(cell) = ordinal_registry().entry(self.ordinal)
+            && let Ok(mut state) = cell.0.lock()
+        {
+            state.capture = None;
+            // codex-review P0 再指摘対応（PR #1390 再修正）: `capturing_active`
+            // も必ず false へ戻す（`begin_capture_session` が drain 完了と
+            // 同一ロック区間で立てる。`OrdinalState::capturing_active` doc
+            // コメント参照。`stream.begin_capture` 自体が失敗した早期
+            // return 経路でも `capturing_active` は既に true になって
+            // いるため、ここで確実に戻す必要がある）。
+            state.capturing_active = false;
+            // `begin_buffer_release`（`memory.rs::CudaBufferHandle::Drop`
+            // が使う）が `capturing_active` の解除を待って駐機している
+            // 可能性がある（`begin_buffer_release` doc コメント参照）ため、
+            // `in_flight` の drain 待ちと同じ `Condvar` で起こす。
+            cell.1.notify_all();
+        }
+    }
+}
+
+/// `graph::run_captured_sgd_step_segment` が stream capture 開始直前に 1 回だけ
+/// 呼ぶ（イシュー #1349・codex-review P0 指摘対応）。同一 ordinal で既に
+/// capture 中（別スレッド・同一スレッドいずれも）なら
+/// [`BackendError::InvalidArgument`] で再入を拒否する
+/// （`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は同一 ordinal・同一
+/// ストリームへの多重 capture を想定しない）。`Active` 以外の `phase`
+/// （`Poisoned`／`Retiring`）でも同様に拒否する（fail-closed。capture
+/// 開始を許してしまうと、直後の driver 呼び出しが健全でないコンテキスト
+/// 上で行われる）。
+///
+/// **`in_flight` ドレイン（codex-review P0 指摘対応。`invalidate_with`
+/// の retire→drain と同型のパターン）**: 本関数を呼ぶ時点で**呼び出し
+/// スレッド自身は当該 ordinal の [`CallToken`] を 1 つも保持していない
+/// 契約**とする（`graph::run_captured_sgd_step_segment` は cache miss を確認した
+/// 直後・`begin_driver_call` を呼ぶ**前**に本関数を呼ぶよう構成する）。
+/// この契約により、本関数がロック中に観測する `state.capture` を
+/// `Some(current thread)` へ設定した瞬間から、以後の他スレッドの
+/// [`begin_driver_call`] 呼び出しはすべて拒否される（新規呼び出しの
+/// 遮断）一方、**このロック取得より前に既に [`begin_driver_call`] を
+/// 通過し `in_flight` へ計上済みの呼び出し**（他スレッドが capture 開始
+/// より前にカーネル起動を予約済みだが、実際の driver 呼び出しは
+/// まだこれから行う場合）は、そのまま共有ストリームへ driver 呼び出しを
+/// 発行しうる。これを許すと、capture 開始直後に「capture 対象外の
+/// つもりだった」他スレッドのカーネル起動が graph へ意図せず混入する
+/// （`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は「別スレッドから同一
+/// ストリームへの発行」自体を必ず防ぐ保証ではない。`begin_driver_call`
+/// doc コメント参照）。そのため `state.capture` 設定後、`state.in_flight
+/// == 0` になるまで [`Condvar`] で待ってから返す（[`CallToken::drop`]
+/// が `notify_all` する。呼び出しスレッド自身は上記契約によりこの時点で
+/// 0 件のため、待つのは常に他スレッド分のみで自己デッドロックしない）。
+///
+/// 返した [`CaptureGuard`] が drop されるまで
+/// [`is_capturing_on_current_thread`] はこのスレッドに対して `true` を
+/// 返す。
+pub(crate) fn begin_capture_session(ordinal: usize) -> Result<CaptureGuard, BackendError> {
+    // codex-review P1 指摘対応（イシュー #1349・PR #1390 再修正）:
+    // 本関数 doc コメント「`in_flight` ドレイン」節が要求する契約
+    // （呼び出しスレッド自身は当該 ordinal の `CallToken` を 1 つも
+    // 保持していないこと）を、ロック取得・`state.capture` 設定より前に
+    // 明示検査する。
+    //
+    // **デッドロック経路**: `memory.rs::MemoryOps::with_host_view` は
+    // `CallToken` を保持したまま（＝ `with_driver_call` の閉じクロージャ
+    // 内で）利用者のコールバック `f` を呼ぶ。そのコールバックの中から
+    // 同じ ordinal に対して本関数が呼ばれた場合、契約検査なしでは
+    // `state.capture` を設定した直後の `while state.in_flight != 0`
+    // ドレイン待機が、まさにこの呼び出しスレッド自身が保持している
+    // 外側の `CallToken`（`f` が戻るまで解放されない）を待ち続けることに
+    // なり、`f` 自身が戻れない以上ドレインは永久に完了しない
+    // （自己デッドロック）。`has_in_flight_call_on_this_thread` は
+    // スレッドローカルな [`DRIVER_CALL_DEPTH`] のみを参照するため
+    // `state` のロックを取得する前に安全に呼べる。
+    if has_in_flight_call_on_this_thread(ordinal) {
+        return Err(BackendError::InvalidArgument(format!(
+            "begin_capture_session: ordinal {ordinal} cannot start a capture session while this \
+             thread already holds an in-flight CallToken (re-entrant call from within a \
+             with_driver_call-protected scope, e.g. MemoryOps::with_host_view's callback; this \
+             would deadlock the in_flight drain)"
+        )));
+    }
+    let cell = ordinal_registry().entry(ordinal)?;
+    let mut state = cell.0.lock().map_err(|e| {
+        BackendError::DeviceContextPoisoned(format!(
+            "context_cache::OrdinalState の Mutex が poison しました（ordinal={ordinal}）: {e}"
+        ))
+    })?;
+    match state.phase {
+        Phase::Poisoned {
+            unrecoverable: true,
+        } => {
+            return Err(BackendError::DeviceContextUnrecoverable {
+                ordinal,
+                probe_error: "device context is permanently poisoned; process restart required"
+                    .to_string(),
+            });
+        }
+        Phase::Poisoned {
+            unrecoverable: false,
+        } => {
+            return Err(BackendError::DeviceContextPoisoned(format!(
+                "ordinal {ordinal} is poisoned; call invalidate() to attempt recovery"
+            )));
+        }
+        Phase::Retiring => {
+            return Err(BackendError::DeviceContextRetiring { ordinal });
+        }
+        Phase::Active => {}
+    }
+    if let Some(owner) = state.capture {
+        // codex-review P1 指摘対応（イシュー #1349・PR #1390 再々修正）:
+        // 「このスレッド自身の再入」（真のプログラミング契約違反。
+        // `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は同一スレッド・同一
+        // ストリームへの多重 capture を想定しない）と「別スレッドが
+        // 既に capture 中」（一過性の競合。少し待てば解消しうる）を
+        // 区別する。旧稿はいずれも `BackendError::InvalidArgument` で
+        // 返していたため、`fandhe_ai_autodiff::optim::device_store::
+        // DeviceParamStore::step` が graph capture を試みて後着になった
+        // 場合にこれを恒久的な設定誤りと誤認し、`pending` を復元せず
+        // `DeviceParamStore` を永久 poison してしまう欠陥があった
+        // （`begin_driver_call` の同型の是正〈P0 コメント「Cursor Bugbot
+        // 指摘対応」参照〉と対になる修正）。所有者が別スレッドの場合は
+        // 専用の一過性 variant [`BackendError::DeviceContextCaptureInProgress`]
+        // を返し、呼び出し元（`device_store.rs`）が pending を復元して
+        // 再試行できるようにする。所有者が自スレッド自身の場合のみ
+        // 従来どおり `InvalidArgument`（真の再入バグ）を返す。
+        if owner == std::thread::current().id() {
+            return Err(BackendError::InvalidArgument(format!(
+                "begin_capture_session: ordinal {ordinal} is already capturing on this thread \
+                 (CUDA Graph capture does not support re-entrant capture on a single stream)"
+            )));
+        }
+        return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+    }
+    // 新規呼び出しの遮断はここで確定する（以後の他スレッド
+    // `begin_driver_call` は `state.capture.is_some() && owner != self`
+    // により拒否される）。
+    state.capture = Some(std::thread::current().id());
+    // 既存の別スレッド呼び出し（このロック取得より前に `begin_driver_call`
+    // を通過済み）の完了を待つ（ドレイン）。
+    while state.in_flight != 0 {
+        state = cell.1.wait(state).map_err(|e| {
+            BackendError::DeviceContextPoisoned(format!(
+                "begin_capture_session の in_flight ドレイン待機中に Mutex が poison しました: \
+                 {e}"
+            ))
+        })?;
+    }
+    // codex-review P0 再指摘対応（PR #1390 再修正。旧稿は
+    // `graph::run_captured_sgd_step_segment` が実際の
+    // `stream.begin_capture()` 成功後に別関数 `mark_capture_active` を
+    // 呼んで立てていたが、drain 完了（ここ）から `stream.begin_capture()`
+    // 呼び出しまでの間、ロックを一旦手放す窓が生じ、その間に別スレッドの
+    // `begin_buffer_release`（`state.capturing_active` 未設定のため
+    // 素通り）が `in_flight` を増減させて素通り、実際の driver capture
+    // 開始と競合しうる〈`begin_buffer_release` doc コメント「P0 再修正」
+    // の窓と同型〉）: **drain 完了と同一ロック区間内**で `capturing_active`
+    // を立てる。`in_flight == 0` をこのロックの下で確認した直後のため、
+    // この時点で存命の `BufferReleaseToken`（他スレッド分）は存在せず、
+    // 以後の `begin_buffer_release` 呼び出しは（capture 開始スレッド
+    // 自身を除き）必ずここで立てた `capturing_active` を見て駐機する
+    // （`OrdinalState::capturing_active` doc コメント参照）。
+    state.capturing_active = true;
+    Ok(CaptureGuard { ordinal })
+}
+
+/// `ordinal` が現在このスレッド上で CUDA Graph capture 中かどうかを返す
+/// （イシュー #1349）。`memory.rs`／`ops.rs` の同期点ガード
+/// （`begin_sync_point_call`）が driver に触れる前の判定に使う（`gemm.rs::
+/// synchronize()` は診断専用・本番ディスパッチから呼ばれないため対象外。
+/// `docs/backend-cuda-graph-step-capture-design.md` §3.2）。
+/// レジストリ自体が取得できない異常時は fail-closed（capture 中扱い＝
+/// 同期点呼び出しを拒否する側）に倒す（`is_poisoned` と同じ方針）。
+pub(crate) fn is_capturing_on_current_thread(ordinal: usize) -> bool {
+    let Ok(cell) = ordinal_registry().entry(ordinal) else {
+        return true;
+    };
+    let Ok(state) = cell.0.lock() else {
+        return true;
+    };
+    state.capture == Some(std::thread::current().id())
+}
+
+/// [`begin_buffer_release`] が返す RAII トークン（codex-review P0 再指摘
+/// 対応・PR #1390）。`memory.rs::CudaBufferHandle::Drop` はこのトークンを
+/// 実際の `cudarc::driver::CudaSlice::drop`（`cuMemFreeAsync`/
+/// `cuMemFree` の発行そのもの）が完了するまで保持し続ける契約とする
+/// （[`begin_buffer_release`] doc コメント「P0 再修正」参照）。
+#[derive(Debug)]
+pub(crate) struct BufferReleaseToken {
+    ordinal: usize,
+    /// [`begin_buffer_release`] がレジストリ・ロック取得に成功し
+    /// `state.in_flight` を実際に 1 増やせた場合のみ `true`。取得自体が
+    /// 失敗した異常系（fail-open）では `false` のままとし、`Drop` で
+    /// 対応する減算を行わない（増減の非対称による `in_flight` 破損を
+    /// 防ぐ）。
+    registered: bool,
+}
+
+impl Drop for BufferReleaseToken {
+    fn drop(&mut self) {
+        if !self.registered {
+            return;
+        }
+        // レジストリ・ロック取得が失敗しても（プロセス末期等）`Drop` は
+        // panic できないため、失敗時は静かに諦める（`CallToken::drop`
+        // と同じ方針。稀な異常系でのみ `in_flight` がわずかに残留し
+        // `invalidate` の drain を長引かせるだけで安全性は損なわない）。
+        if let Ok(cell) = ordinal_registry().entry(self.ordinal)
+            && let Ok(mut state) = cell.0.lock()
+        {
+            state.in_flight = state.in_flight.saturating_sub(1);
+            cell.1.notify_all();
+        }
+    }
+}
+
+/// `memory.rs::CudaBufferHandle` の `Drop` 実装（codex-review P1 指摘
+/// 対応。PR #1390）が、実際に `cudarc::driver::CudaSlice::drop`
+/// （`cuMemFreeAsync`/`cuMemFree` をこのハンドルの `stream` へ直接
+/// 発行する。`memory.rs` モジュール冒頭コメント「解放は `CudaSlice` の
+/// `Drop` に一本化する」参照）を走らせる**前**に呼び、返した
+/// [`BufferReleaseToken`] を実際の解放が終わるまで保持する契約とする。
+///
+/// **背景**: `CudaSlice::drop` は `begin_driver_call`／
+/// `begin_capture_session` の排他機構を一切経由しない（`cudarc` 側の
+/// 実装であり本クレートが介入できない）。そのため、あるスレッドが
+/// `run_captured_sgd_step_segment`（`graph.rs`）で当該 ordinal を実際に
+/// driver capture 中に、**別スレッド**が同じ ordinal 上の
+/// `DeviceBuffer`（SGD 更新区間とは無関係な、例えば古い活性化テンソル）
+/// を drop すると、その `cuMemFreeAsync` が capture 中の共有ストリームへ
+/// 直接記録されてしまい、capture 対象の graph に「本来含めるつもりの
+/// ない解放操作」が混入する（再生のたびに既に無効なポインタへ
+/// `cuMemFreeAsync` を発行する二重解放相当の破損）。
+///
+/// **P0 再修正（codex-review 指摘。旧稿は「待ってから戻るだけ」だった）**:
+/// 旧稿の `wait_until_not_capturing` は駐機から戻った直後にロックを
+/// 手放していたため、戻った瞬間から実際の `cuMemFreeAsync` 発行までの
+/// 間に**別の**capture セッションが開始・実際の driver capture まで
+/// 進んでしまう競合窓が残っていた。本関数はこの窓を閉じるため、
+/// 駐機が終わったら（ロックを保持したまま）[`CallToken`] と同じ
+/// `state.in_flight` カウンタへ登録してから返す。以後
+/// [`begin_capture_session`] が新たに呼ばれても、そのドレイン
+/// （`state.in_flight == 0` 待ち）は本トークンが drop される（＝実際の
+/// 解放が完了する）までブロックされるため、「駐機解除後・解放発行前」
+/// の間に新しい capture が実際に始まることはない。
+///
+/// **駐機条件は「実際に driver capture が進行中」（[`OrdinalState::
+/// capturing_active`]）のみ（Cursor Bugbot High 指摘対応・PR #1390
+/// 再修正）**: `state.capture` が `Some`（`begin_capture_session` の
+/// in_flight ドレイン待機中を含む）というだけでは駐機しない。`capture`
+/// だけを条件にすると、既に [`CallToken`] を保持したまま（＝
+/// `in_flight` に計上済みのまま）一時バッファを drop する別スレッドが
+/// 本関数で駐機し、一方 capture 側は当のスレッドの `in_flight` が
+/// 減るのを待ち続けるという相互待機（Cursor Bugbot 指摘のデッドロック）
+/// が生じる。`capturing_active` のみを条件にすることで、ドレイン中
+/// （driver 側はまだ capture していない）の解放は素通しし、実際に
+/// capture が進行中の区間だけを対象にする（`capturing_active` doc
+/// コメント参照）。
+///
+/// **capture 中のスレッド自身**からの呼び出しは待たずに即座に登録・
+/// 返す（`state.capture == Some(current thread)` の場合。同一スレッドが
+/// 自身の capture 中に意図してバッファを解放するケース〈capture 本体が
+/// テンポラリを確保・解放する場合等〉を自己デッドロックさせないため。
+/// この場合の解放は「このスレッド自身が構成している capture の一部」
+/// として cudarc の `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` 契約の範囲内
+/// であり、本関数の対象外＝呼び出し元〈`graph.rs`〉の責務とする）。
+///
+/// `Drop::drop` から呼ばれる想定のため `Result` を返さない。レジストリ・
+/// ロック取得の失敗時は他の `Drop` 実装（[`CaptureGuard::drop`]・
+/// [`CallToken::drop`]）と同じ方針で静かに諦め、`registered: false` の
+/// トークンを返す（fail-open。これ以上安全にできることがない）。
+pub(crate) fn begin_buffer_release(ordinal: usize) -> BufferReleaseToken {
+    let Ok(cell) = ordinal_registry().entry(ordinal) else {
+        return BufferReleaseToken {
+            ordinal,
+            registered: false,
+        };
+    };
+    let current = std::thread::current().id();
+    let Ok(mut state) = cell.0.lock() else {
+        return BufferReleaseToken {
+            ordinal,
+            registered: false,
+        };
+    };
+    while state.capturing_active && state.capture != Some(current) {
+        state = match cell.1.wait(state) {
+            Ok(s) => s,
+            Err(_) => {
+                return BufferReleaseToken {
+                    ordinal,
+                    registered: false,
+                };
+            }
+        };
+    }
+    state.in_flight += 1;
+    BufferReleaseToken {
+        ordinal,
+        registered: true,
+    }
+}
+
+/// 同期点（ホスト⇔デバイス転送・確保・解放・明示同期）となる driver
+/// 呼び出しの入口が使う（イシュー #1349・`docs/backend-cuda-graph-step-
+/// capture-design.md` §4.2）。`begin_driver_call` と同じ排他区間で
+/// `ordinal` の capture 状態を検査し、現在のスレッドが capture 中なら
+/// **driver に一切触れる前に** [`BackendError::Unsupported`] で拒否する
+/// （capture 中の同期呼び出しは `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`
+/// 等で driver 自身も拒否するが、それを待たずアプリケーション層で
+/// 早期に検出することで、driver 側のエラーを sticky 分類して意図せず
+/// ordinal を poison してしまう事態を避ける——同期点呼び出しの誤りは
+/// 呼び出し元の契約違反であり、デバイスコンテキスト自体は健全な
+/// ままにしてよいため）。`what` は診断メッセージ用の呼び出し名
+/// （`"upload"`／`"download"`／`"alloc_zeroed"`／`"synchronize"` 等）。
+///
+/// capture 中でなければ [`begin_driver_call`] へそのまま委譲する。
+pub(crate) fn begin_sync_point_call(
+    ordinal: usize,
+    resource_generations: &[u64],
+    what: &'static str,
+) -> Result<CallToken, BackendError> {
+    if is_capturing_on_current_thread(ordinal) {
+        return Err(BackendError::Unsupported(format!(
+            "cuda graph capture: {what} is a host synchronization point and cannot be captured"
+        )));
+    }
+    begin_driver_call(ordinal, resource_generations)
 }
 
 /// `invalidate` の実処理プローブの再試行上限（モジュール冒頭コメント
@@ -644,6 +1095,19 @@ pub(crate) struct CallToken {
     generation: u64,
 }
 
+impl CallToken {
+    /// `begin_driver_call` がこのトークンを発行した時点の世代
+    /// （イシュー #1349 `ops.rs::CudaBackendOps::captured_segment_key`／
+    /// `run_captured_sgd_step_segment` が `SegmentKey::generation` の
+    /// 導出に使う。`current_generation` を別途再ロックする代わりに
+    /// トークン発行時点の値をそのまま使うことで、`begin_driver_call` の
+    /// poison／世代検査と `SegmentKey` の世代が常に同一ロック区間の値に
+    /// 揃う）。
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 impl Drop for CallToken {
     fn drop(&mut self) {
         // レジストリ取得・ロック取得が失敗しても（プロセス末期等）
@@ -656,6 +1120,12 @@ impl Drop for CallToken {
             state.in_flight = state.in_flight.saturating_sub(1);
             cell.1.notify_all();
         }
+        // Cursor Bugbot 指摘対応（PR #1390 再々修正）: `DRIVER_CALL_DEPTH`
+        // のネスト深度も対で減らす（`begin_driver_call` doc コメント
+        // 「# 対策」節参照）。レジストリ・ロック取得の成否に関わらず
+        // 必ず実行する（スレッドローカルであり `Mutex` poison の影響を
+        // 受けない）。
+        decrement_driver_call_depth(self.ordinal);
     }
 }
 
@@ -675,6 +1145,27 @@ impl Drop for CallToken {
 /// [`BackendError::DeviceContextUnrecoverable`]、`Retiring` →
 /// [`BackendError::DeviceContextRetiring`]。`Active` かつ世代一致なら
 /// `in_flight += 1` して [`CallToken`] を返す。
+///
+/// **CUDA Graph capture 中の排他制御（イシュー #1349・codex-review P0
+/// 指摘・`docs/backend-cuda-graph-step-capture-design.md` §4.2）**:
+/// `state.capture`（capture 開始スレッドの [`std::thread::ThreadId`]）が
+/// `Some` の間、**capture を開始したスレッド以外**からの本関数呼び出しは
+/// [`BackendError::DeviceContextCaptureInProgress`] で拒否する（driver に
+/// 一切触れる前。`begin_sync_point_call` と同じ「早期拒否」方針。この
+/// variant は一過性の競合を表し `Unsupported` とは意味が異なる——
+/// Cursor Bugbot 指摘対応・PR #1390 是正。`tensor-core::device::
+/// BackendError::DeviceContextCaptureInProgress` doc コメント参照）。`CU_STREAM_
+/// CAPTURE_MODE_THREAD_LOCAL` は「capture を乱しうる driver API 呼び
+/// 出し」を capture 開始スレッドに限定する目的のモードであり、
+/// **別スレッドが同じ共有ストリームへ直接カーネル起動すること自体を
+/// driver 側が防いでくれる保証ではない**（起動する演算・driver バージョン
+/// 依存の未定義動作になりうる）。そのため本関数がホスト側で明示的に
+/// 排他する: 別スレッドの呼び出しは capture 完了（[`CaptureGuard`] の
+/// drop）まで一律拒否し、SGD 更新等が capture 中の graph へ意図せず
+/// 混入する事態を防ぐ。**capture を開始したスレッド自身**の呼び出しは
+/// 通す（`graph::run_captured_sgd_step_segment` の `body()` 実行自体が同一
+/// スレッドから `begin_driver_call` 経由で実カーネルを起動する契約の
+/// ため。再入拒否ではなく同一スレッドの正常フロー）。
 pub(crate) fn begin_driver_call(
     ordinal: usize,
     resource_generations: &[u64],
@@ -707,6 +1198,35 @@ pub(crate) fn begin_driver_call(
         }
         Phase::Active => {}
     }
+    if let Some(owner) = state.capture
+        && owner != std::thread::current().id()
+        && !has_in_flight_call_on_this_thread(ordinal)
+    {
+        // Cursor Bugbot 指摘対応（PR #1390 再々修正）: このスレッドが
+        // `ordinal` 上で既に `CallToken` を 1 つ以上保持している
+        // （`DRIVER_CALL_DEPTH` 参照）場合はこの拒否をスキップする。
+        // これは「ネストした `with_driver_call` 呼び出し」（`gemm.rs::
+        // CudaGemm::with_driver_call` 等が `ops.rs` の排他区間の内側で
+        // 二重に `begin_driver_call` を呼ぶ経路）が、別スレッドが
+        // ちょうど `begin_capture_session` の drain 待機に入った直後の
+        // 窓で不当に拒否され、`begin_capture_session` が正当に待って
+        // いる in-flight 作業自体を失敗させてしまう欠陥（Cursor Bugbot
+        // 指摘「Nested GEMM lock fails in-flight work」）の是正。
+        // poison／世代検査（このガードより前）はスキップしない。
+        //
+        // Cursor Bugbot 指摘対応（PR #1390 是正）: 旧稿は
+        // `BackendError::Unsupported` を返していたが、この variant は
+        // 「恒久的な未実装・設定誤り」を意味する契約（`captured_segment_key`
+        // の legacy stream 判定等）で使われるため、`fandhe_ai_autodiff::
+        // optim::device_store::DeviceParamStore::step` の graph 可用性
+        // 問い合わせがこの一過性の競合（別スレッドが capture 中なだけ）を
+        // 恒久的失敗と誤認して `DeviceParamStore` を永久 poison してしまう
+        // 欠陥があった（関連: `ops.rs::CudaBackendOps::captured_segment_key`・
+        // `device_store.rs` の該当 `match`）。専用の `BackendError::
+        // DeviceContextCaptureInProgress` variant（`tensor-core::device`）を
+        // 返すことで、恒久的失敗と型レベルで区別できるようにする。
+        return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+    }
     let current_generation = state.generation;
     if let Some(&stale) = resource_generations
         .iter()
@@ -719,10 +1239,64 @@ pub(crate) fn begin_driver_call(
         });
     }
     state.in_flight += 1;
+    // Cursor Bugbot 指摘対応（PR #1390 再々修正）: `DRIVER_CALL_DEPTH`
+    // をロック解放後に更新すると、他スレッドから見た `in_flight` と
+    // このスレッドから見た「自分のネスト深度」の更新順序に意味は
+    // ないため、ロック区間の外（drop 後）で構わない（`DRIVER_CALL_DEPTH`
+    // はスレッドローカルであり `state` の排他制御と独立）。
+    increment_driver_call_depth(ordinal);
     Ok(CallToken {
         ordinal,
         generation: current_generation,
     })
+}
+
+/// `CudaGemm`（`gemm.rs`）・`CudaWmmaGemm`（`gemm_wmma.rs`）・
+/// `CudaMmaGemm`（`gemm_mma.rs`）・`CudaMmaTf32Gemm`（`gemm_mma_tf32.rs`）・
+/// `CudaMmaTf32x3Gemm`（`gemm_mma_tf32x3.rs`）・`CudaTranspose`
+/// （`transpose.rs`）が公開 driver 呼び出し系メソッド（H2D 転送・確保・
+/// カーネル起動・D2H readback）を CUDA Graph capture 排他へ参加させる
+/// 共通ヘルパー（codex-review P0 指摘対応・PR #1390 再々修正。
+/// `gemm.rs::CudaGemm::with_driver_call` を汎化し重複実装を避ける）。
+///
+/// これらの構造体の公開低レベル API はいずれも `CudaBackendOps`
+/// （`ops.rs`）を経由せず crate 外から直接呼び出せるベンチ・診断専用の
+/// 入口であり（`gemm.rs::CudaGemm::upload_f32` ドキュメンテーション
+/// コメント「PyTorch 参照計測」参照）、従来はこれらの呼び出しが
+/// `begin_driver_call` の capture 排他検査を一切通らず、共有ストリームへ
+/// 直接転送・確保・カーネル起動を発行していた（別スレッドが SGD capture
+/// 中でも拒否されず、drain・拒否を迂回して一時バッファ等の無関係な操作が
+/// graph に混入しうる欠陥。codex-review 指摘）。本ヘルパーを各公開
+/// エントリの本体先頭で呼ぶことで、直接構築・`ops.rs` 経由いずれの
+/// 呼び出し経路でも同じ排他区間を通るようにする。
+///
+/// `resource_generations` は空スライス固定（`gemm.rs::CudaGemm::
+/// with_driver_call` doc コメントと同じ理由。呼び出し元がホスト
+/// `&[f32]`／`&[f16]` 引数のみを読み書きし、呼び出しを跨いで生存する
+/// 既存 `DeviceBuffer` を検査対象に持たないため）。
+///
+/// `f` の呼び出しより先に [`CallToken`] を束縛することで、Rust の drop
+/// 順序（宣言の逆順）により `f` 内部で確保するデバイスバッファの解放が
+/// 必ずこのトークンの生存区間の内側で起こる（`with_driver_call` doc
+/// コメント「解放」節と同じ設計判断）。
+///
+/// **ネスト経路（Cursor Bugbot 指摘対応）**: `ops.rs::CudaBackendOps::
+/// with_driver_call` が既に確立した排他区間の内側から本関数が呼ばれる
+/// 経路（`ops.rs::CudaBackendOps::gemm` の `Tf32`／`Tf32x3` 分岐）が
+/// 実在する。この場合 [`begin_driver_call`] は [`DRIVER_CALL_DEPTH`]
+/// によりこのスレッドの既存 in-flight 作業を検出し、別スレッドが
+/// ちょうど capture を開始した直後の窓でも不当に拒否しない
+/// （[`begin_driver_call`] doc コメント「CUDA Graph capture 中の排他
+/// 制御」節参照）。
+pub(crate) fn with_driver_call<T>(
+    ordinal: usize,
+    f: impl FnOnce() -> Result<T, CudaError>,
+) -> Result<T, CudaError> {
+    let token =
+        begin_driver_call(ordinal, &[]).map_err(|e| CudaError::CaptureExclusionRejected {
+            detail: e.to_string(),
+        })?;
+    observe_cuda_result(ordinal, &token, f())
 }
 
 /// driver 呼び出しの結果を観測し、sticky エラーなら ordinal を poison
@@ -893,6 +1467,21 @@ fn classify_cuda_result(err: &cudarc::driver::result::DriverError) -> ResultClas
         | CUDA_ERROR_NOT_FOUND
         | CUDA_ERROR_INVALID_PTX
         | CUDA_ERROR_UNSUPPORTED_PTX_VERSION => ResultClass::OperationLocal,
+        // CUDA Graph capture 系エラー（イシュー #1349）: capture の失敗は
+        // driver 内部の capture 状態機械そのものを壊しうる（NVIDIA の
+        // 規定では capture 失敗後のストリームは `end_capture` するまで
+        // 使用不能）ため sticky 側へ明示的に固定する（`_` の wildcard に
+        // 依存せず意図をコード化する。`docs/backend-cuda-graph-step-
+        // capture-design.md` §4.2 F6）。
+        CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED
+        | CUDA_ERROR_STREAM_CAPTURE_INVALIDATED
+        | CUDA_ERROR_STREAM_CAPTURE_MERGE
+        | CUDA_ERROR_STREAM_CAPTURE_UNMATCHED
+        | CUDA_ERROR_STREAM_CAPTURE_UNJOINED
+        | CUDA_ERROR_STREAM_CAPTURE_ISOLATION
+        | CUDA_ERROR_STREAM_CAPTURE_IMPLICIT
+        | CUDA_ERROR_CAPTURED_EVENT
+        | CUDA_ERROR_STREAM_CAPTURE_WRONG_THREAD => ResultClass::Sticky,
         // 上記以外（`CUDA_ERROR_ILLEGAL_ADDRESS`・`CUDA_ERROR_LAUNCH_FAILED`・
         // `CUDA_ERROR_ECC_UNCORRECTABLE`・`CUDA_ERROR_HARDWARE_STACK_ERROR`・
         // `CUDA_ERROR_MISALIGNED_ADDRESS`・`CUDA_ERROR_INVALID_ADDRESS_SPACE`・
@@ -2012,6 +2601,409 @@ mod poison_state_tests {
             state.retiring_waiters, 0,
             "テスト終了時点で駐機中のスレッドは残らないはず"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // CUDA Graph capture 状態機械（イシュー #1349）の GPU 非依存な
+    // ホストモデルテスト。実 CUDA driver・`CudaStream` を要さない
+    // `begin_capture_session`／`is_capturing_on_current_thread`／
+    // `begin_sync_point_call` の制御フローのみを検証する。
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn begin_capture_session_succeeds_and_marks_current_thread_capturing() {
+        let ordinal = unique_ordinal();
+        assert!(!is_capturing_on_current_thread(ordinal));
+        let guard = begin_capture_session(ordinal).expect("first capture session succeeds");
+        assert!(is_capturing_on_current_thread(ordinal));
+        drop(guard);
+        assert!(
+            !is_capturing_on_current_thread(ordinal),
+            "CaptureGuard の Drop で capture 状態が解除されるはず"
+        );
+    }
+
+    #[test]
+    fn begin_capture_session_rejects_reentrant_capture_on_same_ordinal() {
+        let ordinal = unique_ordinal();
+        let _guard = begin_capture_session(ordinal).expect("first capture session succeeds");
+        let second = begin_capture_session(ordinal);
+        assert!(
+            matches!(second, Err(BackendError::InvalidArgument(_))),
+            "同一 ordinal への 2 重 capture 開始は拒否されるはず: {second:?}"
+        );
+    }
+
+    #[test]
+    fn begin_capture_session_allows_reuse_after_guard_is_dropped() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("first capture session succeeds");
+        drop(guard);
+        let second = begin_capture_session(ordinal);
+        assert!(
+            second.is_ok(),
+            "先行 capture が終了（guard drop）していれば再度開始できるはず: {second:?}"
+        );
+    }
+
+    /// codex-review P1 指摘対応（イシュー #1349・PR #1390 再々修正）:
+    /// **別スレッド**が既に capture 中の場合、`begin_capture_session` は
+    /// 一過性の `BackendError::DeviceContextCaptureInProgress` を返す
+    /// べきで、`InvalidArgument`（恒久的な設定誤り）を返してはならない
+    /// （`fandhe_ai_autodiff::optim::device_store::DeviceParamStore::step`
+    /// がこの一過性の競合を恒久的失敗と誤認して `pending` を復元せず
+    /// ストアを永久 poison する欠陥があった。`begin_capture_session`
+    /// doc コメント「codex-review P1 指摘対応」節参照）。上記
+    /// `begin_capture_session_rejects_reentrant_capture_on_same_ordinal`
+    /// （同一スレッドの再入）とは対照的なケース。
+    #[test]
+    fn begin_capture_session_from_other_thread_returns_capture_in_progress_not_invalid_argument() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("first capture session succeeds");
+
+        let other_thread_result = std::thread::spawn(move || begin_capture_session(ordinal))
+            .join()
+            .expect("spawned thread does not panic");
+
+        assert!(
+            matches!(
+                other_thread_result,
+                Err(BackendError::DeviceContextCaptureInProgress { ordinal: o }) if o == ordinal
+            ),
+            "別スレッドが既に capture 中の場合は DeviceContextCaptureInProgress \
+             （一過性の競合）で拒否されるはず。InvalidArgument（恒久的失敗）ではない: \
+             {other_thread_result:?}"
+        );
+
+        drop(guard);
+    }
+
+    /// Cursor Bugbot High 指摘対応（イシュー #1349・PR #1390 再々修正
+    /// 「Nested GEMM lock fails in-flight work」）: `ops.rs::
+    /// CudaBackendOps::with_driver_call` の排他区間内から `gemm.rs::
+    /// CudaGemm::with_driver_call`（`gemm_wmma.rs` 等の sub-struct も
+    /// 同型）が二重に `begin_driver_call` を呼ぶネスト経路で、別スレッド
+    /// が `begin_capture_session` の in_flight ドレイン待機に入った
+    /// 直後の窓でも、ネストした（＝このスレッドが既に `CallToken` を
+    /// 保持している）呼び出しは `DeviceContextCaptureInProgress` で
+    /// 拒否されず成功し続けるはず（`DRIVER_CALL_DEPTH` 機構。
+    /// `begin_driver_call` doc コメント「CUDA Graph capture 中の排他
+    /// 制御」節参照）。
+    #[test]
+    fn begin_driver_call_allows_nested_call_from_thread_with_existing_in_flight_token_even_while_another_thread_drains()
+     {
+        let ordinal = unique_ordinal();
+        // このスレッドの「外側」呼び出し（ops.rs の外側 with_driver_call
+        // 相当）。この token が生存する限り in_flight >= 1。
+        let outer_token = begin_driver_call(ordinal, &[0]).expect("outer token 取得");
+
+        // 別スレッドが begin_capture_session を呼び、state.capture を
+        // 設定した直後（drain 待機に入った状態）まで進める。
+        let capture_handle = std::thread::spawn(move || begin_capture_session(ordinal));
+        let cell = ordinal_registry().entry(ordinal).expect("registry entry");
+        loop {
+            let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            if state.capture.is_some() {
+                break;
+            }
+            drop(state);
+            std::thread::yield_now();
+        }
+
+        // このスレッド（capture を開始した別スレッドではない）が、既に
+        // 保持している outer_token に続けてネストした begin_driver_call
+        // を呼ぶ。DRIVER_CALL_DEPTH によりこのスレッドの既存 in-flight
+        // 作業として扱われ、DeviceContextCaptureInProgress で拒否され
+        // ないはず（拒否されると、drain が待っている作業自体が完了
+        // できなくなる欠陥の再現になる）。
+        let nested_token = begin_driver_call(ordinal, &[0]);
+        assert!(
+            nested_token.is_ok(),
+            "このスレッドが既に in-flight token を保持している場合、別スレッドの \
+             capture 開始と競合してもネストした begin_driver_call は成功するはず: \
+             {nested_token:?}"
+        );
+
+        // ネストしたトークンを先に解放してもまだ outer_token が残るため
+        // drain は完了しない。
+        drop(nested_token);
+        drop(outer_token);
+
+        let guard = capture_handle
+            .join()
+            .expect("spawned thread does not panic")
+            .expect("in-flight 完了後に capture session が成立するはず");
+        drop(guard);
+    }
+
+    #[test]
+    fn begin_sync_point_call_rejects_before_touching_driver_while_capturing() {
+        let ordinal = unique_ordinal();
+        let _guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        let result = begin_sync_point_call(ordinal, &[], "upload");
+        assert!(
+            matches!(&result, Err(BackendError::Unsupported(msg)) if msg.contains("upload")),
+            "capture 中の同期点呼び出しは Unsupported で拒否されるはず: {result:?}"
+        );
+        // 拒否は `begin_driver_call` に到達する前（in_flight を変更しない）
+        // ことを確認する。
+        let cell = ordinal_registry().entry(ordinal).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(
+            state.in_flight, 0,
+            "同期点ガードの拒否は begin_driver_call の in_flight を変更しないはず"
+        );
+    }
+
+    #[test]
+    fn begin_sync_point_call_delegates_to_begin_driver_call_when_not_capturing() {
+        let ordinal = unique_ordinal();
+        let token = begin_sync_point_call(ordinal, &[], "upload");
+        assert!(
+            token.is_ok(),
+            "capture 中でなければ begin_driver_call と同じ挙動になるはず: {token:?}"
+        );
+    }
+
+    #[test]
+    fn is_capturing_on_current_thread_is_false_on_a_fresh_ordinal() {
+        let ordinal = unique_ordinal();
+        assert!(!is_capturing_on_current_thread(ordinal));
+    }
+
+    /// capture モード（`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`）は「この
+    /// スレッドが開始した capture」のみを検出する契約であり、別スレッド
+    /// から見た `is_capturing_on_current_thread` は capture 中でも
+    /// `false` を返す——これは `begin_sync_point_call`（同期点の早期
+    /// 拒否判定）が別スレッドを対象にしない、という**この関数専用**の
+    /// 契約であり、別スレッドの driver 呼び出し一般が野放しという意味
+    /// ではない（codex-review P0 指摘対応で `begin_driver_call` 自体が
+    /// 別途、capture 中は capture 開始スレッド以外を一律拒否するように
+    /// なった。上記 `begin_driver_call_rejects_other_thread_while_
+    /// capturing` 参照。design doc §4.2 追記）。
+    #[test]
+    fn is_capturing_on_current_thread_is_thread_local() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        let observed_from_other_thread =
+            std::thread::spawn(move || is_capturing_on_current_thread(ordinal))
+                .join()
+                .expect("spawned thread does not panic");
+        assert!(
+            !observed_from_other_thread,
+            "別スレッドからは capture 中と観測されないはず（THREAD_LOCAL 契約）"
+        );
+        drop(guard);
+    }
+
+    /// capture 系 CUresult（900〜908）が sticky に分類されることを固定する
+    /// （イシュー #1349・design doc §4.2 F6）。
+    #[test]
+    fn classify_capture_related_codes_are_sticky() {
+        for code in [
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_INVALIDATED,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_MERGE,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_UNMATCHED,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_UNJOINED,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_ISOLATION,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_IMPLICIT,
+            CUresult::CUDA_ERROR_CAPTURED_EVENT,
+            CUresult::CUDA_ERROR_STREAM_CAPTURE_WRONG_THREAD,
+        ] {
+            assert_eq!(
+                classify_cuda_result(&DriverError(code)),
+                ResultClass::Sticky,
+                "{code:?} は sticky に分類されるはず"
+            );
+        }
+    }
+
+    /// codex-review P0 指摘（イシュー #1349）: capture 中は capture を
+    /// 開始したスレッド以外からの `begin_driver_call` を拒否し、共有
+    /// ストリームへの意図しないカーネル起動混入を防ぐ（`design doc`
+    /// §4.2 追記）。
+    ///
+    /// Cursor Bugbot 指摘対応（PR #1390 是正）: 拒否時の variant は
+    /// `BackendError::DeviceContextCaptureInProgress`（一過性の競合。
+    /// `tensor-core::device::BackendError` doc コメント参照）であり、
+    /// `Unsupported`（恒久的な未実装・設定誤り）ではない——呼び出し元
+    /// （`DeviceParamStore::step`）がこの一過性の競合を恒久的失敗と誤認
+    /// してストアを永久 poison する欠陥を避けるための型的区別。
+    #[test]
+    fn begin_driver_call_rejects_other_thread_while_capturing() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        let other_thread_result =
+            std::thread::spawn(move || begin_driver_call(ordinal, &[0]).map(|_| ()))
+                .join()
+                .expect("spawned thread does not panic");
+        assert!(
+            matches!(
+                other_thread_result,
+                Err(BackendError::DeviceContextCaptureInProgress { ordinal: o }) if o == ordinal
+            ),
+            "capture 中の別スレッドからの driver 呼び出しは \
+             DeviceContextCaptureInProgress で拒否されるはず: {other_thread_result:?}"
+        );
+        drop(guard);
+    }
+
+    /// capture を開始した**同一スレッド**の `begin_driver_call` は通す
+    /// （`graph::run_captured_sgd_step_segment` の `body()` 実行契約。上記テストの
+    /// 対照ケース）。
+    #[test]
+    fn begin_driver_call_allows_capturing_thread_itself() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        let token = begin_driver_call(ordinal, &[0]);
+        assert!(
+            token.is_ok(),
+            "capture を開始した本人のスレッドは引き続き driver 呼び出しできるはず: {token:?}"
+        );
+        drop(token);
+        drop(guard);
+    }
+
+    // =====================================================================
+    // `begin_buffer_release`／`capturing_active` の状態機械（codex-review
+    // P0 再指摘・Cursor Bugbot High 指摘対応・PR #1390 再修正）。
+    // `memory.rs::CudaBufferHandle::Drop` の排他契約をホストモデルで検証
+    // する（`.claude/rules/coding-rust.md` テスト規約: 受け入れ基準に
+    // 対応するテストを同一 PR に含める）。
+    // =====================================================================
+
+    /// (a) `begin_capture_session` の in_flight ドレイン中（`capturing_active`
+    /// がまだ立っていない区間）は、別スレッドの `begin_buffer_release` は
+    /// 駐機せず即座に登録される（`begin_buffer_release` doc コメント
+    /// 「P0 再修正」の「ドレイン中は素通し」契約）。ドレイン完了と
+    /// 同一ロック区間内で `capturing_active` が立つこと（`begin_capture_
+    /// session` doc コメント「P0 再修正」）・`CaptureGuard` drop で
+    /// 解除されること（`OrdinalState::capturing_active` doc コメント）も
+    /// あわせて確認する。
+    #[test]
+    fn begin_buffer_release_passes_through_during_capture_session_drain_then_capturing_active_is_set_after_drain()
+     {
+        let ordinal = unique_ordinal();
+        // in-flight を模した CallToken（`begin_capture_session` の drain
+        // 対象になる）。
+        let in_flight_token = begin_driver_call(ordinal, &[0]).expect("token 1 取得");
+
+        let handle = std::thread::spawn(move || begin_capture_session(ordinal));
+
+        // 別スレッドが `state.capture` を設定（drain 待機に入った）まで
+        // ポーリングする。この時点では `in_flight_token` をまだ保持して
+        // いるため drain は完了しておらず、`capturing_active` は
+        // 立っていないはず。
+        let cell = ordinal_registry().entry(ordinal).expect("registry entry");
+        loop {
+            let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            if state.capture.is_some() {
+                assert!(
+                    !state.capturing_active,
+                    "in_flight ドレイン中は capturing_active がまだ立っていないはず"
+                );
+                break;
+            }
+            drop(state);
+            std::thread::yield_now();
+        }
+
+        // ドレイン中（`capturing_active == false`）の別スレッドからの
+        // `begin_buffer_release` は駐機せず即座に登録されるはず。もし
+        // 誤って `state.capture.is_some()` だけを条件に駐機してしまうと、
+        // ここで `begin_capture_session` 側の drain（`in_flight_token` の
+        // drop 待ち）と本呼び出しの `Condvar::wait` が互いを待ち合い、
+        // このテスト自体がハングして CI タイムアウトで検出される
+        // （Cursor Bugbot High 指摘のデッドロックそのもの）。
+        let release_token = begin_buffer_release(ordinal);
+        drop(release_token);
+
+        // drain を完了させる。
+        drop(in_flight_token);
+        let guard = handle
+            .join()
+            .expect("spawned thread does not panic")
+            .expect("capture session succeeds after drain");
+
+        {
+            let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                state.capturing_active,
+                "drain 完了後（begin_capture_session が返った後）は capturing_active が \
+                 立っているはず"
+            );
+        }
+
+        drop(guard);
+        let state_after = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !state_after.capturing_active,
+            "CaptureGuard の Drop で capturing_active も解除されるはず"
+        );
+    }
+
+    /// (b) `capturing_active` が立った後（実際の driver capture 進行中に
+    /// 相当する区間）は、別スレッドの `begin_buffer_release` は
+    /// `CaptureGuard` の drop まで駐機する（`begin_buffer_release` doc
+    /// コメント「P0 再修正」の本題）。
+    #[test]
+    fn begin_buffer_release_blocks_other_thread_while_capturing_active_until_guard_drops() {
+        let ordinal = unique_ordinal();
+        // in_flight が 0 のため drain は即完了し、`begin_capture_session`
+        // が返った時点で `capturing_active` は既に true。
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        {
+            let cell = ordinal_registry().entry(ordinal).unwrap();
+            assert!(
+                cell.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .capturing_active
+            );
+        }
+
+        let (unblock_tx, unblock_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let token = begin_buffer_release(ordinal);
+            // 駐機が解除され登録できた時点で通知する。
+            unblock_tx.send(()).unwrap();
+            drop(token);
+        });
+
+        // `capturing_active` の間は別スレッドの `begin_buffer_release` が
+        // 駐機し続け、短いタイムアウト内には通知が届かないはず
+        // （フレーク回避のための現実的なタイムアウト。真の無限待機の
+        // 証明ではないが、駐機せず即座に登録されてしまう回帰は確実に
+        // 検出できる）。
+        assert!(
+            unblock_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "capturing_active の間は別スレッドの begin_buffer_release は駐機し続けるはず"
+        );
+
+        drop(guard);
+        unblock_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect(
+                "CaptureGuard の drop 後は begin_buffer_release の駐機が解除され \
+                 token を得られるはず",
+            );
+        handle.join().expect("spawned thread does not panic");
+    }
+
+    /// (c) capture 中の**スレッド自身**からの `begin_buffer_release` は
+    /// 駐機せず即座に登録される（`begin_buffer_release` doc コメント
+    /// 「capture 中のスレッド自身」参照。自己デッドロック回避）。
+    #[test]
+    fn begin_buffer_release_does_not_block_the_capturing_thread_itself() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        // ここでハングすればテストがタイムアウトし回帰を検出する。
+        let release_token = begin_buffer_release(ordinal);
+        drop(release_token);
+        drop(guard);
     }
 }
 
