@@ -266,22 +266,21 @@ impl<'t> Var<'t> {
     /// 借用エラー・panic が起きない（`value()` の借用注意を参照）。
     pub fn to_tensor(&self) -> Tensor<f32>;
 
-    /// ホスト可視の値を借用で読み出す（イシュー #1335）。実体化した
-    /// 値が contiguous ならテープの `RefCell` 借用をそのまま返し
-    /// コピーしない（`Deref<Target = [f32]>` を実装する
-    /// [`VarHostView`] 経由）。非 contiguous な場合のみ
-    /// [`Tensor::contiguous`] で 1 回だけ実体化した所有 `Vec` を返す
-    /// （`Tensor::host_slice`〈§2.2〉と同じ「contiguous なら借用・
-    /// そうでなければ 1 回コピー」の方針）。
+    /// ホスト可視の値を読み出す（イシュー #1335）。`Tape` の
+    /// `RefCell` 借用はこのメソッド内で解放し、返す [`VarHostView`]
+    /// へ持ち越さない（P1 是正・codex-review 指摘。当初実装は
+    /// `Ref<'_, [f32]>` をそのまま `VarHostView` へ持ち越しており、
+    /// 保持中に同じ `Tape` へノード追加演算を呼ぶと `borrow_mut()`
+    /// が実行時 panic した）。materialize した `Tensor<f32>` を
+    /// [`Tensor::contiguous`]（contiguous な場合は `Arc` 複製のみで
+    /// 安価・非 contiguous な場合のみ 1 回実体化）へ通してから
+    /// [`VarHostView`] へ所有値として格納する。
     ///
-    /// **借用注意**（`value()` と同じ制約）: 返す `VarHostView` を
-    /// 保持したまま、同じ `Tape` に対して `borrow_mut()` を要する
-    /// 演算（ノード追加演算・`Tape::reset`）を呼ぶと実行時 panic
-    /// になる。値を持ち越したい場合は `to_tensor()` を使うこと。
-    /// テープ値自体は一度確定すると不変（`TapeNode.value: OnceCell`）
-    /// であり、`VarHostView` 生存中にデバイス側から後続書き込みされる
-    /// ことはない。
-    pub fn host_view(&self) -> VarHostView<'_>;
+    /// 返す `VarHostView` はライフタイムパラメータを持たず `Tape`／
+    /// `RefCell` の借用を一切保持しないため、生存中に同じ `Var`／
+    /// `Tape` へノード追加演算（`add`/`matmul` 等）を呼んでも panic
+    /// しない（[`Var::value`] の借用注意とは異なる）。
+    pub fn host_view(&self) -> VarHostView;
 
     // 演算セット（3.2 参照）。shape 不整合・不正なブロードキャスト・
     // 範囲外 dim はすべて失敗しうるため `Result<Var<'t>, AutodiffError>`
@@ -314,12 +313,16 @@ impl<'t> Var<'t> {
     pub fn tanh(&self) -> Var<'t>;
 }
 
-/// [`Var::host_view`] が返す借用ビュー（イシュー #1335）。
-/// `Deref<Target = [f32]>` でスライスとして使う。内部 variant
-/// （`Borrowed(Ref<'a, [f32]>)`／`Owned(Vec<f32>)`）は非公開とし、
-/// 将来 CUDA pinned host 借用（イシュー #1336）等の追加 variant を
-/// 破壊的変更なしに導入できる余地を残す。
-pub struct VarHostView<'a> { /* private */ }
+/// [`Var::host_view`] が返す読み出しビュー（イシュー #1335）。
+/// `Deref<Target = [f32]>` でスライスとして使う。内部には
+/// `host_view()` 構築時に [`Tensor::contiguous`] 済みの所有
+/// `Tensor<f32>` を保持する（`Tensor<f32>` 自体が `Arc<Storage<T>>`
+/// を共有する値型のため、追加コピーなしに `Tape`／`RefCell` の借用
+/// を持ち越さず切り離せる）。ライフタイムパラメータは持たない
+/// （当初設計は `Ref<'a, [f32]>` を保持する `VarHostView<'a>` を
+/// 想定していたが、`Tape` の借用保持による panic を是正した結果
+/// 現行実装へ変更した。`Var::host_view` ドキュメント参照）。
+pub struct VarHostView { /* private */ }
 
 impl Tape {
     /// `loss` から逆伝播し、テープ上の全 `Var` に対する勾配を計算する。
