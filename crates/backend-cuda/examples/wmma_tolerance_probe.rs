@@ -84,12 +84,43 @@
 //! 恒等（f16 側は「乱数取得後にスケールを乗じてから丸める」順序を
 //! 取り、`s = 1.0` は `next_f32() * 1.0` の丸めと同一）のため出力は
 //! #993 以前と完全に一致する（A2）。
+//!
+//! ## `--routes mma`（3×TF32 の誤差分布実測。イシュー #1356）
+//!
+//! `--routes <wmma|mma>`／環境変数 `WMMA_TOLERANCE_PROBE_ROUTES`（CLI
+//! 優先。未指定は `wmma`）で計測経路を切り替える。**既定 `wmma` の出力は
+//! 本拡張の前後で byte 単位で同一**（A2 と同じ互換方針。#1356 実装計画
+//! AC-2）。`--routes mma` を指定した場合のみ、既存 TF32／f16 節の後に
+//! 3 節を追加出力する:
+//!
+//! - `## f32 SIMT (CudaGemm::run_tiled_f32)`
+//! - `## TF32 mma.sync (CudaMmaTf32Gemm::run_tf32)`
+//! - `## 3xTF32 (CudaMmaTf32x3Gemm::run_tf32x3)`
+//!
+//! 各セル（scale, shape, seed）につき、CPU 参照 2 種（`ref` 列）を
+//! 併記する: `f32fma`（[`matmul_reference_fma`]。**REQ-2 判定行**。
+//! `compare`・閾値定数は他節と同じくそのまま import して使い、
+//! ローカル複製・緩和はしない）と `f64`（[`exact_reference_f64`]。
+//! **診断行**であり REQ-2 判定には使わない）。TF32 mma.sync／3×TF32 の
+//! 2 節は `n % 4 == 0 && k % 4 == 0`（[`is_mma_aligned`]）を満たさない
+//! 形状を GEMM 呼び出し前にスキップする（`validate_mma_tf32_alignment`
+//! が `pub(crate)` のため本ハーネスから直接は呼べず、独立した純粋関数
+//! として同じ整列条件を再実装している。呼び出し前スキップのため
+//! `CudaError::InvalidShape` 自体は発生せず、整列形状で発生したエラーは
+//! 全て想定外エラー〈exit 1〉として扱う）。
+//!
+//! ```text
+//! cargo run --release -p fandhe-ai-backend-cuda --example wmma_tolerance_probe -- \
+//!     --scales 0.1,1,10,100 --routes mma
+//! ```
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::{
     ABSOLUTE_RESCUE_THRESHOLD, CompareReport, RELATIVE_TOLERANCE, compare, matmul_reference_fma,
 };
-use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaWmmaGemm};
+use fandhe_ai_backend_cuda::{
+    CudaDevice, CudaError, CudaGemm, CudaMmaTf32Gemm, CudaMmaTf32x3Gemm, CudaWmmaGemm,
+};
 use half::f16;
 
 /// 形状セット（`tests/gemm_wmma_tf32.rs`・`tests/cpu_cuda_wmma_parity.rs` の
@@ -270,11 +301,46 @@ impl Tf32KernelSelect {
 }
 
 /// CLI／環境変数から解決した計測構成（イシュー #994。`--scales`／
+/// 計測経路の選択（イシュー #1356）。`--routes`／
+/// `WMMA_TOLERANCE_PROBE_ROUTES` で指定する。
+///
+/// `Wmma`（既定）は現行どおり TF32（`CudaGemm::run_wmma_tf32`）・f16
+/// WMMA（`CudaWmmaGemm::run_f16`）の 2 節のみを出力する（#1356 実装計画
+/// AC-2: 出力を変更前と byte 単位で同一に保つ）。`Mma` は上記 2 節に
+/// 加え、f32 SIMT（`CudaGemm::run_tiled_f32`）・TF32 mma.sync
+/// （`CudaMmaTf32Gemm::run_tf32`）・3×TF32（`CudaMmaTf32x3Gemm::
+/// run_tf32x3`）の 3 節を追加出力する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteSelect {
+    Wmma,
+    Mma,
+}
+
+impl RouteSelect {
+    /// `raw`（大文字小文字を無視）を `wmma`／`mma` のいずれかへパースする。
+    /// それ以外は fail-closed で `Err`（[`Tf32KernelSelect::parse`] と
+    /// 同じ「未知の値を無音で既定に縮退させない」方針）。
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "wmma" => Ok(Self::Wmma),
+            "mma" => Ok(Self::Mma),
+            other => Err(format!(
+                "invalid --routes value: '{other}' (expected 'wmma' or 'mma')"
+            )),
+        }
+    }
+
+    fn is_mma(&self) -> bool {
+        matches!(self, Self::Mma)
+    }
+}
+
 /// `--tf32-kernel` を単一の [`resolve_probe_config`] 呼び出しで解決する）。
 #[derive(Debug, Clone, PartialEq)]
 struct ProbeConfig {
     scales: ScaleConfig,
     tf32_kernel: Tf32KernelSelect,
+    routes: RouteSelect,
 }
 
 /// CLI 引数（`--help`／`-h` は呼び出し元 `main` が先に処理済みの前提）と
@@ -298,9 +364,11 @@ fn resolve_probe_config(
     args: &[String],
     env_scales: Option<String>,
     env_tf32_kernel: Option<String>,
+    env_routes: Option<String>,
 ) -> Result<ProbeConfig, String> {
     let mut cli_scales: Option<String> = None;
     let mut cli_tf32_kernel: Option<String> = None;
+    let mut cli_routes: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -321,6 +389,15 @@ fn resolve_probe_config(
             i += 2;
         } else if let Some(value) = arg.strip_prefix("--tf32-kernel=") {
             cli_tf32_kernel = Some(value.to_string());
+            i += 1;
+        } else if arg == "--routes" {
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| "--routes requires a value".to_string())?;
+            cli_routes = Some(value.clone());
+            i += 2;
+        } else if let Some(value) = arg.strip_prefix("--routes=") {
+            cli_routes = Some(value.to_string());
             i += 1;
         } else {
             return Err(format!("unknown argument: '{arg}'"));
@@ -347,21 +424,33 @@ fn resolve_probe_config(
         ));
     }
 
+    let routes = match cli_routes.or(env_routes) {
+        Some(raw) => RouteSelect::parse(&raw)?,
+        None => RouteSelect::Wmma,
+    };
+
     Ok(ProbeConfig {
         scales,
         tf32_kernel,
+        routes,
     })
 }
 
 fn print_usage() {
     println!(
-        "使い方: wmma_tolerance_probe [--scales <s1,s2,...>] [--tf32-kernel <auto|opt|basic>] [--help]\n\
+        "使い方: wmma_tolerance_probe [--scales <s1,s2,...>] [--tf32-kernel <auto|opt|basic>] \
+         [--routes <wmma|mma>] [--help]\n\
          \n\
          --scales <カンマ区切りの正の有限値>\n\
          \u{20}\u{20}各要素をこの倍率で入力データにスケールしてスイープ計測する\n\
          \u{20}\u{20}（例: --scales 0.1,1,10,100）。未指定時は環境変数\n\
          \u{20}\u{20}WMMA_TOLERANCE_PROBE_SCALES を確認し、それも未指定なら\n\
          \u{20}\u{20}s=1 単一の既定モード（#993 以前と同一形式の出力）になる。\n\
+         --routes <wmma|mma>\n\
+         \u{20}\u{20}計測経路を選択する（既定 wmma）。wmma は TF32／f16 WMMA の\n\
+         \u{20}\u{20}2 節（#993 以前と同一形式）のみ、mma はそれに加え f32 SIMT／\n\
+         \u{20}\u{20}TF32 mma.sync／3xTF32 の 3 節を追加出力する（イシュー #1356）。\n\
+         \u{20}\u{20}未指定時は環境変数 WMMA_TOLERANCE_PROBE_ROUTES を確認する。\n\
          --tf32-kernel <auto|opt|basic>\n\
          \u{20}\u{20}TF32 経路（CudaGemm::run_wmma_tf32）が使うカーネルを強制する\n\
          \u{20}\u{20}（既定 auto。opt/basic は `--features internal-diagnostics`\n\
@@ -468,6 +557,95 @@ fn error_row_sweep(scale: f64, label: &str, seed: u64, reason: &str) {
     println!(
         "| {scale} | {label} | {seed} | ({reason}) | - | - | - | - | - | - | - | - | - | - | - | - |"
     );
+}
+
+/// `--routes mma`（イシュー #1356）の 3 節が使う 17 列表のヘッダ。
+/// [`table_header_sweep`]（16 列）に `ref`（f32fma／f64。判定 vs 診断の
+/// 区別）列を `seed` の直後に追加する。
+fn table_header_sweep_ref() {
+    println!(
+        "| scale | shape | seed | ref | fail/total | max_abs_diff | mean_abs_diff | max_rel_err | mean_rel_err | p50_abs_diff | p99_abs_diff | p999_abs_diff | max_fail_abs_diff | abs margin (1e-5/max) | rel margin (1e-3/max) | kernel | ref_nonfinite |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+}
+
+/// [`table_header_sweep_ref`] に対応する計測行（17 列）。`ref_label` は
+/// `"f32fma"`（REQ-2 判定行）または `"f64"`（診断行。判定には使わない）。
+#[allow(clippy::too_many_arguments)]
+fn report_row_sweep_ref(
+    scale: f64,
+    context: &str,
+    seed: u64,
+    ref_label: &str,
+    report: &CompareReport,
+    kernel: &str,
+    ref_nonfinite: usize,
+) {
+    println!(
+        "| {scale} | {context} | {seed} | {ref_label} | {}/{} | {:.3e} | {:.3e} | {:.3e} | {:.3e} | {:.3e} | {:.3e} | {:.3e} | {:.3e} | {} | {} | {kernel} | {ref_nonfinite} |",
+        report.fail_count,
+        report.total,
+        report.max_abs_diff,
+        report.mean_abs_diff,
+        report.max_rel_err,
+        report.mean_rel_err,
+        report.p50_abs_diff,
+        report.p99_abs_diff,
+        report.p999_abs_diff,
+        report.max_fail_abs_diff,
+        margin(ABSOLUTE_RESCUE_THRESHOLD, report.max_abs_diff),
+        margin(RELATIVE_TOLERANCE, report.max_rel_err),
+    );
+}
+
+/// [`report_row_sweep_ref`] に対応するエラー行（列数を揃える。17 列）。
+/// `ref_label` は判定不能な行（想定外エラー・整列非対応スキップ）では
+/// `"-"` を渡す。
+fn error_row_sweep_ref(scale: f64, label: &str, seed: u64, ref_label: &str, reason: &str) {
+    println!(
+        "| {scale} | {label} | {seed} | {ref_label} | ({reason}) | - | - | - | - | - | - | - | - | - | - | - |"
+    );
+}
+
+/// A・B（f32）と形状 `(m, n, k)` から、f64 累算による厳密参照（i-k-j 順
+/// 逐次累積）を計算する（`tests/specialized_mma_f16_triage.rs::
+/// exact_reference_f64` の f32 入力版。イシュー #1356 の診断参照行
+/// 「対 f64」を得るために追加した。判定ロジックではなく、`f32fma`
+/// 参照〈REQ-2 判定行〉との比較で `matmul_reference_fma` 自体の丸め
+/// 誤差規模を可視化する目的の追加診断列）。
+fn exact_reference_f64(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f64> {
+    let mut c = vec![0.0f64; m * n];
+    for i in 0..m {
+        let a_row = &a[i * k..i * k + k];
+        let c_row = &mut c[i * n..i * n + n];
+        for (p, &a_ip) in a_row.iter().enumerate() {
+            let a_ip = a_ip as f64;
+            let b_row = &b[p * n..p * n + n];
+            for j in 0..n {
+                c_row[j] += a_ip * (b_row[j] as f64);
+            }
+        }
+    }
+    c
+}
+
+/// [`exact_reference_f64`] の結果を最終的に 1 回だけ `f32` へ downcast
+/// する（`.claude/rules/coding-rust.md` 正規化統計の「最終書き出しは
+/// 1 回だけ f32 へ downcast する」契約と同じ丸め回数の方針。`compare`
+/// は `&[f32]` を取るためこの変換が必要）。
+fn round_f64_to_f32(v: &[f64]) -> Vec<f32> {
+    v.iter().map(|&x| x as f32).collect()
+}
+
+/// TF32 mma.sync 系 2 経路（単発・3×TF32）の cp.async 16 バイト（f32 4
+/// 要素）整列制約 `n % 4 == 0 && k % 4 == 0` を、起動前にホスト側で判定
+/// する（`gemm_mma_tf32.rs::validate_mma_tf32_alignment` は `pub(crate)`
+/// のため本ハーネス〈別クレート境界の `examples/`〉から直接は呼べず、
+/// 同じ整列条件を独立の純粋関数として再実装している。整列を満たさない
+/// 形状は GEMM を呼ばずに「skipped: alignment n%4/k%4」行を出す
+/// `probe_mma_tf32`／`probe_mma_tf32x3` から使う）。
+fn is_mma_aligned(n: u32, k: u32) -> bool {
+    n.is_multiple_of(4) && k.is_multiple_of(4)
 }
 
 /// `v` の非有限（NaN・Inf）要素数を数える。CPU 参照出力に対して呼び、
@@ -796,6 +974,301 @@ fn probe_f16(gemm: &CudaWmmaGemm, scales: &ScaleConfig) -> bool {
     had_unexpected_error
 }
 
+/// `gemm` が形状 `(m, n, k)` で実際に選ぶ tiled f32 カーネル種別
+/// （`Classic`／`Pipeline`）を文字列で返す（イシュー #1356）。
+///
+/// [`CudaGemm::tiled_f32_kernel_for`] は `internal-diagnostics` feature
+/// 限定の公開アクセサ（`TiledF32Kernel` 冒頭ドキュメンテーションコメント
+/// 「公開範囲」参照）のため、非 feature ビルドでは形状ごとの分岐先を
+/// 照会する公開手段がなく `"n/a (internal-diagnostics)"` を返す
+/// （黙って `"Classic"` 等へ縮退させず、未計測であることを明示する。
+/// `--routes mma` は `internal-diagnostics` feature 非依存で動く契約
+/// のため、この経路は既定ビルドで恒常的に到達する）。
+fn f32_simt_kernel_kind(_gemm: &CudaGemm, _n: u32, _k: u32) -> &'static str {
+    #[cfg(feature = "internal-diagnostics")]
+    {
+        use fandhe_ai_backend_cuda::TiledF32Kernel;
+        match _gemm.tiled_f32_kernel_for(_n, _k) {
+            TiledF32Kernel::Classic => "Classic",
+            TiledF32Kernel::Pipeline => "Pipeline",
+        }
+    }
+    #[cfg(not(feature = "internal-diagnostics"))]
+    {
+        "n/a (internal-diagnostics)"
+    }
+}
+
+/// f32 SIMT 経路（[`CudaGemm::run_tiled_f32`]）の誤差分布を形状×シード×
+/// スケール×参照種別（f32fma／f64）ごとに計測する（イシュー #1356。
+/// `--routes mma` 限定）。整列制約がないため全 [`SHAPES`] を対象とする。
+///
+/// `gemm` は呼び出し元 `main` が [`probe_tf32`] 用に構築済みの
+/// `CudaGemm` ハンドルをそのまま再利用する（NVRTC 二重コンパイル回避・
+/// `--tf32-kernel` 意味論の一貫性。実装計画 §3.2「経路構築」参照）。
+///
+/// 戻り値の意味は [`probe_tf32`] と同じ（想定外エラー発生の有無）。
+fn probe_f32_simt(gemm: &CudaGemm, scales: &ScaleConfig) -> bool {
+    println!("\n## f32 SIMT (`CudaGemm::run_tiled_f32`)\n");
+    table_header_sweep_ref();
+    let mut had_unexpected_error = false;
+    for &(label, m, n, k) in SHAPES {
+        for &seed in SEEDS {
+            for &scale in scales.scales() {
+                let mut rng = Xorshift64Star::new(seed.wrapping_mul(1000).wrapping_add(m as u64));
+                let a = scaled_f32_inputs(&mut rng, (m as usize) * (k as usize), scale);
+                let b = scaled_f32_inputs(&mut rng, (k as usize) * (n as usize), scale);
+
+                let mut c_ref_fma = vec![0.0f32; (m as usize) * (n as usize)];
+                if matmul_reference_fma(&a, &b, &mut c_ref_fma, m as usize, n as usize, k as usize)
+                    .is_err()
+                {
+                    error_row_sweep_ref(
+                        scale,
+                        label,
+                        seed,
+                        "-",
+                        "unexpected: shape validation error",
+                    );
+                    had_unexpected_error = true;
+                    continue;
+                }
+                let c_ref_f64 = exact_reference_f64(&a, &b, m as usize, n as usize, k as usize);
+                let c_ref_f64_as_f32 = round_f64_to_f32(&c_ref_f64);
+
+                let kernel = f32_simt_kernel_kind(gemm, n, k);
+                match gemm.run_tiled_f32(&a, &b, m, n, k) {
+                    Ok(c_gpu) => {
+                        for (ref_label, c_ref) in
+                            [("f32fma", &c_ref_fma), ("f64", &c_ref_f64_as_f32)]
+                        {
+                            match compare(&c_gpu, c_ref) {
+                                Ok(report) => {
+                                    let ref_nonfinite = count_nonfinite(c_ref);
+                                    report_row_sweep_ref(
+                                        scale,
+                                        label,
+                                        seed,
+                                        ref_label,
+                                        &report,
+                                        kernel,
+                                        ref_nonfinite,
+                                    );
+                                }
+                                Err(err) => {
+                                    error_row_sweep_ref(
+                                        scale,
+                                        label,
+                                        seed,
+                                        ref_label,
+                                        &format!("unexpected: compare error: {err}"),
+                                    );
+                                    had_unexpected_error = true;
+                                }
+                            }
+                        }
+                    }
+                    Err(other) => {
+                        error_row_sweep_ref(
+                            scale,
+                            label,
+                            seed,
+                            "-",
+                            &format!("unexpected: run error: {other}"),
+                        );
+                        had_unexpected_error = true;
+                    }
+                }
+            }
+        }
+    }
+    had_unexpected_error
+}
+
+/// TF32 mma.sync 経路（[`CudaMmaTf32Gemm::run_tf32`]）の誤差分布を
+/// 形状×シード×スケール×参照種別ごとに計測する（イシュー #1356。
+/// `--routes mma` 限定）。整列非対応形状（[`is_mma_aligned`] が
+/// `false`）は GEMM を呼ばずに skip 行を出す。
+///
+/// 戻り値の意味は [`probe_tf32`] と同じ。
+fn probe_mma_tf32(gemm: &CudaMmaTf32Gemm, scales: &ScaleConfig) -> bool {
+    println!("\n## TF32 mma.sync (`CudaMmaTf32Gemm::run_tf32`)\n");
+    table_header_sweep_ref();
+    let mut had_unexpected_error = false;
+    for &(label, m, n, k) in SHAPES {
+        if !is_mma_aligned(n, k) {
+            for &seed in SEEDS {
+                for &scale in scales.scales() {
+                    error_row_sweep_ref(scale, label, seed, "-", "skipped: alignment n%4/k%4");
+                }
+            }
+            continue;
+        }
+        for &seed in SEEDS {
+            for &scale in scales.scales() {
+                let mut rng = Xorshift64Star::new(seed.wrapping_mul(1000).wrapping_add(m as u64));
+                let a = scaled_f32_inputs(&mut rng, (m as usize) * (k as usize), scale);
+                let b = scaled_f32_inputs(&mut rng, (k as usize) * (n as usize), scale);
+
+                let mut c_ref_fma = vec![0.0f32; (m as usize) * (n as usize)];
+                if matmul_reference_fma(&a, &b, &mut c_ref_fma, m as usize, n as usize, k as usize)
+                    .is_err()
+                {
+                    error_row_sweep_ref(
+                        scale,
+                        label,
+                        seed,
+                        "-",
+                        "unexpected: shape validation error",
+                    );
+                    had_unexpected_error = true;
+                    continue;
+                }
+                let c_ref_f64 = exact_reference_f64(&a, &b, m as usize, n as usize, k as usize);
+                let c_ref_f64_as_f32 = round_f64_to_f32(&c_ref_f64);
+
+                match gemm.run_tf32(&a, &b, m, n, k) {
+                    Ok(c_gpu) => {
+                        for (ref_label, c_ref) in
+                            [("f32fma", &c_ref_fma), ("f64", &c_ref_f64_as_f32)]
+                        {
+                            match compare(&c_gpu, c_ref) {
+                                Ok(report) => {
+                                    let ref_nonfinite = count_nonfinite(c_ref);
+                                    report_row_sweep_ref(
+                                        scale,
+                                        label,
+                                        seed,
+                                        ref_label,
+                                        &report,
+                                        "mma_tf32",
+                                        ref_nonfinite,
+                                    );
+                                }
+                                Err(err) => {
+                                    error_row_sweep_ref(
+                                        scale,
+                                        label,
+                                        seed,
+                                        ref_label,
+                                        &format!("unexpected: compare error: {err}"),
+                                    );
+                                    had_unexpected_error = true;
+                                }
+                            }
+                        }
+                    }
+                    Err(other) => {
+                        error_row_sweep_ref(
+                            scale,
+                            label,
+                            seed,
+                            "-",
+                            &format!("unexpected: run error: {other}"),
+                        );
+                        had_unexpected_error = true;
+                    }
+                }
+            }
+        }
+    }
+    had_unexpected_error
+}
+
+/// 3×TF32 経路（[`CudaMmaTf32x3Gemm::run_tf32x3`]）の誤差分布を
+/// 形状×シード×スケール×参照種別ごとに計測する（イシュー #1356。
+/// `--routes mma` 限定）。整列非対応形状の扱いは [`probe_mma_tf32`] と
+/// 同じ。`run_tf32x3` の非有限入力拒否（`CudaError::NonFiniteInput`。
+/// `gemm_mma_tf32x3.rs::validate_tf32x3_finite_input`）は、本ハーネスの
+/// 入力スケール上限（`--scales` は有限正値のみ・実測は 100 まで）では
+/// 発火しない想定だが、万一発火した場合は想定外エラーとして扱う
+/// （fail-closed。数値を捏造して計測を継続しない）。
+///
+/// 戻り値の意味は [`probe_tf32`] と同じ。
+fn probe_mma_tf32x3(gemm: &CudaMmaTf32x3Gemm, scales: &ScaleConfig) -> bool {
+    println!("\n## 3xTF32 (`CudaMmaTf32x3Gemm::run_tf32x3`)\n");
+    table_header_sweep_ref();
+    let mut had_unexpected_error = false;
+    for &(label, m, n, k) in SHAPES {
+        if !is_mma_aligned(n, k) {
+            for &seed in SEEDS {
+                for &scale in scales.scales() {
+                    error_row_sweep_ref(scale, label, seed, "-", "skipped: alignment n%4/k%4");
+                }
+            }
+            continue;
+        }
+        for &seed in SEEDS {
+            for &scale in scales.scales() {
+                let mut rng = Xorshift64Star::new(seed.wrapping_mul(1000).wrapping_add(m as u64));
+                let a = scaled_f32_inputs(&mut rng, (m as usize) * (k as usize), scale);
+                let b = scaled_f32_inputs(&mut rng, (k as usize) * (n as usize), scale);
+
+                let mut c_ref_fma = vec![0.0f32; (m as usize) * (n as usize)];
+                if matmul_reference_fma(&a, &b, &mut c_ref_fma, m as usize, n as usize, k as usize)
+                    .is_err()
+                {
+                    error_row_sweep_ref(
+                        scale,
+                        label,
+                        seed,
+                        "-",
+                        "unexpected: shape validation error",
+                    );
+                    had_unexpected_error = true;
+                    continue;
+                }
+                let c_ref_f64 = exact_reference_f64(&a, &b, m as usize, n as usize, k as usize);
+                let c_ref_f64_as_f32 = round_f64_to_f32(&c_ref_f64);
+
+                match gemm.run_tf32x3(&a, &b, m, n, k) {
+                    Ok(c_gpu) => {
+                        for (ref_label, c_ref) in
+                            [("f32fma", &c_ref_fma), ("f64", &c_ref_f64_as_f32)]
+                        {
+                            match compare(&c_gpu, c_ref) {
+                                Ok(report) => {
+                                    let ref_nonfinite = count_nonfinite(c_ref);
+                                    report_row_sweep_ref(
+                                        scale,
+                                        label,
+                                        seed,
+                                        ref_label,
+                                        &report,
+                                        "mma_tf32x3",
+                                        ref_nonfinite,
+                                    );
+                                }
+                                Err(err) => {
+                                    error_row_sweep_ref(
+                                        scale,
+                                        label,
+                                        seed,
+                                        ref_label,
+                                        &format!("unexpected: compare error: {err}"),
+                                    );
+                                    had_unexpected_error = true;
+                                }
+                            }
+                        }
+                    }
+                    Err(other) => {
+                        error_row_sweep_ref(
+                            scale,
+                            label,
+                            seed,
+                            "-",
+                            &format!("unexpected: run error: {other}"),
+                        );
+                        had_unexpected_error = true;
+                    }
+                }
+            }
+        }
+    }
+    had_unexpected_error
+}
+
 /// [`ProbeConfig::tf32_kernel`] に従い `CudaGemm` を構築する（イシュー
 /// #994）。`Auto` は本番既定コンストラクタ [`CudaGemm::new`] を使い、
 /// `Opt`／`Basic` は `internal-diagnostics` feature 限定の診断コンストラクタ
@@ -861,7 +1334,8 @@ fn main() -> std::process::ExitCode {
     }
     let env_scales = std::env::var("WMMA_TOLERANCE_PROBE_SCALES").ok();
     let env_tf32_kernel = std::env::var("WMMA_TOLERANCE_PROBE_TF32_KERNEL").ok();
-    let probe_config = match resolve_probe_config(&args, env_scales, env_tf32_kernel) {
+    let env_routes = std::env::var("WMMA_TOLERANCE_PROBE_ROUTES").ok();
+    let probe_config = match resolve_probe_config(&args, env_scales, env_tf32_kernel, env_routes) {
         Ok(cfg) => cfg,
         Err(msg) => {
             eprintln!("error: {msg}\n");
@@ -891,6 +1365,12 @@ fn main() -> std::process::ExitCode {
             }
         );
     }
+    // `routes` 明示（`Mma`）時のみ 1 行追加する（既定 `wmma` の出力は
+    // #993 以前と同一形式を維持する契約〈A2・実装計画 AC-2〉を壊さない
+    // ため。イシュー #1356）。
+    if probe_config.routes.is_mma() {
+        println!("routes: mma\n");
+    }
 
     let device = match CudaDevice::new(0) {
         Ok(dev) => dev,
@@ -915,11 +1395,17 @@ fn main() -> std::process::ExitCode {
 
     let mut had_unexpected_error = false;
 
+    // `--routes mma` の f32 SIMT 節（`probe_f32_simt`）が再利用できる
+    // よう、TF32 節で構築した `CudaGemm` ハンドルをここで保持する
+    // （NVRTC 二重コンパイル回避・`--tf32-kernel` 意味論の一貫性。
+    // 実装計画 §3.2「経路構築」参照。イシュー #1356）。
+    let mut cuda_gemm_for_reuse: Option<CudaGemm> = None;
     match build_cuda_gemm(&device, probe_config.tf32_kernel) {
         Ok(gemm) => {
             if probe_tf32(&device, &gemm, scale_config) {
                 had_unexpected_error = true;
             }
+            cuda_gemm_for_reuse = Some(gemm);
         }
         Err(CudaError::NvrtcUnavailable { detail }) => {
             println!("\nNVRTC 非搭載環境のため TF32 経路の計測をスキップします: {detail}");
@@ -950,6 +1436,68 @@ fn main() -> std::process::ExitCode {
         Err(other) => {
             println!("\nCudaWmmaGemm::new が想定外のエラーを返しました: {other}");
             had_unexpected_error = true;
+        }
+    }
+
+    // `--routes mma`（イシュー #1356）限定の追加 3 節。既定 `wmma` では
+    // 一切呼ばない（AC-2: 出力を byte 単位で変更前と同一に保つ）。
+    if probe_config.routes.is_mma() {
+        match &cuda_gemm_for_reuse {
+            Some(gemm) => {
+                if probe_f32_simt(gemm, scale_config) {
+                    had_unexpected_error = true;
+                }
+            }
+            None => {
+                println!(
+                    "\nTF32 経路（CudaGemm）が構築できなかったため f32 SIMT 節の計測を \
+                     スキップします（上記 TF32 節のスキップ理由を参照）"
+                );
+            }
+        }
+
+        match CudaMmaTf32Gemm::new(&device) {
+            Ok(gemm) => {
+                if probe_mma_tf32(&gemm, scale_config) {
+                    had_unexpected_error = true;
+                }
+            }
+            Err(CudaError::NvrtcUnavailable { detail }) => {
+                println!(
+                    "\nNVRTC 非搭載環境のため TF32 mma.sync 経路の計測をスキップします: {detail}"
+                );
+            }
+            Err(CudaError::TensorCoreUnsupported { detail }) => {
+                println!(
+                    "\ncompute capability 8.0 未満のため TF32 mma.sync 経路の計測を \
+                     スキップします: {detail}"
+                );
+            }
+            Err(other) => {
+                println!("\nCudaMmaTf32Gemm::new が想定外のエラーを返しました: {other}");
+                had_unexpected_error = true;
+            }
+        }
+
+        match CudaMmaTf32x3Gemm::new(&device) {
+            Ok(gemm) => {
+                if probe_mma_tf32x3(&gemm, scale_config) {
+                    had_unexpected_error = true;
+                }
+            }
+            Err(CudaError::NvrtcUnavailable { detail }) => {
+                println!("\nNVRTC 非搭載環境のため 3xTF32 経路の計測をスキップします: {detail}");
+            }
+            Err(CudaError::TensorCoreUnsupported { detail }) => {
+                println!(
+                    "\ncompute capability 8.0 未満のため 3xTF32 経路の計測をスキップします: \
+                     {detail}"
+                );
+            }
+            Err(other) => {
+                println!("\nCudaMmaTf32x3Gemm::new が想定外のエラーを返しました: {other}");
+                had_unexpected_error = true;
+            }
         }
     }
 
@@ -1048,7 +1596,7 @@ mod tests {
 
     #[test]
     fn resolve_probe_config_defaults_when_unspecified() {
-        let cfg = resolve_probe_config(&[], None, None).unwrap();
+        let cfg = resolve_probe_config(&[], None, None, None).unwrap();
         assert_eq!(cfg.scales, ScaleConfig::Default);
         assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Auto);
     }
@@ -1056,39 +1604,39 @@ mod tests {
     #[test]
     fn resolve_probe_config_scales_prefers_cli_over_env() {
         let args = vec!["--scales".to_string(), "1,2".to_string()];
-        let cfg = resolve_probe_config(&args, Some("9,9.5".to_string()), None).unwrap();
+        let cfg = resolve_probe_config(&args, Some("9,9.5".to_string()), None, None).unwrap();
         assert_eq!(cfg.scales, ScaleConfig::Sweep(vec![1.0, 2.0]));
     }
 
     #[test]
     fn resolve_probe_config_scales_falls_back_to_env() {
-        let cfg = resolve_probe_config(&[], Some("0.1,1".to_string()), None).unwrap();
+        let cfg = resolve_probe_config(&[], Some("0.1,1".to_string()), None, None).unwrap();
         assert_eq!(cfg.scales, ScaleConfig::Sweep(vec![0.1, 1.0]));
     }
 
     #[test]
     fn resolve_probe_config_scales_supports_equals_form() {
         let args = vec!["--scales=1,10".to_string()];
-        let cfg = resolve_probe_config(&args, None, None).unwrap();
+        let cfg = resolve_probe_config(&args, None, None, None).unwrap();
         assert_eq!(cfg.scales, ScaleConfig::Sweep(vec![1.0, 10.0]));
     }
 
     #[test]
     fn resolve_probe_config_rejects_unknown_argument() {
         let args = vec!["--bogus".to_string()];
-        assert!(resolve_probe_config(&args, None, None).is_err());
+        assert!(resolve_probe_config(&args, None, None, None).is_err());
     }
 
     #[test]
     fn resolve_probe_config_rejects_missing_scales_value() {
         let args = vec!["--scales".to_string()];
-        assert!(resolve_probe_config(&args, None, None).is_err());
+        assert!(resolve_probe_config(&args, None, None, None).is_err());
     }
 
     #[test]
     fn resolve_probe_config_rejects_missing_tf32_kernel_value() {
         let args = vec!["--tf32-kernel".to_string()];
-        assert!(resolve_probe_config(&args, None, None).is_err());
+        assert!(resolve_probe_config(&args, None, None, None).is_err());
     }
 
     #[test]
@@ -1106,10 +1654,10 @@ mod tests {
     #[test]
     fn resolve_probe_config_tf32_kernel_auto_supports_equals_form_and_env_fallback() {
         let args = vec!["--tf32-kernel=AUTO".to_string()];
-        let cfg = resolve_probe_config(&args, None, None).unwrap();
+        let cfg = resolve_probe_config(&args, None, None, None).unwrap();
         assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Auto);
 
-        let cfg = resolve_probe_config(&[], None, Some("auto".to_string())).unwrap();
+        let cfg = resolve_probe_config(&[], None, Some("auto".to_string()), None).unwrap();
         assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Auto);
     }
 
@@ -1118,14 +1666,15 @@ mod tests {
         // env に不正値を与えても CLI 側が優先されれば env は一切パースされない
         // （`.or()` によるショートサーキット）。
         let args = vec!["--tf32-kernel".to_string(), "auto".to_string()];
-        let cfg = resolve_probe_config(&args, None, Some("not-a-kernel".to_string())).unwrap();
+        let cfg =
+            resolve_probe_config(&args, None, Some("not-a-kernel".to_string()), None).unwrap();
         assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Auto);
     }
 
     #[test]
     fn resolve_probe_config_rejects_unknown_tf32_kernel_value() {
         let args = vec!["--tf32-kernel".to_string(), "turbo".to_string()];
-        assert!(resolve_probe_config(&args, None, None).is_err());
+        assert!(resolve_probe_config(&args, None, None, None).is_err());
     }
 
     /// `internal-diagnostics` feature 無効ビルド（既定）でのみ実行する。
@@ -1135,14 +1684,14 @@ mod tests {
     #[test]
     fn resolve_probe_config_rejects_opt_and_basic_without_internal_diagnostics_feature() {
         let opt_args = vec!["--tf32-kernel".to_string(), "opt".to_string()];
-        let err = resolve_probe_config(&opt_args, None, None).unwrap_err();
+        let err = resolve_probe_config(&opt_args, None, None, None).unwrap_err();
         assert!(
             err.contains("internal-diagnostics"),
             "unexpected error: {err}"
         );
 
         let basic_args = vec!["--tf32-kernel".to_string(), "basic".to_string()];
-        let err = resolve_probe_config(&basic_args, None, None).unwrap_err();
+        let err = resolve_probe_config(&basic_args, None, None, None).unwrap_err();
         assert!(
             err.contains("internal-diagnostics"),
             "unexpected error: {err}"
@@ -1155,11 +1704,11 @@ mod tests {
     #[test]
     fn resolve_probe_config_accepts_opt_and_basic_with_internal_diagnostics_feature() {
         let opt_args = vec!["--tf32-kernel".to_string(), "OPT".to_string()];
-        let cfg = resolve_probe_config(&opt_args, None, None).unwrap();
+        let cfg = resolve_probe_config(&opt_args, None, None, None).unwrap();
         assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Opt);
 
         let basic_args = vec!["--tf32-kernel=basic".to_string()];
-        let cfg = resolve_probe_config(&basic_args, None, None).unwrap();
+        let cfg = resolve_probe_config(&basic_args, None, None, None).unwrap();
         assert_eq!(cfg.tf32_kernel, Tf32KernelSelect::Basic);
     }
 
@@ -1240,5 +1789,113 @@ mod tests {
     #[test]
     fn margin_computes_ratio_for_finite_positive_observed() {
         assert_eq!(margin(1e-3, 1e-4), "10.00x");
+    }
+
+    // --- イシュー #1356（`--routes mma`）関連 ---
+
+    #[test]
+    fn route_select_parse_accepts_known_values_case_insensitive() {
+        assert_eq!(RouteSelect::parse("wmma").unwrap(), RouteSelect::Wmma);
+        assert_eq!(RouteSelect::parse("WMMA").unwrap(), RouteSelect::Wmma);
+        assert_eq!(RouteSelect::parse("mma").unwrap(), RouteSelect::Mma);
+        assert_eq!(RouteSelect::parse("MMA").unwrap(), RouteSelect::Mma);
+    }
+
+    #[test]
+    fn route_select_parse_rejects_unknown_value() {
+        assert!(RouteSelect::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn route_select_is_mma() {
+        assert!(!RouteSelect::Wmma.is_mma());
+        assert!(RouteSelect::Mma.is_mma());
+    }
+
+    #[test]
+    fn resolve_probe_config_routes_defaults_to_wmma() {
+        let cfg = resolve_probe_config(&[], None, None, None).unwrap();
+        assert_eq!(cfg.routes, RouteSelect::Wmma);
+    }
+
+    #[test]
+    fn resolve_probe_config_routes_cli_overrides_env() {
+        let args = vec!["--routes".to_string(), "mma".to_string()];
+        let cfg = resolve_probe_config(&args, None, None, Some("wmma".to_string())).unwrap();
+        assert_eq!(cfg.routes, RouteSelect::Mma);
+    }
+
+    #[test]
+    fn resolve_probe_config_routes_falls_back_to_env() {
+        let cfg = resolve_probe_config(&[], None, None, Some("mma".to_string())).unwrap();
+        assert_eq!(cfg.routes, RouteSelect::Mma);
+    }
+
+    #[test]
+    fn resolve_probe_config_routes_supports_equals_form() {
+        let args = vec!["--routes=mma".to_string()];
+        let cfg = resolve_probe_config(&args, None, None, None).unwrap();
+        assert_eq!(cfg.routes, RouteSelect::Mma);
+    }
+
+    #[test]
+    fn resolve_probe_config_rejects_unknown_routes_value() {
+        let args = vec!["--routes".to_string(), "bogus".to_string()];
+        assert!(resolve_probe_config(&args, None, None, None).is_err());
+    }
+
+    #[test]
+    fn resolve_probe_config_rejects_missing_routes_value() {
+        let args = vec!["--routes".to_string()];
+        assert!(resolve_probe_config(&args, None, None, None).is_err());
+    }
+
+    #[test]
+    fn is_mma_aligned_accepts_shapes_used_by_probe_mma_routes() {
+        // `SHAPES` のうち mma 系 2 経路が計測対象とする整列形状（実装計画
+        // §3.2「整列非対応形状の扱い」の確認リスト）。
+        for &(n, k) in &[
+            (32u32, 32u32),
+            (64, 64),
+            (128, 128),
+            (256, 256),
+            (512, 512),
+            (256, 512),
+            (256, 1024),
+            (256, 4096),
+            (100, 100),
+            (96, 128),
+        ] {
+            assert!(is_mma_aligned(n, k), "expected aligned: n={n}, k={k}");
+        }
+    }
+
+    #[test]
+    fn is_mma_aligned_rejects_non_multiple_edge_shapes() {
+        for &(n, k) in &[(1u32, 1u32), (23, 19), (19, 23), (31, 65), (70, 90)] {
+            assert!(!is_mma_aligned(n, k), "expected non-aligned: n={n}, k={k}");
+        }
+    }
+
+    #[test]
+    fn exact_reference_f64_matches_matmul_reference_fma_for_small_integer_inputs() {
+        // 整数値入力（K が小さい）では f64 厳密計算と f32 逐次 FMA 参照が
+        // bit 一致する（`specialized_mma_f16_triage.rs` の同名テストの
+        // f32 入力版・小 K 前提の同じ根拠）。
+        let (m, n, k) = (2usize, 2usize, 2usize);
+        let a = vec![1.0f32, 2.0, 3.0, 4.0];
+        let b = vec![5.0f32, 6.0, 7.0, 8.0];
+        let exact = exact_reference_f64(&a, &b, m, n, k);
+        let mut fma_ref = vec![0.0f32; m * n];
+        matmul_reference_fma(&a, &b, &mut fma_ref, m, n, k).unwrap();
+        for (idx, (&e, &f)) in exact.iter().zip(fma_ref.iter()).enumerate() {
+            assert_eq!(e, f as f64, "index {idx}: exact={e} fma_ref={f}");
+        }
+    }
+
+    #[test]
+    fn round_f64_to_f32_downcasts_each_element_once() {
+        let v = [1.5f64, -2.25, 0.0];
+        assert_eq!(round_f64_to_f32(&v), vec![1.5f32, -2.25, 0.0]);
     }
 }
