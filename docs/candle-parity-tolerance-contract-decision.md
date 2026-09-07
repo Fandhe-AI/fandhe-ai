@@ -12,7 +12,7 @@
 イシューツリー #1234（ルート）→ Phase 1 親 #1236 配下、前段イシュー #1237
 （`docs/perf/candle-parity-tolerance-candidates.md`）・#1238
 （`docs/perf/candle-parity-tolerance-baseline-impact.md`）に続く本イシュー #1239 の成果物。
-並走イシュー #1240（spec 提案 draft。本文書公開時点で PR・コメントなし）とは独立に、
+#1240（spec 提案 draft: `docs/spec-proposal-req2-candle-parity-tolerance.md`）とは独立に、
 本文書は候補判定の比較・推奨案（draft）・ユーザー承認待ち事項の整理に閉じる。
 承認記録は #1241、承認後の実装（Phase 2）は #1243 配下 #1245／#1252／#1258 が扱う。
 
@@ -190,6 +190,10 @@ spec 再改定（#1240 案 (a) 相当）が前提**となる。一方、**framew
 非 Tensor Core 経路への適用可否）のみを渡し、spec 提案本文の draft 自体は #1240 の成果物と
 する。spec リポジトリへの実起票は #1241 承認後に限る。
 
+spec 提案 draft 自体は `docs/spec-proposal-req2-candle-parity-tolerance.md`（イシュー #1240）
+として起草済み。起票用本文（タイトル案・背景・提案 (a)/(b)・受け入れ基準への影響）は同文書
+§2 を参照。
+
 ## 8. ユーザー承認待ち事項（#1241 で記録）
 
 1. **契約変更の採否**: tolerance 契約（判定式への候補判定 OR 追加）自体を変更するか、
@@ -233,6 +237,8 @@ $ git diff --stat origin/main -- crates/ scripts/ .github/ docs/spec/
 
 ## 11. 関連ドキュメント
 
+- `docs/spec-proposal-req2-candle-parity-tolerance.md`（イシュー #1240。spec 提案 draft・
+  起票用本文）
 - `docs/perf/candle-parity-tolerance-candidates.md`（イシュー #1237。候補 A/B の fail 数机上算出）
 - `docs/perf/logs/candle-parity-tolerance-candidates-1237/`（同上の生出力・env_info）
 - `docs/perf/candle-parity-tolerance-baseline-impact.md`（イシュー #1238。`BASELINES` への影響
