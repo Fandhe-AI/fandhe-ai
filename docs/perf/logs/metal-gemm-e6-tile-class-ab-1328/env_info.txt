@@ -1,0 +1,9 @@
+機種: Apple M4 Max
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+rustc 1.96.0 (ac68faa20 2026-05-25)
+date: 2026-09-06T22:25:06Z
+base commit: b41bba6b6a6d56a5376ddfba8f55c67ccbea8528
+branch: test/1328-metal-e6-tile-class-ab
+uptime_before_all_runs:  7:25  up 18 days, 18:37, 21 users, load averages: 1.55 2.52 3.21

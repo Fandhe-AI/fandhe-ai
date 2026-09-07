@@ -1456,7 +1456,8 @@ constant 経路）が M4 Max 上では既に局所最適に近い」ことを補
   は起票しない。ユーザー承認なしの起票禁止。PR 本文に提示のみ）。
   **追記（イシュー #1327）**: index 15 はその後 `TILE_CLASS`（タイル
   クラス分割ゲート。E6 試作）へ割り当てられた。詳細・実測は
-  `docs/perf/metal-gemm-tile-class-split.md`・実測は #1328（予定）
+  `docs/perf/metal-gemm-tile-class-split.md`。性能実測・採否判断は
+  イシュー #1328（本ファイル §12）で完了済み（組み込み不可・REJECT）
 - NT/TN/TT 転置パターンでの性能比較（bit 一致は #1298 T3 で NN 以外も
   検証済みだが、性能実測は NN のみが対象）
 - f16 経路（`gemm_simdgroup_tiled_f16`）への E4 展開（T5 は f16 経路が
@@ -1475,3 +1476,346 @@ constant 経路）が M4 Max 上では既に局所最適に近い」ことを補
 `uptime_before_run{1..5}.txt`・`pmset_therm_before.txt`・
 `pmset_therm_after.txt`・`smoke_coop_load_bit_match.log`・
 `kernel_gpu_run{1..5}.log`・`aggregate.md`）
+
+## 12. E6 タイルクラス分割の純カーネル時間比較（イシュー #1328）
+
+### 12.0 目的・範囲
+
+`docs/perf/metal-gemm-tile-class-split.md`（E6 タイルクラス分割。イシュー
+#1327 で opt-in 機構〈`tile::TileClassMode`〉を実装・端あり形状込みで
+bit 一致を自己検証済み）の性能実測・本番結線（`tile::TILE_CLASS_MODE`）
+可否判断を担う（同 doc「性能実測・`tile::select` への組み込み判断は
+行わない（兄弟イシュー #1328 のスコープ）」の引き継ぎ）。
+
+**命名衝突の明示**: 本 §12 の「E6」（イシュー #1327/#1328。タイルクラス
+分割）は、§3「Phase B/E6」の「E6」（イシュー #1143。候補
+`(32,64,16,1,2)`＝`CANDIDATES[8]` の追加測定）とは別物である。両者は
+偶然同じ略称を使っているだけで機構としては無関係。
+
+**「現行経路」の定義**: 本番 `dispatch_auto`（`tile::select_for_device`）
+は M4 Max 実測帯域で N=512→`CANDIDATES[5]`・1024→`[6]`・2048→`[1]`・
+4096→`[2]` を選ぶ。本イシューが対象とする候補 0/4/5/8 のうち、
+N=1024/2048/4096（§12.2 本表の対象）ではこの本番選択構成のいずれとも
+一致しないが、**N=512 では候補 5（`CANDIDATES[5]`）自体が本番選択構成
+そのもの**である点に注意（§12.2-B の N=512 行はしたがって候補 0/4/5/8
+の一員である候補 5 の直接計測に相当する）。したがって「現行経路」は
+2 通りに解釈しうる:
+
+- (A) 候補 0/4/5/8 それぞれの `TileClassMode::Legacy`（1 dispatch。
+  §12.2 の主対象）
+- (B) 本番が実際に選択する構成（`CANDIDATES[1]/[2]/[5]/[6]`）の
+  `TileClassMode::Legacy`（§12.2 追補で直接計測）
+
+Issue 記載の受け入れ基準は (A) だが、本番結線の可否判断には (B) が
+不可欠なため、本イシューのスコープを実務的に拡張し両方を計測した
+（§3.4「採否・本番結線の判断規則」の「ADOPT 相当の場合の追加 A/B」
+要求に対応）。
+
+**AC 形状での構造的縮退（事前の作業仮説と実測の乖離）**: 候補 0/4/5/8
+はいずれも `staged: true` で、N=1024/2048/4096 は各候補の `bm`/`bn`/`bk`
+すべての倍数（`bk` が最大でも 32、N が最小でも 1024 のため必ず割り切れる）。
+よって `tile::tile_class_plan` は interior＝grid 全体・端ストリップ 2 本
+とも空を返し、`TileClassMode::Split` は「**Interior クラス（`tile::
+TileClassMode` ドキュメンテーションコメント参照。direct-load 強制）を
+grid 全体へ適用した 1 dispatch**」へ縮退する（実測で edge 増分 0・
+interior 増分のみを確認。§12.1 参照）。当初は E3（`docs/perf/
+metal-gemm-transpose-tiled.md`）の `device-legacy` twin（`staged=false`）
+が全 N で staged 比 1.6〜3.3 倍遅かった実績から、この縮退が一律の後退
+（REJECT）に直結すると予想していたが、**実測は候補依存で符号が割れた**
+（§12.2）。
+
+### 12.1 環境・プロトコル
+
+- HEAD: `b41bba6`（origin/main。E6 機構実装 PR #1388 を含む）
+- 実行方式: `crates/backend-metal/src/gemm_tile_class_diag_tests.rs`
+  （`#[cfg(all(test, target_os = "macos"))]`。本イシューで新規追加）の
+  2 テスト:
+  - `tile_class_kernel_gpu_ab_production_sizes`（候補 0/4/5/8 × N=1024/
+    2048/4096。§12.2 本表）を `cargo test -p fandhe-ai-backend-metal
+    --release --lib tile_class_kernel_gpu_ab_production_sizes --
+    --ignored --nocapture --test-threads=1` で 5 プロセス起動
+  - `tile_class_production_select_kernel_gpu_ab`（本番選択構成 ×
+    N=512/1024/2048/4096。§12.2 追補）を同様に 5 プロセス起動
+- **プロダクションコード変更**: `gemm.rs::encode_tiled_by_class` を挙動
+  不変の `plan_tiled_by_class`／`encode_tiled_plan` へリファクタし、
+  診断専用 `diag_encode_tiled_nn` が `self.tile_class_mode` を尊重する
+  ように是正した（従来は `pipeline_for_tile(..., TileClass::Legacy)` を
+  直接呼んでいたため `new_with_tile_class(Split)` でも常に Legacy 経路
+  しか測れなかった。§12 実測の前提修正。`tile.rs`／`shaders/gemm.metal`
+  は無変更）
+- **計測前ゲート（bit 一致）**: `gemm::tests` の 4 テスト
+  （`tile_class_split_bit_match_all_candidates`／`_edge_shapes`／
+  `_dispatch_auto`／`tile_class_default_matches_production_constants`）を
+  `--release --ignored --nocapture --test-threads=1 tile_class` で実行し
+  **全 4 件 pass**（`smoke_tile_class_bit_match.log`）。ハーネス自身も
+  各 (N, cand) の trial 0 出力で base/head の bit 完全一致を fail-closed
+  に検証し全て pass
+- **経路証跡**: `TILE_CLASS_SPLIT_FALLBACK_COUNT` 増分は全 (N, cand) で
+  0（Edge/Interior 解決構成の食い違いなし）。§12.2 本表では
+  `TILE_CLASS_EDGE_DISPATCH_COUNT` 増分が全 (N, cand) で 0、
+  `TILE_CLASS_INTERIOR_DISPATCH_COUNT` 増分が全 (N, cand) で 40
+  （= warmup 20 + measured 20）——AC 形状での構造的縮退（interior のみ）
+  を機構レベルで裏付ける
+- **負荷状況**: 着手前 `uptime` 1 分値 1.44〜1.83（3.0 未満のため待機
+  不要）。5 run とも同様の負荷帯（`uptime_before_run{1..5}.txt`）。
+  `pmset -g therm` は前後とも警告なし
+- **interleave**: A 節（`tile_class_kernel_gpu_ab_production_sizes`）は
+  trial ごとに base/head の計測順を交互に反転する（E3/E4 と同じ
+  order-bias 相殺）。**B 節（`tile_class_production_select_kernel_gpu_
+  ab`。`run_size_with` 呼び出し）は N ごとに「base を 40 反復 → head を
+  40 反復」の順で逐次実行し、trial 単位の交互化を行っていない**（`gemm_
+  tile_class_diag_tests.rs::tile_class_production_select_kernel_gpu_ab`
+  doc comment 参照）。N=2048/4096 の後退（2.3〜3.1 倍）は order-bias で
+  説明できない規模だが、N=512/1024 の符号不一致・外れ値（§12.2-B）は
+  この非交互構成の影響を受けている可能性がある
+
+### 12.2 候補 × N の 5 run 表と対 Legacy 比
+
+**A. 候補 0/4/5/8（AC 形状）**: `docs/perf/logs/
+metal-gemm-e6-tile-class-ab-1328/aggregate.md` §A に全 run 生値を記載。
+
+| N | cand | resolved_tile (bm,bn,bk,wm,wn) | legacy median (ms) | split median (ms) | run別比の中央値 (split/legacy) | run 間符号 |
+|---|---|---|---|---|---|---|
+| 1024 | 0 | 64,64,16,2,2 | 5.6569 | 3.6782 | **0.6502** | 一貫（改善） |
+| 1024 | 4 | 64,64,16,1,2 | 2.4562 | 2.0830 | **0.8530** | 一貫（改善） |
+| 1024 | 5 | 64,32,32,2,2 | 0.3552 | 1.1016 | **2.7380** | 一貫（後退） |
+| 1024 | 8 | 32,64,16,1,2 | 1.9392 | 1.1774 | **0.5923** | 一貫（改善） |
+| 2048 | 0 | 64,64,16,2,2 | 13.6808 | 7.0745 | **0.5193** | 一貫（改善） |
+| 2048 | 4 | 64,64,16,1,2 | 34.8062 | 16.5568 | **0.4761** | 一貫（改善） |
+| 2048 | 5 | 64,32,32,2,2 | 1.8344 | 4.8899 | **2.6646** | 一貫（後退） |
+| 2048 | 8 | 32,64,16,1,2 | 15.7692 | 7.1534 | **0.4536** | 一貫（改善） |
+| 4096 | 0 | 64,64,16,2,2 | 106.4910 | 57.2960 | **0.5384** | 一貫（改善） |
+| 4096 | 4 | 64,64,16,1,2 | 306.0033 | 132.5602 | **0.4339** | 一貫（改善） |
+| 4096 | 5 | 64,32,32,2,2 | 18.6987 | 43.5757 | **2.3304** | 一貫（後退） |
+| 4096 | 8 | 32,64,16,1,2 | 127.0828 | 59.1988 | **0.4658** | 一貫（改善） |
+
+候補 0/4/8 は Split が一貫して legacy より速い（0.43〜0.85 倍）。候補 5
+は Split が一貫して legacy より遅い（2.3〜2.7 倍）。run 間の符号はどの
+(N, cand) の組でも一貫している。**この差は `bk` では説明できない**
+（後述 §12.2-B のとおり、本番選択構成 `[1]`/`[2]`〈いずれも `bk=16`〉も
+Split で一貫して後退するため、「`bk=16` なら改善」という単純な規則は
+成立しない）。むしろ候補 0/4/8 の legacy（staged）ベースライン自体が
+同一 N の本番選択構成の legacy より極端に遅い（例: N=4096 で候補 0 の
+legacy 106.49 ms 対 本番選択構成 `[2]` の legacy 13.77 ms。約 7.7 倍）
+ことが特徴的であり、Split（direct-load）はこの非効率なベースラインを
+部分的に緩和したに過ぎないと考えられる（§12.4 参照）。
+
+**表記注（codex-review 指摘対応。イシュー #1328 PR #1389）**: 上表
+（A）の「run別比の中央値」は各 run の比（split/legacy）を 5 個算出
+したうえでその中央値を取ったものであり、`legacy median` 列と
+`split median` 列の比（両群の中央値同士の比）とは値が異なる
+（例: N=1024/cand5 は両群中央値の比では 1.1016/0.3552≈3.1014 だが
+run別比の中央値は 2.7380）。下記 B 節の「中央値比（両群中央値の
+比）」列は逆に両群中央値の比そのものであり、算出方法が異なる別の
+指標である点に注意する（同一の生値は `aggregate.md` §A/§B 参照）。
+
+**B. 本番 `select_for_device` 選択構成（追補）**: 同 `aggregate.md` §B に
+全 run 生値を記載。
+
+| N | 選択構成 (bm,bn,bk,wm,wn) | legacy median (ms) | split median (ms) | 中央値比（両群中央値の比） | run 間符号 |
+|---|---|---|---|---|---|
+| 512  | 64,32,32,2,2（`[5]`） | 0.2015 | 0.1081 | 0.5365 | **不一致**（2/5 run は legacy 比 約 2.5 倍に後退・3/5 run は半減） |
+| 1024 | 64,32,8,4,1（`[6]`）  | 0.2245 | 0.5667 | 2.5243 | 4/5 run 後退・1 run 外れ値 |
+| 2048 | 64,32,16,2,2（`[1]`） | 1.6030 | 4.9021 | 3.0581 | **一貫**（5/5 後退） |
+| 4096 | 32,64,16,2,2（`[2]`） | 13.7657 | 32.1276 | 2.3339 | **一貫**（5/5 後退） |
+
+本番が実際に選択する構成では、N=2048/4096 が明確に一貫した後退
+（2.3〜3.1 倍遅い）、N=1024 もおおむね後退方向（4/5 run）、N=512 のみ
+二峰性で符号不一致（B 節「interleave」注記のとおり非交互測定の影響が
+疑われるが未確定）。N=512 の選択構成 `[5]` は候補 5（A 節）そのものであり、
+A 節の N=1024/2048/4096 での結果（一貫して後退）と符号が整合する。
+**候補 0/4/8（A 節。いずれも本番非選択構成）で観測した改善は、本番が
+実際に選択する構成（N=1024/2048/4096。`[1]`/`[2]`/`[6]`）には現れない**
+——A 節の結果を本番選択構成へ外挿できないことが直接計測で確認された。
+
+### 12.3 妥当性帯チェック
+
+§11.5 分母（`docs/perf/metal-gemm-reuse-phase-breakdown.md` §11.5。N=1024
+1.0267 ms／2048 3.1849 ms／4096 13.7051 ms。`CANDIDATES[6]/[1]/[2]` 相当）
+との突合: 本 §12.2-B の legacy 列は N=1024 0.2245 ms・2048 1.6030 ms・
+4096 13.7657 ms で、N=4096 は分母とほぼ一致（13.77 対 13.71 ms）だが
+N=1024/2048 は分母よりかなり**小さい**（速い）。原因は特定できていない
+——本ハーネス（`MetalContext::new()` 専用コンテキスト＋`MetalGemm::
+new_with_tile_class` の非キャッシュインスタンス）は §11.5 の本番 hot
+path（`cached_context()`／`cached_gemm()`）と構成が異なるが、非キャッシュ
+経路が速くなる理由は自明ではなく、単純な「コールドスタートで遅くなる」
+という説明とは逆方向の乖離である。さらに N=1024 の legacy 5 run 生値
+（§12.2-B: `[0.223, 0.224, 0.225, 1.022, 1.023]`）自体が二峰性で中央値が
+不安定であり、上記の分母突合はこの不安定な中央値に基づく参考値に過ぎない
+（原因不明のまま記録する。分母は置換しない）。N=4096 は二峰性が見られず
+分母と近い値のため、この乖離が比率（split/legacy）の妥当性に与える影響は
+N=4096 では小さいと考えられるが、N=512/1024 については§12.4 の判断で
+慎重に扱う（§12.4 参照）。
+
+### 12.4 採否判断
+
+判定基準（§9.4/§10.4/§11.4 と同一）: 組み込み可＝N=2048 かつ 4096 で
+Split/Legacy 比 < 1.0、かつ N=1024 の後退 ≤ 5%、かつ run 間の符号が一貫。
+
+**判定: 組み込み不可（REJECT）。`tile::TILE_CLASS_MODE = Legacy` を維持
+する。コード変更は §12.1 記載のリファクタ（`plan_tiled_by_
+class`／`encode_tiled_plan` 分離。挙動不変）と診断テスト追加のみ**。
+
+根拠:
+
+1. 本番 `dispatch_auto` が実際に選択する構成（`CANDIDATES[1]/[2]/[6]`）
+   では、N=2048/4096 で Split が一貫して legacy より 2.3〜3.1 倍遅い
+   （§12.2-B。5/5 run で符号一貫）。N=1024 もおおむね後退方向（4/5 run）。
+   これは判定基準の「N=2048 かつ 4096 で Split/Legacy 比 < 1.0」を明確に
+   満たさない
+2. 候補 0/4/8（A 節。N=1024/2048/4096 では本番非選択構成）で観測された
+   改善（0.43〜0.85 倍）は真の実測結果だが、本番が実際に選択する構成
+   （B 節の `[1]`/`[2]`/`[6]`）には現れないことを直接計測で確認済み。
+   よって A 節の改善を理由に結線することはできない
+3. 候補 5（A 節）は N=1024/2048/4096 いずれでも Split が一貫して遅く
+   （2.3〜2.7 倍）、その本番選択構成としての姿である N=512（B 節）でも
+   Split が legacy を上回る場面（2/5 run）と大きく下回る場面（3/5 run）
+   が混在し符号が一貫しない。候補 5 系統（本番選択構成 `[5]` を含む）は
+   いずれの N でも Split 採用の根拠にならない
+
+候補 0/4/8 の「改善」は `bk` に依存する規則ではない（本番選択構成
+`[1]`/`[2]` も `bk=16` だが Split で一貫して後退するため。§12.2-A
+参照）。候補 0/4/8 の legacy（staged）ベースライン自体が同一 N の本番
+選択構成の legacy より約 7〜8 倍遅く、Split（Interior クラス＝
+direct-load 強制）はこの非効率を部分的に緩和したに過ぎないと考えられる
+（プロファイリング等による機構レベルの検証は未実施）。いずれにせよ
+候補 0/4/8 は Split・Legacy のどちらのモードでも本番選択構成の legacy
+に及ばず（例: N=4096 で候補 0 の Split 57.30 ms 対 本番選択構成 `[2]`
+の legacy 13.77 ms）、本番結線の根拠にはならない。「候補 0/4/8 の
+legacy ベースラインがなぜ本番選択構成よりこれほど遅いか」自体は本
+イシューでは未解明の新しい観察であり、§12.5 で引き継ぐ。
+
+### 12.5 スコープ外・引き継ぎ
+
+- 端あり形状（E6 本来の効用が現れる形状。Interior／Edge 両方が非空に
+  なる形状）での性能比較は未実施（本 §12 は AC 形状〈整列〉のみ）
+- N=512（候補 0/4/5/8 側。B 節のみ計測）・NT/TN/TT・f16 経路
+- T4（転置）・T5（`FragLoadConfig` 合成）の bit 一致自己検証（#1327 から
+  未実施のまま）
+- REJECT のため `dispatch_auto` 全形状 A/B（§3.4 の「ADOPT 相当の場合」
+  向け追加検証）は本 §12.2-B で先行的に実施済み（実質的に完了）
+- 候補 0/4/8 の legacy（staged）ベースラインが同一 N の本番選択構成より
+  約 7〜8 倍遅い理由（occupancy・レジスタ圧・スレッドグループ数等の
+  プロファイリングによる特定）・Split（direct-load）がこれを部分的に
+  緩和する機構の解明は未調査（§12.4）。追加調査が必要なら新規 Issue の
+  起票をユーザーに提案する（`out-of-scope-tracking.md`）
+- §12.3 で記録した、本ハーネス（非キャッシュ `MetalGemm` インスタンス）
+  の legacy 計測値が §11.5 分母（本番 hot path）より N=1024/2048 で
+  速いという原因不明の乖離、および N=1024 legacy 5 run の二峰性の原因
+  調査は未実施
+- XOR swizzle 軸（index 16 以降）・専有（低負荷）環境での再測定
+
+### 12.6 関連ログ
+
+`docs/perf/logs/metal-gemm-e6-tile-class-ab-1328/`（`env_info.txt`・
+`uptime_before_run{1..5}.txt`・`pmset_therm_before.txt`・
+`pmset_therm_after.txt`・`smoke_tile_class_bit_match.log`・
+`kernel_gpu_run{1..5}.log`（候補 0/4/5/8）・
+`kernel_gpu_production_select_run{1..5}.log`（本番選択構成追補）・
+`aggregate.md`）
+
+## 13. E7 候補追加: 64×64×32（wm2wn2）の収録と parity 確認（イシュー #1329）
+
+### 13.0 目的・範囲
+
+親 #1324（E7: bk=32 を 64×64 タイルへ拡張）の sub-issue。`CANDIDATES[0]`
+（64,64,16,2,2。大形状の主力構成）に対する bk=32 版
+`(64,64,32,2,2)` を `tile::CANDIDATES` の **index 9（末尾）** へ追加した。
+K ループ 1 反復あたりの `threadgroup_barrier` 往復を半減させる狙い
+（理論根拠。`CANDIDATES[5]`〈`(64,32,32,2,2)`。イシュー #532〉が bk=32
+自体の初採用実績）。
+
+本 issue のスコープは**候補追加と正確性（parity）確認のみ**: (a) 明示
+指定（`GemmVariant::SimdgroupTiled(cfg)`／`dispatch_tiled_prepared`／
+`dispatch_strided_tiled_prepared` の `cfg` 引数）でのみ到達可能にする
+（`select`／`select_with_occupancy_for_device` の選択ロジックは無変更）、
+(b) カーネル側手動境界チェック（REQ-8）を維持（`gemm.metal` は無変更）、
+(c) 全形状 × NN/NT/TN/TT で parity 0 fail を実機確認、(d) threadgroup
+メモリ使用量の反射値確認、(e) 現行 `CANDIDATES[0]`（bk=16）との出力が
+複合判定内で一致することを確認。純カーネル時間の before/after 実測・
+`tile::select` への組み込み判断は後続イシュー #1330 のスコープ（§13.5）。
+
+### 13.1 環境・プロトコル
+
+実機は Apple M4 Max（`docs/real-hardware-verification-env.md` §7）。
+`cargo test -p fandhe-ai-backend-metal --release ... -- --ignored
+--nocapture --test-threads=1`（正確性確認のみのため 5 回計測中央値は
+不要）。実行前 `uptime` 1 分 load average 1.67〜1.70（低〜中程度の共有
+負荷。21 ユーザーセッション並走）・`pmset -g therm` は thermal/performance
+warning なし。env_info・実行ログは §13.6 参照。
+
+### 13.2 反射値・SMEM 表
+
+`candidate_9_reflection_shows_no_fallback_for_every_transpose_pattern`
+（`gemm_spec_source_diag_tests.rs`）実機実測結果:
+
+| pattern | requested_thread_count | max_total_threads_per_threadgroup | thread_execution_width | static_threadgroup_memory_length | `shared_mem_bytes_for` |
+|---|---|---|---|---|---|
+| NN | 128 | 1024 | 32 | 0 | 17920 |
+| NT | 128 | 1024 | 32 | 0 | 18432 |
+| TN | 128 | 1024 | 32 | 0 | 17408 |
+| TT | 128 | 1024 | 32 | 0 | 17920 |
+
+全パターンで `resolved_cfg == requested_cfg`（フォールバック非経由）・
+`max_total_threads_per_threadgroup >= 128`・`thread_execution_width ==
+32` を確認。`static_threadgroup_memory_length` が 0 なのはタイル
+バッファが**動的** threadgroup メモリ（`threadgroup float* shared_mem
+[[threadgroup(0)]]` + `setThreadgroupMemoryLength`。§2 の H1 検証時と
+同じ契約）で確保されるためで、`shared_mem_bytes_for`（Rust 側の計算値。
+`tile.rs::candidate_9_shared_mem_bytes_for_every_transpose_pattern_
+within_32kib_and_16_aligned` で固定済み）が実際の確保量を表す。4
+パターンとも 32KiB（32768 バイト）上限内・16 バイト整合。f16 版
+`shared_mem_bytes_f16()` は 25344 バイト（`shared_mem_bytes_f16_all_
+candidates_within_32kib_device_limit` の最大値も同値へ更新済み）。
+親 #1324 の「32 KiB（2 面ダブルバッファ）」見積りは本追加では適用しない
+（現行カーネルにダブルバッファはなく、本 issue でも追加しない）。
+
+### 13.3 parity 結果表
+
+| テスト | 対象 | 実機結果 |
+|---|---|---|
+| `bk32_64x64_candidate_matches_cpu_reference_non_multiple_of_tile`（`gemm_dynamic_tile_parity.rs`） | 境界形状 (100,130,70) | ok |
+| `bk32_64x64_candidate_matches_cpu_reference_k_stress`（同上） | K=4096 ストレス | ok |
+| `bk32_64x64_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns`（`gemm_strided_parity.rs`） | 512³/1024³/2048³・(2048,2048,64)・(2048,2048,512)・(1536,1024,1024)・(1024,1536,1536)・(4096,1024,1024)・(1024,4096,1024)・(72,88,104) × NN/NT/TN/TT（計 40 ケース） | ok（`fail_count=0`・`resolved==cfg` 全ケース） |
+| `bk32_64x64_candidate_matches_cpu_reference_for_n4096_cubic_shape`（同上） | 4096³ × NN/NT/TN/TT | ok（`fail_count=0`） |
+
+全ケースで `assert_parity` の複合判定（相対誤差 1e-3 未満 または 絶対
+誤差 1e-5 未満。REQ-2）が `fail_count=0` で通過。`dispatch_strided_
+tiled_prepared` の戻り値 `resolved == cfg` を全ケースで assert 済みの
+ため、サイレントフォールバックは発生していない。
+
+### 13.4 `CANDIDATES[0]`（bk=16）との複合判定比較
+
+`bk32_64x64_candidate_agrees_with_bk16_counterpart_within_composite_
+tolerance`（`gemm_strided_parity.rs`）: N=512/1024/2048/4096 ×
+NN/NT/TN/TT（計 16 ケース）で `CANDIDATES[9]`（bk=32）と `CANDIDATES[0]`
+（bk=16）の出力を `fandhe_ai_backend_cpu::parity::compare` で直接比較。
+全ケース `report.passes()==true`（`fail_count=0`）。bit 完全一致は
+assert 契約に含めていない（K の分割粒度が異なるため丸め順が変わり
+うる）が、実機観測では bit 完全一致していた（K チャンク順が両構成とも
+昇順で同一のため）。
+
+### 13.5 スコープ外・#1330 への引き継ぎ
+
+- 純カーネル時間の before/after（`CANDIDATES[9]` vs `CANDIDATES[0]`。
+  N=2048/4096・5 回計測中央値）・`tile::select` への組み込み判断
+- ダブルバッファ（2 面）化による SMEM 32 KiB 構成・E1 unroll
+  （`unroll_acc_candidates_are_exactly_acc_product_ge_16` の期待値
+  `{0,4,8,9}` 化は本 issue で実施済みだが、本番 `UNROLL_ACC_ENABLED=
+  false` かつ index 9 自体が `select` 非組み込みのため本番挙動は不変。
+  E1 の再評価は #1330 の実測結果を見て判断）
+- 端あり形状（8 の倍数でない大規模形状）・f16 経路・単独 `NT`/`TN`
+  以外の性能比較
+
+### 13.6 関連ログ
+
+`docs/perf/logs/metal-gemm-e7-candidate-1329/`（`env_info.txt`・
+`reflection.log`・`parity_dynamic_tile.log`・`parity_all_shapes.log`・
+`parity_n4096_cubic.log`・`parity_bk16_compare.log`・
+`regression_ignored_all_candidates.log`（`--lib --ignored` 全件）・
+`regression_gemm_dynamic_tile_parity.log`・
+`regression_gemm_strided_parity.log`・`make_test_ignored_metal.log`
+（並列実行。command_batching の 1 件が並列競合による既知の flaky で
+FAILED。§13.1 の `--test-threads=1` 版〈`full_ignored_serial.log`〉では
+全 pass）・`full_ignored_serial.log`（`cargo test -p fandhe-ai-backend-
+metal --release -- --ignored --nocapture --test-threads=1` 全件。ok）

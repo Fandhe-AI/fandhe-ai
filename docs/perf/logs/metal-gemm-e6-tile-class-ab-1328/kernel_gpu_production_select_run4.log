@@ -1,0 +1,382 @@
+warning: unused import: `crate::context_cache`
+  --> crates/backend-cuda/src/gemm_mma.rs:21:5
+   |
+21 | use crate::context_cache;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `tiled_pipeline_128x64_error` is never read
+   --> crates/backend-cuda/src/gemm.rs:363:5
+    |
+227 | pub struct CudaGemm {
+    |            -------- field in this struct
+...
+363 |     tiled_pipeline_128x64_error: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:852:48
+    |
+852 | pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+852 - pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+852 + pub struct TiledPipelineFunction(CudaFunction, (), TiledPipelineTile);
+    |
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:865:8
+    |
+854 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+865 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: function `persistent_grid_blocks` is never used
+    --> crates/backend-cuda/src/gemm.rs:1028:15
+     |
+1028 | pub(crate) fn persistent_grid_blocks(num_tiles: u32, num_sms: u32, blocks_per_sm: u32) -> u32 {
+     |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_tile_count` is never used
+    --> crates/backend-cuda/src/gemm.rs:1048:15
+     |
+1048 | pub(crate) fn persistent_tile_count(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PersistentTiledPipelineFunction` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1115:12
+     |
+1115 | pub struct PersistentTiledPipelineFunction {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_block_threads` is never used
+    --> crates/backend-cuda/src/gemm.rs:1358:4
+     |
+1358 | fn persistent_block_threads(tile: TiledPipelineTile) -> u32 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:288:4
+    |
+288 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:306:8
+    |
+306 | pub fn tiled_pipeline_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:310:8
+    |
+310 | static TILED_PIPELINE_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:317:8
+    |
+317 | pub fn tiled_pipeline_persistent_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:582:7
+    |
+582 | const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:647:7
+    |
+647 | const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:320:8
+    |
+320 | pub fn tiled_pipeline_128x64_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:380:4
+    |
+380 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:399:8
+    |
+399 | pub fn tiled_pipeline_128x64_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:403:8
+    |
+403 | static TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:411:8
+    |
+411 | pub fn tiled_pipeline_128x64_persistent_f32_source_with_stages(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:695:7
+    |
+695 | const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:763:7
+    |
+763 | const TP128_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:259:19
+    |
+239 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+259 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:651:19
+    |
+457 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+651 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+666 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 43 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_metal-4099ec6cfdfe79eb)
+
+running 1 test
+test gemm_tile_class_diag_tests::tile_class_production_select_kernel_gpu_ab ...   [legacy] N=512 requested_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.0667 ms  q1=0.0644 ms  q3=0.0683 ms
+    upload_b: median=0.0658 ms  q1=0.0635 ms  q3=0.0694 ms
+    alloc_c: median=0.0045 ms  q1=0.0041 ms  q3=0.0047 ms
+    encode: median=0.0027 ms  q1=0.0027 ms  q3=0.0029 ms
+    commit_wait: median=0.3860 ms  q1=0.3827 ms  q3=0.3913 ms
+    commit_wait.kernel_gpu: median=0.2019 ms  q1=0.2003 ms  q3=0.2026 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.1838 ms
+    readback: median=0.0563 ms  q1=0.0553 ms  q3=0.0579 ms
+    host_copy: median=0.0573 ms  q1=0.0542 ms  q3=0.0598 ms
+    sum of medians: 0.6392 ms
+  [split] N=512 requested_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.0600 ms  q1=0.0569 ms  q3=0.0690 ms
+    upload_b: median=0.0611 ms  q1=0.0573 ms  q3=0.0620 ms
+    alloc_c: median=0.0041 ms  q1=0.0038 ms  q3=0.0043 ms
+    encode: median=0.0027 ms  q1=0.0027 ms  q3=0.0027 ms
+    commit_wait: median=0.2730 ms  q1=0.2714 ms  q3=0.2752 ms
+    commit_wait.kernel_gpu: median=0.1081 ms  q1=0.1080 ms  q3=0.1081 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.1647 ms
+    readback: median=0.0549 ms  q1=0.0544 ms  q3=0.0563 ms
+    host_copy: median=0.0125 ms  q1=0.0125 ms  q3=0.0125 ms
+    sum of medians: 0.4684 ms
+  [legacy] N=1024 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.2282 ms  q1=0.2161 ms  q3=0.2345 ms
+    upload_b: median=0.2244 ms  q1=0.2148 ms  q3=0.2350 ms
+    alloc_c: median=0.0048 ms  q1=0.0045 ms  q3=0.0054 ms
+    encode: median=0.0029 ms  q1=0.0028 ms  q3=0.0030 ms
+    commit_wait: median=0.4842 ms  q1=0.4748 ms  q3=0.5158 ms
+    commit_wait.kernel_gpu: median=0.2242 ms  q1=0.2233 ms  q3=0.2254 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2599 ms
+    readback: median=0.2033 ms  q1=0.1967 ms  q3=0.2095 ms
+    host_copy: median=0.2160 ms  q1=0.2130 ms  q3=0.2215 ms
+    sum of medians: 1.3639 ms
+  [split] N=1024 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.2325 ms  q1=0.2130 ms  q3=0.2362 ms
+    upload_b: median=0.2258 ms  q1=0.2219 ms  q3=0.2346 ms
+    alloc_c: median=0.0047 ms  q1=0.0045 ms  q3=0.0054 ms
+    encode: median=0.0035 ms  q1=0.0032 ms  q3=0.0044 ms
+    commit_wait: median=0.8942 ms  q1=0.8446 ms  q3=2.8646 ms
+    commit_wait.kernel_gpu: median=0.5669 ms  q1=0.5583 ms  q3=2.5779 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2924 ms
+    readback: median=0.2205 ms  q1=0.2002 ms  q3=0.2322 ms
+    host_copy: median=0.0500 ms  q1=0.0499 ms  q3=0.0508 ms
+    sum of medians: 1.6311 ms
+  [legacy] N=2048 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.9285 ms  q1=0.8892 ms  q3=0.9395 ms
+    upload_b: median=0.8944 ms  q1=0.8577 ms  q3=0.9154 ms
+    alloc_c: median=0.0062 ms  q1=0.0059 ms  q3=0.0066 ms
+    encode: median=0.0050 ms  q1=0.0046 ms  q3=0.0060 ms
+    commit_wait: median=2.8050 ms  q1=2.5712 ms  q3=3.4298 ms
+    commit_wait.kernel_gpu: median=2.1004 ms  q1=1.6079 ms  q3=2.3576 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.7699 ms
+    readback: median=0.9420 ms  q1=0.9205 ms  q3=0.9530 ms
+    host_copy: median=0.8680 ms  q1=0.8516 ms  q3=0.8897 ms
+    sum of medians: 6.4490 ms
+  [split] N=2048 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.9365 ms  q1=0.8852 ms  q3=0.9660 ms
+    upload_b: median=0.9065 ms  q1=0.8769 ms  q3=0.9299 ms
+    alloc_c: median=0.0065 ms  q1=0.0058 ms  q3=0.0077 ms
+    encode: median=0.0056 ms  q1=0.0045 ms  q3=0.0075 ms
+    commit_wait: median=5.6739 ms  q1=5.6172 ms  q3=5.6968 ms
+    commit_wait.kernel_gpu: median=4.9014 ms  q1=4.9007 ms  q3=4.9026 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.7717 ms
+    readback: median=0.9060 ms  q1=0.8913 ms  q3=0.9268 ms
+    host_copy: median=0.2187 ms  q1=0.2164 ms  q3=0.2205 ms
+    sum of medians: 8.6538 ms
+  [legacy] N=4096 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.5622 ms  q1=3.5026 ms  q3=3.6767 ms
+    upload_b: median=3.5957 ms  q1=3.4638 ms  q3=3.6718 ms
+    alloc_c: median=0.0187 ms  q1=0.0132 ms  q3=0.0214 ms
+    encode: median=0.0199 ms  q1=0.0129 ms  q3=0.0213 ms
+    commit_wait: median=17.0466 ms  q1=16.8588 ms  q3=17.1214 ms
+    commit_wait.kernel_gpu: median=13.6300 ms  q1=13.5854 ms  q3=13.6655 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=3.4581 ms
+    readback: median=4.2506 ms  q1=3.9535 ms  q3=4.3838 ms
+    host_copy: median=3.6112 ms  q1=3.4865 ms  q3=3.7511 ms
+    sum of medians: 32.1050 ms
+  [split] N=4096 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.6392 ms  q1=3.4739 ms  q3=3.7183 ms
+    upload_b: median=3.5954 ms  q1=3.4563 ms  q3=3.7188 ms
+    alloc_c: median=0.0217 ms  q1=0.0149 ms  q3=0.0233 ms
+    encode: median=0.0237 ms  q1=0.0192 ms  q3=0.0254 ms
+    commit_wait: median=34.6783 ms  q1=34.4967 ms  q3=34.7248 ms
+    commit_wait.kernel_gpu: median=32.1276 ms  q1=32.1239 ms  q3=32.1318 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=2.5466 ms
+    readback: median=4.2974 ms  q1=4.1722 ms  q3=4.3769 ms
+    host_copy: median=1.5379 ms  q1=1.4824 ms  q3=1.5917 ms
+    sum of medians: 47.7935 ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 307 filtered out; finished in 4.77s
+

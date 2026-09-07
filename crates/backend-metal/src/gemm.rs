@@ -243,6 +243,36 @@ impl From<tile::TileClassRegion> for TileClassRegion {
     }
 }
 
+/// [`MetalGemm::plan_tiled_by_class`] が求める 1 回分の
+/// `dispatchThreadgroups` 仕様（イシュー #1328。診断専用の
+/// `MetalGemm::diag_encode_tiled_nn` と本番 `MetalGemm::
+/// encode_tiled_by_class` が計画フェーズを共有するための中間表現）。
+struct TiledDispatchSpec {
+    /// この dispatch が使うパイプライン（`TileClass::Legacy`/`Interior`/
+    /// `Edge` のいずれかで解決済み）。
+    pipeline: objc2::rc::Retained<MtlPipeline>,
+    /// この dispatch のスレッドグループ形状・staging 有無を決める構成
+    /// （`TileClassMode::Split` では Interior/Edge で異なりうる）。
+    cfg: TileConfig,
+    /// dispatch grid 上の担当領域（`shaders/gemm.metal::TileClassRegion`
+    /// へ `setBytes` する値）。
+    region: TileClassRegion,
+    /// `setThreadgroupMemoryLength` の算出に使う `TileClass`
+    /// （`encode_dispatch_tiled` ドキュメンテーションコメント参照）。
+    tile_class: tile::TileClass,
+    tgp_pad_elems: u32,
+}
+
+/// [`MetalGemm::plan_tiled_by_class`] の戻り値。`resolved_cfg` は
+/// フォールバック解決後に実際に採用した構成（`TileClassMode::Split` の
+/// 場合は Edge/Interior 双方が一致した構成）、`dispatches` は 1〜3 件の
+/// dispatch 仕様（Legacy／フォールバック時は 1 件、Split は Interior
+/// （存在すれば）＋端ストリップ最大 2 件）。
+struct TiledClassPlan {
+    resolved_cfg: TileConfig,
+    dispatches: Vec<TiledDispatchSpec>,
+}
+
 /// naive・tiled・simdgroup の 3 パイプラインを保持するハンドル。
 ///
 /// [`MetalContext`] とは別に保持する理由: パイプライン構築（MSL コンパイル
@@ -920,18 +950,19 @@ impl MetalGemm {
         }))
     }
 
-    /// タイルクラス分割（イシュー #1327・E6 試作）を適用した NN/NT/TN/TT
-    /// 共通の tiled GEMM dispatch。[`Self::dispatch_tiled_prepared`]・
-    /// [`Self::dispatch_strided_tiled_prepared`]・[`Self::dispatch_variant`]
-    /// （`SimdgroupTiled` 分岐）の 3 入口が共有するヘルパー（重複実装を
-    /// 避ける）。
+    /// [`Self::encode_tiled_by_class`]・[`Self::diag_encode_tiled_nn`]
+    /// （イシュー #1328）が共有する、タイルクラス分割の「どのパイプライン・
+    /// 領域・構成で何回 dispatch するか」を決める計画フェーズ（副作用なし。
+    /// GPU への実際の記録は行わない）。本番 3 入口（`dispatch_tiled_
+    /// prepared`・`dispatch_strided_tiled_prepared`・`dispatch_variant`）は
+    /// `self.tile_class_mode == TileClassMode::Legacy`（既定）のため常に
+    /// 1 要素の `dispatches` を返す。
     ///
     /// `self.tile_class_mode` で分岐する:
     ///
-    /// 1. [`tile::TileClassMode::Legacy`]（本番既定）: 従来どおり
-    ///    [`Self::pipeline_for_tile`] を [`tile::TileClass::Legacy`] で 1 回
-    ///    呼び、恒等領域（grid 全体）で 1 回だけ dispatch する（既存挙動と
-    ///    完全に同一）。
+    /// 1. [`tile::TileClassMode::Legacy`]（本番既定）: [`Self::
+    ///    pipeline_for_tile`] を [`tile::TileClass::Legacy`] で 1 回呼び、
+    ///    恒等領域（grid 全体）を 1 件返す（既存挙動と完全に同一）。
     /// 2. [`tile::TileClassMode::Split`]: まず Edge クラスでパイプラインを
     ///    解決し（`resolved_cfg` を確定）、続けてその `resolved_cfg` を
     ///    起点に Interior クラスを要求する（`tile::fallback_chain` は
@@ -943,22 +974,22 @@ impl MetalGemm {
     ///    `tile::tile_class_plan` が求めた領域（互いに素・grid 全体を
     ///    過不足なく被覆する。`tile.rs` の網羅テスト参照）ごとに、
     ///    Interior（存在すれば）→ Edge（右ストリップ・下ストリップの順）
-    ///    で `encode_dispatch_tiled` を呼ぶ。領域は互いに素なので dispatch
-    ///    順序は出力に影響しない。
-    #[allow(clippy::too_many_arguments)]
-    fn encode_tiled_by_class(
+    ///    の dispatch 仕様を積む。領域は互いに素なので dispatch順序は
+    ///    出力に影響しない。
+    ///
+    /// `TILE_CLASS_INTERIOR_DISPATCH_COUNT`／`TILE_CLASS_EDGE_DISPATCH_
+    /// COUNT`／`TILE_CLASS_SPLIT_FALLBACK_COUNT` の加算は本関数（plan
+    /// フェーズ）で行う。旧実装は encode クロージャ内（実際の dispatch
+    /// 直前）で加算していたが、`plan_tiled_by_class` は常に直後に
+    /// [`Self::encode_tiled_plan`] へ渡されて即座に消費される（呼び出し元
+    /// が計画だけ作って握り潰すことはない）ため、可観測な回数は不変。
+    fn plan_tiled_by_class(
         &self,
         ctx: &MetalContext,
-        a_buf: &MetalBuffer,
-        a_offset: usize,
-        b_buf: &MetalBuffer,
-        b_offset: usize,
-        c_buf: &MetalBuffer,
-        dims: Dims,
         cfg: TileConfig,
-        strides: GemmStrides,
+        dims: Dims,
         pattern: TransposePattern,
-    ) -> Result<TileConfig, MetalError> {
+    ) -> Result<TiledClassPlan, MetalError> {
         if self.tile_class_mode == tile::TileClassMode::Legacy {
             let (pipeline, resolved_cfg) =
                 self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Legacy)?;
@@ -966,26 +997,16 @@ impl MetalGemm {
             let tiles_n = (dims.n as usize).div_ceil(resolved_cfg.bn as usize) as u32;
             let region = TileClassRegion::full_grid(tiles_m, tiles_n);
             let tgp_pad_elems = self.coop_load.pad_elems(resolved_cfg);
-            ctx.dispatch_sync(|encoder| {
-                encode_dispatch_tiled(
-                    encoder,
-                    &pipeline,
-                    a_buf,
-                    a_offset,
-                    b_buf,
-                    b_offset,
-                    c_buf,
-                    dims,
-                    resolved_cfg,
-                    self.swizzle_enabled,
-                    strides,
-                    pattern,
-                    tgp_pad_elems,
+            return Ok(TiledClassPlan {
+                resolved_cfg,
+                dispatches: vec![TiledDispatchSpec {
+                    pipeline,
+                    cfg: resolved_cfg,
                     region,
-                    tile::TileClass::Legacy,
-                );
-            })?;
-            return Ok(resolved_cfg);
+                    tile_class: tile::TileClass::Legacy,
+                    tgp_pad_elems,
+                }],
+            });
         }
 
         // `TileClassMode::Split`: Edge クラスを先に解決し、その解決構成を
@@ -1008,81 +1029,139 @@ impl MetalGemm {
             let tiles_n = (dims.n as usize).div_ceil(resolved_cfg.bn as usize) as u32;
             let region = TileClassRegion::full_grid(tiles_m, tiles_n);
             let tgp_pad_elems = self.coop_load.pad_elems(resolved_cfg);
-            ctx.dispatch_sync(|encoder| {
-                encode_dispatch_tiled(
-                    encoder,
-                    &pipeline,
-                    a_buf,
-                    a_offset,
-                    b_buf,
-                    b_offset,
-                    c_buf,
-                    dims,
-                    resolved_cfg,
-                    self.swizzle_enabled,
-                    strides,
-                    pattern,
-                    tgp_pad_elems,
+            return Ok(TiledClassPlan {
+                resolved_cfg,
+                dispatches: vec![TiledDispatchSpec {
+                    pipeline,
+                    cfg: resolved_cfg,
                     region,
-                    tile::TileClass::Legacy,
-                );
-            })?;
-            return Ok(resolved_cfg);
+                    tile_class: tile::TileClass::Legacy,
+                    tgp_pad_elems,
+                }],
+            });
         }
 
         let resolved_cfg = edge_cfg;
         let plan = tile::tile_class_plan(dims.m, dims.n, dims.k, resolved_cfg);
         let tgp_pad_interior = self.coop_load.pad_elems(interior_cfg);
         let tgp_pad_edge = self.coop_load.pad_elems(edge_cfg);
+
+        let mut dispatches = Vec::with_capacity(3);
+        if let Some(interior) = plan.interior
+            && !interior.is_empty()
+        {
+            TILE_CLASS_INTERIOR_DISPATCH_COUNT.with(|c| c.set(c.get() + 1));
+            dispatches.push(TiledDispatchSpec {
+                pipeline: Retained::clone(&interior_pipeline),
+                cfg: interior_cfg,
+                region: interior.into(),
+                tile_class: tile::TileClass::Interior,
+                tgp_pad_elems: tgp_pad_interior,
+            });
+        }
+        for edge in plan.edges.iter().flatten() {
+            if !edge.is_empty() {
+                TILE_CLASS_EDGE_DISPATCH_COUNT.with(|c| c.set(c.get() + 1));
+                dispatches.push(TiledDispatchSpec {
+                    pipeline: Retained::clone(&edge_pipeline),
+                    cfg: edge_cfg,
+                    region: (*edge).into(),
+                    tile_class: tile::TileClass::Edge,
+                    tgp_pad_elems: tgp_pad_edge,
+                });
+            }
+        }
+
+        Ok(TiledClassPlan {
+            resolved_cfg,
+            dispatches,
+        })
+    }
+
+    /// [`Self::plan_tiled_by_class`] が求めた dispatch 仕様列を、渡された
+    /// `encoder` へ順に記録する（GPU への実際の記録・副作用はここで初めて
+    /// 発生する）。呼び出し元（[`Self::encode_tiled_by_class`]の
+    /// `ctx.dispatch_sync`・[`Self::diag_encode_tiled_nn`]の `ctx.encode`）
+    /// が同じ `encoder` を使って 1〜3 回の `dispatchThreadgroups` を記録
+    /// する。1 回の `MetalContext::encode`／`dispatch_sync` 呼び出しに
+    /// つき 1 回だけラベルが記録される契約（`context.rs`）のため、Split で
+    /// 複数回 dispatch しても計測境界（バッチ数・ラベル）は不変。
+    #[allow(clippy::too_many_arguments)]
+    fn encode_tiled_plan(
+        encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
+        plan: &TiledClassPlan,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        c_buf: &MetalBuffer,
+        dims: Dims,
+        swizzle_enabled: bool,
+        strides: GemmStrides,
+        pattern: TransposePattern,
+    ) {
+        for dispatch in &plan.dispatches {
+            encode_dispatch_tiled(
+                encoder,
+                &dispatch.pipeline,
+                a_buf,
+                a_offset,
+                b_buf,
+                b_offset,
+                c_buf,
+                dims,
+                dispatch.cfg,
+                swizzle_enabled,
+                strides,
+                pattern,
+                dispatch.tgp_pad_elems,
+                dispatch.region,
+                dispatch.tile_class,
+            );
+        }
+    }
+
+    /// タイルクラス分割（イシュー #1327・E6 試作）を適用した NN/NT/TN/TT
+    /// 共通の tiled GEMM dispatch。[`Self::dispatch_tiled_prepared`]・
+    /// [`Self::dispatch_strided_tiled_prepared`]・[`Self::dispatch_variant`]
+    /// （`SimdgroupTiled` 分岐）の 3 入口が共有するヘルパー（重複実装を
+    /// 避ける）。挙動の分岐規則は [`Self::plan_tiled_by_class`] を参照
+    /// （本関数は `plan_tiled_by_class` → `ctx.dispatch_sync`（`encode_
+    /// tiled_plan`）に薄く委譲するのみ。イシュー #1328 で診断専用の
+    /// [`Self::diag_encode_tiled_nn`] と計画フェーズを共有するために分離
+    /// した。本番 3 入口の呼び出し・引数・戻り値は非後退）。
+    #[allow(clippy::too_many_arguments)]
+    fn encode_tiled_by_class(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        c_buf: &MetalBuffer,
+        dims: Dims,
+        cfg: TileConfig,
+        strides: GemmStrides,
+        pattern: TransposePattern,
+    ) -> Result<TileConfig, MetalError> {
+        let plan = self.plan_tiled_by_class(ctx, cfg, dims, pattern)?;
+        let resolved_cfg = plan.resolved_cfg;
         let swizzle_enabled = self.swizzle_enabled;
-
         ctx.dispatch_sync(|encoder| {
-            if let Some(interior) = plan.interior
-                && !interior.is_empty()
-            {
-                TILE_CLASS_INTERIOR_DISPATCH_COUNT.with(|c| c.set(c.get() + 1));
-                encode_dispatch_tiled(
-                    encoder,
-                    &interior_pipeline,
-                    a_buf,
-                    a_offset,
-                    b_buf,
-                    b_offset,
-                    c_buf,
-                    dims,
-                    interior_cfg,
-                    swizzle_enabled,
-                    strides,
-                    pattern,
-                    tgp_pad_interior,
-                    interior.into(),
-                    tile::TileClass::Interior,
-                );
-            }
-            for edge in plan.edges.iter().flatten() {
-                if !edge.is_empty() {
-                    TILE_CLASS_EDGE_DISPATCH_COUNT.with(|c| c.set(c.get() + 1));
-                    encode_dispatch_tiled(
-                        encoder,
-                        &edge_pipeline,
-                        a_buf,
-                        a_offset,
-                        b_buf,
-                        b_offset,
-                        c_buf,
-                        dims,
-                        edge_cfg,
-                        swizzle_enabled,
-                        strides,
-                        pattern,
-                        tgp_pad_edge,
-                        (*edge).into(),
-                        tile::TileClass::Edge,
-                    );
-                }
-            }
+            Self::encode_tiled_plan(
+                encoder,
+                &plan,
+                a_buf,
+                a_offset,
+                b_buf,
+                b_offset,
+                c_buf,
+                dims,
+                swizzle_enabled,
+                strides,
+                pattern,
+            );
         })?;
-
         Ok(resolved_cfg)
     }
 
@@ -1556,10 +1635,10 @@ impl MetalGemm {
         )
     }
 
-    /// [`Self::dispatch_tiled_prepared`] と同じ NN 経路（`pipeline_for_tile`
-    /// → `encode_dispatch_tiled`）を、`encode`（記録のみ）と `synchronize`
-    /// （commit + `waitUntilCompleted`）へ分離した診断専用ヘルパ（イシュー
-    /// #1189）。
+    /// [`Self::dispatch_tiled_prepared`] と同じ NN 経路（`plan_tiled_by_
+    /// class` → `encode_tiled_plan`）を、`encode`（記録のみ）と
+    /// `synchronize`（commit + `waitUntilCompleted`）へ分離した診断専用
+    /// ヘルパ（イシュー #1189）。
     ///
     /// # 追加理由
     ///
@@ -1571,6 +1650,22 @@ impl MetalGemm {
     /// sync／kernel 内訳一次測定）はこの 2 段の境界を区別する必要がある
     /// ため、本メソッドを新設した。既存の [`Self::dispatch_tiled_prepared`]
     /// 自体は無変更（本メソッドは新規追加のみで、既存関数を書き換えない）。
+    ///
+    /// # `self.tile_class_mode` を尊重する（イシュー #1328）
+    ///
+    /// 当初は `pipeline_for_tile(..., TileClass::Legacy)` を直接呼ぶ実装で
+    /// `self.tile_class_mode` を無視していたため、`MetalGemm::
+    /// new_with_tile_class(Split)` で構築したインスタンスでも常に Legacy
+    /// 経路しか測れなかった（イシュー #1328 診断の前提）。[`Self::
+    /// plan_tiled_by_class`] へ委譲することで本番 3 入口
+    /// （[`Self::encode_tiled_by_class`]）と計画フェーズを共有し、
+    /// `tile_class_mode` に応じた Legacy／Split 双方の経路を正しく測れる
+    /// ようにした。`tile_class_mode == Legacy`（既定）のときの出力
+    /// （パイプライン解決・領域・ラベル・`coop_load.pad_elems`）は従来
+    /// 実装と完全に同一（`plan_tiled_by_class` の Legacy 分岐は旧実装の
+    /// ロジックをそのまま移したもの）であり、既存の E2〜E4 診断テストの
+    /// 前提（`measure_one_phase_trial` の「1 バッチ・1 ラベル」不変条件）
+    /// を壊さない。
     ///
     /// `#[cfg(test)]` 限定（本体ビルドには含まれない。AC-2「既存の本番
     /// 経路・既存テストを変更しない（読み取り計測のみ）」に対応）。
@@ -1590,32 +1685,26 @@ impl MetalGemm {
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
         validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
 
-        let (pipeline, resolved_cfg) =
-            self.pipeline_for_tile(ctx, cfg, TransposePattern::Nn, tile::TileClass::Legacy)?;
-        let tiles_m = (dims.m as usize).div_ceil(resolved_cfg.bm as usize) as u32;
-        let tiles_n = (dims.n as usize).div_ceil(resolved_cfg.bn as usize) as u32;
-        let region = TileClassRegion::full_grid(tiles_m, tiles_n);
+        let plan = self.plan_tiled_by_class(ctx, cfg, dims, TransposePattern::Nn)?;
+        let resolved_cfg = plan.resolved_cfg;
+        let swizzle_enabled = self.swizzle_enabled;
         ctx.encode(
             "diag_encode_tiled_nn",
             &[a_buf.raw(), b_buf.raw(), c_buf.raw()],
             None,
             |encoder| {
-                encode_dispatch_tiled(
+                Self::encode_tiled_plan(
                     encoder,
-                    &pipeline,
+                    &plan,
                     a_buf,
                     0,
                     b_buf,
                     0,
                     c_buf,
                     dims,
-                    resolved_cfg,
-                    self.swizzle_enabled,
+                    swizzle_enabled,
                     GemmStrides::nn(dims.k, dims.n),
                     TransposePattern::Nn,
-                    self.coop_load.pad_elems(resolved_cfg),
-                    region,
-                    tile::TileClass::Legacy,
                 );
             },
         )?;
@@ -3894,7 +3983,11 @@ mod tests {
         let head_gemm = MetalGemm::new_with_unroll_acc(&ctx, true)
             .expect("head GEMM パイプラインの構築に失敗した");
 
-        let expected_unroll_indices = [0usize, 4, 8];
+        // イシュー #1329 で index 9（64,64,32,2,2）を追加した後も
+        // acc 積 >= 16（`CANDIDATES[0]` と同じ acc_rows=4, acc_cols=4）の
+        // ため対象へ入る（`tile.rs::unroll_acc_candidates_are_exactly_
+        // acc_product_ge_16` と同じ判定根拠）。
+        let expected_unroll_indices = [0usize, 4, 8, 9];
         for (i, cfg) in tile::CANDIDATES.iter().enumerate() {
             assert!(
                 !base_gemm.unroll_acc_effective(*cfg),
@@ -3910,7 +4003,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 9 候補 × N=512/1024/2048/4096 で、
+    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、
     /// base（`unroll_acc_enabled=false`）/head（`unroll_acc_enabled=true`）
     /// の `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
     /// （イシュー #1282 AC-2）。`resolve_tile_config`（`#[cfg(test)]`）で
@@ -4044,7 +4137,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 9 候補 × N=512/1024/2048/4096 で、
+    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、
     /// base（function constant 経路。`source_specialized=false`）/head
     /// （ソーステキスト特殊化経路。`source_specialized=true`）の
     /// `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
@@ -4227,7 +4320,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 9 候補 × N=512/1024/2048/4096 で、base
+    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、base
     /// （`tile::FRAG_LOAD_CONFIG`。既定）と head ∈
     /// {tgp-k2〈`{false, Two}`〉, device-hoisted-k1〈`{true, One}`〉,
     /// device-hoisted-k2〈`{true, Two}`〉} の `dispatch_tiled_prepared`
@@ -4683,7 +4776,7 @@ mod tests {
         ]
     }
 
-    /// T1: [`tile::CANDIDATES`] 全 9 候補 × N∈{512,1024,2048,4096} ×
+    /// T1: [`tile::CANDIDATES`] 全 10 候補 × N∈{512,1024,2048,4096} ×
     /// 必須 5 head で `dispatch_tiled_prepared` 出力が bit 単位で一致する
     /// ことを確認する（イシュー #1298。`frag_load_on_off_bit_match_all_
     /// candidates` と同型の設計）。`resolve_tile_config` でフォールバック
@@ -5105,7 +5198,7 @@ mod tests {
 
     // --- タイルクラス分割（イシュー #1327・E6 試作） ---
 
-    /// T1: [`tile::CANDIDATES`] 全 9 候補 × N∈{512,1024,2048,4096} で
+    /// T1: [`tile::CANDIDATES`] 全 10 候補 × N∈{512,1024,2048,4096} で
     /// base（`TileClassMode::Legacy`）/head（`TileClassMode::Split`）の
     /// `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
     /// （`coop_load_bit_match_all_candidates` と同型の設計）。staged 候補

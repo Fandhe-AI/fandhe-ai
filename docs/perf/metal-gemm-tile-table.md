@@ -114,6 +114,15 @@ cand2 実測値は本 PR（#1143）自身の計測ではなく、本表 §3・§
 という結論自体は両キャンペーンのいずれの値を基準にしても変わらない。
 `select_with_occupancy_for_device` の選択（本表 §5 の判断）は変更しない。
 
+**#1329 追記**: E7（親 #1324）の sub-issue として `CANDIDATES` へ index 9
+（`(64,64,32,2,2)`。`CANDIDATES[0]` の bk=32 版）を追加した。本 issue は
+候補追加と正確性（parity）確認のみを対象とし、性能値（純カーネル時間
+の before/after・本表 §3/§5 相当の TFLOPS 計測）は未計測のまま
+（`select_with_occupancy_for_device` の選択ロジック・本表 §5 の判断は
+変更しない）。性能実測・`tile::select` への組み込み判断は後続イシュー
+#1330 へ引き継ぐ（詳細は `docs/perf/metal-gemm-n4096-kernel-gap.md`
+§13）。
+
 ## 6. スコープ外（計画 §7 を踏襲）
 
 - `gemm_simdgroup_tiled` への転置ロード導入（NT/TN/TT へのタイル variant 適用）: §4 の定量化を判断材料として親 #1037 系の別イシューへ引き継ぐ

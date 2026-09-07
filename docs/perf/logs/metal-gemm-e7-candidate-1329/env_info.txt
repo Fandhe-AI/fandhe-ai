@@ -1,0 +1,14 @@
+# イシュー #1329（E7 候補追加: CANDIDATES[9]=64x64x32 wm2wn2）実行環境記録
+# 内部ホスト名は含めない（docs/real-hardware-verification-env.md 方針）
+chip: Apple M4 Max
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+rustc 1.96.0 (ac68faa20 2026-05-25)
+HEAD: d15ff73624667ad6501923f1e203b82d4bfe1031
+--- uptime (before) ---
+ 9:01  up 18 days, 20:14, 21 users, load averages: 1.67 2.45 3.30
+--- pmset -g therm (before) ---
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
