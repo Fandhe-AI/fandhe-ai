@@ -250,9 +250,9 @@ fn launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch() {
         .stream()
         .clone_htod(&[9.0f32; 16])
         .expect("uploading a pre-populated c buffer must succeed");
-    gemm.launch_tf32x3(&inputs, &mut c_dev, 4, 4, 0)
-        .expect("launch_tf32x3 must succeed and zero-fill c_dev for k==0");
-    assert_eq!(gemm.download_f32(&c_dev).unwrap(), vec![0.0f32; 16]);
+    gemm.launch_tf32x3_c_raw(&inputs, &mut c_dev, 4, 4, 0)
+        .expect("launch_tf32x3_c_raw must succeed and zero-fill c_dev for k==0");
+    assert_eq!(gemm.download_f32_raw(&c_dev).unwrap(), vec![0.0f32; 16]);
 }
 
 /// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅

@@ -776,8 +776,47 @@ impl CudaMmaGemm {
     /// で本体（`launch_f16_views` への委譲）を capture 排他へ参加させる。
     pub fn launch_f16(
         &self,
-        a_dev: &CudaSlice<f16>,
-        b_dev: &CudaSlice<f16>,
+        a_dev: &GuardedSlice<f16>,
+        b_dev: &GuardedSlice<f16>,
+        c_dev: &mut GuardedSlice<f16>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        // `GuardedSlice::as_raw`／`as_raw_mut`（crate 内部限定）で内部の
+        // `CudaSlice` へアクセスする（`memory.rs::GuardedSlice`
+        // ドキュメンテーションコメント「公開アクセス面」参照。codex-review
+        // P0 再指摘対応・PR #1390 再々々修正）。
+        self.with_driver_call(|| {
+            self.launch_f16_views(
+                &a_dev.as_raw().slice(..),
+                &b_dev.as_raw().slice(..),
+                &mut c_dev.as_raw_mut().slice_mut(..),
+                m,
+                n,
+                k,
+            )
+        })
+    }
+
+    /// [`Self::launch_f16`] の C バッファのみ生 `CudaSlice` を受け取る版
+    /// （`internal-diagnostics` feature 限定の診断専用入口）。
+    /// `tests/large_buffer_percall_alloc_ab_1149.rs` の A/B 計測
+    /// （A/B とも共有の `upload_f16`〈`GuardedSlice`〉で確保した
+    /// a_dev/b_dev はそのままに、C 出力バッファのみ `SyncDeviceBuffer`
+    /// 〈`GuardedSlice` を経由しない同期割当〉と `alloc_output_f16`
+    /// 〈`GuardedSlice` 経由のプール確保〉を切り替えて比較する）専用。
+    /// codex-review P0 再指摘対応（PR #1390 再々々修正）で
+    /// [`Self::launch_f16`] の公開シグネチャを `&GuardedSlice<f16>` へ
+    /// 変更した際、crate 外の `SyncDeviceBuffer` 由来 C バッファ（
+    /// `GuardedSlice::new` が `pub(crate)` のため crate 外からは包めない）
+    /// を渡す経路が失われたため新設した。本体は [`Self::launch_f16_views`]
+    /// を共有し、検証・SAFETY 根拠は [`Self::launch_f16`] と同一。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn launch_f16_c_raw(
+        &self,
+        a_dev: &GuardedSlice<f16>,
+        b_dev: &GuardedSlice<f16>,
         c_dev: &mut CudaSlice<f16>,
         m: u32,
         n: u32,
@@ -785,8 +824,8 @@ impl CudaMmaGemm {
     ) -> Result<(), CudaError> {
         self.with_driver_call(|| {
             self.launch_f16_views(
-                &a_dev.slice(..),
-                &b_dev.slice(..),
+                &a_dev.as_raw().slice(..),
+                &b_dev.as_raw().slice(..),
                 &mut c_dev.slice_mut(..),
                 m,
                 n,
@@ -942,7 +981,16 @@ impl CudaMmaGemm {
     /// ため、本関数が readback ヘルパー経由で完了を確定する。codex-review
     /// P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call` で
     /// capture 排他へ参加させる。
-    pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
+    pub fn download_f16(&self, c_dev: &GuardedSlice<f16>) -> Result<Vec<f16>, CudaError> {
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
+    }
+
+    /// [`Self::download_f16`] の生 `CudaSlice` 版（`internal-diagnostics`
+    /// feature 限定の診断専用入口）。`Self::launch_f16_c_raw` と同じ理由
+    /// （`tests/large_buffer_percall_alloc_ab_1149.rs` の `SyncDeviceBuffer`
+    /// A/B 計測）で新設した。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn download_f16_raw(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
         self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
     }
 

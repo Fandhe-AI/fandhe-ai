@@ -2728,15 +2728,15 @@ impl CompiledMmaF16BlockTileKernel {
     pub fn launch_f16(
         &self,
         stream: &CudaStream,
-        a_dev: &CudaSlice<f16>,
-        b_dev: &CudaSlice<f16>,
-        c_dev: &mut CudaSlice<f16>,
+        a_dev: &crate::memory::GuardedSlice<f16>,
+        b_dev: &crate::memory::GuardedSlice<f16>,
+        c_dev: &mut crate::memory::GuardedSlice<f16>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        crate::gemm::validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.as_raw().len(), m, n)?;
         if m == 0 || n == 0 {
             return Ok(());
         }
@@ -2778,9 +2778,9 @@ impl CompiledMmaF16BlockTileKernel {
         unsafe {
             stream
                 .launch_builder(&self.func)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
+                .arg(a_dev.as_raw())
+                .arg(b_dev.as_raw())
+                .arg(c_dev.as_raw_mut())
                 .arg(&m_i)
                 .arg(&n_i)
                 .arg(&k_i)

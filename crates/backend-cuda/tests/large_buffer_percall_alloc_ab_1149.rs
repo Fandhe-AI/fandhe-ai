@@ -935,11 +935,11 @@ fn phase_p7_gemm_replica(
                 .stream()
                 .memset_zeros(c_dev.slice_mut())
                 .expect("memset_zeros(c) must succeed on CUDA-equipped test runner");
-            gemm.launch_f16(&a_dev, &b_dev, c_dev.slice_mut(), m, n, k)
-                .expect("launch_f16 must succeed on CUDA-equipped test runner");
+            gemm.launch_f16_c_raw(&a_dev, &b_dev, c_dev.slice_mut(), m, n, k)
+                .expect("launch_f16_c_raw must succeed on CUDA-equipped test runner");
             let host = gemm
-                .download_f16(c_dev.slice())
-                .expect("download_f16 must succeed on CUDA-equipped test runner");
+                .download_f16_raw(c_dev.slice())
+                .expect("download_f16_raw must succeed on CUDA-equipped test runner");
             drop(c_dev);
             host
         } else {

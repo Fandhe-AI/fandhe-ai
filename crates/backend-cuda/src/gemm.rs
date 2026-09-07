@@ -2951,9 +2951,9 @@ impl CudaGemm {
     pub fn launch_tiled_pipeline_f32(
         &self,
         func: &TiledPipelineFunction,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
@@ -2973,10 +2973,14 @@ impl CudaGemm {
         // `CudaSlice::context()` のポインタ同一性を `self_context_ptr` と
         // 個別に fail-closed 検証し、混在した `unsafe` launch を防ぐ
         // （関数ドキュメントコメント「バッファ生成元 context の検証」参照）。
+        // `GuardedSlice::as_raw`（crate 内部限定）で内部の `CudaSlice` へ
+        // アクセスする（`memory.rs::GuardedSlice` ドキュメンテーション
+        // コメント「公開アクセス面」参照。codex-review P0 再指摘対応・
+        // PR #1390 再々々修正）。
         for (name, buf_context_ptr) in [
-            ("a_dev", Arc::as_ptr(a_dev.context()) as usize),
-            ("b_dev", Arc::as_ptr(b_dev.context()) as usize),
-            ("c_dev", Arc::as_ptr(c_dev.context()) as usize),
+            ("a_dev", Arc::as_ptr(a_dev.as_raw().context()) as usize),
+            ("b_dev", Arc::as_ptr(b_dev.as_raw().context()) as usize),
+            ("c_dev", Arc::as_ptr(c_dev.as_raw().context()) as usize),
         ] {
             if buf_context_ptr != self_context_ptr {
                 return Err(CudaError::TiledPipelineContextMismatch {
@@ -2988,7 +2992,7 @@ impl CudaGemm {
                 });
             }
         }
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
         validate_tiled_pipeline_k_bound(k)?;
         if !tiled_pipeline_alignment_ok(n, k) {
             return Err(CudaError::InvalidShape {
@@ -2998,7 +3002,7 @@ impl CudaGemm {
                 ),
             });
         }
-        validate_output_len(c_dev.len(), m, n)?;
+        validate_output_len(c_dev.as_raw().len(), m, n)?;
         if m == 0 || n == 0 {
             return Ok(());
         }
@@ -3019,9 +3023,9 @@ impl CudaGemm {
             unsafe {
                 self.stream
                     .launch_builder(func.as_cuda_function())
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
                     .arg(&m_i)
                     .arg(&n_i)
                     .arg(&k_i)
@@ -3069,9 +3073,9 @@ impl CudaGemm {
     pub fn launch_tiled_pipeline_persistent_f32(
         &self,
         func: &mut PersistentTiledPipelineFunction,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
@@ -3085,10 +3089,12 @@ impl CudaGemm {
                     .to_string(),
             });
         }
+        // `GuardedSlice::as_raw`（crate 内部限定）参照:
+        // `launch_tiled_pipeline_f32` ドキュメンテーションコメント。
         for (name, buf_context_ptr) in [
-            ("a_dev", Arc::as_ptr(a_dev.context()) as usize),
-            ("b_dev", Arc::as_ptr(b_dev.context()) as usize),
-            ("c_dev", Arc::as_ptr(c_dev.context()) as usize),
+            ("a_dev", Arc::as_ptr(a_dev.as_raw().context()) as usize),
+            ("b_dev", Arc::as_ptr(b_dev.as_raw().context()) as usize),
+            ("c_dev", Arc::as_ptr(c_dev.as_raw().context()) as usize),
         ] {
             if buf_context_ptr != self_context_ptr {
                 return Err(CudaError::TiledPipelineContextMismatch {
@@ -3100,7 +3106,7 @@ impl CudaGemm {
                 });
             }
         }
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
         validate_tiled_pipeline_k_bound(k)?;
         if !tiled_pipeline_alignment_ok(n, k) {
             return Err(CudaError::InvalidShape {
@@ -3110,7 +3116,7 @@ impl CudaGemm {
                 ),
             });
         }
-        validate_output_len(c_dev.len(), m, n)?;
+        validate_output_len(c_dev.as_raw().len(), m, n)?;
         if m == 0 || n == 0 {
             return Ok(());
         }
@@ -3153,9 +3159,9 @@ impl CudaGemm {
             unsafe {
                 self.stream
                     .launch_builder(&func.func)
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
                     .arg(&m_i)
                     .arg(&n_i)
                     .arg(&k_i)
@@ -3214,7 +3220,7 @@ impl CudaGemm {
         // 参照（`upload_f32`／`launch_tiled_pipeline_persistent_f32` は
         // それぞれ内部で既に排他区間へ参加済み。本行の readback も同様に
         // 参加させる）。
-        self.with_driver_call(|| crate::memory::readback(&self.stream, &*c_dev))
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
     }
 
     /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM を実行
@@ -4268,16 +4274,16 @@ impl CudaGemm {
     /// あることを前提にした検証省略はしない）。
     pub fn launch_tiled_f32(
         &self,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
-        validate_output_len(c_dev.len(), m, n)?;
+        validate_output_len(c_dev.as_raw().len(), m, n)?;
 
         // イシュー #1137: `run_tiled_f32` と同じ形状条件付き選択
         // （`select_tiled_f32_kernel`）を GPU 実行のみの入口にも適用する。
@@ -4288,7 +4294,10 @@ impl CudaGemm {
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
-        // 参照。
+        // 参照。`GuardedSlice::as_raw`（crate 内部限定）で内部の
+        // `CudaSlice` へアクセスする（`memory.rs::GuardedSlice`
+        // ドキュメンテーションコメント「公開アクセス面」参照。codex-review
+        // P0 再指摘対応・PR #1390 再々々修正）。
         //
         // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
         // （a_dev/b_dev/c_dev・m_i/n_i/k_i）は上記で検証済みの m/n/k
@@ -4300,9 +4309,9 @@ impl CudaGemm {
             unsafe {
                 self.stream
                     .launch_builder(func)
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
                     .arg(&m_i)
                     .arg(&n_i)
                     .arg(&k_i)
@@ -4390,31 +4399,32 @@ impl CudaGemm {
     #[cfg(feature = "internal-diagnostics")]
     pub fn launch_tiled_f32_classic(
         &self,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
-        validate_output_len(c_dev.len(), m, n)?;
+        validate_output_len(c_dev.as_raw().len(), m, n)?;
 
         let cfg = tiled_f32_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
-        // 参照。
+        // 参照。`GuardedSlice::as_raw` は `launch_tiled_f32` ドキュメンテー
+        // ションコメント参照。
         //
         // SAFETY: launch_tiled_f32 と同一の根拠。
         self.with_driver_call(|| {
             unsafe {
                 self.stream
                     .launch_builder(&self.tiled_f32)
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
                     .arg(&m_i)
                     .arg(&n_i)
                     .arg(&k_i)
@@ -4450,37 +4460,37 @@ impl CudaGemm {
     #[allow(clippy::too_many_arguments)]
     pub fn launch_tiled_bias_act_f32(
         &self,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        bias_dev: Option<&CudaSlice<f32>>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        bias_dev: Option<&GuardedSlice<f32>>,
         act_relu: bool,
-        c_dev: &mut CudaSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
-        validate_output_len(c_dev.len(), m, n)?;
+        validate_output_len(c_dev.as_raw().len(), m, n)?;
         if let Some(bias_dev) = bias_dev
-            && bias_dev.len() != n as usize
+            && bias_dev.as_raw().len() != n as usize
         {
             return Err(CudaError::InvalidElementwiseShape {
                 detail: format!(
                     "bias length mismatch: expected {n} (n), actual {}",
-                    bias_dev.len()
+                    bias_dev.as_raw().len()
                 ),
             });
         }
 
         let (has_bias, bias_arg): (i32, &CudaSlice<f32>) = match bias_dev {
-            Some(bias_dev) => (1, bias_dev),
+            Some(bias_dev) => (1, bias_dev.as_raw()),
             // `has_bias == 0` のガードによりカーネル側はこのバッファを
             // 実際には参照しない（`run_tiled_bias_act_f32` ドキュメント
             // コメント「`bias` が `None` の場合はダミーの 1 要素バッファ」
             // と同じ設計。ここでは既存の `a_dev` を安全なダミーとして
             // 再利用し、新規デバイス確保を避ける）。
-            None => (0, a_dev),
+            None => (0, a_dev.as_raw()),
         };
 
         let cfg = tiled_f32_launch_config(m, n);
@@ -4490,7 +4500,8 @@ impl CudaGemm {
         BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
 
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
-        // 参照。
+        // 参照。`GuardedSlice::as_raw` は `launch_tiled_f32` ドキュメンテー
+        // ションコメント参照。
         //
         // SAFETY: run_f32_kernel と同一の根拠（`launch_tiled_f32` の
         // 該当コメント参照）。追加引数（bias_arg・has_bias・act_i）は
@@ -4501,10 +4512,10 @@ impl CudaGemm {
             unsafe {
                 self.stream
                     .launch_builder(&self.tiled_bias_act_f32)
-                    .arg(a_dev)
-                    .arg(b_dev)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
                     .arg(bias_arg)
-                    .arg(c_dev)
+                    .arg(c_dev.as_raw_mut())
                     .arg(&m_i)
                     .arg(&n_i)
                     .arg(&k_i)
@@ -4779,15 +4790,15 @@ impl CudaGemm {
     /// ドキュメンテーションコメント参照）。
     pub fn launch_wmma_tf32(
         &self,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        validate_output_len(c_dev.len(), m, n)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
+        validate_output_len(c_dev.as_raw().len(), m, n)?;
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
@@ -4816,9 +4827,9 @@ impl CudaGemm {
                 unsafe {
                     self.stream
                         .launch_builder(kernel)
-                        .arg(a_dev)
-                        .arg(b_dev)
-                        .arg(c_dev)
+                        .arg(a_dev.as_raw())
+                        .arg(b_dev.as_raw())
+                        .arg(c_dev.as_raw_mut())
                         .arg(&m_i)
                         .arg(&n_i)
                         .arg(&k_i)
@@ -4830,9 +4841,9 @@ impl CudaGemm {
                 unsafe {
                     self.stream
                         .launch_builder(func)
-                        .arg(a_dev)
-                        .arg(b_dev)
-                        .arg(c_dev)
+                        .arg(a_dev.as_raw())
+                        .arg(b_dev.as_raw())
+                        .arg(c_dev.as_raw_mut())
                         .arg(&m_i)
                         .arg(&n_i)
                         .arg(&k_i)
@@ -4844,9 +4855,9 @@ impl CudaGemm {
                 unsafe {
                     self.stream
                         .launch_builder(func)
-                        .arg(a_dev)
-                        .arg(b_dev)
-                        .arg(c_dev)
+                        .arg(a_dev.as_raw())
+                        .arg(b_dev.as_raw())
+                        .arg(c_dev.as_raw_mut())
                         .arg(&m_i)
                         .arg(&n_i)
                         .arg(&k_i)
@@ -4872,10 +4883,11 @@ impl CudaGemm {
     ///
     /// 同期点（#1013）: 常駐 `launch_*` は非同期投入のみで完了を待たない
     /// ため、本関数が readback ヘルパー経由で完了を確定する。
-    pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
+    pub fn download_f32(&self, c_dev: &GuardedSlice<f32>) -> Result<Vec<f32>, CudaError> {
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
-        // 参照。
-        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
+        // 参照。`GuardedSlice::as_raw` は `launch_tiled_f32` ドキュメンテー
+        // ションコメント参照。
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013）。

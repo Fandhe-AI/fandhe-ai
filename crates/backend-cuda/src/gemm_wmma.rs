@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
 use crate::context_cache;
@@ -372,15 +372,15 @@ impl CudaWmmaGemm {
     /// ため、この経路の安全性はカーネル起動自体の失敗に委ねられる）。
     pub fn launch_f16(
         &self,
-        a_dev: &CudaSlice<f16>,
-        b_dev: &CudaSlice<f16>,
-        c_dev: &mut CudaSlice<f16>,
+        a_dev: &GuardedSlice<f16>,
+        b_dev: &GuardedSlice<f16>,
+        c_dev: &mut GuardedSlice<f16>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.as_raw().len(), m, n)?;
 
         let (func, cfg) = match self.wmma_f16_opt.as_ref() {
             Some(func) => (func, wmma_opt_launch_config(m, n)),
@@ -401,9 +401,9 @@ impl CudaWmmaGemm {
             unsafe {
                 self.stream
                     .launch_builder(func)
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
                     .arg(&m_i)
                     .arg(&n_i)
                     .arg(&k_i)
@@ -432,15 +432,15 @@ impl CudaWmmaGemm {
     #[cfg(feature = "internal-diagnostics")]
     pub fn launch_f16_basic(
         &self,
-        a_dev: &CudaSlice<f16>,
-        b_dev: &CudaSlice<f16>,
-        c_dev: &mut CudaSlice<f16>,
+        a_dev: &GuardedSlice<f16>,
+        b_dev: &GuardedSlice<f16>,
+        c_dev: &mut GuardedSlice<f16>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.as_raw().len(), m, n)?;
 
         let cfg = wmma_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
@@ -454,9 +454,9 @@ impl CudaWmmaGemm {
             unsafe {
                 self.stream
                     .launch_builder(&self.wmma_f16)
-                    .arg(a_dev)
-                    .arg(b_dev)
-                    .arg(c_dev)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
                     .arg(&m_i)
                     .arg(&n_i)
                     .arg(&k_i)
@@ -475,8 +475,8 @@ impl CudaWmmaGemm {
     /// ため、本関数が readback ヘルパー経由で完了を確定する。codex-review
     /// P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call` で
     /// capture 排他へ参加させる。
-    pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
-        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
+    pub fn download_f16(&self, c_dev: &GuardedSlice<f16>) -> Result<Vec<f16>, CudaError> {
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013。

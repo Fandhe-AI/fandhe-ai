@@ -73,6 +73,7 @@ use bench_harness::{Quartiles, median_q1_q3, rng::Xorshift64Star};
 
 use crate::context_cache::{cached_device, cached_gemm};
 use crate::device::CudaDevice;
+use crate::memory::GuardedSlice;
 
 const WARMUP_TRIALS: usize = 3;
 const MEASURED_TRIALS: usize = 10;
@@ -161,10 +162,18 @@ fn measure_one_phase_trial(
     let t = Instant::now();
     let a_dev: CudaSlice<f32> = stream.clone_htod(a).expect("H2D A upload must succeed");
     let h2d_a_secs = t.elapsed().as_secs_f64();
+    // `launch_tiled_f32`（`gemm.rs`）は codex-review P0 再指摘対応
+    // （PR #1390 再々々修正）で `&GuardedSlice<f32>` 引数へ変更されたため、
+    // ここで測定用の生 `CudaSlice` を `GuardedSlice::new` で包む
+    // （`memory.rs::GuardedSlice` ドキュメンテーションコメント「公開
+    // アクセス面」参照。`device` は `gemm` と同一 `CudaDevice` 由来の
+    // ため ordinal は一致する）。
+    let a_dev = GuardedSlice::new(device.ordinal(), a_dev);
 
     let t = Instant::now();
     let b_dev: CudaSlice<f32> = stream.clone_htod(b).expect("H2D B upload must succeed");
     let h2d_b_secs = t.elapsed().as_secs_f64();
+    let b_dev = GuardedSlice::new(device.ordinal(), b_dev);
 
     let t = Instant::now();
     let mut c_dev = gemm
@@ -181,7 +190,7 @@ fn measure_one_phase_trial(
         DownloadVariant::Fresh => {
             let t = Instant::now();
             let out = stream
-                .clone_dtoh(&*c_dev)
+                .clone_dtoh(c_dev.as_raw())
                 .expect("D2H download (untouched-page Vec, production clone_dtoh) must succeed");
             // `clone_dtoh`／`memcpy_dtoh` は `cuMemcpyDtoHAsync` を発行する
             // だけで返る（plain `Vec<T>` は `HostSlice::stream_synced_mut_
@@ -211,7 +220,7 @@ fn measure_one_phase_trial(
         DownloadVariant::KeepAlive => {
             let t = Instant::now();
             let out = stream
-                .clone_dtoh(&*c_dev)
+                .clone_dtoh(c_dev.as_raw())
                 .expect("D2H download (untouched-page Vec, kept alive) must succeed");
             // Fresh 分岐と同じ理由（上記コメント）で、`keep_alive` へ退避
             // する前に転送完了を待つ。KeepAlive はこの試行内では drop
@@ -232,7 +241,7 @@ fn measure_one_phase_trial(
             (d2h_secs, 0.0, out_len)
         }
         DownloadVariant::PreTouched => {
-            let len = c_dev.len();
+            let len = c_dev.as_raw().len();
             // ページ事前タッチ: `vec![0.0f32; len]` はゼロクリアであり
             // glibc の `calloc` 経路が mmap で既にゼロ化済みのページを
             // 返す最適化を行う可能性があるため、`black_box` 越しに
@@ -247,7 +256,7 @@ fn measure_one_phase_trial(
 
             let t = Instant::now();
             stream
-                .memcpy_dtoh(&*c_dev, &mut dst)
+                .memcpy_dtoh(c_dev.as_raw(), &mut dst)
                 .expect("D2H download (pre-touched Vec) must succeed");
             // `memcpy_dtoh` は `cuMemcpyDtoHAsync` を発行するだけで返る
             // （Fresh 分岐と同じ理由。上記コメント参照）。直後の drop が

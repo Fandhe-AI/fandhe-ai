@@ -167,7 +167,7 @@ impl Drop for CudaBufferHandle {
 ///
 /// 型自体は `pub`（`upload_*`／`alloc_output_*` の戻り値の型として
 /// crate 外の呼び出し元〈ベンチ・examples・integration tests〉のシグ
-/// ネチャに現れるため公開が必須）。構築子（[`Self::new`]）は
+/// ネチャに現れるため公開が必須）。構築子（`Self::new`）は
 /// `pub(crate)` のまま封じ、crate 外は本クレートが返した値を保持・
 /// 転送・drop することしかできない（未検証の `CudaSlice` を外部から
 /// 差し込んで `ordinal` を偽装する経路を型で排除する。`gemm_mma_tf32x3.
@@ -188,16 +188,41 @@ impl Drop for CudaBufferHandle {
 /// `CudaSlice` を drop すると、その解放操作が capture 中の共有ストリーム
 /// へ意図せず記録されうる。
 ///
-/// `Drop` 実装は [`CudaBufferHandle::drop`] と同一の手順（
+/// `Drop` 実装は `CudaBufferHandle::drop` と同一の手順（
 /// `context_cache::begin_buffer_release` を呼び、返した
-/// [`context_cache::BufferReleaseToken`] を実際の `CudaSlice::drop` が
-/// 完了するまで保持する）を踏む。`Deref`／`DerefMut` により
-/// `&CudaSlice<T>`／`&mut CudaSlice<T>` を要求する既存の `launch_*`／
-/// `download_*` 系シグネチャへ変更なく渡せる（呼び出し側の
-/// `&guarded_slice` は自動的に `&CudaSlice<T>` へコアーションされる）。
+/// `context_cache::BufferReleaseToken` を実際の `CudaSlice::drop` が
+/// 完了するまで保持する）を踏む。
+///
+/// **公開アクセス面（codex-review P0 再指摘対応・PR #1390 再々々修正）**:
+/// 生の `&CudaSlice<T>`／`&mut CudaSlice<T>` は crate 外へ一切公開しない
+/// （`Deref`／`DerefMut` を実装しない）。理由は 2 つ: (1) 可変参照
+/// （旧 `DerefMut`）を公開すると、`std::mem::swap` 等の安全な操作だけで
+/// 異なる `ordinal`（別 GPU）を持つ 2 つの `GuardedSlice` の間で内部の
+/// `CudaSlice` 実体を交換できてしまう——ラッパー自身の `ordinal`
+/// フィールドは交換されないため、`Drop` 時に実体が実際に存在する GPU と
+/// 異なる GPU の排他トークンで解放が走り、`capture` 中の共有ストリームへ
+/// 誤った解放操作が混入しうる。(2) 不変参照（旧 `Deref`）であっても
+/// `CudaSlice::context()`／`stream()` 等の公開アクセサへ到達でき、
+/// `context_cache::disable_event_tracking()` が前提とする「1 ストリーム
+/// のみ」という不変条件を crate 外から破りうる。
+///
+/// 代わりに、内部の `CudaSlice<T>` へは本クレート内（`pub(crate)`）の
+/// `Self::as_raw`/`Self::as_raw_mut` からのみ到達できる。`gemm.rs`／
+/// `gemm_wmma.rs`／`gemm_mma.rs`／`gemm_mma_tf32.rs`／
+/// `gemm_mma_tf32x3.rs`／`transpose.rs` の `launch_*`／`download_*` 系
+/// 公開シグネチャ自体を `&GuardedSlice<T>`／`&mut GuardedSlice<T>` を
+/// 受け取る形へ変更し（旧稿の `&CudaSlice<T>`／`&mut CudaSlice<T>` から
+/// 変更）、crate 外からは排他制御を経由する公開 API を通してしか
+/// バッファを渡せない。
 #[derive(Debug)]
 pub struct GuardedSlice<T: cudarc::driver::DeviceRepr> {
-    inner: Option<CudaSlice<T>>,
+    // `ManuallyDrop` で保持する（`Option` は使わない）: `Drop::drop`
+    // 以外の生存区間では常に初期化済みであることを型で保証し、
+    // `Self::as_raw`／`Self::as_raw_mut` が `Option` の取り出し失敗
+    // （`unwrap`/`expect`）で本番経路 panic しうる余地を構造的に排除する
+    // （codex-review P1 指摘対応・PR #1390 再々々修正。coding-rust.md
+    // 「本番経路で unwrap()/expect() を使わない」）。
+    inner: std::mem::ManuallyDrop<CudaSlice<T>>,
     ordinal: usize,
 }
 
@@ -206,28 +231,21 @@ impl<T: cudarc::driver::DeviceRepr> GuardedSlice<T> {
     /// capture 排他へ参加する形で包む。
     pub(crate) fn new(ordinal: usize, slice: CudaSlice<T>) -> Self {
         Self {
-            inner: Some(slice),
+            inner: std::mem::ManuallyDrop::new(slice),
             ordinal,
         }
     }
-}
 
-impl<T: cudarc::driver::DeviceRepr> std::ops::Deref for GuardedSlice<T> {
-    type Target = CudaSlice<T>;
-    fn deref(&self) -> &CudaSlice<T> {
-        // `inner` は `Drop::drop` でのみ `None` になり、それ以外の
-        // 生存区間では常に `Some`（構築は `Self::new` の 1 経路のみ）。
-        self.inner
-            .as_ref()
-            .expect("GuardedSlice::inner is Some outside of Drop")
+    /// crate 内部限定で内部の `&CudaSlice<T>` へアクセスする（構造体
+    /// ドキュメンテーションコメント「公開アクセス面」参照。crate 外へは
+    /// 公開しない）。
+    pub(crate) fn as_raw(&self) -> &CudaSlice<T> {
+        &self.inner
     }
-}
 
-impl<T: cudarc::driver::DeviceRepr> std::ops::DerefMut for GuardedSlice<T> {
-    fn deref_mut(&mut self) -> &mut CudaSlice<T> {
-        self.inner
-            .as_mut()
-            .expect("GuardedSlice::inner is Some outside of Drop")
+    /// `Self::as_raw` の可変版。crate 内部限定（同上）。
+    pub(crate) fn as_raw_mut(&mut self) -> &mut CudaSlice<T> {
+        &mut self.inner
     }
 }
 
@@ -237,11 +255,16 @@ impl<T: cudarc::driver::DeviceRepr> Drop for GuardedSlice<T> {
         // 再修正」参照）: `begin_buffer_release` のトークンを、実際の
         // `CudaSlice::drop`（`cuMemFreeAsync`/`cuMemFree` の発行）が
         // 完了するまで保持する。
-        if let Some(slice) = self.inner.take() {
-            let release_token = context_cache::begin_buffer_release(self.ordinal);
-            drop(slice);
-            drop(release_token);
-        }
+        //
+        // SAFETY: `ManuallyDrop::take` は同一フィールドから 2 度取り出す
+        // と未定義動作になる。`Drop::drop` は各インスタンスにつき高々
+        // 1 回しか呼ばれず（Rust の drop 契約）、`drop` 実行後は `self`
+        // （`self.inner` を含む）へ二度とアクセスされないため、ここでの
+        // 1 回きりの `take` は当該不変条件を満たす。
+        let slice = unsafe { std::mem::ManuallyDrop::take(&mut self.inner) };
+        let release_token = context_cache::begin_buffer_release(self.ordinal);
+        drop(slice);
+        drop(release_token);
     }
 }
 

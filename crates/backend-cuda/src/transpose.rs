@@ -368,8 +368,8 @@ impl CudaTranspose {
     /// （`memory.rs::readback` ドキュメンテーションコメント参照）。
     /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
     /// で capture 排他へ参加させる。
-    pub fn download_f32(&self, dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        self.with_driver_call(|| crate::memory::readback(&self.stream, dev))
+    pub fn download_f32(&self, dev: &GuardedSlice<f32>) -> Result<Vec<f32>, CudaError> {
+        self.with_driver_call(|| crate::memory::readback(&self.stream, dev.as_raw()))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013。
@@ -387,20 +387,20 @@ impl CudaTranspose {
     /// と同型の判断）。
     pub fn launch_naive_f32(
         &self,
-        src_dev: &CudaSlice<f32>,
-        dst_dev: &mut CudaSlice<f32>,
+        src_dev: &GuardedSlice<f32>,
+        dst_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
     ) -> Result<(), CudaError> {
-        validate_transpose_dims(src_dev.len(), m, n)?;
-        validate_transpose_output_len(dst_dev.len(), m, n)?;
+        validate_transpose_dims(src_dev.as_raw().len(), m, n)?;
+        validate_transpose_output_len(dst_dev.as_raw().len(), m, n)?;
         if m == 0 || n == 0 {
             return Ok(());
         }
         self.launch_f32(
             &self.naive_f32,
-            src_dev,
-            dst_dev,
+            src_dev.as_raw(),
+            dst_dev.as_raw_mut(),
             m,
             n,
             naive_launch_config(m, n),
@@ -413,14 +413,14 @@ impl CudaTranspose {
     /// と同じ。
     pub fn launch_smem_f32(
         &self,
-        src_dev: &CudaSlice<f32>,
-        dst_dev: &mut CudaSlice<f32>,
+        src_dev: &GuardedSlice<f32>,
+        dst_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         swizzle: bool,
     ) -> Result<(), CudaError> {
-        validate_transpose_dims(src_dev.len(), m, n)?;
-        validate_transpose_output_len(dst_dev.len(), m, n)?;
+        validate_transpose_dims(src_dev.as_raw().len(), m, n)?;
+        validate_transpose_output_len(dst_dev.as_raw().len(), m, n)?;
         if m == 0 || n == 0 {
             return Ok(());
         }
@@ -429,7 +429,14 @@ impl CudaTranspose {
         } else {
             &self.smem_f32_pad
         };
-        self.launch_f32(func, src_dev, dst_dev, m, n, tiled_launch_config(m, n))
+        self.launch_f32(
+            func,
+            src_dev.as_raw(),
+            dst_dev.as_raw_mut(),
+            m,
+            n,
+            tiled_launch_config(m, n),
+        )
     }
 
     /// GEMM epilogue 融合転置（opt-in）を、デバイス常駐済みの
@@ -437,20 +444,31 @@ impl CudaTranspose {
     /// と同じ「upload/download を含まない」契約。
     pub fn launch_tiled_transposed_f32(
         &self,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_t_dev: &mut CudaSlice<f32>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        c_t_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_tiled_transposed_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        validate_transpose_output_len(c_t_dev.len(), n, m)?;
+        validate_tiled_transposed_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
+        validate_transpose_output_len(c_t_dev.as_raw().len(), n, m)?;
         // codex-review P0 指摘対応（PR #1390 再々修正）: 以降が実際に
         // driver へ触れる区間（memset_zeros・カーネル起動）のため
         // `Self::with_driver_call` で capture 排他へ参加させる。
+        // `GuardedSlice::as_raw`／`as_raw_mut`（crate 内部限定）は
+        // `memory.rs::GuardedSlice` ドキュメンテーションコメント
+        // 「公開アクセス面」参照（codex-review P0 再指摘対応・PR #1390
+        // 再々々修正）。
         self.with_driver_call(|| {
-            self.launch_tiled_transposed_f32_body(a_dev, b_dev, c_t_dev, m, n, k)
+            self.launch_tiled_transposed_f32_body(
+                a_dev.as_raw(),
+                b_dev.as_raw(),
+                c_t_dev.as_raw_mut(),
+                m,
+                n,
+                k,
+            )
         })
     }
 

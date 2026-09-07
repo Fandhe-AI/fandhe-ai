@@ -232,18 +232,30 @@ impl CudaMmaTf32Gemm {
     /// API 版と同じ契約をデバイス常駐バッファ版で再現する）。
     pub fn launch_tf32(
         &self,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
+        a_dev: &GuardedSlice<f32>,
+        b_dev: &GuardedSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
         // codex-review P0 指摘対応（PR #1390 再々修正）: `Self::
         // with_driver_call` で `launch_mma_tf32_family`（共有起動本体）
-        // 呼び出しを capture 排他へ参加させる。
+        // 呼び出しを capture 排他へ参加させる。`GuardedSlice::as_raw`／
+        // `as_raw_mut`（crate 内部限定）は `memory.rs::GuardedSlice`
+        // ドキュメンテーションコメント「公開アクセス面」参照
+        // （codex-review P0 再指摘対応・PR #1390 再々々修正）。
         self.with_driver_call(|| {
-            launch_mma_tf32_family(&self.stream, &self.mma_tf32, a_dev, b_dev, c_dev, m, n, k)
+            launch_mma_tf32_family(
+                &self.stream,
+                &self.mma_tf32,
+                a_dev.as_raw(),
+                b_dev.as_raw(),
+                c_dev.as_raw_mut(),
+                m,
+                n,
+                k,
+            )
         })
     }
 
@@ -253,8 +265,8 @@ impl CudaMmaTf32Gemm {
     /// ため、本関数が readback ヘルパー経由で完了を確定する。codex-review
     /// P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call` で
     /// capture 排他へ参加させる。
-    pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
+    pub fn download_f32(&self, c_dev: &GuardedSlice<f32>) -> Result<Vec<f32>, CudaError> {
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013。

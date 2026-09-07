@@ -329,22 +329,55 @@ impl CudaMmaTf32x3Gemm {
     pub fn launch_tf32x3(
         &self,
         inputs: &ValidatedTf32x3Inputs,
-        c_dev: &mut CudaSlice<f32>,
+        c_dev: &mut GuardedSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
         // codex-review P0 指摘対応（PR #1390 再々修正）: `Self::
         // with_driver_call` で `launch_mma_tf32_family` 呼び出しを
-        // capture 排他へ参加させる。`&inputs.a`／`&inputs.b`
-        // （`GuardedSlice<f32>`）は `Deref` により `&CudaSlice<f32>` を
-        // 要求する `launch_mma_tf32_family` へそのまま渡せる。
+        // capture 排他へ参加させる。`inputs.a`／`inputs.b`・`c_dev`
+        // （いずれも `GuardedSlice<f32>`）は `GuardedSlice::as_raw`／
+        // `as_raw_mut`（crate 内部限定）で内部の `CudaSlice` へアクセス
+        // する（`memory.rs::GuardedSlice` ドキュメンテーションコメント
+        // 「公開アクセス面」参照。codex-review P0 再指摘対応・PR #1390
+        // 再々々修正で `Deref`／`DerefMut` を撤去したため）。
         self.with_driver_call(|| {
             launch_mma_tf32_family(
                 &self.stream,
                 &self.mma_tf32x3,
-                &inputs.a,
-                &inputs.b,
+                inputs.a.as_raw(),
+                inputs.b.as_raw(),
+                c_dev.as_raw_mut(),
+                m,
+                n,
+                k,
+            )
+        })
+    }
+
+    /// [`Self::launch_tf32x3`] の C バッファのみ生 `CudaSlice` を受け
+    /// 取る版。`tests/gemm_mma_tf32x3.rs` の k==0 zero-fill 契約テスト
+    /// （呼び出し元が任意の事前汚染済みバッファを `c_dev` として渡す
+    /// ため `GuardedSlice::new` を経由しない `device.stream().
+    /// clone_htod()` 直呼びを使う。`gemm_mma.rs::CudaMmaGemm::
+    /// launch_f16_c_raw` と同じ理由で新設した。ただし本テストは
+    /// `internal-diagnostics` feature を要求しないため、本関数もその
+    /// feature ではゲートしない）専用。
+    pub fn launch_tf32x3_c_raw(
+        &self,
+        inputs: &ValidatedTf32x3Inputs,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        self.with_driver_call(|| {
+            launch_mma_tf32_family(
+                &self.stream,
+                &self.mma_tf32x3,
+                inputs.a.as_raw(),
+                inputs.b.as_raw(),
                 c_dev,
                 m,
                 n,
@@ -356,7 +389,13 @@ impl CudaMmaTf32x3Gemm {
     /// C をデバイス→ホストへ転送する（`run_tf32x3` の D2H 部分の切り出
     /// し）。codex-review P0 指摘対応（PR #1390 再々修正）: `Self::
     /// with_driver_call` で capture 排他へ参加させる。
-    pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
+    pub fn download_f32(&self, c_dev: &GuardedSlice<f32>) -> Result<Vec<f32>, CudaError> {
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
+    }
+
+    /// [`Self::download_f32`] の生 `CudaSlice` 版。[`Self::
+    /// launch_tf32x3_c_raw`] と同じ理由で新設した。
+    pub fn download_f32_raw(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
         self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
     }
 
