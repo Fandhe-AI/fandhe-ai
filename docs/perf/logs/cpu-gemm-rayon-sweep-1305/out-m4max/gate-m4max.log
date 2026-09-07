@@ -1,0 +1,97 @@
+=== gate start 2026-09-07T17:35:36Z ===
+attempt=0 load1=6.32
+attempt=1 load1=4.53
+attempt=2 load1=5.57
+attempt=3 load1=4.45
+attempt=4 load1=4.52
+attempt=5 load1=4.23
+attempt=6 load1=4.94
+attempt=7 load1=13.31
+attempt=8 load1=15.19
+attempt=9 load1=10.22
+attempt=10 load1=7.15
+attempt=11 load1=6.06
+attempt=12 load1=15.51
+attempt=13 load1=8.66
+attempt=14 load1=8.42
+attempt=15 load1=13.45
+attempt=16 load1=9.08
+attempt=17 load1=5.83
+attempt=18 load1=4.29
+attempt=19 load1=10.78
+attempt=20 load1=10.78
+attempt=21 load1=21.50
+attempt=22 load1=17.45
+attempt=23 load1=18.44
+attempt=24 load1=28.72
+attempt=25 load1=20.14
+attempt=26 load1=13.92
+attempt=27 load1=9.55
+attempt=28 load1=8.37
+attempt=29 load1=5.11
+attempt=30 load1=6.09
+attempt=31 load1=9.03
+attempt=32 load1=10.37
+attempt=33 load1=9.07
+attempt=34 load1=17.33
+attempt=35 load1=13.92
+attempt=36 load1=13.08
+attempt=37 load1=14.02
+attempt=38 load1=9.56
+attempt=39 load1=9.67
+attempt=40 load1=8.40
+attempt=41 load1=6.36
+attempt=42 load1=5.85
+attempt=43 load1=7.06
+attempt=44 load1=6.66
+attempt=45 load1=6.43
+attempt=46 load1=6.77
+attempt=47 load1=7.38
+attempt=48 load1=6.03
+attempt=49 load1=6.07
+attempt=50 load1=4.94
+attempt=51 load1=9.15
+attempt=52 load1=6.59
+attempt=53 load1=7.46
+attempt=54 load1=18.97
+attempt=55 load1=18.21
+attempt=56 load1=13.20
+attempt=57 load1=12.61
+attempt=58 load1=12.47
+attempt=59 load1=8.22
+gate NOT PASSED after max wait (共有負荷下として続行)
+who: nancy            console       8月 19 12:50 
+nancy            ttys000       8月 19 12:50 
+nancy            ttys001       8月 19 12:50 
+nancy            ttys002       8月 20 09:27 
+nancy            ttys003       8月 19 12:50 
+nancy            ttys004       8月 19 13:48 
+nancy            ttys005       8月 29 11:52 
+nancy            ttys006       8月 19 13:58 
+nancy            ttys007       8月 19 13:58 
+nancy            ttys008       8月 27 16:16 
+nancy            ttys009       8月 22 12:49 
+nancy            ttys010       8月 30 21:43 
+nancy            ttys011       8月 19 19:44 
+nancy            ttys013       9月  6 22:36 
+nancy            ttys015       8月 20 00:08 
+nancy            ttys017       8月 20 09:27 
+nancy            ttys018       8月 30 10:20 
+nancy            ttys020       9月  6 19:56 
+nancy            ttys021       9月  7 04:03 
+ %CPU   PID COMM
+1330.6 51499 /Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_f4131cc9-5f2-21/scripts/bench/framework-compare/target/debug/deps/bench_fandhe-db88f21a308e39e0
+ 34.9  1407 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+ 26.4   603 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 11.5  1547 /System/Library/ExtensionKit/Extensions/WallpaperAerialsExtension.appex/Contents/MacOS/WallpaperAerialsExtension
+  8.8  1529 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder
+  6.6 51812 gh
+  6.4 48077 /Users/nancy/.local/bin/claude
+  4.5  1579 /System/Library/Frameworks/VideoToolbox.framework/Versions/A/XPCServices/VTDecoderXPCService.xpc/Contents/MacOS/VTDecoderXPCService
+  2.5  1267 /usr/libexec/textunderstandingd
+  2.4 24755 /usr/libexec/syspolicyd
+  1.7 88969 /Applications/Typeless.app/Contents/Frameworks/Typeless Helper (Renderer).app/Contents/MacOS/Typeless Helper (Renderer)
+  1.2 79945 /Applications/Dia.app/Contents/MacOS/Dia
+  1.0 88931 /Applications/Typeless.app/Contents/MacOS/Typeless
+  0.6   722 /System/Library/DriverExtensions/com.apple.DriverKit.AppleUserECM.dext/com.apple.DriverKit.AppleUserECM
+=== gate end 2026-09-07T18:35:38Z ===
