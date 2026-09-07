@@ -112,34 +112,32 @@ impl<'t> Var<'t> {
     /// ホスト可視の値を借用で読み出す（イシュー #1335・`docs/public-api-
     /// design.md` §3.1「`VarHostView`」）。
     ///
-    /// 実体化した値が contiguous ならテープの `RefCell` 借用
-    /// （`Ref<'_, [f32]>`）をそのまま返しコピーしない。非 contiguous な
-    /// 場合のみ [`Tensor::contiguous`] で 1 回だけ実体化した所有 `Vec`
-    /// を返す（`fandhe_ai_tensor_core::Tensor::host_slice` と同じ
-    /// 「contiguous なら借用・そうでなければ 1 回コピー」の方針を
-    /// `Var` 側にも適用）。
+    /// **P1 是正（codex-review 指摘・イシュー #1335）**: 当初実装は
+    /// `Tape` の `RefCell` 借用（`Ref<'_, [f32]>`）をそのまま
+    /// `VarHostView` へ持ち越しており、`host_view()` を保持したまま
+    /// 同じ `Tape` へノード追加演算（`add`/`matmul` 等の `push_lazy`）を
+    /// 呼ぶと `borrow_mut()` が実行時 panic した（本番経路 panic 禁止・
+    /// `.claude/rules/coding-rust.md` 違反）。`value()` の既存制約と
+    /// 同型ではあるが、新規公開 API がその制約をそのまま持ち込む理由には
+    /// ならないため、`RefCell` 借用を関数内に閉じ込める形へ是正した。
     ///
-    /// **借用注意**（[`Self::value`] と同じ制約）: 返す
-    /// [`VarHostView`] を保持したまま、同じ `Tape` に対して
-    /// `borrow_mut()` を要する演算（`matmul`/`add` 等のノード追加）を
-    /// 呼ぶと `RefCell` の二重可変借用で実行時 panic になる。値を
-    /// 持ち越したい場合は `to_tensor()` を使うこと。
-    pub fn host_view(&self) -> VarHostView<'_> {
-        let nodes = self.tape.nodes.borrow();
-        let tensor_ref = Ref::map(nodes, |nodes| {
-            materialize_non_fallible(nodes, self.tape.ops(), self.id)
-        });
-        match Ref::filter_map(tensor_ref, |t| t.as_slice()) {
-            Ok(slice_ref) => VarHostView {
-                inner: VarHostViewInner::Borrowed(slice_ref),
-            },
-            Err(tensor_ref) => {
-                let owned = tensor_ref.contiguous().as_slice().unwrap_or(&[]).to_vec();
-                VarHostView {
-                    inner: VarHostViewInner::Owned(owned),
-                }
-            }
-        }
+    /// `Tensor<f32>` は内部 `storage: Arc<Storage<T>>` を `Arc` 共有する
+    /// 値型（`tensor.rs` モジュール冒頭コメント「`Clone` は `Arc` の
+    /// ポインタ複製のみで安価」参照）であるため、`materialize_non_fallible`
+    /// が返す `&Tensor<f32>`（`Tape` の `RefCell` 借用が生存中のみ有効）
+    /// を `Tensor::contiguous()`（contiguous な場合は内部で `self.clone()`
+    /// する安価な `Arc` 複製、非 contiguous な場合のみ 1 回実体化）へ
+    /// 通してから所有値として持ち出せば、いずれの分岐でもデータの
+    /// 追加コピーなしに `RefCell` 借用（`nodes`）をこの関数のスコープ内
+    /// で確実に解放できる。返す [`VarHostView`] は `Tape` の借用を一切
+    /// 保持しないため、生存中に同じ `Var`／`Tape` への他の演算を呼んでも
+    /// panic しない。
+    pub fn host_view(&self) -> VarHostView {
+        let tensor = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_non_fallible(&nodes, self.tape.ops(), self.id).contiguous()
+        };
+        VarHostView { tensor }
     }
 
     /// 実体化なしに読める構造的な出力 shape（`TapeNode.shape`。
@@ -668,40 +666,33 @@ impl<'t> Var<'t> {
     }
 }
 
-/// [`Var::host_view`] が返す借用ビュー（イシュー #1335）。
+/// [`Var::host_view`] が返す借用ビュー（イシュー #1335。P1 是正で
+/// `Tape` の借用を保持しない設計へ変更——`Var::host_view` ドキュメント
+/// コメント参照）。
 ///
-/// `Deref<Target = [f32]>` でスライスとして使う。内部 variant
-/// （`Borrowed`/`Owned`）は非公開とし、将来 CUDA pinned host 借用
-/// （イシュー #1336）等の追加 variant を破壊的変更なしに導入できる
-/// 余地を残す。
+/// `Deref<Target = [f32]>` でスライスとして使う。内部に保持する
+/// `Tensor<f32>` は `host_view()` 構築時に既に
+/// [`fandhe_ai_tensor_core::Tensor::contiguous`] 済み（[`Tensor::as_slice`]
+/// が必ず `Some` を返す状態）であり、`Deref::deref` はその場で
+/// borrow-checker 上の `&self` の借用として `&[f32]` を返すだけで
+/// 追加コピーを伴わない。
 ///
-/// **寿命契約**: `Borrowed` variant は `Tape` の `RefCell` 借用
-/// （`Ref<'a, [f32]>`）を保持するため、生存中は同じ `Tape` に対する
-/// `borrow_mut()` を要する操作（ノード追加演算・`Tape::reset`）を
-/// 呼べない（コンパイルエラーにはならず実行時 panic になる制約は
-/// [`Var::value`] と同じ。値を持ち越したい場合は `to_tensor()` を
-/// 使うこと）。テープ値自体は一度確定すると不変（`TapeNode.value:
-/// OnceCell`）であり、`VarHostView` 生存中にデバイス側から後続書き込み
-/// されることはない。
+/// **寿命契約**: `VarHostView` はライフタイムパラメータを持たず
+/// `Tape`／`RefCell` の借用を一切保持しないため、生存中に同じ `Var`／
+/// `Tape` へノード追加演算（`add`/`matmul` 等）を呼んでも panic しない
+/// （[`Var::value`] の借用注意とは異なる）。
 #[derive(Debug)]
-pub struct VarHostView<'a> {
-    inner: VarHostViewInner<'a>,
+pub struct VarHostView {
+    tensor: Tensor<f32>,
 }
 
-#[derive(Debug)]
-enum VarHostViewInner<'a> {
-    Borrowed(Ref<'a, [f32]>),
-    Owned(Vec<f32>),
-}
-
-impl std::ops::Deref for VarHostView<'_> {
+impl std::ops::Deref for VarHostView {
     type Target = [f32];
 
     fn deref(&self) -> &[f32] {
-        match &self.inner {
-            VarHostViewInner::Borrowed(slice_ref) => slice_ref,
-            VarHostViewInner::Owned(vec) => vec,
-        }
+        // `host_view()` が `contiguous()` 済みの `Tensor` のみを格納する
+        // ため `as_slice()` は必ず `Some`。防御的に `unwrap_or(&[])`。
+        self.tensor.as_slice().unwrap_or(&[])
     }
 }
 
@@ -746,6 +737,56 @@ mod linear_act_tests {
             fused.value().as_slice().unwrap(),
             composed.value().as_slice().unwrap(),
             "broadcast bias 経路は融合・非融合合成で bit 一致するはず"
+        );
+    }
+}
+
+#[cfg(test)]
+mod host_view_tests {
+    use super::*;
+    use crate::tape::Tape;
+
+    /// P1 是正の回帰テスト（イシュー #1335 codex-review 指摘）: `host_view()`
+    /// が返す `VarHostView` を保持したまま同じ `Tape` へノード追加演算
+    /// （`add`）を呼んでも `RefCell` の二重可変借用 panic が起きないこと
+    /// を確認する。是正前は `Ref<'a, [f32]>` をそのまま保持していたため
+    /// `x.add(&x)` の `push_lazy` 内 `borrow_mut()` が panic していた
+    /// （指摘の再現手順そのもの）。
+    #[test]
+    fn host_view_does_not_panic_when_tape_op_follows() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap());
+
+        let view = x.host_view();
+        // `view` 生存中に同じ `Tape` へノード追加演算を呼ぶ（是正前は panic）。
+        let result = x.add(&x).expect("同一 shape の加算は成功するはず");
+        drop(view);
+
+        assert_eq!(
+            result.to_tensor().as_slice().unwrap(),
+            &[2.0, 4.0, 6.0, 8.0],
+            "host_view() 生存中の add は通常どおりの結果を返すはず"
+        );
+    }
+
+    /// 非 contiguous（`transpose` 後）な `Var` でも `host_view()` が
+    /// `Tape` の借用を持ち越さないことを確認する（`contiguous()` 分岐の
+    /// 回帰カバレッジ）。
+    #[test]
+    fn host_view_on_transposed_var_does_not_panic_when_tape_op_follows() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap());
+        let xt = x.transpose(0, 1).expect("transpose は 2 次元で成功する");
+
+        let view = xt.host_view();
+        let result = x
+            .add(&x)
+            .expect("transpose 済み view の生存中でも add は成功するはず");
+        drop(view);
+
+        assert_eq!(
+            result.to_tensor().as_slice().unwrap(),
+            &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
         );
     }
 }

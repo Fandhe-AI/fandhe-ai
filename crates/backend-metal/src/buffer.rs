@@ -251,51 +251,70 @@ impl MetalBuffer {
     /// イシュー #1335）。`read_to_vec` はこの借用を `to_vec()` するだけの
     /// 薄いラッパーへ変わった（下記）。
     ///
-    /// **呼び出し前提（イシュー #1017・#1335 で借用 API へ拡張）**:
-    /// 呼び出し元は、このバッファへの書き込みが完了していることを
-    /// `context.rs::MetalContext::synchronize` 等で保証済みであること。
-    /// 本メソッド自体はシグネチャに `&MetalContext` を持たないため同期を
-    /// 行わない（公開 API 非破壊。`.claude/rules/security.md`）。クレート内
-    /// の呼び出し元（`memory.rs::download_inner`／`memory.rs` の
-    /// `with_host_view` 実装）は本メソッド呼び出し直前に
-    /// `self.context.synchronize()` を挟む契約とすることでこの前提を
-    /// 満たす。**返却スライスの寿命 `&self` の間、GPU 側の書き込みを新たに
-    /// 積まないこと**（`&self` の共有借用が生きている間は排他書き込み
-    /// （`zero_fill` 等の `&self` 経由書き込み・GPU 側 dispatch の再発行）
-    /// が型・呼び出し規約の両面で並行しない前提。イシュー #1335 の
-    /// `MemoryOps::with_host_view` 契約と対応する）。
+    /// **P0 是正（codex-review 指摘・イシュー #1335）**: 当初実装は
+    /// `pub fn`（クレート外からも直接呼べる安全 API）だったため、外部
+    /// 呼び出し元が本メソッドで得た `&[f32]` を保持したまま、同じく
+    /// 公開されている [`crate::gemm::MetalGemm::dispatch_tiled_prepared`]
+    /// 等（`&MetalBuffer` の共有参照のみを要求）へ同一バッファを出力先
+    /// として渡すことができ、共有参照が生きている間に GPU 側書き込みが
+    /// 走りうる（Rust の共有参照の不変条件違反。AGENTS.md「unsafe の
+    /// 統制」違反）という安全性の穴があった。本メソッドを `pub(crate)`
+    /// （クレート外から到達不能）かつ `unsafe fn`（呼び出し自体に
+    /// 下記契約の遵守を要求）へ格下げし、低水準の生借用 API をクレート
+    /// 内部の閉じた境界へ封じ込めることで穴を閉じる（クレート外から
+    /// 借用付きホスト読み出しが必要な場合は、借用の寿命をクロージャ
+    /// 実行区間に閉じる安全な公開面 [`crate::memory::MetalMemory::
+    /// with_host_view`]（`MemoryOps::with_host_view` の Metal 実装）を
+    /// 経由すること。クレート内の呼び出し元は本メソッド呼び出し時点で
+    /// `self` への他の書き込み経路が生じないことを個別に検証済み——
+    /// 呼び出し元は `read_to_vec`（直後に `to_vec()` してスライスを
+    /// 破棄）と `with_host_view`（借用をクロージャ内に閉じ込め、GPU
+    /// dispatch を渡さない契約。同メソッドのドキュメンテーションコメント
+    /// 参照）の 2 箇所のみ）。
     ///
     /// # Safety 境界（`unsafe` 使用箇所 2/3。イシュー #1335 で
-    /// `read_to_vec` から本メソッドへ移設。新規 `unsafe` ブロックの追加は
-    /// なし）
+    /// `read_to_vec` から本メソッドへ移設）
+    /// 呼び出し元は次の 2 点を保証すること:
+    /// 1. このバッファへの書き込みが完了していることを
+    ///    `context.rs::MetalContext::synchronize` 等で保証済みであること
+    ///    （読み出し時点で GPU 側の未完了書き込みが残っていないこと）。
+    /// 2. 返却スライスの寿命 `&self` の間、`self` が指す同一バッファへ
+    ///    GPU 側の書き込みを新たに積まないこと（`zero_fill` 等の `&self`
+    ///    経由書き込み・`MetalGemm::dispatch_*` 系の GPU dispatch 再発行
+    ///    のいずれも含む）。
+    ///
     /// `contents()` は `StorageModeShared` バッファの CPU 可視アドレスを
     /// 返す（確保時に `MTLResourceOptions::StorageModeShared` を指定して
     /// いるため CPU から直接参照可能）。読み出す要素数は確保時に記録した
     /// `self.len`（確保時の `checked_byte_len` で検証済みのバイト数に
     /// 対応する要素数）に限定しており、確保バイト数を超えて読むことは
-    /// ない。
-    pub fn as_host_slice(&self) -> &[f32] {
+    /// ない（この部分は呼び出し元契約とは独立に本メソッド自身が保証する）。
+    pub(crate) unsafe fn as_host_slice(&self) -> &[f32] {
         let ptr = self.raw().contents();
-        // SAFETY: 上記コメント参照。`self.len` は常に論理長（`Pooled`
-        // 分岐でも capacity ではなく論理長。設計文書 §3.1「capacity と
-        // 論理長の分離」）であり、`raw()` が返す `MtlBuffer` の確保
-        // バイト数（`Owned` は `self.len` と一致・`Pooled` は
-        // `capacity_bytes >= self.len * 4` がプール側の丸め契約により
-        // 常に成立。`crate::pool::MetalAllocator::alloc_inner` 参照）を
-        // 超えて読むことはない。返却する借用の寿命は `&self` に紐づく
-        // ため、呼び出し元は本メソッドの戻り値を保持している間 `self`
-        // への排他アクセス（`&mut self` を要求する API はそもそも存在
-        // しない。`zero_fill`／GPU 書き込みの再発行は呼び出し規約で
-        // 排除する。上記ドキュメンテーションコメント参照）を行わない。
+        // SAFETY: 呼び出し元は上記 2 条件（同期済み・排他書き込みなし）
+        // を満たす契約（本メソッドが `unsafe fn` である理由）。
+        // `self.len` は常に論理長（`Pooled` 分岐でも capacity ではなく
+        // 論理長。設計文書 §3.1「capacity と論理長の分離」）であり、
+        // `raw()` が返す `MtlBuffer` の確保バイト数（`Owned` は
+        // `self.len` と一致・`Pooled` は `capacity_bytes >= self.len * 4`
+        // がプール側の丸め契約により常に成立。`crate::pool::
+        // MetalAllocator::alloc_inner` 参照）を超えて読むことはない。
         unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const f32, self.len) }
     }
 
     /// バッファの内容をホストへ読み出し新規 `Vec` としてコピーする。
     ///
-    /// 借用のまま使えない場合（所有権が必要な場合）のみ使う。借用で
-    /// 済む場合は [`Self::as_host_slice`]（コピーなし）を使う。
+    /// 借用のまま使えない場合（所有権が必要な場合）のみ使う。
     pub fn read_to_vec(&self) -> Vec<f32> {
-        self.as_host_slice().to_vec()
+        // SAFETY: `as_host_slice()` の Safety 契約 2 点を満たす:
+        // (1) 呼び出し元（このメソッド自身）は書き込み完了の同期を
+        // 呼び出し元契約として要求するのみで、本メソッド自体は
+        // 追加同期を行わない（従来どおりの契約。呼び出し元の
+        // `memory.rs::download_inner` 等が `synchronize()` を先に
+        // 呼ぶ）。(2) 返す借用は `.to_vec()` で即座にコピーし、この式の
+        // 評価が終わるまでの間のみ生存する一時値であり、その間に
+        // 新規 GPU dispatch を挟む経路は存在しない（単一式内で完結）。
+        unsafe { self.as_host_slice() }.to_vec()
     }
 
     /// バッファの内容を全要素 0 で上書きする。

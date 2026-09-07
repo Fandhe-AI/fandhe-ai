@@ -219,6 +219,21 @@ impl MemoryOps for CpuBackendOps {
     ) -> Result<(), BackendError> {
         upload_into_cpu_buffer(tensor, dst, dst_offset)
     }
+
+    /// [`MemoryOps::with_host_view`] の CPU 実装（イシュー #1335
+    /// codex-review P2 指摘）。`shared_cpu_memory()` へ委譲しないまま
+    /// 既定実装（`download` 経由のコピー）へフォールバックすると、
+    /// `crate::memory::CpuMemory::with_host_view`（イシュー #1335）が
+    /// 実装したコピーなし借用の効果が `CpuBackendOps` 経由の呼び出し
+    /// （`facade`／`autodiff` からの実到達経路）では失われるため、他の
+    /// メソッドと同じ委譲パターンで明示的に転送する。
+    fn with_host_view(
+        &self,
+        buffer: &DeviceBuffer<f32>,
+        f: &mut dyn FnMut(&[f32]),
+    ) -> Result<(), BackendError> {
+        shared_cpu_memory().with_host_view(buffer, f)
+    }
 }
 
 /// [`MemoryOps::upload_into`] の CPU 実装本体。`CpuBackendOps`・
@@ -1217,6 +1232,39 @@ mod repack_count_tests {
             counter(),
             before + 2,
             "両方転置（TT）は両オペランドとも contiguous() フォールバックを通るはず"
+        );
+    }
+}
+
+/// `CpuBackendOps::with_host_view`（イシュー #1335 codex-review P2 是正）
+/// が `shared_cpu_memory()` へ実際に転送され、既定実装（`download` 経由
+/// のコピー）ではなくコピーなし借用の実装（`CpuMemory::with_host_view`）
+/// へ到達することを検証する。
+#[cfg(test)]
+mod with_host_view_forwarding_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_backend_ops_with_host_view_matches_download_bit_exact() {
+        let ops = CpuBackendOps::new();
+        let data = vec![1.0f32, -2.5, 3.25, f32::MIN_POSITIVE, f32::MAX];
+        let tensor = Tensor::<f32>::new(data.clone(), &[5]).unwrap();
+        let buf = ops.upload(&tensor).unwrap();
+
+        let mut observed = Vec::new();
+        ops.with_host_view(&buf, &mut |slice| observed = slice.to_vec())
+            .unwrap();
+
+        let downloaded = ops.download(&buf).unwrap();
+        assert_eq!(
+            observed.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            downloaded
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            "CpuBackendOps::with_host_view は download() と bit 同一のはず"
         );
     }
 }

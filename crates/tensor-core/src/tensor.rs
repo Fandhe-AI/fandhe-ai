@@ -320,13 +320,21 @@ impl<T: Element> Tensor<T> {
         if let Some(slice) = self.as_slice() {
             std::borrow::Cow::Borrowed(slice)
         } else {
-            // `contiguous()` は非 contiguous な場合に必ず新規 storage を
-            // 実体化するため、その直後の `as_slice()` は常に `Some` に
-            // なる（`contiguous()` のドキュメンテーションコメント参照）。
-            // ただし `Tensor` を返した後に呼び出し元へ渡すため、ここでは
-            // 一時変数を経由して `to_vec()`（`Cow::Owned` へ格納する
-            // ための所有データ化）する。
-            std::borrow::Cow::Owned(self.contiguous().as_slice().unwrap_or(&[]).to_vec())
+            // `contiguous()` は非 contiguous な場合に必ず新規
+            // `Arc::new(Storage { .. })`（参照カウント 1 のユニーク所有）
+            // を実体化するため（`contiguous()` 実装参照）、直後の
+            // `Arc::try_unwrap` は必ず成功し、`Storage::data`（`Vec<T>`）
+            // を追加コピーなしで取り出せる（イシュー #1335 codex-review
+            // P2 指摘: 従来は `as_slice().to_vec()` で `contiguous()` の
+            // 実体化に加えもう 1 回コピーする二重コピーだった）。
+            // `Err` 分岐（他に共有された場合）は `contiguous()` の実装が
+            // 変わらない限り到達しない防御的フォールバックで、
+            // `Storage: Clone` ではないため `data.clone()` を明示する。
+            let Tensor { storage, .. } = self.contiguous();
+            std::borrow::Cow::Owned(match Arc::try_unwrap(storage) {
+                Ok(unique) => unique.data,
+                Err(shared) => shared.data.clone(),
+            })
         }
     }
 
@@ -937,6 +945,36 @@ mod tests {
         assert!(t.as_slice().is_some());
         let tt = t.transpose(0, 1).unwrap();
         assert!(tt.as_slice().is_none());
+    }
+
+    /// `host_slice()` は contiguous な場合 `Cow::Borrowed`（コピーなし）
+    /// を返す（イシュー #1335）。
+    #[test]
+    fn host_slice_contiguous_is_borrowed_and_bit_exact() {
+        let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let view = t.host_slice();
+        assert!(matches!(view, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(&*view, t.as_slice().unwrap());
+    }
+
+    /// `host_slice()` は非 contiguous（transpose 後）な場合 1 回だけ
+    /// 実体化した `Cow::Owned` を返し、`contiguous().as_slice()` と
+    /// bit 同一である（イシュー #1335 codex-review P2 是正: `contiguous()`
+    /// が新規確保した `Arc<Storage>` を `Arc::try_unwrap` で取り出す
+    /// ため二重コピーを経由しない）。
+    #[test]
+    fn host_slice_non_contiguous_is_owned_and_bit_exact() {
+        let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let tt = t.transpose(0, 1).unwrap();
+        let expected = tt.contiguous().as_slice().unwrap().to_vec();
+
+        let view = tt.host_slice();
+        assert!(matches!(view, std::borrow::Cow::Owned(_)));
+        assert_eq!(
+            view.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "host_slice() は contiguous().as_slice() と bit 同一のはず"
+        );
     }
 
     // イシュー #1040: `as_view_slice` は非 contiguous view（transpose 後）

@@ -427,6 +427,17 @@ impl MemoryOps for MetalMemory {
     /// コストの削減経路そのもの）。`numel == 0`（`handle.buffer ==
     /// None`）は空スライスをそのまま渡す（モジュール冒頭「空テンソルの
     /// 契約」）。
+    ///
+    /// **P0 是正（codex-review 指摘・イシュー #1335）**: `MemoryOps::
+    /// with_host_view` は借用の寿命をクロージャ `f` の実行区間に閉じる
+    /// ことで、`MetalBuffer::as_host_slice`（`pub(crate) unsafe fn` へ
+    /// 格下げ済み。`buffer.rs` ドキュメンテーションコメント参照）が
+    /// クレート外へ漏れることを防ぐ安全な公開面である。呼び出し元は
+    /// `f` の内部で同じ `buffer` への GPU dispatch を発行しないこと
+    /// （`MemoryOps::with_host_view` トレイト側のドキュメンテーション
+    /// コメント「復帰時点でデバイス側の書き込みが完了していること」の
+    /// 契約と対応。`f` 内で新たな書き込みを発行しない限り、借用が
+    /// `deref` 経由で外部へ escape することはない）。
     fn with_host_view(
         &self,
         buffer: &DeviceBuffer<f32>,
@@ -438,7 +449,12 @@ impl MemoryOps for MetalMemory {
         self.context.synchronize().map_err(map_metal_error)?;
         match &handle.buffer {
             None => f(&[]),
-            Some(buf) => f(buf.as_host_slice()),
+            // SAFETY: 直上で `synchronize()` 済み（`as_host_slice` 契約
+            // (1)）。返す借用は `f` の呼び出し区間にのみ生存し、その間
+            // 本メソッドは `buf` への他の書き込みを発行しない（契約
+            // (2)）。`f` 自身が同じ `buffer` へ GPU dispatch を発行しない
+            // ことは呼び出し元契約（上記ドキュメンテーションコメント）。
+            Some(buf) => f(unsafe { buf.as_host_slice() }),
         }
         Ok(())
     }
