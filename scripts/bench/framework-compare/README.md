@@ -286,6 +286,104 @@ cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 4096 --m
 GB10 実機での計測結果・カーネル専有時間ベースの candle 比（参考値）は
 `docs/perf/cuda-gemm-reuse-phase-breakdown.md`（イシュー #1182）を参照。
 
+#### CPU での区間定義と Layer B（イシュー #1290）
+
+CPU は上記 5 区間（`matmul`／`to_tensor`／`host_copy`／`checksum`／
+`iter_total`）を **コード変更なしで** 計測できる（`--device cpu` は
+`dispatch` の `("gemm","reuse",true)` 分岐に device 分岐が無いため）。
+CPU gate 対象形状の下限（README「GEMM ゲート 5 回計測」節。
+`cpu={512,1024,2048}`）で完走することを `gemm_reuse_phases_cpu_smoke_n512`
+（`bench-fandhe/src/main.rs` テスト）が固定している:
+
+```bash
+cargo run --release -p bench-fandhe -- --task gemm --device cpu --size 512 --mode reuse --phases
+```
+
+`matmul` 区間の内訳は CPU では次のように対応する（CUDA #1182 の
+H2D A/B・alloc_c（プール経由）・launch_issue・kernel_wait・d2h、Metal
+#1189 の upload_a/b・alloc_c・encode・commit_wait・readback と対比）。
+CPU にはホスト⇄デバイス転送・ストリーム同期が存在しない（ホスト常駐の
+まま演算する）ため、`matmul` 区間は「Arc clone（`materialize_fallible`
+の実体化）」＋「C 確保（`vec![0.0f32; n*n]`）」＋「マイクロカーネル本体
+（`gemm_blis_parallel`）」＋「`Tensor::new` によるラップ」＋「autodiff
+ノード push（`push_eager`）」の合成である:
+
+| Layer A `matmul` の内訳 | CPU 実体 | 対応する Layer B 区間（`crates/backend-cpu`） |
+| --- | --- | --- |
+| （H2D 相当なし。値渡しではなく `Arc` 共有） | `Var::matmul` 冒頭の `materialize_fallible(..).clone()`（A・B 各 1 回） | 計測対象外（診断側では呼び出し元でループ外に 1 回だけ `contiguous().as_slice()` した結果を渡し、`kernel` 計時窓から除外する） |
+| C 確保 | `vec![0.0f32; n*n]` | `alloc_c` |
+| カーネル実行 | `gemm_blis_parallel`（本番 NN 経路。RowPanel・既定スレッド数） | `kernel` |
+| （D2H 相当なし） | `Tensor::new(out, &out_shape)` | `tensor_wrap` |
+| （同期相当なし） | `push_eager`（tape ノード追加） | `tape_matmul` − `ops_gemm` の残差（autodiff オーバーヘッドの近似） |
+
+`to_tensor`／`host_copy`／`checksum` は Layer A と 1:1 で対応する
+（`c_var.to_tensor()` → `.contiguous().as_slice().to_vec()` → f64 全要素
+和。§下記表参照）。
+
+**何を固定費に含めるか**（CUDA §6／Metal §6 と同じ切り分け）:
+
+- `host_copy`＋`checksum` は **ハーネス自身の診断コスト**（#965/#970 の
+  既存契約と同じ。本番経路には乗らない）。
+- `alloc_c` と autodiff 残差（`tape_matmul` − `ops_gemm`）は
+  **facade/autodiff 呼び出しの固定費**（削減対象候補。イシュー #1294）。
+- `kernel` が実ペイロード。`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §8.1 の「カーネル単体 GFLOP/s」（`gemm_blis_variant_ab_*`・OSS 直接
+  比較ハーネス）との突合には `kernel` 区間の値を使う。
+
+**実行コマンド**（実機・5 回独立プロセス起動・中央値。
+`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値」）:
+
+```bash
+cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+  gemm_reuse_phase_diag_cpu --nocapture --test-threads=1
+```
+
+**忠実性の注意点**（`crates/backend-cpu/src/gemm_reuse_phase_diag_tests.rs`
+冒頭コメントに同一内容あり）:
+
+- **keep-alive**: 本番 reuse（`run_gemm_reuse`）は matmul の出力
+  `Tensor` をアロケータへ返却せず毎反復新規ページに書く一方、readout
+  （ホストコピー `Vec<f32>`）は反復ごとに破棄する。診断側もこれに揃え、
+  `kernel`／`ops_gemm` 各パスの出力 `Tensor`（`wrapped`／`ops_out`）
+  のみを保持しアロケータのページ再利用でコストが消える乖離を避け、
+  readout コピーは保持しない（`tape_matmul` パスの出力は tape 自身が
+  内部で保持するため追加の保持は不要）。
+- **calloc／first-touch の帰属**: `vec![0.0; n*n]` は大サイズでは OS の
+  遅延ゼロページに倒れうるため、初回書き込みの page-fault コストは
+  `alloc_c` ではなく `kernel`（実際に書き込む側）に計上されうる。
+  `alloc_c` を「確保コストの上限」と読まない。
+
+**突合前提**（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` への
+転記時に明記する）: Layer A（`gemm --mode reuse --phases`）は
+crates.io 公開版 `fandhe-ai =0.7.0` で計測する一方、Layer B（本節の
+診断テスト）は HEAD で計測する。突合には CPU GEMM 本番経路
+（`gemm_blis_parallel`・`CpuBackendOps::gemm`・`Var::matmul`）に
+`fandhe-ai =0.7.0` タグ以降の非コメント差分が無いことの確認が前提で、
+`git diff v0.7.0..HEAD -- crates/backend-cpu/src crates/autodiff/src
+crates/facade/src crates/tensor-core/src` を確認した結果（2026-09-07・
+本イシュー #1290 時点）:
+`crates/autodiff/src/var.rs`（`Var::matmul` 自体は変更なし・別メソッド
+の追加のみ）・`crates/backend-cpu/src/ops.rs`（`CpuBackendOps::gemm`
+自体は変更なし・`MemoryOps` へのメソッド追加のみ）・
+`crates/facade/src/lib.rs`・`crates/tensor-core/src/{buffer,pool,tensor}.rs`
+はいずれも既存関数の呼び出し経路を変えない**追加のみ**。
+`crates/backend-cpu/src/gemm_blis/mod.rs`（627 行差分）は
+`gemm_blis_parallel` を含む複数箇所の並列度算出を
+`rayon::current_num_threads()` から `crate::thread_limit::
+effective_num_threads(...)`（イシュー #1363）へ差し替えているが、
+同関数は既定ゲート `thread_limit::BIG_CORE_LIMIT_ENABLED = false`
+（#1364 の両実機実測で REJECT・差し戻し確定済み。
+`docs/perf/cpu-gemm-default-thread-limit.md` §6）のときは
+`rayon::current_num_threads()` をそのまま返す恒等写像であり、
+`gemm_blis_parallel` の NN 経路（本診断が計測する経路）の挙動は
+`fandhe-ai =0.7.0` と不変。したがって突合前提は成立する。
+
+実測（両実機・5 回独立プロセス中央値）は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` へ記録する
+（イシュー #1292）。`gemm --mode reuse --phases`（CPU 含む）は診断専用
+であり、上記のとおり `run_all*.sh`／`run_gemm_gate*.sh` の標準スイープ
+には組み込まない。
+
 #### 借用ビュー readout（イシュー #1337。`host-view-readout` feature）
 
 上記 `#1182` が確定した結論（`host_copy`〈`.to_vec()` の memcpy〉が
