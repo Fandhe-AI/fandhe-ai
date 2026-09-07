@@ -9,9 +9,15 @@
   （PR #1411 `3d5e833`〈イシュー #1337 実装本体〉より後、PR #1420 まで含む HEAD）
 - ラベル: `head-1c298ff-readout-off`（feature 無効・legacy 経路）／
   `head-1c298ff-readout-on`（`host-view-readout` feature 有効・借用ビュー経路）
-- いずれも `GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス>` を使う
-  **参考系列**（crates.io 承認ピン `fandhe-ai =0.7.0` には該当 API が未収録）。
-  正式系列（registry ピン）は不変。
+- **off/on 間でソースが揃っていない**: off 腕は `GEMM_GATE_PATCH_FACADE_PATH`
+  未使用の `fandhe_ai_source=registry`（crates.io 承認ピン `fandhe-ai =0.7.0`。
+  正式系列相当）、on 腕のみ `GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス>`
+  を使う `fandhe_ai_source=path:<facade 絶対パス>`（HEAD `1c298ff...`。
+  `host-view-readout` API は registry ピンに未収録のため path 差し替えが必須）。
+  off/on 比較には readout feature の効果に加えソース差（registry 対 HEAD）が
+  混入しており、readout（#1337）単独への効果分離帰属はできない（詳細・同一
+  ソースでの比較は `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12 を
+  参照）。正式系列（registry ピン）の判定自体は不変。
 
 ## 実機構成
 

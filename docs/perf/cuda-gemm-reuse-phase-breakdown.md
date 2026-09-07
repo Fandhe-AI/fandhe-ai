@@ -273,5 +273,11 @@ bit_exact`・`host_view_readout_keeps_tape_usable`）で自己検証済み（fea
 
 `#1336`（CUDA pinned host staging）は本経路に到達しない点（`Var::matmul`
 の出力は `gemm` バックエンド内部の readback で既にホスト常駐 `Tensor` に
-なっているため）は README 側に明記済み（誤帰属防止）。上記いずれの実測でも
-効果は `#1337` に帰属し `#1336` には帰属しないことを各節で確認している。
+なっているため）は README 側に明記済み（誤帰属防止）。上記いずれの節でも
+`#1336` には帰属しないことを確認しているが、**`#1337`（readout 単独）への
+厳密な帰属は off/on 間でライブラリソース（registry ピン対 HEAD path）を
+揃えて計測できた比較に限られる**。同一ソースで比較できたのは CUDA
+§12（`docs/perf/cuda-gemm-candle-gate-remeasurement.md`）のみであり、
+Metal §12・CPU §15 は off 腕が registry・on 腕が HEAD path という
+ソース差を含む参考比較のため、readout 単独への帰属は保留のまま各節に
+明記している（詳細は各節を参照）。

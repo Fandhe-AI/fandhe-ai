@@ -324,8 +324,9 @@ fandhe-ai 側は全 30 run で `parity_fail_count=0`。off/on の checksum は�
 | 4096/reuse | 41.511 ms (min 40.111 ms / max 48.830 ms) | 55.336 ms (min 42.258 ms / max 83.371 ms) | 1.3330 | 完全一致 | 後退 |
 ```
 
-- checksum 完全一致・parity 0 fail のため数値精度への影響はなく、純粋に readout 経路のコスト
-  差（＋計測時の負荷差。§12.1）の問題
+- checksum 完全一致・parity 0 fail のため数値精度への影響はないが、§12.1 のとおり off/on 間の
+  ソース差（registry ピン対 HEAD path）と計測時の負荷差の両方が未分離の交絡要因として残る
+  ため、後退幅を readout 経路のコスト差のみに帰属することはできない
 - `docs/perf/metal-gemm-reuse-phase-breakdown.md` §6 は `host_copy` が Metal reuse の
   `iter_total` に占める割合を 7.8〜10.7% と見積もっており、CUDA（#1182 のフェーズ分解で
   `host_copy` がより支配的）ほど借用ビュー化の恩恵が大きくないことを事前に示唆していた。
@@ -342,8 +343,10 @@ fandhe-ai 側は全 30 run で `parity_fail_count=0`。off/on の checksum は�
   明記する
 - **#1336 の非到達**: `Var::matmul` 出力は `gemm` 内部の readback で既にホスト常駐
   `Tensor` であるため、CUDA 向け pinned host staging（`MemoryOps::with_host_view`。#1336）は
-  この readout 経路を通らない（Metal には同種の staging 実装自体がない）。本節の効果は
-  `#1337`（borrowed-view readout そのもの）に帰属する
+  この readout 経路を通らない（Metal には同種の staging 実装自体がない）。ただし §12.1 の
+  とおり off/on 間でソース（registry ピン対 HEAD path）が揃っておらず readout feature 以外の
+  コード差分が混入しうるため、**本節の効果を `#1337`（borrowed-view readout）単独へ厳密に
+  帰属することはできない**（#1336 概念の非到達は追加の交絡要因が無いことのみを意味する）
 - **`host-view-readout` 既定化の可否**: 本節では判断しない（Metal で 3 形状とも後退・かつ
   負荷ノイズおよび off/on 間のソース差〈§12.1〉のいずれとも切り分けられていないため、
   既定化の根拠にはできない）
