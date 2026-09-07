@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変
 
 ## 1. 位置づけ
 
@@ -257,3 +257,83 @@ fandhe-ai・candle とも全 30 run で `parity_fail_count=0`・checksum が同�
 1.0 倍との差は負荷ノイズで説明できる範囲を超える（N=1024 の fandhe min 2.136 ms でも candle
 中央値 2.120 ms に届かない）。達成条件の見直し要否・後継ツリーへの引き継ぎは §9
 「2026-09-06 更新」を参照。
+
+## 12. 2026-09-07 追補: 借用ビュー readout 切替前後の再計測（イシュー #1337）
+
+### 12.1 位置づけ・プロトコル
+
+- 実装本体は PR #1411（`3d5e833`。#1334 ツリー）で完了済み。`bench-fandhe` の `readout_var`／
+  `checksum_var`／`checksum_tensor` を cargo feature `host-view-readout`（既定 OFF）で
+  借用ビュー（`fandhe_ai::VarHostView`／`Tensor::host_slice`。#1335/#1336）readout 経路へ
+  切替可能にした。本節はその効果を Metal（M4 Max）で切替前後 5 回中央値として実測した記録
+- crates.io の承認ピンは §11 時点から更新されていないため（`host-view-readout` が使う API は
+  `fandhe-ai =0.7.0` に未収録）、本節も §11 と同じ **参考系列**（`GEMM_GATE_PATCH_FACADE_PATH`
+  による path 差し替え HEAD ビルド）のみで計測する。正式判定（registry ピン）は §11 のまま不変
+- 転送元 sha: `1c298ff5641b948dae3c1c65699930054af8f747`（PR #1411 より後、PR #1420 まで含む
+  HEAD）。ラベル: `head-1c298ff-readout-off`（feature 無効・legacy 経路）／
+  `head-1c298ff-readout-on`（`host-view-readout` 有効・借用ビュー経路）
+- プロトコルは §2 と同一（`run_gemm_gate_metal.sh`）に加え、
+  `GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス>`（on 腕はさらに
+  `GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout`）を付与。効果分離には
+  `compare_gemm_ab.py --device metal --sizes gate --modes reuse`
+  （`jq -c 'select(.framework == "fandhe-ai")'` で抽出した `*.fandhe-only.jsonl` が入力）を
+  追加使用
+- **負荷状態の注意書き（重要）**: 本節の計測は §11 よりさらに高負荷な共有マシン状態で実施した
+  （`uptime` load average: off 開始前 5.13/6.11/8.71 → off 完了時 10.08/7.63/9.07 →
+  on 完了時 21.46/13.16/11.05。詳細 `docs/perf/logs/gemm-candle-gate-readout-1337/env_info.txt`）。
+  off 腕より on 腕のほうが一貫して高負荷という**片方向のノイズ**のため、後述 §12.2 の後退が
+  readout 経路そのものに起因するか負荷ノイズに起因するかを本節単独では切り分けられない
+  （§12.4 のユーザー判断事項）
+- 生データ: `scripts/bench/framework-compare/results/raw/{results,skipped,manifest}-m4max-
+  gemm-gate-head-1c298ff-readout-{off,on}.{jsonl,log,json}`（各 30 行・`skipped-*.log` 空）。
+  実行ログ・env_info: `docs/perf/logs/gemm-candle-gate-readout-1337/`
+
+### 12.2 実測結果
+
+| N | readout-off 中央値（min–max, n=5） | readout-on 中央値（min–max, n=5） | candle fresh 中央値（n=5） | off の candle 比 | on の candle 比 | off 判定 | on 判定 |
+|---|---|---|---|---|---|---|---|
+| 1024 | 2.291 ms（2.041–2.955 ms） | 3.570 ms（2.351–5.498 ms） | 2.102 / 2.337 ms | 0.918 | 0.655 | 未達 | 未達 |
+| 2048 | 10.054 ms（9.233–10.570 ms） | 13.077 ms（10.846–15.814 ms） | 7.491 / 9.276 ms | 0.745 | 0.709 | 未達 | 未達 |
+| 4096 | 41.511 ms（40.111–48.830 ms） | 55.336 ms（42.258–83.371 ms） | 23.620 / 35.790 ms | 0.569 | 0.647 | 未達 | 未達 |
+
+fandhe-ai 側は全 30 run で `parity_fail_count=0`。off/on の checksum は全セル完全一致
+（`compare_gemm_ab.py` 出力。§12.3）。CUDA（#1360）・DGX CPU（§15）で観測された「大形状で
+改善」というパターンは Metal では再現せず、**全 3 形状で後退**した。
+
+### 12.3 readout 切替効果（`compare_gemm_ab.py --device metal --sizes gate --modes reuse`）
+
+```
+| size/mode | before median | after median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 1024/reuse | 2.291 ms (min 2.041 ms / max 2.955 ms) | 3.570 ms (min 2.351 ms / max 5.498 ms) | 1.5582 | 完全一致 | 後退 |
+| 2048/reuse | 10.054 ms (min 9.233 ms / max 10.570 ms) | 13.077 ms (min 10.846 ms / max 15.814 ms) | 1.3007 | 完全一致 | 後退 |
+| 4096/reuse | 41.511 ms (min 40.111 ms / max 48.830 ms) | 55.336 ms (min 42.258 ms / max 83.371 ms) | 1.3330 | 完全一致 | 後退 |
+```
+
+- checksum 完全一致・parity 0 fail のため数値精度への影響はなく、純粋に readout 経路のコスト
+  差（＋計測時の負荷差。§12.1）の問題
+- `docs/perf/metal-gemm-reuse-phase-breakdown.md` §6 は `host_copy` が Metal reuse の
+  `iter_total` に占める割合を 7.8〜10.7% と見積もっており、CUDA（#1182 のフェーズ分解で
+  `host_copy` がより支配的）ほど借用ビュー化の恩恵が大きくないことを事前に示唆していた。
+  本節の後退はその見立てと方向としては矛盾しない（Metal では readout 削減の恩恵よりも
+  負荷ノイズ・その他の固定費の影響が上回った可能性がある）が、**§12.1 の片方向負荷差のため
+  「readout-on 自体が Metal で純粋に遅い」と断定はしない**
+
+### 12.4 公正性の論点・スコープ・ユーザー判断事項（親 #1334 受け入れ条件）
+
+- **公正性**: candle 側ハーネス（`bench-candle`）は本イシューで変更していない（`to_vec2` の
+  まま）。読み出し経路は各ライブラリの公開 API の一部であり、fandhe-ai 側の feature 切替は
+  ハーネスの偏向ではなく製品側実装の測定である。一方、candle にはこれに相当する借用 API が
+  無い／使用していないため、iter_total 境界の比較が「読み出し方式の差」を含むことは限界として
+  明記する
+- **#1336 の非到達**: `Var::matmul` 出力は `gemm` 内部の readback で既にホスト常駐
+  `Tensor` であるため、CUDA 向け pinned host staging（`MemoryOps::with_host_view`。#1336）は
+  この readout 経路を通らない（Metal には同種の staging 実装自体がない）。本節の効果は
+  `#1337`（borrowed-view readout そのもの）に帰属する
+- **`host-view-readout` 既定化の可否**: 本節では判断しない（Metal で 3 形状とも後退・かつ
+  負荷ノイズと切り分けられていないため、既定化の根拠にはできない）
+- **低負荷環境での再計測**: 本節の計測は片方向の負荷差（on 腕がより高負荷）を伴う共有マシン
+  状態下で実施した。低負荷環境での再計測は本イシューのスコープ外とし、ユーザー判断で
+  新規 issue を起票するかを決める
+- **#1037 ゲート判定への影響**: readout-off／on いずれも §11 の正式系列判定（未達 3 件）を
+  覆さない。正式判定（registry ピン）は §11 のまま不変

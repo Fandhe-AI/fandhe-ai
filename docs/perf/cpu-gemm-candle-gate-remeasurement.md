@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変
 
 ## 1. 位置づけ
 
@@ -642,3 +642,138 @@ DGX での後退の推定要因: `IcDynamic` は pc ごとに B を列全幅 `n`
 - `docs/cpu-gemm-b-packing-sharing-decision.md` §F
 - `docs/perf/logs/cpu-gemm-ic-dynamic-ab-1367/`（本追補の生ログ・env_info・集計スクリプト）
 - `.claude/rules/coding-rust.md`（bit 完全一致契約）・`.claude/rules/security.md`（unsafe 非導入）
+
+## 15. 2026-09-07 追補: 借用ビュー readout 切替前後の両実機比較（イシュー #1337）
+
+### 15.1 位置づけ・プロトコル
+
+- 実装本体は PR #1411（`3d5e833`。#1334 ツリー）で完了済み。`bench-fandhe` の `readout_var`
+  等を cargo feature `host-view-readout`（既定 OFF）で借用ビュー readout 経路へ切替可能に
+  した。本節はその効果を DGX Spark GB10（Grace CPU）・Apple M4 Max の両実機で切替前後
+  5 回中央値として実測した記録（CUDA は #1360、Metal は §12 参照）
+- crates.io 承認ピンには `host-view-readout` が使う API が未収録のため、正式系列（registry
+  ピン）は計測せず**参考系列のみ**で行う。正式判定（§12）は不変
+- 転送元 sha: `1c298ff5641b948dae3c1c65699930054af8f747`（PR #1411 より後、PR #1420 まで含む
+  HEAD）。ラベル: `head-1c298ff-readout-off`／`head-1c298ff-readout-on`
+- プロトコルは §3 と同一（`GEMM_GATE_CPU_NODE_TAG=dgx-cpu|m4max-cpu run_gemm_gate_cpu.sh`）に
+  加え、on 腕は `GEMM_GATE_PATCH_FACADE_PATH=<facade 絶対パス>
+  GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout` を付与。効果分離には
+  `compare_gemm_ab.py --device cpu --sizes gate`（既定 `--modes fresh,reuse`。CPU ゲートは
+  fandhe fresh 参考行も発行するため既定のまま）を追加使用
+- 実機構成:
+  - DGX Spark GB10: Grace CPU 20 コア（aarch64）・rustc 1.97.0。計測を通じ `uptime` load
+    average 1 桁台前半・他ジョブ混入なし（`docs/perf/logs/gemm-candle-gate-readout-1337/
+    env_info.txt`）
+  - Apple M4 Max: 16 コア（12P+4E）・macOS 26.6.2・rustc 1.96.0。**§12（Metal）と同じ共有
+    マシン状態**で、off 腕より on 腕のほうが高負荷（`uptime` load average: CPU off 完了時
+    21.29/14.55/11.77 → CPU on 完了時 30.73/18.73/13.62）。片方向の負荷差のため、後述の
+    改善が readout 経路そのものに起因するか負荷ノイズの影響を差し引いた上での改善かは
+    本節単独では完全には切り分けられない
+- 生データ: `scripts/bench/framework-compare/results/raw/{results,skipped,manifest}-{dgx-cpu,
+  m4max-cpu}-gemm-gate-head-1c298ff-readout-{off,on}.{jsonl,log,json}`（各 45 行・
+  `skipped-*.log` 空）。実行ログ・env_info: `docs/perf/logs/gemm-candle-gate-readout-1337/`
+
+### 15.2 実測結果（DGX Spark GB10・Grace CPU）
+
+| N | readout-off 中央値（min–max, n=5） | readout-on 中央値（min–max, n=5） | candle fresh 中央値（n=5） | off の candle 比 | on の candle 比 | off 判定 | on 判定 |
+|---|---|---|---|---|---|---|---|
+| 512 | 2.360 ms（2.261–2.612 ms） | 2.362 ms（2.248–2.466 ms） | 1.757 / 1.770 ms | 0.745 | 0.750 | 未達 | 未達 |
+| 1024 | 7.120 ms（6.982–7.638 ms） | 6.582 ms（6.391–6.864 ms） | 5.554 / 5.530 ms | 0.780 | 0.840 | 未達 | 未達 |
+| 2048 | - | - | - | - | - | 判定不能 | 判定不能 |
+
+N=2048 は candle 側が両腕とも 5 run 決定的に `parity_fail_count=2, max_abs_err=3.814697e-05,
+max_rel_err=3.944416e-01`（§5.2・§12.3 と同一の既知事象。tolerance は変更していない）。
+fandhe-ai 側は全 30 run（3 サイズ×5 run×2 腕）で `parity_fail_count=0`。off/on の checksum は
+全セル完全一致（`compare_gemm_ab.py` 出力。§15.4）。
+
+**DGX 側は N=512/1024 とも readout-on でわずかに改善（off/on の fandhe reuse 中央値: 512 は
+ほぼ同値、1024 は 7.120 ms → 6.582 ms・0.92 倍）したが、candle 比ではいずれも未達のまま**（低
+負荷環境での計測にもかかわらず #1117 ゲートは達成していない）。
+
+### 15.3 実測結果（Apple M4 Max）
+
+| N | readout-off 中央値（min–max, n=5） | readout-on 中央値（min–max, n=5） | candle fresh 中央値（n=5） | off の candle 比 | on の candle 比 | off 判定 | on 判定 |
+|---|---|---|---|---|---|---|---|
+| 512 | 1.161 ms（0.913–1.303 ms） | 1.023 ms（0.881–12.547 ms） | 1.056 / 1.264 ms | 0.909 | **1.236** | 未達 | **達成** |
+| 1024 | 5.024 ms（4.879–5.662 ms） | 5.748 ms（4.242–19.758 ms） | 5.055 / 6.573 ms | 1.006 | **1.144** | 達成 | **達成** |
+| 2048 | 38.176 ms（35.643–76.549 ms） | 39.568 ms（36.452–53.048 ms） | 32.661 / 43.175 ms | 0.856 | **1.091** | 未達 | **達成** |
+
+fandhe-ai 側は全 30 run で `parity_fail_count=0`。off/on の checksum は全セル完全一致。
+
+**M4 Max 側は readout-on で 3 形状とも `candle/fandhe >= 1.0`（達成）** となった。ただし on 腕
+は off 腕より高負荷な共有マシン状態下（§15.1）であり、それでも達成条件を満たしたことは
+readout 削減の効果を過小評価こそすれ過大評価する方向のバイアスではないと考えられる（負荷が
+高いほど不利になるはずの条件下での達成のため）。一方 min–max 幅が広い run（512/reuse の
+max 12.547 ms・1024/reuse の max 19.758 ms・2048/fresh の min 29.989 ms 等）が混在しており、
+5 run 中央値としての判定は成立するが背景負荷の影響は無視できない
+
+### 15.4 readout 切替効果（`compare_gemm_ab.py --device cpu --sizes gate`）
+
+DGX（低負荷環境。信頼度が高い）:
+
+```
+| size/mode | before(off) median | after(on) median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 512/fresh | 2.211 ms | 1.869 ms | 0.8454 | 完全一致 | 非後退 |
+| 512/reuse | 2.360 ms | 2.362 ms | 1.0010 | 完全一致 | 非後退 |
+| 1024/fresh | 7.749 ms | 5.403 ms | 0.6973 | 完全一致 | 非後退 |
+| 1024/reuse | 7.120 ms | 6.582 ms | 0.9245 | 完全一致 | 非後退 |
+| 2048/fresh | 36.531 ms | 29.285 ms | 0.8016 | 完全一致 | 非後退 |
+| 2048/reuse | 35.447 ms | 30.436 ms | 0.8586 | 完全一致 | 非後退 |
+```
+
+M4 Max（片方向の負荷差あり。§15.1 参照）:
+
+```
+| size/mode | before(off) median | after(on) median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 512/fresh | 1.028 ms | 1.624 ms | 1.5789 | 完全一致 | 後退 |
+| 512/reuse | 1.161 ms | 1.023 ms | 0.8811 | 完全一致 | 非後退 |
+| 1024/fresh | 5.128 ms | 10.640 ms | 2.0749 | 完全一致 | 後退（判定注意: before spread > 1.5x） |
+| 1024/reuse | 5.024 ms | 5.748 ms | 1.1441 | 完全一致 | 後退 |
+| 2048/fresh | 35.676 ms | 43.780 ms | 1.2272 | 完全一致 | 後退 |
+| 2048/reuse | 38.176 ms | 39.568 ms | 1.0365 | 完全一致 | 非後退（判定注意: before spread > 1.5x） |
+```
+
+- **DGX（低負荷）は `reuse` 列が全 fresh/reuse セル非後退**（fresh 列も含め改善または同等）。
+  これはハーネス側の `host_copy`（memcpy）削減が背景負荷に邪魔されずに観測できた結果と解釈
+  できる
+- **M4 Max（片方向負荷差あり）は `reuse` 判定が 512/2048 で非後退、1024 のみ「後退」**表示
+  だが、§15.3 のとおり `candle/fandhe` 比では 3 形状とも達成しており、`compare_gemm_ab.py`
+  の非回帰判定（before との単純比較）と candle 比ゲート判定は独立の指標であることに注意
+  （前者は「同一マシン内の readout 前後」、後者は「対 candle」の比較）
+- checksum は DGX・M4 Max とも全セル完全一致（数値契約は不変）
+
+### 15.5 #1117 ゲート判定への反映
+
+| 実機 | N | 正式系列 `0.7.0`（§12） | 参考系列 readout-off（§15.2/15.3） | 参考系列 readout-on |
+|---|---|---|---|---|
+| DGX | 512 | 未達（0.810 倍） | 未達（0.745 倍） | 未達（0.750 倍） |
+| DGX | 1024 | 未達（0.786 倍） | 未達（0.780 倍） | 未達（0.840 倍） |
+| DGX | 2048 | 判定不能 | 判定不能 | 判定不能 |
+| M4 Max | 512 | 未達（0.922 倍） | 未達（0.909 倍） | **達成（1.236 倍）** |
+| M4 Max | 1024 | 未達（0.778 倍） | **達成（1.006 倍）** | **達成（1.144 倍）** |
+| M4 Max | 2048 | 未達（0.829 倍） | 未達（0.856 倍） | **達成（1.091 倍）** |
+
+**正式判定（registry ピン `fandhe-ai =0.7.0` に基づく §12）: #1117 は引き続き未達成（変更なし）**。
+**参考系列（次回ピン更新後の見込み値）**: DGX は readout on/off いずれも全形状未達のまま
+（N=2048 は判定不能のまま）。M4 Max は readout-on で 3 形状とも達成する見込みだが、§15.1 の
+片方向負荷差のため確度は限定的（低負荷環境での再確認が望ましい。§15.6）。DGX で改善が
+小幅・M4 Max で改善が大きい非対称は、DGX CPU が並列度・NUMA/unified memory 構成上
+`host_copy` の相対コストが元々小さい可能性を示唆するが、原因分析は本イシューのスコープ外
+とする
+
+### 15.6 公正性の論点・スコープ・ユーザー判断事項（親 #1334 受け入れ条件）
+
+- **公正性**: candle 側ハーネスは変更していない（`to_vec2` のまま）。読み出し経路は各
+  ライブラリの公開 API の一部であり、fandhe-ai 側の feature 切替はハーネスの偏向ではなく
+  製品側実装の測定である
+- **#1336 の非到達**: CPU バックエンドは元々 `gemm` の戻り値がホストメモリ上にあり、CUDA
+  pinned host staging（#1336）に相当する概念自体が存在しない。本節の効果は純粋に
+  `#1337`（借用ビュー readout。`Arc` 参照カウント増のみで memcpy を伴わない読み出しへの
+  切替）に帰属する
+- **`host-view-readout` 既定化の可否**: 本節では判断しない。DGX（低負荷）は非後退だが
+  candle 比ゲート未達のまま、M4 Max は達成の見込みだが負荷ノイズと完全には切り分けられて
+  いないため、既定化するには (a) M4 Max の低負荷環境での再確認、(b) CUDA 側 N=1024/2048 の
+  大幅後退（#1360 §12.7）の解消、の両方が前提になる
+- **M4 Max 低負荷再計測**: 本イシューのスコープ外。新規 issue 起票はユーザー判断

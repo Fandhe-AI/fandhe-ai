@@ -260,15 +260,18 @@ fandhe に有利な方向に偏っている点に注意（§9 の「candle 側 k
 bit 同一性を `main.rs` の単体テスト（`readout_var_matches_legacy_to_vec_
 bit_exact`・`host_view_readout_keeps_tape_usable`）で自己検証済み（feature
 有効・無効いずれのビルドでも green）。CUDA/Metal/CPU 3 バックエンド ×
-対象形状での切替前後・candle 比の実機実測記録（本 issue の受入条件）は、
-本エージェント実行環境に CUDA/Metal 実機が無いため未実施のまま記入欄を
-残す（`docs/perf/{cuda,metal,cpu}-gemm-candle-gate-remeasurement.md` への
-追補は実機を持つセッションが引き継ぐ）。
+対象形状での切替前後・candle 比の実機実測記録（本 issue の受入条件）は
+以下へ記録した:
+
+- CUDA: イシュー #1360・`docs/perf/cuda-gemm-candle-gate-remeasurement.md`
+  §12（Phase 4／5 反映後の初回実測）・§13（#1337 独自実行による再現性確認・
+  公正性の論点。DGX Spark GB10）
+- Metal: イシュー #1337・`docs/perf/metal-gemm-candle-gate-remeasurement.md`
+  §12（Apple M4 Max）
+- CPU: イシュー #1337・`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §15（DGX Spark GB10 Grace CPU・Apple M4 Max 両実機）
 
 `#1336`（CUDA pinned host staging）は本経路に到達しない点（`Var::matmul`
 の出力は `gemm` バックエンド内部の readback で既にホスト常駐 `Tensor` に
-なっているため）は README 側に明記済み（誤帰属防止）。
-
-CUDA 実機での追補（正式系列・参考系列 off/on の 5 回計測ゲート判定。#1342 の
-128×64 cp.async pipeline 本番結線後の再計測を含む）はイシュー #1360・
-`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12 に記録した。
+なっているため）は README 側に明記済み（誤帰属防止）。上記いずれの実測でも
+効果は `#1337` に帰属し `#1336` には帰属しないことを各節で確認している。

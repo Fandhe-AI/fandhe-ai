@@ -1968,3 +1968,39 @@ DGX の `cpu_capacity` sysfs 値（5 段階の非一様分布）は `lscpu` の
 `docs/perf/cpu-gemm-default-thread-limit.md` §6・
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13・
 `docs/perf/logs/cpu-gemm-thread-limit-1364/` を参照。
+
+## 環境 23: DGX Spark GB10・Apple M4 Max（借用ビュー readout 切替前後・3 バックエンド × 両実機。イシュー #1337）
+
+`bench-fandhe` の `readout_var`（cargo feature `host-view-readout`。既定
+OFF・#1335/#1336 の `VarHostView`／`Tensor::host_slice` を利用。PR #1411）
+を Metal（M4 Max）・CPU（DGX Spark GB10 Grace／M4 Max）・CUDA（DGX Spark
+GB10）で切替前後 5 回中央値として実測（HEAD `1c298ff`。crates.io 承認
+ピンに該当 API が未収録のため参考系列のみ）。`compare_gemm_ab.py
+--sizes gate --modes reuse`（cpu は既定 `fresh,reuse`）で off→on の
+ratio（after/before）を突合。
+
+| device/N | Metal（M4 Max） | CPU-DGX | CPU-M4Max | CUDA（DGX） |
+|---|---|---|---|---|
+| 512 | - | 0.85〜1.00 | 0.88〜1.58 | - |
+| 1024 | 1.5582 | 0.70〜0.92 | 1.14〜2.07 | 16.4498 |
+| 2048 | 1.3007 | 0.80〜0.86 | 1.04〜1.23 | 1.3552 |
+| 4096 | 1.3330 | - | - | 0.7524 |
+
+（値は `reuse` 列。CPU 列はレンジで fresh/reuse 双方を含む。1.0 未満が
+改善・1.0 超が後退。checksum は全セル・全実機で off/on 完全一致）
+
+- **CUDA（低負荷実機）**: N=4096 のみ改善（0.75 倍）・N=1024 は 16.4 倍の
+  大幅後退。#1360（`docs/perf/cuda-gemm-candle-gate-remeasurement.md`
+  §12）と同一符号（独立実行での再現性確認。§13）
+- **CPU-DGX（低負荷実機）**: 全セル非後退（0.70〜1.00 倍）だが candle 比
+  ゲート（#1117）は未達のまま
+- **CPU-M4Max・Metal（共有負荷・片方向負荷差あり）**: いずれも後退方向
+  （CPU-M4Max は 1.04〜2.07 倍・Metal は 1.30〜1.56 倍）。ただし CPU-M4Max
+  は candle 比では 3 形状とも達成（§15.3。同一マシン内 before/after 比較
+  と対 candle 比較は独立の指標であることに注意）
+- 既定化判定は**未確定**（CUDA N=1024/2048・Metal 全形状の後退が解決課題）。
+  詳細・データ有効性・公正性の論点は
+  `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §13・
+  `docs/perf/metal-gemm-candle-gate-remeasurement.md` §12・
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §15・
+  `docs/perf/logs/gemm-candle-gate-readout-1337/` を参照
