@@ -190,8 +190,10 @@ N=4096 NN（正方立方。中核対象）:
   `L0-P0`／`L0-P8` は改善方向のシグナルがあるが N=2048/4096 で run 間の
   符号が反転し確証に至らず）**組み込み対象なし**（`tile::select` への
   結線は行わない。判断結果は #1302／#1304 へ引き継ぎ）
-  → #1304 で E2〜E4 とも組み込み対象なしと確定（§18）。状態行の更新
-  （§5・§7.7 本文の書き換え）は #1306 が担う
+  → #1304 で E2〜E4 とも組み込み対象なしと確定（§18）。#1306 で
+  framework-compare gemm metal 全 8 セル（N=512/1024/2048/4096 ×
+  fresh/reuse）が v0.7.0 → HEAD で非後退・checksum 完全一致であることを
+  確認し、本番既定（`select_for_device`）を確定した（§19）
 - cand0（candle と同一タイル形状）が 4096 で崩壊する根本原因の特定
   （スレッドあたり実行効率の直接計測手段が現状ない）
 - §2 の限界に基づく厳密なレジスタ spill 計測（Xcode Instruments の GPU
@@ -450,8 +452,9 @@ pragma の本番結線を撤回する**（§7.7a）。
   単体切替）は #1278／#1279 で M4 Max 実機実測済み・#1280 で採用候補 0 件・
   結線対象なしと確定した（本項目の対象外扱いは E1 との相互作用診断に限り
   維持。E2〜E4 は引き続き未実施）
-  → #1304 で E2〜E4 とも組み込み対象なしと確定（§18）。状態行の更新は
-  #1306 が担う
+  → #1304 で E2〜E4 とも組み込み対象なしと確定（§18）。#1306 で
+  framework-compare gemm metal 全 8 セルが v0.7.0 → HEAD で非後退・
+  checksum 完全一致であることを確認し、本番既定を確定した（§19）
 - unroll(full) を acc_rows*acc_cols>=16 の候補にのみ適用する条件付き
   gating（function constant 分岐でループ本体を複製する等）は、pragma 単純
   付与よりコード複雑化・実機再検証コストが大きいため本 PR では実施せず、
@@ -2328,15 +2331,140 @@ M4 Max（GPU 40 コア）・macOS 26.6.2・rustc 1.96.0。実行時 `uptime`:
 判定のため、共有負荷は判定の信頼性に影響しない）。詳細は
 `docs/perf/logs/metal-gemm-e2e4-select-closure-1304/env_info.txt`。
 
-### §18.4 #1306 への引き継ぎ
+### §18.4 #1306 への引き継ぎ（完了。§19 参照）
 
 - `docs/perf/metal-gemm-n4096-kernel-gap.md` §5／§7.7 の E2〜E4 該当行の
-  本文書き換え（状態行の全面更新）は #1306 が担う（本イシューはポインタ
-  1 行のみ追記）
-- framework-compare 実践規模の前後比較は #1306 のスコープ。`tile::
-  select` 系関数・候補表を本イシューで変更していないため、**候補表無変更
-  につき before=after（差分なし）となる見込み**（実測自体は #1306 が
-  行う）
+  本文書き換え（状態行の全面更新）・framework-compare 実践規模の前後
+  比較は #1306 で完了した（§19）。当初の見込み「候補表無変更につき
+  before=after（差分なし）」どおり、`tile::select` 系関数・候補表は本
+  イシューでも変更していない
 - E6（#1328）・E7（#1330）・E8（#1332）は本イシューの対象外（各自の
   イシューで完結済み。`CANDIDATES[9]`／`[10]` は「明示指定でのみ到達可能」
   な状態のまま不変）
+
+## §19 候補表更新後の framework-compare gemm metal 結線前後 A/B（イシュー #1306）
+
+### §19.0 結論
+
+**全 8 セル（size 512/1024/2048/4096 × mode fresh/reuse）非後退・checksum
+全セル完全一致（M4 Max 実機実測。compare_gemm_ab.py 終了コード 0）。**
+本番既定（`select_for_device`。#1304 完了時点の候補表）を確定し、
+**コード変更なし**（§4 決定表「全 8 セル非後退」分岐）。
+
+### §19.1 「結線前後」の解釈と根拠
+
+依存 #1304（E2〜E4 の候補組み込み判断）は `tile::CANDIDATES`／
+`tile::select`／`select_for_device` を一切変更していない（本番既定は
+不変）ことを本イシューでも再確認した:
+
+```
+git diff b2a5fcb f396784 -- crates/backend-metal/src/gemm.rs \
+  crates/backend-metal/src/tile.rs crates/backend-metal/src/spec_source.rs \
+  | grep '^[-+]' | grep -v '^[-+][-+]'
+```
+
+上記の非マージコミット差分（`^[-+]` 行）はコメント文字列の書き換え
+（`#[cfg(test)] SOURCE_SPECIALIZATION_ENABLED` の assert メッセージが
+「性能実測・本番結線判断は #1289／#1302 のスコープ」→「#1289 で REJECT・
+#1304 で `tile::select` 組み込み対象なしと確定」へ更新されたのみ）に
+とどまり、コード論理の変更は 0 行（全文は
+`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/
+diff_b2a5fcb_f396784_backend_metal_src.txt`）。加えて `v0.7.0 → HEAD` の
+`tile.rs` にも `select`／`select_for_device` の分岐変更はない（追加は
+`FragLoadConfig::DEFAULT`／`CoopLoadConfig::DEFAULT` 等の opt-in 既定値
+のみ）。
+
+このため本節は字義通りの「結線前後」のコード差分計測ではなく、**v0.7.0
+→ HEAD の Metal 側変更群（E2〜E8 の function constant 追加・候補追加・
+f16 候補等。`gemm.rs` は +3013 行）が本番既定経路の性能を後退させていな
+いかを確認する 0.7.0 ↔ HEAD 非後退確認**である（before=正式系列
+`fandhe-ai =0.7.0`〈crates.io registry 解決〉・after=参考系列 HEAD
+〈`crates/facade` への path patch〉。#1147 で確立した正式系列／参考系列
+の 2 系列方式を踏襲）。
+
+### §19.2 プロトコル
+
+- ツール: `scripts/bench/framework-compare/run_ab_gemm_metal.sh`（before/
+  after 2 バイナリのビルド・sha256／依存解決元検証・N=512/1024/2048/4096
+  × fresh/reuse × 5 run の run 単位交互起動）+ `compare_gemm_ab.py`
+  （`(size, mode)` セルごとの中央値比・checksum 判定）
+- 対象形状: N=512/1024/2048/4096（`run_gemm_gate_metal.sh`〈#1037〉の
+  N=1024/2048/4096 に N=512 を追加。イシュー #1306 の受け入れ条件が
+  N=512 を含むため）
+- モード: fresh／reuse 双方
+- before: `fandhe-ai =0.7.0`（crates.io registry。承認済みピン）
+- after: HEAD（`f396784d8802ab192ae4a7cff1ba71fec270f556`。`crates/facade`
+  への `patch.crates-io.fandhe-ai.path` 差し替え。`Cargo.lock`／
+  `.cargo/config.toml` は変更しない）
+
+### §19.3 実測結果表（M4 Max 実機。5 回計測中央値）
+
+| size/mode | before median | after median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 512/fresh | 514.2 us | 511.6 us | 0.9950 | 完全一致 | 非後退（判定注意: before spread > 1.5x） |
+| 512/reuse | 569.8 us | 553.6 us | 0.9714 | 完全一致 | 非後退（判定注意: before spread > 1.5x） |
+| 1024/fresh | 2.677 ms | 2.556 ms | 0.9547 | 完全一致 | 非後退 |
+| 1024/reuse | 2.923 ms | 2.907 ms | 0.9944 | 完全一致 | 非後退 |
+| 2048/fresh | 8.369 ms | 8.324 ms | 0.9947 | 完全一致 | 非後退（判定注意: before spread > 1.5x） |
+| 2048/reuse | 9.187 ms | 9.522 ms | 1.0365 | 完全一致 | 非後退 |
+| 4096/fresh | 33.776 ms | 33.926 ms | 1.0045 | 完全一致 | 非後退 |
+| 4096/reuse | 39.622 ms | 38.868 ms | 0.9809 | 完全一致 | 非後退 |
+
+閾値は `after/before <= 1.05`（guardrail「劣化中央値 5% 以内」の慣例値）。
+全セル閾値内・checksum 完全一致（bit 同一。本番カーネル・選択結果が
+不変であることの裏取り）。512/fresh・512/reuse・2048/fresh の 3 セルは
+before 側の run 間ばらつき（spread = max/min > 1.5x）が大きく「判定注意」
+を付与しているが、ratio 自体はいずれも 1.05 未満で判定（非後退）は変わ
+らない。全体傾向として ratio は 0.95〜1.04 の範囲に収まり、系統的な後退
+シグナルは見られない。
+
+生データ・manifest・全文表は
+`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/`
+（`env_info.txt`・`run_ab_gemm_metal-m4max-head-f396784.log`・
+`compare_gemm_ab.md`）を正とする。
+
+### §19.4 結線判断
+
+全 8 セル非後退・checksum 完全一致（§4 決定表「全 8 セル非後退」分岐）
+のため、**現行 `select_for_device` 既定（#1304 完了時点の候補表）を
+本番既定として確定する。コード変更なし**（`crates/backend-metal` の
+本番コード・`tile::CANDIDATES`／`tile::select`は本 PR でも変更しない）。
+§18 の E2〜E4 REJECT 判断・#1304 の「組み込み対象なし」確定と合わせ、
+E2〜E4 系列の調査は本イシューをもって一区切りとする。
+
+### §19.5 env_info・負荷状態
+
+M4 Max（GPU 40 コア）・macOS 26.6.2・rustc 1.96.0。計測中の
+`uptime` は load averages 5.99〜9.47・19 users（本タスク自体が複数
+イシュー並列実行ワークフローの一部であるための共有負荷。他セッションの
+並列ビルド・計測が同一マシン上で並走）。`pmset -g therm` は熱・電源
+警告レベルの記録なし。延期基準（目安 load > 6）を計測開始時点で上回っ
+ていたが、並列実行が前提のタスク構造のため延期せず実行し負荷状況を
+そのまま記録した（#1185・#1147 と同じ扱い）。全 80 起動（before/after
+× 4 size × 2 mode × 5 run）とも成功（`skipped-*.log` 空）・
+`parity_fail_count` は全行 0。詳細は
+`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/env_info.txt`。
+
+### §19.6 スコープ外・引き継ぎ
+
+- 後退が観測された場合の v0.7.0 → HEAD 変更群の切り分け（bisect・候補別
+  無効化）は本節では発生しなかったため対象外（全セル非後退のため）
+- `run_gemm_gate_metal.sh` への N=512／fresh 拡張（ゲート契約〈#1037〉の
+  変更にあたるため本 PR では行わない）
+- `results/summary.md`・`docs/performance-targets.md` の更新（A/B は
+  ゲート判定ではないため対象外）
+- E6（#1328）・E7（#1330）・E8（#1332）の結線判断は各イシューで完結済み
+  （`CANDIDATES[9]`／`[10]` は明示指定でのみ到達可能なまま不変）
+- 共有マシンの計測ノイズ原因診断（#1186／#1284 と同種。本節は負荷状況の
+  記録に留める）
+
+### §19.7 関連ログ
+
+`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/`
+（`env_info.txt`・`run_ab_gemm_metal-m4max-head-f396784.log`・
+`compare_gemm_ab.md`・`diff_b2a5fcb_f396784_backend_metal_src.txt`）。
+生データ（JSONL・manifest）は
+`scripts/bench/framework-compare/results/raw/results-m4max-gemm-ab-
+before-0.7.0.jsonl`・`results-m4max-gemm-ab-after-head-f396784.jsonl`・
+`manifest-m4max-gemm-ab-head-f396784.json`・
+`skipped-m4max-gemm-ab-head-f396784.log`（空）。

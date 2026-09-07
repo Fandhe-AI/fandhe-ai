@@ -1,0 +1,40 @@
+イシュー #1306: Metal GEMM before(0.7.0)/after(HEAD) 実践規模 A/B 計測 env_info
+（実ホスト名・machine-id は含めない。docs/real-hardware-verification-env.md 方針）
+
+機種: Apple M4 Max（40-core GPU。system_profiler SPDisplaysDataType 実測）
+macOS: 26.6.2 (25G83)
+rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+cargo: cargo 1.96.0 (30a34c682 2026-05-25)
+HEAD sha: f396784d8802ab192ae4a7cff1ba71fec270f556
+
+before (registry fandhe-ai =0.7.0):
+  sha256: c0066ca9bef521ee84d068e3f21724f74ca3a570453279d6b020efd546542339
+  fandhe_ai_source: registry
+after (HEAD path patch):
+  sha256: 94af83baaac380e558771923092051621b2385a8fe8d183638de4efa30f51d96
+  fandhe_ai_source: path:<facade 絶対パス>
+
+計測前 uptime:        16:18  up 19 days,  3:31, 19 users, load averages: 5.99 8.53 9.37
+run 4/5 完了時点:      16:20  up 19 days,  3:33, 19 users, load averages: 8.95 8.39 9.18
+run 5/5（最終）完了時点: 16:20  up 19 days,  3:33, 19 users, load averages: 9.47 8.53 9.22
+計測後 uptime:        16:20  up 19 days,  3:33, 19 users, load averages: 9.47 8.53 9.22
+pmset -g therm: 熱・電源警告レベルの記録なし
+  (Note: No thermal warning level has been recorded / No performance warning
+   level has been recorded / No CPU power status has been recorded)
+
+負荷状況の注記: load average 5.99〜9.47・19 users は本タスク自体が複数イシュー
+並列実行ワークフローの一部であるための共有負荷（他セッションの並列ビルド・
+計測が同一マシン上で並走）。計測前に延期基準（目安 load > 6）を上回っていたが、
+並列実行が前提のタスク構造のため計測を延期せず実行し、負荷状況をそのまま
+記録する（#1185・#1147 と同じ扱い）。
+
+計測結果サマリ: 全 8 セル（size 512/1024/2048/4096 × mode fresh/reuse）が
+非後退（ratio<=1.05）・checksum 全セル完全一致（compare_gemm_ab.py 終了コード
+0）。512/fresh・512/reuse・2048/fresh の 3 セルは before spread > 1.5x のため
+「判定注意（負荷ノイズの疑い）」が付与されているが、判定自体（非後退）は
+変わらない（詳細は compare_gemm_ab.md）。
+
+manifest（原本）: scripts/bench/framework-compare/results/raw/manifest-m4max-gemm-ab-head-f396784.json
+生データ: scripts/bench/framework-compare/results/raw/results-m4max-gemm-ab-before-0.7.0.jsonl
+          scripts/bench/framework-compare/results/raw/results-m4max-gemm-ab-after-head-f396784.jsonl
+skipped ログ（空。全 80 起動成功）: scripts/bench/framework-compare/results/raw/skipped-m4max-gemm-ab-head-f396784.log
