@@ -1,0 +1,1036 @@
+warning: unused import: `crate::context_cache`
+  --> crates/backend-cuda/src/gemm_mma.rs:21:5
+   |
+21 | use crate::context_cache;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `tiled_pipeline_128x64_error` is never read
+   --> crates/backend-cuda/src/gemm.rs:363:5
+    |
+227 | pub struct CudaGemm {
+    |            -------- field in this struct
+...
+363 |     tiled_pipeline_128x64_error: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:852:48
+    |
+852 | pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+852 - pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+852 + pub struct TiledPipelineFunction(CudaFunction, (), TiledPipelineTile);
+    |
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:865:8
+    |
+854 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+865 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: function `persistent_grid_blocks` is never used
+    --> crates/backend-cuda/src/gemm.rs:1028:15
+     |
+1028 | pub(crate) fn persistent_grid_blocks(num_tiles: u32, num_sms: u32, blocks_per_sm: u32) -> u32 {
+     |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_tile_count` is never used
+    --> crates/backend-cuda/src/gemm.rs:1048:15
+     |
+1048 | pub(crate) fn persistent_tile_count(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PersistentTiledPipelineFunction` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1115:12
+     |
+1115 | pub struct PersistentTiledPipelineFunction {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_block_threads` is never used
+    --> crates/backend-cuda/src/gemm.rs:1358:4
+     |
+1358 | fn persistent_block_threads(tile: TiledPipelineTile) -> u32 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:226:8
+    |
+226 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:288:4
+    |
+288 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:306:8
+    |
+306 | pub fn tiled_pipeline_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:310:8
+    |
+310 | static TILED_PIPELINE_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:317:8
+    |
+317 | pub fn tiled_pipeline_persistent_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:582:7
+    |
+582 | const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:647:7
+    |
+647 | const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:320:8
+    |
+320 | pub fn tiled_pipeline_128x64_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:380:4
+    |
+380 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:399:8
+    |
+399 | pub fn tiled_pipeline_128x64_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:403:8
+    |
+403 | static TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:411:8
+    |
+411 | pub fn tiled_pipeline_128x64_persistent_f32_source_with_stages(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:695:7
+    |
+695 | const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:763:7
+    |
+763 | const TP128_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:259:19
+    |
+239 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+259 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:651:19
+    |
+457 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+651 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+666 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 43 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_metal-4099ec6cfdfe79eb)
+
+running 49 tests
+test context_cache::tests::cached_context_returns_same_instance_across_calls ... ok
+test context_cache::tests::cached_gemm_returns_same_instance_across_calls ... ok
+test device::tests::metal_occupancy_info_reports_smem_upper_bound_at_least_32kib ... MetalOccupancyInfo = MetalOccupancyInfo { gpu_core_count: Some(40), max_threadgroup_memory_bytes: 32768 }
+ok
+test device::tests::probe_gpu_core_count_returns_positive_value_on_apple_silicon ... probe_gpu_core_count() = Some(40)
+ok
+test device::tests::probe_soc_brand_string_returns_apple_prefixed_value_on_apple_silicon ... probe_soc_brand_string() = Some("Apple M4 Max")
+ok
+test gemm::tests::coop_load_bit_match_all_candidates ... ok
+test gemm::tests::coop_load_bit_match_boundary_shape ... ok
+test gemm::tests::coop_load_bit_match_dispatch_auto ... ok
+test gemm::tests::coop_load_default_matches_production_constants ... ok
+test gemm::tests::coop_load_f16_path_is_noop ... ok
+test gemm::tests::coop_load_transposed_bit_match ... ok
+test gemm::tests::frag_load_on_off_bit_match_all_candidates ... ok
+test gemm::tests::frag_load_on_off_bit_match_dispatch_auto ... ok
+test gemm::tests::frag_load_tgp_vs_device_same_shape_bit_match ... ok
+test gemm::tests::frag_load_transposed_bit_match ... ok
+test gemm::tests::run_tiled_bias_act_f32_increments_fused_launch_counter ... ok
+test gemm::tests::run_tiled_bias_act_f32_k_zero_does_not_increment_fused_launch_counter ... ok
+test gemm::tests::source_specialized_on_off_bit_match_all_candidates ... ok
+test gemm::tests::source_specialized_on_off_bit_match_dispatch_auto ... ok
+test gemm::tests::source_specialized_route_populates_only_spec_cache ... ok
+test gemm::tests::tile_class_default_matches_production_constants ... ok
+test gemm::tests::tile_class_split_bit_match_all_candidates ... ok
+test gemm::tests::tile_class_split_bit_match_dispatch_auto ... ok
+test gemm::tests::tile_class_split_bit_match_edge_shapes ... ok
+test gemm::tests::unroll_acc_effective_matches_candidate_acc_product_threshold ... ok
+test gemm::tests::unroll_acc_on_off_bit_match_all_candidates ... ok
+test gemm::tests::unroll_acc_on_off_bit_match_dispatch_auto ... ok
+test gemm_coop_load_diag_tests::coop_load_kernel_gpu_ab_production_sizes ... N=1024 cand=L0-P4 coop_load=CoopLoadConfig { layout: RowLinear, pad: Four } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2242 q1=0.2230 q3=0.2361
+N=1024 cand=L0-P0 coop_load=CoopLoadConfig { layout: RowLinear, pad: Zero } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2214 q1=0.2207 q3=0.2354
+N=1024 cand=L0-P8 coop_load=CoopLoadConfig { layout: RowLinear, pad: Eight } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2220 q1=0.2216 q3=0.2357
+N=1024 cand=L1-P0 coop_load=CoopLoadConfig { layout: RowStrided, pad: Zero } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2244 q1=0.2238 q3=0.2376
+N=1024 cand=L1-P4 coop_load=CoopLoadConfig { layout: RowStrided, pad: Four } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2276 q1=0.2262 q3=0.2398
+N=1024 cand=L1-P8 coop_load=CoopLoadConfig { layout: RowStrided, pad: Eight } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2251 q1=0.2246 q3=0.2379
+N=1024 cand=L0-P4 head_over_base_kernel_gpu=1.000000
+N=1024 cand=L0-P0 head_over_base_kernel_gpu=0.987546
+N=1024 cand=L0-P8 head_over_base_kernel_gpu=0.990334
+N=1024 cand=L1-P0 head_over_base_kernel_gpu=1.000929
+N=1024 cand=L1-P4 head_over_base_kernel_gpu=1.015427
+N=1024 cand=L1-P8 head_over_base_kernel_gpu=1.004274
+N=2048 cand=L0-P4 coop_load=CoopLoadConfig { layout: RowLinear, pad: Four } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=7.2575 q1=2.6760 q3=7.2660
+N=2048 cand=L0-P0 coop_load=CoopLoadConfig { layout: RowLinear, pad: Zero } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=7.2310 q1=2.3402 q3=7.2403
+N=2048 cand=L0-P8 coop_load=CoopLoadConfig { layout: RowLinear, pad: Eight } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=7.2322 q1=1.8596 q3=7.2377
+N=2048 cand=L1-P0 coop_load=CoopLoadConfig { layout: RowStrided, pad: Zero } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=7.3327 q1=1.8489 q3=7.3399
+N=2048 cand=L1-P4 coop_load=CoopLoadConfig { layout: RowStrided, pad: Four } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=5.4618 q1=1.9669 q3=7.3228
+N=2048 cand=L1-P8 coop_load=CoopLoadConfig { layout: RowStrided, pad: Eight } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=6.1097 q1=1.8595 q3=7.3043
+N=2048 cand=L0-P4 head_over_base_kernel_gpu=1.000000
+N=2048 cand=L0-P0 head_over_base_kernel_gpu=0.996349
+N=2048 cand=L0-P8 head_over_base_kernel_gpu=0.996509
+N=2048 cand=L1-P0 head_over_base_kernel_gpu=1.010357
+N=2048 cand=L1-P4 head_over_base_kernel_gpu=0.752566
+N=2048 cand=L1-P8 head_over_base_kernel_gpu=0.841853
+N=4096 cand=L0-P4 coop_load=CoopLoadConfig { layout: RowLinear, pad: Four } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=13.6348 q1=13.5720 q3=13.6847
+N=4096 cand=L0-P0 coop_load=CoopLoadConfig { layout: RowLinear, pad: Zero } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=13.4154 q1=13.3379 q3=14.1171
+N=4096 cand=L0-P8 coop_load=CoopLoadConfig { layout: RowLinear, pad: Eight } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=13.5792 q1=13.5165 q3=13.6360
+N=4096 cand=L1-P0 coop_load=CoopLoadConfig { layout: RowStrided, pad: Zero } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=14.2390 q1=14.1692 q3=14.8220
+N=4096 cand=L1-P4 coop_load=CoopLoadConfig { layout: RowStrided, pad: Four } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=14.3414 q1=14.3339 q3=14.4161
+N=4096 cand=L1-P8 coop_load=CoopLoadConfig { layout: RowStrided, pad: Eight } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=14.3863 q1=14.2969 q3=15.6003
+N=4096 cand=L0-P4 head_over_base_kernel_gpu=1.000000
+N=4096 cand=L0-P0 head_over_base_kernel_gpu=0.983908
+N=4096 cand=L0-P8 head_over_base_kernel_gpu=0.995920
+N=4096 cand=L1-P0 head_over_base_kernel_gpu=1.044317
+N=4096 cand=L1-P4 head_over_base_kernel_gpu=1.051822
+N=4096 cand=L1-P8 head_over_base_kernel_gpu=1.055113
+ok
+test gemm_frag_load_diag_tests::frag_load_kernel_gpu_ab_production_sizes ... N=1024 cand=tgp-k1 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2242 q1=0.2236 q3=0.2246
+N=1024 cand=tgp-k2 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2244 q1=0.2233 q3=0.2246
+N=1024 cand=device-legacy requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } kernel_gpu_median_ms=0.5586 q1=0.5577 q3=0.5592
+N=1024 cand=device-hoisted-k1 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } kernel_gpu_median_ms=0.3510 q1=0.3507 q3=0.3515
+N=1024 cand=device-hoisted-k2 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: false } kernel_gpu_median_ms=0.4736 q1=0.4724 q3=0.4745
+N=1024 cand=tgp-k1 head_over_base_kernel_gpu=1.000000
+N=1024 cand=tgp-k2 head_over_base_kernel_gpu=1.000929
+N=1024 cand=device-legacy head_over_base_kernel_gpu=2.491546
+N=1024 cand=device-hoisted-k1 head_over_base_kernel_gpu=1.565695
+N=1024 cand=device-hoisted-k2 head_over_base_kernel_gpu=2.112248
+N=1024 cand=device-hoisted-k1 head_over_device_legacy_kernel_gpu=0.628403
+N=1024 cand=device-hoisted-k2 head_over_device_legacy_kernel_gpu=0.847766
+N=2048 cand=tgp-k1 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=1.5994 q1=1.5977 q3=1.6018
+N=2048 cand=tgp-k2 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=1.6008 q1=1.5974 q3=1.6038
+N=2048 cand=device-legacy requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=4.9026 q1=4.9019 q3=4.9033
+N=2048 cand=device-hoisted-k1 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=2.8149 q1=2.8140 q3=2.8155
+N=2048 cand=device-hoisted-k2 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=4.6605 q1=4.6169 q3=4.6776
+N=2048 cand=tgp-k1 head_over_base_kernel_gpu=1.000000
+N=2048 cand=tgp-k2 head_over_base_kernel_gpu=1.000860
+N=2048 cand=device-legacy head_over_base_kernel_gpu=3.065338
+N=2048 cand=device-hoisted-k1 head_over_base_kernel_gpu=1.759984
+N=2048 cand=device-hoisted-k2 head_over_base_kernel_gpu=2.913925
+N=2048 cand=device-hoisted-k1 head_over_device_legacy_kernel_gpu=0.574157
+N=2048 cand=device-hoisted-k2 head_over_device_legacy_kernel_gpu=0.950605
+N=4096 cand=tgp-k1 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=13.6859 q1=13.6271 q3=13.6990
+N=4096 cand=tgp-k2 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=31.1920 q1=31.0358 q3=31.3222
+N=4096 cand=device-legacy requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=32.1337 q1=32.1296 q3=32.1360
+N=4096 cand=device-hoisted-k1 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=20.7216 q1=20.7178 q3=20.7258
+N=4096 cand=device-hoisted-k2 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: false } kernel_gpu_median_ms=36.0615 q1=35.9073 q3=36.2254
+N=4096 cand=tgp-k1 head_over_base_kernel_gpu=1.000000
+N=4096 cand=tgp-k2 head_over_base_kernel_gpu=2.279138
+N=4096 cand=device-legacy head_over_base_kernel_gpu=2.347950
+N=4096 cand=device-hoisted-k1 head_over_base_kernel_gpu=1.514088
+N=4096 cand=device-hoisted-k2 head_over_base_kernel_gpu=2.634946
+N=4096 cand=device-hoisted-k1 head_over_device_legacy_kernel_gpu=0.644855
+N=4096 cand=device-hoisted-k2 head_over_device_legacy_kernel_gpu=1.122233
+ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_production_batch ...   [production] N=1024 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.1955 ms  q1=0.1920 ms  q3=0.2013 ms
+    upload_b: median=0.1936 ms  q1=0.1893 ms  q3=0.2021 ms
+    alloc_c: median=0.0001 ms  q1=0.0001 ms  q3=0.0001 ms
+    encode: median=0.0028 ms  q1=0.0028 ms  q3=0.0029 ms
+    commit_wait: median=0.3972 ms  q1=0.3959 ms  q3=0.4050 ms
+    commit_wait.kernel_gpu: median=0.2259 ms  q1=0.2246 ms  q3=0.2261 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.1735 ms
+    readback: median=0.0557 ms  q1=0.0555 ms  q3=0.0558 ms
+    host_copy: median=0.1891 ms  q1=0.1881 ms  q3=0.1921 ms
+    sum of medians: 1.0340 ms
+  [production] N=2048 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.7862 ms  q1=0.7736 ms  q3=0.8266 ms
+    upload_b: median=0.7983 ms  q1=0.7790 ms  q3=0.8200 ms
+    alloc_c: median=0.0005 ms  q1=0.0005 ms  q3=0.0007 ms
+    encode: median=0.0122 ms  q1=0.0107 ms  q3=0.0129 ms
+    commit_wait: median=2.1590 ms  q1=2.1540 ms  q3=2.1738 ms
+    commit_wait.kernel_gpu: median=1.5923 ms  q1=1.5907 ms  q3=1.5936 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.5665 ms
+    readback: median=0.2304 ms  q1=0.2249 ms  q3=0.2333 ms
+    host_copy: median=0.7957 ms  q1=0.7809 ms  q3=0.8096 ms
+    sum of medians: 4.7824 ms
+  [production] N=4096 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.1930 ms  q1=3.1100 ms  q3=3.2341 ms
+    upload_b: median=3.2052 ms  q1=3.0871 ms  q3=3.2427 ms
+    alloc_c: median=0.0010 ms  q1=0.0008 ms  q3=0.0012 ms
+    encode: median=0.0207 ms  q1=0.0156 ms  q3=0.0243 ms
+    commit_wait: median=15.3791 ms  q1=14.7975 ms  q3=15.6965 ms
+    commit_wait.kernel_gpu: median=13.6196 ms  q1=13.5810 ms  q3=13.6561 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=1.7759 ms
+    readback: median=0.9470 ms  q1=0.9360 ms  q3=0.9497 ms
+    host_copy: median=3.2054 ms  q1=3.1265 ms  q3=3.2443 ms
+    sum of medians: 25.9513 ms
+ok
+test gemm_reuse_phase_diag_tests::gpu_timestamps_within_commit_wait_window ...   trial 0: commit_wait=0.8231ms kernel_gpu=0.2245ms (commit_wait-kernel_gpu=0.5986ms)
+  trial 1: commit_wait=0.7377ms kernel_gpu=0.2245ms (commit_wait-kernel_gpu=0.5131ms)
+  trial 2: commit_wait=0.7260ms kernel_gpu=0.2243ms (commit_wait-kernel_gpu=0.5017ms)
+  trial 3: commit_wait=0.7297ms kernel_gpu=0.2245ms (commit_wait-kernel_gpu=0.5052ms)
+  trial 4: commit_wait=0.7252ms kernel_gpu=0.2239ms (commit_wait-kernel_gpu=0.5014ms)
+ok
+test gemm_spec_source_diag_tests::candidate_9_reflection_shows_no_fallback_for_every_transpose_pattern ... pattern requested_thread_count max_total_threads_per_threadgroup thread_execution_width static_threadgroup_memory_length shared_mem_bytes_for resolved_tile
+Nn 128 1024 32 0 17920 TileConfig { bm: 64, bn: 64, bk: 32, wm: 2, wn: 2, staged: true }
+Nt 128 1024 32 0 18432 TileConfig { bm: 64, bn: 64, bk: 32, wm: 2, wn: 2, staged: true }
+Tn 128 1024 32 0 17408 TileConfig { bm: 64, bn: 64, bk: 32, wm: 2, wn: 2, staged: true }
+Tt 128 1024 32 0 17920 TileConfig { bm: 64, bn: 64, bk: 32, wm: 2, wn: 2, staged: true }
+ok
+test gemm_spec_source_diag_tests::spec_source_kernel_gpu_ab_production_sizes ... N=1024 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } base_resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } head_resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true }
+  side=base kernel_gpu_median_ms=0.2658 q1=0.2246 q3=0.2785
+  side=head kernel_gpu_median_ms=0.2757 q1=0.2327 q3=0.2884
+N=1024 head_over_base_kernel_gpu=1.037466 base_spec_cache_len=0 base_fc_cache_len=1 head_spec_cache_len=1 head_fc_cache_len=0
+N=2048 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } base_resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } head_resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+  side=base kernel_gpu_median_ms=1.6029 q1=1.6002 q3=2.9060
+  side=head kernel_gpu_median_ms=1.6181 q1=1.6105 q3=2.2412
+N=2048 head_over_base_kernel_gpu=1.009514 base_spec_cache_len=0 base_fc_cache_len=2 head_spec_cache_len=2 head_fc_cache_len=0
+N=4096 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } base_resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } head_resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+  side=base kernel_gpu_median_ms=13.6764 q1=13.6584 q3=13.7237
+  side=head kernel_gpu_median_ms=14.0652 q1=14.0520 q3=14.0850
+N=4096 head_over_base_kernel_gpu=1.028431 base_spec_cache_len=0 base_fc_cache_len=3 head_spec_cache_len=3 head_fc_cache_len=0
+ok
+test gemm_spec_source_diag_tests::spec_source_reflection_dump_all_candidates ... candidate_index side requested_thread_count max_total_threads_per_threadgroup thread_execution_width static_threadgroup_memory_length resolved_tile
+0 base 128 1024 32 0 TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+0 head 128 1024 32 0 TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+1 base 128 1024 32 0 TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+1 head 128 1024 32 0 TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+2 base 128 1024 32 0 TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+2 head 128 1024 32 0 TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+3 base 128 1024 32 0 TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+3 head 128 1024 32 0 TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+4 base 64 1024 32 0 TileConfig { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, staged: true }
+4 head 64 1024 32 0 TileConfig { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, staged: true }
+5 base 128 1024 32 0 TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true }
+5 head 128 1024 32 0 TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true }
+6 base 128 1024 32 0 TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true }
+6 head 128 1024 32 0 TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true }
+7 base 32 1024 32 0 TileConfig { bm: 8, bn: 8, bk: 8, wm: 1, wn: 1, staged: false }
+7 head 32 1024 32 0 TileConfig { bm: 8, bn: 8, bk: 8, wm: 1, wn: 1, staged: false }
+8 base 64 1024 32 0 TileConfig { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, staged: true }
+8 head 64 1024 32 0 TileConfig { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, staged: true }
+9 base 128 1024 32 0 TileConfig { bm: 64, bn: 64, bk: 32, wm: 2, wn: 2, staged: true }
+9 head 128 1024 32 0 TileConfig { bm: 64, bn: 64, bk: 32, wm: 2, wn: 2, staged: true }
+ok
+test gemm_tile_class_diag_tests::tile_class_kernel_gpu_ab_production_sizes ... N=1024 cand0 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=1024 cand0 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=1.7512 q1=1.7037 q3=1.7805
+N=1024 cand0 mode=split resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=1.0951 q1=0.9150 q3=1.3637
+N=1024 cand0 split_over_legacy_kernel_gpu=0.625330
+N=1024 cand4 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=1024 cand4 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=2.4379 q1=2.4045 q3=2.6566
+N=1024 cand4 mode=split resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=2.0729 q1=2.0575 q3=2.0896
+N=1024 cand4 split_over_legacy_kernel_gpu=0.850279
+N=1024 cand5 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=1024 cand5 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.2463 q1=0.2452 q3=0.2561
+N=1024 cand5 mode=split resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.6472 q1=0.6468 q3=0.6474
+N=1024 cand5 split_over_legacy_kernel_gpu=2.627536
+N=1024 cand8 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=1024 cand8 mode=legacy resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=1.9241 q1=1.8993 q3=1.9359
+N=1024 cand8 mode=split resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=1.1435 q1=1.0689 q3=1.1863
+N=1024 cand8 split_over_legacy_kernel_gpu=0.594309
+N=2048 cand0 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=2048 cand0 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=13.2953 q1=13.0474 q3=13.4320
+N=2048 cand0 mode=split resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=7.0495 q1=6.9427 q3=7.0710
+N=2048 cand0 split_over_legacy_kernel_gpu=0.530225
+N=2048 cand4 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=2048 cand4 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=34.8314 q1=34.6961 q3=34.8883
+N=2048 cand4 mode=split resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=16.5663 q1=16.1905 q3=16.5786
+N=2048 cand4 split_over_legacy_kernel_gpu=0.475614
+N=2048 cand5 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=2048 cand5 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=1.8316 q1=1.8274 q3=1.8391
+N=2048 cand5 mode=split resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=4.8879 q1=4.8864 q3=4.8885
+N=2048 cand5 split_over_legacy_kernel_gpu=2.668684
+N=2048 cand8 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=2048 cand8 mode=legacy resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=15.7354 q1=15.7235 q3=15.7428
+N=2048 cand8 mode=split resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=7.0259 q1=6.9115 q3=7.1024
+N=2048 cand8 split_over_legacy_kernel_gpu=0.446503
+N=4096 cand0 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=4096 cand0 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=108.7892 q1=105.5845 q3=112.4238
+N=4096 cand0 mode=split resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=63.4185 q1=61.0418 q3=69.2371
+N=4096 cand0 split_over_legacy_kernel_gpu=0.582949
+N=4096 cand4 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=4096 cand4 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=305.5739 q1=305.4733 q3=306.4097
+N=4096 cand4 mode=split resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=140.5310 q1=137.6196 q3=142.1832
+N=4096 cand4 split_over_legacy_kernel_gpu=0.459892
+N=4096 cand5 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=4096 cand5 mode=legacy resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=20.8860 q1=20.5069 q3=21.0830
+N=4096 cand5 mode=split resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=52.7461 q1=50.7932 q3=53.4412
+N=4096 cand5 split_over_legacy_kernel_gpu=2.525428
+N=4096 cand8 tile_class_edge_dispatch_increment=0 tile_class_interior_dispatch_increment=40
+N=4096 cand8 mode=legacy resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=132.8653 q1=127.7187 q3=136.7642
+N=4096 cand8 mode=split resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, staged: true } kernel_gpu_median_ms=63.8011 q1=62.5338 q3=64.4685
+N=4096 cand8 split_over_legacy_kernel_gpu=0.480194
+ok
+test gemm_tile_class_diag_tests::tile_class_production_select_kernel_gpu_ab ...   [legacy] N=512 requested_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.0532 ms  q1=0.0519 ms  q3=0.0542 ms
+    upload_b: median=0.0573 ms  q1=0.0564 ms  q3=0.0587 ms
+    alloc_c: median=0.0045 ms  q1=0.0043 ms  q3=0.0047 ms
+    encode: median=0.0026 ms  q1=0.0025 ms  q3=0.0026 ms
+    commit_wait: median=0.2673 ms  q1=0.2611 ms  q3=0.2755 ms
+    commit_wait.kernel_gpu: median=0.0545 ms  q1=0.0534 ms  q3=0.0553 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2119 ms
+    readback: median=0.0523 ms  q1=0.0517 ms  q3=0.0527 ms
+    host_copy: median=0.0468 ms  q1=0.0460 ms  q3=0.0482 ms
+    sum of medians: 0.4840 ms
+  [split] N=512 requested_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.0546 ms  q1=0.0532 ms  q3=0.0570 ms
+    upload_b: median=0.0541 ms  q1=0.0513 ms  q3=0.0550 ms
+    alloc_c: median=0.0044 ms  q1=0.0041 ms  q3=0.0045 ms
+    encode: median=0.0028 ms  q1=0.0027 ms  q3=0.0029 ms
+    commit_wait: median=0.3312 ms  q1=0.3274 ms  q3=0.3352 ms
+    commit_wait.kernel_gpu: median=0.1313 ms  q1=0.1308 ms  q3=0.1316 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2023 ms
+    readback: median=0.0520 ms  q1=0.0512 ms  q3=0.0523 ms
+    host_copy: median=0.0127 ms  q1=0.0127 ms  q3=0.0127 ms
+    sum of medians: 0.5118 ms
+  [legacy] N=1024 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.1992 ms  q1=0.1927 ms  q3=0.2047 ms
+    upload_b: median=0.1915 ms  q1=0.1890 ms  q3=0.2041 ms
+    alloc_c: median=0.0047 ms  q1=0.0042 ms  q3=0.0050 ms
+    encode: median=0.0029 ms  q1=0.0028 ms  q3=0.0029 ms
+    commit_wait: median=0.5767 ms  q1=0.5445 ms  q3=0.5850 ms
+    commit_wait.kernel_gpu: median=0.2780 ms  q1=0.2659 ms  q3=0.2796 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2968 ms
+    readback: median=0.1861 ms  q1=0.1820 ms  q3=0.1871 ms
+    host_copy: median=0.1910 ms  q1=0.1876 ms  q3=0.1963 ms
+    sum of medians: 1.3522 ms
+  [split] N=1024 requested_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.2010 ms  q1=0.1953 ms  q3=0.2059 ms
+    upload_b: median=0.1945 ms  q1=0.1883 ms  q3=0.1997 ms
+    alloc_c: median=0.0045 ms  q1=0.0043 ms  q3=0.0047 ms
+    encode: median=0.0029 ms  q1=0.0028 ms  q3=0.0030 ms
+    commit_wait: median=0.9975 ms  q1=0.9575 ms  q3=1.0124 ms
+    commit_wait.kernel_gpu: median=0.6365 ms  q1=0.6358 ms  q3=0.6385 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.3623 ms
+    readback: median=0.2072 ms  q1=0.2061 ms  q3=0.2087 ms
+    host_copy: median=0.0501 ms  q1=0.0500 ms  q3=0.0502 ms
+    sum of medians: 1.6578 ms
+  [legacy] N=2048 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.7770 ms  q1=0.7656 ms  q3=0.7917 ms
+    upload_b: median=0.7859 ms  q1=0.7630 ms  q3=0.7949 ms
+    alloc_c: median=0.0058 ms  q1=0.0056 ms  q3=0.0065 ms
+    encode: median=0.0058 ms  q1=0.0049 ms  q3=0.0079 ms
+    commit_wait: median=2.3914 ms  q1=2.3312 ms  q3=2.4372 ms
+    commit_wait.kernel_gpu: median=1.7081 ms  q1=1.6182 ms  q3=1.7120 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.6980 ms
+    readback: median=0.9222 ms  q1=0.9129 ms  q3=0.9507 ms
+    host_copy: median=0.7735 ms  q1=0.7602 ms  q3=0.7863 ms
+    sum of medians: 5.6615 ms
+  [split] N=2048 requested_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.8268 ms  q1=0.7868 ms  q3=0.8375 ms
+    upload_b: median=0.7849 ms  q1=0.7728 ms  q3=0.8096 ms
+    alloc_c: median=0.0086 ms  q1=0.0081 ms  q3=0.0087 ms
+    encode: median=0.0132 ms  q1=0.0125 ms  q3=0.0136 ms
+    commit_wait: median=5.6300 ms  q1=5.6224 ms  q3=5.6395 ms
+    commit_wait.kernel_gpu: median=4.9010 ms  q1=4.8996 ms  q3=4.9026 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.7281 ms
+    readback: median=0.9717 ms  q1=0.9681 ms  q3=0.9805 ms
+    host_copy: median=0.2269 ms  q1=0.2256 ms  q3=0.2277 ms
+    sum of medians: 8.4621 ms
+  [legacy] N=4096 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.2447 ms  q1=3.1912 ms  q3=3.2930 ms
+    upload_b: median=3.2230 ms  q1=3.2014 ms  q3=3.3058 ms
+    alloc_c: median=0.0153 ms  q1=0.0132 ms  q3=0.0210 ms
+    encode: median=0.0210 ms  q1=0.0177 ms  q3=0.0227 ms
+    commit_wait: median=18.4541 ms  q1=18.1706 ms  q3=20.4028 ms
+    commit_wait.kernel_gpu: median=15.2040 ms  q1=14.7890 ms  q3=18.1841 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=3.1662 ms
+    readback: median=4.0526 ms  q1=3.8447 ms  q3=4.1238 ms
+    host_copy: median=3.2127 ms  q1=3.1774 ms  q3=3.2785 ms
+    sum of medians: 32.2235 ms
+  [split] N=4096 requested_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.2481 ms  q1=3.1313 ms  q3=3.3196 ms
+    upload_b: median=3.2124 ms  q1=3.1661 ms  q3=3.3007 ms
+    alloc_c: median=0.0211 ms  q1=0.0129 ms  q3=0.0227 ms
+    encode: median=0.0217 ms  q1=0.0185 ms  q3=0.0245 ms
+    commit_wait: median=49.7665 ms  q1=49.3143 ms  q3=49.8850 ms
+    commit_wait.kernel_gpu: median=47.4755 ms  q1=46.3750 ms  q3=47.5110 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=2.3590 ms
+    readback: median=4.0921 ms  q1=4.0068 ms  q3=4.1044 ms
+    host_copy: median=0.9315 ms  q1=0.9277 ms  q3=0.9483 ms
+    sum of medians: 61.2934 ms
+ok
+test memory::tests::pooled_alloc_zeroed_records_logical_bytes_via_shared_context ... ok
+test ops::tests::gemm_nt_transposed_b_does_not_increment_repack_counter ... ok
+test ops::tests::gemm_resident_lhs_transposed_b_does_not_increment_repack_counter ... ok
+test ops::tests::gemm_tn_transposed_a_does_not_increment_repack_counter ... ok
+test ops::tests::gemm_tt_both_transposed_increments_repack_counter_twice ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_f16_tiled_non_multiple_boundary_shape ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_medium_shape ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_non_multiple_boundary_shape ... ok
+test tile::tests::all_tile_candidates_resolve_without_fallback_for_every_transpose_pattern ... ok
+test tile::tests::all_tile_candidates_validate_under_actual_device_shared_memory_limit ... ok
+test tile::tests::direct_load_path_config_resolves_without_fallback ... ok
+test tile::tests::dispatch_f16_auto_tile_select_shapes_resolve_without_fallback ... ok
+
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 261 filtered out; finished in 117.57s
+
+     Running tests/backend_ops_real_device.rs (target/release/deps/backend_ops_real_device-93d6f0492aba6a91)
+
+running 6 tests
+test backend_ops_elementwise_matches_cpu ... ok
+test backend_ops_gemm_matches_cpu_mid_square_shape ... ok
+test backend_ops_gemm_matches_cpu_near_small_tile_threshold ... ok
+test backend_ops_gemm_matches_cpu_non_power_of_two_shape ... ok
+test backend_ops_gemm_matches_cpu_tall_and_wide_shapes ... ok
+test ops_for_selects_metal_backend_and_matches_cpu ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.04s
+
+     Running tests/command_batching.rs (target/release/deps/command_batching-8d3e7947dff15ce9)
+
+running 5 tests
+test dependent_dispatches_in_one_batch_execute_in_order ... ok
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ok
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... ok
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ok
+test synchronize_after_auto_flush_at_limit ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/command_batching_bench.rs (target/release/deps/command_batching_bench-23e4af53648e80b9)
+
+running 2 tests
+test command_batching_micro_bench_untracked_vs_tracked ... [command_batching_micro_bench] steps=100 numel=1024 untracked_median_s=0.011910 (q1=0.010814, q3=0.012728) tracked_median_s=0.000725 (q1=0.000711, q3=0.000744) speedup_x=16.422 tracked_faster=true — record only, non-gating（本ファイル冒頭コメント参照）
+ok
+test pool_reuse_interleaved_with_tracked_steps_preserves_batching ... [pool_reuse_interleaved_with_tracked_steps_preserves_batching] steps=50 encode_delta=50 command_buffer_delta=1
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/context_cache_bench.rs (target/release/deps/context_cache_bench-f63bb9f8c40253e1)
+
+running 2 tests
+test gemm_repeated_calls_are_deterministic_via_cache ... ok
+test gemm_second_call_avoids_reconstruction_cost ... [context_cache_bench] cold_s=0.000200 warm_median_s=0.000170 (q1=0.000170, q3=0.000170) speedup_x=1.18 warm_faster=true — record only, non-gating（本ファイル冒頭コメント参照）
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/cpu_metal_f16_parity.rs (target/release/deps/cpu_metal_f16_parity-6f9e7d6cbdd730a4)
+
+running 6 tests
+test f16_dispatch_is_bit_deterministic_across_runs ... ok
+test f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs ... ok
+test f16_k4096_stress ... ok
+test f16_parity_baseline_8x8x8 ... ok
+test f16_parity_baseline_shape_512 ... ok
+test f16_parity_boundary_shapes_non_multiple_of_eight ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/cpu_metal_f16_tiled_parity.rs (target/release/deps/cpu_metal_f16_tiled_parity-e88e941e91ab6b33)
+
+running 5 tests
+test f16_tiled_k4096_stress ... ok
+test f16_tiled_parity_boundary_shape_non_multiple_of_tile ... ok
+test f16_tiled_parity_direct_load_single_simdgroup_8x8 ... ok
+test f16_tiled_parity_matches_existing_8x8_kernel ... ok
+test f16_tiled_parity_staged_baseline_shape_512 ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/cpu_metal_parity.rs (target/release/deps/cpu_metal_parity-3c0eb7d58c6f5097)
+
+running 5 tests
+test baseline_shape_512_matches_cpu_reference ... ok
+test boundary_shapes_non_multiple_of_threadgroup ... ok
+test dispatch_is_bit_deterministic_across_runs ... ok
+test falsification_injected_perturbation_is_detected ... ok
+test k4096_stress_poc_v2_5 ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/device.rs (target/release/deps/device-a49ccd6e9786ddc4)
+
+running 1 test
+test select_metal_device_on_real_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+
+     Running tests/device_smoke.rs (target/release/deps/device_smoke-c0b85cb2a1966ffd)
+
+running 3 tests
+test allocation_size_overflow_is_rejected ... ok
+test device_and_buffer_roundtrip ... ok
+test zero_length_allocation_is_rejected ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/dispatch_boundary.rs (target/release/deps/dispatch_boundary-cf310afca5618769)
+
+running 2 tests
+test boundary_shapes_tflops_record ... dispatch_boundary_record dim=256 path=tiled tflops=0.104 report={"schema_version":"1","name":"gemm_tiled_dim256","backend":"metal","warmup":20,"iters":20,"median_secs":0.000323333,"q1_secs":0.000321292,"q3_secs":0.000325292,"samples_secs":[0.000315333,0.000309791,0.000318292,0.000322167,0.000324542,0.000330542,0.000331625,0.000324458,0.000323292,0.000324667,0.000321875,0.000330584,0.000321292,0.000328791,0.000318125,0.000323208,0.000323333,0.000325292,0.000446667,0.000313833]}
+dispatch_boundary_record dim=256 path=simdgroup_auto tflops=0.130 report={"schema_version":"1","name":"gemm_dispatch_auto_dim256","backend":"metal","warmup":20,"iters":20,"median_secs":0.000258208,"q1_secs":0.000254583,"q3_secs":0.000260875,"samples_secs":[0.0002575,0.000260875,0.000257291,0.000260375,0.000282917,0.000264833,0.000258209,0.000251917,0.000262042,0.000255166,0.0002625,0.000254583,0.000262083,0.000254,0.000258875,0.000253708,0.0002495,0.000255125,0.000253958,0.000258208]}
+dispatch_boundary_record dim=256 simdgroup_auto_over_tiled=1.252
+dispatch_boundary_record dim=384 path=tiled tflops=0.199 report={"schema_version":"1","name":"gemm_tiled_dim384","backend":"metal","warmup":20,"iters":20,"median_secs":0.000569458,"q1_secs":0.000566583,"q3_secs":0.000576375,"samples_secs":[0.000568875,0.000566625,0.000569791,0.000560084,0.000566791,0.00056325,0.000563375,0.000566583,0.000569666,0.000617625,0.000578583,0.000569458,0.000586916,0.000576375,0.000578167,0.000574333,0.000561417,0.000603208,0.000567083,0.000559792]}
+dispatch_boundary_record dim=384 path=simdgroup_auto tflops=0.337 report={"schema_version":"1","name":"gemm_dispatch_auto_dim384","backend":"metal","warmup":20,"iters":20,"median_secs":0.000335959,"q1_secs":0.000332916,"q3_secs":0.000340084,"samples_secs":[0.0003425,0.000333458,0.000343458,0.0003405,0.00033475,0.000343958,0.00032975,0.000340084,0.000339417,0.0003335,0.000332916,0.000332042,0.000337208,0.000332583,0.000337167,0.000331875,0.000332125,0.000335959,0.000332959,0.000354541]}
+dispatch_boundary_record dim=384 simdgroup_auto_over_tiled=1.695
+dispatch_boundary_record dim=448 path=tiled tflops=0.209 report={"schema_version":"1","name":"gemm_tiled_dim448","backend":"metal","warmup":20,"iters":20,"median_secs":0.000860375,"q1_secs":0.000791375,"q3_secs":0.0008765,"samples_secs":[0.000847875,0.000865375,0.000773042,0.000889958,0.000870666,0.000838292,0.0008765,0.000788958,0.000791375,0.000893167,0.000778041,0.00088775,0.000856042,0.000772958,0.0008725,0.000786708,0.000857083,0.000883792,0.000860375,0.00088275]}
+dispatch_boundary_record dim=448 path=simdgroup_auto tflops=0.450 report={"schema_version":"1","name":"gemm_dispatch_auto_dim448","backend":"metal","warmup":20,"iters":20,"median_secs":0.000399209,"q1_secs":0.000391292,"q3_secs":0.000412959,"samples_secs":[0.000418916,0.00040975,0.00040325,0.000395583,0.000402709,0.000390291,0.000388333,0.000384417,0.000394333,0.000389875,0.000387041,0.000391292,0.000399209,0.000396959,0.000397625,0.000412959,0.000413583,0.000421541,0.000418209,0.000413]}
+dispatch_boundary_record dim=448 simdgroup_auto_over_tiled=2.155
+dispatch_boundary_record dim=512 path=tiled tflops=0.245 report={"schema_version":"1","name":"gemm_tiled_dim512","backend":"metal","warmup":20,"iters":20,"median_secs":0.00109525,"q1_secs":0.001075667,"q3_secs":0.001113459,"samples_secs":[0.001128416,0.00110775,0.00109575,0.001114667,0.001083792,0.001083541,0.001073167,0.001123041,0.001082917,0.001067042,0.001070833,0.001099833,0.001075667,0.00109525,0.001114917,0.001061417,0.0011235,0.001113459,0.001069709,0.00108275]}
+dispatch_boundary_record dim=512 path=simdgroup_auto tflops=0.484 report={"schema_version":"1","name":"gemm_dispatch_auto_dim512","backend":"metal","warmup":20,"iters":20,"median_secs":0.000554542,"q1_secs":0.000551625,"q3_secs":0.000557584,"samples_secs":[0.000558375,0.000551625,0.000552542,0.000548417,0.000557584,0.000553917,0.000555,0.000550166,0.000554542,0.000553583,0.00055875,0.000546,0.000556583,0.00056,0.00055725,0.000561375,0.000561708,0.000554458,0.000551459,0.000550333]}
+dispatch_boundary_record dim=512 simdgroup_auto_over_tiled=1.975
+dispatch_boundary_record dim=576 path=tiled tflops=0.274 report={"schema_version":"1","name":"gemm_tiled_dim576","backend":"metal","warmup":20,"iters":20,"median_secs":0.001395792,"q1_secs":0.00138575,"q3_secs":0.0014015,"samples_secs":[0.001397416,0.001400208,0.001438791,0.001428375,0.001424292,0.001409209,0.001396375,0.001395792,0.00138575,0.001387333,0.001377166,0.001402667,0.001378125,0.001389666,0.0014015,0.001385,0.001395375,0.001376334,0.001385,0.001394291]}
+dispatch_boundary_record dim=576 path=simdgroup_auto tflops=0.634 report={"schema_version":"1","name":"gemm_dispatch_auto_dim576","backend":"metal","warmup":20,"iters":20,"median_secs":0.000602584,"q1_secs":0.000599209,"q3_secs":0.000612292,"samples_secs":[0.00061625,0.000590042,0.000602584,0.000599417,0.000589125,0.00062675,0.000612292,0.000616083,0.000606583,0.000602041,0.000607833,0.000589375,0.000609834,0.000601792,0.000615666,0.000600458,0.000599209,0.000593,0.00062,0.000589792]}
+dispatch_boundary_record dim=576 simdgroup_auto_over_tiled=2.316
+dispatch_boundary_record dim=640 path=tiled tflops=0.529 report={"schema_version":"1","name":"gemm_tiled_dim640","backend":"metal","warmup":20,"iters":20,"median_secs":0.000991,"q1_secs":0.000976042,"q3_secs":0.0010195,"samples_secs":[0.001147333,0.001150708,0.001158458,0.001138541,0.001075917,0.000981375,0.00099375,0.000985625,0.000977541,0.000974083,0.000999042,0.0010195,0.001003583,0.0009845,0.000976042,0.000991,0.000911375,0.000914167,0.000900584,0.000907959]}
+dispatch_boundary_record dim=640 path=simdgroup_auto tflops=1.034 report={"schema_version":"1","name":"gemm_dispatch_auto_dim640","backend":"metal","warmup":20,"iters":20,"median_secs":0.000506917,"q1_secs":0.00049825,"q3_secs":0.00050975,"samples_secs":[0.000504416,0.000504708,0.00051175,0.000498125,0.0005095,0.00049825,0.00050175,0.000494833,0.000533042,0.000497542,0.000516584,0.0005355,0.00050725,0.00050975,0.000506917,0.000498667,0.000487875,0.000509125,0.000557167,0.000496291]}
+dispatch_boundary_record dim=640 simdgroup_auto_over_tiled=1.955
+dispatch_boundary_record dim=768 path=tiled tflops=0.889 report={"schema_version":"1","name":"gemm_tiled_dim768","backend":"metal","warmup":20,"iters":20,"median_secs":0.001018917,"q1_secs":0.001010958,"q3_secs":0.001034958,"samples_secs":[0.001034958,0.001061833,0.001050083,0.001046041,0.001013125,0.001001541,0.001005375,0.001025375,0.001052792,0.001048208,0.001026875,0.001020792,0.001018917,0.001014709,0.001001667,0.001017791,0.001010958,0.001005708,0.001018208,0.001006542]}
+dispatch_boundary_record dim=768 path=simdgroup_auto tflops=1.405 report={"schema_version":"1","name":"gemm_dispatch_auto_dim768","backend":"metal","warmup":20,"iters":20,"median_secs":0.00064475,"q1_secs":0.000635958,"q3_secs":0.000647125,"samples_secs":[0.000646959,0.000631167,0.000645917,0.000649791,0.000651875,0.0006515,0.000635958,0.000646625,0.000647125,0.000626666,0.000632375,0.00062875,0.000656417,0.00063175,0.000638625,0.00064375,0.000636459,0.000648167,0.00064475,0.000636042]}
+dispatch_boundary_record dim=768 simdgroup_auto_over_tiled=1.580
+dispatch_boundary_record dim=1024 path=tiled tflops=1.081 report={"schema_version":"1","name":"gemm_tiled_dim1024","backend":"metal","warmup":20,"iters":20,"median_secs":0.001986417,"q1_secs":0.001983166,"q3_secs":0.00200175,"samples_secs":[0.002070458,0.001981458,0.001988208,0.001986417,0.001984209,0.001986125,0.002012,0.001983166,0.001969917,0.001991625,0.002018167,0.001999791,0.001971875,0.001978166,0.001985833,0.001979833,0.001985417,0.002060459,0.002009542,0.00200175]}
+dispatch_boundary_record dim=1024 path=simdgroup_auto tflops=2.046 report={"schema_version":"1","name":"gemm_dispatch_auto_dim1024","backend":"metal","warmup":20,"iters":20,"median_secs":0.001049792,"q1_secs":0.001045083,"q3_secs":0.001066292,"samples_secs":[0.001049792,0.001038917,0.001063166,0.001034292,0.001070042,0.001045083,0.001070917,0.0010465,0.001047875,0.001048458,0.001066292,0.001082125,0.001043625,0.001058917,0.00105775,0.001082375,0.001049417,0.001083125,0.001034917,0.001026833]}
+dispatch_boundary_record dim=1024 simdgroup_auto_over_tiled=1.892
+ok
+test dispatch_backend_auto_matches_reference_at_boundary_shapes ... dispatch_boundary_route_record dim=256 min_dim_threshold=512 expected_kernel=Tiled route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=384 min_dim_threshold=512 expected_kernel=Tiled route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=448 min_dim_threshold=512 expected_kernel=Tiled route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=512 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=576 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=640 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=768 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+dispatch_boundary_route_record dim=1024 min_dim_threshold=512 expected_kernel=MatrixUnit route_verified=false result=parity_pass
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+     Running tests/elementwise_gemm_bias_act_source_evidence.rs (target/release/deps/elementwise_gemm_bias_act_source_evidence-e568d2b79486147e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/gemm_auto_parity.rs (target/release/deps/gemm_auto_parity-3c98f96bbd5a3422)
+
+running 3 tests
+test at_or_above_threshold_shape_matches_cpu_reference ... ok
+test below_threshold_shape_matches_cpu_reference ... ok
+test threshold_boundary_511_and_512_both_match_cpu_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/gemm_bias_act_parity.rs (target/release/deps/gemm_bias_act_parity-b3f0b11ba7f92892)
+
+running 7 tests
+test elementwise_matches_cpu_across_ops ... ok
+test gemm_bias_act_broadcast_fallback_matches_cpu ... ok
+test gemm_bias_act_broadcast_fallback_zero_dim_matches_cpu ... ok
+test gemm_bias_act_k_zero_matches_cpu ... ok
+test gemm_bias_act_matches_cpu_across_shapes_and_activations ... ok
+test gemm_bias_act_rejects_incompatible_bias_shape_like_cpu ... ok
+test gemm_bias_act_without_bias_matches_cpu ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/gemm_dynamic_tile_parity.rs (target/release/deps/gemm_dynamic_tile_parity-cd884c1e59e6ae87)
+
+running 13 tests
+test bk32_64x64_candidate_matches_cpu_reference_k_stress ... ok
+test bk32_64x64_candidate_matches_cpu_reference_non_multiple_of_tile ... ok
+test bk32_candidate_matches_cpu_reference_k_stress ... ok
+test bk32_candidate_matches_cpu_reference_non_multiple_of_tile ... ok
+test direct_load_path_matches_cpu_reference ... ok
+test direct_load_path_matches_cpu_reference_non_multiple_of_tile ... ok
+test dispatch_auto_matches_cpu_reference_across_shape_bands ... ok
+test dispatch_tiled_prepared_matches_dispatch_variant ... ok
+test dispatch_tiled_prepared_rejects_undersized_and_misaligned_inputs ... ok
+test tiled_matches_cpu_reference_k_stress ... ok
+test tiled_matches_cpu_reference_non_multiple_of_tile ... ok
+test wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile ... ok
+test wm4_bk8_candidate_matches_cpu_reference_non_multiple_of_tile ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/gemm_f16_auto_parity.rs (target/release/deps/gemm_f16_auto_parity-51c175c1bf7b7565)
+
+running 8 tests
+test dispatch_f16_auto_matches_cpu_reference_large_near_square_rectangle ... ok
+test dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape ... ok
+test dispatch_f16_auto_matches_cpu_reference_square_cube_512 ... ok
+test dispatch_f16_auto_matches_cpu_reference_tall_shape ... ok
+test dispatch_f16_auto_matches_cpu_reference_tiny_shape ... ok
+test dispatch_f16_auto_matches_cpu_reference_wide_shape ... ok
+test dispatch_f16_auto_matches_existing_non_tiled_8x8_kernel ... ok
+test dispatch_f16_auto_matches_explicit_tile_select_dispatch ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/gemm_fine_barrier_bit_match.rs (target/release/deps/gemm_fine_barrier_bit_match-f03af4ee23e5ad7c)
+
+running 2 tests
+test fine_barrier_on_off_bit_match_dispatch_auto ... ok
+test fine_barrier_on_off_bit_match_dispatch_tiled_prepared ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/gemm_naive_parity.rs (target/release/deps/gemm_naive_parity-1d1b32f4464ed53a)
+
+running 6 tests
+test dispatch_and_dispatch_variant_naive_agree ... ok
+test dispatch_rejects_invalid_shapes ... ok
+test naive_matches_cpu_reference_degenerate_shapes ... ok
+test naive_matches_cpu_reference_k_stress ... ok
+test naive_matches_cpu_reference_medium_shape ... ok
+test naive_matches_cpu_reference_non_multiple_of_threadgroup ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/gemm_resident_parity.rs (target/release/deps/gemm_resident_parity-59228b062cecee92)
+
+running 2 tests
+test gemm_resident_lhs_matches_cpu_reference ... ok
+test gemm_resident_rhs_matches_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/gemm_simdgroup_parity.rs (target/release/deps/gemm_simdgroup_parity-dab4021c6498dd91)
+
+running 9 tests
+test dispatch_variant_rejects_invalid_shapes ... ok
+test simdgroup_matches_cpu_reference_degenerate_shapes ... ok
+test simdgroup_matches_cpu_reference_k_stress ... ok
+test simdgroup_matches_cpu_reference_medium_shape ... ok
+test simdgroup_matches_cpu_reference_non_multiple_of_eight ... ok
+test tiled_matches_cpu_reference_degenerate_shapes ... ok
+test tiled_matches_cpu_reference_k_stress ... ok
+test tiled_matches_cpu_reference_medium_shape ... ok
+test tiled_matches_cpu_reference_non_multiple_of_tile ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/gemm_strided_parity.rs (target/release/deps/gemm_strided_parity-054c6752fdbba18a)
+
+running 10 tests
+test bk32_64x64_candidate_agrees_with_bk16_counterpart_within_composite_tolerance ... ok
+test bk32_64x64_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns ... ok
+test bk32_64x64_candidate_matches_cpu_reference_for_n4096_cubic_shape ... ok
+test dispatch_bias_act_prepared_nn_is_bit_identical_to_strided_nn ... ok
+test dispatch_strided_bias_act_prepared_matches_cpu_reference_for_all_transpose_patterns ... ok
+test dispatch_strided_tiled_prepared_handles_padded_leading_dimension_for_non_transposed_side ... ok
+test dispatch_strided_tiled_prepared_matches_cpu_reference_for_all_transpose_patterns ... ok
+test dispatch_strided_tiled_prepared_nn_is_bit_identical_to_dispatch_tiled_prepared ... ok
+test dispatch_strided_tiled_prepared_rejects_non_eight_divisible_shape_while_classic_succeeds ... ok
+test gemm_collapsed_lhs_matches_per_batch_cpu_reference ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.40s
+
+     Running tests/gemm_swizzle_bit_match.rs (target/release/deps/gemm_swizzle_bit_match-b410a1b2e2d0dc31)
+
+running 2 tests
+test swizzle_on_off_bit_match_dispatch_auto ... ok
+test swizzle_on_off_bit_match_dispatch_tiled_prepared ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/gemm_transposed_parity.rs (target/release/deps/gemm_transposed_parity-f7a854211fc16f6b)
+
+running 5 tests
+test gemm_narrow_then_transpose_uses_strided_entry_with_padded_ld_and_is_correct_on_real_device ... ok
+test gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test gemm_nt_via_trait_object_matches_concrete_call_on_real_device ... ok
+test gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/gemm_transposed_perf.rs (target/release/deps/gemm_transposed_perf-505b5dfbca43d2bf)
+
+running 2 tests
+test nt_transposed_entry_vs_contiguous_across_shapes ... NT m=64 k=784 n=256 before_median_s=0.000931 after_median_s=0.000385 speedup=2.414x
+NT m=64 k=256 n=10 before_median_s=0.000222 after_median_s=0.000211 speedup=1.053x
+NT m=1024 k=1024 n=1024 before_median_s=0.004074 after_median_s=0.005245 speedup=0.777x
+NT m=2048 k=2048 n=2048 before_median_s=0.018669 after_median_s=0.021554 speedup=0.866x
+ok
+test tn_transposed_entry_vs_contiguous_across_shapes ... TN m=64 k=784 n=256 before_median_s=0.000314 after_median_s=0.000222 speedup=1.412x
+TN m=64 k=256 n=10 before_median_s=0.000193 after_median_s=0.000156 speedup=1.239x
+TN m=1024 k=1024 n=1024 before_median_s=0.003071 after_median_s=0.002057 speedup=1.493x
+TN m=2048 k=2048 n=2048 before_median_s=0.018887 after_median_s=0.012534 speedup=1.507x
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+     Running tests/linear_forward_device_parity.rs (target/release/deps/linear_forward_device_parity-f0d753d2dc267869)
+
+running 5 tests
+test linear_forward_device_bench_metal ... [linear_forward_device_bench:metal] before_median_s=0.000678 after_median_s=0.000371 speedup_x=1.827
+ok
+test linear_forward_device_matches_cpu_reference ... ok
+test linear_forward_device_matches_gemm_resident_rhs_act_bit_exact ... ok
+test linear_forward_device_rejects_shape_mismatches_and_handles_empty_input ... ok
+test linear_forward_device_two_layer_chain_matches_cpu_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/memory_roundtrip.rs (target/release/deps/memory_roundtrip-c97e32c6bb3ed1d9)
+
+running 6 tests
+test alloc_zeroed_returns_all_zero ... ok
+test peak_allocated_bytes_matches_known_allocation_size ... ok
+test pooled_memory_reuses_buffer_and_zero_fills ... ok
+test repeated_alloc_drop_cycles_do_not_leak_device_memory ... ok
+test upload_download_roundtrip_is_bit_exact ... ok
+test zero_numel_tensor_roundtrips_without_touching_ffi ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/mse_parity.rs (target/release/deps/mse_parity-e9fa173c464d38d2)
+
+running 1 test
+test mse_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/mse_source_evidence.rs (target/release/deps/mse_source_evidence-b4b7ceeee07f3d0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/pool_real_device.rs (target/release/deps/pool_real_device-3844d7fefd598877)
+
+running 4 tests
+test dropping_pooled_alloc_zeroed_returns_bytes_to_free_list ... ok
+test gemm_via_pooled_output_buffer_matches_expected ... ok
+test release_cached_device_memory_empties_free_list ... ok
+test second_alloc_of_same_class_reuses_freed_handle ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/rmsnorm_parity.rs (target/release/deps/rmsnorm_parity-1faac4b893a6c720)
+
+running 7 tests
+test rmsnorm_matches_backend_cpu_directly ... ok
+test rmsnorm_matches_backend_cpu_with_extreme_eps ... ok
+test rmsnorm_matches_backend_cpu_with_extreme_magnitude_values ... ok
+test rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row ... ok
+test rmsnorm_matches_cpu_across_shapes ... ok
+test rmsnorm_propagates_nan_matching_backend_cpu ... ok
+test rmsnorm_run_fused_matches_cpu_composed ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/rmsnorm_softmax_source_evidence.rs (target/release/deps/rmsnorm_softmax_source_evidence-3ba19d060ece544d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/sgd_device_parity.rs (target/release/deps/sgd_device_parity-0d65d4dadd913729)
+
+running 7 tests
+test empty_tensor_step_is_a_no_op ... ok
+test full_combo_matches_cpu_reference ... ok
+test full_combo_matches_cpu_reference_across_100_steps ... ok
+test momentum_sgd_matches_cpu_reference ... ok
+test sgd_step_device_rejects_missing_velocity_when_momentum_enabled ... ok
+test sgd_step_device_rejects_shape_mismatch ... ok
+test vanilla_sgd_matches_cpu_reference ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/shader_source_evidence.rs (target/release/deps/shader_source_evidence-981c40ba36d2a98d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+
+     Running tests/softmax_parity.rs (target/release/deps/softmax_parity-fb63b76a29bcc1b4)
+
+running 5 tests
+test softmax_is_numerically_stable_at_extreme_values ... ok
+test softmax_is_numerically_stable_near_f32_max_with_non_multiple_of_32_hidden ... ok
+test softmax_matches_backend_cpu_directly ... ok
+test softmax_matches_cpu_across_shapes ... ok
+test softmax_run_fused_matches_cpu_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests examples/gemm_fine_barrier_ab_bench.rs (target/release/examples/gemm_fine_barrier_ab_bench-4f3d86d5bd6ab97e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_splitk_shapes_bench.rs (target/release/examples/gemm_splitk_shapes_bench-04c76de35d3acc7d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_swizzle_ab_bench.rs (target/release/examples/gemm_swizzle_ab_bench-1deeb047459100a2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+   Doc-tests fandhe_ai_backend_metal
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

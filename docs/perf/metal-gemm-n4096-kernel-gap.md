@@ -1713,3 +1713,109 @@ legacy ベースラインがなぜ本番選択構成よりこれほど遅いか�
 `kernel_gpu_run{1..5}.log`（候補 0/4/5/8）・
 `kernel_gpu_production_select_run{1..5}.log`（本番選択構成追補）・
 `aggregate.md`）
+
+## 13. E7 候補追加: 64×64×32（wm2wn2）の収録と parity 確認（イシュー #1329）
+
+### 13.0 目的・範囲
+
+親 #1324（E7: bk=32 を 64×64 タイルへ拡張）の sub-issue。`CANDIDATES[0]`
+（64,64,16,2,2。大形状の主力構成）に対する bk=32 版
+`(64,64,32,2,2)` を `tile::CANDIDATES` の **index 9（末尾）** へ追加した。
+K ループ 1 反復あたりの `threadgroup_barrier` 往復を半減させる狙い
+（理論根拠。`CANDIDATES[5]`〈`(64,32,32,2,2)`。イシュー #532〉が bk=32
+自体の初採用実績）。
+
+本 issue のスコープは**候補追加と正確性（parity）確認のみ**: (a) 明示
+指定（`GemmVariant::SimdgroupTiled(cfg)`／`dispatch_tiled_prepared`／
+`dispatch_strided_tiled_prepared` の `cfg` 引数）でのみ到達可能にする
+（`select`／`select_with_occupancy_for_device` の選択ロジックは無変更）、
+(b) カーネル側手動境界チェック（REQ-8）を維持（`gemm.metal` は無変更）、
+(c) 全形状 × NN/NT/TN/TT で parity 0 fail を実機確認、(d) threadgroup
+メモリ使用量の反射値確認、(e) 現行 `CANDIDATES[0]`（bk=16）との出力が
+複合判定内で一致することを確認。純カーネル時間の before/after 実測・
+`tile::select` への組み込み判断は後続イシュー #1330 のスコープ（§13.5）。
+
+### 13.1 環境・プロトコル
+
+実機は Apple M4 Max（`docs/real-hardware-verification-env.md` §7）。
+`cargo test -p fandhe-ai-backend-metal --release ... -- --ignored
+--nocapture --test-threads=1`（正確性確認のみのため 5 回計測中央値は
+不要）。実行前 `uptime` 1 分 load average 1.67〜1.70（低〜中程度の共有
+負荷。21 ユーザーセッション並走）・`pmset -g therm` は thermal/performance
+warning なし。env_info・実行ログは §13.6 参照。
+
+### 13.2 反射値・SMEM 表
+
+`candidate_9_reflection_shows_no_fallback_for_every_transpose_pattern`
+（`gemm_spec_source_diag_tests.rs`）実機実測結果:
+
+| pattern | requested_thread_count | max_total_threads_per_threadgroup | thread_execution_width | static_threadgroup_memory_length | `shared_mem_bytes_for` |
+|---|---|---|---|---|---|
+| NN | 128 | 1024 | 32 | 0 | 17920 |
+| NT | 128 | 1024 | 32 | 0 | 18432 |
+| TN | 128 | 1024 | 32 | 0 | 17408 |
+| TT | 128 | 1024 | 32 | 0 | 17920 |
+
+全パターンで `resolved_cfg == requested_cfg`（フォールバック非経由）・
+`max_total_threads_per_threadgroup >= 128`・`thread_execution_width ==
+32` を確認。`static_threadgroup_memory_length` が 0 なのはタイル
+バッファが**動的** threadgroup メモリ（`threadgroup float* shared_mem
+[[threadgroup(0)]]` + `setThreadgroupMemoryLength`。§2 の H1 検証時と
+同じ契約）で確保されるためで、`shared_mem_bytes_for`（Rust 側の計算値。
+`tile.rs::candidate_9_shared_mem_bytes_for_every_transpose_pattern_
+within_32kib_and_16_aligned` で固定済み）が実際の確保量を表す。4
+パターンとも 32KiB（32768 バイト）上限内・16 バイト整合。f16 版
+`shared_mem_bytes_f16()` は 25344 バイト（`shared_mem_bytes_f16_all_
+candidates_within_32kib_device_limit` の最大値も同値へ更新済み）。
+親 #1324 の「32 KiB（2 面ダブルバッファ）」見積りは本追加では適用しない
+（現行カーネルにダブルバッファはなく、本 issue でも追加しない）。
+
+### 13.3 parity 結果表
+
+| テスト | 対象 | 実機結果 |
+|---|---|---|
+| `bk32_64x64_candidate_matches_cpu_reference_non_multiple_of_tile`（`gemm_dynamic_tile_parity.rs`） | 境界形状 (100,130,70) | ok |
+| `bk32_64x64_candidate_matches_cpu_reference_k_stress`（同上） | K=4096 ストレス | ok |
+| `bk32_64x64_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns`（`gemm_strided_parity.rs`） | 512³/1024³/2048³・(2048,2048,64)・(2048,2048,512)・(1536,1024,1024)・(1024,1536,1536)・(4096,1024,1024)・(1024,4096,1024)・(72,88,104) × NN/NT/TN/TT（計 40 ケース） | ok（`fail_count=0`・`resolved==cfg` 全ケース） |
+| `bk32_64x64_candidate_matches_cpu_reference_for_n4096_cubic_shape`（同上） | 4096³ × NN/NT/TN/TT | ok（`fail_count=0`） |
+
+全ケースで `assert_parity` の複合判定（相対誤差 1e-3 未満 または 絶対
+誤差 1e-5 未満。REQ-2）が `fail_count=0` で通過。`dispatch_strided_
+tiled_prepared` の戻り値 `resolved == cfg` を全ケースで assert 済みの
+ため、サイレントフォールバックは発生していない。
+
+### 13.4 `CANDIDATES[0]`（bk=16）との複合判定比較
+
+`bk32_64x64_candidate_agrees_with_bk16_counterpart_within_composite_
+tolerance`（`gemm_strided_parity.rs`）: N=512/1024/2048/4096 ×
+NN/NT/TN/TT（計 16 ケース）で `CANDIDATES[9]`（bk=32）と `CANDIDATES[0]`
+（bk=16）の出力を `fandhe_ai_backend_cpu::parity::compare` で直接比較。
+全ケース `report.passes()==true`（`fail_count=0`）。bit 完全一致は
+assert 契約に含めていない（K の分割粒度が異なるため丸め順が変わり
+うる）が、実機観測では bit 完全一致していた（K チャンク順が両構成とも
+昇順で同一のため）。
+
+### 13.5 スコープ外・#1330 への引き継ぎ
+
+- 純カーネル時間の before/after（`CANDIDATES[9]` vs `CANDIDATES[0]`。
+  N=2048/4096・5 回計測中央値）・`tile::select` への組み込み判断
+- ダブルバッファ（2 面）化による SMEM 32 KiB 構成・E1 unroll
+  （`unroll_acc_candidates_are_exactly_acc_product_ge_16` の期待値
+  `{0,4,8,9}` 化は本 issue で実施済みだが、本番 `UNROLL_ACC_ENABLED=
+  false` かつ index 9 自体が `select` 非組み込みのため本番挙動は不変。
+  E1 の再評価は #1330 の実測結果を見て判断）
+- 端あり形状（8 の倍数でない大規模形状）・f16 経路・単独 `NT`/`TN`
+  以外の性能比較
+
+### 13.6 関連ログ
+
+`docs/perf/logs/metal-gemm-e7-candidate-1329/`（`env_info.txt`・
+`reflection.log`・`parity_dynamic_tile.log`・`parity_all_shapes.log`・
+`parity_n4096_cubic.log`・`parity_bk16_compare.log`・
+`regression_ignored_all_candidates.log`（`--lib --ignored` 全件）・
+`regression_gemm_dynamic_tile_parity.log`・
+`regression_gemm_strided_parity.log`・`make_test_ignored_metal.log`
+（並列実行。command_batching の 1 件が並列競合による既知の flaky で
+FAILED。§13.1 の `--test-threads=1` 版〈`full_ignored_serial.log`〉では
+全 pass）・`full_ignored_serial.log`（`cargo test -p fandhe-ai-backend-
+metal --release -- --ignored --nocapture --test-threads=1` 全件。ok）

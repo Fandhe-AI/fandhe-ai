@@ -373,3 +373,42 @@ fn dispatch_tiled_prepared_rejects_undersized_and_misaligned_inputs() {
         "期待した ALenMismatch ではなかった: {err2:?}"
     );
 }
+
+// --- イシュー #1329（E7・親 #1324）: 64x64x32（wm2wn2）を CANDIDATES[9] へ追加 ---
+
+/// `CANDIDATES[9]`（64,64,32,2,2。`CANDIDATES[0]` の bk=32 版）の境界形状
+/// ケース: m/n/k いずれも 64/64/32 の倍数でない実効次元（pad8 後
+/// k_eff=72・m_eff=104・n_eff=136）で `bk_eff` 末尾 0 埋め経路（REQ-8
+/// 手動境界チェック）に到達することを確認する
+/// （`bk32_candidate_matches_cpu_reference_non_multiple_of_tile` の
+/// 64x64 版）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bk32_64x64_candidate_matches_cpu_reference_non_multiple_of_tile() {
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    run_case(cfg, 64, 65, 100, 130, 70);
+}
+
+/// `CANDIDATES[9]`（64,64,32,2,2）の K ストレスケース: K=4096 の長い内積で
+/// バリア往復半減の狙いが数値正しさを損なわないことを確認する
+/// （`bk32_candidate_matches_cpu_reference_k_stress` の 64x64 版）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bk32_64x64_candidate_matches_cpu_reference_k_stress() {
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    run_case(cfg, 66, 67, 64, 64, 4096);
+}

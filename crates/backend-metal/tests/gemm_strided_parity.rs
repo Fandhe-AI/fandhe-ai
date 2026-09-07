@@ -35,10 +35,10 @@
 #![cfg(target_os = "macos")]
 
 use bench_harness::rng::Xorshift64Star;
-use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+use fandhe_ai_backend_cpu::parity::{assert_parity, compare, matmul_reference_fma};
 use fandhe_ai_backend_metal::layout::{MatrixLayout, classify_2d};
 use fandhe_ai_backend_metal::tile;
-use fandhe_ai_backend_metal::{MetalBackendOps, MetalBuffer, MetalContext, MetalGemm};
+use fandhe_ai_backend_metal::{MetalBackendOps, MetalBuffer, MetalContext, MetalGemm, TileConfig};
 use fandhe_ai_tensor_core::Tensor;
 
 /// `logical`（行優先の論理 `[rows, cols]`）から `[cols, rows]` 行優先の
@@ -499,5 +499,271 @@ fn dispatch_strided_tiled_prepared_handles_padded_leading_dimension_for_non_tran
             &actual,
             &expected,
         );
+    }
+}
+// --- イシュー #1329（E7・親 #1324）: 64x64x32（wm2wn2）を CANDIDATES[9] へ
+//     追加。全形状 × 転置 4 種の parity 確認・CANDIDATES[0]（bk=16）との
+//     複合判定内一致確認。性能比較・`tile::select` への組み込み判断は
+//     後続イシュー #1330 のスコープ（本ファイルは正確性確認のみ）。
+
+/// `CANDIDATES[9]`（イシュー #1329。64,64,32,2,2 — `CANDIDATES[0]` の
+/// bk=32 版）を明示指定した `dispatch_strided_tiled_prepared` の 1 形状 ×
+/// 1 転置パターンを実行し、CPU 参照実装との複合判定（REQ-2）で一致する
+/// ことを確認する。`expected`（CPU 参照）は形状ごとに 1 回だけ計算し
+/// 呼び出し元（4 パターン分）で共有する契約（`matmul_reference_fma` は
+/// スカラー実装で計算コストが高いため）。`resolved == cfg` を assert し
+/// サイレントフォールバックを検知する。
+#[allow(clippy::too_many_arguments)]
+fn assert_e7_candidate_matches_reference_for_pattern(
+    ctx: &MetalContext,
+    gemm: &MetalGemm,
+    cfg: TileConfig,
+    a_logical: &[f32],
+    b_logical: &[f32],
+    expected: &[f32],
+    shape: (usize, usize, usize),
+    transpose: (bool, bool),
+) {
+    let (m, n, k) = shape;
+    let (trans_a, trans_b) = transpose;
+    let (a_phys, a_layout): (Vec<f32>, MatrixLayout) = if trans_a {
+        (
+            transpose_dense(a_logical, m, k),
+            classify_2d(&[m, k], &[1, m as isize]).unwrap(),
+        )
+    } else {
+        (
+            a_logical.to_vec(),
+            classify_2d(&[m, k], &[k as isize, 1]).unwrap(),
+        )
+    };
+    let (b_phys, b_layout): (Vec<f32>, MatrixLayout) = if trans_b {
+        (
+            transpose_dense(b_logical, k, n),
+            classify_2d(&[k, n], &[1, k as isize]).unwrap(),
+        )
+    } else {
+        (
+            b_logical.to_vec(),
+            classify_2d(&[k, n], &[n as isize, 1]).unwrap(),
+        )
+    };
+
+    let a_buf = MetalBuffer::new_with_data(ctx, &a_phys).expect("A バッファ確保に失敗した");
+    let b_buf = MetalBuffer::new_with_data(ctx, &b_phys).expect("B バッファ確保に失敗した");
+    let c_buf = MetalBuffer::new_zeroed(ctx, m * n).expect("C バッファ確保に失敗した");
+
+    let resolved = gemm
+        .dispatch_strided_tiled_prepared(
+            ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf, m, n, k, cfg,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "dispatch_strided_tiled_prepared failed (cfg={cfg:?}, trans_a={trans_a}, \
+                 trans_b={trans_b}, m={m}, n={n}, k={k}): {e}"
+            )
+        });
+    assert_eq!(
+        resolved, cfg,
+        "CANDIDATES[9] がサイレントフォールバックした（trans_a={trans_a}, trans_b={trans_b}, \
+         m={m}, n={n}, k={k}）"
+    );
+
+    let actual = c_buf.read_to_vec();
+    assert_parity(
+        &format!(
+            "CANDIDATES[9]（64,64,32,2,2。イシュー #1329）dispatch_strided_tiled_prepared \
+             parity (trans_a={trans_a}, trans_b={trans_b}, m={m}, n={n}, k={k})"
+        ),
+        &actual,
+        expected,
+    );
+}
+
+/// イシュー #1329 の AC (c): `CANDIDATES[9]`（64,64,32,2,2）が全形状（正方
+/// 立方・K 未実測正方出力・準正方長方形・縦長横長の代表点。
+/// `examples/gemm_transpose_tile_sweep.rs::shapes()` と同一の 10 点のうち
+/// 純 4096³ を除く 9 点）＋ 8 整除境界形状 (72,88,104) × NN/NT/TN/TT の
+/// 4 転置パターンで parity 0 fail であることを確認する。純 4096³
+/// （スカラー CPU 参照の計算コストが突出して大きい）は
+/// `bk32_64x64_candidate_matches_cpu_reference_for_n4096_cubic_shape` へ
+/// 分離する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bk32_64x64_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+
+    let shapes: &[(usize, usize, usize)] = &[
+        (512, 512, 512),
+        (1024, 1024, 1024),
+        (2048, 2048, 2048),
+        (2048, 2048, 64),
+        (2048, 2048, 512),
+        (1536, 1024, 1024),
+        (1024, 1536, 1536),
+        (4096, 1024, 1024),
+        (1024, 4096, 1024),
+        (72, 88, 104),
+    ];
+
+    for &(m, n, k) in shapes {
+        let a_logical = Xorshift64Star::new(m as u64 * 7 + k as u64 + 101).fill_vec(m * k);
+        let b_logical = Xorshift64Star::new(n as u64 * 11 + k as u64 + 102).fill_vec(k * n);
+        let mut expected = vec![0.0f32; m * n];
+        matmul_reference_fma(&a_logical, &b_logical, &mut expected, m, n, k)
+            .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+        for pattern in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_e7_candidate_matches_reference_for_pattern(
+                &ctx,
+                &gemm,
+                cfg,
+                &a_logical,
+                &b_logical,
+                &expected,
+                (m, n, k),
+                pattern,
+            );
+        }
+    }
+}
+
+/// 上記テストから分離した純 4096³ ケース（スカラー CPU 参照の計算コストが
+/// 突出して大きいため実行時間管理のため個別実行可能にする。イシュー
+/// #1329 計画「リスク・注意」節）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない（実行時間が長い）"]
+fn bk32_64x64_candidate_matches_cpu_reference_for_n4096_cubic_shape() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    let (m, n, k) = (4096usize, 4096usize, 4096usize);
+
+    let a_logical = Xorshift64Star::new(201).fill_vec(m * k);
+    let b_logical = Xorshift64Star::new(202).fill_vec(k * n);
+    let mut expected = vec![0.0f32; m * n];
+    matmul_reference_fma(&a_logical, &b_logical, &mut expected, m, n, k)
+        .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+    for pattern in [(false, false), (false, true), (true, false), (true, true)] {
+        assert_e7_candidate_matches_reference_for_pattern(
+            &ctx,
+            &gemm,
+            cfg,
+            &a_logical,
+            &b_logical,
+            &expected,
+            (m, n, k),
+            pattern,
+        );
+    }
+}
+
+/// イシュー #1329 の AC (e): `CANDIDATES[9]`（bk=32）と `CANDIDATES[0]`
+/// （bk=16。同じ 64x64・wm2wn2 タイル形状）の出力が、統一複合判定（REQ-2）
+/// の範囲内で一致することを確認する（K チャンク順を変える構成変更が
+/// 数値面で許容範囲内であることの直接証跡）。bit 完全一致は assert せず
+/// （K の分割粒度が異なるため丸め順が変わりうる）、一致した場合は
+/// 観察としてのみ記録する（`docs/perf/metal-gemm-n4096-kernel-gap.md`
+/// §13 に転記）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bk32_64x64_candidate_agrees_with_bk16_counterpart_within_composite_tolerance() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let cfg_bk32 = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    let cfg_bk16 = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+
+    for &n in &[512usize, 1024, 2048, 4096] {
+        let (m, k) = (n, n);
+        let a_logical = Xorshift64Star::new(n as u64 * 13 + 301).fill_vec(m * k);
+        let b_logical = Xorshift64Star::new(n as u64 * 17 + 302).fill_vec(k * n);
+
+        for (trans_a, trans_b) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (a_phys, a_layout): (Vec<f32>, MatrixLayout) = if trans_a {
+                (
+                    transpose_dense(&a_logical, m, k),
+                    classify_2d(&[m, k], &[1, m as isize]).unwrap(),
+                )
+            } else {
+                (
+                    a_logical.clone(),
+                    classify_2d(&[m, k], &[k as isize, 1]).unwrap(),
+                )
+            };
+            let (b_phys, b_layout): (Vec<f32>, MatrixLayout) = if trans_b {
+                (
+                    transpose_dense(&b_logical, k, n),
+                    classify_2d(&[k, n], &[1, k as isize]).unwrap(),
+                )
+            } else {
+                (
+                    b_logical.clone(),
+                    classify_2d(&[k, n], &[n as isize, 1]).unwrap(),
+                )
+            };
+
+            let a_buf =
+                MetalBuffer::new_with_data(&ctx, &a_phys).expect("A バッファ確保に失敗した");
+            let b_buf =
+                MetalBuffer::new_with_data(&ctx, &b_phys).expect("B バッファ確保に失敗した");
+
+            let c_buf_32 = MetalBuffer::new_zeroed(&ctx, m * n).expect("C バッファ確保に失敗した");
+            gemm.dispatch_strided_tiled_prepared(
+                &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf_32, m, n, k, cfg_bk32,
+            )
+            .expect("CANDIDATES[9]（bk=32）のディスパッチに失敗した");
+            let out_bk32 = c_buf_32.read_to_vec();
+
+            let c_buf_16 = MetalBuffer::new_zeroed(&ctx, m * n).expect("C バッファ確保に失敗した");
+            gemm.dispatch_strided_tiled_prepared(
+                &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf_16, m, n, k, cfg_bk16,
+            )
+            .expect("CANDIDATES[0]（bk=16）のディスパッチに失敗した");
+            let out_bk16 = c_buf_16.read_to_vec();
+
+            let report = compare(&out_bk32, &out_bk16)
+                .expect("compare の形状検証に失敗した（同一 m,n のため発生しないはず）");
+            assert!(
+                report.passes(),
+                "CANDIDATES[9]（bk=32）と CANDIDATES[0]（bk=16）の出力が複合判定 FAIL \
+                 （trans_a={trans_a}, trans_b={trans_b}, n={n}, fail_count={}/{}, \
+                 max_abs_diff={:.3e}, max_rel_err={:.3e}）",
+                report.fail_count,
+                report.total,
+                report.max_abs_diff,
+                report.max_rel_err
+            );
+        }
     }
 }
