@@ -62,9 +62,9 @@
 
 `context_cache::OrdinalState` に `capture: Option<ThreadId>` を追加。`begin_capture_session`（同一 ordinal への再入を拒否）・`is_capturing_on_current_thread`（同期点ガードの判定）・`begin_sync_point_call`（`begin_driver_call` と同じ排他区間で、capture 中なら driver に触れる前に `Unsupported` で拒否）を実装した。capture モードは `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`。
 
-**cross-thread 排他（codex-review P0 指摘対応。追記）**: `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は「capture を乱しうる driver API 呼び出し」の判定を capture 開始スレッドに限定する目的のモードであり、**別スレッドが同じ共有ストリームへ直接カーネル起動すること自体を driver 側が防いでくれる保証ではない**。そのため `begin_driver_call`（`captured_segment_key`／`sgd_step_device_tracked` 等、通常の driver 呼び出し全般が通る唯一の入口）自身が `state.capture` を検査し、capture 中は**capture を開始したスレッド以外**からの呼び出しを `Unsupported` で一律拒否するよう変更した（capture を開始したスレッド自身は通す——`body` 実行がこの入口を再度通るため）。
+**cross-thread 排他（codex-review P0 指摘対応。追記）**: `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は「capture を乱しうる driver API 呼び出し」の判定を capture 開始スレッドに限定する目的のモードであり、**別スレッドが同じ共有ストリームへ直接カーネル起動すること自体を driver 側が防いでくれる保証ではない**。そのため `begin_driver_call`（`captured_segment_key`／`sgd_step_device_tracked` 等、通常の driver 呼び出し全般が通る唯一の入口）自身が `state.capture` を検査し、capture 中は**capture を開始したスレッド以外**からの呼び出しを `BackendError::DeviceContextCaptureInProgress`（一過性の競合を表す専用 variant。恒久的な未実装・設定誤りを表す `Unsupported` とは意味が異なる——呼び出し元がリトライすべきか否かの判断材料になる）で一律拒否するよう変更した（capture を開始したスレッド自身は通す——`body` 実行がこの入口を再度通るため）。
 
-**body の panic 対応（codex-review P1・Cursor Bugbot 指摘対応。追記）**: `body` が panic（unwind）した場合でも `stream.end_capture` を必ず呼んでから panic を再送出するよう `run_captured_segment` を変更した（`std::panic::catch_unwind` で包み、`end_capture` 実行後に `resume_unwind`）。以前は `body()` の panic が `end_capture` 呼び出しをスキップし、driver 側の capture 状態が終了されないまま残る整合性違反があった。
+**body の panic 対応（codex-review P1・Cursor Bugbot 指摘対応。追記。PR #1390 再修正で catch_unwind 経路を変更）**: `body` が panic（unwind）した場合でも `stream.end_capture` を必ず呼んでから、panic を `BackendError::KernelLaunchFailed`（panic ペイロードから抽出した可読メッセージを含む）へ変換して呼び出し元の `Result` 経由の失敗処理へ合流させるよう `run_captured_sgd_step_segment` を変更した（`std::panic::catch_unwind` で包み、`end_capture` 実行後に `body_result` を `Err(BackendError::KernelLaunchFailed(..))` にする）。旧稿は `end_capture` 実行後に `std::panic::resume_unwind` で panic をライブラリ境界外へ再送出していたが、これは `.claude/rules/coding-rust.md`「本番経路で panic しない」規約に反し、呼び出し元（`fandhe_ai_autodiff::optim::device_store::DeviceParamStore::step`）の `Result` ベースの poison・pending 復元処理を丸ごと迂回してしまうため、PR #1390 の codex-review 再指摘を受けて型付きエラーへの変換方式へ改めた。以前は `body()` の panic が `end_capture` 呼び出しをスキップし、driver 側の capture 状態が終了されないまま残る整合性違反があった。
 
 **バッファ解放の排他（codex-review P0 再指摘・Cursor Bugbot High 指摘対応。PR #1390 再修正）**: `cudarc::driver::CudaSlice::drop`（`memory.rs::CudaBufferHandle::Drop` から実行される実際の `cuMemFreeAsync`/`cuMemFree` 発行）は `begin_driver_call`／`begin_capture_session` の排他機構を一切経由しないため、別スレッドが capture 中に無関係なバッファを drop すると、その解放が capture 中の共有ストリームへ意図せず記録されうる。この排他を `context_cache::begin_buffer_release`（`BufferReleaseToken` を返す RAII 関数）で実装した。旧稿（`wait_until_not_capturing`）は「駐機して戻るだけ」で、戻った直後に別の capture セッションが実際に開始してしまう競合窓が残っていた（P0 再指摘）。本関数は駐機解除後に `state.in_flight` へ登録してから返し、`memory.rs` は返した `BufferReleaseToken` を実際の `CudaSlice` drop が完了するまで保持することで、その競合窓を閉じる。
 
@@ -115,10 +115,10 @@
 | 事象 | 結果 |
 |---|---|
 | body 内で同期点（download／upload／alloc／release）を呼ぶ | `Unsupported`（driver に触れる前）。ordinal は poison しない |
-| capture 中に capture 開始スレッド以外から driver 呼び出し | `Unsupported`（driver に触れる前。§4.2 追記） |
+| capture 中に capture 開始スレッド以外から driver 呼び出し | `DeviceContextCaptureInProgress`（一過性の競合。driver に触れる前。恒久的な `Unsupported` とは異なる。§4.2 追記） |
 | capture 中の driver エラー（begin/end capture・launch・upload） | ordinal を `Poisoned{false}` へ（明示 `Sticky` 分類）。`upload` 失敗も fail-closed で伝播（§4.3 追記） |
 | `end_capture` が空 graph | fail-closed エラー |
-| `body` が panic | `end_capture` を実行してから panic を再送出（§4.2 追記） |
+| `body` が panic | `end_capture` を実行してから panic を `BackendError::KernelLaunchFailed` へ変換して返す（§4.2 追記。PR #1390 再修正） |
 | `run_captured_sgd_step_segment` の `param`／`grad`／`velocity` が `key.resources` と不一致 | `InvalidArgument`（driver に触れる前。§4.4 追記） |
 | 世代不一致 | `StaleDeviceGeneration` |
 | opt-in ON だが legacy stream で初期化済み | `Unsupported`（設定順序の誤りを早期に顕在化） |
