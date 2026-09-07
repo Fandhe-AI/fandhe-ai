@@ -1,0 +1,20 @@
+run=1 N=512  0:04  up 19 days, 11:16, 19 users, load averages: 3.61 5.01 9.34
+run=1 N=1024  0:04  up 19 days, 11:16, 19 users, load averages: 3.61 5.01 9.34
+run=1 N=2048  0:04  up 19 days, 11:16, 19 users, load averages: 3.61 5.01 9.34
+run=2 N=512  0:04  up 19 days, 11:16, 19 users, load averages: 5.09 5.29 9.41
+run=2 N=1024  0:04  up 19 days, 11:16, 19 users, load averages: 5.09 5.29 9.41
+run=2 N=2048  0:04  up 19 days, 11:16, 19 users, load averages: 5.09 5.29 9.41
+run=3 N=512  0:04  up 19 days, 11:16, 19 users, load averages: 5.09 5.29 9.41
+run=3 N=1024  0:04  up 19 days, 11:16, 19 users, load averages: 5.09 5.29 9.41
+run=3 N=2048  0:04  up 19 days, 11:16, 19 users, load averages: 5.09 5.29 9.41
+run=4 N=512  0:04  up 19 days, 11:16, 19 users, load averages: 6.92 5.67 9.52
+run=4 N=1024  0:04  up 19 days, 11:16, 19 users, load averages: 6.92 5.67 9.52
+run=4 N=2048  0:04  up 19 days, 11:16, 19 users, load averages: 6.92 5.67 9.52
+run=5 N=512  0:04  up 19 days, 11:16, 19 users, load averages: 6.92 5.67 9.52
+run=5 N=1024  0:04  up 19 days, 11:16, 19 users, load averages: 6.92 5.67 9.52
+run=5 N=2048  0:04  up 19 days, 11:16, 19 users, load averages: 6.92 5.67 9.52
+run=1  0:04  up 19 days, 11:17, 19 users, load averages: 7.62 5.94 9.48
+run=2  0:04  up 19 days, 11:17, 19 users, load averages: 7.65 5.98 9.47
+run=3  0:05  up 19 days, 11:17, 19 users, load averages: 13.61 7.24 9.90
+run=4  0:05  up 19 days, 11:17, 19 users, load averages: 29.98 11.00 11.21
+run=5  0:05  up 19 days, 11:17, 19 users, load averages: 29.58 11.23 11.29

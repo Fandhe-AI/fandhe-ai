@@ -1,0 +1,25 @@
+# 実機環境情報（イシュー #1292・CUDA_NODE=<cuda-node>。GB10 / Grace CPU）
+アーキテクチャ:                      aarch64
+CPU 操作モード:                      64-bit
+バイト順序:                          Little Endian
+CPU:                                 20
+オンラインになっている CPU のリスト: 0-19
+ベンダー ID:                         ARM
+モデル名:                            Cortex-X925
+モデル:                              1
+コアあたりのスレッド数:              1
+ソケットあたりのコア数:              10
+ソケット数:                          1
+ステッピング:                        r0p1
+周波数ブースト:                      使用しない
+CPU スケーリング MHz:                100%
+CPU 最大 MHz:                        3900.0000
+20
+6.44 2.28 0.82 2/1006 416259
+---rustc/cargo---
+rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo 1.97.0 (c980f4866 2026-06-30)
+---fandhe-ai resolve---
+fandhe-ai v0.7.0 (registry, cargo tree -p bench-fandhe --depth 1 実測)
+---rev-stamp (Layer B HEAD)---
+308c2eb6e05c8adfd727244a970b29f422d79dc5
