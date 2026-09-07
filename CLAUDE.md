@@ -81,7 +81,6 @@ fandhe-ai/
     ├── backend-metal-wgpu-decision.md  # Metal バックエンド実装方式（wgpu 非採用）の決定記録
     ├── backend-switching-design.md     # cfg ベースバックエンド切替の設計
     ├── candle-parity-tolerance-contract-decision.md # tolerance 契約変更（N=2048 candle 比 GEMM parity 判定不能の解消）の決定記録 draft。候補 A（スケール付き絶対誤差）／B（ULP ベース）の比較表・推奨 A-1〈係数 c=0.5／1.0 の 2 案。未承認〉・fandhe-ai 側 0 fail 不変の根拠・spec 提案要否（#1240 対応）・Phase 2 反映範囲を整理。tolerance 定数・判定式・`BASELINES`・`docs/spec/` は不変のまま。採否・係数値・適用スコープはイシュー #1241 でユーザー承認（#1237／#1238 引き継ぎ・イシュー #1239）
-    ├── spec-proposal-req2-candle-parity-tolerance.md # REQ-2 統一複合判定へのスケール付き絶対誤差救済項（線形 K 形式・案 1′〈√K 形式〉との相違を明記）の追加／比較対象側（candle 等）fail の「判定不能」規定を fandhe-ai-spec へ提案する draft。spec リポへそのまま起票可能な本文案を含むが、実起票はイシュー #1241 でのユーザー承認後に限る（`docs/spec/` は不変・未起票。イシュー #1240）
     ├── cpu-gemm-b-packing-sharing-decision.md # B パネル packing のスレッド間共有化の設計検討・適用可否判断（#565）
     ├── cpu-gemm-prefetch-decision.md   # aarch64 プリフェッチ intrinsics 到達可能性調査・E-7 保留判断→原則不要へ格下げ（#489・#751）
     ├── crates-io-naming-decision.md # crates.io 公開クレート名（fandhe-ai prefix）の空き確認・最終名ユーザー承認記録（#878/#879）
@@ -207,6 +206,7 @@ fandhe-ai/
     ├── real-hardware-verification-env.local.md.example # 上記の実値（内部ホスト名等）を書くローカル用テンプレート（#461。実体は .gitignore 対象）
     ├── self-repair-candidate-isolation.md # 候補実行の OS レベル縦深防御の調査結果・採否判断（#414）
     ├── self-repair-revalidation-plan.md # TASK-3.3a 自己修復ループ再実証の実証計画・題材選定（#140）
+    ├── spec-proposal-req2-candle-parity-tolerance.md # REQ-2 統一複合判定へのスケール付き絶対誤差救済項（線形 K 形式・案 1′〈√K 形式〉との相違を明記）の追加／比較対象側（candle 等）fail の「判定不能」規定を fandhe-ai-spec へ提案する draft。spec リポへそのまま起票可能な本文案を含むが、実起票はイシュー #1241 でのユーザー承認後に限る（`docs/spec/` は不変・未起票。イシュー #1240）
     └── spec/                # 正本 submodule（fandhe-ai-spec。編集禁止）
         ├── 04-requirements.md  # REQ-1〜14
         ├── 05-tasks.md         # TASK 一覧（4h 粒度）
