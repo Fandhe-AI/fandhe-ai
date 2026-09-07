@@ -346,20 +346,33 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   `host-view-readout`。既定 OFF・`fandhe_ai::VarHostView`／`Tensor::host_slice` 利用。PR
   #1411）の効果を、Metal（M4 Max）・CPU（DGX Spark GB10 Grace／M4 Max）・CUDA（DGX Spark
   GB10）で切替前後 5 回中央値として実測し、`docs/perf/{cuda,metal,cpu}-gemm-candle-gate-
-  remeasurement.md` へ追補した（CUDA §13・Metal §12・CPU §15。CUDA は #1360 §12 の実測を
-  正式記録としつつ #1337 独自実行で同一符号を再現）
-- いずれも crates.io 承認ピンには該当 API が未収録のため **参考系列（path 差し替え HEAD）
-  のみ**の計測。正式判定（registry ピン。§8.2〜§8.4・§8.7）は不変
+  remeasurement.md` へ追補した（CUDA §13・Metal §12・CPU §15。CUDA §13 は #1360 §12 の
+  同一 sha 揃え実測を正式記録としつつ、#1337 独自実行の on 腕〈HEAD path + feature〉のみ
+  同一符号を再現）
+- **重要な限定**: `docs/perf/logs/gemm-candle-gate-readout-1337/` 配下の manifest 実測
+  により、3 バックエンド × 両実機いずれも off 腕が `fandhe_ai_source=registry`（crates.io
+  `fandhe-ai =0.7.0`）・on 腕のみ `fandhe_ai_source=path:<facade 絶対パス>`（HEAD
+  `1c298ff...`）であることが判明した（「参考系列〈path 差し替え HEAD〉のみの計測」という
+  当初の想定と異なり、off 腕は実質的に正式系列相当のビルド）。CUDA（§13）のみ §12.3 の
+  同一 sha 揃え腕（`head-3d5e833-readout-off`／`-on`）との突合により on 腕の再現性を確認
+  できているが、Metal（§12）・CPU（§15）の off/on 比較は readout feature の効果とライブラリ
+  ソース差（HEAD 対 registry）が混在しており、#1337（readout 単独）への厳密な効果分離
+  帰属はできない。以下の結果要約はこの限定のもとでの参考値として扱う
+- いずれも crates.io 承認ピンには該当 API が未収録のため参考値としての計測。正式判定
+  （registry ピン。§8.2〜§8.4・§8.7）は不変
 - 結果は形状・バックエンド依存の混在:
   - CUDA（低負荷実機）: N=4096 のみ改善して達成（0.98～1.37 倍）、N=1024 は 15～16 倍の
     大幅後退、N=2048 は判定不能（既知の candle 側決定的誤差）
   - CPU-DGX（低負荷実機）: 全形状で非後退（改善または同等）だが candle 比は未達のまま
-  - CPU-M4Max（共有負荷・片方向負荷差あり）: 3 形状とも達成の見込みだが、高負荷条件下での
-    達成のため過大評価バイアスではないと考えられる一方、確度は限定的
-  - Metal（共有負荷・片方向負荷差あり）: 3 形状とも後退。負荷ノイズと readout 経路そのものの
-    コストを完全には切り分けられていない
+  - CPU-M4Max（共有負荷・片方向負荷差あり）: 3 形状とも達成の見込み。ただし高負荷が
+    fandhe・candle 双方を遅くしつつ candle 側により強く効くことで比率を押し上げる
+    （過大評価する）ケースが N=2048 で確認されており、「高負荷は過小評価にしか働かない」
+    とは言えない。負荷ノイズによる過大評価・過小評価いずれの可能性も排除できないため
+    確度は限定的（CPU doc §15.3 参照）
+  - Metal（共有負荷・片方向負荷差あり）: 3 形状とも後退。負荷ノイズ・ソース差（上記）と
+    readout 経路そのもののコストを完全には切り分けられていない
 - 公正性の論点（candle 側ハーネス `to_vec2` は不変・checksum/parity 契約不変・#1336 は
   この readout 経路に非到達）は各節に明記。`host-view-readout` の既定化可否は判断していない
-  （CUDA N=1024/2048 の大幅後退・Metal の全形状後退が未解決）
+  （CUDA N=1024/2048 の大幅後退・Metal の全形状後退・上記ソース差の未分離が未解決）
 - 生データ・実行ログ: `scripts/bench/framework-compare/results/raw/*head-1c298ff-readout-
   {off,on}*`・`docs/perf/logs/gemm-candle-gate-readout-1337/`

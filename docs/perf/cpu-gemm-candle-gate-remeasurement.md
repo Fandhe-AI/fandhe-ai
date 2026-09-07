@@ -660,6 +660,18 @@ DGX での後退の推定要因: `IcDynamic` は pc ごとに B を列全幅 `n`
   ピン）は計測せず**参考系列のみ**で行う。正式判定（§12）は不変
 - 転送元 sha: `1c298ff5641b948dae3c1c65699930054af8f747`（PR #1411 より後、PR #1420 まで含む
   HEAD）。ラベル: `head-1c298ff-readout-off`／`head-1c298ff-readout-on`
+- **off/on 間でソースが揃っていない（重要な限定）**: manifest 実測（
+  `docs/perf/logs/gemm-candle-gate-readout-1337/run_gemm_gate_cpu-{dgx,m4max}-readout-
+  {off,on}.log` の `依存元検証 OK` 行）で確認すると、両実機とも off 腕は
+  `fandhe_ai_source=registry`（`GEMM_GATE_PATCH_FACADE_PATH` 未使用。crates.io
+  `fandhe-ai =0.7.0`）、on 腕のみ `fandhe_ai_source=path:<facade 絶対パス>`（HEAD
+  `1c298ff...`）＋ `GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout` である。off/on の
+  差分には readout feature の効果に加え、v0.7.0 公開後にマージされたコード差分（HEAD と
+  registry の乖離。CPU GEMM 本番経路自体は §0 のとおり v0.6.0 以降不変だが、ハーネス側
+  〈`bench-fandhe`〉やその他経路の差分は排除できない）が混入しており、**以下 §15.2〜§15.5
+  の off/on 比較・「readout-on で改善／達成」という記述は #1337（readout 単独）への効果と
+  しては厳密には分離帰属できない**。同一 HEAD source（path 差し替え）での off 腕再計測は
+  本イシューのスコープ内で追加実施していない
 - プロトコルは §3 と同一（`GEMM_GATE_CPU_NODE_TAG=dgx-cpu|m4max-cpu run_gemm_gate_cpu.sh`）に
   加え、on 腕は `GEMM_GATE_PATCH_FACADE_PATH=<facade 絶対パス>
   GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout` を付与。効果分離には
@@ -691,7 +703,7 @@ max_rel_err=3.944416e-01`（§5.2・§12.3 と同一の既知事象。tolerance 
 fandhe-ai 側は全 30 run（3 サイズ×5 run×2 腕）で `parity_fail_count=0`。off/on の checksum は
 全セル完全一致（`compare_gemm_ab.py` 出力。§15.4）。
 
-**DGX 側は N=512/1024 とも readout-on でわずかに改善（off/on の fandhe reuse 中央値: 512 は
+**DGX 側は N=512/1024 とも readout-on の中央値がわずかに小さい（§15.1 の限定により readout 単独の改善とは断定しない。off/on の fandhe reuse 中央値: 512 は
 ほぼ同値、1024 は 7.120 ms → 6.582 ms・0.92 倍）したが、candle 比ではいずれも未達のまま**（低
 負荷環境での計測にもかかわらず #1117 ゲートは達成していない）。
 
@@ -706,11 +718,18 @@ fandhe-ai 側は全 30 run（3 サイズ×5 run×2 腕）で `parity_fail_count=
 fandhe-ai 側は全 30 run で `parity_fail_count=0`。off/on の checksum は全セル完全一致。
 
 **M4 Max 側は readout-on で 3 形状とも `candle/fandhe >= 1.0`（達成）** となった。ただし on 腕
-は off 腕より高負荷な共有マシン状態下（§15.1）であり、それでも達成条件を満たしたことは
-readout 削減の効果を過小評価こそすれ過大評価する方向のバイアスではないと考えられる（負荷が
-高いほど不利になるはずの条件下での達成のため）。一方 min–max 幅が広い run（512/reuse の
-max 12.547 ms・1024/reuse の max 19.758 ms・2048/fresh の min 29.989 ms 等）が混在しており、
-5 run 中央値としての判定は成立するが背景負荷の影響は無視できない
+は off 腕より高負荷な共有マシン状態下（§15.1）であり、この達成が readout 単独の効果か負荷
+ノイズの影響かは切り分けられない。当初「高負荷は fandhe 側を不利にするだけなので過大評価
+方向のバイアスではない」と推定していたが、これは誤りである: N=2048 では fandhe 自体も
+readout-on（高負荷側）で 38.176 ms → 39.568 ms と後退している一方、candle 側は 32.661 ms →
+43.175 ms とそれ以上に悪化しており、結果として `candle/fandhe` 比は 0.856 → 1.091 と改善
+（達成側へ）している。これは高負荷が fandhe・candle の双方を遅くしつつ candle 側により
+強く効くことで比率を押し上げうる（過大評価）ことを示しており、高負荷が過小評価にしか
+働かないとは言えない。したがって本節の達成判定は**負荷ノイズによる過大評価・過小評価の
+いずれの可能性も排除できない**まま報告する（低負荷環境での再確認が必要。§15.6）。一方
+min–max 幅が広い run（512/reuse の max 12.547 ms・1024/reuse の max 19.758 ms・2048/fresh
+の min 29.989 ms 等）が混在しており、5 run 中央値としての判定は成立するが背景負荷の影響は
+無視できない
 
 ### 15.4 readout 切替効果（`compare_gemm_ab.py --device cpu --sizes gate`）
 
@@ -741,8 +760,9 @@ M4 Max（片方向の負荷差あり。§15.1 参照）:
 ```
 
 - **DGX（低負荷）は `reuse` 列が全 fresh/reuse セル非後退**（fresh 列も含め改善または同等）。
-  これはハーネス側の `host_copy`（memcpy）削減が背景負荷に邪魔されずに観測できた結果と解釈
-  できる
+  DGX は低負荷環境かつ §15.1 の限定（off=registry／on=path のソース差）が残るため、この
+  非後退がハーネス側の `host_copy`（memcpy）削減単独の効果であるとは断定しない（readout
+  feature とソース差の複合効果である可能性を排除できない）
 - **M4 Max（片方向負荷差あり）は `reuse` 判定が 512/2048 で非後退、1024 のみ「後退」**表示
   だが、§15.3 のとおり `candle/fandhe` 比では 3 形状とも達成しており、`compare_gemm_ab.py`
   の非回帰判定（before との単純比較）と candle 比ゲート判定は独立の指標であることに注意
@@ -763,7 +783,9 @@ M4 Max（片方向の負荷差あり。§15.1 参照）:
 **正式判定（registry ピン `fandhe-ai =0.7.0` に基づく §12）: #1117 は引き続き未達成（変更なし）**。
 **参考系列（次回ピン更新後の見込み値）**: DGX は readout on/off いずれも全形状未達のまま
 （N=2048 は判定不能のまま）。M4 Max は readout-on で 3 形状とも達成する見込みだが、§15.1 の
-片方向負荷差のため確度は限定的（低負荷環境での再確認が望ましい。§15.6）。DGX で改善が
+off/on ソース差・片方向負荷差のいずれとも切り分けられておらず確度は限定的（低負荷・同一
+ソースでの再確認が望ましい。§15.6）。負荷ノイズは過小評価・過大評価のいずれの方向にも
+働きうる（§15.3 の N=2048 分析）ため、「達成見込み」は暫定値として扱う。DGX で改善が
 小幅・M4 Max で改善が大きい非対称は、DGX CPU が並列度・NUMA/unified memory 構成上
 `host_copy` の相対コストが元々小さい可能性を示唆するが、原因分析は本イシューのスコープ外
 とする

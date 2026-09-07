@@ -272,6 +272,20 @@ fandhe-ai・candle とも全 30 run で `parity_fail_count=0`・checksum が同�
 - 転送元 sha: `1c298ff5641b948dae3c1c65699930054af8f747`（PR #1411 より後、PR #1420 まで含む
   HEAD）。ラベル: `head-1c298ff-readout-off`（feature 無効・legacy 経路）／
   `head-1c298ff-readout-on`（`host-view-readout` 有効・借用ビュー経路）
+- **off/on 間でソースが揃っていない（重要な限定）**: manifest 実測（
+  `docs/perf/logs/gemm-candle-gate-readout-1337/run_gemm_gate_metal-readout-{off,on}.log`
+  の `依存元検証 OK` 行）で確認すると、off 腕は `fandhe_ai_source=registry`（
+  `GEMM_GATE_PATCH_FACADE_PATH` 未使用。crates.io `fandhe-ai =0.7.0`）、on 腕のみ
+  `fandhe_ai_source=path:<facade 絶対パス>`（HEAD `1c298ff...`）＋
+  `GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout` であり、上記「本節も §11 と同じ
+  参考系列のみで計測する」という記述は正確ではない（off 腕のみ正式系列相当の registry
+  ビルド）。off/on の差分には readout feature の効果に加え、v0.7.0 公開後にマージされた
+  コード差分（HEAD と registry の乖離）が混入しており、**§12.2〜§12.3 の off/on 比較単独
+  からは readout（#1337）への効果を分離帰属できない**。§12.4 の「readout-on 自体が Metal
+  で純粋に遅いと断定しない」という保留判断はこの限定のもとでも変わらないが、原因を負荷
+  ノイズのみに限定せず、ソース差（HEAD 対 registry）も未分離の交絡要因として扱う。
+  同一 HEAD source（path 差し替え）での off 腕再計測は本イシューのスコープ内で追加実施
+  していない
 - プロトコルは §2 と同一（`run_gemm_gate_metal.sh`）に加え、
   `GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス>`（on 腕はさらに
   `GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout`）を付与。効果分離には
@@ -331,7 +345,8 @@ fandhe-ai 側は全 30 run で `parity_fail_count=0`。off/on の checksum は�
   この readout 経路を通らない（Metal には同種の staging 実装自体がない）。本節の効果は
   `#1337`（borrowed-view readout そのもの）に帰属する
 - **`host-view-readout` 既定化の可否**: 本節では判断しない（Metal で 3 形状とも後退・かつ
-  負荷ノイズと切り分けられていないため、既定化の根拠にはできない）
+  負荷ノイズおよび off/on 間のソース差〈§12.1〉のいずれとも切り分けられていないため、
+  既定化の根拠にはできない）
 - **低負荷環境での再計測**: 本節の計測は片方向の負荷差（on 腕がより高負荷）を伴う共有マシン
   状態下で実施した。低負荷環境での再計測は本イシューのスコープ外とし、ユーザー判断で
   新規 issue を起票するかを決める
