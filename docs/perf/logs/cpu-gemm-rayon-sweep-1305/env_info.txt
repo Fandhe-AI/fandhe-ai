@@ -1,0 +1,77 @@
+イシュー #1305: 専有環境での RAYON_NUM_THREADS スイープ再実測 環境情報
+
+## DGX Spark GB10（Grace CPU。実測完了）
+
+- 機種: DGX Spark（Grace CPU。Cortex-X925 ×10 + Cortex-A725 ×10、計 20 論理
+  コア。`lscpu -e`・`midr_el1` 導出根拠は `env_info_raw-dgx.txt` 参照）。
+  実ホスト名は `docs/real-hardware-verification-env.local.md` 方式のローカル管理
+- OS: Linux（aarch64・6.17.0-1031-nvidia）
+- rustc/cargo: 1.97.0 (2d8144b78 2026-07-07) / 1.97.0 (c980f4866 2026-06-30)
+- 計測日: 2026-09-07（UTC）
+- worktree HEAD（`.rev-stamp`）: `4bf092f75f5e39877914d61f794a80822ecdfaf3`
+  （`origin/main` 追従。本イシューの計測対象は `oss-gemm-compare` ハーネス自体
+  〈CPU GEMM 本番経路 `RowPanel` を計測〉であり、この HEAD 時点で本番経路は
+  #1364／#1367 いずれも REJECT・未結線のまま `docs/perf/logs/cpu-gemm-thread-limit-1364/`・
+  `cpu-gemm-ic-dynamic-ab-1367/` と同一のため計測対象として妥当）
+- **計測方式**: 本イシュー専用の隔離ディレクトリ（`~/work/sweep-1305/`）へ
+  `crates/`・ルート `Cargo.toml`／`Cargo.lock`・`scripts/bench/oss-gemm-compare/`
+  のみを rsync し、計測完了後に隔離ディレクトリ・外部 `CARGO_TARGET_DIR`
+  （`~/work/target-oss-1305/`）とも削除済み（共有ディレクトリ
+  `~/work/rust-ai-library-run` には触れていない。孤児プロセスなしを
+  `pgrep -af oss-gemm-compare`／`pgrep -af dgx_orchestrate` で確認済み）
+- **専有状態ゲート**: 1 分平均 load average < 2.0 を 2 回連続（attempt=0
+  load1=0.48・attempt=1 load1=0.18）で計測開始前に通過（`out-dgx/gate-dgx.log`）。
+  スイープ実行中の 1 分平均 load average は 0.06〜4.72 で推移（`out-dgx/uptime-dgx.log`。
+  30 秒間隔サンプリング341件。上昇分は計測対象プロセス自身の rayon 占有）。
+  他プロセスからの外部負荷なし（gate 時点の `ps` トップに計測プロセス以外の
+  高 CPU プロセスなし）
+- 主スイープ: `THREADS="8 10 20 1 2 4 12 16"`・`SIZES=1024,2048,4096`・
+  `RUNS=5`（`out-dgx/rayon_sweep_dgx.log`）
+- 補助軸 A（taskset pin）: `RAYON_NUM_THREADS=10` 固定で大コア
+  （`taskset -c 5-9,15-19`）・小コア（`taskset -c 0-4,10-14`）・pin なしの
+  3 条件 × 5 run（`out-dgx/taskset_big_dgx.log`・`taskset_little_dgx.log`・
+  `taskset_nopin_dgx.log`。結合ファイル `taskset_pin_dgx.log`）
+- 補助軸 B（制御形状）: `SIZES=1920`・`THREADS="8 10 20"`（`out-dgx/control_1920_dgx.log`）
+- K>=1024 の `output_match=false`（matrixmultiply・gemm crate との丸め差）は
+  既知の fail-closed 仕様どおりの想定内挙動（`docs/oss-gemm-comparison-baseline.md`）
+
+## Apple M4 Max（実測完了・共有負荷下フォールバック）
+
+- 機種: Apple M4 Max（P コア 12・E コア 4、計 16 論理コア。
+  `sysctl hw.perflevel0.logicalcpu`=12・`hw.perflevel1.logicalcpu`=4）
+- OS: macOS（Darwin 25.6.0）
+- rustc/cargo: 1.96.0 (ac68faa20 2026-05-25) / 1.96.0 (30a34c682 2026-05-25)
+- 計測日: 2026-09-07（UTC）
+- worktree: 本 worktree（`docs/1305-rayon-sweep-exclusive` ブランチ・HEAD
+  `4bf092f75f5e39877914d61f794a80822ecdfaf3` から分岐）
+- **専有状態ゲート**: 1 分平均 load average < 4.0 を 2 回連続で通過することを
+  最大 60 分待機（計画時点の記載は 30 分だったが、`m4max_orchestrate.sh` の
+  ループ上限を DGX 側〈`attempts<60`〉と同一実装にした結果 60 分上限になった。
+  本イシュー実行環境が単一セッションのため見直しは行わず、実測結果として
+  記録する）。本マシン上で並列稼働する他の Claude Code エージェントセッション
+  が多数存在し（`gate-m4max.log` の `who`／`ps` に自プロセス以外の高負荷プロセス
+  複数）、attempt=0〜59（60 分）を通じて 1 分平均 load average が 2 回連続で
+  4.0 未満になることはなく、ゲートは**不通過**のまま「共有負荷下として続行」
+  （`out-m4max/gate-m4max.log` 末尾 `gate NOT PASSED after max wait`）。
+  スイープ実行中の 1 分平均 load average は 2.42〜28.74 で推移
+  （`out-m4max/uptime-m4max.log`。30 秒間隔サンプリング 513 件）。#1147／#1367
+  等の既存記録（load average 20〜31 前後）と比べるとやや低いレンジだが、
+  引き続き高負荷帯を含む
+- 主スイープ: `THREADS="8 12 16 1 2 4 10 14"`・`SIZES=1024,2048,4096`・
+  `RUNS=5`（`out-m4max/rayon_sweep_m4max.log`）
+- 補助軸 B（制御形状）: `SIZES=1920`・`THREADS="8 12 16"`（`out-m4max/control_1920_m4max.log`）
+- 補助軸 A（taskset pin）: macOS には `taskset` 相当のコマンドがなく、計画
+  §3.4 のとおり DGX 限定（M4 Max では実施しない）
+
+## 集計
+
+`aggregate.py`（python3 標準ライブラリのみ）で各ログから中央値・比・run 単位の
+符号一貫性を再計算できる。実行例:
+
+```
+python3 aggregate.py dgx-main out-dgx/rayon_sweep_dgx.log 5
+python3 aggregate.py dgx-taskset out-dgx/taskset_pin_dgx.log 5
+python3 aggregate.py dgx-control1920 out-dgx/control_1920_dgx.log 5
+python3 aggregate.py m4max-main out-m4max/rayon_sweep_m4max.log 5
+python3 aggregate.py m4max-control1920 out-m4max/control_1920_m4max.log 5
+```
