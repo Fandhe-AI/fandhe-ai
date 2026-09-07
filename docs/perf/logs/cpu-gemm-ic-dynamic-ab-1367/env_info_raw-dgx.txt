@@ -1,0 +1,58 @@
+=== env ===
+2026年  9月  7日 月曜日 12:12:59 UTC
+アーキテクチャ:                      aarch64
+CPU 操作モード:                      64-bit
+バイト順序:                          Little Endian
+CPU:                                 20
+オンラインになっている CPU のリスト: 0-19
+ベンダー ID:                         ARM
+モデル名:                            Cortex-X925
+モデル:                              1
+コアあたりのスレッド数:              1
+ソケットあたりのコア数:              10
+ソケット数:                          1
+ステッピング:                        r0p1
+周波数ブースト:                      使用しない
+CPU スケーリング MHz:                100%
+CPU 最大 MHz:                        3900.0000
+CPU 最小 MHz:                        1378.0000
+BogoMIPS:                            2000.00
+フラグ:                              fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm sb paca pacg dcpodp sve2 sveaes svepmull svebitperm svesha3 svesm4 flagm2 frint svei8mm svebf16 i8mm bf16 dgh bti ecv afp wfxt
+モデル名:                            Cortex-A725
+モデル:                              1
+コアあたりのスレッド数:              1
+ソケットあたりのコア数:              10
+ソケット数:                          1
+ステッピング:                        r0p1
+CPU スケーリング MHz:                100%
+CPU 最大 MHz:                        2808.0000
+CPU 最小 MHz:                        338.0000
+BogoMIPS:                            2000.00
+フラグ:                              fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm sb paca pacg dcpodp sve2 sveaes svepmull svebitperm svesha3 svesm4 flagm2 frint svei8mm svebf16 i8mm bf16 dgh bti ecv afp wfxt
+L1d キャッシュ:                      1.3 MiB (20 インスタンス)
+L1i キャッシュ:                      1.3 MiB (20 インスタンス)
+L2 キャッシュ:                       25 MiB (20 インスタンス)
+L3 キャッシュ:                       24 MiB (2 インスタンス)
+NUMA ノード数:                       1
+NUMA ノード 0 CPU:                   0-19
+脆弱性 Gather data sampling:         Not affected
+脆弱性 Ghostwrite:                   Not affected
+脆弱性 Indirect target selection:    Not affected
+脆弱性 Itlb multihit:                Not affected
+脆弱性 L1tf:                         Not affected
+脆弱性 Mds:                          Not affected
+脆弱性 Meltdown:                     Not affected
+脆弱性 Mmio stale data:              Not affected
+脆弱性 Old microcode:                Not affected
+脆弱性 Reg file data sampling:       Not affected
+脆弱性 Retbleed:                     Not affected
+脆弱性 Spec rstack overflow:         Not affected
+脆弱性 Spec store bypass:            Mitigation; Speculative Store Bypass disabled via prctl
+脆弱性 Spectre v1:                   Mitigation; __user pointer sanitization
+脆弱性 Spectre v2:                   Mitigation; CSV2, BHB
+脆弱性 Srbds:                        Not affected
+脆弱性 Tsa:                          Not affected
+脆弱性 Tsx async abort:              Not affected
+脆弱性 Vmscape:                      Not affected
+6.17.0-1031-nvidia
+rustc 1.97.0 (2d8144b78 2026-07-07)
