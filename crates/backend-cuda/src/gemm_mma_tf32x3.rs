@@ -40,6 +40,41 @@ use crate::gemm_mma_tf32::{
 use crate::kernels_mma_tf32x3;
 use crate::nvrtc::compile_ptx;
 
+/// A・B に非有限値（`NaN`／`±inf`）が含まれていないか起動前にホスト側で
+/// 検査する（`CudaError::NonFiniteInput` ドキュメンテーションコメント
+/// 参照。codex-review 指摘・PR #1400）。
+///
+/// `kernels_mma_tf32x3.rs::MMA_TF32X3_SPLIT` の hi/lo 分割
+/// （`lo = round_tf32(v - hi)`）は `v` が非有限だと `v - hi` が
+/// `inf - inf = NaN` 等の不定形になり、その汚染が `mma.sync` の乗算
+/// （`inf * 0 = NaN`）を通じて出力全体へ伝播しうる。CPU・単発 TF32
+/// 経路が `±inf` をそのまま返す契約と食い違うため、本経路のみ非有限
+/// 入力を未対応として明示的に拒否する（fail-closed。黙って誤った
+/// 数値を返さない）。
+fn validate_tf32x3_finite_input(a: &[f32], b: &[f32]) -> Result<(), CudaError> {
+    if let Some((idx, v)) = a.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(CudaError::NonFiniteInput {
+            detail: format!(
+                "lhs (a) contains a non-finite value at flat index {idx}: {v} \
+                 (3xTF32 split-single decomposition cannot represent non-finite \
+                 operands without producing spurious NaN; use Fp32Strict or Tf32 \
+                 precision mode for non-finite inputs)"
+            ),
+        });
+    }
+    if let Some((idx, v)) = b.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(CudaError::NonFiniteInput {
+            detail: format!(
+                "rhs (b) contains a non-finite value at flat index {idx}: {v} \
+                 (3xTF32 split-single decomposition cannot represent non-finite \
+                 operands without producing spurious NaN; use Fp32Strict or Tf32 \
+                 precision mode for non-finite inputs)"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// 3×TF32 `mma.sync`(m16n8k8) GEMM カーネルのコンパイル済みハンドルを
 /// 保持する。`stream` は `CudaDevice` から `Arc` クローンで受け取る
 /// （`gemm_mma_tf32.rs::CudaMmaTf32Gemm` と同じ共有契約）。
@@ -78,6 +113,12 @@ impl CudaMmaTf32x3Gemm {
     /// A・B（f32）を渡すだけで GPU 実行し C（f32）を得る一括 API
     /// （`gemm_mma_tf32.rs::CudaMmaTf32Gemm::run_tf32` と同一の検証順序・
     /// 同一のゼロ次元形状契約。ドキュメンテーションコメント参照）。
+    ///
+    /// 形状検証群に加え、[`validate_tf32x3_finite_input`] で A・B の
+    /// 非有限値（`NaN`／`±inf`）を起動前に検査し、含まれていれば
+    /// [`crate::error::CudaError::NonFiniteInput`] で fail-closed に
+    /// 拒否する（本経路固有。`CudaError::NonFiniteInput` ドキュメン
+    /// テーションコメント参照）。
     pub fn run_tf32x3(
         &self,
         a: &[f32],
@@ -98,6 +139,7 @@ impl CudaMmaTf32x3Gemm {
         validate_mma_tf32_alignment(n, k)?;
         validate_mma_tf32_grid_bounds(m)?;
         validate_mma_tf32_k_bound(k)?;
+        validate_tf32x3_finite_input(a, b)?;
 
         let (a_dev, b_dev) = self.upload_f32(a, b)?;
         let mut c_dev = self.alloc_output_f32(m, n)?;
@@ -189,5 +231,60 @@ mod tests {
     fn validate_mma_tf32_k_bound_accepts_ordinary_k() {
         assert!(validate_mma_tf32_k_bound(0).is_ok());
         assert!(validate_mma_tf32_k_bound(4096).is_ok());
+    }
+
+    /// 全要素が有限な A・B を受理する（`validate_tf32x3_finite_input`
+    /// の非破壊契約。codex-review 指摘・PR #1400）。
+    #[test]
+    fn validate_tf32x3_finite_input_accepts_all_finite() {
+        let a = vec![1.0f32, -2.0, 0.0, f32::MAX, f32::MIN, 1e-30];
+        let b = vec![3.0f32, 4.0, -5.0, 6.0, 7.0, 8.0];
+        assert!(validate_tf32x3_finite_input(&a, &b).is_ok());
+    }
+
+    /// codex-review 指摘の再現ケース: A が全要素 `+inf`・B が全要素
+    /// `1.0` の場合、`+inf` が拒否される（hi/lo 分割の `v - hi =
+    /// inf - inf = NaN` 汚染を未然に防ぐ。詳細は
+    /// `CudaError::NonFiniteInput` ドキュメンテーションコメント）。
+    #[test]
+    fn validate_tf32x3_finite_input_rejects_positive_infinity_in_lhs() {
+        let a = vec![f32::INFINITY; 16];
+        let b = vec![1.0f32; 16];
+        let err = validate_tf32x3_finite_input(&a, &b)
+            .expect_err("+inf lhs は非有限入力として拒否されるべき");
+        match err {
+            CudaError::NonFiniteInput { detail } => {
+                assert!(
+                    detail.contains("lhs (a)"),
+                    "detail should identify the lhs operand: {detail}"
+                );
+            }
+            other => panic!("unexpected error variant: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_tf32x3_finite_input_rejects_negative_infinity_in_rhs() {
+        let a = vec![1.0f32; 4];
+        let b = vec![f32::NEG_INFINITY; 4];
+        let err = validate_tf32x3_finite_input(&a, &b)
+            .expect_err("-inf rhs は非有限入力として拒否されるべき");
+        match err {
+            CudaError::NonFiniteInput { detail } => {
+                assert!(
+                    detail.contains("rhs (b)"),
+                    "detail should identify the rhs operand: {detail}"
+                );
+            }
+            other => panic!("unexpected error variant: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_tf32x3_finite_input_rejects_nan() {
+        let a = vec![1.0f32, f32::NAN, 3.0, 4.0];
+        let b = vec![5.0f32, 6.0, 7.0, 8.0];
+        let err = validate_tf32x3_finite_input(&a, &b).expect_err("NaN lhs は拒否されるべき");
+        assert!(matches!(err, CudaError::NonFiniteInput { .. }));
     }
 }

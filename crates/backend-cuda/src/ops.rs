@@ -2126,6 +2126,16 @@ mod tests {
     /// ことを検証する（イシュー #1355）。CUDA 非搭載環境・カーネル使用
     /// 不能環境では `BackendError::CudaUnavailable`／
     /// `KernelLaunchFailed`（fail-closed 伝播）の型のみ確認する。
+    ///
+    /// 入力形状は 4×4（`n`・`k` とも 4 の倍数）を使う。3×TF32 経路は
+    /// `gemm_mma_tf32.rs::validate_mma_tf32_alignment` により `n % 4 == 0
+    /// && k % 4 == 0`（`cp.async` 16 バイト整列制約）を要求するため、
+    /// 2×2 のような非対応形状では対応 GPU 上でも必ず
+    /// `BackendError::KernelLaunchFailed`（形状拒否）で早期リターンし、
+    /// 起動カウンタ増加を伴う本来の経路検証（成功時分岐）に到達しない
+    /// （codex-review 指摘・PR #1400）。非対応形状の拒否自体は別途
+    /// `gemm_mma_tf32.rs::tests::validate_mma_tf32_alignment_rejects_*`
+    /// が検証する。
     #[test]
     fn gemm_routes_to_tf32x3_path_when_precision_is_tf32x3_env_adaptive() {
         use fandhe_ai_tensor_core::Tensor;
@@ -2134,8 +2144,8 @@ mod tests {
         crate::precision::set_gemm_precision(crate::precision::CudaGemmPrecision::Tf32x3);
 
         let cuda = CudaBackendOps::new(0);
-        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
-        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+        let a = Tensor::new((1..=16).map(|v| v as f32).collect(), &[4, 4]).expect("valid tensor");
+        let b = Tensor::new((1..=16).map(|v| v as f32).collect(), &[4, 4]).expect("valid tensor");
 
         let before_tf32 = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
         let before_tf32x3 = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());

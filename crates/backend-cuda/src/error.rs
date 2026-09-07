@@ -331,6 +331,28 @@ pub enum CudaError {
     /// `map_cuda_error`／`map_cuda_alloc_error` は本 variant を
     /// `BackendError::Unsupported` へマップする（`memory.rs` 参照）。
     ManagedMemoryUnsupported { detail: String },
+
+    /// 3×TF32 split-single 経路（`gemm_mma_tf32x3.rs::CudaMmaTf32x3Gemm::
+    /// run_tf32x3`。イシュー #1355）へ渡された A・B のいずれかに非有限値
+    /// （`NaN`／`±inf`）が含まれていたことを表す（codex-review 指摘。
+    /// PR #1400）。
+    ///
+    /// 本経路は `MMA_TF32X3_SPLIT`（`kernels_mma_tf32x3.rs`）でオペランド
+    /// を `hi = round_tf32(v)`／`lo = round_tf32(v - hi)` の hi/lo 2 語へ
+    /// レジスタ段で分割する。`v` が非有限（`±inf`／`NaN`）の場合、
+    /// `v - hi` は `inf - inf = NaN` 等の不定形になり `lo` が汚染される
+    /// うえ、その `lo` が有限な相手オペランドと `mma.sync` で乗算される
+    /// 際に `inf * 0 = NaN` のような偽の `NaN` を生みうる（IEEE 754 の
+    /// 仕様上、单一 TF32／FP32 厳密経路が返す `±inf`／有限値と異なり
+    /// 本来非有限であるべきでない要素まで `NaN` に汚染しうるため、
+    /// 単純な `lo=0` 代入では契約を回復できない）。この不整合は
+    /// split-single 近似固有の限界であり GPU 上で安価に補正できないため、
+    /// `run_tf32x3` はカーネル起動前にホスト側で A・B の全要素を
+    /// `f32::is_finite()` 検査し、非有限値が 1 つでもあればこの variant
+    /// で fail-closed に拒否する（CPU・単発 TF32 経路は `±inf` をそのまま
+    /// 返す契約のため、3×TF32 経路のみ明示的に未対応入力として扱う。
+    /// `docs/cuda-tf32x3-split-single-decision.md` 追補）。
+    NonFiniteInput { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -416,6 +438,12 @@ impl fmt::Display for CudaError {
                 write!(
                     f,
                     "managed memory (cuMemAllocManaged) unsupported on this device: {detail}"
+                )
+            }
+            CudaError::NonFiniteInput { detail } => {
+                write!(
+                    f,
+                    "3xTF32 (split-single) GEMM rejects non-finite input (NaN/inf): {detail}"
                 )
             }
         }
