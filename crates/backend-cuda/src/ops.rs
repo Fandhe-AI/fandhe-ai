@@ -714,7 +714,7 @@ impl BackendOps for CudaBackendOps {
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
         // `download`（`memory.rs::CudaMemory::download`）と同じ「空バッファ
-        // は `slice: None`」契約のため、numel == 0 はカーネル起動前に
+        // は `storage: None`」契約のため、numel == 0 はカーネル起動前に
         // 早期 return する（`CudaSgd::run` 側の `numel == 0` early-return
         // では `grad_slice` を取り出す前に `param_slice` を要求してしまう
         // ため、ここで先に判定する）。
@@ -722,23 +722,28 @@ impl BackendOps for CudaBackendOps {
         if numel == 0 {
             return Ok(());
         }
-        let Some(grad_slice) = grad_handle.slice.as_ref() else {
+        let Some(grad_storage) = grad_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "sgd_step_device: grad buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        // 配置非依存の読み取り専用引数へ変換する（イシュー #1352。
+        // `crate::memory::CudaArg` ドキュメンテーションコメント参照。
+        // `launch_builder` の前に名前付きローカルとして宣言する）。
+        let grad_arg = grad_storage.as_arg();
 
-        let velocity_handle_slice = match velocity {
+        let velocity_arg = match velocity {
             Some(v) => {
                 let handle = v
                     .downcast_handle_mut::<CudaBufferHandle>()
                     .ok_or(BackendError::DeviceMismatch)?;
-                Some(handle.slice.as_mut().ok_or_else(|| {
+                let storage = handle.storage.as_mut().ok_or_else(|| {
                     BackendError::DeviceAllocationFailed(
                         "sgd_step_device: velocity buffer has numel > 0 but no device allocation"
                             .into(),
                     )
-                })?)
+                })?;
+                Some(storage.as_arg_mut())
             }
             None => None,
         };
@@ -746,11 +751,12 @@ impl BackendOps for CudaBackendOps {
         let param_handle = param
             .downcast_handle_mut::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(param_slice) = param_handle.slice.as_mut() else {
+        let Some(param_storage) = param_handle.storage.as_mut() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "sgd_step_device: param buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let param_arg = param_storage.as_arg_mut();
 
         let kernel_params = crate::sgd::SgdKernelParams {
             lr: config.lr,
@@ -761,12 +767,7 @@ impl BackendOps for CudaBackendOps {
             is_first_step: config.is_first_step,
         };
         self.with_driver_call(&resource_generations, map_cuda_error, || {
-            sgd.run(
-                param_slice,
-                grad_slice,
-                velocity_handle_slice,
-                &kernel_params,
-            )
+            sgd.run(param_arg, grad_arg, velocity_arg, &kernel_params)
         })
     }
 
@@ -1040,12 +1041,12 @@ impl BackendOps for CudaBackendOps {
             .buffer()
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_full) = w_handle.slice.as_ref() else {
+        let Some(w_full) = w_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_rhs: w buffer has numel > 0 but no device allocation".into(),
             ));
         };
-        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
+        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
         let bias_handle = bias
             .map(|b| {
                 b.buffer()
@@ -1056,13 +1057,13 @@ impl BackendOps for CudaBackendOps {
             .transpose()?;
         let bias_view = match &bias_handle {
             Some((h, offset, numel)) => {
-                let Some(full) = h.slice.as_ref() else {
+                let Some(full) = h.storage.as_ref() else {
                     return Err(BackendError::DeviceAllocationFailed(
                         "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation"
                             .into(),
                     ));
                 };
-                Some(full.slice(*offset..*offset + *numel))
+                Some(full.view(*offset..*offset + *numel))
             }
             None => None,
         };
@@ -1092,21 +1093,23 @@ impl BackendOps for CudaBackendOps {
         let a_handle = a_dev_buf
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(a_slice) = a_handle.slice.as_ref() else {
+        let Some(a_storage) = a_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_rhs: a buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let a_arg = a_storage.as_arg();
 
         let mut c_dev_buf = mem.alloc_zeroed(&[m, n])?;
         let c_handle = c_dev_buf
             .downcast_handle_mut::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(c_slice) = c_handle.slice.as_mut() else {
+        let Some(c_storage) = c_handle.storage.as_mut() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_rhs: output buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let mut c_arg = c_storage.as_arg_mut();
 
         // キャッシュ構築（`cached_gemm`）自体の driver 呼び出し（NVRTC
         // コンパイル・モジュールロード）も同じ観測対象とする（Cursor
@@ -1122,11 +1125,11 @@ impl BackendOps for CudaBackendOps {
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || {
                 gemm.launch_tiled_bias_act_f32_resident(
-                    a_slice,
+                    &a_arg,
                     &w_view,
                     bias_view.as_ref(),
                     false,
-                    c_slice,
+                    &mut c_arg,
                     m as u32,
                     n as u32,
                     k as u32,
@@ -1256,7 +1259,7 @@ impl BackendOps for CudaBackendOps {
         let a_handle = a
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(a_full) = a_handle.slice.as_ref() else {
+        let Some(a_full) = a_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "linear_forward_device: a buffer has numel > 0 but no device allocation".into(),
             ));
@@ -1278,12 +1281,12 @@ impl BackendOps for CudaBackendOps {
             .buffer()
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_full) = w_handle.slice.as_ref() else {
+        let Some(w_full) = w_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "linear_forward_device: w buffer has numel > 0 but no device allocation".into(),
             ));
         };
-        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
+        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
         let bias_handle = bias
             .map(|b| {
                 b.buffer()
@@ -1294,14 +1297,14 @@ impl BackendOps for CudaBackendOps {
             .transpose()?;
         let bias_view = match &bias_handle {
             Some((h, offset, numel)) => {
-                let Some(full) = h.slice.as_ref() else {
+                let Some(full) = h.storage.as_ref() else {
                     return Err(BackendError::DeviceAllocationFailed(
                         "linear_forward_device: bias buffer has numel > 0 but no device \
                          allocation"
                             .into(),
                     ));
                 };
-                Some(full.slice(*offset..*offset + *numel))
+                Some(full.view(*offset..*offset + *numel))
             }
             None => None,
         };
@@ -1323,12 +1326,14 @@ impl BackendOps for CudaBackendOps {
         let c_handle = c_dev_buf
             .downcast_handle_mut::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(c_slice) = c_handle.slice.as_mut() else {
+        let Some(c_storage) = c_handle.storage.as_mut() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "linear_forward_device: output buffer has numel > 0 but no device allocation"
                     .into(),
             ));
         };
+        let mut c_arg = c_storage.as_arg_mut();
+        let a_arg = a_full.as_arg();
 
         // キャッシュ構築（`cached_gemm`）自体の driver 呼び出しも同じ
         // 観測対象とする（`gemm_resident_rhs` と同じ理由。PR #1064
@@ -1343,11 +1348,11 @@ impl BackendOps for CudaBackendOps {
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || {
                 gemm.launch_tiled_bias_act_f32_resident(
-                    a_full,
+                    &a_arg,
                     &w_view,
                     bias_view.as_ref(),
                     act_relu,
-                    c_slice,
+                    &mut c_arg,
                     m as u32,
                     n as u32,
                     k as u32,
@@ -1423,12 +1428,12 @@ impl BackendOps for CudaBackendOps {
             .buffer()
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_full) = w_handle.slice.as_ref() else {
+        let Some(w_full) = w_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_lhs: w buffer has numel > 0 but no device allocation".into(),
             ));
         };
-        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
+        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
 
         // `w` のみがデバイス常駐入力（`b` はこの呼び出し内で毎回
         // アップロードし直すため世代を跨がない。イシュー #1013 設計文書
@@ -1506,21 +1511,23 @@ impl BackendOps for CudaBackendOps {
         let b_handle = b_dev_buf
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(b_slice) = b_handle.slice.as_ref() else {
+        let Some(b_storage) = b_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_lhs: b buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let b_arg = b_storage.as_arg();
 
         let mut c_dev_buf = mem.alloc_zeroed(&[p, r])?;
         let c_handle = c_dev_buf
             .downcast_handle_mut::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(c_slice) = c_handle.slice.as_mut() else {
+        let Some(c_storage) = c_handle.storage.as_mut() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_lhs: output buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let mut c_arg = c_storage.as_arg_mut();
 
         self.with_driver_call(
             &[w.buffer().generation()],
@@ -1529,8 +1536,8 @@ impl BackendOps for CudaBackendOps {
                 gemm.launch_tiled_f32_resident(
                     &w_view,
                     w.offset(),
-                    b_slice,
-                    c_slice,
+                    &b_arg,
+                    &mut c_arg,
                     p as u32,
                     r as u32,
                     q as u32,

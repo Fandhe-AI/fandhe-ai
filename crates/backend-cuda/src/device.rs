@@ -55,6 +55,26 @@ pub struct CudaDevice {
     name: String,
     compute_capability: (i32, i32),
     arch: String,
+    /// managed memory（`cuMemAllocManaged`）を安全に使える構成かどうか
+    /// （イシュー #1352。`crate::placement`「配置非依存の管理」参照）。
+    ///
+    /// `CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY`（デバイスが managed memory
+    /// をサポートするか）と `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS`
+    /// （ホスト・デバイス双方から同時アクセス可能か。GB10 のような
+    /// 物理統合メモリ環境で該当）の両方が非 0 の場合にのみ `true`。
+    /// `new` の中で 1 回だけ照会してキャッシュする（`cached_device`
+    /// 経由で ordinal ごとに再利用されるため、per-op のコストにはならない）。
+    ///
+    /// 事前照会が必要な理由: `cudarc::driver::safe::unified_memory::
+    /// CudaContext::alloc_unified` は自身も `MANAGED_MEMORY` 属性を検査し
+    /// 非対応なら `DriverError(CUDA_ERROR_NOT_PERMITTED)` を返すが、この
+    /// エラーは `context_cache::classify_cuda_result` の operation-local
+    /// 一覧に含まれず sticky（ordinal を poison する）扱いになる。
+    /// `memory.rs` の managed 確保経路は driver 呼び出しの**前**に本
+    /// フィールドを検査し、非対応デバイスでは `CudaError::
+    /// ManagedMemoryUnsupported`（非 `Driver` variant。`observe_cuda_result`
+    /// を素通りし poison を起こさない）で fail-closed に拒否する。
+    managed_memory_supported: bool,
 }
 
 impl CudaDevice {
@@ -103,6 +123,19 @@ impl CudaDevice {
         // sm 番号のハードコードが新しい GPU 世代で無効化される事態を
         // 避ける（PoC-v2-3 の方針を踏襲。cuda/mod.rs:129-132）。
         let arch = format!("compute_{}{}", compute_capability.0, compute_capability.1);
+        // managed memory 対応可否を 1 回だけ照会する（フィールド doc
+        // コメント参照）。属性取得自体が失敗した場合は非対応として扱う
+        // （fail-soft ではなく fail-closed: `total_memory_bytes`／
+        // `compute_units` と異なり、この値は opt-in 経路の安全性判定に
+        // 使うため、取得失敗を「対応している」側へ倒さない）。
+        let managed_memory_supported = ctx
+            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY)
+            .unwrap_or(0)
+            != 0
+            && ctx
+                .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS)
+                .unwrap_or(0)
+                != 0;
 
         Ok(Self {
             ctx,
@@ -111,6 +144,7 @@ impl CudaDevice {
             name,
             compute_capability,
             arch,
+            managed_memory_supported,
         })
     }
 
@@ -217,6 +251,15 @@ impl CudaDevice {
             .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)
             .ok()
             .and_then(|bytes| u32::try_from(bytes).ok())
+    }
+
+    /// managed memory（`cuMemAllocManaged`）を安全に使える構成かどうか
+    /// （`new` で照会・キャッシュ済み。フィールド doc コメント参照）。
+    /// `memory.rs` の managed 確保経路（`crate::placement::
+    /// managed_placement_enabled()` が `true` の場合のみ参照される）が、
+    /// driver 呼び出し前の fail-closed 事前検査として使う。
+    pub fn managed_memory_supported(&self) -> bool {
+        self.managed_memory_supported
     }
 
     /// SM（マルチプロセッサ）1 個あたりの共有メモリ上限バイト数

@@ -35,7 +35,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, CudaView, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
 use crate::context_cache;
@@ -46,6 +46,7 @@ use crate::kernels_tiled_pipeline;
 use crate::kernels_tiled_pipeline_128x64;
 use crate::kernels_transpose;
 use crate::kernels_wmma_opt;
+use crate::memory::{CudaArg, CudaArgMut};
 use crate::module_cache::load_function_cached;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
 use crate::pool::CudaAllocator;
@@ -4389,14 +4390,26 @@ impl CudaGemm {
     /// 変えたオーバーロードであり、`a_dev`／`c_dev`（毎ステップ新規
     /// upload/確保するため常に全体バッファ）は従来どおり
     /// `&CudaSlice<f32>` のまま。
+    ///
+    /// **配置非依存化（イシュー #1352）**: `a_dev`／`w_dev`／`bias_dev`／
+    /// `c_dev` は `crate::memory::CudaArg`／`CudaArgMut` を受け取る
+    /// （device-only／managed の両配置を同一カーネル・同一起動 config で
+    /// 扱う。`crate::memory` モジュール冒頭コメント「配置（managed 拡張）」
+    /// 参照）。可視性を `pub` から `pub(crate)` へ引き下げる（本クレート
+    /// `backend-cuda` は CLAUDE.md 「唯一のサポートされる公開 API 面は
+    /// `facade`」の定義上「内部クレート」であり、`fandhe_ai_backend_cuda::
+    /// CudaGemm` を直接使う外部利用は想定契約外のため、公開 API 非破壊の
+    /// 対象外と判断する。唯一の呼び出し元 `ops.rs::
+    /// CudaBackendOps::gemm_resident_rhs`／`linear_forward_device` を
+    /// 本イシューで同時に更新する）。
     #[allow(clippy::too_many_arguments)]
-    pub fn launch_tiled_bias_act_f32_resident(
+    pub(crate) fn launch_tiled_bias_act_f32_resident(
         &self,
-        a_dev: &CudaSlice<f32>,
-        w_dev: &CudaView<'_, f32>,
-        bias_dev: Option<&CudaView<'_, f32>>,
+        a_dev: &CudaArg<'_>,
+        w_dev: &CudaArg<'_>,
+        bias_dev: Option<&CudaArg<'_>>,
         act_relu: bool,
-        c_dev: &mut CudaSlice<f32>,
+        c_dev: &mut CudaArgMut<'_>,
         m: u32,
         n: u32,
         k: u32,
@@ -4421,31 +4434,26 @@ impl CudaGemm {
 
         BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
 
-        // SAFETY: `launch_tiled_bias_act_f32` と同一の根拠。`w_dev`／
-        // `bias_dev` は `CudaView`（`PushKernelArg` は `CudaSlice` と
-        // 同様 `&CudaView` にも実装されており、渡すポインタは元バッファ
-        // 先頭 + オフセットバイトを指す。`DeviceBufferView::new`
-        // （`tensor-core`）が構築時に offset+numel の範囲検査を済ませて
-        // いるため、ここでの追加のオフセット検証は不要）。has_bias == 0
-        // の場合のダミー引数には `a_dev` を再利用する（`CudaView` 型引数
-        // を要求されるため `a_dev.slice(..)` でその場の一時ビューを渡す）。
-        let dummy_view;
-        let bias_arg: (i32, &CudaView<'_, f32>) = match bias_dev {
-            Some(bias_dev) => (1, bias_dev),
-            None => {
-                dummy_view = a_dev.slice(..);
-                (0, &dummy_view)
-            }
-        };
-        let (has_bias, bias_arg) = bias_arg;
+        // has_bias == 0 の場合のダミー引数には `a_dev` を再利用する
+        // （カーネルは `has_bias == 0` の場合この引数を読まないため、
+        // 配置・形状の不一致は問題にならない。`CudaArg::push` は `&self`
+        // のみを取り消費しないため、`a_dev` を 2 回 push しても安全）。
+        let has_bias: i32 = if bias_dev.is_some() { 1 } else { 0 };
+        let bias_arg = bias_dev.unwrap_or(a_dev);
 
+        // SAFETY: `launch_tiled_bias_act_f32` と同一の根拠（`a_dev`／
+        // `w_dev`／`bias_dev`／`c_dev` は呼び出し元〈`DeviceBufferView::new`〉
+        // が offset+numel の範囲検査を済ませたバッファ）。`CudaArg`／
+        // `CudaArgMut` は配置（`Device`／`Managed`）ごとに異なる
+        // cudarc 型へ委譲するのみで、カーネル本体・境界チェック（REQ-8）
+        // ・起動 config は配置に依らず完全に共有する。
         unsafe {
-            self.stream
-                .launch_builder(&self.tiled_bias_act_f32)
-                .arg(a_dev)
-                .arg(w_dev)
-                .arg(bias_arg)
-                .arg(c_dev)
+            let mut builder = self.stream.launch_builder(&self.tiled_bias_act_f32);
+            a_dev.push(&mut builder);
+            w_dev.push(&mut builder);
+            bias_arg.push(&mut builder);
+            c_dev.push(&mut builder);
+            builder
                 .arg(&m_i)
                 .arg(&n_i)
                 .arg(&k_i)
@@ -4491,12 +4499,16 @@ impl CudaGemm {
     /// `pub(crate)` へ絞ることで「検証不能な外部入力では選択できない」
     /// を型システムで保証する（REQ-8 の手動境界チェック省略禁止）。
     #[allow(clippy::too_many_arguments)]
+    ///
+    /// **配置非依存化（イシュー #1352）**: `a_dev`／`b_dev`／`c_dev` は
+    /// [`CudaArg`]／[`CudaArgMut`] を受け取る（`launch_tiled_bias_act_f32_resident`
+    /// ドキュメンテーションコメントと同じ理由・同じ公開範囲判断）。
     pub(crate) fn launch_tiled_f32_resident(
         &self,
-        a_dev: &CudaView<'_, f32>,
+        a_dev: &CudaArg<'_>,
         a_offset: usize,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
+        b_dev: &CudaArg<'_>,
+        c_dev: &mut CudaArgMut<'_>,
         m: u32,
         n: u32,
         k: u32,
@@ -4512,17 +4524,15 @@ impl CudaGemm {
         let (func, cfg) = self.select_tiled_f32_kernel(a_offset, m, n, k);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: `launch_tiled_f32` と同一の根拠。
+        // SAFETY: `launch_tiled_f32` と同一の根拠。`CudaArg`／`CudaArgMut`
+        // は配置ごとの cudarc 型へ委譲するのみでカーネル本体・境界チェック
+        // （REQ-8）は配置に依らず共有する。
         unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
+            let mut builder = self.stream.launch_builder(func);
+            a_dev.push(&mut builder);
+            b_dev.push(&mut builder);
+            c_dev.push(&mut builder);
+            builder.arg(&m_i).arg(&n_i).arg(&k_i).launch(cfg)?;
         }
         // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
         // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
@@ -4558,9 +4568,18 @@ impl CudaGemm {
     /// 明示 `synchronize`）まで生存させること（`run_tiled_f32_nt`／
     /// `run_tiled_f32_tn` は関数内で readback まで完結するため同様の問題
     /// はない）。
+    ///
+    /// `a_dev`（イシュー #1352 で [`CudaArg`] 化）は `w`（`DeviceParamStore`
+    /// 常駐）の部分ビューであり配置（device-only／managed）を選ばないが、
+    /// `bt_dev`／`c_dev` は呼び出し元（`ops.rs::gemm_resident_lhs` の NT
+    /// 分岐）が `CudaMemory`（`crate::placement` 対応）を経由せず
+    /// `device.stream().clone_htod`／`alloc_zeros` を直接呼ぶため、常に
+    /// device-only 配置（`CudaSlice`）のまま。本イシューはこの NT
+    /// 分岐自体の managed 化を対象としない（`docs/backend-cuda-managed-
+    /// placement-decision.md` スコープ外事項）。
     pub(crate) fn launch_tiled_f32_resident_nt(
         &self,
-        a_dev: &CudaView<'_, f32>,
+        a_dev: &CudaArg<'_>,
         a_offset: usize,
         bt_dev: &CudaSlice<f32>,
         c_dev: &mut CudaSlice<f32>,
@@ -4583,9 +4602,9 @@ impl CudaGemm {
         // SAFETY: `launch_tiled_f32_resident` と同一の根拠。`b_std` は
         // 転置カーネルの出力として上記で構築済みの k*n 要素バッファ。
         unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(a_dev)
+            let mut builder = self.stream.launch_builder(func);
+            a_dev.push(&mut builder);
+            builder
                 .arg(&b_std.as_view())
                 .arg(c_dev)
                 .arg(&m_i)
