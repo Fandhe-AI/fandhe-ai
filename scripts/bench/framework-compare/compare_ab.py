@@ -208,6 +208,15 @@ def load_rows(path):
                         f"（{err}） — skipped"
                     )
                     continue
+            # イシュー #1353: `managed`（`Record.managed`）は外部 JSONL 由来
+            # の値のため、summarize.py/compare_gemm_gate.py と同じ
+            # fail-closed 型検証を適用する。
+            if "managed" in obj and not isinstance(obj["managed"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'managed' フィールド型（bool を期待。"
+                    f"実際: {obj['managed']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -235,6 +244,12 @@ def _train_records(rows, mode):
         if r.get("size") != TRAIN_SIZE:
             continue
         if r.get("mode", "fresh") != mode:
+            continue
+        # イシュー #1353: `managed:true`（CUDA managed memory 配置）行は
+        # 本ツールの A/B 比較対象外（既定 device-only 配置とのゲート混同
+        # 防止。managed 有無の A/B 自体は専用ツール `compare_managed_ab.py`
+        # で行う）。
+        if r.get("managed", False) is True:
             continue
         out.append(r)
     return out

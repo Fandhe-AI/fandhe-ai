@@ -326,6 +326,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: None,
         parity,
         tf32: false,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -411,6 +412,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: Some(init_s),
         parity: Some(parity),
         tf32: false,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -530,6 +532,7 @@ fn emit_gemm_phase_records(
                 init_s,
                 parity: Some(parity),
                 tf32: false,
+                managed: cli.managed,
             },
             phase,
             phase_index,
@@ -627,6 +630,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: None,
         parity: None,
         tf32: false,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -782,6 +786,7 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: Some(init_s),
         parity: None,
         tf32: false,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1011,6 +1016,7 @@ fn emit_phase_records(
                 init_s,
                 parity: None,
                 tf32: false,
+                managed: cli.managed,
             },
             phase,
             phase_index,
@@ -1082,6 +1088,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: None,
         parity: None,
         tf32: false,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1179,6 +1186,7 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         init_s: Some(init_s),
         parity: None,
         tf32: false,
+        managed: cli.managed,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1362,6 +1370,7 @@ fn emit_infer_phase_records(
                 init_s,
                 parity: None,
                 tf32: false,
+                managed: cli.managed,
             },
             phase,
             phase_index,
@@ -1414,6 +1423,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// `docs/cuda-tf32-optin-api-decision.md` 参照）は依然未実施のため
 /// fail-fast する。`--phases` の対象外組合せ拒否と同型の allowlist 方式で、
 /// `cli.phases`（`match` の第 3 要素）より先に検査する。
+///
+/// **`--managed`（イシュー #1353）**: CUDA managed memory 配置
+/// （`fandhe_ai::set_cuda_managed_memory_enabled`。#1352）を有効化して
+/// 計測する。`--tf32` と異なり crates.io 公開版 `fandhe-ai =0.7.0` には
+/// 当該 API 自体が未収録（#1352 は本イシュー時点で未リリースの HEAD）
+/// のため、`managed-placement` feature（既定無効）で呼び出しをコンパイル
+/// 時に分離する: feature 無効時は API 呼び出しコード自体が存在せず
+/// `=0.7.0` ピンのままビルド成立する契約を保つ。`device != "cuda"` は
+/// プロセスワイドフラグが cpu 計測で無音 no-op になるのを防ぐため
+/// fail-fast する（README「`--managed`」節参照）。
 fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.tf32 {
         return Err(
@@ -1421,6 +1440,36 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
              bench-fandhe yet; see docs/cuda-tf32-optin-api-decision.md C-2; issue #1042)"
                 .into(),
         );
+    }
+    if cli.managed {
+        if cli.device != "cuda" {
+            return Err(format!(
+                "MEASURE_ERROR: --managed is only meaningful for --device cuda (got \
+                 device='{}'; managed placement affects only the CUDA backend. issue #1353)",
+                cli.device
+            )
+            .into());
+        }
+        #[cfg(feature = "managed-placement")]
+        {
+            fandhe_ai::set_cuda_managed_memory_enabled(true);
+            if !fandhe_ai::cuda_managed_memory_enabled() {
+                return Err(
+                    "MEASURE_ERROR: set_cuda_managed_memory_enabled(true) did not take effect \
+                     (cuda_managed_memory_enabled() returned false after enabling; issue #1353)"
+                        .into(),
+                );
+            }
+        }
+        #[cfg(not(feature = "managed-placement"))]
+        {
+            return Err(
+                "MEASURE_ERROR: --managed requires fandhe-ai >= 0.8.0 or a path-patched facade \
+                 built with --features managed-placement (issue #1353; see \
+                 scripts/bench/framework-compare/README.md \"--managed\" section)"
+                    .into(),
+            );
+        }
     }
     match (cli.task.as_str(), cli.mode.as_str(), cli.phases) {
         ("train", "fresh", true) => run_train_phases(cli),
@@ -1485,6 +1534,7 @@ mod tests {
             mode: mode.to_string(),
             phases: false,
             tf32: false,
+            managed: false,
         }
     }
 
@@ -1563,6 +1613,7 @@ mod tests {
             mode: mode.to_string(),
             phases: true,
             tf32: false,
+            managed: false,
         }
     }
 
@@ -1694,6 +1745,7 @@ mod tests {
             mode: mode.to_string(),
             phases: true,
             tf32: false,
+            managed: false,
         };
         let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
         let msg = err.to_string();
@@ -1717,6 +1769,7 @@ mod tests {
             mode: "reuse".to_string(),
             phases: true,
             tf32: false,
+            managed: false,
         }
     }
 
@@ -1828,6 +1881,7 @@ mod tests {
             mode: "reuse".to_string(),
             phases: true,
             tf32: false,
+            managed: false,
         };
         dispatch(&cli).expect("cuda gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -1853,6 +1907,7 @@ mod tests {
             mode: "reuse".to_string(),
             phases: true,
             tf32: false,
+            managed: false,
         };
         dispatch(&cli).expect("metal gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -1879,6 +1934,7 @@ mod tests {
             mode: mode.to_string(),
             phases: true,
             tf32: false,
+            managed: false,
         }
     }
 
@@ -2099,6 +2155,7 @@ mod tests {
             mode: "reuse".to_string(),
             phases: false,
             tf32: false,
+            managed: false,
         })
         .expect("cuda infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -2119,6 +2176,7 @@ mod tests {
                 mode: mode.to_string(),
                 phases: true,
                 tf32: false,
+                managed: false,
             })
             .expect("cuda infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2149,6 +2207,7 @@ mod tests {
             mode: "reuse".to_string(),
             phases: false,
             tf32: false,
+            managed: false,
         })
         .expect("metal infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -2169,6 +2228,7 @@ mod tests {
                 mode: mode.to_string(),
                 phases: true,
                 tf32: false,
+                managed: false,
             })
             .expect("metal infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2200,6 +2260,7 @@ mod tests {
                 mode: mode.to_string(),
                 phases: false,
                 tf32: true,
+                managed: false,
             };
             let err = dispatch(&cli).expect_err("--tf32 must be rejected on bench-fandhe");
             let msg = err.to_string();
@@ -2207,6 +2268,59 @@ mod tests {
             assert!(msg.contains("--tf32"), "msg={msg}");
             assert!(msg.contains("0.5.0"), "msg={msg}");
         }
+    }
+
+    /// イシュー #1353: `--managed` は `--device cuda` 以外では常に
+    /// MEASURE_ERROR で fail-fast する（プロセスワイドフラグが cpu 計測で
+    /// 無音 no-op になるのを防ぐため）。
+    #[test]
+    fn managed_flag_on_non_cuda_device_is_measure_error() {
+        for device in ["cpu", "metal"] {
+            let out = temp_out_path(&format!("managed-non-cuda-{device}"));
+            let cli = Cli {
+                task: "gemm".to_string(),
+                device: device.to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: "fresh".to_string(),
+                phases: false,
+                tf32: false,
+                managed: true,
+            };
+            let err = dispatch(&cli).expect_err("--managed must be rejected on non-cuda device");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--managed"), "msg={msg}");
+        }
+    }
+
+    /// イシュー #1353: `managed-placement` feature が無効な既定ビルド
+    /// （`fandhe-ai =0.7.0` ピンには `set_cuda_managed_memory_enabled` API
+    /// 自体が未収録）では、`--device cuda` でも `--managed` は常に
+    /// MEASURE_ERROR で fail-fast する。本テストはこのビルド構成（既定
+    /// feature）でのみ意味を持つ（`managed-placement` feature 有効ビルド
+    /// では実際に path patch 済み facade を呼び出す経路が走るため、本
+    /// テストとは別に GB10 実機実測で検証する。README「`--managed`」節）。
+    #[test]
+    #[cfg(not(feature = "managed-placement"))]
+    fn managed_flag_without_feature_is_measure_error() {
+        let out = temp_out_path("managed-no-feature-cuda");
+        let cli = Cli {
+            task: "gemm".to_string(),
+            device: "cuda".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: "fresh".to_string(),
+            phases: false,
+            tf32: false,
+            managed: true,
+        };
+        let err = dispatch(&cli)
+            .expect_err("--managed must be rejected without managed-placement feature");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--managed"), "msg={msg}");
+        assert!(msg.contains("0.8.0"), "msg={msg}");
     }
 
     /// 実機（CUDA）依存の smoke テスト（coding-rust.md「実機依存テストは
@@ -2225,6 +2339,7 @@ mod tests {
                 mode: mode.to_string(),
                 phases: true,
                 tf32: false,
+                managed: false,
             };
             dispatch(&cli).expect("cuda train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2253,6 +2368,7 @@ mod tests {
                 mode: mode.to_string(),
                 phases: true,
                 tf32: false,
+                managed: false,
             };
             dispatch(&cli).expect("metal train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");

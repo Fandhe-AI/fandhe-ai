@@ -13,3 +13,13 @@ publish = false
 bench-common = { path = "../bench-common" }
 # deps-policy.md（第 9 区分の適用範囲拡張。本 workspace 限定）に合わせ =x.y.z 完全固定
 fandhe-ai = "=0.7.0"
+
+# イシュー #1353: `--managed`（CUDA managed memory 配置）の実計測結線用。
+# crates.io 公開版 `fandhe-ai =0.7.0` には `set_cuda_managed_memory_enabled`
+# API が未収録（#1352・未リリースの HEAD で追加）のため、既定ビルド
+# （feature 無効）ではこの feature 配下のコードはコンパイルされず
+# `=0.7.0` ピンのままビルド可能である。有効化する場合は
+# `[patch.crates-io.fandhe-ai]` で `crates/facade` への path patch を
+# 併用する前提（README「`--managed`」節・`run_ab_managed_cuda.sh` 参照）。
+[features]
+managed-placement = []

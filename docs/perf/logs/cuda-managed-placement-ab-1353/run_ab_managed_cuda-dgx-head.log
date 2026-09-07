@@ -1,0 +1,14 @@
+| cell (task/device/size/mode/phase) | off median | on median | on/off | checksum | 判定 |
+|---|---|---|---|---|---|
+| gemm/cuda/2048/fresh/None | 136.573 ms (min 133.393 ms / max 138.180 ms) | 137.261 ms (min 133.807 ms / max 137.996 ms) | 1.0050 | 完全一致 | 後退（REJECT 方向） |
+| gemm/cuda/2048/reuse/None | 9.522 ms (min 9.387 ms / max 9.570 ms) | 9.502 ms (min 9.357 ms / max 9.608 ms) | 0.9979 | 完全一致 | ADOPT 候補 |
+| train/cuda/64/fresh/None | 509.5 us (min 493.5 us / max 535.8 us) | 508.5 us (min 493.6 us / max 513.7 us) | 0.9981 | 完全一致 | ADOPT 候補 |
+| train/cuda/64/reuse/None | 451.5 us (min 439.8 us / max 453.9 us) | 772.5 us (min 736.6 us / max 819.0 us) | 1.7110 | 完全一致 | 後退（REJECT 方向） |
+| train_phases/cuda/64/reuse/backward | - | - | - | - | 判定不能: off=1 件・on=1 件（各ちょうど 5 件を要求） |
+| train_phases/cuda/64/reuse/device_update | - | - | - | - | 判定不能: off=1 件・on=1 件（各ちょうど 5 件を要求） |
+| train_phases/cuda/64/reuse/forward_resident | - | - | - | - | 判定不能: off=1 件・on=1 件（各ちょうど 5 件を要求） |
+| train_phases/cuda/64/reuse/leaf_register | - | - | - | - | 判定不能: off=1 件・on=1 件（各ちょうど 5 件を要求） |
+| train_phases/cuda/64/reuse/loss_readout | - | - | - | - | 判定不能: off=1 件・on=1 件（各ちょうど 5 件を要求） |
+| train_phases/cuda/64/reuse/step_total | - | - | - | - | 判定不能: off=1 件・on=1 件（各ちょうど 5 件を要求） |
+| train_phases/cuda/64/reuse/tape_build | - | - | - | - | 判定不能: off=1 件・on=1 件（各ちょうど 5 件を要求） |
+| train_phases/cuda/64/reuse/tape_drop | - | - | - | - | 判定不能: off=1 件・on=1 件（各ちょうど 5 件を要求） |

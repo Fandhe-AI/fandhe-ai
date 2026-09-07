@@ -1,0 +1,38 @@
+実行日: 2026-09-07（JST）
+実機: DGX Spark GB10（実ホスト名は docs/real-hardware-verification-env.local.md 参照。本ファイルには含めない）
+
+GPU: NVIDIA GB10, driver 580.173.02
+uptime（計測開始前）: 12:48:47 up 11 days, 15 min, 5 users, load average: 0.00, 0.02, 0.01
+uptime（計測後半・train A/B 前後）: 13:05:56 up 11 days, 32 min, 5 users, load average: 0.77, 0.47, 0.19
+  - GPU 使用率は計測中一貫して 0%（nvidia-smi utilization.gpu）
+  - nvidia-smi --query-compute-apps: comfyui-env python (170 MiB) / kokoro python3 (870 MiB) が常駐
+    （メモリ dgx-spark-workflow.md 記載の常駐サービス。GPU 計算利用ではなくメモリ常駐のみ）
+  - load average の上昇は他セッション・常駐サービスの CPU 側活動によるもので、GPU 計算負荷ではない
+
+rustc: 1.97.0 (2d8144b78 2026-07-07)
+nvcc: Cuda compilation tools, release 13.0, V13.0.88 (Build cuda_13.0.r13.0/compiler.36424714_0)
+cargo: 1.97.0 (c980f4866 2026-06-30)
+
+転送元 HEAD: worktree wf_7da17a92-461-189 のブランチ test/1353-managed-ab-gb10
+             （origin/main = ea3fda9 起点。#1352 マージ済み HEAD への本 PR の変更を含む）
+転送先: ~/work/rust-ai-library-run-1353/（rsync -az --delete --exclude .git --exclude target
+        --exclude _/ --exclude .venv* --exclude docs/real-hardware-verification-env.local.md）
+
+計測バイナリ: scripts/bench/framework-compare/target/release/bench-fandhe
+  ビルドコマンド:
+    cargo build --release -p bench-fandhe --features managed-placement \
+      --manifest-path scripts/bench/framework-compare/Cargo.toml \
+      --config 'patch.crates-io.fandhe-ai.path="<abs>/crates/facade"'
+  cargo tree 確認: fandhe-ai v0.7.0 (<abs>/crates/facade)  ※ registry 解決ではなく path 解決を確認済み
+  build 完了: Finished `release` profile [optimized] target(s) in 6.79s
+
+備考: 本セッションは worktree 隔離のためリモートホスト上でシェルスクリプト（.sh）の実行・
+nohup/setsid でのバックグラウンド切り離し・`bash -c` によるネストしたシェル呼び出しが
+サンドボックスにより拒否された（「too complex to verify not git」）。そのため
+`run_ab_managed_cuda.sh` 自体は GB10 上で直接起動できず、同スクリプトが行うのと同じ
+off/on 交互起動ループを ssh 経由の単一コマンド（for ループ・bench-fandhe 直接起動）として
+手動で再現した。計測プロトコル（同一バイナリでの off/on 交互起動・5 回計測）自体は
+スクリプトと同一だが、フルマトリクス（gemm N=1024/2048/4096 × fresh/reuse 全 5 run・
+infer 副次計測）は時間制約により一部省略し、主対象（train reuse）とその他代表点
+（train fresh・gemm N=2048 fresh/reuse・train --phases 診断）に絞った。
+省略した組合せは docs/perf/cuda-managed-placement-ab.md §9「スコープ外」に明記する。

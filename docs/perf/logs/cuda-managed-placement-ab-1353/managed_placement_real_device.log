@@ -1,0 +1,13 @@
+cargo test -p fandhe-ai-backend-cuda --manifest-path $HOME/work/rust-ai-library-run-1353/Cargo.toml --release --all-features --test managed_placement_real_device -- --ignored --nocapture
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/managed_placement_real_device.rs (work/rust-ai-library-run-1353/target/release/deps/managed_placement_real_device-22262545c4d49882)
+
+running 5 tests
+test managed_download_is_correct_without_caller_side_synchronize_on_real_hardware ... ok
+test managed_alloc_zeroed_returns_all_zero_on_real_hardware ... ok
+test managed_upload_download_roundtrip_is_bit_exact_on_real_hardware ... ok
+test managed_placement_does_not_leak_on_real_hardware ... ok
+test device_and_managed_placement_produce_bit_identical_resident_gemm_output_on_real_hardware ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.19s
