@@ -835,16 +835,18 @@ load average のみに帰属させる断定はしない（未特定のまま記�
 に対し `ops_gemm` 自体の中央値は 27.1174 ms で、約 1.4 ms の差がある。
 `docs/perf/logs/cpu-gemm-reuse-phase-1292/layerB-dgx-run1.log` 参照）。
 
-**この `ops_gemm` は、表右端の `Σ`（8 区間の中央値を単純合計した値。
-`tape_matmul`／`to_tensor`／`host_copy`／`checksum` も含む）とは計測範囲
-が異なり直接比較できない点に注意する。** `tape_matmul` は `ops_gemm` と
-同じ `alloc_c+kernel+tensor_wrap` 相当を Layer A `matmul` のレプリカとして
-別途計測し直す区間であり、`Σ` はこの `tape_matmul` を `ops_gemm` に加えて
-更に `to_tensor`・`host_copy`・`checksum` も単純加算した値のため、
-`ops_gemm` の重複計上を含む。例えば DGX N=2048 は `Σ`=37.082 ms に対し
-`ops_gemm`=26.872 ms であり、両者には約 1.38 倍の差がある。本番経路の
-実コスト指標としては `ops_gemm`（本番合成レプリカ）を用いるべきで、`Σ`
-をそのまま `ops_gemm` の代替や本番経路コストの指標として扱わない。
+**この `ops_gemm` は、表右端の `Σ` とは計測範囲が異なり直接比較できない
+点に注意する。** `Σ` は `gemm_reuse_phase_diag_tests.rs::run_size` が
+出力する `alloc_c＋kernel＋tensor_wrap＋to_tensor＋host_copy＋checksum`
+の 6 区間について、各区間を個別に 5 run 中央値化した値をさらに単純合計
+した値であり（`ops_gemm`／`tape_matmul` は含まない）、`ops_gemm` や
+`tape_matmul` の重複計上は無い。例えば DGX N=2048 は `Σ`=37.082 ms に
+対し `ops_gemm`=26.872 ms であり、両者には約 1.38 倍の差があるが、これは
+重複計上ではなく `Σ` が `ops_gemm`（`alloc_c+kernel+tensor_wrap` の合成
+計測）を含まず、代わりに `alloc_c`・`kernel`・`tensor_wrap` を個別区間
+として直接合算しているために生じる差である。本番経路の実コスト指標
+としては `ops_gemm`（本番合成レプリカ）を用いるべきで、`Σ` をそのまま
+`ops_gemm` の代替や本番経路コストの指標として扱わない。
 
 **(iii) Layer A ⊃ Layer B の妥当性**: Layer A `iter_total` を `2N³/t` へ
 換算した値は §12.2（イシュー #1185・`fandhe-ai =0.7.0` reuse）の GFLOP/s と
