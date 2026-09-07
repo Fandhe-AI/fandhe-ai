@@ -23,6 +23,7 @@ use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::validate_gemm_dims;
 use crate::kernels_mma;
+use crate::memory::GuardedSlice;
 use crate::nvrtc::compile_ptx;
 
 /// `mma.sync`/`ldmatrix`/`cp.async` 経路が要求する compute capability の
@@ -166,6 +167,10 @@ pub(crate) fn validate_mma_grid_bounds(m: u32) -> Result<(), CudaError> {
 /// 読み取れる。
 pub struct CudaMmaGemm {
     stream: Arc<CudaStream>,
+    /// capture 排他（`with_driver_call`）に使うデバイス ordinal
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。`gemm.rs::
+    /// CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     mma_f16: CudaFunction,
     mma_f16_swizzle: Option<CudaFunction>,
     swizzle_group_width: Option<u32>,
@@ -376,6 +381,7 @@ impl CudaMmaGemm {
 
         Ok(Self {
             stream,
+            ordinal: device.ordinal(),
             mma_f16,
             mma_f16_swizzle,
             swizzle_group_width,
@@ -411,6 +417,7 @@ impl CudaMmaGemm {
 
         Ok(Self {
             stream,
+            ordinal: device.ordinal(),
             mma_f16,
             mma_f16_swizzle: None,
             swizzle_group_width: None,
@@ -477,6 +484,7 @@ impl CudaMmaGemm {
 
         Ok(Self {
             stream,
+            ordinal: device.ordinal(),
             mma_f16,
             mma_f16_swizzle: None,
             swizzle_group_width: Some(group_width),
@@ -608,6 +616,18 @@ impl CudaMmaGemm {
     /// 試作したが、GB10 実機の before/after 計測で dim4096 が明確に
     /// 後退したため本番結線は見送った（`docs/perf/
     /// cuda-gemm-mma-f16-pool-wiring.md` §7）。
+    /// `Self` の公開 driver 呼び出し系メソッド（H2D 転送・確保・
+    /// カーネル起動・D2H readback）を CUDA Graph capture 排他へ参加
+    /// させる（codex-review P0 指摘対応・PR #1390 再々修正。実体は
+    /// `context_cache::with_driver_call` へ委譲。`gemm.rs::CudaGemm::
+    /// with_driver_call` doc コメント参照）。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
+    }
+
     pub fn run_f16(
         &self,
         a: &[f16],
@@ -658,22 +678,37 @@ impl CudaMmaGemm {
     /// `examples/cuda_floor_bench.rs`・`tests/tensor_core_real_device.rs`・
     /// `tests/dispatch_boundary.rs`・
     /// `tests/large_buffer_percall_alloc_ab_1149.rs` からも利用される）。
+    ///
+    /// 戻り値は生の `CudaSlice<f16>` ではなく [`GuardedSlice<f16>`]
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。理由は
+    /// `gemm.rs::CudaGemm::upload_f32` ドキュメンテーションコメント
+    /// 参照）。
     pub fn upload_f16(
         &self,
         a: &[f16],
         b: &[f16],
-    ) -> Result<(CudaSlice<f16>, CudaSlice<f16>), CudaError> {
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        Ok((a_dev, b_dev))
+    ) -> Result<(GuardedSlice<f16>, GuardedSlice<f16>), CudaError> {
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            Ok((
+                GuardedSlice::new(self.ordinal, a_dev),
+                GuardedSlice::new(self.ordinal, b_dev),
+            ))
+        })
     }
 
     /// C 用のゼロ初期化デバイスバッファを確保する（`upload_f16` と同じ
     /// 理由・同じ位置づけで per-call `alloc_zeros` のまま維持する）。
-    pub fn alloc_output_f16(&self, m: u32, n: u32) -> Result<CudaSlice<f16>, CudaError> {
-        Ok(self
-            .stream
-            .alloc_zeros::<f16>((m as usize) * (n as usize))?)
+    /// 戻り値の型については [`Self::upload_f16`] ドキュメンテーション
+    /// コメント参照。
+    pub fn alloc_output_f16(&self, m: u32, n: u32) -> Result<GuardedSlice<f16>, CudaError> {
+        self.with_driver_call(|| {
+            let c_dev = self
+                .stream
+                .alloc_zeros::<f16>((m as usize) * (n as usize))?;
+            Ok(GuardedSlice::new(self.ordinal, c_dev))
+        })
     }
 
     /// A・B をプール経由でホスト→デバイスへ転送する（イシュー #1153。
@@ -736,6 +771,9 @@ impl CudaMmaGemm {
     /// 本体は `launch_f16_views`（view ベースの単一実装。イシュー
     /// #1153 で raw `CudaSlice` 版・プール版の両方から共有できるよう
     /// 集約）へ委譲する薄い wrapper。
+    ///
+    /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
+    /// で本体（`launch_f16_views` への委譲）を capture 排他へ参加させる。
     pub fn launch_f16(
         &self,
         a_dev: &CudaSlice<f16>,
@@ -745,14 +783,16 @@ impl CudaMmaGemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        self.launch_f16_views(
-            &a_dev.slice(..),
-            &b_dev.slice(..),
-            &mut c_dev.slice_mut(..),
-            m,
-            n,
-            k,
-        )
+        self.with_driver_call(|| {
+            self.launch_f16_views(
+                &a_dev.slice(..),
+                &b_dev.slice(..),
+                &mut c_dev.slice_mut(..),
+                m,
+                n,
+                k,
+            )
+        })
     }
 
     /// [`Self::launch_f16`]／[`Self::launch_f16_pooled`] が共有する起動
@@ -883,23 +923,27 @@ impl CudaMmaGemm {
                 });
             }
         }
-        self.launch_f16_views(
-            &a_dev.0.as_view(),
-            &b_dev.0.as_view(),
-            &mut c_dev.0.as_view_mut(),
-            m,
-            n,
-            k,
-        )
+        self.with_driver_call(|| {
+            self.launch_f16_views(
+                &a_dev.0.as_view(),
+                &b_dev.0.as_view(),
+                &mut c_dev.0.as_view_mut(),
+                m,
+                n,
+                k,
+            )
+        })
     }
 
     /// C をデバイス→ホストへ転送する（`run_f16` の D2H 部分の切り出し。
     /// `upload_f16` と同じ理由で公開する）。
     ///
     /// 同期点（#1013）: 常駐 `launch_f16` は非同期投入のみで完了を待たない
-    /// ため、本関数が readback ヘルパー経由で完了を確定する。
+    /// ため、本関数が readback ヘルパー経由で完了を確定する。codex-review
+    /// P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call` で
+    /// capture 排他へ参加させる。
     pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
-        crate::memory::readback(&self.stream, c_dev)
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
     }
 
     /// プール割当済みの C をデバイス→ホストへ転送する（イシュー #1153。
@@ -926,13 +970,15 @@ impl CudaMmaGemm {
                     .to_string(),
             });
         }
-        crate::memory::readback(&self.stream, &c_dev.0.as_view())
+        self.with_driver_call(|| crate::memory::readback(&self.stream, &c_dev.0.as_view()))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013。
     /// `gemm.rs::CudaGemm::synchronize` と同じ理由の公開 API）。
+    /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
+    /// で capture 排他へ参加させる。
     pub fn synchronize(&self) -> Result<(), CudaError> {
-        Ok(self.stream.synchronize()?)
+        self.with_driver_call(|| Ok(self.stream.synchronize()?))
     }
 }
 

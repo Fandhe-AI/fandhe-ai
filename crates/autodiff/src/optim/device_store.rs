@@ -1664,6 +1664,19 @@ impl DeviceParamStore {
                             // 他スレッドが `facade::set_cuda_graph_step_
                             // enabled` を呼ぶ運用は通常想定しないが、
                             // fail-closed に拒否する）。
+                            //
+                            // codex-review P2 指摘対応（PR #1390 再々
+                            // 修正）: このガード自身の直前のコメント
+                            // 「この区間はまだどのデバイスバッファも
+                            // 変更していない」は本分岐にも同様に成立する
+                            // （`key` 導出前の早期 return）。すぐ下の
+                            // `DeviceContextCaptureInProgress` 分岐と同じ
+                            // 理由で `pending`（`pending_backup`。関数
+                            // 冒頭 `self.pending.take()` 参照）を復元し、
+                            // 呼び出し元が次回 `step()` を再試行できる
+                            // ようにする（旧稿は復元せず `pending` を
+                            // 永久に失っていた）。
+                            self.pending = pending_backup;
                             return Err(BackendError::Unsupported(
                                 "DeviceParamStore::step: captured_segment_key の判定が \
                                  呼び出し間で Some から None へ変化した（別スレッドによる \

@@ -160,6 +160,91 @@ impl Drop for CudaBufferHandle {
     }
 }
 
+/// `gemm.rs`／`gemm_wmma.rs`／`gemm_mma.rs`／`gemm_mma_tf32.rs`／
+/// `gemm_mma_tf32x3.rs`／`transpose.rs` のベンチ・診断専用公開 API
+/// （`upload_*`／`alloc_output_*`）が返す生の [`CudaSlice`] を包む薄い
+/// RAII ラッパー（codex-review P0 指摘対応・PR #1390 再々修正）。
+///
+/// 型自体は `pub`（`upload_*`／`alloc_output_*` の戻り値の型として
+/// crate 外の呼び出し元〈ベンチ・examples・integration tests〉のシグ
+/// ネチャに現れるため公開が必須）。構築子（[`Self::new`]）は
+/// `pub(crate)` のまま封じ、crate 外は本クレートが返した値を保持・
+/// 転送・drop することしかできない（未検証の `CudaSlice` を外部から
+/// 差し込んで `ordinal` を偽装する経路を型で排除する。`gemm_mma_tf32x3.
+/// rs::ValidatedTf32x3Inputs` と同じ「フィールド非公開・構築子限定」
+/// 設計判断）。
+///
+/// **背景**: これらの公開 API は `CudaBackendOps`（`ops.rs`）を経由せず
+/// crate 外から直接呼び出せる（`gemm.rs::CudaGemm::upload_f32`
+/// ドキュメンテーションコメント「PyTorch 参照計測」参照）。呼び出し元
+/// （ベンチハーネス・`fresh_overhead_diag_tests.rs` 等の診断テスト）は
+/// 返された `CudaSlice<T>` を複数回の関数呼び出しをまたいで保持し、
+/// 最終的に自身のスコープで drop する。生の `CudaSlice<T>::drop` は
+/// `context_cache::begin_driver_call`／`begin_capture_session` の排他
+/// 機構を一切経由しない（`cudarc` 側の実装であり本クレートが介入
+/// できない。`CudaBufferHandle` ドキュメンテーションコメント「背景」節と
+/// 同型の欠陥）ため、別スレッドが `run_captured_sgd_step_segment` で
+/// 同じ ordinal を実際に driver capture 中に、このラッパーなしで
+/// `CudaSlice` を drop すると、その解放操作が capture 中の共有ストリーム
+/// へ意図せず記録されうる。
+///
+/// `Drop` 実装は [`CudaBufferHandle::drop`] と同一の手順（
+/// `context_cache::begin_buffer_release` を呼び、返した
+/// [`context_cache::BufferReleaseToken`] を実際の `CudaSlice::drop` が
+/// 完了するまで保持する）を踏む。`Deref`／`DerefMut` により
+/// `&CudaSlice<T>`／`&mut CudaSlice<T>` を要求する既存の `launch_*`／
+/// `download_*` 系シグネチャへ変更なく渡せる（呼び出し側の
+/// `&guarded_slice` は自動的に `&CudaSlice<T>` へコアーションされる）。
+#[derive(Debug)]
+pub struct GuardedSlice<T: cudarc::driver::DeviceRepr> {
+    inner: Option<CudaSlice<T>>,
+    ordinal: usize,
+}
+
+impl<T: cudarc::driver::DeviceRepr> GuardedSlice<T> {
+    /// `slice`（確保済み・アップロード済みのいずれか）を `ordinal` の
+    /// capture 排他へ参加する形で包む。
+    pub(crate) fn new(ordinal: usize, slice: CudaSlice<T>) -> Self {
+        Self {
+            inner: Some(slice),
+            ordinal,
+        }
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> std::ops::Deref for GuardedSlice<T> {
+    type Target = CudaSlice<T>;
+    fn deref(&self) -> &CudaSlice<T> {
+        // `inner` は `Drop::drop` でのみ `None` になり、それ以外の
+        // 生存区間では常に `Some`（構築は `Self::new` の 1 経路のみ）。
+        self.inner
+            .as_ref()
+            .expect("GuardedSlice::inner is Some outside of Drop")
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> std::ops::DerefMut for GuardedSlice<T> {
+    fn deref_mut(&mut self) -> &mut CudaSlice<T> {
+        self.inner
+            .as_mut()
+            .expect("GuardedSlice::inner is Some outside of Drop")
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> Drop for GuardedSlice<T> {
+    fn drop(&mut self) {
+        // `CudaBufferHandle::drop` と同一の手順（doc コメント「P0
+        // 再修正」参照）: `begin_buffer_release` のトークンを、実際の
+        // `CudaSlice::drop`（`cuMemFreeAsync`/`cuMemFree` の発行）が
+        // 完了するまで保持する。
+        if let Some(slice) = self.inner.take() {
+            let release_token = context_cache::begin_buffer_release(self.ordinal);
+            drop(slice);
+            drop(release_token);
+        }
+    }
+}
+
 /// `CudaBufferHandle` が実際に保持する確保済みメモリの配置（イシュー
 /// #1352。モジュール冒頭コメント「配置（managed 拡張）」参照）。
 ///

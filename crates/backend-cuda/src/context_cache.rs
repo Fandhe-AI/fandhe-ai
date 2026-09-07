@@ -516,9 +516,68 @@ pub(crate) fn cached_allocator(device: &CudaDevice) -> Result<Arc<CudaAllocator>
 //   Retiring --プローブが operation-local・再試行余地あり--> Poisoned{false}（同一世代）
 //   Poisoned{true} は恒久状態（プロセス内に回復手段なし）
 
+use std::cell::RefCell;
 use std::sync::Condvar;
 
 use fandhe_ai_tensor_core::device::BackendError;
+
+thread_local! {
+    /// このスレッドが現在保持している ordinal ごとの未解放 [`CallToken`]
+    /// 数（ネスト深度。Cursor Bugbot High 指摘対応・PR #1390 再々修正）。
+    ///
+    /// **背景**: `ops.rs::CudaBackendOps::with_driver_call` が確立した
+    /// 排他区間の内側から、`gemm.rs::CudaGemm::with_driver_call`（本 PR
+    /// で追加した sub-struct 側の排他区間。`gemm_wmma.rs` 等も同型）が
+    /// 二重に [`begin_driver_call`] を呼ぶネスト経路が実在する
+    /// （`ops.rs::CudaBackendOps::gemm` の `Tf32`／`Tf32x3` 分岐が
+    /// 外側の `with_driver_call` の中で `gemm.run_wmma_tf32`／
+    /// `gemm.run_tf32x3` を呼び、その内部が今度は自分自身の
+    /// `with_driver_call` を呼ぶ）。この状態で**別スレッド**が
+    /// [`begin_capture_session`] を呼ぶと、`state.capture` はドレイン
+    /// 完了前（＝この外側呼び出しの `in_flight` がまだ残っている段階）
+    /// に設定されるため、内側のネスト呼び出しが「別スレッドが capture
+    /// 中」の判定に該当し [`BackendError::DeviceContextCaptureInProgress`]
+    /// で拒否されてしまう。しかしこの内側呼び出しは**外側の呼び出しが
+    /// 既に `in_flight` へ計上済みの、まさに `begin_capture_session` の
+    /// drain が完了を待っている作業そのもの**であり、ここで拒否すると
+    /// 外側の呼び出しがエラーで異常終了し、capture 開始より前に始まって
+    /// いた正当な非 capture 処理が失敗する（Cursor Bugbot 指摘）。
+    ///
+    /// **対策**: このスレッドがこの ordinal で既に 1 つ以上
+    /// [`CallToken`] を保持している（＝外側の `begin_driver_call` を
+    /// 通過済みで `in_flight` に計上済み）場合に限り、[`begin_driver_call`]
+    /// の capture-in-progress 拒否検査をスキップする（poison／世代検査は
+    /// 引き続き通す。fail-closed の他の判定を弱めない）。`state.capture
+    /// == Some(current thread)`（capture 開始スレッド自身）の既存の通過
+    /// 条件とは独立で、こちらは「別スレッドが capture 中でも、このスレッド
+    /// 自身が capture 開始より前から続けている作業は継続を許す」という
+    /// 補完条件。`begin_driver_call` 冒頭コメント参照。
+    static DRIVER_CALL_DEPTH: RefCell<HashMap<usize, u32>> = RefCell::new(HashMap::new());
+}
+
+/// このスレッドが `ordinal` 上で既に 1 つ以上 [`CallToken`] を保持して
+/// いるか（[`DRIVER_CALL_DEPTH`] 参照）。
+fn has_in_flight_call_on_this_thread(ordinal: usize) -> bool {
+    DRIVER_CALL_DEPTH.with(|depth| depth.borrow().get(&ordinal).copied().unwrap_or(0) > 0)
+}
+
+/// [`DRIVER_CALL_DEPTH`] のこのスレッド・`ordinal` の値を 1 増やす
+/// （[`begin_driver_call`] が [`CallToken`] を発行する直前に呼ぶ）。
+fn increment_driver_call_depth(ordinal: usize) {
+    DRIVER_CALL_DEPTH.with(|depth| {
+        *depth.borrow_mut().entry(ordinal).or_insert(0) += 1;
+    });
+}
+
+/// [`DRIVER_CALL_DEPTH`] のこのスレッド・`ordinal` の値を 1 減らす
+/// （[`CallToken::drop`] から呼ぶ。`saturating_sub` で下振れを防ぐ）。
+fn decrement_driver_call_depth(ordinal: usize) {
+    DRIVER_CALL_DEPTH.with(|depth| {
+        if let Some(count) = depth.borrow_mut().get_mut(&ordinal) {
+            *count = count.saturating_sub(1);
+        }
+    });
+}
 
 /// [`OrdinalState::phase`] の値。ordinal 単位の poison 状態機械
 /// （モジュール冒頭「非同期実行の遅延エラー伝播」参照）。
@@ -726,11 +785,30 @@ pub(crate) fn begin_capture_session(ordinal: usize) -> Result<CaptureGuard, Back
         }
         Phase::Active => {}
     }
-    if state.capture.is_some() {
-        return Err(BackendError::InvalidArgument(format!(
-            "begin_capture_session: ordinal {ordinal} is already capturing on this or another \
-             thread (CUDA Graph capture does not support re-entrant capture on a single stream)"
-        )));
+    if let Some(owner) = state.capture {
+        // codex-review P1 指摘対応（イシュー #1349・PR #1390 再々修正）:
+        // 「このスレッド自身の再入」（真のプログラミング契約違反。
+        // `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は同一スレッド・同一
+        // ストリームへの多重 capture を想定しない）と「別スレッドが
+        // 既に capture 中」（一過性の競合。少し待てば解消しうる）を
+        // 区別する。旧稿はいずれも `BackendError::InvalidArgument` で
+        // 返していたため、`fandhe_ai_autodiff::optim::device_store::
+        // DeviceParamStore::step` が graph capture を試みて後着になった
+        // 場合にこれを恒久的な設定誤りと誤認し、`pending` を復元せず
+        // `DeviceParamStore` を永久 poison してしまう欠陥があった
+        // （`begin_driver_call` の同型の是正〈P0 コメント「Cursor Bugbot
+        // 指摘対応」参照〉と対になる修正）。所有者が別スレッドの場合は
+        // 専用の一過性 variant [`BackendError::DeviceContextCaptureInProgress`]
+        // を返し、呼び出し元（`device_store.rs`）が pending を復元して
+        // 再試行できるようにする。所有者が自スレッド自身の場合のみ
+        // 従来どおり `InvalidArgument`（真の再入バグ）を返す。
+        if owner == std::thread::current().id() {
+            return Err(BackendError::InvalidArgument(format!(
+                "begin_capture_session: ordinal {ordinal} is already capturing on this thread \
+                 (CUDA Graph capture does not support re-entrant capture on a single stream)"
+            )));
+        }
+        return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
     }
     // 新規呼び出しの遮断はここで確定する（以後の他スレッド
     // `begin_driver_call` は `state.capture.is_some() && owner != self`
@@ -1017,6 +1095,12 @@ impl Drop for CallToken {
             state.in_flight = state.in_flight.saturating_sub(1);
             cell.1.notify_all();
         }
+        // Cursor Bugbot 指摘対応（PR #1390 再々修正）: `DRIVER_CALL_DEPTH`
+        // のネスト深度も対で減らす（`begin_driver_call` doc コメント
+        // 「# 対策」節参照）。レジストリ・ロック取得の成否に関わらず
+        // 必ず実行する（スレッドローカルであり `Mutex` poison の影響を
+        // 受けない）。
+        decrement_driver_call_depth(self.ordinal);
     }
 }
 
@@ -1091,7 +1175,20 @@ pub(crate) fn begin_driver_call(
     }
     if let Some(owner) = state.capture
         && owner != std::thread::current().id()
+        && !has_in_flight_call_on_this_thread(ordinal)
     {
+        // Cursor Bugbot 指摘対応（PR #1390 再々修正）: このスレッドが
+        // `ordinal` 上で既に `CallToken` を 1 つ以上保持している
+        // （`DRIVER_CALL_DEPTH` 参照）場合はこの拒否をスキップする。
+        // これは「ネストした `with_driver_call` 呼び出し」（`gemm.rs::
+        // CudaGemm::with_driver_call` 等が `ops.rs` の排他区間の内側で
+        // 二重に `begin_driver_call` を呼ぶ経路）が、別スレッドが
+        // ちょうど `begin_capture_session` の drain 待機に入った直後の
+        // 窓で不当に拒否され、`begin_capture_session` が正当に待って
+        // いる in-flight 作業自体を失敗させてしまう欠陥（Cursor Bugbot
+        // 指摘「Nested GEMM lock fails in-flight work」）の是正。
+        // poison／世代検査（このガードより前）はスキップしない。
+        //
         // Cursor Bugbot 指摘対応（PR #1390 是正）: 旧稿は
         // `BackendError::Unsupported` を返していたが、この variant は
         // 「恒久的な未実装・設定誤り」を意味する契約（`captured_segment_key`
@@ -1117,10 +1214,64 @@ pub(crate) fn begin_driver_call(
         });
     }
     state.in_flight += 1;
+    // Cursor Bugbot 指摘対応（PR #1390 再々修正）: `DRIVER_CALL_DEPTH`
+    // をロック解放後に更新すると、他スレッドから見た `in_flight` と
+    // このスレッドから見た「自分のネスト深度」の更新順序に意味は
+    // ないため、ロック区間の外（drop 後）で構わない（`DRIVER_CALL_DEPTH`
+    // はスレッドローカルであり `state` の排他制御と独立）。
+    increment_driver_call_depth(ordinal);
     Ok(CallToken {
         ordinal,
         generation: current_generation,
     })
+}
+
+/// `CudaGemm`（`gemm.rs`）・`CudaWmmaGemm`（`gemm_wmma.rs`）・
+/// `CudaMmaGemm`（`gemm_mma.rs`）・`CudaMmaTf32Gemm`（`gemm_mma_tf32.rs`）・
+/// `CudaMmaTf32x3Gemm`（`gemm_mma_tf32x3.rs`）・`CudaTranspose`
+/// （`transpose.rs`）が公開 driver 呼び出し系メソッド（H2D 転送・確保・
+/// カーネル起動・D2H readback）を CUDA Graph capture 排他へ参加させる
+/// 共通ヘルパー（codex-review P0 指摘対応・PR #1390 再々修正。
+/// `gemm.rs::CudaGemm::with_driver_call` を汎化し重複実装を避ける）。
+///
+/// これらの構造体の公開低レベル API はいずれも `CudaBackendOps`
+/// （`ops.rs`）を経由せず crate 外から直接呼び出せるベンチ・診断専用の
+/// 入口であり（`gemm.rs::CudaGemm::upload_f32` ドキュメンテーション
+/// コメント「PyTorch 参照計測」参照）、従来はこれらの呼び出しが
+/// `begin_driver_call` の capture 排他検査を一切通らず、共有ストリームへ
+/// 直接転送・確保・カーネル起動を発行していた（別スレッドが SGD capture
+/// 中でも拒否されず、drain・拒否を迂回して一時バッファ等の無関係な操作が
+/// graph に混入しうる欠陥。codex-review 指摘）。本ヘルパーを各公開
+/// エントリの本体先頭で呼ぶことで、直接構築・`ops.rs` 経由いずれの
+/// 呼び出し経路でも同じ排他区間を通るようにする。
+///
+/// `resource_generations` は空スライス固定（`gemm.rs::CudaGemm::
+/// with_driver_call` doc コメントと同じ理由。呼び出し元がホスト
+/// `&[f32]`／`&[f16]` 引数のみを読み書きし、呼び出しを跨いで生存する
+/// 既存 `DeviceBuffer` を検査対象に持たないため）。
+///
+/// `f` の呼び出しより先に [`CallToken`] を束縛することで、Rust の drop
+/// 順序（宣言の逆順）により `f` 内部で確保するデバイスバッファの解放が
+/// 必ずこのトークンの生存区間の内側で起こる（`with_driver_call` doc
+/// コメント「解放」節と同じ設計判断）。
+///
+/// **ネスト経路（Cursor Bugbot 指摘対応）**: `ops.rs::CudaBackendOps::
+/// with_driver_call` が既に確立した排他区間の内側から本関数が呼ばれる
+/// 経路（`ops.rs::CudaBackendOps::gemm` の `Tf32`／`Tf32x3` 分岐）が
+/// 実在する。この場合 [`begin_driver_call`] は [`DRIVER_CALL_DEPTH`]
+/// によりこのスレッドの既存 in-flight 作業を検出し、別スレッドが
+/// ちょうど capture を開始した直後の窓でも不当に拒否しない
+/// （[`begin_driver_call`] doc コメント「CUDA Graph capture 中の排他
+/// 制御」節参照）。
+pub(crate) fn with_driver_call<T>(
+    ordinal: usize,
+    f: impl FnOnce() -> Result<T, CudaError>,
+) -> Result<T, CudaError> {
+    let token =
+        begin_driver_call(ordinal, &[]).map_err(|e| CudaError::CaptureExclusionRejected {
+            detail: e.to_string(),
+        })?;
+    observe_cuda_result(ordinal, &token, f())
 }
 
 /// driver 呼び出しの結果を観測し、sticky エラーなら ordinal を poison
@@ -2468,6 +2619,96 @@ mod poison_state_tests {
             second.is_ok(),
             "先行 capture が終了（guard drop）していれば再度開始できるはず: {second:?}"
         );
+    }
+
+    /// codex-review P1 指摘対応（イシュー #1349・PR #1390 再々修正）:
+    /// **別スレッド**が既に capture 中の場合、`begin_capture_session` は
+    /// 一過性の `BackendError::DeviceContextCaptureInProgress` を返す
+    /// べきで、`InvalidArgument`（恒久的な設定誤り）を返してはならない
+    /// （`fandhe_ai_autodiff::optim::device_store::DeviceParamStore::step`
+    /// がこの一過性の競合を恒久的失敗と誤認して `pending` を復元せず
+    /// ストアを永久 poison する欠陥があった。`begin_capture_session`
+    /// doc コメント「codex-review P1 指摘対応」節参照）。上記
+    /// `begin_capture_session_rejects_reentrant_capture_on_same_ordinal`
+    /// （同一スレッドの再入）とは対照的なケース。
+    #[test]
+    fn begin_capture_session_from_other_thread_returns_capture_in_progress_not_invalid_argument() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("first capture session succeeds");
+
+        let other_thread_result = std::thread::spawn(move || begin_capture_session(ordinal))
+            .join()
+            .expect("spawned thread does not panic");
+
+        assert!(
+            matches!(
+                other_thread_result,
+                Err(BackendError::DeviceContextCaptureInProgress { ordinal: o }) if o == ordinal
+            ),
+            "別スレッドが既に capture 中の場合は DeviceContextCaptureInProgress \
+             （一過性の競合）で拒否されるはず。InvalidArgument（恒久的失敗）ではない: \
+             {other_thread_result:?}"
+        );
+
+        drop(guard);
+    }
+
+    /// Cursor Bugbot High 指摘対応（イシュー #1349・PR #1390 再々修正
+    /// 「Nested GEMM lock fails in-flight work」）: `ops.rs::
+    /// CudaBackendOps::with_driver_call` の排他区間内から `gemm.rs::
+    /// CudaGemm::with_driver_call`（`gemm_wmma.rs` 等の sub-struct も
+    /// 同型）が二重に `begin_driver_call` を呼ぶネスト経路で、別スレッド
+    /// が `begin_capture_session` の in_flight ドレイン待機に入った
+    /// 直後の窓でも、ネストした（＝このスレッドが既に `CallToken` を
+    /// 保持している）呼び出しは `DeviceContextCaptureInProgress` で
+    /// 拒否されず成功し続けるはず（`DRIVER_CALL_DEPTH` 機構。
+    /// `begin_driver_call` doc コメント「CUDA Graph capture 中の排他
+    /// 制御」節参照）。
+    #[test]
+    fn begin_driver_call_allows_nested_call_from_thread_with_existing_in_flight_token_even_while_another_thread_drains()
+     {
+        let ordinal = unique_ordinal();
+        // このスレッドの「外側」呼び出し（ops.rs の外側 with_driver_call
+        // 相当）。この token が生存する限り in_flight >= 1。
+        let outer_token = begin_driver_call(ordinal, &[0]).expect("outer token 取得");
+
+        // 別スレッドが begin_capture_session を呼び、state.capture を
+        // 設定した直後（drain 待機に入った状態）まで進める。
+        let capture_handle = std::thread::spawn(move || begin_capture_session(ordinal));
+        let cell = ordinal_registry().entry(ordinal).expect("registry entry");
+        loop {
+            let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            if state.capture.is_some() {
+                break;
+            }
+            drop(state);
+            std::thread::yield_now();
+        }
+
+        // このスレッド（capture を開始した別スレッドではない）が、既に
+        // 保持している outer_token に続けてネストした begin_driver_call
+        // を呼ぶ。DRIVER_CALL_DEPTH によりこのスレッドの既存 in-flight
+        // 作業として扱われ、DeviceContextCaptureInProgress で拒否され
+        // ないはず（拒否されると、drain が待っている作業自体が完了
+        // できなくなる欠陥の再現になる）。
+        let nested_token = begin_driver_call(ordinal, &[0]);
+        assert!(
+            nested_token.is_ok(),
+            "このスレッドが既に in-flight token を保持している場合、別スレッドの \
+             capture 開始と競合してもネストした begin_driver_call は成功するはず: \
+             {nested_token:?}"
+        );
+
+        // ネストしたトークンを先に解放してもまだ outer_token が残るため
+        // drain は完了しない。
+        drop(nested_token);
+        drop(outer_token);
+
+        let guard = capture_handle
+            .join()
+            .expect("spawned thread does not panic")
+            .expect("in-flight 完了後に capture session が成立するはず");
+        drop(guard);
     }
 
     #[test]

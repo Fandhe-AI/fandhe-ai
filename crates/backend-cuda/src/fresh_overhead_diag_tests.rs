@@ -181,7 +181,7 @@ fn measure_one_phase_trial(
         DownloadVariant::Fresh => {
             let t = Instant::now();
             let out = stream
-                .clone_dtoh(&c_dev)
+                .clone_dtoh(&*c_dev)
                 .expect("D2H download (untouched-page Vec, production clone_dtoh) must succeed");
             // `clone_dtoh`／`memcpy_dtoh` は `cuMemcpyDtoHAsync` を発行する
             // だけで返る（plain `Vec<T>` は `HostSlice::stream_synced_mut_
@@ -211,7 +211,7 @@ fn measure_one_phase_trial(
         DownloadVariant::KeepAlive => {
             let t = Instant::now();
             let out = stream
-                .clone_dtoh(&c_dev)
+                .clone_dtoh(&*c_dev)
                 .expect("D2H download (untouched-page Vec, kept alive) must succeed");
             // Fresh 分岐と同じ理由（上記コメント）で、`keep_alive` へ退避
             // する前に転送完了を待つ。KeepAlive はこの試行内では drop
@@ -247,7 +247,7 @@ fn measure_one_phase_trial(
 
             let t = Instant::now();
             stream
-                .memcpy_dtoh(&c_dev, &mut dst)
+                .memcpy_dtoh(&*c_dev, &mut dst)
                 .expect("D2H download (pre-touched Vec) must succeed");
             // `memcpy_dtoh` は `cuMemcpyDtoHAsync` を発行するだけで返る
             // （Fresh 分岐と同じ理由。上記コメント参照）。直後の drop が

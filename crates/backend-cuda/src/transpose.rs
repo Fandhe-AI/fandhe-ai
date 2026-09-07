@@ -18,9 +18,11 @@ use std::sync::Arc;
 use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels_transpose;
+use crate::memory::GuardedSlice;
 use crate::nvrtc::compile_ptx;
 
 /// smem 転置カーネル起動 1 回あたりのブロック次元
@@ -212,6 +214,10 @@ fn naive_launch_config(m: u32, n: u32) -> LaunchConfig {
 /// GEMM epilogue 融合転置（opt-in）のコンパイル済みハンドルを保持する。
 pub struct CudaTranspose {
     stream: Arc<CudaStream>,
+    /// capture 排他（`with_driver_call`）に使うデバイス ordinal
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。`gemm.rs::
+    /// CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     naive_f32: CudaFunction,
     naive_f16: CudaFunction,
     smem_f32_pad: CudaFunction,
@@ -293,6 +299,7 @@ impl CudaTranspose {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             naive_f32,
             naive_f16,
             smem_f32_pad,
@@ -301,6 +308,18 @@ impl CudaTranspose {
             smem_f16_swizzle,
             tiled_transposed_f32,
         })
+    }
+
+    /// `Self` の公開 driver 呼び出し系メソッド（H2D 転送・確保・
+    /// カーネル起動・D2H readback）を CUDA Graph capture 排他へ参加
+    /// させる（codex-review P0 指摘対応・PR #1390 再々修正。実体は
+    /// `context_cache::with_driver_call` へ委譲。`gemm.rs::CudaGemm::
+    /// with_driver_call` doc コメント参照）。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     // --- f32: デバイス常駐 upload/launch/download 分離 API ---
@@ -318,15 +337,28 @@ impl CudaTranspose {
 
     /// `src`（f32）をデバイスへ転送する。ベンチマークが計測区間外で使う
     /// ため公開する（`gemm_mma.rs::CudaMmaGemm::upload_f16` と同じ理由）。
-    pub fn upload_f32(&self, src: &[f32]) -> Result<CudaSlice<f32>, CudaError> {
-        Ok(self.stream.clone_htod(src)?)
+    ///
+    /// 戻り値は生の `CudaSlice<f32>` ではなく [`GuardedSlice<f32>`]
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。理由は
+    /// `gemm.rs::CudaGemm::upload_f32` ドキュメンテーションコメント
+    /// 参照）。
+    pub fn upload_f32(&self, src: &[f32]) -> Result<GuardedSlice<f32>, CudaError> {
+        self.with_driver_call(|| {
+            let dev = self.stream.clone_htod(src)?;
+            Ok(GuardedSlice::new(self.ordinal, dev))
+        })
     }
 
-    /// `m x n` 転置出力用のゼロ初期化デバイスバッファを確保する。
-    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<CudaSlice<f32>, CudaError> {
-        Ok(self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?)
+    /// `m x n` 転置出力用のゼロ初期化デバイスバッファを確保する。戻り値の
+    /// 型については [`Self::upload_f32`] ドキュメンテーションコメント
+    /// 参照。
+    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<GuardedSlice<f32>, CudaError> {
+        self.with_driver_call(|| {
+            let dev = self
+                .stream
+                .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+            Ok(GuardedSlice::new(self.ordinal, dev))
+        })
     }
 
     /// デバイス常駐バッファ（f32）をホストへ回収する。
@@ -334,14 +366,18 @@ impl CudaTranspose {
     /// 同期点（#1013）: 常駐 `launch_*_f32` は非同期投入のみで完了を
     /// 待たないため、本関数が readback ヘルパー経由で完了を確定する
     /// （`memory.rs::readback` ドキュメンテーションコメント参照）。
+    /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
+    /// で capture 排他へ参加させる。
     pub fn download_f32(&self, dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        crate::memory::readback(&self.stream, dev)
+        self.with_driver_call(|| crate::memory::readback(&self.stream, dev))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013。
     /// `gemm.rs::CudaGemm::synchronize` と同じ理由の公開 API）。
+    /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
+    /// で capture 排他へ参加させる。
     pub fn synchronize(&self) -> Result<(), CudaError> {
-        Ok(self.stream.synchronize()?)
+        self.with_driver_call(|| Ok(self.stream.synchronize()?))
     }
 
     /// 素朴転置（f32）を、デバイス常駐済みの `src_dev`/`dst_dev` に対して
@@ -410,6 +446,26 @@ impl CudaTranspose {
     ) -> Result<(), CudaError> {
         validate_tiled_transposed_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
         validate_transpose_output_len(c_t_dev.len(), n, m)?;
+        // codex-review P0 指摘対応（PR #1390 再々修正）: 以降が実際に
+        // driver へ触れる区間（memset_zeros・カーネル起動）のため
+        // `Self::with_driver_call` で capture 排他へ参加させる。
+        self.with_driver_call(|| {
+            self.launch_tiled_transposed_f32_body(a_dev, b_dev, c_t_dev, m, n, k)
+        })
+    }
+
+    /// [`Self::launch_tiled_transposed_f32`] の driver 呼び出し本体
+    /// （`with_driver_call` の外側の形状検証を終えた後にのみ呼ぶ契約）。
+    #[allow(clippy::too_many_arguments)]
+    fn launch_tiled_transposed_f32_body(
+        &self,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_t_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
         if m == 0 || n == 0 {
             return Ok(());
         }
@@ -471,6 +527,9 @@ impl CudaTranspose {
     /// f32 カーネル共通の起動手続き（デバイス常駐版。`launch_naive_f32`/
     /// `launch_smem_f32` で共有。呼び出し元が既に形状検証済みのため本関数
     /// 自体は検証しない）。
+    ///
+    /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
+    /// で本体（カーネル起動）を capture 排他へ参加させる。
     fn launch_f32(
         &self,
         func: &CudaFunction,
@@ -480,25 +539,27 @@ impl CudaTranspose {
         n: u32,
         cfg: LaunchConfig,
     ) -> Result<(), CudaError> {
-        let (m_i, n_i) = (m as i32, n as i32);
+        self.with_driver_call(|| {
+            let (m_i, n_i) = (m as i32, n as i32);
 
-        // SAFETY: src_dev（呼び出し元検証済みの m*n 要素）・dst_dev
-        // （同じく m*n 要素）は呼び出し元（`launch_naive_f32`/
-        // `launch_smem_f32`）が検証済みの m/n から導出しており、カーネル
-        // 内の手動境界チェック（REQ-8。呼び出し元カーネルソース
-        // ドキュメンテーションコメント参照）と合わせて OOB を防ぐ。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(src_dev)
-                .arg(dst_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .launch(cfg)?;
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
-        // 委ねる。
-        Ok(())
+            // SAFETY: src_dev（呼び出し元検証済みの m*n 要素）・dst_dev
+            // （同じく m*n 要素）は呼び出し元（`launch_naive_f32`/
+            // `launch_smem_f32`）が検証済みの m/n から導出しており、カーネル
+            // 内の手動境界チェック（REQ-8。呼び出し元カーネルソース
+            // ドキュメンテーションコメント参照）と合わせて OOB を防ぐ。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(src_dev)
+                    .arg(dst_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .launch(cfg)?;
+            }
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+            // 委ねる。
+            Ok(())
+        })
     }
 
     /// 素朴転置（f32）を実行する。`dst[col*m+row] = src[row*n+col]`。
@@ -630,25 +691,30 @@ impl CudaTranspose {
         n: u32,
         cfg: LaunchConfig,
     ) -> Result<Vec<f16>, CudaError> {
-        let src_dev = self.stream.clone_htod(src)?;
-        let mut dst_dev = self
-            .stream
-            .alloc_zeros::<f16>((m as usize) * (n as usize))?;
-        let (m_i, n_i) = (m as i32, n as i32);
+        // codex-review P0 指摘対応（PR #1390 再々修正）: `Self::
+        // with_driver_call` で本体（H2D・確保・起動・readback）全体を
+        // capture 排他へ参加させる。
+        self.with_driver_call(|| {
+            let src_dev = self.stream.clone_htod(src)?;
+            let mut dst_dev = self
+                .stream
+                .alloc_zeros::<f16>((m as usize) * (n as usize))?;
+            let (m_i, n_i) = (m as i32, n as i32);
 
-        // SAFETY: run_f32/launch_f32 と同一の根拠。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&src_dev)
-                .arg(&mut dst_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。
-        let dst_host = crate::memory::readback(&self.stream, &dst_dev)?;
-        Ok(dst_host)
+            // SAFETY: run_f32/launch_f32 と同一の根拠。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&src_dev)
+                    .arg(&mut dst_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。
+            let dst_host = crate::memory::readback(&self.stream, &dst_dev)?;
+            Ok(dst_host)
+        })
     }
 }
 

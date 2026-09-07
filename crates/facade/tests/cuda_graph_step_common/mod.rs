@@ -59,9 +59,16 @@ pub fn build_model() -> Sequential {
         .unwrap()
 }
 
+/// [`train_on_cuda`] の戻り値型（clippy `type_complexity` 回避。
+/// `(loss 列, 各 step 完了直後のパラメータ列, 最終パラメータ列)`。
+/// フィールドの意味は [`train_on_cuda`] doc コメント参照）。
+pub type TrainOnCudaResult = (Vec<f32>, Vec<Vec<Tensor<f32>>>, Vec<Tensor<f32>>);
+
 /// `device_param_store_train.rs::train_with_device_param_store` の CUDA
 /// 版。各 step の loss（`f32` そのまま。ビット比較は呼び出し元が
-/// `to_bits()` で行う）と、最終的にホストへ同期したパラメータ列を返す。
+/// `to_bits()` で行う）・各 step の完了直後にホストへ同期したパラメータ
+/// 列（`per_step_params`）・最終的にホストへ同期したパラメータ列
+/// （`final_params`）の 3 つを返す。
 ///
 /// `ordinal` を引数化している理由（codex-review P2 指摘対応。イシュー
 /// #1349）: opt-in（`FANDHE_AI_CUDA_GRAPH_STEP`／
@@ -70,7 +77,29 @@ pub fn build_model() -> Sequential {
 /// 冒頭コメント参照）、同一プロセス内で「opt-in OFF の基準値」と
 /// 「opt-in ON の capture 経路」を機械比較するには**異なる ordinal**を
 /// 使う必要がある（`cuda_graph_step_two_gpu_bit_identity.rs` 参照）。
-pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> (Vec<f32>, Vec<Tensor<f32>>) {
+///
+/// **各 step のパラメータをホストへ同期する理由（codex-review P2
+/// 指摘対応・PR #1390 再々修正）**: 旧稿は最終 step 完了後のパラメータ
+/// のみを返しており、途中の step で一時的に発生し最終値には現れない
+/// ビット差異（例えば SGD 更新の中間丸め誤差が後続 step で偶然打ち消し
+/// 合う場合）を検出できなかった。`step_device_param_store` の直後に毎回
+/// `sync_device_param_store_to_host` を呼ぶことで、`STEPS` 回すべての
+/// パラメータ状態を比較対象にする。
+///
+/// **各 step の重み勾配そのもの（`Gradients` の生値）は含まない**:
+/// `Sequential::forward_resident` が生成する `Op::LinearResident` の
+/// weight 勾配は resident 経路（`DeviceParamStore::fill_resident_weight_
+/// grad`。`fandhe_ai_autodiff::backward::Gradients` doc「resident_
+/// fingerprint」節参照）でデバイス常駐 `GradStaging` へ直接書き込まれ、
+/// `Gradients::get(var)` が返す `Vec<Option<Tensor<f32>>>` には載らない
+/// （resident 経路はこの取得経路を意図的にスキップする設計。同 doc
+/// 参照）。ホストへ読み出す公開 API（`facade::Tape` 経由）は現状
+/// 存在しないため、勾配そのものの per-step 比較には新規公開 API の
+/// 追加が要る（本 PR のスコープ外。`.claude/rules/out-of-scope-tracking.md`
+/// に従い、必要であれば別 Issue で追跡する）。上記の per-step パラメータ
+/// 比較は「同一 step 開始時点の重みに対して同一の SGD 更新が適用された」
+/// ことを間接的に検証するため、勾配自体の直接比較に近い検出力を持つ。
+pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> TrainOnCudaResult {
     let model = build_model();
     let (x_data, y_data) = gen_regression_data(SEED_DATA);
 
@@ -81,6 +110,7 @@ pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> (Vec<f32>, Vec<Te
 
     let config = FacadeSgdConfig::new(lr);
     let mut log = Vec::with_capacity(steps);
+    let mut per_step_params = Vec::with_capacity(steps);
 
     for _ in 0..steps {
         let tape =
@@ -95,27 +125,53 @@ pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> (Vec<f32>, Vec<Te
         let grads = tape.backward_device_param_store(&loss, &store).unwrap();
         tape.step_device_param_store(&mut store, &grads, &config)
             .unwrap();
+
+        // codex-review P2 指摘対応（PR #1390 再々修正）: この step の
+        // 完了直後にパラメータをホストへ同期し記録する（doc コメント
+        // 「各 step のパラメータをホストへ同期する理由」参照）。
+        let step_synced = tape.sync_device_param_store_to_host(&store).unwrap();
+        per_step_params.push(step_synced);
     }
 
     let final_tape =
         fandhe_ai::tape_for(Device::Cuda(ordinal)).expect("CUDA device must be available");
-    let synced = final_tape.sync_device_param_store_to_host(&store).unwrap();
-    (log, synced)
+    let final_params = final_tape.sync_device_param_store_to_host(&store).unwrap();
+    (log, per_step_params, final_params)
 }
 
-/// loss 列・最終パラメータを `to_bits()` の 16 進表現で標準出力へ出す
-/// （プロセス間比較のための決定的なテキスト表現。浮動小数点の表示
-/// 誤差を避けるため `{:?}`／`{}` ではなくビット表現を使う）。
-pub fn print_bit_identity_report(label: &str, log: &[f32], params: &[Tensor<f32>]) {
+/// loss 列・各 step 完了直後のパラメータ列・最終パラメータを
+/// `to_bits()` の 16 進表現で標準出力へ出す（プロセス間比較のための
+/// 決定的なテキスト表現。浮動小数点の表示誤差を避けるため `{:?}`／
+/// `{}` ではなくビット表現を使う）。
+///
+/// `per_step_params` 引数の追加（codex-review P2 指摘対応・PR #1390
+/// 再々修正）: `train_on_cuda` doc コメント「各 step のパラメータを
+/// ホストへ同期する理由」参照。最終値のみでは検出できない中間 step の
+/// ビット差異を目視比較でも追えるようにする。
+pub fn print_bit_identity_report(
+    label: &str,
+    log: &[f32],
+    per_step_params: &[Vec<Tensor<f32>>],
+    final_params: &[Tensor<f32>],
+) {
     println!("=== cuda_graph_step_bit_identity: {label} ===");
     for (i, loss) in log.iter().enumerate() {
         println!("step[{i}].loss.bits = {:#010x}", loss.to_bits());
     }
-    for (p, tensor) in params.iter().enumerate() {
+    for (step, params) in per_step_params.iter().enumerate() {
+        for (p, tensor) in params.iter().enumerate() {
+            let contiguous = tensor.contiguous();
+            let slice = contiguous.as_slice().unwrap_or(&[]);
+            for (i, v) in slice.iter().enumerate() {
+                println!("step[{step}].param[{p}][{i}].bits = {:#010x}", v.to_bits());
+            }
+        }
+    }
+    for (p, tensor) in final_params.iter().enumerate() {
         let contiguous = tensor.contiguous();
         let slice = contiguous.as_slice().unwrap_or(&[]);
         for (i, v) in slice.iter().enumerate() {
-            println!("param[{p}][{i}].bits = {:#010x}", v.to_bits());
+            println!("final.param[{p}][{i}].bits = {:#010x}", v.to_bits());
         }
     }
 }

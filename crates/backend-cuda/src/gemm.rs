@@ -46,7 +46,7 @@ use crate::kernels_tiled_pipeline;
 use crate::kernels_tiled_pipeline_128x64;
 use crate::kernels_transpose;
 use crate::kernels_wmma_opt;
-use crate::memory::{CudaArg, CudaArgMut};
+use crate::memory::{CudaArg, CudaArgMut, GuardedSlice};
 use crate::module_cache::load_function_cached;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
 use crate::pool::CudaAllocator;
@@ -3214,7 +3214,7 @@ impl CudaGemm {
         // 参照（`upload_f32`／`launch_tiled_pipeline_persistent_f32` は
         // それぞれ内部で既に排他区間へ参加済み。本行の readback も同様に
         // 参加させる）。
-        self.with_driver_call(|| crate::memory::readback(&self.stream, &c_dev))
+        self.with_driver_call(|| crate::memory::readback(&self.stream, &*c_dev))
     }
 
     /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM を実行
@@ -3835,16 +3835,17 @@ impl CudaGemm {
     /// （`a_dev`／`b_dev`／`c_dev` 等。`run_f32_kernel` 参照）の解放が
     /// 必ずこのトークンの生存区間の内側で起こる（`ops.rs::with_driver_call`
     /// のコメント「解放」節と同じ設計判断）。
+    ///
+    /// 実体は [`context_cache::with_driver_call`] へ委譲する（codex-review
+    /// P0 指摘対応・PR #1390 再々修正で `gemm_wmma.rs`・`gemm_mma.rs`・
+    /// `gemm_mma_tf32.rs`・`gemm_mma_tf32x3.rs`・`transpose.rs` の同型
+    /// sub-struct とヘルパー実装を共有するために汎化した。挙動は従来の
+    /// 直接実装と完全に同一）。
     fn with_driver_call<T>(
         &self,
         f: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, CudaError> {
-        let token = context_cache::begin_driver_call(self.ordinal, &[]).map_err(|e| {
-            CudaError::CaptureExclusionRejected {
-                detail: e.to_string(),
-            }
-        })?;
-        context_cache::observe_cuda_result(self.ordinal, &token, f())
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4211,29 +4212,43 @@ impl CudaGemm {
     /// `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py`
     /// 実測確認済み）と計測境界を揃える」対応。tiled f32・WMMA(TF32) は
     /// いずれも入力が f32 のため 1 メソッドで共有する）。
+    ///
+    /// 戻り値は生の `CudaSlice<f32>` ではなく [`GuardedSlice<f32>`]
+    /// （codex-review P0 指摘対応・PR #1390 再々修正）。呼び出し元が本関数
+    /// の戻り値をまたいだ複数呼び出しの間保持し最終的に drop する際、その
+    /// drop も capture 排他へ参加させる（`GuardedSlice` ドキュメンテーション
+    /// コメント「背景」節参照。生の `CudaSlice::drop` は排他機構を経由
+    /// しないため、`with_driver_call` によるここでの確保保護だけでは
+    /// 不十分だった）。`&GuardedSlice<f32>` は `Deref` により
+    /// `&CudaSlice<f32>` を要求する既存シグネチャへそのまま渡せる。
     pub fn upload_f32(
         &self,
         a: &[f32],
         b: &[f32],
-    ) -> Result<(CudaSlice<f32>, CudaSlice<f32>), CudaError> {
+    ) -> Result<(GuardedSlice<f32>, GuardedSlice<f32>), CudaError> {
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
         // 参照。
         self.with_driver_call(|| {
             let a_dev = self.stream.clone_htod(a)?;
             let b_dev = self.stream.clone_htod(b)?;
-            Ok((a_dev, b_dev))
+            Ok((
+                GuardedSlice::new(self.ordinal, a_dev),
+                GuardedSlice::new(self.ordinal, b_dev),
+            ))
         })
     }
 
     /// C 用のゼロ初期化デバイスバッファを確保する（[`Self::upload_f32`] と
-    /// 同じ理由で公開する。tiled f32・WMMA(TF32) で共有）。
-    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<CudaSlice<f32>, CudaError> {
+    /// 同じ理由で公開する。tiled f32・WMMA(TF32) で共有）。戻り値の型に
+    /// ついては [`Self::upload_f32`] ドキュメンテーションコメント参照。
+    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<GuardedSlice<f32>, CudaError> {
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
         // 参照。
         self.with_driver_call(|| {
-            Ok(self
+            let c_dev = self
                 .stream
-                .alloc_zeros::<f32>((m as usize) * (n as usize))?)
+                .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+            Ok(GuardedSlice::new(self.ordinal, c_dev))
         })
     }
 

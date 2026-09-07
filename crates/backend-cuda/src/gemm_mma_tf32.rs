@@ -40,11 +40,13 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::validate_gemm_dims;
 use crate::gemm_mma::check_min_compute_capability;
 use crate::kernels_mma_tf32;
+use crate::memory::GuardedSlice;
 use crate::nvrtc::compile_ptx;
 
 /// `kernels_mma_tf32::MMA_TF32_BLOCK_THREADS` に 1:1 対応するブロック
@@ -65,6 +67,10 @@ pub(crate) const MMA_TF32_BLOCK_DIM: (u32, u32, u32) =
 /// 参照）。
 pub struct CudaMmaTf32Gemm {
     stream: Arc<CudaStream>,
+    /// capture 排他（`with_driver_call`）に使うデバイス ordinal
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。`gemm.rs::
+    /// CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     mma_tf32: CudaFunction,
 }
 
@@ -91,8 +97,21 @@ impl CudaMmaTf32Gemm {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             mma_tf32,
         })
+    }
+
+    /// `Self` の公開 driver 呼び出し系メソッド（H2D 転送・確保・
+    /// カーネル起動・D2H readback）を CUDA Graph capture 排他へ参加
+    /// させる（codex-review P0 指摘対応・PR #1390 再々修正。実体は
+    /// `context_cache::with_driver_call` へ委譲。`gemm.rs::CudaGemm::
+    /// with_driver_call` doc コメント参照）。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     /// A・B（f32）を渡すだけで GPU 実行し C（f32）を得る一括 API。
@@ -148,22 +167,36 @@ impl CudaMmaTf32Gemm {
     /// 切り出し。ベンチマークが GPU 実行時間のみを計測できるよう、転送と
     /// カーネル実行を分離する。`gemm_mma.rs::CudaMmaGemm::upload_f16` と
     /// 同じ理由）。
+    ///
+    /// 戻り値は生の `CudaSlice<f32>` ではなく [`GuardedSlice<f32>`]
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。理由は
+    /// `gemm.rs::CudaGemm::upload_f32` ドキュメンテーションコメント
+    /// 参照）。
     pub fn upload_f32(
         &self,
         a: &[f32],
         b: &[f32],
-    ) -> Result<(CudaSlice<f32>, CudaSlice<f32>), CudaError> {
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        Ok((a_dev, b_dev))
+    ) -> Result<(GuardedSlice<f32>, GuardedSlice<f32>), CudaError> {
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            Ok((
+                GuardedSlice::new(self.ordinal, a_dev),
+                GuardedSlice::new(self.ordinal, b_dev),
+            ))
+        })
     }
 
     /// C 用のゼロ初期化デバイスバッファを確保する（`run_tf32` のバッファ
-    /// 確保部分の切り出し）。
-    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<CudaSlice<f32>, CudaError> {
-        Ok(self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?)
+    /// 確保部分の切り出し）。戻り値の型については [`Self::upload_f32`]
+    /// ドキュメンテーションコメント参照。
+    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<GuardedSlice<f32>, CudaError> {
+        self.with_driver_call(|| {
+            let c_dev = self
+                .stream
+                .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+            Ok(GuardedSlice::new(self.ordinal, c_dev))
+        })
     }
 
     /// デバイス常駐済みの A/B/C バッファに対してカーネルをストリームへ
@@ -206,21 +239,30 @@ impl CudaMmaTf32Gemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        launch_mma_tf32_family(&self.stream, &self.mma_tf32, a_dev, b_dev, c_dev, m, n, k)
+        // codex-review P0 指摘対応（PR #1390 再々修正）: `Self::
+        // with_driver_call` で `launch_mma_tf32_family`（共有起動本体）
+        // 呼び出しを capture 排他へ参加させる。
+        self.with_driver_call(|| {
+            launch_mma_tf32_family(&self.stream, &self.mma_tf32, a_dev, b_dev, c_dev, m, n, k)
+        })
     }
 
     /// C をデバイス→ホストへ転送する（`run_tf32` の D2H 部分の切り出し）。
     ///
     /// 同期点（#1013）: 常駐 `launch_tf32` は非同期投入のみで完了を待たない
-    /// ため、本関数が readback ヘルパー経由で完了を確定する。
+    /// ため、本関数が readback ヘルパー経由で完了を確定する。codex-review
+    /// P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call` で
+    /// capture 排他へ参加させる。
     pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        crate::memory::readback(&self.stream, c_dev)
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013。
     /// `gemm.rs::CudaGemm::synchronize` と同じ理由の公開 API）。
+    /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
+    /// で capture 排他へ参加させる。
     pub fn synchronize(&self) -> Result<(), CudaError> {
-        Ok(self.stream.synchronize()?)
+        self.with_driver_call(|| Ok(self.stream.synchronize()?))
     }
 }
 

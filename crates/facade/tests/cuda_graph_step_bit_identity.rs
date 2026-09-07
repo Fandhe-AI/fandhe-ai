@@ -86,8 +86,8 @@ fn eager_baseline() {
         "本テストは opt-in OFF（既定）の基準値を記録する。環境変数 \
          FANDHE_AI_CUDA_GRAPH_STEP を設定せずに実行すること"
     );
-    let (log, params) = train_on_cuda(0, STEPS, LR);
-    print_bit_identity_report("eager (opt-in OFF)", &log, &params);
+    let (log, per_step_params, final_params) = train_on_cuda(0, STEPS, LR);
+    print_bit_identity_report("eager (opt-in OFF)", &log, &per_step_params, &final_params);
 }
 
 /// capture 経路（opt-in ON）を実行する。`FANDHE_AI_CUDA_GRAPH_STEP=1`
@@ -104,8 +104,13 @@ fn graph_capture() {
         "本テストは opt-in ON（環境変数 FANDHE_AI_CUDA_GRAPH_STEP=1）の \
          別プロセスとして実行すること"
     );
-    let (log, params) = train_on_cuda(0, STEPS, LR);
-    print_bit_identity_report("graph capture (opt-in ON)", &log, &params);
+    let (log, per_step_params, final_params) = train_on_cuda(0, STEPS, LR);
+    print_bit_identity_report(
+        "graph capture (opt-in ON)",
+        &log,
+        &per_step_params,
+        &final_params,
+    );
 }
 
 /// 同一プロセス内でも検証できる範囲の簡易チェック: opt-in を
@@ -130,7 +135,7 @@ fn graph_capture() {
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須。単独プロセスで --exact 単独実行すること（opt-in をプロセスワイドに変更するため）"]
 fn graph_capture_completes_training_loop_without_error() {
     fandhe_ai::set_cuda_graph_step_enabled(true);
-    let (log, _params) = train_on_cuda(0, STEPS, LR);
+    let (log, _per_step_params, _final_params) = train_on_cuda(0, STEPS, LR);
     assert_eq!(log.len(), STEPS);
     for loss in &log {
         assert!(loss.is_finite(), "loss must remain finite: {loss}");
