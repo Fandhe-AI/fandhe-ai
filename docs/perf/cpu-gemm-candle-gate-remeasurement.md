@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）
 
 ## 1. 位置づけ
 
@@ -497,3 +497,144 @@ env_info・実行ログ・生データ:
 `scripts/bench/framework-compare/results/raw/results-{m4max,dgx}-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.jsonl`・
 `manifest-{m4max,dgx}-cpu-gemm-gate-head-90ea1cb-limit-{on,off}.json`。
 集計は `scripts/bench/framework-compare/results/summary.md` 環境 22 節を参照。
+
+## 14. 2026-09-07 追補: RowPanel／IcDynamic／2D 動的の 3 variant 両実機比較（イシュー #1367）
+
+### 14.1 位置づけ・採用ゲート（計測前に確定）
+
+イシュー #1366（#1409）が追加した CPU GEMM 並列ドライバ候補
+`GemmDriverVariant::IcDynamic`（`#[cfg(test)]` 限定・行パネルを
+`AtomicUsize` で動的配布・`unsafe` なし）の実機性能を、本番既定
+`RowPanel` と両実機（Apple M4 Max・DGX Spark GB10〈Grace CPU〉）で
+比較し、本番結線の採否を判定する。2D 動的分配 variant（#1307／#1310／
+#1311）は計画時点（2026-09-07）で設計・実装とも未着手（対応ブランチ・PR
+なし）のため本イシューでは実装せず、比較表に「未実装（#1311 待ち）」列
+として記録するに留める。
+
+採用ゲート（計測前に確定。以後変更しない）:
+
+1. **主判定（対 RowPanel。両実機とも必須）**: `IcDynamic` の 5 回中央値が
+   N=1024・2048 の両方で `RowPanel` 以上（ratio ≥ 1.00）、かつ N=4096 で
+   非劣化（ratio ≥ 0.95）
+2. **両実機一致要件**: 1 を M4 Max・GB10 の両方で満たす場合のみ ADOPT。
+   片方のみ満たす場合は REJECT
+3. **参考判定（対 gemm crate）**: `oss-gemm-compare` との比はトラッキング
+   （#1283／#1117）への参考値として併記する（`oss-gemm-compare` ハーネスは
+   本番 `RowPanel` 経路〈`self_gemm_blis_parallel`〉のみを計測し variant
+   選択に非対応のため、`IcDynamic` 単体の対 gemm crate 比は本イシューでは
+   計測不能）
+4. **bit 完全一致前提**: 各実機で `gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large`
+   （`#[ignore]`・release）が pass することを採否判定の前提条件とする
+5. 2D 動的 variant は未実装のため本ゲートの対象外
+
+### 14.2 プロトコル
+
+```
+cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+  gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large --nocapture
+cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+  gemm_blis_variant_ab_1024_2048 --nocapture   # 5 回独立プロセス
+cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+  gemm_blis_variant_ab_4096 --nocapture        # 5 回独立プロセス
+```
+
+`RAYON_NUM_THREADS` は両実機とも未設定（既定で全論理コア。M4 Max 16・
+DGX 20。`thread_limit::BIG_CORE_LIMIT_ENABLED=false`〈#1364 で REJECT
+確定済み〉）。DGX 側は計測開始前に低負荷ゲート（1 分 load average < 6 を
+2 回連続）を通過してから実行した。M4 Max 側は本マシン上で並列稼働する
+他の Claude Code エージェントセッションが多数存在し、計測専有できる
+低負荷窓が取れなかったため「共有負荷下」のまま実行した（計画 Step
+1-1 の既定動作。ブロックしない）。詳細環境情報は
+`docs/perf/logs/cpu-gemm-ic-dynamic-ab-1367/env_info.txt`。
+
+### 14.3 bit 完全一致前提の結果
+
+両実機とも `gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large` が
+pass（`docs/perf/logs/cpu-gemm-ic-dynamic-ab-1367/bit-exact-large-m4max.txt`・
+`unit-test-dgx.txt`）。前提条件を満たす。
+
+### 14.4 DGX Spark GB10 実測（5 回独立プロセス中央値）
+
+| N | RowPanel | SharedB | SharedBPcOuter | IcDynamic | 2D 動的 | IcDynamic/RowPanel |
+|---|---|---|---|---|---|---|
+| 1024 | 530.338 | 215.851 | 248.020 | 332.159 | 未実装（#1311 待ち） | 0.6263 |
+| 2048 | 699.913 | 359.418 | 375.050 | 594.350 | 未実装（#1311 待ち） | 0.8492 |
+| 4096 | 1136.666 | 458.709 | 456.075 | 1111.147 | 未実装（#1311 待ち） | 0.9775 |
+
+単位 GFLOP/s。生値・run 別内訳は `docs/perf/logs/cpu-gemm-ic-dynamic-ab-1367/aggregate.py`
+の実行結果（生ログ `ab-1024-2048-dgx-run{1..5}.txt`・`ab-4096-dgx-run{1..5}.txt`
+から再計算可能）。
+
+### 14.5 Apple M4 Max 実測（5 回独立プロセス中央値・共有負荷下）
+
+| N | RowPanel | SharedB | SharedBPcOuter | IcDynamic | 2D 動的 | IcDynamic/RowPanel |
+|---|---|---|---|---|---|---|
+| 1024 | 635.868 | 483.663 | 462.928 | 628.141 | 未実装（#1311 待ち） | 0.9878 |
+| 2048 | 736.337 | 624.481 | 611.747 | 742.778 | 未実装（#1311 待ち） | 1.0087 |
+| 4096 | 812.951 | 626.581 | 631.080 | 902.014 | 未実装（#1311 待ち） | 1.1096 |
+
+単位 GFLOP/s。生ログ `ab-1024-2048-m4max-run{1..5}.txt`・`ab-4096-m4max-run{1..5}.txt`。
+共有負荷（load average 22.18〜31.11。16 論理コア）によるノイズが大きい点に
+留意（例: RowPanel N=2048 は run 間で 609〜786 GFLOP/s の幅がある）。
+
+### 14.6 対 RowPanel／対 gemm crate 比の総括
+
+| 実機 | N=1024 | N=2048 | N=4096 | ゲート判定（rule 1） |
+|---|---|---|---|---|
+| DGX Spark GB10 | 0.6263（未達） | 0.8492（未達） | 0.9775（達成） | **未達成**（N=1024/2048 が 1.00 を大きく下回る） |
+| Apple M4 Max | 0.9878（僅かに未達） | 1.0087（達成） | 1.1096（達成） | **未達成**（N=1024 が 1.00 未満） |
+
+対 gemm crate（参考・M4 Max のみ 1 回計測。§14.1 注記のとおり `IcDynamic`
+単体は計測不能のため本番 `RowPanel` 経路の値。既存 5 回中央値基準線は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §12・
+`docs/perf/logs/cpu-gemm-candle-gate-1148/` を参照）: N=1024 0.7595 対
+0.7946 TFLOP/s（gemm crate 上回り）・N=2048 0.7657 対 0.8176（gemm crate
+上回り）・N=4096（`gemm` 側 `output_match=false`。既知の丸め差
+rel_diff≈0.0036 は fail-closed 仕様の想定内）0.7687 対 0.7543（fandhe
+上回り）。いずれも `RowPanel` 経路の参考値であり `IcDynamic` の採否判定
+には使わない。
+
+### 14.7 採否（確定）
+
+**REJECT（不採用）**。DGX Spark GB10 で N=1024（比 0.6263）・N=2048（比
+0.8492）とも主判定を大きく下回り（測定ノイズでは説明できない一貫した
+後退。5 run すべてで RowPanel が IcDynamic を上回る）、ゲート 2「両実機で
+rule 1 を満たす場合のみ ADOPT」を満たさない。Apple M4 Max も N=1024 が
+0.9878 で僅かに 1.00 未満（共有負荷下のノイズの範囲内である可能性はある
+が、DGX 側が非後退ではなく明確な後退のため判定に影響しない）。
+
+DGX での後退の推定要因: `IcDynamic` は pc ごとに B を列全幅 `n` で
+1 回 pack し・行パネルを動的配布する設計だが、DGX の非一様コア構成
+（Cortex-X925 ×10 + Cortex-A725 ×10。`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+§13 既出）・N が小さいほど pc 同期点（`AtomicUsize` 経由の動的配布・
+`Mutex` スロット）のオーバーヘッドがカーネル計算時間に対し相対的に
+大きくなることが考えられる（N=4096 では非劣化まで回復している傾向と
+整合）。根本原因の追加切り分けは本イシューのスコープ外とする。
+
+本番結線（`GemmDriverVariant::IcDynamic` の `#[cfg(test)]` 解除・
+`unsafe` 非導入のまま到達可能化）は **行わない**。
+`crates/backend-cpu/src/gemm_blis/mod.rs` の本番並列経路
+（`gemm_blis_parallel_with_transpose`）・`crates/backend-cpu/src/lib.rs`
+はコード変更なし。
+
+2D 動的分配（#1307／#1310／#1311）は未実装のため本イシューの比較対象外。
+親 #1365 の受入条件のうち 2D 動的分配分は本 PR では未充足のまま
+`#1311`／`#1312` へ引き継ぐ。
+
+### 14.8 スコープ外事項（本追補では対応しない）
+
+- 2D 動的分配 variant の実装（#1311）・両実機比較（#1312）
+- N 極大時（例 65536）の `IcDynamic` B footprint の実測（`docs/perf/cpu-gemm-ic-dynamic-variant.md`
+  §2.4 の見積りのみ）
+- DGX での後退要因（pc 同期点オーバーヘッド仮説）の追加診断
+- `oss-gemm-compare` ハーネスへの variant 選択オプション追加（`IcDynamic`
+  単体の対 gemm crate 比を得るため）
+
+### 14.9 出典
+
+- イシュー #1366／#1409（`IcDynamic` 実装）・#1367（本追補）・#1365（親）・
+  #1307／#1310／#1311（2D 動的分配・未実装）
+- `docs/perf/cpu-gemm-ic-dynamic-variant.md`（設計・回帰テスト詳細）
+- `docs/cpu-gemm-b-packing-sharing-decision.md` §F
+- `docs/perf/logs/cpu-gemm-ic-dynamic-ab-1367/`（本追補の生ログ・env_info・集計スクリプト）
+- `.claude/rules/coding-rust.md`（bit 完全一致契約）・`.claude/rules/security.md`（unsafe 非導入）
