@@ -113,6 +113,7 @@ fandhe-ai/
     │   ├── cuda-tensor-core-tolerance-opt-remeasurement.md # opt 版 WMMA TF32 カーネルの数値一致誤差分布再実測（GB10 実機計測完了・sm_86 との差分なし。#994・#995）
     │   ├── cuda-tensor-core-tolerance-gb10-scale-sweep.md # GB10（sm_121）実機での入力スケールスイープ再実測・sm_86 との世代差記録（#995）
     │   ├── cpu-gemm-candle-cpu-retune.md # CPU GEMM マイクロカーネル・packing 再チューニング（pc 外側ループ・A 1 回 pack 候補〈SharedBPcOuter〉。対 gemm crate 逆転狙い。GB10・M4 Max とも実機実測完了・いずれも非採用と結論〈#1140・#1141〉。#1041。#1144 で本番結線不要（`RowPanel` 維持）と確定・次候補は承認待ち）
+    │   ├── cpu-gemm-ic-dynamic-variant.md # ic 限定動的配布 variant（`GemmDriverVariant::IcDynamic`。atomic 行パネルカウンタ・pc ごとの B パネル共有 pack）の実装記録・`RowPanel` との bit 完全一致回帰・未実測明記（`unsafe` 非導入。両実機実測・採否判定は #1367 へ引き継ぎ。イシュー #1366）
     │   ├── train-linear-epilogue-fusion.md # 学習 forward の Linear+ReLU epilogue 融合（gemm_bias_act／gemm_resident_rhs_act 結線）の起動数 before/after・CPU 実測・Metal/DGX Spark 未実測の明記（#1044）
     │   ├── train-step-phase-breakdown.md # CPU / CUDA / Metal 学習 1 step のフェーズ分解実機実測（M4 Max・DGX Spark GB10・5 回計測）・支配項トップ 3（backward が 83.6〜97.3% で全バックエンド共通の支配項）・#1008 配下 Issue 優先順位の更新案（#1010）。#1145 で v0.6.0 ピン再計測（backward は 75.1〜97.5% で支配項の結論は不変）・0.4.0 との差分を §10〜§14 に追記（推論のフェーズ分解はハーネス制約により未実施）。#1151 で v0.6.0 実測の支配項トップ 3 確定・backward 内部の推定・infer 未達の仮説・改善 issue 起票案（#1211〜#1219）を §15 に追記
     │   ├── cuda-async-sync-removal-framework-compare-ab.md # CUDA 都度同期廃止（#1011）の framework-compare 実践規模 A/B 計測記録（DGX Spark GB10 実機計測完了。受入根拠は同一プロトコルの fresh 0.928 倍のみ。reuse 0.440 倍〈約 2.3 倍短縮〉は #1059 の resident forward/backward 経路変更との複合効果につき参考値〈codex-review P1 対応〉・checksum 複合判定 ok。#1083）

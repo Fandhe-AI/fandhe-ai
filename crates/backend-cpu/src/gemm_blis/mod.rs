@@ -68,6 +68,14 @@ mod pack;
 mod partition;
 
 use std::ops::Range;
+// `IcDynamic`（イシュー #1366）専用: 行パネルの動的配布に使う
+// `AtomicUsize` カウンタ・排他アクセス用 `Mutex`。本番未結線のため
+// `#[cfg(test)]` ゲート（本ファイル冒頭「cache_params／partition」節と
+// 同じ理由。`.claude/rules/coding-rust.md` の dead_code 黙らせ回避方針）。
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, PoisonError};
 
 use fandhe_ai_tensor_core::Activation;
 
@@ -548,6 +556,11 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
     // 22〜24% 低いスループット。GB10: 1024/2048 のみ実測で約 45〜54% 低い。
     // GB10 4096 は候補側未計測）、#1144 で本番結線しないと確定した。詳細・
     // 数値は `docs/perf/cpu-gemm-candle-cpu-retune.md` §8 を参照。
+    //
+    // ic 限定動的配布 `IcDynamic`（[`GemmDriverVariant::IcDynamic`]。
+    // イシュー #1366）は `SharedBPcOuter` の静的行パネル等分割による
+    // 負荷不均衡への対処候補として `#[cfg(test)]` 限定で追加済み。
+    // 結線可否は #1367 の両実機実測後に判断する（本番未結線）。
     //
     // `Nt`（`b` 引数が転置格納 `bt`）は行範囲に依存せず全パネルへ同じ
     // `bt` を渡す（B packing は行パネル分割と無関係）。`Tn`（`a` 引数が
@@ -1817,6 +1830,54 @@ fn task_a_capacity(task_mc: usize, kc_len_max: usize, mr: usize) -> Result<usize
         .ok_or(GemmError::DimProductOverflow)
 }
 
+/// [`gemm_blis_ic_dynamic_region`] 専用: 動的配布する行パネル 1 枚あたりの
+/// 行数（イシュー #1366）。
+///
+/// `SharedBPcOuter`（[`gemm_blis_shared_b_pc_outer_region`]）は
+/// `mc_total.div_ceil(num_workers)` をそのままパネル行数にするため、
+/// `blocks.mc` を跨ぐ大きなパネルになりうる（各パネルは 1 タスクへ
+/// 静的に固定される前提のため問題にならない）。本 variant は行パネルを
+/// `AtomicUsize` カウンタで動的配布するため、パネル数がワーカー数
+/// 以上になるよう `blocks.mc` の上限も同時に満たす必要がある（さもないと
+/// N=1024 のような中形状でパネル数 < ワーカー数となり、後発のワーカーが
+/// 仕事を持てず動的配布の意味がない。issue #1366 実装計画 §3.2）。
+///
+/// 算出方針: `mc_total` をワーカー数で均等割りした行数を [`Microkernel::MR`]
+/// の倍数へ切り上げ（カーネルタイル境界に揃える。切り上げても実際の
+/// 端タイルは `mr_eff` で処理されるため境界検査・bit 一致契約には影響
+/// しない）、`blocks.mc` を超えないようクランプし、最後に 1 未満になら
+/// ないよう下限を敷く（`num_workers` や `mc_total` が極端な値でも
+/// 0 除算・無限ループを生まない。呼び出し元は戻り値を `c.chunks_mut
+/// (panel_rows * n)`（チャンクサイズ 0 はパニック）・`div_ceil` の除数
+/// として使うため 0 は許容できない）。
+#[cfg(test)]
+fn ic_dynamic_panel_rows(mc_total: usize, mc: usize, mr: usize, num_workers: usize) -> usize {
+    let num_workers = num_workers.max(1);
+    let mr = mr.max(1);
+    let per_worker = mc_total.div_ceil(num_workers).max(1);
+    let aligned = per_worker.div_ceil(mr).saturating_mul(mr);
+    mc.min(aligned).max(1)
+}
+
+/// [`gemm_blis_ic_dynamic_region`] 専用: pc ブロックごとに列全幅 `n` を
+/// 1 回だけ pack する共有 B バッファの容量（イシュー #1366）。
+///
+/// `SharedBPcOuter` の [`panel_capacity`] は `blocks.nc` で列を分割した
+/// 1 個の nc ブロックぶんの容量を返すが、本 variant は jc（列ブロック）
+/// ループを持たず pc ごとに列全幅を 1 回で pack するため、`nc_len_max`
+/// の代わりに `n` そのものを使う（[`GemmDriverVariant::IcDynamic`] の
+/// ドキュメント「pc ごとの B パネル共有 pack」参照）。乗算は
+/// [`task_a_capacity`] と同型の `checked_mul` 連鎖でオーバーフローを
+/// 検出し `GemmError::DimProductOverflow` へ変換する（OWASP A03）。
+#[cfg(test)]
+fn ic_dynamic_b_capacity(n: usize, kc_len_max: usize, nr: usize) -> Result<usize, GemmError> {
+    let nr_blocks = n.div_ceil(nr.max(1));
+    nr_blocks
+        .checked_mul(kc_len_max)
+        .and_then(|v| v.checked_mul(nr))
+        .ok_or(GemmError::DimProductOverflow)
+}
+
 /// [`gemm_blis_shared_b_pc_outer_region`] 専用: `a_panel` にタスク担当
 /// 行範囲全体が pc ブロックぶん 1 回で packing 済みであることを前提に、
 /// jr→ir のみを回して `c_chunk`（タスク行 0 起点でオフセット済み）へ
@@ -2126,6 +2187,255 @@ fn dispatch_shared_b_pc_outer(
     gemm_blis_shared_b_pc_outer_region(ScalarKernel, a, b, c, n, k, rows, blocks)
 }
 
+/// pc（K ブロック）最外・ic（行パネル）を `AtomicUsize` カウンタで動的
+/// 配布する並列 5-loop 本体（イシュー #1366）。
+///
+/// [`gemm_blis_shared_b_pc_outer_region`]（#1041）は行パネルを
+/// `mc_total.div_ceil(num_workers)` で **静的に** 1 タスク 1 パネルへ
+/// 固定するため、MC タイル数がワーカー数で割り切れない形状や異種コア
+/// 環境では負荷不均衡が生じうる（issue #1366 実装計画 §1）。本関数は
+/// 行パネルの配布方式を静的から `AtomicUsize` の `fetch_add` カウンタに
+/// よる動的配布へ変更するだけでなく、**B の列ブロッキングも変更して
+/// いる**: [`gemm_blis_shared_b_pc_outer_region`] は B を (pc,jc) ごと
+/// に `blocks.nc` 幅で pack し jc ループで列を順に処理するのに対し、
+/// 本関数は jc ループを持たず `blocks.nc` を使わずに pc ごとへ列全幅
+/// `n` を 1 回で pack する（[`ic_dynamic_b_capacity`] 参照）。この違い
+/// により B バッファのメモリ使用量（`nc` 幅 → 列全幅 `n`。形状によって
+/// は増大する）・キャッシュ局所性（列全幅を一度に触れるか `nc` 単位で
+/// 分割して触れるか）・pc ごとの同期点の数（jc ブロック数ぶん → 1 回）
+/// が変わる。行パネルを `AtomicUsize` の `fetch_add` カウンタで動的
+/// 配布し、先に終わった worker が次のパネルを取れるようにする点は
+/// 変更していない。
+///
+/// ## 動的配布の機構（`unsafe` を追加しない設計）
+///
+/// C を [`ic_dynamic_panel_rows`] 行ずつの `panel_rows` パネルへ分割し、
+/// 各パネルの `&mut [f32]` を `Mutex<Option<&mut [f32]>>` スロットへ
+/// 1 個ずつ格納する。worker は `AtomicUsize::fetch_add(1, Relaxed)` で
+/// 自分が担当するパネル index を確定してから、対応するスロットを
+/// `lock().take()` して `&mut` を取り出す。index はパネル数を上限に
+/// 単調増加し、かつ各 index は高々 1 worker しか claim しないため、
+/// 同じスロットへ 2 つの worker が同時にロックを取り合うことは構築上
+/// 発生しない（1 パネル 1 回のロックで常に無競合）。`&mut` パネル間の
+/// 排他性はコンパイル時の借用検査（`Mutex<Option<&mut [f32]>>` に格納
+/// した時点で各要素の借用が互いに素であることが保証される）で担保
+/// されており、`unsafe` は不要（issue #1366 のスコープ「`unsafe` を
+/// 新規導入しない」）。取り出し後は poison 有無に関わらず即座に
+/// `drop(guard)` してロックを解放する（他 worker のブロッキングを
+/// 最小化する。各 index は高々 1 回しか claim されないため以後この
+/// スロットへのアクセスは発生しない）。
+///
+/// ## bit 完全一致契約（REQ-2）を保つ根拠
+///
+/// [`gemm_blis_shared_b_pc_outer_region`] ドキュメントと同じ論法が
+/// そのまま成り立つ: pc は本関数でも外側で昇順に回り、C の各要素は
+/// (pc, 行パネル) の組で見て一意な 1 つの行パネルにのみ属する。
+/// 行パネルをどの worker が・どの順序で claim するかは、互いに素な
+/// C 要素集合の処理順序を並び替えるだけで、同一要素の pc 昇順・
+/// カーネル内 p 昇順の蓄積順序には影響しない。
+///
+/// カウンタが `num_panels` を超えて進んだ worker は対応するスロットが
+/// 存在しないため直ちにループを終える（`idx >= num_panels` 判定）。
+/// 構築上 `slots[idx]` が既に `None`（他 worker が同じ idx を claim
+/// 済み）になることはないが、`unreachable!` によるパニック変換を避け
+/// `continue` で次の index へ進む fail-safe を入れている
+/// （`.claude/rules/coding-rust.md` の panic 禁止方針）。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_ic_dynamic_region<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k_dim: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    let mr = K::MR;
+    let nr = K::NR;
+    let row_start = rows.start;
+    let mc_total = rows.end - rows.start;
+    let a = &a[row_start * k_dim..];
+
+    let num_workers = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+    let panel_rows = ic_dynamic_panel_rows(mc_total, blocks.mc, mr, num_workers);
+    let num_panels = mc_total.div_ceil(panel_rows);
+
+    // 共有 B バッファ: pc ごとに列全幅 n を 1 回だけ pack する
+    // （`ic_dynamic_b_capacity` 参照。jc ループを持たないため
+    // `blocks.nc` は使わない）。
+    let kc_len_max = blocks.kc.min(k_dim);
+    let b_cap = ic_dynamic_b_capacity(n, kc_len_max, nr)?;
+    let mut b_panel_buf = vec![0.0f32; b_cap];
+
+    // worker ごとの A バッファ: pc ループ外で 1 回確保し、pc ごとに
+    // claim したパネルぶんを 1 回だけ pack して使い回す
+    // （`gemm_blis_shared_b_pc_outer_region` の A バッファ確保方針と
+    // 同型。`panel_rows` は動的配布パネルの最大行数のため、これを
+    // 容量算出に使えば claim したどのパネルも収まる）。
+    let a_cap = task_a_capacity(panel_rows, kc_len_max, mr)?;
+    let mut a_bufs: Vec<Vec<f32>> = (0..num_workers).map(|_| vec![0.0f32; a_cap]).collect();
+
+    for pc in (0..k_dim).step_by(blocks.kc) {
+        let kc_len = blocks.kc.min(k_dim - pc);
+        let nr_blocks = n.div_ceil(nr);
+        let b_panel = &mut b_panel_buf[..nr_blocks * kc_len * nr];
+
+        // B packing の nr ブロック単位並列化
+        // （`gemm_blis_shared_b_pc_outer_region` と同じ理由・実装。
+        // jc を固定 0・列全幅 n の 1 ブロックとして扱うため
+        // `col_start` はそのまま `jr`）。
+        b_panel
+            .par_chunks_mut(kc_len * nr)
+            .enumerate()
+            .for_each(|(jr_block, dst)| {
+                let jr = jr_block * nr;
+                let nr_eff = nr.min(n - jr);
+                pack_b(
+                    dst,
+                    b,
+                    BPackTile {
+                        n_total: n,
+                        kc_start: pc,
+                        kc_len,
+                        col_start: jr,
+                        nr,
+                        nr_eff,
+                    },
+                );
+            });
+
+        let b_panel_ref: &[f32] = b_panel;
+        let ctx = IcLoopContext {
+            b_panel: b_panel_ref,
+            n,
+            k_dim,
+            pc,
+            kc_len,
+            jc: 0,
+            nr_blocks,
+            nc_len: n,
+            blocks,
+        };
+
+        // 行パネルを Mutex スロットへ 1 個ずつ格納し、AtomicUsize
+        // カウンタで動的配布する（上記ドキュメント参照）。`slots` の
+        // 借用は本 pc 反復のスコープ内で完結する（次の pc 反復で
+        // `c.chunks_mut` を再度呼ぶ前に `slots` がドロップされる）。
+        let slots: Vec<Mutex<Option<&mut [f32]>>> = c
+            .chunks_mut(panel_rows * n)
+            .map(|panel| Mutex::new(Some(panel)))
+            .collect();
+        let counter = AtomicUsize::new(0);
+
+        a_bufs.par_iter_mut().try_for_each(|a_buf| {
+            loop {
+                let idx = counter.fetch_add(1, Ordering::Relaxed);
+                if idx >= num_panels {
+                    return Ok::<(), GemmError>(());
+                }
+                let mut guard = slots[idx].lock().unwrap_or_else(PoisonError::into_inner);
+                let Some(c_panel) = guard.take() else {
+                    // 構築上到達しない（各 index は高々 1 worker しか
+                    // claim しないため既に `None` になることはない）が、
+                    // panic せず次の index へ進む fail-safe。
+                    continue;
+                };
+                drop(guard);
+
+                let task_mc = c_panel.len() / n;
+                if task_mc == 0 {
+                    continue;
+                }
+                let row_start_local = idx * panel_rows;
+                let a_task = &a[row_start_local * k_dim..];
+                let mr_blocks = task_mc.div_ceil(mr);
+                for ir_block in 0..mr_blocks {
+                    let ir = ir_block * mr;
+                    let mr_eff = mr.min(task_mc - ir);
+                    pack_a(
+                        &mut a_buf[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr],
+                        a_task,
+                        APackTile {
+                            k_total: k_dim,
+                            row_start: ir,
+                            mr,
+                            mr_eff,
+                            kc_start: pc,
+                            kc_len,
+                        },
+                    );
+                }
+
+                gemm_blis_jr_ir_loop(kernel, c_panel, task_mc, a_buf, &ctx)?;
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// [`dispatch_shared_b_pc_outer`] の動的配布版（イシュー #1366）。
+/// ロジックは `dispatch_shared_b_pc_outer` と同一で、呼ぶ先
+/// （[`gemm_blis_ic_dynamic_region`]）のみが異なる。本番未結線のため
+/// `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(target_arch = "x86_64")]
+fn dispatch_ic_dynamic(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    #[cfg(avx512_stable)]
+    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+        return gemm_blis_ic_dynamic_region(kernel, a, b, c, n, k, rows, blocks);
+    }
+    if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
+        gemm_blis_ic_dynamic_region(kernel, a, b, c, n, k, rows, blocks)
+    } else {
+        gemm_blis_ic_dynamic_region(ScalarKernel, a, b, c, n, k, rows, blocks)
+    }
+}
+
+/// aarch64 版 [`dispatch_ic_dynamic`]（#1366）。[`dispatch_shared_b_pc_outer`]
+/// の aarch64 版と同じ理由で NEON 固定。本番未結線のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(target_arch = "aarch64")]
+fn dispatch_ic_dynamic(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    debug_assert_eq!(Isa::detect(), Isa::Neon);
+    gemm_blis_ic_dynamic_region(microkernel::NeonKernel, a, b, c, n, k, rows, blocks)
+}
+
+/// aarch64／x86_64 以外の arch 版 [`dispatch_ic_dynamic`]（#1366）。
+/// [`dispatch_shared_b_pc_outer`] の同 arch 版と同じ理由で
+/// [`ScalarKernel`] 固定。本番未結線のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn dispatch_ic_dynamic(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    debug_assert_eq!(Isa::detect(), Isa::Scalar);
+    gemm_blis_ic_dynamic_region(ScalarKernel, a, b, c, n, k, rows, blocks)
+}
+
 /// A/B 一括計測ハーネス（イシュー #1041）向け: 並列 5-loop ドライバの
 /// 候補を 1 つの入口で選べるようにする列挙。`#[cfg(test)]` 限定。
 /// GB10（#1140）・Apple M4 Max（#1141）双方の実機実測の結果、`SharedB`・
@@ -2148,6 +2458,12 @@ pub(crate) enum GemmDriverVariant {
     /// B パネル共有・A はタスクごとに pc ブロックあたり 1 回だけ pack
     /// （本 PR・イシュー #1041・[`dispatch_shared_b_pc_outer`]）。
     SharedBPcOuter,
+    /// B パネル共有（pc ごとに列全幅を 1 回 pack）・行パネルを
+    /// `AtomicUsize` カウンタで動的配布（イシュー #1366・
+    /// [`dispatch_ic_dynamic`]）。`SharedBPcOuter` の静的等分割による
+    /// 負荷不均衡（issue #1366 実装計画 §1）への対処候補。採否は
+    /// 両実機実測（#1367）待ち・本番未結線。
+    IcDynamic,
 }
 
 /// [`GemmDriverVariant`] で指定した候補を強制実行する A/B 計測専用入口
@@ -2187,6 +2503,7 @@ pub(crate) fn gemm_blis_parallel_variant(
         GemmDriverVariant::SharedBPcOuter => {
             dispatch_shared_b_pc_outer(a, b, c, n, k, 0..m, blocks)
         }
+        GemmDriverVariant::IcDynamic => dispatch_ic_dynamic(a, b, c, n, k, 0..m, blocks),
     }
 }
 
@@ -3726,11 +4043,11 @@ mod tests {
         );
     }
 
-    /// イシュー #1041: [`GemmDriverVariant`] の全候補（`RowPanel`・
-    /// `SharedB`・`SharedBPcOuter`）が MC/KC/NC 境界を跨ぐ複数形状・
-    /// 複数スレッド数の組で `gemm_naive` と bit 完全一致することを
-    /// 網羅的に検証する（A/B 一括計測ハーネスが候補間で数値的に等価な
-    /// 結果を比較することの前提を担保する）。
+    /// イシュー #1041（#1366 で `IcDynamic` を追加）: [`GemmDriverVariant`]
+    /// の全候補（`RowPanel`・`SharedB`・`SharedBPcOuter`・`IcDynamic`）が
+    /// MC/KC/NC 境界を跨ぐ複数形状・複数スレッド数の組で `gemm_naive` と
+    /// bit 完全一致することを網羅的に検証する（A/B 一括計測ハーネスが
+    /// 候補間で数値的に等価な結果を比較することの前提を担保する）。
     #[test]
     fn gemm_blis_parallel_variant_all_candidates_match_naive_bit_exact() {
         let shapes: &[(usize, usize, usize)] = &[
@@ -3761,6 +4078,7 @@ mod tests {
                     GemmDriverVariant::RowPanel,
                     GemmDriverVariant::SharedB,
                     GemmDriverVariant::SharedBPcOuter,
+                    GemmDriverVariant::IcDynamic,
                 ] {
                     let mut c = vec![0.0f32; m * n];
                     pool.install(|| {
@@ -3779,11 +4097,275 @@ mod tests {
                     assert_eq!(
                         c_naive, c,
                         "variant={variant:?} shape=({m},{n},{k}) num_threads={num_threads} は \
-                         gemm_naive と bit 完全一致するはず（#1041）"
+                         gemm_naive と bit 完全一致するはず（#1041・#1366）"
                     );
                 }
             }
         }
+    }
+
+    /// イシュー #1366: `IcDynamic` が小さい **kc** で pc 同期点を複数
+    /// 強制する形状（`gemm_blis_shared_b_pc_outer_multi_sync_point_matches_serial_bit_exact`
+    /// と同型の意図）でも直列実装（`ScalarKernel` 経由の
+    /// `gemm_blis_with_kernel_and_blocks`）と bit 完全一致することを
+    /// 検証する。`mc=16` により [`ic_dynamic_panel_rows`] が 16 へ
+    /// クランプされ、パネル数（200.div_ceil(16) = 13）がスレッド数 4 を
+    /// 上回るため動的配布（`AtomicUsize::fetch_add` の複数回呼び出し・
+    /// worker の複数パネル claim）を確実に通す。`nc` は本 variant が
+    /// jc ループを持たないため使われないことも合わせて確認する
+    /// （`ic_dynamic_b_capacity` ドキュメント参照）。
+    #[test]
+    fn gemm_blis_ic_dynamic_multi_pc_sync_point_matches_serial_bit_exact() {
+        let (m, n, k) = (200usize, 600usize, 700usize);
+        let blocks = BlockSizes {
+            mc: 16,
+            kc: 17,
+            nc: 19,
+        };
+        let a = xorshift32_vec(0x1111_2222, m * k);
+        let b = xorshift32_vec(0x3333_4444, k * n);
+
+        let mut c_serial = vec![0.0f32; m * n];
+        gemm_blis_with_kernel_and_blocks(ScalarKernel, &a, &b, &mut c_serial, m, n, k, blocks)
+            .unwrap();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap_or_else(|e| panic!("4 スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_dynamic = vec![0.0f32; m * n];
+        pool.install(|| {
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::IcDynamic,
+                &a,
+                &b,
+                &mut c_dynamic,
+                m,
+                n,
+                k,
+                blocks,
+            )
+            .unwrap()
+        });
+
+        assert_eq!(
+            c_serial, c_dynamic,
+            "小さい kc で pc 同期点を複数強制する形状は直列実装と bit 完全一致するはず（#1366）"
+        );
+    }
+
+    /// イシュー #1366: 実タスク数（パネル数）がワーカー数を大きく下回る
+    /// ケース（[`ic_dynamic_panel_rows`] が MR の倍数へ整列した最小値へ
+    /// クランプされる）で、空振りする worker（`AtomicUsize::fetch_add` の
+    /// 結果が `num_panels` を即座に超える worker）が正しく `Ok(())` で
+    /// 終了し、他 worker の処理結果が `gemm_naive` と bit 完全一致する
+    /// ことを検証する（`gemm_blis_shared_b_pc_outer_matches_naive_bit_exact_when_tasks_fewer_than_threads`
+    /// と同型の回帰）。
+    #[test]
+    fn gemm_blis_ic_dynamic_matches_naive_bit_exact_when_tasks_fewer_than_threads() {
+        let (m, n, k) = (10, 130, 40);
+        let a = xorshift32_vec(0x5555_6666, m * k);
+        let b = xorshift32_vec(0x7777_8888, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(16)
+            .build()
+            .unwrap_or_else(|e| panic!("16 スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_dynamic = vec![0.0f32; m * n];
+        pool.install(|| {
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::IcDynamic,
+                &a,
+                &b,
+                &mut c_dynamic,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap()
+        });
+
+        assert_eq!(
+            c_naive, c_dynamic,
+            "m={m} 行を num_threads=16 で分割する実タスク数 Q < T のケースは \
+             gemm_naive と bit 完全一致するはず（#1366）"
+        );
+    }
+
+    /// イシュー #1366: `IcDynamic` が `RowPanel` と bit 完全一致すること
+    /// を、MC/KC/NC 境界を跨ぐ複数形状（`m` がパネルで割り切れない・
+    /// `n % NR != 0`・`k % KC != 0`・`k == 0` の no-op ケースを含む）×
+    /// 複数スレッド数で直接検証する（issue 表題「RowPanel との bit 完全
+    /// 一致を回帰テストで確認する」の直接検証）。各形状で C の初期値を
+    /// 非ゼロ乱数にし、累積の意味論（既存 C 値への `f32::mul_add` 累積）
+    /// が両 variant で揃うことも確認する。
+    #[test]
+    fn gemm_blis_ic_dynamic_matches_row_panel_bit_exact_across_shapes_and_threads() {
+        let shapes: &[(usize, usize, usize)] = &[
+            (5, 7, 3),
+            (64, 64, 64),
+            (128, 128, 96),
+            (129, 130, 257),
+            (1000, 96, 300),
+            (523, 600, 700),
+            (2, 3, 0),
+            (512, 512, 512),
+        ];
+        let thread_counts = [1usize, 2, 3, 16];
+
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0xaaaa_1111 ^ (m as u32), m * k);
+            let b = xorshift32_vec(0xbbbb_2222 ^ (n as u32), k * n);
+            let c_init = xorshift32_vec(0xcccc_3333 ^ (k as u32), m * n);
+
+            for &num_threads in &thread_counts {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap_or_else(|e| {
+                        panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
+                    });
+
+                let mut c_row_panel = c_init.clone();
+                pool.install(|| {
+                    gemm_blis_parallel_variant(
+                        GemmDriverVariant::RowPanel,
+                        &a,
+                        &b,
+                        &mut c_row_panel,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
+                    .unwrap()
+                });
+
+                let mut c_ic_dynamic = c_init.clone();
+                pool.install(|| {
+                    gemm_blis_parallel_variant(
+                        GemmDriverVariant::IcDynamic,
+                        &a,
+                        &b,
+                        &mut c_ic_dynamic,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
+                    .unwrap()
+                });
+
+                assert_eq!(
+                    c_row_panel, c_ic_dynamic,
+                    "shape=({m},{n},{k}) num_threads={num_threads} は IcDynamic と RowPanel が \
+                     bit 完全一致するはず（#1366）"
+                );
+            }
+        }
+    }
+
+    /// イシュー #1366: 大形状（1024/2048/4096 正方）でも `IcDynamic` が
+    /// `RowPanel` と bit 完全一致することを実機で確認する（release
+    /// ビルド・プール既定スレッド数）。デバッグビルドでの計算量が大きい
+    /// ため通常 CI では実行しない（#1367 の実機実測に先立ち 1 回実行する
+    /// ことを想定）。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）での大形状 bit 一致確認専用（#1366。cargo test \
+                -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large --nocapture）"]
+    fn gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large() {
+        for &dim in &[1024usize, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xdddd_4444 ^ (dim as u32), m * k);
+            let b = xorshift32_vec(0xeeee_5555 ^ (dim as u32), k * n);
+
+            let mut c_row_panel = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanel,
+                &a,
+                &b,
+                &mut c_row_panel,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            let mut c_ic_dynamic = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::IcDynamic,
+                &a,
+                &b,
+                &mut c_ic_dynamic,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                c_row_panel, c_ic_dynamic,
+                "dim={dim} は IcDynamic と RowPanel が bit 完全一致するはず（#1366）"
+            );
+        }
+    }
+
+    /// [`ic_dynamic_panel_rows`] の純関数契約を検証する（イシュー #1366）。
+    #[test]
+    fn ic_dynamic_panel_rows_bounds_and_alignment() {
+        // 戻り値は常に 1 以上（0 除算・無限ループを防ぐ下限。mc_total=0 は
+        // 実際には呼び出し元で num_panels=0 になり本関数の戻り値自体は
+        // 使われないが、下限契約は常に成立する）。
+        assert!(ic_dynamic_panel_rows(0, 128, 8, 4) >= 1);
+        assert_eq!(ic_dynamic_panel_rows(1, 128, 8, 16), 8);
+
+        // 戻り値は常に mc 以下（`blocks.mc` を超えるパネルを作らない）。
+        let rows = ic_dynamic_panel_rows(10_000, 128, 8, 2);
+        assert!(rows <= 128, "rows={rows} は mc=128 以下のはず");
+
+        // mc 未満のときは mr の倍数へ整列される。
+        let rows = ic_dynamic_panel_rows(100, 128, 8, 4);
+        assert_eq!(rows % 8, 0, "rows={rows} は mr=8 の倍数のはず");
+
+        // mc_total が num_workers*mc 以上なら mc（`SharedBPcOuter` の
+        // `panel_capacity` と同じ「MC でクランプ済み」帯へ揃う）。
+        assert_eq!(ic_dynamic_panel_rows(10_000, 128, 8, 4), 128);
+
+        // num_workers=1 は 1 パネルで全行を担当するため mc（既に整列済み
+        // でない限り mc 自体へクランプ）へ張り付く。
+        assert_eq!(ic_dynamic_panel_rows(300, 64, 8, 1), 64);
+    }
+
+    /// [`ic_dynamic_b_capacity`] の純関数契約を検証する（イシュー #1366）。
+    #[test]
+    fn ic_dynamic_b_capacity_matches_formula_and_detects_overflow() {
+        // 代表値: n=100, nr=8 → nr_blocks=13, kc_len_max=17 → 13*17*8=1768。
+        // `GemmError` は `#[non_exhaustive]`・`PartialEq` 非実装のため
+        // `assert_eq!` ではなく `.unwrap()`／`matches!` で検証する
+        // （`task_a_capacity` の既存単体テストと同じ理由。同種の
+        // オーバーフロー検査を持つ他テストが存在しないためここが初出）。
+        assert_eq!(ic_dynamic_b_capacity(100, 17, 8).unwrap(), 1768);
+
+        // n が nr で割り切れる場合。
+        assert_eq!(ic_dynamic_b_capacity(64, 32, 8).unwrap(), 64 * 32);
+
+        // usize::MAX 近傍でのオーバーフロー検出（`task_a_capacity` と同型）。
+        assert!(
+            matches!(
+                ic_dynamic_b_capacity(usize::MAX, usize::MAX, 8),
+                Err(GemmError::DimProductOverflow)
+            ),
+            "usize::MAX 近傍は DimProductOverflow を返すはず"
+        );
     }
 
     /// A/B 一括計測ハーネス（イシュー #1041。実機セッションで実行する
@@ -3891,6 +4473,7 @@ mod tests {
             GemmDriverVariant::RowPanel,
             GemmDriverVariant::SharedB,
             GemmDriverVariant::SharedBPcOuter,
+            GemmDriverVariant::IcDynamic,
         ];
 
         for &dim in &[1024usize, 2048] {
@@ -3921,6 +4504,7 @@ mod tests {
             GemmDriverVariant::RowPanel,
             GemmDriverVariant::SharedB,
             GemmDriverVariant::SharedBPcOuter,
+            GemmDriverVariant::IcDynamic,
         ];
 
         let (m, n, k) = (4096usize, 4096usize, 4096usize);
