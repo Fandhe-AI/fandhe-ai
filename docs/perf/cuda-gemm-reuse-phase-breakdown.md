@@ -268,3 +268,7 @@ bit_exact`・`host_view_readout_keeps_tape_usable`）で自己検証済み（fea
 `#1336`（CUDA pinned host staging）は本経路に到達しない点（`Var::matmul`
 の出力は `gemm` バックエンド内部の readback で既にホスト常駐 `Tensor` に
 なっているため）は README 側に明記済み（誤帰属防止）。
+
+CUDA 実機での追補（正式系列・参考系列 off/on の 5 回計測ゲート判定。#1342 の
+128×64 cp.async pipeline 本番結線後の再計測を含む）はイシュー #1360・
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12 に記録した。

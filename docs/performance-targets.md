@@ -316,3 +316,26 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   （`compare_gemm_gate.py` の `iter_total` 相当の判定は不変）を変更しない。CUDA と異なり、
   Metal では reuse 計測境界の再定義は候補比未達の解消に寄与しないと判断した（同ドキュメント
   §7・§9）
+
+### 8.7 #1360 追補（CUDA GEMM reuse を Phase 4／5 反映後に再計測。§2 段階的下限表・§3 丸め規則は不変）
+
+- §8.2（#1142）・#1185 の #1031 未達成確定後、Phase 4／5（#1341 配下）で CUDA f32 SIMT GEMM に
+  入った変更（#1342: 128×64 cp.async pipeline 本番結線・#1337: 借用ビュー readout。§8.2 の
+  #1137 とは別カーネル・別経路）を反映した状態で DGX Spark GB10 実機を再計測した
+  （イシュー #1360）。crates.io の承認ピンは §8.2/#1185 時点から更新されていないため、
+  §8.2 と同じ「正式系列（registry ピン）+ 参考系列（path 差し替え HEAD）」の 2 系列方式を
+  踏襲し、参考系列は readout off／on の 2 本に分けて計測した
+- **正式系列**（`fandhe-ai =0.7.0`）は #1185 の判定（0.381／判定不能／0.904 倍）と誤差範囲内で
+  再現（0.379／判定不能／0.894 倍）。#1031 は正式判定として引き続き未達成
+- **参考系列**（readout off。#1342 のみの効果）は 0.401／判定不能／0.933 倍で、いずれも未達の
+  まま。**参考系列（readout on。#1342+#1337 の効果）は N=4096 で 1.433 倍（達成）**だが、
+  **N=1024 で readout-off 比 15.0 倍・N=2048 で 1.2 倍の大幅後退**が生じる形状依存の混在結果
+  であり、「Phase 4／5 反映後に #1031 が達成される」とは言えない
+- 出典・詳細な突合表・readout 切替の A/B 計測は
+  `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12（イシュー #1360）、生データは
+  `scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-{0.7.0-1360,
+  head-3d5e833-readout-off,head-3d5e833-readout-on}.jsonl`、集計表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 12 節を参照
+- 正式再計測の確定タイミング（crates.io 次回公開・ピン更新後）・`host-view-readout` の既定化
+  （N=1024/2048 後退の対策が前提）・N=2048 判定不能の解消（#1258／#1234 Phase 2）は
+  いずれもユーザー判断（同ドキュメント §12.7）
