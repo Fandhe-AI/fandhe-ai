@@ -225,6 +225,14 @@ def load_rows(path):
                     f"期待。実際: {obj['device_checksum']!r}） — skipped"
                 )
                 continue
+            # イシュー #1350: `graph`（`Record.graph`）も同じ fail-closed
+            # 型検証を適用する（値は文字列）。
+            if "graph" in obj and not isinstance(obj["graph"], str):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'graph' フィールド型（str を期待。"
+                    f"実際: {obj['graph']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -263,6 +271,12 @@ def _train_records(rows, mode):
         # 対象外（既存プロトコル計測とのゲート混同防止。`docs/perf/
         # device-checksum-readback-ab.md` 参照）。
         if r.get("device_checksum", False) is True:
+            continue
+        # イシュー #1350: `graph` キーを持つ行（CUDA Graph step capture
+        # 経路での計測）は本ツールの A/B 比較対象外（既存プロトコル計測
+        # とのゲート混同防止。graph 有無の A/B 自体は専用ツール
+        # `compare_graph_ab.py` で行う）。
+        if "graph" in r:
             continue
         out.append(r)
     return out

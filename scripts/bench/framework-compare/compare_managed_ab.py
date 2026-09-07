@@ -178,6 +178,21 @@ def load_rows(path):
                     "A/B の対象外 — skipped"
                 )
                 continue
+            # イシュー #1350: `graph`（CUDA Graph step capture 経路）行も
+            # 同じ理由（別軸のフラグ違いを managed 配置の違いと取り違え
+            # ない）で除外する。
+            if "graph" in obj and not isinstance(obj["graph"], str):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'graph' フィールド型（str を期待。"
+                    f"実際: {obj['graph']!r}） — skipped"
+                )
+                continue
+            if "graph" in obj:
+                warnings.append(
+                    f"{path}:{lineno}: 'graph' キーを持つ行は managed 配置 A/B の"
+                    "対象外 — skipped"
+                )
+                continue
             if not _valid_cell_identity(obj):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"

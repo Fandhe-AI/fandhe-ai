@@ -289,6 +289,37 @@ pub struct Record<'a> {
     /// フィールドが `true` の行を除外する（正式ゲート・既存 A/B へ
     /// 混入させない。`docs/perf/device-checksum-readback-ab.md` 参照）。
     pub device_checksum: bool,
+    /// `--graph`（値付きフラグ。イシュー #1350）。CUDA Graph step
+    /// capture 経路（`fandhe_ai::set_cuda_graph_step_enabled`／環境変数
+    /// `FANDHE_AI_CUDA_GRAPH_STEP`。#1349）の状態を示す。`None`（既定・
+    /// off）のときはキー自体を emit しない（`tf32`／`managed` と同型の
+    /// 「キー欠損 = off」後方互換規約）。`Some("on")`／`Some("stream-only")`
+    /// のときのみ `"graph":"on"`／`"graph":"stream-only"` を emit する。
+    /// summarize.py・compare_gemm_gate.py・compare_ab.py・
+    /// compare_managed_ab.py の目標達成ゲート・既存 A/B 比較は既定で
+    /// このキーを持つ行を除外する（`docs/perf/train-step-phase-
+    /// breakdown.md` §16 参照。既定 OFF・fail-closed 方針は変更しない）。
+    pub graph: Option<&'a str>,
+    /// `graph` が `Some` のときのみ `Some`（launch 固定費の診断計数。
+    /// `fandhe_ai::cuda_graph_step_stats()` の再公開。イシュー #1350）。
+    /// `compare_graph_ab.py` が 3 状態（off/stream-only/on）5 run の
+    /// 計数一致検査に使う。`--graph` を渡さない（off の）計測では
+    /// `graph_stats` フィールド自体を JSON へ emit しない（`graph` と
+    /// 同一のキー欠損規約）。
+    pub graph_stats: Option<GraphStepStatsRecord>,
+}
+
+/// [`Record::graph_stats`] の中身（POD。イシュー #1350）。
+/// `fandhe_ai::CudaGraphStepStats` の JSON 化専用の薄いコピーで、
+/// bench-common は facade 型を直接参照しない（bench-fandhe のみが
+/// `graph-step` feature 下で facade 型から本型へ詰め替える。
+/// bench-common は `fandhe-ai` に依存しないため型を直接使えない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GraphStepStatsRecord {
+    pub captured: u64,
+    pub replayed: u64,
+    pub graph_launches: u64,
+    pub sgd_kernel_launches: u64,
 }
 
 impl Record<'_> {
@@ -339,6 +370,15 @@ impl Record<'_> {
         }
         if self.device_checksum {
             s.push_str(",\"device_checksum\":true");
+        }
+        if let Some(g) = self.graph {
+            s.push_str(&format!(",\"graph\":\"{g}\""));
+            if let Some(gs) = &self.graph_stats {
+                s.push_str(&format!(
+                    ",\"graph_captured\":{},\"graph_replayed\":{},\"graph_launches\":{},\"graph_sgd_kernel_launches\":{}",
+                    gs.captured, gs.replayed, gs.graph_launches, gs.sgd_kernel_launches
+                ));
+            }
         }
         s.push('}');
         s
@@ -464,6 +504,16 @@ pub struct Cli {
     /// `Var::matmul_checksum` API のため path patch 前提）が有効なビルド
     /// でのみ受理する（`--managed` と同型の allowlist 方式）。
     pub device_checksum: bool,
+    /// `--graph <on|stream-only>`（値付きフラグ。イシュー #1350）。CUDA
+    /// Graph step capture 経路の状態を要求する。未指定＝`None`（既定
+    /// `off`。既存プロトコル不変）。`on`／`stream-only` 以外の値は
+    /// [`BenchError::InvalidArg`] で fail-closed 拒否する（`--mode` と
+    /// 同型の allowlist 方式。security.md A03）。対応は `bench-fandhe`
+    /// × `cuda` × `train` に限定し、`graph-step` feature（crates.io 公開
+    /// 版 fandhe-ai には未収録の API のため path patch 前提。README
+    /// 「`--graph`」節参照）が有効なビルドでのみ受理する（`--managed`
+    /// と同型の allowlist 方式）。
+    pub graph: Option<String>,
 }
 
 /// Parse the CLI arguments from `std::env::args()`. 薄いラッパーで、実体は
@@ -498,6 +548,36 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
     if mode != "fresh" && mode != "reuse" {
         return Err(BenchError::InvalidMode { value: mode });
     }
+    // イシュー #1350: `--graph` は値付きフラグ（`--mode` と同型）。値は
+    // `on`／`stream-only` の完全一致のみ受理し、未知の値はエラー文へ
+    // エコーせず fail-closed 拒否する（security.md A03。値をエラー文へ
+    // 含めるとログインジェクションの経路になりうるため、`BenchError::
+    // InvalidArg` の `value` フィールドには渡すが、呼び出し元がそのまま
+    // シェルへ展開しない契約は `run_ab_graph_cuda.sh` 側で別途担保する）。
+    // codex-review 指摘（PR #1425・P2）: `get("--graph")` は `--graph` が
+    // 引数列の末尾（後続値なし）のとき `args.get(i + 1)` が `None` を
+    // 返すため、フラグ自体を渡さなかった場合と区別できず「未指定＝off」
+    // として静かに通ってしまう（値の書き忘れを検知できない）。`--mode`
+    // 同型の値付きフラグ契約を保つため、`has_flag` も併用して「フラグは
+    // あるが値が取れない」場合を fail-closed で `InvalidArg` にする
+    // （エコーする `value` は空文字列。渡された値をそのまま返す他の
+    // 分岐と同じ契約）。
+    let graph = match get("--graph") {
+        Some(v) if v == "on" || v == "stream-only" => Some(v),
+        Some(v) => {
+            return Err(BenchError::InvalidArg {
+                flag: "--graph",
+                value: v,
+            });
+        }
+        None if has_flag("--graph") => {
+            return Err(BenchError::InvalidArg {
+                flag: "--graph",
+                value: String::new(),
+            });
+        }
+        None => None,
+    };
     Ok(Cli {
         task: get("--task").unwrap_or_else(|| "gemm".into()),
         device: get("--device").unwrap_or_else(|| "cpu".into()),
@@ -508,6 +588,7 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         tf32: has_flag("--tf32"),
         managed: has_flag("--managed"),
         device_checksum: has_flag("--device-checksum"),
+        graph,
     })
 }
 
@@ -596,6 +677,8 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
+            graph_stats: None,
         }
     }
 
@@ -814,6 +897,99 @@ mod tests {
             .expect("parse should succeed");
         assert!(cli.device_checksum);
         assert_eq!(cli.task, "gemm");
+    }
+
+    // イシュー #1350: `--graph`（`parse_cli_from`）・`Record.graph`／
+    // `Record.graph_stats` の契約（`--mode` の値付きフラグ形式＋
+    // `--managed` のキー欠損規約を組み合わせた形）。
+
+    #[test]
+    fn parse_cli_from_defaults_graph_to_none() {
+        let cli = parse_cli_from(&args(&["--task", "train"])).expect("parse should succeed");
+        assert!(cli.graph.is_none());
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_graph_on() {
+        let cli = parse_cli_from(&args(&["--task", "train", "--graph", "on"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.graph.as_deref(), Some("on"));
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_graph_stream_only() {
+        let cli = parse_cli_from(&args(&["--task", "train", "--graph", "stream-only"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.graph.as_deref(), Some("stream-only"));
+    }
+
+    #[test]
+    fn parse_cli_from_rejects_unknown_graph_value() {
+        let result = parse_cli_from(&args(&["--task", "train", "--graph", "off"]));
+        assert!(matches!(
+            result,
+            Err(BenchError::InvalidArg {
+                flag: "--graph",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    // codex-review 指摘（PR #1425・P2）: `--graph` が引数列の末尾で値を
+    // 伴わない（次のトークンが存在しない）場合、フラグ非指定と誤認せず
+    // `InvalidArg` で fail-closed 拒否することを確認する。
+    fn parse_cli_from_rejects_graph_flag_without_trailing_value() {
+        let result = parse_cli_from(&args(&["--task", "train", "--graph"]));
+        assert!(matches!(
+            result,
+            Err(BenchError::InvalidArg {
+                flag: "--graph",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_cli_from_graph_flag_is_order_independent() {
+        let cli = parse_cli_from(&args(&["--graph", "on", "--task", "train"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.graph.as_deref(), Some("on"));
+        assert_eq!(cli.task, "train");
+    }
+
+    #[test]
+    fn json_line_without_graph_omits_graph_key() {
+        let line = sample_record("fresh", None).to_json_line();
+        assert!(!line.contains("\"graph\""));
+        assert!(!line.contains("\"graph_captured\""));
+    }
+
+    #[test]
+    fn json_line_with_graph_includes_graph_value_and_no_stats_without_them() {
+        let mut r = sample_record("fresh", None);
+        r.graph = Some("stream-only");
+        let line = r.to_json_line();
+        assert!(line.contains("\"graph\":\"stream-only\""));
+        assert!(!line.contains("\"graph_captured\""));
+    }
+
+    #[test]
+    fn json_line_with_graph_stats_includes_launch_counts() {
+        let mut r = sample_record("fresh", None);
+        r.graph = Some("on");
+        r.graph_stats = Some(GraphStepStatsRecord {
+            captured: 1,
+            replayed: 24,
+            graph_launches: 25,
+            sgd_kernel_launches: 1,
+        });
+        let line = r.to_json_line();
+        assert!(line.contains("\"graph\":\"on\""));
+        assert!(line.contains("\"graph_captured\":1"));
+        assert!(line.contains("\"graph_replayed\":24"));
+        assert!(line.contains("\"graph_launches\":25"));
+        assert!(line.contains("\"graph_sgd_kernel_launches\":1"));
     }
 
     #[test]

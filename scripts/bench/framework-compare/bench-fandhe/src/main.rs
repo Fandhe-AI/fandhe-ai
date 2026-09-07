@@ -104,6 +104,27 @@ use std::time::{Duration, Instant};
 const FRAMEWORK: &str = "fandhe-ai";
 const VERSION: &str = "0.7.0";
 
+/// イシュー #1350: `--graph` が渡された `--task train` 計測の record
+/// 生成時に 1 回だけ呼び、launch 固定費の診断カウンタ（`fandhe_ai::
+/// cuda_graph_step_stats()`）を `bench_common::GraphStepStatsRecord`
+/// （facade 型を直接持たない bench-common 側の薄いコピー。`Record::
+/// graph_stats` 参照）へ詰め替える。呼び出し自体は計測ループの外
+/// （各 `run_train*` 関数の末尾、`Record` 組み立て直前）でのみ行うため
+/// 計測時間には計上されない。`cli.graph` が `None`（off 計測）のときは
+/// 呼び出し元が呼ばない契約（`graph-step` feature 無効ビルドでは
+/// `fandhe_ai::cuda_graph_step_stats` 自体が存在しないため、この関数
+/// 自体を `cfg(feature = "graph-step")` の外からは呼べない）。
+#[cfg(feature = "graph-step")]
+fn current_graph_stats() -> GraphStepStatsRecord {
+    let s = fandhe_ai::cuda_graph_step_stats();
+    GraphStepStatsRecord {
+        captured: s.captured,
+        replayed: s.replayed,
+        graph_launches: s.graph_launches,
+        sgd_kernel_launches: s.sgd_kernel_launches,
+    }
+}
+
 const BATCH: usize = 64;
 const D_IN: usize = 784;
 const D_HIDDEN: usize = 256;
@@ -418,6 +439,10 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: false,
         managed: cli.managed,
         device_checksum: cli.device_checksum,
+        // イシュー #1350: `--graph` は `--task train` 限定（dispatch の
+        // ゲート参照）のため gemm 計測では常に None。
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -513,6 +538,10 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: false,
         managed: cli.managed,
         device_checksum: cli.device_checksum,
+        // イシュー #1350: gemm は `--graph` 対象外（dispatch のゲート
+        // 参照）。
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -596,6 +625,8 @@ fn run_gemm_device_checksum(
         tf32: false,
         managed: cli.managed,
         device_checksum: true,
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -675,6 +706,8 @@ fn run_gemm_reuse_device_checksum(
         tf32: false,
         managed: cli.managed,
         device_checksum: true,
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -826,6 +859,8 @@ fn emit_gemm_phase_records(
                 tf32: false,
                 managed: cli.managed,
                 device_checksum: false,
+                graph: None,
+                graph_stats: None,
             },
             phase,
             phase_index,
@@ -925,6 +960,18 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: false,
         managed: cli.managed,
         device_checksum: false,
+        // イシュー #1350: `run_train`（fresh）は毎 step ホスト側で
+        // `p - lr*g` を計算する経路で `DeviceParamStore::step`（capture
+        // 対象の update 区間）に到達しないが、`--graph` 値自体は対照
+        // 計測（design doc §9・実装計画 (c)）として記録する。
+        // `graph_stats` はプロセスワイド累積カウンタのため、この経路で
+        // 実際に capture／replay されていなければ 0 のまま記録される
+        // （実際に到達するかどうかも本計測の観測対象）。
+        graph: cli.graph.as_deref(),
+        #[cfg(feature = "graph-step")]
+        graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
+        #[cfg(not(feature = "graph-step"))]
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1082,6 +1129,14 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: false,
         managed: cli.managed,
         device_checksum: false,
+        // イシュー #1350: `run_train_reuse` は `DeviceParamStore::step`
+        // （capture 対象の update 区間。`sgd_step_device_tracked`）へ
+        // 到達する主対象（実装計画 (a)(b)）。
+        graph: cli.graph.as_deref(),
+        #[cfg(feature = "graph-step")]
+        graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
+        #[cfg(not(feature = "graph-step"))]
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1313,6 +1368,14 @@ fn emit_phase_records(
                 tf32: false,
                 managed: cli.managed,
                 device_checksum: false,
+                // イシュー #1350: `mode="reuse"` の `device_update` 行が
+                // 主対象（実装計画 (b)）。`fresh` は `DeviceParamStore::
+                // step` 非到達の対照として `graph` 値のみ記録する。
+                graph: cli.graph.as_deref(),
+                #[cfg(feature = "graph-step")]
+                graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
+                #[cfg(not(feature = "graph-step"))]
+                graph_stats: None,
             },
             phase,
             phase_index,
@@ -1386,6 +1449,10 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: false,
         managed: cli.managed,
         device_checksum: false,
+        // イシュー #1350: infer は `--graph` 対象外（dispatch のゲート
+        // 参照。`DeviceParamStore::step` 自体を呼ばないタスク）。
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1485,6 +1552,10 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         tf32: false,
         managed: cli.managed,
         device_checksum: false,
+        // イシュー #1350: infer は `--graph` 対象外（上記 `run_infer`
+        // 参照）。
+        graph: None,
+        graph_stats: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1670,6 +1741,10 @@ fn emit_infer_phase_records(
                 tf32: false,
                 managed: cli.managed,
                 device_checksum: false,
+                // イシュー #1350: infer は `--graph` 対象外（`run_infer`
+                // 参照）。
+                graph: None,
+                graph_stats: None,
             },
             phase,
             phase_index,
@@ -1770,6 +1845,106 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    // イシュー #1350: `--graph <on|stream-only>` は `--device cuda` かつ
+    // `--task train` 限定（`DeviceParamStore::step` の update 区間のみが
+    // capture 対象のため。gemm／infer は `sgd_step_device_tracked` に
+    // 到達しない）。`bench-fandhe` は crates.io 公開版 `fandhe-ai =0.7.0`
+    // ピンには `cuda_graph_step_mode`/`cuda_graph_step_stats` API 自体が
+    // 未収録のため、`graph-step` feature（既定無効）でコンパイル時に
+    // 分離する（`--managed`／`--device-checksum` と同型の allowlist
+    // 方式）。
+    //
+    // **`on` と `stream-only` でゲートの形が異なる**（`fandhe_ai_backend_
+    // cuda::graph` モジュール冒頭コメントの契約）:
+    // - `on`: `fandhe_ai::set_cuda_graph_step_enabled(true)` を呼ぶ（API
+    //   明示設定は環境変数より優先される）。**この呼び出しは本関数の
+    //   これより前の分岐（`--tf32`／`--managed`／`--device-checksum`）が
+    //   いずれも CUDA デバイスを初期化しないことに依存しており、かつ
+    //   `dispatch` から呼ばれる `run_train*`（`make_tape`/`CudaDevice::
+    //   new` を呼ぶ最初の箇所）より確実に前で実行される契約を、この
+    //   関数自体がその境界であることで満たす**。
+    // - `stream-only`: API setter を呼ぶと `EXPLICIT` フラグが立ち
+    //   環境変数 `FANDHE_AI_CUDA_GRAPH_STEP` が以後無視される契約
+    //   （`graph.rs` の `step_graph_mode` 優先順位）があるため、API は
+    //   呼ばない。代わりに `cuda_graph_step_mode() ==
+    //   CudaGraphStepMode::StreamOnly` を確認し、起動側が環境変数を
+    //   export し忘れている場合は fail-closed で拒否する（「off 行が
+    //   実は stream-only のまま計測される」silent failure を防ぐ）。
+    // - `--graph` 未指定でも `cuda_graph_step_mode() != Off` なら
+    //   拒否する（環境変数が誤って漏れ「off 行」が実は on/stream-only
+    //   になる fail-open を遮断する。`run_ab_graph_cuda.sh` の交互起動
+    //   ループが環境変数を意図せず引き継ぐ事故を機械的に検出する）。
+    if let Some(graph_mode) = cli.graph.as_deref() {
+        if cli.device != "cuda" || cli.task != "train" {
+            return Err(format!(
+                "MEASURE_ERROR: --graph is only meaningful for --device cuda --task train (got \
+                 device='{}' task='{}'; the CUDA Graph step capture path only wraps \
+                 DeviceParamStore::step's update segment, unreachable from gemm/infer tasks. \
+                 issue #1350)",
+                cli.device, cli.task
+            )
+            .into());
+        }
+        #[cfg(feature = "graph-step")]
+        {
+            match graph_mode {
+                "on" => {
+                    fandhe_ai::set_cuda_graph_step_enabled(true);
+                    if fandhe_ai::cuda_graph_step_mode() != fandhe_ai::CudaGraphStepMode::On {
+                        return Err(
+                            "MEASURE_ERROR: set_cuda_graph_step_enabled(true) did not take \
+                             effect (cuda_graph_step_mode() != On after enabling; issue #1350)"
+                                .into(),
+                        );
+                    }
+                }
+                "stream-only" => {
+                    if fandhe_ai::cuda_graph_step_mode() != fandhe_ai::CudaGraphStepMode::StreamOnly
+                    {
+                        return Err(
+                            "MEASURE_ERROR: --graph stream-only requires the launcher to export \
+                             FANDHE_AI_CUDA_GRAPH_STEP=stream-only before this process starts \
+                             (cuda_graph_step_mode() != StreamOnly; the API setter cannot select \
+                             this diagnostic mode. issue #1350)"
+                                .into(),
+                        );
+                    }
+                }
+                // `parse_cli_from` の allowlist（"on"／"stream-only" のみ
+                // 受理）を既に通過済みのため到達しない分岐。
+                other => {
+                    return Err(format!(
+                        "MEASURE_ERROR: unreachable --graph value '{other}' (should have been \
+                         rejected by bench-common's CLI parser; issue #1350)"
+                    )
+                    .into());
+                }
+            }
+        }
+        #[cfg(not(feature = "graph-step"))]
+        {
+            return Err(format!(
+                "MEASURE_ERROR: --graph {graph_mode} requires fandhe-ai >= 0.8.0 or a \
+                 path-patched facade built with --features graph-step (issue #1350; see \
+                 scripts/bench/framework-compare/README.md \"--graph\" section)"
+            )
+            .into());
+        }
+    } else {
+        // イシュー #1350: 環境変数漏れの fail-open 防止（上記コメント
+        // 参照）。`graph-step` feature が無効なビルドでは
+        // `cuda_graph_step_mode` 自体を呼べないため、この検査は feature
+        // 有効時のみ行う（無効時は facade の新 API 自体が存在しない）。
+        #[cfg(feature = "graph-step")]
+        if fandhe_ai::cuda_graph_step_mode() != fandhe_ai::CudaGraphStepMode::Off {
+            return Err(
+                "MEASURE_ERROR: FANDHE_AI_CUDA_GRAPH_STEP is set in the environment but \
+                 --graph was not passed (this would silently measure an on/stream-only row as \
+                 if it were off; issue #1350)"
+                    .into(),
+            );
+        }
+    }
     // イシュー #1339: `--device-checksum` は `--task gemm`（`--phases` なし。
     // `run_gemm`／`run_gemm_reuse` のみが device reduction 分岐を持つ）
     // 限定の allowlist 方式。`device-checksum` feature（crates.io 公開版
@@ -1860,6 +2035,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         }
     }
 
@@ -1940,6 +2116,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         }
     }
 
@@ -2073,6 +2250,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         };
         let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
         let msg = err.to_string();
@@ -2098,6 +2276,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         }
     }
 
@@ -2363,6 +2542,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         };
         dispatch(&cli).expect("cuda gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2390,6 +2570,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         };
         dispatch(&cli).expect("metal gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2418,6 +2599,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         }
     }
 
@@ -2640,6 +2822,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         })
         .expect("cuda infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -2662,6 +2845,7 @@ mod tests {
                 tf32: false,
                 managed: false,
                 device_checksum: false,
+                graph: None,
             })
             .expect("cuda infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2694,6 +2878,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: false,
+            graph: None,
         })
         .expect("metal infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -2716,6 +2901,7 @@ mod tests {
                 tf32: false,
                 managed: false,
                 device_checksum: false,
+                graph: None,
             })
             .expect("metal infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2749,6 +2935,7 @@ mod tests {
                 tf32: true,
                 managed: false,
                 device_checksum: false,
+                graph: None,
             };
             let err = dispatch(&cli).expect_err("--tf32 must be rejected on bench-fandhe");
             let msg = err.to_string();
@@ -2775,6 +2962,7 @@ mod tests {
                 tf32: false,
                 managed: true,
                 device_checksum: false,
+                graph: None,
             };
             let err = dispatch(&cli).expect_err("--managed must be rejected on non-cuda device");
             let msg = err.to_string();
@@ -2804,6 +2992,7 @@ mod tests {
             tf32: false,
             managed: true,
             device_checksum: false,
+            graph: None,
         };
         let err = dispatch(&cli)
             .expect_err("--managed must be rejected without managed-placement feature");
@@ -2811,6 +3000,73 @@ mod tests {
         assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
         assert!(msg.contains("--managed"), "msg={msg}");
         assert!(msg.contains("0.8.0"), "msg={msg}");
+    }
+
+    /// イシュー #1350: `--graph` は `--device cuda --task train` 以外では
+    /// 常に MEASURE_ERROR で fail-fast する（`DeviceParamStore::step` の
+    /// update 区間へ到達しない task／device の組合せで無音 no-op になる
+    /// のを防ぐ。`--managed` と同型）。
+    #[test]
+    fn graph_flag_on_non_cuda_or_non_train_is_measure_error() {
+        let cases = [
+            ("cpu", "train"),
+            ("metal", "train"),
+            ("cuda", "gemm"),
+            ("cuda", "infer"),
+        ];
+        for (device, task) in cases {
+            let out = temp_out_path(&format!("graph-non-target-{device}-{task}"));
+            let cli = Cli {
+                task: task.to_string(),
+                device: device.to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: "fresh".to_string(),
+                phases: false,
+                tf32: false,
+                managed: false,
+                device_checksum: false,
+                graph: Some("on".to_string()),
+            };
+            let err = dispatch(&cli)
+                .expect_err("--graph must be rejected outside --device cuda --task train");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--graph"), "msg={msg}");
+        }
+    }
+
+    /// イシュー #1350: `graph-step` feature が無効な既定ビルド（`fandhe-ai
+    /// =0.7.0` ピンには `cuda_graph_step_mode`/`cuda_graph_step_stats` API
+    /// 自体が未収録）では、`--device cuda --task train` でも `--graph` は
+    /// 常に MEASURE_ERROR で fail-fast する。本テストはこのビルド構成
+    /// （既定 feature）でのみ意味を持つ（`graph-step` feature 有効ビルド
+    /// では実際に path patch 済み facade を呼び出す経路が走るため、本
+    /// テストとは別に GB10 実機実測で検証する。README「`--graph`」節）。
+    #[test]
+    #[cfg(not(feature = "graph-step"))]
+    fn graph_flag_without_feature_is_measure_error() {
+        for mode in ["on", "stream-only"] {
+            let out = temp_out_path(&format!("graph-no-feature-{mode}"));
+            let cli = Cli {
+                task: "train".to_string(),
+                device: "cuda".to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: "reuse".to_string(),
+                phases: false,
+                tf32: false,
+                managed: false,
+                device_checksum: false,
+                graph: Some(mode.to_string()),
+            };
+            let err =
+                dispatch(&cli).expect_err("--graph must be rejected without graph-step feature");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--graph"), "msg={msg}");
+            assert!(msg.contains("0.8.0"), "msg={msg}");
+        }
     }
 
     /// イシュー #1339: `--device-checksum` は `--task gemm`（`--phases`
@@ -2830,6 +3086,7 @@ mod tests {
                 tf32: false,
                 managed: false,
                 device_checksum: true,
+                graph: None,
             };
             let err =
                 dispatch(&cli).expect_err("--device-checksum must be rejected for non-gemm tasks");
@@ -2855,6 +3112,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: true,
+            graph: None,
         };
         let err = dispatch(&cli).expect_err("--device-checksum --phases must be rejected");
         let msg = err.to_string();
@@ -2883,6 +3141,7 @@ mod tests {
             tf32: false,
             managed: false,
             device_checksum: true,
+            graph: None,
         };
         let err = dispatch(&cli)
             .expect_err("--device-checksum must be rejected without device-checksum feature");
@@ -2941,6 +3200,7 @@ mod tests {
                 tf32: false,
                 managed: false,
                 device_checksum: false,
+                graph: None,
             };
             dispatch(&cli).expect("cuda train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2971,6 +3231,7 @@ mod tests {
                 tf32: false,
                 managed: false,
                 device_checksum: false,
+                graph: None,
             };
             dispatch(&cli).expect("metal train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");

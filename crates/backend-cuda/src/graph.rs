@@ -109,6 +109,104 @@ static STEP_GRAPH_MODE: AtomicU8 = AtomicU8::new(0);
 /// コメント・facade 公開 API doc の契約）。
 static EXPLICIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// イシュー #1350: `framework-compare` の `bench-fandhe`（crates.io
+/// `fandhe-ai =0.7.0` ピンのため本モジュールの内部型を直接触れない）が
+/// launch 固定費の実測（`step_total`／`device_update` の A/B と launch
+/// 回数）を行うための、プロセスワイド診断カウンタ 3 種。`internal-
+/// diagnostics` feature には載せない（`GraphMode::requires_created_stream`
+/// 呼び出し側が同 feature 下で `StreamKind::Legacy` に固定され capture
+/// 経路へ到達しないため、載せても常に 0 のまま無意味になる。B4）。
+///
+/// 値そのものは性能に影響しない `AtomicU64` カウントのみ（`Ordering::
+/// Relaxed` で十分。診断用途で他メモリ操作との順序保証を必要としない）。
+static CAPTURED_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REPLAYED_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GRAPH_LAUNCH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// [`crate::sgd::CudaSgd::run`] の launch 成功時に加算される SGD カーネル
+/// launch 回数（graph capture 中の 1 回・capture 後の replay では
+/// カーネル自体は launch されず graph launch に置き換わる点に注意。
+/// つまり ON では「capture 時のウォームアップ launch＋capture 内 1 回」
+/// のみがここに計上され、以後の replay 分は `GRAPH_LAUNCH_COUNT` 側に
+/// 計上される。OFF では毎 step 1 回ずつ加算される）。
+static SGD_KERNEL_LAUNCH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [`crate::sgd`] から呼ばれる: SGD カーネル launch が成功した回数を
+/// 加算する（graph capture 中の launch・capture 外の通常 launch の
+/// いずれも計上する。ドキュメントは [`SGD_KERNEL_LAUNCH_COUNT`] 参照）。
+pub(crate) fn record_sgd_kernel_launch() {
+    SGD_KERNEL_LAUNCH_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 公開 API（`facade::cuda_graph_step_mode` 経由で再公開）向けの
+/// `GraphMode`（クレート内部限定）写像。内部 `GraphMode` をそのまま公開すると
+/// `pub(crate)` の可視性契約が崩れるため、値が同じだけの独立した
+/// 公開 enum を用意する（`crate::precision` の公開型と同型の設計）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepGraphMode {
+    /// 既定。legacy stream・capture なし。
+    Off,
+    /// created stream で初期化するが capture はしない（イシュー #1350
+    /// の診断状態。モジュール冒頭コメント参照）。
+    StreamOnly,
+    /// created stream で初期化し、update 区間を capture・再利用する。
+    On,
+}
+
+impl From<GraphMode> for StepGraphMode {
+    fn from(m: GraphMode) -> Self {
+        match m {
+            GraphMode::Off => StepGraphMode::Off,
+            GraphMode::StreamOnly => StepGraphMode::StreamOnly,
+            GraphMode::On => StepGraphMode::On,
+        }
+    }
+}
+
+/// 現在の opt-in モードを公開型で返す（`facade::cuda_graph_step_mode`
+/// の実体。イシュー #1350: `bench-fandhe` が `--graph stream-only` 起動時
+/// に環境変数が実際に反映されたかを確認するために使う。API setter
+/// （[`set_step_graph_enabled`]）を呼ぶと `stream-only` は選べなくなる
+/// 契約〈モジュール冒頭コメント〉があるため、この確認は環境変数経由の
+/// 起動でのみ意味を持つ）。
+pub fn step_graph_mode_public() -> StepGraphMode {
+    step_graph_mode().into()
+}
+
+/// launch 固定費の診断用スナップショット（POD。イシュー #1350）。
+/// `facade::cuda_graph_step_stats` の実体。値はプロセス起動からの累積
+/// カウントで、計測ウィンドウの前後で差分を取ることを想定している
+/// （bench 側は計測ループの前後で 2 回呼ぶのではなく、計測後に 1 回
+/// だけ呼んで record に載せる設計〈計測時間そのものへの影響を避ける〉
+/// ため、実際には「計測プロセス全体の累積値」がそのまま記録される。
+/// bench-fandhe は 1 計測 = 1 プロセス起動のため、この累積値は当該
+/// 計測分の合計と一致する）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepGraphStats {
+    pub mode: StepGraphMode,
+    /// [`SegmentRun::Captured`] を返した回数（新規 capture の回数）。
+    pub captured: u64,
+    /// [`SegmentRun::Replayed`] を返した回数（既存 graph の再生回数）。
+    pub replayed: u64,
+    /// `CudaGraph::launch()` が成功した回数（capture 直後の初回 launch
+    /// ＋以後の replay launch の合計。`captured + replayed` と一致する）。
+    pub graph_launches: u64,
+    /// SGD カーネル自体の launch 成功回数（`record_sgd_kernel_launch`
+    /// 〈クレート内部限定〉参照。OFF では毎 step 1・ON では capture 時のみ増える）。
+    pub sgd_kernel_launches: u64,
+}
+
+/// [`StepGraphStats`] の現在値を返す（`facade::cuda_graph_step_stats`
+/// の実体。イシュー #1350）。
+pub fn step_graph_stats() -> StepGraphStats {
+    StepGraphStats {
+        mode: step_graph_mode().into(),
+        captured: CAPTURED_COUNT.load(Ordering::Relaxed),
+        replayed: REPLAYED_COUNT.load(Ordering::Relaxed),
+        graph_launches: GRAPH_LAUNCH_COUNT.load(Ordering::Relaxed),
+        sgd_kernel_launches: SGD_KERNEL_LAUNCH_COUNT.load(Ordering::Relaxed),
+    }
+}
+
 /// 環境変数 `FANDHE_AI_CUDA_GRAPH_STEP` の初回参照結果（`OnceLock` で
 /// プロセス生存期間中 1 回だけ読む。イシュー #1349 §4.6。framework-compare
 /// の `bench-fandhe` は crates.io ピン版のためライブラリの新規公開 API
@@ -345,6 +443,8 @@ pub(crate) fn run_captured_sgd_step_segment(
             put_cached_graph(ordinal, key, graph);
             return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
         }
+        GRAPH_LAUNCH_COUNT.fetch_add(1, Ordering::Relaxed);
+        REPLAYED_COUNT.fetch_add(1, Ordering::Relaxed);
         put_cached_graph(ordinal, key, graph);
         return Ok(SegmentRun::Replayed);
     }
@@ -522,6 +622,8 @@ pub(crate) fn run_captured_sgd_step_segment(
         return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
     }
 
+    GRAPH_LAUNCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    CAPTURED_COUNT.fetch_add(1, Ordering::Relaxed);
     put_cached_graph(ordinal, key, graph);
     Ok(SegmentRun::Captured)
 }
@@ -587,5 +689,49 @@ mod tests {
         set_step_graph_enabled(false);
         assert!(!step_graph_enabled());
         assert_eq!(step_graph_mode(), GraphMode::Off);
+    }
+
+    /// イシュー #1350: `StepGraphMode`（公開型）が内部 `GraphMode` の
+    /// 3 値すべてを取り違えなく写像することを検証する（`bench-fandhe`
+    /// の `--graph stream-only` ゲートが `cuda_graph_step_mode() ==
+    /// StreamOnly` を突き合わせに使うため、ここでの取り違えは静かに
+    /// 誤った行を計測してしまう）。
+    #[test]
+    fn step_graph_mode_public_maps_all_three_variants() {
+        let _guard = FlagGuard::acquire();
+        set_step_graph_enabled(true);
+        assert_eq!(step_graph_mode_public(), StepGraphMode::On);
+        set_step_graph_enabled(false);
+        assert_eq!(step_graph_mode_public(), StepGraphMode::Off);
+        // `stream-only` は API から設定できない（モジュール冒頭コメント
+        // の契約）ため、`From<GraphMode>` 単体の写像を直接検証する。
+        assert_eq!(
+            StepGraphMode::from(GraphMode::StreamOnly),
+            StepGraphMode::StreamOnly
+        );
+    }
+
+    /// イシュー #1350: `step_graph_stats()` がプロセスワイドカウンタの
+    /// 現在値をそのまま反映することを検証する（実機 CUDA 呼び出しを
+    /// 経由しないホストモデルテスト。`record_sgd_kernel_launch` と
+    /// カウンタの直接操作のみで完結する）。GPU 実機側の
+    /// `captured`／`replayed` の実加算は
+    /// `tests/graph_capture_real_device.rs`（`#[ignore]`）が検証する。
+    #[test]
+    fn step_graph_stats_reflects_counters() {
+        let _guard = FlagGuard::acquire();
+        // 他テストと static カウンタを共有するため、差分（delta）で
+        // 検証する（絶対値は cargo test の並列実行順に依存するため
+        // 固定できない）。
+        let before = step_graph_stats();
+        record_sgd_kernel_launch();
+        CAPTURED_COUNT.fetch_add(1, Ordering::Relaxed);
+        REPLAYED_COUNT.fetch_add(1, Ordering::Relaxed);
+        GRAPH_LAUNCH_COUNT.fetch_add(2, Ordering::Relaxed);
+        let after = step_graph_stats();
+        assert_eq!(after.sgd_kernel_launches - before.sgd_kernel_launches, 1);
+        assert_eq!(after.captured - before.captured, 1);
+        assert_eq!(after.replayed - before.replayed, 1);
+        assert_eq!(after.graph_launches - before.graph_launches, 2);
     }
 }
