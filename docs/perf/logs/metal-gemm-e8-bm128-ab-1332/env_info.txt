@@ -1,0 +1,18 @@
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+---
+rustc -V:
+rustc 1.96.0 (ac68faa20 2026-05-25)
+---
+cpu brand:
+Apple M4 Max
+---
+git rev-parse HEAD:
+93c6107b42d3984ecd14a6325b045e8792fb2296
+---
+uptime (before):
+11:19  up 18 days, 22:32, 20 users, load averages: 3.44 3.12 4.87
+---
+uptime (after):
+11:25  up 18 days, 22:37, 20 users, load averages: 3.40 3.46 4.52
