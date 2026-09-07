@@ -329,6 +329,15 @@ pc ごとに B を列全幅で pack し行パネルを動的配布する設計�
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §14・
 `docs/perf/cpu-gemm-ic-dynamic-variant.md` §6 を参照。
 
+**追記（イシュー #1307・2026-09-08）**: 案 A（jc 列分割。本節冒頭「§C 設計案」参照）が抱えて
+いた「C 列方向の raw pointer 分割が要る」課題は、2026-09-06 のユーザー承認（イシュー #1338
+コメント）により `unsafe` 導入自体は選択肢として利用可能になった。ただし #1307 の設計記録
+（`docs/cpu-gemm-2d-dynamic-partition-design.md`）は、この承認を前提とせず**主案 S（行セグメント
+slice 方式・`unsafe` 非導入）**を先に確定し、raw pointer 方式は**代替 U**（性能・実装上の障害が
+判明した場合のみ再承認なしで切替可能）として位置づけた。案 A・案 B（本節）とは異なり、job
+単位で K 全域を単一 worker が処理する構造（`IcDynamic` の pc ごと同期点を持たない）を採る点が
+新規設計の要点であり、詳細は同ドキュメント §2・§4 を参照。
+
 ## 出典
 
 - イシュー #565（本ドキュメントの起票元）・#564／PR #701（E-8。MC/KC/NC パラメータ化・NC 拡大

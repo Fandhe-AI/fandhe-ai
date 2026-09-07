@@ -174,6 +174,15 @@ M×N の完全な 2 次元ミニタイル格子（「重複なし・被覆完全
   実行するのみで、正当性には影響しない（`partition::tests::split_evenly_workers_exceeding_total_yields_at_most_total_ranges`
   で固定）
 
+**追記（イシュー #1307）**: 上記「検討した案（不採用）」節が列方向分配を見送った理由（`unsafe`
+の必要最小限方針との整合）は、2026-09-06 のユーザー承認（イシュー #1338 コメント）により
+C 列ブロック raw pointer 分割の `unsafe` 導入が選択肢として再提起された。設計自体は
+`docs/cpu-gemm-2d-dynamic-partition-design.md`（#1307）で扱い、同ドキュメントは `unsafe` 非導入の
+主案（行セグメント slice 方式）を先に確定したうえで raw pointer 方式を代替として位置づけている。
+本節が確立した「行方向のみの安全な分配」（`row_ranges_for_workers`・`gemm_blis_parallel_2d_with_blocks`）
+は削除しない。新設計における 2D job 空間の定義は本節が使う `tile_grid`（M×N の完全な 2 次元
+ミニタイル格子）を踏襲し、#753 の行限定分配はその特殊形（列帯数 cb=1）として包含される。
+
 ## §5 実機計測手順（後続セッション向け）
 
 1. `docs/real-hardware-verification-env.md` の手順で M4 Max 実機へ接続する
