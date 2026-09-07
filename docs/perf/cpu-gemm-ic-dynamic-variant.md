@@ -15,11 +15,16 @@
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13 の DGX Spark GB10 非一様
 コア構成の実測）では負荷不均衡が生じうる。
 
-本 issue は `SharedBPcOuter` の「pc ごとに B を列全幅で 1 回 pack して共有する」
-設計を維持しつつ、行パネルを `AtomicUsize` カウンタで動的配布する新 variant
+本 issue は行パネルの配布を `AtomicUsize` カウンタによる動的配布へ変更する
+だけでなく、B の列ブロッキングも変更した新 variant
 `GemmDriverVariant::IcDynamic`（`gemm_blis_ic_dynamic_region`）を `#[cfg(test)]`
-限定で追加し、`RowPanel` との bit 完全一致を回帰テストで確認する。**本番結線・
-採否判定は行わない**（両実機実測は #1367 へ引き継ぐ）。
+限定で追加し、`RowPanel` との bit 完全一致を回帰テストで確認する。
+`SharedBPcOuter` は B を (pc,jc) ごとに `blocks.nc` 幅で pack し jc ループで
+列を順に処理するのに対し、`IcDynamic` は jc ループを持たず `blocks.nc` を
+使わずに pc ごとへ列全幅 `n` を 1 回で pack する。この違いにより B バッファの
+メモリ使用量（`nc` 幅 → 列全幅 `n`。形状によっては増大する）・キャッシュ
+局所性・pc ごとの同期点の数（jc ブロック数ぶん → 1 回）も変わる（§2.1 参照）。
+**本番結線・採否判定は行わない**（両実機実測は #1367 へ引き継ぐ）。
 
 ## 2. 設計
 

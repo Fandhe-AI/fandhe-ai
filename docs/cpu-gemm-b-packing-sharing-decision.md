@@ -301,13 +301,19 @@ GB10（#1140）・M4 Max（#1141）の両実機実測で `RowPanel` を大きく
 
 **追記（イシュー #1366）**: `SharedBPcOuter` は行パネルを
 `mc_total.div_ceil(num_workers)` で静的に等分割するため、MC タイル数がワーカー数で
-割り切れない形状や異種コア環境で負荷不均衡が生じうる。B の共有 pack 設計（本節・
-pc ごとに列全幅を 1 回 pack する方針）は維持したまま、行パネルの配布のみを
-`AtomicUsize` カウンタによる動的配布へ変更した候補 `GemmDriverVariant::IcDynamic`
-（`gemm_blis_ic_dynamic_region`）を `#[cfg(test)]` 限定で追加し、`RowPanel` との
-bit 完全一致回帰テストを整備した。`unsafe` は新規導入していない（`Mutex<Option<&mut
+割り切れない形状や異種コア環境で負荷不均衡が生じうる。これに対応する候補
+`GemmDriverVariant::IcDynamic`（`gemm_blis_ic_dynamic_region`）は行パネルの配布を
+`AtomicUsize` カウンタによる動的配布へ変更するだけでなく、**B の列ブロッキングも
+変更している**: `SharedBPcOuter` は B を (pc,jc) ごとに `blocks.nc` 幅で pack し
+jc ループで列を順に処理するのに対し、`IcDynamic` は jc ループを持たず `blocks.nc`
+を使わずに pc ごとへ列全幅を 1 回で pack する。この違いにより B バッファの
+メモリ使用量（`nc` 幅 → 列全幅。形状によっては増大する）・キャッシュ局所性・
+pc ごとの同期点の数（jc ブロック数ぶん → 1 回）も変わるため、`RowPanel`・
+`SharedBPcOuter` との性能差は行パネル配布方式の違いのみに起因するとは限らない。
+`unsafe` は新規導入していない（`Mutex<Option<&mut
 [f32]>>` スロット＋`AtomicUsize` の組み合わせで、コンパイル時の借用検査により
-排他性を担保する設計。詳細は `docs/perf/cpu-gemm-ic-dynamic-variant.md`）。両実機
+排他性を担保する設計。詳細は `docs/perf/cpu-gemm-ic-dynamic-variant.md`）。
+`RowPanel` との bit 完全一致回帰テストは整備済み。両実機
 （M4 Max・GB10）での性能実測・採否判定はイシュー #1367 へ引き継ぐ（本番未結線）。
 
 ## 出典
