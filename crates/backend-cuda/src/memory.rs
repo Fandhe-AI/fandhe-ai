@@ -954,18 +954,35 @@ impl MemoryOps for CudaMemory {
                 // できる（`Managed`／`None` 分岐と同じく `f` を境界の
                 // 内側で呼ぶ設計に統一）。
                 let copy_result = self.with_driver_call(&[generation], map_cuda_error, || {
-                    if staging_slot.is_none() {
-                        staging_slot = Some(HostStaging::alloc(kind, ctx, numel)?);
-                    }
-                    let staging = staging_slot
-                        .as_mut()
-                        .expect("staging_slot は直前に Some へ設定済み、または既に Some");
-                    self.stream
-                        .memcpy_dtoh(slice, staging.as_host_slice_mut())?;
-                    self.stream.synchronize()?;
-                    let view = staging.as_slice()?;
-                    f(view);
-                    Ok(())
+                    // codex-review 指摘（イシュー #1336・PR #1408）: 以前は
+                    // `if staging_slot.is_none() { staging_slot = Some(..) }`
+                    // で `Some` を保証したあと `staging_slot.as_mut().expect(..)`
+                    // で取り出していたが、本番経路の `panic` 系 API 使用は
+                    // `.claude/rules/coding-rust.md`「エラーは型付きエラーと
+                    // し、本番経路で `unwrap()` / `expect()` を使わない」で
+                    // 禁止されている。`staging_slot.take()` で所有権ごと取り
+                    // 出し、`None` なら新規 `alloc` した値をそのまま使う形へ
+                    // 変えることで、`Option` を再度覗いて取り出す
+                    // （＝ `.expect()` が必要になる）分岐そのものを無くす。
+                    // クロージャの最後で `staging_slot` へ書き戻すため、
+                    // 成功・失敗いずれの経路でも `?` による早期 return 時点
+                    // までに確保できていれば呼び出し元の返却キャッシュ処理
+                    // （下の `if let Some(staging) = staging_slot`）は従来と
+                    // 同じく機能する。
+                    let mut staging = match staging_slot.take() {
+                        Some(staging) => staging,
+                        None => HostStaging::alloc(kind, ctx, numel)?,
+                    };
+                    let copy_and_read = (|| {
+                        self.stream
+                            .memcpy_dtoh(slice, staging.as_host_slice_mut())?;
+                        self.stream.synchronize()?;
+                        let view = staging.as_slice()?;
+                        f(view);
+                        Ok(())
+                    })();
+                    staging_slot = Some(staging);
+                    copy_and_read
                 });
                 if let Some(staging) = staging_slot {
                     self.return_staging(numel, generation, staging);
