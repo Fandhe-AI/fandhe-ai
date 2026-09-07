@@ -393,6 +393,8 @@ class DeviceCpuTest(unittest.TestCase):
             os.unlink(after_path)
 
     def test_invalid_device_value_rejected(self):
+        # イシュー #1337 で `cuda` を有効な `--device` へ追加したため、
+        # ここでは依然として無効な文字列（`rocm`）を使う。
         before_path = _write_jsonl([_rec(0.002)])
         after_path = _write_jsonl([_rec(0.002)])
         try:
@@ -400,8 +402,138 @@ class DeviceCpuTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 with redirect_stderr(err):
                     compare_gemm_ab.main(
-                        ["prog", "--device", "cuda", before_path, after_path]
+                        ["prog", "--device", "rocm", before_path, after_path]
                     )
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+
+class GateCudaAndModesTest(unittest.TestCase):
+    """イシュー #1337: `--device cuda`・`--sizes gate`・`--modes` の挙動を
+    検証する（`run_gemm_gate.sh` 由来の cuda/metal reuse 専用入力を想定）。
+    """
+
+    _CUDA_SIZES = (1024, 2048, 4096)
+
+    def test_device_cuda_uses_three_size_six_cells(self):
+        # `--sizes` 省略時（既定 full）でも cuda は元々 3 サイズ ×
+        # 2 モード＝6 セル（`_VALID_SIZES_BY_DEVICE["cuda"]` が既に
+        # gate と同一集合のため）。
+        before, after = _all_cells_rows(
+            0.002, 0.0019, sizes=self._CUDA_SIZES, device="cuda"
+        )
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--device", "cuda", before_path, after_path]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(out.getvalue().count("非後退"), 6)
+            self.assertNotIn("512", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_sizes_gate_restricts_metal_to_three_sizes(self):
+        # `run_gemm_gate.sh` は metal でも N=1024/2048/4096 のみ発行する
+        # （512 行はそもそも存在しない。gate 出力の実形状を模す）。
+        # `--sizes gate` はこの 6 セル（1024/2048/4096 × fresh/reuse）を
+        # 期待セルとして判定する（既定 `--sizes full` は 512 込み 8 セルを
+        # 期待するため、512 行が無いと欠測セル扱いで判定不能になる差分）。
+        before, after = _all_cells_rows(
+            0.002, 0.0019, sizes=(1024, 2048, 4096), device="metal"
+        )
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--sizes", "gate", before_path, after_path]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(out.getvalue().count("非後退"), 6)
+            self.assertNotIn("512/", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_sizes_full_default_flags_missing_512_cells_when_input_lacks_them(self):
+        # 対照テスト: `--sizes gate` を使わず同じ 6 セル入力（512 なし）を
+        # 既定（`--sizes full`）で判定すると、512 の 2 セルが欠測扱いに
+        # なり判定不能（exit 3）になることを固定する（`--sizes gate` の
+        # 意義そのものの回帰点）。
+        before, after = _all_cells_rows(
+            0.002, 0.0019, sizes=(1024, 2048, 4096), device="metal"
+        )
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 3)
+            self.assertIn("欠測セル", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_modes_reuse_ignores_fresh_rows_without_warning(self):
+        # cuda/metal のゲート出力は reuse のみ（`run_gemm_gate.sh` は
+        # cuda/metal に対し bench-fandhe の fresh モードを起動しない）。
+        # `--modes reuse` を指定すると fresh 行が交じっていても警告や
+        # 判定不能を出さず、reuse セルのみで判定する。
+        before = []
+        after = []
+        for size in self._CUDA_SIZES:
+            for _ in range(5):
+                before.append(_rec(0.002, size=size, mode="reuse", device="cuda"))
+                after.append(_rec(0.0019, size=size, mode="reuse", device="cuda"))
+            # fresh 行（参考記録。cuda では通常発生しないが、混入しても
+            # 無害であることを固定する）。
+            before.append(_rec(0.001, size=size, mode="fresh", device="cuda"))
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    [
+                        "prog",
+                        "--device",
+                        "cuda",
+                        "--modes",
+                        "reuse",
+                        before_path,
+                        after_path,
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual(out.getvalue().count("非後退"), 3)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_invalid_modes_value_rejected(self):
+        before_path = _write_jsonl([_rec(0.002)])
+        after_path = _write_jsonl([_rec(0.002)])
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--modes", "bogus", before_path, after_path]
+                )
+            self.assertEqual(code, 2)
         finally:
             os.unlink(before_path)
             os.unlink(after_path)

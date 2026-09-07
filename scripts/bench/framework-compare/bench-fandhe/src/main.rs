@@ -79,6 +79,22 @@
 //! （`gemm_reuse_phase_diag_tests`）が別途取り、突合結果を
 //! `docs/perf/cuda-gemm-reuse-phase-breakdown.md` に記録する。詳細は
 //! README「`gemm --mode reuse --phases`」節を参照。
+//!
+//! `host-view-readout` feature（既定 OFF・イシュー #1337）: 上記
+//! `readout_var` の展開（`to_tensor` 区間 + `host_copy` 区間）は、
+//! #1182 §6/§9 が確定した「`host_copy`（`.to_vec()` の memcpy）が
+//! `iter_total` の 25.6〜53.0%（CUDA）を占める」の対策として、`readout_var`
+//! 自体を借用ビュー（`fandhe_ai::VarHostView`／`Tensor::host_slice`。
+//! #1335・#1336）へ切り替え可能にする。feature 有効時は `to_tensor`
+//! 区間が `Var::host_view()`（contiguous なら `Arc` 複製のみ）、
+//! `host_copy` 区間が借用スライス取得（追加コピーなし・想定 ≈0）に
+//! 再定義される。checksum（全要素 `f64` 逐次和）・parity
+//! （`GemmReference::verify`）の契約・計算式は feature 有無で不変
+//! （呼び出し側は両型とも `Deref<Target=[f32]>` のため無変更）。
+//! crates.io 公開版 `fandhe-ai =0.7.0` には該当 API が未収録のため
+//! feature は既定 OFF・有効化には `crates/facade` への path patch が
+//! 必須（`bench-fandhe/Cargo.toml` コメント・README「借用ビュー
+//! readout（#1337）」節参照）。
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
@@ -197,38 +213,100 @@ fn make_tape(device: &str) -> Result<Tape, Box<dyn std::error::Error>> {
     }
 }
 
+/// `readout_var`（`gemm --mode reuse` の `host_copy` 区間。#1182 §6/§9）
+/// の戻り型。既定（feature `host-view-readout` 無効）は現行どおり
+/// `to_tensor()` + `contiguous().as_slice().to_vec()` の所有 `Vec<f32>`
+/// を返す（memcpy 込み）。`host-view-readout` feature 有効時は
+/// `fandhe_ai::VarHostView`（`Deref<Target=[f32]>`。#1335）へ切り替え、
+/// `contiguous()` が `Arc` 複製のみで済む形状では memcpy を伴わない
+/// 借用読み出しになる（`docs/perf/cuda-gemm-reuse-phase-breakdown.md`
+/// §6/§9 の (ii) を「checksum／parity 契約を一切変えず host_copy 側の
+/// みを実現する」形で満たす。イシュー #1337）。呼び出し側
+/// （`out.iter()`・`GemmReference::verify(&out)` の deref 強制）は
+/// いずれの型でも無変更で成立する。
+///
+/// crates.io 公開版 `fandhe-ai =0.7.0` には `VarHostView`／
+/// `Var::host_view` が未収録（#1335 は未リリースの HEAD で追加）のため、
+/// feature 無効な既定ビルドでは本エイリアスは `Vec<f32>` に解決され
+/// `=0.7.0` ピンのままコンパイル可能（`managed-placement` feature と
+/// 同じ分離方式。`bench-fandhe/Cargo.toml` コメント参照）。
+#[cfg(feature = "host-view-readout")]
+type HostReadout = fandhe_ai::VarHostView;
+#[cfg(not(feature = "host-view-readout"))]
+type HostReadout = Vec<f32>;
+
 /// Host-materialize a Var result and return a checksum (forces sync).
+///
+/// `host-view-readout` feature 有効時は借用ビュー（`Var::host_view()`）
+/// に対して同一の `f64` 逐次和を計算する（#1337）。要素順序・型・和の
+/// 計算式は feature 有無で不変（`checksum_var_matches_across_readout_modes`
+/// 系テストで bit 同一を確認）。
 fn checksum_var(v: &fandhe_ai::Var) -> Result<f64, Box<dyn std::error::Error>> {
-    let t = v.to_tensor();
-    let slice = t
-        .contiguous()
-        .as_slice()
-        .ok_or("as_slice() returned None after contiguous()")?
-        .to_vec();
-    Ok(slice.iter().map(|&x| x as f64).sum())
+    #[cfg(feature = "host-view-readout")]
+    {
+        let view = v.host_view();
+        Ok(view.iter().map(|&x| x as f64).sum())
+    }
+    #[cfg(not(feature = "host-view-readout"))]
+    {
+        let t = v.to_tensor();
+        let slice = t
+            .contiguous()
+            .as_slice()
+            .ok_or("as_slice() returned None after contiguous()")?
+            .to_vec();
+        Ok(slice.iter().map(|&x| x as f64).sum())
+    }
 }
 
 /// Host-materialize a Var result and return the raw elements (forces sync).
 /// `run_gemm`/`run_gemm_reuse`（イシュー #970）は checksum（全要素和）に
 /// 加え要素単位の参照比較（`GemmReference::verify`）が必要なため、
-/// `checksum_var` とは別に生の `Vec<f32>` を返す readout を用意する
+/// `checksum_var` とは別に [`HostReadout`] を返す readout を用意する
 /// （`checksum_var`/`checksum_tensor` は `run_infer` が引き続き使うため
 /// シグネチャを変更しない）。
-fn readout_var(v: &fandhe_ai::Var) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let t = v.to_tensor();
-    Ok(t.contiguous()
-        .as_slice()
-        .ok_or("as_slice() returned None after contiguous()")?
-        .to_vec())
+///
+/// イシュー #1337: `host-view-readout` feature 有効時は
+/// `Var::to_tensor()` + `.to_vec()`（`host_copy` memcpy）の代わりに
+/// `Var::host_view()`（`contiguous()` が `Arc` 複製のみで済む場合は
+/// memcpy を伴わない）を返す。戻り値は両モードとも `Deref<Target=[f32]>`
+/// のため、呼び出し側（`run_gemm`/`run_gemm_reuse`/
+/// `measure_gemm_reuse_phases` の `out.iter()`・
+/// `reference.verify(&out)`）は無変更で成立する。
+fn readout_var(v: &fandhe_ai::Var) -> Result<HostReadout, Box<dyn std::error::Error>> {
+    #[cfg(feature = "host-view-readout")]
+    {
+        Ok(v.host_view())
+    }
+    #[cfg(not(feature = "host-view-readout"))]
+    {
+        let t = v.to_tensor();
+        Ok(t.contiguous()
+            .as_slice()
+            .ok_or("as_slice() returned None after contiguous()")?
+            .to_vec())
+    }
 }
 
+/// `host-view-readout` feature 有効時は [`fandhe_ai_tensor_core::Tensor::
+/// host_slice`]（contiguous なら借用 `Cow::Borrowed`・非 contiguous のみ
+/// 実体化して `Cow::Owned`。#1335）に対して同一の `f64` 逐次和を計算する
+/// （#1337）。
 fn checksum_tensor(t: &Tensor<f32>) -> Result<f64, Box<dyn std::error::Error>> {
-    let slice = t
-        .contiguous()
-        .as_slice()
-        .ok_or("as_slice() returned None after contiguous()")?
-        .to_vec();
-    Ok(slice.iter().map(|&x| x as f64).sum())
+    #[cfg(feature = "host-view-readout")]
+    {
+        let slice = t.host_slice();
+        Ok(slice.iter().map(|&x| x as f64).sum())
+    }
+    #[cfg(not(feature = "host-view-readout"))]
+    {
+        let slice = t
+            .contiguous()
+            .as_slice()
+            .ok_or("as_slice() returned None after contiguous()")?
+            .to_vec();
+        Ok(slice.iter().map(|&x| x as f64).sum())
+    }
 }
 
 fn gemm_inputs(n: usize) -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::error::Error>> {
@@ -469,17 +547,47 @@ fn measure_gemm_reuse_phases(
         let c = a.matmul(&b)?;
         phases.push(PHASE_GEMM_MATMUL, t0.elapsed());
 
-        let t0 = Instant::now();
-        let t = c.to_tensor();
-        phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
+        // イシュー #1337: `to_tensor`／`host_copy` の 2 区間は
+        // `readout_var` の実装（feature 有無で分岐）をここで展開した
+        // ものであり、feature 有効時は区間の中身自体が再定義される
+        // （module doc・README「`gemm --mode reuse --phases`」節参照）。
+        // 区間名・順序・件数（5 区間）は feature 有無で不変。
+        #[cfg(feature = "host-view-readout")]
+        let out = {
+            // `to_tensor` 区間: `Var::host_view()` の構築
+            // （`materialize_non_fallible(..).contiguous()`。contiguous
+            // な場合は `Tensor` 内部 `Arc` の複製のみで memcpy を伴わない
+            // ——旧 `to_tensor` 区間が担っていた「`Tape` 借用からの
+            // 実体化」に対応する区間として維持する）。
+            let t0 = Instant::now();
+            let view = c.host_view();
+            phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
 
-        let t0 = Instant::now();
-        let out = t
-            .contiguous()
-            .as_slice()
-            .ok_or("as_slice() returned None after contiguous()")?
-            .to_vec();
-        phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
+            // `host_copy` 区間: 借用スライスの取得（`Deref::deref`。
+            // 追加コピーなし・旧区間の memcpy が消える想定値 ≈0。
+            // #1182 §6/§9 が確定した「host_copy が主因」を打ち消す本
+            // 変更の中心区間）。
+            let t0 = Instant::now();
+            let out: &[f32] = &view;
+            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
+            let _ = out;
+            view
+        };
+        #[cfg(not(feature = "host-view-readout"))]
+        let out = {
+            let t0 = Instant::now();
+            let t = c.to_tensor();
+            phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
+
+            let t0 = Instant::now();
+            let out = t
+                .contiguous()
+                .as_slice()
+                .ok_or("as_slice() returned None after contiguous()")?
+                .to_vec();
+            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
+            out
+        };
 
         let t0 = Instant::now();
         checksum = out.iter().map(|&x| x as f64).sum();
@@ -1865,6 +1973,82 @@ mod tests {
                 "iter={iter}: phase sum {sum:?} is less than 90% of iter_total {total:?}"
             );
         }
+    }
+
+    /// イシュー #1337: `readout_var`（[`HostReadout`] 経由）の内容が、
+    /// feature 有効・無効いずれのビルドでも「`to_tensor()` +
+    /// `contiguous().as_slice().to_vec()`」（旧経路・現行の legacy 経路）
+    /// と bit 同一であることを固定する。feature 無効ビルドでは
+    /// `readout_var` 自体が legacy 経路そのものであるため自明に一致する
+    /// が、feature 有効ビルドで `Var::host_view()` が値として legacy 経路
+    /// と食い違わないことを確認する回帰点として両ビルドで走らせる
+    /// （cpu・実機非依存）。
+    #[test]
+    fn readout_var_matches_legacy_to_vec_bit_exact() {
+        let tape = make_tape("cpu").expect("test: make_tape 失敗");
+        let a_data = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+            .expect("test: a_data 構築失敗");
+        let b_data = Tensor::new(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2])
+            .expect("test: b_data 構築失敗");
+        let a = tape.var(&a_data);
+        let b = tape.var(&b_data);
+        let c = a.matmul(&b).expect("test: matmul 失敗");
+
+        let legacy: Vec<f32> = c
+            .to_tensor()
+            .contiguous()
+            .as_slice()
+            .expect("test: as_slice() が None")
+            .to_vec();
+
+        let via_readout = readout_var(&c).expect("test: readout_var 失敗");
+        assert_eq!(
+            &via_readout[..],
+            &legacy[..],
+            "readout_var の値が legacy 経路（to_tensor + to_vec）と bit 一致しない"
+        );
+
+        // checksum も同一（`f64` 逐次和の計算式・順序が feature 有無で
+        // 不変であることの確認）。
+        let legacy_checksum: f64 = legacy.iter().map(|&x| x as f64).sum();
+        let via_checksum = checksum_var(&a.matmul(&b).expect("test: matmul(2) 失敗"))
+            .expect("test: checksum_var 失敗");
+        assert_eq!(via_checksum.to_bits(), legacy_checksum.to_bits());
+    }
+
+    /// イシュー #1337・#1335: `host-view-readout` feature 有効ビルドで
+    /// `Var::host_view()`（`readout_var` が内部で使う）が返す
+    /// `VarHostView` の寿命契約——`Tape` の借用を保持しないため、生存中に
+    /// 同じ `Tape` へノード追加演算（`matmul`）を呼んでも panic しない
+    /// ——を、`readout_var` 経由の呼び出しパターン（`measure_gemm_reuse_
+    /// phases` の反復内で `out`（`HostReadout`）を生存させたまま次反復の
+    /// `a.matmul(&b)` を呼ぶ形）で確認する。feature 無効ビルドでは
+    /// `HostReadout = Vec<f32>` で自明に成立するため feature 有効時のみ
+    /// 意味を持つ回帰点（`Var::host_view` doc の「P1 是正」参照）。
+    #[cfg(feature = "host-view-readout")]
+    #[test]
+    fn host_view_readout_keeps_tape_usable() {
+        let tape = make_tape("cpu").expect("test: make_tape 失敗");
+        let a_data = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).expect("test: a_data");
+        let b_data = Tensor::new(vec![1.0f32, 0.0, 0.0, 1.0], &[2, 2]).expect("test: b_data");
+        let a = tape.var(&a_data);
+        let b = tape.var(&b_data);
+
+        let c1 = a.matmul(&b).expect("test: matmul(1) 失敗");
+        let out1 = readout_var(&c1).expect("test: readout_var(1) 失敗");
+        // `out1`（`VarHostView`）を生存させたまま同じ `Tape` へ演算を
+        // 追加で呼ぶ。旧実装（`Tape` の `RefCell` 借用を持ち越す版）は
+        // ここで `borrow_mut()` の実行時 panic を起こしていた。
+        let c2 = a
+            .matmul(&b)
+            .expect("test: matmul(2) failed while out1 alive (panic bug?)");
+        let out2 = readout_var(&c2).expect("test: readout_var(2) 失敗");
+
+        assert_eq!(
+            &out1[..],
+            &out2[..],
+            "同一入力の 2 回の matmul で結果が食い違う"
+        );
     }
 
     /// 実機（CUDA）依存の smoke テスト（coding-rust.md「実機依存テストは
