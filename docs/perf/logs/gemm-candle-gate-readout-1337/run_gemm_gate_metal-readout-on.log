@@ -1,0 +1,83 @@
+   (GEMM_GATE_PATCH_FACADE_PATH=/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_2243c296-206-37/crates/facade)
+== build bench-fandhe ==
+== build bench-candle (metal) ==
+== manifest 記録: results/raw/manifest-m4max-gemm-gate-head-1c298ff-readout-on.json ==
+{"label":"head-1c298ff-readout-on","device":"metal","bench_fandhe_sha256":"f2a1324f5976fd5f6e5ce6d005a413b7dd8693d3df3a59c7c707956f5932af2a","fandhe_ai_source":"path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_2243c296-206-37/crates/facade","bench_fandhe_features":"host-view-readout","bench_candle_sha256":"730e79f3188968a92be31746aba287a6192711f35378b351b064f767d52b1b74","candle_core_source":"registry","recorded_at":"2026-09-07T16:16:12Z"}
+== バイナリ sha256 検証 OK: bench-fandhe=f2a1324f5976fd5f6e5ce6d005a413b7dd8693d3df3a59c7c707956f5932af2a（label 'head-1c298ff-readout-on'・device 'metal'） ==
+== 依存元検証 OK: fandhe_ai_source=path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_2243c296-206-37/crates/facade（label 'head-1c298ff-readout-on'） ==
+== feature 検証 OK: bench_fandhe_features='host-view-readout'（label 'head-1c298ff-readout-on'） ==
+== バイナリ sha256 検証 OK: bench-candle=730e79f3188968a92be31746aba287a6192711f35378b351b064f767d52b1b74（label 'head-1c298ff-readout-on'） ==
+== 依存元検証 OK: candle_core_source=registry（label 'head-1c298ff-readout-on'） ==
+== metal status (before) ==
+Apple M4 Max
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 1:16  up 19 days, 12:28, 19 users, load averages: 22.73 11.04 10.19
+== bench-fandhe gemm metal size=1024 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":1024,"median_s":0.003570021,"q1_s":0.003455583,"q3_s":0.003619271,"gflops":601.532,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.070938208,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=1024 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.002155833,"q1_s":0.001528291,"q3_s":0.002277083,"gflops":996.127,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=2048 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":2048,"median_s":0.010846062,"q1_s":0.010464750,"q3_s":0.011413698,"gflops":1583.973,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.059281250,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=2048 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":2048,"median_s":0.009805187,"q1_s":0.006484292,"q3_s":0.009868052,"gflops":1752.120,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=4096 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":4096,"median_s":0.050557771,"q1_s":0.049044750,"q3_s":0.053661145,"gflops":2718.454,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.160020375,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=4096 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.035789688,"q1_s":0.025197719,"q3_s":0.039846635,"gflops":3840.183,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=1024 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":1024,"median_s":0.002351042,"q1_s":0.002288864,"q3_s":0.002403907,"gflops":913.418,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.044931750,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=1024 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.002336646,"q1_s":0.001971990,"q3_s":0.002574302,"gflops":919.045,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=2048 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":2048,"median_s":0.013077167,"q1_s":0.011802135,"q3_s":0.014142511,"gflops":1313.730,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.089607916,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=2048 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":2048,"median_s":0.008270396,"q1_s":0.008180386,"q3_s":0.008563604,"gflops":2077.273,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=4096 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":4096,"median_s":0.042257541,"q1_s":0.041529875,"q3_s":0.049586323,"gflops":3252.412,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.165690917,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=4096 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.023467000,"q1_s":0.023163125,"q3_s":0.024156260,"gflops":5856.690,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=1024 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":1024,"median_s":0.002622020,"q1_s":0.002553396,"q3_s":0.002667437,"gflops":819.019,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.051281500,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=1024 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.002233542,"q1_s":0.002076197,"q3_s":0.002298344,"gflops":961.470,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=2048 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":2048,"median_s":0.011269395,"q1_s":0.010294094,"q3_s":0.013059313,"gflops":1524.471,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.094074250,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=2048 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":2048,"median_s":0.009275792,"q1_s":0.008431667,"q3_s":0.010838687,"gflops":1852.119,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=4096 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":4096,"median_s":0.083371312,"q1_s":0.072201958,"q3_s":0.090667895,"gflops":1648.516,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.161333000,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=4096 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.053087479,"q1_s":0.047086302,"q3_s":0.058842114,"gflops":2588.915,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=1024 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":1024,"median_s":0.004609646,"q1_s":0.004406885,"q3_s":0.005195281,"gflops":465.867,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.114784541,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=1024 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.002378333,"q1_s":0.002311531,"q3_s":0.002589864,"gflops":902.936,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=2048 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":2048,"median_s":0.014247125,"q1_s":0.013314823,"q3_s":0.016417125,"gflops":1205.848,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.092717042,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=2048 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":2048,"median_s":0.008704854,"q1_s":0.008020844,"q3_s":0.010083011,"gflops":1973.596,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=4096 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":4096,"median_s":0.077311541,"q1_s":0.074994917,"q3_s":0.084240073,"gflops":1777.729,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.169389208,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=4096 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.040899521,"q1_s":0.033625573,"q3_s":0.047104854,"gflops":3360.405,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=1024 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":1024,"median_s":0.005498208,"q1_s":0.004338365,"q3_s":0.006993396,"gflops":390.579,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.076581334,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=1024 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.004338708,"q1_s":0.002939302,"q3_s":0.006129979,"gflops":494.959,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=2048 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":2048,"median_s":0.015814500,"q1_s":0.013232281,"q3_s":0.017678906,"gflops":1086.337,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.100129459,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=2048 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":2048,"median_s":0.010172146,"q1_s":0.009996990,"q3_s":0.010469188,"gflops":1688.913,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-fandhe gemm metal size=4096 mode=reuse extra=none ==
+{"framework":"fandhe-ai","version":"0.7.0","task":"gemm","device":"metal","size":4096,"median_s":0.055336021,"q1_s":0.048182428,"q3_s":0.057772563,"gflops":2483.716,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.173586750,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== bench-candle gemm metal size=4096 mode=fresh extra=none ==
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.028421083,"q1_s":0.026025490,"q3_s":0.035782438,"gflops":4835.810,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}
+== metal status (after) ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 1:17  up 19 days, 12:30, 19 users, load averages: 21.46 13.16 11.05
+done. results in results/raw/results-m4max-gemm-gate-head-1c298ff-readout-on.jsonl ; failures (if any) in results/raw/skipped-m4max-gemm-gate-head-1c298ff-readout-on.log
+EXIT_0
