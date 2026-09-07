@@ -1,4 +1,4 @@
-import json
+import json, statistics
 
 with open("agg_f64.json") as f:
     B = json.load(f)
@@ -38,5 +38,5 @@ for route in ROUTES:
             vals[s] = B[k]["max_rel"] / base if B[k]["max_rel"] is not None else None
         print(f"{shape} | s=0.1:{vals['0.1']:.3f} s=10:{vals['10']:.3f} s=100:{vals['100']:.3f}")
         ratios += [v for v in vals.values() if v is not None]
-    print(f"  n={len(ratios)} min={min(ratios):.3f} median={sorted(ratios)[len(ratios)//2]:.3f} max={max(ratios):.3f}")
+    print(f"  n={len(ratios)} min={min(ratios):.3f} median={statistics.median(ratios):.3f} max={max(ratios):.3f}")
     print()
