@@ -361,9 +361,15 @@ impl CudaMmaTf32x3Gemm {
     /// （呼び出し元が任意の事前汚染済みバッファを `c_dev` として渡す
     /// ため `GuardedSlice::new` を経由しない `device.stream().
     /// clone_htod()` 直呼びを使う。`gemm_mma.rs::CudaMmaGemm::
-    /// launch_f16_c_raw` と同じ理由で新設した。ただし本テストは
-    /// `internal-diagnostics` feature を要求しないため、本関数もその
-    /// feature ではゲートしない）専用。
+    /// launch_f16_c_raw` と同じ理由で新設した）専用。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// 診断専用入口（codex-review 指摘・PR #1390。`GuardedSlice` 境界の
+    /// 外から生 `CudaSlice` を渡せる経路を通常ビルドから排除する。
+    /// `gemm_mma.rs::CudaMmaGemm::launch_f16_c_raw` と同じ理由。呼び出し元
+    /// テスト（`tests/gemm_mma_tf32x3.rs`）は本 feature を要求する
+    /// `required-features` を `Cargo.toml` に追加済み）。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn launch_tf32x3_c_raw(
         &self,
         inputs: &ValidatedTf32x3Inputs,
@@ -395,6 +401,11 @@ impl CudaMmaTf32x3Gemm {
 
     /// [`Self::download_f32`] の生 `CudaSlice` 版。[`Self::
     /// launch_tf32x3_c_raw`] と同じ理由で新設した。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// 診断専用入口（[`Self::launch_tf32x3_c_raw`] と同じ理由。
+    /// `gemm_mma.rs::CudaMmaGemm::download_f16_raw` と同型）。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn download_f32_raw(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
         self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
     }

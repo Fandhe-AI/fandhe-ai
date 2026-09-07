@@ -16,6 +16,13 @@
 //! ゼロ fail が成立するかどうかは GB10 実機実測（#1356 が引き継ぐ）まで
 //! 未確定であり、本ファイルの実機テストは「未実測」のまま `#[ignore]`
 //! 分離する。
+//!
+//! **`internal-diagnostics` feature 依存（codex-review 指摘・PR #1390）**:
+//! `launch_tf32x3_c_raw`／`download_f32_raw` は `internal-diagnostics`
+//! feature（既定 off）限定の診断専用入口へ変更したため、本ファイルも
+//! 同 feature を要求する（`Cargo.toml` の `required-features`）。
+//! `cargo test -p fandhe-ai-backend-cuda --test gemm_mma_tf32x3 --features
+//! internal-diagnostics` から実行する。
 
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaTf32x3Gemm};
 

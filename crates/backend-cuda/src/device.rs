@@ -110,41 +110,71 @@ static STREAM_KIND_CACHE: OnceLock<Mutex<HashMap<usize, ResolvedStreamKind>>> = 
 #[derive(Clone)]
 enum ResolvedStreamKind {
     Legacy,
-    Created(Arc<CudaStream>),
+    // Bugbot 指摘対応（PR #1390 再修正・「Cached stream paired with a new
+    // context」）: ストリームだけでなく、それを生成した `CudaContext`
+    // 自身も一緒に保持・共有する。`resolve_stream_kind_for` doc コメント
+    // 「# 対策」節参照。
+    Created(Arc<CudaContext>, Arc<CudaStream>),
 }
 
-/// [`STREAM_KIND_CACHE`] 経由で `ordinal` の `(stream, StreamKind)` を
-/// 解決する。ordinal が未キャッシュの場合のみ `requires_created` の現在値
-/// で決定し（`Created` なら `ctx.new_stream()` と
-/// `disable_event_tracking()` を実行）、以後はキャッシュ済みの決定を
+/// [`STREAM_KIND_CACHE`] 経由で `ordinal` の `(ctx, stream, StreamKind)` を
+/// 解決する。`ctx`（`CudaContext`）自体の生成もこの関数が引き受ける
+/// （Bugbot 指摘対応。PR #1390 再修正。旧稿は呼び出し元が先に
+/// `CudaContext::new(ordinal)` して `&ctx` を渡していたため、`Created`
+/// 決定が既にキャッシュ済みの ordinal に対する 2 回目以降の呼び出しで
+/// 返る `stream`〈1 回目に作った `CudaContext` 由来〉と、呼び出し元が
+/// 新規に作った `ctx`〈今回限りの別 `CudaContext`〉が食い違っていた）。
+/// ordinal が未キャッシュの場合のみ `requires_created` の現在値で決定し
+/// （`Created` なら新規 `CudaContext::new(ordinal)` の上で `new_stream()`
+/// と `disable_event_tracking()` を実行）、以後はキャッシュ済みの決定を
 /// `requires_created` の値に関わらずそのまま返す（sticky。doc コメント
-/// 「# 対策」節参照）。
+/// 「# 対策」節参照）。`Created` の場合は `ctx`／`stream` 双方を 1 回目の
+/// `Arc` のまま共有して返す（`Legacy` は `ctx.default_stream()` がどの
+/// `CudaContext` から呼んでも安全な単一 NULL stream のため、`ctx` は
+/// 呼び出しのたびに独立した新規 `CudaContext::new(ordinal)` でよい）。
 ///
 /// # Safety
 ///
-/// 呼び出し元（[`CudaDevice::new`]）は、本関数が返した `(stream,
-/// StreamKind::Created)` を `CudaDevice::stream` としてそのまま保持する
-/// 契約とする（この ordinal に対して本関数以外の経路で追加の
-/// `new_stream()` を呼ばない）。この契約が守られる限り、`unsafe {
-/// ctx.disable_event_tracking() }` の安全性根拠（この ordinal では本
-/// キャッシュ内で唯一のストリームしか作らない）が成立する。
+/// 呼び出し元（[`CudaDevice::new`]）は、本関数が返した `(ctx, stream,
+/// StreamKind::Created)` の組を `CudaDevice` の `ctx`／`stream` フィールド
+/// としてそのまま保持する契約とする（この ordinal に対して本関数以外の
+/// 経路で追加の `new_stream()` を呼ばない）。この契約が守られる限り、
+/// `unsafe { ctx.disable_event_tracking() }` の安全性根拠（この ordinal
+/// では本キャッシュ内で唯一のストリームしか作らない）が成立する。
 #[cfg(not(feature = "internal-diagnostics"))]
 fn resolve_stream_kind_for(
     ordinal: usize,
-    ctx: &Arc<CudaContext>,
     requires_created: bool,
-) -> Result<(Arc<CudaStream>, StreamKind), CudaError> {
+) -> Result<(Arc<CudaContext>, Arc<CudaStream>, StreamKind), CudaError> {
     let cache = STREAM_KIND_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(existing) = guard.get(&ordinal) {
         return Ok(match existing {
-            ResolvedStreamKind::Legacy => (ctx.default_stream(), StreamKind::Legacy),
-            ResolvedStreamKind::Created(stream) => (Arc::clone(stream), StreamKind::Created),
+            // Legacy は呼び出しのたびに独立した `CudaContext` を作ってよい
+            // （`ctx.default_stream()` はどの `CudaContext` から呼んでも
+            // プロセス内で単一の NULL stream を指すため、`ctx` と `stream`
+            // が別インスタンスでも不整合は生じない。`ResolvedStreamKind`
+            // doc コメント参照）。
+            ResolvedStreamKind::Legacy => {
+                let ctx = CudaContext::new(ordinal)?;
+                let stream = ctx.default_stream();
+                (ctx, stream, StreamKind::Legacy)
+            }
+            // Created は 1 回目の呼び出しで作った `CudaContext`／
+            // `CudaStream` をそのまま共有する（Bugbot 指摘対応。
+            // `CudaDevice::new` 呼び出し元コメント参照）: `ctx` を新規に
+            // 作り直すと `device.context()` と `device.stream()` が別々の
+            // `CudaContext` を指してしまい、カーネルロード先（`ctx`）と
+            // 起動先ストリーム（`stream`）の context が食い違う。
+            ResolvedStreamKind::Created(ctx, stream) => {
+                (Arc::clone(ctx), Arc::clone(stream), StreamKind::Created)
+            }
         });
     }
     if requires_created {
+        let ctx = CudaContext::new(ordinal)?;
         let created = ctx.new_stream()?;
         // SAFETY: 上記関数 doc コメント「# Safety」節参照。本関数はミューテックス
         // 保持下で「未キャッシュの場合にのみ」`new_stream()` を呼ぶため、同一
@@ -153,11 +183,16 @@ fn resolve_stream_kind_for(
         unsafe {
             ctx.disable_event_tracking();
         }
-        guard.insert(ordinal, ResolvedStreamKind::Created(Arc::clone(&created)));
-        Ok((created, StreamKind::Created))
+        guard.insert(
+            ordinal,
+            ResolvedStreamKind::Created(Arc::clone(&ctx), Arc::clone(&created)),
+        );
+        Ok((ctx, created, StreamKind::Created))
     } else {
+        let ctx = CudaContext::new(ordinal)?;
+        let stream = ctx.default_stream();
         guard.insert(ordinal, ResolvedStreamKind::Legacy);
-        Ok((ctx.default_stream(), StreamKind::Legacy))
+        Ok((ctx, stream, StreamKind::Legacy))
     }
 }
 
@@ -258,7 +293,6 @@ impl CudaDevice {
             });
         }
 
-        let ctx = CudaContext::new(ordinal)?;
         // イシュー #1349: CUDA Graph capture opt-in が最初のデバイス
         // 初期化より前に設定されている場合のみ、capture 可能な
         // `new_stream()` を保持する（`StreamKind` doc コメント参照）。
@@ -294,24 +328,52 @@ impl CudaDevice {
         // 通常利用者が有効化しない開発者・CI 専用 feature のため、この
         // フォールバックが本番経路の性能・挙動へ影響することはない）。
         #[cfg(feature = "internal-diagnostics")]
-        let (stream, stream_kind) = (ctx.default_stream(), StreamKind::Legacy);
+        let (ctx, stream, stream_kind) = {
+            let ctx = CudaContext::new(ordinal)?;
+            let stream = ctx.default_stream();
+            (ctx, stream, StreamKind::Legacy)
+        };
         //
-        // **codex-review P0 再指摘対応（PR #1390 再々修正）**: `StreamKind`
-        // の決定を ordinal ごとに恒久固定（sticky）する
-        // `resolve_stream_kind_for`（本ファイル冒頭の `STREAM_KIND_CACHE`）
-        // を経由する。理由は同関数の doc コメント「# 背景」「# 対策」節を
-        // 参照——公開 `CudaDevice::new` は `context_cache::cached_device`
-        // の構築経路とは独立に何度でも呼び出せるため、同一 ordinal に対する
-        // 複数回の呼び出しの間で opt-in フラグ
-        // （`crate::graph::step_graph_mode()`）が切り替わると、`Created`
-        // ストリームと `Legacy` ストリームが同一 ordinal 上で共存しうる。
-        // `resolve_stream_kind_for` は ordinal ごとに最初の呼び出し時点の
-        // フラグ値で `StreamKind` を確定し、以後は現在のフラグ値を無視して
-        // その決定を返すことで、この共存を構造的に防ぐ。
+        // **codex-review P0 再指摘対応（PR #1390 再々修正）・Bugbot 指摘
+        // 対応（PR #1390 再修正。「Cached stream paired with a new
+        // context」）**: `StreamKind` の決定を ordinal ごとに恒久固定
+        // （sticky）する `resolve_stream_kind_for`（本ファイル冒頭の
+        // `STREAM_KIND_CACHE`）を経由する。理由は同関数の doc コメント
+        // 「# 背景」「# 対策」節を参照——公開 `CudaDevice::new` は
+        // `context_cache::cached_device` の構築経路とは独立に何度でも
+        // 呼び出せるため、同一 ordinal に対する複数回の呼び出しの間で
+        // opt-in フラグ（`crate::graph::step_graph_mode()`）が切り替わると、
+        // `Created` ストリームと `Legacy` ストリームが同一 ordinal 上で
+        // 共存しうる。`resolve_stream_kind_for` は ordinal ごとに最初の
+        // 呼び出し時点のフラグ値で `StreamKind` を確定し、以後は現在の
+        // フラグ値を無視してその決定を返すことで、この共存を構造的に防ぐ。
+        //
+        // **`ctx` 自体も `resolve_stream_kind_for` から受け取る（Bugbot
+        // 指摘の是正）**: 旧稿は `CudaDevice::new` が呼び出しのたびに
+        // 無条件で新規 `CudaContext::new(ordinal)` を作り、その `ctx` を
+        // 使って `resolve_stream_kind_for` へ渡していた。`StreamKind::
+        // Created` が既にキャッシュ済みの ordinal に対して 2 回目以降の
+        // `CudaDevice::new` を呼ぶと、返る `stream`（1 回目の呼び出しで
+        // 作られた `Arc<CudaStream>`。内部に自身の生成元 `CudaContext` を
+        // 保持する）は 1 回目の `CudaContext` に紐づいたままなのに対し、
+        // `self.ctx` は今回新規に作った別の `CudaContext` になり、
+        // `device.context()` と `device.stream()` が異なる CUDA context を
+        // 指す不整合が生じていた（`gemm_mma_tf32x3.rs::CudaMmaTf32x3Gemm
+        // ::new` 等が `device.context().load_module(ptx)` でカーネルを
+        // 今回の新規 `ctx` へロードしつつ `device.stream().clone()` で
+        // 1 回目の `ctx` に紐づくストリームへ起動する形になり、モジュール
+        // 読み込み先と起動先ストリームの context が食い違ってカーネル
+        // 起動が失敗しうる）。`resolve_stream_kind_for` が `ctx` の生成
+        // 自体も引き受け、`Created` 決定済みの ordinal では 1 回目に
+        // 作った `Arc<CudaContext>` をそのまま共有して返すことで、
+        // `device.context()`／`device.stream()` は常に同一 `CudaContext`
+        // を指す（`Legacy` 決定の ordinal では従来どおり呼び出しのたびに
+        // 独立した `CudaContext::new(ordinal)` を作る。単一の NULL
+        // stream を返す `ctx.default_stream()` は元々どの `ctx` から
+        // 呼んでも安全なため挙動不変）。
         #[cfg(not(feature = "internal-diagnostics"))]
-        let (stream, stream_kind) = resolve_stream_kind_for(
+        let (ctx, stream, stream_kind) = resolve_stream_kind_for(
             ordinal,
-            &ctx,
             crate::graph::step_graph_mode().requires_created_stream(),
         )?;
         let name = ctx.name()?;
