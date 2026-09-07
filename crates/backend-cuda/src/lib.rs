@@ -376,6 +376,10 @@ mod kernels_tiled_pipeline_128x64;
 mod kernels_transpose;
 mod kernels_wmma;
 mod kernels_wmma_opt;
+// イシュー #1336: `MemoryOps::with_host_view` の CUDA 実装
+// （`memory.rs`）が使う、形状ごとに再利用するホストステージング
+// バッファのキャッシュ。crate 内部限定（`memory.rs` のみが参照）。
+mod host_staging;
 pub mod memory;
 mod module_cache;
 mod mse;
@@ -503,6 +507,23 @@ pub use gemm_mma_tf32::CudaMmaTf32Gemm;
 pub use gemm_mma_tf32x3::{CudaMmaTf32x3Gemm, ValidatedTf32x3Inputs};
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
+// `HostStagingStats`（`CudaMemory::host_staging_stats` の戻り値。イシュー
+// #1336）は `with_host_view` の D2H ステージングキャッシュ挙動を覗く
+// 実機診断専用の補助型のため、`gemm_profile_target` 等と同じ
+// `internal-diagnostics` feature（既定 off）でゲートし通常ビルドの公開
+// API 面から除外する（`memory.rs::CudaMemory::host_staging_stats` の
+// 同一ゲートと対）。`mod host_staging;`（非公開）は本 re-export のみを
+// 通じて到達可能になる。
+#[cfg(feature = "internal-diagnostics")]
+pub use host_staging::HostStagingStats;
+// `HostStagingKind`（`Pinned`／`Pageable`）は `CudaMemory::
+// with_host_view_using_kind`（同じく `internal-diagnostics` feature
+// 限定。イシュー #1336 codex-review 指摘: `HOST_STAGING_KIND` 固定で
+// `Pinned` 経路の実機検証・A/B 比較入口がなかった対応）の引数型として
+// crate 外部（実機 `#[ignore]` テスト）へ公開する。`HostStagingStats`
+// re-export と同一ゲート・同一理由。
+#[cfg(feature = "internal-diagnostics")]
+pub use host_staging::HostStagingKind;
 pub use nvrtc::{
     CompiledDims, CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
     derive_pipeline_stages, nvrtc_version,
