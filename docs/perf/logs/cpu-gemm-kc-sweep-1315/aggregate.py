@@ -10,6 +10,16 @@ KC ごと・形状ごとの 5 run 中央値・対 KC=256 比を算出する。
 踏襲し、5 サンプル未満での集計を fail-closed で拒否する（実測値の
 捏造・不完全データでの判定確定を防ぐ）。Python3 標準ライブラリのみ。
 
+さらに #1430 codex-review 指摘（PR #1430 スレッド
+https://github.com/Fandhe-AI/fandhe-ai/pull/1430#discussion_r3952477456）を
+受け、以下を集計前に検証する（空ログ・候補/形状の丸ごと欠落を
+`exit 0` で通さない）:
+  - 入力行が 1 件も見つからない場合は拒否する（空ログ・/dev/null 対策）。
+  - 期待する KC 候補（EXPECTED_KCS。本スイープの固定候補集合）が
+    検出された各 size で全て揃っているか検証する。
+  - 基準 KC（BASELINE_KC=256）が検出された全 size に存在するか検証する
+    （欠落時に黙ってその size をスキップしない）。
+
 使い方: python3 aggregate.py "<機種名>" <ログファイル...>
 """
 import re
@@ -21,6 +31,12 @@ LINE_RE = re.compile(
     r"variant=(?P<variant>\S+) kc=(?P<kc>\d+) size=(?P<size>\d+) "
     r"median_gflops=(?P<gflops>[\d.]+)"
 )
+
+# 本スイープ（イシュー #1315）で計測対象とした固定 KC 候補集合。
+# `docs/perf/logs/cpu-gemm-kc-sweep-1315/kc-*-run*.txt` は全てこの 5 候補を
+# 含む前提（`aggregate.md` の実測表と対応）。
+EXPECTED_KCS = (128, 192, 256, 384, 512)
+BASELINE_KC = 256
 
 
 def parse_files(paths):
@@ -47,6 +63,17 @@ def main():
     paths = sys.argv[2:]
     samples = parse_files(paths)
 
+    # fail-closed: 入力行が 1 件もなければ拒否する（空ログ・/dev/null 等の
+    # 与えられたログファイル集合が丸ごと欠落した入力を、見出しのみ出力し
+    # exit 0 で通さない）。
+    if not samples:
+        print(
+            "ERROR: no `variant=... kc=... size=... median_gflops=...` "
+            f"lines found in input files: {paths}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # fail-closed: 5 サンプル未満の (kc, size) があれば拒否する
     incomplete = {k: len(v) for k, v in samples.items() if len(v) < 5}
     if incomplete:
@@ -56,11 +83,38 @@ def main():
     sizes = sorted({size for (_, size) in samples})
     kcs = sorted({kc for (kc, _) in samples})
 
+    # fail-closed: 検出された各 size で期待 KC 候補（EXPECTED_KCS）が
+    # 全て揃っているか検証する。候補が丸ごと欠落した入力（一部ログファイル
+    # の取り違え・欠落）を黙ってスキップしない。
+    missing_candidates = {
+        size: sorted(set(EXPECTED_KCS) - {kc for (kc, s) in samples if s == size})
+        for size in sizes
+    }
+    missing_candidates = {k: v for k, v in missing_candidates.items() if v}
+    if missing_candidates:
+        print(
+            f"ERROR: missing expected KC candidates {EXPECTED_KCS} for sizes: "
+            f"{missing_candidates}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # fail-closed: 基準 KC（BASELINE_KC=256）が検出された全 size に
+    # 存在するか検証する（欠落時に黙ってその size を集計から除外しない。
+    # 上の missing_candidates 検査で通常は捕捉されるが、EXPECTED_KCS 外の
+    # KC のみで構成された入力等の想定外ケースにも独立に fail-closed で
+    # 備える）。
+    missing_baseline = [size for size in sizes if (BASELINE_KC, size) not in samples]
+    if missing_baseline:
+        print(
+            f"ERROR: baseline KC={BASELINE_KC} missing for sizes: {missing_baseline}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print(f"## {machine}\n")
     for size in sizes:
         base_key = (256, size)
-        if base_key not in samples:
-            continue
         base_median = statistics.median(samples[base_key])
         base_series = samples[base_key]
         print(f"### size={size}\n")

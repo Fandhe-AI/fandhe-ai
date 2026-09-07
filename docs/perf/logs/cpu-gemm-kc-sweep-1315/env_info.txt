@@ -18,9 +18,11 @@ KC 再スイープ（イシュー #1315）実機実測環境情報
 - rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
 - RAYON_NUM_THREADS: 未設定（既定値）
 - BIG_CORE_LIMIT_ENABLED: false（#1364 REJECT 確定のまま不変）
-- 負荷状態: uptime-m4max.log 参照（計測開始前 1 サンプルのみ記録・load average 0 台。
-  計測後の再サンプリングは行っていない。同一マシンで並走する他セッションの有無は本セッション
-  からは確認できないため「共有負荷下」の可能性は排除しない）
+- 負荷状態: uptime-m4max.log 参照（計測開始前 1 サンプルのみ記録・load averages
+  17.13 12.77 9.69〈1/5/15 分値〉と高負荷。計測後の再サンプリングは行っていない。低負荷
+  ゲート〈1 分 load average < 6〉は満たしておらず、本ログだけでは低負荷条件の成立を
+  確認できない。同一マシンで並走する他セッションの有無は本セッションからは確認できないため
+  「共有負荷下」の可能性は排除しない）
 - 計測方式: `cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored
   gemm_blis_kc_sweep_ab_{1024_2048,4096} --nocapture` を各 5 回、独立プロセス起動で実行
 
@@ -29,8 +31,10 @@ KC 再スイープ（イシュー #1315）実機実測環境情報
 - rustc: rustc-version-dgx.txt 参照（rustc 1.97.0）
 - RAYON_NUM_THREADS: 未設定（既定値）
 - BIG_CORE_LIMIT_ENABLED: false（#1364 REJECT 確定のまま不変）
-- 負荷状態: uptime-dgx.log 参照（計測前後とも load average 1 分値 0.1 台。低負荷ゲート
-  〈1 分 load average < 6〉を満たす）
+- 負荷状態: uptime-dgx.log 参照（計測開始前は load average 1 分値 0.12 台で低負荷ゲート
+  〈1 分 load average < 6〉を満たすが、計測開始直後の 2 回目サンプル〈05:13:10〉は
+  1 分値 11.31 とゲートを超過している。計測時間全体を通じて低負荷条件が成立していたことは
+  本ログだけでは確認できない）
 - 転送方式: メイン worktree の `docs/real-hardware-verification-env.local.md`
   （gitignore 対象・.local.md は転送していない）から解決した SSH ホストへ、
   `crates/`・ルート `Cargo.toml`／`Cargo.lock`・`rust-toolchain.toml` を rsync で
@@ -61,5 +65,13 @@ Stage 1 ゲート（ある単一 KC の対 KC=256 比が N=1024・2048 の両方
 
 したがって **REJECT（不採用）** と確定する。`const KC` は変更しない（Stage 2〈oss-gemm-compare
 前後比較〉・backend-cpu 全テスト再実行は Stage 1 未通過のため実施しない）。
+
+**負荷条件についての留保（PR #1430 codex-review 指摘。本書き起こし時に是正）**: 上記のとおり
+M4 Max は計測開始前サンプルの時点で load averages 17.13/12.77/9.69 と高負荷、DGX Spark GB10 も
+計測開始直後の 2 回目サンプルで 1 分値 11.31 とゲート超過しており、両実機とも計測時間全体を
+通じた低負荷条件の成立は本ログだけでは確認できない。ただし Stage 1 ゲート未達の幅（M4 Max・
+DGX Spark GB10 とも KC=256 に対する最良候補でも 1.00 倍未達・僅差ではなく全 KC 値で系統的に
+未達）は負荷変動由来のノイズで覆る規模ではないと判断し、REJECT の結論自体はこの留保によって
+変わらない。
 
 詳細な採否記録・根拠は `docs/perf/cpu-gemm-candle-cpu-retune.md` §8.1 を参照。
