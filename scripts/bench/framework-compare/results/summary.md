@@ -1968,3 +1968,56 @@ DGX の `cpu_capacity` sysfs 値（5 段階の非一様分布）は `lscpu` の
 `docs/perf/cpu-gemm-default-thread-limit.md` §6・
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13・
 `docs/perf/logs/cpu-gemm-thread-limit-1364/` を参照。
+
+## 環境 23: DGX Spark GB10・Apple M4 Max（借用ビュー readout 切替前後・3 バックエンド × 両実機。イシュー #1337）
+
+`bench-fandhe` の `readout_var`（cargo feature `host-view-readout`。既定
+OFF・#1335/#1336 の `VarHostView`／`Tensor::host_slice` を利用。PR #1411）
+を Metal（M4 Max）・CPU（DGX Spark GB10 Grace／M4 Max）・CUDA（DGX Spark
+GB10）で切替前後 5 回中央値として実測（crates.io 承認ピンに該当 API が
+未収録のため正式系列ではなく参考系列。系列の詳細は下記）。
+`compare_gemm_ab.py --sizes gate --modes reuse`（cpu は既定 `fresh,reuse`）
+で off→on の ratio（after/before）を突合。
+
+**ソース差についての重要な限定**: 下表のうち CUDA 列（§12・HEAD `3d5e833`）
+のみ off/on 両腕が同一ソース（`GEMM_GATE_PATCH_FACADE_PATH` による HEAD
+path 差し替え）で揃っており、readout（#1337）単独への効果分離帰属ができる。
+Metal・CPU-DGX・CPU-M4Max（いずれも HEAD `1c298ff`）は **off 腕が
+`fandhe_ai_source=registry`（crates.io `fandhe-ai =0.7.0`）・on 腕のみ
+`fandhe_ai_source=path:<facade 絶対パス>` というソース差を含む参考比較**
+であり、off/on 差分には readout feature の効果に加え v0.7.0 公開後に
+マージされたコード差分（HEAD と registry の乖離）が混入している。これら
+3 列は readout 単独の効果としては帰属できず、「HEAD（readout 込み）対
+registry v0.7.0」という異なる版の比較として扱う（各節の限定を参照）。
+
+| device/N | Metal（M4 Max・ソース差あり） | CPU-DGX（ソース差あり） | CPU-M4Max（ソース差あり） | CUDA（DGX・同一ソース） |
+|---|---|---|---|---|
+| 512 | - | 0.85〜1.00 | 0.88〜1.58 | - |
+| 1024 | 1.5582 | 0.70〜0.92 | 1.14〜2.07 | 15.0419 |
+| 2048 | 1.3007 | 0.80〜0.86 | 1.04〜1.23 | 1.1966 |
+| 4096 | 1.3330 | - | - | 0.6378 |
+
+（値は `reuse` 列。CUDA 列は同一ソース比較の §12（`docs/perf/
+cuda-gemm-candle-gate-remeasurement.md`）の値を採用。CPU 列はレンジで
+fresh/reuse 双方を含む。1.0 未満が改善・1.0 超が後退。checksum は
+全セル・全実機で off/on 完全一致）
+
+- **CUDA（低負荷実機・同一ソース。readout 単独へ帰属可）**: N=4096 のみ
+  改善（0.64 倍）・N=1024 は約 15 倍の大幅後退。#1337 独自の DGX 再実行
+  （ソース差あり・参考値。`docs/perf/cuda-gemm-candle-gate-remeasurement.md`
+  §13.2）でも on 腕は同一符号を再現
+- **CPU-DGX（低負荷実機・ソース差あり）**: 全セル非後退（0.70〜1.00 倍）
+  だが candle 比ゲート（#1117）は未達のまま。ソース差のため readout 単独
+  の効果とは断定しない
+- **CPU-M4Max・Metal（共有負荷・片方向負荷差＋ソース差あり）**: いずれも
+  後退方向（CPU-M4Max は 1.04〜2.07 倍・Metal は 1.30〜1.56 倍）。ただし
+  CPU-M4Max は candle 比では 3 形状とも達成（`docs/perf/
+  cpu-gemm-candle-gate-remeasurement.md` §15.3。同一マシン内 before/after
+  比較と対 candle 比較は独立の指標であることに注意）。負荷差・ソース差の
+  いずれも未分離のため readout 単独の効果とは断定しない
+- 既定化判定は**未確定**（CUDA N=1024/2048・Metal 全形状の後退が解決課題）。
+  詳細・データ有効性・公正性の論点は
+  `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12・§13・
+  `docs/perf/metal-gemm-candle-gate-remeasurement.md` §12・
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §15・
+  `docs/perf/logs/gemm-candle-gate-readout-1337/` を参照

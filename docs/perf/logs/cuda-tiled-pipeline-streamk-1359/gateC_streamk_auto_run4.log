@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running `/home/fandhe/work/target-fandhe-ai/release/examples/gemm_tiled_pipeline_persistent_bench --sizes 1024,2048,4096 --tile both --blocks-per-sm auto --streamk on`
+tile=64x64 num_sms=48 blocks_per_sm=3 grid_capacity=144
+size=1024 tile=64x64 pipeline3_gpu_only_tflops=11.1420 persistent_gpu_only_tflops=11.1503 persistent_over_pipeline3=1.0007
+size=1024 tile=64x64 streamk_gpu_only_tflops=11.4705 streamk_over_pipeline3=1.0295 streamk_plan=[remainder_tiles=112 q=50 sk_units=144 max_contributors=3 grid_blocks=144 active=true]
+size=2048 tile=64x64 pipeline3_gpu_only_tflops=12.9177 persistent_gpu_only_tflops=12.9731 persistent_over_pipeline3=1.0043
+size=2048 tile=64x64 streamk_gpu_only_tflops=13.1055 streamk_over_pipeline3=1.0145 streamk_plan=[remainder_tiles=16 q=15 sk_units=137 max_contributors=10 grid_blocks=144 active=true]
+size=4096 tile=64x64 pipeline3_gpu_only_tflops=9.6724 persistent_gpu_only_tflops=8.8640 persistent_over_pipeline3=0.9164
+size=4096 tile=64x64 streamk_gpu_only_tflops=9.0612 streamk_over_pipeline3=0.9368 streamk_plan=[remainder_tiles=64 q=114 sk_units=144 max_contributors=4 grid_blocks=144 active=true]
+tile=128x64 num_sms=48 blocks_per_sm=2 grid_capacity=96
+size=1024 tile=128x64 pipeline3_gpu_only_tflops=11.6822 persistent_gpu_only_tflops=11.7993 persistent_over_pipeline3=1.0100
+size=1024 tile=128x64 streamk_gpu_only_tflops=n/a (streamk not implemented for this tile)
+size=2048 tile=128x64 pipeline3_gpu_only_tflops=14.5370 persistent_gpu_only_tflops=14.6118 persistent_over_pipeline3=1.0051
+size=2048 tile=128x64 streamk_gpu_only_tflops=n/a (streamk not implemented for this tile)
+size=4096 tile=128x64 pipeline3_gpu_only_tflops=12.6254 persistent_gpu_only_tflops=10.7712 persistent_over_pipeline3=0.8531
+size=4096 tile=128x64 streamk_gpu_only_tflops=n/a (streamk not implemented for this tile)
