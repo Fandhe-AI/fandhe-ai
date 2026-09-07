@@ -99,6 +99,19 @@ pub(crate) struct CudaBufferHandle {
     /// `zero_fill`（本ファイル下部 `PoolZeroFill` 実装）が正しい世代
     /// 検査を行える。
     pub(crate) generation: u64,
+    /// 確保元デバイスの ordinal（イシュー #1349・PR #1390 マージ時是正）。
+    ///
+    /// `Drop` 実装（本モジュール下部）が `context_cache::
+    /// begin_buffer_release` を呼ぶために必要。`storage` が
+    /// `CudaStorage::Device`（[`CudaSlice`]）の場合は `CudaSlice::
+    /// ordinal()` からも取得できるが、`CudaStorage::Managed`
+    /// （[`UnifiedSlice`]。イシュー #1352）は `cudarc` 側に ordinal・
+    /// context への公開アクセサを持たない（`unified_memory.rs` の
+    /// `stream` フィールドは `pub(crate)`）ため、`storage` の variant に
+    /// 依らず共通に扱えるようハンドル自身に ordinal を刻印する
+    /// （`CudaMemory::ordinal` を各構築箇所でそのまま複製するだけの
+    /// 安価な複製。`generation` フィールドと同じ設計判断）。
+    pub(crate) ordinal: usize,
 }
 
 impl BufferHandle for CudaBufferHandle {
@@ -108,6 +121,153 @@ impl BufferHandle for CudaBufferHandle {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+/// codex-review P1／P0 再指摘対応（イシュー #1349・PR #1390）: `storage`
+/// フィールドの自然な drop（`cudarc::driver::CudaSlice::drop` が
+/// `cuMemFreeAsync`/`cuMemFree` を、`UnifiedSlice::drop`（イシュー
+/// #1352。`CudaStorage::Managed`）が `event.synchronize()` の後に
+/// `cuMemFree` を、それぞれ自身の `stream` へ直接発行する。本モジュール
+/// 冒頭コメント「解放は `CudaSlice`／`UnifiedSlice` の `Drop` に一本化
+/// する」参照）は `context_cache` の `begin_driver_call`／
+/// `begin_capture_session` 排他機構を一切経由しない。そのため、別
+/// スレッドが `graph::run_captured_sgd_step_segment` で同じ ordinal を
+/// capture 中に本ハンドルが drop されると、その解放操作が capture 中の
+/// 共有ストリームへ意図せず記録されうる（`context_cache::
+/// begin_buffer_release` doc コメント参照）。
+///
+/// 本 `Drop` はフィールド既定の drop 順序（宣言順。`storage` →
+/// `_alloc`）より**前**に走る（Rust の `Drop::drop` は構造体自身の
+/// コードがフィールドの自動 drop より先に実行される規則）。`storage` が
+/// `Some`（`numel > 0`。`numel == 0` は driver に触れないため対象外。
+/// 構造体 doc コメント参照）の場合のみ、`self.ordinal`（`storage` の
+/// variant に依らずハンドル自身が保持する。フィールド doc コメント
+/// 参照。`CudaStorage::Managed` は `CudaSlice::ordinal()` 相当の公開
+/// アクセサを `cudarc` 側に持たないため、variant 分岐なしで共通に扱う）
+/// で `context_cache::begin_buffer_release` を呼び、返した
+/// [`context_cache::BufferReleaseToken`] を**実際の `storage` の drop
+/// （`cuMemFreeAsync`/`cuMemFree` の発行）が完了するまで**保持する
+/// （P0 再指摘対応: 旧稿は「駐機して戻るだけ」で、戻った直後に別スレッド
+/// が新たな capture を実際に開始できてしまう競合窓があった。
+/// `begin_buffer_release` doc コメント「P0 再修正」参照。トークンを
+/// `storage` の drop より後まで生かすことで、`state.in_flight` 経由の
+/// 排他が実際の解放発行を包み込む）。
+impl Drop for CudaBufferHandle {
+    fn drop(&mut self) {
+        if let Some(storage) = self.storage.take() {
+            let release_token = context_cache::begin_buffer_release(self.ordinal);
+            drop(storage);
+            drop(release_token);
+        }
+    }
+}
+
+/// `gemm.rs`／`gemm_wmma.rs`／`gemm_mma.rs`／`gemm_mma_tf32.rs`／
+/// `gemm_mma_tf32x3.rs`／`transpose.rs` のベンチ・診断専用公開 API
+/// （`upload_*`／`alloc_output_*`）が返す生の [`CudaSlice`] を包む薄い
+/// RAII ラッパー（codex-review P0 指摘対応・PR #1390 再々修正）。
+///
+/// 型自体は `pub`（`upload_*`／`alloc_output_*` の戻り値の型として
+/// crate 外の呼び出し元〈ベンチ・examples・integration tests〉のシグ
+/// ネチャに現れるため公開が必須）。構築子（`Self::new`）は
+/// `pub(crate)` のまま封じ、crate 外は本クレートが返した値を保持・
+/// 転送・drop することしかできない（未検証の `CudaSlice` を外部から
+/// 差し込んで `ordinal` を偽装する経路を型で排除する。`gemm_mma_tf32x3.
+/// rs::ValidatedTf32x3Inputs` と同じ「フィールド非公開・構築子限定」
+/// 設計判断）。
+///
+/// **背景**: これらの公開 API は `CudaBackendOps`（`ops.rs`）を経由せず
+/// crate 外から直接呼び出せる（`gemm.rs::CudaGemm::upload_f32`
+/// ドキュメンテーションコメント「PyTorch 参照計測」参照）。呼び出し元
+/// （ベンチハーネス・`fresh_overhead_diag_tests.rs` 等の診断テスト）は
+/// 返された `CudaSlice<T>` を複数回の関数呼び出しをまたいで保持し、
+/// 最終的に自身のスコープで drop する。生の `CudaSlice<T>::drop` は
+/// `context_cache::begin_driver_call`／`begin_capture_session` の排他
+/// 機構を一切経由しない（`cudarc` 側の実装であり本クレートが介入
+/// できない。`CudaBufferHandle` ドキュメンテーションコメント「背景」節と
+/// 同型の欠陥）ため、別スレッドが `run_captured_sgd_step_segment` で
+/// 同じ ordinal を実際に driver capture 中に、このラッパーなしで
+/// `CudaSlice` を drop すると、その解放操作が capture 中の共有ストリーム
+/// へ意図せず記録されうる。
+///
+/// `Drop` 実装は `CudaBufferHandle::drop` と同一の手順（
+/// `context_cache::begin_buffer_release` を呼び、返した
+/// `context_cache::BufferReleaseToken` を実際の `CudaSlice::drop` が
+/// 完了するまで保持する）を踏む。
+///
+/// **公開アクセス面（codex-review P0 再指摘対応・PR #1390 再々々修正）**:
+/// 生の `&CudaSlice<T>`／`&mut CudaSlice<T>` は crate 外へ一切公開しない
+/// （`Deref`／`DerefMut` を実装しない）。理由は 2 つ: (1) 可変参照
+/// （旧 `DerefMut`）を公開すると、`std::mem::swap` 等の安全な操作だけで
+/// 異なる `ordinal`（別 GPU）を持つ 2 つの `GuardedSlice` の間で内部の
+/// `CudaSlice` 実体を交換できてしまう——ラッパー自身の `ordinal`
+/// フィールドは交換されないため、`Drop` 時に実体が実際に存在する GPU と
+/// 異なる GPU の排他トークンで解放が走り、`capture` 中の共有ストリームへ
+/// 誤った解放操作が混入しうる。(2) 不変参照（旧 `Deref`）であっても
+/// `CudaSlice::context()`／`stream()` 等の公開アクセサへ到達でき、
+/// `context_cache::disable_event_tracking()` が前提とする「1 ストリーム
+/// のみ」という不変条件を crate 外から破りうる。
+///
+/// 代わりに、内部の `CudaSlice<T>` へは本クレート内（`pub(crate)`）の
+/// `Self::as_raw`/`Self::as_raw_mut` からのみ到達できる。`gemm.rs`／
+/// `gemm_wmma.rs`／`gemm_mma.rs`／`gemm_mma_tf32.rs`／
+/// `gemm_mma_tf32x3.rs`／`transpose.rs` の `launch_*`／`download_*` 系
+/// 公開シグネチャ自体を `&GuardedSlice<T>`／`&mut GuardedSlice<T>` を
+/// 受け取る形へ変更し（旧稿の `&CudaSlice<T>`／`&mut CudaSlice<T>` から
+/// 変更）、crate 外からは排他制御を経由する公開 API を通してしか
+/// バッファを渡せない。
+#[derive(Debug)]
+pub struct GuardedSlice<T: cudarc::driver::DeviceRepr> {
+    // `ManuallyDrop` で保持する（`Option` は使わない）: `Drop::drop`
+    // 以外の生存区間では常に初期化済みであることを型で保証し、
+    // `Self::as_raw`／`Self::as_raw_mut` が `Option` の取り出し失敗
+    // （`unwrap`/`expect`）で本番経路 panic しうる余地を構造的に排除する
+    // （codex-review P1 指摘対応・PR #1390 再々々修正。coding-rust.md
+    // 「本番経路で unwrap()/expect() を使わない」）。
+    inner: std::mem::ManuallyDrop<CudaSlice<T>>,
+    ordinal: usize,
+}
+
+impl<T: cudarc::driver::DeviceRepr> GuardedSlice<T> {
+    /// `slice`（確保済み・アップロード済みのいずれか）を `ordinal` の
+    /// capture 排他へ参加する形で包む。
+    pub(crate) fn new(ordinal: usize, slice: CudaSlice<T>) -> Self {
+        Self {
+            inner: std::mem::ManuallyDrop::new(slice),
+            ordinal,
+        }
+    }
+
+    /// crate 内部限定で内部の `&CudaSlice<T>` へアクセスする（構造体
+    /// ドキュメンテーションコメント「公開アクセス面」参照。crate 外へは
+    /// 公開しない）。
+    pub(crate) fn as_raw(&self) -> &CudaSlice<T> {
+        &self.inner
+    }
+
+    /// `Self::as_raw` の可変版。crate 内部限定（同上）。
+    pub(crate) fn as_raw_mut(&mut self) -> &mut CudaSlice<T> {
+        &mut self.inner
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> Drop for GuardedSlice<T> {
+    fn drop(&mut self) {
+        // `CudaBufferHandle::drop` と同一の手順（doc コメント「P0
+        // 再修正」参照）: `begin_buffer_release` のトークンを、実際の
+        // `CudaSlice::drop`（`cuMemFreeAsync`/`cuMemFree` の発行）が
+        // 完了するまで保持する。
+        //
+        // SAFETY: `ManuallyDrop::take` は同一フィールドから 2 度取り出す
+        // と未定義動作になる。`Drop::drop` は各インスタンスにつき高々
+        // 1 回しか呼ばれず（Rust の drop 契約）、`drop` 実行後は `self`
+        // （`self.inner` を含む）へ二度とアクセスされないため、ここでの
+        // 1 回きりの `take` は当該不変条件を満たす。
+        let slice = unsafe { std::mem::ManuallyDrop::take(&mut self.inner) };
+        let release_token = context_cache::begin_buffer_release(self.ordinal);
+        drop(slice);
+        drop(release_token);
     }
 }
 
@@ -570,6 +730,7 @@ impl CudaMemory {
                 storage: None,
                 _alloc: alloc,
                 generation,
+                ordinal: self.ordinal,
             })
         } else if placement::managed_placement_enabled() {
             self.check_managed_placement_supported()?;
@@ -595,6 +756,7 @@ impl CudaMemory {
                 storage: Some(CudaStorage::Managed(unified)),
                 _alloc: alloc,
                 generation,
+                ordinal: self.ordinal,
             })
         } else {
             let slice = self.stream.alloc_zeros::<f32>(numel)?;
@@ -604,6 +766,7 @@ impl CudaMemory {
                 storage: Some(CudaStorage::Device(slice)),
                 _alloc: alloc,
                 generation,
+                ordinal: self.ordinal,
             })
         };
         Ok(DeviceBuffer::new_with_generation(
@@ -623,6 +786,7 @@ impl CudaMemory {
                 storage: None,
                 _alloc: alloc,
                 generation,
+                ordinal: self.ordinal,
             });
             return Ok(DeviceBuffer::new_with_generation(
                 Device::Cuda(self.ordinal),
@@ -670,6 +834,7 @@ impl CudaMemory {
             storage: Some(storage),
             _alloc: alloc,
             generation,
+            ordinal: self.ordinal,
         });
         Ok(DeviceBuffer::new_with_generation(
             Device::Cuda(self.ordinal),
@@ -733,6 +898,25 @@ impl CudaMemory {
         f: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, BackendError> {
         let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
+        context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
+    }
+
+    /// [`Self::with_driver_call`] と同じだが、CUDA Graph capture 中
+    /// （イシュー #1349・`docs/backend-cuda-graph-step-capture-design.md`
+    /// §4.2）は driver に触れる前に拒否する（`context_cache::
+    /// begin_sync_point_call`）。ホスト⇔デバイス転送・確保・ゼロ初期化
+    /// はいずれも capture 境界を跨ぐ同期点であり、capture 中の呼び出しを
+    /// 許すと graph が「その時点のホストデータ」を焼き込んでしまい、
+    /// 2 回目以降の再生で不正な結果を生む（`what` は診断メッセージ用の
+    /// 呼び出し名）。
+    fn with_sync_point_call<T>(
+        &self,
+        resource_generations: &[u64],
+        what: &'static str,
+        map: impl FnOnce(CudaError) -> BackendError,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, BackendError> {
+        let token = context_cache::begin_sync_point_call(self.ordinal, resource_generations, what)?;
         context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
     }
 
@@ -862,11 +1046,13 @@ impl CudaMemory {
 
 impl MemoryOps for CudaMemory {
     fn alloc_zeroed(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.with_driver_call(&[], map_cuda_alloc_error, || self.alloc_zeroed_inner(shape))
+        self.with_sync_point_call(&[], "alloc_zeroed", map_cuda_alloc_error, || {
+            self.alloc_zeroed_inner(shape)
+        })
     }
 
     fn upload(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.with_driver_call(&[], map_cuda_error, || self.upload_inner(tensor))
+        self.with_sync_point_call(&[], "upload", map_cuda_error, || self.upload_inner(tensor))
     }
 
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -895,8 +1081,84 @@ impl MemoryOps for CudaMemory {
         // `upload_inner` 参照）を渡し、`invalidate` による回復後の新世代に
         // 対して旧世代のバッファが誤って読まれることを検出する
         // （イシュー #1013 設計文書 §9 item 7）。
-        self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
+        self.with_sync_point_call(&[buffer.generation()], "download", map_cuda_error, || {
             self.download_inner(buffer)
+        })
+    }
+
+    /// ホスト常駐の `tensor` を既存の `dst` の `dst_offset` 要素目から
+    /// H2D 転送する（イシュー #1212・§4.5 で `DeviceParamStore::step` の
+    /// grad staging 書き込みに使う。イシュー #1349 では graph capture
+    /// 対象区間の外側〈`run_captured_sgd_step_segment` 呼び出し前〉で毎回呼ぶ
+    /// ことで、capture 済み graph が参照するバッファのアドレス・内容を
+    /// capture 前に確定させる契約とする。`backend-cpu::upload_into_cpu_buffer`
+    /// と同じ境界検査を行う）。
+    fn upload_into(
+        &self,
+        tensor: &Tensor<f32>,
+        dst: &mut DeviceBuffer<f32>,
+        dst_offset: usize,
+    ) -> Result<(), BackendError> {
+        if dst.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let contiguous = tensor.contiguous();
+        let numel = contiguous.numel();
+        let end = dst_offset.checked_add(numel).ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "upload_into: dst_offset + tensor.numel() overflowed usize".to_string(),
+            )
+        })?;
+        if end > dst.numel() {
+            return Err(BackendError::InvalidArgument(format!(
+                "upload_into: write range [{dst_offset}, {end}) exceeds dst buffer length {}",
+                dst.numel()
+            )));
+        }
+        let generation = dst.generation();
+        self.with_sync_point_call(&[generation], "upload_into", map_cuda_error, || {
+            if numel == 0 {
+                return Ok(());
+            }
+            let data = contiguous
+                .as_slice()
+                .ok_or_else(|| CudaError::InvalidShape {
+                    detail: "upload_into: contiguous() の直後にもかかわらず as_slice が \
+                             None を返した（tensor-core 側のロジック不整合）"
+                        .to_string(),
+                })?;
+            let handle = dst
+                .downcast_handle_mut::<CudaBufferHandle>()
+                .ok_or_else(|| CudaError::InvalidShape {
+                    detail: "upload_into: dst buffer handle is not a CudaBufferHandle".to_string(),
+                })?;
+            let storage = handle
+                .storage
+                .as_mut()
+                .ok_or_else(|| CudaError::InvalidShape {
+                    detail: "upload_into: dst buffer has numel > 0 but no device allocation"
+                        .to_string(),
+                })?;
+            match storage {
+                CudaStorage::Device(slice) => {
+                    let mut view = slice.slice_mut(dst_offset..end);
+                    self.stream.memcpy_htod(data, &mut view)?;
+                }
+                CudaStorage::Managed(unified) => {
+                    // managed 配置はホストから直接書き込めるため
+                    // `memcpy_htod` を発行しない（`upload_inner` の
+                    // 新規確保時と同じ方針）。ただし既存バッファへの
+                    // 書き込みであるため、直前に投入されたカーネルが
+                    // 同じ領域を読み書き中でないことを、書き込み前に
+                    // `stream.synchronize()` で確定させる（`host_readback`
+                    // の同期契約コメント参照。`as_mut_slice()` 内部の
+                    // `event.synchronize()` だけでは単一ストリーム構成
+                    // では不十分なため）。
+                    self.stream.synchronize()?;
+                    unified.as_mut_slice()?[dst_offset..end].copy_from_slice(data);
+                }
+            }
+            Ok(())
         })
     }
 
@@ -1187,6 +1449,65 @@ mod tests {
         );
     }
 
+    /// [`CudaMemory::upload_into`]（イシュー #1349・#1212）は `dst.device()`
+    /// が `self` のデバイスと一致しない場合、driver に一切触れずに
+    /// `DeviceMismatch` を返す（`download_rejects_mismatched_device_
+    /// ordinal` と同じ「実 GPU ドライバ呼び出しを経由しない検証」方針。
+    /// numel == 0 の空バッファなので CUDA 非搭載環境でも到達可能）。
+    #[test]
+    fn upload_into_rejects_mismatched_device_ordinal() {
+        match CudaDevice::new(0) {
+            Ok(device) => {
+                let mem = CudaMemory::new(&device);
+                let other_ordinal = mem.ordinal + 1;
+                let alloc = TrackedAllocation::new(Arc::clone(&mem.tracker), 0);
+                let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+                    storage: None,
+                    _alloc: alloc,
+                    generation: 0,
+                    ordinal: other_ordinal,
+                });
+                let mut dst: DeviceBuffer<f32> =
+                    DeviceBuffer::new(Device::Cuda(other_ordinal), vec![0], handle);
+                let tensor = Tensor::<f32>::new(vec![], &[0]).unwrap();
+                let err = mem.upload_into(&tensor, &mut dst, 0).unwrap_err();
+                assert!(matches!(err, BackendError::DeviceMismatch));
+            }
+            Err(_) => {
+                // 非搭載環境: `CudaDevice::new` 自体が型付きエラーで
+                // 止まるため本テストの主張には到達しない。
+            }
+        }
+    }
+
+    /// [`CudaMemory::upload_into`] は `dst_offset + tensor.numel()` が
+    /// `dst.numel()` を超える場合、driver に触れずに `InvalidArgument`
+    /// で拒否する（REQ-8「カーネル側の手動境界チェックを省略しない」・
+    /// OWASP A03。境界検査は device 一致検査の後・driver 呼び出しの前に
+    /// 行われるため、CUDA 非搭載環境でも `CudaDevice::new` が成功する
+    /// 環境でのみ到達する。空バッファ〈`numel == 0`〉の `dst` に対して
+    /// 1 要素書き込もうとする最小ケースで検証する）。
+    #[test]
+    fn upload_into_rejects_out_of_range_write() {
+        if let Ok(device) = CudaDevice::new(0) {
+            let mem = CudaMemory::new(&device);
+            let alloc = TrackedAllocation::new(Arc::clone(&mem.tracker), 0);
+            let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+                storage: None,
+                _alloc: alloc,
+                generation: 0,
+                ordinal: mem.ordinal,
+            });
+            let mut dst: DeviceBuffer<f32> =
+                DeviceBuffer::new(Device::Cuda(mem.ordinal), vec![0], handle);
+            let tensor = Tensor::<f32>::new(vec![1.0], &[1]).unwrap();
+            let err = mem.upload_into(&tensor, &mut dst, 0).unwrap_err();
+            assert!(matches!(err, BackendError::InvalidArgument(_)));
+        }
+        // 非搭載環境: `CudaDevice::new` 自体が型付きエラーで止まるため
+        // 本テストの主張には到達しない。
+    }
+
     #[test]
     fn download_rejects_mismatched_device_ordinal() {
         // 別 ordinal 上で確保された `DeviceBuffer`（ハンドル型は
@@ -1211,6 +1532,7 @@ mod tests {
                     storage: None,
                     _alloc: alloc,
                     generation: 0,
+                    ordinal: other_ordinal,
                 });
                 let buffer: DeviceBuffer<f32> =
                     DeviceBuffer::new(Device::Cuda(other_ordinal), vec![0], handle);
@@ -1242,6 +1564,7 @@ mod tests {
                     storage: None,
                     _alloc: alloc,
                     generation: 0,
+                    ordinal: other_ordinal,
                 });
                 let buffer: DeviceBuffer<f32> =
                     DeviceBuffer::new(Device::Cuda(other_ordinal), vec![0], handle);
@@ -1310,6 +1633,7 @@ mod tests {
                 storage: None,
                 _alloc: alloc,
                 generation: 0,
+                ordinal: mem.ordinal,
             });
             let buffer: DeviceBuffer<f32> =
                 DeviceBuffer::new(Device::Cuda(mem.ordinal), vec![0], handle);

@@ -308,6 +308,25 @@ pub enum BackendError {
         /// 復旧処理が失敗した際のエラー内容（診断用）。
         probe_error: String,
     },
+    /// 対象 ordinal が別スレッドによる CUDA Graph capture 中であり、
+    /// 一時的に演算入口を拒否した（イシュー #1349・Cursor Bugbot 指摘・
+    /// PR #1390 是正。`backend-cuda::context_cache::begin_driver_call` の
+    /// capture 排他制御が発行する）。
+    ///
+    /// `DeviceContextRetiring` と同様、この状態は capture を開始した
+    /// スレッドが capture 区間を抜ける（`CaptureGuard` の drop）まで
+    /// の短時間で自然に解消する**一過性の競合**であり、`Unsupported`
+    /// （恒久的な未実装・設定誤り）とは意味が異なる。呼び出し元
+    /// （`fandhe_ai_autodiff::optim::device_store::DeviceParamStore::step`
+    /// の CUDA Graph 可用性問い合わせ等）はこの variant を、他の
+    /// `BackendError` variant と同じ「恒久的な致命的失敗」として扱って
+    /// はならない（例えば `DeviceParamStore` を永久 poison してはならない。
+    /// 呼び出し元は次回 `step()` で再試行するか、graph capture を使わない
+    /// 直接実行経路へ今回分だけフォールバックする）。
+    DeviceContextCaptureInProgress {
+        /// 対象デバイスの ordinal。
+        ordinal: usize,
+    },
 }
 
 impl fmt::Display for BackendError {
@@ -361,6 +380,11 @@ impl fmt::Display for BackendError {
             } => write!(
                 f,
                 "device context on ordinal {ordinal} is unrecoverably poisoned: {probe_error}"
+            ),
+            BackendError::DeviceContextCaptureInProgress { ordinal } => write!(
+                f,
+                "device context on ordinal {ordinal} is currently being captured by another \
+                 thread (transient; retry after the capture completes)"
             ),
         }
     }

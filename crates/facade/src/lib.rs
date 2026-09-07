@@ -339,6 +339,42 @@ pub fn cuda_tf32_gemm_enabled() -> bool {
     fandhe_ai_backend_cuda::precision::tf32_gemm_enabled()
 }
 
+/// 学習 step の update 区間（`BackendOps::sgd_step_device_tracked`）を
+/// CUDA Graph で capture・再利用する経路を opt-in で有効化・無効化する
+/// （イシュー #1349。親 #1348・ルート #1341 → #1269）。
+///
+/// `fandhe_ai_backend_cuda::graph::set_step_graph_enabled` への薄い委譲
+/// （composition root。`docs/compat-api-scope.md` §0 の確定公開面）。
+/// **既定は無効**。有効化すると以降の全スレッド・全 CUDA device の学習
+/// step update 区間がプロセスワイドに capture 対象となる（`Device` 単位
+/// ではない。`fandhe_ai_backend_cuda::graph` モジュール冒頭コメントの
+/// 契約参照）。
+///
+/// **重要な制約（設定タイミング）**: `CudaDevice` は ordinal ごとに
+/// プロセス内で 1 回だけ構築・キャッシュされる（`context_cache::
+/// cached_device`）ため、本関数は**最初の CUDA デバイス初期化より前**
+/// （`fandhe_ai::tape_for(Device::Cuda(_))` の最初の呼び出しより前）に
+/// 呼ぶ必要がある。有効化がデバイス初期化に間に合わなかった場合、以降の
+/// 学習 step は `BackendError::Unsupported` を返し fail-closed に拒否
+/// する（silent に非 capture 経路へフォールバックしない。`docs/backend-
+/// cuda-graph-step-capture-design.md` §4.7）。
+///
+/// capture 対象は update 区間のみ（forward／backward は対象外。同 design
+/// doc §1・§3.2）であり、`bit` 単位で非 capture 経路と同一の損失・勾配・
+/// パラメータになることを受け入れ条件とする（同 doc §7 受け入れ (a)）。
+/// 非対応バックエンド（CPU／Metal）・opt-in OFF では
+/// `BackendOps::captured_segment_key` が常に `Ok(None)` を返すため、
+/// `DeviceParamStore::step` は現行の直接実行経路のまま動作する。
+pub fn set_cuda_graph_step_enabled(enabled: bool) {
+    fandhe_ai_backend_cuda::graph::set_step_graph_enabled(enabled);
+}
+
+/// [`set_cuda_graph_step_enabled`] で設定した現在の opt-in 状態を返す
+/// （既定 `false`）。
+pub fn cuda_graph_step_enabled() -> bool {
+    fandhe_ai_backend_cuda::graph::step_graph_enabled()
+}
+
 /// CUDA GEMM 精度モード（既定 `Fp32Strict`・単発 `Tf32`・3×TF32
 /// `Tf32x3`。イシュー #1355。親ツリー #1354・承認元 #1338）の再公開。
 /// `set_cuda_gemm_precision`／`cuda_gemm_precision` の戻り値・引数型

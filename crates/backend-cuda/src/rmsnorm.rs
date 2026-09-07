@@ -23,6 +23,7 @@ use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
 use fandhe_ai_tensor_core::{FusedOpKind, FusionPlan, RowFusionMeta};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm_auto::read_clamped_smem_budget_bytes;
@@ -487,6 +488,11 @@ pub(crate) fn match_rmsnorm_plan(plan: &FusionPlan) -> Option<usize> {
 /// （SMEM 予算・SM 数）を保持する。
 pub struct CudaRmsNorm {
     stream: Arc<CudaStream>,
+    /// 構築元 `CudaDevice` の ordinal（イシュー #1349・codex-review P0
+    /// 指摘・PR #1390 是正）。`Self::with_driver_call` が
+    /// `context_cache::with_driver_call` を呼ぶ際のキーとして使う
+    /// （`gemm.rs::CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     onepass_f32: CudaFunction,
     twopass_f32: CudaFunction,
     /// 逆伝播 dx カーネル（イシュー #596。recompute-in-backward）。
@@ -593,6 +599,7 @@ impl CudaRmsNorm {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             onepass_f32,
             twopass_f32,
             bwd_dx_f32,
@@ -603,6 +610,22 @@ impl CudaRmsNorm {
             smem_per_sm_budget_bytes,
             sm_count,
         })
+    }
+
+    /// `CudaRmsNorm` の driver 呼び出し（H2D 転送・カーネル起動・D2H
+    /// readback）を CUDA Graph capture 排他へ参加させる共通ヘルパー
+    /// （`elementwise.rs::CudaElementwise::with_driver_call` と同じ設計。
+    /// codex-review P0 指摘対応・PR #1390 是正）。`run_rmsnorm_f32_raw`／
+    /// `run_rmsnorm_f32_train`（学習経路。autodiff の `Var::rmsnorm` から
+    /// `ops.rs::CudaBackendOps` を経由せず直接呼ばれる）・
+    /// `run_rmsnorm_bwd_f32` 系はいずれも本ヘルパーを内部実装
+    /// （`run_rmsnorm_f32_inner`／`run_rmsnorm_bwd_f32_inner`）の driver
+    /// 呼び出し区間で共有する。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     /// 標準 RMSNorm（mean 正規化あり）: `out = x * rsqrt(mean(x^2, axis=-1)
@@ -730,122 +753,129 @@ impl CudaRmsNorm {
             return Ok((Vec::new(), rstd));
         }
 
-        let route = rmsnorm_route(hidden, self.smem_per_block_budget_bytes);
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // で本体（H2D・確保・起動・readback）全体を capture 排他へ参加
+        // させる（`elementwise.rs::run_binary` と同じ「1 回の呼び出しに
+        // まとめて包む」方式）。早期 return（`rows == 0 || hidden == 0`）
+        // は driver に一切触れないため、このヘルパーの外側で処理済み。
+        self.with_driver_call(|| {
+            let route = rmsnorm_route(hidden, self.smem_per_block_budget_bytes);
 
-        let x_dev = self.stream.clone_htod(x)?;
-        // `w` が `None` の場合もカーネル引数としてポインタは必要だが
-        // `has_weight == 0` により決してデリファレンスされない
-        // （`kernels_rmsnorm.rs` 参照）。ダミーとして 1 要素のゼロ初期化
-        // バッファを渡す（`0` 要素バッファの確保を一部 CUDA driver が
-        // 拒否しうる問題を避ける。`elementwise.rs` の `numel == 0` 早期
-        // return と同じ理由）。
-        let (w_dev, has_weight) = match w {
-            Some(w_slice) => (self.stream.clone_htod(w_slice)?, 1i32),
-            None => (self.stream.alloc_zeros::<f32>(1)?, 0i32),
-        };
-        let mut out_dev = self.stream.alloc_zeros::<f32>(x.len())?;
-        // `save_rstd == false`（推論経路）でもカーネル引数としてポインタは
-        // 必要だが `save_rstd == 0` により決してデリファレンスされない
-        // （`w_dev` ダミーと同じイディオム）。学習経路は `rows` 要素を
-        // 確保する。
-        let mut rstd_dev = if save_rstd {
-            self.stream.alloc_zeros::<f32>(rows)?
-        } else {
-            self.stream.alloc_zeros::<f32>(1)?
-        };
-        let save_rstd_i = save_rstd as i32;
+            let x_dev = self.stream.clone_htod(x)?;
+            // `w` が `None` の場合もカーネル引数としてポインタは必要だが
+            // `has_weight == 0` により決してデリファレンスされない
+            // （`kernels_rmsnorm.rs` 参照）。ダミーとして 1 要素のゼロ初期化
+            // バッファを渡す（`0` 要素バッファの確保を一部 CUDA driver が
+            // 拒否しうる問題を避ける。`elementwise.rs` の `numel == 0` 早期
+            // return と同じ理由）。
+            let (w_dev, has_weight) = match w {
+                Some(w_slice) => (self.stream.clone_htod(w_slice)?, 1i32),
+                None => (self.stream.alloc_zeros::<f32>(1)?, 0i32),
+            };
+            let mut out_dev = self.stream.alloc_zeros::<f32>(x.len())?;
+            // `save_rstd == false`（推論経路）でもカーネル引数としてポインタは
+            // 必要だが `save_rstd == 0` により決してデリファレンスされない
+            // （`w_dev` ダミーと同じイディオム）。学習経路は `rows` 要素を
+            // 確保する。
+            let mut rstd_dev = if save_rstd {
+                self.stream.alloc_zeros::<f32>(rows)?
+            } else {
+                self.stream.alloc_zeros::<f32>(1)?
+            };
+            let save_rstd_i = save_rstd as i32;
 
-        let rows_i = rows as i32;
-        let hidden_i = hidden as i32;
+            let rows_i = rows as i32;
+            let hidden_i = hidden as i32;
 
-        let (func, cfg): (&CudaFunction, LaunchConfig) = match route {
-            RmsNormRoute::OnePassSmem => {
-                // `derive_persistent_grid_one_pass` の `smem_bytes_per_block`
-                // 引数は「1 ブロックが実際に確保する SMEM バイト数」を
-                // 受け取る契約（同関数のドキュメンテーションコメント
-                // 参照）。予算上限（`self.smem_per_block_budget_bytes`。
-                // 通常 48KiB）をそのまま渡すと、行サイズが予算より小さい
-                // 一般的な hidden で `blocks_per_sm` が過小評価され、
-                // 意図した persistent occupancy 上限（16）を大きく下回る
-                // （cursor[bot] 指摘・PR #706 レビュー r3793478990）。
-                // 経路判定〈`rmsnorm_route`〉は予算上限との比較のままで
-                // よいが、grid 導出とカーネル起動の `shared_mem_bytes` は
-                // 実際に確保する `hidden * 4` を単一の真実源として揃える。
-                let smem_bytes_per_block = (hidden as u64).saturating_mul(4);
-                let grid = derive_persistent_grid_one_pass(
-                    self.smem_per_sm_budget_bytes,
-                    self.sm_count,
-                    smem_bytes_per_block,
-                    rows_i as u32,
-                );
-                let shared_mem_bytes = smem_bytes_per_block.min(u32::MAX as u64) as u32;
-                (
-                    &self.onepass_f32,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (RMSNORM_BLOCK_DIM, 1, 1),
-                        shared_mem_bytes,
-                    },
-                )
+            let (func, cfg): (&CudaFunction, LaunchConfig) = match route {
+                RmsNormRoute::OnePassSmem => {
+                    // `derive_persistent_grid_one_pass` の `smem_bytes_per_block`
+                    // 引数は「1 ブロックが実際に確保する SMEM バイト数」を
+                    // 受け取る契約（同関数のドキュメンテーションコメント
+                    // 参照）。予算上限（`self.smem_per_block_budget_bytes`。
+                    // 通常 48KiB）をそのまま渡すと、行サイズが予算より小さい
+                    // 一般的な hidden で `blocks_per_sm` が過小評価され、
+                    // 意図した persistent occupancy 上限（16）を大きく下回る
+                    // （cursor[bot] 指摘・PR #706 レビュー r3793478990）。
+                    // 経路判定〈`rmsnorm_route`〉は予算上限との比較のままで
+                    // よいが、grid 導出とカーネル起動の `shared_mem_bytes` は
+                    // 実際に確保する `hidden * 4` を単一の真実源として揃える。
+                    let smem_bytes_per_block = (hidden as u64).saturating_mul(4);
+                    let grid = derive_persistent_grid_one_pass(
+                        self.smem_per_sm_budget_bytes,
+                        self.sm_count,
+                        smem_bytes_per_block,
+                        rows_i as u32,
+                    );
+                    let shared_mem_bytes = smem_bytes_per_block.min(u32::MAX as u64) as u32;
+                    (
+                        &self.onepass_f32,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (RMSNORM_BLOCK_DIM, 1, 1),
+                            shared_mem_bytes,
+                        },
+                    )
+                }
+                RmsNormRoute::TwoPass => {
+                    let grid = derive_persistent_grid_two_pass(self.sm_count, rows_i as u32);
+                    (
+                        &self.twopass_f32,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (RMSNORM_BLOCK_DIM, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                    )
+                }
+            };
+
+            // SAFETY: カーネル引数（x_dev/w_dev/out_dev/rstd_dev・rows_i/
+            // hidden_i・eps/inv_n/has_weight/save_rstd_i）は
+            // `validate_rmsnorm_launch` で検証済みの形状と 1:1 対応する
+            // デバイスバッファ長・値であり、カーネル内の手動境界チェック
+            // （`if (base+3 < hidden)`／グリッドストライド `row < rows`・
+            // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。1 パス
+            // 経路の `shared_mem_bytes` は `hidden * 4`（実際に確保する SMEM
+            // バイト数）であり、`rmsnorm_route` が判定した
+            // `smem_per_block_budget_bytes` 以下であることを既に確認済み
+            // （経路判定は予算上限との比較、起動は実バイト数という異なる
+            // 量を扱うが、`hidden * 4 <= 予算上限` の不変条件により smem
+            // 予算超過による起動失敗は起きない）。`rstd_dev` は
+            // `save_rstd == true` なら `rows` 要素（カーネル内 `rstd_out[row]`
+            // が `row < rows` の範囲でのみ書く）、`false` ならダミー 1 要素
+            // （`save_rstd == 0` によりカーネルが一切デリファレンスしない。
+            // `w_dev` ダミーと同じ根拠）。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&x_dev)
+                    .arg(&w_dev)
+                    .arg(&mut out_dev)
+                    .arg(&mut rstd_dev)
+                    .arg(&rows_i)
+                    .arg(&hidden_i)
+                    .arg(&eps)
+                    .arg(&inv_n)
+                    .arg(&has_weight)
+                    .arg(&save_rstd_i)
+                    .launch(cfg)?;
             }
-            RmsNormRoute::TwoPass => {
-                let grid = derive_persistent_grid_two_pass(self.sm_count, rows_i as u32);
-                (
-                    &self.twopass_f32,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (RMSNORM_BLOCK_DIM, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                )
-            }
-        };
-
-        // SAFETY: カーネル引数（x_dev/w_dev/out_dev/rstd_dev・rows_i/
-        // hidden_i・eps/inv_n/has_weight/save_rstd_i）は
-        // `validate_rmsnorm_launch` で検証済みの形状と 1:1 対応する
-        // デバイスバッファ長・値であり、カーネル内の手動境界チェック
-        // （`if (base+3 < hidden)`／グリッドストライド `row < rows`・
-        // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。1 パス
-        // 経路の `shared_mem_bytes` は `hidden * 4`（実際に確保する SMEM
-        // バイト数）であり、`rmsnorm_route` が判定した
-        // `smem_per_block_budget_bytes` 以下であることを既に確認済み
-        // （経路判定は予算上限との比較、起動は実バイト数という異なる
-        // 量を扱うが、`hidden * 4 <= 予算上限` の不変条件により smem
-        // 予算超過による起動失敗は起きない）。`rstd_dev` は
-        // `save_rstd == true` なら `rows` 要素（カーネル内 `rstd_out[row]`
-        // が `row < rows` の範囲でのみ書く）、`false` ならダミー 1 要素
-        // （`save_rstd == 0` によりカーネルが一切デリファレンスしない。
-        // `w_dev` ダミーと同じ根拠）。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&x_dev)
-                .arg(&w_dev)
-                .arg(&mut out_dev)
-                .arg(&mut rstd_dev)
-                .arg(&rows_i)
-                .arg(&hidden_i)
-                .arg(&eps)
-                .arg(&inv_n)
-                .arg(&has_weight)
-                .arg(&save_rstd_i)
-                .launch(cfg)?;
-        }
-        // 同期点は本関数末尾へ 1 回に集約する（#1013。設計文書 §9
-        // item 4）。`clone_dtoh` 自体は `cuMemcpyDtoHAsync` を発行する
-        // だけの非同期コピー（`memory.rs::readback` ドキュメンテーション
-        // コメント参照）のため、2 回の `clone_dtoh` をまとめて投入した後
-        // `synchronize` を 1 回だけ呼べば両方の完了を確定できる（2 回目の
-        // 個別 `synchronize` は不要な直列化を招くだけで正当化されない）。
-        let out = self.stream.clone_dtoh(&out_dev)?;
-        let rstd = if save_rstd {
-            Some(self.stream.clone_dtoh(&rstd_dev)?)
-        } else {
-            None
-        };
-        self.stream.synchronize()?;
-        Ok((out, rstd))
+            // 同期点は本関数末尾へ 1 回に集約する（#1013。設計文書 §9
+            // item 4）。`clone_dtoh` 自体は `cuMemcpyDtoHAsync` を発行する
+            // だけの非同期コピー（`memory.rs::readback` ドキュメンテーション
+            // コメント参照）のため、2 回の `clone_dtoh` をまとめて投入した後
+            // `synchronize` を 1 回だけ呼べば両方の完了を確定できる（2 回目の
+            // 個別 `synchronize` は不要な直列化を招くだけで正当化されない）。
+            let out = self.stream.clone_dtoh(&out_dev)?;
+            let rstd = if save_rstd {
+                Some(self.stream.clone_dtoh(&rstd_dev)?)
+            } else {
+                None
+            };
+            self.stream.synchronize()?;
+            Ok((out, rstd))
+        })
     }
 
     /// 逆伝播（イシュー #596。recompute-in-backward）: 保存 `rstd`
@@ -950,182 +980,190 @@ impl CudaRmsNorm {
             return Ok((Vec::new(), dw));
         }
 
-        let x_dev = self.stream.clone_htod(x)?;
-        let dy_dev = self.stream.clone_htod(dy)?;
-        let rstd_dev = self.stream.clone_htod(rstd)?;
-        // `w` ダミーは順伝播と同じイディオム（`has_weight == 0` で
-        // カーネルが一切デリファレンスしない）。
-        let (w_dev, has_weight) = match w {
-            Some(w_slice) => (self.stream.clone_htod(w_slice)?, 1i32),
-            None => (self.stream.alloc_zeros::<f32>(1)?, 0i32),
-        };
-        let mut dx_dev = self.stream.alloc_zeros::<f32>(x.len())?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `run_rmsnorm_f32_inner`
+        // と同じ理由で `Self::with_driver_call` へ参加させる。早期
+        // return（`rows == 0 || hidden == 0`）は driver に一切触れない
+        // ためこのヘルパーの外側で処理済み。
+        self.with_driver_call(|| {
+            let x_dev = self.stream.clone_htod(x)?;
+            let dy_dev = self.stream.clone_htod(dy)?;
+            let rstd_dev = self.stream.clone_htod(rstd)?;
+            // `w` ダミーは順伝播と同じイディオム（`has_weight == 0` で
+            // カーネルが一切デリファレンスしない）。
+            let (w_dev, has_weight) = match w {
+                Some(w_slice) => (self.stream.clone_htod(w_slice)?, 1i32),
+                None => (self.stream.alloc_zeros::<f32>(1)?, 0i32),
+            };
+            let mut dx_dev = self.stream.alloc_zeros::<f32>(x.len())?;
 
-        let rows_i = rows as i32;
-        let hidden_i = hidden as i32;
-        let grid = derive_persistent_grid_two_pass(self.sm_count, rows_i as u32);
+            let rows_i = rows as i32;
+            let hidden_i = hidden as i32;
+            let grid = derive_persistent_grid_two_pass(self.sm_count, rows_i as u32);
 
-        // SAFETY: `validate_rmsnorm_backward_launch` で `x`/`dy`/`rstd`/
-        // `w`（指定時）の長さと `rows`/`hidden`（i32 上限）を検証済み。
-        // カーネル内の手動境界チェック（グリッドストライド `row < rows`・
-        // `base + 3 < hidden`・REQ-8）と合わせて OOB 読み書きが起きない
-        // 根拠とする。`RMSNORM_BWD_BLOCK_DIM`（256）は `RMSNORM_BLOCK_DIM`
-        // （32・順伝播）と独立のブロック幅であり、grid 導出
-        // （`derive_persistent_grid_two_pass`。行数ベースでブロック幅に
-        // 依存しない）はそのまま再利用できる（`kernels_rmsnorm.rs::
-        // RMSNORM_BWD_BLOCK_DIM` ドキュメンテーションコメント参照）。
-        unsafe {
-            self.stream
-                .launch_builder(&self.bwd_dx_f32)
-                .arg(&x_dev)
-                .arg(&w_dev)
-                .arg(&dy_dev)
-                .arg(&rstd_dev)
-                .arg(&mut dx_dev)
-                .arg(&rows_i)
-                .arg(&hidden_i)
-                .arg(&inv_n)
-                .arg(&has_weight)
-                .launch(LaunchConfig {
-                    grid_dim: (grid, 1, 1),
-                    block_dim: (RMSNORM_BWD_BLOCK_DIM, 1, 1),
-                    shared_mem_bytes: 0,
-                })?;
-        }
-
-        let dw = if let Some(w_slice) = w {
-            let mut dw_dev = self.stream.alloc_zeros::<f32>(w_slice.len())?;
-            let auto_num_blocks = derive_dw_split(self.sm_count, rows_i as u32, hidden_i as u32);
-            let num_blocks = force_dw_num_blocks.unwrap_or(auto_num_blocks);
-            // `force_dw_num_blocks`（テストフック経由）はホスト境界から任意値
-            // （`0` を含む）が来うるため、分岐（単段 `num_blocks <= 1` か
-            // split-K か）で検証有無が変わらないよう、分岐前に必ず検証する
-            // （fail-closed。security.md A03。codex-review P2 指摘・PR #716:
-            // 旧実装は `num_blocks <= 1` 分岐内で検証しておらず
-            // `Some(0)` が禁止値のまま単段カーネルへ通っていた）。
-            // `derive_dw_split` によるヒューリスティクス由来（`force_dw_
-            // num_blocks == None`）は常に `>= 1` を返す契約のため、検証は
-            // `force_dw_num_blocks.is_some()` の場合のみで十分だが、
-            // 検証コスト自体が軽量なため分岐なく常に通す（境界条件の
-            // 実装ドリフトを避ける）。
-            validate_dw_split_launch(rows, hidden, num_blocks)?;
-            let col_grid = derive_persistent_grid_dw(self.sm_count, hidden_i as u32);
-
-            if num_blocks <= 1 {
-                // 単段フォールバック（小規模形状で余分なカーネル起動・
-                // 部分和バッファを避ける。`derive_dw_split` ドキュメン
-                // テーションコメント参照。実装計画 §3.3）。
-                //
-                // SAFETY: dw カーネルは列方向 grid-stride（`i < hidden`）で
-                // 起動する。`x`/`dy` の長さは `rows*hidden` と検証済み
-                // （`validate_rmsnorm_backward_launch`）であり、行方向は
-                // カーネル内ループ条件 `row < rows` で境界保証される
-                // （REQ-8）。
-                unsafe {
-                    self.stream
-                        .launch_builder(&self.bwd_dw_f32)
-                        .arg(&x_dev)
-                        .arg(&dy_dev)
-                        .arg(&rstd_dev)
-                        .arg(&mut dw_dev)
-                        .arg(&rows_i)
-                        .arg(&hidden_i)
-                        .launch(LaunchConfig {
-                            grid_dim: (col_grid, 1, 1),
-                            block_dim: (RMSNORM_BWD_DW_BLOCK_DIM, 1, 1),
-                            shared_mem_bytes: 0,
-                        })?;
-                }
-            } else {
-                // split-K 二段リダクション（イシュー #597）。`num_blocks` の
-                // fail-closed 検証は分岐前（上記 `validate_dw_split_launch`
-                // 呼び出し）で完了済み。
-                let num_blocks_i = num_blocks as i32;
-
-                let partial_len = (num_blocks as usize).checked_mul(hidden).ok_or_else(|| {
-                    CudaError::InvalidRmsNormShape {
-                        detail: format!(
-                            "rmsnorm dw split partial buffer length overflowed usize: \
-                             num_blocks={num_blocks}, hidden={hidden}"
-                        ),
-                    }
-                })?;
-                // `dw_partial_dev` は double バッファ（イシュー #1102 §9.8 追補。
-                // `docs/perf/cuda-parity-baseline.md` 参照）。ブロック内・
-                // ブロック間の縮約精度を上げるため要素サイズが 4 → 8 byte へ
-                // 倍増している（バッファ上限検査の `* 4` も `* 8` へ更新済み。
-                // 下記 `validate_dw_split_launch`／`derive_dw_split` 参照）。
-                let mut dw_partial_dev = self.stream.alloc_zeros::<f64>(partial_len)?;
-
-                // SAFETY（第 1 カーネル）: `validate_dw_split_launch` で
-                // `num_blocks` が `[1, rows]` かつ部分和バッファが上限内で
-                // あることを検証済み。`x`/`dy`/`rstd` の長さは
-                // `validate_rmsnorm_backward_launch` で検証済み。カーネル内
-                // の手動境界チェック（`i < hidden`・`row < row_end` かつ
-                // `row_end <= rows`・REQ-8）と合わせて OOB 読み書きが
-                // 起きない根拠とする。`dw_partial` は `num_blocks * hidden`
-                // 要素で `blockIdx.y = b` が一意に `[b*hidden, (b+1)*hidden)`
-                // 範囲へのみ書くため、CTA 間の書き込み競合は起きない
-                // （atomics 不使用でも決定的）。
-                unsafe {
-                    self.stream
-                        .launch_builder(&self.bwd_dw_partial_f32)
-                        .arg(&x_dev)
-                        .arg(&dy_dev)
-                        .arg(&rstd_dev)
-                        .arg(&mut dw_partial_dev)
-                        .arg(&rows_i)
-                        .arg(&hidden_i)
-                        .arg(&num_blocks_i)
-                        .launch(LaunchConfig {
-                            grid_dim: (col_grid, num_blocks, 1),
-                            block_dim: (RMSNORM_BWD_DW_PARTIAL_BLOCK_DIM, 1, 1),
-                            shared_mem_bytes: 0,
-                        })?;
-                }
-
-                // SAFETY（第 2 カーネル）: `dw_partial_dev` は上記カーネルが
-                // `num_blocks * hidden` 要素を無条件に埋める契約
-                // （`kernels_rmsnorm::RMSNORM_BWD_DW_PARTIAL_F32` ドキュメン
-                // テーションコメント「末尾要素ブロックの扱い」参照）。両
-                // カーネルは同一 `self.stream` 上へ順に enqueue されるため、
-                // stream 順序保証により第 2 カーネルは第 1 カーネルの完了後
-                // にのみ `dw_partial_dev` を読む（明示的な追加同期は不要）。
-                // `dw_partial_dev`（デバイスバッファのバインディング）は
-                // この `unsafe` ブロックと下の `synchronize` の両方を
-                // 包む本スコープの終わりまで生存するため、カーネル実行中に
-                // Rust 側で先に drop され解放されることはない。
-                // `RMSNORM_DW_REDUCE_BLOCK_DIM` は縮約カーネルの静的 smem
-                // 配列サイズ（`kernels_rmsnorm.rs` 参照）と一致する契約の
-                // ためブロック幅を固定で渡す（`RMSNORM_BWD_DW_BLOCK_DIM`
-                // 〈単段〉とは独立の値だが現状同じ 256）。
-                unsafe {
-                    self.stream
-                        .launch_builder(&self.bwd_dw_reduce_f32)
-                        .arg(&dw_partial_dev)
-                        .arg(&mut dw_dev)
-                        .arg(&hidden_i)
-                        .arg(&num_blocks_i)
-                        .launch(LaunchConfig {
-                            grid_dim: (col_grid, 1, 1),
-                            block_dim: (RMSNORM_DW_REDUCE_BLOCK_DIM, 1, 1),
-                            shared_mem_bytes: 0,
-                        })?;
-                }
+            // SAFETY: `validate_rmsnorm_backward_launch` で `x`/`dy`/`rstd`/
+            // `w`（指定時）の長さと `rows`/`hidden`（i32 上限）を検証済み。
+            // カーネル内の手動境界チェック（グリッドストライド `row < rows`・
+            // `base + 3 < hidden`・REQ-8）と合わせて OOB 読み書きが起きない
+            // 根拠とする。`RMSNORM_BWD_BLOCK_DIM`（256）は `RMSNORM_BLOCK_DIM`
+            // （32・順伝播）と独立のブロック幅であり、grid 導出
+            // （`derive_persistent_grid_two_pass`。行数ベースでブロック幅に
+            // 依存しない）はそのまま再利用できる（`kernels_rmsnorm.rs::
+            // RMSNORM_BWD_BLOCK_DIM` ドキュメンテーションコメント参照）。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.bwd_dx_f32)
+                    .arg(&x_dev)
+                    .arg(&w_dev)
+                    .arg(&dy_dev)
+                    .arg(&rstd_dev)
+                    .arg(&mut dx_dev)
+                    .arg(&rows_i)
+                    .arg(&hidden_i)
+                    .arg(&inv_n)
+                    .arg(&has_weight)
+                    .launch(LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (RMSNORM_BWD_BLOCK_DIM, 1, 1),
+                        shared_mem_bytes: 0,
+                    })?;
             }
 
-            Some(self.stream.clone_dtoh(&dw_dev)?)
-        } else {
-            None
-        };
+            let dw = if let Some(w_slice) = w {
+                let mut dw_dev = self.stream.alloc_zeros::<f32>(w_slice.len())?;
+                let auto_num_blocks =
+                    derive_dw_split(self.sm_count, rows_i as u32, hidden_i as u32);
+                let num_blocks = force_dw_num_blocks.unwrap_or(auto_num_blocks);
+                // `force_dw_num_blocks`（テストフック経由）はホスト境界から任意値
+                // （`0` を含む）が来うるため、分岐（単段 `num_blocks <= 1` か
+                // split-K か）で検証有無が変わらないよう、分岐前に必ず検証する
+                // （fail-closed。security.md A03。codex-review P2 指摘・PR #716:
+                // 旧実装は `num_blocks <= 1` 分岐内で検証しておらず
+                // `Some(0)` が禁止値のまま単段カーネルへ通っていた）。
+                // `derive_dw_split` によるヒューリスティクス由来（`force_dw_
+                // num_blocks == None`）は常に `>= 1` を返す契約のため、検証は
+                // `force_dw_num_blocks.is_some()` の場合のみで十分だが、
+                // 検証コスト自体が軽量なため分岐なく常に通す（境界条件の
+                // 実装ドリフトを避ける）。
+                validate_dw_split_launch(rows, hidden, num_blocks)?;
+                let col_grid = derive_persistent_grid_dw(self.sm_count, hidden_i as u32);
 
-        // 同期点は `dx` の readback（本関数の唯一の必須戻り値）で 1 回に
-        // 単一化する（#1013。設計文書 §9 item 4）。分岐内の個別
-        // `synchronize()` は「`dw_dev`／`dx_dev` いずれも同一
-        // `self.stream` 上へ enqueue 済みの `clone_dtoh` を、まとめて
-        // 1 回の完了待ちで確定できる」冗長な直列化であったため除去した。
-        let dx = crate::memory::readback(&self.stream, &dx_dev)?;
-        Ok((dx, dw))
+                if num_blocks <= 1 {
+                    // 単段フォールバック（小規模形状で余分なカーネル起動・
+                    // 部分和バッファを避ける。`derive_dw_split` ドキュメン
+                    // テーションコメント参照。実装計画 §3.3）。
+                    //
+                    // SAFETY: dw カーネルは列方向 grid-stride（`i < hidden`）で
+                    // 起動する。`x`/`dy` の長さは `rows*hidden` と検証済み
+                    // （`validate_rmsnorm_backward_launch`）であり、行方向は
+                    // カーネル内ループ条件 `row < rows` で境界保証される
+                    // （REQ-8）。
+                    unsafe {
+                        self.stream
+                            .launch_builder(&self.bwd_dw_f32)
+                            .arg(&x_dev)
+                            .arg(&dy_dev)
+                            .arg(&rstd_dev)
+                            .arg(&mut dw_dev)
+                            .arg(&rows_i)
+                            .arg(&hidden_i)
+                            .launch(LaunchConfig {
+                                grid_dim: (col_grid, 1, 1),
+                                block_dim: (RMSNORM_BWD_DW_BLOCK_DIM, 1, 1),
+                                shared_mem_bytes: 0,
+                            })?;
+                    }
+                } else {
+                    // split-K 二段リダクション（イシュー #597）。`num_blocks` の
+                    // fail-closed 検証は分岐前（上記 `validate_dw_split_launch`
+                    // 呼び出し）で完了済み。
+                    let num_blocks_i = num_blocks as i32;
+
+                    let partial_len =
+                        (num_blocks as usize).checked_mul(hidden).ok_or_else(|| {
+                            CudaError::InvalidRmsNormShape {
+                                detail: format!(
+                                    "rmsnorm dw split partial buffer length overflowed usize: \
+                             num_blocks={num_blocks}, hidden={hidden}"
+                                ),
+                            }
+                        })?;
+                    // `dw_partial_dev` は double バッファ（イシュー #1102 §9.8 追補。
+                    // `docs/perf/cuda-parity-baseline.md` 参照）。ブロック内・
+                    // ブロック間の縮約精度を上げるため要素サイズが 4 → 8 byte へ
+                    // 倍増している（バッファ上限検査の `* 4` も `* 8` へ更新済み。
+                    // 下記 `validate_dw_split_launch`／`derive_dw_split` 参照）。
+                    let mut dw_partial_dev = self.stream.alloc_zeros::<f64>(partial_len)?;
+
+                    // SAFETY（第 1 カーネル）: `validate_dw_split_launch` で
+                    // `num_blocks` が `[1, rows]` かつ部分和バッファが上限内で
+                    // あることを検証済み。`x`/`dy`/`rstd` の長さは
+                    // `validate_rmsnorm_backward_launch` で検証済み。カーネル内
+                    // の手動境界チェック（`i < hidden`・`row < row_end` かつ
+                    // `row_end <= rows`・REQ-8）と合わせて OOB 読み書きが
+                    // 起きない根拠とする。`dw_partial` は `num_blocks * hidden`
+                    // 要素で `blockIdx.y = b` が一意に `[b*hidden, (b+1)*hidden)`
+                    // 範囲へのみ書くため、CTA 間の書き込み競合は起きない
+                    // （atomics 不使用でも決定的）。
+                    unsafe {
+                        self.stream
+                            .launch_builder(&self.bwd_dw_partial_f32)
+                            .arg(&x_dev)
+                            .arg(&dy_dev)
+                            .arg(&rstd_dev)
+                            .arg(&mut dw_partial_dev)
+                            .arg(&rows_i)
+                            .arg(&hidden_i)
+                            .arg(&num_blocks_i)
+                            .launch(LaunchConfig {
+                                grid_dim: (col_grid, num_blocks, 1),
+                                block_dim: (RMSNORM_BWD_DW_PARTIAL_BLOCK_DIM, 1, 1),
+                                shared_mem_bytes: 0,
+                            })?;
+                    }
+
+                    // SAFETY（第 2 カーネル）: `dw_partial_dev` は上記カーネルが
+                    // `num_blocks * hidden` 要素を無条件に埋める契約
+                    // （`kernels_rmsnorm::RMSNORM_BWD_DW_PARTIAL_F32` ドキュメン
+                    // テーションコメント「末尾要素ブロックの扱い」参照）。両
+                    // カーネルは同一 `self.stream` 上へ順に enqueue されるため、
+                    // stream 順序保証により第 2 カーネルは第 1 カーネルの完了後
+                    // にのみ `dw_partial_dev` を読む（明示的な追加同期は不要）。
+                    // `dw_partial_dev`（デバイスバッファのバインディング）は
+                    // この `unsafe` ブロックと下の `synchronize` の両方を
+                    // 包む本スコープの終わりまで生存するため、カーネル実行中に
+                    // Rust 側で先に drop され解放されることはない。
+                    // `RMSNORM_DW_REDUCE_BLOCK_DIM` は縮約カーネルの静的 smem
+                    // 配列サイズ（`kernels_rmsnorm.rs` 参照）と一致する契約の
+                    // ためブロック幅を固定で渡す（`RMSNORM_BWD_DW_BLOCK_DIM`
+                    // 〈単段〉とは独立の値だが現状同じ 256）。
+                    unsafe {
+                        self.stream
+                            .launch_builder(&self.bwd_dw_reduce_f32)
+                            .arg(&dw_partial_dev)
+                            .arg(&mut dw_dev)
+                            .arg(&hidden_i)
+                            .arg(&num_blocks_i)
+                            .launch(LaunchConfig {
+                                grid_dim: (col_grid, 1, 1),
+                                block_dim: (RMSNORM_DW_REDUCE_BLOCK_DIM, 1, 1),
+                                shared_mem_bytes: 0,
+                            })?;
+                    }
+                }
+
+                Some(self.stream.clone_dtoh(&dw_dev)?)
+            } else {
+                None
+            };
+
+            // 同期点は `dx` の readback（本関数の唯一の必須戻り値）で 1 回に
+            // 単一化する（#1013。設計文書 §9 item 4）。分岐内の個別
+            // `synchronize()` は「`dw_dev`／`dx_dev` いずれも同一
+            // `self.stream` 上へ enqueue 済みの `clone_dtoh` を、まとめて
+            // 1 回の完了待ちで確定できる」冗長な直列化であったため除去した。
+            let dx = crate::memory::readback(&self.stream, &dx_dev)?;
+            Ok((dx, dw))
+        })
     }
 }
 

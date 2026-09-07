@@ -16,6 +16,21 @@
 //! ゼロ fail が成立するかどうかは GB10 実機実測（#1356 が引き継ぐ）まで
 //! 未確定であり、本ファイルの実機テストは「未実測」のまま `#[ignore]`
 //! 分離する。
+//!
+//! **`internal-diagnostics` feature 依存（Bugbot 指摘対応・PR #1390
+//! 再修正）**: `launch_tf32x3_c_raw`／`download_f32_raw` は
+//! `internal-diagnostics` feature（既定 off）限定の診断専用入口である。
+//! 旧稿はファイル単位（`Cargo.toml` の `required-features`）で本
+//! feature を要求していたが、それだと本ファイルの他のテスト（no-CUDA
+//! 契約テスト・環境適応スモークテスト）まで既定ビルド（`cargo build
+//! --no-cuda`／`cargo test --workspace` 等の feature 未指定コマンド）
+//! から丸ごとスキップされてしまう（Bugbot Medium 指摘）。よって本
+//! ファイル自体は `required-features` を持たず、上記 2 関数を直接呼ぶ
+//! `launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch`
+//! 1 関数だけを `#[cfg(feature = "internal-diagnostics")]` で個別に
+//! ゲートする（同関数の doc コメント参照。`cargo test -p
+//! fandhe-ai-backend-cuda --test gemm_mma_tf32x3 --all-features` で
+//! フル実行できる）。
 
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaTf32x3Gemm};
 
@@ -197,6 +212,19 @@ fn mma_tf32x3_zero_dim_shape_returns_empty_without_launch() {
 /// 形状契約を守ることを実機で確認する（`tests/gemm_mma_tf32.rs::
 /// launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch` と
 /// 同型）。
+///
+/// **`internal-diagnostics` feature 限定（PR #1390 マージ時是正）**:
+/// 本テストは `device.stream()` を直接呼ぶ（下記コメント参照）。
+/// `crate::device::CudaDevice::stream` は codex-review P0 指摘対応
+/// （イシュー #1349）で既定ビルド（同 feature 無効）では `pub(crate)`
+/// に絞られており、このテストファイル自体は他のテスト（環境適応
+/// スモーク等）を通常 CI（feature 未指定）でも実行させるため
+/// `required-features` によるファイル単位ゲートを使わない。かわりに
+/// このテスト関数だけを `internal-diagnostics` feature（`cargo test
+/// --workspace --all-features`。CI の test ジョブ・`make test` が使う
+/// コマンド）限定でコンパイルする（`device.rs::CudaDevice::context`
+/// doc コメント参照。他の diagnostics 専用テストファイルと同じ契約）。
+#[cfg(feature = "internal-diagnostics")]
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch() {
@@ -237,9 +265,9 @@ fn launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch() {
         .stream()
         .clone_htod(&[9.0f32; 16])
         .expect("uploading a pre-populated c buffer must succeed");
-    gemm.launch_tf32x3(&inputs, &mut c_dev, 4, 4, 0)
-        .expect("launch_tf32x3 must succeed and zero-fill c_dev for k==0");
-    assert_eq!(gemm.download_f32(&c_dev).unwrap(), vec![0.0f32; 16]);
+    gemm.launch_tf32x3_c_raw(&inputs, &mut c_dev, 4, 4, 0)
+        .expect("launch_tf32x3_c_raw must succeed and zero-fill c_dev for k==0");
+    assert_eq!(gemm.download_f32_raw(&c_dev).unwrap(), vec![0.0f32; 16]);
 }
 
 /// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅
