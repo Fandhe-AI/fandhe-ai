@@ -600,13 +600,40 @@ impl Drop for CaptureGuard {
     }
 }
 
-/// `graph::run_captured_segment` が stream capture 開始直前に 1 回だけ
-/// 呼ぶ（イシュー #1349）。同一 ordinal で既に capture 中（別スレッド・
-/// 同一スレッドいずれも）なら [`BackendError::InvalidArgument`] で
-/// 再入を拒否する（`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は同一
-/// ordinal・同一ストリームへの多重 capture を想定しない）。返した
-/// [`CaptureGuard`] が drop されるまで [`is_capturing_on_current_thread`]
-/// はこのスレッドに対して `true` を返す。
+/// `graph::run_captured_sgd_step_segment` が stream capture 開始直前に 1 回だけ
+/// 呼ぶ（イシュー #1349・codex-review P0 指摘対応）。同一 ordinal で既に
+/// capture 中（別スレッド・同一スレッドいずれも）なら
+/// [`BackendError::InvalidArgument`] で再入を拒否する
+/// （`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は同一 ordinal・同一
+/// ストリームへの多重 capture を想定しない）。`Active` 以外の `phase`
+/// （`Poisoned`／`Retiring`）でも同様に拒否する（fail-closed。capture
+/// 開始を許してしまうと、直後の driver 呼び出しが健全でないコンテキスト
+/// 上で行われる）。
+///
+/// **`in_flight` ドレイン（codex-review P0 指摘対応。`invalidate_with`
+/// の retire→drain と同型のパターン）**: 本関数を呼ぶ時点で**呼び出し
+/// スレッド自身は当該 ordinal の [`CallToken`] を 1 つも保持していない
+/// 契約**とする（`graph::run_captured_sgd_step_segment` は cache miss を確認した
+/// 直後・`begin_driver_call` を呼ぶ**前**に本関数を呼ぶよう構成する）。
+/// この契約により、本関数がロック中に観測する `state.capture` を
+/// `Some(current thread)` へ設定した瞬間から、以後の他スレッドの
+/// [`begin_driver_call`] 呼び出しはすべて拒否される（新規呼び出しの
+/// 遮断）一方、**このロック取得より前に既に [`begin_driver_call`] を
+/// 通過し `in_flight` へ計上済みの呼び出し**（他スレッドが capture 開始
+/// より前にカーネル起動を予約済みだが、実際の driver 呼び出しは
+/// まだこれから行う場合）は、そのまま共有ストリームへ driver 呼び出しを
+/// 発行しうる。これを許すと、capture 開始直後に「capture 対象外の
+/// つもりだった」他スレッドのカーネル起動が graph へ意図せず混入する
+/// （`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` は「別スレッドから同一
+/// ストリームへの発行」自体を必ず防ぐ保証ではない。`begin_driver_call`
+/// doc コメント参照）。そのため `state.capture` 設定後、`state.in_flight
+/// == 0` になるまで [`Condvar`] で待ってから返す（[`CallToken::drop`]
+/// が `notify_all` する。呼び出しスレッド自身は上記契約によりこの時点で
+/// 0 件のため、待つのは常に他スレッド分のみで自己デッドロックしない）。
+///
+/// 返した [`CaptureGuard`] が drop されるまで
+/// [`is_capturing_on_current_thread`] はこのスレッドに対して `true` を
+/// 返す。
 pub(crate) fn begin_capture_session(ordinal: usize) -> Result<CaptureGuard, BackendError> {
     let cell = ordinal_registry().entry(ordinal)?;
     let mut state = cell.0.lock().map_err(|e| {
@@ -614,13 +641,48 @@ pub(crate) fn begin_capture_session(ordinal: usize) -> Result<CaptureGuard, Back
             "context_cache::OrdinalState の Mutex が poison しました（ordinal={ordinal}）: {e}"
         ))
     })?;
+    match state.phase {
+        Phase::Poisoned {
+            unrecoverable: true,
+        } => {
+            return Err(BackendError::DeviceContextUnrecoverable {
+                ordinal,
+                probe_error: "device context is permanently poisoned; process restart required"
+                    .to_string(),
+            });
+        }
+        Phase::Poisoned {
+            unrecoverable: false,
+        } => {
+            return Err(BackendError::DeviceContextPoisoned(format!(
+                "ordinal {ordinal} is poisoned; call invalidate() to attempt recovery"
+            )));
+        }
+        Phase::Retiring => {
+            return Err(BackendError::DeviceContextRetiring { ordinal });
+        }
+        Phase::Active => {}
+    }
     if state.capture.is_some() {
         return Err(BackendError::InvalidArgument(format!(
             "begin_capture_session: ordinal {ordinal} is already capturing on this or another \
              thread (CUDA Graph capture does not support re-entrant capture on a single stream)"
         )));
     }
+    // 新規呼び出しの遮断はここで確定する（以後の他スレッド
+    // `begin_driver_call` は `state.capture.is_some() && owner != self`
+    // により拒否される）。
     state.capture = Some(std::thread::current().id());
+    // 既存の別スレッド呼び出し（このロック取得より前に `begin_driver_call`
+    // を通過済み）の完了を待つ（ドレイン）。
+    while state.in_flight != 0 {
+        state = cell.1.wait(state).map_err(|e| {
+            BackendError::DeviceContextPoisoned(format!(
+                "begin_capture_session の in_flight ドレイン待機中に Mutex が poison しました: \
+                 {e}"
+            ))
+        })?;
+    }
     Ok(CaptureGuard { ordinal })
 }
 
@@ -731,6 +793,19 @@ pub(crate) struct CallToken {
     generation: u64,
 }
 
+impl CallToken {
+    /// `begin_driver_call` がこのトークンを発行した時点の世代
+    /// （イシュー #1349 `ops.rs::CudaBackendOps::captured_segment_key`／
+    /// `run_captured_sgd_step_segment` が `SegmentKey::generation` の
+    /// 導出に使う。`current_generation` を別途再ロックする代わりに
+    /// トークン発行時点の値をそのまま使うことで、`begin_driver_call` の
+    /// poison／世代検査と `SegmentKey` の世代が常に同一ロック区間の値に
+    /// 揃う）。
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 impl Drop for CallToken {
     fn drop(&mut self) {
         // レジストリ取得・ロック取得が失敗しても（プロセス末期等）
@@ -777,7 +852,7 @@ impl Drop for CallToken {
 /// 排他する: 別スレッドの呼び出しは capture 完了（[`CaptureGuard`] の
 /// drop）まで一律拒否し、SGD 更新等が capture 中の graph へ意図せず
 /// 混入する事態を防ぐ。**capture を開始したスレッド自身**の呼び出しは
-/// 通す（`graph::run_captured_segment` の `body()` 実行自体が同一
+/// 通す（`graph::run_captured_sgd_step_segment` の `body()` 実行自体が同一
 /// スレッドから `begin_driver_call` 経由で実カーネルを起動する契約の
 /// ため。再入拒否ではなく同一スレッドの正常フロー）。
 pub(crate) fn begin_driver_call(
@@ -2287,7 +2362,7 @@ mod poison_state_tests {
     }
 
     /// capture を開始した**同一スレッド**の `begin_driver_call` は通す
-    /// （`graph::run_captured_segment` の `body()` 実行契約。上記テストの
+    /// （`graph::run_captured_sgd_step_segment` の `body()` 実行契約。上記テストの
     /// 対照ケース）。
     #[test]
     fn begin_driver_call_allows_capturing_thread_itself() {

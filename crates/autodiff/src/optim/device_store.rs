@@ -1515,7 +1515,7 @@ impl DeviceParamStore {
             // `total_numel == 0` は `sgd_step_device` がカーネル起動なしで
             // 早期 return する（`ops.rs::sgd_step_device` の `numel == 0`
             // 分岐）ため、そのまま capture すると 1 個も launch されない
-            // 空 graph になり `run_captured_segment` が fail-closed
+            // 空 graph になり `run_captured_sgd_step_segment` が fail-closed
             // エラーを返してしまう。この場合は capture 対象から常に除外
             // する（design doc §4.5 手順 1）。
             let graph_capture_available = self.total_numel > 0
@@ -1579,12 +1579,22 @@ impl DeviceParamStore {
                 }
 
                 // `key` の算出は `&self.params`／`&staging.buf`／
-                // `self.velocity.as_ref()`（いずれも一時的な共有借用。
-                // `SegmentKey` はバッファのアドレス・要素数のみを写し
-                // 取った所有値のため、借用はこの式の評価後に終わる）。
+                // （momentum 有効時のみ）`self.velocity.as_ref()`（いずれも
+                // 一時的な共有借用。`SegmentKey` はバッファのアドレス・
+                // 要素数のみを写し取った所有値のため、借用はこの式の
+                // 評価後に終わる）。`velocity` を含めるかどうかは
+                // `use_momentum` で判定する——直接実行経路（本関数末尾の
+                // `else` 節・`sgd_step_device_tracked` への直接呼び出し）
+                // と同じ判定基準に揃えることで、`momentum == 0.0` かつ
+                // `self.velocity` が `Some`（momentum を過去に有効化した
+                // 名残等）のケースでも、capture が実際にカーネルへ渡す
+                // リソース集合と `key.resources` が一致する（不一致は
+                // 実害はないが、`run_captured_sgd_step_segment` 側の
+                // アドレス再検証を無意味に厳しくするだけの不整合になる
+                // ため揃える）。
                 let key = {
                     let mut resources: Vec<&DeviceBuffer<f32>> = vec![&self.params, &staging.buf];
-                    if let Some(v) = self.velocity.as_ref() {
+                    if use_momentum && let Some(v) = self.velocity.as_ref() {
                         resources.push(v);
                     }
                     match ops.captured_segment_key(&resources, config_key) {
@@ -1611,52 +1621,33 @@ impl DeviceParamStore {
                     }
                 };
 
-                // `resources` は `key` を得た直前の `captured_segment_key`
-                // 呼び出し（`&self.params`／`&staging.buf`／
-                // `self.velocity.as_ref()` の共有借用）と**同一の対象・
-                // 同一の順序**で構築する（`BackendOps::run_captured_
-                // segment` トレイト doc コメント・codex-review P0 指摘
-                // 対応。今度は `body` の実行にも使うため排他借用）。
-                // `body` は `resources` を**呼び出し時の引数**として受け
-                // 取り、外側の `self` フィールドを直接キャプチャしない
-                // （`resources` が既に `self.params`／`self.velocity` を
-                // 排他借用しているため、`body` の環境が別途 `&mut self.
-                // params` 等を捕捉すると二重借用になりコンパイルできない）。
-                let failure_token = &self.failure_token;
-                let mut resources: Vec<&mut DeviceBuffer<f32>> =
-                    vec![&mut self.params, &mut staging.buf];
-                if let Some(v) = self.velocity.as_mut() {
-                    resources.push(v);
-                }
-                let mut body =
-                    |resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
-                        // `head[0]`／`head[1]` の repeated indexing は `Index`／
-                        // `IndexMut` トレイト呼び出しが毎回 `head` 全体を借用
-                        // するため、`&mut head[0]` と `&head[1]` を同時に得る
-                        // ことができない（E0502）。`split_first_mut` の連鎖で
-                        // 明示的に素片へ分割し、各素片を独立に借用する。
-                        let (p0, rest) = resources
-                            .split_first_mut()
-                            .expect("resources must have at least 2 entries (param, grad)");
-                        let (p1, tail) = rest
-                            .split_first_mut()
-                            .expect("resources must have at least 2 entries (param, grad)");
-                        let param_mut: &mut DeviceBuffer<f32> = p0;
-                        let grad_ref: &DeviceBuffer<f32> = p1;
-                        let velocity_ref: Option<&mut DeviceBuffer<f32>> = if use_momentum {
-                            tail.first_mut().map(|v| &mut **v)
-                        } else {
-                            None
-                        };
-                        ops.sgd_step_device_tracked(
-                            param_mut,
-                            grad_ref,
-                            velocity_ref,
-                            &step_config,
-                            failure_token,
-                        )
-                    };
-                if let Err(e) = ops.run_captured_segment(key, &mut resources, &mut body) {
+                // `param`／`grad`／`velocity` は `key` を得た直前の
+                // `captured_segment_key` 呼び出し（`&self.params`／
+                // `&staging.buf`／（`use_momentum` 時のみ）
+                // `self.velocity.as_ref()`）と**同一の対象・同一の
+                // velocity 有無判定**で渡す（`BackendOps::
+                // run_captured_sgd_step_segment` トレイト doc コメント・
+                // codex-review P0 指摘対応）。旧稿はここで `resources` +
+                // 任意クロージャ `body` を組み立てていたが、`body` が
+                // `resources` に含まれない外部バッファへ触れる抜け道
+                // （トレイト doc コメント参照）と、`split_first_mut` の
+                // `.expect()` 2 箇所（本番経路 panic。codex-review P1
+                // 指摘）を持っていた。本トレイトメソッドは `param`／
+                // `grad`／`velocity` を直接引数として受け取り、クロージャ
+                // を要求しないため、いずれの問題も型ごと解消される。
+                let velocity_ref = if use_momentum {
+                    self.velocity.as_mut()
+                } else {
+                    None
+                };
+                if let Err(e) = ops.run_captured_sgd_step_segment(
+                    key,
+                    &mut self.params,
+                    &staging.buf,
+                    velocity_ref,
+                    &step_config,
+                    &self.failure_token,
+                ) {
                     self.poisoned.store(true, Ordering::SeqCst);
                     return Err(e);
                 }
@@ -1773,7 +1764,7 @@ mod tests {
     // `#[cfg(test)]` 外の通常ビルドでは未使用 import になる
     // （`MockDeviceOps` の graph-capture モック実装・テストのみが型名を
     // 直接使う）。テストモック限定で import する。
-    use fandhe_ai_tensor_core::{CapturedSegmentBody, SegmentKey, SegmentResource, SegmentRun};
+    use fandhe_ai_tensor_core::{SegmentKey, SegmentResource, SegmentRun};
     use std::any::Any;
     use std::cell::RefCell;
     use std::sync::Arc;
@@ -1831,18 +1822,18 @@ mod tests {
         /// のみ `true` にする。
         resident_capable: bool,
         /// `true` の場合のみ [`BackendOps::captured_segment_key`]／
-        /// [`BackendOps::run_captured_segment`] を既定（`Ok(None)`／
+        /// [`BackendOps::run_captured_sgd_step_segment`] を既定（`Ok(None)`／
         /// `Unsupported`）からオーバーライドし、CUDA Graph capture opt-in
         /// ON を模す（イシュー #1349）。ホスト実装のため実際の GPU graph
-        /// は持たず、`run_captured_segment` は capture・再生いずれも
+        /// は持たず、`run_captured_sgd_step_segment` は capture・再生いずれも
         /// `body` を実行する（副作用の再現には毎回の実行が必要なため）が、
         /// `segment_runs`（下記）に `SegmentRun::Captured`／`Replayed` の
         /// 判定（同一 `SegmentKey` を 2 回目以降に見たかどうか）を記録し、
         /// `DeviceParamStore::step` が期待どおり `captured_segment_key`／
-        /// `run_captured_segment` を呼び分けていることをテストが検証
+        /// `run_captured_sgd_step_segment` を呼び分けていることをテストが検証
         /// できるようにする。
         graph_capable: bool,
-        /// `graph_capable` 時、`run_captured_segment` に渡された
+        /// `graph_capable` 時、`run_captured_sgd_step_segment` に渡された
         /// `SegmentKey` を見た順に記録する（既出なら `Replayed` 相当・
         /// 初出なら `Captured` 相当と判定して積む）。
         segment_runs: Arc<std::sync::Mutex<Vec<fandhe_ai_tensor_core::SegmentRun>>>,
@@ -2141,39 +2132,49 @@ mod tests {
             }))
         }
 
-        /// イシュー #1349: 実際の GPU graph は持たないため常に `body` を
-        /// 実行する（ホストモックでは capture を「省略」すると副作用
-        /// 〈パラメータ更新〉自体が起こらなくなってしまうため）。
-        /// `segment_runs`／`seen_segment_keys` へ「このキーを初めて見た
-        /// か」を記録することで、テスト側は `DeviceParamStore::step` が
-        /// 期待どおりのタイミングで新規 capture・再利用を要求している
-        /// ことを検証できる。
+        /// イシュー #1349: 実際の GPU graph は持たないため常に区間本体
+        /// （SGD 更新）を実行する（ホストモックでは capture を「省略」
+        /// すると副作用〈パラメータ更新〉自体が起こらなくなってしまう
+        /// ため）。`segment_runs`／`seen_segment_keys` へ「このキーを
+        /// 初めて見たか」を記録することで、テスト側は
+        /// `DeviceParamStore::step` が期待どおりのタイミングで新規
+        /// capture・再利用を要求していることを検証できる。
         ///
         /// **replay 直前の再検証**（codex-review P0 指摘対応。
-        /// `crate-cuda::ops::CudaBackendOps::run_captured_segment` と
-        /// 同じ契約をホストモックでも再現する。`resources` から現在の
-        /// アドレス集合を再計算し `key.resources` と不一致なら `body` を
-        /// 呼ばず・`SegmentRun` も記録せず `InvalidArgument` を返す）。
-        fn run_captured_segment(
+        /// `crate-cuda::ops::CudaBackendOps::run_captured_sgd_step_segment`
+        /// と同じ契約をホストモックでも再現する。`param`／`grad`／
+        /// `velocity` から現在のアドレス集合を再計算し `key.resources`
+        /// と不一致なら区間本体を実行せず・`SegmentRun` も記録せず
+        /// `InvalidArgument` を返す）。
+        fn run_captured_sgd_step_segment(
             &self,
             key: SegmentKey,
-            resources: &mut [&mut DeviceBuffer<f32>],
-            body: &mut CapturedSegmentBody<'_>,
+            param: &mut DeviceBuffer<f32>,
+            grad: &DeviceBuffer<f32>,
+            velocity: Option<&mut DeviceBuffer<f32>>,
+            config: &SgdStepConfig,
+            token: &DispatchFailureCell,
         ) -> Result<SegmentRun, BackendError> {
-            let current_resources: Vec<SegmentResource> = resources
+            let mut shared_view: Vec<&DeviceBuffer<f32>> = vec![&*param, grad];
+            if let Some(v) = velocity.as_deref() {
+                shared_view.push(v);
+            }
+            let current_resources: Vec<SegmentResource> = shared_view
                 .iter()
                 .map(|buf| SegmentResource {
                     addr: (*buf as *const DeviceBuffer<f32>) as u64,
                     numel: buf.numel(),
                 })
                 .collect();
+            drop(shared_view);
             if current_resources != key.resources {
                 return Err(BackendError::InvalidArgument(
-                    "MockDeviceOps::run_captured_segment: resources do not match key.resources"
+                    "MockDeviceOps::run_captured_sgd_step_segment: resources do not match \
+                     key.resources"
                         .into(),
                 ));
             }
-            body(resources)?;
+            self.sgd_step_device_tracked(param, grad, velocity, config, token)?;
             let mut seen = self
                 .seen_segment_keys
                 .lock()

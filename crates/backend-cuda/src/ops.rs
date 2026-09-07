@@ -28,8 +28,8 @@ use std::sync::Arc;
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, CapturedSegmentBody, DType, FusionPlan, MseReduction, SegmentKey,
-    SegmentResource, SegmentRun, ShapeError, Tensor, require_same_shape,
+    Activation, BackendOps, DType, FusionPlan, MseReduction, SegmentKey, SegmentResource,
+    SegmentRun, ShapeError, Tensor, require_same_shape,
 };
 
 use crate::context_cache;
@@ -284,7 +284,7 @@ impl CudaBackendOps {
 
     /// `resources` から [`SegmentResource`] 列を導出する（イシュー
     /// #1349）。`captured_segment_key`（capture 対象キーの新規発行）・
-    /// `run_captured_segment`（replay 直前の再検証。codex-review P0
+    /// `run_captured_sgd_step_segment`（replay 直前の再検証。codex-review P0
     /// 指摘対応）の双方が同じロジックを使う必要がある——**2 箇所で
     /// アドレス導出ロジックが乖離すると、片方だけを見て再検証が
     /// 「常に一致する」だけの無意味な処理へ形骸化しうる**ため、本関数へ
@@ -818,6 +818,18 @@ impl BackendOps for CudaBackendOps {
     /// 初期化より後に有効化した」設定順序の誤りを示すため、
     /// [`BackendError::Unsupported`] を返し fail-closed に顕在化させる
     /// （design doc §4.7。opt-in OFF 時の `Ok(None)` と区別する）。
+    ///
+    /// **driver 呼び出し境界（codex-review P0 指摘対応）**: 旧稿は
+    /// [`Self::device_handle`]（poison 検査を経由しない。`device_handle`
+    /// doc コメント参照）を driver 呼び出し境界より前に呼んでいたため、
+    /// poison・Retiring・別スレッド capture 中のいずれでも拒否される前に
+    /// `CudaDevice::new`（キャッシュミス時）や `segment_resources_for`
+    /// （`DevicePtr::device_ptr` によるイベント同期を伴いうる）が driver
+    /// を操作しうる fail-closed 契約違反があった。本実装は `resources`
+    /// の世代収集（host-only・driver 非接触）→
+    /// `context_cache::begin_driver_call`（poison／世代検査）→
+    /// `observe_cuda_result` で包んだ [`Self::device_handle_raw`] →
+    /// `segment_resources_for` の順に固定する。
     fn captured_segment_key(
         &self,
         resources: &[&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>],
@@ -826,7 +838,13 @@ impl BackendOps for CudaBackendOps {
         if !crate::graph::step_graph_enabled() {
             return Ok(None);
         }
-        let device = self.device_handle()?;
+        // host-only（driver 非接触）: 世代は `DeviceBuffer` 自身が保持する
+        // ため、driver に触れずに集められる。
+        let generations: Vec<u64> = resources.iter().map(|b| b.generation()).collect();
+        let token = context_cache::begin_driver_call(self.ordinal, &generations)?;
+        let device =
+            context_cache::observe_cuda_result(self.ordinal, &token, self.device_handle_raw())
+                .map_err(|e| BackendError::CudaUnavailable(e.to_string()))?;
         if !device.is_capturable_stream() {
             return Err(BackendError::Unsupported(
                 "captured_segment_key: CUDA Graph step capture is enabled but this device was \
@@ -838,58 +856,102 @@ impl BackendOps for CudaBackendOps {
         let stream = device.stream();
         let segment_resources = Self::segment_resources_for(resources, stream)?;
         Ok(Some(SegmentKey {
-            generation: context_cache::current_generation(self.ordinal),
+            generation: token.generation(),
             config_key,
             resources: segment_resources,
         }))
     }
 
-    /// [`Self::captured_segment_key`] が返した `key` に対応する区間を
-    /// capture・再生する（イシュー #1349）。実体は [`crate::graph::
-    /// run_captured_segment`]（thread-local graph キャッシュ・stream
-    /// capture の手順は同モジュールのドキュメント参照）。
+    /// [`Self::captured_segment_key`] が返した `key` に対応する SGD 更新
+    /// 区間を capture・再生する（イシュー #1349）。実体は
+    /// [`crate::graph::run_captured_sgd_step_segment`]（thread-local
+    /// graph キャッシュ・stream capture の手順は同モジュールのドキュ
+    /// メント参照）。
+    ///
+    /// **任意クロージャの撤廃（codex-review P0 指摘対応）**: 旧稿の
+    /// `resources: &mut [&mut DeviceBuffer<f32>]` + 任意クロージャ
+    /// `body` という public 安全 API は、`body` が `resources` に
+    /// 含まれない外部バッファをクロージャキャプチャ経由で触れる抜け道を
+    /// 持っていた（トレイト doc コメント参照）。本メソッドは区間が
+    /// 触れる全リソース（`param`／`grad`／`velocity`）を直接引数として
+    /// 受け取り、クロージャは受け取らない。
+    ///
+    /// **driver 呼び出し境界（codex-review P0 指摘対応）**: `captured_
+    /// segment_key` と同じ理由で、`param`／`grad`／`velocity` の世代
+    /// 収集（host-only）→ `begin_driver_call` → `observe_cuda_result` で
+    /// 包んだ `device_handle_raw` → アドレス再検証、の順に固定する。
     ///
     /// **replay 直前の再検証（codex-review P0 指摘対応。`docs/backend-
     /// cuda-graph-step-capture-design.md` §4.4 追記）**: `SegmentKey`
-    /// 自身はバッファの所有権・借用を保持しない値型のため、`resources`
-    /// （`&mut [&mut DeviceBuffer<f32>]`。この呼び出しの間ライフタイムが
-    /// 保証される**排他**借用——`body` にも同じバッファへの書き込み
-    /// アクセスが要るため、検証用の共有借用とは別に確保できず、単一の
-    /// 排他借用スライスへ統合している。トレイト doc コメント参照）から
-    /// 現在のアドレス集合を再計算し、`key.resources` と完全一致すること
-    /// を確認してから初めて `crate::graph::run_captured_segment` へ委譲
-    /// する。不一致（呼び出し元が `key` を取得した [`Self::
-    /// captured_segment_key`] 呼び出しと異なる `resources` を渡した契約
-    /// 違反、または `key` 自体が別ドメインの値）なら、driver に一切
-    /// 触れずキャッシュ参照も行わず [`BackendError::InvalidArgument`] で
-    /// 拒否する（fail-closed。解放済み・別バッファへ再利用済みのアドレス
-    /// を参照する古い graph を安全確認なしに再生する事態を防ぐ）。
-    fn run_captured_segment(
+    /// 自身はバッファの所有権・借用を保持しない値型のため、`param`／
+    /// `grad`／`velocity`（この呼び出しの間ライフタイムが保証される
+    /// 借用）から現在のアドレス集合を再計算し、`key.resources` と完全
+    /// 一致することを確認してから初めて `crate::graph::
+    /// run_captured_sgd_step_segment` へ委譲する。不一致（呼び出し元が
+    /// `key` を取得した [`Self::captured_segment_key`] 呼び出しと異なる
+    /// バッファを渡した契約違反、または `key` 自体が別ドメインの値）
+    /// なら、graph 機構の driver 呼び出し（capture・replay）に進まず
+    /// [`BackendError::InvalidArgument`] で拒否する（fail-closed。
+    /// 解放済み・別バッファへ再利用済みのアドレスを参照する古い graph を
+    /// 安全確認なしに再生する事態を防ぐ）。
+    fn run_captured_sgd_step_segment(
         &self,
         key: SegmentKey,
-        resources: &mut [&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>],
-        body: &mut CapturedSegmentBody<'_>,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        config: &fandhe_ai_tensor_core::SgdStepConfig,
+        token: &fandhe_ai_tensor_core::DispatchFailureCell,
     ) -> Result<SegmentRun, BackendError> {
-        let device = self.device_handle()?;
+        let mut generations = vec![param.generation(), grad.generation()];
+        if let Some(v) = velocity.as_deref() {
+            generations.push(v.generation());
+        }
+        let call_token = context_cache::begin_driver_call(self.ordinal, &generations)?;
+        let device =
+            context_cache::observe_cuda_result(self.ordinal, &call_token, self.device_handle_raw())
+                .map_err(|e| BackendError::CudaUnavailable(e.to_string()))?;
         let stream = device.stream();
-        // 排他借用スライスを読み取り専用ビューへ一時変換する（読み取りは
-        // 排他借用でも常に可能。`&mut DeviceBuffer<f32>` から `&DeviceBuffer
-        // <f32>` への reborrow で、`resources` 自体の排他性は変えない）。
-        let shared_view: Vec<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>> =
-            resources.iter().map(|buf| &**buf).collect();
+
+        let shared_view: Vec<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>> = {
+            let mut v: Vec<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>> = vec![&*param, grad];
+            if let Some(vv) = velocity.as_deref() {
+                v.push(vv);
+            }
+            v
+        };
         let current_resources = Self::segment_resources_for(&shared_view, stream)?;
         drop(shared_view);
         if current_resources != key.resources {
             return Err(BackendError::InvalidArgument(
-                "run_captured_segment: the live `resources` passed to this call do not \
-                 match the resources recorded in `key` (the buffers used to obtain `key` \
-                 via `captured_segment_key` must be the exact same borrows, in the same \
-                 order, passed here); refusing to replay or capture against a possibly \
-                 stale/freed buffer address"
+                "run_captured_sgd_step_segment: the live `param`/`grad`/`velocity` passed to \
+                 this call do not match the resources recorded in `key` (the buffers used to \
+                 obtain `key` via `captured_segment_key` must be the exact same borrows, in \
+                 the same order, passed here); refusing to replay or capture against a \
+                 possibly stale/freed buffer address"
                     .to_string(),
             ));
         }
-        crate::graph::run_captured_segment(self.ordinal, stream, key, resources, body)
+        // このメソッド自身のトークンはここで役目を終える
+        // （poison／世代検査・アドレス再検証は完了した）。以降の実際の
+        // capture／replay は `crate::graph::run_captured_sgd_step_segment`
+        // が `context_cache::begin_capture_session`（呼び出しスレッドが
+        // トークンを 1 つも保持していないことを前提とする in_flight
+        // ドレイン契約。同関数 doc コメント参照）から独自に開始する
+        // ため、ここでトークンを保持し続けると自己デッドロックしうる。
+        drop(call_token);
+
+        crate::graph::run_captured_sgd_step_segment(
+            self.ordinal,
+            stream,
+            key,
+            self,
+            param,
+            grad,
+            velocity,
+            config,
+            token,
+        )
     }
 
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、

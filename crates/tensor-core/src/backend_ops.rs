@@ -142,7 +142,7 @@ pub enum MseReduction {
 /// 公開 API はすべて safe。`unsafe` は各バックエンド実装内部の FFI 境界
 /// （`cudarc`・`objc2` 系呼び出し）に閉じ込める
 /// （`.claude/rules/coding-rust.md`）。
-/// [`BackendOps::captured_segment_key`]／[`BackendOps::run_captured_segment`]
+/// [`BackendOps::captured_segment_key`]／[`BackendOps::run_captured_sgd_step_segment`]
 /// が扱う 1 個のデバイスバッファの識別子（イシュー #1349・親 #1348・
 /// ルート #1341 → #1269）。
 ///
@@ -155,7 +155,7 @@ pub enum MseReduction {
 /// の型として定義するため）。`numel == 0`（空バッファ）は `addr == 0` で
 /// 表す契約とする（呼び出し元がゼロ要素バッファを capture 対象に含めた
 /// 場合の識別に使う。実際に capture するかどうかの判断＝空 graph の回避
-/// は呼び出し元〈`run_captured_segment` 実装〉の責務）。
+/// は呼び出し元〈`run_captured_sgd_step_segment` 実装〉の責務）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SegmentResource {
     /// バックエンド固有のバッファ識別子（CUDA では device pointer）。
@@ -189,16 +189,8 @@ pub struct SegmentKey {
     pub resources: Vec<SegmentResource>,
 }
 
-/// [`BackendOps::run_captured_segment`] の `body` パラメータ型（イシュー
-/// #1349・codex-review P0 指摘対応）。`clippy::type_complexity` の警告を
-/// 避けるための型エイリアスであり、意味は「`resources`（`&mut [&mut
-/// DeviceBuffer<f32>]`）を受け取り区間本体を 1 回実行するクロージャ」
-/// （`run_captured_segment` doc コメント参照）。
-pub type CapturedSegmentBody<'a> =
-    dyn FnMut(&mut [&mut DeviceBuffer<f32>]) -> Result<(), BackendError> + 'a;
-
-/// [`BackendOps::run_captured_segment`] が実際に capture したか、既存の
-/// graph を再生（replay）しただけかを呼び出し元へ伝える（イシュー
+/// [`BackendOps::run_captured_sgd_step_segment`] が実際に capture したか、
+/// 既存の graph を再生（replay）しただけかを呼び出し元へ伝える（イシュー
 /// #1349。呼び出し元の launch 回数計測・テストでの制御フロー検証に使う）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentRun {
@@ -361,8 +353,8 @@ pub trait BackendOps {
     ///
     /// 呼び出し元（`fandhe_ai_autodiff::optim::device_store::
     /// DeviceParamStore::step`）は本メソッドが `Ok(Some(key))` を返した
-    /// ときのみ [`Self::run_captured_segment`] を呼ぶ（`Ok(None)` は
-    /// 「このバックエンド・現在の設定では capture 非対応」を意味し、
+    /// ときのみ [`Self::run_captured_sgd_step_segment`] を呼ぶ（`Ok(None)`
+    /// は「このバックエンド・現在の設定では capture 非対応」を意味し、
     /// 呼び出し元は区間を直接実行する現行経路へフォールバックする）。
     ///
     /// # デフォルト実装（非破壊拡張）
@@ -378,53 +370,60 @@ pub trait BackendOps {
         Ok(None)
     }
 
-    /// [`Self::captured_segment_key`] が返した `key` に対応する区間を
-    /// capture（初回）または再生（2 回目以降）する（イシュー #1349）。
+    /// [`Self::captured_segment_key`] が返した `key` に対応する SGD 更新
+    /// 区間（[`Self::sgd_step_device_tracked`] 相当）を capture（初回）
+    /// または再生（2 回目以降）する（イシュー #1349）。
     ///
-    /// `resources` は `key` を得た [`Self::captured_segment_key`] 呼び出し
-    /// と**同一の借用・同一の順序**で渡す契約（codex-review P0 指摘対応。
-    /// `docs/backend-cuda-graph-step-capture-design.md` §4.4 追記）:
-    /// `SegmentKey` 自身はバッファの所有権・借用を保持しない値型
-    /// （`addr`／`numel` のみを畳み込んだ識別子）であるため、呼び出し元が
-    /// 対応するバッファを drop した後に本メソッドを呼ぶと、解放済み
-    /// （または別バッファへ再利用済み）のアドレスを参照する古い graph を
-    /// 安全確認なしに再生してしまいうる（メモリ安全性違反）。実装は
-    /// **replay 直前に** `resources` から導出した現在のアドレス集合が
-    /// `key.resources`（capture 時点で刻印済み）と一致することを再検証
-    /// し、不一致（呼び出し元の借用が `key` 発行時と異なる＝契約違反）
-    /// なら [`BackendError::InvalidArgument`] で replay も新規 capture も
+    /// **codex-review P0 指摘対応（任意クロージャの public 安全 API 化を
+    /// 撤回）**: 旧稿は「`resources: &mut [&mut DeviceBuffer<f32>]` と
+    /// 任意クロージャ `body: &mut dyn FnMut(&mut [&mut DeviceBuffer<f32>])`
+    /// を受け取り、実装が `resources` のアドレスのみを再検証してから
+    /// `body` を呼ぶ」形だった。この形には、`body` が **Rust クロージャの
+    /// 環境キャプチャ経由で `resources` に含まれない外部の
+    /// `DeviceBuffer<f32>` を直接触れる**（`resources` 引数を無視して
+    /// クロージャがキャプチャした変数へ書き込む）という抜け道があり、
+    /// 実装側の「`resources` のアドレス一致」再検証はその外部バッファを
+    /// 一切カバーしない。CUDA Graph は capture 時点で触れた全アドレスを
+    /// 焼き込むため、そのバッファが後で drop・再利用されると replay が
+    /// 解放済み／別用途のアドレスを参照するメモリ安全性違反になりうる
+    /// （`body` の型が `dyn FnMut` である限り、この抜け道を型システムで
+    /// 塞ぐ手段がない）。本メソッドはこの型を公開 API から排除し、
+    /// 「区間が触れる全リソースをメソッド自身の引数として直接受け取り、
+    /// 区間本体（SGD 更新）もこのメソッドの実装が固定的に行う」——
+    /// 任意クロージャを一切受け取らない操作記述に置き換える。これにより
+    /// capture 中に触れうる `DeviceBuffer<f32>` は `param`／`grad`／
+    /// `velocity` の 3 引数に限定され、実装のアドレス再検証がこの区間が
+    /// 触れる全リソースを漏れなくカバーすることを型で保証する
+    /// （`docs/backend-cuda-graph-step-capture-design.md` §4.4 追記）。
+    ///
+    /// `param`／`grad`／`velocity` は [`Self::captured_segment_key`] を
+    /// 得たときと**同一の借用**で渡す契約: `SegmentKey` 自身はバッファの
+    /// 所有権・借用を保持しない値型（`addr`／`numel` のみを畳み込んだ
+    /// 識別子）であるため、呼び出し元が対応するバッファを drop した後に
+    /// 本メソッドを呼ぶと、解放済み（または別バッファへ再利用済み）の
+    /// アドレスを参照する古い graph を安全確認なしに再生してしまいうる
+    /// （メモリ安全性違反）。実装は **replay 直前に** `param`／`grad`／
+    /// `velocity` から導出した現在のアドレス集合が `key.resources`
+    /// （capture 時点で刻印済み）と一致することを再検証し、不一致
+    /// （呼び出し元の借用が `key` 発行時と異なる＝契約違反）なら
+    /// [`BackendError::InvalidArgument`] で replay も新規 capture も
     /// 行わず拒否する（fail-closed）。
     ///
-    /// `resources` を `&mut [&mut DeviceBuffer<f32>]`（**排他借用**の
-    /// スライス）としているのは、`body` にも同じバッファへの書き込み
-    /// アクセスが必要であり（例: `params` を in-place 更新する）、かつ
-    /// Rust の借用規則上「検証用の共有借用」と「`body` 実行用の排他
-    /// 借用」を**同一の関数呼び出し内で別個に**両立させることはできない
-    /// ため（片方が生存している間はもう片方を取れない）。両者を単一の
-    /// 排他借用スライスへ統合することで、`&mut [&mut DeviceBuffer<f32>]`
-    /// という型そのものが「呼び出し元が対応するバッファをこの呼び出しの
-    /// 間生存かつ排他的に所有している」というコンパイル時の生存契約を
-    /// 兼ねる（排他借用は読み取りにも使えるため、検証はこの借用を読む
-    /// だけで行える。設計判断の詳細は codex-review P0 指摘対応時の
-    /// PR 記録・design doc §4.4 追記を参照）。
+    /// `velocity` は [`Self::captured_segment_key`] の `resources` に
+    /// velocity を含めた呼び出しと対でなければならない（`config.momentum
+    /// != 0.0` かつ velocity 引数が異なる本メソッド・`captured_segment_key`
+    /// を混在させない）。
     ///
-    /// `body` は「区間本体を 1 回実行するクロージャ」で、`resources` と
-    /// **同一の**排他借用スライスを引数として受け取る（例:
-    /// `sgd_step_device_tracked` の呼び出しに必要な `param`／`grad`／
-    /// `velocity` を `resources` の要素から reborrow して渡す）。初回
-    /// （キャッシュミス）は stream capture を開始し `body` を 1 回呼んで
-    /// から capture を終了・instantiate し、得られた graph をキーへ
-    /// 紐づけてキャッシュしたのち初回 launch する（[`SegmentRun::
-    /// Captured`]）。2 回目以降（キャッシュヒット）は `body` を呼ばず、
-    /// キャッシュ済み graph をそのまま launch する（[`SegmentRun::
-    /// Replayed`]）——**`body` に副作用があっても、再生時にはその副作用は
-    /// 実行されない**（graph が capture 時点でカーネル起動を焼き込み
-    /// 済みのため。呼び出し元は `body` 内で「このバッファへ書き込む」
-    /// 以外の副作用〈ログ出力等〉を行わない契約とする）。
+    /// 初回（キャッシュミス）は stream capture を開始し、実装内部で
+    /// [`Self::sgd_step_device_tracked`] 相当の更新を 1 回実行してから
+    /// capture を終了・instantiate し、得られた graph をキーへ紐づけて
+    /// キャッシュしたのち初回 launch する（[`SegmentRun::Captured`]）。
+    /// 2 回目以降（キャッシュヒット）は更新を再実行せず、キャッシュ済み
+    /// graph をそのまま launch する（[`SegmentRun::Replayed`]）。
     ///
-    /// `body` が `Err` を返した場合、capture 自体は安全に終了させたうえで
-    /// その `Err` を呼び出し元へ返す（capture 失敗の graph はキャッシュに
-    /// 残さない）。
+    /// 区間本体が `Err` を返した場合、capture 自体は安全に終了させた
+    /// うえでその `Err` を呼び出し元へ返す（capture 失敗の graph は
+    /// キャッシュに残さない）。
     ///
     /// # デフォルト実装（非破壊拡張）
     /// 既定は常に [`BackendError::Unsupported`] を返す fail-closed。
@@ -434,15 +433,19 @@ pub trait BackendOps {
     /// が常に `Ok(None)` を返すため、通常この `Err` へは到達しない。
     /// 到達した場合は呼び出し元・バックエンド実装間の契約違反であり、
     /// fail-closed に拒否する）。
-    fn run_captured_segment(
+    #[allow(clippy::too_many_arguments)]
+    fn run_captured_sgd_step_segment(
         &self,
         _key: SegmentKey,
-        _resources: &mut [&mut DeviceBuffer<f32>],
-        _body: &mut CapturedSegmentBody<'_>,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _velocity: Option<&mut DeviceBuffer<f32>>,
+        _config: &SgdStepConfig,
+        _token: &DispatchFailureCell,
     ) -> Result<SegmentRun, BackendError> {
         Err(BackendError::Unsupported(
-            "run_captured_segment: default fail-safe (no CUDA Graph capture mechanism \
-             available for this backend)"
+            "run_captured_sgd_step_segment: default fail-safe (no CUDA Graph capture \
+             mechanism available for this backend)"
                 .into(),
         ))
     }
@@ -1299,10 +1302,11 @@ mod tests {
     }
 
     /// [`BackendOps::captured_segment_key`]／[`BackendOps::
-    /// run_captured_segment`] の既定実装が非破壊拡張の fail-safe 契約
-    /// （前者は `Ok(None)`・後者は `Err(Unsupported)`）を満たすことを
-    /// 確認する（イシュー #1349）。`MockOps` は CUDA Graph 機構を持たない
-    /// ため、graph 非対応バックエンド・opt-in OFF の既定状態を模す。
+    /// run_captured_sgd_step_segment`] の既定実装が非破壊拡張の
+    /// fail-safe 契約（前者は `Ok(None)`・後者は `Err(Unsupported)`）を
+    /// 満たすことを確認する（イシュー #1349）。`MockOps` は CUDA Graph
+    /// 機構を持たないため、graph 非対応バックエンド・opt-in OFF の既定
+    /// 状態を模す。
     #[test]
     fn captured_segment_key_default_is_none() {
         let ops = MockOps(Device::Cpu);
@@ -1311,33 +1315,42 @@ mod tests {
         assert!(matches!(key, Ok(None)));
     }
 
-    /// [`BackendOps::run_captured_segment`] の既定実装は `body` を一切
-    /// 呼ばずに `Unsupported` を返す（呼び出し元の契約「`captured_
-    /// segment_key` が `Some` を返したときのみ呼ぶ」が守られていれば
-    /// 到達しない経路だが、契約違反時も body の副作用（二重実行等）を
-    /// 起こさないことを固定する）。
+    /// [`BackendOps::run_captured_sgd_step_segment`] の既定実装は区間
+    /// 本体（SGD 更新）を一切実行せずに `Unsupported` を返す（呼び出し元
+    /// の契約「`captured_segment_key` が `Some` を返したときのみ呼ぶ」が
+    /// 守られていれば到達しない経路だが、契約違反時も二重実行等の副作用
+    /// を起こさないことを固定する）。`param` が変化しないことで「本体
+    /// 未実行」を確認する（codex-review P0 指摘対応で `body` クロージャ
+    /// を廃したため、旧テストの `call_count` の代わりに副作用の不在を
+    /// 直接観測する）。
     #[test]
-    fn run_captured_segment_default_is_unsupported_and_does_not_call_body() {
+    fn run_captured_sgd_step_segment_default_is_unsupported_and_has_no_effect() {
         let ops = MockOps(Device::Cpu);
         let key = SegmentKey {
             generation: 0,
             config_key: 0,
             resources: vec![SegmentResource { addr: 0, numel: 0 }],
         };
-        let mut call_count = 0usize;
-        let mut body = |_resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
-            call_count += 1;
-            Ok(())
+        let mut param = empty_device_buffer(Device::Cpu);
+        let grad = empty_device_buffer(Device::Cpu);
+        let config = SgdStepConfig {
+            lr: 0.1,
+            momentum: 0.0,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+            is_first_step: true,
         };
-        let result = ops.run_captured_segment(key, &mut [], &mut body);
+        let token = DispatchFailureCell::new();
+        let result =
+            ops.run_captured_sgd_step_segment(key, &mut param, &grad, None, &config, &token);
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
-        assert_eq!(call_count, 0, "default fail-safe must not invoke body");
     }
 
     /// `&dyn BackendOps` 経由でも新規デフォルトメソッドを呼べる
-    /// （object-safety が壊れていない）ことを確認する（`&mut dyn FnMut`
-    /// 引数を持つ `run_captured_segment` が object-safe な形で trait に
-    /// 追加できていることの回帰ガード）。
+    /// （object-safety が壊れていない）ことを確認する（`run_captured_
+    /// sgd_step_segment` が object-safe な形で trait に追加できている
+    /// ことの回帰ガード）。
     #[test]
     fn captured_segment_methods_are_object_safe() {
         let ops = MockOps(Device::Cpu);

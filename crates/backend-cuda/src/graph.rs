@@ -48,10 +48,13 @@ use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 
 use fandhe_ai_tensor_core::buffer::DeviceBuffer;
 use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{CapturedSegmentBody, SegmentKey, SegmentRun};
+use fandhe_ai_tensor_core::{
+    BackendOps, DispatchFailureCell, SegmentKey, SegmentRun, SgdStepConfig,
+};
 
 use crate::context_cache;
 use crate::error::CudaError;
+use crate::ops::CudaBackendOps;
 
 /// CUDA Graph step capture の opt-in 状態（モジュール冒頭コメント参照）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,43 +227,81 @@ fn put_cached_graph(key: SegmentKey, graph: CudaGraph) {
     });
 }
 
-/// [`crate::ops::CudaBackendOps::run_captured_segment`] の実体（イシュー
-/// #1349）。
+/// [`crate::ops::CudaBackendOps::run_captured_sgd_step_segment`] の実体
+/// （イシュー #1349）。
+///
+/// **codex-review P0 指摘対応（旧稿からの 2 つの変更）**:
+///
+/// 1. **任意クロージャの撤廃**: 旧稿は `resources: &mut [&mut
+///    DeviceBuffer<f32>]` と任意クロージャ `body` を受け取っていたが、
+///    `body` が `resources` に含まれない外部 `DeviceBuffer<f32>` を
+///    クロージャキャプチャ経由で直接触れる抜け道があった
+///    （`fandhe_ai_tensor_core::backend_ops::BackendOps::
+///    run_captured_sgd_step_segment` doc コメント参照）。本関数は
+///    `param`／`grad`／`velocity`（SGD 更新区間が触れる全リソース）を
+///    直接引数として受け取り、区間本体（capture 対象のカーネル起動）も
+///    本関数が固定的に [`CudaBackendOps::sgd_step_device_tracked`] を
+///    呼ぶことで行う。呼び出し元は任意コードを注入できない。
+/// 2. **capture 開始前の in_flight ドレイン**: 旧稿は `begin_driver_call`
+///    （呼び出しスレッド自身のトークン取得）を `begin_capture_session`
+///    より前に呼んでいたため、他スレッドが capture 開始の**直前**に
+///    `begin_driver_call` を通過済み（`in_flight` に計上済みだが実際の
+///    driver 呼び出しはまだ）だった場合、その呼び出しが capture 開始後に
+///    共有ストリームへカーネル起動を発行し、意図せず graph へ混入し
+///    うる窓があった。本関数はキャッシュミスの分岐で
+///    `context_cache::begin_capture_session`（他スレッドの `in_flight`
+///    をドレインしてから返る）を**呼び出しスレッド自身のトークンを
+///    1 つも保持していない状態で**呼び、その後に初めて
+///    `begin_driver_call` を呼ぶ（`context_cache::begin_capture_session`
+///    doc コメントの契約）。
 ///
 /// 手順（モジュール冒頭コメント・design doc §4.3）:
-/// 1. `begin_driver_call` で poison／世代検査（`ordinal`）。
-/// 2. thread-local キャッシュに `key` があれば `graph.launch()` して
+/// 1. thread-local キャッシュに `key` があれば `begin_driver_call` で
+///    poison／世代検査してから `graph.launch()` して
 ///    [`SegmentRun::Replayed`] を返す。
-/// 3. なければ `stream.begin_capture` → `body(resources)` → `stream.end_capture`
+/// 2. なければ `begin_capture_session` → `begin_driver_call` →
+///    `stream.begin_capture` → SGD 更新 1 回 → `stream.end_capture`
 ///    （成功時は `graph.upload()` を 1 回）→ 初回 `graph.launch()` →
 ///    キャッシュへ格納して [`SegmentRun::Captured`] を返す。
 ///
-/// `body` が `Err` を返した場合・`end_capture` 自体が失敗した場合は、
+/// SGD 更新が `Err` を返した場合・`end_capture` 自体が失敗した場合は、
 /// capture を安全に終了させたうえで `Err` を返す（graph はキャッシュに
 /// 残さない）。空 graph（`end_capture` が `Ok(None)`）は fail-closed
 /// エラーとする（design doc §4.3 手順 3）。
-pub(crate) fn run_captured_segment(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_captured_sgd_step_segment(
     ordinal: usize,
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     key: SegmentKey,
-    resources: &mut [&mut DeviceBuffer<f32>],
-    body: &mut CapturedSegmentBody<'_>,
+    ops: &CudaBackendOps,
+    param: &mut DeviceBuffer<f32>,
+    grad: &DeviceBuffer<f32>,
+    mut velocity: Option<&mut DeviceBuffer<f32>>,
+    config: &SgdStepConfig,
+    token: &DispatchFailureCell,
 ) -> Result<SegmentRun, BackendError> {
-    // ① poison／世代検査。`key.generation` はこの区間が触れるバッファの
-    // 世代（呼び出し元が `captured_segment_key` で確定済み）。
-    let _token = context_cache::begin_driver_call(ordinal, &[key.generation])?;
-
-    // ② キャッシュヒット: 既存 graph を再生する。
+    // ① キャッシュヒット: 既存 graph を再生する。
     if let Some(graph) = take_cached_graph(&key) {
+        let call_token = context_cache::begin_driver_call(ordinal, &[key.generation])?;
         let launch_result = graph.launch();
-        context_cache::observe_driver_result(ordinal, &_token, launch_result)
+        context_cache::observe_driver_result(ordinal, &call_token, launch_result)
             .map_err(|e| crate::memory::map_cuda_error(CudaError::Driver(e)))?;
         put_cached_graph(key, graph);
         return Ok(SegmentRun::Replayed);
     }
 
-    // ③ キャッシュミス: capture する。
+    // ② キャッシュミス: capture する。呼び出しスレッドはこの時点で
+    // 当該 ordinal のトークンを 1 つも保持していない
+    // （`begin_capture_session` の in_flight ドレイン契約。上記 doc
+    // コメント参照）。
     let guard = context_cache::begin_capture_session(ordinal)?;
+    let _token = match context_cache::begin_driver_call(ordinal, &[key.generation]) {
+        Ok(t) => t,
+        Err(e) => {
+            drop(guard);
+            return Err(e);
+        }
+    };
     let begin_result =
         stream.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
     if let Err(e) = context_cache::observe_driver_result(ordinal, &_token, begin_result) {
@@ -268,16 +309,16 @@ pub(crate) fn run_captured_segment(
         return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
     }
 
-    // `body` の実行を `catch_unwind` で包み、panic（unwind）した場合でも
-    // 直後で必ず `end_capture` を呼んでから panic を再送出する
+    // SGD 更新本体の実行を `catch_unwind` で包み、panic（unwind）した
+    // 場合でも直後で必ず `end_capture` を呼んでから panic を再送出する
     // （codex-review P1・Cursor Bugbot 指摘: body が panic すると
     // driver 側の stream capture が終了されないまま残り、以後その
     // ストリームへの通常呼び出しが `CUDA_ERROR_STREAM_CAPTURE_*` 系で
-    // 恒久的に失敗しうる整合性違反になる。`AssertUnwindSafe` は
-    // `body: &mut dyn FnMut` が内部状態を持ちうる前提だが、panic 時は
-    // 即座に `resume_unwind` で呼び出し元へ伝播するのみで本関数内では
-    // 使い続けないため安全。design doc §4.3 手順 3 の拡張）。
-    let body_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(resources)));
+    // 恒久的に失敗しうる整合性違反になる。design doc §4.3 手順 3 の
+    // 拡張）。
+    let body_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ops.sgd_step_device_tracked(param, grad, velocity.as_deref_mut(), config, token)
+    }));
 
     // capture は body の成否（正常終了・Err・panic のいずれか）に関わらず
     // 必ず終了させる（design doc §4.3 手順 3。driver 状態を capture 中の
@@ -303,9 +344,10 @@ pub(crate) fn run_captured_segment(
             // 空 graph は fail-closed（silent success 禁止。design doc
             // §4.3 手順 3）。body 自体は成功していても、capture 内で
             // 1 個も launch されていないことは契約違反として扱う。
-            let msg = "run_captured_segment: end_capture produced an empty graph (no kernel \
+            let msg =
+                "run_captured_sgd_step_segment: end_capture produced an empty graph (no kernel \
                         launches were recorded during capture)"
-                .to_string();
+                    .to_string();
             return Err(body_err.unwrap_or(BackendError::Unsupported(msg)));
         }
         Err(e) => {

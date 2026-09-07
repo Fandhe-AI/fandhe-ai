@@ -19,16 +19,32 @@
 //! `crates/facade/tests/cuda_graph_step_bit_identity.rs`（facade 経由・
 //! `DeviceParamStore::step` 結線を通す。design doc §10）で検証する。
 //! 本ファイルは `backend-cuda` 単体（`BackendOps::captured_segment_key`／
-//! `run_captured_segment`）の契約——capture 可否判定・再利用（Replayed）・
-//! fail-closed（同期点拒否・capture エラーの poison 伝播）——を検証する。
+//! `run_captured_sgd_step_segment`）の契約——capture 可否判定・再利用
+//! （Replayed）・fail-closed（capture エラーの poison 伝播）——を検証
+//! する。
+//!
+//! **codex-review P0 指摘対応（`run_captured_sgd_step_segment` への
+//! 改称）で削除したテスト**: 旧稿は `run_captured_segment` が任意
+//! クロージャ `body` を受け取る設計だったため、「capture 中に同期点
+//! （`MemoryOps::download`）を `body` 内から呼ぶと driver に触れる前に
+//! `Unsupported` で拒否される」ことを `body` へ注入して直接検証する
+//! テストを持っていた。新シグネチャは `param`／`grad`／`velocity` の
+//! 3 引数のみを受け取り、区間本体（SGD 更新）は実装が固定的に行う
+//! ため、そもそも任意コード（同期点呼び出しを含む）を capture 区間へ
+//! 注入する経路自体が型レベルで存在しなくなった——このテストが検証
+//! していた性質は「テストで確認すべき仕様」から「型システムが保証する
+//! 不変条件」へ格上げされた。同期点ガード自体
+//! （`context_cache::begin_sync_point_call`）の状態機械としての正しさ
+//! は実機非依存の `context_cache.rs`
+//! `begin_sync_point_call_rejects_before_touching_driver_while_capturing`
+//! で引き続き検証する。
 
 use std::sync::Arc;
 
 use fandhe_ai_backend_cuda::graph::{set_step_graph_enabled, step_graph_enabled};
 use fandhe_ai_backend_cuda::{CudaBackendOps, CudaDevice};
 use fandhe_ai_tensor_core::buffer::DeviceBuffer;
-use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{BackendOps, SegmentRun, SgdStepConfig, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, DispatchFailureCell, SegmentRun, SgdStepConfig, Tensor};
 
 /// opt-in を明示的に OFF/ON へ切り替え、テスト終了時に OFF へ戻す RAII
 /// ガード（`crate::precision::tests::FlagGuard` と同型。本ファイルは
@@ -54,11 +70,13 @@ impl Drop for GraphOptInGuard {
 /// 手順: opt-in を有効化 → `CudaDevice::new(0)`（capturable stream で
 /// 初期化される）→ 連結パラメータ・grad staging・velocity なしの最小
 /// 構成で `captured_segment_key` → `Some` を確認 → 1 回目の
-/// `run_captured_segment` が [`SegmentRun::Captured`] を返し、param が
-/// 期待どおり更新されることを確認 → 2 回目（同一 key）が
-/// [`SegmentRun::Replayed`] を返し、`body` を呼ばなくても同じ更新が
-/// 再生されることを確認する（`body` に呼び出し回数カウンタを仕込み、
-/// 2 回目は増えないことも検証する）。
+/// `run_captured_sgd_step_segment` が [`SegmentRun::Captured`] を返し、
+/// param が期待どおり更新されることを確認 → 2 回目（同一 key）が
+/// [`SegmentRun::Replayed`] を返し、region 本体（実装内部の SGD 更新）を
+/// 再実行しなくても同じ更新が再生されることを param の値で確認する
+/// （codex-review P0 指摘対応で `body` クロージャの呼び出し回数カウンタは
+/// 廃止済み——「本体を呼んだか」は SGD 更新の副作用〈param の値〉でしか
+/// 観測できない設計になった）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須。--test-threads=1 で実行すること"]
 fn sgd_update_segment_captures_then_replays_bit_identically() {
@@ -81,7 +99,7 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
     let mut param = mem
         .upload(&Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[numel]).unwrap())
         .expect("param upload succeeds");
-    let mut grad = mem
+    let grad = mem
         .upload(&Tensor::new(vec![0.1, 0.1, 0.1, 0.1], &[numel]).unwrap())
         .expect("grad upload succeeds");
 
@@ -105,31 +123,12 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
             .expect("captured_segment_key must return Some when opt-in is on")
     };
 
-    let mut call_count = 0usize;
-    {
-        // `resources` は `body` にも `param`／`grad` への排他借用を渡す
-        // ための単一スライス（codex-review P0 指摘対応。トレイト
-        // `BackendOps::run_captured_segment` doc コメント参照）。以前は
-        // `*mut DeviceBuffer<f32>` への `unsafe` 生ポインタ経由で `param`
-        // への `&mut` を得ていたが、新シグネチャでは `resources` から
-        // 素直に reborrow できるため `unsafe` は不要になった。
-        let mut resources: [&mut DeviceBuffer<f32>; 2] = [&mut param, &mut grad];
-        let mut body = |resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
-            call_count += 1;
-            let (head, tail) = resources.split_at_mut(1);
-            let param_mut: &mut DeviceBuffer<f32> = &mut *head[0];
-            let grad_ref: &DeviceBuffer<f32> = &*tail[0];
-            cuda.sgd_step_device(param_mut, grad_ref, None, &config)
-        };
-        let run1 = cuda
-            .run_captured_segment(key.clone(), &mut resources, &mut body)
-            .expect("first run_captured_segment call must succeed (capture)");
-        assert_eq!(run1, SegmentRun::Captured);
-    }
-    assert_eq!(
-        call_count, 1,
-        "初回は capture のため body が 1 回呼ばれるはず"
-    );
+    let token = DispatchFailureCell::new();
+
+    let run1 = cuda
+        .run_captured_sgd_step_segment(key.clone(), &mut param, &grad, None, &config, &token)
+        .expect("first run_captured_sgd_step_segment call must succeed (capture)");
+    assert_eq!(run1, SegmentRun::Captured);
 
     let after_first = mem.download(&param).expect("download succeeds");
     // lr=0.5, grad=0.1 → param -= 0.05 per element.
@@ -139,21 +138,10 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
         &[0.95, 1.95, 2.95, 3.95],
     );
 
-    {
-        let mut resources: [&mut DeviceBuffer<f32>; 2] = [&mut param, &mut grad];
-        let mut body = |_resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
-            call_count += 1;
-            Ok(())
-        };
-        let run2 = cuda
-            .run_captured_segment(key, &mut resources, &mut body)
-            .expect("second run_captured_segment call must succeed (replay)");
-        assert_eq!(run2, SegmentRun::Replayed);
-    }
-    assert_eq!(
-        call_count, 1,
-        "2 回目は再生のため body は呼ばれないはず（呼び出し回数は 1 のまま）"
-    );
+    let run2 = cuda
+        .run_captured_sgd_step_segment(key, &mut param, &grad, None, &config, &token)
+        .expect("second run_captured_sgd_step_segment call must succeed (replay)");
+    assert_eq!(run2, SegmentRun::Replayed);
 
     let after_second = mem.download(&param).expect("download succeeds");
     fandhe_ai_backend_cpu::parity::assert_parity(
@@ -189,57 +177,6 @@ fn opt_in_off_keeps_legacy_stream_and_returns_none() {
         .captured_segment_key(&refs, 0)
         .expect("captured_segment_key must not error when opt-in is off");
     assert!(key.is_none(), "opt-in OFF では常に None のはず");
-}
-
-/// capture 中に同期点（`MemoryOps::download`）を呼ぶと、driver に
-/// 触れる前に `Unsupported` で拒否され、ordinal は poison しない
-/// （受け入れ条件 (b) 前半。design doc §4.7）。
-#[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。--test-threads=1 で実行すること"]
-fn sync_point_call_during_capture_is_rejected_without_poisoning() {
-    let _guard = GraphOptInGuard::enable();
-    let device = CudaDevice::new(0).expect("CUDA device 0 must be available");
-    assert!(device.is_capturable_stream());
-
-    let cuda = CudaBackendOps::new(0);
-    let mem = cuda.memory_ops().expect("memory_ops must be Some");
-    let mut param = mem
-        .upload(&Tensor::new(vec![1.0], &[1]).unwrap())
-        .expect("upload succeeds");
-    let mut grad = mem
-        .upload(&Tensor::new(vec![0.1], &[1]).unwrap())
-        .expect("upload succeeds");
-    let key = {
-        let refs: [&DeviceBuffer<f32>; 2] = [&param, &grad];
-        cuda.captured_segment_key(&refs, 1)
-            .expect("captured_segment_key must succeed")
-            .expect("must be Some when opt-in is on")
-    };
-
-    let mut resources: [&mut DeviceBuffer<f32>; 2] = [&mut param, &mut grad];
-    // `body` は `mem`（`DeviceBuffer` 自体を借用しないハンドル）と、
-    // 呼び出し時に**渡される** `resources` 引数（外側の `resources`
-    // 変数ではなく、クロージャのパラメータとして同名でシャドウする）
-    // のみを使う。外側の `param`／`grad` を直接キャプチャすると、
-    // `resources`（排他借用）と二重に借用することになり
-    // コンパイルできない（トレイト doc コメント参照）。
-    let mut body = |resources: &mut [&mut DeviceBuffer<f32>]| -> Result<(), BackendError> {
-        // capture 中に同期点（download）を呼ぶ契約違反。
-        mem.download(&*resources[0]).map(|_| ())
-    };
-    let result = cuda.run_captured_segment(key, &mut resources, &mut body);
-    assert!(
-        matches!(result, Err(BackendError::Unsupported(_))),
-        "capture 中の同期点呼び出しは Unsupported で拒否されるはず: {result:?}"
-    );
-
-    // ordinal は poison していないはず（同期点ガードは driver に触れる
-    // 前に拒否するため sticky エラーを生じさせない）。次の通常操作が
-    // 成功することで間接的に確認する。
-    let after = mem
-        .download(&param)
-        .expect("ordinal must not be poisoned after a rejected sync-point-during-capture call");
-    assert_eq!(after.as_slice().unwrap(), &[1.0]);
 }
 
 /// capture 済み graph が触れるバッファ集合を [`SegmentKey`] で捉えている

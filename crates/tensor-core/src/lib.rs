@@ -130,8 +130,8 @@ mod tensor;
 pub mod typed;
 
 pub use backend_ops::{
-    Activation, BackendOps, CapturedSegmentBody, MseReduction, SegmentKey, SegmentResource,
-    SegmentRun, SgdStepConfig, ops_for,
+    Activation, BackendOps, MseReduction, SegmentKey, SegmentResource, SegmentRun, SgdStepConfig,
+    ops_for,
 };
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};

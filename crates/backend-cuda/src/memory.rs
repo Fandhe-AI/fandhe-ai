@@ -429,7 +429,7 @@ impl MemoryOps for CudaMemory {
     /// ホスト常駐の `tensor` を既存の `dst` の `dst_offset` 要素目から
     /// H2D 転送する（イシュー #1212・§4.5 で `DeviceParamStore::step` の
     /// grad staging 書き込みに使う。イシュー #1349 では graph capture
-    /// 対象区間の外側〈`run_captured_segment` 呼び出し前〉で毎回呼ぶ
+    /// 対象区間の外側〈`run_captured_sgd_step_segment` 呼び出し前〉で毎回呼ぶ
     /// ことで、capture 済み graph が参照するバッファのアドレス・内容を
     /// capture 前に確定させる契約とする。`backend-cpu::upload_into_cpu_buffer`
     /// と同じ境界検査を行う）。
