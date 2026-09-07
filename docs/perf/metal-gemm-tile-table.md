@@ -123,6 +123,37 @@ cand2 実測値は本 PR（#1143）自身の計測ではなく、本表 §3・§
 #1330 へ引き継ぐ（詳細は `docs/perf/metal-gemm-n4096-kernel-gap.md`
 §13）。
 
+**#1331 追記**: E8（親 #1325）の sub-issue として `CANDIDATES` へ index 10
+（`(128,64,16,2,2)`。`CANDIDATES[0]` の bm=128 版）を追加した。本 issue も
+候補追加と正確性（parity）確認のみを対象とし、性能値（純カーネル時間
+の before/after・本表 §3/§5 相当の TFLOPS 計測）は未計測のまま
+（`select_with_occupancy_for_device` の選択ロジック・本表 §5 の判断は
+変更しない）。性能実測・`tile::select` への組み込み判断は後続イシュー
+#1332 へ引き継ぐ（詳細は `docs/perf/metal-gemm-n4096-kernel-gap.md`
+§15）。
+
+**#1332 追記**: E8 実測（イシュー #1332）で `CANDIDATES[10]`（128×64×16）
+の純カーネル時間を A 系列（vs `[0]`／`[3]`）・B 系列（vs 本番選択構成）で
+5 回計測中央値比較した。B 系列は N=512/1024/2048/4096 の全帯域で
+本番選択構成より 9.7〜13.0 倍後退（20/20 反復符号一貫）し、
+**組み込み不可（REJECT）** と確定した。`select_with_occupancy_for_device`
+の選択ロジック・本表 §5 の判断は変更しない（詳細は
+`docs/perf/metal-gemm-n4096-kernel-gap.md` §16）。
+
+**#1370 追記**: E9（half フラグメント／f32 累算候補 `gemm_simdgroup_
+tiled_hfrag`。親 #1368・イシュー #1369/#1370）の純カーネル時間 5 回
+計測中央値比較を実施した。hfrag は f32 とは別カーネル（協調ロード時に
+half へ変換して MMA する精度低下を伴う経路）のため `CANDIDATES` 自体
+への追加ではなく既存候補を hfrag カーネルで再ディスパッチする形の
+評価であり、N=4096 のみ本番選択構成比 約 10〜12% 高速（ADOPT-as-
+opt-in-candidate）だがこれは仮説段階の間接効果（hfrag の SMEM 使用量
+が f32 の半分であるため異なるタイルが最速になることに起因すると
+推測されるが、SMEM 使用量のみを対照した比較ではないため断定はできない。
+`docs/perf/metal-gemm-hfrag-candidate.md` §9.6）と考えられ、無条件の
+opt-in 候補前進は推奨しないと結論した。`select_with_occupancy_for_
+device` の選択ロジック・本表 §5 の判断は変更しない（詳細は
+`docs/perf/metal-gemm-hfrag-candidate.md` §9）。
+
 ## 6. スコープ外（計画 §7 を踏襲）
 
 - `gemm_simdgroup_tiled` への転置ロード導入（NT/TN/TT へのタイル variant 適用）: §4 の定量化を判断材料として親 #1037 系の別イシューへ引き継ぐ

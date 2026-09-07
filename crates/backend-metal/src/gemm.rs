@@ -338,6 +338,18 @@ pub struct MetalGemm {
     /// `tiled_cache` と同じ理由（イシュー #930）で `RefCell` から `Mutex`
     /// へ変更した。
     tiled_f16_cache: Mutex<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
+    /// `gemm_simdgroup_tiled_hfrag`（half フラグメント／f32 累算候補。
+    /// イシュー #1369）の構成キー（`(TileConfig, TransposePattern)`。
+    /// `TRANS_A`/`TRANS_B` で NT/TN/TT へも特殊化されるため `tiled_cache`
+    /// と同じキー形状にする）→ パイプラインの遅延キャッシュ
+    /// （[`Self::pipeline_for_tile_hfrag`]）。`tiled_f16_cache` と同じ
+    /// 設計判断（関数名が異なる別パイプラインのため独立キャッシュとして
+    /// 持ち、f32 版・f16 版との取り違えを構造的に防ぐ）。本候補は
+    /// `tile::select`／`dispatch_auto` へ結線しないため、本番既定経路
+    /// （`MetalGemm::new`）のキャッシュ・パイプライン構築には一切影響しない
+    /// （`docs/perf/metal-gemm-hfrag-candidate.md` §2）。
+    tiled_hfrag_cache:
+        Mutex<HashMap<(TileConfig, TransposePattern), objc2::rc::Retained<MtlPipeline>>>,
     /// threadgroup ID スウィズル（イシュー #540）をこのインスタンスの
     /// `SimdgroupTiled` 経路（[`Self::pipeline_for_tile`]・
     /// `encode_dispatch_tiled`）で有効化するかどうか。イシュー #746 で
@@ -383,9 +395,10 @@ pub struct MetalGemm {
     /// base（`false`）/head（`true`）の 2 `MetalGemm` を同一プロセス内に
     /// 構築して bit 一致を自己検証できるようにする）。`MetalGemm::new` は
     /// 本番既定 `tile::SOURCE_SPECIALIZATION_ENABLED`（`false`）を渡すため
-    /// 既定挙動は不変。性能実測・本番既定切替は行わない（後続イシュー
-    /// #1289／#1302 のスコープ。`docs/perf/metal-gemm-n4096-kernel-gap.md`
-    /// §8）。`true` の場合、[`Self::pipeline_for_tile`] は
+    /// 既定挙動は不変。性能実測・本番既定切替は行わない（イシュー
+    /// #1289 で REJECT・イシュー #1304 で `tile::select` 組み込み対象なしと
+    /// 確定。`docs/perf/metal-gemm-n4096-kernel-gap.md` §9.4・§18）。`true`
+    /// の場合、[`Self::pipeline_for_tile`] は
     /// `self.tiled_cache`（function constant 経路のキャッシュ）を一切
     /// 更新せず [`Self::tiled_spec_cache`] のみを使う（両経路の取り違えを
     /// 構造的に防ぐため、`tiled_f16_cache` と同じく独立フィールドとする）。
@@ -431,8 +444,9 @@ pub struct MetalGemm {
     /// 不変。[`Self::pipeline_for_tile_f16`] には既定値（`cfg.pad()`／`0`）
     /// のみを渡す no-op 契約（呼び出し側コメント参照）。**本 sub-issue
     /// （#1298）は機構の実装と bit 一致の自己検証のみを行い、性能実測・
-    /// `tile::select` への組み込み判断は行わない**（後続イシュー #1300／
-    /// #1302／#1304 のスコープ）。
+    /// `tile::select` への組み込み判断は行わない**（イシュー #1300 で
+    /// REJECT・イシュー #1304 で組み込み対象なしと確定。`docs/perf/
+    /// metal-gemm-n4096-kernel-gap.md` §11.4・§18）。
     coop_load: tile::CoopLoadConfig,
     /// タイルクラス分割（イシュー #1327・E6 試作）をこのインスタンスの
     /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]・
@@ -580,7 +594,8 @@ impl MetalGemm {
     /// 既定のまま据え置く。本番経路（[`Self::new`]）は常に
     /// `tile::COOP_LOAD_CONFIG`（`RowLinear`・`Four`）を渡すため、本関数の
     /// 追加自体は既定挙動を変えない。性能実測・`tile::select` への組み込み
-    /// 判断は行わない（後続イシュー #1300／#1302／#1304 のスコープ）。
+    /// 判断はイシュー #1300 で REJECT・イシュー #1304 で組み込み対象なしと
+    /// 確定済み。
     ///
     /// `pub` にする理由は [`Self::new_with_frag_load`] doc comment と同じ
     /// （`tile::CoopLoadConfig`/`CoopLoadLayout`/`TgpPad` を `pub` にして
@@ -664,8 +679,8 @@ impl MetalGemm {
     /// 細粒度同期・条件付き loop unroll）は本番既定のまま据え置く。本番
     /// 経路（[`Self::new`]）は常に `tile::SOURCE_SPECIALIZATION_ENABLED`
     /// （`false`）を渡すため、本関数の追加自体は既定挙動を変えない。
-    /// 性能実測・本番既定の `true` への切替判断は行わない（後続イシュー
-    /// #1289／#1302 のスコープ）。
+    /// 性能実測・本番既定の `true` への切替判断はイシュー #1289 で
+    /// REJECT・イシュー #1304 で組み込み対象なしと確定済み。
     pub fn new_with_source_specialization(
         ctx: &MetalContext,
         source_specialized: bool,
@@ -787,6 +802,7 @@ impl MetalGemm {
             library,
             tiled_cache: Mutex::new(HashMap::new()),
             tiled_f16_cache: Mutex::new(HashMap::new()),
+            tiled_hfrag_cache: Mutex::new(HashMap::new()),
             swizzle_enabled,
             fine_barrier_enabled,
             unroll_acc_enabled,
@@ -1264,6 +1280,102 @@ impl MetalGemm {
 
         Err(last_err.unwrap_or(MetalError::PipelineCreation {
             message: "no tile configuration in fallback chain was accepted (f16)".to_string(),
+        }))
+    }
+
+    /// [`TileConfig`] 候補に対する `gemm_simdgroup_tiled_hfrag`
+    /// （half フラグメント／f32 累算候補。イシュー #1369）パイプラインを
+    /// キャッシュから取得、無ければ構築してキャッシュする。
+    /// [`Self::pipeline_for_tile_f16`] と同じフォールバック戦略
+    /// （`crate::tile::fallback_chain`）を踏襲するが、以下 2 点が異なる:
+    ///
+    /// 1. `self.tiled_hfrag_cache`（`(TileConfig, TransposePattern)` キー。
+    ///    f32 版・f16 版とは独立したキャッシュ）を使う。
+    /// 2. **本カーネルは staged 経路（協調ロード）のみを実装する**（`shaders/
+    ///    gemm.metal::gemm_simdgroup_tiled_hfrag` 冒頭コメント「スコープ
+    ///    境界」参照）ため、`candidate.staged == false`（`SINGLE_SIMDGROUP_8X8`
+    ///    を含む `fallback_chain` の非 staged 候補）は明示的にスキップし、
+    ///    `pipeline_for_tile_f16` のようにサイレントへ縮退させない
+    ///    （fail-closed。staged 候補が 1 つも受理されない場合は
+    ///    `MetalError::PipelineCreation` を返す）。デバイス上限検査は f32
+    ///    単位の `validate` に加えて `candidate.shared_mem_bytes_hfrag_for
+    ///    (pattern) <= max_shared_mem_bytes` でも行う（f16 版と同じ理由：
+    ///    f32 版 `validate` は f32 単位の `shared_mem_bytes` しか見ない
+    ///    ため、half タイル確保量の超過を別途検査する必要がある）。
+    fn pipeline_for_tile_hfrag(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+        pattern: TransposePattern,
+    ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
+        let mut last_err: Option<MetalError> = None;
+
+        for candidate in tile::fallback_chain(cfg) {
+            // 本カーネルは direct-load（`staged=false`）経路を実装しない
+            // ため、`SINGLE_SIMDGROUP_8X8` を含む非 staged 候補は構成不適格
+            // として拒否する（上方ドキュメンテーションコメント参照）。
+            if !candidate.staged {
+                continue;
+            }
+
+            if let Some(pipeline) =
+                lock_tile_cache(&self.tiled_hfrag_cache)?.get(&(candidate, pattern))
+            {
+                return Ok((Retained::clone(pipeline), candidate));
+            }
+
+            let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
+            if candidate.validate(1024, max_shared_mem_bytes).is_err() {
+                continue;
+            }
+            if candidate.shared_mem_bytes_hfrag_for(pattern) > max_shared_mem_bytes {
+                continue;
+            }
+
+            // `gemm_simdgroup_tiled_hfrag` は `TILE_CLASS`/
+            // `FRAG_LOAD_DEVICE_HOISTED`/`FRAG_LOAD_KSTEPS`/
+            // `COOP_LOAD_LAYOUT`/`UNROLL_ACC_ENABLED` のいずれも参照しない
+            // （`shaders/gemm.metal` 冒頭コメント「スコープ境界」参照）ため、
+            // これらは常に既定値／no-op 契約の値を渡す（`pipeline_for_tile_f16`
+            // と同じ扱い）。`TGP_PAD`（index 6）は本カーネルも共有メモリ
+            // レイアウトの導出に使うため `candidate.pad()` を渡す。
+            let gates = pipeline::GemmGateConstants {
+                swizzle_enabled: self.swizzle_enabled,
+                fine_barrier_enabled: false,
+                unroll_acc_enabled: false,
+                frag_load_device_hoisted: false,
+                frag_load_ksteps: tile::FragLoadConfig::DEFAULT.ksteps.as_u32(),
+                tgp_pad_elems: candidate.pad(),
+                coop_load_layout: 0,
+                tile_class: 0,
+            };
+            match pipeline::make_pipeline_with_constants(
+                ctx.device(),
+                &self.library,
+                "gemm_simdgroup_tiled_hfrag",
+                candidate,
+                gates,
+                pattern,
+            ) {
+                Ok(pipeline) => {
+                    let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
+                    if candidate.thread_count() > actual_max_threads {
+                        continue;
+                    }
+                    lock_tile_cache(&self.tiled_hfrag_cache)?
+                        .insert((candidate, pattern), Retained::clone(&pipeline));
+                    return Ok((pipeline, candidate));
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    continue;
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or(MetalError::PipelineCreation {
+            message: "no staged tile configuration in fallback chain was accepted (hfrag)"
+                .to_string(),
         }))
     }
 
@@ -2364,6 +2476,152 @@ impl MetalGemm {
         Ok(unpad_matrix_f16(padded_c, m_eff, n_eff, m, n))
     }
 
+    /// `gemm_simdgroup_tiled_hfrag`（half フラグメント／f32 累算候補。
+    /// イシュー #1369）の全部入り入口: パディング・バッファ確保／
+    /// アップロード・ディスパッチ・readback／アンパディングを一括で行う。
+    /// [`Self::dispatch_f16_tiled_unverified`] と同じ全部入り構造だが、
+    /// **候補評価専用・本番非結線**（`docs/perf/metal-gemm-hfrag-candidate.md`
+    /// §2）であることを明示するため `#[doc(hidden)]`・`_unverified` suffix
+    /// を維持する（PR #819 codex-review P1 指摘対応と同じ判断根拠）。
+    ///
+    /// `a`/`b` は `pattern`（[`TransposePattern`]）に応じた行優先ストレージ
+    /// を渡す契約（要素数は転置に関わらず `m*k`/`k*n` で不変。
+    /// [`validate_dims`] が検証する）:
+    /// - `a`: `Tn`/`Tt`（`TRANS_A`）なら `[k, m]`、それ以外は `[m, k]`
+    /// - `b`: `Nt`/`Tt`（`TRANS_B`）なら `[n, k]`、それ以外は `[k, n]`
+    ///
+    /// 戻り値は `(結果, フォールバック解決後に実際に採用した [`TileConfig`])`
+    /// — `cfg` は [`Self::pipeline_for_tile_hfrag`] がデバイス上限超過等で
+    /// サイレントに次候補へフォールバックしうる（f32/f16 版と同じ透明性の
+    /// 設計）ため、呼び出し元が resolved 構成を検証できるようにする。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: [`Self::dispatch_f16_tiled_unverified`]
+    /// と同じ判断根拠に `pattern` が加わったのみ。
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn dispatch_hfrag_tiled_unverified(
+        &self,
+        ctx: &MetalContext,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        pattern: TransposePattern,
+        cfg: TileConfig,
+    ) -> Result<(Vec<f32>, TileConfig), MetalError> {
+        validate_dims(a, b, m, n, k)?;
+
+        let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
+        validate_effective_dims(m_eff, n_eff, k_eff)?;
+
+        let trans_a = matches!(pattern, TransposePattern::Tn | TransposePattern::Tt);
+        let trans_b = matches!(pattern, TransposePattern::Nt | TransposePattern::Tt);
+
+        // ストレージ形状は `pattern` に応じて A: `[m,k]`/`[k,m]`、
+        // B: `[k,n]`/`[n,k]` に切り替わる（上方ドキュメンテーションコメント
+        // 参照）。`pad_matrix` はストレージ形状どおりの行・列数でパディング
+        // する。
+        let (a_rows, a_cols, a_rows_eff, a_cols_eff) = if trans_a {
+            (k, m, k_eff, m_eff)
+        } else {
+            (m, k, m_eff, k_eff)
+        };
+        let (b_rows, b_cols, b_rows_eff, b_cols_eff) = if trans_b {
+            (n, k, n_eff, k_eff)
+        } else {
+            (k, n, k_eff, n_eff)
+        };
+
+        let a_padded = pad_matrix(a, a_rows, a_cols, a_rows_eff, a_cols_eff);
+        let b_padded = pad_matrix(b, b_rows, b_cols, b_rows_eff, b_cols_eff);
+
+        let a_buf = MetalBuffer::new_with_data(ctx, &a_padded)?;
+        let b_buf = MetalBuffer::new_with_data(ctx, &b_padded)?;
+        let c_buf = MetalBuffer::new_zeroed(ctx, m_eff * n_eff)?;
+
+        // `lda`/`ldb` はストレージの行長（`pad8` 済み実効次元）。
+        // NN: k_eff/n_eff・NT: k_eff/k_eff・TN: m_eff/n_eff・TT: m_eff/k_eff
+        // （実装計画 §2.3 の表と一致）。
+        let lda = if trans_a { m_eff } else { k_eff } as u32;
+        let ldb = if trans_b { k_eff } else { n_eff } as u32;
+        let strides = GemmStrides {
+            lda,
+            ldb,
+            trans_a: u32::from(trans_a),
+            trans_b: u32::from(trans_b),
+        };
+
+        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+        let (pipeline, resolved_cfg) = self.pipeline_for_tile_hfrag(ctx, cfg, pattern)?;
+        let swizzle_enabled = self.swizzle_enabled;
+        ctx.dispatch_sync(|encoder| {
+            encode_dispatch_tiled_hfrag(
+                encoder,
+                &pipeline,
+                &a_buf,
+                &b_buf,
+                &c_buf,
+                dims,
+                resolved_cfg,
+                swizzle_enabled,
+                strides,
+                pattern,
+            );
+        })?;
+
+        let padded_c = c_buf.read_to_vec();
+        Ok((unpad_matrix(padded_c, m_eff, n_eff, m, n), resolved_cfg))
+    }
+
+    /// [`Self::dispatch_hfrag_tiled_unverified`] の NN 限定・診断専用入口
+    /// （イシュー #1369。兄弟イシュー #1370 の純カーネル時間計測ハーネスが
+    /// 使う入口）。[`Self::diag_encode_tiled_nn`]（f32 版）と同型: バッファ
+    /// 確保・readback を含まず 1 バッチ・1 ラベルでのみエンコードする
+    /// （`ctx.encode` の計測境界契約）。`#[cfg(test)]` 限定（本体ビルドには
+    /// 含まれない。AC-2「既存の本番経路・既存テストを変更しない」に対応）。
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn diag_encode_tiled_hfrag_nn(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+        validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
+
+        let (pipeline, resolved_cfg) =
+            self.pipeline_for_tile_hfrag(ctx, cfg, TransposePattern::Nn)?;
+        let swizzle_enabled = self.swizzle_enabled;
+        ctx.encode(
+            "diag_encode_tiled_hfrag_nn",
+            &[a_buf.raw(), b_buf.raw(), c_buf.raw()],
+            None,
+            |encoder| {
+                encode_dispatch_tiled_hfrag(
+                    encoder,
+                    &pipeline,
+                    a_buf,
+                    b_buf,
+                    c_buf,
+                    dims,
+                    resolved_cfg,
+                    swizzle_enabled,
+                    GemmStrides::nn(dims.k, dims.n),
+                    TransposePattern::Nn,
+                );
+            },
+        )?;
+
+        Ok(resolved_cfg)
+    }
+
     /// `variant` で選択した GEMM カーネルをディスパッチし、結果をホストへ
     /// 読み出す（TASK-1.8c・#40）。
     ///
@@ -3361,6 +3619,93 @@ fn encode_dispatch_tiled_f16(
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
 
+/// `gemm_simdgroup_tiled_hfrag`（half フラグメント／f32 累算候補。
+/// イシュー #1369）の buffer・threadgroup メモリ結線。入出力は `a_buf`/
+/// `b_buf`/`c_buf` とも `MetalBuffer`（f32）で f32 版 `encode_dispatch_tiled`
+/// と同じ型を使う点が `encode_dispatch_tiled_f16`（half バッファ）との
+/// 違い。本カーネルは `TILE_CLASS` を参照しないため常に dispatch grid
+/// 全体を覆う恒等領域（`TileClassRegion::full_grid`）を渡す（`region` は
+/// カーネル側で読まれないが、f32 版とシグネチャを揃えるため常にバインド
+/// する。`shaders/gemm.metal::gemm_simdgroup_tiled_hfrag` 冒頭コメント
+/// 参照）。
+#[allow(clippy::too_many_arguments)]
+fn encode_dispatch_tiled_hfrag(
+    encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    a_buf: &MetalBuffer,
+    b_buf: &MetalBuffer,
+    c_buf: &MetalBuffer,
+    dims: Dims,
+    cfg: TileConfig,
+    swizzle_enabled: bool,
+    strides: GemmStrides,
+    pattern: TransposePattern,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 1/2）と同一の
+    // 契約。`a_buf`/`b_buf`/`c_buf` は `dispatch_sync`／`ctx.encode` の
+    // 同期完了まで呼び出し元スタックフレームで生存する。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 2);
+    }
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 2/2）と同一の
+    // 契約（`dims`/`strides`/`region` はローカル変数、長さは各々の
+    // `size_of` と一致）。
+    let tiles_n = (dims.n as usize).div_ceil(cfg.bn as usize) as u32;
+    let tiles_m = (dims.m as usize).div_ceil(cfg.bm as usize) as u32;
+    let region = TileClassRegion::full_grid(tiles_m, tiles_n);
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&dims).cast(),
+            std::mem::size_of::<Dims>(),
+            3,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&strides).cast(),
+            std::mem::size_of::<GemmStrides>(),
+            4,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&region).cast(),
+            std::mem::size_of::<TileClassRegion>(),
+            5,
+        );
+    }
+
+    // SAFETY: `encode_dispatch_tiled`（f32 版）の同名 SAFETY コメントと同一
+    // の契約。本カーネルは staged 経路のみのため
+    // `shared_mem_bytes_hfrag_for` は常に非 0（`pipeline_for_tile_hfrag`
+    // が `staged=false` 候補を拒否する契約。`shaders/gemm.metal::
+    // gemm_simdgroup_tiled_hfrag` 冒頭コメント参照）だが、`.max(16)` は
+    // f32/f16 版との対称性・fail-safe として同じ下限適用を維持する。
+    let shared_mem_bytes = cfg.shared_mem_bytes_hfrag_for(pattern).max(16) as usize;
+    debug_assert!(
+        shared_mem_bytes.is_multiple_of(16),
+        "Metal は setThreadgroupMemoryLength に 16 バイト境界整合を要求する"
+    );
+    unsafe {
+        encoder.setThreadgroupMemoryLength_atIndex(shared_mem_bytes, 0);
+    }
+
+    let threads_per_tg = MTLSize {
+        width: cfg.thread_count() as usize,
+        height: 1,
+        depth: 1,
+    };
+    let (grid_w, grid_h) =
+        crate::tile::tiled_dispatch_grid_with(tiles_n as usize, tiles_m as usize, swizzle_enabled);
+    let threadgroups = MTLSize {
+        width: grid_w,
+        height: grid_h,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3983,11 +4328,12 @@ mod tests {
         let head_gemm = MetalGemm::new_with_unroll_acc(&ctx, true)
             .expect("head GEMM パイプラインの構築に失敗した");
 
-        // イシュー #1329 で index 9（64,64,32,2,2）を追加した後も
-        // acc 積 >= 16（`CANDIDATES[0]` と同じ acc_rows=4, acc_cols=4）の
-        // ため対象へ入る（`tile.rs::unroll_acc_candidates_are_exactly_
+        // イシュー #1329 で index 9（64,64,32,2,2）・イシュー #1331 で
+        // index 10（128,64,16,2,2）を追加した後もいずれも acc 積 >= 16
+        // （index 9: acc_rows=4,acc_cols=4／index 10: acc_rows=8,acc_cols=4）
+        // のため対象へ入る（`tile.rs::unroll_acc_candidates_are_exactly_
         // acc_product_ge_16` と同じ判定根拠）。
-        let expected_unroll_indices = [0usize, 4, 8, 9];
+        let expected_unroll_indices = [0usize, 4, 8, 9, 10];
         for (i, cfg) in tile::CANDIDATES.iter().enumerate() {
             assert!(
                 !base_gemm.unroll_acc_effective(*cfg),
@@ -4003,7 +4349,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、
+    /// [`tile::CANDIDATES`] 全 11 候補 × N=512/1024/2048/4096 で、
     /// base（`unroll_acc_enabled=false`）/head（`unroll_acc_enabled=true`）
     /// の `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
     /// （イシュー #1282 AC-2）。`resolve_tile_config`（`#[cfg(test)]`）で
@@ -4137,7 +4483,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、
+    /// [`tile::CANDIDATES`] 全 11 候補 × N=512/1024/2048/4096 で、
     /// base（function constant 経路。`source_specialized=false`）/head
     /// （ソーステキスト特殊化経路。`source_specialized=true`）の
     /// `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
@@ -4320,7 +4666,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、base
+    /// [`tile::CANDIDATES`] 全 11 候補 × N=512/1024/2048/4096 で、base
     /// （`tile::FRAG_LOAD_CONFIG`。既定）と head ∈
     /// {tgp-k2〈`{false, Two}`〉, device-hoisted-k1〈`{true, One}`〉,
     /// device-hoisted-k2〈`{true, Two}`〉} の `dispatch_tiled_prepared`
@@ -4776,7 +5122,7 @@ mod tests {
         ]
     }
 
-    /// T1: [`tile::CANDIDATES`] 全 10 候補 × N∈{512,1024,2048,4096} ×
+    /// T1: [`tile::CANDIDATES`] 全 11 候補 × N∈{512,1024,2048,4096} ×
     /// 必須 5 head で `dispatch_tiled_prepared` 出力が bit 単位で一致する
     /// ことを確認する（イシュー #1298。`frag_load_on_off_bit_match_all_
     /// candidates` と同型の設計）。`resolve_tile_config` でフォールバック
@@ -5198,7 +5544,7 @@ mod tests {
 
     // --- タイルクラス分割（イシュー #1327・E6 試作） ---
 
-    /// T1: [`tile::CANDIDATES`] 全 10 候補 × N∈{512,1024,2048,4096} で
+    /// T1: [`tile::CANDIDATES`] 全 11 候補 × N∈{512,1024,2048,4096} で
     /// base（`TileClassMode::Legacy`）/head（`TileClassMode::Split`）の
     /// `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
     /// （`coop_load_bit_match_all_candidates` と同型の設計）。staged 候補
@@ -5434,5 +5780,161 @@ mod tests {
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
         assert_eq!(gemm.tile_class_mode(), tile::TILE_CLASS_MODE);
         assert_eq!(tile::TILE_CLASS_MODE, tile::TileClassMode::Legacy);
+    }
+
+    // --- gemm_simdgroup_tiled_hfrag（half フラグメント／f32 累算候補。
+    // イシュー #1369。正しさ・全形状 × 転置 parity は
+    // `tests/gemm_hfrag_parity.rs` を参照。ここでは新規追加した Rust 側
+    // 入口（`pipeline_for_tile_hfrag`／`dispatch_hfrag_tiled_unverified`／
+    // `diag_encode_tiled_hfrag_nn`）自体が実機で MSL コンパイル・実行
+    // まで到達することだけを自己検証する） ---
+
+    /// `dispatch_hfrag_tiled_unverified` が NN 小形状で fallback を経ずに
+    /// 指定 `TileConfig` を採用し、f32 参照実装（`matmul_reference_fma`）
+    /// と統一複合判定で一致する（本カーネルの入力は f32→half 丸めを経る
+    /// ため厳密ゼロ fail ではなく複合判定を正しさゲートとする。`shaders/
+    /// gemm.metal::gemm_simdgroup_tiled_hfrag` 冒頭コメント「数値契約」
+    /// 参照）ことを実機で確認する。全形状 × 転置 4 パターンの網羅は
+    /// `tests/gemm_hfrag_parity.rs`（別コンパイル単位）が担う。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn dispatch_hfrag_tiled_unverified_nn_matches_cpu_reference_small_shape() {
+        use bench_harness::rng::Xorshift64Star;
+        use fandhe_ai_backend_cpu::parity::assert_parity;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        let (m, n, k) = (64usize, 64usize, 32usize);
+        let mut rng_a = Xorshift64Star::new(0x1369_0001);
+        let mut rng_b = Xorshift64Star::new(0x1369_0011);
+        let a: Vec<f32> = rng_a.fill_vec(m * k);
+        let b: Vec<f32> = rng_b.fill_vec(k * n);
+
+        let cfg = tile::CANDIDATES[0];
+        let (out, resolved) = gemm
+            .dispatch_hfrag_tiled_unverified(&ctx, &a, &b, m, n, k, TransposePattern::Nn, cfg)
+            .expect("dispatch_hfrag_tiled_unverified に失敗した（実機でのみ実行する前提）");
+        assert_eq!(
+            resolved, cfg,
+            "hfrag: staged 候補 CANDIDATES[0] がフォールバックせず採用される想定"
+        );
+
+        // 入力を half（RTE）へ丸めてから f32 参照実装で計算した値を
+        // 「正しさゲート」とする（カーネル冒頭コメント「数値契約」参照）。
+        let a_h: Vec<f32> = a.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let b_h: Vec<f32> = b.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let mut expected = vec![0.0f32; m * n];
+        fandhe_ai_backend_cpu::parity::matmul_reference_fma(&a_h, &b_h, &mut expected, m, n, k)
+            .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+        assert_parity("metal hfrag SimdgroupTiled NN gemm", &out, &expected);
+    }
+
+    /// [`MetalGemm::diag_encode_tiled_hfrag_nn`]（#1370 が使う診断専用
+    /// 入口）が実機で 1 回のディスパッチとして正しくエンコード・実行
+    /// できることを、`dispatch_hfrag_tiled_unverified` と同じ参照値との
+    /// 一致で確認する。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn diag_encode_tiled_hfrag_nn_matches_cpu_reference_small_shape() {
+        use bench_harness::rng::Xorshift64Star;
+        use fandhe_ai_backend_cpu::parity::assert_parity;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        let (m, n, k) = (64usize, 64usize, 32usize);
+        let mut rng_a = Xorshift64Star::new(0x1369_0002);
+        let mut rng_b = Xorshift64Star::new(0x1369_0012);
+        let a: Vec<f32> = rng_a.fill_vec(m * k);
+        let b: Vec<f32> = rng_b.fill_vec(k * n);
+
+        let a_buf = MetalBuffer::new_with_data(&ctx, &a).expect("A バッファ確保に失敗した");
+        let b_buf = MetalBuffer::new_with_data(&ctx, &b).expect("B バッファ確保に失敗した");
+        let c_buf = MetalBuffer::new_zeroed(&ctx, m * n).expect("C バッファ確保に失敗した");
+
+        let cfg = tile::CANDIDATES[0];
+        let resolved = gemm
+            .diag_encode_tiled_hfrag_nn(&ctx, &a_buf, &b_buf, &c_buf, m, n, k, cfg)
+            .expect("diag_encode_tiled_hfrag_nn に失敗した（実機でのみ実行する前提）");
+        assert_eq!(resolved, cfg);
+
+        // `read_to_vec` は `&MetalContext` を持たず自前で同期しない契約
+        // （`MetalBuffer::read_to_vec` doc comment 参照）のため、`ctx.encode`
+        // 経由の `diag_encode_tiled_hfrag_nn` 呼び出し後は明示的に
+        // `synchronize()` を挟む（`diag_encode_tiled_nn` の呼び出し元と
+        // 同じ契約）。
+        ctx.synchronize()
+            .expect("GPU 完了待ちの同期に失敗した（実機でのみ実行する前提）");
+        let out = c_buf.read_to_vec();
+        let a_h: Vec<f32> = a.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let b_h: Vec<f32> = b.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let mut expected = vec![0.0f32; m * n];
+        fandhe_ai_backend_cpu::parity::matmul_reference_fma(&a_h, &b_h, &mut expected, m, n, k)
+            .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+        assert_parity(
+            "metal hfrag diag_encode_tiled_hfrag_nn gemm",
+            &out,
+            &expected,
+        );
+    }
+
+    /// `tile::CANDIDATES` を全て（`staged=true` のみ）、
+    /// `gemm_simdgroup_tiled_hfrag`（イシュー #1369）で 512³ NN 巡回し、
+    /// CPU 参照実装（丸め済み入力）との複合判定 PASS・フォールバック
+    /// 非経由を確認する。`CANDIDATES` が `pub(crate)`（クレート内部表現）
+    /// のため `tests/gemm_hfrag_parity.rs`（クレート境界の外）では巡回
+    /// できず、本テストが代わりに担う（実装計画 §2.4 形状セット 4 項目。
+    /// `all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`
+    /// と同じ設計判断）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_staged_candidates_match_hfrag_cpu_reference_512_nn() {
+        use bench_harness::rng::Xorshift64Star;
+        use fandhe_ai_backend_cpu::parity::assert_parity;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        let (m, n, k) = (512usize, 512usize, 512usize);
+        for (i, &cfg) in tile::CANDIDATES.iter().enumerate() {
+            if !cfg.staged {
+                // hfrag は staged 経路のみ実装する契約
+                // （`pipeline_for_tile_hfrag` が非 staged 候補を拒否する）
+                // ため対象外。
+                continue;
+            }
+
+            let mut rng_a = Xorshift64Star::new(0x1369_a000 + i as u64);
+            let mut rng_b = Xorshift64Star::new(0x1369_b000 + i as u64);
+            let a: Vec<f32> = rng_a.fill_vec(m * k);
+            let b: Vec<f32> = rng_b.fill_vec(k * n);
+
+            let (out, resolved) = gemm
+                .dispatch_hfrag_tiled_unverified(&ctx, &a, &b, m, n, k, TransposePattern::Nn, cfg)
+                .unwrap_or_else(|err| {
+                    panic!("候補 {cfg:?}（hfrag）のディスパッチに失敗した: {err}")
+                });
+            assert_eq!(
+                resolved, cfg,
+                "候補 {cfg:?}（hfrag）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                 （構成失敗を検知できていない）"
+            );
+
+            let a_h: Vec<f32> = a.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+            let b_h: Vec<f32> = b.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+            let mut expected = vec![0.0f32; m * n];
+            fandhe_ai_backend_cpu::parity::matmul_reference_fma(&a_h, &b_h, &mut expected, m, n, k)
+                .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+            assert_parity(
+                &format!("metal hfrag SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
+                &out,
+                &expected,
+            );
+        }
     }
 }

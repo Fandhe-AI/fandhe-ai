@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/managed_placement_bandwidth_real_device.rs (work/rust-ai-library-run-1353/target/release/deps/managed_placement_bandwidth_real_device-91bbd93088b197ff)
+
+running 1 test
+   MiB |   elements |   off upload off download off readback |    on upload  on download  on readback
+(単位: GiB/s. off=device-only 配置・on=managed 配置)
+     4 |    1048576 |       45.540        0.637        7.343 |        4.732       47.113        7.406
+    16 |    4194304 |       51.975       53.408        7.350 |        5.058       43.696        7.299
+    32 |    8388608 |       52.690        2.031        7.359 |        4.944        2.934        7.400
+    33 |    8650752 |       52.714        2.073        7.357 |        4.903        2.928        7.394
+    64 |   16777216 |       53.369        2.412        7.329 |        5.025        3.020        7.349
+test managed_vs_device_only_bandwidth_sweep_on_real_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+

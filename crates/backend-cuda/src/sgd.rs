@@ -4,22 +4,25 @@
 //!
 //! `elementwise.rs::CudaElementwise` と同じ構成方針を踏襲する:
 //! `CudaSgd::new` が `CudaDevice` から 1 カーネルを NVRTC コンパイルして
-//! 保持し、以降は [`CudaSgd::run`] へ `CudaSlice<f32>` を渡すだけで GPU
-//! 実行できる。`elementwise.rs` と異なり、本モジュールはホスト常駐
-//! `&[f32]` を受け取らず**デバイス上に既に存在する `CudaSlice<f32>`
-//! を直接読み書きする**（H2D／D2H を挟まない。本イシューの主目的である
-//! 「param のホスト往復排除」の実体）。
+//! 保持し、以降は [`CudaSgd::run`] へ配置非依存の
+//! `crate::memory::CudaArgMut`／`CudaArg`（イシュー #1352。既定は
+//! device-only 配置の `CudaSlice<f32>`、opt-in 時は managed 配置の
+//! `UnifiedSlice<f32>`）を渡すだけで GPU 実行できる。`elementwise.rs` と
+//! 異なり、本モジュールはホスト常駐 `&[f32]` を受け取らず**デバイス上に
+//! 既に存在するバッファを直接読み書きする**（H2D／D2H を挟まない。
+//! 本イシューの主目的である「param のホスト往復排除」の実体）。
 //!
 //! `ops.rs::CudaBackendOps::sgd_step_device` から
 //! `BackendOps::sgd_step_device` の実装として呼ばれる。
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaStream, LaunchConfig, PushKernelArg};
 
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels_sgd::{self, SGD_BLOCK_DIM};
+use crate::memory::{CudaArg, CudaArgMut};
 use crate::nvrtc::compile_ptx;
 
 /// SGD カーネル 1 個あたりのブロック次元（1 次元、`SGD_BLOCK_DIM` 幅）。
@@ -100,11 +103,22 @@ impl CudaSgd {
     ///
     /// `numel == 0` の場合はカーネル起動自体を回避する（`elementwise.rs::
     /// CudaElementwise::run_binary` と同じ理由）。
-    pub fn run(
+    ///
+    /// **配置非依存化（イシュー #1352）**: `param`／`grad`／`velocity` は
+    /// [`CudaArgMut`]／[`CudaArg`] を受け取る（`crate::placement` の
+    /// opt-in〈managed 配置〉と既定〈device-only 配置〉の両方を同一の
+    /// カーネル・同一の起動 config で扱う。配置はメモリの物理的な
+    /// 置き場所のみを変え、カーネル本体・境界チェック・起動 config は
+    /// 完全に共有するため、出力は配置に依らず bit 同一となる）。本
+    /// メソッドは `sgd` モジュールが private（`lib.rs` の `mod sgd;`）で
+    /// crate 内到達のみのため、公開 API 非破壊の対象外（唯一の呼び出し元
+    /// `ops.rs::CudaBackendOps::sgd_step_device` を本イシューで同時に
+    /// 更新する）。
+    pub(crate) fn run(
         &self,
-        param: &mut CudaSlice<f32>,
-        grad: &CudaSlice<f32>,
-        velocity: Option<&mut CudaSlice<f32>>,
+        mut param: CudaArgMut<'_>,
+        grad: CudaArg<'_>,
+        mut velocity: Option<CudaArgMut<'_>>,
         params: &SgdKernelParams,
     ) -> Result<(), CudaError> {
         let numel = param.len();
@@ -135,7 +149,7 @@ impl CudaSgd {
         // であり、カーネル内の手動境界チェック（`if (idx < numel)`。
         // `kernels_sgd.rs` 参照、REQ-8）と合わせて OOB 読み書きが起きない
         // 根拠とする。`use_momentum == 0` の場合は `velocity` 引数として
-        // `param` 自身の別名エイリアスを渡すが、カーネル側は
+        // `grad` 自身の別名エイリアスを渡すが、カーネル側は
         // `use_momentum` が真の場合しか `velocity` を読み書きしないため
         // エイリアシングによる未定義動作は発生しない。グリッド次元は
         // `div_ceil` で numel を包含するよう構築しており
@@ -143,27 +157,19 @@ impl CudaSgd {
         // 境界チェックで弾かれる。
         unsafe {
             let mut builder = self.stream.launch_builder(&self.sgd_step_f32);
-            // `&mut *param` で毎回リボローする（`param` は `&mut
-            // CudaSlice<f32>` であり `Copy` ではないため、`use_momentum ==
-            // 0` の分岐で `velocity` 引数としても再度使う場合は
-            // 明示的にリボローする必要がある。各 `arg()` 呼び出しは
-            // 引数のデバイスポインタのみを取り出して即座に手放すため
-            // 〈`elementwise.rs::run_binary` の `.arg(&mut out_dev)` と
-            // 同様〉、逐次のリボローは重ならず借用検査を通る）。
-            builder.arg(&mut *param);
-            builder.arg(grad);
-            match velocity {
+            param.push(&mut builder);
+            grad.push(&mut builder);
+            match velocity.as_mut() {
                 Some(v) => {
-                    builder.arg(v);
+                    v.push(&mut builder);
                 }
                 None => {
-                    // `param` は既に上で可変借用済みのため再借用できない
-                    // （`cudarc::driver::LaunchArgs::arg` は起動〈`launch()`〉
-                    // まで借用を保持する）。`grad`（共有参照。`Copy`）を
-                    // 未使用ダミーとして再利用する（カーネル側は
-                    // `use_momentum == 0` の場合この引数を読み書きしない。
-                    // `kernels_sgd.rs` 冒頭コメント「velocity 引数」参照）。
-                    builder.arg(grad);
+                    // `grad.push` は `&self` を取るのみで消費しないため
+                    // 再度呼べる（`CudaArg::push` ドキュメンテーション
+                    // コメント参照）。カーネル側は `use_momentum == 0` の
+                    // 場合この引数を読み書きしない（`kernels_sgd.rs`
+                    // 冒頭コメント「velocity 引数」参照）。
+                    grad.push(&mut builder);
                 }
             }
             builder

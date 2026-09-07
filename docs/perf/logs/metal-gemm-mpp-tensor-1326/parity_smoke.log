@@ -1,0 +1,8 @@
+running 1 test
+test gemm_mpp_diag_tests::mpp_matches_cpu_reference ... mpp_parity N=8 pass=true mean_abs_diff=0.000000e0
+mpp_parity N=64 pass=true mean_abs_diff=0.000000e0
+mpp_parity N=100 pass=true mean_abs_diff=0.000000e0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 319 filtered out; finished in 0.04s
+

@@ -366,3 +366,92 @@ pub fn set_cuda_graph_step_enabled(enabled: bool) {
 pub fn cuda_graph_step_enabled() -> bool {
     fandhe_ai_backend_cuda::graph::step_graph_enabled()
 }
+
+/// CUDA GEMM 精度モード（既定 `Fp32Strict`・単発 `Tf32`・3×TF32
+/// `Tf32x3`。イシュー #1355。親ツリー #1354・承認元 #1338）の再公開。
+/// `set_cuda_gemm_precision`／`cuda_gemm_precision` の戻り値・引数型
+/// として使う（`fandhe_ai_backend_cuda::precision::CudaGemmPrecision` の
+/// 薄い再公開。[`PoolStats`] と同じ前例）。
+pub use fandhe_ai_backend_cuda::precision::CudaGemmPrecision;
+
+/// CUDA GEMM（`fandhe_ai::tape().var(a).matmul(b)` 等が最終的に到達する
+/// `CudaBackendOps::gemm`）の精度モードを設定する（イシュー #1355。
+/// [`set_cuda_tf32_gemm_enabled`] の 3 モード拡張版・同型の composition
+/// root 委譲）。
+///
+/// `fandhe_ai_backend_cuda::precision::set_gemm_precision` への薄い委譲。
+/// **既定は [`CudaGemmPrecision::Fp32Strict`]**。`CudaGemmPrecision::
+/// Tf32x3` を指定すると、以降の全スレッド・全 CUDA device の `gemm`
+/// 呼び出しが 3×TF32（split-single 法。hi/lo 分割・3 回の `mma.sync`
+/// 累積）経路へプロセスワイドに切り替わる（`Device` 単位ではない。
+/// `fandhe_ai_backend_cuda::precision` モジュール冒頭コメントの契約
+/// 参照）。有効時にモード固有のカーネルが使用不能（cc<8.0・NVRTC
+/// コンパイル失敗・整列制約不成立等）な環境では `gemm` 呼び出しが
+/// [`BackendError`] を返す（fail-closed。FP32 への黙示フォールバックは
+/// しない）。`Tf32x3` は f32 SIMT と bit 一致しない（
+/// `.claude/rules/coding-rust.md` FMA 契約統一節の明示的例外。数値一致
+/// 許容誤差自体は変更しない）。適用範囲（`gemm_bias_act`・
+/// `gemm_resident_*`・学習経路は対象外）は [`set_cuda_tf32_gemm_enabled`]
+/// と同じ（`docs/cuda-tf32-optin-api-decision.md`・
+/// `docs/cuda-tf32x3-split-single-decision.md`）。
+///
+/// [`set_cuda_tf32_gemm_enabled`]／[`cuda_tf32_gemm_enabled`]（旧 2 値
+/// API）は互換ラッパーとして維持する: `set_cuda_tf32_gemm_enabled(false)`
+/// はどのモードからでも `Fp32Strict` へ戻す。`cuda_tf32_gemm_enabled()`
+/// は単発 `Tf32` のときのみ `true` を返す（`Tf32x3` では `false`）。
+pub fn set_cuda_gemm_precision(mode: CudaGemmPrecision) {
+    fandhe_ai_backend_cuda::precision::set_gemm_precision(mode);
+}
+
+/// [`set_cuda_gemm_precision`] で設定した現在の精度モードを返す
+/// （既定 [`CudaGemmPrecision::Fp32Strict`]）。
+pub fn cuda_gemm_precision() -> CudaGemmPrecision {
+    fandhe_ai_backend_cuda::precision::gemm_precision()
+}
+
+/// CUDA `DeviceBuffer` の確保配置（`alloc_zeroed`／`upload`）を managed
+/// memory（`cuMemAllocManaged`）へ opt-in で切り替える（イシュー #1352。
+/// 親 #1351「GB10 物理統合メモリ向けゼロコピー割当の試作・実測」）。
+///
+/// `fandhe_ai_backend_cuda::placement::set_managed_placement_enabled` への
+/// 薄い委譲（[`set_cuda_tf32_gemm_enabled`] と同型の composition root。
+/// `docs/compat-api-scope.md` §0 の確定公開面）。**既定は無効
+/// （`cuMemAlloc` による device-only 配置）**。有効化すると以降の全
+/// スレッド・全 CUDA device の確保呼び出しがプロセスワイドに managed
+/// 配置へ切り替わる（`Device` 単位ではない。`fandhe_ai_backend_cuda::
+/// placement` モジュール冒頭コメントの契約参照）。
+///
+/// **本イシュー時点のスコープ**（`docs/backend-cuda-managed-placement-
+/// decision.md` 参照）: `MemoryOps::alloc_zeroed`／`upload`／`download`
+/// と、これらを経由する GEMM／SGD 常駐経路
+/// （`gemm_resident_rhs`／`gemm_resident_lhs`（NT 転置分岐を除く）／
+/// `linear_forward_device`／`sgd_step_device`）は managed 配置に対応
+/// 済み。fresh モードの素の `CudaBackendOps::gemm`（`run_tiled_f32` 系。
+/// `CudaMemory` を経由せず `clone_htod`／`alloc_zeros` を直接呼ぶ）・
+/// `gemm_resident_lhs` の NT 転置分岐・その他の演算（elementwise・
+/// rmsnorm・softmax 等）は本イシューでは managed 化していない
+/// （既定 device-only のまま変更なし。opt-in 時にこれらの経路を通ると
+/// 従来どおり device-only 配置で動作する。managed 化の可否は #1353 の
+/// 実測結果を踏まえ後続で判断する）。
+///
+/// 対象デバイスが managed memory 非対応（`CU_DEVICE_ATTRIBUTE_
+/// MANAGED_MEMORY`／`CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS` の
+/// いずれかが 0）の場合、有効時の確保呼び出しは
+/// [`BackendError::Unsupported`] を返す（fail-closed。device-only への
+/// 黙示フォールバックはしない。`set_cuda_tf32_gemm_enabled` と同じ方針）。
+///
+/// 出力の数値契約: 配置はメモリの物理的な置き場所のみを変え、確保
+/// バッファを読み書きするカーネル本体・起動 config は device-only／
+/// managed の両配置で完全に共有するため、出力は配置に依らず bit
+/// 同一となる（`fandhe_ai_backend_cuda::memory` モジュール冒頭コメント
+/// 「配置（managed 拡張）」参照）。既定（無効）時の経路・出力は本
+/// イシュー導入前と完全に不変。
+pub fn set_cuda_managed_memory_enabled(enabled: bool) {
+    fandhe_ai_backend_cuda::placement::set_managed_placement_enabled(enabled);
+}
+
+/// [`set_cuda_managed_memory_enabled`] で設定した現在の opt-in 状態を
+/// 返す（既定 `false`）。
+pub fn cuda_managed_memory_enabled() -> bool {
+    fandhe_ai_backend_cuda::placement::managed_placement_enabled()
+}

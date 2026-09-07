@@ -177,13 +177,38 @@ fn gemm_simdgroup_tiled_kernel_body() -> &'static str {
 }
 
 /// `gemm_simdgroup_tiled_f16` カーネル本体（`kernel void
-/// gemm_simdgroup_tiled_f16(` 開始位置から EOF まで）を切り出す
-/// （イシュー #796）。本ファイル内で最後に定義されるカーネルのため EOF
-/// までのスライスで安全。
+/// gemm_simdgroup_tiled_f16(` 開始位置から、次に定義される
+/// `gemm_simdgroup_tiled_hfrag` 開始位置まで）を切り出す（イシュー #796）。
+///
+/// イシュー #1369 で `gemm_simdgroup_tiled_hfrag`（half フラグメント／f32
+/// 累算候補）をファイル末尾へ追加したため、本関数の終端は「EOF」から
+/// 「f16 カーネル自身の閉じ `}` の直後」へ変更した。境界の探索文字列は
+/// `kernel void gemm_simdgroup_tiled_hfrag(` ではなく、その直前に置いた
+/// 新カーネルの説明コメント冒頭行（`// half フラグメント／f32 累算
+/// タイル化候補カーネル`）にする——新カーネルの説明コメント自体が
+/// `TILE_CLASS`/`COOP_LOAD_LAYOUT` 等の語句を含む（no-op 契約の説明の
+/// ため）ので、`kernel void ...hfrag(` を境界にするとその直前のコメント
+/// 行が f16 側の範囲へ混入し、`gemm_simdgroup_tiled_f16_source_does_not_
+/// reference_*` 系の証跡テストが誤検知する（実装計画「リスク・注意」節）。
 fn gemm_simdgroup_tiled_f16_kernel_body() -> &'static str {
     let kernel_start = GEMM_METAL_SOURCE
         .find("kernel void gemm_simdgroup_tiled_f16(")
         .expect("gemm_simdgroup_tiled_f16 カーネル本体が見つかりません");
+    let next_kernel_comment_start = GEMM_METAL_SOURCE[kernel_start..]
+        .find("// half フラグメント／f32 累算タイル化候補カーネル")
+        .map(|offset| kernel_start + offset)
+        .expect("gemm_simdgroup_tiled_hfrag の説明コメントが見つかりません");
+    &GEMM_METAL_SOURCE[kernel_start..next_kernel_comment_start]
+}
+
+/// `gemm_simdgroup_tiled_hfrag` カーネル本体（`kernel void
+/// gemm_simdgroup_tiled_hfrag(` 開始位置から EOF まで）を切り出す
+/// （イシュー #1369）。本ファイル内で最後に定義されるカーネルのため EOF
+/// までのスライスで安全。
+fn gemm_simdgroup_tiled_hfrag_kernel_body() -> &'static str {
+    let kernel_start = GEMM_METAL_SOURCE
+        .find("kernel void gemm_simdgroup_tiled_hfrag(")
+        .expect("gemm_simdgroup_tiled_hfrag カーネル本体が見つかりません");
     &GEMM_METAL_SOURCE[kernel_start..]
 }
 
@@ -1070,10 +1095,17 @@ fn gemm_simdgroup_tiled_source_uses_coop_load_flat_index_helper() {
             "gemm.metal の gemm_simdgroup_tiled 協調ロードに `{needle}`（イシュー #1298）が見つかりません"
         );
     }
+    // イシュー #1369: `gemm_simdgroup_tiled`（f32 版・本検査対象）に限定して
+    // 判定する。以前は `GEMM_METAL_SOURCE` 全文を対象にしていたが、ファイル
+    // 末尾へ追加した `gemm_simdgroup_tiled_hfrag`（`COOP_LOAD_LAYOUT`／
+    // `coop_load_flat_index` を一切参照しない no-op 契約。実装計画 §2.1）は
+    // 意図的に `uint idx = vi * 4;` を直接記述する（f16 版が `vi * 8` を
+    // 直接記述するのと同じ設計判断）ため、全文スキャンのままだと誤検知する。
+    let tiled_body = gemm_simdgroup_tiled_kernel_body();
     assert_eq!(
-        GEMM_METAL_SOURCE.matches("uint idx = vi * 4;").count(),
+        tiled_body.matches("uint idx = vi * 4;").count(),
         0,
-        "coop_load_flat_index ヘルパ導入後も `uint idx = vi * 4;` が本体側に直接残っている\
+        "coop_load_flat_index ヘルパ導入後も `uint idx = vi * 4;` が gemm_simdgroup_tiled 本体側に直接残っている\
          （ヘルパ経由への置換漏れの疑い）"
     );
     assert!(
@@ -1094,17 +1126,14 @@ fn gemm_simdgroup_tiled_source_uses_coop_load_flat_index_helper() {
 /// 契約の裏付け）。
 #[test]
 fn gemm_simdgroup_tiled_f16_source_does_not_reference_coop_load_constants() {
-    let f16_start = GEMM_METAL_SOURCE
-        .find("kernel void gemm_simdgroup_tiled_f16(")
-        .expect("gemm_simdgroup_tiled_f16 の定義が見つかりません");
-    let f16_body = &GEMM_METAL_SOURCE[f16_start..];
-    // 次のトップレベル kernel/inline 定義までを本関数の本体範囲とみなす
-    // （`gemm_simdgroup_tiled_f16_source_does_not_reference_frag_load_
-    // constants` 等の既存証跡テストと同じ切り出し方針があれば揃えるが、
-    // 現状は「ファイル末尾まで」を許容範囲としても COOP_LOAD_LAYOUT/
-    // coop_load_flat_index はいずれもファイル中でこの関数より前にしか
-    // 現れないため、以下の contains 検査は f16 本体の非参照を正しく
-    // 検出できる）。
+    // イシュー #1369: `gemm_simdgroup_tiled_f16_kernel_body()`（本ファイル
+    // 冒頭のヘルパ）を使う。以前は「f16_start..EOF」を自前で切り出して
+    // いたが、`gemm_simdgroup_tiled_hfrag`（ファイル末尾へ新規追加。
+    // コメント中に `COOP_LOAD_LAYOUT` の語句を含む）を巻き込んでしまい
+    // 誤検知するため、次カーネル開始位置で区切るヘルパへ統一した
+    // （`gemm_simdgroup_tiled_f16_kernel_body` doc comment「リスク・注意」
+    // 参照）。
+    let f16_body = gemm_simdgroup_tiled_f16_kernel_body();
     assert!(
         !f16_body.contains("COOP_LOAD_LAYOUT"),
         "gemm_simdgroup_tiled_f16 が COOP_LOAD_LAYOUT を参照している（no-op 契約違反）"
@@ -1266,5 +1295,153 @@ fn gemm_simdgroup_tiled_f16_source_does_not_reference_tile_class() {
     assert!(
         !kernel_body.contains("region."),
         "gemm_simdgroup_tiled_f16 が region を参照しています（イシュー #1327 のスコープ外）"
+    );
+}
+
+// === gemm_simdgroup_tiled_hfrag（half フラグメント／f32 累算候補。
+// イシュー #1369・親 #1368 E9）の証跡 ===
+
+/// イシュー #380 の証跡固定（イシュー #1369 で追記）: `gemm_simdgroup_f16`
+/// 冒頭で確定した `MM_T`＝`simdgroup_half8x8`（A/B フラグメント）・
+/// `ACC_T`＝`simdgroup_float8x8`（f32 累算）の typedef が、本番 f16 経路
+/// （`gemm_simdgroup_tiled_f16`）で既に half 入力／float 累積として使われて
+/// いることを機械的に固定する。E9（親 #1368）の前提「f16 経路を half 入力
+/// ／float 累積へ切り替える」は本番経路で既に実現済みであることの裏付け
+/// （実装計画 §1.1「現行構成の確認結果」）。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_uses_half_fragments_and_f32_accumulator() {
+    assert!(
+        GEMM_METAL_SOURCE.contains("typedef simdgroup_half8x8 MM_T;"),
+        "gemm.metal に `typedef simdgroup_half8x8 MM_T;` が見つかりません"
+    );
+    assert!(
+        GEMM_METAL_SOURCE.contains("typedef simdgroup_float8x8 ACC_T;"),
+        "gemm.metal に `typedef simdgroup_float8x8 ACC_T;` が見つかりません"
+    );
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for needle in [
+        "MM_T a_frag[MAX_ACC];",
+        "MM_T b_frag[MAX_ACC];",
+        "ACC_T acc[MAX_ACC][MAX_ACC];",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_f16 に `{needle}` が見つかりません（half フラグメント／f32 累算構成の裏付け）"
+        );
+    }
+}
+
+/// REQ-11 の証跡: `gemm_simdgroup_tiled_hfrag` が (a) half フラグメント
+/// （`MM_T`）・f32 累算（`ACC_T`）・行列演算ユニット命令、(b) f32 入出力
+/// （`device const float*`/`device float*`）を実際に使用していることを
+/// ロックする（実装計画 §2.4 (a)(b)）。
+#[test]
+fn gemm_simdgroup_tiled_hfrag_source_uses_half_fragments_f32_io_and_matrix_unit_instructions() {
+    let kernel_body = gemm_simdgroup_tiled_hfrag_kernel_body();
+    for needle in [
+        "device const float* a",
+        "device const float* b",
+        "device float* c",
+        "MM_T a_frag[MAX_ACC];",
+        "MM_T b_frag[MAX_ACC];",
+        "ACC_T acc[MAX_ACC][MAX_ACC];",
+        "simdgroup_load",
+        "simdgroup_multiply_accumulate",
+        "simdgroup_store",
+        "half4(v)",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm.metal の gemm_simdgroup_tiled_hfrag に `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// REQ-8 の証跡（実装計画 §2.4 (c)）: `gemm_simdgroup_tiled_hfrag` が
+/// 協調ロードの境界ヘルパ（`gemm_simdgroup_tiled`〈f32 版〉と共有する
+/// 8 関数）を使用し、エピローグの `out_row`/`out_col` 境界ガードを維持
+/// していることをロックする。
+#[test]
+fn gemm_simdgroup_tiled_hfrag_source_retains_req8_boundary_guards() {
+    let kernel_body = gemm_simdgroup_tiled_hfrag_kernel_body();
+    for needle in [
+        "tiled_block_out_of_range(row0, col0, dims)",
+        "tiled_a_group_in_bounds(",
+        "tiled_a_elem_in_bounds(",
+        "tiled_b_group_in_bounds(",
+        "tiled_b_elem_in_bounds(",
+        "tiled_at_group_in_bounds(",
+        "tiled_at_elem_in_bounds(",
+        "tiled_bt_group_in_bounds(",
+        "tiled_bt_elem_in_bounds(",
+        "if (out_row >= dims.m) {",
+        "if (out_col >= dims.n) {",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_hfrag に REQ-8 境界チェック `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1138 と同型の証跡（実装計画 §2.4 (d)）: `gemm_simdgroup_tiled_hfrag`
+/// が `TRANS_A`/`TRANS_B` 分岐・転置 `simdgroup_load`（`transpose_matrix=true`
+/// 相当の第 4 引数 `true`）を持つことをロックする。
+#[test]
+fn gemm_simdgroup_tiled_hfrag_source_retains_transpose_branches() {
+    let kernel_body = gemm_simdgroup_tiled_hfrag_kernel_body();
+    for needle in [
+        "if (TRANS_A) {",
+        "if (TRANS_B) {",
+        "lda, ulong2(0), true);",
+        "ldb, ulong2(0), true);",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_hfrag に転置分岐 `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// 実装計画 §2.4 (e) の証跡: `gemm_simdgroup_tiled_hfrag` が
+/// `TILE_CLASS`/`FRAG_LOAD_DEVICE_HOISTED`/`FRAG_LOAD_KSTEPS`/
+/// `COOP_LOAD_LAYOUT`/`UNROLL_ACC_ENABLED`/`USE_TGP_STAGING` のいずれも
+/// 参照しない（本カーネルのスコープ境界。冒頭コメント参照）ことをロック
+/// する。`gemm_simdgroup_tiled_f16_source_does_not_reference_*` 系と同型の
+/// 設計判断。
+#[test]
+fn gemm_simdgroup_tiled_hfrag_source_does_not_reference_experimental_gates() {
+    let kernel_body = gemm_simdgroup_tiled_hfrag_kernel_body();
+    for needle in [
+        "TILE_CLASS",
+        "FRAG_LOAD_DEVICE_HOISTED",
+        "FRAG_LOAD_KSTEPS",
+        "COOP_LOAD_LAYOUT",
+        "UNROLL_ACC_ENABLED",
+        "USE_TGP_STAGING",
+    ] {
+        assert!(
+            !kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_hfrag が `{needle}` を参照しています（本カーネルのスコープ外）"
+        );
+    }
+}
+
+/// 実装計画 §2.4 (f) の証跡: 16 個の function constant 宣言
+/// （`gemm_metal_source_declares_spec_ifdef_block_with_all_sixteen_defines`
+/// が既に固定している宣言群）が `gemm_simdgroup_tiled_hfrag` の追加後も
+/// 個数不変であることを再確認する（新規 function constant を追加しない
+/// 契約。実装計画 §2.1「`gemm_simdgroup_tiled_tiled` の function constant
+/// index を再利用し新規追加しない」）。
+#[test]
+fn gemm_simdgroup_tiled_hfrag_introduces_no_new_function_constants() {
+    let declared = GEMM_METAL_SOURCE.matches("[[function_constant(").count();
+    // `gemm_metal_source_declares_spec_ifdef_block_with_all_sixteen_defines`
+    // が個々の宣言文字列（index 0〜15 の 16 個）を固定済みのため、本テストは
+    // 総数のみを再確認する（`gemm_simdgroup_tiled_hfrag` が新規宣言を追加
+    // していないことの裏付け）。
+    assert_eq!(
+        declared, 16,
+        "function_constant 宣言の総数が想定外です（gemm_simdgroup_tiled_hfrag が新規 function constant を追加した疑い）"
     );
 }

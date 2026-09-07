@@ -31,6 +31,13 @@
 //! `crates/backend-metal/src/ops.rs` の `#[cfg(test)]` 内クレート内テスト
 //! （`gemm_resident_lhs_transposed_b_does_not_increment_repack_counter`）に
 //! 委ねる。本ファイルは数値一致のみを検証する。
+//! - **本番選択ロジック（`tile::select_for_device`）× 全形状 × 転置 4 種**
+//!   （イシュー #1304）: E2〜E4（#1289／#1295／#1300）はいずれも組み込み
+//!   不可（REJECT）と確定済みのため `tile::select` 系関数は不変だが、
+//!   本番構成そのものを転置パターン込みで検証するテストが従来存在
+//!   しなかった（E7/E8 は `CANDIDATES[9]`／`[10]` 明示指定のみ）。
+//!   `production_select_matches_cpu_reference_for_all_shapes_and_
+//!   transpose_patterns`／`_for_n4096_cubic_shape` がこの欠落を埋める
 
 #![cfg(target_os = "macos")]
 
@@ -506,18 +513,28 @@ fn dispatch_strided_tiled_prepared_handles_padded_leading_dimension_for_non_tran
 //     複合判定内一致確認。性能比較・`tile::select` への組み込み判断は
 //     後続イシュー #1330 のスコープ（本ファイルは正確性確認のみ）。
 
-/// `CANDIDATES[9]`（イシュー #1329。64,64,32,2,2 — `CANDIDATES[0]` の
-/// bk=32 版）を明示指定した `dispatch_strided_tiled_prepared` の 1 形状 ×
-/// 1 転置パターンを実行し、CPU 参照実装との複合判定（REQ-2）で一致する
-/// ことを確認する。`expected`（CPU 参照）は形状ごとに 1 回だけ計算し
-/// 呼び出し元（4 パターン分）で共有する契約（`matmul_reference_fma` は
-/// スカラー実装で計算コストが高いため）。`resolved == cfg` を assert し
-/// サイレントフォールバックを検知する。
+/// [`assert_candidate_matches_reference_for_pattern`] の `label` 引数
+/// 経由で使う既定ラベル（E7 用。`CANDIDATES[9]` 固有の文言）。汎化前の
+/// `assert_e7_candidate_matches_reference_for_pattern` 呼び出し箇所を
+/// そのまま維持するための後方互換ラッパーで使う。
+const E7_LABEL: &str = "CANDIDATES[9]（64,64,32,2,2。イシュー #1329）";
+
+/// `cfg`（呼び出し元が明示指定した `TileConfig`。イシュー #1329 の
+/// `CANDIDATES[9]` 明示指定・イシュー #1304 の本番選択構成
+/// `tile::select_for_device` 出力のいずれにも使う）を用いた
+/// `dispatch_strided_tiled_prepared` の 1 形状 × 1 転置パターンを実行し、
+/// CPU 参照実装との複合判定（REQ-2）で一致することを確認する。
+/// `expected`（CPU 参照）は形状ごとに 1 回だけ計算し呼び出し元
+/// （4 パターン分）で共有する契約（`matmul_reference_fma` はスカラー
+/// 実装で計算コストが高いため）。`resolved == cfg` を assert しサイレント
+/// フォールバックを検知する。`label` は assert メッセージ・parity ラベル
+/// に埋め込む識別文字列（どの候補・どの選択方式の検証かを区別する）。
 #[allow(clippy::too_many_arguments)]
-fn assert_e7_candidate_matches_reference_for_pattern(
+fn assert_candidate_matches_reference_for_pattern(
     ctx: &MetalContext,
     gemm: &MetalGemm,
     cfg: TileConfig,
+    label: &str,
     a_logical: &[f32],
     b_logical: &[f32],
     expected: &[f32],
@@ -565,18 +582,38 @@ fn assert_e7_candidate_matches_reference_for_pattern(
         });
     assert_eq!(
         resolved, cfg,
-        "CANDIDATES[9] がサイレントフォールバックした（trans_a={trans_a}, trans_b={trans_b}, \
+        "{label} がサイレントフォールバックした（trans_a={trans_a}, trans_b={trans_b}, \
          m={m}, n={n}, k={k}）"
     );
 
     let actual = c_buf.read_to_vec();
     assert_parity(
         &format!(
-            "CANDIDATES[9]（64,64,32,2,2。イシュー #1329）dispatch_strided_tiled_prepared \
+            "{label} dispatch_strided_tiled_prepared \
              parity (trans_a={trans_a}, trans_b={trans_b}, m={m}, n={n}, k={k})"
         ),
         &actual,
         expected,
+    );
+}
+
+/// [`assert_e7_candidate_matches_reference_for_pattern`]（イシュー #1329
+/// 時点の関数名）の後方互換ラッパー。E7 既定ラベル（[`E7_LABEL`]）を
+/// 渡して [`assert_candidate_matches_reference_for_pattern`] へ委譲する
+/// だけで、E7/E8 テストの assert メッセージ・挙動は不変。
+#[allow(clippy::too_many_arguments)]
+fn assert_e7_candidate_matches_reference_for_pattern(
+    ctx: &MetalContext,
+    gemm: &MetalGemm,
+    cfg: TileConfig,
+    a_logical: &[f32],
+    b_logical: &[f32],
+    expected: &[f32],
+    shape: (usize, usize, usize),
+    transpose: (bool, bool),
+) {
+    assert_candidate_matches_reference_for_pattern(
+        ctx, gemm, cfg, E7_LABEL, a_logical, b_logical, expected, shape, transpose,
     );
 }
 
@@ -757,6 +794,394 @@ fn bk32_64x64_candidate_agrees_with_bk16_counterpart_within_composite_tolerance(
             assert!(
                 report.passes(),
                 "CANDIDATES[9]（bk=32）と CANDIDATES[0]（bk=16）の出力が複合判定 FAIL \
+                 （trans_a={trans_a}, trans_b={trans_b}, n={n}, fail_count={}/{}, \
+                 max_abs_diff={:.3e}, max_rel_err={:.3e}）",
+                report.fail_count,
+                report.total,
+                report.max_abs_diff,
+                report.max_rel_err
+            );
+        }
+    }
+}
+
+// --- イシュー #1304（親 #1302→#1273）: E2〜E4（ソーステキスト特殊化・
+//     フラグメントロード方式・協調ロードレイアウト。#1289／#1295／#1300）
+//     はいずれも実機実測で組み込み不可（REJECT）と確定済み
+//     （`docs/perf/metal-gemm-n4096-kernel-gap.md` §9.4／§10.4／§11.4）で
+//     あり、`tile::CANDIDATES`・`tile::select`／`select_for_device` は
+//     本イシューでは変更しない。一方、本番選択構成（`select_for_device`
+//     の出力）そのものを全形状 × NN/NT/TN/TT の 4 転置パターンで検証する
+//     テストは E7（#1329）／E8（#1331）が `CANDIDATES[9]`／`[10]` を
+//     明示指定するのみで存在しなかった。このカバレッジ欠落を埋め、
+//     `MetalBackendOps::gemm` が実際に選ぶ構成が転置パターン下でも
+//     サイレントフォールバックせず CPU 参照実装と一致することを機械的に
+//     確認する（イシュー #1304 受け入れ条件「全形状 × NN/NT/TN/TT の
+//     parity 0 fail」）。
+
+/// イシュー #1304: 本番選択ロジック（`tile::select_for_device`）が形状
+/// ごとに返す `TileConfig` を用いて、E7/E8 と同一の 10 形状（純 4096³ を
+/// 除く 9 点＋境界形状 (72,88,104)）× NN/NT/TN/TT の 4 転置パターンで
+/// CPU 参照実装との複合判定（REQ-2）が 0 fail であることを確認する。
+/// `resolved == cfg` の assert により、本番構成が転置パターン下で
+/// サイレントフォールバックしないことも同時に検証する。
+///
+/// 実運用の `MetalBackendOps::gemm` は NN を `dispatch_auto`
+/// （`select_for_device` 経由）、NT/TN を `dispatch_strided_bias_act_
+/// prepared`（classic strided・タイル variant なし）、TT を
+/// `contiguous()` 化 + `dispatch_auto` へ振り分ける（`ops.rs`）。本テストは
+/// 「`select_for_device` が返す構成自体が全転置パターンで正しいか」を
+/// タイル系入口（`dispatch_strided_tiled_prepared`）に対して直接検証する
+/// もので、ops 層の転置ルーティング自体は既存 `tests/
+/// gemm_transposed_parity.rs`（NT/TN/TT・小形状）が別途担う。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn production_select_matches_cpu_reference_for_all_shapes_and_transpose_patterns() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let core_count = ctx.verified_m4_max_gpu_core_count();
+
+    let shapes: &[(usize, usize, usize)] = &[
+        (512, 512, 512),
+        (1024, 1024, 1024),
+        (2048, 2048, 2048),
+        (2048, 2048, 64),
+        (2048, 2048, 512),
+        (1536, 1024, 1024),
+        (1024, 1536, 1536),
+        (4096, 1024, 1024),
+        (1024, 4096, 1024),
+        (72, 88, 104),
+    ];
+
+    for &(m, n, k) in shapes {
+        let a_logical = Xorshift64Star::new(m as u64 * 7 + k as u64 + 301).fill_vec(m * k);
+        let b_logical = Xorshift64Star::new(n as u64 * 11 + k as u64 + 302).fill_vec(k * n);
+        let mut expected = vec![0.0f32; m * n];
+        matmul_reference_fma(&a_logical, &b_logical, &mut expected, m, n, k)
+            .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+        let cfg = tile::select_for_device(m, n, k, core_count);
+        // どの本番構成（`CANDIDATES` のどの候補相当か）が形状ごとに検証
+        // されたかを `--nocapture` 実行時に読者が追えるようにする診断出力
+        // （イシュー #1304 docs/perf 記録の集計用）。assert には関与しない。
+        println!("[production_select] m={m}, n={n}, k={k} -> cfg={cfg:?}");
+        let label = format!(
+            "select_for_device(m={m}, n={n}, k={k}) → {cfg:?}（イシュー #1304・本番選択構成）"
+        );
+
+        for pattern in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_candidate_matches_reference_for_pattern(
+                &ctx,
+                &gemm,
+                cfg,
+                &label,
+                &a_logical,
+                &b_logical,
+                &expected,
+                (m, n, k),
+                pattern,
+            );
+        }
+    }
+}
+
+/// 上記テストから分離した純 4096³ ケース（スカラー CPU 参照の計算コストが
+/// 突出して大きいため実行時間管理のため個別実行可能にする。E7/E8
+/// （#1329・#1331）と同じ運用）。イシュー #1304。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない（実行時間が長い）"]
+fn production_select_matches_cpu_reference_for_n4096_cubic_shape() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let core_count = ctx.verified_m4_max_gpu_core_count();
+    let (m, n, k) = (4096usize, 4096usize, 4096usize);
+
+    let a_logical = Xorshift64Star::new(303).fill_vec(m * k);
+    let b_logical = Xorshift64Star::new(304).fill_vec(k * n);
+    let mut expected = vec![0.0f32; m * n];
+    matmul_reference_fma(&a_logical, &b_logical, &mut expected, m, n, k)
+        .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+    let cfg = tile::select_for_device(m, n, k, core_count);
+    println!("[production_select] m={m}, n={n}, k={k} -> cfg={cfg:?}");
+    let label =
+        format!("select_for_device(m={m}, n={n}, k={k}) → {cfg:?}（イシュー #1304・本番選択構成）");
+
+    for pattern in [(false, false), (false, true), (true, false), (true, true)] {
+        assert_candidate_matches_reference_for_pattern(
+            &ctx,
+            &gemm,
+            cfg,
+            &label,
+            &a_logical,
+            &b_logical,
+            &expected,
+            (m, n, k),
+            pattern,
+        );
+    }
+}
+
+// --- イシュー #1331（E8・親 #1325）: 128x64x16（wm2wn2）を CANDIDATES[10] へ
+//     追加。全形状 × 転置 4 種の parity 確認・CANDIDATES[0]（bk=16・
+//     bm=64）との複合判定内一致確認。性能比較・`tile::select` への
+//     組み込み判断は後続イシュー #1332 のスコープ（本ファイルは正確性
+//     確認のみ）。
+
+/// `CANDIDATES[10]`（イシュー #1331。128,64,16,2,2 — `CANDIDATES[0]` の
+/// bm=128 版）を明示指定した `dispatch_strided_tiled_prepared` の 1 形状 ×
+/// 1 転置パターンを実行し、CPU 参照実装との複合判定（REQ-2）で一致する
+/// ことを確認する。`assert_e7_candidate_matches_reference_for_pattern`
+/// と同型（`expected` を形状ごとに 1 回だけ計算し 4 パターン分で共有）。
+/// `resolved == cfg` を assert しサイレントフォールバックを検知する。
+#[allow(clippy::too_many_arguments)]
+fn assert_e8_candidate_matches_reference_for_pattern(
+    ctx: &MetalContext,
+    gemm: &MetalGemm,
+    cfg: TileConfig,
+    a_logical: &[f32],
+    b_logical: &[f32],
+    expected: &[f32],
+    shape: (usize, usize, usize),
+    transpose: (bool, bool),
+) {
+    let (m, n, k) = shape;
+    let (trans_a, trans_b) = transpose;
+    let (a_phys, a_layout): (Vec<f32>, MatrixLayout) = if trans_a {
+        (
+            transpose_dense(a_logical, m, k),
+            classify_2d(&[m, k], &[1, m as isize]).unwrap(),
+        )
+    } else {
+        (
+            a_logical.to_vec(),
+            classify_2d(&[m, k], &[k as isize, 1]).unwrap(),
+        )
+    };
+    let (b_phys, b_layout): (Vec<f32>, MatrixLayout) = if trans_b {
+        (
+            transpose_dense(b_logical, k, n),
+            classify_2d(&[k, n], &[1, k as isize]).unwrap(),
+        )
+    } else {
+        (
+            b_logical.to_vec(),
+            classify_2d(&[k, n], &[n as isize, 1]).unwrap(),
+        )
+    };
+
+    let a_buf = MetalBuffer::new_with_data(ctx, &a_phys).expect("A バッファ確保に失敗した");
+    let b_buf = MetalBuffer::new_with_data(ctx, &b_phys).expect("B バッファ確保に失敗した");
+    let c_buf = MetalBuffer::new_zeroed(ctx, m * n).expect("C バッファ確保に失敗した");
+
+    let resolved = gemm
+        .dispatch_strided_tiled_prepared(
+            ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf, m, n, k, cfg,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "dispatch_strided_tiled_prepared failed (cfg={cfg:?}, trans_a={trans_a}, \
+                 trans_b={trans_b}, m={m}, n={n}, k={k}): {e}"
+            )
+        });
+    assert_eq!(
+        resolved, cfg,
+        "CANDIDATES[10] がサイレントフォールバックした（trans_a={trans_a}, trans_b={trans_b}, \
+         m={m}, n={n}, k={k}）"
+    );
+
+    let actual = c_buf.read_to_vec();
+    assert_parity(
+        &format!(
+            "CANDIDATES[10]（128,64,16,2,2。イシュー #1331）dispatch_strided_tiled_prepared \
+             parity (trans_a={trans_a}, trans_b={trans_b}, m={m}, n={n}, k={k})"
+        ),
+        &actual,
+        expected,
+    );
+}
+
+/// イシュー #1331 の E8 受け入れ基準: `CANDIDATES[10]`（128,64,16,2,2）が
+/// 全形状（正方立方・K 未実測正方出力・準正方長方形・縦長横長の代表点。
+/// `examples/gemm_transpose_tile_sweep.rs::shapes()` と同一の 10 点のうち
+/// 純 4096³ を除く 9 点）＋ 8 整除境界形状 (72,88,104) ＋ `bm=128` 固有の
+/// 部分タイル形状 (200,136,104)（200 mod 128=72・136 mod 64=8・
+/// 104 mod 16=8 のいずれも非 0 で M/N/K 全方向の端タイルを踏む）×
+/// NN/NT/TN/TT の 4 転置パターンで parity 0 fail であることを確認する。
+/// 純 4096³（スカラー CPU 参照の計算コストが突出して大きい）は
+/// `bm128_candidate_matches_cpu_reference_for_n4096_cubic_shape` へ分離
+/// する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bm128_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let cfg = TileConfig {
+        bm: 128,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+
+    let shapes: &[(usize, usize, usize)] = &[
+        (512, 512, 512),
+        (1024, 1024, 1024),
+        (2048, 2048, 2048),
+        (2048, 2048, 64),
+        (2048, 2048, 512),
+        (1536, 1024, 1024),
+        (1024, 1536, 1536),
+        (4096, 1024, 1024),
+        (1024, 4096, 1024),
+        (72, 88, 104),
+        (200, 136, 104),
+    ];
+
+    for &(m, n, k) in shapes {
+        let a_logical = Xorshift64Star::new(m as u64 * 7 + k as u64 + 111).fill_vec(m * k);
+        let b_logical = Xorshift64Star::new(n as u64 * 11 + k as u64 + 112).fill_vec(k * n);
+        let mut expected = vec![0.0f32; m * n];
+        matmul_reference_fma(&a_logical, &b_logical, &mut expected, m, n, k)
+            .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+        for pattern in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_e8_candidate_matches_reference_for_pattern(
+                &ctx,
+                &gemm,
+                cfg,
+                &a_logical,
+                &b_logical,
+                &expected,
+                (m, n, k),
+                pattern,
+            );
+        }
+    }
+}
+
+/// 上記テストから分離した純 4096³ ケース（スカラー CPU 参照の計算コストが
+/// 突出して大きいため実行時間管理のため個別実行可能にする。イシュー
+/// #1329 の同型テストと同じ判断根拠）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない（実行時間が長い）"]
+fn bm128_candidate_matches_cpu_reference_for_n4096_cubic_shape() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let cfg = TileConfig {
+        bm: 128,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    let (m, n, k) = (4096usize, 4096usize, 4096usize);
+
+    let a_logical = Xorshift64Star::new(211).fill_vec(m * k);
+    let b_logical = Xorshift64Star::new(212).fill_vec(k * n);
+    let mut expected = vec![0.0f32; m * n];
+    matmul_reference_fma(&a_logical, &b_logical, &mut expected, m, n, k)
+        .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+    for pattern in [(false, false), (false, true), (true, false), (true, true)] {
+        assert_e8_candidate_matches_reference_for_pattern(
+            &ctx,
+            &gemm,
+            cfg,
+            &a_logical,
+            &b_logical,
+            &expected,
+            (m, n, k),
+            pattern,
+        );
+    }
+}
+
+/// イシュー #1331 の補助確認: `CANDIDATES[10]`（bm=128）と `CANDIDATES[0]`
+/// （bm=64。同じ bk=16・wm2wn2）の出力が、統一複合判定（REQ-2）の範囲内
+/// で一致することを確認する（threadgroup タイルの M 方向拡張が数値面で
+/// 許容範囲内であることの直接証跡）。bit 完全一致は assert せず（タイル
+/// 形状が異なるため K チャンク内の丸め順・アキュムレータの組み方が
+/// 変わりうる）、一致した場合は観察としてのみ記録する
+/// （`docs/perf/metal-gemm-n4096-kernel-gap.md` §15 に転記）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bm128_candidate_agrees_with_bm64_counterpart_within_composite_tolerance() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let cfg_bm128 = TileConfig {
+        bm: 128,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    let cfg_bm64 = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+
+    for &n in &[512usize, 1024, 2048, 4096] {
+        let (m, k) = (n, n);
+        let a_logical = Xorshift64Star::new(n as u64 * 13 + 311).fill_vec(m * k);
+        let b_logical = Xorshift64Star::new(n as u64 * 17 + 312).fill_vec(k * n);
+
+        for (trans_a, trans_b) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (a_phys, a_layout): (Vec<f32>, MatrixLayout) = if trans_a {
+                (
+                    transpose_dense(&a_logical, m, k),
+                    classify_2d(&[m, k], &[1, m as isize]).unwrap(),
+                )
+            } else {
+                (
+                    a_logical.clone(),
+                    classify_2d(&[m, k], &[k as isize, 1]).unwrap(),
+                )
+            };
+            let (b_phys, b_layout): (Vec<f32>, MatrixLayout) = if trans_b {
+                (
+                    transpose_dense(&b_logical, k, n),
+                    classify_2d(&[k, n], &[1, k as isize]).unwrap(),
+                )
+            } else {
+                (
+                    b_logical.clone(),
+                    classify_2d(&[k, n], &[n as isize, 1]).unwrap(),
+                )
+            };
+
+            let a_buf =
+                MetalBuffer::new_with_data(&ctx, &a_phys).expect("A バッファ確保に失敗した");
+            let b_buf =
+                MetalBuffer::new_with_data(&ctx, &b_phys).expect("B バッファ確保に失敗した");
+
+            let c_buf_128 = MetalBuffer::new_zeroed(&ctx, m * n).expect("C バッファ確保に失敗した");
+            gemm.dispatch_strided_tiled_prepared(
+                &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf_128, m, n, k, cfg_bm128,
+            )
+            .expect("CANDIDATES[10]（bm=128）のディスパッチに失敗した");
+            let out_bm128 = c_buf_128.read_to_vec();
+
+            let c_buf_64 = MetalBuffer::new_zeroed(&ctx, m * n).expect("C バッファ確保に失敗した");
+            gemm.dispatch_strided_tiled_prepared(
+                &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf_64, m, n, k, cfg_bm64,
+            )
+            .expect("CANDIDATES[0]（bm=64）のディスパッチに失敗した");
+            let out_bm64 = c_buf_64.read_to_vec();
+
+            let report = compare(&out_bm128, &out_bm64)
+                .expect("compare の形状検証に失敗した（同一 m,n のため発生しないはず）");
+            assert!(
+                report.passes(),
+                "CANDIDATES[10]（bm=128）と CANDIDATES[0]（bm=64）の出力が複合判定 FAIL \
                  （trans_a={trans_a}, trans_b={trans_b}, n={n}, fail_count={}/{}, \
                  max_abs_diff={:.3e}, max_rel_err={:.3e}）",
                 report.fail_count,

@@ -150,6 +150,7 @@ const _: fn() = || {
     assert_send_sync::<CudaRmsNorm>();
     assert_send_sync::<CudaSoftmax>();
     assert_send_sync::<CudaAllocator>();
+    assert_send_sync::<crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm>();
 };
 
 /// キャッシュキー単位の single-flight ロック。`None` は未構築（または
@@ -428,6 +429,27 @@ pub(crate) fn cached_mse(device: &CudaDevice) -> Result<Arc<crate::mse::CudaMse>
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ContextKey::from_device(device), || {
         crate::mse::CudaMse::new(device)
+    })
+}
+
+/// `device` の `CudaContext` に対応する [`crate::gemm_mma_tf32x3::
+/// CudaMmaTf32x3Gemm`]（3×TF32 split-single 法 GEMM。イシュー #1355。
+/// キーは [`ContextKey`]。`cached_gemm` 冒頭コメント参照）を
+/// プロセス内キャッシュから取得する。`ops::CudaBackendOps::gemm` が
+/// `crate::precision::CudaGemmPrecision::Tf32x3` opt-in 時にのみ呼ぶ
+/// （既定 `Fp32Strict`・単発 `Tf32` の経路には一切影響しない）。opt-in
+/// 時に初めて構築されるため、cc<8.0・NVRTC 不在・コンパイル失敗は
+/// opt-in 時のみ表面化する（fail-closed。`precision.rs` モジュール冒頭
+/// コメント参照）。
+pub(crate) fn cached_mma_tf32x3(
+    device: &CudaDevice,
+) -> Result<Arc<crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm>, CudaError> {
+    static CACHE: OnceLock<
+        SingleFlightCache<ContextKey, crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm::new(device)
     })
 }
 

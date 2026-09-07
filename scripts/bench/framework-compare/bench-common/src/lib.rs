@@ -268,6 +268,15 @@ pub struct Record<'a> {
     /// `true` の行を除外する（fail-open 防止。FP32 目標値との混同を防ぐ。
     /// `docs/cuda-tf32-optin-api-decision.md` 参照）。
     pub tf32: bool,
+    /// `--managed`（イシュー #1353）。CUDA managed memory（`cuMemAllocManaged`
+    /// 経由の `DeviceBuffer` 配置。`fandhe_ai::set_cuda_managed_memory_enabled`）
+    /// 有効時に計測したかを示す。既定 `false`（device-only 配置）。`tf32` と
+    /// 同型の「キー欠損 = false」後方互換規約: `true` のときのみ JSON に
+    /// `"managed":true` を emit する。summarize.py／compare_gemm_gate.py／
+    /// compare_ab.py の目標達成ゲート・A/B 比較は既定でこのフィールドが
+    /// `true` の行を除外する（`docs/backend-cuda-managed-placement-decision.md`
+    /// 参照。既定 OFF・fail-closed 方針は変更しない）。
+    pub managed: bool,
 }
 
 impl Record<'_> {
@@ -312,6 +321,9 @@ impl Record<'_> {
         }
         if self.tf32 {
             s.push_str(",\"tf32\":true");
+        }
+        if self.managed {
+            s.push_str(",\"managed\":true");
         }
         s.push('}');
         s
@@ -420,6 +432,15 @@ pub struct Cli {
     /// （`docs/cuda-tf32-optin-api-decision.md` 参照。`--phases` と同型の
     /// allowlist 方式）。
     pub tf32: bool,
+    /// `--managed`（値なしフラグ。イシュー #1353）。CUDA managed memory
+    /// 配置（`fandhe_ai::set_cuda_managed_memory_enabled`）を有効化して
+    /// 計測することを要求する。既定 `false`（device-only 配置。既存
+    /// プロトコル不変）。対応は `bench-fandhe` × `cuda` に限定し（`bench-candle`／
+    /// `bench-burn` は常に拒否）、`managed-placement` feature（crates.io
+    /// 公開版 fandhe-ai には未収録の API のため path patch 前提。README
+    /// 「`--managed`」節参照）が有効なビルドでのみ受理する（`--tf32` と
+    /// 同型の allowlist 方式）。
+    pub managed: bool,
 }
 
 /// Parse the CLI arguments from `std::env::args()`. 薄いラッパーで、実体は
@@ -462,6 +483,7 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         mode,
         phases: has_flag("--phases"),
         tf32: has_flag("--tf32"),
+        managed: has_flag("--managed"),
     })
 }
 
@@ -548,6 +570,7 @@ mod tests {
             init_s,
             parity: None,
             tf32: false,
+            managed: false,
         }
     }
 
@@ -717,6 +740,44 @@ mod tests {
         assert!(cli.tf32);
         assert_eq!(cli.task, "gemm");
         assert_eq!(cli.device, "cuda");
+    }
+
+    // イシュー #1353: `--managed`（`parse_cli_from`）・`Record.managed` の契約
+    // （`--tf32` と同型）。
+
+    #[test]
+    fn parse_cli_from_defaults_managed_to_false() {
+        let cli = parse_cli_from(&args(&["--task", "gemm"])).expect("parse should succeed");
+        assert!(!cli.managed);
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_managed_flag() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--device", "cuda", "--managed"]))
+            .expect("parse should succeed");
+        assert!(cli.managed);
+    }
+
+    #[test]
+    fn parse_cli_from_managed_flag_is_order_independent() {
+        let cli = parse_cli_from(&args(&["--managed", "--task", "gemm", "--device", "cuda"]))
+            .expect("parse should succeed");
+        assert!(cli.managed);
+        assert_eq!(cli.task, "gemm");
+        assert_eq!(cli.device, "cuda");
+    }
+
+    #[test]
+    fn json_line_without_managed_omits_managed_key() {
+        let line = sample_record("fresh", None).to_json_line();
+        assert!(!line.contains("\"managed\""));
+    }
+
+    #[test]
+    fn json_line_with_managed_includes_managed_true() {
+        let mut r = sample_record("fresh", None);
+        r.managed = true;
+        assert!(r.to_json_line().contains("\"managed\":true"));
     }
 
     #[test]

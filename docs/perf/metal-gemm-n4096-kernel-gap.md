@@ -190,6 +190,10 @@ N=4096 NN（正方立方。中核対象）:
   `L0-P0`／`L0-P8` は改善方向のシグナルがあるが N=2048/4096 で run 間の
   符号が反転し確証に至らず）**組み込み対象なし**（`tile::select` への
   結線は行わない。判断結果は #1302／#1304 へ引き継ぎ）
+  → #1304 で E2〜E4 とも組み込み対象なしと確定（§18）。#1306 で
+  framework-compare gemm metal 全 8 セル（N=512/1024/2048/4096 ×
+  fresh/reuse）が v0.7.0 → HEAD で非後退・checksum 完全一致であることを
+  確認し、本番既定（`select_for_device`）を確定した（§19）
 - cand0（candle と同一タイル形状）が 4096 で崩壊する根本原因の特定
   （スレッドあたり実行効率の直接計測手段が現状ない）
 - §2 の限界に基づく厳密なレジスタ spill 計測（Xcode Instruments の GPU
@@ -448,6 +452,9 @@ pragma の本番結線を撤回する**（§7.7a）。
   単体切替）は #1278／#1279 で M4 Max 実機実測済み・#1280 で採用候補 0 件・
   結線対象なしと確定した（本項目の対象外扱いは E1 との相互作用診断に限り
   維持。E2〜E4 は引き続き未実施）
+  → #1304 で E2〜E4 とも組み込み対象なしと確定（§18）。#1306 で
+  framework-compare gemm metal 全 8 セルが v0.7.0 → HEAD で非後退・
+  checksum 完全一致であることを確認し、本番既定を確定した（§19）
 - unroll(full) を acc_rows*acc_cols>=16 の候補にのみ適用する条件付き
   gating（function constant 分岐でループ本体を複製する等）は、pragma 単純
   付与よりコード複雑化・実機再検証コストが大きいため本 PR では実施せず、
@@ -1936,3 +1943,528 @@ run1（1.0245 ms・この base 列内でも外れ値）だけを見て「概ね�
 `smoke_bk32_parity.log`・`kernel_gpu_run{1..5}.log`（A 系列）・
 `kernel_gpu_production_select_run{1..5}.log`（B 系列）・`aggregate.md`）。
 内部ホスト名は含めない。
+
+## 15. E8 候補追加: 128×64×16（wm2wn2）の収録と parity 確認（イシュー #1331）
+
+### 15.0 目的・範囲
+
+親 #1325（E8: threadgroup タイルを 128×64×16（2×2 simdgroup）へ拡張）の
+sub-issue。`CANDIDATES[0]`（64,64,16,2,2。大形状の主力構成）に対する
+bm=128 版 `(128,64,16,2,2)` を `tile::CANDIDATES` の **index 10（末尾）**
+へ追加した。各 simdgroup が担当する acc タイル数（acc_rows=8・
+acc_cols=4。積 32。`CANDIDATES[0]` は acc_rows=4・acc_cols=4・積 16）を
+拡張したまま A/B タイルの threadgroup 内再利用率を倍にする狙い（理論
+根拠。E1 実験〈本 doc §7〉・#1143 の H1〈レジスタ圧仮説。反射値レベル
+では非支持〉が動機）。
+
+本 issue のスコープは**候補追加と正確性（parity）確認のみ**: (a) 明示
+指定（`GemmVariant::SimdgroupTiled(cfg)`／`dispatch_tiled_prepared`／
+`dispatch_strided_tiled_prepared` の `cfg` 引数）でのみ到達可能にする
+（`select`／`select_with_occupancy_for_device` の選択ロジックは無変更）、
+(b) カーネル側手動境界チェック（REQ-8）を維持（`gemm.metal` は無変更）、
+(c) 全形状 × NN/NT/TN/TT で parity 0 fail を実機確認、(d) threadgroup
+メモリ使用量の反射値確認、(e) 現行 `CANDIDATES[0]`（bm=64）との出力が
+複合判定内で一致することを確認。純カーネル時間の before/after 実測・
+`tile::select` への組み込み判断は後続イシュー #1332 のスコープ（§15.6）。
+
+### 15.1 環境・プロトコル
+
+実機は Apple M4 Max（`docs/real-hardware-verification-env.md` §7）。
+`cargo test -p fandhe-ai-backend-metal --release ... -- --ignored
+--nocapture --test-threads=1`（正確性確認のみのため 5 回計測中央値は
+不要）。実行前 `uptime` load average 2.87/4.26/5.18（他イシューが並列
+実行中の共有環境。20 ユーザーセッション並走）。正確性確認のみのため
+共有負荷は結論に影響しない。env_info・実行ログは §15.7 参照。
+
+### 15.2 f16 版 SMEM 超過の扱い（設計判断）
+
+`shared_mem_bytes_f16()` は本候補で **40064 バイト**となり、標準
+Apple Silicon の threadgroup メモリ上限（32KiB=32768 バイト）を構造的
+に超過する。エピローグ領域単独で `bm*bn*4 = 128*64*4 = 32768` バイトに
+達し、staged タイル領域（half 単位。NN で 7296 バイト）を加えると必ず
+上限を超える（`TileConfig::shared_mem_bytes_f16` ドキュメントコメント
+参照）。`pipeline_for_tile_f16` は超過構成を `fallback_chain` の
+`SINGLE_SIMDGROUP_8X8` へ安全に縮退させるため実行時 panic はしない
+（f16 タイル化経路は本候補で構造的に使用不可なだけであり、`select`・
+`dispatch_f16_auto_unverified` は `CANDIDATES` を選ばないため本番挙動へ
+の影響もない）。
+
+この非適格性を隠さず機械的に固定するため、`TileConfig::f16_tiled_fits_
+standard_limit`（`shared_mem_bytes_f16() <= 32*1024` を返す `#[cfg(test)]`
+限定ヘルパ）・`TileConfig::f16_tiled_candidates`（適格候補のみを巡回する
+イテレータ）を追加し、既存の f16 全候補 CI テスト 2 件
+（`shared_mem_bytes_f16_all_candidates_within_32kib_device_limit`・
+`shared_mem_bytes_f16_fits_standard_shared_mem_limit_for_all_candidates`。
+いずれも Linux 実行可能）を `CANDIDATES` 全体ではなく `f16_tiled_
+candidates()` の巡回へ変更した。新規 CI テスト
+`f16_tiled_candidates_excludes_exactly_candidate_10` で「f16 非適格
+index 集合が正確に `{10}`」であることを両方向（増加・減少）で固定する
+ドリフト検出とした。実機側の f16 全候補テスト 2 件
+（`all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`／
+`_non_multiple_boundary_shape`）は候補ごとに分岐させ、適格候補は従来
+どおり `resolved == cfg` を、非適格（index 10）候補は `resolved ==
+SINGLE_SIMDGROUP_8X8` を assert したうえで parity も実行する（縮退経路
+が正しく動作することの fail-closed 確認。§15.7 の
+`regression_ignored_all_candidates.log` 参照）。
+
+この変更は既存テストの緩和ではなく、非適格集合を index で固定し
+縮退先を assert する厳格化である（`tolerance`・baseline の変更は伴わ
+ない。`.claude/rules/coding-rust.md` の対象外）。
+
+### 15.3 反射値・SMEM 表
+
+`candidate_10_reflection_shows_no_fallback_for_every_transpose_pattern`
+（`gemm_spec_source_diag_tests.rs`）実機実測結果:
+
+| pattern | requested_thread_count | max_total_threads_per_threadgroup | thread_execution_width | static_threadgroup_memory_length | `shared_mem_bytes_for` |
+|---|---|---|---|---|---|
+| NN | 128 | 1024 | 32 | 0 | 14592 |
+| NT | 128 | 1024 | 32 | 0 | 15360 |
+| TN | 128 | 1024 | 32 | 0 | 12800 |
+| TT | 128 | 1024 | 32 | 0 | 13568 |
+
+全パターンで `resolved_cfg == requested_cfg`（フォールバック非経由）・
+`max_total_threads_per_threadgroup >= 128`・`thread_execution_width ==
+32` を確認。`static_threadgroup_memory_length` が 0 なのは §13.2 と
+同じ理由（動的 threadgroup メモリのため `shared_mem_bytes_for` が実際の
+確保量を表す）。4 パターンとも 32KiB（32768 バイト）上限内・16 バイト
+整合（`tile.rs::candidate_10_shared_mem_bytes_for_every_transpose_
+pattern_within_32kib_and_16_aligned` で固定済み）。f16 版
+`shared_mem_bytes_f16()` は上記 §15.2 のとおり 40064 バイトで超過・
+非適格。
+
+### 15.4 parity 結果表
+
+| テスト | 対象 | 実機結果 |
+|---|---|---|
+| `bm128_candidate_matches_cpu_reference_non_multiple_of_tile`（`gemm_dynamic_tile_parity.rs`） | 境界形状 (200,130,70) | ok |
+| `bm128_candidate_matches_cpu_reference_k_stress`（同上） | K=4096 ストレス | ok |
+| `bm128_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns`（`gemm_strided_parity.rs`） | 512³/1024³/2048³・(2048,2048,64)・(2048,2048,512)・(1536,1024,1024)・(1024,1536,1536)・(4096,1024,1024)・(1024,4096,1024)・(72,88,104)・(200,136,104) × NN/NT/TN/TT（計 44 ケース） | ok（`fail_count=0`・`resolved==cfg` 全ケース。実測 2.78s） |
+| `bm128_candidate_matches_cpu_reference_for_n4096_cubic_shape`（同上） | 4096³ × NN/NT/TN/TT | ok（`fail_count=0`。実測 6.20s） |
+
+全ケースで `assert_parity` の複合判定（相対誤差 1e-3 未満 または 絶対
+誤差 1e-5 未満。REQ-2）が `fail_count=0` で通過。`dispatch_strided_
+tiled_prepared` の戻り値 `resolved == cfg` を全ケースで assert 済みの
+ため、サイレントフォールバックは発生していない。(200,136,104) は
+200 mod 128=72・136 mod 64=8・104 mod 16=8 のいずれも非 0 で、M/N/K
+全方向のブロック端部分タイル（協調ロードのベクトルグループ境界
+フォールバック含む）を踏む形状として追加した。
+
+### 15.5 `CANDIDATES[0]`（bm=64）との複合判定比較
+
+`bm128_candidate_agrees_with_bm64_counterpart_within_composite_
+tolerance`（`gemm_strided_parity.rs`）: N=512/1024/2048/4096 ×
+NN/NT/TN/TT（計 16 ケース）で `CANDIDATES[10]`（bm=128）と
+`CANDIDATES[0]`（bm=64）の出力を `fandhe_ai_backend_cpu::parity::
+compare` で直接比較。全ケース `report.passes()==true`（`fail_count=0`。
+実測 2.88s）。bit 完全一致は assert 契約に含めていない（タイル形状が
+異なるため K チャンク内の丸め順・アキュムレータの組み方が変わりうる）。
+
+### 15.6 スコープ外・#1332 への引き継ぎ
+
+- 純カーネル時間の before/after（`CANDIDATES[10]` vs `CANDIDATES[0]`。
+  N=1024/2048/4096・5 回計測中央値）・`tile::select` への組み込み判断
+- f16 タイル化経路自体の再設計（エピローグ領域を `bm*bn*4` からタイル
+  分割等で縮小し 32KiB 内へ収める案）: §15.2 のとおり本候補は f16 経路
+  では構造的に使用不可のまま維持し、f32 経路のみを対象とする
+- E1 unroll pragma（`UNROLL_ACC_ENABLED`）の index 10 再評価:
+  `unroll_acc_candidates_are_exactly_acc_product_ge_16` の期待値
+  `{0,4,8,9,10}` 化は本 issue で実施済みだが、本番
+  `UNROLL_ACC_ENABLED=false` かつ index 10 自体が `select` 非組み込み
+  のため本番挙動は不変。E1 の再評価は #1332 の実測結果を見て判断
+- 端あり形状（8 の倍数でない大規模形状）・単独 NT/TN 以外の性能比較・
+  ダブルバッファ（2 面）SMEM 化
+
+### 15.7 関連ログ
+
+`docs/perf/logs/metal-gemm-e8-candidate-1331/`（`env_info.txt`・
+`reflection.log`・`parity_dynamic_tile.log`・`parity_all_shapes.log`・
+`parity_n4096_cubic.log`・`parity_cand0_compare.log`・
+`regression_ignored_all_candidates.log`（`--lib --ignored` 全件）・
+`full_ignored_serial.log`（`cargo test -p fandhe-ai-backend-metal
+--release -- --ignored --nocapture --test-threads=1` 全件））。内部
+ホスト名は含めない。
+
+## §16 E8 実測 — `CANDIDATES[10]`（128×64×16）純カーネル時間比較・採否判断（イシュー #1332）
+
+### 16.0 目的・範囲・イシュー文言の注記
+
+§15（イシュー #1331）で追加した `CANDIDATES[10]`（`bm=128, bn=64, bk=16,
+wm=2, wn=2, staged`）の純カーネル時間（GPU タイムスタンプ。`kernel_gpu`
+変種。イシュー #1276）を E7（§14）と同型の A/B 2 系列で計測し、
+`tile::select` への組み込み可否を判定する。
+
+イシュー #1332 本文は「現行 N=4096 最良候補（`CANDIDATES[3]`／`[0]`）」
+と書くが、これは #744 時点の古い記述である。`tile.rs` の M4 Max
+厳密一致テーブル（`select_with_occupancy_for_device`）と §14.3 実測では
+**2048→`CANDIDATES[1]`（64,32,16,2,2）・4096→`CANDIDATES[2]`
+（32,64,16,2,2）** が現行本番選択構成であり、`[3]` は #1039 以降最良
+ではない。したがって本節では「現行最良候補」を B 系列（`select_for_
+device` の実選択構成）で表現し、`[0]`（構造上の直接対応。§15.6 の
+引き継ぎ）を A 系列の主対象、`[3]` をイシュー文言突合用の参考ペアと
+して追加した。
+
+### 16.1 環境・プロトコル
+
+- 実機: Apple M4 Max（本エージェント実行環境自体。macOS 26.6.2・
+  rustc 1.96.0）
+- 計測対象コミット: `93c6107b42d3984ecd14a6325b045e8792fb2296`
+  （origin/main。PR #1393 マージ済み。イシュー #1332 の診断テスト
+  追加自体はこのコミットに対する変更であり、本番コード〈`tile.rs`／
+  `gemm.rs`／`shaders/gemm.metal`〉は無変更のまま計測）
+- 事前スモーク: `bm128_candidate_matches_cpu_reference_k_stress`・
+  `bm128_candidate_matches_cpu_reference_non_multiple_of_tile`・
+  `bm128_candidate_agrees_with_bm64_counterpart_within_composite_
+  tolerance`・`bm128_candidate_matches_cpu_reference_for_all_shapes_
+  and_transpose_patterns`・`bm128_candidate_matches_cpu_reference_
+  for_n4096_cubic_shape` の 5 件全 pass（`smoke_bm128_parity.log`）
+- A 系列: `bm128_kernel_gpu_ab_vs_candidate0`（N=1024/2048/4096 ×
+  `cand10_vs_cand0`／`cand10_vs_cand3` の 2 ペア）を 5 プロセス起動
+  （`--release --lib -- --ignored --nocapture --test-threads=1`）
+- B 系列: `bm128_kernel_gpu_ab_vs_production_select`（N=512/1024/
+  2048/4096 × `tile::select_for_device` 解決構成）を同様に 5 プロセス
+  起動
+- warmup 20・測定 20（trial 交互回転）・fail-closed 検証
+  （`resolved_cfg == cfg` によるフォールバック非経由・trial 0 出力の
+  複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉pass）は
+  全 run で違反なし（`assert_eq!`／`assert!` が 1 件も panic せず全
+  run が `test result: ok`）
+- 負荷帯: `uptime` load average（1 分値）は A 系列（`uptime_before_
+  run{1..5}.txt`）が 3.42〜7.97、B 系列（`uptime_before_prod_
+  run{1..5}.txt`）が 2.87〜2.97 で、全 10 ファイル通しの範囲は
+  2.87〜7.97（他セッションとの共有負荷下。`docs/perf/logs/
+  metal-gemm-e8-bm128-ab-1332/uptime_before_*.txt`）。#1330（E7）と
+  同様「負荷はあるが符号完全一致のため判定不可とはしない」方針を
+  適用する（A 系列 30/30・B 系列
+  20/20 の全反復が同一符号のため、この負荷帯でも結論は揺るがない）
+
+### 16.2 A 系列結果（`CANDIDATES[10]` vs `[0]`／`[3]`）
+
+`head_over_base_kernel_gpu`（5 run 中央値。詳細は
+`docs/perf/logs/metal-gemm-e8-bm128-ab-1332/aggregate.md`）:
+
+| N | vs `CANDIDATES[0]` | vs `CANDIDATES[3]` |
+|---|---|---|
+| 1024 | 1.65 倍後退（5/5 符号一貫） | 10.52 倍後退（5/5 符号一貫） |
+| 2048 | 1.89 倍後退（5/5 符号一貫） | 13.45 倍後退（5/5 符号一貫） |
+| 4096 | 2.40 倍後退（5/5 符号一貫） | 14.15 倍後退（5/5 符号一貫） |
+
+`[10]` は #1325 の「threadgroup タイル拡張によるタイル再利用率向上」
+仮説に反し、構造上の直接対応である `[0]`（同じ `bk=16`・2×2
+simdgroup）に対しても全 N で一貫して遅い。
+
+### 16.3 B 系列結果（`CANDIDATES[10]` vs 本番選択構成。結線判断の唯一の根拠）
+
+`production_select_resolved`（全 run で一致・フォールバック非経由）:
+
+| N | 解決構成 |
+|---|---|
+| 512 | `CANDIDATES[5]`（64,32,32,2,2） |
+| 1024 | `CANDIDATES[6]`（64,32,8,4,1） |
+| 2048 | `CANDIDATES[1]`（64,32,16,2,2） |
+| 4096 | `CANDIDATES[2]`（32,64,16,2,2） |
+
+`head_over_base_kernel_gpu`（5 run 中央値）:
+
+| N | 比 | 符号一貫性 |
+|---|---|---|
+| 512 | 9.72 倍後退 | 5/5 |
+| 1024 | 10.04 倍後退 | 5/5 |
+| 2048 | 12.98 倍後退 | 5/5 |
+| 4096 | 12.46 倍後退 | 5/5 |
+
+N=512〜4096 の全帯域で `[10]` が本番選択構成より 1 桁近く遅い
+（20/20 反復すべて後退方向で符号一貫）。
+
+### 16.4 妥当性帯チェック
+
+`docs/perf/metal-gemm-reuse-phase-breakdown.md` §11.5 の `kernel_gpu`
+分母（本番選択構成。N=1024 1.0267 ms・N=2048 3.1849 ms・N=4096
+13.7051 ms）と、本計測の B 系列 base（production_select）絶対値
+5 run 中央値（N=1024 0.3769 ms・N=2048 1.6105 ms・N=4096 15.8216 ms）
+を突合した。N=4096 は近い値（約 1.15 倍差）だが N=1024/2048 は
+乖離があり、これは同ファイル §9.4 が記録する「N=1024 の既知の乖離
+（約 4.6 倍）」と同種の計測プロトコル間差（本計測は warmup 20／
+測定 20 の交互測定、§11.5 は単発 5 プロセス起動）に起因すると考え
+られる。**採否判定は base/head を同一 run・同一プロトコル内で比較した
+run 別比（`head_over_base_kernel_gpu`）の符号一貫性で行っており、
+base 絶対値のプロトコル間差は判定そのものへ影響しない**（詳細は
+`docs/perf/logs/metal-gemm-e8-bm128-ab-1332/aggregate.md`「妥当性帯
+チェック」節）。
+
+### 16.5 採否判断
+
+- 採否判定基準（`(m,n,k)` キー単位）:
+  - **ADOPT（行置換）**: B 系列で当該 N の run 別比中央値が < 0.95
+    かつ 5/5 run 符号一貫
+  - **REJECT**: 当該 N で後退方向（比 ≥ 1.0）が 5/5 符号一貫、または
+    ±5% 帯内で有意差なし
+  - **undetermined**: run 間で符号が反転
+- B 系列は N=512/1024/2048/4096 のすべてで「後退方向（比 9.7〜13.0）
+  が 5/5 符号一貫」に該当する。ノイズ帯（±5%）を 1 桁近く超える一貫
+  した後退のため、undetermined の余地はない。
+- **結論: 組み込み不可（REJECT）**。`tile.rs`／`gemm.rs`／
+  `shaders/gemm.metal` は一切変更しない（`tile::select`／
+  `select_with_occupancy_for_device` の候補表は `[0]`〜`[9]` の既存
+  構成のまま不変維持）。`CANDIDATES[10]` は §15 で確立した「明示
+  指定でのみ到達可能」な状態のまま残す（反射値・parity 群が既に
+  green のため候補自体の削除はしない）。
+- **示唆**: threadgroup タイルを 128×64 へ拡張しても、レジスタ／
+  occupancy 上の負担が K ループの再利用率向上を上回り純カーネル
+  時間が大幅に悪化する（#1325 の仮説は本 GPU 世代・本タイル形状の
+  組合せでは支持されない）。128 系タイルの探索は本結果をもって
+  打ち切りとし、後続の探索は 64 系タイルの周辺（E4〜E7 の知見）へ
+  戻すことを推奨する（下記 16.6 参照）。
+
+### 16.6 スコープ外・引き継ぎ
+
+- NT/TN/TT・端あり形状・f16 経路（§15.2 のとおり構造的に不可）での
+  `[10]` 性能比較（REJECT が明確なため実施しない）
+- ダブルバッファ（2 面）SMEM 化・E1 unroll pragma の index 10
+  再評価（§15.6 の引き継ぎ。REJECT により優先度は大幅に低下したと
+  判断する。実施する場合は親 #1325 系列の後続 issue とする）
+- M4 Max 以外の機種向けテーブル・後退の機構レベル切り分け
+  （レジスタ圧・occupancy 低下の定量診断。反射値〈§15〉からの推定に
+  留め、`MTLComputePipelineState` 実測〈§7 の H1 検証と同型の手法〉
+  は本 issue のスコープ外）
+- 本節の知見（128 系タイルは本 GPU 世代で不利）を親 #1325 へコメント
+  として記録することを推奨する（自動運転のため本 issue 側では追加
+  issue 起票は行わない）
+
+### 16.7 関連ログ
+
+`docs/perf/logs/metal-gemm-e8-bm128-ab-1332/`（`env_info.txt`・
+`uptime_before_run{1..5}.txt`・`uptime_before_prod_run{1..5}.txt`・
+`pmset_therm_before.txt`／`pmset_therm_after.txt`・
+`smoke_bm128_parity.log`・`kernel_gpu_run{1..5}.log`（A 系列）・
+`kernel_gpu_production_select_run{1..5}.log`（B 系列）・
+`aggregate.md`（抽出コマンド・5 run 表・妥当性帯チェック・判定を
+記載））。内部ホスト名・絶対パスは含めない。
+
+## §17 E9 hfrag 実測（イシュー #1370）
+
+E7〜E8 と同型の候補評価が E9（half フラグメント／f32 累算候補
+`gemm_simdgroup_tiled_hfrag`。親 #1368・イシュー #1369/#1370）でも
+実施された。詳細（S 系列の N 別最良タイル・A 系列の同一タイル比較・
+B 系列の結線判断・採否）は `docs/perf/metal-gemm-hfrag-candidate.md`
+§9 を正とし、本節では二重管理しない。要旨: N=4096 のみ本番選択構成
+比 約 10〜12% 高速（ADOPT-as-opt-in-candidate）だが、これは「hfrag
+固有の演算スループット向上」ではなく「hfrag の SMEM 使用量が f32 の
+半分であるため f32 の本番選択では選ばれない `bk=32` 構成が最速になる」
+という**仮説段階の間接効果**だと推測される（同一タイル比較では hfrag
+は f32 より一貫して遅いことと整合するが、A/B 系列は SMEM 使用量のみを
+対照した比較ではないため断定はできない。`CANDIDATES[9]`〈f32・bk=32〉
+自体は本節 §14 のとおり実行可能〈viable〉であり本番選択構成比 4.5〜7.6
+倍遅いという理由で REJECT されているため、hfrag によって使用可能性
+〈viability〉が新規に実証されたわけではない）。無条件の opt-in 候補
+前進は推奨しない（同 doc §9.6）。
+
+## §18 E2〜E4 の `tile::select` 組み込み判断（イシュー #1304）
+
+### §18.0 結論
+
+**E2・E3・E4 はいずれも実機実測（M4 Max）で「組み込み不可（REJECT）」
+確定済み**であり、`tile::select`／`select_for_device` の候補表
+（`CANDIDATES`）・選択条件へ組み込む**有効候補は 0 件**である。出典:
+
+- E2（ソーステキスト特殊化）: §9.4（イシュー #1289）。N=1024 で約 22%
+  後退・N=4096 で 5/5 run 一貫の微後退
+- E3（フラグメントロード方式）: §10.4（イシュー #1295）。5 候補中
+  本番既定 `tgp-k1` が全 N 最速
+- E4（協調ロードレイアウト）: §11.4（イシュー #1300）。6 候補中本番
+  既定 `L0-P4` を安定して上回る候補なし
+
+したがって本イシューは受け入れ条件の**「有効候補 0 件の場合はその旨を
+記録してクローズ」**分岐を採る。`crates/backend-metal/src/tile.rs`
+（候補表・選択ロジック・opt-in 定数）・`gemm.rs`（`MetalGemm::new`／
+`dispatch_auto`）・`shaders/gemm.metal` の**本番コードは変更しない**。
+
+### §18.1 実施内容
+
+本番コードを変更しない代わりに、受け入れ条件「全形状 × NN/NT/TN/TT の
+parity 0 fail・既存 bit 一致テスト pass（実機）」を満たすためのカバレッジ
+欠落を埋めた。既存の同型テスト（E7〈`bk32_64x64_candidate_matches_cpu_
+reference_for_all_shapes_and_transpose_patterns`〉・E8〈`bm128_
+candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns`〉）
+は `tile::CANDIDATES[9]`／`[10]` を**明示指定**するのみで、`MetalGemm::
+dispatch_auto` が実際に選ぶ本番選択構成（`tile::select_for_device` の
+出力）そのものを転置パターン込みで検証するテストは存在しなかった。
+
+`crates/backend-metal/tests/gemm_strided_parity.rs` へ以下 2 本の
+`#[ignore]` テストを追加した（E7 用ヘルパ `assert_e7_candidate_matches_
+reference_for_pattern` を `label` 引数で汎化した `assert_candidate_
+matches_reference_for_pattern` を共用。E7/E8 の assert メッセージ・
+挙動は不変）:
+
+- `production_select_matches_cpu_reference_for_all_shapes_and_transpose_patterns`
+  （E7/E8 と同一の 10 形状 × NN/NT/TN/TT）
+- `production_select_matches_cpu_reference_for_n4096_cubic_shape`
+  （純 4096³ をスカラー CPU 参照の計算コストのため分離）
+
+各形状で `cfg = tile::select_for_device(m, n, k, ctx.
+verified_m4_max_gpu_core_count())` を取得し、`resolved == cfg` を assert
+してサイレントフォールバックを検知したうえで CPU 参照実装との複合判定
+（REQ-2）を確認する。
+
+### §18.2 実機検証結果（M4 Max）
+
+詳細は `docs/perf/logs/metal-gemm-e2e4-select-closure-1304/aggregate.md`
+を正とし、本節では要約のみ記す。
+
+| 区分 | 内容 | 結果 |
+|---|---|---|
+| (a) 新規 | 本番選択構成 × 10 形状 × 4 パターン + 4096³ × 4 パターン（計 44 ケース） | 全 pass・`resolved == cfg` |
+| (b) 既存（E2〜E4 の `#[cfg(test)]` 自己検証） | 10 本（E2 2 本・E3 4 本・E4 4 本。参考として E1・E6 の 5 本も同時実行） | 全 15 本 pass |
+| (c) 既存 integration | swizzle／fine_barrier／transposed_parity／dynamic_tile_parity／strided_parity 残り（E7/E8/本イシュー新規を除く） | 27 本 pass |
+| (d) 既定値ガード | `SOURCE_SPECIALIZATION_ENABLED`／`FRAG_LOAD_CONFIG`／`COOP_LOAD_CONFIG` の既定値ロック 3 本 | 全 pass |
+
+`select_for_device` は形状ごとに複数の異なる `TileConfig`
+（境界形状縮退〈(72,88,104)〉を含む）へ分岐したが、いずれも NN/NT/TN/TT
+の 4 転置パターンで parity 0 fail・サイレントフォールバックなしを確認
+した。
+
+### §18.3 env_info・実行環境
+
+M4 Max（GPU 40 コア）・macOS 26.6.2・rustc 1.96.0。実行時 `uptime`:
+`up 19 days 2:53, load averages: 7.07 7.53 7.91`（他セッション並走の
+共有負荷環境。本節のテストは性能計測ではなく parity・bit 一致の 0/1
+判定のため、共有負荷は判定の信頼性に影響しない）。詳細は
+`docs/perf/logs/metal-gemm-e2e4-select-closure-1304/env_info.txt`。
+
+### §18.4 #1306 への引き継ぎ（完了。§19 参照）
+
+- `docs/perf/metal-gemm-n4096-kernel-gap.md` §5／§7.7 の E2〜E4 該当行の
+  本文書き換え（状態行の全面更新）・framework-compare 実践規模の前後
+  比較は #1306 で完了した（§19）。当初の見込み「候補表無変更につき
+  before=after（差分なし）」どおり、`tile::select` 系関数・候補表は本
+  イシューでも変更していない
+- E6（#1328）・E7（#1330）・E8（#1332）は本イシューの対象外（各自の
+  イシューで完結済み。`CANDIDATES[9]`／`[10]` は「明示指定でのみ到達可能」
+  な状態のまま不変）
+
+## §19 候補表更新後の framework-compare gemm metal 結線前後 A/B（イシュー #1306）
+
+### §19.0 結論
+
+**全 8 セル（size 512/1024/2048/4096 × mode fresh/reuse）非後退・checksum
+全セル完全一致（M4 Max 実機実測。compare_gemm_ab.py 終了コード 0）。**
+本番既定（`select_for_device`。#1304 完了時点の候補表）を確定し、
+**コード変更なし**（§4 決定表「全 8 セル非後退」分岐）。
+
+### §19.1 「結線前後」の解釈と根拠
+
+依存 #1304（E2〜E4 の候補組み込み判断）は `tile::CANDIDATES`／
+`tile::select`／`select_for_device` を一切変更していない（本番既定は
+不変）ことを本イシューでも再確認した:
+
+```
+git diff b2a5fcb f396784 -- crates/backend-metal/src/gemm.rs \
+  crates/backend-metal/src/tile.rs crates/backend-metal/src/spec_source.rs \
+  | grep '^[-+]' | grep -v '^[-+][-+]'
+```
+
+上記の非マージコミット差分（`^[-+]` 行）はコメント文字列の書き換え
+（`#[cfg(test)] SOURCE_SPECIALIZATION_ENABLED` の assert メッセージが
+「性能実測・本番結線判断は #1289／#1302 のスコープ」→「#1289 で REJECT・
+#1304 で `tile::select` 組み込み対象なしと確定」へ更新されたのみ）に
+とどまり、コード論理の変更は 0 行（全文は
+`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/
+diff_b2a5fcb_f396784_backend_metal_src.txt`）。加えて `v0.7.0 → HEAD` の
+`tile.rs` にも `select`／`select_for_device` の分岐変更はない（追加は
+`FragLoadConfig::DEFAULT`／`CoopLoadConfig::DEFAULT` 等の opt-in 既定値
+のみ）。
+
+このため本節は字義通りの「結線前後」のコード差分計測ではなく、**v0.7.0
+→ HEAD の Metal 側変更群（E2〜E8 の function constant 追加・候補追加・
+f16 候補等。`gemm.rs` は +3013 行）が本番既定経路の性能を後退させていな
+いかを確認する 0.7.0 ↔ HEAD 非後退確認**である（before=正式系列
+`fandhe-ai =0.7.0`〈crates.io registry 解決〉・after=参考系列 HEAD
+〈`crates/facade` への path patch〉。#1147 で確立した正式系列／参考系列
+の 2 系列方式を踏襲）。
+
+### §19.2 プロトコル
+
+- ツール: `scripts/bench/framework-compare/run_ab_gemm_metal.sh`（before/
+  after 2 バイナリのビルド・sha256／依存解決元検証・N=512/1024/2048/4096
+  × fresh/reuse × 5 run の run 単位交互起動）+ `compare_gemm_ab.py`
+  （`(size, mode)` セルごとの中央値比・checksum 判定）
+- 対象形状: N=512/1024/2048/4096（`run_gemm_gate_metal.sh`〈#1037〉の
+  N=1024/2048/4096 に N=512 を追加。イシュー #1306 の受け入れ条件が
+  N=512 を含むため）
+- モード: fresh／reuse 双方
+- before: `fandhe-ai =0.7.0`（crates.io registry。承認済みピン）
+- after: HEAD（`f396784d8802ab192ae4a7cff1ba71fec270f556`。`crates/facade`
+  への `patch.crates-io.fandhe-ai.path` 差し替え。`Cargo.lock`／
+  `.cargo/config.toml` は変更しない）
+
+### §19.3 実測結果表（M4 Max 実機。5 回計測中央値）
+
+| size/mode | before median | after median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 512/fresh | 514.2 us | 511.6 us | 0.9950 | 完全一致 | 非後退（判定注意: before spread > 1.5x） |
+| 512/reuse | 569.8 us | 553.6 us | 0.9714 | 完全一致 | 非後退（判定注意: before spread > 1.5x） |
+| 1024/fresh | 2.677 ms | 2.556 ms | 0.9547 | 完全一致 | 非後退 |
+| 1024/reuse | 2.923 ms | 2.907 ms | 0.9944 | 完全一致 | 非後退 |
+| 2048/fresh | 8.369 ms | 8.324 ms | 0.9947 | 完全一致 | 非後退（判定注意: before spread > 1.5x） |
+| 2048/reuse | 9.187 ms | 9.522 ms | 1.0365 | 完全一致 | 非後退 |
+| 4096/fresh | 33.776 ms | 33.926 ms | 1.0045 | 完全一致 | 非後退 |
+| 4096/reuse | 39.622 ms | 38.868 ms | 0.9809 | 完全一致 | 非後退 |
+
+閾値は `after/before <= 1.05`（guardrail「劣化中央値 5% 以内」の慣例値）。
+全セル閾値内・checksum 完全一致（bit 同一。本番カーネル・選択結果が
+不変であることの裏取り）。512/fresh・512/reuse・2048/fresh の 3 セルは
+before 側の run 間ばらつき（spread = max/min > 1.5x）が大きく「判定注意」
+を付与しているが、ratio 自体はいずれも 1.05 未満で判定（非後退）は変わ
+らない。全体傾向として ratio は 0.95〜1.04 の範囲に収まり、系統的な後退
+シグナルは見られない。
+
+生データ・manifest・全文表は
+`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/`
+（`env_info.txt`・`run_ab_gemm_metal-m4max-head-f396784.log`・
+`compare_gemm_ab.md`）を正とする。
+
+### §19.4 結線判断
+
+全 8 セル非後退・checksum 完全一致（§4 決定表「全 8 セル非後退」分岐）
+のため、**現行 `select_for_device` 既定（#1304 完了時点の候補表）を
+本番既定として確定する。コード変更なし**（`crates/backend-metal` の
+本番コード・`tile::CANDIDATES`／`tile::select`は本 PR でも変更しない）。
+§18 の E2〜E4 REJECT 判断・#1304 の「組み込み対象なし」確定と合わせ、
+E2〜E4 系列の調査は本イシューをもって一区切りとする。
+
+### §19.5 env_info・負荷状態
+
+M4 Max（GPU 40 コア）・macOS 26.6.2・rustc 1.96.0。計測中の
+`uptime` は load averages 5.99〜9.47・19 users（本タスク自体が複数
+イシュー並列実行ワークフローの一部であるための共有負荷。他セッションの
+並列ビルド・計測が同一マシン上で並走）。`pmset -g therm` は熱・電源
+警告レベルの記録なし。延期基準（目安 load > 6）を計測開始時点で上回っ
+ていたが、並列実行が前提のタスク構造のため延期せず実行し負荷状況を
+そのまま記録した（#1185・#1147 と同じ扱い）。全 80 起動（before/after
+× 4 size × 2 mode × 5 run）とも成功（`skipped-*.log` 空）・
+`parity_fail_count` は全行 0。詳細は
+`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/env_info.txt`。
+
+### §19.6 スコープ外・引き継ぎ
+
+- 後退が観測された場合の v0.7.0 → HEAD 変更群の切り分け（bisect・候補別
+  無効化）は本節では発生しなかったため対象外（全セル非後退のため）
+- `run_gemm_gate_metal.sh` への N=512／fresh 拡張（ゲート契約〈#1037〉の
+  変更にあたるため本 PR では行わない）
+- `results/summary.md`・`docs/performance-targets.md` の更新（A/B は
+  ゲート判定ではないため対象外）
+- E6（#1328）・E7（#1330）・E8（#1332）の結線判断は各イシューで完結済み
+  （`CANDIDATES[9]`／`[10]` は明示指定でのみ到達可能なまま不変）
+- 共有マシンの計測ノイズ原因診断（#1186／#1284 と同種。本節は負荷状況の
+  記録に留める）
+
+### §19.7 関連ログ
+
+`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/`
+（`env_info.txt`・`run_ab_gemm_metal-m4max-head-f396784.log`・
+`compare_gemm_ab.md`・`diff_b2a5fcb_f396784_backend_metal_src.txt`）。
+生データ（JSONL・manifest）は
+`scripts/bench/framework-compare/results/raw/results-m4max-gemm-ab-
+before-0.7.0-head-f396784.jsonl`・`results-m4max-gemm-ab-after-head-f396784.jsonl`・
+`manifest-m4max-gemm-ab-head-f396784.json`・
+`skipped-m4max-gemm-ab-head-f396784.log`（空）。

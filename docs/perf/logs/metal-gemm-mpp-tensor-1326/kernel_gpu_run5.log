@@ -1,0 +1,17 @@
+running 1 test
+test gemm_mpp_diag_tests::mpp_kernel_gpu_ab_vs_production_select ... N=1024 pair=mpp_vs_production_select production_select_resolved=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true }
+N=1024 pair=mpp_vs_production_select mode=base resolved_tile=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true } kernel_gpu_median_ms=0.2246 q1=0.2240 q3=0.2272
+N=1024 pair=mpp_vs_production_select mode=head kernel_gpu_median_ms=0.2324 q1=0.2289 q3=0.9749
+N=1024 pair=mpp_vs_production_select head_over_base_kernel_gpu=1.0347
+N=2048 pair=mpp_vs_production_select production_select_resolved=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+N=2048 pair=mpp_vs_production_select mode=base resolved_tile=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=1.6076 q1=1.6047 q3=1.6104
+N=2048 pair=mpp_vs_production_select mode=head kernel_gpu_median_ms=2.0675 q1=2.0341 q3=2.7979
+N=2048 pair=mpp_vs_production_select head_over_base_kernel_gpu=1.2861
+N=4096 pair=mpp_vs_production_select production_select_resolved=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+N=4096 pair=mpp_vs_production_select mode=base resolved_tile=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=13.6067 q1=13.5619 q3=13.6239
+N=4096 pair=mpp_vs_production_select mode=head kernel_gpu_median_ms=25.2264 q1=23.8500 q3=27.5461
+N=4096 pair=mpp_vs_production_select head_over_base_kernel_gpu=1.8540
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 319 filtered out; finished in 3.89s
+

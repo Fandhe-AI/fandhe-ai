@@ -36,7 +36,7 @@ use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
 use crate::error::CudaError;
-use crate::memory::{CudaBufferHandle, CudaMemory, map_cuda_error};
+use crate::memory::{CudaBufferHandle, CudaMemory, CudaStorage, map_cuda_error};
 use crate::rmsnorm::match_rmsnorm_plan;
 use crate::softmax::match_softmax_plan;
 
@@ -119,10 +119,12 @@ pub struct CudaBackendOps {
 
 impl CudaBackendOps {
     /// GEMM 本体（f32）の FP32 厳密経路（`run_tiled_f32`）のみを実行する
-    /// 内部ヘルパー。`crate::precision::tf32_gemm_enabled()` の状態に
-    /// 関わらず常に FP32 厳密で計算する（TF32 opt-in フラグを一切見ない）。
+    /// 内部ヘルパー。`crate::precision::gemm_precision()` の状態に
+    /// 関わらず常に FP32 厳密で計算する（`Tf32`／`Tf32x3` いずれの
+    /// opt-in モードも一切見ない）。
     ///
-    /// `gemm`（公開経路。opt-in 時は TF32 へ分岐しうる）・`gemm_bias_act`
+    /// `gemm`（公開経路。opt-in 時は `Tf32`／`Tf32x3` へ分岐しうる）・
+    /// `gemm_bias_act`
     /// の `ComposedFallback`（非融合合成経路）・
     /// `BackendOps::gemm_fp32_strict`（`dyn BackendOps` 経由の学習経路
     /// 向け入口。イシュー #1211 codex-review 指摘・PR #1223）の 3 者から
@@ -303,14 +305,27 @@ impl CudaBackendOps {
                 let handle = buf
                     .downcast_handle::<CudaBufferHandle>()
                     .ok_or(BackendError::DeviceMismatch)?;
-                let slice = handle.slice.as_ref().ok_or_else(|| {
+                let storage = handle.storage.as_ref().ok_or_else(|| {
                     BackendError::DeviceAllocationFailed(
                         "segment_resources_for: buffer has numel > 0 but no device allocation"
                             .to_string(),
                     )
                 })?;
-                let (ptr, _sync) = cudarc::driver::DevicePtr::device_ptr(slice, stream);
-                ptr
+                // `CudaStorage::Device`／`Managed`（イシュー #1352）の
+                // いずれも `cudarc::driver::DevicePtr` を実装するため、
+                // graph capture 対象の segment key（アドレス比較による
+                // 差し替え検出）は配置に依らず同じ経路で導出できる
+                // （`crate::memory::CudaStorage::as_arg` と同じ分岐方針）。
+                match storage {
+                    CudaStorage::Device(slice) => {
+                        let (ptr, _sync) = cudarc::driver::DevicePtr::device_ptr(slice, stream);
+                        ptr
+                    }
+                    CudaStorage::Managed(unified) => {
+                        let (ptr, _sync) = cudarc::driver::DevicePtr::device_ptr(unified, stream);
+                        ptr
+                    }
+                }
             };
             segment_resources.push(SegmentResource { addr, numel });
         }
@@ -750,7 +765,7 @@ impl BackendOps for CudaBackendOps {
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
         // `download`（`memory.rs::CudaMemory::download`）と同じ「空バッファ
-        // は `slice: None`」契約のため、numel == 0 はカーネル起動前に
+        // は `storage: None`」契約のため、numel == 0 はカーネル起動前に
         // 早期 return する（`CudaSgd::run` 側の `numel == 0` early-return
         // では `grad_slice` を取り出す前に `param_slice` を要求してしまう
         // ため、ここで先に判定する）。
@@ -758,23 +773,28 @@ impl BackendOps for CudaBackendOps {
         if numel == 0 {
             return Ok(());
         }
-        let Some(grad_slice) = grad_handle.slice.as_ref() else {
+        let Some(grad_storage) = grad_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "sgd_step_device: grad buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        // 配置非依存の読み取り専用引数へ変換する（イシュー #1352。
+        // `crate::memory::CudaArg` ドキュメンテーションコメント参照。
+        // `launch_builder` の前に名前付きローカルとして宣言する）。
+        let grad_arg = grad_storage.as_arg();
 
-        let velocity_handle_slice = match velocity {
+        let velocity_arg = match velocity {
             Some(v) => {
                 let handle = v
                     .downcast_handle_mut::<CudaBufferHandle>()
                     .ok_or(BackendError::DeviceMismatch)?;
-                Some(handle.slice.as_mut().ok_or_else(|| {
+                let storage = handle.storage.as_mut().ok_or_else(|| {
                     BackendError::DeviceAllocationFailed(
                         "sgd_step_device: velocity buffer has numel > 0 but no device allocation"
                             .into(),
                     )
-                })?)
+                })?;
+                Some(storage.as_arg_mut())
             }
             None => None,
         };
@@ -782,11 +802,12 @@ impl BackendOps for CudaBackendOps {
         let param_handle = param
             .downcast_handle_mut::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(param_slice) = param_handle.slice.as_mut() else {
+        let Some(param_storage) = param_handle.storage.as_mut() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "sgd_step_device: param buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let param_arg = param_storage.as_arg_mut();
 
         let kernel_params = crate::sgd::SgdKernelParams {
             lr: config.lr,
@@ -797,12 +818,7 @@ impl BackendOps for CudaBackendOps {
             is_first_step: config.is_first_step,
         };
         self.with_driver_call(&resource_generations, map_cuda_error, || {
-            sgd.run(
-                param_slice,
-                grad_slice,
-                velocity_handle_slice,
-                &kernel_params,
-            )
+            sgd.run(param_arg, grad_arg, velocity_arg, &kernel_params)
         })
     }
 
@@ -991,21 +1007,26 @@ impl BackendOps for CudaBackendOps {
 
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、
     /// 本イシュー導入前と bit-exact に不変（`crate::precision` モジュール
-    /// 冒頭コメントの契約）。`crate::precision::tf32_gemm_enabled()` が
-    /// opt-in（`true`）の場合のみ WMMA TF32 Tensor Core 経路
-    /// （[`crate::gemm::CudaGemm::run_wmma_tf32`]）へ分岐する（イシュー
-    /// #1042。親ツリー #1029 Phase 2）。opt-in 時に TF32 カーネルが使用
-    /// 不能（cc<8.0・NVRTC コンパイル失敗等）な場合は
-    /// `CudaError::WmmaUnavailable` をそのまま `BackendError` へ変換して
-    /// 伝播し、FP32 への黙示フォールバックはしない（fail-closed。明示
-    /// opt-in の計測条件を静かに崩さない方針。`crate::precision` 参照）。
+    /// 冒頭コメントの契約）。`crate::precision::gemm_precision()` が
+    /// [`crate::precision::CudaGemmPrecision::Tf32`] の場合は WMMA TF32
+    /// Tensor Core 単発経路（[`crate::gemm::CudaGemm::run_wmma_tf32`]。
+    /// イシュー #1042）、[`crate::precision::CudaGemmPrecision::Tf32x3`]
+    /// の場合は 3×TF32 split-single 経路
+    /// （[`crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm::run_tf32x3`]。
+    /// イシュー #1355）へそれぞれ分岐する。opt-in 時にモード固有の
+    /// カーネルが使用不能（cc<8.0・NVRTC コンパイル失敗・整列制約
+    /// 不成立等）な場合は型付きエラーをそのまま `BackendError` へ変換
+    /// して伝播し、FP32 への黙示フォールバックはしない（fail-closed。
+    /// 明示 opt-in の計測条件を静かに崩さない方針。`crate::precision`
+    /// 参照）。
     ///
     /// **注意**: `gemm_bias_act` の `ComposedFallback` および
     /// `gemm_fp32_strict`（学習経路向け入口）からはこのメソッドを
     /// 呼ばない（`gemm_fp32_strict_impl` を使う）。本メソッドは
-    /// TF32 opt-in フラグの適用対象である「素の公開 GEMM 入口」専用。
+    /// 精度モードの適用対象である「素の公開 GEMM 入口」専用。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        if !crate::precision::tf32_gemm_enabled() {
+        let mode = crate::precision::gemm_precision();
+        if mode == crate::precision::CudaGemmPrecision::Fp32Strict {
             return self.gemm_fp32_strict_impl(a, b);
         }
 
@@ -1023,32 +1044,86 @@ impl BackendOps for CudaBackendOps {
             .as_slice()
             .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
 
-        let gemm = self.with_driver_call(
-            &[],
-            |e| BackendError::CudaUnavailable(e.to_string()),
-            || {
-                let device = self.device_handle_raw()?;
-                context_cache::cached_gemm(&device)
-            },
-        )?;
-        let out = self.with_driver_call(
-            &[],
-            |e| BackendError::KernelLaunchFailed(e.to_string()),
-            || gemm.run_wmma_tf32(a_slice, b_slice, m, n, k),
-        )?;
-        crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+        let out = match mode {
+            crate::precision::CudaGemmPrecision::Tf32 => {
+                let gemm = self.with_driver_call(
+                    &[],
+                    |e| BackendError::CudaUnavailable(e.to_string()),
+                    || {
+                        let device = self.device_handle_raw()?;
+                        context_cache::cached_gemm(&device)
+                    },
+                )?;
+                let out = self.with_driver_call(
+                    &[],
+                    |e| BackendError::KernelLaunchFailed(e.to_string()),
+                    || gemm.run_wmma_tf32(a_slice, b_slice, m, n, k),
+                )?;
+                crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+                out
+            }
+            crate::precision::CudaGemmPrecision::Tf32x3 => {
+                // デバイスハンドル取得（driver 不在等）は他モードと同じ
+                // `CudaUnavailable` へ写像し、続くカーネル構築
+                // （`cached_mma_tf32x3`。cc<8.0・NVRTC コンパイル失敗等）
+                // のみを 3×TF32 固有の fail-closed メッセージ
+                // （`KernelLaunchFailed`）へ写像する（`Tf32` 分岐は両者を
+                // 区別せず一括で `CudaUnavailable` にしているが、driver
+                // そのものが不在の場合に「3xTF32 gemm unavailable」と
+                // 誤解を招くメッセージを返さないよう、本分岐では意図的に
+                // 分離する）。
+                let device = self.with_driver_call(
+                    &[],
+                    |e| BackendError::CudaUnavailable(e.to_string()),
+                    || self.device_handle_raw(),
+                )?;
+                let gemm = self.with_driver_call(
+                    &[],
+                    |e| {
+                        BackendError::KernelLaunchFailed(format!(
+                            "3xTF32 gemm unavailable (fail-closed): {e}"
+                        ))
+                    },
+                    || context_cache::cached_mma_tf32x3(&device),
+                )?;
+                let out = self.with_driver_call(
+                    &[],
+                    |e| {
+                        BackendError::KernelLaunchFailed(format!(
+                            "3xTF32 gemm unavailable (fail-closed): {e}"
+                        ))
+                    },
+                    || gemm.run_tf32x3(a_slice, b_slice, m, n, k),
+                )?;
+                crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+                out
+            }
+            // `Fp32Strict` はこの `match` に到達する前に早期 return 済み
+            // （関数冒頭）。ここでの唯一の残り経路は理論上到達しないが、
+            // `#[non_exhaustive]` の `CudaGemmPrecision`（`precision.rs`
+            // 参照。将来モード追加に備える）は同一クレート内でも将来の
+            // 変更で列挙し忘れうるため、ワイルドカードで fail-closed に
+            // エラーを返す（未知モードへ黙示フォールバックしない）。
+            _ => {
+                return Err(BackendError::KernelLaunchFailed(format!(
+                    "gemm: unsupported CudaGemmPrecision mode {mode:?} (fail-closed; \
+                     no implicit fallback to FP32)"
+                )));
+            }
+        };
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict`] のオーバー
-    /// ライド。`gemm`（TF32 opt-in 分岐を持つ公開経路）を経由せず、
-    /// `gemm_fp32_strict_impl`（`crate::precision::tf32_gemm_enabled()`
-    /// を一切見ない FP32 厳密経路）へ直結する。`autodiff::grad` の VJP
+    /// ライド。`gemm`（精度モード分岐を持つ公開経路）を経由せず、
+    /// `gemm_fp32_strict_impl`（`crate::precision::gemm_precision()` を
+    /// 一切見ない FP32 厳密経路）へ直結する。`autodiff::grad` の VJP
     /// （`matmul_vjp`・`Op::LinearResident` の `d_weight`）が `dyn
-    /// BackendOps` 経由で呼ぶ入口で、TF32 opt-in フラグが有効な間も
-    /// backward を暗黙に TF32 化しない契約を保証する（`crate::precision`
-    /// モジュール冒頭コメントの「学習経路は本イシューのスコープ外」契約。
-    /// codex-review 指摘・イシュー #1211・PR #1223）。
+    /// BackendOps` 経由で呼ぶ入口で、`Tf32`／`Tf32x3` いずれの opt-in
+    /// モードが有効な間も backward を暗黙に精度変更しない契約を保証する
+    /// （`crate::precision` モジュール冒頭コメントの「学習経路は本
+    /// モジュールのスコープ外」契約。codex-review 指摘・イシュー #1211・
+    /// PR #1223。3 モード化はイシュー #1355）。
     fn gemm_fp32_strict(
         &self,
         a: &Tensor<f32>,
@@ -1259,12 +1334,12 @@ impl BackendOps for CudaBackendOps {
             .buffer()
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_full) = w_handle.slice.as_ref() else {
+        let Some(w_full) = w_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_rhs: w buffer has numel > 0 but no device allocation".into(),
             ));
         };
-        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
+        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
         let bias_handle = bias
             .map(|b| {
                 b.buffer()
@@ -1275,13 +1350,13 @@ impl BackendOps for CudaBackendOps {
             .transpose()?;
         let bias_view = match &bias_handle {
             Some((h, offset, numel)) => {
-                let Some(full) = h.slice.as_ref() else {
+                let Some(full) = h.storage.as_ref() else {
                     return Err(BackendError::DeviceAllocationFailed(
                         "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation"
                             .into(),
                     ));
                 };
-                Some(full.slice(*offset..*offset + *numel))
+                Some(full.view(*offset..*offset + *numel))
             }
             None => None,
         };
@@ -1311,21 +1386,23 @@ impl BackendOps for CudaBackendOps {
         let a_handle = a_dev_buf
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(a_slice) = a_handle.slice.as_ref() else {
+        let Some(a_storage) = a_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_rhs: a buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let a_arg = a_storage.as_arg();
 
         let mut c_dev_buf = mem.alloc_zeroed(&[m, n])?;
         let c_handle = c_dev_buf
             .downcast_handle_mut::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(c_slice) = c_handle.slice.as_mut() else {
+        let Some(c_storage) = c_handle.storage.as_mut() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_rhs: output buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let mut c_arg = c_storage.as_arg_mut();
 
         // キャッシュ構築（`cached_gemm`）自体の driver 呼び出し（NVRTC
         // コンパイル・モジュールロード）も同じ観測対象とする（Cursor
@@ -1341,11 +1418,11 @@ impl BackendOps for CudaBackendOps {
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || {
                 gemm.launch_tiled_bias_act_f32_resident(
-                    a_slice,
+                    &a_arg,
                     &w_view,
                     bias_view.as_ref(),
                     false,
-                    c_slice,
+                    &mut c_arg,
                     m as u32,
                     n as u32,
                     k as u32,
@@ -1475,7 +1552,7 @@ impl BackendOps for CudaBackendOps {
         let a_handle = a
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(a_full) = a_handle.slice.as_ref() else {
+        let Some(a_full) = a_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "linear_forward_device: a buffer has numel > 0 but no device allocation".into(),
             ));
@@ -1497,12 +1574,12 @@ impl BackendOps for CudaBackendOps {
             .buffer()
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_full) = w_handle.slice.as_ref() else {
+        let Some(w_full) = w_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "linear_forward_device: w buffer has numel > 0 but no device allocation".into(),
             ));
         };
-        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
+        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
         let bias_handle = bias
             .map(|b| {
                 b.buffer()
@@ -1513,14 +1590,14 @@ impl BackendOps for CudaBackendOps {
             .transpose()?;
         let bias_view = match &bias_handle {
             Some((h, offset, numel)) => {
-                let Some(full) = h.slice.as_ref() else {
+                let Some(full) = h.storage.as_ref() else {
                     return Err(BackendError::DeviceAllocationFailed(
                         "linear_forward_device: bias buffer has numel > 0 but no device \
                          allocation"
                             .into(),
                     ));
                 };
-                Some(full.slice(*offset..*offset + *numel))
+                Some(full.view(*offset..*offset + *numel))
             }
             None => None,
         };
@@ -1542,12 +1619,14 @@ impl BackendOps for CudaBackendOps {
         let c_handle = c_dev_buf
             .downcast_handle_mut::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(c_slice) = c_handle.slice.as_mut() else {
+        let Some(c_storage) = c_handle.storage.as_mut() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "linear_forward_device: output buffer has numel > 0 but no device allocation"
                     .into(),
             ));
         };
+        let mut c_arg = c_storage.as_arg_mut();
+        let a_arg = a_full.as_arg();
 
         // キャッシュ構築（`cached_gemm`）自体の driver 呼び出しも同じ
         // 観測対象とする（`gemm_resident_rhs` と同じ理由。PR #1064
@@ -1562,11 +1641,11 @@ impl BackendOps for CudaBackendOps {
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || {
                 gemm.launch_tiled_bias_act_f32_resident(
-                    a_full,
+                    &a_arg,
                     &w_view,
                     bias_view.as_ref(),
                     act_relu,
-                    c_slice,
+                    &mut c_arg,
                     m as u32,
                     n as u32,
                     k as u32,
@@ -1642,12 +1721,12 @@ impl BackendOps for CudaBackendOps {
             .buffer()
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_full) = w_handle.slice.as_ref() else {
+        let Some(w_full) = w_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_lhs: w buffer has numel > 0 but no device allocation".into(),
             ));
         };
-        let w_view = w_full.slice(w.offset()..w.offset() + w.numel());
+        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
 
         // `w` のみがデバイス常駐入力（`b` はこの呼び出し内で毎回
         // アップロードし直すため世代を跨がない。イシュー #1013 設計文書
@@ -1725,21 +1804,23 @@ impl BackendOps for CudaBackendOps {
         let b_handle = b_dev_buf
             .downcast_handle::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(b_slice) = b_handle.slice.as_ref() else {
+        let Some(b_storage) = b_handle.storage.as_ref() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_lhs: b buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let b_arg = b_storage.as_arg();
 
         let mut c_dev_buf = mem.alloc_zeroed(&[p, r])?;
         let c_handle = c_dev_buf
             .downcast_handle_mut::<CudaBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let Some(c_slice) = c_handle.slice.as_mut() else {
+        let Some(c_storage) = c_handle.storage.as_mut() else {
             return Err(BackendError::DeviceAllocationFailed(
                 "gemm_resident_lhs: output buffer has numel > 0 but no device allocation".into(),
             ));
         };
+        let mut c_arg = c_storage.as_arg_mut();
 
         self.with_driver_call(
             &[w.buffer().generation()],
@@ -1748,8 +1829,8 @@ impl BackendOps for CudaBackendOps {
                 gemm.launch_tiled_f32_resident(
                     &w_view,
                     w.offset(),
-                    b_slice,
-                    c_slice,
+                    &b_arg,
+                    &mut c_arg,
                     p as u32,
                     r as u32,
                     q as u32,
@@ -2148,21 +2229,28 @@ mod tests {
     /// フラグはプロセスグローバル（`crate::precision`）のため、他の
     /// テストとの競合を避けて直列化・原状復帰する RAII ガード
     /// （`precision.rs::tests::FlagGuard` と同型。イシュー #1042）。
+    ///
+    /// **enum 保存/復元（イシュー #1355）**: `original` を `bool` ではなく
+    /// [`crate::precision::CudaGemmPrecision`] で保存する。`bool` のまま
+    /// では `Tf32x3` 状態が `set_tf32_gemm_enabled` の互換ラッパー経由で
+    /// `Fp32Strict`／`Tf32` の 2 値へ lossy に丸められて復元され、テスト
+    /// 間で `Tf32x3` 状態が意図せず消える干渉を招く（実装計画 §4 ステップ
+    /// 1）。
     struct Tf32FlagGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
-        original: bool,
+        original: crate::precision::CudaGemmPrecision,
     }
 
     impl Tf32FlagGuard {
         fn acquire() -> Self {
             // `precision.rs::tests::FlagGuard` と単一ロックを共有する
             // （codex-review P2・Cursor Bugbot Medium 指摘。別々の
-            // `static LOCK` を持つと直列化が効かず `TF32_GEMM_ENABLED`
+            // `static LOCK` を持つと直列化が効かず `GEMM_PRECISION`
             // を巡るレースが起こりうる。PR #1091）。
             let lock = crate::precision::test_support::tf32_flag_test_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let original = crate::precision::tf32_gemm_enabled();
+            let original = crate::precision::gemm_precision();
             Self {
                 _lock: lock,
                 original,
@@ -2172,7 +2260,7 @@ mod tests {
 
     impl Drop for Tf32FlagGuard {
         fn drop(&mut self) {
-            crate::precision::set_tf32_gemm_enabled(self.original);
+            crate::precision::set_gemm_precision(self.original);
         }
     }
 
@@ -2272,6 +2360,116 @@ mod tests {
             }
             Err(other) => panic!("unexpected error variant for tf32 opt-in gemm: {other}"),
         }
+    }
+
+    /// 環境適応: `crate::precision::gemm_precision()` が
+    /// [`crate::precision::CudaGemmPrecision::Tf32x3`] のとき、`gemm` は
+    /// 単発 TF32 経路（[`crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT`]）
+    /// ではなく 3×TF32 経路
+    /// （[`crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT`]）へのみ到達する
+    /// ことを検証する（イシュー #1355）。CUDA 非搭載環境・カーネル使用
+    /// 不能環境では `BackendError::CudaUnavailable`／
+    /// `KernelLaunchFailed`（fail-closed 伝播）の型のみ確認する。
+    ///
+    /// 入力形状は 4×4（`n`・`k` とも 4 の倍数）を使う。3×TF32 経路は
+    /// `gemm_mma_tf32.rs::validate_mma_tf32_alignment` により `n % 4 == 0
+    /// && k % 4 == 0`（`cp.async` 16 バイト整列制約）を要求するため、
+    /// 2×2 のような非対応形状では対応 GPU 上でも必ず
+    /// `BackendError::KernelLaunchFailed`（形状拒否）で早期リターンし、
+    /// 起動カウンタ増加を伴う本来の経路検証（成功時分岐）に到達しない
+    /// （codex-review 指摘・PR #1400）。非対応形状の拒否自体は別途
+    /// `gemm_mma_tf32.rs::tests::validate_mma_tf32_alignment_rejects_*`
+    /// が検証する。
+    #[test]
+    fn gemm_routes_to_tf32x3_path_when_precision_is_tf32x3_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_gemm_precision(crate::precision::CudaGemmPrecision::Tf32x3);
+
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new((1..=16).map(|v| v as f32).collect(), &[4, 4]).expect("valid tensor");
+        let b = Tensor::new((1..=16).map(|v| v as f32).collect(), &[4, 4]).expect("valid tensor");
+
+        let before_tf32 = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        let before_tf32x3 = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        match cuda.gemm(&a, &b) {
+            Ok(_) => {
+                let after_tf32 = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+                let after_tf32x3 = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+                assert_eq!(
+                    before_tf32, after_tf32,
+                    "Tf32x3 opt-in 時に単発 TF32 経路のカウンタが増加した（誤配線の疑い）"
+                );
+                assert!(
+                    after_tf32x3 > before_tf32x3,
+                    "Tf32x3 opt-in 時に 3×TF32 経路の起動カウンタが増加していない: \
+                     before={before_tf32x3}, after={after_tf32x3}"
+                );
+            }
+            Err(BackendError::CudaUnavailable(msg)) => {
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(BackendError::KernelLaunchFailed(msg)) => {
+                // 3×TF32 カーネル使用不能環境（cc<8.0 等）の fail-closed
+                // 伝播。FP32 への黙示フォールバックはしない契約
+                // （`crate::precision` モジュール冒頭コメント参照）。
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(other) => panic!("unexpected error variant for tf32x3 opt-in gemm: {other}"),
+        }
+    }
+
+    /// `Fp32Strict`／`Tf32` のいずれでも `gemm` が 3×TF32 経路
+    /// （[`crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT`]）へ到達しない
+    /// ことを検証する（イシュー #1355。3 モード分岐の相互排他性）。
+    #[test]
+    fn gemm_does_not_route_to_tf32x3_path_for_other_precision_modes_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+        let cuda = CudaBackendOps::new(0);
+
+        for mode in [
+            crate::precision::CudaGemmPrecision::Fp32Strict,
+            crate::precision::CudaGemmPrecision::Tf32,
+        ] {
+            crate::precision::set_gemm_precision(mode);
+            let before = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+            let _ = cuda.gemm(&a, &b);
+            let after = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+            assert_eq!(
+                before, after,
+                "mode={mode:?} で 3×TF32 経路のカウンタが増加した（誤配線の疑い）"
+            );
+        }
+    }
+
+    /// `gemm_fp32_strict`（VJP が使う入口）は `Tf32x3` opt-in 時にも
+    /// 3×TF32 経路へ到達しない（`gemm_fp32_strict_ignores_tf32_optin_
+    /// flag_even_when_enabled_env_adaptive` の Tf32x3 版。学習経路の
+    /// FP32 契約は精度モードに関わらず一貫して守られる）。
+    #[test]
+    fn gemm_fp32_strict_ignores_tf32x3_precision_mode_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_gemm_precision(crate::precision::CudaGemmPrecision::Tf32x3);
+
+        let cuda = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+
+        let before = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        let _ = cuda.gemm_fp32_strict(&a, &b);
+        let after = crate::gemm::TF32X3_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        assert_eq!(
+            before, after,
+            "Tf32x3 opt-in 時でも gemm_fp32_strict は FP32 厳密経路のままであるべきだが、\
+             3×TF32 経路のカウンタが増加した: before={before}, after={after}"
+        );
     }
 
     /// `run_fused` の canonical RMSNorm プラン検出（`rmsnorm.rs::
