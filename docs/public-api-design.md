@@ -121,6 +121,14 @@ impl<T: Element> Tensor<T> {
     /// view の組を返す（backend-cpu の elementwise カーネル・autodiff
     /// の入口が消費する想定。#12・TASK-1.4b）。
     pub fn broadcast_with(&self, other: &Tensor<T>) -> Result<(Tensor<T>, Tensor<T>), ShapeError>;
+
+    /// ホスト可視の値を借用で読み出す（イシュー #1335。zero-copy view
+    /// API の一員）。contiguous な場合は [`Self::as_slice`] の借用を
+    /// そのまま `Cow::Borrowed` として返す（コピーなし）。非 contiguous
+    /// な場合のみ [`Self::contiguous`] で 1 回だけ実体化し
+    /// `Cow::Owned` として返す。`Var::host_view`（§3.1）・facade
+    /// `VarHostView` の内部実装が使う想定の読み出し専用 API。
+    pub fn host_slice(&self) -> std::borrow::Cow<'_, [T]>;
 }
 
 /// NumPy 互換のブロードキャスト後 shape を計算する（`broadcast.rs`）。
@@ -258,6 +266,22 @@ impl<'t> Var<'t> {
     /// 借用エラー・panic が起きない（`value()` の借用注意を参照）。
     pub fn to_tensor(&self) -> Tensor<f32>;
 
+    /// ホスト可視の値を読み出す（イシュー #1335）。`Tape` の
+    /// `RefCell` 借用はこのメソッド内で解放し、返す [`VarHostView`]
+    /// へ持ち越さない（P1 是正・codex-review 指摘。当初実装は
+    /// `Ref<'_, [f32]>` をそのまま `VarHostView` へ持ち越しており、
+    /// 保持中に同じ `Tape` へノード追加演算を呼ぶと `borrow_mut()`
+    /// が実行時 panic した）。materialize した `Tensor<f32>` を
+    /// [`Tensor::contiguous`]（contiguous な場合は `Arc` 複製のみで
+    /// 安価・非 contiguous な場合のみ 1 回実体化）へ通してから
+    /// [`VarHostView`] へ所有値として格納する。
+    ///
+    /// 返す `VarHostView` はライフタイムパラメータを持たず `Tape`／
+    /// `RefCell` の借用を一切保持しないため、生存中に同じ `Var`／
+    /// `Tape` へノード追加演算（`add`/`matmul` 等）を呼んでも panic
+    /// しない（[`Var::value`] の借用注意とは異なる）。
+    pub fn host_view(&self) -> VarHostView;
+
     // 演算セット（3.2 参照）。shape 不整合・不正なブロードキャスト・
     // 範囲外 dim はすべて失敗しうるため `Result<Var<'t>, AutodiffError>`
     // を返す（§1「すべての失敗しうる公開 API は Result<T, E> を返す」
@@ -288,6 +312,17 @@ impl<'t> Var<'t> {
     pub fn exp(&self) -> Var<'t>;
     pub fn tanh(&self) -> Var<'t>;
 }
+
+/// [`Var::host_view`] が返す読み出しビュー（イシュー #1335）。
+/// `Deref<Target = [f32]>` でスライスとして使う。内部には
+/// `host_view()` 構築時に [`Tensor::contiguous`] 済みの所有
+/// `Tensor<f32>` を保持する（`Tensor<f32>` 自体が `Arc<Storage<T>>`
+/// を共有する値型のため、追加コピーなしに `Tape`／`RefCell` の借用
+/// を持ち越さず切り離せる）。ライフタイムパラメータは持たない
+/// （当初設計は `Ref<'a, [f32]>` を保持する `VarHostView<'a>` を
+/// 想定していたが、`Tape` の借用保持による panic を是正した結果
+/// 現行実装へ変更した。`Var::host_view` ドキュメント参照）。
+pub struct VarHostView { /* private */ }
 
 impl Tape {
     /// `loss` から逆伝播し、テープ上の全 `Var` に対する勾配を計算する。
@@ -586,6 +621,14 @@ pub trait BackendOps {
 
 **TASK-12.1f（#203）実装時の突合結果**: `BackendOps` に `Activation` enum（`None`／`Relu`。`#[non_exhaustive]`）と `gemm_bias_act(&self, a, b, bias: Option<&Tensor<f32>>, act: Activation) -> Result<Tensor<f32>, BackendError>` を **デフォルトメソッド**として非破壊追加した（GEMM epilogue〈bias 加算・activation〉融合。CUTLASS 系実測で平均 1.38〜1.45 倍が動機）。デフォルト実装は `gemm` → （`bias` があれば）`add`（行方向ブロードキャスト）→ `act` に応じた activation メソッドの 3 段合成であり、CPU バックエンド（`backend-cpu::ops::CpuBackendOps`）のみカーネル内融合実装（`gemm_blis_bias_act_parallel`）でこれをオーバーライドする。CUDA／Metal は本イシュー時点で elementwise 未実装（`Unsupported`）のためデフォルト実装へフォールバックし、`bias`／`act` 指定時は `Unsupported` を透過的に返す（GPU カーネル内 epilogue 融合は本イシューのスコープ外。`docs/perf/cpu-gemm-epilogue-fusion.md`「スコープ外」節参照）。実測記録: `docs/perf/cpu-gemm-epilogue-fusion.md`。
 
+**イシュー #1335 実装時の突合結果（`MemoryOps::with_host_view`）**: `MemoryOps`（4.2 冒頭「TASK-1.9b 実装時の突合結果」参照）へ `with_host_view(&self, buffer: &DeviceBuffer<f32>, f: &mut dyn FnMut(&[f32])) -> Result<(), BackendError>` をデフォルト実装付きで非破壊追加した（`BackendOps::memory_ops(&self) -> Option<&dyn MemoryOps>` が `&dyn MemoryOps` を返す object-safe 契約〈4.2 冒頭〉を保つため、ジェネリック戻り値 `R` を持たずクロージャへ結果を渡す形にした）。
+
+- **同期契約**: [`Self::download`] と同一（復帰時点でデバイス側の書き込みが完了していること）。既定実装は `download` を経由するフェイルセーフ（コピーを 1 回伴う）。
+- **CPU 実装**（`backend-cpu::CpuMemory`）: 既定実装を上書きし、`CpuBufferHandle::data`（既存ホストバッファ）をそのまま借用する（コピーなし）。
+- **Metal 実装**（`backend-metal::MetalMemory`）: 既定実装を上書きし、`self.context.synchronize()`（`download_inner` と同一の同期点。イシュー #1017）の直後に `MetalBuffer::as_host_slice`（`StorageModeShared` バッファの `contents()` を直接借用。旧 `read_to_vec` の `unsafe` ブロックをそのまま移設したのみで新規 `unsafe` は追加していない）を呼び、`read_to_vec`（`Vec` 確保 + memcpy）を経由しない。
+- **CUDA**: 本イシューでは上書きしない（既定実装のまま）。pinned host バッファ経由の借用化はイシュー #1336 のスコープ。
+- **facade 到達経路**: `Var::host_view`（3.1）／`Tensor::host_slice`（2.2）が内部実装として使う想定の backend レイヤー API。`memory_ops()` が `None` を返す実装（`Tape`／`Var::matmul` 等が直接消費する経路ではない）からは到達しない——`Var::matmul` の出力（テープ値）は演算の内部で `download` 済みのホスト常駐 `Tensor` として保持されるため（6 節「新規論点」参照）。
+
 ### 4.3 API 契約として明記する数値仕様
 
 - **バックエンド間数値一致**: 全ペア共通で「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の複合判定（`docs/spec/04-requirements.md` REQ-2、PoC-v2-5 の事前固定判定基準と同一）。
@@ -649,6 +692,7 @@ pub enum BackendError {
 7. **`Tape` のライフサイクル（学習ループ）**（3.1.1・**確定。イシュー #1048**）: ステップごとに新しい `Tape` を生成し破棄する運用（運用 A）に加え、`Tape::reset()`（`&mut self`）で葉プレフィックスまで切り詰めて同一 `Tape` を再利用する運用（運用 B）を追加した。`Gradients::get` は `&Var`（＝テープ借用 + `TapeId` 一致検査）をキーにする現行設計を維持しつつ、`Tape::epoch()`（reset のたびに +1 する世代番号）による追加検査で reset 後の stale な `Gradients`／`DeviceParamStore::pending` を fail-closed に拒否する（`VarId`／`(TapeId, VarId)` へのキー変更は行わなかった）。
 8. **`BackendOps` の f16 対応**（4.2）: `DeviceBuffer<T: Element>` はジェネリックだが `BackendOps` トレイト v1 は `f32` 固定。GPU 推論で使う `half::f16` 経路の入口設計（トレイトのジェネリック化か並行トレイト追加か）は TASK-1.9 実装時に決定する。
 9. **デバイスハンドル再利用の公開 API 化（イシュー #931）**: 再構築コストが発生していたのは `tape()`／`tape_for(Device)` 呼び出しごとではなく、`CudaBackendOps::gemm` 等の**演算呼び出しごと**に `CudaDevice::new`／`CudaGemm::new` が都度実行される構成だった（`Tape` を使い回しても解消しない。`crates/backend-cuda/src/ops.rs` 冒頭コメント参照）ことへの対応方針。facade に新規公開型（`DeviceHandle` 等）を追加する案は不採用と判断し、バックエンド内部（`backend-cuda::context_cache`・`backend-metal::context_cache`）のプロセス内常駐キャッシュのみで対応する構成を採用した（CUDA は #929/#946、Metal も #930/#948 で同型の実装が完了済み）。設計判断・採否根拠は `docs/facade-device-handle-design.md` を正とする。
+10. **`Var::matmul` 出力のデバイス常駐化（Metal memcpy-free の facade 到達。イシュー #1335）**: `Var::host_view`（3.1）・`MemoryOps::with_host_view`（4.2）は Metal の `contents()` 直接借用（`read_to_vec` の memcpy 廃止）を実現したが、これは `DeviceBuffer<f32>` レベルに限られる。`Var::matmul` の出力（テープの `TapeNode.value: OnceCell<Tensor<f32>>`）は `gemm` 呼び出しの**内側**で `download`（`synchronize` + memcpy）済みのホスト常駐 `Tensor` として保存される構造（`crates/autodiff/src/tape.rs`・`crates/backend-metal/src/ops.rs`）であり、`Var::host_view` 自身は既にホスト常駐の値をコピーなしで返すのみで、`gemm` 内部の memcpy 自体は回避できない。`Var::matmul` 出力をデバイス常駐のまま保持する（`gemm` 内の download を遅延させる）ことは、`Tape: Send`（`crates/autodiff/tests/fusion_backend_integration.rs:390` の静的アサーション。公開契約）と Metal `MTLBuffer: !Send`（objc2-metal 0.3.2。`crates/backend-metal/src/pool.rs:108-198` の実測記録）の衝突により、(i) `MetalBuffer` への新規 `unsafe impl Send`、または (ii) `newBufferWithBytesNoCopy` によるページ整列ホストメモリ上の出力バッファ確保（objc2 の新規 `unsafe` 呼び出し）のいずれかを要する。両案とも新規 `unsafe` 導入・ユーザー承認必須（`.claude/rules/security.md`）に抵触するため本イシューでは選択せず、実測根拠（Metal N=4096 の `readback` 0.94 ms 対 `host_copy` 3.79 ms。`docs/perf/metal-gemm-reuse-phase-breakdown.md` §4）とともにユーザー判断へ引き継ぐ（Layer B〈`Var::host_view`〉が二重コピー廃止の主要効果・Layer A〈`with_host_view`〉が残余 1 ms 未満という位置づけ）。
 
 ## スコープ外（out-of-scope-tracking 対象）
 

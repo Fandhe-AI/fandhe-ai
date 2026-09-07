@@ -151,6 +151,15 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 対象範囲はこの 3 種（配列生成関数・Sequential ビルダー・基本レイヤー／活性化の
 薄いラッパー）に限定する。
 
+- **`Var::host_view`／`Tensor::host_slice`（借用ビュー読み出し API）**:
+  5 節手続き 2（ユーザー承認済みイシュー #1335 起票）により対象範囲へ
+  追加。compat 層固有のラッパーではなく `fandhe_ai_autodiff`／
+  `fandhe_ai_tensor_core` の値型に直接生えた読み出し専用 API（facade
+  では `VarHostView` の 1 文 1 行 `pub use` として再エクスポート）だが、
+  0 節が定める「`facade` が唯一のサポートされる公開 API 面」の一部と
+  して本文書に記録する。詳細（寿命契約・同期契約）は
+  `docs/public-api-design.md` §2.2／§3.1／§4.2 を正とする。
+
 - **`Sequential` の学習パラメータ取得 API**（#294）:
   `Sequential::bind(&tape)` が返す `SequentialVars`（`crates/facade/src/
   compat/sequential.rs`。TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から移設。

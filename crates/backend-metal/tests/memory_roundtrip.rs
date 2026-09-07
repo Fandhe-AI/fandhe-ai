@@ -188,3 +188,97 @@ fn peak_allocated_bytes_matches_known_allocation_size() {
 
     drop(b);
 }
+
+/// `MemoryOps::with_host_view`（イシュー #1335）が `download().as_slice()`
+/// と bit 同一であることを、単純な `upload` バッファで確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn with_host_view_matches_download_bit_exact_on_uploaded_buffer() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let mem = MetalMemory::new(ctx);
+
+    let data: Vec<f32> = (0..1024).map(|i| (i as f32) * 0.25 - 50.0).collect();
+    let tensor = Tensor::<f32>::new(data.clone(), &[32, 32]).unwrap();
+    let buf = mem.upload(&tensor).expect("upload は成功するはず");
+
+    let via_download = mem.download(&buf).expect("download は成功するはず");
+    let via_download_bits: Vec<u32> = via_download
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+
+    let mut via_view_bits = Vec::new();
+    mem.with_host_view(&buf, &mut |slice| {
+        via_view_bits = slice.iter().map(|v| v.to_bits()).collect();
+    })
+    .expect("with_host_view は成功するはず");
+
+    assert_eq!(
+        via_view_bits, via_download_bits,
+        "with_host_view は download().as_slice() と bit 同一のはず"
+    );
+}
+
+/// **GPU が書いたバッファ**（`MetalBackendOps::linear_forward_device`。
+/// イシュー #1216）に対して `with_host_view` と `download().as_slice()`
+/// が bit 同一であることを確認する（`synchronize` 契約の実効性検証。
+/// `docs/perf/metal-gemm-reuse-phase-breakdown.md` §4 が指摘する
+/// `host_copy` コスト削減経路の正当性を、単純な `upload` バッファでは
+/// なく GPU dispatch 直後のバッファで裏付ける。イシュー #1335 実装計画
+/// §5.2）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn with_host_view_matches_download_on_gpu_written_buffer() {
+    use fandhe_ai_backend_metal::MetalBackendOps;
+    use fandhe_ai_tensor_core::{Activation, BackendOps};
+
+    let metal_ops = MetalBackendOps::new();
+    let metal_mem = metal_ops
+        .memory_ops()
+        .expect("MetalBackendOps must implement MemoryOps");
+
+    let (m, k, n) = (37, 65, 33);
+    let a = Tensor::<f32>::new(
+        (0..(m * k)).map(|i| (i as f32) * 0.01 - 3.0).collect(),
+        &[m, k],
+    )
+    .unwrap();
+    let w = Tensor::<f32>::new(
+        (0..(k * n)).map(|i| (i as f32) * 0.02 - 1.0).collect(),
+        &[k, n],
+    )
+    .unwrap();
+
+    let a_dev = metal_mem.upload(&a).unwrap();
+    let w_dev = metal_mem.upload(&w).unwrap();
+    let w_shape = [k, n];
+    let w_view = fandhe_ai_tensor_core::buffer::DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+
+    let out_dev = metal_ops
+        .linear_forward_device(&a_dev, w_view, None, Activation::Relu)
+        .expect("linear_forward_device は成功するはず（GPU 書き込み済みバッファの生成）");
+
+    let via_download = metal_mem
+        .download(&out_dev)
+        .expect("download は成功するはず");
+    let via_download_bits: Vec<u32> = via_download
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+
+    let mut via_view_bits = Vec::new();
+    metal_mem
+        .with_host_view(&out_dev, &mut |slice| {
+            via_view_bits = slice.iter().map(|v| v.to_bits()).collect();
+        })
+        .expect("with_host_view は成功するはず");
+
+    assert_eq!(
+        via_view_bits, via_download_bits,
+        "GPU 書き込み済みバッファでも with_host_view は download().as_slice() と bit 同一のはず"
+    );
+}
