@@ -395,9 +395,10 @@ pub struct MetalGemm {
     /// base（`false`）/head（`true`）の 2 `MetalGemm` を同一プロセス内に
     /// 構築して bit 一致を自己検証できるようにする）。`MetalGemm::new` は
     /// 本番既定 `tile::SOURCE_SPECIALIZATION_ENABLED`（`false`）を渡すため
-    /// 既定挙動は不変。性能実測・本番既定切替は行わない（後続イシュー
-    /// #1289／#1302 のスコープ。`docs/perf/metal-gemm-n4096-kernel-gap.md`
-    /// §8）。`true` の場合、[`Self::pipeline_for_tile`] は
+    /// 既定挙動は不変。性能実測・本番既定切替は行わない（イシュー
+    /// #1289 で REJECT・イシュー #1304 で `tile::select` 組み込み対象なしと
+    /// 確定。`docs/perf/metal-gemm-n4096-kernel-gap.md` §9.4・§18）。`true`
+    /// の場合、[`Self::pipeline_for_tile`] は
     /// `self.tiled_cache`（function constant 経路のキャッシュ）を一切
     /// 更新せず [`Self::tiled_spec_cache`] のみを使う（両経路の取り違えを
     /// 構造的に防ぐため、`tiled_f16_cache` と同じく独立フィールドとする）。
@@ -443,8 +444,9 @@ pub struct MetalGemm {
     /// 不変。[`Self::pipeline_for_tile_f16`] には既定値（`cfg.pad()`／`0`）
     /// のみを渡す no-op 契約（呼び出し側コメント参照）。**本 sub-issue
     /// （#1298）は機構の実装と bit 一致の自己検証のみを行い、性能実測・
-    /// `tile::select` への組み込み判断は行わない**（後続イシュー #1300／
-    /// #1302／#1304 のスコープ）。
+    /// `tile::select` への組み込み判断は行わない**（イシュー #1300 で
+    /// REJECT・イシュー #1304 で組み込み対象なしと確定。`docs/perf/
+    /// metal-gemm-n4096-kernel-gap.md` §11.4・§18）。
     coop_load: tile::CoopLoadConfig,
     /// タイルクラス分割（イシュー #1327・E6 試作）をこのインスタンスの
     /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]・
@@ -592,7 +594,8 @@ impl MetalGemm {
     /// 既定のまま据え置く。本番経路（[`Self::new`]）は常に
     /// `tile::COOP_LOAD_CONFIG`（`RowLinear`・`Four`）を渡すため、本関数の
     /// 追加自体は既定挙動を変えない。性能実測・`tile::select` への組み込み
-    /// 判断は行わない（後続イシュー #1300／#1302／#1304 のスコープ）。
+    /// 判断はイシュー #1300 で REJECT・イシュー #1304 で組み込み対象なしと
+    /// 確定済み。
     ///
     /// `pub` にする理由は [`Self::new_with_frag_load`] doc comment と同じ
     /// （`tile::CoopLoadConfig`/`CoopLoadLayout`/`TgpPad` を `pub` にして
@@ -676,8 +679,8 @@ impl MetalGemm {
     /// 細粒度同期・条件付き loop unroll）は本番既定のまま据え置く。本番
     /// 経路（[`Self::new`]）は常に `tile::SOURCE_SPECIALIZATION_ENABLED`
     /// （`false`）を渡すため、本関数の追加自体は既定挙動を変えない。
-    /// 性能実測・本番既定の `true` への切替判断は行わない（後続イシュー
-    /// #1289／#1302 のスコープ）。
+    /// 性能実測・本番既定の `true` への切替判断はイシュー #1289 で
+    /// REJECT・イシュー #1304 で組み込み対象なしと確定済み。
     pub fn new_with_source_specialization(
         ctx: &MetalContext,
         source_specialized: bool,

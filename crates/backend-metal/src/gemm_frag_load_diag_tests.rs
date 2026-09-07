@@ -67,8 +67,10 @@
 //! 一切含まない（イシュー #1293 が既に追加済みの `#[cfg(test)] pub`／
 //! `pub(crate)` 面のみを利用する）。`tile::select` の候補表・本番既定
 //! （`MetalGemm::new` の `tile::FRAG_LOAD_CONFIG`）への組み込みは本イシュー
-//! のスコープ外（兄弟イシュー #1302 が担う。`docs/perf/metal-gemm-
-//! frag-load-candidates.md` §5・本ファイル冒頭コメント参照）。
+//! のスコープ外（イシュー #1300 で REJECT・イシュー #1304 で組み込み
+//! 対象なしと確定済み。`docs/perf/metal-gemm-frag-load-candidates.md`
+//! §5・`docs/perf/metal-gemm-n4096-kernel-gap.md` §10.4・§18・本ファイル
+//! 冒頭コメント参照）。
 
 use crate::context::MetalContext;
 use crate::gemm::MetalGemm;
