@@ -814,6 +814,72 @@ function constant・候補追加等）が本番既定経路の性能を後退さ
   既定は切り替えない（安全側）。判断の記録先は
   `docs/perf/metal-gemm-n4096-kernel-gap.md` §19
 
+### `compare_gemm_ab.py --device cpu`（既定スレッド数限定 on/off 比較・イシュー #1364）
+
+`compare_gemm_ab.py` は既定で `--device metal`（上記 #1306 用途・8 セル）を
+使うが、`--device cpu` を指定すると N=512/1024/2048 の 6 セル
+（`compare_gemm_gate.py --device cpu` と同じ N 集合。CPU GEMM ゲート計測は
+N=4096 を対象にしないため）に切り替わる。判定ロジック（threshold・
+checksum 複合判定・parity fail-closed）は device に関わらず不変。
+
+`crates/backend-cpu/src/thread_limit.rs`（大コア数限定。イシュー #1363）の
+既定有効化 on/off を（`GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対
+パス>` の path patch と `RAYON_NUM_THREADS` の有無を組み合わせて）比較
+する用途にも本ツールを流用する。#1364 の実測当時は
+`BIG_CORE_LIMIT_ENABLED = true`（限定有効）のまま HEAD 直下の同一バイナリ
+で `RAYON_NUM_THREADS` の有無のみを切り替えて計測できたが、REJECT
+（不採用）確定を受けて `BIG_CORE_LIMIT_ENABLED` は `false` へ差し戻し
+済み（下記参照）のため、再計測には手順の変更が必要になる。
+
+**現行 HEAD の `crates/facade`（本 checkout）は限定が無効
+（`BIG_CORE_LIMIT_ENABLED = false`。イシュー #1405 実装後、DGX での重大な
+後退により無効化された経緯。`crates/backend-cpu/src/thread_limit.rs`）
+のため、この checkout の `crates/facade` を `GEMM_GATE_PATCH_FACADE_PATH`
+に指定しても on/off で挙動が変わらない**。限定が有効な状態を再現するに
+は、限定実装時点のコミット `90ea1cb`（`feat(backend-cpu): 大コア数判定
+…既定スレッド数の限定を実装し…`。#1405。`BIG_CORE_LIMIT_ENABLED = true`）
+を別ディレクトリへ隔離 checkout し、その `crates/facade` を指す:
+
+```bash
+# 限定が有効な隔離 checkout を用意する（初回のみ）
+git worktree add /tmp/fandhe-thread-limit-on 90ea1cb
+FACADE_ON="/tmp/fandhe-thread-limit-on/crates/facade"
+FACADE_OFF="$(cd ../../../crates/facade && pwd)"  # 現行 HEAD（限定無効）
+
+# 限定あり（90ea1cb の facade。RAYON_NUM_THREADS 未設定を明示）
+env -u RAYON_NUM_THREADS GEMM_GATE_CPU_NODE_TAG=<node> GEMM_GATE_PATCH_FACADE_PATH="$FACADE_ON" \
+  bash run_gemm_gate_cpu.sh head-limit-on
+# 限定なし（現行 HEAD の facade。全論理コア数を明示し実質同一挙動で対照する）
+RAYON_NUM_THREADS=<全論理コア数> GEMM_GATE_CPU_NODE_TAG=<node> GEMM_GATE_PATCH_FACADE_PATH="$FACADE_OFF" \
+  bash run_gemm_gate_cpu.sh head-limit-off
+
+# run_gemm_gate_cpu.sh の出力には fandhe-ai（reuse・fresh 参考行）と
+# candle（fresh）の行が混在する。compare_gemm_ab.py は 'framework' が
+# 'fandhe-ai' 以外の行を検出すると警告を出し判定不能（終了コード 2）を
+# 返すため、比較にかける前に fandhe-ai の行のみを別ファイルへ抽出する
+# （mode=reuse のみに絞る必要はない — mode は _cell_key に含まれ、fresh
+# 参考行は期待セル集合外として無視されるだけで害はない）:
+for label in head-limit-off head-limit-on; do
+  jq -c 'select(.framework == "fandhe-ai")' \
+    "results/raw/results-<node>-gemm-gate-${label}.jsonl" \
+    > "results/raw/results-<node>-gemm-gate-${label}.fandhe-only.jsonl"
+done
+
+python3 compare_gemm_ab.py --device cpu \
+  results/raw/results-<node>-gemm-gate-head-limit-off.fandhe-only.jsonl \
+  results/raw/results-<node>-gemm-gate-head-limit-on.fandhe-only.jsonl
+```
+
+before=限定なし・after=限定あり（`ratio = after/before`）として渡す。
+上記のとおり on/off は異なる facade checkout（HEAD／`90ea1cb`）を指すため
+`manifest-*.json` の `bench_fandhe_sha256` は on/off 間で一致しない
+（`BIG_CORE_LIMIT_ENABLED` の値以外はソース同一のはずだが、バイナリの
+バイト同一性は保証しない）。各 invocation 内での再現性は
+`manifest-*.json` の `fandhe_ai_source` が指定した `GEMM_GATE_PATCH_
+FACADE_PATH` と一致していることで確認する（結果記録・採否は
+`docs/perf/cpu-gemm-default-thread-limit.md` §6・
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13 を参照）。
+
 ## A/B 計測（都度同期廃止・イシュー #1083）
 
 #1011（CUDA 都度 `stream.synchronize()` 廃止）の受入条件「MLP 学習 1 step が

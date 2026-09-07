@@ -71,12 +71,26 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-/// 大コア数限定を有効化する単一ゲート。#1364（両実機 framework-compare
-/// 前後比較）が性能後退と判断した場合、ここを `false` へ 1 行差し戻す
-/// だけで [`effective_num_threads`] は常に `current` をそのまま返す
-/// （本番結線は事前承認済み。実測根拠は PR 本文・
-/// `docs/perf/cpu-gemm-default-thread-limit.md` に記録する）。
-pub(crate) const BIG_CORE_LIMIT_ENABLED: bool = true;
+/// 大コア数限定を有効化する単一ゲート。
+///
+/// **#1364（両実機 framework-compare 前後比較）の実測により `false` へ
+/// 差し戻し済み**（2026-09-07。同一バイナリ・`RAYON_NUM_THREADS` の
+/// on/off を `run_gemm_gate_cpu.sh`＋`compare_gemm_ab.py --device cpu`
+/// で 5 回計測中央値比較。DGX Spark GB10（Grace CPU）の sysfs
+/// `cpu_capacity` 分布は `lscpu` が報告する「Cortex-X925 ×10（big）＋
+/// Cortex-A725 ×10（little）」の 2 群構成と一致せず、
+/// [`big_cores_from_capacities`] が最大値と一致するコアをちょうど 1 個
+/// （非一様な 5 段階の capacity 値のうち最大 1024 を持つコアが 1 個の
+/// み）検出してしまい、`effective_num_threads` が実質シングルスレッド
+/// （`effective=1`）へ縮退する誤判定を引き起こした。結果、DGX では
+/// reuse 全セルで 1.19〜4.34 倍の重大な性能後退（N=2048 reuse:
+/// 34.7 ms→152.0 ms）を確認した。Apple M4 Max では逆に 0.80〜0.91 倍の
+/// 改善が確認できたが、決定規則（両実機で reuse 全セル非後退が条件）に
+/// より不採用と確定した。実測記録は
+/// `docs/perf/cpu-gemm-default-thread-limit.md` §6・
+/// `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13 を参照
+/// （`docs/perf/logs/cpu-gemm-thread-limit-1364/`）。
+pub(crate) const BIG_CORE_LIMIT_ENABLED: bool = false;
 
 /// 診断・#1364 の env_info 記録用に判定結果を可視化する構造体
 /// （[`thread_limit_report`] の戻り値）。`facade` 等の公開 API 面へは

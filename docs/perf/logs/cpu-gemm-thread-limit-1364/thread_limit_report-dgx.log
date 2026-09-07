@@ -1,0 +1,33 @@
+running 1 test
+thread_limit_report=ThreadLimitReport { current: 20, detected_big_cores: Some(1), env_override: false, effective: 1 }
+test thread_limit_report_effective_within_current_bounds ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+--- cpu_capacity 実測（lscpu の X925x10+A725x10 と不一致の非一様分布） ---
+cpu0=718
+cpu1=718
+cpu2=718
+cpu3=718
+cpu4=718
+cpu5=997
+cpu6=997
+cpu7=997
+cpu8=997
+cpu9=997
+cpu10=731
+cpu11=731
+cpu12=731
+cpu13=731
+cpu14=731
+cpu15=1017
+cpu16=1017
+cpu17=1017
+cpu18=1017
+cpu19=1024
+
+--- lscpu (抜粋) ---
+アーキテクチャ:                      aarch64
+CPU:                                 20
+モデル名:                            Cortex-X925 (ソケットあたりのコア数: 10)
+モデル名:                            Cortex-A725 (ソケットあたりのコア数: 10)

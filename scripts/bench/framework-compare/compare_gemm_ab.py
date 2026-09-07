@@ -7,6 +7,15 @@ after（参考系列 HEAD。`crates/facade` への path patch）2 バイナリ A
 を読み、`(size, mode)` セルごとに before/after の `median_s` を集約して
 Markdown 表を出力する。
 
+`--device`（既定 `metal`。後方互換）で `metal`／`cpu` を選択できる
+（イシュー #1364）。`cpu` はセル集合が `{512,1024,2048}×{fresh,reuse}`
+（`compare_gemm_gate.py --device cpu` と同じ N 集合。N=4096 は CPU GEMM
+ゲート計測の対象外）。同一バイナリ（`fandhe-ai =0.7.0` の facade path
+patch を固定し、環境変数 `RAYON_NUM_THREADS` の有無のみを切替える）の
+on/off 比較にも本ツールを流用する（#1364「既定スレッド数限定」A/B）。
+判定ロジック（threshold・checksum 複合判定・parity fail-closed）は
+device に関わらず不変。
+
 `compare_ab.py` は `framework_version` が before/after で同一だと fail-closed
 拒否する（同一バージョンの A/B は意味を持たないという前提）ため、before/after
 とも `fandhe-ai =0.7.0` を名乗る本用途（before=registry・after=HEAD path
@@ -49,6 +58,16 @@ checksum_contract = _import_from_path("checksum_contract", "checksum_contract.py
 _VALID_MODES = frozenset({"fresh", "reuse"})
 _VALID_SIZES = frozenset({512, 1024, 2048, 4096})
 
+# device 別のセル集合（イシュー #1364）。`cpu` は `compare_gemm_gate.py
+# --device cpu` と同じ N=512/1024/2048 のみ（N=4096 は CPU GEMM ゲート
+# 計測の対象外。`run_gemm_gate_cpu.sh` が発行する N 集合と揃える）。
+_VALID_SIZES_BY_DEVICE = {
+    "metal": frozenset({512, 1024, 2048, 4096}),
+    "cpu": frozenset({512, 1024, 2048}),
+}
+_VALID_DEVICES = frozenset(_VALID_SIZES_BY_DEVICE)
+DEFAULT_DEVICE = "metal"
+
 # 既定の非後退閾値（median 比 ratio = after/before が 1.05 以下なら非後退。
 # guardrail「劣化中央値 5% 以内」の慣例値。閾値変更は本ツールの CLI 引数
 # としてのみ与え、コード定数としては固定しない。判定に使う値は既定のまま
@@ -56,28 +75,31 @@ _VALID_SIZES = frozenset({512, 1024, 2048, 4096})
 DEFAULT_THRESHOLD = 1.05
 
 
-def _valid_cell_identity(obj):
+def _valid_cell_identity(obj, device):
     """`_cell_key` がグループ化に使う `task`/`device`/`size`/`mode` の型・
     値域を検証する（`compare_managed_ab.py::_valid_cell_identity` と同方針。
     未検証のまま集約すると、これらのフィールドを欠いた行が単一の偽セルへ
     迂回して集約され、比較対象が不明なまま "ok" 判定になりうる）。
+
+    `device`（`metal`／`cpu`）でセル集合の N を切り替える（イシュー #1364）。
     """
     task = obj.get("task")
     if not isinstance(task, str) or task != "gemm":
         return False
-    device = obj.get("device")
-    if not isinstance(device, str) or device != "metal":
+    row_device = obj.get("device")
+    if not isinstance(row_device, str) or row_device != device:
         return False
     mode = obj.get("mode", "fresh")
     if not isinstance(mode, str) or mode not in _VALID_MODES:
         return False
     size = obj.get("size")
-    if isinstance(size, bool) or not isinstance(size, int) or size not in _VALID_SIZES:
+    valid_sizes = _VALID_SIZES_BY_DEVICE[device]
+    if isinstance(size, bool) or not isinstance(size, int) or size not in valid_sizes:
         return False
     return True
 
 
-def load_rows(path):
+def load_rows(path, device=DEFAULT_DEVICE):
     """JSONL を読み、不正な行は理由付きで報告しスキップする（A08）。"""
     rows = []
     warnings = []
@@ -124,7 +146,7 @@ def load_rows(path):
                     f"{path}:{lineno}: 'managed:true' の行は本 A/B の対象外 — skipped"
                 )
                 continue
-            if not _valid_cell_identity(obj):
+            if not _valid_cell_identity(obj, device):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"
                     f"'mode' フィールド（行: {obj!r}） — skipped"
@@ -311,28 +333,31 @@ def _fmt_ms(s):
     return f"{s * 1e6:.1f} us"
 
 
-def _all_expected_cells():
-    """契約上の全 8 セル（`_VALID_SIZES` × `_VALID_MODES`）を昇順で返す。
+def _all_expected_cells(device=DEFAULT_DEVICE):
+    """契約上の全セル（device 別 `_VALID_SIZES_BY_DEVICE[device]` ×
+    `_VALID_MODES`。metal は 8 セル・cpu は 6 セル）を昇順で返す。
 
     `render_markdown`／`main` の集計対象を `cells` に実在するキーだけに
     限定すると、before/after 双方から同一セルが欠落した場合に何も表示
     されず・`any_bad` 判定にも寄与しないまま終了コード 0 になりうる
     （codex-review P2・Cursor Bugbot Medium 指摘。イシュー #1306 の
-    「全 8 セル非後退」契約に反する）。欠測セルを判定不能として明示する
+    「全セル非後退」契約に反する）。欠測セルを判定不能として明示する
     ため、実データに依らずこの固定集合を走査の基準にする。
     """
     return sorted(
-        (size, mode) for size in _VALID_SIZES for mode in _VALID_MODES
+        (size, mode)
+        for size in _VALID_SIZES_BY_DEVICE[device]
+        for mode in _VALID_MODES
     )
 
 
-def render_markdown(cells, threshold):
+def render_markdown(cells, threshold, device=DEFAULT_DEVICE):
     lines = []
     lines.append(
         "| size/mode | before median | after median | after/before | checksum | 判定 |"
     )
     lines.append("|---|---|---|---|---|---|")
-    for key in _all_expected_cells():
+    for key in _all_expected_cells(device):
         rows = cells.get(key, [])
         before_rows = [r for r in rows if not r.get("_is_after")]
         after_rows = [r for r in rows if r.get("_is_after")]
@@ -371,8 +396,17 @@ def main(argv):
     parser = argparse.ArgumentParser(
         description="Metal GEMM before/after (0.7.0 vs HEAD) A/B comparison (issue #1306)"
     )
-    parser.add_argument("before", help="before (registry fandhe-ai =0.7.0) JSONL path")
-    parser.add_argument("after", help="after (HEAD path-patched) JSONL path")
+    parser.add_argument("before", help="before JSONL path")
+    parser.add_argument("after", help="after JSONL path")
+    parser.add_argument(
+        "--device",
+        choices=sorted(_VALID_DEVICES),
+        default=DEFAULT_DEVICE,
+        help=(
+            "device 別セル集合を選択する（既定 'metal'。後方互換。"
+            "'cpu' は N=512/1024/2048 のみ。イシュー #1364）"
+        ),
+    )
     parser.add_argument(
         "--threshold",
         type=float,
@@ -381,8 +415,8 @@ def main(argv):
     )
     args = parser.parse_args(argv[1:])
 
-    before_rows, before_warnings = load_rows(args.before)
-    after_rows, after_warnings = load_rows(args.after)
+    before_rows, before_warnings = load_rows(args.before, args.device)
+    after_rows, after_warnings = load_rows(args.after, args.device)
     warnings = before_warnings + after_warnings
     for w in warnings:
         print(f"WARNING: {w}", file=sys.stderr)
@@ -407,10 +441,10 @@ def main(argv):
         print("判定不能: 入力ファイルに行がない", file=sys.stderr)
         return 2
 
-    print(render_markdown(cells, args.threshold))
+    print(render_markdown(cells, args.threshold, args.device))
 
     any_bad = False
-    for key in _all_expected_cells():
+    for key in _all_expected_cells(args.device):
         rows = cells.get(key, [])
         if not rows:
             any_bad = True
