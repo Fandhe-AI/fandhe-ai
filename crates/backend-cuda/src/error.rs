@@ -333,13 +333,18 @@ pub enum CudaError {
     ManagedMemoryUnsupported { detail: String },
 
     /// 3×TF32 split-single 経路（`gemm_mma_tf32x3.rs::CudaMmaTf32x3Gemm::
-    /// run_tf32x3`。イシュー #1355）へ渡された A・B のいずれかに非有限値
-    /// （`NaN`／`±inf`）が含まれていたことを表す（codex-review 指摘。
-    /// PR #1400）。
+    /// run_tf32x3`。イシュー #1355）へ渡された A・B のいずれかに
+    /// (1) 非有限値（`NaN`／`±inf`）が含まれていた、または
+    /// (2) 有限値だが TF32（10 bit 仮数）丸めで `±inf` へオーバーフロー
+    /// する値が含まれていたことを表す（codex-review 指摘。PR #1400。
+    /// (2) は PR #1400 スレッド PRRT_kwDOTuUCJc6f01d6 で追加）。
     ///
     /// 本経路は `MMA_TF32X3_SPLIT`（`kernels_mma_tf32x3.rs`）でオペランド
     /// を `hi = round_tf32(v)`／`lo = round_tf32(v - hi)` の hi/lo 2 語へ
-    /// レジスタ段で分割する。`v` が非有限（`±inf`／`NaN`）の場合、
+    /// レジスタ段で分割する。(1) `v` が非有限（`±inf`／`NaN`）の場合、
+    /// または (2) `v` は有限でも仮数の丸め上げが指数へ繰り上がり
+    /// `hi = round_tf32(v)` 自体が `±inf` になる場合（`f32::MAX` 等。
+    /// `gemm_mma_tf32x3.rs::tf32_round_overflows` 参照）、いずれも
     /// `v - hi` は `inf - inf = NaN` 等の不定形になり `lo` が汚染される
     /// うえ、その `lo` が有限な相手オペランドと `mma.sync` で乗算される
     /// 際に `inf * 0 = NaN` のような偽の `NaN` を生みうる（IEEE 754 の
@@ -348,9 +353,10 @@ pub enum CudaError {
     /// 単純な `lo=0` 代入では契約を回復できない）。この不整合は
     /// split-single 近似固有の限界であり GPU 上で安価に補正できないため、
     /// `run_tf32x3` はカーネル起動前にホスト側で A・B の全要素を
-    /// `f32::is_finite()` 検査し、非有限値が 1 つでもあればこの variant
-    /// で fail-closed に拒否する（CPU・単発 TF32 経路は `±inf` をそのまま
-    /// 返す契約のため、3×TF32 経路のみ明示的に未対応入力として扱う。
+    /// `f32::is_finite()` 検査に加え `tf32_round_overflows` 検査し、
+    /// いずれかに該当する値が 1 つでもあればこの variant で fail-closed
+    /// に拒否する（CPU・単発 TF32 経路は `±inf` をそのまま返す契約の
+    /// ため、3×TF32 経路のみ明示的に未対応入力として扱う。
     /// `docs/cuda-tf32x3-split-single-decision.md` 追補）。
     NonFiniteInput { detail: String },
 }
