@@ -87,7 +87,7 @@ impl BufferHandle for CudaBufferHandle {
     }
 }
 
-/// codex-review P1 指摘対応（イシュー #1349・PR #1390）: `slice`
+/// codex-review P1／P0 再指摘対応（イシュー #1349・PR #1390）: `slice`
 /// フィールドの自然な drop（`cudarc::driver::CudaSlice::drop` が
 /// `cuMemFreeAsync`/`cuMemFree` を自身の `stream` へ直接発行する。
 /// 本モジュール冒頭コメント「解放は `CudaSlice` の `Drop` に一本化する」
@@ -96,21 +96,27 @@ impl BufferHandle for CudaBufferHandle {
 /// スレッドが `graph::run_captured_sgd_step_segment` で同じ ordinal を
 /// capture 中に本ハンドルが drop されると、その解放操作が capture 中の
 /// 共有ストリームへ意図せず記録されうる（`context_cache::
-/// wait_until_not_capturing` doc コメント参照）。
+/// begin_buffer_release` doc コメント参照）。
 ///
 /// 本 `Drop` はフィールド既定の drop 順序（宣言順。`slice` → `_alloc`）
 /// より**前**に走る（Rust の `Drop::drop` は構造体自身のコードが
 /// フィールドの自動 drop より先に実行される規則）。`slice` が
 /// `Some`（`numel > 0`。`numel == 0` は driver に触れないため対象外。
 /// 構造体 doc コメント参照）の場合のみ、`CudaSlice::ordinal()` から
-/// 得た ordinal で `wait_until_not_capturing` を呼び、別スレッドの
-/// capture が終わるまで駐機してから本体の drop（後続のフィールド既定
-/// drop）へ進む。同一スレッドが自身の capture 中に呼ぶ場合は待たない
-/// （`wait_until_not_capturing` doc コメント参照）。
+/// 得た ordinal で `context_cache::begin_buffer_release` を呼び、返した
+/// [`context_cache::BufferReleaseToken`] を**実際の `slice` の drop
+/// （`cuMemFreeAsync`/`cuMemFree` の発行）が完了するまで**保持する
+/// （P0 再指摘対応: 旧稿は「駐機して戻るだけ」で、戻った直後に別スレッド
+/// が新たな capture を実際に開始できてしまう競合窓があった。
+/// `begin_buffer_release` doc コメント「P0 再修正」参照。トークンを
+/// `slice` の drop より後まで生かすことで、`state.in_flight` 経由の
+/// 排他が実際の解放発行を包み込む）。
 impl Drop for CudaBufferHandle {
     fn drop(&mut self) {
-        if let Some(slice) = self.slice.as_ref() {
-            context_cache::wait_until_not_capturing(slice.ordinal());
+        if let Some(slice) = self.slice.take() {
+            let release_token = context_cache::begin_buffer_release(slice.ordinal());
+            drop(slice);
+            drop(release_token);
         }
     }
 }

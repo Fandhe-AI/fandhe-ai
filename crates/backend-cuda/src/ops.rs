@@ -838,6 +838,20 @@ impl BackendOps for CudaBackendOps {
         if !crate::graph::step_graph_enabled() {
             return Ok(None);
         }
+        // codex-review P0 指摘対応（PR #1390 再修正）: `sgd_step_device`
+        // （通常経路）と同じ `Device::Cuda(self.ordinal)` 一致検査を
+        // driver に触れる前（host-only）に行う。この検査を欠くと、GPU 0
+        // の `CudaBackendOps` へ GPU 1 のバッファを渡して `SegmentKey` を
+        // 導出できてしまい、`run_captured_sgd_step_segment` 側の一致
+        // 検査（`key.resources` との比較）は「同じ誤った組」を渡せば
+        // 通過してしまうため防御にならない（`run_captured_sgd_step_segment`
+        // doc コメント「replay 直前の再検証」参照）。
+        if resources
+            .iter()
+            .any(|b| b.device() != Device::Cuda(self.ordinal))
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
         // host-only（driver 非接触）: 世代は `DeviceBuffer` 自身が保持する
         // ため、driver に触れずに集められる。
         let generations: Vec<u64> = resources.iter().map(|b| b.generation()).collect();
@@ -903,6 +917,27 @@ impl BackendOps for CudaBackendOps {
         config: &fandhe_ai_tensor_core::SgdStepConfig,
         token: &fandhe_ai_tensor_core::DispatchFailureCell,
     ) -> Result<SegmentRun, BackendError> {
+        // codex-review P0 指摘対応（PR #1390 再修正）: `sgd_step_device`
+        // （通常経路）にある `Device::Cuda(self.ordinal)` 一致検査を
+        // driver に触れる前（host-only）に行う。この検査を欠くと、同一
+        // スレッドで GPU 0 の graph をキャッシュした `key` と、GPU 1 の
+        // `param`／`grad`／`velocity`（`Device::Cuda(1)`）を GPU 1 の
+        // `CudaBackendOps`（`self.ordinal == 1`）へ渡した際、世代番号が
+        // たまたま一致すれば下記の「replay 直前の再検証」（アドレス
+        // 一致検査）も通過してしまい、検査・エラー観測が GPU 1 に対して
+        // 行われる一方でキャッシュ済み graph は GPU 0 上で再生される
+        // ——GPU 0 の capture 排他・poison 機構を迂回する（design doc
+        // §4.4）。
+        if param.device() != Device::Cuda(self.ordinal)
+            || grad.device() != Device::Cuda(self.ordinal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if let Some(v) = velocity.as_deref()
+            && v.device() != Device::Cuda(self.ordinal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
         let mut generations = vec![param.generation(), grad.generation()];
         if let Some(v) = velocity.as_deref() {
             generations.push(v.generation());

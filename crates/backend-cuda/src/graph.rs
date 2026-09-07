@@ -255,14 +255,20 @@ fn put_cached_graph(key: SegmentKey, graph: CudaGraph) {
 ///    `begin_driver_call` を呼ぶ（`context_cache::begin_capture_session`
 ///    doc コメントの契約）。
 ///
-/// 手順（モジュール冒頭コメント・design doc §4.3）:
+/// 手順（モジュール冒頭コメント・design doc §4.3。PR #1390 再修正で
+/// ウォームアップの位置を変更）:
 /// 1. thread-local キャッシュに `key` があれば `begin_driver_call` で
 ///    poison／世代検査してから `graph.launch()` して
 ///    [`SegmentRun::Replayed`] を返す。
-/// 2. なければ `begin_capture_session` → `begin_driver_call` →
-///    `stream.begin_capture` → SGD 更新 1 回 → `stream.end_capture`
-///    （成功時は `graph.upload()` を 1 回）→ 初回 `graph.launch()` →
-///    キャッシュへ格納して [`SegmentRun::Captured`] を返す。
+/// 2. なければ、まず独立した `begin_driver_call` 境界で SGD カーネルを
+///    ウォームアップ（NVRTC コンパイル・モジュールロードを capture の
+///    排他区間の外で済ませる。Bugbot Medium 指摘対応）→
+///    `begin_capture_session`（in_flight ドレイン完了と同一ロック区間で
+///    `capturing_active` を設定済み）→ `begin_driver_call` →
+///    `stream.begin_capture` → SGD 更新 1 回 →
+///    `stream.end_capture`（成功時は `graph.upload()` を 1 回）→
+///    初回 `graph.launch()` → キャッシュへ格納して
+///    [`SegmentRun::Captured`] を返す。
 ///
 /// SGD 更新が `Err` を返した場合・`end_capture` 自体が失敗した場合は、
 /// capture を安全に終了させたうえで `Err` を返す（graph はキャッシュに
@@ -290,6 +296,37 @@ pub(crate) fn run_captured_sgd_step_segment(
         return Ok(SegmentRun::Replayed);
     }
 
+    // SGD カーネルを確実にコンパイル・ロード済みにする（Cursor Bugbot
+    // Medium 指摘対応・PR #1390 再修正）: `sgd_step_device_tracked` は
+    // 内部で `context_cache::cached_sgd`（`ordinal` キーの NVRTC
+    // コンパイル済みカーネルの singleflight キャッシュ）を参照するが、
+    // プロセス内でこの ordinal の SGD が一度も呼ばれていない場合、
+    // キャッシュミスにより NVRTC コンパイル＋`cuModuleLoadDataEx`
+    // （driver へのモジュールロード）が初回発生する。この初回発生が
+    // `stream.begin_capture` 後（＝下記 `body_outcome` 内の
+    // `sgd_step_device_tracked` 呼び出し時）まで遅延すると、capture
+    // 領域内でモジュールロードという「ストリームに紐づかない driver
+    // 操作」が走ることになり、`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` の
+    // 下で未定義動作・capture 失敗（ordinal poison）につながりうる。
+    //
+    // **`begin_capture_session` より前で行う（Bugbot Medium 再指摘:
+    // 旧稿は `begin_capture_session`／`begin_driver_call` の後でこの
+    // ウォームアップを行っていたため、NVRTC コンパイルという遅い操作の
+    // 間ずっと `state.capture` が設定済みのまま——他スレッドの
+    // `begin_driver_call` を Unsupported で拒否し続けていた。コンパイル
+    // 自体は capture の排他と無関係〈このスレッドの capture 意図さえ
+    // 登録されていなければ、他スレッドの通常呼び出しを妨げる理由が
+    // ない〉ため、専用の `begin_driver_call` 境界（poison／世代検査を
+    // 保ったまま）で先に済ませ、`begin_capture_session` は実際に
+    // capture を開始する直前まで呼ばない）**。
+    {
+        let warmup_token = context_cache::begin_driver_call(ordinal, &[key.generation])?;
+        let warmup_result = context_cache::cached_device(ordinal)
+            .and_then(|device| context_cache::cached_sgd(&device).map(|_| ()));
+        drop(warmup_token);
+        warmup_result.map_err(crate::memory::map_cuda_error)?;
+    }
+
     // ② キャッシュミス: capture する。呼び出しスレッドはこの時点で
     // 当該 ordinal のトークンを 1 つも保持していない
     // （`begin_capture_session` の in_flight ドレイン契約。上記 doc
@@ -303,30 +340,15 @@ pub(crate) fn run_captured_sgd_step_segment(
         }
     };
 
-    // capture 開始前に SGD カーネルを確実にコンパイル・ロード済みにする
-    // （Cursor Bugbot 指摘対応。追記）: `sgd_step_device_tracked` は
-    // 内部で `context_cache::cached_sgd`（`ordinal` キーの NVRTC
-    // コンパイル済みカーネルの singleflight キャッシュ）を参照するが、
-    // プロセス内でこの ordinal の SGD が一度も呼ばれていない場合、
-    // キャッシュミスにより NVRTC コンパイル＋`cuModuleLoadDataEx`
-    // （driver へのモジュールロード）が初回発生する。この初回発生が
-    // `stream.begin_capture` 後（＝下記 `body_outcome` 内の
-    // `sgd_step_device_tracked` 呼び出し時）まで遅延すると、capture
-    // 領域内でモジュールロードという「ストリームに紐づかない driver
-    // 操作」が走ることになり、`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` の
-    // 下で未定義動作・capture 失敗（ordinal poison）につながりうる。
-    // そのため `cached_device`／`cached_sgd` を明示的に先行呼び出しし、
-    // 2 回目以降はキャッシュヒットで実質無償になる契約（`cached_sgd`
-    // doc コメント参照）を利用して capture 領域の外でウォームアップを
-    // 完了させる（`_token` 取得済み＝poison／世代検査は通過済みの
-    // driver 呼び出し境界内で行う）。
-    if let Err(e) = context_cache::cached_device(ordinal)
-        .and_then(|device| context_cache::cached_sgd(&device).map(|_| ()))
-    {
-        drop(guard);
-        return Err(crate::memory::map_cuda_error(e));
-    }
-
+    // codex-review P0 再指摘対応（Cursor Bugbot High。PR #1390 再修正）:
+    // `context_cache::begin_buffer_release`（`memory.rs::
+    // CudaBufferHandle::Drop` が使う）が別スレッドからの解放を正しく
+    // 駐機できるよう、`state.capturing_active` は `begin_capture_session`
+    // が in_flight ドレイン完了と同一ロック区間内で既に立てている
+    // （`begin_capture_session` doc コメント「P0 再修正」参照。以前は
+    // 本関数が `stream.begin_capture()` 成功後に別関数
+    // `mark_capture_active` を呼んで立てていたが、drain 完了からこの
+    // 呼び出しまでの間に競合窓が生じるため撤廃した）。
     let begin_result =
         stream.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
     if let Err(e) = context_cache::observe_driver_result(ordinal, &_token, begin_result) {

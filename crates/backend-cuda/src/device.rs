@@ -209,12 +209,65 @@ impl CudaDevice {
     }
 
     /// #33/#34 のカーネルロード・起動が使う `CudaContext` 共有ハンドル。
+    ///
+    /// **可視性を `internal-diagnostics` feature でゲートする
+    /// （codex-review P0 指摘対応・PR #1390。旧稿は無条件 `pub` だった）**:
+    /// `crate::graph`（イシュー #1349）が opt-in ON 時この `ctx` 上に
+    /// `unsafe { ctx.disable_event_tracking() }` を適用する根拠は
+    /// 「この `CudaDevice` はこの `ctx` 上で唯一のストリーム
+    /// （`self.stream`）しか作らない」という**本クレート内部の**運用
+    /// 契約であり、`cudarc` 自身が強制する不変条件ではない。`CudaDevice`
+    /// 自体は本クレート（crates.io 公開クレート
+    /// `fandhe-ai-backend-cuda`）から `pub use` で再公開されているため、
+    /// 本メソッドが無条件 `pub` のままだと、クレート外の利用者が安全な
+    /// 公開 API の組み合わせだけで `context().clone()` → `.new_stream()`
+    /// と呼んで**この `ctx` 上に第 2 のストリーム**を作れてしまう
+    /// （`AGENTS.md` の unsafe 不変条件保証の要件に違反）。第 2
+    /// ストリームが作られると、イベント追跡を無効化済みの `ctx` の下で
+    /// 2 本のストリーム間の読み書き順序を保証する手段がなくなり、
+    /// バッファをまたいだ競合が起こりうる。
+    ///
+    /// 一方で本クレート自身の実機診断テスト・ベンチ（`tests/`・
+    /// `examples/` 配下。`large_buffer_percall_alloc_ab_1149.rs`・
+    /// `tma_probe_real_device.rs`・`device_attributes_dump.rs` 等）は
+    /// 既定 OFF（opt-in 無効。`ctx` のイベント追跡は無効化されていない）
+    /// の状態で `context()`/`stream()` へ直接アクセスして driver 属性・
+    /// pool 状態を読む正当な既存用途を持つ（`Cargo.toml` の
+    /// `internal-diagnostics` feature コメント「内部診断専用ツールの
+    /// 可視性制御」参照）。そのため既定ビルド（`internal-diagnostics`
+    /// feature 無効。crates.io の通常利用者はこの feature を有効化し
+    /// ない）では `pub(crate)` に絞る一方、同 feature 有効時（本クレート
+    /// 自身の `tests/`／`examples/` が `required-features` 経由でのみ
+    /// 要求する。CI の `cargo test --workspace --all-features` は常に
+    /// この feature を含む）だけ `pub` へ戻す。既定ビルドの公開 API 面
+    /// からは変わらず除外されるため、`AGENTS.md` が要求する不変条件
+    /// 保証は成立する（`docs/backend-cuda-graph-step-capture-design.md`
+    /// §4.1）。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn context(&self) -> &Arc<CudaContext> {
         &self.ctx
     }
 
+    /// [`Self::context`] doc コメント参照。既定ビルド（`internal-diagnostics`
+    /// feature 無効）ではクレート内部限定に絞る。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    pub(crate) fn context(&self) -> &Arc<CudaContext> {
+        &self.ctx
+    }
+
     /// #33/#34 のカーネル起動・メモリ転送が使う既定ストリーム。
+    ///
+    /// `internal-diagnostics` feature によるゲート（codex-review P0
+    /// 指摘対応・PR #1390）: [`Self::context`] と同じ理由。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+
+    /// [`Self::stream`] doc コメント参照。既定ビルド（`internal-diagnostics`
+    /// feature 無効）ではクレート内部限定に絞る。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    pub(crate) fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
     }
 

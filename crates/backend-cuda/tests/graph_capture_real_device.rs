@@ -38,15 +38,27 @@
 //! は実機非依存の `context_cache.rs`
 //! `begin_sync_point_call_rejects_before_touching_driver_while_capturing`
 //! で引き続き検証する。
-
-use std::sync::Arc;
+//!
+//! **opt-in OFF の検証は別ファイル（codex-review P2／Cursor Bugbot Low
+//! 指摘対応。PR #1390 再修正）**: `opt_in_off_keeps_legacy_stream_and_
+//! returns_none` は `graph_capture_real_device_optin_off.rs` へ移した。
+//! `context_cache::cached_device`（`ordinal` キーのプロセス内
+//! singleflight キャッシュ）はプロセス生存期間中キャッシュされるため、
+//! OFF 側のテストが本ファイルの ON 側テストと同一プロセスで実行される
+//! と、先に走った方が確保した `CudaDevice`（`StreamKind::Legacy`／
+//! `Created` のいずれか）が後から走る側にもそのまま見えてしまい
+//! （`opt-in` フラグを変えても `cached_device` のヒットには影響しない）、
+//! テスト実行順序に判定が依存する競合状態になる。`cargo test` は
+//! `tests/` 配下のファイルをそれぞれ独立プロセスとしてビルド・実行する
+//! ため、別ファイルへ分けることでこのプロセス内キャッシュ共有そのものを
+//! 断つ（レビュー指摘「別プロセスに分けてください」への対応）。
 
 use fandhe_ai_backend_cuda::graph::{set_step_graph_enabled, step_graph_enabled};
 use fandhe_ai_backend_cuda::{CudaBackendOps, CudaDevice};
 use fandhe_ai_tensor_core::buffer::DeviceBuffer;
 use fandhe_ai_tensor_core::{BackendOps, DispatchFailureCell, SegmentRun, SgdStepConfig, Tensor};
 
-/// opt-in を明示的に OFF/ON へ切り替え、テスト終了時に OFF へ戻す RAII
+/// opt-in を明示的に ON へ切り替え、テスト終了時に OFF へ戻す RAII
 /// ガード（`crate::precision::tests::FlagGuard` と同型）。
 ///
 /// **`Makefile::test-ignored-cuda` との整合（Cursor Bugbot／codex-review
@@ -62,7 +74,10 @@ use fandhe_ai_tensor_core::{BackendOps, DispatchFailureCell, SegmentRun, SgdStep
 /// ため `crate::precision::tests::FlagGuard` と同じ「プロセスワイド
 /// `Mutex` でテスト間を直列化する」方式を採用し、`--test-threads=1` の
 /// 有無に関わらず安全にする（`Mutex` はガードの生存期間中保持し続ける
-/// ため、同一バイナリ内の本ガード使用テストは事実上直列化される）。
+/// ため、同一バイナリ内の本ガード使用テストは事実上直列化される。
+/// opt-in OFF のテストはファイル冒頭コメントのとおり別プロセスへ移した
+/// ため、本ガードで直列化すべき相手は本ファイル内の ON 側テスト同士の
+/// みで足りる）。
 struct GraphOptInGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -169,34 +184,6 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
     );
 }
 
-/// opt-in OFF（既定）では `captured_segment_key` が常に `Ok(None)` を
-/// 返し、ストリームは legacy のまま（本イシュー導入前と挙動不変）で
-/// あることを確認する（design doc §4.1 の非後退契約）。
-#[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。--test-threads=1 で実行すること"]
-fn opt_in_off_keeps_legacy_stream_and_returns_none() {
-    assert!(
-        !step_graph_enabled(),
-        "他テストの opt-in が残留していないこと"
-    );
-    let device = CudaDevice::new(0).expect("CUDA device 0 must be available");
-    assert!(
-        !device.is_capturable_stream(),
-        "opt-in OFF では legacy stream のまま（本イシュー導入前と挙動不変）"
-    );
-
-    let cuda = CudaBackendOps::new(0);
-    let mem = cuda.memory_ops().expect("memory_ops must be Some");
-    let param = mem
-        .upload(&Tensor::new(vec![1.0], &[1]).unwrap())
-        .expect("upload succeeds");
-    let refs: [&DeviceBuffer<f32>; 1] = [&param];
-    let key = cuda
-        .captured_segment_key(&refs, 0)
-        .expect("captured_segment_key must not error when opt-in is off");
-    assert!(key.is_none(), "opt-in OFF では常に None のはず");
-}
-
 /// capture 済み graph が触れるバッファ集合を [`SegmentKey`] で捉えている
 /// ため、異なる config（例えば学習率変更）は別 key になり再 capture が
 /// 促されることを確認する（design doc §4.5 の「設定変更検出」契約の
@@ -228,7 +215,13 @@ fn different_config_key_produces_a_different_segment_key() {
         "config_key が異なれば SegmentKey も異なるはず（再 capture の契機）"
     );
 
-    // `Device` を握るだけの参照カウントの生存確認（`Arc<CudaStream>` の
-    // 寿命が本テスト内で有効であることの簡易チェック）。
-    let _stream: &Arc<cudarc::driver::CudaStream> = device.stream();
+    // `device` はここまでの `CudaDevice::new(0)`／`is_capturable_stream()`
+    // 検証で既に使用済み（生存確認は上記の呼び出し自体で足りる）。
+    // codex-review P0 指摘対応（PR #1390 再修正）で `CudaDevice::stream()`／
+    // `context()` は既定ビルドで `pub(crate)` へ絞った（`internal-
+    // diagnostics` feature 有効時のみ `pub`。`device.rs::CudaDevice::
+    // context` doc コメント参照）。本ファイル（`[[test]] required-
+    // features` を指定していない）は同 feature を要求しないため、この
+    // アクセサへは直接アクセスしない。
+    drop(device);
 }

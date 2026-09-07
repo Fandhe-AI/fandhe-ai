@@ -37,7 +37,7 @@
 6. `autodiff::DeviceParamStore::step` の update 区間結線（`!any_resident` 分岐に graph-capture 経路を追加。既存の非 capture 経路〈`else`〉は無変更）
 7. `CudaMemory::upload_into`（新規実装。既定 `Unsupported` から `MemoryOps` の非破壊拡張として CUDA 実装を追加。graph 経路の永続 staging バッファ書き込みに必須）
 8. facade 公開 API: `set_cuda_graph_step_enabled`／`cuda_graph_step_enabled`
-9. テスト: GPU 不要のホストモデルテスト（`context_cache.rs::poison_state_tests`・`graph.rs::tests`・`tensor-core::backend_ops::tests`・`autodiff::optim::device_store::tests::graph_capture_wiring_replays_stable_key_and_matches_non_graph_path`）・`#[ignore]` 実機テスト（`crates/backend-cuda/tests/graph_capture_real_device.rs`・`crates/facade/tests/cuda_graph_step_bit_identity.rs`）
+9. テスト: GPU 不要のホストモデルテスト（`context_cache.rs::poison_state_tests`・`graph.rs::tests`・`tensor-core::backend_ops::tests`・`autodiff::optim::device_store::tests::graph_capture_wiring_replays_stable_key_and_matches_non_graph_path`）・`#[ignore]` 実機テスト（`crates/backend-cuda/tests/graph_capture_real_device.rs`〈opt-in ON 側〉・`crates/backend-cuda/tests/graph_capture_real_device_optin_off.rs`〈opt-in OFF 側。codex-review P2／Cursor Bugbot Low 指摘対応・PR #1390 再修正で ON 側から別ファイル＝別プロセスへ分離。`context_cache::cached_device` のプロセス内キャッシュ共有によるテスト順序依存を断つため〉・`crates/facade/tests/cuda_graph_step_bit_identity.rs`）
 
 ### 3.2 スコープ外（PR 本文へ記録・起票はユーザー承認後）
 
@@ -56,6 +56,8 @@
 
 **イベント追跡の無効化（codex-review P1 指摘対応。PR #1390 追記）**: `ctx.new_stream()` は cudarc を「multi-stream mode」へ切り替え、以降に確保する全 `CudaSlice` へ read/write 用 `CudaEvent` を付与する（既定 `is_event_tracking() == true`）。この状態では `launch_builder`（`sgd.rs::CudaSgd::run` 等）が引数バッファの直近 read/write イベントへ `CU_EVENT_WAIT_DEFAULT` で自動 `cuStreamWaitEvent` するが、その待機対象イベントは通常 capture 開始前（forward／backward 等）に記録されたものであり、capture 外で記録済みのイベントへの `CU_EVENT_WAIT_DEFAULT` 待機は stream capture 中は禁止操作（driver がエラーを返し ordinal を poison する）。本クレートはこの `CudaContext` につき常に単一ストリームのみを保持し複数ストリームを実際には使わないため、イベントベース cross-stream 同期機構はそもそも不要と判断し、`new_stream()` 直後・他のどの `CudaSlice` 確保よりも前に `ctx.disable_event_tracking()`（`unsafe fn`）を呼び、以降確保する `CudaSlice` にイベントを付与しないようにした（`device.rs::CudaDevice::new`）。
 
+**「単一ストリームしか作らない」不変条件の可視性による担保（codex-review P0 再指摘対応。PR #1390 再修正）**: 上記 `disable_event_tracking()` の unsafe 根拠は「この `CudaDevice` はこの `ctx` 上で唯一のストリームしか作らない」という本クレート内部の運用契約だが、`CudaDevice::context()`/`stream()` が無条件 `pub`（crates.io 公開クレート `fandhe-ai-backend-cuda` から `pub use` 再公開済み）のままだと、クレート外の利用者が安全な公開 API の組み合わせ（`context().clone()` → `.new_stream()`）だけで第 2 のストリームを作れてしまい、上記の不変条件を型システムが保証できなかった（`AGENTS.md` の unsafe 不変条件保証の要件違反）。そこで `context()`/`stream()` の可視性を `internal-diagnostics` feature（既存の `Cargo.toml` feature。診断専用ツールの可視性制御）でゲートし、既定ビルド（同 feature 無効。crates.io の通常利用者はこれを有効化しない）では `pub(crate)` に絞った。この feature を要求する本クレート自身の実機診断テスト・ベンチ（`tests/large_buffer_percall_alloc_ab_1149.rs`・`tests/setmaxnreg_common/mod.rs` 経由の 4 ファイル・`examples/device_attributes_dump.rs` 等）は `Cargo.toml` の `[[test]]`/`[[example]]` `required-features` で個別にゲートし、CI の `cargo test --workspace --all-features`（rust-ci test ジョブ・`make test`）では引き続きビルド・実行される（`device.rs::CudaDevice::context` doc コメント参照）。
+
 ### 4.2 capture 状態機械
 
 `context_cache::OrdinalState` に `capture: Option<ThreadId>` を追加。`begin_capture_session`（同一 ordinal への再入を拒否）・`is_capturing_on_current_thread`（同期点ガードの判定）・`begin_sync_point_call`（`begin_driver_call` と同じ排他区間で、capture 中なら driver に触れる前に `Unsupported` で拒否）を実装した。capture モードは `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`。
@@ -64,16 +66,22 @@
 
 **body の panic 対応（codex-review P1・Cursor Bugbot 指摘対応。追記）**: `body` が panic（unwind）した場合でも `stream.end_capture` を必ず呼んでから panic を再送出するよう `run_captured_segment` を変更した（`std::panic::catch_unwind` で包み、`end_capture` 実行後に `resume_unwind`）。以前は `body()` の panic が `end_capture` 呼び出しをスキップし、driver 側の capture 状態が終了されないまま残る整合性違反があった。
 
+**バッファ解放の排他（codex-review P0 再指摘・Cursor Bugbot High 指摘対応。PR #1390 再修正）**: `cudarc::driver::CudaSlice::drop`（`memory.rs::CudaBufferHandle::Drop` から実行される実際の `cuMemFreeAsync`/`cuMemFree` 発行）は `begin_driver_call`／`begin_capture_session` の排他機構を一切経由しないため、別スレッドが capture 中に無関係なバッファを drop すると、その解放が capture 中の共有ストリームへ意図せず記録されうる。この排他を `context_cache::begin_buffer_release`（`BufferReleaseToken` を返す RAII 関数）で実装した。旧稿（`wait_until_not_capturing`）は「駐機して戻るだけ」で、戻った直後に別の capture セッションが実際に開始してしまう競合窓が残っていた（P0 再指摘）。本関数は駐機解除後に `state.in_flight` へ登録してから返し、`memory.rs` は返した `BufferReleaseToken` を実際の `CudaSlice` drop が完了するまで保持することで、その競合窓を閉じる。
+
+さらに、単純に「`state.capture` が `Some`（`begin_capture_session` の in_flight ドレイン待機中を含む）の間は常に駐機する」設計は、以下のデッドロックを生む（Cursor Bugbot High 指摘）: スレッド B が既に `CallToken` を保持したまま（`in_flight` に計上済みのまま）一時バッファを drop すると、その `Drop` が別スレッド A の capture 完了を待って駐機する一方、A は `begin_capture_session` の drain で B の `in_flight` が 0 になるのを待ち続け、両者が永久に待ち合う。これを避けるため `OrdinalState` に **`capturing_active: bool`**（`capture` が `Some` の区間のうち、in_flight ドレインが完了した後だけ `true` になるサブフラグ）を追加し、`begin_capture_session` がドレイン完了と**同一ロック区間内**でこれを立てる（ロックを一旦手放してから別関数で立てる設計は同種の競合窓を生むため不採用）。`begin_buffer_release` は `state.capture.is_some()` ではなく `state.capturing_active` を駐機条件にする——ドレイン中（driver 側はまだ capture していない）の解放は素通しし、実際に driver capture が進行中の区間だけを対象にすることで、上記デッドロックを構造的に回避する。`CaptureGuard::drop` で `capturing_active` も必ず `false` へ戻す。
+
 ### 4.3 graph モジュール
 
 **任意クロージャの撤廃（codex-review P0 指摘対応。追記）**: 当初は `crate::graph::run_captured_segment(ordinal, stream, key, resources, body)`（`resources: &mut [&mut DeviceBuffer<f32>]`・`body: &mut CapturedSegmentBody<'_>` という任意クロージャ）という設計だったが、`body` が `resources` に含まれない外部 `DeviceBuffer<f32>` をクロージャキャプチャ経由で直接触れる抜け道があった。現在は `crate::graph::run_captured_sgd_step_segment(ordinal, stream, key, ops, param, grad, velocity, config, token)` へ変更し、SGD 更新区間が触れる全リソース（`param`／`grad`／`velocity`）を直接引数として受け取り、区間本体（capture 対象のカーネル起動）も本関数が固定的に `CudaBackendOps::sgd_step_device_tracked` を呼ぶことで行う（呼び出し元は任意コードを注入できない）。`CapturedSegmentBody` 型は撤廃済み。
 
 **capture 開始前の in_flight ドレイン順序（codex-review P0 指摘対応。追記）**: `begin_capture_session`（他スレッドの `in_flight` をドレインしてから返る）を、呼び出しスレッド自身が当該 ordinal のトークンを 1 つも保持していない状態で先に呼び、その後に初めて `begin_driver_call` を呼ぶ順序へ変更した（逆順だと、他スレッドが capture 開始の直前に `begin_driver_call` を通過済み〈`in_flight` に計上済みだが実際の driver 呼び出しはまだ〉だった場合、その呼び出しが capture 開始後に共有ストリームへカーネル起動を発行し意図せず graph へ混入しうる窓があった）。
 
-手順:
+**SGD カーネルウォームアップの位置（Cursor Bugbot Medium 指摘対応。PR #1390 再修正）**: `sgd_step_device_tracked` は内部で `context_cache::cached_sgd`（`ordinal` キーの NVRTC コンパイル済みカーネルの singleflight キャッシュ）を参照するが、プロセス内でこの ordinal の SGD が一度も呼ばれていない場合、キャッシュミスにより NVRTC コンパイル＋`cuModuleLoadDataEx`（driver へのモジュールロード）が初回発生する。旧稿はこのウォームアップを `begin_capture_session` の**後**（`state.capture` 設定済み・in_flight ドレイン完了後）で行っていたため、NVRTC コンパイルという遅い操作の間ずっと他スレッドの `begin_driver_call` が `Unsupported` で拒否され続けていた（capture 意図の登録自体はコンパイルと無関係なため、この長時間ブロックは不要）。現在は `begin_capture_session` より**前**に、独立した `begin_driver_call` 境界（poison／世代検査を保ったまま。ウォームアップ専用トークンは使用後すぐ drop）でウォームアップを完了させる。
+
+手順（PR #1390 再修正でウォームアップの位置を変更）:
 
 1. thread-local キャッシュ（`STEP_GRAPHS`。上限 8・世代不一致 evict）から `key` に一致する graph を take → ヒットなら `begin_driver_call` で poison／世代検査してから `launch()` のみ実行し `SegmentRun::Replayed`
-2. ミスなら `begin_capture_session` → `begin_driver_call` → `stream.begin_capture` → SGD 更新 1 回（`sgd_step_device_tracked`。panic しても直後で必ず `end_capture` する。§4.2 追記）→ `stream.end_capture` → 成功時は `graph.upload()` → 初回 `launch()` → キャッシュへ格納 → `SegmentRun::Captured`
+2. ミスなら、まず独立した `begin_driver_call` 境界で SGD カーネルをウォームアップ（上記）→ `begin_capture_session`（drain 完了と同一ロック区間で `capturing_active` を設定済み。§4.2 追記）→ `begin_driver_call` → `stream.begin_capture` → SGD 更新 1 回（`sgd_step_device_tracked`。panic しても直後で必ず `end_capture` する。§4.2 追記）→ `stream.end_capture` → 成功時は `graph.upload()` → 初回 `launch()` → キャッシュへ格納 → `SegmentRun::Captured`
 3. SGD 更新の `Err`・`end_capture` の `Err`・空 graph（`Ok(None)`）はいずれも fail-closed なエラーとして呼び出し元へ返す（graph はキャッシュに残さない）
 4. **`graph.upload()` の失敗も fail-closed で伝播する**（codex-review P0 指摘対応・追記。以前は poison 化のみで握りつぶし、直後の `launch()` が別途成功すると全体が `Ok(Captured)` 扱いになっていた——「最初に失敗した driver エラーを伝播する」という本クレート全体の契約に反する後退だった）
 
@@ -82,6 +90,8 @@
 `SegmentKey { generation, config_key, resources: Vec<SegmentResource> }`（`SegmentResource { addr, numel }`）。`CudaBackendOps::captured_segment_key` は opt-in OFF または非 capturable stream なら `Ok(None)`（後者は opt-in ON だが legacy stream のままの設定ミスを示すため実際には `Err(Unsupported)`。§4.7）、それ以外は各バッファの `device_ptr` から `SegmentKey` を構築する。**driver 呼び出し境界（codex-review P0 指摘対応。追記）**: `resources` の世代収集（host-only・driver 非接触）→ `begin_driver_call`（poison／世代検査）→ `device_handle_raw` → `segment_resources_for` の順に固定し、poison・Retiring・別スレッド capture 中のいずれでも driver に触れる前に拒否されるようにした。
 
 **replay 直前の再検証（codex-review P0 指摘対応。追記）**: `SegmentKey` 自身はバッファの所有権・借用を保持しない値型のため、`param`／`grad`／`velocity`（呼び出しの間ライフタイムが保証される借用）から現在のアドレス集合を再計算し `key.resources` と完全一致することを確認してから初めて `crate::graph::run_captured_sgd_step_segment` へ委譲する（不一致なら driver に一切触れず `InvalidArgument` で拒否。解放済み・別バッファへ再利用済みのアドレスを参照する古い graph を安全確認なしに再生する事態を防ぐ）。
+
+**デバイス一致検査（codex-review P0 再指摘対応。PR #1390 再修正）**: `captured_segment_key`／`run_captured_sgd_step_segment` のいずれにも、通常経路の `sgd_step_device` が持つ `Device::Cuda(self.ordinal)` 一致検査（driver に触れる前・host-only）が欠けていた。この検査がないと、同一スレッドで GPU 0 の graph をキャッシュした `key` と GPU 1 の `param`/`grad`/`velocity`（`Device::Cuda(1)`）を GPU 1 の `CudaBackendOps`（`self.ordinal == 1`）へ渡した際、世代番号がたまたま一致すれば上記「replay 直前の再検証」（アドレス一致検査）も通過してしまい、検査・エラー観測が GPU 1 に対して行われる一方でキャッシュ済み graph は GPU 0 上で再生される——GPU 0 の capture 排他・poison 機構を迂回する。両関数の冒頭で `resources`／`param`/`grad`/`velocity` 全ての `.device()` が `Device::Cuda(self.ordinal)` と一致することを検査し、不一致は `BackendError::DeviceMismatch` で拒否するよう追加した。
 
 ### 4.5 `DeviceParamStore::step` の結線
 
@@ -118,7 +128,7 @@
 本エージェント実行環境に CUDA 実機が存在しないため、以下は **未実測**のまま記入欄を残す:
 
 - §4.1 の実機プローブ（cudarc の自動 event 管理と capture の互換性。「リスクと安全側の判断」参照）
-- `crates/backend-cuda/tests/graph_capture_real_device.rs`（`#[ignore]`）の実行結果
+- `crates/backend-cuda/tests/graph_capture_real_device.rs`（opt-in ON 側。`#[ignore]`）・`crates/backend-cuda/tests/graph_capture_real_device_optin_off.rs`（opt-in OFF 側。`#[ignore]`）の実行結果
 - `crates/facade/tests/cuda_graph_step_bit_identity.rs`（`#[ignore]`）の実行結果（受け入れ条件 (a)）
 - `make test-ignored-cuda` による非後退確認（ストリーム切替が opt-in OFF 時の既存動作を壊していないことの実機確認）
 
@@ -128,9 +138,12 @@
 # 1. 既存回帰の非後退確認
 make test-ignored-cuda
 
-# 2. capture 可否プローブ・bit 同一・fail-closed 検証（本イシュー新規）
+# 2. capture 可否プローブ・bit 同一・fail-closed 検証（本イシュー新規。
+#    opt-in ON 側と OFF 側は別ファイル＝別プロセス。PR #1390 再修正）
 cargo test -p fandhe-ai-backend-cuda --release --test graph_capture_real_device \
   -- --ignored --nocapture --test-threads=1
+cargo test -p fandhe-ai-backend-cuda --release --test graph_capture_real_device_optin_off \
+  -- --ignored --nocapture
 
 # 3. facade 経由の 10 step bit 同一検証（2 プロセス比較。ファイル冒頭コメント参照）
 cargo test -p fandhe-ai --release --test cuda_graph_step_bit_identity \
@@ -152,5 +165,5 @@ cargo test -p fandhe-ai --release --test cuda_graph_step_bit_identity \
 
 - ストリーム切替（§4.1）が最大のリスク。opt-in 時限定にすることで OFF 時の挙動・性能を現行と同一に保つ
 - cudarc の自動 event 管理（ON 時のみ有効化される `cuStreamWaitEvent`）は capture と非互換であることが PR #1390 の codex-review 指摘（§3.2・§4.1 追記）で確定した。回避策（`disable_event_tracking()`）は unsafe 面の判断を伴うが、本クレートがこの `CudaContext` につき単一ストリームしか使わない前提が安全性根拠として成立するため実装・適用済み（§4.1）
-- 別スレッドが同じ ordinal の `DeviceBuffer` を drop すると `CudaSlice::drop` が capture 中の共有ストリームへ非同期解放を発行しうる問題（codex-review P1 指摘。PR #1390）に対し、`context_cache::wait_until_not_capturing` を `CudaBufferHandle::Drop` から呼び、別スレッドの capture 完了を待ってから実際の解放を行うよう対応した（`memory.rs`）
+- 別スレッドが同じ ordinal の `DeviceBuffer` を drop すると `CudaSlice::drop` が capture 中の共有ストリームへ非同期解放を発行しうる問題（codex-review P1 指摘。PR #1390）に対し、`context_cache::begin_buffer_release` を `CudaBufferHandle::Drop` から呼び、返した `BufferReleaseToken` を実際の解放が完了するまで保持することで対応した（`memory.rs`。§4.2「バッファ解放の排他」参照。P0 再指摘・Bugbot High デッドロック指摘を経て `capturing_active` サブフラグによる再修正済み）
 - 「step 全体」を capture できない事実は起票時の想定との乖離であり、隠さず本文書 §0 に明記する

@@ -561,6 +561,34 @@ struct OrdinalState {
     /// 自体を driver 側が防いでくれる保証ではないため、ホスト側で
     /// 明示的に排他する。`begin_driver_call` doc コメント参照）。
     capture: Option<std::thread::ThreadId>,
+    /// `capture` が `Some` の区間のうち、**in_flight ドレインが完了した
+    /// 後**だけ `true` になるサブフラグ（Cursor Bugbot High 指摘対応・
+    /// PR #1390 再修正）。[`begin_capture_session`] がドレイン完了と
+    /// **同一ロック区間内**で立てる（ロックを一旦手放してから別関数で
+    /// 立てる設計は、drain 完了から本フラグ設定までの間に他スレッドの
+    /// `begin_buffer_release` が素通りしてしまう競合窓を生むため不採用。
+    /// `begin_capture_session` doc コメント「P0 再修正」参照）。
+    ///
+    /// **この区別が必要な理由（デッドロック回避）**: [`begin_buffer_release`]
+    /// （`memory.rs::CudaBufferHandle::Drop` が使う）は「別スレッドが
+    /// 実際に driver capture 中」の間だけ駐機し、`capture` が
+    /// `Some`（ドレイン待機中を含む）というだけでは駐機しない。もし
+    /// ドレイン待機中も駐機してしまうと、あるスレッド B が既に
+    /// [`CallToken`] を保持したまま（＝ `in_flight` に計上済みのまま）
+    /// 一時バッファを drop し、その `Drop` が `begin_buffer_release` 経由で
+    /// 別スレッド A の capture 完了を待つ一方、A は
+    /// `begin_capture_session` の drain で B の `in_flight` が 0 になるのを
+    /// 待ち続ける——という相互待機（AB-BA デッドロック）が生じる。
+    /// ドレイン中（`capturing_active == false`）は driver 側で実際に
+    /// capture が始まっていないため、この間に他スレッドの
+    /// `cuMemFreeAsync` が共有ストリームへ発行されても捕獲対象の graph を
+    /// 汚染しない（捕獲はまだ始まっていない）。よってこの間は
+    /// [`begin_buffer_release`] を通し、B の `in_flight` が速やかに
+    /// 減ってドレインが完了できるようにする。真に危険な区間
+    /// （driver capture が実際に進行中）でのみ [`begin_buffer_release`]
+    /// を駐機させれば、`memory.rs` P0 の脆弱性（capture 中の共有
+    /// ストリームへの無関係な解放混入）は防げる。
+    capturing_active: bool,
 }
 
 impl Default for OrdinalState {
@@ -572,6 +600,7 @@ impl Default for OrdinalState {
             probe_retry_count: 0,
             retiring_waiters: 0,
             capture: None,
+            capturing_active: false,
         }
     }
 }
@@ -596,11 +625,17 @@ impl Drop for CaptureGuard {
             && let Ok(mut state) = cell.0.lock()
         {
             state.capture = None;
-            // codex-review P1 指摘対応（PR #1390）: `wait_until_not_capturing`
-            // が `state.capture` の解除を待って駐機している可能性がある
-            // （他スレッドの `DeviceBuffer` drop。`wait_until_not_capturing`
-            // doc コメント参照）ため、`in_flight` の drain 待ちと同じ
-            // `Condvar` で起こす。
+            // codex-review P0 再指摘対応（PR #1390 再修正）: `capturing_active`
+            // も必ず false へ戻す（`begin_capture_session` が drain 完了と
+            // 同一ロック区間で立てる。`OrdinalState::capturing_active` doc
+            // コメント参照。`stream.begin_capture` 自体が失敗した早期
+            // return 経路でも `capturing_active` は既に true になって
+            // いるため、ここで確実に戻す必要がある）。
+            state.capturing_active = false;
+            // `begin_buffer_release`（`memory.rs::CudaBufferHandle::Drop`
+            // が使う）が `capturing_active` の解除を待って駐機している
+            // 可能性がある（`begin_buffer_release` doc コメント参照）ため、
+            // `in_flight` の drain 待ちと同じ `Condvar` で起こす。
             cell.1.notify_all();
         }
     }
@@ -689,6 +724,21 @@ pub(crate) fn begin_capture_session(ordinal: usize) -> Result<CaptureGuard, Back
             ))
         })?;
     }
+    // codex-review P0 再指摘対応（PR #1390 再修正。旧稿は
+    // `graph::run_captured_sgd_step_segment` が実際の
+    // `stream.begin_capture()` 成功後に別関数 `mark_capture_active` を
+    // 呼んで立てていたが、drain 完了（ここ）から `stream.begin_capture()`
+    // 呼び出しまでの間、ロックを一旦手放す窓が生じ、その間に別スレッドの
+    // `begin_buffer_release`（`state.capturing_active` 未設定のため
+    // 素通り）が `in_flight` を増減させて素通り、実際の driver capture
+    // 開始と競合しうる〈`begin_buffer_release` doc コメント「P0 再修正」
+    // の窓と同型〉）: **drain 完了と同一ロック区間内**で `capturing_active`
+    // を立てる。`in_flight == 0` をこのロックの下で確認した直後のため、
+    // この時点で存命の `BufferReleaseToken`（他スレッド分）は存在せず、
+    // 以後の `begin_buffer_release` 呼び出しは（capture 開始スレッド
+    // 自身を除き）必ずここで立てた `capturing_active` を見て駐機する
+    // （`OrdinalState::capturing_active` doc コメント参照）。
+    state.capturing_active = true;
     Ok(CaptureGuard { ordinal })
 }
 
@@ -709,56 +759,124 @@ pub(crate) fn is_capturing_on_current_thread(ordinal: usize) -> bool {
     state.capture == Some(std::thread::current().id())
 }
 
+/// [`begin_buffer_release`] が返す RAII トークン（codex-review P0 再指摘
+/// 対応・PR #1390）。`memory.rs::CudaBufferHandle::Drop` はこのトークンを
+/// 実際の `cudarc::driver::CudaSlice::drop`（`cuMemFreeAsync`/
+/// `cuMemFree` の発行そのもの）が完了するまで保持し続ける契約とする
+/// （[`begin_buffer_release`] doc コメント「P0 再修正」参照）。
+#[derive(Debug)]
+pub(crate) struct BufferReleaseToken {
+    ordinal: usize,
+    /// [`begin_buffer_release`] がレジストリ・ロック取得に成功し
+    /// `state.in_flight` を実際に 1 増やせた場合のみ `true`。取得自体が
+    /// 失敗した異常系（fail-open）では `false` のままとし、`Drop` で
+    /// 対応する減算を行わない（増減の非対称による `in_flight` 破損を
+    /// 防ぐ）。
+    registered: bool,
+}
+
+impl Drop for BufferReleaseToken {
+    fn drop(&mut self) {
+        if !self.registered {
+            return;
+        }
+        // レジストリ・ロック取得が失敗しても（プロセス末期等）`Drop` は
+        // panic できないため、失敗時は静かに諦める（`CallToken::drop`
+        // と同じ方針。稀な異常系でのみ `in_flight` がわずかに残留し
+        // `invalidate` の drain を長引かせるだけで安全性は損なわない）。
+        if let Ok(cell) = ordinal_registry().entry(self.ordinal)
+            && let Ok(mut state) = cell.0.lock()
+        {
+            state.in_flight = state.in_flight.saturating_sub(1);
+            cell.1.notify_all();
+        }
+    }
+}
+
 /// `memory.rs::CudaBufferHandle` の `Drop` 実装（codex-review P1 指摘
 /// 対応。PR #1390）が、実際に `cudarc::driver::CudaSlice::drop`
 /// （`cuMemFreeAsync`/`cuMemFree` をこのハンドルの `stream` へ直接
 /// 発行する。`memory.rs` モジュール冒頭コメント「解放は `CudaSlice` の
-/// `Drop` に一本化する」参照）を走らせる**前**に呼ぶ。
+/// `Drop` に一本化する」参照）を走らせる**前**に呼び、返した
+/// [`BufferReleaseToken`] を実際の解放が終わるまで保持する契約とする。
 ///
 /// **背景**: `CudaSlice::drop` は `begin_driver_call`／
 /// `begin_capture_session` の排他機構を一切経由しない（`cudarc` 側の
 /// 実装であり本クレートが介入できない）。そのため、あるスレッドが
-/// `run_captured_sgd_step_segment`（`graph.rs`）で当該 ordinal を
-/// capture 中に、**別スレッド**が同じ ordinal 上の `DeviceBuffer`
-/// （SGD 更新区間とは無関係な、例えば古い活性化テンソル）を drop する
-/// と、その `cuMemFreeAsync` が capture 中の共有ストリームへ直接
-/// 記録されてしまい、capture 対象の graph に「本来含めるつもりのない
-/// 解放操作」が混入する（再生のたびに既に無効なポインタへ
+/// `run_captured_sgd_step_segment`（`graph.rs`）で当該 ordinal を実際に
+/// driver capture 中に、**別スレッド**が同じ ordinal 上の
+/// `DeviceBuffer`（SGD 更新区間とは無関係な、例えば古い活性化テンソル）
+/// を drop すると、その `cuMemFreeAsync` が capture 中の共有ストリームへ
+/// 直接記録されてしまい、capture 対象の graph に「本来含めるつもりの
+/// ない解放操作」が混入する（再生のたびに既に無効なポインタへ
 /// `cuMemFreeAsync` を発行する二重解放相当の破損）。
 ///
-/// 本関数はそれを防ぐため、`ordinal` が**別スレッドで** capture 中
-/// （`state.capture` が `Some(current thread と異なる ThreadId)`）の間、
-/// [`CaptureGuard::drop`] の `notify_all` を待って `Condvar::wait` で
-/// 駐機する（`begin_capture_session` の in_flight ドレインと対称の
-/// 「capture 側からの排他」）。**capture 中のスレッド自身**からの
-/// 呼び出しは待たずに即座に返す（`state.capture == Some(current
-/// thread)` の場合。同一スレッドが自身の capture 中に意図して
-/// バッファを解放するケース〈capture 本体がテンポラリを確保・解放する
-/// 場合等〉を自己デッドロックさせないため。この場合の解放は「この
-/// スレッド自身が構成している capture の一部」として cudarc の
-/// `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` 契約の範囲内であり、本関数の
-/// 対象外＝呼び出し元〈`graph.rs`〉の責務とする）。
+/// **P0 再修正（codex-review 指摘。旧稿は「待ってから戻るだけ」だった）**:
+/// 旧稿の `wait_until_not_capturing` は駐機から戻った直後にロックを
+/// 手放していたため、戻った瞬間から実際の `cuMemFreeAsync` 発行までの
+/// 間に**別の**capture セッションが開始・実際の driver capture まで
+/// 進んでしまう競合窓が残っていた。本関数はこの窓を閉じるため、
+/// 駐機が終わったら（ロックを保持したまま）[`CallToken`] と同じ
+/// `state.in_flight` カウンタへ登録してから返す。以後
+/// [`begin_capture_session`] が新たに呼ばれても、そのドレイン
+/// （`state.in_flight == 0` 待ち）は本トークンが drop される（＝実際の
+/// 解放が完了する）までブロックされるため、「駐機解除後・解放発行前」
+/// の間に新しい capture が実際に始まることはない。
 ///
-/// `Drop::drop` から呼ばれるため `Result` を返せない。レジストリ・
+/// **駐機条件は「実際に driver capture が進行中」（[`OrdinalState::
+/// capturing_active`]）のみ（Cursor Bugbot High 指摘対応・PR #1390
+/// 再修正）**: `state.capture` が `Some`（`begin_capture_session` の
+/// in_flight ドレイン待機中を含む）というだけでは駐機しない。`capture`
+/// だけを条件にすると、既に [`CallToken`] を保持したまま（＝
+/// `in_flight` に計上済みのまま）一時バッファを drop する別スレッドが
+/// 本関数で駐機し、一方 capture 側は当のスレッドの `in_flight` が
+/// 減るのを待ち続けるという相互待機（Cursor Bugbot 指摘のデッドロック）
+/// が生じる。`capturing_active` のみを条件にすることで、ドレイン中
+/// （driver 側はまだ capture していない）の解放は素通しし、実際に
+/// capture が進行中の区間だけを対象にする（`capturing_active` doc
+/// コメント参照）。
+///
+/// **capture 中のスレッド自身**からの呼び出しは待たずに即座に登録・
+/// 返す（`state.capture == Some(current thread)` の場合。同一スレッドが
+/// 自身の capture 中に意図してバッファを解放するケース〈capture 本体が
+/// テンポラリを確保・解放する場合等〉を自己デッドロックさせないため。
+/// この場合の解放は「このスレッド自身が構成している capture の一部」
+/// として cudarc の `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL` 契約の範囲内
+/// であり、本関数の対象外＝呼び出し元〈`graph.rs`〉の責務とする）。
+///
+/// `Drop::drop` から呼ばれる想定のため `Result` を返さない。レジストリ・
 /// ロック取得の失敗時は他の `Drop` 実装（[`CaptureGuard::drop`]・
-/// [`CallToken::drop`]）と同じ方針で静かに諦める（fail-open。`Drop` の
-/// 中で panic できないため、これ以上安全にできることがない）。
-pub(crate) fn wait_until_not_capturing(ordinal: usize) {
+/// [`CallToken::drop`]）と同じ方針で静かに諦め、`registered: false` の
+/// トークンを返す（fail-open。これ以上安全にできることがない）。
+pub(crate) fn begin_buffer_release(ordinal: usize) -> BufferReleaseToken {
     let Ok(cell) = ordinal_registry().entry(ordinal) else {
-        return;
+        return BufferReleaseToken {
+            ordinal,
+            registered: false,
+        };
     };
     let current = std::thread::current().id();
     let Ok(mut state) = cell.0.lock() else {
-        return;
+        return BufferReleaseToken {
+            ordinal,
+            registered: false,
+        };
     };
-    while let Some(owner) = state.capture {
-        if owner == current {
-            return;
-        }
+    while state.capturing_active && state.capture != Some(current) {
         state = match cell.1.wait(state) {
             Ok(s) => s,
-            Err(_) => return,
+            Err(_) => {
+                return BufferReleaseToken {
+                    ordinal,
+                    registered: false,
+                };
+            }
         };
+    }
+    state.in_flight += 1;
+    BufferReleaseToken {
+        ordinal,
+        registered: true,
     }
 }
 
@@ -2433,6 +2551,147 @@ mod poison_state_tests {
             "capture を開始した本人のスレッドは引き続き driver 呼び出しできるはず: {token:?}"
         );
         drop(token);
+        drop(guard);
+    }
+
+    // =====================================================================
+    // `begin_buffer_release`／`capturing_active` の状態機械（codex-review
+    // P0 再指摘・Cursor Bugbot High 指摘対応・PR #1390 再修正）。
+    // `memory.rs::CudaBufferHandle::Drop` の排他契約をホストモデルで検証
+    // する（`.claude/rules/coding-rust.md` テスト規約: 受け入れ基準に
+    // 対応するテストを同一 PR に含める）。
+    // =====================================================================
+
+    /// (a) `begin_capture_session` の in_flight ドレイン中（`capturing_active`
+    /// がまだ立っていない区間）は、別スレッドの `begin_buffer_release` は
+    /// 駐機せず即座に登録される（`begin_buffer_release` doc コメント
+    /// 「P0 再修正」の「ドレイン中は素通し」契約）。ドレイン完了と
+    /// 同一ロック区間内で `capturing_active` が立つこと（`begin_capture_
+    /// session` doc コメント「P0 再修正」）・`CaptureGuard` drop で
+    /// 解除されること（`OrdinalState::capturing_active` doc コメント）も
+    /// あわせて確認する。
+    #[test]
+    fn begin_buffer_release_passes_through_during_capture_session_drain_then_capturing_active_is_set_after_drain()
+     {
+        let ordinal = unique_ordinal();
+        // in-flight を模した CallToken（`begin_capture_session` の drain
+        // 対象になる）。
+        let in_flight_token = begin_driver_call(ordinal, &[0]).expect("token 1 取得");
+
+        let handle = std::thread::spawn(move || begin_capture_session(ordinal));
+
+        // 別スレッドが `state.capture` を設定（drain 待機に入った）まで
+        // ポーリングする。この時点では `in_flight_token` をまだ保持して
+        // いるため drain は完了しておらず、`capturing_active` は
+        // 立っていないはず。
+        let cell = ordinal_registry().entry(ordinal).expect("registry entry");
+        loop {
+            let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            if state.capture.is_some() {
+                assert!(
+                    !state.capturing_active,
+                    "in_flight ドレイン中は capturing_active がまだ立っていないはず"
+                );
+                break;
+            }
+            drop(state);
+            std::thread::yield_now();
+        }
+
+        // ドレイン中（`capturing_active == false`）の別スレッドからの
+        // `begin_buffer_release` は駐機せず即座に登録されるはず。もし
+        // 誤って `state.capture.is_some()` だけを条件に駐機してしまうと、
+        // ここで `begin_capture_session` 側の drain（`in_flight_token` の
+        // drop 待ち）と本呼び出しの `Condvar::wait` が互いを待ち合い、
+        // このテスト自体がハングして CI タイムアウトで検出される
+        // （Cursor Bugbot High 指摘のデッドロックそのもの）。
+        let release_token = begin_buffer_release(ordinal);
+        drop(release_token);
+
+        // drain を完了させる。
+        drop(in_flight_token);
+        let guard = handle
+            .join()
+            .expect("spawned thread does not panic")
+            .expect("capture session succeeds after drain");
+
+        {
+            let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                state.capturing_active,
+                "drain 完了後（begin_capture_session が返った後）は capturing_active が \
+                 立っているはず"
+            );
+        }
+
+        drop(guard);
+        let state_after = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !state_after.capturing_active,
+            "CaptureGuard の Drop で capturing_active も解除されるはず"
+        );
+    }
+
+    /// (b) `capturing_active` が立った後（実際の driver capture 進行中に
+    /// 相当する区間）は、別スレッドの `begin_buffer_release` は
+    /// `CaptureGuard` の drop まで駐機する（`begin_buffer_release` doc
+    /// コメント「P0 再修正」の本題）。
+    #[test]
+    fn begin_buffer_release_blocks_other_thread_while_capturing_active_until_guard_drops() {
+        let ordinal = unique_ordinal();
+        // in_flight が 0 のため drain は即完了し、`begin_capture_session`
+        // が返った時点で `capturing_active` は既に true。
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        {
+            let cell = ordinal_registry().entry(ordinal).unwrap();
+            assert!(
+                cell.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .capturing_active
+            );
+        }
+
+        let (unblock_tx, unblock_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let token = begin_buffer_release(ordinal);
+            // 駐機が解除され登録できた時点で通知する。
+            unblock_tx.send(()).unwrap();
+            drop(token);
+        });
+
+        // `capturing_active` の間は別スレッドの `begin_buffer_release` が
+        // 駐機し続け、短いタイムアウト内には通知が届かないはず
+        // （フレーク回避のための現実的なタイムアウト。真の無限待機の
+        // 証明ではないが、駐機せず即座に登録されてしまう回帰は確実に
+        // 検出できる）。
+        assert!(
+            unblock_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "capturing_active の間は別スレッドの begin_buffer_release は駐機し続けるはず"
+        );
+
+        drop(guard);
+        unblock_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect(
+                "CaptureGuard の drop 後は begin_buffer_release の駐機が解除され \
+                 token を得られるはず",
+            );
+        handle.join().expect("spawned thread does not panic");
+    }
+
+    /// (c) capture 中の**スレッド自身**からの `begin_buffer_release` は
+    /// 駐機せず即座に登録される（`begin_buffer_release` doc コメント
+    /// 「capture 中のスレッド自身」参照。自己デッドロック回避）。
+    #[test]
+    fn begin_buffer_release_does_not_block_the_capturing_thread_itself() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture session succeeds");
+        // ここでハングすればテストがタイムアウトし回帰を検出する。
+        let release_token = begin_buffer_release(ordinal);
+        drop(release_token);
         drop(guard);
     }
 }
