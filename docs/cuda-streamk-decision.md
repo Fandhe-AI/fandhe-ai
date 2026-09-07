@@ -242,27 +242,34 @@ GB10 実測で K 分割なし版は REJECT と確定）が完了したのを受�
   時間比較・採否判断は兄弟イシュー #1359 へ引き継ぐ（`docs/perf/cuda-gemm-tiled-pipeline-streamk.md`
   §5「#1359 向け判定基準の事前宣言」参照）。
 
-したがって本節時点では **設計・実装は完了したが、§5 の再評価条件 1（実機確認）は未充足**。#1358 の
-成果物（opt-in カーネル・ホスト API・GPU 不要のホストシミュレータテストによる配布計画の網羅性・一意性
-検証）は本番結線を一切行わない（`CudaGemm::new`・`select_tiled_f32_kernel` は不変）。実機実測後の採否
-判断（本番結線可否）は #1359 が担い、その結果を本節へ追記する。
+したがって本節時点では **設計・実装は完了・GB10 実機実測も完了し、§5 の再評価条件 1・2 とも判定材料が
+揃った**。#1358 の成果物（opt-in カーネル・ホスト API・GPU 不要のホストシミュレータテストによる配布
+計画の網羅性・一意性検証）は本番結線を一切行わない（`CudaGemm::new`・`select_tiled_f32_kernel` は
+不変）。実機実測後の採否判断（本番結線可否）は #1359 が担当し、以下「#1359 実測結果」節に確定記録した。
 
 ## #1359 実測結果
 
-**未実測（実機未到達）**。本エージェント実行環境から GB10（DGX Spark GB10）実機への接続手段
-（`docs/real-hardware-verification-env.local.md`。Git 管理外の実値ファイル）が本セッションの worktree
-に存在せず、`CUDA_NODE` を解決できなかったため、SSH 転送・実機テスト・ベンチ実行のいずれにも着手
-できなかった。実測値は捏造せず、以下のとおり現状のみを記録する。
+**REJECT（本番結線は行わない）**。GB10（DGX Spark GB10・sm_121）実機で
+`docs/perf/cuda-gemm-tiled-pipeline-streamk.md` §6 のゲート A〜D を実施した（実行ログ・env_info は
+`docs/perf/logs/cuda-tiled-pipeline-streamk-1359/`）。
 
-- **§5 再評価条件 1（tail effect の実測支配性・正味改善の確認）**: 引き続き未充足。ゲート C（N=1024
-  `streamk_over_pipeline3 ≥ 1.05`・N=2048 `≥ 1.00`）が未実施のため判定不能。
-- **§5 再評価条件 2（`assert_no_parity_regression` 相当の実機確認）**: `streamk_repeated_launch_is_deterministic`
-  を含む `cpu_cuda_tiled_pipeline_streamk_parity -- --ignored` の実機実行が未実施のため、引き続き
-  未確認のまま（#1358 が設計・静的検証まで完了させた状態から進捗なし）。
-- **最終採否**: **保留**（実測なしには ADOPT／REJECT を確定できない。#1358・本節冒頭で記録した「不採用
-  （保留）」の状態を変更する実測的根拠がまだ得られていない）。本番結線（`select_tiled_f32_kernel`／
-  `CudaGemm::new`）は行っていない。
-- **申し送り**: GB10 等の CUDA 実機へ到達可能なセッションで
-  `docs/perf/cuda-gemm-tiled-pipeline-streamk.md` §6「再開手順」に従いゲート A〜D を実施し、本節を
-  実測結果で更新すること。詳細な判定基準・机上見積りとの突合欄は同ドキュメント §6 を参照（本節では
-  重複記載しない）。
+- **§5 再評価条件 1（tail effect の実測支配性・正味改善の確認）**: **不充足と確定**。ゲート C
+  （`streamk_over_pipeline3` 5 回中央値）は N=1024 で 1.0271 倍（判定基準 ≥1.05 未達）・N=2048 で
+  0.9395 倍（判定基準 ≥1.00 未達）。ゲート D（本番経路実体である 128×64 pipeline との比較。5 回中央値）
+  も N=1024 で 0.9801 倍・N=2048 で 0.8394 倍（いずれも ≥1.00 未達）。fixup 固定費（カーネル起動・
+  寄与者数に比例する固定順序逐次加算コスト）が末尾 wave 短縮による理論改善を実測では相殺・逆転させて
+  おり、正味の改善にならないことが実機で確認された（詳細は同ドキュメント §6.6「机上見積りとの突合」）。
+- **§5 再評価条件 2（`assert_no_parity_regression` 相当の実機確認）**: **決定性は充足を確認**
+  （`streamk_repeated_launch_is_deterministic` を含む `cpu_cuda_tiled_pipeline_streamk_parity --
+  --ignored` の 8 テストが GB10 実機で全 PASS。同ドキュメント §6.3）。一方、残タイルの複合判定統計
+  （B-1）は 16 行中 12 行で `fail_count > 0`（tolerance 定数・`ParityBaseline` は変更していない。
+  同ドキュメント §6.4）であり、結線の前提条件である「全行 0 fail」は満たしていない。既存経路
+  （非 Stream-K・persistent）への非後退（B-2）は 18 passed・10 passed（0 failed）で確認済み。
+- **最終採否**: **REJECT**（`select_tiled_f32_kernel`／`CudaGemm::new` への本番結線は行わない）。
+  ゲート B-1・C・D の 3 つが判定基準未達のため、§5「結線の総合条件」（A ∧ B-1 全行 0 fail ∧ B-2 ∧
+  C 合格 ∧ D 合格）は成立しない。opt-in 実装（`internal-diagnostics` feature 限定）自体は削除せず
+  そのまま維持する。
+- **申し送り**: fixup 固定費の削減・B-1 の複合判定 fail の扱い（tolerance 緩和や `ParityBaseline`
+  行追加の要否はユーザー承認事項として本イシューでは判断していない）・128×64 タイルへの Stream-K
+  拡張は今後の検討候補として `docs/perf/cuda-gemm-tiled-pipeline-streamk.md` §6.8 に記録した
+  （本節では重複記載しない）。

@@ -1,14 +1,117 @@
 # GB10 実機実測 env_info（イシュー #1359）
-#
-# 状態: 未実測（ブロッカー）
-#
-# 理由: 本エージェント実行環境（Mac 側 worktree）に
-# docs/real-hardware-verification-env.local.md（GB10 実機接続用のローカル実値ファイル。
-# Git 管理外）が存在せず、CUDA_NODE を解決できなかったため、GB10 実機への rsync 転送・
-# SSH 経由でのビルド・テスト・ベンチ実行のいずれにも着手できなかった。
-#
-# 実測値は捏造せず未記入のまま残す。判定基準・再開手順の詳細は
-# docs/perf/cuda-gemm-tiled-pipeline-streamk.md §6 を参照。
-#
-# 再開時にこのファイルを実測の env_info（計測日・.rev-stamp・nvidia-smi 出力・
-# 実行前後の uptime・nvcc/rustc/cargo バージョン・streamk_plan 要約）で置き換えること。
+
+## 計測日時
+
+2026-09-07（UTC。実行区間は概ね UTC 17:34〜17:40）。
+
+## 対象リビジョン
+
+`.rev-stamp`（rsync 転送時に付与・実測後にローカルから削除）:
+`4bf092f75f5e39877914d61f794a80822ecdfaf3`
+（`docs/perf/cuda-gemm-tiled-pipeline-streamk.md` #6・
+`docs/cuda-streamk-decision.md` の「#1359 実測結果」節を追記する直前の
+`test/1359-cuda-streamk-gb10-measure` ブランチ HEAD。#1358／PR #1410 マージ
+済みの Stream-K 実装を含む main 相当）。
+
+## GPU・ドライバ
+
+```
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+```
+
+sm_121（GB10）。実行前後とも `utilization.gpu` は 0%（自身のベンチプロセス
+実行中を除く）で、他の計測プロセスによる占有は確認されなかった。
+
+## 実行中の常駐プロセス（計測対象外。`docs/real-hardware-verification-env.local.md`
+記載の既知常駐サービス）
+
+```
+427276, /opt/llm-infra/comfyui-env/bin/python, 170 MiB
+1241474, /opt/llm-infra/venvs/kokoro/bin/python3, 870 MiB
+```
+
+いずれも GPU compute を占有しない常駐サービス（ComfyUI・Kokoro）。GB10 は
+unified memory のため used_memory 表示はサービスプロセスの常駐分のみで
+GEMM ベンチ計測を妨げるものではない（`utilization.gpu` 0% で確認済み）。
+
+## uptime（load average）
+
+- 実測開始前（Step 0 到達性確認時）:
+  `02:34:51 up 11 days, 14:01, 6 users, load average: 1.43, 0.55, 0.30`
+- ゲート C run5 完了直後:
+  `02:39:57 up 11 days, 14:06, 6 users, load average: 2.81, 2.20, 1.12`
+  （load average の上昇は本セッションの `cargo test`/`cargo run --release`
+  ビルド・実行自体によるもの。他プロセスの並走は `nvidia-smi
+  --query-compute-apps` で確認した上記 2 プロセス〈GPU compute 非占有〉のみ）
+
+## ツールチェイン
+
+```
+$ nvcc --version
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Aug_20_01:57:39_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+
+$ rustc --version
+rustc 1.97.0 (2d8144b78 2026-07-07)
+```
+
+## 実行コマンド一覧
+
+ゲート A・B-1（同一実行。`--nocapture` 必須。統計行は informational）:
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_streamk_parity -- --ignored --nocapture --test-threads=1
+```
+
+ゲート B-2（既存経路の非後退。2 テストバイナリ）:
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_parity -- --ignored --nocapture --test-threads=1
+cargo test -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --test cpu_cuda_tiled_pipeline_persistent_parity -- --ignored --nocapture --test-threads=1
+```
+
+ゲート C・D（GPU-only純カーネル時間。5 回独立プロセス起動）:
+
+```sh
+cargo run -p fandhe-ai-backend-cuda --release --locked --features internal-diagnostics \
+  --example gemm_tiled_pipeline_persistent_bench -- \
+  --sizes 1024,2048,4096 --tile both --blocks-per-sm auto --streamk on
+```
+
+全コマンドとも `env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH
+CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai` を先頭に付けて実行した
+（`docs/real-hardware-verification-env.md` §2.2 準拠）。
+
+## 破棄した run
+
+なし。5 回すべて `nvidia-smi --query-gpu=utilization.gpu` 0%（実行前確認）
+の条件下で採取し、撮り直しは発生しなかった。
+
+## ゲート結果サマリ（詳細は `docs/perf/cuda-gemm-tiled-pipeline-streamk.md` §6・
+`aggregate.md` を参照）
+
+- ゲート A（決定性・正確性・8 テスト）: **PASS**（8 passed; 0 failed）。
+- ゲート B-1（残タイル複合判定統計）: **一部行 fail_count > 0**（16 行中
+  12 行が `fail_count > 0`。全行 0 fail の green ではない）。
+  `blocks_per_sm=Some(1)` 8 形状・`blocks_per_sm=None` 8 形状の全 16 行の
+  実測値は `gateA_streamk_parity.log` を参照。
+- ゲート B-2（既存経路の非後退）: **PASS**（`cpu_cuda_tiled_pipeline_parity`
+  18 passed; `cpu_cuda_tiled_pipeline_persistent_parity` 10 passed。いずれも
+  0 failed）。
+- ゲート C（`streamk_over_pipeline3` 5 回中央値）: **FAIL**
+  （N=1024: 1.0271 倍 < 1.05・N=2048: 0.9395 倍 < 1.00）。
+- ゲート D（64x64.streamk / 128x64.pipeline3 5 回中央値）: **FAIL**
+  （N=1024: 0.9801 倍 < 1.00・N=2048: 0.8394 倍 < 1.00）。
+
+## 最終判定
+
+**REJECT**（本番結線〈`select_tiled_f32_kernel`／`CudaGemm::new`〉は行わない）。
+判断根拠は `docs/perf/cuda-gemm-tiled-pipeline-streamk.md` §6「7. 採否・結線
+判断」・`docs/cuda-streamk-decision.md` の「#1359 実測結果」節を参照。
