@@ -441,8 +441,8 @@ fn compute_b_laneq(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: us
 /// そのまま引き継ぐ。`acc` はレジスタ内のみで完結し境界検査の対象外。
 #[inline(always)]
 unsafe fn b_laneq_k_loop(acc: &mut [[float32x4_t; 2]; NR], ap: &[f32], bp: &[f32], kc_len: usize) {
-    // edition 2024 は `unsafe fn` 内であっても `#[target_feature]` 付き
-    // intrinsic 呼び出しに明示 `unsafe {}` を要求するため、本関数全体を
+    // SAFETY: edition 2024 は `unsafe fn` 内であっても `#[target_feature]`
+    // 付き intrinsic 呼び出しに明示 `unsafe {}` を要求するため、本関数全体を
     // 包む（呼び出し元 [`compute_b_laneq`]／[`compute_b_laneq_vec`] が
     // 保証する SAFETY 契約をそのまま引き継ぐのみで、追加の安全性条件は
     // ない）。
@@ -592,7 +592,7 @@ unsafe fn transpose_4x4(
     r2: float32x4_t,
     r3: float32x4_t,
 ) -> [float32x4_t; 4] {
-    // edition 2024 は `unsafe fn` の内部であっても `#[target_feature]`
+    // SAFETY: edition 2024 は `unsafe fn` の内部であっても `#[target_feature]`
     // 付き intrinsic 呼び出しに明示 `unsafe {}` を要求する（呼び出し元の
     // unsafe fn 境界だけでは暗黙に許可されない）。本関数自体は呼び出し元
     // （[`compute_b_laneq_vec`]）が保証する SAFETY 契約をそのまま引き継ぐ
@@ -1298,6 +1298,11 @@ mod tests {
             9.0,
             10.0,
         ];
+        // SAFETY: `vals` は 16 要素の固定長配列で `i` は `0..4` の範囲しか
+        // 取らないため、各 `vals[i * 4..]` スライスには `vld1q_f32` が読む
+        // 4 要素（`i * 4 + 3` まで）が必ず残っている。ストア先 `out` も
+        // 4 要素の固定長配列（`[0.0f32; 4]`）であり `vst1q_f32` の書き込み
+        // 幅と一致する。
         unsafe {
             let rows: [float32x4_t; 4] = std::array::from_fn(|i| vld1q_f32(vals[i * 4..].as_ptr()));
             let transposed = transpose_4x4(rows[0], rows[1], rows[2], rows[3]);
