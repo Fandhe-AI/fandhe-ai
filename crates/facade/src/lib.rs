@@ -331,6 +331,48 @@ pub fn cuda_tf32_gemm_enabled() -> bool {
     fandhe_ai_backend_cuda::precision::tf32_gemm_enabled()
 }
 
+/// CUDA GEMM 精度モード（既定 `Fp32Strict`・単発 `Tf32`・3×TF32
+/// `Tf32x3`。イシュー #1355。親ツリー #1354・承認元 #1338）の再公開。
+/// `set_cuda_gemm_precision`／`cuda_gemm_precision` の戻り値・引数型
+/// として使う（`fandhe_ai_backend_cuda::precision::CudaGemmPrecision` の
+/// 薄い再公開。[`PoolStats`] と同じ前例）。
+pub use fandhe_ai_backend_cuda::precision::CudaGemmPrecision;
+
+/// CUDA GEMM（`fandhe_ai::tape().var(a).matmul(b)` 等が最終的に到達する
+/// `CudaBackendOps::gemm`）の精度モードを設定する（イシュー #1355。
+/// [`set_cuda_tf32_gemm_enabled`] の 3 モード拡張版・同型の composition
+/// root 委譲）。
+///
+/// `fandhe_ai_backend_cuda::precision::set_gemm_precision` への薄い委譲。
+/// **既定は [`CudaGemmPrecision::Fp32Strict`]**。`CudaGemmPrecision::
+/// Tf32x3` を指定すると、以降の全スレッド・全 CUDA device の `gemm`
+/// 呼び出しが 3×TF32（split-single 法。hi/lo 分割・3 回の `mma.sync`
+/// 累積）経路へプロセスワイドに切り替わる（`Device` 単位ではない。
+/// `fandhe_ai_backend_cuda::precision` モジュール冒頭コメントの契約
+/// 参照）。有効時にモード固有のカーネルが使用不能（cc<8.0・NVRTC
+/// コンパイル失敗・整列制約不成立等）な環境では `gemm` 呼び出しが
+/// [`BackendError`] を返す（fail-closed。FP32 への黙示フォールバックは
+/// しない）。`Tf32x3` は f32 SIMT と bit 一致しない（
+/// `.claude/rules/coding-rust.md` FMA 契約統一節の明示的例外。数値一致
+/// 許容誤差自体は変更しない）。適用範囲（`gemm_bias_act`・
+/// `gemm_resident_*`・学習経路は対象外）は [`set_cuda_tf32_gemm_enabled`]
+/// と同じ（`docs/cuda-tf32-optin-api-decision.md`・
+/// `docs/cuda-tf32x3-split-single-decision.md`）。
+///
+/// [`set_cuda_tf32_gemm_enabled`]／[`cuda_tf32_gemm_enabled`]（旧 2 値
+/// API）は互換ラッパーとして維持する: `set_cuda_tf32_gemm_enabled(false)`
+/// はどのモードからでも `Fp32Strict` へ戻す。`cuda_tf32_gemm_enabled()`
+/// は単発 `Tf32` のときのみ `true` を返す（`Tf32x3` では `false`）。
+pub fn set_cuda_gemm_precision(mode: CudaGemmPrecision) {
+    fandhe_ai_backend_cuda::precision::set_gemm_precision(mode);
+}
+
+/// [`set_cuda_gemm_precision`] で設定した現在の精度モードを返す
+/// （既定 [`CudaGemmPrecision::Fp32Strict`]）。
+pub fn cuda_gemm_precision() -> CudaGemmPrecision {
+    fandhe_ai_backend_cuda::precision::gemm_precision()
+}
+
 /// CUDA `DeviceBuffer` の確保配置（`alloc_zeroed`／`upload`）を managed
 /// memory（`cuMemAllocManaged`）へ opt-in で切り替える（イシュー #1352。
 /// 親 #1351「GB10 物理統合メモリ向けゼロコピー割当の試作・実測」）。

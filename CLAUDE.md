@@ -84,7 +84,8 @@ fandhe-ai/
     ├── crates-io-publishing-order.md # crates.io 公開 6 クレート間 path 依存の version 併記方針（[dependencies] は付与・[dev-dependencies] は strip）・公開順序（トポロジカル順）・workspace.version 一括バンプ運用（#881）
     ├── cuda-streamk-decision.md        # CUDA GEMM StreamK スケジューリングの機構要約・wave 定量化・採否判断（保留。#812）
     ├── cuda-tensor-core-design.md      # TASK-11.1a WMMA/mma カーネル設計メモ（#60）
-    ├── cuda-tf32-optin-api-decision.md # CUDA GEMM の TF32 Tensor Core 経路を opt-in で選択する公開 API（`fandhe_ai::set_cuda_tf32_gemm_enabled`）の設計判断・既定 OFF／fail-closed 方針・framework-compare `--tf32` の C-1/C-2 分割（#1042）
+    ├── cuda-tf32-optin-api-decision.md # CUDA GEMM の TF32 Tensor Core 経路を opt-in で選択する公開 API（`fandhe_ai::set_cuda_tf32_gemm_enabled`）の設計判断・既定 OFF／fail-closed 方針・framework-compare `--tf32` の C-1/C-2 分割（#1042）。追補（#1355）で `CudaGemmPrecision` 3 モード化（`Fp32Strict`／`Tf32`／`Tf32x3`）・`set_cuda_gemm_precision` API・互換ラッパー意味論・fail-closed 範囲を追記
+    ├── cuda-tf32x3-split-single-decision.md # CUDA GEMM 3×TF32（split-single 法。hi/lo 分割・3 回の `mma.sync` 累積）の設計判断（分割式・レジスタ段分割の根拠・smem 2 面分離案の不採用・CUTLASS `mma_tensor_op_fast_f32` と同型の累積順序・FMA 契約例外の明記・#1356 へ引き継ぐ誤差分布／純カーネル時間の実測記入欄。親ツリー #1354・承認元 #1338・イシュー #1355）
     ├── device-memory-pool-design.md # デバイスメモリのサイズクラス・プールアロケータ設計（ハンドル非依存 SizeClassPool<H>〈take／put の RAII 返却・record_allocation／record_loan_end／record_release（Mutex 系）と record_pending_return／record_pending_merge（AtomicU64 の lock-free 系。push／take と同一クリティカルセクションで対にして順序逆転を排除）による PoolStats 更新契約・Metal は synchronize 完了まで put を遅延し同期の成否に関わらず pending_return_bytes で可視化した返却待ちを合流・take_one_for_release とバックエンド別フェーズを持つ release_cached のトランザクション型解放〉・PoolConfig／PoolStats・サイズクラス表・寿命・断片化・スレッド安全・解放戦略・REQ-14 解放 API の facade 到達経路・§8 設計確定事項／実装確定事項の区分。#1018 ツリー・#1019）
     ├── device-resident-update-design.md # 学習ループのパラメータ更新デバイス常駐化の設計（更新経路・所有権・数値一致契約。#933 ツリー・#934）
     ├── facade-device-handle-design.md # デバイスハンドル再利用の公開 API 設計判断（案 B のみ採用・#929/#946 実装済みの追認・#931）

@@ -216,6 +216,15 @@ thread_local! {
     /// 使う。スレッドローカルにする理由も同上（並列テスト間の偽陽性混入
     /// を避ける）。
     pub(crate) static GEMM_TRANSPOSED_ENTRY_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// `ops.rs::CudaBackendOps::gemm` が `crate::precision::gemm_precision()`
+    /// が [`crate::precision::CudaGemmPrecision::Tf32x3`] のとき
+    /// [`crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm::run_tf32x3`] へ実際に
+    /// ルーティングした回数（イシュー #1355）。`TF32_OPTIN_GEMM_LAUNCH_
+    /// COUNT` と同型の可観測点で、実機なしの単体テストが 3 モード分岐
+    /// （`Fp32Strict`／`Tf32`／`Tf32x3`）を検証するために使う。スレッド
+    /// ローカルにする理由も同上（並列テスト間の偽陽性混入を避ける）。
+    pub(crate) static TF32X3_OPTIN_GEMM_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
