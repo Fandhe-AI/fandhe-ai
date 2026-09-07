@@ -3983,11 +3983,12 @@ mod tests {
         let head_gemm = MetalGemm::new_with_unroll_acc(&ctx, true)
             .expect("head GEMM パイプラインの構築に失敗した");
 
-        // イシュー #1329 で index 9（64,64,32,2,2）を追加した後も
-        // acc 積 >= 16（`CANDIDATES[0]` と同じ acc_rows=4, acc_cols=4）の
-        // ため対象へ入る（`tile.rs::unroll_acc_candidates_are_exactly_
+        // イシュー #1329 で index 9（64,64,32,2,2）・イシュー #1331 で
+        // index 10（128,64,16,2,2）を追加した後もいずれも acc 積 >= 16
+        // （index 9: acc_rows=4,acc_cols=4／index 10: acc_rows=8,acc_cols=4）
+        // のため対象へ入る（`tile.rs::unroll_acc_candidates_are_exactly_
         // acc_product_ge_16` と同じ判定根拠）。
-        let expected_unroll_indices = [0usize, 4, 8, 9];
+        let expected_unroll_indices = [0usize, 4, 8, 9, 10];
         for (i, cfg) in tile::CANDIDATES.iter().enumerate() {
             assert!(
                 !base_gemm.unroll_acc_effective(*cfg),
@@ -4003,7 +4004,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、
+    /// [`tile::CANDIDATES`] 全 11 候補 × N=512/1024/2048/4096 で、
     /// base（`unroll_acc_enabled=false`）/head（`unroll_acc_enabled=true`）
     /// の `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
     /// （イシュー #1282 AC-2）。`resolve_tile_config`（`#[cfg(test)]`）で
@@ -4137,7 +4138,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、
+    /// [`tile::CANDIDATES`] 全 11 候補 × N=512/1024/2048/4096 で、
     /// base（function constant 経路。`source_specialized=false`）/head
     /// （ソーステキスト特殊化経路。`source_specialized=true`）の
     /// `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
@@ -4320,7 +4321,7 @@ mod tests {
         }
     }
 
-    /// [`tile::CANDIDATES`] 全 10 候補 × N=512/1024/2048/4096 で、base
+    /// [`tile::CANDIDATES`] 全 11 候補 × N=512/1024/2048/4096 で、base
     /// （`tile::FRAG_LOAD_CONFIG`。既定）と head ∈
     /// {tgp-k2〈`{false, Two}`〉, device-hoisted-k1〈`{true, One}`〉,
     /// device-hoisted-k2〈`{true, Two}`〉} の `dispatch_tiled_prepared`
@@ -4776,7 +4777,7 @@ mod tests {
         ]
     }
 
-    /// T1: [`tile::CANDIDATES`] 全 10 候補 × N∈{512,1024,2048,4096} ×
+    /// T1: [`tile::CANDIDATES`] 全 11 候補 × N∈{512,1024,2048,4096} ×
     /// 必須 5 head で `dispatch_tiled_prepared` 出力が bit 単位で一致する
     /// ことを確認する（イシュー #1298。`frag_load_on_off_bit_match_all_
     /// candidates` と同型の設計）。`resolve_tile_config` でフォールバック
@@ -5198,7 +5199,7 @@ mod tests {
 
     // --- タイルクラス分割（イシュー #1327・E6 試作） ---
 
-    /// T1: [`tile::CANDIDATES`] 全 10 候補 × N∈{512,1024,2048,4096} で
+    /// T1: [`tile::CANDIDATES`] 全 11 候補 × N∈{512,1024,2048,4096} で
     /// base（`TileClassMode::Legacy`）/head（`TileClassMode::Split`）の
     /// `dispatch_tiled_prepared` 出力が bit 単位で一致することを確認する
     /// （`coop_load_bit_match_all_candidates` と同型の設計）。staged 候補

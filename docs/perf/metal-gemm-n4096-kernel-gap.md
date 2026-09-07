@@ -1936,3 +1936,144 @@ run1（1.0245 ms・この base 列内でも外れ値）だけを見て「概ね�
 `smoke_bk32_parity.log`・`kernel_gpu_run{1..5}.log`（A 系列）・
 `kernel_gpu_production_select_run{1..5}.log`（B 系列）・`aggregate.md`）。
 内部ホスト名は含めない。
+
+## 15. E8 候補追加: 128×64×16（wm2wn2）の収録と parity 確認（イシュー #1331）
+
+### 15.0 目的・範囲
+
+親 #1325（E8: threadgroup タイルを 128×64×16（2×2 simdgroup）へ拡張）の
+sub-issue。`CANDIDATES[0]`（64,64,16,2,2。大形状の主力構成）に対する
+bm=128 版 `(128,64,16,2,2)` を `tile::CANDIDATES` の **index 10（末尾）**
+へ追加した。各 simdgroup が担当する acc タイル数（acc_rows=8・
+acc_cols=4。積 32。`CANDIDATES[0]` は acc_rows=4・acc_cols=4・積 16）を
+拡張したまま A/B タイルの threadgroup 内再利用率を倍にする狙い（理論
+根拠。E1 実験〈本 doc §7〉・#1143 の H1〈レジスタ圧仮説。反射値レベル
+では非支持〉が動機）。
+
+本 issue のスコープは**候補追加と正確性（parity）確認のみ**: (a) 明示
+指定（`GemmVariant::SimdgroupTiled(cfg)`／`dispatch_tiled_prepared`／
+`dispatch_strided_tiled_prepared` の `cfg` 引数）でのみ到達可能にする
+（`select`／`select_with_occupancy_for_device` の選択ロジックは無変更）、
+(b) カーネル側手動境界チェック（REQ-8）を維持（`gemm.metal` は無変更）、
+(c) 全形状 × NN/NT/TN/TT で parity 0 fail を実機確認、(d) threadgroup
+メモリ使用量の反射値確認、(e) 現行 `CANDIDATES[0]`（bm=64）との出力が
+複合判定内で一致することを確認。純カーネル時間の before/after 実測・
+`tile::select` への組み込み判断は後続イシュー #1332 のスコープ（§15.6）。
+
+### 15.1 環境・プロトコル
+
+実機は Apple M4 Max（`docs/real-hardware-verification-env.md` §7）。
+`cargo test -p fandhe-ai-backend-metal --release ... -- --ignored
+--nocapture --test-threads=1`（正確性確認のみのため 5 回計測中央値は
+不要）。実行前 `uptime` load average 2.87/4.26/5.18（他イシューが並列
+実行中の共有環境。20 ユーザーセッション並走）。正確性確認のみのため
+共有負荷は結論に影響しない。env_info・実行ログは §15.7 参照。
+
+### 15.2 f16 版 SMEM 超過の扱い（設計判断）
+
+`shared_mem_bytes_f16()` は本候補で **40064 バイト**となり、標準
+Apple Silicon の threadgroup メモリ上限（32KiB=32768 バイト）を構造的
+に超過する。エピローグ領域単独で `bm*bn*4 = 128*64*4 = 32768` バイトに
+達し、staged タイル領域（half 単位。NN で 7296 バイト）を加えると必ず
+上限を超える（`TileConfig::shared_mem_bytes_f16` ドキュメントコメント
+参照）。`pipeline_for_tile_f16` は超過構成を `fallback_chain` の
+`SINGLE_SIMDGROUP_8X8` へ安全に縮退させるため実行時 panic はしない
+（f16 タイル化経路は本候補で構造的に使用不可なだけであり、`select`・
+`dispatch_f16_auto_unverified` は `CANDIDATES` を選ばないため本番挙動へ
+の影響もない）。
+
+この非適格性を隠さず機械的に固定するため、`TileConfig::f16_tiled_fits_
+standard_limit`（`shared_mem_bytes_f16() <= 32*1024` を返す `#[cfg(test)]`
+限定ヘルパ）・`TileConfig::f16_tiled_candidates`（適格候補のみを巡回する
+イテレータ）を追加し、既存の f16 全候補 CI テスト 2 件
+（`shared_mem_bytes_f16_all_candidates_within_32kib_device_limit`・
+`shared_mem_bytes_f16_fits_standard_shared_mem_limit_for_all_candidates`。
+いずれも Linux 実行可能）を `CANDIDATES` 全体ではなく `f16_tiled_
+candidates()` の巡回へ変更した。新規 CI テスト
+`f16_tiled_candidates_excludes_exactly_candidate_10` で「f16 非適格
+index 集合が正確に `{10}`」であることを両方向（増加・減少）で固定する
+ドリフト検出とした。実機側の f16 全候補テスト 2 件
+（`all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`／
+`_non_multiple_boundary_shape`）は候補ごとに分岐させ、適格候補は従来
+どおり `resolved == cfg` を、非適格（index 10）候補は `resolved ==
+SINGLE_SIMDGROUP_8X8` を assert したうえで parity も実行する（縮退経路
+が正しく動作することの fail-closed 確認。§15.7 の
+`regression_ignored_all_candidates.log` 参照）。
+
+この変更は既存テストの緩和ではなく、非適格集合を index で固定し
+縮退先を assert する厳格化である（`tolerance`・baseline の変更は伴わ
+ない。`.claude/rules/coding-rust.md` の対象外）。
+
+### 15.3 反射値・SMEM 表
+
+`candidate_10_reflection_shows_no_fallback_for_every_transpose_pattern`
+（`gemm_spec_source_diag_tests.rs`）実機実測結果:
+
+| pattern | requested_thread_count | max_total_threads_per_threadgroup | thread_execution_width | static_threadgroup_memory_length | `shared_mem_bytes_for` |
+|---|---|---|---|---|---|
+| NN | 128 | 1024 | 32 | 0 | 14592 |
+| NT | 128 | 1024 | 32 | 0 | 15360 |
+| TN | 128 | 1024 | 32 | 0 | 12800 |
+| TT | 128 | 1024 | 32 | 0 | 13568 |
+
+全パターンで `resolved_cfg == requested_cfg`（フォールバック非経由）・
+`max_total_threads_per_threadgroup >= 128`・`thread_execution_width ==
+32` を確認。`static_threadgroup_memory_length` が 0 なのは §13.2 と
+同じ理由（動的 threadgroup メモリのため `shared_mem_bytes_for` が実際の
+確保量を表す）。4 パターンとも 32KiB（32768 バイト）上限内・16 バイト
+整合（`tile.rs::candidate_10_shared_mem_bytes_for_every_transpose_
+pattern_within_32kib_and_16_aligned` で固定済み）。f16 版
+`shared_mem_bytes_f16()` は上記 §15.2 のとおり 40064 バイトで超過・
+非適格。
+
+### 15.4 parity 結果表
+
+| テスト | 対象 | 実機結果 |
+|---|---|---|
+| `bm128_candidate_matches_cpu_reference_non_multiple_of_tile`（`gemm_dynamic_tile_parity.rs`） | 境界形状 (200,130,70) | ok |
+| `bm128_candidate_matches_cpu_reference_k_stress`（同上） | K=4096 ストレス | ok |
+| `bm128_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns`（`gemm_strided_parity.rs`） | 512³/1024³/2048³・(2048,2048,64)・(2048,2048,512)・(1536,1024,1024)・(1024,1536,1536)・(4096,1024,1024)・(1024,4096,1024)・(72,88,104)・(200,136,104) × NN/NT/TN/TT（計 44 ケース） | ok（`fail_count=0`・`resolved==cfg` 全ケース。実測 2.78s） |
+| `bm128_candidate_matches_cpu_reference_for_n4096_cubic_shape`（同上） | 4096³ × NN/NT/TN/TT | ok（`fail_count=0`。実測 6.20s） |
+
+全ケースで `assert_parity` の複合判定（相対誤差 1e-3 未満 または 絶対
+誤差 1e-5 未満。REQ-2）が `fail_count=0` で通過。`dispatch_strided_
+tiled_prepared` の戻り値 `resolved == cfg` を全ケースで assert 済みの
+ため、サイレントフォールバックは発生していない。(200,136,104) は
+200 mod 128=72・136 mod 64=8・104 mod 16=8 のいずれも非 0 で、M/N/K
+全方向のブロック端部分タイル（協調ロードのベクトルグループ境界
+フォールバック含む）を踏む形状として追加した。
+
+### 15.5 `CANDIDATES[0]`（bm=64）との複合判定比較
+
+`bm128_candidate_agrees_with_bm64_counterpart_within_composite_
+tolerance`（`gemm_strided_parity.rs`）: N=512/1024/2048/4096 ×
+NN/NT/TN/TT（計 16 ケース）で `CANDIDATES[10]`（bm=128）と
+`CANDIDATES[0]`（bm=64）の出力を `fandhe_ai_backend_cpu::parity::
+compare` で直接比較。全ケース `report.passes()==true`（`fail_count=0`。
+実測 2.88s）。bit 完全一致は assert 契約に含めていない（タイル形状が
+異なるため K チャンク内の丸め順・アキュムレータの組み方が変わりうる）。
+
+### 15.6 スコープ外・#1332 への引き継ぎ
+
+- 純カーネル時間の before/after（`CANDIDATES[10]` vs `CANDIDATES[0]`。
+  N=1024/2048/4096・5 回計測中央値）・`tile::select` への組み込み判断
+- f16 タイル化経路自体の再設計（エピローグ領域を `bm*bn*4` からタイル
+  分割等で縮小し 32KiB 内へ収める案）: §15.2 のとおり本候補は f16 経路
+  では構造的に使用不可のまま維持し、f32 経路のみを対象とする
+- E1 unroll pragma（`UNROLL_ACC_ENABLED`）の index 10 再評価:
+  `unroll_acc_candidates_are_exactly_acc_product_ge_16` の期待値
+  `{0,4,8,9,10}` 化は本 issue で実施済みだが、本番
+  `UNROLL_ACC_ENABLED=false` かつ index 10 自体が `select` 非組み込み
+  のため本番挙動は不変。E1 の再評価は #1332 の実測結果を見て判断
+- 端あり形状（8 の倍数でない大規模形状）・単独 NT/TN 以外の性能比較・
+  ダブルバッファ（2 面）SMEM 化
+
+### 15.7 関連ログ
+
+`docs/perf/logs/metal-gemm-e8-candidate-1331/`（`env_info.txt`・
+`reflection.log`・`parity_dynamic_tile.log`・`parity_all_shapes.log`・
+`parity_n4096_cubic.log`・`parity_cand0_compare.log`・
+`regression_ignored_all_candidates.log`（`--lib --ignored` 全件）・
+`full_ignored_serial.log`（`cargo test -p fandhe-ai-backend-metal
+--release -- --ignored --nocapture --test-threads=1` 全件））。内部
+ホスト名は含めない。
