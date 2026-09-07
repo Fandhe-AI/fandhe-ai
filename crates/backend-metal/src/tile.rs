@@ -453,6 +453,48 @@ impl TileConfig {
         compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
     }
 
+    /// f16 版 threadgroup 共有メモリの標準デバイス上限（32KiB=32768 バイト。
+    /// Apple GPU 系の一般的な `maxThreadgroupMemoryLength` 実測値。
+    /// [`validate`](Self::validate) の `max_shared_mem_bytes` 引数と同じ値を
+    /// 定数化したもので、[`shared_mem_bytes_f16`](Self::shared_mem_bytes_f16)
+    /// が呼び出し時のデバイス実測上限に関わらず「標準的な構成なら収まるか」
+    /// を機械的に判定するために使う（イシュー #1331）。
+    #[cfg(test)]
+    pub(crate) const F16_STANDARD_SHARED_MEM_LIMIT: u32 = 32 * 1024;
+
+    /// [`shared_mem_bytes_f16`](Self::shared_mem_bytes_f16) が
+    /// [`F16_STANDARD_SHARED_MEM_LIMIT`](Self::F16_STANDARD_SHARED_MEM_LIMIT)
+    /// 以内に収まるか（＝f16 タイル化経路で使用可能か）を返す。
+    ///
+    /// `CANDIDATES`（本ファイル）は f32 版のみを前提に追加されてきたため、
+    /// 一部候補（イシュー #1331 で追加した `bm=128` 構成が最初の例）は
+    /// f16 版のエピローグ領域（`bm*bn*4` バイト。`shared_mem_bytes_f16`
+    /// ドキュメントコメント参照）だけで上限に達し、staged タイル領域を
+    /// 加えると超過する。`crate::gemm::MetalGemm::pipeline_for_tile_f16`
+    /// は超過構成を `fallback_chain` の `SINGLE_SIMDGROUP_8X8` へ安全に
+    /// 縮退させるため実行時 panic はしないが、f16 全候補を巡回する CI・
+    /// 実機テストは本メソッドで適格・非適格を区別して期待値を切り替える
+    /// （`f16_tiled_candidates` と対で使う）。
+    #[cfg(test)]
+    pub(crate) fn f16_tiled_fits_standard_limit(&self) -> bool {
+        self.shared_mem_bytes_f16() <= Self::F16_STANDARD_SHARED_MEM_LIMIT
+    }
+
+    /// `CANDIDATES` のうち [`f16_tiled_fits_standard_limit`]
+    /// (Self::f16_tiled_fits_standard_limit) が `true` を返す（＝f16
+    /// タイル化経路が `SINGLE_SIMDGROUP_8X8` へ縮退せず使用可能な）候補
+    /// だけを巡回するイテレータ（イシュー #1331）。f16 版の bit 一致・
+    /// パイプライン構築テストは f16 非適格な候補（縮退先が別構成になる）
+    /// を同じ期待値で検証できないため、CI・実機テストの両方でこの絞り込み
+    /// 済み集合を巡回対象にする。
+    #[cfg(test)]
+    pub(crate) fn f16_tiled_candidates() -> impl Iterator<Item = TileConfig> {
+        CANDIDATES
+            .iter()
+            .copied()
+            .filter(TileConfig::f16_tiled_fits_standard_limit)
+    }
+
     /// [`shared_mem_bytes`](Self::shared_mem_bytes)（NN 専用）の転置パターン
     /// 一般化版（イシュー #1138）。`shaders/gemm.metal::gemm_simdgroup_tiled`
     /// は `TRANS_A`/`TRANS_B` に応じて threadgroup タイルの物理配置を
@@ -875,6 +917,41 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         bm: 64,
         bn: 64,
         bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    },
+    // E8（イシュー #1325/#1331）: threadgroup タイルを 128x64（`CANDIDATES[0]`
+    // の bm を 2 倍）へ拡張し、simdgroup あたりの acc 数（acc_rows=8・
+    // acc_cols=4。積 32 で `TileConfig::MAX_ACC=8` 内・`UNROLL_ACC_MIN_
+    // PRODUCT=16` 以上）を維持したまま A/B タイルの threadgroup 内再利用率を
+    // 倍にする構成。N=4096 純カーネル時間短縮の理論的動機は E1 実験
+    // （`docs/perf/metal-gemm-n4096-kernel-gap.md` §7）・#1143 の H1
+    // （レジスタ圧仮説。反射値レベルでは非支持）を参照。SMEM は
+    // `shared_mem_bytes_for` により NN 14592 / NT 15360 / TN 12800 /
+    // TT 13568 バイトで、32KiB 上限内（`TileConfig::validate` で機械
+    // 検証。`docs/perf/metal-gemm-n4096-kernel-gap.md` §15）。
+    //
+    // **f16 版（`shared_mem_bytes_f16`）は 40064 バイトで 32KiB を超過し
+    // 構造的に使用不可**（エピローグ領域単独で `bm*bn*4 = 128*64*4 =
+    // 32768` バイトに達し、staged タイル領域〈half 単位 7296 バイト〉を
+    // 加えると上限を超える。`pipeline_for_tile_f16` は本候補で
+    // `shared_mem_bytes_f16() > max_shared_mem_bytes` により
+    // `SINGLE_SIMDGROUP_8X8` へフォールバックする。既存 f16 全候補検査
+    // テストは本候補を f16 非適格として個別に扱う。本ファイル末尾
+    // `f16_tiled_candidates`／関連テスト参照）。
+    //
+    // **index 10（末尾）に追加し、既存 index 0〜9 は不変に保つ**
+    // （`select` の添字依存・`examples/gemm_transpose_tile_sweep.rs` の
+    // 複製配列・`tests/gemm_dynamic_tile_parity.rs`／
+    // `tests/gemm_strided_parity.rs` が index 0〜9 の並びに依存するため）。
+    // `select`／`select_with_occupancy_for_device` の選択ロジックには
+    // 組み込まない（明示指定でのみ到達可能。純カーネル時間の
+    // before/after 実測・組み込み判断は後続イシュー #1332）。
+    TileConfig {
+        bm: 128,
+        bn: 64,
+        bk: 16,
         wm: 2,
         wn: 2,
         staged: true,
@@ -2310,6 +2387,78 @@ mod tests {
     }
 
     #[test]
+    fn candidate_10_shared_mem_bytes_for_every_transpose_pattern_within_32kib_and_16_aligned() {
+        // イシュー #1331 で追加した `CANDIDATES[10]`（128,64,16,2,2）の
+        // 転置パターン別 threadgroup 共有メモリ量を固定する（E8 反射値
+        // 確認の前提となる純関数側の証跡。`docs/perf/
+        // metal-gemm-n4096-kernel-gap.md` §15 に転記）。4 パターンとも
+        // 32KiB 上限内・16 バイト整合であることを既存候補と同じ形式で
+        // 確認する。f16 版は 40064 バイトで 32KiB を超過し非適格である
+        // ことも合わせて固定する（`f16_tiled_fits_standard_limit` が
+        // `false` を返す唯一の候補。§2.1「f16 版 SMEM 超過の扱い」参照）。
+        use crate::layout::TransposePattern;
+        let cfg = CANDIDATES[10];
+        assert_eq!(
+            cfg,
+            TileConfig {
+                bm: 128,
+                bn: 64,
+                bk: 16,
+                wm: 2,
+                wn: 2,
+                staged: true,
+            }
+        );
+        let expected = [
+            (TransposePattern::Nn, 14592u32),
+            (TransposePattern::Nt, 15360u32),
+            (TransposePattern::Tn, 12800u32),
+            (TransposePattern::Tt, 13568u32),
+        ];
+        for (pattern, want) in expected {
+            let bytes = cfg.shared_mem_bytes_for(pattern);
+            assert_eq!(
+                bytes, want,
+                "pattern={pattern:?} の shared_mem_bytes_for が想定と異なる"
+            );
+            assert!(bytes <= 32 * 1024, "pattern={pattern:?} が 32KiB を超過");
+            assert!(
+                bytes.is_multiple_of(16),
+                "pattern={pattern:?} が 16 の倍数でない"
+            );
+        }
+        assert_eq!(cfg.shared_mem_bytes_f16(), 40064);
+        assert!(
+            !cfg.f16_tiled_fits_standard_limit(),
+            "CANDIDATES[10] は f16 版が 32KiB を超過し非適格であるはず"
+        );
+    }
+
+    #[test]
+    fn f16_tiled_candidates_excludes_exactly_candidate_10() {
+        // §2.1「f16 版 SMEM 超過の扱い」のドリフト検出テスト（イシュー
+        // #1331）: f16 非適格な候補集合が「現時点で `CANDIDATES[10]` の
+        // みである」ことを両方向で固定する。将来の候補追加で非適格集合が
+        // 黙って増減した場合（例: 新候補が f16 でも超過する／既存候補の
+        // 定義変更で `CANDIDATES[10]` 自体が適格化する）に本テストが
+        // fail するため、`docs/perf/metal-gemm-n4096-kernel-gap.md` の
+        // 実測記録・§2.1 の設計判断が黙って陳腐化しない。
+        let ineligible: Vec<usize> = CANDIDATES
+            .iter()
+            .enumerate()
+            .filter(|(_, cfg)| !cfg.f16_tiled_fits_standard_limit())
+            .map(|(idx, _)| idx)
+            .collect();
+        assert_eq!(
+            ineligible,
+            vec![10],
+            "f16 非適格 index 集合が [10] から変化した（新候補の f16 適格性・\
+             既存候補の定義変更を確認すること）"
+        );
+        assert_eq!(CANDIDATES[10].shared_mem_bytes_f16(), 40064);
+    }
+
+    #[test]
     fn shared_mem_bytes_saturates_instead_of_wrapping_on_overflow() {
         // codex-review 指摘（P0・#538 PR レビュー）: `bm`/`bn`/`bk` は任意の
         // `u32` を受け取れる公開フィールドのため、以前の `u32` のみの演算
@@ -2385,7 +2534,14 @@ mod tests {
         // イシュー #1329 で index 9（64,64,32,2,2）を追加後の最大値は
         // 25344 バイトへ更新〈`candidate_9_shared_mem_bytes_for_every_
         // transpose_pattern_within_32kib_and_16_aligned` で固定〉）。
-        for cfg in CANDIDATES {
+        //
+        // イシュー #1331: index 10（128,64,16,2,2）は f16 版が 40064 バイト
+        // で 32KiB を構造的に超過する（`f16_tiled_fits_standard_limit`
+        // ドキュメントコメント参照）。本テストは f16 適格候補
+        // （[`TileConfig::f16_tiled_candidates`]）のみを巡回し、非適格な
+        // 縮退前提の候補は対象から除く。非適格集合自体の固定・ドリフト
+        // 検出は `f16_tiled_candidates_excludes_exactly_candidate_10` が担う。
+        for cfg in TileConfig::f16_tiled_candidates() {
             let bytes = cfg.shared_mem_bytes_f16();
             assert!(
                 bytes <= 32 * 1024,
@@ -2420,14 +2576,18 @@ mod tests {
         // どの候補も超えていなければ、`select` の出力がデバイス実測なしに
         // サイレント縮退（`SINGLE_SIMDGROUP_8X8` へのフォールバック）を
         // 起こさないことを CI（Linux・GPU 非依存）上で担保できる。
-        const STANDARD_SHARED_MEM_LIMIT: u32 = 32 * 1024;
-        for cfg in CANDIDATES {
+        // イシュー #1331: index 10（128,64,16,2,2）は f16 版が構造的に
+        // 32KiB を超過し `SINGLE_SIMDGROUP_8X8` へ縮退する（設計判断。
+        // 上記 `shared_mem_bytes_f16_all_candidates_within_32kib_device_
+        // limit` コメント参照）。本テストも f16 適格候補のみを巡回する。
+        for cfg in TileConfig::f16_tiled_candidates() {
             let bytes = cfg.shared_mem_bytes_f16();
             assert!(
-                bytes <= STANDARD_SHARED_MEM_LIMIT,
+                bytes <= TileConfig::F16_STANDARD_SHARED_MEM_LIMIT,
                 "cfg {cfg:?} の shared_mem_bytes_f16={bytes} が標準上限 \
-                 {STANDARD_SHARED_MEM_LIMIT} を超過しており、標準 Apple \
-                 Silicon 上ではサイレント縮退が起きる"
+                 {} を超過しており、標準 Apple Silicon 上ではサイレント \
+                 縮退が起きる",
+                TileConfig::F16_STANDARD_SHARED_MEM_LIMIT
             );
         }
     }
@@ -3728,8 +3888,21 @@ mod tests {
         // イシュー #1143 で追加した `(32,64,16,1,2)` は index 8 に収録。
         // イシュー #1329 で `(64,64,32,2,2)` を末尾（index 9）へ追加し
         // 既存 index 0〜8 は不変に保つ契約（`CANDIDATES` 定義コメント
-        // 参照）。並び順の回帰を検知する。
-        assert_eq!(CANDIDATES.len(), 10, "CANDIDATES の長さが 10 ではない");
+        // 参照）。イシュー #1331 で `(128,64,16,2,2)` を末尾（index 10）へ
+        // 追加し既存 index 0〜9 は不変に保つ。並び順の回帰を検知する。
+        assert_eq!(CANDIDATES.len(), 11, "CANDIDATES の長さが 11 ではない");
+        assert_eq!(
+            CANDIDATES[10],
+            TileConfig {
+                bm: 128,
+                bn: 64,
+                bk: 16,
+                wm: 2,
+                wn: 2,
+                staged: true,
+            },
+            "CANDIDATES[10] が想定の (128,64,16,2,2)（イシュー #1331）ではない"
+        );
         assert_eq!(
             CANDIDATES[9],
             TileConfig {
@@ -3971,7 +4144,7 @@ mod tests {
     }
 
     /// `CANDIDATES` を巡回し、[`TileConfig::unroll_acc_loops`] が `true` を
-    /// 返す index 集合が `{0, 4, 8, 9}`（E1 実験〈`docs/perf/
+    /// 返す index 集合が `{0, 4, 8, 9, 10}`（E1 実験〈`docs/perf/
     /// metal-gemm-n4096-kernel-gap.md` §7〉で改善を確認した acc 積 >= 16 の
     /// 候補）と完全一致することを固定する（イシュー #1282）。`CANDIDATES`
     /// への候補追加・変更時にこのテストが自動追従する（ハードコード列挙を
@@ -3979,10 +4152,13 @@ mod tests {
     ///
     /// index 9（イシュー #1329 で追加した `(64,64,32,2,2)`）は
     /// `acc_rows=(64/2)/8=4`・`acc_cols=(64/2)/8=4` で `CANDIDATES[0]` と
-    /// 同じ acc 積 16 を持つため構造的に対象へ入る。ただし本番既定は
-    /// `UNROLL_ACC_ENABLED=false`（本ファイル冒頭）かつ index 9 自体も
-    /// `select` 非組み込み（明示指定限定）のため、この変化は本番挙動に
-    /// 影響しない。E1 の再評価（性能実測）は後続イシュー #1330 へ引き継ぐ。
+    /// 同じ acc 積 16 を持つため構造的に対象へ入る。index 10（イシュー
+    /// #1331 で追加した `(128,64,16,2,2)`）は `acc_rows=(128/2)/8=8`・
+    /// `acc_cols=(64/2)/8=4` で acc 積 32 を持つため同様に対象へ入る。
+    /// ただし本番既定は `UNROLL_ACC_ENABLED=false`（本ファイル冒頭）かつ
+    /// index 9・10 自体も `select` 非組み込み（明示指定限定）のため、この
+    /// 変化は本番挙動に影響しない。E1 の再評価（性能実測）は後続イシュー
+    /// #1330／#1332 へ引き継ぐ。
     #[test]
     fn unroll_acc_candidates_are_exactly_acc_product_ge_16() {
         let unroll_indices: Vec<usize> = CANDIDATES
@@ -3993,7 +4169,7 @@ mod tests {
             .collect();
         assert_eq!(
             unroll_indices,
-            vec![0, 4, 8, 9],
+            vec![0, 4, 8, 9, 10],
             "CANDIDATES の acc_rows*acc_cols>=16 判定対象 index が変化しました。\
              CANDIDATES を変更した場合は E1 実験の再評価が必要です \
              （docs/perf/metal-gemm-n4096-kernel-gap.md §7・イシュー #1282）。"
@@ -4474,11 +4650,25 @@ mod tests {
             let resolved = gemm.resolve_tile_config_f16(&ctx, cfg).unwrap_or_else(|err| {
                 panic!("候補 {cfg:?}（f16）のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
             });
-            assert_eq!(
-                resolved, cfg,
-                "候補 {cfg:?}（f16）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
-                 （構成失敗を検知できていない）"
-            );
+            // イシュー #1331・§2.1「f16 版 SMEM 超過の扱い」: `CANDIDATES[10]`
+            // は f16 版が 32KiB を構造的に超過し `SINGLE_SIMDGROUP_8X8` へ
+            // 縮退する設計（`f16_tiled_fits_standard_limit` ドキュメント
+            // コメント参照）。他の候補は従来どおり `resolved == cfg` を
+            // 要求し、サイレントフォールバックを検知する。
+            if cfg.f16_tiled_fits_standard_limit() {
+                assert_eq!(
+                    resolved, cfg,
+                    "候補 {cfg:?}（f16）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                     （構成失敗を検知できていない）"
+                );
+            } else {
+                assert_eq!(
+                    resolved,
+                    TileConfig::SINGLE_SIMDGROUP_8X8,
+                    "候補 {cfg:?}（f16）は f16_tiled_fits_standard_limit()==false のため \
+                     SINGLE_SIMDGROUP_8X8 へ縮退するはずが {resolved:?} へ解決された"
+                );
+            }
 
             let (m, n, k) = (256, 256, 256);
             let mut rng_a = Xorshift64Star::new(300 + i as u64);
@@ -4625,11 +4815,23 @@ mod tests {
             let resolved = gemm.resolve_tile_config_f16(&ctx, cfg).unwrap_or_else(|err| {
                 panic!("候補 {cfg:?}（f16）のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
             });
-            assert_eq!(
-                resolved, cfg,
-                "候補 {cfg:?}（f16）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
-                 （構成失敗を検知できていない）"
-            );
+            // §2.1「f16 版 SMEM 超過の扱い」（イシュー #1331）と同じ分岐。
+            // `all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`
+            // 参照。
+            if cfg.f16_tiled_fits_standard_limit() {
+                assert_eq!(
+                    resolved, cfg,
+                    "候補 {cfg:?}（f16）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                     （構成失敗を検知できていない）"
+                );
+            } else {
+                assert_eq!(
+                    resolved,
+                    TileConfig::SINGLE_SIMDGROUP_8X8,
+                    "候補 {cfg:?}（f16）は f16_tiled_fits_standard_limit()==false のため \
+                     SINGLE_SIMDGROUP_8X8 へ縮退するはずが {resolved:?} へ解決された"
+                );
+            }
 
             let (m, n, k) = (100, 84, 68);
             let mut rng_a = Xorshift64Star::new(3000 + i as u64);

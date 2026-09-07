@@ -1,0 +1,13 @@
+chip: Apple M4 Max
+ProductName: macOS
+ProductVersion: 26.6.2
+BuildVersion: 25G83
+rustc 1.96.0 (ac68faa20 2026-05-25)
+HEAD: 56955b9924e328eb5aca33bc315273fff58fd7e5
+uptime_before: 10:33  up 18 days, 21:46, 20 users, load averages: 2.87 4.26 5.18
+note: 複数イシューが並列実行されている共有環境のため load average が高い。
+本イシューは正確性確認（parity）のみが目的であり、共有負荷による計測
+ノイズは結論に影響しない。
+uptime_after: 10:42  up 18 days, 21:55, 20 users, load averages: 2.04 4.30 5.05
+result: 全 --ignored テスト（--lib 52 件・統合テスト全件）が fail_count=0
+で完了（full_ignored_serial.log 参照。FAILED 0 件）。

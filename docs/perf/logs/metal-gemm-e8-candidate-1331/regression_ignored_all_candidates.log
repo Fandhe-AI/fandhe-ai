@@ -1,0 +1,102 @@
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:411:8
+    |
+411 | pub fn tiled_pipeline_128x64_persistent_f32_source_with_stages(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:695:7
+    |
+695 | const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:763:7
+    |
+763 | const TP128_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:259:19
+    |
+239 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+259 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:651:19
+    |
+457 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+651 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+666 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 43 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.24s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_metal-4099ec6cfdfe79eb)
+
+running 52 tests
+test context_cache::tests::cached_context_returns_same_instance_across_calls ... ok
+test context_cache::tests::cached_gemm_returns_same_instance_across_calls ... ok
+test device::tests::metal_occupancy_info_reports_smem_upper_bound_at_least_32kib ... ok
+test device::tests::probe_gpu_core_count_returns_positive_value_on_apple_silicon ... ok
+test device::tests::probe_soc_brand_string_returns_apple_prefixed_value_on_apple_silicon ... ok
+test gemm::tests::coop_load_bit_match_all_candidates ... ok
+test gemm::tests::coop_load_bit_match_boundary_shape ... ok
+test gemm::tests::coop_load_bit_match_dispatch_auto ... ok
+test gemm::tests::coop_load_default_matches_production_constants ... ok
+test gemm::tests::coop_load_f16_path_is_noop ... ok
+test gemm::tests::coop_load_transposed_bit_match ... ok
+test gemm::tests::frag_load_on_off_bit_match_all_candidates ... ok
+test gemm::tests::frag_load_on_off_bit_match_dispatch_auto ... ok
+test gemm::tests::frag_load_tgp_vs_device_same_shape_bit_match ... ok
+test gemm::tests::frag_load_transposed_bit_match ... ok
+test gemm::tests::run_tiled_bias_act_f32_increments_fused_launch_counter ... ok
+test gemm::tests::run_tiled_bias_act_f32_k_zero_does_not_increment_fused_launch_counter ... ok
+test gemm::tests::source_specialized_on_off_bit_match_all_candidates ... ok
+test gemm::tests::source_specialized_on_off_bit_match_dispatch_auto ... ok
+test gemm::tests::source_specialized_route_populates_only_spec_cache ... ok
+test gemm::tests::tile_class_default_matches_production_constants ... ok
+test gemm::tests::tile_class_split_bit_match_all_candidates ... ok
+test gemm::tests::tile_class_split_bit_match_dispatch_auto ... ok
+test gemm::tests::tile_class_split_bit_match_edge_shapes ... ok
+test gemm::tests::unroll_acc_effective_matches_candidate_acc_product_threshold ... ok
+test gemm::tests::unroll_acc_on_off_bit_match_all_candidates ... ok
+test gemm::tests::unroll_acc_on_off_bit_match_dispatch_auto ... ok
+test gemm_bk32_diag_tests::bk32_kernel_gpu_ab_vs_candidate0 ... ok
+test gemm_bk32_diag_tests::bk32_kernel_gpu_ab_vs_production_select ... ok
+test gemm_coop_load_diag_tests::coop_load_kernel_gpu_ab_production_sizes ... ok
+test gemm_frag_load_diag_tests::frag_load_kernel_gpu_ab_production_sizes ... ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_production_batch ... ok
+test gemm_reuse_phase_diag_tests::gpu_timestamps_within_commit_wait_window ... ok
+test gemm_spec_source_diag_tests::candidate_10_reflection_shows_no_fallback_for_every_transpose_pattern ... ok
+test gemm_spec_source_diag_tests::candidate_9_reflection_shows_no_fallback_for_every_transpose_pattern ... ok
+test gemm_spec_source_diag_tests::spec_source_kernel_gpu_ab_production_sizes ... ok
+test gemm_spec_source_diag_tests::spec_source_reflection_dump_all_candidates ... ok
+test gemm_tile_class_diag_tests::tile_class_kernel_gpu_ab_production_sizes ... ok
+test gemm_tile_class_diag_tests::tile_class_production_select_kernel_gpu_ab ... ok
+test memory::tests::pooled_alloc_zeroed_records_logical_bytes_via_shared_context ... ok
+test ops::tests::gemm_nt_transposed_b_does_not_increment_repack_counter ... ok
+test ops::tests::gemm_resident_lhs_transposed_b_does_not_increment_repack_counter ... ok
+test ops::tests::gemm_tn_transposed_a_does_not_increment_repack_counter ... ok
+test ops::tests::gemm_tt_both_transposed_increments_repack_counter_twice ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_f16_tiled_non_multiple_boundary_shape ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_medium_shape ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_non_multiple_boundary_shape ... ok
+test tile::tests::all_tile_candidates_resolve_without_fallback_for_every_transpose_pattern ... ok
+test tile::tests::all_tile_candidates_validate_under_actual_device_shared_memory_limit ... ok
+test tile::tests::direct_load_path_config_resolves_without_fallback ... ok
+test tile::tests::dispatch_f16_auto_tile_select_shapes_resolve_without_fallback ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 263 filtered out; finished in 213.24s
+
+
+[exited with code 0]

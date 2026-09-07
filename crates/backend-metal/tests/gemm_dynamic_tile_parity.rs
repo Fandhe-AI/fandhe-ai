@@ -412,3 +412,42 @@ fn bk32_64x64_candidate_matches_cpu_reference_k_stress() {
     };
     run_case(cfg, 66, 67, 64, 64, 4096);
 }
+
+// --- イシュー #1331（E8・親 #1325）: 128x64x16（wm2wn2）を CANDIDATES[10] へ追加 ---
+
+/// `CANDIDATES[10]`（128,64,16,2,2。`CANDIDATES[0]` の bm=128 版）の境界
+/// 形状ケース: m/n/k いずれも 128/64/16 の倍数でない実効次元（pad8 後
+/// m_eff=200・n_eff=136・k_eff=72）で `bm`（M 方向）・`bn`（N 方向）・
+/// `bk_eff`（K 末尾）いずれのブロック端でも部分タイル（REQ-8 手動境界
+/// チェック）に到達することを確認する。m=200→pad8=200（200 mod 128=72
+/// ≠0）・n=130→pad8=136（136 mod 64=8≠0）・k=70→pad8=72（72 mod 16=8≠0）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bm128_candidate_matches_cpu_reference_non_multiple_of_tile() {
+    let cfg = TileConfig {
+        bm: 128,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    run_case(cfg, 68, 69, 200, 130, 70);
+}
+
+/// `CANDIDATES[10]`（128,64,16,2,2）の K ストレスケース: K=4096 の長い
+/// 内積で threadgroup 内再利用率倍増の狙い（bm 拡張）が数値正しさを
+/// 損なわないことを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bm128_candidate_matches_cpu_reference_k_stress() {
+    let cfg = TileConfig {
+        bm: 128,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    run_case(cfg, 70, 71, 128, 64, 4096);
+}
