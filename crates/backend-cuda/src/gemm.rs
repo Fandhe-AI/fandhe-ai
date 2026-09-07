@@ -3705,6 +3705,17 @@ impl CudaGemm {
         let q_i = plan.q as i32;
         let max_contributors_i = plan.max_contributors as i32;
         let remainder_tiles_i = plan.remainder_tiles as i32;
+        // REQ-8: カーネル側の手動境界チェック（`TP_SK_TILE_CORE` の部分和
+        // 書き込み・`TP_SK_FIXUP_KERNEL` の部分和読み取り）が参照する
+        // `partials` バッファの実際の要素数。上記のホスト側 fail-closed
+        // 検査（`required_elems > func.partials.len()`）とは独立の防御線
+        // として、カーネル自身にも容量を渡し `slot * (TP_BM*TP_BN) +
+        // local` を都度この値と突き合わせる（性能下限・最適化を理由に
+        // 手動境界チェックを省略しない。`.claude/rules/coding-rust.md`）。
+        let partials_capacity_i = u32_from_u64_bounded(
+            func.partials.len() as u64,
+            "launch_tiled_pipeline_streamk_f32 partials_capacity",
+        )? as i32;
 
         // ストリーム順序でのゼロ化（メソッドコメント「起動前に」参照）。
         // `partials` は memset しない（メソッドコメント参照）。
@@ -3718,13 +3729,16 @@ impl CudaGemm {
         // SAFETY: `launch_tiled_pipeline_persistent_f32` と同一の根拠。
         // カーネル引数（a_dev/b_dev/c_dev・m_i/n_i/k_i・unit_counter・
         // partials・full_tiles_i/total_units_i/q_i/max_contributors_i/
-        // remainder_tiles_i）は上記で検証済みの m/n/k・plan と 1:1 対応し、
-        // カーネル内の手動境界チェック（cp.async src_size ゼロ充填・
-        // エピローグ guarded store。`TP_SK_TILE_CORE`）と合わせて OOB
-        // 読み書きが起きない根拠とする。単位取得ループの `break` 判定は
+        // remainder_tiles_i/partials_capacity_i）は上記で検証済みの
+        // m/n/k・plan と 1:1 対応し、カーネル内の手動境界チェック
+        // （cp.async src_size ゼロ充填・エピローグ guarded store・
+        // partials_capacity_i との突き合わせ。`TP_SK_TILE_CORE`）と合わせて
+        // OOB 読み書きが起きない根拠とする。単位取得ループの `break` 判定は
         // unsigned 比較のため、余分に起動された CTA も範囲外単位へは到達
         // しない。部分和スロットは `streamk_plan`／起動前検査（上記）で
-        // `partials` 容量内であることを確認済み。
+        // `partials` 容量内であることを確認済みだが、`partials_capacity_i`
+        // （`func.partials.len()`）をカーネルへも渡し、性能下限・最適化を
+        // 理由に手動境界チェックを省略しない（`.claude/rules/coding-rust.md`）。
         unsafe {
             self.stream
                 .launch_builder(&func.sk_func)
@@ -3741,6 +3755,7 @@ impl CudaGemm {
                 .arg(&q_i)
                 .arg(&max_contributors_i)
                 .arg(&remainder_tiles_i)
+                .arg(&partials_capacity_i)
                 .launch(sk_cfg)?;
         }
 
@@ -3758,8 +3773,10 @@ impl CudaGemm {
             // SAFETY: fixup カーネルは `partials`（読み取りのみ。上記起動が
             // 同一ストリームで先に完了させる契約）と `c_dev`（残タイル領域
             // のみへの書き込み。SK 本体カーネルが書く full タイル領域とは
-            // 互いに素）を引数に取る。`r`／`local` の範囲チェックはカーネル
-            // 側の手動境界チェック（`TP_SK_FIXUP_KERNEL`）が担う。
+            // 互いに素）を引数に取る。`r`／`local` の範囲チェック・
+            // `contributors` のクランプ・`partials` 読み取り添字と
+            // `partials_capacity_i`（`func.partials.len()`）との突き合わせは
+            // カーネル側の手動境界チェック（`TP_SK_FIXUP_KERNEL`）が担う。
             unsafe {
                 self.stream
                     .launch_builder(&func.fixup_func)
@@ -3772,6 +3789,7 @@ impl CudaGemm {
                     .arg(&remainder_tiles_i)
                     .arg(&q_i)
                     .arg(&max_contributors_i)
+                    .arg(&partials_capacity_i)
                     .launch(fixup_cfg)?;
             }
         }

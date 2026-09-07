@@ -701,6 +701,13 @@ const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
 ///   `remainder_tiles`: いずれも [`crate::gemm::streamk_plan`] が算出する
 ///   計画値をそのままホストから渡す（本カーネル自身は計画のロジックを
 ///   持たず、計画に従って復号するのみ）。
+/// - `partials_capacity`: `partials` バッファの要素数（呼び出し元が
+///   確保したハンドルの `CudaSlice::len()`。REQ-8・fail-closed）。ホスト側
+///   （`streamk_plan`・起動前検査）がスロット添字は容量内であることを
+///   証明済みだが、性能下限・最適化を理由に手動境界チェックを省略しない
+///   （`.claude/rules/coding-rust.md`）ためカーネル側でも `partials` への
+///   書き込み直前に `slot * (TP_BM*TP_BN) + local` を本値と突き合わせる
+///   （[`TP_SK_TILE_CORE`] 参照）。
 const TP_SK_KERNEL_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_streamk_f32(
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -709,7 +716,7 @@ const TP_SK_KERNEL_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipel
     unsigned int* unit_counter,
     float* __restrict__ partials,
     int full_tiles, int total_units, int q, int max_contributors,
-    int remainder_tiles)
+    int remainder_tiles, int partials_capacity)
 {
     __shared__ __align__(16) float as_tile[TP_STAGES][TP_BM][TP_A_PAD];
     __shared__ __align__(16) float bs_tile[TP_STAGES][TP_BK][TP_B_PAD];
@@ -937,7 +944,17 @@ const TP_SK_TILE_CORE: &str = r#"            int tid = threadIdx.x;
                         int local_row = ty * TP_THREAD_M + i;
                         int local_col = tx * TP_THREAD_N + j;
                         int local = local_row * TP_BN + local_col;
-                        partials[(size_t)slot * (TP_BM * TP_BN) + local] = acc[i][j];
+                        // REQ-8: スロット添字はホスト側 streamk_plan／起動前
+                        // 検査（`crate::gemm::CudaGemm::
+                        // launch_tiled_pipeline_streamk_f32`）で partials
+                        // 容量内であることを証明済みだが、性能下限・最適化を
+                        // 理由に手動境界チェックを省略しない
+                        // （`.claude/rules/coding-rust.md`）ためカーネル側でも
+                        // 明示的に検査する。
+                        long long p_idx = (long long)slot * (TP_BM * TP_BN) + local;
+                        if (p_idx >= 0 && p_idx < (long long)partials_capacity) {
+                            partials[(size_t)slot * (TP_BM * TP_BN) + local] = acc[i][j];
+                        }
                     }
                 }
             }
@@ -1004,7 +1021,14 @@ pub const TP_SK_FIXUP_BLOCK_THREADS: u32 = 256;
 /// `local`（`blockIdx.y*256+threadIdx.x`）が `TP_BM*TP_BN` 以上のスレッド
 /// は早期 return する（smem を使わないため `SPLITK_REDUCE_F32` と同じく
 /// ブロック同期プリミティブへの到達義務がない）。出力座標は
-/// `if (row < m && col < n)` の guarded store。
+/// `if (row < m && col < n)` の guarded store。`contributors`（ホスト側
+/// `streamk_plan` が `max_contributors` 以下であることを証明済み）は
+/// カーネル側でも `max_contributors` へクランプし、`partials` の読み取り
+/// 添字 `slot * (TP_BM*TP_BN) + local` は呼び出し元から渡される
+/// `partials_capacity`（`CudaSlice::len()`）と突き合わせて範囲内のときのみ
+/// 読む（[`TP_SK_KERNEL_PREFIX`] の書き込み側検査と対をなす。性能下限・
+/// 最適化を理由に手動境界チェックを省略しない。
+/// `.claude/rules/coding-rust.md`）。
 ///
 /// ブロックあたりスレッド数は [`TP_SK_FIXUP_BLOCK_THREADS`] 固定
 /// （`crate::gemm::CudaGemm::launch_tiled_pipeline_streamk_f32` の
@@ -1014,7 +1038,8 @@ extern "C" __global__ void gemm_tiled_pipeline_streamk_fixup_f32(
     const float* __restrict__ partials,
     float* __restrict__ c,
     int m, int n, int k,
-    int full_tiles, int remainder_tiles, int q, int max_contributors)
+    int full_tiles, int remainder_tiles, int q, int max_contributors,
+    int partials_capacity)
 {
     int r = blockIdx.x;
     if (r >= remainder_tiles) {
@@ -1032,13 +1057,28 @@ extern "C" __global__ void gemm_tiled_pipeline_streamk_fixup_f32(
     long long tile_flat_last = tile_flat_begin + (long long)num_k_tiles - 1;
     int contributors =
         (int)(tile_flat_last / (long long)q - tile_flat_begin / (long long)q + 1);
+    // REQ-8: contributors はホスト側 streamk_plan が max_contributors 以下
+    // であることを証明済みだが、性能下限・最適化を理由に手動境界チェックを
+    // 省略しない（`.claude/rules/coding-rust.md`）ためカーネル側でも
+    // クランプする。
+    if (contributors > max_contributors) {
+        contributors = max_contributors;
+    }
+    if (contributors < 0) {
+        contributors = 0;
+    }
 
     // 固定順序（c 昇順）の逐次加算。decompose せずレジスタのみで完結する
     // （`SPLITK_REDUCE_F32` と同じ判断）。
     float acc = 0.0f;
     for (int c_idx = 0; c_idx < contributors; ++c_idx) {
         long long slot = (long long)r * (long long)max_contributors + (long long)c_idx;
-        acc += partials[slot * (long long)(TP_BM * TP_BN) + local];
+        long long p_idx = slot * (long long)(TP_BM * TP_BN) + local;
+        // REQ-8: partials 読み取り前の手動境界チェック（書き込み側の
+        // p_idx 検査と対をなす）。
+        if (p_idx >= 0 && p_idx < (long long)partials_capacity) {
+            acc += partials[p_idx];
+        }
     }
 
     int tile = full_tiles + r;
