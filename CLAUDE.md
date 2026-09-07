@@ -171,7 +171,9 @@ fandhe-ai/
     │   ├── metal-gemm-tile-class-split.md # `gemm_simdgroup_tiled` の内部タイル direct load／端タイル staged 2 クラス経路（`TILE_CLASS`〈index 15。#1298 で未割当のまま残っていた枠を割当〉function constant・`TileClassRegion`）を opt-in で追加し、端あり形状込みで bit 同一を自己検証（`MetalGemm::new_with_tile_class`）。Linux 実行可能な被覆・互いに素の網羅テスト・証跡テストは green。実機〈M4 Max〉での T1〜T3・T6（全候補×N=512〜4096・端あり形状・`dispatch_auto`・既定値）は全 pass・既存 `#[ignore]` 群も非後退（T4/T5〈転置・`FragLoadConfig` 合成〉は時間制約により未実施）。**性能実測・採否は #1328 で完了（組み込み不可・REJECT。`docs/perf/metal-gemm-n4096-kernel-gap.md` §12 参照）**（イシュー #1327）
     │   ├── logs/metal-gemm-e6-tile-class-1327/ # 上記（#1327 機構実装）の実行ログ・env_info（内部ホスト名は含めない。イシュー #1327）
     │   ├── logs/metal-gemm-e6-tile-class-ab-1328/ # E6 性能実測・採否判断（候補 0/4/5/8 および本番選択構成の 5 プロセス起動計測）の実行ログ・env_info・aggregate.md（内部ホスト名は含めない。イシュー #1328）
-    │   └── logs/metal-gemm-mpp-tensor-1326/ # Metal 4 `tensor<>`＋MPP `matmul2d` 可用性調査（`backend-metal-mpp-tensor-decision.md`）の compile probe／parity smoke／5 プロセス起動 kernel_gpu A/B の実行ログ・env_info・aggregate.md（内部ホスト名は含めない。イシュー #1326）
+    │   ├── logs/metal-gemm-mpp-tensor-1326/ # Metal 4 `tensor<>`＋MPP `matmul2d` 可用性調査（`backend-metal-mpp-tensor-decision.md`）の compile probe／parity smoke／5 プロセス起動 kernel_gpu A/B の実行ログ・env_info・aggregate.md（内部ホスト名は含めない。イシュー #1326）
+    │   ├── metal-gemm-hfrag-candidate.md # half フラグメント（`simdgroup_half8x8`）／f32 累算候補カーネル `gemm_simdgroup_tiled_hfrag`（`gemm.metal` 末尾。E9・親 #1368）の追加・REQ-2 形状別判定方式に基づく全形状 × 転置 4 パターンの parity 実測（正しさゲートは丸め済み入力参照で全 PASS・丸めなし参照は設計上全形状で fail_count>0）・本番非結線（`docs/cuda-tf32-optin-api-decision.md` 同型の opt-in API 設計が前提）・#1370（純カーネル時間比較）への引き継ぎ。M4 Max 実機実測（イシュー #1369）
+    │   └── logs/metal-gemm-hfrag-parity-1369/ # 上記の実行ログ・env_info（内部ホスト名は含めない。イシュー #1369）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）
