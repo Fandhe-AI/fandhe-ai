@@ -1521,6 +1521,21 @@ impl DeviceParamStore {
             let graph_capture_available = self.total_numel > 0
                 && match ops.captured_segment_key(&[], config_key) {
                     Ok(maybe_key) => maybe_key.is_some(),
+                    // Cursor Bugbot 指摘対応（PR #1390 是正）: `DeviceContextCaptureInProgress`
+                    // は同一 ordinal を別スレッドが CUDA Graph capture 中
+                    // であることを示す**一過性の競合**（`tensor-core::
+                    // device::BackendError::DeviceContextCaptureInProgress`
+                    // doc コメント参照。`context_cache::begin_driver_call`
+                    // の capture 排他制御が発行する）であり、下記の「呼び
+                    // 出し元の設定順序の誤り」（legacy stream 等の恒久的
+                    // 設定誤り）とは異なる。この問い合わせ自体はまだ
+                    // どのデバイスバッファも変更していない安価な事前確認
+                    // （`resources` は空スライス）であるため、恒久的失敗
+                    // として `poisoned` へ遷移させず、単に本 step だけ
+                    // graph capture を使わない直接実行経路（下記 `else`
+                    // 相当）へフォールバックする（呼び出し元が次回 `step()`
+                    // で再試行すれば通常は解消する）。
+                    Err(BackendError::DeviceContextCaptureInProgress { .. }) => false,
                     Err(e) => {
                         // opt-in ON だが対象デバイスが capture 不可（legacy
                         // stream）等、呼び出し元の設定順序の誤りを示す
@@ -1613,6 +1628,19 @@ impl DeviceParamStore {
                                  opt-in 変更の競合の可能性）"
                                     .to_string(),
                             ));
+                        }
+                        // Cursor Bugbot 指摘対応（PR #1390 是正）: 直前の
+                        // 安価な問い合わせ（上記）と同じ理由で、
+                        // `DeviceContextCaptureInProgress`（一過性の別
+                        // スレッド capture 競合）は恒久的失敗ではないため
+                        // `poisoned` へ遷移させない。ここまでの区間は
+                        // まだどのデバイスバッファも変更していない
+                        // （`key` 導出のみ）ため、エラーをそのまま
+                        // 呼び出し元へ返して今回の `step()` 呼び出しだけ
+                        // 失敗させても、ストア自体は次回 `step()` で
+                        // 引き続き使用できる。
+                        Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => {
+                            return Err(e);
                         }
                         Err(e) => {
                             self.poisoned.store(true, Ordering::SeqCst);

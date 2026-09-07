@@ -124,10 +124,30 @@ endif
 # `internal-diagnostics` feature の `required-features` ゲート対象のため、
 # feature 未指定だとテストバイナリがビルドされず実機検証で実際には走らない
 # （false-green）。
+#
+# **`graph_capture_real_device.rs` の ON 側 2 テストは 2 回目の別呼び出しに
+# 分離する（codex-review P2 指摘対応・PR #1390）**: `internal-diagnostics`
+# feature が有効な間、`device.rs::CudaDevice::new` は CUDA Graph capture
+# opt-in が ON でも `StreamKind` を常に `Legacy` に固定する（同 feature 有効時
+# `unsafe { ctx.disable_event_tracking() }` 分岐自体を到達不能にするため。
+# `device.rs::CudaDevice::new` 冒頭コメント参照）。そのため
+# `sgd_update_segment_captures_then_replays_bit_identically`／
+# `different_config_key_produces_a_different_segment_key`（いずれも
+# `device.is_capturable_stream()` が `true` であることを前提とする）は、
+# 1 回目の `--all-features` 呼び出しに含めたままだと実機上で確実に失敗する
+# （`internal-diagnostics` が capturable stream 経路自体を潰すため）。
+# `--skip` でこの 2 テストを 1 回目の呼び出しから除外し、`internal-diagnostics`
+# を持たない 2 回目の呼び出しで実行する（`internal-diagnostics` 以外の feature
+# 集合には依存しないテストのため、feature 追加なしで capturable stream 経路へ
+# 到達できる）。ファイル冒頭コメントの指示どおり `--test-threads=1` を明示する。
 .PHONY: test-ignored-cuda
 test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する（release）
 ifdef HAS_CARGO
-	cargo test -p fandhe-ai-backend-cuda --release --all-features -- --ignored --nocapture
+	cargo test -p fandhe-ai-backend-cuda --release --all-features -- --ignored --nocapture \
+		--skip sgd_update_segment_captures_then_replays_bit_identically \
+		--skip different_config_key_produces_a_different_segment_key
+	cargo test -p fandhe-ai-backend-cuda --release --test graph_capture_real_device -- \
+		--ignored --nocapture --test-threads=1
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored-cuda をスキップ"
 endif

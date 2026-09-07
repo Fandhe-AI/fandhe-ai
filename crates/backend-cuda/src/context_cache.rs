@@ -1041,8 +1041,11 @@ impl Drop for CallToken {
 /// 指摘・`docs/backend-cuda-graph-step-capture-design.md` §4.2）**:
 /// `state.capture`（capture 開始スレッドの [`std::thread::ThreadId`]）が
 /// `Some` の間、**capture を開始したスレッド以外**からの本関数呼び出しは
-/// [`BackendError::Unsupported`] で拒否する（driver に一切触れる前。
-/// `begin_sync_point_call` と同じ「早期拒否」方針）。`CU_STREAM_
+/// [`BackendError::DeviceContextCaptureInProgress`] で拒否する（driver に
+/// 一切触れる前。`begin_sync_point_call` と同じ「早期拒否」方針。この
+/// variant は一過性の競合を表し `Unsupported` とは意味が異なる——
+/// Cursor Bugbot 指摘対応・PR #1390 是正。`tensor-core::device::
+/// BackendError::DeviceContextCaptureInProgress` doc コメント参照）。`CU_STREAM_
 /// CAPTURE_MODE_THREAD_LOCAL` は「capture を乱しうる driver API 呼び
 /// 出し」を capture 開始スレッドに限定する目的のモードであり、
 /// **別スレッドが同じ共有ストリームへ直接カーネル起動すること自体を
@@ -1089,9 +1092,18 @@ pub(crate) fn begin_driver_call(
     if let Some(owner) = state.capture
         && owner != std::thread::current().id()
     {
-        return Err(BackendError::Unsupported(format!(
-            "cuda graph capture: ordinal {ordinal} is currently being captured by another              thread; concurrent driver calls on the shared stream during capture are not              supported"
-        )));
+        // Cursor Bugbot 指摘対応（PR #1390 是正）: 旧稿は
+        // `BackendError::Unsupported` を返していたが、この variant は
+        // 「恒久的な未実装・設定誤り」を意味する契約（`captured_segment_key`
+        // の legacy stream 判定等）で使われるため、`fandhe_ai_autodiff::
+        // optim::device_store::DeviceParamStore::step` の graph 可用性
+        // 問い合わせがこの一過性の競合（別スレッドが capture 中なだけ）を
+        // 恒久的失敗と誤認して `DeviceParamStore` を永久 poison してしまう
+        // 欠陥があった（関連: `ops.rs::CudaBackendOps::captured_segment_key`・
+        // `device_store.rs` の該当 `match`）。専用の `BackendError::
+        // DeviceContextCaptureInProgress` variant（`tensor-core::device`）を
+        // 返すことで、恒久的失敗と型レベルで区別できるようにする。
+        return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
     }
     let current_generation = state.generation;
     if let Some(&stale) = resource_generations
@@ -2545,6 +2557,13 @@ mod poison_state_tests {
     /// 開始したスレッド以外からの `begin_driver_call` を拒否し、共有
     /// ストリームへの意図しないカーネル起動混入を防ぐ（`design doc`
     /// §4.2 追記）。
+    ///
+    /// Cursor Bugbot 指摘対応（PR #1390 是正）: 拒否時の variant は
+    /// `BackendError::DeviceContextCaptureInProgress`（一過性の競合。
+    /// `tensor-core::device::BackendError` doc コメント参照）であり、
+    /// `Unsupported`（恒久的な未実装・設定誤り）ではない——呼び出し元
+    /// （`DeviceParamStore::step`）がこの一過性の競合を恒久的失敗と誤認
+    /// してストアを永久 poison する欠陥を避けるための型的区別。
     #[test]
     fn begin_driver_call_rejects_other_thread_while_capturing() {
         let ordinal = unique_ordinal();
@@ -2554,8 +2573,12 @@ mod poison_state_tests {
                 .join()
                 .expect("spawned thread does not panic");
         assert!(
-            matches!(other_thread_result, Err(BackendError::Unsupported(_))),
-            "capture 中の別スレッドからの driver 呼び出しは Unsupported で拒否されるはず:              {other_thread_result:?}"
+            matches!(
+                other_thread_result,
+                Err(BackendError::DeviceContextCaptureInProgress { ordinal: o }) if o == ordinal
+            ),
+            "capture 中の別スレッドからの driver 呼び出しは \
+             DeviceContextCaptureInProgress で拒否されるはず: {other_thread_result:?}"
         );
         drop(guard);
     }

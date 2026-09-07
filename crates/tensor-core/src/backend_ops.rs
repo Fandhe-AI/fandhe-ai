@@ -131,17 +131,6 @@ pub enum MseReduction {
     Sum,
 }
 
-/// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
-/// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
-///
-/// object-safe に設計している（`&dyn BackendOps` として扱える。
-/// [`ops_for`] が複数バックエンドを横断して選択する際に使用する）。
-/// v1 は PoC-v2-5 実測 API（`MetalOps`）のスコープに合わせて `f32` 固定
-/// とする（f16 経路のジェネリック化は §4.2 6-8 のとおり保留）。
-///
-/// 公開 API はすべて safe。`unsafe` は各バックエンド実装内部の FFI 境界
-/// （`cudarc`・`objc2` 系呼び出し）に閉じ込める
-/// （`.claude/rules/coding-rust.md`）。
 /// [`BackendOps::captured_segment_key`]／[`BackendOps::run_captured_sgd_step_segment`]
 /// が扱う 1 個のデバイスバッファの識別子（イシュー #1349・親 #1348・
 /// ルート #1341 → #1269）。
@@ -200,6 +189,17 @@ pub enum SegmentRun {
     Replayed,
 }
 
+/// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
+/// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
+///
+/// object-safe に設計している（`&dyn BackendOps` として扱える。
+/// [`ops_for`] が複数バックエンドを横断して選択する際に使用する）。
+/// v1 は PoC-v2-5 実測 API（`MetalOps`）のスコープに合わせて `f32` 固定
+/// とする（f16 経路のジェネリック化は §4.2 6-8 のとおり保留）。
+///
+/// 公開 API はすべて safe。`unsafe` は各バックエンド実装内部の FFI 境界
+/// （`cudarc`・`objc2` 系呼び出し）に閉じ込める
+/// （`.claude/rules/coding-rust.md`）。
 pub trait BackendOps {
     /// このインスタンスが対応する [`Device`]（呼び出し元がログ・
     /// エラーメッセージで識別するために使う）。
