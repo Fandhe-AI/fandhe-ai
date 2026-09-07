@@ -13,8 +13,15 @@ LOGDIR=docs/perf/logs/metal-gemm-hfrag-kernel-gpu-ab-1370
 抽出:
 
 ```sh
-grep '^N=<N> series=sweep' "$LOGDIR"/kernel_gpu_sweep_run*.log
+grep -oE 'N=<N> series=sweep.*' "$LOGDIR"/kernel_gpu_sweep_run*.log
 ```
+
+（各ログの最初の出力行は `cargo test` の `test <name> ... ` プレフィクスと
+同一行に出力されるため、行頭固定の `^N=` では N=1024・cand=0 の行が
+全 5 run とも漏れる。`grep -oE 'N=<N> series=sweep.*'`
+のように行頭アンカーなしで一致部分のみ抽出することで、プレフィクスの
+有無に関わらず全候補を拾える。2026-09-07 是正・イシュー #1370
+codex-review 指摘）
 
 5 run の `kernel_gpu_median_ms` の中央値（＝5 回中央値の中央値）で候補を
 比較した。値には run 間で最大 約 4.5 倍の二峰性（同一 cfg・同一 N でも
@@ -25,6 +32,7 @@ run によって束が変わる。「他セッション負荷変動」節参照�
 
 | cand | tile (bm,bn,bk,wm,wn) | median_of_medians (ms) |
 |---|---|---|
+| 0 | (64,64,16,2,2) | 1.0584 |
 | 1 | (64,32,16,2,2) | 0.2542 |
 | 2 | (32,64,16,2,2) | 0.2476 |
 | 3 | (32,32,16,2,2) | 0.2400 |
