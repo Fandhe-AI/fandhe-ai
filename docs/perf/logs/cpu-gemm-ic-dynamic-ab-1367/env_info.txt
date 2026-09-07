@@ -24,9 +24,12 @@ CPU GEMM `IcDynamic` 両実機 A/B 計測（イシュー #1367）環境情報
   （`variant=… size=… median_gflops=…` 形式。各テストは 20 iteration の中央値）
 - OSS 直接比較（gemm crate 等）: 本イシューでは未計測（§2 の主判定は対 RowPanel。
   DGX 側が主判定で明確に REJECT〈N=1024 比 0.63・N=2048 比 0.85〉のため、
-  時間予算の関係で参考値の 5 回計測は実施しなかった。既存の RowPanel 対 gemm crate
-  基準線は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §12・
-  `docs/perf/logs/cpu-gemm-candle-gate-1148/` を参照）
+  時間予算の関係で参考値の 5 回計測は実施しなかった。**RowPanel 対 gemm crate の
+  5 回計測中央値基準線は存在しない**（`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §12 は candle-core 比のみで gemm crate 比を含まず、`docs/perf/logs/
+  cpu-gemm-candle-gate-1148/` にも gemm crate 比の記録はない。既存の対 gemm crate
+  参考値は同ファイル §8.2 の `RAYON_NUM_THREADS` スイープ〈各 3 回計測・N=1024
+  限定のノイズ含み参考値〉のみ）
 
 ## Apple M4 Max（実測完了）
 

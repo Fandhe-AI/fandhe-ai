@@ -585,9 +585,13 @@ pass（`docs/perf/logs/cpu-gemm-ic-dynamic-ab-1367/bit-exact-large-m4max.txt`・
 | Apple M4 Max | 0.9878（僅かに未達） | 1.0087（達成） | 1.1096（達成） | **未達成**（N=1024 が 1.00 未満） |
 
 対 gemm crate（参考・M4 Max のみ 1 回計測。§14.1 注記のとおり `IcDynamic`
-単体は計測不能のため本番 `RowPanel` 経路の値。既存 5 回中央値基準線は
-`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §12・
-`docs/perf/logs/cpu-gemm-candle-gate-1148/` を参照）: N=1024 0.7595 対
+単体は計測不能のため本番 `RowPanel` 経路の値。**対 gemm crate の 5 回計測
+中央値基準線は存在しない**（本ファイル §12 は candle-core 比のみを記録して
+おり gemm crate 比のデータを含まない。既存の対 gemm crate 参考値は §8.2 の
+`RAYON_NUM_THREADS` スイープ〈coding-rust.md の「5 回計測中央値」原則に
+対し計測時間短縮のため各 3 回へ簡略化したノイズ含みの参考値。N=1024 限定〉
+のみで、`docs/perf/logs/cpu-gemm-candle-gate-1148/` にも gemm crate 比の
+記録はない）: N=1024 0.7595 対
 0.7946 TFLOP/s（gemm crate 上回り）・N=2048 0.7657 対 0.8176（gemm crate
 上回り）・N=4096（`gemm` 側 `output_match=false`。既知の丸め差
 rel_diff≈0.0036 は fail-closed 仕様の想定内）0.7687 対 0.7543（fandhe
