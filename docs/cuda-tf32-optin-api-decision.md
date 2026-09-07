@@ -90,3 +90,35 @@ fail-closed 検査するため path 依存への差し替えは不可）、本�
 いずれも `out-of-scope-tracking.md` の規約に従い、実装完了後にユーザー承認を
 得たうえで Issue 化を提案する（本エージェントは自動運転モードのため Issue の
 自動起票は行わない）。
+
+## 追補（イシュー #1355）: 第 3 モード 3×TF32
+
+親ツリー #1354・承認元 #1338（ユーザー承認 2026-09-06）に基づき、`crate::
+precision::CudaGemmPrecision` を `bool`（TF32 単発の 2 値）から 3 モード
+（`Fp32Strict`／`Tf32`／`Tf32x3`）の enum へ拡張した。3×TF32（split-single
+法。hi/lo 分割・3 回の `mma.sync` 累積）の設計・数値契約の詳細は
+`docs/cuda-tf32x3-split-single-decision.md` を参照する（本 doc では API 形状の
+要点のみ記す）。
+
+- **API 形状**: `precision::set_gemm_precision(CudaGemmPrecision)`／
+  `precision::gemm_precision() -> CudaGemmPrecision` を新設。facade は
+  `fandhe_ai::set_cuda_gemm_precision`／`fandhe_ai::cuda_gemm_precision`
+  として再公開する（`set_cuda_tf32_gemm_enabled`／`cuda_tf32_gemm_enabled`
+  と並存）。
+- **互換ラッパーの意味論**（公開 API 非破壊。`precision.rs` モジュール冒頭
+  コメントが正）: `set_tf32_gemm_enabled(true)` は `Tf32` へ、
+  `set_tf32_gemm_enabled(false)` はどのモードからでも `Fp32Strict` へ設定
+  する。`tf32_gemm_enabled()` は `Tf32` のときのみ `true`（`Tf32x3` では
+  `false`）。
+- **fail-closed の範囲**: `Tf32x3` opt-in 時にカーネルが使用不能
+  （cc<8.0・NVRTC コンパイル失敗・cp.async 16 バイト整列制約〈`n%4==0 &&
+  k%4==0`〉不成立）な場合は `BackendError::KernelLaunchFailed`（
+  `"3xTF32 gemm unavailable (fail-closed): …"` 接頭辞）を返し、FP32／単発
+  TF32 への黙示フォールバックはしない（`Tf32` opt-in の既存契約と同型）。
+- **framework-compare 対象外**: `bench-fandhe` は crates.io 公開版
+  `fandhe-ai =0.7.0` に完全固定されており、本イシューで追加した
+  `set_cuda_gemm_precision` は次回リリース + ピン更新（ユーザー承認）まで
+  `bench-fandhe` から呼べない（`--tf32` フラグの 3×TF32 対応は本イシューの
+  スコープ外。上記 C-2 と同型のフォローアップ）。
+- **適用範囲**: 素の `CudaBackendOps::gemm` のみ（`gemm_bias_act`・
+  `gemm_resident_*`・学習経路は対象外。既存の適用範囲契約を継承）。

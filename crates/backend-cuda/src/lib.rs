@@ -300,6 +300,16 @@
 //! WMMA 本番経路）へプロセスワイドに切り替わる。既定 OFF・fail-closed
 //! （TF32 カーネル使用不能時は FP32 へ黙示フォールバックしない）の契約
 //! は `precision.rs` モジュール冒頭コメントを正とする。
+//!
+//! イシュー #1355（親ツリー #1354・承認元 #1338）で `precision::
+//! CudaGemmPrecision` を 2 値（`bool`）から 3 モード
+//! （`Fp32Strict`／`Tf32`／`Tf32x3`）へ拡張した。`precision::set_gemm_
+//! precision(CudaGemmPrecision::Tf32x3)`（`facade::set_cuda_gemm_
+//! precision` から到達）で opt-in すると `gemm_mma_tf32x3::
+//! CudaMmaTf32x3Gemm`（3×TF32 split-single 法。hi/lo 分割・3 回の
+//! `mma.sync` 累積）へ切り替わる。旧 API（`set_tf32_gemm_enabled`／
+//! `tf32_gemm_enabled`）は互換ラッパーとして維持し公開 API を破壊しない
+//! （`precision.rs` モジュール冒頭コメント参照）。
 
 mod context_cache;
 pub mod device;
@@ -329,6 +339,7 @@ pub mod gemm_variant_selection;
 // 変更しない（改善実装は Phase 2 のスコープ）。
 mod gemm_mma;
 mod gemm_mma_tf32;
+mod gemm_mma_tf32x3;
 mod gemm_wmma;
 // イシュー #956: #946（`context_cache` プロセス内キャッシュ）反映後の
 // fresh モード GEMM で N=2048 のみに現れる約 166 ms の再現性ある固定
@@ -354,6 +365,7 @@ mod kernels;
 mod kernels_elementwise;
 mod kernels_mma;
 mod kernels_mma_tf32;
+mod kernels_mma_tf32x3;
 mod kernels_mse;
 mod kernels_rmsnorm;
 mod kernels_sgd;
@@ -487,6 +499,7 @@ pub use gemm_auto::F16MatrixUnitImpl;
 pub use gemm_auto::{SpecializedMmaKernelHandle, run_specialized_mma_f16};
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_mma_tf32::CudaMmaTf32Gemm;
+pub use gemm_mma_tf32x3::{CudaMmaTf32x3Gemm, ValidatedTf32x3Inputs};
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
 pub use nvrtc::{

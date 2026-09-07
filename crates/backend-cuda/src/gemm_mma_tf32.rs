@@ -48,8 +48,11 @@ use crate::kernels_mma_tf32;
 use crate::nvrtc::compile_ptx;
 
 /// `kernels_mma_tf32::MMA_TF32_BLOCK_THREADS` に 1:1 対応するブロック
-/// 次元。
-const MMA_TF32_BLOCK_DIM: (u32, u32, u32) = (kernels_mma_tf32::MMA_TF32_BLOCK_THREADS, 1, 1);
+/// 次元。`gemm_mma_tf32x3.rs::CudaMmaTf32x3Gemm`（イシュー #1355）も
+/// タイル構成を完全にエイリアスしているため同じブロック次元で起動する
+/// （`kernels_mma_tf32x3.rs` 冒頭コメント「タイル構成のエイリアス」参照）。
+pub(crate) const MMA_TF32_BLOCK_DIM: (u32, u32, u32) =
+    (kernels_mma_tf32::MMA_TF32_BLOCK_THREADS, 1, 1);
 
 /// TF32 `mma.sync`(m16n8k8) GEMM カーネルのコンパイル済みハンドルを保持
 /// する。`stream` は `CudaDevice` から `Arc` クローンで受け取る
@@ -203,59 +206,7 @@ impl CudaMmaTf32Gemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
-
-        if m == 0 || n == 0 {
-            return Ok(());
-        }
-        if k == 0 {
-            // `memset_zeros` は非同期発行のみに留める（イシュー #1013
-            // で本関数（常駐 API）の契約を「非同期投入のみ。完了保証は
-            // 呼び出し元の次の同期点（`download_f32`／`MemoryOps::
-            // download`／明示 `synchronize`）に委ねる」へ統一した。PR #823
-            // codex-review 指摘（旧: この早期 return パスが `synchronize`
-            // を呼ばずに戻っていたレース）は、単一ストリームの FIFO 順序
-            // 保証により後続の同期点が本 `memset_zeros` を含む全ての先行
-            // 投入を合わせて待つため、契約変更後も再発しない
-            // （`transpose.rs` の同型分岐と同じ判断。設計文書 §3〜§4）。
-            self.stream.memset_zeros(c_dev)?;
-            return Ok(());
-        }
-
-        validate_mma_tf32_alignment(n, k)?;
-        validate_mma_tf32_grid_bounds(m)?;
-        validate_mma_tf32_k_bound(k)?;
-
-        let cfg = mma_tf32_launch_config(m, n);
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
-
-        // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/
-        // b.len()/(m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の
-        // 5 個・型・個数が、上記で検証済みの m/n/k と 1:1 対応する。
-        // カーネル内の手動境界チェック（cp.async src-size ゼロ充填・
-        // エピローグ guarded store。`kernels_mma_tf32.rs` 参照、REQ-8）と
-        // 合わせて OOB 読み書きが起きない根拠とする。グリッド次元は
-        // `MMA_TF32_BM`/`MMA_TF32_BN` 単位の div_ceil で m/n を包含する
-        // よう構築しており（`mma_tf32_launch_config`）、末尾タイルの余剰は
-        // カーネル内境界チェックで弾かれる。共有メモリは静的 `__shared__`
-        // 配列のみを使用するため `shared_mem_bytes` は 0 のままでよい
-        // （`kernels_mma_tf32.rs::MMA_TF32_SHARED_MEM_BYTES` = 28,416B は
-        // per-block 静的上限 48KiB 内）。
-        unsafe {
-            self.stream
-                .launch_builder(&self.mma_tf32)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
-        // 委ねる。
-        Ok(())
+        launch_mma_tf32_family(&self.stream, &self.mma_tf32, a_dev, b_dev, c_dev, m, n, k)
     }
 
     /// C をデバイス→ホストへ転送する（`run_tf32` の D2H 部分の切り出し）。
@@ -271,6 +222,95 @@ impl CudaMmaTf32Gemm {
     pub fn synchronize(&self) -> Result<(), CudaError> {
         Ok(self.stream.synchronize()?)
     }
+}
+
+/// `CudaMmaTf32Gemm::launch_tf32`（単発 TF32）と
+/// `gemm_mma_tf32x3::CudaMmaTf32x3Gemm::launch_tf32x3`（3×TF32。イシュー
+/// #1355）が共有するカーネル起動本体。両カーネルはシグネチャ
+/// （`(a, b, c, m, n, k)`）・タイル構成（`kernels_mma_tf32x3.rs` が
+/// `kernels_mma_tf32` の定数をエイリアスして同一値に固定）・境界検査
+/// 契約（REQ-8: cp.async ゼロ充填・整列クランプ・エピローグ guarded
+/// store）が完全に同一であるため、形状検証・no-op/`k==0` 分岐・起動
+/// 引数の組み立てをここへ集約し重複させない（`kernels_mma_tf32x3.rs`
+/// 冒頭コメント「本番結線しない新規 unsafe」不使用の根拠でもある:
+/// x3 経路はこのヘルパーの既存 `unsafe` 呼び出しを再利用するのみで、
+/// 新規に `unsafe` ブロックを追加しない）。
+///
+/// 検証順序（`gemm_mma.rs::CudaMmaGemm::run_f16` と同一設計）:
+/// `validate_gemm_dims`（i32 積ガード含む）を常に先行させる → no-op
+/// 形状（`m==0 || n==0`）の早期 return → `k==0` の memset 早期 return →
+/// 本経路固有の `validate_mma_tf32_alignment`／`validate_mma_tf32_grid_
+/// bounds`／`validate_mma_tf32_k_bound`。
+#[allow(clippy::too_many_arguments)] // 単発 TF32／3×TF32 の 2 呼び出し元が共有する起動本体のため引数集約は妥当（責務分割の代替案はホスト側の重複を招く）
+pub(crate) fn launch_mma_tf32_family(
+    stream: &Arc<CudaStream>,
+    func: &CudaFunction,
+    a_dev: &CudaSlice<f32>,
+    b_dev: &CudaSlice<f32>,
+    c_dev: &mut CudaSlice<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<(), CudaError> {
+    validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+    crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+
+    if m == 0 || n == 0 {
+        return Ok(());
+    }
+    if k == 0 {
+        // `memset_zeros` は非同期発行のみに留める（イシュー #1013
+        // で本関数（常駐 API）の契約を「非同期投入のみ。完了保証は
+        // 呼び出し元の次の同期点（`download_f32`／`MemoryOps::
+        // download`／明示 `synchronize`）に委ねる」へ統一した。PR #823
+        // codex-review 指摘（旧: この早期 return パスが `synchronize`
+        // を呼ばずに戻っていたレース）は、単一ストリームの FIFO 順序
+        // 保証により後続の同期点が本 `memset_zeros` を含む全ての先行
+        // 投入を合わせて待つため、契約変更後も再発しない
+        // （`transpose.rs` の同型分岐と同じ判断。設計文書 §3〜§4）。
+        stream.memset_zeros(c_dev)?;
+        return Ok(());
+    }
+
+    validate_mma_tf32_alignment(n, k)?;
+    validate_mma_tf32_grid_bounds(m)?;
+    validate_mma_tf32_k_bound(k)?;
+
+    let cfg = mma_tf32_launch_config(m, n);
+    let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+    // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/
+    // b.len()/(m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の
+    // 5 個・型・個数が、上記で検証済みの m/n/k と 1:1 対応する。
+    // カーネル内の手動境界チェック（cp.async src-size ゼロ充填・
+    // エピローグ guarded store。`kernels_mma_tf32.rs`／
+    // `kernels_mma_tf32x3.rs` 参照、REQ-8）と合わせて OOB 読み書きが
+    // 起きない根拠とする。グリッド次元は `MMA_TF32_BM`/`MMA_TF32_BN`
+    // 単位の div_ceil で m/n を包含するよう構築しており
+    // （`mma_tf32_launch_config`）、末尾タイルの余剰はカーネル内境界
+    // チェックで弾かれる。共有メモリは静的 `__shared__` 配列のみを
+    // 使用するため `shared_mem_bytes` は 0 のままでよい
+    // （`kernels_mma_tf32.rs::MMA_TF32_SHARED_MEM_BYTES` = 28,416B は
+    // per-block 静的上限 48KiB 内。x3 経路は同一定数をエイリアスして
+    // おり静的 SMEM サイズも完全に同一）。`func` は呼び出し元
+    // （`CudaMmaTf32Gemm::new`／`CudaMmaTf32x3Gemm::new`）がそれぞれ
+    // 対応するエントリポイント名（`gemm_mma_tf32`／`gemm_mma_tf32x3`）で
+    // `load_function` 済みのハンドルであり、引数の型・個数はどちらの
+    // カーネルも同一シグネチャを持つため共通で安全。
+    unsafe {
+        stream
+            .launch_builder(func)
+            .arg(a_dev)
+            .arg(b_dev)
+            .arg(c_dev)
+            .arg(&m_i)
+            .arg(&n_i)
+            .arg(&k_i)
+            .launch(cfg)?;
+    }
+    // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+    // 委ねる。
+    Ok(())
 }
 
 /// TF32 `mma.sync`(m16n8k8) 経路が要求する cp.async 16 バイト（f32 4
@@ -351,7 +391,9 @@ pub(crate) fn validate_mma_tf32_k_bound(k: u32) -> Result<(), CudaError> {
 /// `MMA_TF32_BM x MMA_TF32_BN` タイル 1 個を担当するため、
 /// `div_ceil(n, MMA_TF32_BN)` x `div_ceil(m, MMA_TF32_BM)` のグリッドを
 /// 構築する（`gemm_mma.rs::mma_launch_config` と同じ設計）。
-fn mma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
+/// `gemm_mma_tf32x3.rs`（イシュー #1355）もタイル定数を完全にエイリアス
+/// しているため本関数をそのまま再利用する（`pub(crate)`）。
+pub(crate) fn mma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
     let grid_dim = (
         n.div_ceil(kernels_mma_tf32::MMA_TF32_BN),
         m.div_ceil(kernels_mma_tf32::MMA_TF32_BM),
