@@ -326,17 +326,34 @@ fn job_grid(
 - 行側: `rb ∈ 1..=cap` の各候補について `mc_job(rb) = align_up(ceil(m/rb), mr)`・
   `real_rb(rb) = ceil(m / mc_job(rb))` を求める（同様に `real_rb(rb) <= rb` になり得る）
 
-`cb` の候補ごとに次の手順で `rb` を決め、**実帯数の積で下限を再検査してから**候補として残す:
+**`real_rb(rb)` は `rb` について単調非減少である**（`real_cb(cb)` も同様に `cb` について
+単調非減少）: `rb` を大きくすると `ceil(m/rb)` は単調非増加、`align_up` は入力の大小関係を
+保つ非減少写像なので `mc_job(rb) = align_up(ceil(m/rb), mr)` は `rb` について単調非増加、
+よって `real_rb(rb) = ceil(m/mc_job(rb))` は `rb` について単調非減少になる。この単調性により
+「`real_rb(rb) >= t` を満たす最小の `rb`」が `rb ∈ [1, cap]`（`O(cap)` の境界検査済みの
+線形走査、または単調性を使った二分探索）で一意に求まる。**`rb=cap` では
+`ceil(m/cap) <= mr` のため `mc_job(cap) = align_up(ceil(m/cap), mr) = mr`・
+`real_rb(cap) = ceil(m/mr) = cap` となり、collapse が一切起きない**（`cb=ceil(n/nr)` でも
+同様に `real_cb = ceil(n/nr) = cb` で collapse しない。この事実は後述のフォールバック
+到達不能性の根拠になる）。
+
+`cb` の候補ごとに次の手順で `rb` を決める（旧版は `rb` を閉形式の式
+`rb = min(cap, max(ceil(J/real_cb), ceil(bound/real_cb)))` で一意に「導出」し、その結果を
+事後に `real_rb * real_cb >= bound` で検査していたが、この式は `rb` 自体の alignment
+collapse（列側と同じ現象が行側でも起きる）を考慮していないため、実際には `rb` を `cap`
+まで引き上げれば下限を満たせる候補を、より小さい `rb` の見積もりに基づいて誤って棄却する
+ことがあった — codex-review #1431／Cursor Bugbot 指摘の欠陥そのもの。以下は
+`real_rb(rb)` の単調性を使い、閉形式の見積もりではなく実際に到達可能な `rb` を探索して
+求める修正版）:
 
 - `nc_job = align_up(ceil(n/cb), nr)`・`real_cb = ceil(n/nc_job)`
-- `rb = min(cap, max(ceil(J/real_cb), ceil(bound/real_cb)))`（意図した `cb` ではなく
-  `real_cb` を分母に使う。`real_cb` が `cb` より小さい場合に必要な `rb` が大きくなる方向へ
-  自動的に補正される）
-- `mc_job = align_up(ceil(m/rb), mr)`・`real_rb = ceil(m/mc_job)`
-- **`real_rb * real_cb >= bound` を満たさない候補は棄却する**（`rb` を `cap` まで
-  大きくしても `real_cb` 自体が `align_up` で頭打ちのため解消しない場合がある。これが
-  codex-review #1431／Cursor Bugbot が指摘した欠陥そのもの — 意図した `cb` に基づく
-  `cap * cb >= bound` の検査だけでは、この頭打ちを検出できない）
+- `t = ceil(bound / real_cb)`（この `cb` 候補が下限を満たすために必要な `real_rb` の最小値）
+- `real_rb(rb)` の単調性を使い、`real_rb(rb) >= t` を満たす最小の `rb ∈ [1, cap]` を探索する。
+  そのような `rb` が `cap` まで存在しなければ（`real_rb(cap) = cap < t` の場合）、`cb` を
+  これ以上変えても `real_cb` は増えないため、この `cb` 候補は棄却する
+- 見つかった `rb` について `mc_job = align_up(ceil(m/rb), mr)`・`real_rb = ceil(m/mc_job)`
+  を確定する。探索の定義から `real_rb * real_cb >= bound` は自動的に成立する（事後の
+  棄却検査は不要 — 探索自体が下限充足を保証する）
 
 残った候補について pack 総量モデル
 
@@ -347,35 +364,98 @@ cost(rb, cb) = real_cb_eff * m * k + real_rb * k * n
 （`real_cb_eff = real_cb * ceil(nc_job / NC)`。A は列帯ごと・B は行帯ごとに重複するため、
 コスト計算にも意図した `cb`／`rb` ではなく実帯数 `real_cb`／`real_rb` を使う）を最小化する
 (rb, cb) を決める。同コストなら `nc_job` の大きい方（A 再利用回数が多く端タイルが少ない）を
-選ぶ。全候補が棄却された場合（`bound` 自体が `到達可能最大 job 数` を超えないため理論上
-発生しないが、fail-closed の防御として）は `rb = cap`・`cb = ceil(n/nr)`（最大分割）を採用する。
+選ぶ。
+
+**フォールバック `rb = cap`・`cb = ceil(n/nr)`（最大分割）は理論上到達不能である**:
+上記のとおり `rb=cap` かつ `cb=ceil(n/nr)` では collapse が一切起きず、
+`real_rb(cap) * real_cb(ceil(n/nr)) = cap * ceil(n/nr) = 到達可能最大 job 数 >= bound`
+（`bound = min(J, 到達可能最大 job 数)` の定義そのもの）が常に成立するため、
+`cb = ceil(n/nr)` の候補は探索の中で必ず受理される（棄却されない）。よって「全候補が
+棄却される」事態は発生しない ——旧版の「理論上発生しないが、fail-closed の防御として」
+という記述は、実際には旧版の `rb` 導出方法の欠陥により発生し得た（具体例 3）。修正後の
+探索方式では上記の証明により本当に発生しないため、フォールバックはコードの
+`unreachable!()` 相当の防御としてのみ残す（到達した場合は探索ロジックの契約違反を示す
+バグであり、通常の分岐として実行されることはない）。
 
 **具体例 1（cb 絞り込みのみでは不十分なケース。cb=1 除外だけでは足りない反例）**:
 `m=n=24`・`mr=8`・`nr=12`・`NC=512`・`num_threads=8`・`jobs_per_worker=2` のとき
 `J=16`・`cap=ceil(24/8)=3`・`到達可能最大 job 数=3*ceil(24/12)=3*2=6`・`bound=min(16,6)=6`。
-`cb=1`: `nc_job=align_up(24,12)=24`・`real_cb=ceil(24/24)=1`。`rb=min(3, max(ceil(16/1)=16,
-ceil(6/1)=6))=3`。`mc_job=align_up(ceil(24/3)=8,8)=8`・`real_rb=ceil(24/8)=3`。
-`real_rb*real_cb=3*1=3 < bound=6` のため棄却。
+`real_rb(1)=1`・`real_rb(2)=2`・`real_rb(3)=3`（この形状では collapse なし。単調性の
+とおり `rb=1,2,3` の順で単調非減少）。
+`cb=1`: `nc_job=align_up(24,12)=24`・`real_cb=ceil(24/24)=1`。`t=ceil(6/1)=6`。
+`real_rb(rb)>=6` を満たす `rb` は `cap=3` まで存在しない（最大でも `real_rb(3)=3`）ため棄却。
 `cb=2`: `nc_job=align_up(ceil(24/2)=12,12)=12`・`real_cb=ceil(24/12)=2`（この形状では
-alignment collapse は起きず `real_cb=cb`）。`rb=min(3, max(ceil(16/2)=8, ceil(6/2)=3))=3`。
-`mc_job=align_up(ceil(24/3)=8,8)=8`・`real_rb=3`。`real_rb*real_cb=3*2=6=bound` を満たし採用。
+alignment collapse は起きず `real_cb=cb`）。`t=ceil(6/2)=3`。`real_rb(rb)>=3` を満たす
+最小の `rb` は `rb=3`（`real_rb(3)=3`）。`mc_job=align_up(ceil(24/3)=8,8)=8`。
+`real_rb*real_cb=3*2=6=bound` を満たし採用。
 
 **具体例 2（alignment collapse が実際に発生し `cap * cb >= bound` の検査だけでは
 防げないケース。codex-review #1431／Cursor Bugbot 指摘の反例）**:
 `m=16`・`n=108`・`mr=8`・`nr=12`・`NC=512`・`num_threads=8`・`jobs_per_worker=2` のとき
 `J=16`・`cap=ceil(16/8)=2`・`到達可能最大 job 数=2*ceil(108/12)=2*9=18`・
-`bound=min(16,18)=16`。
+`bound=min(16,18)=16`。`real_rb(1)=1`・`real_rb(2)=2`（この `m` では `cap` が小さく
+collapse の余地がない）。
 `cb=8`（`cap*cb=16>=bound=16` を満たすため、意図した `cb` だけを見る検査では通過してしまう）:
 `nc_job=align_up(ceil(108/8)=14,12)=24`・`real_cb=ceil(108/24)=5`（`align_up` が 14 を
-24 へ切り上げたため、意図した 8 帯ではなく実際には 5 帯しか生成されない）。
-`rb=min(2, max(ceil(16/5)=4, ceil(16/5)=4))=2`。`mc_job=align_up(ceil(16/2)=8,8)=8`・
-`real_rb=ceil(16/8)=2`。`real_rb*real_cb=2*5=10 < bound=16` のため棄却（意図した `rb*cb=16`
-は下限を満たすように見えるが、実際に生成される job は 10 個のみ）。
+24 へ切り上げたため、意図した 8 帯ではなく実際には 5 帯しか生成されない）。`t=ceil(16/5)=4`。
+`real_rb(rb)>=4` を満たす `rb` は `cap=2` まで存在しない（最大でも `real_rb(2)=2`）ため
+棄却（意図した `rb*cb=16` は下限を満たすように見えるが、`real_cb` の collapse により
+実際に到達可能な積は高々 `2*5=10` にとどまる）。
 `cb=9`（`n/nr` の上限）: `nc_job=align_up(ceil(108/9)=12,12)=12`・`real_cb=ceil(108/12)=9`
 （この `cb` では `align_up` の切り上げが `ceil(n/nr)` と一致し collapse しない）。
-`rb=min(2, max(ceil(16/9)=2, ceil(16/9)=2))=2`。`mc_job=8`・`real_rb=2`。
-`real_rb*real_cb=2*9=18>=bound=16` を満たし採用（`cb=8` では `bound` を満たせず、`cb=9` まで
-上げて初めて満たすことが `real_cb` 経由の検査で判明する）。
+`t=ceil(16/9)=2`。`real_rb(rb)>=2` を満たす最小の `rb` は `rb=2`（`real_rb(2)=2`）。
+`mc_job=align_up(ceil(16/2)=8,8)=8`。`real_rb*real_cb=2*9=18>=bound=16` を満たし採用
+（`cb=8` では `bound` を満たせず、`cb=9` まで上げて初めて満たすことが `real_cb` 経由の
+探索で判明する）。
+
+**具体例 3（行側の alignment collapse が原因で §10 が要求する `jobs_per_worker` 単調性が
+破れていた反例。codex-review #1431 指摘）**:
+`m=48`・`n=36`・`mr=8`・`nr=12`・`NC=512`・`num_threads=2` のとき、`cap=ceil(48/8)=6`・
+`到達可能最大 job 数=6*ceil(36/12)=6*3=18`。`real_rb(1)=1`・`real_rb(2)=2`・`real_rb(3)=3`・
+`real_rb(4)=3`（`mc_job=align_up(12,8)=16`・`real_rb=ceil(48/16)=3`。**collapse**: 意図
+`rb=4` に対し実際は `3`）・`real_rb(5)=3`（`mc_job=align_up(10,8)=16`。同じく collapse）・
+`real_rb(6)=6`（`mc_job=align_up(8,8)=8`。collapse なし）——単調非減少だが `rb=4,5` で
+横ばいになる。
+
+`jobs_per_worker=5`: `J=10`・`bound=min(10,18)=10`。**旧版の閉形式導出**では `cb=1,2,3` の
+それぞれで `rb=min(6,max(ceil(10/real_cb),ceil(10/real_cb)))` を計算すると
+`cb=1→rb=6`（`real_rb=6`・`real_rb*real_cb=6<10` 棄却）・`cb=2→rb=5`（`real_rb(5)=3`・
+`real_rb*real_cb=6<10` 棄却。閉形式は `rb=5` で十分と見積もったが実際は `real_rb(5)=3` しか
+達成しない）・`cb=3→rb=4`（`real_rb(4)=3`・`real_rb*real_cb=9<10` 棄却）と
+**全 cb 候補が棄却され、フォールバック `(rb,cb)=(6,3)`（18 job）に落ちていた**（`jobs_per_worker`
+を上げるほど job 数が減るという逆転の原因）。
+
+**修正後の探索方式**では、`cb=2`（`real_cb=2`）について `t=ceil(10/2)=5` を満たす最小の
+`rb` を `real_rb(rb)` の単調性で探索すると、`real_rb(4)=real_rb(5)=3 < 5` だが
+`real_rb(6)=6 >= 5` のため `rb=6` が選ばれ、`real_rb*real_cb=6*2=12 >= bound=10` を満たして
+採用される（`cost=real_cb_eff*m*k+real_rb*n*k=2*1*48k+6*36k=96k+216k=312k`。
+`nc_job=align_up(18,12)=24`・`ceil(24/512)=1` のため `real_cb_eff=2`）。`cb=3` も
+`t=ceil(10/3)=4` に対し `rb=6`（`real_rb=6`）で `6*3=18>=10` を満たすが、
+`cost=3*1*48k+6*36k=144k+216k=360k` と `cb=2` より高いため棄却され、
+**`(rb,cb)=(6,2)`・12 job が選ばれる**（全候補棄却・フォールバックへは到達しない）。
+
+`jobs_per_worker=6`: `J=12`・`bound=min(12,18)=12`。`cb=2` は `t=ceil(12/2)=6` に対し
+`rb=6`（`real_rb=6`）で `6*2=12>=12` を満たし、コスト比較（同上）で
+**`(rb,cb)=(6,2)`・12 job が選ばれる**。
+
+`jobs_per_worker=5` と `6` で同一の `(rb,cb)=(6,2)`・12 job が選ばれ、旧版で発生していた
+「`jobs_per_worker` を 5→6 に増やすと job 数が 18→12 に**減る**」という逆転は解消される。
+
+**この修正で証明できる単調性の範囲（過大に主張しない）**: `bound(jobs_per_worker) =
+min(jobs_per_worker × num_threads, 到達可能最大 job 数)` は `jobs_per_worker` について
+単調非減少（自明）。固定した `cb` の分岐内では、`t = ceil(bound/real_cb)` が非減少である
+限り探索で選ばれる `rb` も `real_rb(rb)` の単調性により非減少なので、**その `cb` 分岐が
+達成する `real_rb*real_cb` も `jobs_per_worker` について単調非減少**である（分岐単位では
+証明済み）。一方、コスト最小化によって採用される `cb` 自体が `jobs_per_worker` の増加に
+伴って別の分岐へ切り替わり得るため、**最終的に選択される job 数（`real_rb*real_cb`）が
+あらゆる形状・あらゆる `jobs_per_worker` の組に対して大域的に単調非減少であることは
+本設計では数学的に証明しない**。§10 の回帰テストは、実際に使用するスイープ範囲
+（`{1,2,4,8}`。#1312 が計測する `{2,4}` を含む）・多数のランダム形状・および本具体例 3 を
+固定入力とした回帰として非減少性を検証する（経験的検証であり全域の証明ではないことを
+明記する）。少なくとも、選ばれた `(rb,cb)` の積は常に `>= bound`（探索の定義より保証）
+であり `<= 到達可能最大 job 数` に収まるため、旧版で起きていた「フォールバックへの
+意図しない転落による飛躍的な job 数増加」は修正後の探索方式では構造的に発生しない
+（フォールバック自体が到達不能になったため）。
 
 `jobs_per_worker` は const（既定 2。§5.3 の表で `RowPanel` の pack 総量を全形状で下回る側）。
 `#[cfg(test)]` のパラメータ化入口 `gemm_blis_parallel_2d_dynamic_with_params(..., jobs_per_worker)`
@@ -478,8 +558,10 @@ pack 総量は §5 の表のとおり `RowPanel` 以下。
 
 | テスト | 目的 |
 |---|---|
-| `partition::tests::job_grid_*` | 被覆完全・互いに素・`mr`/`nr` 整列・job 数下限（`ceil(m/mc_job) * ceil(n/nc_job)` という **`align_up` 後の実帯数の積**で判定。意図した `rb`／`cb` 自体では判定しない）・`num_threads=1`／`m<mr`／`n<nr`／`m==0`／`n==0`／オーバーフロー近傍の全域性・`jobs_per_worker` 単調性 |
+| `partition::tests::job_grid_*` | 被覆完全・互いに素・`mr`/`nr` 整列・job 数下限（`ceil(m/mc_job) * ceil(n/nc_job)` という **`align_up` 後の実帯数の積**で判定。意図した `rb`／`cb` 自体では判定しない）・`num_threads=1`／`m<mr`／`n<nr`／`m==0`／`n==0`／オーバーフロー近傍の全域性・`real_rb(rb)`／`real_cb(cb)` の単調非減少性（§5.2 証明の実装契約としての検証） |
 | `partition::tests::job_grid_lower_bound_survives_alignment_collapse` | §5.2 具体例 2（`m=16,n=108,mr=8,nr=12,num_threads=8,jobs_per_worker=2`）を固定入力として再現し、`ceil(m/mc_job) * ceil(n/nc_job) >= bound` が実際に成立することを検証する回帰テスト（codex-review #1431／Cursor Bugbot 指摘の反例固定化） |
+| `partition::tests::job_grid_all_candidates_rejected_is_unreachable` | §5.2「フォールバック到達不能」の証明（`rb=cap`・`cb=ceil(n/nr)` では collapse しないため `cb=ceil(n/nr)` は必ず受理される）をランダム形状・スレッド数・`jobs_per_worker` の組で実行時検査する（フォールバック分岐に到達したらテスト失敗。旧版の欠陥では具体例 3 の入力でこの分岐へ落ちていた） |
+| `partition::tests::job_grid_jobs_per_worker_product_non_decreasing` | §5.2 具体例 3（`m=48,n=36,mr=8,nr=12,num_threads=2`。`jobs_per_worker` を 5→6 に増やすと job 数が 18→12 に逆転していた codex-review #1431 指摘の反例）を固定入力として再現し、修正後は両方とも `(rb,cb)=(6,2)`・12 job になることを検証する回帰テスト。加えて `jobs_per_worker ∈ {1,2,4,8}`（実際に使用するスイープ範囲。#1312 の `{2,4}` を含む）でのランダム形状に対する非減少性を経験的に検査する（§5.2「この修正で証明できる単調性の範囲」のとおり全域の数学的証明ではなく、このスイープ範囲内での回帰検証であることを明記する） |
 | `microkernel::tests::run_rows_matches_run_with_ldc_bit_exact_*`（ISA ごと） | 新入口と既存入口の bit 同一（乱数タイル・`ldc=n`／`ldc=NR` 双方・境界エラーの fail-closed） |
 | `gemm_blis_parallel_variant_all_candidates_match_naive_bit_exact` 拡張 | `TwoDDynamic` を配列へ追加（5 形状 × スレッド数 1/2/3/16） |
 | `gemm_blis_two_d_dynamic_matches_row_panel_bit_exact_across_shapes_and_threads` | C 初期値非ゼロ・端あり形状（`m`/`n` が MR/NR 非倍数・`m<mr`・`n<nr`・`k=0`・`k<kc`・非正方・512³）× スレッド数 1/2/3/16 × `jobs_per_worker` {1,2,4,8} |
