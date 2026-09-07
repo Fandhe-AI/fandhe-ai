@@ -612,6 +612,25 @@ python3 parity_tolerance_candidates.py --n 2048 \
   --dump cpu=../../../docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-cpu-2048.txt
 ```
 
+**候補判定の fandhe-ai 本体側 parity 非後退契約への影響**（イシュー #1238。
+`scripts/bench/framework-compare/parity_baseline_impact.py`）: 上記と同じ
+候補定義（係数のみ再利用）を、fandhe-ai 本体側の parity 非後退契約
+（`crates/backend-cuda/tests/common/parity_baseline.rs::BASELINES`。45 行）
+へ適用した場合の影響を机上確認する。`BASELINES` は行単位の集計値
+（`fail_count`・`mean_abs_diff_ceiling`・`max_abs_diff_ceiling`）しか持た
+ないため、上記スクリプトと異なり要素単位の救済可否ではなく no-op／全救済／
+部分・未確定の 3 クラス分類までしか判定できない。`M`（入力規模）は
+`--scale-mode`（既定 `exact`）で行ごとに `Xorshift64Star` を実際に走らせて
+`max|A|・max|B|` を求める（`upper-bound` は `M=1` の即時近似）。標準
+ライブラリのみに依存し、`BASELINES`・tolerance 定数は一切変更しない
+（`docs/perf/candle-parity-tolerance-baseline-impact.md`）。
+
+```bash
+cd scripts/bench/framework-compare
+python3 -m unittest parity_baseline_impact_test.py
+python3 parity_baseline_impact.py --scale-mode exact
+```
+
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
 `backend-cuda` の GEMM 公開経路（`fandhe-ai::gemm`）は既定で FP32 厳密（`run_tiled_f32`）だが、

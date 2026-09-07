@@ -239,6 +239,11 @@ fail_count・mean_abs_diff は全 262144 要素の集計値である）。
 - イシュー #490（GEMM 性能改善ツリー Phase 2 親）
 - `docs/perf/cuda-optimized-remeasurement.md`「役割分担」節（#575 は性能値
   採用の前提ゲートとして非後退を確認する側であることの相互参照）
+- `docs/perf/candle-parity-tolerance-baseline-impact.md`（イシュー #1238。
+  #1237 の候補判定〈スケール付き絶対誤差／ULP ベース〉を本ファイルの
+  `BASELINES`（45 行）へ適用した場合の no-op／全救済／部分・未確定 3 クラス
+  分類・`assert_no_parity_regression` 5 項目への影響・同時更新が必要な
+  箇所一覧の机上確認記録。`BASELINES`・tolerance 定数は不変のまま）
 
 ## 8. Phase F-4 最終確認（#575）
 
