@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§15）
 
 ## 1. 位置づけ
 
@@ -194,6 +194,9 @@ GFLOP/s と本計測の framework-compare 境界値を比べると:
 この計測境界固定費は GB10 側でより顕著（環境 10 単発 fresh との対比では
 1024 で 536.2 対 279.3 と約 48% もの差。retune §5 記入表）であり、facade
 呼び出し境界の効率化は #1148 のスコープ外の別調査候補（§10）とする。
+**この「推定」は #1292（§15）で reuse 1 反復の内訳を両実機 5 回計測中央値で
+実測し、固定費の内訳（ハーネス診断コスト対本番経路固定費）・優先順位として
+確定した。**
 
 ### 8.2 並列化（スレッド数スイープ）
 
@@ -273,6 +276,8 @@ GB10: 1024/2048 で約 45〜54% 低い）、packing の重複コスト自体は�
 1. **計測境界固定費（§8.1）**: framework-compare 境界とカーネル単体の差が
    最大（M4 Max で 16〜24%・GB10 で 31〜48%）で、GEMM カーネル自体の改善では
    解消できない構造要因。facade/autodiff 呼び出し境界の効率化調査が候補
+   （**内訳確定は §15。ハーネス診断コスト〈host_copy／checksum〉と本番経路
+   固定費〈autodiff オーバーヘッド・alloc_c〉の切り分け・削減優先順位を記載**）
 2. **並列化の非単調性（§8.2）**: 両実機で観測された「大コア数付近の落ち込み」
    は P/E 異種コア構成での静的等分割行パネル分割が疑わしいが、背景負荷ノイズ
    （M4 Max は他エージェント稼働中。DGX はスイープ実行中の load average を
@@ -642,3 +647,410 @@ DGX での後退の推定要因: `IcDynamic` は pc ごとに B を列全幅 `n`
 - `docs/cpu-gemm-b-packing-sharing-decision.md` §F
 - `docs/perf/logs/cpu-gemm-ic-dynamic-ab-1367/`（本追補の生ログ・env_info・集計スクリプト）
 - `.claude/rules/coding-rust.md`（bit 完全一致契約）・`.claude/rules/security.md`（unsafe 非導入）
+
+## 15. 2026-09-08 追補: reuse 計測境界のフェーズ分解（イシュー #1292）
+
+### 15.1 位置づけ・プロトコル
+
+§8.1・§8.5 は framework-compare reuse 境界の GFLOP/s がカーネル単体
+（`cpu-gemm-candle-cpu-retune.md` §5 の `RowPanel` 実測値）より低いことを
+「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」
+と**推定**したまま、CPU では reuse 1 反復のどこに固定費が乗るかを分解して
+いなかった（CUDA は #1182、Metal は #1189 で分解済み。本節はその CPU 版）。
+
+本追補は依存イシュー #1290 が追加した 2 層のハーネス（`README.md`「CPU での
+区間定義と Layer B（イシュー #1290）」節）を用いて両実機を実測する:
+
+- **Layer A**（`bench-fandhe --task gemm --device cpu --mode reuse --phases`。
+  framework-compare 公開 API 境界）: `matmul`／`to_tensor`／`host_copy`／
+  `checksum`／`iter_total` の 5 区間
+- **Layer B**（`crates/backend-cpu` 内側診断テスト
+  `gemm_reuse_phase_diag_cpu`）: `alloc_c`（出力バッファ確保）／`kernel`
+  （`gemm_blis_parallel` カーネル本体）／`tensor_wrap`（`Tensor` 包装）／
+  `ops_gemm`（`alloc_c+kernel+tensor_wrap` の本番合成レプリカ）／
+  `tape_matmul`（Layer A `matmul` のレプリカ。autodiff tape 登録込み）／
+  `to_tensor`／`host_copy`／`checksum` の 8 区間
+
+系列は Layer A が crates.io 公開版 `fandhe-ai =0.7.0`（framework-compare の
+承認済みピン。両実機で `cargo tree -p bench-fandhe --depth 1` = `fandhe-ai
+v0.7.0`〈registry〉を確認）、Layer B が origin/main HEAD（`308c2eb`。#1290
+マージ直後で本イシューはコード変更なし）。**突合前提の確認**として
+`git diff v0.7.0..HEAD -- crates/backend-cpu/src crates/autodiff/src
+crates/facade/src crates/tensor-core/src` を実施し、CPU 本番経路
+（`GemmDriverVariant::RowPanel`。`gemm_blis/mod.rs` の
+`GemmDriverVariant::RowPanel` 呼び出し）が不変であること、
+`thread_limit::BIG_CORE_LIMIT_ENABLED = false`（#1364 の差し戻し後の値）で
+あること、`IcDynamic`（#1366/#1409/#1367）が本番未結線であることを確認した
+（差分自体は autodiff/tensor-core/facade/backend-cpu にまたがる約 2400 行
+挿入だが、いずれも新規機構の追加であり `RowPanel` 経路の呼び出し形は変更
+されていない）。`RAYON_NUM_THREADS` 未設定・`host-view-readout` feature
+OFF（legacy `to_vec` 経路）・`--device-checksum`（#1339/#1415）不使用
+（既定 `checksum_var`）は §2 の gate プロトコルと同一。
+
+5 回独立プロセス起動・run 間中央値（`.claude/rules/coding-rust.md`）。
+Layer A は N ごとに 5 プロセス × 3 N = 15 プロセス、Layer B は 1 プロセスで
+N=512/1024/2048 を順に走らせるため 5 プロセス = 5 run。失敗 run はなし
+（全 run 完走・除外なし）。
+
+**共有負荷の注記**: M4 Max は本イシュー実行中も他セッションが並走
+（`uptime-m4max.log`。19 users 常駐・load average が 4.9〜7.6 の平常域から
+run 終盤（Layer B run 4/5）に一時的に約 30 まで急伸）しており、§4.2・
+§12.2 と同じ「共有負荷下」の実測である。DGX Spark GB10 は本イシュー専用の
+隔離ディレクトリ（`~/work/fc-1292/`。§14.2 と同じ方式で `rsync` 転送・
+実測後削除）で計測し、DGX 側の `uptime`（`uptime-dgx.log`）は安定していた。
+
+生ログ・env_info は `docs/perf/logs/cpu-gemm-reuse-phase-1292/` を参照
+（AC-1）。
+
+### 15.2 Layer A 実測（両実機・N=512/1024/2048）
+
+5 run 中央値（`iter_total` に対する比率を併記）:
+
+**Apple M4 Max**
+
+| N | matmul | to_tensor | host_copy | checksum | iter_total |
+|---|---|---|---|---|---|
+| 512 | 591.4 µs (77.8%) | 0.1 µs (0.0%) | 15.4 µs (2.0%) | 147.3 µs (19.4%) | 759.8 µs |
+| 1024 | 2.887 ms (77.3%) | 0.2 µs (0.0%) | 266.4 µs (7.1%) | 573.3 µs (15.3%) | 3.735 ms |
+| 2048 | 19.087 ms (84.4%) | 0.3 µs (0.0%) | 1.115 ms (4.9%) | 2.370 ms (10.5%) | 22.608 ms |
+
+**DGX Spark GB10（Grace CPU）**
+
+| N | matmul | to_tensor | host_copy | checksum | iter_total |
+|---|---|---|---|---|---|
+| 512 | 1.850 ms (77.7%) | 0.0 µs (0.0%) | 372.5 µs (15.7%) | 134.8 µs (5.7%) | 2.380 ms |
+| 1024 | 5.069 ms (71.6%) | 0.0 µs (0.0%) | 1.441 ms (20.3%) | 531.1 µs (7.5%) | 7.082 ms |
+| 2048 | 26.056 ms (73.8%) | 0.1 µs (0.0%) | 6.020 ms (17.1%) | 3.007 ms (8.5%) | 35.285 ms |
+
+両実機とも `matmul` が `iter_total` の 72〜84% を占め支配的。`to_tensor`
+（`Var::from_tensor` 相当の薄いラップ）は無視できる大きさ（0.0%）。
+`host_copy`（readout の `to_vec` コピー）・`checksum`（ホスト f64 逐次和）
+は DGX で比率が顕著に高い（host_copy が N=1024/2048 で 17〜20%。M4 Max は
+5〜7%）。これは §15.3 の `alloc_c` 異常（N=2048）とは独立の傾向で、DGX の
+メモリサブシステム（unified memory・aarch64）側の特性を示唆するが、本
+イシューでは原因の特定までは行わない（未特定）。
+
+**AC-2（非 `--phases` の `gemm --mode reuse` 各 N 1 run）**: checksum は
+phases 版と全 N・全実機で bit 一致（例: M4 Max N=1024 = -1855.597736）、
+`parity_fail_count=0`（tolerance を緩めていない）。`layerA-ac2-{dgx,m4max}.jsonl`
+参照。
+
+`python3 summarize.py --strict layerA-phases-{dgx,m4max}.jsonl` は両ファイル
+とも exit 0（各 N 5 run × 5 phase の順序・件数一致）。`compare_gemm_gate.py
+--device cpu` は `task=gemm_phases` 行を「fandhe-ai reuse レコード件数 0 件」
+として `判定不能` 扱いにするのみで、ゲート判定へは混入しない（既存契約の
+確認。両ファイルで確認済み）。
+
+### 15.3 Layer B 実測（両実機・8 区間）
+
+5 run 中央値。`alloc_c`〜`checksum` の各列は「区間ごとに 5 run の値を
+中央値化した値」（列単位の中央値）だが、右端の `Σ` 列は列単位の中央値を
+合計した値**ではない**。`Σ` は「各 run 内で 6 区間（各区間は当該 run 内
+20 trials の中央値）を合算した run ごとの合計値」をまず求め、その 5 run
+分の合計値をあらためて中央値化した値（= 各 run 合計の中央値）である。
+中央値は加法的でない（`median(a)+median(b)+... ≠ median(a+b+...)`）ため、
+「列単位の中央値を合計した値」とは一般に一致しない（例: DGX N=1024 は
+列単位の中央値を合計すると 6.7801 ms だが、run ごとの合計値
+[6.7707, 6.7716, 6.9936, 6.9533, 6.8525] ms の中央値は 6.8526 ms であり
+表の `Σ`=6.853 ms と一致する。生ログ `layerB-dgx-run{1..5}.log` の該当行
+参照）。M4 Max のみ 1 run で負荷スパイクの影響を受けた値を含むが、`Σ`
+自体は run 単位の中央値方式のため代表値への影響は限定的。原ログは
+`layerB-{dgx,m4max}-run{1..5}.log`）:
+
+**Apple M4 Max**
+
+| N | alloc_c | kernel | tensor_wrap | ops_gemm | tape_matmul | to_tensor | host_copy | checksum | Σ |
+|---|---|---|---|---|---|---|---|---|---|
+| 512 | 9.2 µs | 592.5 µs | 0.3 µs | 579.2 µs | 589.0 µs | 0.1 µs | 14.9 µs | 145.5 µs | 760.2 µs |
+| 1024 | 21.3 µs | 3.237 ms | 0.8 µs | 3.448 ms | 3.379 ms | 0.1 µs | 294.7 µs | 636.3 µs | 4.187 ms |
+| 2048 | 78.9 µs | 23.842 ms | 1.3 µs | 25.037 ms | 25.632 ms | 0.2 µs | 1.279 ms | 2.736 ms | 27.920 ms |
+
+**DGX Spark GB10（Grace CPU）**
+
+| N | alloc_c | kernel | tensor_wrap | ops_gemm | tape_matmul | to_tensor | host_copy | checksum | Σ |
+|---|---|---|---|---|---|---|---|---|---|
+| 512 | 5.0 µs | 1.515 ms | 2.3 µs | 1.697 ms | 1.659 ms | 0.1 µs | 367.6 µs | 141.8 µs | 2.025 ms |
+| 1024 | 24.3 µs | 4.725 ms | 3.1 µs | 5.422 ms | 5.349 ms | 0.1 µs | 1.485 ms | 543.0 µs | 6.853 ms |
+| 2048 | **2.881 ms** | 25.611 ms | 5.4 µs | 26.872 ms | 26.653 ms | 0.3 µs | 5.625 ms | 3.007 ms | 37.082 ms |
+
+`kernel` を `2N³/t` で GFLOP/s 化すると: M4 Max 512=453.1・1024=663.4・
+2048=720.6、DGX 512=177.2・1024=454.5・2048=670.8 GFLOP/s。
+
+**DGX N=2048 の `alloc_c` 異常値**: `alloc_c` は `vec![0.0f32; n*n]`
+（出力 C バッファの新規確保）の計時のみであり、確保した領域への実書き込み
+（first-touch）は別区間の `kernel`（`gemm_blis_parallel` カーネル本体が
+実際に計算結果を書き込む）で発生する。ゼロ初期化の遅延ページ（OS の
+zero-fill-on-demand。物理ページの確保・ゼロ化を実際の書き込み発生まで
+遅延する）が使われている場合、`alloc_c` 区間では仮想アドレス空間の確保・
+ゼロクリアの要求のみが行われ、物理ページのコミット（first-touch page
+fault）自体は `kernel` 区間側に計上され得る（既存診断（`cuda-large-buffer
+-percall-alloc-transfer-threshold.md` 等）の一般的な説明どおり）。本追補は
+`alloc_c` に first-touch が含まれるとは断定せず、**観測事実**と**未検証の
+仮説**を分離して記録する:
+
+- **観測**: N=512/1024 では `alloc_c` が数〜数十 µs にとどまるのに対し、
+  N=2048（16 MiB。4194304 要素 × 4 バイト）では 5 run とも一貫して
+  2.8〜3.0 ms と 2 桁跳ね上がる（`layerB-dgx-run{1..5}.log` で全 5 run
+  符号一貫）。M4 Max では同じ N=2048 で `alloc_c` は 78.9 µs にとどまり、
+  この跳躍は DGX（Grace CPU・aarch64・unified memory）固有の傾向である
+- **仮説（未検証）**: 上記の跳躍が `alloc_c` 区間内で実際に発生した
+  first-touch ページフォルトによるものか、それとも純粋な確保系コスト
+  （mmap 呼び出し自体・ゼロクリア命令）によるものかは、本追補のハーネスでは
+  区別できない。前者であれば `kernel` 区間側の first-touch は既に発生済み
+  という帰結になり、後者であれば `kernel` 区間側で改めて first-touch が
+  発生している可能性がある
+
+本イシューでは異常値の発生を確認するにとどめ、page fault 経路（透過的
+ヒュージページ閾値・glibc mmap 閾値等）や `alloc_c`／`kernel` への帰属の
+特定は行わない（未特定。`cuda-large-buffer-percall-alloc-transfer
+-threshold.md` の 32 MiB mmap 閾値〈CUDA D2H〉と類似の現象だが、対象・
+経路とも異なるため直接の関連は主張しない）。
+
+**autodiff 残差**（`tape_matmul − ops_gemm`。tape 登録のオーバーヘッド）は
+M4 Max で N=512 +9.8 µs・N=1024 −68.4 µs・N=2048 +594.5 µs、DGX で
+N=512 −37.5 µs・N=1024 −73.8 µs・N=2048 −219.6 µs と、いずれも `kernel` の
+ms オーダーに対し 1〜2 桁小さく符号も安定しない。M4 Max N=2048 の +594.5 µs
+は §15.1 の共有負荷スパイク（Layer B run 4/5 で load average が約 30 まで
+急伸）の影響を受けた run が中央値に混入した可能性が高く、autodiff の tape
+登録自体のコストは両実機とも `alloc_c`／`host_copy`／`checksum` と比べて
+無視できる水準と判断する。
+
+### 15.4 突合
+
+**(i) Layer A `matmul` vs Layer B `tape_matmul`（HEAD レプリカ）**:
+DGX は概ね近い（N=1024: 5.069 対 5.349 ms・約 5% 差、N=2048: 26.056 対
+26.653 ms・約 2% 差、N=512 は 1.850 対 1.659 ms・符号が逆で Layer A の方が
+高い）。M4 Max は N=512/1024 が近い（591.4 対 589.0 µs、2.887 対 3.379 ms）
+一方 N=2048 は 19.087 対 25.632 ms と大きく乖離する。Layer B の N=2048
+`kernel` は 5 run 全て（21.3114 / 57.4900 / 27.2153 / 23.2684 /
+23.8415 ms。中央値 23.8415 ms が表の値）が Layer A `matmul` の中央値
+19.087 ms を上回っており、単一の外れ値だけでは説明できない。うち
+57.4900 ms（`layerB-m4max-run2.log`。当該行を run3 と誤記していたのを本
+修正で訂正）は他 run の 21〜28 ms から突出しており、§15.1 の共有負荷
+スパイク（Layer B run 4/5 で load average が約 30 まで急伸）と時期が近い
+ことから負荷アーティファクトの疑いがあるが、残る 4 run（21.3114〜
+27.2153 ms）も一様に Layer A 側より高く、これだけでは全体の乖離を
+説明しきれない。したがって本追補では「負荷アーティファクトの影響を
+受けた可能性がある」という**仮説**にとどめ、乖離の全量を単一の外れ値・
+load average のみに帰属させる断定はしない（未特定のまま記録）。
+
+**M4 Max N=2048 は Layer B `kernel` 自体が Layer A `iter_total` を上回る**:
+Layer B の N=2048 `kernel` 中央値 23.842 ms は、同一形状の Layer A
+`iter_total`（`matmul`＋`to_tensor`＋`host_copy`＋`checksum` の合計）中央値
+22.608 ms を上回る。`kernel` は本来 `matmul`（ひいては `iter_total`）に
+包含される部分区間であり、包含関係が保たれるなら `kernel` が全体を
+超えることはない。この逆転は Layer A・Layer B が別プロセス・別時点の
+計測（§15.1 のとおり系列は同一 HEAD だが実行自体は独立）であるために
+生じた計測条件差（負荷変動を含む）由来と考えられるが、原因は本追補では
+未特定のまま記録する。この逆転がある以上、**M4 Max N=2048 について
+Layer B（`kernel`・`ops_gemm`・retune baseline との比較）から導く結論は、
+Layer A 単体で直接確認できる事実（`host_copy`・`checksum` の比率等）とは
+異なり、あくまで仮説として扱う**（§15.5 で区別する）。
+
+**(ii) `ops_gemm` vs `alloc_c+kernel+tensor_wrap`**: `ops_gemm` は
+イテレーションごとに `alloc_c+kernel+tensor_wrap` を直接計測した独立の
+区間であり、表の `alloc_c`／`kernel`／`tensor_wrap` 列（各区間を個別に
+5 run 中央値化した値）の単純合計とはおおむね近いが厳密には一致しない
+（median は非線形なため「個別区間の中央値の合計」と「合成区間自体の
+中央値」は一般に一致しない。例: DGX N=2048 run1 では `alloc_c`
+2.8355 ms + `kernel` 25.7089 ms + `tensor_wrap` 0.0052 ms = 28.5496 ms
+に対し `ops_gemm` 自体の中央値は 27.1174 ms で、約 1.4 ms の差がある。
+`docs/perf/logs/cpu-gemm-reuse-phase-1292/layerB-dgx-run1.log` 参照）。
+
+**この `ops_gemm` は、表右端の `Σ` とは計測範囲が異なり直接比較できない
+点に注意する。** `Σ` は `gemm_reuse_phase_diag_tests.rs::run_size` が
+出力する `alloc_c＋kernel＋tensor_wrap＋to_tensor＋host_copy＋checksum`
+の 6 区間について、各 run 内でこの 6 区間（各区間は当該 run 内 20 trials
+の中央値）を合算した run ごとの合計値をまず求め、その 5 run 分の合計値を
+中央値化した値である（§15.3 冒頭のとおり、区間ごとに先に 5 run 中央値化
+してから合計した値とは一致しない。`ops_gemm`／`tape_matmul` は含まない）。
+`ops_gemm` や `tape_matmul` の重複計上は無い。例えば DGX N=2048 は
+`Σ`=37.082 ms に対し `ops_gemm`=26.872 ms であり、両者には約 1.38 倍の
+差（10.210 ms）があるが、これは重複計上ではなく `Σ` が `ops_gemm`
+（`alloc_c+kernel+tensor_wrap` の合成計測）を含まず、代わりに `alloc_c`・
+`kernel`・`tensor_wrap` を個別区間として直接合算しているために生じる差
+である。この 10.210 ms は単一の原因ではなく、性質の異なる 2 つの要素へ
+分けられる:
+
+- **主因（計測範囲の違い）**: `Σ` は `host_copy`（5.625 ms）・`checksum`
+  （3.007 ms）の 2 区間を含むが、`ops_gemm` はこの 2 区間を含まない
+  （`alloc_c+kernel+tensor_wrap` のみを計測する独立区間のため）。この
+  差分は 5.625+3.007=**8.632 ms**（約 8.63 ms）で、10.210 ms のうち
+  最大の寄与を占める
+- **残差（中央値の非加法性・独立計測由来）**: 表の `alloc_c`（2.881 ms）・
+  `kernel`（25.611 ms）・`tensor_wrap`（0.0054 ms）を単純合計すると
+  **28.497 ms**（約 28.50 ms）となり、これは `ops_gemm` 自体の中央値
+  26.872 ms と厳密には一致しない（差 **1.625 ms**・約 1.63 ms）。原因は
+  §15.3 冒頭で述べた中央値の非加法性（`median(a)+median(b)+... ≠
+  median(a+b+...)`）に加え、`alloc_c`／`kernel`／`tensor_wrap` が
+  `Σ` 側では run 内 20 trials それぞれで 3 区間を個別計測した値である
+  のに対し、`ops_gemm` はイテレーションごとに 3 区間分をまとめて 1 回で
+  独立計測した値であり、両者は同一コード経路を指しつつも計測手続きが
+  異なる（個別区間の直接比較ではない）ことにも起因する
+
+8.632 ms（主因）＋1.625 ms（残差）＝10.257 ms は実測差 10.210 ms と
+端数の丸めの範囲でおおむね一致する。**主因は `host_copy`／`checksum`
+という計測範囲の違いであり、残差（中央値の非加法性・独立計測の手続き差）
+はこれよりも一桁小さい**。本番経路の実コスト指標としては `ops_gemm`
+（本番合成レプリカ）を用いるべきで、`Σ` をそのまま `ops_gemm` の代替や
+本番経路コストの指標として扱わない。
+
+**(iii) Layer A ⊃ Layer B の妥当性**: Layer A `iter_total` を `2N³/t` へ
+換算した値は §12.2（イシュー #1185・`fandhe-ai =0.7.0` reuse）の GFLOP/s と
+近い（M4 Max: 353.3 対 361.8〈N=512〉・574.9 対 584.2〈N=1024〉・759.9 対
+699.0〈N=2048。ここも上振れは共有負荷変動によるもの〉、DGX: 112.8 対
+117.8〈N=512〉・303.2 対 304.1〈N=1024〉）。同一プロトコル・別イシュー実行
+間でおおむね整合しており、本追補の Layer A 計測自体の再現性を確認した。
+
+### 15.5 §8.1 推定との突合
+
+§8.1 は「カーネル単体（retune §5 の `RowPanel`）」対「本計測 reuse
+（framework-compare 境界）」の差を M4 Max で 16〜24%・DGX で 31〜48% と
+記録し、原因を「facade/autodiff 呼び出しオーバーヘッド・readout コピー・
+checksum の固定費」と推定していた。本追補で分解した結果は次のとおり:
+
+| 実機 | N | kernel 単体（本追補・GFLOP/s） | retune §5 RowPanel（GFLOP/s） | 比率 |
+|---|---|---|---|---|
+| M4 Max | 1024 | 663.4 | 743.8 | 89.2% |
+| M4 Max | 2048 | 720.6 | 851.8 | 84.6% |
+| DGX | 1024 | 454.5 | 536.2 | 84.8% |
+| DGX | 2048 | 670.8 | 701.6 | 95.6% |
+
+本追補の `kernel` 区間は診断ハーネス下（毎反復 `alloc_c` で新規 C ページを
+確保する構成。§15.3 のとおり first-touch がどちらの区間に計上されるかは
+未特定）の値であり、retune §5 の A/B ハーネス（C バッファを反復間で
+使い回す想定）とは計測条件が異なる点に注意。
+
+**この節の結論は、条件のそろった Layer A 単体から直接確認できる事実と、
+条件の異なる Layer A/Layer B・retune baseline 間比較に基づく仮説とを
+分けて記述する。** §15.4 のとおり M4 Max N=2048 は Layer B `kernel`
+（23.842 ms）が同一形状の Layer A `iter_total`（22.608 ms）を上回るという
+包含関係の逆転があり、Layer B（`kernel`・retune baseline）を参照する比較は
+少なくとも M4 Max N=2048 について確度を主張できない。DGX（`kernel`
+単体が Layer A `iter_total` を上回る逆転は観測されていない）・M4 Max
+N=1024 以下は Layer B・retune baseline とも大きな矛盾は見られないが、
+本追補ではこの逆転が生じた条件差自体を特定していないため、逆転が
+生じていない形状・実機についても Layer B 由来の結論は同じ性質の仮説
+として扱う。
+
+- **仮説（Layer B・retune baseline との比較に基づく）**: `kernel` 単体の
+  GFLOP/s は retune §5 RowPanel の 85〜96%（DGX N=2048 のみ）の範囲で
+  近く、この近さが実機・形状全体で成り立つなら、§8.1 が観測した「本計測
+  reuse」対「カーネル単体」の 16〜48% という差の大部分はカーネル自体の
+  効率差ではなく `kernel` 区間の外側（`alloc_c`・autodiff 残差・
+  `to_tensor`・`host_copy`・`checksum`）に乗っていると解釈できる。ただし
+  上記の逆転により、この解釈を「本追補で確定した」とは言えず、次項の
+  Layer A 直接確認分で裏付けられる範囲（`host_copy`／`checksum`）を除き
+  仮説にとどめる
+
+**確認済みの事実（Layer A 単体・比較なしで直接計測）**: `iter_total`
+（Layer A）に対する寄与は:
+
+- **M4 Max**: `matmul`（`kernel` 相当を含む本番経路）が 72〜84%（既に
+  カーネル自体を含む）、`host_copy` が 2.0〜7.1%、`checksum` が
+  10.5〜19.4%
+- **DGX**: `matmul` が 72〜78%、`host_copy` が **15.7〜20.3%**（M4 Max の
+  2〜3 倍）、`checksum` が 5.7〜8.5%
+
+DGX は `host_copy`（readout コピー）の寄与が M4 Max より顕著に大きく、
+これが §8.1 が観測した「DGX の方が固定費の影響が大きい（31〜48% 対
+16〜24%）」の主因の一つであることが本追補で裏付けられた。加えて DGX
+N=2048 固有の `alloc_c` 異常（§15.3。2.8〜3.0 ms）は Layer B（`ops_gemm`
+本番合成レプリカ）にのみ現れる区間であり、Layer A の `matmul`（`tape_matmul`
+相当）には C バッファ確保コストが同様に含まれるはずだが、Layer A 側の
+`matmul` 自体は §15.4(i) のとおり `tape_matmul` と近い値のため、N=2048 の
+`alloc_c` 跳躍は Layer A の `matmul` 内部にも既に含まれていると解釈するのが
+自然である（Layer A は `matmul` 単体でしか計測しないため `alloc_c` を
+単独区間として分離できない。この点は Layer A のハーネス設計上の制約として
+記録するにとどめる）。
+
+### 15.6 固定費の帰属と削減優先順位（AC-3）
+
+観測事実から、固定費を次の 2 種類に区分する:
+
+**A. ハーネス診断コスト（本番経路には乗らない。#965/#970 の既存契約どおり）**
+
+- `host_copy`（readout の `to_vec` コピー）: DGX で `iter_total` の
+  15.7〜20.3%・M4 Max で 2.0〜7.1%
+- `checksum`（ホスト f64 逐次和）: 両実機で 5.7〜19.4%
+
+`host_copy` と `checksum` の合計を §15.2 の Layer A `iter_total` に対する
+比率として形状（N）ごとに再計算すると次のとおり（生ログは
+`layerA-phases-{dgx,m4max}.jsonl`）:
+
+| 実機 | N=512 | N=1024 | N=2048 |
+|---|---|---|---|
+| DGX | 21.4% | 27.8% | 25.6% |
+| M4 Max | 21.4% | 22.4% | 15.4% |
+
+合計は `iter_total` の **21.4〜27.8%（DGX）・15.4〜22.4%（M4 Max）**の
+範囲であり、`iter_total` ベースで見た framework-compare reuse 境界の
+「本番外」比率として最大の寄与を持つ。ただしこれは実運用コードパスの
+オーバーヘッドではなく、比較ハーネス自身の診断コストである点に注意する。
+
+この 2 区間はさらに性質が異なる: `host_copy`（readout の `to_vec` コピー）
+は CPU バックエンドが GPU 同様にホスト側へ値を読み出すためのコピーで
+あり、`device-checksum-readback-ab.md` の `device_checksum` feature（CPU で
+既に bit 一致確認済み）を有効化すれば checksum 用の返却値を 8 バイトへ
+削減できる余地がある。一方 `checksum`（全要素和を求めるホスト側 f64
+逐次和そのもの）は CPU では元々 GPU の「readback」を経由しない計算
+（GPU バックエンドは `readback` してから CPU 側で逐次和を取るのに対し、
+CPU バックエンドは元から同一ホスト上のメモリに対して直接逐次和を計算
+する）であり、`gemm_checksum`（デバイス側 f64 reduction）を使っても
+「返却値を 8 バイトへ削減できる」のは reduction 自体を GPU 側で行う場合の
+話であって、CPU 側では reduction の計算量（全要素を走査して f64 で
+足し込む処理そのもの）は元々ローカルで行われており readback という
+形では発生していない。したがって CPU においては `host_copy`（削減候補。
+readout コピーの往復コストを避けられる）と `checksum`（残存計算。逐次和
+自体の計算コストは `device_checksum` 化しても CPU 側で発生し続ける）を
+分けて捉える必要がある（本追補では未実施のまま記録する）。
+
+**B. 本番経路固定費（`Sequential::predict`／`Var::matmul` 経由の実運用で
+実際に発生するコスト）**
+
+優先順位（`iter_total` に対する寄与の大きい順）:
+
+1. **`alloc_c`（出力バッファ確保）**: DGX N=2048 で 2.8〜3.0 ms（`iter_total`
+   の約 8%）と突出。N=512/1024 では無視できる水準（DGX 5〜24 µs・M4 Max
+   9〜21 µs）のため、大サイズ出力バッファの確保コスト（§15.3 のとおり
+   first-touch が本区間・`kernel` 区間のいずれに計上されるかは未特定）が
+   DGX 固有に顕在化する形状依存の問題。プール再利用（`tensor-core::pool`。
+   `device-memory-pool-design.md` の CPU 版に相当する仕組み）による
+   `alloc_c` 削減が候補になりうるが、本イシューでは設計・実装まで踏み込まない
+2. **autodiff 残差（tape 登録オーバーヘッド）**: §15.3 のとおり両実機とも
+   `kernel` の 1〜2 桁下で無視できる水準（M4 Max N=2048 の値は共有負荷
+   アーティファクトの疑いが強い）。優先度は低い
+3. **`materialize`／`tensor_wrap`**: `tensor_wrap` 区間は全 N・全実機で
+   1〜5 µs と無視できる水準。優先度は最も低い
+
+**結論**: `iter_total` を候補側（gemm crate・candle 等）と比べる際の
+「固定費」削減で最も効果が見込めるのは、本番経路では発生しない
+**ハーネス診断コスト（`host_copy`／`checksum`。特に DGX の `host_copy`）**
+であり、これは #965/#970 の契約上あえて残している比較用の計測境界の一部
+である（削減しても実運用の性能改善にはならない）。**実運用コードパスで
+削減効果が見込める本番経路固定費は DGX N=2048 の `alloc_c`（出力バッファ
+確保）が最有力候補**であり、後続イシュー（#1294）が調査候補として引き継ぐ。
+autodiff・`tensor_wrap` は優先度が低い。
+
+### 15.7 スコープ外
+
+- `alloc_c`（DGX N=2048 出力バッファ確保コスト）削減の設計・実装
+- `device-checksum` feature を用いた `checksum` 区間削減の framework-compare
+  ハーネスへの組み込み
+- N=4096 での同型分解（`gemm_reuse_phase_diag_tests.rs` の `SIZES` 拡張が
+  必要）
+- `host-view-readout` feature on との比較（既定 OFF のまま計測）
+- 本番結線を伴うコード変更（本追補は docs／実測ログのみ）
+
+### 15.8 出典
+
+- イシュー #1292（本追補）・#1290（依存。Layer A/B ハーネス実装）・
+  #1148／#1185（親系列。§8.1 の推定元・§12.2 の boundary 実測）
+- `docs/perf/cuda-gemm-reuse-phase-breakdown.md`（CUDA 版。#1182）・
+  `docs/perf/metal-gemm-reuse-phase-breakdown.md`（Metal 版。#1189）
+- `docs/perf/cpu-gemm-candle-cpu-retune.md` §5（`RowPanel` カーネル単体
+  実測値の出典）
+- `docs/perf/logs/cpu-gemm-reuse-phase-1292/`（本追補の生ログ・env_info・
+  `layerA-summarize-{dgx,m4max}.md`）
+- `scripts/bench/framework-compare/README.md`「CPU での区間定義と Layer B
+  （イシュー #1290）」節

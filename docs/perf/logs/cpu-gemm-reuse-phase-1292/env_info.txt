@@ -1,0 +1,30 @@
+# 実機環境情報（イシュー #1292。CPU gemm reuse 境界フェーズ分解の両実機実測）
+
+## M4 Max（ローカル worktree で実行）
+
+- 機種: Apple M4 Max（macOS 26.6.2 / BuildVersion 25G83）
+- パフォーマンスコア: hw.perflevel0.logicalcpu=12・エフィシェンシコア: hw.perflevel1.logicalcpu=4
+- rustc 1.96.0（2026-05-25）
+- 共有負荷下: `uptime-m4max.log` 参照（19 users 常駐・load average 4.9〜30 の範囲。他セッション並走のため #1147/#1185/#1189 と同じ「共有負荷下」注記）
+- pmset -g therm: `pmset-m4max.log` 参照（thermal/performance warning なし）
+- fandhe-ai 解決: `cargo tree -p bench-fandhe --depth 1` = `fandhe-ai v0.7.0`（registry）
+- 転送元コミット（Layer B HEAD）: 308c2eb6e05c8adfd727244a970b29f422d79dc5（origin/main。#1290 マージ後）
+
+## DGX Spark GB10（Grace CPU。<cuda-node> 経由の隔離ディレクトリ ~/work/fc-1292/ で実行・実測後削除済み）
+
+詳細は `env_info_dgx.txt` を参照。
+
+- CPU: Cortex-X925 × 10（P コア）+ Cortex-A725 × 10（E コア）、nproc=20、aarch64
+- Linux（カーネルバージョンは env_info_dgx.txt に含めない。ホスト名も同様に伏せる）
+- rustc/cargo 1.97.0
+- fandhe-ai 解決: `cargo tree -p bench-fandhe --depth 1` = `fandhe-ai v0.7.0`（registry）
+- 転送元コミット（Layer B HEAD）: 308c2eb6e05c8adfd727244a970b29f422d79dc5（同上）
+- 隔離ディレクトリ方式（#1148 の先例踏襲）: `~/work/fc-1292/`（共有ディレクトリ `~/work/rust-ai-library-run` は使わない）。rsync 転送は `.gitignore` フィルタ + `.env*`／`.claude/settings.local.json`／`.venv*/`／`real-hardware-verification-env.local.md`／`.codex/` を除外。転送後 `.rev-stamp` が `308c2eb...` と一致することを確認済み、機微ファイルの混入なしを `find` で確認済み
+- 計測後、隔離ディレクトリ・専用 CARGO_TARGET_DIR ともに削除済み（共有ディレクトリには触れていない）
+
+## 共通プロトコル
+
+- Layer A（framework-compare 公開 API 境界）: `fandhe-ai =0.7.0`（registry。承認済みピン）
+- Layer B（`crates/backend-cpu` 内側診断テスト）: origin/main HEAD（308c2eb。#1290 マージ直後・本イシューはコード変更なし）
+- RAYON_NUM_THREADS 未設定・`host-view-readout` feature OFF（legacy `to_vec` 経路）・`--device-checksum` 不使用（既定 `checksum_var`）
+- 5 回独立プロセス起動・run 間中央値。失敗 run はなし（全 run 完走・除外なし）
