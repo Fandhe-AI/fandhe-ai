@@ -1,0 +1,11 @@
+sw_vers:
+ProductName: macOS
+ProductVersion: 26.6.2
+BuildVersion: 25G83
+
+rustc -V: rustc 1.96.0 (ac68faa20 2026-05-25)
+sysctl machdep.cpu.brand_string: Apple M4 Max
+git rev-parse HEAD (base): a25f7060d6ca91aebfb1e02eb296b433bbe59103
+
+uptime (実行前): 13:19  up 19 days, 32 mins, 20 users, load averages: 3.99 4.80 4.62
+uptime (実行後): 13:25  up 19 days, 37 mins, 20 users, load averages: 3.18 4.65 4.64

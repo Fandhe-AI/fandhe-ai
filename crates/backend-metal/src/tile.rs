@@ -575,12 +575,36 @@ impl TileConfig {
     /// [`shared_mem_bytes_for_class`](Self::shared_mem_bytes_for_class) が
     /// 共有する staged タイル領域（A タイル＋B タイル）バイト数計算本体
     /// （`staged`／実効 staged 判定を呼び出し元へ切り出した残り）。
+    /// f32 版タイル（4 バイト要素）専用の薄いラッパーで、実体は
+    /// [`tiled_elem_bytes_for_pad`](Self::tiled_elem_bytes_for_pad)
+    /// （イシュー #1369・要素バイト幅パラメータ化）に委譲する。
     fn tiled_bytes_for_pad(
         bm: u32,
         bn: u32,
         bk: u32,
         pattern: crate::layout::TransposePattern,
         pad_elems: u32,
+    ) -> u32 {
+        Self::tiled_elem_bytes_for_pad(bm, bn, bk, pattern, pad_elems, 4)
+    }
+
+    /// [`tiled_bytes_for_pad`](Self::tiled_bytes_for_pad) の要素バイト幅
+    /// 一般化版（イシュー #1369）。`gemm_simdgroup_tiled_hfrag`（half
+    /// フラグメント候補。`shaders/gemm.metal` 末尾）の threadgroup タイル
+    /// 領域（A/B とも half=2 バイト要素で確保。エピローグ staging 領域は
+    /// 不要 — 出力が `device float*` のため `simdgroup_store` を直接 `c`
+    /// へ書ける。`gemm_simdgroup_tiled_f16` の f32 staging と異なる点）の
+    /// バイト数計算に使う。`elem_bytes=4` を渡した場合の戻り値は
+    /// [`tiled_bytes_for_pad`](Self::tiled_bytes_for_pad) と完全に一致する
+    /// （タイル要素数の算出式自体は要素幅に依存しないため。本ファイル末尾
+    /// テスト参照）。
+    fn tiled_elem_bytes_for_pad(
+        bm: u32,
+        bn: u32,
+        bk: u32,
+        pattern: crate::layout::TransposePattern,
+        pad_elems: u32,
+        elem_bytes: u64,
     ) -> u32 {
         use crate::layout::TransposePattern;
         let trans_a = matches!(pattern, TransposePattern::Tn | TransposePattern::Tt);
@@ -607,9 +631,30 @@ impl TileConfig {
                 (bk, bn.checked_add(pad)?)
             };
             let b_tile = b_rows.checked_mul(b_row_len)?;
-            a_tile.checked_add(b_tile)?.checked_mul(4)
+            a_tile.checked_add(b_tile)?.checked_mul(elem_bytes)
         };
         compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
+    }
+
+    /// `gemm_simdgroup_tiled_hfrag`（イシュー #1369。f32 入出力・half
+    /// フラグメント・f32 累算の候補カーネル。`shaders/gemm.metal` 末尾）
+    /// 用の threadgroup 共有メモリ必要量。`staged=false`（direct-load）は
+    /// 候補カーネル側で実装しないため常に `0` を返す
+    /// （`crate::gemm::MetalGemm::pipeline_for_tile_hfrag` が
+    /// `staged=true` の候補のみへフォールバックを限定する契約と対応する。
+    /// `docs/perf/metal-gemm-hfrag-candidate.md` §2.1〜2.2）。
+    ///
+    /// `gemm_simdgroup_tiled_f16` と異なりエピローグ staging 領域を持たない
+    /// （出力が `device float*` のため `simdgroup_store` を直接書ける）。
+    /// staged 時の戻り値は
+    /// [`shared_mem_bytes_for`](Self::shared_mem_bytes_for)（f32 版・同一
+    /// `pattern`）のちょうど半分になる（要素数は同一で、half=2 バイトが
+    /// f32=4 バイトの半分のため。本ファイル末尾テスト参照）。
+    pub fn shared_mem_bytes_hfrag_for(&self, pattern: crate::layout::TransposePattern) -> u32 {
+        if !self.staged {
+            return 0;
+        }
+        Self::tiled_elem_bytes_for_pad(self.bm, self.bn, self.bk, pattern, self.pad(), 2)
     }
 
     /// `bm/bn/bk/wm/wn` の整除制約・デバイス上限（`max_threads_per_tg`:
@@ -2342,6 +2387,76 @@ mod tests {
             staged: true,
         };
         assert_eq!(cfg.shared_mem_bytes_for(TransposePattern::Tt), u32::MAX);
+    }
+
+    // --- shared_mem_bytes_hfrag_for（イシュー #1369。half フラグメント
+    // 候補 `gemm_simdgroup_tiled_hfrag` 用 threadgroup 共有メモリ量。
+    // pure・実機不要） ---
+
+    #[test]
+    fn shared_mem_bytes_hfrag_for_not_staged_is_always_zero() {
+        use crate::layout::TransposePattern;
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: false,
+        };
+        for pattern in [
+            TransposePattern::Nn,
+            TransposePattern::Nt,
+            TransposePattern::Tn,
+            TransposePattern::Tt,
+        ] {
+            assert_eq!(cfg.shared_mem_bytes_hfrag_for(pattern), 0);
+        }
+    }
+
+    #[test]
+    fn shared_mem_bytes_hfrag_for_is_half_of_shared_mem_bytes_for_all_candidates_and_patterns() {
+        // `gemm_simdgroup_tiled_hfrag` はタイル要素数が f32 版
+        // （`gemm_simdgroup_tiled`）と完全に同一で、要素バイト幅のみ
+        // half（2 バイト）と f32（4 バイト）で異なる（エピローグ staging
+        // 領域を持たない点も f32 版と同じ。`docs/perf/
+        // metal-gemm-hfrag-candidate.md` §2.2）。全 `CANDIDATES`（staged
+        // のみ）× 全転置パターンで `shared_mem_bytes_for` のちょうど半分に
+        // なることを固定する。
+        use crate::layout::TransposePattern;
+        for cfg in CANDIDATES.iter().copied().filter(|c| c.staged) {
+            for pattern in [
+                TransposePattern::Nn,
+                TransposePattern::Nt,
+                TransposePattern::Tn,
+                TransposePattern::Tt,
+            ] {
+                let f32_bytes = cfg.shared_mem_bytes_for(pattern);
+                let hfrag_bytes = cfg.shared_mem_bytes_hfrag_for(pattern);
+                assert_eq!(
+                    hfrag_bytes,
+                    f32_bytes / 2,
+                    "cfg={cfg:?} pattern={pattern:?} の shared_mem_bytes_hfrag_for が半分になっていない"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_mem_bytes_hfrag_for_saturates_instead_of_wrapping_on_overflow() {
+        use crate::layout::TransposePattern;
+        let cfg = TileConfig {
+            bm: 8,
+            bn: 8,
+            bk: u32::MAX - 4,
+            wm: 1,
+            wn: 1,
+            staged: true,
+        };
+        assert_eq!(
+            cfg.shared_mem_bytes_hfrag_for(TransposePattern::Tt),
+            u32::MAX
+        );
     }
 
     #[test]
