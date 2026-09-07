@@ -28,6 +28,18 @@ fandhe-ai = { git = "https://github.com/Fandhe-AI/fandhe-ai" }
 [`fandhe-ai` の README](https://github.com/Fandhe-AI/fandhe-ai/blob/main/README.md#最小コード例)
 を参照してください。
 
+## 並列度（`RAYON_NUM_THREADS`）
+
+`gemm_blis` 並列 GEMM の既定並列度は、`RAYON_NUM_THREADS` 環境変数が
+未指定の場合、プラットフォーム判定（macOS `hw.perflevel0.logicalcpu`／
+Linux sysfs `cpu_capacity`）で検出した物理大コア数へ限定されます
+（イシュー #1363。異種コア構成〈big.LITTLE 系〉での非単調性仮説の検証が
+目的）。`RAYON_NUM_THREADS` を明示指定した場合はその値がそのまま
+採用され、上限はかかりません。判定不能な環境（同種コア構成・Linux/macOS
+以外・sandbox 等）では従来どおり `rayon` の既定並列度がそのまま使われ
+ます。詳細は `docs/perf/cpu-gemm-default-thread-limit.md` を参照して
+ください。
+
 ## ドキュメント・リポジトリ
 
 利用者向けドキュメントサイト（GitHub Pages）: https://fandhe-ai.github.io/fandhe-ai/（Getting Started / Guides / Examples / API Reference）。API リファレンスは https://docs.rs/fandhe-ai
