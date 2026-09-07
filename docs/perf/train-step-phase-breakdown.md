@@ -1036,3 +1036,167 @@ I の設計判断は `docs/autodiff-nograd-leaf-dinput-skip-decision.md`（#1219
   存在しないため、`.example` のプレースホルダ名で代替確認した）
 - Rust コード・`results/summary.md`・`docs/spec/`・依存・tolerance
   定数はいずれも無変更（本節は docs と GitHub issue 起票のみ）
+
+## 16. CUDA Graph step capture 有無の GB10 A/B（イシュー #1350）
+
+### 16.1 目的・対象
+
+親 #1348（framework-compare train cuda の step_total 前後 5 回中央値と
+採否を docs/perf に記録する）の消化として、#1349（PR #1390・
+`5a66e11` で main へマージ済み）が opt-in で実装した学習 step の
+update 区間（`BackendOps::sgd_step_device_tracked`。
+`DeviceParamStore::step`）に対する CUDA Graph capture／replay 経路
+（`docs/backend-cuda-graph-step-capture-design.md`）を、DGX Spark
+GB10 実機で `bench-fandhe --task train --phases` を graph 有無
+（`off`／`stream-only`／`on` の 3 状態）で計測し、`step_total`・
+`device_update` の 5 回中央値と launch 回数（capture／replay の
+プロセスワイド診断カウンタ）の A/B を記録する。
+
+`stream-only` は API からは選べない中間状態（環境変数
+`FANDHE_AI_CUDA_GRAPH_STEP=stream-only` 限定。
+`fandhe_ai_backend_cuda::graph` モジュール冒頭コメント）で、「created
+stream の event 管理コスト」と「capture 自体の効果」を分離計測する
+ための対照系列（design doc §9・実装計画）。
+
+### 16.2 構造上の事前宣言（計測前に確定。事後の枠付けを防ぐ）
+
+- **launch 回数は減らない**: update 区間はカーネル 1 個（SGD カーネル）
+  しか含まないため、OFF「カーネル launch 1 回／step」と ON「graph
+  launch 1 回（ノード 1 個）／step」で launch 数自体は同数。本計測の
+  位置づけは「graph 機構が update 区間の launch 固定費を削減する余地は
+  構造的にカーネル 1 個分しかない」ことを実測で裏付けること
+- **`device_update` の差分には 2 要因が混在しうる**: (i) graph replay
+  による launch 固定費差、(ii) OFF 経路「毎 step 新規バッファ確保 +
+  `upload`」→ ON 経路「永続 staging への `upload_into`」の差
+  （design doc F9）。`stream-only` は (i)(ii) とも含まない対照
+- **`step_total` は中立見込み**（§11.4/§15 実測: `device_update` は
+  step_total の 0.7〜1% 程度）。5 回中央値でもノイズ域の差になることを
+  前提に、判定は `device_update` 区間・checksum・launch 計数を主とする
+- **採否の判定基準（事前宣言）**: 既定は設計上 opt-in OFF のまま
+  （design doc §6「後退が観測されても結線撤回は不要」）。「既定 ON
+  推奨」と判定する条件は「`step_total` ON/OFF 中央値比 ≤ 0.95 **かつ**
+  `device_update` ON/OFF 中央値比 < 1.0（5/5 run 符号一貫）**かつ**
+  checksum 完全一致（bit 同一）」。いずれか未達なら「既定 OFF 維持
+  （中立／後退）」
+
+### 16.3 実行環境
+
+- DGX Spark GB10（sm_121）。rustc 1.97.0・nvcc CUDA 13.0（V13.0.88）
+- 対象 HEAD: ローカル `main` 5a66e110ba8fbcd1e32102de83f8436a3de04ef0
+  （PR #1390 のマージコミット。ラベル `head-5a66e11`）
+- 計測前 `uptime` load average 0.00/0.04/0.38・GPU 使用率 0%（低負荷）。
+  計測後 load average 1.00/0.79/0.46（計測プロセス自体の CPU 負荷。
+  GPU 使用率は計測後確認でも 0% のまま）
+- 詳細は `docs/perf/logs/cuda-graph-step-ab-1350/env_info.txt`
+
+### 16.4 Phase 0（実機実測前提の消化）
+
+| ゲート | 結果 |
+|---|---|
+| `make test-ignored-cuda` 1 段目（`--all-features`。graph 系 2 テストを `--skip`） | 34 passed・2 failed（`init_cost_diag_gemm_new_lru_cold_vs_warm`・`cuda_gemm_new_second_construction_reuses_module_cache`。いずれも `#[ignore]` テスト並行実行によるモジュールキャッシュ LRU 相互汚染という**既知の非決定性**〈失敗メッセージ自体が明記。イシュー #1107〉で、本イシューの変更とは無関係） |
+| `make test-ignored-cuda` 2 段目（`graph_capture_real_device` を `--test-threads=1`） | **2 passed・0 failed**。本イシューで追加した launch カウンタ assert（capture で `captured`+1・`graph_launches`+1・`replayed` 不変／replay で `replayed`+1・`graph_launches`+1・`captured` 不変）を含めて実機で自己検証済み |
+| `scripts/verify-cuda-graph-step-bit-identity.sh` | **OK: eager_baseline（opt-in OFF）と graph_capture（opt-in ON）は 2662 行すべて bit 同一** |
+
+capture 機構は GB10 で成立していることを確認済み（「機構未成立時は
+判定不可」の停止条件には該当しない）。ログは
+`docs/perf/logs/cuda-graph-step-ab-1350/`
+（`test-ignored-cuda-first-invocation.log`・
+`graph_capture_real_device_optin_off.log`・
+`verify-cuda-graph-step-bit-identity.log`）。
+
+### 16.5 A/B 計測
+
+`run_ab_graph_cuda.sh`（`graph-step` feature ＋ 未リリース HEAD
+`crates/facade` への path patch）が同一バイナリで
+off/stream-only/on を交互起動し、(a) `train cuda 64 reuse`
+（`step_total` のみ）× 5 run、(b) `train cuda 64 reuse --phases`
+（8 phase）× 5 run、(c) `train cuda 64 fresh`（`DeviceParamStore`
+非到達の対照）× 5 run を計測した（計 150 run。sha256 再照合ゲート
+全通過・失敗 0 件・`Cargo.lock` 計測前後不変を確認）。
+
+`compare_graph_ab.py` による集計（全 10 セルとも `status: ok`。
+判定不能セルなし）:
+
+| cell (task/phase) | off median | stream-only median | on median | stream-only/off | on/off | on/stream-only | checksum | on launch counters (captured/replayed/graph_launches/sgd_launches) |
+|---|---|---|---|---|---|---|---|---|
+| train（`--phases` なし。reuse） | 446.2 us | 430.3 us | 430.3 us | 0.9644 | 0.9644 | 1.0000 | 完全一致 | 2/98/100/2 |
+| train（fresh。対照） | 520.3 us | 502.9 us | 496.9 us | 0.9665 | 0.9550 | 0.9880 | 完全一致 | 0/0/0/0 |
+| train_phases: tape_build | 2.6 us | 2.8 us | 2.7 us | 1.0638 | 1.0395 | 0.9771 | 完全一致 | 2/98/100/2 |
+| train_phases: leaf_register | 0.1 us | 0.1 us | 0.1 us | 1.0000 | 1.0000 | 1.0000 | 完全一致 | 2/98/100/2 |
+| train_phases: forward_resident | 159.2 us | 150.4 us | 149.6 us | 0.9448 | 0.9397 | 0.9947 | 完全一致 | 2/98/100/2 |
+| train_phases: loss_readout | 0.0 us | 0.0 us | 0.0 us | 1.0000 | 1.0000 | 1.0000 | 完全一致 | 2/98/100/2 |
+| train_phases: backward | 197.2 us | 190.4 us | 190.3 us | 0.9657 | 0.9651 | 0.9994 | 完全一致 | 2/98/100/2 |
+| **train_phases: device_update** | **90.9 us** | **89.7 us** | **88.4 us** | **0.9866** | **0.9719** | **0.9851** | 完全一致 | 2/98/100/2 |
+| train_phases: tape_drop | 0.9 us | 0.9 us | 0.9 us | 0.9153 | 0.9322 | 1.0185 | 完全一致 | 2/98/100/2 |
+| **train_phases: step_total** | **451.1 us** | **432.6 us** | **430.9 us** | **0.9589** | **0.9552** | **0.9962** | 完全一致 | 2/98/100/2 |
+
+launch カウンタ（`on` 状態。5 run 内で完全一致）: `captured=2`
+（`is_first_step` 遷移により 1 ではなく 2。design doc の想定範囲内）・
+`replayed=98`（100 step のうち capture 分 2 を除いた残り）・
+`graph_launches=100`（`captured+replayed`）・`sgd_kernel_launches=2`
+（capture 時のウォームアップ launch + capture 内 1 回のみ。B6 の想定
+どおり replay では SGD カーネル自体は launch されない）。`off`/
+`stream-only` の `sgd_kernel_launches=100`（毎 step 1 回、想定どおり）。
+`train`（fresh・対照）の launch カウンタは 4 系列とも 0（`DeviceParam
+Store::step` 非到達・capture 機構に触れていないことの裏付け）。
+
+生ログ・JSONL・集計 md は
+`docs/perf/logs/cuda-graph-step-ab-1350/`
+（`run_ab_graph_cuda-dgx-head-5a66e11.log`・
+`results-dgx-graph-ab-head-5a66e11.jsonl`・
+`compare_graph_ab.md`・`env_info.txt`）。
+
+### 16.6 要因分離（F9 との対応）
+
+`device_update` の on/off 比 0.9719（改善方向）は、5 run 個別の比を
+見ると 1.0165／0.9576／0.9719／0.9724／0.9733 であり、**5/5 run で
+符号一貫していない**（1 run で ON がわずかに後退）。`stream-only`
+（created stream 化のみ・capture なし）単独でも on/off 比 0.9866 と
+既に改善方向を示しており、`device_update` 全体の改善のうち一定割合は
+「created stream 化」（要因 ii 寄りの「毎 step 新規バッファ確保 +
+`upload`」→「永続 staging への `upload_into`」という OFF/ON 経路差、
+もしくは stream 種別自体の event 管理コスト差）に由来し、capture
+自体（要因 i）の寄与は on/stream-only 比 0.9851 とさらに小さいことを
+示唆する。ただし checksum・launch カウンタとも全セル完全一致・整合
+しており、機構自体の正しさに疑義はない。
+
+### 16.7 採否判定（事前宣言基準に基づく）
+
+| 基準 | 実測 | 判定 |
+|---|---|---|
+| `step_total` ON/OFF 中央値比 ≤ 0.95 | train_phases: 0.9552／train（非 phases）: 0.9644 | **未達**（いずれも 0.95 超） |
+| `device_update` ON/OFF 中央値比 < 1.0（5/5 run 符号一貫） | 中央値 0.9719（< 1.0）だが個別 run は 1/5 が > 1.0 | **未達**（符号非一貫） |
+| checksum 完全一致（bit 同一） | 全 10 セルとも `完全一致` | 達成 |
+
+3 条件のうち 2 つが未達のため、**「既定 OFF 維持（中立）」と確定する**
+（`docs/backend-cuda-graph-step-capture-design.md` §6 が事前に述べた
+とおり、`facade::set_cuda_graph_step_enabled` の既定 OFF は不変。結線
+撤回も不要）。`device_update` が `step_total` の約 20%（90.9/451.1）を
+占める中で 1〜3% 程度の改善方向シグナルはあるが、事前宣言した「5/5
+run 符号一貫」の閾値には届かず、GB10 の計測ノイズ（数 µs オーダーの
+区間で ±数 µs の run 間ばらつき）の範囲内と判断する。
+
+### 16.8 launch 削減余地の構造的上限（事前宣言の裏付け）
+
+§16.2 で事前宣言したとおり、update 区間は SGD カーネル 1 個のみを
+含むため、launch 回数自体（`graph_launches`〈ON〉対 
+`sgd_kernel_launches`〈OFF〉）はいずれも 100（step 数）で同数——本計測
+はこれを実測で確認した。graph capture が短絡できるのは「カーネル
+launch のドライバ側オーバーヘッド」のみであり、本計測形状
+（BATCH=64・D_IN=784・D_HIDDEN=256・D_OUT=10 の小規模 MLP）では
+`device_update` 自体が step_total の一部（約 20%）に留まるため、
+launch 固定費削減の効果が `step_total` へ波及する余地は構造的に小さい。
+より大きな効果を見込む場合は forward／backward の capture 拡張
+（facade 常駐チェーン結線 #1216 Phase 2・CUDA `gemm_fp32_strict_into`・
+loss 常駐化が前提。スコープ外・§16.9 参照）が必要と考えられる。
+
+### 16.9 スコープ外（親 #1348 の受け入れ条件行への反映）
+
+- `cuGraphExecUpdate_v2` による exec update（`unsafe` 導入が前提。
+  design doc §3.2）は本イシューでも対象外のまま
+- forward／backward の capture 拡張は、update 区間のカーネルが 1 個
+  である以上 launch 固定費削減の実効性はこの拡張後に再評価する必要が
+  あることを本計測で裏付けた（§16.8）。既存の起票案（design doc の
+  申し送り）どおり後続イシューへ引き継ぐ
+- 実機全体の kernel launch 総数計測（nsys／CUPTI）は GB10 での可用性
+  未確認のため引き続き対象外
