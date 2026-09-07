@@ -55,6 +55,7 @@ ssh "$CUDA_NODE" 'nvidia-smi --query-compute-apps=pid,process_name,used_memory -
 ssh "$CUDA_NODE" 'uptime'
 
 ssh "$CUDA_NODE" '
+  cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
       cargo build --release -p fandhe-ai-backend-cuda \
@@ -76,7 +77,8 @@ ssh "$CUDA_NODE" 'diff ~/work/probe-mma-run1.md ~/work/probe-mma-run2.md && echo
 ### 3.4 `#[ignore]` テスト（P1: REQ-2 判定行の直接判定）
 
 ```sh
-ssh "$CUDA_NODE" "env PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH \
+ssh "$CUDA_NODE" "cd ~/work/rust-ai-library-run && \
+  env PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH \
   CARGO_TARGET_DIR=\$HOME/work/target-fandhe-ai \
   cargo test -p fandhe-ai-backend-cuda --release --all-features \
   --test gemm_mma_tf32x3 -- --ignored --nocapture > ~/work/ignored-gemm_mma_tf32x3.log"

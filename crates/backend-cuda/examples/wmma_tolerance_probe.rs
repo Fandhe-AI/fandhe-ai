@@ -116,7 +116,8 @@
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::{
-    ABSOLUTE_RESCUE_THRESHOLD, CompareReport, RELATIVE_TOLERANCE, compare, matmul_reference_fma,
+    ABSOLUTE_RESCUE_THRESHOLD, CompareReport, ParityError, RELATIVE_TOLERANCE, compare,
+    matmul_reference_fma,
 };
 use fandhe_ai_backend_cuda::{
     CudaDevice, CudaError, CudaGemm, CudaMmaTf32Gemm, CudaMmaTf32x3Gemm, CudaWmmaGemm,
@@ -603,7 +604,7 @@ fn report_row_sweep_ref(
 /// `"-"` を渡す。
 fn error_row_sweep_ref(scale: f64, label: &str, seed: u64, ref_label: &str, reason: &str) {
     println!(
-        "| {scale} | {label} | {seed} | {ref_label} | ({reason}) | - | - | - | - | - | - | - | - | - | - | - |"
+        "| {scale} | {label} | {seed} | {ref_label} | ({reason}) | - | - | - | - | - | - | - | - | - | - | - | - |"
     );
 }
 
@@ -629,12 +630,115 @@ fn exact_reference_f64(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Ve
     c
 }
 
-/// [`exact_reference_f64`] の結果を最終的に 1 回だけ `f32` へ downcast
-/// する（`.claude/rules/coding-rust.md` 正規化統計の「最終書き出しは
-/// 1 回だけ f32 へ downcast する」契約と同じ丸め回数の方針。`compare`
-/// は `&[f32]` を取るためこの変換が必要）。
-fn round_f64_to_f32(v: &[f64]) -> Vec<f32> {
-    v.iter().map(|&x| x as f32).collect()
+/// `v`（[`exact_reference_f64`] の出力）の非有限（NaN・Inf）要素数を数える
+/// （[`count_nonfinite`] の `&[f64]` 版。「対 f64」診断行の
+/// `ref_nonfinite` 列は [`exact_reference_f64`] の生出力に対して数える
+/// 必要があり、`f32` へ丸めた値には数え直さない。#1356 codex-review
+/// 指摘「f64 参照を比較前に f32 へ丸めない」対応）。
+fn count_nonfinite_f64(v: &[f64]) -> usize {
+    v.iter().filter(|x| !x.is_finite()).count()
+}
+
+/// 「対 f64」診断行（`ref_label = "f64"`）専用の複合判定。
+///
+/// `fandhe_ai_backend_cpu::compare` は `&[f32]` 同士のみを受け付けるため、
+/// 従来実装は [`exact_reference_f64`] の結果を比較前に一度 `f32` へ
+/// downcast していた（丸め誤差が二重に混入し、`matmul_reference_fma`
+/// 自身の最終丸め誤差を「対 f64」診断行が観測できなくなる問題。#1356
+/// codex-review 指摘）。本関数は GPU 結果（`f32`。`f32` → `f64` は無損失
+/// 昇格）と `exact_reference_f64` の生出力（`f64`。丸めない）を直接
+/// `f64` 精度で差分集計する。判定式・統計項目は `compare`（`parity.rs`）
+/// と同一（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD` を用いる
+/// 同じ複合判定・`p50`/`p99`/`p999`／`max_fail_abs_diff` 集計）。REQ-2
+/// 判定行（`ref_label = "f32fma"`）は本関数を使わず、既存の
+/// `compare(&c_gpu, &c_ref_fma)` をそのまま維持する（判定基準は変更
+/// しない。本関数は診断行専用）。
+///
+/// `percentile`／`max_nonfinite_aware`（NaN・Inf を無視しない最大値集計）
+/// は `backend_cpu::parity` が非公開のためここで同じロジックを再実装
+/// している（アルゴリズムは `parity.rs::compare` と同一。乖離防止の
+/// ため単体テストで `compare` との整合を確認する）。
+fn compare_f64_promoted(gpu: &[f32], ref_f64: &[f64]) -> Result<CompareReport, ParityError> {
+    if gpu.len() != ref_f64.len() {
+        return Err(ParityError::LengthMismatch {
+            left: gpu.len(),
+            right: ref_f64.len(),
+        });
+    }
+
+    let mut abs_diffs: Vec<f64> = Vec::with_capacity(gpu.len());
+    let mut rel_errs: Vec<f64> = Vec::with_capacity(gpu.len());
+    let mut fail_count = 0usize;
+    let mut max_fail_abs_diff = 0.0f64;
+
+    for (&x, &yf) in gpu.iter().zip(ref_f64.iter()) {
+        let xf = x as f64;
+        let diff = (xf - yf).abs();
+        let scale = xf.abs().max(yf.abs()).max(1e-12);
+        let rel = diff / scale;
+
+        let pass = rel < RELATIVE_TOLERANCE || diff < ABSOLUTE_RESCUE_THRESHOLD;
+        let fail = !pass;
+        if fail {
+            fail_count += 1;
+            if diff.is_finite() {
+                max_fail_abs_diff = max_fail_abs_diff.max(diff);
+            } else {
+                max_fail_abs_diff = f64::INFINITY;
+            }
+        }
+
+        abs_diffs.push(diff);
+        rel_errs.push(rel);
+    }
+
+    let total = gpu.len();
+    let max_abs_diff = max_nonfinite_aware_diag(&abs_diffs);
+    let mean_abs_diff = abs_diffs.iter().sum::<f64>() / total as f64;
+    let max_rel_err = max_nonfinite_aware_diag(&rel_errs);
+    let mean_rel_err = rel_errs.iter().sum::<f64>() / total as f64;
+
+    let mut sorted = abs_diffs.clone();
+    sorted.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let p50_abs_diff = percentile_diag(&sorted, 0.50);
+    let p99_abs_diff = percentile_diag(&sorted, 0.99);
+    let p999_abs_diff = percentile_diag(&sorted, 0.999);
+
+    Ok(CompareReport {
+        total,
+        fail_count,
+        max_abs_diff,
+        mean_abs_diff,
+        max_rel_err,
+        mean_rel_err,
+        p50_abs_diff,
+        p99_abs_diff,
+        p999_abs_diff,
+        max_fail_abs_diff,
+    })
+}
+
+/// [`compare_f64_promoted`] 用の非有限考慮最大値集計（`parity.rs::
+/// max_nonfinite_aware` と同一ロジック。非公開のためここに複製）。
+fn max_nonfinite_aware_diag(values: &[f64]) -> f64 {
+    let mut acc = 0.0f64;
+    for &v in values {
+        if !v.is_finite() {
+            return f64::INFINITY;
+        }
+        acc = acc.max(v);
+    }
+    acc
+}
+
+/// [`compare_f64_promoted`] 用のパーセンタイル（`parity.rs::percentile`
+/// と同一ロジック。非公開のためここに複製）。
+fn percentile_diag(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
 }
 
 /// TF32 mma.sync 系 2 経路（単発・3×TF32）の cp.async 16 バイト（f32 4
@@ -1034,37 +1138,56 @@ fn probe_f32_simt(gemm: &CudaGemm, scales: &ScaleConfig) -> bool {
                     continue;
                 }
                 let c_ref_f64 = exact_reference_f64(&a, &b, m as usize, n as usize, k as usize);
-                let c_ref_f64_as_f32 = round_f64_to_f32(&c_ref_f64);
 
                 let kernel = f32_simt_kernel_kind(gemm, n, k);
                 match gemm.run_tiled_f32(&a, &b, m, n, k) {
                     Ok(c_gpu) => {
-                        for (ref_label, c_ref) in
-                            [("f32fma", &c_ref_fma), ("f64", &c_ref_f64_as_f32)]
-                        {
-                            match compare(&c_gpu, c_ref) {
-                                Ok(report) => {
-                                    let ref_nonfinite = count_nonfinite(c_ref);
-                                    report_row_sweep_ref(
-                                        scale,
-                                        label,
-                                        seed,
-                                        ref_label,
-                                        &report,
-                                        kernel,
-                                        ref_nonfinite,
-                                    );
-                                }
-                                Err(err) => {
-                                    error_row_sweep_ref(
-                                        scale,
-                                        label,
-                                        seed,
-                                        ref_label,
-                                        &format!("unexpected: compare error: {err}"),
-                                    );
-                                    had_unexpected_error = true;
-                                }
+                        match compare(&c_gpu, &c_ref_fma) {
+                            Ok(report) => {
+                                let ref_nonfinite = count_nonfinite(&c_ref_fma);
+                                report_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f32fma",
+                                    &report,
+                                    kernel,
+                                    ref_nonfinite,
+                                );
+                            }
+                            Err(err) => {
+                                error_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f32fma",
+                                    &format!("unexpected: compare error: {err}"),
+                                );
+                                had_unexpected_error = true;
+                            }
+                        }
+                        match compare_f64_promoted(&c_gpu, &c_ref_f64) {
+                            Ok(report) => {
+                                let ref_nonfinite = count_nonfinite_f64(&c_ref_f64);
+                                report_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f64",
+                                    &report,
+                                    kernel,
+                                    ref_nonfinite,
+                                );
+                            }
+                            Err(err) => {
+                                error_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f64",
+                                    &format!("unexpected: compare error: {err}"),
+                                );
+                                had_unexpected_error = true;
                             }
                         }
                     }
@@ -1125,36 +1248,55 @@ fn probe_mma_tf32(gemm: &CudaMmaTf32Gemm, scales: &ScaleConfig) -> bool {
                     continue;
                 }
                 let c_ref_f64 = exact_reference_f64(&a, &b, m as usize, n as usize, k as usize);
-                let c_ref_f64_as_f32 = round_f64_to_f32(&c_ref_f64);
 
                 match gemm.run_tf32(&a, &b, m, n, k) {
                     Ok(c_gpu) => {
-                        for (ref_label, c_ref) in
-                            [("f32fma", &c_ref_fma), ("f64", &c_ref_f64_as_f32)]
-                        {
-                            match compare(&c_gpu, c_ref) {
-                                Ok(report) => {
-                                    let ref_nonfinite = count_nonfinite(c_ref);
-                                    report_row_sweep_ref(
-                                        scale,
-                                        label,
-                                        seed,
-                                        ref_label,
-                                        &report,
-                                        "mma_tf32",
-                                        ref_nonfinite,
-                                    );
-                                }
-                                Err(err) => {
-                                    error_row_sweep_ref(
-                                        scale,
-                                        label,
-                                        seed,
-                                        ref_label,
-                                        &format!("unexpected: compare error: {err}"),
-                                    );
-                                    had_unexpected_error = true;
-                                }
+                        match compare(&c_gpu, &c_ref_fma) {
+                            Ok(report) => {
+                                let ref_nonfinite = count_nonfinite(&c_ref_fma);
+                                report_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f32fma",
+                                    &report,
+                                    "mma_tf32",
+                                    ref_nonfinite,
+                                );
+                            }
+                            Err(err) => {
+                                error_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f32fma",
+                                    &format!("unexpected: compare error: {err}"),
+                                );
+                                had_unexpected_error = true;
+                            }
+                        }
+                        match compare_f64_promoted(&c_gpu, &c_ref_f64) {
+                            Ok(report) => {
+                                let ref_nonfinite = count_nonfinite_f64(&c_ref_f64);
+                                report_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f64",
+                                    &report,
+                                    "mma_tf32",
+                                    ref_nonfinite,
+                                );
+                            }
+                            Err(err) => {
+                                error_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f64",
+                                    &format!("unexpected: compare error: {err}"),
+                                );
+                                had_unexpected_error = true;
                             }
                         }
                     }
@@ -1219,36 +1361,55 @@ fn probe_mma_tf32x3(gemm: &CudaMmaTf32x3Gemm, scales: &ScaleConfig) -> bool {
                     continue;
                 }
                 let c_ref_f64 = exact_reference_f64(&a, &b, m as usize, n as usize, k as usize);
-                let c_ref_f64_as_f32 = round_f64_to_f32(&c_ref_f64);
 
                 match gemm.run_tf32x3(&a, &b, m, n, k) {
                     Ok(c_gpu) => {
-                        for (ref_label, c_ref) in
-                            [("f32fma", &c_ref_fma), ("f64", &c_ref_f64_as_f32)]
-                        {
-                            match compare(&c_gpu, c_ref) {
-                                Ok(report) => {
-                                    let ref_nonfinite = count_nonfinite(c_ref);
-                                    report_row_sweep_ref(
-                                        scale,
-                                        label,
-                                        seed,
-                                        ref_label,
-                                        &report,
-                                        "mma_tf32x3",
-                                        ref_nonfinite,
-                                    );
-                                }
-                                Err(err) => {
-                                    error_row_sweep_ref(
-                                        scale,
-                                        label,
-                                        seed,
-                                        ref_label,
-                                        &format!("unexpected: compare error: {err}"),
-                                    );
-                                    had_unexpected_error = true;
-                                }
+                        match compare(&c_gpu, &c_ref_fma) {
+                            Ok(report) => {
+                                let ref_nonfinite = count_nonfinite(&c_ref_fma);
+                                report_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f32fma",
+                                    &report,
+                                    "mma_tf32x3",
+                                    ref_nonfinite,
+                                );
+                            }
+                            Err(err) => {
+                                error_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f32fma",
+                                    &format!("unexpected: compare error: {err}"),
+                                );
+                                had_unexpected_error = true;
+                            }
+                        }
+                        match compare_f64_promoted(&c_gpu, &c_ref_f64) {
+                            Ok(report) => {
+                                let ref_nonfinite = count_nonfinite_f64(&c_ref_f64);
+                                report_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f64",
+                                    &report,
+                                    "mma_tf32x3",
+                                    ref_nonfinite,
+                                );
+                            }
+                            Err(err) => {
+                                error_row_sweep_ref(
+                                    scale,
+                                    label,
+                                    seed,
+                                    "f64",
+                                    &format!("unexpected: compare error: {err}"),
+                                );
+                                had_unexpected_error = true;
                             }
                         }
                     }
@@ -1894,8 +2055,57 @@ mod tests {
     }
 
     #[test]
-    fn round_f64_to_f32_downcasts_each_element_once() {
-        let v = [1.5f64, -2.25, 0.0];
-        assert_eq!(round_f64_to_f32(&v), vec![1.5f32, -2.25, 0.0]);
+    fn compare_f64_promoted_matches_compare_when_ref_is_f32_representable() {
+        // ref が f32 で厳密表現できる値のときは `compare`（f32 ref）と
+        // `compare_f64_promoted`（f64 ref）が同じ統計を返す（アルゴリズム
+        // の同値性を確認する退化ケース）。
+        let gpu = [1.0f32, 2.5, -3.25];
+        let ref_f32 = [1.0f32, 2.5, -3.0];
+        let ref_f64: Vec<f64> = ref_f32.iter().map(|&x| x as f64).collect();
+
+        let report_f32 = compare(&gpu, &ref_f32).unwrap();
+        let report_f64 = compare_f64_promoted(&gpu, &ref_f64).unwrap();
+
+        assert_eq!(report_f32.fail_count, report_f64.fail_count);
+        assert_eq!(report_f32.total, report_f64.total);
+        assert_eq!(report_f32.max_abs_diff, report_f64.max_abs_diff);
+        assert_eq!(report_f32.max_rel_err, report_f64.max_rel_err);
+    }
+
+    #[test]
+    fn compare_f64_promoted_observes_final_rounding_error_that_downcast_first_would_hide() {
+        // #1356 codex-review 指摘の核心: ref を先に f32 へ丸めてから
+        // 比較すると、gpu の値がその丸め後の f32 とちょうど一致する場合に
+        // 誤差が 0 に見えてしまう。`compare_f64_promoted` は ref を f64 の
+        // まま比較するため、gpu と真の f64 値との差（丸め誤差そのもの）を
+        // 観測できる。
+        // f32 near 1.0 の ULP は 2^-23（半 ULP は約 5.96e-8）。
+        // 差 2^-30（約 9.31e-10）は半 ULP よりずっと小さいため、
+        // `ref_f64` は最近傍丸めで厳密に `1.0f32` に丸まる
+        // （= GPU が実際に返しうる典型的な f32 出力値と一致する）。
+        let ref_f64 = [1.0f64 + 2f64.powi(-30)];
+        let gpu = [1.0f32]; // ref_f64 を最近傍丸めした f32 値と bit 一致
+
+        // 旧実装が行っていた「先に f32 へ丸めてから compare」は誤差ゼロ
+        // （downcast 後に GPU 値と一致するため）。
+        let ref_rounded_to_f32 = ref_f64[0] as f32;
+        assert_eq!(ref_rounded_to_f32, gpu[0]);
+        let report_downcast_first = compare(&gpu, &[ref_rounded_to_f32]).unwrap();
+        assert_eq!(report_downcast_first.max_abs_diff, 0.0);
+
+        // 新実装は ref を f64 のまま比較するため、GPU の f32 表現限界に
+        // よる丸め誤差（非ゼロ）を観測する。
+        let report_promoted = compare_f64_promoted(&gpu, &ref_f64).unwrap();
+        assert!(
+            report_promoted.max_abs_diff > 0.0,
+            "expected nonzero abs diff against the un-rounded f64 reference, got {}",
+            report_promoted.max_abs_diff
+        );
+    }
+
+    #[test]
+    fn count_nonfinite_f64_counts_nan_and_inf() {
+        let v = [1.0f64, f64::NAN, f64::INFINITY, -2.0, f64::NEG_INFINITY];
+        assert_eq!(count_nonfinite_f64(&v), 3);
     }
 }
