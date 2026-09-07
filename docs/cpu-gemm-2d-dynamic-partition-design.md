@@ -299,15 +299,39 @@ fn job_grid(
 - 寸法計算は全て `checked_mul`／`saturating_add` を用い、オーバーフロー時は型付きエラー
   （`GemmError::DimProductOverflow` 相当）を返す fail-closed 設計とする
   （`partition::bands`〈`partition.rs:52`〉の既存方針を踏襲）
-- `m==0`／`n==0`／`num_threads==1` で全域的に正しく動作する。**`num_threads==1` は下限式・
-  選択規則の双方で明示的に job 1 個（`rb=cb=1`・`mc_job=align_up(m, mr)`・
+- `m==0`／`n==0`／`num_threads==1` で全域的に正しく動作する。**判定順序は
+  「`m==0` または `n==0`」→「`num_threads==1`」→「§5.2 のコスト最小化探索」の順に固定する**
+  （後述のとおり `m==0`／`n==0` は列側候補範囲 `cb ∈ 1..=ceil(n/nr)` が `n==0` で空集合に
+  なり探索そのものが成立しないため、`num_threads==1` 特例やコスト最小化探索より先に
+  弾く必要がある。codex-review #1431 指摘）。**`m==0` または `n==0` のときは
+  `num_threads` の値に関わらず空の `JobGrid`（`tiles = tile_grid(m, n, mc_job, nc_job)`
+  が空集合になることと契約上一致させるため `row_bands=0`・`col_bands=0`・
+  `mc_job=align_up(m, mr)`・`nc_job=align_up(n, nr)`）を返す**（`m`／`n` いずれかが 0 の
+  場合 `align_up(0, mr)=0`・`align_up(0, nr)=0` となり、`tile_grid` はタイルを 1 枚も
+  生成しない。`row_bands`／`col_bands` を「実際に生成される帯数」の定義どおり 0 とすることで
+  `tiles` の空集合と整合させる）。**`num_threads==1` は（`m` も `n` も 0 でない場合に限り）
+  下限式・選択規則の双方で明示的に job 1 個（`rb=cb=1`・`mc_job=align_up(m, mr)`・
   `nc_job=align_up(n, nr)`）の特例とし、§5.2 のコスト最小化探索を経由しない**（直列実行と
   同一経路になる。並列コスト比較を 1 スレッドに対して行う意味がないため）
 
 ### §5.2 選択規則
 
-**`num_threads == 1` の特例**: 下限式（§5.1）どおり job 1 個に固定する
-（`rb = cb = 1`・`mc_job = align_up(m, mr)`・`nc_job = align_up(n, nr)`）。
+**`m==0` または `n==0` の特例（探索・`num_threads==1` 特例より先に判定する）**: `num_threads`
+の値に関わらず空の `JobGrid`（`row_bands=0`・`col_bands=0`・`mc_job=align_up(m, mr)=0`・
+`nc_job=align_up(n, nr)=0`・`tiles=∅`）を返す。§5.1 の下限式 `到達可能最大 job 数 =
+ceil(m/mr) * ceil(n/nr)` は `m==0` または `n==0` で 0 になり、`bound = min(J, 0) = 0` は
+job 0 個で自明に満たされるため、この特例は §5.1 の下限契約と矛盾しない。この判定を後段の
+探索より先に置く理由: `num_threads >= 2` の探索は列側候補範囲を `cb ∈ 1..=ceil(n/nr)` と
+定義しており、`n==0` では `ceil(n/nr)=0` のためこの範囲が空集合になり探索自体が実行できない
+（§5.2「フォールバック到達不能」の証明は `cb=ceil(n/nr)` が候補として存在することを前提と
+しており、`n==0` ではこの前提が崩れる）。また `m==0` かつ `num_threads==1` の場合、この特例が
+無いと §5.1 の `num_threads==1` 特例が `mc_job=align_up(0, mr)=0`・`rb=cb=1`（job 1 個）を
+返す一方、`tiles=tile_grid(0, n, 0, nc_job)` は空集合を返す契約（被覆完全・互いに素の対象が
+空であるため）となり、「job 数」と「`tiles` の要素数」が食い違う契約矛盾が生じる。本特例は
+これを解消し、`row_bands`／`col_bands` を「実際に生成される帯数」（=0）として一貫させる。
+
+**`num_threads == 1` の特例**（`m` も `n` も 0 でない場合のみ到達する）: 下限式（§5.1）
+どおり job 1 個に固定する（`rb = cb = 1`・`mc_job = align_up(m, mr)`・`nc_job = align_up(n, nr)`）。
 以下のコスト最小化探索は経由しない（1 スレッドに対して並列コスト比較を行う意味がないため）。
 
 `num_threads >= 2` のとき、目標 job 数 `J = jobs_per_worker × num_threads`・
