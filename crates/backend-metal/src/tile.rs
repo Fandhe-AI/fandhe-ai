@@ -1567,11 +1567,11 @@ pub(crate) const UNROLL_ACC_ENABLED: bool = false;
 ///
 /// **本 sub-issue（#1288）は機構の実装と bit 一致の自己検証のみを行い、
 /// 性能実測・本番既定の `true` への切替判断は行わない**（後続イシュー
-/// #1289〈反射値・カーネル純時間の before/after 実測〉／#1302〈`tile::
-/// select` への組み込み〉のスコープ。`docs/perf/
-/// metal-gemm-n4096-kernel-gap.md` §8）。コミット状態では常に `false`
-/// のままとし、実機 A/B 計測目的以外で一時的にも `true` へ書き換えて
-/// コミットしない。
+/// #1289〈反射値・カーネル純時間の before/after 実測〉で REJECT・
+/// イシュー #1304 で `tile::select` 組み込み対象なしと確定。`docs/perf/
+/// metal-gemm-n4096-kernel-gap.md` §9.4・§18）。コミット状態では常に
+/// `false` のままとし、実機 A/B 計測目的以外で一時的にも `true` へ
+/// 書き換えてコミットしない。
 ///
 /// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
 /// doc comment を参照（同一の dead_code 誤検知回避）。
@@ -1736,8 +1736,9 @@ impl TgpPad {
 /// `UNROLL_ACC_ENABLED`/`SOURCE_SPECIALIZATION_ENABLED`/`FragLoadConfig` と
 /// 同じ instance ゲート方式を踏襲する）。**本 sub-issue（#1298）は機構の
 /// 実装と bit 一致の自己検証のみを行い、性能実測・`tile::select` への
-/// 組み込み判断は行わない**（後続イシュー #1300／#1302／#1304 のスコープ。
-/// `docs/perf/metal-gemm-n4096-kernel-gap.md` §5）。`pub` にする理由は
+/// 組み込み判断は行わない**（後続イシュー #1300 で REJECT・イシュー
+/// #1304 で `tile::select` 組み込み対象なしと確定。`docs/perf/
+/// metal-gemm-n4096-kernel-gap.md` §11.4・§18）。`pub` にする理由は
 /// [`FragLoadKSteps`] doc comment と同じ（`new_with_coop_load` を `pub fn`
 /// にする以上、引数型も少なくとも同じ可視性が必要）。
 #[cfg(any(test, target_os = "macos"))]
@@ -4253,8 +4254,8 @@ mod tests {
         assert!(
             !std::hint::black_box(SOURCE_SPECIALIZATION_ENABLED),
             "SOURCE_SPECIALIZATION_ENABLED が true のままコミットされている疑いがあります。\
-             本番既定は false（性能実測・本番結線判断は #1289／#1302 のスコープ）です \
-             （tile.rs 冒頭 SOURCE_SPECIALIZATION_ENABLED doc comment・イシュー #1288 参照）。"
+             本番既定は false（#1289 で REJECT・#1304 で `tile::select` 組み込み対象なしと確定）\
+             です（tile.rs 冒頭 SOURCE_SPECIALIZATION_ENABLED doc comment・イシュー #1288 参照）。"
         );
     }
 

@@ -81,9 +81,10 @@
 //! 一切含まない（イシュー #1298 が既に追加済みの `#[cfg(test)] pub`／
 //! `pub(crate)` 面のみを利用する）。`tile::select` の候補表・本番既定
 //! （`MetalGemm::new` の `tile::COOP_LOAD_CONFIG`）への組み込みは本
-//! イシューのスコープ外（兄弟イシュー #1302／#1304 が担う。
-//! `docs/perf/metal-gemm-coop-load-candidates.md` §5・本ファイル冒頭
-//! コメント参照）。
+//! イシューのスコープ外（イシュー #1300 で REJECT・イシュー #1304 で
+//! 組み込み対象なしと確定済み。`docs/perf/metal-gemm-coop-load-
+//! candidates.md` §5・`docs/perf/metal-gemm-n4096-kernel-gap.md`
+//! §11.4・§18・本ファイル冒頭コメント参照）。
 
 use crate::context::MetalContext;
 use crate::gemm::MetalGemm;

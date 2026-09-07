@@ -190,6 +190,8 @@ N=4096 NN（正方立方。中核対象）:
   `L0-P0`／`L0-P8` は改善方向のシグナルがあるが N=2048/4096 で run 間の
   符号が反転し確証に至らず）**組み込み対象なし**（`tile::select` への
   結線は行わない。判断結果は #1302／#1304 へ引き継ぎ）
+  → #1304 で E2〜E4 とも組み込み対象なしと確定（§18）。状態行の更新
+  （§5・§7.7 本文の書き換え）は #1306 が担う
 - cand0（candle と同一タイル形状）が 4096 で崩壊する根本原因の特定
   （スレッドあたり実行効率の直接計測手段が現状ない）
 - §2 の限界に基づく厳密なレジスタ spill 計測（Xcode Instruments の GPU
@@ -448,6 +450,8 @@ pragma の本番結線を撤回する**（§7.7a）。
   単体切替）は #1278／#1279 で M4 Max 実機実測済み・#1280 で採用候補 0 件・
   結線対象なしと確定した（本項目の対象外扱いは E1 との相互作用診断に限り
   維持。E2〜E4 は引き続き未実施）
+  → #1304 で E2〜E4 とも組み込み対象なしと確定（§18）。状態行の更新は
+  #1306 が担う
 - unroll(full) を acc_rows*acc_cols>=16 の候補にのみ適用する条件付き
   gating（function constant 分岐でループ本体を複製する等）は、pragma 単純
   付与よりコード複雑化・実機再検証コストが大きいため本 PR では実施せず、
@@ -2251,3 +2255,88 @@ B 系列の結線判断・採否）は `docs/perf/metal-gemm-hfrag-candidate.md`
 倍遅いという理由で REJECT されているため、hfrag によって使用可能性
 〈viability〉が新規に実証されたわけではない）。無条件の opt-in 候補
 前進は推奨しない（同 doc §9.6）。
+
+## §18 E2〜E4 の `tile::select` 組み込み判断（イシュー #1304）
+
+### §18.0 結論
+
+**E2・E3・E4 はいずれも実機実測（M4 Max）で「組み込み不可（REJECT）」
+確定済み**であり、`tile::select`／`select_for_device` の候補表
+（`CANDIDATES`）・選択条件へ組み込む**有効候補は 0 件**である。出典:
+
+- E2（ソーステキスト特殊化）: §9.4（イシュー #1289）。N=1024 で約 22%
+  後退・N=4096 で 5/5 run 一貫の微後退
+- E3（フラグメントロード方式）: §10.4（イシュー #1295）。5 候補中
+  本番既定 `tgp-k1` が全 N 最速
+- E4（協調ロードレイアウト）: §11.4（イシュー #1300）。6 候補中本番
+  既定 `L0-P4` を安定して上回る候補なし
+
+したがって本イシューは受け入れ条件の**「有効候補 0 件の場合はその旨を
+記録してクローズ」**分岐を採る。`crates/backend-metal/src/tile.rs`
+（候補表・選択ロジック・opt-in 定数）・`gemm.rs`（`MetalGemm::new`／
+`dispatch_auto`）・`shaders/gemm.metal` の**本番コードは変更しない**。
+
+### §18.1 実施内容
+
+本番コードを変更しない代わりに、受け入れ条件「全形状 × NN/NT/TN/TT の
+parity 0 fail・既存 bit 一致テスト pass（実機）」を満たすためのカバレッジ
+欠落を埋めた。既存の同型テスト（E7〈`bk32_64x64_candidate_matches_cpu_
+reference_for_all_shapes_and_transpose_patterns`〉・E8〈`bm128_
+candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns`〉）
+は `tile::CANDIDATES[9]`／`[10]` を**明示指定**するのみで、`MetalGemm::
+dispatch_auto` が実際に選ぶ本番選択構成（`tile::select_for_device` の
+出力）そのものを転置パターン込みで検証するテストは存在しなかった。
+
+`crates/backend-metal/tests/gemm_strided_parity.rs` へ以下 2 本の
+`#[ignore]` テストを追加した（E7 用ヘルパ `assert_e7_candidate_matches_
+reference_for_pattern` を `label` 引数で汎化した `assert_candidate_
+matches_reference_for_pattern` を共用。E7/E8 の assert メッセージ・
+挙動は不変）:
+
+- `production_select_matches_cpu_reference_for_all_shapes_and_transpose_patterns`
+  （E7/E8 と同一の 10 形状 × NN/NT/TN/TT）
+- `production_select_matches_cpu_reference_for_n4096_cubic_shape`
+  （純 4096³ をスカラー CPU 参照の計算コストのため分離）
+
+各形状で `cfg = tile::select_for_device(m, n, k, ctx.
+verified_m4_max_gpu_core_count())` を取得し、`resolved == cfg` を assert
+してサイレントフォールバックを検知したうえで CPU 参照実装との複合判定
+（REQ-2）を確認する。
+
+### §18.2 実機検証結果（M4 Max）
+
+詳細は `docs/perf/logs/metal-gemm-e2e4-select-closure-1304/aggregate.md`
+を正とし、本節では要約のみ記す。
+
+| 区分 | 内容 | 結果 |
+|---|---|---|
+| (a) 新規 | 本番選択構成 × 10 形状 × 4 パターン + 4096³ × 4 パターン（計 44 ケース） | 全 pass・`resolved == cfg` |
+| (b) 既存（E2〜E4 の `#[cfg(test)]` 自己検証） | 10 本（E2 2 本・E3 4 本・E4 4 本。参考として E1・E6 の 5 本も同時実行） | 全 15 本 pass |
+| (c) 既存 integration | swizzle／fine_barrier／transposed_parity／dynamic_tile_parity／strided_parity 残り（E7/E8/本イシュー新規を除く） | 27 本 pass |
+| (d) 既定値ガード | `SOURCE_SPECIALIZATION_ENABLED`／`FRAG_LOAD_CONFIG`／`COOP_LOAD_CONFIG` の既定値ロック 3 本 | 全 pass |
+
+`select_for_device` は形状ごとに複数の異なる `TileConfig`
+（境界形状縮退〈(72,88,104)〉を含む）へ分岐したが、いずれも NN/NT/TN/TT
+の 4 転置パターンで parity 0 fail・サイレントフォールバックなしを確認
+した。
+
+### §18.3 env_info・実行環境
+
+M4 Max（GPU 40 コア）・macOS 26.6.2・rustc 1.96.0。実行時 `uptime`:
+`up 19 days 2:53, load averages: 7.07 7.53 7.91`（他セッション並走の
+共有負荷環境。本節のテストは性能計測ではなく parity・bit 一致の 0/1
+判定のため、共有負荷は判定の信頼性に影響しない）。詳細は
+`docs/perf/logs/metal-gemm-e2e4-select-closure-1304/env_info.txt`。
+
+### §18.4 #1306 への引き継ぎ
+
+- `docs/perf/metal-gemm-n4096-kernel-gap.md` §5／§7.7 の E2〜E4 該当行の
+  本文書き換え（状態行の全面更新）は #1306 が担う（本イシューはポインタ
+  1 行のみ追記）
+- framework-compare 実践規模の前後比較は #1306 のスコープ。`tile::
+  select` 系関数・候補表を本イシューで変更していないため、**候補表無変更
+  につき before=after（差分なし）となる見込み**（実測自体は #1306 が
+  行う）
+- E6（#1328）・E7（#1330）・E8（#1332）は本イシューの対象外（各自の
+  イシューで完結済み。`CANDIDATES[9]`／`[10]` は「明示指定でのみ到達可能」
+  な状態のまま不変）

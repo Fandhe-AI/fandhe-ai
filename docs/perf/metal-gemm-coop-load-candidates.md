@@ -11,7 +11,10 @@
 
 **本イシューのスコープは機構の実装と bit 一致の自己検証のみ**。各候補の
 純カーネル時間比較・`tile::select`／本番既定への結線判断は後続イシュー
-#1300／#1302／#1304 のスコープであり、本ドキュメントでは行わない。
+#1300（純カーネル時間比較・組み込み判断）で REJECT・#1304（`tile::
+select` 組み込み対象なしの確定・全形状 × 転置 4 種 parity 確認）で確定
+済み（`docs/perf/metal-gemm-n4096-kernel-gap.md` §11.4・§18）。本ドキュ
+メントでは行わない。
 
 非公式 `simdgroup_async_copy` 系 AIR intrinsic は使わない
 （`docs/backend-metal-async-copy-decision.md` の不採用判断を維持）。レーン
@@ -219,7 +222,8 @@ fandhe-ai-backend-metal` 実行で確認〉、少なくとも非 ignore 経路�
   1 コンテキストで構築し、trial ごとに交互計測して中央値・base 比を
   出力する構成）。
 - `tile::select`／`tile::CANDIDATES` への組み込み（本番結線）は行って
-  いない。有効性が確認された場合の結線判断は #1302／#1304 のスコープ。
+  いない。結線判断は #1300 で REJECT・#1304 で組み込み対象なしと確定
+  済み（`docs/perf/metal-gemm-n4096-kernel-gap.md` §11.4・§18）。
 
 ## 6. スコープ外（PR 本文へ記録。新規 Issue は起票しない）
 
@@ -232,7 +236,8 @@ fandhe-ai-backend-metal` 実行で確認〉、少なくとも非 ignore 経路�
   `simdgroup_load(ptr, ld)` の契約を満たす限り bit 不変）が適用できる
   はずだが、実装・自己検証は行っていない。
 - 各候補の純カーネル時間比較・有効性判断・`tile::select` 候補表への
-  組み込み・本番結線（#1300／#1302／#1304）。
+  組み込み・本番結線は #1300 で REJECT・#1304 で組み込み対象なしと確定
+  済み（`docs/perf/metal-gemm-n4096-kernel-gap.md` §11.4・§18）。
 - `gemm_simdgroup_tiled_f16` の協調ロードレイアウト切替（本 issue は f32
   経路のみ。f16 は no-op 契約）。
 - 実機（Metal・Apple Silicon）での T1〜T6 の実行・非後退確認（§3 参照。

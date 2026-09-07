@@ -1,0 +1,9 @@
+macOS: 26.6.2 (BuildVersion 25G83)
+chip: Apple M4 Max
+gpu_cores: 40
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+HEAD: b2a5fcb (perf(backend-metal): f16 候補の純カーネル時間を M4 Max で 5 回中央値比較し採否を記録する #1399)
+uptime_before_run: 15:40 up 19 days 2:53, 19 users, load averages: 7.07 7.53 7.91
+解釈上の注意: load average が高い（共有負荷環境）。本テスト群は parity・
+bit 一致の 0/1 判定（fail_count の有無）のみを検証し、性能計測ではない
+ため、共有負荷下でも判定自体の信頼性には影響しない。
