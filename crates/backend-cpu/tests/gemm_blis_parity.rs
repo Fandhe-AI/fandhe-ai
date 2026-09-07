@@ -12,7 +12,9 @@
 //! 4. 境界条件（m=0／n=0／k=0）・エラー経路を検証する。
 
 use bench_harness::rng::Xorshift64Star;
-use fandhe_ai_backend_cpu::{GemmError, gemm_blis, gemm_blis_parallel, gemm_naive};
+use fandhe_ai_backend_cpu::{
+    GemmError, gemm_blis, gemm_blis_parallel, gemm_naive, thread_limit_report,
+};
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)
@@ -393,4 +395,54 @@ fn gemm_blis_and_parallel_reject_same_shape_errors() {
     assert!(gemm_blis(&a, &b, &mut c1, 2, 2, 2).is_err());
     let mut c2 = vec![0.0; 4];
     assert!(gemm_blis_parallel(&a, &b, &mut c2, 2, 2, 2).is_err());
+}
+
+// --- 5. 大コア数限定（イシュー #1363）の実効スレッド数契約 ---
+//
+// `gemm_blis_parallel` の並列度算出（大コア数限定。`thread_limit_report`
+// 経由で可視化）は、任意プラットフォーム・任意の判定成否に関わらず
+// `1 <= effective <= current` を満たす（判定不能時は現行既定へ
+// フォールバックするフェイルセーフ設計。単体テストは
+// `crates/backend-cpu/src/thread_limit.rs` の `mod tests` で
+// 純関数〈`resolve`／`parse_sysctl_stdout`／`big_cores_from_sysfs` 等〉を
+// 網羅済みのため、ここでは公開面 `thread_limit_report()` の統合契約のみ
+// を検証する）。
+
+#[test]
+fn thread_limit_report_effective_within_current_bounds() {
+    let report = thread_limit_report();
+    assert!(report.effective >= 1);
+    assert!(report.effective <= report.current.max(1));
+    if let Some(detected) = report.detected_big_cores {
+        // 判定できていれば 0 より大きいはず（判定不能時は `None` を返す
+        // 契約。`thread_limit::big_cores_from_sysfs`／`big_cores_from_sysctl`
+        // ドキュメント参照）。
+        assert!(detected > 0);
+    }
+}
+
+#[test]
+fn gemm_blis_parallel_bit_exact_regardless_of_thread_limit_detection() {
+    // 大コア数限定が有効(既定)であっても、bit 完全一致契約
+    // (REQ-2・本ファイル冒頭コメント)は並列度に依存せず成立する
+    // (`*_across_thread_pools` 系テストが異なるプール幅で既に検証済み
+    // だが、本テストは `thread_limit_report()` を介して実際に適用された
+    // `effective` 値を明示的に記録し、値の変化が結果を壊さないことを
+    // 直接確認する)。
+    let report = thread_limit_report();
+    let (m, n, k) = (37usize, 41usize, 29usize);
+    let a = random_matrix(0x1363_0001, m * k);
+    let b = random_matrix(0x1363_0002, k * n);
+
+    let mut c_naive = vec![0.0f32; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+    let mut c_parallel = vec![0.0f32; m * n];
+    gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+
+    assert_eq!(
+        c_naive, c_parallel,
+        "effective_threads={} (current={}, detected={:?}) で bit 不一致",
+        report.effective, report.current, report.detected_big_cores
+    );
 }

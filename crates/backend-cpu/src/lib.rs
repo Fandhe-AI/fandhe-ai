@@ -101,6 +101,15 @@
 //! を「RMSNorm 一致 → softmax 一致 → 既存 elementwise 融合」の 3 分岐へ
 //! 拡張した。exp 実装方式は標準 `f32::exp` を採用（[`softmax`] モジュール
 //! 冒頭コメント参照。tolerance 緩和は行わない）。
+//!
+//! イシュー #1363（親 #1362・祖 #1361）で `thread_limit` モジュール
+//! （macOS `hw.perflevel0.logicalcpu`／Linux sysfs `cpu_capacity` による
+//! 大コア数判定・判定不能時フォールバック。診断用の [`ThreadLimitReport`]／
+//! [`thread_limit_report()`] のみ公開）を追加し、`gemm_blis` 並列 GEMM の
+//! 既定並列度を大コア数へ限定する制御を単一 const ゲート
+//! （`thread_limit::BIG_CORE_LIMIT_ENABLED`）付きで結線した。性能上の
+//! 採否判断は #1364（両実機 framework-compare 前後比較）へ引き継ぐ
+//! （`docs/perf/cpu-gemm-default-thread-limit.md`）。
 
 mod device;
 mod elementwise;
@@ -114,6 +123,7 @@ pub mod parity;
 pub mod reduction;
 pub mod rmsnorm;
 pub mod softmax;
+mod thread_limit;
 
 pub use device::CpuDeviceProvider;
 pub use elementwise::{
@@ -135,3 +145,4 @@ pub use parity::{
 };
 pub use rmsnorm::{RmsNormError, run_rmsnorm_f32};
 pub use softmax::{SoftmaxError, run_softmax_f32};
+pub use thread_limit::{ThreadLimitReport, thread_limit_report};
