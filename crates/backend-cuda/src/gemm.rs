@@ -4904,8 +4904,15 @@ impl CudaGemm {
     /// drop も capture 排他へ参加させる（`GuardedSlice` ドキュメンテーション
     /// コメント「背景」節参照。生の `CudaSlice::drop` は排他機構を経由
     /// しないため、`with_driver_call` によるここでの確保保護だけでは
-    /// 不十分だった）。`&GuardedSlice<f32>` は `Deref` により
-    /// `&CudaSlice<f32>` を要求する既存シグネチャへそのまま渡せる。
+    /// 不十分だった）。**`GuardedSlice<T>` は `Deref`／`DerefMut` を実装
+    /// しない**（`&CudaSlice<T>` への変換は提供しない。理由は
+    /// `GuardedSlice` ドキュメンテーションコメント「公開アクセス面」節
+    /// 参照。codex-review P2 指摘対応・PR #1390 再修正）。呼び出し元は
+    /// `&GuardedSlice<f32>`／`&mut GuardedSlice<f32>` をそのまま受け取る
+    /// 本クレートの公開 `launch_*`／`download_*` 系 API（例:
+    /// [`Self::download_f32`]）へ渡す。内部の `CudaSlice<T>` への到達は
+    /// 本クレート内限定の `GuardedSlice::as_raw`／`as_raw_mut`
+    /// （`pub(crate)`）のみが行う。
     pub fn upload_f32(
         &self,
         a: &[f32],

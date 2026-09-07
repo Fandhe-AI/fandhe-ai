@@ -323,11 +323,28 @@ pub(crate) fn run_captured_sgd_step_segment(
     token: &DispatchFailureCell,
 ) -> Result<SegmentRun, BackendError> {
     // ① キャッシュヒット: 既存 graph を再生する。
+    //
+    // `begin_driver_call` は別スレッドの capture と競合しただけでも
+    // 一過性の `BackendError::DeviceContextCaptureInProgress` を返しうる
+    // （`context_cache::begin_driver_call` doc コメント参照）。この場合
+    // graph 自体は破損しておらず再利用可能なため、素朴に `?` で早期
+    // return すると take 済みの graph がどこにも戻らずキャッシュから
+    // 失われ、次回呼び出しで再 capture・re-instantiate が必要になって
+    // しまう（codex-review P2 指摘・PR #1390）。よってエラー発生時は
+    // graph をキャッシュへ戻してからエラーを返す。
     if let Some(graph) = take_cached_graph(ordinal, &key) {
-        let call_token = context_cache::begin_driver_call(ordinal, &[key.generation])?;
+        let call_token = match context_cache::begin_driver_call(ordinal, &[key.generation]) {
+            Ok(token) => token,
+            Err(e) => {
+                put_cached_graph(ordinal, key, graph);
+                return Err(e);
+            }
+        };
         let launch_result = graph.launch();
-        context_cache::observe_driver_result(ordinal, &call_token, launch_result)
-            .map_err(|e| crate::memory::map_cuda_error(CudaError::Driver(e)))?;
+        if let Err(e) = context_cache::observe_driver_result(ordinal, &call_token, launch_result) {
+            put_cached_graph(ordinal, key, graph);
+            return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
+        }
         put_cached_graph(ordinal, key, graph);
         return Ok(SegmentRun::Replayed);
     }
