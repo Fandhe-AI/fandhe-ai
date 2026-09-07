@@ -112,6 +112,26 @@ grep -rnE '^\s*#\[ignore' crates/backend-cuda/tests/*.rs | wc -l   # => 51
 （テスト自体の並列度制御は本イシューのスコープ外。並列実行下での安定計測が必要な場合は別途 issue で
 `#[test]` の直列化属性付与を検討する。7 節参照）。
 
+**#1162／#1203 追記（`tiled_f32_outperforms_naive_at_4096` の帰属再評価）**: 上表の
+「並列実行の GPU 競合が原因」という帰属は `tiled_f32_outperforms_naive_at_4096` については不正確
+であることが判明した。#1162 の GB10 実機 sweep（2026-09-05・`--test-threads=1` **直列**・
+`--features internal-diagnostics`）で本テストが speedup=0.235x で FAIL しており、直列条件では
+並列競合は発生しない。#1203 で単発実行・直列バイナリ実行の両条件で再現調査したところ、単発
+実行 5 回中 1 回（speedup=0.189x）・直列バイナリ実行 3 回中 1 回（speedup=0.208x）で FAIL を
+再現し、tiled 側サンプルの二峰性（5 サンプル中 3〜4 が約 0.5〜0.7s 帯・残りが約 0.04s 帯）が
+`docs/perf/cuda-large-buffer-percall-alloc-transfer-threshold.md` の 64 MiB D2H 二峰性病態と
+振幅・確率的な出現パターンの点で整合することを確認した。加えて、cp.async パイプライン結線
+（#1137/#1164/#1344）を一切経由しない classic（非 pipeline）版カーネルでも本番 pipeline 版と
+同振幅の slow モードが発生しており、原因が tiled カーネル実装差分ではなく naive/tiled が共有
+するホスト経路（H2D／プール確保／readback。`gemm.rs::run_f32_kernel`）側にある可能性を示す
+強い傍証を得た（計測点は同経路全体の壁時計時間であり、D2H フェーズ単体を分離計測したもの
+ではないため、これは仮説段階の判断であり直接証明ではない。詳細は
+`docs/perf/cuda-gemm-tiled-naive-speedup-4096-triage.md` §6 参照）。したがって本テストの FAIL は
+**並列競合ではなく、直列・単発条件でも発生しうる #1130 系の環境要因（大容量バッファ D2H の
+確率的二峰性）が根本原因である可能性が高い**（仮説段階。フェーズ分解による直接証明は未実施）。
+詳細な再現手順・全 run の生データ・切り分け根拠は
+`docs/perf/cuda-gemm-tiled-naive-speedup-4096-triage.md` を正本とする（本節では要約のみ）。
+
 **tiled f32 基準値の突合（バイナリ間で約 5 倍の乖離。数値の信頼性に関する重要な注記）**: 上表の
 `wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096` は `gemm_wmma_tf32_opt.rs` 単体バイナリ内で計測した
 tiled f32 基準値が 1.187〜1.237 TFLOPS だったのに対し、`docs/perf/cuda-tensor-core-measurement.md`

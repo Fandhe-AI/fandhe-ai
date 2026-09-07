@@ -1,0 +1,26 @@
+   Compiling fandhe-ai-backend-cuda v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling bench-harness v0.7.0 (/home/fandhe/work/rust-ai-library-run/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 2.33s
+     Running tests/gemm_tiled_naive_speedup_triage_1203.rs (/home/fandhe/work/target-fandhe-ai/release/deps/gemm_tiled_naive_speedup_triage_1203-3d5cdf7d47401543)
+
+running 3 tests
+test triage_classic_vs_pipeline_tiled ... [#1203 triage] tiled_pipeline(production): samples=[0.036232557, 0.545175752, 0.534059381, 0.544383105, 0.036895841]s median=0.534059s q1=0.036896s q3=0.544383s
+[#1203 triage] tiled_classic(diagnostics): samples=[0.04071683, 0.047066604, 0.053422412, 0.049839969, 0.556670474]s median=0.049840s q1=0.047067s q3=0.053422s
+[#1203 triage] classic_vs_pipeline ratio(pipeline/classic)=10.715484x (>1 means production pipeline is slower than classic)
+ok
+test triage_interleaved_naive_tiled ... [#1203 triage] interleaved pair 0: naive=0.123427s tiled=0.030883s
+[#1203 triage] interleaved pair 1: naive=0.126198s tiled=0.039301s
+[#1203 triage] interleaved pair 2: naive=0.127277s tiled=0.040867s
+[#1203 triage] interleaved pair 3: naive=0.133902s tiled=0.043163s
+[#1203 triage] interleaved pair 4: naive=0.129513s tiled=0.043387s
+[#1203 triage] naive(interleaved): samples=[0.123427378, 0.126197782, 0.127277038, 0.133902191, 0.129512591]s median=0.127277s q1=0.126198s q3=0.129513s
+[#1203 triage] tiled(interleaved): samples=[0.030883332, 0.039301043, 0.040866606, 0.043163071, 0.043387073]s median=0.040867s q1=0.039301s q3=0.043163s
+[#1203 triage] interleaved speedup(naive/tiled)=3.114451x
+ok
+test triage_reversed_order_tiled_then_naive ... [#1203 triage] tiled(1st): samples=[0.043508098, 0.041546019, 0.040865791, 0.543831589, 0.536199037]s median=0.043508s q1=0.041546s q3=0.536199s
+[#1203 triage] naive(2nd): samples=[0.650114882, 0.648050242, 0.652421024, 0.65162793, 0.651870169]s median=0.651628s q1=0.650115s q3=0.651870s
+[#1203 triage] reversed_order speedup(naive/tiled)=14.977164x
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.66s
+
