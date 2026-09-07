@@ -463,6 +463,21 @@ pub use gemm::TiledPipelineTile;
 // PersistentTiledPipelineFunction` ドキュメンテーションコメント参照）。
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::PersistentTiledPipelineFunction;
+// `StreamKTiledPipelineFunction`／`StreamKPlan`／`CudaGemm::
+// compile_tiled_pipeline_streamk_variant`／`CudaGemm::
+// launch_tiled_pipeline_streamk_f32`／`CudaGemm::run_tiled_pipeline_
+// streamk_f32` は最終 wave 限定 Stream-K（固定順序 fixup）版のベンチ・
+// 実機自己検証専用の常駐 API（イシュー #1358）。`PersistentTiledPipelineFunction`
+// と同じ判断パターン（テスト・ベンチ専用の意図に反して通常ビルドの安定
+// した公開 API 面へ漏出させない）で `internal-diagnostics` feature
+// （既定 off）でゲートする。`examples/gemm_tiled_pipeline_persistent_bench.rs`・
+// `tests/cpu_cuda_tiled_pipeline_streamk_parity.rs` の常駐 API 使用箇所は
+// `Cargo.toml` の `[[example]]`/`[[test]]` セクションで
+// `required-features = ["internal-diagnostics"]` を指定して到達する。
+// **本番既定経路（`CudaGemm::new`）は本型を一切生成しない**（`gemm.rs::
+// StreamKTiledPipelineFunction` ドキュメンテーションコメント参照）。
+#[cfg(feature = "internal-diagnostics")]
+pub use gemm::{StreamKPlan, StreamKTiledPipelineFunction};
 pub use gemm_auto::{
     CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
     TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,
