@@ -64,6 +64,7 @@ fandhe-ai/
 └── docs/
     ├── autodiff-nograd-leaf-dinput-skip-decision.md # 非学習葉（活性化入力 x 等）への d_input 伝播スキップの設計判断（`requires_grad` 前方伝播案の採用・`Gradients::get` 契約整理・多層依存整理・起票草案。#1151 起票案 I・#1219）
     ├── autodiff-view-recompute-decision.md # view 系ノード（reshape / transpose）の再計算方式化の設計（push_view／resolve_view による中間バッファ非確保・融合境界化・実測記録。#1043 ツリー・#1047）
+    ├── backend-abstraction-amd-readiness-decision.md # 将来の AMD（ROCm/HIP）追加に備えた抽象境界の設計記録（warp 幅の実行時パラメータ化・シャッフルのマスク差異吸収・起動種別〈通常／persistent／cooperative〉の区別・stream 優先 API。32 固定箇所の棚卸し。コード変更なし。#1340）
     ├── backend-cuda-async-execution-design.md # CUDA 非同期実行モデルの同期契約（ストリーム順序・エラー伝播・D2H 境界・poison/invalidate 状態機械。#1011 ツリー・#1012。§14 で managed 配置〈#1352〉の同期契約差分を追記）
     ├── backend-cuda-managed-placement-decision.md # CUDA managed 配置（`cuMemAllocManaged`）を `DeviceBuffer` の opt-in 配置として実装する設計判断（host-registered／`cuMemAdvise`／`prefetch` 不採用理由・既定 OFF・fail-closed・出力 bit 同一契約・スコープ外事項。#1352。実機実測完了（GB10・#1353）: 契約テスト 20 件全 pass・非後退確認。性能実測・既定化可否判断〈REJECT〉は `docs/perf/cuda-managed-placement-ab.md` を参照）
     ├── backend-cuda-pool-allocator-decision.md # CUDA サイズクラス別プールアロケータ（自作 SizeClassPool<H> 案 B・driver プール〈cuMemPoolTrimTo〉併用）の採用判断・alloc_uninit 適用確認範囲・実測記入欄（#1018 ツリー・#1020）
