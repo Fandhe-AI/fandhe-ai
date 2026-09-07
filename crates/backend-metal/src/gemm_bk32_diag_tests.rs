@@ -91,7 +91,8 @@
 use crate::context::MetalContext;
 use crate::gemm::MetalGemm;
 use crate::gemm_reuse_phase_diag_tests::{
-    MEASURED_TRIALS, WARMUP_TRIALS, gen_square_ab, measure_one_phase_trial, median_of,
+    DiagKernel, MEASURED_TRIALS, WARMUP_TRIALS, gen_square_ab, measure_one_phase_trial_with,
+    median_of,
 };
 use crate::tile::{self, TileConfig};
 // `MTLDevice::maxThreadgroupMemoryLength`（`CANDIDATES[9]` の共有メモリ
@@ -126,7 +127,9 @@ const MAX_THREADS_PER_TG_ESTIMATE: u32 = 1024;
 /// `pub(crate)`: E8（`gemm_bm128_diag_tests.rs`。イシュー #1332）も
 /// 同じ交互測定・fail-closed 検証ロジックを必要とするため、E7 専用の
 /// private ヘルパから兄弟モジュール間で共有する `pub(crate)` ヘルパへ
-/// 昇格した（ロジックの複製を避ける）。
+/// 昇格した（ロジックの複製を避ける）。両 arm とも本番 f32 経路
+/// （`DiagKernel::F32Tiled`）に固定した [`run_ab_pair_kernels`] の薄い
+/// ラッパー（イシュー #1370。出力形式・挙動とも不変）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_ab_pair(
     ctx: &MetalContext,
@@ -138,13 +141,66 @@ pub(crate) fn run_ab_pair(
     head_cfg: TileConfig,
     pair_label: &str,
 ) {
+    run_ab_pair_kernels(
+        ctx,
+        gemm,
+        a,
+        b,
+        n,
+        base_cfg,
+        head_cfg,
+        pair_label,
+        DiagKernel::F32Tiled,
+        DiagKernel::F32Tiled,
+    );
+}
+
+/// [`run_ab_pair`] の一般化版（イシュー #1370）: base/head 各 arm が
+/// エンコードするカーネルを独立に指定できる（`base_kernel`／
+/// `head_kernel`。[`DiagKernel`] 参照）。E7/E8 は両 arm とも `F32Tiled`
+/// 固定のため `run_ab_pair` を素通りするだけだったが、hfrag 候補
+/// （イシュー #1369）の純カーネル時間比較は base（f32）/head（hfrag）
+/// で異なるカーネルをエンコードする必要があるため、交互測定・
+/// fail-closed 検証・`println!` 出力形式は共有しつつカーネル種別のみ
+/// 引数化した。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_ab_pair_kernels(
+    ctx: &MetalContext,
+    gemm: &MetalGemm,
+    a: &[f32],
+    b: &[f32],
+    n: usize,
+    base_cfg: TileConfig,
+    head_cfg: TileConfig,
+    pair_label: &str,
+    base_kernel: DiagKernel,
+    head_kernel: DiagKernel,
+) {
     let mut keep_alive_base: Vec<Vec<f32>> = Vec::with_capacity(WARMUP_TRIALS + MEASURED_TRIALS);
     let mut keep_alive_head: Vec<Vec<f32>> = Vec::with_capacity(WARMUP_TRIALS + MEASURED_TRIALS);
 
     // warmup: 各 arm の初回 MSL パイプライン構築コストを吸収する。
     for _ in 0..WARMUP_TRIALS {
-        let _ = measure_one_phase_trial(ctx, gemm, a, b, n, base_cfg, &mut keep_alive_base);
-        let _ = measure_one_phase_trial(ctx, gemm, a, b, n, head_cfg, &mut keep_alive_head);
+        let _ = measure_one_phase_trial_with(
+            ctx,
+            gemm,
+            a,
+            b,
+            n,
+            base_cfg,
+            &mut keep_alive_base,
+            base_kernel,
+        );
+        let _ = measure_one_phase_trial_with(
+            ctx,
+            gemm,
+            a,
+            b,
+            n,
+            head_cfg,
+            &mut keep_alive_head,
+            head_kernel,
+        );
     }
 
     let mut kernel_gpu_base: Vec<f64> = Vec::with_capacity(MEASURED_TRIALS);
@@ -157,12 +213,48 @@ pub(crate) fn run_ab_pair(
         // `gemm_tile_class_diag_tests.rs` と同じ設計）。
         let base_first = trial % 2 == 0;
         let (sample_base, sample_head) = if base_first {
-            let sb = measure_one_phase_trial(ctx, gemm, a, b, n, base_cfg, &mut keep_alive_base);
-            let sh = measure_one_phase_trial(ctx, gemm, a, b, n, head_cfg, &mut keep_alive_head);
+            let sb = measure_one_phase_trial_with(
+                ctx,
+                gemm,
+                a,
+                b,
+                n,
+                base_cfg,
+                &mut keep_alive_base,
+                base_kernel,
+            );
+            let sh = measure_one_phase_trial_with(
+                ctx,
+                gemm,
+                a,
+                b,
+                n,
+                head_cfg,
+                &mut keep_alive_head,
+                head_kernel,
+            );
             (sb, sh)
         } else {
-            let sh = measure_one_phase_trial(ctx, gemm, a, b, n, head_cfg, &mut keep_alive_head);
-            let sb = measure_one_phase_trial(ctx, gemm, a, b, n, base_cfg, &mut keep_alive_base);
+            let sh = measure_one_phase_trial_with(
+                ctx,
+                gemm,
+                a,
+                b,
+                n,
+                head_cfg,
+                &mut keep_alive_head,
+                head_kernel,
+            );
+            let sb = measure_one_phase_trial_with(
+                ctx,
+                gemm,
+                a,
+                b,
+                n,
+                base_cfg,
+                &mut keep_alive_base,
+                base_kernel,
+            );
             (sb, sh)
         };
 
