@@ -76,6 +76,14 @@ if [[ ! "$AB_ROUNDS" =~ ^[0-9]+$ || "$AB_ROUNDS" -lt 1 ]]; then
   exit 1
 fi
 
+# `jq` は成果物パスを `cargo build --message-format=json` から正確に
+# 特定するために必須（codex-review P2 指摘。下記 build_bench_fandhe）。
+# 未導入なら fail-closed で早期終了する。
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq is required (used to parse 'cargo build --message-format=json' artifact paths)" >&2
+  exit 1
+fi
+
 SIZES=(512 1024 2048 4096)
 MODES=(fresh reuse)
 
@@ -137,47 +145,69 @@ restore_lock() {
 }
 trap restore_lock EXIT
 
-echo "== build bench-fandhe (before: registry pin fandhe-ai =0.7.0) =="
-# `--target-dir target` を明示（codex-review P2 指摘）: CARGO_TARGET_DIR
-# 環境変数や .cargo/config.toml の build.target-dir 設定が有効な環境では
-# cargo の実際の出力先が本スクリプトが固定コピー元とする
-# `target/release/bench-fandhe` と一致せず、以降の `cp` が古いバイナリを
-# 拾ったまま before/after 双方を計測しうる（cargo tree・sha256 検証の
-# いずれでも検出不能）。target-dir を明示固定することで一致を保証する。
-if ! cargo build --release -p bench-fandhe --target-dir target 2>build-err.tmp; then
-  tail -40 build-err.tmp
-  echo "bench-fandhe (before) BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
+# cargo の実際の成果物パスを `--message-format=json` から特定する
+# （codex-review P2 指摘）: `--target-dir target` を明示していても、
+# `CARGO_BUILD_TARGET` 環境変数や `.cargo/config.toml` の `build.target`
+# 設定が有効な環境では実際の出力先が `target/<triple>/release/` へ
+# 変わり、本スクリプトが固定コピー元と仮定していた
+# `target/release/bench-fandhe` は「前回ビルドの古いバイナリ」のまま
+# 残ってしまう（cargo tree・sha256 検証のいずれでも検出不能）。
+# JSON メッセージの `compiler-artifact`（`target.name == "bench-fandhe"`・
+# `target.kind` に `bin` を含む・`executable` が非 null）から実際の
+# 成果物パスを直接取り出すことで、target レイアウトの前提を置かない。
+build_bench_fandhe() { # build_bench_fandhe <out_exe_pathvar> [追加の cargo build 引数...]
+  local __out_var=$1
+  shift
+  local msg_file
+  msg_file="$(mktemp)"
+  if ! cargo build --release -p bench-fandhe --target-dir target --message-format=json "$@" >"$msg_file" 2>build-err.tmp; then
+    tail -40 build-err.tmp
+    echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
+    rm -f build-err.tmp "$msg_file"
+    exit 1
+  fi
   rm -f build-err.tmp
-  exit 1
-fi
-rm -f build-err.tmp
+  local exe
+  exe="$(jq -rs '[.[] | select(.reason == "compiler-artifact" and .target.name == "bench-fandhe" and (.target.kind[]? == "bin") and .executable != null)] | last | .executable // empty' "$msg_file")"
+  rm -f "$msg_file"
+  if [[ -z "$exe" || ! -f "$exe" ]]; then
+    echo "error: bench-fandhe ビルド成果物のパスを 'cargo build --message-format=json' から特定できなかった（jq 抽出結果: '${exe:-<空>}')" >&2
+    exit 1
+  fi
+  printf -v "$__out_var" '%s' "$exe"
+}
+
+echo "== build bench-fandhe (before: registry pin fandhe-ai =0.7.0) =="
+build_bench_fandhe BEFORE_EXE
 BEFORE_SOURCE="$(fandhe_ai_source_desc || true)"
 if [[ "$BEFORE_SOURCE" != "registry" ]]; then
   echo "error: before ビルドの fandhe-ai が registry 解決ではない (actual=${BEFORE_SOURCE:-<取得失敗>})" >&2
   echo "  承認済みピン fandhe-ai =0.7.0（registry）以外での before 確定はできない（fail-closed）。" >&2
   exit 1
 fi
-cp target/release/bench-fandhe target/release/bench-fandhe-ab-before
-BEFORE_SHA="$(sha256_of target/release/bench-fandhe-ab-before)"
-echo "bench-fandhe-ab-before sha256: $BEFORE_SHA (source: $BEFORE_SOURCE)"
-
-echo "== build bench-fandhe (after: HEAD path patch) =="
-# 同上（codex-review P2 指摘。#1306:166 相当箇所）。
-if ! cargo build --release -p bench-fandhe --target-dir target --config "$PATCH_CONFIG" 2>build-err.tmp; then
-  tail -40 build-err.tmp
-  echo "bench-fandhe (after) BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
-  rm -f build-err.tmp
+# `cp` の終了状態を確認する（codex-review P2 指摘）: 失敗を無視すると
+# 前回実行の古い bench-fandhe-ab-before が残ったまま計測が進み、
+# 「新しいバイナリの hash」として誤って記録・報告されうる。
+if ! cp "$BEFORE_EXE" target/release/bench-fandhe-ab-before; then
+  echo "error: cp '$BEFORE_EXE' target/release/bench-fandhe-ab-before に失敗した" >&2
   exit 1
 fi
-rm -f build-err.tmp
+BEFORE_SHA="$(sha256_of target/release/bench-fandhe-ab-before)"
+echo "bench-fandhe-ab-before sha256: $BEFORE_SHA (source: $BEFORE_SOURCE, exe: $BEFORE_EXE)"
+
+echo "== build bench-fandhe (after: HEAD path patch) =="
+build_bench_fandhe AFTER_EXE --config "$PATCH_CONFIG"
 AFTER_SOURCE="$(fandhe_ai_source_desc --config "$PATCH_CONFIG" || true)"
 if [[ "$AFTER_SOURCE" != "path:${AB_PATCH_FACADE_PATH}" ]]; then
   echo "error: after ビルドの fandhe-ai が期待した path 解決ではない (expected=path:${AB_PATCH_FACADE_PATH} actual=${AFTER_SOURCE:-<取得失敗>})" >&2
   exit 1
 fi
-cp target/release/bench-fandhe target/release/bench-fandhe-ab-after
+if ! cp "$AFTER_EXE" target/release/bench-fandhe-ab-after; then
+  echo "error: cp '$AFTER_EXE' target/release/bench-fandhe-ab-after に失敗した" >&2
+  exit 1
+fi
 AFTER_SHA="$(sha256_of target/release/bench-fandhe-ab-after)"
-echo "bench-fandhe-ab-after sha256: $AFTER_SHA (source: $AFTER_SOURCE)"
+echo "bench-fandhe-ab-after sha256: $AFTER_SHA (source: $AFTER_SOURCE, exe: $AFTER_EXE)"
 
 SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null || echo unknown)"
 # after ビルドが実際に取り込んだ facade のコミット（AB_PATCH_FACADE_PATH
@@ -249,21 +279,40 @@ echo "== metal status (after loop) =="
 pmset -g therm 2>&1 || true
 uptime 2>&1 || true
 
+# `mv` の終了状態を確認する（codex-review P2 指摘）: 無視すると、
+# 一時ファイル→正規パスの反映が一部失敗しても「done」と誤報告されたり
+# （新旧結果混在の温床）、失敗時の診断データ退避が欠落したまま
+# 気づかれなかったりしうる。
+MV_FAILED=0
+mv_checked() { # mv_checked <src> <dst>
+  if ! mv -f "$1" "$2"; then
+    echo "error: mv -f '$1' '$2' に失敗した" >&2
+    MV_FAILED=$((MV_FAILED + 1))
+  fi
+}
+
 if [[ "$ANY_FAILED" -eq 0 ]]; then
-  mv -f "$OUT_BEFORE_TMP" "$OUT_BEFORE"
-  mv -f "$OUT_AFTER_TMP" "$OUT_AFTER"
-  mv -f "$SKIP_TMP" "$SKIP"
-  mv -f "$MANIFEST_TMP" "$MANIFEST"
+  mv_checked "$OUT_BEFORE_TMP" "$OUT_BEFORE"
+  mv_checked "$OUT_AFTER_TMP" "$OUT_AFTER"
+  mv_checked "$SKIP_TMP" "$SKIP"
+  mv_checked "$MANIFEST_TMP" "$MANIFEST"
+  if [[ "$MV_FAILED" -ne 0 ]]; then
+    echo "error: $MV_FAILED 件の mv が失敗し、正規パスへの反映が不完全な可能性がある（fail-closed。新旧結果混在を防ぐため成功と報告しない）。" >&2
+    exit 1
+  fi
   echo "done. before results in $OUT_BEFORE ; after results in $OUT_AFTER ; failures (if any) in $SKIP ; manifest in $MANIFEST"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
-  mv -f "$OUT_BEFORE_TMP" "results/raw/results-m4max-gemm-ab-before-0.7.0-${LABEL}.failed-${FAIL_TS}.jsonl"
-  mv -f "$OUT_AFTER_TMP" "results/raw/results-m4max-gemm-ab-after-${LABEL}.failed-${FAIL_TS}.jsonl"
-  mv -f "$SKIP_TMP" "results/raw/skipped-m4max-gemm-ab-${LABEL}.failed-${FAIL_TS}.log"
-  mv -f "$MANIFEST_TMP" "results/raw/manifest-m4max-gemm-ab-${LABEL}.failed-${FAIL_TS}.json"
+  mv_checked "$OUT_BEFORE_TMP" "results/raw/results-m4max-gemm-ab-before-0.7.0-${LABEL}.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_AFTER_TMP" "results/raw/results-m4max-gemm-ab-after-${LABEL}.failed-${FAIL_TS}.jsonl"
+  mv_checked "$SKIP_TMP" "results/raw/skipped-m4max-gemm-ab-${LABEL}.failed-${FAIL_TS}.log"
+  mv_checked "$MANIFEST_TMP" "results/raw/manifest-m4max-gemm-ab-${LABEL}.failed-${FAIL_TS}.json"
   # 正規 $MANIFEST は計測前に一切書き換えないため（一時ファイルのみ更新）、
   # 同一 label 再実行が失敗しても直前の成功結果に紐づく正規 manifest は
   # 保持されたまま残る（codex-review P2 指摘の解消）。
+  if [[ "$MV_FAILED" -ne 0 ]]; then
+    echo "error: $MV_FAILED 件の失敗結果退避 mv も失敗した（診断用データが一部欠落している可能性がある）。" >&2
+  fi
   echo "FAILED: $ANY_FAILED run(s) failed; partial/unreliable data kept for diagnosis (${FAIL_TS}). $OUT_BEFORE/$OUT_AFTER/$MANIFEST left untouched (fail-closed. security.md A08)." >&2
   exit 1
 fi
