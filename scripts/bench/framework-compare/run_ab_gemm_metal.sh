@@ -160,7 +160,25 @@ restore_lock() {
   fi
   rm -f "$LOCK_BACKUP"
 }
-trap restore_lock EXIT
+# codex-review P2 指摘: `restore_lock` は EXIT trap から実行されるため、
+# 単に `trap restore_lock EXIT` のままだと `return 1` はトラップハンドラ
+# 内で完結し、スクリプト全体の終了コードには反映されない（trap の終了
+# コードはスクリプト自体の終了コードを上書きしない）。計測（run 群）が
+# 全て成功したあとに `restore_lock` の cp のみ失敗すると、path patch
+# 適用後の Cargo.lock を残したまま exit 0 で終了し、呼び出し元が
+# 「Cargo.lock 復元契約の未達」を検出できなくなる。
+# 元の終了コード（`$?`。restore_lock 呼び出し前に確定させる必要が
+# ある）を保持しつつ、restore_lock が失敗した場合のみ非 0 へ強制する。
+restore_lock_trap() {
+  local code=$?
+  if ! restore_lock; then
+    if [[ "$code" -eq 0 ]]; then
+      code=1
+    fi
+  fi
+  exit "$code"
+}
+trap restore_lock_trap EXIT
 
 # cargo の実際の成果物パスを `--message-format=json` から特定する
 # （codex-review P2 指摘）: `--target-dir target` を明示していても、
@@ -370,12 +388,23 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
 
   if [[ "$MV_FAILED" -ne 0 ]]; then
     echo "error: $MV_FAILED 件の mv が失敗した。計測世代の混在を防ぐため、成功した反映分を反映前の状態へ巻き戻す（fail-closed。新旧結果混在を防ぐため成功と報告しない）。" >&2
+    # Cursor Bugbot 指摘: この巻き戻し自体（`.prev-backup` → 正規パスへの
+    # mv）が失敗した場合に、それを気付かせないまま後続の
+    # `for b in "${AB_BACKUPS[@]}"; do rm -f "$b"; done` で無条件削除すると、
+    # このロールバックが本来防ぐはずだった「新旧結果混在」ケースが
+    # 発生した状態のまま復元手段（バックアップ）まで失われる。
+    # 復元に失敗した要素だけバックアップを保持し、成功／不要な要素のみ
+    # 削除する（保持したバックアップの保存先は明示的に通知する）。
+    ROLLBACK_RESTORE_FAILED=0
     ab_i=0
     while [[ "$ab_i" -lt "${#AB_DSTS[@]}" ]]; do
       if [[ "${AB_OKS[$ab_i]}" == "1" ]]; then
         if [[ -n "${AB_BACKUPS[$ab_i]}" ]]; then
-          if ! mv -f "${AB_BACKUPS[$ab_i]}" "${AB_DSTS[$ab_i]}"; then
-            echo "error: rollback 用バックアップ '${AB_BACKUPS[$ab_i]}' から '${AB_DSTS[$ab_i]}' への復元に失敗した（正規パスが新世代のまま残っている可能性がある）。" >&2
+          if mv -f "${AB_BACKUPS[$ab_i]}" "${AB_DSTS[$ab_i]}"; then
+            AB_BACKUPS[$ab_i]=""
+          else
+            echo "error: rollback 用バックアップ '${AB_BACKUPS[$ab_i]}' から '${AB_DSTS[$ab_i]}' への復元に失敗した（正規パスが新世代のまま残っている可能性がある）。バックアップは削除せず保持する: ${AB_BACKUPS[$ab_i]}" >&2
+            ROLLBACK_RESTORE_FAILED=$((ROLLBACK_RESTORE_FAILED + 1))
           fi
         else
           rm -f "${AB_DSTS[$ab_i]}"
@@ -386,6 +415,9 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
     for b in "${AB_BACKUPS[@]}"; do
       [[ -n "$b" ]] && rm -f "$b"
     done
+    if [[ "$ROLLBACK_RESTORE_FAILED" -ne 0 ]]; then
+      echo "error: $ROLLBACK_RESTORE_FAILED 件のロールバック用バックアップ復元に失敗した。上記に列挙した保存先から手動で復元すること（fail-closed。復元手段を失わないためバックアップは自動削除しない）。" >&2
+    fi
     exit 1
   fi
   for b in "${AB_BACKUPS[@]}"; do
