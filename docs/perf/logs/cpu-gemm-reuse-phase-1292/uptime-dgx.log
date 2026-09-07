@@ -1,0 +1,20 @@
+run=1 N=512  00:06:26 up 11 days, 11:33,  5 users,  load average: 0.91, 0.31, 0.11
+run=1 N=1024  00:06:26 up 11 days, 11:33,  5 users,  load average: 0.91, 0.31, 0.11
+run=1 N=2048  00:06:27 up 11 days, 11:33,  5 users,  load average: 0.91, 0.31, 0.11
+run=2 N=512  00:06:29 up 11 days, 11:33,  5 users,  load average: 0.91, 0.31, 0.11
+run=2 N=1024  00:06:29 up 11 days, 11:33,  5 users,  load average: 0.91, 0.31, 0.11
+run=2 N=2048  00:06:30 up 11 days, 11:33,  5 users,  load average: 2.36, 0.62, 0.21
+run=3 N=512  00:06:32 up 11 days, 11:33,  5 users,  load average: 2.36, 0.62, 0.21
+run=3 N=1024  00:06:33 up 11 days, 11:33,  5 users,  load average: 2.36, 0.62, 0.21
+run=3 N=2048  00:06:33 up 11 days, 11:33,  5 users,  load average: 2.36, 0.62, 0.21
+run=4 N=512  00:06:36 up 11 days, 11:33,  5 users,  load average: 2.97, 0.78, 0.26
+run=4 N=1024  00:06:36 up 11 days, 11:33,  5 users,  load average: 2.97, 0.78, 0.26
+run=4 N=2048  00:06:36 up 11 days, 11:33,  5 users,  load average: 2.97, 0.78, 0.26
+run=5 N=512  00:06:39 up 11 days, 11:33,  5 users,  load average: 2.97, 0.78, 0.26
+run=5 N=1024  00:06:39 up 11 days, 11:33,  5 users,  load average: 2.97, 0.78, 0.26
+run=5 N=2048  00:06:40 up 11 days, 11:33,  5 users,  load average: 2.97, 0.78, 0.26
+run=1  00:07:13 up 11 days, 11:34,  5 users,  load average: 3.85, 1.28, 0.45
+run=2  00:07:18 up 11 days, 11:34,  5 users,  load average: 5.14, 1.59, 0.56
+run=3  00:07:23 up 11 days, 11:34,  5 users,  load average: 5.53, 1.73, 0.61
+run=4  00:07:28 up 11 days, 11:34,  5 users,  load average: 5.17, 1.72, 0.61
+run=5  00:07:33 up 11 days, 11:34,  5 users,  load average: 6.35, 2.02, 0.71

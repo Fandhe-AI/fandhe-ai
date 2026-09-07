@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaFunction, CudaSlice, CudaStream};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::validate_gemm_dims;
@@ -38,6 +39,7 @@ use crate::gemm_mma_tf32::{
     validate_mma_tf32_k_bound,
 };
 use crate::kernels_mma_tf32x3;
+use crate::memory::GuardedSlice;
 use crate::nvrtc::compile_ptx;
 
 /// `v`（有限値のみを対象とする呼び出し前提。非有限値は
@@ -159,10 +161,16 @@ fn validate_tf32x3_finite_input(a: &[f32], b: &[f32]) -> Result<(), CudaError> {
 /// まで到達する経路自体を型で排除する（codex-review 指摘・PR #1400
 /// スレッド PRRT_kwDOTuUCJc6f0YV_。`upload_f32` ドキュメンテーション
 /// コメント参照）。
+///
+/// フィールドは [`GuardedSlice`]（codex-review P0 指摘対応・PR #1390
+/// 再々修正。理由は `gemm.rs::CudaGemm::upload_f32` ドキュメンテーション
+/// コメント参照。生の `CudaSlice` のままだと、本型を保持したまま
+/// 複数呼び出しをまたぐベンチ・診断コードが最終的に drop する際、その
+/// 解放が capture 排他機構を経由しない）。
 #[derive(Debug)]
 pub struct ValidatedTf32x3Inputs {
-    a: CudaSlice<f32>,
-    b: CudaSlice<f32>,
+    a: GuardedSlice<f32>,
+    b: GuardedSlice<f32>,
 }
 
 /// 3×TF32 `mma.sync`(m16n8k8) GEMM カーネルのコンパイル済みハンドルを
@@ -170,6 +178,10 @@ pub struct ValidatedTf32x3Inputs {
 /// （`gemm_mma_tf32.rs::CudaMmaTf32Gemm` と同じ共有契約）。
 pub struct CudaMmaTf32x3Gemm {
     stream: Arc<CudaStream>,
+    /// capture 排他（`with_driver_call`）に使うデバイス ordinal
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。`gemm.rs::
+    /// CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     mma_tf32x3: CudaFunction,
 }
 
@@ -196,8 +208,25 @@ impl CudaMmaTf32x3Gemm {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             mma_tf32x3,
         })
+    }
+
+    /// `Self` の公開 driver 呼び出し系メソッド（H2D 転送・確保・
+    /// カーネル起動・D2H readback）を CUDA Graph capture 排他へ参加
+    /// させる（codex-review P0 指摘対応・PR #1390 再々修正。実体は
+    /// `context_cache::with_driver_call` へ委譲。`gemm.rs::CudaGemm::
+    /// with_driver_call` doc コメント参照）。`ops.rs::CudaBackendOps::gemm`
+    /// の `Tf32x3` 分岐は既に自身の `with_driver_call` 区間の内側から
+    /// `run_tf32x3` を呼ぶため、本関数によるネストは `context_cache::
+    /// begin_driver_call` の `DRIVER_CALL_DEPTH` 機構（Cursor Bugbot
+    /// 指摘対応）により正しく処理される。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     /// A・B（f32）を渡すだけで GPU 実行し C（f32）を得る一括 API
@@ -258,17 +287,27 @@ impl CudaMmaTf32x3Gemm {
     /// `upload_f32` の検証を迂回できた）。
     pub fn upload_f32(&self, a: &[f32], b: &[f32]) -> Result<ValidatedTf32x3Inputs, CudaError> {
         validate_tf32x3_finite_input(a, b)?;
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        Ok(ValidatedTf32x3Inputs { a: a_dev, b: b_dev })
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            Ok(ValidatedTf32x3Inputs {
+                a: GuardedSlice::new(self.ordinal, a_dev),
+                b: GuardedSlice::new(self.ordinal, b_dev),
+            })
+        })
     }
 
     /// C 用のゼロ初期化デバイスバッファを確保する（`run_tf32x3` のバッファ
-    /// 確保部分の切り出し）。
-    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<CudaSlice<f32>, CudaError> {
-        Ok(self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?)
+    /// 確保部分の切り出し）。戻り値の型については [`Self::upload_f32`]
+    /// ドキュメンテーションコメント参照（codex-review P0 指摘対応・
+    /// PR #1390 再々修正で [`GuardedSlice`] へ変更）。
+    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<GuardedSlice<f32>, CudaError> {
+        self.with_driver_call(|| {
+            let c_dev = self
+                .stream
+                .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+            Ok(GuardedSlice::new(self.ordinal, c_dev))
+        })
     }
 
     /// 検証済みの A/B（[`ValidatedTf32x3Inputs`]。`upload_f32` でのみ
@@ -290,33 +329,93 @@ impl CudaMmaTf32x3Gemm {
     pub fn launch_tf32x3(
         &self,
         inputs: &ValidatedTf32x3Inputs,
+        c_dev: &mut GuardedSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        // codex-review P0 指摘対応（PR #1390 再々修正）: `Self::
+        // with_driver_call` で `launch_mma_tf32_family` 呼び出しを
+        // capture 排他へ参加させる。`inputs.a`／`inputs.b`・`c_dev`
+        // （いずれも `GuardedSlice<f32>`）は `GuardedSlice::as_raw`／
+        // `as_raw_mut`（crate 内部限定）で内部の `CudaSlice` へアクセス
+        // する（`memory.rs::GuardedSlice` ドキュメンテーションコメント
+        // 「公開アクセス面」参照。codex-review P0 再指摘対応・PR #1390
+        // 再々々修正で `Deref`／`DerefMut` を撤去したため）。
+        self.with_driver_call(|| {
+            launch_mma_tf32_family(
+                &self.stream,
+                &self.mma_tf32x3,
+                inputs.a.as_raw(),
+                inputs.b.as_raw(),
+                c_dev.as_raw_mut(),
+                m,
+                n,
+                k,
+            )
+        })
+    }
+
+    /// [`Self::launch_tf32x3`] の C バッファのみ生 `CudaSlice` を受け
+    /// 取る版。`tests/gemm_mma_tf32x3.rs` の k==0 zero-fill 契約テスト
+    /// （呼び出し元が任意の事前汚染済みバッファを `c_dev` として渡す
+    /// ため `GuardedSlice::new` を経由しない `device.stream().
+    /// clone_htod()` 直呼びを使う。`gemm_mma.rs::CudaMmaGemm::
+    /// launch_f16_c_raw` と同じ理由で新設した）専用。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// 診断専用入口（codex-review 指摘・PR #1390。`GuardedSlice` 境界の
+    /// 外から生 `CudaSlice` を渡せる経路を通常ビルドから排除する。
+    /// `gemm_mma.rs::CudaMmaGemm::launch_f16_c_raw` と同じ理由。呼び出し元
+    /// テスト（`tests/gemm_mma_tf32x3.rs`）は本 feature を要求する
+    /// `required-features` を `Cargo.toml` に追加済み）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn launch_tf32x3_c_raw(
+        &self,
+        inputs: &ValidatedTf32x3Inputs,
         c_dev: &mut CudaSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        launch_mma_tf32_family(
-            &self.stream,
-            &self.mma_tf32x3,
-            &inputs.a,
-            &inputs.b,
-            c_dev,
-            m,
-            n,
-            k,
-        )
+        self.with_driver_call(|| {
+            launch_mma_tf32_family(
+                &self.stream,
+                &self.mma_tf32x3,
+                inputs.a.as_raw(),
+                inputs.b.as_raw(),
+                c_dev,
+                m,
+                n,
+                k,
+            )
+        })
     }
 
     /// C をデバイス→ホストへ転送する（`run_tf32x3` の D2H 部分の切り出
-    /// し）。
-    pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        crate::memory::readback(&self.stream, c_dev)
+    /// し）。codex-review P0 指摘対応（PR #1390 再々修正）: `Self::
+    /// with_driver_call` で capture 排他へ参加させる。
+    pub fn download_f32(&self, c_dev: &GuardedSlice<f32>) -> Result<Vec<f32>, CudaError> {
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
+    }
+
+    /// [`Self::download_f32`] の生 `CudaSlice` 版。[`Self::
+    /// launch_tf32x3_c_raw`] と同じ理由で新設した。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// 診断専用入口（[`Self::launch_tf32x3_c_raw`] と同じ理由。
+    /// `gemm_mma.rs::CudaMmaGemm::download_f16_raw` と同型）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn download_f32_raw(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev))
     }
 
     /// ストリームの完了を明示的に待つ（`gemm_mma_tf32.rs::CudaMmaTf32Gemm
-    /// ::synchronize` と同じ理由の公開 API）。
+    /// ::synchronize` と同じ理由の公開 API）。codex-review P0 指摘対応
+    /// （PR #1390 再々修正）: `Self::with_driver_call` で capture 排他へ
+    /// 参加させる。
     pub fn synchronize(&self) -> Result<(), CudaError> {
-        Ok(self.stream.synchronize()?)
+        self.with_driver_call(|| Ok(self.stream.synchronize()?))
     }
 }
 

@@ -13,14 +13,16 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::validate_gemm_dims;
 use crate::kernels_wmma;
 use crate::kernels_wmma_opt;
+use crate::memory::GuardedSlice;
 use crate::nvrtc::compile_ptx;
 
 /// WMMA f16 経路が要求する compute capability の下限（major）。
@@ -60,6 +62,10 @@ const WMMA_OPT_BLOCK_DIM: (u32, u32, u32) = (kernels_wmma_opt::WMMA_F16_OPT_THRE
 /// と同じ共有契約。`device.rs` 参照）。
 pub struct CudaWmmaGemm {
     stream: Arc<CudaStream>,
+    /// capture 排他（`with_driver_call`）に使うデバイス ordinal
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。`gemm.rs::
+    /// CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     wmma_f16: CudaFunction,
     /// TASK-11.1d（#63）で追加。共有メモリ・タイル最適化版 f16 WMMA
     /// カーネル（`kernels_wmma_opt::wmma_f16_opt_source()`）のコンパイル済みハンドル。
@@ -153,10 +159,23 @@ impl CudaWmmaGemm {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             wmma_f16,
             wmma_f16_opt,
             wmma_f16_opt_error,
         })
+    }
+
+    /// `Self` の公開 driver 呼び出し系メソッド（H2D 転送・確保・
+    /// カーネル起動・D2H readback）を CUDA Graph capture 排他へ参加
+    /// させる（codex-review P0 指摘対応・PR #1390 再々修正。実体は
+    /// `context_cache::with_driver_call` へ委譲。`gemm.rs::CudaGemm::
+    /// with_driver_call` doc コメント参照）。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     /// 共有メモリ・タイル最適化版 f16 WMMA カーネル（`Self::wmma_f16_opt`）
@@ -243,6 +262,11 @@ impl CudaWmmaGemm {
     /// [`Self::run_f16`] が m==0/n==0/k==0 の早期 return を終えた後にのみ
     /// 呼ぶ契約）。
     #[allow(clippy::too_many_arguments)]
+    ///
+    /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
+    /// で本体（H2D・確保・起動・readback）全体を capture 排他へ参加
+    /// させる（`gemm.rs::CudaGemm::run_f32_kernel` と同じ「1 回の呼び出し
+    /// にまとめて包む」方式）。
     fn launch_f16_kernel(
         &self,
         func: &CudaFunction,
@@ -253,40 +277,42 @@ impl CudaWmmaGemm {
         k: u32,
         cfg: LaunchConfig,
     ) -> Result<Vec<f16>, CudaError> {
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        let mut c_dev = self
-            .stream
-            .alloc_zeros::<f16>((m as usize) * (n as usize))?;
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            let mut c_dev = self
+                .stream
+                .alloc_zeros::<f16>((m as usize) * (n as usize))?;
 
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/
-        // b.len()/(m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の
-        // 5 個・型・個数が、ホスト側検証（validate_gemm_dims）済みの
-        // m/n/k と 1:1 対応する。カーネル内の手動境界チェック（A/B タイル
-        // guarded load・エピローグ guarded store。基本版は
-        // kernels_wmma.rs、opt 版は kernels_wmma_opt.rs 参照、REQ-8）と
-        // 合わせて OOB 読み書きが起きない根拠とする。グリッド次元は
-        // 呼び出し元（`run_f16`）が基本版／opt 版それぞれのタイル単位で
-        // `div_ceil` 構築済み（`wmma_launch_config`／`wmma_opt_launch_config`）
-        // であり、末尾タイルの余剰はカーネル内境界チェックで弾かれる。
-        // 共有メモリは静的 `__shared__` 配列のみを使用するため
-        // `shared_mem_bytes` は 0 のままでよい。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&mut c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。
-        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
-        Ok(c_host)
+            // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/
+            // b.len()/(m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の
+            // 5 個・型・個数が、ホスト側検証（validate_gemm_dims）済みの
+            // m/n/k と 1:1 対応する。カーネル内の手動境界チェック（A/B タイル
+            // guarded load・エピローグ guarded store。基本版は
+            // kernels_wmma.rs、opt 版は kernels_wmma_opt.rs 参照、REQ-8）と
+            // 合わせて OOB 読み書きが起きない根拠とする。グリッド次元は
+            // 呼び出し元（`run_f16`）が基本版／opt 版それぞれのタイル単位で
+            // `div_ceil` 構築済み（`wmma_launch_config`／`wmma_opt_launch_config`）
+            // であり、末尾タイルの余剰はカーネル内境界チェックで弾かれる。
+            // 共有メモリは静的 `__shared__` 配列のみを使用するため
+            // `shared_mem_bytes` は 0 のままでよい。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&a_dev)
+                    .arg(&b_dev)
+                    .arg(&mut c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。
+            let c_host = crate::memory::readback(&self.stream, &c_dev)?;
+            Ok(c_host)
+        })
     }
 
     /// A・B（f16）をホスト→デバイスへ転送する（`run_f16` の H2D 部分の
@@ -295,22 +321,36 @@ impl CudaWmmaGemm {
     /// カーネル実行を分離できるよう公開する。PR #349 codex-review 指摘
     /// P1 対応。`gemm.rs::upload_f32` ドキュメンテーションコメント
     /// 「PyTorch 参照計測」参照）。
+    ///
+    /// 戻り値は生の `CudaSlice<f16>` ではなく [`GuardedSlice<f16>`]
+    /// （codex-review P0 指摘対応・PR #1390 再々修正。理由は
+    /// `gemm.rs::CudaGemm::upload_f32` ドキュメンテーションコメント
+    /// 参照）。
     pub fn upload_f16(
         &self,
         a: &[f16],
         b: &[f16],
-    ) -> Result<(CudaSlice<f16>, CudaSlice<f16>), CudaError> {
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        Ok((a_dev, b_dev))
+    ) -> Result<(GuardedSlice<f16>, GuardedSlice<f16>), CudaError> {
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            Ok((
+                GuardedSlice::new(self.ordinal, a_dev),
+                GuardedSlice::new(self.ordinal, b_dev),
+            ))
+        })
     }
 
     /// C 用のゼロ初期化デバイスバッファを確保する（[`Self::upload_f16`]
-    /// と同じ理由で公開する）。
-    pub fn alloc_output_f16(&self, m: u32, n: u32) -> Result<CudaSlice<f16>, CudaError> {
-        Ok(self
-            .stream
-            .alloc_zeros::<f16>((m as usize) * (n as usize))?)
+    /// と同じ理由で公開する）。戻り値の型については [`Self::upload_f16`]
+    /// ドキュメンテーションコメント参照。
+    pub fn alloc_output_f16(&self, m: u32, n: u32) -> Result<GuardedSlice<f16>, CudaError> {
+        self.with_driver_call(|| {
+            let c_dev = self
+                .stream
+                .alloc_zeros::<f16>((m as usize) * (n as usize))?;
+            Ok(GuardedSlice::new(self.ordinal, c_dev))
+        })
     }
 
     /// デバイス常駐済みの A/B/C バッファに対して f16 WMMA カーネルを起動
@@ -332,15 +372,15 @@ impl CudaWmmaGemm {
     /// ため、この経路の安全性はカーネル起動自体の失敗に委ねられる）。
     pub fn launch_f16(
         &self,
-        a_dev: &CudaSlice<f16>,
-        b_dev: &CudaSlice<f16>,
-        c_dev: &mut CudaSlice<f16>,
+        a_dev: &GuardedSlice<f16>,
+        b_dev: &GuardedSlice<f16>,
+        c_dev: &mut GuardedSlice<f16>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.as_raw().len(), m, n)?;
 
         let (func, cfg) = match self.wmma_f16_opt.as_ref() {
             Some(func) => (func, wmma_opt_launch_config(m, n)),
@@ -348,24 +388,31 @@ impl CudaWmmaGemm {
         };
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
+        // codex-review P0 指摘対応（PR #1390 再々修正）: `Self::
+        // with_driver_call` で capture 排他へ参加させる（従来はこの
+        // 起動そのものが排他区間へ一切参加していなかった。「未解決
+        // スレッド一覧」記載の P0 指摘の核心）。
+        //
         // SAFETY: launch_f16_kernel と同一の根拠。カーネル引数は上記で
         // 検証済みの m/n/k と 1:1 対応し、カーネル内の手動境界チェック
         // （基本版は kernels_wmma.rs、opt 版は kernels_wmma_opt.rs 参照、
         // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
-        // 委ねる。
-        Ok(())
+        self.with_driver_call(|| {
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+            // 委ねる。
+            Ok(())
+        })
     }
 
     /// [`Self::launch_f16`] の「基本版（`Self::wmma_f16`）を強制的に使う」
@@ -385,50 +432,59 @@ impl CudaWmmaGemm {
     #[cfg(feature = "internal-diagnostics")]
     pub fn launch_f16_basic(
         &self,
-        a_dev: &CudaSlice<f16>,
-        b_dev: &CudaSlice<f16>,
-        c_dev: &mut CudaSlice<f16>,
+        a_dev: &GuardedSlice<f16>,
+        b_dev: &GuardedSlice<f16>,
+        c_dev: &mut GuardedSlice<f16>,
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
-        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.as_raw().len(), m, n)?;
 
         let cfg = wmma_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
+        // codex-review P0 指摘対応（PR #1390 再々修正）: `Self::launch_f16`
+        // と同じ理由で `Self::with_driver_call` へ参加させる。
+        //
         // SAFETY: launch_f16 と同一の根拠（基本版カーネル
         // `Self::wmma_f16` を固定で使う点のみが異なる）。
-        unsafe {
-            self.stream
-                .launch_builder(&self.wmma_f16)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(cfg)?;
-        }
-        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
-        // 委ねる。
-        Ok(())
+        self.with_driver_call(|| {
+            unsafe {
+                self.stream
+                    .launch_builder(&self.wmma_f16)
+                    .arg(a_dev.as_raw())
+                    .arg(b_dev.as_raw())
+                    .arg(c_dev.as_raw_mut())
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+            // 委ねる。
+            Ok(())
+        })
     }
 
     /// C（f16）をデバイス→ホストへ転送する（[`Self::upload_f16`] と同じ
     /// 理由で公開する）。
     ///
     /// 同期点（#1013）: 常駐 `launch_f16` は非同期投入のみで完了を待たない
-    /// ため、本関数が readback ヘルパー経由で完了を確定する。
-    pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
-        crate::memory::readback(&self.stream, c_dev)
+    /// ため、本関数が readback ヘルパー経由で完了を確定する。codex-review
+    /// P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call` で
+    /// capture 排他へ参加させる。
+    pub fn download_f16(&self, c_dev: &GuardedSlice<f16>) -> Result<Vec<f16>, CudaError> {
+        self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
     }
 
     /// ストリームの完了を明示的に待つ（イシュー #1013。
     /// `gemm.rs::CudaGemm::synchronize` と同じ理由の公開 API）。
+    /// codex-review P0 指摘対応（PR #1390 再々修正）: `Self::with_driver_call`
+    /// で capture 排他へ参加させる。
     pub fn synchronize(&self) -> Result<(), CudaError> {
-        Ok(self.stream.synchronize()?)
+        self.with_driver_call(|| Ok(self.stream.synchronize()?))
     }
 }
 

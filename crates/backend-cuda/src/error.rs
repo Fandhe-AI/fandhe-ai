@@ -359,6 +359,26 @@ pub enum CudaError {
     /// ため、3×TF32 経路のみ明示的に未対応入力として扱う。
     /// `docs/cuda-tf32x3-split-single-decision.md` 追補）。
     NonFiniteInput { detail: String },
+
+    /// 公開低レベル GEMM API（`gemm.rs::CudaGemm::with_driver_call`）が
+    /// `context_cache::begin_driver_call`（CUDA Graph capture 排他制御。
+    /// イシュー #1349）に入場を拒否されたことを表す（codex-review P0
+    /// 指摘対応・PR #1390 是正: `run_naive_f32`／`run_tiled_f32` 等の
+    /// 公開低レベル演算が capture 排他へ一切参加していなかった欠陥への
+    /// 対策）。
+    ///
+    /// `context_cache::begin_driver_call` が返す [`fandhe_ai_tensor_core::
+    /// device::BackendError`] の中で本 variant に対応するのは主に
+    /// `DeviceContextCaptureInProgress`（別スレッドが capture 中の
+    /// 一過性の競合）だが、`DeviceContextPoisoned`／
+    /// `DeviceContextUnrecoverable`／`DeviceContextRetiring`（恒久的な
+    /// ordinal 状態）も同じ経路で拒否されうるため、区別せず `detail` に
+    /// 元エラーの `Display` 文字列を保持する統一 variant とする
+    /// （`CudaGemm` は `ops.rs::CudaBackendOps` と異なり `DeviceParamStore`
+    /// の poison 一過性判定〈`device_store.rs`〉の対象外であり、本 crate
+    /// 内で `BackendError` variant ごとの再試行可否を区別する呼び出し元が
+    /// 現状存在しないため、型を素通しせず detail 文字列へ畳み込む）。
+    CaptureExclusionRejected { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -450,6 +470,12 @@ impl fmt::Display for CudaError {
                 write!(
                     f,
                     "3xTF32 (split-single) GEMM rejects non-finite input (NaN/inf): {detail}"
+                )
+            }
+            CudaError::CaptureExclusionRejected { detail } => {
+                write!(
+                    f,
+                    "cuda graph capture exclusion rejected the call: {detail}"
                 )
             }
         }
