@@ -246,3 +246,23 @@ GB10 実測で K 分割なし版は REJECT と確定）が完了したのを受�
 成果物（opt-in カーネル・ホスト API・GPU 不要のホストシミュレータテストによる配布計画の網羅性・一意性
 検証）は本番結線を一切行わない（`CudaGemm::new`・`select_tiled_f32_kernel` は不変）。実機実測後の採否
 判断（本番結線可否）は #1359 が担い、その結果を本節へ追記する。
+
+## #1359 実測結果
+
+**未実測（実機未到達）**。本エージェント実行環境から GB10（DGX Spark GB10）実機への接続手段
+（`docs/real-hardware-verification-env.local.md`。Git 管理外の実値ファイル）が本セッションの worktree
+に存在せず、`CUDA_NODE` を解決できなかったため、SSH 転送・実機テスト・ベンチ実行のいずれにも着手
+できなかった。実測値は捏造せず、以下のとおり現状のみを記録する。
+
+- **§5 再評価条件 1（tail effect の実測支配性・正味改善の確認）**: 引き続き未充足。ゲート C（N=1024
+  `streamk_over_pipeline3 ≥ 1.05`・N=2048 `≥ 1.00`）が未実施のため判定不能。
+- **§5 再評価条件 2（`assert_no_parity_regression` 相当の実機確認）**: `streamk_repeated_launch_is_deterministic`
+  を含む `cpu_cuda_tiled_pipeline_streamk_parity -- --ignored` の実機実行が未実施のため、引き続き
+  未確認のまま（#1358 が設計・静的検証まで完了させた状態から進捗なし）。
+- **最終採否**: **保留**（実測なしには ADOPT／REJECT を確定できない。#1358・本節冒頭で記録した「不採用
+  （保留）」の状態を変更する実測的根拠がまだ得られていない）。本番結線（`select_tiled_f32_kernel`／
+  `CudaGemm::new`）は行っていない。
+- **申し送り**: GB10 等の CUDA 実機へ到達可能なセッションで
+  `docs/perf/cuda-gemm-tiled-pipeline-streamk.md` §6「再開手順」に従いゲート A〜D を実施し、本節を
+  実測結果で更新すること。詳細な判定基準・机上見積りとの突合欄は同ドキュメント §6 を参照（本節では
+  重複記載しない）。

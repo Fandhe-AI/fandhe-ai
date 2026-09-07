@@ -119,7 +119,86 @@ q=15, nk=128` → 末尾 wave が `15/128 ≈ 0.117` タイル時間へ縮むが
 
 ## 6. GB10 実機実測記入欄（#1359）
 
-*(未実測。#1359 で実施し本節へ追記する。実行環境の `uptime`／load average・env_info を記載すること)*
+### 0. 結論（先頭）
+
+**未実測（ブロッカー: 本エージェント実行環境に CUDA 実機〈GB10〉への接続手段なし）**。§3・§4 に記す
+とおり Mac 側で実行可能な範囲（ホストシミュレータテスト・静的テスト・ビルド整合性）はすべて green
+であることを確認した。GB10 実機でのゲート A〜D（`#[ignore]` 実機テスト・`--streamk on` ベンチ 5 回計測）
+は未実施であり、実測値を捏造せずここに記録する。§7 に再開手順を記す。
+
+### 1. 判定基準の再掲
+
+§5「#1359 向け実行コマンド・判定基準の事前宣言」のゲート A〜C をそのまま採用し、以下のゲート D を
+**本番結線可否の前提条件**として追加する（ゲート C 自体の閾値は変更しない）。
+
+- **ゲート A（決定性・正確性・必須）**: `cpu_cuda_tiled_pipeline_streamk_parity -- --ignored` の 8
+  テストすべて PASS。1 本でも fail なら REJECT（結線なし）。
+- **ゲート B（parity）**:
+  - B-1: `streamk_full_tiles_match_non_persistent_bit_exact` が出力する残タイル複合判定統計
+    （`fail_count`／`total`／`max_abs_diff`／`max_rel_err`・`remainder_tiles`／`q`／`max_contributors`）
+    を全行記録し、全行 `fail_count == 0` なら green。1 行でも `fail_count > 0` の場合は tolerance 定数・
+    `ParityBaseline` 行を変更せず、承認候補として記録するに留め結線は保留する。
+  - B-2: 既存経路の非後退（`cpu_cuda_tiled_pipeline_parity` 全 PASS・`cpu_cuda_tiled_pipeline_persistent_parity`
+    全 PASS）。
+- **ゲート C（性能。`--blocks-per-sm auto`・GPU-only・各 5 回実行の中央値）**: N=1024 の
+  `streamk_over_pipeline3` 中央値 ≥ 1.05、N=2048 で ≥ 1.00（かつ 0.95 未満の形状がないこと）。
+- **ゲート D（結線専用。本イシューで追加）**: N=1024/N=2048 の本番経路実体は 128×64 pipeline
+  （`TILED_PIPELINE_128X64_MIN_N/_MIN_K = Some(1024)`）であるため、同一 run ログの
+  `pipeline128x64_gpu_only` 列に対し `streamk_gpu_only_tflops / pipeline128x64_gpu_only_tflops` の
+  5 回中央値が N=1024・N=2048 とも ≥ 1.00 であること。
+- **結線の総合条件**: A PASS ∧ B-1 全行 0 fail ∧ B-2 PASS ∧ C 合格 ∧ D 合格。1 つでも欠ければ結線しない。
+
+### 2. 環境
+
+- 実行環境: 本エージェントの作業 worktree（Mac、CUDA 実機なし）。
+- `docs/real-hardware-verification-env.local.md`（GB10 実機接続情報。Git 管理外）が本 worktree に
+  存在しないため `CUDA_NODE` を解決できず、GB10 への rsync 転送・SSH 実行に着手できなかった
+  （`docs/real-hardware-verification-env.local.md.example` はテンプレートのみで実値を含まない）。
+- ネットワーク経由の CUDA 実機（DGX Spark GB10）への代替アクセス手段も本セッションには与えられていない。
+
+### 3. ゲート A（実機未到達のため未実施）
+
+未実施。Mac 側で代替として `cargo test -p fandhe-ai-backend-cuda --lib --locked` を実行し、Stream-K の
+GPU 不要ホストシミュレータテスト・静的テスト（`gemm::tests::streamk_plan_*`・
+`kernels_tiled_pipeline::tests::tiled_pipeline_streamk_*`）を含む 696 tests が全て green（0 failed）
+であることを確認した（`streamk` 部分一致フィルタで 15 tests 抽出・全 PASS）。これは §3「決定性の根拠」
+の設計時静的検査の再確認であり、ゲート A（実機での bit 同一性・繰り返し起動の決定性）の代替にはならない。
+
+### 4. ゲート B（実機未到達のため未実施）
+
+未実施。残タイル複合判定統計・既存経路の非後退確認はいずれも GB10 実機での `#[ignore]` テスト実行を
+前提とするため、記録すべき実測値がない。
+
+### 5. ゲート C・D（実機未到達のため未実施）
+
+未実施。`gemm_tiled_pipeline_persistent_bench --streamk on` による 5 回計測・TFLOPS 中央値比較は
+GB10 実機を前提とするため、記録すべき実測値がない。
+
+### 6. 机上見積りとの突合
+
+実測値がないため突合不能。§5「fixup 固定費の事前見積り」「末尾 wave 短縮の理論上限」の机上値
+（N=1024: 理論改善見込み約 10% 前後・N=2048: 数% 程度、fixup 往復 N=1024 で約 5.25 MiB）は本節時点で
+未検証のまま残る。
+
+### 7. 採否・結線判断
+
+**保留（実機未到達のため判定不能）**。ADOPT／REJECT のいずれも実測なしには確定できない。本番結線
+（`select_tiled_f32_kernel`／`CudaGemm::new`）は行わない（既存方針を変更せず不変のまま）。
+
+### 8. 申し送り・再開手順
+
+- **再開手順**: GB10（または同等の CUDA 実機）へ SSH 到達可能なセッションで、
+  `docs/real-hardware-verification-env.local.md`（`docs/real-hardware-verification-env.local.md.example`
+  をコピーして `CUDA_NODE` 等を実値で埋めたもの）を用意したうえで、§5 の実行コマンド（ゲート A・B は
+  `--ignored --nocapture --test-threads=1`、ゲート C・D は `--sizes 1024,2048,4096 --tile both
+  --blocks-per-sm auto --streamk on` を独立 5 回）を実行し、本節（0〜7 節）を実測値で置き換えること。
+  実行前後の `uptime`（load average）・`nvidia-smi --query-gpu=name,driver_version,utilization.gpu`・
+  `nvidia-smi --query-compute-apps` を記録し、生ログは
+  `docs/perf/logs/cuda-tiled-pipeline-streamk-1359/` 配下へ保存すること（内部ホスト名・ユーザー名を
+  含めない）。
+- 本節の記入自体は #1359 の受入条件（「parity 結果・5 回中央値・env_info が記録されていること」）を
+  満たしていない。再開後の実測完了をもって受入条件を充足させる必要がある。
+- `docs/cuda-streamk-decision.md` §6 は本節の状態（未実測・保留）に対応する形で追記した。
 
 ## 7. 申し送り（対象外）
 
