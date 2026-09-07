@@ -63,21 +63,25 @@ fn graph_capture_matches_eager_baseline_bit_identical_across_two_gpus() {
         !fandhe_ai::cuda_graph_step_enabled(),
         "ordinal 0 の eager baseline は opt-in OFF のまま初期化する必要がある"
     );
-    let (eager_log, eager_per_step_params, eager_final_params) = train_on_cuda(0, STEPS, LR);
+    let (eager_log, eager_per_step_dinput, eager_per_step_params, eager_final_params) =
+        train_on_cuda(0, STEPS, LR);
 
     fandhe_ai::set_cuda_graph_step_enabled(true);
-    let (graph_log, graph_per_step_params, graph_final_params) = train_on_cuda(1, STEPS, LR);
+    let (graph_log, graph_per_step_dinput, graph_per_step_params, graph_final_params) =
+        train_on_cuda(1, STEPS, LR);
     fandhe_ai::set_cuda_graph_step_enabled(false);
 
     print_bit_identity_report(
         "eager (opt-in OFF, ordinal 0)",
         &eager_log,
+        &eager_per_step_dinput,
         &eager_per_step_params,
         &eager_final_params,
     );
     print_bit_identity_report(
         "graph capture (opt-in ON, ordinal 1)",
         &graph_log,
+        &graph_per_step_dinput,
         &graph_per_step_params,
         &graph_final_params,
     );
@@ -93,6 +97,39 @@ fn graph_capture_matches_eager_baseline_bit_identical_across_two_gpus() {
             g.to_bits(),
             "step[{i}] の loss が bit 同一でない: eager={e:#010x?}／graph={g:#010x?}"
         );
+    }
+
+    // codex-review P2 指摘対応（PR #1390 是正）: loss・パラメータ
+    // だけでなく各 step の入力勾配（d(loss)/d(x)）も bit 同一性を検証
+    // する（`train_on_cuda` doc コメント「各 step の入力勾配
+    // d(loss)/d(x) を比較対象に加える理由」参照）。
+    assert_eq!(
+        eager_per_step_dinput.len(),
+        graph_per_step_dinput.len(),
+        "per-step 入力勾配列の長さ（step 数）が一致しないはず（STEPS は共通の定数）"
+    );
+    for (step, (e_dinput, g_dinput)) in eager_per_step_dinput
+        .iter()
+        .zip(graph_per_step_dinput.iter())
+        .enumerate()
+    {
+        let e_contig = e_dinput.contiguous();
+        let g_contig = g_dinput.contiguous();
+        let e_slice = e_contig.as_slice().unwrap_or(&[]);
+        let g_slice = g_contig.as_slice().unwrap_or(&[]);
+        assert_eq!(
+            e_slice.len(),
+            g_slice.len(),
+            "step[{step}].dinput の要素数が一致しないはず"
+        );
+        for (j, (ev, gv)) in e_slice.iter().zip(g_slice.iter()).enumerate() {
+            assert_eq!(
+                ev.to_bits(),
+                gv.to_bits(),
+                "step[{step}].dinput[{j}] が bit 同一でない: \
+                 eager={ev:#010x?}／graph={gv:#010x?}"
+            );
+        }
     }
 
     // codex-review P2 指摘対応（PR #1390 再々修正）: 最終パラメータの

@@ -58,8 +58,22 @@ run_variant() {
     fi
 }
 
+# Cursor Bugbot 指摘対応（PR #1390）: `set -euo pipefail` 下で
+# `var="$(run_variant ...)"`（`local` を伴わない top-level 代入）は、
+# `run_variant`（＝ `cargo test`）が非ゼロ終了すると代入コマンド自体の
+# 終了ステータスがそのまま非ゼロになり、`set -e` により後続の診断出力
+# （捕捉した raw 出力の印字）へ到達する前にスクリプトが即終了して
+# しまう（失敗原因が分からなくなる欠陥）。`A && B || C` の 1 個の複合
+# コマンドとして終了ステータスを明示的に変数へ退避することで、
+# `set -e` を発火させずに失敗を検出し、raw 出力を必ず印字してから
+# `exit 1` する。
 echo "[1/2] eager_baseline（opt-in OFF）を実行する..." >&2
-eager_raw="$(run_variant eager_baseline "")"
+eager_raw="$(run_variant eager_baseline "")" && eager_rc=0 || eager_rc=$?
+if [[ "$eager_rc" -ne 0 ]]; then
+    echo "エラー: eager_baseline（opt-in OFF）の cargo test が失敗した（exit ${eager_rc}）" >&2
+    printf '%s\n' "$eager_raw" >&2
+    exit 1
+fi
 eager_bits="$(printf '%s\n' "$eager_raw" | extract_bits_lines)"
 
 if [[ -z "$eager_bits" ]]; then
@@ -69,7 +83,12 @@ if [[ -z "$eager_bits" ]]; then
 fi
 
 echo "[2/2] graph_capture（opt-in ON）を実行する..." >&2
-graph_raw="$(run_variant graph_capture "1")"
+graph_raw="$(run_variant graph_capture "1")" && graph_rc=0 || graph_rc=$?
+if [[ "$graph_rc" -ne 0 ]]; then
+    echo "エラー: graph_capture（opt-in ON）の cargo test が失敗した（exit ${graph_rc}）" >&2
+    printf '%s\n' "$graph_raw" >&2
+    exit 1
+fi
 graph_bits="$(printf '%s\n' "$graph_raw" | extract_bits_lines)"
 
 if [[ -z "$graph_bits" ]]; then
@@ -78,14 +97,25 @@ if [[ -z "$graph_bits" ]]; then
     exit 1
 fi
 
-diff_output="$(diff <(printf '%s\n' "$eager_bits") <(printf '%s\n' "$graph_bits") || true)"
+# codex-review P2 指摘対応（PR #1390）: 従来は `diff ... || true` で
+# diff の終了コードを常に握りつぶしており、diff 自体の実行エラー
+# （diff 未インストール等・終了コード 2 以上）も「bit 同一」（exit 0）
+# として扱ってしまっていた。diff の終了コードは仕様上 0（一致）／
+# 1（不一致）／2 以上（実行エラー）の 3 値を持つため、`eager_rc` と
+# 同じ「複合コマンドで終了ステータスを明示退避」する方式で 3 値を
+# 区別する。
+diff_output="$(diff <(printf '%s\n' "$eager_bits") <(printf '%s\n' "$graph_bits"))" && diff_rc=0 || diff_rc=$?
 
-if [[ -z "$diff_output" ]]; then
+if [[ "$diff_rc" -eq 0 ]]; then
     line_count="$(printf '%s\n' "$eager_bits" | wc -l | tr -d ' ')"
     echo "OK: eager_baseline（opt-in OFF）と graph_capture（opt-in ON）は ${line_count} 行すべて bit 同一" >&2
     exit 0
-else
+elif [[ "$diff_rc" -eq 1 ]]; then
     echo "NG: eager_baseline（opt-in OFF）と graph_capture（opt-in ON）の出力が bit 同一でない" >&2
     printf '%s\n' "$diff_output" >&2
     exit 1
+else
+    echo "エラー: diff の実行自体が失敗した（exit ${diff_rc}）。bit 同一性は判定不能" >&2
+    printf '%s\n' "$diff_output" >&2
+    exit "$diff_rc"
 fi

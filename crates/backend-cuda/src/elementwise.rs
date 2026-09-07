@@ -83,6 +83,11 @@ fn elementwise_launch_config(numel: u32) -> LaunchConfig {
 /// しない。
 pub struct CudaElementwise {
     stream: Arc<CudaStream>,
+    /// 構築元 `CudaDevice` の ordinal（イシュー #1349・codex-review P0
+    /// 指摘・PR #1390 是正）。`Self::with_driver_call` が
+    /// `context_cache::with_driver_call` を呼ぶ際のキーとして使う
+    /// （`gemm.rs::CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     /// 出力バッファのサイズクラス別プール（イシュー #1020・REQ-14）。
     /// `gemm.rs::CudaGemm::allocator` と同一の設計（`crate::pool` 冒頭
     /// コメント参照）。`context_cache::cached_allocator` 経由で
@@ -142,6 +147,7 @@ impl CudaElementwise {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             allocator,
             add_f32,
             mul_f32,
@@ -149,6 +155,33 @@ impl CudaElementwise {
             exp_f32,
             tanh_f32,
         })
+    }
+
+    /// `CudaElementwise` の driver 呼び出し（H2D 転送・カーネル起動・
+    /// D2H readback）を CUDA Graph capture 排他へ参加させる共通ヘルパー
+    /// （`gemm.rs::CudaGemm::with_driver_call` と同じ設計。codex-review
+    /// P0 指摘対応・PR #1390 是正）。
+    ///
+    /// `run_add_f32`／`run_relu_f32` 等の公開低レベル API は
+    /// `CudaBackendOps`（`ops.rs`）を経由せず crate 外から直接呼び出せる
+    /// ため、従来はこれらの呼び出しが `context_cache::begin_driver_call`
+    /// の capture 排他検査を一切通らず、共有ストリームへ直接転送・確保・
+    /// カーネル起動を発行していた（別スレッドが SGD capture 中でも
+    /// 拒否されず、drain・拒否を迂回して一時バッファ等の無関係な操作が
+    /// graph に混入しうる欠陥。codex-review 指摘）。本ヘルパーを
+    /// `run_binary`／`run_unary`（全公開エントリの共通実装）の本体先頭で
+    /// 呼ぶことで、直接構築・`ops.rs` 経由いずれの呼び出し経路でも同じ
+    /// 排他区間を通るようにする。
+    ///
+    /// `ops.rs` 経由の呼び出しは外側の `with_driver_call` と二重に排他
+    /// 区間へ入るが、`begin_driver_call` は同一スレッドからの再入を
+    /// 拒否しない設計（`context_cache::begin_driver_call` doc コメント
+    /// 参照）のため、二重の排他は安全側の重複であり挙動を変えない。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     /// 二項演算共通の起動手続き（H2D → 起動 → 同期 → D2H）。
@@ -164,36 +197,42 @@ impl CudaElementwise {
             return Ok(Vec::new());
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let b_dev = self.stream.clone_htod(b)?;
-        // イシュー #1020: 全カーネル（`ew_add_f32` 等）が
-        // `if (idx < numel)` ガード内で `out[idx]` を必ず埋める
-        // （`kernels_elementwise.rs` 参照）ため `alloc_uninit_f32` を使う。
-        let mut out_dev = self.allocator.alloc_uninit_f32(numel)?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // で本体（H2D・確保・起動・readback）全体を capture 排他へ参加
+        // させる（`gemm_wmma.rs::CudaWmmaGemm::launch_f16_kernel` と同じ
+        // 「1 回の呼び出しにまとめて包む」方式）。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let b_dev = self.stream.clone_htod(b)?;
+            // イシュー #1020: 全カーネル（`ew_add_f32` 等）が
+            // `if (idx < numel)` ガード内で `out[idx]` を必ず埋める
+            // （`kernels_elementwise.rs` 参照）ため `alloc_uninit_f32` を使う。
+            let mut out_dev = self.allocator.alloc_uninit_f32(numel)?;
 
-        let cfg = elementwise_launch_config(numel as u32);
-        let numel_i = numel as i32;
+            let cfg = elementwise_launch_config(numel as u32);
+            let numel_i = numel as i32;
 
-        // SAFETY: カーネル引数（a_dev/b_dev/out_dev・numel_i）は上記で
-        // 検証済みの numel と 1:1 対応するデバイスバッファ長・値であり、
-        // カーネル内の手動境界チェック（`if (idx < numel)`。
-        // `kernels_elementwise.rs` 参照、REQ-8）と合わせて OOB 読み書きが
-        // 起きない根拠とする。グリッド次元は `div_ceil` で numel を包含
-        // するよう構築しており（`elementwise_launch_config`）、末尾ブロック
-        // の余剰スレッドはカーネル内境界チェックで弾かれる。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&mut out_dev.as_view_mut())
-                .arg(&numel_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
-        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
-        // ため、論理長ビュー（`as_view()`）を渡す。
-        crate::memory::readback(&self.stream, &out_dev.as_view())
+            // SAFETY: カーネル引数（a_dev/b_dev/out_dev・numel_i）は上記で
+            // 検証済みの numel と 1:1 対応するデバイスバッファ長・値であり、
+            // カーネル内の手動境界チェック（`if (idx < numel)`。
+            // `kernels_elementwise.rs` 参照、REQ-8）と合わせて OOB 読み書きが
+            // 起きない根拠とする。グリッド次元は `div_ceil` で numel を包含
+            // するよう構築しており（`elementwise_launch_config`）、末尾ブロック
+            // の余剰スレッドはカーネル内境界チェックで弾かれる。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&a_dev)
+                    .arg(&b_dev)
+                    .arg(&mut out_dev.as_view_mut())
+                    .arg(&numel_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+            // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+            // ため、論理長ビュー（`as_view()`）を渡す。
+            crate::memory::readback(&self.stream, &out_dev.as_view())
+        })
     }
 
     /// 単項演算共通の起動手続き。[`Self::run_binary`] と同一構造。
@@ -204,25 +243,29 @@ impl CudaElementwise {
             return Ok(Vec::new());
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let mut out_dev = self.allocator.alloc_uninit_f32(numel)?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `run_binary` と同じ
+        // 理由で `Self::with_driver_call` へ参加させる。
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let mut out_dev = self.allocator.alloc_uninit_f32(numel)?;
 
-        let cfg = elementwise_launch_config(numel as u32);
-        let numel_i = numel as i32;
+            let cfg = elementwise_launch_config(numel as u32);
+            let numel_i = numel as i32;
 
-        // SAFETY: run_binary と同一の根拠（上記コメント参照）。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&a_dev)
-                .arg(&mut out_dev.as_view_mut())
-                .arg(&numel_i)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
-        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
-        // ため、論理長ビュー（`as_view()`）を渡す。
-        crate::memory::readback(&self.stream, &out_dev.as_view())
+            // SAFETY: run_binary と同一の根拠（上記コメント参照）。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&a_dev)
+                    .arg(&mut out_dev.as_view_mut())
+                    .arg(&numel_i)
+                    .launch(cfg)?;
+            }
+            // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+            // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+            // ため、論理長ビュー（`as_view()`）を渡す。
+            crate::memory::readback(&self.stream, &out_dev.as_view())
+        })
     }
 
     /// `out[i] = a[i] + b[i]`（f32・同一長）。

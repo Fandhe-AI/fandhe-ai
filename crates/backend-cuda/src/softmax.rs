@@ -210,6 +210,11 @@ pub(crate) fn match_softmax_plan(plan: &FusionPlan) -> Option<(usize, usize)> {
 /// （SMEM 予算・SM 数）を保持する。
 pub struct CudaSoftmax {
     stream: Arc<CudaStream>,
+    /// 構築元 `CudaDevice` の ordinal（イシュー #1349・codex-review P0
+    /// 指摘・PR #1390 是正）。`Self::with_driver_call` が
+    /// `context_cache::with_driver_call` を呼ぶ際のキーとして使う
+    /// （`gemm.rs::CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     /// 出力バッファのサイズクラス別プール（イシュー #1020・REQ-14）。
     /// `gemm.rs::CudaGemm::allocator` と同一設計。persistent grid 方式
     /// （グリッドストライドで行を分担する）は `gemm.rs`／`elementwise.rs`
@@ -281,6 +286,7 @@ impl CudaSoftmax {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             allocator,
             onepass_f32,
             twopass_f32,
@@ -288,6 +294,17 @@ impl CudaSoftmax {
             smem_per_sm_budget_bytes,
             sm_count,
         })
+    }
+
+    /// `CudaSoftmax` の driver 呼び出し（H2D 転送・カーネル起動・D2H
+    /// readback）を CUDA Graph capture 排他へ参加させる共通ヘルパー
+    /// （`elementwise.rs::CudaElementwise::with_driver_call` と同じ設計。
+    /// codex-review P0 指摘対応・PR #1390 是正）。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     /// `out[r, :] = softmax(x[r, :])`（行方向・最終軸 softmax）を実行する
@@ -333,75 +350,82 @@ impl CudaSoftmax {
             return Ok(Vec::new());
         }
 
-        let route = softmax_route(cols, self.smem_per_block_budget_bytes);
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // で本体（H2D・確保・起動・readback）全体を capture 排他へ参加
+        // させる（`elementwise.rs::run_binary` と同じ「1 回の呼び出しに
+        // まとめて包む」方式）。早期 return（`rows == 0 || cols == 0`）は
+        // driver に一切触れないためこのヘルパーの外側で処理済み。
+        self.with_driver_call(|| {
+            let route = softmax_route(cols, self.smem_per_block_budget_bytes);
 
-        let x_dev = self.stream.clone_htod(x)?;
-        let mut out_dev = self.allocator.alloc_zeroed_f32(x.len())?;
+            let x_dev = self.stream.clone_htod(x)?;
+            let mut out_dev = self.allocator.alloc_zeroed_f32(x.len())?;
 
-        let rows_i = rows as i32;
-        let cols_i = cols as i32;
+            let rows_i = rows as i32;
+            let cols_i = cols as i32;
 
-        let (func, cfg): (&CudaFunction, LaunchConfig) = match route {
-            RmsNormRoute::OnePassSmem => {
-                // `derive_persistent_grid_one_pass` の `smem_bytes_per_block`
-                // 契約は「1 ブロックが実際に確保する SMEM バイト数」
-                // （`rmsnorm.rs::CudaRmsNorm::run_rmsnorm_f32_raw` の同種
-                // コメント参照。予算上限〈通常 48KiB〉ではなく実バイト数
-                // を渡さないと `blocks_per_sm` が過小評価される）。
-                let smem_bytes_per_block = (cols as u64).saturating_mul(4);
-                let grid = derive_persistent_grid_one_pass(
-                    self.smem_per_sm_budget_bytes,
-                    self.sm_count,
-                    smem_bytes_per_block,
-                    rows_i as u32,
-                );
-                let shared_mem_bytes = smem_bytes_per_block.min(u32::MAX as u64) as u32;
-                (
-                    &self.onepass_f32,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (SOFTMAX_BLOCK_DIM, 1, 1),
-                        shared_mem_bytes,
-                    },
-                )
+            let (func, cfg): (&CudaFunction, LaunchConfig) = match route {
+                RmsNormRoute::OnePassSmem => {
+                    // `derive_persistent_grid_one_pass` の `smem_bytes_per_block`
+                    // 契約は「1 ブロックが実際に確保する SMEM バイト数」
+                    // （`rmsnorm.rs::CudaRmsNorm::run_rmsnorm_f32_raw` の同種
+                    // コメント参照。予算上限〈通常 48KiB〉ではなく実バイト数
+                    // を渡さないと `blocks_per_sm` が過小評価される）。
+                    let smem_bytes_per_block = (cols as u64).saturating_mul(4);
+                    let grid = derive_persistent_grid_one_pass(
+                        self.smem_per_sm_budget_bytes,
+                        self.sm_count,
+                        smem_bytes_per_block,
+                        rows_i as u32,
+                    );
+                    let shared_mem_bytes = smem_bytes_per_block.min(u32::MAX as u64) as u32;
+                    (
+                        &self.onepass_f32,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (SOFTMAX_BLOCK_DIM, 1, 1),
+                            shared_mem_bytes,
+                        },
+                    )
+                }
+                RmsNormRoute::TwoPass => {
+                    let grid = derive_persistent_grid_two_pass(self.sm_count, rows_i as u32);
+                    (
+                        &self.twopass_f32,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (SOFTMAX_BLOCK_DIM, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                    )
+                }
+            };
+
+            // SAFETY: カーネル引数（x_dev/out_dev・rows_i/cols_i・scale）は
+            // `validate_softmax_launch` で検証済みの形状と 1:1 対応する
+            // デバイスバッファ長・値であり、カーネル内の手動境界チェック
+            // （`if (base+3 < cols)`／グリッドストライド `row < rows`・
+            // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。1 パス
+            // 経路の `shared_mem_bytes` は `cols * 4`（実際に確保する SMEM
+            // バイト数）であり、`softmax_route` が判定した
+            // `smem_per_block_budget_bytes` 以下であることを既に確認済み
+            // （`rmsnorm.rs::CudaRmsNorm::run_rmsnorm_f32_raw` の同種
+            // SAFETY コメントと同じ不変条件）。
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(&x_dev)
+                    .arg(&mut out_dev.as_view_mut())
+                    .arg(&rows_i)
+                    .arg(&cols_i)
+                    .arg(&scale)
+                    .launch(cfg)?;
             }
-            RmsNormRoute::TwoPass => {
-                let grid = derive_persistent_grid_two_pass(self.sm_count, rows_i as u32);
-                (
-                    &self.twopass_f32,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (SOFTMAX_BLOCK_DIM, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                )
-            }
-        };
-
-        // SAFETY: カーネル引数（x_dev/out_dev・rows_i/cols_i・scale）は
-        // `validate_softmax_launch` で検証済みの形状と 1:1 対応する
-        // デバイスバッファ長・値であり、カーネル内の手動境界チェック
-        // （`if (base+3 < cols)`／グリッドストライド `row < rows`・
-        // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。1 パス
-        // 経路の `shared_mem_bytes` は `cols * 4`（実際に確保する SMEM
-        // バイト数）であり、`softmax_route` が判定した
-        // `smem_per_block_budget_bytes` 以下であることを既に確認済み
-        // （`rmsnorm.rs::CudaRmsNorm::run_rmsnorm_f32_raw` の同種
-        // SAFETY コメントと同じ不変条件）。
-        unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(&x_dev)
-                .arg(&mut out_dev.as_view_mut())
-                .arg(&rows_i)
-                .arg(&cols_i)
-                .arg(&scale)
-                .launch(cfg)?;
-        }
-        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
-        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
-        // ため、論理長ビュー（`as_view()`）を渡す。
-        crate::memory::readback(&self.stream, &out_dev.as_view())
+            // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+            // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+            // ため、論理長ビュー（`as_view()`）を渡す。
+            crate::memory::readback(&self.stream, &out_dev.as_view())
+        })
     }
 }
 

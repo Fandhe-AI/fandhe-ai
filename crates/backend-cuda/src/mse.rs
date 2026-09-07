@@ -61,6 +61,11 @@ fn mse_num_blocks(numel: u32) -> u32 {
 /// コンパイル済みハンドルを保持する。
 pub struct CudaMse {
     stream: Arc<CudaStream>,
+    /// 構築元 `CudaDevice` の ordinal（イシュー #1349・codex-review P0
+    /// 指摘・PR #1390 是正）。`Self::with_driver_call` が
+    /// `context_cache::with_driver_call` を呼ぶ際のキーとして使う
+    /// （`gemm.rs::CudaGemm::ordinal` と同じ役割）。
+    ordinal: usize,
     allocator: Arc<CudaAllocator>,
     partial_f32: CudaFunction,
     finalize_f32: CudaFunction,
@@ -94,11 +99,23 @@ impl CudaMse {
 
         Ok(Self {
             stream: device.stream().clone(),
+            ordinal: device.ordinal(),
             allocator,
             partial_f32,
             finalize_f32,
             backward_f32,
         })
+    }
+
+    /// `CudaMse` の driver 呼び出し（H2D 転送・カーネル起動・D2H
+    /// readback）を CUDA Graph capture 排他へ参加させる共通ヘルパー
+    /// （`elementwise.rs::CudaElementwise::with_driver_call` と同じ設計。
+    /// codex-review P0 指摘対応・PR #1390 是正）。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
     }
 
     /// forward: `reduction(Σ(pred[i]−target[i])²)`。`pred.len() ==
@@ -117,63 +134,69 @@ impl CudaMse {
             return Ok(0.0);
         }
 
-        let pred_dev = self.stream.clone_htod(pred)?;
-        let target_dev = self.stream.clone_htod(target)?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
+        // で本体（H2D・確保・起動・readback）全体を capture 排他へ参加
+        // させる（`elementwise.rs::run_binary` と同じ「1 回の呼び出しに
+        // まとめて包む」方式）。
+        self.with_driver_call(|| {
+            let pred_dev = self.stream.clone_htod(pred)?;
+            let target_dev = self.stream.clone_htod(target)?;
 
-        let num_blocks = mse_num_blocks(numel as u32);
-        // `partial_f32` は起動する `num_blocks` 個のブロックそれぞれが
-        // `partial[blockIdx.x]` を必ず 1 回書く（`kernels_mse.rs` 冒頭
-        // コメント参照）ため `alloc_uninit_f32` を使える（`pool.rs`
-        // `alloc_uninit_f32` doc の適用条件）。
-        let mut partial_dev = self.allocator.alloc_uninit_f32(num_blocks as usize)?;
+            let num_blocks = mse_num_blocks(numel as u32);
+            // `partial_f32` は起動する `num_blocks` 個のブロックそれぞれが
+            // `partial[blockIdx.x]` を必ず 1 回書く（`kernels_mse.rs` 冒頭
+            // コメント参照）ため `alloc_uninit_f32` を使える（`pool.rs`
+            // `alloc_uninit_f32` doc の適用条件）。
+            let mut partial_dev = self.allocator.alloc_uninit_f32(num_blocks as usize)?;
 
-        let numel_i = numel as i32;
-        let partial_cfg = LaunchConfig {
-            grid_dim: (num_blocks, 1, 1),
-            block_dim: (MSE_BLOCK_DIM, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        // SAFETY: `pred_dev`／`target_dev` は `numel` 要素の H2D 済み
-        // デバイスバッファ、`partial_dev` は `num_blocks` 要素確保済みで
-        // カーネルが `blockIdx.x`（`0..num_blocks`）ごとに 1 回だけ書く
-        // （`kernels_mse.rs::MSE_PARTIAL_F32` 参照）。カーネル内の
-        // grid-stride ループは `idx < numel` を維持する（REQ-8）ため
-        // OOB 読み出しは起きない。
-        unsafe {
-            self.stream
-                .launch_builder(&self.partial_f32)
-                .arg(&pred_dev)
-                .arg(&target_dev)
-                .arg(&mut partial_dev.as_view_mut())
-                .arg(&numel_i)
-                .launch(partial_cfg)?;
-        }
+            let numel_i = numel as i32;
+            let partial_cfg = LaunchConfig {
+                grid_dim: (num_blocks, 1, 1),
+                block_dim: (MSE_BLOCK_DIM, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: `pred_dev`／`target_dev` は `numel` 要素の H2D 済み
+            // デバイスバッファ、`partial_dev` は `num_blocks` 要素確保済みで
+            // カーネルが `blockIdx.x`（`0..num_blocks`）ごとに 1 回だけ書く
+            // （`kernels_mse.rs::MSE_PARTIAL_F32` 参照）。カーネル内の
+            // grid-stride ループは `idx < numel` を維持する（REQ-8）ため
+            // OOB 読み出しは起きない。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.partial_f32)
+                    .arg(&pred_dev)
+                    .arg(&target_dev)
+                    .arg(&mut partial_dev.as_view_mut())
+                    .arg(&numel_i)
+                    .launch(partial_cfg)?;
+            }
 
-        let mut out_dev = self.allocator.alloc_uninit_f32(1)?;
-        let num_partials_i = num_blocks as i32;
-        let finalize_cfg = LaunchConfig {
-            grid_dim: (1, 1, 1),
-            block_dim: (MSE_BLOCK_DIM, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        // SAFETY: `partial_dev` は上記で `num_blocks` 要素すべてが書き
-        // 込み済み、`out_dev` は `mse_finalize_f32` が単一ブロックの
-        // lane 0 で `out[0]` を必ず 1 回書く（`kernels_mse.rs` 参照）ため
-        // `alloc_uninit_f32(1)` を使える。`num_partials_i` は起動時に
-        // 確保した `partial_dev` の長さと同一の値を渡す（本関数内の
-        // 単一の `num_blocks` 由来。呼び出し元がずらせない）。
-        unsafe {
-            self.stream
-                .launch_builder(&self.finalize_f32)
-                .arg(&partial_dev.as_view())
-                .arg(&mut out_dev.as_view_mut())
-                .arg(&num_partials_i)
-                .arg(&factor)
-                .launch(finalize_cfg)?;
-        }
+            let mut out_dev = self.allocator.alloc_uninit_f32(1)?;
+            let num_partials_i = num_blocks as i32;
+            let finalize_cfg = LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (MSE_BLOCK_DIM, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: `partial_dev` は上記で `num_blocks` 要素すべてが書き
+            // 込み済み、`out_dev` は `mse_finalize_f32` が単一ブロックの
+            // lane 0 で `out[0]` を必ず 1 回書く（`kernels_mse.rs` 参照）ため
+            // `alloc_uninit_f32(1)` を使える。`num_partials_i` は起動時に
+            // 確保した `partial_dev` の長さと同一の値を渡す（本関数内の
+            // 単一の `num_blocks` 由来。呼び出し元がずらせない）。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.finalize_f32)
+                    .arg(&partial_dev.as_view())
+                    .arg(&mut out_dev.as_view_mut())
+                    .arg(&num_partials_i)
+                    .arg(&factor)
+                    .launch(finalize_cfg)?;
+            }
 
-        let host: Vec<f32> = readback(&self.stream, &out_dev.as_view())?;
-        Ok(host.first().copied().unwrap_or(0.0))
+            let host: Vec<f32> = readback(&self.stream, &out_dev.as_view())?;
+            Ok(host.first().copied().unwrap_or(0.0))
+        })
     }
 
     /// backward: `dPred[i] = scale·(pred[i]−target[i])`。`dTarget` は
@@ -193,37 +216,41 @@ impl CudaMse {
             return Ok(Vec::new());
         }
 
-        let pred_dev = self.stream.clone_htod(pred)?;
-        let target_dev = self.stream.clone_htod(target)?;
-        // イシュー #1020: `mse_backward_f32` は `if (idx < numel)` ガード
-        // 内で `dpred[idx]` を必ず埋める（`kernels_mse.rs` 参照）ため
-        // `alloc_uninit_f32` を使う（`elementwise.rs::run_unary` と同じ
-        // 適用条件）。
-        let mut dpred_dev = self.allocator.alloc_uninit_f32(numel)?;
+        // codex-review P0 指摘対応（PR #1390 是正）: `run_mse_loss_f32`
+        // と同じ理由で `Self::with_driver_call` へ参加させる。
+        self.with_driver_call(|| {
+            let pred_dev = self.stream.clone_htod(pred)?;
+            let target_dev = self.stream.clone_htod(target)?;
+            // イシュー #1020: `mse_backward_f32` は `if (idx < numel)` ガード
+            // 内で `dpred[idx]` を必ず埋める（`kernels_mse.rs` 参照）ため
+            // `alloc_uninit_f32` を使う（`elementwise.rs::run_unary` と同じ
+            // 適用条件）。
+            let mut dpred_dev = self.allocator.alloc_uninit_f32(numel)?;
 
-        let numel_i = numel as i32;
-        let cfg = LaunchConfig {
-            grid_dim: (numel.div_ceil(MSE_BLOCK_DIM as usize) as u32, 1, 1),
-            block_dim: (MSE_BLOCK_DIM, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        // SAFETY: `pred_dev`／`target_dev`／`dpred_dev` はいずれも
-        // `numel` 要素のデバイスバッファであり、カーネル内の手動境界
-        // チェック（`if (idx < numel)`。REQ-8）と合わせて OOB 読み書き
-        // が起きない根拠とする。グリッド次元は `div_ceil` で numel を
-        // 包含するよう構築しており、末尾ブロックの余剰スレッドは
-        // カーネル内境界チェックで弾かれる。
-        unsafe {
-            self.stream
-                .launch_builder(&self.backward_f32)
-                .arg(&pred_dev)
-                .arg(&target_dev)
-                .arg(&mut dpred_dev.as_view_mut())
-                .arg(&numel_i)
-                .arg(&scale)
-                .launch(cfg)?;
-        }
+            let numel_i = numel as i32;
+            let cfg = LaunchConfig {
+                grid_dim: (numel.div_ceil(MSE_BLOCK_DIM as usize) as u32, 1, 1),
+                block_dim: (MSE_BLOCK_DIM, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: `pred_dev`／`target_dev`／`dpred_dev` はいずれも
+            // `numel` 要素のデバイスバッファであり、カーネル内の手動境界
+            // チェック（`if (idx < numel)`。REQ-8）と合わせて OOB 読み書き
+            // が起きない根拠とする。グリッド次元は `div_ceil` で numel を
+            // 包含するよう構築しており、末尾ブロックの余剰スレッドは
+            // カーネル内境界チェックで弾かれる。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.backward_f32)
+                    .arg(&pred_dev)
+                    .arg(&target_dev)
+                    .arg(&mut dpred_dev.as_view_mut())
+                    .arg(&numel_i)
+                    .arg(&scale)
+                    .launch(cfg)?;
+            }
 
-        readback(&self.stream, &dpred_dev.as_view())
+            readback(&self.stream, &dpred_dev.as_view())
+        })
     }
 }
