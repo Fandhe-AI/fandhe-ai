@@ -27,6 +27,13 @@ LINE_RE = re.compile(
     r"size=(\d+) tile=(\S+) (\S+)"
 )
 
+# AGENTS.md の性能予算・5 回計測契約（本ハーネスは 5 回独立プロセス起動の
+# 中央値を判定根拠とする）に合わせた必須 run 数。入力ログがこれに満たない
+# 場合、部分集計を「N 回中央値」として判定出力しない（codex-review 指摘。
+# run1 のみでも中央値扱いで PASS/FAIL を出してしまうと、5 本揃えた場合の
+# 判定〈本イシューでは両ゲート FAIL〉と食い違う誤判定を招く）。
+REQUIRED_RUNS = 5
+
 
 def parse(path):
     """1 run のログから size×tile×metric -> 値 の辞書を作る。"""
@@ -61,7 +68,19 @@ def main():
         print("usage: aggregate.py <run1.log> [run2.log ...]", file=sys.stderr)
         sys.exit(1)
 
-    runs = [parse(p) for p in sys.argv[1:]]
+    run_paths = sys.argv[1:]
+    # 集計・判定を行う前に入力が REQUIRED_RUNS（5）回分揃っていることを検証
+    # する。不足時は判定を出力せず終了する（fail-closed。codex-review 指摘）。
+    if len(run_paths) != REQUIRED_RUNS:
+        print(
+            f"error: expected exactly {REQUIRED_RUNS} run logs "
+            f"(5 回中央値契約), got {len(run_paths)}: "
+            f"{', '.join(run_paths)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    runs = [parse(p) for p in run_paths]
     n_runs = len(runs)
     sizes = [1024, 2048, 4096]
 
