@@ -655,8 +655,17 @@ contract-decision.md` §8（イシュー #1241 承認記録・2026-09-08）で�
   `null` 変換規則）・`parity_scaled_abs_rescued`（既存 2 条件では fail だが第 3 項で pass に転じた
   要素数）。既存 4 キー（`parity_total`/`parity_fail_count`/`parity_max_abs_err`/
   `parity_max_rel_err`）は書式・意味とも不変で、2 キーが追加されるのみ
-- **fandhe-ai 側 0 fail は救済に依存しない**: `bench-fandhe` の CPU GEMM（N=64/256/512/2048）は
-  本救済項なしに引き続き 0 fail であることをテストで固定している
+- **fandhe-ai 側 0 fail は救済に依存しない（構造的遮断。イシュー #1247 PR #1443 codex-review
+  指摘・P1）**: 第 3 項は §7 の (b-2)「比較対象（candle/Burn）妥当性検証に限り」の承認であり、
+  `GemmReference::verify`（`self.tol` を無条件適用）は 3 バイナリ（`bench-fandhe`/`bench-candle`/
+  `bench-burn`）で共有される汎用経路のため、メソッド未分離のままでは fandhe-ai 自身の検証にも
+  第 3 項が効いてしまい、既存複合判定に違反する自社側回帰が `scaled_abs_bound` 以下に収まる限り
+  `fail_count=0` として救済されうる。`bench-common::parity::GemmReference` はこれを避けるため
+  `verify`（`self.tol` 適用。`bench-candle`/`bench-burn` が使う）と `verify_strict`
+  （`ScaledAbsTolerance::NONE` 固定。既存 2 条件のみ）を分離し、**`bench-fandhe::run_gemm` 系の
+  全呼び出しは `verify_strict` を使う**（CPU/CUDA/Metal・全形状に一律で効く構造的な遮断であり、
+  特定 backend・形状のみを対象にしたテストに依存しない）。この構造に加えて `bench-fandhe` の CPU
+  GEMM（N=64/256/512/2048）は本救済項なしに引き続き 0 fail であることもテストで固定している
   （`bench-fandhe::tests::gemm_cpu_parity_zero_fail_without_scaled_rescue`。
   `scaled_abs_rescued == 0` を assert）。第 3 項は candle/Burn 側参照 GEMM のキャンセレーション由来
   丸め誤差フロア（イシュー #1184。N=2048 で決定的に発生する 2 要素）を許容するための運用であり、

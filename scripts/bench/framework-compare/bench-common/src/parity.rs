@@ -726,12 +726,48 @@ impl GemmReference {
         self.verify_with_sink(out, &mut stderr)
     }
 
+    /// `bench-fandhe`（自社実装 fandhe-ai 自身の検証）専用の厳密判定。
+    ///
+    /// [`verify`](Self::verify) は `self.tol`（[`ScaledAbsTolerance`]。
+    /// ハーネス限定の第 3 救済項）を無条件に適用するが、この救済は
+    /// `docs/candle-parity-tolerance-contract-decision.md` §7 が
+    /// 「比較対象（candle/Burn）妥当性検証に限り」採用したものであり、
+    /// fandhe-ai 自身の出力を `self.tol` 込みで検証すると、既存複合判定
+    /// （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）に違反する自社側
+    /// 回帰が `scaled_abs_bound` 以下に収まる限り `fail_count=0` として
+    /// 救済されてしまい、`compare_gemm_gate.py`／`summarize.py` が見逃す
+    /// （イシュー #1247 PR #1443 codex-review 指摘・P1）。`GemmReference::verify`
+    /// は `bench-fandhe`/`bench-candle`/`bench-burn` の 3 バイナリで共有
+    /// される汎用経路のため、救済適用の可否はメソッド単位で明示的に選び、
+    /// `bench-fandhe::run_gemm` は必ずこちらを呼ぶ（`self.tol` を経由
+    /// しない構造的な遮断。CPU/CUDA/Metal・全形状に一律で効く）。
+    pub fn verify_strict(&self, out: &[f32]) -> Result<ParityStats, BenchError> {
+        let mut stderr = std::io::stderr();
+        self.verify_with_sink_and_tol(out, &mut stderr, &ScaledAbsTolerance::NONE)
+    }
+
     /// [`verify`](Self::verify) の内部実装。`sink` を注入できるようにして
     /// ユニットテストから stderr を経由せず検証できるようにする。
+    /// `self.tol`（比較対象側の救済適用）を使う。
     fn verify_with_sink(
         &self,
         out: &[f32],
         sink: &mut dyn std::io::Write,
+    ) -> Result<ParityStats, BenchError> {
+        let tol = self.tol;
+        self.verify_with_sink_and_tol(out, sink, &tol)
+    }
+
+    /// [`verify_with_sink`](Self::verify_with_sink)／
+    /// [`verify_strict`](Self::verify_strict) の共通実装。`tol` を呼び出し側
+    /// から明示的に受け取ることで、救済（[`ScaledAbsTolerance`]）の
+    /// 適用有無をメソッド選択の時点で固定する（`self.tol` への暗黙依存を
+    /// 断つ。イシュー #1247 PR #1443 codex-review 指摘・P1）。
+    fn verify_with_sink_and_tol(
+        &self,
+        out: &[f32],
+        sink: &mut dyn std::io::Write,
+        tol: &ScaledAbsTolerance,
     ) -> Result<ParityStats, BenchError> {
         // 診断用カウンタ（`dump` 出力の `call=` ラベルにのみ使う）。
         // `usize::MAX` 到達は現実的な反復回数では起こり得ないが、
@@ -743,12 +779,12 @@ impl GemmReference {
         let call_index = self.verify_calls.get().saturating_add(1);
         self.verify_calls.set(call_index);
 
-        let stats = compare_elementwise(out, &self.c, &self.tol)?;
+        let stats = compare_elementwise(out, &self.c, tol)?;
 
         if let Some(cfg) = self.dump
             && stats.fail_count > 0
         {
-            dump_parity_failures(out, &self.c, self.n, &self.tol, cfg, call_index, sink)?;
+            dump_parity_failures(out, &self.c, self.n, tol, cfg, call_index, sink)?;
         }
 
         Ok(stats)

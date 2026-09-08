@@ -405,7 +405,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // 避けるため elapsed 取得後に実行する）。反復間の worst-case を
         // 保持し、途中反復の破損（要素の入れ替わり等、checksum では
         // 見逃しうる破損）も見逃さない。
-        let stats = reference.verify(&out)?;
+        let stats = reference.verify_strict(&out)?;
         *parity = Some(match parity.take() {
             Some(prev) => prev.worst(stats),
             None => stats,
@@ -498,7 +498,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     validate_gemm_checksum(checksum)?;
     // イシュー #970: init 計測分の要素単位検証は init_s の外（elapsed 取得後）
     // で行う。以後の反復と worst-case で集約する。
-    let mut parity = reference.verify(&out0)?;
+    let mut parity = reference.verify_strict(&out0)?;
 
     // 残り warmup（1 回は init 計測内で消費済み）+ 計測本体。同一 tape・同一
     // 葉 Var を使い回し、matmul のみを繰り返す。
@@ -509,7 +509,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         checksum = out.iter().map(|&x| x as f64).sum();
         let elapsed = start.elapsed();
         validate_gemm_checksum(checksum)?;
-        parity = parity.worst(reference.verify(&out)?);
+        parity = parity.worst(reference.verify_strict(&out)?);
         Ok(elapsed)
     };
     for _ in 0..WARMUP_ITERS.saturating_sub(1) {
@@ -596,7 +596,7 @@ fn run_gemm_device_checksum(
         "MEASURE_ERROR: matmul_checksum(WithOutput).output.as_slice() returned None \
          (issue #1339)",
     )?;
-    let parity = reference.verify(out)?;
+    let parity = reference.verify_strict(out)?;
     if tail.checksum.to_bits() != checksum.to_bits() {
         return Err(format!(
             "MEASURE_ERROR: tail matmul_checksum ({}) is not bit-identical to the last timed \
@@ -677,7 +677,7 @@ fn run_gemm_reuse_device_checksum(
         "MEASURE_ERROR: matmul_checksum(WithOutput).output.as_slice() returned None \
          (issue #1339)",
     )?;
-    let parity = reference.verify(out)?;
+    let parity = reference.verify_strict(out)?;
     if tail.checksum.to_bits() != checksum.to_bits() {
         return Err(format!(
             "MEASURE_ERROR: tail matmul_checksum ({}) is not bit-identical to the last timed \
@@ -751,7 +751,7 @@ fn measure_gemm_reuse_phases(
     let mut checksum: f64 = out0.iter().map(|&x| x as f64).sum();
     let init_s = init_start.elapsed().as_secs_f64();
     validate_gemm_checksum(checksum)?;
-    let mut parity = reference.verify(&out0)?;
+    let mut parity = reference.verify_strict(&out0)?;
 
     let mut phases = PhaseSamples::new();
     // 1 回は init 計測内で消費済み（`run_gemm_reuse` と同じ warmup 消費
@@ -815,7 +815,7 @@ fn measure_gemm_reuse_phases(
         phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
 
         validate_gemm_checksum(checksum)?;
-        parity = parity.worst(reference.verify(&out)?);
+        parity = parity.worst(reference.verify_strict(&out)?);
     }
 
     Ok((phases, checksum, init_s, parity))
