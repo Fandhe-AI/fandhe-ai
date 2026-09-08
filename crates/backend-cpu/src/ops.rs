@@ -121,6 +121,84 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
     Some(view)
 }
 
+/// `CpuBackendOps::gemm` の出力バッファをゼロ確保するしきい値
+/// （要素数。イシュー #1299）。`gemm_reuse_phase_diag_tests` の
+/// フェーズ分解実測（`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+/// §15）で、出力確保 `alloc_c` が `iter_total` に対し実測上意味を持つのは
+/// DGX Spark GB10 の N=2048（4,194,304 要素 = 16 MiB）のみで、N=1024
+/// （1,048,576 要素）以下は無視できる水準（24.3 µs 未満）だった。この
+/// しきい値未満は従来どおり [`zeroed_output_with_threshold`] 内で
+/// `vec![0.0f32; len]`（calloc 相当の逐次ゼロ確保）を使い、既存経路と
+/// 完全同一のまま変更しない。
+///
+/// **本番既定は `usize::MAX`（並列分岐を常に無効化）。** イシュー #1299
+/// の M4 Max スモーク実測（`docs/perf/logs/cpu-matmul-fixed-cost-1299/`）
+/// で、N=2048（この分岐の対象形状そのもの）の `alloc_c` が逐次経路比
+/// 約 3〜22 倍・`ops_gemm`（本番合成）が 5 run 符号一貫で中央値約 29%
+/// 後退することを確認したため（`docs/perf/cpu-matmul-fixed-cost-
+/// impl.md` 参照）。macOS 上の `vec![0.0f32; len]`（`alloc_zeroed`
+/// 相当）は OS の遅延ゼロページをそのまま返し、ページフォールトは
+/// カーネル本体が実際に書き込む時点（`kernel` 区間）まで遅延される
+/// 一方、`Vec::with_capacity` + 並列書き込みは全ページのフォールトを
+/// `alloc_c` 区間内へ前倒しで発生させる。この前倒しコストが並列化の
+/// 利得を上回った（`kernel` 側で元々ノイズに埋もれていたフォールト
+/// コストが `alloc_c` 側で顕在化しただけで、単純な「並列化で速くなる」
+/// という §3.C の当初仮説とは逆の結果）。この機構は macOS 固有の可能性
+/// があり、Linux（DGX Spark GB10）の glibc heap 経路では §3.C の当初
+/// 仮説（calloc の memset が `alloc_c` に計上される）が依然成り立ちうる
+/// ため、イシュー #1301 が DGX 実機実測で有効化可否を判断する
+/// （`docs/cpu-matmul-fixed-cost-design.md` §10）。有効化する場合は
+/// `2 << 20`（8 MiB 相当。設計時の暫定値）等へ差し替える。
+pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = usize::MAX;
+
+/// [`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`] 以上の並列ゼロ書き込みにおける
+/// rayon チャンク粒度（要素数。イシュー #1299）。`with_min_len` へ渡し
+/// 過分割（タスク生成オーバーヘッドがゼロ書き込み自体を上回る）を防ぐ。
+/// 256 KiB 分（`1 << 16` 要素 × 4 byte）はページ粒度（4〜16 KiB）より
+/// 十分大きく、`gemm_blis` 側の並列粒度（`gemm_blis/mod.rs` の行パネル
+/// 分割）と同じオーダーの経験則値。
+pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_CHUNK_ELEMS: usize = 1 << 16;
+
+/// `CpuBackendOps::gemm` の出力バッファ確保（イシュー #1299。設計は
+/// `docs/cpu-matmul-fixed-cost-design.md` §3.C 案 1a）。
+/// [`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`] しきい値で分岐する:
+///
+/// - 未満: `vec![0.0f32; len]`（従来どおり。calloc 相当の逐次ゼロ確保）
+/// - 以上: `Vec::with_capacity(len)`（非ゼロ確保）へ rayon で並列に
+///   `0.0f32` を書き込む（`RepeatN` を `with_min_len` で粗くチャンク
+///   分割し `collect_into_vec` で埋める）。ゼロ書き込みを複数スレッドへ
+///   分散することで、単一スレッドが `len` 全体を触る（calloc の遅延
+///   ページフォールト解決も含め）経路より `alloc_c` 区間の実測時間を
+///   縮める狙い（§3.C の仮説。機構検証〈page fault 計数〉は #1301 へ
+///   引き継ぎ）
+///
+/// どちらの分岐も返す `Vec<f32>` は「長さ `len`・全要素 `0.0f32`」で
+/// 意味的に同一（`zeroed_output_tests` で全要素 `to_bits() == 0` を
+/// 固定）。`gemm_blis_parallel` 系カーネルは出力へ蓄積するだけ
+/// （読み出さない）契約のため、ゼロ書き込みの順序・並列度は後続の
+/// `C = A @ B` の bit 完全一致に影響しない
+/// （`tests/gemm_output_alloc_bit_exact.rs` で回帰確認）。`unsafe` は
+/// 使わない（`set_len`／`alloc_zeroed` 直呼び等は設計上不採用。
+/// `docs/cpu-matmul-fixed-cost-design.md` §3.C・ユーザー承認事項）。
+pub(crate) fn zeroed_output_with_threshold(len: usize, min_elems: usize) -> Vec<f32> {
+    if len < min_elems {
+        return vec![0.0f32; len];
+    }
+    use rayon::iter::{IndexedParallelIterator, repeat_n};
+    let mut out = Vec::with_capacity(len);
+    repeat_n(0.0f32, len)
+        .with_min_len(GEMM_OUTPUT_PARALLEL_ZERO_MIN_CHUNK_ELEMS)
+        .collect_into_vec(&mut out);
+    out
+}
+
+/// [`zeroed_output_with_threshold`] を本番既定しきい値
+/// （[`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`]）で呼ぶ薄いラッパー
+/// （`CpuBackendOps::gemm` の唯一の呼び出し口。イシュー #1299）。
+pub(crate) fn zeroed_output(len: usize) -> Vec<f32> {
+    zeroed_output_with_threshold(len, GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS)
+}
+
 /// `gemm`／`gemm_fp32_strict_into` 共通の転置判定付きディスパッチ
 /// （イシュー #1213 の NT/TN 入口を #1212 の staging 直接書き込み経路
 /// でも共有する。codex-review P2・PR #1224）。`out` は呼び出し元が
@@ -464,12 +542,17 @@ impl BackendOps for CpuBackendOps {
     /// 外）。フォールバックでオペランドを再パックした回数は
     /// `GEMM_HOST_REPACK_COUNT` へ計上する（可観測点。`backend-metal::
     /// ops::upload_operand_for_resident_gemm` と同型の設計）。
+    ///
+    /// 出力バッファの確保は `zeroed_output`（イシュー #1299）へ委譲する。
+    /// `m*n` がしきい値以上なら rayon 並列ゼロ書き込みへ切り替わるが、
+    /// カーネル呼び出し契約・累積セマンティクスは不変（`gemm` 自体は
+    /// 変更なし）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
-        let mut out = vec![0.0f32; m * n];
+        let mut out = zeroed_output(m * n);
         gemm_into_slice(a, b, &mut out, m, n, k, "gemm")?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
@@ -1272,6 +1355,134 @@ mod repack_count_tests {
             counter(),
             before + 2,
             "両方転置（TT）は両オペランドとも contiguous() フォールバックを通るはず"
+        );
+    }
+
+    /// 本番 NN（転置なし）経路では `GEMM_HOST_REPACK_COUNT` が増えない
+    /// ことを固定する回帰（イシュー #1299・設計 §3.A「本番 NN 経路で
+    /// contiguous コピーは発生していない」の確認。`docs/cpu-matmul-
+    /// fixed-cost-design.md` §3.A は変更なしと結論づけたため、この
+    /// 結論をテストで固定し将来の意図しない後退を検知する）。
+    #[test]
+    fn gemm_nn_does_not_increment_repack_counter() {
+        reset_counter();
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32; 4 * 3], &[4, 3]).unwrap();
+        let b = Tensor::new(vec![1.0f32; 3 * 5], &[3, 5]).unwrap();
+        let before = counter();
+        ops.gemm(&a, &b).unwrap();
+        assert_eq!(
+            counter(),
+            before,
+            "本番 NN 経路（両オペランドとも転置なし・contiguous）は \
+             contiguous() フォールバックを通らないはず"
+        );
+    }
+}
+
+/// [`zeroed_output`]／[`zeroed_output_with_threshold`]（イシュー #1299）
+/// の意味論を固定するクレート内テスト。実際の bit 完全一致回帰は
+/// `tests/gemm_output_alloc_bit_exact.rs`（統合テスト）が担当し、本
+/// モジュールはヘルパー自体の契約（長さ・全要素ゼロ・両分岐・境界値）
+/// のみを検証する。
+#[cfg(test)]
+mod zeroed_output_tests {
+    use super::*;
+
+    fn assert_all_zero_bits(v: &[f32], len: usize) {
+        assert_eq!(v.len(), len);
+        assert!(
+            v.iter().all(|x| x.to_bits() == 0),
+            "全要素が bit 表現で 0.0f32（符号なしゼロ）であるはず"
+        );
+    }
+
+    #[test]
+    fn below_threshold_uses_sequential_path() {
+        let len = 1024;
+        let out = zeroed_output_with_threshold(len, 2048);
+        assert_all_zero_bits(&out, len);
+    }
+
+    #[test]
+    fn at_threshold_uses_parallel_path() {
+        // len == min_elems ちょうど: 「以上」分岐（並列経路）に入る境界。
+        let min_elems = 4096;
+        let out = zeroed_output_with_threshold(min_elems, min_elems);
+        assert_all_zero_bits(&out, min_elems);
+    }
+
+    #[test]
+    fn above_threshold_uses_parallel_path() {
+        let min_elems = 4096;
+        let len = min_elems + 1;
+        let out = zeroed_output_with_threshold(len, min_elems);
+        assert_all_zero_bits(&out, len);
+    }
+
+    #[test]
+    fn zero_length_both_branches() {
+        assert_all_zero_bits(&zeroed_output_with_threshold(0, 0), 0);
+        assert_all_zero_bits(&zeroed_output_with_threshold(0, 1), 0);
+    }
+
+    #[test]
+    fn default_wrapper_matches_production_threshold() {
+        // 本番既定しきい値は `usize::MAX`（並列分岐は常に無効。#1299 の
+        // M4 Max スモークが N=2048 で後退を確認したため。イシュー #1301
+        // が DGX 実機実測で有効化可否を判断するまでの暫定値）。
+        // したがって `zeroed_output` は現実的なサイズでは常に「未満」
+        // 分岐（逐次経路）へ入る。並列分岐自体は
+        // `above_threshold_uses_parallel_path`／`at_threshold_uses_parallel_path`
+        // が明示的な小さいしきい値を渡して別途カバーする。
+        let len = 1usize << 24; // 16M 要素（64 MiB）でも usize::MAX 未満。
+        assert_all_zero_bits(&zeroed_output(len), len);
+    }
+
+    /// 本番既定しきい値が無効化状態（`usize::MAX`）であることを固定する
+    /// 回帰（イシュー #1299。#1301 が DGX 実機実測で有効化する際は本
+    /// テストの期待値も合わせて更新する）。
+    #[test]
+    fn default_threshold_is_disabled_pending_dgx_measurement() {
+        assert_eq!(
+            GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS,
+            usize::MAX,
+            "M4 Max での後退確認（#1299）により本番既定は並列分岐を \
+             無効化した状態であるはず。DGX 実機実測（#1301）で有効化 \
+             する場合は本テストの期待値も更新すること"
+        );
+    }
+
+    /// 並列ゼロ書き込み分岐（本番既定では `usize::MAX` により到達不能。
+    /// 明示的にしきい値 0 を渡して強制する）を実際の GEMM カーネルへ
+    /// 通した結果が、逐次ゼロ確保（`vec![0.0f32; ..]`）経由の結果と
+    /// bit 完全一致することを確認する（イシュー #1299・codex-review
+    /// 相当の指摘: 統合テスト `tests/gemm_output_alloc_bit_exact.rs` は
+    /// 本番既定が無効化されたことで並列分岐を実走できなくなったため、
+    /// クレート内テストで並列分岐自体の正しさを別途固定する）。
+    #[test]
+    fn parallel_branch_output_matches_sequential_branch_through_kernel() {
+        let (m, k, n) = (37usize, 65usize, 33usize);
+        let a: Vec<f32> = (0..m * k).map(|i| (i % 13) as f32 * 0.5 - 3.0).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| (i % 11) as f32 * 0.25 - 1.0).collect();
+
+        // 並列分岐を強制（min_elems=0 は「常に以上」を意味する）。
+        let mut parallel_out = zeroed_output_with_threshold(m * n, 0);
+        gemm_blis_parallel(&a, &b, &mut parallel_out, m, n, k)
+            .expect("gemm_blis_parallel must succeed (parallel branch)");
+
+        // 逐次分岐を強制（min_elems=usize::MAX は「常に未満」を意味する）。
+        let mut sequential_out = zeroed_output_with_threshold(m * n, usize::MAX);
+        gemm_blis_parallel(&a, &b, &mut sequential_out, m, n, k)
+            .expect("gemm_blis_parallel must succeed (sequential branch)");
+
+        let parallel_bits: Vec<u32> = parallel_out.iter().map(|x| x.to_bits()).collect();
+        let sequential_bits: Vec<u32> = sequential_out.iter().map(|x| x.to_bits()).collect();
+        assert_eq!(
+            parallel_bits, sequential_bits,
+            "並列ゼロ書き込み分岐を通した GEMM 結果は逐次ゼロ確保分岐と \
+             bit 完全一致するはず（カーネル入口で C が全要素ゼロである \
+             限りゼロ書き込みの並列度は出力に影響しない契約。設計 §4）"
         );
     }
 }

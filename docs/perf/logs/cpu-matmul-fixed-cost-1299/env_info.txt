@@ -1,0 +1,22 @@
+# 実行環境情報（イシュー #1299。内部ホスト名・機体識別子は含めない）
+
+機種: Apple M4 Max 前提（CLAUDE.md 記載の実機検証環境。system_profiler は
+  本セッションでは実行していない）
+OS: macOS 26.6.2（BuildVersion 25G83。`sw_vers` 実測）
+hw.perflevel0.logicalcpu（大コア論理数）: 12
+hw.logicalcpu（総論理数）: 16
+uname -m: arm64
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+cargo: 1.96.0 (30a34c682 2026-05-25)
+HEAD sha（base origin/main）: 2d013a0424da84d64488ba8ea4912012765c8335
+
+負荷観測（uptime。共有マシンで他ユーザーのセッションが多数常駐。19 users）:
+  実行前: load averages 9.13 9.18 10.89
+
+注記: 本セッションは共有マシン上の隔離 worktree での実行であり、
+  `docs/perf/logs/metal-gemm-unroll-acc-ab-1284/` 等の先例と同様に
+  load average が高いスモーク参考値であることに留意する。#1299 の
+  スモーク計測（M4 Max）はあくまで参考値であり、削減効果を実測で
+  確認できるのは DGX Spark GB10（#1301 が担当）のみ（設計 §15 表の
+  結論。N=512/1024・M4 Max 全形状では `alloc_c` の寄与自体が
+  無視できる水準）。
