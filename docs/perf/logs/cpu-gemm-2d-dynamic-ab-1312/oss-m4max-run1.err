@@ -1,0 +1,9 @@
+oss-gemm-compare: commit=f719012 hw=macos/aarch64 (16 logical cores) rayon_threads=16
+::warning::size=1024 出力不一致（matrixmultiply）: matrixmultiply: index=5119 reference=-0.0021471737 candidate=-0.0021572113 abs_diff=0.000010037562 rel_diff=0.004653027
+::warning::size=2048 出力不一致（matrixmultiply）: matrixmultiply: index=1988 reference=-0.0072821276 candidate=-0.00727129 abs_diff=0.000010837801 rel_diff=0.001488274
+::warning::size=4096 出力不一致（matrixmultiply）: matrixmultiply: index=117 reference=0.012689356 candidate=0.012704611 abs_diff=0.000015255064 rel_diff=0.0012007502
+::warning::size=4096 出力不一致（gemm crate）: gemm: index=858 reference=0.0038044143 candidate=0.0037908554 abs_diff=0.0000135588925 rel_diff=0.0035639894
+oss-gemm-compare: commit=f719012 hw=macos/aarch64 (16 logical cores) rayon_threads=16
+::warning::size=4096 出力不一致（matrixmultiply）: matrixmultiply: index=117 reference=0.012689356 candidate=0.012704611 abs_diff=0.000015255064 rel_diff=0.0012007502
+::warning::size=4096 出力不一致（gemm crate）: gemm: index=858 reference=0.0038044143 candidate=0.0037908554 abs_diff=0.0000135588925 rel_diff=0.0035639894
+::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。各 JSON Lines レコードの output_match / mismatch_detail を参照。既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。

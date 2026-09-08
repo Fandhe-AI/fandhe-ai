@@ -1,0 +1,3 @@
+2026-09-08T02:08:31Z
+11:08  up 19 days, 22:21, 19 users, load averages: 34.71 41.57 29.62
+gate NOT PASSED (shared load, load avg ~37-60 vs threshold 6). proceeding under 共有負荷下 per plan §4.1 condition 7 fallback.
