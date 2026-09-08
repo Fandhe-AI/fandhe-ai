@@ -16,7 +16,15 @@ HEAD sha: 52406200f6102bf64cf512451b372bcdd56d81c8
 - 実測: 30 回全試行で load average(1 分) >= 2.40（最小 2.40・最大 6.92・
   平均 4.28）。1 度も 2.0 未満に落ちなかった（`count_below_2.0=0`）
 - GPU プロセス検出（watchlist: cargo|rustc|bench|gemm_|python|torch|mlx）:
-  全 30 試行で `proc_count=0`（自プロセス・本 example 以外に該当なし）
+  全 30 試行で `proc_count=0` と記録されていたが、**この値は「該当
+  プロセスなし」の根拠にならない（訂正。codex-review 指摘・PR #1457。
+  詳細は `docs/perf/metal-gemm-transpose-tiled.md` §5.6 訂正節）**:
+  当時の `1261-orchestrate.sh` は `pgrep -fl -E "${GPU_WATCH_PATTERN}"`
+  を呼んでいたところ、macOS（BSD）の `pgrep` に `-E` オプションは
+  存在せず毎回コマンド自体が失敗しており、実際には他 GPU プロセスの
+  有無を一切検査できていなかった（検出失敗のため不明）。ただし
+  ゲート判定結果自体（30 回とも不通過）は load average 条件が単独で
+  全試行を不通過にしているため本バグの影響を受けない
 - 判定: **gate_not_passed**（30 回試行後）。マーカー
   `1261-GATE_NOT_PASSED.marker` を出力し計測を実行せず終了
 

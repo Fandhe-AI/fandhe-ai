@@ -54,13 +54,51 @@ GATE_LOG="${LOGDIR}/1261-gate.log"
 # ビルド/ベンチ系プロセスを検出する（計画 §3.1「GPU プロセス確認」）。
 GPU_WATCH_PATTERN='cargo|rustc|bench|gemm_|python|torch|mlx'
 
+# 自プロセス（このオーケストレータの shell 自身）の PID。
+#
+# 注意（codex-review 指摘・PR #1457）: 以前は `pgrep` の出力を
+# `grep -v "1261-orchestrate.sh"` / `grep -v "gemm_transpose_route_ab_bench"`
+# という**名前一致**で除外していたため、同一マシンで並走する別ワーク
+# ツリー・別セッションが起動した同名のオーケストレータ／同じ example
+# バイナリ（＝実際に排他性を脅かす競合プロセス）まで無差別に除外して
+# しまい、排他ゲートが競合を見逃しうる不整合があった。除外は「自分
+# 自身の PID」のみに限定する（この gate ループの時点では
+# `run_one`／`${BINARY}` はまだ起動していないため、自プロセス除外は
+# この shell の PID だけで十分。`run_one` 内の snapshot／サンプリング
+# 呼び出しも `${BINARY}` を同期的に起動・待機した後に行うため同様）。
+SELF_PID=$$
+
 # load average の 1 分値を取り出す（macOS `uptime` の
-# "load averages: 1.23 4.56 7.89" 形式）。
+# "load averages: 1.23 4.56 7.89" 形式）。標準出力へ値を書き、
+# 取得・解析の成否を戻り値で伝える（0=成功・非 0=失敗）。
+#
+# 注意（codex-review 指摘・PR #1457）: 以前は `uptime` の起動失敗・
+# 出力形式不一致を検査していなかった。`sed` が一致しなかった場合
+# `current_load1` は `uptime` の出力全体（数値ではない文字列）を
+# そのまま返し、呼び出し元の `awk -v l="${load1}" ... 'BEGIN{exit !(l<t)}'`
+# は awk の数値変換規則により非数値文字列を 0 として扱う（`uptime`
+# コマンド自体が失敗して `load1=""` になった場合も同様）。0 は閾値
+# 2.0 未満を満たすため、取得に失敗しているにもかかわらずゲートを
+# 誤って通過させてしまう可能性があった。ここで取得成功・数値形式
+# （`[0-9]+(\.[0-9]+)?`）を検証し、失敗時は非 0 を返して呼び出し元が
+# fail-closed に扱えるようにする。
 current_load1() {
-    uptime | sed -E 's/.*load averages?: *([0-9.]+).*/\1/'
+    local out
+    out="$(uptime 2>/dev/null)"
+    local uptime_status=$?
+    if [ "${uptime_status}" -ne 0 ]; then
+        return 1
+    fi
+    local val
+    val="$(printf '%s\n' "${out}" | sed -E 's/.*load averages?: *([0-9.]+).*/\1/')"
+    if ! printf '%s' "${val}" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+        return 1
+    fi
+    printf '%s' "${val}"
+    return 0
 }
 
-# 自プロセス（オーケストレータ）・本 example 以外の該当プロセスを
+# 自プロセス（オーケストレータ = `${SELF_PID}`）以外の該当プロセスを
 # 検出し、伏字化して1行ずつ出す（0 件なら何も出さない）。
 #
 # 注意（codex-review 指摘・PR #1457）: macOS（BSD）の `pgrep` に `-E`
@@ -84,8 +122,7 @@ gpu_watch_processes() {
         return 2
     fi
     printf '%s\n' "${pgrep_out}" \
-        | grep -v "1261-orchestrate.sh" \
-        | grep -v "gemm_transpose_route_ab_bench" \
+        | awk -v self="${SELF_PID}" '{ if ($1 != self) print }' \
         | grep -v '^$' \
         | sed -E "${SANITIZE_SED}"
     return 0
@@ -96,6 +133,7 @@ gate_passed=0
 prev_ok=0
 for attempt in $(seq 1 "${GATE_MAX_ATTEMPTS}"); do
     load1="$(current_load1)"
+    load1_status=$?
     procs="$(gpu_watch_processes)"
     pgrep_check_status=$?
     proc_count=0
@@ -103,18 +141,23 @@ for attempt in $(seq 1 "${GATE_MAX_ATTEMPTS}"); do
         proc_count=$(printf '%s\n' "${procs}" | grep -c .)
     fi
     ok=0
+    # load1_status != 0（`uptime` 起動失敗・出力形式不一致）の場合は
+    # 「load average を検査できていない」として fail-closed に ok=0
+    # とする（codex-review 指摘・PR #1457。空文字列・非数値の
+    # `load1` を awk の数値変換規則に委ねると 0 未満扱いになり
+    # ゲートを誤通過しうるため、ここで明示的に弾く）。
     # pgrep_check_status != 0（起動失敗。「一致なし」を意味する 1 は
     # gpu_watch_processes 内部で正常系として吸収済みのためここでは
-    # 現れない）の場合は「検査できていない」として fail-closed に
-    # ok=0 とする（誤って proc_count=0 のままゲート通過させない）。
-    if [ "${pgrep_check_status}" -eq 0 ] \
+    # 現れない）の場合も同様に「検査できていない」として fail-closed
+    # に ok=0 とする（誤って proc_count=0 のままゲート通過させない）。
+    if [ "${load1_status}" -eq 0 ] && [ "${pgrep_check_status}" -eq 0 ] \
         && awk -v l="${load1}" -v t="${GATE_LOAD_THRESHOLD}" 'BEGIN{exit !(l<t)}'; then
         if [ "${proc_count}" -eq 0 ]; then
             ok=1
         fi
     fi
     {
-        echo "attempt=${attempt} load1=${load1} proc_count=${proc_count} pgrep_check_status=${pgrep_check_status} ok=${ok}"
+        echo "attempt=${attempt} load1=${load1} load1_status=${load1_status} proc_count=${proc_count} pgrep_check_status=${pgrep_check_status} ok=${ok}"
         if [ -n "${procs}" ]; then
             printf '%s\n' "${procs}" | sed 's/^/  matched: /'
         fi

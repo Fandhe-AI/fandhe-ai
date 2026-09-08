@@ -32,6 +32,27 @@ ROUND_RE = re.compile(r"^phase1_gpu_host_round\s+(.*)$")
 # `gemm_transpose_route_ab_bench.rs:596`）。
 CFG_TAIL_RE = re.compile(r"resolved_cfg=(?P<cfg>.*) valid=(?P<valid>true|false)\s*$")
 
+# `phase1_gpu_host_stats size=<N> rounds=<M> ...`（1 サイズの計測が完了
+# した時点で 1 回だけ出力される完了行。`format_gpu_host_size_line`・
+# `gemm_transpose_route_ab_bench.rs:753`）。`size=`／`rounds=` は常に
+# 先頭の空白区切りトークンとして現れる（後続の
+# `kernel_gpu_round_medians_secs=`／`wall_round_medians_secs=` はカンマ
+# 区切りリストのため単純な空白トークナイズでは壊れるが、先頭 2 トークン
+# の抽出には影響しない）。
+STATS_RE = re.compile(r"^phase1_gpu_host_stats\s+size=(?P<size>\d+)\s+rounds=(?P<rounds>\d+)\b")
+
+# 1 サイズあたりの計画ラウンド数（`gemm_transpose_route_ab_bench.rs`
+# `const ROUNDS: usize = 10`。フェーズ 1／2 共通のコンパイル時定数——
+# codex-review 指摘・PR #1457: 収集できた `phase1_gpu_host_round` 行数
+# から期待ラウンド数を逆算していたため、計測が先頭から連番のまま途中で
+# 打ち切られたログ（例: round=0..2 の 3 行のみ）でも
+# `round_idxs == range(len(rounds))` の連番整合性チェックを通過し
+# 「完全な系列」として誤って確定的な帰属を出しうる不整合があった。
+# 期待ラウンド数を外部定数として持ち、かつ当該サイズの完了行
+# （`phase1_gpu_host_stats`）自体の有無を検証することで、系列途中
+# 打ち切りを NA へ倒す）。
+EXPECTED_ROUNDS = 10
+
 
 def parse_kv_line(rest: str) -> dict[str, str]:
     """`key=value` トークン列（`resolved_cfg`/`valid` を除き値に空白を
@@ -85,11 +106,36 @@ class RunLog:
     # できたもの（codex-review 指摘・PR #1457: 欠落・解析失敗を含む
     # サイズを黙って除外せず NA として明示するための帰属先集合）。
     incomplete_sizes: set[int] = field(default_factory=set)
+    # `phase1_gpu_host_stats`（完了行）が観測できたサイズ → その行が
+    # 報告した `rounds=` 値（codex-review 指摘・PR #1457。完了行自体が
+    # 存在しないサイズは「計測が完了する前にログが打ち切られた」ことの
+    # 直接証拠であり、収集できた `phase1_gpu_host_round` 行数だけからは
+    # 判別できない）。
+    completed_size_rounds: dict[int, int] = field(default_factory=dict)
 
     def rounds_for_size(self, size: int) -> list[RoundSample]:
         return sorted(
             (r for r in self.rounds if r.size == size), key=lambda r: r.round_idx
         )
+
+    def is_complete_size(self, size: int) -> bool:
+        """このサイズの判定材料が「完全な系列」と扱えるかを検査する
+        （codex-review 指摘・PR #1457）。以下すべてを満たす場合のみ True:
+        - 解析失敗行から `size` のみ救出されたケースが無い
+          （`incomplete_sizes` 非該当）
+        - 完了行（`phase1_gpu_host_stats`）が観測できている
+        - 収集できたラウンド数が計画ラウンド数（`EXPECTED_ROUNDS`）と
+          一致する
+        - 収集できたラウンド数が完了行の `rounds=` 値と一致する
+          （完了行とラウンド行が異なるログ破損を検出する代理指標）
+        """
+        if size in self.incomplete_sizes:
+            return False
+        declared = self.completed_size_rounds.get(size)
+        if declared is None:
+            return False
+        n = len(self.rounds_for_size(size))
+        return n == EXPECTED_ROUNDS and n == declared
 
 
 def load_run_log(path: str) -> RunLog:
@@ -100,6 +146,12 @@ def load_run_log(path: str) -> RunLog:
             line = line.rstrip("\n")
             if line.startswith("phase1_min_warmup_override_secs="):
                 run.min_warmup_override_secs = int(line.split("=", 1)[1])
+                continue
+            m_stats = STATS_RE.match(line)
+            if m_stats:
+                run.completed_size_rounds[int(m_stats.group("size"))] = int(
+                    m_stats.group("rounds")
+                )
                 continue
             m = ROUND_RE.match(line)
             if not m:
@@ -318,7 +370,7 @@ def render_run_table(run: RunLog) -> str:
     lines.append("|---|---|---|---|---|---|---|")
     for size in SIZES:
         rounds = run.rounds_for_size(size)
-        v = classify_cell(rounds, incomplete=size in run.incomplete_sizes)
+        v = classify_cell(rounds, incomplete=not run.is_complete_size(size))
         if v is None:
             lines.append(f"| {size} | - | - | NA(no data) | - | - | - |")
             continue
@@ -346,7 +398,11 @@ def head_index_bias_summary(runs: list[RunLog]) -> str:
         total = 0
         for size in SIZES:
             rounds = run.rounds_for_size(size)
-            v = classify_cell(rounds)
+            # codex-review 指摘（PR #1457）・Cursor Bugbot 指摘（同 PR）:
+            # 以前は `incomplete` を渡していなかったため、
+            # `render_run_table` が NA にする欠損・途中打ち切りサイズが
+            # ここでは有効セルとして数えられ、両表の間で矛盾していた。
+            v = classify_cell(rounds, incomplete=not run.is_complete_size(size))
             if v is None or v.r_star < 0:
                 continue
             total += 1
@@ -482,6 +538,80 @@ def self_test() -> None:
         )
     finally:
         os.unlink(path3)
+
+    # 追加テスト（codex-review 指摘・Cursor Bugbot 指摘・PR #1457）:
+    # 計測が途中終了し、先頭から連番のまま欠落したログ（round=0..2 の
+    # 3 行のみ。`round_idxs == range(3)` の連番整合性チェックは通過
+    # するが `EXPECTED_ROUNDS=10` に満たず、かつ完了行
+    # （`phase1_gpu_host_stats`）も存在しない）を渡すと、
+    # `RunLog.is_complete_size` が False を返し、`render_run_table`
+    # （NA 表示）・`head_index_bias_summary`（total から除外）の両方が
+    # 一貫して当該サイズを除外することを検証する（以前は
+    # `head_index_bias_summary` が `incomplete` を渡さず矛盾していた）。
+    truncated_lines = []
+    for i, wall in enumerate([0.02, 0.02, 0.05]):
+        kv = dict(base)
+        kv["round"] = str(i)
+        kv["iters"] = "20"
+        kv["wall_median_secs"] = str(wall)
+        truncated_lines.append(
+            "phase1_gpu_host_round " + " ".join(f"{k}={v}" for k, v in kv.items())
+        )
+    # 完了行（`phase1_gpu_host_stats`）は意図的に出力しない
+    # （計測打ち切りを模擬する）。
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(truncated_lines) + "\n")
+        path4 = f.name
+    try:
+        run4 = load_run_log(path4)
+        assert len(run4.rounds_for_size(1024)) == 3
+        assert not run4.is_complete_size(1024), (
+            "完了行が無く EXPECTED_ROUNDS 未満のため incomplete のはず"
+        )
+        table_text = render_run_table(run4)
+        row1024 = [
+            line for line in table_text.splitlines() if line.strip().startswith("| 1024 |")
+        ]
+        assert len(row1024) == 1
+        # 列: | size | r* | gpu_share | attribution | host_subclass | ... |
+        attribution_col = row1024[0].split("|")[4].strip()
+        assert attribution_col == "NA", (
+            f"render_run_table は打ち切りサイズを NA 表示するはず: {row1024[0]}"
+        )
+        bias_text = head_index_bias_summary([run4])
+        # total_cells 列（3 列目）が 0 であること
+        # （`head_index_bias_summary` も同じ incomplete 判定で size を
+        # 除外していることの確認。以前は `classify_cell` に `incomplete`
+        # を渡さず `total` が 1 のまま数えられていた）。
+        data_row = [
+            line for line in bias_text.splitlines() if line.startswith(f"| {run4.label}")
+        ]
+        assert len(data_row) == 1
+        assert data_row[0].split("|")[3].strip() == "0", (
+            f"打ち切りサイズは total_cells から除外されるはず: {data_row[0]}"
+        )
+    finally:
+        os.unlink(path4)
+
+    # 完了行はあるが `rounds=` 値と実際の収集行数が食い違う（ログ破損の
+    # 代理検出）場合も incomplete 扱いになることを検証する。
+    mismatched_lines = list(truncated_lines)  # size=1024 の 3 ラウンド
+    mismatched_lines.append("phase1_gpu_host_stats size=1024 rounds=10 valid=3")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(mismatched_lines) + "\n")
+        path5 = f.name
+    try:
+        run5 = load_run_log(path5)
+        assert run5.completed_size_rounds.get(1024) == 10
+        assert not run5.is_complete_size(1024), (
+            "完了行の rounds= と実収集行数が食い違うため incomplete のはず"
+        )
+    finally:
+        os.unlink(path5)
 
     print("self-test: ok")
 
