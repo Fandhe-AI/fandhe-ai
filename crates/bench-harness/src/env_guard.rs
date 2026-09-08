@@ -493,6 +493,9 @@ fn parse_ioreg_device_utilization(text: &str) -> Option<u8> {
         return None;
     }
     let value: u32 = digits.parse().ok()?;
+    if value > 100 {
+        return None;
+    }
     u8::try_from(value).ok()
 }
 
@@ -742,6 +745,17 @@ mod tests {
     #[test]
     fn parse_ioreg_device_utilization_absent() {
         assert!(parse_ioreg_device_utilization("no such field").is_none());
+    }
+
+    #[test]
+    fn parse_ioreg_device_utilization_out_of_range_is_none() {
+        // ioreg の実出力は仕様上 0〜100 のみだが、doc コメントが約束する
+        // 「0〜100 に収まらない値は None」を境界値（101・255）で自己検証する
+        // （u8 の型範囲チェックのみに留まる実装への回帰を防ぐ。Review 指摘対応）。
+        let text = "  | |   \"Device Utilization %\"=101\n";
+        assert!(parse_ioreg_device_utilization(text).is_none());
+        let text = "  | |   \"Device Utilization %\"=255\n";
+        assert!(parse_ioreg_device_utilization(text).is_none());
     }
 
     // --- EnvGuardConfig::new / with_* --------------------------------
