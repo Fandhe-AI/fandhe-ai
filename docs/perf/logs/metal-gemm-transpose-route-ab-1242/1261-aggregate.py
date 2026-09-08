@@ -83,6 +83,24 @@ def parse_float_or_na(v: str) -> float | None:
         return None
 
 
+def parse_required_float_or_na(v: str) -> float | None:
+    """`kernel_gpu_median_secs`/`commit_wait_minus_gpu_median_secs` 等、
+    Rust 側で `valid=false` の場合にのみ `NA` を出力する契約のフィールド
+    用パーサ（`format_gpu_host_round_line`・`gemm_transpose_route_ab_
+    bench.rs:596` 参照）。文字列 `"NA"` は正当な欠損（`None`）として
+    受理するが、キー自体が無い場合は呼び出し元の `kv[...]`（`.get` では
+    ない）で `KeyError` になり、数値にもならず `"NA"` でもない値は
+    `ValueError` を送出する——いずれも他の必須フィールドと同じ
+    `except (KeyError, ValueError)` で `incomplete_sizes` へ倒れる
+    （codex-review 指摘・PR #1457: 従来の `parse_float_or_na` は
+    パース不能値も無条件に `None` へ変換していたため、`valid=true` の
+    行で本来 `incomplete` とすべき欠損・破損を静かに見逃していた）。
+    """
+    if v == "NA":
+        return None
+    return float(v)
+
+
 @dataclass
 class RoundSample:
     size: int
@@ -91,6 +109,15 @@ class RoundSample:
     wall_median_secs: float
     kernel_gpu_median_secs: float | None
     commit_wait_median_secs: float
+    # Rust 側（`aggregate_gpu_host_round`）が**ラウンド内の iters 個の
+    # サンプルごとに** `commit_wait - kernel_gpu` を計算してから中央値化
+    # した値（`commit_wait_median_secs - kernel_gpu_median_secs` とは
+    # 一般に一致しない。中央値の非線形性）。`kernel_gpu_median_secs` と
+    # 同じ理由で `valid=false` のときのみ `None`
+    # （`gemm_transpose_route_ab_bench.rs:563` 周辺参照）。
+    # host_subclass 判定はラウンド**間**の中央値化が必要なため、Python
+    # 側で再計算せずこの記録済み値を使う（codex-review 指摘・PR #1457）。
+    commit_wait_minus_gpu_median_secs: float | None
     upload_median_secs: float
     alloc_median_secs: float
     encode_median_secs: float
@@ -164,10 +191,19 @@ def load_run_log(path: str) -> RunLog:
                         round_idx=int(kv["round"]),
                         valid=(kv.get("valid") == "true"),
                         wall_median_secs=float(kv["wall_median_secs"]),
-                        kernel_gpu_median_secs=parse_float_or_na(
-                            kv.get("kernel_gpu_median_secs", "NA")
+                        # `kv[...]`（`.get` ではない）でキー欠落を
+                        # `KeyError` として検出し、`parse_required_float_
+                        # or_na` で `"NA"` 以外のパース不能値を
+                        # `ValueError` として検出する（codex-review
+                        # 指摘・PR #1457）。いずれも下の except で
+                        # `incomplete_sizes` へ倒れる。
+                        kernel_gpu_median_secs=parse_required_float_or_na(
+                            kv["kernel_gpu_median_secs"]
                         ),
                         commit_wait_median_secs=float(kv["commit_wait_median_secs"]),
+                        commit_wait_minus_gpu_median_secs=parse_required_float_or_na(
+                            kv["commit_wait_minus_gpu_median_secs"]
+                        ),
                         upload_median_secs=float(kv["upload_median_secs"]),
                         alloc_median_secs=float(kv["alloc_median_secs"]),
                         encode_median_secs=float(kv["encode_median_secs"]),
@@ -292,25 +328,28 @@ def classify_cell(
     if r_star_round.kernel_gpu_median_secs is not None and kgpu_med is not None:
         delta_kgpu = r_star_round.kernel_gpu_median_secs - kgpu_med
 
-    # `commit_wait_minus_gpu` の基準値は「ラウンドごとの
-    # (commit_wait - kernel_gpu) の系列」の中央値であって、
-    # `median(commit_wait) - median(kernel_gpu)` ではない
-    # （一般に一致しない。codex-review 指摘・PR #1457）。
+    # `commit_wait_minus_gpu` の基準値は、ログに既に記録済みの
+    # `commit_wait_minus_gpu_median_secs`（Rust 側 `aggregate_gpu_host_
+    # round` がラウンド内の iters サンプルごとに commit_wait -
+    # kernel_gpu を計算してから中央値化した値。§5.5 契約）の
+    # ラウンド**間**中央値であって、`r.commit_wait_median_secs -
+    # r.kernel_gpu_median_secs`（ラウンド中央値どうしの差分。中央値の
+    # 非線形性により記録済み値と一般に一致しない）を Python 側で
+    # 再計算した値ではない（codex-review 指摘・PR #1457）。
     commit_minus_gpu_series = [
-        r.commit_wait_median_secs - r.kernel_gpu_median_secs
+        r.commit_wait_minus_gpu_median_secs
         for r in rounds
-        if r.kernel_gpu_median_secs is not None
+        if r.commit_wait_minus_gpu_median_secs is not None
     ]
     commit_minus_gpu_med = median(commit_minus_gpu_series)
     delta_commit_minus_gpu = None
     if (
-        r_star_round.kernel_gpu_median_secs is not None
+        r_star_round.commit_wait_minus_gpu_median_secs is not None
         and commit_minus_gpu_med is not None
     ):
-        r_commit_minus_gpu = (
-            r_star_round.commit_wait_median_secs - r_star_round.kernel_gpu_median_secs
+        delta_commit_minus_gpu = (
+            r_star_round.commit_wait_minus_gpu_median_secs - commit_minus_gpu_med
         )
-        delta_commit_minus_gpu = r_commit_minus_gpu - commit_minus_gpu_med
 
     delta_upload = r_star_round.upload_median_secs - upload_med if upload_med is not None else 0.0
     delta_alloc = r_star_round.alloc_median_secs - alloc_med if alloc_med is not None else 0.0
@@ -423,6 +462,11 @@ def self_test() -> None:
         valid="true",
         kernel_gpu_median_secs="0.010",
         commit_wait_median_secs="0.011",
+        # Rust 側が iters サンプルごとに計算してから中央値化した値
+        # （commit_wait_median_secs - kernel_gpu_median_secs とは別の
+        # 記録済みフィールド。ここでは合成データのため両者を一致させて
+        # 単純化する）。
+        commit_wait_minus_gpu_median_secs="0.001",
         upload_median_secs="0.001",
         alloc_median_secs="0.0005",
         encode_median_secs="0.0002",
@@ -437,6 +481,7 @@ def self_test() -> None:
         if i == 2:
             kv["kernel_gpu_median_secs"] = "0.04"
             kv["commit_wait_median_secs"] = "0.041"
+            kv["commit_wait_minus_gpu_median_secs"] = "0.001"
         line = "phase1_gpu_host_round " + " ".join(f"{k}={v}" for k, v in kv.items())
         sample_lines.append(line)
 
@@ -504,18 +549,24 @@ def self_test() -> None:
     #   旧実装なら       delta = 0.010 - 0.001 = 0.009
     diff_lines = []
     diff_base = dict(base)
+    # 4 要素目は Rust 側が記録済みの `commit_wait_minus_gpu_median_secs`
+    # を模す（このテストでは合成 1 ラウンド 1 サンプル相当のため
+    # commit_v - kgpu_v と一致させている。python 側が再計算するのでは
+    # なくこの記録済み値をそのまま読む契約を検証する。codex-review
+    # 指摘・PR #1457）。
     triples = [
-        (0.02, "0.011", "0.010"),
-        (0.05, "0.020", "0.010"),  # r*: wall 最大
-        (0.02, "0.005", "0.001"),
+        (0.02, "0.011", "0.010", "0.001"),
+        (0.05, "0.020", "0.010", "0.010"),  # r*: wall 最大
+        (0.02, "0.005", "0.001", "0.004"),
     ]
-    for i, (wall_v, commit_v, kgpu_v) in enumerate(triples):
+    for i, (wall_v, commit_v, kgpu_v, diff_v) in enumerate(triples):
         kv = dict(diff_base)
         kv["round"] = str(i)
         kv["iters"] = "20"
         kv["wall_median_secs"] = str(wall_v)
         kv["commit_wait_median_secs"] = commit_v
         kv["kernel_gpu_median_secs"] = kgpu_v
+        kv["commit_wait_minus_gpu_median_secs"] = diff_v
         diff_lines.append(
             "phase1_gpu_host_round " + " ".join(f"{k}={v}" for k, v in kv.items())
         )
@@ -612,6 +663,53 @@ def self_test() -> None:
         )
     finally:
         os.unlink(path5)
+
+    # 追加テスト（codex-review 指摘・PR #1457）: `valid=true` の行で
+    # `kernel_gpu_median_secs` キー自体が欠落した場合（ログ破損・
+    # フォーマット不整合の想定）、以前は `parse_float_or_na` が黙って
+    # `None` へ変換し `incomplete_sizes` に記録しなかったため、
+    # 他ラウンドの GPU 中央値だけで確定的な帰属が出てしまっていた。
+    # 10 ラウンド分揃った「完全な系列」（完了行の rounds= とも一致）
+    # であっても、この欠落 1 行だけで当該サイズ全体が incomplete に
+    # 倒れることを検証する。
+    missing_key_lines = []
+    for i in range(10):
+        kv = dict(base)
+        kv["round"] = str(i)
+        kv["iters"] = "20"
+        kv["wall_median_secs"] = "0.02"
+        if i == 5:
+            del kv["kernel_gpu_median_secs"]
+        missing_key_lines.append(
+            "phase1_gpu_host_round " + " ".join(f"{k}={v}" for k, v in kv.items())
+        )
+    missing_key_lines.append("phase1_gpu_host_stats size=1024 rounds=10 valid=9")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(missing_key_lines) + "\n")
+        path6 = f.name
+    try:
+        run6 = load_run_log(path6)
+        assert len(run6.rounds_for_size(1024)) == 9, (
+            f"kernel_gpu_median_secs 欠落行は救出されず 9 ラウンドのはず: "
+            f"{len(run6.rounds_for_size(1024))}"
+        )
+        assert 1024 in run6.incomplete_sizes, (
+            "kernel_gpu_median_secs 欠落行から size は救出され incomplete_sizes に記録されるはず"
+        )
+        assert not run6.is_complete_size(1024), (
+            "kernel_gpu_median_secs 欠落により incomplete のはず"
+        )
+        v6 = classify_cell(
+            run6.rounds_for_size(1024), incomplete=not run6.is_complete_size(1024)
+        )
+        assert v6 is not None
+        assert v6.attribution == "NA", (
+            f"kernel_gpu_median_secs 欠落サイズは NA のはず: {v6.attribution}"
+        )
+    finally:
+        os.unlink(path6)
 
     print("self-test: ok")
 
