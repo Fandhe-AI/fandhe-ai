@@ -1,4 +1,4 @@
-   Compiling fandhe-ai-backend-cpu v0.7.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_209997e6-39f-52/crates/backend-cpu)
+   Compiling fandhe-ai-backend-cpu v0.7.0 (local worktree path redacted)
 warning: unused import: `CudaSlice`
   --> crates/backend-cuda/src/gemm_mma.rs:17:19
    |
@@ -398,7 +398,7 @@ warning: methods `alloc_uninit_f16` and `upload_f16` are never used
     |                   ^^^^^^^^^^
 
 warning: `fandhe-ai-backend-cuda` (lib) generated 60 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
-   Compiling bench-harness v0.7.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_209997e6-39f-52/crates/bench-harness)
+   Compiling bench-harness v0.7.0 (local worktree path redacted)
     Finished `release` profile [optimized] target(s) in 4.62s
      Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cpu-08eb8cc2a1653da7)
 
