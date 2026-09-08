@@ -57,6 +57,13 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
+# PR #1452 codex-review P2 指摘（PRRT_kwDOTuUCJc6gKI3z）: `run_all.sh` と
+# 同じ理由で、本スクリプトも常に path patch 付きで `cargo build` する
+# ため、`bench_fandhe_pin_guard.sh` 共有のバックアップ・復元 EXIT trap
+# （`run_ab_gemm_metal.sh` と同一設計）で workspace の `Cargo.lock`
+# （承認済みピン固定）を必ず元へ戻す。
+bench_fandhe_setup_lock_restore_trap
+
 # fail-closed（AGENTS.md）: run() 内の個々の起動失敗はログに記録しつつ計測を
 # 継続する（1 回の失敗で残りの試行を打ち切らない）が、スクリプト全体としては
 # 1 件でも失敗があれば呼び出し元へ非 0 終了で伝播させる。ANY_FAILED はその

@@ -2190,10 +2190,18 @@ CPU の同一 raw JSONL から `fresh` を再集計した参考行（受け入�
 - 既定化判定: **CUDA・CPU（両実機。reuse 判定）は ADOPT**。**Metal は参考結果（暫定・ADOPT 保留）**
   — before/after が同一マシン上で連続実行されており負荷変動と readout 切替の効果を
   分離できていないため（`docs/perf/metal-gemm-candle-gate-remeasurement.md` §13.5）。
-  判定木の runtime `Device` フォールバックはいずれも導入不要
+  本節（環境 26）の計測自体は Metal も借用ビュー readout（after 腕）で実施したものだが、
+  この暫定判定を受けて codex-review（PR #1452 P2）指摘により
+  `readout_uses_borrowed_view`（`bench-fandhe/src/main.rs`）という runtime `Device`
+  フォールバックを追加実装済みで、**現在の bench-fandhe 既定動作は Metal 限定で legacy
+  経路（`to_tensor()` + `.to_vec()`）を維持する**（CPU/CUDA は借用ビュー既定のまま）。
+  したがって本節の Metal 実測値は当該フォールバック導入前のバイナリによる暫定計測であり、
+  再計測（interleave 実行等）で Metal の ADOPT が確定した場合にのみ
+  `readout_uses_borrowed_view` を `true` 固定へ変更して legacy 経路を撤去する運用とする
+  （詳細は `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13.6）
 - 詳細・実測値・candle 比表は
   `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §15・
   `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13（§13.5 に Metal の暫定判定の
-  根拠）・
+  根拠・§13.6 に runtime legacy フォールバックの実装記録）・
   `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §22（§22.2a に fresh 参考表）・
   `docs/perf/logs/gemm-candle-gate-readout-default-1438/` を参照

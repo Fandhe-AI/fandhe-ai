@@ -41,6 +41,14 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
+# PR #1452 codex-review P2 指摘（PRRT_kwDOTuUCJc6gKI3z）: 上記ガードにより
+# 本スクリプトは常に path patch（`GEMM_GATE_PATCH_FACADE_PATH`）付きで
+# `cargo build` するため、invocation-only のはずの patch 解決過程で本
+# workspace の `Cargo.lock`（承認済みピン固定）が書き換わったまま残る。
+# `bench_fandhe_pin_guard.sh` 共有のバックアップ・復元 EXIT trap
+# （`run_ab_gemm_metal.sh` と同一設計）で必ず元へ戻す。
+bench_fandhe_setup_lock_restore_trap
+
 run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
   local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh} extra_flag=${6:-}
   echo "== $bin $task $device size=$size mode=$mode extra=${extra_flag:-none} =="
