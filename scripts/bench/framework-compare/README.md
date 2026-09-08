@@ -690,7 +690,8 @@ contract-decision.md` §8（イシュー #1241 承認記録・2026-09-08）で�
   新キー反映（`parity_status`／`compare_gemm_gate.py::_parity_check` の詳細は「GEMM ゲート 5 回計測」
   節を参照）。N=2048 の GB10 再計測・判定不能解消の確認はイシュー #1260/#1262（**CUDA は
   #1260 で実測完了**: 確定判定〈未達・0.476 倍〉へ遷移。`docs/perf/cuda-gemm-candle-gate-
-  remeasurement.md` §14）
+  remeasurement.md` §14。**CPU は #1262 で実測完了**: 確定判定〈未達・0.950 倍〉へ遷移。
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19）
 
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
