@@ -91,5 +91,11 @@ THREADS=default RUNS=5 MACHINE=m4max LOGDIR="$LOGDIR" \
   bash "$SCRIPTDIR/run_ab.sh"
 AB_RC=$?
 
+if [ "$AB_RC" -ne 0 ]; then
+  echo "run_ab failed rc=$AB_RC" > "$LOGDIR/AB_FAILED.marker"
+  echo "ab failed rc=$AB_RC $(date -u +%FT%TZ)" >> "$LOGDIR/uptime-m4max.log"
+  exit "$AB_RC"
+fi
+
 echo "done." > "$LOGDIR/ALL_DONE.marker"
 echo "all done rc=$AB_RC $(date -u +%FT%TZ)" >> "$LOGDIR/uptime-m4max.log"
