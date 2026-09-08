@@ -17,7 +17,29 @@
 | Layer B 診断テストの扱い | (i) 採用（`measure_one_phase_trial` 自体を変更後の確保方式へ更新） | `crates/backend-cpu/src/gemm_reuse_phase_diag_tests.rs:164` を `zeroed_output(n*n)` へ更新 |
 | `facade`／`autodiff` | コード変更なし（テスト追加のみ） | `crates/facade/src/*`・`crates/autodiff/src/*` は無変更 |
 
-## §2 本番結線の判断: 無効化（`usize::MAX`）
+## §2 本番結線の判断（2026-09-08 更新・PR #1448 codex-review 対応で無効化へ差し戻し）: 無効化（`usize::MAX`）を維持
+
+**#1301 が DGX Spark GB10（Grace CPU）・Apple M4 Max 両実機で on/off 比較を
+実施した結果、両実機・全対象形状（N=512/1024/2048）で非後退（一部改善）を
+確認した。この実測を根拠にいったんは本番既定しきい値を `usize::MAX`
+（無効化）から `2 << 20`（8 MiB 相当。設計時の暫定値）へ有効化していたが、
+事前宣言した判定規則（`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+§20.1 規則 4・candle 比の非後退）は緩和なしでは 6 セル中 3 セルで不成立
+であり、実測後に緩和した基準（同 doc §20.1a）のみを根拠に本番採用を
+確定していた点が PR #1448 の codex-review 指摘（計測後に緩和した基準
+だけで本番採用を確定しない）を受け、**本番既定を `usize::MAX`
+（無効化）へ差し戻した****（§6・`docs/perf/logs/
+cpu-matmul-fixed-cost-1301/` 参照）。#1301 の実測系列は「参考系列」
+として §6 に維持しつつ、§20.1a の改定版規則 4（事前登録された規則
+として以後固定）を用いた**独立の再計測**（同 doc §20.6）が両実機で
+完了し ADOPT と確定するまで、本番既定は有効化しない。以下の §2 本文
+（旧版）は #1299 実装時点の当初判断の記録として残す（内容自体は
+現在の判断＝無効化維持と一致する）。
+
+<details>
+<summary>当初の判断（#1299 実装時点。参考として維持）</summary>
+
+### （旧）§2 本番結線の判断: 無効化（`usize::MAX`）
 
 設計 §7「判定基準」に基づき M4 Max スモーク（§4）を実施した結果、
 **N=2048 で 5 run 符号一貫の後退**（`ops_gemm` 合成区間で中央値約 29%）
@@ -51,6 +73,8 @@ rayon 並列書き込みは、確保した全ページへ即座に `0.0f32` を�
 フォールト遅延の恩恵がそもそも大きく、前倒しは損にしかならない）。
 DGX Spark GB10（glibc heap 経路）では逆に「`memset` の逐次実行を並列化
 する」効果が働き得るため、#1301 が実機実測で判断する。
+
+</details>
 
 ## §3 数値契約（bit 完全一致）
 
@@ -135,20 +159,49 @@ DGX Spark GB10 実測は本エージェント実行環境に実機接続手段�
   `2 << 20` を一時的に使って計測。**本番既定は §2 のとおり
   `usize::MAX`**）
 
-## §6 DGX Spark GB10 実測記入欄（#1301 が担当）
+## §6 DGX Spark GB10 実測結果（イシュー #1301・2026-09-08 実施済み）
 
-未実施。#1301 が下記を実施し本欄を更新する:
+DGX Spark GB10（専有ゲート確認: 1 分 load average <6 を 2 回連続確認後に
+計測。1 回目の on 腕は他セッション並走〈イシュー #1262・#1437。load
+average 15〜18〉により contamination を検出し、`docs/perf/logs/
+cpu-matmul-fixed-cost-1301/` に記録のうえ専有確認後に再計測した「clean」
+系列を正式値とする）・Apple M4 Max（このリポジトリのメイン worktree が
+動くホスト自身。共有マシンだが #1299 当時より低負荷）で、§4 と同一
+プロトコル（Layer B: `gemm_reuse_phase_diag_cpu`。5 回独立プロセス起動・
+`RAYON_NUM_THREADS` 未設定）に加え、Layer A（`bench-fandhe gemm cpu <N>
+reuse`。`run_gemm_gate_cpu.sh` 経由の 5 回独立プロセス起動）も計測した。
 
-1. §4 と同一プロトコル（`gemm_reuse_phase_diag_cpu`。5 回独立プロセス
-   起動・`RAYON_NUM_THREADS` 未設定）を DGX 実機で実行（このとき
-   `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS` を一時的に `2 << 20` 等へ戻して
-   計測する必要がある。本番既定 `usize::MAX` のままでは並列分岐が
-   実走しないため）
-2. N=2048 の `alloc_c`／`ops_gemm` の DGX 実測が非後退（理想的には
-   削減）であれば、しきい値を本番既定として有効化する変更を実施し
-   `docs/cpu-matmul-fixed-cost-design.md` §10 を更新する
-3. DGX でも後退する場合は `usize::MAX`（無効化）を維持したまま記録
-   のみ更新する
+**Layer B（DGX。off=`usize::MAX`／on=`2 << 20`。5 run 中央値、ms）**:
+
+| 区間 | N=2048 off | N=2048 on | on/off 比 | N=1024 off | N=1024 on | on/off 比 |
+|---|---|---|---|---|---|---|
+| `alloc_c` | 3.2554 | 1.6817 | **0.5166**（約 48% 削減） | 0.0306 | 0.0269 | 0.8791 |
+| `ops_gemm` | 26.8177 | 26.7420 | **0.9972**（非後退） | 5.4276 | 5.3701 | 0.9894 |
+
+**Layer A（`bench-fandhe gemm cpu <N> reuse`。5 run 中央値。
+`docs/perf/logs/cpu-matmul-fixed-cost-1301/` の生ログ・`compare_gemm_ab.py`
+出力）**:
+
+| N/mode | DGX on/off 比 | M4 Max on/off 比 |
+|---|---|---|
+| 512/fresh | 0.8690 | 1.0068 |
+| 512/reuse | 0.8889 | 0.9509 |
+| 1024/fresh | 0.9841 | 1.0019 |
+| 1024/reuse | 1.0042 | 1.0269 |
+| 2048/fresh | 1.0469 | 0.9728 |
+| **2048/reuse（決定セル）** | **0.9990** | **0.9788** |
+
+checksum は両実機・全セル完全一致（`compare_gemm_ab.py` 判定 `完全一致`）。
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1 で計測前に確定した
+判定規則のうち規則 1〜3・5 は満たしたが、**規則 4（candle 比の非後退）は
+緩和なしでは 6 セル中 3 セルで不成立**だった（同 doc §20.3 candle 比表）。
+§20.4 の判定はいったん §20.1a の事後緩和版規則 4 を適用して「全規則を
+満たす（ケース (c)）」とし本番既定を無条件に `2 << 20` へ有効化していたが、
+PR #1448 の codex-review 指摘（計測後に緩和した基準だけで本番採用を確定
+しない）を受けて**本番既定を `usize::MAX`（無効化）へ差し戻した**。
+上記の実測結果自体（Layer A/B の各表）は参考系列として本節に維持する。
+§20.1a の改定版規則 4 を事前登録規則として用いた独立の再計測（同 doc
+§20.6）が完了するまで、本番既定は有効化しない。
 
 ## §7 スコープ外（本 Issue では実施しない）
 
@@ -158,10 +211,13 @@ DGX Spark GB10 実測は本エージェント実行環境に実機接続手段�
 - 案 2（`tensor-core` の `Storage` 返却フック実装によるバッファプール化）
 - 案 3（`unsafe`: `set_len`／`alloc_zeroed`／`mallopt`／mmap 直接操作）
 - `#[cfg(target_os = "linux")]` によるプラットフォーム限定 gating
-  （並列ゼロ書き込みが macOS 固有に不利という機構は本セッションの
-  推定段階であり、DGX 実測前に実装を先行させない。#1301 の結果次第で
-  検討）
-- machine gating（page fault 計数等での機構検証）は #1301 へ引き継ぐ
+  （両実機とも非後退を確認したため #1301 では不要と判明。将来他
+  プラットフォームで後退が見つかった場合の予備策として設計は保持）
+- machine gating（page fault 計数）: `/usr/bin/time -v` による minor page
+  fault 数を DGX 実機で記録済み（`docs/perf/logs/
+  cpu-matmul-fixed-cost-1301/time-v-dgx-*.log`）。alloc_c 削減が
+  page fault 前倒し自体の削減によるものか厳密な定量比較は未実施
+  （記入欄のみ・追加分析はスコープ外）
 
 ## §8 関連ドキュメント
 

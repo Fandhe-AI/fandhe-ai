@@ -353,17 +353,31 @@ cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
   readout コピーは保持しない（`tape_matmul` パスの出力は tape 自身が
   内部で保持するため追加の保持は不要）。
 - **calloc／first-touch の帰属**: `zeroed_output` は本番既定
-  （`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`）では常に
-  `vec![0.0; n*n]` へ倒れるため、大サイズでは OS の遅延ゼロページに
-  倒れうるため、初回書き込みの page-fault コストは `alloc_c` ではなく
-  `kernel`（実際に書き込む側）に計上されうる。`alloc_c` を「確保コスト
-  の上限」と読まない。**イシュー #1299** はしきい値以上で `alloc_c`
-  区間内に並列ゼロ書き込み（first-touch を複数スレッドへ前倒しで
-  分散）する分岐を追加したが、M4 Max スモーク実測で N=2048 の
-  `alloc_c` が約 3〜22 倍・`ops_gemm` 合成が中央値約 29% 後退することを
-  確認したため無効化した（`docs/perf/cpu-matmul-fixed-cost-impl.md`）。
-  Linux（DGX Spark GB10）では帰属の曖昧さが解消される可能性が残るため
-  #1301 が実機実測で有効化可否を判断する。
+  （`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`。並列分岐は常に
+  無効化）ではしきい値未満（N=2048 相当を含む現実的な全形状）が常に
+  `vec![0.0; n*n]`（OS の遅延ゼロページ）経由の逐次分岐へ入り、
+  page-fault コストは `kernel` 側に計上されうる。**イシュー #1299** の
+  M4 Max スモーク実測では高負荷（他 worktree 並走ビルド）下で N=2048 の
+  `ops_gemm` 合成が中央値約 29% 後退したため、しきい値以上（N=2048 相当）
+  で `alloc_c` 区間内に並列ゼロ書き込み（first-touch を複数スレッドへ
+  前倒しで分散）する分岐（設計時の暫定値 `2 << 20`）は無効化した状態を
+  本番既定としていた。**イシュー #1301** が DGX Spark GB10・Apple M4 Max
+  両実機で低負荷条件下の 5 回独立プロセス起動を計測した結果、DGX
+  N=2048 の `alloc_c` が約 48% 削減・`ops_gemm` 合成 0.9972 倍（非後退）
+  を確認し、いったんは本番既定を `2 << 20` へ有効化していた。しかし
+  事前宣言した判定規則のうち candle 比の非後退（規則 4）が緩和なしでは
+  6 セル中 3 セルで不成立であり、この緩和を実測後に定義した点を PR #1448
+  の codex-review が指摘したため、本番既定を `usize::MAX`（無効化）へ
+  差し戻した（`docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6・
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1a・§20.4・
+  §20.6）。M4 Max の Layer B（本節の診断テスト単体）の `ops_gemm` 合成が
+  N=2048 で 1.0738 倍（約 7.4% 後退。`layerB-m4max-off/on-run1〜5.log`
+  実測）と後退した一方、本番相当の計測境界である Layer A（`bench-fandhe
+  gemm cpu reuse`）の N=2048/reuse on/off 比は 0.9788（改善）だった
+  という Layer A/B 間の乖離自体は事実として記録を維持する（Layer A/B
+  双方の生ログは `docs/perf/logs/cpu-matmul-fixed-cost-1301/`）。
+  規則 4 を事前登録規則として固定したうえでの独立の再計測（同 doc
+  §20.6）で ADOPT／REJECT を確定するまで、本番既定は有効化しない。
 
 **突合前提**（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` への
 転記時に明記する）: Layer A（`gemm --mode reuse --phases`）は

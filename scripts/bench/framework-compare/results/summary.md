@@ -2074,7 +2074,45 @@ fresh/reuse 双方を含む。1.0 未満が改善・1.0 超が後退。checksum 
   `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §15・
   `docs/perf/logs/gemm-candle-gate-readout-1337/` を参照
 
-## 環境 24: DGX Spark GB10・Apple M4 Max（(mc, nc) 2D 動的分配本番結線。イシュー #1313）
+## 環境 24: DGX Spark GB10・Apple M4 Max（出力並列ゼロ埋め on/off 比較。イシュー #1301）
+
+`crates/backend-cpu/src/ops.rs::GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`
+（#1299。既定 `usize::MAX`）の on（`2 << 20`）/off（`usize::MAX`）を同一
+ソース（両腕とも `GEMM_GATE_PATCH_FACADE_PATH` による HEAD path 差し替え）
+で両実機比較。`compare_gemm_ab.py --device cpu --sizes gate`
+（N=512/1024/2048 の fresh/reuse）で off→on の ratio（after/before）を突合。
+DGX は初回計測が他セッション並走（load average 15〜18）で contaminate
+されたため専有確認後に再計測した clean 系列を正式値とする。
+
+| N/mode | DGX（clean） | M4 Max |
+|---|---|---|
+| 512/fresh | 0.8690 | 1.0068 |
+| 512/reuse | 0.8889 | 0.9509 |
+| 1024/fresh | 0.9841 | 1.0019 |
+| 1024/reuse | 1.0042 | 1.0269 |
+| 2048/fresh | 1.0469 | 0.9728 |
+| **2048/reuse（決定セル）** | **0.9990** | **0.9788** |
+
+checksum は両実機・全セル完全一致。DGX の Layer B（`gemm_reuse_phase_diag_
+cpu`。crates 内診断テスト）実測では N=2048 の `alloc_c` が 48% 削減
+（3.2554→1.6817 ms）・`ops_gemm` 合成は 0.9972 倍（非後退）を確認。
+
+**既定化判定: 保留（PR #1448 codex-review 対応。2026-09-08 再判定）**。
+checksum 一致・DGX 決定セル非後退・対照セル非後退・M4 Max 非後退は
+満たしたが、candle 比非後退（事前宣言した規則 4）は許容幅なしの原文
+では 6 セル中 3 セルで不成立だった。計測後に定義した許容幅（改定版
+規則 4）を同じ実測系列へ遡及適用して「満たす」と扱い本番既定を
+`2 << 20` へ有効化していたが、この遡及適用が事前宣言の趣旨（後出しで
+基準を変えない）を欠くという codex-review 指摘を受け、**本番既定を
+`usize::MAX`（無効化）へ差し戻した**。改定版規則 4 は以後の判定に
+用いる事前登録規則として固定し、この規則を用いた独立の再計測で
+ADOPT／REJECT を確定する（未実施）。上表の実測結果自体は参考系列
+として維持する。詳細・env_info・判定規則の事前宣言記録・差し戻しの
+経緯は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1・
+§20.1a・§20.4・§20.6・`docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6・
+`docs/perf/logs/cpu-matmul-fixed-cost-1301/` を参照。
+
+## 環境 25: DGX Spark GB10・Apple M4 Max（(mc, nc) 2D 動的分配本番結線。イシュー #1313）
 
 `crates/backend-cpu/src/gemm_blis/mod.rs`（#1311/#1312 で実装・A/B 済みの
 `GemmDriverVariant::TwoDDynamic`）を単一 const ゲート
@@ -2101,7 +2139,7 @@ N=1024/2048 で対 `RowPanel` 比 1.00 以上・N=4096 で 0.95 以上）を両�
 Phase 0 再計測で確定した）。checksum は両実機・全セル完全一致・
 `parity_fail_count=0`。詳細・env_info・Tier 1 判定・スコープ外事項は
 `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節・
-`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20・
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §21・
 `docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/` を参照。
 
 ## 環境 25: DGX Spark GB10・Apple M4 Max（借用ビュー readout の既定経路化・feature ゲート撤去。3 バックエンド × 両実機。イシュー #1438）

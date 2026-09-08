@@ -1,0 +1,55 @@
+# 実行環境情報（イシュー #1301。内部ホスト名は含めない）
+
+## 対象イシュー・計画
+
+イシュー #1301: 固定費削減（出力並列ゼロ埋め。#1299）の framework-compare
+gemm cpu N=512/1024/2048 before/after を DGX Spark GB10・Apple M4 Max
+両実機で記録し結線可否を確定する。判定規則は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19.1 に計測前確定済み。
+
+## 対象コミット
+
+- base（off 腕）: HEAD = 145639d047f6fcd7488d0665e1488e68ee084dfc
+  （`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`。現行本番既定）
+- on 腕: 同 HEAD ＋ `on-arm.patch`（定数 1 行差し替え。
+  `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = 2 << 20`）
+
+両腕とも `GEMM_GATE_PATCH_FACADE_PATH`（HEAD ツリーへの path patch）で
+ビルド。crates.io registry 版は使わない（2 腕を同一ソース系列で揃える）。
+
+## DGX Spark GB10（Grace CPU。cpu ノードタグ dgx-cpu）
+
+- OS: Linux 6.17.0-1031-nvidia aarch64 Ubuntu
+- CPU: Cortex-X925 × 10（大コア）+ Cortex-A725 × 10（小コア）= 20 論理コア
+  （`nproc`=20）
+- 作業ディレクトリ: `~/work/fc-1301-run`（本イシュー専用の隔離ディレクトリ。
+  他セッション並走〈イシュー #1437・CUDA backend テスト。別ディレクトリ
+  `~/work/rust-ai-library-run-1437` で実行中〉と非干渉）
+- GNU time（`/usr/bin/time -v`）: 利用可能。minor page fault 数を
+  `time-v-dgx-<arm>-run{1..5}.log` へ記録
+- 専有ゲート事前確認: 転送直前の 1 分 load average 1.03〜1.08（2 回連続
+  確認。<6 を満たす）。他セッションの CUDA テストが並走中だったが CPU
+  リソース競合は小さいと判断（GPU テストのため）
+- rsync: `docs/real-hardware-verification-env.md` §3 の手順（`.gitignore`
+  フィルタ・`.git/`／`.codex/`／`.env*`／`real-hardware-verification-env.local.md`
+  除外）。転送後 `find` で秘密情報・`.local.md` が渡っていないことを確認済み
+- `gemm-gate-trusted-hosts.local`（gitignore 対象・rsync 対象外）はノード上で
+  `hostname`・`/etc/machine-id` から新規作成（既存の worktree 側登録値と
+  一致することを事前確認済み）
+
+## Apple M4 Max（このリポジトリのメイン worktree が動くホスト自身。cpu
+ノードタグ m4max-cpu）
+
+- チップ: Apple M4 Max（`sysctl -n machdep.cpu.brand_string`）
+- OS: Darwin 25.6.0 arm64
+- 隔離: 本セッション専用 worktree（他 worktree・並走エージェントとは
+  ファイルシステム上分離。ただし同一 CPU/メモリを共有するため他
+  worktree の並走ビルド・テストの影響を受けうる。負荷は各 run の
+  `uptime-m4max.log` に記録）
+
+## セキュリティ・多層防御チェック
+
+- 内部ホスト名・機体識別子は本ファイル・生成ドキュメントへ書かない
+  （`grep -r` で確認する）
+- `.local.md`・`gemm-gate-trusted-hosts.local` は rsync 除外・
+  git 管理外のまま維持
