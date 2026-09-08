@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§16）。#1305 で専有環境の RAYON_NUM_THREADS スイープを両実機で 5 回計測中央値再実測し、DGX Spark GB10 の N=1024 非単調性を taskset pin 実験で H1（異種コア由来）と確定・Apple M4 Max は専有ゲート不通過のため undetermined のまま記録した（§17）。#1312 で `TwoDDynamic`（2D 動的分配）vs `RowPanel` の両実機 A/B を実施し、DGX（専有ゲート通過）は全形状で `RowPanel` を 1.09〜1.80 倍上回ったが Apple M4 Max が専有ゲート不通過のため最終判定は undetermined（結線せず #1313 へ記録のみ引き継ぎ）・DGX 単独の非単調性（T10/T8）は「残存」（比 0.86 前後・僅かに閾値未達）と判定した（§18）。#1262 で承認済み tolerance 契約（#1241 承認・#1443/#1445 実装）下の DGX Spark GB10 N=2048 を再計測し、「判定不能」が解消して確定判定（未達・0.950 倍）へ遷移したことを確認した（§19。N=512/1024 は引き続き未達。Apple M4 Max は N=2048 が元々 0 fail のため対象外）。#1301 で出力並列ゼロ埋め（#1299）の on/off を両実機実測し、両実機・全形状で非後退（DGX N=2048 alloc_c 約 48% 削減）を確認したが、事前宣言した規則 4（candle 比の非後退）が緩和なしでは 6 セル中 3 セルで不成立だった点を PR #1448 の codex-review が指摘したため、いったん有効化した `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = 2 << 20` を `usize::MAX`（無効化）へ差し戻し、§20.1a の改定版規則 4 を事前登録規則として固定したうえで独立の再計測（§20.6）を経て確定する方針とした（§20）。#1313 で `TwoDDynamic`（2D 動的分配）を M4 Max 専有ゲート付き Phase 0 再計測で ADOPT 確定・本番結線し、framework-compare gemm cpu 全 12 セル（両実機）が非後退（改善方向）であることを確認した（§21。candle 比ゲート自体の判定は不変）。#1321（#1283 Phase 4）で Phase 1〜3 結線後（実質 `TwoDDynamic` のみ）の両実機ゲート再判定を実施し、正式系列（`fandhe-ai =0.7.0` ピン）は両実機・全形状で未達成のまま（DGX N=2048 は §19 の確定判定を再確認）だが、参考系列（origin/main HEAD `ced4d14`）では Apple M4 Max が全 3 形状（512/1024/2048）で達成・DGX Spark GB10 が N=2048 のみ達成（1.562 倍）という、初めて candle 比ゲート達成が観測された結果を記録した（§22。ピン未更新のため正式判定は不変）
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§16）。#1305 で専有環境の RAYON_NUM_THREADS スイープを両実機で 5 回計測中央値再実測し、DGX Spark GB10 の N=1024 非単調性を taskset pin 実験で H1（異種コア由来）と確定・Apple M4 Max は専有ゲート不通過のため undetermined のまま記録した（§17）。#1312 で `TwoDDynamic`（2D 動的分配）vs `RowPanel` の両実機 A/B を実施し、DGX（専有ゲート通過）は全形状で `RowPanel` を 1.09〜1.80 倍上回ったが Apple M4 Max が専有ゲート不通過のため最終判定は undetermined（結線せず #1313 へ記録のみ引き継ぎ）・DGX 単独の非単調性（T10/T8）は「残存」（比 0.86 前後・僅かに閾値未達）と判定した（§18）。#1262 で承認済み tolerance 契約（#1241 承認・#1443/#1445 実装）下の DGX Spark GB10 N=2048 を再計測し、「判定不能」が解消して確定判定（未達・0.950 倍）へ遷移したことを確認した（§19。N=512/1024 は引き続き未達。Apple M4 Max は N=2048 が元々 0 fail のため対象外）。#1301 で出力並列ゼロ埋め（#1299）の on/off を両実機実測し、両実機・全形状で非後退（DGX N=2048 alloc_c 約 48% 削減）を確認したが、事前宣言した規則 4（candle 比の非後退）が緩和なしでは 6 セル中 3 セルで不成立だった点を PR #1448 の codex-review が指摘したため、いったん有効化した `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = 2 << 20` を `usize::MAX`（無効化）へ差し戻し、§20.1a の改定版規則 4 を事前登録規則として固定したうえで独立の再計測（§20.6）を経て確定する方針とした（§20）。#1313 で `TwoDDynamic`（2D 動的分配）を M4 Max 専有ゲート付き Phase 0 再計測で ADOPT 確定・本番結線し、framework-compare gemm cpu 全 12 セル（両実機）が非後退（改善方向）であることを確認した（§21。candle 比ゲート自体の判定は不変）。#1321（#1283 Phase 4）で Phase 1〜3 結線後（実質 `TwoDDynamic` のみ）の両実機ゲート再判定を実施し、正式系列（`fandhe-ai =0.7.0` ピン）は両実機・全形状で未達成のまま（DGX N=2048 は §19 の確定判定を再確認）だが、参考系列（origin/main HEAD `ced4d14`）では Apple M4 Max が全 3 形状（512/1024/2048）で達成・DGX Spark GB10 が N=2048 のみ達成（1.562 倍）という、初めて candle 比ゲート達成が観測された結果を記録した（§22。ピン未更新のため正式判定は不変） #1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を両実機実測し、reuse 全 6 セル（3 サイズ×2 実機）非後退・checksum 完全一致を確認（ADOPT。§15 の交絡を解消。正式判定は §12／§19 のまま不変。fresh は参考記録で DGX 全形状改善だが M4 Max N=512/1024 は after/before 1.0115／1.0028 と僅かに後退方向であり、計測ノイズかどうかは本記録のみでは確定できない。§23）
 
 ## 1. 位置づけ
 
@@ -2151,3 +2151,116 @@ DGX Spark GB10 が N=2048 のみ達成**という、これまでの #1283 系列
 - `docs/candle-parity-tolerance-contract-decision.md`（tolerance 契約承認記録）
 - `scripts/bench/framework-compare/results/summary.md` 環境 26 節
 - `docs/performance-targets.md` §8.11
+
+## 23. 2026-09-08 追補: 同一 facade ソース下の借用ビュー readout 既定化 before/after・両実機（イシュー #1438）
+
+### 23.0 位置づけ
+
+§15（#1337）は片方向の負荷差を伴う registry off／path on の比較で「DGX は非後退・M4 Max は
+達成見込みだが確度限定的」と記録していた。#1438 は借用ビュー readout を bench-fandhe の
+既定経路とし旧 `host-view-readout` cargo feature を撤去するにあたり、**両腕を同一 facade
+ソース**（本 PR HEAD の `crates/facade` への path patch）で揃えた before（legacy bench-fandhe
+ソース）/after（default bench-fandhe ソース）比較を DGX Spark GB10・Apple M4 Max 両実機で
+再計測し、§15 の facade ソース不一致の交絡を解消した。
+
+### 23.1 プロトコル
+
+`docs/perf/logs/gemm-candle-gate-readout-default-1438/env_info.txt` を参照。両腕とも
+`GEMM_GATE_PATCH_FACADE_PATH` で本 PR HEAD の同一 `crates/facade` を指定し、bench-fandhe
+側のソースのみを base コミット `fddca17`（legacy）／本 PR HEAD（default）で切り替えた。
+実測は 2026-09-08。DGX は低負荷（`nvidia-smi`／`uptime` 実測。GPU 常駐 2 プロセスのみ・
+load average 1.7〜5.1）、M4 Max は高負荷共有環境（他セッション並走。load average 9〜25）。
+
+### 23.2 実測結果（fandhe-ai reuse・5 回計測中央値・before/after 比較。判定対象）
+
+**DGX Spark GB10（dgx-cpu）**
+
+| N | before 中央値（min–max） | after 中央値（min–max） | after/before | checksum |
+|---|---|---|---|---|
+| 512 | 2.401 ms（1.924–2.471 ms） | 2.251 ms（2.190–2.472 ms） | 0.937 | 完全一致 |
+| 1024 | 6.916 ms（6.823–7.157 ms） | 6.535 ms（6.481–6.886 ms） | 0.945 | 完全一致 |
+| 2048 | 35.283 ms（34.447–35.458 ms） | 30.819 ms（30.668–31.373 ms） | **0.874** | 完全一致 |
+
+**Apple M4 Max（m4max-cpu）**
+
+| N | before 中央値（min–max） | after 中央値（min–max） | after/before | checksum |
+|---|---|---|---|---|
+| 512 | 747.4 us（734.1–806.4 us） | 719.3 us（697.5–738.9 us） | 0.962 | 完全一致 |
+| 1024 | 3.755 ms（3.728–3.842 ms） | 3.533 ms（3.493–3.616 ms） | 0.941 | 完全一致 |
+| 2048 | 24.836 ms（23.464–25.707 ms） | 23.581 ms（22.445–24.609 ms） | 0.950 | 完全一致 |
+
+reuse は両実機・全 3 サイズで非後退（`after/before` 0.87〜0.96）。checksum は全セル完全一致
+（要素単位 `parity_fail_count=0`）。出典: `docs/perf/logs/gemm-candle-gate-readout-default-1438/
+compare_gemm_ab-cpu-{dgx,m4max}.md`（`compare_gemm_ab.py --device cpu` の既定 `fresh,reuse`
+出力。fresh 行を含む）
+
+### 23.2a 参考: fresh（イシュー #1438 の受け入れ条件外。同一 raw JSONL から再集計）
+
+イシュー #1438 の受け入れ条件・事前宣言判定木は reuse のみを対象とする。同じ raw JSONL
+（`scripts/bench/framework-compare/results/raw/results-{dgx,m4max}-cpu-gemm-gate-head-{fddca17-readout-legacy,1438pr-readout-default}.jsonl`）
+には fresh の 5 回計測も含まれるため、`compare_gemm_ab.py --device cpu`（標準ライブラリのみ・
+5 回中央値）で再集計した結果を参考記録として掲載する（PR #1452 codex-review 指摘対応）。
+
+**DGX Spark GB10（dgx-cpu・fresh）**
+
+| N | before 中央値（min–max） | after 中央値（min–max） | after/before | checksum |
+|---|---|---|---|---|
+| 512 | 2.251 ms（2.196–2.371 ms） | 1.752 ms（1.709–2.002 ms） | 0.778 | 完全一致 |
+| 1024 | 7.738 ms（7.594–7.773 ms） | 5.609 ms（5.421–5.635 ms） | 0.725 | 完全一致 |
+| 2048 | 36.191 ms（34.493–36.301 ms） | 29.079 ms（28.234–29.350 ms） | 0.804 | 完全一致 |
+
+**Apple M4 Max（m4max-cpu・fresh）**
+
+| N | before 中央値（min–max） | after 中央値（min–max） | after/before | checksum |
+|---|---|---|---|---|
+| 512 | 737.9 us（731.0–771.3 us） | 746.4 us（711.3–759.7 us） | **1.0115** | 完全一致 |
+| 1024 | 3.503 ms（3.469–3.535 ms） | 3.513 ms（3.424–3.608 ms） | **1.0028** | 完全一致 |
+| 2048 | 24.297 ms（24.013–24.499 ms） | 23.320 ms（22.542–23.677 ms） | 0.960 | 完全一致 |
+
+- DGX は fresh も全 3 サイズで改善方向（0.72〜0.80）
+- M4 Max は N=512／1024 の fresh が 1.0115／1.0028 と**僅かに後退方向**であり、
+  「fresh/reuse 両モードで全セル非後退」とは言えない。差は 0.3〜1.2% で before/after の
+  min–max 範囲は重なっており（高負荷共有環境・load average 9〜25 下の計測）、**計測ノイズ
+  かどうかは本記録のみでは確定できない**（専有ゲート付き再計測は本イシューのスコープ外）
+- ログ表（`compare_gemm_ab-cpu-*.md`）の「判定」列は `compare_gemm_ab.py` の既定閾値
+  1.05 による表示であり、判定木条件 (a)（after/before ≤ 1.00）とは異なる。本節の
+  「僅かに後退方向」は後者の基準による
+- 非後退の総括（§23.5）は判定対象の reuse に限定する
+
+### 23.3 candle 比ゲート（#1117。参考記録。正式判定は §12 のまま不変）
+
+**DGX**
+
+| N | before candle 比 | before 判定 | after candle 比 | after 判定 |
+|---|---|---|---|---|
+| 512 | 0.809 | 未達 | 0.843 | 未達 |
+| 1024 | 0.810 | 未達 | 0.834 | 未達 |
+| 2048 | 0.955（candle 救済 2 要素） | 未達 | **1.103**（candle 救済 2 要素） | **達成** |
+
+**M4 Max**
+
+| N | before candle 比 | before 判定 | after candle 比 | after 判定 |
+|---|---|---|---|---|
+| 512 | 0.898 | 未達 | 0.968 | 未達 |
+| 1024 | 0.742 | 未達 | 0.788 | 未達 |
+| 2048 | 0.775 | 未達 | 0.814 | 未達 |
+
+出典: `docs/perf/logs/gemm-candle-gate-readout-default-1438/gate_cpu-{dgx,m4max}-{legacy,default}.md`。
+DGX N=2048 の after 腕が #1117 の受け入れ条件（candle 超え）を満たす一方、他の全セルは未達
+のまま（正式系列 `fandhe-ai =0.7.0` ピンは本 PR で更新していないため §12／§19 の判定は不変）。
+
+### 23.4 公正性の論点
+
+- `bench-candle` は本 PR で一切変更していない（`.to_vec2()` による所有 `Vec` 読み出しのまま）
+- CPU backend の `gemm` 本体（`gemm_blis` 系）は本 PR で変更していない。差分は readout
+  （`readout_var`／`checksum_var`）のみであり、両実機とも改善方向のみが観測された
+
+### 23.5 採否
+
+判定対象の reuse は両実機・全 6 セル（3 サイズ×2 実機）で非後退・checksum 完全一致のため、
+CPU についても既定経路化を承認（ADOPT）。イシュー #1438 の事前宣言判定木の条件 (a)「全 N で
+after/before ≤ 1.00」を reuse で両実機とも満たすため、runtime `Device` 分岐によるフォールバックは
+導入しない。§15 の「確度限定的」という留保は本節（同一 facade ソース比較）により解消した。
+fresh（§23.2a。受け入れ条件外の参考記録）は DGX 全形状改善・M4 Max N=2048 改善だが、M4 Max
+N=512／1024 は 1.0115／1.0028 と僅かに後退方向であり、ノイズかどうかは本記録のみでは確定
+できない。本節の非後退の総括は reuse に限定する。

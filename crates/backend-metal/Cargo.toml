@@ -48,6 +48,26 @@ objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-metal.workspace = true
 
+[features]
+# `MetalContext::synchronize_with_gpu_timestamps`（`BatchGpuTimestamps` を
+# 返す）・`MetalGemm::encode_tiled_prepared` を通常の公開 API 面から外す
+# ための feature ゲート（codex-review Medium 指摘対応・イシュー #1259）。
+# `crates/backend-cuda/Cargo.toml` の `internal-diagnostics` feature
+# （`CudaDevice::context`/`stream` のゲート。#1390）と同一動機・同一方針:
+# クレート外の利用者が安全な公開 API の組み合わせだけで「診断・ベンチ専用の
+# 生アクセス手段」（GPU タイムスタンプ収集の内部境界・encode/synchronize
+# の分離計測用エンコード専用入口）を得てしまう懸念に対応する。この feature
+# を有効化しない既定ビルドでは両 API とも `pub(crate)` に絞られ crate 外部
+# から到達不能（`crates/backend-metal/src/context.rs::BatchGpuTimestamps`・
+# `synchronize_with_gpu_timestamps` および `crates/backend-metal/src/
+# gemm.rs::MetalGemm::encode_tiled_prepared` の doc コメント参照）。
+# `examples/gemm_transpose_route_ab_bench.rs`（`--gpu-timestamps` opt-in）
+# のみが `required-features` 経由で本 feature を要求する。deps-policy.md
+# 「バックエンド切替は feature フラグなしの cfg ベース」はバックエンド選択
+# （CUDA/Metal/CPU）に関する規約であり、本 feature は内部診断専用ツールの
+# 可視性制御であって対象外（`backend-cuda` の同コメントと同じ判断）。
+internal-diagnostics = []
+
 [dev-dependencies]
 # 受け入れ条件「naive GEMM の数値が CPU 参照実装と複合判定で一致する」
 # （REQ-2 統一複合判定。TASK-1.8b・#39）の判定基盤。workspace 内クレート
@@ -102,6 +122,18 @@ test = true
 # 引数解析・ラウンド別 min/max 集計のクロスプラットフォーム純関数回帰
 # 検知テスト。イシュー #1251）を持つため `test = true` を明示する
 # （`gemm_swizzle_ab_bench` と同型）。
+#
+# `required-features`（codex-review Medium 指摘対応・イシュー #1259）:
+# 本 example の `--gpu-timestamps` 経路（`run_stability_gpu_host`）は
+# `MetalGemm::encode_tiled_prepared`・`MetalContext::synchronize_with_gpu_
+# timestamps` を呼ぶ。両 API は `internal-diagnostics` feature（既定 OFF）
+# 限定の `pub`（既定ビルドは `pub(crate)`。`Cargo.toml` 冒頭の feature
+# コメント参照）へ絞ったため、本 example 自体も同 feature を要求する
+# （`backend-cuda` の `device_attributes_dump`／`gemm_profile_target` と
+# 同型）。CI の `cargo test --workspace --all-features`（rust-ci test
+# ジョブ・`make test`）は常にこの feature を含むため、`test = true` の
+# テスト実行カバレッジ（`cli_and_round_stats_tests` 等）は変わらない。
 [[example]]
 name = "gemm_transpose_route_ab_bench"
 test = true
+required-features = ["internal-diagnostics"]

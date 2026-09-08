@@ -24,18 +24,18 @@ fandhe-ai = "=0.7.0"
 [features]
 managed-placement = []
 
-# イシュー #1337: `readout_var`（`Var::to_tensor()` + `.to_vec()` の
-# host_copy memcpy）を借用ビュー（`fandhe_ai::VarHostView`/
-# `Tensor::host_slice`）へ切り替える計測専用 feature（既定 OFF）。
-# crates.io 公開版 `fandhe-ai =0.7.0` には `Var::host_view`/
+# イシュー #1337・#1438: `readout_var`（`Var::to_tensor()` + `.to_vec()`
+# の host_copy memcpy）を借用ビュー（`fandhe_ai::VarHostView`/
+# `Tensor::host_slice`）へ切り替える経路は #1438 で bench-fandhe の
+# 既定経路へ取り込み、旧計測専用 cargo feature（既定 OFF・#1337 で導入）は
+# 撤去した。crates.io 公開版 `fandhe-ai =0.7.0` には `Var::host_view`/
 # `VarHostView`/`Tensor::host_slice` API が未収録（#1335・#1336 は
-# 未リリースの HEAD で追加）のため、既定ビルド（feature 無効）では
-# `HostReadout` 型・呼び出しは `Vec<f32>` 経路のままコンパイルされ
-# `=0.7.0` ピンのままビルド可能である。有効化する場合は
-# `managed-placement` と同じく `[patch.crates-io.fandhe-ai]` で
-# `crates/facade` への path patch を CLI `--config` 経由で併用する
-# 前提（README「借用ビュー readout（#1337）」節参照）。
-host-view-readout = []
+# 未リリースの HEAD で追加）のため、ピン未更新の間は registry 解決
+# ビルドが構造的に不可能になった。`managed-placement` と同じく
+# `[patch.crates-io.fandhe-ai]` で `crates/facade` への path patch を
+# CLI `--config` 経由で併用する前提（README「借用ビュー readout
+# （既定経路）」節参照。`bench_fandhe_pin_guard.sh` が未指定時を
+# fail-closed で検知する）。
 
 # イシュー #1339: `--device-checksum`（GEMM checksum をバックエンド側
 # `f64` reduction で求め読み戻しを 8 バイトへ縮小する経路）の実計測結線用。

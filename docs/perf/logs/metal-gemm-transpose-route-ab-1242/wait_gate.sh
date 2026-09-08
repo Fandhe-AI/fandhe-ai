@@ -15,7 +15,7 @@
 # 判定条件を再現する保証はない（attempt 1 の wait_gate.log は util= 欄を
 # 持ち gemm_transpose_route_ab_bench も検出しているが本版は出力しない。
 # attempt 1 は load1 < 2.0 の行でも gate_ok=0 のため判定条件は未確定。
-# `docs/perf/metal-gemm-transpose-tiled.md` §5.5）。（誤検知を許容する簡易版であり、実際の
+# `docs/perf/metal-gemm-transpose-tiled.md` §5.6）。（誤検知を許容する簡易版であり、実際の
 # GPU 使用有無は各 run 実行前後の `ps`／`uptime` 生ログで人間が確認する
 # 前提）。
 set -uo pipefail

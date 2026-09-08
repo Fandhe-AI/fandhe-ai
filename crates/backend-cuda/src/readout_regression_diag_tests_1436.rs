@@ -1,14 +1,15 @@
-//! `host-view-readout` cargo feature（`scripts/bench/framework-compare`
-//! `bench-fandhe`。#1335／#1336／#1337）有効時の CUDA reuse N=1024/2048
-//! 後退（15.04 倍・1.20 倍。`docs/perf/cuda-gemm-candle-gate-remeasurement.md`
-//! §12.3／§12.4／§13）を D2H 読み出し方式別に再現・分解する診断テスト
-//! （イシュー #1436・親 #1435）。
+//! 借用ビュー readout（`scripts/bench/framework-compare` `bench-fandhe`。
+//! #1335／#1336／#1337。当時は cargo feature `host-view-readout` 有効時、
+//! #1438 で bench-fandhe の既定経路化に伴い旧 feature は撤去済み）有効時
+//! の CUDA reuse N=1024/2048 後退（15.04 倍・1.20 倍。`docs/perf/
+//! cuda-gemm-candle-gate-remeasurement.md` §12.3／§12.4／§13）を D2H
+//! 読み出し方式別に再現・分解する診断テスト（イシュー #1436・親 #1435）。
 //!
 //! # 背景
 //!
 //! `readout_var`（off 腕）は `Var::to_tensor()`（`Arc` 複製）→
 //! `.contiguous().as_slice().to_vec()` で **反復ごとに新規 `Vec` を確保・
-//! 反復末尾で free する**。一方 `host-view-readout` 有効時（on 腕）は
+//! 反復末尾で free する**。一方借用ビュー readout 有効時（on 腕。#1438 で既定経路）は
 //! `Var::host_view()`（`Arc` 複製のみ）を `Deref` で借用するだけで、
 //! **追加確保・free が一切無い**。いずれの腕も出力元は同一
 //! （`Var::matmul` → `CudaBackendOps::gemm_fp32_strict` → `run_f32_kernel`
@@ -221,7 +222,7 @@ fn measure_one_readout_trial(
             }
         }
         ReadoutArm::BorrowedKeepAlive => {
-            // on 腕（`host-view-readout` 有効時の `Var::host_view()`）の
+            // on 腕（借用ビュー readout 有効時〈#1438 で既定経路〉の `Var::host_view()`）の
             // 再現: `clone_dtoh` の `Vec` を直接読み出し、追加確保・free
             // なしで keep-alive へ積む。
             let t = Instant::now();

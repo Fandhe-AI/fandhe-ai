@@ -101,7 +101,7 @@ select_for_device` が選ぶ構成——`dispatch_auto` の本番既定経路と
 進まず終了する）を追加した:
 
 ```sh
-cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release -- --phase1-only
+cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --phase1-only
 ```
 
 出力にはサイズごとに機械可読な 1 行 `phase1_round_stats`（`grep
@@ -250,7 +250,115 @@ gate（spread ≤0.05）を超過**した。実行中 30 秒間隔で `uptime` �
 `MetalGemm::dispatch_strided_tiled_prepared` は引き続き明示入口として
 利用可能であり、AC-4 は §4 の実機正確性実測のとおり満たされている。
 
-## 5.5 排他環境での phase 1 spread 分布記録（イシュー #1253）
+## 5.5 GPU タイムスタンプ分離計測モードの追加（イシュー #1259）
+
+§5.4 まででフェーズ 1 の単発スパイクが 8 試行（#1186〜#1187）を通じて
+一度も安定性ゲートを満たせず、原因が **GPU 実行時間（純カーネル時間）**
+に乗るのか **host 側時間**（upload・alloc・encode・commit_wait・readback）
+に乗るのかが未切り分けのまま残っていた。本イシューはこの切り分けを行う
+ための計測機構を `gemm_transpose_route_ab_bench.rs` へ opt-in
+（`--gpu-timestamps`）で追加する（実測・原因切り分け自体は #1261 へ
+引き継ぐ。本イシューは機構追加と短時間動作確認に限定）。
+
+### 実行方法
+
+```sh
+cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --phase1-only --gpu-timestamps
+```
+
+`--phase1-only` と順序不問で併用可。引数なし（既定）の壁時計判定・出力
+（`phase1_round_stats`／`phase1_summary`／`verdict=` 等）はバイト単位で
+不変——`--gpu-timestamps` はフェーズ 1 の対照ワークロードを `dispatch_auto`
+から計装版（`run_stability_gpu_host`）へ**置換**するのみで、追加パスを
+走らせて ROUNDS を倍増させることはしない。
+
+### 機構
+
+- `MetalContext::synchronize_with_gpu_timestamps`／`BatchGpuTimestamps`
+  （イシュー #1276 で `#[cfg(test)] pub(crate)` として新設）を `pub` へ
+  公開化した。本番 `MetalContext::synchronize()` は引き続き no-op
+  オブザーバのままで、公開化自体は本番経路の FFI 呼び出し回数・挙動を
+  変えない（AC-2 は不変。`crates/backend-metal/src/context.rs`）
+- `MetalGemm::encode_tiled_prepared`（`pub`。ラベル `"gemm_tiled_prepared"`）
+  を新設し、`dispatch_tiled_prepared`（encode + 即時 synchronize）・
+  `diag_encode_tiled_nn`（`#[cfg(test)]` 限定・ラベル
+  `"diag_encode_tiled_nn"` 不変）と共通の private ヘルパ
+  `encode_tiled_nn_recorded` へ委譲するよう整理した。診断テスト
+  （`gemm_reuse_phase_diag_tests.rs`）が assert するラベル契約は不変
+  （`crates/backend-metal/src/gemm.rs`）
+- **追補（同イシュー #1259。codex-review Medium 指摘対応）**: 上記 2 点の
+  `pub` 化は当初「無条件 `pub`」で行ったが、crates.io 公開クレート
+  （`fandhe-ai-backend-metal`）の恒久的な公開 API 面へ診断・ベンチ専用の
+  内部到達手段（GPU タイムスタンプ収集・encode/synchronize 分離計測用
+  エンコード専用入口）を与えてしまう懸念が指摘された。`backend-cuda` の
+  `CudaDevice::context`/`stream`（`internal-diagnostics` feature ゲート。
+  #1390）と同じ解決パターンを適用し、両 API とも `internal-diagnostics`
+  feature（既定 OFF）限定の `pub` とし、既定ビルドでは `pub(crate)` に
+  絞った（`crates/backend-metal/Cargo.toml` の feature コメント参照）。
+  本 example（`gemm_transpose_route_ab_bench`）自体も `required-features
+  = ["internal-diagnostics"]` を要求するよう変更した。CI の `cargo test
+  --workspace --all-features`（rust-ci test ジョブ・`make test`）は常に
+  この feature を含むため、上記の実行方法・出力契約・テストカバレッジは
+  不変。
+- `bench_harness::ab::run_stability_observed`（ラウンド完了オブザーバ付き
+  変種。`run_stability` はこれを no-op フックで呼ぶ薄いラッパーへ変更）
+  を新設し、ラウンド境界（「直前 `measurement.iters` 件が測定対象」）を
+  example 側へ通知できるようにした（`crates/bench-harness/src/ab.rs`）
+- opt-in 時のワークロードは `dispatch_auto`（`GemmVariant::
+  SimdgroupTiled` 分岐）と同一組成（upload → alloc → encode →
+  commit_wait → readback）を上記公開 API で再現しつつ、`Instant` による
+  host 側フェーズ内訳と `kernel_gpu`（`GPUEndTime − GPUStartTime`）を
+  呼び出しごとに記録する。対象サイズ（256〜4096）は全て 8 の倍数のため
+  `pad_matrix`/`unpad_matrix` は no-op・`c_buf` 確保は `dispatch_auto` と
+  同じ専有確保（`MetalBuffer::new_zeroed`。本 example の
+  `MetalContext` はプロセスワイド singleton ではないため
+  `alloc_uninit_pooled` は元々 `new_zeroed` へフォールバックする）で、
+  既定組成との実質差は (i) バッチラベル、(ii) `encode` の resources 3 本
+  retain、(iii) タイムスタンプ取得 2 回、(iv) 入力検証経路
+  （`validate_dims` on slice → `validate_prepared_inputs_f32`）のみ
+- `wall_minus_gpu`／`commit_wait_minus_gpu` は**サンプルごとに差を
+  取ってから**中央値化する（`median(a) − median(b)` ではない。
+  `gemm_reuse_phase_diag_tests.rs`〈PR #1371 レビュー教訓〉と同じ理由）
+- `MTLCommandBuffer` の不変条件（`batches.len()==1`・タイムスタンプ
+  `Some`・`0 ≤ kernel_gpu ≤ commit_wait ≤ wall`）違反は fail-closed で
+  当該ラウンドを `valid=false`・関連する差分／spread を `NA` として
+  報告し、既定の壁時計判定出力を失わせない
+
+### 出力キー（機械可読）
+
+- 冒頭マーカー: `phase1_workload=gpu_timestamps`（opt-in 時のみ）
+- `grep '^phase1_gpu_host_round '`: ラウンド別（`size`・`round`・`iters`・
+  `kernel_gpu_median_secs`・`wall_median_secs`・
+  `wall_minus_gpu_median_secs`・`commit_wait_median_secs`・
+  `commit_wait_minus_gpu_median_secs`・`upload_median_secs`・
+  `alloc_median_secs`・`encode_median_secs`・`readback_median_secs`・
+  `resolved_cfg`・`valid`）
+- `grep '^phase1_gpu_host_stats '`: サイズ別総括（`size`・`rounds`・
+  `valid`〈valid=true だったラウンド数〉・`spread_kernel_gpu`・
+  `max_round_idx_kernel_gpu`・`spread_wall`・`max_round_idx_wall`・
+  `spread_wall_minus_gpu`・`max_round_idx_wall_minus_gpu`・
+  `kernel_gpu_round_medians_secs`・`wall_round_medians_secs`。値なしは
+  `NA`）
+
+フェーズ 2（30 セルの A/B 本計測）は非計装のまま（本イシューのスコープ
+外。§6 参照）。
+
+### 短時間動作確認（M4 Max 実機。ROUNDS=2・COOLDOWN=1s・MIN_WARMUP=1s
+への一時ローカル編集・コミットせず revert 済み）
+
+- `--phase1-only --gpu-timestamps` 実行で `phase1_workload=gpu_timestamps`
+  マーカー・5 サイズ × 2 ラウンドの `phase1_gpu_host_round` 行・各サイズの
+  `phase1_gpu_host_stats` 行を確認（全ラウンド〈5 サイズ × 2 ラウンド〉
+  とも `valid=true`・`kernel_gpu ≤ commit_wait ≤ wall` を満たす）
+- `--phase1-only`（`--gpu-timestamps` なし）実行で既存出力形式が変化しない
+  ことを確認（`phase1_gpu_host_*` 行・`phase1_workload=` マーカーとも
+  出力されない）
+- 引数エラー系（`--gpu-timestamps --gpu-timestamps`・`--bogus`）が
+  `MetalContext::new()` 到達前に fail-closed でエラー終了することを確認
+- 実測値自体は共有負荷下の短時間確認のため参考記録に留め、`docs/perf/
+  logs/` には残さない（正式な原因切り分け・実測記録は #1261 の担当）
+
+## 5.6 排他環境での phase 1 spread 分布記録（イシュー #1253）
 
 イシュー #1253 は §6（旧稿）の引き継ぎ事項「実行自体が spread へ与える影響の
 切り分け」に向けた前段として、`--phase1-only` モード（#1249/#1251）を
@@ -379,14 +487,14 @@ real-hardware-verification-env.md` の実機予約運用）を確保したうえ
 - `examples/gemm_transpose_tile_sweep.rs` の NT/TN/TT tiled 候補計測
   （タイル variant 別のスイープ。現状は classic strided 固定候補のみ）
   は引き続きスコープ外。
-- **排他環境での phase 1 spread 分布記録（§5.5・イシュー #1253）の再試行**:
+- **排他環境での phase 1 spread 分布記録（§5.6・イシュー #1253）の再試行**:
   2 回とも load average < 2 のゲートに到達できず TIMEOUT した。本 worktree
   環境が複数イシューの並列実行セッションを常時抱える構造上の制約であり、
   他イシューの並走が実際に止まる時間帯を確保しない限り再現性のある排他
   計測は困難である。なお `docs/perf/logs/
   metal-gemm-transpose-route-ab-1242/orchestrate.sh`／`wait_gate.sh` は
   attempt 1 の実行後に再構成したもの（attempt 2 で使用）であり、attempt 1
-  の判定条件を再現する保証はない（§5.5 attempt 1 節: attempt 1 のログは
+  の判定条件を再現する保証はない（§5.6 attempt 1 節: attempt 1 のログは
   load1 < 2.0 の行でも `gate_ok=0` であり、出力形式も再構成版と一致しない）。
   再試行時は再構成版をそのまま流用してよいが、実際に用いた判定条件
   （`GATE_THRESHOLD`・比較対象〈load1〉・`CONSEC_REQUIRED`・プロセス条件

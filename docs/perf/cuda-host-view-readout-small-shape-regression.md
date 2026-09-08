@@ -564,5 +564,9 @@ checksum 完全一致（生ログ `docs/perf/logs/cuda-host-view-readout-fix-143
 - 候補 A（`HostStagingCache` 再利用経由の readback）の本実装（候補 B が
   受け入れ条件〈Gate 1〉を満たし ADOPT されたため優先度低。Gate 2 は
   §13.3 のとおり N=1024/2048 でわずかに超過している）
-- feature ゲート撤去・3 バックエンド candle 比ゲート再計測（#1438）
+- ~~feature ゲート撤去・3 バックエンド candle 比ゲート再計測（#1438）~~ →
+  **完了**（#1438。旧 `host-view-readout` cargo feature を撤去し bench-fandhe の既定経路化・
+  3 バックエンド × 両実機の before/after 実測で判定対象の reuse 全セル非後退・checksum 完全一致を
+  確認（CPU の fresh 参考行は M4 Max N=512/1024 が僅かに後退方向・ノイズかは未確定）。
+  `docs/perf/{cuda,metal,cpu}-gemm-candle-gate-remeasurement.md` の該当節を参照）
 - Metal の全形状後退（1.30〜1.56 倍。CUDA 限定のためスコープ外）

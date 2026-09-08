@@ -362,7 +362,8 @@ mod fresh_overhead_diag_tests;
 mod gemm_reuse_phase_diag_tests;
 #[cfg(test)]
 mod init_cost_diag_tests;
-// イシュー #1436: `host-view-readout` feature（#1335／#1336／#1337）
+// イシュー #1436: 借用ビュー readout（#1335／#1336／#1337。#1438 で
+// bench-fandhe の既定経路化・旧計測専用 cargo feature は撤去済み）
 // 有効時の CUDA reuse N=1024/2048 後退（15.04 倍・1.20 倍）を、D2H
 // 読み出し方式別（`clone_dtoh`＋`to_vec` 複製 / `clone_dtoh` 借用
 // keep-alive / 借用＋ダミー確保-解放 / 事前タッチ済み再利用宛先）に
