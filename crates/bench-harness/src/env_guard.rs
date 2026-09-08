@@ -801,6 +801,11 @@ pub struct GuardRetryOutcome {
     pub attempts: Vec<GuardAttempt>,
     pub final_report: EnvGuardReport,
     pub total_wait: Duration,
+    /// 構築時に指定された `RetryConfig::max_attempts()`（上限）。`attempts_used()`
+    /// と別に保持する（Review 指摘。#1265）: 上限に対する余裕（何回目で
+    /// pass したか）が [`format_env_info_text`] の診断ログから読み取れる
+    /// ようにするため、実際の試行回数とは独立に記録する。
+    pub configured_max_attempts: usize,
 }
 
 impl GuardRetryOutcome {
@@ -864,6 +869,8 @@ impl GuardRetryOutcome {
             }],
             final_report: report,
             total_wait: Duration::ZERO,
+            // record_only モードは判定を行わず単一試行のみのため 1 固定。
+            configured_max_attempts: 1,
         }
     }
 }
@@ -935,6 +942,7 @@ where
                 attempts,
                 final_report: report,
                 total_wait,
+                configured_max_attempts: retry.max_attempts(),
             });
         }
         if is_last {
@@ -1044,7 +1052,7 @@ pub fn format_env_info_text(
         "env_guard_overall verdict={} attempts={} max_attempts={} total_wait_secs={:.2}\n",
         verdict_str(outcome.final_report.overall),
         outcome.attempts_used(),
-        outcome.attempts_used(),
+        outcome.configured_max_attempts,
         outcome.total_wait.as_secs_f64(),
     ));
 
@@ -1937,7 +1945,9 @@ mod tests {
         assert!(text.contains("env_guard_mode=gated"));
         assert!(text.contains("env_guard_load_avg"));
         assert!(text.contains("env_guard_gpu status=available"));
-        assert!(text.contains("env_guard_overall verdict=pass attempts=1 max_attempts=1"));
+        // attempts（実試行回数）と max_attempts（RetryConfig の上限）を区別する
+        // ため意図的に異なる値になる設定を使う（Review 指摘。#1265）。
+        assert!(text.contains("env_guard_overall verdict=pass attempts=1 max_attempts=3"));
         assert!(text.contains("env_guard_attempt idx=1"));
         // GPU プロセス名の全列挙は行わない（flagged のみ記録する設計）。
         assert!(!text.contains("processes=["));
@@ -2031,6 +2041,7 @@ mod tests {
             }],
             final_report: report,
             total_wait: Duration::ZERO,
+            configured_max_attempts: 1,
         };
         let text = format_env_info_text("phase1", &single_attempt_outcome, Some(&cfg));
         assert!(text.contains("flagged=internal-secret-service"));
