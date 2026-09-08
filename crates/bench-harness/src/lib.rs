@@ -112,8 +112,23 @@
 //! 提供する。#1186／#1187（Metal 転置ルーティング A/B）で手動記録に頼っていた
 //! 環境確認を機械化する位置づけで、[`ab::STABILITY_SPREAD_GATE`]・
 //! [`ab::run_ab`]／[`ab::run_stability`] の判定ロジック自体は変更しない。
-//! ガード不成立時のバックオフ再試行・記録出力・example への結線は兄弟
-//! イシュー #1265 のスコープ（[`env_guard`] モジュール doc 参照）。
+//!
+//! ## Phase 2b: ガード不成立時のバックオフ再試行・env_info 自動記録
+//! （本イシュー #1265 の実装範囲。親 #1263）
+//!
+//! [`env_guard`] モジュールへ、ガード判定（`overall == GuardVerdict::Fail`）
+//! 不成立時に待機して再判定するバックオフ再試行（[`env_guard::RetryConfig`]・
+//! [`env_guard::run_guard_with_retry`]／[`env_guard::run_guard_with_retry_with`]。
+//! 上限到達時は `BenchError::EnvGuardExhausted` により fail-closed に中断）と、
+//! `env_info.txt` 準拠のテキストブロック生成（[`env_guard::format_env_info_text`]。
+//! I/O なしの純粋関数）を実装済み。`Undetermined` は再試行せず記録のみで
+//! 続行する契約（#1264 の「取得不能は未判定・ブロック要因にしない」設計を
+//! 再試行にも一貫適用）。結線先は
+//! `crates/backend-metal/examples/gemm_transpose_route_ab_bench.rs`
+//! （フェーズ 1・フェーズ 2 の各開始前。`--guard-only`／`--max-load-avg`／
+//! `--gpu-watch` 等 CLI opt-in。閾値の既定値はユーザー承認事項のためコードに
+//! 埋め込まない）。詳細な出力フォーマット・再試行規定は
+//! `docs/perf/metal-bench-noise-protocol.md` を参照。
 
 pub mod ab;
 pub mod alloc_tracker;

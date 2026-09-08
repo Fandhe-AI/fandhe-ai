@@ -64,9 +64,26 @@ average 3.4〜8.6・実行中の再上昇を `docs/perf/logs/metal-gemm-transpos
 で確認）により「5. 安定性ゲートと不成立時の中断規定」のゲートが 4 試行とも不成立のまま終わった。環境状態の
 確認が手動記録（同ディレクトリの `env_info.txt`）に依存していたことが一因のため、`bench_harness::env_guard`
 （`crates/bench-harness/src/env_guard.rs`）がその確認を機械化する **API 層**を提供する。load average・他
-GPU プロセス検出・uptime 記録の取得と判定を行う設定型・取得関数・判定結果型のみを提供し、ガード不成立時の
-バックオフ再試行・記録出力・example（`gemm_transpose_route_ab_bench.rs` 等）への結線は兄弟イシュー #1265 の
-スコープである（本ドキュメントの本節は API の位置づけの記録に留める）。
+GPU プロセス検出・uptime 記録の取得と判定を行う設定型・取得関数・判定結果型を提供する（#1264）。
+ガード不成立時のバックオフ再試行・env_info への記録出力・
+`crates/backend-metal/examples/gemm_transpose_route_ab_bench.rs` への結線はイシュー #1265 で実装済み
+（詳細は「7. ガード不成立時の再試行規定」節）。
+
+## 7. ガード不成立時の再試行規定（イシュー #1265）
+
+- **再判定するのは `EnvGuardReport::is_blocking()`（`overall == GuardVerdict::Fail`）の場合のみ**。
+  `GuardVerdict::Undetermined`（取得不能）は記録のみで続行し、再試行しない（#1264 の「取得不能は未判定・
+  ブロック要因にしない」契約を再試行にも一貫適用する）
+- **待機間隔は増える方向のみ**: `RetryConfig`（`initial_wait`・`growth_factor`・`max_wait`・`max_attempts`）は
+  `initial_wait * growth_factor^i` を `max_wait` で cap した非減少列を生成する。呼び出し側 example
+  （`gemm_transpose_route_ab_bench.rs`）の既定値 `GUARD_INITIAL_WAIT=30s`・`GUARD_GROWTH_FACTOR=1.5`・
+  `GUARD_MAX_WAIT=300s`・`GUARD_MAX_ATTEMPTS=10` の調整は `ROUNDS`／`COOLDOWN`／`MIN_WARMUP` と同様
+  **増やす方向のみ**許容する
+- **上限回数到達で中断**: `max_attempts` 回すべて `Fail` のままなら `BenchError::EnvGuardExhausted` を返す。
+  呼び出し側 example は `verdict=undetermined` を出力して非ゼロ終了する（フェーズ 1 不成立時の既存経路と同じ
+  `verdict=` grep 運用に揃える）
+- **閾値は既定値なし**: `--max-load-avg` を指定しない実行は **record_only**（判定なし・記録のみ）で動作する。
+  具体的な閾値の既定化は本イシューでも行わず（下記「#1265 向けの提案閾値」参照）、CLI 明示指定のみで有効化する
 
 ## 熱・電源状態の記録
 
@@ -117,12 +134,29 @@ pmset -g therm
 部分一致するプロセスがある、または使用率が上限超過で `Fail`。watchlist・上限とも未設定なら記録のみで `Pass`。
 GPU 取得自体が不能（Linux 等）なら `Undetermined`。
 
+### バックオフ再試行・env_info 記録 API（イシュー #1265）
+
+- `RetryConfig::new(initial_wait, growth_factor, max_wait, max_attempts) -> Result<Self, BenchError>`:
+  検証付きコンストラクタ（`max_attempts >= 1`・`initial_wait > 0`・`growth_factor` 有限かつ `>= 1.0`・
+  `max_wait >= initial_wait`）。既定値・`Default` 実装は持たない
+- `RetryConfig::wait_for_attempt(attempt_index: usize) -> Duration`: 待機列を返す純粋関数（非減少・`max_wait` cap）
+- `run_guard_with_retry_with(&RetryConfig, check, sleep) -> Result<GuardRetryOutcome, BenchError>`:
+  バックオフ再試行のコア実装（`check`／`sleep` を注入。I/O なしでユニットテスト可能）
+- `run_guard_with_retry(&EnvGuardConfig, &RetryConfig) -> Result<GuardRetryOutcome, BenchError>`:
+  実 I/O 版（`EnvGuardConfig::check` + `std::thread::sleep` の合成）
+- `GuardRetryOutcome::record_only(EnvSample) -> Self`: 判定を行わない記録専用の単一試行結果を構築する
+  （`--max-load-avg` 未指定時の record_only モード向け）
+- `format_env_info_text(label, &GuardRetryOutcome, Option<&EnvGuardConfig>) -> String`:
+  `env_info.txt` 準拠のテキストブロックを生成する純粋関数（I/O なし。GPU プロセスは件数と flagged 名のみ記録し、
+  全プロセス名の列挙は行わない）
+
 ### #1265 向けの提案閾値（未承認・記録のみ）
 
-`EnvGuardConfig::new` の `max_load_avg_1min` に既定値はなく、#1265（バックオフ再試行・結線）側での具体的な
-閾値設定はユーザー承認が必要な別判断である。参考として、`crates/backend-cpu/src/thread_limit.rs::ThreadLimitReport`
-（大コア数判定。#1363）の実測値を踏まえ「大コア数の 0.5 倍程度」を出発点とする案が考えられるが、**本イシュー
-では未承認・未検証のまま提案として記すに留める**。
+`EnvGuardConfig::new` の `max_load_avg_1min` に既定値はなく、#1265（バックオフ再試行・結線）でも既定値化は行わず
+CLI 明示指定（`--max-load-avg`）にのみ opt-in する形で実装した。参考として、
+`crates/backend-cpu/src/thread_limit.rs::ThreadLimitReport`（大コア数判定。#1363）の実測値を踏まえ
+「大コア数の 0.5 倍程度」を出発点とする案が考えられるが、**未承認・未検証のまま提案として記すに留める**。
+承認後に既定値化するなら別イシューで行う。
 
 ## 適用対象・スコープ
 

@@ -1,5 +1,6 @@
 //! ベンチ実行前の環境ガード（イシュー #1264・親 #1263。トラッキング #1242・
-//! Phase 親 #1246）。
+//! Phase 親 #1246）と、そのバックオフ再試行・`env_info` 自動記録
+//! （イシュー #1265）。
 //!
 //! ## 背景・目的
 //!
@@ -12,9 +13,12 @@
 //! metal-gemm-transpose-route-ab-1187/env_info.txt`）に依存していた。
 //!
 //! 本モジュールは、その環境確認を機械化する **API 層**（設定型・取得・
-//! 判定・結果型）のみを提供する。ガード不成立時のバックオフ再試行・
-//! `env_info` への自動記録・`examples/gemm_transpose_route_ab_bench.rs` への
-//! 結線は兄弟イシュー #1265 のスコープであり、本モジュールでは行わない。
+//! 判定・結果型。#1264）に加え、ガード不成立時のバックオフ再試行
+//! （[`RetryConfig`]・[`run_guard_with_retry`]／[`run_guard_with_retry_with`]）と
+//! `env_info` への自動記録（[`format_env_info_text`]）を提供する（#1265）。
+//! `examples/gemm_transpose_route_ab_bench.rs` への結線自体は本モジュールでは
+//! 行わず、呼び出し側 example の責務とする（本モジュールは I/O を伴う
+//! 実行前チェックのビルディングブロックに徹する）。
 //!
 //! ## 設計方針
 //!
@@ -57,7 +61,7 @@ use crate::stats::BenchError;
 use serde::Serialize;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// 個別項目・全体の判定結果。
 ///
@@ -180,6 +184,14 @@ pub struct GpuProcessCheck {
     pub verdict: GuardVerdict,
     /// 未判定・記録のみ等の補足説明。
     pub note: Option<String>,
+    /// GPU プロセス取得自体が成功したか（`sample.gpu` が
+    /// [`GpuSample::Available`] だったか）。`processes` が空でも
+    /// `available=true`（GPU 使用中のプロセスが単に 0 件）と
+    /// `available=false`（取得コマンド自体が失敗・非対応プラットフォーム）を
+    /// 区別する（イシュー #1265・[`format_env_info_text`] の
+    /// `env_guard_gpu status=` 出力向け。#1264 時点の `note` は「未判定・
+    /// 記録のみ」双方の補足に使われ本区別には使えなかったため追加）。
+    pub available: bool,
 }
 
 /// uptime の記録（判定なし。記録のみ）。
@@ -324,6 +336,7 @@ impl EnvGuardConfig {
                 device_utilization_percent: None,
                 verdict: GuardVerdict::Undetermined,
                 note: Some(reason.clone()),
+                available: false,
             },
             GpuSample::Available {
                 processes,
@@ -390,6 +403,7 @@ impl EnvGuardConfig {
                     device_utilization_percent: *device_utilization_percent,
                     verdict,
                     note,
+                    available: true,
                 }
             }
         }
@@ -669,6 +683,404 @@ fn gpu_sample_now() -> GpuSample {
     GpuSample::Unavailable {
         reason: "未対応プラットフォームのため GPU プロセス検出ができない".to_string(),
     }
+}
+
+// ---------------------------------------------------------------------
+// バックオフ再試行・env_info 記録（イシュー #1265。親 #1263）
+// ---------------------------------------------------------------------
+//
+// 上のモジュール doc で「兄弟イシュー #1265 のスコープ」としていた
+// バックオフ再試行 API・env_info 自動記録テキスト生成を実装する。
+// 呼び出し先は `crates/backend-metal/examples/gemm_transpose_route_ab_bench.rs`
+// （フェーズ 1・フェーズ 2 の各開始前）。判定ロジック（[`EnvGuardConfig::evaluate`]）・
+// `ab::STABILITY_SPREAD_GATE`・`ab::run_ab`／`run_stability` 自体は変更しない
+// （このモジュールが計測区間の外側で完結するため）。
+
+/// バックオフ再試行の設定。既定値・`Default` 実装は持たない
+/// （[`EnvGuardConfig`] と同様、待機間隔・上限回数はユーザー承認事項として
+/// 呼び出し側が明示する。`.claude/rules/security.md`「自己修復ループ固有の
+/// ガードレール」に倣う）。
+///
+/// 待機列は [`Self::wait_for_attempt`] が非減少（`growth_factor >= 1.0` と
+/// `max_wait` による cap）であることを構築時に検証するため、[`run_guard_with_retry_with`]
+/// の呼び出し側は「待機は増える方向のみ」という契約を機械的に信頼できる
+/// （`ROUNDS`／`COOLDOWN`／`MIN_WARMUP` 等の計測プロトコル定数と同様、
+/// 調整は増やす方向のみが許容される。`docs/perf/metal-bench-noise-protocol.md`）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RetryConfig {
+    initial_wait: Duration,
+    growth_factor: f64,
+    max_wait: Duration,
+    max_attempts: usize,
+}
+
+impl RetryConfig {
+    /// 検証付きコンストラクタ。以下のいずれかに違反する場合は
+    /// `BenchError::ProtocolViolation` を返す（fail-closed）:
+    /// - `max_attempts >= 1`
+    /// - `initial_wait > 0`
+    /// - `growth_factor` が有限かつ `>= 1.0`（待機列を非減少にする必須条件）
+    /// - `max_wait >= initial_wait`
+    pub fn new(
+        initial_wait: Duration,
+        growth_factor: f64,
+        max_wait: Duration,
+        max_attempts: usize,
+    ) -> Result<Self, BenchError> {
+        if max_attempts == 0 {
+            return Err(BenchError::ProtocolViolation(
+                "max_attempts は 1 以上である必要がある".to_string(),
+            ));
+        }
+        if initial_wait.is_zero() {
+            return Err(BenchError::ProtocolViolation(
+                "initial_wait は正である必要がある".to_string(),
+            ));
+        }
+        if !growth_factor.is_finite() || growth_factor < 1.0 {
+            return Err(BenchError::ProtocolViolation(format!(
+                "growth_factor は有限かつ 1.0 以上である必要がある（実際: {growth_factor}）"
+            )));
+        }
+        if max_wait < initial_wait {
+            return Err(BenchError::ProtocolViolation(
+                "max_wait は initial_wait 以上である必要がある".to_string(),
+            ));
+        }
+        Ok(RetryConfig {
+            initial_wait,
+            growth_factor,
+            max_wait,
+            max_attempts,
+        })
+    }
+
+    /// 試行インデックス `attempt_index`（0 始まり。0 回目の再試行前の待機に対応）
+    /// の待機時間を返す純粋関数。`initial_wait * growth_factor^attempt_index` を
+    /// `max_wait` で cap する。`growth_factor >= 1.0` の検証済み構築のため、
+    /// `attempt_index` の増加に対し非減少列になる。
+    pub fn wait_for_attempt(&self, attempt_index: usize) -> Duration {
+        // Duration に対する冪乗演算は存在しないため秒（f64）で計算してから
+        // Duration へ戻す。extreme な attempt_index でも f64 の powi は
+        // 発散して +inf になるだけで panic しない（Duration::from_secs_f64 も
+        // 有限値へ自然に飽和させるため、後段の `.min` が機構的に機能する）。
+        let factor = self.growth_factor.powi(attempt_index as i32);
+        let secs = (self.initial_wait.as_secs_f64() * factor).min(self.max_wait.as_secs_f64());
+        Duration::from_secs_f64(secs)
+    }
+
+    pub fn max_attempts(&self) -> usize {
+        self.max_attempts
+    }
+
+    pub fn initial_wait(&self) -> Duration {
+        self.initial_wait
+    }
+
+    pub fn growth_factor(&self) -> f64 {
+        self.growth_factor
+    }
+
+    pub fn max_wait(&self) -> Duration {
+        self.max_wait
+    }
+}
+
+/// 1 回の試行記録（env_info 出力・テスト用）。`attempt` は 1 始まり。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardAttempt {
+    pub attempt: usize,
+    pub report: EnvGuardReport,
+    /// この試行の判定を得る前に待機した時間（1 回目は常に `None`）。
+    pub waited_before: Option<Duration>,
+}
+
+/// [`run_guard_with_retry_with`]／[`run_guard_with_retry`] の成功時の戻り値。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardRetryOutcome {
+    pub attempts: Vec<GuardAttempt>,
+    pub final_report: EnvGuardReport,
+    pub total_wait: Duration,
+}
+
+impl GuardRetryOutcome {
+    /// 実行した試行回数（`attempts.len()` の別名。呼び出し側の可読性のため）。
+    pub fn attempts_used(&self) -> usize {
+        self.attempts.len()
+    }
+
+    /// 判定を行わない記録専用の単一試行結果を構築する（`--max-load-avg`
+    /// 未指定時の `record_only` モード向け。[`EnvGuardConfig::new`] が
+    /// 閾値必須のため、閾値を設定せずに [`EnvSample::collect`] の記録のみを
+    /// [`format_env_info_text`] へ渡す経路として使う。既存 API
+    /// （[`EnvGuardConfig`]・[`EnvGuardReport`]）自体は変更しない）。
+    ///
+    /// 各項目の verdict は「取得できたかに関わらず判定は行わない」ことを
+    /// 表すため、[`GuardVerdict::Undetermined`] に固定する（[`EnvGuardReport::is_blocking`]
+    /// が `false` を返すことも保証される）。
+    pub fn record_only(sample: EnvSample) -> Self {
+        let load_avg = LoadAvgCheck {
+            observed: sample.load_avg,
+            max_1min: f64::INFINITY,
+            verdict: GuardVerdict::Undetermined,
+        };
+        let gpu = match &sample.gpu {
+            GpuSample::Unavailable { reason } => GpuProcessCheck {
+                processes: Vec::new(),
+                flagged: Vec::new(),
+                device_utilization_percent: None,
+                verdict: GuardVerdict::Undetermined,
+                note: Some(reason.clone()),
+                available: false,
+            },
+            GpuSample::Available {
+                processes,
+                device_utilization_percent,
+            } => GpuProcessCheck {
+                processes: processes.clone(),
+                flagged: Vec::new(),
+                device_utilization_percent: *device_utilization_percent,
+                verdict: GuardVerdict::Undetermined,
+                note: Some("record_only モードのため判定を行わない".to_string()),
+                available: true,
+            },
+        };
+        let uptime = UptimeRecord {
+            uptime_secs: sample.uptime_secs,
+            raw_line: sample.raw_uptime_line.clone(),
+            collected_at_unix_secs: sample.collected_at_unix_secs,
+        };
+        let report = EnvGuardReport {
+            load_avg,
+            gpu,
+            uptime,
+            overall: GuardVerdict::Undetermined,
+        };
+        GuardRetryOutcome {
+            attempts: vec![GuardAttempt {
+                attempt: 1,
+                report: report.clone(),
+                waited_before: None,
+            }],
+            final_report: report,
+            total_wait: Duration::ZERO,
+        }
+    }
+}
+
+/// `report.load_avg.max_1min` 等から、上限到達時の `BenchError::EnvGuardExhausted`
+/// 用の人が読める要約を組み立てる（ホスト名・ユーザー名を含めない）。
+fn summarize_exhausted(report: &EnvGuardReport) -> String {
+    let load_part = match report.load_avg.observed {
+        Some(load) => format!(
+            "load_avg(1min)={:.2} > max={:.2}",
+            load.one, report.load_avg.max_1min
+        ),
+        None => format!("load_avg=NA(max={:.2})", report.load_avg.max_1min),
+    };
+    let gpu_part = if report.gpu.flagged.is_empty() {
+        "gpu_flagged=none".to_string()
+    } else {
+        let names: Vec<&str> = report.gpu.flagged.iter().map(|p| p.name.as_str()).collect();
+        format!("gpu_flagged={}", names.join(","))
+    };
+    format!("{load_part}; {gpu_part}")
+}
+
+/// バックオフ再試行のコア実装。実測（`check`）・待機（`sleep`）を注入する
+/// ことで I/O なしにユニットテストできる（[`run_guard_with_retry`] が
+/// 実 I/O 版として本関数を呼ぶ）。
+///
+/// 再判定するのは `report.is_blocking()`（`overall == GuardVerdict::Fail`）の
+/// 場合のみ。`Pass`・`Undetermined` は即座に成功として返す（[`EnvGuardReport`]
+/// doc の「取得不能は未判定・ブロック要因にしない」契約を再試行にも一貫適用。
+/// `Undetermined` では待機・再試行しない）。
+///
+/// 試行 `i`（0 始まり）が `Fail` で `i + 1 < retry.max_attempts()` なら
+/// `sleep(retry.wait_for_attempt(i))` して再判定する。`retry.max_attempts()`
+/// 回すべて `Fail` なら `Err(BenchError::EnvGuardExhausted { .. })` を返す。
+///
+/// `unwrap`／`expect` を使わず panic 経路を持たない（`.claude/rules/coding-rust.md`）。
+pub fn run_guard_with_retry_with<C, S>(
+    retry: &RetryConfig,
+    mut check: C,
+    mut sleep: S,
+) -> Result<GuardRetryOutcome, BenchError>
+where
+    C: FnMut() -> EnvGuardReport,
+    S: FnMut(Duration),
+{
+    let mut attempts: Vec<GuardAttempt> = Vec::with_capacity(retry.max_attempts());
+    let mut total_wait = Duration::ZERO;
+
+    for attempt_index in 0..retry.max_attempts() {
+        let waited_before = if attempt_index == 0 {
+            None
+        } else {
+            let wait = retry.wait_for_attempt(attempt_index - 1);
+            sleep(wait);
+            total_wait += wait;
+            Some(wait)
+        };
+        let report = check();
+        let is_last = attempt_index + 1 == retry.max_attempts();
+        let blocking = report.is_blocking();
+        attempts.push(GuardAttempt {
+            attempt: attempt_index + 1,
+            report: report.clone(),
+            waited_before,
+        });
+        if !blocking {
+            return Ok(GuardRetryOutcome {
+                attempts,
+                final_report: report,
+                total_wait,
+            });
+        }
+        if is_last {
+            return Err(BenchError::EnvGuardExhausted {
+                attempts: retry.max_attempts(),
+                detail: summarize_exhausted(&report),
+            });
+        }
+        // ループを継続（次の反復冒頭で `wait_for_attempt(attempt_index)` を待機）。
+    }
+    // `retry.max_attempts() >= 1`（`RetryConfig::new` で検証済み）のため、
+    // このループは必ず上の分岐のいずれかで return する。到達しない。
+    unreachable!("RetryConfig::new が max_attempts >= 1 を検証済みのためループは必ず return する")
+}
+
+/// [`run_guard_with_retry_with`] の実 I/O 版（`EnvGuardConfig::check` +
+/// `std::thread::sleep` を合成した薄いラッパー）。
+/// `examples/gemm_transpose_route_ab_bench.rs` から呼ばれる想定。
+pub fn run_guard_with_retry(
+    config: &EnvGuardConfig,
+    retry: &RetryConfig,
+) -> Result<GuardRetryOutcome, BenchError> {
+    run_guard_with_retry_with(retry, || config.check(), std::thread::sleep)
+}
+
+/// env_info.txt 準拠のテキストブロックを生成する純粋関数（I/O なし）。
+///
+/// `docs/perf/logs/metal-gemm-transpose-route-ab-1186/env_info.txt` の
+/// `== before ==`／`uptime` 生行の並びに準拠しつつ、機械的に grep できる
+/// `key=value` 行を併記する（フォーマット詳細はモジュール doc 「3.2」を
+/// 実装したもの。呼び出し側 example の doc も参照）。
+///
+/// `label` は呼び出し側が渡す固定文字列（`"phase1"`／`"phase2"`／`"guard_only"`
+/// 等）のみを想定し、外部入力をそのまま埋め込まない（`.claude/rules/security.md`
+/// A03 対応）。GPU プロセスは件数と flagged 名のみを記録し、全プロセス名の
+/// 列挙は行わない（記録用途に必要十分で、付随的な情報露出を抑える。
+/// `docs/real-hardware-verification-env.md` 方針）。
+///
+/// `config` は `record_only` モード（閾値未指定）では `None` を渡す想定。
+pub fn format_env_info_text(
+    label: &str,
+    outcome: &GuardRetryOutcome,
+    config: Option<&EnvGuardConfig>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("== env_guard({label}) ==\n"));
+    if let Some(raw) = &outcome.final_report.uptime.raw_line {
+        out.push_str(raw);
+        out.push('\n');
+    }
+    let mode = if config.is_some() {
+        "gated"
+    } else {
+        "record_only"
+    };
+    out.push_str(&format!("env_guard_mode={mode}\n"));
+
+    let load = &outcome.final_report.load_avg;
+    let (one, five, fifteen) = match load.observed {
+        Some(l) => (
+            format!("{:.2}", l.one),
+            format!("{:.2}", l.five),
+            format!("{:.2}", l.fifteen),
+        ),
+        None => ("NA".to_string(), "NA".to_string(), "NA".to_string()),
+    };
+    let max_1min = if config.is_some() {
+        format!("{:.2}", load.max_1min)
+    } else {
+        "NA".to_string()
+    };
+    out.push_str(&format!(
+        "env_guard_load_avg one={one} five={five} fifteen={fifteen} max_1min={max_1min} verdict={}\n",
+        verdict_str(load.verdict)
+    ));
+
+    out.push_str(&format!(
+        "env_guard_uptime_secs={} collected_at_unix_secs={}\n",
+        opt_u64_str(outcome.final_report.uptime.uptime_secs),
+        opt_u64_str(outcome.final_report.uptime.collected_at_unix_secs),
+    ));
+
+    let gpu = &outcome.final_report.gpu;
+    let status = if gpu.available {
+        "available"
+    } else {
+        "unavailable"
+    };
+    let flagged = if gpu.flagged.is_empty() {
+        "none".to_string()
+    } else {
+        gpu.flagged
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    out.push_str(&format!(
+        "env_guard_gpu status={status} processes={} flagged={flagged} device_utilization_percent={} verdict={} note={}\n",
+        gpu.processes.len(),
+        opt_u8_str(gpu.device_utilization_percent),
+        verdict_str(gpu.verdict),
+        gpu.note.as_deref().unwrap_or("none"),
+    ));
+
+    out.push_str(&format!(
+        "env_guard_overall verdict={} attempts={} max_attempts={} total_wait_secs={:.2}\n",
+        verdict_str(outcome.final_report.overall),
+        outcome.attempts_used(),
+        outcome.attempts_used(),
+        outcome.total_wait.as_secs_f64(),
+    ));
+
+    for a in &outcome.attempts {
+        let load_one = a
+            .report
+            .load_avg
+            .observed
+            .map(|l| format!("{:.2}", l.one))
+            .unwrap_or_else(|| "NA".to_string());
+        out.push_str(&format!(
+            "env_guard_attempt idx={} waited_before_secs={:.2} load_avg_one={load_one} gpu_verdict={} overall={}\n",
+            a.attempt,
+            a.waited_before.map(|d| d.as_secs_f64()).unwrap_or(0.0),
+            verdict_str(a.report.gpu.verdict),
+            verdict_str(a.report.overall),
+        ));
+    }
+
+    out
+}
+
+fn verdict_str(v: GuardVerdict) -> &'static str {
+    match v {
+        GuardVerdict::Pass => "pass",
+        GuardVerdict::Fail => "fail",
+        GuardVerdict::Undetermined => "undetermined",
+    }
+}
+
+fn opt_u64_str(v: Option<u64>) -> String {
+    v.map(|x| x.to_string()).unwrap_or_else(|| "NA".to_string())
+}
+
+fn opt_u8_str(v: Option<u8>) -> String {
+    v.map(|x| x.to_string()).unwrap_or_else(|| "NA".to_string())
 }
 
 #[cfg(test)]
@@ -1324,5 +1736,304 @@ mod tests {
                 panic!("macOS では Available を期待する（reason: {reason}）");
             }
         }
+    }
+
+    // ===================================================================
+    // RetryConfig / run_guard_with_retry_with / format_env_info_text
+    // （イシュー #1265）
+    // ===================================================================
+
+    fn report_with(load_verdict: GuardVerdict, overall: GuardVerdict) -> EnvGuardReport {
+        EnvGuardReport {
+            load_avg: LoadAvgCheck {
+                observed: Some(LoadAvg {
+                    one: 1.0,
+                    five: 1.0,
+                    fifteen: 1.0,
+                }),
+                max_1min: 4.0,
+                verdict: load_verdict,
+            },
+            gpu: GpuProcessCheck {
+                processes: Vec::new(),
+                flagged: Vec::new(),
+                device_utilization_percent: None,
+                verdict: GuardVerdict::Pass,
+                note: None,
+                available: true,
+            },
+            uptime: UptimeRecord {
+                uptime_secs: Some(123),
+                raw_line: Some("load averages: 1.00 1.00 1.00".to_string()),
+                collected_at_unix_secs: Some(1_700_000_000),
+            },
+            overall,
+        }
+    }
+
+    // --- RetryConfig::new の検証 ---------------------------------------
+
+    #[test]
+    fn retry_config_rejects_zero_max_attempts() {
+        let err =
+            RetryConfig::new(Duration::from_secs(1), 1.5, Duration::from_secs(10), 0).unwrap_err();
+        assert!(matches!(err, BenchError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn retry_config_rejects_zero_initial_wait() {
+        let err = RetryConfig::new(Duration::ZERO, 1.5, Duration::from_secs(10), 3).unwrap_err();
+        assert!(matches!(err, BenchError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn retry_config_rejects_growth_factor_below_one() {
+        let err =
+            RetryConfig::new(Duration::from_secs(1), 0.5, Duration::from_secs(10), 3).unwrap_err();
+        assert!(matches!(err, BenchError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn retry_config_rejects_nan_growth_factor() {
+        let err = RetryConfig::new(Duration::from_secs(1), f64::NAN, Duration::from_secs(10), 3)
+            .unwrap_err();
+        assert!(matches!(err, BenchError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn retry_config_rejects_max_wait_below_initial_wait() {
+        let err =
+            RetryConfig::new(Duration::from_secs(10), 1.5, Duration::from_secs(1), 3).unwrap_err();
+        assert!(matches!(err, BenchError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn retry_config_accepts_valid_config() {
+        let cfg = RetryConfig::new(Duration::from_secs(1), 1.5, Duration::from_secs(10), 3)
+            .expect("有効な設定のため成功するはず");
+        assert_eq!(cfg.max_attempts(), 3);
+        assert_eq!(cfg.initial_wait(), Duration::from_secs(1));
+        assert_eq!(cfg.growth_factor(), 1.5);
+        assert_eq!(cfg.max_wait(), Duration::from_secs(10));
+    }
+
+    // --- wait_for_attempt: 非減少・cap ----------------------------------
+
+    #[test]
+    fn wait_for_attempt_is_non_decreasing_and_capped() {
+        let cfg = RetryConfig::new(Duration::from_secs(2), 2.0, Duration::from_secs(10), 10)
+            .expect("有効な設定のため成功するはず");
+        let w0 = cfg.wait_for_attempt(0);
+        let w1 = cfg.wait_for_attempt(1);
+        let w2 = cfg.wait_for_attempt(2);
+        let w5 = cfg.wait_for_attempt(5);
+        assert_eq!(w0, Duration::from_secs(2));
+        assert_eq!(w1, Duration::from_secs(4));
+        assert_eq!(w2, Duration::from_secs(8));
+        assert!(w1 >= w0 && w2 >= w1 && w5 >= w2);
+        // max_wait=10s で cap される。
+        assert_eq!(w5, Duration::from_secs(10));
+    }
+
+    // --- run_guard_with_retry_with ---------------------------------------
+
+    #[test]
+    fn retry_with_immediate_pass_does_not_sleep() {
+        let retry = RetryConfig::new(Duration::from_secs(1), 1.5, Duration::from_secs(10), 5)
+            .expect("有効な設定のため成功するはず");
+        let mut sleep_calls: Vec<Duration> = Vec::new();
+        let outcome = run_guard_with_retry_with(
+            &retry,
+            || report_with(GuardVerdict::Pass, GuardVerdict::Pass),
+            |d| sleep_calls.push(d),
+        )
+        .expect("初回 Pass のため成功するはず");
+        assert_eq!(outcome.attempts_used(), 1);
+        assert!(sleep_calls.is_empty());
+        assert_eq!(outcome.total_wait, Duration::ZERO);
+        assert_eq!(outcome.final_report.overall, GuardVerdict::Pass);
+    }
+
+    #[test]
+    fn retry_with_undetermined_does_not_retry() {
+        let retry = RetryConfig::new(Duration::from_secs(1), 1.5, Duration::from_secs(10), 5)
+            .expect("有効な設定のため成功するはず");
+        let mut sleep_calls: Vec<Duration> = Vec::new();
+        let outcome = run_guard_with_retry_with(
+            &retry,
+            || report_with(GuardVerdict::Undetermined, GuardVerdict::Undetermined),
+            |d| sleep_calls.push(d),
+        )
+        .expect("Undetermined は再試行せず成功扱いのはず");
+        assert_eq!(outcome.attempts_used(), 1);
+        assert!(sleep_calls.is_empty());
+    }
+
+    #[test]
+    fn retry_with_fail_then_pass_retries_with_non_decreasing_waits() {
+        let retry = RetryConfig::new(Duration::from_secs(1), 2.0, Duration::from_secs(100), 5)
+            .expect("有効な設定のため成功するはず");
+        let mut sleep_calls: Vec<Duration> = Vec::new();
+        let mut call_count = 0usize;
+        let outcome = run_guard_with_retry_with(
+            &retry,
+            || {
+                call_count += 1;
+                if call_count <= 2 {
+                    report_with(GuardVerdict::Fail, GuardVerdict::Fail)
+                } else {
+                    report_with(GuardVerdict::Pass, GuardVerdict::Pass)
+                }
+            },
+            |d| sleep_calls.push(d),
+        )
+        .expect("3 回目で Pass になるため成功するはず");
+        assert_eq!(outcome.attempts_used(), 3);
+        assert_eq!(sleep_calls.len(), 2);
+        // 非減少列（growth_factor=2.0）。
+        assert!(sleep_calls[1] >= sleep_calls[0]);
+        assert_eq!(sleep_calls[0], Duration::from_secs(1));
+        assert_eq!(sleep_calls[1], Duration::from_secs(2));
+        assert_eq!(outcome.total_wait, sleep_calls[0] + sleep_calls[1]);
+    }
+
+    #[test]
+    fn retry_with_always_fail_exhausts_and_errors() {
+        let retry = RetryConfig::new(Duration::from_secs(1), 1.5, Duration::from_secs(10), 3)
+            .expect("有効な設定のため成功するはず");
+        let mut sleep_calls: Vec<Duration> = Vec::new();
+        let err = run_guard_with_retry_with(
+            &retry,
+            || report_with(GuardVerdict::Fail, GuardVerdict::Fail),
+            |d| sleep_calls.push(d),
+        )
+        .unwrap_err();
+        match err {
+            BenchError::EnvGuardExhausted { attempts, detail } => {
+                assert_eq!(attempts, 3);
+                assert!(!detail.is_empty());
+            }
+            other => panic!("EnvGuardExhausted を期待したが {other:?} だった"),
+        }
+        // max_attempts=3 のため sleep は 2 回（各試行間）。
+        assert_eq!(sleep_calls.len(), 2);
+    }
+
+    // --- format_env_info_text --------------------------------------------
+
+    #[test]
+    fn format_env_info_text_gated_pass_contains_expected_keys() {
+        let retry = RetryConfig::new(Duration::from_secs(1), 1.5, Duration::from_secs(10), 3)
+            .expect("有効な設定のため成功するはず");
+        let cfg = EnvGuardConfig::new(4.0).expect("有効な設定のため成功するはず");
+        let outcome = run_guard_with_retry_with(
+            &retry,
+            || report_with(GuardVerdict::Pass, GuardVerdict::Pass),
+            |_| {},
+        )
+        .expect("初回 Pass のため成功するはず");
+        let text = format_env_info_text("phase1", &outcome, Some(&cfg));
+        assert!(text.contains("== env_guard(phase1) =="));
+        assert!(text.contains("env_guard_mode=gated"));
+        assert!(text.contains("env_guard_load_avg"));
+        assert!(text.contains("env_guard_gpu status=available"));
+        assert!(text.contains("env_guard_overall verdict=pass attempts=1 max_attempts=1"));
+        assert!(text.contains("env_guard_attempt idx=1"));
+        // GPU プロセス名の全列挙は行わない（flagged のみ記録する設計）。
+        assert!(!text.contains("processes=["));
+    }
+
+    #[test]
+    fn format_env_info_text_record_only_mode() {
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Available {
+                processes: Vec::new(),
+                device_utilization_percent: None,
+            },
+        );
+        let outcome = GuardRetryOutcome::record_only(sample);
+        let text = format_env_info_text("guard_only", &outcome, None);
+        assert!(text.contains("env_guard_mode=record_only"));
+        assert!(text.contains("env_guard_load_avg one=1.00"));
+        assert!(text.contains("max_1min=NA"));
+        assert!(text.contains("verdict=undetermined"));
+        assert!(text.contains("env_guard_gpu status=available"));
+    }
+
+    #[test]
+    fn format_env_info_text_gpu_unavailable_status() {
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Unavailable {
+                reason: "ioreg コマンドの実行に失敗した".to_string(),
+            },
+        );
+        let outcome = GuardRetryOutcome::record_only(sample);
+        let text = format_env_info_text("guard_only", &outcome, None);
+        assert!(text.contains("env_guard_gpu status=unavailable"));
+    }
+
+    #[test]
+    fn format_env_info_text_never_lists_all_process_names() {
+        // watchlist に一致しない常駐プロセス名（例: 内部情報を含みうる名前）が
+        // 全列挙されないことを確認する（`docs/real-hardware-verification-env.md`
+        // 方針・モジュール doc「セキュリティ」参照）。
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Available {
+                processes: vec![
+                    GpuProcess {
+                        pid: 111,
+                        name: "WindowServer".to_string(),
+                    },
+                    GpuProcess {
+                        pid: 222,
+                        name: "internal-secret-service".to_string(),
+                    },
+                ],
+                device_utilization_percent: Some(10),
+            },
+        );
+        let cfg = EnvGuardConfig::new(4.0)
+            .expect("有効な設定のため成功するはず")
+            .with_gpu_process_watchlist(vec!["internal-secret-service".to_string()]);
+        let retry = RetryConfig::new(Duration::from_secs(1), 1.5, Duration::from_secs(10), 1)
+            .expect("有効な設定のため成功するはず");
+        let outcome = run_guard_with_retry_with(&retry, || cfg.evaluate(&sample), |_| {})
+            .expect_err("watchlist 一致で Fail するため EnvGuardExhausted のはず");
+        // Exhausted エラーの detail にも flagged 名のみが含まれる（全列挙ではない）。
+        if let BenchError::EnvGuardExhausted { detail, .. } = outcome {
+            assert!(detail.contains("internal-secret-service"));
+        } else {
+            panic!("EnvGuardExhausted を期待した");
+        }
+        // 参考として report 自体でも processes は保持しつつ、
+        // format_env_info_text は flagged のみを書き出すことを確認する。
+        let report = cfg.evaluate(&sample);
+        let single_attempt_outcome = GuardRetryOutcome {
+            attempts: vec![GuardAttempt {
+                attempt: 1,
+                report: report.clone(),
+                waited_before: None,
+            }],
+            final_report: report,
+            total_wait: Duration::ZERO,
+        };
+        let text = format_env_info_text("phase1", &single_attempt_outcome, Some(&cfg));
+        assert!(text.contains("flagged=internal-secret-service"));
+        assert!(!text.contains("WindowServer"));
     }
 }

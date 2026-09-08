@@ -1,0 +1,5 @@
+機種・OS: Apple M4 Max・macOS 26.6.2（sw_vers 実測）
+rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+base HEAD sha（実装着手時点。origin/main）: c47376c2ca1390130f9c37b88d5058cbeb9578db
+実行内容: --guard-only の 3 モード（record_only／gated pass／exhausted）短時間動作確認（イシュー #1265 R3）
+ホスト名・ユーザー名は含めない（grep 確認済み）

@@ -113,6 +113,13 @@ cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --r
 示す単発スパイク型の再現条件を排他環境／負荷環境で切り分ける用途
 （#1253・#1255）で、1 回ごとに別プロセスで起動する運用を想定する。
 
+実行前の環境確認（load average・他 GPU プロセス・uptime）はイシュー #1265 で
+example 自身が自動記録するようになった（フェーズ 1・フェーズ 2 の各開始前に
+`env_guard` ブロックを stdout へ出力。`--max-load-avg=<f64>` 指定時のみ
+判定あり・不成立ならバックオフ再試行。詳細は
+`docs/perf/metal-bench-noise-protocol.md` §7）。`pmset -g therm` によるサーマル
+状態記録は引き続き手動で行う。
+
 ### 5.1 計測環境
 
 - 機種・OS: §1 と同一（Apple M4 Max・macOS 26.6.2）
