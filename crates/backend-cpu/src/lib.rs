@@ -125,6 +125,19 @@ pub mod gemm_blis;
 // （#1189）と同じ理由でクレートルートの兄弟モジュールとして配置する。
 #[cfg(test)]
 mod gemm_reuse_phase_diag_tests;
+// イシュー #1319: `docs/cpu-gemm-prefetch-decision.md`（#489・#751）の
+// 「原則不要（HW ストリームプリフェッチャー任せ）」格下げ判断を覆す
+// 帯域律速根拠の有無を実測する診断テスト（候補 2 `vld1q_f32_x3` 経路
+// prefetch）。`crate::gemm_blis::microkernel::NeonKernel`（`pub`）へ
+// 到達するためクレートルートの兄弟モジュールとして配置する
+// （`gemm_reuse_phase_diag_tests` と同じ配置理由）。`unsafe asm!` は
+// 本ファイル・本番経路のいずれにも追加しない（着手にはユーザー承認が
+// 必要）。`NeonKernel` は aarch64 限定型（`microkernel.rs` の
+// `#[cfg(target_arch = "aarch64")]`）のため、本モジュールも同条件で
+// 限定する（x86_64 では `cargo check --target x86_64-unknown-linux-gnu`
+// がクレート全体をスキップせず正常終了する）。
+#[cfg(all(test, target_arch = "aarch64"))]
+mod gemm_prefetch_bandwidth_diag_tests;
 pub mod memory;
 mod mse;
 mod ops;
