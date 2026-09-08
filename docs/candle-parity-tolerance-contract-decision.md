@@ -233,7 +233,7 @@ draft 時点で #1241 へ委ねた 5 点は、#1241 の承認記録コメント�
 | #1250 | `compare_gemm_gate.py::_parity_check`・`summarize.py` の判定不能条件の更新（§7.2）。**実装済み**（6 キー契約〈両方存在＝新契約検証・両方欠損＝レガシー契約・一方のみ＝判定不能〉・framework 別ルール〈fandhe-ai の `rescued>0` は判定不能・candle は許容〉・`rescued>0 ∧ bound<絶対誤差許容値` の整合検査を判定式レプリカなしで追加。`compare_gemm_gate_test.py`／`summarize_test.py` に新契約ケースを追加し全件 green（既存テストは非後退）。`scripts/bench/framework-compare/README.md`「GEMM ゲート 5 回計測」節「要素単位判定の契約」参照） |
 | #1254 | **承認スコープ外（§8-3 ハーネス限定）・Phase 2 で再スコープ要**: 本体 `compare` の新入口追加（シグネチャ非破壊。§8 の設計制約）・判定式レプリカ群（§7.2）・リテラル閾値レプリカ（§7.3）・`extract_f64_const`／`_extract_f64_const` 両方への新定数追加（§7.5）・規約文言更新（§7.4） |
 | #1256 | **承認スコープ外（§8-3 ハーネス限定。本体 `ParityBaseline` は不変のため契約反映後の再測定対象なし）・Phase 2 で再スコープ要**: GB10 実機で `BASELINES` の非後退確認、必要なら再測定（人間承認必須） |
-| #1260／#1262 | CUDA／CPU N=2048 再計測で判定不能が解消したことの記録 |
+| #1260／#1262 | CUDA／CPU N=2048 再計測で判定不能が解消したことの記録。**#1260 は実測済み**（GB10 実機。N=2048 が確定判定〈未達・0.476 倍〉へ遷移。fandhe-ai 側は救済に依存せず 0 fail 不変。結果は `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §14） |
 
 **#1241 で本 draft が却下された場合、Phase 2 は「対応不要」としてクローズする。**
 
