@@ -131,24 +131,25 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
 /// `vec![0.0f32; len]`（calloc 相当の逐次ゼロ確保）を使い、既存経路と
 /// 完全同一のまま変更しない。
 ///
-/// **本番既定は `usize::MAX`（並列分岐を常に無効化）。** イシュー #1299
-/// の M4 Max スモーク実測（`docs/perf/logs/cpu-matmul-fixed-cost-1299/`）
-/// で、N=2048（この分岐の対象形状そのもの）の `alloc_c` が逐次経路比
-/// 約 3〜22 倍・`ops_gemm`（本番合成）が 5 run 符号一貫で中央値約 29%
-/// 後退することを確認したため（`docs/perf/cpu-matmul-fixed-cost-
-/// impl.md` 参照）。macOS 上の `vec![0.0f32; len]`（`alloc_zeroed`
-/// 相当）は OS の遅延ゼロページをそのまま返し、ページフォールトは
-/// カーネル本体が実際に書き込む時点（`kernel` 区間）まで遅延される
-/// 一方、`Vec::with_capacity` + 並列書き込みは全ページのフォールトを
-/// `alloc_c` 区間内へ前倒しで発生させる。この前倒しコストが並列化の
-/// 利得を上回った（`kernel` 側で元々ノイズに埋もれていたフォールト
-/// コストが `alloc_c` 側で顕在化しただけで、単純な「並列化で速くなる」
-/// という §3.C の当初仮説とは逆の結果）。この機構は macOS 固有の可能性
-/// があり、Linux（DGX Spark GB10）の glibc heap 経路では §3.C の当初
-/// 仮説（calloc の memset が `alloc_c` に計上される）が依然成り立ちうる
-/// ため、イシュー #1301 が DGX 実機実測で有効化可否を判断する
-/// （`docs/cpu-matmul-fixed-cost-design.md` §10）。有効化する場合は
-/// `2 << 20`（8 MiB 相当。設計時の暫定値）等へ差し替える。
+/// **本番既定は `usize::MAX`（並列分岐を常に無効化）。**
+///
+/// イシュー #1299 の M4 Max スモーク実測（`docs/perf/logs/
+/// cpu-matmul-fixed-cost-1299/`）では、他 worktree の並走ビルドで
+/// load average 9〜11 という高負荷下の計測により N=2048 の `ops_gemm`
+/// が中央値約 29% 後退したため、当初は `usize::MAX`（無効化）を本番
+/// 既定としていた。イシュー #1301 が DGX Spark GB10（Grace CPU）・
+/// Apple M4 Max の両実機で 5 回独立プロセス起動・on/off 比較を実施し
+/// （`docs/perf/logs/cpu-matmul-fixed-cost-1301/`）、事前宣言した判定
+/// 規則（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1）の
+/// うち規則 4（candle 比の非後退）が実測後の緩和なしでは 6 セル中 3
+/// セルで不成立だったため、いったんは緩和後の基準で `2 << 20` へ
+/// 有効化していたが、PR #1448 の codex-review 指摘（計測後に緩和した
+/// 基準だけで本番採用を確定しない）を受けて **`usize::MAX` へ差し戻した**。
+/// §20.3 の実測系列自体は改善方向の参考値として維持しつつ、規則 4 の
+/// 改定版（§20.1a。同 doc の事前登録版として以後固定）を用いた
+/// **独立の再計測**が両実機で完了し ADOPT と確定するまでは、本定数を
+/// `2 << 20` へ戻さない（同 doc §20.6・`docs/cpu-matmul-fixed-cost-
+/// design.md` §10 参照）。
 pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = usize::MAX;
 
 /// [`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`] 以上の並列ゼロ書き込みにおける
@@ -1429,10 +1430,12 @@ mod zeroed_output_tests {
     #[test]
     fn default_wrapper_matches_production_threshold() {
         // 本番既定しきい値は `usize::MAX`（並列分岐は常に無効。#1299 の
-        // M4 Max スモークが N=2048 で後退を確認したため。イシュー #1301
-        // が DGX 実機実測で有効化可否を判断するまでの暫定値）。
-        // したがって `zeroed_output` は現実的なサイズでは常に「未満」
-        // 分岐（逐次経路）へ入る。並列分岐自体は
+        // M4 Max スモークが N=2048 で後退を確認したため。PR #1448 の
+        // codex-review 指摘を受け、#1301 の実測後に緩和した基準のみを
+        // 根拠とする有効化を差し戻した。独立の再計測〈`docs/perf/
+        // cpu-gemm-candle-gate-remeasurement.md` §20.6〉が完了し ADOPT
+        // と確定するまでの暫定値）。したがって `zeroed_output` は現実的
+        // なサイズでは常に「未満」分岐（逐次経路）へ入る。並列分岐自体は
         // `above_threshold_uses_parallel_path`／`at_threshold_uses_parallel_path`
         // が明示的な小さいしきい値を渡して別途カバーする。
         let len = 1usize << 24; // 16M 要素（64 MiB）でも usize::MAX 未満。
@@ -1440,26 +1443,30 @@ mod zeroed_output_tests {
     }
 
     /// 本番既定しきい値が無効化状態（`usize::MAX`）であることを固定する
-    /// 回帰（イシュー #1299。#1301 が DGX 実機実測で有効化する際は本
-    /// テストの期待値も合わせて更新する）。
+    /// 回帰（イシュー #1299・#1301・PR #1448 codex-review 対応で差し戻し。
+    /// `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.6 の独立
+    /// 再計測で ADOPT と確定した場合は本テストの期待値も合わせて更新する）。
     #[test]
-    fn default_threshold_is_disabled_pending_dgx_measurement() {
+    fn default_threshold_is_disabled_pending_independent_remeasurement() {
         assert_eq!(
             GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS,
             usize::MAX,
-            "M4 Max での後退確認（#1299）により本番既定は並列分岐を \
-             無効化した状態であるはず。DGX 実機実測（#1301）で有効化 \
-             する場合は本テストの期待値も更新すること"
+            "#1301 の実測は事前宣言した規則 4 を緩和後の基準でしか \
+             満たさなかった（codex-review 指摘）ため本番既定は並列分岐を \
+             無効化した状態であるはず。§20.1a の改定版規則 4 を用いた \
+             独立の再計測で ADOPT と確定する場合は本テストの期待値も \
+             更新すること"
         );
     }
 
     /// 並列ゼロ書き込み分岐（本番既定では `usize::MAX` により到達不能。
-    /// 明示的にしきい値 0 を渡して強制する）を実際の GEMM カーネルへ
-    /// 通した結果が、逐次ゼロ確保（`vec![0.0f32; ..]`）経由の結果と
-    /// bit 完全一致することを確認する（イシュー #1299・codex-review
-    /// 相当の指摘: 統合テスト `tests/gemm_output_alloc_bit_exact.rs` は
-    /// 本番既定が無効化されたことで並列分岐を実走できなくなったため、
-    /// クレート内テストで並列分岐自体の正しさを別途固定する）。
+    /// 明示的にしきい値 0 を渡して強制する）を実際の
+    /// GEMM カーネルへ通した結果が、逐次ゼロ確保（`vec![0.0f32; ..]`）
+    /// 経由の結果と bit 完全一致することを確認する（イシュー #1299・
+    /// codex-review 相当の指摘: 統合テスト
+    /// `tests/gemm_output_alloc_bit_exact.rs` は小さい形状が中心で
+    /// 並列分岐を実走できないため、クレート内テストで並列分岐自体の
+    /// 正しさを別途固定する）。
     #[test]
     fn parallel_branch_output_matches_sequential_branch_through_kernel() {
         let (m, k, n) = (37usize, 65usize, 33usize);
