@@ -28,6 +28,16 @@
 //! `docs/perf/metal-bench-noise-protocol.md` の基準に沿って出力するに留める
 //! （安定性ゲート不成立時は「判定不可」を明示し、判定へ進まない安全側設計）。
 
+// 実行前の環境ガード（load average・GPU プロセス検出・uptime 記録）は
+// `crate::env_guard` が提供する（イシュー #1264・親 #1263）。本モジュールの
+// 判定ロジック（`STABILITY_SPREAD_GATE`・`run_ab`・`run_stability`）自体は
+// 変更せず、呼び出し側が実行前チェックとして併用できるよう再公開するのみ
+// （`env_guard` モジュール doc 参照。バックオフ再試行・結線は兄弟イシュー #1265）。
+pub use crate::env_guard::{
+    EnvGuardConfig, EnvGuardReport, EnvSample, GpuProcess, GpuProcessCheck, GuardVerdict,
+    LoadAvgCheck, UptimeRecord,
+};
+
 use crate::protocol::{self, MeasurementConfig};
 use crate::stats::{self, BenchError};
 use std::time::{Duration, Instant};
