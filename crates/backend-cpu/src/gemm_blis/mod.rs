@@ -5992,4 +5992,202 @@ mod tests {
             Err(GemmError::ALenMismatch { .. })
         ));
     }
+    // --- `TwoDDynamic` vs `RowPanel` 両実機 A/B（イシュー #1312。
+    //     `docs/cpu-gemm-2d-dynamic-partition-design.md` §9・§11 の
+    //     採用ゲート判定用実測資産） ---
+
+    /// [`run_candidates_interleaved`]（`GemmDriverVariant`＋`BlockSizes` の
+    /// 組でしか候補を表現できない）を、`TwoDDynamic` の `jobs_per_worker`
+    /// スイープ（イシュー #1312 計画 §4.4）まで表現できるよう一般化した
+    /// 候補列挙。`RowPanel` は [`gemm_blis_parallel_variant`]（本番分岐と
+    /// 完全一致）を、`TwoDDynamic` は [`gemm_blis_parallel_two_d_dynamic_with_params`]
+    /// （`jobs_per_worker` を注入できるテスト専用入口）をそれぞれ経由する。
+    /// `#[cfg(test)]` 限定・本番経路（`gemm_blis_parallel`・
+    /// `gemm_blis_bias_act_parallel`）は不変。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AbCandidate {
+        /// 本番既定分岐（[`GemmDriverVariant::RowPanel`]）をそのまま計測する。
+        RowPanel,
+        /// (mc, nc) 2D job 動的分配（イシュー #1311）を指定
+        /// `jobs_per_worker` で計測する。
+        TwoDDynamic { jobs_per_worker: usize },
+    }
+
+    impl AbCandidate {
+        /// ログ出力・集計スクリプト（`docs/perf/logs/cpu-gemm-2d-dynamic-ab-1312/aggregate.py`）
+        /// 側のキーとして使う候補名。
+        fn label(self) -> &'static str {
+            match self {
+                AbCandidate::RowPanel => "RowPanel",
+                AbCandidate::TwoDDynamic { .. } => "TwoDDynamic",
+            }
+        }
+
+        /// ログ出力用の `jobs_per_worker`（`RowPanel` は分配方式自体を
+        /// 使わないため `0` を出力する。集計スクリプト側は
+        /// `(variant, jobs_per_worker)` の組をキーとして扱う）。
+        fn jobs_per_worker_for_log(self) -> usize {
+            match self {
+                AbCandidate::RowPanel => 0,
+                AbCandidate::TwoDDynamic { jobs_per_worker } => jobs_per_worker,
+            }
+        }
+
+        fn run(
+            self,
+            a: &[f32],
+            b: &[f32],
+            c: &mut [f32],
+            m: usize,
+            n: usize,
+            k: usize,
+        ) -> Result<(), GemmError> {
+            match self {
+                AbCandidate::RowPanel => gemm_blis_parallel_variant(
+                    GemmDriverVariant::RowPanel,
+                    a,
+                    b,
+                    c,
+                    m,
+                    n,
+                    k,
+                    default_blocks(),
+                ),
+                AbCandidate::TwoDDynamic { jobs_per_worker } => {
+                    gemm_blis_parallel_two_d_dynamic_with_params(
+                        a,
+                        b,
+                        c,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                        jobs_per_worker,
+                        GemmTranspose::Nn,
+                    )
+                }
+            }
+        }
+    }
+
+    /// [`run_candidates_interleaved`] と同じ round-robin＋反復ごとの開始
+    /// 位置ローテーション方式（PR #1075 codex-review 指摘・順序バイアス
+    /// 対策）を [`AbCandidate`] へ適用したもの。戻り値は `candidates` と
+    /// 同じ順序の中央値 GFLOP/s。
+    fn run_ab_candidates_interleaved(
+        candidates: &[AbCandidate],
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        iters: usize,
+    ) -> Vec<f64> {
+        use std::time::Instant;
+
+        let mut outputs: Vec<Vec<f32>> = candidates.iter().map(|_| vec![0.0f32; m * n]).collect();
+
+        for w in 0..3 {
+            for offset in 0..candidates.len() {
+                let idx = (offset + w) % candidates.len();
+                candidates[idx]
+                    .run(a, b, &mut outputs[idx], m, n, k)
+                    .unwrap();
+            }
+        }
+
+        let mut samples: Vec<Vec<f64>> = candidates
+            .iter()
+            .map(|_| Vec::with_capacity(iters))
+            .collect();
+        let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
+        for it in 0..iters {
+            for offset in 0..candidates.len() {
+                let idx = (offset + it) % candidates.len();
+                let start = Instant::now();
+                candidates[idx]
+                    .run(a, b, &mut outputs[idx], m, n, k)
+                    .unwrap();
+                let elapsed = start.elapsed().as_secs_f64();
+                samples[idx].push(flops / elapsed / 1e9);
+            }
+        }
+
+        samples.into_iter().map(median).collect()
+    }
+
+    /// 本 A/B（#1312）の固定候補集合: `RowPanel`・`TwoDDynamic(jpw=2)`・
+    /// `TwoDDynamic(jpw=4)` の 3 つのみ（計画 §3.1(c)。他 variant を含めない
+    /// ことで計測時間・ノイズを抑える）。
+    fn two_d_dynamic_ab_candidates() -> Vec<AbCandidate> {
+        vec![
+            AbCandidate::RowPanel,
+            AbCandidate::TwoDDynamic { jobs_per_worker: 2 },
+            AbCandidate::TwoDDynamic { jobs_per_worker: 4 },
+        ]
+    }
+
+    /// 実行中の `RAYON_NUM_THREADS`（未設定なら既定値）を出力するための
+    /// 実効スレッド数。集計側がログファイル名からスレッド数を推定せず
+    /// 出力行自体から読み取れるようにする（計画 §3.1(c)）。
+    fn ab_effective_num_threads() -> usize {
+        crate::thread_limit::effective_num_threads(rayon::current_num_threads())
+    }
+
+    /// N=1024/2048 の `TwoDDynamic` vs `RowPanel` A/B 計測（イシュー
+    /// #1312）。両実機（DGX Spark GB10・Apple M4 Max）で
+    /// `RAYON_NUM_THREADS` を変えながら 5 回独立プロセス実行し、出力を
+    /// `docs/perf/logs/cpu-gemm-2d-dynamic-ab-1312/aggregate.py` で集計する。
+    /// 出力形式は固定: `variant={RowPanel|TwoDDynamic} jobs_per_worker={n}
+    /// num_threads={t} size={dim} median_gflops={v:.3}`。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用（#1312。 \
+                cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+                gemm_blis_two_d_dynamic_ab_1024_2048 --nocapture）"]
+    fn gemm_blis_two_d_dynamic_ab_1024_2048() {
+        let candidates = two_d_dynamic_ab_candidates();
+        let num_threads = ab_effective_num_threads();
+
+        for &dim in &[1024usize, 2048] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xdede_dede, m * k);
+            let b = xorshift32_vec(0xefef_efef, k * n);
+
+            let gflops = run_ab_candidates_interleaved(&candidates, &a, &b, m, n, k, 20);
+            for (candidate, gflops) in candidates.iter().zip(gflops) {
+                println!(
+                    "variant={} jobs_per_worker={} num_threads={num_threads} size={dim} \
+                     median_gflops={gflops:.3}",
+                    candidate.label(),
+                    candidate.jobs_per_worker_for_log(),
+                );
+            }
+        }
+    }
+
+    /// N=4096 版（イシュー #1312。`gemm_blis_variant_ab_4096` と同型に
+    /// 分離する理由は同コメント参照: 1024/2048 とは別のゲート条件
+    /// 〈4096 で非劣化〉を独立に計測できるようにするため）。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用（#1312。 \
+                cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+                gemm_blis_two_d_dynamic_ab_4096 --nocapture）"]
+    fn gemm_blis_two_d_dynamic_ab_4096() {
+        let candidates = two_d_dynamic_ab_candidates();
+        let num_threads = ab_effective_num_threads();
+
+        let (m, n, k) = (4096usize, 4096usize, 4096usize);
+        let a = xorshift32_vec(0xdede_dede, m * k);
+        let b = xorshift32_vec(0xefef_efef, k * n);
+
+        let gflops = run_ab_candidates_interleaved(&candidates, &a, &b, m, n, k, 20);
+        for (candidate, gflops) in candidates.iter().zip(gflops) {
+            println!(
+                "variant={} jobs_per_worker={} num_threads={num_threads} size={n} \
+                 median_gflops={gflops:.3}",
+                candidate.label(),
+                candidate.jobs_per_worker_for_log(),
+            );
+        }
+    }
 }
