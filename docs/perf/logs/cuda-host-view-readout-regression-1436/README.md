@@ -24,17 +24,24 @@ GB10（sm_121）実機実測（2026-09-08）。内部ホスト名は含めない
 
 ```bash
 # Layer B（backend-cuda 非公開 API 診断テスト。--test-threads=1 必須）
-# 完全一致テスト名 + --exact を使うこと。部分一致フィルター
-# （例: `readout_regression_diag_n1024`）は同名 prefix を持つ単腕
-# 4 関数（`readout_regression_diag_n1024_legacy_to_vec` 等。#1442
-# レビュー指摘対応で新設）にも一致してしまい、4 腕をまとめて実行する
+# --exact はテストバイナリ内の完全修飾パス（モジュール名を含む）に対して
+# 一致判定するため、モジュール名を省いた短いテスト名
+# （例: `readout_regression_diag_n1024`）を渡すと `--exact` の完全一致が
+# 成立せず対象テストが 0 件のまま終了する（診断データが取得できない）。
+# 加えて、モジュール名を省いた部分一致フィルターのまま `--exact` なしで
+# 実行すると、同名 prefix を持つ単腕 4 関数
+# （`readout_regression_diag_n1024_legacy_to_vec` 等。#1442 レビュー指摘
+# 対応で新設）にも一致してしまい、4 腕をまとめて実行する
 # `readout_regression_diag_n1024` と単腕 4 関数の計 5 関数が同一プロセス
 # 内で連続実行され、記録時（4 腕一括のみ）と異なる allocator 状態の
-# 引き継ぎが起きる。
+# 引き継ぎが起きる。このため、モジュール名付き完全修飾名
+# （`readout_regression_diag_tests_1436::readout_regression_diag_n1024`）
+# を `--exact` と併用する。
 env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
     CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
 cargo test -p fandhe-ai-backend-cuda --release --lib \
-  readout_regression_diag_n1024 -- --ignored --nocapture --test-threads=1 --exact
+  readout_regression_diag_tests_1436::readout_regression_diag_n1024 \
+  -- --ignored --nocapture --test-threads=1 --exact
 
 # Layer A（off／on 2 バイナリを facade path patch でビルドしてから実行）
 cd scripts/bench/framework-compare

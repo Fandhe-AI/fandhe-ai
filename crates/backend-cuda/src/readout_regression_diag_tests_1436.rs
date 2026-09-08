@@ -366,7 +366,21 @@ fn run_size_arm(n: usize, arm: ReadoutArm) {
 
     // `PretouchedReusedDest` 専用の事前タッチ済み再利用宛先（ループの
     // 外で 1 回だけ確保・全要素書き込み。§冒頭「4 腕の定義」参照）。
+    //
+    // `vec![0.0f32; numel]` は glibc の `alloc_zeroed` 経由で確保される
+    // ため、大きいサイズでは mmap の COW ゼロページ（実ページはまだ
+    // 未コミット）を返しうる。これでは「事前タッチ済み」の意図
+    // （ページフォールトを計測区間の外で先に起こしておく）を満たさない
+    // ため、確保直後に全要素へ明示的な非ゼロ値を書き込み、実ページを
+    // コミットしてから 0.0 へ戻す（`fresh_overhead_diag_tests.rs` の
+    // dummy 腕と同種の懸念を明示的に扱う。#1442 Bugbot 指摘対応）。
     let mut pretouched_dest = vec![0.0f32; numel];
+    for v in pretouched_dest.iter_mut() {
+        *v = 1.0;
+    }
+    for v in pretouched_dest.iter_mut() {
+        *v = 0.0;
+    }
 
     let mut keep_alive: Vec<Vec<f32>> = Vec::with_capacity(WARMUP_TRIALS + MEASURED_TRIALS);
 
