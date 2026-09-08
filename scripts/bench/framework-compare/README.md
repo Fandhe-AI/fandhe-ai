@@ -1482,7 +1482,18 @@ echo $?   # 0: 判定完了（性能比較が成立） / 2: 判定不能（レ�
 ならない**——`GEMM_GATE_PATCH_FACADE_PATH` はビルドを通すためだけの指定
 であり、ラベル（`before-<label>`/`after-<label>`）は任意の 2 回の計測を
 区別する名前に過ぎない点に注意する（例えば host-view-readout 既定化前後の
-比較など、当時と異なる対比軸で使う場合の実行例）:
+比較など、当時と異なる対比軸で使う場合の実行例）。
+
+**注意（codex-review 指摘・PR #1452 P2）**: `framework_version`（JSONL の
+`version` キー）は `bench-fandhe/src/main.rs` の `VERSION` 定数
+（`"0.7.0"` 固定リテラル）から出力され、`GEMM_GATE_PATCH_FACADE_PATH` の
+有無・patch 先の差はこの値に反映されない。そのため before/after 双方の
+`version` は常に同一（`"0.7.0"`）になり、`compare_ab.py:365` の
+「before/after の `framework_version` が同一——A/B 比較になっていない」
+判定（fail-closed。security.md A08）により、以下の 2 回計測は
+**必ず「判定不能」（`exit 2`）になる**——`compare_ab.py` による自動比較
+はこの構成では使えない。計測のみを行い、`median_s`（`(mode)` ごとの
+5 回計測中央値）を手作業で突き合わせる:
 
 ```bash
 cd scripts/bench/framework-compare
@@ -1491,9 +1502,13 @@ GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
 GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
   bash run_ab_train_cuda.sh after-<label>
 
-python3 compare_ab.py results/raw/results-dgx-ab-before-<label>.jsonl \
+# compare_ab.py は version 同一のため使えない（上記注意参照）。mode ごとに
+# median_s を jq で抽出し、比率は手計算する（例: python3 -c
+# "import statistics; ..." や電卓で after/before を算出）。
+jq -s '[.[] | select(.mode=="fresh" or .mode=="reuse")] | group_by(.mode)[] | {mode: .[0].mode, median_s: (map(.median_s) | sort | .[length/2|floor])}' \
+  results/raw/results-dgx-ab-before-<label>.jsonl
+jq -s '[.[] | select(.mode=="fresh" or .mode=="reuse")] | group_by(.mode)[] | {mode: .[0].mode, median_s: (map(.median_s) | sort | .[length/2|floor])}' \
   results/raw/results-dgx-ab-after-<label>.jsonl
-echo $?   # 0: 判定完了（性能比較が成立） / 2: 判定不能（レコード不足・version 同一・checksum 不一致等）
 ```
 
 - `run_ab_train_cuda.sh <label>` はラベル（`[A-Za-z0-9._-]+` のみ許可）ごとに

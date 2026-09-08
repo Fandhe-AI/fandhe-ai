@@ -264,11 +264,13 @@ fn make_tape(device: &str) -> Result<Tape, Box<dyn std::error::Error>> {
 /// #1438 が撤去したのはコンパイル時 cargo feature（`host-view-readout`）
 /// のみであり、本関数はその cargo feature を再導入しない runtime 分岐
 /// （`device` 文字列 1 個の比較）である——`readout_var`／`checksum_var`／
-/// `checksum_tensor`／`measure_gemm_reuse_phases` のインライン展開の
-/// 4 箇所すべてがこの 1 箇所を経由するため、Metal の既定経路（gemm 本体
-/// 計測と `--phases` 診断）が内部で矛盾しない。Metal の ADOPT が確定
-/// したら、この関数を `true` 固定に変更する（または呼び出し側から分岐
-/// ごと削除する）1 箇所の変更で足りるよう集約してある。
+/// `checksum_tensor`／`measure_gemm_reuse_phases`／`measure_infer_phases`
+/// （codex-review 指摘・PR #1452 P2 でインライン展開を 3 箇所追加）の
+/// インライン展開すべてがこの 1 箇所を経由するため、Metal の既定経路
+/// （gemm・infer 本体計測と `--phases` 診断）が内部で矛盾しない。Metal
+/// の ADOPT が確定したら、この関数を `true` 固定に変更する（または
+/// 呼び出し側から分岐ごと削除する）1 箇所の変更で足りるよう集約して
+/// ある。
 fn readout_uses_borrowed_view(device: &str) -> bool {
     device != "metal"
 }
@@ -1657,16 +1659,29 @@ fn measure_infer_phases(
             let out = model.predict_resident(&store, &x_data)?;
             phases.push(PHASE_INFER_PREDICT_RESIDENT, t0.elapsed());
 
+            // イシュー #1438 codex-review 指摘（PR #1452 P2）:
+            // 通常推論（`run_infer_reuse`）が既定化した借用ビュー
+            // 読み出し（[`readout_uses_borrowed_view`]）を `--phases`
+            // 診断側にも揃える。CPU/CUDA は `Tensor::host_slice()`
+            // （contiguous なら memcpy なしの `Cow::Borrowed`）・Metal は
+            // legacy 経路（`contiguous().as_slice().to_vec()`）を維持し、
+            // gemm 側の分岐判定と矛盾しないようにする。
             let t0 = Instant::now();
-            let slice = out
-                .contiguous()
-                .as_slice()
-                .ok_or("predict_resident output as_slice() returned None")?
-                .to_vec();
+            let host_slice: std::borrow::Cow<'_, [f32]> = if readout_uses_borrowed_view(&cli.device)
+            {
+                out.host_slice()
+            } else {
+                std::borrow::Cow::Owned(
+                    out.contiguous()
+                        .as_slice()
+                        .ok_or("predict_resident output as_slice() returned None")?
+                        .to_vec(),
+                )
+            };
             phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
 
             let t0 = Instant::now();
-            checksum = slice.iter().map(|&x| x as f64).sum();
+            checksum = host_slice.iter().map(|&x| x as f64).sum();
             phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
 
             phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
@@ -1702,16 +1717,25 @@ fn measure_infer_phases(
             let out = model.predict(&x_data)?;
             phases.push(PHASE_INFER_PREDICT, t0.elapsed());
 
+            // イシュー #1438 codex-review 指摘（PR #1452 P2）: 上の
+            // reuse 分岐と同じく [`readout_uses_borrowed_view`] を適用
+            // する（module doc 参照）。
             let t0 = Instant::now();
-            let slice = out
-                .contiguous()
-                .as_slice()
-                .ok_or("predict output as_slice() returned None")?
-                .to_vec();
+            let host_slice: std::borrow::Cow<'_, [f32]> = if readout_uses_borrowed_view(&cli.device)
+            {
+                out.host_slice()
+            } else {
+                std::borrow::Cow::Owned(
+                    out.contiguous()
+                        .as_slice()
+                        .ok_or("predict output as_slice() returned None")?
+                        .to_vec(),
+                )
+            };
             phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
 
             let t0 = Instant::now();
-            checksum = slice.iter().map(|&x| x as f64).sum();
+            checksum = host_slice.iter().map(|&x| x as f64).sum();
             phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
 
             phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
@@ -1738,16 +1762,26 @@ fn measure_infer_phases(
             let t = out.to_tensor();
             phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
 
+            // イシュー #1438 codex-review 指摘（PR #1452 P2）: 上の 2
+            // 分岐と同じく [`readout_uses_borrowed_view`] を適用する
+            // （module doc 参照。GPU fresh 経路も `to_tensor` 後の
+            // `host_copy` 区間は同一判定を共有する）。
             let t0 = Instant::now();
-            let slice = t
-                .contiguous()
-                .as_slice()
-                .ok_or("as_slice() returned None after contiguous()")?
-                .to_vec();
+            let host_slice: std::borrow::Cow<'_, [f32]> = if readout_uses_borrowed_view(&cli.device)
+            {
+                t.host_slice()
+            } else {
+                std::borrow::Cow::Owned(
+                    t.contiguous()
+                        .as_slice()
+                        .ok_or("as_slice() returned None after contiguous()")?
+                        .to_vec(),
+                )
+            };
             phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
 
             let t0 = Instant::now();
-            checksum = slice.iter().map(|&x| x as f64).sum();
+            checksum = host_slice.iter().map(|&x| x as f64).sum();
             phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
 
             phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
