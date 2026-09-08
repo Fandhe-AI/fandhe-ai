@@ -1,0 +1,4 @@
+2026-09-08T19:04:26+0900 orchestrator start
+2026-09-08T19:04:26+0900 attempt 1: waiting for gate (see wait_gate.log)
+2026-09-08T22:04:57+0900 attempt 1: gate result=TIMEOUT -> aborting (TIMEOUT)
+ORCHESTRATOR_RESULT=TIMEOUT valid_runs=0
