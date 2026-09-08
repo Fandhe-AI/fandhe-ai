@@ -140,6 +140,35 @@
 //! 当該ラウンドを `valid=false`・関連する差分／spread を `NA` として
 //! 報告し、既定の壁時計判定出力を失わせない。
 //!
+//! ## 実行前環境ガード（イシュー #1265）
+//!
+//! フェーズ 1（`MetalContext::new()` より前）・フェーズ 2 の各開始前に、
+//! `bench_harness::env_guard`（イシュー #1264）のバックオフ再試行
+//! （`RetryConfig`・`run_guard_with_retry`）を通した実行前チェックを行う。
+//! `--max-load-avg=<f64>` 未指定時は **record_only**（判定なし・記録のみ）、
+//! 指定時は **gated**（`EnvGuardConfig` による判定あり。不成立
+//! 〈`Fail`〉ならバックオフ再試行し、上限到達で `verdict=undetermined` を
+//! 出力して非ゼロ終了する）で動作する。判定結果は `env_info.txt` 準拠の
+//! テキストブロックとして stdout へ常時出力し、`--env-info-out=<path>` を
+//! 指定すると同じテキストを追記する（opt-in）。
+//!
+//! ```sh
+//! # 記録のみ（判定なし）で GPU を初期化せず終了する短時間動作確認
+//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --guard-only
+//!
+//! # 閾値を明示して gated モードで実行（不成立時は自動でバックオフ再試行）
+//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --max-load-avg=8.0 --gpu-watch=Chrome
+//! ```
+//!
+//! 閾値（`--max-load-avg`）に既定値はない（ユーザー承認事項。
+//! `docs/perf/metal-bench-noise-protocol.md`「#1265 向けの提案閾値」参照）。
+//! バックオフ再試行の待機定数（`macos_impl::GUARD_INITIAL_WAIT` 等）は
+//! `--guard-max-attempts`／`--guard-wait-secs` で上書きできる。詳細な出力
+//! フォーマット・再試行規定は同ドキュメント「7. ガード不成立時の再試行
+//! 規定」を参照。ガード・待機は計測区間（`run_stability`／`run_ab`）の
+//! 外側で完結し、計測プロトコル定数（`ROUNDS`・`STABILITY_SPREAD_GATE`
+//! 等）には一切影響しない。
+//!
 //! ## MIN_WARMUP 増加試行モード（イシュー #1261）
 //!
 //! フェーズ 1 の単発スパイクが原因候補 (b)（ウォームアップ不足。GPU
@@ -171,7 +200,7 @@
 /// SingleRunVerdict` と同型の cfg 分岐（非 macOS・非テストの `example`
 /// ターゲット単体でのみ未使用になる誤検知）で `dead_code` を抑止する。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 struct CliArgs {
     /// `true` なら phase 1（安定性セルフチェック）のみ実行してフェーズ 2
     /// （A/B 判定）へ進まない。
@@ -180,6 +209,29 @@ struct CliArgs {
     /// GPU タイムスタンプ計装版へ置換する（イシュー #1259。`--phase1-only`
     /// と順序不問で併用可）。
     gpu_timestamps: bool,
+    /// `--max-load-avg=<f64>`（イシュー #1265）。指定時のみ実行前
+    /// 環境ガードを **gated**（`bench_harness::env_guard::EnvGuardConfig`
+    /// による判定あり）にする。未指定なら **record_only**（記録のみ・
+    /// 判定なし）。閾値の既定値はユーザー承認事項のためコードへ埋め込まない
+    /// （`docs/perf/metal-bench-noise-protocol.md`「#1265 向けの提案閾値
+    /// （未承認・記録のみ）」参照）。
+    max_load_avg: Option<f64>,
+    /// `--gpu-watch=<name>`（複数指定可。イシュー #1265）。
+    /// `EnvGuardConfig::with_gpu_process_watchlist` へ渡す部分一致名。
+    /// `max_load_avg` 指定時のみ有効（単独指定はエラー）。
+    gpu_watch: Vec<String>,
+    /// `--guard-max-attempts=<usize>`（イシュー #1265）。未指定時は
+    /// `macos_impl::GUARD_MAX_ATTEMPTS`。
+    guard_max_attempts: Option<usize>,
+    /// `--guard-wait-secs=<f64>`（イシュー #1265）。未指定時は
+    /// `macos_impl::GUARD_INITIAL_WAIT`。
+    guard_wait_secs: Option<f64>,
+    /// `--guard-only`（イシュー #1265）。ガード＋env_info 出力のみ行い
+    /// GPU を初期化せず終了する（短時間動作確認・実行前チェック用）。
+    guard_only: bool,
+    /// `--env-info-out=<path>`（イシュー #1265）。env_info ブロックを
+    /// 指定ファイルへ追記する opt-in（stdout 出力は常に行う）。
+    env_info_out: Option<String>,
     /// `Some(n)` なら既定のウォームアップ下限（[`DEFAULT_MIN_WARMUP_SECS`]。
     /// 3 秒）の代わりに `n` 秒をフェーズ 1・フェーズ 2 双方の `AbConfig`
     /// へ渡す（イシュー #1261。ウォームアップ不足〈原因候補 (b)〉の
@@ -202,8 +254,7 @@ fn min_warmup_override_duration(min_warmup_secs: Option<u64>) -> std::time::Dura
     std::time::Duration::from_secs(min_warmup_secs.unwrap_or(DEFAULT_MIN_WARMUP_SECS))
 }
 
-/// `std::env::args()` を**一度だけ**走査して `--phase1-only`／
-/// `--gpu-timestamps`（いずれも値なしフラグ）を解析する
+/// `std::env::args()` を**一度だけ**走査して CLI 引数を解析する
 /// （`gemm_counter_workload.rs::parse_args`・
 /// `fixed_overhead_diagnosis.rs::parse_args` と同型の一括走査＋未知引数・
 /// 重複指定の fail-closed 拒否。OWASP A03 観点）。
@@ -215,39 +266,148 @@ fn min_warmup_override_duration(min_warmup_secs: Option<u64>) -> std::time::Dura
 /// 分離することで、Linux CI の `#[cfg(test)]` から引数列を注入して検証
 /// できる。
 ///
-/// 許可する引数は `--phase1-only`／`--gpu-timestamps`／
-/// `--min-warmup-secs=<N>`（単一トークン。`=` 必須・値は 3〜600 の整数
-/// 秒。イシュー #1261）のみ（順序不問で併用可）。それ以外の引数・
-/// 重複指定は `Err` で fail-closed に拒否する（呼び出し元は
-/// `MetalContext::new` に到達する前にこの結果を検査し、不正引数なら GPU
-/// を触らずに終了する）。プロセス内リピート（`--repeat=N`）・`--help` 等
-/// は意図的に非対応（本 example ヘッダ doc comment 参照。必要になれば
-/// #1249 配下で別イシュー）。環境変数は使わない（#1454 の引数方式に統一。
-/// イシュー #1259）。`--min-warmup-secs 9`（値をスペース区切りの別トークン
-/// で渡す形）は本関数が認識する形式ではないため未知の引数として拒否される
-/// （`=` 必須の設計）。
+/// 許可する引数（順序不問で併用可）:
+/// - `--phase1-only`／`--gpu-timestamps`（値なしフラグ）
+/// - `--max-load-avg=<f64>`（有限・正）・`--guard-max-attempts=<usize>`
+///   （1 以上）・`--guard-wait-secs=<f64>`（有限・正）・`--gpu-watch=<name>`
+///   （非空文字列。複数指定可）・`--guard-only`（値なしフラグ）・
+///   `--env-info-out=<path>`（非空文字列）（イシュー #1265。
+///   `RetryConfig`／`EnvGuardConfig` への実結線は `macos_impl::run_env_guard`）
+/// - `--min-warmup-secs=<N>`（単一トークン。`=` 必須・値は 3〜600 の整数秒。
+///   イシュー #1261。既定のウォームアップ下限 [`DEFAULT_MIN_WARMUP_SECS`] の
+///   代わりに使う）
+///
+/// それ以外の引数・重複指定（`--gpu-watch` を除く）は `Err` で fail-closed
+/// に拒否する（呼び出し元は `MetalContext::new` に到達する前にこの結果を
+/// 検査し、不正引数なら GPU を触らずに終了する）。`--gpu-watch` は
+/// `max_load_avg`（`--max-load-avg`）が指定されていない状態での単独指定を
+/// エラーとする（gated モードでのみ意味を持つため）。数値引数は非数値・
+/// 非有限・非正（`guard_max_attempts` は 0）を fail-closed に拒否する。
+/// `--min-warmup-secs 9`（値をスペース区切りの別トークンで渡す形）は
+/// 本関数が認識する形式ではないため未知の引数として拒否される（`=` 必須の
+/// 設計）。プロセス内リピート（`--repeat=N`）・`--help` 等は意図的に非対応
+/// （本 example ヘッダ doc comment 参照）。環境変数は使わない
+/// （#1454 の引数方式に統一）。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, String> {
-    let mut phase1_only = false;
-    let mut gpu_timestamps = false;
+    let mut out = CliArgs::default();
+    let mut max_load_avg_seen = false;
+    let mut guard_max_attempts_seen = false;
+    let mut guard_wait_secs_seen = false;
+    let mut env_info_out_seen = false;
     let mut min_warmup_secs: Option<u64> = None;
     for arg in args {
+        if let Some(rest) = arg.strip_prefix("--max-load-avg=") {
+            if max_load_avg_seen {
+                return Err(format!(
+                    "--max-load-avg は複数回指定できない（重複指定）: '{arg}'"
+                ));
+            }
+            let value: f64 = rest
+                .parse()
+                .map_err(|_| format!("--max-load-avg の値が数値として解釈できない: '{arg}'"))?;
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!(
+                    "--max-load-avg は有限かつ正である必要がある: '{arg}'"
+                ));
+            }
+            out.max_load_avg = Some(value);
+            max_load_avg_seen = true;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--gpu-watch=") {
+            if rest.is_empty() {
+                return Err(format!("--gpu-watch の値が空文字列: '{arg}'"));
+            }
+            out.gpu_watch.push(rest.to_string());
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--guard-max-attempts=") {
+            if guard_max_attempts_seen {
+                return Err(format!(
+                    "--guard-max-attempts は複数回指定できない（重複指定）: '{arg}'"
+                ));
+            }
+            let value: usize = rest.parse().map_err(|_| {
+                format!("--guard-max-attempts の値が非負整数として解釈できない: '{arg}'")
+            })?;
+            if value == 0 {
+                return Err(format!(
+                    "--guard-max-attempts は 1 以上である必要がある: '{arg}'"
+                ));
+            }
+            out.guard_max_attempts = Some(value);
+            guard_max_attempts_seen = true;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--guard-wait-secs=") {
+            if guard_wait_secs_seen {
+                return Err(format!(
+                    "--guard-wait-secs は複数回指定できない（重複指定）: '{arg}'"
+                ));
+            }
+            let value: f64 = rest
+                .parse()
+                .map_err(|_| format!("--guard-wait-secs の値が数値として解釈できない: '{arg}'"))?;
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!(
+                    "--guard-wait-secs は有限かつ正である必要がある: '{arg}'"
+                ));
+            }
+            // `is_finite() && > 0.0` だけでは `Duration` の表現範囲
+            // （最大 `Duration::MAX` ≒ 1.8e19 秒）を超える値（例:
+            // `--guard-wait-secs=1e100`）を通してしまい、後段の
+            // `run_env_guard` 内 `Duration::from_secs_f64` が panic する
+            // 経路になっていた（Review 指摘・AGENTS.md「本番経路の panic
+            // 禁止」。#1265）。ここで `Duration::try_from_secs_f64` により
+            // 変換可能性そのものを検証し、範囲外なら CLI 引数エラーとして
+            // undetermined ではなく明示的に拒否する。
+            if std::time::Duration::try_from_secs_f64(value).is_err() {
+                return Err(format!(
+                    "--guard-wait-secs の値が Duration の表現範囲を超えている: '{arg}'"
+                ));
+            }
+            out.guard_wait_secs = Some(value);
+            guard_wait_secs_seen = true;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--env-info-out=") {
+            if env_info_out_seen {
+                return Err(format!(
+                    "--env-info-out は複数回指定できない（重複指定）: '{arg}'"
+                ));
+            }
+            if rest.is_empty() {
+                return Err(format!("--env-info-out の値が空文字列: '{arg}'"));
+            }
+            out.env_info_out = Some(rest.to_string());
+            env_info_out_seen = true;
+            continue;
+        }
         match arg.as_str() {
             "--phase1-only" => {
-                if phase1_only {
+                if out.phase1_only {
                     return Err(format!(
                         "--phase1-only は複数回指定できない（重複指定）: '{arg}'"
                     ));
                 }
-                phase1_only = true;
+                out.phase1_only = true;
             }
             "--gpu-timestamps" => {
-                if gpu_timestamps {
+                if out.gpu_timestamps {
                     return Err(format!(
                         "--gpu-timestamps は複数回指定できない（重複指定）: '{arg}'"
                     ));
                 }
-                gpu_timestamps = true;
+                out.gpu_timestamps = true;
+            }
+            "--guard-only" => {
+                if out.guard_only {
+                    return Err(format!(
+                        "--guard-only は複数回指定できない（重複指定）: '{arg}'"
+                    ));
+                }
+                out.guard_only = true;
             }
             _ if arg.starts_with("--min-warmup-secs=") => {
                 if min_warmup_secs.is_some() {
@@ -260,16 +420,18 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, S
             _ => {
                 return Err(format!(
                     "未知の引数: '{arg}'（許可される引数は --phase1-only／--gpu-timestamps／\
+                     --max-load-avg=<f64>／--gpu-watch=<name>／--guard-max-attempts=<usize>／\
+                     --guard-wait-secs=<f64>／--guard-only／--env-info-out=<path>／\
                      --min-warmup-secs=<N> のみ）"
                 ));
             }
         }
     }
-    Ok(CliArgs {
-        phase1_only,
-        gpu_timestamps,
-        min_warmup_secs,
-    })
+    if !out.gpu_watch.is_empty() && out.max_load_avg.is_none() {
+        return Err("--gpu-watch は --max-load-avg 指定時のみ有効（単独指定はエラー）".to_string());
+    }
+    out.min_warmup_secs = min_warmup_secs;
+    Ok(out)
 }
 
 /// `--min-warmup-secs=<N>` の値部分（`arg` は `--min-warmup-secs=` で
@@ -346,6 +508,36 @@ fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
         max_secs: round_medians_secs[max_idx],
         max_round_idx: max_idx,
     })
+}
+
+/// `env_guard_result=` 行の値を導出する純関数（イシュー #1265。Review 指摘
+/// 対応: 以前は `args.max_load_avg` の有無だけで `pass`／`record_only` を
+/// 決め打ちしていたため、`run_guard_with_retry` が `Undetermined`（load
+/// average 取得不能等）でも `Ok` を返す契約〈`bench_harness::env_guard`
+/// モジュール doc「取得不能は未判定・ブロック要因にしない」〉の下では、直前
+/// の `env_guard_overall verdict=undetermined` と矛盾する `pass` を出力
+/// しえた）。
+///
+/// - `gated == false`（`--max-load-avg` 未指定）: 判定を行わないため常に
+///   `record_only`（`GuardRetryOutcome::record_only` の `overall` は
+///   `Undetermined` 固定だが、これは「未判定」であり「取得不能」とは区別する）
+/// - `gated == true`: `final_report.overall` をそのまま写像する。`Fail` は
+///   `run_guard_with_retry` が `Err(EnvGuardExhausted)` を返すため `Ok`
+///   経路では現れないが、panic 経路を作らず `fail` へ写像しておく
+///   （fail-closed）
+///
+/// `macos_impl::main` から呼ばれる（フェーズ 1・2 の各ガード後）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn env_guard_result_label(gated: bool, overall: bench_harness::ab::GuardVerdict) -> &'static str {
+    use bench_harness::ab::GuardVerdict;
+    if !gated {
+        return "record_only";
+    }
+    match overall {
+        GuardVerdict::Pass => "pass",
+        GuardVerdict::Undetermined => "undetermined",
+        GuardVerdict::Fail => "fail",
+    }
 }
 
 /// `--gpu-timestamps` opt-in 時、フェーズ 1 の計装クロージャが 1 回の
@@ -768,8 +960,12 @@ fn format_gpu_host_size_line(stats: &GpuHostSizeStats) -> String {
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
+    use bench_harness::BenchError;
     use bench_harness::MeasurementConfig;
-    use bench_harness::ab::{AbConfig, run_ab, run_stability, run_stability_observed};
+    use bench_harness::ab::{
+        AbConfig, EnvGuardConfig, EnvSample, GuardRetryOutcome, RetryConfig, format_env_info_text,
+        run_ab, run_guard_with_retry, run_stability, run_stability_observed,
+    };
     use bench_harness::rng::Xorshift64Star;
     use fandhe_ai_backend_metal::layout::{MatrixLayout, classify_2d};
     use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm, tile};
@@ -782,9 +978,9 @@ mod macos_impl {
     // `aggregate_gpu_host_round`／`_size`・`format_gpu_host_round_line`／
     // `_size_line`）へ切り出してある。
     use super::{
-        GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round, aggregate_gpu_host_size,
-        format_gpu_host_round_line, format_gpu_host_size_line, measured_tail,
-        min_warmup_override_duration, round_extrema,
+        CliArgs, GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round,
+        aggregate_gpu_host_size, format_gpu_host_round_line, format_gpu_host_size_line,
+        measured_tail, min_warmup_override_duration, round_extrema,
     };
 
     /// `gemm_transpose_tile_sweep.rs`・`gemm_bench.rs` と同一値（決定的
@@ -809,6 +1005,151 @@ mod macos_impl {
     // `phase1_stability_selfcheck`／`phase2_route_ab` の呼び出し側が両方
     // ともオーバーライド経由の呼び出しへ切り替わった結果 dead_code に
     // なるため、定数としては保持しない。
+
+    // --- イシュー #1265: 実行前環境ガードのバックオフ再試行既定値 --------
+    //
+    // `ROUNDS`／`COOLDOWN`／`MIN_WARMUP` と同様、調整は増やす方向のみ許容
+    // する（`docs/perf/metal-bench-noise-protocol.md`）。閾値
+    // （`--max-load-avg`）自体の既定値はユーザー承認事項のため、ここには
+    // 待機・再試行回数のみを置く（`bench_harness::env_guard::EnvGuardConfig`
+    // は既定値・`Default` を持たない設計。同モジュール doc 参照）。
+    const GUARD_INITIAL_WAIT: Duration = Duration::from_secs(30);
+    const GUARD_GROWTH_FACTOR: f64 = 1.5;
+    const GUARD_MAX_WAIT: Duration = Duration::from_secs(300);
+    const GUARD_MAX_ATTEMPTS: usize = 10;
+
+    /// フェーズ 1・フェーズ 2 の各開始前に呼ぶ実行前環境ガード（イシュー
+    /// #1265）。`args.max_load_avg` 指定時は **gated**（`EnvGuardConfig`
+    /// による判定・`Fail` ならバックオフ再試行）、未指定時は **record_only**
+    /// （[`GuardRetryOutcome::record_only`]。判定なし・記録のみ）で動作する。
+    /// `EnvGuardConfig::new`（閾値の有限・正値検査）は呼び出し元
+    /// `parse_args_from` が同じ条件を検証済みのため通常到達せず、
+    /// `RetryConfig::new` の `max_wait >= initial_wait` 制約は
+    /// `--guard-wait-secs` が `GUARD_MAX_WAIT` を上回る指定（例:
+    /// `--guard-wait-secs=400`）でも本関数が `max_wait` を `initial_wait`
+    /// 以上へ持ち上げるため構築失敗しない。それでも `Err` になった場合は
+    /// fail-closed に同じ `BenchError` 経路で呼び出し元へ伝播する。I/O・待機は
+    /// すべて `bench_harness::env_guard` に委譲し、本関数は設定の組み立てと
+    /// 呼び分けのみを行う。計測区間（`run_stability`／`run_ab`）の外側で
+    /// 完結するため、`ab::STABILITY_SPREAD_GATE` 等の判定ロジックには
+    /// 影響しない。
+    fn run_env_guard(
+        args: &CliArgs,
+    ) -> Result<(GuardRetryOutcome, Option<EnvGuardConfig>), BenchError> {
+        match args.max_load_avg {
+            Some(max_load_avg) => {
+                let config = EnvGuardConfig::new(max_load_avg)?
+                    .with_gpu_process_watchlist(args.gpu_watch.clone());
+                let initial_wait = args
+                    .guard_wait_secs
+                    .map(Duration::from_secs_f64)
+                    .unwrap_or(GUARD_INITIAL_WAIT);
+                let max_attempts = args.guard_max_attempts.unwrap_or(GUARD_MAX_ATTEMPTS);
+                // `RetryConfig::new` は `max_wait >= initial_wait` を要求する
+                // （`bench_harness::env_guard::RetryConfig::new` doc 参照）。
+                // `--guard-wait-secs` は利用者指定で `GUARD_MAX_WAIT`
+                // （既定 300s）を上回りうるため、cap を initial_wait 未満に
+                // 落とさないよう max で持ち上げる（fail-closed に構築失敗させ
+                // ないための単純な整合。`GUARD_MAX_WAIT` 自体の既定値は不変）。
+                let max_wait = GUARD_MAX_WAIT.max(initial_wait);
+                let retry =
+                    RetryConfig::new(initial_wait, GUARD_GROWTH_FACTOR, max_wait, max_attempts)?;
+                let outcome = run_guard_with_retry(&config, &retry)?;
+                Ok((outcome, Some(config)))
+            }
+            None => Ok((GuardRetryOutcome::record_only(EnvSample::collect()), None)),
+        }
+    }
+
+    /// [`run_env_guard`] の結果を env_info テキストへ変換し、stdout へ出力
+    /// する（常時）とともに、`args.env_info_out` が指定されていれば同じ
+    /// テキストを追記する（イシュー #1265・opt-in）。ファイル出力に失敗
+    /// した場合は「記録できない実行を記録済みと誤認しない」ため fail-closed
+    /// に stderr へ理由を出して exit(1) する（`.claude/rules/security.md`
+    /// A01/A05 相当の慎重さ）。`OpenOptions::create(true).append(true)` で
+    /// 開くため既存内容の上書き（truncate）は行わず末尾追記のみとなる。
+    /// 一方、指定パスがシンボリックリンクであれば OS の通常の解決に従い
+    /// リンク先へ追記する（シンボリックリンクの検出・拒否は行わない。出力先
+    /// は利用者が `--env-info-out` で明示した docs/perf/logs 配下のログ
+    /// ファイルを想定し、権限・パスの妥当性は利用者側の責務とする）。
+    fn emit_env_info(
+        label: &str,
+        outcome: &GuardRetryOutcome,
+        config: Option<&EnvGuardConfig>,
+        args: &CliArgs,
+    ) {
+        let text = format_env_info_text(label, outcome, config);
+        print!("{text}");
+        if let Some(path) = &args.env_info_out {
+            use std::io::Write;
+            let result = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut f| f.write_all(text.as_bytes()));
+            if let Err(e) = result {
+                eprintln!("env_info_out への書き込みに失敗した（path={path}）: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// [`run_env_guard`] が `Err` を返した場合の共通処理（イシュー #1265）。
+    /// `EnvGuardExhausted`（再試行上限到達）を含め、いずれの `BenchError`
+    /// も `verdict=undetermined` として出力し非ゼロ終了する
+    /// （フェーズ 1 不成立時〈既存経路〉と同じ `verdict=` grep 運用に揃える。
+    /// GPU は未初期化のまま終了できる位置でのみ呼ぶ想定 — フェーズ 1 前は
+    /// `MetalContext::new()` より前、フェーズ 2 前は既にコンテキスト保持
+    /// 済みだが追加の GPU 操作は行わずに終了する）。
+    ///
+    /// 以前は stdout のみへ出力していたため、`--env-info-out` 指定時でも
+    /// 再試行上限到達（exhausted）で終了した実行がログファイルへ一切
+    /// 残らなかった（[`emit_env_info`] は `Ok` 経路の成功試行でしか呼ばれ
+    /// ないため。Review 指摘。#1265）。`emit_env_info` と同じ
+    /// `OpenOptions::create(true).append(true)` 方式で `label`／`args` を
+    /// 受け取り、stdout と同一テキストをファイルへも追記することで
+    /// 「記録できない実行を記録済みと誤認しない」という既存の fail-closed
+    /// 方針（書き込み失敗時は stderr へ理由を出して exit(1)）を exhausted
+    /// 経路にも一貫適用する。
+    fn abort_on_guard_error(label: &str, err: &BenchError, args: &CliArgs) -> ! {
+        // `env_guard_result=` は行頭キーとして出力する（フェーズ 1/2 成功時
+        // の `env_guard_result={} attempts={}` 行〈1798/1883 行目〉と同じ
+        // 位置づけに揃え、`grep '^env_guard_result='` で成功・失敗いずれの
+        // 経路も一律に拾えるようにする。`env_guard_label` は同じ行の末尾
+        // 側の付加情報として出す（Bugbot 指摘。#1265。合わせて
+        // `crates/bench-harness/src/env_guard.rs::summarize_exhausted` の
+        // 内訳キーを `verdict=` から `state=` へ変更し、後続の `verdict=`
+        // 行との衝突〈同一行に `verdict=` が複数回出現し行頭 grep が
+        // 崩れる〉を解消済み）。
+        let text = match err {
+            BenchError::EnvGuardExhausted { attempts, detail } => {
+                format!(
+                    "env_guard_result=exhausted attempts={attempts} env_guard_label={label}\n\
+                     verdict=undetermined (環境ガード上限到達: {detail})\n"
+                )
+            }
+            other => {
+                format!(
+                    "env_guard_result=error env_guard_label={label}\n\
+                     verdict=undetermined (環境ガード設定エラー: {other})\n"
+                )
+            }
+        };
+        print!("{text}");
+        if let Some(path) = &args.env_info_out {
+            use std::io::Write;
+            let result = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut f| f.write_all(text.as_bytes()));
+            if let Err(e) = result {
+                eprintln!("env_info_out への書き込みに失敗した（path={path}）: {e}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(1);
+    }
 
     fn tflops(m: usize, n: usize, k: usize, median_secs: f64) -> f64 {
         let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
@@ -1448,6 +1789,38 @@ mod macos_impl {
             }
         };
 
+        // イシュー #1265: フェーズ 1 前の実行前環境ガード。`MetalContext::new()`
+        // （GPU 初期化）より前に行い、gated モードで上限到達（`Fail` が
+        // バックオフ再試行を使い切っても解消しない）した場合は GPU を
+        // 一切触らずに終了する。
+        let (phase1_guard_outcome, phase1_guard_config) = match run_env_guard(&args) {
+            Ok(v) => v,
+            Err(e) => abort_on_guard_error("phase1", &e, &args),
+        };
+        emit_env_info(
+            "phase1",
+            &phase1_guard_outcome,
+            phase1_guard_config.as_ref(),
+            &args,
+        );
+        println!(
+            "env_guard_result={} attempts={}",
+            super::env_guard_result_label(
+                args.max_load_avg.is_some(),
+                phase1_guard_outcome.final_report.overall,
+            ),
+            phase1_guard_outcome.attempts_used()
+        );
+
+        if args.guard_only {
+            // イシュー #1265: ガード＋env_info 出力のみ行い GPU を初期化
+            // せず終了する（短時間動作確認・実行前チェック用）。
+            println!(
+                "verdict=not_evaluated (--guard-only: 環境ガードの記録のみで GEMM 計測は未実行)"
+            );
+            return;
+        }
+
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
@@ -1500,6 +1873,30 @@ mod macos_impl {
             return;
         }
 
+        // イシュー #1265: フェーズ 2（A/B 判定）前の実行前環境ガード。
+        // フェーズ 1 と同じ設定を再実測して再判定する（フェーズ 1 実行中に
+        // 負荷が上昇した場合を検知するため。GPU コンテキストは既に構築
+        // 済みだが、ここでは追加の GPU 操作は行わずガード結果のみで終了
+        // 判断する）。
+        let (phase2_guard_outcome, phase2_guard_config) = match run_env_guard(&args) {
+            Ok(v) => v,
+            Err(e) => abort_on_guard_error("phase2", &e, &args),
+        };
+        emit_env_info(
+            "phase2",
+            &phase2_guard_outcome,
+            phase2_guard_config.as_ref(),
+            &args,
+        );
+        println!(
+            "env_guard_result={} attempts={}",
+            super::env_guard_result_label(
+                args.max_load_avg.is_some(),
+                phase2_guard_outcome.final_report.overall,
+            ),
+            phase2_guard_outcome.attempts_used()
+        );
+
         phase2_route_ab(&ctx, &gemm, args.min_warmup_secs);
     }
 }
@@ -1531,13 +1928,38 @@ fn main() {
 mod cli_and_round_stats_tests {
     use super::{
         CliArgs, GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round,
-        aggregate_gpu_host_size, format_gpu_host_round_line, format_gpu_host_size_line,
-        measured_tail, min_warmup_override_duration, parse_args_from, parse_min_warmup_secs,
-        round_extrema,
+        aggregate_gpu_host_size, env_guard_result_label, format_gpu_host_round_line,
+        format_gpu_host_size_line, measured_tail, min_warmup_override_duration, parse_args_from,
+        parse_min_warmup_secs, round_extrema,
     };
+    use bench_harness::ab::GuardVerdict;
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// イシュー #1265 Review 指摘対応: `env_guard_result=` は
+    /// `final_report.overall` から導出し、gated かつ `Undetermined` で
+    /// `pass` を出さない。
+    #[test]
+    fn env_guard_result_label_record_only_ignores_verdict() {
+        for v in [
+            GuardVerdict::Pass,
+            GuardVerdict::Fail,
+            GuardVerdict::Undetermined,
+        ] {
+            assert_eq!(env_guard_result_label(false, v), "record_only");
+        }
+    }
+
+    #[test]
+    fn env_guard_result_label_gated_maps_verdict() {
+        assert_eq!(env_guard_result_label(true, GuardVerdict::Pass), "pass");
+        assert_eq!(
+            env_guard_result_label(true, GuardVerdict::Undetermined),
+            "undetermined"
+        );
+        assert_eq!(env_guard_result_label(true, GuardVerdict::Fail), "fail");
     }
 
     #[test]
@@ -1548,7 +1970,7 @@ mod cli_and_round_stats_tests {
             CliArgs {
                 phase1_only: false,
                 gpu_timestamps: false,
-                min_warmup_secs: None,
+                ..Default::default()
             }
         );
     }
@@ -1562,7 +1984,7 @@ mod cli_and_round_stats_tests {
             CliArgs {
                 phase1_only: true,
                 gpu_timestamps: false,
-                min_warmup_secs: None,
+                ..Default::default()
             }
         );
     }
@@ -1592,7 +2014,7 @@ mod cli_and_round_stats_tests {
             CliArgs {
                 phase1_only: false,
                 gpu_timestamps: true,
-                min_warmup_secs: None,
+                ..Default::default()
             }
         );
     }
@@ -1610,7 +2032,7 @@ mod cli_and_round_stats_tests {
                 CliArgs {
                     phase1_only: true,
                     gpu_timestamps: true,
-                    min_warmup_secs: None,
+                    ..Default::default()
                 }
             );
         }
@@ -1621,6 +2043,122 @@ mod cli_and_round_stats_tests {
         let err = parse_args_from(args(&["--gpu-timestamps", "--gpu-timestamps"]))
             .expect_err("重複指定は fail-closed に拒否するはず");
         assert!(err.contains("複数回指定できない"));
+    }
+
+    // --- イシュー #1265: 環境ガード CLI 引数 ----------------------------
+
+    #[test]
+    fn parse_args_from_max_load_avg_sets_gated_mode() {
+        let parsed =
+            parse_args_from(args(&["--max-load-avg=8.5"])).expect("有効な値は成功するはず");
+        assert_eq!(parsed.max_load_avg, Some(8.5));
+    }
+
+    #[test]
+    fn parse_args_from_max_load_avg_rejects_non_numeric() {
+        let err = parse_args_from(args(&["--max-load-avg=abc"]))
+            .expect_err("非数値は fail-closed に拒否するはず");
+        assert!(err.contains("数値として解釈できない"));
+    }
+
+    #[test]
+    fn parse_args_from_max_load_avg_rejects_zero_and_negative() {
+        for v in ["0", "-1.0"] {
+            let err = parse_args_from(args(&[&format!("--max-load-avg={v}")]))
+                .expect_err("0・負値は fail-closed に拒否するはず");
+            assert!(err.contains("有限かつ正"), "v={v} err={err}");
+        }
+    }
+
+    #[test]
+    fn parse_args_from_max_load_avg_duplicate_is_error() {
+        let err = parse_args_from(args(&["--max-load-avg=4.0", "--max-load-avg=8.0"]))
+            .expect_err("重複指定は fail-closed に拒否するはず");
+        assert!(err.contains("複数回指定できない"));
+    }
+
+    #[test]
+    fn parse_args_from_gpu_watch_alone_is_error() {
+        let err = parse_args_from(args(&["--gpu-watch=Safari"]))
+            .expect_err("--max-load-avg 未指定での単独指定はエラーのはず");
+        assert!(err.contains("--max-load-avg 指定時のみ"));
+    }
+
+    #[test]
+    fn parse_args_from_gpu_watch_with_max_load_avg_collects_multiple() {
+        let parsed = parse_args_from(args(&[
+            "--max-load-avg=4.0",
+            "--gpu-watch=Safari",
+            "--gpu-watch=Chrome",
+        ]))
+        .expect("--max-load-avg と併用時は成功するはず");
+        assert_eq!(
+            parsed.gpu_watch,
+            vec!["Safari".to_string(), "Chrome".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_args_from_guard_max_attempts_rejects_zero() {
+        let err = parse_args_from(args(&["--guard-max-attempts=0"]))
+            .expect_err("0 は fail-closed に拒否するはず");
+        assert!(err.contains("1 以上"));
+    }
+
+    #[test]
+    fn parse_args_from_guard_wait_secs_rejects_non_positive() {
+        let err = parse_args_from(args(&["--guard-wait-secs=0"]))
+            .expect_err("0 は fail-closed に拒否するはず");
+        assert!(err.contains("有限かつ正"));
+    }
+
+    /// Review 指摘（#1265・P2）の再現ケース: `is_finite() && > 0.0` は
+    /// 通過するが `Duration` の表現範囲（最大約 1.8e19 秒）を大きく
+    /// 超える値（`1e100`）は、以前は検証をすり抜けて後段
+    /// `run_env_guard` 内 `Duration::from_secs_f64` の panic 経路に
+    /// 到達しえた。CLI 引数検証の時点で明示的に拒否することを確認する。
+    #[test]
+    fn parse_args_from_guard_wait_secs_rejects_duration_overflow() {
+        let err = parse_args_from(args(&["--guard-wait-secs=1e100"]))
+            .expect_err("Duration の表現範囲外は fail-closed に拒否するはず");
+        assert!(err.contains("Duration の表現範囲"));
+    }
+
+    #[test]
+    fn parse_args_from_guard_only_flag_sets_true() {
+        let parsed = parse_args_from(args(&["--guard-only"])).expect("成功するはず");
+        assert!(parsed.guard_only);
+    }
+
+    #[test]
+    fn parse_args_from_env_info_out_rejects_empty_value() {
+        let err = parse_args_from(args(&["--env-info-out="]))
+            .expect_err("空文字列は fail-closed に拒否するはず");
+        assert!(err.contains("空文字列"));
+    }
+
+    #[test]
+    fn parse_args_from_env_info_out_sets_path() {
+        let parsed =
+            parse_args_from(args(&["--env-info-out=/tmp/env_info.txt"])).expect("成功するはず");
+        assert_eq!(parsed.env_info_out, Some("/tmp/env_info.txt".to_string()));
+    }
+
+    #[test]
+    fn parse_args_from_guard_options_combine_with_existing_flags() {
+        let parsed = parse_args_from(args(&[
+            "--phase1-only",
+            "--max-load-avg=4.0",
+            "--guard-max-attempts=2",
+            "--guard-wait-secs=1.0",
+            "--guard-only",
+        ]))
+        .expect("併用は成功するはず");
+        assert!(parsed.phase1_only);
+        assert!(parsed.guard_only);
+        assert_eq!(parsed.max_load_avg, Some(4.0));
+        assert_eq!(parsed.guard_max_attempts, Some(2));
+        assert_eq!(parsed.guard_wait_secs, Some(1.0));
     }
 
     // イシュー #1261: `--min-warmup-secs=<N>` の解析テスト群。
@@ -1640,6 +2178,7 @@ mod cli_and_round_stats_tests {
                     phase1_only: false,
                     gpu_timestamps: false,
                     min_warmup_secs: Some(expected),
+                    ..Default::default()
                 }
             );
         }
@@ -1708,6 +2247,7 @@ mod cli_and_round_stats_tests {
                     phase1_only: true,
                     gpu_timestamps: true,
                     min_warmup_secs: Some(9),
+                    ..Default::default()
                 }
             );
         }

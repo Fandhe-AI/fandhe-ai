@@ -1,0 +1,8 @@
+== env_guard(phase1) ==
+3:47  up 20 days, 15 hrs, 19 users, load averages: 5.94 5.22 4.25
+env_guard_mode=record_only
+env_guard_load_avg one=5.94 five=5.22 fifteen=4.25 max_1min=NA verdict=undetermined
+env_guard_uptime_secs=1781988 collected_at_unix_secs=1788893262
+env_guard_gpu status=available processes=93 flagged=none device_utilization_percent=10 verdict=undetermined note=record_only モードのため判定を行わない
+env_guard_overall verdict=undetermined attempts=1 max_attempts=1 total_wait_secs=0.00
+env_guard_attempt idx=1 waited_before_secs=0.00 load_avg_one=5.94 gpu_verdict=undetermined overall=undetermined

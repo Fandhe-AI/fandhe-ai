@@ -1,0 +1,10 @@
+== env_guard(phase1) ==
+3:47  up 20 days, 15 hrs, 19 users, load averages: 5.94 5.22 4.25
+env_guard_mode=gated
+env_guard_load_avg one=5.94 five=5.22 fifteen=4.25 max_1min=20.00 verdict=pass
+env_guard_uptime_secs=1781989 collected_at_unix_secs=1788893263
+env_guard_gpu status=available processes=93 flagged=none device_utilization_percent=0 verdict=pass note=watchlist・使用率上限とも未設定のため記録のみ
+env_guard_overall verdict=pass attempts=1 max_attempts=10 total_wait_secs=0.00
+env_guard_attempt idx=1 waited_before_secs=0.00 load_avg_one=5.94 gpu_verdict=pass overall=pass
+env_guard_result=pass attempts=1
+verdict=not_evaluated (--guard-only: 環境ガードの記録のみで GEMM 計測は未実行)
