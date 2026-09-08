@@ -229,7 +229,7 @@ draft 時点で #1241 へ委ねた 5 点は、#1241 の承認記録コメント�
 
 | Phase 2 issue（想定） | 対応する #1238 の同時更新箇所 |
 |---|---|
-| #1247 | `bench-common::parity`（`element_error`・`PARITY_REL_TOL`／`PARITY_ABS_TOL` 周辺）への判定式追加、および定数ピンが判定式そのものを検査しない盲点（§7.1）を埋める判定式ピンテストの新設 |
+| #1247 | `bench-common::parity`（`element_error`・`PARITY_REL_TOL`／`PARITY_ABS_TOL` 周辺）への判定式追加、および定数ピンが判定式そのものを検査しない盲点（§7.1）を埋める判定式ピンテストの新設。**実装済み**（`ScaledAbsTolerance`・`PARITY_SCALED_ABS_COEFF`／`F32_UNIT_ROUNDOFF`・`compare_elementwise`／`dump_parity_failures`／`GemmReference` への結線・#1184 実値の bit パターン固定テスト・fandhe-ai 側 0 fail 不変〈`scaled_abs_rescued==0`〉テストを含む。`scripts/bench/framework-compare/README.md`「承認済み契約の実装（イシュー #1247）」節） |
 | #1250 | `compare_gemm_gate.py::_parity_check`・`summarize.py` の判定不能条件の更新（§7.2） |
 | #1254 | **承認スコープ外（§8-3 ハーネス限定）・Phase 2 で再スコープ要**: 本体 `compare` の新入口追加（シグネチャ非破壊。§8 の設計制約）・判定式レプリカ群（§7.2）・リテラル閾値レプリカ（§7.3）・`extract_f64_const`／`_extract_f64_const` 両方への新定数追加（§7.5）・規約文言更新（§7.4） |
 | #1256 | **承認スコープ外（§8-3 ハーネス限定。本体 `ParityBaseline` は不変のため契約反映後の再測定対象なし）・Phase 2 で再スコープ要**: GB10 実機で `BASELINES` の非後退確認、必要なら再測定（人間承認必須） |

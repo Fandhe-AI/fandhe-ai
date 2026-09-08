@@ -5,8 +5,15 @@
 //! 非有限）」と「他フレームワークとの粗い一致」しか検出できず、和が偶然
 //! 一致する破損（要素の入れ替わり・正負誤差の相殺）を見逃す。本モジュール
 //! は本体の数値一致契約（`crates/backend-cpu/src/parity.rs` の複合判定
-//! 「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」）と同じ式・同じ閾値を
-//! 使い、GEMM 結果を要素単位で参照実装と突合する。
+//! 「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」）と同じ式・同じ閾値
+//! （既存 2 条件は本体と bit 単位で不変）を使い、GEMM 結果を要素単位で
+//! 参照実装と突合する。加えて、本モジュール限定（ハーネス限定）の承認済み
+//! 第 3 救済項（スケール付き絶対誤差。[`ScaledAbsTolerance`]・
+//! [`PARITY_SCALED_ABS_COEFF`]）を OR 追加できる。本体
+//! `compare`／`assert_parity`／`ParityBaseline` の判定式にはこの項は
+//! 存在せず、あくまで candle/Burn 側参照 GEMM のキャンセレーション由来の
+//! 丸め誤差フロアを許容するためのハーネス側運用（イシュー #1241 承認記録
+//! コメント・`docs/candle-parity-tolerance-contract-decision.md` §8）。
 //!
 //! # 参照実装の選択
 //!
@@ -53,6 +60,123 @@ pub const PARITY_REL_TOL: f64 = 1e-3;
 /// 方針は [`PARITY_REL_TOL`] と同じ。
 pub const PARITY_ABS_TOL: f64 = 1e-5;
 
+/// スケール付き絶対誤差救済項（候補 A-1・係数 `c=0.5`。`u=2^-24` 表記）の
+/// 係数。判定式は `diff <= PARITY_SCALED_ABS_COEFF * F32_UNIT_ROUNDOFF *
+/// K * S_A * S_B`（[`ScaledAbsTolerance::bound`]）。
+///
+/// **本項目は framework-compare ハーネス限定の承認済み契約**であり、本体
+/// `crates/backend-cpu/src/parity.rs::compare`・
+/// `crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline` の
+/// 判定式には対応する項が**設計上存在しない**（イシュー #1241 承認記録
+/// コメント〈2026-09-08〉・`docs/candle-parity-tolerance-contract-decision.md`
+/// §8。スコープ 3「ハーネス限定」の承認内容）。ハーネスの
+/// [`GemmReference::verify`] が candle/Burn の cuBLAS/oneDNN 系参照 GEMM を
+/// N=2048 で比較する際、キャンセレーションにより最終値が縮小し
+/// [`PARITY_REL_TOL`]／[`PARITY_ABS_TOL`] の両方を割る 2 要素が決定的に
+/// 発生する（`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3・§11・
+/// `docs/perf/logs/cuda-gemm-candle-parity-1184/`）ため、比較対象側の
+/// 丸め誤差フロアを許容する第 3 項を OR 追加する。fandhe-ai 側 GEMM は
+/// 本項の救済なしに 0 fail のままであることをテストで固定する
+/// （`bench-fandhe::tests::gemm_cpu_parity_zero_fail_without_scaled_rescue`）。
+///
+/// **変更はユーザー承認必須**（[`PARITY_REL_TOL`] と同じ方針。
+/// `.claude/rules/coding-rust.md`・`.claude/rules/security.md` A08）。
+pub const PARITY_SCALED_ABS_COEFF: f64 = 0.5;
+
+/// f32 の unit roundoff（machine epsilon の半分。`2^-24`）。承認済み判定式
+/// （[`PARITY_SCALED_ABS_COEFF`]）の `u` に対応する。`f32::EPSILON`
+/// （`2^-23`）の半分として const 評価できるため、リテラルの二重管理を
+/// 避けてここから導出する。
+pub const F32_UNIT_ROUNDOFF: f64 = 1.0 / 16_777_216.0;
+
+/// [`PARITY_SCALED_ABS_COEFF`]・[`F32_UNIT_ROUNDOFF`] による第 3 救済項
+/// （スケール付き絶対誤差。候補 A-1）の適用パラメータ。
+///
+/// `bound = c・u・K・S_A・S_B`（`c`=[`PARITY_SCALED_ABS_COEFF`]・
+/// `u`=[`F32_UNIT_ROUNDOFF`]・`K`=内積長・`S_A`/`S_B`=入力行列 A/B の
+/// 絶対値の全体最大）。要素の複合判定 `pass ⇔ rel < PARITY_REL_TOL ∨
+/// diff < PARITY_ABS_TOL ∨ diff <= bound` へ [`element_error`] が OR 追加
+/// する（`docs/candle-parity-tolerance-contract-decision.md` §8「承認内容」
+/// 2 行目と同一式）。
+///
+/// [`NONE`](Self::NONE)（`bound() == 0.0`）を渡すと第 3 項が事実上
+/// 無効化され、既存 2 条件のみの判定（レガシー同値）になる
+/// （`compare_elementwise` の既存呼び出し元・テストの後方互換に使う）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScaledAbsTolerance {
+    /// 内積長（正方 GEMM の一辺長 `n` と同値。[`GemmReference::compute`]
+    /// が `n` をそのまま渡す）。
+    pub k: usize,
+    /// 入力行列 A の絶対値の全体最大（`max|A|`）。非有限要素を検出した
+    /// 場合は `f64::INFINITY` センチネル（[`bound`](Self::bound) が
+    /// fail-closed に 0.0 へ倒す）。
+    pub scale_a: f64,
+    /// 入力行列 B の絶対値の全体最大（`max|B|`）。`scale_a` と同じ
+    /// センチネル運用。
+    pub scale_b: f64,
+}
+
+impl ScaledAbsTolerance {
+    /// 第 3 項を無効化する値（`bound() == 0.0`）。`diff <= 0.0` は
+    /// `diff == 0.0`（既存 2 条件で必ず pass する場合のみ）に限られるため、
+    /// 既存判定に対し無害（レガシー同値）。
+    pub const NONE: Self = Self {
+        k: 0,
+        scale_a: 0.0,
+        scale_b: 0.0,
+    };
+
+    /// GEMM 入力 `a`・`b`（flat・行優先。長さは呼び出し元
+    /// [`GemmReference::compute`] が検証済み）から `S_A`・`S_B` を導出する。
+    ///
+    /// `f64::max` は NaN を含む片側を暗黙に捨てる（`x.max(NaN) == x`）ため、
+    /// [`worst_f64`] と同じ回避策で非有限要素を検出したら `f64::INFINITY`
+    /// センチネルへ固定する（本体 `max_nonfinite_aware` と同じ論点。
+    /// [`bound`](Self::bound) 側で救済なし〈0.0〉へ倒すことで、
+    /// `diff <= +Inf` による全要素救済という fail-closed 違反を構造的に
+    /// 防ぐ。A08）。
+    pub fn from_inputs(k: usize, a: &[f32], b: &[f32]) -> Self {
+        Self {
+            k,
+            scale_a: max_abs_f64(a),
+            scale_b: max_abs_f64(b),
+        }
+    }
+
+    /// スケール付き絶対誤差の許容量 `c・u・K・S_A・S_B` を返す。
+    /// `scale_a`／`scale_b` が非有限・負、または結果が非有限になる場合は
+    /// 救済なし（`0.0`）に倒す fail-closed 設計（[`from_inputs`](Self::from_inputs)
+    /// のドキュメント参照）。
+    pub fn bound(&self) -> f64 {
+        if !self.scale_a.is_finite() || !self.scale_b.is_finite() {
+            return 0.0;
+        }
+        if self.scale_a < 0.0 || self.scale_b < 0.0 {
+            return 0.0;
+        }
+        let bound = PARITY_SCALED_ABS_COEFF
+            * F32_UNIT_ROUNDOFF
+            * (self.k as f64)
+            * self.scale_a
+            * self.scale_b;
+        if bound.is_finite() { bound } else { 0.0 }
+    }
+}
+
+/// `values` の絶対値の全体最大。空スライスは `0.0`（`ScaledAbsTolerance`
+/// の呼び出し元は `n >= 1` を [`GemmReference::compute`] で検証済みのため
+/// 実質到達しないが、`pub` な `from_inputs` の契約として空入力を panic
+/// させない。`f64::max` の NaN 捨て問題を避けるため [`worst_f64`] と同じ
+/// センチネル方式を使う）。
+fn max_abs_f64(values: &[f32]) -> f64 {
+    let mut acc = 0.0f64;
+    for &v in values {
+        let av = (v as f64).abs();
+        acc = worst_f64(acc, av);
+    }
+    acc
+}
+
 /// GEMM の要素単位検証結果。反復間の worst-case を保持する
 /// （[`ParityStats::worst`]）ため、`fail_count`・`max_abs_err`・
 /// `max_rel_err` は必ずしも同一反復由来ではない（診断指標としてはそれで
@@ -71,6 +195,17 @@ pub struct ParityStats {
     /// 全要素中の相対誤差の最大値。非有限の要素があった場合は
     /// `f64::INFINITY`。
     pub max_rel_err: f64,
+    /// 適用したスケール付き絶対誤差救済項（[`ScaledAbsTolerance`]）の
+    /// bound（`ScaledAbsTolerance::bound`）。非有限入力を検出していた
+    /// 場合は `f64::INFINITY` センチネル（`bound()` 自体は fail-closed で
+    /// 0.0 を返すため、このフィールドは診断用に検出有無を残す目的）。
+    pub scaled_abs_bound: f64,
+    /// 既存 2 条件（[`PARITY_REL_TOL`]／[`PARITY_ABS_TOL`]）では fail だが
+    /// スケール付き絶対誤差救済項（[`PARITY_SCALED_ABS_COEFF`]）で pass に
+    /// 転じた要素数。0 なら本救済項に依存せず判定が確定している
+    /// （`bench-fandhe` 側は本フィールドが常に 0 であることをテストで
+    /// 固定し、救済項が本体側の回帰を隠す経路を遮断する）。
+    pub scaled_abs_rescued: usize,
 }
 
 impl ParityStats {
@@ -85,6 +220,8 @@ impl ParityStats {
             fail_count: self.fail_count.max(other.fail_count),
             max_abs_err: worst_f64(self.max_abs_err, other.max_abs_err),
             max_rel_err: worst_f64(self.max_rel_err, other.max_rel_err),
+            scaled_abs_bound: worst_f64(self.scaled_abs_bound, other.scaled_abs_bound),
+            scaled_abs_rescued: self.scaled_abs_rescued.max(other.scaled_abs_rescued),
         }
     }
 }
@@ -112,10 +249,16 @@ struct ElementError {
     abs: f64,
     rel: f64,
     pass: bool,
+    /// 既存 2 条件（`legacy_pass`）では fail だがスケール付き絶対誤差
+    /// 救済項（`scaled_abs_bound`）で pass に転じた場合に `true`
+    /// （[`ParityStats::scaled_abs_rescued`] の集計元）。
+    rescued_by_scaled_abs: bool,
 }
 
+/// `scaled_abs_bound` は [`ScaledAbsTolerance::bound`] の結果（ハーネス
+/// 限定の第 3 救済項。`0.0` なら実質無効でレガシー判定と完全同値）。
 #[inline]
-fn element_error(actual: f32, reference: f32) -> ElementError {
+fn element_error(actual: f32, reference: f32, scaled_abs_bound: f64) -> ElementError {
     let xf = actual as f64;
     let yf = reference as f64;
     let diff = (xf - yf).abs();
@@ -124,19 +267,35 @@ fn element_error(actual: f32, reference: f32) -> ElementError {
     let scale = xf.abs().max(yf.abs()).max(1e-12);
     let rel = diff / scale;
     // NaN 混入時 `rel`/`diff` は NaN になり `<` 比較は常に false のため
-    // fail 側に倒れる（本体 `parity::compare` と同じ安全側の挙動）。
-    let pass = rel < PARITY_REL_TOL || diff < PARITY_ABS_TOL;
+    // fail 側に倒れる（本体 `parity::compare` と同じ安全側の挙動）。既存
+    // 2 条件は本体契約と bit 単位で不変（`legacy_pass` として分離し、
+    // ハーネス限定の第 3 項〈`scaled_abs_pass`〉を OR で追加する）。
+    let legacy_pass = rel < PARITY_REL_TOL || diff < PARITY_ABS_TOL;
+    // NaN diff は `<=` も false のため fail 側に倒れる（legacy と同じ
+    // 安全側の挙動）。承認済み判定式は境界含む `<=`
+    // （`docs/candle-parity-tolerance-contract-decision.md` §8）。
+    let scaled_abs_pass = diff <= scaled_abs_bound;
+    let pass = legacy_pass || scaled_abs_pass;
     ElementError {
         abs: diff,
         rel,
         pass,
+        rescued_by_scaled_abs: !legacy_pass && scaled_abs_pass,
     }
 }
 
-/// 要素単位の複合判定（`crates/backend-cpu/src/parity.rs::compare` と同じ式）。
+/// 要素単位の複合判定。既存 2 条件（[`PARITY_REL_TOL`]／[`PARITY_ABS_TOL`]）
+/// は `crates/backend-cpu/src/parity.rs::compare` と同じ式で不変。`tol`
+/// （[`ScaledAbsTolerance`]）はハーネス限定の第 3 救済項で、
+/// [`ScaledAbsTolerance::NONE`] を渡すとレガシー判定（既存 2 条件のみ）と
+/// 完全同値になる。
 /// `actual`・`reference` は同じ長さの flat データを想定し、長さ不一致は
 /// 呼び出し誤りの早期検出として型付きエラーを返す。
-pub fn compare_elementwise(actual: &[f32], reference: &[f32]) -> Result<ParityStats, BenchError> {
+pub fn compare_elementwise(
+    actual: &[f32],
+    reference: &[f32],
+    tol: &ScaledAbsTolerance,
+) -> Result<ParityStats, BenchError> {
     if actual.len() != reference.len() {
         return Err(BenchError::ParityLengthMismatch {
             expected: reference.len(),
@@ -144,15 +303,20 @@ pub fn compare_elementwise(actual: &[f32], reference: &[f32]) -> Result<ParitySt
         });
     }
 
+    let bound = tol.bound();
     let total = actual.len();
     let mut fail_count = 0usize;
     let mut max_abs_err = 0.0f64;
     let mut max_rel_err = 0.0f64;
+    let mut scaled_abs_rescued = 0usize;
 
     for (&x, &y) in actual.iter().zip(reference.iter()) {
-        let err = element_error(x, y);
+        let err = element_error(x, y, bound);
         if !err.pass {
             fail_count += 1;
+        }
+        if err.rescued_by_scaled_abs {
+            scaled_abs_rescued += 1;
         }
 
         max_abs_err = if err.abs.is_finite() {
@@ -167,11 +331,21 @@ pub fn compare_elementwise(actual: &[f32], reference: &[f32]) -> Result<ParitySt
         };
     }
 
+    // 非有限スケールを検出していた場合（`bound()` 自体は fail-closed で
+    // 0.0 を返す）、診断値としては検出があったことを `INFINITY` で残す。
+    let scaled_abs_bound_diag = if tol.scale_a.is_finite() && tol.scale_b.is_finite() {
+        bound
+    } else {
+        f64::INFINITY
+    };
+
     Ok(ParityStats {
         total,
         fail_count,
         max_abs_err,
         max_rel_err,
+        scaled_abs_bound: scaled_abs_bound_diag,
+        scaled_abs_rescued,
     })
 }
 
@@ -280,6 +454,7 @@ pub fn dump_parity_failures(
     actual: &[f32],
     reference: &[f32],
     n: usize,
+    tol: &ScaledAbsTolerance,
     cfg: ParityDumpConfig,
     call_index: usize,
     sink: &mut dyn std::io::Write,
@@ -301,6 +476,7 @@ pub fn dump_parity_failures(
         });
     }
 
+    let bound = tol.bound();
     let to_io_err = |source: std::io::Error| BenchError::Io {
         path: "<stderr>".to_string(),
         source,
@@ -309,7 +485,10 @@ pub fn dump_parity_failures(
     let mut fail_count = 0usize;
     let mut dumped = 0usize;
     for (idx, (&x, &y)) in actual.iter().zip(reference.iter()).enumerate() {
-        let err = element_error(x, y);
+        // `tol` に基づく判定（`err.pass` が救済済みならダンプ対象から
+        // 除外する。ダンプ対象 ⟺ `compare_elementwise` の `fail_count` に
+        // 数えた要素、という不変条件を維持する）。
+        let err = element_error(x, y, bound);
         if err.pass {
             continue;
         }
@@ -384,6 +563,11 @@ pub struct GemmReference {
     /// [`verify`](Self::verify) の呼び出し回数（ダンプ出力の `call=` に
     /// 反映。`&self` のまま数えるため `Cell` を使う）。
     verify_calls: std::cell::Cell<usize>,
+    /// [`ScaledAbsTolerance::from_inputs`]（`a`・`b`・`n` から 1 回だけ導出。
+    /// [`compute`](Self::compute) 内で計算する）。[`verify_with_sink`] が
+    /// 毎反復これを再利用し、`compare_elementwise`／`dump_parity_failures`
+    /// の第 3 救済項へ渡す。
+    tol: ScaledAbsTolerance,
 }
 
 impl GemmReference {
@@ -420,6 +604,10 @@ impl GemmReference {
                 actual: b.len(),
             });
         }
+        // スケール付き絶対誤差救済項（第 3 項）のスケール `S_A`・`S_B` を
+        // 参照 GEMM 計算前に確定する（`a`・`b` は不変のまま以降使い回す
+        // ため、`verify` の毎反復ではなくここで 1 回だけ計算する）。
+        let tol = ScaledAbsTolerance::from_inputs(n, a, b);
 
         let mut c = vec![0.0f32; expected];
         // `available_parallelism()` は `Result<NonZeroUsize>`。失敗時は
@@ -496,12 +684,22 @@ impl GemmReference {
             n,
             dump,
             verify_calls: std::cell::Cell::new(0),
+            tol,
         })
     }
 
     /// 参照 GEMM の結果（flat・行優先）。
     pub fn as_slice(&self) -> &[f32] {
         &self.c
+    }
+
+    /// [`verify`](Self::verify)／[`verify_with_sink`](Self::verify_with_sink)
+    /// が使うスケール付き絶対誤差救済項のパラメータ（[`ScaledAbsTolerance`]）。
+    /// `bench-fandhe` 側テストが `compare_elementwise` を
+    /// [`ScaledAbsTolerance::NONE`] で明示的に呼び直す際に、実ベンチ入力
+    /// 由来の `tol` と対比するためのアクセサ。
+    pub fn scaled_abs_tolerance(&self) -> ScaledAbsTolerance {
+        self.tol
     }
 
     /// テスト用ビルダー: `dump` 設定を差し替えた同値のコピーを返す
@@ -513,6 +711,7 @@ impl GemmReference {
             n: self.n,
             dump,
             verify_calls: std::cell::Cell::new(0),
+            tol: self.tol,
         }
     }
 
@@ -527,12 +726,48 @@ impl GemmReference {
         self.verify_with_sink(out, &mut stderr)
     }
 
+    /// `bench-fandhe`（自社実装 fandhe-ai 自身の検証）専用の厳密判定。
+    ///
+    /// [`verify`](Self::verify) は `self.tol`（[`ScaledAbsTolerance`]。
+    /// ハーネス限定の第 3 救済項）を無条件に適用するが、この救済は
+    /// `docs/candle-parity-tolerance-contract-decision.md` §7 が
+    /// 「比較対象（candle/Burn）妥当性検証に限り」採用したものであり、
+    /// fandhe-ai 自身の出力を `self.tol` 込みで検証すると、既存複合判定
+    /// （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）に違反する自社側
+    /// 回帰が `scaled_abs_bound` 以下に収まる限り `fail_count=0` として
+    /// 救済されてしまい、`compare_gemm_gate.py`／`summarize.py` が見逃す
+    /// （イシュー #1247 PR #1443 codex-review 指摘・P1）。`GemmReference::verify`
+    /// は `bench-fandhe`/`bench-candle`/`bench-burn` の 3 バイナリで共有
+    /// される汎用経路のため、救済適用の可否はメソッド単位で明示的に選び、
+    /// `bench-fandhe::run_gemm` は必ずこちらを呼ぶ（`self.tol` を経由
+    /// しない構造的な遮断。CPU/CUDA/Metal・全形状に一律で効く）。
+    pub fn verify_strict(&self, out: &[f32]) -> Result<ParityStats, BenchError> {
+        let mut stderr = std::io::stderr();
+        self.verify_with_sink_and_tol(out, &mut stderr, &ScaledAbsTolerance::NONE)
+    }
+
     /// [`verify`](Self::verify) の内部実装。`sink` を注入できるようにして
     /// ユニットテストから stderr を経由せず検証できるようにする。
+    /// `self.tol`（比較対象側の救済適用）を使う。
     fn verify_with_sink(
         &self,
         out: &[f32],
         sink: &mut dyn std::io::Write,
+    ) -> Result<ParityStats, BenchError> {
+        let tol = self.tol;
+        self.verify_with_sink_and_tol(out, sink, &tol)
+    }
+
+    /// [`verify_with_sink`](Self::verify_with_sink)／
+    /// [`verify_strict`](Self::verify_strict) の共通実装。`tol` を呼び出し側
+    /// から明示的に受け取ることで、救済（[`ScaledAbsTolerance`]）の
+    /// 適用有無をメソッド選択の時点で固定する（`self.tol` への暗黙依存を
+    /// 断つ。イシュー #1247 PR #1443 codex-review 指摘・P1）。
+    fn verify_with_sink_and_tol(
+        &self,
+        out: &[f32],
+        sink: &mut dyn std::io::Write,
+        tol: &ScaledAbsTolerance,
     ) -> Result<ParityStats, BenchError> {
         // 診断用カウンタ（`dump` 出力の `call=` ラベルにのみ使う）。
         // `usize::MAX` 到達は現実的な反復回数では起こり得ないが、
@@ -544,12 +779,12 @@ impl GemmReference {
         let call_index = self.verify_calls.get().saturating_add(1);
         self.verify_calls.set(call_index);
 
-        let stats = compare_elementwise(out, &self.c)?;
+        let stats = compare_elementwise(out, &self.c, tol)?;
 
         if let Some(cfg) = self.dump
             && stats.fail_count > 0
         {
-            dump_parity_failures(out, &self.c, self.n, cfg, call_index, sink)?;
+            dump_parity_failures(out, &self.c, self.n, tol, cfg, call_index, sink)?;
         }
 
         Ok(stats)
@@ -673,7 +908,7 @@ mod tests {
     #[test]
     fn compare_elementwise_identical_is_all_pass() {
         let v = vec![1.0f32, -2.5, 0.0, 100.0];
-        let stats = compare_elementwise(&v, &v).expect("compare");
+        let stats = compare_elementwise(&v, &v, &ScaledAbsTolerance::NONE).expect("compare");
         assert_eq!(stats.fail_count, 0);
         assert_eq!(stats.total, v.len());
         assert_eq!(stats.max_abs_err, 0.0);
@@ -685,7 +920,8 @@ mod tests {
         let reference = vec![1.0f32, 2.0, 3.0, 4.0];
         let mut actual = reference.clone();
         actual[2] *= 1.01; // 1% 相対誤差。PARITY_REL_TOL(1e-3) を超える。
-        let stats = compare_elementwise(&actual, &reference).expect("compare");
+        let stats =
+            compare_elementwise(&actual, &reference, &ScaledAbsTolerance::NONE).expect("compare");
         assert_eq!(stats.fail_count, 1);
         assert!(stats.max_rel_err > PARITY_REL_TOL);
         assert!((stats.max_abs_err - 0.03).abs() < 1e-6);
@@ -696,7 +932,8 @@ mod tests {
         // 相対誤差は跳ね上がるが絶対誤差 1e-7 < PARITY_ABS_TOL(1e-5) で救済。
         let reference = vec![1e-7f32];
         let actual = vec![2e-7f32];
-        let stats = compare_elementwise(&actual, &reference).expect("compare");
+        let stats =
+            compare_elementwise(&actual, &reference, &ScaledAbsTolerance::NONE).expect("compare");
         assert_eq!(stats.fail_count, 0);
     }
 
@@ -704,7 +941,8 @@ mod tests {
     fn compare_elementwise_nan_is_fail_with_infinite_max_abs_err() {
         let reference = vec![1.0f32];
         let actual = vec![f32::NAN];
-        let stats = compare_elementwise(&actual, &reference).expect("compare");
+        let stats =
+            compare_elementwise(&actual, &reference, &ScaledAbsTolerance::NONE).expect("compare");
         assert_eq!(stats.fail_count, 1);
         assert_eq!(stats.max_abs_err, f64::INFINITY);
         assert_eq!(stats.max_rel_err, f64::INFINITY);
@@ -713,7 +951,7 @@ mod tests {
     #[test]
     fn compare_elementwise_length_mismatch_is_typed_error() {
         assert!(matches!(
-            compare_elementwise(&[1.0, 2.0], &[1.0]),
+            compare_elementwise(&[1.0, 2.0], &[1.0], &ScaledAbsTolerance::NONE),
             Err(BenchError::ParityLengthMismatch {
                 expected: 1,
                 actual: 2
@@ -728,17 +966,23 @@ mod tests {
             fail_count: 0,
             max_abs_err: 1e-6,
             max_rel_err: 1e-7,
+            scaled_abs_bound: 1e-9,
+            scaled_abs_rescued: 0,
         };
         let b = ParityStats {
             total: 100,
             fail_count: 2,
             max_abs_err: 1e-8,
             max_rel_err: 1e-4,
+            scaled_abs_bound: 1e-6,
+            scaled_abs_rescued: 3,
         };
         let w = a.worst(b);
         assert_eq!(w.fail_count, 2);
         assert!((w.max_abs_err - 1e-6).abs() < 1e-12);
         assert!((w.max_rel_err - 1e-4).abs() < 1e-12);
+        assert!((w.scaled_abs_bound - 1e-6).abs() < 1e-18);
+        assert_eq!(w.scaled_abs_rescued, 3);
     }
 
     #[test]
@@ -748,16 +992,280 @@ mod tests {
             fail_count: 0,
             max_abs_err: 1e-6,
             max_rel_err: 1e-6,
+            scaled_abs_bound: 1e-9,
+            scaled_abs_rescued: 0,
         };
         let broken = ParityStats {
             total: 10,
             fail_count: 1,
             max_abs_err: f64::INFINITY,
             max_rel_err: f64::INFINITY,
+            scaled_abs_bound: f64::INFINITY,
+            scaled_abs_rescued: 0,
         };
         let w = ok.worst(broken);
         assert_eq!(w.max_abs_err, f64::INFINITY);
         assert_eq!(w.max_rel_err, f64::INFINITY);
+        assert_eq!(w.scaled_abs_bound, f64::INFINITY);
+    }
+
+    // --- スケール付き絶対誤差救済項（候補 A-1・`c=0.5`・`u=2^-24`。
+    // イシュー #1247・承認記録: #1241 承認コメント 2026-09-08・
+    // `docs/candle-parity-tolerance-contract-decision.md` §8）------------
+
+    /// 承認済み係数がハーネス限定の値のまま固定されていることのピン止め
+    /// （本体には対応定数が存在しない設計。値の変更はユーザー承認必須）。
+    #[test]
+    fn scaled_abs_constants_pinned() {
+        assert_eq!(PARITY_SCALED_ABS_COEFF, 0.5);
+        // u = 2^-24 は f32::EPSILON（2^-23）の半分と同値（別導出との
+        // 一致確認。#1238 §7.1 で盲点になった定数ピンの死角を、後続の
+        // `scaled_abs_bound_formula_pinned` で判定式自体もピン止めする
+        // ことで塞ぐ）。
+        assert_eq!(F32_UNIT_ROUNDOFF, (f32::EPSILON as f64) / 2.0);
+    }
+
+    /// 判定式 `bound = c・u・K・S_A・S_B` 自体をピン止めする
+    /// （`docs/candle-parity-tolerance-contract-decision.md` §9 で
+    /// 「定数ピンは判定式を検査しない」と指摘された #1238 §7.1 の盲点への
+    /// 対応）。3 つの `K` はいずれも 2 のべき乗の積のみで構成されるため
+    /// f64 演算が丸め誤差なく厳密値と bit 一致する（`assert_eq!` で確認
+    /// できる。K=2048/512/4096・`S_A・S_B=0.25` はいずれも 2 のべき乗）。
+    #[test]
+    fn scaled_abs_bound_formula_pinned() {
+        let tol_2048 = ScaledAbsTolerance {
+            k: 2048,
+            scale_a: 0.5,
+            scale_b: 0.5,
+        };
+        assert_eq!(tol_2048.bound(), 2f64.powi(-16)); // 1.52587890625e-5
+
+        let tol_512 = ScaledAbsTolerance {
+            k: 512,
+            scale_a: 0.5,
+            scale_b: 0.5,
+        };
+        assert_eq!(tol_512.bound(), 2f64.powi(-18)); // 3.814697265625e-6
+
+        let tol_4096 = ScaledAbsTolerance {
+            k: 4096,
+            scale_a: 0.5,
+            scale_b: 0.5,
+        };
+        assert_eq!(tol_4096.bound(), 2f64.powi(-15));
+    }
+
+    /// 境界は `<=`（包含的）。`diff == bound` ちょうどは pass、1 ulp 超えると
+    /// fail に戻る。かつ既存 2 条件（[`PARITY_REL_TOL`]/[`PARITY_ABS_TOL`]）
+    /// は本項の適用有無に関わらず不変であることを [`ScaledAbsTolerance::NONE`]
+    /// との比較で確認する。
+    #[test]
+    fn scaled_abs_boundary_is_inclusive_and_legacy_conditions_unchanged() {
+        // reference=0.0・actual=2^-16 は rel=1.0（跳ね上がり）・
+        // diff=2^-16 > PARITY_ABS_TOL(1e-5) のため既存 2 条件は fail。
+        let reference = 0.0f32;
+        let bound = 2f64.powi(-16);
+        let actual_at_bound = bound as f32;
+        assert_eq!((actual_at_bound as f64 - reference as f64).abs(), bound);
+
+        let tol = ScaledAbsTolerance {
+            k: 2048,
+            scale_a: 0.5,
+            scale_b: 0.5,
+        };
+        assert_eq!(tol.bound(), bound);
+
+        let err_at_bound = element_error(actual_at_bound, reference, tol.bound());
+        assert!(!err_at_bound.abs.is_nan());
+        assert!(
+            err_at_bound.pass,
+            "diff == bound はちょうど境界で pass する契約（`<=`）"
+        );
+        assert!(err_at_bound.rescued_by_scaled_abs);
+
+        // 1 ulp 超えると fail に戻る。
+        let actual_over_bound = f32::from_bits(actual_at_bound.to_bits() + 1);
+        let err_over_bound = element_error(actual_over_bound, reference, tol.bound());
+        assert!(!err_over_bound.pass);
+        assert!(!err_over_bound.rescued_by_scaled_abs);
+
+        // `NONE`（bound=0.0）では第 3 項が無効化され、既存 2 条件のみの
+        // 判定（レガシー同値）になる。
+        let legacy = element_error(actual_at_bound, reference, ScaledAbsTolerance::NONE.bound());
+        assert!(!legacy.pass);
+        assert!(!legacy.rescued_by_scaled_abs);
+    }
+
+    /// `scale_a`／`scale_b` に非有限値が混入していた場合、`bound()` は
+    /// fail-closed に `0.0`（救済なし）へ倒れる（`diff <= +Inf` による
+    /// 全要素救済という事故を構造的に防ぐ。A08）。
+    #[test]
+    fn scaled_abs_bound_is_fail_closed_on_nonfinite_scale() {
+        let nan_scale = ScaledAbsTolerance {
+            k: 2048,
+            scale_a: f64::NAN,
+            scale_b: 0.5,
+        };
+        assert_eq!(nan_scale.bound(), 0.0);
+
+        let inf_scale = ScaledAbsTolerance {
+            k: 2048,
+            scale_a: f64::INFINITY,
+            scale_b: 0.5,
+        };
+        assert_eq!(inf_scale.bound(), 0.0);
+
+        // `from_inputs` は NaN/Inf 要素を検出すると `f64::INFINITY`
+        // センチネルへ固定する（`max_abs_f64`/`worst_f64` 経由）。
+        let tol = ScaledAbsTolerance::from_inputs(2, &[1.0, f32::NAN], &[1.0, 2.0]);
+        assert_eq!(tol.scale_a, f64::INFINITY);
+        assert_eq!(tol.bound(), 0.0);
+
+        // NaN diff を含む要素は bound が大きくても救済されず fail のまま
+        // （`element_error` の `<=` 比較は NaN に対し常に false）。
+        let err = element_error(f32::NAN, 1.0, f64::INFINITY);
+        assert!(!err.pass);
+    }
+
+    /// `docs/perf/logs/cuda-gemm-candle-parity-1184/` の N=2048 candle
+    /// 実測 fail 要素（CUDA・CPU 各 2 要素）を bit パターンで固定し、
+    /// 実ベンチ入力（`Xorshift64Star::new(SEED_A/SEED_B).fill_vec(2048*2048)`。
+    /// `bench-fandhe::main::{SEED_A,SEED_B}` と同一シード）由来の
+    /// `ScaledAbsTolerance` で候補要素が救済されることを固定する
+    /// （承認済み契約の主目的の直接確認。イシュー #1184・#1247）。
+    #[test]
+    fn candidate_elements_from_1184_dump_pass_under_scaled_abs() {
+        // `crate::SEED_A`/`crate::SEED_B`（`bench-fandhe`/`bench-candle`
+        // 等が実際に使う xorshift64* シード。`lib.rs` 参照）と同一の値で
+        // `S_A`・`S_B` を導出し、実ベンチ入力条件と一致させる。
+        let n = 2048usize;
+        let a = crate::Xorshift64Star::new(crate::SEED_A).fill_vec(n * n);
+        let b = crate::Xorshift64Star::new(crate::SEED_B).fill_vec(n * n);
+        let tol = ScaledAbsTolerance::from_inputs(n, &a, &b);
+
+        // (ref_bits, actual_bits) の 4 要素（CUDA 2・CPU 2。
+        // `docs/perf/logs/cuda-gemm-candle-parity-1184/parity-dump-*-2048.txt`
+        // から転記）。
+        let candidates: [(u32, u32); 4] = [
+            (0x3b0e24b9, 0x3b0d6800), // CUDA idx=13850
+            (0x3c1689b0, 0x3c16b800), // CUDA idx=4130484
+            (0x3c2289f5, 0x3c22bf00), // CPU idx=1372466
+            (0x3bb0187b, 0x3bb07a00), // CPU idx=1633751
+        ];
+        let refs: Vec<f32> = candidates.iter().map(|&(r, _)| f32::from_bits(r)).collect();
+        let actuals: Vec<f32> = candidates.iter().map(|&(_, a)| f32::from_bits(a)).collect();
+
+        // 承認済み判定式（`tol` は実ベンチ入力由来）では 0 fail・4 要素
+        // 救済。
+        let stats = compare_elementwise(&actuals, &refs, &tol).expect("compare");
+        assert_eq!(stats.fail_count, 0);
+        assert_eq!(stats.scaled_abs_rescued, 4);
+
+        // `NONE`（既存 2 条件のみ）では引き続き 4 要素とも fail する
+        // （#1184 実測どおり。既存契約は不変であることの確認）。
+        let legacy =
+            compare_elementwise(&actuals, &refs, &ScaledAbsTolerance::NONE).expect("compare");
+        assert_eq!(legacy.fail_count, 4);
+        assert_eq!(legacy.scaled_abs_rescued, 0);
+    }
+
+    /// 同じ 4 要素を `K=512`（`bound = 3.814697265625e-6 < PARITY_ABS_TOL`
+    /// 未満で実質 no-op）で比較すると救済されず fail のままであることを
+    /// 確認する（`K` 依存の確認。線形 K 形式であることの直接的な検証）。
+    #[test]
+    fn non_candidate_elements_still_fail_with_small_k() {
+        let tol = ScaledAbsTolerance {
+            k: 512,
+            scale_a: 0.5,
+            scale_b: 0.5,
+        };
+        assert!(tol.bound() < PARITY_ABS_TOL);
+
+        let refs = [
+            f32::from_bits(0x3b0e24b9),
+            f32::from_bits(0x3c1689b0),
+            f32::from_bits(0x3c2289f5),
+            f32::from_bits(0x3bb0187b),
+        ];
+        let actuals = [
+            f32::from_bits(0x3b0d6800),
+            f32::from_bits(0x3c16b800),
+            f32::from_bits(0x3c22bf00),
+            f32::from_bits(0x3bb07a00),
+        ];
+        let stats = compare_elementwise(&actuals, &refs, &tol).expect("compare");
+        assert_eq!(stats.fail_count, 4);
+        assert_eq!(stats.scaled_abs_rescued, 0);
+
+        // 既存の 1% 摂動テスト（diff=0.03）は `K=2048` の bound
+        // （1.52587890625e-5）よりはるかに大きいため、引き続き fail する
+        // ことも合わせて確認する（大きな摂動が救済されないことの確認）。
+        let reference = vec![1.0f32, 2.0, 3.0, 4.0];
+        let mut actual = reference.clone();
+        actual[2] *= 1.01;
+        let big_tol = ScaledAbsTolerance {
+            k: 2048,
+            scale_a: 0.5,
+            scale_b: 0.5,
+        };
+        let stats2 = compare_elementwise(&actual, &reference, &big_tol).expect("compare");
+        assert_eq!(stats2.fail_count, 1);
+    }
+
+    /// 救済された要素は `dump_parity_failures` の出力対象から除外される
+    /// （ダンプ対象 ⟺ `compare_elementwise` の `fail_count` に数えた要素、
+    /// という不変条件の確認。イシュー #1183 の既存契約を第 3 項導入後も
+    /// 維持する）。
+    #[test]
+    fn dump_parity_failures_skips_rescued_elements() {
+        let n = 2;
+        // idx=0 は大きく摂動させ救済されない fail、idx=1..3 は 0 埋めで
+        // pass、idx=3 を第 3 項でのみ救済される値にする。
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0f32];
+        let bound = 2f64.powi(-10);
+        let rescued_actual = bound as f32;
+        let actual = vec![2.0f32, 0.0, 0.0, rescued_actual];
+
+        // `k・c・u = bound` から `k` を逆算し、`tol.bound()` が `bound`
+        // とほぼ一致する `ScaledAbsTolerance` を組む（scale は 1.0 固定）。
+        let k_for_bound = (bound / (PARITY_SCALED_ABS_COEFF * F32_UNIT_ROUNDOFF)) as usize;
+        let tol = ScaledAbsTolerance {
+            k: k_for_bound,
+            scale_a: 1.0,
+            scale_b: 1.0,
+        };
+        assert!((tol.bound() - bound).abs() / bound < 1e-9);
+
+        let stats = compare_elementwise(&actual, &reference, &tol).expect("compare");
+        assert_eq!(stats.fail_count, 1);
+        assert_eq!(stats.scaled_abs_rescued, 1);
+
+        let mut sink = Vec::new();
+        let outcome = dump_parity_failures(
+            &actual,
+            &reference,
+            n,
+            &tol,
+            ParityDumpConfig { limit: 64 },
+            1,
+            &mut sink,
+        )
+        .expect("dump");
+
+        // ダンプ対象は `fail_count`（救済後）と一致する 1 件のみ。
+        assert_eq!(outcome.fail_count, 1);
+        assert_eq!(outcome.dumped, 1);
+        let text = String::from_utf8(sink).expect("utf8");
+        let dump_lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("PARITY_DUMP call="))
+            .collect();
+        assert_eq!(dump_lines.len(), 1);
+        assert!(dump_lines[0].contains("idx=0"));
+        assert!(
+            !dump_lines.iter().any(|l| l.contains("idx=3")),
+            "救済された要素（idx=3）はダンプされない"
+        );
     }
 
     #[test]
@@ -825,6 +1333,7 @@ mod tests {
             &actual,
             &reference,
             2,
+            &ScaledAbsTolerance::NONE,
             ParityDumpConfig { limit: 64 },
             1,
             &mut sink,
@@ -866,12 +1375,14 @@ mod tests {
             actual[idx] *= 1.5;
         }
 
-        let stats = compare_elementwise(&actual, &reference).expect("compare");
+        let stats =
+            compare_elementwise(&actual, &reference, &ScaledAbsTolerance::NONE).expect("compare");
         let mut sink = Vec::new();
         let outcome = dump_parity_failures(
             &actual,
             &reference,
             n,
+            &ScaledAbsTolerance::NONE,
             ParityDumpConfig { limit: 64 },
             1,
             &mut sink,
@@ -899,6 +1410,7 @@ mod tests {
             &actual,
             &reference,
             3,
+            &ScaledAbsTolerance::NONE,
             ParityDumpConfig { limit: 2 },
             1,
             &mut sink,
@@ -932,6 +1444,7 @@ mod tests {
             &actual,
             &reference,
             1,
+            &ScaledAbsTolerance::NONE,
             ParityDumpConfig { limit: 64 },
             1,
             &mut sink,
@@ -958,6 +1471,7 @@ mod tests {
             &actual,
             &reference,
             0,
+            &ScaledAbsTolerance::NONE,
             ParityDumpConfig { limit: 64 },
             1,
             &mut sink,
@@ -981,6 +1495,7 @@ mod tests {
             &actual,
             &reference,
             3, // n=3 なら n*n=9 で 4 要素と矛盾する。
+            &ScaledAbsTolerance::NONE,
             ParityDumpConfig { limit: 64 },
             1,
             &mut sink,
@@ -1010,7 +1525,16 @@ mod tests {
         let mut out = reference.as_slice().to_vec();
         out[0] *= 1.5; // fail 要素を作る。
 
-        let expected = compare_elementwise(&out, reference.as_slice()).expect("compare");
+        // `verify_with_sink` は `self.tol`（実ベンチ入力 a/b から導出した
+        // `ScaledAbsTolerance`）を使うため、比較対象の `expected` も同じ
+        // `tol` で計算する（`NONE` にすると別の判定条件になり同一性を
+        // 検証したことにならない）。
+        let expected = compare_elementwise(
+            &out,
+            reference.as_slice(),
+            &reference.scaled_abs_tolerance(),
+        )
+        .expect("compare");
 
         let no_dump = reference.with_dump(None);
         let mut sink = Vec::new();

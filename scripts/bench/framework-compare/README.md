@@ -631,6 +631,48 @@ python3 -m unittest parity_baseline_impact_test.py
 python3 parity_baseline_impact.py --scale-mode exact
 ```
 
+**承認済み契約の実装（イシュー #1247。スケール付き絶対誤差救済項）**: 上記の候補判定は机上評価
+（`parity_dump_truth.py`/`parity_tolerance_candidates.py`/`parity_baseline_impact.py`。いずれも
+`bench-common::parity` の判定式自体は変更しない）に閉じていたが、`docs/candle-parity-tolerance-
+contract-decision.md` §8（イシュー #1241 承認記録・2026-09-08）で「候補 A-1・係数 `c=0.5`・
+ハーネス限定（本体 `compare`/`assert_parity`/`ParityBaseline` は不変）」が承認されたのを受け、
+`bench-common::parity::compare_elementwise`/`dump_parity_failures`/`GemmReference::verify` の
+要素単位判定へ第 3 救済項として実装した。
+
+- **判定式**: `pass ⇔ rel < PARITY_REL_TOL ∨ diff < PARITY_ABS_TOL ∨ diff <= c・u・K・S_A・S_B`
+  （`u = 2^-24`。既存 2 条件は本体契約と bit 単位で不変・第 3 項を OR 追加するのみ）
+- **定数**（`bench-common::parity::{PARITY_SCALED_ABS_COEFF, F32_UNIT_ROUNDOFF}`）:
+  `PARITY_SCALED_ABS_COEFF = 0.5`・`F32_UNIT_ROUNDOFF = 2^-24`。**本項目はハーネス限定の承認済み
+  契約であり、本体 `crates/backend-cpu/src/parity.rs`/`crates/backend-cuda/tests/common/
+  parity_baseline.rs` には対応する定数が設計上存在しない**（本体側への反映はスコープ外・
+  イシュー #1254 は承認スコープ外として対応不要クローズ済み）
+- **パラメータ**（`bench-common::parity::ScaledAbsTolerance`）: `K` は内積長（正方 GEMM の一辺長
+  `n`）・`S_A`/`S_B` は入力行列 A/B の絶対値の全体最大（`ScaledAbsTolerance::from_inputs` が
+  `GemmReference::compute` 内で 1 回だけ導出し、以降の `verify` 呼び出しで使い回す）。
+  `ScaledAbsTolerance::NONE`（`bound() == 0.0`）を渡すと第 3 項が実質無効化され、既存 2 条件のみの
+  レガシー判定と完全同値になる
+- **JSONL の追加キー**: `parity_scaled_abs_bound`（適用した bound。非有限は既存 2 キーと同じ
+  `null` 変換規則）・`parity_scaled_abs_rescued`（既存 2 条件では fail だが第 3 項で pass に転じた
+  要素数）。既存 4 キー（`parity_total`/`parity_fail_count`/`parity_max_abs_err`/
+  `parity_max_rel_err`）は書式・意味とも不変で、2 キーが追加されるのみ
+- **fandhe-ai 側 0 fail は救済に依存しない（構造的遮断。イシュー #1247 PR #1443 codex-review
+  指摘・P1）**: 第 3 項は §7 の (b-2)「比較対象（candle/Burn）妥当性検証に限り」の承認であり、
+  `GemmReference::verify`（`self.tol` を無条件適用）は 3 バイナリ（`bench-fandhe`/`bench-candle`/
+  `bench-burn`）で共有される汎用経路のため、メソッド未分離のままでは fandhe-ai 自身の検証にも
+  第 3 項が効いてしまい、既存複合判定に違反する自社側回帰が `scaled_abs_bound` 以下に収まる限り
+  `fail_count=0` として救済されうる。`bench-common::parity::GemmReference` はこれを避けるため
+  `verify`（`self.tol` 適用。`bench-candle`/`bench-burn` が使う）と `verify_strict`
+  （`ScaledAbsTolerance::NONE` 固定。既存 2 条件のみ）を分離し、**`bench-fandhe::run_gemm` 系の
+  全呼び出しは `verify_strict` を使う**（CPU/CUDA/Metal・全形状に一律で効く構造的な遮断であり、
+  特定 backend・形状のみを対象にしたテストに依存しない）。この構造に加えて `bench-fandhe` の CPU
+  GEMM（N=64/256/512/2048）は本救済項なしに引き続き 0 fail であることもテストで固定している
+  （`bench-fandhe::tests::gemm_cpu_parity_zero_fail_without_scaled_rescue`。
+  `scaled_abs_rescued == 0` を assert）。第 3 項は candle/Burn 側参照 GEMM のキャンセレーション由来
+  丸め誤差フロア（イシュー #1184。N=2048 で決定的に発生する 2 要素）を許容するための運用であり、
+  fandhe-ai 側の回帰を隠す経路にはならない
+- **未実施（後続イシュー）**: `summarize.py`/`compare_gemm_gate.py` の判定不能条件・理由出力への
+  新キー反映はイシュー #1250。N=2048 の GB10 再計測・判定不能解消の確認はイシュー #1260/#1262
+
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
 `backend-cuda` の GEMM 公開経路（`fandhe-ai::gemm`）は既定で FP32 厳密（`run_tiled_f32`）だが、
