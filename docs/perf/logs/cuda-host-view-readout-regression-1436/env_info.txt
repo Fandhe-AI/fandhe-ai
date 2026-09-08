@@ -1,0 +1,17 @@
+name, driver_version, memory.total [MiB]
+NVIDIA GB10, 580.173.02, [N/A]
+bash: 行 1: nvcc: コマンドが見つかりません
+bash: 行 1: rustc: コマンドが見つかりません
+ 10:18:33 up 11 days, 21:45,  5 users,  load average: 0.16, 0.20, 0.16
+4096
+always [madvise] never
+ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+pid, used_gpu_memory [MiB]
+427276, 170 MiB
+1241474, 870 MiB
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Aug_20_01:57:39_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+rustc 1.97.0 (2d8144b78 2026-07-07)

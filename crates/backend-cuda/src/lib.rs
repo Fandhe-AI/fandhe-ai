@@ -362,6 +362,13 @@ mod fresh_overhead_diag_tests;
 mod gemm_reuse_phase_diag_tests;
 #[cfg(test)]
 mod init_cost_diag_tests;
+// イシュー #1436: `host-view-readout` feature（#1335／#1336／#1337）
+// 有効時の CUDA reuse N=1024/2048 後退（15.04 倍・1.20 倍）を、D2H
+// 読み出し方式別（`clone_dtoh`＋`to_vec` 複製 / `clone_dtoh` 借用
+// keep-alive / 借用＋ダミー確保-解放 / 事前タッチ済み再利用宛先）に
+// 分解する診断テスト。`context_cache`・`launch_tiled_f32_pooled` へ
+// 到達する必要があるため `gemm_reuse_phase_diag_tests` と同じ理由で
+// クレートルートの兄弟モジュールとして配置する。
 mod kernels;
 mod kernels_elementwise;
 mod kernels_mma;
@@ -376,6 +383,8 @@ mod kernels_tiled_pipeline_128x64;
 mod kernels_transpose;
 mod kernels_wmma;
 mod kernels_wmma_opt;
+#[cfg(test)]
+mod readout_regression_diag_tests_1436;
 // イシュー #1336: `MemoryOps::with_host_view` の CUDA 実装
 // （`memory.rs`）が使う、形状ごとに再利用するホストステージング
 // バッファのキャッシュ。crate 内部限定（`memory.rs` のみが参照）。

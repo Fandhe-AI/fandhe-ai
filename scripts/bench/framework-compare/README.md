@@ -549,7 +549,11 @@ cargo run --release -p bench-fandhe -- --task infer --device cpu --mode reuse --
 - **`summarize.py` の判定**: `parity_fail_count > 0`、または 4 フィールドの型・値が不正（`null` 含む）
   な行を「無効（要素誤差超過）」として表で表示し GFLOP/s を `-` にする（`parity_status`）。本フィールド
   追加前の JSONL（キー欄自体が無い）は「無効」ではなく「未検証（旧形式）」として区別する（キー欠損と
-  `null` を混同しない。データ有効性節・`--strict` 対象）
+  `null` を混同しない。データ有効性節・`--strict` 対象）。イシュー #1250: 承認済み契約（#1241）下の
+  第 3 救済項キー（`parity_scaled_abs_bound`／`parity_scaled_abs_rescued`）が**両方存在する場合のみ**
+  追加検証する（後方互換。新 2 キーがともに欠損の 4 キー行は挙動が変わらない）。一方のみ存在・
+  `bound=null`・`rescued` が値域外・`framework=="fandhe-ai"` での `rescued>0` はいずれも「無効」に
+  倒す（判定式そのものは再計算しない。詳細は `parity_status` docstring 参照）
 - `train`/`infer` タスクは対象外（fandhe-ai の重み初期化が candle/Burn と異なる設計のため checksum
   同様に比較不能。§「計測プロトコル」重み初期化の節を参照）
 
@@ -682,8 +686,9 @@ contract-decision.md` §8（イシュー #1241 承認記録・2026-09-08）で�
   `scaled_abs_rescued == 0` を assert）。第 3 項は candle/Burn 側参照 GEMM のキャンセレーション由来
   丸め誤差フロア（イシュー #1184。N=2048 で決定的に発生する 2 要素）を許容するための運用であり、
   fandhe-ai 側の回帰を隠す経路にはならない
-- **未実施（後続イシュー）**: `summarize.py`/`compare_gemm_gate.py` の判定不能条件・理由出力への
-  新キー反映はイシュー #1250。N=2048 の GB10 再計測・判定不能解消の確認はイシュー #1260/#1262
+- **実装済み（イシュー #1250）**: `summarize.py`/`compare_gemm_gate.py` の判定不能条件・理由出力への
+  新キー反映（`parity_status`／`compare_gemm_gate.py::_parity_check` の詳細は「GEMM ゲート 5 回計測」
+  節を参照）。N=2048 の GB10 再計測・判定不能解消の確認はイシュー #1260/#1262
 
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
@@ -1108,13 +1113,34 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
   security.md A08）: レコードが 5 件未満、要素単位検証（`parity_*`。イシュー
   #970）が `parity_fail_count > 0` またはフィールド欠損・値域不正、checksum が
   本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる。
-  判定不能時は run ごとの `fail_count`/`max_abs`/`max_rel` を診断表として出力
-  する（N=2048 の candle 無効データの原因調査・再現条件記録に使う。イシュー
-  #1142 R2）。`--device cpu` のみ、`bench-fandhe gemm cpu <N> fresh` 行が
-  ちょうど 5 件かつ要素単位検証・checksum とも正式判定と同じ検証を通る場合
-  に限り「fandhe-ai fresh median（参考）」列を追加表示する。この列は環境
-  10/11 の単発 fresh 計測との連続性を説明するための参考記録であり
-  `achieved` の判定には一切使わない（イシュー #1148）
+  判定不能時は run ごとの `fail_count`/`max_abs`/`max_rel`/`bound`/`rescued`
+  を診断表として出力する（N=2048 の candle 無効データの原因調査・再現条件
+  記録に使う。イシュー #1142 R2）。`--device cpu` のみ、`bench-fandhe gemm
+  cpu <N> fresh` 行がちょうど 5 件かつ要素単位検証・checksum とも正式判定
+  と同じ検証を通る場合に限り「fandhe-ai fresh median（参考）」列を追加表示
+  する。この列は環境 10/11 の単発 fresh 計測との連続性を説明するための参考
+  記録であり `achieved` の判定には一切使わない（イシュー #1148）
+  - **要素単位判定の契約（イシュー #1241 でユーザー承認・#1247 で
+    `bench-common::parity` 実装済み・#1250 で本ツール〈`compare_gemm_gate.py`
+    ／`summarize.py`〉が追従。`docs/candle-parity-tolerance-contract-
+    decision.md` §8）**: 既存複合判定（相対誤差 1e-3 未満 または絶対誤差
+    1e-5 未満）に加え、スケール付き絶対誤差の第 3 救済項（候補 A-1・係数
+    `c=0.5`）が OR で追加された `parity_scaled_abs_bound`／
+    `parity_scaled_abs_rescued` の 2 診断フィールド（両方存在する場合のみ
+    追加検証。片方だけの JSONL は部分欠損として判定不能・両方欠損の 4 キー
+    行はレガシー契約〈第 3 項なし〉で判定する）を検証する。判定式そのもの
+    は再計算しない（`bench-common::parity` が単一真実源）。判定不能となる
+    条件: `bound` が `null`（入力に非有限値を検出したセンチネル）または
+    不正値、`rescued` が不正値・値域外、`rescued > 0` なのに `bound` が
+    絶対誤差許容値未満（整合しない）、`framework == "fandhe-ai"` の行が
+    `rescued > 0`（fandhe-ai は全経路 `verify_strict` のため構造的に 0 の
+    はず）、`fail_count > 0`（救済後もなお fail する要素がある。framework
+    を問わず判定不能）。`framework == "candle"` の `rescued > 0` は許容し
+    達成／未達判定へ進める（判定不能を「達成」へ倒す経路は用意しない）。
+    候補行の `max_abs_err`／`max_rel_err` は pass 要素も含む全要素の最大
+    であり `bound` を超えうるため判定条件には使わない（診断表示のみ）。
+    candle 側が救済に依存した size は判定列へ「（candle 救済 n 要素）」と
+    注記される
 - `tf32:true` の行（イシュー #1042）は本ゲートの対象外として除外する
 
 ### Metal GEMM 結線前後 A/B（`run_ab_gemm_metal.sh`／`compare_gemm_ab.py`。イシュー #1306）
