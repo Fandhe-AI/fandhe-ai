@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§16）。#1305 で専有環境の RAYON_NUM_THREADS スイープを両実機で 5 回計測中央値再実測し、DGX Spark GB10 の N=1024 非単調性を taskset pin 実験で H1（異種コア由来）と確定・Apple M4 Max は専有ゲート不通過のため undetermined のまま記録した（§17）。#1312 で `TwoDDynamic`（2D 動的分配）vs `RowPanel` の両実機 A/B を実施し、DGX（専有ゲート通過）は全形状で `RowPanel` を 1.09〜1.80 倍上回ったが Apple M4 Max が専有ゲート不通過のため最終判定は undetermined（結線せず #1313 へ記録のみ引き継ぎ）・DGX 単独の非単調性（T10/T8）は「残存」（比 0.86 前後・僅かに閾値未達）と判定した（§18）。#1262 で承認済み tolerance 契約（#1241 承認・#1443/#1445 実装）下の DGX Spark GB10 N=2048 を再計測し、「判定不能」が解消して確定判定（未達・0.950 倍）へ遷移したことを確認した（§19。N=512/1024 は引き続き未達。Apple M4 Max は N=2048 が元々 0 fail のため対象外）
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§16）。#1305 で専有環境の RAYON_NUM_THREADS スイープを両実機で 5 回計測中央値再実測し、DGX Spark GB10 の N=1024 非単調性を taskset pin 実験で H1（異種コア由来）と確定・Apple M4 Max は専有ゲート不通過のため undetermined のまま記録した（§17）。#1312 で `TwoDDynamic`（2D 動的分配）vs `RowPanel` の両実機 A/B を実施し、DGX（専有ゲート通過）は全形状で `RowPanel` を 1.09〜1.80 倍上回ったが Apple M4 Max が専有ゲート不通過のため最終判定は undetermined（結線せず #1313 へ記録のみ引き継ぎ）・DGX 単独の非単調性（T10/T8）は「残存」（比 0.86 前後・僅かに閾値未達）と判定した（§18）。#1262 で承認済み tolerance 契約（#1241 承認・#1443/#1445 実装）下の DGX Spark GB10 N=2048 を再計測し、「判定不能」が解消して確定判定（未達・0.950 倍）へ遷移したことを確認した（§19。N=512/1024 は引き続き未達。Apple M4 Max は N=2048 が元々 0 fail のため対象外。#1313 で `TwoDDynamic`（2D 動的分配）を M4 Max 専有ゲート付き Phase 0 再計測で ADOPT 確定・本番結線し、framework-compare gemm cpu 全 12 セル（両実機）が非後退（改善方向）であることを確認した（§20。candle 比ゲート自体の判定は不変））
 
 ## 1. 位置づけ
 
@@ -1680,3 +1680,28 @@ N=2048「判定不能」は解消し、3 形状すべてで確定判定（いず
   `fail=0, rescued=2, bound=1.525878e-05` を確認できたため該当なし
 - **Issue 操作は行わない**（`out-of-scope-tracking.md` に従い、本 PR では #1117／#1283／
   #1234 への状態変更は行わない）
+
+## 20. 2026-09-08 追補: 2D 動的分配の本番結線（イシュー #1313）
+
+- 位置づけ: #1312（`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`）が undetermined
+  （M4 Max 専有ゲート不通過）と判定した `GemmDriverVariant::TwoDDynamic`（(mc, nc) 2D job
+  動的分配）について、#1313 が M4 Max 専有ゲート付き Phase 0 再計測を実施した結果、
+  jpw=2・jpw=4 とも Tier 1 条件（N=1024/2048 で対 `RowPanel` 比 1.00 以上・N=4096 で 0.95
+  以上・勝ち run 3/5 以上）を充足し **ADOPT 確定・本番結線済み**（詳細な Tier 1 判定・
+  実測表は `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節を正とする）
+- `TWO_D_JOBS_PER_WORKER`（既定値 2。#1311 導入時点から不変）を維持したまま
+  `TWO_D_DYNAMIC_PRODUCTION_ENABLED = true` で `gemm_blis_parallel_with_transpose`・
+  `gemm_blis_bias_act_parallel` から結線（`crates/backend-cpu/src/gemm_blis/mod.rs`）
+- framework-compare gemm cpu N=512/1024/2048 × fresh/reuse の before/after（before=
+  結線前 origin/main `fddca17`・after=本ブランチ HEAD）を両実機で実行し、**全 12 セルが
+  非後退（ratio 0.60〜0.96・改善方向）・checksum 完全一致**を確認した:
+
+  | 実機 | 512/fresh | 512/reuse | 1024/fresh | 1024/reuse | 2048/fresh | 2048/reuse |
+  |---|---|---|---|---|---|---|
+  | Apple M4 Max | 0.8954 | 0.8789 | 0.8792 | 0.8593 | 0.8575 | 0.8385 |
+  | DGX Spark GB10 | 0.9643 | 0.9003 | 0.8142 | 0.7603 | 0.6504 | 0.6015 |
+
+- 本追補は本番既定経路の変更（`RowPanel` → `TwoDDynamic`）を記録するものであり、#1117
+  ゲート（対 candle 比。§12/§13/§19）の未達成判定自体を変更するものではない（candle 比
+  ではなく `RowPanel` 比の改善である点に注意。REQ-8 candle 比ゲート未達成は継続）
+- 実行ログ: `docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/`

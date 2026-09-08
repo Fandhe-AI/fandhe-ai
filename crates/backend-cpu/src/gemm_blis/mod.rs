@@ -64,7 +64,13 @@
 mod cache_params;
 pub mod microkernel;
 mod pack;
-#[cfg(test)]
+// イシュー #1313 で本番結線（`gemm_blis_parallel_with_transpose`／
+// `gemm_blis_bias_act_parallel` からの [`dispatch_two_d_dynamic`] 呼び出し）
+// を追加したため、`partition::job_grid` が本番経路から到達可能になり
+// モジュール自体の `#[cfg(test)]` は外した。モジュール内のテスト専用
+// ヘルパー（`split_evenly`／`row_ranges_for_workers`。#753 の
+// [`gemm_blis_parallel_2d_with_blocks`] 経由のみ使用）は個別に
+// `#[cfg(test)]` を付与している（`partition.rs` 冒頭コメント参照）。
 mod partition;
 
 use std::ops::Range;
@@ -526,20 +532,11 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
     // 再スイープ未実施のため。`should_serialize` は `#[cfg(test)]`
     // 限定で実装・実測突合テストのみ保持する）。
 
-    // 行パネル分割数を rayon の既定スレッド数ではなく実効スレッド数
-    // （`crate::thread_limit::effective_num_threads`）から算出する
-    // （イシュー #1363。macOS `hw.perflevel0.logicalcpu`／Linux sysfs
-    // `cpu_capacity` による大コア数判定で `RAYON_NUM_THREADS` 未指定時の
-    // 既定並列度を大コア数へ限定し、判定不能時は従来どおり
-    // `rayon::current_num_threads()` へフォールバックする。異種コア
-    // 構成での非単調性仮説の検証が目的で、性能上の採否は #1364 が
-    // 判断する。詳細は `docs/perf/cpu-gemm-default-thread-limit.md`）。
-    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
-    let panel_rows = m.div_ceil(num_threads).max(1);
-    // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
-    // キャプチャして渡す（既定ブロックサイズは n に依存しないため
-    // ループ外で確定させても意味は変わらないが、`dispatch_region`
-    // 呼び出しごとの再計算を避ける従来方針を踏襲する）。
+    // 呼び出しあたり 1 回だけ確定し、行パネル・2D 動的分配のどちらの
+    // 経路でも共有するブロックサイズ（既定ブロックサイズは n に依存
+    // しないためループ外で確定させても意味は変わらないが、
+    // `dispatch_region`／`dispatch_two_d_dynamic` 呼び出しごとの再計算を
+    // 避ける従来方針を踏襲する）。
     let blocks = default_blocks();
 
     // B パネル共有経路（`dispatch_shared_b`。案 B・イシュー #750）は
@@ -575,13 +572,44 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
     // `gemm_blis_region` 内部（絶対行位置 `row_start + ic + ir`）で解決
     // する（`at` は m 方向でなく k 方向が先頭軸のため `a[row_start*k..]`
     // の単純スライスができない。#1213）。
-    c.par_chunks_mut(panel_rows * n)
-        .enumerate()
-        .try_for_each(|(panel_idx, c_chunk)| {
-            let row_start = panel_idx * panel_rows;
-            let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks, transpose)
-        })
+    //
+    // 本番結線（イシュー #1313）: [`TWO_D_DYNAMIC_PRODUCTION_ENABLED`]
+    // （単一 const ゲート）が `true` の間は (mc, nc) 2D job 動的分配
+    // （[`dispatch_two_d_dynamic`]）へ切り替える。`false` へ差し戻された
+    // 場合は #1313 以前と同一の静的行パネル分割（`par_chunks_mut`）へ
+    // 戻る（`RowPanel` 参照実装と bit 完全一致・`num_threads`／
+    // `panel_rows` の算出も従来どおり `else` 節内でのみ行う）。
+    if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
+        dispatch_two_d_dynamic(
+            a,
+            b,
+            c,
+            n,
+            k,
+            0..m,
+            blocks,
+            transpose,
+            TWO_D_JOBS_PER_WORKER,
+        )
+    } else {
+        // 行パネル分割数を rayon の既定スレッド数ではなく実効スレッド数
+        // （`crate::thread_limit::effective_num_threads`）から算出する
+        // （イシュー #1363。macOS `hw.perflevel0.logicalcpu`／Linux sysfs
+        // `cpu_capacity` による大コア数判定で `RAYON_NUM_THREADS` 未指定時の
+        // 既定並列度を大コア数へ限定し、判定不能時は従来どおり
+        // `rayon::current_num_threads()` へフォールバックする。異種コア
+        // 構成での非単調性仮説の検証が目的で、性能上の採否は #1364 が
+        // 判断する。詳細は `docs/perf/cpu-gemm-default-thread-limit.md`）。
+        let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+        let panel_rows = m.div_ceil(num_threads).max(1);
+        c.par_chunks_mut(panel_rows * n)
+            .enumerate()
+            .try_for_each(|(panel_idx, c_chunk)| {
+                let row_start = panel_idx * panel_rows;
+                let row_end = (row_start + c_chunk.len() / n).min(m);
+                dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks, transpose)
+            })
+    }
 }
 
 /// `gemm_blis_parallel_with_transpose` を `Nt`（B オペランドが転置
@@ -703,42 +731,68 @@ pub fn gemm_blis_bias_act_parallel(
     // `gemm_blis_parallel` と同じ理由（[`GEMM_THREADING_THRESHOLD`]
     // ドキュメント「本番未結線」参照）で本番結線しない。
 
-    // 行パネル分割数の実効スレッド数への差し替えは `gemm_blis_parallel`
-    // と同じ理由（イシュー #1363。上記実装コメント参照）。
-    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
-    let panel_rows = m.div_ceil(num_threads).max(1);
-    // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
-    // キャプチャして渡す（`gemm_blis_parallel` と同じ理由）。
+    // 呼び出しあたり 1 回だけ確定し、行パネル・2D 動的分配のどちらの
+    // 経路でも共有するブロックサイズ（`gemm_blis_parallel_with_transpose`
+    // と同じ理由）。
     let blocks = default_blocks();
 
-    // GEMM 本体は `gemm_blis_parallel` と同じ理由で B パネル共有経路
-    // （`dispatch_shared_b`）を本番既定へ採用しない（上記
-    // `gemm_blis_parallel` 実装コメント参照。イシュー #750・実機ゲート
-    // 未通過）。従来どおり行パネルごとに `dispatch_region` を独立呼び出し
-    // する。epilogue（bias 加算・activation）は要素ごとに独立な演算で
-    // パネル分割順序に依存しないため（本関数冒頭のドキュメンテーション
-    // コメント「bit 完全一致契約」参照）、GEMM 本体の完了後に `c` 全体へ
-    // 1 回だけ適用する（設計 doc §C 案 B の選択肢 (a)。
-    // `par_chunks_mut(panel_rows * n)` で行パネル並列に適用することで、
-    // T=1（`panel_rows == m` で単一チャンク）では従来と同一の 1 パスに
-    // なる）。
-    c.par_chunks_mut(panel_rows * n)
-        .enumerate()
-        .try_for_each(|(panel_idx, c_chunk)| {
-            let row_start = panel_idx * panel_rows;
-            let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(
-                a,
-                b,
-                c_chunk,
-                n,
-                k,
-                row_start..row_end,
-                blocks,
-                GemmTranspose::Nn,
-            )?;
-            apply_epilogue(c_chunk, n, bias, act)
-        })
+    // GEMM 本体の分岐は `gemm_blis_parallel_with_transpose` と同一の
+    // 単一 const ゲート（[`TWO_D_DYNAMIC_PRODUCTION_ENABLED`]。イシュー
+    // #1313）を共有する。`Nn` 固定のため `gemm_blis_bias_act_parallel`
+    // 自体は `transpose` 引数を持たない。
+    //
+    // epilogue（bias 加算・activation）は要素ごとに独立な演算で
+    // job／パネルの分割順序に依存しないため（本関数冒頭のドキュメン
+    // テーションコメント「bit 完全一致契約」参照）、GEMM 本体が
+    // どちらの経路でも完了後に `c` 全体へ 1 回だけ適用する（`TwoDDynamic`
+    // 経路では各要素がちょうど 1 job に属するため多重適用が構造的に
+    // 起きない。設計 `docs/cpu-gemm-2d-dynamic-partition-design.md`
+    // §12「job ごとに K 全域完了後 1 回」の「または join 後に全体へ 1 回」
+    // 案を採用）。
+    if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
+        dispatch_two_d_dynamic(
+            a,
+            b,
+            c,
+            n,
+            k,
+            0..m,
+            blocks,
+            GemmTranspose::Nn,
+            TWO_D_JOBS_PER_WORKER,
+        )?;
+        apply_epilogue(c, n, bias, act)
+    } else {
+        // 行パネル分割数の実効スレッド数への差し替えは
+        // `gemm_blis_parallel_with_transpose` と同じ理由（イシュー
+        // #1363。同関数の実装コメント参照）。
+        let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+        let panel_rows = m.div_ceil(num_threads).max(1);
+        // GEMM 本体は `gemm_blis_parallel_with_transpose` と同じ理由で
+        // B パネル共有経路（`dispatch_shared_b`）を採用せず、従来どおり
+        // 行パネルごとに `dispatch_region` を独立呼び出しする
+        // （#1313 以前と同一の分岐。`par_chunks_mut(panel_rows * n)` で
+        // epilogue も行パネル並列に適用することで、T=1
+        // （`panel_rows == m` で単一チャンク）では従来と同一の 1 パスに
+        // なる）。
+        c.par_chunks_mut(panel_rows * n)
+            .enumerate()
+            .try_for_each(|(panel_idx, c_chunk)| {
+                let row_start = panel_idx * panel_rows;
+                let row_end = (row_start + c_chunk.len() / n).min(m);
+                dispatch_region(
+                    a,
+                    b,
+                    c_chunk,
+                    n,
+                    k,
+                    row_start..row_end,
+                    blocks,
+                    GemmTranspose::Nn,
+                )?;
+                apply_epilogue(c_chunk, n, bias, act)
+            })
+    }
 }
 
 /// [`gemm_blis_parallel`] の**テスト専用**ワークロード閾値直列
@@ -2513,7 +2567,9 @@ fn dispatch_ic_dynamic(
 /// [`split_c_into_jobs`] が `c.chunks_mut(n)`（行分割）→ 列帯境界での
 /// `split_at_mut` 連鎖により job 間で重複しないことをコンパイル時借用
 /// 検査で保証して構築する（`unsafe` 非導入。設計 §4.2）。
-#[cfg(test)]
+///
+/// 本番結線（#1313）により `#[cfg(test)]` を外した（旧 `#[cfg(test)]` は
+/// #1311 導入時点の本番未結線を反映していた）。
 struct TwoDJob<'c> {
     rows: Range<usize>,
     cols: Range<usize>,
@@ -2534,7 +2590,8 @@ struct TwoDJob<'c> {
 /// （設計 §6。性能上の推奨であり、job 分割の正しさ〈§3〉には影響しない。
 /// 隣接 job を同時処理する worker 群が同じ B 列を共有キャッシュ上で
 /// 参照しやすくするための順序）。
-#[cfg(test)]
+///
+/// 本番結線（#1313）により `#[cfg(test)]` を外した。
 fn split_c_into_jobs<'c>(
     c: &'c mut [f32],
     n: usize,
@@ -2606,7 +2663,8 @@ fn split_c_into_jobs<'c>(
 /// （[`gemm_blis_two_d_dynamic_region`]）が受け取った `rows: Range<usize>`
 /// の `start`（通常 0）で、`Tn`（転置格納 A）の絶対行位置解決にのみ使う
 /// （`gemm_blis_region` の `row_offset`／`m_total` 引き回しと同型。#1213）。
-#[cfg(test)]
+///
+/// 本番結線（#1313）により `#[cfg(test)]` を外した。
 #[allow(clippy::too_many_arguments)]
 fn run_two_d_job<K: Microkernel>(
     kernel: K,
@@ -2737,11 +2795,15 @@ fn run_two_d_job<K: Microkernel>(
 /// split-K 禁止。`IcDynamic`〈#1366〉の「pc ごとの同期点＋列全幅 B pack」
 /// という構造〈GB10 での後退の推定要因。#1367〉を繰り返さない設計）。
 ///
-/// **本番未結線**: 本関数・[`dispatch_two_d_dynamic`] は本番公開入口
-/// （[`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]）からは
-/// 呼ばれない。両実機 A/B・採否判定は #1312、本番結線は #1313 が担当する
-/// （`docs/perf/cpu-gemm-2d-dynamic-variant.md`）。
-#[cfg(test)]
+/// **本番結線（イシュー #1313）**: 両実機 A/B・採否判定は #1312（DGX 実測。
+/// 判定 undetermined）・#1313 Phase 0（Apple M4 Max 専有ゲート通過後の
+/// 再計測。jpw=2・jpw=4 とも Tier 1 条件充足）を経て、
+/// [`TWO_D_DYNAMIC_PRODUCTION_ENABLED`] 単一 const ゲート経由で本関数・
+/// [`dispatch_two_d_dynamic`] が本番公開入口
+/// （[`gemm_blis_parallel_with_transpose`]／[`gemm_blis_bias_act_parallel`]）
+/// から呼ばれるようになった。実測記録は
+/// `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`・
+/// `docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/` を参照。
 #[allow(clippy::too_many_arguments)]
 fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
     kernel: K,
@@ -2793,9 +2855,8 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
 
 /// [`dispatch_ic_dynamic`] の 2D 動的分配版（イシュー #1311）。
 /// x86_64: AVX-512（stable cfg 時）→ AVX2 → スカラーの優先順位で ISA
-/// トークンを 1 回だけ確定する（既存 dispatch 系と同一方針）。本番未結線
-/// のため `#[cfg(test)]`。
-#[cfg(test)]
+/// トークンを 1 回だけ確定する（既存 dispatch 系と同一方針）。本番結線
+/// 済み（#1313）。
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 fn dispatch_two_d_dynamic(
@@ -2854,9 +2915,8 @@ fn dispatch_two_d_dynamic(
 }
 
 /// aarch64 版 [`dispatch_two_d_dynamic`]（#1311）。他 dispatch 系
-/// （[`dispatch_ic_dynamic`] 等）と同じ理由で NEON 固定。本番未結線の
-/// ため `#[cfg(test)]`。
-#[cfg(test)]
+/// （[`dispatch_ic_dynamic`] 等）と同じ理由で NEON 固定。本番結線済み
+/// （#1313）。
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
 fn dispatch_two_d_dynamic(
@@ -2886,8 +2946,7 @@ fn dispatch_two_d_dynamic(
 }
 
 /// aarch64／x86_64 以外の arch 版 [`dispatch_two_d_dynamic`]（#1311）。
-/// [`ScalarKernel`] 固定。本番未結線のため `#[cfg(test)]`。
-#[cfg(test)]
+/// [`ScalarKernel`] 固定。本番結線済み（#1313）。
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[allow(clippy::too_many_arguments)]
 fn dispatch_two_d_dynamic(
@@ -2919,9 +2978,34 @@ fn dispatch_two_d_dynamic(
 /// [`GemmDriverVariant::TwoDDynamic`] の既定 `jobs_per_worker`（設計
 /// §5.2「`jobs_per_worker` は const（既定 2。§5.3 の表で `RowPanel` の
 /// pack 総量を全形状で下回る側）」）。#1312 が `{2, 4}`（必要なら 8）を
-/// [`gemm_blis_parallel_two_d_dynamic_with_params`] でスイープする。
-#[cfg(test)]
+/// [`gemm_blis_parallel_two_d_dynamic_with_params`] でスイープし、#1313
+/// Phase 0（Apple M4 Max 専有ゲート通過後の再計測）でも jpw=2・jpw=4 とも
+/// Tier 1 条件を満たしたため、既定値 2（#1311 導入時点の値）を変更せず
+/// 本番結線した（`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`
+/// 「#1313 追記」節）。本番経路（[`gemm_blis_parallel_with_transpose`]／
+/// [`gemm_blis_bias_act_parallel`]）もこの値を使う。
 const TWO_D_JOBS_PER_WORKER: usize = 2;
+
+/// [`GemmDriverVariant::TwoDDynamic`]（(mc, nc) 2D job 動的分配）を本番
+/// 公開入口（[`gemm_blis_parallel_with_transpose`]／
+/// [`gemm_blis_bias_act_parallel`]）へ結線するかどうかの単一 const ゲート
+/// （イシュー #1313）。
+///
+/// `thread_limit::BIG_CORE_LIMIT_ENABLED`（#1363/#1364）と同型の設計:
+/// ADOPT 時は `true` のまま維持し、後日の実測（例: framework-compare
+/// 実践規模での後退発見）で REJECT が確定した場合は本 const のみ
+/// `false` へ差し戻す（コード・テストは削除せず保持する）。
+///
+/// 採否根拠: #1312（DGX Spark GB10 実機実測。専有ゲート通過・
+/// `jobs_per_worker ∈ {2, 4}` とも全形状で `RowPanel` を 1.09〜1.80 倍
+/// 上回る）・#1313 Phase 0（Apple M4 Max 専有ゲート通過後の再計測。
+/// jpw=2: 1024/2048/4096 で 1.23／1.31／1.03 倍、jpw=4: 1.23／1.31／
+/// 1.09 倍、いずれも Tier 1 条件（N=1024/2048 で比 1.00 以上・N=4096 で
+/// 0.95 以上・勝ち run 3/5 以上）を満たす）・#1313 framework-compare gemm cpu
+/// before/after（両実機・reuse 非後退）。詳細は
+/// `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`・
+/// `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20 を参照。
+const TWO_D_DYNAMIC_PRODUCTION_ENABLED: bool = true;
 
 /// テスト・A/B 計測専用: [`GemmDriverVariant::TwoDDynamic`] の
 /// `jobs_per_worker`／`transpose` を注入できるパラメータ化入口
