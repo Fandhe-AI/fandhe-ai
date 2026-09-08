@@ -5,6 +5,19 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）:
+# 実行拒否ガード（`bench_fandhe_require_facade_patch`。空文字判定で常に
+# exit する）は、既存の計測結果・ログを初期化する `: > "$OUT"`／
+# `: > "$SKIP"` より前に置く。後ろに置くと、通常起動しただけでガードに
+# 拒否される前に既存ファイルが空へ初期化されてしまい、過去の計測結果が
+# 失われる（データ破壊。security.md A08）。本スクリプトは常に registry
+# 解決でビルドする（path patch 機構を持たない）。bench-fandhe が借用
+# ビュー readout を既定経路化したため、crates.io ピンのままでは構造的に
+# ビルド不能（bench_fandhe_pin_guard.sh 参照）。ビルド起動前・ファイル
+# 初期化前に明示エラーで早期停止する。
+source ./bench_fandhe_pin_guard.sh
+bench_fandhe_require_facade_patch "run_all.sh" ""
+
 OUT=results/raw/results.jsonl
 SKIP=results/raw/skipped.log
 mkdir -p results/raw
@@ -20,13 +33,6 @@ run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
   fi
   rm -f err.tmp
 }
-
-# イシュー #1438: 本スクリプトは常に registry 解決でビルドする（path patch
-# 機構を持たない）。bench-fandhe が借用ビュー readout を既定経路化した
-# ため、crates.io ピンのままでは構造的にビルド不能（bench_fandhe_pin_guard.sh
-# 参照）。ビルド起動前に明示エラーで早期停止する。
-source ./bench_fandhe_pin_guard.sh
-bench_fandhe_require_facade_patch "run_all.sh" ""
 
 # ビルド失敗時はここで中断する（古い target/release バイナリを現行ツリーの結果として
 # 計測・記録しないため。pipefail により tail 越しでも cargo の失敗が伝播する）

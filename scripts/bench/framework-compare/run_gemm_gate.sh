@@ -91,6 +91,18 @@ fi
 source "${SCRIPT_DIR}/bench_fandhe_pin_guard.sh"
 bench_fandhe_require_facade_patch "run_gemm_gate.sh" "${GEMM_GATE_PATCH_FACADE_PATH:-}"
 
+# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59K）:
+# 旧 legacy 経路（feature OFF）と #1438 で常時有効化した借用ビュー readout
+# 経路は、いずれも `bench_fandhe_features` フィールドが空文字であるため
+# その値だけでは区別できない（旧 manifest を GEMM_GATE_SKIP_BUILD=1 で
+# 誤って現行経路として受理してしまう fail-open の穴。SHA・依存元照合は
+# バイナリの同一性は保証するが「どの readout 経路のソースからビルドした
+# か」までは識別できない）。manifest に readout 方式の識別子
+# （`readout_method`）を明示的に記録し、この値が現行の期待値と一致する
+# manifest だけを再利用可能とすることで、フィールド自体が存在しない
+# （#1438 以前の）旧 manifest を構造的に拒否する。
+GEMM_GATE_EXPECTED_READOUT_METHOD="borrowed-view-default-1438"
+
 
 # device ごとのノードタグ（出力ファイル名の識別子。cuda=dgx〈DGX Spark
 # GB10〉／metal=m4max〈Apple M4 Max。イシュー #1147〉／cpu=dgx-cpu・m4max-cpu
@@ -362,7 +374,7 @@ record_manifest() {
     exit 1
   fi
   cat > "$MANIFEST" <<JSON
-{"label":"${LABEL}","device":"${DEVICE}","bench_fandhe_sha256":"${fandhe_sha}","fandhe_ai_source":"${fandhe_source}","bench_fandhe_features":"","bench_candle_sha256":"${candle_sha}","candle_core_source":"${candle_source}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"label":"${LABEL}","device":"${DEVICE}","bench_fandhe_sha256":"${fandhe_sha}","fandhe_ai_source":"${fandhe_source}","bench_fandhe_features":"","readout_method":"${GEMM_GATE_EXPECTED_READOUT_METHOD}","bench_candle_sha256":"${candle_sha}","candle_core_source":"${candle_source}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
   echo "== manifest 記録: $MANIFEST =="
   cat "$MANIFEST"
@@ -459,6 +471,28 @@ verify_manifest() {
     exit 1
   fi
   echo "== feature 検証 OK: bench_fandhe_features=''（#1438 で常時既定経路。label '${LABEL}'） =="
+
+  # イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59K）:
+  # 上記の bench_fandhe_features 空文字検査だけでは、#1438 より前の legacy
+  # manifest（feature OFF で計測した旧経路。この場合も bench_fandhe_features
+  # は空文字のため区別がつかない）を新しい借用ビュー readout 経路として
+  # 誤って受理してしまう。manifest に `readout_method` フィールドが存在し、
+  # かつ現行の期待値と一致する場合に限り再利用可能とすることで、当該
+  # フィールド自体を持たない旧 manifest を構造的に拒否する（性能値を
+  # 捏造しない。security.md A08）。
+  local recorded_readout_method
+  recorded_readout_method=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['readout_method'] if 'readout_method' in d else '<missing>')" "$MANIFEST" 2>/dev/null || echo "<missing>")
+  if [[ "$recorded_readout_method" != "$GEMM_GATE_EXPECTED_READOUT_METHOD" ]]; then
+    echo "ERROR: manifest ($MANIFEST) の readout_method が現行の期待値と不一致。" >&2
+    echo "  expected='${GEMM_GATE_EXPECTED_READOUT_METHOD}' actual='${recorded_readout_method}'。" >&2
+    echo "  '<missing>' の場合は #1438 より前（借用ビュー readout 常時有効化" >&2
+    echo "  以前）に記録された legacy manifest であり、現在の bench-fandhe" >&2
+    echo "  バイナリとは別物のソースからビルドされた可能性がある。" >&2
+    echo "  GEMM_GATE_SKIP_BUILD を外して label '${LABEL}' を再ビルドすること" >&2
+    echo "  （fail-closed。security.md A08。#1438）。" >&2
+    exit 1
+  fi
+  echo "== readout 方式検証 OK: readout_method=${recorded_readout_method}（label '${LABEL}'） =="
 
 
   # bench-candle 側の sha256・依存解決元も同様に検証する（比較基準

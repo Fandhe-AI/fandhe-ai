@@ -6,6 +6,20 @@
 set -u
 cd "$(dirname "$0")"
 
+# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）:
+# 実行拒否ガード（`bench_fandhe_require_facade_patch`。空文字判定で常に
+# exit する）は、既存の計測結果・ログを初期化する `: > "$OUT"`／
+# `: > "$SKIP"` より前に置く。後ろに置くと、通常起動しただけでガードに
+# 拒否される前に既存ファイルが空へ初期化されてしまい、過去の計測結果が
+# 失われる（データ破壊。security.md A08）。本スクリプトは常に registry
+# 解決でビルドする（path patch 機構を持たない）。bench-fandhe が借用
+# ビュー readout を既定経路化したため、crates.io ピンのままでは構造的に
+# ビルド不能（bench_fandhe_pin_guard.sh 参照）。`build` 関数の「失敗を
+# 記録して続行」方針より前に、ここで早期エラーとして停止する（分かり
+# にくい cargo エラーを skipped.log に埋もれさせない）。
+source ./bench_fandhe_pin_guard.sh
+bench_fandhe_require_facade_patch "run_all_cuda.sh" ""
+
 OUT=results/raw/results-cuda.jsonl
 SKIP=results/raw/skipped-cuda.log
 mkdir -p results/raw
@@ -34,15 +48,6 @@ build() { # build <crate> [extra cargo args...]
   fi
   rm -f build-err.tmp
 }
-
-# イシュー #1438: 本スクリプトは常に registry 解決でビルドする（path patch
-# 機構を持たない）。bench-fandhe が借用ビュー readout を既定経路化した
-# ため、crates.io ピンのままでは構造的にビルド不能（bench_fandhe_pin_guard.sh
-# 参照）。`build` 関数の「失敗を記録して続行」方針より前に、ここで早期
-# エラーとして停止する（分かりにくい cargo エラーを skipped.log に埋もれ
-# させない）。
-source ./bench_fandhe_pin_guard.sh
-bench_fandhe_require_facade_patch "run_all_cuda.sh" ""
 
 BINS=()
 build bench-fandhe && BINS+=(bench-fandhe)

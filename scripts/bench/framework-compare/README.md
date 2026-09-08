@@ -1286,20 +1286,39 @@ FACADE_PATH` と一致していることで確認する（結果記録・採否�
 on（借用ビュー経路）A/B に本ツールを流用した（イシュー #1337 当時の
 記録）。当時の off/on 切替は `GEMM_GATE_BENCH_FANDHE_FEATURES` cargo
 feature で行っていたが、`#1438` で feature 自体を撤去し借用ビュー経路を
-既定化したため、同じ A/B を再現する場合は off 腕に base コミット（feature
-撤去前）のソースツリー、on 腕に現行 HEAD のソースツリーをそれぞれ path
-patch で指定する形に置き換える:
+既定化した。
+
+**注意（イシュー #1438 codex-review 指摘・PR #1452 P2）**: `readout_var` の
+off/on 分岐は **`bench-fandhe`（本ハーネス自身のソース。`main.rs`）側**に
+あり、`crates/facade`（本体ライブラリの公開 API 面）側にはない。したがって
+`GEMM_GATE_PATCH_FACADE_PATH`（facade クレートの依存解決元を切り替える
+機構）だけを腕ごとに変えても `bench-fandhe` 自体のソースは常に現行
+チェックアウト（借用ビュー経路）のままビルドされ、legacy/default の A/B
+にはならない（両腕とも default 経路を計測してしまう）。legacy/default を
+再現するには **`bench-fandhe` を含むリポジトリ全体を feature 撤去前後の
+2 つの worktree としてチェックアウトし**、各 worktree の
+`scripts/bench/framework-compare/` からそれぞれ本スクリプトを実行する
+（`GEMM_GATE_PATCH_FACADE_PATH` は各 worktree 内の `crates/facade` を指す
+ことで、facade 側の変更が両腕の計測に影響しないよう揃える）:
 
 ```bash
-cd scripts/bench/framework-compare
-FACADE_LEGACY="$(cd <feature 撤去前コミットの checkout>/crates/facade && pwd)"
+# 2 つの worktree を用意する（同一リポジトリの異なるコミットを同時
+# チェックアウトするため git worktree を使う。通常の checkout の
+# 使い回しでは両腕を同時にビルド・保持できない）
+git worktree add /tmp/fandhe-ai-readout-legacy <feature 撤去前コミット sha>
+git worktree add /tmp/fandhe-ai-readout-default <feature 撤去後コミット sha（例: 現行 HEAD）>
+
+# legacy 腕（旧 to_tensor+to_vec 経路）
+cd /tmp/fandhe-ai-readout-legacy/scripts/bench/framework-compare
+FACADE_LEGACY="$(cd ../../../crates/facade && pwd)"
+GEMM_GATE_PATCH_FACADE_PATH="$FACADE_LEGACY" bash run_gemm_gate_cuda.sh head-<short sha>-readout-legacy
+
+# default 腕（借用ビュー経路。#1438 で既定化）
+cd /tmp/fandhe-ai-readout-default/scripts/bench/framework-compare
 FACADE_DEFAULT="$(cd ../../../crates/facade && pwd)"
+GEMM_GATE_PATCH_FACADE_PATH="$FACADE_DEFAULT" bash run_gemm_gate_cuda.sh head-<short sha>-readout-default
 
-# legacy（旧 to_tensor+to_vec 経路）・default（借用ビュー経路。#1438 で既定化）
-# を同一 label 系列で計測
-GEMM_GATE_PATCH_FACADE_PATH="$FACADE_LEGACY"   bash run_gemm_gate_cuda.sh head-<short sha>-readout-legacy
-GEMM_GATE_PATCH_FACADE_PATH="$FACADE_DEFAULT"   bash run_gemm_gate_cuda.sh head-<short sha>-readout-default
-
+# 出力（results/raw/ 配下）を比較用ディレクトリへ集約してから
 # fandhe-ai 行のみ抽出（cpu の thread-limit A/B と同じ手順。上記参照）
 for label in head-<short sha>-readout-legacy head-<short sha>-readout-default; do
   jq -c 'select(.framework == "fandhe-ai")'     "results/raw/results-dgx-gemm-gate-${label}.jsonl"     > "results/raw/results-dgx-gemm-gate-${label}.fandhe-only.jsonl"
