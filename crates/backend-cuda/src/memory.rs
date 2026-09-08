@@ -534,29 +534,187 @@ impl MemoryStats for CudaMemory {
     }
 }
 
+/// [`readback`] の宛先確保方式（イシュー #1437。`host-view-readout`
+/// feature〈#1335〜#1337〉有効時の CUDA reuse N=1024/2048 後退を、
+/// `readback` 唯一の同期点を是正することで全形状非後退化する）。
+///
+/// `docs/perf/cuda-host-view-readout-small-shape-regression.md`（#1436）
+/// の診断で、後退の増分は「`clone_dtoh` の宛先 `Vec<T>` が毎回 fresh な
+/// 未タッチ mmap ページになりうる」ことに帰着すると判明した（on 腕は
+/// 反復ごとの free が無いため glibc の動的 mmap 閾値適応が定常状態化
+/// せず、宛先が既タッチページを再利用できない）。`PretouchedFresh` は
+/// 宛先を非ゼロ値で明示的に埋めてから `memcpy_dtoh` するため、確保
+/// 直後の D2H が必ず既にコミット済みの物理ページへ書き込まれる
+/// （ページフォールト処理を D2H 区間の外〈CPU 側の fill〉へ前倒しする）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadbackDest {
+    /// 現行方式（`clone_dtoh` が内部で `Vec::with_capacity` +
+    /// `set_len` により確保する未初期化 `Vec`）。挙動・bit 出力とも
+    /// 本イシュー導入前と完全に同一。
+    Fresh,
+    /// 事前タッチ済み `Vec`（[`pretouched_host_vec`]）へ `memcpy_dtoh`
+    /// する方式。宛先の全バイトが `memcpy_dtoh` 呼び出し前に一度
+    /// 上書きされるため、返す `Vec` の内容自体は `Fresh` と bit 同一
+    /// （D2H が全要素を上書きするため事前値は残らない）。
+    PretouchedFresh,
+}
+
+/// `crates/backend-cuda` の CUDA 実機実測（#1437・GB10）で Layer B
+/// 分離計測（`readout_regression_diag_tests_1436.rs` の 5 腕・単一腕
+/// プロセス分離実行）が事前宣言ゲートを通過したことを確認したうえで
+/// 既定値を `PretouchedFresh` へ切り替える。GB10 実機実測（同一プロセス
+/// 内の腕間汚染を排したプロセス分離実行）: N=1024（legacy 6.06 ms・
+/// borrowed 37.15 ms・pretouched-fresh **2.04 ms**）・N=2048（legacy
+/// 12.15 ms・borrowed 11.32 ms・pretouched-fresh **7.34 ms**）・N=4096
+/// （legacy 48.39 ms・borrowed 29.26 ms・pretouched-fresh 30.37 ms）の
+/// いずれも `PretouchedFresh` が `Fresh`（legacy 相当）を下回るか同水準
+/// であり、後退対象だった N=1024/2048 で大幅改善（受け入れ条件 Gate 1。
+/// 全 N で 0.637〜0.897 倍・PASS）を裏付ける。Gate 2（既存経路の非後退
+/// 目安。≤1.03）は N=1024/2048 でわずかに超過（1.038・1.047）しており
+/// 「後退なし」ではない——`PretouchedFresh` は `host-view-readout`
+/// feature の有効・無効を問わず無条件に既定となるため、`off` 経路にも
+/// 事前フィル費用が一律で乗ることが機構的な説明として整合する。Gate 2
+/// は受け入れ条件自体には含まれず、超過幅が Gate 1 の改善幅より小さい
+/// ことから ADOPT 判断は変更していない。詳細・Layer A（framework-compare
+/// 実践規模）ゲート結果は `docs/perf/cuda-host-view-readout-small-shape-
+/// regression.md` §13 以降（とくに §13.3 の再評価）を参照。
+pub(crate) const READBACK_DEST: ReadbackDest = ReadbackDest::PretouchedFresh;
+
+/// [`ReadbackDest::PretouchedFresh`] が要求する「非ゼロ事前タッチ値」を
+/// 型ごとに定義する crate 内部限定トレイト。`readback` は `f32`
+/// （`gemm.rs` 等の大半の GEMM 経路）と `f16`（`gemm_mma.rs` の
+/// `download_f16` 系。#1191 で本番結線済みの MMA f16 経路が経由する）の
+/// 両方で使われるため、`T: DeviceRepr` だけでは「非ゼロ値」を汎用に
+/// 構成できない。新しい `T` で `readback` を呼ぶ場合はここへ impl を
+/// 追加する必要があり、追加を怠るとコンパイルエラーで機械的に検出
+/// される（トレイト境界の欠落として現れるため、既定値 `Fresh` 側は
+/// 影響を受けない）。
+pub(crate) trait ReadbackSentinel: DeviceRepr + Copy {
+    /// 事前タッチに使う非ゼロ値。`0` だと `vec![Self::SENTINEL; n]` が
+    /// `alloc_zeroed`（calloc）経由になり、mmap の COW ゼロページの
+    /// まま実ページがコミットされず「事前タッチ」の意図を満たさない
+    /// （`readout_regression_diag_tests_1436.rs` の `PretouchedReusedDest`
+    /// 腕が既に踏んだ同種の罠。#1436 コメント参照）。
+    const SENTINEL: Self;
+}
+
+impl ReadbackSentinel for f32 {
+    const SENTINEL: f32 = 1.0;
+}
+
+impl ReadbackSentinel for half::f16 {
+    const SENTINEL: half::f16 = half::f16::ONE;
+}
+
+/// `numel` 要素ぶんの事前タッチ済みホストバッファを確保する
+/// （[`ReadbackDest::PretouchedFresh`] 専用ヘルパー）。`vec![T::SENTINEL;
+/// numel]` は `Vec::from_elem` 経由で全要素を明示的に書き込むため
+/// （`alloc_zeroed` を経由しない）、返した時点で全ページが物理コミット
+/// 済みであることが保証される。フィル自体の費用は帯域律速（数百 KiB〜
+/// 数十 MiB で概ね 0.1〜数 ms オーダー）で、事前タッチが避けようと
+/// している D2H 中のページフォールト処理費用より小さい想定
+/// （実測は `docs/perf/cuda-host-view-readout-small-shape-regression.md`
+/// を参照）。
+pub(crate) fn pretouched_host_vec<T: ReadbackSentinel>(numel: usize) -> Vec<T> {
+    vec![T::SENTINEL; numel]
+}
+
 /// カーネル起動直後の都度 `synchronize()` を除去した非同期実行契約
 /// （イシュー #1013・`docs/backend-cuda-async-execution-design.md` §3〜
 /// §4）の下で、ホストへ結果を読み戻す全ての readback 経路が共有する
-/// 唯一の同期点。`clone_dtoh` は `cuMemcpyDtoHAsync` を発行する非同期
-/// コピー（`cudarc-0.19.8` `core.rs::memcpy_dtoh`）のため、呼び出し
-/// 直後にホスト側データが確定していることを保証するには `clone_dtoh`
-/// → `synchronize` の順が必須（逆順ではコピー自体の完了を待てない）。
-/// 起動元のカーネルが `unsafe { stream.launch(..) }` を経て投入した
-/// 非同期作業も、同一ストリーム上の FIFO 順序保証により本関数の
-/// `synchronize` で合わせて完了が確定する（`CudaDevice` は ordinal ごとに
-/// 単一ストリームを共有する。設計文書 §3「実行モデル」）。
+/// 唯一の同期点。`clone_dtoh`／`memcpy_dtoh` は `cuMemcpyDtoHAsync` を
+/// 発行する非同期コピー（`cudarc-0.19.8` `core.rs::memcpy_dtoh`）のため、
+/// 呼び出し直後にホスト側データが確定していることを保証するには
+/// D2H コピー → `synchronize` の順が必須（逆順ではコピー自体の完了を
+/// 待てない）。起動元のカーネルが `unsafe { stream.launch(..) }` を
+/// 経て投入した非同期作業も、同一ストリーム上の FIFO 順序保証により
+/// 本関数の `synchronize` で合わせて完了が確定する（`CudaDevice` は
+/// ordinal ごとに単一ストリームを共有する。設計文書 §3「実行モデル」）。
 /// `download_inner`（本ファイル）・`gemm.rs`／`gemm_wmma.rs`／
 /// `gemm_mma.rs`／`gemm_mma_tf32.rs` の `download_f32`／`download_f16`・
 /// 各演算のホスト `Tensor` 返却ラッパーはすべて本関数を経由し、
 /// 「同期点は D2H 境界のみ」という契約を単一箇所に集約する。
+///
+/// 宛先確保方式は [`READBACK_DEST`]（[`ReadbackDest`]）で切り替わる
+/// （イシュー #1437）。既定は `PretouchedFresh` であり、`host-view-readout`
+/// feature の有効・無効に関わらず本関数の全呼び出し（`off`／`on` 両方の
+/// 経路）が同じ既定値を通る（`ReadbackDest` の選択はこの feature flag
+/// に連動しない）。返す `Vec` の内容は `Fresh` と bit 同一だが、宛先を
+/// `SENTINEL` で事前に埋めるぶんの費用が全呼び出しに一律で乗るため、
+/// `off` 経路（`host-view-readout` 無効時）の性能も本イシューの前後で
+/// 完全に不変とは限らない（実測・評価は
+/// `docs/perf/cuda-host-view-readout-small-shape-regression.md` §13.3
+/// を参照）。
 pub(crate) fn readback<T, Src>(stream: &Arc<CudaStream>, dev: &Src) -> Result<Vec<T>, CudaError>
 where
-    T: DeviceRepr,
+    T: ReadbackSentinel,
     Src: DevicePtr<T>,
 {
-    let host = stream.clone_dtoh(dev)?;
-    stream.synchronize()?;
-    Ok(host)
+    readback_with(stream, dev, READBACK_DEST)
+}
+
+/// [`readback`] の宛先確保方式を明示指定できる内部版（実機 A/B 計測・
+/// 単体テスト用。`readback` はこれへ `READBACK_DEST` を渡して委譲する）。
+pub(crate) fn readback_with<T, Src>(
+    stream: &Arc<CudaStream>,
+    dev: &Src,
+    dest: ReadbackDest,
+) -> Result<Vec<T>, CudaError>
+where
+    T: ReadbackSentinel,
+    Src: DevicePtr<T>,
+{
+    match dest {
+        ReadbackDest::Fresh => {
+            let host = stream.clone_dtoh(dev)?;
+            stream.synchronize()?;
+            Ok(host)
+        }
+        ReadbackDest::PretouchedFresh => {
+            let mut host = pretouched_host_vec::<T>(dev.len());
+            stream.memcpy_dtoh(dev, &mut host)?;
+            stream.synchronize()?;
+            Ok(host)
+        }
+    }
+}
+
+/// [`readback_with`] を `ReadbackDest::Fresh`／`PretouchedFresh` の両方で
+/// crate 外部（実機 `#[ignore]` テスト）から直接呼べるようにする診断専用
+/// 入口（イシュー #1437）。`ReadbackDest`／`readback_with` 自体は
+/// `pub(crate)` のままシグネチャへは出さず、`bool` フラグで戦略を選ぶ
+/// ことで「`internal-diagnostics` feature 無効時は公開 API 面に一切
+/// 現れない」という既存の診断専用入口群（`device.rs::context`/`stream`
+/// 等）と同じ可視性契約を保つ。既定ビルドでは存在しない関数のため、
+/// `readback`／`READBACK_DEST` の既定動作には一切影響しない。
+#[cfg(feature = "internal-diagnostics")]
+pub fn readback_f32_diag(
+    stream: &Arc<CudaStream>,
+    dev: &CudaSlice<f32>,
+    pretouched: bool,
+) -> Result<Vec<f32>, CudaError> {
+    let dest = if pretouched {
+        ReadbackDest::PretouchedFresh
+    } else {
+        ReadbackDest::Fresh
+    };
+    readback_with(stream, dev, dest)
+}
+
+/// [`readback_f32_diag`] の f16 版（`gemm_mma.rs::download_f16` が経由
+/// する `T = f16` 経路の bit 一致検証用。#1437）。
+#[cfg(feature = "internal-diagnostics")]
+pub fn readback_f16_diag(
+    stream: &Arc<CudaStream>,
+    dev: &CudaSlice<half::f16>,
+    pretouched: bool,
+) -> Result<Vec<half::f16>, CudaError> {
+    let dest = if pretouched {
+        ReadbackDest::PretouchedFresh
+    } else {
+        ReadbackDest::Fresh
+    };
+    readback_with(stream, dev, dest)
 }
 
 /// `CudaStorage::Managed`（[`UnifiedSlice`]）専用の readback（イシュー
@@ -1388,6 +1546,58 @@ impl PoolZeroFill for CudaMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`ReadbackSentinel::SENTINEL`] が非ゼロであることを固定する
+    /// （イシュー #1437）。`0` だと `vec![T::SENTINEL; n]` が
+    /// `alloc_zeroed` 経由になり、mmap の COW ゼロページのまま実ページが
+    /// コミットされず「事前タッチ」の意図が壊れる。GPU 実機なしで
+    /// 機械的に検出できるよう、bit パターンでのゼロ判定を直接テストする。
+    #[test]
+    fn readback_sentinel_f32_is_nonzero() {
+        assert_ne!(
+            <f32 as ReadbackSentinel>::SENTINEL.to_bits(),
+            0.0f32.to_bits()
+        );
+    }
+
+    #[test]
+    fn readback_sentinel_f16_is_nonzero() {
+        assert_ne!(
+            <half::f16 as ReadbackSentinel>::SENTINEL.to_bits(),
+            half::f16::from_f32(0.0).to_bits()
+        );
+    }
+
+    /// [`pretouched_host_vec`] が要求長・全要素 sentinel 埋めであることを
+    /// 固定する（`PretouchedFresh` の前提条件）。
+    #[test]
+    fn pretouched_host_vec_f32_has_expected_len_and_fill() {
+        let v: Vec<f32> = pretouched_host_vec(1024);
+        assert_eq!(v.len(), 1024);
+        assert!(
+            v.iter()
+                .all(|&x| x.to_bits() == <f32 as ReadbackSentinel>::SENTINEL.to_bits()),
+            "all elements must equal the non-zero sentinel before D2H overwrites them"
+        );
+    }
+
+    #[test]
+    fn pretouched_host_vec_f16_has_expected_len_and_fill() {
+        let v: Vec<half::f16> = pretouched_host_vec(37);
+        assert_eq!(v.len(), 37);
+        assert!(
+            v.iter()
+                .all(|&x| x.to_bits() == <half::f16 as ReadbackSentinel>::SENTINEL.to_bits())
+        );
+    }
+
+    /// `numel == 0` は空 `Vec` を返し panic しないことを確認する
+    /// （`readback` が 0 要素バッファに対して呼ばれるケースの境界値）。
+    #[test]
+    fn pretouched_host_vec_zero_numel_is_empty() {
+        let v: Vec<f32> = pretouched_host_vec(0);
+        assert!(v.is_empty());
+    }
 
     /// 受け入れ条件「CUDA 非搭載環境で実行時に panic せず型付きエラーが
     /// 返る」の `CudaMemory` 版。`CudaDevice::new` が失敗する環境

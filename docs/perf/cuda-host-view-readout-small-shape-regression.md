@@ -1,6 +1,9 @@
 # CUDA `host-view-readout` 有効時の reuse N=1024/2048 後退のフェーズ分解診断
 
 イシュー #1436（親 #1435）。GB10（sm_121）実機実測（2026-09-08）。
+**#1437 で是正完了**（`memory::readback` の宛先確保方式を
+`ReadbackDest::PretouchedFresh` へ切替。全 N で受け入れ条件〈Gate 1〉
+達成。§13）。
 
 ## 0. 要約
 
@@ -386,3 +389,180 @@ Layer B の腕別実測（§6）から、以下の優先順位で候補を提示
   `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12/§13（#1142/#1360）・
   `docs/perf/cuda-large-buffer-percall-alloc-transfer-threshold.md`（#1146）・
   `docs/perf/cuda-gemm-reuse-phase-breakdown.md`（#1182）
+
+## 13. #1437 是正結果（採用: 候補 B「fresh 宛先の全要素事前タッチ」・GB10 実機実測 2026-09-08）
+
+イシュー #1437（本イシューの後続）。§10 で提示した候補 A（`PretouchedReusedDest`
+系。事前タッチ済み宛先の**使い回し**＋copy-out）は N=2048 bimodal の
+fast 側でネット後退しうるトレードオフを持つため、代わりに未計測だった
+**候補 B の変種**（`crates/backend-cuda/src/memory.rs::ReadbackDest::
+PretouchedFresh`。反復ごとに`vec![1.0f32; numel]`で新規確保した**非ゼロ
+sentinel 埋め済み**宛先へ `memcpy_dtoh` する。copy-out なし・宛先の使い
+回しなし）を実装し採用した。
+
+### 13.1 設計判断の要点
+
+- **`readback`（`memory.rs`。全 30 箇所超の呼び出し元が共有する唯一の
+  D2H 同期点）自体を是正**した。これにより `readout_var`（bench 側）を
+  変更せずに on 経路が改善し、feature 撤去（#1438）への引き継ぎも
+  最小変更になる
+- `ReadbackDest` enum（`Fresh`／`PretouchedFresh`）+ `READBACK_DEST`
+  const で戦略を切り替える。`Fresh` は現行 `clone_dtoh` を bit 単位で
+  維持
+- **非ゼロ sentinel が必須**: `vec![0.0; n]` は `alloc_zeroed`（calloc）
+  → mmap の COW ゼロページのままで物理ページが確保されず「事前タッチ」
+  にならない（`ReadoutArm::PretouchedReusedDest`／`PretouchedFreshDest`
+  診断腕が既に踏んだ罠と同じ。§6 参照）。`ReadbackSentinel` トレイト
+  （`f32: 1.0`・`f16: half::f16::ONE`）で型ごとの非ゼロ値を強制する
+- generic `T`（f32 のほか f16。`gemm_mma.rs::download_f16` が経由）
+  への対応は `ReadbackSentinel` トレイトの型ごと impl で行う
+- 出力は `Fresh` と bit 完全一致（`memcpy_dtoh` は全バイトを上書きする
+  コピーであり、事前タッチの値は D2H 完了後には残らない。実機
+  `#[ignore]` テスト `readback_pretouched_bit_match_1437.rs` で
+  f32/f16 とも複数形状（0・1・37・4096・1,048,576・16,777,216 要素）を
+  横断して確認済み）
+
+### 13.2 Layer B 分離計測（単一腕プロセス分離実行。§4 の未実施事項の解消）
+
+`readout_regression_diag_tests_1436.rs` に候補 B の先取り腕
+`PretouchedFreshDest`（反復ごとに `crate::memory::pretouched_host_vec`
+で新規確保・fill を d2h 区間に含めて計測）を追加し、`LegacyToVec`・
+`BorrowedKeepAlive`・`PretouchedFreshDest` の 3 腕を単一腕・単一プロセス
+起動（`readout_regression_diag_n{1024,2048,4096}_{legacy_to_vec,
+borrowed_keep_alive,pretouched_fresh_dest}`）で計測した。これにより
+§11 が引き継いだ「H1 の on 腕固有原因を交絡なく検証する」目的も同時に
+満たされる。
+
+| N | LegacyToVec（off 相当） | BorrowedKeepAlive（on 相当・後退再現） | PretouchedFreshDest（採用候補） |
+|---|---|---|---|
+| 1024 | d2h 3.94 ms + host_read 2.12 ms = 6.06 ms | d2h 36.61 ms + host_read 0.54 ms = **37.15 ms** | d2h 1.51 ms + host_read 0.53 ms = **2.04 ms** |
+| 2048 | d2h 4.23 ms + host_read 7.91 ms = 12.15 ms | d2h 9.16 ms + host_read 2.16 ms = 11.32 ms | d2h 5.19 ms + host_read 2.15 ms = **7.34 ms** |
+| 4096 | d2h 20.32 ms + host_read 28.07 ms = 48.39 ms | d2h 20.63 ms + host_read 8.63 ms = 29.26 ms | d2h 21.63 ms + host_read 8.75 ms = 30.37 ms |
+
+（各セル: 20 warmup + 20 測定の中央値。生ログ・全 quartile は
+`docs/perf/logs/cuda-host-view-readout-fix-1437/layer-b/`）
+
+`PretouchedFreshDest` は N=1024/2048 で `LegacyToVec`（off 経路相当）・
+`BorrowedKeepAlive`（on 経路・後退再現）の両方を明確に下回り、N=4096 は
+`BorrowedKeepAlive`（29.26 ms）と僅差（30.37 ms・約 4% 差）に収束する。
+`LegacyToVec`（48.39 ms）はこの僅差の範囲には収まらず、N=4096 では
+`PretouchedFreshDest`・`BorrowedKeepAlive` の 2 腕がむしろ `LegacyToVec`
+を約 1.6 倍上回る（`host_read` 側の内訳差が支配的。上表）。N=1024 の
+`BorrowedKeepAlive` 37.15 ms は §0 が報告した「N=1024 15.04 倍後退」を
+本診断テストの計測境界（d2h+host_read のみ。H2D／カーネル起動を含まない）
+でも再現しており、H1（宛先ページ未タッチ由来）が on 腕固有の後退の
+交絡なき原因であることを確認した。
+
+### 13.3 Layer A（framework-compare 実践規模）ゲート判定
+
+事前宣言ゲート（実装計画 §5）:
+
+- **Gate 1（受け入れ条件）**: 全 N で `on@after / off@base ≤ 1.00`
+- **Gate 2（既存経路の非後退）**: 全 N で `off@after / off@base ≤ 1.03`
+
+`off@base` は正式系列 `fandhe-ai =0.7.0`（registry 版。#1185 で
+2026-09-06 計測済みの既存ファイルを再利用。`readback_with` 内の
+`Fresh` 分岐自体は本イシューで変更していないため `off@base`／
+`off@after` は出力（bit 単位）で同一系列として扱えるが、**性能面では
+両者は無条件に同一ではない**——`readback()` の既定 `ReadbackDest` は
+`host-view-readout` feature の有効・無効を問わず `PretouchedFresh` へ
+切り替わっており（`memory.rs::READBACK_DEST`）、`off@after` も
+`off@base`（旧 `Fresh` 既定）とは異なる宛先確保方式を通る。この差が
+下表 Gate 2 の N=1024/2048 での超過に寄与している可能性を §13.3 末尾で
+再評価する）、`off@after`／`on@after` は結線後 HEAD を
+`GEMM_GATE_PATCH_FACADE_PATH` で path patch し、`on@after` のみ
+`GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout` を追加した。
+いずれも `run_gemm_gate_cuda.sh` による N=1024/2048/4096 reuse × 5 run。
+
+| N | off@base 中央値 | off@after 中央値 | on@after 中央値 | Gate 2（off@after/off@base） | Gate 1（on@after/off@base） |
+|---|---|---|---|---|---|
+| 1024 | 2.4236 ms | 2.5153 ms | 2.1291 ms | 1.0378 | **0.8785**（PASS） |
+| 2048 | 9.6010 ms | 10.0509 ms | 8.6062 ms | 1.0469 | **0.8964**（PASS） |
+| 4096 | 62.3005 ms | 59.4962 ms | 39.6699 ms | 0.9550 | **0.6368**（PASS） |
+
+**Gate 1（受け入れ条件そのもの）は全 N で通過**（0.637〜0.897 倍。
+`docs/perf/cuda-gemm-candle-gate-remeasurement.md` §13 が報告した
+「N=1024 15.04 倍・N=2048 1.20 倍後退」を完全に解消し、N=4096 の改善
+（0.638 倍。#1360）も維持している）。
+
+**Gate 2（自己宣言した非後退の目安。≤1.03）は N=1024/2048 でわずかに
+超過**（1.038・1.047）。当初の草稿では「`off@after` は `Fresh` 分岐
+限定を通るため機構的な後退要因が存在しない」としてこの超過を実機計測
+ノイズと判断していたが、これは誤りである。`readback()` の既定
+`ReadbackDest` は `host-view-readout` feature に連動せず**無条件に**
+`PretouchedFresh` へ切り替わっている（`memory.rs:575`
+`READBACK_DEST = ReadbackDest::PretouchedFresh`）。したがって
+`off@after` も `off@base`（旧 `Fresh` 既定）とは異なる宛先確保方式
+（`vec![SENTINEL; numel]` による事前フィル + `memcpy_dtoh`）を通っており、
+「後退要因が存在しない」という前提そのものが実装（`memory.rs:575` の
+無条件 `PretouchedFresh`）と矛盾していた。
+
+再評価: `PretouchedFresh` の事前フィル費用（帯域律速。N=1024 で
+4 MiB・N=2048 で 16 MiB 相当。§13.2 コメントの見積りでは概ね
+0.1〜数 ms オーダー）が `off@after` の全呼び出しに一律で乗ることは、
+N=1024/2048 で観測された 1.038・1.047 倍という小さな超過の説明として
+機構的に整合する（N=4096 では `off@after` がむしろ `off@base` を
+下回っており〈0.955〉、大形状では D2H 本体の費用が支配的でフィル費用の
+相対寄与が縮小するという同じ機構と矛盾しない）。5 run の生値レンジ
+（`off@base` 2.32〜2.58 ms 対 `off@after` 2.37〜2.64 ms・N=2048 も
+base 9.51〜9.82 ms 対 after 9.69〜10.51 ms）はなお重なっており測定
+ノイズの寄与も否定できないため、単発追加計測での寄与分離までは
+行っていないが、**「機構的な後退要因が存在しない」という当初の断定は
+撤回する**。
+
+この再評価を踏まえても ADOPT 判断自体は変更しない: 受け入れ条件
+そのものである Gate 1 は全 N で明確に通過しており（0.637〜0.897 倍。
+上表）、Gate 2 はその判断を補助する自己宣言の目安（≤1.03 は目安であり
+受け入れ条件自体には含まれない）である。N=1024/2048 の超過幅（3.78%・
+4.69%）は Gate 1 の改善幅（12〜36%）に対して小さく、`PretouchedFresh`
+自体は N=1024/2048 の主目的（後退是正）を達成しつつ他形状・他経路への
+副作用も限定的と判断する。ただし今後 `off` 経路（`host-view-readout`
+無効時）の追加最適化を検討する際は、この事前フィル費用が既に一律で
+乗っていることを前提に含める。全 6 セルとも `parity_fail_count=0`・
+checksum 完全一致（生ログ `docs/perf/logs/cuda-host-view-readout-fix-1437/`）。
+
+### 13.4 契約テスト・既存テストの非後退
+
+- `readback_pretouched_bit_match_1437.rs`（新規 `#[ignore]` 実機テスト。
+  f32/f16 × 6 形状）: PASS（`Fresh`／`PretouchedFresh` が byte 単位で
+  完全一致）
+- `memory_real_device.rs`（5 件）・`host_view_real_device.rs`（7 件）:
+  結線後 HEAD で全 PASS（非後退）
+- GPU 非依存単体テスト（`memory::tests` 27 件。うち
+  `readback_sentinel_{f32,f16}_is_nonzero`・
+  `pretouched_host_vec_{f32,f16}_has_expected_len_and_fill`・
+  `pretouched_host_vec_zero_numel_is_empty` が新規）: 全 PASS
+- 既存 `#[ignore]` テスト全体を結線後 HEAD で通しで実行し、`cpu_cuda_
+  mma_parity`・`cpu_cuda_wmma_parity`・`gemm_mma_tf32x3`・
+  `gemm_tf32_optin`・`gemm_wmma_f16_opt`・`tensor_core_real_device`・
+  `graph_capture_real_device` の FAIL を確認したが、**同一形状・同一
+  シードで origin/main（未変更ツリー・イシュー #1437 着手前の
+  `5480f94`）でも同一の FAIL が再現する**ことを個別実行で確認済み
+  （K=4096 の f16/TF32 tail 超過・小形状計測プロトコルのタイミング
+  依存・CUDA Graph capture のプロセス内テスト順序依存はいずれも本
+  イシュー着手前から存在する既知の環境依存 FAIL であり、`readback`
+  是正が原因ではない）。`dispatch_boundary` は同一ツリーでの再実行で
+  PASS に戻ったため、単発の計測タイミング揺らぎ（他テストと同型の
+  「フェーズ 1 安定性ゲート」性質の flaky）と判断する
+
+### 13.5 結線
+
+判定木（実装計画 §5）に従い、受け入れ条件である Gate 1（全 N で
+0.637〜0.897 倍・PASS）の通過を根拠に ADOPT し、
+`READBACK_DEST = ReadbackDest::PretouchedFresh` を既定として結線した
+（`crates/backend-cuda/src/memory.rs`）。Gate 2（自己宣言の非後退目安）
+は §13.3 のとおり N=1024/2048 でわずかに超過（1.038・1.047）しており
+「Gate 1・2 とも通過」ではない点に注意——Gate 2 は受け入れ条件自体には
+含まれず、超過幅（3.78%・4.69%）が Gate 1 の改善幅（12〜36%）に対して
+小さいことを理由に ADOPT 判断は変更しなかった（§13.3 末尾の再評価を
+参照）。候補 C（bench 側 N 閾値切替）は不要となったため実装していない。
+
+### 13.6 スコープ外（本イシューでも未実施のまま引き継ぐ）
+
+- N=2048 bimodal の厳密な発生条件・N=4096 D2H 二峰性・32→33 MiB 段差
+  （#1146／#1169 系。§11 から不変）
+- 候補 A（`HostStagingCache` 再利用経由の readback）の本実装（候補 B が
+  受け入れ条件〈Gate 1〉を満たし ADOPT されたため優先度低。Gate 2 は
+  §13.3 のとおり N=1024/2048 でわずかに超過している）
+- feature ゲート撤去・3 バックエンド candle 比ゲート再計測（#1438）
+- Metal の全形状後退（1.30〜1.56 倍。CUDA 限定のためスコープ外）

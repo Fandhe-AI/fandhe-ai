@@ -27,7 +27,7 @@
 //! うる（先行知見: `docs/perf/cuda-large-buffer-percall-alloc-transfer-
 //! threshold.md` #1146 §4。ただし #1146 の P4/P5 は「未タッチ」と
 //! 「区間内新規確保」が未分離だった）。本ファイルはこの 2 要因
-//! （新規確保の有無・宛先ページの事前タッチ有無）を分離した 4 腕で
+//! （新規確保の有無・宛先ページの事前タッチ有無）を分離した 5 腕で
 //! `d2h`／`host_read` 区間を実測し、後退フェーズを特定する。
 //!
 //! # 配置理由（`gemm_reuse_phase_diag_tests.rs` と同じ判断）
@@ -39,7 +39,7 @@
 //! `memory::readback`／`gemm.rs`／`host_staging.rs` 等の本番経路は
 //! 一切変更しない。
 //!
-//! # 4 腕の定義
+//! # 5 腕の定義
 //!
 //! - `LegacyToVec`（off 腕の再現）: `clone_dtoh` で 1 本目を受け取り、
 //!   `to_vec()` で 2 本目を確保して読み出し、2 本目を drop する。1 本目は
@@ -55,8 +55,17 @@
 //!   書き込み（事前タッチ）した宛先 `Vec` へ `stream.memcpy_dtoh` し、
 //!   読み出し後にその内容を `keep_alive` 用の別 `Vec` へ `copy_from_slice`
 //!   する（reuse tape がノード storage として D2H 結果を所有する契約を
-//!   模した copy-out込み）。#1437 の是正候補 A（`readback` の事前タッチ
-//!   済みステージング化）を先取りする対照腕
+//!   模した copy-out込み）。#1437 の是正候補 A（`HostStagingCache` 再利用
+//!   経由の readback）を先取りする対照腕
+//! - `PretouchedFreshDest`（#1437 で追加）: `readout` 反復ごとに
+//!   `crate::memory::pretouched_host_vec::<f32>`（本番 [`crate::memory::
+//!   ReadbackDest::PretouchedFresh`] と同一のヘルパー・同一の非ゼロ
+//!   sentinel）で新規確保した宛先へ `memcpy_dtoh` し、そのまま
+//!   `keep_alive` へ積む（copy-out なし）。`PretouchedReusedDest` が
+//!   「宛先を使い回す」候補 A の先取りであるのに対し、本腕は「宛先を
+//!   fresh 確保するが事前タッチだけはしておく」#1437 採用候補 B
+//!   （`ReadbackDest::PretouchedFresh`）の先取りであり、`readback` の
+//!   実装そのものと同じ D2H 区間費用（fill を含む）を計測する
 //!
 //! # gating しない方針（`gemm_reuse_phase_diag_tests.rs` と同じ理由）
 //!
@@ -73,13 +82,14 @@
 //!
 //! # プロセス分離実行（#1442 レビュー指摘対応）
 //!
-//! `*_all_arms`／`*_n1024`／`*_n2048`／`*_n4096` は 4 腕を同一プロセス
+//! `*_all_arms`／`*_n1024`／`*_n2048`／`*_n4096` は 5 腕を同一プロセス
 //! 内で順に実行するため、glibc の動的 mmap 閾値適応・`keep_alive` の
 //! 一括解放が後続の腕へアロケータ状態として引き継がれうる。腕間の
 //! 独立性を保証した比較が必要な場合はファイル末尾の単一腕専用テスト
 //! （`readout_regression_diag_n{1024,2048,4096}_{legacy_to_vec,
 //! borrowed_keep_alive,borrowed_with_dummy_alloc_free,
-//! pretouched_reused_dest}`）を使う。cargo test は単一テスト名で
+//! pretouched_reused_dest,pretouched_fresh_dest}`）を使う。cargo test は
+//! 単一テスト名で
 //! filter すると新規プロセスを起動するため、これらを個別に呼べば
 //! 腕ごとに独立したプロセス状態で計測できる。
 //!
@@ -104,21 +114,23 @@ const MEASURED_TRIALS: usize = 20;
 /// N=4096 を加える。
 const SIZES: [usize; 3] = [1024, 2048, 4096];
 
-/// 読み出し方式 4 腕（本ファイル冒頭「4 腕の定義」参照）。
+/// 読み出し方式 5 腕（本ファイル冒頭「5 腕の定義」参照）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadoutArm {
     LegacyToVec,
     BorrowedKeepAlive,
     BorrowedWithDummyAllocFree,
     PretouchedReusedDest,
+    PretouchedFreshDest,
 }
 
 impl ReadoutArm {
-    const ALL: [ReadoutArm; 4] = [
+    const ALL: [ReadoutArm; 5] = [
         ReadoutArm::LegacyToVec,
         ReadoutArm::BorrowedKeepAlive,
         ReadoutArm::BorrowedWithDummyAllocFree,
         ReadoutArm::PretouchedReusedDest,
+        ReadoutArm::PretouchedFreshDest,
     ];
 
     fn label(self) -> &'static str {
@@ -127,6 +139,7 @@ impl ReadoutArm {
             ReadoutArm::BorrowedKeepAlive => "BorrowedKeepAlive",
             ReadoutArm::BorrowedWithDummyAllocFree => "BorrowedWithDummyAllocFree",
             ReadoutArm::PretouchedReusedDest => "PretouchedReusedDest",
+            ReadoutArm::PretouchedFreshDest => "PretouchedFreshDest",
         }
     }
 }
@@ -297,6 +310,34 @@ fn measure_one_readout_trial(
                 checksum,
             }
         }
+        ReadoutArm::PretouchedFreshDest => {
+            // #1437 採用候補 B（`ReadbackDest::PretouchedFresh`）の先取り
+            // 対照腕: 反復ごとに `crate::memory::pretouched_host_vec` で
+            // 新規確保した非ゼロ埋め済み宛先へ `memcpy_dtoh` する。
+            // fill 費用を `d2h_secs` に含める（本番 `readback_with` の
+            // `PretouchedFresh` 分岐と同じ区間構成で計測するため。fill を
+            // 計測外に出すと本番経路の費用を過小評価する）。
+            let t = Instant::now();
+            let mut dest = crate::memory::pretouched_host_vec::<f32>(c_dev.as_view().len());
+            stream
+                .memcpy_dtoh(&c_dev.as_view(), &mut dest)
+                .expect("D2H download into pretouched-fresh dest must succeed");
+            stream
+                .synchronize()
+                .expect("stream synchronize after D2H must succeed");
+            let d2h_secs = t.elapsed().as_secs_f64();
+
+            let t = Instant::now();
+            let checksum = checksum_f64(&dest);
+            let host_read_secs = t.elapsed().as_secs_f64();
+
+            keep_alive.push(dest);
+            ArmSample {
+                d2h_secs,
+                host_read_secs,
+                checksum,
+            }
+        }
     }
 }
 
@@ -365,7 +406,7 @@ fn run_size_arm(n: usize, arm: ReadoutArm) {
     );
 
     // `PretouchedReusedDest` 専用の事前タッチ済み再利用宛先（ループの
-    // 外で 1 回だけ確保・全要素書き込み。§冒頭「4 腕の定義」参照）。
+    // 外で 1 回だけ確保・全要素書き込み。§冒頭「5 腕の定義」参照）。
     //
     // `vec![0.0f32; numel]` は glibc の `alloc_zeroed` 経由で確保される
     // ため、大きいサイズでは mmap の COW ゼロページ（実ページはまだ
@@ -463,7 +504,7 @@ fn run_size_arm(n: usize, arm: ReadoutArm) {
     let _ = allocator.release_cached();
 }
 
-/// 実機（CUDA）依存の診断テスト。全 4 腕 × N=1024/2048/4096 を順に計測
+/// 実機（CUDA）依存の診断テスト。全 5 腕 × N=1024/2048/4096 を順に計測
 /// する（`--test-threads=1` 必須。ファイル冒頭コメント参照）。
 #[test]
 #[ignore]
@@ -505,7 +546,7 @@ fn readout_regression_diag_n4096() {
 
 /// 単一腕・単一サイズ限定の分離実行エントリ（#1442 レビュー指摘対応）。
 ///
-/// 上記の `*_n1024`／`*_n2048`／`*_n4096` は 4 腕を同一プロセス内で順に
+/// 上記の `*_n1024`／`*_n2048`／`*_n4096` は 5 腕を同一プロセス内で順に
 /// 実行するため、glibc の動的 mmap 閾値適応・`keep_alive` の一括解放が
 /// 後続の腕へ状態として引き継がれうる（例: `LegacyToVec` が先に free を
 /// 発生させて以降の腕の確保が既タッチページを再利用できてしまう等）。
@@ -547,6 +588,11 @@ single_arm_test!(
     1024,
     ReadoutArm::PretouchedReusedDest
 );
+single_arm_test!(
+    readout_regression_diag_n1024_pretouched_fresh_dest,
+    1024,
+    ReadoutArm::PretouchedFreshDest
+);
 
 single_arm_test!(
     readout_regression_diag_n2048_legacy_to_vec,
@@ -568,6 +614,11 @@ single_arm_test!(
     2048,
     ReadoutArm::PretouchedReusedDest
 );
+single_arm_test!(
+    readout_regression_diag_n2048_pretouched_fresh_dest,
+    2048,
+    ReadoutArm::PretouchedFreshDest
+);
 
 single_arm_test!(
     readout_regression_diag_n4096_legacy_to_vec,
@@ -588,6 +639,11 @@ single_arm_test!(
     readout_regression_diag_n4096_pretouched_reused_dest,
     4096,
     ReadoutArm::PretouchedReusedDest
+);
+single_arm_test!(
+    readout_regression_diag_n4096_pretouched_fresh_dest,
+    4096,
+    ReadoutArm::PretouchedFreshDest
 );
 
 #[cfg(test)]

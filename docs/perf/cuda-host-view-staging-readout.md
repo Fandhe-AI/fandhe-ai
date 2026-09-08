@@ -310,8 +310,14 @@ Cursor Bugbot が同一箇所を独立に指摘。一致度が高い）。
    交絡なく確定しているが、「on 腕固有の free 欠如が原因」という機構
    自体は腕単体・プロセス分離計測が未実施のため仮説にとどまる。
    `docs/perf/cuda-host-view-readout-small-shape-regression.md`
-   §0・§8・§10 候補 A・§11。PR #1442 codex-review 指摘）。#1437 の是正
-   実装で本項目の「自然な後続候補」を実装に格上げする想定。
+   §0・§8・§10 候補 A・§11。PR #1442 codex-review 指摘）。**追記（#1437）**:
+   `readback` 自体（`memory.rs`。`gemm.rs` 等 30 箇所超が共有する唯一の
+   D2H 同期点）を `ReadbackDest::PretouchedFresh`（反復ごとに事前タッチ
+   済み宛先を**新規確保**する方式。`HostStagingCache` の再利用〈候補 A〉
+   ではない）へ切り替え、Gate 1（全 N で `on@after / off@base ≤ 1.00`）
+   を達成した。`HostStagingCache` 自体は変更していない（引き続き本経路
+   〈`readback`〉には到達しない。`docs/perf/cuda-host-view-readout-
+   small-shape-regression.md` §13）。
 3. **キャッシュ可能 pinned（フラグ 0）**: `driver::result::malloc_host` +
    自作 `HostSlice` 実装は unsafe 面が広がるため本イシューでは実装しない
    （2.2 節）。5 節の**是正前の参考値**では `Pinned`（WRITECOMBINED）が
