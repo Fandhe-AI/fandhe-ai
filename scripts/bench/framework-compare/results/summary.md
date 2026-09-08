@@ -2135,10 +2135,13 @@ before/after 完全一致）
 - candle 比ゲート（#1031／#1037／#1117）は参考系列として CUDA N=4096（1.489 倍・達成）・
   CPU-DGX N=2048（1.103 倍・達成）が新規に達成条件を満たした。他セルは未達のまま
   （正式系列 `fandhe-ai =0.7.0` ピンは本 PR で変更していないため、既存の正式判定は不変）
-- 既定化判定: **ADOPT**（3 バックエンド全てで既定経路化を承認。判定木の runtime `Device`
-  フォールバックは導入不要）
+- 既定化判定: **CUDA・CPU（両実機）は ADOPT**。**Metal は参考結果（暫定・ADOPT 保留）**
+  — before/after が同一マシン上で連続実行されており負荷変動と readout 切替の効果を
+  分離できていないため（`docs/perf/metal-gemm-candle-gate-remeasurement.md` §13.5）。
+  判定木の runtime `Device` フォールバックはいずれも導入不要
 - 詳細・実測値・candle 比表は
   `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §15・
-  `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13・
+  `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13（§13.5 に Metal の暫定判定の
+  根拠）・
   `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §21・
   `docs/perf/logs/gemm-candle-gate-readout-default-1438/` を参照

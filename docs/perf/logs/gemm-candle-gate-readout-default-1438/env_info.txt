@@ -20,7 +20,11 @@
   （candle 比ゲートは高負荷下でも 5 回計測中央値をそのまま記録する仕様）ため、N=4096 の
   before（legacy）腕は spread（40.857〜64.843 ms）が 1.5 倍を超えており負荷ノイズの影響が
   疑われる（`compare_gemm_ab-metal-m4max.md` の判定注意欄に明記）。それでも after/before は
-  全 3 サイズで 1.00 未満（非後退）であり、判定を覆す方向のノイズではない。
+  全 3 サイズで 1.00 未満（非後退方向のシグナル）であり、判定を覆す方向のノイズではない。
+  ただし before/after は同一マシン上で連続実行されており負荷変動と readout 切替の効果を
+  分離できていないため、この非後退方向のシグナル自体は参考結果（暫定）にとどまり、Metal の
+  既定化を無条件の ADOPT として断定するものではない（PR #1452 codex-review P2 是正。
+  詳細・再計測条件は `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13.5 を参照）。
 
 ## 計測プロトコル
 - before（legacy）腕: base コミット `fddca17`（origin/main。#1437 マージ直後）の
