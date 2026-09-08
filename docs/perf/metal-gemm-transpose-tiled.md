@@ -286,6 +286,20 @@ cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --r
   `encode_tiled_nn_recorded` へ委譲するよう整理した。診断テスト
   （`gemm_reuse_phase_diag_tests.rs`）が assert するラベル契約は不変
   （`crates/backend-metal/src/gemm.rs`）
+- **追補（同イシュー #1259。codex-review Medium 指摘対応）**: 上記 2 点の
+  `pub` 化は当初「無条件 `pub`」で行ったが、crates.io 公開クレート
+  （`fandhe-ai-backend-metal`）の恒久的な公開 API 面へ診断・ベンチ専用の
+  内部到達手段（GPU タイムスタンプ収集・encode/synchronize 分離計測用
+  エンコード専用入口）を与えてしまう懸念が指摘された。`backend-cuda` の
+  `CudaDevice::context`/`stream`（`internal-diagnostics` feature ゲート。
+  #1390）と同じ解決パターンを適用し、両 API とも `internal-diagnostics`
+  feature（既定 OFF）限定の `pub` とし、既定ビルドでは `pub(crate)` に
+  絞った（`crates/backend-metal/Cargo.toml` の feature コメント参照）。
+  本 example（`gemm_transpose_route_ab_bench`）自体も `required-features
+  = ["internal-diagnostics"]` を要求するよう変更した。CI の `cargo test
+  --workspace --all-features`（rust-ci test ジョブ・`make test`）は常に
+  この feature を含むため、上記の実行方法・出力契約・テストカバレッジは
+  不変。
 - `bench_harness::ab::run_stability_observed`（ラウンド完了オブザーバ付き
   変種。`run_stability` はこれを no-op フックで呼ぶ薄いラッパーへ変更）
   を新設し、ラウンド境界（「直前 `measurement.iters` 件が測定対象」）を

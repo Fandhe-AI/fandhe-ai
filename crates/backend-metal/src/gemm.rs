@@ -1861,18 +1861,55 @@ impl MetalGemm {
         )
     }
 
-    /// [`Self::encode_tiled_nn_recorded`] の `pub` 入口（イシュー #1259。
+    /// [`Self::encode_tiled_nn_recorded`] の入口（イシュー #1259。
     /// ラベルは `"gemm_tiled_prepared"`）。ベンチ example
     /// （`examples/gemm_transpose_route_ab_bench.rs` の `--gpu-timestamps`）
     /// が encode（記録のみ）と `MetalContext::synchronize_with_gpu_
     /// timestamps`（commit + GPU 完了待ち + タイムスタンプ取得）を分離
-    /// 計時するために使う公開版。[`Self::dispatch_tiled_prepared`]
+    /// 計時するために使う。[`Self::dispatch_tiled_prepared`]
     /// （encode + 即時 synchronize の 1 回計測）とは異なる計測境界を
     /// 提供するのみで、両者とも最終的に同じ [`Self::encode_tiled_plan`]
     /// を発行するため出力（パディング後の C の中身）は同一である
     /// （`encode` 自体は GPU 実行を伴わないため bit 一致は自明）。
+    ///
+    /// 可視性ゲート（イシュー #1259。codex-review Medium 指摘対応）:
+    /// 当初は無条件 `pub`（crates.io 公開クレートの恒久的な公開 API 面）へ
+    /// 追加したが、`context.rs::BatchGpuTimestamps` doc コメントと同じ
+    /// 懸念に該当するため、`internal-diagnostics` feature（既定 OFF）
+    /// 限定の `pub` とし、既定ビルドでは `pub(crate)` に絞る
+    /// （`Cargo.toml` の feature コメント参照。`backend-cuda` の
+    /// `CudaDevice::context`/`stream` と同型の 2 分岐構成）。
+    #[cfg(feature = "internal-diagnostics")]
     #[allow(clippy::too_many_arguments)]
     pub fn encode_tiled_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        self.encode_tiled_nn_recorded(
+            ctx,
+            "gemm_tiled_prepared",
+            a_buf,
+            b_buf,
+            c_buf,
+            m_eff,
+            n_eff,
+            k_eff,
+            cfg,
+        )
+    }
+
+    /// [`Self::encode_tiled_prepared`] doc コメント参照。既定ビルド
+    /// （`internal-diagnostics` feature 無効）ではクレート内部限定に絞る。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_tiled_prepared(
         &self,
         ctx: &MetalContext,
         a_buf: &MetalBuffer,

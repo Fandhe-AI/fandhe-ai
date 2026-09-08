@@ -99,8 +99,8 @@ struct BatchSlots {
 }
 
 /// [`MetalContext::synchronize_with_gpu_timestamps`]（診断・ベンチ専用。
-/// イシュー #1276。イシュー #1259 で `pub` へ公開化）が返す、完了した
-/// バッチ 1 個分の GPU タイムスタンプ。
+/// イシュー #1276。イシュー #1259 で `internal-diagnostics` feature 限定の
+/// `pub` へ公開化）が返す、完了したバッチ 1 個分の GPU タイムスタンプ。
 ///
 /// `MTLCommandBuffer::GPUStartTime`/`GPUEndTime` は「ホスト時計上の
 /// 秒数」（`CFTimeInterval` = `f64`）で、未開始・完了通知未受領時は
@@ -109,12 +109,22 @@ struct BatchSlots {
 /// [`Self::from_raw`] で `None` へ正規化してから保持する（`0.0` を
 /// 「ホスト時計の起点」と誤読して区間計算に使う事故を型で防ぐ）。
 ///
-/// 公開化（イシュー #1259）の理由: `crates/backend-metal/examples/
-/// gemm_transpose_route_ab_bench.rs` は別コンパイル単位（example）の
-/// ため `#[cfg(test)] pub(crate)` の可視性からは到達できない。本番
-/// `MetalContext::synchronize()`（`context.rs` 上記）は本型・本 API を
-/// 一切経由しない no-op オブザーバのままであり、公開化そのものは本番
-/// 経路の挙動・FFI 呼び出し回数を変えない（AC-2 は不変）。
+/// 可視性ゲート（イシュー #1259。codex-review Medium 指摘対応・PR 是正）:
+/// 当初は無条件 `pub`（crates.io 公開クレートの恒久的な公開 API 面）へ
+/// 格上げしたが、`backend-cuda` の `CudaDevice::context`/`stream`
+/// （`internal-diagnostics` feature ゲート。#1390）と同じ懸念——クレート
+/// 外の利用者が安全な公開 API の組み合わせだけで診断・ベンチ専用の内部
+/// 到達手段を得てしまう——に該当するため、`internal-diagnostics` feature
+/// （既定 OFF）限定の `pub` とし、既定ビルドでは `pub(crate)` に絞る
+/// （`Cargo.toml` の feature コメント参照）。`crates/backend-metal/
+/// examples/gemm_transpose_route_ab_bench.rs` は別コンパイル単位
+/// （example）のため、既定の `pub(crate)`／`#[cfg(test)]` の可視性からは
+/// 到達できず、`required-features = ["internal-diagnostics"]`
+/// （`Cargo.toml`）経由でのみビルドできる。本番 `MetalContext::
+/// synchronize()`（`context.rs` 上記）は本型・本 API を一切経由しない
+/// no-op オブザーバのままであり、可視性ゲートそのものは本番経路の挙動・
+/// FFI 呼び出し回数を変えない（AC-2 は不変）。
+#[cfg(feature = "internal-diagnostics")]
 #[derive(Debug, Clone)]
 pub struct BatchGpuTimestamps {
     gpu_start_secs: Option<f64>,
@@ -123,6 +133,17 @@ pub struct BatchGpuTimestamps {
     /// labels`）。診断テスト・ベンチ側が「想定どおり 1 個の GEMM
     /// ディスパッチだけが載っていたか（singleton `cached_context()`
     /// への他ディスパッチ混入がないか）」を確認するために保持する。
+    labels: Vec<&'static str>,
+}
+
+/// [`Self`] doc コメント参照。既定ビルド（`internal-diagnostics` feature
+/// 無効）ではクレート内部限定に絞る（`gemm_reuse_phase_diag_tests.rs`
+/// の `#[cfg(test)]` 診断テストは crate 内部のためこの可視性で到達できる）。
+#[cfg(not(feature = "internal-diagnostics"))]
+#[derive(Debug, Clone)]
+pub(crate) struct BatchGpuTimestamps {
+    gpu_start_secs: Option<f64>,
+    gpu_end_secs: Option<f64>,
     labels: Vec<&'static str>,
 }
 
@@ -635,10 +656,10 @@ impl MetalContext {
     }
 
     /// 診断・ベンチ専用（イシュー #1276 で `#[cfg(test)] pub(crate)`
-    /// として新設。イシュー #1259 で `pub` へ公開化し example から
-    /// 到達可能にした）: [`Self::synchronize_observed`] を GPU
-    /// タイムスタンプ収集オブザーバで呼び、完了した各バッチの
-    /// [`BatchGpuTimestamps`] を呼ばれた順に返す。
+    /// として新設。イシュー #1259 で `internal-diagnostics` feature 限定
+    /// の `pub` へ公開化し example から到達可能にした）: [`Self::
+    /// synchronize_observed`] を GPU タイムスタンプ収集オブザーバで呼び、
+    /// 完了した各バッチの [`BatchGpuTimestamps`] を呼ばれた順に返す。
     ///
     /// `crates/backend-metal/src/gemm_reuse_phase_diag_tests.rs`
     /// （#1189 の Layer B 分解）が `commit_wait` 区間内の純カーネル
@@ -647,9 +668,35 @@ impl MetalContext {
     /// gemm_transpose_route_ab_bench.rs`（#1259。`--gpu-timestamps`
     /// opt-in）がフェーズ 1 安定性計測のラウンド別純カーネル時間・
     /// host 側時間の分離に使う。本番 `synchronize()` は no-op
-    /// オブザーバのままのため、本メソッドの公開化は本番経路の FFI
+    /// オブザーバのままのため、本メソッドの可視性ゲートは本番経路の FFI
     /// 呼び出し回数・挙動を一切変えない（AC-2）。
+    ///
+    /// 可視性ゲート（イシュー #1259。codex-review Medium 指摘対応）:
+    /// [`BatchGpuTimestamps`] doc コメント冒頭の説明と同じ理由で
+    /// `internal-diagnostics` feature（既定 OFF）限定の `pub` とし、
+    /// 既定ビルドでは `pub(crate)` に絞る（`backend-cuda` の
+    /// `CudaDevice::context`/`stream` と同型の 2 分岐構成。実体は
+    /// [`Self::synchronize_with_gpu_timestamps_impl`] へ共有し重複を
+    /// 避ける）。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn synchronize_with_gpu_timestamps(&self) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
+        self.synchronize_with_gpu_timestamps_impl()
+    }
+
+    /// [`Self::synchronize_with_gpu_timestamps`] doc コメント参照。
+    /// 既定ビルド（`internal-diagnostics` feature 無効）ではクレート
+    /// 内部限定に絞る（`gemm_reuse_phase_diag_tests.rs` の `#[cfg(test)]`
+    /// 診断テストは crate 内部のためこの可視性で到達できる）。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    pub(crate) fn synchronize_with_gpu_timestamps(
+        &self,
+    ) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
+        self.synchronize_with_gpu_timestamps_impl()
+    }
+
+    /// [`Self::synchronize_with_gpu_timestamps`] の実体（可視性ゲートの
+    /// 両分岐から共有する。イシュー #1259）。
+    fn synchronize_with_gpu_timestamps_impl(&self) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
         let mut collected = Vec::new();
         let result = self.synchronize_observed(|cmd_buf, meta| {
             // SAFETY ではなく単純な safe メソッド呼び出し: `GPUStartTime`/
