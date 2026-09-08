@@ -92,10 +92,36 @@ def parse_run_classification(monitor_log_path: str) -> Optional[dict]:
     return last
 
 
-def build_table_a(ld: str, max_runs: int = 5) -> tuple[list[dict], int]:
+RUN_LOG_RE = re.compile(r"^1255-phase1_run(\d+)\.log$")
+
+
+def discover_run_numbers(ld: str) -> list[int]:
+    """`1255-phase1_run{n}.log` の実ファイル一覧から run 番号を検出する。
+
+    `MAX_RUNS`（既定 5 だが `1255-orchestrate.sh` の環境変数で変更可能）を
+    決め打ちせず、実ログの有無だけを根拠にすることで、MAX_RUNS を変更して
+    実行した場合でも run6 以降が集計から黙って除外される事態を防ぐ
+    （codex-review 指摘。`1255-DONE` の `runs_executed` とも整合する）。
+    """
+    if not os.path.isdir(ld):
+        return []
+    found = []
+    for name in os.listdir(ld):
+        m = RUN_LOG_RE.match(name)
+        if m:
+            found.append(int(m.group(1)))
+    return sorted(found)
+
+
+def build_table_a(ld: str, max_runs: Optional[int] = None) -> tuple[list[dict], int]:
     rows = []
     runs_found = 0
-    for n in range(1, max_runs + 1):
+    run_numbers = discover_run_numbers(ld)
+    if max_runs is not None:
+        # 明示指定時は互換のため上限として尊重するが、既定（None）では
+        # 実ログ検出数をそのまま使う（上記 docstring 参照）。
+        run_numbers = [n for n in run_numbers if n <= max_runs]
+    for n in run_numbers:
         log_path = os.path.join(ld, f"1255-phase1_run{n}.log")
         monitor_path = os.path.join(ld, f"1255-phase1_run{n}_monitor.log")
         if not os.path.isfile(log_path):
