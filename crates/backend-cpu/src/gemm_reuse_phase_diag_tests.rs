@@ -209,10 +209,13 @@ fn measure_one_phase_trial(
     let c_var = a_var.matmul(b_var).expect("Var::matmul must succeed");
     let tape_matmul_secs = t.elapsed().as_secs_f64();
 
-    // (6) to_tensor + (7) host_copy: Layer A の非 feature 経路
-    // （`measure_gemm_reuse_phases` の `#[cfg(not(feature =
-    // "host-view-readout"))]` 分岐）と同一の 2 区間分割
-    // （`c.to_tensor()` → `.contiguous().as_slice().to_vec()`）。
+    // (6) to_tensor + (7) host_copy: Layer A の legacy 経路
+    // （`readout_var_matches_legacy_to_vec_bit_exact` テスト内に固定点
+    // として保持されている旧 to_tensor()+to_vec() 経路。#1438 で
+    // bench-fandhe の既定経路は借用ビューへ切り替わったが、本診断
+    // テストは Layer A/B 突合のため legacy 経路を意図的に再現する）と
+    // 同一の 2 区間分割（`c.to_tensor()` → `.contiguous().as_slice()
+    // .to_vec()`）。
     let t = Instant::now();
     let tensor = c_var.to_tensor();
     let to_tensor_secs = t.elapsed().as_secs_f64();

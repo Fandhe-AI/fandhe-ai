@@ -73,42 +73,55 @@ LABEL=${2:-}
 # 検証する（run_ab_train_cuda.sh と同じ方針）。
 if [[ "$DEVICE" != "cuda" && "$DEVICE" != "metal" && "$DEVICE" != "cpu" ]]; then
   echo "usage: $0 <device: cuda|metal|cpu> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
-  echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列）" >&2
-  echo "  optional: GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout でイシュー #1337 の借用ビュー readout feature を有効化（GEMM_GATE_PATCH_FACADE_PATH 併用必須）" >&2
+  echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列。#1438 でピン未更新の間は正式系列でも必須）" >&2
   echo "  通常は device 別 wrapper（run_gemm_gate_cuda.sh／run_gemm_gate_metal.sh／run_gemm_gate_cpu.sh）経由で呼ぶ" >&2
   exit 1
 fi
 if [[ -z "$LABEL" || ! "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "usage: $0 <device: cuda|metal|cpu> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
-  echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列）" >&2
-  echo "  optional: GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout でイシュー #1337 の借用ビュー readout feature を有効化（GEMM_GATE_PATCH_FACADE_PATH 併用必須）" >&2
+  echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列。#1438 でピン未更新の間は正式系列でも必須）" >&2
   exit 1
 fi
 
-# イシュー #1337: `bench-fandhe` の `host-view-readout` feature（既定 OFF。
-# `readout_var` を借用ビュー〈`fandhe_ai::VarHostView`〉へ切り替える計測用
-# feature。`bench-fandhe/Cargo.toml` コメント参照）を allowlist 完全一致で
-# 検証する（A03 インジェクション対策。`GEMM_GATE_PATCH_FACADE_PATH` の
-# `"`/`\` 拒否と同じ fail-closed 方針。空文字は「feature 無効」として許容）。
-# 将来 feature を追加する場合は allowlist を明示拡張すること。
-GEMM_GATE_BENCH_FANDHE_FEATURES=${GEMM_GATE_BENCH_FANDHE_FEATURES:-}
-if [[ -n "$GEMM_GATE_BENCH_FANDHE_FEATURES" && "$GEMM_GATE_BENCH_FANDHE_FEATURES" != "host-view-readout" ]]; then
-  echo "ERROR: GEMM_GATE_BENCH_FANDHE_FEATURES は空か 'host-view-readout' のみ許容する" \
-       "(actual='${GEMM_GATE_BENCH_FANDHE_FEATURES}')。allowlist 外の値は fail-closed で拒否する（A03）。" >&2
-  exit 1
+# イシュー #1438: bench-fandhe は借用ビュー readout（旧計測専用 cargo
+# feature・#1337 導入）を既定経路化したため、crates.io ピン
+# fandhe-ai =0.7.0 の registry 解決ビルドは構造的に不可能になった。
+# ビルド起動前にここで明示エラーとして早期停止する
+# （bench_fandhe_pin_guard.sh 参照）。
+source "${SCRIPT_DIR}/bench_fandhe_pin_guard.sh"
+bench_fandhe_require_facade_patch "run_gemm_gate.sh" "${GEMM_GATE_PATCH_FACADE_PATH:-}"
+
+# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59K）:
+# 旧 legacy 経路（feature OFF）と #1438 で常時有効化した借用ビュー readout
+# 経路は、いずれも `bench_fandhe_features` フィールドが空文字であるため
+# その値だけでは区別できない（旧 manifest を GEMM_GATE_SKIP_BUILD=1 で
+# 誤って現行経路として受理してしまう fail-open の穴。SHA・依存元照合は
+# バイナリの同一性は保証するが「どの readout 経路のソースからビルドした
+# か」までは識別できない）。manifest に readout 方式の識別子
+# （`readout_method`）を明示的に記録し、この値が現行の期待値と一致する
+# manifest だけを再利用可能とすることで、フィールド自体が存在しない
+# （#1438 以前の）旧 manifest を構造的に拒否する。
+#
+# PR #1452 P2 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gLro7）: 期待値は
+# device 別に分ける。Metal は `bench-fandhe` 側の runtime 判定
+# （`readout_uses_borrowed_view`。`bench-fandhe/src/main.rs`）により
+# 借用ビューではなく旧 legacy 経路（`to_tensor()` + `.to_vec()`）を維持
+# するため、CUDA/CPU と同一の識別子 `borrowed-view-default-1438` を
+# Metal の manifest にも記録すると、(1) 現在の Metal バイナリの実際の
+# readout 経路（legacy）と識別子の意味が食い違う、(2) この runtime 分岐
+# 導入前（#1438 で借用ビューが Metal にも一律適用されていたコミット
+# 29cf401 時点）の Metal バイナリ・manifest が同じ識別子を持つため、
+# `GEMM_GATE_SKIP_BUILD=1` で当時の manifest を誤って現行の Metal legacy
+# 経路として再利用できてしまう、という 2 つの取り違えが起こる。Metal
+# 限定で別の識別子 `legacy-metal-1452` を用い、`readout_method` の値
+# そのもので経路の意味（借用ビューか legacy か）と対象 device が一意に
+# 決まるようにする。
+if [[ "$DEVICE" == "metal" ]]; then
+  GEMM_GATE_EXPECTED_READOUT_METHOD="legacy-metal-1452"
+else
+  GEMM_GATE_EXPECTED_READOUT_METHOD="borrowed-view-default-1438"
 fi
-# crates.io 公開版 `fandhe-ai =0.7.0` には `host-view-readout` feature が
-# 使う API（`VarHostView`／`Tensor::host_slice`）が未収録のため、feature を
-# 指定する場合は `GEMM_GATE_PATCH_FACADE_PATH`（HEAD ツリーへの path patch）
-# の併用を必須とする。未併用のまま registry 解決でビルドすると
-# コンパイルエラーになる可能性があるため、ここで早期に明示エラーとする
-# （bench-fandhe/Cargo.toml コメント・README「借用ビュー readout（#1337）」節）。
-if [[ -n "$GEMM_GATE_BENCH_FANDHE_FEATURES" && -z "${GEMM_GATE_PATCH_FACADE_PATH:-}" ]]; then
-  echo "ERROR: GEMM_GATE_BENCH_FANDHE_FEATURES=${GEMM_GATE_BENCH_FANDHE_FEATURES} の指定には" >&2
-  echo "  GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> の併用が必須（#1337。" >&2
-  echo "  crates.io 公開版 fandhe-ai =0.7.0 には該当 feature の API が未収録）。" >&2
-  exit 1
-fi
+
 
 # device ごとのノードタグ（出力ファイル名の識別子。cuda=dgx〈DGX Spark
 # GB10〉／metal=m4max〈Apple M4 Max。イシュー #1147〉／cpu=dgx-cpu・m4max-cpu
@@ -380,7 +393,7 @@ record_manifest() {
     exit 1
   fi
   cat > "$MANIFEST" <<JSON
-{"label":"${LABEL}","device":"${DEVICE}","bench_fandhe_sha256":"${fandhe_sha}","fandhe_ai_source":"${fandhe_source}","bench_fandhe_features":"${GEMM_GATE_BENCH_FANDHE_FEATURES}","bench_candle_sha256":"${candle_sha}","candle_core_source":"${candle_source}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"label":"${LABEL}","device":"${DEVICE}","bench_fandhe_sha256":"${fandhe_sha}","fandhe_ai_source":"${fandhe_source}","bench_fandhe_features":"","readout_method":"${GEMM_GATE_EXPECTED_READOUT_METHOD}","bench_candle_sha256":"${candle_sha}","candle_core_source":"${candle_source}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
   echo "== manifest 記録: $MANIFEST =="
   cat "$MANIFEST"
@@ -457,23 +470,49 @@ verify_manifest() {
   fi
   echo "== 依存元検証 OK: fandhe_ai_source=${actual_source}（label '${LABEL}'） =="
 
-  # イシュー #1337: `bench_fandhe_features` の突合。manifest が本 issue 以前
-  # に記録されたもの（キー欠損）は python3 側 `.get(..., '')` で空文字と
-  # 解釈し後方互換を保つ（`GEMM_GATE_SKIP_BUILD=1` で旧 manifest を再利用
-  # するケース）。現在の invocation の env（`GEMM_GATE_BENCH_FANDHE_FEATURES`）
-  # と一致しなければ fail-closed で終了する（off/on でバイナリの中身
-  # 〈readout 経路〉が異なるため、feature の取り違えは性能値そのものを
-  # 誤らせる。security.md A08）。
-  local expected_features
-  expected_features=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bench_fandhe_features',''))" "$MANIFEST" 2>/dev/null || true)
-  if [[ "$expected_features" != "$GEMM_GATE_BENCH_FANDHE_FEATURES" ]]; then
-    echo "ERROR: bench_fandhe_features が manifest ($MANIFEST) と不一致。" >&2
-    echo "  expected='${expected_features}' actual='${GEMM_GATE_BENCH_FANDHE_FEATURES}'" >&2
-    echo "  label '${LABEL}' を off/on 取り違えたまま計測を続けると性能値を誤る" >&2
-    echo "  ため測定を中止する（fail-closed。security.md A08。#1337）。" >&2
+  # イシュー #1337・#1438: manifest の bench_fandhe_features フィールドは
+  # 旧計測専用 cargo feature（#1337 導入）を撤去した後もキー自体は JSON
+  # 形状互換のため空文字固定で残す（record_manifest 参照）。旧 on 腕
+  # （feature 有効時にバイナリの中身〈readout 経路〉が異なっていた）の
+  # manifest を GEMM_GATE_SKIP_BUILD=1 で誤再利用すると、既に撤去済みの
+  # feature 分岐を前提とした古いバイナリを正式経路として扱ってしまう
+  # ため、非空値が記録されている manifest は無条件に fail-closed で拒否
+  # する（性能値を捏造しない。security.md A08。#1438）。
+  local recorded_features
+  recorded_features=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bench_fandhe_features',''))" "$MANIFEST" 2>/dev/null || true)
+  if [[ -n "$recorded_features" ]]; then
+    echo "ERROR: manifest ($MANIFEST) に旧計測専用 cargo feature 有効時の" >&2
+    echo "  記録（bench_fandhe_features='${recorded_features}'）が残っている。" >&2
+    echo "  当該 feature は #1438 で撤去済みのため、この manifest は現在の" >&2
+    echo "  bench-fandhe（借用ビュー readout 常時有効）とは別物のバイナリを" >&2
+    echo "  指している。GEMM_GATE_SKIP_BUILD を外して label '${LABEL}' を" >&2
+    echo "  再ビルドすること（fail-closed。security.md A08）。" >&2
     exit 1
   fi
-  echo "== feature 検証 OK: bench_fandhe_features='${GEMM_GATE_BENCH_FANDHE_FEATURES}'（label '${LABEL}'） =="
+  echo "== feature 検証 OK: bench_fandhe_features=''（#1438 で常時既定経路。label '${LABEL}'） =="
+
+  # イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59K）:
+  # 上記の bench_fandhe_features 空文字検査だけでは、#1438 より前の legacy
+  # manifest（feature OFF で計測した旧経路。この場合も bench_fandhe_features
+  # は空文字のため区別がつかない）を新しい借用ビュー readout 経路として
+  # 誤って受理してしまう。manifest に `readout_method` フィールドが存在し、
+  # かつ現行の期待値と一致する場合に限り再利用可能とすることで、当該
+  # フィールド自体を持たない旧 manifest を構造的に拒否する（性能値を
+  # 捏造しない。security.md A08）。
+  local recorded_readout_method
+  recorded_readout_method=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['readout_method'] if 'readout_method' in d else '<missing>')" "$MANIFEST" 2>/dev/null || echo "<missing>")
+  if [[ "$recorded_readout_method" != "$GEMM_GATE_EXPECTED_READOUT_METHOD" ]]; then
+    echo "ERROR: manifest ($MANIFEST) の readout_method が現行の期待値と不一致。" >&2
+    echo "  expected='${GEMM_GATE_EXPECTED_READOUT_METHOD}' actual='${recorded_readout_method}'。" >&2
+    echo "  '<missing>' の場合は #1438 より前（借用ビュー readout 常時有効化" >&2
+    echo "  以前）に記録された legacy manifest であり、現在の bench-fandhe" >&2
+    echo "  バイナリとは別物のソースからビルドされた可能性がある。" >&2
+    echo "  GEMM_GATE_SKIP_BUILD を外して label '${LABEL}' を再ビルドすること" >&2
+    echo "  （fail-closed。security.md A08。#1438）。" >&2
+    exit 1
+  fi
+  echo "== readout 方式検証 OK: readout_method=${recorded_readout_method}（label '${LABEL}'） =="
+
 
   # bench-candle 側の sha256・依存解決元も同様に検証する（比較基準
   # candle 0.11.0 の同一性。P0 指摘 PRRT_kwDOTuUCJc6evCpm 対応。#1166）。
@@ -551,12 +590,6 @@ fi
 if [[ "${GEMM_GATE_SKIP_BUILD:-0}" != "1" ]]; then
   echo "== build bench-fandhe =="
   FANDHE_BUILD_ARGS=(build --release -p bench-fandhe "${CARGO_CONFIG_ARGS[@]}")
-  # イシュー #1337: `host-view-readout` feature を bench-fandhe のビルドへ
-  # 反映する（`GEMM_GATE_PATCH_FACADE_PATH` 併用済みは冒頭の allowlist
-  # 検証で保証済み）。
-  if [[ -n "$GEMM_GATE_BENCH_FANDHE_FEATURES" ]]; then
-    FANDHE_BUILD_ARGS+=(--features "$GEMM_GATE_BENCH_FANDHE_FEATURES")
-  fi
   if ! cargo "${FANDHE_BUILD_ARGS[@]}" 2>build-err.tmp; then
     tail -40 build-err.tmp
     # ビルド失敗はまだ検証前のため最終 $SKIP には触れず、失敗内容は標準出力

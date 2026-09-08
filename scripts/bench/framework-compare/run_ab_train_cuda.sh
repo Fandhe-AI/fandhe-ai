@@ -29,11 +29,40 @@ if [[ -z "$LABEL" || ! "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 
+# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）に加え
+# PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）: `run_all.sh` と
+# 同じ理由で `GEMM_GATE_PATCH_FACADE_PATH`（任意。`crates/facade` への
+# path patch）を導入し、指定時のみビルドを解放する。実行拒否ガード
+# （`bench_fandhe_require_facade_patch`。空文字判定で常に exit する）は、
+# 既存の計測結果・ログを初期化する `: > "$OUT"`／`: > "$SKIP"` より前に
+# 置く。後ろに置くと、通常起動しただけでガードに拒否される前に既存
+# ファイルが空へ初期化されてしまい、過去の計測結果が失われる（データ
+# 破壊。security.md A08）。
+source ./bench_fandhe_pin_guard.sh
+bench_fandhe_require_facade_patch "run_ab_train_cuda.sh" "${GEMM_GATE_PATCH_FACADE_PATH:-}"
+
+# A03 インジェクション対策（run_gemm_gate.sh と同一方針）。
+CARGO_CONFIG_ARGS=()
+if [[ -n "${GEMM_GATE_PATCH_FACADE_PATH:-}" ]]; then
+  if [[ "$GEMM_GATE_PATCH_FACADE_PATH" == *'"'* || "$GEMM_GATE_PATCH_FACADE_PATH" == *'\'* ]]; then
+    echo "ERROR: GEMM_GATE_PATCH_FACADE_PATH に '\"' または '\\' を含めることはできない" >&2
+    exit 1
+  fi
+  CARGO_CONFIG_ARGS+=(--config "patch.crates-io.fandhe-ai.path=\"${GEMM_GATE_PATCH_FACADE_PATH}\"")
+fi
+
 OUT="results/raw/results-dgx-ab-${LABEL}.jsonl"
 SKIP="results/raw/skipped-dgx-ab-${LABEL}.log"
 mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
+
+# PR #1452 codex-review P2 指摘（PRRT_kwDOTuUCJc6gKI3z）: `run_all.sh` と
+# 同じ理由で、本スクリプトも常に path patch 付きで `cargo build` する
+# ため、`bench_fandhe_pin_guard.sh` 共有のバックアップ・復元 EXIT trap
+# （`run_ab_gemm_metal.sh` と同一設計）で workspace の `Cargo.lock`
+# （承認済みピン固定）を必ず元へ戻す。
+bench_fandhe_setup_lock_restore_trap
 
 # fail-closed（AGENTS.md）: run() 内の個々の起動失敗はログに記録しつつ計測を
 # 継続する（1 回の失敗で残りの試行を打ち切らない）が、スクリプト全体としては
@@ -53,8 +82,8 @@ run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
   rm -f err.tmp
 }
 
-echo "== build bench-fandhe =="
-if ! cargo build --release -p bench-fandhe 2>build-err.tmp; then
+echo "== build bench-fandhe ${CARGO_CONFIG_ARGS[*]} =="
+if ! cargo build --release -p bench-fandhe "${CARGO_CONFIG_ARGS[@]}" 2>build-err.tmp; then
   tail -40 build-err.tmp
   echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >> "$SKIP"
   echo "  -> BUILD FAILED (recorded in $SKIP)"

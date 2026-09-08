@@ -1,0 +1,41 @@
+イシュー #1438: host-view-readout を bench-fandhe の既定経路へ取り込み feature ゲートを
+撤去し、3 バックエンドの candle 比ゲートを再計測する。実測日 2026-09-08。
+
+## CUDA / CPU（DGX Spark GB10。<cuda-node>）
+- GPU: NVIDIA GB10, driver 580.173.02
+- OS: Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64
+- 計測直前の GPU 空き判定: `nvidia-smi --query-compute-apps` に常駐 2 プロセス（ComfyUI/Kokoro 系。
+  used_gpu_memory 170 MiB・870 MiB）のみ。`utilization.gpu` 0%
+- before（legacy）腕開始時 load average: 0.04 0.03 0.02
+- after（default）腕終了時 GPU 使用率: 8%
+- CPU（dgx-cpu）腕終了時 load average（legacy）: 5.12 3.46 1.74／（default）: 4.77 3.55 1.90
+- rustc: 1.97.0（`~/.cargo/env` 経由）
+
+## Metal / CPU（Apple M4 Max。<metal-node>）
+- OS: macOS 26.6.2 (25G83)
+- Chip: Apple M4 Max, 16 cores (12P+4E)
+- 高負荷共有環境（他セッション並走。`uptime` 実測: legacy 腕開始前 load average
+  5.72 8.84 10.29 → Metal legacy 腕終了時 25.54 12.54 10.76 → Metal default 腕終了時
+  11.09 11.16 10.41）。フェーズ 1 安定性ゲートは run_gemm_gate.sh に組み込まれていない
+  （candle 比ゲートは高負荷下でも 5 回計測中央値をそのまま記録する仕様）ため、N=4096 の
+  before（legacy）腕は spread（40.857〜64.843 ms）が 1.5 倍を超えており負荷ノイズの影響が
+  疑われる（`compare_gemm_ab-metal-m4max.md` の判定注意欄に明記）。それでも after/before は
+  全 3 サイズで 1.00 未満（非後退方向のシグナル）であり、判定を覆す方向のノイズではない。
+  ただし before/after は同一マシン上で連続実行されており負荷変動と readout 切替の効果を
+  分離できていないため、この非後退方向のシグナル自体は参考結果（暫定）にとどまり、Metal の
+  既定化を無条件の ADOPT として断定するものではない（PR #1452 codex-review P2 是正。
+  詳細・再計測条件は `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13.5 を参照）。
+
+## 計測プロトコル
+- before（legacy）腕: base コミット `fddca17`（origin/main。#1437 マージ直後）の
+  `scripts/bench/framework-compare/bench-fandhe` ソース（旧 `host-view-readout` cargo
+  feature・既定 OFF＝legacy `to_tensor()+to_vec()` 経路）
+- after（default）腕: 本 PR（イシュー #1438）HEAD の bench-fandhe ソース（借用ビュー
+  readout が既定経路・cargo feature 撤去済み）
+- 両腕とも `GEMM_GATE_PATCH_FACADE_PATH` で本 PR HEAD の同一 `crates/facade` ツリーを
+  path patch 指定（facade ソースを揃え、readout 経路の差だけを分離する。#1337/#1437 の
+  「off 腕 registry・on 腕 path」という facade ソース不一致の反省を踏まえる）
+- 各腕は同一ノード内で連続実行（before → after の順）。CUDA・Metal・CPU(dgx)・CPU(m4max)
+  は互いに独立したノード／リソースのため並列実行した
+- 計測後 `git diff --exit-code scripts/bench/framework-compare/Cargo.lock` を確認し、
+  path patch による Cargo.lock の意図しない書き換えがないことを検証した（差分なし）

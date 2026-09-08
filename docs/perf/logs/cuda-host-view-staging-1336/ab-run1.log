@@ -1,22 +1,22 @@
     Finished `release` profile [optimized] target(s) in 0.02s
-     Running tests/host_view_staging_readout_ab_1336.rs (/home/<cuda-node-user>/work/target-fandhe-ai/release/deps/host_view_staging_readout_ab_1336-4df91e7f7b51bec9)
+     Running tests/host_view_staging_readout_ab_1336.rs (<local build path redacted>/deps/host_view_staging_readout_ab_1336-4df91e7f7b51bec9)
 
 running 1 test
 test host_view_staging_readout_ab ... phase,n,bytes_mib,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms
-before,1024,4.0000,5.7732,0.2471,0.2483,0.2490,0.2501,0.2539
-after_pageable,1024,4.0000,35.8963,0.2569,0.2585,0.2598,0.2606,0.2620
-after_pinned,1024,4.0000,0.8524,0.2049,0.2057,0.2064,0.2074,0.2092
+before,1024,4.0000,2.4130,0.4222,0.4232,0.4240,0.4243,0.4257
+after_pageable,1024,4.0000,44.2349,0.2654,0.2673,0.2680,0.2685,0.2713
+after_pinned,1024,4.0000,0.8827,0.2082,0.2097,0.2108,0.2113,0.2136
 note: N=1024（4.0 MiB）は glibc mmap 閾値（32 MiB）未満のため、after 系列の改善が観測されなくても病態不成立とは判断しない（doc §5 ゲート B 参照）
-before,2048,16.0000,12.4558,0.8964,0.9002,0.9016,0.9033,0.9064
-after_pageable,2048,16.0000,1.2621,0.9084,0.9126,0.9146,0.9157,0.9206
-after_pinned,2048,16.0000,2.8489,0.7811,0.7850,0.7878,0.7894,0.7936
+before,2048,16.0000,9.1622,1.3321,1.3339,1.3354,1.3377,1.3405
+after_pageable,2048,16.0000,1.3289,0.9257,0.9294,0.9319,0.9338,0.9368
+after_pinned,2048,16.0000,2.8653,0.7413,0.7429,0.7446,0.7459,0.7479
 note: N=2048（16.0 MiB）は glibc mmap 閾値（32 MiB）未満のため、after 系列の改善が観測されなくても病態不成立とは判断しない（doc §5 ゲート B 参照）
-before,4096,64.0000,38.6414,25.3864,25.5666,29.7540,32.3014,34.6804
-after_pageable,4096,64.0000,20.7816,3.1664,3.1853,3.1915,3.1969,3.2102
-after_pinned,4096,64.0000,11.0383,3.0220,3.0295,3.0335,3.0361,3.0430
+before,4096,64.0000,36.4170,23.9018,25.3203,26.5788,27.9960,28.2526
+after_pageable,4096,64.0000,24.6502,3.3307,3.3369,3.3421,3.3442,3.3489
+after_pinned,4096,64.0000,11.0811,3.1055,3.1105,3.1196,3.1235,3.1438
 release_host_staging,pageable,88080384
 release_host_staging,pinned,88080384
 ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.17s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.01s
 
