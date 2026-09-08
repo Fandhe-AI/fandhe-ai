@@ -30,8 +30,10 @@
   確証実験（§7）で、off 腕も on 腕と同じ低速状態に収束することを確認し、
   機構仮説を裏付けた。
 - #1437 への是正候補として、事前タッチ済み宛先を再利用する読み出し
-  （腕 `PretouchedReusedDest` が全 N で最速）を候補 A として提示する
-  （§10）。
+  （腕 `PretouchedReusedDest` が全 N で **d2h が最速**）を候補 A として
+  提示する。ただし N=2048 の bimodal fast 側（`BorrowedKeepAlive` 自体が
+  既に高速な run）では `host_read` 増加が `d2h` 削減を上回りネットで
+  約 +1.2 ms 後退する（比較元を統一した場合の再評価。§10）。
 
 ## 1. 背景
 
@@ -222,15 +224,31 @@ N=1024・`MALLOC_MMAP_THRESHOLD_=67108864`（64 MiB。バッファサイズ 4 Mi
 
 Layer B の腕別実測（§6）から、以下の優先順位で候補を提示する。
 
-- **候補 A（推奨）**: `memory::readback` の D2H 宛先を事前タッチ済み
-  ステージングバッファへ変え、tape 所有用に copy-out する。`Pretouched
-  ReusedDest` 腕が **全 N・全ケースで d2h が最速**（N=1024: 0.076〜
-  0.078 ms・N=2048: 0.283〜0.285 ms・N=4096: 1.128 ms。§6・§7）であり、
-  `MALLOC_MMAP_THRESHOLD_` の probabilistic な挙動（§6 の bimodal・§9
-  の大形状での効果減衰）に依存しない決定的な解決になる。`host_read`
-  区間（copy-out のコスト）は増えるが、d2h 削減分が上回る
-  （N=1024: d2h 削減 -30〜-39 ms に対し host_read 増加 +1.5〜1.8 ms・
-  N=2048: d2h 削減 -4〜-125 ms に対し host_read 増加 +0.1〜1.0 ms）。
+- **候補 A（条件付き推奨）**: `memory::readback` の D2H 宛先を事前
+  タッチ済みステージングバッファへ変え、tape 所有用に copy-out する。
+  `PretouchedReusedDest` 腕が **全 N・全ケースで d2h が最速**（N=1024:
+  0.076〜0.078 ms・N=2048: 0.283〜0.285 ms・N=4096: 1.128 ms。§6・§7）
+  であり、`MALLOC_MMAP_THRESHOLD_` の probabilistic な挙動（§6 の
+  bimodal・§9 の大形状での効果減衰）に依存しない決定的な解決になる。
+  `host_read` 区間（copy-out のコスト）は増えるため、d2h 削減量と
+  host_read 増加量は **同一比較元**（on 腕の再現である
+  `BorrowedKeepAlive`）に統一して評価する必要がある（d2h 削減量を
+  `BorrowedKeepAlive` 比、host_read 増加量を `LegacyToVec` 比のように
+  比較元を混在させると、下記 N=2048 fast 側のネット後退が埋もれる）:
+  - **N=1024**（`BorrowedKeepAlive` 比）: d2h 削減 -29.9〜-39.0 ms に
+    対し host_read 増加 +1.5〜1.8 ms → 常にネット改善（約 -28〜-37 ms）
+  - **N=2048**（`BorrowedKeepAlive` 比。bimodal の run1/run2/run3
+    それぞれ）: d2h 削減は run1 -125.2 ms・run2 **-4.5 ms**・run3
+    -125.3 ms、host_read 増加は 3 run とも +5.7〜+6.1 ms。
+    `BorrowedKeepAlive` が slow 側（run1/run3。3 回中 2 回）ならネット
+    改善（約 -119 ms）だが、`BorrowedKeepAlive` が既に fast 側
+    （run2。動的 mmap 閾値がたまたま有利に適応済みのケース）だと
+    **ネットで約 +1.2 ms 後退する**（d2h 削減 -4.5 ms < host_read
+    増加 +5.7〜6.1 ms）。すなわち候補 A は「slow 側を高速化する」代わり
+    に「fast 側をわずかに遅くする」トレードオフを持ち、bimodal の
+    どちら側が定常状態かに依存して net の符号が変わりうる。N=2048
+    bimodal の発生条件は未特定（§11）のため、#1437 での採否判断は
+    このトレードオフを踏まえて行う必要がある
   `HostStagingCache`（#1336）の再利用が自然な実装先候補になる
   （既存の `Pageable` 種別・世代検査の仕組みをそのまま `readback` 経路
   へ繋げる）

@@ -71,6 +71,18 @@
 //! # 実行時は必ず `--test-threads=1`（同一 GPU 上の競合を避ける。
 //! `gemm_reuse_phase_diag_tests.rs` と同じ理由）
 //!
+//! # プロセス分離実行（#1442 レビュー指摘対応）
+//!
+//! `*_all_arms`／`*_n1024`／`*_n2048`／`*_n4096` は 4 腕を同一プロセス
+//! 内で順に実行するため、glibc の動的 mmap 閾値適応・`keep_alive` の
+//! 一括解放が後続の腕へアロケータ状態として引き継がれうる。腕間の
+//! 独立性を保証した比較が必要な場合はファイル末尾の単一腕専用テスト
+//! （`readout_regression_diag_n{1024,2048,4096}_{legacy_to_vec,
+//! borrowed_keep_alive,borrowed_with_dummy_alloc_free,
+//! pretouched_reused_dest}`）を使う。cargo test は単一テスト名で
+//! filter すると新規プロセスを起動するため、これらを個別に呼べば
+//! 腕ごとに独立したプロセス状態で計測できる。
+//!
 //! # メモリ使用量
 //!
 //! keep-alive は N=4096・1 腕あたり (20 warmup + 20 測定) ×
@@ -234,7 +246,20 @@ fn measure_one_readout_trial(
 
             let t = Instant::now();
             let checksum = checksum_f64(&out);
-            let dummy: Vec<f32> = vec![0.0f32; out.len()];
+            // ゼロ初期化（`vec![0.0f32; n]`）だけでは、glibc の mmap
+            // 経由確保がカーネルのゼロページ（COW）で応答しうるため
+            // 物理ページへの実書き込みを保証できない。全要素へ非ゼロ
+            // 値を明示的に書き込むことで実際のページフォールト・
+            // コミットを発生させる。加えて、書き込み結果を一度も
+            // 読み出さない dead store は最適化で除去されうるため、
+            // 確保・書き込みの両方を `std::hint::black_box` で観測
+            // 境界に包み、コンパイラによる除去を防ぐ（#1442 レビュー
+            // 指摘対応）。
+            let mut dummy: Vec<f32> = std::hint::black_box(vec![0.0f32; out.len()]);
+            for (i, x) in dummy.iter_mut().enumerate() {
+                *x = std::hint::black_box(i as f32 + 1.0);
+            }
+            std::hint::black_box(&dummy);
             let host_read_secs = t.elapsed().as_secs_f64();
             drop(dummy);
 
@@ -397,6 +422,93 @@ fn readout_regression_diag_n4096() {
         run_size_arm(4096, arm);
     }
 }
+
+/// 単一腕・単一サイズ限定の分離実行エントリ（#1442 レビュー指摘対応）。
+///
+/// 上記の `*_n1024`／`*_n2048`／`*_n4096` は 4 腕を同一プロセス内で順に
+/// 実行するため、glibc の動的 mmap 閾値適応・`keep_alive` の一括解放が
+/// 後続の腕へ状態として引き継がれうる（例: `LegacyToVec` が先に free を
+/// 発生させて以降の腕の確保が既タッチページを再利用できてしまう等）。
+/// 「free がないため閾値が適応しない」という H1 の機構は本来腕ごとに
+/// 独立したプロセス状態で検証すべきであり、この汚染の有無自体を切り
+/// 分けるため、腕単体を新規プロセスとして起動できる入口を用意する。
+/// `cargo test --release -p fandhe-ai-backend-cuda --lib
+/// readout_regression_diag_n2048_borrowed_keep_alive -- --ignored
+/// --test-threads=1` のように単一テスト名で filter すれば、cargo test
+/// が腕ごとに新規プロセスを起動するため、他腕のアロケータ状態を一切
+/// 引き継がない計測になる。
+macro_rules! single_arm_test {
+    ($fn_name:ident, $n:expr, $arm:expr) => {
+        #[test]
+        #[ignore]
+        fn $fn_name() {
+            run_size_arm($n, $arm);
+        }
+    };
+}
+
+single_arm_test!(
+    readout_regression_diag_n1024_legacy_to_vec,
+    1024,
+    ReadoutArm::LegacyToVec
+);
+single_arm_test!(
+    readout_regression_diag_n1024_borrowed_keep_alive,
+    1024,
+    ReadoutArm::BorrowedKeepAlive
+);
+single_arm_test!(
+    readout_regression_diag_n1024_borrowed_with_dummy_alloc_free,
+    1024,
+    ReadoutArm::BorrowedWithDummyAllocFree
+);
+single_arm_test!(
+    readout_regression_diag_n1024_pretouched_reused_dest,
+    1024,
+    ReadoutArm::PretouchedReusedDest
+);
+
+single_arm_test!(
+    readout_regression_diag_n2048_legacy_to_vec,
+    2048,
+    ReadoutArm::LegacyToVec
+);
+single_arm_test!(
+    readout_regression_diag_n2048_borrowed_keep_alive,
+    2048,
+    ReadoutArm::BorrowedKeepAlive
+);
+single_arm_test!(
+    readout_regression_diag_n2048_borrowed_with_dummy_alloc_free,
+    2048,
+    ReadoutArm::BorrowedWithDummyAllocFree
+);
+single_arm_test!(
+    readout_regression_diag_n2048_pretouched_reused_dest,
+    2048,
+    ReadoutArm::PretouchedReusedDest
+);
+
+single_arm_test!(
+    readout_regression_diag_n4096_legacy_to_vec,
+    4096,
+    ReadoutArm::LegacyToVec
+);
+single_arm_test!(
+    readout_regression_diag_n4096_borrowed_keep_alive,
+    4096,
+    ReadoutArm::BorrowedKeepAlive
+);
+single_arm_test!(
+    readout_regression_diag_n4096_borrowed_with_dummy_alloc_free,
+    4096,
+    ReadoutArm::BorrowedWithDummyAllocFree
+);
+single_arm_test!(
+    readout_regression_diag_n4096_pretouched_reused_dest,
+    4096,
+    ReadoutArm::PretouchedReusedDest
+);
 
 #[cfg(test)]
 mod pure_unit_tests {
