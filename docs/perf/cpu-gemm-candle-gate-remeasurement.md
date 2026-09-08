@@ -1992,7 +1992,14 @@ cpu_path.txt`）と、各施策の実コード状態を突合した帰属表:
   average は実測開始時 6.06・完了時 7.87 と上昇。`run_gemm_gate_cpu-dgx-*.log` の
   `before`/`after` status）。**DGX も M4 Max と同様、専有ゲート通過後の計測ウィンドウ中に
   load average が再上昇している**
-- M4 Max 実行順: 正式系列（08:18:53〜08:19:34 UTC）→ 参考系列（08:20:01〜08:20:49 UTC）
+- M4 Max 実行順: 正式系列（`0.7.0-1321`。専有ゲート通過〈08:18:53 UTC〉で開始し、参考系列開始
+  （`gate-m4max.log` の `08:20:01 UTC`）までに完了。macOS `uptime` は秒精度を持たないため
+  `cpu status (before)/(after)` は分単位表示（before 17:19 JST=08:19 UTC・after 17:20 JST=
+  08:20 UTC。load average は 5.62→10.92 と上昇）にとどまり、DGX（Linux `uptime` で秒精度
+  あり）のように開始・完了を秒単位で確定できない。manifest `recorded_at`（`08:19:34 UTC`）
+  はビルド・バイナリ検証完了直後に記録された時刻であり、計測完了時刻ではない
+  （旧稿はこれを完了時刻と誤記していた。是正: #1321 codex-review 指摘）
+  → 参考系列（08:20:01〜08:20:49 UTC）
 - 4 系列とも manifest で `fandhe_ai_source`（正式=`registry`、参考=`path:<絶対パス>`）・
   `candle_core_source=registry`・`bench_fandhe_features=""` を確認済み。生データは 45 行・
   `skipped-*.log` は空
