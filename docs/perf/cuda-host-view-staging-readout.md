@@ -303,7 +303,12 @@ Cursor Bugbot が同一箇所を独立に指摘。一致度が高い）。
 2. **`gemm` 内 `readback` のステージング化**: `gemm.rs::run_f32_kernel` の
    `readback` ヘルパー自体を `host_staging` 相当のキャッシュへ結線する
    ことは自然な後続候補だが、本イシューのスコープ外（自動運転のため
-   Issue 起票はしない。将来 issue 化を検討）。
+   Issue 起票はしない。将来 issue 化を検討）。**追記（#1436）**:
+   `host-view-readout` feature 有効時の CUDA reuse N=1024/2048 後退は、
+   まさにこの `readback` 宛先の事前タッチ未実施が原因と実測で確定した
+   （`docs/perf/cuda-host-view-readout-small-shape-regression.md`
+   §8・§10 候補 A）。#1437 の是正実装で本項目の「自然な後続候補」を
+   実装に格上げする想定。
 3. **キャッシュ可能 pinned（フラグ 0）**: `driver::result::malloc_host` +
    自作 `HostSlice` 実装は unsafe 面が広がるため本イシューでは実装しない
    （2.2 節）。5 節の**是正前の参考値**では `Pinned`（WRITECOMBINED）が
