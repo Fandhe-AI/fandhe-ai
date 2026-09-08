@@ -101,7 +101,26 @@ bench_fandhe_require_facade_patch "run_gemm_gate.sh" "${GEMM_GATE_PATCH_FACADE_P
 # （`readout_method`）を明示的に記録し、この値が現行の期待値と一致する
 # manifest だけを再利用可能とすることで、フィールド自体が存在しない
 # （#1438 以前の）旧 manifest を構造的に拒否する。
-GEMM_GATE_EXPECTED_READOUT_METHOD="borrowed-view-default-1438"
+#
+# PR #1452 P2 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gLro7）: 期待値は
+# device 別に分ける。Metal は `bench-fandhe` 側の runtime 判定
+# （`readout_uses_borrowed_view`。`bench-fandhe/src/main.rs`）により
+# 借用ビューではなく旧 legacy 経路（`to_tensor()` + `.to_vec()`）を維持
+# するため、CUDA/CPU と同一の識別子 `borrowed-view-default-1438` を
+# Metal の manifest にも記録すると、(1) 現在の Metal バイナリの実際の
+# readout 経路（legacy）と識別子の意味が食い違う、(2) この runtime 分岐
+# 導入前（#1438 で借用ビューが Metal にも一律適用されていたコミット
+# 29cf401 時点）の Metal バイナリ・manifest が同じ識別子を持つため、
+# `GEMM_GATE_SKIP_BUILD=1` で当時の manifest を誤って現行の Metal legacy
+# 経路として再利用できてしまう、という 2 つの取り違えが起こる。Metal
+# 限定で別の識別子 `legacy-metal-1452` を用い、`readout_method` の値
+# そのもので経路の意味（借用ビューか legacy か）と対象 device が一意に
+# 決まるようにする。
+if [[ "$DEVICE" == "metal" ]]; then
+  GEMM_GATE_EXPECTED_READOUT_METHOD="legacy-metal-1452"
+else
+  GEMM_GATE_EXPECTED_READOUT_METHOD="borrowed-view-default-1438"
+fi
 
 
 # device ごとのノードタグ（出力ファイル名の識別子。cuda=dgx〈DGX Spark
