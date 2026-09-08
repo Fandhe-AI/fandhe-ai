@@ -31,7 +31,12 @@
 - 転送: rsync（`.gitignore` フィルタ + 明示除外）。`.rev-stamp` がノード側で `ced4d14f8acf08499308142c19e3ea34e9a27097` と一致することを確認。転送後 secrets grep（`.env*`／`settings.local.json`／`real-hardware-verification-env.local.md`）は 0 件
 - trusted-hosts: `gemm-gate-trusted-hosts.local` をノード上で生成（`hostname`＝`spark-dbd9`・`/etc/machine-id` の実値。Mac から転送していない）
 - 専有ゲート: 1 分 load average < 6.0 を 30 秒間隔で 2 回連続確認。**1 回目の試行（`orchestrate.sh`）は `CARGO_TARGET_DIR` を同期ツリー外（`~/work/target-fc-1321`）へ分離したところ `run_gemm_gate.sh` が `./target/release/...` を固定参照する実装のため manifest 記録に失敗（`formal exit=1`）。原因判明後 `CARGO_TARGET_DIR` を外し `./target`（隔離ディレクトリ内。計測後にディレクトリごと削除されるため恒久キャッシュ分離は不要と判断）で再実行（`orchestrate2.sh`）**。専有ゲートは 08:14:23〜08:14:53 UTC に 2 回連続 load1<6.0（0.29→0.50）で通過（`gate-dgx.log`）
-- 実行順: 正式系列（`0.7.0-1321`。08:14:53〜08:18:00 UTC）→ 参考系列（`head-ced4d14-1321`。08:18:48〜08:19:34 UTC）
+- 実行順（起動試行 2 回目・成功分。`orchestrate.sh` の 1 回目は 08:14:53〜08:16:07 UTC に両系列とも
+  `exit=1` で失敗しており実測に含まれない）: 正式系列（`0.7.0-1321`。ビルド完了後の実測は
+  08:18:00〜08:18:48 UTC。load average は実測開始時 5.30・完了時 6.58 と上昇）→ 参考系列
+  （`head-ced4d14-1321`。実測は 08:18:54〜08:19:34 UTC。load average は実測開始時 6.06・完了時
+  7.87 と上昇。`run_gemm_gate_cpu-dgx-*.log` の `before`/`after` status）。DGX も M4 Max（下記）と
+  同様、専有ゲート通過後の計測ウィンドウ中に load average が再上昇している
 - 完了時 load average: `5.23, 3.68, 1.62`（`uptime-dgx.log`）
 - 秘密情報 grep（回収後）: 短縮ホスト名（`spark-dbd9`。信頼済みタグとして precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で許容されている表記）以外の内部実値は本ファイル・生成物のいずれにも含めていない。`/etc/machine-id`・`IOPlatformUUID` の実値は env_info.txt を含むどの生成物にも記載していない（trusted-hosts ファイルはノード上で生成しノード上のまま残置。回収対象に含めていない）
 
@@ -57,6 +62,6 @@
 | M4 Max | 0.7.0-1321（正式） | 0.981 未達 | 0.887 未達 | 0.891 未達 |
 | M4 Max | head-ced4d14-1321（参考） | **1.133 達成** | **1.169 達成** | **1.051 達成** |
 
-fandhe-ai 側は 4 系列・全 120 run（reuse 15 + fresh 15 × 4 系列 = 実質 60 reuse + 60 fresh 相当。
-各系列 45 行 ×4 = 180 行中 fandhe-ai 側 90 行）で `parity_fail_count=0` を確認（`compare_gemm_gate-*.md` の
+fandhe-ai 側は 4 系列・全 120 run（各系列 reuse 15 + fresh 15 = 30 run ×4 系列 = reuse 60 + fresh 60。
+各系列 45 行 ×4 = 180 行中 fandhe-ai 側 120 行）で `parity_fail_count=0` を確認（`compare_gemm_gate-*.md` の
 「fandhe-ai」列がすべて `0/<total>`）。

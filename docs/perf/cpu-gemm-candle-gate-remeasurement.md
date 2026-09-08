@@ -1977,13 +1977,21 @@ cpu_path.txt`）と、各施策の実コード状態を突合した帰属表:
 
 - 両実機とも本イシュー専用の隔離ディレクトリで計測（DGX: `~/work/fc-1321/
   rust-ai-library-run/`・計測後削除済み。M4 Max: 本 worktree を直接使用）
-- DGX 専有ゲート: 08:14:23〜08:14:53 UTC に 2 回連続 load1<6.0（0.29→0.50）で通過
+- DGX 専有ゲート: 08:14:23〜08:14:53 UTC に 2 回連続 load1<6.0（0.29→0.50）で通過。
+  ただし直後の 1 回目の起動試行（`orchestrate.sh`）は `CARGO_TARGET_DIR` 分離に起因する
+  manifest 記録失敗（`formal exit=1`／`reference exit=1`。08:14:53〜08:16:07 UTC）に終わり、
+  原因判明後の 2 回目の起動試行（`orchestrate2.sh`。08:16:54 UTC 開始）で成功している
+  （`gate-dgx.log`）。以下の実行順・実測時刻は成功した 2 回目の試行のもの
 - M4 Max 専有ゲート: 08:18:53 UTC に load1=4.34 で 2 回連続 load1<6.0 を満たし通過（開始時
   load average 6.48〜8.26 の共有負荷から低下したタイミングで通過）。**ただし参考系列計測
   完了時点で load average が 9.27 まで再上昇しており、計測ウィンドウ中に他セッションの
   並走負荷が増加した可能性がある**（詳細・時系列は
   `docs/perf/logs/cpu-gemm-candle-gate-1321/env_info.txt`「Apple M4 Max」節）
-- DGX 実行順: 正式系列（08:14:53〜08:18:00 UTC）→ 参考系列（08:18:48〜08:19:34 UTC）
+- DGX 実行順: 正式系列（ビルド完了後の実測は 08:18:00〜08:18:48 UTC。load average は
+  実測開始時 5.30・完了時 6.58 と上昇）→ 参考系列（実測は 08:18:54〜08:19:34 UTC。load
+  average は実測開始時 6.06・完了時 7.87 と上昇。`run_gemm_gate_cpu-dgx-*.log` の
+  `before`/`after` status）。**DGX も M4 Max と同様、専有ゲート通過後の計測ウィンドウ中に
+  load average が再上昇している**
 - M4 Max 実行順: 正式系列（08:18:53〜08:19:34 UTC）→ 参考系列（08:20:01〜08:20:49 UTC）
 - 4 系列とも manifest で `fandhe_ai_source`（正式=`registry`、参考=`path:<絶対パス>`）・
   `candle_core_source=registry`・`bench_fandhe_features=""` を確認済み。生データは 45 行・
@@ -2043,7 +2051,8 @@ parity_scaled_abs_bound   = 1.525878e-05
 parity_scaled_abs_rescued = 2
 ```
 
-fandhe-ai 側は 4 系列・全 180 行中 fandhe-ai 側 90 run（各系列 reuse 15 + fresh 15）すべてで
+fandhe-ai 側は 4 系列・全 180 行中 fandhe-ai 側 120 run（各系列 reuse 15 + fresh 15 = 30 run
+×4 系列。reuse 60 + fresh 60）すべてで
 `parity_fail_count=0` **かつ** `parity_scaled_abs_rescued=0`（`verify_strict` 経路）を確認
 した。`compare_gemm_gate.py::_parity_check` の fail-closed 検査（`rescued>0` は判定不能へ
 倒す）は発火していない。

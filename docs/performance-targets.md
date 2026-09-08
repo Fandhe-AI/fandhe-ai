@@ -454,7 +454,8 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   全 3 形状で達成（1.133／1.169／1.051 倍）、DGX Spark GB10 が N=2048 のみ達成
   （1.562 倍）。M4 Max 参考系列は専有ゲート通過後に共有負荷が再上昇した状態下の計測である
   点に留意（詳細は出典を参照）
-- fandhe-ai 側は 4 系列（正式・参考 × 両実機）・全 90 run で `parity_fail_count=0` を確認
+- fandhe-ai 側は 4 系列（正式・参考 × 両実機）・全 120 run（各系列 reuse 15 + fresh 15。
+  reuse 60 + fresh 60）で `parity_fail_count=0` を確認
   （tolerance 契約・定数・判定式・`docs/spec/` はいずれも本追補で変更していない）
 - **正式判定は不変**: 参考系列で達成した形状を正式達成にするには、`TwoDDynamic` を含む
   HEAD を次回 `release-all.yml` で crates.io へ公開しピンを更新する必要がある

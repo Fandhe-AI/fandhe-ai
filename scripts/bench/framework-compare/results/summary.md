@@ -2166,7 +2166,7 @@ Phase 0 再計測で確定した）。checksum は両実機・全セル完全一
 crates.io 公開後の見込み値）では、Phase 1〜3 結線後の HEAD が実質的に `TwoDDynamic`
 （#1313）のみを反映した状態で、Apple M4 Max が全 3 形状・DGX Spark GB10 が N=2048 のみで
 初めて candle 比ゲート達成を記録した（M4 Max 参考系列は専有ゲート通過後に共有負荷が
-再上昇した状態下の計測である点に留意）。fandhe-ai 側は 4 系列・全 90 run で
-`parity_fail_count=0` を確認。checksum・parity の詳細、diff 帰属表、tolerance 契約の状態は
+再上昇した状態下の計測である点に留意）。fandhe-ai 側は 4 系列・全 120 run（各系列
+reuse 15 + fresh 15。reuse 60 + fresh 60）で `parity_fail_count=0` を確認。checksum・parity の詳細、diff 帰属表、tolerance 契約の状態は
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §22・`docs/perf/logs/
 cpu-gemm-candle-gate-1321/` を参照。
