@@ -792,12 +792,42 @@ variant 併記」）による切り分けが必要である。
 - **#1321（candle 比ゲート再判定）への影響**: 本イシューでコード変更がないため、#1321 は
   本追補の影響を受けずに現行 `RowPanel` のまま再計測してよい
 
+## §8.3 候補 2 `vld1q_f32_x3` 経路 prefetch（イシュー #1319）
+
+候補 2「格下げ判断を覆す帯域律速の新根拠を先に示すこと」（§8「次候補への引き継ぎ・
+起票案」）の再挑戦条件に対応する。`docs/cpu-gemm-prefetch-decision.md`「2026-09-08
+追補: 帯域律速根拠の追加実測」節に実測全文を記録した（本節は要約と本ドキュメントへの
+接続のみ）。
+
+**結論: 根拠あり**。両実機（Apple M4 Max・DGX Spark GB10。DGX は異種コア構成
+〈Cortex-X925／A725〉スケジューリング交絡を `taskset` の大コア pin で除去した条件）で、
+マイクロカーネル（`NeonKernel::run`。MR=8×NR=12・`vld1q_f32_x2`/`x3` ロード）単体の
+残差感度計測（`R_dram = streamed_dram / l1_resident` の GFLOP/s 比）が事前宣言ゲート
+「`R_dram <= 0.90` かつ 5 run 中 3 run 以上で `<= 0.95`」を満たした（DGX 大コア pin:
+single 中央値 0.4392・multi 中央値 0.3183、いずれも 5/5。M4 Max: single 中央値
+0.8119・multi 中央値 0.2671、それぞれ 4/5・5/5）。packed A/B パネルが L1 に無い条件では
+`docs/cpu-gemm-prefetch-decision.md` 2026-08-19 追補が前提としていた「HW ストリーム
+プリフェッチャーによる完全隠蔽」が成立していない可能性を示す。
+
+`unsafe asm!`（PRFM 発行）は本イシューでは実装していない（ユーザー承認事項として
+`docs/cpu-gemm-prefetch-decision.md` に承認依頼の要点〈到達手段・適用箇所案・期待効果の
+上限見積り・前提条件〉を記録した）。承認後は候補 1・3 と同型の両実機 A/B（Tier 1/Tier 2
+プロトコル）で ADOPT/REJECT を判定する新イシューとして起票する。
+
+これにより候補 1（B 側 laneq ベクトル転置版。§8.2・REJECT 確定）・候補 2（本節。根拠あり・
+実装は承認待ち）・候補 3（KC 再スイープ。§8.1・REJECT 確定）の 3 候補すべてが確定した
+（Phase 3 の総括・後続候補の優先順位付けは #1321 が引き継ぐ）。
+
+実測ログ・env_info・DGX オーケストレーションスクリプト・集計スクリプトは
+`docs/perf/logs/cpu-gemm-prefetch-bandwidth-1319/`（内部ホスト名は含めない）を参照。
+
 ## 出典
 
 - イシュー #1041（本ドキュメントの起票元）・#1117（親 issue）・#1140（GB10 実機実測。本追補）・
   #1141（M4 Max 実機実測。本追補）・#1144（本番結線の要否判断）・#1315（候補 3 KC 再スイープ・
   §8.1）・#1317（候補 1 実装。`GemmDriverVariant::RowPanelBLaneqVec`）・#1318（候補 1 両実機
-  A/B・採否判定。§8.2）
+  A/B・採否判定。§8.2）・#1319（候補 2 帯域律速根拠の実測・根拠あり確定。§8.3）
+- `docs/cpu-gemm-prefetch-decision.md`「2026-09-08 追補」節（§8.3 の実測全文・承認依頼の要点）
 - `docs/perf/oss-gemm-comparison-baseline.md` §7.2・§7.3（対 gemm crate 比較ベースライン）
 - `docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/`（§8.2 実測資産・生ログ・env_info）
 - `docs/cpu-gemm-b-packing-sharing-decision.md`（B 共有化の設計判断・採用ゲート方針の前例）

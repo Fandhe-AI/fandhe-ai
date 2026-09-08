@@ -1,0 +1,10 @@
+## DGX Spark GB10 env_info (イシュー #1319)
+2026年  9月  8日 火曜日 00:48:40 UTC
+アーキテクチャ:                      aarch64
+CPU:                                 20
+モデル名:                            Cortex-X925
+モデル名:                            Cortex-A725
+NUMA ノード 0 CPU:                   0-19
+20
+rustc 1.97.0 (2d8144b78 2026-07-07)
+ 09:48:40 up 11 days, 21:15,  5 users,  load average: 1.42, 0.80, 0.31
