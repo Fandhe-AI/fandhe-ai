@@ -9,14 +9,26 @@
   後退は、**`matmul` 区間（`Var::matmul` → `readback` = `clone_dtoh` +
   `synchronize`）に完全に集中しており、`to_tensor`／`host_copy`／
   `checksum` は増分を持たない**（§5）。
-- 後退の機構は **glibc malloc の動的 mmap 閾値適応の有無**に帰着する
-  （§8・H1 **支持**）。off 腕（`readout_var` 既定経路）は反復ごとに
-  `to_vec()` で確保した 2 本目のバッファを free するため、この free が
+- 後退の機構は **glibc malloc の動的 mmap 閾値適応の有無**が有力仮説
+  である（§8・H1 **有力仮説（裏付けあり）・腕間の分離計測は未実施**。
+  §4・§11）。off 腕（`readout_var` 既定経路）は反復ごとに `to_vec()`
+  で確保した 2 本目のバッファを free するため、この free が
   `M_MMAP_THRESHOLD` を動的に引き上げ、以後 `clone_dtoh` の内部確保が
-  ヒープ（brk）領域の既タッチページを再利用できる。一方 on 腕
-  （`host-view-readout`）は free が一切発生しないため `clone_dtoh` の
-  宛先が常に未タッチの新規 mmap ページとなり、GPU の D2H 書き込みが
-  初回ページフォールト処理を伴う（§2・§8）。
+  ヒープ（brk）領域の既タッチページを再利用できる、という機構を想定
+  している。一方 on 腕（`host-view-readout`）は free が一切発生しない
+  ため `clone_dtoh` の宛先が常に未タッチの新規 mmap ページとなり、GPU
+  の D2H 書き込みが初回ページフォールト処理を伴う、という説明である
+  （§2・§8）。ただし Layer B（§6・§7）は 4 腕を同一プロセス内で
+  `LegacyToVec` → `BorrowedKeepAlive` → `BorrowedWithDummyAllocFree` →
+  `PretouchedReusedDest` の順に逐次実行しており、先行腕の free・
+  `keep_alive` 一括解放が後続腕のアロケータ状態（動的 mmap 閾値）へ
+  引き継がれる交絡がある。この交絡を排除する腕単体・プロセス分離計測
+  （§4 に入口を用意済み）は本イシューでは未実施のため、「on 腕固有の
+  free 欠如が原因」という主張は独立検証できておらず**仮説にとどまる**。
+  一方、増分が `matmul`（`d2h`）区間に集中する事実（§5）、および
+  アロケータ状態に依存しない別実装である `PretouchedReusedDest` が
+  全 N で d2h 最速という事実（§6・§7）は、交絡の影響を受けない観測
+  として確定している。
 - `HostStagingCache`（#1336）はこの経路に到達しない（§2.1・§8 H4）。
   `to_tensor` 固定費・非 contiguous 実体化（H3）・小形状固定費（H5）は
   いずれも増分を説明できず棄却できる（§8）。
@@ -93,7 +105,17 @@ gate-remeasurement.md` §13.3 で既に確認済み。本イシューでもコ�
 - Layer B: `crates/backend-cuda/src/readout_regression_diag_tests_1436.rs`
   （新規診断テスト。`#[ignore]`・`--test-threads=1`・`--release`）。
   H2D・カーネル起動・同期を共通に済ませたうえで D2H 以降（`d2h`／
-  `host_read`）のみを 4 腕で分解計測（20 warmup + 20 計測の中央値）
+  `host_read`）のみを 4 腕で分解計測（20 warmup + 20 計測の中央値）。
+  §6・§7 で報告する値は `ReadoutArm::ALL`（`LegacyToVec` →
+  `BorrowedKeepAlive` → `BorrowedWithDummyAllocFree` →
+  `PretouchedReusedDest` の順）を**同一プロセス内で逐次実行**した
+  結果であり、先行腕のアロケータ状態（動的 mmap 閾値・`keep_alive`
+  一括解放）が後続腕へ引き継がれる交絡を含む。腕単体・サイズ単体を
+  新規プロセスとして起動し交絡を排除する入口（`readout_regression_
+  diag_n{1024,2048,4096}_{legacy_to_vec,borrowed_keep_alive,
+  borrowed_with_dummy_alloc_free,pretouched_reused_dest}`。同ファイル
+  427〜509 行）を用意済みだが、本イシューでは実機実測の時間制約により
+  **未実行**（§11 に是正候補として引き継ぐ）
 - **スコープ縮小**: Layer A は各 off/on 1〜2 プロセス起動、Layer B は
   N=1024/2048 各 3 プロセス起動・N=4096 は 1 プロセス起動（計画の 5 回
   から縮小。時間制約。詳細は logs README「スコープの縮小」節）
@@ -188,13 +210,26 @@ N=1024・`MALLOC_MMAP_THRESHOLD_=67108864`（64 MiB。バッファサイズ 4 Mi
 閾値）では `LegacyToVec` が 3〜4 ms と一桁以上高速だったことと対比する
 と、**off 腕の高速性は「反復ごとの free が動的 mmap 閾値を引き上げ、
 以後の確保がヒープ内の既タッチ領域を再利用できる」ことに起因する**
-という H1 の機構を強く裏付ける。
+という H1 の機構を裏付ける。
+
+ただしこの実験でも 4 腕は同一プロセス内で `LegacyToVec` から順に
+実行しており、`LegacyToVec` はその中で最初の腕である（後続腕からの
+汚染は受けない）。したがって本実験が直接裏付けるのは「**off 腕
+（`LegacyToVec`）自身**の高速性が動的閾値適応に依存する」ことであり、これは
+off 腕単独で交絡なく確認できている。一方「on 腕（`BorrowedKeepAlive`）
+が遅いのは on 腕自身に free が無いからだ」という**on 腕側の原因特定**
+は、`BorrowedKeepAlive` が `LegacyToVec` の実行後（`LegacyToVec` の
+free 群により閾値が動的に引き上げられた状態）で計測されているため、
+この実験だけでは独立に検証できていない。§4 に用意した分離プロセス
+入口（`BorrowedKeepAlive` を単独プロセスで実行し、`LegacyToVec` の
+影響を受けない状態で同様に低速となるかを確認する）を実行することで
+初めて on 腕側の原因も確定できる（未実施。§11）。
 
 ## 8. 仮説の支持／棄却
 
 | ID | 判定 | 根拠 |
 |---|---|---|
-| H1（主） | **支持** | §5: 増分が `matmul` に集中（to_tensor／host_copy／checksum は不変）。§6: `BorrowedKeepAlive`（free なし）が `LegacyToVec`（free あり）より d2h で 7〜30 倍遅い。§6: `PretouchedReusedDest`（事前タッチ）が全 N で d2h 最速（N=1024 で 0.076 ms・N=2048 で 0.283 ms・N=4096 で 1.128 ms）。§7: `MALLOC_MMAP_THRESHOLD_` 固定で off 腕も低速化 |
+| H1（主） | **有力仮説（裏付けあり）・on 腕固有の原因特定は分離計測未実施** | §5: 増分が `matmul` に集中（to_tensor／host_copy／checksum は不変）— 交絡の影響を受けない確定観測。§6: `BorrowedKeepAlive`（free なし）が `LegacyToVec`（free あり）より d2h で 7〜30 倍遅い — ただし両腕は同一プロセス内で `LegacyToVec` → `BorrowedKeepAlive` の順に逐次実行されており、`LegacyToVec` の free 群が `BorrowedKeepAlive` 計測時の動的 mmap 閾値へ引き継がれる交絡がある。§6: `PretouchedReusedDest`（事前タッチ・別実装のためアロケータ状態の交絡を受けない）が全 N で d2h 最速（N=1024 で 0.076 ms・N=2048 で 0.283 ms・N=4096 で 1.128 ms）— 確定観測。§7: `MALLOC_MMAP_THRESHOLD_` 固定で `LegacyToVec`（off 腕再現。4 腕中最初に実行され交絡を受けない）が低速化することは確定。ただし同実験内の `BorrowedKeepAlive` は `LegacyToVec` 実行後の状態で計測されているため、「on 腕固有の free 欠如が原因」という主張はこれらの実測から独立に確認できておらず、腕単体・プロセス分離計測（§4 に入口あり・未実行）が必要 |
 | H2 | **棄却** | §6: 増分は `d2h` に現れ `host_read` は on 系 3 腕でほぼ同水準（0.53〜0.55 ms・N=1024）。GPU 書き込み後の CPU 初回読み出しコストが支配的なら `host_read` 側に出るはずだが観測されない |
 | H3 | **棄却** | Layer A の `to_tensor` は off/on とも実測で数十〜数百 ns（§5 表）であり、非 contiguous 実体化のような大きなコストは observられない |
 | H4 | **コード経路で棄却（実測でも補強）** | §2.1: 呼び出しグラフ上 `with_host_view` は `readback` から到達不能。§6: `PretouchedReusedDest`（`HostStagingCache` と同じ「事前タッチ済み宛先再利用」設計方針）が別実装のまま最速を示しており、`HostStagingCache` 固有の機構（世代検査・`Pinned`/`Pageable` 分岐）を経由せずとも同じ改善効果が得られることを確認 |
@@ -272,6 +307,23 @@ Layer B の腕別実測（§6）から、以下の優先順位で候補を提示
 
 ## 11. スコープ外・未確定事項
 
+- **H1 の on 腕固有の原因特定は分離計測未実施**（本 codex-review 指摘・
+  PR #1442 レビュー対応で判明）。§6・§7 の Layer B 実測は 4 腕を
+  `LegacyToVec` → `BorrowedKeepAlive` → `BorrowedWithDummyAllocFree` →
+  `PretouchedReusedDest` の順に同一プロセス内で逐次実行しており、
+  先行腕の free・`keep_alive` 一括解放が後続腕のアロケータ状態
+  （動的 mmap 閾値）へ引き継がれる交絡を排除できていない。§4 に
+  用意した腕単体・プロセス分離実行エントリ（`readout_regression_
+  diag_n{1024,2048,4096}_{legacy_to_vec,borrowed_keep_alive,
+  borrowed_with_dummy_alloc_free,pretouched_reused_dest}`）を
+  `cargo test --release -p fandhe-ai-backend-cuda --lib <test名> --
+  --ignored --test-threads=1` で個別プロセス起動し、`BorrowedKeepAlive`
+  単独（`LegacyToVec` の影響を受けない状態）でも同様に低速となるかを
+  確認することが、H1 を「仮説」から「確定」へ格上げするために必要。
+  本イシューでは実機実測の時間制約により未実施のため #1437 へ引き継ぐ。
+  現時点で交絡なく確定できているのは「増分が `matmul`（`d2h`）区間に
+  集中する」「`PretouchedReusedDest`（別実装で交絡を受けない）が全 N
+  で d2h 最速」の 2 点のみである
 - N=2048 bimodal の厳密な発生条件（どの起動順・ヒープ初期状態で
   slow/fast が決まるか）は未特定。#1146 の「32→33 MiB 段差」「降順
   走査限定の確率的スパイク」と同族の可能性はあるが、本イシューでは
