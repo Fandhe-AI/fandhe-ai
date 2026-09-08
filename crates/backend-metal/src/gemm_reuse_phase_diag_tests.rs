@@ -61,8 +61,9 @@
 //! 新設する」のではなく「`MetalContext::synchronize` の内部（完了
 //! バッチを `waitUntilCompleted` した直後・drop する前）にオブザーバ
 //! を差し込む」方式（`context.rs::synchronize_observed`／
-//! `#[cfg(test)] pub(crate) synchronize_with_gpu_timestamps`）でこれを
-//! 解消した。本番 `synchronize()` は no-op オブザーバのままのため
+//! `synchronize_with_gpu_timestamps`。イシュー #1259 で `pub` へ公開化
+//! し `examples/gemm_transpose_route_ab_bench.rs` からも到達可能に
+//! した）でこれを解消した。本番 `synchronize()` は no-op オブザーバのままのため
 //! ディスパッチ挙動・数値結果は不変（AC-2）。`commit_wait` は引き続き
 //! 「commit＋カーネル専有＋`waitUntilCompleted`」の合算値として扱い、
 //! `kernel_gpu`（GPUEnd−GPUStart）はその内訳の 1 項目として別途出力

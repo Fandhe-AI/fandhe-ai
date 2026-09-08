@@ -1748,9 +1748,11 @@ impl MetalGemm {
     }
 
     /// [`Self::dispatch_tiled_prepared`] と同じ NN 経路（`plan_tiled_by_
-    /// class` → `encode_tiled_plan`）を、`encode`（記録のみ）と
-    /// `synchronize`（commit + `waitUntilCompleted`）へ分離した診断専用
-    /// ヘルパ（イシュー #1189）。
+    /// class` → `encode_tiled_plan`）を、`encode`（記録のみ。commit も
+    /// `waitUntilCompleted` も行わない）で発行する共有実体（イシュー
+    /// #1189 で新設・イシュー #1259 で [`Self::diag_encode_tiled_nn`]
+    /// （診断テスト専用・ラベル不変）と [`Self::encode_tiled_prepared`]
+    /// （`pub`。ベンチ example 用）の 2 入口へ共有できるよう切り出した）。
     ///
     /// # 追加理由
     ///
@@ -1759,9 +1761,11 @@ impl MetalGemm {
     /// 公開 API からは encode（コマンドバッファへの記録）と synchronize
     /// （commit + GPU 完了待ち）を個別に計時できない。`crates/backend-metal/
     /// src/gemm_reuse_phase_diag_tests.rs`（reuse 計測境界の transfer／
-    /// sync／kernel 内訳一次測定）はこの 2 段の境界を区別する必要がある
-    /// ため、本メソッドを新設した。既存の [`Self::dispatch_tiled_prepared`]
-    /// 自体は無変更（本メソッドは新規追加のみで、既存関数を書き換えない）。
+    /// sync／kernel 内訳一次測定）・`examples/gemm_transpose_route_ab_
+    /// bench.rs`（`--gpu-timestamps`。フェーズ 1 の純カーネル時間・host
+    /// 側時間の分離）はこの 2 段の境界を区別する必要があるため、本メソッド
+    /// を新設した。既存の [`Self::dispatch_tiled_prepared`] 自体は無変更
+    /// （本メソッドは新規追加のみで、既存関数を書き換えない）。
     ///
     /// # `self.tile_class_mode` を尊重する（イシュー #1328）
     ///
@@ -1779,13 +1783,14 @@ impl MetalGemm {
     /// 前提（`measure_one_phase_trial` の「1 バッチ・1 ラベル」不変条件）
     /// を壊さない。
     ///
-    /// `#[cfg(test)]` 限定（本体ビルドには含まれない。AC-2「既存の本番
-    /// 経路・既存テストを変更しない（読み取り計測のみ）」に対応）。
-    #[cfg(test)]
+    /// `label` は呼び出し元が渡す（`ctx.encode` のバッチラベル。診断
+    /// テストは `batch.labels()` を assert するため、既存呼び出し元の
+    /// ラベル文字列は本切り出しの前後で変更しない）。
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn diag_encode_tiled_nn(
+    fn encode_tiled_nn_recorded(
         &self,
         ctx: &MetalContext,
+        label: &'static str,
         a_buf: &MetalBuffer,
         b_buf: &MetalBuffer,
         c_buf: &MetalBuffer,
@@ -1801,7 +1806,7 @@ impl MetalGemm {
         let resolved_cfg = plan.resolved_cfg;
         let swizzle_enabled = self.swizzle_enabled;
         ctx.encode(
-            "diag_encode_tiled_nn",
+            label,
             &[a_buf.raw(), b_buf.raw(), c_buf.raw()],
             None,
             |encoder| {
@@ -1822,6 +1827,73 @@ impl MetalGemm {
         )?;
 
         Ok(resolved_cfg)
+    }
+
+    /// [`Self::encode_tiled_nn_recorded`] の診断テスト専用入口（イシュー
+    /// #1189。ラベルは `"diag_encode_tiled_nn"` 固定で切り出し前と不変
+    /// ——`gemm_reuse_phase_diag_tests.rs` が `batch.labels()` を assert
+    /// するため）。`#[cfg(test)]` 限定（本体ビルドには含まれない。AC-2
+    /// 「既存の本番経路・既存テストを変更しない（読み取り計測のみ）」に
+    /// 対応）。
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn diag_encode_tiled_nn(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        self.encode_tiled_nn_recorded(
+            ctx,
+            "diag_encode_tiled_nn",
+            a_buf,
+            b_buf,
+            c_buf,
+            m_eff,
+            n_eff,
+            k_eff,
+            cfg,
+        )
+    }
+
+    /// [`Self::encode_tiled_nn_recorded`] の `pub` 入口（イシュー #1259。
+    /// ラベルは `"gemm_tiled_prepared"`）。ベンチ example
+    /// （`examples/gemm_transpose_route_ab_bench.rs` の `--gpu-timestamps`）
+    /// が encode（記録のみ）と `MetalContext::synchronize_with_gpu_
+    /// timestamps`（commit + GPU 完了待ち + タイムスタンプ取得）を分離
+    /// 計時するために使う公開版。[`Self::dispatch_tiled_prepared`]
+    /// （encode + 即時 synchronize の 1 回計測）とは異なる計測境界を
+    /// 提供するのみで、両者とも最終的に同じ [`Self::encode_tiled_plan`]
+    /// を発行するため出力（パディング後の C の中身）は同一である
+    /// （`encode` 自体は GPU 実行を伴わないため bit 一致は自明）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_tiled_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        self.encode_tiled_nn_recorded(
+            ctx,
+            "gemm_tiled_prepared",
+            a_buf,
+            b_buf,
+            c_buf,
+            m_eff,
+            n_eff,
+            k_eff,
+            cfg,
+        )
     }
 
     /// `gemm_simdgroup_tiled`（`TRANS_A`/`TRANS_B` 拡張。イシュー #1138）への

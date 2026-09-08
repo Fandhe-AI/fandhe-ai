@@ -98,8 +98,9 @@ struct BatchSlots {
     pending_pool_returns: pool_pending::PendingReturns<crate::pool::RawMetalBuffer>,
 }
 
-/// [`MetalContext::synchronize_with_gpu_timestamps`]（診断専用。イシュー
-/// #1276）が返す、完了したバッチ 1 個分の GPU タイムスタンプ。
+/// [`MetalContext::synchronize_with_gpu_timestamps`]（診断・ベンチ専用。
+/// イシュー #1276。イシュー #1259 で `pub` へ公開化）が返す、完了した
+/// バッチ 1 個分の GPU タイムスタンプ。
 ///
 /// `MTLCommandBuffer::GPUStartTime`/`GPUEndTime` は「ホスト時計上の
 /// 秒数」（`CFTimeInterval` = `f64`）で、未開始・完了通知未受領時は
@@ -107,19 +108,24 @@ struct BatchSlots {
 /// はこの `0.0` を「値なし」として扱いたいため、生値をそのまま持たず
 /// [`Self::from_raw`] で `None` へ正規化してから保持する（`0.0` を
 /// 「ホスト時計の起点」と誤読して区間計算に使う事故を型で防ぐ）。
-#[cfg(test)]
+///
+/// 公開化（イシュー #1259）の理由: `crates/backend-metal/examples/
+/// gemm_transpose_route_ab_bench.rs` は別コンパイル単位（example）の
+/// ため `#[cfg(test)] pub(crate)` の可視性からは到達できない。本番
+/// `MetalContext::synchronize()`（`context.rs` 上記）は本型・本 API を
+/// 一切経由しない no-op オブザーバのままであり、公開化そのものは本番
+/// 経路の挙動・FFI 呼び出し回数を変えない（AC-2 は不変）。
 #[derive(Debug, Clone)]
-pub(crate) struct BatchGpuTimestamps {
+pub struct BatchGpuTimestamps {
     gpu_start_secs: Option<f64>,
     gpu_end_secs: Option<f64>,
     /// バッチに記録されていたディスパッチのラベル列（`BatchMeta::
-    /// labels`）。診断テスト側が「想定どおり 1 個の GEMM ディスパッチ
-    /// だけが載っていたか（singleton `cached_context()` への他
-    /// ディスパッチ混入がないか）」を確認するために保持する。
+    /// labels`）。診断テスト・ベンチ側が「想定どおり 1 個の GEMM
+    /// ディスパッチだけが載っていたか（singleton `cached_context()`
+    /// への他ディスパッチ混入がないか）」を確認するために保持する。
     labels: Vec<&'static str>,
 }
 
-#[cfg(test)]
 impl BatchGpuTimestamps {
     /// `0.0`（未開始／完了通知未受領）を `None` へ変換して保持する。
     fn from_raw(gpu_start_secs: f64, gpu_end_secs: f64, meta: &BatchMeta) -> Self {
@@ -131,14 +137,14 @@ impl BatchGpuTimestamps {
     }
 
     /// このバッチに記録されていたディスパッチのラベル列。
-    pub(crate) fn labels(&self) -> &[&'static str] {
+    pub fn labels(&self) -> &[&'static str] {
         &self.labels
     }
 
     /// `GPUEndTime - GPUStartTime`（秒）。両者が取得できた場合のみ
-    /// `Some` を返す（`None` の伝播は診断テスト側の assert で検出する
+    /// `Some` を返す（`None` の伝播は呼び出し側の検証で検出する
     /// 設計。ファイル冒頭「GPU タイムスタンプ変種」参照）。
-    pub(crate) fn kernel_gpu_secs(&self) -> Option<f64> {
+    pub fn kernel_gpu_secs(&self) -> Option<f64> {
         let start = self.gpu_start_secs?;
         let end = self.gpu_end_secs?;
         Some(end - start)
@@ -628,22 +634,22 @@ impl MetalContext {
         })
     }
 
-    /// 診断専用（イシュー #1276。`#[cfg(test)] pub(crate)` の可視性は
-    /// `gemm.rs::MetalGemm::diag_encode_tiled_nn` と同じ方針）:
-    /// [`Self::synchronize_observed`] を GPU タイムスタンプ収集
-    /// オブザーバで呼び、完了した各バッチの
+    /// 診断・ベンチ専用（イシュー #1276 で `#[cfg(test)] pub(crate)`
+    /// として新設。イシュー #1259 で `pub` へ公開化し example から
+    /// 到達可能にした）: [`Self::synchronize_observed`] を GPU
+    /// タイムスタンプ収集オブザーバで呼び、完了した各バッチの
     /// [`BatchGpuTimestamps`] を呼ばれた順に返す。
     ///
     /// `crates/backend-metal/src/gemm_reuse_phase_diag_tests.rs`
     /// （#1189 の Layer B 分解）が `commit_wait` 区間内の純カーネル
     /// 専有時間を分離するために使う（同ファイル冒頭コメント「GPU
-    /// タイムスタンプ変種」参照）。本番 `synchronize()` は no-op
-    /// オブザーバのままのため、本メソッドの追加は本番経路の FFI
+    /// タイムスタンプ変種」参照）ほか、`examples/
+    /// gemm_transpose_route_ab_bench.rs`（#1259。`--gpu-timestamps`
+    /// opt-in）がフェーズ 1 安定性計測のラウンド別純カーネル時間・
+    /// host 側時間の分離に使う。本番 `synchronize()` は no-op
+    /// オブザーバのままのため、本メソッドの公開化は本番経路の FFI
     /// 呼び出し回数・挙動を一切変えない（AC-2）。
-    #[cfg(test)]
-    pub(crate) fn synchronize_with_gpu_timestamps(
-        &self,
-    ) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
+    pub fn synchronize_with_gpu_timestamps(&self) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
         let mut collected = Vec::new();
         let result = self.synchronize_observed(|cmd_buf, meta| {
             // SAFETY ではなく単純な safe メソッド呼び出し: `GPUStartTime`/

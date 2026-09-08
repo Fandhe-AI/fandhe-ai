@@ -158,8 +158,53 @@ pub struct StabilityResult {
 pub fn run_stability<F: FnMut()>(
     ab_config: &AbConfig,
     measurement_config: &MeasurementConfig,
-    mut workload: F,
+    workload: F,
 ) -> Result<StabilityResult, BenchError> {
+    run_stability_observed(
+        ab_config,
+        measurement_config,
+        workload,
+        |_round, _measurement| {},
+    )
+}
+
+/// [`run_stability`] のラウンド完了オブザーバ付き版（イシュー #1259）。
+///
+/// `run_stability` は各ラウンドの `protocol::run` 結果を `median_secs` へ
+/// 圧縮した直後に捨てるため、呼び出し側は「そのラウンドの計測サンプル
+/// （`Measurement::samples_secs`）が何個・どの範囲だったか」を知る手段が
+/// ない。`gemm_transpose_route_ab_bench.rs`（#1259）は 1 回のワークロード
+/// 呼び出しごとに host 側フェーズ内訳・GPU タイムスタンプを別途
+/// `RefCell<Vec<_>>` へ push しており、そのバッファのうち「どこからどこ
+/// までが測定対象サンプルか」をラウンド境界の外から知る必要がある
+/// （warmup 呼び出し分は測定対象でないため含めてはならない）。
+///
+/// `on_round` は `protocol::run` が返した直後・cooldown 前（計測区間の
+/// 外・[`AbConfig::cooldown`] の待機より前）に、ラウンド番号
+/// （`0..ab_config.rounds`。昇順で 1 回ずつ）と `&Measurement` を渡して
+/// 呼ばれる。呼び出し時点で「直前に積まれた `measurement.iters` 件」が
+/// そのラウンドの測定対象サンプルであると確定できる（`extended_warmup`
+/// の呼び出し分は `protocol::run` 内の回数ベース warmup 分とあわせて
+/// それより前に積まれている）。
+///
+/// `run_stability` は本関数を no-op オブザーバ（`|_, _| {}`）で呼ぶ薄い
+/// ラッパーであり、挙動・戻り値・エラー伝播は本関数の抽出前と完全に
+/// 同一（`context.rs::synchronize`／`synchronize_observed` と同型の
+/// 「本番は no-op オブザーバ」設計）。
+///
+/// # Errors
+///
+/// [`run_stability`] と同じ。
+pub fn run_stability_observed<F, H>(
+    ab_config: &AbConfig,
+    measurement_config: &MeasurementConfig,
+    mut workload: F,
+    mut on_round: H,
+) -> Result<StabilityResult, BenchError>
+where
+    F: FnMut(),
+    H: FnMut(usize, &protocol::Measurement),
+{
     let mut round_medians_secs = Vec::with_capacity(ab_config.rounds);
 
     for round in 0..ab_config.rounds {
@@ -170,6 +215,7 @@ pub fn run_stability<F: FnMut()>(
         );
         let measurement = protocol::run(measurement_config, &mut workload)?;
         round_medians_secs.push(measurement.median_secs);
+        on_round(round, &measurement);
 
         let is_last_round = round + 1 == ab_config.rounds;
         if !is_last_round {
@@ -395,6 +441,55 @@ mod tests {
         assert_eq!(result.round_medians_secs.len(), 4);
         // 軽量な固定回数ワークロードは全ラウンドほぼ同じ短時間のため spread は 0 近傍。
         assert!(result.spread >= 0.0);
+    }
+
+    #[test]
+    fn run_stability_observed_calls_hook_once_per_round_in_order() {
+        // イシュー #1259: フックがラウンドごとに 1 回・0 始まり昇順で
+        // 呼ばれ、`Measurement::iters` が `measurement_config.iters` と
+        // 一致すること（呼び出し側がラウンド境界を「直前 iters 件」で
+        // 正しく復元できる前提）を固定する。
+        let ab_config = AbConfig::new(4, Duration::ZERO, Duration::ZERO).unwrap();
+        let measurement_config = MeasurementConfig::new(20, 20).unwrap();
+        let observed_rounds: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+        let observed_iters: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+
+        let result = run_stability_observed(
+            &ab_config,
+            &measurement_config,
+            spin_workload,
+            |round, measurement| {
+                observed_rounds.borrow_mut().push(round);
+                observed_iters.borrow_mut().push(measurement.iters);
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*observed_rounds.borrow(), vec![0, 1, 2, 3]);
+        assert_eq!(*observed_iters.borrow(), vec![20, 20, 20, 20]);
+        assert_eq!(result.round_medians_secs.len(), 4);
+    }
+
+    #[test]
+    fn run_stability_observed_no_op_hook_matches_run_stability() {
+        // `run_stability` が `run_stability_observed` を no-op フックで
+        // 委譲する薄いラッパーであること（挙動非後退）を固定する。
+        let ab_config = AbConfig::new(4, Duration::ZERO, Duration::ZERO).unwrap();
+        let measurement_config = MeasurementConfig::new(20, 20).unwrap();
+
+        let via_wrapper = run_stability(&ab_config, &measurement_config, spin_workload).unwrap();
+        let via_observed = run_stability_observed(
+            &ab_config,
+            &measurement_config,
+            spin_workload,
+            |_round, _measurement| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            via_wrapper.round_medians_secs.len(),
+            via_observed.round_medians_secs.len()
+        );
     }
 
     #[test]

@@ -288,9 +288,10 @@ pub mod gemm;
 // `context.rs::synchronize` はイシュー #1276 で本体を `synchronize_
 // observed`（完了バッチごとのオブザーバ付き）へ切り出し、本番
 // `synchronize()` は no-op オブザーバで呼ぶ薄いラッパーへ変更した
-// （挙動・エラー伝播・ロック区間は不変。AC-2）。`#[cfg(test)] pub(crate)
-// synchronize_with_gpu_timestamps`（`BatchGpuTimestamps` を返す）が
-// `kernel_gpu`（GPUStartTime/GPUEndTime）変種の実体。
+// （挙動・エラー伝播・ロック区間は不変。AC-2）。`synchronize_with_gpu_
+// timestamps`（`BatchGpuTimestamps` を返す。イシュー #1259 で `pub` へ
+// 公開化し `examples/gemm_transpose_route_ab_bench.rs` からも到達可能に
+// した）が `kernel_gpu`（GPUStartTime/GPUEndTime）変種の実体。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_reuse_phase_diag_tests;
 // E2 特殊化版（`spec_source`／`gemm::MetalGemm::new_with_source_

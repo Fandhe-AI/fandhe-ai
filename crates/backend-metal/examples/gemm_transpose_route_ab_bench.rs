@@ -95,6 +95,50 @@
 //! `--phase1-only` はプロセス内リピートに対応しない（`--repeat=N` 等は
 //! 非対応）。#1253/#1255 の「複数回実行」は 1 回ごとに別プロセスで起動し、
 //! run ごとに env_info・uptime を独立に取る運用を想定するため。
+//!
+//! ## GPU タイムスタンプ分離計測モード（イシュー #1259）
+//!
+//! フェーズ 1 の単発スパイクが **GPU 実行時間（純カーネル時間）** に
+//! 乗るのか **host 側時間**（upload・alloc・encode・commit_wait・
+//! readback）に乗るのかを切り分けるため、`--gpu-timestamps`（opt-in・
+//! `--phase1-only` と併用可）を指定すると、フェーズ 1 の対照ワークロード
+//! を `dispatch_auto` から計装版へ**置換**する（追加パスを走らせて
+//! ROUNDS を倍増させない）。計装版は `dispatch_auto`
+//! （`GemmVariant::SimdgroupTiled` 分岐）と同一組成
+//! （upload → alloc → encode → commit_wait → readback）を公開 API
+//! （[`fandhe_ai_backend_metal::MetalGemm::encode_tiled_prepared`]・
+//! [`fandhe_ai_backend_metal::MetalContext::synchronize_with_gpu_
+//! timestamps`]）で再現しつつ、`Instant` によるホスト側フェーズ内訳と
+//! `MTLCommandBuffer::GPUStartTime`/`GPUEndTime`（`kernel_gpu`）を
+//! 呼び出しごとに記録する。対象サイズ（256〜4096）は全て 8 の倍数の
+//! ため `pad_matrix`/`unpad_matrix` は no-op・`c_buf` は `dispatch_auto`
+//! と同じ専有確保（本 example の `MetalContext` はプロセスワイド
+//! singleton ではないため `alloc_uninit_pooled` は元々 `new_zeroed`へ
+//! フォールバックする）で、既定組成との実質差は (i) バッチラベル、
+//! (ii) `encode` の resources 3 本 retain、(iii) タイムスタンプ取得 2 回、
+//! (iv) 入力検証経路（`validate_dims` on slice →
+//! `validate_prepared_inputs_f32`）のみ（いずれも無視できる固定費）。
+//!
+//! 既定（引数なし・`--gpu-timestamps` を指定しない）の壁時計判定・出力
+//! （`phase1_round_stats`／`phase1_summary`／`verdict=` 等）は本モードの
+//! 影響を一切受けない（バイト単位で不変）。フェーズ 2（A/B 判定）は
+//! 非計装のまま（本イシューのスコープ外）。
+//!
+//! ```sh
+//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release -- --phase1-only --gpu-timestamps
+//! ```
+//!
+//! opt-in 時は冒頭に `phase1_workload=gpu_timestamps` を出力し、各サイズ
+//! について機械可読な `phase1_gpu_host_round`（ラウンド別）・
+//! `phase1_gpu_host_stats`（サイズ別総括）の 2 行を追加出力する
+//! （キーは各出力関数〈`format_gpu_host_round_line`／
+//! `format_gpu_host_size_line`〉のドキュメンテーションコメント参照）。
+//! `wall_minus_gpu`／`commit_wait_minus_gpu` はサンプルごとに差を取って
+//! から中央値を計算する（`median(a) − median(b)` ではない）。
+//! `MTLCommandBuffer` の不変条件（`batches.len()==1`・タイムスタンプ
+//! `Some`・`0 ≤ kernel_gpu ≤ commit_wait ≤ wall`）違反は fail-closed で
+//! 当該ラウンドを `valid=false`・関連する差分／spread を `NA` として
+//! 報告し、既定の壁時計判定出力を失わせない。
 
 /// `parse_args_from` の解析結果（イシュー #1251）。
 ///
@@ -108,10 +152,15 @@ struct CliArgs {
     /// `true` なら phase 1（安定性セルフチェック）のみ実行してフェーズ 2
     /// （A/B 判定）へ進まない。
     phase1_only: bool,
+    /// `true` ならフェーズ 1 の対照ワークロードを `dispatch_auto` から
+    /// GPU タイムスタンプ計装版へ置換する（イシュー #1259。`--phase1-only`
+    /// と順序不問で併用可）。
+    gpu_timestamps: bool,
 }
 
-/// `std::env::args()` を**一度だけ**走査して `--phase1-only`（値なしフラグ）
-/// を解析する（`gemm_counter_workload.rs::parse_args`・
+/// `std::env::args()` を**一度だけ**走査して `--phase1-only`／
+/// `--gpu-timestamps`（いずれも値なしフラグ）を解析する
+/// （`gemm_counter_workload.rs::parse_args`・
 /// `fixed_overhead_diagnosis.rs::parse_args` と同型の一括走査＋未知引数・
 /// 重複指定の fail-closed 拒否。OWASP A03 観点）。
 ///
@@ -122,29 +171,46 @@ struct CliArgs {
 /// 分離することで、Linux CI の `#[cfg(test)]` から引数列を注入して検証
 /// できる。
 ///
-/// 許可する引数は `--phase1-only` のみ。それ以外の引数・重複指定は
-/// `Err` で fail-closed に拒否する（呼び出し元は `MetalContext::new` に
-/// 到達する前にこの結果を検査し、不正引数なら GPU を触らずに終了する）。
-/// プロセス内リピート（`--repeat=N`）・`--help` 等は意図的に非対応（本
-/// example ヘッダ doc comment 参照。必要になれば #1249 配下で別イシュー）。
+/// 許可する引数は `--phase1-only`／`--gpu-timestamps` のみ（順序不問で
+/// 併用可）。それ以外の引数・重複指定は `Err` で fail-closed に拒否する
+/// （呼び出し元は `MetalContext::new` に到達する前にこの結果を検査し、
+/// 不正引数なら GPU を触らずに終了する）。プロセス内リピート
+/// （`--repeat=N`）・`--help` 等は意図的に非対応（本 example ヘッダ doc
+/// comment 参照。必要になれば #1249 配下で別イシュー）。環境変数は使わない
+/// （#1454 の引数方式に統一。イシュー #1259）。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, String> {
     let mut phase1_only = false;
+    let mut gpu_timestamps = false;
     for arg in args {
-        if arg == "--phase1-only" {
-            if phase1_only {
+        match arg.as_str() {
+            "--phase1-only" => {
+                if phase1_only {
+                    return Err(format!(
+                        "--phase1-only は複数回指定できない（重複指定）: '{arg}'"
+                    ));
+                }
+                phase1_only = true;
+            }
+            "--gpu-timestamps" => {
+                if gpu_timestamps {
+                    return Err(format!(
+                        "--gpu-timestamps は複数回指定できない（重複指定）: '{arg}'"
+                    ));
+                }
+                gpu_timestamps = true;
+            }
+            _ => {
                 return Err(format!(
-                    "--phase1-only は複数回指定できない（重複指定）: '{arg}'"
+                    "未知の引数: '{arg}'（許可される引数は --phase1-only／--gpu-timestamps のみ）"
                 ));
             }
-            phase1_only = true;
-        } else {
-            return Err(format!(
-                "未知の引数: '{arg}'（許可される引数は --phase1-only のみ）"
-            ));
         }
     }
-    Ok(CliArgs { phase1_only })
+    Ok(CliArgs {
+        phase1_only,
+        gpu_timestamps,
+    })
 }
 
 /// [`round_extrema`] の戻り値。`phase1_round_stats` 行の `min_secs`／
@@ -196,17 +262,356 @@ fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
     })
 }
 
+/// `--gpu-timestamps` opt-in 時、フェーズ 1 の計装クロージャが 1 回の
+/// ワークロード呼び出しごとに記録する 1 サンプル（イシュー #1259）。
+///
+/// `wall_secs` は呼び出し全体（upload〜readback）の `Instant` 計測、
+/// `commit_wait_secs` は `MetalContext::synchronize_with_gpu_timestamps`
+/// 呼び出し自体の `Instant` 計測（commit + `waitUntilCompleted` +
+/// タイムスタンプ取得）、`kernel_gpu_secs` はその中で得られた
+/// `GPUEndTime − GPUStartTime`（`BatchGpuTimestamps::kernel_gpu_secs`）。
+/// `batches_len` はそのバッチに含まれていたディスパッチ数（1 個の GEMM
+/// ディスパッチのみが載っていたことの検証に使う。`gemm_reuse_phase_
+/// diag_tests.rs` の不変条件と同じ理由）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+struct GpuHostSample {
+    wall_secs: f64,
+    upload_secs: f64,
+    alloc_secs: f64,
+    encode_secs: f64,
+    commit_wait_secs: f64,
+    kernel_gpu_secs: Option<f64>,
+    readback_secs: f64,
+    batches_len: usize,
+}
+
+/// `samples` のうち末尾 `iters` 件（測定対象サンプル）を返す。
+///
+/// `bench_harness::ab::run_stability_observed` のラウンド完了フックは
+/// 「直前に積まれた `measurement.iters` 件が測定対象」という契約
+/// （`run_stability_observed` ドキュメンテーションコメント参照）を
+/// 提供するため、本関数はそれをそのままスライスへ変換する。`samples`
+/// の長さが `iters` 未満の場合は `None`（fail-closed。warmup 呼び出し分
+/// を誤って含めて集計してしまう事故を防ぐ。呼び出し元が到達すると
+/// `run_stability_observed` 自体の契約違反を意味するため `expect` で
+/// panic させる想定）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn measured_tail<T: Copy>(samples: &[T], iters: usize) -> Option<&[T]> {
+    if samples.len() < iters {
+        return None;
+    }
+    Some(&samples[samples.len() - iters..])
+}
+
+/// [`aggregate_gpu_host_round`] の戻り値。フェーズ 1 の 1 ラウンド分の
+/// GPU/host 内訳中央値（イシュー #1259）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq)]
+struct GpuHostRoundStats {
+    round: usize,
+    iters: usize,
+    /// `true` なら `tail` の全サンプルが不変条件（`batches_len==1`・
+    /// `kernel_gpu_secs` が `Some`・`0 ≤ kernel_gpu ≤ commit_wait ≤ wall`）
+    /// を満たした（fail-closed。1 件でも違反すれば `false`）。
+    valid: bool,
+    kernel_gpu_median_secs: Option<f64>,
+    wall_median_secs: f64,
+    /// `wall_secs − kernel_gpu_secs` を**サンプルごとに差を取ってから**
+    /// 中央値化した値（`median(wall) − median(kernel_gpu)` ではない。
+    /// `gemm_reuse_phase_diag_tests.rs`〈PR #1371 レビュー教訓〉と同じ
+    /// 理由）。
+    wall_minus_gpu_median_secs: Option<f64>,
+    commit_wait_median_secs: f64,
+    /// `commit_wait_secs − kernel_gpu_secs` の同様の差分中央値。
+    commit_wait_minus_gpu_median_secs: Option<f64>,
+    upload_median_secs: f64,
+    alloc_median_secs: f64,
+    encode_median_secs: f64,
+    readback_median_secs: f64,
+    /// `tile::select_for_device` が解決した構成（`{cfg:?}` 形式の文字列。
+    /// このサイズの全ラウンドで同一値になる想定——呼び出し元
+    /// 〈`run_stability_gpu_host`〉が計測ループの外で 1 回だけ解決する）。
+    resolved_cfg: String,
+}
+
+/// `tail`（[`measured_tail`] が返す、あるラウンドの測定対象サンプル列）
+/// から [`GpuHostRoundStats`] を集計する純関数（イシュー #1259）。
+///
+/// `wall_minus_gpu`／`commit_wait_minus_gpu` はサンプルごとに差を取って
+/// から中央値を計算する契約（[`GpuHostRoundStats`] フィールドドキュメント
+/// 参照）。不変条件違反サンプルは `kernel_gpu`／差分系列の集計対象から
+/// 除外し、1 件でも違反があれば `valid=false` として `kernel_gpu_median_
+/// secs`・両差分中央値を `None` にする（fail-closed。host 側フェーズ
+/// 内訳〈upload/alloc/encode/commit_wait/readback/wall〉自体は GPU
+/// タイムスタンプに依存しないため、`valid=false` でも中央値を計算する）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn aggregate_gpu_host_round(
+    round: usize,
+    iters: usize,
+    tail: &[GpuHostSample],
+    resolved_cfg: String,
+) -> GpuHostRoundStats {
+    let median = |xs: &[f64]| -> f64 {
+        bench_harness::median_q1_q3(xs)
+            .expect("tail は run_stability_observed 契約により非空のはず")
+            .median
+    };
+
+    let wall: Vec<f64> = tail.iter().map(|s| s.wall_secs).collect();
+    let commit_wait: Vec<f64> = tail.iter().map(|s| s.commit_wait_secs).collect();
+    let upload: Vec<f64> = tail.iter().map(|s| s.upload_secs).collect();
+    let alloc: Vec<f64> = tail.iter().map(|s| s.alloc_secs).collect();
+    let encode: Vec<f64> = tail.iter().map(|s| s.encode_secs).collect();
+    let readback: Vec<f64> = tail.iter().map(|s| s.readback_secs).collect();
+
+    let mut valid = !tail.is_empty();
+    let mut kernel_gpu_samples: Vec<f64> = Vec::with_capacity(tail.len());
+    let mut wall_minus_gpu_samples: Vec<f64> = Vec::with_capacity(tail.len());
+    let mut commit_wait_minus_gpu_samples: Vec<f64> = Vec::with_capacity(tail.len());
+    for s in tail {
+        if s.batches_len != 1 {
+            valid = false;
+            continue;
+        }
+        let Some(kernel_gpu) = s.kernel_gpu_secs else {
+            valid = false;
+            continue;
+        };
+        if !(kernel_gpu >= 0.0
+            && kernel_gpu <= s.commit_wait_secs
+            && s.commit_wait_secs <= s.wall_secs)
+        {
+            valid = false;
+            continue;
+        }
+        kernel_gpu_samples.push(kernel_gpu);
+        wall_minus_gpu_samples.push(s.wall_secs - kernel_gpu);
+        commit_wait_minus_gpu_samples.push(s.commit_wait_secs - kernel_gpu);
+    }
+
+    let (kernel_gpu_median_secs, wall_minus_gpu_median_secs, commit_wait_minus_gpu_median_secs) =
+        if valid && !kernel_gpu_samples.is_empty() {
+            (
+                Some(median(&kernel_gpu_samples)),
+                Some(median(&wall_minus_gpu_samples)),
+                Some(median(&commit_wait_minus_gpu_samples)),
+            )
+        } else {
+            (None, None, None)
+        };
+
+    GpuHostRoundStats {
+        round,
+        iters,
+        valid,
+        kernel_gpu_median_secs,
+        wall_median_secs: median(&wall),
+        wall_minus_gpu_median_secs,
+        commit_wait_median_secs: median(&commit_wait),
+        commit_wait_minus_gpu_median_secs,
+        upload_median_secs: median(&upload),
+        alloc_median_secs: median(&alloc),
+        encode_median_secs: median(&encode),
+        readback_median_secs: median(&readback),
+        resolved_cfg,
+    }
+}
+
+/// `phase1_gpu_host_round` 行（機械可読・`grep '^phase1_gpu_host_round '`）
+/// を組み立てる。値なし（`None`）のフィールドは `NA` を出力する（イシュー
+/// #1259）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn format_gpu_host_round_line(stats: &GpuHostRoundStats, size: usize) -> String {
+    let opt = |x: Option<f64>| {
+        x.map(|v| format!("{v:.6e}"))
+            .unwrap_or_else(|| "NA".to_string())
+    };
+    format!(
+        "phase1_gpu_host_round size={size} round={} iters={} kernel_gpu_median_secs={} \
+         wall_median_secs={:.6e} wall_minus_gpu_median_secs={} commit_wait_median_secs={:.6e} \
+         commit_wait_minus_gpu_median_secs={} upload_median_secs={:.6e} alloc_median_secs={:.6e} \
+         encode_median_secs={:.6e} readback_median_secs={:.6e} resolved_cfg={} valid={}",
+        stats.round,
+        stats.iters,
+        opt(stats.kernel_gpu_median_secs),
+        stats.wall_median_secs,
+        opt(stats.wall_minus_gpu_median_secs),
+        stats.commit_wait_median_secs,
+        opt(stats.commit_wait_minus_gpu_median_secs),
+        stats.upload_median_secs,
+        stats.alloc_median_secs,
+        stats.encode_median_secs,
+        stats.readback_median_secs,
+        stats.resolved_cfg,
+        stats.valid,
+    )
+}
+
+/// [`aggregate_gpu_host_size`] の戻り値。フェーズ 1 の 1 サイズ分の
+/// ラウンド間ばらつき総括（イシュー #1259）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq)]
+struct GpuHostSizeStats {
+    size: usize,
+    rounds: usize,
+    /// `valid=true` だったラウンド数。
+    valid_rounds: usize,
+    spread_kernel_gpu: Option<f64>,
+    max_round_idx_kernel_gpu: Option<usize>,
+    spread_wall: f64,
+    max_round_idx_wall: usize,
+    spread_wall_minus_gpu: Option<f64>,
+    max_round_idx_wall_minus_gpu: Option<usize>,
+    /// ラウンド別 `kernel_gpu_median_secs`（無効ラウンドは `None`）。
+    kernel_gpu_round_medians_secs: Vec<Option<f64>>,
+    /// ラウンド別 `wall_median_secs`（GPU タイムスタンプ非依存のため常に
+    /// 値を持つ）。
+    wall_round_medians_secs: Vec<f64>,
+}
+
+/// `rounds`（サイズ 1 個分の [`GpuHostRoundStats`] 列。ラウンド順）から
+/// [`GpuHostSizeStats`] を集計する純関数（イシュー #1259）。
+///
+/// `spread_kernel_gpu`／`spread_wall_minus_gpu` とその `max_round_idx_*`
+/// は、無効ラウンド（`valid=false`）が 1 つでも混じっていれば `None`
+/// とする（元のラウンド index との対応関係が崩れる部分集合だけの
+/// spread 計算はしない。fail-closed）。`spread_wall` は GPU タイムスタンプ
+/// に依存しないため常に計算する（[`bench_harness::relative_spread`]・
+/// [`round_extrema`] は `rounds` が非空である `run_stability` の契約
+/// 〈`AbConfig::rounds >= 2`〉により常に成功する前提）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn aggregate_gpu_host_size(size: usize, rounds: &[GpuHostRoundStats]) -> GpuHostSizeStats {
+    let wall_medians: Vec<f64> = rounds.iter().map(|r| r.wall_median_secs).collect();
+    let kernel_gpu_medians: Vec<Option<f64>> = rounds
+        .iter()
+        .map(|r| {
+            if r.valid {
+                r.kernel_gpu_median_secs
+            } else {
+                None
+            }
+        })
+        .collect();
+    let wall_minus_gpu_medians: Vec<Option<f64>> = rounds
+        .iter()
+        .map(|r| {
+            if r.valid {
+                r.wall_minus_gpu_median_secs
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let valid_rounds = rounds.iter().filter(|r| r.valid).count();
+
+    let spread_wall = bench_harness::relative_spread(&wall_medians)
+        .expect("wall_medians は run_stability の契約〈rounds>=2・非 NaN〉により成功する");
+    let max_round_idx_wall = round_extrema(&wall_medians)
+        .expect("wall_medians は run_stability の契約〈rounds>=2〉により非空")
+        .max_round_idx;
+
+    // `Option` 系列を「1 個でも欠損があれば全体を諦める」方式で集約する
+    // 共有ヘルパ（`spread_kernel_gpu`／`spread_wall_minus_gpu` の両方で
+    // 同じロジックを使うため 1 箇所に集約する）。
+    let spread_and_max_idx = |series: &[Option<f64>]| -> (Option<f64>, Option<usize>) {
+        if series.is_empty() || series.iter().any(Option::is_none) {
+            return (None, None);
+        }
+        let present: Vec<f64> = series
+            .iter()
+            .map(|x| x.expect("is_none 済み検査"))
+            .collect();
+        match (
+            bench_harness::relative_spread(&present),
+            round_extrema(&present),
+        ) {
+            (Ok(spread), Some(extrema)) => (Some(spread), Some(extrema.max_round_idx)),
+            _ => (None, None),
+        }
+    };
+
+    let (spread_kernel_gpu, max_round_idx_kernel_gpu) = spread_and_max_idx(&kernel_gpu_medians);
+    let (spread_wall_minus_gpu, max_round_idx_wall_minus_gpu) =
+        spread_and_max_idx(&wall_minus_gpu_medians);
+
+    GpuHostSizeStats {
+        size,
+        rounds: rounds.len(),
+        valid_rounds,
+        spread_kernel_gpu,
+        max_round_idx_kernel_gpu,
+        spread_wall,
+        max_round_idx_wall,
+        spread_wall_minus_gpu,
+        max_round_idx_wall_minus_gpu,
+        kernel_gpu_round_medians_secs: kernel_gpu_medians,
+        wall_round_medians_secs: wall_medians,
+    }
+}
+
+/// `phase1_gpu_host_stats` 行（機械可読・`grep '^phase1_gpu_host_stats '`）
+/// を組み立てる。値なし（`None`）のフィールドは `NA` を出力する（イシュー
+/// #1259）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn format_gpu_host_size_line(stats: &GpuHostSizeStats) -> String {
+    let opt_f64 = |x: Option<f64>| {
+        x.map(|v| format!("{v:.4e}"))
+            .unwrap_or_else(|| "NA".to_string())
+    };
+    let opt_usize = |x: Option<usize>| x.map(|v| v.to_string()).unwrap_or_else(|| "NA".to_string());
+    let kernel_gpu_series = stats
+        .kernel_gpu_round_medians_secs
+        .iter()
+        .map(|x| {
+            x.map(|v| format!("{v:.6e}"))
+                .unwrap_or_else(|| "NA".to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let wall_series = stats
+        .wall_round_medians_secs
+        .iter()
+        .map(|v| format!("{v:.6e}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "phase1_gpu_host_stats size={} rounds={} valid={} spread_kernel_gpu={} \
+         max_round_idx_kernel_gpu={} spread_wall={:.4e} max_round_idx_wall={} \
+         spread_wall_minus_gpu={} max_round_idx_wall_minus_gpu={} \
+         kernel_gpu_round_medians_secs={kernel_gpu_series} wall_round_medians_secs={wall_series}",
+        stats.size,
+        stats.rounds,
+        stats.valid_rounds,
+        opt_f64(stats.spread_kernel_gpu),
+        opt_usize(stats.max_round_idx_kernel_gpu),
+        stats.spread_wall,
+        stats.max_round_idx_wall,
+        opt_f64(stats.spread_wall_minus_gpu),
+        opt_usize(stats.max_round_idx_wall_minus_gpu),
+    )
+}
+
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use bench_harness::MeasurementConfig;
-    use bench_harness::ab::{AbConfig, run_ab, run_stability};
+    use bench_harness::ab::{AbConfig, run_ab, run_stability, run_stability_observed};
     use bench_harness::rng::Xorshift64Star;
     use fandhe_ai_backend_metal::layout::{MatrixLayout, classify_2d};
     use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm, tile};
-    use std::time::Duration;
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
     // イシュー #1249/#1251: `--phase1-only` 引数解析・ラウンド別 min/max
     // 集計は macOS 依存部分を持たない top-level 純関数（本モジュール外）。
-    use super::round_extrema;
+    // イシュー #1259: `--gpu-timestamps` の集計・出力も同様に top-level
+    // 純関数（`GpuHostSample`・`GpuHostRoundStats`・`measured_tail`・
+    // `aggregate_gpu_host_round`／`_size`・`format_gpu_host_round_line`／
+    // `_size_line`）へ切り出してある。
+    use super::{
+        GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round, aggregate_gpu_host_size,
+        format_gpu_host_round_line, format_gpu_host_size_line, measured_tail, round_extrema,
+    };
 
     /// `gemm_transpose_tile_sweep.rs`・`gemm_bench.rs` と同一値（決定的
     /// シード。過去 PoC・CPU 実装ベンチと同じ入力分布に揃える）。
@@ -282,11 +687,142 @@ mod macos_impl {
         ]
     }
 
+    /// `--gpu-timestamps` opt-in 時、`dispatch_auto`
+    /// （`GemmVariant::SimdgroupTiled` 分岐）と同一組成
+    /// （upload → alloc → encode → commit_wait → readback）を公開 API
+    /// （[`MetalGemm::encode_tiled_prepared`]・
+    /// [`MetalContext::synchronize_with_gpu_timestamps`]）で再現しつつ、
+    /// `Instant` によるホスト側フェーズ内訳と GPU タイムスタンプ
+    /// （`kernel_gpu`）を呼び出しごとに記録する（イシュー #1259。
+    /// example ヘッダ doc comment「GPU タイムスタンプ分離計測モード」
+    /// 参照）。
+    ///
+    /// 対象サイズ（256〜4096）は全て 8 の倍数のため `pad_matrix`/
+    /// `unpad_matrix` は no-op・`c_buf` は `dispatch_auto` と同じ専有
+    /// 確保（本 example の `MetalContext` はプロセスワイド singleton
+    /// ではないため `MetalBuffer::alloc_uninit_pooled`〈`dispatch_auto`
+    /// が内部で使う〉は元々 `new_zeroed` へフォールバックする。本関数は
+    /// その `new_zeroed` を直接呼ぶ）。戻り値の [`bench_harness::ab::
+    /// StabilityResult`]（`round_medians_secs`・`spread`）は
+    /// `run_stability`（`dispatch_auto` 直呼び）と同じ壁時計 `Instant`
+    /// 計測（`protocol::run`）から得るため、呼び出し元
+    /// （`phase1_stability_selfcheck`）の判定ロジックは分岐に依らない。
+    fn run_stability_gpu_host(
+        ctx: &MetalContext,
+        gemm: &MetalGemm,
+        ab_config: &AbConfig,
+        measurement_config: &MeasurementConfig,
+        size: usize,
+    ) -> bench_harness::ab::StabilityResult {
+        let mut rng = Xorshift64Star::new(SEED);
+        let a = rng.fill_vec(size * size);
+        let b = rng.fill_vec(size * size);
+        // `tile::select_for_device` はループの外（ラウンド計測の外）で
+        // 1 回だけ解決する——`dispatch_auto` も呼び出しごとに再解決するが
+        // 決定的（`(m, n, k)` とデバイス情報のみに依存）なため、計測ループ
+        // 内で毎回呼んでも呼ばなくても値は不変。ここで 1 回解決して
+        // `resolved_cfg` ラベルとしてラウンド出力へ含める。
+        let cfg = tile::select_for_device(size, size, size, ctx.verified_m4_max_gpu_core_count());
+        let resolved_cfg_label = format!("{cfg:?}");
+
+        let samples: RefCell<Vec<GpuHostSample>> = RefCell::new(Vec::new());
+        let round_stats: RefCell<Vec<GpuHostRoundStats>> = RefCell::new(Vec::new());
+
+        let mut workload = || {
+            let wall_start = Instant::now();
+
+            let t = Instant::now();
+            let a_buf = MetalBuffer::new_with_data(ctx, &a)
+                .expect("upload A に失敗した（実機でのみ実行する前提）");
+            let b_buf = MetalBuffer::new_with_data(ctx, &b)
+                .expect("upload B に失敗した（実機でのみ実行する前提）");
+            let upload_secs = t.elapsed().as_secs_f64();
+
+            let t = Instant::now();
+            let c_buf = MetalBuffer::new_zeroed(ctx, size * size)
+                .expect("alloc C に失敗した（実機でのみ実行する前提）");
+            let alloc_secs = t.elapsed().as_secs_f64();
+
+            let t = Instant::now();
+            gemm.encode_tiled_prepared(ctx, &a_buf, &b_buf, &c_buf, size, size, size, cfg)
+                .expect("encode_tiled_prepared に失敗した（実機でのみ実行する前提）");
+            let encode_secs = t.elapsed().as_secs_f64();
+
+            let t = Instant::now();
+            let batches = ctx
+                .synchronize_with_gpu_timestamps()
+                .expect("synchronize_with_gpu_timestamps に失敗した（実機でのみ実行する前提）");
+            let commit_wait_secs = t.elapsed().as_secs_f64();
+
+            let t = Instant::now();
+            let c = c_buf.read_to_vec();
+            std::hint::black_box(&c);
+            let readback_secs = t.elapsed().as_secs_f64();
+
+            let wall_secs = wall_start.elapsed().as_secs_f64();
+            let kernel_gpu_secs = if batches.len() == 1 {
+                batches[0].kernel_gpu_secs()
+            } else {
+                None
+            };
+
+            samples.borrow_mut().push(GpuHostSample {
+                wall_secs,
+                upload_secs,
+                alloc_secs,
+                encode_secs,
+                commit_wait_secs,
+                kernel_gpu_secs,
+                readback_secs,
+                batches_len: batches.len(),
+            });
+        };
+
+        let result = run_stability_observed(
+            ab_config,
+            measurement_config,
+            &mut workload,
+            |round, measurement| {
+                let all_samples = samples.borrow();
+                let tail = measured_tail(all_samples.as_slice(), measurement.iters).expect(
+                    "run_stability_observed の契約〈直前 iters 件が測定対象〉により \
+                     samples の長さは常に iters 以上のはず",
+                );
+                let stats = aggregate_gpu_host_round(
+                    round,
+                    measurement.iters,
+                    tail,
+                    resolved_cfg_label.clone(),
+                );
+                println!("{}", format_gpu_host_round_line(&stats, size));
+                round_stats.borrow_mut().push(stats);
+            },
+        )
+        .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
+
+        let size_stats = aggregate_gpu_host_size(size, &round_stats.borrow());
+        println!("{}", format_gpu_host_size_line(&size_stats));
+
+        result
+    }
+
     /// フェーズ 1: 対照カーネルとして `dispatch_auto`（`dispatch_auto` の
     /// 本番既定経路と同一構成選択。`gemm_swizzle_ab_bench.rs::
     /// phase1_stability_selfcheck` と同一手法）を各サイズで
     /// [`run_stability`] 計測し、spread を出力する。
-    fn phase1_stability_selfcheck(ctx: &MetalContext, gemm: &MetalGemm) -> bool {
+    ///
+    /// `gpu_timestamps=true`（`--gpu-timestamps`。イシュー #1259）の場合、
+    /// 対照ワークロードを [`run_stability_gpu_host`] （`dispatch_auto`
+    /// と同一組成の計装版）へ**置換**する。壁時計判定（`result.spread`・
+    /// `within_gate`・`phase1_round_stats`／`phase1_summary` 等の既存出力）
+    /// は両分岐で完全に同一の計算経路（`run_stability_observed` の壁時計
+    /// `Instant` 計測。`run_stability` はこれを no-op フックで呼ぶ薄い
+    /// ラッパー）を通るため、以下の判定ロジック自体は分岐に依らず不変。
+    fn phase1_stability_selfcheck(
+        ctx: &MetalContext,
+        gemm: &MetalGemm,
+        gpu_timestamps: bool,
+    ) -> bool {
         // 安定性ゲートの値自体は `bench_harness::ab::STABILITY_SPREAD_GATE`
         // を単一真実源とする（`docs/perf/metal-bench-noise-protocol.md` と
         // 同じ値を example 内に直接複製すると、閾値変更時にコードと文書が
@@ -305,11 +841,15 @@ mod macos_impl {
             let a = rng.fill_vec(size * size);
             let b = rng.fill_vec(size * size);
 
-            let result = run_stability(&ab_config, &measurement_config, || {
-                gemm.dispatch_auto(ctx, &a, &b, size, size, size)
-                    .expect("Metal GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
-            })
-            .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
+            let result = if gpu_timestamps {
+                run_stability_gpu_host(ctx, gemm, &ab_config, &measurement_config, size)
+            } else {
+                run_stability(&ab_config, &measurement_config, || {
+                    gemm.dispatch_auto(ctx, &a, &b, size, size, size)
+                        .expect("Metal GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+                })
+                .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない")
+            };
 
             let within_gate = result.spread <= SPREAD_GATE;
             all_within_gate &= within_gate;
@@ -716,8 +1256,15 @@ mod macos_impl {
         if args.phase1_only {
             println!("mode=phase1_only");
         }
+        if args.gpu_timestamps {
+            // イシュー #1259: フェーズ 1 の対照ワークロードが計装版
+            // （`run_stability_gpu_host`）へ置換されていることを示す
+            // マーカー。`size=…`／`phase1_round_stats` 行がこの組成で
+            // 得た値であることを識別する。
+            println!("phase1_workload=gpu_timestamps");
+        }
 
-        let phase1_ok = phase1_stability_selfcheck(&ctx, &gemm);
+        let phase1_ok = phase1_stability_selfcheck(&ctx, &gemm, args.gpu_timestamps);
 
         if args.phase1_only {
             // イシュー #1249/#1251: `--phase1-only` はフェーズ 1 が安定性
@@ -777,7 +1324,11 @@ fn main() {
 /// `Cargo.toml` の `[[example]] test = true` により実行対象）でも走る。
 #[cfg(test)]
 mod cli_and_round_stats_tests {
-    use super::{CliArgs, parse_args_from, round_extrema};
+    use super::{
+        CliArgs, GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round,
+        aggregate_gpu_host_size, format_gpu_host_round_line, format_gpu_host_size_line,
+        measured_tail, parse_args_from, round_extrema,
+    };
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -786,14 +1337,26 @@ mod cli_and_round_stats_tests {
     #[test]
     fn parse_args_from_empty_defaults_to_phase1_only_false() {
         let parsed = parse_args_from(args(&[])).expect("空引数列は成功するはず");
-        assert_eq!(parsed, CliArgs { phase1_only: false });
+        assert_eq!(
+            parsed,
+            CliArgs {
+                phase1_only: false,
+                gpu_timestamps: false,
+            }
+        );
     }
 
     #[test]
     fn parse_args_from_phase1_only_flag_sets_true() {
         let parsed =
             parse_args_from(args(&["--phase1-only"])).expect("既知の単一引数は成功するはず");
-        assert_eq!(parsed, CliArgs { phase1_only: true });
+        assert_eq!(
+            parsed,
+            CliArgs {
+                phase1_only: true,
+                gpu_timestamps: false,
+            }
+        );
     }
 
     #[test]
@@ -810,6 +1373,217 @@ mod cli_and_round_stats_tests {
                 .expect_err("未知の引数は fail-closed に拒否するはず");
             assert!(err.contains("未知の引数"), "unknown={unknown} err={err}");
         }
+    }
+
+    #[test]
+    fn parse_args_from_gpu_timestamps_flag_sets_true() {
+        let parsed =
+            parse_args_from(args(&["--gpu-timestamps"])).expect("既知の単一引数は成功するはず");
+        assert_eq!(
+            parsed,
+            CliArgs {
+                phase1_only: false,
+                gpu_timestamps: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_from_both_flags_combine_regardless_of_order() {
+        // イシュー #1259: `--phase1-only`／`--gpu-timestamps` は順序不問で併用可。
+        for combo in [
+            ["--phase1-only", "--gpu-timestamps"],
+            ["--gpu-timestamps", "--phase1-only"],
+        ] {
+            let parsed = parse_args_from(args(&combo)).expect("順序不問で併用できるはず");
+            assert_eq!(
+                parsed,
+                CliArgs {
+                    phase1_only: true,
+                    gpu_timestamps: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_from_duplicate_gpu_timestamps_is_error() {
+        let err = parse_args_from(args(&["--gpu-timestamps", "--gpu-timestamps"]))
+            .expect_err("重複指定は fail-closed に拒否するはず");
+        assert!(err.contains("複数回指定できない"));
+    }
+
+    /// [`GpuHostSample`] の共通ビルダ（テスト用）。デフォルトは
+    /// `wall=10・commit_wait=6・kernel_gpu=Some(4)・upload/alloc/encode/
+    /// readback=1・batches_len=1`（全不変条件を満たす基準値）。
+    fn sample(
+        wall: f64,
+        commit_wait: f64,
+        kernel_gpu: Option<f64>,
+        batches_len: usize,
+    ) -> GpuHostSample {
+        GpuHostSample {
+            wall_secs: wall,
+            upload_secs: 1.0,
+            alloc_secs: 1.0,
+            encode_secs: 1.0,
+            commit_wait_secs: commit_wait,
+            kernel_gpu_secs: kernel_gpu,
+            readback_secs: 1.0,
+            batches_len,
+        }
+    }
+
+    #[test]
+    fn measured_tail_returns_none_when_shorter_than_iters() {
+        assert_eq!(measured_tail(&[1, 2, 3], 4), None);
+    }
+
+    #[test]
+    fn measured_tail_returns_last_iters_elements() {
+        assert_eq!(measured_tail(&[1, 2, 3, 4, 5], 3), Some(&[3, 4, 5][..]));
+    }
+
+    #[test]
+    fn measured_tail_exact_length_returns_whole_slice() {
+        assert_eq!(measured_tail(&[1, 2], 2), Some(&[1, 2][..]));
+    }
+
+    #[test]
+    fn aggregate_gpu_host_round_valid_tail_computes_medians() {
+        let tail = [
+            sample(10.0, 6.0, Some(4.0), 1),
+            sample(12.0, 7.0, Some(5.0), 1),
+            sample(11.0, 6.5, Some(4.5), 1),
+        ];
+        let stats = aggregate_gpu_host_round(2, 3, &tail, "cfg".to_string());
+        assert!(stats.valid);
+        assert_eq!(stats.round, 2);
+        assert_eq!(stats.iters, 3);
+        assert_eq!(stats.kernel_gpu_median_secs, Some(4.5));
+        assert_eq!(stats.wall_median_secs, 11.0);
+        // wall_minus_gpu はサンプルごとの差（6.0, 7.0, 6.5）の中央値。
+        assert_eq!(stats.wall_minus_gpu_median_secs, Some(6.5));
+        assert_eq!(stats.commit_wait_median_secs, 6.5);
+        assert_eq!(stats.commit_wait_minus_gpu_median_secs, Some(2.0));
+        assert_eq!(stats.resolved_cfg, "cfg");
+    }
+
+    #[test]
+    fn aggregate_gpu_host_round_invalid_when_kernel_gpu_missing() {
+        let tail = [sample(10.0, 6.0, None, 1)];
+        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        assert!(!stats.valid);
+        assert_eq!(stats.kernel_gpu_median_secs, None);
+        assert_eq!(stats.wall_minus_gpu_median_secs, None);
+        // host 側フェーズ内訳自体は GPU タイムスタンプ非依存のため計算される。
+        assert_eq!(stats.wall_median_secs, 10.0);
+    }
+
+    #[test]
+    fn aggregate_gpu_host_round_invalid_when_batches_len_not_one() {
+        let tail = [sample(10.0, 6.0, Some(4.0), 2)];
+        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        assert!(!stats.valid);
+    }
+
+    #[test]
+    fn aggregate_gpu_host_round_invalid_when_invariant_order_violated() {
+        // kernel_gpu > commit_wait は `0 ≤ kernel_gpu ≤ commit_wait ≤ wall`
+        // 不変条件違反。
+        let tail = [sample(10.0, 6.0, Some(7.0), 1)];
+        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        assert!(!stats.valid);
+    }
+
+    #[test]
+    fn format_gpu_host_round_line_starts_with_grep_key_and_includes_size() {
+        let tail = [sample(10.0, 6.0, Some(4.0), 1)];
+        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        let line = format_gpu_host_round_line(&stats, 512);
+        assert!(line.starts_with("phase1_gpu_host_round "));
+        assert!(line.contains("size=512"));
+        assert!(line.contains("valid=true"));
+    }
+
+    #[test]
+    fn format_gpu_host_round_line_reports_na_for_invalid_round() {
+        let tail = [sample(10.0, 6.0, None, 1)];
+        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        let line = format_gpu_host_round_line(&stats, 512);
+        assert!(line.contains("kernel_gpu_median_secs=NA"));
+        assert!(line.contains("valid=false"));
+    }
+
+    fn round_stats(kernel_gpu: Option<f64>, wall: f64) -> GpuHostRoundStats {
+        GpuHostRoundStats {
+            round: 0,
+            iters: 20,
+            valid: kernel_gpu.is_some(),
+            kernel_gpu_median_secs: kernel_gpu,
+            wall_median_secs: wall,
+            wall_minus_gpu_median_secs: kernel_gpu.map(|k| wall - k),
+            commit_wait_median_secs: wall / 2.0,
+            commit_wait_minus_gpu_median_secs: kernel_gpu.map(|k| wall / 2.0 - k),
+            upload_median_secs: 1.0,
+            alloc_median_secs: 1.0,
+            encode_median_secs: 1.0,
+            readback_median_secs: 1.0,
+            resolved_cfg: "cfg".to_string(),
+        }
+    }
+
+    #[test]
+    fn aggregate_gpu_host_size_all_valid_computes_spreads() {
+        let rounds = [
+            round_stats(Some(4.0), 10.0),
+            round_stats(Some(5.0), 12.0),
+            round_stats(Some(4.5), 11.0),
+            round_stats(Some(4.2), 10.5),
+        ];
+        let stats = aggregate_gpu_host_size(512, &rounds);
+        assert_eq!(stats.size, 512);
+        assert_eq!(stats.rounds, 4);
+        assert_eq!(stats.valid_rounds, 4);
+        assert!(stats.spread_kernel_gpu.is_some());
+        assert!(stats.spread_wall_minus_gpu.is_some());
+        assert!(stats.spread_wall >= 0.0);
+    }
+
+    #[test]
+    fn aggregate_gpu_host_size_one_invalid_round_makes_kernel_gpu_spread_na() {
+        // 1 ラウンドでも無効（`valid=false`）なら kernel_gpu 系の spread は
+        // 部分集合で計算せず `None`（fail-closed）。壁時計側の spread は
+        // GPU タイムスタンプに依存しないため常に計算される。
+        let rounds = [
+            round_stats(Some(4.0), 10.0),
+            round_stats(None, 12.0),
+            round_stats(Some(4.5), 11.0),
+            round_stats(Some(4.2), 10.5),
+        ];
+        let stats = aggregate_gpu_host_size(512, &rounds);
+        assert_eq!(stats.spread_kernel_gpu, None);
+        assert_eq!(stats.max_round_idx_kernel_gpu, None);
+        assert_eq!(stats.spread_wall_minus_gpu, None);
+        assert!(stats.spread_wall >= 0.0);
+        assert_eq!(stats.valid_rounds, 3);
+    }
+
+    #[test]
+    fn format_gpu_host_size_line_starts_with_grep_key_and_includes_na() {
+        let rounds = [
+            round_stats(Some(4.0), 10.0),
+            round_stats(None, 12.0),
+            round_stats(Some(4.5), 11.0),
+            round_stats(Some(4.2), 10.5),
+        ];
+        let stats = aggregate_gpu_host_size(512, &rounds);
+        let line = format_gpu_host_size_line(&stats);
+        assert!(line.starts_with("phase1_gpu_host_stats "));
+        assert!(line.contains("size=512"));
+        assert!(line.contains("spread_kernel_gpu=NA"));
+        assert!(line.contains("kernel_gpu_round_medians_secs="));
+        assert!(line.contains(",NA,"));
     }
 
     #[test]
