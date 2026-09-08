@@ -1,0 +1,124 @@
+イシュー #1262 実行環境情報（内部ホスト名・machine-id・ユーザー名は含めない）
+
+## 実機
+- DGX Spark GB10（`docs/real-hardware-verification-env.md` の CUDA 実機ノード。CPU は
+  Grace: Cortex-X925 ×10 + Cortex-A725 ×10、計 20 論理コア。内部ホスト名は
+  `docs/real-hardware-verification-env.local.md` を参照〈Git 管理外〉）
+- OS: Linux aarch64
+- rustc: 1.97.0 (2d8144b78 2026-07-07)
+
+## 転送元 sha（origin/main）
+- 145639d047f6fcd7488d0665e1488e68ee084dfc（PR #1447 マージ後 HEAD。`bench-common::parity` の
+  第 3 救済項〈#1443〉・`compare_gemm_gate.py::_parity_check` の判定不能条件更新〈#1445〉・
+  CUDA 側 #1260 追補〈#1447〉を含む）
+- 承認済み契約: A-1（`c=0.5`。`docs/candle-parity-tolerance-contract-decision.md` §8。イシュー #1241 で承認）
+- crates.io 承認済みピン: `fandhe-ai =0.7.0`（更新なし。`run_gemm_gate_cpu.sh` は
+  `GEMM_GATE_PATCH_FACADE_PATH`・`GEMM_GATE_BENCH_FANDHE_FEATURES` いずれも未指定の**正式系列のみ**
+  で計測。参考系列は計測していない）
+
+## 実行環境（共有ノード。隔離ディレクトリを使用）
+- 本ノードは他の並列セッションが常時ベンチマーク・ビルドを実行する共有環境。共有作業
+  ディレクトリ（`~/work/rust-ai-library-run`）に他セッションが並行占有していたため、本
+  Issue 専用の隔離ディレクトリ（`~/work/fc-1262/`。計測後に削除済み）へ本リポジトリを
+  rsync 転送して計測した（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §2 と同方式。
+  #1148／#1305 の前例に倣う）
+- `gemm-gate-trusted-hosts.local`（Git 管理外）は共有ディレクトリの既存ファイルをノード内で
+  隔離ディレクトリへコピーして使用（Mac からは転送していない）
+
+## 実行 1 回目（並走ゲートにより破棄）
+- 開始直後の `pgrep` 確認で、他セッションの CPU ゲート（label `head-145639d-pzero-on`）・
+  CUDA ゲート（label `1437after-off`、後に `1437after-on` の CUDA ビルド `cicc`/`rustc`
+  100〜423% CPU）が同一ノードで並走していたことを事後に確認した（隔離ディレクトリの
+  rsync 完了直後に実行を開始したため、並走確認と起動が競合した）
+- `uptime`: 起動時 load average 5.23 → 完了時 17.17/10.32/5.05（自 run 分のみでは
+  説明できない上昇）。**破棄の根拠は比の乖離ではなく、この期間中 `pgrep` で実際に競合
+  プロセス（他セッションの CPU/CUDA GEMM ゲート・cargo ビルド）が動作していたことを
+  直接確認した点にある**（測定と競合プロセスの起動が時間的に重なっており、CPU 論理
+  コアを奪い合う実負荷混入は構造的に避けられない状態だった）。参考までに 1 回目の
+  candle/fandhe 比は N=512 0.745・N=1024 0.793・N=2048 0.938（結果ファイルは比較確認の
+  ため Mac 側へ一時的にコピーしたのみで、隔離ディレクトリ〈`~/work/fc-1262/`〉の削除
+  〈§「転送・回収」節〉とともに破棄しており、ノード側にも Mac 側の恒久領域にも残って
+  いない。commit 対象外）で、2 回目（0.862／0.778／0.950）とは方向感が一致
+  しない項目（N=1024 は 1 回目の方が §12.2 の 0.786 に近い）もあり、比の大小のみからは
+  どちらが「正しい」かを機械的に判定できない。したがって**採否は比較ではなく競合
+  プロセスの有無という直接的な事実に基づく**
+- **parity 判定自体（N=2048 の `fail=0, rescued=2, bound=1.525878e-05`）は 1 回目でも
+  2 回目と完全に同一の決定的な値であり、負荷の影響を受けていない**（bit 決定的な
+  candle-core カーネル挙動のため。§19.3 参照）
+
+## N=2048 比の妥当性根拠（2 回目採用値 0.950 倍）
+
+- イシュー #1185（§12.2）の DGX 側生データ（`results/raw/results-dgx-cpu-gemm-gate-
+  0.7.0.jsonl`。当時 N=2048 は candle 側 parity fail のため「判定不能」として比を
+  確定表示していなかった）から N=2048 の median（fandhe-ai reuse・candle fresh）を
+  算出すると candle/fandhe ≈ 0.968 倍（fandhe reuse median 0.034877 s・candle fresh
+  median 0.033750 s）であり、本追補の採用値 0.950 倍と近い水準にある。tolerance 契約
+  変更は判定方式（fail-closed の可否）のみを変えるものであり性能値自体には影響しない
+  ため、この近さは 2 回目の計測が異常値ではないことの参考傍証になる
+
+## 計測前後のアイドル確認（採用した 2 回目の run）
+- 1 回目完了直後、`pgrep -af "run_gemm_gate.sh|cargo build|rustc|cicc"` で他セッションの
+  競合プロセスが検出されなくなるまで 30 秒間隔でポーリングし、`uptime` の 1 分平均
+  load average が 4.0 未満（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §17.2 の
+  専有ゲート閾値と同一基準）になった時点で即座に競合プロセス再確認後に起動した
+  （チェックと起動の間隙を最小化する atomic launch。ビルド成果物は 1 回目でキャッシュ
+  済みのため 2 回目はビルドなしで即計測に入った）
+- 起動直前: `pgrep -af "run_gemm_gate.sh|cargo build"` 該当なし・load average 3.56
+  （直前ポーリング時点）
+- `run_gemm_gate_cpu.sh` 内部の `cpu status (before)`: load average 3.28/7.01/5.00
+  （20 コア中の使用率としては低〜中程度。5 分・15 分平均にはまだ 1 回目実行の残余が
+  含まれる）
+- 計測完了直後: `cpu status (after)` load average 5.60/7.10/5.13（自 run による上昇を
+  含む）
+- **完全な専有（load average が実測前の基準値近傍まで下がる状態）は最後まで確保できな
+  かった**。競合プロセスの直接確認は起動直前（`pgrep` 該当なし・load average 3.56）の
+  1 回のみで、計測実行中は自ラベル `run_gemm_gate.sh cpu 0.7.0-1262` の生死監視のみを
+  行っており、他セッションのプロセスを計測中に再確認してはいない（監視スクリプトの
+  `pgrep` パターンは自ラベル限定）。ただし (a) 起動直前に競合プロセスが不在だったこと、
+  (b) 20 コア中 1 プロセス（本計測）が約 50 秒動作しただけで load average が 3.28 から
+  5.60 まで上昇する挙動は、単独の 20 スレッド GEMM ワークロードとして矛盾しない範囲
+  （1 回目の 17.17 という跳ね上がりとは対照的）であること、(c) N=512/1024 の実測値
+  （0.862／0.778 倍）が §12.2 の正式系列値（0.810／0.786 倍）と誤差範囲内で一致し、
+  N=2048（0.950 倍）も #1185 生データから算出した参考比（0.968 倍。下記節）に近い水準
+  であることから、1 回目のような重度の負荷混入は解消されていたと判断した
+
+## 実行順序・所要時間
+1. 1 回目（破棄）: `run_gemm_gate_cpu.sh 0.7.0-1262`（既存キャッシュなしのためフルビルド）。
+   開始 2026-09-08T04:22 UTC 頃 / 完了 2026-09-08T04:22:20Z（manifest `recorded_at`）
+2. 2 回目（採用）: 同一ラベル `0.7.0-1262` で再実行。ビルド成果物はキャッシュ済み
+   （バイナリ sha256 は 1 回目と完全一致: `bench-fandhe=83e5a0c0...`・
+   `bench-candle=b1364b00...`）のためビルドなしで即計測。開始 2026-09-08T04:27 UTC 頃 /
+   完了 2026-09-08T04:27:47Z（manifest `recorded_at`）。所要時間約 1 分弱（45 run）
+
+## manifest 突合（`fandhe_ai_source`／`bench_fandhe_features`）
+- `0.7.0-1262`（2 回目・採用）: `fandhe_ai_source=registry`・`candle_core_source=registry`・
+  `bench_fandhe_features=""`（正式系列。`manifest-dgx-cpu-gemm-gate-0.7.0-1262.json`）
+- `skipped-dgx-cpu-gemm-gate-0.7.0-1262.log` は空・
+  `results-dgx-cpu-gemm-gate-0.7.0-1262.jsonl` は 45 行（N=512/1024/2048 ×
+  fandhe reuse／candle fresh／fandhe fresh × 5 run）
+
+## 転送・回収
+- rsync（`--exclude .git/ --exclude .codex/ --exclude .env* --exclude
+  .claude/settings.local.json --exclude .venv*/ --exclude
+  real-hardware-verification-env.local.md --exclude gemm-gate-trusted-hosts.local
+  --exclude target --exclude _/`）で Mac → GB10 隔離ディレクトリ（`~/work/fc-1262/
+  rust-ai-library-run/`）へ転送し、`.rev-stamp` が転送元 sha
+  （145639d047f6fcd7488d0665e1488e68ee084dfc）と一致することを確認済み
+- 回収後、内部ホスト名（`docs/real-hardware-verification-env.local.md` 記載の実値）・
+  machine-id・`/home/fandhe`・`local.fandhe` パターンで grep 走査し 0 件を確認してから
+  本ディレクトリ・`results/raw/` へ配置（生データ・実行ログとも 0 件）
+- `scripts/bench/framework-compare/Cargo.lock`・`Cargo.toml` への path/patch 差し替えは
+  行っていない（正式系列のみのため `--config patch.crates-io.fandhe-ai.path=...` は不使用）
+- 計測完了後、隔離ディレクトリ（`~/work/fc-1262/`）・一時ログ（`/tmp/test1262*.log`）は
+  ノード側で削除済み
+
+## 判定結果の要点（詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19）
+- N=2048 の candle 側は 1 回目・2 回目とも 5 run すべてで `parity_fail_count=0`・
+  `parity_scaled_abs_rescued=2`・`parity_scaled_abs_bound=1.525878e-05`（承認済み契約
+  A-1 の救済項により旧契約の `fail=2` が解消。1 回目・2 回目で完全に決定的に同一値）。
+  `compare_gemm_gate.py` の判定は「判定不能」から確定判定（「未達（candle 救済 2 要素）」。
+  2 回目採用値 0.950 倍）へ遷移した
+- fandhe-ai 側は採用した 2 回目の全 15 run（N=512/1024/2048）で `parity_fail_count=0` かつ
+  `parity_scaled_abs_rescued=0`（`verify_strict` 経路。救済に依存していないことを確認）
+- `compare_gemm_gate.py --device cpu` の終了コードは 3（N=512/1024 が「未達」のまま残る
+  ため。仕様どおりで失敗ではない）
