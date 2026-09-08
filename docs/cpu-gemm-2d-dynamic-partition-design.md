@@ -1,6 +1,6 @@
 # CPU GEMM `gemm_blis_parallel` の (mc, nc) 2D タイル動的分配設計・bit 完全一致条件（イシュー #1307）
 
-## 状態: 設計記録のみ（`crates/` 配下のコード変更なし）。実装は #1311、実機 A/B 計測は #1312、本番結線は #1313 が担当する。
+## 状態: 設計記録のみ（`crates/` 配下のコード変更なし）。実装は #1311 が完了・実機 A/B 計測は #1312 が完了（判定 undetermined。M4 Max 専有ゲート未通過のため #1313 へ「結線せず記録のみ」で引き継ぎ。`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`）。
 
 ## 位置づけ
 
@@ -590,6 +590,13 @@ pack 総量は §5 の表のとおり `RowPanel` 以下。
 `oss-gemm-compare` への variant 選択オプション追加（#1367 が未実施のまま残した事項）は、
 #1312 の任意前提として提案するに留める（本設計のスコープ外。§13）。
 
+**追記（イシュー #1312・実機実測結果）**: 両実機 A/B を実施した結果、DGX（専有ゲート通過）は
+`jobs_per_worker ∈ {2, 4}` とも全形状（N=1024/2048/4096）で `RowPanel` を 1.09〜1.80 倍
+上回り、条件 4（中止条件）も発火しなかった。しかし Apple M4 Max が §11「M4 Max が計測中に
+専有できない場合の扱い」の専有ゲートを通過できなかったため、最終判定は **undetermined**
+（ADOPT でも REJECT でもない）と確定した。詳細は `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`
+を参照。
+
 ## §10 回帰テスト計画（#1311 が実装する一覧）
 
 | テスト | 目的 |
@@ -625,6 +632,12 @@ pack 総量は §5 の表のとおり `RowPanel` 以下。
 
 M4 Max が計測中に専有できない場合の扱い: `docs/perf/cpu-gemm-candle-gate-remeasurement.md`
 §17 と同じ「共有負荷下として記録・undetermined」規則を踏襲し、DGX の結果だけで ADOPT しない。
+
+**追記（イシュー #1312）**: 実際に M4 Max が専有ゲートを通過できなかった（1 分 load average
+30〜60 台。他セッション並走）。本節の規則どおり最終判定は undetermined と確定し、#1313 へ
+「結線せず記録のみ」で引き継いだ。DGX 単独では条件 1〜5 を満たしていた（jpw=2・jpw=4 とも
+全形状で `RowPanel` を上回り、中止条件〈N=1024・T=10 で両 jpw が 1.00 未満〉も発火せず）。
+詳細は `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md` を参照。
 
 ## §12 #1313（本番結線）時の考慮事項
 
