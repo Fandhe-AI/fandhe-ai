@@ -338,6 +338,13 @@ slice 方式・`unsafe` 非導入）**を先に確定し、raw pointer 方式は
 単位で K 全域を単一 worker が処理する構造（`IcDynamic` の pc ごと同期点を持たない）を採る点が
 新規設計の要点であり、詳細は同ドキュメント §2・§4 を参照。
 
+**追記（イシュー #1312）**: `TwoDDynamic`（本節末尾で触れた 2D 動的分配）の両実機 A/B 実測は
+DGX（専有ゲート通過）が `jobs_per_worker ∈ {2, 4}` とも全形状で `RowPanel` を 1.09〜1.80 倍
+上回ったが、Apple M4 Max が専有ゲートを通過できず（他セッション並走の共有負荷）最終判定は
+**undetermined**（ADOPT でも REJECT でもない）と確定した。`IcDynamic`（本節の主題。REJECT
+確定済み）とは異なり数値面での明確な後退は観測されていないが、片実機の確証が得られないため
+本番結線は行わない。詳細は `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md` を参照。
+
 ## 出典
 
 - イシュー #565（本ドキュメントの起票元）・#564／PR #701（E-8。MC/KC/NC パラメータ化・NC 拡大

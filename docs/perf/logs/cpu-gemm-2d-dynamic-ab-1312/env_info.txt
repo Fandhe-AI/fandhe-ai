@@ -1,0 +1,71 @@
+イシュー #1312: TwoDDynamic vs RowPanel 両実機 A/B・採用ゲート事前宣言（実行計画〈Plan
+フェーズ〉§4 からの転記。文言は計画立案時点で確定済みであり、計測後に変更していない）。
+
+対象コミット: f719012（test(backend-cpu): TwoDDynamic の jobs_per_worker 別 A/B ハーネスを
+追加する）。
+
+=== Tier 1（結線判定。ADOPT を決める。対 RowPanel） ===
+
+同一プロセス内 round-robin 計測の 5 回独立プロセス中央値比 TwoDDynamic(jpw) / RowPanel
+（RAYON_NUM_THREADS 未設定＝既定全コア。DGX 20・M4 Max 16）:
+
+1. N=1024・N=2048 の両方で比 >= 1.00、かつ N=4096 で比 >= 0.95
+2. 単一の固定 jobs_per_worker（2 または 4）が条件 1 を M4 Max・GB10 の両方で満たす場合のみ
+   ADOPT（#1313 は定数 1 つを結線する。実機ごとの best-of は不可）。片実機のみは REJECT
+3. ノイズガード: 中央値比 >= 1.00 でもペアワイズ勝ち run 数が 5 中 3 未満の形状があれば
+   undetermined（結線しない）
+4. 中止条件（設計 §11 を優先適用）: DGX N=1024・T=10 で jpw 2・4 のいずれも対 RowPanel 比
+   < 1.00 → REJECT（既定スレッド数の条件 1 を満たしていても REJECT）
+5. 前提: 両実機で gemm_blis_two_d_dynamic_matches_row_panel_bit_exact_large（#[ignore]・
+   release）pass、および cargo test -p fandhe-ai-backend-cpu --lib gemm_blis --release green
+6. 条件付き採用: 条件 1 が既定スレッド数で不成立でも、形状・スレッド数の部分集合（例「N <=
+   1024 かつ effective_num_threads >= 10」）で両実機とも比 >= 1.00（勝ち >=3/5）かつその
+   補集合で >= 0.95 を満たす場合に限り、その述語を #1313 の結線条件として明記する
+7. M4 Max 専有性: 低負荷ゲート（1 分 load average < 6 が 2 回連続・最大 30 分待機）を試み、
+   不通過なら「共有負荷下」と明記して計測は続行する。REJECT は DGX（低負荷ゲート成立）＋
+   同方向の M4 Max 結果で確定してよいが、ADOPT／条件付き採用は M4 Max のゲート通過が必須
+   （不通過なら undetermined として #1313 へ「結線せず記録のみ」を引き継ぐ）
+
+=== Tier 2（#1041 ゲート・対 gemm crate。#1313／#1321 への参考値・結線判定には使わない） ===
+
+候補の GFLOP/s（A/B ハーネス 5 run 中央値）÷ gemm crate の tflops_median（oss-gemm-compare
+--sizes 1024,2048,4096 5 独立プロセスの run 間中央値 × 1000）を N=1024/2048 で算出し、
+「1024/2048 で >= 1.00 かつ 4096 で非劣化」を報告する。
+
+=== 非単調性の解消／残存判定（AC-2。ゲートとは独立に報告） ===
+
+DGX・N=1024 について同一 A/B ハーネス内で:
+- 対照: RowPanel(T=10) / RowPanel(T=8)
+- 判定: TwoDDynamic(jpw)(T=10) / TwoDDynamic(jpw)(T=8) が >= 1.00（5 run 中 >=3 run で 1.0
+  以上）→「解消」、0.90 未満 →「残存」、その間は「部分的緩和」と表記。T=20（既定）でも
+  TwoDDynamic(T=20)/TwoDDynamic(T=8) を併記
+- N=2048/4096 は参考表示のみ
+
+=== 計測マトリクス（固定） ===
+
+DGX Spark GB10: RAYON_NUM_THREADS = 8・10・未設定（=20）。形状 1024/2048/4096。候補
+RowPanel・TwoD(2)・TwoD(4)。各 5 独立プロセス。
+Apple M4 Max: RAYON_NUM_THREADS 未設定（=16）。同上。
+両実機: oss-gemm-compare（Tier 2）1024,2048,4096 × 5。
+
+jobs_per_worker=8 はグリッドに含めない。
+
+=== 実測タイミングに関する注記 ===
+
+本ファイルは計測完了後に作成した（計測前の別ファイルとしては用意しなかった）。ただし
+本文の内容は実行計画（Plan フェーズ。上位エージェントが計測開始前に作成・本エージェントへ
+渡した固定計画）§4 の文言をそのまま転記したものであり、計測結果を見てから閾値・条件を
+変更した事実はない。実測結果・判定は docs/perf/cpu-gemm-2d-dynamic-partition-ab.md を参照。
+
+=== 実行環境ゲート結果（実測後の追記） ===
+
+- DGX Spark GB10: 低負荷ゲート成立（load average 概ね 0.00〜0.01。gate-dgx.log）
+- Apple M4 Max: 低負荷ゲート**不成立**。**実行プロトコルに関する重要な注記**:
+  §4.1 条件 7 が規定する「スクリプト化した 60 秒間隔ポーリング・2 回連続 <6.0・
+  最大 30 分待機」というフル自動プロトコルは、本エージェント実行環境のサンドボックス
+  制約（長時間 `sleep` の直接実行禁止・複雑な `while` ループを含むコマンドの拒否）
+  により実行できなかった。代わりに手動で複数回 `uptime` を取得した（02:08:31Z
+  load1=59.65 → 02:30 台 load1=11.84 の約 22 分間・単調減少を確認したが、22 分
+  経過時点でも閾値 6.0 を約 2 倍上回ったまま。gate-m4max.log に全サンプル記録）。
+  低負荷ゲートは成立しなかったと判断する。条件 7 によりこの実行では ADOPT・
+  条件付き ADOPT を確定しない

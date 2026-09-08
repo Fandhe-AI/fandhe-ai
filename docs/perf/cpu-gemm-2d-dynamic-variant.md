@@ -3,10 +3,13 @@
 イシュー #1311（親: #1310。設計: `docs/cpu-gemm-2d-dynamic-partition-design.md`。
 兄弟: #1312「両実機 A/B・採否判定」・#1313「本番結線」）。
 
-**状態: 実装完了・本番未結線**。両実機 A/B・採否判定は #1312、本番結線は
-#1313 が引き継ぐ。本 PR では `crates/backend-cpu/src/gemm_blis/{partition.rs,mod.rs}`
-に `#[cfg(test)]` 限定で追加するのみで、本番公開入口
-（`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`）は変更しない。
+**状態: 実装完了・本番未結線**。両実機 A/B・採否判定は #1312 で実施済み
+（判定は **undetermined**。M4 Max 専有ゲート未通過のため ADOPT を確定できず、
+DGX 単独では採用しない規則〈設計 §11〉に従い #1313 へ「結線せず記録のみ」で
+引き継ぐ。詳細は `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`）。本ファイルが
+記録する実装自体（`crates/backend-cpu/src/gemm_blis/{partition.rs,mod.rs}` の
+`#[cfg(test)]` 限定コード）は変更しない。本番公開入口
+（`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`）は引き続き未変更。
 
 ## 1. 目的・位置づけ
 
@@ -154,17 +157,34 @@ A/B ハーネス（`gemm_blis_variant_ab_1024_2048`／`_4096`。`#[ignore]`）�
 `all_gemm_driver_variants()` に `TwoDDynamic` が追加されたことで自動的に
 候補へ含まれる（sanity 実行のみ・値は採否根拠にしない。#1312 が本格計測する）。
 
-## 6. スコープ外（#1312／#1313 が引き継ぐ）
+## 6. スコープ外（#1313 が引き継ぐ）
 
-- 両実機（Apple M4 Max・DGX Spark GB10）A/B 計測・採否判定（#1312）
 - 本番結線・`gemm_blis_bias_act_parallel` の epilogue 統合・`partition` の
-  `#[cfg(test)]` 解除（#1313）
-- `oss-gemm-compare` への variant 選択オプション追加（#1312 の任意前提）
+  `#[cfg(test)]` 解除（#1313。#1312 の判定が undetermined のため「結線せず
+  記録のみ」で引き継ぐ。§7 参照）
+- `oss-gemm-compare` への variant 選択オプション追加（#1312 では未実施のまま
+  対象外と判断済み）
 - 設計 §4.2 主案 S（`run_rows` 入口）の実装（S′ が障害に直面した場合の
   フォールバックとしてのみ着手する）
 
+## 7. 実機実測（#1312）
+
+両実機（DGX Spark GB10・Apple M4 Max）5 回独立プロセス中央値 A/B 計測を実施
+した。DGX（専有ゲート通過）は `jobs_per_worker ∈ {2, 4}` とも全形状（N=1024/
+2048/4096）で `RowPanel` を 1.09〜1.80 倍上回った。一方 Apple M4 Max は計測時
+の 1 分 load average が概ね 30〜60（他セッション並走の共有負荷）で推移し、
+事前宣言した専有ゲート（1 分 load average < 6 を 2 回連続）を通過しなかった。
+採用ゲート条件 7（「ADOPT／条件付き ADOPT は M4 Max のゲート通過が必須」）に
+より、M4 Max 側の数値が良好に見えても本イシューでは確証としない設計であり、
+最終判定は **undetermined**（REJECT でも ADOPT でもない）と確定した。
+DGX・N=1024 の T=10/T=8 非単調性（#1305）は `TwoDDynamic` で「残存」判定
+（比 0.86 前後・閾値 0.90 未満）だが `RowPanel` の 0.48 から大幅に改善した。
+詳細な実測表・判定根拠・#1313 への引き継ぎ内容は
+`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md` を参照。
+
 ## 出典
 
-イシュー #1311・親 #1310・設計 `docs/cpu-gemm-2d-dynamic-partition-design.md`・
+イシュー #1311・#1312・親 #1310・設計 `docs/cpu-gemm-2d-dynamic-partition-design.md`・
 `docs/perf/cpu-gemm-ic-dynamic-variant.md`・
+`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`・
 `crates/backend-cpu/src/gemm_blis/{partition.rs,mod.rs}`。
