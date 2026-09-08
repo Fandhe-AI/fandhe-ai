@@ -12,7 +12,13 @@
 # WORKDIR／CARGO_TARGET_DIR／LOGDIR／SCRIPTDIR は環境変数で上書き可能。
 set -uo pipefail
 
-WORKDIR="${WORKDIR:-/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_209997e6-39f-98}"
+# WORKDIR は特定の個人用 worktree に固定せず、本スクリプト自身の配置
+# （docs/perf/logs/<issue>/ はリポジトリルート直下から 3 階層下）から
+# リポジトリルートを導出する。環境変数指定があればそれを優先する
+# （base 側 AGENTS.md「ハードコード回避（P1）」・イシュー #1451 レビュー指摘）。
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DERIVED_WORKDIR="$(cd "$SELF_DIR/../../.." && pwd)"
+WORKDIR="${WORKDIR:-$DERIVED_WORKDIR}"
 LOGDIR="${LOGDIR:-$WORKDIR/docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313}"
 SCRIPTDIR="${SCRIPTDIR:-$LOGDIR}"
 GATE_THRESHOLD="6.0"
@@ -24,7 +30,10 @@ if [ ! -f "$SCRIPTDIR/run_ab.sh" ]; then
 fi
 
 mkdir -p "$LOGDIR"
-cd "$WORKDIR"
+if ! cd "$WORKDIR"; then
+  echo "エラー: WORKDIR='$WORKDIR' への移動に失敗した（存在しないか古い checkout の可能性）" >&2
+  exit 1
+fi
 
 ( while :; do date -u +"%Y-%m-%dT%H:%M:%SZ" >> "$LOGDIR/uptime-m4max.log"; uptime >> "$LOGDIR/uptime-m4max.log"; sleep 30; done ) &
 POLLER_PID=$!
