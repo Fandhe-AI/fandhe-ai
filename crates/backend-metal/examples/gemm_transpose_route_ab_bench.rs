@@ -1112,16 +1112,25 @@ mod macos_impl {
     /// 方針（書き込み失敗時は stderr へ理由を出して exit(1)）を exhausted
     /// 経路にも一貫適用する。
     fn abort_on_guard_error(label: &str, err: &BenchError, args: &CliArgs) -> ! {
+        // `env_guard_result=` は行頭キーとして出力する（フェーズ 1/2 成功時
+        // の `env_guard_result={} attempts={}` 行〈1798/1883 行目〉と同じ
+        // 位置づけに揃え、`grep '^env_guard_result='` で成功・失敗いずれの
+        // 経路も一律に拾えるようにする。`env_guard_label` は同じ行の末尾
+        // 側の付加情報として出す（Bugbot 指摘。#1265。合わせて
+        // `crates/bench-harness/src/env_guard.rs::summarize_exhausted` の
+        // 内訳キーを `verdict=` から `state=` へ変更し、後続の `verdict=`
+        // 行との衝突〈同一行に `verdict=` が複数回出現し行頭 grep が
+        // 崩れる〉を解消済み）。
         let text = match err {
             BenchError::EnvGuardExhausted { attempts, detail } => {
                 format!(
-                    "env_guard_label={label} env_guard_result=exhausted attempts={attempts}\n\
+                    "env_guard_result=exhausted attempts={attempts} env_guard_label={label}\n\
                      verdict=undetermined (環境ガード上限到達: {detail})\n"
                 )
             }
             other => {
                 format!(
-                    "env_guard_label={label} env_guard_result=error\n\
+                    "env_guard_result=error env_guard_label={label}\n\
                      verdict=undetermined (環境ガード設定エラー: {other})\n"
                 )
             }

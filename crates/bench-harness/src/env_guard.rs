@@ -780,18 +780,22 @@ impl RetryConfig {
         Duration::try_from_secs_f64(secs).unwrap_or(self.max_wait)
     }
 
+    /// 構築時に指定した最大試行回数（`RetryConfig::new` の `max_attempts` 引数）を返す。
     pub fn max_attempts(&self) -> usize {
         self.max_attempts
     }
 
+    /// 構築時に指定した初回試行の待機時間（`RetryConfig::new` の `initial_wait` 引数）を返す。
     pub fn initial_wait(&self) -> Duration {
         self.initial_wait
     }
 
+    /// 構築時に指定した待機時間の指数バックオフ係数（`RetryConfig::new` の `growth_factor` 引数）を返す。
     pub fn growth_factor(&self) -> f64 {
         self.growth_factor
     }
 
+    /// 構築時に指定した待機時間の上限（`RetryConfig::new` の `max_wait` 引数。[`wait_for_attempt`](Self::wait_for_attempt) の cap 値）を返す。
     pub fn max_wait(&self) -> Duration {
         self.max_wait
     }
@@ -800,7 +804,9 @@ impl RetryConfig {
 /// 1 回の試行記録（env_info 出力・テスト用）。`attempt` は 1 始まり。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuardAttempt {
+    /// この試行の番号（1 始まり）。
     pub attempt: usize,
+    /// この試行で得られたガード判定結果。
     pub report: EnvGuardReport,
     /// この試行の判定を得る前に待機した時間（1 回目は常に `None`）。
     pub waited_before: Option<Duration>,
@@ -809,8 +815,11 @@ pub struct GuardAttempt {
 /// [`run_guard_with_retry_with`]／[`run_guard_with_retry`] の成功時の戻り値。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuardRetryOutcome {
+    /// 実行した全試行の記録（1 回目から成功時点まで）。
     pub attempts: Vec<GuardAttempt>,
+    /// 最終的に成功した試行のガード判定結果（`attempts` 末尾の `report` と同一）。
     pub final_report: EnvGuardReport,
+    /// 全試行を通じて待機した合計時間。
     pub total_wait: Duration,
     /// 構築時に指定された `RetryConfig::max_attempts()`（上限）。`attempts_used()`
     /// と別に保持する（Review 指摘。#1265）: 上限に対する余裕（何回目で
@@ -897,6 +906,15 @@ impl GuardRetryOutcome {
 /// いた（Review 指摘。#1265）。各項目の `verdict` をそのまま併記すること
 /// で、どちらが実際のブロック要因かを要約からも判別できるようにする。
 fn summarize_exhausted(report: &EnvGuardReport) -> String {
+    // 各項目の内訳キーは `state=`（`verdict=` ではない）を使う: この
+    // 要約は呼び出し元（`abort_on_guard_error`）で `verdict=undetermined
+    // ({detail})` という 1 行に埋め込まれるため、`detail` 内に `verdict=`
+    // を含めると同一行に `verdict=` が複数回出現し、「行頭の `verdict=`
+    // を一意な判定値として grep する」既存の運用契約（本ファイル冒頭
+    // doc・`verdict={verdict} (...)` 等の他出力箇所）を壊す
+    // （Bugbot 指摘。#1265。crates/backend-metal/examples/
+    // gemm_transpose_route_ab_bench.rs 側の `env_guard_result=` 行頭
+    // 化とセットの是正）。
     let load_part = match report.load_avg.observed {
         Some(load) => {
             let cmp = if load.one > report.load_avg.max_1min {
@@ -905,21 +923,21 @@ fn summarize_exhausted(report: &EnvGuardReport) -> String {
                 "<="
             };
             format!(
-                "load_avg(1min)={:.2} {cmp} max={:.2} verdict={:?}",
+                "load_avg(1min)={:.2} {cmp} max={:.2} state={:?}",
                 load.one, report.load_avg.max_1min, report.load_avg.verdict
             )
         }
         None => format!(
-            "load_avg=NA(max={:.2}) verdict={:?}",
+            "load_avg=NA(max={:.2}) state={:?}",
             report.load_avg.max_1min, report.load_avg.verdict
         ),
     };
     let gpu_part = if report.gpu.flagged.is_empty() {
-        format!("gpu_flagged=none verdict={:?}", report.gpu.verdict)
+        format!("gpu_flagged=none state={:?}", report.gpu.verdict)
     } else {
         let names: Vec<&str> = report.gpu.flagged.iter().map(|p| p.name.as_str()).collect();
         format!(
-            "gpu_flagged={} verdict={:?}",
+            "gpu_flagged={} state={:?}",
             names.join(","),
             report.gpu.verdict
         )
