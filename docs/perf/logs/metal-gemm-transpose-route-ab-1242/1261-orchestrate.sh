@@ -281,12 +281,26 @@ stop_during_sampling() {
 # 実行中の監視サンプリングプロセスの PID（空白区切り）。`run_one` が
 # 設定し、正常停止後に空へ戻す。中断時は `cleanup_on_exit` が参照する。
 SAMPLING_PIDS=""
+# 実行中のベンチ本体（`${BINARY}`）の PID。`run_one` が設定し、終了後に
+# 空へ戻す。中断時は `cleanup_on_exit` が停止対象として参照する。
+BENCH_PID=""
 
-# EXIT trap: 監視プロセスが残っていれば停止する（冪等。正常経路で
-# 停止済みなら `SAMPLING_PIDS` が空のため何もしない）。INT/TERM は
+# EXIT trap: ベンチ本体・監視プロセスが残っていれば停止する（冪等。
+# 正常経路で停止済みなら両変数が空のため何もしない）。INT/TERM は
 # `exit` へ変換して EXIT trap を確実に経由させる（`set -e` 非使用の
 # ため、ここで exit しないと `kill` 後も残りのコマンドが続行しうる）。
+# ベンチ本体は `run_one` でバックグラウンド起動＋`wait` する方式にして
+# いる（Cursor Bugbot 指摘・PR #1457: bash はフォアグラウンドの子
+# プロセス実行中は INT/TERM の trap 実行をその終了まで遅延させるため、
+# 素朴に `"${BINARY}" ...` を前景実行すると計測途中の SIGTERM で
+# 監視プロセスが計測終了まで残留する。`wait` 組み込みは trap で即座に
+# 中断されるため、trap 実行が遅延しない）。
 cleanup_on_exit() {
+    if [ -n "${BENCH_PID}" ]; then
+        kill "${BENCH_PID}" 2>/dev/null
+        wait "${BENCH_PID}" 2>/dev/null
+        BENCH_PID=""
+    fi
     if [ -n "${SAMPLING_PIDS}" ]; then
         stop_during_sampling "${SAMPLING_PIDS}"
         SAMPLING_PIDS=""
@@ -322,8 +336,14 @@ run_one() {
 
     # `cargo run` はビルド出力（絶対パス）を含みうるため、事前ビルド済み
     # バイナリを直接起動する（計画 §4 ステップ 10 の理由）。
-    "${BINARY}" "$@" > "${out_log}" 2>&1
+    # バックグラウンド起動＋`wait`（前景実行にしない理由は
+    # `cleanup_on_exit` のコメント参照）。`wait <pid>` の戻り値が
+    # ベンチ本体の exit code になる。
+    "${BINARY}" "$@" > "${out_log}" 2>&1 &
+    BENCH_PID=$!
+    wait "${BENCH_PID}"
     local exit_code=$?
+    BENCH_PID=""
     sed -E -i '' "${SANITIZE_SED}" "${out_log}"
 
     stop_during_sampling "${SAMPLING_PIDS}"
