@@ -449,6 +449,26 @@ attempt 1 が最大 3 時間の無限定待機で TIMEOUT したことを受け�
 変更していない（打ち切り理由は `orchestrate.log`・`wait_gate_attempt2.log`
 末尾に明記）。attempt 2 でも phase1-only の実測は 0 回のまま。
 
+**PR #1459 codex-review／Cursor Bugbot 指摘の是正（2026-09-09）**:
+両 attempt とも ゲート不通過（`gate_ok=0` 継続）で `cargo run` ループへ
+到達しなかったため、本記録の実測値・TIMEOUT 判定そのものへの影響はない
+が、`orchestrate.sh`／`wait_gate.sh` 自体に将来の再試行を壊す 2 件の
+不備が指摘された。(1) `orchestrate.sh` の `cargo run` が
+`gemm_transpose_route_ab_bench` の `required-features =
+["internal-diagnostics"]`（`crates/backend-metal/Cargo.toml`）を満たさず
+計測開始前に失敗しうる状態だったため、`--features internal-diagnostics`
+を明示指定した。(2) `wait_gate.sh` の `gate_ok` 判定が
+`proc_count`（cargo/rustc/python3 の有無）を記録するのみで判定式へ
+反映しておらず、load average のみで PASSED 判定していたため、
+`proc_count == 0` を必須条件へ追加した。加えて `orchestrate.sh` の
+3 回の run 実行中は排他計測契約を実行前後の静的確認・終了コードのみで
+判定していたため、run 実行中もバックグラウンドで load average・他
+GPU/build 系プロセス（自 run のプロセスツリーは除外）をポーリング監視
+し、逸脱を検出した run は終了コードに関わらず `valid_runs` から除外する
+よう変更した（`phase1_run${n}_monitor.log` に記録）。修正後スクリプトは
+`docs/perf/logs/metal-gemm-transpose-route-ab-1242/orchestrate.sh`／
+`wait_gate.sh` を正とする。
+
 ### 結論（本イシューでの到達点）
 
 **排他環境（load average < 2・他 GPU プロセスなし）の確保に 2 回とも

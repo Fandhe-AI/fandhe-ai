@@ -8,16 +8,22 @@
 # （#1187／#1284 の前例に倣い、再度不通過なら undetermined として記録
 # する方針。orchestrate.sh から呼ばれる）。
 #
-# 判定条件: 1 分 load average < GATE_THRESHOLD が CONSEC_REQUIRED 回連続。
-# GPU プロセス確認は cargo/rustc/python3（ビルド・計測系プロセス。他
-# セッションの並走を示す代理指標）の有無を procs= として記録する。
+# 判定条件: 1 分 load average < GATE_THRESHOLD **かつ** cargo/rustc/python3
+# （ビルド・計測系プロセス。他セッションの並走を示す代理指標）が
+# 0 件、の両方が CONSEC_REQUIRED 回連続で成立すること。
+#
+# PR #1459 codex-review 指摘の是正（イシュー #1253）: 従来版は
+# proc_count を計測・ログには記録するものの gate_ok（PASSED 判定）へは
+# load1 のみを使っており、「他 GPU プロセスなし」という排他計測契約の
+# 半分（プロセス条件）が判定へ反映されていなかった。本版は
+# proc_count == 0 も gate_ok の必須条件へ加える（load1 のみでの緩和は
+# 行わない）。
+#
 # 注意: 本スクリプトは attempt 1 の実行後に再構成したもので、attempt 1 の
 # 判定条件を再現する保証はない（attempt 1 の wait_gate.log は util= 欄を
 # 持ち gemm_transpose_route_ab_bench も検出しているが本版は出力しない。
 # attempt 1 は load1 < 2.0 の行でも gate_ok=0 のため判定条件は未確定。
-# `docs/perf/metal-gemm-transpose-tiled.md` §5.6）。（誤検知を許容する簡易版であり、実際の
-# GPU 使用有無は各 run 実行前後の `ps`／`uptime` 生ログで人間が確認する
-# 前提）。
+# `docs/perf/metal-gemm-transpose-tiled.md` §5.6）。
 set -uo pipefail
 
 LOGDIR="${LOGDIR:?LOGDIR required}"
@@ -48,7 +54,9 @@ while :; do
       proc_count=$((proc_count + cnt))
     fi
   done
-  ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" 'BEGIN{print (l<t)?1:0}')
+  # load1 とプロセス不在の両方を満たしたときのみ gate_ok=1
+  # （プロセス条件を落とすと排他計測契約の片側しか検査しなくなる）。
+  ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v p="$proc_count" 'BEGIN{print (l<t && p==0)?1:0}')
   if [ "$ok" = "1" ]; then
     consec=$((consec + 1))
   else
