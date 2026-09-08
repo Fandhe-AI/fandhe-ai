@@ -24,6 +24,15 @@ pub enum BenchError {
     NanSample,
     /// `MeasurementConfig` が spec 下限（warmup 20 回以上・計測 20 回以上）を満たさない。
     ProtocolViolation(String),
+    /// 環境ガード（[`crate::env_guard`]）のバックオフ再試行が上限回数に達しても
+    /// `overall == GuardVerdict::Fail`（[`crate::env_guard::EnvGuardReport::is_blocking`]）
+    /// のまま解消しなかった（イシュー #1265）。`attempts` は実行した試行回数
+    /// （`max_attempts` と一致）、`detail` は最終試行の実測値・上限・flagged
+    /// プロセス名等の人が読める要約（ホスト名・ユーザー名・機体識別子は含まない。
+    /// `docs/real-hardware-verification-env.md` 方針）。呼び出し側
+    /// （`examples/gemm_transpose_route_ab_bench.rs`）はこのエラーで計測を
+    /// 中断し `verdict=undetermined` として記録する。
+    EnvGuardExhausted { attempts: usize, detail: String },
 }
 
 impl fmt::Display for BenchError {
@@ -32,6 +41,10 @@ impl fmt::Display for BenchError {
             BenchError::EmptySamples => write!(f, "サンプル列が空のため分位点を計算できない"),
             BenchError::NanSample => write!(f, "サンプル列に NaN が混入している"),
             BenchError::ProtocolViolation(msg) => write!(f, "計測プロトコル違反: {msg}"),
+            BenchError::EnvGuardExhausted { attempts, detail } => write!(
+                f,
+                "環境ガードが {attempts} 回の再試行上限に達した: {detail}"
+            ),
         }
     }
 }
