@@ -1,2 +1,2 @@
 env_guard_result=exhausted attempts=2
-verdict=undetermined (環境ガード上限到達: load_avg(1min)=18.54 > max=0.01; gpu_flagged=none)
+verdict=undetermined (環境ガード上限到達: load_avg(1min)=3.43 > max=0.01; gpu_flagged=none)

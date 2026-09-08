@@ -905,12 +905,15 @@ mod macos_impl {
                     .map(Duration::from_secs_f64)
                     .unwrap_or(GUARD_INITIAL_WAIT);
                 let max_attempts = args.guard_max_attempts.unwrap_or(GUARD_MAX_ATTEMPTS);
-                let retry = RetryConfig::new(
-                    initial_wait,
-                    GUARD_GROWTH_FACTOR,
-                    GUARD_MAX_WAIT,
-                    max_attempts,
-                )?;
+                // `RetryConfig::new` は `max_wait >= initial_wait` を要求する
+                // （`bench_harness::env_guard::RetryConfig::new` doc 参照）。
+                // `--guard-wait-secs` は利用者指定で `GUARD_MAX_WAIT`
+                // （既定 300s）を上回りうるため、cap を initial_wait 未満に
+                // 落とさないよう max で持ち上げる（fail-closed に構築失敗させ
+                // ないための単純な整合。`GUARD_MAX_WAIT` 自体の既定値は不変）。
+                let max_wait = GUARD_MAX_WAIT.max(initial_wait);
+                let retry =
+                    RetryConfig::new(initial_wait, GUARD_GROWTH_FACTOR, max_wait, max_attempts)?;
                 let outcome = run_guard_with_retry(&config, &retry)?;
                 Ok((outcome, Some(config)))
             }
