@@ -1743,6 +1743,11 @@ DGX N=2048 は candle 側要素誤差超過により判定不能、M4 Max N=2048
 **追記（イシュー #1262）**: DGX N=2048 の「判定不能」はその後 tolerance 契約変更（#1241
 承認）により解消し、確定判定（未達・0.950 倍）へ遷移した（環境 14 節「5 回計測ゲート判定
 （イシュー #1262）」参照）。CUDA 側の同種解消は #1260（環境 12 節）を参照。
+**追記（イシュー #1321）**: #1283 Phase 4 として Phase 1〜3 結線後（実質 `TwoDDynamic` の
+み）の両実機再判定を実施した結果、正式系列（`fandhe-ai =0.7.0` ピン）は両実機・全形状で
+未達成のまま不変だが、参考系列（origin/main HEAD）では Apple M4 Max が全 3 形状・
+DGX Spark GB10 が N=2048（1.562 倍）で初めて達成を記録した（環境 26 節参照。ピン未更新の
+ため正式判定は不変のまま）。
 
 ## 環境 16: DGX Spark GB10（GEMM reuse 計測境界のフェーズ分解・イシュー #1182）
 
@@ -2141,3 +2146,27 @@ Phase 0 再計測で確定した）。checksum は両実機・全セル完全一
 `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節・
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §21・
 `docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/` を参照。
+
+## 環境 26: DGX Spark GB10・Apple M4 Max（Phase 1〜3 結線後の candle 比ゲート再判定。イシュー #1321）
+
+#1283 Phase 4「ゲート再判定」。`run_gemm_gate_cpu.sh`／`compare_gemm_gate.py --device cpu`
+の同一プロトコル（5 回独立プロセス起動・中央値）で、正式系列（`fandhe-ai =0.7.0` registry
+ピン）・参考系列（origin/main HEAD `ced4d14`。`crates/facade` へ path patch）の 2 系列 ×
+両実機 = 4 通りを計測した。
+
+| 実機 | 系列 | N=512 | N=1024 | N=2048 |
+|---|---|---|---|---|
+| DGX Spark GB10 | 正式 `0.7.0-1321` | 未達（0.696） | 未達（0.770） | 未達（0.938。candle 救済 2 要素） |
+| DGX Spark GB10 | 参考 `head-ced4d14-1321` | 未達（0.802） | 未達（0.875） | **達成（1.562）** |
+| Apple M4 Max | 正式 `0.7.0-1321` | 未達（0.981） | 未達（0.887） | 未達（0.891） |
+| Apple M4 Max | 参考 `head-ced4d14-1321` | **達成（1.133）** | **達成（1.169）** | **達成（1.051）** |
+
+**正式判定（`fandhe-ai =0.7.0` ピン基準。#1283 の正式ゲート判定）は両実機・全形状で
+未達成のまま不変**（DGX N=2048 は #1262／§19 の確定判定を再確認）。参考系列（次回
+crates.io 公開後の見込み値）では、Phase 1〜3 結線後の HEAD が実質的に `TwoDDynamic`
+（#1313）のみを反映した状態で、Apple M4 Max が全 3 形状・DGX Spark GB10 が N=2048 のみで
+初めて candle 比ゲート達成を記録した（M4 Max 参考系列は専有ゲート通過後に共有負荷が
+再上昇した状態下の計測である点に留意）。fandhe-ai 側は 4 系列・全 90 run で
+`parity_fail_count=0` を確認。checksum・parity の詳細、diff 帰属表、tolerance 契約の状態は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §22・`docs/perf/logs/
+cpu-gemm-candle-gate-1321/` を参照。

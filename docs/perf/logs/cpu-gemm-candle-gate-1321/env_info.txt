@@ -1,0 +1,62 @@
+# イシュー #1321 実機実測 env_info
+
+## 共通
+
+- 対象イシュー: #1321（親 #1320 → #1283 Phase 4「ゲート再判定」）
+- 転送元コミット（base）: `ced4d14f8acf08499308142c19e3ea34e9a27097`（`origin/main` HEAD。#1451/#1448/#1450 を含む）
+- 参考系列ラベル: `head-ced4d14-1321`（`GEMM_GATE_PATCH_FACADE_PATH` で HEAD ツリーの `crates/facade` へ path patch）
+- 正式系列ラベル: `0.7.0-1321`（`fandhe-ai =0.7.0` registry 解決。GEMM_GATE_PATCH_FACADE_PATH 未指定）
+- プロトコル: `run_gemm_gate_cpu.sh` → `compare_gemm_gate.py --device cpu`（5 回独立プロセス起動・中央値）
+- 判定規則: `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §22.1（本イシュー冒頭で事前宣言・計測後に変更なし）
+- tolerance 契約: #1241 承認・#1443/#1445 実装済み（候補 A-1・`c=0.5`）を適用。tolerance 定数・判定式は本イシューで変更していない
+
+## manifest 突合（4 系列とも期待どおり）
+
+| 実機 | 系列 | fandhe_ai_source | bench_fandhe_features | candle_core_source |
+|---|---|---|---|---|
+| DGX | 0.7.0-1321 | registry | "" | registry |
+| DGX | head-ced4d14-1321 | path:/home/fandhe/work/fc-1321/rust-ai-library-run/crates/facade | "" | registry |
+| M4 Max | 0.7.0-1321 | registry | "" | registry |
+| M4 Max | head-ced4d14-1321 | path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade | "" | registry |
+
+4 系列とも `results/raw/results-*.jsonl` は 45 行、`skipped-*.log` は空。
+
+## DGX Spark GB10（Grace CPU）
+
+- ノード: `docs/real-hardware-verification-env.local.md` 記載の CUDA 実機ノード（`CUDA_NODE`。実 SSH ホスト名は非開示。本イシューは CPU 経路のみ使用）
+- OS: `Linux spark-dbd9 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64`
+- CPU: `lscpu` — Cortex-X925 ×10（大コア）+ Cortex-A725 ×10（小コア）計 20 論理 CPU
+- rustc: `1.97.0 (2d8144b78 2026-07-07)`
+- 隔離ディレクトリ: `~/work/fc-1321/rust-ai-library-run/`（本イシュー専用。共有 `~/work/rust-ai-library-run` は未使用）。計測後に削除済み（`rm -rf ~/work/fc-1321` 実行・確認済み）
+- 転送: rsync（`.gitignore` フィルタ + 明示除外）。`.rev-stamp` がノード側で `ced4d14f8acf08499308142c19e3ea34e9a27097` と一致することを確認。転送後 secrets grep（`.env*`／`settings.local.json`／`real-hardware-verification-env.local.md`）は 0 件
+- trusted-hosts: `gemm-gate-trusted-hosts.local` をノード上で生成（`hostname`＝`spark-dbd9`・`/etc/machine-id` の実値。Mac から転送していない）
+- 専有ゲート: 1 分 load average < 6.0 を 30 秒間隔で 2 回連続確認。**1 回目の試行（`orchestrate.sh`）は `CARGO_TARGET_DIR` を同期ツリー外（`~/work/target-fc-1321`）へ分離したところ `run_gemm_gate.sh` が `./target/release/...` を固定参照する実装のため manifest 記録に失敗（`formal exit=1`）。原因判明後 `CARGO_TARGET_DIR` を外し `./target`（隔離ディレクトリ内。計測後にディレクトリごと削除されるため恒久キャッシュ分離は不要と判断）で再実行（`orchestrate2.sh`）**。専有ゲートは 08:14:23〜08:14:53 UTC に 2 回連続 load1<6.0（0.29→0.50）で通過（`gate-dgx.log`）
+- 実行順: 正式系列（`0.7.0-1321`。08:14:53〜08:18:00 UTC）→ 参考系列（`head-ced4d14-1321`。08:18:48〜08:19:34 UTC）
+- 完了時 load average: `5.23, 3.68, 1.62`（`uptime-dgx.log`）
+- 秘密情報 grep（回収後）: 短縮ホスト名（`spark-dbd9`。信頼済みタグとして precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で許容されている表記）以外の内部実値は本ファイル・生成物のいずれにも含めていない。`/etc/machine-id`・`IOPlatformUUID` の実値は env_info.txt を含むどの生成物にも記載していない（trusted-hosts ファイルはノード上で生成しノード上のまま残置。回収対象に含めていない）
+
+## Apple M4 Max（このセッションが動くホスト自身）
+
+- OS: macOS 26.6.2（BuildVersion 25G83）・`Darwin nancynoMBP 25.6.0 arm64`
+- CPU: `hw.perflevel0.logicalcpu=12`（性能コア）・`hw.perflevel1.logicalcpu=4`（効率コア）
+- rustc: `1.96.0 (ac68faa20 2026-05-25)`
+- 実行場所: 本 worktree（`/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43`）を直接使用（rsync 転送不要。ローカル実行）
+- trusted-hosts: `GEMM_GATE_TRUSTED_HOSTS_FILE` でメイン worktree の `scripts/bench/framework-compare/gemm-gate-trusted-hosts.local` を直接参照（コピーせず）
+- 専有ゲート: 開始時 load average 6.48〜8.26（他セッション並走中の共有負荷）。08:18:53 UTC に load1=4.34 で 2 回連続 load1<6.0 を満たし通過（`gate-m4max.log`）
+- 実行順: 正式系列（`0.7.0-1321`。08:18:53〜08:19:34 UTC）→ 参考系列（`head-ced4d14-1321`。08:20:01〜08:20:49 UTC）
+- **注記（共有負荷）**: 専有ゲート自体は通過したが、参考系列の計測完了時点の load average は `9.27, 7.71, 7.96`（`uptime-m4max.log`）まで再上昇していた。他セッションの並走ビルド・計測が計測ウィンドウ中に増加した可能性がある。規則 4 に従い「専有ゲート通過」と「完了時点で共有負荷が再上昇した」の両方を事実として記録する（判定自体は §22.1 規則どおり確定するが、絶対値の解釈には幅を持たせる）
+- `git status` で `scripts/bench/framework-compare/Cargo.toml`／`Cargo.lock` の差分なしを確認済み
+- 秘密情報 grep: `/Users/nancy/...` パスは precedent（既存コミット済み manifest 多数。例 `manifest-m4max-cpu-gemm-gate-head-145639d-pzero-on.json`）と同型のため許容する既存慣行として扱う。DGX 側の CUDA_NODE 実 SSH ホスト名（`docs/real-hardware-verification-env.local.md` にのみ存在するフルドメイン形式）は非開示のまま維持し、本ファイル・生成物のいずれにも記載していない（`spark-dbd9`〈trusted-hosts の tag 用短縮形。実機の `hostname` コマンド出力〉自体は precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で既に許容されている短縮形のため同様に扱う）
+
+## 実測結果サマリ（詳細は gate doc §22.4 を正とする）
+
+| 実機 | 系列 | N=512 | N=1024 | N=2048 |
+|---|---|---|---|---|
+| DGX | 0.7.0-1321（正式） | 0.696 未達 | 0.770 未達 | 0.938 未達（candle 救済 2 要素） |
+| DGX | head-ced4d14-1321（参考） | 0.802 未達 | 0.875 未達 | **1.562 達成（candle 救済 2 要素）** |
+| M4 Max | 0.7.0-1321（正式） | 0.981 未達 | 0.887 未達 | 0.891 未達 |
+| M4 Max | head-ced4d14-1321（参考） | **1.133 達成** | **1.169 達成** | **1.051 達成** |
+
+fandhe-ai 側は 4 系列・全 120 run（reuse 15 + fresh 15 × 4 系列 = 実質 60 reuse + 60 fresh 相当。
+各系列 45 行 ×4 = 180 行中 fandhe-ai 側 90 行）で `parity_fail_count=0` を確認（`compare_gemm_gate-*.md` の
+「fandhe-ai」列がすべて `0/<total>`）。

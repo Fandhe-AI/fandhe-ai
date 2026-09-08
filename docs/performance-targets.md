@@ -436,3 +436,31 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   `scripts/bench/framework-compare/results/raw/results-dgx-cpu-gemm-gate-0.7.0-1262.jsonl`、
   集計表は `scripts/bench/framework-compare/results/summary.md` 環境 14 節「5 回計測ゲート
   判定（イシュー #1262）」を参照
+
+### 8.11 #1321 追補（Phase 1〜3 結線後の CPU GEMM candle 比ゲート再判定を両実機で実施。
+§2 段階的下限表・§3 丸め規則は不変）
+
+- #1283（CPU GEMM の candle 超えトラッキング）Phase 4「ゲート再判定」として、Phase 1
+  （計測境界固定費）・Phase 2（並列分割）・Phase 3（マイクロカーネル・ブロッキング）の
+  結線結果を反映した状態で、CPU GEMM N=512/1024/2048 reuse ゲートを DGX Spark GB10
+  （Grace CPU）・Apple M4 Max の両実機で再計測した（イシュー #1321）。`git diff v0.7.0..HEAD`
+  の実測突合により、v0.7.0 との実質的な差は「`RowPanel` → `TwoDDynamic`（#1313 で本番
+  結線済み）」のみと確定した（他の Phase 施策は無効〈出力並列ゼロ埋め〉または REJECT）
+- **正式系列（承認済みピン `fandhe-ai =0.7.0`）は両実機・全 3 形状で未達成のまま不変**
+  （DGX N=2048 は §8.10／#1262 の確定判定〈未達・0.950 倍〉相当を本追補でも再確認
+  〈0.938 倍〉）
+- **参考系列（origin/main HEAD への path patch。次回 crates.io 公開後の見込み値）では、
+  #1283 系列で初めて candle 比ゲート達成を観測**: Apple M4 Max が N=512/1024/2048 の
+  全 3 形状で達成（1.133／1.169／1.051 倍）、DGX Spark GB10 が N=2048 のみ達成
+  （1.562 倍）。M4 Max 参考系列は専有ゲート通過後に共有負荷が再上昇した状態下の計測である
+  点に留意（詳細は出典を参照）
+- fandhe-ai 側は 4 系列（正式・参考 × 両実機）・全 90 run で `parity_fail_count=0` を確認
+  （tolerance 契約・定数・判定式・`docs/spec/` はいずれも本追補で変更していない）
+- **正式判定は不変**: 参考系列で達成した形状を正式達成にするには、`TwoDDynamic` を含む
+  HEAD を次回 `release-all.yml` で crates.io へ公開しピンを更新する必要がある
+  （リリースフローの実行はユーザー判断）
+- 出典・詳細な突合表・帰属表・要素単位判定は
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §22（イシュー #1321）、生データは
+  `scripts/bench/framework-compare/results/raw/results-{dgx,m4max}-cpu-gemm-gate-
+  {0.7.0-1321,head-ced4d14-1321}.jsonl`、集計表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 26 節を参照
