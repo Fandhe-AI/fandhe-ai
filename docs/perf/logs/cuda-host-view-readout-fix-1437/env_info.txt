@@ -1,0 +1,23 @@
+実機環境情報（イシュー #1437。内部ホスト名は含めない）
+
+GPU: NVIDIA GB10 (sm_121)・driver 580.173.02
+OS: Linux 6.17.0-1031-nvidia aarch64 (Ubuntu)
+CUDA: nvcc release 13.0, V13.0.88（build cuda_13.0.r13.0/compiler.36424714_0）
+Rust: rustc 1.97.0 (2d8144b78 2026-07-07)
+glibc: 2.39 (Ubuntu GLIBC 2.39-0ubuntu8.8)
+getconf PAGESIZE: 4096
+
+同期元 SHA（作業ツリー転送元。origin/main。作業ツリー自体には #1437 の
+未コミット変更を含む rsync で転送）:
+5480f94e83cb3006feb6f85a8be634d728f72096
+
+計測前 nvidia-smi --query-compute-apps: 常駐サービス（ComfyUI・Kokoro）
+のみ・GPU utilization 0%。計測前後の uptime load average は本文参照。
+
+正式系列（off@base）は既存の docs/perf/logs/gemm-candle-gate-0.7.0-1185/
+と同一系列（`fandhe-ai =0.7.0` registry 版。#1185 で 2026-09-06 計測済み）
+を再利用し、本イシューでは新規計測しなかった（同一プロトコル・同一
+バイナリ構成のため）。本ディレクトリの
+`results-dgx-gemm-gate-0.7.0-official-base.jsonl` は GB10 上の
+`scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-0.7.0.jsonl`
+のコピー。

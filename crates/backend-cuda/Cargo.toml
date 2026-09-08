@@ -399,6 +399,14 @@ name = "host_view_staging_readout_ab_1336"
 required-features = ["internal-diagnostics"]
 
 [[test]]
+# イシュー #1437: `readback_pretouched_bit_match_1437` は `memory::
+# readback_f32_diag`／`readback_f16_diag`（診断専用公開入口。いずれも
+# `internal-diagnostics` feature 限定）を使うため、上記と同じ理由で
+# `internal-diagnostics` feature を要求する。
+name = "readback_pretouched_bit_match_1437"
+required-features = ["internal-diagnostics"]
+
+[[test]]
 # イシュー #1203: `gemm_tiled_naive_speedup_triage_1203` は
 # `CudaGemm::run_tiled_f32_classic`（`internal-diagnostics` feature 限定。
 # `gemm.rs` 参照）を使う診断 (3) を含むため、他の `*_1203`／診断系エントリ
