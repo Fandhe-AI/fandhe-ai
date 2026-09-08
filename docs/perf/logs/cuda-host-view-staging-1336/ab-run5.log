@@ -1,5 +1,5 @@
     Finished `release` profile [optimized] target(s) in 0.03s
-     Running tests/host_view_staging_readout_ab_1336.rs (/home/fandhe/work/target-fandhe-ai-1438/release/deps/host_view_staging_readout_ab_1336-4df91e7f7b51bec9)
+     Running tests/host_view_staging_readout_ab_1336.rs (<local build path redacted>/deps/host_view_staging_readout_ab_1336-4df91e7f7b51bec9)
 
 running 1 test
 test host_view_staging_readout_ab ... phase,n,bytes_mib,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms

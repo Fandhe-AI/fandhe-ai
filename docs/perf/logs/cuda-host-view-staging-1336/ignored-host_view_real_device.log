@@ -1,5 +1,5 @@
     Finished `release` profile [optimized] target(s) in 0.03s
-     Running tests/host_view_real_device.rs (/home/fandhe/work/target-fandhe-ai-1438/release/deps/host_view_real_device-8ba6ba440231f4ac)
+     Running tests/host_view_real_device.rs (<local build path redacted>/deps/host_view_real_device-8ba6ba440231f4ac)
 
 running 7 tests
 test pooled_memory_with_host_view_matches_download_bit_exact ... ok

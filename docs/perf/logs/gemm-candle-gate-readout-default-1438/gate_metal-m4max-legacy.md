@@ -1,7 +1,7 @@
-未達: /private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/base-fddca17/scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-head-fddca17-readout-legacy.jsonl size=1024（fandhe-ai 0.004838s > candle 0.002981s）
-未達: /private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/base-fddca17/scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-head-fddca17-readout-legacy.jsonl size=2048（fandhe-ai 0.017059s > candle 0.012329s）
-未達: /private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/base-fddca17/scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-head-fddca17-readout-legacy.jsonl size=4096（fandhe-ai 0.058375s > candle 0.034157s）
-## GEMM 目標達成ゲート（#1037・device=metal）: `/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/base-fddca17/scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-head-fddca17-readout-legacy.jsonl`
+未達: results/raw/results-m4max-gemm-gate-head-fddca17-readout-legacy.jsonl size=1024（fandhe-ai 0.004838s > candle 0.002981s）
+未達: results/raw/results-m4max-gemm-gate-head-fddca17-readout-legacy.jsonl size=2048（fandhe-ai 0.017059s > candle 0.012329s）
+未達: results/raw/results-m4max-gemm-gate-head-fddca17-readout-legacy.jsonl size=4096（fandhe-ai 0.058375s > candle 0.034157s）
+## GEMM 目標達成ゲート（#1037・device=metal）: `results/raw/results-m4max-gemm-gate-head-fddca17-readout-legacy.jsonl`
 
 | N | fandhe-ai reuse median (min–max, n) | candle fresh median (n) | candle/fandhe | GFLOP/s | 判定 |
 |---|---|---|---|---|---|
