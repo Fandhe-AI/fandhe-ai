@@ -338,19 +338,28 @@ impl EnvGuardConfig {
                     })
                     .cloned()
                     .collect();
+                // 公開評価 API（`GpuSample::Available` は直接構築可能）経由で
+                // `EnvSample::collect` の 0〜100 変換（100 超は `None`）を経て
+                // いない値（例: `Some(255)`）が渡されうるため、判定前に範囲
+                // 検証する（review #1456 指摘対応。`LoadAvg::is_valid` と同型。
+                // `device_utilization_percent` フィールド自体は記録用に生値
+                // をそのまま残す）。
+                let validated_utilization =
+                    device_utilization_percent.filter(|percent| *percent <= 100);
                 let utilization_exceeded = match (
-                    device_utilization_percent,
+                    validated_utilization,
                     self.max_gpu_device_utilization_percent,
                 ) {
-                    (Some(observed), Some(max)) => *observed > max,
+                    (Some(observed), Some(max)) => observed > max,
                     _ => false,
                 };
-                // 使用率上限を設定したのに `Device Utilization %` を取得できな
-                // かった場合は、判定不能を `Pass` に落とさず `Undetermined` に
-                // する（review #1456 指摘対応。モジュール doc「設計方針」の
-                // 「取得不能は未判定」を使用率上限にも一貫して適用する）。
+                // 使用率上限を設定したのに検証済み `Device Utilization %` を
+                // 取得できなかった場合は、判定不能を `Pass` に落とさず
+                // `Undetermined` にする（review #1456 指摘対応。モジュール
+                // doc「設計方針」の「取得不能は未判定」を使用率上限にも
+                // 一貫して適用する。範囲外値〈例 255〉も未取得と同じ扱い）。
                 let utilization_undetermined = self.max_gpu_device_utilization_percent.is_some()
-                    && device_utilization_percent.is_none();
+                    && validated_utilization.is_none();
                 let verdict = if !flagged.is_empty() || utilization_exceeded {
                     GuardVerdict::Fail
                 } else if utilization_undetermined {
@@ -358,13 +367,18 @@ impl EnvGuardConfig {
                 } else {
                     GuardVerdict::Pass
                 };
+                // note は「未判定」の補足説明専用のため、watchlist 一致等で
+                // 既に `Fail` が確定している場合は付与しない（Cursor Bugbot
+                // 指摘対応。verdict が `Fail` のまま note が「未判定」を主張
+                // する矛盾を防ぐ）。
                 let note = if self.gpu_process_watchlist.is_empty()
                     && self.max_gpu_device_utilization_percent.is_none()
                 {
                     Some("watchlist・使用率上限とも未設定のため記録のみ".to_string())
-                } else if utilization_undetermined {
+                } else if verdict == GuardVerdict::Undetermined && utilization_undetermined {
                     Some(
-                        "使用率上限を設定したが Device Utilization % を取得できなかったため未判定"
+                        "使用率上限を設定したが Device Utilization % を取得できなかったため未判定\
+                         （範囲外値〈0〜100 外〉も含む）"
                             .to_string(),
                     )
                 } else {
@@ -1063,6 +1077,95 @@ mod tests {
         );
         let report = cfg.evaluate(&sample);
         assert_eq!(report.gpu.verdict, GuardVerdict::Fail);
+    }
+
+    #[test]
+    fn evaluate_gpu_flagged_overrides_utilization_undetermined_note_absent() {
+        // review #1456（Cursor Bugbot）指摘対応: watchlist 一致で verdict が
+        // 既に `Fail` に確定している場合、note が「未判定」を主張する矛盾を
+        // 起こしてはならない。
+        let cfg = EnvGuardConfig::new(4.0)
+            .unwrap()
+            .with_gpu_process_watchlist(vec!["python".to_string()])
+            .with_max_gpu_device_utilization_percent(50)
+            .unwrap();
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Available {
+                processes: vec![GpuProcess {
+                    pid: 123,
+                    name: "python3.11".to_string(),
+                }],
+                device_utilization_percent: None,
+            },
+        );
+        let report = cfg.evaluate(&sample);
+        assert_eq!(report.gpu.verdict, GuardVerdict::Fail);
+        assert!(
+            report.gpu.note.is_none(),
+            "Fail 確定時に note が「未判定」を主張してはならない: {:?}",
+            report.gpu.note
+        );
+    }
+
+    #[test]
+    fn evaluate_gpu_utilization_out_of_range_is_undetermined_not_fail() {
+        // review #1456（codex-review P2）指摘対応: 公開 `GpuSample::Available`
+        // を直接構築すると `collect()` の 0〜100 変換（100 超は `None`）を経
+        // ずに範囲外値（例 255）を渡せてしまう。範囲外値は未取得と同じ
+        // `Undetermined` として扱い、不正な観測値を根拠に `Fail` にしない。
+        let cfg = EnvGuardConfig::new(4.0)
+            .unwrap()
+            .with_max_gpu_device_utilization_percent(50)
+            .unwrap();
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Available {
+                processes: Vec::new(),
+                device_utilization_percent: Some(255),
+            },
+        );
+        let report = cfg.evaluate(&sample);
+        assert_eq!(report.gpu.verdict, GuardVerdict::Undetermined);
+        assert_eq!(report.overall, GuardVerdict::Undetermined);
+        assert!(report.gpu.note.is_some());
+    }
+
+    #[test]
+    fn evaluate_gpu_utilization_out_of_range_with_flagged_is_fail_without_undetermined_note() {
+        // 範囲外の使用率観測値があっても、watchlist 一致（明確な悪化）は
+        // `Fail` を優先し、note は「未判定」を主張しない（上記 2 指摘の
+        // 複合ケース）。
+        let cfg = EnvGuardConfig::new(4.0)
+            .unwrap()
+            .with_gpu_process_watchlist(vec!["python".to_string()])
+            .with_max_gpu_device_utilization_percent(50)
+            .unwrap();
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Available {
+                processes: vec![GpuProcess {
+                    pid: 123,
+                    name: "python3.11".to_string(),
+                }],
+                device_utilization_percent: Some(255),
+            },
+        );
+        let report = cfg.evaluate(&sample);
+        assert_eq!(report.gpu.verdict, GuardVerdict::Fail);
+        assert!(report.gpu.note.is_none());
     }
 
     #[test]
