@@ -1,6 +1,6 @@
 # CUDA GEMM N=1024/2048/4096 reuse candle 比再計測と #1031 ゲート判定の確定（イシュー #1142）
 
-## 状態: DGX Spark GB10 実機実測完了。#1031（reuse candle 超え）は正式系列・参考系列（#1164 結線後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1360 で Phase 4／5（#1342 の 128×64 cp.async pipeline 本番結線・#1337 借用ビュー readout）反映後の GB10 再計測を実施し、正式系列（ピン未更新のため §11 と同値。再現性確認）は未達成が継続、参考系列（path 差し替え HEAD）は readout off で未達成継続・on で N=4096 のみ達成（N=1024/2048 は大幅後退）を記録した（§12。正式判定はピン更新後に確定）。#1337 の正式記録・公正性の論点は §13 参照（独自再現も同一符号で確認）。#1260 で承認済み tolerance 契約変更（#1241 承認・#1247/#1250 実装）下の N=2048 を再計測し、「判定不能」が解消して確定判定（未達・0.476 倍）へ遷移したことを確認した（§14。N=1024/4096 は引き続き未達）
+## 状態: DGX Spark GB10 実機実測完了。#1031（reuse candle 超え）は正式系列・参考系列（#1164 結線後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1360 で Phase 4／5（#1342 の 128×64 cp.async pipeline 本番結線・#1337 借用ビュー readout）反映後の GB10 再計測を実施し、正式系列（ピン未更新のため §11 と同値。再現性確認）は未達成が継続、参考系列（path 差し替え HEAD）は readout off で未達成継続・on で N=4096 のみ達成（N=1024/2048 は大幅後退）を記録した（§12。正式判定はピン更新後に確定）。#1337 の正式記録・公正性の論点は §13 参照（独自再現も同一符号で確認）。#1260 で承認済み tolerance 契約変更（#1241 承認・#1247/#1250 実装）下の N=2048 を再計測し、「判定不能」が解消して確定判定（未達・0.476 倍）へ遷移したことを確認した（§14。N=1024/4096 は引き続き未達）。#1438 で借用ビュー readout の既定経路化（旧 host-view-readout cargo feature 撤去）の before/after を GB10 実機実測し、全 3 形状非後退・checksum 完全一致を確認（ADOPT。正式判定は §14 のまま不変。§15）
 
 ## 1. 位置づけ
 
@@ -753,3 +753,68 @@ parity_scaled_abs_rescued = 2
   ビルドと計測の間にアイドル待機を挟む）を徹底することで再発を避けられるかはユーザー判断
 - **CPU 側（イシュー #1262）は本追補の対象外**（並走イシュー。`docs/perf/cpu-gemm-candle-gate-
   remeasurement.md` 側で別途記録）
+
+## 15. §15（イシュー #1438。借用ビュー readout の既定経路化後の GB10 再計測）
+
+### 15.0 位置づけ
+
+イシュー #1438 は、当初 `bench-fandhe` の cargo feature `host-view-readout`（既定 OFF・#1337）
+として導入した借用ビュー readout を、#1436/#1437 の是正（`ReadbackDest::PretouchedFresh`。
+CUDA D2H 宛先未タッチによる N=1024/2048 の後退の解消）を確認したうえで既定経路化し、feature
+自体を撤去した。本節はその before/after 再計測を記録する。**正式判定（`fandhe-ai =0.7.0` 系列
+の #1031 達成可否）は §11／§14 のまま不変**（ピン未更新のため §14 と同値の未達成が継続する）。
+本節は「feature 撤去・既定化」というコード変更そのものが性能を後退させていないかの確認記録。
+
+### 15.1 プロトコル
+
+`docs/perf/logs/gemm-candle-gate-readout-default-1438/env_info.txt` を参照。要点:
+
+- before（legacy）腕: base コミット `fddca17`（origin/main。#1437 マージ直後）の bench-fandhe
+  ソース（旧 feature 既定 OFF＝legacy `to_tensor()+to_vec()` 経路）
+- after（default）腕: 本 PR HEAD の bench-fandhe ソース（借用ビュー readout が既定・feature 撤去済み）
+- 両腕とも本 PR HEAD の同一 `crates/facade` へ path patch（facade ソースを揃え readout 経路の
+  差のみを分離。#1337/#1436 §13「§12」で指摘された facade ソース不一致の反省を踏まえる）
+- GB10 実機実測 2026-09-08。GPU 空き判定は `nvidia-smi --query-compute-apps`（常駐 2 プロセスの
+  み・utilization.gpu 0%）。低負荷ウィンドウで計測
+
+### 15.2 実測結果（fandhe-ai reuse・5 回計測中央値・before/after 比較）
+
+| N | before 中央値（min–max） | after 中央値（min–max） | after/before | checksum |
+|---|---|---|---|---|
+| 1024 | 2.311 ms（2.177–2.454 ms） | 2.161 ms（2.118–2.288 ms） | 0.935 | 完全一致 |
+| 2048 | 9.651 ms（9.357–10.050 ms） | 8.535 ms（8.171–9.104 ms） | 0.884 | 完全一致 |
+| 4096 | 57.177 ms（55.873–57.512 ms） | 37.503 ms（36.819–38.278 ms） | **0.656** | 完全一致 |
+
+全 3 サイズで非後退（`after/before < 1.00`）。checksum は 3 サイズとも完全一致（要素単位
+`parity_fail_count=0`）。N=4096 は 1.53 倍の顕著な改善を示す（借用ビュー readout の
+`host_copy`〈追加コピー省略〉が主因と推定。#1182 の診断と整合）。
+出典: `docs/perf/logs/gemm-candle-gate-readout-default-1438/compare_gemm_ab-cuda-dgx.md`
+
+### 15.3 candle 比ゲート（#1031。参考系列としての記録。正式判定は §14 のまま不変）
+
+| N | before candle 比 | before 判定 | after candle 比 | after 判定 |
+|---|---|---|---|---|
+| 1024 | 0.404 | 未達 | 0.428 | 未達 |
+| 2048 | 0.438 | 未達（candle 救済 2 要素） | 0.494 | 未達（candle 救済 2 要素） |
+| 4096 | 0.959 | 未達 | **1.489** | **達成** |
+
+出典: `docs/perf/logs/gemm-candle-gate-readout-default-1438/gate_cuda-dgx-{legacy,default}.md`。
+N=4096 が after 腕で #1031 の受け入れ条件（candle 超え）を満たす一方、N=1024/2048 は未達のまま
+（形状依存の結果。#1360 §12 の参考系列 readout-on 実測と同符号）。**正式系列（`fandhe-ai =0.7.0`
+ピン）は本 PR で feature 撤去のみ行いピン自体は更新していないため §14 の判定（3 形状とも未達）
+は不変のまま**——本節の測定はピン更新後の正式系列とは異なる「facade を HEAD path patch で
+揃えた参考系列」の before/after であることに注意。
+
+### 15.4 公正性の論点
+
+- `bench-candle` は本 PR で一切変更していない（`.to_vec2()` による所有 `Vec` 読み出しのまま）。
+  fandhe-ai 側だけが借用ビュー・candle 側が所有コピーという非対称は本 PR 後も残る
+  （`scripts/bench/framework-compare/README.md`「借用ビュー readout（既定経路）」節に明記）
+- CUDA `#1336` の pinned host staging（`MemoryOps::with_host_view`）は本経路に到達しない
+  （`docs/perf/cuda-host-view-staging-readout.md` §7。§13.4 と同じ注記）
+
+### 15.5 採否
+
+全 3 サイズ非後退・checksum 完全一致のため、CUDA については既定経路化を承認（ADOPT）。
+判定木（§3.2 に相当する事前宣言）の条件 (a)「全 N で after/before ≤ 1.00」を満たすため、
+runtime `Device` 分岐によるフォールバックは導入しない。

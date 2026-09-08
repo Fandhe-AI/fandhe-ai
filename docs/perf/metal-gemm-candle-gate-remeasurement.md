@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認（ADOPT。§12 の交絡を解消。正式判定は §11 のまま不変。§13）
 
 ## 1. 位置づけ
 
@@ -355,3 +355,67 @@ fandhe-ai 側は全 30 run で `parity_fail_count=0`。off/on の checksum は�
   新規 issue を起票するかを決める
 - **#1037 ゲート判定への影響**: readout-off／on いずれも §11 の正式系列判定（未達 3 件）を
   覆さない。正式判定（registry ピン）は §11 のまま不変
+
+## 13. §13（イシュー #1438。同一 facade ソース下の借用ビュー readout 既定化 before/after）
+
+### 13.0 位置づけ
+
+§12 は off 腕が registry・on 腕が path patch という facade ソース不一致と片方向の負荷差という
+2 つの交絡を抱えたまま「3 形状とも後退」を記録し、既定化の根拠にはできないと結論していた。
+イシュー #1438 は借用ビュー readout を bench-fandhe の既定経路とし旧 `host-view-readout`
+cargo feature を撤去するにあたり、**両腕を同一 facade ソース（本 PR HEAD の `crates/facade`
+への path patch）**で揃えた before（legacy bench-fandhe ソース）/after（default bench-fandhe
+ソース）比較を M4 Max 実機で再計測し、§12 が抱えていた facade ソース不一致の交絡を解消した。
+
+### 13.1 プロトコル
+
+`docs/perf/logs/gemm-candle-gate-readout-default-1438/env_info.txt` を参照。§12 との違い:
+両腕とも `GEMM_GATE_PATCH_FACADE_PATH` で本 PR HEAD の同一 `crates/facade` を指定し、
+bench-fandhe 側のソースのみを base コミット `fddca17`（legacy）／本 PR HEAD（default）で
+切り替えた。実測は 2026-09-08。高負荷共有環境（他セッション並走。`uptime` 実測:
+計測開始前 load average 5.72–10.29 → Metal legacy 腕終了時 25.54–10.76 → Metal default 腕
+終了時 11.09–10.41）は §12 と同様に残る（片方向ではなく both arms とも高負荷帯を通過）。
+
+### 13.2 実測結果（fandhe-ai reuse・5 回計測中央値・before/after 比較）
+
+| N | before 中央値（min–max） | after 中央値（min–max） | after/before | checksum |
+|---|---|---|---|---|
+| 1024 | 4.838 ms（4.373–4.931 ms） | 2.288 ms（2.178–2.824 ms） | **0.473** | 完全一致 |
+| 2048 | 17.059 ms（16.771–19.880 ms） | 10.487 ms（9.250–10.899 ms） | **0.615** | 完全一致 |
+| 4096 | 58.375 ms（40.857–64.843 ms） | 39.367 ms（39.051–40.284 ms） | **0.674** | 完全一致（判定注意: before spread 40.857–64.843 ms が 1.5 倍超で負荷ノイズの疑い） |
+
+全 3 サイズで非後退（`after/before` 0.47〜0.67）。N=4096 は before 腕の分散が特に大きく
+（40.857–64.843 ms）高負荷ノイズの影響が疑われるが、after 腕はその最良値（40.857 ms）と
+比べても非後退（39.367 ms）であり、判定を覆す方向のノイズではない。checksum は 3 サイズとも
+完全一致（要素単位 `parity_fail_count=0`）。
+出典: `docs/perf/logs/gemm-candle-gate-readout-default-1438/compare_gemm_ab-metal-m4max.md`
+
+### 13.3 candle 比ゲート（#1037。参考記録。正式判定は §11 のまま不変）
+
+| N | before candle 比 | before 判定 | after candle 比 | after 判定 |
+|---|---|---|---|---|
+| 1024 | 0.616 | 未達 | 0.933 | 未達 |
+| 2048 | 0.723 | 未達 | 0.655 | 未達 |
+| 4096 | 0.585 | 未達 | 0.604 | 未達 |
+
+出典: `docs/perf/logs/gemm-candle-gate-readout-default-1438/gate_metal-m4max-{legacy,default}.md`。
+3 形状とも #1037 未達成のまま（正式系列 `fandhe-ai =0.7.0` ピンは本 PR で更新していないため
+§11 の判定は不変）。N=1024・N=4096 は candle 比も改善方向（0.616→0.933・0.585→0.604）だが、
+N=2048 のみ fandhe-ai 側が非後退（10.487 < 17.059 ms）にもかかわらず candle 比は
+0.723→0.655 と悪化している。これは candle 側自体が同一プロトコルで大きく高速化した
+（12.329→6.866 ms・約 1.8 倍。負荷変動）ため、fandhe-ai の改善幅（約 1.6 倍）を上回った
+ことによるものであり fandhe-ai 側の後退ではない（§13.2 の非後退判定を参照）。
+
+### 13.4 公正性の論点
+
+- `bench-candle` は本 PR で一切変更していない（`.to_vec2()` による所有 `Vec` 読み出しのまま）
+- Metal は CUDA `#1436/#1437` のような D2H 宛先事前タッチの是正が未実施（Metal readback は
+  #1338 のスコープ外のまま）。それでも本節の同一 facade ソース比較では全 3 形状が非後退した
+
+### 13.5 採否・判定木の適用
+
+§12 で懸念されていた「3 形状とも後退」は facade ソース不一致・片方向負荷差という交絡込みの
+結果だったと判明した。facade ソースを揃えた本節（§13）の比較では全 3 サイズが非後退のため、
+イシュー #1438 の事前宣言判定木の条件 (a)「全 N で after/before ≤ 1.00」を満たし、Metal も
+借用ビュー readout の既定経路化を承認する（ADOPT）。runtime `Device::Metal` 限定の legacy
+フォールバックは導入しない。§12 の「既定化の可否は判断しない」という留保は本節により解消した。

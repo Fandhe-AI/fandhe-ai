@@ -53,6 +53,13 @@ run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
   rm -f err.tmp
 }
 
+# イシュー #1438: 本スクリプトは常に registry 解決でビルドする（path patch
+# 機構を持たない）。bench-fandhe が借用ビュー readout を既定経路化した
+# ため、crates.io ピンのままでは構造的にビルド不能（bench_fandhe_pin_guard.sh
+# 参照）。ビルド起動前に明示エラーで早期停止する。
+source ./bench_fandhe_pin_guard.sh
+bench_fandhe_require_facade_patch "run_ab_train_cuda.sh" ""
+
 echo "== build bench-fandhe =="
 if ! cargo build --release -p bench-fandhe 2>build-err.tmp; then
   tail -40 build-err.tmp

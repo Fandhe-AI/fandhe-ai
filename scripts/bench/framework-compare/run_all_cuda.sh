@@ -35,6 +35,15 @@ build() { # build <crate> [extra cargo args...]
   rm -f build-err.tmp
 }
 
+# イシュー #1438: 本スクリプトは常に registry 解決でビルドする（path patch
+# 機構を持たない）。bench-fandhe が借用ビュー readout を既定経路化した
+# ため、crates.io ピンのままでは構造的にビルド不能（bench_fandhe_pin_guard.sh
+# 参照）。`build` 関数の「失敗を記録して続行」方針より前に、ここで早期
+# エラーとして停止する（分かりにくい cargo エラーを skipped.log に埋もれ
+# させない）。
+source ./bench_fandhe_pin_guard.sh
+bench_fandhe_require_facade_patch "run_all_cuda.sh" ""
+
 BINS=()
 build bench-fandhe && BINS+=(bench-fandhe)
 build bench-candle --no-default-features --features cuda && BINS+=(bench-candle)

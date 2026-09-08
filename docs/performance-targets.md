@@ -436,3 +436,32 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   `scripts/bench/framework-compare/results/raw/results-dgx-cpu-gemm-gate-0.7.0-1262.jsonl`、
   集計表は `scripts/bench/framework-compare/results/summary.md` 環境 14 節「5 回計測ゲート
   判定（イシュー #1262）」を参照
+
+### 8.11 #1438 追補（借用ビュー readout の既定経路化・feature ゲート撤去。3 バックエンド × 両実機で before/after 再計測。§2 段階的下限表・§3 丸め規則は不変）
+
+- `scripts/bench/framework-compare/bench-fandhe` の旧 `host-view-readout` cargo feature
+  （既定 OFF・#1337 で導入）を撤去し、借用ビュー readout（`Var::host_view()`／
+  `Tensor::host_slice()`）を既定経路化した（イシュー #1438）。crates.io ピン
+  `fandhe-ai =0.7.0` には該当 API が未収録のため、ピン未更新の間は `GEMM_GATE_PATCH_
+  FACADE_PATH` の path patch が正式系列でも必須になる（`bench_fandhe_pin_guard.sh` が
+  未指定時をビルド起動前に fail-closed で検知する）
+- CUDA（DGX Spark GB10）・Metal（Apple M4 Max）・CPU（両実機）の全 6 系列で before
+  （base コミット `fddca17`＝旧 legacy 経路）/after（本 PR HEAD＝既定経路）を同一
+  `crates/facade` ソースへ揃えて 5 回計測中央値を再計測し、**全セル非後退・checksum
+  完全一致**を確認した（ADOPT）:
+  - CUDA: after/before 0.66〜0.94（N=4096 で 1.53 倍改善・#1031 参考系列で N=4096 が
+    新規に達成〈1.489 倍〉）
+  - Metal: after/before 0.47〜0.67（1.5〜2.1 倍改善）
+  - CPU（DGX）: after/before 0.87〜0.94（DGX N=2048 が #1117 参考系列で新規に達成
+    〈1.103 倍〉）
+  - CPU（M4 Max）: after/before 0.94〜0.96
+- **正式系列（`fandhe-ai =0.7.0` ピン）の #1031／#1037／#1117 判定は本追補では更新しない**
+  （ピン自体は本 PR で変更していないため、`docs/perf/{cuda,metal,cpu}-gemm-candle-gate-
+  remeasurement.md` の既存正式判定〈§14／§11／§19〉が不変のまま。次回 crates.io 公開・
+  ピン更新後に正式系列を再計測して確定する）
+- `bench-candle` は本 PR で変更していない。fandhe-ai 側が借用ビュー・candle 側が
+  `.to_vec2()` 所有コピーという読み出し方式の非対称は残る（公正性の論点。各 doc に明記）
+- 出典・詳細な突合表・candle 比ゲート判定は `docs/perf/cuda-gemm-candle-gate-
+  remeasurement.md` §15・`docs/perf/metal-gemm-candle-gate-remeasurement.md` §13・
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20 を参照。生データ・実行ログは
+  `docs/perf/logs/gemm-candle-gate-readout-default-1438/`

@@ -212,6 +212,14 @@ build_bench_fandhe() { # build_bench_fandhe <out_exe_pathvar> [追加の cargo b
   printf -v "$__out_var" '%s' "$exe"
 }
 
+# イシュー #1438: before 腕は常に registry 解決を意図する（本スクリプトの
+# 目的そのもの）。bench-fandhe が借用ビュー readout を既定経路化した
+# ため、crates.io ピンのままの registry ビルドは構造的に不能になった
+# （bench_fandhe_pin_guard.sh 参照）。ビルド起動前に明示エラーで早期停止
+# する（after 腕は AB_PATCH_FACADE_PATH を必ず伴うため対象外）。
+source ./bench_fandhe_pin_guard.sh
+bench_fandhe_require_facade_patch "run_ab_gemm_metal.sh (before arm)" ""
+
 echo "== build bench-fandhe (before: registry pin fandhe-ai =0.7.0) =="
 build_bench_fandhe BEFORE_EXE
 BEFORE_SOURCE="$(fandhe_ai_source_desc || true)"

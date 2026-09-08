@@ -80,21 +80,24 @@
 //! `docs/perf/cuda-gemm-reuse-phase-breakdown.md` に記録する。詳細は
 //! README「`gemm --mode reuse --phases`」節を参照。
 //!
-//! `host-view-readout` feature（既定 OFF・イシュー #1337）: 上記
+//! 借用ビュー readout（既定経路・イシュー #1337/#1437/#1438）: 上記
 //! `readout_var` の展開（`to_tensor` 区間 + `host_copy` 区間）は、
 //! #1182 §6/§9 が確定した「`host_copy`（`.to_vec()` の memcpy）が
 //! `iter_total` の 25.6〜53.0%（CUDA）を占める」の対策として、`readout_var`
 //! 自体を借用ビュー（`fandhe_ai::VarHostView`／`Tensor::host_slice`。
-//! #1335・#1336）へ切り替え可能にする。feature 有効時は `to_tensor`
-//! 区間が `Var::host_view()`（contiguous なら `Arc` 複製のみ）、
-//! `host_copy` 区間が借用スライス取得（追加コピーなし・想定 ≈0）に
-//! 再定義される。checksum（全要素 `f64` 逐次和）・parity
-//! （`GemmReference::verify`）の契約・計算式は feature 有無で不変
+//! #1335・#1336）へ切り替えたものを bench-fandhe の既定経路とする
+//! （#1438 で旧計測専用 cargo feature（#1337 導入）を撤去し常時有効化。
+//! #1436/#1437 が CUDA D2H 宛先未タッチによる N=1024/2048 の後退を診断・
+//! 是正し、#1438 で全 N 非後退を確認したうえで既定化した）。`to_tensor`
+//! 区間は `Var::host_view()`（contiguous なら `Arc` 複製のみ）、
+//! `host_copy` 区間は借用スライス取得（追加コピーなし・想定 ≈0）。
+//! checksum（全要素 `f64` 逐次和）・parity（`GemmReference::verify`）の
+//! 契約・計算式は旧 legacy 経路（`to_tensor()` + `.to_vec()`）と不変
 //! （呼び出し側は両型とも `Deref<Target=[f32]>` のため無変更）。
-//! crates.io 公開版 `fandhe-ai =0.7.0` には該当 API が未収録のため
-//! feature は既定 OFF・有効化には `crates/facade` への path patch が
-//! 必須（`bench-fandhe/Cargo.toml` コメント・README「借用ビュー
-//! readout（#1337）」節参照）。
+//! crates.io 公開版 `fandhe-ai =0.7.0` には該当 API が未収録のため、
+//! ピン更新までは `crates/facade` への path patch が CLI `--config`
+//! 経由で必須（`bench_fandhe_pin_guard.sh` が未指定時に early-exit で
+//! 検知する。README「借用ビュー readout（既定経路）」節参照）。
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
@@ -238,49 +241,31 @@ fn make_tape(device: &str) -> Result<Tape, Box<dyn std::error::Error>> {
 }
 
 /// `readout_var`（`gemm --mode reuse` の `host_copy` 区間。#1182 §6/§9）
-/// の戻り型。既定（feature `host-view-readout` 無効）は現行どおり
-/// `to_tensor()` + `contiguous().as_slice().to_vec()` の所有 `Vec<f32>`
-/// を返す（memcpy 込み）。`host-view-readout` feature 有効時は
-/// `fandhe_ai::VarHostView`（`Deref<Target=[f32]>`。#1335）へ切り替え、
-/// `contiguous()` が `Arc` 複製のみで済む形状では memcpy を伴わない
+/// の戻り型。`fandhe_ai::VarHostView`（`Deref<Target=[f32]>`。#1335）を
+/// 返し、`contiguous()` が `Arc` 複製のみで済む形状では memcpy を伴わない
 /// 借用読み出しになる（`docs/perf/cuda-gemm-reuse-phase-breakdown.md`
 /// §6/§9 の (ii) を「checksum／parity 契約を一切変えず host_copy 側の
-/// みを実現する」形で満たす。イシュー #1337）。呼び出し側
-/// （`out.iter()`・`GemmReference::verify(&out)` の deref 強制）は
-/// いずれの型でも無変更で成立する。
+/// みを実現する」形で満たす。イシュー #1337・#1438 で既定経路化）。
+/// 呼び出し側（`out.iter()`・`GemmReference::verify(&out)` の deref
+/// 強制）は旧 legacy 経路（`Vec<f32>`）と無変更で成立する。
 ///
 /// crates.io 公開版 `fandhe-ai =0.7.0` には `VarHostView`／
 /// `Var::host_view` が未収録（#1335 は未リリースの HEAD で追加）のため、
-/// feature 無効な既定ビルドでは本エイリアスは `Vec<f32>` に解決され
-/// `=0.7.0` ピンのままコンパイル可能（`managed-placement` feature と
-/// 同じ分離方式。`bench-fandhe/Cargo.toml` コメント参照）。
-#[cfg(feature = "host-view-readout")]
+/// ピン未更新の間は `crates/facade` への path patch（CLI `--config`）が
+/// 必須（`bench_fandhe_pin_guard.sh` が未指定時に registry ビルドを
+/// fail-closed で拒否する。#1438 で既定経路化・旧計測専用 cargo
+/// feature（#1337 導入）は撤去済み）。
 type HostReadout = fandhe_ai::VarHostView;
-#[cfg(not(feature = "host-view-readout"))]
-type HostReadout = Vec<f32>;
 
 /// Host-materialize a Var result and return a checksum (forces sync).
 ///
-/// `host-view-readout` feature 有効時は借用ビュー（`Var::host_view()`）
-/// に対して同一の `f64` 逐次和を計算する（#1337）。要素順序・型・和の
-/// 計算式は feature 有無で不変（`checksum_var_matches_across_readout_modes`
-/// 系テストで bit 同一を確認）。
+/// 借用ビュー（`Var::host_view()`）に対して `f64` 逐次和を計算する
+/// （#1337・#1438 で既定経路化）。要素順序・型・和の計算式は旧 legacy
+/// 経路（`to_tensor()` + `.to_vec()`）と不変（`readout_var_matches_
+/// legacy_to_vec_bit_exact` で bit 同一を確認）。
 fn checksum_var(v: &fandhe_ai::Var) -> Result<f64, Box<dyn std::error::Error>> {
-    #[cfg(feature = "host-view-readout")]
-    {
-        let view = v.host_view();
-        Ok(view.iter().map(|&x| x as f64).sum())
-    }
-    #[cfg(not(feature = "host-view-readout"))]
-    {
-        let t = v.to_tensor();
-        let slice = t
-            .contiguous()
-            .as_slice()
-            .ok_or("as_slice() returned None after contiguous()")?
-            .to_vec();
-        Ok(slice.iter().map(|&x| x as f64).sum())
-    }
+    let view = v.host_view();
+    Ok(view.iter().map(|&x| x as f64).sum())
 }
 
 /// Host-materialize a Var result and return the raw elements (forces sync).
@@ -290,47 +275,22 @@ fn checksum_var(v: &fandhe_ai::Var) -> Result<f64, Box<dyn std::error::Error>> {
 /// （`checksum_var`/`checksum_tensor` は `run_infer` が引き続き使うため
 /// シグネチャを変更しない）。
 ///
-/// イシュー #1337: `host-view-readout` feature 有効時は
-/// `Var::to_tensor()` + `.to_vec()`（`host_copy` memcpy）の代わりに
-/// `Var::host_view()`（`contiguous()` が `Arc` 複製のみで済む場合は
-/// memcpy を伴わない）を返す。戻り値は両モードとも `Deref<Target=[f32]>`
-/// のため、呼び出し側（`run_gemm`/`run_gemm_reuse`/
-/// `measure_gemm_reuse_phases` の `out.iter()`・
-/// `reference.verify(&out)`）は無変更で成立する。
+/// イシュー #1337・#1438: `Var::to_tensor()` + `.to_vec()`
+/// （旧 legacy 経路の `host_copy` memcpy）の代わりに `Var::host_view()`
+/// （`contiguous()` が `Arc` 複製のみで済む場合は memcpy を伴わない）を
+/// 返す。戻り値は `Deref<Target=[f32]>` のため、呼び出し側
+/// （`run_gemm`/`run_gemm_reuse`/`measure_gemm_reuse_phases` の
+/// `out.iter()`・`reference.verify(&out)`）は無変更で成立する。
 fn readout_var(v: &fandhe_ai::Var) -> Result<HostReadout, Box<dyn std::error::Error>> {
-    #[cfg(feature = "host-view-readout")]
-    {
-        Ok(v.host_view())
-    }
-    #[cfg(not(feature = "host-view-readout"))]
-    {
-        let t = v.to_tensor();
-        Ok(t.contiguous()
-            .as_slice()
-            .ok_or("as_slice() returned None after contiguous()")?
-            .to_vec())
-    }
+    Ok(v.host_view())
 }
 
-/// `host-view-readout` feature 有効時は [`fandhe_ai_tensor_core::Tensor::
-/// host_slice`]（contiguous なら借用 `Cow::Borrowed`・非 contiguous のみ
-/// 実体化して `Cow::Owned`。#1335）に対して同一の `f64` 逐次和を計算する
-/// （#1337）。
+/// [`fandhe_ai_tensor_core::Tensor::host_slice`]（contiguous なら借用
+/// `Cow::Borrowed`・非 contiguous のみ実体化して `Cow::Owned`。#1335）に
+/// 対して `f64` 逐次和を計算する（#1337・#1438 で既定経路化）。
 fn checksum_tensor(t: &Tensor<f32>) -> Result<f64, Box<dyn std::error::Error>> {
-    #[cfg(feature = "host-view-readout")]
-    {
-        let slice = t.host_slice();
-        Ok(slice.iter().map(|&x| x as f64).sum())
-    }
-    #[cfg(not(feature = "host-view-readout"))]
-    {
-        let slice = t
-            .contiguous()
-            .as_slice()
-            .ok_or("as_slice() returned None after contiguous()")?
-            .to_vec();
-        Ok(slice.iter().map(|&x| x as f64).sum())
-    }
+    let slice = t.host_slice();
+    Ok(slice.iter().map(|&x| x as f64).sum())
 }
 
 fn gemm_inputs(n: usize) -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::error::Error>> {
@@ -764,12 +724,10 @@ fn measure_gemm_reuse_phases(
         let c = a.matmul(&b)?;
         phases.push(PHASE_GEMM_MATMUL, t0.elapsed());
 
-        // イシュー #1337: `to_tensor`／`host_copy` の 2 区間は
-        // `readout_var` の実装（feature 有無で分岐）をここで展開した
-        // ものであり、feature 有効時は区間の中身自体が再定義される
+        // イシュー #1337・#1438: `to_tensor`／`host_copy` の 2 区間は
+        // `readout_var` の実装（借用ビュー経路）をここで展開したもの
         // （module doc・README「`gemm --mode reuse --phases`」節参照）。
-        // 区間名・順序・件数（5 区間）は feature 有無で不変。
-        #[cfg(feature = "host-view-readout")]
+        // 区間名・順序・件数（5 区間）は旧 legacy 経路と不変。
         let out = {
             // `to_tensor` 区間: `Var::host_view()` の構築
             // （`materialize_non_fallible(..).contiguous()`。contiguous
@@ -789,21 +747,6 @@ fn measure_gemm_reuse_phases(
             phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
             let _ = out;
             view
-        };
-        #[cfg(not(feature = "host-view-readout"))]
-        let out = {
-            let t0 = Instant::now();
-            let t = c.to_tensor();
-            phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
-
-            let t0 = Instant::now();
-            let out = t
-                .contiguous()
-                .as_slice()
-                .ok_or("as_slice() returned None after contiguous()")?
-                .to_vec();
-            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
-            out
         };
 
         let t0 = Instant::now();
@@ -2450,14 +2393,11 @@ mod tests {
         }
     }
 
-    /// イシュー #1337: `readout_var`（[`HostReadout`] 経由）の内容が、
-    /// feature 有効・無効いずれのビルドでも「`to_tensor()` +
-    /// `contiguous().as_slice().to_vec()`」（旧経路・現行の legacy 経路）
-    /// と bit 同一であることを固定する。feature 無効ビルドでは
-    /// `readout_var` 自体が legacy 経路そのものであるため自明に一致する
-    /// が、feature 有効ビルドで `Var::host_view()` が値として legacy 経路
-    /// と食い違わないことを確認する回帰点として両ビルドで走らせる
-    /// （cpu・実機非依存）。
+    /// イシュー #1337・#1438: `readout_var`（[`HostReadout`] 経由・
+    /// `Var::host_view()`）の内容が「`to_tensor()` +
+    /// `contiguous().as_slice().to_vec()`」（旧 legacy 経路。テスト内に
+    /// インライン展開して保持する固定点）と bit 同一であることを固定する
+    /// 回帰テスト（cpu・実機非依存）。
     #[test]
     fn readout_var_matches_legacy_to_vec_bit_exact() {
         let tape = make_tape("cpu").expect("test: make_tape 失敗");
@@ -2491,16 +2431,14 @@ mod tests {
         assert_eq!(via_checksum.to_bits(), legacy_checksum.to_bits());
     }
 
-    /// イシュー #1337・#1335: `host-view-readout` feature 有効ビルドで
-    /// `Var::host_view()`（`readout_var` が内部で使う）が返す
-    /// `VarHostView` の寿命契約——`Tape` の借用を保持しないため、生存中に
-    /// 同じ `Tape` へノード追加演算（`matmul`）を呼んでも panic しない
-    /// ——を、`readout_var` 経由の呼び出しパターン（`measure_gemm_reuse_
-    /// phases` の反復内で `out`（`HostReadout`）を生存させたまま次反復の
-    /// `a.matmul(&b)` を呼ぶ形）で確認する。feature 無効ビルドでは
-    /// `HostReadout = Vec<f32>` で自明に成立するため feature 有効時のみ
-    /// 意味を持つ回帰点（`Var::host_view` doc の「P1 是正」参照）。
-    #[cfg(feature = "host-view-readout")]
+    /// イシュー #1337・#1335・#1438: `Var::host_view()`（`readout_var`
+    /// が内部で使う）が返す `VarHostView` の寿命契約——`Tape` の借用を
+    /// 保持しないため、生存中に同じ `Tape` へノード追加演算（`matmul`）
+    /// を呼んでも panic しない——を、`readout_var` 経由の呼び出し
+    /// パターン（`measure_gemm_reuse_phases` の反復内で `out`
+    /// （`HostReadout`）を生存させたまま次反復の `a.matmul(&b)` を呼ぶ形）
+    /// で確認する回帰点（`Var::host_view` doc の「P1 是正」参照。#1438 で
+    /// 常時実行化・旧計測専用 feature（#1337 導入）の cfg は撤去）。
     #[test]
     fn host_view_readout_keeps_tape_usable() {
         let tape = make_tape("cpu").expect("test: make_tape 失敗");

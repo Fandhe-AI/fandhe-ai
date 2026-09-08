@@ -21,6 +21,13 @@ run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
   rm -f err.tmp
 }
 
+# イシュー #1438: 本スクリプトは常に registry 解決でビルドする（path patch
+# 機構を持たない）。bench-fandhe が借用ビュー readout を既定経路化した
+# ため、crates.io ピンのままでは構造的にビルド不能（bench_fandhe_pin_guard.sh
+# 参照）。ビルド起動前に明示エラーで早期停止する。
+source ./bench_fandhe_pin_guard.sh
+bench_fandhe_require_facade_patch "run_all.sh" ""
+
 # ビルド失敗時はここで中断する（古い target/release バイナリを現行ツリーの結果として
 # 計測・記録しないため。pipefail により tail 越しでも cargo の失敗が伝播する）
 if ! cargo build --release 2>&1 | tail -20; then
