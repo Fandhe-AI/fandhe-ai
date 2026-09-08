@@ -260,12 +260,70 @@ gate（spread ≤0.05）を超過**した。実行中 30 秒間隔で `uptime` �
 
 ### attempt 1（TIMEOUT・valid_runs=0）
 
-2026-09-08 19:04〜22:04 JST の 3 時間、load average < 2 が 2 回連続で
-成立するまで待機を試みたが、最低でも load1 ≈ 3.3 台までしか下がらず、
-他セッションの `cargo`／`python3`／時折 `rustc` が常駐し続けたため
-ゲート不通過のまま TIMEOUT した（`docs/perf/logs/
+2026-09-08 19:04〜22:04 JST の 3 時間（elapsed=10828s）、排他ゲートの
+成立を待機したが、ログ上 `gate_ok=1` の行は 1 行もなく `consecutive_ok`
+も一度も 1 以上にならないまま TIMEOUT した（`docs/perf/logs/
 metal-gemm-transpose-route-ab-1242/wait_gate.log`・`orchestrate.log`）。
 phase1-only の実測は 1 回も実行できていない。
+
+`wait_gate.log`（ポーリング 335 行）を実際に集計した結果は次のとおり
+（集計コマンドは後述。初稿の「最低でも load1 ≈ 3.3 台までしか下がらず」
+という記述は誤りだったため本節で訂正する）:
+
+| 項目 | 実測値 |
+|------|--------|
+| `gate_ok=1` の行数 | 0 / 335 |
+| `consecutive_ok` の最大値 | 0 |
+| `load1` の最小値 | 1.86（elapsed=3702s・20:06:08 JST。`load5=3.50 util=8% proc_count=7 procs=[python3,] gate_ok=0`） |
+| `load1` < 2.0 の行 | 上記と 1.92（elapsed=9396s・21:41:02 JST。`load5=3.19 util=17% proc_count=7 procs=[python3,] gate_ok=0`）の 2 行のみ |
+| `load1` < 3.0 の行数 | 38 |
+| `load5` の最小値 | 2.87（全行で 2.0 以上） |
+| `proc_count` の最小値 | 7（全行で 1 以上。`python3` が全行で検出） |
+| `util` の最小値 | 1%（全行で 1% 以上） |
+
+すなわち **load1 が一時的に 2.0 未満（1.86／1.92）へ低下した瞬間は 2 回
+あるが、いずれも `gate_ok=0` のまま記録されており**、attempt 1 のゲート
+判定条件（閾値・比較対象が load1 か load5 か・連続回数・プロセス条件の
+有無）はログからは確定できない。attempt 1 を駆動した実スクリプトは
+失われており（commit ccede10 で `wait_gate.sh`／`orchestrate.sh` を
+再構成した経緯を同コミットメッセージに明記）、ログの出力形式も再構成版と
+一致しない——attempt 1 のログには `util=` 欄があり、elapsed=9494s の行では
+`procs=[gemm_transpose_route_ab_bench,python3,]` と当該ベンチバイナリ
+自体を検出しているが、再構成版 `wait_gate.sh` は `util=` を出力せず
+`pgrep` 対象も `cargo`／`rustc`／`python3` の 3 種のみである（attempt 2 の
+`wait_gate_attempt2.log` は再構成版の形式と一致する）。したがって
+再構成版の判定条件（`GATE_THRESHOLD=2.0`・load1 比較・`CONSEC_REQUIRED=2`）
+を attempt 1 の判定条件と同一とみなす根拠はない。
+
+load1 < 2.0 の 2 行が `gate_ok=0` となった理由として、ログ上の他欄と整合
+する仮説は次の 3 つである（いずれも**推測**であり、ログからは確定できない）:
+
+- 仮説 (a): 「他 GPU プロセスなし」条件として `proc_count = 0` も
+  要求していた（全行で `proc_count >= 7`・`python3` 常駐のため不成立）。
+  イシュー本文のゲート定義（load average < 2 **かつ** 他 GPU プロセス
+  なし）とは最も整合する
+- 仮説 (b): 比較対象が load1 ではなく load5 だった（load5 の最小値は
+  2.87 で全行 2.0 以上）
+- 仮説 (c): GPU 使用率 `util = 0%` も条件だった（全行で 1% 以上）
+
+なお elapsed=9494s の行で他セッションが `gemm_transpose_route_ab_bench`
+（本 A/B ベンチのバイナリ自体）を実行していたことは、同一 GPU 上での
+計測競合が実際に生じていた直接の証跡である。
+
+集計コマンド（Python3 標準ライブラリのみ。リポジトリルートで実行）:
+
+```sh
+python3 - <<'EOF'
+import re
+L="docs/perf/logs/metal-gemm-transpose-route-ab-1242/wait_gate.log"
+P=re.compile(r"load1=([\d.]+) load5=([\d.]+) util=(\d+)% proc_count=(\d+) procs=\[([^\]]*)\] gate_ok=(\d) consecutive_ok=(\d+)")
+rows=[m.groups() for m in map(P.search, open(L)) if m]
+l1=[float(r[0]) for r in rows]; l5=[float(r[1]) for r in rows]
+print("rows",len(rows),"gate_ok=1",sum(int(r[5]) for r in rows),"max consec",max(int(r[6]) for r in rows))
+print("min load1",min(l1),"min load5",min(l5),"load1<2",sum(v<2 for v in l1),"load1<3",sum(v<3 for v in l1))
+print("min proc_count",min(int(r[3]) for r in rows),"min util",min(int(r[2]) for r in rows))
+EOF
+```
 
 ### attempt 2（TIMEOUT・valid_runs=0。有限待機）
 
@@ -325,6 +383,13 @@ real-hardware-verification-env.md` の実機予約運用）を確保したうえ
   2 回とも load average < 2 のゲートに到達できず TIMEOUT した。本 worktree
   環境が複数イシューの並列実行セッションを常時抱える構造上の制約であり、
   他イシューの並走が実際に止まる時間帯を確保しない限り再現性のある排他
-  計測は困難である。再試行時は `docs/perf/logs/
-  metal-gemm-transpose-route-ab-1242/orchestrate.sh`／`wait_gate.sh`
-  （ゲート閾値・待機ロジックとも変更不要）をそのまま再利用できる。
+  計測は困難である。なお `docs/perf/logs/
+  metal-gemm-transpose-route-ab-1242/orchestrate.sh`／`wait_gate.sh` は
+  attempt 1 の実行後に再構成したもの（attempt 2 で使用）であり、attempt 1
+  の判定条件を再現する保証はない（§5.5 attempt 1 節: attempt 1 のログは
+  load1 < 2.0 の行でも `gate_ok=0` であり、出力形式も再構成版と一致しない）。
+  再試行時は再構成版をそのまま流用してよいが、実際に用いた判定条件
+  （`GATE_THRESHOLD`・比較対象〈load1〉・`CONSEC_REQUIRED`・プロセス条件
+  〈`pgrep` 対象と `proc_count` の扱い〉・`MAX_WAIT_SECS`）を `env_info.txt`
+  と本ドキュメントへ明示して記録し、attempt 1 と同一条件であるとは
+  記述しないこと。

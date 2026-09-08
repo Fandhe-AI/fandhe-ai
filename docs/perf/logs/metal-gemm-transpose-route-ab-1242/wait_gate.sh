@@ -10,8 +10,12 @@
 #
 # 判定条件: 1 分 load average < GATE_THRESHOLD が CONSEC_REQUIRED 回連続。
 # GPU プロセス確認は cargo/rustc/python3（ビルド・計測系プロセス。他
-# セッションの並走を示す代理指標。#1242 attempt 1 と同一の簡易フィルタ）
-# の有無を procs= として記録する（誤検知を許容する簡易版であり、実際の
+# セッションの並走を示す代理指標）の有無を procs= として記録する。
+# 注意: 本スクリプトは attempt 1 の実行後に再構成したもので、attempt 1 の
+# 判定条件を再現する保証はない（attempt 1 の wait_gate.log は util= 欄を
+# 持ち gemm_transpose_route_ab_bench も検出しているが本版は出力しない。
+# attempt 1 は load1 < 2.0 の行でも gate_ok=0 のため判定条件は未確定。
+# `docs/perf/metal-gemm-transpose-tiled.md` §5.5）。（誤検知を許容する簡易版であり、実際の
 # GPU 使用有無は各 run 実行前後の `ps`／`uptime` 生ログで人間が確認する
 # 前提）。
 set -uo pipefail
