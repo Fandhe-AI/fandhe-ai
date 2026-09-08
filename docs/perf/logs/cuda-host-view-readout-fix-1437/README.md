@@ -44,6 +44,9 @@ GEMM_GATE_PATCH_FACADE_PATH=<HEAD ツリーの crates/facade 絶対パス> \
   bash run_gemm_gate_cuda.sh 1437after-on
 
 # Layer B（単一腕プロセス分離実行の例。N=1024 PretouchedFreshDest）
+# 直前の off@after／on@after は scripts/bench/framework-compare （独立
+# workspace）へ cd 済みのため、本体 workspace ルートへ戻ってから実行する
+cd ../../..
 cargo test -p fandhe-ai-backend-cuda --release --lib \
   readout_regression_diag_n1024_pretouched_fresh_dest -- --ignored --nocapture --test-threads=1
 ```

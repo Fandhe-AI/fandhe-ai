@@ -568,10 +568,16 @@ pub(crate) enum ReadbackDest {
 /// 12.15 ms・borrowed 11.32 ms・pretouched-fresh **7.34 ms**）・N=4096
 /// （legacy 48.39 ms・borrowed 29.26 ms・pretouched-fresh 30.37 ms）の
 /// いずれも `PretouchedFresh` が `Fresh`（legacy 相当）を下回るか同水準
-/// であり、後退対象だった N=1024/2048 で大幅改善（Gate 1）・既存経路の
-/// 後退なし（Gate 2）を裏付ける。詳細・Layer A（framework-compare 実践
-/// 規模）ゲート結果は `docs/perf/cuda-host-view-readout-small-shape-
-/// regression.md` §13 以降を参照。
+/// であり、後退対象だった N=1024/2048 で大幅改善（受け入れ条件 Gate 1。
+/// 全 N で 0.637〜0.897 倍・PASS）を裏付ける。Gate 2（既存経路の非後退
+/// 目安。≤1.03）は N=1024/2048 でわずかに超過（1.038・1.047）しており
+/// 「後退なし」ではない——`PretouchedFresh` は `host-view-readout`
+/// feature の有効・無効を問わず無条件に既定となるため、`off` 経路にも
+/// 事前フィル費用が一律で乗ることが機構的な説明として整合する。Gate 2
+/// は受け入れ条件自体には含まれず、超過幅が Gate 1 の改善幅より小さい
+/// ことから ADOPT 判断は変更していない。詳細・Layer A（framework-compare
+/// 実践規模）ゲート結果は `docs/perf/cuda-host-view-readout-small-shape-
+/// regression.md` §13 以降（とくに §13.3 の再評価）を参照。
 pub(crate) const READBACK_DEST: ReadbackDest = ReadbackDest::PretouchedFresh;
 
 /// [`ReadbackDest::PretouchedFresh`] が要求する「非ゼロ事前タッチ値」を

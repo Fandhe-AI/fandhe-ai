@@ -444,7 +444,10 @@ borrowed_keep_alive,pretouched_fresh_dest}`）で計測した。これにより
 
 `PretouchedFreshDest` は N=1024/2048 で `LegacyToVec`（off 経路相当）・
 `BorrowedKeepAlive`（on 経路・後退再現）の両方を明確に下回り、N=4096 は
-3 腕とも僅差（29.26〜30.37 ms・約 4% 差）に収束する。N=1024 の
+`BorrowedKeepAlive`（29.26 ms）と僅差（30.37 ms・約 4% 差）に収束する。
+`LegacyToVec`（48.39 ms）はこの僅差の範囲には収まらず、N=4096 では
+`PretouchedFreshDest`・`BorrowedKeepAlive` の 2 腕がむしろ `LegacyToVec`
+を約 1.6 倍上回る（`host_read` 側の内訳差が支配的。上表）。N=1024 の
 `BorrowedKeepAlive` 37.15 ms は §0 が報告した「N=1024 15.04 倍後退」を
 本診断テストの計測境界（d2h+host_read のみ。H2D／カーネル起動を含まない）
 でも再現しており、H1（宛先ページ未タッチ由来）が on 腕固有の後退の
@@ -544,16 +547,22 @@ checksum 完全一致（生ログ `docs/perf/logs/cuda-host-view-readout-fix-143
 
 ### 13.5 結線
 
-判定木（実装計画 §5）の「Gate 1・2 とも通過 → ADOPT」に従い、
+判定木（実装計画 §5）に従い、受け入れ条件である Gate 1（全 N で
+0.637〜0.897 倍・PASS）の通過を根拠に ADOPT し、
 `READBACK_DEST = ReadbackDest::PretouchedFresh` を既定として結線した
-（`crates/backend-cuda/src/memory.rs`）。候補 C（bench 側 N 閾値切替）は
-不要となったため実装していない。
+（`crates/backend-cuda/src/memory.rs`）。Gate 2（自己宣言の非後退目安）
+は §13.3 のとおり N=1024/2048 でわずかに超過（1.038・1.047）しており
+「Gate 1・2 とも通過」ではない点に注意——Gate 2 は受け入れ条件自体には
+含まれず、超過幅（3.78%・4.69%）が Gate 1 の改善幅（12〜36%）に対して
+小さいことを理由に ADOPT 判断は変更しなかった（§13.3 末尾の再評価を
+参照）。候補 C（bench 側 N 閾値切替）は不要となったため実装していない。
 
 ### 13.6 スコープ外（本イシューでも未実施のまま引き継ぐ）
 
 - N=2048 bimodal の厳密な発生条件・N=4096 D2H 二峰性・32→33 MiB 段差
   （#1146／#1169 系。§11 から不変）
 - 候補 A（`HostStagingCache` 再利用経由の readback）の本実装（候補 B が
-  Gate 1/2 を満たしたため優先度低）
+  受け入れ条件〈Gate 1〉を満たし ADOPT されたため優先度低。Gate 2 は
+  §13.3 のとおり N=1024/2048 でわずかに超過している）
 - feature ゲート撤去・3 バックエンド candle 比ゲート再計測（#1438）
 - Metal の全形状後退（1.30〜1.56 倍。CUDA 限定のためスコープ外）
