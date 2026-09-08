@@ -21,19 +21,35 @@ THREADS="${THREADS:?THREADS required}"
 RUNS="${RUNS:-5}"
 mkdir -p "$LOGDIR"
 
+# 計測プロセスの失敗件数（呼び出し元 dgx_orchestrate.sh / m4max_orchestrate.sh
+# が本スクリプトの終了コードを見て ALL_DONE.marker 作成を判断できるよう、
+# 1 件でも非 0 終了があれば本スクリプト自体も非 0 で終了する。codex-review 指摘
+# 対応: #1312 PR #1444 レビュースレッド）
+FAIL_COUNT=0
+
 run_test() {
   local test_name="$1" out_prefix="$2" thread_label="$3" thread_arg="$4"
-  local run out
+  local run out rc
   for run in $(seq 1 "$RUNS"); do
     out="$LOGDIR/${out_prefix}-${MACHINE}-T${thread_label}-run${run}.txt"
     if [ -n "$thread_arg" ]; then
       RAYON_NUM_THREADS="$thread_arg" cargo test -p fandhe-ai-backend-cpu --release --lib \
         -- --ignored "$test_name" --nocapture >"$out" 2>&1
+      rc=$?
     else
-      cargo test -p fandhe-ai-backend-cpu --release --lib \
+      # "未設定=既定全コア" という計測契約を満たすため、呼び出し元が
+      # RAYON_NUM_THREADS を設定していても env -u で明示的に解除する
+      # （継承した値が既定分岐に紛れ込み T=default の意味を壊すのを防ぐ。
+      # codex-review 指摘対応: #1312 PR #1444 レビュースレッド）
+      env -u RAYON_NUM_THREADS cargo test -p fandhe-ai-backend-cpu --release --lib \
         -- --ignored "$test_name" --nocapture >"$out" 2>&1
+      rc=$?
     fi
-    echo "  wrote $out (rc=$?)"
+    echo "  wrote $out (rc=$rc)"
+    if [ "$rc" -ne 0 ]; then
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "  NG: $test_name (T=$thread_label run=$run) rc=$rc" >>"$LOGDIR/FAILURES.log"
+    fi
   done
 }
 
@@ -47,5 +63,10 @@ for T in $THREADS; do
   run_test gemm_blis_two_d_dynamic_ab_1024_2048 ab-1024-2048 "$T" "$thread_arg"
   run_test gemm_blis_two_d_dynamic_ab_4096 ab-4096 "$T" "$thread_arg"
 done
+
+if [ "$FAIL_COUNT" -ne 0 ]; then
+  echo "run_ab.sh done with failures: $FAIL_COUNT 件（$LOGDIR/FAILURES.log 参照） $(date -u +%FT%TZ)"
+  exit 1
+fi
 
 echo "run_ab.sh done $(date -u +%FT%TZ)"

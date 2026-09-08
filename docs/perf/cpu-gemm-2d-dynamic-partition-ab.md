@@ -190,7 +190,13 @@ T=10/T=8 軸では **「残存」** と判定される。ただし比の絶対�
 
 （`self_gemm_blis_parallel` の `impl_threads` は実機既定値〈DGX 20・M4 Max 16〉。
 `matrixmultiply` は `output_match=false` の既知限界〈K≥1024 の丸め差。
-`docs/oss-comparison-harness-decision.md`〉があるため参照に含めない。M4 Max は共有負荷下で
+`docs/oss-comparison-harness-decision.md`〉があるため参照に含めない。**`gemm` crate 側にも
+同様の留保がある**: 上表の DGX `2048`・`4096` 行と M4 Max `4096` 行は、同梱 JSONL
+（`oss-{dgx,m4max}-run{1..5}.jsonl`）で該当 size の 5 run すべてが `output_match=false`
+（DGX 1024 と M4 Max 1024／2048 のみ `output_match=true`）であり、これらの行の
+「TFLOP/s」「RowPanel/gemm」は出力不一致下での参考値に留まる（Tier 2 が採否判定に
+使わない参考値であるという既存の位置づけに変わりはないが、行単位でどこまで信頼できるかを
+明示するための追記）。M4 Max は共有負荷下で
 `--sizes 1024,2048,4096` 一括実行が 2 分タイムアウトへ到達した run が複数あったため、
 run 1・run 3 はサイズ別（1024,2048 → 4096 を別プロセスで追加実行）に分割して完走させた
 〈`oss-m4max-run{1,3}.err` 参照〉。各 (impl, size) の 5 サンプルはいずれも 5 個の独立

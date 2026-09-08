@@ -86,8 +86,16 @@ if [ $? -ne 0 ]; then
 fi
 
 # 主計測マトリクス: T=8, T=10, 既定（未設定=20）
+# run_ab.sh の終了コードは呼び出し元へ伝播させる（計測プロセスの非 0 終了を
+# 検出したら ALL_DONE.marker を作らず失敗のまま停止する。codex-review 指摘
+# 対応: #1312 PR #1444 レビュースレッド）
 LOGDIR="$LOGDIR" MACHINE="$MACHINE" THREADS="8 10 default" RUNS=5 \
   bash "$AB_SCRIPT_DIR/run_ab.sh"
+if [ $? -ne 0 ]; then
+  echo "計測失敗: run_ab.sh が非 0 終了（$LOGDIR/FAILURES.log 参照）" >"$LOGDIR/RUN_AB_FAILED.marker"
+  kill "$POLLER_PID" 2>/dev/null || true
+  exit 1
+fi
 
 # oss-gemm-compare（Tier 2。gemm crate 比較用）5 回独立実行
 OSS_BIN="$CARGO_TARGET_DIR/oss-release/oss-gemm-compare"
