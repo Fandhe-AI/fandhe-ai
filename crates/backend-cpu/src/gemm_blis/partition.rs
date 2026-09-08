@@ -82,6 +82,14 @@ pub(crate) fn tile_grid(m: usize, n: usize, mc: usize, nc: usize) -> Vec<Tile> {
 /// `total % workers` 個の worker が 1 つ多く受け取るため、区間長の差は
 /// 常に高々 1）。`workers == 0` または `total == 0` は空の結果を返す
 /// 全域関数。
+///
+/// 呼び出し元は [`row_ranges_for_workers`]（#753・
+/// [`super::gemm_blis_parallel_2d_with_blocks`] 経由のテスト専用入口）
+/// のみで、本番経路（[`job_grid`]・#1311/#1313）は使わない。イシュー
+/// #1313 でモジュール全体の `#[cfg(test)]` を外した際、テスト専用
+/// ヘルパーとして個別に `#[cfg(test)]` を付与した
+/// （`.claude/rules/coding-rust.md` の dead_code 黙らせ回避方針）。
+#[cfg(test)]
 pub(crate) fn split_evenly(total: usize, workers: usize) -> Vec<Range<usize>> {
     if workers == 0 || total == 0 {
         return Vec::new();
@@ -113,6 +121,10 @@ pub(crate) fn split_evenly(total: usize, workers: usize) -> Vec<Range<usize>> {
 /// ドキュメント「unsafe を使わない設計判断」参照。実行側は
 /// [`super::gemm_blis_parallel_2d_with_blocks`] が本関数の結果を
 /// `split_at_mut` 連鎖で安全に disjoint 分割する）。
+///
+/// テスト専用（[`split_evenly`] ドキュメント参照。#1313 でモジュール
+/// 全体の `#[cfg(test)]` を外した際に個別付与）。
+#[cfg(test)]
 pub(crate) fn row_ranges_for_workers(m: usize, mc: usize, workers: usize) -> Vec<Range<usize>> {
     let row_bands = bands(m, mc);
     if row_bands.is_empty() {
@@ -347,7 +359,10 @@ fn job_grid_with_trace(
 /// ガード込み）で行い、乗算オーバーフローは
 /// [`crate::gemm::GemmError::DimProductOverflow`] へ変換する
 /// （OWASP A03・`.claude/rules/security.md`）。
-#[cfg(test)]
+///
+/// 本番結線（イシュー #1313・[`super::dispatch_two_d_dynamic`] 経由）
+/// により `#[cfg(test)]` を外した（旧 `#[cfg(test)]` は #1311 導入時点の
+/// 本番未結線を反映していた）。
 pub(crate) fn job_grid(
     m: usize,
     n: usize,

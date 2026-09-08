@@ -157,15 +157,18 @@ A/B ハーネス（`gemm_blis_variant_ab_1024_2048`／`_4096`。`#[ignore]`）�
 `all_gemm_driver_variants()` に `TwoDDynamic` が追加されたことで自動的に
 候補へ含まれる（sanity 実行のみ・値は採否根拠にしない。#1312 が本格計測する）。
 
-## 6. スコープ外（#1313 が引き継ぐ）
+## 6. スコープ外（#1313 が引き継いだ）
 
-- 本番結線・`gemm_blis_bias_act_parallel` の epilogue 統合・`partition` の
-  `#[cfg(test)]` 解除（#1313。#1312 の判定が undetermined のため「結線せず
-  記録のみ」で引き継ぐ。§7 参照）
+- **本番結線・`gemm_blis_bias_act_parallel` の epilogue 統合・`partition` の
+  `#[cfg(test)]` 解除は #1313 で実施済み**（M4 Max 専有ゲート付き Phase 0
+  再計測で ADOPT 確定・`TWO_D_DYNAMIC_PRODUCTION_ENABLED = true` で結線。
+  §7 追記・`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節
+  参照）
 - `oss-gemm-compare` への variant 選択オプション追加（#1312 では未実施のまま
-  対象外と判断済み）
+  対象外と判断済み。#1313 でも同様に対象外のまま）
 - 設計 §4.2 主案 S（`run_rows` 入口）の実装（S′ が障害に直面した場合の
-  フォールバックとしてのみ着手する）
+  フォールバックとしてのみ着手する。#1313 でも S′ のまま問題なく結線でき
+  たため未着手）
 
 ## 7. 実機実測（#1312）
 
@@ -181,6 +184,14 @@ DGX・N=1024 の T=10/T=8 非単調性（#1305）は `TwoDDynamic` で「残存�
 （比 0.86 前後・閾値 0.90 未満）だが `RowPanel` の 0.48 から大幅に改善した。
 詳細な実測表・判定根拠・#1313 への引き継ぎ内容は
 `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md` を参照。
+
+**追記（#1313）**: M4 Max 専有ゲート付き Phase 0 再計測（1 回・有界）で
+attempt=8（load average 3.40）にゲート通過し、jpw=2・jpw=4 とも Tier 1 条件を
+両実機で満たしたため ADOPT が確定し本番結線した（既定 `TWO_D_JOBS_PER_WORKER=2`
+は変更なし）。framework-compare gemm cpu N=512/1024/2048 × fresh/reuse の
+before/after は両実機・全 12 セルで非後退（ratio 0.60〜0.96・改善方向）・
+checksum 完全一致を確認した。詳細は
+`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節を参照。
 
 ## 出典
 
