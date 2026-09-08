@@ -131,35 +131,26 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
 /// `vec![0.0f32; len]`（calloc 相当の逐次ゼロ確保）を使い、既存経路と
 /// 完全同一のまま変更しない。
 ///
-/// **本番既定は `2 << 20`（8 MiB 相当。並列分岐を N=2048 以上で有効化）。**
+/// **本番既定は `usize::MAX`（並列分岐を常に無効化）。**
+///
 /// イシュー #1299 の M4 Max スモーク実測（`docs/perf/logs/
 /// cpu-matmul-fixed-cost-1299/`）では、他 worktree の並走ビルドで
 /// load average 9〜11 という高負荷下の計測により N=2048 の `ops_gemm`
 /// が中央値約 29% 後退したため、当初は `usize::MAX`（無効化）を本番
 /// 既定としていた。イシュー #1301 が DGX Spark GB10（Grace CPU）・
-/// Apple M4 Max の両実機で 5 回独立プロセス起動・on/off 比較を実施
-/// した結果（`docs/perf/logs/cpu-matmul-fixed-cost-1301/`）:
-///
-/// - DGX Spark GB10（専有ゲート確認済みの低負荷条件下。N=2048）:
-///   `alloc_c` が約 48% 削減（Layer B 診断テスト）・`ops_gemm` 合成は
-///   0.9972 倍（非後退）・Layer A（`bench-fandhe gemm cpu 2048 reuse`）
-///   on/off 比 0.9990 倍。対照セル（N=512/1024）もすべて 1.05 倍以内
-/// - Apple M4 Max（共有マシン。#1299 当時より低負荷）: N=512/1024/2048
-///   いずれも on/off 比 0.951〜1.027 倍で非後退（`checksum` 全セル
-///   完全一致）
-///
-/// 両実機・対象形状すべてで非後退（一部改善）を確認したため、
-/// `usize::MAX` から `2 << 20`（設計時の暫定値のまま）へ本番既定を
-/// 有効化した（`docs/cpu-matmul-fixed-cost-design.md` §10・
-/// `docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6 参照）。
-///
-/// なお #1299 当時の M4 Max 後退は、高負荷下でページフォールトが
-/// `kernel` 区間から `alloc_c` 区間へ前倒しされた影響が外部負荷と
-/// 重なって顕在化したものと推定される（同 impl.md §2「なぜ後退したか」）。
-/// #1301 の低負荷条件下では同じ前倒し自体は起きているはずだが、
-/// 後退として顕在化しなかった（`docs/perf/cpu-matmul-fixed-cost-1301/`
-/// の M4 Max off/on 比較を参照）。
-pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = 2 << 20;
+/// Apple M4 Max の両実機で 5 回独立プロセス起動・on/off 比較を実施し
+/// （`docs/perf/logs/cpu-matmul-fixed-cost-1301/`）、事前宣言した判定
+/// 規則（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1）の
+/// うち規則 4（candle 比の非後退）が実測後の緩和なしでは 6 セル中 3
+/// セルで不成立だったため、いったんは緩和後の基準で `2 << 20` へ
+/// 有効化していたが、PR #1448 の codex-review 指摘（計測後に緩和した
+/// 基準だけで本番採用を確定しない）を受けて **`usize::MAX` へ差し戻した**。
+/// §20.3 の実測系列自体は改善方向の参考値として維持しつつ、規則 4 の
+/// 改定版（§20.1a。同 doc の事前登録版として以後固定）を用いた
+/// **独立の再計測**が両実機で完了し ADOPT と確定するまでは、本定数を
+/// `2 << 20` へ戻さない（同 doc §20.6・`docs/cpu-matmul-fixed-cost-
+/// design.md` §10 参照）。
+pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = usize::MAX;
 
 /// [`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`] 以上の並列ゼロ書き込みにおける
 /// rayon チャンク粒度（要素数。イシュー #1299）。`with_min_len` へ渡し
@@ -1438,36 +1429,38 @@ mod zeroed_output_tests {
 
     #[test]
     fn default_wrapper_matches_production_threshold() {
-        // 本番既定しきい値は `2 << 20`（8 MiB 相当。イシュー #1301 の
-        // 両実機実測で非後退を確認し有効化。`docs/perf/logs/
-        // cpu-matmul-fixed-cost-1301/`）。しきい値未満（N<=1024 相当）は
-        // 逐次経路（`vec![0.0f32; len]`）へ、以上（N=2048 以上）は並列
-        // 分岐へ入る。両分岐とも `zeroed_output_with_threshold` の
-        // 契約（全要素ゼロ）を満たすことをここで固定する。
-        let below = 1usize << 10; // 1024 要素。しきい値未満（逐次経路）。
-        assert_all_zero_bits(&zeroed_output(below), below);
-        let above = 1usize << 22; // 4M 要素（16 MiB）。しきい値以上（並列経路）。
-        assert_all_zero_bits(&zeroed_output(above), above);
+        // 本番既定しきい値は `usize::MAX`（並列分岐は常に無効。#1299 の
+        // M4 Max スモークが N=2048 で後退を確認したため。PR #1448 の
+        // codex-review 指摘を受け、#1301 の実測後に緩和した基準のみを
+        // 根拠とする有効化を差し戻した。独立の再計測〈`docs/perf/
+        // cpu-gemm-candle-gate-remeasurement.md` §20.6〉が完了し ADOPT
+        // と確定するまでの暫定値）。したがって `zeroed_output` は現実的
+        // なサイズでは常に「未満」分岐（逐次経路）へ入る。並列分岐自体は
+        // `above_threshold_uses_parallel_path`／`at_threshold_uses_parallel_path`
+        // が明示的な小さいしきい値を渡して別途カバーする。
+        let len = 1usize << 24; // 16M 要素（64 MiB）でも usize::MAX 未満。
+        assert_all_zero_bits(&zeroed_output(len), len);
     }
 
-    /// 本番既定しきい値が `2 << 20`（有効化状態）であることを固定する
-    /// 回帰（イシュー #1301。値をさらに変更する場合は
-    /// `docs/cpu-matmul-fixed-cost-design.md` §10・
-    /// `docs/perf/cpu-matmul-fixed-cost-impl.md` の実測記録を更新すること）。
+    /// 本番既定しきい値が無効化状態（`usize::MAX`）であることを固定する
+    /// 回帰（イシュー #1299・#1301・PR #1448 codex-review 対応で差し戻し。
+    /// `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.6 の独立
+    /// 再計測で ADOPT と確定した場合は本テストの期待値も合わせて更新する）。
     #[test]
-    fn default_threshold_is_enabled_per_1301_measurement() {
+    fn default_threshold_is_disabled_pending_independent_remeasurement() {
         assert_eq!(
             GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS,
-            2 << 20,
-            "DGX Spark GB10・Apple M4 Max 両実機実測（#1301）で非後退を \
-             確認したため本番既定は並列分岐を有効化した状態であるはず。 \
-             値を変更する場合は実測記録も合わせて更新すること"
+            usize::MAX,
+            "#1301 の実測は事前宣言した規則 4 を緩和後の基準でしか \
+             満たさなかった（codex-review 指摘）ため本番既定は並列分岐を \
+             無効化した状態であるはず。§20.1a の改定版規則 4 を用いた \
+             独立の再計測で ADOPT と確定する場合は本テストの期待値も \
+             更新すること"
         );
     }
 
-    /// 並列ゼロ書き込み分岐（この単体テストの形状 `m*n` はしきい値
-    /// `2 << 20` 未満のため、本番既定のままでは逐次分岐にしか到達
-    /// しない。明示的にしきい値 0 を渡して並列分岐を強制する）を実際の
+    /// 並列ゼロ書き込み分岐（本番既定では `usize::MAX` により到達不能。
+    /// 明示的にしきい値 0 を渡して強制する）を実際の
     /// GEMM カーネルへ通した結果が、逐次ゼロ確保（`vec![0.0f32; ..]`）
     /// 経由の結果と bit 完全一致することを確認する（イシュー #1299・
     /// codex-review 相当の指摘: 統合テスト

@@ -2097,10 +2097,17 @@ checksum は両実機・全セル完全一致。DGX の Layer B（`gemm_reuse_ph
 cpu`。crates 内診断テスト）実測では N=2048 の `alloc_c` が 48% 削減
 （3.2554→1.6817 ms）・`ops_gemm` 合成は 0.9972 倍（非後退）を確認。
 
-**既定化判定: ADOPT（無条件・cfg gating なし）**。全事前宣言規則
-（checksum 一致・DGX 決定セル非後退・対照セル非後退・candle 比非後退・
-M4 Max 非後退）を両実機とも満たしたため、本番既定を `2 << 20` へ有効化
-した。詳細・env_info・判定規則の事前宣言記録は
-`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19・
-`docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6・
+**既定化判定: 保留（PR #1448 codex-review 対応。2026-09-08 再判定）**。
+checksum 一致・DGX 決定セル非後退・対照セル非後退・M4 Max 非後退は
+満たしたが、candle 比非後退（事前宣言した規則 4）は許容幅なしの原文
+では 6 セル中 3 セルで不成立だった。計測後に定義した許容幅（改定版
+規則 4）を同じ実測系列へ遡及適用して「満たす」と扱い本番既定を
+`2 << 20` へ有効化していたが、この遡及適用が事前宣言の趣旨（後出しで
+基準を変えない）を欠くという codex-review 指摘を受け、**本番既定を
+`usize::MAX`（無効化）へ差し戻した**。改定版規則 4 は以後の判定に
+用いる事前登録規則として固定し、この規則を用いた独立の再計測で
+ADOPT／REJECT を確定する（未実施）。上表の実測結果自体は参考系列
+として維持する。詳細・env_info・判定規則の事前宣言記録・差し戻しの
+経緯は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1・
+§20.1a・§20.4・§20.6・`docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6・
 `docs/perf/logs/cpu-matmul-fixed-cost-1301/` を参照。

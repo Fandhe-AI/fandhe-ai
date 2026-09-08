@@ -36,6 +36,14 @@ SIZE_RE = re.compile(r"N=(?P<n>\d+)\s*\(median over")
 
 PHASES = ["alloc_c", "kernel", "tensor_wrap", "ops_gemm", "tape_matmul", "to_tensor", "host_copy", "checksum"]
 
+# 本ハーネスが対象とする GEMM ゲート形状（`run_gemm_gate_cpu.sh`・
+# `compare_gemm_gate.py --device cpu` と同一の N=512/1024/2048）。
+# `validate_run_counts` は agg に実在するサイズしか検査できないため
+# （5 ファイルすべてで同一サイズの解析に失敗すると、そのサイズは
+# agg に一切現れず検査対象から漏れる。イシュー #1301 codex-review 指
+# 摘）、このリストで「集計対象サイズ全体の欠落」を独立に検出する。
+EXPECTED_SIZES = [512, 1024, 2048]
+
 
 def parse_log(path: str) -> dict[int, dict[str, float]]:
     """1 run のログを { N: { phase: median_ms } } へパースする。"""
@@ -99,6 +107,29 @@ def validate_run_counts(
     return errors
 
 
+def validate_expected_sizes(
+    label: str, agg: dict[int, dict[str, list[float]]], expected_sizes: list[int]
+) -> list[str]:
+    """全 `PHASES` が集計から漏れているサイズ（＝5 ファイルすべてで
+    そのサイズの解析に失敗し `agg` に一切現れなかったケース）を検出する。
+
+    `validate_run_counts` は `agg.items()`（既に存在するサイズのみ）を
+    走査するため、サイズそのものが丸ごと欠落した場合は検査をすり抜けて
+    無検証で表から抜け落ちる（イシュー #1301 codex-review 指摘）。
+    `EXPECTED_SIZES` と突き合わせることで、この経路を fail-closed に
+    塞ぐ。違反があれば理由の一覧を返す（空リストなら問題なし）。
+    """
+    errors: list[str] = []
+    for n in expected_sizes:
+        if n not in agg:
+            errors.append(
+                f"{label}: N={n} が集計から完全に欠落（読み込んだ全ログで"
+                "この N の解析に失敗した可能性。SIZE_RE がログ中の "
+                "`N=<n> (median over` 行を検出できなかった疑いがある）"
+            )
+    return errors
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--node", required=True)
@@ -110,7 +141,14 @@ def main() -> int:
         default=5,
         help="each glob が拾うべきログ件数（coding-rust.md の 5 回計測契約。既定 5）",
     )
+    ap.add_argument(
+        "--expect-sizes",
+        type=str,
+        default=",".join(str(n) for n in EXPECTED_SIZES),
+        help="集計対象として必須の N（カンマ区切り。既定は GEMM ゲート形状 512,1024,2048）",
+    )
     args = ap.parse_args()
+    expected_sizes = [int(s) for s in args.expect_sizes.split(",") if s.strip()]
 
     off_paths = sorted(glob.glob(args.off_glob))
     on_paths = sorted(glob.glob(args.on_glob))
@@ -126,6 +164,11 @@ def main() -> int:
     # エラー終了する。
     errors = validate_run_counts("off", off_paths, args.expect_runs, off_agg)
     errors += validate_run_counts("on", on_paths, args.expect_runs, on_agg)
+    # 集計対象サイズ全体の欠落検証（5 ファイルすべてでの解析失敗を検出。
+    # イシュー #1301 codex-review 指摘。上記 validate_run_counts は
+    # agg に実在するサイズしか走査できないため、この検査で補完する）。
+    errors += validate_expected_sizes("off", off_agg, expected_sizes)
+    errors += validate_expected_sizes("on", on_agg, expected_sizes)
     if errors:
         print("ERROR: run 数・サンプル数の検証に失敗しました:", file=sys.stderr)
         for e in errors:

@@ -400,11 +400,19 @@ Apple M4 Max 両実機で on/off 5 回独立プロセス起動・Layer A（`benc
 gemm cpu <N> reuse`）・Layer B（`gemm_reuse_phase_diag_cpu`）双方を計測
 した結果、DGX N=2048（`alloc_c` 約 48% 削減・`ops_gemm` 合成 0.9972 倍）・
 対照セル（N=512/1024）・M4 Max 全セル（0.951〜1.027 倍）いずれも非後退
-（一部改善）を確認したため、**本番既定を `2 << 20` へ有効化**した
-（`crates/backend-cpu/src/ops.rs::GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`。
-プラットフォーム別 cfg gating は不要と判明したため単一定数のまま）。
-初回計測時に他セッション並走（load average 15〜18）による contamination
-を検出し、専有ゲート確認後に DGX を再計測した経緯を含め、実測詳細は
-`docs/perf/cpu-matmul-fixed-cost-impl.md` §6・`docs/perf/
-cpu-gemm-candle-gate-remeasurement.md` §19・`docs/perf/logs/
+（一部改善）を確認した。ただし事前宣言した判定規則（`docs/perf/
+cpu-gemm-candle-gate-remeasurement.md` §20.1 規則 4・candle 比の
+非後退）は緩和なしでは 6 セル中 3 セルで不成立であり、いったんは
+実測後に緩和した基準（同 doc §20.1a）のみを根拠に `2 << 20` へ
+有効化していたが、PR #1448 の codex-review 指摘（計測後に緩和した
+基準だけで本番採用を確定しない）を受けて**本番既定を `usize::MAX`
+（無効化）へ差し戻した**（`crates/backend-cpu/src/ops.rs::
+GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`）。§20.1a の改定版規則 4 は
+以後の判定に用いる事前登録規則として維持し、この規則を用いた
+**独立の再計測**（同 doc §20.6）が両実機で完了して ADOPT と確定する
+まで、本番既定は有効化しない。初回計測時に他セッション並走
+（load average 15〜18）による contamination を検出し、専有ゲート確認後
+に DGX を再計測した経緯を含め、実測詳細は `docs/perf/
+cpu-matmul-fixed-cost-impl.md` §6・`docs/perf/
+cpu-gemm-candle-gate-remeasurement.md` §20・`docs/perf/logs/
 cpu-matmul-fixed-cost-1301/` を参照。
