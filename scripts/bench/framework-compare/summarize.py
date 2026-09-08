@@ -1243,7 +1243,19 @@ def parity_status(row):
         "parity_max_abs_err",
         "parity_max_rel_err",
     )
-    if all(k not in row for k in parity_keys):
+    # イシュー #1250 codex-review P2 指摘: 新契約のキー
+    # （`parity_scaled_abs_bound`／`parity_scaled_abs_rescued`）は旧 4
+    # キーと独立して存在しうるため、旧 4 キー欠損のみで "unverified" と
+    # 判定すると、旧 4 キーが全欠損かつ新 2 キーのいずれかが残っている
+    # 部分破損行（新契約下での破損 JSONL）が検証をすり抜けて誤って
+    # 「未検証（旧形式）」表示になる。6 キー（旧 4 ＋新 2）すべてが欠損
+    # する場合に限り旧形式として "unverified" とし、それ以外の部分欠損は
+    # 下記の通常検証へ進めて fail-closed に "fail" 判定させる。
+    new_keys_for_unverified_check = (
+        "parity_scaled_abs_bound",
+        "parity_scaled_abs_rescued",
+    )
+    if all(k not in row for k in parity_keys + new_keys_for_unverified_check):
         return "unverified"
     fail_count = row.get("parity_fail_count")
     total = row.get("parity_total")

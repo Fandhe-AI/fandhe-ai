@@ -143,6 +143,23 @@ def _non_integral(v):
     return float(v) != int(v)
 
 
+def _format_maybe_huge(v):
+    """指数表記フォーマット（`f"{v:.6e}"`）は桁数の大きい `int` に対し
+    内部で `float` 変換が発生し `OverflowError` になる（`summarize.py`
+    `_format_maybe_huge` と同根の問題。イシュー #1250 codex-review P2
+    指摘）。`parity_scaled_abs_bound`（および `parity_max_abs_err`／
+    `parity_max_rel_err`）は外部 JSONL 由来の任意精度 `int` になりうる
+    ため、`_is_plain_number` が受理した後の表示整形でも同じ経路で
+    集計全体を例外終了させないよう、フォーマット失敗時は `str()` へ
+    フォールバックする（fail-closed。判定不能の理由表示自体を落とさない
+    契約を守る）。
+    """
+    try:
+        return f"{v:.6e}"
+    except OverflowError:
+        return str(v)
+
+
 def load_rows(path):
     """JSONL を読み、不正な行は理由付きで報告しスキップする（A08）。"""
     rows = []
@@ -330,7 +347,8 @@ def _parity_check(r, size, framework):
         if fail_count > 0:
             return False, (
                 f"要素誤差超過（旧契約・救済なし） fail={fail_count}/{total}, "
-                f"max_abs={max_abs:.6e}, max_rel={max_rel:.6e}"
+                f"max_abs={_format_maybe_huge(max_abs)}, "
+                f"max_rel={_format_maybe_huge(max_rel)}"
             ), info
         return True, None, info
     if not all(has_new):
@@ -368,7 +386,7 @@ def _parity_check(r, size, framework):
     if rescued > 0 and bound < _checksum_contract.CHECKSUM_ABS_TOL:
         return False, (
             f"parity_scaled_abs_rescued={rescued} だが "
-            f"parity_scaled_abs_bound={bound:.6e} が絶対誤差許容値 "
+            f"parity_scaled_abs_bound={_format_maybe_huge(bound)} が絶対誤差許容値 "
             f"（{_checksum_contract.CHECKSUM_ABS_TOL:.6e}）未満で整合しない"
         ), info
 
@@ -381,8 +399,9 @@ def _parity_check(r, size, framework):
     if fail_count > 0:
         return False, (
             f"要素誤差超過（救済後もなお fail） fail={fail_count}/{total}, "
-            f"rescued={rescued}, bound={bound:.6e}, "
-            f"max_abs={max_abs:.6e}, max_rel={max_rel:.6e}"
+            f"rescued={rescued}, bound={_format_maybe_huge(bound)}, "
+            f"max_abs={_format_maybe_huge(max_abs)}, "
+            f"max_rel={_format_maybe_huge(max_rel)}"
         ), info
     return True, None, info
 
@@ -622,10 +641,18 @@ def render(path, results, device="cuda"):
                 if d["fail_count"] is not None and d["total"] is not None
                 else "?"
             )
-            abs_str = f"{d['max_abs']:.6e}" if isinstance(d["max_abs"], (int, float)) else "null"
-            rel_str = f"{d['max_rel']:.6e}" if isinstance(d["max_rel"], (int, float)) else "null"
+            abs_str = (
+                _format_maybe_huge(d["max_abs"])
+                if isinstance(d["max_abs"], (int, float))
+                else "null"
+            )
+            rel_str = (
+                _format_maybe_huge(d["max_rel"])
+                if isinstance(d["max_rel"], (int, float))
+                else "null"
+            )
             bound_str = (
-                f"{d['scaled_abs_bound']:.6e}"
+                _format_maybe_huge(d["scaled_abs_bound"])
                 if isinstance(d["scaled_abs_bound"], (int, float))
                 else "null"
             )
