@@ -662,7 +662,7 @@ load average 3.40）、jpw=2・jpw=4 とも Tier 1 条件を両実機で満た�
 `row_ranges_for_workers`（#753 専用ヘルパー）のみ個別に `#[cfg(test)]` を維持した。
 framework-compare gemm cpu before/after は両実機・全 12 セル非後退（改善方向）を確認して
 ADOPT を確定した。詳細は `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節・
-`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20 を参照。
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §21 を参照。
 
 ## §13 スコープ外（本ドキュメントで扱わない事項）
 
