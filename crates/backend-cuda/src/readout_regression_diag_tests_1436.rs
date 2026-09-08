@@ -320,7 +320,19 @@ fn run_size_arm(n: usize, arm: ReadoutArm) {
     // 検証できる基準になる（同一腕内の先頭値との比較だけでは、ある腕が
     // 一貫してゼロ・誤値を返しても自己無矛盾のため検出できない、という
     // 指摘への対応）。
-    let reference_checksum = {
+    // `reference_checksum` 用に `clone_dtoh` が確保した host `Vec` は
+    // ここでは drop しない（#1442 レビュー指摘対応）。`BorrowedKeepAlive`
+    // 腕（プロセス分離実行時は単独腕）が検証しようとしている対照条件は
+    // 「D2H 宛先 `Vec` の free が一切発生しない」状態であり、この参照
+    // checksum 計算がここで `out` を drop すると、その「同サイズの
+    // free」が glibc 動的 mmap 閾値（`M_MMAP_THRESHOLD`）を適応させ、
+    // 単独プロセス実行であっても以降の測定ループ（warmup／計測とも）が
+    // 「free 済みの定常状態」から開始してしまい、H1（オンアーム固有の
+    // free 欠如がヒープ汚染を招く）の検証がそもそも隔離できていない
+    // 対照条件になる。`reference_out` を関数末尾まで保持することで、
+    // この参照 checksum 計算自体を「D2H 宛先を確保するだけで free
+    // しない」観測対象と同じ副作用形状に揃える。
+    let (reference_checksum, reference_out) = {
         let mut c_dev = allocator
             .alloc_uninit_f32(numel)
             .expect("pooled output buffer allocation must succeed (reference run)");
@@ -344,7 +356,8 @@ fn run_size_arm(n: usize, arm: ReadoutArm) {
             .synchronize()
             .expect("stream synchronize after D2H must succeed (reference run)");
         drop(c_dev);
-        checksum_f64(&out)
+        let checksum = checksum_f64(&out);
+        (checksum, out)
     };
     assert!(
         reference_checksum.is_finite() && reference_checksum != 0.0,
@@ -425,6 +438,13 @@ fn run_size_arm(n: usize, arm: ReadoutArm) {
     print_quartiles_ms("d2h", median_of(&d2h));
     print_quartiles_ms("host_read", median_of(&host_read));
     println!("    sum of medians: {:.4} ms", total * 1e3);
+
+    // `reference_out` を明示的にここまで生かす（測定ループ全体を
+    // 通じて free させない）。コンパイラの早期 drop 最適化（NLL）に
+    // 委ねると `reference_checksum` 読み出し後の最終使用点まで生存が
+    // 縮む可能性があるため、`drop` 呼び出しをこの位置に固定して
+    // 生存区間を機構として保証する。
+    drop(reference_out);
 
     let _ = allocator.release_cached();
 }
