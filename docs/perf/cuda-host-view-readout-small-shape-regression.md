@@ -458,9 +458,15 @@ borrowed_keep_alive,pretouched_fresh_dest}`）で計測した。これにより
 - **Gate 2（既存経路の非後退）**: 全 N で `off@after / off@base ≤ 1.03`
 
 `off@base` は正式系列 `fandhe-ai =0.7.0`（registry 版。#1185 で
-2026-09-06 計測済みの既存ファイルを再利用。本イシューの変更は
-`host-view-readout` feature 無効時の `Fresh` 分岐を一切変更しないため
-同一系列として扱える）、`off@after`／`on@after` は結線後 HEAD を
+2026-09-06 計測済みの既存ファイルを再利用。`readback_with` 内の
+`Fresh` 分岐自体は本イシューで変更していないため `off@base`／
+`off@after` は出力（bit 単位）で同一系列として扱えるが、**性能面では
+両者は無条件に同一ではない**——`readback()` の既定 `ReadbackDest` は
+`host-view-readout` feature の有効・無効を問わず `PretouchedFresh` へ
+切り替わっており（`memory.rs::READBACK_DEST`）、`off@after` も
+`off@base`（旧 `Fresh` 既定）とは異なる宛先確保方式を通る。この差が
+下表 Gate 2 の N=1024/2048 での超過に寄与している可能性を §13.3 末尾で
+再評価する）、`off@after`／`on@after` は結線後 HEAD を
 `GEMM_GATE_PATCH_FACADE_PATH` で path patch し、`on@after` のみ
 `GEMM_GATE_BENCH_FANDHE_FEATURES=host-view-readout` を追加した。
 いずれも `run_gemm_gate_cuda.sh` による N=1024/2048/4096 reuse × 5 run。
@@ -477,15 +483,40 @@ borrowed_keep_alive,pretouched_fresh_dest}`）で計測した。これにより
 （0.638 倍。#1360）も維持している）。
 
 **Gate 2（自己宣言した非後退の目安。≤1.03）は N=1024/2048 でわずかに
-超過**（1.038・1.047）。ただし 5 run の生値を突き合わせると
-`off@base`（2.32〜2.58 ms）と `off@after`（2.37〜2.64 ms）のレンジは
-大きく重なっており（N=2048 も同様: base 9.51〜9.82 ms 対 after
-9.69〜10.51 ms）、系統的な後退ではなく実機計測ノイズの範囲内と判断する
-（`off@after` の実装は `Fresh` 分岐のみを通り `clone_dtoh` を byte 単位で
-変更していないため、機構的な後退要因が存在しない。Gate 2 は Gate 1
-〈受け入れ条件〉を補助する自己宣言の目安であり、受け入れ条件自体には
-含まれない）。全 6 セルとも `parity_fail_count=0`・checksum 完全一致
-（生ログ `docs/perf/logs/cuda-host-view-readout-fix-1437/`）。
+超過**（1.038・1.047）。当初の草稿では「`off@after` は `Fresh` 分岐
+限定を通るため機構的な後退要因が存在しない」としてこの超過を実機計測
+ノイズと判断していたが、これは誤りである。`readback()` の既定
+`ReadbackDest` は `host-view-readout` feature に連動せず**無条件に**
+`PretouchedFresh` へ切り替わっている（`memory.rs:575`
+`READBACK_DEST = ReadbackDest::PretouchedFresh`）。したがって
+`off@after` も `off@base`（旧 `Fresh` 既定）とは異なる宛先確保方式
+（`vec![SENTINEL; numel]` による事前フィル + `memcpy_dtoh`）を通っており、
+「後退要因が存在しない」という前提そのものが実装（`memory.rs:575` の
+無条件 `PretouchedFresh`）と矛盾していた。
+
+再評価: `PretouchedFresh` の事前フィル費用（帯域律速。N=1024 で
+4 MiB・N=2048 で 16 MiB 相当。§13.2 コメントの見積りでは概ね
+0.1〜数 ms オーダー）が `off@after` の全呼び出しに一律で乗ることは、
+N=1024/2048 で観測された 1.038・1.047 倍という小さな超過の説明として
+機構的に整合する（N=4096 では `off@after` がむしろ `off@base` を
+下回っており〈0.955〉、大形状では D2H 本体の費用が支配的でフィル費用の
+相対寄与が縮小するという同じ機構と矛盾しない）。5 run の生値レンジ
+（`off@base` 2.32〜2.58 ms 対 `off@after` 2.37〜2.64 ms・N=2048 も
+base 9.51〜9.82 ms 対 after 9.69〜10.51 ms）はなお重なっており測定
+ノイズの寄与も否定できないため、単発追加計測での寄与分離までは
+行っていないが、**「機構的な後退要因が存在しない」という当初の断定は
+撤回する**。
+
+この再評価を踏まえても ADOPT 判断自体は変更しない: 受け入れ条件
+そのものである Gate 1 は全 N で明確に通過しており（0.637〜0.897 倍。
+上表）、Gate 2 はその判断を補助する自己宣言の目安（≤1.03 は目安であり
+受け入れ条件自体には含まれない）である。N=1024/2048 の超過幅（3.78%・
+4.69%）は Gate 1 の改善幅（12〜36%）に対して小さく、`PretouchedFresh`
+自体は N=1024/2048 の主目的（後退是正）を達成しつつ他形状・他経路への
+副作用も限定的と判断する。ただし今後 `off` 経路（`host-view-readout`
+無効時）の追加最適化を検討する際は、この事前フィル費用が既に一律で
+乗っていることを前提に含める。全 6 セルとも `parity_fail_count=0`・
+checksum 完全一致（生ログ `docs/perf/logs/cuda-host-view-readout-fix-1437/`）。
 
 ### 13.4 契約テスト・既存テストの非後退
 

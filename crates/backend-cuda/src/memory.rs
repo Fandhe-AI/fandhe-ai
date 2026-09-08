@@ -630,7 +630,15 @@ pub(crate) fn pretouched_host_vec<T: ReadbackSentinel>(numel: usize) -> Vec<T> {
 /// 「同期点は D2H 境界のみ」という契約を単一箇所に集約する。
 ///
 /// 宛先確保方式は [`READBACK_DEST`]（[`ReadbackDest`]）で切り替わる
-/// （イシュー #1437）。既定は現行動作と完全同一の `Fresh`。
+/// （イシュー #1437）。既定は `PretouchedFresh` であり、`host-view-readout`
+/// feature の有効・無効に関わらず本関数の全呼び出し（`off`／`on` 両方の
+/// 経路）が同じ既定値を通る（`ReadbackDest` の選択はこの feature flag
+/// に連動しない）。返す `Vec` の内容は `Fresh` と bit 同一だが、宛先を
+/// `SENTINEL` で事前に埋めるぶんの費用が全呼び出しに一律で乗るため、
+/// `off` 経路（`host-view-readout` 無効時）の性能も本イシューの前後で
+/// 完全に不変とは限らない（実測・評価は
+/// `docs/perf/cuda-host-view-readout-small-shape-regression.md` §13.3
+/// を参照）。
 pub(crate) fn readback<T, Src>(stream: &Arc<CudaStream>, dev: &Src) -> Result<Vec<T>, CudaError>
 where
     T: ReadbackSentinel,
