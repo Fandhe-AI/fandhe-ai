@@ -233,10 +233,10 @@ snapshot() {
 # 注意（codex-review 指摘・PR #1457）: 以下 2 つの無限ループはループ本体
 # の出力を明示的にファイルへリダイレクトしているが、`( ... ) &` の
 # サブシェル自体の stdout（fd 1）はこの関数の呼び出し元
-# （`sampling_pids="$(start_during_sampling ...)"` というコマンド置換）
+# （`SAMPLING_PIDS="$(start_during_sampling ...)"` というコマンド置換）
 # のパイプ書き込み端を継承したままになる。ループが無限に回り続ける限り
 # この fd 1 は閉じられないため、コマンド置換は PID を echo した後も
-# パイプの読み取り側で EOF を待ち続け、`sampling_pids` への代入が
+# パイプの読み取り側で EOF を待ち続け、`SAMPLING_PIDS` への代入が
 # 停止していた（排他ゲート通過後もベンチ本体へ到達できない）。
 # `>/dev/null 2>&1` でサブシェル自体の fd 1/2 を明示的に切り離し
 # （ループ内部のファイルへのリダイレクトは個々のコマンドに対して
@@ -278,6 +278,24 @@ stop_during_sampling() {
     wait 2>/dev/null
 }
 
+# 実行中の監視サンプリングプロセスの PID（空白区切り）。`run_one` が
+# 設定し、正常停止後に空へ戻す。中断時は `cleanup_on_exit` が参照する。
+SAMPLING_PIDS=""
+
+# EXIT trap: 監視プロセスが残っていれば停止する（冪等。正常経路で
+# 停止済みなら `SAMPLING_PIDS` が空のため何もしない）。INT/TERM は
+# `exit` へ変換して EXIT trap を確実に経由させる（`set -e` 非使用の
+# ため、ここで exit しないと `kill` 後も残りのコマンドが続行しうる）。
+cleanup_on_exit() {
+    if [ -n "${SAMPLING_PIDS}" ]; then
+        stop_during_sampling "${SAMPLING_PIDS}"
+        SAMPLING_PIDS=""
+    fi
+}
+trap cleanup_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # 1 run を実行する。$1=run_label（例: exclusive-run1） $2...=example への引数
 run_one() {
     local run_label="$1"
@@ -294,8 +312,13 @@ run_one() {
     local out_log="${LOGDIR}/1261-${run_label}.log"
 
     snapshot "before ${run_label}" > "${LOGDIR}/1261-${run_label}-before.txt"
-    local sampling_pids
-    sampling_pids="$(start_during_sampling "${run_label}")"
+    # PID はローカル変数ではなくスクリプトレベルの `SAMPLING_PIDS` に
+    # 保持し、計測中に本スクリプトが SIGTERM/SIGINT 等で終了した場合も
+    # EXIT trap（`cleanup_on_exit`）が監視プロセスを停止できるようにする
+    # （codex-review 指摘・PR #1457: 通常経路の `stop_during_sampling`
+    # だけでは中断時に監視が残留し、再実行時の開始時クリーンアップで
+    # 削除したログを再作成して前回の監視出力が混入しうる）。
+    SAMPLING_PIDS="$(start_during_sampling "${run_label}")"
 
     # `cargo run` はビルド出力（絶対パス）を含みうるため、事前ビルド済み
     # バイナリを直接起動する（計画 §4 ステップ 10 の理由）。
@@ -303,7 +326,10 @@ run_one() {
     local exit_code=$?
     sed -E -i '' "${SANITIZE_SED}" "${out_log}"
 
-    stop_during_sampling "${sampling_pids}"
+    stop_during_sampling "${SAMPLING_PIDS}"
+    # 正常停止後は空にし、EXIT trap が同じ PID を二重に kill しない
+    # （冪等）ようにする。
+    SAMPLING_PIDS=""
     snapshot "after ${run_label}" > "${LOGDIR}/1261-${run_label}-after.txt"
 
     echo "run_label=${run_label} exit_code=${exit_code}" >> "${GATE_LOG}"
