@@ -365,7 +365,176 @@ cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --r
 - 実測値自体は共有負荷下の短時間確認のため参考記録に留め、`docs/perf/
   logs/` には残さない（正式な原因切り分け・実測記録は #1261 の担当）
 
-## 5.6 排他環境での分離計測・原因候補 (a)(b)(c) の切り分け（イシュー #1261）
+## 5.6 排他環境での phase 1 spread 分布記録（イシュー #1253）
+
+イシュー #1253 は §6（旧稿）の引き継ぎ事項「実行自体が spread へ与える影響の
+切り分け」に向けた前段として、`--phase1-only` モード（#1249/#1251）を
+排他環境（実行直前・実行中の load average < 2・他 GPU プロセスなし）で
+3 回実行し、サイズ別 spread・単発スパイクの有無を記録することを目的とする。
+`STABILITY_SPREAD_GATE` 等の判定閾値・統計量は変更していない。
+
+### attempt 1（TIMEOUT・valid_runs=0）
+
+2026-09-08 19:04〜22:04 JST の 3 時間（elapsed=10828s）、排他ゲートの
+成立を待機したが、ログ上 `gate_ok=1` の行は 1 行もなく `consecutive_ok`
+も一度も 1 以上にならないまま TIMEOUT した（`docs/perf/logs/
+metal-gemm-transpose-route-ab-1242/wait_gate.log`・`orchestrate.log`）。
+phase1-only の実測は 1 回も実行できていない。
+
+`wait_gate.log`（ポーリング 335 行）を実際に集計した結果は次のとおり
+（集計コマンドは後述。初稿の「最低でも load1 ≈ 3.3 台までしか下がらず」
+という記述は誤りだったため本節で訂正する）:
+
+| 項目 | 実測値 |
+|------|--------|
+| `gate_ok=1` の行数 | 0 / 335 |
+| `consecutive_ok` の最大値 | 0 |
+| `load1` の最小値 | 1.86（elapsed=3702s・20:06:08 JST。`load5=3.50 util=8% proc_count=7 procs=[python3,] gate_ok=0`） |
+| `load1` < 2.0 の行 | 上記と 1.92（elapsed=9396s・21:41:02 JST。`load5=3.19 util=17% proc_count=7 procs=[python3,] gate_ok=0`）の 2 行のみ |
+| `load1` < 3.0 の行数 | 38 |
+| `load5` の最小値 | 2.87（全行で 2.0 以上） |
+| `proc_count` の最小値 | 7（全行で 1 以上。`python3` が全行で検出） |
+| `util` の最小値 | 1%（全行で 1% 以上） |
+
+すなわち **load1 が一時的に 2.0 未満（1.86／1.92）へ低下した瞬間は 2 回
+あるが、いずれも `gate_ok=0` のまま記録されており**、attempt 1 のゲート
+判定条件（閾値・比較対象が load1 か load5 か・連続回数・プロセス条件の
+有無）はログからは確定できない。attempt 1 を駆動した実スクリプトは
+失われており（commit ccede10 で `wait_gate.sh`／`orchestrate.sh` を
+再構成した経緯を同コミットメッセージに明記）、ログの出力形式も再構成版と
+一致しない——attempt 1 のログには `util=` 欄があり、elapsed=9494s の行では
+`procs=[gemm_transpose_route_ab_bench,python3,]` と当該ベンチバイナリ
+自体を検出しているが、再構成版 `wait_gate.sh` は `util=` を出力せず
+`pgrep` 対象も `cargo`／`rustc`／`python3` の 3 種のみである（attempt 2 の
+`wait_gate_attempt2.log` は再構成版の形式と一致する）。したがって
+再構成版の判定条件（`GATE_THRESHOLD=2.0`・load1 比較・`CONSEC_REQUIRED=2`）
+を attempt 1 の判定条件と同一とみなす根拠はない。
+
+load1 < 2.0 の 2 行が `gate_ok=0` となった理由として、ログ上の他欄と整合
+する仮説は次の 3 つである（いずれも**推測**であり、ログからは確定できない）:
+
+- 仮説 (a): 「他 GPU プロセスなし」条件として `proc_count = 0` も
+  要求していた（全行で `proc_count >= 7`・`python3` 常駐のため不成立）。
+  イシュー本文のゲート定義（load average < 2 **かつ** 他 GPU プロセス
+  なし）とは最も整合する
+- 仮説 (b): 比較対象が load1 ではなく load5 だった（load5 の最小値は
+  2.87 で全行 2.0 以上）
+- 仮説 (c): GPU 使用率 `util = 0%` も条件だった（全行で 1% 以上）
+
+なお elapsed=9494s の行で他セッションが `gemm_transpose_route_ab_bench`
+（本 A/B ベンチのバイナリ自体）を実行していたことは、同一 GPU 上での
+計測競合が実際に生じていた直接の証跡である。
+
+集計コマンド（Python3 標準ライブラリのみ。リポジトリルートで実行）:
+
+```sh
+python3 - <<'EOF'
+import re
+L="docs/perf/logs/metal-gemm-transpose-route-ab-1242/wait_gate.log"
+P=re.compile(r"load1=([\d.]+) load5=([\d.]+) util=(\d+)% proc_count=(\d+) procs=\[([^\]]*)\] gate_ok=(\d) consecutive_ok=(\d+)")
+rows=[m.groups() for m in map(P.search, open(L)) if m]
+l1=[float(r[0]) for r in rows]; l5=[float(r[1]) for r in rows]
+print("rows",len(rows),"gate_ok=1",sum(int(r[5]) for r in rows),"max consec",max(int(r[6]) for r in rows))
+print("min load1",min(l1),"min load5",min(l5),"load1<2",sum(v<2 for v in l1),"load1<3",sum(v<3 for v in l1))
+print("min proc_count",min(int(r[3]) for r in rows),"min util",min(int(r[2]) for r in rows))
+EOF
+```
+
+### attempt 2（TIMEOUT・valid_runs=0。有限待機）
+
+attempt 1 が最大 3 時間の無限定待機で TIMEOUT したことを受け、attempt 2
+は本実装エージェントのセッション実行時間制約に合わせ待機上限を有限
+（`wait_gate.sh` の `MAX_WAIT_SECS=600`・実際の打ち切りは elapsed≈201s
+時点）に区切って再試行した。2026-09-09 00:58 JST に開始し、load average
+は 4.2〜12.6 台で推移して**一度も 2 未満へ近づく気配を示さず**、
+`gate_ok=0`（不成立）が続いた（`wait_gate_attempt2.log`）。他セッションの
+`cargo`／`rustc`／`python3` が attempt 1 と同様に検出され続けており、
+本 worktree 環境自体が複数イシューの並列実行を常時抱える構造であることを
+裏付けている。持続的な非収束トレンドを確認した時点で待機を打ち切り
+`TIMEOUT`（`DONE_TIMEOUT_ATTEMPT2`）として記録した——プログラム上の
+`MAX_WAIT_SECS` 到達を待たなかったが、判定条件・ゲート閾値そのものは
+変更していない（打ち切り理由は `orchestrate.log`・`wait_gate_attempt2.log`
+末尾に明記）。attempt 2 でも phase1-only の実測は 0 回のまま。
+
+**PR #1459 codex-review／Cursor Bugbot 指摘の是正（2026-09-09）**:
+両 attempt とも ゲート不通過（`gate_ok=0` 継続）で `cargo run` ループへ
+到達しなかったため、本記録の実測値・TIMEOUT 判定そのものへの影響はない
+が、`orchestrate.sh`／`wait_gate.sh` 自体に将来の再試行を壊す 2 件の
+不備が指摘された。(1) `orchestrate.sh` の `cargo run` が
+`gemm_transpose_route_ab_bench` の `required-features =
+["internal-diagnostics"]`（`crates/backend-metal/Cargo.toml`）を満たさず
+計測開始前に失敗しうる状態だったため、`--features internal-diagnostics`
+を明示指定した。(2) `wait_gate.sh` の `gate_ok` 判定が
+`proc_count`（cargo/rustc/python3 の有無）を記録するのみで判定式へ
+反映しておらず、load average のみで PASSED 判定していたため、
+`proc_count == 0` を必須条件へ追加した。加えて `orchestrate.sh` の
+3 回の run 実行中は排他計測契約を実行前後の静的確認・終了コードのみで
+判定していたため、run 実行中もバックグラウンドで load average・他
+GPU/build 系プロセス（自 run のプロセスツリーは除外）をポーリング監視
+し、逸脱を検出した run は終了コードに関わらず `valid_runs` から除外する
+よう変更した（`phase1_run${n}_monitor.log` に記録）。修正後スクリプトは
+`docs/perf/logs/metal-gemm-transpose-route-ab-1242/orchestrate.sh`／
+`wait_gate.sh` を正とする。
+同 PR の codex-review 五度目の指摘（P2・2 件）で、(a) `aggregate.py` が
+常にスクリプト配置元からログを読むため `LOGDIR` を変更した再試行の
+出力先を集計できない点、(b) `orchestrate.sh` の実行中監視が反復冒頭の
+自プロセスツリーのスナップショットのみで除外判定しており、スナップ
+ショット後に自 `cargo` が起動した `rustc`／ベンチ本体を他セッションと
+誤判定して `breach=1` を固定しうる点を是正した。再利用時の入出力契約は
+`LOGDIR=<出力先> bash orchestrate.sh` → `LOGDIR=<同じ出力先> python3
+aggregate.py`（第 1 引数でも可。未指定時は両者ともスクリプト配置元）で
+揃え、監視ループは `is_self_descendant`（`ps -o ppid=` で祖先を辿る）
+による列挙時点の再確認を追加した（消滅済み PID は `vanished=[...]` と
+して記録のみ・breach 根拠にしない）。
+同 PR の codex-review 六度目の指摘（P2・2 件）で、(c) 相対 `LOGDIR` が
+`orchestrate.sh` では `cd "$WORKDIR"` 後に WORKDIR 基準で解決され
+`aggregate.py`（呼び出し元 cwd 基準）と別ディレクトリを参照しうる点、
+(d) 同じ `LOGDIR` で成功 attempt の後に再試行して TIMEOUT すると過去の
+run 記録が今回の有効計測として集計されうる点を是正した。`LOGDIR` は
+`cd` 前に呼び出し元基準の絶対パスへ正規化し、run 単位の記録は
+`attempt${ATTEMPT}_phase1_run${n}.log`／`_monitor.log`・
+`attempt${ATTEMPT}_uptime_{before,after}_run${n}.txt` と attempt 別に保存
+して完了時に `DONE_ATTEMPT${ATTEMPT}`（`DONE valid_runs=N`）を書く
+（同じ `ATTEMPT` の記録が既にあれば上書きせず中止）。`aggregate.py` は
+同じ `ATTEMPT`（環境変数。既定 2）の記録のみ読み、完了記録が無い
+attempt は run 記録が残っていても有効 0 件とし、完了記録の `valid_runs`
+と集計結果の不一致は警告として明示する。再利用手順は
+`ATTEMPT=<n> LOGDIR=<出力先> bash orchestrate.sh` →
+`ATTEMPT=<n> LOGDIR=<出力先> python3 aggregate.py`。
+同 PR の codex-review 七度目の指摘（P2）で、`pgrep` の終了コードを見ず
+出力件数のみで判定していたため取得失敗（終了コード 2 以上）が「該当
+なし」と同一視されていた点を是正した。`gate_common.sh` の
+`pgrep_or_fail`（0／1 正常・2 以上失敗）を両スクリプトで共有し、
+`wait_gate.sh` は `proc_error=1` で `gate_ok=0`（不成立）、
+`orchestrate.sh` の実行中監視は `UNDETERMINED`（BREACH と区別）を記録
+して当該 run を `valid_runs` から除外し、`aggregate.py` も同 run を
+「プロセス一覧取得失敗・判定不能」として除外する。
+同 PR の codex-review 八度目の指摘（P2・2 件）で、`uptime` の失敗・非
+数値出力時に `load1` が空のまま awk `l<t` が真になる点、`is_self_descendant`
+が `ps` の取得失敗を消滅と同一視する点を是正した。`gate_common.sh` の
+`read_load_or_fail`（終了コード・数値形式を検証）を両スクリプトで共有し、
+待機側は `load_error=1` で不成立、監視側は `UNDETERMINED`。祖先探索は
+`ps -p` の終了コード 1（該当なし）のみを消滅（戻り値 2）とし、それ以外の
+失敗は戻り値 3 → `enum_error=1` → `UNDETERMINED`（run 除外）とする。
+
+### 結論（本イシューでの到達点）
+
+**排他環境（load average < 2・他 GPU プロセスなし）の確保に 2 回とも
+失敗し、phase1-only の実測（サイズ別 spread・単発スパイクの記録）は
+1 件も取得できていない。** 本イシューが動作した worktree 環境自体が、
+複数イシューの並列実行セッション（他 worktree の cargo ビルド・python3
+集計スクリプト）を常時抱える共有環境であり、attempt 1（3 時間待機）・
+attempt 2（有界待機）のいずれも load average が 2 未満へ収束しなかった。
+`STABILITY_SPREAD_GATE`・統計量は変更していない。
+
+実装計画の fail-closed 方針（#1187／#1284 の前例と同様）に従い、
+本ドキュメントでは AC1／AC2（3 回分の実測ログ・表化）を**未達のまま**
+記録する。ゲート閾値を緩めて排他条件を弱めることは行わない——排他環境
+での再試行は、他イシューの並列実行が実際に止まる時間帯（`docs/
+real-hardware-verification-env.md` の実機予約運用）を確保したうえで
+改めて行う必要がある。
+
+## 5.7 排他環境での分離計測・原因候補 (a)(b)(c) の切り分け（イシュー #1261）
 
 §5.5 が追加した `--gpu-timestamps` 分離計測モードを用い、排他環境
 （load average < 2.0・他 GPU プロセスなし）で正式な原因切り分け計測を
@@ -482,7 +651,6 @@ cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --r
   待つのではなく、共有負荷下でも解釈可能な統計手法（#1266）や、
   低負荷時間帯を検出して自動的にリトライするスケジューリング（#1265）
   の優先度を上げて設計することを推奨する
-
 ## 6. 引き継ぎ事項
 
 - **`gemm_transpose_route_ab_bench.rs` によるフェーズ 2 A/B 本計測の
@@ -504,11 +672,25 @@ cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --r
 - `examples/gemm_transpose_tile_sweep.rs` の NT/TN/TT tiled 候補計測
   （タイル variant 別のスイープ。現状は classic strided 固定候補のみ）
   は引き続きスコープ外。
+- **排他環境での phase 1 spread 分布記録（§5.6・イシュー #1253）の再試行**:
+  2 回とも load average < 2 のゲートに到達できず TIMEOUT した。本 worktree
+  環境が複数イシューの並列実行セッションを常時抱える構造上の制約であり、
+  他イシューの並走が実際に止まる時間帯を確保しない限り再現性のある排他
+  計測は困難である。なお `docs/perf/logs/
+  metal-gemm-transpose-route-ab-1242/orchestrate.sh`／`wait_gate.sh` は
+  attempt 1 の実行後に再構成したもの（attempt 2 で使用）であり、attempt 1
+  の判定条件を再現する保証はない（§5.6 attempt 1 節: attempt 1 のログは
+  load1 < 2.0 の行でも `gate_ok=0` であり、出力形式も再構成版と一致しない）。
+  再試行時は再構成版をそのまま流用してよいが、実際に用いた判定条件
+  （`GATE_THRESHOLD`・比較対象〈load1〉・`CONSEC_REQUIRED`・プロセス条件
+  〈`pgrep` 対象と `proc_count` の扱い〉・`MAX_WAIT_SECS`）を `env_info.txt`
+  と本ドキュメントへ明示して記録し、attempt 1 と同一条件であるとは
+  記述しないこと。
 - **#1261（排他環境での分離計測）は「排他環境ゲートが 30 回試行すべて
   不通過」という結果に終わり、分離計測データ自体が得られなかった
-  （§5.6）。フェーズ 2 A/B 本計測の再実行に必要な「他プロセスが一切
+  （§5.7）。フェーズ 2 A/B 本計測の再実行に必要な「他プロセスが一切
   並走しない時間帯」は、本リポジトリの並列ワークフロー運用下では
   実質的に確保が困難であることが 30 分間の実測で裏付けられた。
-  §5.6「Phase 2 への反映事項」で #1263〜#1266 への引き継ぎ事項を整理
+  §5.7「Phase 2 への反映事項」で #1263〜#1266 への引き継ぎ事項を整理
   済み——とくに #1266（共有負荷下でも解釈可能なロバスト統計）の優先度
   を上げることを推奨する。

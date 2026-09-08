@@ -1,0 +1,48 @@
+イシュー #1253: 排他環境（load average < 2・他 GPU プロセスなし）での
+phase 1（安定性セルフチェック）3 回実行。ゲート閾値・統計量は変更していない
+（`STABILITY_SPREAD_GATE` は `crates/bench-harness/src/ab.rs` が単一真実源）。
+
+機種・OS: Apple M4 Max・macOS 26.6.2（`sw_vers`／`sysctl -n
+machdep.cpu.brand_string` 実測。内部ホスト名は含めない）
+
+ゲート条件（本イシュー固有。緩めていない）:
+- 実行直前・実行中の 1 分 load average < 2.0 が連続で成立（`wait_gate.sh`
+  の GATE_THRESHOLD=2.0。CONSEC_REQUIRED は既定 2・attempt 2 実行時は
+  やや厳しめの 3 を指定。いずれも「< 2」というゲート閾値自体は変更して
+  いない。この記述は再構成版 wait_gate.sh〈attempt 2 で使用〉のもので、
+  attempt 1 の判定条件と同一である保証はない）
+- 他 GPU プロセスなし（簡易代理指標として cargo／rustc／python3 の有無を
+  `pgrep` で確認・記録。実際の GPU 使用有無は各 run 前後の `ps` 生ログで
+  人間が確認する前提）
+
+attempt 1（2026-09-08 19:04〜22:04 JST・最大 3 時間待機）:
+`wait_gate.log`（335 行）の集計では load1 の最小値は 1.86（elapsed=3702s）・
+次点 1.92（elapsed=9396s）で、この 2 行は 2.0 未満だが gate_ok=0 のまま
+記録されている（gate_ok=1 は 0 行・consecutive_ok の最大値 0・load5 の
+最小値 2.87・proc_count の最小値 7〈python3 が全行で検出〉・util の最小値
+1%）。attempt 1 を駆動した実スクリプトは失われており（本ディレクトリの
+wait_gate.sh／orchestrate.sh は attempt 1 後に再構成したもの。ログの
+util= 欄・gemm_transpose_route_ab_bench の検出は再構成版には無い）、
+attempt 1 の判定条件（閾値・load1/load5 のどちらか・連続回数・プロセス
+条件）はログからは確定できない。他セッションの cargo／python3／rustc が
+終始検出され続けたため TIMEOUT（`orchestrate.log` 冒頭を参照）。
+phase1-only 実測 0 件。集計コマンドは
+`docs/perf/metal-gemm-transpose-tiled.md` §5.6 attempt 1 節を参照。
+
+attempt 2（2026-09-09 00:58 JST 開始・有界待機。詳細は
+`wait_gate_attempt2.log`・`orchestrate.log` の attempt2 節を参照）:
+attempt 1 と同一の背景（本 worktree 環境自体が複数イシューの並列実行
+セッションを常時抱えているため、cargo／rustc／python3 が恒常的に稼働
+する共有環境）で再試行した。待機上限を `MAX_WAIT_SECS=600`（10 分）に
+区切ったが、load average が 4.2〜12.6 台で推移して収束の兆しが一度も
+なかったため、実装エージェントのセッション実行時間制約下で elapsed≈201s
+時点で待機を打ち切り TIMEOUT として記録した（プログラム上の
+MAX_WAIT_SECS 到達を待たなかった旨・打ち切り理由は
+`wait_gate_attempt2.log`・`orchestrate.log` 末尾に明記。ゲート閾値
+自体は変更していない）。`docs/perf/metal-gemm-transpose-tiled.md` §5.6
+が #1187／#1284 の前例（低負荷開始でも gate 超過・判定不可のまま
+undetermined として記録）に倣って結果を記録する方針を踏襲した。
+
+備考: 本エージェント自身（このセッション）も cargo/rustc を保有しない
+（Bash ツールで uptime／pgrep のみ実行）ため、procs= に現れる
+cargo/python3/rustc は他セッション由来である。

@@ -1,0 +1,12 @@
+2026-09-09T00:58:08+0900 elapsed=0s load1=5.65 load5=5.66 proc_count=8 procs=[cargo,python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T00:58:28+0900 elapsed=20s load1=5.70 load5=5.66 proc_count=8 procs=[cargo,python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T00:58:48+0900 elapsed=40s load1=5.64 load5=5.66 proc_count=7 procs=[python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T00:59:08+0900 elapsed=60s load1=4.67 load5=5.44 proc_count=7 procs=[python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T00:59:28+0900 elapsed=80s load1=4.21 load5=5.28 proc_count=7 procs=[python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T00:59:48+0900 elapsed=100s load1=5.65 load5=5.51 proc_count=10 procs=[cargo,rustc,python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T01:00:08+0900 elapsed=120s load1=5.09 load5=5.40 proc_count=24 procs=[cargo,rustc,python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T01:00:28+0900 elapsed=140s load1=12.62 load5=7.24 proc_count=8 procs=[cargo,python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T01:00:49+0900 elapsed=161s load1=12.46 load5=7.53 proc_count=8 procs=[cargo,python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T01:01:09+0900 elapsed=181s load1=9.91 load5=7.26 proc_count=10 procs=[cargo,rustc,python3,] gate_ok=0 consecutive_ok=0
+2026-09-09T01:01:29+0900 elapsed=201s load1=8.26 load5=7.10 proc_count=9 procs=[cargo,python3,] gate_ok=0 consecutive_ok=0
+MANUAL_STOP at 2026-09-09T01:02:05+0900 (elapsed=~201s of MAX_WAIT_SECS=600) -- session time constraint
