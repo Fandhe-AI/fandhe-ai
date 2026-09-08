@@ -35,6 +35,21 @@ PR #1459 codex-review 再指摘の是正（イシュー #1253・P2）: 上記の
 `parse_breach_status` へ置き換え、`missing`（監視ログ不在・空）の run も
 `valid_run_ids` から除外したうえで、`breach` と区別して「監視記録なし・
 判定不能」として明示する（除外理由を混同させない）。
+
+PR #1459 codex-review 三度目・Cursor Bugbot 指摘の是正（イシュー #1253）:
+`valid_run_ids` は監視ログ（`phase1_run{n}_monitor.log`）の BREACH 有無
+のみで決まり、`orchestrate.sh` 側が確認している run 自体の終了コード
+（`uptime_after_run{n}.txt` の `rc=`）・全サイズ計測完了（`phase1_run{n}.log`
+に 5 サイズすべての `phase1_round_stats` 行が揃っているか）を一切参照して
+いなかった。監視ループで一度 `ok`（BREACH なし）を記録した後に、cargo の
+ビルド失敗・実行時クラッシュ・計測の途中中断が起きても、この不整合を
+検出できず有効件数の分母・成立回数へ混入する（`orchestrate.sh` 側は
+`RC -eq 0 && breach -eq 0` を要求しており両者は不整合だった）。本版は
+`parse_exit_code`（`uptime_after_run{n}.txt` の `rc=` を読む）を追加し、
+`classify_run` で breach／missing／rc 非 0・不明／サイズ欠落／ok の優先順位
+で 1 run を分類する。`valid_run_ids` は「ok」（監視記録あり・BREACH なし・
+rc=0・5 サイズ全計測済み）の run のみとし、それ以外は理由別に除外して
+表の直前に明示する。
 """
 from __future__ import annotations
 
@@ -133,25 +148,102 @@ def parse_breach_status(path: Path) -> str:
     return "ok"
 
 
+EXIT_CODE_RE = re.compile(r"rc=(-?\d+)")
+
+
+def parse_exit_code(path: Path) -> int | None:
+    """1 run の uptime_after_run{N}.txt から post-check 時点のベンチ終了コード
+    （`orchestrate.sh` が書く「=== run${n} post-check ... rc=${RC} ===」行）
+    を読む。
+
+    PR #1459 codex-review 三度目・Cursor Bugbot 指摘の是正（イシュー
+    #1253）: 監視ログ（`phase1_run{N}_monitor.log`）が BREACH を含まなく
+    ても、ベンチ自体が非 0 終了（`cargo run` の required-features エラー・
+    クラッシュ等）した run は排他条件不成立の run と同様に不完全な計測で
+    あり、有効な計測と区別する必要がある。`orchestrate.sh` 側は
+    `RC -eq 0 && breach -eq 0` を要求しており、集計側もこれと整合させる。
+
+    戻り値: パースできた終了コード（int）。ファイル不在・`rc=` 未検出
+    （判定不能）の場合は None。
+    """
+    if not path.exists():
+        return None
+    text = path.read_text()
+    m = EXIT_CODE_RE.search(text)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def classify_run(
+    breach: str, exit_code: int | None, measured_sizes: int, total_sizes: int
+) -> str:
+    """1 run の有効性を「breach」「missing」「rc_unknown」「rc_nonzero」
+    「incomplete」「ok」の 6 値へ分類する（優先順位はこの列挙順）。
+
+    PR #1459 codex-review 三度目・Cursor Bugbot 指摘の是正（イシュー
+    #1253）: 従来は `breach_status`（BREACH 行の有無）のみで「有効」を
+    判定しており、監視ループで一度 `ok` を記録した後に run 自体が失敗・
+    中断したケースを検出できなかった。本関数は監視結果に加えて
+    `orchestrate.sh` の終了コード記録（`uptime_after_run{N}.txt` の
+    `rc=`）・`phase1_run{N}.log` に 5 サイズ全ての `phase1_round_stats`
+    行が揃っているか（途中中断の検出）も合わせて判定する。
+
+    - "breach": 監視ログに BREACH 行あり（排他条件違反を検出済み）。
+    - "missing": 監視ログ不在・空（排他条件成立を一度も確認できていない）。
+    - "rc_unknown": `uptime_after_run{N}.txt` が不在、または `rc=` を
+      読み取れない（終了コードが判定不能）。
+    - "rc_nonzero": ベンチの終了コードが非 0（ビルド失敗・クラッシュ等）。
+    - "incomplete": 終了コード 0 だが `phase1_run{N}.log` に 5 サイズ全て
+      の `phase1_round_stats` 行が揃っていない（途中中断）。
+    - "ok": 監視記録あり・BREACH なし・rc=0・5 サイズ全計測済み（有効）。
+    """
+    if breach == "breach":
+        return "breach"
+    if breach == "missing":
+        return "missing"
+    if exit_code is None:
+        return "rc_unknown"
+    if exit_code != 0:
+        return "rc_nonzero"
+    if measured_sizes != total_sizes:
+        return "incomplete"
+    return "ok"
+
+
 def main() -> None:
     runs_data: dict[int, dict[int, dict]] = {}
     loads_before: dict[int, str] = {}
     breach_status: dict[int, str] = {}
+    exit_codes: dict[int, int | None] = {}
+    run_class: dict[int, str] = {}
     for n in RUNS:
         runs_data[n] = parse_run_log(HERE / f"phase1_run{n}.log")
         loads_before[n] = parse_load_before(HERE / f"uptime_before_run{n}.txt")
         breach_status[n] = parse_breach_status(HERE / f"phase1_run{n}_monitor.log")
+        exit_codes[n] = parse_exit_code(HERE / f"uptime_after_run{n}.txt")
+        run_class[n] = classify_run(
+            breach_status[n], exit_codes[n], len(runs_data[n]), len(SIZES)
+        )
 
-    # BREACH が記録された run、および監視記録が存在しない／空の run（排他
-    # 条件成立を一度も確認できていない「判定不能」）はいずれも「排他条件
-    # 不成立」として全表（A/B/C）から除外する。除外した run 番号・理由は
-    # 表出力の直前に明示する（PR #1459 codex-review 再指摘の是正。
-    # イシュー #1253・P2。監視記録なしの run を有効な計測と同列に集計し
-    # ない）。
-    valid_run_ids = [n for n in RUNS if breach_status[n] == "ok"]
-    excluded_breach_ids = [n for n in RUNS if breach_status[n] == "breach"]
-    excluded_missing_ids = [n for n in RUNS if breach_status[n] == "missing"]
-    excluded_run_ids = sorted(excluded_breach_ids + excluded_missing_ids)
+    # BREACH・監視記録なし・終了コード判定不能／非 0・サイズ欠落（途中中断）
+    # のいずれかに該当する run は「排他条件不成立、または計測が不完全」と
+    # して全表（A/B/C）から除外する。除外した run 番号・理由は表出力の
+    # 直前に明示する（PR #1459 codex-review 三度目・Cursor Bugbot 指摘の
+    # 是正。イシュー #1253。`classify_run` の分類を参照）。
+    valid_run_ids = [n for n in RUNS if run_class[n] == "ok"]
+    excluded_breach_ids = [n for n in RUNS if run_class[n] == "breach"]
+    excluded_missing_ids = [n for n in RUNS if run_class[n] == "missing"]
+    excluded_rc_unknown_ids = [n for n in RUNS if run_class[n] == "rc_unknown"]
+    excluded_rc_nonzero_ids = [n for n in RUNS if run_class[n] == "rc_nonzero"]
+    excluded_incomplete_ids = [n for n in RUNS if run_class[n] == "incomplete"]
+    excluded_run_ids = sorted(
+        excluded_breach_ids
+        + excluded_missing_ids
+        + excluded_rc_unknown_ids
+        + excluded_rc_nonzero_ids
+        + excluded_incomplete_ids
+    )
 
     lines: list[str] = []
     if excluded_breach_ids:
@@ -169,6 +261,33 @@ def main() -> None:
             "確認できない「判定不能」として以下の表から除外した"
             "（BREACH とは区別する。計測・監視の記録が揃い正常完了を確認できた"
             "run のみ有効とする）。\n"
+        )
+    if excluded_rc_unknown_ids:
+        excluded_label = "、".join(f"run{n}" for n in excluded_rc_unknown_ids)
+        lines.append(
+            f"**注意**: {excluded_label} は `uptime_after_run${{n}}.txt` が"
+            "存在しない、または `rc=` を読み取れないため、ベンチの終了コードを"
+            "確認できない「判定不能」として以下の表から除外した"
+            "（PR #1459 codex-review 三度目・Cursor Bugbot 指摘の是正）。\n"
+        )
+    if excluded_rc_nonzero_ids:
+        excluded_label = "、".join(f"run{n}" for n in excluded_rc_nonzero_ids)
+        lines.append(
+            f"**注意**: {excluded_label} はベンチの終了コードが非 0"
+            "（`uptime_after_run${n}.txt` の `rc=` 参照。ビルド失敗・実行時"
+            "クラッシュ等）だったため、監視ログに BREACH がなくても以下の表"
+            "から除外した（`orchestrate.sh` の `RC -eq 0 && breach -eq 0` と"
+            "整合させるため。PR #1459 codex-review 三度目・Cursor Bugbot 指摘"
+            "の是正）。\n"
+        )
+    if excluded_incomplete_ids:
+        excluded_label = "、".join(f"run{n}" for n in excluded_incomplete_ids)
+        lines.append(
+            f"**注意**: {excluded_label} は終了コード 0 だが "
+            f"`phase1_run${{n}}.log` に {len(SIZES)} サイズ全ての "
+            "`phase1_round_stats` 行が揃っておらず、計測が途中で中断した"
+            "とみなし以下の表から除外した"
+            "（PR #1459 codex-review 三度目・Cursor Bugbot 指摘の是正）。\n"
         )
 
     lines.append("### 表 A: run × size の spread・ゲート判定\n")
@@ -208,6 +327,15 @@ def main() -> None:
         lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（BREACH） | - |")
     for n in excluded_missing_ids:
         lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（監視記録なし・判定不能） | - |")
+    for n in excluded_rc_unknown_ids:
+        lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（終了コード判定不能） | - |")
+    for n in excluded_rc_nonzero_ids:
+        lines.append(
+            f"| run{n} | {loads_before.get(n, 'N/A')} | "
+            f"EXCLUDED（rc={exit_codes.get(n)}） | - |"
+        )
+    for n in excluded_incomplete_ids:
+        lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（計測途中中断） | - |")
 
     lines.append("")
     lines.append(f"| size | gate 成立回数 (/{len(valid_run_ids)}) |")

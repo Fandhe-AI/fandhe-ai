@@ -45,6 +45,19 @@
 # `gate_common.sh`（wait_gate.sh と共有する単一定義）を source して
 # GATE_THRESHOLD を得て、実行中監視ループでもそのまま同名で使う
 # （MONITOR_GATE_THRESHOLD は廃止）。
+#
+# PR #1459 codex-review 四度目の指摘の是正（イシュー #1253・P2）:
+# `wait_gate.sh` の起動元を `$LOGDIR/wait_gate.sh` としていたため、再利用時
+# に `LOGDIR` を本ディレクトリ以外（既存記録と分けた出力用ディレクトリ等）
+# へ変更すると、その出力先ディレクトリ配下に存在しない `wait_gate.sh` を
+# 探して `bash` が「No such file or directory」で失敗する。`LOGDIR` は
+# `wait_gate.sh`（`OUT`／`GATE_LOG` の書き出し先）に渡す出力先引数であり、
+# スクリプト自体の配置元とは独立であるべきなので、起動元は常に
+# `SELF_DIR/wait_gate.sh` に固定する。また従来は `bash ...` の終了コードを
+# 見ずに標準出力（`GATE_RESULT`）のみで分岐していたため、上記のような
+# 起動失敗（空の標準出力）も「ゲート待ちの TIMEOUT」と誤記録されていた。
+# 本版は起動コマンドの終了コード（`GATE_RC`）を別途保持し、非 0（起動
+# 失敗）と `TIMEOUT`（正常起動した上でのゲート不成立）を区別して記録する。
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,9 +76,24 @@ cd "$WORKDIR" || { echo "エラー: WORKDIR='$WORKDIR' への移動に失敗し�
 echo "$(date +"%Y-%m-%dT%H:%M:%S%z") orchestrator attempt${ATTEMPT} start" >> "$LOGDIR/orchestrate.log"
 echo "$(date +"%Y-%m-%dT%H:%M:%S%z") attempt ${ATTEMPT}: waiting for gate (see $(basename "$GATE_LOG"))" >> "$LOGDIR/orchestrate.log"
 
-GATE_RESULT=$(LOGDIR="$LOGDIR" OUT="$GATE_LOG" GATE_THRESHOLD="$GATE_THRESHOLD" bash "$LOGDIR/wait_gate.sh")
+# wait_gate.sh は常に SELF_DIR（本スクリプトの配置元）から起動する。LOGDIR
+# は出力先引数として渡すのみで、起動元の探索には使わない（LOGDIR を出力用
+# ディレクトリへ変更した再利用時に「No such file or directory」で失敗する
+# のを防ぐ。PR #1459 codex-review 四度目の指摘の是正）。
+GATE_RESULT=$(LOGDIR="$LOGDIR" OUT="$GATE_LOG" GATE_THRESHOLD="$GATE_THRESHOLD" bash "$SELF_DIR/wait_gate.sh")
+GATE_RC=$?
 
-echo "$(date +"%Y-%m-%dT%H:%M:%S%z") attempt ${ATTEMPT}: gate result=${GATE_RESULT}" >> "$LOGDIR/orchestrate.log"
+echo "$(date +"%Y-%m-%dT%H:%M:%S%z") attempt ${ATTEMPT}: gate result=${GATE_RESULT} rc=${GATE_RC}" >> "$LOGDIR/orchestrate.log"
+
+# 起動コマンド自体の失敗（GATE_RC != 0。スクリプト不在・source 失敗等）は
+# 正常に起動したうえでのゲート不成立（TIMEOUT）とは異なる事象であり、
+# 混同すると「ゲート待ちを試みたが不成立だった」と誤解される。両者を
+# 区別して記録する（PR #1459 codex-review 四度目の指摘の是正）。
+if [ "$GATE_RC" -ne 0 ]; then
+  echo "ORCHESTRATOR_RESULT=GATE_LAUNCH_ERROR valid_runs=0 attempt=${ATTEMPT} rc=${GATE_RC}" >> "$LOGDIR/orchestrate.log"
+  echo "GATE_LAUNCH_ERROR rc=${GATE_RC}" > "$LOGDIR/DONE_GATE_LAUNCH_ERROR_ATTEMPT${ATTEMPT}"
+  exit 1
+fi
 
 if [ "$GATE_RESULT" != "PASSED" ]; then
   echo "ORCHESTRATOR_RESULT=TIMEOUT valid_runs=0 attempt=${ATTEMPT}" >> "$LOGDIR/orchestrate.log"
