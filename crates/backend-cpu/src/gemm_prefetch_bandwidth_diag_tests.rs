@@ -219,10 +219,18 @@ fn measure_kernel_throughput(
     total_flops / elapsed / 1e9
 }
 
-/// 単スレッド・全コア同時の 2 条件で `measure_kernel_throughput` を
+/// 単スレッド・全コア同時の 2 条件で `measure_kernel_throughput` 相当を
 /// 実行する。全コア条件は各スレッドが**独立**な panel 列を持つ
 /// （キャッシュライン共有によるスキューを避けるため。§2 事前宣言
 /// ゲートの「各スレッドが独立バッファを走査」に対応）。
+///
+/// 全コア条件は [`measure_kernel_throughput_multi_synced`] を使い、
+/// 全スレッドのバッファ準備・warmup 完了後にのみ計測区間を開始する
+/// （codex-review 指摘対応。各タスクが独立に計時を開始し GFLOP/s を
+/// 単純合算すると、`streamed_dram` の約 256 MiB 確保・初期化が他タスク
+/// の計測区間と重なり、`l1_resident` には無いメモリ負荷が混入して
+/// 「全コア同時」のスループットにならない。イシュー #1319 codex-review
+/// 指摘）。
 fn measure_kernel_throughput_both_modes(
     kernel: NeonKernel,
     make_panel_pairs: impl Fn(u32) -> Vec<(Vec<f32>, Vec<f32>)> + Sync,
@@ -242,32 +250,66 @@ fn measure_kernel_throughput_both_modes(
     // 経由で本番と同じフォールバック（`BIG_CORE_LIMIT_ENABLED=false`
     // 時は `rayon::current_num_threads()` をそのまま使う）を踏襲する。
     let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
-    let per_thread: Vec<f64> = (0..num_threads).collect::<Vec<_>>().par_iter_map(|&t| {
-        let pairs = make_panel_pairs(1000 + t as u32);
-        measure_kernel_throughput(kernel, &pairs, iters)
-    });
-    let multi = per_thread.iter().sum::<f64>();
+    let multi =
+        measure_kernel_throughput_multi_synced(kernel, &make_panel_pairs, iters, num_threads);
     (single, multi)
 }
 
-/// `.par_iter().map(...).collect()` の薄いラッパー（rayon 依存を
-/// 局所化する目的の最小限のヘルパー。トレイト名は診断専用）。
-trait ParIterMap<T> {
-    fn par_iter_map<F, R>(&self, f: F) -> Vec<R>
-    where
-        F: Fn(&T) -> R + Sync + Send,
-        R: Send;
-}
+/// 全コア同時条件の計測（`measure_kernel_throughput_both_modes` から
+/// 分離。codex-review 指摘対応: 各スレッドの (1) panel 列準備・
+/// (2) warmup を計測対象外の同期フェーズで完了させたうえで、
+/// (3) 計測本体（全スレッド共通の壁時計時間）のみを計時する。
+/// `streamed_dram` の ~256 MiB バッファ確保・初期化は (1) の中で
+/// 行われるため、他スレッドの (3) 計測区間へメモリ負荷として
+/// 混入しない。総スループットは「全スレッドの総 FLOP 数 ÷ 共通
+/// 経過時間」で算出する（各スレッドの GFLOP/s を単純合算しない）。
+fn measure_kernel_throughput_multi_synced(
+    kernel: NeonKernel,
+    make_panel_pairs: &(impl Fn(u32) -> Vec<(Vec<f32>, Vec<f32>)> + Sync),
+    iters: usize,
+    num_threads: usize,
+) -> f64 {
+    use rayon::prelude::*;
 
-impl<T: Sync> ParIterMap<T> for Vec<T> {
-    fn par_iter_map<F, R>(&self, f: F) -> Vec<R>
-    where
-        F: Fn(&T) -> R + Sync + Send,
-        R: Send,
-    {
-        use rayon::prelude::*;
-        self.par_iter().map(f).collect()
-    }
+    let warmup = (iters / 10).max(4);
+
+    // フェーズ (1)+(2): panel 列準備・warmup を計測対象外で並列実行する。
+    // `into_par_iter` はタスク間で完了待ちを行わないため、ここで
+    // 生成した `Vec` を後段の `collect()` が全タスク完了まで
+    // ブロックすることが同期点として機能する（暗黙のバリア）。
+    let mut prepared: Vec<(Vec<(Vec<f32>, Vec<f32>)>, usize, Vec<f32>)> = (0..num_threads)
+        .into_par_iter()
+        .map(|t| {
+            let pairs = make_panel_pairs(1000 + t as u32);
+            let kc_len = pairs[0].0.len() / MR;
+            let mut c_tile = vec![0.0f32; MR * NR];
+            for i in 0..warmup {
+                let (ap, bp) = &pairs[i % pairs.len()];
+                run_once(kernel, ap, bp, &mut c_tile, kc_len);
+            }
+            (pairs, kc_len, c_tile)
+        })
+        .collect();
+
+    // フェーズ (3): 全スレッド共通の計測区間。準備・warmup が全スレッド
+    // で完了した後にのみ開始する（上記 `collect()` の同期後）。
+    let start = std::time::Instant::now();
+    prepared.par_iter_mut().for_each(|(pairs, kc_len, c_tile)| {
+        for i in 0..iters {
+            let (ap, bp) = &pairs[i % pairs.len()];
+            run_once(kernel, ap, bp, c_tile, *kc_len);
+        }
+        // c_tile を読み出しコンパイラによる最適化除去を防ぐ（黒箱化）。
+        std::hint::black_box(&*c_tile);
+    });
+    let elapsed = start.elapsed().as_secs_f64();
+
+    let flops_per_call = 2.0 * (MR as f64) * (NR as f64);
+    let total_flops: f64 = prepared
+        .iter()
+        .map(|(_, kc_len, _)| flops_per_call * (*kc_len as f64) * (iters as f64))
+        .sum();
+    total_flops / elapsed / 1e9
 }
 
 /// 総トラフィック量から生成する panel 列の要素数を決める。

@@ -5,3 +5,9 @@ Apple M4 Max
 rustc 1.96.0 (ac68faa20 2026-05-25)
  9:43  up 19 days, 20:56, 19 users, load averages: 3.06 2.90 3.14
  9:44  up 19 days, 20:56, 19 users, load averages: 13.12 5.08 3.90
+
+## 再計測（codex-review #1319 P2 指摘対応。measure_kernel_throughput_multi_synced 導入後）
+2026年 9月 8日 火曜日 01時14分14秒 UTC
+Apple M4 Max
+rustc 1.96.0 (ac68faa20 2026-05-25)
+10:14  up 19 days, 21:26, 19 users, load averages: 40.23 23.25 13.86

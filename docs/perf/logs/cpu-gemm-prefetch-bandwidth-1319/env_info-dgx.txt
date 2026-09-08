@@ -8,3 +8,13 @@ NUMA ノード 0 CPU:                   0-19
 20
 rustc 1.97.0 (2d8144b78 2026-07-07)
  09:48:40 up 11 days, 21:15,  5 users,  load average: 1.42, 0.80, 0.31
+
+## 再計測（codex-review #1319 P2 指摘対応。measure_kernel_throughput_multi_synced 導入後）
+2026年  9月  8日 火曜日 01:14:20 UTC
+アーキテクチャ:                      aarch64
+CPU:                                 20
+モデル名:                            Cortex-X925
+モデル名:                            Cortex-A725
+ 10:14:20 up 11 days, 21:41,  5 users,  load average: 0.46, 0.34, 0.18
+427276, /opt/llm-infra/comfyui-env/bin/python, 170 MiB
+1241474, /opt/llm-infra/venvs/kokoro/bin/python3, 870 MiB

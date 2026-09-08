@@ -3,9 +3,15 @@
 
 `resid-<machine>[-bigpin]-run{1..5}.txt`（`microkernel_residency_diag`
 の出力）から `mode=<name> threads=<single|multi> median_gflops=<f64>`
-行を正規表現で読み、l1_resident / streamed_dram の中央値比
-`R_dram = streamed_dram / l1_resident` を run ごとに算出したうえで
-5 run 中央値・ペアワイズ勝ち数（<=0.95 を満たす run 数）を出す。
+行を正規表現で読み、事前宣言ゲート（`gemm_prefetch_bandwidth_diag_tests.rs`
+モジュール doc・`cpu-gemm-prefetch-decision.md`）が定義する代表値
+`R_dram = streamed_dram の中央値 GFLOP/s / l1_resident の中央値 GFLOP/s`
+を「l1_resident の 5 run 中央値」と「streamed_dram の 5 run 中央値」の
+比として算出する（run ごとの比の中央値ではない。中央値を取る演算と
+除算は可換ではないため両者は一般に一致しない。codex-review 指摘対応・
+イシュー #1319）。5 run 中 3 run 以上で `R_dram <= 0.95` を満たすかの
+判定（事前宣言ゲートの併記条件）には、別途 run ごとの比（同一 run 内の
+streamed_dram / l1_resident）を用いる。
 サンプル数が 5 でなければ非ゼロ終了する（fail-closed。実測値の
 欠落・捏造を機械的に防ぐ）。
 
@@ -48,30 +54,58 @@ def load_runs(pattern: str, expected: int = 5) -> list[dict[tuple[str, str], flo
     return [parse_file(p) for p in paths]
 
 
-def r_dram_series(runs: list[dict[tuple[str, str], float]], threads: str) -> list[float]:
-    out = []
+def l1_dram_values(
+    runs: list[dict[tuple[str, str], float]], threads: str
+) -> tuple[list[float], list[float]]:
+    """(l1_resident 値の列, streamed_dram 値の列) を run 順に返す。"""
+    l1_vals: list[float] = []
+    dram_vals: list[float] = []
     for r in runs:
         l1 = r.get(("l1_resident", threads))
         dram = r.get(("streamed_dram", threads))
         if l1 is None or dram is None:
             print(f"FATAL: l1_resident/streamed_dram (threads={threads}) が欠落", file=sys.stderr)
             sys.exit(1)
-        out.append(dram / l1)
-    return out
+        l1_vals.append(l1)
+        dram_vals.append(dram)
+    return l1_vals, dram_vals
+
+
+def r_dram_per_run_series(l1_vals: list[float], dram_vals: list[float]) -> list[float]:
+    """run ごとの比（同一 run 内の streamed_dram / l1_resident）。
+    事前宣言ゲートの「5 run 中 3 run 以上で `R_dram <= 0.95`」判定にのみ
+    使う補助指標（代表値ではない。代表値は
+    `r_dram_declared`〈中央値の比〉を参照）。
+    """
+    return [d / l for l, d in zip(l1_vals, dram_vals)]
+
+
+def r_dram_declared(l1_vals: list[float], dram_vals: list[float]) -> float:
+    """事前宣言どおりの代表値
+    `R_dram = streamed_dram の中央値 GFLOP/s / l1_resident の中央値 GFLOP/s`。
+    run ごとの比の中央値（`r_dram_per_run_series` の中央値）とは一般に
+    一致しない（中央値と除算は非可換）。codex-review 指摘対応・
+    イシュー #1319。
+    """
+    return statistics.median(dram_vals) / statistics.median(l1_vals)
 
 
 def report_residency(label: str, pattern: str) -> None:
     runs = load_runs(pattern)
     print(f"### {label}（{pattern}。5 run）")
     print()
-    print("| threads | R_dram 各 run | 中央値 | <=0.95 の run 数 |")
+    print(
+        "| threads | R_dram 各 run（参考: run 内比） | "
+        "R_dram 代表値（中央値の比。事前宣言式） | <=0.95 の run 数 |"
+    )
     print("|---|---|---|---|")
     for threads in ("single", "multi"):
-        series = r_dram_series(runs, threads)
-        median = statistics.median(series)
-        under_95 = sum(1 for v in series if v <= 0.95)
-        series_str = ", ".join(f"{v:.4f}" for v in series)
-        print(f"| {threads} | {series_str} | {median:.4f} | {under_95}/5 |")
+        l1_vals, dram_vals = l1_dram_values(runs, threads)
+        per_run = r_dram_per_run_series(l1_vals, dram_vals)
+        declared = r_dram_declared(l1_vals, dram_vals)
+        under_95 = sum(1 for v in per_run if v <= 0.95)
+        series_str = ", ".join(f"{v:.4f}" for v in per_run)
+        print(f"| {threads} | {series_str} | {declared:.4f} | {under_95}/5 |")
     print()
 
 

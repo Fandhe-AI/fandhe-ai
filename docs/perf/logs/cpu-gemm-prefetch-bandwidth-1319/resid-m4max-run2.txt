@@ -397,17 +397,17 @@ warning: methods `alloc_uninit_f16` and `upload_f16` are never used
     |                   ^^^^^^^^^^
 
 warning: `fandhe-ai-backend-cuda` (lib) generated 60 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
-    Finished `release` profile [optimized] target(s) in 0.03s
+    Finished `release` profile [optimized] target(s) in 0.08s
      Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cpu-08eb8cc2a1653da7)
 
 running 1 test
-mode=l1_resident threads=single median_gflops=123.160614
-mode=l1_resident threads=multi median_gflops=1655.329561
-mode=streamed_l2 threads=single median_gflops=127.526094
-mode=streamed_l2 threads=multi median_gflops=1706.465847
-mode=streamed_dram threads=single median_gflops=121.973019
-mode=streamed_dram threads=multi median_gflops=445.393534
+mode=l1_resident threads=single median_gflops=95.279977
+mode=l1_resident threads=multi median_gflops=350.193460
+mode=streamed_l2 threads=single median_gflops=58.878908
+mode=streamed_l2 threads=multi median_gflops=180.303820
+mode=streamed_dram threads=single median_gflops=86.742847
+mode=streamed_dram threads=multi median_gflops=114.287968
 test gemm_prefetch_bandwidth_diag_tests::microkernel_residency_diag ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 296 filtered out; finished in 0.45s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 296 filtered out; finished in 0.83s
 

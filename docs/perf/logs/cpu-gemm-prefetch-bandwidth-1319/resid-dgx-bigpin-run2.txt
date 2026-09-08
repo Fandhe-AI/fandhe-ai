@@ -1,12 +1,12 @@
 
 running 1 test
-mode=l1_resident threads=single median_gflops=135.699476
-mode=l1_resident threads=multi median_gflops=1341.689910
-mode=streamed_l2 threads=single median_gflops=133.507999
-mode=streamed_l2 threads=multi median_gflops=1334.144192
-mode=streamed_dram threads=single median_gflops=59.025984
-mode=streamed_dram threads=multi median_gflops=457.403972
+mode=l1_resident threads=single median_gflops=132.499388
+mode=l1_resident threads=multi median_gflops=1165.702375
+mode=streamed_l2 threads=single median_gflops=131.899463
+mode=streamed_l2 threads=multi median_gflops=1204.063924
+mode=streamed_dram threads=single median_gflops=60.094781
+mode=streamed_dram threads=multi median_gflops=216.172428
 test gemm_prefetch_bandwidth_diag_tests::microkernel_residency_diag ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 296 filtered out; finished in 0.79s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 296 filtered out; finished in 0.90s
 

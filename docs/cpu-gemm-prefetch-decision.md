@@ -232,33 +232,47 @@ target_arch = "aarch64"))]`。本番経路への変更なし）:
 ### 実測結果（両実機・KC=256 パネル・5 run 独立プロセス中央値）
 
 `docs/perf/logs/cpu-gemm-prefetch-bandwidth-1319/aggregate.md`（生成元
-`aggregate.py`）より抜粋。R_dram（`streamed_dram / l1_resident`）:
+`aggregate.py`）より抜粋。R_dram（事前宣言どおりの代表値
+`= streamed_dram の 5 run 中央値 / l1_resident の 5 run 中央値`）:
 
-| 実機 | 条件 | threads | R_dram 中央値 | `<=0.95` の run 数 |
+> **2026-09-08 再計測（codex-review #1319 P2 指摘 2 件対応）**: 初回実測
+> （2026-09-07）には計測手法上の欠陥が 2 件あった。(1) 全コア同時条件
+> （`measure_kernel_throughput_both_modes` の `multi` 分岐）が各スレッドの
+> 計測区間を同期せず、各タスクが独立に計時を開始した GFLOP/s を単純合算
+> していたため「全コア同時」のスループットになっておらず、`streamed_dram`
+> では他タスクの ~256 MiB バッファ確保・初期化が自タスクの計測区間へ
+> メモリ負荷として混入していた。(2) `aggregate.py` が代表値を「run ごとの
+> 比の中央値」として算出していたが、事前宣言（本ドキュメント上記・診断
+> ハーネスのモジュール doc）は「両モードの 5 run 中央値の比」であり、
+> 両者は一般に一致しない。(1) は `measure_kernel_throughput_multi_synced`
+> （全スレッドのバッファ準備・warmup を計測対象外の同期フェーズで完了させ、
+> 全スレッド共通の壁時計時間で計測する方式）へ、(2) は `aggregate.py` の
+> 代表値算出（`r_dram_declared`）へそれぞれ是正し、両実機で再計測した。
+> 下表は再計測後の値。旧初回実測値・旧「DGX 無 pin single の解釈」節は
+> 本追補末尾「2026-09-07 初回実測（是正前・参考）」に保持する。
+
+| 実機 | 条件 | threads | R_dram 代表値 | `<=0.95` の run 数（run 内比） |
 |---|---|---|---|---|
-| Apple M4 Max（共有負荷下。実測開始前 load average 約 3.0） | 無 pin | single | 0.8119 | 4/5 |
-| Apple M4 Max | 無 pin | multi | 0.2671 | 5/5 |
-| DGX Spark GB10 | 無 pin | single | 1.2985 | 2/5（**下記「DGX 無 pin single の解釈」参照**） |
-| DGX Spark GB10 | 無 pin | multi | 0.5183 | 5/5 |
-| DGX Spark GB10 | big core pin（`taskset -c 5-9,15-19`。Cortex-X925 10 コア限定） | single | 0.4392 | 5/5 |
-| DGX Spark GB10 | big core pin | multi | 0.3183 | 5/5 |
+| Apple M4 Max（共有負荷下。実測開始前 load average 約 40。複数セッションの並列実装ジョブと同居） | 無 pin | single | 1.4250 | 2/5 |
+| Apple M4 Max | 無 pin | multi | 1.0376 | 3/5 |
+| DGX Spark GB10（専有・load average 約 0.3〜0.5） | 無 pin | single | 0.4550 | 5/5 |
+| DGX Spark GB10 | 無 pin | multi | 0.2781 | 5/5 |
+| DGX Spark GB10 | big core pin（`taskset -c 5-9,15-19`。Cortex-X925 10 コア限定） | single | 0.4543 | 5/5 |
+| DGX Spark GB10 | big core pin | multi | 0.1854 | 5/5 |
 
-#### DGX 無 pin single の解釈（測定アーティファクトであり「根拠なし」の証拠ではない）
+再計測では DGX 無 pin single も 5 run すべてが 0.44〜0.46 の狭い範囲に収まり、初回実測
+（後述）で観測された小コア／大コア二峰性は再現しなかった（`resid-dgx-run{1..5}.txt`。
+偶然 OS スケジューラが安定して大コアへ割り当てた可能性があり、無 pin 条件の頑健性を
+主張するものではない。big core pin 条件による再計測は今回も実施し、無 pin と同方向の
+結果を得た）。
 
-DGX Spark GB10 は Cortex-X925（大コア。最大 3900 MHz）10 個・Cortex-A725（小コア。最大
-2808 MHz）10 個の異種構成（`lscpu -e` 実測）。無 pin 条件では単スレッドタスクが OS
-スケジューラにより大小コアへ不定に割り当てられ、`l1_resident`（本来コア性能に比例する
-はずの計測）自体が run ごとに約 43 GFLOP/s（小コア）と約 135 GFLOP/s（大コア）の
-二峰性を示した（`resid-dgx-run{1,2,5}.txt` は小コア相当・`run{3,4}.txt` は大コア相当）。
-これは `docs/perf/cpu-gemm-default-thread-limit.md`（`cpu_capacity` sysfs 誤検出。#1364）
-が記録する同種の異種コア起因の観測不安定性であり、本イシューの残差感度計測とは無関係な
-交絡要因である。`R_dram` の分母（`l1_resident`）と分子（`streamed_dram`）が異なる run で
-異なるコア種別に割り当てられうる無 pin single 条件は、残差感度の判定には不適切と判断し、
-`taskset -c 5-9,15-19`（大コアのみへ pin。`effective_num_threads` は
-`std::thread::available_parallelism()` 経由で affinity mask を尊重するため multi 条件も
-10 スレッドへ自動整合）で再計測した（`resid-dgx-bigpin-run{1..5}.txt`）。pin 後は
-`l1_resident single` が 116〜136 GFLOP/s で安定し、`R_dram single` 中央値 0.4392
-（5/5 run が `<=0.95`）という一貫した結果を得た。
+M4 Max は今回の実測時に他セッションの並列実装ジョブが多数同居し load average が約 40
+まで上昇しており（`env_info-m4max.txt` 追記分）、5 run のばらつきが大きく単独では
+主判定ゲート（`R_dram <= 0.90` かつ 5 run 中 3 run 以上 `<= 0.95`）を満たさない
+（single 2/5・multi 3/5）。これは M4 Max 側のマイクロカーネル残差感度が無いことを示す
+ものではなく、高負荷下でのノイズによる判定不能（undetermined）であり、下記「判断」節の
+とおり事前宣言ゲートは DGX 単独成立で「根拠あり」と判定できるため、この M4 Max ノイズは
+結論を左右しない。
 
 ### G-a（文脈）
 
@@ -273,18 +287,21 @@ DGX Spark GB10 は Cortex-X925（大コア。最大 3900 MHz）10 個・Cortex-A
 ### 判断: 根拠あり
 
 主判定 G-b は「DGX 単独で `R_dram <= 0.90`（5 run 中 3 run 以上 `<= 0.95`）」を、
-DGX big-core pin 条件の **single・multi の両方**で満たす（single 中央値 0.4392・5/5、
-multi 中央値 0.3183・5/5）。M4 Max も single 中央値 0.8119（4/5 `<=0.95`）・multi 中央値
-0.2671（5/5）で同方向（`<=0.90`）を満たし、DGX の pin 後結果と矛盾しない。無 pin DGX
-single のみが表面上矛盾する（1.2985）が、上記のとおり異種コアスケジューリングという
-既知の交絡要因に起因すると判断し、pin 後の値を残差感度の代表値として採用する。
+DGX **無 pin・big-core pin の両条件、かつ single・multi の両方**で満たす（無 pin:
+single 代表値 0.4550・5/5、multi 代表値 0.2781・5/5。big core pin: single 代表値
+0.4543・5/5、multi 代表値 0.1854・5/5）。DGX 単独成立のため事前宣言ゲートの
+「または DGX 単独で `R_dram <= 0.90`」を満たし、M4 Max 側の結果（今回は高負荷ノイズに
+より判定不能）に依らず「根拠あり」と判定できる。
 
 以上により、2026-08-19 追補の「原則不要」格下げ判断を**覆す実測根拠が得られた**。
-packed A/B パネルが L1 に常駐しない条件（256 MiB 循環走査）では、単スレッドでも
-マイクロカーネル単体のスループットが L1 常駐時の 44〜88%（M4 Max）・44〜51%（DGX 大コア
-pin）まで低下しており、BLIS/matrixmultiply が前提とする「HW ストリームプリフェッチャーが
-完全に隠蔽する」という想定が本リポのマイクロカーネル（MR=8×NR=12・`vld1q_f32_x2`/`x3`）
-では成立していない可能性を示す。
+packed A/B パネルが L1 に常駐しない条件（256 MiB 循環走査）では、DGX Spark GB10 では
+単スレッドでもマイクロカーネル単体のスループットが L1 常駐時の 45〜46% まで低下して
+おり、BLIS/matrixmultiply が前提とする「HW ストリームプリフェッチャーが完全に隠蔽する」
+という想定が本リポのマイクロカーネル（MR=8×NR=12・`vld1q_f32_x2`/`x3`）では成立して
+いない可能性を示す。M4 Max については今回の再計測が高負荷下（load average 約 40）で
+あったため判定不能（undetermined）のまま残る。低負荷環境での M4 Max 再確認は本判断の
+結論を変えるものではないが、承認後の実装 PR で候補 1〜3 と同型の両実機 A/B を行う際に
+併せて記録する。
 
 ### 承認依頼の要点（実装はしない。ユーザー承認を得てから別イシューで着手する）
 
@@ -295,8 +312,8 @@ pin）まで低下しており、BLIS/matrixmultiply が前提とする「HW ス
 - **適用箇所案**: `crates/backend-cpu/src/gemm_blis/microkernel/neon.rs` の k ループ
   （`vld1q_f32_x2`/`x3` ロード直前）へ、次パネル分の PRFM を追加する案（BLIS
   `PRFMC_FWD` 相当の先読み距離をベンチで決める）
-- **期待効果の上限見積り**: 本実測の `R_dram`（DGX 大コア pin single 中央値 0.4392）から、
-  理論上の改善余地は最大で約 2.3 倍（`1/0.4392`）。ただし PRFM 自体の発行オーバーヘッド・
+- **期待効果の上限見積り**: 本実測の `R_dram`（DGX 大コア pin single 代表値 0.4543）から、
+  理論上の改善余地は最大で約 2.2 倍（`1/0.4543`）。ただし PRFM 自体の発行オーバーヘッド・
   実効プリフェッチ距離次第で実際の改善はこれを大きく下回りうる（見積りの性質上の上限で
   あり達成値の予測ではない）
 - **前提条件**: `.claude/rules/coding-rust.md`「コード品質」節（`unsafe` は FFI 境界等の
@@ -311,18 +328,48 @@ pin）まで低下しており、BLIS/matrixmultiply が前提とする「HW ス
 両実機とも 5 run 独立プロセス起動（`cargo test -p fandhe-ai-backend-cpu --release --lib --
 --ignored <test_name> --nocapture`）。詳細な実行ログ・env_info・DGX オーケストレーション
 スクリプト・集計スクリプトは `docs/perf/logs/cpu-gemm-prefetch-bandwidth-1319/`
-（内部ホスト名は含めない）を参照。DGX は隔離ディレクトリ（`~/work/ab-1319/`。作業完了後
-削除）で実行した。
+（内部ホスト名は含めない）を参照。
 
-- Apple M4 Max: 共有負荷下（実測開始前 load average 約 3.0。他セッションの並列実装ジョブと
-  同居）。`sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` = 12/4
-  （`effective_num_threads` の T=16 相当）。`rustc 1.96.0`
-- DGX Spark GB10: 実測開始前 load average 0.16 と低負荷（専有ゲート成立）。Cortex-X925×10
-  ／Cortex-A725×10（`lscpu -e` 実測）。`rustc 1.97.0`
+- Apple M4 Max（2026-09-08 再計測分）: 共有負荷下（実測開始前 load average 約 40。
+  複数セッションの並列実装ジョブと同居）。`sysctl -n machdep.cpu.brand_string` =
+  Apple M4 Max。`rustc 1.96.0`
+- DGX Spark GB10（2026-09-08 再計測分）: 実測開始前 load average 約 0.3〜0.5 と低負荷
+  （専有ゲート成立）。Cortex-X925×10／Cortex-A725×10（`lscpu -e` 実測）。`rustc 1.97.0`。
+  作業ディレクトリは `~/work/rust-ai-library-run`（`docs/real-hardware-verification-env.md`
+  の標準手順）
 
-本追補はドキュメント変更・診断テスト追加（`#[cfg(test)]` 限定）のみであり、本番
-`crates/backend-cpu` の駆動経路（`gemm_blis_parallel` 等）・REQ-8 下限値・数値一致許容
-誤差は変更していない。
+本追補はドキュメント変更・診断テスト追加＋是正（`#[cfg(test)]` 限定。全コア同時条件の
+計測区間同期・`aggregate.py` の代表値算出式）のみであり、本番 `crates/backend-cpu` の
+駆動経路（`gemm_blis_parallel` 等）・REQ-8 下限値・数値一致許容誤差は変更していない。
+
+### 2026-09-07 初回実測（是正前・参考。codex-review #1319 P2 指摘により上記へ置き換え）
+
+初回実測は前述のとおり計測手法上の欠陥（全コア同時条件の計測区間非同期・`aggregate.py`
+の代表値算出式の事前宣言との不一致）があり、下記の値は参考記録として残すのみで判断の
+根拠には用いない（現在の判断根拠は上記「実測結果」「判断: 根拠あり」節の再計測値）。
+
+| 実機 | 条件 | threads | R_dram（初回・run ごとの比の中央値） | `<=0.95` の run 数 |
+|---|---|---|---|---|
+| Apple M4 Max（共有負荷下。実測開始前 load average 約 3.0） | 無 pin | single | 0.8119 | 4/5 |
+| Apple M4 Max | 無 pin | multi | 0.2671 | 5/5 |
+| DGX Spark GB10 | 無 pin | single | 1.2985 | 2/5（下記「DGX 無 pin single の解釈（初回実測）」参照） |
+| DGX Spark GB10 | 無 pin | multi | 0.5183 | 5/5 |
+| DGX Spark GB10 | big core pin（`taskset -c 5-9,15-19`。Cortex-X925 10 コア限定） | single | 0.4392 | 5/5 |
+| DGX Spark GB10 | big core pin | multi | 0.3183 | 5/5 |
+
+#### DGX 無 pin single の解釈（初回実測。測定アーティファクトと判断した記録）
+
+DGX Spark GB10 は Cortex-X925（大コア。最大 3900 MHz）10 個・Cortex-A725（小コア。最大
+2808 MHz）10 個の異種構成（`lscpu -e` 実測）。初回実測の無 pin 条件では単スレッドタスクが
+OS スケジューラにより大小コアへ不定に割り当てられ、`l1_resident`（本来コア性能に比例する
+はずの計測）自体が run ごとに約 43 GFLOP/s（小コア）と約 135 GFLOP/s（大コア）の
+二峰性を示した（`resid-dgx-run{1,2,5}.txt` は小コア相当・`run{3,4}.txt` は大コア相当。
+これは初回実測時のログであり、2026-09-08 再計測分の同名ファイルへ上書き済み）。これは
+`docs/perf/cpu-gemm-default-thread-limit.md`（`cpu_capacity` sysfs 誤検出。#1364）が記録
+する同種の異種コア起因の観測不安定性であり、本イシューの残差感度計測とは無関係な交絡
+要因と判断し、`taskset -c 5-9,15-19` による big core pin 条件を追加した。2026-09-08
+再計測では無 pin 条件でもこの二峰性は再現しなかった（上記「実測結果」節参照。偶然の
+可能性があるため big core pin 条件は再計測でも継続して実施した）。
 
 ## 出典
 
