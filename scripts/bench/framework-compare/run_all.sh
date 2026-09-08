@@ -5,18 +5,35 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）:
-# 実行拒否ガード（`bench_fandhe_require_facade_patch`。空文字判定で常に
-# exit する）は、既存の計測結果・ログを初期化する `: > "$OUT"`／
-# `: > "$SKIP"` より前に置く。後ろに置くと、通常起動しただけでガードに
-# 拒否される前に既存ファイルが空へ初期化されてしまい、過去の計測結果が
-# 失われる（データ破壊。security.md A08）。本スクリプトは常に registry
-# 解決でビルドする（path patch 機構を持たない）。bench-fandhe が借用
-# ビュー readout を既定経路化したため、crates.io ピンのままでは構造的に
-# ビルド不能（bench_fandhe_pin_guard.sh 参照）。ビルド起動前・ファイル
-# 初期化前に明示エラーで早期停止する。
+# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）に加え
+# PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）: 当初は「本スクリプト
+# は常に registry 解決でビルドする（path patch 機構を持たない）」としていたが、
+# crates.io ピン `fandhe-ai =0.7.0` には借用ビュー readout API が未収録のため
+# registry 解決は構造的にビルド不能（bench_fandhe_pin_guard.sh 参照）であり、
+# この設計のままでは本スクリプトが恒久的に実行不能になってしまう。
+# `run_gemm_gate.sh`／`run_ab_gemm_metal.sh`（after 腕）と同型の
+# `GEMM_GATE_PATCH_FACADE_PATH`（任意。`crates/facade` への path patch）を
+# 導入し、指定時のみ `--config patch.crates-io.fandhe-ai.path=...` でビルドを
+# 解放する（deps-policy.md 第 9 区分の承認済みピン固定は Cargo.lock へ
+# 永続化しない invocation 限定の `--config` のため壊さない）。実行拒否ガード
+# （`bench_fandhe_require_facade_patch`）は、既存の計測結果・ログを初期化する
+# `: > "$OUT"`／`: > "$SKIP"` より前に置く。後ろに置くと、通常起動しただけで
+# ガードに拒否される前に既存ファイルが空へ初期化されてしまい、過去の計測
+# 結果が失われる（データ破壊。security.md A08）。
 source ./bench_fandhe_pin_guard.sh
-bench_fandhe_require_facade_patch "run_all.sh" ""
+bench_fandhe_require_facade_patch "run_all.sh" "${GEMM_GATE_PATCH_FACADE_PATH:-}"
+
+# A03 インジェクション対策（run_gemm_gate.sh と同一方針）: TOML 文字列値へ
+# 埋め込むため、二重引用符・バックスラッシュを含む値は不正な `--config` を
+# 生成しうるので拒否する。
+CARGO_CONFIG_ARGS=()
+if [[ -n "${GEMM_GATE_PATCH_FACADE_PATH:-}" ]]; then
+  if [[ "$GEMM_GATE_PATCH_FACADE_PATH" == *'"'* || "$GEMM_GATE_PATCH_FACADE_PATH" == *'\'* ]]; then
+    echo "ERROR: GEMM_GATE_PATCH_FACADE_PATH に '\"' または '\\' を含めることはできない" >&2
+    exit 1
+  fi
+  CARGO_CONFIG_ARGS+=(--config "patch.crates-io.fandhe-ai.path=\"${GEMM_GATE_PATCH_FACADE_PATH}\"")
+fi
 
 OUT=results/raw/results.jsonl
 SKIP=results/raw/skipped.log
@@ -36,7 +53,7 @@ run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
 
 # ビルド失敗時はここで中断する（古い target/release バイナリを現行ツリーの結果として
 # 計測・記録しないため。pipefail により tail 越しでも cargo の失敗が伝播する）
-if ! cargo build --release 2>&1 | tail -20; then
+if ! cargo build --release "${CARGO_CONFIG_ARGS[@]}" 2>&1 | tail -20; then
   echo "BUILD FAILED: aborting sweep (stale binaries must not be measured)" >&2
   exit 1
 fi

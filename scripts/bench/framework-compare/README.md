@@ -887,6 +887,14 @@ CUDA Graph で capture・再利用する経路（`fandhe_ai::set_cuda_graph_step
 cd scripts/bench/framework-compare
 ./run_all.sh                 # macOS: cpu + metal 全組み合わせ（+ metal gemm reuse・train reuse・train phases スイープ）→ results/raw/results.jsonl
 ./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda gemm reuse・train reuse・train phases スイープ）→ results/raw/results-cuda.jsonl
+# 上記 2 本・run_ab_train_cuda.sh は crates.io ピン fandhe-ai =0.7.0 に借用
+# ビュー readout API（Var::host_view/Tensor::host_slice）が未収録のため
+# （#1438）、registry 解決のままではビルド不能（bench_fandhe_pin_guard.sh
+# が明示エラーで早期停止する）。実行するには GEMM_GATE_PATCH_FACADE_PATH
+# （crates/facade への絶対パス。通常は現行 HEAD の `crates/facade`）を
+# 指定して bench-fandhe のみを path patch すること（run_gemm_gate.sh と
+# 同じ仕組み。正式系列〈registry ピン〉の再計測はピン更新後にのみ可能）:
+#   GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" ./run_all.sh
 # 個別実行:
 cargo run --release -p bench-fandhe -- --task gemm --device metal --size 2048
 cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 2048 --mode reuse
@@ -1169,6 +1177,19 @@ function constant・候補追加等）が本番既定経路の性能を後退さ
 は同一バイナリのフラグ切替専用で 2 本の異なるバイナリを比較する構造を
 持たないため、こちらも流用できない。
 
+**注（#1438 以降。before 腕の構造的制約）**: before 腕は常に registry 解決
+（crates.io ピン `fandhe-ai =0.7.0`）を意図する。しかし bench-fandhe の
+ソース（本スクリプトが常に現行チェックアウトから同一ソースでビルドする）
+が借用ビュー readout API を無条件に要求するようになった（#1438）ため、
+ピンにこの API が未収録の現状では before 腕は facade への path patch では
+解消できない構造的な理由で常にビルド不能（`bench_fandhe_pin_guard.sh` が
+専用の note 付きで明示エラーを出す）。対処は (1) crates.io ピンが借用
+ビュー readout API を収録するまで待つ、または (2) #1438 の feature 撤去
+より前のコミットを別 worktree にチェックアウトし、その worktree の
+`scripts/bench/framework-compare/` から本スクリプトを実行する（この場合
+after 腕の `AB_PATCH_FACADE_PATH` には現行 HEAD の `crates/facade` を指定
+できる）のいずれかに限られる。
+
 - `run_ab_gemm_metal.sh <label>`（`AB_PATCH_FACADE_PATH=<HEAD の crates/facade
   絶対パス>` 必須。`AB_ROUNDS`〈既定 5〉で計測回数を調整可能だが判定は 5
   固定）は before（registry）・after（path patch）の 2 バイナリを
@@ -1397,12 +1418,19 @@ tag `v0.5.0` = `a5e465d`）へ更新した（#1011 ツリー）。**ピンはそ
 対応するピンのコミット（`=0.4.0`・`=0.5.0`）を別 worktree で checkout して
 計測する。
 
+**注（#1438 以降）**: crates.io ピン `fandhe-ai =0.7.0` には借用ビュー readout
+API が未収録のため、`GEMM_GATE_PATCH_FACADE_PATH`（`crates/facade` への絶対
+パス）を指定しない限り本スクリプトは `bench_fandhe_pin_guard.sh` により
+明示エラーで早期停止する（上記「使い方」節と同じ理由）。
+
 ```bash
 cd scripts/bench/framework-compare
 # before（現行ピン。都度同期あり）を DGX Spark 実機で計測:
-bash run_ab_train_cuda.sh before-0.4.0
+GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
+  bash run_ab_train_cuda.sh before-0.4.0
 # ピン更新（別 PR・承認後）を適用したツリーで after を計測:
-bash run_ab_train_cuda.sh after-0.5.0
+GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
+  bash run_ab_train_cuda.sh after-0.5.0
 
 # before/after の 5 回計測中央値を比較（fresh/reuse 各 mode ごとに Markdown 表）:
 python3 compare_ab.py results/raw/results-dgx-ab-before-0.4.0.jsonl \

@@ -217,8 +217,17 @@ build_bench_fandhe() { # build_bench_fandhe <out_exe_pathvar> [追加の cargo b
 # ため、crates.io ピンのままの registry ビルドは構造的に不能になった
 # （bench_fandhe_pin_guard.sh 参照）。ビルド起動前に明示エラーで早期停止
 # する（after 腕は AB_PATCH_FACADE_PATH を必ず伴うため対象外）。
+#
+# PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）: before 腕は
+# facade への path patch では解消できない（bench-fandhe ソース＝現行
+# HEAD 自体が借用ビュー readout API を無条件に要求するため、facade だけ
+# 差し替えても後続の `fandhe_ai_source_desc` の "registry" 検証が必ず
+# 失敗する）。汎用の GEMM_GATE_PATCH_FACADE_PATH 案内はここでは誤りに
+# なるため、専用 note で正しい対処を案内する（`bench_fandhe_pin_guard.sh`
+# の note 引数）。
 source ./bench_fandhe_pin_guard.sh
-bench_fandhe_require_facade_patch "run_ab_gemm_metal.sh (before arm)" ""
+bench_fandhe_require_facade_patch "run_ab_gemm_metal.sh (before arm)" "" \
+  "before 腕は registry 解決（crates.io ピン fandhe-ai =0.7.0）を意図しており、GEMM_GATE_PATCH_FACADE_PATH 等の facade path patch では解消できない（bench-fandhe ソース自体〈現行 HEAD〉が借用ビュー readout API を無条件に要求するため）。対処: (1) crates.io ピンが借用ビュー readout API を収録するまで待つ、または (2) #1438 の feature 撤去より前のコミットを別 git worktree にチェックアウトし、その worktree の scripts/bench/framework-compare/ から本スクリプトを実行する（その場合 after 腕の AB_PATCH_FACADE_PATH には現行 HEAD の crates/facade を指定できる）。"
 
 echo "== build bench-fandhe (before: registry pin fandhe-ai =0.7.0) =="
 build_bench_fandhe BEFORE_EXE

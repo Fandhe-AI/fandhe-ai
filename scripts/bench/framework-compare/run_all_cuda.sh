@@ -6,19 +6,30 @@
 set -u
 cd "$(dirname "$0")"
 
-# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）:
+# イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）に加え
+# PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）: `run_all.sh` と
+# 同じ理由で `GEMM_GATE_PATCH_FACADE_PATH`（任意。`crates/facade` への
+# path patch）を導入し、指定時のみ bench-fandhe のビルドを解放する
+# （bench-candle／bench-burn は fandhe-ai に依存しないため patch 対象外）。
 # 実行拒否ガード（`bench_fandhe_require_facade_patch`。空文字判定で常に
 # exit する）は、既存の計測結果・ログを初期化する `: > "$OUT"`／
 # `: > "$SKIP"` より前に置く。後ろに置くと、通常起動しただけでガードに
 # 拒否される前に既存ファイルが空へ初期化されてしまい、過去の計測結果が
-# 失われる（データ破壊。security.md A08）。本スクリプトは常に registry
-# 解決でビルドする（path patch 機構を持たない）。bench-fandhe が借用
-# ビュー readout を既定経路化したため、crates.io ピンのままでは構造的に
-# ビルド不能（bench_fandhe_pin_guard.sh 参照）。`build` 関数の「失敗を
-# 記録して続行」方針より前に、ここで早期エラーとして停止する（分かり
-# にくい cargo エラーを skipped.log に埋もれさせない）。
+# 失われる（データ破壊。security.md A08）。`build` 関数の「失敗を記録して
+# 続行」方針より前に、ここで早期エラーとして停止する（分かりにくい
+# cargo エラーを skipped.log に埋もれさせない）。
 source ./bench_fandhe_pin_guard.sh
-bench_fandhe_require_facade_patch "run_all_cuda.sh" ""
+bench_fandhe_require_facade_patch "run_all_cuda.sh" "${GEMM_GATE_PATCH_FACADE_PATH:-}"
+
+# A03 インジェクション対策（run_gemm_gate.sh と同一方針）。
+CARGO_CONFIG_ARGS=()
+if [[ -n "${GEMM_GATE_PATCH_FACADE_PATH:-}" ]]; then
+  if [[ "$GEMM_GATE_PATCH_FACADE_PATH" == *'"'* || "$GEMM_GATE_PATCH_FACADE_PATH" == *'\'* ]]; then
+    echo "ERROR: GEMM_GATE_PATCH_FACADE_PATH に '\"' または '\\' を含めることはできない" >&2
+    exit 1
+  fi
+  CARGO_CONFIG_ARGS+=(--config "patch.crates-io.fandhe-ai.path=\"${GEMM_GATE_PATCH_FACADE_PATH}\"")
+fi
 
 OUT=results/raw/results-cuda.jsonl
 SKIP=results/raw/skipped-cuda.log
@@ -38,8 +49,15 @@ run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
 
 build() { # build <crate> [extra cargo args...]
   local crate=$1; shift
-  echo "== build $crate $* =="
-  if ! cargo build --release -p "$crate" "$@" 2>build-err.tmp; then
+  local extra_args=("$@")
+  # bench-fandhe のみ patch 対象（fandhe-ai に依存するのは bench-fandhe だけ。
+  # bench-candle／bench-burn へ付けても cargo は無害な unused-patch 警告を
+  # 出すのみだが、意図を明確にするため対象を絞る）。
+  if [[ "$crate" == "bench-fandhe" ]]; then
+    extra_args+=("${CARGO_CONFIG_ARGS[@]}")
+  fi
+  echo "== build $crate ${extra_args[*]} =="
+  if ! cargo build --release -p "$crate" "${extra_args[@]}" 2>build-err.tmp; then
     tail -40 build-err.tmp
     echo "$crate BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >> "$SKIP"
     echo "  -> BUILD FAILED (recorded in $SKIP)"

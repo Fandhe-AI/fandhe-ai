@@ -36,9 +36,22 @@ BENCH_FANDHE_REGISTRY_PIN_LACKS_HOST_VIEW=1
 # ピン値を読み取って理由とともに stderr へ出し exit 1 する（呼び出し元の
 # シェルを終了させる。source される前提のため exit で呼び出し元プロセス
 # 自体を止める）。
+#   $3 - note（任意）: 既定の「GEMM_GATE_PATCH_FACADE_PATH を指定すること」
+#        という案内が誤りになる呼び出し元（例: registry 解決そのものを
+#        意図する「before」腕。path patch では本質的に解消できない）向けの
+#        差し替え文面。PR #1452 codex-review P1 指摘（PRRT_kwDOTuUCJc6gIbMM）:
+#        `run_ab_gemm_metal.sh` の before 腕は bench-fandhe ソース自体
+#        （現行 HEAD）が借用ビュー readout API を無条件に要求するため、
+#        facade 側だけを path patch しても bench-fandhe のビルドは解決
+#        しない（`fandhe_ai_source_desc` の "registry" 検証が後続で
+#        必ず失敗する）。この腕に汎用の GEMM_GATE_PATCH_FACADE_PATH 案内を
+#        出すと「渡せば解決する」という誤った期待を与えるため、専用の
+#        note で正しい対処（ピン更新を待つ、または #1438 以前のコミットを
+#        別 worktree にチェックアウトして実行する）を案内する。
 bench_fandhe_require_facade_patch() {
   local ctx="$1"
   local patch_path="${2:-}"
+  local note="${3:-}"
 
   if [[ "$BENCH_FANDHE_REGISTRY_PIN_LACKS_HOST_VIEW" != "1" ]]; then
     return 0
@@ -55,9 +68,13 @@ bench_fandhe_require_facade_patch() {
   echo "  未収録のため、registry 解決のままの bench-fandhe ビルドは実行不可" >&2
   echo "  （#1438。旧計測専用 cargo feature〈#1337 導入〉は既に撤去済みで" >&2
   echo "  条件分岐そのものが存在しない）。" >&2
-  echo "  GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> を指定して" >&2
-  echo "  crates/facade（HEAD ツリー）への path patch を併用すること。" >&2
-  echo "  正式系列（registry ピン）の再計測はピン更新後にのみ可能" >&2
-  echo "  （README「既定経路（#1438）」節参照）。" >&2
+  if [[ -n "$note" ]]; then
+    echo "  $note" >&2
+  else
+    echo "  GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> を指定して" >&2
+    echo "  crates/facade（HEAD ツリー）への path patch を併用すること。" >&2
+    echo "  正式系列（registry ピン）の再計測はピン更新後にのみ可能" >&2
+    echo "  （README「既定経路（#1438）」節参照）。" >&2
+  fi
   exit 1
 }
