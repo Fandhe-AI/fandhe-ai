@@ -2142,7 +2142,7 @@ Phase 0 再計測で確定した）。checksum は両実機・全セル完全一
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §21・
 `docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/` を参照。
 
-## 環境 25: DGX Spark GB10・Apple M4 Max（借用ビュー readout の既定経路化・feature ゲート撤去。3 バックエンド × 両実機。イシュー #1438）
+## 環境 26: DGX Spark GB10・Apple M4 Max（借用ビュー readout の既定経路化・feature ゲート撤去。3 バックエンド × 両実機。イシュー #1438）
 
 環境 23（#1337）で未確定だった「既定化の可否」を確定させる位置づけ。#1436/#1437 が
 CUDA D2H 宛先未タッチ（N=1024/2048 の後退の原因）を診断・是正したことを確認したうえで、
@@ -2151,9 +2151,10 @@ readout を既定経路化した。**環境 23 が抱えていた「off 腕 regi
 facade ソース不一致の交絡を、本環境では全 6 系列（3 バックエンド×2 実機）で解消**した
 （両腕とも本 PR HEAD の同一 `crates/facade` へ path patch）。
 
-`compare_gemm_ab.py --sizes gate --modes reuse`（cpu は既定 `fresh,reuse`）で
+`compare_gemm_ab.py --sizes gate --modes reuse`（cpu は `--device cpu`。既定 `fresh,reuse`）で
 before（legacy bench-fandhe ソース＝base コミット `fddca17`）/after（default bench-fandhe
-ソース＝本 PR HEAD）の ratio（after/before）を突合。
+ソース＝本 PR HEAD）の ratio（after/before）を突合。イシュー #1438 の受け入れ条件・判定対象は
+`reuse` のみ。
 
 | device/N | CUDA（DGX） | Metal（M4 Max） | CPU-DGX | CPU-M4Max |
 |---|---|---|---|---|
@@ -2165,15 +2166,28 @@ before（legacy bench-fandhe ソース＝base コミット `fddca17`）/after（
 （値は `reuse` 列。1.0 未満が改善・1.0 超が後退。checksum は全セル・全実機で
 before/after 完全一致）
 
-- **全 6 系列・全セルで非後退**（after/before 0.47〜0.95）。環境 23 で観測された
-  「Metal 全形状後退（1.30〜1.56 倍）」「CPU-M4Max 後退（1.04〜2.07 倍）」は facade
+CPU の同一 raw JSONL から `fresh` を再集計した参考行（受け入れ条件外。5 回計測中央値・
+`compare_gemm_ab.py --device cpu`。PR #1452 codex-review 指摘対応）:
+
+| device/N（fresh・参考） | CPU-DGX | CPU-M4Max |
+|---|---|---|
+| 512 | 0.7783 | **1.0115** |
+| 1024 | 0.7248 | **1.0028** |
+| 2048 | 0.8035 | 0.9598 |
+
+- **判定対象の `reuse` は全 6 系列・全セルで非後退**（after/before 0.47〜0.95）。環境 23 で
+  観測された「Metal 全形状後退（1.30〜1.56 倍）」「CPU-M4Max 後退（1.04〜2.07 倍）」は facade
   ソース不一致・片方向負荷差の交絡によるものであり、facade ソースを揃えた本環境では
   再現しなかった
-- CUDA N=4096 は 1.53 倍・Metal は全形状 1.5〜2.1 倍・CPU 両実機は 1.05〜1.15 倍の改善
+- CPU の `fresh`（参考）は DGX 全形状改善（0.72〜0.80）だが、**M4 Max N=512／1024 は
+  1.0115／1.0028 と僅かに後退方向**で「fresh/reuse 両モードで全セル非後退」とは言えない。
+  差は 0.3〜1.2% で before/after の min–max 範囲は重なる（高負荷共有環境下）が、計測ノイズ
+  かどうかは本記録のみでは確定できない。非後退の総括は `reuse` に限定する
+- CUDA N=4096 は 1.53 倍・Metal は全形状 1.5〜2.1 倍・CPU 両実機は reuse で 1.05〜1.15 倍の改善
 - candle 比ゲート（#1031／#1037／#1117）は参考系列として CUDA N=4096（1.489 倍・達成）・
   CPU-DGX N=2048（1.103 倍・達成）が新規に達成条件を満たした。他セルは未達のまま
   （正式系列 `fandhe-ai =0.7.0` ピンは本 PR で変更していないため、既存の正式判定は不変）
-- 既定化判定: **CUDA・CPU（両実機）は ADOPT**。**Metal は参考結果（暫定・ADOPT 保留）**
+- 既定化判定: **CUDA・CPU（両実機。reuse 判定）は ADOPT**。**Metal は参考結果（暫定・ADOPT 保留）**
   — before/after が同一マシン上で連続実行されており負荷変動と readout 切替の効果を
   分離できていないため（`docs/perf/metal-gemm-candle-gate-remeasurement.md` §13.5）。
   判定木の runtime `Device` フォールバックはいずれも導入不要
@@ -2181,5 +2195,5 @@ before/after 完全一致）
   `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §15・
   `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13（§13.5 に Metal の暫定判定の
   根拠）・
-  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §21・
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §22（§22.2a に fresh 参考表）・
   `docs/perf/logs/gemm-candle-gate-readout-default-1438/` を参照
