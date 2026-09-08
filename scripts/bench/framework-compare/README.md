@@ -474,7 +474,6 @@ remeasurement.md` §13.5 が「負荷変動と readout 切替の効果が分離�
   cuda/metal={1024,2048,4096}への絞り込み）・`--modes reuse`（cuda/metal の
   ゲート出力が reuse のみのため fresh 参考行をセル外扱いにする）に対応する
   （下記「GEMM ゲート 5 回計測」節参照）。
-  （下記「GEMM ゲート 5 回計測」節参照）。
 
 ### `infer --mode reuse` / `infer --phases`（イシュー #1217）
 
