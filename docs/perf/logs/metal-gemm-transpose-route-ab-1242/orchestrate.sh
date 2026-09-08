@@ -23,6 +23,19 @@
 #     `cargo run` 自身のプロセスツリーは自プロセスとして除外する）を
 #     ポーリング監視し、逸脱（breach）を検出した run は終了コードに関わ
 #     らず valid_runs に含めない（`phase1_run${n}_monitor.log` に記録）。
+#
+# PR #1459 codex-review 再指摘の是正（イシュー #1253）:
+# (3) 上記 (2) の監視対象が cargo/rustc/python3 のみだったため、他セッシ
+#     ョンが `gemm_transpose_route_ab_bench` を `cargo run` を介さず直接
+#     起動した場合に検出できなかった。本版はビルド済みバイナリ名
+#     `gemm_transpose_route_ab_bench` も pre-check／監視／post-check の
+#     全 3 箇所（`wait_gate.sh` と同型の是正）へ加える。
+# (4) 監視中に BREACH を検出した run は valid_runs へは含めないが、
+#     `phase1_run${n}.log`（生の計測出力）は削除せず残す設計のため、
+#     `aggregate.py` 側が集計時に本 run の監視結果（`phase1_run${n}_
+#     monitor.log` の BREACH 有無）を必ず参照し、排他条件不成立の計測を
+#     有効な計測と同列に集計・表示しないようにする（`aggregate.py` 側の
+#     是正）。
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,8 +84,8 @@ for n in 1 2 3; do
   {
     echo "=== run${n} pre-check $(date +"%Y-%m-%dT%H:%M:%S%z") ==="
     uptime
-    echo "--- GPU/build 系プロセス（cargo/rustc/python3） ---"
-    ps -Ao pid,pcpu,comm | grep -E '(cargo|rustc|python3)$' | grep -v grep || echo "(none)"
+    echo "--- GPU/build 系プロセス（cargo/rustc/python3/gemm_transpose_route_ab_bench） ---"
+    ps -Ao pid,pcpu,comm | grep -E '(cargo|rustc|python3|gemm_transpose_route_ab_bench)$' | grep -v grep || echo "(none)"
   } > "$LOGDIR/uptime_before_run${n}.txt"
 
   MONITOR_LOG="$LOGDIR/phase1_run${n}_monitor.log"
@@ -85,7 +98,10 @@ for n in 1 2 3; do
 
   # run 実行中の排他計測契約（load average < 2・他 GPU プロセスなし）を
   # ポーリング監視する。bench 自身のプロセスツリーは self_pid_tree で
-  # 除外したうえで cargo/rustc/python3 の残存を「他プロセス」とみなす。
+  # 除外したうえで cargo/rustc/python3/gemm_transpose_route_ab_bench の
+  # 残存を「他プロセス」とみなす（gemm_transpose_route_ab_bench を含める
+  # のは、他セッションが本バイナリを cargo run を介さず直接起動した場合
+  # も検出するため。#1459 codex-review 再指摘）。
   breach=0
   while kill -0 "$BENCH_PID" 2>/dev/null; do
     self_pids=" $(self_pid_tree "$BENCH_PID" | tr '\n' ' ') "
@@ -94,7 +110,7 @@ for n in 1 2 3; do
     load1=$(printf '%s' "$load_line" | sed -E 's/.*load averages?:[[:space:]]*([0-9.]+).*/\1/')
     other_procs=""
     other_count=0
-    for name in cargo rustc python3; do
+    for name in cargo rustc python3 gemm_transpose_route_ab_bench; do
       for pid in $(pgrep -x "$name" 2>/dev/null); do
         case "$self_pids" in
           *" $pid "*) ;;
@@ -121,8 +137,8 @@ for n in 1 2 3; do
   {
     echo "=== run${n} post-check $(date +"%Y-%m-%dT%H:%M:%S%z") rc=${RC} ==="
     uptime
-    echo "--- GPU/build 系プロセス（cargo/rustc/python3） ---"
-    ps -Ao pid,pcpu,comm | grep -E '(cargo|rustc|python3)$' | grep -v grep || echo "(none)"
+    echo "--- GPU/build 系プロセス（cargo/rustc/python3/gemm_transpose_route_ab_bench） ---"
+    ps -Ao pid,pcpu,comm | grep -E '(cargo|rustc|python3|gemm_transpose_route_ab_bench)$' | grep -v grep || echo "(none)"
   } > "$LOGDIR/uptime_after_run${n}.txt"
 
   if [ "$RC" -eq 0 ] && [ "$breach" -eq 0 ]; then
