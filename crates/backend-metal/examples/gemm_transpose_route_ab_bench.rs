@@ -50,7 +50,7 @@
 //! ## 実機実行手順（macOS・Apple Silicon）
 //!
 //! ```sh
-//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release
+//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics
 //! ```
 //!
 //! 実行前後に `pmset -g therm` でサーマル状態を記録すること
@@ -70,7 +70,7 @@
 //! フェーズ 2（A/B 判定）へ進まず終了する `--phase1-only` モードを設ける。
 //!
 //! ```sh
-//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release -- --phase1-only
+//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --phase1-only
 //! ```
 //!
 //! `--phase1-only` を指定すると、既定の phase 1 → phase 2 の流れは実行せず
@@ -125,7 +125,7 @@
 //! 非計装のまま（本イシューのスコープ外）。
 //!
 //! ```sh
-//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release -- --phase1-only --gpu-timestamps
+//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --phase1-only --gpu-timestamps
 //! ```
 //!
 //! opt-in 時は冒頭に `phase1_workload=gpu_timestamps` を出力し、各サイズ
@@ -1596,28 +1596,34 @@ mod cli_and_round_stats_tests {
     /// （`measured_wall_secs`）には乗る——`aggregate_gpu_host_round` が
     /// 後者を単一真実源とすることを、両者が乖離するサンプルで検証する
     /// （codex-review 指摘の再発防止。イシュー #1261）。
+    ///
+    /// `measured_wall_secs` の中央値（16.0）が `closure_wall_secs` の
+    /// 中央値（10.0）と異なる組み合わせを選ぶ（PR #1455 codex-review
+    /// 指摘。旧版は `[10.0, 10.0, 16.0]` で両者の中央値が偶然一致し、
+    /// `closure_wall_secs` への取り違えを検知できなかった）。
     #[test]
     fn aggregate_gpu_host_round_uses_measured_wall_not_closure_wall() {
         // `closure_wall_secs` は 3 ラウンドとも 10.0 で不変（drop 時間を
         // 含まないため一定に見える）だが、`measured_wall_secs`
         // （`protocol::run` 側の真の壁時計）は解放時のスパイクで
-        // 10.0/10.0/16.0 と変動する——中央値・差分はこちらを反映すべき。
+        // 10.0/16.0/16.0 と変動する——中央値・差分はこちらを反映すべき。
         let tail = [
             sample(10.0, 6.0, Some(4.0), 1),
             sample(10.0, 6.0, Some(4.0), 1),
             sample(10.0, 6.0, Some(4.0), 1),
         ];
-        let measured_wall_secs = [10.0, 10.0, 16.0];
+        let measured_wall_secs = [10.0, 16.0, 16.0];
         let stats = aggregate_gpu_host_round(0, 3, &tail, &measured_wall_secs);
         assert!(stats.valid);
         // `closure_wall_secs` の中央値（10.0）ではなく `measured_wall_secs`
-        // の中央値（10.0）——この例では中央値自体は一致するが、
-        // wall_minus_gpu はサンプルごとの差（6.0, 6.0, 12.0）の中央値
-        // 6.0 になり、`closure_wall_secs` ベースの差（同じく 6.0,6.0,6.0
-        // → 6.0）とはスパイクの有無で意味が異なることを round_medians
-        // 側の spread 検査（下記 size 集計テスト）で切り分ける。
-        assert_eq!(stats.wall_median_secs, 10.0);
-        assert_eq!(stats.wall_minus_gpu_median_secs, Some(6.0));
+        // の中央値（16.0）を反映すべき——実装が誤って
+        // `closure_wall_secs` を参照していれば 10.0 のまま不変となり
+        // このアサーションで検知できる。
+        // wall_minus_gpu はサンプルごとの差（6.0, 12.0, 12.0）の中央値
+        // 12.0 になり、`closure_wall_secs` ベースの差（6.0,6.0,6.0
+        // → 6.0）とは値そのものが異なることでも取り違えを検知できる。
+        assert_eq!(stats.wall_median_secs, 16.0);
+        assert_eq!(stats.wall_minus_gpu_median_secs, Some(12.0));
     }
 
     #[test]
