@@ -277,7 +277,7 @@ fn measure_kernel_throughput_multi_synced(
     // `into_par_iter` はタスク間で完了待ちを行わないため、ここで
     // 生成した `Vec` を後段の `collect()` が全タスク完了まで
     // ブロックすることが同期点として機能する（暗黙のバリア）。
-    let mut prepared: Vec<(Vec<(Vec<f32>, Vec<f32>)>, usize, Vec<f32>)> = (0..num_threads)
+    let mut prepared: Vec<PreparedThread> = (0..num_threads)
         .into_par_iter()
         .map(|t| {
             let pairs = make_panel_pairs(1000 + t as u32);
@@ -287,29 +287,42 @@ fn measure_kernel_throughput_multi_synced(
                 let (ap, bp) = &pairs[i % pairs.len()];
                 run_once(kernel, ap, bp, &mut c_tile, kc_len);
             }
-            (pairs, kc_len, c_tile)
+            PreparedThread {
+                pairs,
+                kc_len,
+                c_tile,
+            }
         })
         .collect();
 
     // フェーズ (3): 全スレッド共通の計測区間。準備・warmup が全スレッド
     // で完了した後にのみ開始する（上記 `collect()` の同期後）。
     let start = std::time::Instant::now();
-    prepared.par_iter_mut().for_each(|(pairs, kc_len, c_tile)| {
+    prepared.par_iter_mut().for_each(|t| {
         for i in 0..iters {
-            let (ap, bp) = &pairs[i % pairs.len()];
-            run_once(kernel, ap, bp, c_tile, *kc_len);
+            let (ap, bp) = &t.pairs[i % t.pairs.len()];
+            run_once(kernel, ap, bp, &mut t.c_tile, t.kc_len);
         }
         // c_tile を読み出しコンパイラによる最適化除去を防ぐ（黒箱化）。
-        std::hint::black_box(&*c_tile);
+        std::hint::black_box(&t.c_tile);
     });
     let elapsed = start.elapsed().as_secs_f64();
 
     let flops_per_call = 2.0 * (MR as f64) * (NR as f64);
     let total_flops: f64 = prepared
         .iter()
-        .map(|(_, kc_len, _)| flops_per_call * (*kc_len as f64) * (iters as f64))
+        .map(|t| flops_per_call * (t.kc_len as f64) * (iters as f64))
         .sum();
     total_flops / elapsed / 1e9
+}
+
+/// [`measure_kernel_throughput_multi_synced`] の 1 スレッド分の準備結果
+/// （panel 列・kc 長・累積用 c_tile）。clippy `type_complexity` 回避の
+/// ためタプルの代わりに構造体化する（診断専用の複製型）。
+struct PreparedThread {
+    pairs: Vec<(Vec<f32>, Vec<f32>)>,
+    kc_len: usize,
+    c_tile: Vec<f32>,
 }
 
 /// 総トラフィック量から生成する panel 列の要素数を決める。
