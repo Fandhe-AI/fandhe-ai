@@ -265,7 +265,18 @@ fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
 /// `--gpu-timestamps` opt-in 時、フェーズ 1 の計装クロージャが 1 回の
 /// ワークロード呼び出しごとに記録する 1 サンプル（イシュー #1259）。
 ///
-/// `wall_secs` は呼び出し全体（upload〜readback）の `Instant` 計測、
+/// `closure_wall_secs` は upload〜readback（クロージャ本体の計測区間の
+/// 内側）のみを覆う `Instant` 計測で、クロージャ末尾で暗黙に発生する
+/// `a_buf`/`b_buf`/`c_buf` の解放（drop）時間を**含まない**（診断用の
+/// 参考値に限る）。安定性判定（`bench_harness::protocol::run`）が実際に
+/// 使う壁時計サンプル（`Measurement::samples_secs`。クロージャ呼び出し
+/// 全体を `Instant` で挟むため drop 時間を含む）とは計測区間が異なり、
+/// drop 時のスパイクが `closure_wall_secs` には反映されない
+/// （codex-review 指摘。イシュー #1261）。このため
+/// [`aggregate_gpu_host_round`] の `wall`／`wall_minus_gpu` 系集計は
+/// `closure_wall_secs` ではなく呼び出し元が `Measurement::samples_secs`
+/// から渡す `measured_wall_secs` を単一真実源として使う
+/// （[`aggregate_gpu_host_round`] ドキュメンテーションコメント参照）。
 /// `commit_wait_secs` は `MetalContext::synchronize_with_gpu_timestamps`
 /// 呼び出し自体の `Instant` 計測（commit + `waitUntilCompleted` +
 /// タイムスタンプ取得）、`kernel_gpu_secs` はその中で得られた
@@ -273,10 +284,17 @@ fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
 /// `batches_len` はそのバッチに含まれていたディスパッチ数（1 個の GEMM
 /// ディスパッチのみが載っていたことの検証に使う。`gemm_reuse_phase_
 /// diag_tests.rs` の不変条件と同じ理由）。
+///
+/// `resolved_cfg` は [`MetalGemm::encode_tiled_prepared`] の**戻り値**
+/// （`{cfg:?}` 形式）——呼び出し時に渡した要求構成（`tile::
+/// select_for_device` の解決値）そのものではなく、`pipeline_for_tile` が
+/// フォールバック解決を行った後に実際に実行したカーネルの構成を記録する
+/// （codex-review 指摘。フォールバック発生時は要求構成と乖離しうるため、
+/// 診断ラベルは常に実行結果側を出す。イシュー #1261）。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct GpuHostSample {
-    wall_secs: f64,
+    closure_wall_secs: f64,
     upload_secs: f64,
     alloc_secs: f64,
     encode_secs: f64,
@@ -284,6 +302,7 @@ struct GpuHostSample {
     kernel_gpu_secs: Option<f64>,
     readback_secs: f64,
     batches_len: usize,
+    resolved_cfg: String,
 }
 
 /// `samples` のうち末尾 `iters` 件（測定対象サンプル）を返す。
@@ -297,7 +316,7 @@ struct GpuHostSample {
 /// `run_stability_observed` 自体の契約違反を意味するため `expect` で
 /// panic させる想定）。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-fn measured_tail<T: Copy>(samples: &[T], iters: usize) -> Option<&[T]> {
+fn measured_tail<T>(samples: &[T], iters: usize) -> Option<&[T]> {
     if samples.len() < iters {
         return None;
     }
@@ -316,9 +335,21 @@ struct GpuHostRoundStats {
     /// を満たした（fail-closed。1 件でも違反すれば `false`）。
     valid: bool,
     kernel_gpu_median_secs: Option<f64>,
+    /// 安定性判定（`bench_harness::protocol::run`）が使う壁時計サンプル
+    /// （`Measurement::samples_secs`）の中央値。`GpuHostSample::
+    /// closure_wall_secs` ではなく `aggregate_gpu_host_round` の
+    /// `measured_wall_secs` 引数から計算する（同関数ドキュメンテーション
+    /// コメント参照）。
     wall_median_secs: f64,
-    /// `wall_secs − kernel_gpu_secs` を**サンプルごとに差を取ってから**
-    /// 中央値化した値（`median(wall) − median(kernel_gpu)` ではない。
+    /// `GpuHostSample::closure_wall_secs`（クロージャ内側のみ、バッファ
+    /// 解放時間を含まない `Instant` 計測）の中央値。診断専用の参考値
+    /// （`wall_median_secs` との差が大きければ、drop 時間が無視できない
+    /// ことを示唆する）であり、`wall_minus_gpu` 系の判定には使わない
+    /// （イシュー #1261）。
+    closure_wall_median_secs: f64,
+    /// `wall − kernel_gpu_secs`（`wall` は上記 `Measurement::samples_secs`
+    /// 由来）を**サンプルごとに差を取ってから**中央値化した値
+    /// （`median(wall) − median(kernel_gpu)` ではない。
     /// `gemm_reuse_phase_diag_tests.rs`〈PR #1371 レビュー教訓〉と同じ
     /// 理由）。
     wall_minus_gpu_median_secs: Option<f64>,
@@ -329,14 +360,31 @@ struct GpuHostRoundStats {
     alloc_median_secs: f64,
     encode_median_secs: f64,
     readback_median_secs: f64,
-    /// `tile::select_for_device` が解決した構成（`{cfg:?}` 形式の文字列。
-    /// このサイズの全ラウンドで同一値になる想定——呼び出し元
-    /// 〈`run_stability_gpu_host`〉が計測ループの外で 1 回だけ解決する）。
+    /// `GpuHostSample::resolved_cfg`（`encode_tiled_prepared` の戻り値。
+    /// 実際に実行したカーネル構成）から求めた、このラウンドの構成ラベル。
+    /// 全サンプルで一致していればその値、不一致なら `MIXED(...)`
+    /// （`aggregate_gpu_host_round` ドキュメンテーションコメント参照。
+    /// イシュー #1261）。
     resolved_cfg: String,
 }
 
 /// `tail`（[`measured_tail`] が返す、あるラウンドの測定対象サンプル列）
 /// から [`GpuHostRoundStats`] を集計する純関数（イシュー #1259）。
+///
+/// `measured_wall_secs` は呼び出し元（`run_stability_gpu_host`）が
+/// `bench_harness::protocol::run` の `Measurement::samples_secs` から
+/// そのまま渡す、安定性判定（`protocol::run`）自身が使う壁時計サンプル
+/// である。`tail`（同じ呼び出し列から生成された [`GpuHostSample`]）と
+/// インデックスが 1:1 で対応する契約——`tail` は同一クロージャの呼び出し
+/// 順に積まれ、`measured_wall_secs` も同じ呼び出し順で記録されるため
+/// （`run_stability_gpu_host` ドキュメンテーションコメント参照）。
+/// `GpuHostSample::closure_wall_secs`（クロージャ内側のみの `Instant`
+/// 計測。バッファ〈`a_buf`/`b_buf`/`c_buf`〉解放時間を含まない）は
+/// `wall`／`wall_minus_gpu` 系集計には**使わない**——解放時のスパイクが
+/// 安定性判定の対象区間（`Measurement::samples_secs`）には乗るのに
+/// `closure_wall_secs` には乗らず、`spread_wall`／`wall_minus_gpu` が
+/// 実際のばらつきを過小評価してしまうため（codex-review 指摘。
+/// イシュー #1261）。
 ///
 /// `wall_minus_gpu`／`commit_wait_minus_gpu` はサンプルごとに差を取って
 /// から中央値を計算する契約（[`GpuHostRoundStats`] フィールドドキュメント
@@ -345,20 +393,55 @@ struct GpuHostRoundStats {
 /// secs`・両差分中央値を `None` にする（fail-closed。host 側フェーズ
 /// 内訳〈upload/alloc/encode/commit_wait/readback/wall〉自体は GPU
 /// タイムスタンプに依存しないため、`valid=false` でも中央値を計算する）。
+///
+/// `resolved_cfg` は `tail` の各サンプルが持つ [`GpuHostSample::
+/// resolved_cfg`]（`encode_tiled_prepared` の戻り値。実際に実行した
+/// カーネル構成）から求める。同一ラウンド内の全サンプルで一致していれば
+/// その値をそのまま使い、`pipeline_for_tile` のフォールバック挙動が
+/// 呼び出しの途中で変化して一致しない場合は `MIXED(...)`（全値をカンマ
+/// 区切りで列挙）として可視化する（fail-closed。要求構成のラベルへ
+/// 黙って戻さない。codex-review 指摘。イシュー #1261）。
+///
+/// # Panics
+///
+/// `tail.len() != measured_wall_secs.len()` の場合（呼び出し元の契約
+/// 違反。両者は同じ呼び出し列から生成されるため通常発生しない）。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn aggregate_gpu_host_round(
     round: usize,
     iters: usize,
     tail: &[GpuHostSample],
-    resolved_cfg: String,
+    measured_wall_secs: &[f64],
 ) -> GpuHostRoundStats {
+    assert_eq!(
+        tail.len(),
+        measured_wall_secs.len(),
+        "tail と measured_wall_secs は同一呼び出し列から生成される契約のため \
+         長さが一致するはず（run_stability_gpu_host 参照）"
+    );
+
+    let resolved_cfg = match tail.first() {
+        Some(first) if tail.iter().all(|s| s.resolved_cfg == first.resolved_cfg) => {
+            first.resolved_cfg.clone()
+        }
+        Some(_) => format!(
+            "MIXED({})",
+            tail.iter()
+                .map(|s| s.resolved_cfg.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        None => "NA".to_string(),
+    };
+
     let median = |xs: &[f64]| -> f64 {
         bench_harness::median_q1_q3(xs)
             .expect("tail は run_stability_observed 契約により非空のはず")
             .median
     };
 
-    let wall: Vec<f64> = tail.iter().map(|s| s.wall_secs).collect();
+    let wall: Vec<f64> = measured_wall_secs.to_vec();
+    let closure_wall: Vec<f64> = tail.iter().map(|s| s.closure_wall_secs).collect();
     let commit_wait: Vec<f64> = tail.iter().map(|s| s.commit_wait_secs).collect();
     let upload: Vec<f64> = tail.iter().map(|s| s.upload_secs).collect();
     let alloc: Vec<f64> = tail.iter().map(|s| s.alloc_secs).collect();
@@ -369,7 +452,7 @@ fn aggregate_gpu_host_round(
     let mut kernel_gpu_samples: Vec<f64> = Vec::with_capacity(tail.len());
     let mut wall_minus_gpu_samples: Vec<f64> = Vec::with_capacity(tail.len());
     let mut commit_wait_minus_gpu_samples: Vec<f64> = Vec::with_capacity(tail.len());
-    for s in tail {
+    for (idx, s) in tail.iter().enumerate() {
         if s.batches_len != 1 {
             valid = false;
             continue;
@@ -378,15 +461,16 @@ fn aggregate_gpu_host_round(
             valid = false;
             continue;
         };
+        let wall_true = measured_wall_secs[idx];
         if !(kernel_gpu >= 0.0
             && kernel_gpu <= s.commit_wait_secs
-            && s.commit_wait_secs <= s.wall_secs)
+            && s.commit_wait_secs <= wall_true)
         {
             valid = false;
             continue;
         }
         kernel_gpu_samples.push(kernel_gpu);
-        wall_minus_gpu_samples.push(s.wall_secs - kernel_gpu);
+        wall_minus_gpu_samples.push(wall_true - kernel_gpu);
         commit_wait_minus_gpu_samples.push(s.commit_wait_secs - kernel_gpu);
     }
 
@@ -407,6 +491,7 @@ fn aggregate_gpu_host_round(
         valid,
         kernel_gpu_median_secs,
         wall_median_secs: median(&wall),
+        closure_wall_median_secs: median(&closure_wall),
         wall_minus_gpu_median_secs,
         commit_wait_median_secs: median(&commit_wait),
         commit_wait_minus_gpu_median_secs,
@@ -429,13 +514,15 @@ fn format_gpu_host_round_line(stats: &GpuHostRoundStats, size: usize) -> String 
     };
     format!(
         "phase1_gpu_host_round size={size} round={} iters={} kernel_gpu_median_secs={} \
-         wall_median_secs={:.6e} wall_minus_gpu_median_secs={} commit_wait_median_secs={:.6e} \
+         wall_median_secs={:.6e} closure_wall_median_secs={:.6e} \
+         wall_minus_gpu_median_secs={} commit_wait_median_secs={:.6e} \
          commit_wait_minus_gpu_median_secs={} upload_median_secs={:.6e} alloc_median_secs={:.6e} \
          encode_median_secs={:.6e} readback_median_secs={:.6e} resolved_cfg={} valid={}",
         stats.round,
         stats.iters,
         opt(stats.kernel_gpu_median_secs),
         stats.wall_median_secs,
+        stats.closure_wall_median_secs,
         opt(stats.wall_minus_gpu_median_secs),
         stats.commit_wait_median_secs,
         opt(stats.commit_wait_minus_gpu_median_secs),
@@ -720,10 +807,12 @@ mod macos_impl {
         // `tile::select_for_device` はループの外（ラウンド計測の外）で
         // 1 回だけ解決する——`dispatch_auto` も呼び出しごとに再解決するが
         // 決定的（`(m, n, k)` とデバイス情報のみに依存）なため、計測ループ
-        // 内で毎回呼んでも呼ばなくても値は不変。ここで 1 回解決して
-        // `resolved_cfg` ラベルとしてラウンド出力へ含める。
+        // 内で毎回呼んでも呼ばなくても値は不変。この `cfg` は
+        // `encode_tiled_prepared` への**要求**構成であり、`pipeline_for_tile`
+        // がフォールバックする可能性があるため、診断ラベル
+        // （`GpuHostSample::resolved_cfg`）は呼び出しごとの**戻り値**から
+        // 別途記録する（codex-review 指摘。イシュー #1261）。
         let cfg = tile::select_for_device(size, size, size, ctx.verified_m4_max_gpu_core_count());
-        let resolved_cfg_label = format!("{cfg:?}");
 
         let samples: RefCell<Vec<GpuHostSample>> = RefCell::new(Vec::new());
         let round_stats: RefCell<Vec<GpuHostRoundStats>> = RefCell::new(Vec::new());
@@ -744,7 +833,8 @@ mod macos_impl {
             let alloc_secs = t.elapsed().as_secs_f64();
 
             let t = Instant::now();
-            gemm.encode_tiled_prepared(ctx, &a_buf, &b_buf, &c_buf, size, size, size, cfg)
+            let resolved_cfg_actual = gemm
+                .encode_tiled_prepared(ctx, &a_buf, &b_buf, &c_buf, size, size, size, cfg)
                 .expect("encode_tiled_prepared に失敗した（実機でのみ実行する前提）");
             let encode_secs = t.elapsed().as_secs_f64();
 
@@ -759,7 +849,7 @@ mod macos_impl {
             std::hint::black_box(&c);
             let readback_secs = t.elapsed().as_secs_f64();
 
-            let wall_secs = wall_start.elapsed().as_secs_f64();
+            let closure_wall_secs = wall_start.elapsed().as_secs_f64();
             let kernel_gpu_secs = if batches.len() == 1 {
                 batches[0].kernel_gpu_secs()
             } else {
@@ -767,7 +857,7 @@ mod macos_impl {
             };
 
             samples.borrow_mut().push(GpuHostSample {
-                wall_secs,
+                closure_wall_secs,
                 upload_secs,
                 alloc_secs,
                 encode_secs,
@@ -775,6 +865,7 @@ mod macos_impl {
                 kernel_gpu_secs,
                 readback_secs,
                 batches_len: batches.len(),
+                resolved_cfg: format!("{resolved_cfg_actual:?}"),
             });
         };
 
@@ -788,11 +879,15 @@ mod macos_impl {
                     "run_stability_observed の契約〈直前 iters 件が測定対象〉により \
                      samples の長さは常に iters 以上のはず",
                 );
+                // 安定性判定（`protocol::run`）自身が使う壁時計サンプルを
+                // そのまま渡す——`tail`（`closure_wall_secs`）は drop 時間を
+                // 含まないため使わない（`aggregate_gpu_host_round`
+                // ドキュメンテーションコメント参照。イシュー #1261）。
                 let stats = aggregate_gpu_host_round(
                     round,
                     measurement.iters,
                     tail,
-                    resolved_cfg_label.clone(),
+                    measurement.samples_secs.as_slice(),
                 );
                 println!("{}", format_gpu_host_round_line(&stats, size));
                 round_stats.borrow_mut().push(stats);
@@ -1414,16 +1509,35 @@ mod cli_and_round_stats_tests {
     }
 
     /// [`GpuHostSample`] の共通ビルダ（テスト用）。デフォルトは
-    /// `wall=10・commit_wait=6・kernel_gpu=Some(4)・upload/alloc/encode/
-    /// readback=1・batches_len=1`（全不変条件を満たす基準値）。
+    /// `closure_wall=10・commit_wait=6・kernel_gpu=Some(4)・upload/alloc/
+    /// encode/readback=1・batches_len=1・resolved_cfg="cfg"`（全不変条件を
+    /// 満たす基準値）。`closure_wall_secs` はここでは `measured_wall_secs`
+    /// （`protocol::run` 側の真の壁時計。[`aggregate_gpu_host_round`] が
+    /// 集計に使う値）と同一値を渡す呼び出しが大半——両者が乖離する場合
+    /// （drop 時のスパイクを模す場合）は個別テスト
+    /// （`aggregate_gpu_host_round_uses_measured_wall_not_closure_wall`）
+    /// で明示的に区別する。`resolved_cfg` を個別に変える場合は
+    /// [`sample_with_cfg`] を使う。
     fn sample(
-        wall: f64,
+        closure_wall: f64,
         commit_wait: f64,
         kernel_gpu: Option<f64>,
         batches_len: usize,
     ) -> GpuHostSample {
+        sample_with_cfg(closure_wall, commit_wait, kernel_gpu, batches_len, "cfg")
+    }
+
+    /// [`sample`] の `resolved_cfg` 指定版（イシュー #1261。フォールバック
+    /// による構成乖離を模すテスト用）。
+    fn sample_with_cfg(
+        closure_wall: f64,
+        commit_wait: f64,
+        kernel_gpu: Option<f64>,
+        batches_len: usize,
+        resolved_cfg: &str,
+    ) -> GpuHostSample {
         GpuHostSample {
-            wall_secs: wall,
+            closure_wall_secs: closure_wall,
             upload_secs: 1.0,
             alloc_secs: 1.0,
             encode_secs: 1.0,
@@ -1431,7 +1545,14 @@ mod cli_and_round_stats_tests {
             kernel_gpu_secs: kernel_gpu,
             readback_secs: 1.0,
             batches_len,
+            resolved_cfg: resolved_cfg.to_string(),
         }
+    }
+
+    /// `tail` の `closure_wall_secs` をそのまま `measured_wall_secs`
+    /// として使う（両者が一致するケース用のテストヘルパ）。
+    fn walls_from_closure(tail: &[GpuHostSample]) -> Vec<f64> {
+        tail.iter().map(|s| s.closure_wall_secs).collect()
     }
 
     #[test]
@@ -1456,7 +1577,7 @@ mod cli_and_round_stats_tests {
             sample(12.0, 7.0, Some(5.0), 1),
             sample(11.0, 6.5, Some(4.5), 1),
         ];
-        let stats = aggregate_gpu_host_round(2, 3, &tail, "cfg".to_string());
+        let stats = aggregate_gpu_host_round(2, 3, &tail, &walls_from_closure(&tail));
         assert!(stats.valid);
         assert_eq!(stats.round, 2);
         assert_eq!(stats.iters, 3);
@@ -1469,10 +1590,76 @@ mod cli_and_round_stats_tests {
         assert_eq!(stats.resolved_cfg, "cfg");
     }
 
+    /// バッファ（`a_buf`/`b_buf`/`c_buf`）解放時のスパイクは
+    /// `GpuHostSample::closure_wall_secs`（クロージャ内側のみの計測）には
+    /// 乗らないが、安定性判定が使う `Measurement::samples_secs`
+    /// （`measured_wall_secs`）には乗る——`aggregate_gpu_host_round` が
+    /// 後者を単一真実源とすることを、両者が乖離するサンプルで検証する
+    /// （codex-review 指摘の再発防止。イシュー #1261）。
+    #[test]
+    fn aggregate_gpu_host_round_uses_measured_wall_not_closure_wall() {
+        // `closure_wall_secs` は 3 ラウンドとも 10.0 で不変（drop 時間を
+        // 含まないため一定に見える）だが、`measured_wall_secs`
+        // （`protocol::run` 側の真の壁時計）は解放時のスパイクで
+        // 10.0/10.0/16.0 と変動する——中央値・差分はこちらを反映すべき。
+        let tail = [
+            sample(10.0, 6.0, Some(4.0), 1),
+            sample(10.0, 6.0, Some(4.0), 1),
+            sample(10.0, 6.0, Some(4.0), 1),
+        ];
+        let measured_wall_secs = [10.0, 10.0, 16.0];
+        let stats = aggregate_gpu_host_round(0, 3, &tail, &measured_wall_secs);
+        assert!(stats.valid);
+        // `closure_wall_secs` の中央値（10.0）ではなく `measured_wall_secs`
+        // の中央値（10.0）——この例では中央値自体は一致するが、
+        // wall_minus_gpu はサンプルごとの差（6.0, 6.0, 12.0）の中央値
+        // 6.0 になり、`closure_wall_secs` ベースの差（同じく 6.0,6.0,6.0
+        // → 6.0）とはスパイクの有無で意味が異なることを round_medians
+        // 側の spread 検査（下記 size 集計テスト）で切り分ける。
+        assert_eq!(stats.wall_median_secs, 10.0);
+        assert_eq!(stats.wall_minus_gpu_median_secs, Some(6.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "長さが一致するはず")]
+    fn aggregate_gpu_host_round_panics_on_length_mismatch() {
+        let tail = [sample(10.0, 6.0, Some(4.0), 1)];
+        let measured_wall_secs: [f64; 2] = [10.0, 11.0];
+        let _ = aggregate_gpu_host_round(0, 1, &tail, &measured_wall_secs);
+    }
+
+    /// `resolved_cfg` は要求構成（呼び出しループの外で 1 回だけ解決した
+    /// `tile::select_for_device` の値）ではなく、`GpuHostSample::
+    /// resolved_cfg`（`encode_tiled_prepared` の戻り値。実際に実行した
+    /// カーネル構成）から求める——全サンプルが同一の実行構成なら
+    /// そのまま採用する（codex-review 指摘。イシュー #1261）。
+    #[test]
+    fn aggregate_gpu_host_round_resolved_cfg_from_actual_execution() {
+        let tail = [
+            sample_with_cfg(10.0, 6.0, Some(4.0), 1, "TileConfig { bm: 64, .. }"),
+            sample_with_cfg(10.0, 6.0, Some(4.0), 1, "TileConfig { bm: 64, .. }"),
+        ];
+        let stats = aggregate_gpu_host_round(0, 2, &tail, &walls_from_closure(&tail));
+        assert_eq!(stats.resolved_cfg, "TileConfig { bm: 64, .. }");
+    }
+
+    /// `pipeline_for_tile` のフォールバック挙動がラウンド内の呼び出しで
+    /// 一致しない稀なケースを想定し、黙って先頭値へ丸めず `MIXED(...)`
+    /// として可視化することを検証する（fail-closed。イシュー #1261）。
+    #[test]
+    fn aggregate_gpu_host_round_resolved_cfg_mixed_when_samples_disagree() {
+        let tail = [
+            sample_with_cfg(10.0, 6.0, Some(4.0), 1, "cfg_a"),
+            sample_with_cfg(10.0, 6.0, Some(4.0), 1, "cfg_b"),
+        ];
+        let stats = aggregate_gpu_host_round(0, 2, &tail, &walls_from_closure(&tail));
+        assert_eq!(stats.resolved_cfg, "MIXED(cfg_a,cfg_b)");
+    }
+
     #[test]
     fn aggregate_gpu_host_round_invalid_when_kernel_gpu_missing() {
         let tail = [sample(10.0, 6.0, None, 1)];
-        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        let stats = aggregate_gpu_host_round(0, 1, &tail, &walls_from_closure(&tail));
         assert!(!stats.valid);
         assert_eq!(stats.kernel_gpu_median_secs, None);
         assert_eq!(stats.wall_minus_gpu_median_secs, None);
@@ -1483,7 +1670,7 @@ mod cli_and_round_stats_tests {
     #[test]
     fn aggregate_gpu_host_round_invalid_when_batches_len_not_one() {
         let tail = [sample(10.0, 6.0, Some(4.0), 2)];
-        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        let stats = aggregate_gpu_host_round(0, 1, &tail, &walls_from_closure(&tail));
         assert!(!stats.valid);
     }
 
@@ -1492,14 +1679,14 @@ mod cli_and_round_stats_tests {
         // kernel_gpu > commit_wait は `0 ≤ kernel_gpu ≤ commit_wait ≤ wall`
         // 不変条件違反。
         let tail = [sample(10.0, 6.0, Some(7.0), 1)];
-        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        let stats = aggregate_gpu_host_round(0, 1, &tail, &walls_from_closure(&tail));
         assert!(!stats.valid);
     }
 
     #[test]
     fn format_gpu_host_round_line_starts_with_grep_key_and_includes_size() {
         let tail = [sample(10.0, 6.0, Some(4.0), 1)];
-        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        let stats = aggregate_gpu_host_round(0, 1, &tail, &walls_from_closure(&tail));
         let line = format_gpu_host_round_line(&stats, 512);
         assert!(line.starts_with("phase1_gpu_host_round "));
         assert!(line.contains("size=512"));
@@ -1509,7 +1696,7 @@ mod cli_and_round_stats_tests {
     #[test]
     fn format_gpu_host_round_line_reports_na_for_invalid_round() {
         let tail = [sample(10.0, 6.0, None, 1)];
-        let stats = aggregate_gpu_host_round(0, 1, &tail, "cfg".to_string());
+        let stats = aggregate_gpu_host_round(0, 1, &tail, &walls_from_closure(&tail));
         let line = format_gpu_host_round_line(&stats, 512);
         assert!(line.contains("kernel_gpu_median_secs=NA"));
         assert!(line.contains("valid=false"));
@@ -1522,6 +1709,7 @@ mod cli_and_round_stats_tests {
             valid: kernel_gpu.is_some(),
             kernel_gpu_median_secs: kernel_gpu,
             wall_median_secs: wall,
+            closure_wall_median_secs: wall,
             wall_minus_gpu_median_secs: kernel_gpu.map(|k| wall - k),
             commit_wait_median_secs: wall / 2.0,
             commit_wait_minus_gpu_median_secs: kernel_gpu.map(|k| wall / 2.0 - k),

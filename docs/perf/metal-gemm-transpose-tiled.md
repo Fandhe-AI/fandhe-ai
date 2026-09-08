@@ -101,7 +101,7 @@ select_for_device` が選ぶ構成——`dispatch_auto` の本番既定経路と
 進まず終了する）を追加した:
 
 ```sh
-cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release -- --phase1-only
+cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --phase1-only
 ```
 
 出力にはサイズごとに機械可読な 1 行 `phase1_round_stats`（`grep
@@ -263,7 +263,7 @@ gate（spread ≤0.05）を超過**した。実行中 30 秒間隔で `uptime` �
 ### 実行方法
 
 ```sh
-cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release -- --phase1-only --gpu-timestamps
+cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --phase1-only --gpu-timestamps
 ```
 
 `--phase1-only` と順序不問で併用可。引数なし（既定）の壁時計判定・出力
