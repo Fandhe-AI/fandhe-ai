@@ -1,0 +1,16 @@
+=== start 2026-09-08T08:14:53Z ===
+2026-09-08T08:14:53Z load1=6.48 pass_count=0
+2026-09-08T08:15:23Z load1=7.21 pass_count=0
+2026-09-08T08:15:53Z load1=7.99 pass_count=0
+2026-09-08T08:16:23Z load1=7.65 pass_count=0
+2026-09-08T08:16:53Z load1=8.26 pass_count=0
+2026-09-08T08:17:23Z load1=7.00 pass_count=0
+2026-09-08T08:17:53Z load1=6.88 pass_count=0
+2026-09-08T08:18:23Z load1=5.17 pass_count=0
+2026-09-08T08:18:53Z load1=4.34 pass_count=1
+GATE_RESULT shared=0 at 2026-09-08T08:18:53Z
+=== formal series 0.7.0-1321 2026-09-08T08:18:53Z ===
+formal exit=0
+=== reference series head-ced4d14-1321 2026-09-08T08:20:01Z ===
+reference exit=0
+ORCHESTRATE_DONE 2026-09-08T08:20:49Z
