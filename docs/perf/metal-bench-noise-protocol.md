@@ -57,11 +57,23 @@ Metal 側は `MetalGemm::new_with_swizzle(ctx, bool)` で swizzle off/on の 2 �
 不成立の場合の調整手順: `crates/backend-metal/examples/gemm_swizzle_ab_bench.rs` の `ROUNDS`・`COOLDOWN`・
 `MIN_WARMUP` 定数を**増やす方向のみ**調整して再実行する（減らす調整は spread 実測 green が条件。実装計画 §4.2）。
 
+### 6. 実行前の環境ガード（イシュー #1264・親 #1263）
+
+#1186／#1187（Metal 転置ルーティング A/B）は、同一マシンで並走する他セッションの負荷（`uptime` 実測 load
+average 3.4〜8.6・実行中の再上昇を `docs/perf/logs/metal-gemm-transpose-route-ab-1187/uptime_during_run4.txt`
+で確認）により「5. 安定性ゲートと不成立時の中断規定」のゲートが 4 試行とも不成立のまま終わった。環境状態の
+確認が手動記録（同ディレクトリの `env_info.txt`）に依存していたことが一因のため、`bench_harness::env_guard`
+（`crates/bench-harness/src/env_guard.rs`）がその確認を機械化する **API 層**を提供する。load average・他
+GPU プロセス検出・uptime 記録の取得と判定を行う設定型・取得関数・判定結果型のみを提供し、ガード不成立時の
+バックオフ再試行・記録出力・example（`gemm_transpose_route_ab_bench.rs` 等）への結線は兄弟イシュー #1265 の
+スコープである（本ドキュメントの本節は API の位置づけの記録に留める）。
+
 ## 熱・電源状態の記録
 
 計測実行前後に `pmset -g therm`（非特権・`sudo` 不要）でサーマル状態を記録する。`powermetrics` は `sudo` 必須の
-ため使用しない（A03 インジェクション対策の一環でもあり、コード側にシェル呼び出しを埋め込まず手順書側の手動実行に
-留める設計）。
+ため使用しない（A03 インジェクション対策の一環でもあり、シェル（`sh -c`）・`sudo` を使わず固定バイナリを直接
+実行する設計。`env_guard` の外部コマンド起動〈`sysctl`・`ioreg`・`uptime`〉も同じ方針に従う。`pmset`／
+`powermetrics` 自体は引き続き手順書側の手動実行に留める）。
 
 ```sh
 pmset -g therm
@@ -83,6 +95,34 @@ pmset -g therm
 いずれも `crate::protocol::run`（既存の warmup 20 回以上・計測 20 回以上・中央値/Q1/Q3 プロトコル）をラウンドごとに
 呼ぶ上位ユーティリティであり、`guardrail`／`self-repair` が依存する `protocol::run`・`MeasurementConfig` の
 セマンティクス自体は変更しない。
+
+## API 概要（`bench_harness::env_guard`。`ab` から再公開。イシュー #1264）
+
+実行前の環境確認を機械化する API 層（取得・判定を分離。設計は
+`crates/bench-harness/src/env_guard.rs` モジュール doc 参照）。
+
+- `EnvGuardConfig::new(max_load_avg_1min: f64) -> Result<Self, BenchError>`: 呼び出し側が明示するガード条件の
+  検証付きコンストラクタ。**既定閾値・`Default` 実装は持たない**（ガードレール閾値相当のためユーザー承認事項。
+  `.claude/rules/security.md`）。`with_gpu_process_watchlist(Vec<String>)`（名前部分一致。空なら記録のみ）・
+  `with_max_gpu_device_utilization_percent(u8) -> Result<Self, BenchError>`（0〜100 検証）を builder 形式で追加設定する
+- `EnvSample::collect() -> EnvSample`: load average・uptime・GPU プロセス（macOS のみ。`ioreg -r -c IOAccelerator -l`）
+  を実測する I/O 層。全フィールドが `Option`（GPU は理由付き `Unavailable`）で、取得失敗を `panic`／`Err` にしない
+- `EnvGuardConfig::evaluate(&EnvSample) -> EnvGuardReport`: 実測値へガード条件を適用する純粋関数（I/O なし）
+- `EnvGuardConfig::check() -> EnvGuardReport`: `collect()` + `evaluate()` の合成
+- `EnvGuardReport::is_blocking() -> bool`: `overall == GuardVerdict::Fail` のときのみ `true`。
+  **取得不能（`GuardVerdict::Undetermined`）はブロック要因にしない**（イシュー #1264 本文の GPU 検出要件を
+  load average にも一貫適用した設計）
+
+判定規則: load average は `observed.one > max_1min` で `Fail`・取得不能で `Undetermined`。GPU は watchlist に
+部分一致するプロセスがある、または使用率が上限超過で `Fail`。watchlist・上限とも未設定なら記録のみで `Pass`。
+GPU 取得自体が不能（Linux 等）なら `Undetermined`。
+
+### #1265 向けの提案閾値（未承認・記録のみ）
+
+`EnvGuardConfig::new` の `max_load_avg_1min` に既定値はなく、#1265（バックオフ再試行・結線）側での具体的な
+閾値設定はユーザー承認が必要な別判断である。参考として、`crates/backend-cpu/src/thread_limit.rs::ThreadLimitReport`
+（大コア数判定。#1363）の実測値を踏まえ「大コア数の 0.5 倍程度」を出発点とする案が考えられるが、**本イシュー
+では未承認・未検証のまま提案として記すに留める**。
 
 ## 適用対象・スコープ
 

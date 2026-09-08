@@ -103,9 +103,21 @@
 //! の判定対象）とは別系列であり、本モジュールの値は `floor_spec`／`judge` の判定対象に
 //! 含めない（`threshold` モジュールへの変更なし）。定義の確定経緯・計測プロトコル・
 //! 比較対象 PyTorch 構成・評価方式は `docs/perf/transformer-workload-baseline.md`（#589）を参照。
+//!
+//! ## Phase 2: ベンチ実行前の環境ガード（本イシュー #1264 の実装範囲。親 #1263）
+//!
+//! [`env_guard`] モジュールが、load average・他 GPU プロセス検出・uptime 記録の
+//! 実行前チェック API（設定型 [`env_guard::EnvGuardConfig`]・取得
+//! [`env_guard::EnvSample::collect`]・判定結果 [`env_guard::EnvGuardReport`]）を
+//! 提供する。#1186／#1187（Metal 転置ルーティング A/B）で手動記録に頼っていた
+//! 環境確認を機械化する位置づけで、[`ab::STABILITY_SPREAD_GATE`]・
+//! [`ab::run_ab`]／[`ab::run_stability`] の判定ロジック自体は変更しない。
+//! ガード不成立時のバックオフ再試行・記録出力・example への結線は兄弟
+//! イシュー #1265 のスコープ（[`env_guard`] モジュール doc 参照）。
 
 pub mod ab;
 pub mod alloc_tracker;
+pub mod env_guard;
 pub mod peak_memory;
 mod protocol;
 mod report;
