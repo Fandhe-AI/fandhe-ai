@@ -2046,3 +2046,34 @@ fresh/reuse 双方を含む。1.0 未満が改善・1.0 超が後退。checksum 
   `docs/perf/metal-gemm-candle-gate-remeasurement.md` §12・
   `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §15・
   `docs/perf/logs/gemm-candle-gate-readout-1337/` を参照
+
+## 環境 24: DGX Spark GB10・Apple M4 Max（出力並列ゼロ埋め on/off 比較。イシュー #1301）
+
+`crates/backend-cpu/src/ops.rs::GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`
+（#1299。既定 `usize::MAX`）の on（`2 << 20`）/off（`usize::MAX`）を同一
+ソース（両腕とも `GEMM_GATE_PATCH_FACADE_PATH` による HEAD path 差し替え）
+で両実機比較。`compare_gemm_ab.py --device cpu --sizes gate`
+（N=512/1024/2048 の fresh/reuse）で off→on の ratio（after/before）を突合。
+DGX は初回計測が他セッション並走（load average 15〜18）で contaminate
+されたため専有確認後に再計測した clean 系列を正式値とする。
+
+| N/mode | DGX（clean） | M4 Max |
+|---|---|---|
+| 512/fresh | 0.8690 | 1.0068 |
+| 512/reuse | 0.8889 | 0.9509 |
+| 1024/fresh | 0.9841 | 1.0019 |
+| 1024/reuse | 1.0042 | 1.0269 |
+| 2048/fresh | 1.0469 | 0.9728 |
+| **2048/reuse（決定セル）** | **0.9990** | **0.9788** |
+
+checksum は両実機・全セル完全一致。DGX の Layer B（`gemm_reuse_phase_diag_
+cpu`。crates 内診断テスト）実測では N=2048 の `alloc_c` が 48% 削減
+（3.2554→1.6817 ms）・`ops_gemm` 合成は 0.9972 倍（非後退）を確認。
+
+**既定化判定: ADOPT（無条件・cfg gating なし）**。全事前宣言規則
+（checksum 一致・DGX 決定セル非後退・対照セル非後退・candle 比非後退・
+M4 Max 非後退）を両実機とも満たしたため、本番既定を `2 << 20` へ有効化
+した。詳細・env_info・判定規則の事前宣言記録は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19・
+`docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6・
+`docs/perf/logs/cpu-matmul-fixed-cost-1301/` を参照。

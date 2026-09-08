@@ -388,11 +388,23 @@ DGX N=2048（16 MiB）で 2.8〜3.0 ms・M4 Max で 79 µs という実機非対
 `gemm_reuse_phase_diag_tests.rs` の `alloc_c` 区間自体を新ヘルパーへ
 追従させた）。
 
-**本番既定は `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`
-（並列分岐を常に無効化）**。M4 Max スモーク実測（§7 の判定基準・
+当初の本番既定は `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`
+（並列分岐を常に無効化）とした。M4 Max スモーク実測（§7 の判定基準・
 5 run 符号一貫かつ相対 5% 超）で N=2048 の `ops_gemm` 合成区間が
-中央値約 29% 後退したため、設計時の暫定しきい値 `2 << 20` は本番では
-採用せず安全側（無効化）へ倒した。機構の推定・実測詳細・DGX 実測記入欄
-は `docs/perf/cpu-matmul-fixed-cost-impl.md` を参照。`unsafe`・
-`GemmDriverVariant` への追加はいずれも行っていない（§5.3・§6 のとおり）。
-DGX Spark GB10 実機実測（#1301）の結果次第でしきい値を差し替える。
+中央値約 29% 後退したため、設計時の暫定しきい値 `2 << 20` を本番では
+一時採用せず安全側（無効化）へ倒していた。`unsafe`・`GemmDriverVariant`
+への追加はいずれも行っていない（§5.3・§6 のとおり）。
+
+**2026-09-08 更新（イシュー #1301）**: DGX Spark GB10（Grace CPU）・
+Apple M4 Max 両実機で on/off 5 回独立プロセス起動・Layer A（`bench-fandhe
+gemm cpu <N> reuse`）・Layer B（`gemm_reuse_phase_diag_cpu`）双方を計測
+した結果、DGX N=2048（`alloc_c` 約 48% 削減・`ops_gemm` 合成 0.9972 倍）・
+対照セル（N=512/1024）・M4 Max 全セル（0.951〜1.027 倍）いずれも非後退
+（一部改善）を確認したため、**本番既定を `2 << 20` へ有効化**した
+（`crates/backend-cpu/src/ops.rs::GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`。
+プラットフォーム別 cfg gating は不要と判明したため単一定数のまま）。
+初回計測時に他セッション並走（load average 15〜18）による contamination
+を検出し、専有ゲート確認後に DGX を再計測した経緯を含め、実測詳細は
+`docs/perf/cpu-matmul-fixed-cost-impl.md` §6・`docs/perf/
+cpu-gemm-candle-gate-remeasurement.md` §19・`docs/perf/logs/
+cpu-matmul-fixed-cost-1301/` を参照。

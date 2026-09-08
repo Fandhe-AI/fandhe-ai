@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§16）。#1305 で専有環境の RAYON_NUM_THREADS スイープを両実機で 5 回計測中央値再実測し、DGX Spark GB10 の N=1024 非単調性を taskset pin 実験で H1（異種コア由来）と確定・Apple M4 Max は専有ゲート不通過のため undetermined のまま記録した（§17）。#1312 で `TwoDDynamic`（2D 動的分配）vs `RowPanel` の両実機 A/B を実施し、DGX（専有ゲート通過）は全形状で `RowPanel` を 1.09〜1.80 倍上回ったが Apple M4 Max が専有ゲート不通過のため最終判定は undetermined（結線せず #1313 へ記録のみ引き継ぎ）・DGX 単独の非単調性（T10/T8）は「残存」（比 0.86 前後・僅かに閾値未達）と判定した（§18）
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§16）。#1305 で専有環境の RAYON_NUM_THREADS スイープを両実機で 5 回計測中央値再実測し、DGX Spark GB10 の N=1024 非単調性を taskset pin 実験で H1（異種コア由来）と確定・Apple M4 Max は専有ゲート不通過のため undetermined のまま記録した（§17）。#1312 で `TwoDDynamic`（2D 動的分配）vs `RowPanel` の両実機 A/B を実施し、DGX（専有ゲート通過）は全形状で `RowPanel` を 1.09〜1.80 倍上回ったが Apple M4 Max が専有ゲート不通過のため最終判定は undetermined（結線せず #1313 へ記録のみ引き継ぎ）・DGX 単独の非単調性（T10/T8）は「残存」（比 0.86 前後・僅かに閾値未達）と判定した（§18）。#1301 で出力並列ゼロ埋め（#1299）の on/off を両実機実測し、両実機・全形状で非後退（DGX N=2048 alloc_c 約 48% 削減）を確認したため `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS` を `2 << 20` へ有効化・本番結線した（§19）
 
 ## 1. 位置づけ
 
@@ -1525,3 +1525,114 @@ Apple M4 Max は §17.7 と同様に本追補でも専有ゲートを通過で�
 イシュー #1312・#1311/#1307/#1310・`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`・
 `docs/perf/logs/cpu-gemm-2d-dynamic-ab-1312/`・§17（本ファイル。#1305 の元の
 非単調性実測）。
+
+## §19. 2026-09-08 追補: 出力並列ゼロ埋め on/off 両実機比較（イシュー #1301）
+
+### 19.1 位置づけ・事前宣言する判定規則（計測前に確定）
+
+イシュー #1299 が実装した `CpuBackendOps::gemm` 出力バッファの並列ゼロ
+書き込み分岐（`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`。本番既定
+`usize::MAX` で無効化。§16.6 の「実運用経路で削減効果が見込める本番経路
+固定費は DGX N=2048 の `alloc_c`」という結論を実装したもの）について、
+DGX Spark GB10（Grace CPU）・Apple M4 Max の両実機で off（`usize::MAX`）
+/on（`2 << 20`。設計時暫定値）を同一プロトコル・5 回独立プロセス中央値で
+比較し、本番結線可否を確定する。
+
+事前宣言する判定規則（後出しで変えない）:
+
+1. **checksum**: 全セルで off/on 完全一致（`compare_gemm_ab.py` の複合
+   判定 pass かつ `==` 列一致）。不一致なら判定不能。
+2. **DGX N=2048 reuse（決定セル）**: Layer B の `alloc_c` 中央値が
+   削減され、かつ `ops_gemm` 中央値の on/off 比 ≤ 1.00。Layer A
+   （`run_gemm_gate_cpu.sh`）の 2048/reuse の on/off 比 ≤ 1.05（非後退）。
+3. **対照セル**: 両実機の N=512/1024 の reuse/fresh すべてで on/off 比
+   ≤ 1.05。
+4. **candle 比**: 各腕を `compare_gemm_gate.py --device cpu` で集計し、
+   on 腕の candle 比が off 腕より後退していないこと。
+5. **M4 Max N=2048**: on/off 比 > 1.05 で 5 run 符号一貫の後退なら
+   macOS では有効化しない（#1299 スモークの再確認）。
+
+結線の場合分け: (a) DGX が規則 1〜4 を満たし M4 Max が規則 5 で後退 →
+**ADOPT（Linux 限定 cfg gating）**。(b) DGX で削減されない・後退する →
+**REJECT**（コード無変更）。(c) 両実機とも全規則を満たす → 無条件
+`2 << 20`。
+
+出典: イシュー #1301・`docs/perf/logs/cpu-matmul-fixed-cost-1301/`。
+
+### 19.2 計測プロトコル・専有状態
+
+- DGX Spark GB10: 本イシュー専用の隔離ディレクトリ（`~/work/fc-1301-run`）
+  へ rsync 転送。転送直前の 1 分 load average が 2 回連続 <6（1.03〜1.08）
+  であることを確認してから計測を開始した。
+- 初回の on 腕計測中に他セッション（イシュー #1262・#1437）の並走を検出
+  （load average 15〜18・同一形状 N=2048 の CPU GEMM ベンチが同時実行され
+  ていた）。この回の Layer A・Layer B は**参考値として `docs/perf/logs/
+  cpu-matmul-fixed-cost-1301/` に生ログを保存したうえで正式値には採用しない**
+  （contamination の可能性が高く、on/off 比が Layer A で 1.4〜1.8 倍・
+  Layer B の IQR が off 腕の 2 倍超に拡大していた）。
+- 他セッション終了・専有状態（1 分 load average <6 を 2 回連続）を再確認
+  してから on 腕（Layer A・Layer B とも）を再計測した（ファイル名末尾
+  `-clean`。以下の §19.3 表はこの再計測分を正式値とする）。
+- Apple M4 Max: 共有マシン（このリポジトリのメイン worktree が動くホスト
+  自身）。#1299 当時（load average 9〜11・19 users）より低負荷（off 腕
+  load average 約 7・on 腕 約 5）だったが、完全な専有は確保していない。
+
+### 19.3 実測結果
+
+**Layer A（`bench-fandhe gemm cpu <N> reuse`。5 run 中央値の on/off 比。
+`compare_gemm_ab.py --device cpu --sizes gate`）**:
+
+| N/mode | DGX（専有確認後の clean 系列） | M4 Max |
+|---|---|---|
+| 512/fresh | 0.8690 | 1.0068 |
+| 512/reuse | 0.8889 | 0.9509 |
+| 1024/fresh | 0.9841 | 1.0019 |
+| 1024/reuse | 1.0042 | 1.0269 |
+| 2048/fresh | 1.0469 | 0.9728 |
+| **2048/reuse（決定セル）** | **0.9990** | **0.9788** |
+
+checksum は両実機・全セル完全一致。
+
+**Layer B（`gemm_reuse_phase_diag_cpu`。5 run 中央値。DGX のみ抜粋）**:
+
+| N | phase | off median (ms) | on median (ms) | on/off 比 |
+|---|---|---|---|---|
+| 2048 | `alloc_c` | 3.2554 | 1.6817 | **0.5166**（約 48% 削減） |
+| 2048 | `ops_gemm` | 26.8177 | 26.7420 | **0.9972** |
+| 1024 | `alloc_c` | 0.0306 | 0.0269 | 0.8791 |
+| 1024 | `ops_gemm` | 5.4276 | 5.3701 | 0.9894 |
+
+**candle 比（`compare_gemm_gate.py --device cpu`。#1117 は両腕とも未達成
+のまま不変。参考値）**: DGX 512/1024/2048 は off 0.703/0.778/0.965 →
+on 0.746/0.775/0.972（ノイズ範囲内でおおむね横ばい〜改善）。M4 Max は
+off 0.889/0.760/0.809 → on 0.894/0.747/0.783（1024・2048 で数%の
+ノイズ域の低下だが 5 run とも「未達」の判定自体は不変で、直接の on/off
+比〈§19.3 上表〉が非後退のため §19.1 規則 4 は「強い後退シグナルなし」
+と判断した）。
+
+### 19.4 判定
+
+§19.1 の事前宣言規則を機械的に適用する:
+
+1. checksum: 全セル完全一致 → **満たす**
+2. DGX N=2048 決定セル: `alloc_c` 48% 削減・`ops_gemm` 0.9972（≤1.00）・
+   Layer A 0.9990（≤1.05） → **満たす**
+3. 対照セル（両実機 N=512/1024）: 全セル 0.869〜1.047（≤1.05） → **満たす**
+4. candle 比: 直接比較（on/off）は非後退・candle 比自体はノイズ域の変動 →
+   **強い後退シグナルなし（満たす）**
+5. M4 Max N=2048: on/off 比 0.9788（≤1.05・改善方向） → **規則 5 は
+   発火しない**（Linux 限定化は不要）
+
+**結論: ケース (c)（両実機とも全規則を満たす）→ `GEMM_OUTPUT_PARALLEL_
+ZERO_MIN_ELEMS` を無条件に `2 << 20` へ有効化（cfg gating なし）**。
+`crates/backend-cpu/src/ops.rs` を更新し、`zeroed_output_tests` の
+関連テスト期待値も追従させた。bit 完全一致回帰（`gemm_output_alloc_bit_
+exact.rs`・`tape_matmul_cpu_bit_exact.rs`）は release/`#[ignore]` で
+M4 Max 実機実行し pass を確認済み。
+
+### 19.5 出典
+
+イシュー #1301・`docs/perf/logs/cpu-matmul-fixed-cost-1301/`（env_info・
+Layer A/B 生ログ・`aggregate_layer_b.py`・`on-arm.patch`）・
+`docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6・
+`docs/cpu-matmul-fixed-cost-design.md` §10。

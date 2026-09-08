@@ -1,0 +1,13 @@
+diff --git a/crates/backend-cpu/src/ops.rs b/crates/backend-cpu/src/ops.rs
+index 2c67fe7..7dd41e5 100644
+--- a/crates/backend-cpu/src/ops.rs
++++ b/crates/backend-cpu/src/ops.rs
+@@ -149,7 +149,7 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
+ /// ため、イシュー #1301 が DGX 実機実測で有効化可否を判断する
+ /// （`docs/cpu-matmul-fixed-cost-design.md` §10）。有効化する場合は
+ /// `2 << 20`（8 MiB 相当。設計時の暫定値）等へ差し替える。
+-pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = usize::MAX;
++pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = 2 << 20;
+ 
+ /// [`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`] 以上の並列ゼロ書き込みにおける
+ /// rayon チャンク粒度（要素数。イシュー #1299）。`with_min_len` へ渡し
