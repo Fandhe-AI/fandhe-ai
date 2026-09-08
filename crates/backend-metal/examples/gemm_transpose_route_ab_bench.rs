@@ -139,6 +139,30 @@
 //! `Some`・`0 ≤ kernel_gpu ≤ commit_wait ≤ wall`）違反は fail-closed で
 //! 当該ラウンドを `valid=false`・関連する差分／spread を `NA` として
 //! 報告し、既定の壁時計判定出力を失わせない。
+//!
+//! ## MIN_WARMUP 増加試行モード（イシュー #1261）
+//!
+//! フェーズ 1 の単発スパイクが原因候補 (b)（ウォームアップ不足。GPU
+//! クロック〈DVFS〉が計測開始直後にまだ定常状態へ達していない可能性）
+//! に起因するかを切り分けるため、`--min-warmup-secs=<N>`（`--phase1-only`／
+//! `--gpu-timestamps` と順序不問で併用可）を指定すると、既定
+//! `MIN_WARMUP`（3 秒）の代わりに `N` 秒をフェーズ 1・フェーズ 2 双方の
+//! `AbConfig` へ渡す。`N` は **3〜600 の整数秒**（既定値を下回る「減らす
+//! 方向」の指定は拒否——原因候補 (b) の切り分けは増やす方向の試行に
+//! 限定する `docs/perf/metal-gemm-transpose-tiled.md` §5.6 の計画上の
+//! 制約）。片方のフェーズだけへ適用すると A/B 側と対照側で warmup が
+//! 異なる非対称が生じるため、両方へ一貫適用する。
+//!
+//! ```sh
+//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release --features internal-diagnostics -- --phase1-only --gpu-timestamps --min-warmup-secs=9
+//! ```
+//!
+//! 指定時のみ冒頭に `phase1_min_warmup_override_secs=N` を出力する（実効値
+//! をログ自身に残すことで、e.g. `docs/perf/logs/
+//! metal-gemm-transpose-route-ab-1242/1261-aggregate.py` がどの run が
+//! どの MIN_WARMUP で計測されたかを再現できるようにする）。未指定時の
+//! 出力（既定 `--phase1-only`／`--gpu-timestamps` の出力を含む）はバイト
+//! 単位で不変。
 
 /// `parse_args_from` の解析結果（イシュー #1251）。
 ///
@@ -156,6 +180,26 @@ struct CliArgs {
     /// GPU タイムスタンプ計装版へ置換する（イシュー #1259。`--phase1-only`
     /// と順序不問で併用可）。
     gpu_timestamps: bool,
+    /// `Some(n)` なら既定のウォームアップ下限（[`DEFAULT_MIN_WARMUP_SECS`]。
+    /// 3 秒）の代わりに `n` 秒をフェーズ 1・フェーズ 2 双方の `AbConfig`
+    /// へ渡す（イシュー #1261。ウォームアップ不足〈原因候補 (b)〉の
+    /// 切り分け用。既定値を「減らす方向」の指定は受け付けない——
+    /// [`parse_min_warmup_secs`] 参照）。
+    min_warmup_secs: Option<u64>,
+}
+
+/// フェーズ 1・フェーズ 2 共通のウォームアップ下限（`macos_impl::
+/// phase1_stability_selfcheck`／`phase2_route_ab` が `--min-warmup-secs`
+/// 未指定時に使う値）の既定値（秒）の単一真実源（イシュー #1261）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const DEFAULT_MIN_WARMUP_SECS: u64 = 3;
+
+/// `--min-warmup-secs=<N>` 解析結果（[`CliArgs::min_warmup_secs`]）から
+/// 実効 `Duration` を求める純関数（イシュー #1261）。`None`（未指定）なら
+/// [`DEFAULT_MIN_WARMUP_SECS`] を返す。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn min_warmup_override_duration(min_warmup_secs: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_secs(min_warmup_secs.unwrap_or(DEFAULT_MIN_WARMUP_SECS))
 }
 
 /// `std::env::args()` を**一度だけ**走査して `--phase1-only`／
@@ -171,17 +215,22 @@ struct CliArgs {
 /// 分離することで、Linux CI の `#[cfg(test)]` から引数列を注入して検証
 /// できる。
 ///
-/// 許可する引数は `--phase1-only`／`--gpu-timestamps` のみ（順序不問で
-/// 併用可）。それ以外の引数・重複指定は `Err` で fail-closed に拒否する
-/// （呼び出し元は `MetalContext::new` に到達する前にこの結果を検査し、
-/// 不正引数なら GPU を触らずに終了する）。プロセス内リピート
-/// （`--repeat=N`）・`--help` 等は意図的に非対応（本 example ヘッダ doc
-/// comment 参照。必要になれば #1249 配下で別イシュー）。環境変数は使わない
-/// （#1454 の引数方式に統一。イシュー #1259）。
+/// 許可する引数は `--phase1-only`／`--gpu-timestamps`／
+/// `--min-warmup-secs=<N>`（単一トークン。`=` 必須・値は 3〜600 の整数
+/// 秒。イシュー #1261）のみ（順序不問で併用可）。それ以外の引数・
+/// 重複指定は `Err` で fail-closed に拒否する（呼び出し元は
+/// `MetalContext::new` に到達する前にこの結果を検査し、不正引数なら GPU
+/// を触らずに終了する）。プロセス内リピート（`--repeat=N`）・`--help` 等
+/// は意図的に非対応（本 example ヘッダ doc comment 参照。必要になれば
+/// #1249 配下で別イシュー）。環境変数は使わない（#1454 の引数方式に統一。
+/// イシュー #1259）。`--min-warmup-secs 9`（値をスペース区切りの別トークン
+/// で渡す形）は本関数が認識する形式ではないため未知の引数として拒否される
+/// （`=` 必須の設計）。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, String> {
     let mut phase1_only = false;
     let mut gpu_timestamps = false;
+    let mut min_warmup_secs: Option<u64> = None;
     for arg in args {
         match arg.as_str() {
             "--phase1-only" => {
@@ -200,9 +249,18 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, S
                 }
                 gpu_timestamps = true;
             }
+            _ if arg.starts_with("--min-warmup-secs=") => {
+                if min_warmup_secs.is_some() {
+                    return Err(format!(
+                        "--min-warmup-secs は複数回指定できない（重複指定）: '{arg}'"
+                    ));
+                }
+                min_warmup_secs = Some(parse_min_warmup_secs(&arg)?);
+            }
             _ => {
                 return Err(format!(
-                    "未知の引数: '{arg}'（許可される引数は --phase1-only／--gpu-timestamps のみ）"
+                    "未知の引数: '{arg}'（許可される引数は --phase1-only／--gpu-timestamps／\
+                     --min-warmup-secs=<N> のみ）"
                 ));
             }
         }
@@ -210,7 +268,35 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, S
     Ok(CliArgs {
         phase1_only,
         gpu_timestamps,
+        min_warmup_secs,
     })
+}
+
+/// `--min-warmup-secs=<N>` の値部分（`arg` は `--min-warmup-secs=` で
+/// 始まる前提）を解析し、`3 ≤ N ≤ 600` の範囲検証まで行う（イシュー
+/// #1261）。下限 3 は既定値 [`DEFAULT_MIN_WARMUP_SECS`]（3 秒）を下回る
+/// 「減らす方向」の指定を拒否するため（原因候補 (b) の切り分けは
+/// ウォームアップを**増やす**方向の試行に限定する計画上の制約。
+/// `docs/perf/metal-gemm-transpose-tiled.md` §5.6 参照）。上限 600 は
+/// 誤指定（桁間違い等）による長時間占有事故を防ぐための安全弁。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn parse_min_warmup_secs(arg: &str) -> Result<u64, String> {
+    let value = arg
+        .strip_prefix("--min-warmup-secs=")
+        .expect("呼び出し元が prefix 一致を確認済み");
+    if value.is_empty() {
+        return Err(format!("--min-warmup-secs の値が空: '{arg}'"));
+    }
+    let n: u64 = value
+        .parse()
+        .map_err(|_| format!("--min-warmup-secs の値が非数値: '{arg}'"))?;
+    if !(3..=600).contains(&n) {
+        return Err(format!(
+            "--min-warmup-secs は 3〜600 の範囲でなければならない（既定値 3 秒を下回る指定・\
+             600 秒超の指定はいずれも拒否）。指定値: '{arg}'"
+        ));
+    }
+    Ok(n)
 }
 
 /// [`round_extrema`] の戻り値。`phase1_round_stats` 行の `min_secs`／
@@ -697,7 +783,8 @@ mod macos_impl {
     // `_size_line`）へ切り出してある。
     use super::{
         GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round, aggregate_gpu_host_size,
-        format_gpu_host_round_line, format_gpu_host_size_line, measured_tail, round_extrema,
+        format_gpu_host_round_line, format_gpu_host_size_line, measured_tail,
+        min_warmup_override_duration, round_extrema,
     };
 
     /// `gemm_transpose_tile_sweep.rs`・`gemm_bench.rs` と同一値（決定的
@@ -715,7 +802,13 @@ mod macos_impl {
     /// しない）。
     const ROUNDS: usize = 10;
     const COOLDOWN: Duration = Duration::from_secs(8);
-    const MIN_WARMUP: Duration = Duration::from_secs(3);
+    // ウォームアップ下限の既定値は [`super::DEFAULT_MIN_WARMUP_SECS`]
+    // （単一真実源）を [`super::min_warmup_override_duration`] 経由で使う
+    // （イシュー #1261。`--min-warmup-secs=<N>` 未指定時は同値になる）。
+    // 本モジュール内に `MIN_WARMUP` 定数として複製すると
+    // `phase1_stability_selfcheck`／`phase2_route_ab` の呼び出し側が両方
+    // ともオーバーライド経由の呼び出しへ切り替わった結果 dead_code に
+    // なるため、定数としては保持しない。
 
     fn tflops(m: usize, n: usize, k: usize, median_secs: f64) -> f64 {
         let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
@@ -917,6 +1010,7 @@ mod macos_impl {
         ctx: &MetalContext,
         gemm: &MetalGemm,
         gpu_timestamps: bool,
+        min_warmup_secs: Option<u64>,
     ) -> bool {
         // 安定性ゲートの値自体は `bench_harness::ab::STABILITY_SPREAD_GATE`
         // を単一真実源とする（`docs/perf/metal-bench-noise-protocol.md` と
@@ -925,7 +1019,13 @@ mod macos_impl {
         const SPREAD_GATE: f64 = bench_harness::ab::STABILITY_SPREAD_GATE;
         println!("--- フェーズ 1: 安定性セルフチェック（対照カーネル: dispatch_auto）---");
 
-        let ab_config = AbConfig::new(ROUNDS, COOLDOWN, MIN_WARMUP)
+        // `--min-warmup-secs=<N>`（イシュー #1261）が指定されていれば既定
+        // `MIN_WARMUP`（3 秒）の代わりに使う。フェーズ 1・フェーズ 2 の
+        // 両方へ一貫適用する契約（`min_warmup_override_duration`
+        // ドキュメンテーションコメント参照）に従い、本関数は呼び出し元
+        // （`main`）から渡された値をそのまま使う。
+        let effective_min_warmup = min_warmup_override_duration(min_warmup_secs);
+        let ab_config = AbConfig::new(ROUNDS, COOLDOWN, effective_min_warmup)
             .expect("ROUNDS は偶数固定のため AbConfig::new は失敗しない");
         let measurement_config = MeasurementConfig::default();
 
@@ -1184,12 +1284,15 @@ mod macos_impl {
 
     /// フェーズ 2: 全 10 形状 × NT/TN/TT（計 30 セル）の A/B を計測し、
     /// 総括判定（`verdict`）を出力する。
-    fn phase2_route_ab(ctx: &MetalContext, gemm: &MetalGemm) {
+    fn phase2_route_ab(ctx: &MetalContext, gemm: &MetalGemm, min_warmup_secs: Option<u64>) {
         println!(
             "--- フェーズ 2: 転置タイル variant ルーティング A/B（A=classic strided / B=strided tiled）---"
         );
 
-        let ab_config = AbConfig::new(ROUNDS, COOLDOWN, MIN_WARMUP)
+        // フェーズ 1 と同じ実効値を使う（イシュー #1261。片方だけ変えると
+        // A/B 側と対照側で warmup が異なる非対称が生じるため）。
+        let effective_min_warmup = min_warmup_override_duration(min_warmup_secs);
+        let ab_config = AbConfig::new(ROUNDS, COOLDOWN, effective_min_warmup)
             .expect("ROUNDS は偶数固定のため AbConfig::new は失敗しない");
         let measurement_config = MeasurementConfig::default();
 
@@ -1358,8 +1461,15 @@ mod macos_impl {
             // 得た値であることを識別する。
             println!("phase1_workload=gpu_timestamps");
         }
+        if let Some(n) = args.min_warmup_secs {
+            // イシュー #1261: 原因候補 (b)（ウォームアップ不足）切り分け用。
+            // 実効値をログ自身に残すことで、e.g. `1261-aggregate.py` が
+            // どの run がどの MIN_WARMUP で計測されたかを再現できる。
+            println!("phase1_min_warmup_override_secs={n}");
+        }
 
-        let phase1_ok = phase1_stability_selfcheck(&ctx, &gemm, args.gpu_timestamps);
+        let phase1_ok =
+            phase1_stability_selfcheck(&ctx, &gemm, args.gpu_timestamps, args.min_warmup_secs);
 
         if args.phase1_only {
             // イシュー #1249/#1251: `--phase1-only` はフェーズ 1 が安定性
@@ -1390,7 +1500,7 @@ mod macos_impl {
             return;
         }
 
-        phase2_route_ab(&ctx, &gemm);
+        phase2_route_ab(&ctx, &gemm, args.min_warmup_secs);
     }
 }
 
@@ -1422,7 +1532,8 @@ mod cli_and_round_stats_tests {
     use super::{
         CliArgs, GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round,
         aggregate_gpu_host_size, format_gpu_host_round_line, format_gpu_host_size_line,
-        measured_tail, parse_args_from, round_extrema,
+        measured_tail, min_warmup_override_duration, parse_args_from, parse_min_warmup_secs,
+        round_extrema,
     };
 
     fn args(items: &[&str]) -> Vec<String> {
@@ -1437,6 +1548,7 @@ mod cli_and_round_stats_tests {
             CliArgs {
                 phase1_only: false,
                 gpu_timestamps: false,
+                min_warmup_secs: None,
             }
         );
     }
@@ -1450,6 +1562,7 @@ mod cli_and_round_stats_tests {
             CliArgs {
                 phase1_only: true,
                 gpu_timestamps: false,
+                min_warmup_secs: None,
             }
         );
     }
@@ -1479,6 +1592,7 @@ mod cli_and_round_stats_tests {
             CliArgs {
                 phase1_only: false,
                 gpu_timestamps: true,
+                min_warmup_secs: None,
             }
         );
     }
@@ -1496,6 +1610,7 @@ mod cli_and_round_stats_tests {
                 CliArgs {
                     phase1_only: true,
                     gpu_timestamps: true,
+                    min_warmup_secs: None,
                 }
             );
         }
@@ -1506,6 +1621,126 @@ mod cli_and_round_stats_tests {
         let err = parse_args_from(args(&["--gpu-timestamps", "--gpu-timestamps"]))
             .expect_err("重複指定は fail-closed に拒否するはず");
         assert!(err.contains("複数回指定できない"));
+    }
+
+    // イシュー #1261: `--min-warmup-secs=<N>` の解析テスト群。
+
+    #[test]
+    fn parse_args_from_min_warmup_secs_accepts_boundary_and_typical_values() {
+        for (raw, expected) in [
+            ("--min-warmup-secs=3", 3u64),
+            ("--min-warmup-secs=9", 9),
+            ("--min-warmup-secs=600", 600),
+        ] {
+            let parsed = parse_args_from(args(&[raw]))
+                .unwrap_or_else(|e| panic!("{raw} は成功するはず: {e}"));
+            assert_eq!(
+                parsed,
+                CliArgs {
+                    phase1_only: false,
+                    gpu_timestamps: false,
+                    min_warmup_secs: Some(expected),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_from_min_warmup_secs_rejects_below_default() {
+        // 既定値（3 秒）を下回る「減らす方向」の指定は拒否する
+        // （原因候補 (b) 切り分けは増やす方向の試行に限定する計画上の制約）。
+        for raw in ["--min-warmup-secs=2", "--min-warmup-secs=0"] {
+            let err = parse_args_from(args(&[raw])).expect_err(&format!("{raw} は拒否されるはず"));
+            assert!(err.contains("3〜600"), "raw={raw} err={err}");
+        }
+    }
+
+    #[test]
+    fn parse_args_from_min_warmup_secs_rejects_above_upper_bound() {
+        let err = parse_args_from(args(&["--min-warmup-secs=601"]))
+            .expect_err("上限 600 秒超は拒否されるはず");
+        assert!(err.contains("3〜600"));
+    }
+
+    #[test]
+    fn parse_args_from_min_warmup_secs_rejects_non_numeric_or_empty() {
+        for raw in [
+            "--min-warmup-secs=abc",
+            "--min-warmup-secs=",
+            "--min-warmup-secs=9.5",
+            "--min-warmup-secs=-1",
+        ] {
+            let err = parse_args_from(args(&[raw])).expect_err(&format!("{raw} は拒否されるはず"));
+            assert!(
+                err.contains("非数値") || err.contains("値が空"),
+                "raw={raw} err={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_from_min_warmup_secs_rejects_duplicate() {
+        let err = parse_args_from(args(&["--min-warmup-secs=9", "--min-warmup-secs=9"]))
+            .expect_err("重複指定は fail-closed に拒否するはず");
+        assert!(err.contains("複数回指定できない"));
+    }
+
+    #[test]
+    fn parse_args_from_min_warmup_secs_space_separated_value_is_unknown_arg() {
+        // `--min-warmup-secs 9`（値を別トークンで渡す形）は `=` 必須の
+        // 本関数が認識しない形式のため、`9` 単独が未知の引数として
+        // fail-closed に拒否される（意図した挙動。plan §3.2 参照）。
+        let err = parse_args_from(args(&["--min-warmup-secs", "9"]))
+            .expect_err("space 区切りの値指定は未知引数として拒否されるはず");
+        assert!(err.contains("未知の引数"), "err={err}");
+    }
+
+    #[test]
+    fn parse_args_from_min_warmup_secs_combines_with_other_flags_regardless_of_order() {
+        for combo in [
+            vec!["--phase1-only", "--gpu-timestamps", "--min-warmup-secs=9"],
+            vec!["--min-warmup-secs=9", "--phase1-only", "--gpu-timestamps"],
+        ] {
+            let parsed = parse_args_from(args(&combo)).expect("順序不問で併用できるはず");
+            assert_eq!(
+                parsed,
+                CliArgs {
+                    phase1_only: true,
+                    gpu_timestamps: true,
+                    min_warmup_secs: Some(9),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn min_warmup_override_duration_defaults_when_none() {
+        assert_eq!(
+            min_warmup_override_duration(None),
+            std::time::Duration::from_secs(super::DEFAULT_MIN_WARMUP_SECS)
+        );
+    }
+
+    #[test]
+    fn min_warmup_override_duration_uses_override_when_some() {
+        assert_eq!(
+            min_warmup_override_duration(Some(9)),
+            std::time::Duration::from_secs(9)
+        );
+    }
+
+    #[test]
+    fn parse_min_warmup_secs_boundary_values_ok() {
+        assert_eq!(
+            parse_min_warmup_secs("--min-warmup-secs=3"),
+            Ok(3),
+            "下限 3 は受理されるはず"
+        );
+        assert_eq!(
+            parse_min_warmup_secs("--min-warmup-secs=600"),
+            Ok(600),
+            "上限 600 は受理されるはず"
+        );
     }
 
     /// [`GpuHostSample`] の共通ビルダ（テスト用）。デフォルトは
