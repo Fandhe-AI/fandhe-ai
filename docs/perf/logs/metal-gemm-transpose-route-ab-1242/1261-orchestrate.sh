@@ -62,11 +62,33 @@ current_load1() {
 
 # 自プロセス（オーケストレータ）・本 example 以外の該当プロセスを
 # 検出し、伏字化して1行ずつ出す（0 件なら何も出さない）。
+#
+# 注意（codex-review 指摘・PR #1457）: macOS（BSD）の `pgrep` に `-E`
+# オプションは存在しない（`pgrep` は既定で拡張正規表現を解釈するため
+# `-E` は不要かつ無効な引数でありコマンド自体が失敗する）。以前は
+# `-E` を渡していたため `pgrep` が毎回失敗し、その失敗が
+# `| grep -v ...` のパイプラインに吸収されて `procs=""`・
+# `proc_count=0`（該当プロセスなしの意味に誤読される値）になっていた
+# ——低負荷時であっても実際には他 GPU プロセスの有無を一切検査できて
+# いなかった。`-E` を除去し、`pgrep` 自体の終了コードも呼び出し元
+# （ゲートループ）で確認できるよう関数の戻り値として伝播する。
 gpu_watch_processes() {
-    pgrep -fl -E "${GPU_WATCH_PATTERN}" 2>/dev/null \
+    local pgrep_out
+    pgrep_out="$(pgrep -fl "${GPU_WATCH_PATTERN}" 2>/dev/null)"
+    local pgrep_status=$?
+    # pgrep の終了コード: 0=一致あり、1=一致なし、2 以上=起動失敗
+    # （不正オプション等）。1（一致なし）は正常系として扱うが、
+    # 2 以上は「検査できていない」ことを示すため呼び出し元へ伝える。
+    if [ "${pgrep_status}" -ge 2 ]; then
+        echo "PGREP_ERROR status=${pgrep_status}" >&2
+        return 2
+    fi
+    printf '%s\n' "${pgrep_out}" \
         | grep -v "1261-orchestrate.sh" \
         | grep -v "gemm_transpose_route_ab_bench" \
+        | grep -v '^$' \
         | sed -E "${SANITIZE_SED}"
+    return 0
 }
 
 echo "gate_start_unix=$(date +%s)" >> "${GATE_LOG}"
@@ -75,18 +97,24 @@ prev_ok=0
 for attempt in $(seq 1 "${GATE_MAX_ATTEMPTS}"); do
     load1="$(current_load1)"
     procs="$(gpu_watch_processes)"
+    pgrep_check_status=$?
     proc_count=0
     if [ -n "${procs}" ]; then
         proc_count=$(printf '%s\n' "${procs}" | grep -c .)
     fi
     ok=0
-    if awk -v l="${load1}" -v t="${GATE_LOAD_THRESHOLD}" 'BEGIN{exit !(l<t)}'; then
+    # pgrep_check_status != 0（起動失敗。「一致なし」を意味する 1 は
+    # gpu_watch_processes 内部で正常系として吸収済みのためここでは
+    # 現れない）の場合は「検査できていない」として fail-closed に
+    # ok=0 とする（誤って proc_count=0 のままゲート通過させない）。
+    if [ "${pgrep_check_status}" -eq 0 ] \
+        && awk -v l="${load1}" -v t="${GATE_LOAD_THRESHOLD}" 'BEGIN{exit !(l<t)}'; then
         if [ "${proc_count}" -eq 0 ]; then
             ok=1
         fi
     fi
     {
-        echo "attempt=${attempt} load1=${load1} proc_count=${proc_count} ok=${ok}"
+        echo "attempt=${attempt} load1=${load1} proc_count=${proc_count} pgrep_check_status=${pgrep_check_status} ok=${ok}"
         if [ -n "${procs}" ]; then
             printf '%s\n' "${procs}" | sed 's/^/  matched: /'
         fi
@@ -131,6 +159,19 @@ snapshot() {
 }
 
 # 実行中サンプリングをバックグラウンドで開始し、PID を返す。
+#
+# 注意（codex-review 指摘・PR #1457）: 以下 2 つの無限ループはループ本体
+# の出力を明示的にファイルへリダイレクトしているが、`( ... ) &` の
+# サブシェル自体の stdout（fd 1）はこの関数の呼び出し元
+# （`sampling_pids="$(start_during_sampling ...)"` というコマンド置換）
+# のパイプ書き込み端を継承したままになる。ループが無限に回り続ける限り
+# この fd 1 は閉じられないため、コマンド置換は PID を echo した後も
+# パイプの読み取り側で EOF を待ち続け、`sampling_pids` への代入が
+# 停止していた（排他ゲート通過後もベンチ本体へ到達できない）。
+# `>/dev/null 2>&1` でサブシェル自体の fd 1/2 を明示的に切り離し
+# （ループ内部のファイルへのリダイレクトは個々のコマンドに対して
+# 別途行われているため、この変更はログ出力先には影響しない）、
+# 継承されたパイプの書き込み端を確実に閉じる。
 start_during_sampling() {
     local run_label="$1"
     local uptime_log="${LOGDIR}/1261-uptime-during-${run_label}.log"
@@ -142,7 +183,7 @@ start_during_sampling() {
             { echo "t=$(date +%s)"; uptime; } | sed -E "${SANITIZE_SED}" >> "${uptime_log}"
             sleep 30
         done
-    ) &
+    ) >/dev/null 2>&1 &
     local uptime_pid=$!
     (
         while true; do
@@ -154,7 +195,7 @@ start_during_sampling() {
             } | sed -E "${SANITIZE_SED}" >> "${pmset_log}"
             sleep 60
         done
-    ) &
+    ) >/dev/null 2>&1 &
     local pmset_pid=$!
     echo "${uptime_pid} ${pmset_pid}"
 }

@@ -81,6 +81,10 @@ class RunLog:
     label: str
     rounds: list[RoundSample] = field(default_factory=list)
     min_warmup_override_secs: int | None = None
+    # 解析失敗（`KeyError`/`ValueError`）した行のうち `size` だけは救出
+    # できたもの（codex-review 指摘・PR #1457: 欠落・解析失敗を含む
+    # サイズを黙って除外せず NA として明示するための帰属先集合）。
+    incomplete_sizes: set[int] = field(default_factory=set)
 
     def rounds_for_size(self, size: int) -> list[RoundSample]:
         return sorted(
@@ -119,8 +123,18 @@ def load_run_log(path: str) -> RunLog:
                     )
                 )
             except (KeyError, ValueError):
-                # 不完全な行（途中打ち切りログ等）は集計対象から除外する
-                # （fail-closed。判定は残りのラウンドのみで行う）。
+                # 不完全な行（途中打ち切りログ等）はラウンドとしては
+                # 追加しないが、`size` だけは救出できる場合が多いため
+                # `incomplete_sizes` へ記録し、当該サイズの判定を
+                # NA へ倒す（codex-review 指摘・PR #1457: 以前は黙って
+                # 除外していたため、欠落ラウンドを含むログからでも
+                # 確定的な帰属〈GPU側/host側〉が出てしまっていた）。
+                size_str = kv.get("size")
+                if size_str is not None:
+                    try:
+                        run.incomplete_sizes.add(int(size_str))
+                    except ValueError:
+                        pass
                 continue
     return run
 
@@ -148,16 +162,45 @@ class CellVerdict:
     kernel_gpu_occupancy: float | None  # kernel_gpu_median / wall_median
 
 
-def classify_cell(rounds: list[RoundSample]) -> CellVerdict | None:
+def classify_cell(
+    rounds: list[RoundSample], incomplete: bool = False
+) -> CellVerdict | None:
     """計画 §3.4 のスパイク所在判定を 1 サイズ分適用する。
 
-    `valid=false` のラウンドが 1 つでもあれば NA を返す（fail-closed。
-    計画 §3.4「valid=false ラウンドを含むサイズは NA で帰属しない」）。
+    NA（fail-closed）で帰属しない条件（計画 §3.4 に加え、
+    codex-review 指摘・PR #1457 で追加）:
+    - `valid=false` のラウンドが 1 つでもある
+    - `incomplete=True`（解析失敗行から `size` のみ救出できたケースを
+      含む。呼び出し元が `RunLog.incomplete_sizes` から渡す）
+    - ラウンドの `round_idx` 列が 0 始まりの連番として揃っていない
+      （欠落・重複を検出する。期待ラウンド数を外部から与えられない
+      ため、収集できたラウンドの `round_idx` 集合が
+      `{0, 1, ..., len(rounds)-1}` と一致することを整合性の代理指標
+      とする）
     """
     if not rounds:
         return None
     size = rounds[0].size
-    if any(not r.valid for r in rounds):
+    if incomplete or any(not r.valid for r in rounds):
+        return CellVerdict(
+            size=size,
+            r_star=-1,
+            gpu_share=None,
+            attribution="NA",
+            host_subclass=None,
+            delta_wall=0.0,
+            delta_kernel_gpu=None,
+            kernel_gpu_occupancy=None,
+        )
+
+    round_idxs = sorted(r.round_idx for r in rounds)
+    if round_idxs != list(range(len(rounds))):
+        # ラウンド欠落・重複あり（例: 先頭ラウンドが丸ごと欠けている
+        # 場合、`round_idxs` は `{1, 2, ...}` のようになり
+        # `range(len(rounds))` と一致しない）。以前はここを検査せず
+        # 配列位置をそのまま `round_idx` として扱っていたため、先頭
+        # ラウンド欠落時に誤って `r*=0`（実際には別ラウンド）と判定
+        # しうる不整合があった。
         return CellVerdict(
             size=size,
             r_star=-1,
@@ -170,19 +213,23 @@ def classify_cell(rounds: list[RoundSample]) -> CellVerdict | None:
         )
 
     wall_vals = [r.wall_median_secs for r in rounds]
-    r_star = max(range(len(rounds)), key=lambda i: wall_vals[i])
-    r_star_round = rounds[r_star]
+    r_star_pos = max(range(len(rounds)), key=lambda i: wall_vals[i])
+    r_star_round = rounds[r_star_pos]
+    # 出力する r* は配列位置ではなく元の `round_idx`
+    # （codex-review 指摘・PR #1457）。連番整合性チェックを通過した後
+    # であれば両者は数値として一致するが、意味上は常に「元の
+    # round_idx」を報告する契約とし、チェック方式が将来変わっても
+    # 出力契約が揺らがないようにする。
+    r_star = r_star_round.round_idx
 
     wall_med = median(wall_vals)
     kgpu_vals = [r.kernel_gpu_median_secs for r in rounds]
     kgpu_med = median([v for v in kgpu_vals if v is not None])
-    commit_vals = [r.commit_wait_median_secs for r in rounds]
     upload_vals = [r.upload_median_secs for r in rounds]
     alloc_vals = [r.alloc_median_secs for r in rounds]
     encode_vals = [r.encode_median_secs for r in rounds]
     readback_vals = [r.readback_median_secs for r in rounds]
 
-    commit_med = median(commit_vals)
     upload_med = median(upload_vals)
     alloc_med = median(alloc_vals)
     encode_med = median(encode_vals)
@@ -193,15 +240,25 @@ def classify_cell(rounds: list[RoundSample]) -> CellVerdict | None:
     if r_star_round.kernel_gpu_median_secs is not None and kgpu_med is not None:
         delta_kgpu = r_star_round.kernel_gpu_median_secs - kgpu_med
 
+    # `commit_wait_minus_gpu` の基準値は「ラウンドごとの
+    # (commit_wait - kernel_gpu) の系列」の中央値であって、
+    # `median(commit_wait) - median(kernel_gpu)` ではない
+    # （一般に一致しない。codex-review 指摘・PR #1457）。
+    commit_minus_gpu_series = [
+        r.commit_wait_median_secs - r.kernel_gpu_median_secs
+        for r in rounds
+        if r.kernel_gpu_median_secs is not None
+    ]
+    commit_minus_gpu_med = median(commit_minus_gpu_series)
     delta_commit_minus_gpu = None
     if (
         r_star_round.kernel_gpu_median_secs is not None
-        and kgpu_med is not None
-        and commit_med is not None
+        and commit_minus_gpu_med is not None
     ):
-        r_commit_minus_gpu = r_star_round.commit_wait_median_secs - r_star_round.kernel_gpu_median_secs
-        med_commit_minus_gpu = commit_med - kgpu_med
-        delta_commit_minus_gpu = r_commit_minus_gpu - med_commit_minus_gpu
+        r_commit_minus_gpu = (
+            r_star_round.commit_wait_median_secs - r_star_round.kernel_gpu_median_secs
+        )
+        delta_commit_minus_gpu = r_commit_minus_gpu - commit_minus_gpu_med
 
     delta_upload = r_star_round.upload_median_secs - upload_med if upload_med is not None else 0.0
     delta_alloc = r_star_round.alloc_median_secs - alloc_med if alloc_med is not None else 0.0
@@ -261,7 +318,7 @@ def render_run_table(run: RunLog) -> str:
     lines.append("|---|---|---|---|---|---|---|")
     for size in SIZES:
         rounds = run.rounds_for_size(size)
-        v = classify_cell(rounds)
+        v = classify_cell(rounds, incomplete=size in run.incomplete_sizes)
         if v is None:
             lines.append(f"| {size} | - | - | NA(no data) | - | - | - |")
             continue
@@ -344,6 +401,88 @@ def self_test() -> None:
         assert v.attribution == "GPU側", f"kernel_gpu も比例して増えたので GPU 側のはず: {v.attribution}"
     finally:
         os.unlink(path)
+
+    # 追加テスト（codex-review 指摘・PR #1457）: 先頭ラウンド（round=0）
+    # が丸ごと欠落したログ（round=1..4 の 4 ラウンドのみ）を渡すと、
+    # 以前は配列位置 0 を r*=0 として誤って扱いうる不整合があった。
+    # 現在は round_idx の連番整合性チェックにより NA を返すことを検証
+    # する。
+    missing_head_lines = []
+    for i, wall in [(1, 0.02), (2, 0.05), (3, 0.02), (4, 0.02)]:
+        kv = dict(base)
+        kv["round"] = str(i)
+        kv["iters"] = "20"
+        kv["wall_median_secs"] = str(wall)
+        missing_head_lines.append(
+            "phase1_gpu_host_round " + " ".join(f"{k}={v}" for k, v in kv.items())
+        )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(missing_head_lines) + "\n")
+        path2 = f.name
+    try:
+        run2 = load_run_log(path2)
+        assert len(run2.rounds) == 4
+        v2 = classify_cell(run2.rounds_for_size(1024))
+        assert v2 is not None
+        assert v2.attribution == "NA", (
+            f"先頭ラウンド欠落時は round_idx 連番不整合により NA のはず: {v2.attribution}"
+        )
+    finally:
+        os.unlink(path2)
+
+    # 追加テスト（codex-review 指摘・PR #1457）: `commit_wait_minus_gpu`
+    # の基準値は「ラウンドごとの (commit_wait - kernel_gpu) の中央値」
+    # であって「commit_wait の中央値 - kernel_gpu の中央値」ではない
+    # （一般に一致しない）ことを、両者が異なる値になるよう選んだ合成
+    # ログで検証する。
+    #
+    # commit = [0.011, 0.020, 0.005]  kgpu = [0.010, 0.010, 0.001]
+    # 各ラウンドの差分 diff_i = commit_i - kgpu_i = [0.001, 0.010, 0.004]
+    #   median(diff_i) = 0.004  （系列の中央値。新実装）
+    # median(commit) - median(kgpu) = 0.011 - 0.010 = 0.001
+    #   （中央値同士の差分。旧実装。系列の中央値 0.004 と異なる）
+    # r*（wall 最大）はラウンド 1: diff = 0.010
+    #   新実装の delta = 0.010 - 0.004 = 0.006
+    #   旧実装なら       delta = 0.010 - 0.001 = 0.009
+    diff_lines = []
+    diff_base = dict(base)
+    triples = [
+        (0.02, "0.011", "0.010"),
+        (0.05, "0.020", "0.010"),  # r*: wall 最大
+        (0.02, "0.005", "0.001"),
+    ]
+    for i, (wall_v, commit_v, kgpu_v) in enumerate(triples):
+        kv = dict(diff_base)
+        kv["round"] = str(i)
+        kv["iters"] = "20"
+        kv["wall_median_secs"] = str(wall_v)
+        kv["commit_wait_median_secs"] = commit_v
+        kv["kernel_gpu_median_secs"] = kgpu_v
+        diff_lines.append(
+            "phase1_gpu_host_round " + " ".join(f"{k}={v}" for k, v in kv.items())
+        )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(diff_lines) + "\n")
+        path3 = f.name
+    try:
+        run3 = load_run_log(path3)
+        rounds3 = run3.rounds_for_size(1024)
+        v3 = classify_cell(rounds3)
+        assert v3 is not None
+        assert v3.r_star == 1, f"r* はラウンド 1 のはず: {v3.r_star}"
+        assert v3.attribution == "host側", (
+            f"kernel_gpu は横ばいなので host 側のはず: {v3.attribution}"
+        )
+        assert v3.host_subclass == "commit_wait_minus_gpu", (
+            f"host_subclass は commit_wait_minus_gpu が最大のはず: {v3.host_subclass}"
+        )
+    finally:
+        os.unlink(path3)
+
     print("self-test: ok")
 
 

@@ -385,8 +385,21 @@ cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --r
 - 1 分 load average は 30 サンプル全てで 2.0 を上回った（最小 2.40・
   最大 6.92・平均 4.28。`count_below_2.0=0`）
 - GPU プロセス検出（watchlist: `cargo|rustc|bench|gemm_|python|torch|mlx`）
-  は 30 試行すべてで `proc_count=0`（自プロセス・本 example 以外に該当
-  なし）——ゲート不通過の要因は GPU プロセス側ではなく load average 側
+  は 30 試行すべてで `proc_count=0` と記録されていたが、**この値は
+  「該当プロセスなし」の根拠にならない（訂正。codex-review 指摘・
+  PR #1457）**: 当時の `1261-orchestrate.sh` は `pgrep -fl -E "${GPU_WATCH_PATTERN}"`
+  を呼んでいたところ、macOS（BSD）の `pgrep` に `-E` オプションは存在
+  せず毎回コマンド自体が失敗していた（`pgrep` は既定で拡張正規表現を
+  解釈するため `-E` は不要かつ無効な引数）。その失敗（非ゼロ終了・空
+  stdout）が後続の `| grep -v ...` パイプラインに吸収され、実際には
+  他 GPU プロセスの有無を一切検査できないまま機械的に `proc_count=0`
+  が記録されていた。ただしこの回の**ゲート判定結果自体（30 回とも
+  不通過）は本バグの影響を受けない**——`ok=1` は load average 条件
+  （30 サンプル全てで 2.0 超）と `proc_count==0` 条件の両方を要求する
+  AND 条件であり、load average 側が単独で全試行を不通過にしているため、
+  `pgrep` 側の検査可否に関わらず判定結果は変わらない。`pgrep` の
+  `-E` 除去・失敗検知（`pgrep_check_status`）は PR #1457 で是正済みで
+  あり、以降の計測では GPU プロセス側の検査も正しく機能する
 - セッションが「複数のイシューが並列に実行されるワークフロー運用下」
   にあるという実行前提（本イシューの起動プロンプトが明示）と整合する
   結果であり、実装計画（§4 ステップ 5・§1）が事前に想定していたリスク
