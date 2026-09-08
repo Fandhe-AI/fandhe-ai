@@ -57,6 +57,25 @@ GATE_LOG="${LOGDIR}/1261-gate.log"
 # 「実行 1 回につき LOGDIR 内の結果は最後の 1 回分」を契約とし、
 # マーカーは相互排他（どちらか一方のみ存在）を保証する）。
 rm -f "${LOGDIR}/1261-GATE_NOT_PASSED.marker" "${LOGDIR}/1261-ALL_DONE.marker"
+# 同じ理由で、前回実行が生成した run 別ログ・スナップショット・サンプリング
+# ログも開始時に削除する（codex-review 指摘・PR #1457: マーカーと
+# `gate.log` だけを初期化すると、計測成功後の再実行でゲート不通過に
+# なった場合に前回の `1261-<run_label>.log` 等が残り、ゲート結果を参照
+# しない `1261-aggregate.py` へ渡すと前回データから通常の判定が出て
+# 「LOGDIR 内の結果は最後の 1 回分」の契約に反する）。対象は末尾の
+# `run_one` 呼び出しの run_label 一覧と 1 対 1 で対応させる
+# （`run_one`／`start_during_sampling` が生成するファイル名の
+# パターンは各関数を参照）。
+RUN_LABELS="exclusive-run1 exclusive-run2 exclusive-run3 warmup9s-run1 warmup9s-run2"
+for _label in ${RUN_LABELS}; do
+    rm -f \
+        "${LOGDIR}/1261-${_label}.log" \
+        "${LOGDIR}/1261-${_label}-before.txt" \
+        "${LOGDIR}/1261-${_label}-after.txt" \
+        "${LOGDIR}/1261-uptime-during-${_label}.log" \
+        "${LOGDIR}/1261-pmset-during-${_label}.log"
+done
+unset _label
 
 # GPU プロセス watchlist（部分一致）。本スクリプト自身・本 example 以外の
 # ビルド/ベンチ系プロセスを検出する（計画 §3.1「GPU プロセス確認」）。
@@ -263,6 +282,15 @@ stop_during_sampling() {
 run_one() {
     local run_label="$1"
     shift
+    # 開始時クリーンアップ対象（`RUN_LABELS`）に無いラベルは、再実行時に
+    # 前回ログが残留するため fail-closed で拒否する（一覧のドリフト防止）。
+    case " ${RUN_LABELS} " in
+        *" ${run_label} "*) ;;
+        *)
+            echo "run_label '${run_label}' は RUN_LABELS に未登録（開始時クリーンアップ対象外）。中止する。" >&2
+            exit 1
+            ;;
+    esac
     local out_log="${LOGDIR}/1261-${run_label}.log"
 
     snapshot "before ${run_label}" > "${LOGDIR}/1261-${run_label}-before.txt"
