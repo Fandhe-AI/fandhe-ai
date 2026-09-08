@@ -185,6 +185,11 @@ cargo test -p fandhe-ai-backend-cpu --release -- --ignored mc_kc_nc_blocking_swe
 
 ## §7 実機実測結果（2026-08-19・M4 Max）と形状依存 NC 分岐の実装（#749。本番適用は §(ii) 参照）
 
+**KC=128〜512 の細粒度再スイープ（両実機実測）は #1315（`cpu-gemm-candle-cpu-retune.md`
+§8.1）を参照**。本節（#749）は KC 単独拡大（KC=4096 のみ）を M4 Max 単独で検証したもので
+REJECT。#1315 はより細かいグリッドを両実機（DGX Spark GB10 を含む）で再検証し、同じく
+REJECT（現行 KC=256 維持）と確定している。
+
 ### (i) 実測値表
 
 出典: イシュー #749／親 issue #738・#735 に記載の 2026-08-19 M4 Max 実測（5 回計測中央値。

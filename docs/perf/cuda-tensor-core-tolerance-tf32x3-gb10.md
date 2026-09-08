@@ -5,7 +5,7 @@
 
 **GB10 実機実測を完了した（2026-09-07。イシュー #1356 reopen 対応。CUDA_NODE は `docs/real-hardware-verification-env.local.md` から解決し本ドキュメント・ログには書いていない）**。§2〜§10 の記入欄を実測値で充填し、§11 で採否を確定した。
 
-- **P1（`#[ignore]` テスト 2 件）は FAIL した**（`mma_tf32x3_matches_reference_across_shapes` は形状 512×512×512・seed 5004 で `assert_parity` 複合判定 FAIL。`mma_tf32x3_k4096_stress` も FAIL。§10 参照）。P1 不成立のため、本ドキュメントは §11 の 3 択語彙（「opt-in 維持・推奨」／「opt-in 維持・条件付き推奨」／「opt-in 維持・非推奨」）を選ばず、実測 `fail_count`／`max_abs_diff`／`max_rel_err` を「baseline 提案値（未承認）」として §11 に記録し、ユーザー判断へ回す（本ドキュメント §11「P1 が不成立の場合」の運用に従う）。
+- **P1（`#[ignore]` テスト 2 件）は FAIL した**（`mma_tf32x3_matches_reference_across_shapes` は形状 512×512×512・seed 5004 で `assert_parity` 複合判定 FAIL。`mma_tf32x3_k4096_stress` も FAIL。§10 参照）。P1 不成立のため、本ドキュメントは §11 の 3 択語彙（「opt-in 維持・推奨」／「opt-in 維持・条件付き推奨」／「opt-in 維持・非推奨」）を選ばず、実測 `fail_count`／`max_abs_diff`／`max_rel_err` を「baseline 提案値（未承認）」として §11 に記録し、ユーザー判断へ回す（本ドキュメント §11「P1 が不成立の場合」の運用に従う）。**追記（2026-09-08）: ユーザー判断が「opt-in 維持・非推奨」・baseline 不承認で確定した（§11 の「不承認（2026-09-08）」・`docs/cuda-tf32x3-split-single-decision.md` §9）。**
 - P2（対 f64 精度。§7・§11 参照）は形状依存で部分的に不成立（K が支配的な形状〈256×256×1024・256×256×4096〉で `max_abs_diff` が f32 SIMT の 2 倍を超える）。
 - P3（`s²` 比例・`max_rel_err` スケール不変性。§8）は 3 経路とも成立した。
 - P4（純カーネル時間。§9）は 5 形状すべてで `mma_tf32x3 / f32_simt` < 1.0（0.721〜0.930 倍）であり、性能面のみで判断すれば「非推奨」に相当する信号だが、P1 不成立を受けて総合判定としては 3 択を選ばない。
@@ -728,6 +728,8 @@ def aggregate_bench_runs(paths):
 - `mma_tf32x3_matches_reference_across_shapes`（512×512×512, seed 5004）: `fail_count=212/262144, mean_abs_diff=2.152e-5, max_abs_diff=1.469e-4, max_rel_err=4.970e-1`
 - `mma_tf32x3_k4096_stress`（4096³, seed 9001）: `fail_count=151916/16777216, mean_abs_diff=4.872e-4, max_abs_diff=3.731e-3, max_rel_err=1.985e0`
 
+**不承認（2026-09-08）**: 上記 baseline 提案値 2 件はユーザー判断で**承認しない**と確定した（イシュー #1356・親ツリー #1354）。`ParityBaseline` への行追加・`ParityPath::MmaTf32x3` の追加は行わず、`#[ignore]` テスト 2 件（`crates/backend-cuda/tests/gemm_mma_tf32x3.rs`）は厳密ゼロ fail 判定のまま残す（GB10 実機で FAIL する状態は本判断で受け入れた既知 FAIL であり、回帰として扱わない。テストコード非変更）。あわせて §11 の 3 択は**「opt-in 維持・非推奨」**で確定した（P1 FAIL・P4 5 形状すべてで f32 SIMT より遅い〈0.721〜0.930 倍〉・P2 の K 支配的形状での基準超過が根拠。速度で劣る経路のためにテスト契約を緩める価値が薄い）。opt-in 実装 `CudaGemmPrecision::Tf32x3` は残すが本番結線・推奨はしない。確定記録は `docs/cuda-tf32x3-split-single-decision.md` §9 を正とする。
+
 **参考所見（P1 不成立を前提に、仮に P1 を満たしていた場合の傾向）**: P4（性能）は 5 形状すべてで基準未達（0.721〜0.930 倍）であり、P2 も K 支配的形状で 2 倍基準を超える。両者を踏まえると、たとえ P1 が pass していたとしても総合判定は「opt-in 維持・非推奨」寄りのシグナルが強い。ただし P1 自体が不成立（fail=0 を満たさない）ことは、3×TF32 が REQ-2 の厳密ゼロ fail 判定という受け入れ基準を現状満たしていないという、より根本的な問題であり、これは baseline 方式（`ParityBaseline` の非後退検査。`.claude/rules/coding-rust.md` 記載の「実機実測で成立が確認された形状に限り」厳密ゼロ fail 判定を適用する方針）による受け入れへの切り替えを検討するか、`CudaMmaTf32x3Gemm` 実装自体の見直しが必要かの判断をユーザーに委ねる。
 
 ## 12. 制約・スコープ外
@@ -735,7 +737,7 @@ def aggregate_bench_runs(paths):
 - レジスタ圧・occupancy の定量化（`CudaFunction` が非公開のため `internal-diagnostics` 側の拡張が必要。`docs/cuda-tf32x3-split-single-decision.md` §6 参照）
 - `gemm_bias_act`／`gemm_resident_*`／VJP への 3×TF32 適用
 - framework-compare `--tf32` の 3×TF32 対応（ピン `fandhe-ai =0.7.0` は `set_cuda_gemm_precision` を持たない）
-- baseline 行・`ParityPath::MmaTf32x3` の追加（P1 不成立時のみ提案値を記録。承認は別途）
+- baseline 行・`ParityPath::MmaTf32x3` の追加（P1 不成立時のみ提案値を記録。承認は別途）。**→ 2026-09-08 ユーザー判断で不承認と確定（§11 追記参照）**
 - Metal 側の同種検討
 
 ## 13. 生ログ一覧

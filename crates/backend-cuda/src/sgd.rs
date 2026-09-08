@@ -183,6 +183,11 @@ impl CudaSgd {
                 .arg(&use_momentum)
                 .launch(sgd_launch_config(numel as u32))?;
         }
+        // イシュー #1350: launch 成功をここで計数する（graph capture
+        // 中の launch・capture 外の通常 launch のいずれもここを通る。
+        // `graph::step_graph_stats()` の `sgd_kernel_launches` の実体。
+        // ドキュメントは `graph.rs::SGD_KERNEL_LAUNCH_COUNT` 参照）。
+        crate::graph::record_sgd_kernel_launch();
         // ここでは `synchronize()` を呼ばない（イシュー #1013）。SGD は
         // D2H を伴わない唯一の常駐経路であり、旧実装はここで毎回ホストを
         // ブロックしていた（親 #1008 が診断した「都度同期」の主要因の

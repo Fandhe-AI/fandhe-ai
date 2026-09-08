@@ -47,3 +47,14 @@ host-view-readout = []
 # `crates/facade` への path patch を CLI `--config` 経由で併用する前提
 # （README「`--device-checksum`」節参照）。
 device-checksum = []
+
+# イシュー #1350: `--graph <on|stream-only>`（学習 step の CUDA Graph
+# capture 経路。#1349）の実計測結線用。crates.io 公開版
+# `fandhe-ai =0.7.0` には `cuda_graph_step_mode`/`cuda_graph_step_stats`
+# API が未収録（#1349 は未リリースの HEAD で追加）のため、既定ビルド
+# （feature 無効）ではこの feature 配下のコードはコンパイルされず
+# `=0.7.0` ピンのままビルド可能である。有効化する場合は
+# `managed-placement` と同じく `[patch.crates-io.fandhe-ai]` で
+# `crates/facade` への path patch を CLI `--config` 経由で併用する前提
+# （README「`--graph`」節・`run_ab_graph_cuda.sh` 参照）。
+graph-step = []

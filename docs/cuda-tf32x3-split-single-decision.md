@@ -147,3 +147,36 @@ mma_tf32x3_source_issues_mma_sync_from_single_macro_site_called_three_times`）
   ケール依存）は成立、P4（純カーネル時間）は 5 形状すべてで
   `mma_tf32x3 / f32_simt` < 1.0（0.721〜0.930 倍）。詳細は上記ドキュメ
   ント §11 を参照。
+
+## 9. ユーザー判断（2026-09-08）: 「opt-in 維持・非推奨」で確定・baseline 不承認・テストは厳密判定のまま
+
+`docs/perf/cuda-tensor-core-tolerance-tf32x3-gb10.md` §11 で「ユーザー判断へ
+回した」3 択（「opt-in 維持・推奨」／「opt-in 維持・条件付き推奨」／
+「opt-in 維持・非推奨」）について、2026-09-08 にユーザー判断が確定した
+（イシュー #1356・親ツリー #1354）。§8 までの記述は経緯として残し、本節で
+結論を確定する。
+
+- **採否: 「opt-in 維持・非推奨」**。opt-in 実装
+  `CudaGemmPrecision::Tf32x3`（`crates/backend-cuda/src/precision.rs`）と
+  facade `fandhe_ai::set_cuda_gemm_precision` 経由の明示 opt-in 経路は残す
+  が、**本番結線（既定経路・自動選択への組み込み）は行わず、利用も推奨
+  しない**
+- **baseline 提案値 2 件は不承認**。同ドキュメント §11 の「baseline 提案値
+  （未承認）」（`mma_tf32x3_matches_reference_across_shapes` 512×512×512・
+  `mma_tf32x3_k4096_stress` 4096³）を `ParityBaseline`
+  （`crates/backend-cuda/tests/common/parity_baseline.rs`）へ追加せず、
+  `ParityPath::MmaTf32x3` 変種も追加しない
+- **`#[ignore]` テスト 2 件は厳密ゼロ fail 判定のまま残す**
+  （`crates/backend-cuda/tests/gemm_mma_tf32x3.rs`）。GB10 実機では現状
+  FAIL する状態が既知であり、これは本判断で受け入れた**設計どおりの既知
+  FAIL**である（後日の実機実行で FAIL しても回帰として扱わない）。テスト
+  コード・tolerance 定数は変更しない
+- **根拠**: P1（REQ-2 厳密ゼロ fail 判定）FAIL に加え、P4（純カーネル時間）
+  が 5 形状すべてで f32 SIMT より遅く（`mma_tf32x3 / f32_simt` =
+  0.721〜0.930 倍）、P2（対 f64 精度）も K 支配的形状で 2 倍基準を超過し
+  た。速度で劣る経路のためにテスト契約（厳密ゼロ fail 判定）を baseline
+  非後退方式へ緩める価値が薄い
+- **規約への影響**: `.claude/rules/coding-rust.md` の FMA 契約例外
+  （3×TF32 opt-in モードは f32 SIMT 参照実装と bit 一致しない）の記述は
+  opt-in 経路自体が残るため変更しない。REQ-2 の複合判定・tolerance 定数も
+  不変

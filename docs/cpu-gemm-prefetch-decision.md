@@ -180,6 +180,197 @@ E-7（#562・closed）の inline asm による packed A/B プリフェッチ導�
 本追補はドキュメント変更のみであり `crates/` 配下・CI・設定は変更していない。REQ-8 下限値・
 数値一致許容誤差も変更していない。
 
+## 2026-09-08 追補: 帯域律速根拠の追加実測（イシュー #1319）
+
+イシュー #1319（`docs/perf/cpu-gemm-candle-cpu-retune.md` §8.3 候補 2「`vld1q_f32_x3` 経路
+prefetch」の再挑戦条件「格下げ判断を覆す帯域律速の新根拠を先に示すこと」）に対応する。
+上記 2026-08-19 追補（BLIS armv8a・matrixmultiply の一次ソース照合による「原則不要」判断）
+は OSS 実装の設計選択の傍証であり、本リポ自身の実機での帯域律速有無は未計測のまま
+だった。本追補はその空白を実測で埋める。**`unsafe asm!`（PRFM 発行）は本イシューでは
+一切実装しない**（着手はユーザー承認後）。
+
+### 「帯域律速」の 2 系統
+
+- **(a) GEMM 全体の DRAM トラフィック vs 実測到達帯域**: `cpu-gemm-candle-cpu-retune.md`
+  §2 の「A packing 重複コスト（帯域）」仮説そのもの。PRFM では解消できない（移動バイト数を
+  減らさないため）。対策は packing 共有だが `SharedB`／`SharedBPcOuter`／`IcDynamic` は
+  いずれも REJECT 済み
+- **(b) マイクロカーネル k ループ（`vld1q_f32_x3`／`vld1q_f32_x2` ロード）のロード
+  レイテンシ露出**: packed パネルが L1 に無いとき HW ストリームプリフェッチャーが隠蔽
+  しきれず FMA がストールするか。PRFM で解消できる可能性がある（本来の用途）。**本追補の
+  主判定**
+
+### 実測方法（診断ハーネス）
+
+`crates/backend-cpu/src/gemm_prefetch_bandwidth_diag_tests.rs`（`#[cfg(all(test,
+target_arch = "aarch64"))]`。本番経路への変更なし）:
+
+- **G-b（主判定・`microkernel_residency_diag`）**: `NeonKernel::run`（本番マイクロカーネル。
+  MR=8×NR=12・`vld1q_f32_x2`/`x3` ロード）を、packed A/B パネルの常駐先を変えて
+  KC=256 パネル 4096 回呼び出しで計測する。`l1_resident`（同一パネル反復再利用）・
+  `streamed_l2`（~512 KiB 循環）・`streamed_dram`（~256 MiB 循環）の 3 モード ×
+  単スレッド／全コア同時（`crate::thread_limit::effective_num_threads` で本番と同じ
+  既定並列度を算出。DGX Spark GB10 の `cpu_capacity` 誤検出〈`docs/perf/
+  cpu-gemm-default-thread-limit.md`〉を踏まない）。判定量は
+  `R_dram = streamed_dram の中央値 GFLOP/s / l1_resident の中央値 GFLOP/s`
+- **G-a（文脈・`achievable_bandwidth_diag`・`row_panel_traffic_bytes`）**: 512 MiB
+  バッファの f64 read-sum 実測 GB/s（`achievable_bw`）と、`gemm_blis_parallel`
+  （RowPanel）が動かす DRAM トラフィックの上界モデル（B の重複 pack・A の jc 反復重複
+  pack・C RMW をバイト数へ翻訳。`row_panel_traffic_bytes`）から求めた
+  `required_bw = 上界バイト数 / RowPanel 実測時間`（既存 `gemm_blis_variant_ab_1024_2048`
+  の N=2048 median GFLOP/s から換算）の比 `Q = required_bw / achievable_bw`
+
+事前宣言ゲート（計測前に確定・以後変更しない。診断ハーネスのモジュール doc コメントに
+同一内容を記載済み）:
+
+- **根拠あり**: M4 Max で `R_dram <= 0.90` かつ 5 run 中 3 run 以上で `R_dram <= 0.95`、
+  かつ DGX が矛盾しない（`R_dram <= 0.95`）。または DGX 単独で `R_dram <= 0.90`
+  （5 run 中 3 run 以上 `<= 0.95`）
+- **根拠なし（格下げ維持）**: 両実機とも `R_dram >= 0.95`
+- **それ以外**: 判定不可（undetermined。根拠ありへ格上げしない）
+
+### 実測結果（両実機・KC=256 パネル・5 run 独立プロセス中央値）
+
+`docs/perf/logs/cpu-gemm-prefetch-bandwidth-1319/aggregate.md`（生成元
+`aggregate.py`）より抜粋。R_dram（事前宣言どおりの代表値
+`= streamed_dram の 5 run 中央値 / l1_resident の 5 run 中央値`）:
+
+> **2026-09-08 再計測（codex-review #1319 P2 指摘 2 件対応）**: 初回実測
+> （2026-09-07）には計測手法上の欠陥が 2 件あった。(1) 全コア同時条件
+> （`measure_kernel_throughput_both_modes` の `multi` 分岐）が各スレッドの
+> 計測区間を同期せず、各タスクが独立に計時を開始した GFLOP/s を単純合算
+> していたため「全コア同時」のスループットになっておらず、`streamed_dram`
+> では他タスクの ~256 MiB バッファ確保・初期化が自タスクの計測区間へ
+> メモリ負荷として混入していた。(2) `aggregate.py` が代表値を「run ごとの
+> 比の中央値」として算出していたが、事前宣言（本ドキュメント上記・診断
+> ハーネスのモジュール doc）は「両モードの 5 run 中央値の比」であり、
+> 両者は一般に一致しない。(1) は `measure_kernel_throughput_multi_synced`
+> （全スレッドのバッファ準備・warmup を計測対象外の同期フェーズで完了させ、
+> 全スレッド共通の壁時計時間で計測する方式）へ、(2) は `aggregate.py` の
+> 代表値算出（`r_dram_declared`）へそれぞれ是正し、両実機で再計測した。
+> 下表は再計測後の値。旧初回実測値・旧「DGX 無 pin single の解釈」節は
+> 本追補末尾「2026-09-07 初回実測（是正前・参考）」に保持する。
+
+| 実機 | 条件 | threads | R_dram 代表値 | `<=0.95` の run 数（run 内比） |
+|---|---|---|---|---|
+| Apple M4 Max（共有負荷下。実測開始前 load average 約 40。複数セッションの並列実装ジョブと同居） | 無 pin | single | 1.4250 | 2/5 |
+| Apple M4 Max | 無 pin | multi | 1.0376 | 3/5 |
+| DGX Spark GB10（専有・load average 約 0.3〜0.5） | 無 pin | single | 0.4550 | 5/5 |
+| DGX Spark GB10 | 無 pin | multi | 0.2781 | 5/5 |
+| DGX Spark GB10 | big core pin（`taskset -c 5-9,15-19`。Cortex-X925 10 コア限定） | single | 0.4543 | 5/5 |
+| DGX Spark GB10 | big core pin | multi | 0.1854 | 5/5 |
+
+再計測では DGX 無 pin single も 5 run すべてが 0.44〜0.46 の狭い範囲に収まり、初回実測
+（後述）で観測された小コア／大コア二峰性は再現しなかった（`resid-dgx-run{1..5}.txt`。
+偶然 OS スケジューラが安定して大コアへ割り当てた可能性があり、無 pin 条件の頑健性を
+主張するものではない。big core pin 条件による再計測は今回も実施し、無 pin と同方向の
+結果を得た）。
+
+M4 Max は今回の実測時に他セッションの並列実装ジョブが多数同居し load average が約 40
+まで上昇しており（`env_info-m4max.txt` 追記分）、5 run のばらつきが大きく単独では
+主判定ゲート（`R_dram <= 0.90` かつ 5 run 中 3 run 以上 `<= 0.95`）を満たさない
+（single 2/5・multi 3/5）。これは M4 Max 側のマイクロカーネル残差感度が無いことを示す
+ものではなく、高負荷下でのノイズによる判定不能（undetermined）であり、下記「判断」節の
+とおり事前宣言ゲートは DGX 単独成立で「根拠あり」と判定できるため、この M4 Max ノイズは
+結論を左右しない。
+
+### G-a（文脈）
+
+| 実機 | `required_bw`（RowPanel N=2048 モデル上界 ÷ 実測時間） | `achievable_bw`（実測 read-sum、multi 中央値） | `Q` |
+|---|---|---|---|
+| Apple M4 Max（T=16） | 43.19 GB/s | 75.68 GB/s | 0.5707 |
+| DGX Spark GB10（T=20・無 pin） | 44.01 GB/s | 68.45 GB/s | 0.6430 |
+
+両実機とも `Q >= 0.5`（「DRAM 帯域圧迫あり」フラグ）。ただし G-a は系統 (a) の文脈情報で
+あり、単独では asm 承認の根拠にしない（事前宣言ゲート参照）。
+
+### 判断: 根拠あり
+
+主判定 G-b は「DGX 単独で `R_dram <= 0.90`（5 run 中 3 run 以上 `<= 0.95`）」を、
+DGX **無 pin・big-core pin の両条件、かつ single・multi の両方**で満たす（無 pin:
+single 代表値 0.4550・5/5、multi 代表値 0.2781・5/5。big core pin: single 代表値
+0.4543・5/5、multi 代表値 0.1854・5/5）。DGX 単独成立のため事前宣言ゲートの
+「または DGX 単独で `R_dram <= 0.90`」を満たし、M4 Max 側の結果（今回は高負荷ノイズに
+より判定不能）に依らず「根拠あり」と判定できる。
+
+以上により、2026-08-19 追補の「原則不要」格下げ判断を**覆す実測根拠が得られた**。
+packed A/B パネルが L1 に常駐しない条件（256 MiB 循環走査）では、DGX Spark GB10 では
+単スレッドでもマイクロカーネル単体のスループットが L1 常駐時の 45〜46% まで低下して
+おり、BLIS/matrixmultiply が前提とする「HW ストリームプリフェッチャーが完全に隠蔽する」
+という想定が本リポのマイクロカーネル（MR=8×NR=12・`vld1q_f32_x2`/`x3`）では成立して
+いない可能性を示す。M4 Max については今回の再計測が高負荷下（load average 約 40）で
+あったため判定不能（undetermined）のまま残る。低負荷環境での M4 Max 再確認は本判断の
+結論を変えるものではないが、承認後の実装 PR で候補 1〜3 と同型の両実機 A/B を行う際に
+併せて記録する。
+
+### 承認依頼の要点（実装はしない。ユーザー承認を得てから別イシューで着手する）
+
+- **到達手段**: 2026-08-14 調査（本ドキュメント「代替経路の評価表」節）のとおり stable
+  rustc に aarch64 prefetch intrinsic は無く（`stdarch_aarch64_prefetch` unstable。
+  rust-lang/rust#117217）、`unsafe asm!("prfm pldl1keep, [{0}]", ...)` の 1 箇所局所化
+  ラッパー（本ドキュメント「実装設計案」節の枠組みを踏襲）が唯一の実質的到達手段
+- **適用箇所案**: `crates/backend-cpu/src/gemm_blis/microkernel/neon.rs` の k ループ
+  （`vld1q_f32_x2`/`x3` ロード直前）へ、次パネル分の PRFM を追加する案（BLIS
+  `PRFMC_FWD` 相当の先読み距離をベンチで決める）
+- **期待効果の上限見積り**: 本実測の `R_dram`（DGX 大コア pin single 代表値 0.4543）から、
+  理論上の改善余地は最大で約 2.2 倍（`1/0.4543`）。ただし PRFM 自体の発行オーバーヘッド・
+  実効プリフェッチ距離次第で実際の改善はこれを大きく下回りうる（見積りの性質上の上限で
+  あり達成値の予測ではない）
+- **前提条件**: `.claude/rules/coding-rust.md`「コード品質」節（`unsafe` は FFI 境界等の
+  必要最小限に限定・理由コメント必須）との整合上、実装 PR には security-auditor の並列
+  レビューを必須とする。RowPanel 全体（framework-compare 実践規模）への効果は本追補では
+  未計測（マイクロカーネル単体の残差感度のみを実測した）。実装後は候補 1〜3 と同型の
+  両実機 A/B（`docs/perf/cpu-gemm-candle-cpu-retune.md` の Tier 1/Tier 2 プロトコル）で
+  ADOPT/REJECT を判定する
+
+### 実測環境・再現手順
+
+両実機とも 5 run 独立プロセス起動（`cargo test -p fandhe-ai-backend-cpu --release --lib --
+--ignored <test_name> --nocapture`）。詳細な実行ログ・env_info・DGX オーケストレーション
+スクリプト・集計スクリプトは `docs/perf/logs/cpu-gemm-prefetch-bandwidth-1319/`
+（内部ホスト名は含めない）を参照。
+
+- Apple M4 Max（2026-09-08 再計測分）: 共有負荷下（実測開始前 load average 約 40。
+  複数セッションの並列実装ジョブと同居）。`sysctl -n machdep.cpu.brand_string` =
+  Apple M4 Max。`rustc 1.96.0`
+- DGX Spark GB10（2026-09-08 再計測分）: 実測開始前 load average 約 0.3〜0.5 と低負荷
+  （専有ゲート成立）。Cortex-X925×10／Cortex-A725×10（`lscpu -e` 実測）。`rustc 1.97.0`。
+  作業ディレクトリは `~/work/rust-ai-library-run`（`docs/real-hardware-verification-env.md`
+  の標準手順）
+
+本追補はドキュメント変更・診断テスト追加＋是正（`#[cfg(test)]` 限定。全コア同時条件の
+計測区間同期・`aggregate.py` の代表値算出式）のみであり、本番 `crates/backend-cpu` の
+駆動経路（`gemm_blis_parallel` 等）・REQ-8 下限値・数値一致許容誤差は変更していない。
+
+### 2026-09-07 初回実測（是正前・参考。codex-review #1319 P2 指摘により上記へ置き換え）
+
+初回実測は前述のとおり計測手法上の欠陥（全コア同時条件の計測区間非同期・`aggregate.py`
+の代表値算出式の事前宣言との不一致）があり、下記の値は参考記録として残すのみで判断の
+根拠には用いない（現在の判断根拠は上記「実測結果」「判断: 根拠あり」節の再計測値）。
+
+| 実機 | 条件 | threads | R_dram（初回・run ごとの比の中央値） | `<=0.95` の run 数 |
+|---|---|---|---|---|
+| Apple M4 Max（共有負荷下。実測開始前 load average 約 3.0） | 無 pin | single | 0.8119 | 4/5 |
+| Apple M4 Max | 無 pin | multi | 0.2671 | 5/5 |
+| DGX Spark GB10 | 無 pin | single | 1.2985 | 2/5（下記「DGX 無 pin single の解釈（初回実測）」参照） |
+| DGX Spark GB10 | 無 pin | multi | 0.5183 | 5/5 |
+| DGX Spark GB10 | big core pin（`taskset -c 5-9,15-19`。Cortex-X925 10 コア限定） | single | 0.4392 | 5/5 |
+| DGX Spark GB10 | big core pin | multi | 0.3183 | 5/5 |
+
+#### DGX 無 pin single の解釈（初回実測。測定アーティファクトと判断した記録）
+
+DGX Spark GB10 は Cortex-X925（大コア。最大 3900 MHz）10 個・Cortex-A725（小コア。最大
+2808 MHz）10 個の異種構成（`lscpu -e` 実測）。初回実測の無 pin 条件では単スレッドタスクが
+OS スケジューラにより大小コアへ不定に割り当てられ、`l1_resident`（本来コア性能に比例する
+はずの計測）自体が run ごとに約 43 GFLOP/s（小コア）と約 135 GFLOP/s（大コア）の
+二峰性を示した（`resid-dgx-run{1,2,5}.txt` は小コア相当・`run{3,4}.txt` は大コア相当。
+これは初回実測時のログであり、2026-09-08 再計測分の同名ファイルへ上書き済み）。これは
+`docs/perf/cpu-gemm-default-thread-limit.md`（`cpu_capacity` sysfs 誤検出。#1364）が記録
+する同種の異種コア起因の観測不安定性であり、本イシューの残差感度計測とは無関係な交絡
+要因と判断し、`taskset -c 5-9,15-19` による big core pin 条件を追加した。2026-09-08
+再計測では無 pin 条件でもこの二峰性は再現しなかった（上記「実測結果」節参照。偶然の
+可能性があるため big core pin 条件は再計測でも継続して実施した）。
+
 ## 出典
 
 - イシュー #489（本ドキュメントの起票元）・#479（GEMM 性能改善ツリー・Phase A）・#562（E-7。本判断の引き継ぎ先）
@@ -193,3 +384,6 @@ E-7（#562・closed）の inline asm による packed A/B プリフェッチ導�
 - rust-lang/rust#117217（`stdarch_aarch64_prefetch` tracking issue）
 - flame/blis `kernels/armv8a/3/bli_gemm_armv8a_asm_d6x8.c`（コミット `a49238e6141c96a41aa3c2a4adb0b0663d0b4968`。BLIS プリフェッチ距離の一次ソース再検証根拠）
 - [The Rust Reference: Inline assembly](https://doc.rust-lang.org/reference/inline-assembly.html)（`asm!`／`global_asm!` の stable 化・aarch64 対応・意味論の違いの根拠）
+- イシュー #1319（本追補の起票元。`docs/perf/cpu-gemm-candle-cpu-retune.md` §8.3 候補 2 の再挑戦条件）・#751（帯域律速仮説の出典元。retune §2）
+- `docs/perf/logs/cpu-gemm-prefetch-bandwidth-1319/`（両実機 5 run 生ログ・env_info・DGX オーケストレーションスクリプト・`aggregate.py`／`aggregate.md`）
+- `docs/perf/cpu-gemm-default-thread-limit.md`（DGX Spark GB10 `cpu_capacity` 誤検出・異種コア構成の既知の観測不安定性。#1364）

@@ -158,10 +158,33 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
 
     let token = DispatchFailureCell::new();
 
+    // イシュー #1350: launch 固定費の診断カウンタ（`framework-compare`
+    // の `--graph` A/B が読む）が capture/replay の実回数どおりに実際に
+    // 増えることを実機で裏付ける（ホストモデルテスト
+    // `graph::tests::step_graph_stats_reflects_counters` はカウンタを
+    // 直接操作するのみで、実際の capture／replay 経路を通していない）。
+    let stats_before = fandhe_ai_backend_cuda::graph::step_graph_stats();
+
     let run1 = cuda
         .run_captured_sgd_step_segment(key.clone(), &mut param, &grad, None, &config, &token)
         .expect("first run_captured_sgd_step_segment call must succeed (capture)");
     assert_eq!(run1, SegmentRun::Captured);
+
+    let stats_after_capture = fandhe_ai_backend_cuda::graph::step_graph_stats();
+    assert_eq!(
+        stats_after_capture.captured - stats_before.captured,
+        1,
+        "capture success must increment captured by exactly 1"
+    );
+    assert_eq!(
+        stats_after_capture.replayed, stats_before.replayed,
+        "capture must not increment replayed"
+    );
+    assert_eq!(
+        stats_after_capture.graph_launches - stats_before.graph_launches,
+        1,
+        "capture performs exactly one graph launch (the post-instantiate warmup launch)"
+    );
 
     let after_first = mem.download(&param).expect("download succeeds");
     // lr=0.5, grad=0.1 → param -= 0.05 per element.
@@ -175,6 +198,22 @@ fn sgd_update_segment_captures_then_replays_bit_identically() {
         .run_captured_sgd_step_segment(key, &mut param, &grad, None, &config, &token)
         .expect("second run_captured_sgd_step_segment call must succeed (replay)");
     assert_eq!(run2, SegmentRun::Replayed);
+
+    let stats_after_replay = fandhe_ai_backend_cuda::graph::step_graph_stats();
+    assert_eq!(
+        stats_after_replay.captured, stats_after_capture.captured,
+        "replay must not increment captured"
+    );
+    assert_eq!(
+        stats_after_replay.replayed - stats_after_capture.replayed,
+        1,
+        "replay success must increment replayed by exactly 1"
+    );
+    assert_eq!(
+        stats_after_replay.graph_launches - stats_after_capture.graph_launches,
+        1,
+        "replay performs exactly one graph launch"
+    );
 
     let after_second = mem.download(&param).expect("download succeeds");
     fandhe_ai_backend_cpu::parity::assert_parity(

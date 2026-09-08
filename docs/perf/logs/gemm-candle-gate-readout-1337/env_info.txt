@@ -1,0 +1,100 @@
+# イシュー #1337 実機実測 env_info（借用ビュー readout 切替前後 A/B）
+
+内部ホスト名・machine-id・ユーザー実名・シリアル番号等は記載しない
+（docs/real-hardware-verification-env.md 冒頭注記・security.md 準拠）。
+
+## 対象 sha・ラベル
+
+- 転送元コミット: `1c298ff5641b948dae3c1c65699930054af8f747`
+  （PR #1411 `3d5e833`〈イシュー #1337 実装本体〉より後、PR #1420 まで含む HEAD）
+- ラベル: `head-1c298ff-readout-off`（feature 無効・legacy 経路）／
+  `head-1c298ff-readout-on`（`host-view-readout` feature 有効・借用ビュー経路）
+- **off/on 間でソースが揃っていない**: off 腕は `GEMM_GATE_PATCH_FACADE_PATH`
+  未使用の `fandhe_ai_source=registry`（crates.io 承認ピン `fandhe-ai =0.7.0`。
+  正式系列相当）、on 腕のみ `GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス>`
+  を使う `fandhe_ai_source=path:<facade 絶対パス>`（HEAD `1c298ff...`。
+  `host-view-readout` API は registry ピンに未収録のため path 差し替えが必須）。
+  off/on 比較には readout feature の効果に加えソース差（registry 対 HEAD）が
+  混入しており、readout（#1337）単独への効果分離帰属はできない（詳細・同一
+  ソースでの比較は `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §12 を
+  参照）。正式系列（registry ピン）の判定自体は不変。
+
+## 実機構成
+
+### M4 Max（Metal・CPU〈m4max-cpu〉）
+
+- Apple M4 Max・16 コア（12P+4E）・64GB・macOS 26.6.2（BuildVersion 25G83）
+- rustc 1.96.0（aarch64-apple-darwin）
+
+### DGX Spark GB10（CUDA・CPU〈dgx-cpu〉）
+
+- NVIDIA GB10（sm_121）・Grace CPU 20 コア（aarch64）・CUDA 13.0（nvcc
+  `Cuda_13.0.r13.0/compiler.36424714_0`）
+- rustc 1.97.0（Linux aarch64）
+- 実ホスト名・IP はローカル版 `docs/real-hardware-verification-env.local.md`
+  参照（Git 管理外）。本 issue では `docs/real-hardware-verification-env.md`
+  §2.4 記載の計測ノード（他の常駐サービスノードとは別）を使用
+
+## 実行順序・直前の負荷スナップショット
+
+各腕の実行直前・直後の `uptime`／`pmset -g therm`（Mac）／`nvidia-smi
+--query-gpu=utilization.gpu`（DGX）は各 `run_gemm_gate_*.log` 内の
+`== {device} status (before/after) ==` セクションに記録済み（run_gemm_gate.sh
+の既存 status snapshot 機能）。以下は実行順序と、ここでのみ記録する接続時の
+一次値。
+
+1. Metal off → Metal on（M4 Max。連続実行）
+2. DGX rsync 転送（`.rev-stamp` で `1c298ff...` 一致確認済み）・
+   `gemm-gate-trusted-hosts.local` を DGX ノード上で新規作成
+   （`dgx-cpu=<hostname>|<machine-id>`。ノード上限定・Git 管理外・回収せず）
+3. DGX CPU off → DGX CPU on（並行して M4 Max CPU off → M4 Max CPU on を実行）
+4. DGX CUDA off → DGX CUDA on（任意実施。#1360 との再現性確認目的）
+
+- DGX 接続確認時（作業開始時点）: `uptime` load average 0.22, 0.13, 0.05
+  （`docs/real-hardware-verification-env.local.md` の `CUDA_NODE` へ ssh
+  し `uptime; nvidia-smi -L` を実行。GPU: NVIDIA GB10 1 台）
+- M4 Max 側は本エージェント自身が動作するホストであり、他セッション・
+  ビルドが同時並走する共有環境（`uptime` load average は Metal off 実行前
+  5.13/6.11/8.71、Metal on 完了時点で 21.46/13.16/11.05、CPU on 完了時点で
+  30.73/18.73/13.62 まで上昇）。**M4 Max（Metal・CPU 双方）は高負荷共有環境
+  下の計測であり、後述のとおり Metal 系列は負荷ノイズの影響を強く受けている
+  可能性がある**（`compare_gemm_ab.py` の `後退（判定注意: before spread >
+  1.5x）` 表示箇所を参照）。DGX 側は全実行を通じ load average 1 桁台前半・
+  `nvidia-smi utilization.gpu` は CUDA 計測直前直後とも 0〜8% で他ジョブの
+  混入は確認されなかった
+
+## manifest 突合・データ有効性（要旨。詳細は各 `results/raw/manifest-*.json`）
+
+- 全 8 run（metal off/on・cpu-m4max off/on・cpu-dgx off/on・cuda off/on）で
+  `fandhe_ai_source` が意図どおり（off=`registry`／on=
+  `path:<facade 絶対パス>`）・`bench_fandhe_features`（off=空／on=
+  `host-view-readout`）・`candle_core_source=registry` を確認（各 log の
+  `== 依存元検証 OK ==`／`== feature 検証 OK ==` 行）
+- `skipped-*.log` は全 8 本とも空（計測失敗 0 件）
+- 行数: metal/cuda 各 30 行、cpu 各 45 行（`fandhe reuse` + `candle fresh` +
+  `fandhe fresh`参考。想定どおり）
+- `results/raw/*.fandhe-only.jsonl` は `jq -c 'select(.framework ==
+  "fandhe-ai")'` で抽出（`compare_gemm_ab.py` 入力用）
+- off/on 間で `checksum` は全セル完全一致（`compare_gemm_ab-*.md` の
+  「完全一致」列）。`parity_fail_count` は fandhe-ai 側は全 run 0、candle
+  側は N=2048 でのみ既知の決定的 fail=2/4194304（既存文書
+  `cuda-gemm-candle-gate-remeasurement.md` §5・`cpu-gemm-candle-gate-
+  remeasurement.md` 既出の既知事象と同一値。tolerance は不変）
+- CUDA 側は #1360（PR #1414）の同一 sha 系列と別 invocation（本イシュー
+  独自の再実行）。N=4096 readout-on の candle 比達成（1.373 倍）・N=1024
+  大幅後退（16.45 倍）という符号は #1360 と一致（絶対値は run 間ノイズで
+  多少異なる。#1360 は 1.433 倍・15.0 倍）
+
+## 回収・整形
+
+- DGX 側の生データ（`results/raw/*1c298ff*`・`/tmp/gate_*.log`）は
+  `rsync` で Mac 側 worktree へ回収した後、内部ホスト名・machine-id・
+  ユーザー実名で grep し 0 件であることを確認済み
+  （`gemm-gate-trusted-hosts.local`・`real-hardware-verification-env.local.md`
+  はいずれも rsync 除外対象・DGX 側で新規作成した
+  `gemm-gate-trusted-hosts.local` は回収せずノード上に残置）
+- manifest 中の `fandhe_ai_source` 絶対パスに含まれるユーザー名
+  `fandhe`（プロジェクト共用アカウント名。個人名ではない）は、既存コミット
+  （例: `manifest-dgx-cpu-gemm-gate-head-90ea1cb-limit-on.json`。PR #1406）
+  で同型の値が既に redaction なしでコミットされている前例に倣い、本 PR でも
+  redaction しない

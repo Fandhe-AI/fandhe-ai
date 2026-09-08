@@ -138,6 +138,13 @@ const MAX_TILE: usize = 256;
 /// ベース MC/KC/NC 動的算出〉で機種識別を含めて再検討する）。
 const MC: usize = 128;
 /// 縮約次元（K）のブロックサイズ。B パネル（KC×NC×4B）が L1/L2 に収まる値。
+///
+/// **KC=128〜512 の細粒度再スイープ（イシュー #1315）**: #749 は KC=4096 への大幅拡大
+/// （単独）のみを M4 Max 単独で検証していたが、#1315 は現行値近傍のグリッド
+/// （KC ∈ {128, 192, 256, 384, 512}）を Apple M4 Max・DGX Spark GB10（Grace CPU）の
+/// 両実機で 5 回独立プロセス中央値スイープした。いずれの実機・KC 値でも N=1024・2048
+/// の両方で現行 KC=256 を上回る候補は確認できず（`docs/perf/cpu-gemm-candle-cpu-retune.md`
+/// §8.1 実測表）、KC=256 を維持する（REJECT・不採用確定）。
 const KC: usize = 256;
 /// 列方向ブロックサイズ（B のパネル幅）。本 PR 時点の唯一の適用値
 /// （上記 NC 拡大の未有効化理由を参照）。
@@ -1161,6 +1168,13 @@ struct IcLoopContext<'b> {
     /// では `bufs.b_panel` のサブスライス、[`gemm_blis_shared_b_region`]
     /// （並列・#750）ではタスク間で共有する 1 本のバッファのサブスライス。
     b_panel: &'b [f32],
+    /// C の行ストライド（`ldc`）としてのみ使う（B の列幅としては使わない。
+    /// `gemm_blis_ic_loop` 内の完全タイル直接アドレッシング
+    /// `row0 = (ic+ir)*n + col_base` を参照）。この契約により、`n`（C の
+    /// 実際の行幅）とは異なる値（job-local な連続バッファの行ストライド）
+    /// を渡しても `gemm_blis_ic_loop` を無改変で再利用できる（2D 動的
+    /// 分配 `TwoDDynamic` の job-local C staging〈S′〉方式。イシュー
+    /// #1311・`run_two_d_job` 参照）。
     n: usize,
     k_dim: usize,
     pc: usize,
@@ -1731,6 +1745,62 @@ pub(crate) fn gemm_blis_parallel_row_panel_with_blocks(
                 n,
                 k,
                 row_start..row_end,
+                blocks,
+                GemmTranspose::Nn,
+            )
+        })
+}
+
+/// [`gemm_blis_parallel_row_panel_with_blocks`] の任意マイクロカーネル版
+/// （イシュー #1317・`GemmDriverVariant::RowPanelBLaneqVec` 用）。
+/// `dispatch_region`（本番駆動経路。実行時 ISA 検出で `NeonKernel` 等を
+/// 選ぶ）を経由せず、呼び出し元が指定した `K: Microkernel` へ直接
+/// `gemm_blis_region` を呼ぶ点のみが差分（行パネル分割・rayon 並列化の
+/// ロジックは完全に同一）。これにより `RowPanel`（本番既定）との A/B
+/// 比較の差分をマイクロカーネル自体（laneq のベクトル転置化）だけに
+/// 限定できる（計画 §3.4）。`#[cfg(test)]` の A/B 計測専用入口であり
+/// `dispatch_region`／本番公開入口は変更しない。aarch64 限定（唯一の
+/// 呼び出し元 [`gemm_blis_parallel_variant`] の `RowPanelBLaneqVec`
+/// アームが aarch64 限定のため、他アーキでは未使用関数になり
+/// `-D warnings` の `dead_code` lint に抵触する）。
+#[cfg(all(test, target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_parallel_row_panel_with_kernel<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    validate_block_sizes(blocks)?;
+
+    if n == 0 {
+        return Ok(());
+    }
+
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+    let panel_rows = m.div_ceil(num_threads).max(1);
+
+    c.par_chunks_mut(panel_rows * n)
+        .enumerate()
+        .try_for_each(|(panel_idx, c_chunk)| {
+            let row_start = panel_idx * panel_rows;
+            let row_end = (row_start + c_chunk.len() / n).min(m);
+            let mc_total = row_end - row_start;
+            let mut bufs = PanelBuffers::new::<K>(n, k, mc_total, blocks);
+            gemm_blis_region(
+                kernel,
+                a,
+                b,
+                c_chunk,
+                n,
+                k,
+                row_start..row_end,
+                &mut bufs,
                 blocks,
                 GemmTranspose::Nn,
             )
@@ -2436,6 +2506,472 @@ fn dispatch_ic_dynamic(
     gemm_blis_ic_dynamic_region(ScalarKernel, a, b, c, n, k, rows, blocks)
 }
 
+/// [`gemm_blis_two_d_dynamic_region`] 専用: (行帯, 列帯) job 1 個が担当する
+/// C の行セグメント集合（イシュー #1311・設計 §4.2 主案 S′〈job-local C
+/// staging〉・§6）。`c_rows[i]` は `rows.start + i` 行目のうち `cols`
+/// 範囲に対応する `&'c mut [f32]`（長さ `cols.end - cols.start`）で、
+/// [`split_c_into_jobs`] が `c.chunks_mut(n)`（行分割）→ 列帯境界での
+/// `split_at_mut` 連鎖により job 間で重複しないことをコンパイル時借用
+/// 検査で保証して構築する（`unsafe` 非導入。設計 §4.2）。
+#[cfg(test)]
+struct TwoDJob<'c> {
+    rows: Range<usize>,
+    cols: Range<usize>,
+    c_rows: Vec<&'c mut [f32]>,
+}
+
+/// [`gemm_blis_two_d_dynamic_region`] 専用: C を `grid`（[`partition::JobGrid`]）
+/// の (行帯 × 列帯) へ分割し、job ごとに独立な `&mut [f32]` 集合を返す
+/// （イシュー #1311・設計 §4.2）。
+///
+/// 手順: (1) `c.chunks_mut(n)` で行スライスへ分割（各行は他行と disjoint。
+/// コンパイル時借用検査で保証される）。(2) 各行を列帯境界（`partition::bands(n,
+/// grid.nc_job)`）で `split_at_mut` 連鎖し、列帯ごとの行セグメントへ分割
+/// する。(3) 行帯（`partition::bands(m, grid.mc_job)`）ごとに行を束ねて
+/// job を組み立てる。
+///
+/// job 配列は **column-band-major**（同一列帯の行帯を連続）に並べる
+/// （設計 §6。性能上の推奨であり、job 分割の正しさ〈§3〉には影響しない。
+/// 隣接 job を同時処理する worker 群が同じ B 列を共有キャッシュ上で
+/// 参照しやすくするための順序）。
+#[cfg(test)]
+fn split_c_into_jobs<'c>(
+    c: &'c mut [f32],
+    n: usize,
+    grid: &partition::JobGrid,
+) -> Vec<TwoDJob<'c>> {
+    if n == 0 || grid.row_bands == 0 || grid.col_bands == 0 {
+        return Vec::new();
+    }
+    let m = c.len() / n;
+    let row_bands = partition::bands(m, grid.mc_job);
+    let col_bands = partition::bands(n, grid.nc_job);
+    if row_bands.is_empty() || col_bands.is_empty() {
+        return Vec::new();
+    }
+
+    // 行ごとに列帯境界で split_at_mut 連鎖し、列帯ごとの行セグメント列
+    // （`per_col_band[col_band_idx]` は絶対行順に並ぶ `Vec<&'c mut [f32]>`）
+    // へ集約する。
+    let mut per_col_band: Vec<Vec<&'c mut [f32]>> = (0..col_bands.len())
+        .map(|_| Vec::with_capacity(m))
+        .collect();
+    for row in c.chunks_mut(n) {
+        let mut remaining: &mut [f32] = row;
+        for (col_band_idx, band) in col_bands.iter().enumerate() {
+            let len = band.end - band.start;
+            let (head, tail) = remaining.split_at_mut(len);
+            per_col_band[col_band_idx].push(head);
+            remaining = tail;
+        }
+    }
+
+    // column-band-major で job を組み立てる（設計 §6）。行帯は
+    // `per_col_band[col_band_idx]` の先頭から連続して並んでいる
+    // （`c.chunks_mut(n)` が絶対行順を保つため）ことを利用し、
+    // 行帯の長さぶんずつ前から `drain` して切り出す。
+    let mut jobs = Vec::with_capacity(row_bands.len() * col_bands.len());
+    for (col_band_idx, col_band) in col_bands.iter().enumerate() {
+        let rows_for_band = &mut per_col_band[col_band_idx];
+        for row_band in &row_bands {
+            let band_len = row_band.end - row_band.start;
+            let c_rows: Vec<&'c mut [f32]> = rows_for_band.drain(0..band_len).collect();
+            jobs.push(TwoDJob {
+                rows: row_band.clone(),
+                cols: col_band.clone(),
+                c_rows,
+            });
+        }
+    }
+    jobs
+}
+
+/// [`gemm_blis_two_d_dynamic_region`] 専用: 1 job（(行帯, 列帯) タイル）を
+/// 単一 worker が K 全域を通して処理する本体（イシュー #1311・設計 §2.2・
+/// §4.2 主案 S′）。
+///
+/// **job-local C staging（S′）**: job は自分の `mc_len × nc_len_job` の
+/// C 部分ブロックを job-local な連続バッファ `c_local`（行ストライド
+/// `ldc = nc_len_job`）へ 1 回だけ copy-in し、K 全域（jc→pc→ic→jr→ir）
+/// を**既存・無改変の [`gemm_blis_ic_loop`]** で処理してから 1 回だけ
+/// copy-out する。[`gemm_blis_ic_loop`] は `IcLoopContext.n` を**C の
+/// 行ストライドとしてのみ**使うため（B の幅としては使わない設計。同構造体
+/// ドキュメント参照）、`ctx.n = nc_len_job`・`ctx.jc` は job 内相対位置
+/// として素通しでき、カーネル本体・FMA 契約（REQ-2）を一切変更せずに
+/// job 単位の並列実行を実現できる（設計 §4.2「bit 完全一致（設計 §3
+/// 条件 1〜8）の充足」）。
+///
+/// B は呼び出し元から共有せず job ごとに個別 pack する（設計 §2.2
+/// 「packing: job 内 private」）。`region_row_offset` は呼び出し元
+/// （[`gemm_blis_two_d_dynamic_region`]）が受け取った `rows: Range<usize>`
+/// の `start`（通常 0）で、`Tn`（転置格納 A）の絶対行位置解決にのみ使う
+/// （`gemm_blis_region` の `row_offset`／`m_total` 引き回しと同型。#1213）。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_two_d_job<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    job: &mut TwoDJob,
+    n: usize,
+    k_dim: usize,
+    blocks: BlockSizes,
+    transpose: GemmTranspose,
+    region_row_offset: usize,
+) -> Result<(), GemmError> {
+    let nr = K::NR;
+    let mc_len = job.rows.end - job.rows.start;
+    let nc_len_job = job.cols.end - job.cols.start;
+    if mc_len == 0 || nc_len_job == 0 {
+        return Ok(());
+    }
+
+    let c_local_len = mc_len
+        .checked_mul(nc_len_job)
+        .ok_or(GemmError::DimProductOverflow)?;
+    let mut c_local = vec![0.0f32; c_local_len];
+    for (i, row) in job.c_rows.iter().enumerate() {
+        c_local[i * nc_len_job..(i + 1) * nc_len_job].copy_from_slice(row);
+    }
+
+    // `gemm_blis_region`（`mod.rs:1064` 付近）と同じ Nn/Nt/Tn 分岐
+    // （#1213）。`Tn` は絶対行位置解決のため `region_row_offset +
+    // job.rows.start` を渡す（job.rows は region 内の相対範囲のため）。
+    let (a_for_loop, row_offset, m_total): (&[f32], usize, usize) = match transpose {
+        GemmTranspose::Tn => (
+            a,
+            region_row_offset + job.rows.start,
+            a.len() / k_dim.max(1),
+        ),
+        GemmTranspose::Nn | GemmTranspose::Nt => (&a[job.rows.start * k_dim..], 0, 0),
+    };
+
+    let mut bufs = PanelBuffers::new::<K>(nc_len_job, k_dim, mc_len, blocks);
+
+    for jc in (0..nc_len_job).step_by(blocks.nc) {
+        let nc_len = blocks.nc.min(nc_len_job - jc);
+        for pc in (0..k_dim).step_by(blocks.kc) {
+            let kc_len = blocks.kc.min(k_dim - pc);
+            let nr_blocks = nc_len.div_ceil(nr);
+            let b_panel = &mut bufs.b_panel[..nr_blocks * kc_len * nr];
+            for jr_block in 0..nr_blocks {
+                let jr = jr_block * nr;
+                let nr_eff = nr.min(nc_len - jr);
+                let dst = &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
+                // B は絶対列位置（`job.cols.start + jc + jr`）で pack する
+                // （job 内の相対 jc に対し、実際の B 参照は元の n 幅の
+                // 行列へアクセスするため）。
+                let col_start = job.cols.start + jc + jr;
+                match transpose {
+                    GemmTranspose::Nt => pack_b_from_transposed(
+                        dst,
+                        b,
+                        BTPackTile {
+                            k_total: k_dim,
+                            n_total: n,
+                            kc_start: pc,
+                            kc_len,
+                            col_start,
+                            nr,
+                            nr_eff,
+                        },
+                    ),
+                    GemmTranspose::Nn | GemmTranspose::Tn => pack_b(
+                        dst,
+                        b,
+                        BPackTile {
+                            n_total: n,
+                            kc_start: pc,
+                            kc_len,
+                            col_start,
+                            nr,
+                            nr_eff,
+                        },
+                    ),
+                }
+            }
+
+            // `ctx.n = nc_len_job`（job 幅。C 行ストライドとしてのみ
+            // 使われる。`IcLoopContext` ドキュメント参照）・`ctx.jc` は
+            // job 内相対位置。`gemm_blis_ic_loop` は無改変で再利用する。
+            let ctx = IcLoopContext {
+                b_panel,
+                n: nc_len_job,
+                k_dim,
+                pc,
+                kc_len,
+                jc,
+                nr_blocks,
+                nc_len,
+                blocks,
+            };
+            gemm_blis_ic_loop(
+                kernel,
+                a_for_loop,
+                &mut c_local,
+                mc_len,
+                &mut bufs.a_panel,
+                &ctx,
+                transpose,
+                row_offset,
+                m_total,
+            )?;
+        }
+    }
+
+    for (i, row) in job.c_rows.iter_mut().enumerate() {
+        row.copy_from_slice(&c_local[i * nc_len_job..(i + 1) * nc_len_job]);
+    }
+
+    Ok(())
+}
+
+/// (mc, nc) 2D 動的分配の 5-loop 本体（イシュー #1311・設計 §2.2・§6）。
+///
+/// `partition::job_grid` で worker 数より多い job 数（`jobs_per_worker *
+/// num_threads` 目標）を算出し、[`split_c_into_jobs`] で C を job ごとの
+/// 独立な `&mut` 集合へ分割、rayon の適応分割（work stealing）で分配する
+/// （`jobs.into_par_iter().with_min_len(1)`。カスタム同期・`Mutex` は
+/// 使わない。設計 §6「主案」）。各 job は自分の C 部分ブロックに対し
+/// **K 全域を単一 worker が同期なしで処理**する（pc ごとのバリアなし・
+/// split-K 禁止。`IcDynamic`〈#1366〉の「pc ごとの同期点＋列全幅 B pack」
+/// という構造〈GB10 での後退の推定要因。#1367〉を繰り返さない設計）。
+///
+/// **本番未結線**: 本関数・[`dispatch_two_d_dynamic`] は本番公開入口
+/// （[`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]）からは
+/// 呼ばれない。両実機 A/B・採否判定は #1312、本番結線は #1313 が担当する
+/// （`docs/perf/cpu-gemm-2d-dynamic-variant.md`）。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k_dim: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+    transpose: GemmTranspose,
+    jobs_per_worker: usize,
+) -> Result<(), GemmError> {
+    let mr = K::MR;
+    let nr = K::NR;
+    let row_start = rows.start;
+    let mc_total = rows.end - rows.start;
+    if mc_total == 0 || n == 0 {
+        return Ok(());
+    }
+
+    // `Tn` は a をフルスライスのまま渡し、絶対行位置は
+    // `run_two_d_job` 側で `region_row_offset + job.rows.start` として
+    // 解決する（`gemm_blis_region` と同じ分岐。#1213）。
+    let a_for_region: &[f32] = match transpose {
+        GemmTranspose::Tn => a,
+        GemmTranspose::Nn | GemmTranspose::Nt => &a[row_start * k_dim..],
+    };
+    let c_region = &mut c[row_start * n..(row_start + mc_total) * n];
+
+    let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+    let grid = partition::job_grid(mc_total, n, mr, nr, &blocks, num_threads, jobs_per_worker)?;
+    let mut jobs = split_c_into_jobs(c_region, n, &grid);
+
+    jobs.par_iter_mut().try_for_each(|job| {
+        run_two_d_job(
+            kernel,
+            a_for_region,
+            b,
+            job,
+            n,
+            k_dim,
+            blocks,
+            transpose,
+            row_start,
+        )
+    })
+}
+
+/// [`dispatch_ic_dynamic`] の 2D 動的分配版（イシュー #1311）。
+/// x86_64: AVX-512（stable cfg 時）→ AVX2 → スカラーの優先順位で ISA
+/// トークンを 1 回だけ確定する（既存 dispatch 系と同一方針）。本番未結線
+/// のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_two_d_dynamic(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+    transpose: GemmTranspose,
+    jobs_per_worker: usize,
+) -> Result<(), GemmError> {
+    #[cfg(avx512_stable)]
+    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+        return gemm_blis_two_d_dynamic_region(
+            kernel,
+            a,
+            b,
+            c,
+            n,
+            k,
+            rows,
+            blocks,
+            transpose,
+            jobs_per_worker,
+        );
+    }
+    if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
+        gemm_blis_two_d_dynamic_region(
+            kernel,
+            a,
+            b,
+            c,
+            n,
+            k,
+            rows,
+            blocks,
+            transpose,
+            jobs_per_worker,
+        )
+    } else {
+        gemm_blis_two_d_dynamic_region(
+            ScalarKernel,
+            a,
+            b,
+            c,
+            n,
+            k,
+            rows,
+            blocks,
+            transpose,
+            jobs_per_worker,
+        )
+    }
+}
+
+/// aarch64 版 [`dispatch_two_d_dynamic`]（#1311）。他 dispatch 系
+/// （[`dispatch_ic_dynamic`] 等）と同じ理由で NEON 固定。本番未結線の
+/// ため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_two_d_dynamic(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+    transpose: GemmTranspose,
+    jobs_per_worker: usize,
+) -> Result<(), GemmError> {
+    debug_assert_eq!(Isa::detect(), Isa::Neon);
+    gemm_blis_two_d_dynamic_region(
+        microkernel::NeonKernel,
+        a,
+        b,
+        c,
+        n,
+        k,
+        rows,
+        blocks,
+        transpose,
+        jobs_per_worker,
+    )
+}
+
+/// aarch64／x86_64 以外の arch 版 [`dispatch_two_d_dynamic`]（#1311）。
+/// [`ScalarKernel`] 固定。本番未結線のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_two_d_dynamic(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+    transpose: GemmTranspose,
+    jobs_per_worker: usize,
+) -> Result<(), GemmError> {
+    debug_assert_eq!(Isa::detect(), Isa::Scalar);
+    gemm_blis_two_d_dynamic_region(
+        ScalarKernel,
+        a,
+        b,
+        c,
+        n,
+        k,
+        rows,
+        blocks,
+        transpose,
+        jobs_per_worker,
+    )
+}
+
+/// [`GemmDriverVariant::TwoDDynamic`] の既定 `jobs_per_worker`（設計
+/// §5.2「`jobs_per_worker` は const（既定 2。§5.3 の表で `RowPanel` の
+/// pack 総量を全形状で下回る側）」）。#1312 が `{2, 4}`（必要なら 8）を
+/// [`gemm_blis_parallel_two_d_dynamic_with_params`] でスイープする。
+#[cfg(test)]
+const TWO_D_JOBS_PER_WORKER: usize = 2;
+
+/// テスト・A/B 計測専用: [`GemmDriverVariant::TwoDDynamic`] の
+/// `jobs_per_worker`／`transpose` を注入できるパラメータ化入口
+/// （イシュー #1311・設計 §5.2「`#[cfg(test)]` のパラメータ化入口」）。
+/// `validate_dims`・`validate_block_sizes`・`n == 0`／`m == 1`（gemv 専用
+/// 経路。`gemm_blis_parallel_with_transpose` の分岐と同一）を経てから
+/// [`dispatch_two_d_dynamic`] を呼ぶ。`jobs_per_worker == 0` は `1` へ
+/// クランプする（`partition::job_grid` の `num_threads == 1` 特例と同じ
+/// fail-closed 方針。0 を渡すと目標 job 数が 0 になり空の job 集合に
+/// なってしまうのを防ぐ）。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_blis_parallel_two_d_dynamic_with_params(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+    jobs_per_worker: usize,
+    transpose: GemmTranspose,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    validate_block_sizes(blocks)?;
+
+    if n == 0 {
+        return Ok(());
+    }
+    if m == 1 {
+        match transpose {
+            GemmTranspose::Nn | GemmTranspose::Tn => gemm_row_vector(a, b, c, n),
+            GemmTranspose::Nt => gemm_row_vector_nt(a, b, c, k),
+        }
+        return Ok(());
+    }
+
+    dispatch_two_d_dynamic(
+        a,
+        b,
+        c,
+        n,
+        k,
+        0..m,
+        blocks,
+        transpose,
+        jobs_per_worker.max(1),
+    )
+}
+
 /// A/B 一括計測ハーネス（イシュー #1041）向け: 並列 5-loop ドライバの
 /// 候補を 1 つの入口で選べるようにする列挙。`#[cfg(test)]` 限定。
 /// GB10（#1140）・Apple M4 Max（#1141）双方の実機実測の結果、`SharedB`・
@@ -2468,6 +3004,26 @@ pub(crate) enum GemmDriverVariant {
     /// `docs/perf/cpu-gemm-ic-dynamic-variant.md` §6）。本番未結線のまま
     /// `#[cfg(test)]` 限定を維持する。
     IcDynamic,
+    /// B 側 laneq ベクトル転置版マイクロカーネル（[`microkernel::NeonBLaneqVecKernel`]。
+    /// イシュー #1317）を [`RowPanel`](Self::RowPanel) と同一の行パネル
+    /// 分割・並列化ロジックへ差し込んだ候補（[`gemm_blis_parallel_row_panel_with_kernel`]
+    /// 経由）。差分をマイクロカーネル自体（C タイル転置のベクトル化）に
+    /// 限定した A/B 計測基準線であり、`RowPanel` との bit 完全一致
+    /// （有限値入力）が理論契約として成り立つ（`neon` モジュール冒頭
+    /// #1317 節）。採否・実機実測は #1318 が引き継ぐ。aarch64 限定
+    /// （`NeonBLaneqVecKernel` 自体が aarch64 限定トークンのため）。
+    #[cfg(target_arch = "aarch64")]
+    RowPanelBLaneqVec,
+    /// (mc, nc) 2D タイル job の動的分配（rayon work stealing。イシュー
+    /// #1311・設計 `docs/cpu-gemm-2d-dynamic-partition-design.md`）。
+    /// [`partition::job_grid`] が worker 数より多い job 数を算出し、各
+    /// job が自分の C 部分ブロックに対し K 全域を単一 worker が同期
+    /// なしで処理する（`IcDynamic` の「pc ごとの同期点＋列全幅 B pack」
+    /// という構造を繰り返さない設計。設計 §2.2）。C 列分割は job-local
+    /// C staging（[`run_two_d_job`] の copy-in/out）方式（設計 §4.2
+    /// 主案 S′）を採り `unsafe` を追加しない。両実機 A/B・採否判定は
+    /// #1312、本番結線は #1313 が引き継ぐ。
+    TwoDDynamic,
 }
 
 /// [`GemmDriverVariant`] で指定した候補を強制実行する A/B 計測専用入口
@@ -2508,12 +3064,64 @@ pub(crate) fn gemm_blis_parallel_variant(
             dispatch_shared_b_pc_outer(a, b, c, n, k, 0..m, blocks)
         }
         GemmDriverVariant::IcDynamic => dispatch_ic_dynamic(a, b, c, n, k, 0..m, blocks),
+        #[cfg(target_arch = "aarch64")]
+        GemmDriverVariant::RowPanelBLaneqVec => gemm_blis_parallel_row_panel_with_kernel(
+            microkernel::NeonBLaneqVecKernel,
+            a,
+            b,
+            c,
+            m,
+            n,
+            k,
+            blocks,
+        ),
+        GemmDriverVariant::TwoDDynamic => dispatch_two_d_dynamic(
+            a,
+            b,
+            c,
+            n,
+            k,
+            0..m,
+            blocks,
+            GemmTranspose::Nn,
+            TWO_D_JOBS_PER_WORKER,
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`GemmDriverVariant`] の全候補一覧（A/B 一括計測ハーネス・全候補
+    /// bit 完全一致回帰の 3 箇所で共用。イシュー #1317）。
+    /// `RowPanelBLaneqVec`（[`microkernel::NeonBLaneqVecKernel`] 経由）は
+    /// aarch64 限定トークンに依存するため aarch64 版のみ追加する
+    /// （`x86_64` で `let mut v = vec![…]; #[cfg(aarch64)] v.push(…)` と
+    /// すると `unused_mut` lint が `-D warnings` で落ちる罠を避けるため、
+    /// 2 定義に分ける方式を採る。計画 §3.4）。
+    #[cfg(target_arch = "aarch64")]
+    fn all_gemm_driver_variants() -> Vec<GemmDriverVariant> {
+        vec![
+            GemmDriverVariant::RowPanel,
+            GemmDriverVariant::SharedB,
+            GemmDriverVariant::SharedBPcOuter,
+            GemmDriverVariant::IcDynamic,
+            GemmDriverVariant::RowPanelBLaneqVec,
+            GemmDriverVariant::TwoDDynamic,
+        ]
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn all_gemm_driver_variants() -> Vec<GemmDriverVariant> {
+        vec![
+            GemmDriverVariant::RowPanel,
+            GemmDriverVariant::SharedB,
+            GemmDriverVariant::SharedBPcOuter,
+            GemmDriverVariant::IcDynamic,
+            GemmDriverVariant::TwoDDynamic,
+        ]
+    }
 
     #[test]
     fn gemm_blis_matches_hand_computed_2x2() {
@@ -3457,7 +4065,7 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_8x12_and_12x8_match_scalar_forced_bit_exact() {
-        use microkernel::{Neon12x8Kernel, NeonBLaneqKernel, NeonKernel};
+        use microkernel::{Neon12x8Kernel, NeonBLaneqKernel, NeonBLaneqVecKernel, NeonKernel};
 
         for (i, &(m, n, k)) in [
             (200usize, 600usize, 700usize),
@@ -3498,6 +4106,27 @@ mod tests {
             assert_eq!(
                 c_scalar, c_neon_b_laneq,
                 "NeonBLaneqKernel（B レーン参照変種・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
+            );
+
+            // イシュー #1317: B 側 laneq ベクトル転置版（[`compute_b_laneq`]
+            // の C タイル転置をベクトル化した候補）も ScalarKernel 強制
+            // 経路と bit 完全一致するはず（k%4 の剰余網羅は上記グリッドを
+            // 共用）。
+            let mut c_neon_b_laneq_vec = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(
+                NeonBLaneqVecKernel,
+                &a,
+                &b,
+                &mut c_neon_b_laneq_vec,
+                m,
+                n,
+                k,
+            )
+            .unwrap();
+            assert_eq!(
+                c_scalar, c_neon_b_laneq_vec,
+                "NeonBLaneqVecKernel（B laneq ベクトル転置版・k={k}）は ScalarKernel 強制経路と \
+                 bit 完全一致するはず"
             );
         }
     }
@@ -4078,12 +4707,7 @@ mod tests {
                         panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
                     });
 
-                for variant in [
-                    GemmDriverVariant::RowPanel,
-                    GemmDriverVariant::SharedB,
-                    GemmDriverVariant::SharedBPcOuter,
-                    GemmDriverVariant::IcDynamic,
-                ] {
+                for variant in all_gemm_driver_variants() {
                     let mut c = vec![0.0f32; m * n];
                     pool.install(|| {
                         gemm_blis_parallel_variant(
@@ -4323,6 +4947,521 @@ mod tests {
         }
     }
 
+    /// イシュー #1311: `TwoDDynamic`（(mc, nc) 2D job 動的分配）が
+    /// `RowPanel`（本番既定）と bit 完全一致することを、C 初期値
+    /// 非ゼロ乱数・端あり形状（`m`/`n` が MR/NR 非倍数・`m<mr`・`n<nr`・
+    /// `k==0`・`k<kc`・非正方・512³）× スレッド数 1/2/3/16 ×
+    /// `jobs_per_worker` {1,2,4,8} で直接検証する（設計 §10・
+    /// `gemm_blis_ic_dynamic_matches_row_panel_bit_exact_across_shapes_and_threads`
+    /// と同型。debug ビルドの所要時間を抑えるため `RowPanel` 参照値は
+    /// (形状, スレッド数) ごとに 1 回だけ計算し `jobs_per_worker`
+    /// スイープで再利用する）。
+    #[test]
+    fn gemm_blis_two_d_dynamic_matches_row_panel_bit_exact_across_shapes_and_threads() {
+        let shapes: &[(usize, usize, usize)] = &[
+            (5, 7, 3),
+            (64, 64, 64),
+            (128, 128, 96),
+            (129, 130, 257),
+            (1000, 96, 300),
+            (523, 600, 700),
+            (2, 3, 0),
+            (7, 5, 64),
+            (64, 5, 64),
+            (300, 300, 100),
+            (512, 512, 512),
+        ];
+        let thread_counts = [1usize, 2, 3, 16];
+        let jobs_per_worker_values = [1usize, 2, 4, 8];
+
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0xaaaa_1111 ^ (m as u32), m * k);
+            let b = xorshift32_vec(0xbbbb_2222 ^ (n as u32), k * n);
+            let c_init = xorshift32_vec(0xcccc_3333 ^ (k as u32), m * n);
+
+            for &num_threads in &thread_counts {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap_or_else(|e| {
+                        panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
+                    });
+
+                let mut c_row_panel = c_init.clone();
+                pool.install(|| {
+                    gemm_blis_parallel_variant(
+                        GemmDriverVariant::RowPanel,
+                        &a,
+                        &b,
+                        &mut c_row_panel,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
+                    .unwrap()
+                });
+
+                for &jobs_per_worker in &jobs_per_worker_values {
+                    let mut c_two_d = c_init.clone();
+                    pool.install(|| {
+                        gemm_blis_parallel_two_d_dynamic_with_params(
+                            &a,
+                            &b,
+                            &mut c_two_d,
+                            m,
+                            n,
+                            k,
+                            default_blocks(),
+                            jobs_per_worker,
+                            GemmTranspose::Nn,
+                        )
+                        .unwrap()
+                    });
+
+                    assert_eq!(
+                        c_row_panel, c_two_d,
+                        "shape=({m},{n},{k}) num_threads={num_threads} \
+                         jobs_per_worker={jobs_per_worker} は TwoDDynamic と RowPanel が \
+                         bit 完全一致するはず（#1311）"
+                    );
+                }
+            }
+        }
+    }
+
+    /// イシュー #1311: 小 `kc`／`mc`／`nc`（`BlockSizes { mc: 16, kc: 8,
+    /// nc: 24 }`）で job 内 jc/pc/ic ループが複数回通ることを固定し、
+    /// `RowPanel`（同一小ブロックサイズ）・直列 [`gemm_blis`] と bit
+    /// 完全一致することを検証する（設計 §10）。
+    #[test]
+    fn gemm_blis_two_d_dynamic_multi_pc_matches_serial_bit_exact() {
+        let small_blocks = BlockSizes {
+            mc: 16,
+            kc: 8,
+            nc: 24,
+        };
+        let shapes: &[(usize, usize, usize)] = &[(64, 72, 40), (100, 50, 33), (33, 100, 17)];
+        let thread_counts = [1usize, 4, 8];
+
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0x1111_aaaa ^ (m as u32), m * k);
+            let b = xorshift32_vec(0x2222_bbbb ^ (n as u32), k * n);
+
+            let mut c_serial = vec![0.0f32; m * n];
+            gemm_blis_with_kernel_and_blocks(
+                ScalarKernel,
+                &a,
+                &b,
+                &mut c_serial,
+                m,
+                n,
+                k,
+                small_blocks,
+            )
+            .unwrap();
+
+            for &num_threads in &thread_counts {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap_or_else(|e| {
+                        panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
+                    });
+
+                let mut c_row_panel = vec![0.0f32; m * n];
+                pool.install(|| {
+                    gemm_blis_parallel_variant(
+                        GemmDriverVariant::RowPanel,
+                        &a,
+                        &b,
+                        &mut c_row_panel,
+                        m,
+                        n,
+                        k,
+                        small_blocks,
+                    )
+                    .unwrap()
+                });
+                assert_eq!(
+                    c_serial, c_row_panel,
+                    "shape=({m},{n},{k}) T={num_threads}: RowPanel は直列 gemm_blis と \
+                     bit 完全一致するはず（前提確認）"
+                );
+
+                let mut c_two_d = vec![0.0f32; m * n];
+                pool.install(|| {
+                    gemm_blis_parallel_two_d_dynamic_with_params(
+                        &a,
+                        &b,
+                        &mut c_two_d,
+                        m,
+                        n,
+                        k,
+                        small_blocks,
+                        2,
+                        GemmTranspose::Nn,
+                    )
+                    .unwrap()
+                });
+
+                assert_eq!(
+                    c_serial, c_two_d,
+                    "shape=({m},{n},{k}) T={num_threads}: TwoDDynamic は小ブロックサイズ \
+                     （複数 pc/jc/ic 反復）でも直列 gemm_blis と bit 完全一致するはず（#1311）"
+                );
+            }
+        }
+    }
+
+    /// イシュー #1311: `TwoDDynamic` が同一入力・同一プール（スレッド数
+    /// 3・16）で 2 回実行しても bit 同一であることを検証する（job の
+    /// 分配順序・rayon work stealing のスケジューリングに依存しない
+    /// ことの直接確認。設計 §10）。
+    #[test]
+    fn gemm_blis_two_d_dynamic_is_deterministic_across_runs() {
+        let (m, n, k) = (523usize, 611usize, 400usize);
+        let a = xorshift32_vec(0x3333_cccc, m * k);
+        let b = xorshift32_vec(0x4444_dddd, k * n);
+        let c_init = xorshift32_vec(0x5555_eeee, m * n);
+
+        for &num_threads in &[3usize, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .unwrap_or_else(|e| panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}"));
+
+            let mut c_run1 = c_init.clone();
+            pool.install(|| {
+                gemm_blis_parallel_two_d_dynamic_with_params(
+                    &a,
+                    &b,
+                    &mut c_run1,
+                    m,
+                    n,
+                    k,
+                    default_blocks(),
+                    2,
+                    GemmTranspose::Nn,
+                )
+                .unwrap()
+            });
+
+            let mut c_run2 = c_init.clone();
+            pool.install(|| {
+                gemm_blis_parallel_two_d_dynamic_with_params(
+                    &a,
+                    &b,
+                    &mut c_run2,
+                    m,
+                    n,
+                    k,
+                    default_blocks(),
+                    2,
+                    GemmTranspose::Nn,
+                )
+                .unwrap()
+            });
+
+            assert_eq!(
+                c_run1, c_run2,
+                "num_threads={num_threads}: TwoDDynamic は同一入力の 2 回実行で \
+                 bit 同一のはず（#1311）"
+            );
+        }
+    }
+
+    /// イシュー #1311: `TwoDDynamic` を `Nt`／`Tn` で実行した結果が、
+    /// 本番 `RowPanel` 経路（[`gemm_blis_parallel_nt`]／
+    /// [`gemm_blis_parallel_tn`]）と bit 完全一致することを検証する
+    /// （#1313 結線対象の事前保証。設計 §10「転置（Nt/Tn）の bit 一致」）。
+    #[test]
+    fn gemm_blis_two_d_dynamic_transposed_matches_row_panel_bit_exact() {
+        let shapes: &[(usize, usize, usize)] = &[(64, 64, 64), (129, 130, 97), (512, 512, 512)];
+        let thread_counts = [1usize, 4, 16];
+
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0x6666_1111 ^ (m as u32), m * k);
+            let b = xorshift32_vec(0x7777_2222 ^ (n as u32), k * n);
+            // bt: 論理形状 [n, k] 行優先（元の B [k, n] を転置した実体）。
+            let bt = xorshift32_vec(0x8888_3333 ^ (k as u32), n * k);
+            // at: 論理形状 [k, m] 行優先（元の A [m, k] を転置した実体）。
+            let at = xorshift32_vec(0x9999_4444 ^ (m as u32), k * m);
+
+            for &num_threads in &thread_counts {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap_or_else(|e| {
+                        panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
+                    });
+
+                // Nt
+                let mut c_prod_nt = vec![0.0f32; m * n];
+                pool.install(|| gemm_blis_parallel_nt(&a, &bt, &mut c_prod_nt, m, n, k).unwrap());
+                let mut c_two_d_nt = vec![0.0f32; m * n];
+                pool.install(|| {
+                    gemm_blis_parallel_two_d_dynamic_with_params(
+                        &a,
+                        &bt,
+                        &mut c_two_d_nt,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                        2,
+                        GemmTranspose::Nt,
+                    )
+                    .unwrap()
+                });
+                assert_eq!(
+                    c_prod_nt, c_two_d_nt,
+                    "shape=({m},{n},{k}) T={num_threads} Nt: TwoDDynamic は \
+                     gemm_blis_parallel_nt と bit 完全一致するはず（#1311）"
+                );
+
+                // Tn
+                let mut c_prod_tn = vec![0.0f32; m * n];
+                pool.install(|| gemm_blis_parallel_tn(&at, &b, &mut c_prod_tn, m, n, k).unwrap());
+                let mut c_two_d_tn = vec![0.0f32; m * n];
+                pool.install(|| {
+                    gemm_blis_parallel_two_d_dynamic_with_params(
+                        &at,
+                        &b,
+                        &mut c_two_d_tn,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                        2,
+                        GemmTranspose::Tn,
+                    )
+                    .unwrap()
+                });
+                assert_eq!(
+                    c_prod_tn, c_two_d_tn,
+                    "shape=({m},{n},{k}) T={num_threads} Tn: TwoDDynamic は \
+                     gemm_blis_parallel_tn と bit 完全一致するはず（#1311）"
+                );
+            }
+        }
+    }
+
+    /// イシュー #1311: 大形状（1024/2048/4096 正方）でも `TwoDDynamic` が
+    /// `RowPanel` と bit 完全一致することを実機で確認する（release
+    /// ビルド・プール既定スレッド数。`gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large`
+    /// と同型）。デバッグビルドでの計算量が大きいため通常 CI では実行
+    /// しない。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）での大形状 bit 一致確認専用（#1311。cargo test \
+                -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_two_d_dynamic_matches_row_panel_bit_exact_large --nocapture）"]
+    fn gemm_blis_two_d_dynamic_matches_row_panel_bit_exact_large() {
+        for &dim in &[1024usize, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xdddd_6666 ^ (dim as u32), m * k);
+            let b = xorshift32_vec(0xeeee_7777 ^ (dim as u32), k * n);
+
+            let mut c_row_panel = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanel,
+                &a,
+                &b,
+                &mut c_row_panel,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            let mut c_two_d = vec![0.0f32; m * n];
+            gemm_blis_parallel_two_d_dynamic_with_params(
+                &a,
+                &b,
+                &mut c_two_d,
+                m,
+                n,
+                k,
+                default_blocks(),
+                TWO_D_JOBS_PER_WORKER,
+                GemmTranspose::Nn,
+            )
+            .unwrap();
+
+            assert_eq!(
+                c_row_panel, c_two_d,
+                "dim={dim} は TwoDDynamic と RowPanel が bit 完全一致するはず（#1311）"
+            );
+        }
+    }
+
+    /// [`split_c_into_jobs`] が生成する各 job の `c_rows` が、C 全体を
+    /// 過不足なく被覆し互いに素であることを、番兵値の書き込みで検証する
+    /// （設計 §10「`split_c_into_jobs_rows_are_disjoint_and_cover_c`」）。
+    #[test]
+    fn split_c_into_jobs_rows_are_disjoint_and_cover_c() {
+        let blocks = BlockSizes {
+            mc: 128,
+            kc: 256,
+            nc: 512,
+        };
+        let (m, n) = (257usize, 193usize);
+        let grid = partition::job_grid(m, n, 8, 12, &blocks, 8, 2).unwrap();
+
+        let mut c = vec![0.0f32; m * n];
+        let jobs = split_c_into_jobs(&mut c, n, &grid);
+
+        // job 数は row_bands * col_bands のはず。
+        assert_eq!(jobs.len(), grid.row_bands * grid.col_bands);
+
+        // 各 job について、番兵値（job インデックス+1）を書き込む。
+        for (job_idx, job) in jobs.into_iter().enumerate() {
+            let sentinel = (job_idx + 1) as f32;
+            let mut job = job;
+            for row in job.c_rows.iter_mut() {
+                for v in row.iter_mut() {
+                    *v = sentinel;
+                }
+            }
+        }
+
+        // C 全要素が「ちょうど 1 回」上書きされ、0.0（未上書き）が残って
+        // いないことを確認する（被覆完全・互いに素の直接検証）。
+        assert!(
+            c.iter().all(|&v| v != 0.0),
+            "split_c_into_jobs の job は C を過不足なく被覆するはず"
+        );
+    }
+
+    /// イシュー #1317: `RowPanelBLaneqVec`（B 側 laneq ベクトル転置版
+    /// マイクロカーネル）が `RowPanel`（本番既定）と bit 完全一致する
+    /// ことを、MC/KC/NC 境界を跨ぐ複数形状（端タイル・`n % NR != 0`・
+    /// `k % KC != 0`・`k == 0` no-op を含む）× 複数スレッド数で直接検証
+    /// する（[`gemm_blis_ic_dynamic_matches_row_panel_bit_exact_across_shapes_and_threads`]
+    /// と同一パターン）。両 variant の唯一の差分がマイクロカーネル（C タイル
+    /// 転置方式）であることを、`gemm_blis_parallel_row_panel_with_kernel`
+    /// が `RowPanel` と行パネル分割・並列化ロジックを共有することで保証
+    /// する（§3.4）。端タイル（`ldc=NR` スタックバッファ経路）・完全タイル
+    /// （`ldc=n` 直接経路）の両方を通す形状を含む。aarch64 限定
+    /// （`RowPanelBLaneqVec` 自体が aarch64 限定 variant のため）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_across_shapes_and_threads() {
+        let shapes: &[(usize, usize, usize)] = &[
+            (5, 7, 3),
+            (64, 64, 64),
+            (128, 128, 96),
+            (129, 130, 257),
+            (1000, 96, 300),
+            (523, 600, 700),
+            (2, 3, 0),
+            (512, 512, 512),
+        ];
+        let thread_counts = [1usize, 2, 3, 16];
+
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0xb1a2_1111 ^ (m as u32), m * k);
+            let b = xorshift32_vec(0xb1a2_2222 ^ (n as u32), k * n);
+            let c_init = xorshift32_vec(0xb1a2_3333 ^ (k as u32), m * n);
+
+            for &num_threads in &thread_counts {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap_or_else(|e| {
+                        panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}")
+                    });
+
+                let mut c_row_panel = c_init.clone();
+                pool.install(|| {
+                    gemm_blis_parallel_variant(
+                        GemmDriverVariant::RowPanel,
+                        &a,
+                        &b,
+                        &mut c_row_panel,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
+                    .unwrap()
+                });
+
+                let mut c_b_laneq_vec = c_init.clone();
+                pool.install(|| {
+                    gemm_blis_parallel_variant(
+                        GemmDriverVariant::RowPanelBLaneqVec,
+                        &a,
+                        &b,
+                        &mut c_b_laneq_vec,
+                        m,
+                        n,
+                        k,
+                        default_blocks(),
+                    )
+                    .unwrap()
+                });
+
+                assert_eq!(
+                    c_row_panel, c_b_laneq_vec,
+                    "shape=({m},{n},{k}) num_threads={num_threads} は \
+                     RowPanelBLaneqVec と RowPanel が bit 完全一致するはず（#1317）"
+                );
+            }
+        }
+    }
+
+    /// イシュー #1317: 大形状（1024/2048/4096 正方）でも
+    /// `RowPanelBLaneqVec` が `RowPanel` と bit 完全一致することを実機で
+    /// 確認する（release ビルド・プール既定スレッド数。#1318 の実機実測
+    /// に先立つ事前確認用。[`gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large`]
+    /// と同一パターン）。デバッグビルドでの計算量が大きいため通常 CI
+    /// では実行しない。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）での大形状 bit 一致確認専用（#1317。cargo test \
+                -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_large --nocapture）"]
+    fn gemm_blis_row_panel_b_laneq_vec_matches_row_panel_bit_exact_large() {
+        for &dim in &[1024usize, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xb1a2_4444 ^ (dim as u32), m * k);
+            let b = xorshift32_vec(0xb1a2_5555 ^ (dim as u32), k * n);
+
+            let mut c_row_panel = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanel,
+                &a,
+                &b,
+                &mut c_row_panel,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            let mut c_b_laneq_vec = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanelBLaneqVec,
+                &a,
+                &b,
+                &mut c_b_laneq_vec,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                c_row_panel, c_b_laneq_vec,
+                "dim={dim} は RowPanelBLaneqVec と RowPanel が bit 完全一致するはず（#1317）"
+            );
+        }
+    }
+
     /// [`ic_dynamic_panel_rows`] の純関数契約を検証する（イシュー #1366）。
     #[test]
     fn ic_dynamic_panel_rows_bounds_and_alignment() {
@@ -4400,14 +5539,23 @@ mod tests {
         xs[xs.len() / 2]
     }
 
-    /// `variants` の全候補を 1 プロセス内で計測するが、ウォームアップ・
-    /// 本計測ともサンプル単位で round-robin し、走査開始位置を反復
-    /// ごとにローテーションする。これにより「候補 X は常に他候補より
-    /// 先に（＝周波数ブースト前や熱の低い状態で）測られる」といった
-    /// 順序バイアスを均す（PR #1075 codex-review 指摘）。戻り値は
-    /// `variants` と同じ順序の中央値 GFLOP/s。
-    fn run_variants_interleaved(
-        variants: &[GemmDriverVariant],
+    /// `candidates`（`(GemmDriverVariant, BlockSizes)` の組）の全候補を
+    /// 1 プロセス内で計測するが、ウォームアップ・本計測ともサンプル単位で
+    /// round-robin し、走査開始位置を反復ごとにローテーションする。これに
+    /// より「候補 X は常に他候補より先に（＝周波数ブースト前や熱の低い
+    /// 状態で）測られる」といった順序バイアスを均す（PR #1075 codex-review
+    /// 指摘）。戻り値は `candidates` と同じ順序の中央値 GFLOP/s。
+    ///
+    /// イシュー #1315（KC 再スイープ）で [`run_variants_interleaved`]
+    /// （`variant` のみを変え `blocks` は常に [`default_blocks`] 固定）から
+    /// 一般化した。`blocks` も候補ごとに変えられるようにすることで、KC の
+    /// ような `BlockSizes` フィールド単位のスイープを同一ハーネスで計測
+    /// できる（`GemmDriverVariant` に KC 専用 variant を追加しない設計判断は
+    /// 計画 §1.4-2 を参照。KC は driver の分岐ロジックではなく
+    /// `gemm_blis_parallel_variant` へ渡す `blocks` 引数のパラメータに過ぎ
+    /// ないため）。
+    fn run_candidates_interleaved(
+        candidates: &[(GemmDriverVariant, BlockSizes)],
         a: &[f32],
         b: &[f32],
         m: usize,
@@ -4417,49 +5565,35 @@ mod tests {
     ) -> Vec<f64> {
         use std::time::Instant;
 
-        let mut outputs: Vec<Vec<f32>> = variants.iter().map(|_| vec![0.0f32; m * n]).collect();
+        let mut outputs: Vec<Vec<f32>> = candidates.iter().map(|_| vec![0.0f32; m * n]).collect();
 
         // ウォームアップも round-robin＋反復ごとの開始位置ローテーションで
         // 実行し、ウォームアップ順自体が本計測のキャッシュ・熱状態に
         // 与える偏りを避ける。
         for w in 0..3 {
-            for offset in 0..variants.len() {
-                let idx = (offset + w) % variants.len();
-                gemm_blis_parallel_variant(
-                    variants[idx],
-                    a,
-                    b,
-                    &mut outputs[idx],
-                    m,
-                    n,
-                    k,
-                    default_blocks(),
-                )
-                .unwrap();
+            for offset in 0..candidates.len() {
+                let idx = (offset + w) % candidates.len();
+                let (variant, blocks) = candidates[idx];
+                gemm_blis_parallel_variant(variant, a, b, &mut outputs[idx], m, n, k, blocks)
+                    .unwrap();
             }
         }
 
-        let mut samples: Vec<Vec<f64>> =
-            variants.iter().map(|_| Vec::with_capacity(iters)).collect();
+        let mut samples: Vec<Vec<f64>> = candidates
+            .iter()
+            .map(|_| Vec::with_capacity(iters))
+            .collect();
         let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
         for it in 0..iters {
             // 反復ごとに走査開始位置を 1 つずつずらす。1 回の反復内では
             // 全候補を測るため合計サンプル数は候補間で完全に揃ったまま、
             // 「常に同じ候補が先に測られる」偏りだけを取り除く。
-            for offset in 0..variants.len() {
-                let idx = (offset + it) % variants.len();
+            for offset in 0..candidates.len() {
+                let idx = (offset + it) % candidates.len();
+                let (variant, blocks) = candidates[idx];
                 let start = Instant::now();
-                gemm_blis_parallel_variant(
-                    variants[idx],
-                    a,
-                    b,
-                    &mut outputs[idx],
-                    m,
-                    n,
-                    k,
-                    default_blocks(),
-                )
-                .unwrap();
+                gemm_blis_parallel_variant(variant, a, b, &mut outputs[idx], m, n, k, blocks)
+                    .unwrap();
                 let elapsed = start.elapsed().as_secs_f64();
                 samples[idx].push(flops / elapsed / 1e9);
             }
@@ -4468,17 +5602,31 @@ mod tests {
         samples.into_iter().map(median).collect()
     }
 
+    /// [`run_candidates_interleaved`] を `variant` のみ変えて既定
+    /// `BlockSizes`（[`default_blocks`]）で計測する互換ラッパー（#1041
+    /// 導入時点の元シグネチャを維持する。既存呼び出し元
+    /// [`gemm_blis_variant_ab_1024_2048`]／[`gemm_blis_variant_ab_4096`]
+    /// の出力形式・値を不変に保つ）。
+    fn run_variants_interleaved(
+        variants: &[GemmDriverVariant],
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        iters: usize,
+    ) -> Vec<f64> {
+        let candidates: Vec<(GemmDriverVariant, BlockSizes)> =
+            variants.iter().map(|&v| (v, default_blocks())).collect();
+        run_candidates_interleaved(&candidates, a, b, m, n, k, iters)
+    }
+
     #[test]
     #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用。ローカル smoke 目的のみ \
                 （#1041。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
                 gemm_blis_variant_ab_1024_2048 --nocapture）"]
     fn gemm_blis_variant_ab_1024_2048() {
-        let variants = [
-            GemmDriverVariant::RowPanel,
-            GemmDriverVariant::SharedB,
-            GemmDriverVariant::SharedBPcOuter,
-            GemmDriverVariant::IcDynamic,
-        ];
+        let variants = all_gemm_driver_variants();
 
         for &dim in &[1024usize, 2048] {
             let (m, n, k) = (dim, dim, dim);
@@ -4504,12 +5652,7 @@ mod tests {
                 #1141。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
                 gemm_blis_variant_ab_4096 --nocapture）"]
     fn gemm_blis_variant_ab_4096() {
-        let variants = [
-            GemmDriverVariant::RowPanel,
-            GemmDriverVariant::SharedB,
-            GemmDriverVariant::SharedBPcOuter,
-            GemmDriverVariant::IcDynamic,
-        ];
+        let variants = all_gemm_driver_variants();
 
         let (m, n, k) = (4096usize, 4096usize, 4096usize);
         let a = xorshift32_vec(0xdede_dede, m * k);
@@ -4518,6 +5661,182 @@ mod tests {
         let gflops = run_variants_interleaved(&variants, &a, &b, m, n, k, 20);
         for (variant, gflops) in variants.iter().zip(gflops) {
             println!("variant={variant:?} size={n} median_gflops={gflops:.3}");
+        }
+    }
+
+    // --- KC 再スイープ（イシュー #1315。候補 3・`docs/perf/cpu-gemm-candle-cpu-retune.md`
+    //     §8「候補 3 KC 再スイープ」の実測資産） ---
+
+    /// KC 再スイープの対象グリッド。現行本番既定 `KC`（256）を含む
+    /// 128〜512 の 5 点（計画 §3 で計測前に確定した固定グリッド。実測後の
+    /// 追加・削除は行わない）。
+    const KC_SWEEP_GRID: [usize; 5] = [128, 192, 256, 384, 512];
+
+    /// KC 再スイープの候補列（`RowPanel` 固定・`MC`/`NC` は
+    /// [`default_blocks`] を継承し `kc` のみ [`KC_SWEEP_GRID`] で差し替え）
+    /// を [`run_candidates_interleaved`] へ渡せる形で構築する。KC は
+    /// [`GemmDriverVariant`] の分岐対象ではなく `BlockSizes` のフィールドの
+    /// ため、driver variant を追加せず `blocks` 側で表現する（計画 §1.4-2）。
+    fn kc_sweep_candidates() -> Vec<(GemmDriverVariant, BlockSizes)> {
+        let base = default_blocks();
+        KC_SWEEP_GRID
+            .iter()
+            .map(|&kc| {
+                (
+                    GemmDriverVariant::RowPanel,
+                    BlockSizes {
+                        mc: base.mc,
+                        kc,
+                        nc: base.nc,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用（KC 再スイープ・イシュー \
+                #1315。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_kc_sweep_ab_1024_2048 --nocapture）"]
+    fn gemm_blis_kc_sweep_ab_1024_2048() {
+        let candidates = kc_sweep_candidates();
+
+        for &dim in &[1024usize, 2048] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xdede_dede, m * k);
+            let b = xorshift32_vec(0xefef_efef, k * n);
+
+            let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 20);
+            for ((variant, blocks), gflops) in candidates.iter().zip(gflops) {
+                println!(
+                    "variant={variant:?} kc={} size={dim} median_gflops={gflops:.3}",
+                    blocks.kc
+                );
+            }
+        }
+    }
+
+    /// N=4096 版の KC 再スイープ（イシュー #1315。#1141 の
+    /// `gemm_blis_variant_ab_4096` と同じ理由〈4096 非劣化ゲートの分子を
+    /// 独立に計測する必要〉で 1024/2048 版と分離する）。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）5 回独立実行の A/B 計測専用（KC 再スイープ・4096 非劣化 \
+                ゲート用。イシュー #1315。cargo test -p fandhe-ai-backend-cpu --release -- \
+                --ignored gemm_blis_kc_sweep_ab_4096 --nocapture）"]
+    fn gemm_blis_kc_sweep_ab_4096() {
+        let candidates = kc_sweep_candidates();
+
+        let (m, n, k) = (4096usize, 4096usize, 4096usize);
+        let a = xorshift32_vec(0xdede_dede, m * k);
+        let b = xorshift32_vec(0xefef_efef, k * n);
+
+        let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 20);
+        for ((variant, blocks), gflops) in candidates.iter().zip(gflops) {
+            println!(
+                "variant={variant:?} kc={} size={n} median_gflops={gflops:.3}",
+                blocks.kc
+            );
+        }
+    }
+
+    /// [`KC_SWEEP_GRID`] の全 KC 値で `RowPanel` が [`crate::gemm::gemm_naive`]
+    /// と bit 完全一致することを検証する（REQ-2 の bit 一致契約。
+    /// `docs/perf/cpu-gemm-blocking-sweep.md` §3.2「C タイルは pc（K
+    /// ブロック）をまたいで現在値をロードして FMA 連鎖を継続するため、
+    /// 累積順序は KC の値に依らず常に p 昇順」により KC の変更は縮約順序を
+    /// 変えない、という主張を KC 再スイープの候補グリッドで直接確認する）。
+    /// `k` は境界を跨ぐ値（`KC_SWEEP_GRID` のどの値でも割り切れない・末尾
+    /// `kc_len` が `k % 4 ∈ {1,2,3}` を含むよう choose）にして端タイル
+    /// 処理の bit 一致もあわせて検証する。x86_64 でも実行可能（CI 対象）。
+    #[test]
+    fn gemm_blis_row_panel_kc_grid_matches_naive_bit_exact() {
+        let (m, n, k) = (37, 53, 1099);
+        let a = xorshift32_vec(0x1111_2222, m * k);
+        let b = xorshift32_vec(0x3333_4444, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        for &kc in &KC_SWEEP_GRID {
+            let blocks = BlockSizes {
+                mc: default_blocks().mc,
+                kc,
+                nc: default_blocks().nc,
+            };
+            let mut c_blocked = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanel,
+                &a,
+                &b,
+                &mut c_blocked,
+                m,
+                n,
+                k,
+                blocks,
+            )
+            .unwrap();
+
+            assert_eq!(
+                c_naive, c_blocked,
+                "kc={kc} は gemm_naive と bit 完全一致するはず（#1315）"
+            );
+        }
+    }
+
+    /// イシュー #1315: KC 再スイープ候補グリッド（[`KC_SWEEP_GRID`]）が、
+    /// 大形状（1024/2048/4096 正方）でも本番既定 KC（256・[`default_blocks`]）
+    /// の `RowPanel` 出力と bit 完全一致することを実機で確認する（release
+    /// ビルド。#1366 の `gemm_blis_ic_dynamic_matches_row_panel_bit_exact_large`
+    /// と同型）。KC=256 自体はグリッドに含まれるため自明に一致するが、
+    /// グリッド全点を大形状でも横断することで小形状テストでは踏まない
+    /// メモリレイアウト・並列分割経路を確認する。
+    #[test]
+    #[ignore = "実機（M4 Max / GB10）での大形状 bit 一致確認専用（KC 再スイープ・イシュー \
+                #1315。cargo test -p fandhe-ai-backend-cpu --release -- --ignored \
+                gemm_blis_row_panel_kc_grid_matches_default_kc_bit_exact_large --nocapture）"]
+    fn gemm_blis_row_panel_kc_grid_matches_default_kc_bit_exact_large() {
+        for &dim in &[1024usize, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xaaaa_1111 ^ (dim as u32), m * k);
+            let b = xorshift32_vec(0xbbbb_2222 ^ (dim as u32), k * n);
+
+            let mut c_default_kc = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::RowPanel,
+                &a,
+                &b,
+                &mut c_default_kc,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+
+            for &kc in &KC_SWEEP_GRID {
+                let blocks = BlockSizes {
+                    mc: default_blocks().mc,
+                    kc,
+                    nc: default_blocks().nc,
+                };
+                let mut c_kc = vec![0.0f32; m * n];
+                gemm_blis_parallel_variant(
+                    GemmDriverVariant::RowPanel,
+                    &a,
+                    &b,
+                    &mut c_kc,
+                    m,
+                    n,
+                    k,
+                    blocks,
+                )
+                .unwrap();
+
+                assert_eq!(
+                    c_default_kc, c_kc,
+                    "dim={dim} kc={kc} は既定 KC=256 と bit 完全一致するはず（#1315）"
+                );
+            }
         }
     }
 
