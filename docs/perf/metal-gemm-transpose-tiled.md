@@ -501,6 +501,14 @@ attempt は run 記録が残っていても有効 0 件とし、完了記録の 
 と集計結果の不一致は警告として明示する。再利用手順は
 `ATTEMPT=<n> LOGDIR=<出力先> bash orchestrate.sh` →
 `ATTEMPT=<n> LOGDIR=<出力先> python3 aggregate.py`。
+同 PR の codex-review 七度目の指摘（P2）で、`pgrep` の終了コードを見ず
+出力件数のみで判定していたため取得失敗（終了コード 2 以上）が「該当
+なし」と同一視されていた点を是正した。`gate_common.sh` の
+`pgrep_or_fail`（0／1 正常・2 以上失敗）を両スクリプトで共有し、
+`wait_gate.sh` は `proc_error=1` で `gate_ok=0`（不成立）、
+`orchestrate.sh` の実行中監視は `UNDETERMINED`（BREACH と区別）を記録
+して当該 run を `valid_runs` から除外し、`aggregate.py` も同 run を
+「プロセス一覧取得失敗・判定不能」として除外する。
 
 ### 結論（本イシューでの到達点）
 

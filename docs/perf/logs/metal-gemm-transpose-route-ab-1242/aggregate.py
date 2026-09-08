@@ -235,8 +235,10 @@ def parse_breach_status(path: Path) -> str:
       この状態を「非 BREACH」（=有効）として `valid_run_ids` へ算入して
       いたため、計測・監視の記録が一切ない run でも分母に含まれてしまっ
       ていた。本版は "breach" と区別しつつも同じく除外対象とする。
-    - "ok": 監視記録が存在し、BREACH 行を含まない（排他条件成立を確認
-      できた）。
+    - "undetermined": BREACH 行は無いが `UNDETERMINED` 行（pgrep 取得失敗
+      で他プロセス有無を判定できなかった反復）が存在する。
+    - "ok": 監視記録が存在し、BREACH／UNDETERMINED 行を含まない（排他
+      条件成立を確認できた）。
     """
     if not path.exists():
         return "missing"
@@ -245,6 +247,12 @@ def parse_breach_status(path: Path) -> str:
         return "missing"
     if "BREACH" in text:
         return "breach"
+    # PR #1459 codex-review 七度目の指摘の是正（イシュー #1253・P2）:
+    # `orchestrate.sh` は pgrep の取得失敗（終了コード 2 以上）を
+    # `UNDETERMINED` として BREACH と区別して記録する。排他条件を確認
+    # できていない反復を含む run は有効にしない。
+    if "UNDETERMINED" in text:
+        return "undetermined"
     return "ok"
 
 
@@ -302,6 +310,8 @@ def classify_run(
         return "breach"
     if breach == "missing":
         return "missing"
+    if breach == "undetermined":
+        return "undetermined"
     if exit_code is None:
         return "rc_unknown"
     if exit_code != 0:
@@ -345,6 +355,7 @@ def main() -> None:
     valid_run_ids = [n for n in RUNS if run_class[n] == "ok"]
     excluded_breach_ids = [n for n in RUNS if run_class[n] == "breach"]
     excluded_missing_ids = [n for n in RUNS if run_class[n] == "missing"]
+    excluded_undetermined_ids = [n for n in RUNS if run_class[n] == "undetermined"]
     excluded_rc_unknown_ids = [n for n in RUNS if run_class[n] == "rc_unknown"]
     excluded_rc_nonzero_ids = [n for n in RUNS if run_class[n] == "rc_nonzero"]
     excluded_incomplete_ids = [n for n in RUNS if run_class[n] == "incomplete"]
@@ -352,6 +363,7 @@ def main() -> None:
     excluded_run_ids = sorted(
         excluded_breach_ids
         + excluded_missing_ids
+        + excluded_undetermined_ids
         + excluded_rc_unknown_ids
         + excluded_rc_nonzero_ids
         + excluded_incomplete_ids
@@ -469,6 +481,8 @@ def main() -> None:
         lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（BREACH） | - |")
     for n in excluded_missing_ids:
         lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（監視記録なし・判定不能） | - |")
+    for n in excluded_undetermined_ids:
+        lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（プロセス一覧取得失敗・判定不能） | - |")
     for n in excluded_rc_unknown_ids:
         lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（終了コード判定不能） | - |")
     for n in excluded_rc_nonzero_ids:

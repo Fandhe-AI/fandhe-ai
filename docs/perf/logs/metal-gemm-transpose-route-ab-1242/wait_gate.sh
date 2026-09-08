@@ -78,27 +78,45 @@ while :; do
   # python3 は元々 15 文字以内のため `-x` のままでよい）。
   procs=""
   proc_count=0
+  # PR #1459 codex-review 七度目の指摘の是正（イシュー #1253・P2）: pgrep
+  # の終了コード 2 以上（取得失敗）を「該当なし」と混同せず、proc_error=1
+  # として gate_ok=0（判定不能・fail-closed）にする（gate_common.sh の
+  # pgrep_or_fail）。
+  proc_error=0
   for name in cargo rustc python3; do
-    cnt=$(pgrep -x "$name" 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$cnt" -gt 0 ]; then
-      procs="${procs}${name},"
-      proc_count=$((proc_count + cnt))
+    if list=$(pgrep_or_fail -x "$name"); then
+      cnt=0
+      if [ -n "$list" ]; then cnt=$(printf '%s\n' "$list" | wc -l | tr -d ' '); fi
+      if [ "$cnt" -gt 0 ]; then
+        procs="${procs}${name},"
+        proc_count=$((proc_count + cnt))
+      fi
+    else
+      proc_error=1
+      procs="${procs}${name}:ENUM_ERROR,"
     fi
   done
-  bench_cnt=$(pgrep -f '(^|/)gemm_transpose_route_ab_bench([[:space:]]|$)' 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$bench_cnt" -gt 0 ]; then
-    procs="${procs}gemm_transpose_route_ab_bench,"
-    proc_count=$((proc_count + bench_cnt))
+  if list=$(pgrep_or_fail -f '(^|/)gemm_transpose_route_ab_bench([[:space:]]|$)'); then
+    bench_cnt=0
+    if [ -n "$list" ]; then bench_cnt=$(printf '%s\n' "$list" | wc -l | tr -d ' '); fi
+    if [ "$bench_cnt" -gt 0 ]; then
+      procs="${procs}gemm_transpose_route_ab_bench,"
+      proc_count=$((proc_count + bench_cnt))
+    fi
+  else
+    proc_error=1
+    procs="${procs}gemm_transpose_route_ab_bench:ENUM_ERROR,"
   fi
-  # load1 とプロセス不在の両方を満たしたときのみ gate_ok=1
-  # （プロセス条件を落とすと排他計測契約の片側しか検査しなくなる）。
-  ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v p="$proc_count" 'BEGIN{print (l<t && p==0)?1:0}')
+  # load1 とプロセス不在の両方を満たし、かつプロセス一覧の取得に失敗して
+  # いないときのみ gate_ok=1（プロセス条件を落とすと排他計測契約の片側
+  # しか検査しなくなる。取得失敗は判定不能として不成立に倒す）。
+  ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v p="$proc_count" -v e="$proc_error" 'BEGIN{print (l<t && p==0 && e==0)?1:0}')
   if [ "$ok" = "1" ]; then
     consec=$((consec + 1))
   else
     consec=0
   fi
-  echo "$ts elapsed=${elapsed}s load1=$load1 load5=$load5 proc_count=$proc_count procs=[$procs] gate_ok=$ok consecutive_ok=$consec" >> "$OUT"
+  echo "$ts elapsed=${elapsed}s load1=$load1 load5=$load5 proc_count=$proc_count proc_error=$proc_error procs=[$procs] gate_ok=$ok consecutive_ok=$consec" >> "$OUT"
 
   if [ "$consec" -ge "$CONSEC_REQUIRED" ]; then
     result="PASSED"

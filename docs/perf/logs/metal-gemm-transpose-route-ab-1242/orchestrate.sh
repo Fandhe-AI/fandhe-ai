@@ -100,6 +100,14 @@
 #     （`ATTEMPT` を変えるか、旧記録を明示的に退避してから再実行する）。
 #     `aggregate.py` 側は同じ `ATTEMPT` 接頭辞の記録のみ読み、完了記録の
 #     `valid_runs` と照合する。
+#
+# PR #1459 codex-review 七度目の指摘の是正（イシュー #1253・P2）:
+# (7) pgrep の終了コードを確認せず出力だけを数えていたため、プロセス
+#     一覧の取得失敗（終了コード 2 以上）も「該当なし」と同じ 0 件になり、
+#     排他条件を確認できていない計測を有効扱いしうる。`gate_common.sh` の
+#     `pgrep_or_fail`（0／1 は正常・2 以上は失敗）を wait_gate.sh と共有
+#     し、実行中監視の取得失敗は `UNDETERMINED`（BREACH と区別）として
+#     記録したうえで run を valid_runs から除外する。
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -262,20 +270,37 @@ for n in 1 2 3; do
     # 各 PID の自子孫／他プロセス／消滅の分類は classify_pid（スナップ
     # ショット照合 + 祖先関係の再確認）に集約する（PR #1459 codex-review
     # 五度目の指摘の是正）。
+    # PR #1459 codex-review 七度目の指摘の是正（イシュー #1253・P2）: pgrep
+    # の終了コード 2 以上（取得失敗）は「該当なし」と区別し enum_error=1
+    # として記録する。取得失敗の反復は排他条件を確認できていないため、
+    # run は BREACH と同様に valid_runs から除外し、監視ログには BREACH と
+    # 区別できる `UNDETERMINED` を書く（aggregate.py も同トークンで判別）。
+    enum_error=0
     for name in cargo rustc python3; do
-      for pid in $(pgrep -x "$name" 2>/dev/null); do
-        classify_pid "$name" "$pid"
+      if list=$(pgrep_or_fail -x "$name"); then
+        for pid in $list; do
+          classify_pid "$name" "$pid"
+        done
+      else
+        enum_error=1
+      fi
+    done
+    if list=$(pgrep_or_fail -f '(^|/)gemm_transpose_route_ab_bench([[:space:]]|$)'); then
+      for pid in $list; do
+        classify_pid gemm_transpose_route_ab_bench "$pid"
       done
-    done
-    for pid in $(pgrep -f '(^|/)gemm_transpose_route_ab_bench([[:space:]]|$)' 2>/dev/null); do
-      classify_pid gemm_transpose_route_ab_bench "$pid"
-    done
-    load_ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" 'BEGIN{print (l<t)?1:0}')
-    if [ "$load_ok" != "1" ] || [ "$other_count" -gt 0 ]; then
-      breach=1
-      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] BREACH" >> "$MONITOR_LOG"
     else
-      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] ok" >> "$MONITOR_LOG"
+      enum_error=1
+    fi
+    load_ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" 'BEGIN{print (l<t)?1:0}')
+    if [ "$enum_error" -ne 0 ]; then
+      breach=1
+      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=1 UNDETERMINED" >> "$MONITOR_LOG"
+    elif [ "$load_ok" != "1" ] || [ "$other_count" -gt 0 ]; then
+      breach=1
+      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 BREACH" >> "$MONITOR_LOG"
+    else
+      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 ok" >> "$MONITOR_LOG"
     fi
     sleep "$MONITOR_POLL_INTERVAL_SECS"
   done
