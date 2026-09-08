@@ -761,12 +761,23 @@ impl RetryConfig {
     /// `attempt_index` の増加に対し非減少列になる。
     pub fn wait_for_attempt(&self, attempt_index: usize) -> Duration {
         // Duration に対する冪乗演算は存在しないため秒（f64）で計算してから
-        // Duration へ戻す。extreme な attempt_index でも f64 の powi は
-        // 発散して +inf になるだけで panic しない（Duration::from_secs_f64 も
-        // 有限値へ自然に飽和させるため、後段の `.min` が機構的に機能する）。
-        let factor = self.growth_factor.powi(attempt_index as i32);
+        // Duration へ戻す。`attempt_index` は `usize -> i32` へ直接 `as` すると
+        // `i32::MAX` 超で wrap し非減少列の契約を壊しうる（Review 指摘。#1265）
+        // ため `i32::try_from` の失敗を `i32::MAX` へ飽和させる（`powi` は
+        // それ以上大きい指数でも `growth_factor >= 1.0` の下では発散する
+        // だけで結果は変わらない）。
+        let exponent = i32::try_from(attempt_index).unwrap_or(i32::MAX);
+        let factor = self.growth_factor.powi(exponent);
         let secs = (self.initial_wait.as_secs_f64() * factor).min(self.max_wait.as_secs_f64());
-        Duration::from_secs_f64(secs)
+        // `Duration::from_secs_f64` は「有限値へ自然に飽和する」わけではなく、
+        // f64 の丸め誤差により `Duration::MAX` をわずかに超える値（例:
+        // `Duration::MAX.as_secs_f64()` の往復）で overflow panic しうる
+        // （Review 指摘・AGENTS.md「本番経路の panic 禁止」。#1265）。
+        // `try_from_secs_f64` で変換不能（負・NaN・無限大・範囲外）を検知し、
+        // その場合は `max_wait` へ fail-closed に飽和させる（`secs` は
+        // 既に `max_wait` 以下へ `.min` 済みのため、変換失敗は実質的に
+        // 丸め誤差による極端な入力時のみ発生する）。
+        Duration::try_from_secs_f64(secs).unwrap_or(self.max_wait)
     }
 
     pub fn max_attempts(&self) -> usize {
@@ -877,19 +888,41 @@ impl GuardRetryOutcome {
 
 /// `report.load_avg.max_1min` 等から、上限到達時の `BenchError::EnvGuardExhausted`
 /// 用の人が読める要約を組み立てる（ホスト名・ユーザー名を含めない）。
+///
+/// `report.overall == GuardVerdict::Fail`（`combine_verdicts` により
+/// `load_avg`／`gpu` いずれか一方の `Fail` だけでも成立する）で呼ばれる
+/// 契約のため、load 側が実際には閾値以下（GPU 側のみが `Fail` 要因）の
+/// ケースがありうる。以前は `load_avg(1min)={..} > max={..}` を無条件に
+/// 出力しており、この場合に実際の失敗理由（GPU）と矛盾する要約になって
+/// いた（Review 指摘。#1265）。各項目の `verdict` をそのまま併記すること
+/// で、どちらが実際のブロック要因かを要約からも判別できるようにする。
 fn summarize_exhausted(report: &EnvGuardReport) -> String {
     let load_part = match report.load_avg.observed {
-        Some(load) => format!(
-            "load_avg(1min)={:.2} > max={:.2}",
-            load.one, report.load_avg.max_1min
+        Some(load) => {
+            let cmp = if load.one > report.load_avg.max_1min {
+                ">"
+            } else {
+                "<="
+            };
+            format!(
+                "load_avg(1min)={:.2} {cmp} max={:.2} verdict={:?}",
+                load.one, report.load_avg.max_1min, report.load_avg.verdict
+            )
+        }
+        None => format!(
+            "load_avg=NA(max={:.2}) verdict={:?}",
+            report.load_avg.max_1min, report.load_avg.verdict
         ),
-        None => format!("load_avg=NA(max={:.2})", report.load_avg.max_1min),
     };
     let gpu_part = if report.gpu.flagged.is_empty() {
-        "gpu_flagged=none".to_string()
+        format!("gpu_flagged=none verdict={:?}", report.gpu.verdict)
     } else {
         let names: Vec<&str> = report.gpu.flagged.iter().map(|p| p.name.as_str()).collect();
-        format!("gpu_flagged={}", names.join(","))
+        format!(
+            "gpu_flagged={} verdict={:?}",
+            names.join(","),
+            report.gpu.verdict
+        )
     };
     format!("{load_part}; {gpu_part}")
 }
@@ -936,7 +969,15 @@ where
         } else {
             let wait = retry.wait_for_attempt(attempt_index - 1);
             sleep(wait);
-            total_wait += wait;
+            // `Duration` の `+=` は加算結果が表現範囲を超えると panic する
+            // （`RetryConfig::new` は `max_wait` の妥当性しか検証せず、極端な
+            // `initial_wait`／`max_wait`〈例: `Duration::from_secs(1u64<<63)`〉
+            // では累積が `Duration::MAX` を超えうる。Review 指摘・AGENTS.md
+            // 「本番経路の panic 禁止」。#1265）。`checked_add` で検知し
+            // 表現できない場合は `Duration::MAX` へ fail-closed に飽和させる
+            // （env_info 上は「観測可能な最大値」として記録されるだけで、
+            // 判定ロジック〈`is_blocking`〉には影響しない）。
+            total_wait = total_wait.checked_add(wait).unwrap_or(Duration::MAX);
             Some(wait)
         };
         let report = check();
@@ -1848,6 +1889,89 @@ mod tests {
         assert!(w1 >= w0 && w2 >= w1 && w5 >= w2);
         // max_wait=10s で cap される。
         assert_eq!(w5, Duration::from_secs(10));
+    }
+
+    /// Review 指摘（#1265・P1）の再現ケース: `initial_wait=max_wait=
+    /// Duration::MAX`・`growth_factor=1.0` で `wait_for_attempt(0)` を
+    /// 呼ぶと、`Duration::MAX.as_secs_f64()` の丸め誤差により
+    /// `Duration::from_secs_f64` が overflow panic しうる（f64 は
+    /// `Duration::MAX` を正確に表現できず、往復変換で表現範囲を
+    /// わずかに超える値になりうるため）。`try_from_secs_f64` +
+    /// `max_wait` への飽和で panic せず値を返すことを確認する。
+    #[test]
+    fn wait_for_attempt_does_not_panic_at_duration_max() {
+        let cfg = RetryConfig::new(Duration::MAX, 1.0, Duration::MAX, 2)
+            .expect("Duration::MAX は initial_wait <= max_wait を満たすため成功するはず");
+        let w0 = cfg.wait_for_attempt(0);
+        // 丸め誤差で `Duration::MAX` を僅かに下回っても許容する
+        // （`try_from_secs_f64` が失敗すれば `max_wait` へ飽和するため、
+        // いずれにせよ `Duration::MAX` 近傍の有限値になる）。
+        assert!(w0 <= Duration::MAX);
+    }
+
+    /// Review 指摘（#1265・P2）の再現ケース: `attempt_index` が `i32::MAX`
+    /// を超えても（`usize -> i32` の `as` wrap を経由せず）panic せず、
+    /// 非減少列の契約を壊さないことを確認する。
+    #[test]
+    fn wait_for_attempt_handles_attempt_index_beyond_i32_max() {
+        let cfg = RetryConfig::new(Duration::from_secs(2), 2.0, Duration::from_secs(100), 2)
+            .expect("有効な設定のため成功するはず");
+        let large_index = usize::try_from(i32::MAX).expect("i32::MAX は usize に収まる") + 1;
+        let w = cfg.wait_for_attempt(large_index);
+        // `growth_factor >= 1.0` の下では index が大きいほど `max_wait`
+        // へ収束するため、cap されているはず（wrap して負の指数になり
+        // `initial_wait` 未満へ落ちる、という非減少契約違反が起きない
+        // ことを確認する）。
+        assert_eq!(w, Duration::from_secs(100));
+    }
+
+    /// Review 指摘（#1265・P1）の再現ケース: `initial_wait=max_wait=
+    /// Duration::from_secs(1u64<<63)`・`growth_factor=1.0`・
+    /// `max_attempts=3` で 2 回目の `total_wait += wait` が `u64` の
+    /// 秒フィールドを超えて overflow panic しうる。`checked_add` +
+    /// `Duration::MAX` への飽和で panic しないことを確認する
+    /// （`run_guard_with_retry_with` は常に `Fail` を返す `check` を
+    /// 使い、`Err(EnvGuardExhausted)` の戻り自体を確認する）。
+    #[test]
+    fn run_guard_with_retry_total_wait_does_not_panic_on_overflow() {
+        let huge = Duration::from_secs(1u64 << 63);
+        let retry = RetryConfig::new(huge, 1.0, huge, 3)
+            .expect("initial_wait == max_wait のため成功するはず");
+        let always_fail = || EnvGuardReport {
+            load_avg: LoadAvgCheck {
+                observed: Some(LoadAvg {
+                    one: 100.0,
+                    five: 100.0,
+                    fifteen: 100.0,
+                }),
+                max_1min: 1.0,
+                verdict: GuardVerdict::Fail,
+            },
+            gpu: GpuProcessCheck {
+                processes: Vec::new(),
+                flagged: Vec::new(),
+                device_utilization_percent: None,
+                verdict: GuardVerdict::Pass,
+                note: None,
+                available: true,
+            },
+            uptime: UptimeRecord {
+                uptime_secs: None,
+                raw_line: None,
+                collected_at_unix_secs: Some(0),
+            },
+            overall: GuardVerdict::Fail,
+        };
+        let mut sleeps: Vec<Duration> = Vec::new();
+        let result = run_guard_with_retry_with(&retry, always_fail, |wait| sleeps.push(wait));
+        match result {
+            Err(BenchError::EnvGuardExhausted { attempts, .. }) => {
+                assert_eq!(attempts, 3);
+            }
+            other => panic!("EnvGuardExhausted を期待したが得られなかった: {other:?}"),
+        }
+        // 2 回 sleep（3 試行 - 1）した後も panic せずここへ到達する。
+        assert_eq!(sleeps.len(), 2);
     }
 
     // --- run_guard_with_retry_with ---------------------------------------

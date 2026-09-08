@@ -354,6 +354,19 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, S
                     "--guard-wait-secs は有限かつ正である必要がある: '{arg}'"
                 ));
             }
+            // `is_finite() && > 0.0` だけでは `Duration` の表現範囲
+            // （最大 `Duration::MAX` ≒ 1.8e19 秒）を超える値（例:
+            // `--guard-wait-secs=1e100`）を通してしまい、後段の
+            // `run_env_guard` 内 `Duration::from_secs_f64` が panic する
+            // 経路になっていた（Review 指摘・AGENTS.md「本番経路の panic
+            // 禁止」。#1265）。ここで `Duration::try_from_secs_f64` により
+            // 変換可能性そのものを検証し、範囲外なら CLI 引数エラーとして
+            // undetermined ではなく明示的に拒否する。
+            if std::time::Duration::try_from_secs_f64(value).is_err() {
+                return Err(format!(
+                    "--guard-wait-secs の値が Duration の表現範囲を超えている: '{arg}'"
+                ));
+            }
             out.guard_wait_secs = Some(value);
             guard_wait_secs_seen = true;
             continue;
@@ -476,6 +489,27 @@ struct RoundExtrema {
 /// 既に `BenchError::NanSample` として拒否するため、本関数へは到達しない
 /// 前提とする。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
+    if round_medians_secs.is_empty() {
+        return None;
+    }
+    let (mut min_idx, mut max_idx) = (0usize, 0usize);
+    for (i, &v) in round_medians_secs.iter().enumerate().skip(1) {
+        if v < round_medians_secs[min_idx] {
+            min_idx = i;
+        }
+        if v > round_medians_secs[max_idx] {
+            max_idx = i;
+        }
+    }
+    Some(RoundExtrema {
+        min_secs: round_medians_secs[min_idx],
+        min_round_idx: min_idx,
+        max_secs: round_medians_secs[max_idx],
+        max_round_idx: max_idx,
+    })
+}
+
 /// `env_guard_result=` 行の値を導出する純関数（イシュー #1265。Review 指摘
 /// 対応: 以前は `args.max_load_avg` の有無だけで `pass`／`record_only` を
 /// 決め打ちしていたため、`run_guard_with_retry` が `Undetermined`（load
@@ -504,27 +538,6 @@ fn env_guard_result_label(gated: bool, overall: bench_harness::ab::GuardVerdict)
         GuardVerdict::Undetermined => "undetermined",
         GuardVerdict::Fail => "fail",
     }
-}
-
-fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
-    if round_medians_secs.is_empty() {
-        return None;
-    }
-    let (mut min_idx, mut max_idx) = (0usize, 0usize);
-    for (i, &v) in round_medians_secs.iter().enumerate().skip(1) {
-        if v < round_medians_secs[min_idx] {
-            min_idx = i;
-        }
-        if v > round_medians_secs[max_idx] {
-            max_idx = i;
-        }
-    }
-    Some(RoundExtrema {
-        min_secs: round_medians_secs[min_idx],
-        min_round_idx: min_idx,
-        max_secs: round_medians_secs[max_idx],
-        max_round_idx: max_idx,
-    })
 }
 
 /// `--gpu-timestamps` opt-in 時、フェーズ 1 の計装クロージャが 1 回の
@@ -1088,15 +1101,42 @@ mod macos_impl {
     /// GPU は未初期化のまま終了できる位置でのみ呼ぶ想定 — フェーズ 1 前は
     /// `MetalContext::new()` より前、フェーズ 2 前は既にコンテキスト保持
     /// 済みだが追加の GPU 操作は行わずに終了する）。
-    fn abort_on_guard_error(err: &BenchError) -> ! {
-        match err {
+    ///
+    /// 以前は stdout のみへ出力していたため、`--env-info-out` 指定時でも
+    /// 再試行上限到達（exhausted）で終了した実行がログファイルへ一切
+    /// 残らなかった（[`emit_env_info`] は `Ok` 経路の成功試行でしか呼ばれ
+    /// ないため。Review 指摘。#1265）。`emit_env_info` と同じ
+    /// `OpenOptions::create(true).append(true)` 方式で `label`／`args` を
+    /// 受け取り、stdout と同一テキストをファイルへも追記することで
+    /// 「記録できない実行を記録済みと誤認しない」という既存の fail-closed
+    /// 方針（書き込み失敗時は stderr へ理由を出して exit(1)）を exhausted
+    /// 経路にも一貫適用する。
+    fn abort_on_guard_error(label: &str, err: &BenchError, args: &CliArgs) -> ! {
+        let text = match err {
             BenchError::EnvGuardExhausted { attempts, detail } => {
-                println!("env_guard_result=exhausted attempts={attempts}");
-                println!("verdict=undetermined (環境ガード上限到達: {detail})");
+                format!(
+                    "env_guard_label={label} env_guard_result=exhausted attempts={attempts}\n\
+                     verdict=undetermined (環境ガード上限到達: {detail})\n"
+                )
             }
             other => {
-                println!("env_guard_result=error");
-                println!("verdict=undetermined (環境ガード設定エラー: {other})");
+                format!(
+                    "env_guard_label={label} env_guard_result=error\n\
+                     verdict=undetermined (環境ガード設定エラー: {other})\n"
+                )
+            }
+        };
+        print!("{text}");
+        if let Some(path) = &args.env_info_out {
+            use std::io::Write;
+            let result = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut f| f.write_all(text.as_bytes()));
+            if let Err(e) = result {
+                eprintln!("env_info_out への書き込みに失敗した（path={path}）: {e}");
+                std::process::exit(1);
             }
         }
         std::process::exit(1);
@@ -1746,7 +1786,7 @@ mod macos_impl {
         // 一切触らずに終了する。
         let (phase1_guard_outcome, phase1_guard_config) = match run_env_guard(&args) {
             Ok(v) => v,
-            Err(e) => abort_on_guard_error(&e),
+            Err(e) => abort_on_guard_error("phase1", &e, &args),
         };
         emit_env_info(
             "phase1",
@@ -1831,7 +1871,7 @@ mod macos_impl {
         // 判断する）。
         let (phase2_guard_outcome, phase2_guard_config) = match run_env_guard(&args) {
             Ok(v) => v,
-            Err(e) => abort_on_guard_error(&e),
+            Err(e) => abort_on_guard_error("phase2", &e, &args),
         };
         emit_env_info(
             "phase2",
@@ -2061,6 +2101,18 @@ mod cli_and_round_stats_tests {
         let err = parse_args_from(args(&["--guard-wait-secs=0"]))
             .expect_err("0 は fail-closed に拒否するはず");
         assert!(err.contains("有限かつ正"));
+    }
+
+    /// Review 指摘（#1265・P2）の再現ケース: `is_finite() && > 0.0` は
+    /// 通過するが `Duration` の表現範囲（最大約 1.8e19 秒）を大きく
+    /// 超える値（`1e100`）は、以前は検証をすり抜けて後段
+    /// `run_env_guard` 内 `Duration::from_secs_f64` の panic 経路に
+    /// 到達しえた。CLI 引数検証の時点で明示的に拒否することを確認する。
+    #[test]
+    fn parse_args_from_guard_wait_secs_rejects_duration_overflow() {
+        let err = parse_args_from(args(&["--guard-wait-secs=1e100"]))
+            .expect_err("Duration の表現範囲外は fail-closed に拒否するはず");
+        assert!(err.contains("Duration の表現範囲"));
     }
 
     #[test]
