@@ -1,10 +1,16 @@
-# tolerance 契約変更の決定記録（draft）
+# tolerance 契約変更の決定記録（確定版・2026-09-08 ユーザー承認）
 
-> **本文書は draft であり採用決定ではない。** `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・
+> **本文書は確定版である（イシュー #1241 承認記録コメント `<!-- approval-record:1241 -->`・2026-09-08）。**
+> 採否・判定形式・係数値・適用スコープ・spec 提案の起票可否の 5 点は §8 のとおりユーザー承認済み
+> （採否: 承認／形式・係数: A-1 `c=0.5`／スコープ: framework-compare ハーネス限定／spec 起票: 可
+> 〈(b) 形式・(b-2) 含む〉→ 起票済み Fandhe-AI/fandhe-ai-spec#64／既存定数: 維持）。
+> §2〜§7・§9 の分析節は draft 時点（イシュー #1239）の内容をそのまま保持し、確定に伴う追記は
+> 「**確定（2026-09-08）**」の見出しで区別する。
+>
+> 本確定版化（docs のみの変更）にあたっても `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・
 > `PARITY_REL_TOL`／`PARITY_ABS_TOL`・判定式（`compare`／`_parity_check`）・
 > `crates/backend-cuda/tests/common/parity_baseline.rs::BASELINES`・`docs/spec/`（正本 submodule）
-> は本 draft の作成にあたって一切変更していない。採否・判定形式・係数値・適用スコープ・
-> spec 提案の起票可否は、いずれもイシュー #1241 でのユーザー承認を経て初めて確定する
+> は一切変更していない。承認済み契約のハーネスへの実装は Phase 2（#1243 配下）が扱う
 > （`.claude/rules/coding-rust.md`・`.claude/rules/security.md`「自己修復ループ固有のガードレール」）。
 
 ## 1. 位置づけ
@@ -13,7 +19,8 @@
 （`docs/perf/candle-parity-tolerance-candidates.md`）・#1238
 （`docs/perf/candle-parity-tolerance-baseline-impact.md`）に続く本イシュー #1239 の成果物。
 #1240（spec 提案 draft: `docs/spec-proposal-req2-candle-parity-tolerance.md`）とは独立に、
-本文書は候補判定の比較・推奨案（draft）・ユーザー承認待ち事項の整理に閉じる。
+本文書は候補判定の比較・推奨案（draft）・ユーザー承認待ち事項の整理に閉じ、#1241 の承認を受けて
+§8 に承認記録を確定した（2026-09-08）。
 承認記録は #1241、承認後の実装（Phase 2）は #1243 配下 #1245／#1252／#1258 が扱う。
 
 ## 2. 背景
@@ -102,11 +109,13 @@
 **1 条件のみ**の fail 要素が根拠であり、「候補で置き換える」判定（現行 pass 要素が候補判定の
 下で新たに fail に転じうるか）は評価不能・スコープ外。他形状・他シードへの外挿は行わない。
 
-## 5. 推奨案と定数値（draft の提案）
+## 5. 推奨案と定数値（draft 時点の提案。§8 で (i) `c=0.5` を承認）
 
 **第一候補: A-1（`pass ⇔ rel < 1e-3 ∨ diff < 1e-5 ∨ diff <= c・u・K・S_A・S_B`。既存 2 条件への
 OR 追加・既存定数〈`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`〉は不変）。** 係数 `c`
-（`u=2^-24` 表記）は次の 2 案を提示し、選択は #1241 に委ねる。
+（`u=2^-24` 表記）は次の 2 案を提示し、選択は #1241 に委ねた。
+**確定（2026-09-08）: #1241 で案 (i) `c=0.5` を承認**（`u=2^-24` 表記。machine epsilon `eps=2^-23`
+表記では `c=0.25` に相当。§3 の換算則）。代替案 B-2 は不採用。
 
 | 案 | `c`（`u=2^-24`） | bound(K=2048) | 現行 1e-5 比の余裕 | N=512 | N=4096 | `BASELINES` 分類（no-op/全救済/部分・未確定/分類不能） |
 |---|---:|---:|---|---:|---:|---|
@@ -188,39 +197,57 @@ spec 再改定（#1240 案 (a) 相当）が前提**となる。一方、**framew
 
 本 draft はこの要否の整理と論点（線形 K 形式 vs √K 形式・`S_A・S_B` の局所性限界・
 非 Tensor Core 経路への適用可否）のみを渡し、spec 提案本文の draft 自体は #1240 の成果物と
-する。spec リポジトリへの実起票は #1241 承認後に限る。
+する。spec リポジトリへの実起票は #1241 承認後に限る（draft 時点）。
 
 spec 提案 draft 自体は `docs/spec-proposal-req2-candle-parity-tolerance.md`（イシュー #1240）
 として起草済み。起票用本文（タイトル案・背景・提案 (a)/(b)・受け入れ基準への影響）は同文書
 §2 を参照。
 
-## 8. ユーザー承認待ち事項（#1241 で記録）
+**確定（2026-09-08）**: #1241 で spec 起票を **(b) 形式**（(b-1) 第三者比較対象の統一複合判定
+外れは fandhe-ai 側の REQ-2 違反ではない旨の明文化 + (b-2) 比較対象妥当性検証に限りスケール付き
+絶対誤差項をハーネス限定で認める）で承認し、Fandhe-AI/fandhe-ai-spec#64
+（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/64）として起票済み。案 (a)（本体 `compare`／
+`assert_parity` の判定式改定を伴う spec 再改定）は不採用。
 
-1. **契約変更の採否**: tolerance 契約（判定式への候補判定 OR 追加）自体を変更するか、
-   現状（「tolerance は緩めない」・N=2048 判定不能のまま据え置き）を維持するか
-2. **判定形式と係数**: A-1（第一候補）か B-2（代替案）か。A-1 の場合、`c=0.5`（案 i）／
-   `c=1.0`（案 ii）／その他の値か
-3. **適用スコープ**: framework-compare ハーネス限定（`bench-common` + `compare_gemm_gate.py`）
-   か、本体 `compare`／`assert_parity`／`ParityBaseline` にも反映するか
-4. **spec 提案の起票可否**: #1240（案 (a)／(b)）の起票を進めるか
-5. **既存定数の扱い**: `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`／`PARITY_REL_TOL`／
-   `PARITY_ABS_TOL` は変更せず維持（OR 追加のみ）でよいか
+## 8. ユーザー承認記録（#1241・2026-09-08 承認済み）
 
-## 9. Phase 2 の反映範囲（#1238 §7.1〜§7.5 の Phase 2 issue への対応付け）
+draft 時点で #1241 へ委ねた 5 点は、#1241 の承認記録コメント（`<!-- approval-record:1241 -->`・
+2026-09-08T00:55Z）で次のとおり確定した。
+
+| # | 承認待ち事項（draft 時点） | 承認内容（2026-09-08） |
+|---|---|---|
+| 1 | 契約変更の採否（候補判定 OR 追加 か 据え置き か） | **承認**（候補判定の OR 追加を行う） |
+| 2 | 判定形式と係数（A-1 か B-2 か。A-1 の `c`） | **A-1 `c=0.5`**（`pass ⇔ rel < 1e-3 ∨ diff < 1e-5 ∨ diff <= 0.5・u・K・S_A・S_B`。`u=2^-24`） |
+| 3 | 適用スコープ（ハーネス限定 か 本体まで か） | **ハーネス限定**（`scripts/bench/framework-compare/` の `bench-common::parity`・`compare_gemm_gate.py` のみ。本体の `compare`／`assert_parity`／`ParityBaseline` は変更しない） |
+| 4 | spec 提案の起票可否（案 (a)／(b)） | **可（(b) 形式。(b-2) を含む）** → Fandhe-AI/fandhe-ai-spec#64（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/64）として起票済み |
+| 5 | 既存定数の扱い | **維持**（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`／`PARITY_REL_TOL`／`PARITY_ABS_TOL` は不変。候補判定は OR 追加のみ） |
+
+出典: https://github.com/Fandhe-AI/fandhe-ai/issues/1241 （承認依頼コメント 2026-09-07・承認記録
+コメント 2026-09-08）。承認内容に基づく実装は Phase 2（#1243 配下。§9）へ引き継ぐ。
+
+## 9. Phase 2 の反映範囲（#1238 §7.1〜§7.5 の Phase 2 issue への対応付け。draft 時点の想定）
 
 | Phase 2 issue（想定） | 対応する #1238 の同時更新箇所 |
 |---|---|
 | #1247 | `bench-common::parity`（`element_error`・`PARITY_REL_TOL`／`PARITY_ABS_TOL` 周辺）への判定式追加、および定数ピンが判定式そのものを検査しない盲点（§7.1）を埋める判定式ピンテストの新設 |
 | #1250 | `compare_gemm_gate.py::_parity_check`・`summarize.py` の判定不能条件の更新（§7.2） |
-| #1254 | 本体 `compare` の新入口追加（シグネチャ非破壊。§8 の設計制約）・判定式レプリカ群（§7.2）・リテラル閾値レプリカ（§7.3）・`extract_f64_const`／`_extract_f64_const` 両方への新定数追加（§7.5）・規約文言更新（§7.4） |
-| #1256 | GB10 実機で `BASELINES` の非後退確認、必要なら再測定（人間承認必須） |
+| #1254 | **承認スコープ外（§8-3 ハーネス限定）・Phase 2 で再スコープ要**: 本体 `compare` の新入口追加（シグネチャ非破壊。§8 の設計制約）・判定式レプリカ群（§7.2）・リテラル閾値レプリカ（§7.3）・`extract_f64_const`／`_extract_f64_const` 両方への新定数追加（§7.5）・規約文言更新（§7.4） |
+| #1256 | **承認スコープ外（§8-3 ハーネス限定。本体 `ParityBaseline` は不変のため契約反映後の再測定対象なし）・Phase 2 で再スコープ要**: GB10 実機で `BASELINES` の非後退確認、必要なら再測定（人間承認必須） |
 | #1260／#1262 | CUDA／CPU N=2048 再計測で判定不能が解消したことの記録 |
 
 **#1241 で本 draft が却下された場合、Phase 2 は「対応不要」としてクローズする。**
 
+**確定（2026-09-08）**: #1241 で承認されたため Phase 2 は着手可能。ただし承認スコープは
+ハーネス限定（§8-3）であり、上表のうち本体 `compare`／`assert_parity`／`ParityBaseline` を
+対象とする #1254・#1256（#1252 配下）は承認スコープと整合しないため、Phase 2 着手時に
+ユーザー確認のうえ再スコープ（ハーネス限定に伴う「対応不要」クローズ、または縮小）する
+（`.claude/rules/out-of-scope-tracking.md`。本確定版化では #1254・#1256 の本文・状態は変更しない）。
+#1247／#1250（ハーネス側）・#1260／#1262（N=2048 再計測）は承認スコープ内。
+
 ## 10. 未変更事項の確認
 
-本 draft の作成にあたり、以下は一切変更していない:
+本決定記録の作成（draft・イシュー #1239）および確定版化（イシュー #1241）のいずれにおいても、
+以下は一切変更していない:
 
 ```
 $ git diff --stat origin/main -- crates/ scripts/ .github/ docs/spec/
