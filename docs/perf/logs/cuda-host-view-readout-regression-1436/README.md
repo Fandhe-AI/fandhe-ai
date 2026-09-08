@@ -24,10 +24,17 @@ GB10（sm_121）実機実測（2026-09-08）。内部ホスト名は含めない
 
 ```bash
 # Layer B（backend-cuda 非公開 API 診断テスト。--test-threads=1 必須）
+# 完全一致テスト名 + --exact を使うこと。部分一致フィルター
+# （例: `readout_regression_diag_n1024`）は同名 prefix を持つ単腕
+# 4 関数（`readout_regression_diag_n1024_legacy_to_vec` 等。#1442
+# レビュー指摘対応で新設）にも一致してしまい、4 腕をまとめて実行する
+# `readout_regression_diag_n1024` と単腕 4 関数の計 5 関数が同一プロセス
+# 内で連続実行され、記録時（4 腕一括のみ）と異なる allocator 状態の
+# 引き継ぎが起きる。
 env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
     CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
 cargo test -p fandhe-ai-backend-cuda --release --lib \
-  readout_regression_diag_n1024 -- --ignored --nocapture --test-threads=1
+  readout_regression_diag_n1024 -- --ignored --nocapture --test-threads=1 --exact
 
 # Layer A（off／on 2 バイナリを facade path patch でビルドしてから実行）
 cd scripts/bench/framework-compare

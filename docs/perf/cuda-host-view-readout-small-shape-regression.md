@@ -137,14 +137,22 @@ gate-remeasurement.md` §13.3 で既に確認済み。本イシューでもコ�
 checksum（要素和）は off/on・全 N で完全一致（`parity_fail_count=0`）を
 確認済み（数値契約不変の裏付け）。
 
-**観察**: N=1024/2048 とも `matmul` の増分（1024: +34.9 ms・2048:
-+6.7〜7.9 ms）がほぼそのまま `iter_total` の増分になっている。
-`to_tensor`／`host_copy`／`checksum` は off/on で実質不変（`host_copy`
-は on 腕で `Deref` 借用のみのため定義上ほぼ 0 になる。README「借用
-ビュー readout」節どおり）。N=4096 は `matmul` 自体はほぼ不変（29.6 vs
-30.0 ms）で、`iter_total` の改善（55.1→38.6 ms）は off 腕の `host_copy`
-（16.8 ms。`to_vec()` の 2 本目確保・memcpy）を on 腕が完全に免れる分
-そのものである。
+**観察**: N=1024 は `matmul` の増分（+34.9 ms）が `host_copy` の減少
+（1.488→0.0001 ms・約 1.49 ms）に比べて 1 桁以上大きいため、`matmul`
+増分がほぼそのまま `iter_total` の増分（+33.386 ms）に反映される。
+一方 N=2048 は `matmul` の増分（+6.7〜7.9 ms）と `host_copy` の減少
+（5.366→0.0002〜0.0003 ms・約 5.37 ms）が同程度の大きさであり、
+両者はほぼ相殺し合う。`iter_total` の増分（+1.270〜2.414 ms）は
+「`matmul` 増分 − `host_copy` 減少」にほぼ一致する
+（run1: 6.728−5.366=1.362 ms・run2: 7.881−5.366=2.515 ms。実測の
++1.270 ms・+2.414 ms と整合）。すなわち N=2048 では `host_copy` は
+「実質不変」ではなく `matmul` 増分の大半を相殺する側で明確に減少
+している（`host_copy` は on 腕で `Deref` 借用のみのため定義上ほぼ 0
+になる。README「借用ビュー readout」節どおり）。`to_tensor`／
+`checksum` は N=1024/2048 とも off/on で実質不変。N=4096 は `matmul`
+自体はほぼ不変（29.6 vs 30.0 ms）で、`iter_total` の改善
+（55.1→38.6 ms）は off 腕の `host_copy`（16.8 ms。`to_vec()` の 2 本目
+確保・memcpy）を on 腕が完全に免れる分そのものである。
 
 ## 6. Layer B 実測（D2H 内訳の 4 腕分解）
 
