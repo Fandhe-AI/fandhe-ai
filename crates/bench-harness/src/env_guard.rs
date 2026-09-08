@@ -79,6 +79,24 @@ pub struct LoadAvg {
     pub fifteen: f64,
 }
 
+impl LoadAvg {
+    /// 全フィールドが有限かつ非負であるかを検査する。
+    ///
+    /// [`EnvSample`]・[`LoadAvg`] は公開フィールドを持つため、公開評価 API
+    /// （[`EnvGuardConfig::evaluate`]）の呼び出し側が `parse_proc_loadavg` 等の
+    /// 検証を経ない任意の値（`NaN`・負値等）を直接構築して渡せてしまう。
+    /// `evaluate_load_avg` はこの検査を通過した値のみを判定対象とし、
+    /// 通過しない値は `None`（未判定）と同じ扱いにする（review #1456 指摘対応）。
+    fn is_valid(&self) -> bool {
+        self.one.is_finite()
+            && self.five.is_finite()
+            && self.fifteen.is_finite()
+            && self.one >= 0.0
+            && self.five >= 0.0
+            && self.fifteen >= 0.0
+    }
+}
+
 /// GPU（Metal）を使用中と観測されたプロセス。
 ///
 /// `name` は `ioreg` 出力由来の非信頼データであり、記録・部分一致比較にのみ
@@ -240,14 +258,17 @@ impl EnvGuardConfig {
         Ok(self)
     }
 
+    /// 設定済みの load average（1 分）上限を返す。
     pub fn max_load_avg_1min(&self) -> f64 {
         self.max_load_avg_1min
     }
 
+    /// 設定済みの GPU プロセス watchlist（名前部分一致）を返す。
     pub fn gpu_process_watchlist(&self) -> &[String] {
         &self.gpu_process_watchlist
     }
 
+    /// 設定済みの GPU 使用率上限（未設定なら `None`）を返す。
     pub fn max_gpu_device_utilization_percent(&self) -> Option<u8> {
         self.max_gpu_device_utilization_percent
     }
@@ -278,7 +299,12 @@ impl EnvGuardConfig {
     }
 
     fn evaluate_load_avg(&self, sample: &EnvSample) -> LoadAvgCheck {
-        let verdict = match sample.load_avg {
+        // 公開評価 API 経由で妥当性検証を経ていない値（NaN・負値等）が
+        // 渡される可能性があるため、判定前に `LoadAvg::is_valid` で検証する
+        // （review #1456 指摘対応。`observed` フィールド自体は記録用に
+        // 生値をそのまま残す）。
+        let validated = sample.load_avg.filter(LoadAvg::is_valid);
+        let verdict = match validated {
             Some(observed) if observed.one > self.max_load_avg_1min => GuardVerdict::Fail,
             Some(_) => GuardVerdict::Pass,
             None => GuardVerdict::Undetermined,
@@ -319,8 +345,16 @@ impl EnvGuardConfig {
                     (Some(observed), Some(max)) => *observed > max,
                     _ => false,
                 };
+                // 使用率上限を設定したのに `Device Utilization %` を取得できな
+                // かった場合は、判定不能を `Pass` に落とさず `Undetermined` に
+                // する（review #1456 指摘対応。モジュール doc「設計方針」の
+                // 「取得不能は未判定」を使用率上限にも一貫して適用する）。
+                let utilization_undetermined = self.max_gpu_device_utilization_percent.is_some()
+                    && device_utilization_percent.is_none();
                 let verdict = if !flagged.is_empty() || utilization_exceeded {
                     GuardVerdict::Fail
+                } else if utilization_undetermined {
+                    GuardVerdict::Undetermined
                 } else {
                     GuardVerdict::Pass
                 };
@@ -328,6 +362,11 @@ impl EnvGuardConfig {
                     && self.max_gpu_device_utilization_percent.is_none()
                 {
                     Some("watchlist・使用率上限とも未設定のため記録のみ".to_string())
+                } else if utilization_undetermined {
+                    Some(
+                        "使用率上限を設定したが Device Utilization % を取得できなかったため未判定"
+                            .to_string(),
+                    )
                 } else {
                     None
                 };
@@ -376,6 +415,7 @@ fn parse_proc_loadavg(text: &str) -> Option<LoadAvg> {
 }
 
 /// macOS `sysctl -n vm.loadavg` 形式（`"{ 2.72 4.31 4.66 }\n"`）を parse する。
+#[cfg(any(target_os = "macos", test))]
 fn parse_sysctl_vm_loadavg(text: &str) -> Option<LoadAvg> {
     let trimmed = text.trim();
     let inner = trimmed.strip_prefix('{')?.strip_suffix('}')?;
@@ -413,6 +453,7 @@ fn parse_proc_uptime(text: &str) -> Option<u64> {
 /// macOS `sysctl -n kern.boottime` 形式
 /// （`"{ sec = 1787111274, usec = 868910 } Wed Sep  3 ...\n"`）から
 /// `sec = <N>` を抽出する。
+#[cfg(any(target_os = "macos", test))]
 fn parse_kern_boottime_sec(text: &str) -> Option<u64> {
     let idx = text.find("sec =")?;
     let after = &text[idx + "sec =".len()..];
@@ -432,6 +473,7 @@ fn parse_kern_boottime_sec(text: &str) -> Option<u64> {
 ///
 /// 出力は非信頼データであり、抽出した `name` はコマンド・パスへ再展開せず
 /// 記録・部分一致比較にのみ用いる（モジュール doc「セキュリティ」参照）。
+#[cfg(any(target_os = "macos", test))]
 fn parse_ioreg_user_clients(text: &str, self_pid: u32) -> Vec<GpuProcess> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
@@ -480,6 +522,7 @@ fn parse_ioreg_user_clients(text: &str, self_pid: u32) -> Vec<GpuProcess> {
 
 /// `ioreg -r -c IOAccelerator -l` 出力中の `"Device Utilization %"=N` を
 /// parse する（0〜100 に収まらない値・parse 不能は `None`）。
+#[cfg(any(target_os = "macos", test))]
 fn parse_ioreg_device_utilization(text: &str) -> Option<u8> {
     let idx = text.find("\"Device Utilization %\"")?;
     let rest = &text[idx + "\"Device Utilization %\"".len()..];
@@ -578,6 +621,15 @@ fn gpu_sample_now() -> GpuSample {
             reason: "ioreg コマンドの実行に失敗した".to_string(),
         };
     };
+    // `-c IOAccelerator` は対象デバイスが見つからない場合でも exit success・
+    // 空 stdout を返しうる（本機実測）。これを検出データなしの `Available`
+    // として扱うと watchlist 設定時に GPU 使用中でも `Pass` になりうるため、
+    // 理由付き `Unavailable` として明示的に未判定にする（review #1456 指摘対応）。
+    if text.trim().is_empty() {
+        return GpuSample::Unavailable {
+            reason: "ioreg の出力が空だった（IOAccelerator デバイスが見つからない）".to_string(),
+        };
+    }
     let self_pid = std::process::id();
     let processes = parse_ioreg_user_clients(&text, self_pid);
     let device_utilization_percent = parse_ioreg_device_utilization(&text);
@@ -959,6 +1011,97 @@ mod tests {
         );
         let report = cfg.evaluate(&sample);
         assert_eq!(report.gpu.verdict, GuardVerdict::Pass);
+    }
+
+    #[test]
+    fn evaluate_gpu_utilization_unavailable_with_limit_is_undetermined() {
+        // review #1456 指摘対応: 使用率上限を設定したが `Device Utilization %`
+        // を取得できない（`None`）場合、watchlist 不一致だけを根拠に `Pass`
+        // へ落としてはならない（取得不能は未判定というモジュール設計方針の
+        // 一貫適用）。
+        let cfg = EnvGuardConfig::new(4.0)
+            .unwrap()
+            .with_max_gpu_device_utilization_percent(50)
+            .unwrap();
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Available {
+                processes: Vec::new(),
+                device_utilization_percent: None,
+            },
+        );
+        let report = cfg.evaluate(&sample);
+        assert_eq!(report.gpu.verdict, GuardVerdict::Undetermined);
+        assert_eq!(report.overall, GuardVerdict::Undetermined);
+    }
+
+    #[test]
+    fn evaluate_gpu_flagged_overrides_utilization_undetermined() {
+        // 使用率が未判定でも watchlist 一致（明確な悪化）は `Fail` を優先する。
+        let cfg = EnvGuardConfig::new(4.0)
+            .unwrap()
+            .with_gpu_process_watchlist(vec!["python".to_string()])
+            .with_max_gpu_device_utilization_percent(50)
+            .unwrap();
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Available {
+                processes: vec![GpuProcess {
+                    pid: 123,
+                    name: "python3.11".to_string(),
+                }],
+                device_utilization_percent: None,
+            },
+        );
+        let report = cfg.evaluate(&sample);
+        assert_eq!(report.gpu.verdict, GuardVerdict::Fail);
+    }
+
+    #[test]
+    fn evaluate_load_avg_invalid_observed_is_undetermined() {
+        // review #1456 指摘対応: 公開評価 API 経由で妥当性検証を経ていない
+        // 値（NaN・負値）が観測値として渡された場合、`Pass`／`Fail` へ倒さず
+        // `Undetermined` にする。
+        let cfg = EnvGuardConfig::new(4.0).unwrap();
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: f64::NAN,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Unavailable {
+                reason: "test".to_string(),
+            },
+        );
+        let report = cfg.evaluate(&sample);
+        assert_eq!(report.load_avg.verdict, GuardVerdict::Undetermined);
+        // 生の観測値は記録用にそのまま保持する。
+        assert!(report.load_avg.observed.unwrap().one.is_nan());
+    }
+
+    #[test]
+    fn evaluate_load_avg_negative_observed_is_undetermined() {
+        let cfg = EnvGuardConfig::new(4.0).unwrap();
+        let sample = sample_with(
+            Some(LoadAvg {
+                one: -1.0,
+                five: 1.0,
+                fifteen: 1.0,
+            }),
+            GpuSample::Unavailable {
+                reason: "test".to_string(),
+            },
+        );
+        let report = cfg.evaluate(&sample);
+        assert_eq!(report.load_avg.verdict, GuardVerdict::Undetermined);
     }
 
     // --- overall / is_blocking ---------------------------------------
