@@ -96,6 +96,23 @@ select_for_device` が選ぶ構成——`dispatch_auto` の本番既定経路と
 選択ロジック）を、`gemm_transpose_tile_sweep.rs::shapes()` と同一の
 10 形状 × NT/TN/TT（計 30 セル）で計測を試みた。
 
+`gemm_transpose_route_ab_bench.rs` は#1249/#1251 で `--phase1-only`
+モード（フェーズ 1〈安定性セルフチェック〉のみ実行してフェーズ 2 へ
+進まず終了する）を追加した:
+
+```sh
+cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release -- --phase1-only
+```
+
+出力にはサイズごとに機械可読な 1 行 `phase1_round_stats`（`grep
+'^phase1_round_stats '` で抽出。キー: `size`・`rounds`・`spread`・
+`gate`・`within_gate`・`median_secs`・`min_secs`／`min_round_idx`・
+`max_secs`／`max_round_idx`〈秒基準・0 始まり。TFLOPS では大小が逆転
+するため注意〉・`round_medians_secs`〈カンマ区切り〉）と、末尾に総括
+`phase1_summary`（`sizes_gate_exceeded` 一覧）が出る。§5.4 の 4 試行が
+示す単発スパイク型の再現条件を排他環境／負荷環境で切り分ける用途
+（#1253・#1255）で、1 回ごとに別プロセスで起動する運用を想定する。
+
 ### 5.1 計測環境
 
 - 機種・OS: §1 と同一（Apple M4 Max・macOS 26.6.2）

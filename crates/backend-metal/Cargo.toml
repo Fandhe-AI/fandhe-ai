@@ -97,3 +97,11 @@ test = true
 [[example]]
 name = "gemm_swizzle_ab_bench"
 test = true
+
+# 同上の理由。本 example は `cli_and_round_stats_tests`（`--phase1-only`
+# 引数解析・ラウンド別 min/max 集計のクロスプラットフォーム純関数回帰
+# 検知テスト。イシュー #1251）を持つため `test = true` を明示する
+# （`gemm_swizzle_ab_bench` と同型）。
+[[example]]
+name = "gemm_transpose_route_ab_bench"
+test = true
