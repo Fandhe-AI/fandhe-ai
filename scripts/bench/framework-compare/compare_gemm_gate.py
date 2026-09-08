@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """GEMM 目標達成ゲート（CUDA: #1031／Metal: #1037／CPU: #1117）の 5 回計測
 中央値集計ツール（イシュー #1142・#1147 で Metal 対応汎用化・#1148 で CPU
-対応拡張）。
+対応拡張・#1250 で要素単位判定を承認済み契約〈スケール付き絶対誤差救済
+項〉へ追従）。
 
 使い方:
     python3 compare_gemm_gate.py [--device {cuda,metal,cpu}] JSONL [JSONL ...] [--out FILE]
@@ -29,14 +30,38 @@ candle は reuse 非対応のため fresh 固定）の `median_s` を run 間中
 - fail-closed: レコード件数が size ごとに fandhe-ai/candle 各ちょうど 5 件で
   ない（過不足いずれも判定不能。標本差し替え防止。イシュー #1166）・
   `median_s`/`checksum` が不正値（非正・NaN・Infinity 等）・要素単位検証
-  （`parity_*` フィールド。イシュー #970）が `parity_fail_count > 0` また
-  は `parity_total != size*size`・checksum が本体の数値一致契約（相対
-  誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる場合は、性能値を確定
-  表示せず「判定不能」を明示し理由（run ごとの fail_count/max_abs/max_rel
-  を含む）を出力する（A08: 壊れた計算の実行時間で達成判定しない）。
-  N=2048 の candle 無効データ（イシュー #1142 R2）の再現条件記録は、この
-  判定不能理由の詳細出力でまかなう（`bench-common::parity` への追加計装
-  は行わない。既存 JSONL フィールドで十分診断できるため）。
+  （`parity_*` フィールド。イシュー #970）が判定不能条件（下記）を満たす・
+  checksum が本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5
+  未満）を外れる場合は、性能値を確定表示せず「判定不能」を明示し理由
+  （run ごとの fail_count/max_abs/max_rel/bound/rescued を含む）を出力
+  する（A08: 壊れた計算の実行時間で達成判定しない）。N=2048 の candle
+  無効データ（イシュー #1142 R2）の再現条件記録は、この判定不能理由の
+  詳細出力でまかなう。
+- **要素単位判定の契約（イシュー #1241 でユーザー承認・#1247 で
+  `bench-common::parity` 実装済み。`docs/candle-parity-tolerance-
+  contract-decision.md` §8）**: 既存の複合判定（相対誤差 1e-3 未満 または
+  絶対誤差 1e-5 未満）に加え、スケール付き絶対誤差の第 3 救済項（候補
+  A-1・係数 `c=0.5`）が OR で追加された `parity_scaled_abs_bound`／
+  `parity_scaled_abs_rescued` の 2 フィールドを検証する（`_parity_check`
+  参照）。判定式自体はここで再計算しない（`bench-common::parity` が
+  単一真実源。drift 防止）。判定不能となる条件:
+    - `parity_scaled_abs_bound`／`parity_scaled_abs_rescued` の一方のみ
+      存在（部分欠損。両方欠損なら旧形式 JSONL として第 3 項なしの旧
+      契約で判定する）。
+    - `parity_scaled_abs_bound` が `null`（入力に非有限値を検出したセン
+      チネル）または不正値。
+    - `parity_scaled_abs_rescued` が不正値・値域外、または
+      `parity_scaled_abs_bound` との整合が取れない
+      （`rescued > 0` なのに `bound` が絶対誤差許容値未満）。
+    - `framework == "fandhe-ai"` の行が `parity_scaled_abs_rescued > 0`
+      （承認スコープ (b-2)「比較対象側限定」の逸脱。fandhe-ai は全経路
+      `verify_strict` のため構造的に 0 のはず）。
+    - `parity_fail_count > 0`（救済後もなお fail する要素がある。framework
+      を問わず判定不能。承認スコープ (b-1)「比較対象側 fail は判定不能」）。
+  `framework == "candle"` の `parity_scaled_abs_rescued > 0` は許容し、
+  達成／未達判定へ進める（判定不能を「達成」へ倒す経路は用意しない。
+  `max_abs_err`／`max_rel_err` は pass 要素も含む全要素の最大であり
+  `bound` を超えうるため判定には使わない。診断表示のみ）。
 - 捏造しない: 入力 JSONL 自体は変更しない。JSON parse 不能な行は理由付き
   でスキップし黙って無視しない。
 - `--tf32` 行（イシュー #1042）は本ゲートの対象外として除外する（FP32
@@ -230,15 +255,49 @@ def _matching_rows(rows, framework, mode, size, device="cuda"):
     return out
 
 
-def _parity_check(r, size):
-    """1 行の要素単位検証結果（イシュー #970）を検証する。
+def _parity_check(r, size, framework):
+    """1 行の要素単位検証結果（イシュー #970・#1247・#1250）を検証する。
 
-    戻り値: `(ok, reason)`。`reason` は `ok=False` のときのみ非 None で、
-    診断のため fail_count/total/max_abs/max_rel を含む（イシュー #1142
-    R2: N=2048 candle 無効データの再現条件を判定不能理由として記録する）。
-    summarize.py `parity_status` と同じ判定基準（値域・整数性・
-    `parity_total == size*size` の完全一致）を、本ツール用に簡約したもの。
+    戻り値: `(ok, reason, info)`。`reason` は `ok=False` のときのみ非
+    None（診断のため fail_count/total/max_abs/max_rel/bound/rescued を
+    含む）。`info` は常に dict で `contract`（"scaled_abs"／"legacy"／
+    None）・`bound`・`rescued` を持つ（render・diagnostics 表示用。値が
+    取得できない場合は None）。
+
+    イシュー #1241 でユーザー承認された契約（`docs/candle-parity-tolerance-
+    contract-decision.md` §8）: 要素単位判定へスケール付き絶対誤差の第 3
+    救済項（候補 A-1・`c=0.5`）を OR 追加する。本ツールは判定式そのものを
+    再計算せず（drift 防止。`docs/spec/` の判定式が単一真実源）、
+    `bench-common::parity`（イシュー #1247）が出力する 2 つの追加診断
+    フィールドを検証するのみ:
+      - `parity_scaled_abs_bound`: 救済項の上限値（`c・u・K・S_A・S_B`）。
+        入力に非有限値を検出したセンチネルは JSON `null`（`parity.rs:336-
+        340`）。
+      - `parity_scaled_abs_rescued`: 救済で pass に転じた要素数
+        （`!legacy_pass ∧ diff <= bound` の個数）。
+
+    キー集合ポリシー（drift 検出。`bench-common::Record::to_json_line` は
+    parity フィールドを 1 ブロックで emit するため新旧混在は本来生じない
+    が、外部 JSONL の改変・古い形式の混入に備え fail-closed で扱う）:
+      - 6 キー全存在 → 新契約検証（下記）。
+      - 新 2 キーがともに欠損（旧形式の 4 キーのみ）→ レガシー契約（第 3
+        項なし）として既存 4 キー検証のみで判定する。この経路で得られる
+        `fail_count == 0` は新契約より**厳しい**判定（救済なし）で得られた
+        ものなので、新契約でも 0 fail のままであり fail-open にならない。
+      - 新 2 キーの一方のみ存在（部分欠損）→ 判定不能（破損 JSONL）。
+
+    framework 別ルール（本イシューの中核。#1241 承認スコープ (b-2)「比較
+    対象側限定」を consumer 側でも fail-closed に固定する）:
+      - `framework == "fandhe-ai"` で `rescued > 0` → 判定不能。
+        `bench-fandhe` は全経路で `verify_strict`（第 3 項無効。
+        `bench-common/src/parity.rs:744`）を使うため構造的に `rescued`
+        は常に 0 のはずであり、0 でなければ計装の前提が崩れている。
+      - `framework == "candle"` は `rescued > 0` を許容する（承認済み
+        契約の目的そのもの）。
+      - `fail_count > 0` は framework を問わず判定不能（(b-1)「比較対象
+        側 fail は判定不能」を維持。救済後もなお fail する要素がある）。
     """
+    info = {"contract": None, "bound": None, "rescued": None}
     keys = (
         "parity_fail_count",
         "parity_total",
@@ -246,26 +305,86 @@ def _parity_check(r, size):
         "parity_max_rel_err",
     )
     if any(k not in r for k in keys):
-        return False, "parity フィールド欠損（旧形式または破損 JSONL）"
+        return False, "parity フィールド欠損（旧形式または破損 JSONL）", info
     fail_count, total, max_abs, max_rel = (r.get(k) for k in keys)
     if not all(_is_plain_number(v) for v in (fail_count, total, max_abs, max_rel)):
-        return False, "parity フィールドが数値でない"
+        return False, "parity フィールドが数値でない", info
     if _non_integral(total) or _non_integral(fail_count):
-        return False, "parity_total/parity_fail_count が整数でない"
+        return False, "parity_total/parity_fail_count が整数でない", info
     total = int(total)
     fail_count = int(fail_count)
     if total != size * size:
-        return False, f"parity_total が期待要素数と不一致（{total} != {size * size}）"
+        return False, f"parity_total が期待要素数と不一致（{total} != {size * size}）", info
     if fail_count < 0 or fail_count > total:
-        return False, f"parity_fail_count が値域外（{fail_count}/{total}）"
+        return False, f"parity_fail_count が値域外（{fail_count}/{total}）", info
     if max_abs < 0 or max_rel < 0:
-        return False, "parity_max_abs_err/parity_max_rel_err が負"
+        return False, "parity_max_abs_err/parity_max_rel_err が負", info
+
+    new_keys = ("parity_scaled_abs_bound", "parity_scaled_abs_rescued")
+    has_new = [k in r for k in new_keys]
+    if not any(has_new):
+        # レガシー 4 キーのみ（#1247 以前の JSONL）。第 3 救済項なしの
+        # 従来判定のみで確定する（新契約より厳しい判定のため fail-open
+        # にならない）。
+        info["contract"] = "legacy"
+        if fail_count > 0:
+            return False, (
+                f"要素誤差超過（旧契約・救済なし） fail={fail_count}/{total}, "
+                f"max_abs={max_abs:.6e}, max_rel={max_rel:.6e}"
+            ), info
+        return True, None, info
+    if not all(has_new):
+        return False, (
+            "parity_scaled_abs_bound/parity_scaled_abs_rescued の一方のみ欠損"
+            "（部分的に破損・改変された JSONL）"
+        ), info
+
+    info["contract"] = "scaled_abs"
+    bound = r.get("parity_scaled_abs_bound")
+    rescued = r.get("parity_scaled_abs_rescued")
+    # `bound` は非有限入力検出時 JSON `null`（Python None）になりうる
+    # （`parity.rs:336-340` のセンチネル）。この run は壊れているため
+    # 判定不能へ倒す。
+    if bound is None:
+        return False, "parity_scaled_abs_bound が null（入力に非有限値を検出）", info
+    if not _is_plain_number(bound) or bound < 0:
+        return False, "parity_scaled_abs_bound が不正値（数値でない、または負）", info
+    info["bound"] = bound
+    if not _is_plain_number(rescued) or _non_integral(rescued):
+        return False, "parity_scaled_abs_rescued が整数値でない", info
+    rescued = int(rescued)
+    if rescued < 0 or rescued > total:
+        return False, f"parity_scaled_abs_rescued が値域外（{rescued}/{total}）", info
+    if rescued + fail_count > total:
+        return False, (
+            f"parity_scaled_abs_rescued + parity_fail_count が総要素数を超過"
+            f"（{rescued}+{fail_count} > {total}）"
+        ), info
+    info["rescued"] = rescued
+    # 整合検査（判定式のレプリカを作らない。救済要素は `!legacy_pass ∧
+    # diff <= bound` の定義上 `diff >= CHECKSUM_ABS_TOL` かつ
+    # `bound >= diff` を満たすため、`rescued > 0` なら
+    # `bound >= CHECKSUM_ABS_TOL` が必要十分な整合条件）。
+    if rescued > 0 and bound < _checksum_contract.CHECKSUM_ABS_TOL:
+        return False, (
+            f"parity_scaled_abs_rescued={rescued} だが "
+            f"parity_scaled_abs_bound={bound:.6e} が絶対誤差許容値 "
+            f"（{_checksum_contract.CHECKSUM_ABS_TOL:.6e}）未満で整合しない"
+        ), info
+
+    if framework == "fandhe-ai" and rescued > 0:
+        return False, (
+            f"fandhe-ai 側が救済項に依存（rescued={rescued}）。承認スコープ "
+            "(b-2) は比較対象側限定であり fandhe-ai 側は verify_strict の"
+            "はず（計装前提の崩れ）"
+        ), info
     if fail_count > 0:
         return False, (
-            f"要素誤差超過 fail={fail_count}/{total}, "
+            f"要素誤差超過（救済後もなお fail） fail={fail_count}/{total}, "
+            f"rescued={rescued}, bound={bound:.6e}, "
             f"max_abs={max_abs:.6e}, max_rel={max_rel:.6e}"
-        )
-    return True, None
+        ), info
+    return True, None, info
 
 
 def _median(values):
@@ -320,7 +439,7 @@ def evaluate_size(rows, size, device="cuda"):
     diagnostics = []
     for label, run_rows in (("fandhe-ai", fandhe_rows), ("candle", candle_rows)):
         for i, r in enumerate(run_rows, start=1):
-            ok, reason = _parity_check(r, size)
+            ok, reason, info = _parity_check(r, size, label)
             diagnostics.append(
                 {
                     "framework": label,
@@ -331,6 +450,9 @@ def evaluate_size(rows, size, device="cuda"):
                     "total": r.get("parity_total"),
                     "max_abs": r.get("parity_max_abs_err"),
                     "max_rel": r.get("parity_max_rel_err"),
+                    "contract": info["contract"],
+                    "scaled_abs_bound": info["bound"],
+                    "scaled_abs_rescued": info["rescued"],
                 }
             )
     result["diagnostics"] = diagnostics
@@ -340,6 +462,18 @@ def evaluate_size(rows, size, device="cuda"):
         result["status"] = "undeterminable"
         result["reason"] = f"要素単位検証が無効（{reasons}）"
         return result
+
+    # 承認済み契約（#1241）下で candle 側が救済項に依存した場合、達成／
+    # 未達判定に紐づく size 集計結果へ最大救済数を残す（#1260/#1262 の
+    # 再計測記録が「救済により判定可能になった」ことを追跡できるように
+    # する。判定〈achieved〉自体は変えない）。
+    candle_rescued = [
+        d["scaled_abs_rescued"]
+        for d in diagnostics
+        if d["framework"] == "candle" and d["scaled_abs_rescued"] is not None
+    ]
+    if candle_rescued:
+        result["candle_scaled_abs_rescued_max"] = max(candle_rescued)
 
     fandhe_medians = [_safe_positive(r.get("median_s")) for r in fandhe_rows]
     candle_medians = [_safe_positive(r.get("median_s")) for r in candle_rows]
@@ -398,7 +532,7 @@ def evaluate_size(rows, size, device="cuda"):
     if device == "cpu":
         fresh_rows = _matching_rows(rows, "fandhe-ai", "fresh", size, device)
         if len(fresh_rows) == MIN_RECORDS:
-            fresh_diag_ok = all(_parity_check(r, size)[0] for r in fresh_rows)
+            fresh_diag_ok = all(_parity_check(r, size, "fandhe-ai")[0] for r in fresh_rows)
             fresh_medians = [_safe_positive(r.get("median_s")) for r in fresh_rows]
             fresh_checksums = [_safe_finite(r.get("checksum")) for r in fresh_rows]
             if (
@@ -448,6 +582,12 @@ def render(path, results, device="cuda"):
             lines.append(row)
             continue
         verdict = "達成" if r["achieved"] else "未達"
+        # イシュー #1250: candle 側が承認済み契約（#1241）の救済項に依存
+        # した場合、判定列へ注記する（達成／未達自体は変えない。救済依存の
+        # 可視化。#1260/#1262 の再計測記録が参照する）。
+        rescued_max = r.get("candle_scaled_abs_rescued_max")
+        if rescued_max:
+            verdict += f"（candle 救済 {rescued_max} 要素）"
         row = (
             f"| {r['size']} | {_fmt_s(r['fandhe_median_s'])} "
             f"({_fmt_s(r['fandhe_min_s'])}–{_fmt_s(r['fandhe_max_s'])}, n=5) | "
@@ -472,8 +612,10 @@ def render(path, results, device="cuda"):
             continue
         lines.append(f"### N={r['size']} 要素単位検証の run 別内訳")
         lines.append("")
-        lines.append("| framework | run | fail_count/total | max_abs | max_rel | 判定 |")
-        lines.append("|---|---|---|---|---|---|")
+        lines.append(
+            "| framework | run | fail_count/total | max_abs | max_rel | bound | rescued | 判定 |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|")
         for d in diags:
             fail_str = (
                 f"{d['fail_count']}/{d['total']}"
@@ -482,9 +624,20 @@ def render(path, results, device="cuda"):
             )
             abs_str = f"{d['max_abs']:.6e}" if isinstance(d["max_abs"], (int, float)) else "null"
             rel_str = f"{d['max_rel']:.6e}" if isinstance(d["max_rel"], (int, float)) else "null"
+            bound_str = (
+                f"{d['scaled_abs_bound']:.6e}"
+                if isinstance(d["scaled_abs_bound"], (int, float))
+                else "null"
+            )
+            rescued_str = (
+                str(d["scaled_abs_rescued"]) if d["scaled_abs_rescued"] is not None else "-"
+            )
+            verdict_str = "ok" if d["ok"] else d["reason"]
+            if d["ok"] and d["contract"] == "legacy":
+                verdict_str = "ok（旧契約・救済なし）"
             lines.append(
                 f"| {d['framework']} | {d['run']} | {fail_str} | {abs_str} | {rel_str} | "
-                f"{'ok' if d['ok'] else d['reason']} |"
+                f"{bound_str} | {rescued_str} | {verdict_str} |"
             )
         lines.append("")
 

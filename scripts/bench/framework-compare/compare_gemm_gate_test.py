@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""`compare_gemm_gate.py` の stdlib unittest（イシュー #1142・#1147）。
+"""`compare_gemm_gate.py` の stdlib unittest（イシュー #1142・#1147・#1250）。
 
 GPU 不要・合成 fixture のみで完結する（`summarize_test.py`・
 `compare_ab_test.py` と同じ方針）。ゲート判定の正しさを担保する最小構成に
-絞る（happy path・レコード不足・要素単位検証無効・`--device` 分離の各
-ケース。網羅ではなく判定ロジックの正しさの検証が目的）。
+絞る（happy path・レコード不足・要素単位検証無効・`--device` 分離・
+承認済み契約〈#1241。スケール付き絶対誤差救済項〉の各ケース。網羅ではなく
+判定ロジックの正しさの検証が目的）。
 """
 
 import importlib.util
@@ -20,10 +21,35 @@ _SPEC = importlib.util.spec_from_file_location(
 compare_gemm_gate = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(compare_gemm_gate)
 
+# `parity_scaled_abs_bound` の既定値（`2^-16`。`bench-common::parity` の
+# `F32_UNIT_ROUNDOFF = 2^-24` に対する `c=0.5・K=... ` 由来の代表値ではなく、
+# 単に「典型的に非ゼロで絶対誤差許容値〈1e-5〉を上回る」ことだけをテスト
+# fixture の既定値に求めるための固定値。実測値との対応は
+# `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5.3（#1184 相当）を
+# 参照）。
+_DEFAULT_SCALED_ABS_BOUND = 1.52587890625e-5
 
-def _row(framework, size, mode, median_s, checksum=1.0, fail_count=0, device="cuda"):
+
+def _row(
+    framework,
+    size,
+    mode,
+    median_s,
+    checksum=1.0,
+    fail_count=0,
+    device="cuda",
+    scaled_abs_bound=_DEFAULT_SCALED_ABS_BOUND,
+    scaled_abs_rescued=0,
+    legacy=False,
+):
+    """`framework`／`size`／`mode` の 1 レコードを合成する（イシュー
+    #1250: `bench-common::Record::to_json_line` が 6 キーを同一ブロックで
+    emit する現行仕様〈`lib.rs:353-372`〉に合わせ、新契約 2 キーを既定で
+    含める）。`legacy=True` を渡すと新 2 キーを含めない旧形式 4 キーの
+    行を合成する（#1247 以前の JSONL 再現用）。
+    """
     total = size * size
-    return {
+    row = {
         "framework": framework,
         "task": "gemm",
         "device": device,
@@ -36,6 +62,10 @@ def _row(framework, size, mode, median_s, checksum=1.0, fail_count=0, device="cu
         "parity_max_abs_err": 0.0 if fail_count == 0 else 1.0,
         "parity_max_rel_err": 0.0 if fail_count == 0 else 1.0,
     }
+    if not legacy:
+        row["parity_scaled_abs_bound"] = scaled_abs_bound
+        row["parity_scaled_abs_rescued"] = scaled_abs_rescued
+    return row
 
 
 def _write_jsonl(rows):
@@ -232,6 +262,168 @@ class CpuDeviceTest(unittest.TestCase):
             self.assertEqual(compare_gemm_gate.main(["--device", "cpu", path]), 0)
         finally:
             os.unlink(path)
+
+
+class ScaledAbsContractTest(unittest.TestCase):
+    """承認済み契約（イシュー #1241。`docs/candle-parity-tolerance-
+    contract-decision.md` §8）下の判定不能条件を検証する（イシュー
+    #1250）。"""
+
+    def test_candle_rescued_run_reaches_achieved_verdict(self):
+        # #1184 相当（`docs/perf/cuda-gemm-candle-gate-remeasurement.md`
+        # §5.3）: candle 側 2 要素が旧契約では fail していたが、新契約の
+        # 救済項で pass に転じ fail_count=0 になった run。max_abs_err が
+        # bound を上回っていても（pass 要素も含む全要素の最大のため）
+        # 判定不能へ倒れず「達成」まで進むことを固定する。
+        fandhe_rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)]
+        candle_rows = [
+            _row(
+                "candle",
+                2048,
+                "fresh",
+                0.020,
+                scaled_abs_bound=1.525879e-5,
+                scaled_abs_rescued=2,
+            )
+            for _ in range(5)
+        ]
+        # 実測値の max_abs_err（3.623962e-5）は bound（1.525879e-5）を
+        # 上回るが、これは pass 要素も含む全要素の最大であり判定条件では
+        # ないことを固定する（テスト対象行のうち 1 件だけ実測相当の
+        # max_abs/max_rel を持たせる）。
+        candle_rows[0]["parity_max_abs_err"] = 3.623962e-5
+        candle_rows[0]["parity_max_rel_err"] = 2.811288e-1
+        result = compare_gemm_gate.evaluate_size(fandhe_rows + candle_rows, 2048)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["achieved"])
+        self.assertEqual(result["candle_scaled_abs_rescued_max"], 2)
+
+    def test_candle_still_failing_after_rescue_is_undeterminable(self):
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)] + [
+            _row("candle", 2048, "fresh", 0.020, fail_count=2, scaled_abs_rescued=1)
+            for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("救済後もなお fail", result["reason"])
+        self.assertIn("rescued=1", result["reason"])
+
+    def test_fandhe_side_rescued_is_undeterminable(self):
+        # 承認スコープ (b-2) は比較対象側限定。fandhe-ai 側は
+        # `verify_strict` で構造的に rescued=0 のはずであり、0 でない行は
+        # 計装前提の崩れとして判定不能に倒す。
+        rows = [
+            _row("fandhe-ai", 2048, "reuse", 0.010, scaled_abs_rescued=1)
+            for _ in range(5)
+        ] + [_row("candle", 2048, "fresh", 0.020) for _ in range(5)]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("fandhe-ai", result["reason"])
+        self.assertIn("救済項に依存", result["reason"])
+
+    def test_bound_null_is_undeterminable(self):
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)] + [
+            _row("candle", 2048, "fresh", 0.020, scaled_abs_bound=None) for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("null", result["reason"])
+
+    def test_rescued_negative_is_undeterminable(self):
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)] + [
+            _row("candle", 2048, "fresh", 0.020, scaled_abs_rescued=-1) for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+
+    def test_rescued_exceeds_total_is_undeterminable(self):
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)] + [
+            _row("candle", 2048, "fresh", 0.020, scaled_abs_rescued=2048 * 2048 + 1)
+            for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+
+    def test_rescued_plus_fail_count_exceeds_total_is_undeterminable(self):
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)] + [
+            _row(
+                "candle",
+                2048,
+                "fresh",
+                0.020,
+                fail_count=2048 * 2048,
+                scaled_abs_rescued=1,
+            )
+            for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+
+    def test_rescued_positive_but_bound_below_abs_tol_is_inconsistent(self):
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)] + [
+            _row("candle", 2048, "fresh", 0.020, scaled_abs_bound=1e-6, scaled_abs_rescued=1)
+            for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("整合しない", result["reason"])
+
+    def test_partial_new_keys_missing_rescued_is_undeterminable(self):
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)]
+        candle_row = _row("candle", 2048, "fresh", 0.020)
+        del candle_row["parity_scaled_abs_rescued"]
+        rows += [candle_row for _ in range(5)]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("一方のみ欠損", result["reason"])
+
+    def test_legacy_four_key_row_with_zero_fail_is_achieved(self):
+        # #1247 以前の JSONL（新 2 キーがともに欠損）は、第 3 救済項なしの
+        # 従来判定のみで `fail_count=0` なら受理する（新契約より厳しい
+        # 判定のため fail-open にならない）。
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010, legacy=True) for _ in range(5)] + [
+            _row("candle", 2048, "fresh", 0.020, legacy=True) for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["achieved"])
+        self.assertNotIn("candle_scaled_abs_rescued_max", result)
+        diag = result["diagnostics"][0]
+        self.assertEqual(diag["contract"], "legacy")
+
+    def test_legacy_four_key_row_with_fail_is_undeterminable(self):
+        # レガシー行でも fail_count>0 は従来どおり判定不能（README の
+        # `results-*-gate-0.7.0.jsonl` 実行例で N=2048 が引き続き判定不能
+        # になることの回帰固定）。
+        rows = [_row("fandhe-ai", 2048, "reuse", 0.010, legacy=True) for _ in range(5)] + [
+            _row("candle", 2048, "fresh", 0.020, fail_count=2, legacy=True) for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows, 2048)
+        self.assertEqual(result["status"], "undeterminable")
+        self.assertIn("旧契約", result["reason"])
+
+    def test_cpu_reference_row_rescued_does_not_affect_achieved(self):
+        # cpu 参考列（fandhe-ai fresh）が rescued>0 の場合、正式判定
+        # （reuse vs candle fresh）には一切影響しないが、参考列自体は
+        # 付与されない（fresh_diag_ok が False になるため）。
+        base_rows = [_row("fandhe-ai", 512, "reuse", 0.010, device="cpu") for _ in range(5)] + [
+            _row("candle", 512, "fresh", 0.020, device="cpu") for _ in range(5)
+        ]
+        rows_with_bad_fresh = base_rows + [
+            _row(
+                "fandhe-ai",
+                512,
+                "fresh",
+                0.015,
+                device="cpu",
+                scaled_abs_rescued=1,
+            )
+            for _ in range(5)
+        ]
+        result = compare_gemm_gate.evaluate_size(rows_with_bad_fresh, 512, device="cpu")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["achieved"])
+        self.assertNotIn("fandhe_fresh_median_s", result)
 
 
 class LoadRowsTfz32Test(unittest.TestCase):
