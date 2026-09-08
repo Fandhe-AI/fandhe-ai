@@ -486,6 +486,21 @@ aggregate.py`（第 1 引数でも可。未指定時は両者ともスクリプ�
 揃え、監視ループは `is_self_descendant`（`ps -o ppid=` で祖先を辿る）
 による列挙時点の再確認を追加した（消滅済み PID は `vanished=[...]` と
 して記録のみ・breach 根拠にしない）。
+同 PR の codex-review 六度目の指摘（P2・2 件）で、(c) 相対 `LOGDIR` が
+`orchestrate.sh` では `cd "$WORKDIR"` 後に WORKDIR 基準で解決され
+`aggregate.py`（呼び出し元 cwd 基準）と別ディレクトリを参照しうる点、
+(d) 同じ `LOGDIR` で成功 attempt の後に再試行して TIMEOUT すると過去の
+run 記録が今回の有効計測として集計されうる点を是正した。`LOGDIR` は
+`cd` 前に呼び出し元基準の絶対パスへ正規化し、run 単位の記録は
+`attempt${ATTEMPT}_phase1_run${n}.log`／`_monitor.log`・
+`attempt${ATTEMPT}_uptime_{before,after}_run${n}.txt` と attempt 別に保存
+して完了時に `DONE_ATTEMPT${ATTEMPT}`（`DONE valid_runs=N`）を書く
+（同じ `ATTEMPT` の記録が既にあれば上書きせず中止）。`aggregate.py` は
+同じ `ATTEMPT`（環境変数。既定 2）の記録のみ読み、完了記録が無い
+attempt は run 記録が残っていても有効 0 件とし、完了記録の `valid_runs`
+と集計結果の不一致は警告として明示する。再利用手順は
+`ATTEMPT=<n> LOGDIR=<出力先> bash orchestrate.sh` →
+`ATTEMPT=<n> LOGDIR=<出力先> python3 aggregate.py`。
 
 ### 結論（本イシューでの到達点）
 

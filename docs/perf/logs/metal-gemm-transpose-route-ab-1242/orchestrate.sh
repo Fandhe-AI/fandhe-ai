@@ -79,14 +79,52 @@
 # 参照するよう是正し、本スクリプトと入出力契約を揃えた
 # （`LOGDIR=/path/to/out bash orchestrate.sh` の後に
 # `LOGDIR=/path/to/out python3 aggregate.py`）。
+#
+# PR #1459 codex-review 六度目の指摘の是正（イシュー #1253・P2）:
+# (5) `LOGDIR` が相対パスの場合、従来は `cd "$WORKDIR"` 後に解決されて
+#     出力先が WORKDIR 基準になる一方、`aggregate.py` は呼び出し元の作業
+#     ディレクトリ基準で解決するため、リポジトリ外から同じ相対 `LOGDIR`
+#     を両者へ渡すと別ディレクトリを参照していた。本版は `cd` の前に
+#     `LOGDIR` を呼び出し元基準の絶対パスへ正規化する（ディレクトリは
+#     `mkdir -p` で作成）。
+# (6) 同じ `LOGDIR` で成功した attempt の後に再試行してゲート待ちが
+#     TIMEOUT すると、過去の `phase1_run*`／monitor／uptime ファイルが
+#     残ったままになり、集計側が attempt を識別せずに読むと過去の成功
+#     を今回の有効計測として表示していた。本版は run 単位の全記録を
+#     `attempt${ATTEMPT}_` 接頭辞付きで保存し（`attempt${ATTEMPT}_
+#     phase1_run${n}.log`／`_monitor.log`・`attempt${ATTEMPT}_uptime_
+#     {before,after}_run${n}.txt`）、run ループ完了時に完了記録
+#     `DONE_ATTEMPT${ATTEMPT}`（`DONE valid_runs=N`）を書く。同じ
+#     `ATTEMPT` の記録（run 記録・DONE／TIMEOUT／GATE_LAUNCH_ERROR
+#     マーカー）が既に存在する場合は上書きせず fail-closed に中止する
+#     （`ATTEMPT` を変えるか、旧記録を明示的に退避してから再実行する）。
+#     `aggregate.py` 側は同じ `ATTEMPT` 接頭辞の記録のみ読み、完了記録の
+#     `valid_runs` と照合する。
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DERIVED_WORKDIR="$(cd "$SELF_DIR/../../../.." && pwd)"
 WORKDIR="${WORKDIR:-$DERIVED_WORKDIR}"
 LOGDIR="${LOGDIR:-$SELF_DIR}"
+# LOGDIR は cd "$WORKDIR" より前に呼び出し元基準の絶対パスへ正規化する
+# （相対指定時に aggregate.py〈呼び出し元 cwd 基準〉と別ディレクトリを
+# 参照しないため。PR #1459 codex-review 六度目の指摘の是正）。
+mkdir -p "$LOGDIR" || { echo "エラー: LOGDIR='$LOGDIR' を作成できない" >&2; exit 1; }
+LOGDIR="$(cd "$LOGDIR" && pwd)" || { echo "エラー: LOGDIR の正規化に失敗した" >&2; exit 1; }
 ATTEMPT="${ATTEMPT:-2}"
 GATE_LOG="$LOGDIR/wait_gate_attempt${ATTEMPT}.log"
+RUN_PREFIX="$LOGDIR/attempt${ATTEMPT}_"
+
+# 同じ ATTEMPT の記録が既にある場合は上書きせず中止する（過去 attempt の
+# 記録が今回の集計へ混入・消失するのを防ぐ fail-closed。PR #1459
+# codex-review 六度目の指摘の是正）。
+for existing in "$RUN_PREFIX"* "$LOGDIR/DONE_ATTEMPT${ATTEMPT}" \
+  "$LOGDIR/DONE_TIMEOUT_ATTEMPT${ATTEMPT}" "$LOGDIR/DONE_GATE_LAUNCH_ERROR_ATTEMPT${ATTEMPT}"; do
+  if [ -e "$existing" ]; then
+    echo "エラー: attempt${ATTEMPT} の記録 '$existing' が既に存在する。ATTEMPT を変えるか旧記録を退避してから再実行すること" >&2
+    exit 1
+  fi
+done
 
 # shellcheck source=gate_common.sh
 source "$SELF_DIR/gate_common.sh"
@@ -191,14 +229,14 @@ for n in 1 2 3; do
     # 末尾一致で検出できない。診断用ログのため comm ではなく完全なコマンド
     # ライン（command 列）を対象にする。
     ps -Ao pid,pcpu,command | grep -E '(cargo|rustc|python3|gemm_transpose_route_ab_bench)' | grep -v grep || echo "(none)"
-  } > "$LOGDIR/uptime_before_run${n}.txt"
+  } > "${RUN_PREFIX}uptime_before_run${n}.txt"
 
-  MONITOR_LOG="$LOGDIR/phase1_run${n}_monitor.log"
+  MONITOR_LOG="${RUN_PREFIX}phase1_run${n}_monitor.log"
   : > "$MONITOR_LOG"
 
   cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release \
     --features internal-diagnostics \
-    -- --phase1-only > "$LOGDIR/phase1_run${n}.log" 2>&1 &
+    -- --phase1-only > "${RUN_PREFIX}phase1_run${n}.log" 2>&1 &
   BENCH_PID=$!
 
   # run 実行中の排他計測契約（load average < 2・他 GPU プロセスなし）を
@@ -251,7 +289,7 @@ for n in 1 2 3; do
     echo "--- GPU/build 系プロセス（cargo/rustc/python3/gemm_transpose_route_ab_bench） ---"
     # 上記 uptime_before_run と同型の是正（comm 切り詰め対策・command 列使用）。
     ps -Ao pid,pcpu,command | grep -E '(cargo|rustc|python3|gemm_transpose_route_ab_bench)' | grep -v grep || echo "(none)"
-  } > "$LOGDIR/uptime_after_run${n}.txt"
+  } > "${RUN_PREFIX}uptime_after_run${n}.txt"
 
   if [ "$RC" -eq 0 ] && [ "$breach" -eq 0 ]; then
     valid_runs=$((valid_runs + 1))
@@ -262,3 +300,5 @@ done
 
 echo "$(date +"%Y-%m-%dT%H:%M:%S%z") attempt ${ATTEMPT}: done valid_runs=${valid_runs}/3" >> "$LOGDIR/orchestrate.log"
 echo "ORCHESTRATOR_RESULT=DONE valid_runs=${valid_runs}" >> "$LOGDIR/orchestrate.log"
+# 完了記録（aggregate.py が同じ ATTEMPT の集計結果と照合する）。
+echo "DONE valid_runs=${valid_runs}" > "$LOGDIR/DONE_ATTEMPT${ATTEMPT}"

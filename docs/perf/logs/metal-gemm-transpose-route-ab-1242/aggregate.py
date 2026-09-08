@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """イシュー #1253: 排他環境での phase1-only 3 run から spread 分布表を再生成する。
 
-`phase1_run{1,2,3}.log`（`gemm_transpose_route_ab_bench --phase1-only` の
-標準出力）に含まれる `phase1_round_stats` 行（size 別のラウンド別 min/max・
-spread・median）と `uptime_before_run{N}.txt`（実行直前 load average）を
+`attempt${ATTEMPT}_phase1_run{1,2,3}.log`（`gemm_transpose_route_ab_bench
+--phase1-only` の標準出力。ファイル名の attempt 接頭辞は六度目の是正を
+参照）に含まれる `phase1_round_stats` 行（size 別のラウンド別 min/max・
+spread・median）と `attempt${ATTEMPT}_uptime_before_run{N}.txt`（実行直前
+load average）を
 key=value 形式で単純パースし、run × size の表（A: spread/ゲート判定、
 B: ゲート成立回数、C: スパイク位置）を Markdown で標準出力へ書く。
 
@@ -63,6 +65,18 @@ PR #1459 codex-review 五度目の指摘の是正（イシュー #1253・P2）: 
 実行した出力先を指定する）。指定ディレクトリが存在しない場合は
 `sys.exit(2)` で fail-closed に終了し、集計対象ディレクトリを出力冒頭に
 明示する。
+
+PR #1459 codex-review 六度目の指摘の是正（イシュー #1253・P2）: 同じ
+`LOGDIR` で成功した attempt の後に再試行してゲート待ちが TIMEOUT すると、
+`orchestrate.sh` は過去の run 記録を残すため、attempt を識別せずに読む
+と過去の成功が今回の有効計測として表示されていた。本版は
+`orchestrate.sh` と同じ `ATTEMPT`（環境変数。既定 2）を受け取り、
+`attempt${ATTEMPT}_phase1_run{n}.log`／`_monitor.log`・
+`attempt${ATTEMPT}_uptime_{before,after}_run{n}.txt` のみを読む。さらに
+完了記録 `DONE_ATTEMPT${ATTEMPT}`（`DONE valid_runs=N`）を照合し、
+完了記録が無い attempt（TIMEOUT／起動失敗／実行中・中断）は run 記録の
+有無に関わらず有効 run 0 件として扱い、完了記録の `valid_runs` と集計
+側の有効 run 数が食い違う場合は警告を明示する（`parse_completion`）。
 """
 from __future__ import annotations
 
@@ -102,6 +116,48 @@ def resolve_logdir(argv: list[str]) -> Path:
         )
         sys.exit(2)
     return logdir
+
+
+def resolve_attempt() -> str:
+    """`orchestrate.sh` と同じ環境変数 `ATTEMPT`（既定 2）で集計対象の
+    attempt を決める（PR #1459 codex-review 六度目の指摘の是正）。"""
+    raw = os.environ.get("ATTEMPT", "2").strip()
+    if not raw.isdigit():
+        print(f"エラー: ATTEMPT='{raw}' は正の整数でなければならない", file=sys.stderr)
+        sys.exit(2)
+    return raw
+
+
+COMPLETION_RE = re.compile(r"^DONE valid_runs=(\d+)\s*$")
+
+
+def parse_completion(logdir: Path, attempt: str) -> tuple[str, int | None]:
+    """attempt の完了状態を `orchestrate.sh` のマーカーから判定する。
+
+    戻り値 `(状態, 完了記録の valid_runs)`:
+    - ("done", N): `DONE_ATTEMPT${ATTEMPT}` があり `DONE valid_runs=N` を
+      読めた（run ループ完了）。
+    - ("done_unparsable", None): マーカーはあるが形式が読めない。
+    - ("timeout", None): `DONE_TIMEOUT_ATTEMPT${ATTEMPT}`（ゲート不成立）。
+    - ("gate_launch_error", None): `DONE_GATE_LAUNCH_ERROR_ATTEMPT${ATTEMPT}`。
+    - ("none", None): いずれのマーカーも無い（実行中・中断・未実行）。
+    完了記録が "done" 以外の attempt は run 記録が残っていても集計へ
+    含めない（PR #1459 codex-review 六度目の指摘の是正）。
+    """
+    done = logdir / f"DONE_ATTEMPT{attempt}"
+    if done.exists():
+        for line in done.read_text().splitlines():
+            m = COMPLETION_RE.match(line.strip())
+            if m:
+                return "done", int(m.group(1))
+        return "done_unparsable", None
+    if (logdir / f"DONE_TIMEOUT_ATTEMPT{attempt}").exists():
+        return "timeout", None
+    if (logdir / f"DONE_GATE_LAUNCH_ERROR_ATTEMPT{attempt}").exists():
+        return "gate_launch_error", None
+    return "none", None
+
+
 SIZES = [256, 512, 1024, 2048, 4096]
 RUNS = [1, 2, 3]
 
@@ -259,19 +315,27 @@ def main() -> None:
     # 集計対象は orchestrate.sh と同じ LOGDIR 契約で解決する（第 1 引数 →
     # 環境変数 LOGDIR → HERE。PR #1459 codex-review 五度目の指摘の是正）。
     logdir = resolve_logdir(sys.argv)
+    attempt = resolve_attempt()
+    prefix = f"attempt{attempt}_"
+    completion, recorded_valid = parse_completion(logdir, attempt)
     runs_data: dict[int, dict[int, dict]] = {}
     loads_before: dict[int, str] = {}
     breach_status: dict[int, str] = {}
     exit_codes: dict[int, int | None] = {}
     run_class: dict[int, str] = {}
     for n in RUNS:
-        runs_data[n] = parse_run_log(logdir / f"phase1_run{n}.log")
-        loads_before[n] = parse_load_before(logdir / f"uptime_before_run{n}.txt")
-        breach_status[n] = parse_breach_status(logdir / f"phase1_run{n}_monitor.log")
-        exit_codes[n] = parse_exit_code(logdir / f"uptime_after_run{n}.txt")
+        runs_data[n] = parse_run_log(logdir / f"{prefix}phase1_run{n}.log")
+        loads_before[n] = parse_load_before(logdir / f"{prefix}uptime_before_run{n}.txt")
+        breach_status[n] = parse_breach_status(logdir / f"{prefix}phase1_run{n}_monitor.log")
+        exit_codes[n] = parse_exit_code(logdir / f"{prefix}uptime_after_run{n}.txt")
         run_class[n] = classify_run(
             breach_status[n], exit_codes[n], len(runs_data[n]), len(SIZES)
         )
+        # 完了記録が無い attempt（TIMEOUT／起動失敗／実行中・中断）は run
+        # 記録が残っていても有効とみなさない（PR #1459 codex-review 六度目
+        # の指摘の是正）。
+        if completion != "done" and run_class[n] == "ok":
+            run_class[n] = "not_completed"
 
     # BREACH・監視記録なし・終了コード判定不能／非 0・サイズ欠落（途中中断）
     # のいずれかに該当する run は「排他条件不成立、または計測が不完全」と
@@ -284,12 +348,14 @@ def main() -> None:
     excluded_rc_unknown_ids = [n for n in RUNS if run_class[n] == "rc_unknown"]
     excluded_rc_nonzero_ids = [n for n in RUNS if run_class[n] == "rc_nonzero"]
     excluded_incomplete_ids = [n for n in RUNS if run_class[n] == "incomplete"]
+    excluded_not_completed_ids = [n for n in RUNS if run_class[n] == "not_completed"]
     excluded_run_ids = sorted(
         excluded_breach_ids
         + excluded_missing_ids
         + excluded_rc_unknown_ids
         + excluded_rc_nonzero_ids
         + excluded_incomplete_ids
+        + excluded_not_completed_ids
     )
 
     lines: list[str] = []
@@ -301,7 +367,27 @@ def main() -> None:
         logdir_label = str(logdir.relative_to(repo_root))
     except ValueError:
         logdir_label = str(logdir)
-    lines.append(f"集計対象ディレクトリ（LOGDIR）: `{logdir_label}`\n")
+    lines.append(f"集計対象ディレクトリ（LOGDIR）: `{logdir_label}`・attempt: {attempt}\n")
+    completion_label = {
+        "done": f"完了（`DONE_ATTEMPT{attempt}`: valid_runs={recorded_valid}）",
+        "done_unparsable": f"完了記録 `DONE_ATTEMPT{attempt}` はあるが形式を読めない",
+        "timeout": f"ゲート待ち TIMEOUT（`DONE_TIMEOUT_ATTEMPT{attempt}`）。run 未実行",
+        "gate_launch_error": f"ゲート起動失敗（`DONE_GATE_LAUNCH_ERROR_ATTEMPT{attempt}`）。run 未実行",
+        "none": "完了記録なし（未実行・実行中・中断）",
+    }[completion]
+    lines.append(f"attempt{attempt} の完了状態: {completion_label}\n")
+    if completion != "done":
+        lines.append(
+            f"**注意**: attempt{attempt} は run ループの完了記録が無いため、"
+            "run 記録が残っていても有効な計測として集計しない"
+            "（PR #1459 codex-review 六度目の指摘の是正）。\n"
+        )
+    elif recorded_valid is not None and recorded_valid != len(valid_run_ids):
+        lines.append(
+            f"**警告**: 完了記録の valid_runs={recorded_valid} と集計側の有効 run 数"
+            f"={len(valid_run_ids)} が一致しない（`orchestrate.sh` と本スクリプト"
+            "の判定規則の差、または記録の欠落・改変の可能性。要確認）。\n"
+        )
     if excluded_breach_ids:
         excluded_label = "、".join(f"run{n}" for n in excluded_breach_ids)
         lines.append(
@@ -392,6 +478,8 @@ def main() -> None:
         )
     for n in excluded_incomplete_ids:
         lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（計測途中中断） | - |")
+    for n in excluded_not_completed_ids:
+        lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（attempt 未完了） | - |")
 
     lines.append("")
     lines.append(f"| size | gate 成立回数 (/{len(valid_run_ids)}) |")
