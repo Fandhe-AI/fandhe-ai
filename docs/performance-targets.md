@@ -404,4 +404,35 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   `scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-0.7.0-1260.jsonl`、
   集計表は `scripts/bench/framework-compare/results/summary.md` 環境 12 節「5 回計測ゲート
   判定（イシュー #1260）」を参照
-- CPU 側の同種再計測（イシュー #1262）は本追補の対象外（並走イシュー）
+- CPU 側の同種再計測（イシュー #1262）は本追補の対象外（並走イシュー。§8.10 参照）
+
+### 8.10 #1262 追補（CPU GEMM N=2048 ゲートを承認済み tolerance 契約下で GB10〈Grace CPU〉で再計測。§2 段階的下限表・§3 丸め規則は不変）
+
+- tolerance 契約変更（イシュー #1241・2026-09-08 承認・候補 A-1「係数 `c=0.5`」。
+  `docs/candle-parity-tolerance-contract-decision.md` §8）を Phase 2（#1443: `bench-common::
+  parity` へ第 3 救済項追加・#1445: `compare_gemm_gate.py::_parity_check` の判定不能条件
+  更新）で実装後、承認済みピン `fandhe-ai =0.7.0`（正式系列。参考系列は計測せず）のみで
+  DGX Spark GB10（Grace CPU）の CPU GEMM N=512/1024/2048 reuse ゲートを再計測した
+  （イシュー #1262。CUDA 側 #8.9 の CPU ミラー構成）
+- **DGX N=2048 の「判定不能」（§5.2/§12.3 以来一貫して観測されていた candle 側の決定的な
+  `parity_fail_count=2`）が解消**: candle 側 5 run すべてで `parity_fail_count=0`・
+  `parity_scaled_abs_rescued=2`・`parity_scaled_abs_bound=1.525878e-05` を実測し、机上評価
+  （`docs/perf/candle-parity-tolerance-candidates.md` §4.1）および CUDA 側 #1260 の実測値と
+  一致した。fandhe-ai 側は全 15 run で `parity_fail_count=0` かつ `parity_scaled_abs_
+  rescued=0`（救済に依存しない厳密ゼロ fail が不変）
+- N=2048 は「判定不能」から確定判定（**未達・candle/fandhe = 0.950 倍**）へ遷移した。
+  N=512（0.862 倍）・N=1024（0.778 倍）はいずれも未達のまま、`docs/perf/cpu-gemm-candle-
+  gate-remeasurement.md` §12.2 との誤差範囲内で再現した
+- Apple M4 Max は N=2048 が §12.2 の時点で元々 `parity_fail_count=0`（判定不能ではない）
+  のため本追補の再計測対象外
+- **tolerance 定数・判定式・`docs/spec/`・本体 `assert_parity`／`ParityBaseline` はいずれも
+  変更していない**（#1254／#1256 は承認スコープ外〈ハーネス限定〉として NOT_PLANNED
+  クローズ済み）
+- #1117 は既に #1185（2026-09-06）でユーザー指示によりクローズ・後継ツリー #1283 が引き継ぎ
+  済みのため、本追補は #1283 が引き継いだ DGX N=2048 判定不能の実測解消を記録するもので
+  あり #1117 の再判定ではない
+- 出典・詳細な突合表・要素単位判定は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19
+  （イシュー #1262）、生データは
+  `scripts/bench/framework-compare/results/raw/results-dgx-cpu-gemm-gate-0.7.0-1262.jsonl`、
+  集計表は `scripts/bench/framework-compare/results/summary.md` 環境 14 節「5 回計測ゲート
+  判定（イシュー #1262）」を参照
