@@ -514,6 +514,14 @@ def head_index_bias_summary(runs: list[RunLog]) -> str:
             v = classify_cell(rounds, incomplete=not run.is_complete_size(size))
             if v is None or v.r_star < 0:
                 continue
+            if v.delta_wall <= 0:
+                # スパイクのないセル（全ラウンドの wall が同値等で
+                # `delta_wall <= 0`・attribution=NA）は偏在集計から除外
+                # する（codex-review 指摘・PR #1457: `max()` は同値なら
+                # 先頭を選ぶため r*=0 となり、スパイクが無い系列だけで
+                # 「先頭偏在あり」の材料が生成されていた。計画 §3.4
+                # 「スパイクが消えた場合は評価対象なし」と整合させる）。
+                continue
             total += 1
             if v.r_star == 0:
                 zero += 1
@@ -914,6 +922,42 @@ def self_test() -> None:
         )
     finally:
         os.unlink(path_o)
+
+    # 追加テスト（codex-review 指摘・PR #1457）: 全ラウンドの wall が
+    # 同値（スパイクなし・`delta_wall == 0`）の完全系列は、`max()` が
+    # 先頭を選んで r*=0 になるが、先頭偏在集計の zero_count／
+    # total_cells のいずれにも数えないことを検証する。
+    flat_lines = []
+    for i in range(10):
+        kv = dict(base)
+        kv["round"] = str(i)
+        kv["iters"] = "20"
+        kv["wall_median_secs"] = "0.02"
+        flat_lines.append(
+            "phase1_gpu_host_round " + " ".join(f"{k}={v}" for k, v in kv.items())
+        )
+    flat_lines.append("phase1_gpu_host_stats size=1024 rounds=10 valid=10")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(flat_lines) + "\n")
+        path_f = f.name
+    try:
+        run_f = load_run_log(path_f)
+        assert run_f.is_complete_size(1024)
+        v_f = classify_cell(run_f.rounds_for_size(1024))
+        assert v_f is not None and v_f.attribution == "NA" and v_f.delta_wall <= 0
+        bias_f = head_index_bias_summary([run_f])
+        data_f = [
+            line for line in bias_f.splitlines() if line.startswith(f"| {run_f.label}")
+        ]
+        assert len(data_f) == 1
+        cols_f = [c.strip() for c in data_f[0].split("|")]
+        assert cols_f[2] == "0" and cols_f[3] == "0", (
+            f"スパイクのないセルは zero_count/total_cells に数えないはず: {data_f[0]}"
+        )
+    finally:
+        os.unlink(path_f)
 
     print("self-test: ok")
 

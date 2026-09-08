@@ -49,6 +49,14 @@ GATE_INTERVAL_SECS=60
 GATE_MAX_ATTEMPTS=30
 GATE_LOG="${LOGDIR}/1261-gate.log"
 : > "${GATE_LOG}"
+# 過去の実行が残した結果マーカーを開始時に削除する（codex-review 指摘・
+# PR #1457: `gate.log` は初期化する一方でマーカーは残していたため、
+# `1261-GATE_NOT_PASSED.marker` が残った状態で計測を完了すると
+# `1261-ALL_DONE.marker` と共存し、逆に成功後の再実行でゲート不通過に
+# なっても古い完了マーカーが残って結果記録が矛盾しうる。本スクリプトは
+# 「実行 1 回につき LOGDIR 内の結果は最後の 1 回分」を契約とし、
+# マーカーは相互排他（どちらか一方のみ存在）を保証する）。
+rm -f "${LOGDIR}/1261-GATE_NOT_PASSED.marker" "${LOGDIR}/1261-ALL_DONE.marker"
 
 # GPU プロセス watchlist（部分一致）。本スクリプト自身・本 example 以外の
 # ビルド/ベンチ系プロセスを検出する（計画 §3.1「GPU プロセス確認」）。
