@@ -5,7 +5,11 @@ base HEAD sha（実装着手時点。origin/main）: c47376c2ca1390130f9c37b88d5
 初回実行分はログ内容とファイル名が一致していなかった（gated pass の実証ログが欠落）ため、
 `RetryConfig::new` の `max_wait >= initial_wait` 制約是正（`GUARD_MAX_WAIT.max(initial_wait)`）と
 あわせて 3 モードを再実行し、正しいファイル名で記録し直した。
-- guard_only_record_only.log: 引数なし（`--max-load-avg` 未指定）→ env_guard_mode=record_only
-- guard_only_gated_pass.log: `--max-load-avg=20.0`（実測 load average 3.56 未満）→ env_guard_result=pass attempts=1
-- guard_only_exhausted.log: `--max-load-avg=0.01 --guard-max-attempts=2 --guard-wait-secs=1`（常に load average を上回る閾値）→ env_guard_result=exhausted attempts=2
+push 前 Review（Medium: `env_guard_result=` を `args.max_load_avg` の有無で決め打ち → `final_report.overall` から
+導出するよう是正）後に、最終コードで 3 モード＋ `--env-info-out` を再度取得し直した（実測 load average 1min=5.94）。
+- guard_only_record_only.log: 引数なし（`--max-load-avg` 未指定）→ env_guard_mode=record_only／env_guard_result=record_only attempts=1
+- guard_only_gated_pass.log: `--max-load-avg=20.0`（実測 load average 5.94 より高い閾値を設定して pass 条件を成立させた。
+  この閾値は動作確認用であり `docs/perf/metal-bench-noise-protocol.md` の提案閾値とは無関係）→ env_guard_overall verdict=pass／env_guard_result=pass attempts=1
+- guard_only_exhausted.log: `--max-load-avg=0.01 --guard-max-attempts=2 --guard-wait-secs=1`（常に load average を上回る閾値）→ env_guard_result=exhausted attempts=2・終了コード 1
+- env_info.txt: record_only 実行時に `--env-info-out` で追記出力したファイル（guard_only_record_only.log の env_info ブロックと同一内容）
 ホスト名・ユーザー名は含めない（grep 確認済み）

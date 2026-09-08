@@ -917,10 +917,20 @@ where
     C: FnMut() -> EnvGuardReport,
     S: FnMut(Duration),
 {
-    let mut attempts: Vec<GuardAttempt> = Vec::with_capacity(retry.max_attempts());
+    // `Vec::with_capacity(retry.max_attempts())` は極端な `max_attempts`
+    // （`usize::MAX` 近傍）で capacity overflow の panic 経路になりうるため
+    // 使わない（Review 指摘。#1265）。試行回数は高々数十のため事前確保の
+    // 利点もない。
+    let mut attempts: Vec<GuardAttempt> = Vec::new();
     let mut total_wait = Duration::ZERO;
+    // `for .. in 0..max_attempts` + 末尾 `unreachable!` ではなく明示カウンタの
+    // `loop` にし、上限到達（`Err`）を末尾分岐として持つことで panic 経路を
+    // 構文上も持たない（Review 指摘。#1265）。`max_attempts >= 1` は
+    // `RetryConfig::new` が検証済みだが、仮に 0 でも初回試行後に必ず
+    // `Err(EnvGuardExhausted)` で終了する（無限ループにならない）。
+    let mut attempt_index = 0usize;
 
-    for attempt_index in 0..retry.max_attempts() {
+    loop {
         let waited_before = if attempt_index == 0 {
             None
         } else {
@@ -930,7 +940,6 @@ where
             Some(wait)
         };
         let report = check();
-        let is_last = attempt_index + 1 == retry.max_attempts();
         let blocking = report.is_blocking();
         attempts.push(GuardAttempt {
             attempt: attempt_index + 1,
@@ -945,17 +954,15 @@ where
                 configured_max_attempts: retry.max_attempts(),
             });
         }
-        if is_last {
+        attempt_index += 1;
+        if attempt_index >= retry.max_attempts() {
             return Err(BenchError::EnvGuardExhausted {
                 attempts: retry.max_attempts(),
                 detail: summarize_exhausted(&report),
             });
         }
-        // ループを継続（次の反復冒頭で `wait_for_attempt(attempt_index)` を待機）。
+        // ループを継続（次の反復冒頭で `wait_for_attempt(attempt_index - 1)` を待機）。
     }
-    // `retry.max_attempts() >= 1`（`RetryConfig::new` で検証済み）のため、
-    // このループは必ず上の分岐のいずれかで return する。到達しない。
-    unreachable!("RetryConfig::new が max_attempts >= 1 を検証済みのためループは必ず return する")
 }
 
 /// [`run_guard_with_retry_with`] の実 I/O 版（`EnvGuardConfig::check` +

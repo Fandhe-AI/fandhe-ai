@@ -389,6 +389,36 @@ struct RoundExtrema {
 /// 既に `BenchError::NanSample` として拒否するため、本関数へは到達しない
 /// 前提とする。
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+/// `env_guard_result=` 行の値を導出する純関数（イシュー #1265。Review 指摘
+/// 対応: 以前は `args.max_load_avg` の有無だけで `pass`／`record_only` を
+/// 決め打ちしていたため、`run_guard_with_retry` が `Undetermined`（load
+/// average 取得不能等）でも `Ok` を返す契約〈`bench_harness::env_guard`
+/// モジュール doc「取得不能は未判定・ブロック要因にしない」〉の下では、直前
+/// の `env_guard_overall verdict=undetermined` と矛盾する `pass` を出力
+/// しえた）。
+///
+/// - `gated == false`（`--max-load-avg` 未指定）: 判定を行わないため常に
+///   `record_only`（`GuardRetryOutcome::record_only` の `overall` は
+///   `Undetermined` 固定だが、これは「未判定」であり「取得不能」とは区別する）
+/// - `gated == true`: `final_report.overall` をそのまま写像する。`Fail` は
+///   `run_guard_with_retry` が `Err(EnvGuardExhausted)` を返すため `Ok`
+///   経路では現れないが、panic 経路を作らず `fail` へ写像しておく
+///   （fail-closed）
+///
+/// `macos_impl::main` から呼ばれる（フェーズ 1・2 の各ガード後）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn env_guard_result_label(gated: bool, overall: bench_harness::ab::GuardVerdict) -> &'static str {
+    use bench_harness::ab::GuardVerdict;
+    if !gated {
+        return "record_only";
+    }
+    match overall {
+        GuardVerdict::Pass => "pass",
+        GuardVerdict::Undetermined => "undetermined",
+        GuardVerdict::Fail => "fail",
+    }
+}
+
 fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
     if round_medians_secs.is_empty() {
         return None;
@@ -886,9 +916,13 @@ mod macos_impl {
     /// #1265）。`args.max_load_avg` 指定時は **gated**（`EnvGuardConfig`
     /// による判定・`Fail` ならバックオフ再試行）、未指定時は **record_only**
     /// （[`GuardRetryOutcome::record_only`]。判定なし・記録のみ）で動作する。
-    /// `RetryConfig`／`EnvGuardConfig` の構築失敗（呼び出し元
-    /// `parse_args_from` が検証済みのため通常到達しないが、fail-closed に
-    /// 同じ `BenchError` 経路で呼び出し元へ伝播する）も含め I/O・待機は
+    /// `EnvGuardConfig::new`（閾値の有限・正値検査）は呼び出し元
+    /// `parse_args_from` が同じ条件を検証済みのため通常到達せず、
+    /// `RetryConfig::new` の `max_wait >= initial_wait` 制約は
+    /// `--guard-wait-secs` が `GUARD_MAX_WAIT` を上回る指定（例:
+    /// `--guard-wait-secs=400`）でも本関数が `max_wait` を `initial_wait`
+    /// 以上へ持ち上げるため構築失敗しない。それでも `Err` になった場合は
+    /// fail-closed に同じ `BenchError` 経路で呼び出し元へ伝播する。I/O・待機は
     /// すべて `bench_harness::env_guard` に委譲し、本関数は設定の組み立てと
     /// 呼び分けのみを行う。計測区間（`run_stability`／`run_ab`）の外側で
     /// 完結するため、`ab::STABILITY_SPREAD_GATE` 等の判定ロジックには
@@ -926,8 +960,12 @@ mod macos_impl {
     /// テキストを追記する（イシュー #1265・opt-in）。ファイル出力に失敗
     /// した場合は「記録できない実行を記録済みと誤認しない」ため fail-closed
     /// に stderr へ理由を出して exit(1) する（`.claude/rules/security.md`
-    /// A01/A05 相当の慎重さ）。追記のみ・シンボリックリンク追跡や上書きは
-    /// 行わない（`OpenOptions::create(true).append(true)`）。
+    /// A01/A05 相当の慎重さ）。`OpenOptions::create(true).append(true)` で
+    /// 開くため既存内容の上書き（truncate）は行わず末尾追記のみとなる。
+    /// 一方、指定パスがシンボリックリンクであれば OS の通常の解決に従い
+    /// リンク先へ追記する（シンボリックリンクの検出・拒否は行わない。出力先
+    /// は利用者が `--env-info-out` で明示した docs/perf/logs 配下のログ
+    /// ファイルを想定し、権限・パスの妥当性は利用者側の責務とする）。
     fn emit_env_info(
         label: &str,
         outcome: &GuardRetryOutcome,
@@ -1615,10 +1653,10 @@ mod macos_impl {
         );
         println!(
             "env_guard_result={} attempts={}",
-            match args.max_load_avg {
-                Some(_) => "pass",
-                None => "record_only",
-            },
+            super::env_guard_result_label(
+                args.max_load_avg.is_some(),
+                phase1_guard_outcome.final_report.overall,
+            ),
             phase1_guard_outcome.attempts_used()
         );
 
@@ -1693,10 +1731,10 @@ mod macos_impl {
         );
         println!(
             "env_guard_result={} attempts={}",
-            match args.max_load_avg {
-                Some(_) => "pass",
-                None => "record_only",
-            },
+            super::env_guard_result_label(
+                args.max_load_avg.is_some(),
+                phase2_guard_outcome.final_report.overall,
+            ),
             phase2_guard_outcome.attempts_used()
         );
 
@@ -1731,12 +1769,37 @@ fn main() {
 mod cli_and_round_stats_tests {
     use super::{
         CliArgs, GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round,
-        aggregate_gpu_host_size, format_gpu_host_round_line, format_gpu_host_size_line,
-        measured_tail, parse_args_from, round_extrema,
+        aggregate_gpu_host_size, env_guard_result_label, format_gpu_host_round_line,
+        format_gpu_host_size_line, measured_tail, parse_args_from, round_extrema,
     };
+    use bench_harness::ab::GuardVerdict;
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// イシュー #1265 Review 指摘対応: `env_guard_result=` は
+    /// `final_report.overall` から導出し、gated かつ `Undetermined` で
+    /// `pass` を出さない。
+    #[test]
+    fn env_guard_result_label_record_only_ignores_verdict() {
+        for v in [
+            GuardVerdict::Pass,
+            GuardVerdict::Fail,
+            GuardVerdict::Undetermined,
+        ] {
+            assert_eq!(env_guard_result_label(false, v), "record_only");
+        }
+    }
+
+    #[test]
+    fn env_guard_result_label_gated_maps_verdict() {
+        assert_eq!(env_guard_result_label(true, GuardVerdict::Pass), "pass");
+        assert_eq!(
+            env_guard_result_label(true, GuardVerdict::Undetermined),
+            "undetermined"
+        );
+        assert_eq!(env_guard_result_label(true, GuardVerdict::Fail), "fail");
     }
 
     #[test]
