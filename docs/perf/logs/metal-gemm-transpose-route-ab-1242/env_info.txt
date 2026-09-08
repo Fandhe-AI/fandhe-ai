@@ -30,7 +30,7 @@ attempt 1 と同一の背景（本 worktree 環境自体が複数イシューの
 MAX_WAIT_SECS 到達を待たなかった旨・打ち切り理由は
 `wait_gate_attempt2.log`・`orchestrate.log` 末尾に明記。ゲート閾値
 自体は変更していない）。`docs/perf/metal-gemm-transpose-tiled.md` §5.5
-が §1187／§1284 の前例（低負荷開始でも gate 超過・判定不可のまま
+が #1187／#1284 の前例（低負荷開始でも gate 超過・判定不可のまま
 undetermined として記録）に倣って結果を記録する方針を踏襲した。
 
 備考: 本エージェント自身（このセッション）も cargo/rustc を保有しない

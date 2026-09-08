@@ -27,7 +27,7 @@ RUNS = [1, 2, 3]
 ROUND_STATS_RE = re.compile(
     r"^phase1_round_stats size=(?P<size>\d+) rounds=(?P<rounds>\d+) "
     r"spread=(?P<spread>[0-9.eE+-]+) gate=(?P<gate>[0-9.eE+-]+) "
-    r"within_gate=(?P<within_gate>True|False) median_secs=(?P<median_secs>[0-9.eE+-]+) "
+    r"within_gate=(?P<within_gate>[Tt]rue|[Ff]alse) median_secs=(?P<median_secs>[0-9.eE+-]+) "
     r"min_secs=(?P<min_secs>[0-9.eE+-]+) min_round_idx=(?P<min_round_idx>\d+) "
     r"max_secs=(?P<max_secs>[0-9.eE+-]+) max_round_idx=(?P<max_round_idx>\d+) "
     r"round_medians_secs=(?P<round_medians_secs>[0-9.eE+,-]+)$"
@@ -57,7 +57,7 @@ def parse_run_log(path: Path) -> dict[int, dict]:
         out[size] = {
             "spread": float(d["spread"]),
             "gate": gate,
-            "within_gate": d["within_gate"] == "True",
+            "within_gate": d["within_gate"].lower() == "true",
             "median_secs": median,
             "min_secs": float(d["min_secs"]),
             "min_round_idx": int(d["min_round_idx"]),
