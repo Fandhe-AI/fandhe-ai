@@ -1,0 +1,47 @@
+イシュー #1261: 排他環境での分離計測 env_info（内部ホスト名・ユーザー名は含めない）
+
+機種: Mac16,6（`sysctl -n hw.model`）
+OS: macOS 26.6.2（`sw_vers -productVersion`）
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+cargo: 1.96.0 (30a34c682 2026-05-25)
+HEAD sha: 52406200f6102bf64cf512451b372bcdd56d81c8
+  （コミット `test(backend-metal): gemm_transpose_route_ab_bench に
+  --min-warmup-secs を追加する` 適用後。計測に使ったバイナリは事前ビルド済み
+  `target/release/examples/gemm_transpose_route_ab_bench` を直接起動した
+  ものであり、このコミットからビルドしたもの）
+
+## 排他環境ゲート結果（イシュー #1261 計画 §3.1。詳細は 1261-gate.log）
+
+- 条件: 1 分 load average < 2.0 を 60 秒間隔で 2 回連続。最大 30 回
+- 実測: 30 回全試行で load average(1 分) >= 2.40（最小 2.40・最大 6.92・
+  平均 4.28）。1 度も 2.0 未満に落ちなかった（`count_below_2.0=0`）
+- GPU プロセス検出（watchlist: cargo|rustc|bench|gemm_|python|torch|mlx）:
+  全 30 試行で `proc_count=0`（自プロセス・本 example 以外に該当なし）
+- 判定: **gate_not_passed**（30 回試行後）。マーカー
+  `1261-GATE_NOT_PASSED.marker` を出力し計測を実行せず終了
+
+## 実行環境の背景
+
+- 複数のイシューが並列に実行されるワークフロー運用下でのセッション
+  （プロンプトで明示された前提）。load average は 2.4〜6.9 台で推移し、
+  他プロセスの並走負荷が持続的に存在したことを示す
+- ゲート開始から終了まで約 30 分（`gate_start_unix` から `attempt=30`
+  記録時刻までの経過を `1261-gate.log` タイムスタンプなしのため
+  `1261-orchestrate-stdout.log` の終了メッセージと合わせて判断。厳密な
+  経過秒数は本オーケストレータが記録していないためログからは求まらない
+  ——Phase 2〈#1265〉反映事項として env_info への経過秒数自動記録を追加
+  提案する）
+
+## 実行前後スナップショット・実行中サンプリング
+
+排他環境ゲートが不通過のため E1〜E3／W1〜W2 のいずれも実行しておらず、
+`1261-*-before.txt`／`1261-*-after.txt`／`1261-uptime-during-*.log`／
+`1261-pmset-during-*.log`／`1261-exclusive-run*.log`／
+`1261-warmup9s-run*.log` は生成されていない（`1261-orchestrate.sh` は
+ゲート不通過時に計測本体（`run_one`）へ進まない設計。計画 §3.1 の
+「ゲート不通過なら計測せず終了する」を実装どおり遵守）。
+
+## サニタイズ確認
+
+`grep -rniE "$(scutil --get LocalHostName)|/Users/<user>" 1261-*` は
+0 件（クリーン）。
