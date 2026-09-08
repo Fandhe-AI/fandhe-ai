@@ -19,6 +19,7 @@ Python3 標準ライブラリのみ（依存追加なし。deps-policy.md 対象
 
 from __future__ import annotations
 
+import math
 import re
 import sys
 from dataclasses import dataclass, field
@@ -83,6 +84,23 @@ def parse_float_or_na(v: str) -> float | None:
         return None
 
 
+def _validate_finite_nonneg(x: float) -> float:
+    """時間系フィールド（秒）に共通の不変条件——有限（`NaN`/`inf`/
+    `-inf` ではない）かつ非負——を検査する純関数（codex-review 指摘・
+    PR #1457: 従来は `float(v)` の成功のみをもって受理していたため、
+    `float()` が受理する `"nan"`/`"inf"` 等の非有限値も後段の比較・
+    中央値計算まで素通りしていた。ここで拒否し `ValueError` として
+    呼び出し元の `except (KeyError, ValueError)` へ倒す）。
+    Rust 側 `aggregate_gpu_host_round` の不変条件
+    （`0 ≤ kernel_gpu ≤ commit_wait ≤ wall`）により、ここで扱う
+    時間差分・時間値はいずれも理論上非負のはずであり、負値はログ破損
+    の代理指標として扱う。
+    """
+    if not math.isfinite(x) or x < 0.0:
+        raise ValueError(f"non-finite or negative value: {x!r}")
+    return x
+
+
 def parse_required_float_or_na(v: str) -> float | None:
     """`kernel_gpu_median_secs`/`commit_wait_minus_gpu_median_secs` 等、
     Rust 側で `valid=false` の場合にのみ `NA` を出力する契約のフィールド
@@ -95,10 +113,54 @@ def parse_required_float_or_na(v: str) -> float | None:
     （codex-review 指摘・PR #1457: 従来の `parse_float_or_na` は
     パース不能値も無条件に `None` へ変換していたため、`valid=true` の
     行で本来 `incomplete` とすべき欠損・破損を静かに見逃していた）。
+    パース成功した数値は `_validate_finite_nonneg` で有限・非負を検査
+    する（codex-review 指摘・PR #1457 再指摘: `float()` は `"nan"` 等を
+    無条件に受理するため、ここで拒否しないと `valid=true` の行に紛れた
+    非有限値がそのまま `gpu_share` 等の比較に伝播しうる）。
     """
     if v == "NA":
         return None
-    return float(v)
+    return _validate_finite_nonneg(float(v))
+
+
+def parse_finite_nonneg_secs(v: str) -> float:
+    """`wall_median_secs`/`commit_wait_median_secs`/`upload_median_secs`
+    等、`valid` に依らず常に数値が出力される契約の時間フィールド用
+    パーサ。`float()` が受理する `"nan"`/`"inf"` や負値を
+    `_validate_finite_nonneg` で `ValueError` へ倒し、呼び出し元の
+    `except (KeyError, ValueError)` で `incomplete_sizes` へ記録させる
+    （codex-review 指摘・PR #1457: 以前は素の `float()` だったため、
+    `wall_median_secs=nan` の行が通過すると `delta_wall`/`gpu_share` が
+    `NaN` となり、`NaN >= 0.5` が False に評価されて「host側」という
+    確定的な帰属を誤って出力しうる）。
+    """
+    return _validate_finite_nonneg(float(v))
+
+
+def check_valid_round_fields(sample: "RoundSample") -> "RoundSample":
+    """`valid=true` のラウンドについて、Rust 側の契約
+    （`format_gpu_host_round_line`: `valid=true` なら
+    `kernel_gpu_median_secs`／`commit_wait_minus_gpu_median_secs` は
+    必ず数値・`NA` は `valid=false` のときのみ）が守られているかを検査
+    し、`valid=true` と `NA` が同居する不整合行を `ValueError` として
+    拒否する（codex-review 指摘・PR #1457: 以前は `valid` フラグしか
+    検査していなかったため、`valid=true` かつ `kernel_gpu_median_secs=NA`
+    の行が通過し、後段 `classify_cell` が `None` を除外して中央値を
+    計算することで不完全な系列から GPU側／host側を確定していた）。
+    数値フィールドの有限・非負検査は各パーサ側で済んでいるため、ここ
+    では「`valid=true` の必須値がすべて存在する」ことだけを検査する。
+    `valid=false` のラウンドは `NA` を正当な欠損として受理し、
+    `classify_cell` が当該サイズを NA へ倒す既存契約に委ねる。
+    """
+    if sample.valid and (
+        sample.kernel_gpu_median_secs is None
+        or sample.commit_wait_minus_gpu_median_secs is None
+    ):
+        raise ValueError(
+            f"valid=true round (size={sample.size}, round={sample.round_idx}) "
+            "has NA in a required GPU-timing field"
+        )
+    return sample
 
 
 @dataclass
@@ -185,31 +247,39 @@ def load_run_log(path: str) -> RunLog:
                 continue
             kv = parse_kv_line(m.group(1))
             try:
-                run.rounds.append(
-                    RoundSample(
-                        size=int(kv["size"]),
-                        round_idx=int(kv["round"]),
-                        valid=(kv.get("valid") == "true"),
-                        wall_median_secs=float(kv["wall_median_secs"]),
-                        # `kv[...]`（`.get` ではない）でキー欠落を
-                        # `KeyError` として検出し、`parse_required_float_
-                        # or_na` で `"NA"` 以外のパース不能値を
-                        # `ValueError` として検出する（codex-review
-                        # 指摘・PR #1457）。いずれも下の except で
-                        # `incomplete_sizes` へ倒れる。
-                        kernel_gpu_median_secs=parse_required_float_or_na(
-                            kv["kernel_gpu_median_secs"]
-                        ),
-                        commit_wait_median_secs=float(kv["commit_wait_median_secs"]),
-                        commit_wait_minus_gpu_median_secs=parse_required_float_or_na(
-                            kv["commit_wait_minus_gpu_median_secs"]
-                        ),
-                        upload_median_secs=float(kv["upload_median_secs"]),
-                        alloc_median_secs=float(kv["alloc_median_secs"]),
-                        encode_median_secs=float(kv["encode_median_secs"]),
-                        readback_median_secs=float(kv["readback_median_secs"]),
-                    )
+                # `check_valid_round_fields` は `valid=true` と `NA` の
+                # 同居を `ValueError` へ倒し、`parse_finite_nonneg_secs`
+                # は非有限・負値を `ValueError` へ倒す（いずれも下の
+                # except で `incomplete_sizes` へ記録。codex-review
+                # 指摘・PR #1457）。
+                sample = RoundSample(
+                    size=int(kv["size"]),
+                    round_idx=int(kv["round"]),
+                    valid=(kv.get("valid") == "true"),
+                    wall_median_secs=parse_finite_nonneg_secs(kv["wall_median_secs"]),
+                    # `kv[...]`（`.get` ではない）でキー欠落を
+                    # `KeyError` として検出し、`parse_required_float_
+                    # or_na` で `"NA"` 以外のパース不能値を
+                    # `ValueError` として検出する（codex-review
+                    # 指摘・PR #1457）。いずれも下の except で
+                    # `incomplete_sizes` へ倒れる。
+                    kernel_gpu_median_secs=parse_required_float_or_na(
+                        kv["kernel_gpu_median_secs"]
+                    ),
+                    commit_wait_median_secs=parse_finite_nonneg_secs(
+                        kv["commit_wait_median_secs"]
+                    ),
+                    commit_wait_minus_gpu_median_secs=parse_required_float_or_na(
+                        kv["commit_wait_minus_gpu_median_secs"]
+                    ),
+                    upload_median_secs=parse_finite_nonneg_secs(kv["upload_median_secs"]),
+                    alloc_median_secs=parse_finite_nonneg_secs(kv["alloc_median_secs"]),
+                    encode_median_secs=parse_finite_nonneg_secs(kv["encode_median_secs"]),
+                    readback_median_secs=parse_finite_nonneg_secs(
+                        kv["readback_median_secs"]
+                    ),
                 )
+                run.rounds.append(check_valid_round_fields(sample))
             except (KeyError, ValueError):
                 # 不完全な行（途中打ち切りログ等）はラウンドとしては
                 # 追加しないが、`size` だけは救出できる場合が多いため
@@ -710,6 +780,140 @@ def self_test() -> None:
         )
     finally:
         os.unlink(path6)
+
+    # 追加テスト（codex-review 指摘・PR #1457 再指摘）: 10 ラウンド＋
+    # 完了行が揃った「完全な系列」であっても、(a) `valid=true` と
+    # `kernel_gpu_median_secs=NA` が同居する行、(b) `float()` が受理する
+    # `wall_median_secs=nan` の行、(c) `commit_wait_minus_gpu_median_
+    # secs=inf` の行、(d) 負値の行が 1 つでもあれば当該サイズが
+    # incomplete へ倒れ、`render_run_table`（NA）・
+    # `head_index_bias_summary`（total から除外）の両方で一貫して除外
+    # されることを検証する。r* 以外のラウンド（round=5）に不整合を
+    # 置くのは、以前の実装が「最大 wall 以外のラウンドの欠損は None
+    # 除外で素通り」させていたケースを直接再現するため。
+    def _full_series_with(mutate) -> list[str]:
+        lines = []
+        for i in range(10):
+            kv = dict(base)
+            kv["round"] = str(i)
+            kv["iters"] = "20"
+            kv["wall_median_secs"] = "0.05" if i == 2 else "0.02"
+            if i == 5:
+                mutate(kv)
+            lines.append(
+                "phase1_gpu_host_round " + " ".join(f"{k}={v}" for k, v in kv.items())
+            )
+        lines.append("phase1_gpu_host_stats size=1024 rounds=10 valid=10")
+        return lines
+
+    def _assert_incomplete(lines: list[str], why: str) -> None:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".log", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("\n".join(lines) + "\n")
+            path_x = f.name
+        try:
+            run_x = load_run_log(path_x)
+            assert len(run_x.rounds_for_size(1024)) == 9, (
+                f"{why}: 不整合行は救出されず 9 ラウンドのはず: "
+                f"{len(run_x.rounds_for_size(1024))}"
+            )
+            assert 1024 in run_x.incomplete_sizes, f"{why}: incomplete_sizes に載るはず"
+            assert not run_x.is_complete_size(1024), f"{why}: incomplete のはず"
+            table_x = render_run_table(run_x)
+            row_x = [
+                line for line in table_x.splitlines() if line.strip().startswith("| 1024 |")
+            ]
+            assert len(row_x) == 1
+            assert row_x[0].split("|")[4].strip() == "NA", (
+                f"{why}: render_run_table は NA 表示するはず: {row_x[0]}"
+            )
+            bias_x = head_index_bias_summary([run_x])
+            data_x = [
+                line for line in bias_x.splitlines() if line.startswith(f"| {run_x.label}")
+            ]
+            assert len(data_x) == 1
+            assert data_x[0].split("|")[3].strip() == "0", (
+                f"{why}: 先頭偏在集計の total_cells から除外されるはず: {data_x[0]}"
+            )
+        finally:
+            os.unlink(path_x)
+
+    def _set(key: str, value: str):
+        def mutate(kv):
+            kv[key] = value
+
+        return mutate
+
+    _assert_incomplete(
+        _full_series_with(_set("kernel_gpu_median_secs", "NA")),
+        "valid=true と kernel_gpu_median_secs=NA の同居",
+    )
+    _assert_incomplete(
+        _full_series_with(_set("commit_wait_minus_gpu_median_secs", "NA")),
+        "valid=true と commit_wait_minus_gpu_median_secs=NA の同居",
+    )
+    _assert_incomplete(
+        _full_series_with(_set("wall_median_secs", "nan")),
+        "wall_median_secs=nan",
+    )
+    _assert_incomplete(
+        _full_series_with(_set("kernel_gpu_median_secs", "nan")),
+        "kernel_gpu_median_secs=nan",
+    )
+    _assert_incomplete(
+        _full_series_with(_set("commit_wait_minus_gpu_median_secs", "inf")),
+        "commit_wait_minus_gpu_median_secs=inf",
+    )
+    _assert_incomplete(
+        _full_series_with(_set("upload_median_secs", "-0.001")),
+        "upload_median_secs 負値",
+    )
+
+    # 対照: 同じ位置の行が `valid=false` かつ両 GPU フィールド `NA`
+    # （Rust 側契約どおりの正当な欠損）ならラウンドとしては受理され
+    # （10 ラウンド・incomplete ではない）、`classify_cell` の既存
+    # `valid=false` 規則により NA へ倒れることを検証する。
+    def _invalidate(kv):
+        kv["valid"] = "false"
+        kv["kernel_gpu_median_secs"] = "NA"
+        kv["commit_wait_minus_gpu_median_secs"] = "NA"
+
+    ctrl_lines = _full_series_with(_invalidate)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(ctrl_lines) + "\n")
+        path_c = f.name
+    try:
+        run_c = load_run_log(path_c)
+        assert len(run_c.rounds_for_size(1024)) == 10
+        assert 1024 not in run_c.incomplete_sizes
+        assert run_c.is_complete_size(1024)
+        v_c = classify_cell(run_c.rounds_for_size(1024))
+        assert v_c is not None and v_c.attribution == "NA" and v_c.r_star < 0, (
+            f"valid=false ラウンド込みのサイズは NA のはず: {v_c}"
+        )
+    finally:
+        os.unlink(path_c)
+
+    # 対照: 不整合を含まない完全系列は従来どおり確定帰属される
+    # （検査追加による偽陽性が無いこと）。
+    ok_lines = _full_series_with(lambda kv: None)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(ok_lines) + "\n")
+        path_o = f.name
+    try:
+        run_o = load_run_log(path_o)
+        assert run_o.is_complete_size(1024)
+        v_o = classify_cell(run_o.rounds_for_size(1024))
+        assert v_o is not None and v_o.r_star == 2 and v_o.attribution != "NA", (
+            f"完全系列は確定帰属されるはず: {v_o}"
+        )
+    finally:
+        os.unlink(path_o)
 
     print("self-test: ok")
 
