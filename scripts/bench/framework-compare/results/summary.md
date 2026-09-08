@@ -2074,7 +2074,37 @@ fresh/reuse 双方を含む。1.0 未満が改善・1.0 超が後退。checksum 
   `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §15・
   `docs/perf/logs/gemm-candle-gate-readout-1337/` を参照
 
-## 環境 24: DGX Spark GB10・Apple M4 Max（借用ビュー readout の既定経路化・feature ゲート撤去。3 バックエンド × 両実機。イシュー #1438）
+## 環境 24: DGX Spark GB10・Apple M4 Max（(mc, nc) 2D 動的分配本番結線。イシュー #1313）
+
+`crates/backend-cpu/src/gemm_blis/mod.rs`（#1311/#1312 で実装・A/B 済みの
+`GemmDriverVariant::TwoDDynamic`）を単一 const ゲート
+（`TWO_D_DYNAMIC_PRODUCTION_ENABLED`）で本番結線した before/after を両実機
+比較。before=結線前 origin/main（コミット `fddca17`。`GEMM_GATE_PATCH_FACADE_PATH`
+経由 path patch）・after=結線後 HEAD。`compare_gemm_ab.py --device cpu` で
+N=512/1024/2048 × fresh/reuse を突合。
+
+| cell | M4 Max ratio | DGX ratio | 判定 |
+|---|---|---|---|
+| 512/fresh | 0.8954 | 0.9643 | 両実機: 非後退 |
+| 512/reuse | 0.8789 | 0.9003 | 両実機: 非後退 |
+| 1024/fresh | 0.8792 | 0.8142 | 両実機: 非後退 |
+| 1024/reuse | 0.8593 | 0.7603 | 両実機: 非後退 |
+| 2048/fresh | 0.8575 | 0.6504 | 両実機: 非後退 |
+| **2048/reuse** | **0.8385** | **0.6015** | **両実機: 非後退（大幅改善）** |
+
+**既定化判定: ADOPT**（`TWO_D_DYNAMIC_PRODUCTION_ENABLED = true` を維持）。
+決定規則（両実機・全 reuse セルで ratio 1.05 以下・checksum 完全一致）を
+全 12 セルで満たす。M4 Max 専有ゲート（1 分 load average < 6.0 を 2 回連続）
+は attempt=8（load average 3.40）で通過し、Tier 1 判定（jpw=2・jpw=4 とも
+N=1024/2048 で対 `RowPanel` 比 1.00 以上・N=4096 で 0.95 以上）を両実機で
+充足したことを前提に本番結線した（#1312 が undetermined としていた判定を
+Phase 0 再計測で確定した）。checksum は両実機・全セル完全一致・
+`parity_fail_count=0`。詳細・env_info・Tier 1 判定・スコープ外事項は
+`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節・
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20・
+`docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/` を参照。
+
+## 環境 25: DGX Spark GB10・Apple M4 Max（借用ビュー readout の既定経路化・feature ゲート撤去。3 バックエンド × 両実機。イシュー #1438）
 
 環境 23（#1337）で未確定だった「既定化の可否」を確定させる位置づけ。#1436/#1437 が
 CUDA D2H 宛先未タッチ（N=1024/2048 の後退の原因）を診断・是正したことを確認したうえで、
@@ -2110,5 +2140,5 @@ before/after 完全一致）
 - 詳細・実測値・candle 比表は
   `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §15・
   `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13・
-  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20・
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §21・
   `docs/perf/logs/gemm-candle-gate-readout-default-1438/` を参照

@@ -1271,6 +1271,41 @@ FACADE_PATH` と一致していることで確認する（結果記録・採否�
 `docs/perf/cpu-gemm-default-thread-limit.md` §6・
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13 を参照）。
 
+**イシュー #1313（(mc, nc) 2D 動的分配 `TWO_D_DYNAMIC_PRODUCTION_ENABLED` の
+本番結線 on/off）** は上記 #1364 と異なり on／off いずれも現行 HEAD の
+`crates/facade` 1 checkout だけで再現できない（結線 on/off は const の
+値そのものであり、この checkout は既に on 固定のため）。結線前（off）の
+比較には別 checkout（結線コミットの親コミット、または origin/main）を
+用意する必要がある:
+
+```bash
+cd scripts/bench/framework-compare
+FACADE_AFTER="$(cd ../../../crates/facade && pwd)"  # 現行 HEAD（結線後・on 固定）
+git worktree add --detach /tmp/fandhe-1313-before <結線前コミット>
+FACADE_BEFORE=/tmp/fandhe-1313-before/crates/facade
+
+GEMM_GATE_CPU_NODE_TAG=<node> GEMM_GATE_PATCH_FACADE_PATH="$FACADE_BEFORE" \
+  bash run_gemm_gate_cpu.sh head-1313-off
+GEMM_GATE_CPU_NODE_TAG=<node> GEMM_GATE_PATCH_FACADE_PATH="$FACADE_AFTER" \
+  bash run_gemm_gate_cpu.sh head-1313-on
+
+for label in head-1313-off head-1313-on; do
+  jq -c 'select(.framework == "fandhe-ai")' \
+    "results/raw/results-<node>-cpu-gemm-gate-${label}.jsonl" \
+    > "results/raw/results-<node>-cpu-gemm-gate-${label}.fandhe-only.jsonl"
+done
+
+python3 compare_gemm_ab.py --device cpu \
+  results/raw/results-<node>-cpu-gemm-gate-head-1313-off.fandhe-only.jsonl \
+  results/raw/results-<node>-cpu-gemm-gate-head-1313-on.fandhe-only.jsonl
+```
+
+DGX 側は `~/work/rust-ai-library-run`（共有作業ディレクトリ）を使わず、
+本イシュー専用の隔離ディレクトリ（`rsync` で before/after 2 本を別々に
+転送）を用い、計測後に削除する（#1148 と同方針）。実測結果・判定は
+`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節・
+`results/summary.md` 環境 24 を参照。
+
 ### `compare_gemm_ab.py --device cuda --sizes gate --modes reuse`（借用ビュー readout・イシュー #1337・#1438）
 
 `compare_gemm_ab.py` は `--device cuda`（新規。N=1024/2048/4096 の 6 セル。

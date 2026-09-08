@@ -1,0 +1,46 @@
+イシュー #1313: TwoDDynamic 本番結線可否（Phase 0: Apple M4 Max 専有ゲート付き
+再計測）事前宣言。Tier 1 判定基準は #1312（`docs/perf/logs/cpu-gemm-2d-dynamic-ab-1312/env_info.txt`）
+の文言をそのまま転記する（計測後に基準を変更しない）。
+
+=== Tier 1（結線判定。ADOPT を決める。対 RowPanel） ===
+
+同一プロセス内 round-robin 計測の 5 回独立プロセス中央値比 TwoDDynamic(jpw) / RowPanel
+（RAYON_NUM_THREADS 未設定＝既定全コア。DGX 20・M4 Max 16）:
+
+1. N=1024・N=2048 の両方で比 >= 1.00、かつ N=4096 で比 >= 0.95
+2. 単一の固定 jobs_per_worker（2 または 4）が条件 1 を M4 Max・GB10 の両方で満たす場合のみ
+   ADOPT（#1313 は定数 1 つを結線する。実機ごとの best-of は不可）。片実機のみは REJECT
+3. ノイズガード: 中央値比 >= 1.00 でもペアワイズ勝ち run 数が 5 中 3 未満の形状があれば
+   undetermined（結線しない）
+4. 中止条件（設計 §11 を優先適用）: DGX N=1024・T=10 で jpw 2・4 のいずれも対 RowPanel 比
+   < 1.00 → REJECT（#1312 で非発火を確認済み。DGX 側は再計測しないため本節はそのまま
+   #1312 の結果を正として扱う）
+5. 前提: 両実機で gemm_blis_two_d_dynamic_matches_row_panel_bit_exact_large（#[ignore]・
+   release）pass、および cargo test -p fandhe-ai-backend-cpu --lib gemm_blis --release green
+6. 条件付き採用: 条件 1 が既定スレッド数で不成立でも、形状・スレッド数の部分集合（例「N <=
+   1024 かつ effective_num_threads >= 10」）で両実機とも比 >= 1.00（勝ち >=3/5）かつその
+   補集合で >= 0.95 を満たす場合に限り、その述語を結線条件として明記する
+7. M4 Max 専有性: 低負荷ゲート（1 分 load average < 6 が 2 回連続・最大 30 分待機）を試み、
+   不通過なら計測を続行せず undetermined（結線せず記録のみ）として終了する（#1312 と異なり、
+   本イシューは #1312 の推奨〈専有ゲート通過時に再計測〉を実行する立場のため、不通過時に
+   共有負荷下データを積み上げない）
+
+=== 本イシュー固有の判断ツリー（実装計画 §2 より） ===
+
+Phase 0（本ファイル）: M4 Max 専有ゲート付き A/B 再計測を 1 回だけ試みる（有界。最大 30 分
+待機 + 計測 ≈ 25 分）。
+  - ゲート不通過 → Branch B（結線せず記録）
+  - ゲート通過だが Tier 1 条件 1〜3 を単一 jpw で満たさない → Branch B
+  - ゲート通過かつ単一 jpw（2 または 4）で条件 1〜3 充足 → Branch A（結線 + 両実機
+    framework-compare before/after）
+    - 両実機の全 reuse セル非後退（ratio ≤ 1.05・checksum 一致）→ const=true のまま ADOPT
+    - いずれかの実機・セルで後退 → const=false へ差し戻し・コードは維持・理由記録
+
+DGX 側 TwoDDynamic vs RowPanel A/B は再計測しない（#1312 で専有ゲート通過済み・中止条件
+非発火。同 doc が「正として扱ってよい」と明記）。
+
+=== DGX 接続性確認（Phase 0 実行前・2026-09-08） ===
+
+`ssh <CUDA_NODE> 'echo ok; uptime'` で到達性を確認済み（load average 4.10, 1.48, 0.54。
+低負荷）。実ホスト名は本ファイルに書かない（`docs/real-hardware-verification-env.local.md`
+参照）。

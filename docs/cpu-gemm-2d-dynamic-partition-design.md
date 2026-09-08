@@ -652,6 +652,18 @@ M4 Max が計測中に専有できない場合の扱い: `docs/perf/cpu-gemm-can
 - `m==1`／`n==0` の専用経路は不変。小形状で job 数 1 の場合は直列と同一結果になる
 - `oss-gemm-compare`・framework-compare gemm cpu の before/after を #1313 の受入根拠とする
 
+**追記（イシュー #1313・実施内容）**: #1312 が undetermined と判定したため、#1313 は M4 Max
+専有ゲート付き Phase 0 再計測（1 回・有界）をまず実施した。ゲートが通過し（attempt=8・
+load average 3.40）、jpw=2・jpw=4 とも Tier 1 条件を両実機で満たしたため **ADOPT 確定**。
+`TWO_D_DYNAMIC_PRODUCTION_ENABLED`（単一 const ゲート。`thread_limit::BIG_CORE_LIMIT_ENABLED`
+と同型設計）を追加し `true` で結線した。`gemm_blis_bias_act_parallel` の epilogue 適用は
+「join 後に全体へ 1 回」の方式を採った（job ごと適用より配管が単純で bit 契約は同じ）。
+`partition` モジュール・新入口の `#[cfg(test)]` 解除は上記のとおり実施し、`split_evenly`／
+`row_ranges_for_workers`（#753 専用ヘルパー）のみ個別に `#[cfg(test)]` を維持した。
+framework-compare gemm cpu before/after は両実機・全 12 セル非後退（改善方向）を確認して
+ADOPT を確定した。詳細は `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節・
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20 を参照。
+
 ## §13 スコープ外（本ドキュメントで扱わない事項）
 
 - `crates/` の実装（#1311）・実機 A/B（#1312）・結線（#1313）
