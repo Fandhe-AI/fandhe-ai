@@ -184,20 +184,32 @@ self_pid_tree() {
 # is_self_descendant: 与えた PID の祖先を `ps -o ppid=` で辿り、root（自
 # run の BENCH_PID）に到達すれば 0（自子孫）、PID 1／0 まで到達しても root
 # に当たらなければ 1（他プロセス）、途中で PID が消滅して祖先を確定
-# できなければ 2（判定不能・消滅）を返す。self_pid_tree のスナップ
+# できなければ 2（消滅）、`ps` 自体の失敗（終了コード 0 かつ出力あり
+# 以外。`ps -p` は該当 PID が無いと終了コード 1 を返すので、消滅は
+# 「終了コード 1」で識別し、それ以外の非 0 は取得失敗）で祖先を確定
+# できなければ 3（取得失敗・判定不能）を返す（PR #1459 codex-review
+# 八度目の指摘の是正: 取得失敗を消滅と混同しない）。self_pid_tree のスナップ
 # ショット取得後に自 cargo が起動した rustc／ベンチ本体を、列挙時点の
 # 祖先関係で改めて自子孫と判定するために使う（PR #1459 codex-review
 # 五度目の指摘の是正）。祖先の探索深さは異常な循環に備えて 64 で打ち切る。
 is_self_descendant() {
-  local pid="$1" root="$2" depth=0 ppid
+  local pid="$1" root="$2" depth=0 ppid ps_rc
   while [ "$pid" -gt 1 ] && [ "$depth" -lt 64 ]; do
     if [ "$pid" -eq "$root" ]; then
       return 0
     fi
-    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
-    if [ -z "$ppid" ]; then
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null)
+    ps_rc=$?
+    ppid=$(printf '%s' "$ppid" | tr -d '[:space:]')
+    if [ "$ps_rc" -eq 1 ] && [ -z "$ppid" ]; then
       return 2
     fi
+    if [ "$ps_rc" -ne 0 ] || [ -z "$ppid" ]; then
+      return 3
+    fi
+    case "$ppid" in
+      *[!0-9]*) return 3 ;;
+    esac
     pid="$ppid"
     depth=$((depth + 1))
   done
@@ -209,7 +221,10 @@ is_self_descendant() {
 # まず反復冒頭のスナップショット（self_pids）で高速に除外し、不一致の
 # PID のみ is_self_descendant で祖先関係を確認する（スナップショット後に
 # 起動した自子孫の誤検出を防ぐ）。結果は other_procs／other_count／
-# vanished_procs（呼び出し側のシェル変数）へ反映する。
+# vanished_procs／enum_error（呼び出し側のシェル変数）へ反映する。祖先
+# 情報の取得失敗（is_self_descendant が 3）は消滅とは区別し enum_error=1
+# として当該反復を UNDETERMINED（run 除外）に倒す（PR #1459 codex-review
+# 八度目の指摘の是正）。
 classify_pid() {
   local name="$1" pid="$2"
   case "$self_pids" in
@@ -219,6 +234,10 @@ classify_pid() {
   case $? in
     0) ;;
     2) vanished_procs="${vanished_procs}${name}:${pid}," ;;
+    3)
+      enum_error=1
+      other_procs="${other_procs}${name}:${pid}:PS_ERROR,"
+      ;;
     *)
       other_procs="${other_procs}${name}:${pid},"
       other_count=$((other_count + 1))
@@ -257,8 +276,16 @@ for n in 1 2 3; do
   while kill -0 "$BENCH_PID" 2>/dev/null; do
     self_pids=" $(self_pid_tree "$BENCH_PID" | tr '\n' ' ') "
     ts=$(date +"%Y-%m-%dT%H:%M:%S%z")
-    load_line=$(uptime)
-    load1=$(printf '%s' "$load_line" | sed -E 's/.*load averages?:[[:space:]]*([0-9.]+).*/\1/')
+    # uptime の失敗・非数値出力は enum_error と同様に UNDETERMINED（run
+    # 除外）へ倒す（gate_common.sh の read_load_or_fail。PR #1459
+    # codex-review 八度目の指摘の是正）。
+    load_error=0
+    if loads=$(read_load_or_fail); then
+      load1=${loads%% *}
+    else
+      load_error=1
+      load1="NA"
+    fi
     other_procs=""
     other_count=0
     vanished_procs=""
@@ -292,15 +319,15 @@ for n in 1 2 3; do
     else
       enum_error=1
     fi
-    load_ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" 'BEGIN{print (l<t)?1:0}')
-    if [ "$enum_error" -ne 0 ]; then
+    load_ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v le="$load_error" 'BEGIN{print (le==0 && l<t)?1:0}')
+    if [ "$enum_error" -ne 0 ] || [ "$load_error" -ne 0 ]; then
       breach=1
-      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=1 UNDETERMINED" >> "$MONITOR_LOG"
+      echo "$ts load1=$load1 load_error=$load_error other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=$enum_error UNDETERMINED" >> "$MONITOR_LOG"
     elif [ "$load_ok" != "1" ] || [ "$other_count" -gt 0 ]; then
       breach=1
-      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 BREACH" >> "$MONITOR_LOG"
+      echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 BREACH" >> "$MONITOR_LOG"
     else
-      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 ok" >> "$MONITOR_LOG"
+      echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 ok" >> "$MONITOR_LOG"
     fi
     sleep "$MONITOR_POLL_INTERVAL_SECS"
   done

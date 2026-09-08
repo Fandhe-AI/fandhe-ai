@@ -509,6 +509,13 @@ attempt は run 記録が残っていても有効 0 件とし、完了記録の 
 `orchestrate.sh` の実行中監視は `UNDETERMINED`（BREACH と区別）を記録
 して当該 run を `valid_runs` から除外し、`aggregate.py` も同 run を
 「プロセス一覧取得失敗・判定不能」として除外する。
+同 PR の codex-review 八度目の指摘（P2・2 件）で、`uptime` の失敗・非
+数値出力時に `load1` が空のまま awk `l<t` が真になる点、`is_self_descendant`
+が `ps` の取得失敗を消滅と同一視する点を是正した。`gate_common.sh` の
+`read_load_or_fail`（終了コード・数値形式を検証）を両スクリプトで共有し、
+待機側は `load_error=1` で不成立、監視側は `UNDETERMINED`。祖先探索は
+`ps -p` の終了コード 1（該当なし）のみを消滅（戻り値 2）とし、それ以外の
+失敗は戻り値 3 → `enum_error=1` → `UNDETERMINED`（run 除外）とする。
 
 ### 結論（本イシューでの到達点）
 

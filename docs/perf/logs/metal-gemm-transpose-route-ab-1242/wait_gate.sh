@@ -62,9 +62,19 @@ while :; do
   now_ts=$(date +%s)
   elapsed=$((now_ts - start_ts))
   ts=$(date +"%Y-%m-%dT%H:%M:%S%z")
-  load_line=$(uptime)
-  load1=$(printf '%s' "$load_line" | sed -E 's/.*load averages?:[[:space:]]*([0-9.]+).*/\1/')
-  load5=$(printf '%s' "$load_line" | sed -E 's/.*load averages?:[[:space:]]*[0-9.]+[[:space:]]+([0-9.]+).*/\1/')
+  # PR #1459 codex-review 八度目の指摘の是正（イシュー #1253・P2）: uptime
+  # の失敗・非数値出力は load_error=1 として gate_ok=0（不成立）に倒す
+  # （gate_common.sh の read_load_or_fail）。ログには load1/load5 を
+  # `NA` と記録する。
+  load_error=0
+  if loads=$(read_load_or_fail); then
+    load1=${loads%% *}
+    load5=${loads##* }
+  else
+    load_error=1
+    load1="NA"
+    load5="NA"
+  fi
   # GPU/build 系プロセス（cargo・rustc・python3、および対象バイナリ直接起動
   # gemm_transpose_route_ab_bench）を他セッション並走の代理指標として数える。
   #
@@ -110,13 +120,13 @@ while :; do
   # load1 とプロセス不在の両方を満たし、かつプロセス一覧の取得に失敗して
   # いないときのみ gate_ok=1（プロセス条件を落とすと排他計測契約の片側
   # しか検査しなくなる。取得失敗は判定不能として不成立に倒す）。
-  ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v p="$proc_count" -v e="$proc_error" 'BEGIN{print (l<t && p==0 && e==0)?1:0}')
+  ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v p="$proc_count" -v e="$proc_error" -v le="$load_error" 'BEGIN{print (le==0 && l<t && p==0 && e==0)?1:0}')
   if [ "$ok" = "1" ]; then
     consec=$((consec + 1))
   else
     consec=0
   fi
-  echo "$ts elapsed=${elapsed}s load1=$load1 load5=$load5 proc_count=$proc_count proc_error=$proc_error procs=[$procs] gate_ok=$ok consecutive_ok=$consec" >> "$OUT"
+  echo "$ts elapsed=${elapsed}s load1=$load1 load5=$load5 load_error=$load_error proc_count=$proc_count proc_error=$proc_error procs=[$procs] gate_ok=$ok consecutive_ok=$consec" >> "$OUT"
 
   if [ "$consec" -ge "$CONSEC_REQUIRED" ]; then
     result="PASSED"
