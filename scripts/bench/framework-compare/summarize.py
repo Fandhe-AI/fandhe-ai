@@ -1187,9 +1187,19 @@ def _format_maybe_huge(v):
 
 
 def parity_status(row):
-    """GEMM 行の要素単位検証結果（イシュー #970）を判定する。
+    """GEMM 行の要素単位検証結果（イシュー #970・#1250）を判定する。
 
     戻り値: "unverified" | "fail" | "ok"
+
+    イシュー #1250（承認済み契約 #1241。`docs/candle-parity-tolerance-
+    contract-decision.md` §8）: 既存 4 キーの判定に加え、
+    `parity_scaled_abs_bound`／`parity_scaled_abs_rescued`（#1247 で
+    `bench-common::parity` が追加した第 3 救済項の診断値）が**両方存在
+    する場合のみ**追加検証する（後方互換。新 2 キーがともに欠損の 4 キー
+    行は本関数の挙動が変わらない）。一方のみ存在（部分欠損）・不正値・
+    `bound=null`（非有限入力センチネル）・`framework=="fandhe-ai"` での
+    `rescued>0` はいずれも "fail" とする（判定ロジックの詳細は
+    `compare_gemm_gate.py::_parity_check` と同じ整合条件を共有する）。
 
     - "unverified": `parity_fail_count`・`parity_total`・
       `parity_max_abs_err`・`parity_max_rel_err` の 4 キーが**すべて**
@@ -1233,7 +1243,19 @@ def parity_status(row):
         "parity_max_abs_err",
         "parity_max_rel_err",
     )
-    if all(k not in row for k in parity_keys):
+    # イシュー #1250 codex-review P2 指摘: 新契約のキー
+    # （`parity_scaled_abs_bound`／`parity_scaled_abs_rescued`）は旧 4
+    # キーと独立して存在しうるため、旧 4 キー欠損のみで "unverified" と
+    # 判定すると、旧 4 キーが全欠損かつ新 2 キーのいずれかが残っている
+    # 部分破損行（新契約下での破損 JSONL）が検証をすり抜けて誤って
+    # 「未検証（旧形式）」表示になる。6 キー（旧 4 ＋新 2）すべてが欠損
+    # する場合に限り旧形式として "unverified" とし、それ以外の部分欠損は
+    # 下記の通常検証へ進めて fail-closed に "fail" 判定させる。
+    new_keys_for_unverified_check = (
+        "parity_scaled_abs_bound",
+        "parity_scaled_abs_rescued",
+    )
+    if all(k not in row for k in parity_keys + new_keys_for_unverified_check):
         return "unverified"
     fail_count = row.get("parity_fail_count")
     total = row.get("parity_total")
@@ -1269,6 +1291,44 @@ def parity_status(row):
         return "fail"
     if fail_count > 0:
         return "fail"
+
+    # イシュー #1250: 承認済み契約（#1241。`docs/candle-parity-tolerance-
+    # contract-decision.md` §8）下の第 3 救済項フィールド
+    # （`parity_scaled_abs_bound`／`parity_scaled_abs_rescued`。#1247 で
+    # `bench-common::parity` が追加）を、**両方存在する場合のみ**追加
+    # 検証する。旧形式 JSONL（新 2 キーがともに欠損）はここに到達しない
+    # 限り従来どおり "ok"（後方互換。`results/raw/*.jsonl` の履歴ファイル
+    # 集計・コミット済み `results/summary.md` の再生成結果を変えない）。
+    # 一方のみ存在（部分欠損）は破損・改変 JSONL として "fail" に倒す
+    # （compare_gemm_gate.py `_parity_check` と同じキー集合ポリシー）。
+    new_keys = ("parity_scaled_abs_bound", "parity_scaled_abs_rescued")
+    has_new = [k in row for k in new_keys]
+    if any(has_new) and not all(has_new):
+        return "fail"
+    if all(has_new):
+        bound = row.get("parity_scaled_abs_bound")
+        rescued = row.get("parity_scaled_abs_rescued")
+        if bound is None:
+            return "fail"
+        if not _is_plain_number(bound) or bound < 0:
+            return "fail"
+        if not _is_plain_number(rescued) or _non_integral(rescued):
+            return "fail"
+        rescued = int(rescued)
+        if rescued < 0 or rescued > total or rescued + fail_count > total:
+            return "fail"
+        # 整合検査（判定式のレプリカを作らない。`compare_gemm_gate.py`
+        # `_parity_check` と同じ整合条件）: 救済要素は
+        # `!legacy_pass ∧ diff <= bound` の定義上 `diff >= CHECKSUM_ABS_TOL`
+        # かつ `bound >= diff` を満たすため、`rescued > 0` なら
+        # `bound >= CHECKSUM_ABS_TOL` が必要。
+        if rescued > 0 and bound < _checksum_contract.CHECKSUM_ABS_TOL:
+            return "fail"
+        # 承認スコープ (b-2)「比較対象側限定」: fandhe-ai 側は全経路
+        # `verify_strict`（`bench-common/src/parity.rs:744`）のため構造的
+        # に rescued は常に 0 のはず。0 でなければ計装前提が崩れている。
+        if row.get("framework") == "fandhe-ai" and rescued > 0:
+            return "fail"
     return "ok"
 
 
@@ -1300,7 +1360,19 @@ def _parity_reason(row):
     )
     abs_str = _format_maybe_huge(max_abs) if _is_plain_number(max_abs) else "null"
     rel_str = _format_maybe_huge(max_rel) if _is_plain_number(max_rel) else "null"
-    return f"要素誤差超過 fail={fail_str}, max_abs={abs_str}, max_rel={rel_str}"
+    reason = f"要素誤差超過 fail={fail_str}, max_abs={abs_str}, max_rel={rel_str}"
+    # イシュー #1250: 新 2 キー（承認済み契約 #1241 の救済項診断値）が
+    # 存在する場合は理由文字列へ併記する（不正値でも表示できるよう
+    # `_is_plain_number` チェックを都度行う。値が読めなければ "?"）。
+    if "parity_scaled_abs_bound" in row or "parity_scaled_abs_rescued" in row:
+        bound = row.get("parity_scaled_abs_bound")
+        rescued = row.get("parity_scaled_abs_rescued")
+        bound_str = (
+            _format_maybe_huge(bound) if _is_plain_number(bound) else ("null" if bound is None else "?")
+        )
+        rescued_str = str(rescued) if _is_plain_number(rescued) else "?"
+        reason += f", rescued={rescued_str}, bound={bound_str}"
+    return reason
 
 
 def _row_key(r):
