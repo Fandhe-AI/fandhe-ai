@@ -59,6 +59,142 @@
 //! （`bench_harness::ab::STABILITY_SPREAD_GATE`）を超過した場合、
 //! フェーズ 2（A/B 判定）には進まない（「判定不可」を出力して終了する。
 //! 安全側判断: 判定を無効化して中断する方向のみ許す）。
+//!
+//! ## phase 1 のみ実行モード（イシュー #1249/#1251）
+//!
+//! フェーズ 1（安定性セルフチェック）は #1186/#1187 の計 8 試行で一度も
+//! 安定性ゲートを満たせず、ログ上は 10 ラウンド中 1 ラウンドだけ落ち込む
+//! 単発スパイク型であることが分かっている（`docs/perf/
+//! metal-gemm-transpose-tiled.md` §5.2・§5.4）。#1249 はこの再現条件を
+//! 排他環境／負荷環境で phase 1 のみを複数回実行して切り分けるため、
+//! フェーズ 2（A/B 判定）へ進まず終了する `--phase1-only` モードを設ける。
+//!
+//! ```sh
+//! cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --release -- --phase1-only
+//! ```
+//!
+//! `--phase1-only` を指定すると、既定の phase 1 → phase 2 の流れは実行せず
+//! 冒頭に `mode=phase1_only` を出力したうえでフェーズ 1 のみを実行し、
+//! `verdict=not_evaluated (...)` を出力して終了する（`undetermined` とは
+//! 区別する。フェーズ 1 が安定性ゲートを満たしたか否かに関わらず、常に
+//! A/B 判定を実行しなかったことを示すため）。既定動作（引数なし）は不変。
+//!
+//! フェーズ 1 の各サイズについて、既存の
+//! `size=… spread=… (…) round_tflops=…` 行（バイト単位で不変）の直後に、
+//! 分布集計を機械的に grep できる 1 行 `phase1_round_stats` を追加出力する
+//! （キー: `size`・`rounds`・`spread`・`gate`・`within_gate`・
+//! `median_secs`・`min_secs`／`min_round_idx`・`max_secs`／`max_round_idx`・
+//! `round_medians_secs`〈カンマ区切り〉）。`min`／`max` は**秒基準**・
+//! **0 始まり** index である点に注意: TFLOPS 換算では大小関係が逆転する
+//! （レイテンシ比と TFLOPS 比の取り違えは #540/#746 で一度発生した既知の
+//! 落とし穴。本モジュール内 `b_over_a_tflops` の doc comment 参照）ため、
+//! 「落ち込んだラウンド」は常に `max_secs` 側で読むこと。フェーズ 1 末尾に
+//! は総括 1 行 `phase1_summary`（ゲート超過サイズの一覧）を既定モード・
+//! `--phase1-only` の両方で出力する。
+//!
+//! `--phase1-only` はプロセス内リピートに対応しない（`--repeat=N` 等は
+//! 非対応）。#1253/#1255 の「複数回実行」は 1 回ごとに別プロセスで起動し、
+//! run ごとに env_info・uptime を独立に取る運用を想定するため。
+
+/// `parse_args_from` の解析結果（イシュー #1251）。
+///
+/// macOS 実機の `macos_impl::main` と Linux CI の `#[cfg(test)]` ユニット
+/// テストの双方から使われるため、`gemm_swizzle_ab_bench.rs::
+/// SingleRunVerdict` と同型の cfg 分岐（非 macOS・非テストの `example`
+/// ターゲット単体でのみ未使用になる誤検知）で `dead_code` を抑止する。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct CliArgs {
+    /// `true` なら phase 1（安定性セルフチェック）のみ実行してフェーズ 2
+    /// （A/B 判定）へ進まない。
+    phase1_only: bool,
+}
+
+/// `std::env::args()` を**一度だけ**走査して `--phase1-only`（値なしフラグ）
+/// を解析する（`gemm_counter_workload.rs::parse_args`・
+/// `fixed_overhead_diagnosis.rs::parse_args` と同型の一括走査＋未知引数・
+/// 重複指定の fail-closed 拒否。OWASP A03 観点）。
+///
+/// `std::env::args` を直接読まず引数列 `I` を受け取る純関数にしているのは、
+/// `std::env::args()` を関数内で直接読む実装は単体テストから差し替えられ
+/// ない（`gemm_profile_target.rs` が指摘する同種の問題）ため。呼び出し元
+/// （`macos_impl::main`）が `std::env::args().skip(1)` を渡す薄い呼び出しへ
+/// 分離することで、Linux CI の `#[cfg(test)]` から引数列を注入して検証
+/// できる。
+///
+/// 許可する引数は `--phase1-only` のみ。それ以外の引数・重複指定は
+/// `Err` で fail-closed に拒否する（呼び出し元は `MetalContext::new` に
+/// 到達する前にこの結果を検査し、不正引数なら GPU を触らずに終了する）。
+/// プロセス内リピート（`--repeat=N`）・`--help` 等は意図的に非対応（本
+/// example ヘッダ doc comment 参照。必要になれば #1249 配下で別イシュー）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, String> {
+    let mut phase1_only = false;
+    for arg in args {
+        if arg == "--phase1-only" {
+            if phase1_only {
+                return Err(format!(
+                    "--phase1-only は複数回指定できない（重複指定）: '{arg}'"
+                ));
+            }
+            phase1_only = true;
+        } else {
+            return Err(format!(
+                "未知の引数: '{arg}'（許可される引数は --phase1-only のみ）"
+            ));
+        }
+    }
+    Ok(CliArgs { phase1_only })
+}
+
+/// [`round_extrema`] の戻り値。`phase1_round_stats` 行の `min_secs`／
+/// `max_secs` とその 0 始まり index を保持する（イシュー #1251）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RoundExtrema {
+    min_secs: f64,
+    min_round_idx: usize,
+    max_secs: f64,
+    max_round_idx: usize,
+}
+
+/// `round_medians_secs`（[`bench_harness::ab::StabilityResult::
+/// round_medians_secs`]。秒単位）から最小・最大ラウンドを求める純関数。
+///
+/// **秒基準**で判定する点が契約: TFLOPS へ換算すると大小関係が逆転する
+/// （レイテンシ比と TFLOPS 比の取り違えは #540/#746 で一度発生した既知の
+/// 落とし穴。本モジュール内 `b_over_a_tflops` の doc comment と同じ設計
+/// 判断で、集約はここへ 1 箇所に留める）ため、呼び出し元
+/// （`phase1_stability_selfcheck`）は本関数の戻り値をそのまま
+/// `phase1_round_stats` 行へ出力すればよい。
+///
+/// 同値タイは**最初に出現した** index を採る（決定的）。空スライスは
+/// `None`（fail-closed。`run_stability` は `rounds >= 2` を保証する契約
+/// 上ここへは到達しない想定だが、契約として明示的に扱う）。`NaN` は
+/// `run_stability`（内部で `stats::relative_spread` を呼ぶ）が計測時点で
+/// 既に `BenchError::NanSample` として拒否するため、本関数へは到達しない
+/// 前提とする。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
+    if round_medians_secs.is_empty() {
+        return None;
+    }
+    let (mut min_idx, mut max_idx) = (0usize, 0usize);
+    for (i, &v) in round_medians_secs.iter().enumerate().skip(1) {
+        if v < round_medians_secs[min_idx] {
+            min_idx = i;
+        }
+        if v > round_medians_secs[max_idx] {
+            max_idx = i;
+        }
+    }
+    Some(RoundExtrema {
+        min_secs: round_medians_secs[min_idx],
+        min_round_idx: min_idx,
+        max_secs: round_medians_secs[max_idx],
+        max_round_idx: max_idx,
+    })
+}
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
@@ -68,6 +204,9 @@ mod macos_impl {
     use fandhe_ai_backend_metal::layout::{MatrixLayout, classify_2d};
     use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm, tile};
     use std::time::Duration;
+    // イシュー #1249/#1251: `--phase1-only` 引数解析・ラウンド別 min/max
+    // 集計は macOS 依存部分を持たない top-level 純関数（本モジュール外）。
+    use super::round_extrema;
 
     /// `gemm_transpose_tile_sweep.rs`・`gemm_bench.rs` と同一値（決定的
     /// シード。過去 PoC・CPU 実装ベンチと同じ入力分布に揃える）。
@@ -160,6 +299,7 @@ mod macos_impl {
         let measurement_config = MeasurementConfig::default();
 
         let mut all_within_gate = true;
+        let mut gate_exceeded_sizes: Vec<usize> = Vec::new();
         for size in [256usize, 512, 1024, 2048, 4096] {
             let mut rng = Xorshift64Star::new(SEED);
             let a = rng.fill_vec(size * size);
@@ -173,6 +313,9 @@ mod macos_impl {
 
             let within_gate = result.spread <= SPREAD_GATE;
             all_within_gate &= within_gate;
+            if !within_gate {
+                gate_exceeded_sizes.push(size);
+            }
 
             let round_tflops: Vec<f64> = result
                 .round_medians_secs
@@ -184,7 +327,51 @@ mod macos_impl {
                 result.spread,
                 if within_gate { "OK" } else { "NG: gate 超過" }
             );
+
+            // イシュー #1249/#1251: サイズごとのラウンド別中央値・spread を
+            // 機械可読な 1 行で追加出力する（`grep '^phase1_round_stats '`
+            // で既存ログ〈docs/perf/logs/metal-gemm-transpose-route-ab-1186/・
+            // -1187/〉と同じ突合ができるよう、上記の既存行はバイト単位で
+            // 変更せず直後に追加するのみ）。`round_extrema` の契約どおり
+            // min/max は秒基準・0 始まり index。
+            let median_secs = bench_harness::median_q1_q3(&result.round_medians_secs)
+                .expect("run_stability が返す round_medians_secs は非空・非 NaN のため成功する")
+                .median;
+            let round_medians_secs_str = result
+                .round_medians_secs
+                .iter()
+                .map(|s| format!("{s:.6e}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            if let Some(extrema) = round_extrema(&result.round_medians_secs) {
+                println!(
+                    "phase1_round_stats size={size} rounds={} spread={:.4e} gate={SPREAD_GATE:.4e} \
+                     within_gate={within_gate} median_secs={median_secs:.6e} \
+                     min_secs={:.6e} min_round_idx={} max_secs={:.6e} max_round_idx={} \
+                     round_medians_secs={round_medians_secs_str}",
+                    result.round_medians_secs.len(),
+                    result.spread,
+                    extrema.min_secs,
+                    extrema.min_round_idx,
+                    extrema.max_secs,
+                    extrema.max_round_idx,
+                );
+            }
         }
+
+        let sizes_gate_exceeded_str = if gate_exceeded_sizes.is_empty() {
+            "none".to_string()
+        } else {
+            gate_exceeded_sizes
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        println!(
+            "phase1_summary sizes_measured=5 sizes_gate_exceeded={sizes_gate_exceeded_str} \
+             all_within_gate={all_within_gate}"
+        );
 
         if !all_within_gate {
             println!(
@@ -512,10 +699,40 @@ mod macos_impl {
     }
 
     pub fn main() {
+        // イシュー #1249/#1251: 引数解析は `MetalContext::new()`（GPU 初期化）
+        // より前に行う。不正引数なら GPU を一切触らずに終了する
+        // （`super::parse_args_from` の doc comment 参照。OWASP A03 観点）。
+        let args = match super::parse_args_from(std::env::args().skip(1)) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("引数解析エラー: {e}");
+                std::process::exit(1);
+            }
+        };
+
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
+        if args.phase1_only {
+            println!("mode=phase1_only");
+        }
+
         let phase1_ok = phase1_stability_selfcheck(&ctx, &gemm);
+
+        if args.phase1_only {
+            // イシュー #1249/#1251: `--phase1-only` はフェーズ 1 が安定性
+            // ゲートを満たしたか否かに関わらず、常にフェーズ 2（A/B 判定）を
+            // 実行しなかったことを示す `not_evaluated` を出力して終了する
+            // （`undetermined`〈判定不可〉とは意味が異なるため使い分ける。
+            // #1253/#1255 が `verdict=` grep で本モードのログを区別できる
+            // ようにする）。
+            println!(
+                "verdict=not_evaluated (--phase1-only: フェーズ 2〈A/B 判定〉は未実行。\
+                 #1249 の spread 分布記録用)"
+            );
+            return;
+        }
+
         if !phase1_ok {
             // codex-review 指摘対応（PR #1198）: フェーズ 1 不成立での早期
             // return もフェーズ 2 総括（`phase2_route_ab`）と同じ
@@ -552,4 +769,84 @@ fn main() {
          See docs/perf/metal-bench-noise-protocol.md and \
          docs/perf/metal-gemm-transpose-tiled.md for the real-hardware execution procedure."
     );
+}
+
+/// `parse_args_from`／`round_extrema`（イシュー #1251）の純関数ユニット
+/// テスト。macOS 依存部分を一切持たないため Linux CI（`cargo test -p
+/// fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench`。
+/// `Cargo.toml` の `[[example]] test = true` により実行対象）でも走る。
+#[cfg(test)]
+mod cli_and_round_stats_tests {
+    use super::{CliArgs, parse_args_from, round_extrema};
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_from_empty_defaults_to_phase1_only_false() {
+        let parsed = parse_args_from(args(&[])).expect("空引数列は成功するはず");
+        assert_eq!(parsed, CliArgs { phase1_only: false });
+    }
+
+    #[test]
+    fn parse_args_from_phase1_only_flag_sets_true() {
+        let parsed =
+            parse_args_from(args(&["--phase1-only"])).expect("既知の単一引数は成功するはず");
+        assert_eq!(parsed, CliArgs { phase1_only: true });
+    }
+
+    #[test]
+    fn parse_args_from_duplicate_phase1_only_is_error() {
+        let err = parse_args_from(args(&["--phase1-only", "--phase1-only"]))
+            .expect_err("重複指定は fail-closed に拒否するはず");
+        assert!(err.contains("複数回指定できない"));
+    }
+
+    #[test]
+    fn parse_args_from_unknown_argument_is_error() {
+        for unknown in ["--bogus", "phase1-only", "--phase1-only=1"] {
+            let err = parse_args_from(args(&[unknown]))
+                .expect_err("未知の引数は fail-closed に拒否するはず");
+            assert!(err.contains("未知の引数"), "unknown={unknown} err={err}");
+        }
+    }
+
+    #[test]
+    fn round_extrema_empty_slice_is_none() {
+        assert_eq!(round_extrema(&[]), None);
+    }
+
+    #[test]
+    fn round_extrema_single_element_min_equals_max_at_index_zero() {
+        let extrema = round_extrema(&[1.5]).expect("単一要素は Some を返すはず");
+        assert_eq!(extrema.min_secs, 1.5);
+        assert_eq!(extrema.min_round_idx, 0);
+        assert_eq!(extrema.max_secs, 1.5);
+        assert_eq!(extrema.max_round_idx, 0);
+    }
+
+    #[test]
+    fn round_extrema_single_spike_finds_correct_index() {
+        // 単発スパイク型（#1249 本文が指摘する実測パターン）: index 3 だけ
+        // 突出して遅い（秒基準で大きい値）。
+        let samples = [1.0, 1.1, 0.9, 5.0, 1.05, 0.95];
+        let extrema = round_extrema(&samples).expect("非空スライスは Some を返すはず");
+        assert_eq!(extrema.max_secs, 5.0);
+        assert_eq!(extrema.max_round_idx, 3);
+        assert_eq!(extrema.min_secs, 0.9);
+        assert_eq!(extrema.min_round_idx, 2);
+    }
+
+    #[test]
+    fn round_extrema_tie_picks_first_occurrence() {
+        let samples = [3.0, 1.0, 3.0, 1.0];
+        let extrema = round_extrema(&samples).expect("非空スライスは Some を返すはず");
+        // 最大値 3.0 は index 0・2 に出現するが最初の出現（0）を採る。
+        assert_eq!(extrema.max_secs, 3.0);
+        assert_eq!(extrema.max_round_idx, 0);
+        // 最小値 1.0 は index 1・3 に出現するが最初の出現（1）を採る。
+        assert_eq!(extrema.min_secs, 1.0);
+        assert_eq!(extrema.min_round_idx, 1);
+    }
 }
