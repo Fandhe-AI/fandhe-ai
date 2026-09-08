@@ -1,0 +1,436 @@
+warning: unused import: `CudaSlice`
+  --> crates/backend-cuda/src/gemm_mma.rs:17:19
+   |
+17 |     CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, LaunchConfig, PushKernelArg,
+   |                   ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CudaSlice`
+  --> crates/backend-cuda/src/gemm_mma_tf32x3.rs:30:36
+   |
+30 | use cudarc::driver::{CudaFunction, CudaSlice, CudaStream};
+   |                                    ^^^^^^^^^
+
+warning: field `tiled_pipeline_128x64_error` is never read
+   --> crates/backend-cuda/src/gemm.rs:390:5
+    |
+237 | pub struct CudaGemm {
+    |            -------- field in this struct
+...
+390 |     tiled_pipeline_128x64_error: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:879:48
+    |
+879 | pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+879 - pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+879 + pub struct TiledPipelineFunction(CudaFunction, (), TiledPipelineTile);
+    |
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:892:8
+    |
+881 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+892 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: function `persistent_grid_blocks` is never used
+    --> crates/backend-cuda/src/gemm.rs:1055:15
+     |
+1055 | pub(crate) fn persistent_grid_blocks(num_tiles: u32, num_sms: u32, blocks_per_sm: u32) -> u32 {
+     |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_tile_count` is never used
+    --> crates/backend-cuda/src/gemm.rs:1075:15
+     |
+1075 | pub(crate) fn persistent_tile_count(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PersistentTiledPipelineFunction` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1142:12
+     |
+1142 | pub struct PersistentTiledPipelineFunction {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_block_threads` is never used
+    --> crates/backend-cuda/src/gemm.rs:1385:4
+     |
+1385 | fn persistent_block_threads(tile: TiledPipelineTile) -> u32 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StreamKPlan` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1418:12
+     |
+1418 | pub struct StreamKPlan {
+     |            ^^^^^^^^^^^
+
+warning: method `is_active` is never used
+    --> crates/backend-cuda/src/gemm.rs:1449:12
+     |
+1444 | impl StreamKPlan {
+     | ---------------- method in this implementation
+...
+1449 |     pub fn is_active(&self) -> bool {
+     |            ^^^^^^^^^
+
+warning: function `streamk_plan` is never used
+    --> crates/backend-cuda/src/gemm.rs:1479:15
+     |
+1479 | pub(crate) fn streamk_plan(
+     |               ^^^^^^^^^^^^
+
+warning: function `u32_from_u64_bounded` is never used
+    --> crates/backend-cuda/src/gemm.rs:1582:4
+     |
+1582 | fn u32_from_u64_bounded(value: u64, context: &str) -> Result<u32, CudaError> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StreamKTiledPipelineFunction` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1617:12
+     |
+1617 | pub struct StreamKTiledPipelineFunction {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:240:8
+    |
+240 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:302:4
+    |
+302 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:320:8
+    |
+320 | pub fn tiled_pipeline_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:324:8
+    |
+324 | static TILED_PIPELINE_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:331:8
+    |
+331 | pub fn tiled_pipeline_persistent_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:596:7
+    |
+596 | const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:661:7
+    |
+661 | const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_KERNEL_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:711:7
+    |
+711 | const TP_SK_KERNEL_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_streamk_f32(
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_TILE_CORE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:827:7
+    |
+827 | const TP_SK_TILE_CORE: &str = r#"            int tid = threadIdx.x;
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_KERNEL_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:965:7
+    |
+965 | const TP_SK_KERNEL_SUFFIX: &str = "        }\n    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_FIXUP_BLOCK_THREADS` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:979:11
+    |
+979 | pub const TP_SK_FIXUP_BLOCK_THREADS: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_FIXUP_KERNEL` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1036:7
+     |
+1036 | const TP_SK_FIXUP_KERNEL: &str = r#"
+     |       ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_streamk_source` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1105:4
+     |
+1105 | fn render_streamk_source(stages: u32) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_streamk_f32_source` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1120:8
+     |
+1120 | pub fn tiled_pipeline_streamk_f32_source() -> &'static str {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_STREAMK_F32_SOURCE` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1124:8
+     |
+1124 | static TILED_PIPELINE_STREAMK_F32_SOURCE: LazyLock<String> =
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_streamk_f32_source_with_stages` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1130:8
+     |
+1130 | pub fn tiled_pipeline_streamk_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:320:8
+    |
+320 | pub fn tiled_pipeline_128x64_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:380:4
+    |
+380 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:399:8
+    |
+399 | pub fn tiled_pipeline_128x64_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:403:8
+    |
+403 | static TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:411:8
+    |
+411 | pub fn tiled_pipeline_128x64_persistent_f32_source_with_stages(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:695:7
+    |
+695 | const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:763:7
+    |
+763 | const TP128_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Pinned` is never constructed
+   --> crates/backend-cuda/src/host_staging.rs:104:5
+    |
+ 88 | pub enum HostStagingKind {
+    |          --------------- variant in this enum
+...
+104 |     Pinned,
+    |     ^^^^^^
+    |
+    = note: `HostStagingKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `stats` is never used
+   --> crates/backend-cuda/src/host_staging.rs:250:19
+    |
+223 | impl HostStagingCache {
+    | --------------------- method in this implementation
+...
+250 |     pub(crate) fn stats(&self) -> HostStagingStats {
+    |                   ^^^^^
+
+warning: variant `Fresh` is never constructed
+   --> crates/backend-cuda/src/memory.rs:554:5
+    |
+550 | pub(crate) enum ReadbackDest {
+    |                 ------------ variant in this enum
+...
+554 |     Fresh,
+    |     ^^^^^
+    |
+    = note: `ReadbackDest` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:319:19
+    |
+299 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+319 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:715:19
+    |
+517 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+715 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 61 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.10s
+     Running `target/release/examples/gemm_transpose_route_ab_bench --phase1-only --env-info-out=docs/perf/logs/metal-gemm-transpose-route-ab-1242/1255-env_info_run2.txt`
+== env_guard(phase1) ==
+7:19  up 20 days, 18:31, 19 users, load averages: 6.51 6.06 5.54
+env_guard_mode=record_only
+env_guard_load_avg one=6.51 five=6.06 fifteen=5.54 max_1min=NA verdict=undetermined
+env_guard_uptime_secs=1794681 collected_at_unix_secs=1788905955
+env_guard_gpu status=available processes=92 flagged=none device_utilization_percent=53 verdict=undetermined note=record_only モードのため判定を行わない
+env_guard_overall verdict=undetermined attempts=1 max_attempts=1 total_wait_secs=0.00
+env_guard_attempt idx=1 waited_before_secs=0.00 load_avg_one=6.51 gpu_verdict=undetermined overall=undetermined
+env_guard_result=record_only attempts=1
+mode=phase1_only
+--- フェーズ 1: 安定性セルフチェック（対照カーネル: dispatch_auto）---
+size=256 spread=0.2603 (NG: gate 超過) round_tflops=[0.1493, 0.1906, 0.1659, 0.1478, 0.1463, 0.1940, 0.1450, 0.1788, 0.1478, 0.1733]
+phase1_round_stats size=256 rounds=10 spread=2.6033e-1 gate=5.0000e-2 within_gate=false median_secs=2.247080e-4 min_secs=1.729590e-4 min_round_idx=5 max_secs=2.314580e-4 max_round_idx=6 round_medians_secs=2.247080e-4,1.760420e-4,2.022080e-4,2.270000e-4,2.293330e-4,1.729590e-4,2.314580e-4,1.877080e-4,2.270830e-4,1.936670e-4
+size=512 spread=0.5003 (NG: gate 超過) round_tflops=[0.7440, 0.6950, 0.7009, 0.5320, 0.7042, 0.7046, 0.7068, 0.4859, 0.7051, 0.6542]
+phase1_round_stats size=512 rounds=10 spread=5.0033e-1 gate=5.0000e-2 within_gate=false median_secs=3.830000e-4 min_secs=3.607910e-4 min_round_idx=0 max_secs=5.524170e-4 max_round_idx=7 round_medians_secs=3.607910e-4,3.862500e-4,3.830000e-4,5.046250e-4,3.811670e-4,3.810000e-4,3.797920e-4,5.524170e-4,3.807080e-4,4.103340e-4
+size=1024 spread=0.7431 (NG: gate 超過) round_tflops=[1.0385, 1.0505, 1.8076, 1.8293, 1.8557, 1.8658, 1.2900, 1.7401, 1.8025, 1.3488]
+phase1_round_stats size=1024 rounds=10 spread=7.4306e-1 gate=5.0000e-2 within_gate=false median_secs=1.234083e-3 min_secs=1.150958e-3 min_round_idx=5 max_secs=2.067958e-3 max_round_idx=0 round_medians_secs=2.067958e-3,2.044250e-3,1.188042e-3,1.173917e-3,1.157250e-3,1.150958e-3,1.664750e-3,1.234083e-3,1.191416e-3,1.592167e-3
+size=2048 spread=0.2833 (NG: gate 超過) round_tflops=[3.2422, 3.3048, 2.6240, 3.3834, 3.3336, 3.3187, 3.3390, 3.3119, 3.3525, 3.2172]
+phase1_round_stats size=2048 rounds=10 spread=2.8330e-1 gate=5.0000e-2 within_gate=false median_secs=5.187292e-3 min_secs=5.077625e-3 min_round_idx=3 max_secs=6.547167e-3 max_round_idx=2 round_medians_secs=5.298875e-3,5.198500e-3,6.547167e-3,5.077625e-3,5.153500e-3,5.176667e-3,5.145167e-3,5.187292e-3,5.124458e-3,5.340000e-3
+size=4096 spread=0.0285 (OK) round_tflops=[4.8577, 4.8450, 4.8584, 4.8032, 4.9081, 4.8055, 4.9424, 4.8758, 4.9325, 4.8356]
+phase1_round_stats size=4096 rounds=10 spread=2.8479e-2 gate=5.0000e-2 within_gate=true median_secs=2.829317e-2 min_secs=2.780817e-2 min_round_idx=6 max_secs=2.861392e-2 max_round_idx=3 round_medians_secs=2.829317e-2,2.836746e-2,2.828892e-2,2.861392e-2,2.800258e-2,2.860008e-2,2.780817e-2,2.818821e-2,2.786421e-2,2.842229e-2
+phase1_summary sizes_measured=5 sizes_gate_exceeded=256,512,1024,2048 all_within_gate=false
+--- フェーズ 1 判定: 一部サイズが spread ≤0.05 相当を満たさなかった。フェーズ 2（A/B 判定）はスキップする（安全側判断: 判定不可のまま採否を確定しない）。
+verdict=not_evaluated (--phase1-only: フェーズ 2〈A/B 判定〉は未実行。#1249 の spread 分布記録用)

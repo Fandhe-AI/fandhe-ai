@@ -1,0 +1,8 @@
+2026-09-09T07:09:44+0900 orchestrator(#1255) start HIGH_LOAD_THRESHOLD=3.0 MID_LOAD_THRESHOLD=2.0 POLL_INTERVAL_SECS=30 MAX_WAIT_SECS=600 MAX_RUNS=5 TARGET_HIGH_RUNS=3
+2026-09-09T07:10:14+0900 wait phase result=HIGH_CONFIRMED elapsed=30s
+run1 rc=0 run_valid=1 round_stats_count=5 load_class=high median_load1=5.645 sample_count=18 load_error_count=0
+run2 rc=0 run_valid=1 round_stats_count=5 load_class=mid median_load1=2.645 sample_count=18 load_error_count=0
+run3 rc=0 run_valid=1 round_stats_count=5 load_class=low median_load1=1.815 sample_count=18 load_error_count=0
+run4 rc=0 run_valid=1 round_stats_count=5 load_class=low median_load1=1.98 sample_count=18 load_error_count=0
+run5 rc=0 run_valid=1 round_stats_count=5 load_class=low median_load1=1.895 sample_count=18 load_error_count=0
+2026-09-09T07:55:17+0900 orchestrator(#1255) done runs_executed=5 valid_runs=5 high_runs=1/3
