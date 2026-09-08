@@ -405,7 +405,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // 避けるため elapsed 取得後に実行する）。反復間の worst-case を
         // 保持し、途中反復の破損（要素の入れ替わり等、checksum では
         // 見逃しうる破損）も見逃さない。
-        let stats = reference.verify(&out)?;
+        let stats = reference.verify_strict(&out)?;
         *parity = Some(match parity.take() {
             Some(prev) => prev.worst(stats),
             None => stats,
@@ -498,7 +498,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     validate_gemm_checksum(checksum)?;
     // イシュー #970: init 計測分の要素単位検証は init_s の外（elapsed 取得後）
     // で行う。以後の反復と worst-case で集約する。
-    let mut parity = reference.verify(&out0)?;
+    let mut parity = reference.verify_strict(&out0)?;
 
     // 残り warmup（1 回は init 計測内で消費済み）+ 計測本体。同一 tape・同一
     // 葉 Var を使い回し、matmul のみを繰り返す。
@@ -509,7 +509,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         checksum = out.iter().map(|&x| x as f64).sum();
         let elapsed = start.elapsed();
         validate_gemm_checksum(checksum)?;
-        parity = parity.worst(reference.verify(&out)?);
+        parity = parity.worst(reference.verify_strict(&out)?);
         Ok(elapsed)
     };
     for _ in 0..WARMUP_ITERS.saturating_sub(1) {
@@ -596,7 +596,7 @@ fn run_gemm_device_checksum(
         "MEASURE_ERROR: matmul_checksum(WithOutput).output.as_slice() returned None \
          (issue #1339)",
     )?;
-    let parity = reference.verify(out)?;
+    let parity = reference.verify_strict(out)?;
     if tail.checksum.to_bits() != checksum.to_bits() {
         return Err(format!(
             "MEASURE_ERROR: tail matmul_checksum ({}) is not bit-identical to the last timed \
@@ -677,7 +677,7 @@ fn run_gemm_reuse_device_checksum(
         "MEASURE_ERROR: matmul_checksum(WithOutput).output.as_slice() returned None \
          (issue #1339)",
     )?;
-    let parity = reference.verify(out)?;
+    let parity = reference.verify_strict(out)?;
     if tail.checksum.to_bits() != checksum.to_bits() {
         return Err(format!(
             "MEASURE_ERROR: tail matmul_checksum ({}) is not bit-identical to the last timed \
@@ -751,7 +751,7 @@ fn measure_gemm_reuse_phases(
     let mut checksum: f64 = out0.iter().map(|&x| x as f64).sum();
     let init_s = init_start.elapsed().as_secs_f64();
     validate_gemm_checksum(checksum)?;
-    let mut parity = reference.verify(&out0)?;
+    let mut parity = reference.verify_strict(&out0)?;
 
     let mut phases = PhaseSamples::new();
     // 1 回は init 計測内で消費済み（`run_gemm_reuse` と同じ warmup 消費
@@ -815,7 +815,7 @@ fn measure_gemm_reuse_phases(
         phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
 
         validate_gemm_checksum(checksum)?;
-        parity = parity.worst(reference.verify(&out)?);
+        parity = parity.worst(reference.verify_strict(&out)?);
     }
 
     Ok((phases, checksum, init_s, parity))
@@ -3242,5 +3242,75 @@ mod tests {
                 "content={content}"
             );
         }
+    }
+    // --- ハーネス限定のスケール付き絶対誤差救済項（イシュー #1247）:
+    // fandhe-ai 側 GEMM は本救済項なしに 0 fail のままであることを固定
+    // し、`bench-common::parity` 側の第 3 項が本体の回帰を隠す経路を
+    // 遮断する（`docs/candle-parity-tolerance-contract-decision.md` §6
+    // 「fandhe-ai 側 0 fail 不変」の根拠を実装で固定）。 ---------------
+
+    /// N ∈ {64, 256, 512, 2048} の CPU GEMM は、`GemmReference::verify`
+    /// が使う `ScaledAbsTolerance`（実ベンチ入力由来）による救済に依存
+    /// せず、既存 2 条件のみで 0 fail であることを固定する（受け入れ条件
+    /// (b)）。N=2048 は candle 比較で判定不能になる形状（#1184）だが、
+    /// fandhe-ai 自身の CPU 参照比較では引き続き 0 fail のままである
+    /// ことがここでの主張。
+    #[test]
+    fn gemm_cpu_parity_zero_fail_without_scaled_rescue() {
+        for n in [64usize, 256, 512, 2048] {
+            let (a_data, b_data) = gemm_inputs(n).expect("gemm_inputs");
+            let a_host = a_data
+                .contiguous()
+                .as_slice()
+                .expect("a_data as_slice")
+                .to_vec();
+            let b_host = b_data
+                .contiguous()
+                .as_slice()
+                .expect("b_data as_slice")
+                .to_vec();
+            let reference = GemmReference::compute(n, &a_host, &b_host).expect("compute");
+
+            let tape = make_tape("cpu").expect("make_tape(cpu)");
+            let a = tape.var(&a_data);
+            let b = tape.var(&b_data);
+            let c = a.matmul(&b).expect("matmul");
+            let out = readout_var(&c).expect("readout_var");
+
+            let stats = reference.verify(&out).expect("verify");
+            assert_eq!(stats.fail_count, 0, "n={n}: fail_count must be 0");
+            assert_eq!(
+                stats.scaled_abs_rescued, 0,
+                "n={n}: fandhe-ai 側 CPU GEMM はスケール付き絶対誤差救済に依存せず 0 fail のままである契約"
+            );
+
+            // `ScaledAbsTolerance::NONE`（既存 2 条件のみ）でも明示的に
+            // 0 fail であることを確認する（`GemmReference::verify` が
+            // 内部で使う `tol` に依存しない、独立した確認）。
+            let legacy = compare_elementwise(&out, reference.as_slice(), &ScaledAbsTolerance::NONE)
+                .expect("compare_elementwise (legacy)");
+            assert_eq!(legacy.fail_count, 0, "n={n}: legacy fail_count must be 0");
+        }
+    }
+
+    /// `run_gemm` が emit する JSONL に新設 2 キー（イシュー #1247）が
+    /// 含まれ、fandhe-ai 側 CPU GEMM では `parity_scaled_abs_rescued:0`
+    /// のまま（救済に依存しない）であることを、実際の CLI 経路
+    /// （`Record::to_json_line` 結線）で固定する。
+    #[test]
+    fn run_gemm_jsonl_contains_scaled_abs_keys_with_zero_rescue() {
+        let out = temp_out_path("gemm-scaled-abs-keys");
+        let cli = make_cli("gemm", "fresh", &out);
+        run_gemm(&cli).expect("run_gemm (cpu fresh, size=64) failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        let last = content.lines().next_back().expect("JSONL に行がない");
+
+        assert!(last.contains("\"parity_fail_count\":0"), "line={last}");
+        assert!(
+            last.contains("\"parity_scaled_abs_rescued\":0"),
+            "line={last}"
+        );
+        assert!(last.contains("\"parity_scaled_abs_bound\":"), "line={last}");
     }
 }

@@ -9,8 +9,8 @@ use std::time::Duration;
 
 pub mod parity;
 pub use parity::{
-    GemmReference, PARITY_ABS_TOL, PARITY_REL_TOL, ParityDumpConfig, ParityStats,
-    compare_elementwise, gemm_element_count,
+    F32_UNIT_ROUNDOFF, GemmReference, PARITY_ABS_TOL, PARITY_REL_TOL, PARITY_SCALED_ABS_COEFF,
+    ParityDumpConfig, ParityStats, ScaledAbsTolerance, compare_elementwise, gemm_element_count,
 };
 
 /// Typed error for the shared bench utilities. Bench binaries propagate this
@@ -354,12 +354,21 @@ impl Record<'_> {
             // として妥当でないため `null` にする。summarize.py 側はこれを
             // 「無効」（parity フィールドが存在するが値が不正）として扱う
             // （キー欠損＝旧形式・未検証とは区別する。イシュー #970）。
+            //
+            // `parity_scaled_abs_bound`／`parity_scaled_abs_rescued`
+            // はハーネス限定の第 3 救済項（[`ScaledAbsTolerance`]。
+            // イシュー #1247）の診断値を追加するのみで、既存 4 キーの
+            // 意味・書式・出現順は不変（`summarize.py`／
+            // `compare_gemm_gate.py` 側の消費〈判定不能条件の更新〉は
+            // 後続イシュー #1250 の範囲）。
             s.push_str(&format!(
-                ",\"parity_total\":{},\"parity_fail_count\":{},\"parity_max_abs_err\":{},\"parity_max_rel_err\":{}",
+                ",\"parity_total\":{},\"parity_fail_count\":{},\"parity_max_abs_err\":{},\"parity_max_rel_err\":{},\"parity_scaled_abs_bound\":{},\"parity_scaled_abs_rescued\":{}",
                 p.total,
                 p.fail_count,
                 fmt_f64_or_null(p.max_abs_err),
                 fmt_f64_or_null(p.max_rel_err),
+                fmt_f64_or_null(p.scaled_abs_bound),
+                p.scaled_abs_rescued,
             ));
         }
         if self.tf32 {
@@ -770,12 +779,52 @@ mod tests {
             fail_count: 0,
             max_abs_err: 1.234e-6,
             max_rel_err: 5.678e-7,
+            scaled_abs_bound: 0.0,
+            scaled_abs_rescued: 0,
         };
         let line = sample_record_with_parity(Some(stats)).to_json_line();
         assert!(line.contains("\"parity_total\":65536"));
         assert!(line.contains("\"parity_fail_count\":0"));
         assert!(line.contains("\"parity_max_abs_err\":1.234000e-6"));
         assert!(line.contains("\"parity_max_rel_err\":5.678000e-7"));
+    }
+
+    /// イシュー #1247: ハーネス限定の第 3 救済項（スケール付き絶対誤差。
+    /// [`ScaledAbsTolerance`]）の診断値 2 キーが JSONL へ追加のみされる
+    /// こと（既存 4 キーは非破壊）を固定する。`summarize.py`／
+    /// `compare_gemm_gate.py` 側の消費は後続イシュー #1250 の範囲。
+    #[test]
+    fn json_line_with_parity_includes_scaled_abs_keys() {
+        let stats = ParityStats {
+            total: 4_194_304,
+            fail_count: 0,
+            max_abs_err: 1.1e-5,
+            max_rel_err: 5.2e-3,
+            scaled_abs_bound: 1.52587890625e-5,
+            scaled_abs_rescued: 2,
+        };
+        let line = sample_record_with_parity(Some(stats)).to_json_line();
+        assert!(line.contains("\"parity_scaled_abs_bound\":1.525879e-5"));
+        assert!(line.contains("\"parity_scaled_abs_rescued\":2"));
+    }
+
+    /// `scaled_abs_bound` が非有限（[`ScaledAbsTolerance::from_inputs`] が
+    /// 非有限スケールを検出していた場合の診断センチネル）のとき、既存の
+    /// `max_abs_err`/`max_rel_err` と同じ `null` 変換規則が適用されること
+    /// を確認する。
+    #[test]
+    fn json_line_with_nonfinite_scaled_abs_bound_emits_null() {
+        let stats = ParityStats {
+            total: 4,
+            fail_count: 1,
+            max_abs_err: 1e-3,
+            max_rel_err: 1e-3,
+            scaled_abs_bound: f64::INFINITY,
+            scaled_abs_rescued: 0,
+        };
+        let line = sample_record_with_parity(Some(stats)).to_json_line();
+        assert!(line.contains("\"parity_scaled_abs_bound\":null"));
+        assert!(line.contains("\"parity_scaled_abs_rescued\":0"));
     }
 
     #[test]
@@ -785,6 +834,8 @@ mod tests {
             fail_count: 1,
             max_abs_err: f64::INFINITY,
             max_rel_err: f64::INFINITY,
+            scaled_abs_bound: 0.0,
+            scaled_abs_rescued: 0,
         };
         let line = sample_record_with_parity(Some(stats)).to_json_line();
         assert!(line.contains("\"parity_max_abs_err\":null"));
