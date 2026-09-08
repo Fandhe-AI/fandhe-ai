@@ -311,6 +311,46 @@ fn run_size_arm(n: usize, arm: ReadoutArm) {
     let a_dev = stream.clone_htod(&a).expect("H2D A upload must succeed");
     let b_dev = stream.clone_htod(&b).expect("H2D B upload must succeed");
 
+    // 腕間・プロセス分離実行間で共通に使う参照 checksum（#1442 レビュー
+    // 指摘対応）。計測ループ（warmup／測定とも）に含めない独立実行で
+    // 1 回だけ求める。`a`／`b` は `n` から決定的に生成されるため
+    // （`gen_square_ab` の seed が `n` 依存）、この参照値は「どの腕を
+    // どのプロセスで単体実行しても同じ入力に対する同じカーネル出力」
+    // という不変量に基づき、腕間の checksum 一致・非ゼロを独立に
+    // 検証できる基準になる（同一腕内の先頭値との比較だけでは、ある腕が
+    // 一貫してゼロ・誤値を返しても自己無矛盾のため検出できない、という
+    // 指摘への対応）。
+    let reference_checksum = {
+        let mut c_dev = allocator
+            .alloc_uninit_f32(numel)
+            .expect("pooled output buffer allocation must succeed (reference run)");
+        gemm.launch_tiled_f32_pooled(
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+            n as u32,
+            n as u32,
+            n as u32,
+            DiagTiledF32Kernel::Select,
+        )
+        .expect("launch_tiled_f32_pooled must succeed (reference run)");
+        stream
+            .synchronize()
+            .expect("stream synchronize (kernel completion wait) must succeed (reference run)");
+        let out = stream
+            .clone_dtoh(&c_dev.as_view())
+            .expect("D2H download must succeed (reference run)");
+        stream
+            .synchronize()
+            .expect("stream synchronize after D2H must succeed (reference run)");
+        drop(c_dev);
+        checksum_f64(&out)
+    };
+    assert!(
+        reference_checksum.is_finite() && reference_checksum != 0.0,
+        "reference checksum must be finite and non-zero (n={n}, arm={arm:?})"
+    );
+
     // `PretouchedReusedDest` 専用の事前タッチ済み再利用宛先（ループの
     // 外で 1 回だけ確保・全要素書き込み。§冒頭「4 腕の定義」参照）。
     let mut pretouched_dest = vec![0.0f32; numel];
@@ -355,19 +395,25 @@ fn run_size_arm(n: usize, arm: ReadoutArm) {
         checksums.push(s.checksum);
     }
 
-    // sanity: 全反復で有限・同一入力なら同一 checksum（大小関係への
-    // assert は行わない。gating しない方針参照）。
+    // sanity: 全反復で有限・非ゼロ・かつ計測外で独立に求めた
+    // `reference_checksum`（腕間で共通）と一致すること（大小関係への
+    // assert は行わない。gating しない方針参照）。同一腕内の先頭値との
+    // 比較のみでは、ある腕が一貫してゼロ・誤値を返しても自己無矛盾の
+    // ため検出できないため、腕間・プロセス分離実行間でも共通に働く
+    // 外部参照（`reference_checksum`）との比較へ統一する（#1442 レビュー
+    // 指摘対応）。
     assert!(
-        checksums.iter().all(|c| c.is_finite()),
-        "checksum must be finite (n={n}, arm={arm:?})"
+        checksums.iter().all(|c| c.is_finite() && *c != 0.0),
+        "checksum must be finite and non-zero (n={n}, arm={arm:?})"
     );
-    let first = checksums[0];
     assert!(
         checksums
             .iter()
-            .all(|&c| (c - first).abs() <= first.abs() * 1e-9 + 1e-6),
-        "checksum must be stable across iterations for a fixed seed (n={n}, arm={arm:?})"
+            .all(|&c| (c - reference_checksum).abs() <= reference_checksum.abs() * 1e-9 + 1e-6),
+        "checksum must match the arm-independent reference checksum \
+         (n={n}, arm={arm:?}, reference={reference_checksum})"
     );
+    let first = checksums[0];
 
     let total: f64 = [&d2h, &host_read].iter().map(|v| median_of(v).median).sum();
 
