@@ -1298,8 +1298,14 @@ off/on 分岐は **`bench-fandhe`（本ハーネス自身のソース。`main.rs
 再現するには **`bench-fandhe` を含むリポジトリ全体を feature 撤去前後の
 2 つの worktree としてチェックアウトし**、各 worktree の
 `scripts/bench/framework-compare/` からそれぞれ本スクリプトを実行する
-（`GEMM_GATE_PATCH_FACADE_PATH` は各 worktree 内の `crates/facade` を指す
-ことで、facade 側の変更が両腕の計測に影響しないよう揃える）:
+（`GEMM_GATE_PATCH_FACADE_PATH` は**両腕とも同一の固定 `crates/facade`
+ツリーを指す**ことで、facade 側の差分が比較に混入しないよう揃える。
+legacy/default 2 つの worktree はあくまで `bench-fandhe`〈本ハーネス自身の
+ソース〉を切り替えるためのものであり、facade 側は default worktree
+〈現行 HEAD〉の 1 本に固定して両腕で使い回す。イシュー #1438 codex-review
+指摘・PR #1452 P2: 旧手順は worktree ごとに `crates/facade` を別々に
+指しており、「facade 側の変更が計測へ影響しない」という比較保証が
+成立していなかった）:
 
 ```bash
 # 2 つの worktree を用意する（同一リポジトリの異なるコミットを同時
@@ -1308,15 +1314,17 @@ off/on 分岐は **`bench-fandhe`（本ハーネス自身のソース。`main.rs
 git worktree add /tmp/fandhe-ai-readout-legacy <feature 撤去前コミット sha>
 git worktree add /tmp/fandhe-ai-readout-default <feature 撤去後コミット sha（例: 現行 HEAD）>
 
-# legacy 腕（旧 to_tensor+to_vec 経路）
+# facade は default worktree（現行 HEAD）の 1 本に固定し、両腕で
+# 同一パスを使い回す（facade 側の変更が両腕の計測に影響しないよう揃える）
+FACADE_FIXED="$(cd /tmp/fandhe-ai-readout-default/crates/facade && pwd)"
+
+# legacy 腕（旧 to_tensor+to_vec 経路。bench-fandhe ソースのみ旧 worktree）
 cd /tmp/fandhe-ai-readout-legacy/scripts/bench/framework-compare
-FACADE_LEGACY="$(cd ../../../crates/facade && pwd)"
-GEMM_GATE_PATCH_FACADE_PATH="$FACADE_LEGACY" bash run_gemm_gate_cuda.sh head-<short sha>-readout-legacy
+GEMM_GATE_PATCH_FACADE_PATH="$FACADE_FIXED" bash run_gemm_gate_cuda.sh head-<short sha>-readout-legacy
 
 # default 腕（借用ビュー経路。#1438 で既定化）
 cd /tmp/fandhe-ai-readout-default/scripts/bench/framework-compare
-FACADE_DEFAULT="$(cd ../../../crates/facade && pwd)"
-GEMM_GATE_PATCH_FACADE_PATH="$FACADE_DEFAULT" bash run_gemm_gate_cuda.sh head-<short sha>-readout-default
+GEMM_GATE_PATCH_FACADE_PATH="$FACADE_FIXED" bash run_gemm_gate_cuda.sh head-<short sha>-readout-default
 
 # 出力（results/raw/ 配下）を比較用ディレクトリへ集約してから
 # fandhe-ai 行のみ抽出（cpu の thread-limit A/B と同じ手順。上記参照）
