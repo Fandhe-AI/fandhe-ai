@@ -475,6 +475,17 @@ GPU/build 系プロセス（自 run のプロセスツリーは除外）をポ�
 よう変更した（`phase1_run${n}_monitor.log` に記録）。修正後スクリプトは
 `docs/perf/logs/metal-gemm-transpose-route-ab-1242/orchestrate.sh`／
 `wait_gate.sh` を正とする。
+同 PR の codex-review 五度目の指摘（P2・2 件）で、(a) `aggregate.py` が
+常にスクリプト配置元からログを読むため `LOGDIR` を変更した再試行の
+出力先を集計できない点、(b) `orchestrate.sh` の実行中監視が反復冒頭の
+自プロセスツリーのスナップショットのみで除外判定しており、スナップ
+ショット後に自 `cargo` が起動した `rustc`／ベンチ本体を他セッションと
+誤判定して `breach=1` を固定しうる点を是正した。再利用時の入出力契約は
+`LOGDIR=<出力先> bash orchestrate.sh` → `LOGDIR=<同じ出力先> python3
+aggregate.py`（第 1 引数でも可。未指定時は両者ともスクリプト配置元）で
+揃え、監視ループは `is_self_descendant`（`ps -o ppid=` で祖先を辿る）
+による列挙時点の再確認を追加した（消滅済み PID は `vanished=[...]` と
+して記録のみ・breach 根拠にしない）。
 
 ### 結論（本イシューでの到達点）
 

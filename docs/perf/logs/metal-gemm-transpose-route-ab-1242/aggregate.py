@@ -50,14 +50,58 @@ PR #1459 codex-review 三度目・Cursor Bugbot 指摘の是正（イシュー #
 で 1 run を分類する。`valid_run_ids` は「ok」（監視記録あり・BREACH なし・
 rc=0・5 サイズ全計測済み）の run のみとし、それ以外は理由別に除外して
 表の直前に明示する。
+
+PR #1459 codex-review 五度目の指摘の是正（イシュー #1253・P2）: `orchestrate.sh`
+は環境変数 `LOGDIR` で出力先ディレクトリを本ディレクトリ以外へ変更した
+再試行に対応済みだが、本スクリプトは常にスクリプト配置元（`HERE`）から
+ログを読んでいたため、別ディレクトリに正常な計測を保存しても古い結果
+または「監視記録なし」が表示されていた。本版は集計対象ディレクトリを
+第 1 引数 → 環境変数 `LOGDIR` → `HERE`（既定）の優先順位で解決し
+（`resolve_logdir`）、`orchestrate.sh` と同じ `LOGDIR` 契約で入出力を揃える。
+使用例: `LOGDIR=/path/to/out python3 aggregate.py` または
+`python3 aggregate.py /path/to/out`（`orchestrate.sh` を同じ `LOGDIR` で
+実行した出力先を指定する）。指定ディレクトリが存在しない場合は
+`sys.exit(2)` で fail-closed に終了し、集計対象ディレクトリを出力冒頭に
+明示する。
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+
+def resolve_logdir(argv: list[str]) -> Path:
+    """集計対象ディレクトリを第 1 引数 → 環境変数 `LOGDIR` → `HERE` の順で
+    解決する（`orchestrate.sh` の `LOGDIR="${LOGDIR:-$SELF_DIR}"` と同じ既定
+    値・同じ環境変数名。PR #1459 codex-review 五度目の指摘の是正）。
+
+    存在しないディレクトリを黙って `HERE` へフォールバックすると、指定先
+    のログが無いことに気づかずに古い結果を集計してしまうため、fail-closed
+    に終了する。
+    """
+    if len(argv) > 2:
+        print(
+            f"使い方: {argv[0]} [LOGDIR]（または環境変数 LOGDIR）",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if len(argv) == 2:
+        raw = argv[1]
+    else:
+        raw = os.environ.get("LOGDIR") or str(HERE)
+    logdir = Path(raw).expanduser().resolve()
+    if not logdir.is_dir():
+        print(
+            f"エラー: 集計対象ディレクトリ '{logdir}' が存在しない"
+            "（orchestrate.sh と同じ LOGDIR を指定すること）",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return logdir
 SIZES = [256, 512, 1024, 2048, 4096]
 RUNS = [1, 2, 3]
 
@@ -212,16 +256,19 @@ def classify_run(
 
 
 def main() -> None:
+    # 集計対象は orchestrate.sh と同じ LOGDIR 契約で解決する（第 1 引数 →
+    # 環境変数 LOGDIR → HERE。PR #1459 codex-review 五度目の指摘の是正）。
+    logdir = resolve_logdir(sys.argv)
     runs_data: dict[int, dict[int, dict]] = {}
     loads_before: dict[int, str] = {}
     breach_status: dict[int, str] = {}
     exit_codes: dict[int, int | None] = {}
     run_class: dict[int, str] = {}
     for n in RUNS:
-        runs_data[n] = parse_run_log(HERE / f"phase1_run{n}.log")
-        loads_before[n] = parse_load_before(HERE / f"uptime_before_run{n}.txt")
-        breach_status[n] = parse_breach_status(HERE / f"phase1_run{n}_monitor.log")
-        exit_codes[n] = parse_exit_code(HERE / f"uptime_after_run{n}.txt")
+        runs_data[n] = parse_run_log(logdir / f"phase1_run{n}.log")
+        loads_before[n] = parse_load_before(logdir / f"uptime_before_run{n}.txt")
+        breach_status[n] = parse_breach_status(logdir / f"phase1_run{n}_monitor.log")
+        exit_codes[n] = parse_exit_code(logdir / f"uptime_after_run{n}.txt")
         run_class[n] = classify_run(
             breach_status[n], exit_codes[n], len(runs_data[n]), len(SIZES)
         )
@@ -246,6 +293,15 @@ def main() -> None:
     )
 
     lines: list[str] = []
+    # 表示はリポジトリルート相対（`HERE` の 4 階層上）にし、絶対パス
+    # （内部ホスト名・ユーザー名を含みうる）を集計出力へ残さない。
+    # リポジトリ外を指定した場合のみ絶対パスのまま表示する。
+    repo_root = HERE.parents[3]
+    try:
+        logdir_label = str(logdir.relative_to(repo_root))
+    except ValueError:
+        logdir_label = str(logdir)
+    lines.append(f"集計対象ディレクトリ（LOGDIR）: `{logdir_label}`\n")
     if excluded_breach_ids:
         excluded_label = "、".join(f"run{n}" for n in excluded_breach_ids)
         lines.append(

@@ -58,6 +58,27 @@
 # 起動失敗（空の標準出力）も「ゲート待ちの TIMEOUT」と誤記録されていた。
 # 本版は起動コマンドの終了コード（`GATE_RC`）を別途保持し、非 0（起動
 # 失敗）と `TIMEOUT`（正常起動した上でのゲート不成立）を区別して記録する。
+#
+# PR #1459 codex-review 五度目の指摘の是正（イシュー #1253・P2）:
+# 実行中監視ループは反復冒頭で自プロセスツリー（`self_pids`）をスナップ
+# ショットし、その後 `pgrep` で列挙した PID を同スナップショットと照合して
+# いた。スナップショット取得から `pgrep` 列挙までの間に自 `cargo` が
+# `rustc` やベンチ本体を新たに起動すると、その自子孫 PID はスナップ
+# ショットに無いため他セッションとして数えられ、1 回の誤検出で
+# `breach=1` が固定されて排他条件を満たす計測が無効化されうる（TOCTOU）。
+# 本版はスナップショット不一致の PID について `is_self_descendant`
+# （`ps -o ppid=` で祖先を辿り `BENCH_PID` に到達するかを列挙時点で確認）
+# を追加で適用し、自子孫と確定した PID を除外する。祖先を辿る途中で
+# 消滅した PID（列挙と照合の間に終了した短命プロセス）は他セッションとも
+# 自子孫とも確定できないため `vanished=[...]` として記録のみ行い
+# `other_count` へは加算しない（load average 条件は別途判定されるため、
+# 消滅済みプロセスを breach 根拠にはしない）。同型の照合箇所 2 箇所
+# （cargo/rustc/python3 用と `gemm_transpose_route_ab_bench` 用）を共通
+# 関数 `classify_pid` に集約し、判定規則の分散定義を避ける。
+# 集計側 `aggregate.py` も同指摘で `LOGDIR`（第 1 引数または環境変数）を
+# 参照するよう是正し、本スクリプトと入出力契約を揃えた
+# （`LOGDIR=/path/to/out bash orchestrate.sh` の後に
+# `LOGDIR=/path/to/out python3 aggregate.py`）。
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -114,6 +135,51 @@ self_pid_tree() {
   done
 }
 
+# is_self_descendant: 与えた PID の祖先を `ps -o ppid=` で辿り、root（自
+# run の BENCH_PID）に到達すれば 0（自子孫）、PID 1／0 まで到達しても root
+# に当たらなければ 1（他プロセス）、途中で PID が消滅して祖先を確定
+# できなければ 2（判定不能・消滅）を返す。self_pid_tree のスナップ
+# ショット取得後に自 cargo が起動した rustc／ベンチ本体を、列挙時点の
+# 祖先関係で改めて自子孫と判定するために使う（PR #1459 codex-review
+# 五度目の指摘の是正）。祖先の探索深さは異常な循環に備えて 64 で打ち切る。
+is_self_descendant() {
+  local pid="$1" root="$2" depth=0 ppid
+  while [ "$pid" -gt 1 ] && [ "$depth" -lt 64 ]; do
+    if [ "$pid" -eq "$root" ]; then
+      return 0
+    fi
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$ppid" ]; then
+      return 2
+    fi
+    pid="$ppid"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# classify_pid: 監視ループで列挙した 1 PID を「自子孫（除外）」「他プロ
+# セス（other_procs へ加算）」「消滅（vanished へ記録のみ）」へ分類する。
+# まず反復冒頭のスナップショット（self_pids）で高速に除外し、不一致の
+# PID のみ is_self_descendant で祖先関係を確認する（スナップショット後に
+# 起動した自子孫の誤検出を防ぐ）。結果は other_procs／other_count／
+# vanished_procs（呼び出し側のシェル変数）へ反映する。
+classify_pid() {
+  local name="$1" pid="$2"
+  case "$self_pids" in
+    *" $pid "*) return 0 ;;
+  esac
+  is_self_descendant "$pid" "$BENCH_PID"
+  case $? in
+    0) ;;
+    2) vanished_procs="${vanished_procs}${name}:${pid}," ;;
+    *)
+      other_procs="${other_procs}${name}:${pid},"
+      other_count=$((other_count + 1))
+      ;;
+  esac
+}
+
 valid_runs=0
 for n in 1 2 3; do
   {
@@ -149,37 +215,29 @@ for n in 1 2 3; do
     load1=$(printf '%s' "$load_line" | sed -E 's/.*load averages?:[[:space:]]*([0-9.]+).*/\1/')
     other_procs=""
     other_count=0
+    vanished_procs=""
     # Cursor Bugbot 指摘の是正（イシュー #1253・Medium）: `gemm_transpose_
     # route_ab_bench`（29 文字）は Darwin の comm が 15 文字までしか保持
     # しないため `pgrep -x`（comm 完全一致）では検出できない（wait_gate.sh
     # と同型の是正。同スクリプトのコメント参照）。当該バイナリのみ
     # `pgrep -f`（コマンドライン全体照合）で検出する。
+    # 各 PID の自子孫／他プロセス／消滅の分類は classify_pid（スナップ
+    # ショット照合 + 祖先関係の再確認）に集約する（PR #1459 codex-review
+    # 五度目の指摘の是正）。
     for name in cargo rustc python3; do
       for pid in $(pgrep -x "$name" 2>/dev/null); do
-        case "$self_pids" in
-          *" $pid "*) ;;
-          *)
-            other_procs="${other_procs}${name}:${pid},"
-            other_count=$((other_count + 1))
-            ;;
-        esac
+        classify_pid "$name" "$pid"
       done
     done
     for pid in $(pgrep -f '(^|/)gemm_transpose_route_ab_bench([[:space:]]|$)' 2>/dev/null); do
-      case "$self_pids" in
-        *" $pid "*) ;;
-        *)
-          other_procs="${other_procs}gemm_transpose_route_ab_bench:${pid},"
-          other_count=$((other_count + 1))
-          ;;
-      esac
+      classify_pid gemm_transpose_route_ab_bench "$pid"
     done
     load_ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" 'BEGIN{print (l<t)?1:0}')
     if [ "$load_ok" != "1" ] || [ "$other_count" -gt 0 ]; then
       breach=1
-      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] BREACH" >> "$MONITOR_LOG"
+      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] BREACH" >> "$MONITOR_LOG"
     else
-      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] ok" >> "$MONITOR_LOG"
+      echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] ok" >> "$MONITOR_LOG"
     fi
     sleep "$MONITOR_POLL_INTERVAL_SECS"
   done
