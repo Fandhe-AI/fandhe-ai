@@ -88,7 +88,6 @@ def main() -> None:
 
     lines: list[str] = []
     lines.append("### 表 A: run × size の spread・ゲート判定\n")
-    header = "| size | " + " | ".join(f"run{n} spread (gate={{gate}})" for n in RUNS) + " |"
     lines.append("| size | " + " | ".join(f"run{n} spread" for n in RUNS) + " | gate |")
     lines.append("|---|" + "---|" * (len(RUNS) + 1))
     for size in SIZES:

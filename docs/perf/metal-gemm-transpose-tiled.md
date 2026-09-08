@@ -250,6 +250,56 @@ gate（spread ≤0.05）を超過**した。実行中 30 秒間隔で `uptime` �
 `MetalGemm::dispatch_strided_tiled_prepared` は引き続き明示入口として
 利用可能であり、AC-4 は §4 の実機正確性実測のとおり満たされている。
 
+## 5.5 排他環境での phase 1 spread 分布記録（イシュー #1253）
+
+イシュー #1253 は §6（旧稿）の引き継ぎ事項「実行自体が spread へ与える影響の
+切り分け」に向けた前段として、`--phase1-only` モード（#1249/#1251）を
+排他環境（実行直前・実行中の load average < 2・他 GPU プロセスなし）で
+3 回実行し、サイズ別 spread・単発スパイクの有無を記録することを目的とする。
+`STABILITY_SPREAD_GATE` 等の判定閾値・統計量は変更していない。
+
+### attempt 1（TIMEOUT・valid_runs=0）
+
+2026-09-08 19:04〜22:04 JST の 3 時間、load average < 2 が 2 回連続で
+成立するまで待機を試みたが、最低でも load1 ≈ 3.3 台までしか下がらず、
+他セッションの `cargo`／`python3`／時折 `rustc` が常駐し続けたため
+ゲート不通過のまま TIMEOUT した（`docs/perf/logs/
+metal-gemm-transpose-route-ab-1242/wait_gate.log`・`orchestrate.log`）。
+phase1-only の実測は 1 回も実行できていない。
+
+### attempt 2（TIMEOUT・valid_runs=0。有限待機）
+
+attempt 1 が最大 3 時間の無限定待機で TIMEOUT したことを受け、attempt 2
+は本実装エージェントのセッション実行時間制約に合わせ待機上限を有限
+（`wait_gate.sh` の `MAX_WAIT_SECS=600`・実際の打ち切りは elapsed≈201s
+時点）に区切って再試行した。2026-09-09 00:58 JST に開始し、load average
+は 4.2〜12.6 台で推移して**一度も 2 未満へ近づく気配を示さず**、
+`gate_ok=0`（不成立）が続いた（`wait_gate_attempt2.log`）。他セッションの
+`cargo`／`rustc`／`python3` が attempt 1 と同様に検出され続けており、
+本 worktree 環境自体が複数イシューの並列実行を常時抱える構造であることを
+裏付けている。持続的な非収束トレンドを確認した時点で待機を打ち切り
+`TIMEOUT`（`DONE_TIMEOUT_ATTEMPT2`）として記録した——プログラム上の
+`MAX_WAIT_SECS` 到達を待たなかったが、判定条件・ゲート閾値そのものは
+変更していない（打ち切り理由は `orchestrate.log`・`wait_gate_attempt2.log`
+末尾に明記）。attempt 2 でも phase1-only の実測は 0 回のまま。
+
+### 結論（本イシューでの到達点）
+
+**排他環境（load average < 2・他 GPU プロセスなし）の確保に 2 回とも
+失敗し、phase1-only の実測（サイズ別 spread・単発スパイクの記録）は
+1 件も取得できていない。** 本イシューが動作した worktree 環境自体が、
+複数イシューの並列実行セッション（他 worktree の cargo ビルド・python3
+集計スクリプト）を常時抱える共有環境であり、attempt 1（3 時間待機）・
+attempt 2（有界待機）のいずれも load average が 2 未満へ収束しなかった。
+`STABILITY_SPREAD_GATE`・統計量は変更していない。
+
+実装計画の fail-closed 方針（#1187／#1284 の前例と同様）に従い、
+本ドキュメントでは AC1／AC2（3 回分の実測ログ・表化）を**未達のまま**
+記録する。ゲート閾値を緩めて排他条件を弱めることは行わない——排他環境
+での再試行は、他イシューの並列実行が実際に止まる時間帯（`docs/
+real-hardware-verification-env.md` の実機予約運用）を確保したうえで
+改めて行う必要がある。
+
 ## 6. 引き継ぎ事項
 
 - **`gemm_transpose_route_ab_bench.rs` によるフェーズ 2 A/B 本計測の
@@ -271,3 +321,10 @@ gate（spread ≤0.05）を超過**した。実行中 30 秒間隔で `uptime` �
 - `examples/gemm_transpose_tile_sweep.rs` の NT/TN/TT tiled 候補計測
   （タイル variant 別のスイープ。現状は classic strided 固定候補のみ）
   は引き続きスコープ外。
+- **排他環境での phase 1 spread 分布記録（§5.5・イシュー #1253）の再試行**:
+  2 回とも load average < 2 のゲートに到達できず TIMEOUT した。本 worktree
+  環境が複数イシューの並列実行セッションを常時抱える構造上の制約であり、
+  他イシューの並走が実際に止まる時間帯を確保しない限り再現性のある排他
+  計測は困難である。再試行時は `docs/perf/logs/
+  metal-gemm-transpose-route-ab-1242/orchestrate.sh`／`wait_gate.sh`
+  （ゲート閾値・待機ロジックとも変更不要）をそのまま再利用できる。

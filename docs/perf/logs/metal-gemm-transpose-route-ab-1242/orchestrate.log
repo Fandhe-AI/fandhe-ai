@@ -2,3 +2,7 @@
 2026-09-08T19:04:26+0900 attempt 1: waiting for gate (see wait_gate.log)
 2026-09-08T22:04:57+0900 attempt 1: gate result=TIMEOUT -> aborting (TIMEOUT)
 ORCHESTRATOR_RESULT=TIMEOUT valid_runs=0
+2026-09-09T00:58:08+0900 orchestrator attempt2 start
+2026-09-09T00:58:08+0900 attempt 2: waiting for gate (see wait_gate_attempt2.log)
+2026-09-09T01:02:10+0900 attempt 2: gate result=TIMEOUT (manual stop at elapsed=~201s of MAX_WAIT_SECS=600s; load average showed no convergence trend under session time constraint)
+ORCHESTRATOR_RESULT=TIMEOUT valid_runs=0 attempt=2

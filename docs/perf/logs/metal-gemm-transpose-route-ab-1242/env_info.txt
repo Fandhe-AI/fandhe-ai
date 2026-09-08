@@ -1,0 +1,38 @@
+イシュー #1253: 排他環境（load average < 2・他 GPU プロセスなし）での
+phase 1（安定性セルフチェック）3 回実行。ゲート閾値・統計量は変更していない
+（`STABILITY_SPREAD_GATE` は `crates/bench-harness/src/ab.rs` が単一真実源）。
+
+機種・OS: Apple M4 Max・macOS 26.6.2（`sw_vers`／`sysctl -n
+machdep.cpu.brand_string` 実測。内部ホスト名は含めない）
+
+ゲート条件（本イシュー固有。緩めていない）:
+- 実行直前・実行中の 1 分 load average < 2.0 が連続で成立（`wait_gate.sh`
+  の GATE_THRESHOLD=2.0。CONSEC_REQUIRED は既定 2・attempt 2 実行時は
+  やや厳しめの 3 を指定。いずれも「< 2」というゲート閾値自体は変更して
+  いない）
+- 他 GPU プロセスなし（簡易代理指標として cargo／rustc／python3 の有無を
+  `pgrep` で確認・記録。実際の GPU 使用有無は各 run 前後の `ps` 生ログで
+  人間が確認する前提）
+
+attempt 1（2026-09-08 19:04〜22:04 JST・最大 3 時間待機）:
+load average が最低でも 3.3 台までしか下がらず、他セッションの
+cargo／python3／rustc が終始検出され続けたため TIMEOUT（`wait_gate.log`・
+`orchestrate.log` 冒頭を参照）。phase1-only 実測 0 件。
+
+attempt 2（2026-09-09 00:58 JST 開始・有界待機。詳細は
+`wait_gate_attempt2.log`・`orchestrate.log` の attempt2 節を参照）:
+attempt 1 と同一の背景（本 worktree 環境自体が複数イシューの並列実行
+セッションを常時抱えているため、cargo／rustc／python3 が恒常的に稼働
+する共有環境）で再試行した。待機上限を `MAX_WAIT_SECS=600`（10 分）に
+区切ったが、load average が 4.2〜12.6 台で推移して収束の兆しが一度も
+なかったため、実装エージェントのセッション実行時間制約下で elapsed≈201s
+時点で待機を打ち切り TIMEOUT として記録した（プログラム上の
+MAX_WAIT_SECS 到達を待たなかった旨・打ち切り理由は
+`wait_gate_attempt2.log`・`orchestrate.log` 末尾に明記。ゲート閾値
+自体は変更していない）。`docs/perf/metal-gemm-transpose-tiled.md` §5.5
+が §1187／§1284 の前例（低負荷開始でも gate 超過・判定不可のまま
+undetermined として記録）に倣って結果を記録する方針を踏襲した。
+
+備考: 本エージェント自身（このセッション）も cargo/rustc を保有しない
+（Bash ツールで uptime／pgrep のみ実行）ため、procs= に現れる
+cargo/python3/rustc は他セッション由来である。
