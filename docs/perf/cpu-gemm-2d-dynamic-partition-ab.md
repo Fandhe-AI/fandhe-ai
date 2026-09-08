@@ -1,6 +1,6 @@
 # CPU GEMM `TwoDDynamic` vs `RowPanel` 両実機 A/B（1024/2048/4096）・採用ゲート判定（イシュー #1312）
 
-## 状態: 実機実測完了。判定は **undetermined**（M4 Max 専有ゲート未通過。DGX 単独では ADOPT しない規則。#1313 へ結線せず記録のみで引き継ぐ）。
+## 状態: 実機実測完了。判定は **undetermined**（M4 Max 専有ゲート未通過。DGX 単独では ADOPT しない規則。#1313 へ結線せず記録のみで引き継ぐ）。**#1313 で M4 Max 専有ゲート通過後の Phase 0 再計測を実施し、jpw=2・jpw=4 とも Tier 1 条件を充足したため ADOPT へ確定・本番結線済み**（「#1313 追記」節参照）。
 
 ## 位置づけ
 
@@ -277,6 +277,103 @@ run 1・run 3 はサイズ別（1024,2048 → 4096 を別プロセスで追加�
   N=1024/2048 でやや優勢・jpw=4 が N=4096 でやや優勢。M4 Max も同様の傾向）。再計測で ADOPT
   と判定された場合、既存の `TWO_D_JOBS_PER_WORKER`（#1311 導入時点の既定値 2）をそのまま
   採用するか、N=4096 での優位性を踏まえて jpw=4 を検討するかは #1313 の裁量とする
+
+## #1313 追記（Phase 0 再計測・ADOPT 確定・本番結線）
+
+### Phase 0: Apple M4 Max 専有ゲート付き再計測（2026-09-08）
+
+計画に基づき、M4 Max 専有ゲート（1 分 load average < 6.0 を 2 回連続・最大 30 分待機）を
+`setsid nohup` で切り離したオーケストレーションスクリプトで 1 回だけ試みた
+（`docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/m4max_orchestrate.sh`）。attempt=8（開始
+から約 8 分後）で load average 3.40 を記録しゲート **通過**（`gate-m4max.log`）。前提 2 件
+（`cargo test -p fandhe-ai-backend-cpu --lib gemm_blis --release` green・
+`gemm_blis_two_d_dynamic_matches_row_panel_bit_exact_large`〈`--ignored`〉pass）を確認後、
+`gemm_blis_two_d_dynamic_ab_1024_2048`／`_4096`（T=default=16）を実行した。
+
+| candidate | jobs_per_worker | N=1024 比 | N=2048 比 | N=4096 比 | ノイズガード（勝ち run） |
+|---|---|---|---|---|---|
+| TwoDDynamic | 2 | 1.2327 | 1.3088 | 1.0261 | 5/5・5/5・4/5 |
+| TwoDDynamic | 4 | 1.2261 | 1.3120 | 1.0917 | 5/5・5/5・5/5 |
+
+（`docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/aggregate.md` 参照）
+
+Tier 1 条件（本ファイル §「事前宣言ゲート」・#1312 の文言をそのまま転記した
+`docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/env_info.txt` を正とする）を機械的に適用:
+
+1. **条件 1**（N=1024/2048 で比 >=1.00・N=4096 で比 >=0.95）: jpw=2・jpw=4 とも **充足**
+2. **条件 2**（単一固定 jpw が両実機で条件 1 を充足）: DGX（#1312）は jpw=2・jpw=4 とも
+   全形状で `RowPanel` を上回り条件 1 を満たす。M4 Max（本計測）も jpw=2・jpw=4 とも条件 1
+   を満たす。よって**両実機で条件 2 が jpw=2・jpw=4 の両方について成立**
+3. **条件 3**（ノイズガード。勝ち run >=3/5）: jpw=2 は N=4096 で 4/5・他は 5/5 で充足。
+   jpw=4 は全形状 5/5 で充足
+4. **条件 4**（中止条件。DGX N=1024・T=10）: #1312 で非発火を確認済み（再計測しない。本
+   ファイル §「#1313 への引き継ぎ」参照）
+5. **条件 5**（前提）: 両実機で充足（M4 Max は本計測・DGX は #1312）
+6. **条件 7**（M4 Max 専有性）: **通過**（本計測。#1312 とは異なり成立）
+
+**最終判定: ADOPT 確定**。既存の `TWO_D_JOBS_PER_WORKER`（#1311 導入時点の既定値 2）は
+jpw=2 が条件 1〜3 を単独で満たすため変更不要と判断し、そのまま採用した（計画「Phase 0 で
+jpw=2 が条件 1 を満たさず jpw=4 のみ満たす場合に限り 4 へ変更する」の分岐は非該当）。
+
+### 本番結線
+
+`crates/backend-cpu/src/gemm_blis/mod.rs` に単一 const ゲート
+`TWO_D_DYNAMIC_PRODUCTION_ENABLED = true` を追加し、`gemm_blis_parallel_with_transpose`
+（`gemm_blis_parallel`／`_nt`／`_tn` の共通実装本体）・`gemm_blis_bias_act_parallel` から
+`dispatch_two_d_dynamic` を呼ぶよう分岐した（`false` の場合は #1313 以前と同一の静的行
+パネル分割 `par_chunks_mut` へ戻る。`thread_limit::BIG_CORE_LIMIT_ENABLED` と同型の設計）。
+`partition` モジュール・`TwoDJob`／`split_c_into_jobs`／`run_two_d_job`／
+`gemm_blis_two_d_dynamic_region`／`dispatch_two_d_dynamic`（3 arch 版）／
+`TWO_D_JOBS_PER_WORKER` の `#[cfg(test)]` を解除し本番到達可能にした。`partition.rs` 内の
+`split_evenly`／`row_ranges_for_workers`（#753 の `gemm_blis_parallel_2d_with_blocks` 専用
+ヘルパー）は個別に `#[cfg(test)]` を付与し維持した。
+
+回帰テスト（`cargo test -p fandhe-ai-backend-cpu --lib`。289 件 pass・0 fail）・統合テスト
+（`gemm_blis_parity`・`gemm_epilogue_parity`・`gemm_transposed_parity`。既存の「本番入口
+`gemm_blis_parallel`／`gemm_blis_bias_act_parallel` vs `gemm_naive` bit 完全一致」回帰が
+`TwoDDynamic` 経路を自動的に検証する構成のため新規テスト追加は不要と判断した）・
+`cargo clippy -p fandhe-ai-backend-cpu --all-targets -- -D warnings`（0 error）・
+`cargo fmt --all -- --check`（差分なし）はすべて通過を確認した。
+
+### framework-compare gemm cpu before/after（両実機）
+
+`compare_gemm_ab.py --device cpu`（README「`compare_gemm_ab.py --device cpu`」節の手順。
+before = 結線前の origin/main HEAD `fddca17`〈`GEMM_GATE_PATCH_FACADE_PATH` 経由の path
+patch〉・after = 本ブランチ HEAD）を N=512/1024/2048 × fresh/reuse の全 6 セルで実行した。
+
+Apple M4 Max（`docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/framework-compare/compare_gemm_ab-m4max-1313.md`）:
+
+| size/mode | after/before | checksum | 判定 |
+|---|---|---|---|
+| 512/fresh | 0.8954 | 完全一致 | 非後退 |
+| 512/reuse | 0.8789 | 完全一致 | 非後退 |
+| 1024/fresh | 0.8792 | 完全一致 | 非後退 |
+| 1024/reuse | 0.8593 | 完全一致 | 非後退 |
+| 2048/fresh | 0.8575 | 完全一致 | 非後退 |
+| 2048/reuse | 0.8385 | 完全一致 | 非後退 |
+
+DGX Spark GB10（`docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/framework-compare/compare_gemm_ab-dgx-1313.md`）:
+
+| size/mode | after/before | checksum | 判定 |
+|---|---|---|---|
+| 512/fresh | 0.9643 | 完全一致 | 非後退 |
+| 512/reuse | 0.9003 | 完全一致 | 非後退 |
+| 1024/fresh | 0.8142 | 完全一致 | 非後退 |
+| 1024/reuse | 0.7603 | 完全一致 | 非後退 |
+| 2048/fresh | 0.6504 | 完全一致 | 非後退 |
+| 2048/reuse | 0.6015 | 完全一致 | 非後退 |
+
+両実機・全 12 セルが非後退（ratio 0.60〜0.96。すべて改善方向）・checksum 完全一致・
+`parity_fail_count=0` を確認した。決定規則（#1364 と同一。両実機・全判定可能 reuse セルで
+`ratio <= 1.05` かつ checksum 完全一致）を満たすため **ADOPT を確定**し、
+`TWO_D_DYNAMIC_PRODUCTION_ENABLED = true` を維持する（差し戻しは不要）。
+
+### 実行ログ
+
+`docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/`（Phase 0 の gate/uptime/aggregate・
+env_info）・`docs/perf/logs/cpu-gemm-2d-dynamic-wiring-1313/framework-compare/`
+（両実機の JSONL・manifest・compare 結果）。DGX 側は本イシュー専用の隔離ディレクトリ
+（`~/work/fc-1313/`）で作業し、計測後に削除した。内部ホスト名は記録していない。
 
 ## スコープ外
 

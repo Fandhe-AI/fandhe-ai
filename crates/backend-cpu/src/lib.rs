@@ -110,6 +110,16 @@
 //! （`thread_limit::BIG_CORE_LIMIT_ENABLED`）付きで結線した。性能上の
 //! 採否判断は #1364（両実機 framework-compare 前後比較）へ引き継ぐ
 //! （`docs/perf/cpu-gemm-default-thread-limit.md`）。
+//!
+//! イシュー #1313 で `gemm_blis` の並列化戦略を静的行パネル分割
+//! （`par_chunks_mut`）から (mc, nc) 2D job 動的分配（`GemmDriverVariant::
+//! TwoDDynamic`。イシュー #1311・#1312）へ、単一 const ゲート
+//! （`gemm_blis::TWO_D_DYNAMIC_PRODUCTION_ENABLED`）付きで結線した。
+//! Apple M4 Max 専有ゲート付き再計測で採用ゲート（対 `RowPanel` 比。DGX
+//! Spark GB10・Apple M4 Max 両実機）を満たしたことを確認し（`docs/perf/
+//! cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節）、framework-compare
+//! gemm cpu の before/after（両実機・全 12 セル非後退）で ADOPT を確定した
+//! （`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20）。
 
 mod device;
 mod elementwise;
