@@ -453,6 +453,67 @@ class ParityStatusTests(unittest.TestCase):
         self.assertIn(str(10**1000), reason)
 
 
+class ScaledAbsParityStatusTests(unittest.TestCase):
+    """`parity_status` の新 2 キー検証（イシュー #1250。承認済み契約
+    #1241）。新 2 キーがともに欠損の 4 キー行の挙動は `ParityStatusTests`
+    が非後退を担保するため、ここでは新契約経路のみを扱う。"""
+
+    def test_both_new_keys_present_zero_rescued_is_ok(self):
+        row = _with_parity(_base_row())
+        row["parity_scaled_abs_bound"] = 1.525879e-5
+        row["parity_scaled_abs_rescued"] = 0
+        self.assertEqual(summarize.parity_status(row), "ok")
+
+    def test_candle_rescued_is_ok(self):
+        row = _with_parity(_base_row(framework="candle"))
+        row["parity_scaled_abs_bound"] = 1.525879e-5
+        row["parity_scaled_abs_rescued"] = 2
+        self.assertEqual(summarize.parity_status(row), "ok")
+
+    def test_fandhe_ai_rescued_is_fail(self):
+        row = _with_parity(_base_row(framework="fandhe-ai"))
+        row["parity_scaled_abs_bound"] = 1.525879e-5
+        row["parity_scaled_abs_rescued"] = 1
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_bound_null_is_fail(self):
+        row = _with_parity(_base_row(framework="candle"))
+        row["parity_scaled_abs_bound"] = None
+        row["parity_scaled_abs_rescued"] = 0
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_partial_new_keys_missing_bound_is_fail(self):
+        row = _with_parity(_base_row(framework="candle"))
+        row["parity_scaled_abs_rescued"] = 0
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_partial_new_keys_missing_rescued_is_fail(self):
+        row = _with_parity(_base_row(framework="candle"))
+        row["parity_scaled_abs_bound"] = 1.525879e-5
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_rescued_positive_bound_below_abs_tol_is_fail(self):
+        row = _with_parity(_base_row(framework="candle"))
+        row["parity_scaled_abs_bound"] = 1e-6
+        row["parity_scaled_abs_rescued"] = 1
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_legacy_four_key_row_unaffected(self):
+        # 新 2 キーがともに欠損の 4 キー行は本関数の挙動が変わらない
+        # （後方互換。既存のコミット済み results/summary.md 再生成が
+        # 変わらないことの直接固定）。
+        row = _with_parity(_base_row(framework="candle"))
+        self.assertEqual(summarize.parity_status(row), "ok")
+
+    def test_parity_reason_includes_rescued_and_bound(self):
+        row = _with_parity(_base_row(framework="candle"), fail_count=2)
+        row["parity_scaled_abs_bound"] = 1.525879e-5
+        row["parity_scaled_abs_rescued"] = 1
+        reason = summarize._parity_reason(row)
+        self.assertIn("rescued=1", reason)
+        self.assertIn("bound=", reason)
+
+
 class SafeNumberOverflowTests(unittest.TestCase):
     """イシュー #959 codex-review 2 巡目 P0 指摘の回帰テスト。
 

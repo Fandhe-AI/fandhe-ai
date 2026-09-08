@@ -379,3 +379,20 @@ DGX N=2048（16 MiB）で 2.8〜3.0 ms・M4 Max で 79 µs という実機非対
 - `.claude/rules/coding-rust.md`（FMA 契約・数値一致複合判定）
 - `.claude/rules/security.md`（unsafe 導入の承認要件）
 - `docs/compat-api-scope.md` §0（`facade` の公開 API サポート境界）
+
+## §10 実装記録（#1299）
+
+案 1a（§3.C）を `zeroed_output`／`zeroed_output_with_threshold`
+（`crates/backend-cpu/src/ops.rs`）として実装し、`CpuBackendOps::gemm`
+へ結線した。Layer B 診断テストは §7 の (i) を採用（
+`gemm_reuse_phase_diag_tests.rs` の `alloc_c` 区間自体を新ヘルパーへ
+追従させた）。
+
+**本番既定は `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`
+（並列分岐を常に無効化）**。M4 Max スモーク実測（§7 の判定基準・
+5 run 符号一貫かつ相対 5% 超）で N=2048 の `ops_gemm` 合成区間が
+中央値約 29% 後退したため、設計時の暫定しきい値 `2 << 20` は本番では
+採用せず安全側（無効化）へ倒した。機構の推定・実測詳細・DGX 実測記入欄
+は `docs/perf/cpu-matmul-fixed-cost-impl.md` を参照。`unsafe`・
+`GemmDriverVariant` への追加はいずれも行っていない（§5.3・§6 のとおり）。
+DGX Spark GB10 実機実測（#1301）の結果次第でしきい値を差し替える。

@@ -1,0 +1,60 @@
+イシュー #1260 実行環境情報（内部ホスト名・machine-id・ユーザー名は含めない）
+
+## 実機
+- DGX Spark GB10（`docs/real-hardware-verification-env.md` の CUDA 実機ノード。内部ホスト名は `docs/real-hardware-verification-env.local.md` を参照〈Git 管理外〉）
+- GPU: NVIDIA GB10
+- driver: 580.173.02
+- OS: Linux aarch64
+- CUDA: 13.0.88（`nvcc` build cuda_13.0.r13.0/compiler.36424714_0）
+- rustc: 1.97.0 (2d8144b78 2026-07-07)
+
+## 転送元 sha（origin/main）
+- 9f4af172a0586384a45328d29555c1bd08297ee6（PR #1445 マージ後 HEAD。`bench-common::parity` の
+  第 3 救済項〈#1247〉・`compare_gemm_gate.py::_parity_check` の判定不能条件更新〈#1250〉を含む）
+- 承認済み契約: A-1（`c=0.5`。`docs/candle-parity-tolerance-contract-decision.md` §8。イシュー #1241 で承認）
+- crates.io 承認済みピン: `fandhe-ai =0.7.0`（更新なし。`run_gemm_gate.sh` は
+  `GEMM_GATE_PATCH_FACADE_PATH`・`GEMM_GATE_BENCH_FANDHE_FEATURES` いずれも未指定の**正式系列のみ**
+  で計測。参考系列は計測していない）
+
+## 計測前後のアイドル確認
+- 計測開始前: utilization.gpu 0%・load average 0.16/0.07/0.05
+  - 常駐サービス（ComfyUI・Kokoro）はプロセス在中だが 0% util（`docs/real-hardware-
+    verification-env.local.md` の空き判定基準に合致）
+- 計測完了後: utilization.gpu 0%・load average 3.54/1.86/0.78（直前に完了した
+  `bench-candle`（CUDA feature）の並列ビルドの残余負荷。計測対象プロセスの割り込みではない）
+- compute-apps は一貫して ComfyUI（`/opt/llm-infra/comfyui-env`）・Kokoro
+  （`/opt/llm-infra/venvs/kokoro`）のみ（計測対象プロセスの割り込みなし）
+
+## 実行順序・所要時間
+1. `run_gemm_gate_cuda.sh 0.7.0-1260`（registry ピン。既存キャッシュなしのためフルビルド。
+   `bench-fandhe`・`bench-candle`〈CUDA feature〉とも新規ビルド）
+   - 開始 2026-09-08T03:26 UTC（ビルド開始）/ 完了 2026-09-08T03:47 UTC（`recorded_at` は
+     manifest 記録時点の 03:46:56Z）
+- 系列は正式系列 1 本のみのため、系列間の `cargo` 挟み込み事故（#1166）は該当しない
+
+## manifest 突合（`fandhe_ai_source`／`bench_fandhe_features`）
+- `0.7.0-1260`: `fandhe_ai_source=registry`・`candle_core_source=registry`・
+  `bench_fandhe_features=""`（正式系列。`manifest-dgx-gemm-gate-0.7.0-1260.json`）
+- `skipped-dgx-gemm-gate-0.7.0-1260.log` は空・`results-dgx-gemm-gate-0.7.0-1260.jsonl` は
+  30 行（N=1024/2048/4096 × fandhe reuse／candle fresh × 5 run）
+
+## 転送・回収
+- rsync（`--exclude=.git --exclude=.codex/ --exclude=target --exclude=_/ --exclude='.env*'
+  --exclude=.claude/settings.local.json --exclude='.venv*' --exclude=real-hardware-
+  verification-env.local.md --exclude=gemm-gate-trusted-hosts.local`）で Mac → GB10 へ転送し、
+  `.rev-stamp` が転送元 sha（9f4af172a0586384a45328d29555c1bd08297ee6）と一致することを確認済み
+- 回収後、内部ホスト名（`docs/real-hardware-verification-env.local.md` 記載の実値）・
+  machine-id・ユーザー名・`/home/<user>` パターンで grep 走査し 0 件を確認してから本
+  ディレクトリへ配置（生データ・実行ログとも 0 件）
+- `scripts/bench/framework-compare/Cargo.lock`・`Cargo.toml` への path/patch 差し替えは行って
+  いない（正式系列のみのため `--config patch.crates-io.fandhe-ai.path=...` は不使用）
+
+## 判定結果の要点（詳細は `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §14）
+- N=2048 の candle 側は 5 run すべてで `parity_fail_count=0`・`parity_scaled_abs_rescued=2`・
+  `parity_scaled_abs_bound=1.525878e-05`（承認済み契約 A-1 の救済項により旧契約の `fail=2` が
+  解消）。`compare_gemm_gate.py` の判定は「判定不能」から確定判定（「未達（candle 救済 2 要素）」。
+  0.476 倍）へ遷移した
+- fandhe-ai 側は全 15 run（N=1024/2048/4096）で `parity_fail_count=0` かつ
+  `parity_scaled_abs_rescued=0`（`verify_strict` 経路。救済に依存していないことを確認）
+- `compare_gemm_gate.py` の終了コードは 3（N=1024/4096 が「未達」のまま残るため。仕様どおりで
+  失敗ではない）
