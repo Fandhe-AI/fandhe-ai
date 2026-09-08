@@ -247,6 +247,8 @@ forward-device-gpu.md`）。以下は引き続きスコープ外とし、
   相当の重み再構築コストを削減するのみで #1216 の中間活性化デバイス
   常駐効果は反映されていない（同ドキュメント §6）
 - candle との残差ギャップ全体の解消（親イシュー #1008 Phase 3 以降）
+- CPU `Var::matmul`（tape 経路）の固定費削減設計は
+  `docs/cpu-matmul-fixed-cost-design.md`（イシュー #1294）を参照
 
 ## §5 fail-closed 検証（REQ-8・OWASP A03）
 
