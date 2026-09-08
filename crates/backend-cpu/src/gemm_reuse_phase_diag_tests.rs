@@ -34,7 +34,7 @@
 //!
 //! | phase | 実体 | 対応する Layer A 区間 |
 //! | --- | --- | --- |
-//! | `alloc_c` | `vec![0.0f32; n*n]`（本番 `CpuBackendOps::gemm` と同じ確保） | `matmul` 内側 |
+//! | `alloc_c` | `zeroed_output(n*n)`（本番 `CpuBackendOps::gemm` と同じ確保。イシュー #1299 でしきい値以上の rayon 並列ゼロ書き込み分岐を追加したが、本番既定は `usize::MAX` で無効化のため実質は従来どおり逐次確保。M4 Max スモークで N=2048 の後退を確認したため。#1301 が DGX 実機実測で有効化可否を判断する） | `matmul` 内側 |
 //! | `kernel` | `gemm_blis_parallel(a, b, &mut c, n, n, n)`（本番 RowPanel・既定スレッド数） | `matmul` 内側 |
 //! | `tensor_wrap` | `Tensor::new(c, &[n, n])` | `matmul` 内側 |
 //! | `ops_gemm` | `CpuBackendOps::gemm` 呼び出し 1 回（alloc_c+kernel+tensor_wrap の本番合成。別試行として計測） | `matmul` − `ops_gemm` ≈ autodiff 残差 |
@@ -58,10 +58,23 @@
 //!   `keep_alive` への追加は不要。N=2048 で `wrapped`＋`ops_out` 計
 //!   2 個 × (20 warmup + 20 測定) × 16 MiB ≈ 1.3 GiB＋tape 側 40 個 ×
 //!   16 MiB ≈ 640 MiB。合計約 2 GiB オーダー）。
-//! - **calloc／first-touch の帰属**: `vec![0.0; n*n]` は大サイズでは
-//!   OS の遅延ゼロページ（mmap）に倒れうるため、初回書き込みの
-//!   page-fault コストは `alloc_c` ではなく `kernel`（実際に書き込む側）
-//!   に計上されうる。`alloc_c` を「確保コストの上限」と読まない。
+//! - **calloc／first-touch の帰属**: `zeroed_output` がしきい値未満の
+//!   `vec![0.0; n*n]` へ倒れる場合、大サイズでは OS の遅延ゼロページ
+//!   （mmap）に倒れうるため、初回書き込みの page-fault コストは
+//!   `alloc_c` ではなく `kernel`（実際に書き込む側）に計上されうる。
+//!   `alloc_c` を「確保コストの上限」と読まない。イシュー #1299 は
+//!   しきい値（`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`）以上で `alloc_c`
+//!   区間内に並列ゼロ書き込み（first-touch を複数スレッドへ分散）まで
+//!   前倒しする分岐を追加したが、**M4 Max スモーク実測で N=2048 の
+//!   `alloc_c` が逐次経路比 約 3〜22 倍・`ops_gemm` 合成が中央値約 29%
+//!   後退することを確認したため、本番既定は `usize::MAX`（無効化）**
+//!   （`docs/perf/cpu-matmul-fixed-cost-impl.md`）。macOS の
+//!   `vec![0.0f32; n*n]` は遅延ゼロページをそのまま返しフォールトが
+//!   `kernel` 側へ遅延される一方、並列書き込みは全ページのフォールトを
+//!   `alloc_c` 側へ前倒しするため、この機構では帰属の曖昧さは解消され
+//!   ず単にコストの計上区間が移動しただけだった。Linux（DGX Spark
+//!   GB10）の glibc heap 経路では §3.C の当初仮説（calloc の memset）が
+//!   依然成立しうるため、#1301 が DGX 実機実測で有効化可否を判断する。
 //! - `RAYON_NUM_THREADS` は既定のまま（`bench-fandhe` の gate プロトコル
 //!   と同一環境）。
 //!
@@ -88,7 +101,7 @@ use fandhe_ai_autodiff::Tape;
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 use crate::gemm_blis::gemm_blis_parallel;
-use crate::ops::CpuBackendOps;
+use crate::ops::{CpuBackendOps, zeroed_output};
 
 const WARMUP_TRIALS: usize = 20;
 const MEASURED_TRIALS: usize = 20;
@@ -159,9 +172,12 @@ fn measure_one_phase_trial(
 ) -> PhaseSample {
     let ops = CpuBackendOps::new();
 
-    // (1) alloc_c: 本番 `CpuBackendOps::gemm` と同じゼロ初期化確保。
+    // (1) alloc_c: 本番 `CpuBackendOps::gemm` と同じ出力確保
+    // （イシュー #1299 以降は `zeroed_output`。しきい値未満は従来どおり
+    // `vec![0.0f32; n*n]`、以上は rayon 並列ゼロ書き込みへ分岐する。
+    // この区間内で first-touch も含めて計時するのは変更前と同じ）。
     let t = Instant::now();
-    let mut c = vec![0.0f32; n * n];
+    let mut c = zeroed_output(n * n);
     let alloc_c_secs = t.elapsed().as_secs_f64();
 
     // (2) kernel: 本番 NN 経路のマイクロカーネル本体

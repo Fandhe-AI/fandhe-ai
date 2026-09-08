@@ -304,14 +304,18 @@ H2D A/B・alloc_c（プール経由）・launch_issue・kernel_wait・d2h、Meta
 #1189 の upload_a/b・alloc_c・encode・commit_wait・readback と対比）。
 CPU にはホスト⇄デバイス転送・ストリーム同期が存在しない（ホスト常駐の
 まま演算する）ため、`matmul` 区間は「Arc clone（`materialize_fallible`
-の実体化）」＋「C 確保（`vec![0.0f32; n*n]`）」＋「マイクロカーネル本体
+の実体化）」＋「C 確保（`zeroed_output(n*n)`。イシュー #1299 でしきい値
+以上の rayon 並列ゼロ書き込み分岐を追加したが、M4 Max スモーク実測で
+N=2048 が後退したため本番既定 `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS =
+usize::MAX` により無効化。#1301 が DGX 実機実測で有効化可否を判断する）」
+＋「マイクロカーネル本体
 （`gemm_blis_parallel`）」＋「`Tensor::new` によるラップ」＋「autodiff
 ノード push（`push_eager`）」の合成である:
 
 | Layer A `matmul` の内訳 | CPU 実体 | 対応する Layer B 区間（`crates/backend-cpu`） |
 | --- | --- | --- |
 | （H2D 相当なし。値渡しではなく `Arc` 共有） | `Var::matmul` 冒頭の `materialize_fallible(..).clone()`（A・B 各 1 回） | 計測対象外（診断側では呼び出し元でループ外に 1 回だけ `contiguous().as_slice()` した結果を渡し、`kernel` 計時窓から除外する） |
-| C 確保 | `vec![0.0f32; n*n]` | `alloc_c` |
+| C 確保 | `zeroed_output(n*n)`（#1299） | `alloc_c` |
 | カーネル実行 | `gemm_blis_parallel`（本番 NN 経路。RowPanel・既定スレッド数） | `kernel` |
 | （D2H 相当なし） | `Tensor::new(out, &out_shape)` | `tensor_wrap` |
 | （同期相当なし） | `push_eager`（tape ノード追加） | `tape_matmul` − `ops_gemm` の残差（autodiff オーバーヘッドの近似） |
@@ -348,10 +352,18 @@ cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
   のみを保持しアロケータのページ再利用でコストが消える乖離を避け、
   readout コピーは保持しない（`tape_matmul` パスの出力は tape 自身が
   内部で保持するため追加の保持は不要）。
-- **calloc／first-touch の帰属**: `vec![0.0; n*n]` は大サイズでは OS の
-  遅延ゼロページに倒れうるため、初回書き込みの page-fault コストは
-  `alloc_c` ではなく `kernel`（実際に書き込む側）に計上されうる。
-  `alloc_c` を「確保コストの上限」と読まない。
+- **calloc／first-touch の帰属**: `zeroed_output` は本番既定
+  （`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`）では常に
+  `vec![0.0; n*n]` へ倒れるため、大サイズでは OS の遅延ゼロページに
+  倒れうるため、初回書き込みの page-fault コストは `alloc_c` ではなく
+  `kernel`（実際に書き込む側）に計上されうる。`alloc_c` を「確保コスト
+  の上限」と読まない。**イシュー #1299** はしきい値以上で `alloc_c`
+  区間内に並列ゼロ書き込み（first-touch を複数スレッドへ前倒しで
+  分散）する分岐を追加したが、M4 Max スモーク実測で N=2048 の
+  `alloc_c` が約 3〜22 倍・`ops_gemm` 合成が中央値約 29% 後退することを
+  確認したため無効化した（`docs/perf/cpu-matmul-fixed-cost-impl.md`）。
+  Linux（DGX Spark GB10）では帰属の曖昧さが解消される可能性が残るため
+  #1301 が実機実測で有効化可否を判断する。
 
 **突合前提**（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` への
 転記時に明記する）: Layer A（`gemm --mode reuse --phases`）は
