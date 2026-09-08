@@ -410,7 +410,7 @@ effective_num_threads(...)`（イシュー #1363）へ差し替えているが�
 であり、上記のとおり `run_all*.sh`／`run_gemm_gate*.sh` の標準スイープ
 には組み込まない。
 
-#### 借用ビュー readout（既定経路。イシュー #1337・#1436・#1437・#1438）
+#### 借用ビュー readout（CPU/CUDA 既定経路・Metal は runtime legacy 維持。イシュー #1337・#1436・#1437・#1438・codex-review 指摘 PR #1452 P2）
 
 上記 `#1182` が確定した結論（`host_copy`〈`.to_vec()` の memcpy〉が
 `iter_total` の 25.6〜53.0%〈CUDA〉を占める＝ハーネス自身の診断コストが
@@ -420,7 +420,17 @@ candle 比未達の主因）を受け、`readout_var`（`to_tensor` + `host_copy
 `bench-fandhe` の cargo feature `host-view-readout`（既定 OFF）として導入
 したが、CUDA D2H 宛先未タッチによる N=1024/2048 の後退を `#1436` が診断し
 `#1437` が是正（`ReadbackDest::PretouchedFresh`）して全 N 非後退を確認した
-うえで、`#1438` が feature を撤去して **bench-fandhe の既定経路**とした。
+うえで、`#1438` が feature を撤去して **CPU/CUDA の既定経路**とした。
+
+**Metal は既定経路から除外する**: `docs/perf/metal-gemm-candle-gate-
+remeasurement.md` §13.5 が「負荷変動と readout 切替の効果が分離できて
+おらず、ADOPT 判定は暫定の参考結果に留める」と明記しているため、
+`readout_uses_borrowed_view`（`main.rs`。`device == "metal"` で `false`
+を返す runtime 分岐）が Metal 限定で legacy 経路（`to_tensor()` +
+`.to_vec()`）を維持する（§13.6 に実装記録・codex-review 指摘の詳細）。
+`host-view-readout` cargo feature を再導入するものではなく、CLI が渡す
+`device` 文字列 1 個を見る runtime 分岐に閉じている。Metal の ADOPT が
+確定したら `readout_uses_borrowed_view` を `true` 固定へ変更する。
 
 - **crates.io 公開版 `fandhe-ai =0.7.0` には該当 API が未収録**のため、
   ピン未更新の間は `managed-placement`（イシュー #1353）と同じ方式で
@@ -1432,23 +1442,57 @@ tag `v0.5.0` = `a5e465d`）へ更新した（#1011 ツリー）。**ピンはそ
 対応するピンのコミット（`=0.4.0`・`=0.5.0`）を別 worktree で checkout して
 計測する。
 
-**注（#1438 以降）**: crates.io ピン `fandhe-ai =0.7.0` には借用ビュー readout
-API が未収録のため、`GEMM_GATE_PATCH_FACADE_PATH`（`crates/facade` への絶対
-パス）を指定しない限り本スクリプトは `bench_fandhe_pin_guard.sh` により
-明示エラーで早期停止する（上記「使い方」節と同じ理由）。
+### 当時の再現例（2 worktree・patch なし。0.4.0/0.5.0 ピンでのみ再現する）
+
+以下は #1011 当時のコマンドをそのまま残したものであり、`before-0.4.0`
+（`fandhe-ai =0.4.0` ピン）・`after-0.5.0`（`fandhe-ai =0.5.0` ピン）が
+実際に別バージョンの registry 依存を解決していた前提に立つ。**現行ツリー
+（main）でこのまま実行しても再現しない**: 上記「前提」段落のとおり現行
+ピンは `=0.7.0` であり、`before`/`after` いずれの worktree も同じ現行ソース
+から同じピンを解決するため、ラベルが示す「都度同期あり／なし」の対比が
+崩れる。当時どおり再現するには、`before-0.4.0`/`after-0.5.0` のそれぞれに
+対応するピンのコミット（`=0.4.0`・`=0.5.0`）を別 worktree で checkout し、
+**各 worktree の `scripts/bench/framework-compare/` から**このコマンドを
+実行する（`crates/facade` への path patch は使わない。0.4.0/0.5.0 の
+時点では借用ビュー readout API が存在せず `bench_fandhe_pin_guard.sh` の
+早期エラーにも該当しないため不要）:
 
 ```bash
 cd scripts/bench/framework-compare
-# before（現行ピン。都度同期あり）を DGX Spark 実機で計測:
-GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
-  bash run_ab_train_cuda.sh before-0.4.0
-# ピン更新（別 PR・承認後）を適用したツリーで after を計測:
-GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
-  bash run_ab_train_cuda.sh after-0.5.0
+# before（0.4.0 ピンの worktree。都度同期あり）を DGX Spark 実機で計測:
+bash run_ab_train_cuda.sh before-0.4.0
+# after（0.5.0 ピンの worktree。都度同期なし）を計測:
+bash run_ab_train_cuda.sh after-0.5.0
 
 # before/after の 5 回計測中央値を比較（fresh/reuse 各 mode ごとに Markdown 表）:
 python3 compare_ab.py results/raw/results-dgx-ab-before-0.4.0.jsonl \
   results/raw/results-dgx-ab-after-0.5.0.jsonl
+echo $?   # 0: 判定完了（性能比較が成立） / 2: 判定不能（レコード不足・version 同一・checksum 不一致等）
+```
+
+### 現行 HEAD（ピン未更新中）での計測例
+
+現行ツリー（`fandhe-ai =0.7.0` ピン）で `run_ab_train_cuda.sh` を実行する
+場合は、上記の 2 worktree 再現とは別物として扱う。crates.io ピンには借用
+ビュー readout API が未収録のため、`GEMM_GATE_PATCH_FACADE_PATH`
+（`crates/facade` への絶対パス）を指定しない限り本スクリプトは
+`bench_fandhe_pin_guard.sh` により明示エラーで早期停止する（上記「使い方」
+節と同じ理由）。この構成では before/after 双方が同一 worktree・同一 patch
+先（現行 `crates/facade`）を使うため、**0.4.0 vs 0.5.0 の版数差分の再現には
+ならない**——`GEMM_GATE_PATCH_FACADE_PATH` はビルドを通すためだけの指定
+であり、ラベル（`before-<label>`/`after-<label>`）は任意の 2 回の計測を
+区別する名前に過ぎない点に注意する（例えば host-view-readout 既定化前後の
+比較など、当時と異なる対比軸で使う場合の実行例）:
+
+```bash
+cd scripts/bench/framework-compare
+GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
+  bash run_ab_train_cuda.sh before-<label>
+GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
+  bash run_ab_train_cuda.sh after-<label>
+
+python3 compare_ab.py results/raw/results-dgx-ab-before-<label>.jsonl \
+  results/raw/results-dgx-ab-after-<label>.jsonl
 echo $?   # 0: 判定完了（性能比較が成立） / 2: 判定不能（レコード不足・version 同一・checksum 不一致等）
 ```
 

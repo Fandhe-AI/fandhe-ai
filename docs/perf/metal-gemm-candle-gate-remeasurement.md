@@ -437,3 +437,17 @@ before 腕（readout-off/legacy）がより高負荷帯・after 腕（readout-on
 有効な参考データとして保持するが、Metal の借用ビュー readout 既定化を無条件の ADOPT として
 断定はしない。runtime `Device::Metal` 限定の legacy フォールバックの要否も同様に再計測後の
 判断とする。正式判定（#1037 ゲート）は §11 のまま不変。
+
+### 13.6 runtime legacy フォールバックの実装（codex-review 指摘・PR #1452 P2）
+
+§13.5 で「要否は再計測後の判断」としていた `runtime Device::Metal` 限定の legacy
+フォールバックは、codex-review（PR #1452）が「未確定の経路が既定で使われている」と
+指摘したことを受け、再計測を待たず fail-closed に実装した（
+`scripts/bench/framework-compare/bench-fandhe/src/main.rs::readout_uses_borrowed_view`）。
+`device == "metal"` のときのみ `readout_var`／`checksum_var`／`checksum_tensor`／
+`measure_gemm_reuse_phases` のインライン展開が旧 legacy 経路（`to_tensor()` +
+`.to_vec()`）へ分岐し、CPU/CUDA は #1337/#1438 で確定した借用ビュー既定のまま変えない。
+#1438 が撤去したコンパイル時 cargo feature（`host-view-readout`）を再導入するもの
+ではなく、`device` 文字列 1 個を見る runtime 分岐に閉じている。Metal の ADOPT が
+確定した場合は `readout_uses_borrowed_view` を `true` 固定へ変更する 1 箇所の
+修正で本節の暫定判定と整合させられる。
