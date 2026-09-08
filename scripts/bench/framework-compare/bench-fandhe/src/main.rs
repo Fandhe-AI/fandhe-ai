@@ -3281,7 +3281,7 @@ mod tests {
             assert_eq!(stats.fail_count, 0, "n={n}: fail_count must be 0");
             assert_eq!(
                 stats.scaled_abs_rescued, 0,
-                "n={n}: fandhe-ai 側 CPU GEMM はスケール付き絶対誤差救済に                  依存せず 0 fail のままである契約"
+                "n={n}: fandhe-ai 側 CPU GEMM はスケール付き絶対誤差救済に依存せず 0 fail のままである契約"
             );
 
             // `ScaledAbsTolerance::NONE`（既存 2 条件のみ）でも明示的に
