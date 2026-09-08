@@ -6,8 +6,11 @@
 > 判定式（`compare`／`element_error`／`_parity_check`）・`BASELINES`・`docs/spec/`（正本 submodule）は
 > 本 draft の作成にあたって一切変更していない。
 >
-> **spec リポジトリへの実起票は、イシュー #1241 でのユーザー承認後に限る。** 承認前に
-> `gh issue create -R Fandhe-AI/fandhe-ai-spec` を実行しない（本エージェントは実行していない）。
+> **起票済み（2026-09-08）**: イシュー #1241 のユーザー承認（採否: 承認／A-1 `c=0.5`／ハーネス限定／
+> spec 起票: 可〈**(b) 形式**・(b-2) 含む〉／既存定数: 維持）を受け、本 draft §2 の提案 (b) を承認内容で
+> 確定した本文により Fandhe-AI/fandhe-ai-spec#64（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/64）として起票した。
+> 提案 (a)（本体判定式への OR 追加・(a-1)/(a-2)）は不採用のため起票本文には含めていない。
+> 確定した承認内容は `docs/candle-parity-tolerance-contract-decision.md` §8 を正とする。
 >
 > 先例: `docs/spec-proposal-req2-req8-revision.md`（#580／#996。限定救済項〈案 1′〉の既存 spec 提案 draft）・
 > `docs/cuda-tensor-core-parity-judgment-decision.md`（#1106 → spec PR #63 で反映済み）。
@@ -24,8 +27,12 @@
 ## 2. spec 側 issue の起票用本文（そのまま貼り付け可能な形式）
 
 以下は、#1241 でのユーザー承認後に `gh issue create -R Fandhe-AI/fandhe-ai-spec` へ
-そのまま渡せる形で用意した起票用本文である。係数値・採否は #1241 で確定した値へ
-起票時に差し替える（本 draft では未確定のためプレースホルダのまま残す）。
+そのまま渡せる形で用意した起票用本文である（draft 時点。係数値・採否のプレースホルダを含む）。
+
+**起票済み（2026-09-08・(b) 形式）**: Fandhe-AI/fandhe-ai-spec#64（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/64）。
+起票本文は下記案のうち提案 (b)（(b-1)+(b-2)）を #1241 承認内容（A-1 `c=0.5`・`u=2^-24`・ハーネス限定・
+既存定数維持）で確定したものであり、提案 (a) と「係数 2 案検討中」のプレースホルダは含めていない。
+下記の本文案は draft 時点の記録としてそのまま保持する。
 
 ---
 
@@ -239,7 +246,8 @@ OR 追加のみ。単調性により既存 pass 要素は pass のまま変わ�
 | (i) 最小緩和 | 0.5 | 1.526e-05 | 3.8e-06（1e-5 比 0.38 倍） | 3.05e-05（1e-5 比 3.05 倍） |
 | (ii) 2 倍余裕 | 1.0 | 3.052e-05 | 7.6e-06（1e-5 比 0.76 倍） | 6.10e-05（1e-5 比 6.10 倍） |
 
-いずれも未承認であり、#1241 の判断を待つ（本 draft では確定しない）。
+いずれも draft 時点では未承認であり、#1241 の判断を待った。**確定（2026-09-08）: #1241 で案 (i) `c=0.5` を承認**
+（決定記録 §8）。
 
 **代替案 B-2**（`t・ulp(Σ|ab|)`。決定記録 draft §5）: spec 側が案 1′（A-3 と同型の √K 形式）
 に対して指摘する「`S_A・S_B` はテンソル全体スケールであり要素ごとの局所性を失う」という
@@ -330,7 +338,8 @@ spec 側・ユーザー承認事項として明示的な問いとして記述す
 
 対象外事項:
 
-- spec リポジトリへの実起票（#1241 承認後に実施。本文書の作成では実行していない）
+- spec リポジトリへの実起票（draft 作成時点では未実施。#1241 承認後の 2026-09-08 に (b) 形式で
+  Fandhe-AI/fandhe-ai-spec#64 として起票済み）
 - tolerance 契約の実装・`BASELINES` 再測定・GB10 再計測（Phase 2: #1245／#1252／#1258）
 - 他形状・他シードでの候補判定の追加机上計算（#1237 §2.2 の外挿禁止方針）
 - burn/cpu（fail=5）の実値取得（実装リポ側で本イシューのスコープ外と明記済み）
@@ -338,7 +347,7 @@ spec 側・ユーザー承認事項として明示的な問いとして記述す
 ## 9. 関連ドキュメント
 
 - `docs/candle-parity-tolerance-contract-decision.md`（イシュー #1239。候補比較・推奨案・
-  ユーザー承認待ち事項の決定記録 draft）
+  ユーザー承認待ち事項の決定記録。#1241 承認を受け 2026-09-08 に確定版化・§8 に承認記録）
 - `docs/perf/candle-parity-tolerance-candidates.md`（イシュー #1237。候補 A/B の fail 数
   机上算出）
 - `docs/perf/candle-parity-tolerance-baseline-impact.md`（イシュー #1238。`BASELINES` への
