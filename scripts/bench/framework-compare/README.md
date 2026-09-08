@@ -688,7 +688,9 @@ contract-decision.md` §8（イシュー #1241 承認記録・2026-09-08）で�
   fandhe-ai 側の回帰を隠す経路にはならない
 - **実装済み（イシュー #1250）**: `summarize.py`/`compare_gemm_gate.py` の判定不能条件・理由出力への
   新キー反映（`parity_status`／`compare_gemm_gate.py::_parity_check` の詳細は「GEMM ゲート 5 回計測」
-  節を参照）。N=2048 の GB10 再計測・判定不能解消の確認はイシュー #1260/#1262
+  節を参照）。N=2048 の GB10 再計測・判定不能解消の確認はイシュー #1260/#1262（**CUDA は
+  #1260 で実測完了**: 確定判定〈未達・0.476 倍〉へ遷移。`docs/perf/cuda-gemm-candle-gate-
+  remeasurement.md` §14）
 
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 

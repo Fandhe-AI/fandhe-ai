@@ -376,3 +376,32 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   （CUDA N=1024/2048 の大幅後退・Metal の全形状後退・上記ソース差の未分離が未解決）
 - 生データ・実行ログ: `scripts/bench/framework-compare/results/raw/*head-1c298ff-readout-
   {off,on}*`・`docs/perf/logs/gemm-candle-gate-readout-1337/`
+
+### 8.9 #1260 追補（CUDA GEMM N=2048 ゲートを承認済み tolerance 契約下で再計測。§2 段階的下限表・§3 丸め規則は不変）
+
+- tolerance 契約変更（イシュー #1241・2026-09-08 承認・候補 A-1「係数 `c=0.5`」。
+  `docs/candle-parity-tolerance-contract-decision.md` §8）を Phase 2（#1247: `bench-common::
+  parity` へ第 3 救済項追加・#1250: `compare_gemm_gate.py::_parity_check` の判定不能条件更新）
+  で実装後、承認済みピン `fandhe-ai =0.7.0`（正式系列。参考系列は計測せず）のみで DGX Spark
+  GB10 の CUDA GEMM N=1024/2048/4096 reuse ゲートを再計測した（イシュー #1260）
+- **N=2048 の「判定不能」（§8.2 以来 §11/§12 まで一貫して観測されていた candle 側の決定的な
+  `parity_fail_count=2`）が解消**: candle 側 5 run すべてで `parity_fail_count=0`・
+  `parity_scaled_abs_rescued=2`・`parity_scaled_abs_bound=1.525878e-05` を実測し、机上評価
+  （`docs/perf/candle-parity-tolerance-candidates.md` §4）と一致した。fandhe-ai 側は全 15
+  run で `parity_fail_count=0` かつ `parity_scaled_abs_rescued=0`（救済に依存しない厳密ゼロ
+  fail が不変）
+- N=2048 は「判定不能」から確定判定（**未達・candle/fandhe = 0.476 倍**）へ遷移した。
+  N=1024（0.416 倍）・N=4096（0.919 倍）はいずれも未達のまま、§11/§12 との誤差範囲内で
+  再現（本 run はフルビルド直後の計測で分散がやや拡大）
+- **tolerance 定数・判定式・`docs/spec/`・本体 `assert_parity`／`ParityBaseline` はいずれも
+  変更していない**（#1254／#1256 は承認スコープ外〈ハーネス限定〉として NOT_PLANNED
+  クローズ済み）
+- #1031 は既に #1185（2026-09-06）でユーザー指示によりクローズ・後継ツリー #1234 が引き継ぎ
+  済みのため、本追補は #1234 配下のイシュー #1258（N=2048 判定不能の解消）の実測完了を記録
+  するものであり #1031 の再判定ではない
+- 出典・詳細な突合表・要素単位判定は `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §14
+  （イシュー #1260）、生データは
+  `scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-0.7.0-1260.jsonl`、
+  集計表は `scripts/bench/framework-compare/results/summary.md` 環境 12 節「5 回計測ゲート
+  判定（イシュー #1260）」を参照
+- CPU 側の同種再計測（イシュー #1262）は本追補の対象外（並走イシュー）
