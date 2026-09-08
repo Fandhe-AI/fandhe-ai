@@ -37,6 +37,18 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
+# PR #1452 codex-review P2 指摘（PRRT_kwDOTuUCJc6gKes-）: `run_all.sh`／
+# `run_ab_train_cuda.sh` には `bench_fandhe_pin_guard.sh` 共有のバックアップ・
+# 復元 EXIT trap（`bench_fandhe_setup_lock_restore_trap`）を導入済みだが、
+# 本スクリプトは未適用のまま残っていた。本スクリプトも `bench-fandhe` の
+# みに `CARGO_CONFIG_ARGS`（`GEMM_GATE_PATCH_FACADE_PATH` 経由の
+# invocation-only `--config patch.crates-io.fandhe-ai.path=...`）を付けて
+# `cargo build` するため、同じ理由（patch 解決過程で本 workspace の
+# `Cargo.lock`〈承認済みピン固定〉が書き換わったまま残る）でビルド中断・
+# 依存解決失敗時に patch 後のロックが残留しうる。`run_all.sh` と同一設計
+# （EXIT trap 経由で終了経路に依らず必ず復元する）で解消する。
+bench_fandhe_setup_lock_restore_trap
+
 run() { # run <binary> <task> <device> <size> [mode] [extra_flag]
   local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh} extra_flag=${6:-}
   echo "== $bin $task $device size=$size mode=$mode extra=${extra_flag:-none} =="
