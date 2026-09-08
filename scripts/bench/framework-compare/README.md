@@ -360,10 +360,21 @@ cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
   並走ビルド）下で N=2048 の `ops_gemm` 合成が中央値約 29% 後退したため
   一時的に無効化（`usize::MAX`）していたが、**イシュー #1301** が DGX
   Spark GB10・Apple M4 Max 両実機で低負荷条件下の 5 回独立プロセス
-  起動を計測した結果、DGX N=2048 の `alloc_c` が約 48% 削減・両実機の
-  `ops_gemm` 合成が非後退（一部改善）であることを確認し、本番既定を
-  `2 << 20` へ有効化した（`docs/perf/cpu-matmul-fixed-cost-impl.md`
-  §2・§6・`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19）。
+  起動を計測した結果、DGX N=2048 の `alloc_c` が約 48% 削減・`ops_gemm`
+  合成 0.9972 倍（非後退）を確認した。M4 Max は Layer B（本節の診断テスト
+  単体）の `ops_gemm` 合成が N=2048 で 1.0738 倍（約 7.4% 後退。
+  `layerB-m4max-off/on-run1〜5.log` 実測。`alloc_c` 単体は 0.0709→0.2110 ms
+  へ増加しており、この診断計測境界特有のオーバーヘッドが主因と見られる）
+  と後退したが、本番相当の計測境界である Layer A（`bench-fandhe gemm cpu
+  reuse`。診断用の保持・破棄ロジックを持たず本番 reuse 経路そのものを計測
+  する）の N=2048/reuse on/off 比は 0.9788（改善）で非後退であり、本番
+  既定を判断する事前宣言規則（`docs/perf/cpu-gemm-candle-gate-
+  remeasurement.md` §19.1）は Layer A を基準とするためこの乖離は採否
+  判断そのものには影響しない（同 doc §19 出典。Layer A/B 双方の生ログは
+  `docs/perf/logs/cpu-matmul-fixed-cost-1301/`）。この Layer A/B 間の
+  乖離を踏まえ、本番既定を `2 << 20` へ有効化した
+  （`docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6・
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19）。
   しきい値未満（N=1024 以下）は従来どおり `vec![0.0; n*n]`（OS の遅延
   ゼロページ）のままで、page-fault コストは `kernel` 側に計上されうる
   点は不変。

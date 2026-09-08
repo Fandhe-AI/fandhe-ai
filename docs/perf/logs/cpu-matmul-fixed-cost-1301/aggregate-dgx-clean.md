@@ -3,6 +3,19 @@
 off runs: ['layerB-dgx-off-run1.log', 'layerB-dgx-off-run2.log', 'layerB-dgx-off-run3.log', 'layerB-dgx-off-run4.log', 'layerB-dgx-off-run5.log']
 on runs: ['layerB-dgx-on-clean-run1.log', 'layerB-dgx-on-clean-run2.log', 'layerB-dgx-on-clean-run3.log', 'layerB-dgx-on-clean-run4.log', 'layerB-dgx-on-clean-run5.log']
 
+## N=512
+
+| phase | off median (of 5 run medians, ms) | off n | on median (ms) | on n | on/off 比 |
+|---|---|---|---|---|---|
+| alloc_c | 0.0089 | 5 | 0.0077 | 5 | 0.8652 |
+| kernel | 1.5221 | 5 | 1.3412 | 5 | 0.8812 |
+| tensor_wrap | 0.0019 | 5 | 0.0019 | 5 | 1.0000 |
+| ops_gemm | 1.7383 | 5 | 1.6805 | 5 | 0.9667 |
+| tape_matmul | 1.6863 | 5 | 1.6650 | 5 | 0.9874 |
+| to_tensor | 0.0001 | 5 | 0.0001 | 5 | 1.0000 |
+| host_copy | 0.3658 | 5 | 0.4023 | 5 | 1.0998 |
+| checksum | 0.1872 | 5 | 0.1870 | 5 | 0.9989 |
+
 ## N=1024
 
 | phase | off median (of 5 run medians, ms) | off n | on median (ms) | on n | on/off 比 |

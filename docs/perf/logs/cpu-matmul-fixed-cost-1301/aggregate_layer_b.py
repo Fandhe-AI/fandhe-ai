@@ -24,7 +24,15 @@ import sys
 LINE_RE = re.compile(
     r"^\s*(?P<phase>[A-Za-z_]+)(?:\s*\([^)]*\))?:\s*median=(?P<median>[0-9.]+)\s*ms"
 )
-SIZE_RE = re.compile(r"^\s*N=(?P<n>\d+)\s*\(median over")
+# N=512 の行のみ cargo test の出力接頭辞
+# （`test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_cpu ...   `）が
+# 先頭に付いた状態で出力される（N=1024/2048 は直前の N ブロック終端の後に
+# 素の `  N=1024 (median over ...):` で出力される）。`^\s*N=` に固定すると
+# N=512 の行がこの接頭辞と一致せず cur_n が設定されないまま alloc_c 等の
+# 後続行が捨てられ、N=512 が集計表から欠落する（イシュー #1301
+# codex-review 指摘）。行頭固定をやめ、行中のどこかに `N=<n> (median over`
+# が現れれば検出する `.search` へ切り替える。
+SIZE_RE = re.compile(r"N=(?P<n>\d+)\s*\(median over")
 
 PHASES = ["alloc_c", "kernel", "tensor_wrap", "ops_gemm", "tape_matmul", "to_tensor", "host_copy", "checksum"]
 
@@ -35,7 +43,7 @@ def parse_log(path: str) -> dict[int, dict[str, float]]:
     cur_n: int | None = None
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            m_size = SIZE_RE.match(line)
+            m_size = SIZE_RE.search(line)
             if m_size:
                 cur_n = int(m_size.group("n"))
                 out.setdefault(cur_n, {})
@@ -60,11 +68,48 @@ def aggregate(paths: list[str]) -> dict[int, dict[str, list[float]]]:
     return agg
 
 
+def validate_run_counts(
+    label: str, paths: list[str], expect_runs: int, agg: dict[int, dict[str, list[float]]]
+) -> list[str]:
+    """coding-rust.md「ベンチは 5 回計測の中央値」契約の機械検査。
+
+    `--off-glob`／`--on-glob` が拾ったファイル数が `expect_runs`（既定 5）と
+    一致すること（glob の書き方次第で on-clean 系列と汚染 run が混在した
+    り、想定より多い／少ないファイルを拾っても無検証で「5 run medians」と
+    銘打った表を出力してしまう問題を防ぐ。イシュー #1301 codex-review 指
+    摘）に加え、集計後の各 (N, phase) セルのサンプル数がファイル数と一致
+    すること（一部の run でパース失敗し欠損した場合の検出）を確認する。
+    違反があれば理由の一覧を返す（空リストなら問題なし）。
+    """
+    errors: list[str] = []
+    if len(paths) != expect_runs:
+        errors.append(
+            f"{label}: {len(paths)} 件のログが glob にマッチしたが "
+            f"expect_runs={expect_runs} と不一致（対象ファイル: {paths}）"
+        )
+    for n, phases in agg.items():
+        for phase in PHASES:
+            vals = phases.get(phase, [])
+            if len(vals) != len(paths):
+                errors.append(
+                    f"{label}: N={n} phase={phase} のサンプル数が {len(vals)} 件で"
+                    f" 読み込んだログ数 {len(paths)} 件と不一致"
+                    "（一部ログでパースに失敗した可能性）"
+                )
+    return errors
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--node", required=True)
     ap.add_argument("--off-glob", required=True)
     ap.add_argument("--on-glob", required=True)
+    ap.add_argument(
+        "--expect-runs",
+        type=int,
+        default=5,
+        help="each glob が拾うべきログ件数（coding-rust.md の 5 回計測契約。既定 5）",
+    )
     args = ap.parse_args()
 
     off_paths = sorted(glob.glob(args.off_glob))
@@ -75,6 +120,17 @@ def main() -> int:
 
     off_agg = aggregate(off_paths)
     on_agg = aggregate(on_paths)
+
+    # 5 回計測契約・パース欠損の検証（イシュー #1301 codex-review 指摘）。
+    # 違反時は「5 run medians」と称した表を無検証で出さず fail-closed で
+    # エラー終了する。
+    errors = validate_run_counts("off", off_paths, args.expect_runs, off_agg)
+    errors += validate_run_counts("on", on_paths, args.expect_runs, on_agg)
+    if errors:
+        print("ERROR: run 数・サンプル数の検証に失敗しました:", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        return 1
 
     print(f"# Layer B 集計（node={args.node}。イシュー #1301）\n")
     print(f"off runs: {off_paths}")
