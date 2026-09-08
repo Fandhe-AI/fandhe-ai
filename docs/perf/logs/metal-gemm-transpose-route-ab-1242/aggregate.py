@@ -25,6 +25,16 @@ run 実行中の排他条件違反（BREACH。load average 逸脱・他 GPU/buil
 「排他条件不成立」として全表から除外し、除外した run 数を明示する
 （`valid_run_ids`／`excluded_run_ids`。表 B の分母・表下の gate 成立回数
 の分母も除外後の run 数へ追従する）。
+
+PR #1459 codex-review 再指摘の是正（イシュー #1253・P2）: 上記の
+`parse_breach` は監視ログが存在しない・空の場合に `False`（BREACH では
+ない）を返すため、その run は `valid_run_ids` へ算入されてしまう。監視
+記録が存在しない run は「排他条件が成立していた」ことを一度も確認できて
+おらず、計測ログすら無い状態でも分母が増えてしまうのは誤り。本版は
+`parse_breach` を 3 値（"ok"／"breach"／"missing"）を返す
+`parse_breach_status` へ置き換え、`missing`（監視ログ不在・空）の run も
+`valid_run_ids` から除外したうえで、`breach` と区別して「監視記録なし・
+判定不能」として明示する（除外理由を混同させない）。
 """
 from __future__ import annotations
 
@@ -91,45 +101,74 @@ def parse_load_before(path: Path) -> str:
     return f"{m.group(1)} {m.group(2)} {m.group(3)}"
 
 
-def parse_breach(path: Path) -> bool:
-    """1 run の phase1_run{N}_monitor.log に BREACH 行が含まれるかを判定する。
+def parse_breach_status(path: Path) -> str:
+    """1 run の phase1_run{N}_monitor.log の監視結果を 3 値で判定する。
 
     `orchestrate.sh` は監視中に排他条件違反（load average 逸脱・他
     GPU/build 系プロセスの残存）を検出すると `... BREACH` 行を書き込み、
     その run を `valid_runs` から除外する（run 自体は最後まで実行し
     `phase1_run{N}.log` は残す）。本関数はその監視結果を読み、集計側で
-    同じ run を排他条件不成立として除外するために使う。ファイルが存在
-    しない場合（監視機構導入前のログ・監視 0 秒未満で終了した run 等）は
-    判定不能として非 BREACH 扱いにする（保守的に「除外しない」側へは倒
-    さず、コメントで判定不能である旨を残すに留める。監視ログが存在する
-    run のみを対象とする設計のため実運用ではほぼ発生しない）。
+    同じ run を排他条件不成立として除外するために使う。
+
+    戻り値:
+    - "breach": BREACH 行が 1 行でも存在する（排他条件違反を検出済み）。
+    - "missing": ファイルが存在しない、または存在するが空（1 行も監視
+      記録がない）。監視が一度も行われなかった、または監視ループが 1 度
+      も反復せず run が終了した等が該当し、排他条件が成立していたことを
+      一度も確認できていない「判定不能」の状態。
+      PR #1459 codex-review 再指摘の是正（イシュー #1253・P2）: 従来版は
+      この状態を「非 BREACH」（=有効）として `valid_run_ids` へ算入して
+      いたため、計測・監視の記録が一切ない run でも分母に含まれてしまっ
+      ていた。本版は "breach" と区別しつつも同じく除外対象とする。
+    - "ok": 監視記録が存在し、BREACH 行を含まない（排他条件成立を確認
+      できた）。
     """
     if not path.exists():
-        return False
-    return "BREACH" in path.read_text()
+        return "missing"
+    text = path.read_text()
+    if not text.strip():
+        return "missing"
+    if "BREACH" in text:
+        return "breach"
+    return "ok"
 
 
 def main() -> None:
     runs_data: dict[int, dict[int, dict]] = {}
     loads_before: dict[int, str] = {}
-    breached: dict[int, bool] = {}
+    breach_status: dict[int, str] = {}
     for n in RUNS:
         runs_data[n] = parse_run_log(HERE / f"phase1_run{n}.log")
         loads_before[n] = parse_load_before(HERE / f"uptime_before_run{n}.txt")
-        breached[n] = parse_breach(HERE / f"phase1_run{n}_monitor.log")
+        breach_status[n] = parse_breach_status(HERE / f"phase1_run{n}_monitor.log")
 
-    # BREACH が記録された run は「排他条件不成立」として全表（A/B/C）から
-    # 除外する。除外した run 番号は表出力の直前に明示する。
-    valid_run_ids = [n for n in RUNS if not breached[n]]
-    excluded_run_ids = [n for n in RUNS if breached[n]]
+    # BREACH が記録された run、および監視記録が存在しない／空の run（排他
+    # 条件成立を一度も確認できていない「判定不能」）はいずれも「排他条件
+    # 不成立」として全表（A/B/C）から除外する。除外した run 番号・理由は
+    # 表出力の直前に明示する（PR #1459 codex-review 再指摘の是正。
+    # イシュー #1253・P2。監視記録なしの run を有効な計測と同列に集計し
+    # ない）。
+    valid_run_ids = [n for n in RUNS if breach_status[n] == "ok"]
+    excluded_breach_ids = [n for n in RUNS if breach_status[n] == "breach"]
+    excluded_missing_ids = [n for n in RUNS if breach_status[n] == "missing"]
+    excluded_run_ids = sorted(excluded_breach_ids + excluded_missing_ids)
 
     lines: list[str] = []
-    if excluded_run_ids:
-        excluded_label = "、".join(f"run{n}" for n in excluded_run_ids)
+    if excluded_breach_ids:
+        excluded_label = "、".join(f"run{n}" for n in excluded_breach_ids)
         lines.append(
             f"**注意**: {excluded_label} は実行中に排他条件違反（BREACH。"
             "`phase1_run${n}_monitor.log` 参照）を検出したため、以下の表から"
             "除外した（排他条件不成立の計測を有効な計測と同列に集計しないため）。\n"
+        )
+    if excluded_missing_ids:
+        excluded_label = "、".join(f"run{n}" for n in excluded_missing_ids)
+        lines.append(
+            f"**注意**: {excluded_label} は `phase1_run${{n}}_monitor.log` が"
+            "存在しない、または空（監視記録が一度もない）ため、排他条件成立を"
+            "確認できない「判定不能」として以下の表から除外した"
+            "（BREACH とは区別する。計測・監視の記録が揃い正常完了を確認できた"
+            "run のみ有効とする）。\n"
         )
 
     lines.append("### 表 A: run × size の spread・ゲート判定\n")
@@ -165,8 +204,10 @@ def main() -> None:
         lines.append(
             f"| run{n} | {loads_before.get(n, 'N/A')} | {all_ok} | {ok_count}/{measured if measured else 5} |"
         )
-    for n in excluded_run_ids:
+    for n in excluded_breach_ids:
         lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（BREACH） | - |")
+    for n in excluded_missing_ids:
+        lines.append(f"| run{n} | {loads_before.get(n, 'N/A')} | EXCLUDED（監視記録なし・判定不能） | - |")
 
     lines.append("")
     lines.append(f"| size | gate 成立回数 (/{len(valid_run_ids)}) |")

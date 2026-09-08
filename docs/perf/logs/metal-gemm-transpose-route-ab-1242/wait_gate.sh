@@ -35,10 +35,20 @@
 # 持ち gemm_transpose_route_ab_bench も検出しているが本版は出力しない。
 # attempt 1 は load1 < 2.0 の行でも gate_ok=0 のため判定条件は未確定。
 # `docs/perf/metal-gemm-transpose-tiled.md` §5.6）。
+#
+# PR #1459 codex-review 再々指摘の是正（イシュー #1253・P1）: 排他計測契約
+# の閾値（GATE_THRESHOLD）を、待機フェーズ（本スクリプト）と実行中監視
+# フェーズ（orchestrate.sh）が別変数名（従来 orchestrate.sh 側は
+# MONITOR_GATE_THRESHOLD）で重複定義しており、片方だけ override すると
+# 両フェーズで異なる閾値になり得た。本版は `gate_common.sh`
+# （orchestrate.sh と共有する単一定義）を source して GATE_THRESHOLD を
+# 得る（変数名の重複定義を解消）。
 set -uo pipefail
 
 LOGDIR="${LOGDIR:?LOGDIR required}"
-GATE_THRESHOLD="${GATE_THRESHOLD:-2.0}"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=gate_common.sh
+source "$SELF_DIR/gate_common.sh"
 CONSEC_REQUIRED="${CONSEC_REQUIRED:-2}"
 MAX_WAIT_SECS="${MAX_WAIT_SECS:-600}"
 POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-30}"
@@ -57,15 +67,29 @@ while :; do
   load5=$(printf '%s' "$load_line" | sed -E 's/.*load averages?:[[:space:]]*[0-9.]+[[:space:]]+([0-9.]+).*/\1/')
   # GPU/build 系プロセス（cargo・rustc・python3、および対象バイナリ直接起動
   # gemm_transpose_route_ab_bench）を他セッション並走の代理指標として数える。
+  #
+  # PR #1459 Cursor Bugbot 指摘の是正（イシュー #1253・Medium）:
+  # `gemm_transpose_route_ab_bench`（29 文字）は Darwin の comm（プロセス名）
+  # 表示が 15 文字までしか保持しないため、`pgrep -x` の完全一致（comm 照合）
+  # では検出できない（他セッションが本バイナリを直接起動した場合に排他
+  # ゲートをすり抜けうる。attempt 1 で実際に競合が観測済み）。本版は当該
+  # バイナリのみ `pgrep -f`（コマンドライン全体照合）＋パス区切り／末尾を
+  # 固定した正規表現で検出し、comm の切り詰めに依存しない（cargo/rustc/
+  # python3 は元々 15 文字以内のため `-x` のままでよい）。
   procs=""
   proc_count=0
-  for name in cargo rustc python3 gemm_transpose_route_ab_bench; do
+  for name in cargo rustc python3; do
     cnt=$(pgrep -x "$name" 2>/dev/null | wc -l | tr -d ' ')
     if [ "$cnt" -gt 0 ]; then
       procs="${procs}${name},"
       proc_count=$((proc_count + cnt))
     fi
   done
+  bench_cnt=$(pgrep -f '(^|/)gemm_transpose_route_ab_bench([[:space:]]|$)' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$bench_cnt" -gt 0 ]; then
+    procs="${procs}gemm_transpose_route_ab_bench,"
+    proc_count=$((proc_count + bench_cnt))
+  fi
   # load1 とプロセス不在の両方を満たしたときのみ gate_ok=1
   # （プロセス条件を落とすと排他計測契約の片側しか検査しなくなる）。
   ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v p="$proc_count" 'BEGIN{print (l<t && p==0)?1:0}')

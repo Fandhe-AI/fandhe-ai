@@ -36,6 +36,15 @@
 #     monitor.log` の BREACH 有無）を必ず参照し、排他条件不成立の計測を
 #     有効な計測と同列に集計・表示しないようにする（`aggregate.py` 側の
 #     是正）。
+#
+# PR #1459 codex-review 再々指摘の是正（イシュー #1253・P1）: 待機フェーズ
+# （wait_gate.sh の GATE_THRESHOLD）と実行中監視フェーズ（本スクリプトの
+# 従来 MONITOR_GATE_THRESHOLD）が別名の変数として重複定義されており、
+# 例えば GATE_THRESHOLD=1.0 で再実行しても実行中監視は既定 2.0 のままに
+# なり得た（AGENTS.md の閾値分散定義禁止に反する）。本版は
+# `gate_common.sh`（wait_gate.sh と共有する単一定義）を source して
+# GATE_THRESHOLD を得て、実行中監視ループでもそのまま同名で使う
+# （MONITOR_GATE_THRESHOLD は廃止）。
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,10 +54,8 @@ LOGDIR="${LOGDIR:-$SELF_DIR}"
 ATTEMPT="${ATTEMPT:-2}"
 GATE_LOG="$LOGDIR/wait_gate_attempt${ATTEMPT}.log"
 
-# run 実行中監視の閾値。wait_gate.sh の既定（GATE_THRESHOLD=2.0・
-# POLL_INTERVAL_SECS=30）と同一値をここでも既定にし、緩めない
-# （排他計測契約はゲート待機フェーズと実行フェーズで同一閾値とする）。
-MONITOR_GATE_THRESHOLD="${MONITOR_GATE_THRESHOLD:-2.0}"
+# shellcheck source=gate_common.sh
+source "$SELF_DIR/gate_common.sh"
 MONITOR_POLL_INTERVAL_SECS="${MONITOR_POLL_INTERVAL_SECS:-30}"
 
 cd "$WORKDIR" || { echo "エラー: WORKDIR='$WORKDIR' への移動に失敗した" >&2; exit 1; }
@@ -56,7 +63,7 @@ cd "$WORKDIR" || { echo "エラー: WORKDIR='$WORKDIR' への移動に失敗し�
 echo "$(date +"%Y-%m-%dT%H:%M:%S%z") orchestrator attempt${ATTEMPT} start" >> "$LOGDIR/orchestrate.log"
 echo "$(date +"%Y-%m-%dT%H:%M:%S%z") attempt ${ATTEMPT}: waiting for gate (see $(basename "$GATE_LOG"))" >> "$LOGDIR/orchestrate.log"
 
-GATE_RESULT=$(LOGDIR="$LOGDIR" OUT="$GATE_LOG" bash "$LOGDIR/wait_gate.sh")
+GATE_RESULT=$(LOGDIR="$LOGDIR" OUT="$GATE_LOG" GATE_THRESHOLD="$GATE_THRESHOLD" bash "$LOGDIR/wait_gate.sh")
 
 echo "$(date +"%Y-%m-%dT%H:%M:%S%z") attempt ${ATTEMPT}: gate result=${GATE_RESULT}" >> "$LOGDIR/orchestrate.log"
 
@@ -85,7 +92,11 @@ for n in 1 2 3; do
     echo "=== run${n} pre-check $(date +"%Y-%m-%dT%H:%M:%S%z") ==="
     uptime
     echo "--- GPU/build 系プロセス（cargo/rustc/python3/gemm_transpose_route_ab_bench） ---"
-    ps -Ao pid,pcpu,comm | grep -E '(cargo|rustc|python3|gemm_transpose_route_ab_bench)$' | grep -v grep || echo "(none)"
+    # Cursor Bugbot 指摘の是正（イシュー #1253・Medium）: comm 列は Darwin で
+    # 15 文字に切り詰まるため gemm_transpose_route_ab_bench（29 文字）を
+    # 末尾一致で検出できない。診断用ログのため comm ではなく完全なコマンド
+    # ライン（command 列）を対象にする。
+    ps -Ao pid,pcpu,command | grep -E '(cargo|rustc|python3|gemm_transpose_route_ab_bench)' | grep -v grep || echo "(none)"
   } > "$LOGDIR/uptime_before_run${n}.txt"
 
   MONITOR_LOG="$LOGDIR/phase1_run${n}_monitor.log"
@@ -110,7 +121,12 @@ for n in 1 2 3; do
     load1=$(printf '%s' "$load_line" | sed -E 's/.*load averages?:[[:space:]]*([0-9.]+).*/\1/')
     other_procs=""
     other_count=0
-    for name in cargo rustc python3 gemm_transpose_route_ab_bench; do
+    # Cursor Bugbot 指摘の是正（イシュー #1253・Medium）: `gemm_transpose_
+    # route_ab_bench`（29 文字）は Darwin の comm が 15 文字までしか保持
+    # しないため `pgrep -x`（comm 完全一致）では検出できない（wait_gate.sh
+    # と同型の是正。同スクリプトのコメント参照）。当該バイナリのみ
+    # `pgrep -f`（コマンドライン全体照合）で検出する。
+    for name in cargo rustc python3; do
       for pid in $(pgrep -x "$name" 2>/dev/null); do
         case "$self_pids" in
           *" $pid "*) ;;
@@ -121,7 +137,16 @@ for n in 1 2 3; do
         esac
       done
     done
-    load_ok=$(awk -v l="$load1" -v t="$MONITOR_GATE_THRESHOLD" 'BEGIN{print (l<t)?1:0}')
+    for pid in $(pgrep -f '(^|/)gemm_transpose_route_ab_bench([[:space:]]|$)' 2>/dev/null); do
+      case "$self_pids" in
+        *" $pid "*) ;;
+        *)
+          other_procs="${other_procs}gemm_transpose_route_ab_bench:${pid},"
+          other_count=$((other_count + 1))
+          ;;
+      esac
+    done
+    load_ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" 'BEGIN{print (l<t)?1:0}')
     if [ "$load_ok" != "1" ] || [ "$other_count" -gt 0 ]; then
       breach=1
       echo "$ts load1=$load1 other_count=$other_count other_procs=[$other_procs] BREACH" >> "$MONITOR_LOG"
@@ -138,7 +163,8 @@ for n in 1 2 3; do
     echo "=== run${n} post-check $(date +"%Y-%m-%dT%H:%M:%S%z") rc=${RC} ==="
     uptime
     echo "--- GPU/build 系プロセス（cargo/rustc/python3/gemm_transpose_route_ab_bench） ---"
-    ps -Ao pid,pcpu,comm | grep -E '(cargo|rustc|python3|gemm_transpose_route_ab_bench)$' | grep -v grep || echo "(none)"
+    # 上記 uptime_before_run と同型の是正（comm 切り詰め対策・command 列使用）。
+    ps -Ao pid,pcpu,command | grep -E '(cargo|rustc|python3|gemm_transpose_route_ab_bench)' | grep -v grep || echo "(none)"
   } > "$LOGDIR/uptime_after_run${n}.txt"
 
   if [ "$RC" -eq 0 ] && [ "$breach" -eq 0 ]; then
