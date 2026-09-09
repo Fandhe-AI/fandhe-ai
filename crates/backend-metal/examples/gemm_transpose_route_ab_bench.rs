@@ -2770,10 +2770,14 @@ mod cli_and_round_stats_tests {
         assert!(iqr_pos < mad_pos);
     }
 
-    /// [`RoundExtrema`] が公開されている（別 example への複製を避けた設計
-    /// 判断）ことの回帰確認。イシュー #1484。
+    /// [`RoundExtrema`] の最小契約（`round_extrema` が非空スライスに対し
+    /// `min_secs` を正しく返す）の回帰確認。`RoundExtrema`／`round_extrema`
+    /// 自体は非公開のため、他の A/B example（`gemm_swizzle_ab_bench.rs` 等）
+    /// へは import できず verbatim で複製している（実行バイナリが分かれる
+    /// ため。`bench-harness` クレートへの共通化は #1484 のスコープ外）。
+    /// イシュー #1484。
     #[test]
-    fn round_extrema_type_is_reusable_from_other_examples() {
+    fn round_extrema_min_secs_from_non_empty_slice() {
         let extrema: RoundExtrema = round_extrema(&[1.0]).expect("非空スライスは Some を返すはず");
         assert_eq!(extrema.min_secs, 1.0);
     }
