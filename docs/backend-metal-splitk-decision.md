@@ -117,6 +117,10 @@ split-K の文脈でも変わらない。本ドキュメントは Case 1（非 N
    （`.claude/rules/out-of-scope-tracking.md`）。本ドキュメントは PR 本文で切り出しを提案するに
    留め、本 PR 自体では起票しない
 
+**追記（イシュー #1474）**: 上記 1〜4 の設計方針どおり opt-in で実装済み（`dispatch_auto` へは
+未結線）。実装記録は `docs/perf/metal-gemm-splitk-two-pass.md` を参照。性能 A/B・本番結線可否は
+それぞれ後続イシュー #1475／#1476 のスコープ。
+
 ## §3 採否判断
 
 `docs/perf/metal-gemm-splitk-shapes.md` §4「実測結果」・§6「採否判断」で確定した（イシュー #1308・

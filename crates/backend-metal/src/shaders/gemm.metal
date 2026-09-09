@@ -58,6 +58,26 @@ struct TileClassRegion {
     uint cols;
 };
 
+// split-K 2 パス GEMM（イシュー #1474。`docs/backend-metal-splitk-decision.md`
+// 「採用検討推奨」・#1308 実測を踏まえた opt-in 実装）: K 支配的で M/N が
+// 小さい形状（threadgroup 数が GPU コア数を大きく下回り並列度が枯渇する
+// 形状。`crate::tile::should_split_k` が判定）向けに、K を `partitions`
+// 個の区間へ分割してパーティションごとに部分和を書く（パス 1）＋
+// 固定順序で逐次縮約する（パス 2）2 段カーネルの共通パラメータ。
+// `SPLIT_K_ENABLED==0`（本番既定・classic 経路）のときも
+// `gemm_simdgroup_tiled` へ常にバインドする（`region` と同じ「未バインド
+// バッファ参照を作らない」契約。呼び出し元は
+// `crate::gemm::SplitKParams::disabled(dims.k)` 相当の
+// `{partitions:1, k_per_partition:dims.k}` を渡す）。
+// `crate::gemm::SplitKParams`（repr(C)）とレイアウトを一致させる
+// （4 × uint32 = 16 バイト。`crate::gemm` のレイアウト一致テスト参照）。
+struct SplitKParams {
+    uint partitions;
+    uint k_per_partition;
+    uint reserved0;
+    uint reserved1;
+};
+
 // === タイル化カーネル共通境界検査ヘルパ（イシュー #1038） ===
 //
 // `gemm_simdgroup_tiled`（f32・#188/#532/#538/#745）・
@@ -601,6 +621,7 @@ constant bool FRAG_LOAD_DEVICE_HOISTED = GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED;
 constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;
 constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;
 constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;
+constant bool SPLIT_K_ENABLED = GEMM_SPEC_SPLIT_K_ENABLED;
 #else
 constant uint BM [[function_constant(0)]];
 constant uint BN [[function_constant(1)]];
@@ -790,8 +811,25 @@ constant uint COOP_LOAD_LAYOUT [[function_constant(14)]];
 // の直後、15（本ファイル内で未使用の最小 index。`docs/perf/
 // metal-gemm-coop-load-candidates.md` §1/§6 では index 15 を「XOR swizzle
 // 軸〈未実装〉用に未割当」と記していたが、本イシューで `TILE_CLASS` に
-// 割り当てる。XOR swizzle 軸を実装する場合は index 16 以降を使う）。
+// 割り当てる。XOR swizzle 軸を実装する場合は index 17 以降を使う。
+// index 16 は下記 `SPLIT_K_ENABLED`〈#1474〉が占有する）。
 constant uint TILE_CLASS [[function_constant(15)]];
+
+// split-K 有効化ゲート（イシュー #1474・opt-in）: `gemm_simdgroup_tiled`
+// を split-K パス 1（K 区間ごとの部分和書き出し）として実行するかどうか。
+// `crate::tile::should_split_k`（`crate::gemm::MetalGemm::
+// dispatch_split_k*`）が判定した形状のみでこの定数を `true` にして
+// パイプラインを構築する。`false`（本番既定・`dispatch_auto`/
+// `select_for_device` 経路）では本ファイル内の `SPLIT_K_ENABLED` 分岐が
+// すべてコンパイル時に畳み込まれ、`k_begin=0`・`k_end=dims.k`・
+// `c_out=c` に確定するため既存 NN/転置経路の演算オペランド列・ストア先は
+// 一切変わらない（bit 同一。#536/#538/#745/#809/#1138/#1282/#1288/#1293/
+// #1298/#1327 と同じ論法）。index は TILE_CLASS（#1327・index 15）の
+// 直後の 16（`docs/perf/metal-gemm-tile-class-split.md`／
+// `metal-gemm-coop-load-candidates.md` が「index 16 以降は XOR swizzle
+// 軸に予約」と記していた枠を本イシューで占有する。両 doc は本 PR で
+// 「index 17 以降」へ改訂する）。
+constant bool SPLIT_K_ENABLED [[function_constant(16)]];
 #endif
 
 // イシュー #1298: 協調ロードの「スレッド → float4 グループ」割当を
@@ -844,8 +882,20 @@ kernel void gemm_simdgroup_tiled(
     // grid 全体）を渡すため、以下のガード・オフセット加算は事実上の
     // no-op になる（下記ガードのコメント参照）。
     constant TileClassRegion& region [[buffer(5)]],
+    // split-K パス 1（イシュー #1474）: パーティション数・区間幅。
+    // `SPLIT_K_ENABLED==0`（本番既定）でも常にバインドする
+    // （`region` と同じ「未バインドバッファ参照を作らない」契約。
+    // 非 split-K 呼び出し元は `crate::gemm::SplitKParams::disabled(dims.k)`
+    // （`partitions:1`）を渡す）。
+    constant SplitKParams& sk [[buffer(6)]],
     threadgroup float* shared_mem [[threadgroup(0)]],
-    uint2 tgid [[threadgroup_position_in_grid]],
+    // split-K パス 1 の 3 次元 dispatch（depth = partitions）に対応する
+    // ため `uint2` から `uint3` へ拡張（イシュー #1474）。`tgid.x`/`tgid.y`
+    // の意味・SWIZZLE_ENABLED 経路の扱いは不変。`tgid.z` は
+    // `SPLIT_K_ENABLED=false`（既定・2 次元 dispatch）では常に 0
+    // （`crate::gemm::encode_dispatch_tiled` が depth=1 で dispatch する
+    // ため、下記 SPLIT_K_ENABLED 分岐に到達せず無害）。
+    uint3 tgid [[threadgroup_position_in_grid]],
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
@@ -1009,8 +1059,48 @@ kernel void gemm_simdgroup_tiled(
     threadgroup float* tile_a = shared_mem;
     threadgroup float* tile_b = shared_mem + (size_t)a_tile_rows * (size_t)lda;
 
-    uint k_full_tiles = dims.k / BK;
-    uint k_tail = dims.k - k_full_tiles * BK; // BK の倍数でない末尾（0 埋め扱い）
+    // split-K パス 1（イシュー #1474）: K 全域 [0, dims.k) のうち
+    // このパーティション（`tgid.z`）が担当する区間 [k_begin, k_end) の
+    // みを計算し、パーティション別スクラッチ（`c_out`）へ書く。
+    // `SPLIT_K_ENABLED=false`（既定・classic 経路）ではこのブロック
+    // 全体が定数畳み込みで `k_begin=0`・`k_end=dims.k`・`c_out=c` に
+    // 確定し、以下の K ループ・エピローグの演算オペランド列・ストア先は
+    // 既存 NN/転置経路と完全に同一のまま（bit 同一。
+    // `tests/gemm_fine_barrier_bit_match.rs` 等の既存非後退テスト・
+    // `crate::gemm` の split-K bit 一致テストが確認する）。
+    uint k_begin = 0;
+    uint k_end = dims.k;
+    device float* c_out = c;
+    if (SPLIT_K_ENABLED) {
+        // `tgid.z` は threadgroup 全体で共通の値のため、この early
+        // return は一様分岐（SIMD 内分岐にならない。REQ-8 の一様境界
+        // 検査に加え split-K 固有の「grid depth 超過」ガード）。
+        uint part = tgid.z;
+        if (part >= sk.partitions) {
+            return;
+        }
+        k_begin = part * sk.k_per_partition;
+        // 最終パーティションは K の端数（`sk.k_per_partition` の
+        // 非倍数分）を引き受ける（`crate::tile::should_split_k_with`
+        // 手順 5。`crate::gemm::MetalGemm::dispatch_split_k*` が渡す
+        // `SplitKParams` はこの契約を満たすよう構築する）。
+        k_end = (part + 1 == sk.partitions) ? dims.k : min(dims.k, k_begin + sk.k_per_partition);
+        if (k_begin >= k_end) {
+            // `should_split_k_with` が空区間を作らないよう構造的に
+            // 保証するため通常到達しないが、fail-closed に空区間を
+            // 無害化する（他パーティションの領域へは書かない）。
+            return;
+        }
+        // パーティション `part` 用のスクラッチ平面（M×N 要素）へ書く。
+        // `crate::gemm::MetalGemm::dispatch_split_k*` がホスト側で
+        // `partitions * m * n` 要素のスクラッチを確保する契約
+        // （`checked_mul` による overflow フォールバック込み）。
+        c_out = c + (size_t)part * (size_t)dims.m * (size_t)dims.n;
+    }
+    uint k_len = k_end - k_begin;
+
+    uint k_full_tiles = k_len / BK;
+    uint k_tail = k_len - k_full_tiles * BK; // BK の倍数でない末尾（0 埋め扱い）
     uint k_tile_count = k_full_tiles + (k_tail > 0 ? 1 : 0);
 
     // タイルクラス別ロード方式述語（イシュー #1327）: `TILE_CLASS==0`
@@ -1024,9 +1114,11 @@ kernel void gemm_simdgroup_tiled(
     const bool staging_active = (TILE_CLASS == 0) ? USE_TGP_STAGING : (TILE_CLASS == 2);
 
     for (uint t = 0; t < k_tile_count; t++) {
-        uint p0 = t * BK;
-        // 末尾タイルが BK に満たない場合の有効幅（境界チェック。REQ-8）。
-        uint bk_eff = min(BK, dims.k - p0);
+        uint p0 = k_begin + t * BK;
+        // 末尾タイルが BK に満たない場合の有効幅（境界チェック。REQ-8。
+        // split-K 有効時はパーティション境界 `k_end` に対する残り幅、
+        // 無効時は `k_end == dims.k` のため従来と同一の値になる）。
+        uint bk_eff = min(BK, k_end - p0);
 
         if (staging_active) {
             // 協調ロード: threadgroup 内の全スレッド（WM*WN*32 個）で
@@ -1622,7 +1714,7 @@ kernel void gemm_simdgroup_tiled(
                 if (out_col >= dims.n) {
                     continue;
                 }
-                simdgroup_store(acc[r][c_], c + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
+                simdgroup_store(acc[r][c_], c_out + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
             }
         }
     } else {
@@ -1636,7 +1728,7 @@ kernel void gemm_simdgroup_tiled(
                 if (out_col >= dims.n) {
                     continue;
                 }
-                simdgroup_store(acc[r][c_], c + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
+                simdgroup_store(acc[r][c_], c_out + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
             }
         }
     }
@@ -2277,4 +2369,56 @@ kernel void gemm_simdgroup_tiled_hfrag(
             simdgroup_store(acc[r][c_], c + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
         }
     }
+}
+
+// split-K パス 2（縮約。イシュー #1474）: `gemm_simdgroup_tiled`
+// （`SPLIT_K_ENABLED=true`）がパーティション別スクラッチ `c_split`
+// （`partitions` 枚の M×N f32 プレーン）へ書いた部分和を、パーティション
+// 昇順の固定順序で逐次加算し `c`（M×N）へ書く。`atomic` は使わず
+// スレッドごとに独立した 1 要素（`row`,`col`）を担当するため、実行順に
+// 依存しない決定的な結果になる（`crate::gemm::MetalGemm::
+// dispatch_split_k*` が `dispatch_sync` の同一クロージャ内でパス 1 →
+// パス 2 を発行し、`computeCommandEncoder()`〈serial〉により両パスの
+// 実行順序を保証する）。f32 固定で蓄積する（`docs/backend-metal-splitk-
+// decision.md` §2 の設計方針。half 蓄積はしない）。
+kernel void gemm_splitk_reduce(
+    device const float* c_split [[buffer(0)]],
+    device float* c [[buffer(1)]],
+    constant Dims& dims [[buffer(2)]],
+    constant SplitKParams& sk [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint col = gid.x;
+    uint row = gid.y;
+    // REQ-8: 縮約 grid（`ceil(n/16) x ceil(m/16)` threadgroup）は端で
+    // 実効次元をはみ出しうるため手動境界チェックで弾く（省略しない）。
+    if (row >= dims.m || col >= dims.n) {
+        return;
+    }
+    size_t idx = (size_t)row * (size_t)dims.n + (size_t)col;
+    size_t plane = (size_t)dims.m * (size_t)dims.n;
+    // パーティション昇順の固定順序で直列加算する（`docs/cuda-streamk-
+    // decision.md` が指摘した fixup 非決定性と同種の懸念を、順序を
+    // 固定することで解消する設計。#1358 の固定順序 fixup と同じ論法）。
+    // Neumaier 改良版 Kahan 補償和を使う: K が大きい形状ほど
+    // `k_per_partition` が増え各パーティション部分和の絶対値が大きくなる
+    // ため、単純な逐次加算では丸め誤差が蓄積し REQ-2 統一複合判定
+    // （相対誤差 1e-3 未満または絶対誤差 1e-5 未満）を割り込みうる
+    // （実機実測で `(32,32,8192)` NN が単純加算では fail_count=1/1024 で
+    // 不成立と確認済み）。`coding-rust.md` の正規化統計 f64 アキュムレータ
+    // 方針と同種の考え方を f32 補償和として適用する（Metal は `double`
+    // 非対応のため f64 化はできないが、補償項 `comp` で桁落ちを補正する）。
+    float acc = 0.0f;
+    float comp = 0.0f;
+    for (uint p = 0; p < sk.partitions; p++) {
+        float term = c_split[(size_t)p * plane + idx];
+        float t = acc + term;
+        if (fabs(acc) >= fabs(term)) {
+            comp += (acc - t) + term;
+        } else {
+            comp += (term - t) + acc;
+        }
+        acc = t;
+    }
+    c[idx] = acc + comp;
 }

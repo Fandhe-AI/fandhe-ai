@@ -29,7 +29,9 @@ opt-in 機構を追加し、両クラス経路の出力が現行版と **bit 同
     candidates.md` §1/§6 では index 15 を「XOR swizzle 軸（未実装）用に
     未割当」と記していたが、その軸は未実装のまま残されていたため、本
     Issue で `TILE_CLASS` に割り当てた。両ドキュメントに相互参照の追記
-    を行った。XOR swizzle 軸を将来実装する場合は index 16 以降を使う。
+    を行った。**追記（イシュー #1474）**: index 16 は split-K 有効化
+    ゲート（`SPLIT_K_ENABLED`）が占有した。XOR swizzle 軸を将来実装する
+    場合は index 17 以降を使う。
 - `TileClassRegion`（4 × uint32＝16 バイト。`row_off`/`col_off`/`rows`/
   `cols`）を新設し、`gemm_simdgroup_tiled` の引数へ
   `constant TileClassRegion& region [[buffer(5)]]` を追加。`TILE_CLASS
@@ -240,7 +242,8 @@ bit 一致）は本試作では実装しなかった**（時間制約。§6「�
 - T4（転置 NT/TN 対応の bit 一致自己検証）・T5（`FragLoadConfig` との
   合成 bit 一致自己検証）の実機実行（時間制約。§3.2 参照）。
 - 一般 stride／TT 以外の転置パターンでの性能面。
-- XOR swizzle 軸（旧 index 15 予約）の index 16 以降への再割当と実装。
+- XOR swizzle 軸（旧 index 15 予約）の index 17 以降への再割当と実装
+  （index 16 はイシュー #1474 で split-K 有効化ゲートが占有した）。
 
 ## 7. 実測結果と採否（#1328）
 

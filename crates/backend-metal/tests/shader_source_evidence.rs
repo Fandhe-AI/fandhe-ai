@@ -202,13 +202,32 @@ fn gemm_simdgroup_tiled_f16_kernel_body() -> &'static str {
 }
 
 /// `gemm_simdgroup_tiled_hfrag` カーネル本体（`kernel void
-/// gemm_simdgroup_tiled_hfrag(` 開始位置から EOF まで）を切り出す
-/// （イシュー #1369）。本ファイル内で最後に定義されるカーネルのため EOF
-/// までのスライスで安全。
+/// gemm_simdgroup_tiled_hfrag(` 開始位置から、次に定義される
+/// `gemm_splitk_reduce`（イシュー #1474）の説明コメント冒頭直前まで）を
+/// 切り出す（イシュー #1369。#1474 で末尾に `gemm_splitk_reduce` を
+/// 追加したため、従来の「EOF まで」から境界を変更した。`gemm_simdgroup_
+/// tiled_f16_kernel_body` と同じ理由: 新カーネルの説明コメント自体が
+/// hfrag のスコープ外語句〈`SplitKParams` 等〉を含むため、境界を
+/// コメント冒頭に置いて混入を避ける）。
 fn gemm_simdgroup_tiled_hfrag_kernel_body() -> &'static str {
     let kernel_start = GEMM_METAL_SOURCE
         .find("kernel void gemm_simdgroup_tiled_hfrag(")
         .expect("gemm_simdgroup_tiled_hfrag カーネル本体が見つかりません");
+    let next_kernel_comment_start = GEMM_METAL_SOURCE[kernel_start..]
+        .find("// split-K パス 2（縮約。イシュー #1474）")
+        .map(|offset| kernel_start + offset)
+        .expect("gemm_splitk_reduce の説明コメントが見つかりません");
+    &GEMM_METAL_SOURCE[kernel_start..next_kernel_comment_start]
+}
+
+/// `gemm_splitk_reduce` カーネル本体（説明コメント冒頭〈`// split-K
+/// パス 2（縮約。イシュー #1474）`〉から EOF まで）を切り出す
+/// （イシュー #1474）。本ファイル内で最後に定義されるカーネルのため
+/// EOF までのスライスで安全。
+fn gemm_splitk_reduce_kernel_body() -> &'static str {
+    let kernel_start = GEMM_METAL_SOURCE
+        .find("// split-K パス 2（縮約。イシュー #1474）")
+        .expect("gemm_splitk_reduce の説明コメントが見つかりません");
     &GEMM_METAL_SOURCE[kernel_start..]
 }
 
@@ -1007,13 +1026,13 @@ fn gemm_metal_source_declares_transpose_boundary_helpers() {
     }
 }
 
-/// イシュー #1288/#1293/#1298 の証跡: ソーステキスト特殊化経路
-/// （`GEMM_SPEC_ENABLED`）が定義される `#ifdef` 分岐に 15 個の
-/// `= GEMM_SPEC_*` リテラル代入（function constant 経路 15 宣言と 1:1
-/// 対応。#1298 で協調ロードレイアウト候補ゲート 1 個〈index 14〉が
-/// 追加され 14→15 へ増えた）が全て存在することをロックする。
+/// イシュー #1288/#1293/#1298/#1327/#1474 の証跡: ソーステキスト特殊化
+/// 経路（`GEMM_SPEC_ENABLED`）が定義される `#ifdef` 分岐に 16 個の
+/// `= GEMM_SPEC_*` リテラル代入（function constant 経路 16 宣言と 1:1
+/// 対応。#1474 で split-K 有効化ゲート 1 個〈index 16〉が追加され
+/// 15→16 へ増えた）が全て存在することをロックする。
 #[test]
-fn gemm_metal_source_declares_spec_ifdef_block_with_all_sixteen_defines() {
+fn gemm_metal_source_declares_spec_ifdef_block_with_all_seventeen_defines() {
     assert!(
         GEMM_METAL_SOURCE.contains("#ifdef GEMM_SPEC_ENABLED"),
         "gemm.metal に #ifdef GEMM_SPEC_ENABLED 分岐（イシュー #1288）が見つかりません"
@@ -1035,22 +1054,23 @@ fn gemm_metal_source_declares_spec_ifdef_block_with_all_sixteen_defines() {
         "constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;",
         "constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;",
         "constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;",
+        "constant bool SPLIT_K_ENABLED = GEMM_SPEC_SPLIT_K_ENABLED;",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
-            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293/#1298/#1327）が見つかりません"
+            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293/#1298/#1327/#1474）が見つかりません"
         );
     }
 }
 
-/// イシュー #1288/#1293/#1298 の証跡: `#ifdef GEMM_SPEC_ENABLED` 導入後も
-/// `#else` 側の 15 個の function constant 宣言（本番既定経路。#188/#538/
-/// #540/#809/#1138/#1282/#1293/#1298 の各 index）がバイト同一で残っている
-/// ことをロックする（`crate::spec_source` へ移設した
+/// イシュー #1288/#1293/#1298/#1327/#1474 の証跡: `#ifdef GEMM_SPEC_ENABLED`
+/// 導入後も `#else` 側の 16 個の function constant 宣言（本番既定経路。
+/// #188/#538/#540/#809/#1138/#1282/#1293/#1298/#1327/#1474 の各 index）が
+/// バイト同一で残っていることをロックする（`crate::spec_source` へ移設した
 /// `SOURCE_SPECIALIZATION_ENABLED` 既定 `false` の裏付け——`#else` 側が
 /// 変わっていなければ本番挙動は変わらない）。
 #[test]
-fn gemm_metal_source_else_branch_retains_all_sixteen_function_constants() {
+fn gemm_metal_source_else_branch_retains_all_seventeen_function_constants() {
     for needle in [
         "constant uint BM [[function_constant(0)]];",
         "constant uint BN [[function_constant(1)]];",
@@ -1068,11 +1088,12 @@ fn gemm_metal_source_else_branch_retains_all_sixteen_function_constants() {
         "constant uint FRAG_LOAD_KSTEPS [[function_constant(13)]];",
         "constant uint COOP_LOAD_LAYOUT [[function_constant(14)]];",
         "constant uint TILE_CLASS [[function_constant(15)]];",
+        "constant bool SPLIT_K_ENABLED [[function_constant(16)]];",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
             "gemm.metal の #else 側（本番既定）に function constant 宣言 `{needle}` が見つかりません。\
-             イシュー #1288/#1293/#1298/#1327 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
+             イシュー #1288/#1293/#1298/#1327/#1474 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
         );
     }
 }
@@ -1427,21 +1448,137 @@ fn gemm_simdgroup_tiled_hfrag_source_does_not_reference_experimental_gates() {
     }
 }
 
-/// 実装計画 §2.4 (f) の証跡: 16 個の function constant 宣言
-/// （`gemm_metal_source_declares_spec_ifdef_block_with_all_sixteen_defines`
+/// 実装計画 §2.4 (f) の証跡（イシュー #1474 で index 16 の
+/// `SPLIT_K_ENABLED` 追加に伴い 16→17 個へ更新）: 17 個の function
+/// constant 宣言
+/// （`gemm_metal_source_declares_spec_ifdef_block_with_all_seventeen_defines`
 /// が既に固定している宣言群）が `gemm_simdgroup_tiled_hfrag` の追加後も
-/// 個数不変であることを再確認する（新規 function constant を追加しない
-/// 契約。実装計画 §2.1「`gemm_simdgroup_tiled_tiled` の function constant
-/// index を再利用し新規追加しない」）。
+/// 個数不変であることを再確認する（`gemm_simdgroup_tiled_hfrag` 自体は
+/// 新規 function constant を追加しない契約。実装計画 §2.1
+/// 「`gemm_simdgroup_tiled_tiled` の function constant index を再利用し
+/// 新規追加しない」）。
 #[test]
 fn gemm_simdgroup_tiled_hfrag_introduces_no_new_function_constants() {
     let declared = GEMM_METAL_SOURCE.matches("[[function_constant(").count();
-    // `gemm_metal_source_declares_spec_ifdef_block_with_all_sixteen_defines`
-    // が個々の宣言文字列（index 0〜15 の 16 個）を固定済みのため、本テストは
+    // `gemm_metal_source_declares_spec_ifdef_block_with_all_seventeen_defines`
+    // が個々の宣言文字列（index 0〜16 の 17 個）を固定済みのため、本テストは
     // 総数のみを再確認する（`gemm_simdgroup_tiled_hfrag` が新規宣言を追加
     // していないことの裏付け）。
     assert_eq!(
-        declared, 16,
-        "function_constant 宣言の総数が想定外です（gemm_simdgroup_tiled_hfrag が新規 function constant を追加した疑い）"
+        declared, 17,
+        "function_constant 宣言の総数が想定外です（gemm_simdgroup_tiled_hfrag または他カーネルが新規 function constant を追加した疑い）"
     );
+}
+
+/// イシュー #1474 の証跡: `gemm_simdgroup_tiled`（f32 tiled 本体。
+/// `SPLIT_K_ENABLED` 分岐追加）が split-K パス 1 の K 区間導出
+/// （`k_begin`/`k_end`/`c_out` の算出・`tgid.z >= sk.partitions` の
+/// 一様分岐 early return）を含み、`uint3 tgid` へ拡張されていることを
+/// ロックする。
+#[test]
+fn gemm_simdgroup_tiled_source_contains_split_k_partition_derivation() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for needle in [
+        "uint3 tgid [[threadgroup_position_in_grid]],",
+        "constant SplitKParams& sk [[buffer(6)]],",
+        "if (SPLIT_K_ENABLED) {",
+        "uint part = tgid.z;",
+        "if (part >= sk.partitions) {",
+        "c_out = c + (size_t)part * (size_t)dims.m * (size_t)dims.n;",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled に split-K パス 1 の記述 `{needle}`（イシュー #1474）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1474 の証跡: `SplitKParams` 構造体（`TileClassRegion` 直後）
+/// が repr(C) レイアウト一致契約どおり `partitions`/`k_per_partition`/
+/// `reserved0`/`reserved1`（4 × uint32）で宣言されていることをロックする。
+#[test]
+fn gemm_metal_source_declares_split_k_params_struct() {
+    assert!(
+        GEMM_METAL_SOURCE.contains("struct SplitKParams {"),
+        "gemm.metal に SplitKParams 構造体宣言（イシュー #1474）が見つかりません"
+    );
+    for needle in [
+        "uint partitions;",
+        "uint k_per_partition;",
+        "uint reserved0;",
+        "uint reserved1;",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal の SplitKParams 構造体に `{needle}`（イシュー #1474）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1474 の証跡（AC-4・REQ-8）: `gemm_splitk_reduce`（縮約パス 2）
+/// が `atomic` 系 API を一切参照しない（各スレッドが独立した 1 要素を
+/// 担当する設計。`docs/backend-metal-splitk-decision.md` §2 の設計方針）
+/// ことをロックする。
+#[test]
+fn gemm_splitk_reduce_source_uses_no_atomics() {
+    // `kernel void gemm_splitk_reduce(` の署名以降（コード本体のみ）を
+    // 検査対象にする: 直前の説明コメントは「`atomic` は使わず」という
+    // 日本語文中に `atomic` という語を含むため、コメントごと検査すると
+    // 常に偽陽性になる（本テストが検証したいのは実際の MSL コードが
+    // atomic 系 API を呼んでいないことであり、コメントの語句一致ではない）。
+    let kernel_body = gemm_splitk_reduce_kernel_body();
+    let code_only = kernel_body
+        .find("kernel void gemm_splitk_reduce(")
+        .map(|offset| &kernel_body[offset..])
+        .expect("gemm_splitk_reduce カーネル署名が見つかりません");
+    assert!(
+        !code_only.contains("atomic"),
+        "gemm_splitk_reduce が atomic 系 API を参照しています（実行順序に依存しない\
+         決定的な縮約という設計方針〈#1474〉に反する）"
+    );
+}
+
+/// イシュー #1474 の証跡（REQ-8）: `gemm_splitk_reduce` が縮約 grid の
+/// M×N 境界を手動チェックし（`row >= dims.m || col >= dims.n`）、
+/// パーティション昇順の固定順序ループ（`for (uint p = 0; p < sk.partitions; p++)`）
+/// で Neumaier 改良版 Kahan 補償和（`comp` 補償項）により加算している
+/// ことをロックする（実機実測で単純逐次加算が `(32,32,8192)` NN で
+/// REQ-2 統一複合判定に不成立と判明し補償和へ変更した経緯は
+/// `docs/perf/metal-gemm-splitk-two-pass.md` を参照）。
+#[test]
+fn gemm_splitk_reduce_source_has_boundary_check_and_ascending_loop() {
+    let kernel_body = gemm_splitk_reduce_kernel_body();
+    for needle in [
+        "if (row >= dims.m || col >= dims.n) {",
+        "for (uint p = 0; p < sk.partitions; p++) {",
+        "float term = c_split[(size_t)p * plane + idx];",
+        "c[idx] = acc + comp;",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_splitk_reduce に `{needle}`（イシュー #1474・REQ-8 境界検査／\
+             固定順序縮約）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1474 の証跡: `gemm_simdgroup_tiled_f16`／`gemm_simdgroup_
+/// tiled_hfrag` はいずれも `SPLIT_K_ENABLED`／`SplitKParams`／`c_out` を
+/// 一切参照しない（split-K は f32 tiled 経路限定のスコープ。`crate::gemm::
+/// MetalGemm::pipeline_for_tile_f16`／`pipeline_for_tile_hfrag` が常に
+/// `split_k_enabled: false` を渡す no-op 契約と対応）。
+#[test]
+fn f16_and_hfrag_kernels_do_not_reference_split_k() {
+    let f16_body = gemm_simdgroup_tiled_f16_kernel_body();
+    let hfrag_body = gemm_simdgroup_tiled_hfrag_kernel_body();
+    for needle in ["SPLIT_K_ENABLED", "SplitKParams", "c_out"] {
+        assert!(
+            !f16_body.contains(needle),
+            "gemm_simdgroup_tiled_f16 が `{needle}` を参照しています（split-K は f32 tiled 限定のスコープ外）"
+        );
+        assert!(
+            !hfrag_body.contains(needle),
+            "gemm_simdgroup_tiled_hfrag が `{needle}` を参照しています（split-K は f32 tiled 限定のスコープ外）"
+        );
+    }
 }

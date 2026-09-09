@@ -510,7 +510,7 @@ pub use elementwise::MetalElementwise;
 #[cfg(target_os = "macos")]
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
-pub use gemm::{GemmVariant, MetalGemm};
+pub use gemm::{GemmVariant, MetalGemm, SplitKFallbackReason, SplitKRoute};
 #[cfg(target_os = "macos")]
 pub use half_buffer::MetalHalfBuffer;
 #[cfg(target_os = "macos")]
@@ -524,6 +524,7 @@ pub use rmsnorm::MetalRmsNorm;
 #[cfg(target_os = "macos")]
 pub use softmax::MetalSoftmax;
 pub use tile::TileConfig;
+pub use tile::{SplitKParams, SplitKPlan, should_split_k};
 
 /// テスト・診断専用: プロセスワイド singleton `MetalContext`
 /// （`context_cache::cached_context`。`ops::MetalBackendOps` の全演算

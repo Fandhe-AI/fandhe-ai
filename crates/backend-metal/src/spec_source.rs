@@ -89,6 +89,10 @@ pub(crate) struct SpecializationParams {
     /// [`new`](Self::new) は本番既定 `0`（`crate::tile::TileClass::Legacy`）
     /// を渡す。
     pub(crate) tile_class: u32,
+    /// `GEMM_SPEC_SPLIT_K_ENABLED`（イシュー #1474）。
+    /// `crate::pipeline::GemmGateConstants::split_k_enabled` と同じ意味。
+    /// [`new`](Self::new) は本番既定 `false`（classic 経路）を渡す。
+    pub(crate) split_k_enabled: bool,
 }
 
 impl SpecializationParams {
@@ -129,6 +133,9 @@ impl SpecializationParams {
             // イシュー #1327: 本コンストラクタは従来の 7 引数のまま据え置き、
             // タイルクラス軸も本番既定値（`0`＝`TileClass::Legacy`）で埋める。
             tile_class: 0,
+            // イシュー #1474: 本コンストラクタは従来の 7 引数のまま据え置き、
+            // split-K 軸も本番既定値（`false`＝classic 経路）で埋める。
+            split_k_enabled: false,
         }
     }
 }
@@ -212,6 +219,10 @@ pub(crate) fn specialized_gemm_source(params: &SpecializationParams) -> String {
     header.push_str(&format!(
         "#define GEMM_SPEC_TILE_CLASS {}\n",
         params.tile_class
+    ));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_SPLIT_K_ENABLED {}\n",
+        msl_bool(params.split_k_enabled)
     ));
     header.push_str(&format!("#define GEMM_SPEC_ACC_ROWS {acc_rows}\n"));
     header.push_str(&format!("#define GEMM_SPEC_ACC_COLS {acc_cols}\n"));

@@ -249,4 +249,7 @@ index 15 は「未割当」のまま残すとした上記の記述は、イシ�
 `TILE_CLASS`（タイルクラス分割ゲート。内部タイル direct load／端タイル
 staged の 2 クラス経路 opt-in 機構）へ割り当てられた（詳細は
 `docs/perf/metal-gemm-tile-class-split.md`）。バンク競合回避（XOR
-swizzle）軸を将来実装する場合は index 16 以降を使うこと。
+swizzle）軸を将来実装する場合は index 17 以降を使うこと（**追記・
+イシュー #1474**: index 16 は split-K 有効化ゲート
+〈`SPLIT_K_ENABLED`〉が占有した。`docs/backend-metal-splitk-decision.md`・
+`docs/perf/metal-gemm-splitk-two-pass.md` 参照）。
