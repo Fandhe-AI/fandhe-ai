@@ -1992,10 +1992,55 @@ on/off > 1.0）だが中央値比 1.0212 が閾値 1.05 以下のため元々発
 REJECT のまま修正前後で不変**（`judge.md` 差分・`judge_rules.py` の
 `_self_test()` に追加した符号一貫性回帰テストで確認）。
 
+**判定コードの計測後修正 4 回目（PR #1501 codex-review 指摘対応その 3。
+透明性のための明記）**: 上記 3 回目の修正後も 2 点の指摘を受けた。
+(P1) 規則 5 の run 別符号一貫性判定（`_raw_run_pair_ratios`）が両腕の
+run 数が異なる場合に短い方へ切り詰めていたため、片腕が 1 run しか
+無くても「5 run 符号一貫」相当の判定を通過しうる契約不整合があり、
+かつ `--jsonl` が完全に未指定・データ欠落の場合は「後退なし」の
+fail-safe が最終 verdict の決定ロジックへそのまま伝播し、他規則さえ
+満たせば `ADOPT_UNCONDITIONAL` を返しうる欠陥があった（AGENTS.md の
+5 回計測契約・§20.1 の採否条件は両腕 5 run の対応関係が前提）。
+`_raw_run_pair_ratios` を両腕ちょうど `REQUIRED_RUN_COUNT`（5）件の
+対応関係を要求する実装へ是正し、規則 5 の入力が欠落・不完全な場合は
+「後退なし」と区別して最終 verdict を `UNDETERMINED` へ強制するよう
+`judge()` を是正した（厳格化方向の修正のみ・緩和なし）。
+(P2) 規則 4（改定版）は 3 回目の修正時点で `compare_gemm_gate.py`
+出力 Markdown の candle/fandhe 列（3 桁丸め）を on/off で再除算して
+おり、`RULE4_MIN_RATIO` 境界（~0.952380...）付近で表示丸めにより採否
+が逆転しうる欠陥が残っていた。本イシューの成果物として
+`scripts/bench/framework-compare/results/raw/results-*-1481-pzero-*.
+jsonl`（`framework` タグ付き生 JSONL。candle・fandhe-ai 両方の生
+`median_s` を含む）が保存済みであると判明したため、`judge_rules.py` に
+`--candle-jsonl` を追加入力とし、`parse_candle_jsonl_medians`／
+`_raw_candle_ratio` で丸めなしの candle 比 on/off 比を優先的に算出
+するよう是正した（`--candle-jsonl` 未指定・データ欠落時は従来どおり
+Markdown 丸め値へフォールバック）。
+(P3) `orchestrate_m4max.sh`・`orchestrate_dgx.sh` は `errexit` を有効化
+せず Layer A/B 呼び出しの終了コードも確認していなかったため、計測
+コマンドが失敗しても `ALL_DONE.marker` を生成し終了コード 0 を返し、
+不完全な計測を完了として扱ってしまう欠陥があった。両オーケストレーター
+に `set -euo pipefail` を追加し、各呼び出しの成功確認後にのみ完了
+マーカーを生成するよう是正した。
+本イシューの保存データへ P1・P2 是正後のコードを `--candle-jsonl` 付きで
+再適用した結果、規則 5 は run 別対応関係が完備（両腕 5 run）かつ符号
+一貫のまま元々発火せず、規則 4 の丸めなし raw 比は Markdown 丸め値と
+数値が僅かに異なるのみで成否は変化しない（M4Max N=512 が引き続き
+`0.9060` 未満で不成立）。**verdict は REJECT のまま修正前後で不変**
+（`judge.md` 差分・`judge_rules.py` の `_self_test()` に追加した
+run 数不足・境界逆転の回帰テストで確認。P3 のオーケストレータ修正は
+本イシューの保存済み計測結果〈両腕とも完走済み・`ALL_DONE.marker` の
+生成条件は今回満たされていた〉自体には影響しない将来の再計測に対する
+是正）。
+
 出典: イシュー #1481・`docs/perf/logs/cpu-matmul-fixed-cost-remeasure-1481/`
 （`env_info.txt`・`judge.md`・`judge_rules.py`・Layer A/B 生ログ・
 `aggregate_layer_b.py`・`compare_gemm_ab-{dgx,m4max}.md`・
-`compare_gemm_gate-{dgx,m4max}-{off,on}.md`・`on-arm.patch`）。
+`compare_gemm_gate-{dgx,m4max}-{off,on}.md`・`on-arm.patch`・
+`orchestrate_m4max.sh`・`orchestrate_dgx.sh`）・
+`scripts/bench/framework-compare/results/raw/results-{dgx,m4max}-
+cpu-gemm-gate-head-54cb14057dbf30cc77a3d77c0d1b37caf348f75c-1481-
+pzero-{off,on}.jsonl`（規則 4 の candle 側生 `median_s` 出典）。
 
 ## 21. 2026-09-08 追補: 2D 動的分配の本番結線（イシュー #1313）
 
