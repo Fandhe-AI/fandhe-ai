@@ -43,6 +43,8 @@ Metal 側は `MetalGemm::new_with_swizzle(ctx, bool)` で swizzle off/on の 2 �
 は本イシューの範囲では変更しない（`.claude/rules/security.md`: ガードレール閾値・テスト許容誤差の変更は
 ユーザー承認必須）。`bench_harness::relative_spread`（`(max − min) / median`）でラウンド間ばらつきを定量報告し、
 `bench_harness::ab::run_stability` が対照カーネルの安定性セルフチェックとして使う（下記「安定性ゲート」参照）。
+補助統計（`StabilityResult::aux` → `trimmed_spread_k1`／`iqr_spread`／`mad_spread`。イシュー #1483/#1484/#1485）は
+**定量報告のみ**であり、判定へ転用してはならない（§8.6・`ab.rs` の `AuxiliarySpread` doc contract と同文意）。
 
 ### 5. 安定性ゲートと不成立時の中断規定
 
@@ -56,6 +58,8 @@ Metal 側は `MetalGemm::new_with_swizzle(ctx, bool)` で swizzle off/on の 2 �
 
 不成立の場合の調整手順: `crates/backend-metal/examples/gemm_swizzle_ab_bench.rs` の `ROUNDS`・`COOLDOWN`・
 `MIN_WARMUP` 定数を**増やす方向のみ**調整して再実行する（減らす調整は spread 実測 green が条件。実装計画 §4.2）。
+`within_gate` は `spread ≤ STABILITY_SPREAD_GATE` のみで決まり、補助統計（§4 参照）を `STABILITY_SPREAD_GATE`
+と比較して判定に転用してはならない（イシュー #1485。§8.6・§8.8）。
 
 ### 6. 実行前の環境ガード（イシュー #1264・親 #1263）
 
@@ -85,7 +89,7 @@ GPU プロセス検出・uptime 記録の取得と判定を行う設定型・取
 - **閾値は既定値なし**: `--max-load-avg` を指定しない実行は **record_only**（判定なし・記録のみ）で動作する。
   具体的な閾値の既定化は本イシューでも行わず（下記「#1265 向けの提案閾値」参照）、CLI 明示指定のみで有効化する
 
-## 8. ロバスト統計の設計提案（イシュー #1266・ユーザー承認待ち）
+## 8. ロバスト統計の設計提案（イシュー #1266 提案・#1485 で確定（2026-09-09 ユーザー承認））
 
 **本節は設計・提案のみであり、コード（`crates/bench-harness/src/stats.rs`・
 `ab.rs`）は一切変更しない。ユーザー承認を得るまで統計量・閾値は現行の
@@ -232,9 +236,9 @@ GPU プロセス検出・uptime 記録の取得と判定を行う設定型・取
 を後方互換な形で追従させた（`STABILITY_SPREAD_GATE`・判定式・既存キーは
 不変。詳細は `docs/perf/metal-gemm-transpose-tiled.md` のキー一覧節）。
 本節（§8.5）が挙げる A の**ゲート置換**（統計量そのものの置き換え）は
-未承認のまま・スコープ外（下記の見積もりは引き続き将来の承認事項）。
+**不採用と確定**（再検討には新たな承認が必要。§8.6 参照）。
 
-### 8.5 採用時の変更範囲（承認が下りた場合の見積もり。本 PR では未実施）
+### 8.5 採用時の変更範囲（承認が下りた場合の見積もり。ゲート置換は不採用確定のため未実施のまま）
 
 - `crates/bench-harness/src/stats.rs`: 新関数（例
   `trimmed_relative_spread(samples, trim_per_side)`）を追加し、
@@ -261,15 +265,35 @@ GPU プロセス検出・uptime 記録の取得と判定を行う設定型・取
   `metal-gemm-fine-barrier-ab.md` 等の「`STABILITY_SPREAD_GATE=0.05`」
   記述）
 
-### 8.6 承認を求める事項
+### 8.6 承認結果（2026-09-09）
 
-1. ゲート統計量を案 A（k=1）へ置換するか、現行 `max − min` を維持するか
-2. 置換する場合の k と、閾値 0.05 据え置きの可否（C・D を採る場合は
-   閾値の再導出を別途承認）
-3. 補助統計（A・C・D）を判定に使わないレポート項目として先行追加する
-   後続イシューの起票可否
-4. 案 E（サイズ別部分ゲート）を #1267 の設計へ持ち込む可否
-5. 上記いずれも**ユーザー承認待ち**であり、承認までコード変更は行わない
+ルート #1468・Phase 親 #1472 のユーザー承認により、以下の 5 項目が確定した
+（イシュー #1485）。tolerance／ガードレール変更ではなく「ゲート・閾値・
+判定意味は不変のまま補助レポートを追加する」だけの変更であるため、
+本件は `.claude/rules/security.md` のガードレール閾値・テスト許容誤差の
+承認規約（変更を対象とする規約）の対象外である（(5) の根拠）。
+
+1. **ゲート統計量は案 A（k=1）へ置換せず、現行 `max − min`（レンジ）ベースの
+   `relative_spread` を維持する**
+2. **置換は行わないため、閾値 `STABILITY_SPREAD_GATE = 0.05` も不変**
+   （C・D の閾値再導出は不要・未実施のまま）
+3. **補助統計（A・C・D）を判定に使わないレポート項目として先行追加する
+   後続イシューは承認済み・実装完了**: `crates/bench-harness`
+   （`StabilityResult::aux`・`AuxiliarySpread`・`AUXILIARY_TRIM_PER_SIDE = 1`）
+   は #1483 で追加済み、呼び出し側 example 4 本（`gemm_transpose_route_ab_bench.rs`・
+   `gemm_swizzle_ab_bench.rs`・`gemm_fine_barrier_ab_bench.rs`・
+   `gemm_unroll_acc_ab_bench.rs`）の `phase1_round_stats` 行への
+   `trimmed_spread_k1`／`iqr_spread`／`mad_spread` 追記・`aggregate.py`／
+   `1255-aggregate.py` の表 D 追加は #1484 で実装済み（§8.4「イシュー #1484
+   での先行実施」参照）
+4. **案 E（サイズ別部分ゲート）は不採用**: #1267 が既にクローズ済みで
+   あり、判定範囲を縮小するプロトコル変更を持ち込む先が存在しないため
+5. **tolerance／ガードレール承認規約（`.claude/rules/security.md`）の対象外
+   である根拠**: 本承認はゲート・閾値・判定意味（`within_gate` は
+   `spread ≤ gate` のみで決まる）を一切変更せず、判定に使わない補助
+   レポート項目を追加するのみであるため、性能ゲート閾値の変更を要する
+   承認手続きの対象にはならない（§4・§5 の doc contract 明文化・#1485
+   の M4 Max 実機記録は §8.8 参照）
 
 ### 8.7 再現手順
 
@@ -286,6 +310,64 @@ Rust は 5・Python は 4 へ分岐しうる（例: `1255-run1`・size=256 で
 素朴な Python `round()` 実装では 0.6170 になり、ログの 0.6127 と
 食い違う）。`reapply.py` は `floor(x + 0.5)` で Rust 側の丸めを再現する
 （詳細はスクリプト冒頭コメント）。
+
+### 8.8 M4 Max 実機非後退確認（イシュー #1485）
+
+§8.6 の承認結果を受け、`StabilityResult::aux`（#1483）・`phase1_round_stats`
+行への補助キー出力（#1484）が実機で機能し、かつ `within_gate` 判定が
+補助統計の影響を一切受けないことを M4 Max 実機で機械確認した
+（コード変更なし。性能ゲート達成の確認は目的としない）。
+
+**実行コマンド**:
+
+```sh
+cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench \
+  --release --features internal-diagnostics -- --phase1-only
+```
+
+`--max-load-avg` を付けないため環境ガードは `record_only`（判定なし・
+待機なし）。
+
+**環境**: Apple M4 Max（arm64）・共有負荷下（実行前 load average 1min
+1.86 → 実行中 3.84 → 実行後 7.91。他セッション並走）。
+
+**結果表**（`phase1_round_stats` 行の転記。詳細な機械検査結果は
+`docs/perf/logs/metal-bench-robust-stats-1485/aggregate.md` を参照）:
+
+| size | spread | gate | within_gate | trimmed_spread_k1 | iqr_spread | mad_spread |
+|---|---|---|---|---|---|---|
+| 256 | 2.1418e-01 | 5.0000e-02 | false | 1.9120e-1 | 1.3225e-2 | 1.9510e-2 |
+| 512 | 5.9134e-01 | 5.0000e-02 | false | 4.7441e-1 | 5.2024e-2 | 7.1282e-2 |
+| 1024 | 1.2784e-01 | 5.0000e-02 | false | 6.8816e-2 | 3.2653e-2 | 4.4504e-2 |
+| 2048 | 3.6217e-01 | 5.0000e-02 | false | 1.9826e-1 | 1.4264e-1 | 4.3319e-2 |
+| 4096 | 5.9607e-01 | 5.0000e-02 | false | 5.7022e-2 | 3.7271e-2 | 3.9314e-2 |
+
+共有負荷下のため全 5 サイズで `within_gate=false`（想定内。ゲート成立
+自体は本イシューの目的ではない）。
+
+**判定不変の機械確認**: `phase1_round_stats` 行 5 件すべてで
+`within_gate == (spread <= gate)` が一致し（補助統計が判定に影響して
+いないことの直接証拠）、既存キー順（`size rounds spread gate within_gate
+median_secs min_secs min_round_idx max_secs max_round_idx
+round_medians_secs`）に続き `trimmed_spread_k1`／`iqr_spread`／
+`mad_spread` の 3 補助キーがこの順で出力されることも確認した
+（検査スクリプト・結果全文は `docs/perf/logs/metal-bench-robust-stats-1485/`
+の `verify_1485.py`・`aggregate.md`・`README.md` を参照）。
+
+**既存 `#[ignore]` 群・関連テストの非後退確認**（コード変更なしのため）:
+`gemm_swizzle_bit_match`・`gemm_fine_barrier_bit_match`・
+`gemm_transposed_parity` の実機 `#[ignore]` テスト（計 9 件）・example
+単体テスト（`gemm_transpose_route_ab_bench`・`gemm_swizzle_ab_bench`・
+`gemm_fine_barrier_ab_bench`・`gemm_unroll_acc_ab_bench`。計 76 件）・
+`bench-harness` クレートテスト（16 passed・6 ignored〈実機依存分〉）・
+`aggregate.py`／`1255-aggregate.py`／`reapply.py` の `--self-test` が
+すべて非後退（全 pass。`docs/perf/logs/metal-bench-robust-stats-1485/
+ignored_tests.log`）であることを確認した。
+
+**ログ所在**: `docs/perf/logs/metal-bench-robust-stats-1485/`
+（`phase1_only_run1.log`・`env_info.txt`・`uptime_{before,after}.txt`・
+`pmset_therm_{before,after}.txt`・`ignored_tests.log`・`aggregate.md`・
+`verify_1485.py`・`README.md`）。内部ホスト名・ユーザーパスは含めない。
 
 ## 熱・電源状態の記録
 
