@@ -1,0 +1,16 @@
+== env_guard(phase1) ==
+9:05  up 20 days, 20:17, 19 users, load averages: 1.83 2.72 3.46
+env_guard_mode=gated
+env_guard_load_avg one=1.83 five=2.72 fifteen=3.46 max_1min=2.00 verdict=pass
+env_guard_uptime_secs=1801039 collected_at_unix_secs=1788912313
+env_guard_gpu status=available processes=92 flagged=none device_utilization_percent=7 verdict=pass note=none
+env_guard_overall verdict=pass attempts=9 max_attempts=20 total_wait_secs=1687.50
+env_guard_attempt idx=1 waited_before_secs=0.00 load_avg_one=2.03 gpu_verdict=pass overall=fail
+env_guard_attempt idx=2 waited_before_secs=60.00 load_avg_one=3.12 gpu_verdict=pass overall=fail
+env_guard_attempt idx=3 waited_before_secs=90.00 load_avg_one=3.71 gpu_verdict=pass overall=fail
+env_guard_attempt idx=4 waited_before_secs=135.00 load_avg_one=5.00 gpu_verdict=pass overall=fail
+env_guard_attempt idx=5 waited_before_secs=202.50 load_avg_one=2.98 gpu_verdict=pass overall=fail
+env_guard_attempt idx=6 waited_before_secs=300.00 load_avg_one=3.53 gpu_verdict=pass overall=fail
+env_guard_attempt idx=7 waited_before_secs=300.00 load_avg_one=3.16 gpu_verdict=pass overall=fail
+env_guard_attempt idx=8 waited_before_secs=300.00 load_avg_one=2.64 gpu_verdict=pass overall=fail
+env_guard_attempt idx=9 waited_before_secs=300.00 load_avg_one=1.83 gpu_verdict=pass overall=pass

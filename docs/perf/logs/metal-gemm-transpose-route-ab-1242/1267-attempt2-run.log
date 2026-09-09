@@ -1,0 +1,31 @@
+== env_guard(phase1) ==
+9:05  up 20 days, 20:17, 19 users, load averages: 1.83 2.72 3.46
+env_guard_mode=gated
+env_guard_load_avg one=1.83 five=2.72 fifteen=3.46 max_1min=2.00 verdict=pass
+env_guard_uptime_secs=1801039 collected_at_unix_secs=1788912313
+env_guard_gpu status=available processes=92 flagged=none device_utilization_percent=7 verdict=pass note=none
+env_guard_overall verdict=pass attempts=9 max_attempts=20 total_wait_secs=1687.50
+env_guard_attempt idx=1 waited_before_secs=0.00 load_avg_one=2.03 gpu_verdict=pass overall=fail
+env_guard_attempt idx=2 waited_before_secs=60.00 load_avg_one=3.12 gpu_verdict=pass overall=fail
+env_guard_attempt idx=3 waited_before_secs=90.00 load_avg_one=3.71 gpu_verdict=pass overall=fail
+env_guard_attempt idx=4 waited_before_secs=135.00 load_avg_one=5.00 gpu_verdict=pass overall=fail
+env_guard_attempt idx=5 waited_before_secs=202.50 load_avg_one=2.98 gpu_verdict=pass overall=fail
+env_guard_attempt idx=6 waited_before_secs=300.00 load_avg_one=3.53 gpu_verdict=pass overall=fail
+env_guard_attempt idx=7 waited_before_secs=300.00 load_avg_one=3.16 gpu_verdict=pass overall=fail
+env_guard_attempt idx=8 waited_before_secs=300.00 load_avg_one=2.64 gpu_verdict=pass overall=fail
+env_guard_attempt idx=9 waited_before_secs=300.00 load_avg_one=1.83 gpu_verdict=pass overall=pass
+env_guard_result=pass attempts=9
+--- フェーズ 1: 安定性セルフチェック（対照カーネル: dispatch_auto）---
+size=256 spread=0.3003 (NG: gate 超過) round_tflops=[0.1862, 0.1776, 0.1736, 0.1448, 0.1810, 0.1794, 0.1730, 0.1927, 0.1446, 0.1720]
+phase1_round_stats size=256 rounds=10 spread=3.0028e-1 gate=5.0000e-2 within_gate=false median_secs=1.932920e-4 min_secs=1.740830e-4 min_round_idx=7 max_secs=2.321250e-4 max_round_idx=8 round_medians_secs=1.802500e-4,1.889580e-4,1.932920e-4,2.316660e-4,1.854170e-4,1.870000e-4,1.940000e-4,1.740830e-4,2.321250e-4,1.951250e-4
+size=512 spread=4.4252 (NG: gate 超過) round_tflops=[0.6896, 0.4557, 0.6991, 0.4657, 0.4657, 0.0937, 0.6747, 0.6792, 0.6622, 0.4785]
+phase1_round_stats size=512 rounds=10 spread=4.4252e0 gate=5.0000e-2 within_gate=false median_secs=5.609580e-4 min_secs=3.840000e-4 min_round_idx=2 max_secs=2.866334e-3 max_round_idx=5 round_medians_secs=3.892500e-4,5.890420e-4,3.840000e-4,5.764590e-4,5.764590e-4,2.866334e-3,3.978750e-4,3.952500e-4,4.053750e-4,5.609580e-4
+size=1024 spread=0.6744 (NG: gate 超過) round_tflops=[1.0480, 1.0165, 0.9657, 1.7501, 0.9792, 0.8021, 0.9988, 1.0406, 0.8228, 1.0278]
+phase1_round_stats size=1024 rounds=10 spread=6.7442e-1 gate=5.0000e-2 within_gate=false median_secs=2.150167e-3 min_secs=1.227041e-3 min_round_idx=3 max_secs=2.677166e-3 max_round_idx=5 round_medians_secs=2.049042e-3,2.112708e-3,2.223750e-3,1.227041e-3,2.193083e-3,2.677166e-3,2.150167e-3,2.063666e-3,2.610042e-3,2.089500e-3
+size=2048 spread=0.5896 (NG: gate 超過) round_tflops=[2.2637, 1.6335, 3.1245, 1.7181, 1.8487, 2.3491, 2.0182, 2.1730, 2.0329, 1.8454]
+phase1_round_stats size=2048 rounds=10 spread=5.8958e-1 gate=5.0000e-2 within_gate=false median_secs=8.512292e-3 min_secs=5.498417e-3 min_round_idx=2 max_secs=1.051708e-2 max_round_idx=1 round_medians_secs=7.589417e-3,1.051708e-2,5.498417e-3,9.999333e-3,9.292917e-3,7.313250e-3,8.512292e-3,7.905917e-3,8.450917e-3,9.309459e-3
+size=4096 spread=0.4312 (NG: gate 超過) round_tflops=[4.7191, 4.4075, 4.4193, 4.3535, 3.9854, 4.1190, 4.2795, 3.2158, 4.5384, 4.5674]
+phase1_round_stats size=4096 rounds=10 spread=4.3124e-1 gate=5.0000e-2 within_gate=false median_secs=3.156983e-2 min_secs=2.912408e-2 min_round_idx=0 max_secs=4.273825e-2 max_round_idx=7 round_medians_secs=2.912408e-2,3.118321e-2,3.109967e-2,3.156983e-2,3.448583e-2,3.336729e-2,3.211550e-2,4.273825e-2,3.028387e-2,3.009104e-2
+phase1_summary sizes_measured=5 sizes_gate_exceeded=256,512,1024,2048,4096 all_within_gate=false
+--- フェーズ 1 判定: 一部サイズが spread ≤0.05 相当を満たさなかった。フェーズ 2（A/B 判定）はスキップする（安全側判断: 判定不可のまま採否を確定しない）。
+verdict=undetermined (フェーズ 1 の安定性セルフチェックで spread ≤gate 相当を満たさないサイズが残ったため、フェーズ 2（A/B 判定）を実行せず判定不可のまま終了する)
