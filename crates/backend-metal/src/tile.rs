@@ -2243,8 +2243,10 @@ pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
 // 未結線）**。実際の 2 パスディスパッチ（パス 1: K 区間ごとの部分和を
 // device スクラッチへ書く 3 次元 dispatch・パス 2: 固定順序逐次縮約）は
 // `crate::gemm::MetalGemm::dispatch_split_k*`（`gemm.rs`）が担う。性能
-// A/B・本番結線可否は後続イシュー #1475/#1476 のスコープ（本モジュール・
-// 本ファイルは変更しない）。
+// A/B は #1475（暫定 ADOPT・3/5 run）、本番結線可否は #1476 で確定した
+// （**結線しない**。性能判定 undetermined・数値契約未承認の 2 ブロッカー。
+// `docs/backend-metal-splitk-decision.md` §4。本モジュール・本ファイルは
+// 変更しない）。
 
 /// [`should_split_k_with`] の判定パラメータ（MLX steel Case 1 の閾値を
 /// 実行時に差し替え可能にする。既定値は [`SplitKParams::MLX_CASE1_M4_MAX`]）。

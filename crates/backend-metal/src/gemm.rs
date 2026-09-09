@@ -130,6 +130,8 @@ thread_local! {
 /// ユーザー承認が必要（PR #1496 codex-review P1 指摘。イシュー
 /// #1474）。承認を得た場合のみ `true` へ切り替える（`_with_plan` 系は
 /// このゲートの対象外。AC-1／診断テスト専用の明示入口として維持する）。
+/// 承認依頼の要点（適用拡張の可否・`BASELINES` 具体値・適用順序）は
+/// #1476 で整理済み（`docs/backend-metal-splitk-decision.md` §4）。
 pub(crate) const SPLIT_K_NUMERIC_CONTRACT_APPROVED: bool = false;
 
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
@@ -2257,9 +2259,10 @@ impl MetalGemm {
     /// が選ぶ構成）へフォールバックする（[`SplitKRoute::Classic`]。
     /// `reason` は [`SplitKFallbackReason::NotEligible`]）。`Some(plan)`
     /// の場合は `Self::dispatch_split_k_strided_prepared_with_plan` へ
-    /// 委譲する。性能 A/B・`dispatch_auto` への結線可否は後続イシュー
-    /// （#1475/#1476）のスコープ（`docs/perf/metal-gemm-splitk-two-pass.md`
-    /// 「スコープ外」節）。
+    /// 委譲する。性能 A/B は #1475（暫定 ADOPT・3/5 run）、`dispatch_auto` への
+    /// 結線可否は #1476 で確定した（**結線しない**。性能判定
+    /// `undetermined`・数値契約未承認の 2 ブロッカー。
+    /// `docs/backend-metal-splitk-decision.md` §4）。
     ///
     /// **数値契約ゲート（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`。本モジュール
     /// 内 `pub(crate)` 定数のためリンク非対応）**:
