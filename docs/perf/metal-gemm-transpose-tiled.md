@@ -125,8 +125,9 @@ cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --r
 **判定には使わない**（`within_gate` は既存の `spread`／`gate` 列のみで
 決まり、これら 3 キーはレポート専用の追加情報）。`gemm_swizzle_ab_bench`・
 `gemm_fine_barrier_ab_bench`・`gemm_unroll_acc_ab_bench` の 3 example にも
-（後 2 者は識別キーが `m=`／`n=`／`k=`）同じキー集合の `phase1_round_stats`
-行を新規追加している（従来は本 example のみが出力していた）。
+（識別キーは `gemm_swizzle_ab_bench`・`gemm_fine_barrier_ab_bench` が本 example と同じ
+`size=`、`gemm_unroll_acc_ab_bench` のみ `m=`／`n=`／`k=` で例外）同じキー集合の
+`phase1_round_stats` 行を新規追加している（従来は本 example のみが出力していた）。
 
 実行前の環境確認（load average・他 GPU プロセス・uptime）はイシュー #1265 で
 example 自身が自動記録するようになった（フェーズ 1・フェーズ 2 の各開始前に
