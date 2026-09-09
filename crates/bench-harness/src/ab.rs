@@ -54,7 +54,84 @@ use std::time::{Duration, Instant};
 /// （codex-review 指摘対応。イシュー #746 PR #763）。値を変更する場合は本定数と
 /// 上記文書の記述を両方更新すること（ガードレール閾値相当のためユーザー承認必須。
 /// `.claude/rules/security.md`）。
+///
+/// [`StabilityResult::aux`]／[`AbResult::aux_a`]／[`AbResult::aux_b`]
+/// （[`AuxiliarySpread`]。イシュー #1483）は本ゲートの判定対象**外**である
+/// （`docs/perf/metal-bench-noise-protocol.md` §8。判定に使わない補助レポート値）。
 pub const STABILITY_SPREAD_GATE: f64 = 0.05;
+
+/// [`AuxiliarySpread::trimmed`] が用いる対称トリム幅（案 A・k=1。イシュー #1483）。
+///
+/// `docs/perf/metal-bench-noise-protocol.md` §8.4 の総合推奨（案 A・C・D を
+/// 「ゲート置換ではなく判定に使わないレポート項目として併記追加する」）のうち
+/// 案 A の固定パラメータ。`STABILITY_` を接頭辞に含めないのは、この定数が
+/// `STABILITY_SPREAD_GATE` のような判定閾値ではないため誤認させないための
+/// 命名判断（本モジュール冒頭ドキュメント参照）。
+pub const AUXILIARY_TRIM_PER_SIDE: usize = 1;
+
+/// 判定に使わない補助 spread 統計量（イシュー #1483。
+/// `docs/perf/metal-bench-noise-protocol.md` §8 案 A・C・D）。
+///
+/// [`StabilityResult::spread`]／[`AbResult::spread_a`]／[`AbResult::spread_b`]
+/// （いずれも [`crate::relative_spread()`]＝レンジベース）は n=10 ラウンド中
+/// 1 ラウンドのスパイクで [`STABILITY_SPREAD_GATE`] を容易に超える
+/// （§8 の課題認識）。本構造体はスパイクの影響を受けにくい 3 通りの
+/// 代替統計量を**併記**するのみで、[`STABILITY_SPREAD_GATE`]・既存の
+/// `spread`／`spread_a`／`spread_b` の判定経路は一切変更しない。
+///
+/// **本構造体の値を [`STABILITY_SPREAD_GATE`] と比較して安定性ゲート判定に
+/// 転用してはならない**: トリム・IQR・MAD はいずれもスパイクを機械的に
+/// 除外・希釈するため、同じ閾値に対する比較は実質的な閾値緩和になり、
+/// ガードレール閾値の単独緩和を禁じる方針（`.claude/rules/security.md`）に
+/// 反する（`docs/perf/metal-bench-noise-protocol.md` §8.2）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AuxiliarySpread {
+    /// 案 A: 上下各 [`AUXILIARY_TRIM_PER_SIDE`] 個を除いたレンジ ÷ 全系列 median
+    /// （[`stats::trimmed_relative_spread`]）。ラウンド数がトリム後に
+    /// 2 要素未満しか残らない場合（`rounds < 2*AUXILIARY_TRIM_PER_SIDE + 2`）は
+    /// `None`（トリム不能を明示し、[`stats::BenchError::ProtocolViolation`] を
+    /// 握りつぶして他エラーまで隠すことを避けるため事前に長さ判定する。
+    /// `auxiliary_spread` 実装参照）。
+    pub trimmed: Option<f64>,
+    /// 案 C: `(Q3 − Q1) / median`（[`stats::iqr_over_median`]）。
+    pub iqr_over_median: f64,
+    /// 案 D: `2 * MAD / median`（[`stats::mad2_over_median`]）。
+    pub mad2_over_median: f64,
+}
+
+/// `samples` から [`AuxiliarySpread`] を計算する（イシュー #1483）。
+///
+/// `run_stability_observed`／`run_ab` から、既存の [`stats::relative_spread`]・
+/// [`stats::median_q1_q3`]・[`validate_ab_medians`] の呼び出し順序を維持した
+/// **後**に呼ぶ（既存のエラー面・発生順序を変えないため）。
+///
+/// `trimmed` は `samples.len() >= 2*AUXILIARY_TRIM_PER_SIDE + 2` を事前判定し、
+/// 満たすときのみ [`stats::trimmed_relative_spread`] を呼ぶ。`.ok()` で
+/// `ProtocolViolation` を握りつぶす実装はしない（NaN 等トリム長不足以外の
+/// エラーまで `None` へ変換してしまい、fail-closed 契約が崩れるため）。
+///
+/// # Errors
+///
+/// [`stats::iqr_over_median`]／[`stats::mad2_over_median`] が失敗した場合、
+/// そのエラーをそのまま伝播する（`relative_spread` が `Ok` を返す入力では、
+/// 有限性・median==0 の扱いが `ratio_over_median` 経由で共通のため、
+/// 通常は発生しない。`stats` モジュールのテスト参照）。
+fn auxiliary_spread(samples: &[f64]) -> Result<AuxiliarySpread, BenchError> {
+    let required = 2 * AUXILIARY_TRIM_PER_SIDE + 2;
+    let trimmed = if samples.len() >= required {
+        Some(stats::trimmed_relative_spread(
+            samples,
+            AUXILIARY_TRIM_PER_SIDE,
+        )?)
+    } else {
+        None
+    };
+    Ok(AuxiliarySpread {
+        trimmed,
+        iqr_over_median: stats::iqr_over_median(samples)?,
+        mad2_over_median: stats::mad2_over_median(samples)?,
+    })
+}
 
 /// [`run_ab`]／[`run_stability`] のラウンド構成。
 ///
@@ -151,7 +228,11 @@ pub struct StabilityResult {
     /// 各ラウンドの中央値（秒）。`protocol::run` の `median_secs` をラウンド数分集めたもの。
     pub round_medians_secs: Vec<f64>,
     /// `round_medians_secs` の相対ばらつき（[`crate::relative_spread()`]）。
+    /// 判定（[`STABILITY_SPREAD_GATE`]）はこの値に対して行う。
     pub spread: f64,
+    /// `round_medians_secs` の補助 spread 統計量（[`AuxiliarySpread`]。イシュー #1483）。
+    /// **判定には使わない**（[`AuxiliarySpread`] のドキュメント参照）。
+    pub aux: AuxiliarySpread,
 }
 
 /// 同一ワークロードを `ab_config.rounds` ラウンド計測し、ラウンド間の
@@ -237,9 +318,11 @@ where
     }
 
     let spread = stats::relative_spread(&round_medians_secs)?;
+    let aux = auxiliary_spread(&round_medians_secs)?;
     Ok(StabilityResult {
         round_medians_secs,
         spread,
+        aux,
     })
 }
 
@@ -265,9 +348,15 @@ pub struct AbResult {
     /// そのまま `head_over_base` として出力し判定を逆転させていた）。
     pub b_over_a_ratio: f64,
     /// side A のラウンド間ばらつき（[`crate::relative_spread()`]）。
+    /// 判定（[`STABILITY_SPREAD_GATE`]）はこの値に対して行う。
     pub spread_a: f64,
     /// side B のラウンド間ばらつき。
     pub spread_b: f64,
+    /// side A の補助 spread 統計量（[`AuxiliarySpread`]。イシュー #1483）。
+    /// **判定には使わない**（[`AuxiliarySpread`] のドキュメント参照）。
+    pub aux_a: AuxiliarySpread,
+    /// side B の補助 spread 統計量。
+    pub aux_b: AuxiliarySpread,
 }
 
 /// [`run_ab`] が `b_over_a_ratio`（`median_b_secs / median_a_secs`）を計算する前に
@@ -390,6 +479,9 @@ pub fn run_ab<FA: FnMut(), FB: FnMut()>(
 
     validate_ab_medians(median_a_secs, median_b_secs)?;
 
+    let aux_a = auxiliary_spread(&a_round_medians_secs)?;
+    let aux_b = auxiliary_spread(&b_round_medians_secs)?;
+
     Ok(AbResult {
         a_round_medians_secs,
         b_round_medians_secs,
@@ -398,6 +490,8 @@ pub fn run_ab<FA: FnMut(), FB: FnMut()>(
         b_over_a_ratio: median_b_secs / median_a_secs,
         spread_a,
         spread_b,
+        aux_a,
+        aux_b,
     })
 }
 
@@ -693,5 +787,115 @@ mod tests {
             call_count.fetch_add(1, Ordering::SeqCst);
         });
         assert_eq!(call_count.load(Ordering::SeqCst), 20);
+    }
+
+    // --- 補助 spread 統計量（イシュー #1483。判定に使わない） ---
+
+    #[test]
+    fn auxiliary_spread_known_distribution_matches_stats_functions() {
+        // 1..=9（n=9 >= 2*1+2=4）: trimmed は Some、値は stats::trimmed_relative_spread
+        // と一致するはず（`auxiliary_spread` は単に `stats` 関数を束ねるだけであるという
+        // 契約を固定する）。
+        let samples: Vec<f64> = (1..=9).map(f64::from).collect();
+        let aux = auxiliary_spread(&samples).expect("成功するはず");
+        let expected_trimmed =
+            stats::trimmed_relative_spread(&samples, AUXILIARY_TRIM_PER_SIDE).unwrap();
+        assert_eq!(aux.trimmed, Some(expected_trimmed));
+        assert_eq!(
+            aux.iqr_over_median,
+            stats::iqr_over_median(&samples).unwrap()
+        );
+        assert_eq!(
+            aux.mad2_over_median,
+            stats::mad2_over_median(&samples).unwrap()
+        );
+    }
+
+    #[test]
+    fn auxiliary_spread_trimmed_is_none_when_len_is_below_required() {
+        // len=2 < 2*1+2=4 -> trimmed は None（ProtocolViolation を握りつぶさず
+        // 事前の長さ判定で決める設計。他 2 統計量は影響を受けず Ok のまま）。
+        let samples = vec![1.0, 2.0];
+        let aux = auxiliary_spread(&samples).expect("iqr/mad2 は成功するはず");
+        assert_eq!(aux.trimmed, None);
+    }
+
+    #[test]
+    fn auxiliary_spread_trimmed_is_some_when_len_is_at_required_boundary() {
+        // len=4 == 2*1+2 -> ちょうど required を満たし trimmed は Some。
+        let samples = vec![1.0, 2.0, 3.0, 4.0];
+        let aux = auxiliary_spread(&samples).expect("成功するはず");
+        assert!(aux.trimmed.is_some());
+    }
+
+    #[test]
+    fn auxiliary_spread_never_fails_when_relative_spread_succeeds() {
+        // relative_spread が Ok を返す入力（NaN なし・非空）なら auxiliary_spread も
+        // 常に Ok になることを、全ゼロ系列を含む複数系列で確認する
+        // （ab.rs doc の「新たな失敗モードを増やさない」根拠の裏付け）。
+        let series: Vec<Vec<f64>> = vec![
+            vec![0.0, 0.0, 0.0, 0.0],
+            vec![2.0, 2.0, 2.0, 2.0],
+            (1..=9).map(f64::from).collect(),
+            (1..=20).map(f64::from).collect(),
+            vec![1.0, 1.0, 1.0, 100.0, 1.0, 1.0, 1.0, 1.0],
+        ];
+        for samples in series {
+            assert!(
+                stats::relative_spread(&samples).is_ok(),
+                "前提: relative_spread が Ok のはず"
+            );
+            let aux = auxiliary_spread(&samples);
+            assert!(aux.is_ok(), "auxiliary_spread も Ok のはず: {samples:?}");
+        }
+    }
+
+    #[test]
+    fn run_stability_populates_aux_and_matches_spread_field() {
+        // rounds=4 は required=4 を満たすため aux.trimmed は Some のはず。
+        let ab_config = AbConfig::new(4, Duration::ZERO, Duration::ZERO).unwrap();
+        let measurement_config = MeasurementConfig::new(20, 20).unwrap();
+        let result = run_stability(&ab_config, &measurement_config, spin_workload).unwrap();
+
+        // 判定経路（`spread` フィールド）は既存どおり relative_spread と完全一致するはず
+        // （aux 追加が既存判定経路に影響しないことのロック）。
+        let expected_spread = stats::relative_spread(&result.round_medians_secs).unwrap();
+        assert_eq!(result.spread, expected_spread);
+
+        assert!(result.aux.trimmed.is_some());
+        assert!(result.aux.trimmed.unwrap().is_finite() && result.aux.trimmed.unwrap() >= 0.0);
+        assert!(result.aux.iqr_over_median.is_finite() && result.aux.iqr_over_median >= 0.0);
+        assert!(result.aux.mad2_over_median.is_finite() && result.aux.mad2_over_median >= 0.0);
+    }
+
+    #[test]
+    fn run_stability_aux_trimmed_is_none_for_minimal_two_rounds() {
+        // rounds=2 は AbConfig::new が許す最小値だが required=4 を満たさないため
+        // aux.trimmed は None になるはず。
+        let ab_config = AbConfig::new(2, Duration::ZERO, Duration::ZERO).unwrap();
+        let measurement_config = MeasurementConfig::new(20, 20).unwrap();
+        let result = run_stability(&ab_config, &measurement_config, spin_workload).unwrap();
+        assert_eq!(result.round_medians_secs.len(), 2);
+        assert_eq!(result.aux.trimmed, None);
+    }
+
+    #[test]
+    fn run_ab_populates_aux_a_and_aux_b() {
+        let ab_config = AbConfig::new(4, Duration::ZERO, Duration::ZERO).unwrap();
+        let measurement_config = MeasurementConfig::new(20, 20).unwrap();
+        let result = run_ab(
+            &ab_config,
+            &measurement_config,
+            spin_workload,
+            spin_workload,
+        )
+        .unwrap();
+
+        assert!(result.aux_a.trimmed.is_some());
+        assert!(result.aux_b.trimmed.is_some());
+        assert!(result.aux_a.iqr_over_median.is_finite());
+        assert!(result.aux_b.iqr_over_median.is_finite());
+        assert!(result.aux_a.mad2_over_median.is_finite());
+        assert!(result.aux_b.mad2_over_median.is_finite());
     }
 }

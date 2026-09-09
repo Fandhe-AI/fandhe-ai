@@ -1894,3 +1894,57 @@ CPU（`backend-cpu`）のみ `gemm_fp32_strict_into`／`upload_into` を
 返して既存経路へフォールバックするため挙動・性能とも本イシュー着手前と
 不変（実機なしのため未実測。§4 参照）。実測記録・Go/No-Go 判断は
 `docs/perf/train-resident-grad-device-update.md` を参照。
+
+## 追補: #1479 — resident `GradStaging` の重み勾配をホストへ読み出す公開 API
+
+上記「既知の縮小点」（`grads.get()` が resident weight に対して
+`Ok(None)` を返す点自体は非変更）とは別に、resident 経由の weight
+勾配は本追補以前はホストから一切観測できなかった（`Gradients` に
+寄与を残さず `GradStaging` へ直接書き込まれるため。#1212 の設計）。
+後続 #1480（CUDA Graph capture の bit 同一性比較へ各 step の重み勾配
+生値を追加）がこの読み出しを必要としたため、`DeviceParamStore` に
+読み出し専用の公開メソッドを 2 本追加した（`facade::Tape` から薄く
+委譲。`crates/facade/src/lib.rs::Tape::resident_grads_to_host`／
+`param_grads_to_host`）。
+
+- **`resident_grads_to_host`（strict 版）**: `GradStaging` に今回の
+  backward で新鮮に充填済みの slot のみ `Some(Tensor<f32>)` を返し、
+  未充填 slot（bias 等）は `None`。resident 未対応バックエンド
+  （`resident_grad_capability == Some(false)`。現状 CUDA／Metal）では
+  `BackendError::Unsupported` を返す（panic なし）
+- **`param_grads_to_host`（unified 版）**: strict 版と同じ内部経路
+  （`resident_filled_slots`／`download_staging_slots`。§2.1 の由来
+  検証ヘルパを `step()` と共有）を使いつつ、未充填 slot は `grads.
+  get(...)`（`step()` の非 resident フォールバックと同一経路）から
+  取得し、全パラメータの勾配を 3 バックエンド共通の読み出し窓として
+  返す。CUDA／Metal では常に unified 版のみが `Ok` を返す
+  （resident 未充填のため全 slot が `grads` フォールバックを通る）
+
+**strict／unified を分けた理由**: CUDA／Metal は `gemm_fp32_strict_into`
+未実装のため resident 経由の重み勾配は常に `Gradients` 側（`Op::
+LinearResident` の VJP がホスト経路で書き込んだ寄与）に載る。strict 版
+（`GradStaging` 限定）を CUDA／Metal で呼ぶと必ず `Unsupported` になり、
+#1480 が要求する「3 バックエンド横断で各 step の重み勾配を読む」こと
+ができない。unified 版が両者を吸収する。
+
+**契約**: いずれも `&self`・読み出し専用（`pending`／`backward_serial`／
+`grad_staging` を変更しない。呼び出し後も `step()` が通常どおり成功
+する）。呼び出し窓は `backward` 後〜`step()` 前限定（`step()` 消費後は
+`InvalidArgument`）。`Gradients::get` の意味論（`Ok(None)`＝「未到達」）
+は不変——本 API は `Gradients` を直接呼ばない strict 版と、`step()` と
+同一のフォールバック経路を再利用する unified 版のいずれも、既存の
+`grads.get()` 契約を変更しない。判定ロジック（鮮度＋同一性検査）は
+`step()` の分岐と単一のヘルパ（`resident_filled_slots`）へ集約した
+ため、二重管理・ドリフトの余地はない。
+
+実装の正は `crates/autodiff/src/optim/device_store.rs`
+（`resident_filled_slots`／`download_staging_slots`／
+`resident_grads_to_host`／`param_grads_to_host`）・`crates/facade/
+src/lib.rs`（`Tape` への委譲）とする。受入テストは `crates/autodiff/
+src/optim/device_store.rs::tests`（`MockDeviceOps` 経由の配管検証）・
+`crates/facade/tests/device_param_store_grad_readout.rs`（実 CPU
+カーネル・`fandhe_ai_backend_cpu::matmul_reference_fma` との bit 一致）・
+`crates/facade/tests/device_param_store_backend_parity.rs`
+（`grad_readout_contract_on_{metal,cuda}`。CUDA／Metal 実機 `#[ignore]`。
+本エージェント実行環境には実機がないため未実測のまま。#1480 が GB10
+実機で実行する）。

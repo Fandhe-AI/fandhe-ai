@@ -146,6 +146,142 @@ pub fn relative_spread(samples: &[f64]) -> Result<f64, BenchError> {
     Ok(spread)
 }
 
+/// `numerator / median` の 0 除算・非有限伝播を [`relative_spread`] と同じ
+/// fail-closed 契約で判定する私的ヘルパー。
+///
+/// [`trimmed_relative_spread`]・[`iqr_over_median`]・[`mad2_over_median`] の
+/// 3 関数はいずれも「分子（レンジ・IQR幅・2×MAD）を `median` で正規化する」
+/// という構造が共通するため、`median == 0.0` 時の扱い（分子も 0 のときのみ
+/// `Ok(0.0)`、それ以外は `NanSample`）と結果 NaN の拒否をここへ集約する。
+/// [`relative_spread`] 本体はこのヘルパーを使わず既存のまま独立に保つ
+/// （REQ-8・イシュー #1483: 既存の判定経路をバイト単位で不変に保つため）。
+fn ratio_over_median(numerator: f64, median: f64) -> Result<f64, BenchError> {
+    if median == 0.0 {
+        return if numerator == 0.0 {
+            Ok(0.0)
+        } else {
+            Err(BenchError::NanSample)
+        };
+    }
+    let ratio = numerator / median;
+    if ratio.is_nan() {
+        return Err(BenchError::NanSample);
+    }
+    Ok(ratio)
+}
+
+/// サンプル列の「トリム済みレンジ」相対ばらつきを求める（判定に使わない補助統計量。
+/// `docs/perf/metal-bench-noise-protocol.md` §8 案 A）。
+///
+/// 昇順ソート後、上下各 `trim_per_side` 個を除いた残り `n - 2*trim_per_side` 個の
+/// レンジ（max − min）を、**全系列**（トリム前）の median（[`median_q1_q3`] と同一定義）
+/// で正規化する。分母をトリム前 median に固定するのは
+/// `docs/perf/logs/metal-bench-robust-stats-1266/reapply.py` の参照実装
+/// （`trimmed_range_spread`）と定義を一致させ、既存の実測再適用値
+/// （`docs/perf/metal-bench-noise-protocol.md` §8.3）と突合可能にするため。
+///
+/// [`ab::auxiliary_spread`](crate::ab) から呼ばれ、[`crate::ab::AuxiliarySpread::trimmed`]
+/// を埋める。**判定に使わない補助レポート値であり、[`crate::ab::STABILITY_SPREAD_GATE`]
+/// と比較して安定性ゲート判定に転用してはならない**（トリムはスパイクを機械的に
+/// 除外するため、`relative_spread` と同じ閾値に対して実質的なゲート緩和になる。
+/// `docs/perf/metal-bench-noise-protocol.md` §8.2）。
+///
+/// # Errors
+///
+/// - `samples` が空の場合は `BenchError::EmptySamples`
+/// - NaN が混入している場合は `BenchError::NanSample`
+/// - `samples.len() < 2 * trim_per_side + 2`（トリム後に 2 要素未満しか残らず
+///   レンジを定義できない。`reapply.py` の `n - 2k < 2` 判定と同一式）の場合、
+///   または `trim_per_side` が大きすぎて `2 * trim_per_side + 2` 自体が
+///   `usize` の範囲で計算できない場合（例: `trim_per_side = usize::MAX`）は
+///   いずれも `BenchError::ProtocolViolation`
+/// - median が 0.0 でトリム後の max/min のいずれかが非 0 の場合、
+///   または結果が NaN になる場合は `BenchError::NanSample`
+///   （[`relative_spread`] と同じ fail-closed 方針）
+pub fn trimmed_relative_spread(samples: &[f64], trim_per_side: usize) -> Result<f64, BenchError> {
+    // `median_q1_q3` を先に呼び、空・NaN のエラー優先順位を `relative_spread` と揃える。
+    let Quartiles { median, .. } = median_q1_q3(samples)?;
+
+    let n = samples.len();
+    // codex-review 指摘（PR #1491）: `2 * trim_per_side + 2` を無検査の
+    // usize 演算で計算すると、巨大な `trim_per_side`（例: `usize::MAX`）で
+    // オーバーフローする。overflow-checks 有効時はこの式自体で panic、
+    // 無効時も `required` が 0 へラップして下の `n < required` 検査を
+    // すり抜け、後続の `sorted[trim_per_side..n - trim_per_side]` スライス
+    // 操作で panic する（AGENTS.md「本番経路の panic 禁止」）。
+    // `checked_mul`/`checked_add` で計算不能を検出し、`n` を明らかに超える
+    // トリム幅と同様に `ProtocolViolation` として fail-closed に拒否する。
+    match trim_per_side
+        .checked_mul(2)
+        .and_then(|doubled| doubled.checked_add(2))
+    {
+        Some(required) if n >= required => {}
+        Some(required) => {
+            return Err(BenchError::ProtocolViolation(format!(
+                "トリム済みレンジには samples.len() >= 2*trim_per_side+2 が必須。\
+                 n={n}, trim_per_side={trim_per_side}, 必要下限={required}"
+            )));
+        }
+        None => {
+            return Err(BenchError::ProtocolViolation(format!(
+                "トリム済みレンジには samples.len() >= 2*trim_per_side+2 が必須だが、\
+                 trim_per_side={trim_per_side} は 2*trim_per_side+2 の計算自体が \
+                 usize の範囲を超えるため不正な入力として拒否する。n={n}"
+            )));
+        }
+    }
+
+    let mut sorted: Vec<f64> = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let trimmed = &sorted[trim_per_side..n - trim_per_side];
+
+    let min = trimmed[0];
+    let max = trimmed[trimmed.len() - 1];
+    ratio_over_median(max - min, median)
+}
+
+/// サンプル列の IQR（四分位範囲）相対ばらつきを求める（判定に使わない補助統計量。
+/// `docs/perf/metal-bench-noise-protocol.md` §8 案 C）。
+///
+/// `(q3 - q1) / median`（いずれも [`median_q1_q3`] の定義）。分位点自体が
+/// 極端値の影響を受けにくいため、外れ値 1 点によるスパイクを自然に抑える。
+///
+/// [`ab::auxiliary_spread`](crate::ab) から呼ばれる。**判定に使わない補助
+/// レポート値**である点は [`trimmed_relative_spread`] と同じ契約
+/// （`crate::ab::STABILITY_SPREAD_GATE` への転用禁止）。
+///
+/// # Errors
+///
+/// [`relative_spread`] と同じ（空 → `EmptySamples`、NaN 混入 → `NanSample`、
+/// median==0 かつ q3==q1 のときのみ `Ok(0.0)`・それ以外は `NanSample`）。
+pub fn iqr_over_median(samples: &[f64]) -> Result<f64, BenchError> {
+    let Quartiles { median, q1, q3 } = median_q1_q3(samples)?;
+    ratio_over_median(q3 - q1, median)
+}
+
+/// サンプル列の 2×MAD（中央絶対偏差）相対ばらつきを求める（判定に使わない補助統計量。
+/// `docs/perf/metal-bench-noise-protocol.md` §8 案 D）。
+///
+/// `2 * median(|x - median(samples)|) / median(samples)`。内側の
+/// `median(|x - median|)` も [`median_q1_q3`] と同一の median-of-halves 定義で
+/// 求める（偏差列に対して改めて `median_q1_q3` を適用する）。係数 2 は
+/// 正規分布下で IQR とスケールを揃えるための慣用的な補正（`reapply.py`
+/// `mad_over_median` を参照）。
+///
+/// [`ab::auxiliary_spread`](crate::ab) から呼ばれる。**判定に使わない補助
+/// レポート値**である点は [`trimmed_relative_spread`] と同じ契約。
+///
+/// # Errors
+///
+/// [`relative_spread`] と同じ（空 → `EmptySamples`、NaN 混入 → `NanSample`、
+/// median==0 かつ MAD==0 のときのみ `Ok(0.0)`・それ以外は `NanSample`）。
+pub fn mad2_over_median(samples: &[f64]) -> Result<f64, BenchError> {
+    let Quartiles { median, .. } = median_q1_q3(samples)?;
+    let deviations: Vec<f64> = samples.iter().map(|&x| (x - median).abs()).collect();
+    let mad = median_q1_q3(&deviations)?.median;
+    ratio_over_median(2.0 * mad, median)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +353,178 @@ mod tests {
             relative_spread(&[1.0, f64::NAN]),
             Err(BenchError::NanSample)
         );
+    }
+
+    // --- 補助 spread 統計量（イシュー #1483。判定に使わない） ---
+
+    #[test]
+    fn trimmed_relative_spread_k0_matches_relative_spread() {
+        // k=0 は「トリムなし」であり relative_spread と完全一致するはず。
+        let samples: Vec<f64> = (1..=9).map(f64::from).collect();
+        let expected = relative_spread(&samples).expect("成功するはず");
+        let actual = trimmed_relative_spread(&samples, 0).expect("成功するはず");
+        assert!((actual - expected).abs() < 1e-12);
+
+        let samples20: Vec<f64> = (1..=20).map(f64::from).collect();
+        let expected20 = relative_spread(&samples20).expect("成功するはず");
+        let actual20 = trimmed_relative_spread(&samples20, 0).expect("成功するはず");
+        assert!((actual20 - expected20).abs() < 1e-12);
+    }
+
+    #[test]
+    fn trimmed_relative_spread_odd_count_known_distribution() {
+        // 1..=9（median=5, idx=4）。k=1 でトリム後は 2..=8（7 要素）→ レンジ 6。
+        let samples: Vec<f64> = (1..=9).map(f64::from).collect();
+        let actual = trimmed_relative_spread(&samples, 1).expect("成功するはず");
+        // (8-2)/5 = 1.2
+        assert!((actual - 1.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn iqr_over_median_odd_count_known_distribution() {
+        // 1..=9: q1=3.0, q3=7.0, median=5.0 -> (7-3)/5 = 0.8
+        let samples: Vec<f64> = (1..=9).map(f64::from).collect();
+        let actual = iqr_over_median(&samples).expect("成功するはず");
+        assert!((actual - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mad2_over_median_odd_count_known_distribution() {
+        // 1..=9: median=5.0, 偏差=[4,3,2,1,0,1,2,3,4] をソートすると
+        // [0,1,1,2,2,3,3,4,4] で median-of-halves idx=4 -> 2.0。2*2/5 = 0.8。
+        let samples: Vec<f64> = (1..=9).map(f64::from).collect();
+        let actual = mad2_over_median(&samples).expect("成功するはず");
+        assert!((actual - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn even_count_iqr_and_trimmed_known_distribution() {
+        // 1..=20: median=11.0, q1=6.0, q3=15.0（even_count_known_distribution 参照）。
+        let samples: Vec<f64> = (1..=20).map(f64::from).collect();
+        let iqr = iqr_over_median(&samples).expect("成功するはず");
+        assert!((iqr - (15.0 - 6.0) / 11.0).abs() < 1e-12);
+
+        // k=1 トリム後は 2..=19（18 要素）-> レンジ 17。
+        let trimmed = trimmed_relative_spread(&samples, 1).expect("成功するはず");
+        assert!((trimmed - (19.0 - 2.0) / 11.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn trimmed_relative_spread_rejects_insufficient_samples() {
+        // n=3, k=1 -> 必要下限 2*1+2=4 を満たさない。
+        let samples = vec![1.0, 2.0, 3.0];
+        assert!(matches!(
+            trimmed_relative_spread(&samples, 1),
+            Err(BenchError::ProtocolViolation(_))
+        ));
+
+        // n=4, k=1 -> 必要下限 4 をちょうど満たす（中央 2 要素のレンジ）。
+        let samples4 = vec![1.0, 2.0, 3.0, 4.0];
+        assert!(trimmed_relative_spread(&samples4, 1).is_ok());
+
+        // n=4, k=2 -> 必要下限 2*2+2=6 を満たさない。
+        assert!(matches!(
+            trimmed_relative_spread(&samples4, 2),
+            Err(BenchError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn trimmed_relative_spread_rejects_overflowing_trim_per_side() {
+        // codex-review 指摘（PR #1491）の回帰テスト: `2 * trim_per_side + 2` が
+        // usize の範囲を超える巨大な trim_per_side（usize::MAX・usize::MAX / 2 付近）は
+        // panic せず ProtocolViolation として fail-closed に拒否されること。
+        let samples = vec![1.0, 2.0, 3.0, 4.0];
+        assert!(matches!(
+            trimmed_relative_spread(&samples, usize::MAX),
+            Err(BenchError::ProtocolViolation(_))
+        ));
+        assert!(matches!(
+            trimmed_relative_spread(&samples, usize::MAX / 2),
+            Err(BenchError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn auxiliary_stats_all_same_value_is_zero() {
+        let samples = vec![2.0, 2.0, 2.0, 2.0];
+        assert_eq!(trimmed_relative_spread(&samples, 1), Ok(0.0));
+        assert_eq!(iqr_over_median(&samples), Ok(0.0));
+        assert_eq!(mad2_over_median(&samples), Ok(0.0));
+    }
+
+    #[test]
+    fn auxiliary_stats_all_zero_is_zero() {
+        let samples = vec![0.0, 0.0, 0.0, 0.0];
+        assert_eq!(trimmed_relative_spread(&samples, 1), Ok(0.0));
+        assert_eq!(iqr_over_median(&samples), Ok(0.0));
+        assert_eq!(mad2_over_median(&samples), Ok(0.0));
+    }
+
+    #[test]
+    fn auxiliary_stats_propagate_empty_and_nan_errors() {
+        assert_eq!(
+            trimmed_relative_spread(&[], 1),
+            Err(BenchError::EmptySamples)
+        );
+        assert_eq!(iqr_over_median(&[]), Err(BenchError::EmptySamples));
+        assert_eq!(mad2_over_median(&[]), Err(BenchError::EmptySamples));
+
+        let nan_samples = [1.0, f64::NAN, 3.0, 4.0];
+        assert_eq!(
+            trimmed_relative_spread(&nan_samples, 1),
+            Err(BenchError::NanSample)
+        );
+        assert_eq!(iqr_over_median(&nan_samples), Err(BenchError::NanSample));
+        assert_eq!(mad2_over_median(&nan_samples), Err(BenchError::NanSample));
+    }
+
+    #[test]
+    fn auxiliary_stats_never_exceed_relative_spread() {
+        // トリム・IQR・MAD はいずれもレンジより小さいかスパイクの影響を受けにくいため、
+        // 素の relative_spread 以下になるはず（複数系列で機械的に確認）。
+        let series: Vec<Vec<f64>> = vec![
+            (1..=9).map(f64::from).collect(),
+            (1..=20).map(f64::from).collect(),
+            vec![1.0, 1.0, 1.0, 100.0, 1.0, 1.0, 1.0, 1.0],
+        ];
+        for samples in series {
+            let raw = relative_spread(&samples).expect("成功するはず");
+            let trimmed = trimmed_relative_spread(&samples, 1).expect("成功するはず");
+            let iqr = iqr_over_median(&samples).expect("成功するはず");
+            assert!(trimmed <= raw + 1e-12, "trimmed={trimmed} raw={raw}");
+            assert!(iqr <= raw + 1e-12, "iqr={iqr} raw={raw}");
+        }
+    }
+
+    #[test]
+    fn auxiliary_stats_match_reapply_reference_1255_run4_size1024() {
+        // docs/perf/logs/metal-gemm-transpose-route-ab-1242/1255-phase1_run4.log:429
+        // の size=1024 系列（round_medians_secs）を
+        // docs/perf/logs/metal-bench-robust-stats-1266/reapply.md の該当行
+        // （1255-run4 | 1024 | 0.8371 | 0.0184✓ | 0.0110✓ | ... | 0.0139✓）と突合する。
+        let samples = [
+            1.155958e-3,
+            1.168250e-3,
+            1.146875e-3,
+            1.160167e-3,
+            1.151459e-3,
+            1.162667e-3,
+            2.112750e-3,
+            1.153833e-3,
+            1.141542e-3,
+            1.164250e-3,
+        ];
+        let raw = relative_spread(&samples).expect("成功するはず");
+        assert!((raw - 0.8371).abs() < 1e-4, "raw={raw}");
+
+        let trimmed = trimmed_relative_spread(&samples, 1).expect("成功するはず");
+        assert!((trimmed - 0.0184).abs() < 1e-4, "trimmed={trimmed}");
+
+        let iqr = iqr_over_median(&samples).expect("成功するはず");
+        assert!((iqr - 0.0110).abs() < 1e-4, "iqr={iqr}");
+
+        let mad2 = mad2_over_median(&samples).expect("成功するはず");
+        assert!((mad2 - 0.0139).abs() < 1e-4, "mad2={mad2}");
     }
 }
