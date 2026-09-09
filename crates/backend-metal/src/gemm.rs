@@ -2256,7 +2256,7 @@ impl MetalGemm {
     /// （`Self::encode_tiled_by_class`。`crate::tile::select_for_device`
     /// が選ぶ構成）へフォールバックする（[`SplitKRoute::Classic`]。
     /// `reason` は [`SplitKFallbackReason::NotEligible`]）。`Some(plan)`
-    /// の場合は [`Self::dispatch_split_k_strided_prepared_with_plan`] へ
+    /// の場合は `Self::dispatch_split_k_strided_prepared_with_plan` へ
     /// 委譲する。性能 A/B・`dispatch_auto` への結線可否は後続イシュー
     /// （#1475/#1476）のスコープ（`docs/perf/metal-gemm-splitk-two-pass.md`
     /// 「スコープ外」節）。
@@ -2280,7 +2280,7 @@ impl MetalGemm {
     /// 明示的に検証できる。ただしクレート外部からの無条件到達を防ぐ
     /// 別の可視性ゲート（`internal-diagnostics` feature。PR #1496
     /// codex-review P1 再指摘対応）を持つ。詳細は
-    /// [`Self::dispatch_split_k_strided_prepared_with_plan`] doc
+    /// `Self::dispatch_split_k_strided_prepared_with_plan` doc
     /// コメント参照。
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_split_k_strided_prepared(
