@@ -60,21 +60,25 @@ pub fn build_model() -> Sequential {
 }
 
 /// [`train_on_cuda`] の戻り値型（clippy `type_complexity` 回避。
-/// `(loss 列, 各 step の入力勾配（d(loss)/d(x)）列, 各 step 完了直後の
-/// パラメータ列, 最終パラメータ列)`。フィールドの意味は
-/// [`train_on_cuda`] doc コメント参照）。
+/// `(loss 列, 各 step の入力勾配（d(loss)/d(x)）列, 各 step の重み勾配
+/// （`Tape::param_grads_to_host` の戻り値そのもの。パラメータごとの
+/// `Vec<Tensor<f32>>`）列, 各 step 完了直後のパラメータ列, 最終
+/// パラメータ列)`。フィールドの意味は [`train_on_cuda`] doc コメント
+/// 参照）。
 pub type TrainOnCudaResult = (
     Vec<f32>,
     Vec<Tensor<f32>>,
+    Vec<Vec<Tensor<f32>>>,
     Vec<Vec<Tensor<f32>>>,
     Vec<Tensor<f32>>,
 );
 
 /// `device_param_store_train.rs::train_with_device_param_store` の CUDA
 /// 版。各 step の loss（`f32` そのまま。ビット比較は呼び出し元が
-/// `to_bits()` で行う）・各 step の完了直後にホストへ同期したパラメータ
-/// 列（`per_step_params`）・最終的にホストへ同期したパラメータ列
-/// （`final_params`）の 3 つを返す。
+/// `to_bits()` で行う）・各 step の入力勾配（`per_step_dinput`）・各
+/// step の重み勾配（`per_step_grads`。#1480）・各 step の完了直後に
+/// ホストへ同期したパラメータ列（`per_step_params`）・最終的にホストへ
+/// 同期したパラメータ列（`final_params`）の 5 つを返す。
 ///
 /// `ordinal` を引数化している理由（codex-review P2 指摘対応。イシュー
 /// #1349）: opt-in（`FANDHE_AI_CUDA_GRAPH_STEP`／
@@ -104,25 +108,50 @@ pub type TrainOnCudaResult = (
 /// 経路を含む）が capture 経路・非 capture 経路で bit 同一であることを
 /// 直接検証する。
 ///
-/// **重み自体の勾配（`Op::LinearResident.weight` に対応する
-/// `Gradients` の生値）は引き続き含まない**: `weight` は
-/// `Op::ResidentLeaf`（`optim::device_store::ResidentLeaf`）であり、
+/// **重み自体の勾配を per-step で比較対象へ加える（イシュー #1480。
+/// 旧稿は「引き続き含まない」としていたが、依存イシュー #1479 が
+/// 読み出し手段を追加したため本節を全面的に書き換える）**: `weight`
+/// は `Op::ResidentLeaf`（`optim::device_store::ResidentLeaf`）であり、
 /// このハンドルは意図的に `node_id` を公開しない（`ResidentLeaf` の
 /// ドキュメンテーションコメント参照）ため、`Gradients::get()` を呼べる
-/// `Var` を外部（`facade` 利用者側）から構築する手段が存在しない。
-/// これは CUDA が `gemm_fp32_strict_into` を実装しておらずホスト
-/// フォールバック経路（`fill_resident_weight_grad` が `Ok(false)` を
-/// 返し `ops.gemm_fp32_strict` へ委譲する。`fandhe_ai_autodiff::grad::
-/// vjp` の `Op::LinearResident` 分岐コメント参照）を通る場合でも
-/// 変わらない（勾配自体は内部で計算・蓄積されるが、`ResidentLeaf` が
-/// `Var` へ変換できない構造的な制約のため公開 API から読み出せない）。
-/// ホストへ読み出す公開 API（`facade::Tape` 経由）は現状存在しないため、
-/// 重み勾配そのものの per-step 比較には新規公開 API の追加が要る
-/// （本 PR のスコープ外。`.claude/rules/out-of-scope-tracking.md` に
-/// 従い、必要であれば別 Issue で追跡する）。上記の per-step パラメータ
-/// 比較は「同一 step 開始時点の重みに対して同一の SGD 更新が適用された」
-/// ことを間接的に検証するため、重み勾配自体の直接比較に近い検出力を
-/// 持つ。
+/// `Var` を外部（`facade` 利用者側）から構築する手段は依然として
+/// 存在しない。#1479 はこの制約を回避するのではなく、
+/// `DeviceParamStore` 自身が `pending`（`sync_to_host` と同じ登録順）
+/// を経由して直接読み出す新規公開 API（`facade::Tape::
+/// resident_grads_to_host`〈strict 版。resident staging 限定〉／
+/// `Tape::param_grads_to_host`〈統合版。resident 未充填 slot は
+/// `grads.get(...)` へフォールバック〉）を追加した。
+///
+/// **CUDA では統合版 `param_grads_to_host` を使う理由**: CUDA は
+/// `gemm_fp32_strict_into` 未実装のため `Op::LinearResident` の重み
+/// 勾配は resident staging（`GradStaging`）へ書き込まれず、backward が
+/// ホスト経路（`fill_resident_weight_grad` が `Ok(false)` を返し
+/// `ops.gemm_fp32_strict` へ委譲。`fandhe_ai_autodiff::grad::vjp` の
+/// `Op::LinearResident` 分岐コメント参照）で `Gradients` へ寄与を
+/// 書き込む。strict 版 `resident_grads_to_host` を CUDA で呼ぶと
+/// `resident_grad_capability` が `Some(false)` のため必ず
+/// `BackendError::Unsupported` を返す（`crates/facade/tests/
+/// device_param_store_backend_parity.rs::assert_grad_readout_contract`
+/// が別途検証）。統合版 `param_grads_to_host` は全 slot がこの
+/// `grads.get(...)` フォールバック経路を通ることで `Ok` を返す。
+///
+/// **呼び出し窓**: `backward_device_param_store`（backward 実行）の
+/// 直後・`step_device_param_store`（`pending` を消費する SGD 更新）の
+/// 前に限る（`DeviceParamStore::param_grads_to_host` doc の「呼び出し
+/// 窓」契約）。この窓を外すと `BackendError::InvalidArgument` を返す。
+///
+/// **CUDA での本比較が検証する内容**: CUDA は resident 経路
+/// （`GradStaging` へのデバイス直接書き込み）に到達しないため、本比較
+/// は「backward が計算した重み勾配そのもの（ホスト経路で `Gradients`
+/// へ書き込まれた値）が capture 経路・非 capture 経路で bit 同一」で
+/// あることの直接検証であり、`GradStaging` の D2H 検証ではない（CPU
+/// のみ resident 経路が成立する。`docs/device-resident-update-design.md`
+/// 追補 #1479 参照）。既存の `dinput`（d(loss)/d(x)）比較が「backward
+/// の入力側端点」を見るのに対し、本比較は「backward のパラメータ側
+/// 端点（SGD 更新の入力そのもの）」を見る点で相補的である。上記の
+/// per-step パラメータ比較（更新後の重み）と合わせて、SGD 更新の
+/// 入力・出力の両端が capture 経路・非 capture 経路で bit 同一である
+/// ことを揃って検証する。
 pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> TrainOnCudaResult {
     let model = build_model();
     let (x_data, y_data) = gen_regression_data(SEED_DATA);
@@ -135,6 +164,7 @@ pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> TrainOnCudaResult
     let config = FacadeSgdConfig::new(lr);
     let mut log = Vec::with_capacity(steps);
     let mut per_step_dinput = Vec::with_capacity(steps);
+    let mut per_step_grads = Vec::with_capacity(steps);
     let mut per_step_params = Vec::with_capacity(steps);
 
     for _ in 0..steps {
@@ -168,6 +198,19 @@ pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> TrainOnCudaResult
             .clone();
         per_step_dinput.push(dinput);
 
+        // イシュー #1480: backward 直後・`step_device_param_store`
+        // （`pending` を消費する SGD 更新）の前という呼び出し窓内で
+        // 各 step の重み勾配を読み出す（`train_on_cuda` doc コメント
+        // 「重み自体の勾配を per-step で比較対象へ加える」参照）。
+        // strict 版 `resident_grads_to_host` は CUDA で必ず
+        // `Unsupported` を返す設計（`gemm_fp32_strict_into` 未実装）
+        // のため、統合版 `param_grads_to_host`（resident 未充填 slot は
+        // `grads.get(...)` フォールバック）を使う。
+        let step_grads = tape
+            .param_grads_to_host(&store, &grads)
+            .expect("param_grads_to_host: backward 直後・step 前の呼び出し窓内で呼んでいるはず");
+        per_step_grads.push(step_grads);
+
         tape.step_device_param_store(&mut store, &grads, &config)
             .unwrap();
 
@@ -181,7 +224,13 @@ pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> TrainOnCudaResult
     let final_tape =
         fandhe_ai::tape_for(Device::Cuda(ordinal)).expect("CUDA device must be available");
     let final_params = final_tape.sync_device_param_store_to_host(&store).unwrap();
-    (log, per_step_dinput, per_step_params, final_params)
+    (
+        log,
+        per_step_dinput,
+        per_step_grads,
+        per_step_params,
+        final_params,
+    )
 }
 
 /// loss 列・各 step の入力勾配（d(loss)/d(x)）列・各 step 完了直後の
@@ -198,10 +247,16 @@ pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> TrainOnCudaResult
 /// 是正）: `train_on_cuda` doc コメント「各 step の入力勾配
 /// d(loss)/d(x) を比較対象に加える理由」参照。`step[{i}].dinput[{j}]`
 /// ラベルで出力する（`param` と衝突しない専用プレフィックス）。
+///
+/// `per_step_grads` 引数の追加（イシュー #1480）: `train_on_cuda` doc
+/// コメント「重み自体の勾配を per-step で比較対象へ加える」参照。
+/// `step[{step}].grad[{p}][{j}]` ラベルで出力する（`dinput`／`param`
+/// いずれとも衝突しない専用プレフィックス）。
 pub fn print_bit_identity_report(
     label: &str,
     log: &[f32],
     per_step_dinput: &[Tensor<f32>],
+    per_step_grads: &[Vec<Tensor<f32>>],
     per_step_params: &[Vec<Tensor<f32>>],
     final_params: &[Tensor<f32>],
 ) {
@@ -214,6 +269,15 @@ pub fn print_bit_identity_report(
         let slice = contiguous.as_slice().unwrap_or(&[]);
         for (j, v) in slice.iter().enumerate() {
             println!("step[{step}].dinput[{j}].bits = {:#010x}", v.to_bits());
+        }
+    }
+    for (step, grads) in per_step_grads.iter().enumerate() {
+        for (p, tensor) in grads.iter().enumerate() {
+            let contiguous = tensor.contiguous();
+            let slice = contiguous.as_slice().unwrap_or(&[]);
+            for (j, v) in slice.iter().enumerate() {
+                println!("step[{step}].grad[{p}][{j}].bits = {:#010x}", v.to_bits());
+            }
         }
     }
     for (step, params) in per_step_params.iter().enumerate() {
