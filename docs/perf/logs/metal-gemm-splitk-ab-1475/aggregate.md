@@ -56,6 +56,6 @@
 
 ## verdict
 
-**ADOPT**（target_shapes=9/9・target_ok=True・control_shapes=3/3・control_ok=True）
+**undetermined**（正式な ADOPT/REJECT は 5 run 完了後にのみ出力する。n_runs=3 が MIN_FORMAL_RUNS=5 未満のため暫定値。n_runs=3・enough_runs=False・target_shapes=9/9・target_complete=True・control_shapes=3/3・control_complete=True）
 
 

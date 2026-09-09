@@ -31,6 +31,14 @@ from dataclasses import dataclass, field
 ADOPT_TARGET_MIN_SPEEDUP = 1.5
 ADOPT_CONTROL_MIN_SPEEDUP = 0.95
 
+# AGENTS.md の「5 回計測の中央値」契約・本 example が事前登録した 5 run
+# 契約（イシュー #1475 コメント）。正式な ADOPT/REJECT はこの本数の run
+# ログが揃って初めて出力してよい（イシュー #1499 codex-review P1 指摘:
+# 完全性検査が「渡された run 数 n_runs との一致」しか見ておらず、1〜3 run
+# でも全形状さえ揃えば正式判定を出力していた）。3 run 等で打ち切った場合は
+# 暫定値として明示し、正式な ADOPT/REJECT は出力しない。
+MIN_FORMAL_RUNS = 5
+
 # `crates/backend-metal/examples/gemm_splitk_ab_bench.rs` の `target_shapes`／
 # `control_shapes`（`TARGET_MN`／`CONTROL_MN`／`K_LIST`）と同一の期待形状
 # 集合。各 run は対象 9・対照 3 の各キーをちょうど 1 行ずつ持つことを
@@ -83,6 +91,40 @@ def check_run_shape_completeness(
         violations.append(
             f"run{run_index}: kind={key[0]} m={key[1]} n={key[2]} k={key[3]} "
             f"は期待形状集合外（n={counts[key]}）"
+        )
+    return violations
+
+
+def check_env_guard_gated_pass(text: str, run_index: int) -> list[str]:
+    """1 run 分のログテキストが専有ゲート（`env_guard`）を実施し、かつ成立
+    していることを検査する純関数（イシュー #1499 codex-review P2 指摘）。
+
+    `parse_log` の `verdict=undetermined` 検出だけでは、`--max-load-avg`
+    未指定でゲートを実施せず全計測行を出力した「記録のみ」のログ
+    （ゲート自体が走っていない）を素通りさせてしまう。専有ゲート成立を
+    前提とする判定契約（`run_gated.sh` 経由の実行を正式判定の入力とする
+    運用）を守るため、`env_guard_mode=gated` と
+    `env_guard_overall verdict=pass` の両方がログ中に存在することを
+    明示的に確認する。
+    """
+    has_gated_mode = False
+    has_overall_pass = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "env_guard_mode=gated":
+            has_gated_mode = True
+        elif stripped.startswith("env_guard_overall ") and "verdict=pass" in stripped:
+            has_overall_pass = True
+    violations: list[str] = []
+    if not has_gated_mode:
+        violations.append(
+            f"run{run_index}: env_guard_mode=gated が見つからない"
+            "（専有ゲート未実施・記録のみモードの可能性）"
+        )
+    if not has_overall_pass:
+        violations.append(
+            f"run{run_index}: env_guard_overall verdict=pass が見つからない"
+            "（専有ゲート不成立、または env_guard 自体が未実行）"
         )
     return violations
 
@@ -150,12 +192,15 @@ def aggregate(
     """複数 run のログテキストを集約する。undetermined が 1 件でもあれば
     2 番目の戻り値が True になり、その場合 shapes は参考値として扱う
     （判定には使わない）。3 番目の戻り値は run ごとの期待形状集合との
-    不一致（欠落・重複・想定外キー）の説明文（空なら全 run が完全）で、
-    1 件でもあれば 2 番目の戻り値も True にする（イシュー #1499
-    codex-review P2 指摘: 集約後の総件数一致だけでは run をまたいだ
-    欠落／重複の相殺を検出できないため、run 単位で
-    `check_run_shape_completeness` を呼び、run の所属情報を保ったまま
-    検査する）。
+    不一致（欠落・重複・想定外キー。`check_run_shape_completeness`）、
+    および専有ゲート未実施・不成立（`check_env_guard_gated_pass`。イシュー
+    #1499 codex-review P2 指摘）の説明文（空なら全 run が完全かつゲート
+    成立済み）で、1 件でもあれば 2 番目の戻り値も True にする（形状の
+    欠落・重複は集約後の総件数一致だけでは run をまたいだ相殺を検出
+    できないため run 単位で検査し、専有ゲートは `verdict=undetermined`
+    行の有無だけでは「ゲート自体が未実施（記録のみモード）」を検出
+    できないため `env_guard_mode`／`env_guard_overall` を明示的に検査
+    する）。
     """
     shapes: dict[tuple[str, int, int, int], ShapeSamples] = {}
     any_undetermined = False
@@ -167,6 +212,9 @@ def aggregate(
         run_violations = check_run_shape_completeness(rows, run_index)
         if run_violations:
             shape_violations.extend(run_violations)
+        env_guard_violations = check_env_guard_gated_pass(text, run_index)
+        if env_guard_violations:
+            shape_violations.extend(env_guard_violations)
         for row in rows:
             kind = row.get("kind")
             if kind is None or "m" not in row or "n" not in row or "k" not in row:
@@ -200,7 +248,7 @@ def render_markdown(
                       "または run 単位の期待形状集合検査で不一致（欠落・重複・想定外キー）"
                       "を検出した。以下は参考値であり判定には使わない。**\n")
     if shape_violations:
-        lines.append("\n### run 単位の形状不一致\n")
+        lines.append("\n### run 単位の形状不一致・専有ゲート不成立\n")
         for v in shape_violations:
             lines.append(f"- {v}")
         lines.append("")
@@ -232,17 +280,29 @@ def render_markdown(
         # ADOPT を出力し得た）。各形状の `speedups` 件数が `n_runs`
         # （渡された run ログの本数）と一致することまで確認し、AGENTS.md
         # の「5 回計測の中央値・5/5 run」契約を機械的に担保する。
+        #
+        # 加えて、n_runs 自体が MIN_FORMAL_RUNS（5）未満の場合は、たとえ
+        # 渡された run ログすべてで形状が完全に揃っていても正式な
+        # ADOPT/REJECT を出力しない（イシュー #1499 codex-review P1 指摘:
+        # 「渡された run 数との一致」しか見ていなかったため、1〜3 run で
+        # 打ち切った暫定計測でも正式判定を誤って出力し得た）。
+        enough_runs = n_runs >= MIN_FORMAL_RUNS
         target_complete = len(target_rows) == 9 and all(
             len(t.speedups) == n_runs for t in target_rows
         )
         control_complete = len(control_rows) == 3 and all(
             len(c.speedups) == n_runs for c in control_rows
         )
-        if not (target_complete and control_complete):
+        if not (enough_runs and target_complete and control_complete):
+            reason = (
+                f"n_runs={n_runs} が MIN_FORMAL_RUNS={MIN_FORMAL_RUNS} 未満のため暫定値"
+                if not enough_runs
+                else "対象・対照形状のいずれかが全 run に揃っていない"
+            )
             lines.append(
                 "\n## verdict\n\n**undetermined**"
-                "（run の完全性検査が不成立: 対象・対照形状のいずれかが"
-                f" 全 {n_runs} run に揃っていない。"
+                f"（正式な ADOPT/REJECT は {MIN_FORMAL_RUNS} run 完了後にのみ出力する。"
+                f"{reason}。n_runs={n_runs}・enough_runs={enough_runs}・"
                 f"target_shapes={len(target_rows)}/9・target_complete={target_complete}・"
                 f"control_shapes={len(control_rows)}/3・control_complete={control_complete}）\n"
             )
@@ -314,7 +374,15 @@ def self_test() -> None:
     def make_run(
         drop: tuple[str, int, int, int] | None,
         dup: tuple[str, int, int, int] | None = None,
+        gated: bool = True,
     ) -> str:
+        """1 run 分の擬似ログを生成する。`gated=True`（既定）では実運用の
+        `run_gated.sh` が出力する専有ゲート成立ログ（`env_guard_mode=gated`・
+        `env_guard_overall verdict=pass`）を模した行も含める
+        （`check_env_guard_gated_pass` の自己検証・イシュー #1499
+        codex-review P2 指摘）。`gated=False` はゲート未実施／不成立の
+        「記録のみ」ログを模し、専有ゲート検査自体の自己検証に使う。
+        """
         lines_: list[str] = []
         for mn in target_mn:
             for k in k_list:
@@ -339,6 +407,12 @@ def self_test() -> None:
             lines_.append(line)
             if dup == ("control", control_mn, control_mn, k):
                 lines_.append(line)
+        if gated:
+            lines_.append("== env_guard(gemm_splitk_ab_bench) ==")
+            lines_.append("env_guard_mode=gated")
+            lines_.append(
+                "env_guard_overall verdict=pass attempts=1 max_attempts=10 total_wait_secs=0.00"
+            )
         return "\n".join(lines_) + "\n"
 
     complete_runs = [make_run(None) for _ in range(5)]
@@ -396,6 +470,46 @@ def self_test() -> None:
     assert "**undetermined**" in offset_md, offset_md
     assert "**ADOPT**" not in offset_md, offset_md
     assert "**REJECT**" not in offset_md, offset_md
+
+    # イシュー #1499 codex-review P1 の自己検証: 3 run（渡された run 数
+    # 全てで形状が完全に揃っていても）は MIN_FORMAL_RUNS=5 未満のため
+    # 正式な ADOPT/REJECT を出力してはならず、undetermined（暫定値の旨を
+    # 明示）になることを確認する。これは PR #1499 に同梱されていた
+    # `aggregate.md`（3 run で **ADOPT** を出力していた）を再現しない
+    # ことの機械的な裏付けである。
+    three_runs = [make_run(None) for _ in range(3)]
+    three_shapes, three_any_undetermined, three_violations = aggregate(three_runs)
+    # 3 run とも形状は完全・専有ゲートも成立しているため
+    # `check_run_shape_completeness`／`check_env_guard_gated_pass` 自体は
+    # 違反を検出しない（violations は空のまま）。undetermined は
+    # render_markdown 側の MIN_FORMAL_RUNS 判定でのみ生じる。
+    assert not three_any_undetermined
+    assert not three_violations
+    three_md = render_markdown(
+        three_shapes, three_any_undetermined, len(three_runs), three_violations
+    )
+    assert "**undetermined**" in three_md, three_md
+    assert "**ADOPT**" not in three_md, three_md
+    assert "**REJECT**" not in three_md, three_md
+    assert "MIN_FORMAL_RUNS" in three_md, three_md
+
+    # イシュー #1499 codex-review P2 の自己検証: 5 run 分の形状はすべて
+    # 完全に揃っているが、専有ゲート未実施（`--max-load-avg` 未指定の
+    # 「記録のみ」モード）のログが 1 run でも混じっていれば undetermined
+    # になることを確認する（`verdict=undetermined` 行の有無だけを見る
+    # 旧実装は、ゲート自体が走っていないログを素通りさせ ADOPT を誤って
+    # 出力し得た）。
+    ungated_runs = [make_run(None) for _ in range(4)] + [make_run(None, gated=False)]
+    ungated_shapes, ungated_any_undetermined, ungated_violations = aggregate(ungated_runs)
+    assert ungated_any_undetermined
+    assert ungated_violations
+    assert any("env_guard" in v for v in ungated_violations), ungated_violations
+    ungated_md = render_markdown(
+        ungated_shapes, ungated_any_undetermined, len(ungated_runs), ungated_violations
+    )
+    assert "**undetermined**" in ungated_md, ungated_md
+    assert "**ADOPT**" not in ungated_md, ungated_md
+    assert "**REJECT**" not in ungated_md, ungated_md
 
     print("self-test OK", file=sys.stderr)
 

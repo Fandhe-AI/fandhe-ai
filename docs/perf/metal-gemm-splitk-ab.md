@@ -206,8 +206,24 @@ median_b_secs（例: `(128,128,8192)` は 1.9e-4 秒）を達成しているた�
 
 ## §5 判定
 
-**暫定 ADOPT**（§0 参照）。3 run いずれも `verdict=undetermined` を出力せず
-正常終了しており、対象 9 形状・対照 3 形状とも事前登録基準を満たした。
+**暫定 ADOPT**（§0 参照。人間による分析上の暫定評価であり、`aggregate.py`
+が出力する機械的な正式 verdict とは区別する）。3 run いずれも
+`verdict=undetermined`（専有ゲート不成立）を出力せず正常終了しており、
+対象 9 形状・対照 3 形状とも事前登録基準を満たした。
+
+ただし `aggregate.py` 自体の正式な ADOPT/REJECT 出力は、渡された run 数
+（本例では 3）が事前登録した `MIN_FORMAL_RUNS`（5）以上であることを条件に
+変更済み（イシュー #1499 codex-review P1 指摘への対応。3〜4 run の時点で
+形状さえ揃えば正式判定を出力していた旧実装の不備を修正）。このため
+`docs/perf/logs/metal-gemm-splitk-ab-1475/aggregate.md`（3 run から生成）は
+機械的な verdict としては **`undetermined`**（`n_runs=3 < MIN_FORMAL_RUNS=5`
+により暫定値と明示）を出力しており、上記「暫定 ADOPT」という本ドキュメントの
+評価はあくまで §0／本節の記述に基づく人間側の暫定的な解釈であって、
+`aggregate.md` が ADOPT を宣言しているわけではない。加えて `aggregate.py`
+は各 run が専有ゲート（`env_guard_mode=gated` かつ
+`env_guard_overall verdict=pass`）を経て収集されたことも run 単位で検査する
+（同 P2 指摘への対応）。run1〜run3 はいずれも `run_gated.sh` 経由（§0 の
+`--max-load-avg=8.0` 緩和込み）で収集されておりこの検査を満たす。
 
 ### 計測環境に関する留保
 
