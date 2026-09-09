@@ -156,10 +156,25 @@ M4 Max 実機実測・2026-09-09）。
   にとどまる。因果の確定には split-K プロトタイプによる A/B 計測（§2 の設計方針に基づく別 issue）
   を要する
 
+**追記（イシュー #1475。M4 Max 実機実測・2026-09-09）**: split-K 2 パス実装（#1474）を用い、
+上記で留保していた因果を対象 9 形状の A/B 実測（A=classic〈`select_for_device`〉・A′=classic
+〈`split_k_tile`。タイル構成のみ変更〉・B=split-K〈`should_split_k` の計画〉の 3 腕比較）で
+検証した。**A′/A（タイル構成のみを変えた効果）は 0.99〜1.05 が大半でほぼ 1.0**（classic 経路の
+速度はタイル構成差でほとんど変化しない）である一方、**target（A/B。K 分割を含む効果）は 9 形状
+すべてで 1.5686〜4.4233 倍の改善**を示した（3 run 中央値。事前登録基準 `speedup >= 1.5` を全形状
+で満たし 3/3 run 符号一貫）。この結果は「劣化の主因はタイル構成差ではなく K 方向の並列度不足
+（threadgroup 分割の不在）である」という仮説を**支持する**方向で因果の留保を更新する（詳細・
+実測表・数値契約の扱いは `docs/perf/metal-gemm-splitk-ab.md` §6 を参照）。ただし単一セッションの
+時間制約により事前登録した 5 run のうち 3 run で打ち切ったため、正式確定ではなく暫定判定である
+（同 doc §0／§5・§7 フォローアップ参照）。ADOPT（性能上の判定）が確定しても、本番結線
+（`SPLIT_K_NUMERIC_CONTRACT_APPROVED` の切替）は別途ユーザー承認が必要（#1476）。
+
 ## §4 参照
 
 - `docs/perf/logs/metal-gemm-splitk-shapes-1308/`（M4 Max 実機実測の生ログ・`aggregate.py`／
   `aggregate.md`・`env_info.txt`。イシュー #1308）
+- `docs/perf/metal-gemm-splitk-ab.md`・`docs/perf/logs/metal-gemm-splitk-ab-1475/`（split-K vs
+  classic 経路の M4 Max 実機 A/B・因果検証。イシュー #1475）
 - MLX リポジトリ `ml-explore/mlx`（参照時点コミット `a082cb91d5908e9d89a61a31ee90ee45875b8a1e`。
   `gh api repos/ml-explore/mlx/commits/main --jq '.sha'` で解決）
   - `mlx/backend/metal/matmul.cpp:503-660`（`steel_gemm_splitk_axpby`。2 パス構造・`C_split`

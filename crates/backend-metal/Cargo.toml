@@ -172,3 +172,15 @@ required-features = ["internal-diagnostics"]
 [[test]]
 name = "gemm_splitk_parity"
 required-features = ["internal-diagnostics"]
+
+# split-K 2 パス GEMM（イシュー #1474）と現行 classic 経路の性能 A/B
+# （イシュー #1475）。`dispatch_split_k_strided_prepared_with_plan`
+# （`internal-diagnostics` feature 限定の `pub`）を直接呼ぶため本 feature を
+# 要求する（`gemm_transpose_route_ab_bench`／`gemm_splitk_bit_match` と同型）。
+# `test = true` は CLI 解析・形状定義・`should_split_k` 前提のクロスプラット
+# フォーム純関数回帰テスト（`#[cfg(test)] mod tests`）を CI（Linux）実行対象へ
+# 含めるため（`gemm_splitk_shapes_bench` 等と同型の判断）。
+[[example]]
+name = "gemm_splitk_ab_bench"
+test = true
+required-features = ["internal-diagnostics"]
