@@ -10,6 +10,17 @@
 （`compare_gemm_gate.py --device cpu` 出力。off/on × 実機で計 4 本）
 から正規表現で機械抽出する。
 
+PR #1501 codex-review 指摘の是正（2026-09-09）: 初版は規則 1（checksum
+完全一致）をテキスト出力のみに留め最終 verdict へ反映しておらず、
+規則 5（M4 Max N=2048 後退）も表示のみで `all_ok` に一切寄与しなかった
+（§20.1 の場合分け (a)〜(c) が実装されず、常に「全規則充足なら ADOPT・
+不成立なら REJECT」の二値判定に単純化されていた）。本版は
+`compare_gemm_ab.py` 出力の `checksum` 列を機械抽出して規則 1 を
+判定の必須前提とし（不一致・欠落セルがあれば `judge()` は "UNDETERMINED"
+を返し他規則の成否によらず判定不能とする）、規則 5 の発火有無を
+§20.1 の場合分けへ折り込んで "ADOPT_UNCONDITIONAL"／
+"ADOPT_LINUX_ONLY"／"REJECT"／"UNDETERMINED" の 4 値判定にした。
+
 使い方:
   python3 judge_rules.py \
     --layer-a-md compare_gemm_ab-dgx.md --layer-a-md compare_gemm_ab-m4max.md \
@@ -28,22 +39,45 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass
 
 # ---- 事前登録した数値閾値（計測前に固定。以後変更しない） ----
 RULE234_THRESHOLD = 1.05  # 規則 2 の Layer A・規則 3・規則 5 の on/off 比上限
 RULE2_OPS_GEMM_THRESHOLD = 1.00  # 規則 2 の ops_gemm on/off 比上限（厳密。緩めない）
 RULE4_MIN_RATIO = 1.0 / 1.05  # 規則 4（改定版）: on/off 比の下限 (~0.952380...)
+CHECKSUM_OK_VALUE = "完全一致"  # 規則 1 が要求する checksum 列の合格値
+
+# N=512/1024/2048 の fresh/reuse 全セル。規則 1 の網羅性確認（欠落検出）に使う。
+EXPECTED_LAYER_A_CELLS = tuple(
+    (n, mode) for n in (512, 1024, 2048) for mode in ("fresh", "reuse")
+)
 
 GATE_ROW_RE = re.compile(
     r"^\|\s*(?P<n>\d+)\s*\|[^|]*\|[^|]*\|\s*(?P<ratio>[0-9.]+)\s*\|"
 )
+# size/mode | before median | after median | after/before | checksum | 判定
+# の 6 列形式（`compare_gemm_ab.py` 実出力）。5 列目 checksum を規則 1 用に追加抽出する。
 LAYER_A_ROW_RE = re.compile(
     r"^\|\s*(?P<n>\d+)/(?P<mode>fresh|reuse)\s*\|[^|]*\|[^|]*\|\s*(?P<ratio>[0-9.]+)\s*\|"
+    r"\s*(?P<checksum>[^|]*?)\s*\|"
 )
 LAYER_B_SECTION_RE = re.compile(r"^##\s*N=(?P<n>\d+)\s*$")
 LAYER_B_ROW_RE = re.compile(
     r"^\|\s*(?P<phase>[A-Za-z_]+)\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*(?P<ratio>[0-9.nNaA]+)\s*\|"
 )
+
+
+@dataclass
+class LayerACell:
+    """`compare_gemm_ab.py` 出力 1 行分（1 セル）を保持する。
+
+    `ratio` は規則 2〜5 の on/off 比判定に、`checksum` は規則 1 の
+    完全一致判定に使う（別々の規則が同じ表の別列を参照するため、
+    パース段階で両方保持し呼び出し側で規則ごとに参照する）。
+    """
+
+    ratio: float
+    checksum: str
 
 
 def parse_gate_md(text: str) -> dict[int, float]:
@@ -62,16 +96,23 @@ def parse_gate_md(text: str) -> dict[int, float]:
     return out
 
 
-def parse_layer_a_md(text: str) -> dict[tuple[int, str], float]:
-    """`compare_gemm_ab.py --device cpu` 出力 md から {(N, mode): on/off 比} を抽出する。"""
-    out: dict[tuple[int, str], float] = {}
+def parse_layer_a_md(text: str) -> dict[tuple[int, str], LayerACell]:
+    """`compare_gemm_ab.py --device cpu` 出力 md から {(N, mode): LayerACell} を抽出する。
+
+    `ratio`（after/before 比。規則 2〜5 で使用）と `checksum`（規則 1 で
+    使用）を同一行から同時に取り出す。
+    """
+    out: dict[tuple[int, str], LayerACell] = {}
     for line in text.splitlines():
         m = LAYER_A_ROW_RE.match(line)
         if m:
             try:
-                out[(int(m.group("n")), m.group("mode"))] = float(m.group("ratio"))
+                ratio = float(m.group("ratio"))
             except ValueError:
                 continue
+            out[(int(m.group("n")), m.group("mode"))] = LayerACell(
+                ratio=ratio, checksum=m.group("checksum").strip()
+            )
     return out
 
 
@@ -97,27 +138,65 @@ def parse_layer_b_md(text: str) -> dict[tuple[int, str], float]:
     return out
 
 
+def _check_rule1_checksum(
+    layer_a: dict[str, dict[tuple[int, str], LayerACell]],
+) -> tuple[bool, list[str]]:
+    """規則 1: 両実機・全セル（N=512/1024/2048 × fresh/reuse）で checksum 完全一致。
+
+    `compare_gemm_ab.py` の複合判定（`==` 列）が「完全一致」でない行、
+    または期待セルが 1 つでも欠落していれば不成立とし、呼び出し元
+    （`judge()`）はこれを他規則の成否によらない前提条件として扱う
+    （§20.1「不一致なら判定不能」）。
+    """
+    lines: list[str] = []
+    ok = True
+    for node in ("dgx", "m4max"):
+        cells = layer_a.get(node, {})
+        for n, mode in EXPECTED_LAYER_A_CELLS:
+            cell = cells.get((n, mode))
+            if cell is None:
+                lines.append(f"規則1 checksum {node} N={n}/{mode}: セル欠落 -> 不成立（判定不能）")
+                ok = False
+                continue
+            cell_ok = cell.checksum == CHECKSUM_OK_VALUE
+            lines.append(
+                f"規則1 checksum {node} N={n}/{mode}: checksum={cell.checksum!r} "
+                f"(== {CHECKSUM_OK_VALUE!r}) -> {'満たす' if cell_ok else '不成立（判定不能）'}"
+            )
+            ok = ok and cell_ok
+    return ok, lines
+
+
 def judge(
-    layer_a: dict[str, dict[tuple[int, str], float]],
+    layer_a: dict[str, dict[tuple[int, str], LayerACell]],
     layer_b: dict[str, dict[tuple[int, str], float]],
     gate: dict[tuple[str, str], dict[int, float]],
 ) -> tuple[list[str], str]:
     """規則 1〜5 を機械判定し、(明細行のリスト, verdict) を返す。
 
-    verdict は "ADOPT" | "REJECT"。規則を満たさないセルが 1 つでもあれば
-    REJECT（§20.1 の場合分け (b) 相当。改定版規則 4 は全 6 セル必須の
-    片側検査であり (a) の非対称扱いは行わない — 両実機とも同一プロトコル
-    で計測している独立再計測では (a)/(c) を区別する意味がないため、本
-    スクリプトでは「全規則充足なら ADOPT・いずれか不成立なら REJECT」の
-    二値判定に単純化する）。
+    verdict は次の 4 値（§20.1 の場合分け (a)〜(c) をそのまま実装する）:
+    - "UNDETERMINED": 規則 1（checksum 完全一致）が不成立・入力欠落
+      （判定不能。他規則の成否によらず優先する）
+    - "ADOPT_UNCONDITIONAL": 両実機とも規則 1〜4 を満たし、かつ規則 5
+      （M4 Max N=2048 後退）が発火しない（§20.1 場合分け (c)）
+    - "ADOPT_LINUX_ONLY": DGX が規則 1〜4 を満たし、M4 Max が規則 5 で
+      後退する（§20.1 場合分け (a)。Linux 限定 cfg gating）
+    - "REJECT": 上記いずれにも該当しない（DGX が規則 2〜4 のいずれかを
+      満たさない、または M4 Max が規則 5 で後退しないのに規則 3・4 の
+      いずれかを満たさない等。§20.1 場合分け (b) およびそれ以外の
+      未網羅ケースを安全側にすべて REJECT へ倒す）
     """
     lines: list[str] = []
-    all_ok = True
 
-    # 規則 2: DGX N=2048 決定セル
+    # 規則 1（前提条件）: 両実機・全セルで checksum 完全一致。
+    checksum_ok, checksum_lines = _check_rule1_checksum(layer_a)
+    lines.extend(checksum_lines)
+
+    # 規則 2: DGX N=2048 決定セル（DGX 専用）。
     dgx_a = layer_a.get("dgx", {})
     dgx_b = layer_b.get("dgx", {})
-    r2_layer_a = dgx_a.get((2048, "reuse"))
+    r2_layer_a_cell = dgx_a.get((2048, "reuse"))
+    r2_layer_a = r2_layer_a_cell.ratio if r2_layer_a_cell is not None else None
     r2_alloc_c = dgx_b.get((2048, "alloc_c"))
     r2_ops_gemm = dgx_b.get((2048, "ops_gemm"))
     # 「alloc_c 中央値が削減され」= on/off 比 < 1.0（既存コメントの見落とし
@@ -136,25 +215,32 @@ def judge(
         f"alloc_c比={r2_alloc_c} ops_gemm比={r2_ops_gemm} (<= {RULE2_OPS_GEMM_THRESHOLD}) "
         f"-> {'満たす' if r2_ok else '不成立'}"
     )
-    all_ok = all_ok and r2_ok
 
-    # 規則 3: 対照セル（両実機 N=512/1024 の fresh/reuse 全セル）
-    r3_ok = True
+    # 規則 3: 対照セル（両実機 N=512/1024 の fresh/reuse 全セル）。
+    # §20.1 場合分けの (a) が「DGX が規則 1〜4 を満たす」ことのみを要求
+    # するため、DGX 側・M4 Max 側を分けて判定を保持する。
+    r3_dgx_ok = True
+    r3_m4max_ok = True
     for node in ("dgx", "m4max"):
         a = layer_a.get(node, {})
         for n in (512, 1024):
             for mode in ("fresh", "reuse"):
-                v = a.get((n, mode))
+                cell = a.get((n, mode))
+                v = cell.ratio if cell is not None else None
                 ok = v is not None and v <= RULE234_THRESHOLD
                 lines.append(
                     f"規則3 対照セル {node} N={n}/{mode}: 比={v} (<= {RULE234_THRESHOLD}) "
                     f"-> {'満たす' if ok else '不成立'}"
                 )
-                r3_ok = r3_ok and ok
-    all_ok = all_ok and r3_ok
+                if node == "dgx":
+                    r3_dgx_ok = r3_dgx_ok and ok
+                else:
+                    r3_m4max_ok = r3_m4max_ok and ok
 
-    # 規則 4（改定版）: 各セル（実機×N=512/1024/2048）の candle 比 on/off 比
-    r4_ok = True
+    # 規則 4（改定版）: 各セル（実機×N=512/1024/2048）の candle 比 on/off 比。
+    # 規則 3 と同様に DGX 側・M4 Max 側を分けて保持する。
+    r4_dgx_ok = True
+    r4_m4max_ok = True
     for node in ("dgx", "m4max"):
         off = gate.get((node, "off"), {})
         on = gate.get((node, "on"), {})
@@ -171,34 +257,52 @@ def judge(
                 f"規則4改定版 {node} N={n}: candle比 off={off_v} on={on_v} "
                 f"on/off比={ratio} (>= {RULE4_MIN_RATIO:.4f}) -> {'満たす' if ok else '不成立'}"
             )
-            r4_ok = r4_ok and ok
-    all_ok = all_ok and r4_ok
+            if node == "dgx":
+                r4_dgx_ok = r4_dgx_ok and ok
+            else:
+                r4_m4max_ok = r4_m4max_ok and ok
 
-    # 規則 1: checksum 完全一致は compare_gemm_ab.py 自体の複合判定 pass
-    # （`==` 列）を前提とする。本スクリプトは md をパースするのみで
-    # 独自の bit 一致検査は行わない（実データは compare_gemm_ab.py の
-    # 判定に委ねる。ここでは「md が生成できた」= 複合判定が走ったことの
-    # 記録として明示するに留める。実際の pass/fail は env_info.txt に
-    # compare_gemm_ab.py の生出力（exit code・`==` 列）を転記して確認する）
-    lines.append(
-        "規則1 checksum: compare_gemm_ab.py の複合判定結果は生ログ "
-        "(compare_gemm_ab-<node>.md 全文・exit code) を env_info.txt に転記して確認 "
-        "(本スクリプトは数値抽出のみ)"
-    )
-
-    # 規則 5: M4 Max N=2048 の後退判定（Layer A on/off 比 > 1.05 かつ
-    # 5 run 符号一貫なら Linux 限定化。本判定は run 別 JSONL の符号一貫性
-    # までは見ず、集計後の中央値比のみで判定する（5 run 中央値そのものが
-    # 規則 2〜3 と同じ Layer A 表由来のため、符号一貫性は生ログ側で別途
-    # 確認し env_info.txt に記録する）。
-    m4_2048_reuse = layer_a.get("m4max", {}).get((2048, "reuse"))
+    # 規則 5: M4 Max N=2048 の後退判定（Layer A on/off 比 > 1.05 なら
+    # 規則発火＝§20.1 場合分け (a) の Linux 限定化条件）。本判定は
+    # run 別 JSONL の符号一貫性までは見ず、集計後の中央値比のみで判定
+    # する（5 run 中央値そのものが規則 2〜3 と同じ Layer A 表由来のため、
+    # 符号一貫性は生ログ側で別途確認し env_info.txt に記録する）。
+    m4_2048_reuse_cell = layer_a.get("m4max", {}).get((2048, "reuse"))
+    m4_2048_reuse = m4_2048_reuse_cell.ratio if m4_2048_reuse_cell is not None else None
     r5_regression = m4_2048_reuse is not None and m4_2048_reuse > RULE234_THRESHOLD
     lines.append(
         f"規則5 M4Max N=2048: layer_a(reuse)={m4_2048_reuse} "
         f"-> {'後退あり（5run符号一貫は生ログで別途確認）' if r5_regression else '後退なし（発火せず）'}"
     )
 
-    verdict = "ADOPT" if all_ok else "REJECT"
+    # ---- §20.1 場合分け (a)〜(c) を最終 verdict へ折り込む ----
+    dgx_rules_1_4_ok = checksum_ok and r2_ok and r3_dgx_ok and r4_dgx_ok
+    m4max_rules_1_4_ok = checksum_ok and r3_m4max_ok and r4_m4max_ok
+
+    if not checksum_ok:
+        # 規則 1 は前提条件。不成立なら他規則の成否によらず判定不能。
+        verdict = "UNDETERMINED"
+    elif dgx_rules_1_4_ok and m4max_rules_1_4_ok and not r5_regression:
+        # (c) 両実機とも全規則を満たす → 無条件 ADOPT。
+        verdict = "ADOPT_UNCONDITIONAL"
+    elif dgx_rules_1_4_ok and r5_regression:
+        # (a) DGX が規則 1〜4 を満たし M4 Max が規則 5 で後退
+        #     → ADOPT（Linux 限定 cfg gating）。M4 Max は Linux 限定化に
+        #     より当該分岐を通らないため、M4 Max 側の規則 3・4 の成否は
+        #     この場合分けの成立条件に含めない（§20.1 原文どおり）。
+        verdict = "ADOPT_LINUX_ONLY"
+    else:
+        # (b) DGX で削減されない・後退する、または (a)/(c) いずれの
+        # 条件にも当てはまらない未網羅ケース（例: 規則 5 は発火しない
+        # が M4 Max が規則 3・4 を満たさない）は安全側に REJECT とする。
+        verdict = "REJECT"
+
+    lines.append(
+        f"折り込み判定: checksum_ok={checksum_ok} dgx_rules_1_4_ok={dgx_rules_1_4_ok} "
+        f"m4max_rules_1_4_ok={m4max_rules_1_4_ok} r5_regression={r5_regression} "
+        f"-> verdict={verdict}"
+    )
+
     return lines, verdict
 
 
@@ -226,8 +330,19 @@ def _self_test() -> int:
 | 2048/reuse | 34.799 ms | 34.764 ms | 0.9990 | 完全一致 | 非後退 |
 """
     parsed_a = parse_layer_a_md(sample_layer_a)
-    assert parsed_a[(2048, "reuse")] == 0.9990, parsed_a
-    assert parsed_a[(512, "fresh")] == 1.0075, parsed_a
+    assert parsed_a[(2048, "reuse")].ratio == 0.9990, parsed_a
+    assert parsed_a[(512, "fresh")].ratio == 1.0075, parsed_a
+    assert parsed_a[(2048, "reuse")].checksum == "完全一致", parsed_a
+    assert set(parsed_a.keys()) == set(EXPECTED_LAYER_A_CELLS), parsed_a
+
+    # checksum 列が完全一致でない行を機械抽出できること（規則 1 の検出対象）。
+    sample_layer_a_mismatch = """
+| size/mode | before median | after median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 512/fresh | 2.522 ms | 2.541 ms | 1.0075 | 不一致（fail=2） | 非後退 |
+"""
+    parsed_mismatch = parse_layer_a_md(sample_layer_a_mismatch)
+    assert parsed_mismatch[(512, "fresh")].checksum == "不一致（fail=2）", parsed_mismatch
 
     sample_layer_b = """
 ## N=2048
@@ -248,38 +363,73 @@ def _self_test() -> int:
     assert parsed_b[(2048, "ops_gemm")] == 0.9972, parsed_b
     assert parsed_b[(2048, "alloc_c")] == 0.5166, parsed_b
 
-    # judge() の一貫性チェック: 全セル満たす合成サンプルで ADOPT を返すこと
-    layer_a = {
-        "dgx": {
-            (512, "fresh"): 1.00,
-            (512, "reuse"): 1.00,
-            (1024, "fresh"): 1.00,
-            (1024, "reuse"): 1.00,
-            (2048, "reuse"): 1.00,
-        },
-        "m4max": {
-            (512, "fresh"): 1.00,
-            (512, "reuse"): 1.00,
-            (1024, "fresh"): 1.00,
-            (1024, "reuse"): 1.00,
-            (2048, "reuse"): 1.00,
-        },
-    }
-    layer_b = {"dgx": {(2048, "alloc_c"): 0.5, (2048, "ops_gemm"): 0.99}}
-    gate = {
+    def _all_ok_layer_a() -> dict[str, dict[tuple[int, str], LayerACell]]:
+        cell = LayerACell(ratio=1.00, checksum=CHECKSUM_OK_VALUE)
+        return {
+            "dgx": {k: cell for k in EXPECTED_LAYER_A_CELLS},
+            "m4max": {k: cell for k in EXPECTED_LAYER_A_CELLS},
+        }
+
+    layer_b_ok = {"dgx": {(2048, "alloc_c"): 0.5, (2048, "ops_gemm"): 0.99}}
+    gate_ok = {
         ("dgx", "off"): {512: 0.70, 1024: 0.78, 2048: 0.96},
         ("dgx", "on"): {512: 0.70, 1024: 0.78, 2048: 0.96},
         ("m4max", "off"): {512: 0.89, 1024: 0.76, 2048: 0.81},
         ("m4max", "on"): {512: 0.89, 1024: 0.76, 2048: 0.81},
     }
-    _, verdict = judge(layer_a, layer_b, gate)
-    assert verdict == "ADOPT", verdict
 
-    # 規則 4 不成立ケース（on 腕 candle 比が off 腕比で 10% 悪化）→ REJECT
-    gate_bad = dict(gate)
+    # judge() の一貫性チェック 1: 全セル満たす合成サンプルで
+    # ADOPT_UNCONDITIONAL（§20.1 場合分け (c)）を返すこと。
+    _, verdict = judge(_all_ok_layer_a(), layer_b_ok, gate_ok)
+    assert verdict == "ADOPT_UNCONDITIONAL", verdict
+
+    # 規則 4 不成立ケース（on 腕 candle 比が off 腕比で 10% 悪化）→ REJECT。
+    gate_bad = dict(gate_ok)
     gate_bad[("dgx", "on")] = {512: 0.63, 1024: 0.78, 2048: 0.96}
-    _, verdict_bad = judge(layer_a, layer_b, gate_bad)
+    _, verdict_bad = judge(_all_ok_layer_a(), layer_b_ok, gate_bad)
     assert verdict_bad == "REJECT", verdict_bad
+
+    # checksum 不一致ケース（規則 1 不成立）→ 他が全て満たしても
+    # UNDETERMINED（判定不能）を返すこと。ここが初版の欠陥（規則 1 が
+    # verdict に一切反映されない）を再発させないための回帰テスト。
+    layer_a_checksum_mismatch = _all_ok_layer_a()
+    layer_a_checksum_mismatch["dgx"] = dict(layer_a_checksum_mismatch["dgx"])
+    layer_a_checksum_mismatch["dgx"][(2048, "reuse")] = LayerACell(
+        ratio=1.00, checksum="不一致（fail=3）"
+    )
+    _, verdict_checksum = judge(layer_a_checksum_mismatch, layer_b_ok, gate_ok)
+    assert verdict_checksum == "UNDETERMINED", verdict_checksum
+
+    # checksum セル欠落ケース（規則 1 不成立）→ UNDETERMINED。
+    layer_a_missing_cell = _all_ok_layer_a()
+    layer_a_missing_cell["m4max"] = {
+        k: v for k, v in layer_a_missing_cell["m4max"].items() if k != (2048, "reuse")
+    }
+    _, verdict_missing = judge(layer_a_missing_cell, layer_b_ok, gate_ok)
+    assert verdict_missing == "UNDETERMINED", verdict_missing
+
+    # 規則 5 発火ケース（M4 Max N=2048 が 1.05 超で後退）だが DGX 側は
+    # 規則 1〜4 を満たす → ADOPT_LINUX_ONLY（§20.1 場合分け (a)）。
+    # これが初版のもう一つの欠陥（規則 5 が verdict に反映されず常に
+    # 無条件 ADOPT/REJECT の二値になっていた）を再発させないための
+    # 回帰テスト。
+    layer_a_r5 = _all_ok_layer_a()
+    layer_a_r5["m4max"] = dict(layer_a_r5["m4max"])
+    layer_a_r5["m4max"][(2048, "reuse")] = LayerACell(
+        ratio=1.20, checksum=CHECKSUM_OK_VALUE
+    )
+    _, verdict_r5 = judge(layer_a_r5, layer_b_ok, gate_ok)
+    assert verdict_r5 == "ADOPT_LINUX_ONLY", verdict_r5
+
+    # 規則 5 は発火しない（M4 Max N=2048 <= 1.05）が M4 Max の対照セル
+    # （規則 3）が不成立 → (a)/(c) いずれにも該当しないため REJECT。
+    layer_a_m4max_r3_fail = _all_ok_layer_a()
+    layer_a_m4max_r3_fail["m4max"] = dict(layer_a_m4max_r3_fail["m4max"])
+    layer_a_m4max_r3_fail["m4max"][(512, "fresh")] = LayerACell(
+        ratio=1.20, checksum=CHECKSUM_OK_VALUE
+    )
+    _, verdict_m4max_r3_fail = judge(layer_a_m4max_r3_fail, layer_b_ok, gate_ok)
+    assert verdict_m4max_r3_fail == "REJECT", verdict_m4max_r3_fail
 
     print("self-test: OK", file=sys.stderr)
     return 0
@@ -303,7 +453,7 @@ def main() -> int:
             return "m4max"
         raise SystemExit(f"ERROR: node を推定できない path={path}（ファイル名に dgx/m4max を含めること）")
 
-    layer_a: dict[str, dict[tuple[int, str], float]] = {}
+    layer_a: dict[str, dict[tuple[int, str], LayerACell]] = {}
     for p in args.layer_a_md:
         node = infer_node(p)
         with open(p, encoding="utf-8") as f:

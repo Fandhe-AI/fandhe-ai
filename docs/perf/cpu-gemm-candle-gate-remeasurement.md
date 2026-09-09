@@ -1946,6 +1946,24 @@ cpu-matmul-fixed-cost-remeasure-1481/env_info.txt` へ一字一句転記し、
 `fandhe-ai =0.8.0` 等新しいピンへ更新するタイミング等）でも同一規則を
 機械適用する。
 
+**判定コードの計測後修正 2 回目（PR #1501 codex-review 指摘対応。透明性の
+ための明記）**: `judge_rules.py` は規則 1（checksum 完全一致）をテキスト
+出力のみに留め最終 verdict へ一切反映しておらず、規則 5（M4 Max N=2048
+後退）も表示のみで `all_ok` に寄与しない実装になっていた（§20.1 の場合
+分け (a)〜(c) が実装されず、常に「規則 2〜4 充足なら ADOPT・不成立なら
+REJECT」の二値判定に単純化されていた）。`compare_gemm_ab.py` 出力の
+`checksum` 列を機械抽出して規則 1 を前提条件（不一致・セル欠落なら
+"UNDETERMINED"）とし、規則 5 の発火有無を §20.1 の場合分けへ折り込んで
+"ADOPT_UNCONDITIONAL"／"ADOPT_LINUX_ONLY"／"REJECT"／"UNDETERMINED" の
+4 値判定へ是正した（厳格化方向の修正のみ・緩和なし）。本イシューの
+保存データ（本節の生ログ）へ是正後のコードを再適用した結果、両実機・
+全 12 セルで checksum 完全一致（規則 1 満たす）・M4 Max N=2048 は後退
+なし（規則 5 発火せず）だが、規則 2（DGX N=2048 決定セル）・規則 3
+（対照セル 8 中 3 超過）・規則 4（M4 Max N=512 が閾値未達）がいずれも
+不成立のため §20.1 の場合分け (a)〜(c) いずれにも該当せず、**verdict は
+REJECT のまま修正前後で不変**（詳細は `judge.md`・`judge_rules.py` の
+`_self_test()` に追加した回帰テスト）。
+
 出典: イシュー #1481・`docs/perf/logs/cpu-matmul-fixed-cost-remeasure-1481/`
 （`env_info.txt`・`judge.md`・`judge_rules.py`・Layer A/B 生ログ・
 `aggregate_layer_b.py`・`compare_gemm_ab-{dgx,m4max}.md`・
