@@ -47,7 +47,19 @@ ROUND_STATS_RE = re.compile(
     r"median_secs=(?P<median_secs>[0-9.eE+-]+) "
     r"min_secs=(?P<min_secs>[0-9.eE+-]+) min_round_idx=(?P<min_round_idx>\d+) "
     r"max_secs=(?P<max_secs>[0-9.eE+-]+) max_round_idx=(?P<max_round_idx>\d+) "
-    r"round_medians_secs=(?P<round_medians_secs>.*)$"
+    r"round_medians_secs=(?P<round_medians_secs>[0-9.eE+,-]+)"
+    # イシュー #1484: `bench_harness::ab::StabilityResult::aux`（判定には
+    # 使わない補助 spread 統計量）を行末へ追記する形式へ example 側が
+    # 変更されたため、任意の末尾キー群として受理する（無ければ従来どおり
+    # `round_medians_secs=…` で終端。`aggregate.py`〈metal-gemm-transpose-
+    # route-ab-1242 直下〉と同一方針）。従来は `round_medians_secs` を
+    # `.*$`（貪欲・末尾まで）で捕捉しており、この追記で末尾キーごと
+    # 取り込んでしまっていた（`round_medians_secs` フィールド自体は本
+    # スクリプトの表 A〜C では未使用のため実害はなかったが、文字クラスへ
+    # 絞ることで意図を明確にする）。
+    r"(?: trimmed_spread_k1=(?P<trimmed_spread_k1>[0-9.eE+-]+|NA) "
+    r"iqr_spread=(?P<iqr_spread>[0-9.eE+-]+) "
+    r"mad_spread=(?P<mad_spread>[0-9.eE+-]+))?$"
 )
 RUN_CLASS_RE = re.compile(
     r"^RUN_CLASSIFICATION run=(?P<run>\d+) run_valid=(?P<run_valid>\d+) "
@@ -134,6 +146,17 @@ def build_table_a(ld: str, max_runs: Optional[int] = None) -> tuple[list[dict], 
             "median_load1": "NA",
         }
         for s in stats:
+            # イシュー #1484: `aux` は既存ログでは常に `None`（regex の
+            # optional 群が未マッチ）。存在する場合のみ dict を作る
+            # （表 D の表示要否判定・レポート転記に使う。判定には使わない）。
+            aux = None
+            if s.get("iqr_spread") is not None:
+                trimmed_raw = s.get("trimmed_spread_k1")
+                aux = {
+                    "trimmed_spread_k1": None if trimmed_raw == "NA" else float(trimmed_raw),
+                    "iqr_spread": float(s["iqr_spread"]),
+                    "mad_spread": float(s["mad_spread"]),
+                }
             rows.append(
                 {
                     "run": n,
@@ -146,6 +169,7 @@ def build_table_a(ld: str, max_runs: Optional[int] = None) -> tuple[list[dict], 
                     "load_class": cls["load_class"],
                     "median_load1": cls["median_load1"],
                     "run_valid": cls["run_valid"],
+                    "aux": aux,
                 }
             )
     return rows, runs_found
@@ -197,6 +221,40 @@ def render_table_c(rows: list[dict]) -> str:
     out = ["| max_round_idx（0 始まり） | 出現回数 |", "|---|---|"]
     for idx in sorted(counts):
         out.append(f"| {idx} | {counts[idx]} |")
+    return "\n".join(out) + "\n"
+
+
+def render_table_d(rows: list[dict]) -> str:
+    """表 D: 補助 spread 統計量（`StabilityResult::aux`。イシュー #1483/
+    #1484）を run × size で並べる。**判定には使わない**（表 A の
+    `within_gate` が正）。
+
+    いずれの row にも `aux` が無ければ空文字を返す（既存ログの出力を
+    byte 単位で不変に保つ。イシュー #1484 受入条件 1。呼び出し元
+    `main` は空文字でも見出し行自体は出す `render_table_a` 等とは異なり、
+    本関数は真に何も出力しない設計とする——空表を毎回見せる必要が薄い
+    ため。空文字判定は `main` 側 `if table_d:` で行う）。
+    """
+    aux_rows = [r for r in rows if r.get("aux") is not None]
+    if not aux_rows:
+        return ""
+    out = [
+        "**ゲート判定は表 A の within_gate 列が正**。本表はレポート専用の"
+        "補助指標（`bench_harness::ab::StabilityResult::aux`）で、"
+        "`trimmed_k1` が `NA` の場合はラウンド数がトリム後 2 要素未満"
+        "（トリム不能）を示す。\n",
+        "| run | size | trimmed_k1 | iqr | mad |",
+        "|---|---|---|---|---|",
+    ]
+    for r in sorted(rows, key=lambda r: (r["run"], r["size"])):
+        aux = r.get("aux")
+        if aux is None:
+            continue
+        trimmed_str = "NA" if aux["trimmed_spread_k1"] is None else f"{aux['trimmed_spread_k1']:.4e}"
+        out.append(
+            f"| {r['run']} | {r['size']} | {trimmed_str} | "
+            f"{aux['iqr_spread']:.4e} | {aux['mad_spread']:.4e} |"
+        )
     return "\n".join(out) + "\n"
 
 
@@ -265,6 +323,13 @@ def main() -> None:
     print(render_table_b(rows))
     print("## 表 C: スパイク位置分布（load_class=high かつ run_valid の run のみ）\n")
     print(render_table_c(rows))
+    table_d = render_table_d(rows)
+    if table_d:
+        # イシュー #1484: 既存ログ（本イシュー以前に取得したもの）は aux
+        # を持たないため表自体を出さない（既存出力を byte 単位で不変に
+        # 保つ。`if table_d:` の条件分岐がその契約）。
+        print("## 表 D: 補助 spread 統計量（トリム済みレンジ・IQR・MAD。判定には使わない）\n")
+        print(table_d)
     print("## 参考表 R: #1187 試行 4（非排他）\n")
     ref_path = os.path.join(
         os.path.dirname(ld), "metal-gemm-transpose-route-ab-1187", "route_ab_run4.log"
@@ -322,6 +387,43 @@ def self_test() -> None:
         assert "| 7 | 1 |" in table_c
         exclusive = render_exclusive_side(td)
         assert "valid_runs=0" in exclusive
+        # イシュー #1484: run1/run2（既存ログと同じ形式）に aux が無い間は
+        # 表 D は空文字（既存出力の非後退）。
+        assert render_table_d(rows) == ""
+
+        # run3: 補助 spread 統計量（末尾キー。`trimmed_spread_k1=NA` を
+        # 含む）付きの新形式ログ。regex の後方互換・aux 取り込み・表 D の
+        # 条件付き表示を検証する（イシュー #1484）。
+        with open(os.path.join(td, "1255-phase1_run3.log"), "w", encoding="utf-8") as f:
+            f.write(
+                "mode=phase1_only\n"
+                "phase1_round_stats size=256 rounds=10 spread=1.0000e-02 gate=5.0000e-02 "
+                "within_gate=true median_secs=1.000000e-03 min_secs=9.900000e-04 min_round_idx=2 "
+                "max_secs=1.010000e-03 max_round_idx=7 round_medians_secs=1e-3,1e-3 "
+                "trimmed_spread_k1=NA iqr_spread=2.3456e-01 mad_spread=3.4567e-01\n"
+                "verdict=not_evaluated (--phase1-only)\n"
+            )
+        with open(os.path.join(td, "1255-phase1_run3_monitor.log"), "w", encoding="utf-8") as f:
+            f.write(
+                "2026-09-09T00:10:00+0900 load1=3.9 load_error=0\n"
+                "RUN_CLASSIFICATION run=3 run_valid=1 load_class=high median_load1=3.9\n"
+            )
+        rows3, runs_found3 = build_table_a(td)
+        assert runs_found3 == 3, runs_found3
+        assert len(rows3) == 3, rows3
+        run3_row = next(r for r in rows3 if r["run"] == 3)
+        assert run3_row["aux"] == {
+            "trimmed_spread_k1": None,
+            "iqr_spread": 2.3456e-01,
+            "mad_spread": 3.4567e-01,
+        }
+        table_d3 = render_table_d(rows3)
+        assert table_d3, "aux を持つ row が 1 件あれば表 D は非空であるはず"
+        assert "| 3 | 256 | NA | 2.3456e-01 | 3.4567e-01 |" in table_d3
+        # 表 A〜C は run3 混入後も既存フィールドの取り込みが崩れていない
+        # ことを確認する（regex 変更の非後退）。
+        table_b3 = render_table_b(rows3)
+        assert "分母（load_class=high かつ run_valid=1 の run 数）: 2" in table_b3
         print("self-test: ok")
 
 

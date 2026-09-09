@@ -84,13 +84,17 @@
 //! 分布集計を機械的に grep できる 1 行 `phase1_round_stats` を追加出力する
 //! （キー: `size`・`rounds`・`spread`・`gate`・`within_gate`・
 //! `median_secs`・`min_secs`／`min_round_idx`・`max_secs`／`max_round_idx`・
-//! `round_medians_secs`〈カンマ区切り〉）。`min`／`max` は**秒基準**・
-//! **0 始まり** index である点に注意: TFLOPS 換算では大小関係が逆転する
-//! （レイテンシ比と TFLOPS 比の取り違えは #540/#746 で一度発生した既知の
-//! 落とし穴。本モジュール内 `b_over_a_tflops` の doc comment 参照）ため、
-//! 「落ち込んだラウンド」は常に `max_secs` 側で読むこと。フェーズ 1 末尾に
-//! は総括 1 行 `phase1_summary`（ゲート超過サイズの一覧）を既定モード・
-//! `--phase1-only` の両方で出力する。
+//! `round_medians_secs`〈カンマ区切り〉・`trimmed_spread_k1`／
+//! `iqr_spread`／`mad_spread`〈イシュー #1484。`bench_harness::ab::
+//! StabilityResult::aux` のトリム済みレンジ・IQR・MAD ベースの補助
+//! spread 統計量。**判定には使わない**レポート専用列。`trimmed` が
+//! `None`〈ラウンド数がトリム後 2 要素未満〉のときは `NA`〉）。`min`／
+//! `max` は**秒基準**・**0 始まり** index である点に注意: TFLOPS 換算では
+//! 大小関係が逆転する（レイテンシ比と TFLOPS 比の取り違えは #540/#746 で
+//! 一度発生した既知の落とし穴。本モジュール内 `b_over_a_tflops` の doc
+//! comment 参照）ため、「落ち込んだラウンド」は常に `max_secs` 側で読む
+//! こと。フェーズ 1 末尾には総括 1 行 `phase1_summary`（ゲート超過サイズ
+//! の一覧）を既定モード・`--phase1-only` の両方で出力する。
 //!
 //! `--phase1-only` はプロセス内リピートに対応しない（`--repeat=N` 等は
 //! 非対応）。#1253/#1255 の「複数回実行」は 1 回ごとに別プロセスで起動し、
@@ -508,6 +512,89 @@ fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
         max_secs: round_medians_secs[max_idx],
         max_round_idx: max_idx,
     })
+}
+
+/// [`bench_harness::ab::StabilityResult::aux`]（[`bench_harness::ab::
+/// AuxiliarySpread`]。イシュー #1483）を `phase1_round_stats` 行の末尾
+/// キー群（`trimmed_spread_k1=`／`iqr_spread=`／`mad_spread=`）へ整形する
+/// 純関数（イシュー #1484）。
+///
+/// キー → フィールド対応（`AuxiliarySpread` doc comment と同じ意味を
+/// 保つ。ここで新たな意味を作らない）:
+/// - `trimmed_spread_k1` ← `aux.trimmed`（`_k1` 接尾辞は
+///   [`bench_harness::ab::AUXILIARY_TRIM_PER_SIDE`] = 1 を表す。定数と
+///   キー名がずれていないことは呼び出し側テストで
+///   `assert_eq!(AUXILIARY_TRIM_PER_SIDE, 1)` により固定する）
+/// - `iqr_spread` ← `aux.iqr_over_median`
+/// - `mad_spread` ← `aux.mad2_over_median`（**2·MAD/median** である点は
+///   キー名だけでは分からないため、この doc comment と
+///   `docs/perf/metal-gemm-transpose-tiled.md` のキー一覧に明記する）
+///
+/// `trimmed` が `None`（ラウンド数がトリム後 2 要素未満）の場合は既存
+/// sentinel `NA`（同 example の `phase1_gpu_host_stats` 行
+/// `kernel_gpu_median_secs=NA` 等と同じ表記。`opt` 関数参照）を使う。新規
+/// sentinel は導入しない。
+///
+/// **本関数の戻り値・呼び出し元は補助値を [`bench_harness::ab::
+/// STABILITY_SPREAD_GATE`] 等の閾値と比較する判定へ転用してはならない**
+/// （`AuxiliarySpread` doc comment・`.claude/rules/security.md` のガード
+/// レール閾値単独緩和禁止と同じ理由）。あくまでレポート専用の追記。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn format_aux_spread_keys(aux: &bench_harness::ab::AuxiliarySpread) -> String {
+    let trimmed_str = match aux.trimmed {
+        Some(v) => format!("{v:.4e}"),
+        None => "NA".to_string(),
+    };
+    format!(
+        "trimmed_spread_k1={trimmed_str} iqr_spread={:.4e} mad_spread={:.4e}",
+        aux.iqr_over_median, aux.mad2_over_median
+    )
+}
+
+/// `phase1_round_stats` 行（機械可読な 1 行。`grep '^phase1_round_stats '`
+/// で既存ログ〈`docs/perf/logs/metal-gemm-transpose-route-ab-1242/`〉と
+/// 突合できる形式）を組み立てる純関数（イシュー #1484）。
+///
+/// 既存キー（`rounds`・`spread`・`gate`・`within_gate`・`median_secs`・
+/// `min_secs`／`min_round_idx`・`max_secs`／`max_round_idx`・
+/// `round_medians_secs`）の並び・書式は
+/// [`phase1_stability_selfcheck`] が元々直書きしていた `println!` と
+/// byte 単位で同一（イシュー #1249/#1251 の既存契約を維持）。
+/// [`format_aux_spread_keys`] による 3 キー（`trimmed_spread_k1`／
+/// `iqr_spread`／`mad_spread`。イシュー #1483 の `StabilityResult::aux`）を
+/// **末尾に追記するのみ**で、既存キーの意味・順序・判定
+/// （`within_gate = result.spread <= gate`。本関数は判定を行わず呼び出し
+/// 元が計算済みの値をそのまま受け取る）は一切変更しない。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn format_phase1_round_stats_line(
+    size: usize,
+    result: &bench_harness::ab::StabilityResult,
+    gate: f64,
+    within_gate: bool,
+    extrema: &RoundExtrema,
+) -> String {
+    let median_secs = bench_harness::median_q1_q3(&result.round_medians_secs)
+        .expect("run_stability が返す round_medians_secs は非空・非 NaN のため成功する")
+        .median;
+    let round_medians_secs_str = result
+        .round_medians_secs
+        .iter()
+        .map(|s| format!("{s:.6e}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "phase1_round_stats size={size} rounds={} spread={:.4e} gate={gate:.4e} \
+         within_gate={within_gate} median_secs={median_secs:.6e} \
+         min_secs={:.6e} min_round_idx={} max_secs={:.6e} max_round_idx={} \
+         round_medians_secs={round_medians_secs_str} {}",
+        result.round_medians_secs.len(),
+        result.spread,
+        extrema.min_secs,
+        extrema.min_round_idx,
+        extrema.max_secs,
+        extrema.max_round_idx,
+        format_aux_spread_keys(&result.aux),
+    )
 }
 
 /// `env_guard_result=` 行の値を導出する純関数（イシュー #1265。Review 指摘
@@ -980,7 +1067,7 @@ mod macos_impl {
     use super::{
         CliArgs, GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round,
         aggregate_gpu_host_size, format_gpu_host_round_line, format_gpu_host_size_line,
-        measured_tail, min_warmup_override_duration, round_extrema,
+        format_phase1_round_stats_line, measured_tail, min_warmup_override_duration, round_extrema,
     };
 
     /// `gemm_transpose_tile_sweep.rs`・`gemm_bench.rs` と同一値（決定的
@@ -1409,28 +1496,20 @@ mod macos_impl {
             // で既存ログ〈docs/perf/logs/metal-gemm-transpose-route-ab-1186/・
             // -1187/〉と同じ突合ができるよう、上記の既存行はバイト単位で
             // 変更せず直後に追加するのみ）。`round_extrema` の契約どおり
-            // min/max は秒基準・0 始まり index。
-            let median_secs = bench_harness::median_q1_q3(&result.round_medians_secs)
-                .expect("run_stability が返す round_medians_secs は非空・非 NaN のため成功する")
-                .median;
-            let round_medians_secs_str = result
-                .round_medians_secs
-                .iter()
-                .map(|s| format!("{s:.6e}"))
-                .collect::<Vec<_>>()
-                .join(",");
+            // min/max は秒基準・0 始まり index。イシュー #1484:
+            // `StabilityResult::aux`（トリム済みレンジ／IQR／MAD ベースの
+            // 補助 spread 統計量。判定には使わない）を行末へ追記する整形は
+            // [`format_phase1_round_stats_line`] に集約する。
             if let Some(extrema) = round_extrema(&result.round_medians_secs) {
                 println!(
-                    "phase1_round_stats size={size} rounds={} spread={:.4e} gate={SPREAD_GATE:.4e} \
-                     within_gate={within_gate} median_secs={median_secs:.6e} \
-                     min_secs={:.6e} min_round_idx={} max_secs={:.6e} max_round_idx={} \
-                     round_medians_secs={round_medians_secs_str}",
-                    result.round_medians_secs.len(),
-                    result.spread,
-                    extrema.min_secs,
-                    extrema.min_round_idx,
-                    extrema.max_secs,
-                    extrema.max_round_idx,
+                    "{}",
+                    format_phase1_round_stats_line(
+                        size,
+                        &result,
+                        SPREAD_GATE,
+                        within_gate,
+                        &extrema
+                    )
                 );
             }
         }
@@ -1927,12 +2006,15 @@ fn main() {
 #[cfg(test)]
 mod cli_and_round_stats_tests {
     use super::{
-        CliArgs, GpuHostRoundStats, GpuHostSample, aggregate_gpu_host_round,
-        aggregate_gpu_host_size, env_guard_result_label, format_gpu_host_round_line,
-        format_gpu_host_size_line, measured_tail, min_warmup_override_duration, parse_args_from,
-        parse_min_warmup_secs, round_extrema,
+        CliArgs, GpuHostRoundStats, GpuHostSample, RoundExtrema, aggregate_gpu_host_round,
+        aggregate_gpu_host_size, env_guard_result_label, format_aux_spread_keys,
+        format_gpu_host_round_line, format_gpu_host_size_line, format_phase1_round_stats_line,
+        measured_tail, min_warmup_override_duration, parse_args_from, parse_min_warmup_secs,
+        round_extrema,
     };
-    use bench_harness::ab::GuardVerdict;
+    use bench_harness::ab::{
+        AUXILIARY_TRIM_PER_SIDE, AuxiliarySpread, GuardVerdict, StabilityResult,
+    };
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -2591,5 +2673,112 @@ mod cli_and_round_stats_tests {
         // 最小値 1.0 は index 1・3 に出現するが最初の出現（1）を採る。
         assert_eq!(extrema.min_secs, 1.0);
         assert_eq!(extrema.min_round_idx, 1);
+    }
+
+    /// イシュー #1484: `AUXILIARY_TRIM_PER_SIDE` は
+    /// `format_aux_spread_keys` のキー名 `trimmed_spread_k1` の `_k1`
+    /// 接尾辞が前提とする値（k=1）。定数が変われば接尾辞もずれるため、
+    /// このテストで固定する（値そのものはイシュー #1483 で確定済み・
+    /// 本イシューでは変更しない）。
+    #[test]
+    fn auxiliary_trim_per_side_is_one() {
+        assert_eq!(AUXILIARY_TRIM_PER_SIDE, 1);
+    }
+
+    /// `docs/perf/logs/metal-gemm-transpose-route-ab-1242/1255-phase1_run1.log`
+    /// の実ログ行（size=256）を固定し、`format_phase1_round_stats_line`
+    /// の出力が **既存 prefix と byte 単位で一致する**ことを検証する
+    /// （イシュー #1484 の受入条件: 既存キー・順序は不変）。`spread` は
+    /// ログ値をそのまま使う（`.6e` 丸め済み中央値から `relative_spread`
+    /// を再計算すると 5 桁目がずれうるため再計算しない）。
+    #[test]
+    fn format_phase1_round_stats_line_starts_with_existing_log_prefix() {
+        let round_medians_secs = vec![
+            3.694170e-4,
+            2.224590e-4,
+            2.312080e-4,
+            2.332920e-4,
+            2.381670e-4,
+            2.632910e-4,
+            2.470000e-4,
+            3.650830e-4,
+            2.260000e-4,
+            2.398340e-4,
+        ];
+        let existing_prefix = "phase1_round_stats size=256 rounds=10 spread=6.1275e-1 \
+             gate=5.0000e-2 within_gate=false median_secs=2.398340e-4 \
+             min_secs=2.224590e-4 min_round_idx=1 max_secs=3.694170e-4 max_round_idx=0 \
+             round_medians_secs=3.694170e-4,2.224590e-4,2.312080e-4,2.332920e-4,2.381670e-4,\
+             2.632910e-4,2.470000e-4,3.650830e-4,2.260000e-4,2.398340e-4";
+        let result = StabilityResult {
+            round_medians_secs: round_medians_secs.clone(),
+            spread: 6.1275e-1,
+            aux: AuxiliarySpread {
+                trimmed: Some(1.2345e-1),
+                iqr_over_median: 2.3456e-1,
+                mad2_over_median: 3.4567e-1,
+            },
+        };
+        let extrema = round_extrema(&round_medians_secs).expect("非空スライスは Some を返すはず");
+        let line = format_phase1_round_stats_line(256, &result, 5.0000e-2, false, &extrema);
+        assert!(
+            line.starts_with(existing_prefix),
+            "既存キーの prefix が byte 単位で不変であること: {line}"
+        );
+        // 補助 3 キーは既存 prefix の直後にスペース区切りで続く。
+        assert_eq!(
+            line,
+            format!(
+                "{existing_prefix} trimmed_spread_k1=1.2345e-1 iqr_spread=2.3456e-1 \
+                 mad_spread=3.4567e-1"
+            )
+        );
+    }
+
+    /// `aux.trimmed == None`（ラウンド数がトリム後 2 要素未満）のとき、
+    /// `trimmed_spread_k1=NA`（既存 sentinel。新規 sentinel を導入しない
+    /// 契約）になることを検証する（イシュー #1484）。
+    #[test]
+    fn format_aux_spread_keys_trimmed_none_renders_na_sentinel() {
+        let aux = AuxiliarySpread {
+            trimmed: None,
+            iqr_over_median: 1.0e-1,
+            mad2_over_median: 2.0e-1,
+        };
+        let keys = format_aux_spread_keys(&aux);
+        assert_eq!(
+            keys,
+            "trimmed_spread_k1=NA iqr_spread=1.0000e-1 mad_spread=2.0000e-1"
+        );
+    }
+
+    /// 末尾キーの順序（`trimmed_spread_k1` → `iqr_spread` → `mad_spread`）
+    /// を固定する（`docs/perf/metal-gemm-transpose-tiled.md` のキー一覧と
+    /// 同じ順序。イシュー #1484）。
+    #[test]
+    fn format_aux_spread_keys_key_order_is_trimmed_then_iqr_then_mad() {
+        let aux = AuxiliarySpread {
+            trimmed: Some(9.0e-1),
+            iqr_over_median: 8.0e-1,
+            mad2_over_median: 7.0e-1,
+        };
+        let keys = format_aux_spread_keys(&aux);
+        let trimmed_pos = keys.find("trimmed_spread_k1=").expect("キーが存在するはず");
+        let iqr_pos = keys.find("iqr_spread=").expect("キーが存在するはず");
+        let mad_pos = keys.find("mad_spread=").expect("キーが存在するはず");
+        assert!(trimmed_pos < iqr_pos);
+        assert!(iqr_pos < mad_pos);
+    }
+
+    /// [`RoundExtrema`] の最小契約（`round_extrema` が非空スライスに対し
+    /// `min_secs` を正しく返す）の回帰確認。`RoundExtrema`／`round_extrema`
+    /// 自体は非公開のため、他の A/B example（`gemm_swizzle_ab_bench.rs` 等）
+    /// へは import できず verbatim で複製している（実行バイナリが分かれる
+    /// ため。`bench-harness` クレートへの共通化は #1484 のスコープ外）。
+    /// イシュー #1484。
+    #[test]
+    fn round_extrema_min_secs_from_non_empty_slice() {
+        let extrema: RoundExtrema = round_extrema(&[1.0]).expect("非空スライスは Some を返すはず");
+        assert_eq!(extrema.min_secs, 1.0);
     }
 }
