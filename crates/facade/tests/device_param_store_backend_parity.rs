@@ -282,8 +282,15 @@ fn grad_readout_contract_on_metal() {
 
 /// CUDA 実機での AC-R2 契約検証（`assert_grad_readout_contract` 参照）。
 ///
-/// 本エージェント実行環境には CUDA 実機がないため未実測（イシュー
-/// #1479 実装セッションでは未実行）。
+/// イシュー #1479 実装セッションでは本エージェント実行環境に CUDA 実機が
+/// なかったため未実測のまま引き継がれていたが、**イシュー #1480 の GB10
+/// 実機実測（2026-09-09）で pass 済み**（`docs/perf/logs/
+/// cuda-graph-step-grad-1480/grad_readout_contract_on_cuda.log`）:
+/// strict 版 `resident_grads_to_host` が `BackendError::Unsupported` を
+/// 返すこと（CUDA は `gemm_fp32_strict_into` 未実装のため resident
+/// staging 未到達）・統合版 `param_grads_to_host` が返す全パラメータ
+/// 勾配がホスト参照実装（`eval::matmul` ベース）と統一複合判定内で一致
+/// することの両方を確認した。
 ///
 /// ```sh
 /// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture

@@ -63,18 +63,29 @@ fn graph_capture_matches_eager_baseline_bit_identical_across_two_gpus() {
         !fandhe_ai::cuda_graph_step_enabled(),
         "ordinal 0 の eager baseline は opt-in OFF のまま初期化する必要がある"
     );
-    let (eager_log, eager_per_step_dinput, eager_per_step_params, eager_final_params) =
-        train_on_cuda(0, STEPS, LR);
+    let (
+        eager_log,
+        eager_per_step_dinput,
+        eager_per_step_grads,
+        eager_per_step_params,
+        eager_final_params,
+    ) = train_on_cuda(0, STEPS, LR);
 
     fandhe_ai::set_cuda_graph_step_enabled(true);
-    let (graph_log, graph_per_step_dinput, graph_per_step_params, graph_final_params) =
-        train_on_cuda(1, STEPS, LR);
+    let (
+        graph_log,
+        graph_per_step_dinput,
+        graph_per_step_grads,
+        graph_per_step_params,
+        graph_final_params,
+    ) = train_on_cuda(1, STEPS, LR);
     fandhe_ai::set_cuda_graph_step_enabled(false);
 
     print_bit_identity_report(
         "eager (opt-in OFF, ordinal 0)",
         &eager_log,
         &eager_per_step_dinput,
+        &eager_per_step_grads,
         &eager_per_step_params,
         &eager_final_params,
     );
@@ -82,6 +93,7 @@ fn graph_capture_matches_eager_baseline_bit_identical_across_two_gpus() {
         "graph capture (opt-in ON, ordinal 1)",
         &graph_log,
         &graph_per_step_dinput,
+        &graph_per_step_grads,
         &graph_per_step_params,
         &graph_final_params,
     );
@@ -129,6 +141,46 @@ fn graph_capture_matches_eager_baseline_bit_identical_across_two_gpus() {
                 "step[{step}].dinput[{j}] が bit 同一でない: \
                  eager={ev:#010x?}／graph={gv:#010x?}"
             );
+        }
+    }
+
+    // イシュー #1480: loss・入力勾配・パラメータだけでなく各 step の
+    // 重み勾配（`Tape::param_grads_to_host` の戻り値）も bit 同一性を
+    // 検証する（`train_on_cuda` doc コメント「重み自体の勾配を
+    // per-step で比較対象へ加える」参照）。
+    assert_eq!(
+        eager_per_step_grads.len(),
+        graph_per_step_grads.len(),
+        "per-step 重み勾配列の長さ（step 数）が一致しないはず（STEPS は共通の定数）"
+    );
+    for (step, (e_step, g_step)) in eager_per_step_grads
+        .iter()
+        .zip(graph_per_step_grads.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            e_step.len(),
+            g_step.len(),
+            "step[{step}] の重み勾配列の個数が一致しないはず（同一モデル構成）"
+        );
+        for (p, (ep, gp)) in e_step.iter().zip(g_step.iter()).enumerate() {
+            let e_contig = ep.contiguous();
+            let g_contig = gp.contiguous();
+            let e_slice = e_contig.as_slice().unwrap_or(&[]);
+            let g_slice = g_contig.as_slice().unwrap_or(&[]);
+            assert_eq!(
+                e_slice.len(),
+                g_slice.len(),
+                "step[{step}].grad[{p}] の要素数が一致しないはず"
+            );
+            for (j, (ev, gv)) in e_slice.iter().zip(g_slice.iter()).enumerate() {
+                assert_eq!(
+                    ev.to_bits(),
+                    gv.to_bits(),
+                    "step[{step}].grad[{p}][{j}] が bit 同一でない: \
+                     eager={ev:#010x?}／graph={gv:#010x?}"
+                );
+            }
         }
     }
 
