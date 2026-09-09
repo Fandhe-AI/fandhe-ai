@@ -94,13 +94,21 @@ const FLOOR_K: usize = 64;
 const FLOOR_MN: [usize; 4] = [32, 64, 128, 256];
 
 /// `splitk_ab` 行の種別。
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+// KIND_TARGET/KIND_TARGET_TILE/KIND_CONTROL/KIND_CONTROL_FORCED は
+// `macos_impl`（`cfg(target_os = "macos")`）内でのみ参照され、
+// `#[cfg(test)] mod tests` からは（`format_ab_line` を文字列リテラル
+// 引数で直接呼ぶため）参照されない。よって非 macOS ビルドでは
+// `cfg(test)` の真偽に関わらず未使用になるため、`test` を条件に含めず
+// `not(target_os = "macos")` のみで dead_code を抑止する
+// （KIND_FLOOR は `format_floor_line` 経由でテストからも到達するため
+// 対象外。イシュー #1499 codex-review 指摘対応）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const KIND_TARGET: &str = "target";
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const KIND_TARGET_TILE: &str = "target_tile";
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const KIND_CONTROL: &str = "control";
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const KIND_CONTROL_FORCED: &str = "control_forced";
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const KIND_FLOOR: &str = "floor";
@@ -621,15 +629,25 @@ mod macos_impl {
             // 計測する必要がある。呼ばないと A と全く同一の経路を測る
             // だけになり B′ の存在意義がなくなる。イシュー #1499
             // codex-review 指摘）。対照形状では `None` を返す前提は
-            // ループ先頭の assert で確認済みのため、ここでは
-            // `debug_assert` に留め計測クロージャの呼び出し費用を
-            // 不必要に増やさない。
+            // ループ先頭の assert で確認済みのため正しさの検査自体は
+            // `debug_assert` に留めるが、戻り値をそれだけに任せると
+            // release ビルドの計測経路では `debug_assert!` が消え
+            // `route` が未使用になり、最適化で `should_split_k` の呼び出し
+            // ごと消去されて「選択関数の呼び出し費用込み」の計測契約が
+            // release ビルドで保証されなくなる（イシュー #1499
+            // codex-review 指摘）。`std::hint::black_box` で戻り値を
+            // 不透明化して消去を防ぎ、debug/release いずれでも
+            // `should_split_k` が確実に評価されるようにする。
             let result = run_ab(
                 ab_config,
                 measurement_config,
                 || dispatch_classic(gemm, ctx, &p_a, select_cfg),
                 || {
-                    let route = tile::should_split_k(m, n, k);
+                    let route = std::hint::black_box(tile::should_split_k(
+                        std::hint::black_box(m),
+                        std::hint::black_box(n),
+                        std::hint::black_box(k),
+                    ));
                     debug_assert!(route.is_none(), "対照形状の前提が崩れている");
                     dispatch_classic(gemm, ctx, &p_b, select_cfg);
                 },

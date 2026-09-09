@@ -25,10 +25,66 @@ from __future__ import annotations
 
 import statistics
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 
 ADOPT_TARGET_MIN_SPEEDUP = 1.5
 ADOPT_CONTROL_MIN_SPEEDUP = 0.95
+
+# `crates/backend-metal/examples/gemm_splitk_ab_bench.rs` の `target_shapes`／
+# `control_shapes`（`TARGET_MN`／`CONTROL_MN`／`K_LIST`）と同一の期待形状
+# 集合。各 run は対象 9・対照 3 の各キーをちょうど 1 行ずつ持つことを
+# 前提とする（イシュー #1499 codex-review P2 指摘: 集約後の件数だけでは
+# 「あるキーの欠落」と「別キーの重複」が相殺し得るため、run ごとの
+# 期待形状集合との完全一致を検査する）。
+_TARGET_MN = (32, 64, 128)
+_CONTROL_MN = 256
+_K_LIST = (2048, 4096, 8192)
+EXPECTED_TARGET_KEYS = frozenset(
+    ("target", mn, mn, k) for mn in _TARGET_MN for k in _K_LIST
+)
+EXPECTED_CONTROL_KEYS = frozenset(
+    ("control", _CONTROL_MN, _CONTROL_MN, k) for k in _K_LIST
+)
+
+
+def check_run_shape_completeness(
+    rows: list[dict[str, str]], run_index: int
+) -> list[str]:
+    """1 run 分の `splitk_ab` 行（target/control kind に限る）が、期待形状
+    集合の各キーをちょうど 1 回ずつ含むことを検査する純関数。
+
+    集約後の総件数（`len(speedups) == n_runs`）だけでは、ある run での
+    欠落を別 run での重複が相殺してしまい検出できない（イシュー #1499
+    codex-review P2 指摘）。本関数は run 単体のキー集合を期待集合と
+    突き合わせるため、run をまたいだ相殺が起こらない。
+    """
+    counts: Counter[tuple[str, int, int, int]] = Counter()
+    for row in rows:
+        kind = row.get("kind")
+        if kind not in ("target", "control"):
+            continue
+        if "m" not in row or "n" not in row or "k" not in row:
+            continue
+        key = (kind, int(row["m"]), int(row["n"]), int(row["k"]))
+        counts[key] += 1
+
+    violations: list[str] = []
+    expected = EXPECTED_TARGET_KEYS | EXPECTED_CONTROL_KEYS
+    for key in sorted(expected):
+        n = counts.get(key, 0)
+        if n != 1:
+            violations.append(
+                f"run{run_index}: kind={key[0]} m={key[1]} n={key[2]} k={key[3]} "
+                f"の行数が {n}（期待 1）"
+            )
+    unexpected = set(counts) - expected
+    for key in sorted(unexpected):
+        violations.append(
+            f"run{run_index}: kind={key[0]} m={key[1]} n={key[2]} k={key[3]} "
+            f"は期待形状集合外（n={counts[key]}）"
+        )
+    return violations
 
 
 @dataclass
@@ -88,16 +144,29 @@ def parse_log(text: str) -> tuple[list[dict[str, str]], bool]:
     return rows, undetermined
 
 
-def aggregate(logs: list[str]) -> tuple[dict[tuple[str, int, int, int], ShapeSamples], bool]:
+def aggregate(
+    logs: list[str],
+) -> tuple[dict[tuple[str, int, int, int], ShapeSamples], bool, list[str]]:
     """複数 run のログテキストを集約する。undetermined が 1 件でもあれば
-    True を返し、その場合 shapes は参考値として扱う（判定には使わない）。
+    2 番目の戻り値が True になり、その場合 shapes は参考値として扱う
+    （判定には使わない）。3 番目の戻り値は run ごとの期待形状集合との
+    不一致（欠落・重複・想定外キー）の説明文（空なら全 run が完全）で、
+    1 件でもあれば 2 番目の戻り値も True にする（イシュー #1499
+    codex-review P2 指摘: 集約後の総件数一致だけでは run をまたいだ
+    欠落／重複の相殺を検出できないため、run 単位で
+    `check_run_shape_completeness` を呼び、run の所属情報を保ったまま
+    検査する）。
     """
     shapes: dict[tuple[str, int, int, int], ShapeSamples] = {}
     any_undetermined = False
-    for text in logs:
+    shape_violations: list[str] = []
+    for run_index, text in enumerate(logs):
         rows, undetermined = parse_log(text)
         if undetermined:
             any_undetermined = True
+        run_violations = check_run_shape_completeness(rows, run_index)
+        if run_violations:
+            shape_violations.extend(run_violations)
         for row in rows:
             kind = row.get("kind")
             if kind is None or "m" not in row or "n" not in row or "k" not in row:
@@ -112,15 +181,29 @@ def aggregate(logs: list[str]) -> tuple[dict[tuple[str, int, int, int], ShapeSam
             median_a = row.get("median_a_secs")
             if median_a is not None and median_a != "NA":
                 shapes[key].median_a_secs_list.append(float(median_a))
-    return shapes, any_undetermined
+    if shape_violations:
+        any_undetermined = True
+    return shapes, any_undetermined, shape_violations
 
 
-def render_markdown(shapes: dict[tuple[str, int, int, int], ShapeSamples], any_undetermined: bool, n_runs: int) -> str:
+def render_markdown(
+    shapes: dict[tuple[str, int, int, int], ShapeSamples],
+    any_undetermined: bool,
+    n_runs: int,
+    shape_violations: list[str] | None = None,
+) -> str:
+    shape_violations = shape_violations or []
     lines: list[str] = []
     lines.append(f"# split-K A/B 集計（{n_runs} run）\n")
     if any_undetermined:
-        lines.append("**いずれかの run が `verdict=undetermined`（専有ゲート不成立）で終了した。"
-                      "以下は参考値であり判定には使わない。**\n")
+        lines.append("**いずれかの run が `verdict=undetermined`（専有ゲート不成立）"
+                      "または run 単位の期待形状集合検査で不一致（欠落・重複・想定外キー）"
+                      "を検出した。以下は参考値であり判定には使わない。**\n")
+    if shape_violations:
+        lines.append("\n### run 単位の形状不一致\n")
+        for v in shape_violations:
+            lines.append(f"- {v}")
+        lines.append("")
 
     for kind in ["target", "target_tile", "control", "control_forced", "floor"]:
         rows = [v for v in shapes.values() if v.kind == kind]
@@ -194,8 +277,14 @@ def self_test() -> None:
     assert len(rows) == 3, rows
     assert not undetermined
 
-    shapes, any_undetermined = aggregate([sample, sample])
-    assert not any_undetermined
+    shapes, any_undetermined, violations = aggregate([sample, sample])
+    # sample は対象 1・対照 1 形状のみ（本 self-test は行解析のプラミング
+    # 確認が目的で、期待形状集合とは意図的に一致しない）。よって run 単位の
+    # 期待形状集合検査（`check_run_shape_completeness`）は不一致を検出し
+    # `any_undetermined` は True になる（後段で render_markdown の
+    # `**undetermined**` 出力として再確認する）。
+    assert any_undetermined
+    assert violations
     key = ("target", 32, 32, 2048)
     assert key in shapes
     assert shapes[key].speedups == [2.0, 2.0]
@@ -206,7 +295,7 @@ def self_test() -> None:
     _, undetermined2 = parse_log(undetermined_sample)
     assert undetermined2
 
-    md = render_markdown(shapes, False, 2)
+    md = render_markdown(shapes, any_undetermined, 2, violations)
     assert "target" in md
     assert "floor" in md
     # 対象 9・対照 3 形状が揃っていない（self-test サンプルは各 1 形状のみ）
@@ -222,31 +311,45 @@ def self_test() -> None:
     control_mn = 256
     k_list = [2048, 4096, 8192]
 
-    def make_run(drop: tuple[str, int, int, int] | None) -> str:
+    def make_run(
+        drop: tuple[str, int, int, int] | None,
+        dup: tuple[str, int, int, int] | None = None,
+    ) -> str:
         lines_: list[str] = []
         for mn in target_mn:
             for k in k_list:
                 if drop == ("target", mn, mn, k):
                     continue
-                lines_.append(
+                line = (
                     f"splitk_ab kind=target m={mn} n={mn} k={k} partitions=4 "
                     "median_a_secs=2e-4 median_b_secs=1e-4 speedup=2.0000 "
                     "spread_a=0.1 spread_b=0.1"
                 )
+                lines_.append(line)
+                if dup == ("target", mn, mn, k):
+                    lines_.append(line)
         for k in k_list:
             if drop == ("control", control_mn, control_mn, k):
                 continue
-            lines_.append(
+            line = (
                 f"splitk_ab kind=control m={control_mn} n={control_mn} k={k} "
                 "partitions=NA median_a_secs=5e-4 median_b_secs=5e-4 "
                 "speedup=1.0000 spread_a=0.1 spread_b=0.1"
             )
+            lines_.append(line)
+            if dup == ("control", control_mn, control_mn, k):
+                lines_.append(line)
         return "\n".join(lines_) + "\n"
 
     complete_runs = [make_run(None) for _ in range(5)]
-    complete_shapes, complete_any_undetermined = aggregate(complete_runs)
+    complete_shapes, complete_any_undetermined, complete_violations = aggregate(
+        complete_runs
+    )
     assert not complete_any_undetermined
-    complete_md = render_markdown(complete_shapes, False, len(complete_runs))
+    assert not complete_violations
+    complete_md = render_markdown(
+        complete_shapes, complete_any_undetermined, len(complete_runs), complete_violations
+    )
     assert "**ADOPT**" in complete_md, complete_md
 
     # 5 run 中 1 run だけ対象形状の 1 つ（32,32,2048）が欠落 → 全体が
@@ -254,12 +357,45 @@ def self_test() -> None:
     incomplete_runs = [make_run(None) for _ in range(4)] + [
         make_run(("target", 32, 32, 2048))
     ]
-    incomplete_shapes, incomplete_any_undetermined = aggregate(incomplete_runs)
-    assert not incomplete_any_undetermined
-    incomplete_md = render_markdown(incomplete_shapes, False, len(incomplete_runs))
+    incomplete_shapes, incomplete_any_undetermined, incomplete_violations = aggregate(
+        incomplete_runs
+    )
+    assert incomplete_any_undetermined
+    assert incomplete_violations
+    incomplete_md = render_markdown(
+        incomplete_shapes, incomplete_any_undetermined, len(incomplete_runs), incomplete_violations
+    )
     assert "**undetermined**" in incomplete_md, incomplete_md
     assert "**ADOPT**" not in incomplete_md, incomplete_md
     assert "**REJECT**" not in incomplete_md, incomplete_md
+
+    # イシュー #1499 codex-review P2 が指摘した具体的な相殺シナリオ:
+    # 5 run 中 1 run で対象形状（32,32,2048）が欠落し、別の 1 run で同じ
+    # 形状が重複する。総件数（len(speedups)）は 4+0+1+1+1=... ではなく
+    # 5（欠落 run 0 件・重複 run 2 件・残り 3 run 各 1 件）と n_runs=5 に
+    # 一致してしまうため、run の所属情報を捨てた集計だけでは検出できない
+    # （旧実装はこのケースで ADOPT を誤って出力していた）。run 単位の
+    # `check_run_shape_completeness` はこの相殺を許さず undetermined に
+    # なることを確認する。
+    offset_runs = [
+        make_run(("target", 32, 32, 2048), None),
+        make_run(None, ("target", 32, 32, 2048)),
+    ] + [make_run(None) for _ in range(3)]
+    assert len(offset_runs) == 5
+    offset_shapes, offset_any_undetermined, offset_violations = aggregate(offset_runs)
+    assert offset_any_undetermined
+    assert offset_violations
+    key = ("target", 32, 32, 2048)
+    assert key in offset_shapes
+    # 相殺により総件数だけは n_runs と一致してしまうことも確認しておく
+    # （このケースを検出できるのが run 単位検査の価値であることの裏付け）。
+    assert len(offset_shapes[key].speedups) == len(offset_runs)
+    offset_md = render_markdown(
+        offset_shapes, offset_any_undetermined, len(offset_runs), offset_violations
+    )
+    assert "**undetermined**" in offset_md, offset_md
+    assert "**ADOPT**" not in offset_md, offset_md
+    assert "**REJECT**" not in offset_md, offset_md
 
     print("self-test OK", file=sys.stderr)
 
@@ -279,8 +415,8 @@ def main() -> None:
         with open(p, "r", encoding="utf-8") as f:
             logs.append(f.read())
 
-    shapes, any_undetermined = aggregate(logs)
-    print(render_markdown(shapes, any_undetermined, len(paths)))
+    shapes, any_undetermined, violations = aggregate(logs)
+    print(render_markdown(shapes, any_undetermined, len(paths), violations))
 
 
 if __name__ == "__main__":
