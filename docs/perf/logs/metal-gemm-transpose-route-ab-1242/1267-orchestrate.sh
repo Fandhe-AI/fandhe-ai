@@ -29,9 +29,14 @@
 #     POLL_INTERVAL_SECS=30・MAX_WAIT_SECS（既定 7200＝2 時間。環境変数で
 #     上書き可——本計測実行時に実際に用いた値を env_info／docs へ明示する
 #     契約は変更しない）
-#   本計測（内側ガード）: --max-load-avg=2.0 --gpu-watch=python
-#     --gpu-watch=torch --gpu-watch=mlx --gpu-watch=gemm_ --gpu-watch=bench
-#     --guard-wait-secs=60 --guard-max-attempts=20
+#   本計測（内側ガード）: --max-load-avg="${GATE_THRESHOLD}"（外側ゲート・
+#     実行中監視と同一の GATE_THRESHOLD を単一真実源として共有する。PR
+#     #1462 codex-review 指摘: 従来は内側ガードのみ 2.0 を直書きしており、
+#     例えば GATE_THRESHOLD=1.0 で再実行すると内側ガードは負荷 1.5 でも
+#     計測を開始してしまうのに監視側は同条件を BREACH と判定する不整合が
+#     あった） --gpu-watch=python --gpu-watch=torch --gpu-watch=mlx
+#     --gpu-watch=gemm_ --gpu-watch=bench --guard-wait-secs=60
+#     --guard-max-attempts=20
 #     （待機列 60,90,135,202,300×16 ≈ 1.5h 上限。env_guard.rs のバック
 #     オフ実装に従う）
 #
@@ -228,7 +233,7 @@ MONITOR_POLL_INTERVAL_SECS="${MONITOR_POLL_INTERVAL_SECS:-30}"
 
 OUT_LOG="${RUN_PREFIX}run.log"
 "${BINARY}" \
-  --max-load-avg=2.0 \
+  --max-load-avg="${GATE_THRESHOLD}" \
   --gpu-watch=python --gpu-watch=torch --gpu-watch=mlx --gpu-watch=gemm_ --gpu-watch=bench \
   --guard-wait-secs=60 --guard-max-attempts=20 \
   --env-info-out="${RUN_PREFIX}env_info.txt" \
