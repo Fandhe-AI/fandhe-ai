@@ -42,6 +42,7 @@ def _rec(
     device="metal",
     size=1024,
     mode="reuse",
+    parity_fail_count=0,
 ):
     r = {
         "framework": "fandhe-ai",
@@ -56,7 +57,14 @@ def _rec(
         "warmup": 20,
         "iters": 20,
         "mode": mode,
+        # イシュー #1477 P1（PR #1493 codex-review 指摘）: `evaluate_cell`
+        # が parity を見ない問題の回帰テスト用に既定 0 fail を付与する
+        # （`bench-fandhe` が emit する `parity_fail_count` フラットキーと
+        # 同型。`parity_fail_count=None` で意図的にキー省略できる）。
+        "parity_fail_count": parity_fail_count,
     }
+    if parity_fail_count is None:
+        del r["parity_fail_count"]
     if readout is not None:
         r["readout"] = readout
     return r
@@ -215,7 +223,9 @@ class OverallVerdictTest(unittest.TestCase):
     def test_all_cells_nonregressed_yields_adopt(self):
         rows = _gate_rows(ratio=0.8)
         cells = compare_readout_ab.split_legacy_borrowed(rows)
-        verdict = compare_readout_ab.overall_verdict(cells, threshold=1.00)
+        verdict = compare_readout_ab.overall_verdict(
+            cells, threshold=1.00, device="metal", size_set=compare_readout_ab.GATE_SIZES
+        )
         self.assertTrue(verdict.startswith("ADOPT"))
 
     def test_one_cell_regressed_yields_reject(self):
@@ -228,7 +238,9 @@ class OverallVerdictTest(unittest.TestCase):
         ]
         rows += _five_cell(0.010, 0.012, size=4096, mode="reuse")
         cells = compare_readout_ab.split_legacy_borrowed(rows)
-        verdict = compare_readout_ab.overall_verdict(cells, threshold=1.00)
+        verdict = compare_readout_ab.overall_verdict(
+            cells, threshold=1.00, device="metal", size_set=compare_readout_ab.GATE_SIZES
+        )
         self.assertTrue(verdict.startswith("REJECT"))
 
     def test_missing_cell_yields_undetermined(self):
@@ -242,8 +254,83 @@ class OverallVerdictTest(unittest.TestCase):
             )
         ]
         cells = compare_readout_ab.split_legacy_borrowed(rows)
-        verdict = compare_readout_ab.overall_verdict(cells, threshold=1.00)
+        verdict = compare_readout_ab.overall_verdict(
+            cells, threshold=1.00, device="metal", size_set=compare_readout_ab.GATE_SIZES
+        )
         self.assertTrue(verdict.startswith("undetermined"))
+
+    def test_entirely_absent_required_cell_yields_undetermined_not_adopt(self):
+        """codex-review 指摘（PR #1493 P1）: 必須 6 セルのうち 1 セルが
+        丸ごと欠測（対応する行が 1 件も無い）場合でも、存在する 5 セルが
+        全て非後退なら ADOPT になってしまっていた問題の回帰テスト。
+        """
+        rows = _gate_rows(ratio=0.8)
+        # size=4096, mode=reuse セルの行を丸ごと除去する（`_five_cell`
+        # で legacy/borrowed 双方生成される行を全削除。`test_missing_
+        # cell_yields_undetermined` は borrowed 側のみを間引くのに対し、
+        # 本テストはセルキー自体を `cells` 辞書から消す）。
+        rows = [
+            r for r in rows if not (r["size"] == 4096 and r["mode"] == "reuse")
+        ]
+        cells = compare_readout_ab.split_legacy_borrowed(rows)
+        self.assertNotIn(("gemm", "metal", 4096, "reuse", None), cells)
+        verdict = compare_readout_ab.overall_verdict(
+            cells, threshold=1.00, device="metal", size_set=compare_readout_ab.GATE_SIZES
+        )
+        self.assertTrue(
+            verdict.startswith("undetermined"),
+            f"欠測セルがあるのに ADOPT/REJECT が確定した: {verdict!r}",
+        )
+
+    def test_parity_fail_count_positive_yields_reject_even_if_faster(self):
+        """codex-review 指摘（PR #1493 P1／Cursor Bugbot Medium）:
+        `evaluate_cell` は checksum・所要時間のみを見て parity を検証
+        しないため、`parity_fail_count` が正の行があっても ADOPT に
+        なりうる問題の回帰テスト。
+        """
+        rows = _gate_rows(ratio=0.8)
+        rows = [
+            r for r in rows if not (r["size"] == 1024 and r["mode"] == "fresh")
+        ]
+        rows += _five_cell(
+            0.010,
+            0.008,
+            size=1024,
+            mode="fresh",
+            parity_fail_count=1,
+        )
+        cells = compare_readout_ab.split_legacy_borrowed(rows)
+        verdict = compare_readout_ab.overall_verdict(
+            cells, threshold=1.00, device="metal", size_set=compare_readout_ab.GATE_SIZES
+        )
+        self.assertTrue(
+            verdict.startswith("REJECT"),
+            f"parity_fail_count>0 の行があるのに ADOPT になった: {verdict!r}",
+        )
+
+    def test_parity_fail_count_missing_yields_reject(self):
+        """`parity_fail_count` キー自体が欠損する行（fail-closed 方針）は
+        「未検証」として ADOPT を許さない。
+        """
+        rows = _gate_rows(ratio=0.8)
+        rows = [
+            r for r in rows if not (r["size"] == 2048 and r["mode"] == "reuse")
+        ]
+        rows += _five_cell(
+            0.010,
+            0.008,
+            size=2048,
+            mode="reuse",
+            parity_fail_count=None,
+        )
+        cells = compare_readout_ab.split_legacy_borrowed(rows)
+        verdict = compare_readout_ab.overall_verdict(
+            cells, threshold=1.00, device="metal", size_set=compare_readout_ab.GATE_SIZES
+        )
+        self.assertTrue(
+            verdict.startswith("REJECT"),
+            f"parity_fail_count 欠損の行があるのに ADOPT になった: {verdict!r}",
+        )
 
 
 class MainTest(unittest.TestCase):
@@ -276,6 +363,29 @@ class MainTest(unittest.TestCase):
             with redirect_stdout(out):
                 code = compare_readout_ab.main(["compare_readout_ab.py", path])
             self.assertEqual(code, 3)
+        finally:
+            os.unlink(path)
+
+    def test_main_returns_nonzero_and_undetermined_on_missing_required_cell(self):
+        """codex-review 指摘（PR #1493 P1）: 6 セル中 1 セル（例: 1024/
+        reuse のみ）が丸ごと欠測していても `main()` が ADOPT・終了コード
+        0 を返してはならない回帰テスト（`--sizes gate` 既定・入力に
+        size=4096, mode=reuse セルの行を含めない）。
+        """
+        rows = _gate_rows(ratio=0.8)
+        rows = [
+            r for r in rows if not (r["size"] == 4096 and r["mode"] == "reuse")
+        ]
+        path = _write_jsonl(rows)
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = compare_readout_ab.main(
+                    ["compare_readout_ab.py", path, "--sizes", "gate"]
+                )
+            self.assertEqual(code, 3)
+            self.assertIn("undetermined", out.getvalue())
+            self.assertNotIn("ADOPT（", out.getvalue())
         finally:
             os.unlink(path)
 

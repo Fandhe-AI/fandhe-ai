@@ -33,12 +33,16 @@ ADOPT／REJECT／undetermined の判定規則（事前宣言。閾値の既定�
 gate-remeasurement.md` §13.5 が「#1438 判定木 (a) 全 N で after/before <= 1.00」
 の再計測と位置づけていることを継承する）:
 - 全 6 セルで `ratio <= threshold` かつ checksum 完全一致・parity 0 fail
+  （`parity_fail_count` が全行で `0`。欠損は fail-closed に fail 扱い）
   → ADOPT（`readout_uses_borrowed_view` の Metal 分岐を除去し借用ビュー
   を既定化する根拠）
-- 1 セルでも `ratio > threshold` または checksum 不一致 → REJECT
-  （legacy フォールバックを維持する）
-- セル自体が「判定不能」（`--sizes gate` の 6 セルが揃わない等）→
-  undetermined としてまとめて記録する
+- 1 セルでも `ratio > threshold` または checksum 不一致・parity fail
+  → REJECT（legacy フォールバックを維持する）
+- 必須 6 セル（`(gemm, metal, size, mode, phase=None)`。[`required_cells`]）
+  のうち 1 件でも計測行が存在しない、またはセル自体が「判定不能」
+  （件数過不足・warmup/iters/version 不一致・checksum 複合判定外れ 等）
+  → undetermined としてまとめて記録する（codex-review 指摘・PR #1493
+  P1: 存在するセルのみで ADOPT を確定しない）
 """
 
 import importlib.util
@@ -214,6 +218,32 @@ def split_legacy_borrowed(rows):
     return cells
 
 
+def required_cells(device, size_set):
+    """イシュー #1477 計画 §2・`docs/perf/metal-gemm-candle-gate-
+    remeasurement.md` §15.1 が要求する必須セル集合を返す（`task="gemm"`・
+    `device`・`size_set` の各サイズ・`mode ∈ {"fresh", "reuse"}`・
+    `phase=None` の直積。既定 `--sizes gate` では 3 サイズ × 2 モード =
+    6 セル）。`cells` にこの集合の全キーが揃っていない限り、存在する
+    セルのみで ADOPT／REJECT を確定してはならない（codex-review 指摘・
+    PR #1493 P1: 欠損セルがあっても非後退の見かけになりうるため）。
+    """
+    return frozenset(
+        ("gemm", device, size, mode, None)
+        for size in size_set
+        for mode in ("fresh", "reuse")
+    )
+
+
+def missing_required_cells(cells, device, size_set):
+    """`cells` に必須セル（[`required_cells`]）のうち計測行が 1 件も
+    存在しないものを、表示順（size 昇順・mode 順）で返す。
+    """
+    required = required_cells(device, size_set)
+    present = set(cells.keys())
+    missing = required - present
+    return sorted(missing, key=lambda k: tuple(str(v) for v in k))
+
+
 def _valid_field_value(field, v):
     """`warmup`／`iters`／`version` 1 値の型・値域を検証する
     （`compare_managed_ab.py::_valid_field_value` と同方針）。
@@ -357,9 +387,12 @@ def _fmt_ms(s):
     return f"{s * 1e6:.1f} us"
 
 
-def render_markdown(cells, threshold):
+def render_markdown(cells, threshold, device, size_set):
     """セルごとの判定結果を Markdown 表として整形し、総合 verdict 行を
-    末尾に付す（イシュー #1477 判定規則 §2）。
+    末尾に付す（イシュー #1477 判定規則 §2）。必須セル（[`required_
+    cells`]）のうち計測行が 1 件も無いものは「欠損（計測なし）」行として
+    明示し、存在するセルのみで判定が確定しないようにする（codex-review
+    指摘・PR #1493 P1）。
     """
     lines = []
     lines.append(
@@ -394,29 +427,69 @@ def render_markdown(cells, threshold):
             f"{result['ratio']:.4f} | {checksum_label} | {verdict} |"
         )
 
+    missing = missing_required_cells(cells, device, size_set)
+    for key in missing:
+        cell_label = "/".join(str(v) for v in key)
+        lines.append(f"| {cell_label} | - | - | - | - | 欠損（計測なし） |")
+
     lines.append("")
-    lines.append(f"総合判定: {overall_verdict(cells, threshold)}")
+    lines.append(f"総合判定: {overall_verdict(cells, threshold, device, size_set)}")
     return "\n".join(lines)
 
 
-def overall_verdict(cells, threshold):
+def overall_verdict(cells, threshold, device, size_set):
     """イシュー #1477 判定規則 §2 の 3 択（ADOPT／REJECT／undetermined）を
     機械的に確定する。
 
-    - いずれかのセルが「判定不能」→ undetermined
-    - 全セル ok かつ全セルで `ratio <= threshold` かつ checksum 完全一致
-      → ADOPT
-    - それ以外（1 セルでも `ratio > threshold` または checksum 不一致）
-      → REJECT
+    - 必須セル（[`required_cells`]。`gemm`/`device`/`size_set` 各サイズ/
+      `{fresh, reuse}`/`phase=None` の直積）が 1 件でも欠損 → undetermined
+      （存在するセルのみを見て非後退と誤判定しない。codex-review 指摘・
+      PR #1493 P1）
+    - いずれかの必須セルが「判定不能」→ undetermined
+    - 全必須セル ok かつ全セルで `ratio <= threshold` かつ checksum 完全
+      一致・parity 0 fail（`--parity-fail-count-key` 経由。P1: parity
+      未検証は ADOPT 対象外） → ADOPT
+    - それ以外（1 セルでも `ratio > threshold` または checksum 不一致・
+      parity fail） → REJECT
     """
-    results = [evaluate_cell(v["legacy"], v["borrowed"]) for v in cells.values()]
+    if missing_required_cells(cells, device, size_set):
+        return "undetermined（必須セル欠損あり。legacy フォールバックを維持する）"
+    required = required_cells(device, size_set)
+    results = [
+        evaluate_cell(cells[key]["legacy"], cells[key]["borrowed"]) for key in required
+    ]
     if any(r["status"] != "ok" for r in results):
         return "undetermined（判定不能セルあり。legacy フォールバックを維持する）"
+    if any(_cell_has_parity_fail(cells[key]) for key in required):
+        return "REJECT（parity fail の行があるため legacy フォールバックを維持する）"
     if all(
         r["ratio"] <= threshold and r["checksum_exact_match"] for r in results
     ):
         return "ADOPT（借用ビューへ切替。Metal 分岐を除去して既定化する）"
     return "REJECT（legacy フォールバックを維持する）"
+
+
+def _cell_has_parity_fail(cell):
+    """1 セル（legacy/borrowed 全行）のうち、`parity_fail_count`（`Record::
+    to_json_line` が emit するフラットキー。`bench-common::Record.parity`
+    の `fail_count`）が正の整数または欠損している行が 1 件でもあれば
+    `True` を返す（codex-review 指摘・PR #1493 P1: `evaluate_cell` が
+    parity を一切見ないため、checksum と性能さえ一致すれば parity fail
+    が残っていても・parity が未検証〈`--device-checksum` 等で `parity`
+    キー自体が省略される場合〉でも ADOPT になりうる問題の是正。REQ-2
+    coding-rust.md「テスト・ベンチ」節の parity 0 fail 契約に倣い、欠損
+    は fail-closed に「fail あり」として扱う）。
+    """
+    for label in ("legacy", "borrowed"):
+        for r in cell.get(label, []):
+            fail_count = r.get("parity_fail_count")
+            if (
+                not isinstance(fail_count, int)
+                or isinstance(fail_count, bool)
+                or fail_count > 0
+            ):
+                return True
+    return False
 
 
 def main(argv):
@@ -477,10 +550,17 @@ def main(argv):
     if not cells:
         print("判定不能: 入力ファイルに対象行がない", file=sys.stderr)
         return 3
-    print(render_markdown(cells, args.threshold))
-    any_undeterminable = any(
-        evaluate_cell(v["legacy"], v["borrowed"])["status"] != "ok"
-        for v in cells.values()
+    print(render_markdown(cells, args.threshold, args.device, size_set))
+    # イシュー #1477 判定規則 §2: 必須セル（[`required_cells`]）が 1 件
+    # でも欠損していれば「存在するセルのみで非後退」と誤判定してはいけない
+    # （codex-review 指摘・PR #1493 P1）。missing 自体を判定不能の理由に
+    # 含めたうえで、存在する必須セルの判定不能も従来どおり検出する。
+    any_undeterminable = bool(
+        missing_required_cells(cells, args.device, size_set)
+    ) or any(
+        evaluate_cell(cells[key]["legacy"], cells[key]["borrowed"])["status"] != "ok"
+        for key in required_cells(args.device, size_set)
+        if key in cells
     )
     return 3 if any_undeterminable else 0
 

@@ -520,7 +520,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // ゲート参照）のため gemm 計測では常に None。
         graph: None,
         graph_stats: None,
-        readout: None,
+        readout: cli.readout.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -620,7 +620,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // 参照）。
         graph: None,
         graph_stats: None,
-        readout: None,
+        readout: cli.readout.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -946,7 +946,7 @@ fn emit_gemm_phase_records(
                 device_checksum: false,
                 graph: None,
                 graph_stats: None,
-                readout: None,
+                readout: cli.readout.as_deref(),
             },
             phase,
             phase_index,
@@ -1542,7 +1542,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // 参照。`DeviceParamStore::step` 自体を呼ばないタスク）。
         graph: None,
         graph_stats: None,
-        readout: None,
+        readout: cli.readout.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1646,7 +1646,7 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // 参照）。
         graph: None,
         graph_stats: None,
-        readout: None,
+        readout: cli.readout.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1868,7 +1868,7 @@ fn emit_infer_phase_records(
                 // 参照）。
                 graph: None,
                 graph_stats: None,
-                readout: None,
+                readout: cli.readout.as_deref(),
             },
             phase,
             phase_index,
@@ -2640,6 +2640,67 @@ mod tests {
         assert!(readout_uses_borrowed_view("cpu", None));
         assert!(readout_uses_borrowed_view("cuda", None));
         assert!(!readout_uses_borrowed_view("metal", None));
+    }
+
+    /// codex-review 指摘（PR #1493 P1）: `--readout` override が実際の
+    /// 計測経路（`readout_uses_borrowed_view`）へ反映されるだけでなく、
+    /// `Record.readout` にも指定値が記録され JSONL の `"readout"` キーへ
+    /// emit されることを固定する回帰テスト。`run_ab_readout_metal.sh` が
+    /// `compare_readout_ab.py` で legacy／borrowed の run 単位 interleave
+    /// を識別するには、この JSONL キーが計測経路と一致していることが
+    /// 前提となる（README「借用ビュー readout」節・`docs/perf/logs/
+    /// metal-gemm-readout-interleave-1477/` 参照）。
+    #[test]
+    fn run_gemm_jsonl_records_readout_override_value() {
+        let cli = Cli {
+            readout: Some("legacy".to_string()),
+            ..make_cli("gemm", "fresh", &temp_out_path("gemm-readout-legacy"))
+        };
+        let out_path = std::path::PathBuf::from(cli.out.clone());
+        run_gemm(&cli).expect("run_gemm failed");
+        let content = std::fs::read_to_string(&out_path).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out_path);
+        let last = content.lines().next_back().expect("test: JSONL に行がない");
+        assert!(
+            last.contains("\"readout\":\"legacy\""),
+            "run_gemm が --readout legacy を Record.readout へ反映していない: line={last}"
+        );
+    }
+
+    #[test]
+    fn run_gemm_reuse_jsonl_records_readout_override_value() {
+        let cli = Cli {
+            readout: Some("borrowed".to_string()),
+            ..make_cli(
+                "gemm",
+                "reuse",
+                &temp_out_path("gemm-reuse-readout-borrowed"),
+            )
+        };
+        let out_path = std::path::PathBuf::from(cli.out.clone());
+        run_gemm_reuse(&cli).expect("run_gemm_reuse failed");
+        let content = std::fs::read_to_string(&out_path).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out_path);
+        let last = content.lines().next_back().expect("test: JSONL に行がない");
+        assert!(
+            last.contains("\"readout\":\"borrowed\""),
+            "run_gemm_reuse が --readout borrowed を Record.readout へ反映していない: line={last}"
+        );
+    }
+
+    #[test]
+    fn run_gemm_jsonl_omits_readout_key_when_override_is_none() {
+        let cli = make_cli("gemm", "fresh", &temp_out_path("gemm-readout-none"));
+        assert!(cli.readout.is_none());
+        let out_path = std::path::PathBuf::from(cli.out.clone());
+        run_gemm(&cli).expect("run_gemm failed");
+        let content = std::fs::read_to_string(&out_path).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out_path);
+        let last = content.lines().next_back().expect("test: JSONL に行がない");
+        assert!(
+            !last.contains("\"readout\""),
+            "--readout 未指定なのに readout キーが emit された: line={last}"
+        );
     }
 
     /// codex-review 指摘（PR #1452 P2）: `readout_uses_borrowed_view` が

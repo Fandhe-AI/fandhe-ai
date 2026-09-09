@@ -128,7 +128,30 @@ AB_LOAD_GATE_MAX_ATTEMPTS=${AB_LOAD_GATE_MAX_ATTEMPTS:-10}
 AB_LOAD_GATE_INITIAL_WAIT=${AB_LOAD_GATE_INITIAL_WAIT:-60}
 
 load1_now() {
-  uptime | sed -E 's/.*load average[s]?: ([0-9.]+).*/\1/'
+  # `uptime` の失敗（コマンド自体の異常終了）／出力形式の不一致は
+  # 空文字を返す（呼び出し側 `wait_for_exclusive_gate` が非数値・空文字
+  # を「取得失敗」として fail-closed に扱う契約。codex-review 指摘・
+  # PR #1493 P1: 空文字を awk の数値コンテキストへそのまま渡すと 0 扱い
+  # されて閾値未満と誤判定され、専有ゲートが誤通過しうる）。
+  local raw parsed
+  if ! raw="$(uptime 2>/dev/null)"; then
+    return 0
+  fi
+  parsed="$(printf '%s\n' "$raw" | sed -E 's/.*load average[s]?: ([0-9.]+).*/\1/')"
+  # sed が置換に成功しなかった場合（`uptime` の出力形式が想定外）、
+  # `-n` を付けていないため置換前の行がそのまま出力される。それを
+  # そのまま数値として扱わないよう、`load1_is_valid` 相当の判定は
+  # 呼び出し側で行う（ここでは非数値も含めそのまま返す）。
+  printf '%s' "$parsed"
+}
+
+# `load1_now` が返した文字列が非負の有限数値であることを検証する
+# （codex-review 指摘・PR #1493 P1）。`awk` の数値コンテキストは非数値
+# 文字列を暗黙に 0 として扱うため、専有ゲートの比較へ渡す前に本関数で
+# 明示的に弾く。
+load1_is_valid() {
+  local v="$1"
+  [[ -n "$v" ]] && awk -v l="$v" 'BEGIN{exit !(l ~ /^[0-9]+(\.[0-9]+)?$/ && l + 0 >= 0)}'
 }
 
 wait_for_exclusive_gate() {
@@ -137,15 +160,20 @@ wait_for_exclusive_gate() {
   : > "$gate_log"
   while [[ "$attempt" -lt "$AB_LOAD_GATE_MAX_ATTEMPTS" ]]; do
     l1="$(load1_now)"
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) attempt=$attempt load1=$l1 threshold=$AB_LOAD_GATE_MAX_LOAD1 consecutive_ok=$consecutive_ok" | tee -a "$gate_log"
-    if awk -v l="$l1" -v t="$AB_LOAD_GATE_MAX_LOAD1" 'BEGIN{exit !(l < t)}'; then
-      consecutive_ok=$((consecutive_ok + 1))
-      if [[ "$consecutive_ok" -ge 2 ]]; then
-        echo "gate: ok (2 consecutive checks under threshold)" | tee -a "$gate_log"
-        return 0
-      fi
-    else
+    if ! load1_is_valid "$l1"; then
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) attempt=$attempt load1_invalid=${l1:-<empty>} threshold=$AB_LOAD_GATE_MAX_LOAD1 consecutive_ok=$consecutive_ok" | tee -a "$gate_log"
       consecutive_ok=0
+    else
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) attempt=$attempt load1=$l1 threshold=$AB_LOAD_GATE_MAX_LOAD1 consecutive_ok=$consecutive_ok" | tee -a "$gate_log"
+      if awk -v l="$l1" -v t="$AB_LOAD_GATE_MAX_LOAD1" 'BEGIN{exit !(l < t)}'; then
+        consecutive_ok=$((consecutive_ok + 1))
+        if [[ "$consecutive_ok" -ge 2 ]]; then
+          echo "gate: ok (2 consecutive checks under threshold)" | tee -a "$gate_log"
+          return 0
+        fi
+      else
+        consecutive_ok=0
+      fi
     fi
     attempt=$((attempt + 1))
     if [[ "$attempt" -ge "$AB_LOAD_GATE_MAX_ATTEMPTS" ]]; then
