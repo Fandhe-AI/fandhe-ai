@@ -21,6 +21,28 @@ PR #1501 codex-review 指摘の是正（2026-09-09）: 初版は規則 1（check
 §20.1 の場合分けへ折り込んで "ADOPT_UNCONDITIONAL"／
 "ADOPT_LINUX_ONLY"／"REJECT"／"UNDETERMINED" の 4 値判定にした。
 
+PR #1501 codex-review 指摘の追加是正（2026-09-09 その 2）: 上記初版の
+規則 5 は集計済み Markdown（`compare_gemm_ab.py` 出力）の中央値比のみで
+発火判定しており、5 run 個々の符号一貫性を検証していなかった（DGX 側が
+合格でも M4 Max 側が規則 3／4 不成立のまま符号混在の計測から
+ADOPT_LINUX_ONLY を返しうる契約不整合。保存済みデータの REJECT という
+結論自体には影響しない）。本版は `--jsonl`（`bench-fandhe` の生 JSONL。
+`node:arm:path` 形式・1 行 1 run）を追加入力とし、`parse_jsonl_medians`
+で `(size, mode) -> [median_s, ...]`（run 出現順を保持）を抽出したうえで、
+規則 5 は (i) run 別 on/off 比（`on_runs[i] / off_runs[i]`。生ログの run
+順で対応付け）が全 run で 1.0 超（符号一貫）、かつ (ii) 生 JSONL から
+算出した中央値比（`statistics.median(on) / statistics.median(off)`）が
+閾値超、の両方を満たす場合のみ発火する（run 別データが未指定の場合は
+Markdown 由来の中央値比のみで判定し、符号一貫性は「未確認」として
+`lines` に明記する。判定不能側〈発火させない〉に倒す fail-safe）。
+副次効果として、規則 2／3 の on/off 比も `--jsonl` 指定時は
+Markdown 表示値（3〜4 桁丸め）ではなく生 JSONL 由来の中央値比
+（丸めなし）を優先して使う（未指定時は従来どおり Markdown 値を使う。
+規則 4〈candle 比〉は candle 側の生 JSONL がこのディレクトリの成果物
+として保存されていないため本是正の対象外——`compare_gemm_gate.py`
+出力 Markdown の candle/fandhe 列〈3 桁丸め〉を再除算する現状のまま
+とし、この既知の精度限界を判定ロジック中にコメントで明記する）。
+
 使い方:
   python3 judge_rules.py \
     --layer-a-md compare_gemm_ab-dgx.md --layer-a-md compare_gemm_ab-m4max.md \
@@ -29,6 +51,10 @@ PR #1501 codex-review 指摘の是正（2026-09-09）: 初版は規則 1（check
     --gate-md dgx:on:compare_gemm_gate-dgx-on.md \
     --gate-md m4max:off:compare_gemm_gate-m4max-off.md \
     --gate-md m4max:on:compare_gemm_gate-m4max-on.md \
+    --jsonl dgx:off:results-dgx-...-off.fandhe-only.jsonl \
+    --jsonl dgx:on:results-dgx-...-on.fandhe-only.jsonl \
+    --jsonl m4max:off:results-m4max-...-off.fandhe-only.jsonl \
+    --jsonl m4max:on:results-m4max-...-on.fandhe-only.jsonl \
     > judge.md
 
 自己検証: `python3 judge_rules.py --self-test`（固定サンプル文字列に対する
@@ -37,7 +63,9 @@ PR #1501 codex-review 指摘の是正（2026-09-09）: 初版は規則 1（check
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import statistics
 import sys
 from dataclasses import dataclass
 
@@ -138,6 +166,78 @@ def parse_layer_b_md(text: str) -> dict[tuple[int, str], float]:
     return out
 
 
+def parse_jsonl_medians(text: str) -> dict[tuple[int, str], list[float]]:
+    """`bench-fandhe` 生 JSONL（1 行 1 run）から {(size, mode): [median_s, ...]} を抽出する。
+
+    行の出現順を保持する（本イシューのオーケストレーションスクリプトは
+    5 回の独立プロセス起動を順に連結して 1 ファイルへ書き出すため、
+    各 (size, mode) の要素は run 1〜5 の順で並ぶ。規則 5 の run 別
+    符号一貫性判定〈`_check_rule5_regression`〉はこの並び順を
+    run 番号の対応付けとしてそのまま使う）。パース不能な行・必要
+    フィールド欠落行は静かに無視する（Layer A の `--layer-a-md` と
+    同じ「壊れた行は無視してヘッダ等を誤検出しない」方針）。
+    """
+    out: dict[tuple[int, str], list[float]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        try:
+            size = int(d["size"])
+            mode = str(d["mode"])
+            median_s = float(d["median_s"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.setdefault((size, mode), []).append(median_s)
+    return out
+
+
+def _raw_median_ratio(
+    off_runs: dict[tuple[int, str], list[float]],
+    on_runs: dict[tuple[int, str], list[float]],
+    n: int,
+    mode: str,
+) -> float | None:
+    """生 JSONL から丸めなしの on/off 中央値比を計算する（`--jsonl` 未指定時は None）。
+
+    `statistics.median(on) / statistics.median(off)`。`compare_gemm_ab.py`
+    が Markdown へ出力する `after/before` 列（3〜4 桁丸め）と同じ定義だが、
+    本関数は生の `median_s` から直接計算するため丸め誤差を持ち込まない
+    （PR #1501 codex-review P2: 表示用に丸めた値を再除算しない）。
+    """
+    off_list = off_runs.get((n, mode))
+    on_list = on_runs.get((n, mode))
+    if not off_list or not on_list:
+        return None
+    return statistics.median(on_list) / statistics.median(off_list)
+
+
+def _raw_run_pair_ratios(
+    off_runs: dict[tuple[int, str], list[float]],
+    on_runs: dict[tuple[int, str], list[float]],
+    n: int,
+    mode: str,
+) -> list[float] | None:
+    """run 番号を対応付けた on/off 比のリストを返す（規則 5 の符号一貫性判定用）。
+
+    `parse_jsonl_medians` が保持する出現順（= run 1〜5 の順）で
+    `off_runs[i]`・`on_runs[i]` を同じ run 番号の対として扱う。両ファイル
+    の該当 (size, mode) の run 数が異なる場合は短い方に合わせる。
+    """
+    off_list = off_runs.get((n, mode))
+    on_list = on_runs.get((n, mode))
+    if not off_list or not on_list:
+        return None
+    count = min(len(off_list), len(on_list))
+    if count == 0:
+        return None
+    return [on_list[i] / off_list[i] for i in range(count)]
+
+
 def _check_rule1_checksum(
     layer_a: dict[str, dict[tuple[int, str], LayerACell]],
 ) -> tuple[bool, list[str]]:
@@ -171,8 +271,14 @@ def judge(
     layer_a: dict[str, dict[tuple[int, str], LayerACell]],
     layer_b: dict[str, dict[tuple[int, str], float]],
     gate: dict[tuple[str, str], dict[int, float]],
+    jsonl: dict[tuple[str, str], dict[tuple[int, str], list[float]]] | None = None,
 ) -> tuple[list[str], str]:
     """規則 1〜5 を機械判定し、(明細行のリスト, verdict) を返す。
+
+    `jsonl` は `{(node, arm): {(size, mode): [median_s, ...]}}`（`--jsonl`
+    引数から `parse_jsonl_medians` で構築。`arm` は "off"／"on"）。未指定
+    （`None`／空 dict）なら Markdown 由来の丸め済み比のみで判定する
+    （`_self_test` の合成サンプルとの後方互換）。
 
     verdict は次の 4 値（§20.1 の場合分け (a)〜(c) をそのまま実装する）:
     - "UNDETERMINED": 規則 1（checksum 完全一致）が不成立・入力欠落
@@ -187,16 +293,24 @@ def judge(
       未網羅ケースを安全側にすべて REJECT へ倒す）
     """
     lines: list[str] = []
+    jsonl = jsonl or {}
 
     # 規則 1（前提条件）: 両実機・全セルで checksum 完全一致。
     checksum_ok, checksum_lines = _check_rule1_checksum(layer_a)
     lines.extend(checksum_lines)
 
     # 規則 2: DGX N=2048 決定セル（DGX 専用）。
+    # PR #1501 codex-review P2 是正: `--jsonl` 指定時は生 median_s から
+    # 丸めなしで中央値比を再計算し、`compare_gemm_ab.py` の Markdown 表示
+    # （3〜4 桁丸め）に依存しない（未指定時は従来どおり Markdown 値）。
     dgx_a = layer_a.get("dgx", {})
     dgx_b = layer_b.get("dgx", {})
     r2_layer_a_cell = dgx_a.get((2048, "reuse"))
-    r2_layer_a = r2_layer_a_cell.ratio if r2_layer_a_cell is not None else None
+    r2_layer_a_md = r2_layer_a_cell.ratio if r2_layer_a_cell is not None else None
+    r2_layer_a_raw = _raw_median_ratio(
+        jsonl.get(("dgx", "off"), {}), jsonl.get(("dgx", "on"), {}), 2048, "reuse"
+    )
+    r2_layer_a = r2_layer_a_raw if r2_layer_a_raw is not None else r2_layer_a_md
     r2_alloc_c = dgx_b.get((2048, "alloc_c"))
     r2_ops_gemm = dgx_b.get((2048, "ops_gemm"))
     # 「alloc_c 中央値が削減され」= on/off 比 < 1.0（既存コメントの見落とし
@@ -211,25 +325,32 @@ def judge(
         and r2_ops_gemm <= RULE2_OPS_GEMM_THRESHOLD
     )
     lines.append(
-        f"規則2 DGX N=2048決定セル: layer_a(reuse)={r2_layer_a} (<= {RULE234_THRESHOLD}) "
+        f"規則2 DGX N=2048決定セル: layer_a(reuse)={r2_layer_a} "
+        f"(md={r2_layer_a_md}, raw={r2_layer_a_raw}) (<= {RULE234_THRESHOLD}) "
         f"alloc_c比={r2_alloc_c} ops_gemm比={r2_ops_gemm} (<= {RULE2_OPS_GEMM_THRESHOLD}) "
         f"-> {'満たす' if r2_ok else '不成立'}"
     )
 
     # 規則 3: 対照セル（両実機 N=512/1024 の fresh/reuse 全セル）。
     # §20.1 場合分けの (a) が「DGX が規則 1〜4 を満たす」ことのみを要求
-    # するため、DGX 側・M4 Max 側を分けて判定を保持する。
+    # するため、DGX 側・M4 Max 側を分けて判定を保持する。規則 2 と同様、
+    # `--jsonl` 指定時は生 median_s から丸めなしで比を再計算する。
     r3_dgx_ok = True
     r3_m4max_ok = True
     for node in ("dgx", "m4max"):
         a = layer_a.get(node, {})
+        off_runs = jsonl.get((node, "off"), {})
+        on_runs = jsonl.get((node, "on"), {})
         for n in (512, 1024):
             for mode in ("fresh", "reuse"):
                 cell = a.get((n, mode))
-                v = cell.ratio if cell is not None else None
+                v_md = cell.ratio if cell is not None else None
+                v_raw = _raw_median_ratio(off_runs, on_runs, n, mode)
+                v = v_raw if v_raw is not None else v_md
                 ok = v is not None and v <= RULE234_THRESHOLD
                 lines.append(
-                    f"規則3 対照セル {node} N={n}/{mode}: 比={v} (<= {RULE234_THRESHOLD}) "
+                    f"規則3 対照セル {node} N={n}/{mode}: 比={v} "
+                    f"(md={v_md}, raw={v_raw}) (<= {RULE234_THRESHOLD}) "
                     f"-> {'満たす' if ok else '不成立'}"
                 )
                 if node == "dgx":
@@ -239,6 +360,14 @@ def judge(
 
     # 規則 4（改定版）: 各セル（実機×N=512/1024/2048）の candle 比 on/off 比。
     # 規則 3 と同様に DGX 側・M4 Max 側を分けて保持する。
+    # PR #1501 codex-review P2 既知の限界: candle 側の生 median_s は本
+    # ディレクトリの成果物として保存されておらず（`--jsonl` は fandhe-ai
+    # 自系列の生ログのみを持つ）、`compare_gemm_gate.py` 出力 Markdown の
+    # candle/fandhe 列（3 桁丸め）を on/off で再除算する以外に丸めなしの
+    # 値を得る手段がない。規則 2・3・5 と異なり本規則は Markdown 値のまま
+    # とし、この限界をここに明記する（真値との乖離は 3 桁丸め由来の
+    # 高々 5e-4 程度であり、`RULE4_MIN_RATIO` 境界〈0.952380...〉近傍で
+    # なければ判定結果へ影響しない）。
     r4_dgx_ok = True
     r4_m4max_ok = True
     for node in ("dgx", "m4max"):
@@ -262,18 +391,44 @@ def judge(
             else:
                 r4_m4max_ok = r4_m4max_ok and ok
 
-    # 規則 5: M4 Max N=2048 の後退判定（Layer A on/off 比 > 1.05 なら
-    # 規則発火＝§20.1 場合分け (a) の Linux 限定化条件）。本判定は
-    # run 別 JSONL の符号一貫性までは見ず、集計後の中央値比のみで判定
-    # する（5 run 中央値そのものが規則 2〜3 と同じ Layer A 表由来のため、
-    # 符号一貫性は生ログ側で別途確認し env_info.txt に記録する）。
+    # 規則 5: M4 Max N=2048 の後退判定（§20.1 場合分け (a) の Linux 限定化
+    # 条件）。PR #1501 codex-review P1 是正: 当初実装は集計後の中央値比の
+    # みで発火判定しており、5 run 個々の符号一貫性を検証していなかった
+    # （DGX 合格・M4 Max 側規則 3/4 不成立でも符号混在の計測から
+    # ADOPT_LINUX_ONLY を返しうる契約不整合）。本版は `--jsonl` 指定時、
+    # (i) 生 median_s から丸めなしで算出した中央値比が閾値超、かつ
+    # (ii) run 番号を対応付けた on/off 比（`_raw_run_pair_ratios`）が
+    # 全 run で 1.0 超（符号一貫）、の両方を満たす場合のみ発火する。
+    # `--jsonl` 未指定時は Markdown 中央値比のみで判定し、符号一貫性は
+    # 「未確認」と明記したうえで発火させない側（fail-safe）に倒す
+    # （中央値比のみでの誤った ADOPT_LINUX_ONLY 発火を避ける）。
     m4_2048_reuse_cell = layer_a.get("m4max", {}).get((2048, "reuse"))
-    m4_2048_reuse = m4_2048_reuse_cell.ratio if m4_2048_reuse_cell is not None else None
-    r5_regression = m4_2048_reuse is not None and m4_2048_reuse > RULE234_THRESHOLD
-    lines.append(
-        f"規則5 M4Max N=2048: layer_a(reuse)={m4_2048_reuse} "
-        f"-> {'後退あり（5run符号一貫は生ログで別途確認）' if r5_regression else '後退なし（発火せず）'}"
-    )
+    m4_2048_reuse_md = m4_2048_reuse_cell.ratio if m4_2048_reuse_cell is not None else None
+    m4_off_runs = jsonl.get(("m4max", "off"), {})
+    m4_on_runs = jsonl.get(("m4max", "on"), {})
+    m4_2048_reuse_raw = _raw_median_ratio(m4_off_runs, m4_on_runs, 2048, "reuse")
+    run_pairs = _raw_run_pair_ratios(m4_off_runs, m4_on_runs, 2048, "reuse")
+
+    if m4_2048_reuse_raw is not None and run_pairs:
+        median_exceeds = m4_2048_reuse_raw > RULE234_THRESHOLD
+        sign_consistent = all(r > 1.0 for r in run_pairs)
+        r5_regression = median_exceeds and sign_consistent
+        lines.append(
+            f"規則5 M4Max N=2048: layer_a(reuse)={m4_2048_reuse_raw} "
+            f"(md={m4_2048_reuse_md}) run別比={run_pairs} "
+            f"中央値超過={median_exceeds} 符号一貫={sign_consistent} "
+            f"-> {'後退あり（run別符号一貫を確認済み）' if r5_regression else '後退なし（発火せず）'}"
+        )
+    else:
+        # `--jsonl` 未指定・データ欠落: 符号一貫性を確認できないため
+        # 安全側（発火させない）に倒す。旧版のように中央値比のみで
+        # 発火判定しない（P1 是正の核心）。
+        r5_regression = False
+        lines.append(
+            f"規則5 M4Max N=2048: layer_a(reuse)={m4_2048_reuse_md} "
+            f"(生 JSONL 未指定のため run別符号一貫性を確認できず、"
+            f"中央値比のみでの発火判定は行わない) -> 後退なし扱い（判定不能を安全側 REJECT 方向へ）"
+        )
 
     # ---- §20.1 場合分け (a)〜(c) を最終 verdict へ折り込む ----
     dgx_rules_1_4_ok = checksum_ok and r2_ok and r3_dgx_ok and r4_dgx_ok
@@ -363,6 +518,36 @@ def _self_test() -> int:
     assert parsed_b[(2048, "ops_gemm")] == 0.9972, parsed_b
     assert parsed_b[(2048, "alloc_c")] == 0.5166, parsed_b
 
+    # `parse_jsonl_medians`: bench-fandhe 生 JSONL（1 行 1 run）から
+    # (size, mode) ごとの median_s リストを出現順で抽出できること。
+    # 壊れた行（JSON 不正・必須フィールド欠落）は静かに無視すること。
+    sample_jsonl = (
+        '{"size":2048,"mode":"reuse","median_s":0.0210}\n'
+        '{"size":2048,"mode":"fresh","median_s":0.0217}\n'
+        "not json\n"
+        '{"size":2048,"mode":"reuse"}\n'
+        '{"size":2048,"mode":"reuse","median_s":0.0213}\n'
+    )
+    parsed_jsonl = parse_jsonl_medians(sample_jsonl)
+    assert parsed_jsonl[(2048, "reuse")] == [0.0210, 0.0213], parsed_jsonl
+    assert parsed_jsonl[(2048, "fresh")] == [0.0217], parsed_jsonl
+
+    # `_raw_median_ratio`／`_raw_run_pair_ratios`: 生 median_s から
+    # 丸めなしの中央値比・run 対応付き比リストを計算できること。
+    off_runs_sample = {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]}
+    on_runs_sample = {(2048, "reuse"): [1.2, 1.2, 1.2, 1.2, 1.2]}
+    assert _raw_median_ratio(off_runs_sample, on_runs_sample, 2048, "reuse") == 1.2
+    assert _raw_run_pair_ratios(off_runs_sample, on_runs_sample, 2048, "reuse") == [
+        1.2,
+        1.2,
+        1.2,
+        1.2,
+        1.2,
+    ]
+    # データ欠落セルは None を返すこと。
+    assert _raw_median_ratio(off_runs_sample, on_runs_sample, 4096, "reuse") is None
+    assert _raw_run_pair_ratios({}, on_runs_sample, 2048, "reuse") is None
+
     def _all_ok_layer_a() -> dict[str, dict[tuple[int, str], LayerACell]]:
         cell = LayerACell(ratio=1.00, checksum=CHECKSUM_OK_VALUE)
         return {
@@ -408,18 +593,53 @@ def _self_test() -> int:
     _, verdict_missing = judge(layer_a_missing_cell, layer_b_ok, gate_ok)
     assert verdict_missing == "UNDETERMINED", verdict_missing
 
-    # 規則 5 発火ケース（M4 Max N=2048 が 1.05 超で後退）だが DGX 側は
-    # 規則 1〜4 を満たす → ADOPT_LINUX_ONLY（§20.1 場合分け (a)）。
-    # これが初版のもう一つの欠陥（規則 5 が verdict に反映されず常に
-    # 無条件 ADOPT/REJECT の二値になっていた）を再発させないための
-    # 回帰テスト。
+    # 規則 5 発火ケース（M4 Max N=2048 が 1.05 超で後退・かつ run 別比が
+    # 全 run 1.0 超で符号一貫）だが DGX 側は規則 1〜4 を満たす →
+    # ADOPT_LINUX_ONLY（§20.1 場合分け (a)）。これが初版のもう一つの欠陥
+    # （規則 5 が verdict に反映されず常に無条件 ADOPT/REJECT の二値に
+    # なっていた）を再発させないための回帰テスト。PR #1501 codex-review
+    # P1 是正後は `--jsonl` 経由の run 別データも与え、符号一貫性が
+    # 確認された場合に限り発火することを検証する。
     layer_a_r5 = _all_ok_layer_a()
     layer_a_r5["m4max"] = dict(layer_a_r5["m4max"])
     layer_a_r5["m4max"][(2048, "reuse")] = LayerACell(
         ratio=1.20, checksum=CHECKSUM_OK_VALUE
     )
-    _, verdict_r5 = judge(layer_a_r5, layer_b_ok, gate_ok)
+    jsonl_r5_consistent = {
+        ("m4max", "off"): {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]},
+        ("m4max", "on"): {(2048, "reuse"): [1.2, 1.2, 1.2, 1.2, 1.2]},
+    }
+    _, verdict_r5 = judge(layer_a_r5, layer_b_ok, gate_ok, jsonl_r5_consistent)
     assert verdict_r5 == "ADOPT_LINUX_ONLY", verdict_r5
+
+    # 規則 5 の P1 是正の核心テスト: Markdown 中央値比は 1.05 超（後退
+    # ありに見える）だが run 別 JSONL の符号が混在（5 run 中 1 run は
+    # on < off）している場合、規則 5 は「符号一貫性を確認できない」ため
+    # 発火**しない**こと（中央値比のみで判定していた初版の欠陥の直接的な
+    # 再発防止テスト）。他規則（1〜4）は両実機とも満たすため、規則 5 が
+    # 発火しない結果として ADOPT_UNCONDITIONAL になる（規則 5 は
+    # ADOPT_LINUX_ONLY への切替条件であり、未確定を REJECT 直結にはしない
+    # 設計。規則 3・4 の対照セル・N=2048 決定セル自体は別途 §20.1a の
+    # 独立した閾値判定で担保されている）。
+    layer_a_r5_mixed = _all_ok_layer_a()
+    layer_a_r5_mixed["m4max"] = dict(layer_a_r5_mixed["m4max"])
+    layer_a_r5_mixed["m4max"][(2048, "reuse")] = LayerACell(
+        ratio=1.20, checksum=CHECKSUM_OK_VALUE
+    )
+    jsonl_r5_mixed = {
+        ("m4max", "off"): {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]},
+        ("m4max", "on"): {(2048, "reuse"): [1.5, 1.5, 1.5, 0.9, 1.5]},
+    }
+    _, verdict_r5_mixed = judge(layer_a_r5_mixed, layer_b_ok, gate_ok, jsonl_r5_mixed)
+    assert verdict_r5_mixed == "ADOPT_UNCONDITIONAL", verdict_r5_mixed
+    assert verdict_r5_mixed != "ADOPT_LINUX_ONLY", verdict_r5_mixed
+
+    # 規則 5 の後方互換ケース: `--jsonl` 未指定（None）の場合、Markdown
+    # 中央値比が 1.05 超であっても符号一貫性を確認できないため発火**しない**
+    # （初版が中央値比のみで無条件に発火していたのに対する fail-safe 側の
+    # 変更点）。
+    _, verdict_r5_no_jsonl = judge(layer_a_r5, layer_b_ok, gate_ok, None)
+    assert verdict_r5_no_jsonl == "ADOPT_UNCONDITIONAL", verdict_r5_no_jsonl
 
     # 規則 5 は発火しない（M4 Max N=2048 <= 1.05）が M4 Max の対照セル
     # （規則 3）が不成立 → (a)/(c) いずれにも該当しないため REJECT。
@@ -440,6 +660,18 @@ def main() -> int:
     ap.add_argument("--layer-a-md", action="append", default=[], help="node:path または path（node は '-dgx.md'/'−m4max.md' 等のファイル名から推定）")
     ap.add_argument("--layer-b-md", action="append", default=[])
     ap.add_argument("--gate-md", action="append", default=[], help="node:arm:path 形式（例 dgx:off:compare_gemm_gate-dgx-off.md）")
+    ap.add_argument(
+        "--jsonl",
+        action="append",
+        default=[],
+        help=(
+            "node:arm:path 形式（例 m4max:off:results-m4max-....jsonl）。"
+            "bench-fandhe 生 JSONL（1 行 1 run）を渡すと規則 2・3・5 が "
+            "丸めなしの中央値比・run 別符号一貫性で判定される（PR #1501 "
+            "codex-review P1/P2 是正）。未指定でも Markdown 由来の値で "
+            "動作する（後方互換）。"
+        ),
+    )
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -476,7 +708,18 @@ def main() -> int:
         with open(path, encoding="utf-8") as f:
             gate[(node, arm)] = parse_gate_md(f.read())
 
-    lines, verdict = judge(layer_a, layer_b, gate)
+    jsonl: dict[tuple[str, str], dict[tuple[int, str], list[float]]] = {}
+    for spec in args.jsonl:
+        parts = spec.split(":", 2)
+        if len(parts) != 3:
+            raise SystemExit(f"ERROR: --jsonl は node:arm:path 形式が必須（実際: {spec}）")
+        node, arm, path = parts
+        if node not in ("dgx", "m4max") or arm not in ("off", "on"):
+            raise SystemExit(f"ERROR: --jsonl の node/arm が不正: {spec}")
+        with open(path, encoding="utf-8") as f:
+            jsonl[(node, arm)] = parse_jsonl_medians(f.read())
+
+    lines, verdict = judge(layer_a, layer_b, gate, jsonl)
     print(f"# イシュー #1481 機械判定\n")
     print(f"事前登録閾値: RULE234_THRESHOLD={RULE234_THRESHOLD} "
           f"RULE2_OPS_GEMM_THRESHOLD={RULE2_OPS_GEMM_THRESHOLD} "

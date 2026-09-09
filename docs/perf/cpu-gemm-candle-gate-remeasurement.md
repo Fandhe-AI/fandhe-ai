@@ -1964,6 +1964,34 @@ REJECT」の二値判定に単純化されていた）。`compare_gemm_ab.py` �
 REJECT のまま修正前後で不変**（詳細は `judge.md`・`judge_rules.py` の
 `_self_test()` に追加した回帰テスト）。
 
+**判定コードの計測後修正 3 回目（PR #1501 codex-review 指摘対応その 2。
+透明性のための明記）**: 上記 2 回目の修正後も、規則 5（M4 Max N=2048
+後退）は集計済み Markdown（`compare_gemm_ab.py` 出力）の中央値比のみで
+発火判定しており、5 run 個々の符号一貫性を検証していなかった（DGX 側が
+規則 1〜4 を満たし M4 Max 側が規則 3／4 不成立のまま符号混在の計測から
+`ADOPT_LINUX_ONLY` を返しうる契約不整合。P1・要修正）。あわせて規則 4
+の候補比計算が表示用に丸めた（小数 3〜4 桁）candle 比を再除算しており
+境界精度が失われる指摘（P2・参考）も受けた。`judge_rules.py` へ
+`--jsonl`（`bench-fandhe` の生 JSONL・`node:arm:path` 形式）を追加入力
+とし、規則 5 は (i) 生 `median_s` から丸めなしで算出した中央値比が
+閾値超、かつ (ii) run 番号を対応付けた on/off 比が全 run で 1.0 超
+（符号一貫）の両方を満たす場合のみ発火するよう是正した（`--jsonl` 未
+指定時は符号一貫性を確認できないため発火させない fail-safe 側に倒す。
+厳格化方向の修正のみ・緩和なし）。副次的に規則 2・3 の on/off 比も
+`--jsonl` 指定時は生 `median_s` 由来の丸めなし中央値比を優先して使う
+ようにした。規則 4（candle 比）は candle 側の生 `median_s` が本節の
+成果物として保存されておらず丸めなし値を復元する手段がないため、
+既知の精度限界としてコード中に明記したうえで Markdown 値のまま維持
+した（3 桁丸め由来の乖離は高々 5e-4 程度で `RULE4_MIN_RATIO` 境界
+〈0.952380...〉付近でなければ判定結果へ影響しない）。本イシューの
+保存データ（4 実機分の生 JSONL）へ是正後のコードを `--jsonl` 付きで
+再適用した結果、規則 5 は run 別比 5 件すべてが符号一貫（全 run で
+on/off > 1.0）だが中央値比 1.0212 が閾値 1.05 以下のため元々発火せず、
+規則 2・3・4 の不成立セルも数値・成否とも変化なし（丸めなし値と丸め
+表示値の差は小数第 4〜5 位に留まり境界を跨がない）。**verdict は
+REJECT のまま修正前後で不変**（`judge.md` 差分・`judge_rules.py` の
+`_self_test()` に追加した符号一貫性回帰テストで確認）。
+
 出典: イシュー #1481・`docs/perf/logs/cpu-matmul-fixed-cost-remeasure-1481/`
 （`env_info.txt`・`judge.md`・`judge_rules.py`・Layer A/B 生ログ・
 `aggregate_layer_b.py`・`compare_gemm_ab-{dgx,m4max}.md`・
