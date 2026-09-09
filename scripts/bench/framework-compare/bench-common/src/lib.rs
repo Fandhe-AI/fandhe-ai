@@ -307,6 +307,19 @@ pub struct Record<'a> {
     /// `graph_stats` フィールド自体を JSON へ emit しない（`graph` と
     /// 同一のキー欠損規約）。
     pub graph_stats: Option<GraphStepStatsRecord>,
+    /// `--readout <legacy|borrowed>`（イシュー #1477）。Metal 借用ビュー
+    /// readout の legacy フォールバック（`bench-fandhe` の
+    /// `readout_uses_borrowed_view` device 既定）を run 単位で明示上書き
+    /// して再計測するための override。`None`（既定・未指定）のときは
+    /// キー自体を emit しない（`tf32`／`managed`／`graph` と同型の
+    /// 「キー欠損 = 既定」後方互換規約）。`Some("legacy")`／
+    /// `Some("borrowed")` のときのみ `"readout":"legacy"`／
+    /// `"readout":"borrowed"` を emit する。summarize.py・
+    /// compare_gemm_gate.py・compare_gemm_ab.py の目標達成ゲート・
+    /// 既存 A/B 比較は既定でこのキーを持つ行を除外する
+    /// （`docs/perf/metal-gemm-candle-gate-remeasurement.md` §15 参照。
+    /// 既存 device 既定契約は変更しない）。
+    pub readout: Option<&'a str>,
 }
 
 /// [`Record::graph_stats`] の中身（POD。イシュー #1350）。
@@ -388,6 +401,9 @@ impl Record<'_> {
                     gs.captured, gs.replayed, gs.graph_launches, gs.sgd_kernel_launches
                 ));
             }
+        }
+        if let Some(r) = self.readout {
+            s.push_str(&format!(",\"readout\":\"{r}\""));
         }
         s.push('}');
         s
@@ -523,6 +539,16 @@ pub struct Cli {
     /// 「`--graph`」節参照）が有効なビルドでのみ受理する（`--managed`
     /// と同型の allowlist 方式）。
     pub graph: Option<String>,
+    /// `--readout <legacy|borrowed>`（値付きフラグ。イシュー #1477）。
+    /// `bench-fandhe` の `readout_uses_borrowed_view` device 既定
+    /// （CPU/CUDA 借用ビュー・Metal legacy）を run 単位で明示上書きする
+    /// 再計測専用 override。未指定＝`None`（既定・device 既定契約を
+    /// 変更しない）。`legacy`／`borrowed` 以外の値は
+    /// [`BenchError::InvalidArg`] で fail-closed 拒否する（`--graph`
+    /// と同型の allowlist 方式。security.md A03）。`bench-candle`・
+    /// `bench-burn` は本フラグを受理しない（`readout: None` 固定で
+    /// 無視）。
+    pub readout: Option<String>,
 }
 
 /// Parse the CLI arguments from `std::env::args()`. 薄いラッパーで、実体は
@@ -587,6 +613,28 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         }
         None => None,
     };
+    // イシュー #1477: `--readout` は `--graph` と同型の値付きフラグ
+    // （`legacy`／`borrowed` の完全一致のみ受理。未知値・値欠落は
+    // fail-closed で `InvalidArg`）。同一バイナリで両腕を run 単位に
+    // interleave 計測できるようにする再計測専用 override であり、
+    // `bench-fandhe::readout_uses_borrowed_view` の device 既定契約
+    // 自体は変更しない。
+    let readout = match get("--readout") {
+        Some(v) if v == "legacy" || v == "borrowed" => Some(v),
+        Some(v) => {
+            return Err(BenchError::InvalidArg {
+                flag: "--readout",
+                value: v,
+            });
+        }
+        None if has_flag("--readout") => {
+            return Err(BenchError::InvalidArg {
+                flag: "--readout",
+                value: String::new(),
+            });
+        }
+        None => None,
+    };
     Ok(Cli {
         task: get("--task").unwrap_or_else(|| "gemm".into()),
         device: get("--device").unwrap_or_else(|| "cpu".into()),
@@ -598,6 +646,7 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         managed: has_flag("--managed"),
         device_checksum: has_flag("--device-checksum"),
         graph,
+        readout,
     })
 }
 
@@ -688,6 +737,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             graph_stats: None,
+            readout: None,
         }
     }
 
@@ -1119,5 +1169,87 @@ mod tests {
             .to_json_line()
             .expect_err("empty phase name must be rejected");
         assert!(matches!(err, BenchError::InvalidPhaseName { .. }));
+    }
+
+    // イシュー #1477: `--readout`（`parse_cli_from`）・`Record.readout`
+    // の契約（`--graph` と同型の値付きフラグ形式＋「キー欠損＝既定」の
+    // 後方互換規約）。両腕（legacy／borrowed）を同一バイナリで
+    // interleave 計測するための再計測専用 override であることを
+    // 固定する。
+
+    #[test]
+    fn parse_cli_from_defaults_readout_to_none() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--device", "metal"]))
+            .expect("parse should succeed");
+        assert!(cli.readout.is_none());
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_readout_legacy() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--readout", "legacy"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.readout.as_deref(), Some("legacy"));
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_readout_borrowed() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--readout", "borrowed"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.readout.as_deref(), Some("borrowed"));
+    }
+
+    #[test]
+    fn parse_cli_from_rejects_unknown_readout_value() {
+        let result = parse_cli_from(&args(&["--task", "gemm", "--readout", "legacyish"]));
+        assert!(matches!(
+            result,
+            Err(BenchError::InvalidArg {
+                flag: "--readout",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    // `--graph` の末尾値欠落防止（PR #1425・P2）と同型: `--readout` が
+    // 引数列の末尾で値を伴わない場合、フラグ非指定と誤認せず
+    // `InvalidArg` で fail-closed 拒否する。
+    fn parse_cli_from_rejects_readout_flag_without_trailing_value() {
+        let result = parse_cli_from(&args(&["--task", "gemm", "--readout"]));
+        assert!(matches!(
+            result,
+            Err(BenchError::InvalidArg {
+                flag: "--readout",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_cli_from_readout_flag_is_order_independent() {
+        let cli = parse_cli_from(&args(&["--readout", "borrowed", "--task", "gemm"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.readout.as_deref(), Some("borrowed"));
+        assert_eq!(cli.task, "gemm");
+    }
+
+    #[test]
+    fn json_line_without_readout_omits_readout_key() {
+        let line = sample_record("fresh", None).to_json_line();
+        assert!(!line.contains("\"readout\""));
+    }
+
+    #[test]
+    fn json_line_with_readout_legacy_includes_readout_legacy() {
+        let mut r = sample_record("fresh", None);
+        r.readout = Some("legacy");
+        assert!(r.to_json_line().contains("\"readout\":\"legacy\""));
+    }
+
+    #[test]
+    fn json_line_with_readout_borrowed_includes_readout_borrowed() {
+        let mut r = sample_record("fresh", None);
+        r.readout = Some("borrowed");
+        assert!(r.to_json_line().contains("\"readout\":\"borrowed\""));
     }
 }

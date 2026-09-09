@@ -145,6 +145,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         device_checksum: false,
         graph: None,
         graph_stats: None,
+        readout: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -263,6 +264,7 @@ fn run_train<B: AutodiffBackend>(
         device_checksum: false,
         graph: None,
         graph_stats: None,
+        readout: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -314,6 +316,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         device_checksum: false,
         graph: None,
         graph_stats: None,
+        readout: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -441,6 +444,7 @@ mod tests {
             managed: false,
             device_checksum: false,
             graph: None,
+            readout: None,
         }
     }
 

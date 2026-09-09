@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）
 
 ## 1. 位置づけ
 
@@ -604,3 +604,72 @@ N=2048 が 0.969 倍と 1.0 倍にもっとも近づいたが、これも§14.6 
   `scripts/bench/framework-compare/results/raw/{results,skipped,manifest}-m4max-gemm-gate-0.7.0-1309.*`
 - `docs/performance-targets.md` §8.13・`scripts/bench/framework-compare/results/summary.md`
   環境 28 節にも同じ数値を反映する
+
+## 15. §13.5 の暫定判定の解消: legacy/borrowed interleave 再計測（イシュー #1477）
+
+### 15.0 位置づけ
+
+§13.5 は「before/after が同一マシン上で連続実行され、負荷変動と readout
+切替の効果を分離できていない」ことを理由に ADOPT 判定を保留した
+（暫定・参考結果）。本イシューは `--readout <legacy|borrowed>`
+（同一バイナリの runtime override。`bench-common::Cli.readout`／
+`Record.readout`。`scripts/bench/framework-compare/README.md`
+「`--readout <legacy|borrowed>`」節参照）を用いて legacy/borrowed を
+run 単位に interleave 計測（奇数 run: legacy→borrowed・偶数 run:
+borrowed→legacy）し、§13.5 の限界を解消したうえで
+`readout_uses_borrowed_view` の Metal 分岐（`bench-fandhe/src/main.rs`）
+の採否を確定する。
+
+**正式系列 `fandhe-ai =0.7.0` の #1037 ゲート判定（§11・§14）は本イシュー
+では不変**。本イシューは `bench-fandhe` の readout 実装（既定経路の
+選択）自体の A/B であり、candle 比ゲート自体の再判定ではない。
+
+### 15.1 事前宣言した判定規則
+
+`scripts/bench/framework-compare/README.md`「`--readout` （Metal の
+legacy/borrowed override interleave 再計測。イシュー #1477）」節・
+`compare_readout_ab.py` docstring に転記した規則（計測前に固定。計測後の
+緩和・読み替えは行わない）:
+
+- 対象: `gemm metal` × N ∈ {1024, 2048, 4096} × mode ∈ {fresh, reuse}
+  （6 セル）
+- 反復: 各セル・各腕ちょうど 5 プロセス起動。run 単位で順序反転
+- ADOPT: 全 6 セルで `ratio(=borrowed/legacy) <= 1.00` かつ checksum
+  完全一致・parity 0 fail → `readout_uses_borrowed_view` の Metal 分岐を
+  除去し借用ビューを既定化する
+- REJECT: 1 セルでも `ratio > 1.00` または checksum 不一致 → legacy
+  フォールバックを維持する
+- undetermined: 専有ゲート（1 分 load average < 4.0 を 30 秒間隔で 2 回
+  連続確認・不合格時は 60 秒開始 × 1.5 倍・最大 10 回）が成立しない場合。
+  1 回だけ記録して終了し、再試行ループで待たない（コード既定は不変）
+
+### 15.2 実測結果（1 回目の試み・2026-09-09）
+
+`run_ab_readout_metal.sh head-e8cd3a2-1477`（`AB_LOAD_GATE_MAX_ATTEMPTS=4`。
+既定 10 より少ない値で動作確認を兼ねて実行）を実行したが、専有ゲート
+（1 分 load average < 4.0 を 30 秒間隔で 2 回連続確認・最大 4 試行）が
+一度も成立しなかった（load1 実測値: 14.64 / 10.23 / 15.93 / 6.18。他セッション
+の並走負荷が原因）。判定規則 §15.1 どおり **undetermined** と確定し、計測
+（build・`bench-fandhe` 起動）は一切開始しないまま記録のみで終了した
+（再試行ループでは待たない）。
+
+- **正式系列 `fandhe-ai =0.7.0` の #1037 ゲート判定（§11・§14）は影響を
+  受けない**（計測自体が発生していないため）。
+- **`readout_uses_borrowed_view` の Metal 分岐は不変のまま**（legacy
+  フォールバックを維持。§13.5 の暫定・ADOPT 保留判定も変更なし）。
+- 既定 10 試行でのゲート再挑戦、またはより低負荷な時間帯での再実行は、
+  専有環境が確保できるタイミングで別途行う（本 PR のスコープ外）。
+
+実行ログ・undetermined マーカー・env_info:
+`docs/perf/logs/metal-gemm-readout-interleave-1477/`。
+
+### 15.3 出典
+
+- 実装: `scripts/bench/framework-compare/bench-common/src/lib.rs`
+  （`Cli.readout`／`Record.readout`）・
+  `scripts/bench/framework-compare/bench-fandhe/src/main.rs`
+  （`readout_uses_borrowed_view` override 引数）
+- 集計: `scripts/bench/framework-compare/compare_readout_ab.py`・
+  `compare_readout_ab_test.py`
+- 計測: `scripts/bench/framework-compare/run_ab_readout_metal.sh`
+- 生データ（実測後）: `docs/perf/logs/metal-gemm-readout-interleave-1477/`

@@ -222,6 +222,15 @@ def load_rows(path):
                     f"実際: {obj['graph']!r}） — skipped"
                 )
                 continue
+            # イシュー #1477: `readout`（Metal 借用ビュー readout の
+            # legacy/borrowed override。`--readout`）行も `graph` と同型
+            # の理由で型検証する（値は文字列）。
+            if "readout" in obj and not isinstance(obj["readout"], str):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'readout' フィールド型（str を期待。"
+                    f"実際: {obj['readout']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -267,6 +276,12 @@ def _matching_rows(rows, framework, mode, size, device="cuda"):
         # 経路での計測）は既定プロトコル計測とのゲート混同を防ぐため除外
         # する（`compare_graph_ab.py` が専用の A/B 比較を別途担う）。
         if "graph" in r:
+            continue
+        # イシュー #1477: `readout` キーを持つ行（Metal 借用ビュー readout
+        # の legacy/borrowed override 計測）は既定プロトコル計測との
+        # ゲート混同を防ぐため除外する（`compare_readout_ab.py` が専用の
+        # interleave A/B 比較を別途担う）。
+        if "readout" in r:
             continue
         out.append(r)
     return out
