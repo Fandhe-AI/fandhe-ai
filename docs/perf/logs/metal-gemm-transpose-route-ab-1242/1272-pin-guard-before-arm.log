@@ -1,0 +1,48 @@
+イシュー #1272 向けに `run_ab_gemm_metal.sh` を after 腕用の
+`AB_PATCH_FACADE_PATH`（本作業ブランチの `crates/facade` 絶対パス）を
+付けて実行し、before 腕（crates.io ピン `fandhe-ai =0.7.0` の registry
+解決）のビルド開始前に `bench_fandhe_pin_guard.sh` が fail-closed で
+早期停止することを確認した記録。実行環境・日時は `1272-env_info.txt`
+を参照。絶対パスは `<facade 絶対パス>` に置換している。
+
+## 実行コマンド
+
+```
+cd scripts/bench/framework-compare
+AB_PATCH_FACADE_PATH="<facade 絶対パス>" bash run_ab_gemm_metal.sh 1272-probe
+echo "exit=$?"
+```
+
+## 標準出力・標準エラー（結合）
+
+```
+ERROR: [run_ab_gemm_metal.sh (before arm)] crates.io ピン 'fandhe-ai =0.7.0' には
+  借用ビュー readout API（Var::host_view/Tensor::host_slice）が
+  未収録のため、registry 解決のままの bench-fandhe ビルドは実行不可
+  （#1438。旧計測専用 cargo feature〈#1337 導入〉は既に撤去済みで
+  条件分岐そのものが存在しない）。
+  before 腕は registry 解決（crates.io ピン fandhe-ai =0.7.0）を意図しており、GEMM_GATE_PATCH_FACADE_PATH 等の facade path patch では解消できない（bench-fandhe ソース自体〈現行 HEAD〉が借用ビュー readout API を無条件に要求するため）。対処: (1) crates.io ピンが借用ビュー readout API を収録するまで待つ、または (2) #1438 の feature 撤去より前のコミットを別 git worktree にチェックアウトし、その worktree の scripts/bench/framework-compare/ から本スクリプトを実行する（その場合 after 腕の AB_PATCH_FACADE_PATH には現行 HEAD の crates/facade を指定できる）。
+exit=1
+```
+
+（`jq` は導入済みのため、手前の `jq` チェックではなく上記の
+「before 腕」専用ガードで停止した。README「Metal GEMM 結線前後 A/B」
+節の注記どおりの挙動。）
+
+## 停止後の作業ツリー確認
+
+```
+$ git status --short scripts/bench/framework-compare/
+（出力なし＝差分ゼロ。trap により Cargo.lock は自動復元されている）
+
+$ git diff --stat -- scripts/bench/framework-compare/Cargo.lock
+（出力なし＝差分ゼロ）
+```
+
+停止直後は `results/raw/` に空の `*.tmp` プレースホルダ 3 件
+（`results-m4max-gemm-ab-after-1272-probe.jsonl.tmp`・
+`results-m4max-gemm-ab-before-0.7.0-1272-probe.jsonl.tmp`・
+`skipped-m4max-gemm-ab-1272-probe.log.tmp`）が残っていた（正規の
+`.jsonl`／`.log` は生成されない設計どおり）。これらは未追跡ファイル
+であり `Cargo.lock` 等の追跡対象には影響しないことを確認したうえで
+削除済み。

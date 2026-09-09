@@ -1,0 +1,62 @@
+イシュー #1272（framework-compare gemm metal 結線前後 A/B）向けの事実確認
+コマンド実行結果。すべて読み取り専用（`git diff --stat`）で、リポジトリの
+状態は変更していない。実行日時・環境は `1272-env_info.txt` を参照。
+
+## $ git diff 760db74..origin/main --stat -- crates/
+
+（出力なし＝差分ゼロ）
+
+#1270（PR #1464）は「結線せず」と確定しており、`crates/` に対する
+コード変更は行われていない。760db74（#1270 着手前の base）から
+origin/main（80c1a49）までの間、`crates/` は不変。
+
+## $ git diff origin/main --stat -- crates/ scripts/bench/framework-compare/
+
+（出力なし＝差分ゼロ）
+
+本イシューの作業ブランチ HEAD は origin/main（80c1a49）そのものから
+分岐しており、`crates/`・`scripts/bench/framework-compare/` に対する
+コード変更を一切加えていないことの確認。
+
+## $ git diff f396784..origin/main --stat -- crates/backend-metal/src/
+
+ crates/backend-metal/src/buffer.rs                 |  82 +++++++++----
+ crates/backend-metal/src/context.rs                |  91 +++++++++++---
+ crates/backend-metal/src/gemm.rs                   | 131 +++++++++++++++++++--
+ .../src/gemm_reuse_phase_diag_tests.rs             |   5 +-
+ crates/backend-metal/src/lib.rs                    |   9 +-
+ crates/backend-metal/src/memory.rs                 |  43 +++++++
+ 6 files changed, 304 insertions(+), 57 deletions(-)
+
+f396784 は #1306（framework-compare gemm metal 結線前後 A/B。本番
+`dispatch_auto` 経路の直近の非後退記録。全 8 セル非後退・checksum
+完全一致）の対照コミット。f396784..origin/main の
+`crates/backend-metal/src/` 差分は `gemm.rs`（内部リファクタ・
+`internal-diagnostics` 限定 API 追加）・`context.rs`（GPU タイムスタンプ
+診断 API）・`buffer.rs`／`memory.rs`（`with_host_view` 借用ビュー
+readout。bench-fandhe は Metal で legacy readout を維持）・`lib.rs`
+（re-export 追加）のみ。
+
+## $ git diff f396784..origin/main --stat -- crates/backend-metal/src/gemm.metal crates/backend-metal/src/ops.rs crates/backend-metal/src/tile.rs
+
+（出力なし＝差分ゼロ）
+
+`dispatch_auto` の実カーネル（`gemm.metal`）・呼び出し経路
+（`ops.rs::gemm`）・タイル選択ロジック（`tile.rs`）は #1306 実測時点
+から一切変更されていない。したがって #1306 の非後退記録
+（`docs/perf/logs/metal-gemm-select-closure-framework-compare-1306/`）
+は現行 HEAD（origin/main）の本番 NN 経路にもそのまま当てはまる参考
+情報として扱える。
+
+## $ grep -n "fn gemm(" crates/backend-metal/src/ops.rs
+
+548:    fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+
+`MetalBackendOps::gemm`（NN・contiguous を含む一般入口）は
+`layout::classify_2d` の転置有無が一致する場合（NN・TT・分類不能形状）
+のみ `contiguous()` 経由で `dispatch_auto` へ進む
+（`ops.rs:548-600`）。転置有無が不一致（NT/TN）のときのみ
+`gemm_strided_nt_tn`（→ VJP 専用 strided 経路。#1215）へ分岐する。
+framework-compare の `gemm` タスク（`Var::matmul`）は NN・contiguous の
+ため、`dispatch_strided_bias_act_prepared`（#1270 の結線候補経路）には
+構造的に到達しない。
