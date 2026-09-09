@@ -4,7 +4,7 @@
 
 - 設計: `docs/cpu-matmul-fixed-cost-design.md`（イシュー #1294）§3.C 案 1a
 - 親: #1296（要件項目 3）→ #1285（Phase 親）→ #1283（ルート）
-- 後続: #1301（DGX Spark GB10 実機実測・有効化可否の最終判断）
+- 後続: #1301（DGX Spark GB10 実機実測・有効化可否の最終判断）→ #1481（独立再計測・REJECT）→ #1482（確定既定）
 
 ## §1 設計 §3.x → 実装対応表
 
@@ -17,7 +17,7 @@
 | Layer B 診断テストの扱い | (i) 採用（`measure_one_phase_trial` 自体を変更後の確保方式へ更新） | `crates/backend-cpu/src/gemm_reuse_phase_diag_tests.rs:164` を `zeroed_output(n*n)` へ更新 |
 | `facade`／`autodiff` | コード変更なし（テスト追加のみ） | `crates/facade/src/*`・`crates/autodiff/src/*` は無変更 |
 
-## §2 本番結線の判断（2026-09-08 更新・PR #1448 codex-review 対応で無効化へ差し戻し）: 無効化（`usize::MAX`）を維持
+## §2 本番結線の判断（2026-09-10 更新・#1481 独立再計測 REJECT により確定）: 無効化（`usize::MAX`）を確定既定とする
 
 **#1301 が DGX Spark GB10（Grace CPU）・Apple M4 Max 両実機で on/off 比較を
 実施した結果、両実機・全対象形状（N=512/1024/2048）で非後退（一部改善）を
@@ -31,10 +31,16 @@
 （無効化）へ差し戻した****（§6・`docs/perf/logs/
 cpu-matmul-fixed-cost-1301/` 参照）。#1301 の実測系列は「参考系列」
 として §6 に維持しつつ、§20.1a の改定版規則 4（事前登録された規則
-として以後固定）を用いた**独立の再計測**（同 doc §20.6）が両実機で
-完了し ADOPT と確定するまで、本番既定は有効化しない。以下の §2 本文
-（旧版）は #1299 実装時点の当初判断の記録として残す（内容自体は
-現在の判断＝無効化維持と一致する）。
+として以後固定）を用いた**独立の再計測**（イシュー #1481・同 doc
+§20.7）を両実機で実施した結果 **verdict=REJECT** と確定した（規則 2:
+DGX N=2048 の `alloc_c` が on/off で 2.1199 倍に増加／規則 3: 対照セル
+8 中 3 が 1.05 超過／規則 4: M4 Max N=512 が 0.9060 < 0.9524。他は満た
+す）。イシュー #1482 でこの REJECT 確定を受けて **`usize::MAX`（無効化）
+を確定既定として固定**した（コード・テスト名・関連 docs の「未確定」
+記述を確定状態へ整合）。再検討は同一の事前登録規則を機械適用する将来の
+再計測（正式系列の新ピン更新時等）に限る。以下の §2 本文（旧版）は
+#1299 実装時点の当初判断の記録として残す（内容自体は現在の判断＝無効化
+維持と一致する）。
 
 <details>
 <summary>当初の判断（#1299 実装時点。参考として維持）</summary>
@@ -206,6 +212,18 @@ PR #1448 の codex-review 指摘（計測後に緩和した基準だけで本番
 **独立再計測は #1481（同 doc §20.7）で実施済み**: 規則を計測後に緩和・
 読み替えずに機械適用した結果 verdict=REJECT（規則 2・3・4 のいずれも
 不成立セルを含む）と確定し、本番既定 `usize::MAX`（無効化）は変更なし。
+
+**#1482 でこの REJECT 確定を本番既定として固定**: `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`
+の値自体は変更しない（すでに `usize::MAX`）が、`ops.rs` の定数 doc
+comment・テスト名（`default_threshold_is_disabled_pending_independent_
+remeasurement` → `default_threshold_is_disabled_confirmed_by_
+independent_remeasurement`）・`gemm_output_alloc_bit_exact.rs`／
+`tape_matmul_cpu_bit_exact.rs` の冒頭 doc・本ドキュメント・
+`docs/cpu-matmul-fixed-cost-design.md` §10・CLAUDE.md の該当行を、
+「独立再計測の完了・ADOPT 確定を待つ未確定状態」から「REJECT が確定し
+`usize::MAX` が確定既定である状態」へ整合させた。並列ゼロ書き込み
+ヘルパー自体（`zeroed_output_with_threshold`）は削除せず、しきい値
+定数 1 箇所の差し替えで再有効化できる状態を維持する。
 
 ## §7 スコープ外（本 Issue では実施しない）
 

@@ -12,8 +12,9 @@
 //! **本番既定は `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`（並列
 //! 分岐は常に無効）**。M4 Max スモーク実測（#1299・
 //! `docs/perf/cpu-matmul-fixed-cost-impl.md`）で N=2048 の後退を確認した
-//! ため、DGX Spark GB10 実機実測（#1301）が有効化可否を判断するまでの
-//! 暫定値。したがって本ファイルの `ops.gemm(..)` 呼び出しは（形状に
+//! 後、#1301 の両実機実測 → PR #1448 差し戻し → #1481 の独立再計測
+//! （§20.7）で verdict=REJECT 確定 → #1482 で確定既定、という経緯を
+//! 経ている。したがって本ファイルの `ops.gemm(..)` 呼び出しは（形状に
 //! 依らず）常に `crate::ops::zeroed_output` の逐次分岐を通る。並列分岐
 //! 自体の bit 一致は `crates/backend-cpu/src/ops.rs::zeroed_output_tests::
 //! parallel_branch_output_matches_sequential_branch_through_kernel`

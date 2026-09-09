@@ -416,3 +416,22 @@ GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`）。§20.1a の改定版規則 4 は
 cpu-matmul-fixed-cost-impl.md` §6・`docs/perf/
 cpu-gemm-candle-gate-remeasurement.md` §20・`docs/perf/logs/
 cpu-matmul-fixed-cost-1301/` を参照。
+
+**2026-09-10 更新（イシュー #1481・#1482）**: §20.1a の改定版規則 4 を
+事前登録規則として用いた独立の再計測（イシュー #1481・
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.7）を両実機で
+実施した結果、計測後の緩和なしに §20.1 規則 1〜3・5＋§20.1a 改定版
+規則 4 を機械適用して **verdict=REJECT** と確定した（規則 2: DGX
+N=2048 の `alloc_c` が on/off で 2.1199 倍に増加〈削減ではなく増加〉／
+規則 3: 対照セル 8 中 3〈DGX N=1024/fresh・M4 Max N=512/fresh・reuse〉
+が 1.05 超過／規則 4: M4 Max N=512 が 0.9060 < 0.9524。規則 1
+〈checksum〉・規則 5〈M4 Max N=2048 後退なし〉は満たす）。イシュー
+#1482 でこの REJECT を受けて
+`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`（無効化）を**確定
+既定**として固定した。並列ゼロ書き込みヘルパー自体
+（`zeroed_output_with_threshold`）は削除せず、しきい値定数 1 箇所の
+差し替えで再有効化できる状態を維持する。再検討は同一の事前登録規則を
+計測後の緩和なしで機械適用する将来の再計測（正式系列の新ピン更新時
+等）に限る。実測詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+§20.7・`docs/perf/logs/cpu-matmul-fixed-cost-remeasure-1481/judge.md`
+を参照。

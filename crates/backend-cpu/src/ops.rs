@@ -147,9 +147,15 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
 /// 基準だけで本番採用を確定しない）を受けて **`usize::MAX` へ差し戻した**。
 /// §20.3 の実測系列自体は改善方向の参考値として維持しつつ、規則 4 の
 /// 改定版（§20.1a。同 doc の事前登録版として以後固定）を用いた
-/// **独立の再計測**が両実機で完了し ADOPT と確定するまでは、本定数を
-/// `2 << 20` へ戻さない（同 doc §20.6・`docs/cpu-matmul-fixed-cost-
-/// design.md` §10 参照）。
+/// **独立の再計測**（イシュー #1481・同 doc §20.7）が両実機で完了し、
+/// §20.1 規則 1〜3・5＋§20.1a 改定版規則 4 を計測後の緩和なしで機械
+/// 適用した結果 **verdict=REJECT** と確定した（規則 2: DGX N=2048 の
+/// `alloc_c` が on/off で 2.1199 倍に増加〈削減ではない〉／規則 3:
+/// 対照セル 8 中 3 が 1.05 超過／規則 4: M4 Max N=512 が 0.9060 <
+/// 0.9524）。したがって `usize::MAX`（無効化）を**確定既定**とする
+/// （イシュー #1482）。再検討は同一の事前登録規則を機械適用する将来の
+/// 再計測（正式系列の新ピン更新時等）に限る（同 doc §20.6・§20.7・
+/// `docs/cpu-matmul-fixed-cost-design.md` §10 参照）。
 pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = usize::MAX;
 
 /// [`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`] 以上の並列ゼロ書き込みにおける
@@ -1432,10 +1438,11 @@ mod zeroed_output_tests {
         // 本番既定しきい値は `usize::MAX`（並列分岐は常に無効。#1299 の
         // M4 Max スモークが N=2048 で後退を確認したため。PR #1448 の
         // codex-review 指摘を受け、#1301 の実測後に緩和した基準のみを
-        // 根拠とする有効化を差し戻した。独立の再計測〈`docs/perf/
-        // cpu-gemm-candle-gate-remeasurement.md` §20.6〉が完了し ADOPT
-        // と確定するまでの暫定値）。したがって `zeroed_output` は現実的
-        // なサイズでは常に「未満」分岐（逐次経路）へ入る。並列分岐自体は
+        // 根拠とする有効化を差し戻した。独立の再計測（`docs/perf/
+        // cpu-gemm-candle-gate-remeasurement.md` §20.7・イシュー #1481）
+        // で verdict=REJECT が確定し、#1482 で確定既定とした）。
+        // したがって `zeroed_output` は現実的なサイズでは常に「未満」
+        // 分岐（逐次経路）へ入る。並列分岐自体は
         // `above_threshold_uses_parallel_path`／`at_threshold_uses_parallel_path`
         // が明示的な小さいしきい値を渡して別途カバーする。
         let len = 1usize << 24; // 16M 要素（64 MiB）でも usize::MAX 未満。
@@ -1444,18 +1451,21 @@ mod zeroed_output_tests {
 
     /// 本番既定しきい値が無効化状態（`usize::MAX`）であることを固定する
     /// 回帰（イシュー #1299・#1301・PR #1448 codex-review 対応で差し戻し。
-    /// `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.6 の独立
-    /// 再計測で ADOPT と確定した場合は本テストの期待値も合わせて更新する）。
+    /// `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.7 の独立
+    /// 再計測（イシュー #1481）で verdict=REJECT と確定し、#1482 で
+    /// 確定既定とした）。
     #[test]
-    fn default_threshold_is_disabled_pending_independent_remeasurement() {
+    fn default_threshold_is_disabled_confirmed_by_independent_remeasurement() {
         assert_eq!(
             GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS,
             usize::MAX,
-            "#1301 の実測は事前宣言した規則 4 を緩和後の基準でしか \
-             満たさなかった（codex-review 指摘）ため本番既定は並列分岐を \
-             無効化した状態であるはず。§20.1a の改定版規則 4 を用いた \
-             独立の再計測で ADOPT と確定する場合は本テストの期待値も \
-             更新すること"
+            "#1481 の独立再計測（§20.7）は事前登録した規則 1〜5 を \
+             計測後の緩和なしで機械適用した結果 verdict=REJECT と確定した \
+             （規則 2: DGX N=2048 alloc_c が 2.1199 倍に増加／規則 3: \
+             対照セル 8 中 3 超過／規則 4: M4 Max N=512 が 0.9060 < \
+             0.9524）ため本番既定は並列分岐を無効化した状態であるはず。 \
+             同一の事前登録規則を機械適用する将来の再計測で ADOPT へ \
+             転じた場合のみ本テストの期待値を更新すること"
         );
     }
 

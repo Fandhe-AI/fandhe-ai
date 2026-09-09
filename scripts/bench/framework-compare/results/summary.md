@@ -2113,8 +2113,10 @@ checksum 一致・DGX 決定セル非後退・対照セル非後退・M4 Max 非
 `2 << 20` へ有効化していたが、この遡及適用が事前宣言の趣旨（後出しで
 基準を変えない）を欠くという codex-review 指摘を受け、**本番既定を
 `usize::MAX`（無効化）へ差し戻した**。改定版規則 4 は以後の判定に
-用いる事前登録規則として固定し、この規則を用いた独立の再計測で
-ADOPT／REJECT を確定する（未実施）。上表の実測結果自体は参考系列
+用いる事前登録規則として固定し、この規則を用いた独立の再計測は
+#1481 で実施済み・verdict=REJECT を確定・#1482 で `usize::MAX` を
+確定既定として固定した（`docs/perf/cpu-gemm-candle-gate-
+remeasurement.md` §20.7）。上表の実測結果自体は参考系列
 として維持する。詳細・env_info・判定規則の事前宣言記録・差し戻しの
 経緯は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1・
 §20.1a・§20.4・§20.6・`docs/perf/cpu-matmul-fixed-cost-impl.md` §2・§6・
