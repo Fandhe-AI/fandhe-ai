@@ -17,11 +17,14 @@
 # 本スクリプトは、その「2 プロセスの標準出力を目視・スクリプトで比較」
 # という手作業部分を自動化する: 同一 GPU 上で eager_baseline
 # （opt-in OFF）・graph_capture（opt-in ON）を順に別プロセスとして実行し、
-# 両者が出力する `step[...].loss.bits` / `step[...].param[...][...].bits`
-# / `final.param[...][...].bits` 行列（ラベル行 `=== ... ===` を除く）を
-# 完全一致するか diff で検証する。不一致があれば非ゼロ終了・diff を
-# 表示する（fail-closed。CI では実行しない — 実機〈CUDA〉必須のため
-# 通常 CI ジョブの対象外。.claude/rules/ci.md「実機依存」節）。
+# 両者が出力する `step[...].loss.bits` / `step[...].dinput[...].bits` /
+# `step[...].grad[...][...].bits`（各 step の重み勾配。イシュー #1480 で
+# 追加。`Tape::param_grads_to_host` の戻り値） /
+# `step[...].param[...][...].bits` / `final.param[...][...].bits` 行列
+# （ラベル行 `=== ... ===` を除く）を完全一致するか diff で検証する。
+# 不一致があれば非ゼロ終了・diff を表示する（fail-closed。CI では実行
+# しない — 実機〈CUDA〉必須のため通常 CI ジョブの対象外。
+# .claude/rules/ci.md「実機依存」節）。
 #
 # 実行方法（DGX Spark GB10 等 CUDA 実機。docs/real-hardware-
 # verification-env.md の手順に従う。事前に cargo test --release
