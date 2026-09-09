@@ -6,6 +6,14 @@
 #     ユーザー承認事項どおり verdict=undetermined を 1 回だけ記録する
 #     判断は呼び出し側〈本エージェント〉に委ねる。待ち続けない）
 # (ii) Layer A（off=実装 worktree → on=スクラッチ複製ツリーの順）
+#
+# 対象ツリーは環境変数 OFF_TREE（off 腕＝実装 worktree の絶対パス）・
+# ON_TREE（on 腕＝`on-arm.patch` 適用済みスクラッチ複製ツリーの絶対パス）
+# で実行時に指定する（既定値なし。未指定なら usage を出して exit 1。
+# PR #1501 codex-review P1 是正: 当初は個人 worktree とセッション UUID を
+# 含む絶対パスをハードコードしており別 checkout で再計測できなかった。
+# 実測時に使った具体値は env_info.txt へ記録する）。
+#   使用例: OFF_TREE=/path/to/off ON_TREE=/path/to/on bash orchestrate_m4max.sh
 # (iii) Layer B（run_layerB_m4max.sh off → on）
 # (iv) ALL_DONE.marker（Layer A/B の 4 呼び出しすべてが成功した場合のみ）
 #
@@ -18,8 +26,19 @@
 # `ALL_DONE.marker` を生成せずに非 0 で終了するよう是正した。
 set -uo pipefail
 LOG_DIR="$(cd "$(dirname "$0")" && pwd)"
-OFF_TREE="/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_dbb339eb-c60-13"
-ON_TREE="/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on"
+if [ -z "${OFF_TREE:-}" ] || [ -z "${ON_TREE:-}" ]; then
+  echo "usage: OFF_TREE=<off 腕ツリーの絶対パス> ON_TREE=<on 腕ツリーの絶対パス> bash $0" >&2
+  exit 1
+fi
+if [ ! -d "$OFF_TREE/scripts/bench/framework-compare" ] || [ ! -d "$ON_TREE/crates/facade" ]; then
+  echo "error: OFF_TREE/ON_TREE がリポジトリツリーを指していない: OFF_TREE=$OFF_TREE ON_TREE=$ON_TREE" >&2
+  exit 1
+fi
+
+# 状態マーカーの初期化（PR #1501 codex-review P2 是正: ログディレクトリを
+# 再利用するため、前回実行の完了印・失敗印・ゲート不成立印が残ったままだと
+# 今回の不完全な計測を完了と取り違える。実行ごとに開始時に消す）。
+rm -f "$LOG_DIR/ALL_DONE.marker" "$LOG_DIR/MEASUREMENT_FAILED.marker" "$LOG_DIR/GATE_NOT_PASSED.marker"
 
 # --- (i) 専有ゲート ---
 GATE_OK=0

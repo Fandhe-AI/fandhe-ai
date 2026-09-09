@@ -9,6 +9,13 @@
 # (iv) Layer B（run_layerB_dgx.sh off → on）
 # (v) ALL_DONE.marker（Layer A/B の 4 呼び出しすべてが成功した場合のみ）
 #
+# 対象ツリー・ログディレクトリは環境変数 OFF（off 腕ツリー）・ON（on 腕
+# ツリー）・LOG（ログ出力先）で上書きできる（既定はノード上の隔離
+# ディレクトリ `$HOME/work/fc-1481/{off,on}`・`$HOME/work/fc-1481-logs`。
+# 個人ホームパスや UUID を含まないため既定値を残す。PR #1501 codex-review
+# P1 是正に合わせ、Layer B の run_layerB_dgx.sh へも同じ値を export して
+# 渡す〈orchestrator と Layer B で参照するツリーがずれないようにする〉）。
+#
 # PR #1501 codex-review P3 是正: 当初は `set -u`（errexit なし。`/bin/sh`
 # 実行のため dash 等 POSIX sh には `pipefail` が無く `set -e` も
 # バックグラウンドポーラの後始末と相性が悪いため、`errexit` には頼らず
@@ -21,10 +28,16 @@
 # `MEASUREMENT_FAILED.marker` を書いて `ALL_DONE.marker` を生成せずに
 # 非 0 で終了するよう是正した。
 set -u
-LOG="$HOME/work/fc-1481-logs"
+LOG="${LOG:-$HOME/work/fc-1481-logs}"
 mkdir -p "$LOG"
-OFF="$HOME/work/fc-1481/off"
-ON="$HOME/work/fc-1481/on"
+OFF="${OFF:-$HOME/work/fc-1481/off}"
+ON="${ON:-$HOME/work/fc-1481/on}"
+export LOG OFF ON
+
+# 状態マーカーの初期化（PR #1501 codex-review P2 是正: ログディレクトリを
+# 再利用するため、前回実行の完了印・失敗印・ゲート不成立印が残ったままだと
+# 今回の不完全な計測を完了と取り違える。実行ごとに開始時に消す）。
+rm -f "$LOG/ALL_DONE.marker" "$LOG/MEASUREMENT_FAILED.marker" "$LOG/GATE_NOT_PASSED.marker"
 export PATH="$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH"
 
 # --- (i) 専有ゲート ---

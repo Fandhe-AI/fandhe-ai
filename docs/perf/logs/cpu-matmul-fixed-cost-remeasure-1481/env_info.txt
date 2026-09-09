@@ -70,7 +70,9 @@ PR #1448 の codex-review 指摘の是正）。数値判定は `judge_rules.py` 
 - 論理コア数: 20（`nproc`）
 - 作業ディレクトリ: `~/work/fc-1481/off`・`~/work/fc-1481/on`（本イシュー
   専用の隔離ディレクトリ。off/on を別々に rsync 転送し同一プロセスから
-  `GEMM_GATE_PATCH_FACADE_PATH` で切り替えて使用）
+  `GEMM_GATE_PATCH_FACADE_PATH` で切り替えて使用。`orchestrate_dgx.sh`
+  の `OFF`／`ON`／`LOG` は既定値のまま〈`~/work/fc-1481/off`・
+  `~/work/fc-1481/on`・`~/work/fc-1481-logs`〉で実行）
 - GNU time（`/usr/bin/time -v`）: 利用可能。`time-v-dgx-<arm>-run{1..5}.log`
   へ記録
 - 専有ゲート: 転送後 orchestrate_dgx.sh 実行開始時の 1 分 load average
@@ -93,11 +95,15 @@ PR #1448 の codex-review 指摘の是正）。数値判定は `judge_rules.py` 
 - OS: Darwin 25.6.0 arm64
 - perflevel0（大コア）論理数: 12・perflevel1（小コア）論理数: 4
   （`sysctl -n hw.perflevel{0,1}.logicalcpu`）
-- off 腕: 実装 worktree
-  `/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_dbb339eb-c60-13`
-- on 腕: スクラッチ複製ツリー（`rsync -a` による worktree の複製に
-  `on-arm.patch` を適用したもの。git worktree ではなくプレーンな
-  ファイルコピー）
+- off 腕: 実装 worktree `<worktree-off>`（本セッション専用の git worktree。
+  個人ホームパス・セッション UUID を含むため匿名化表記）
+- on 腕: スクラッチ複製ツリー `<worktree-on>`（`rsync -a` による worktree の
+  複製に `on-arm.patch` を適用したもの。git worktree ではなくプレーンな
+  ファイルコピー。セッション scratchpad 配下のため匿名化表記）
+- `orchestrate_m4max.sh` 実行時の指定値: `OFF_TREE=<worktree-off>
+  ON_TREE=<worktree-on>`（PR #1501 codex-review P1 是正後は環境変数で
+  指定する契約。実測当時はスクリプト内に同値が直書きされていたが、
+  指す実体は上記 2 ツリーで同一）
 - 専有ゲート: load average 4.07→4.92（2 回連続 <6.0）で通過。ただし
   完全な専有ではない共有マシン（このリポジトリのメイン worktree が
   動くホスト自身。他 worktree・並走エージェントの影響を受けうる）
