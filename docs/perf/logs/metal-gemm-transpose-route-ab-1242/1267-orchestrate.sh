@@ -80,7 +80,12 @@ SANITIZE_SED='s#/Users/[^/[:space:]]+#/Users/<user>#g'
 CONSEC_REQUIRED="${CONSEC_REQUIRED:-2}"
 POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-30}"
 MAX_WAIT_SECS="${MAX_WAIT_SECS:-7200}"
-GATE_LOG="$LOGDIR/1267-gate.log"
+# attempt 接尾辞付きパス（`RUN_PREFIX`）にする。既存 `orchestrate.sh`
+# （`GATE_LOG="$LOGDIR/wait_gate_attempt${ATTEMPT}.log"`）と同じ理由——
+# 非接尾辞パスのままだと 2 回目以降の attempt 実行時に前の attempt の
+# 外側ゲート記録が上書きで失われる（PR #1462 codex-review／Bugbot 指摘。
+# #1267 実測自体はこのスクリプトを未経由のため実測データへの影響はない）。
+GATE_LOG="${RUN_PREFIX}gate.log"
 : > "$GATE_LOG"
 
 gate_start_unix=$(date +%s)
@@ -123,8 +128,11 @@ snapshot() {
     }
 }
 snapshot "before attempt${ATTEMPT}" > "${RUN_PREFIX}uptime_before.txt"
-uptime > "$LOGDIR/1267-uptime_before.txt"
-pmset -g therm > "$LOGDIR/1267-pmset_therm_before.txt" 2>&1
+# 単純な `uptime`／`pmset -g therm` 出力も attempt 接尾辞付きパスへ
+# 書く（前段の GATE_LOG と同じ是正理由。非接尾辞パスのままだと 2 回目
+# 以降の attempt 実行時に前の attempt の記録が上書きで失われる）。
+uptime > "${RUN_PREFIX}uptime_before_plain.txt"
+pmset -g therm > "${RUN_PREFIX}pmset_therm_before.txt" 2>&1
 
 # ---------------------------------------------------------------------
 # (2)+(3) 本計測: バイナリ内蔵ガード（--max-load-avg 等。#1264/#1265）を
@@ -245,8 +253,8 @@ RC=$?
 sed -E -i '' "${SANITIZE_SED}" "$OUT_LOG" 2>/dev/null || true
 
 snapshot "after attempt${ATTEMPT}" > "${RUN_PREFIX}uptime_after.txt"
-uptime > "$LOGDIR/1267-uptime_after.txt"
-pmset -g therm > "$LOGDIR/1267-pmset_therm_after.txt" 2>&1
+uptime > "${RUN_PREFIX}uptime_after_plain.txt"
+pmset -g therm > "${RUN_PREFIX}pmset_therm_after.txt" 2>&1
 
 valid=0
 if [ "$RC" -eq 0 ] && [ "$breach" -eq 0 ]; then

@@ -187,15 +187,90 @@ def parse_run_log(text: str) -> dict:
     }
 
 
+# 簡略版 monitor.log（`<timestamp> load1=<値>` のみ。ok/BREACH/
+# UNDETERMINED 分類なし）を検出する正規表現。#1267 の実測（`1267-
+# attempt{1,2}-monitor.log`）は外側ゲート／pgrep ベースの BREACH
+# 分類器を経由せずこの形式で記録された（`docs/perf/metal-gemm-
+# transpose-tiled.md` §5.9「実行方法」節参照）。
+SIMPLE_LOAD_LINE_RE = re.compile(r"^\S+\s+load1=(?P<load1>[-0-9.]+|NA)\s*$")
+
+# 外側ゲート（`gate_common.sh`／`wait_gate.sh`／`1267-orchestrate.sh`）の
+# 事前宣言判定閾値と同一の値（load average(1 分) < 2.0）。簡略版
+# monitor.log しか無い attempt（#1267 の実測）に対して、ここで load1
+# の実測値から breach／undetermined を再判定するために使う。緩める
+# 変更は不可（事前宣言パラメータ。同スクリプト冒頭コメント参照）。
+MONITOR_LOAD_BREACH_THRESHOLD = 2.0
+
+
 def parse_monitor_log(text: str) -> dict:
     """`1267-attempt<N>-monitor.log` を解析し BREACH/UNDETERMINED 件数・
     総サンプル数を返す純関数。ファイルが空（外側ゲート不通過で本計測が
-    起動しなかった等）なら total=0 を返す。"""
+    起動しなかった等）なら total=0 を返す。
+
+    2 つの形式を扱う（PR #1462 codex-review 指摘: 従来は
+    `1267-orchestrate.sh` が生成する形式のみを対象とし、それ以外の
+    形式は暗黙に「breach=0（逸脱なし）」と誤読される余地があった）:
+
+    (1) `1267-orchestrate.sh` が生成する形式（各行末尾が
+        ` ok`／` BREACH`／` UNDETERMINED`）——従来どおりそのまま集計する。
+    (2) #1267 の実測で実際に使われた簡略版（`SIMPLE_LOAD_LINE_RE`）。
+        こちらは分類済みの行が 1 つもない場合にのみフォールバックで
+        適用し、`MONITOR_LOAD_BREACH_THRESHOLD` 以上の load1 を breach・
+        `NA`／解析不能な行を undetermined として集計し直す（実測値を
+        黙って「breach=0」扱いにしない）。
+    """
     lines = [l for l in text.splitlines() if l.strip()]
-    breach = sum(1 for l in lines if l.endswith(" BREACH"))
-    undetermined = sum(1 for l in lines if l.endswith(" UNDETERMINED"))
-    ok = sum(1 for l in lines if l.endswith(" ok"))
-    return {"total": len(lines), "breach": breach, "undetermined": undetermined, "ok": ok}
+    if not lines:
+        return {"total": 0, "breach": 0, "undetermined": 0, "ok": 0, "format": "empty"}
+
+    classified = sum(
+        1
+        for l in lines
+        if l.endswith(" BREACH") or l.endswith(" UNDETERMINED") or l.endswith(" ok")
+    )
+    if classified > 0:
+        breach = sum(1 for l in lines if l.endswith(" BREACH"))
+        undetermined = sum(1 for l in lines if l.endswith(" UNDETERMINED"))
+        ok = sum(1 for l in lines if l.endswith(" ok"))
+        return {
+            "total": len(lines),
+            "breach": breach,
+            "undetermined": undetermined,
+            "ok": ok,
+            "format": "orchestrate",
+        }
+
+    breach = 0
+    undetermined = 0
+    ok = 0
+    matched = 0
+    for l in lines:
+        m = SIMPLE_LOAD_LINE_RE.match(l)
+        if not m:
+            undetermined += 1
+            continue
+        matched += 1
+        raw = m.group("load1")
+        if raw == "NA":
+            undetermined += 1
+            continue
+        try:
+            load1 = float(raw)
+        except ValueError:
+            undetermined += 1
+            continue
+        if load1 >= MONITOR_LOAD_BREACH_THRESHOLD:
+            breach += 1
+        else:
+            ok += 1
+    fmt = "simple_load" if matched > 0 else "unrecognized"
+    return {
+        "total": len(lines),
+        "breach": breach,
+        "undetermined": undetermined,
+        "ok": ok,
+        "format": fmt,
+    }
 
 
 def parse_gate_log(text: str) -> dict:
@@ -215,6 +290,31 @@ def parse_gate_log(text: str) -> dict:
                     k, v = tok.split("=", 1)
                     out[k] = v
     return out
+
+
+def find_gate_result(logdir: str, attempt: int) -> tuple[str | None, str | None]:
+    """外側ゲートの実行証跡（`gate.log`）を探し `gate_result` を返す。
+    見つからなければ `(None, None)`（PR #1462 codex-review 指摘: 証跡
+    がない attempt を証拠なく「通過（PASSED）」と表示しない——#1267 の
+    実測は `1267-orchestrate.sh` を経由せずバイナリを直接起動したため
+    `gate.log` 自体が存在しない。`docs/perf/metal-gemm-transpose-
+    tiled.md` §5.9「実行方法」節参照）。
+
+    探索先は 2 通り: 是正後（本 PR）の attempt 接尾辞付きパス
+    `1267-attempt<N>-gate.log` を優先し、見つからなければ是正前の
+    非接尾辞パス `1267-gate.log`（旧 `1267-orchestrate.sh` が生成し
+    うる形式。複数 attempt 分が上書きされている可能性があるため
+    後方互換の fallback に留める）を試す。"""
+    candidates = [
+        os.path.join(logdir, f"1267-attempt{attempt}-gate.log"),
+        os.path.join(logdir, "1267-gate.log"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path) as f:
+                info = parse_gate_log(f.read())
+            return info.get("gate_result"), path
+    return None, None
 
 
 def discover_attempts(logdir: str) -> list[int]:
@@ -254,7 +354,23 @@ def render_attempt(logdir: str, attempt: int) -> str:
         out.append("- 本計測は未起動\n")
         return "".join(out)
 
-    out.append("- 外側ゲート: **通過（PASSED）**\n")
+    gate_result, gate_log_path = find_gate_result(logdir, attempt)
+    if gate_result == "PASSED":
+        out.append(f"- 外側ゲート: **通過（PASSED）** — `{os.path.basename(gate_log_path)}`\n")
+    elif gate_result is not None:
+        out.append(
+            f"- 外側ゲート: 記録あり・結果は `{gate_result}`"
+            f"（`{os.path.basename(gate_log_path)}`。PASSED 以外の値の場合は"
+            "取り扱いを個別確認すること）\n"
+        )
+    else:
+        out.append(
+            "- 外側ゲート: **記録なし**（対応する `gate.log` が見つからない。"
+            "`1267-orchestrate.sh` を経由せずバイナリを直接起動した可能性が"
+            "あり、その場合は外側ゲートを経由していない——証拠がないため"
+            "「通過（PASSED）」とは表示しない。`docs/perf/metal-gemm-"
+            "transpose-tiled.md` §5.9「実行方法」節参照）\n"
+        )
 
     run_log_path = prefix + "run.log"
     monitor_log_path = prefix + "monitor.log"
@@ -264,8 +380,9 @@ def render_attempt(logdir: str, attempt: int) -> str:
 
     with open(run_log_path) as f:
         run = parse_run_log(f.read())
-    monitor = {"total": 0, "breach": 0, "undetermined": 0, "ok": 0}
-    if os.path.exists(monitor_log_path):
+    monitor_log_exists = os.path.exists(monitor_log_path)
+    monitor = {"total": 0, "breach": 0, "undetermined": 0, "ok": 0, "format": "missing"}
+    if monitor_log_exists:
         with open(monitor_log_path) as f:
             monitor = parse_monitor_log(f.read())
 
@@ -276,15 +393,37 @@ def render_attempt(logdir: str, attempt: int) -> str:
     out.append(f"- 完了記録: `{valid}`\n")
     out.append(
         f"- 実行中監視: total={monitor['total']} ok={monitor['ok']} "
-        f"breach={monitor['breach']} undetermined={monitor['undetermined']}\n"
+        f"breach={monitor['breach']} undetermined={monitor['undetermined']} "
+        f"(format={monitor.get('format', 'unknown')})\n"
     )
 
-    excluded = monitor["breach"] > 0 or monitor["undetermined"] > 0
+    # PR #1462 codex-review 指摘: 監視ログが欠落／空、または完了記録が
+    # `valid=0` の場合でも従来はここが False のままになり verdict が
+    # 確定扱いされる余地があった。いずれも「排他条件を確認できない」
+    # 状態として明示的に除外理由へ含める（fail-closed）。
+    monitor_missing = (not monitor_log_exists) or monitor["total"] == 0
+    valid_is_zero = bool(re.search(r"(?:^|\s)valid=0(?:\s|$)", valid))
+    excluded = (
+        monitor["breach"] > 0
+        or monitor["undetermined"] > 0
+        or monitor_missing
+        or valid_is_zero
+    )
     if excluded:
+        reasons = []
+        if monitor["breach"] > 0:
+            reasons.append(f"breach={monitor['breach']}")
+        if monitor["undetermined"] > 0:
+            reasons.append(f"undetermined={monitor['undetermined']}")
+        if monitor_missing:
+            reasons.append("実行中監視ログが欠落／空")
+        if valid_is_zero:
+            reasons.append("完了記録が valid=0")
         out.append(
-            "- **排他条件が実行中に逸脱（BREACH/UNDETERMINED）したため、"
+            "- **排他条件を確認できない（" + "・".join(reasons) + "）ため、"
             "本 attempt は verdict 確定の対象から除外する**"
-            "（fail-closed。共有負荷下の値を排他環境の結果として提示しない）。\n"
+            "（fail-closed。共有負荷下の値・監視できていない値を排他"
+            "環境の結果として提示しない）。\n"
         )
 
     out.append("\n#### env_guard 結果\n\n")
@@ -403,18 +542,37 @@ verdict=route_ok (全形状 × NT/TN/TT で B/A(TFLOPS) >= 1.0 かつ全セル s
 
     monitor_ok = "2026-01-01T00:00:00+0900 load1=1.0 load_error=0 other_count=0 other_procs=[] vanished=[] enum_error=0 ok\n"
     m = parse_monitor_log(monitor_ok)
-    assert m == {"total": 1, "breach": 0, "undetermined": 0, "ok": 1}
+    assert m == {"total": 1, "breach": 0, "undetermined": 0, "ok": 1, "format": "orchestrate"}
 
     monitor_breach = monitor_ok + (
         "2026-01-01T00:01:00+0900 load1=5.0 load_error=0 other_count=1 "
         "other_procs=[cargo:1234,] vanished=[] enum_error=0 BREACH\n"
     )
     m2 = parse_monitor_log(monitor_breach)
-    assert m2 == {"total": 2, "breach": 1, "undetermined": 0, "ok": 1}
+    assert m2 == {"total": 2, "breach": 1, "undetermined": 0, "ok": 1, "format": "orchestrate"}
 
     monitor_undetermined = "2026-01-01T00:02:00+0900 load1=NA load_error=1 other_count=0 other_procs=[] vanished=[] enum_error=0 UNDETERMINED\n"
     m3 = parse_monitor_log(monitor_undetermined)
-    assert m3 == {"total": 1, "breach": 0, "undetermined": 1, "ok": 0}
+    assert m3 == {"total": 1, "breach": 0, "undetermined": 1, "ok": 0, "format": "orchestrate"}
+
+    # PR #1462 codex-review 指摘への回帰テスト: #1267 の実測で実際に
+    # 使われた簡略版 monitor.log（`load1=` のみ・ok/BREACH/UNDETERMINED
+    # 分類なし）を、黙って「breach=0」扱いにせず load1 の実測値から
+    # 再判定できることを確認する。
+    monitor_simple_ok = "2026-01-01T00:00:00+0900 load1=1.20\n2026-01-01T00:00:30+0900 load1=1.83\n"
+    m4 = parse_monitor_log(monitor_simple_ok)
+    assert m4 == {"total": 2, "breach": 0, "undetermined": 0, "ok": 2, "format": "simple_load"}
+
+    monitor_simple_breach = monitor_simple_ok + "2026-01-01T00:01:00+0900 load1=9.27\n"
+    m5 = parse_monitor_log(monitor_simple_breach)
+    assert m5 == {"total": 3, "breach": 1, "undetermined": 0, "ok": 2, "format": "simple_load"}
+
+    monitor_simple_na = "2026-01-01T00:00:00+0900 load1=NA\n"
+    m6 = parse_monitor_log(monitor_simple_na)
+    assert m6 == {"total": 1, "breach": 0, "undetermined": 1, "ok": 0, "format": "simple_load"}
+
+    m7 = parse_monitor_log("")
+    assert m7 == {"total": 0, "breach": 0, "undetermined": 0, "ok": 0, "format": "empty"}
 
     sample_undetermined_log = sample_run_log.replace(
         "verdict=route_ok (全形状 × NT/TN/TT で B/A(TFLOPS) >= 1.0 かつ全セル spread が gate 内。結線可)",

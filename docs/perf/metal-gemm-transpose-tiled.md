@@ -930,10 +930,17 @@ attempt 2 を開始した。
   連続で `fail`、**9 回目（累計待機 1687.50 秒 ≈ 28 分。バックオフ
   60→90→135→202.5→300〈以降上限 300 で頭打ち〉秒）で pass**
   （`load_avg_one=1.83`）
-- phase 1（5 サイズ）実測中、load average(1 分) はガード直後の 1.75〜
-  1.95 台から急上昇し、**15.59（08:57:10 JST。ピーク）**・12.37
-  （09:09:41 JST）を記録するなど attempt 1 より大幅に悪化した
-  （74 サンプル）
+- phase 1（5 サイズ）実測中、load average(1 分) はガード通過直後
+  （09:05:13 JST 前後）の 1.75〜1.95 台から急上昇し、**実測区間内の
+  ピークは 12.37（09:09:41 JST）**を記録するなど attempt 1 より大幅に
+  悪化した（74 サンプル）。なお同じ `1267-attempt2-monitor.log` には
+  これより高い **15.59（08:57:10 JST）** も記録されているが、これは
+  内側ガードのバックオフ待機中（8 回目の `fail` から 9 回目の `pass`
+  までの間。`1267-attempt2-run.log` の `env_guard_attempt` 系列参照）
+  に観測された値であり、phase 1 計測開始（09:05:13 JST 前後）より前の
+  サンプルのため実測区間には含めない（`1267-DONE_ATTEMPT2` の
+  `load1_peak_during_run=12.37` はこの区別を反映済みの値であり、本節も
+  それに合わせて「実測区間内のピーク」を 12.37 とする）
 
 | size | spread | gate | within_gate |
 |---|---|---|---|
@@ -965,8 +972,10 @@ all_within_gate=false`（512 の spread は 4.4 と極端——`round_tflops` �
   〈3 秒ウォームアップ + 40 回呼び出し + 8 秒 cooldown〉≈ 9 分）の
   **全区間**で低負荷が持続する保証はなく、実際に両 attempt とも
   実測中に load average が 2.0 を大きく超えて上昇した
-  （attempt 1: 最大 9.27／attempt 2: 最大 15.59）ことが `monitor.log`
-  で直接確認できる
+  （attempt 1: 実測区間内の最大 9.27／attempt 2: 実測区間内の最大
+  12.37。attempt 2 はバックオフ待機中〈phase 1 計測開始前〉にさらに
+  高い 15.59 を記録しているが、これは実測区間の値ではないためここには
+  含めない）ことが `monitor.log` で直接確認できる
 - (iv) phase 2 gate 超過セル／skip／resolution 不一致: **未到達**
   （phase 1 が両 attempt とも不成立のため phase 2 は実行されていない）
 - (v) 実行中 BREACH: 上記 (iii) と実質同じ事象を指す（本イシューでは
@@ -1010,20 +1019,63 @@ all_within_gate=false`（512 の spread は 4.4 と極端——`round_tflops` �
 - `docs/perf/logs/metal-gemm-transpose-route-ab-1242/1267-orchestrate.sh`:
   計画どおりの外側ゲート→内側ガード→実行中 BREACH 監視の 3 段
   オーケストレーター（`bash -n` で構文検証済み。上記理由により本
-  イシューの実測では未使用）
+  イシューの実測では未使用）。#1267（本イシュー）の PR レビューで
+  指摘され是正済み: 外側ゲートの `GATE_LOG`・その前後スナップショット
+  （`uptime`／`pmset -g therm`）を書き出す一部の出力先が attempt 接尾辞
+  付き（`RUN_PREFIX`）ではなく `$LOGDIR/1267-*.txt` の非接尾辞パスの
+  ままだったため、同一 `ATTEMPT` を跨いで再利用すると前の attempt の
+  記録が上書きで失われる不具合があった（既存 `orchestrate.sh`
+  〈`GATE_LOG="$LOGDIR/wait_gate_attempt${ATTEMPT}.log"`〉と同じ
+  attempt 接尾辞方式へ揃えた）。本イシューの実測自体はこのスクリプトを
+  経由していないため実測データそのものへの影響はない
 - `docs/perf/logs/metal-gemm-transpose-route-ab-1242/1267-aggregate.py`:
   本計測ログ（`env_guard_result=`／`phase1_round_stats`／
   `phase1_summary`／phase 2 セル行／`verdict=`）から Markdown 表を生成
-  する集計スクリプト（`--self-test` で判定ロジックを検証済み。
-  monitor log の ok/BREACH/UNDETERMINED 分類は `1267-orchestrate.sh`
-  が生成する形式を対象とし、本イシューの実測で使った簡略版
-  monitor.log〈load average のみ〉には未適用——本節の load average
-  実測値は `monitor.log` から手動で転記した）
+  する集計スクリプト（`--self-test` で判定ロジックを検証済み）。
+  PR #1462 codex-review／Bugbot 指摘を受けて是正済み: (1) 外側ゲートの
+  `gate.log` が見つからない attempt（本イシューの実測はまさにこれに
+  該当。`1267-orchestrate.sh` を未経由）を証拠なく「外側ゲート:
+  通過（PASSED）」と表示していたのを、`gate.log` の実際の
+  `gate_result=` 値を読んで表示するよう修正し、見つからない場合は
+  「記録なし」と明示するようにした。(2) monitor log の
+  ok/BREACH/UNDETERMINED 分類は従来 `1267-orchestrate.sh` が生成する
+  形式のみを対象とし、本イシューの実測で使った簡略版 monitor.log
+  〈`load1=` のみ〉には未適用だったため breach が暗黙に 0 件扱いに
+  なっていた点を是正し、簡略版の場合は `load1` の実測値を外側ゲートと
+  同じ閾値（2.0）で再判定して breach／undetermined を数えるように
+  した。(3) 完了記録が `valid=0` の場合・監視ログが欠落／空の場合も
+  verdict 確定対象から除外するようにした。以上により、本節の
+  attempt 1・2 とも `1267-aggregate.py .` の出力は「外側ゲート:
+  記録なし」・実行中監視 breach 件数（simple_load 判定。attempt 1:
+  breach=15/18・attempt 2: breach=59/74）を示し、両 attempt とも
+  verdict 確定の対象から除外される（`verdict=undetermined` という
+  結論自体は変わらない——本節はもともと phase 1 gate 超過を理由に
+  `undetermined` と結論しており、本修正はその結論を裏付ける形で
+  監視データの表示を訂正するもの）。本節の load average 実測値は
+  引き続き `monitor.log` から手動で転記した記述であり、上記の
+  スクリプト修正はこの記述内容を変更しない
 - 生ログ: `1267-attempt{1,2}-run.log`・`1267-attempt{1,2}-monitor.log`・
   `1267-attempt{1,2}-env_info.txt`・`1267-DONE_ATTEMPT{1,2}`・
   `1267-uptime_before.txt`／`1267-uptime_after.txt`（attempt 1）・
   `1267-uptime_after2.txt`（attempt 2）・`1267-pmset_therm_*.txt`
-  （両 attempt ともサーマル警告なし）
+  （両 attempt ともサーマル警告なし）。これらの外側スナップショットは
+  `1267-orchestrate.sh` を経由せず手動採取したもので、`1267-` 非接尾辞
+  パスを両 attempt で使い回したため attempt 2 の「開始直前」時点の
+  単独スナップショットは残っていない（attempt 1 終了直後・間を空けず
+  attempt 2 を開始しているため、attempt 2 の開始時点の load average は
+  `1267-attempt2-monitor.log` 先頭行〈08:37:09 JST load1=2.03〉で代替
+  参照できる）。`1267-DONE_ATTEMPT{1,2}` は PR #1462 codex-review 指摘
+  （Bugbot が指摘した `1267-orchestrate.sh` の pgrep ベース BREACH
+  分類器の `breach=` フィールドと同じキー名を、本イシューの実測では
+  未使用のその分類器の判定結果であるかのように `breach=0` と記載して
+  いた点が「load average 明白超過の run を breach=0 と記録している」
+  と誤読されうる指摘）を受けて是正済み: `breach=0` を
+  `pgrep_breach_classifier=not_used(load1>=2.0_via_monitor_log_instead)`
+  へ書き換え、この attempt は pgrep ベースの分類器を使っていないこと・
+  排他条件逸脱の判定は `monitor.log` の load1 実測値（`1267-
+  aggregate.py` が再判定する）を参照すべきことを明示した。`valid=1`・
+  `phase1_max_load1_during_run`／`load1_peak_during_run` の値自体は
+  変更していない
 
 ## 6. 引き継ぎ事項
 
@@ -1107,9 +1159,11 @@ all_within_gate=false`（512 の spread は 4.4 と極端——`round_tflops` �
   有限時間（1 回目・28 分のバックオフ後）で通過し、#1253/#1261 が
   一度も突破できなかった「排他環境の入口判定」自体は改善された。
   しかし phase 1 の実測 5〜9 分間の**全区間**で低負荷が持続する保証は
-  別問題であり、2 attempt とも実測中に load average が 9.27／15.59 まで
-  再上昇し、10 サイズ計測中 9 サイズで安定性ゲート超過・`verdict=
-  undetermined` に終わった。フェーズ 2（30 セル A/B）へは 2 attempt
+  別問題であり、2 attempt とも実測区間内で load average が最大 9.27
+  （attempt 1）／12.37（attempt 2。バックオフ待機中〈実測開始前〉には
+  さらに高い 15.59 を記録しているが実測区間の値ではない）まで再上昇し、
+  10 サイズ計測中 9 サイズで安定性ゲート超過・`verdict=undetermined`
+  に終わった。フェーズ 2（30 セル A/B）へは 2 attempt
   とも到達していない。`dispatch_strided_bias_act_prepared` への自動
   ルーティング結線可否判断・パターン別タイル選択テーブルの要否判断は
   引き続き持ち越し。また §5.9 で新たに判明した事実として、#1253 由来
