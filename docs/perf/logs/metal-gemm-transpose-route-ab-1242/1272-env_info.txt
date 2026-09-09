@@ -1,0 +1,25 @@
+=== uname -m ===
+arm64
+
+=== sw_vers ===
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+
+=== rustc -V ===
+rustc 1.96.0 (ac68faa20 2026-05-25)
+
+=== cargo -V ===
+cargo 1.96.0 (30a34c682 2026-05-25)
+
+=== git rev-parse origin/main（分岐元） ===
+80c1a4937d6ad644ecdfc2692bb04f526c940b47
+
+=== git rev-parse HEAD（作業ブランチ分岐時点。origin/main と同一） ===
+80c1a4937d6ad644ecdfc2692bb04f526c940b47
+
+=== uptime ===
+11:10  up 20 days, 22:23, 19 users, load averages: 10.28 9.63 9.91
+
+=== date -u（実行日） ===
+2026年 9月 9日 水曜日 02時10分26秒 UTC

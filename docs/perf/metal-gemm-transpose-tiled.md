@@ -1172,6 +1172,120 @@ gemm_strided_parity -- --ignored --nocapture`。テスト数は §4 記録時
 は `docs/perf/logs/metal-gemm-transpose-route-ab-1242/
 1270-parity-rerun.log`・`1270-env_info.txt`。
 
+## 5.11 framework-compare gemm metal 結線前後 A/B（イシュー #1272。結線なしのため計測対象なし）
+
+### 前提
+
+#1270（PR #1464。§5.10）は判定基準未達（`verdict=undetermined`。
+フェーズ 2 未到達）のため**結線せず**と確定している。
+`git diff 760db74..origin/main --stat -- crates/` は空
+（`docs/perf/logs/metal-gemm-transpose-route-ab-1242/
+1272-crates-diff.txt`）であり、#1270 以降 origin/main まで
+`crates/` に対するコード変更は一切加わっていない。したがって本
+イシューが求める「結線前（base）」と「結線後（after）」は**同一
+コード**であり、A/B 計測の対象そのものが存在しない。
+
+### 判定
+
+計測せず。数値表は作らない（捏造しない。security.md A08）。比率表
+の代わりに以下の 1 行のみを記録する。
+
+| 対象形状 × モード | before | after | B/A | 判定 |
+|---|---|---|---|---|
+| N=512/1024/2048/4096 × fresh/reuse（8 セル） | 結線前コード（origin/main 相当） | 結線後コード（同一。結線なし） | 定義上 1.0（同一バイナリ・ノイズのみ） | 計測対象なし・結線なし（#1270 §5.10 の判断を継承） |
+
+### 到達性の分析（本イシューでの新規確認事項）
+
+framework-compare の `gemm` タスク（`Var::matmul`。NN・contiguous
+入力）は、`MetalBackendOps::gemm`（`crates/backend-metal/src/ops.rs:548`）
+において `layout::classify_2d` の転置有無が一致する（NN）ため、
+`contiguous()` 経由で `dispatch_auto` へ進む。#1270 の結線候補経路
+`dispatch_strided_bias_act_prepared` へは、転置有無が不一致
+（NT/TN）の場合にのみ分岐する `gemm_strided_nt_tn`
+（VJP 専用。#1215）を経由してのみ到達し、`gemm` タスクからは
+**構造的に到達しない**。到達するのは NT/TN の VJP 経路
+（`Op::LinearResident.d_weight` 等）と `gemm_resident_lhs`／
+`LinearResident`（#1040）のみである。
+
+したがって、将来 `verdict=route_ok` が得られて結線したとしても、
+framework-compare `gemm metal` タスク（8 セル）の A/B では結線の
+影響を**検出できない**。非後退確認の対象としては原理的に不適切で
+あり、本イシューが求めていた計測自体が、依頼時点で想定されていた
+経路と実際の到達経路の不一致により成立しないことが判明した。
+
+### 再開時の正しいプロトコル（事前宣言）
+
+`verdict=route_ok` 確定後の再開時は、以下のプロトコルに従う（本
+イシューでは実施しない。閾値・統計量はいずれも変更しない）。
+
+1. **主ゲート**: `bench-fandhe --task train --device metal --phases`
+   の fresh／reuse 双方（`backward`・`step_total` フェーズ。NT/TN
+   の VJP gemm が乗る区間）の結線前後 5 回計測中央値比較。
+2. **副次（健全性確認）**: `gemm metal` 8 セル
+   （`run_ab_gemm_metal.sh` + `compare_gemm_ab.py`）を「結線の影響を
+   受けないはず」の非後退確認として実施する（上記到達性分析の裏付け
+   として位置づけ、主判定には用いない）。
+3. **比率の種類の注意（実行時間比と TFLOPS 比は別物）**:
+   `compare_gemm_ab.py` の判定式は **実行時間比**
+   `t_after / t_before ≤ DEFAULT_THRESHOLD`（既定 1.05。時間が短い
+   ほど良いため「小さいほど改善」）であるのに対し、§5.10 の
+   「B/A ≥ 1.0」は **TFLOPS 比**
+   `TFLOPS_after / TFLOPS_before ≥ 1.0`（スループットが高いほど良い
+   ため「大きいほど改善」）である。両者は単に分母・分子が逆なので
+   はなく、そもそも比較する量（実行時間 vs TFLOPS）が異なる。ただし
+   同一の計測（時間とスループットは反比例）に対しては
+   `t_after/t_before` と `TFLOPS_after/TFLOPS_before` は互いに逆数の
+   関係になる（`t_after/t_before ≈ TFLOPS_before/TFLOPS_after`）。再開
+   時の実装者は「小さいほど良い（時間比）」と「大きいほど良い
+   （TFLOPS 比）」の判定方向を混同しないこと（判定基準そのものは
+   変更しない）。
+
+### before 腕の構造的制約
+
+`run_ab_gemm_metal.sh` の before 腕（crates.io ピン `fandhe-ai
+=0.7.0` の registry 解決ビルド）は、#1438 以降 `bench-fandhe` が
+借用ビュー readout API（`Var::host_view`／`Tensor::host_slice`）を
+無条件に要求するようになったため、ピンが当該 API を収録する版へ
+更新されるまで構造的に実行不能である
+（`bench_fandhe_pin_guard.sh` が fail-closed で早期停止する。実測
+ログ: `docs/perf/logs/metal-gemm-transpose-route-ab-1242/
+1272-pin-guard-before-arm.log`）。`AB_PATCH_FACADE_PATH` 等の facade
+path patch では解消できない（before 腕は registry 解決を意図した
+設計のため）。
+
+上記主ゲート（`train --phases`）も同じ `bench-fandhe` を使うため、
+before 腕を registry 解決にする形式では同様に実行不能である。再開
+時の選択肢は README の注記と同じ 2 択（(1) crates.io ピン更新を
+待つ、(2) #1438 以前のコミットを別 git worktree にチェックアウト
+して実行する）に整理される。
+
+### 参考: 本番 NN 経路の直近の非後退記録
+
+`dispatch_auto` 経路（framework-compare `gemm metal` が実際に通る
+本番経路）の直近の非後退記録は #1306（`f396784`。全 8 セル非後退・
+checksum 完全一致。`docs/perf/logs/
+metal-gemm-select-closure-framework-compare-1306/`）である。
+`git diff f396784..origin/main --stat -- crates/backend-metal/src/
+gemm.metal crates/backend-metal/src/ops.rs crates/backend-metal/src/
+tile.rs` は空（`1272-crates-diff.txt`）であり、実カーネル・
+呼び出し経路・タイル選択ロジックは #1306 実測時点から変更されて
+いない。これは #1272 の代替計測ではなく、参考情報として位置づける。
+
+### 成果物
+
+- `docs/perf/logs/metal-gemm-transpose-route-ab-1242/1272-env_info.txt`
+  （実行環境）
+- `docs/perf/logs/metal-gemm-transpose-route-ab-1242/1272-crates-diff.txt`
+  （事実確認コマンドの出力）
+- `docs/perf/logs/metal-gemm-transpose-route-ab-1242/
+  1272-pin-guard-before-arm.log`（before 腕の fail-closed 停止ログ）
+
+### スコープ外
+
+実測の実施・結線・`run_ab_gemm_metal.sh` 等スクリプトの変更・
+crates.io ピン更新・ロバスト統計（#1266）の承認。これらは #1268
+配下での再開を要する。
+
 ## 6. 引き継ぎ事項
 
 
@@ -1269,3 +1383,9 @@ gemm_strided_parity -- --ignored --nocapture`。テスト数は §4 記録時
   の見直しが必要。再試行は #1266（ロバスト統計。未承認）の優先度を
   上げるか、実測時間全体（5〜9 分）を通した排他性を確保できる運用
   （本セッションの並列実行を一時停止する等）を用意したうえで行うこと。
+- **#1272（framework-compare gemm metal 結線前後 A/B）は結線なしの
+  ため計測対象なしで完了**（§5.11）。再開時は §5.11 のプロトコル
+  （`train --phases` を主ゲートとし `gemm` 8 セルは到達性の理由で
+  副次の健全性確認に留める・比率の向き `after/before ≤ 1.05` に注意・
+  crates.io ピン更新〈#1438〉に依存する before 腕の構造的制約）に
+  従うこと。
