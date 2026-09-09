@@ -81,6 +81,6 @@ python3 aggregate.py
   効果と判断する。
 - ゲート C（情報のみ。**確定**）: キャッシュ経由 `Pinned` は全 N で
   `Pageable` よりさらに速い（N=1024: 約 21%・N=2048: 約 19%・
-  N=4096: 約 6% 高速）。`HOST_STAGING_KIND` は確定値後も本ラン単独
-  では切り替えない（既定 `Pageable` を維持。切替はユーザー判断事項
-  として doc §6 に記録）。
+  N=4096: 約 6% 高速）。**イシュー #1478（2026-09-09 ユーザー承認）で
+  `HOST_STAGING_KIND` の既定を `Pinned` へ切替済み**（GB10 実機再計測は
+  `docs/perf/logs/cuda-host-staging-pinned-default-1478/`。doc §8）。
