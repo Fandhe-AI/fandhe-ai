@@ -229,9 +229,24 @@ def parse_monitor_log(text: str) -> dict:
         if l.endswith(" BREACH") or l.endswith(" UNDETERMINED") or l.endswith(" ok")
     )
     if classified > 0:
-        breach = sum(1 for l in lines if l.endswith(" BREACH"))
-        undetermined = sum(1 for l in lines if l.endswith(" UNDETERMINED"))
-        ok = sum(1 for l in lines if l.endswith(" ok"))
+        # PR #1462 codex-review 指摘: 分類済み行が 1 件でもあれば
+        # orchestrate 形式と判定していたが、そのまま分類済み行だけを
+        # 集計すると分類不能な行（想定外フォーマット・破損行等）が
+        # 黙って無視され、他の行に breach/undetermined が無ければ
+        # 判定確定を許してしまう。分類できない行は個別に undetermined
+        # として計上し、記録の完全性を保つ（fail-closed）。
+        breach = 0
+        undetermined = 0
+        ok = 0
+        for l in lines:
+            if l.endswith(" BREACH"):
+                breach += 1
+            elif l.endswith(" UNDETERMINED"):
+                undetermined += 1
+            elif l.endswith(" ok"):
+                ok += 1
+            else:
+                undetermined += 1
         return {
             "total": len(lines),
             "breach": breach,
@@ -304,16 +319,29 @@ def find_gate_result(logdir: str, attempt: int) -> tuple[str | None, str | None]
     `1267-attempt<N>-gate.log` を優先し、見つからなければ是正前の
     非接尾辞パス `1267-gate.log`（旧 `1267-orchestrate.sh` が生成し
     うる形式。複数 attempt 分が上書きされている可能性があるため
-    後方互換の fallback に留める）を試す。"""
-    candidates = [
-        os.path.join(logdir, f"1267-attempt{attempt}-gate.log"),
-        os.path.join(logdir, "1267-gate.log"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            with open(path) as f:
-                info = parse_gate_log(f.read())
-            return info.get("gate_result"), path
+    後方互換の fallback に留める）を試す。
+
+    PR #1462 codex-review 指摘: 非接尾辞パス（`1267-gate.log`）は
+    複数 attempt 分が同じファイル名へ上書きされうるため、記録済みの
+    `start_attempt`（本ファイル冒頭 `gate_start_unix=... attempt=<N>
+    ...` 行由来）が要求 attempt と一致する場合のみ採用する。
+    attempt 接尾辞付きパスは命名自体が attempt を一意に固定するため
+    この照合は行わない（別 attempt の証跡が紛れ込む余地がない）。
+    不一致・`start_attempt` が読み取れない場合は「記録なし」
+    （`(None, None)`）として扱い、別試行の証跡を転用しない
+    （fail-closed）。"""
+    attempt_suffixed = os.path.join(logdir, f"1267-attempt{attempt}-gate.log")
+    if os.path.exists(attempt_suffixed):
+        with open(attempt_suffixed) as f:
+            info = parse_gate_log(f.read())
+        return info.get("gate_result"), attempt_suffixed
+
+    legacy = os.path.join(logdir, "1267-gate.log")
+    if os.path.exists(legacy):
+        with open(legacy) as f:
+            info = parse_gate_log(f.read())
+        if info.get("start_attempt") == str(attempt):
+            return info.get("gate_result"), legacy
     return None, None
 
 
@@ -401,13 +429,24 @@ def render_attempt(logdir: str, attempt: int) -> str:
     # `valid=0` の場合でも従来はここが False のままになり verdict が
     # 確定扱いされる余地があった。いずれも「排他条件を確認できない」
     # 状態として明示的に除外理由へ含める（fail-closed）。
+    #
+    # 2 巡目の指摘: 完了マーカー自体が欠落・空の attempt は上記の
+    # 「`valid=0`」検査に一度も引っかからず（`valid` は既定値
+    # `"valid=?"` のまま）、監視ログに問題がなければそのまま確定扱い
+    # されうる（オーケストレータがバイナリの verdict 出力後・マーカー
+    # 書き込み前に中断された場合等、正常完了の証拠がない）。よって
+    # 「valid=0 でない」ことではなく「`valid=1` かつ `exit_code=0` を
+    # 明示的に確認できる」ことを確定対象の条件とする（fail-closed。
+    # マーカー欠落・空・`valid=?` のいずれも未確認として除外側へ倒す）。
     monitor_missing = (not monitor_log_exists) or monitor["total"] == 0
-    valid_is_zero = bool(re.search(r"(?:^|\s)valid=0(?:\s|$)", valid))
+    completion_confirmed = bool(
+        re.search(r"(?:^|\s)valid=1(?:\s|$)", valid)
+    ) and bool(re.search(r"(?:^|\s)exit_code=0(?:\s|$)", valid))
     excluded = (
         monitor["breach"] > 0
         or monitor["undetermined"] > 0
         or monitor_missing
-        or valid_is_zero
+        or not completion_confirmed
     )
     if excluded:
         reasons = []
@@ -417,13 +456,13 @@ def render_attempt(logdir: str, attempt: int) -> str:
             reasons.append(f"undetermined={monitor['undetermined']}")
         if monitor_missing:
             reasons.append("実行中監視ログが欠落／空")
-        if valid_is_zero:
-            reasons.append("完了記録が valid=0")
+        if not completion_confirmed:
+            reasons.append("完了記録で valid=1 かつ exit_code=0 を確認できない（マーカー欠落／空を含む）")
         out.append(
             "- **排他条件を確認できない（" + "・".join(reasons) + "）ため、"
             "本 attempt は verdict 確定の対象から除外する**"
-            "（fail-closed。共有負荷下の値・監視できていない値を排他"
-            "環境の結果として提示しない）。\n"
+            "（fail-closed。共有負荷下の値・監視できていない値・正常完了を"
+            "確認できない値を排他環境の結果として提示しない）。\n"
         )
 
     out.append("\n#### env_guard 結果\n\n")
@@ -573,6 +612,62 @@ verdict=route_ok (全形状 × NT/TN/TT で B/A(TFLOPS) >= 1.0 かつ全セル s
 
     m7 = parse_monitor_log("")
     assert m7 == {"total": 0, "breach": 0, "undetermined": 0, "ok": 0, "format": "empty"}
+
+    # PR #1462 codex-review 指摘への回帰テスト（2 巡目 その 1）:
+    # 分類済み行（末尾が ok/BREACH/UNDETERMINED）が混在するログに
+    # 分類不能な行（簡略形式 `load1=` のみ等）が 1 件でも混じると、
+    # 従来は無視されて他の行の集計に影響しなかった。混在時も分類
+    # 不能な行を undetermined として計上することを確認する。
+    monitor_mixed = monitor_ok + "2026-01-01T00:01:30+0900 load1=9.27\n"
+    m8 = parse_monitor_log(monitor_mixed)
+    assert m8 == {"total": 2, "breach": 0, "undetermined": 1, "ok": 1, "format": "orchestrate"}
+
+    # PR #1462 codex-review 指摘への回帰テスト（2 巡目 その 2）:
+    # 非接尾辞パス `1267-gate.log` へのフォールバックは、記録済みの
+    # `start_attempt` が要求 attempt と一致する場合のみ採用し、
+    # 別 attempt（例: attempt=2 PASSED のみが残存）の証跡を attempt=1
+    # の通過として転用しない。
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        legacy_gate_log = (
+            "gate_start_unix=1000 attempt=2 GATE_THRESHOLD=2.0 "
+            "CONSEC_REQUIRED=2 POLL_INTERVAL_SECS=30 MAX_WAIT_SECS=7200\n"
+            "gate_end_unix=1010 gate_elapsed_secs=10 gate_result=PASSED gate_rc=0\n"
+        )
+        with open(os.path.join(td, "1267-gate.log"), "w") as f:
+            f.write(legacy_gate_log)
+        # attempt=1 を要求しても、記録は attempt=2 のものなので不一致
+        # として「記録なし」を返す（別試行の証跡を転用しない）。
+        result1, path1 = find_gate_result(td, 1)
+        assert (result1, path1) == (None, None)
+        # attempt=2 を要求すれば一致するため採用してよい。
+        result2, path2 = find_gate_result(td, 2)
+        assert result2 == "PASSED"
+        assert path2 is not None
+
+    # PR #1462 codex-review 指摘への回帰テスト（2 巡目 その 3）:
+    # 完了マーカー（`1267-DONE_ATTEMPT<N>`）が欠落・空の attempt は
+    # 監視ログに問題がなくても verdict 確定の対象から除外する
+    # （`valid=1` かつ `exit_code=0` を明示的に確認できる場合のみ
+    # 確定対象とする）。
+    with tempfile.TemporaryDirectory() as td:
+        prefix = os.path.join(td, "1267-attempt1-")
+        with open(prefix + "run.log", "w") as f:
+            f.write(sample_run_log)
+        with open(prefix + "monitor.log", "w") as f:
+            f.write(monitor_ok)
+        # 完了マーカーを書かない（欠落のまま）。
+        rendered_missing_marker = render_attempt(td, 1)
+        assert "本 attempt は verdict 確定の対象から除外する" in rendered_missing_marker
+        assert "valid=1 かつ exit_code=0 を確認できない" in rendered_missing_marker
+
+        # 完了マーカーが存在し valid=1・exit_code=0 を明示していれば
+        # 除外理由に「valid=1 かつ exit_code=0 を確認できない」は含まれない。
+        with open(os.path.join(td, "1267-DONE_ATTEMPT1"), "w") as f:
+            f.write("DONE valid=1 exit_code=0 breach=0\n")
+        rendered_confirmed = render_attempt(td, 1)
+        assert "valid=1 かつ exit_code=0 を確認できない" not in rendered_confirmed
 
     sample_undetermined_log = sample_run_log.replace(
         "verdict=route_ok (全形状 × NT/TN/TT で B/A(TFLOPS) >= 1.0 かつ全セル spread が gate 内。結線可)",

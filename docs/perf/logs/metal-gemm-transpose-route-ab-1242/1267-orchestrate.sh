@@ -38,6 +38,13 @@
 # セキュリティ（OWASP A03）: 外部コマンドは固定引数のみで起動し、シェル
 # 経由の任意実行はしない。ホスト名・ユーザー名の絶対パスはログへ書く前に
 # 必ず SANITIZE_SED を通す（#1261 の方針を踏襲）。
+#
+# PR #1462 codex-review 是正: 監視ループはバイナリ起動直後（内側ガード
+# のバックオフ待機区間を含む）から始まるため、待機中の負荷逸脱と
+# phase 1／phase 2 実測区間中の逸脱を区別せずに breach を立てていた
+# （詳細は `current_phase_state` 関数コメント参照）。実測区間の判定に
+# は OUT_LOG（本計測プロセスの標準出力）中の `== env_guard(` ／
+# `env_guard_result=` マーカーを用いる。
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -196,6 +203,37 @@ MONITOR_LOG="${RUN_PREFIX}monitor.log"
 MONITOR_POLL_INTERVAL_SECS="${MONITOR_POLL_INTERVAL_SECS:-30}"
 
 OUT_LOG="${RUN_PREFIX}run.log"
+
+# PR #1462 codex-review 指摘: 監視ループはバイナリ起動直後（内側ガード
+# `env_guard` のバックオフ待機の最中）から始まり、待機中の負荷も
+# 実測中の負荷と同じ扱いで breach=1 を不可逆に記録していた。外側
+# ゲート通過後に一時的に負荷が上がり、内側ガードが待機してから
+# phase 1／phase 2 の実測自体は排他的に成功した場合でも valid=0 に
+# なってしまい、内側ガードの再試行設計が結果に反映されない。
+#
+# `${BINARY}` は `env_guard` のブロックを `== env_guard(<label>) ==`
+# で開始し、判定確定時に `env_guard_result=<pass|fail...>` を書く
+# （`env_guard.rs`。`crates/bench-harness` 側の契約。本スクリプトは
+# 変更しない）。この 2 種のマーカーのうち OUT_LOG 中で最後に現れた
+# 方を見て、現在が「ガード待機中（guard_wait）」か「実測中
+# （measuring。直近の env_guard が通過し、次の env_guard ブロックが
+# まだ始まっていない区間）」かを判定する。まだ 1 つも
+# `env_guard_result=` が現れていなければ guard_wait とみなす
+# （fail-closed。実測開始の証拠がない間は実測中とみなさない）。
+current_phase_state() {
+  local out_log="$1" last_start last_result
+  last_start=$(grep -n '^== env_guard(' "$out_log" 2>/dev/null | tail -1 | cut -d: -f1)
+  last_result=$(grep -n '^env_guard_result=' "$out_log" 2>/dev/null | tail -1 | cut -d: -f1)
+  if [ -z "$last_result" ]; then
+    echo "guard_wait"
+    return
+  fi
+  if [ -n "$last_start" ] && [ "$last_start" -gt "$last_result" ]; then
+    echo "guard_wait"
+  else
+    echo "measuring"
+  fi
+}
 "${BINARY}" \
   --max-load-avg=2.0 \
   --gpu-watch=python --gpu-watch=torch --gpu-watch=mlx --gpu-watch=gemm_ --gpu-watch=bench \
@@ -236,14 +274,20 @@ while kill -0 "$BENCH_PID" 2>/dev/null; do
     enum_error=1
   fi
   load_ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v le="$load_error" 'BEGIN{print (le==0 && l<t)?1:0}')
+  # PR #1462 codex-review 指摘: `breach` は実測区間（phase_state=
+  # measuring）で検出された逸脱のみで不可逆に立てる。ガード待機中
+  # （guard_wait）の逸脱は監視ログには記録する（可視性のため）が
+  # `valid` の判定へは影響させない——内側ガード自身がバックオフで
+  # 再試行し、実測を開始できる状態まで待つ設計だから。
+  phase_state=$(current_phase_state "$OUT_LOG")
   if [ "$enum_error" -ne 0 ] || [ "$load_error" -ne 0 ]; then
-    breach=1
-    echo "$ts load1=$load1 load_error=$load_error other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=$enum_error UNDETERMINED" >> "$MONITOR_LOG"
+    [ "$phase_state" = "measuring" ] && breach=1
+    echo "$ts load1=$load1 load_error=$load_error other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=$enum_error phase=$phase_state UNDETERMINED" >> "$MONITOR_LOG"
   elif [ "$load_ok" != "1" ] || [ "$other_count" -gt 0 ]; then
-    breach=1
-    echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 BREACH" >> "$MONITOR_LOG"
+    [ "$phase_state" = "measuring" ] && breach=1
+    echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 phase=$phase_state BREACH" >> "$MONITOR_LOG"
   else
-    echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 ok" >> "$MONITOR_LOG"
+    echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 phase=$phase_state ok" >> "$MONITOR_LOG"
   fi
   sleep "$MONITOR_POLL_INTERVAL_SECS"
 done
