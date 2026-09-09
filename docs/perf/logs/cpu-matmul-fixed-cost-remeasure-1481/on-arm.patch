@@ -1,0 +1,13 @@
+diff --git a/crates/backend-cpu/src/ops.rs b/crates/backend-cpu/src/ops.rs
+index bffc2be3..36196495 100644
+--- a/crates/backend-cpu/src/ops.rs
++++ b/crates/backend-cpu/src/ops.rs
+@@ -150,7 +150,7 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
+ /// **独立の再計測**が両実機で完了し ADOPT と確定するまでは、本定数を
+ /// `2 << 20` へ戻さない（同 doc §20.6・`docs/cpu-matmul-fixed-cost-
+ /// design.md` §10 参照）。
+-pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = usize::MAX;
++pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS: usize = 2 << 20;
+
+ /// [`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`] 以上の並列ゼロ書き込みにおける
+ /// rayon チャンク粒度（要素数。イシュー #1299）。`with_min_len` へ渡し

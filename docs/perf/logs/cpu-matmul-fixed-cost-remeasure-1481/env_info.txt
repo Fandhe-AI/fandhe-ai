@@ -1,0 +1,160 @@
+# 実行環境情報（イシュー #1481。内部ホスト名は含めない）
+
+## 対象イシュー・計画
+
+イシュー #1481: 出力並列ゼロ埋め（#1299）on/off を、PR #1448 の
+codex-review 指摘に基づき事前登録した改定版規則 4
+（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1a）で
+両実機・独立セッション再計測し、`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS`
+の有効化可否（ADOPT／REJECT）を確定する。#1301（`docs/perf/logs/
+cpu-matmul-fixed-cost-1301/`）とは別セッション・別ログディレクトリ。
+
+## 事前登録した判定規則（計測開始前にここへ転記。転記時刻 2026-09-09T12:14:02Z）
+
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20.1（規則 1〜3・5）・
+§20.1a（規則 4 改定版）から、計測前に一字一句このファイルへ転記する。
+以後、計測結果を見て文言・数値を変更しない。
+
+1. **checksum**: 全セルで off/on 完全一致（`compare_gemm_ab.py` の複合
+   判定 pass かつ `==` 列一致）。不一致なら判定不能。
+2. **DGX N=2048 reuse（決定セル）**: Layer B の `alloc_c` 中央値が
+   削減され、かつ `ops_gemm` 中央値の on/off 比 ≤ 1.00。Layer A
+   （`run_gemm_gate_cpu.sh`）の 2048/reuse の on/off 比 ≤ 1.05（非後退）。
+3. **対照セル**: 両実機の N=512/1024 の reuse/fresh すべてで on/off 比
+   ≤ 1.05。
+4. **規則 4（改定版・§20.1a）**: 各セルの candle 比 on/off 比
+   （`on 腕の candle 比 / off 腕の candle 比`）が `1/1.05 ≈ 0.9524` 以上
+   であること（規則 2・3・5 と同じ `±5%` 慣例許容幅を、比の比という
+   間接指標に対して逆数側〈悪化方向〉のみへ適用する片側検査）。
+   対象は両実機 × N=512/1024/2048 の 6 セル全部。
+5. **M4 Max N=2048**: on/off 比 > 1.05 で 5 run 符号一貫の後退なら
+   macOS では有効化しない（#1299 スモークの再確認）。
+
+結線の場合分け: (a) DGX が規則 1〜4 を満たし M4 Max が規則 5 で後退 →
+ADOPT（Linux 限定 cfg gating）。(b) DGX で削減されない・後退する →
+REJECT（コード無変更）。(c) 両実機とも全規則を満たす → 無条件
+`2 << 20`。いずれか不成立（(a)(c) いずれにも該当しない）→ REJECT。
+専有ゲート不成立で片実機が欠ける → **undetermined**（1 回だけ記録して
+終了。ユーザー承認 2026-09-09・memory `handover-approvals-2026-09-09`）。
+
+**規則を計測後に緩和・読み替えない**（本イシューの存在理由そのもの。
+PR #1448 の codex-review 指摘の是正）。数値判定は `judge_rules.py` に
+ハードコードし、機械的に適用する。
+
+## 規則 4 列定義の事前固定（計測前の再現確認）
+
+「candle 比」列は `compare_gemm_gate.py --device cpu` 出力表の
+`candle/fandhe` 列（candle fresh 中央値 ÷ fandhe-ai reuse 中央値）と
+事前に固定する。#1301 の追跡済み JSONL
+（`results/raw/results-dgx-cpu-gemm-gate-head-145639d-pzero-off.jsonl`）
+に同コマンドを適用すると §20.3 の 0.703／0.778／0.965 を再現する
+ことを本イシュー実装時に確認済み（`python3 compare_gemm_gate.py
+--device cpu results/raw/results-dgx-cpu-gemm-gate-head-145639d-pzero-off.jsonl`
+の出力 `candle/fandhe` 列が 512:0.703・1024:0.778・2048:0.965）。
+
+## 対象コミット
+
+- off 腕: HEAD = 54cb14057dbf30cc77a3d77c0d1b37caf348f75c
+  （`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`。現行本番既定。
+  crates/** への変更はこのブランチでもゼロ）
+- on 腕: 同 HEAD ＋ `on-arm.patch`（定数 1 行差し替え。
+  `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = 2 << 20`）
+
+両腕とも `GEMM_GATE_PATCH_FACADE_PATH`（各腕ツリーへの path patch）で
+ビルド。crates.io registry 版は使わない（2 腕を同一ソース系列で揃える。
+#1301 と同方針）。
+
+## DGX Spark GB10（Grace CPU。cpu ノードタグ dgx-cpu）
+
+- OS: Linux 6.17.0-1031-nvidia aarch64
+- 論理コア数: 20（`nproc`）
+- 作業ディレクトリ: `~/work/fc-1481/off`・`~/work/fc-1481/on`（本イシュー
+  専用の隔離ディレクトリ。off/on を別々に rsync 転送し同一プロセスから
+  `GEMM_GATE_PATCH_FACADE_PATH` で切り替えて使用）
+- GNU time（`/usr/bin/time -v`）: 利用可能。`time-v-dgx-<arm>-run{1..5}.log`
+  へ記録
+- 専有ゲート: 転送後 orchestrate_dgx.sh 実行開始時の 1 分 load average
+  0.02→0.12（2 回連続 <6.0）で即座に通過（ノードはほぼ完全アイドル）
+- rsync: `docs/real-hardware-verification-env.md` §3 の手順（`.gitignore`
+  フィルタ・`.git/`／`.codex/`／`.env*`／`.claude/settings.local.json`／
+  `.venv*/`／`real-hardware-verification-env.local.md` 除外）で off・on
+  それぞれ転送。転送後 `.rev-stamp` 一致・`find` による秘密情報 0 件を
+  確認済み
+- `gemm-gate-trusted-hosts.local`（gitignore 対象・rsync 対象外）は
+  ノード上で `hostname`・`/etc/machine-id` から新規生成し、off・on
+  両ツリーへコピー（Mac との往復転送なし）
+- 実行完了後、`~/work/fc-1481/`（off/on ツリー）・
+  `~/work/fc-1481-logs/`（生ログ）はノード上に残置（削除は任意。次回
+  再利用時は上書き rsync で足りるため本セッションでは削除しなかった）
+
+## Apple M4 Max（このセッションのホスト自身。cpu ノードタグ m4max-cpu）
+
+- チップ: Apple M4 Max
+- OS: Darwin 25.6.0 arm64
+- perflevel0（大コア）論理数: 12・perflevel1（小コア）論理数: 4
+  （`sysctl -n hw.perflevel{0,1}.logicalcpu`）
+- off 腕: 実装 worktree
+  `/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_dbb339eb-c60-13`
+- on 腕: スクラッチ複製ツリー（`rsync -a` による worktree の複製に
+  `on-arm.patch` を適用したもの。git worktree ではなくプレーンな
+  ファイルコピー）
+- 専有ゲート: load average 4.07→4.92（2 回連続 <6.0）で通過。ただし
+  完全な専有ではない共有マシン（このリポジトリのメイン worktree が
+  動くホスト自身。他 worktree・並走エージェントの影響を受けうる）
+- 隔離: 本セッション専用 worktree（ファイルシステム上は分離。CPU/
+  メモリは共有）
+
+## 実行結果サマリ（2026-09-09 実施）
+
+対象コミット: 54cb14057dbf30cc77a3d77c0d1b37caf348f75c
+
+**規則 1（checksum）**: 両実機・全 6 セルで `compare_gemm_ab.py --device
+cpu --sizes gate` の checksum 列が「完全一致」（`compare_gemm_ab-dgx.md`・
+`compare_gemm_ab-m4max.md`）。`parity_fail_count` は全 120 行（両実機×
+off/on×5run×6cell）で 0。**満たす**。
+
+**規則 2（DGX N=2048 決定セル）**: Layer A 2048/reuse on/off 比 0.7090
+（≤1.05・満たす）だが、Layer B `alloc_c` on/off 比 **2.1199**（削減ではなく
+約 2.1 倍に増加。§20.3 の #1301 実測〈0.5166・約 48% 削減〉とは逆符号）。
+`alloc_c` 削減の条件を満たさないため**規則 2 は不成立**（`ops_gemm` 比
+0.8012 は ≤1.00 を満たすが、規則は「`alloc_c` 中央値が削減され、かつ
+`ops_gemm` ≤1.00」の AND 条件であり alloc_c が削減されていない時点で
+不成立）。
+
+**規則 3（対照セル）**: 両実機 N=512/1024 の fresh/reuse 全 8 セル中
+3 セルが不成立（DGX 1024/fresh 1.0549・M4Max 512/fresh 1.0576・M4Max
+512/reuse 1.0780。いずれも 1.05 をわずかに超過）。**不成立**。
+
+**規則 4（改定版）**: 両実機×N=512/1024/2048 の 6 セル中 5 セルは満たすが、
+M4Max N=512 が candle 比 on/off 0.9060（<0.9524）で**不成立**。
+
+**規則 5（M4Max N=2048 後退判定）**: Layer A on/off 比 1.0212（≤1.05）
+のため後退なし・発火せず。
+
+**verdict = REJECT**（`judge_rules.py` 出力 `judge.md` 参照。規則 2・3・4
+のいずれも不成立セルを含むため、§20.1 の場合分け (a)〜(c) いずれにも
+該当しない）。**規則は計測後に一切緩和・読み替えていない**（事前登録
+版のまま `judge_rules.py` にハードコードして機械適用）。本番既定
+`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`（無効化）は変更しない
+（`crates/**` は本コミットで無変更）。
+
+なお #1301（§20.3）の実測と本イシューの実測は方向性が一部逆転している
+（DGX alloc_c は削減→増加、DGX/M4Max の一部対照セルは非後退→僅かな
+後退）。両実機とも共有負荷下（M4Max は他 worktree 並走・DGX も
+load average が計測中 6〜12 まで上昇する区間があった）での 1 セッション
+限りの計測であり、本イシューは「事前登録した規則を機械的に適用して
+ADOPT/REJECT を確定する」ことが目的であるため、この方向性の違いの
+原因分析（真の後退か計測ノイズか）自体はスコープ外として記録するに
+留める。
+
+## セキュリティ・多層防御チェック
+
+- 内部ホスト名（FQDN・短縮形とも）・machine-id・IOPlatformUUID・
+  個人パス以外の環境実値は本ファイル・生成ドキュメントへ書かない
+  （コミット前 `grep -rniE` で確認する）
+- `real-hardware-verification-env.local.md`・`gemm-gate-trusted-hosts.local`
+  は rsync 除外・git 管理外のまま維持し、DGX の trusted-hosts は
+  ノード上で生成・残置し回収しない
+- manifest（`fandhe_ai_source` 等）にホスト名フィールドは存在しない
+  （`run_gemm_gate.sh` の `record_manifest` を確認済み。label・device・
+  sha256・source・readout_method・recorded_at のみ）
