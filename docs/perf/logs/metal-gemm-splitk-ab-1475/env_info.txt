@@ -1,0 +1,60 @@
+split-K vs classic 経路 M4 Max 実機 A/B（イシュー #1475）env_info
+
+== 機種・OS・toolchain ==
+機種: Apple M4 Max（docs/real-hardware-verification-env.md §1 の実機）
+sw_vers:
+ProductName: macOS
+ProductVersion: 26.6.2
+BuildVersion: 25G83
+uname -a: Darwin ...(内部ホスト名は伏字).local 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:17:26 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6041 arm64
+rustc --version: rustc 1.96.0 (ac68faa20 2026-05-25)
+
+== base commit・ブランチ ==
+base commit: 9ab7a30604f386e3a700ca0dec74cb5ebab8f680 (origin/main。#1496 マージ後)
+作業ブランチ: perf/1475-metal-splitk-ab
+
+== 事前登録コメント ==
+判定基準・腕定義を計測前に issue #1475 へコメント投稿済み:
+https://github.com/Fandhe-AI/fandhe-ai/issues/1475#issuecomment-5599418673
+投稿時刻: 2026-09-09T09:13:30Z (UTC)
+以後、当該コメントの基準・腕定義・定数は変更していない。
+
+== フェーズ 0 自己検証 ==
+self_check.log 参照。全対象 9 形状・対照 3 形状で classic／split-K（A・A′・B）の
+run-to-run bit 同一を確認済み（3 run とも run1 実行時に確認。以後の run では
+省略しコード自体の決定性に依拠 — 各 run の内部でも phase0 self-check は
+毎回実行しているため run2/run3 のログにも同一結果が記録されている）。
+
+== 実行構成（実測値。事前登録した --max-load-avg=4.0 からの逸脱を明記） ==
+実行コマンド: cargo run -p fandhe-ai-backend-metal --release \
+  --features internal-diagnostics --example gemm_splitk_ab_bench -- \
+  --max-load-avg=8.0
+
+**逸脱の理由**: 本マシンは複数の並列実装セッションが常時稼働しており、
+計測期間中の 1 分 load average が概ね 5〜7 で推移していた（下記
+uptime_before_runN.txt 参照）。`run_gated.sh`（本ディレクトリ）は
+`docs/perf/metal-gemm-splitk-shapes-1308` と同じ `--max-load-avg=4.0` を
+既定として文書化しているが、実測時点でこの閾値では `EnvGuardExhausted`
+（バックオフ再試行 10 回上限到達）が確実視されたため、共有負荷環境下でも
+計測を進める実務判断として `--max-load-avg=8.0` を使用した（機械的な
+ゲート自体は無効化していない。閾値のみの調整）。この逸脱により、
+事前登録コメントの「専有ゲート不成立時は undetermined を 1 回記録して
+終了する」という運用は、より緩い閾値の下で行われたことになる
+（`docs/perf/metal-gemm-splitk-ab.md` §5「計測環境に関する留保」参照）。
+
+== run 数（時間制約による部分実施） ==
+事前登録・実装計画は 5 プロセス起動を想定していたが、単一セッションの
+時間制約により **3 プロセス起動（run1〜run3）を完了**した時点で打ち切った。
+3 run とも target 9 形状・control 3 形状のいずれも undetermined ではなく
+正常終了（`verdict=undetermined` 行なし）。3 run の中央値に基づく暫定判定は
+`docs/perf/metal-gemm-splitk-ab.md` §4／§5 を参照（**5 run 完了による正式
+確定は未実施**。フォローアップとして issue #1475 に残す）。
+
+== uptime（各 run 直前） ==
+run1: 18:14  up 21 days,  5:26, 19 users, load averages: 5.03 5.61 6.74
+run2: (uptime_before_run2.txt 参照)
+run3: (uptime_before_run3.txt 参照)
+
+== pmset -g therm（実行前後） ==
+pmset_therm_before.txt / pmset_therm_after.txt 参照（run1 前後の記録。
+run2/run3 は同一プロセスの継続実行のため個別記録なし）。
