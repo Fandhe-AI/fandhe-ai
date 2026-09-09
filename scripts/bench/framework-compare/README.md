@@ -475,6 +475,39 @@ remeasurement.md` §13.5 が「負荷変動と readout 切替の効果が分離�
   ゲート出力が reuse のみのため fresh 参考行をセル外扱いにする）に対応する
   （下記「GEMM ゲート 5 回計測」節参照）。
 
+##### `--readout <legacy|borrowed>`（Metal の legacy/borrowed override interleave 再計測。イシュー #1477）
+
+`docs/perf/metal-gemm-candle-gate-remeasurement.md` §13.5 が指摘した
+「before/after を連続実行しており負荷変動と切替効果を分離できていない」
+という限界を解消するため、`bench-fandhe` は `--readout <legacy|borrowed>`
+（値付きフラグ。`--graph` と同型の allowlist 方式）を受理する。指定時は
+`readout_uses_borrowed_view` の device 既定（CPU/CUDA 借用ビュー・Metal
+legacy）を明示的に上書きし、**同一バイナリで両腕を run 単位に
+interleave 計測**できるようにする（`bench-candle`／`bench-burn` は本
+フラグを受理せず無視する）。未指定（既定）のときは device 既定契約が
+そのまま適用され、JSONL には `readout` キー自体が emit されない（`tf32`／
+`managed`／`graph` と同型の「キー欠損 = 既定」後方互換規約）。
+
+- **計測**: `run_ab_readout_metal.sh <label>`（`AB_PATCH_FACADE_PATH` 必須。
+  `run_ab_gemm_metal.sh`/`run_ab_managed_cuda.sh` と同型の設計 — 専有ゲート
+  〈load average < 4.0 を 2 回連続確認〉・run 単位の順序反転〈奇数 run:
+  legacy→borrowed・偶数 run: borrowed→legacy〉・`Cargo.lock` backup/
+  restore trap・fail-closed の一時ファイル→原子的 mv）を M4 Max 実機で
+  実行する。専有ゲートが規定回数以内に成立しない場合は
+  `results/raw/readout-ab-<label>.undetermined.txt` へ記録して計測を
+  開始せず終了する（再試行しない。判定規則は事前宣言済み）。
+- **集計**: `compare_readout_ab.py results.jsonl --device metal --sizes gate
+  --threshold 1.00` が device=metal・N∈{1024,2048,4096}・mode∈
+  {fresh,reuse} の 6 セルを legacy/borrowed へ分離し、5 回計測中央値の
+  比・checksum 完全一致を Markdown 表と総合判定（ADOPT／REJECT／
+  undetermined）で出力する。
+- **既存ツールとの独立性**: `summarize.py`・`compare_gemm_gate.py`・
+  `compare_gemm_ab.py` は `readout` キーを持つ行を `tf32`/`managed`/
+  `graph` と同型に除外する（正式ゲート・既存 A/B 比較へ混入させない）。
+- **結果**: `docs/perf/metal-gemm-candle-gate-remeasurement.md` §15 参照。
+  ADOPT 確定時は `readout_uses_borrowed_view` の Metal 分岐が撤去され、
+  本節「借用ビュー readout」冒頭の見出しも更新される。
+
 ### `infer --mode reuse` / `infer --phases`（イシュー #1217）
 
 `docs/perf/train-step-phase-breakdown.md` §13・§15.5 の背景: `--task infer` は

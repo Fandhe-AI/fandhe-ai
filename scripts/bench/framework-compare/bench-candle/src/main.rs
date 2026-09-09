@@ -216,6 +216,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         device_checksum: cli.device_checksum,
         graph: None,
         graph_stats: None,
+        readout: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -342,6 +343,7 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             device_checksum: false,
             graph: None,
             graph_stats: None,
+            readout: None,
         }
         .emit(&cli.out)?;
     }
@@ -408,6 +410,7 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             device_checksum: false,
             graph: None,
             graph_stats: None,
+            readout: None,
         }
         .emit(&cli.out)?;
     }
@@ -509,6 +512,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         device_checksum: false,
         graph: None,
         graph_stats: None,
+        readout: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -555,6 +559,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         device_checksum: false,
         graph: None,
         graph_stats: None,
+        readout: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -670,6 +675,7 @@ mod tests {
             managed: false,
             device_checksum: false,
             graph: None,
+            readout: None,
         }
     }
 
