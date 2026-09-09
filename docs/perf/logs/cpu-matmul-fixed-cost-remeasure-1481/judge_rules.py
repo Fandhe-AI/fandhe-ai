@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import statistics
 import sys
@@ -242,6 +243,22 @@ def parse_jsonl_medians(text: str) -> dict[tuple[int, str], list[float]]:
             median_s = float(d["median_s"])
         except (KeyError, TypeError, ValueError):
             continue
+        # PR #1501 codex-review P1 是正（2026-09-09 その 7）: NaN・inf・
+        # 非正値（0 以下）を有効な計測回数に数えない。`float("nan")` は
+        # 上の `float()` 変換を素通りするため、ここで明示的に拒否しない
+        # と「本数はちょうど 5 件だが中身に NaN が混入」した run を
+        # `REQUIRED_RUN_COUNT` 完備の正常な 5 run として扱ってしまい、
+        # 比較・符号一貫性判定（`_raw_median_ratio`／`_raw_run_pair_ratios`）
+        # が NaN を含む不定値のまま計算され、AGENTS.md の 5 回計測契約に
+        # 反した ADOPT 系判定を返しうる（指摘の反例: off が 5 件とも
+        # 有限値、on が [x, x, x, x, NaN] の場合）。不正値混入行は
+        # パース段階で静かに無視し、結果として当該 (size, mode) の
+        # 収集数が `REQUIRED_RUN_COUNT` に満たなくなることで、
+        # 下流の `_raw_ratio_or_incomplete` 系が `incomplete=True` を返し
+        # 最終 verdict を UNDETERMINED へ倒す（既存の本数完備チェックへ
+        # そのまま合流させる設計）。
+        if not math.isfinite(median_s) or median_s <= 0:
+            continue
         out.setdefault((size, mode), []).append(median_s)
     return out
 
@@ -283,6 +300,12 @@ def parse_candle_jsonl_medians(text: str) -> dict[int, list[float]]:
             size = int(d["size"])
             median_s = float(d["median_s"])
         except (KeyError, TypeError, ValueError):
+            continue
+        # PR #1501 codex-review P1 是正（2026-09-09 その 7）:
+        # `parse_jsonl_medians` と同型の是正。NaN・inf・非正値の
+        # `median_s` は有効な計測回数に数えない（規則 4 改定版の
+        # candle 比計算 `_raw_candle_ratio` へ不定値を混入させない）。
+        if not math.isfinite(median_s) or median_s <= 0:
             continue
         out.setdefault(size, []).append(median_s)
     return out
@@ -419,30 +442,49 @@ def _raw_ratio_or_incomplete(
     on_runs: dict[tuple[int, str], list[float]],
     n: int,
     mode: str,
+    *,
+    off_specified: bool,
+    on_specified: bool,
 ) -> tuple[float | None, bool]:
     """`_raw_median_ratio` を計算し、あわせて「指定済み生データが不完全
     だったか」（`incomplete`）を返す（PR #1501 codex-review P1 是正・
-    2026-09-09 その 6）。
+    2026-09-09 その 6・その 8）。
 
-    `attempted`（`off_runs`／`on_runs` のいずれかに該当 `(n, mode)`
-    キーが存在する）を「この (実機, 腕, size, mode) の生データが
-    `--jsonl` で指定されていた」の判定基準とする。未指定（両方とも
-    キーが存在しない。例: `--jsonl` 完全省略時の自己テスト後方互換
-    ケースや、当該実機の当該腕がそもそも `--jsonl` に含まれない
-    ケース）は Markdown フォールバックが正当なため `incomplete=False`
-    を返す。指定されていたにもかかわらず run 数が
+    `attempted`（呼び出し側が渡す `off_specified`／`on_specified` の
+    いずれかが True）を「この (実機, 腕) の `--jsonl` ファイル自体が
+    指定されていた」の判定基準とする。未指定（両腕とも `--jsonl` に
+    その node:arm が渡されていない。例: `--jsonl` 完全省略時の自己
+    テスト後方互換ケースや、当該実機の当該腕がそもそも `--jsonl` に
+    含まれないケース）は Markdown フォールバックが正当なため
+    `incomplete=False` を返す。指定されていたにもかかわらず該当
+    `(n, mode)` セルが両腕から丸ごと欠落している・run 数が
     `REQUIRED_RUN_COUNT` と異なる・片腕のみ欠落等で `raw is None` に
     なった場合（例: DGX on N=512/reuse の生データが 1 件しか収集
-    できなかった）は `incomplete=True` を返す。呼び出し側 `judge()`
-    はこれを収集し、1 件でもあれば最終 verdict を UNDETERMINED へ
-    強制する（従来は規則 2〜4 いずれも `raw is None` を無条件で
-    Markdown 由来の丸め値へフォールバックし、その丸め値だけで
+    できなかった、または --jsonl は指定済みなのに当該セルの行が
+    ファイルに 1 行も無かった）は `incomplete=True` を返す。呼び出し側
+    `judge()` はこれを収集し、1 件でもあれば最終 verdict を
+    UNDETERMINED へ強制する（従来は規則 2〜4 いずれも `raw is None` を
+    無条件で Markdown 由来の丸め値へフォールバックし、その丸め値だけで
     ADOPT 系判定へ寄与しうる契約不整合があった。指摘の反例:
     DGX on N=512/reuse を 1 件だけにし対応する Markdown 比を 1.0 に
     すると、規則 3 が「満たす」と誤判定されて ADOPT_UNCONDITIONAL を
     返しうる）。
+
+    PR #1501 codex-review P1 追加是正（2026-09-09 その 8）: 従来は
+    `attempted` をセルキー（`(n, mode) in off_runs or (n, mode) in
+    on_runs`）の存在で判断していたため、`--jsonl` が両腕とも指定
+    済み（ファイルは渡されている）にもかかわらず、当該セルがその
+    ファイルに 1 行も存在しない（生データ収集自体に失敗した）場合に
+    `attempted=False` となり「未指定」と誤認して Markdown フォール
+    バックへ抜けてしまう欠陥があった（指摘の反例: DGX の 512/fresh が
+    両腕とも欠落していても Markdown と他条件が合格なら
+    ADOPT_UNCONDITIONAL と誤判定されうる）。本版は呼び出し側が
+    `jsonl` 辞書の node:arm キー存在（`(node, "off") in jsonl` 等）を
+    `off_specified`／`on_specified` として明示的に渡すことで、
+    「ファイルが指定されていたか」と「そのファイル内にセルが
+    存在したか」を分離する。
     """
-    attempted = (n, mode) in off_runs or (n, mode) in on_runs
+    attempted = off_specified or on_specified
     raw = _raw_median_ratio(off_runs, on_runs, n, mode)
     incomplete = attempted and raw is None
     return raw, incomplete
@@ -454,24 +496,37 @@ def _raw_candle_ratio_or_incomplete(
     off_candle: dict[int, list[float]],
     on_candle: dict[int, list[float]],
     n: int,
+    *,
+    off_specified: bool,
+    on_specified: bool,
 ) -> tuple[float | None, bool]:
     """`_raw_candle_ratio` を計算し、あわせて「指定済み生データが不完全
     だったか」（`incomplete`）を返す（`_raw_ratio_or_incomplete` の
     規則 4（改定版）版。PR #1501 codex-review P1 是正・2026-09-09
-    その 6）。
+    その 6・その 8）。
 
-    `attempted`（`off_candle`／`on_candle` のいずれかに該当 `n` キーが
-    存在する）を「この (実機, 腕, size) の candle 生データが
-    `--candle-jsonl` で指定されていた」の判定基準とする（fandhe-ai 側
+    `attempted`（呼び出し側が渡す `off_specified`／`on_specified` の
+    いずれかが True）を「この (実機, 腕) の `--candle-jsonl` ファイル
+    自体が指定されていた」の判定基準とする（fandhe-ai 側
     `off_fandhe`／`on_fandhe` の有無は判定に使わない。他規則の判定に
     必要な理由で fandhe-ai 側 jsonl のみ与えられ candle-jsonl が
     entirely 未指定のケース〈自己テスト後方互換〉を誤って
     incomplete 扱いしないため）。未指定は `incomplete=False`
-    （Markdown フォールバックが正当）、指定されていたのに 4 入力の
-    いずれかが `REQUIRED_RUN_COUNT` に満たない等で `raw is None` に
-    なった場合は `incomplete=True` を返す。
+    （Markdown フォールバックが正当）、指定されていたのに当該 `n`
+    セルがファイルに存在しない・4 入力のいずれかが
+    `REQUIRED_RUN_COUNT` に満たない等で `raw is None` になった場合は
+    `incomplete=True` を返す。
+
+    PR #1501 codex-review P1 追加是正（2026-09-09 その 8）: 従来は
+    `attempted` を `n in off_candle or n in on_candle`（セルキーの
+    存在）で判断していたため、`--candle-jsonl` が両腕とも指定済み
+    でも当該 `n` の行が丸ごと欠落していれば `attempted=False` となり
+    Markdown フォールバックへ抜けてしまう欠陥が `_raw_ratio_or_
+    incomplete` と同型で存在した。本版は呼び出し側が渡す
+    `off_specified`／`on_specified`（`(node, "off") in candle_jsonl`
+    等）で「ファイルが指定されていたか」を判定する。
     """
-    attempted = n in off_candle or n in on_candle
+    attempted = off_specified or on_specified
     raw = _raw_candle_ratio(off_fandhe, on_fandhe, off_candle, on_candle, n)
     incomplete = attempted and raw is None
     return raw, incomplete
@@ -571,7 +626,12 @@ def judge(
     r2_layer_a_cell = dgx_a.get((2048, "reuse"))
     r2_layer_a_md = r2_layer_a_cell.ratio if r2_layer_a_cell is not None else None
     r2_layer_a_raw, r2_incomplete = _raw_ratio_or_incomplete(
-        jsonl.get(("dgx", "off"), {}), jsonl.get(("dgx", "on"), {}), 2048, "reuse"
+        jsonl.get(("dgx", "off"), {}),
+        jsonl.get(("dgx", "on"), {}),
+        2048,
+        "reuse",
+        off_specified=("dgx", "off") in jsonl,
+        on_specified=("dgx", "on") in jsonl,
     )
     if r2_incomplete:
         incomplete_cells.append("規則2 DGX N=2048/reuse")
@@ -608,11 +668,20 @@ def judge(
         a = layer_a.get(node, {})
         off_runs = jsonl.get((node, "off"), {})
         on_runs = jsonl.get((node, "on"), {})
+        off_specified = (node, "off") in jsonl
+        on_specified = (node, "on") in jsonl
         for n in (512, 1024):
             for mode in ("fresh", "reuse"):
                 cell = a.get((n, mode))
                 v_md = cell.ratio if cell is not None else None
-                v_raw, v_incomplete = _raw_ratio_or_incomplete(off_runs, on_runs, n, mode)
+                v_raw, v_incomplete = _raw_ratio_or_incomplete(
+                    off_runs,
+                    on_runs,
+                    n,
+                    mode,
+                    off_specified=off_specified,
+                    on_specified=on_specified,
+                )
                 if v_incomplete:
                     incomplete_cells.append(f"規則3 対照セル {node} N={n}/{mode}")
                 v = v_raw if v_raw is not None else v_md
@@ -655,11 +724,19 @@ def judge(
         on_fandhe = jsonl.get((node, "on"), {})
         off_candle = candle_jsonl.get((node, "off"), {})
         on_candle = candle_jsonl.get((node, "on"), {})
+        candle_off_specified = (node, "off") in candle_jsonl
+        candle_on_specified = (node, "on") in candle_jsonl
         for n in (512, 1024, 2048):
             off_v_md = off.get(n)
             on_v_md = on.get(n)
             ratio_raw, ratio_incomplete = _raw_candle_ratio_or_incomplete(
-                off_fandhe, on_fandhe, off_candle, on_candle, n
+                off_fandhe,
+                on_fandhe,
+                off_candle,
+                on_candle,
+                n,
+                off_specified=candle_off_specified,
+                on_specified=candle_on_specified,
             )
             if ratio_incomplete:
                 incomplete_cells.append(f"規則4改定版 {node} N={n}")
@@ -995,6 +1072,35 @@ def _self_test() -> int:
             "m4max": {k: cell for k in EXPECTED_LAYER_A_CELLS},
         }
 
+    def _full_arm_jsonl(
+        ratio: float = 1.0,
+        overrides: dict[tuple[int, str], list[float]] | None = None,
+    ) -> dict[tuple[int, str], list[float]]:
+        """Self-test 用: ある実機の 1 腕（off または on）が期待する全 6
+        セル（512/1024/2048 × fresh/reuse）を `ratio` の `REQUIRED_
+        RUN_COUNT` 件run列で埋めた `--jsonl` フィクスチャを構築する。
+
+        PR #1501 codex-review P1 是正（2026-09-09 その 8）: `attempted`
+        （`--jsonl` が指定されていたか）の判定基準が「セルキーの存在」
+        から「(node, arm) 単位のファイル指定状態」へ変わったため、
+        実運用（1 つの `--jsonl` ファイルに全セルの行が揃う。
+        `bench-fandhe` の 1 回のスイープ実行が 512/1024/2048 ×
+        fresh/reuse の全 6 セルを書き出す）を模した自己テストの
+        フィクスチャは、意図的に一部セルだけを検証したい場合でも
+        その腕全体を明示的に埋める必要がある（一部セルだけ供給すると
+        残りのセルが「指定済みなのに欠落」と判定され、意図しない
+        UNDETERMINED を招く）。`overrides` で特定セルだけ別の run 列
+        （閾値超過・run 数不足等の意図的な異常値）に差し替えられる。
+        """
+        base: dict[tuple[int, str], list[float]] = {
+            (n, mode): [ratio] * REQUIRED_RUN_COUNT
+            for n in (512, 1024, 2048)
+            for mode in ("fresh", "reuse")
+        }
+        if overrides:
+            base.update(overrides)
+        return base
+
     layer_b_ok = {"dgx": {(2048, "alloc_c"): 0.5, (2048, "ops_gemm"): 0.99}}
     gate_ok = {
         ("dgx", "off"): {512: 0.70, 1024: 0.78, 2048: 0.96},
@@ -1008,10 +1114,14 @@ def _self_test() -> int:
     # 規則 5 の入力が欠落・不完全な場合は他規則の成否によらず
     # verdict が UNDETERMINED に倒れるため、ADOPT_UNCONDITIONAL／REJECT
     # を検証する自己テストは本フィクスチャで規則 5 の入力を明示的に
-    # 完備させる必要がある。
+    # 完備させる必要がある。`_full_arm_jsonl` で m4max の全セルを
+    # ratio=1.0（`_all_ok_layer_a()` の md 値と整合）で埋め、
+    # 「(node, arm) 単位のファイル指定」に対して欠落セルが出ない
+    # ようにする（その 8 是正: セル単位の部分供給は「指定済みなのに
+    # 一部欠落」と判定され UNDETERMINED を誘発するため）。
     jsonl_r5_no_regression = {
-        ("m4max", "off"): {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]},
-        ("m4max", "on"): {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]},
+        ("m4max", "off"): _full_arm_jsonl(1.0),
+        ("m4max", "on"): _full_arm_jsonl(1.0),
     }
 
     # judge() の一貫性チェック 1: 全セル満たす合成サンプルで
@@ -1040,13 +1150,29 @@ def _self_test() -> int:
     # だけのフィクスチャでは None が返り Markdown フォールバックへ
     # 倒れてしまい、本テストが検証すべき「生値では正しく不成立」の
     # end-to-end 経路を検証できなくなる）。
+    # PR #1501 codex-review P1 是正（2026-09-09 その 8）: `--candle-jsonl`
+    # も (node, arm) 単位のファイル指定判定になったため、512 の境界値
+    # 以外（1024・2048）も明示的に埋め、意図しない UNDETERMINED を
+    # 避ける（他サイズは on/off 比 1.0 で無条件に規則 4 を満たす値）。
     candle_jsonl_boundary = {
-        ("dgx", "off"): {512: [1.00049] * REQUIRED_RUN_COUNT},
-        ("dgx", "on"): {512: [0.95251] * REQUIRED_RUN_COUNT},
+        ("dgx", "off"): {
+            512: [1.00049] * REQUIRED_RUN_COUNT,
+            1024: [1.0] * REQUIRED_RUN_COUNT,
+            2048: [1.0] * REQUIRED_RUN_COUNT,
+        },
+        ("dgx", "on"): {
+            512: [0.95251] * REQUIRED_RUN_COUNT,
+            1024: [1.0] * REQUIRED_RUN_COUNT,
+            2048: [1.0] * REQUIRED_RUN_COUNT,
+        },
     }
+    # dgx 側 fandhe-ai 生 median_s も同様に全セルを埋める（`_full_arm_
+    # jsonl` を使用。ratio=1.0 は `_all_ok_layer_a()` の md 値・
+    # `layer_b_ok` の閾値と整合し、512 以外のセルで規則 2・3・4 が
+    # 無条件に満たされるようにする）。
     jsonl_dgx_512_fandhe = dict(jsonl_r5_no_regression)
-    jsonl_dgx_512_fandhe[("dgx", "off")] = {(512, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]}
-    jsonl_dgx_512_fandhe[("dgx", "on")] = {(512, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]}
+    jsonl_dgx_512_fandhe[("dgx", "off")] = _full_arm_jsonl(1.0)
+    jsonl_dgx_512_fandhe[("dgx", "on")] = _full_arm_jsonl(1.0)
     _, verdict_boundary_md_only = judge(_all_ok_layer_a(), layer_b_ok, gate_boundary, jsonl_r5_no_regression)
     assert verdict_boundary_md_only == "ADOPT_UNCONDITIONAL", verdict_boundary_md_only  # 丸め値のみでは欠陥どおり通ってしまう
     _, verdict_boundary_raw = judge(
@@ -1085,9 +1211,14 @@ def _self_test() -> int:
     layer_a_r5["m4max"][(2048, "reuse")] = LayerACell(
         ratio=1.20, checksum=CHECKSUM_OK_VALUE
     )
+    # `_full_arm_jsonl` で m4max の全セルを埋め、(2048, "reuse") のみ
+    # 意図的な後退値へ差し替える（その 8 是正: 部分供給だと他セルが
+    # 「指定済みなのに欠落」扱いになり UNDETERMINED を誘発するため）。
     jsonl_r5_consistent = {
-        ("m4max", "off"): {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]},
-        ("m4max", "on"): {(2048, "reuse"): [1.2, 1.2, 1.2, 1.2, 1.2]},
+        ("m4max", "off"): _full_arm_jsonl(1.0),
+        ("m4max", "on"): _full_arm_jsonl(
+            1.0, overrides={(2048, "reuse"): [1.2, 1.2, 1.2, 1.2, 1.2]}
+        ),
     }
     _, verdict_r5 = judge(layer_a_r5, layer_b_ok, gate_ok, jsonl_r5_consistent)
     assert verdict_r5 == "ADOPT_LINUX_ONLY", verdict_r5
@@ -1107,8 +1238,10 @@ def _self_test() -> int:
         ratio=1.20, checksum=CHECKSUM_OK_VALUE
     )
     jsonl_r5_mixed = {
-        ("m4max", "off"): {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]},
-        ("m4max", "on"): {(2048, "reuse"): [1.5, 1.5, 1.5, 0.9, 1.5]},
+        ("m4max", "off"): _full_arm_jsonl(1.0),
+        ("m4max", "on"): _full_arm_jsonl(
+            1.0, overrides={(2048, "reuse"): [1.5, 1.5, 1.5, 0.9, 1.5]}
+        ),
     }
     _, verdict_r5_mixed = judge(layer_a_r5_mixed, layer_b_ok, gate_ok, jsonl_r5_mixed)
     assert verdict_r5_mixed == "ADOPT_UNCONDITIONAL", verdict_r5_mixed
@@ -1136,16 +1269,32 @@ def _self_test() -> int:
 
     # 規則 5 は発火しない（M4 Max N=2048 <= 1.05）が M4 Max の対照セル
     # （規則 3）が不成立 → (a)/(c) いずれにも該当しないため REJECT。
-    # 規則 5 の入力（両腕 5 run の対応関係）は `jsonl_r5_no_regression`
-    # で明示的に完備させる（未完備だと UNDETERMINED になり本テストの
-    # 意図〈規則 3 不成立 → REJECT〉を検証できないため）。
-    layer_a_m4max_r3_fail = _all_ok_layer_a()
-    layer_a_m4max_r3_fail["m4max"] = dict(layer_a_m4max_r3_fail["m4max"])
-    layer_a_m4max_r3_fail["m4max"][(512, "fresh")] = LayerACell(
-        ratio=1.20, checksum=CHECKSUM_OK_VALUE
-    )
+    # 規則 5 の入力（両腕 5 run の対応関係）は m4max の全セルを
+    # `_full_arm_jsonl` で完備させたフィクスチャで満たす（未完備だと
+    # UNDETERMINED になり本テストの意図〈規則 3 不成立 → REJECT〉を
+    # 検証できないため）。
+    #
+    # PR #1501 codex-review P1 是正（2026-09-09 その 8）: 従来は
+    # `jsonl_r5_no_regression`（m4max (2048, "reuse") セルのみ供給）を
+    # 使い回し、rule3 の失敗は `layer_a`（Markdown 側）の (512, "fresh")
+    # ratio=1.20 override のみで表現していた。しかし `attempted` が
+    # (node, arm) 単位になったため、`jsonl_r5_no_regression` を
+    # `_full_arm_jsonl` で全セル ratio=1.0 に更新した結果、raw データ
+    # （常に Markdown より優先）が (512, "fresh") にも 1.0（合格値）を
+    # 供給してしまい、Markdown 側の override が無視されて本テストの
+    # 意図（rule3 不成立）を検証できなくなった。本版は raw jsonl 側で
+    # 直接 (512, "fresh") on 腕を失敗値（1.20・5 run 符号一貫）に
+    # 差し替え、raw データが失敗を反映するようにする（layer_a は
+    # `_all_ok_layer_a()` のまま変更不要。rule1 の checksum 判定にのみ
+    # 使われ、rule3 の比較は raw を優先するため）。
+    jsonl_m4max_r3_fail = {
+        ("m4max", "off"): _full_arm_jsonl(1.0),
+        ("m4max", "on"): _full_arm_jsonl(
+            1.0, overrides={(512, "fresh"): [1.20, 1.20, 1.20, 1.20, 1.20]}
+        ),
+    }
     _, verdict_m4max_r3_fail = judge(
-        layer_a_m4max_r3_fail, layer_b_ok, gate_ok, jsonl_r5_no_regression
+        _all_ok_layer_a(), layer_b_ok, gate_ok, jsonl_m4max_r3_fail
     )
     assert verdict_m4max_r3_fail == "REJECT", verdict_m4max_r3_fail
 
@@ -1195,6 +1344,100 @@ def _self_test() -> int:
         candle_jsonl_dgx_512_incomplete,
     )
     assert verdict_r4_incomplete == "UNDETERMINED", verdict_r4_incomplete
+
+    # PR #1501 codex-review P1 是正の核心回帰テスト（2026-09-09 その 8）:
+    # 指摘の反例そのもの。DGX の `--jsonl` が両腕とも指定済み（off/on
+    # ファイルは存在する）にもかかわらず、特定セル（512/fresh）が
+    # 両腕とも丸ごと欠落している場合、旧実装は `attempted`（セルキーの
+    # 存在で判定）が False になり「未指定」と誤認して Markdown 値へ
+    # フォールバックし、他条件が揃えば ADOPT_UNCONDITIONAL を返しうる
+    # 契約不整合があった（例: DGX の 512/fresh が両腕とも欠落していても
+    # Markdown と他条件が合格なら誤判定されうる）。本版は `(node, arm)`
+    # 単位のファイル指定状態を追跡するため、この欠落が他規則の成否に
+    # よらず UNDETERMINED へ伝播することを確認する。
+    jsonl_dgx_both_arms_missing_cell_off = _full_arm_jsonl(1.0)
+    jsonl_dgx_both_arms_missing_cell_on = _full_arm_jsonl(1.0)
+    del jsonl_dgx_both_arms_missing_cell_off[(512, "fresh")]
+    del jsonl_dgx_both_arms_missing_cell_on[(512, "fresh")]
+    jsonl_both_arms_missing_cell = dict(jsonl_r5_no_regression)
+    jsonl_both_arms_missing_cell[("dgx", "off")] = jsonl_dgx_both_arms_missing_cell_off
+    jsonl_both_arms_missing_cell[("dgx", "on")] = jsonl_dgx_both_arms_missing_cell_on
+    _, verdict_both_arms_missing_cell = judge(
+        _all_ok_layer_a(), layer_b_ok, gate_ok, jsonl_both_arms_missing_cell
+    )
+    assert (
+        verdict_both_arms_missing_cell == "UNDETERMINED"
+    ), verdict_both_arms_missing_cell
+
+    # 同型の回帰テスト: `--candle-jsonl` 側で両腕とも指定済みなのに
+    # 特定サイズ（1024）が丸ごと欠落している場合も UNDETERMINED に
+    # なること（`_raw_candle_ratio_or_incomplete` の同型是正）。
+    candle_jsonl_dgx_both_arms_missing_size = {
+        ("dgx", "off"): {512: [1.0] * REQUIRED_RUN_COUNT, 2048: [1.0] * REQUIRED_RUN_COUNT},
+        ("dgx", "on"): {512: [1.0] * REQUIRED_RUN_COUNT, 2048: [1.0] * REQUIRED_RUN_COUNT},
+    }
+    _, verdict_candle_both_arms_missing_size = judge(
+        _all_ok_layer_a(),
+        layer_b_ok,
+        gate_ok,
+        jsonl_dgx_512_fandhe,
+        candle_jsonl_dgx_both_arms_missing_size,
+    )
+    assert (
+        verdict_candle_both_arms_missing_size == "UNDETERMINED"
+    ), verdict_candle_both_arms_missing_size
+
+    # PR #1501 codex-review P1 是正の回帰テスト（2026-09-09 その 7）:
+    # `parse_jsonl_medians`／`parse_candle_jsonl_medians` は NaN・inf・
+    # 非正値（0 以下）の `median_s` を有効な計測回数に含めないこと。
+    # Python の `json` モジュールは既定で `NaN`／`Infinity`／
+    # `-Infinity` を非標準拡張として受理する（`float("nan")` 等へ変換
+    # される）ため、`float()` 変換自体は例外を送出せずすり抜ける。
+    sample_jsonl_nonfinite = (
+        '{"size":2048,"mode":"reuse","median_s":1.0}\n'
+        '{"size":2048,"mode":"reuse","median_s":NaN}\n'
+        '{"size":2048,"mode":"reuse","median_s":Infinity}\n'
+        '{"size":2048,"mode":"reuse","median_s":-Infinity}\n'
+        '{"size":2048,"mode":"reuse","median_s":-1.0}\n'
+        '{"size":2048,"mode":"reuse","median_s":0.0}\n'
+    )
+    parsed_nonfinite = parse_jsonl_medians(sample_jsonl_nonfinite)
+    assert parsed_nonfinite == {(2048, "reuse"): [1.0]}, parsed_nonfinite
+
+    sample_candle_jsonl_nonfinite = (
+        '{"framework":"candle","size":2048,"mode":"fresh","median_s":1.0}\n'
+        '{"framework":"candle","size":2048,"mode":"fresh","median_s":NaN}\n'
+        '{"framework":"candle","size":2048,"mode":"fresh","median_s":Infinity}\n'
+        '{"framework":"candle","size":2048,"mode":"fresh","median_s":0.0}\n'
+    )
+    parsed_candle_nonfinite = parse_candle_jsonl_medians(sample_candle_jsonl_nonfinite)
+    assert parsed_candle_nonfinite == {2048: [1.0]}, parsed_candle_nonfinite
+
+    # end-to-end 回帰テスト（指摘の反例そのもの）: M4 Max N=2048 の
+    # off が 5 件とも有限の正値（[1.0]*5）、on が 4 件の有限値 +
+    # 1 件の NaN（[1.2, 1.2, 1.2, 1.2, NaN]）の場合、NaN 行はパース段階
+    # で無視され on の収集数が 4 件（`REQUIRED_RUN_COUNT` 未満）になり、
+    # 規則 5 の run 別符号一貫性判定が「判定不能」になり、他規則が
+    # 全て満たされていても最終 verdict が UNDETERMINED になること
+    # （NaN を含む不定値のまま比較が進み無条件 ADOPT 系判定へ進む
+    # 契約不整合の再発防止テスト）。
+    sample_jsonl_r5_on_with_nan = (
+        '{"size":2048,"mode":"reuse","median_s":1.2}\n'
+        '{"size":2048,"mode":"reuse","median_s":1.2}\n'
+        '{"size":2048,"mode":"reuse","median_s":1.2}\n'
+        '{"size":2048,"mode":"reuse","median_s":1.2}\n'
+        '{"size":2048,"mode":"reuse","median_s":NaN}\n'
+    )
+    m4max_on_with_nan = dict(_full_arm_jsonl(1.0))
+    m4max_on_with_nan[(2048, "reuse")] = parse_jsonl_medians(sample_jsonl_r5_on_with_nan)[
+        (2048, "reuse")
+    ]
+    jsonl_r5_nan = {
+        ("m4max", "off"): _full_arm_jsonl(1.0),
+        ("m4max", "on"): m4max_on_with_nan,
+    }
+    _, verdict_r5_nan = judge(layer_a_r5, layer_b_ok, gate_ok, jsonl_r5_nan)
+    assert verdict_r5_nan == "UNDETERMINED", verdict_r5_nan
 
     print("self-test: OK", file=sys.stderr)
     return 0
