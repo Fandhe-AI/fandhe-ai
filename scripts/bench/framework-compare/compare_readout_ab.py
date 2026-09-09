@@ -472,13 +472,17 @@ def overall_verdict(cells, threshold, device, size_set):
 def _cell_has_parity_fail(cell):
     """1 セル（legacy/borrowed 全行）のうち、`parity_fail_count`（`Record::
     to_json_line` が emit するフラットキー。`bench-common::Record.parity`
-    の `fail_count`）が正の整数または欠損している行が 1 件でもあれば
+    の `fail_count`）が 0 以外の整数または欠損している行が 1 件でもあれば
     `True` を返す（codex-review 指摘・PR #1493 P1: `evaluate_cell` が
     parity を一切見ないため、checksum と性能さえ一致すれば parity fail
     が残っていても・parity が未検証〈`--device-checksum` 等で `parity`
     キー自体が省略される場合〉でも ADOPT になりうる問題の是正。REQ-2
     coding-rust.md「テスト・ベンチ」節の parity 0 fail 契約に倣い、欠損
-    は fail-closed に「fail あり」として扱う）。
+    は fail-closed に「fail あり」として扱う。`fail_count` は非負のはずの
+    件数フィールドであり負整数は不正値だが、`> 0` 判定のみでは負整数
+    （例 `-1`）を素通りさせ「全行で parity 0 fail」契約を破る〈codex-review
+    指摘・PR #1493 スレッド 2〉ため `!= 0` で判定し負整数も fail 扱いに
+    する）。
     """
     for label in ("legacy", "borrowed"):
         for r in cell.get(label, []):
@@ -486,7 +490,7 @@ def _cell_has_parity_fail(cell):
             if (
                 not isinstance(fail_count, int)
                 or isinstance(fail_count, bool)
-                or fail_count > 0
+                or fail_count != 0
             ):
                 return True
     return False

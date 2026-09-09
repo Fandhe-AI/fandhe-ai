@@ -127,6 +127,19 @@ AB_LOAD_GATE_MAX_LOAD1=${AB_LOAD_GATE_MAX_LOAD1:-4.0}
 AB_LOAD_GATE_MAX_ATTEMPTS=${AB_LOAD_GATE_MAX_ATTEMPTS:-10}
 AB_LOAD_GATE_INITIAL_WAIT=${AB_LOAD_GATE_INITIAL_WAIT:-60}
 
+# `AB_LOAD_GATE_MAX_LOAD1`（環境変数から利用者が上書き可能な専有ゲート
+# 閾値）が有限の正数であることを事前検証する（codex-review 指摘・PR
+# #1493 スレッド 2: 未検証のまま awk の数値コンテキストへ渡すと不正値
+# 〈空文字・非数値・負数〉が暗黙に 0 または文字列比較として扱われ、
+# `l1 < t` が常に真になり load1=14.64 のような高負荷でも専有ゲートが
+# 誤って通過しうる。`load1_is_valid` は 0 を許容するため使い回さず、
+# 閾値専用に厳密な正数〈> 0〉検証を行う）。不正値では即座に fail-closed
+# で終了する（再試行ループへは入らない）。
+if ! awk -v t="$AB_LOAD_GATE_MAX_LOAD1" 'BEGIN{exit !(t ~ /^[0-9]+(\.[0-9]+)?$/ && t + 0 > 0)}'; then
+  echo "error: AB_LOAD_GATE_MAX_LOAD1 が有限の正数ではありません: ${AB_LOAD_GATE_MAX_LOAD1}" >&2
+  exit 1
+fi
+
 load1_now() {
   # `uptime` の失敗（コマンド自体の異常終了）／出力形式の不一致は
   # 空文字を返す（呼び出し側 `wait_for_exclusive_gate` が非数値・空文字

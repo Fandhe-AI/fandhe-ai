@@ -308,6 +308,32 @@ class OverallVerdictTest(unittest.TestCase):
             f"parity_fail_count>0 の行があるのに ADOPT になった: {verdict!r}",
         )
 
+    def test_parity_fail_count_negative_yields_reject(self):
+        """codex-review 指摘（PR #1493 スレッド 2）: `parity_fail_count` が
+        負整数（例 `-1`）の行は `> 0` 判定のみでは素通りし「全行で parity
+        0 fail」契約に反して ADOPT になりうる。`!= 0` 判定で負整数も
+        fail 扱いになることの回帰テスト。
+        """
+        rows = _gate_rows(ratio=0.8)
+        rows = [
+            r for r in rows if not (r["size"] == 4096 and r["mode"] == "fresh")
+        ]
+        rows += _five_cell(
+            0.010,
+            0.008,
+            size=4096,
+            mode="fresh",
+            parity_fail_count=-1,
+        )
+        cells = compare_readout_ab.split_legacy_borrowed(rows)
+        verdict = compare_readout_ab.overall_verdict(
+            cells, threshold=1.00, device="metal", size_set=compare_readout_ab.GATE_SIZES
+        )
+        self.assertTrue(
+            verdict.startswith("REJECT"),
+            f"parity_fail_count が負整数の行があるのに ADOPT になった: {verdict!r}",
+        )
+
     def test_parity_fail_count_missing_yields_reject(self):
         """`parity_fail_count` キー自体が欠損する行（fail-closed 方針）は
         「未検証」として ADOPT を許さない。
