@@ -27,10 +27,23 @@
 # 再実行できなかった（AGENTS.md「ハードコード回避」）。呼び出し時の
 # 第 2 引数または環境変数 FC_ARCHIVE_DIR で archive 展開先を受け取り、
 # 負荷ゲート待機前（重い処理に入る前）に存在検証するよう変更した。
+#
+# 是正（PR #1467 codex-review P2 指摘）: 参考系列のみ
+# `bash run_gemm_gate_metal.sh ...` を呼び出し元のカレントディレクトリ
+# から探していたため、リポジトリルート等（scripts/bench/framework-compare
+# 以外）から本スクリプトを実行すると、正式系列の計測・両系列の負荷ゲート
+# 待機を終えた後になって「No such file or directory」で停止していた。
+# LOGDIR（本スクリプト自身の絶対パス）を基準に framework-compare
+# ディレクトリを絶対パスで解決し、正式系列の SCRATCH_FC 検証と同様に
+# 負荷ゲート待機前（重い処理に入る前）に存在確認する。
 set -eu
 LOGDIR="$(cd "$(dirname "$0")" && pwd)"
 FACADE_PATH="$1"  # 呼び出し時に crates/facade の絶対パスを渡す
 SCRATCH_FC="${2:-${FC_ARCHIVE_DIR:-}}"  # 61b8b65 アーカイブ展開先（第 2 引数 or FC_ARCHIVE_DIR 環境変数で受け取る）
+# scripts/bench/framework-compare（run_gemm_gate_metal.sh の実体）を LOGDIR
+# 基準の絶対パスで解決する。LOGDIR は docs/perf/logs/metal-gemm-candle-gate-1309
+# のためリポジトリルートまで 4 階層上がる。
+FC_DIR="$(cd "$LOGDIR/../../../../scripts/bench/framework-compare" && pwd)"
 
 if [ -z "$SCRATCH_FC" ]; then
   echo "エラー: 正式系列の archive 展開先が指定されていません。呼び出し時の第 2 引数または環境変数 FC_ARCHIVE_DIR で crates/facade を含む 61b8b65 アーカイブ展開先（scripts/bench/framework-compare まで）の絶対パスを渡してください。" >&2
@@ -42,6 +55,10 @@ if [ ! -d "$SCRATCH_FC" ]; then
 fi
 if [ ! -f "$SCRATCH_FC/run_gemm_gate_metal.sh" ]; then
   echo "エラー: 指定された archive 展開先に run_gemm_gate_metal.sh が見つかりません: $SCRATCH_FC" >&2
+  exit 1
+fi
+if [ ! -f "$FC_DIR/run_gemm_gate_metal.sh" ]; then
+  echo "エラー: 参考系列用の framework-compare ディレクトリに run_gemm_gate_metal.sh が見つかりません: $FC_DIR" >&2
   exit 1
 fi
 
@@ -70,4 +87,4 @@ echo "== 正式系列: 61b8b65（#1438 直前）アーカイブツリーで regi
 
 run_gate "参考系列"
 echo "== 参考系列: HEAD 797030e を crates/facade へ path patch + 計測 ==" >&2
-GEMM_GATE_PATCH_FACADE_PATH="$FACADE_PATH" bash run_gemm_gate_metal.sh head-797030e-1309
+( cd "$FC_DIR" && GEMM_GATE_PATCH_FACADE_PATH="$FACADE_PATH" bash run_gemm_gate_metal.sh head-797030e-1309 )
