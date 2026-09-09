@@ -223,10 +223,26 @@ def aggregate(
             key = (kind, m, n, k)
             if key not in shapes:
                 shapes[key] = ShapeSamples(kind, m, n, k)
+            # 採否判定に使う speedup は、ログ中の `speedup=` フィールド（`gemm_
+            # splitk_ab_bench.rs::format_ab_line` が表示用に小数 4 桁へ丸めて
+            # 出力する）をそのまま数値化するのではなく、より高精度な
+            # `median_a_secs`／`median_b_secs`（各 6 桁精度の科学的記数法）
+            # から都度再計算する（イシュー #1499 codex-review 指摘: 丸め済み
+            # 値をそのまま採否判定へ使うと境界値付近で符号判定が反転しうる。
+            # 丸めは表示限定にすべき）。`speedup` フィールドの非 NA 判定は
+            # 「両腕が揃った行か（floor 行を除外するか）」の判定にのみ使う。
             speedup = row.get("speedup")
-            if speedup is not None and speedup != "NA":
-                shapes[key].speedups.append(float(speedup))
             median_a = row.get("median_a_secs")
+            median_b = row.get("median_b_secs")
+            if (
+                speedup is not None
+                and speedup != "NA"
+                and median_a is not None
+                and median_a != "NA"
+                and median_b is not None
+                and median_b != "NA"
+            ):
+                shapes[key].speedups.append(float(median_a) / float(median_b))
             if median_a is not None and median_a != "NA":
                 shapes[key].median_a_secs_list.append(float(median_a))
     if shape_violations:

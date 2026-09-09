@@ -154,6 +154,24 @@ fn format_floor_line(m: usize, n: usize, k: usize, median_secs: f64, spread: f64
     )
 }
 
+/// run-to-run bit 同一検証を `to_bits()` 経由で行う純関数
+/// （`tests/gemm_swizzle_bit_match.rs::assert_bit_exact`・
+/// `tests/gemm_splitk_bit_match.rs` と同じ理由: `&[f32]` の `==` は
+/// IEEE 754 の `+0.0 == -0.0` を区別できず符号ビットの差異を見逃す。
+/// `NaN` は `to_bits()` がビットパターンをそのまま返すため
+/// `NaN != NaN` の数値比較特性に引きずられない。イシュー #1499
+/// codex-review 指摘対応: フェーズ 0 の `classic_stable`／
+/// `target_tile_stable`／`splitk_stable` 判定が素の `Vec<f32>` 比較
+/// だったため本関数へ置き換える）。macOS（`macos_impl`）とテストから
+/// のみ呼ばれる。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn bit_equal(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
 /// フェーズ 1（A/B）の対象 9 形状。
 fn target_shapes() -> Vec<(usize, usize, usize)> {
     let mut out = Vec::with_capacity(TARGET_MN.len() * K_LIST.len());
@@ -277,8 +295,9 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, S
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use super::{
-        CliArgs, KIND_CONTROL, KIND_CONTROL_FORCED, KIND_TARGET, KIND_TARGET_TILE, control_shapes,
-        floor_shapes, format_ab_line, format_floor_line, parse_args_from, target_shapes,
+        CliArgs, KIND_CONTROL, KIND_CONTROL_FORCED, KIND_TARGET, KIND_TARGET_TILE, bit_equal,
+        control_shapes, floor_shapes, format_ab_line, format_floor_line, parse_args_from,
+        target_shapes,
     };
     use bench_harness::BenchError;
     use bench_harness::MeasurementConfig;
@@ -444,7 +463,7 @@ mod macos_impl {
             let a_run1 = p1.c_buf.read_to_vec();
             dispatch_classic(gemm, ctx, &p1, select_cfg);
             let a_run2 = p1.c_buf.read_to_vec();
-            let classic_stable = a_run1 == a_run2;
+            let classic_stable = bit_equal(&a_run1, &a_run2);
 
             // A′（classic・split-K タイル）run-to-run bit 同一。
             let p1t = prepare(ctx, m, n, k, 1);
@@ -453,7 +472,7 @@ mod macos_impl {
             let at_run1 = p1t.c_buf.read_to_vec();
             dispatch_classic(gemm, ctx, &p1t, tile_cfg);
             let at_run2 = p1t.c_buf.read_to_vec();
-            let target_tile_stable = at_run1 == at_run2;
+            let target_tile_stable = bit_equal(&at_run1, &at_run2);
 
             // split-K（B）run-to-run bit 同一。`p1`（classic）と同一
             // `seed_offset`（=1）で生成する: 以下の `a_vs_b_fail_count`
@@ -466,7 +485,7 @@ mod macos_impl {
             let b_run1 = p2.c_buf.read_to_vec();
             dispatch_split_k(gemm, ctx, &p2, plan);
             let b_run2 = p2.c_buf.read_to_vec();
-            let splitk_stable = b_run1 == b_run2;
+            let splitk_stable = bit_equal(&b_run1, &b_run2);
 
             let stable = classic_stable && target_tile_stable && splitk_stable;
             all_ok &= stable;
@@ -503,7 +522,7 @@ mod macos_impl {
             let run1 = p.c_buf.read_to_vec();
             dispatch_classic(gemm, ctx, &p, select_cfg);
             let run2 = p.c_buf.read_to_vec();
-            let stable = run1 == run2;
+            let stable = bit_equal(&run1, &run2);
             all_ok &= stable;
             println!("phase0 kind={KIND_CONTROL} m={m} n={n} k={k} classic_stable={stable}");
         }
@@ -941,6 +960,21 @@ mod tests {
         assert!(line.contains("speedup=2.0000"));
         assert!(line.contains("kind=target"));
         assert!(line.contains("partitions=4"));
+    }
+
+    /// [`bit_equal`] の自己検証（イシュー #1499 codex-review 指摘対応）:
+    /// `&[f32]` の `==` が見逃す `+0.0`／`-0.0` の符号ビット差異・長さ不一致
+    /// を `bit_equal` が正しく検出することを確認する。
+    #[test]
+    fn bit_equal_distinguishes_signed_zero_and_detects_length_mismatch() {
+        assert!(bit_equal(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]));
+        // +0.0 と -0.0 は `==` では等しいが `to_bits()` では異なる。
+        assert!(!bit_equal(&[0.0], &[-0.0]));
+        // NaN は `to_bits()` が同一ビットパターンなら bit_equal で一致扱い
+        // にする（`NaN != NaN` の数値比較特性に引きずられない）。
+        let nan = f32::NAN;
+        assert!(bit_equal(&[nan], &[nan]));
+        assert!(!bit_equal(&[1.0, 2.0], &[1.0]));
     }
 
     #[test]

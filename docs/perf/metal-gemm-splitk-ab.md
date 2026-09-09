@@ -90,8 +90,13 @@ https://github.com/Fandhe-AI/fandhe-ai/issues/1475#issuecomment-5599418673
   `target_tile_stable=true` / `splitk_stable=true` が全 12 形状で成立）。
 - A vs A′（`a_vs_at_fail_count`）は全 9 対象形状で **0**（タイル構成
   〈`select_for_device` の選択構成 vs `split_k_tile`〉を変えても classic
-  経路自体は bit 完全一致することを実測で確認した。演算列がタイル形状に
-  よらず同一の K 直列ループであることの裏付け）。
+  経路の出力が `fandhe_ai_backend_cpu::parity::compare` の許容誤差複合判定
+  （相対誤差 1e-3 未満または絶対誤差 1e-5 未満。`.claude/rules/coding-
+  rust.md`）を全要素で満たすことを実測で確認した。`fail_count=0` は
+  この複合判定を通過したことを意味し、bit 完全一致（ビットパターン一致）
+  を保証するものではない〈イシュー #1499 codex-review 指摘。§3 の
+  `classic_stable`／`target_tile_stable`／`splitk_stable`〈`to_bits()`
+  比較〉が別途 run-to-run の bit 同一を担保している〉）。
 - A vs B（`a_vs_b_fail_count`）は全 9 対象形状で総要素数近くまで不一致
   （K 分割の結合順序差に起因する既知の丸め誤差。`tests/gemm_splitk_parity.rs`
   の既知 FAIL・`docs/perf/metal-gemm-splitk-two-pass.md` §5 と整合。
@@ -258,10 +263,14 @@ ADOPT は性能上の判定に限る。本番結線（`SPLIT_K_NUMERIC_CONTRACT_
 `target`（B/A′ 相当。K 分割効果）を分離することでこの留保を検証する:
 
 - **A′/A（タイル構成効果）**: 対象 9 形状の median は 0.99〜1.05 が大半
-  （`(32,32,4096)` のみ 0.63 と外れるが、他の run2 で 0.99 近くまで戻る
-  ばらつきの大きい単発値と考えられる）。タイル構成を `select_for_device`
-  の選択構成から `split_k_tile`（16×16 または 32×32・staged・wm2/wn2）へ
-  変えるだけでは、classic 経路の速度はほぼ変化しない。
+  だが、`(32,32,4096)` は 3 run 中 2 run（run1=0.6140・run2=0.6278）が
+  0.6 台まで劣化し、run3（0.9895）のみ 1.0 近傍に戻るという再現性のある
+  ばらつきを示した（イシュー #1499 codex-review 指摘: 単発の外れ値では
+  ない。3 run のみでは劣化が恒常的な効果か run 間ノイズかを切り分けられ
+  ず、原因は本 A/B の観測範囲外として未確定のまま扱う）。他 8 形状では
+  タイル構成を `select_for_device` の選択構成から `split_k_tile`
+  （16×16 または 32×32・staged・wm2/wn2）へ変えても classic 経路の速度は
+  ほぼ変化しない。
 - **B/A′（K 分割効果。`target` の speedup を A′ 基準に再計算すると
   概ね target の speedup と同程度）**: A′/A がほぼ 1.0 のため、`target`
   （A/B の比）で観測された 1.5686〜4.4233 倍の改善は、タイル構成差ではなく
