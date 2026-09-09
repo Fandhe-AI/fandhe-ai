@@ -1,0 +1,32 @@
+$ cargo test -p fandhe-ai-backend-metal --release --test gemm_strided_parity -- --ignored --nocapture
+
+running 15 tests
+[production_select] m=512, n=512, k=512 -> cfg=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true }
+test gemm_collapsed_lhs_matches_per_batch_cpu_reference ... ok
+test dispatch_strided_tiled_prepared_rejects_non_eight_divisible_shape_while_classic_succeeds ... ok
+test dispatch_bias_act_prepared_nn_is_bit_identical_to_strided_nn ... ok
+test dispatch_strided_tiled_prepared_nn_is_bit_identical_to_dispatch_tiled_prepared ... ok
+test dispatch_strided_tiled_prepared_handles_padded_leading_dimension_for_non_transposed_side ... ok
+test dispatch_strided_bias_act_prepared_matches_cpu_reference_for_all_transpose_patterns ... ok
+test dispatch_strided_tiled_prepared_matches_cpu_reference_for_all_transpose_patterns ... ok
+[production_select] m=1024, n=1024, k=1024 -> cfg=TileConfig { bm: 64, bn: 32, bk: 8, wm: 4, wn: 1, staged: true }
+[production_select] m=2048, n=2048, k=2048 -> cfg=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+[production_select] m=2048, n=2048, k=64 -> cfg=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+[production_select] m=2048, n=2048, k=512 -> cfg=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+test bk32_64x64_candidate_agrees_with_bk16_counterpart_within_composite_tolerance ... ok
+[production_select] m=1536, n=1024, k=1024 -> cfg=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+test bm128_candidate_agrees_with_bm64_counterpart_within_composite_tolerance ... ok
+[production_select] m=1024, n=1536, k=1536 -> cfg=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+test bm128_candidate_agrees_with_bm64_counterpart_within_composite_tolerance ... ok
+[production_select] m=4096, n=1024, k=1024 -> cfg=TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+[production_select] m=1024, n=4096, k=1024 -> cfg=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+[production_select] m=72, n=88, k=104 -> cfg=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+test production_select_matches_cpu_reference_for_all_shapes_and_transpose_patterns ... ok
+test bk32_64x64_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns ... ok
+test bm128_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns ... ok
+[production_select] m=4096, n=4096, k=4096 -> cfg=TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+test bm128_candidate_matches_cpu_reference_for_n4096_cubic_shape ... ok
+test bk32_64x64_candidate_matches_cpu_reference_for_n4096_cubic_shape ... ok
+test production_select_matches_cpu_reference_for_n4096_cubic_shape ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.46s

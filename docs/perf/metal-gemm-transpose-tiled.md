@@ -1077,6 +1077,101 @@ all_within_gate=false`（512 の spread は 4.4 と極端——`round_tflops` �
   `phase1_max_load1_during_run`／`load1_peak_during_run` の値自体は
   変更していない
 
+
+## 5.10 自動委譲の結線判断（イシュー #1270。判定基準未達のため結線せず）
+
+### 判定基準と結果の突合
+
+親 #1268 が定める結線の判定基準は「全形状 × NT/TN/TT で B/A ≥ 1.0」
+（フェーズ 2〈30 セル A/B〉のセル別比較で判定する）。§5.9（イシュー
+#1267）の実測は 2 attempt とも `verdict=undetermined`（原因分類 (iii)。
+phase 1 の安定性ゲートが 2 attempt 合計 10 サイズ中 9 サイズで超過し、
+フェーズ 2 は未実行）に終わっており、**セル別 B/A 比は取得なし
+（phase 2 未到達）**。したがって判定基準を満たすデータは 1 件も存在
+せず、本イシューはこの事実に基づき結線しない判断を確定する。
+
+### 結論
+
+`dispatch_strided_bias_act_prepared` から `dispatch_strided_tiled_prepared`
+への自動委譲は**結線しない**。コード変更なし（`git diff origin/main --
+stat -- crates/` は空）。NN 経路は結線前と同一実装のままのため、ビット同一
+は自明に維持される（既存テスト
+`dispatch_bias_act_prepared_nn_is_bit_identical_to_strided_nn` 等が
+その契約を担保。§4 参照）。
+
+### 現行コード状態（HEAD で確認した事実）
+
+- `crates/backend-metal/src/gemm.rs:2223` `MetalGemm::
+  dispatch_strided_bias_act_prepared` は `encode_strided_bias_act_prepared`
+  （classic strided `gemm_tiled_bias_act`）へ委譲し `ctx.synchronize()`
+  するのみで、`dispatch_strided_tiled_prepared` への自動委譲は存在
+  しない（#1138 以降不変）。
+- `crates/backend-metal/src/gemm.rs:1950` `dispatch_strided_tiled_prepared`
+  は「常に利用可能な明示入口」として提供され、doc comment に
+  「[`Self::dispatch_strided_bias_act_prepared`] のルーティング判断
+  （bias/act 無しかつ適格な入力を本関数へ委譲するか）は実測に基づき
+  別途行う」と記されている。
+- 適格性ゲート `strided_tiled_eligibility`
+  （`crates/backend-metal/src/gemm.rs:3034`。m/n/k 非 0 かつ 8 整除・
+  ld／offset が `TileConfig::VEC_WIDTH`=4 の倍数）と、その拒否を表す
+  `MetalError::StridedTiledIneligible`
+  （`crates/backend-metal/src/error.rs:156`）は実装済みで、結線時の
+  フォールバック判断材料として利用できる。
+- ルーティング回数の可視化はスレッドローカル `pub(crate) static
+  STRIDED_TILED_ROUTE_COUNT`（`crates/backend-metal/src/gemm.rs:84`。
+  `Cell<u64>`）が担う。**イシュー本文が挙げる `MetalGemmRouteStats`
+  という型はリポジトリに存在しない**（`grep -rn
+  "MetalGemmRouteStats" crates/` は 0 件）ため、以降の記録・PR では
+  実在する `STRIDED_TILED_ROUTE_COUNT` の名で記述する。
+
+### 再開条件
+
+事前宣言プロトコル（`STABILITY_SPREAD_GATE=0.05`・判定統計量は
+`relative_spread` のまま不変）の下で phase 1 → phase 2 が完走し
+`verdict=route_ok`（全形状 × NT/TN/TT で B/A ≥ 1.0）が得られたときに
+限り結線を再検討する。#1266（共有負荷下でも解釈可能なロバスト統計）
+が承認された場合はその承認版プロトコルでの `route_ok` 確定でも可。
+いずれの場合も閾値・統計量の変更はユーザー承認必須（§5.9「再試行
+方針」）であることは変わらない。
+
+### 結線案（参考・本イシューでは未実施）
+
+**本イシューでは実装しない**。将来 `verdict=route_ok` が得られた際の
+実装者向け設計メモとして記録する。
+
+- (a) 委譲条件は `bias.is_none() && !act_relu`（`dispatch_strided_
+  tiled_prepared` の入口はエピローグ〈bias/activation〉を持たない
+  ため）かつ `TransposePattern != Nn`（NN は classic 経路のビット
+  同一契約〈§4 の parity テスト〉を維持するため引き続き対象外とし、
+  NT/TN/TT のみ委譲対象とする）かつ `strided_tiled_eligibility` 通過。
+- (b) タイル構成は `tile::select_for_device`（`dispatch_auto` と同一
+  の選択ロジック）を再利用する。
+- (c) `Err(StridedTiledIneligible)` および構成失敗時は classic
+  strided 経路（`encode_strided_bias_act_prepared`）へ fail-closed
+  フォールバックし、本番経路で `unwrap`／`expect` を使わない
+  （`coding-rust.md`「型付きエラー」方針）。
+- (d) 委譲回数は既存の `STRIDED_TILED_ROUTE_COUNT` で可視化する（新規
+  カウンタは設けない）。
+- (e) 結線時は §4 の parity テスト群（`gemm_strided_parity.rs` の
+  `#[ignore]` 実機テスト。NN ビット同一・NT/TN/TT 複合判定・フォール
+  バック健全性）を実機で再実行し 0 fail を確認する。
+- (f) #1272 相当の framework-compare 非後退計測を、同一プロトコル・
+  5 回計測中央値で実施する。
+
+### 参考: 結線前状態の再確認
+
+実行環境が Apple Silicon（M4 Max・macOS 26.6.2・rustc 1.96.0）だった
+ため、§4 の既存 parity テスト（`gemm_strided_parity.rs` の全 `#[ignore]`
+実機テスト）を HEAD（`760db74`）で再実行した。**15 件全て pass**
+（`cargo test -p fandhe-ai-backend-metal --release --test
+gemm_strided_parity -- --ignored --nocapture`。テスト数は §4 記録時
+〈2026-09-03・6 件〉から #1329〜#1332 等の追加候補評価テストにより
+増加しているが、これらもすべて既存回帰の一部として pass している）。
+結線前状態が HEAD でも NN ビット同一・NT/TN/TT 複合判定・フォール
+バック健全性のいずれも成立していることを裏付ける。生ログ・env_info
+は `docs/perf/logs/metal-gemm-transpose-route-ab-1242/
+1270-parity-rerun.log`・`1270-env_info.txt`。
+
 ## 6. 引き継ぎ事項
 
 
