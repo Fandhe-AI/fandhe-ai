@@ -191,8 +191,10 @@ fn ratio_over_median(numerator: f64, median: f64) -> Result<f64, BenchError> {
 /// - `samples` が空の場合は `BenchError::EmptySamples`
 /// - NaN が混入している場合は `BenchError::NanSample`
 /// - `samples.len() < 2 * trim_per_side + 2`（トリム後に 2 要素未満しか残らず
-///   レンジを定義できない。`reapply.py` の `n - 2k < 2` 判定と同一式）の場合は
-///   `BenchError::ProtocolViolation`
+///   レンジを定義できない。`reapply.py` の `n - 2k < 2` 判定と同一式）の場合、
+///   または `trim_per_side` が大きすぎて `2 * trim_per_side + 2` 自体が
+///   `usize` の範囲で計算できない場合（例: `trim_per_side = usize::MAX`）は
+///   いずれも `BenchError::ProtocolViolation`
 /// - median が 0.0 でトリム後の max/min のいずれかが非 0 の場合、
 ///   または結果が NaN になる場合は `BenchError::NanSample`
 ///   （[`relative_spread`] と同じ fail-closed 方針）
@@ -201,12 +203,32 @@ pub fn trimmed_relative_spread(samples: &[f64], trim_per_side: usize) -> Result<
     let Quartiles { median, .. } = median_q1_q3(samples)?;
 
     let n = samples.len();
-    let required = 2 * trim_per_side + 2;
-    if n < required {
-        return Err(BenchError::ProtocolViolation(format!(
-            "トリム済みレンジには samples.len() >= 2*trim_per_side+2 が必須。\
-             n={n}, trim_per_side={trim_per_side}, 必要下限={required}"
-        )));
+    // codex-review 指摘（PR #1491）: `2 * trim_per_side + 2` を無検査の
+    // usize 演算で計算すると、巨大な `trim_per_side`（例: `usize::MAX`）で
+    // オーバーフローする。overflow-checks 有効時はこの式自体で panic、
+    // 無効時も `required` が 0 へラップして下の `n < required` 検査を
+    // すり抜け、後続の `sorted[trim_per_side..n - trim_per_side]` スライス
+    // 操作で panic する（AGENTS.md「本番経路の panic 禁止」）。
+    // `checked_mul`/`checked_add` で計算不能を検出し、`n` を明らかに超える
+    // トリム幅と同様に `ProtocolViolation` として fail-closed に拒否する。
+    match trim_per_side
+        .checked_mul(2)
+        .and_then(|doubled| doubled.checked_add(2))
+    {
+        Some(required) if n >= required => {}
+        Some(required) => {
+            return Err(BenchError::ProtocolViolation(format!(
+                "トリム済みレンジには samples.len() >= 2*trim_per_side+2 が必須。\
+                 n={n}, trim_per_side={trim_per_side}, 必要下限={required}"
+            )));
+        }
+        None => {
+            return Err(BenchError::ProtocolViolation(format!(
+                "トリム済みレンジには samples.len() >= 2*trim_per_side+2 が必須だが、\
+                 trim_per_side={trim_per_side} は 2*trim_per_side+2 の計算自体が \
+                 usize の範囲を超えるため不正な入力として拒否する。n={n}"
+            )));
+        }
     }
 
     let mut sorted: Vec<f64> = samples.to_vec();
@@ -403,6 +425,22 @@ mod tests {
         // n=4, k=2 -> 必要下限 2*2+2=6 を満たさない。
         assert!(matches!(
             trimmed_relative_spread(&samples4, 2),
+            Err(BenchError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn trimmed_relative_spread_rejects_overflowing_trim_per_side() {
+        // codex-review 指摘（PR #1491）の回帰テスト: `2 * trim_per_side + 2` が
+        // usize の範囲を超える巨大な trim_per_side（usize::MAX・usize::MAX / 2 付近）は
+        // panic せず ProtocolViolation として fail-closed に拒否されること。
+        let samples = vec![1.0, 2.0, 3.0, 4.0];
+        assert!(matches!(
+            trimmed_relative_spread(&samples, usize::MAX),
+            Err(BenchError::ProtocolViolation(_))
+        ));
+        assert!(matches!(
+            trimmed_relative_spread(&samples, usize::MAX / 2),
             Err(BenchError::ProtocolViolation(_))
         ));
     }
