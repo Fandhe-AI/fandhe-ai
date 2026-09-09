@@ -7,14 +7,21 @@
 //!
 //! - `before`: `mem.download(&buf)`（毎回新規 `Vec<f32>` 確保。#1336 導入
 //!   前の既定実装相当）→ 全要素読み出し
-//! - `after_pageable`: 本番 `CudaMemory::new`（`HOST_STAGING_KIND` 既定
-//!   ＝ `Pageable`）の `with_host_view` でクロージャ内に同じ全要素読み出し
+//! - `after_pageable`: `CudaMemory::new_with_host_staging_kind(Pageable)`
+//!   （切替前既定・#1336〜#1438。イシュー #1478 で本番既定は `Pinned` へ
+//!   切替済みのため、対照腕として明示種別で構築する）の `with_host_view`
+//!   でクロージャ内に同じ全要素読み出し
 //! - `after_pinned`: `CudaMemory::new_with_host_staging_kind(Pinned)`
-//!   （イシュー #1336 実機実測フェーズで追加。`with_host_view` 経由・
+//!   （**イシュー #1478 の本番既定と同じ種別**。`with_host_view` 経由・
 //!   本番と同じキャッシュ hit 条件で `Pageable` と公平に比較できる。
 //!   `memory.rs::CudaMemory::new_with_host_staging_kind` ドキュメンテー
 //!   ションコメント参照）
 //!
+//! 別途 `mem_default = CudaMemory::new(&device)` を計測に使わず構築し、
+//! `host_staging_kind()`（`internal-diagnostics` feature 限定の診断
+//! アクセサ）を `default_kind,<kind>` として出力する（本番既定
+//! コンストラクタが `after_pinned` と同じ種別へ実際に解決されている
+//! ことの自己証明。イシュー #1478 AC-2）。
 //! 各系列は `bench_harness::MeasurementConfig::new(20, 20)`（TASK-8.1
 //! 下限）＋ cold 1 回目を個別記録する（`large_buffer_percall_alloc_
 //! transfer_triage.rs::measure_with_cold` と同型）。3 系列とも読み出し
@@ -158,8 +165,21 @@ fn print_row(phase: &str, n: u64, cold_ms: f64, s: &Summary) {
 fn host_view_staging_readout_ab() {
     let device =
         CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
-    let mem_pageable = CudaMemory::new(&device);
+    // イシュー #1478（本番既定を `Pinned` へ切替）以降、`CudaMemory::new`
+    // （本番既定コンストラクタ）は `Pinned` へ解決される。`after_pageable`
+    // 系列は切替前既定（#1336〜#1438）を対照腕として計測する目的のため、
+    // `new_with_host_staging_kind(Pageable)` で明示的に構築する（暗黙の
+    // `CudaMemory::new` に依存すると本番既定の切替に追従してしまい、
+    // 系列名と実体が乖離する）。
+    let mem_pageable = CudaMemory::new_with_host_staging_kind(&device, HostStagingKind::Pageable);
     let mem_pinned = CudaMemory::new_with_host_staging_kind(&device, HostStagingKind::Pinned);
+    // `mem_default` は計測に使わず、`CudaMemory::new`（本番既定コンスト
+    // ラクタ）が実際にどの種別へ解決されているかを自己証明する専用
+    // インスタンス（イシュー #1478 AC-2）。ログの `default_kind,<kind>`
+    // 行が `Pinned` であることを確認すれば、`after_pinned` 系列が本番
+    // 既定と同じ種別を計測していることの根拠になる。
+    let mem_default = CudaMemory::new(&device);
+    println!("default_kind,{:?}", mem_default.host_staging_kind());
     let config = MeasurementConfig::new(20, 20).expect("20/20 は TASK-8.1 下限を満たす");
 
     println!("phase,n,bytes_mib,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms");
@@ -192,7 +212,8 @@ fn host_view_staging_readout_ab() {
         let before_folded = cold_folded;
         print_row("before", n, cold_ms, &summarize(&m));
 
-        // `after_pageable`: 本番既定経路（`HOST_STAGING_KIND` = Pageable）。
+        // `after_pageable`: 明示 `Pageable`（切替前既定・#1336〜#1438。
+        // イシュー #1478 で本番既定は `Pinned` へ切替済み。対照腕）。
         let (cold_ms, cold_folded, m) = measure_with_cold(&config, || {
             let mut folded = 0u32;
             mem_pageable
