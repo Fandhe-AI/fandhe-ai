@@ -497,6 +497,16 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > 「#1185 公開してください」（2026-09-06）に基づき、`fandhe-ai =0.6.0` から
 > `=0.7.0` へ更新した（`scripts/bench/framework-compare/`）。
 
+> **追補（2026-09-10）**: `.github/workflows/release-all.yml`
+> （[run 34417008617](https://github.com/Fandhe-AI/fandhe-ai/actions/runs/34417008617)）
+> により公開 6 クレートの **v0.8.0 の公開を完了した**（`verify` → environment
+> `crates-io-release` 承認 → `publish` の順に success・6 クレート crates.io
+> 反映確認済み。#1486・2026-09-10 ユーザー承認）。リリースタグ `v0.8.0` は
+> コミット `81411488` として付与済み。framework-compare の承認ピン
+> （`.claude/rules/deps-policy.md` 第 9 区分）は、v0.8.0 公開完了を受けた
+> イシュー #1487 でユーザー承認を得て `fandhe-ai =0.7.0` から `=0.8.0` へ
+> 更新した（`scripts/bench/framework-compare/`）。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -669,6 +679,13 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 ## 変更履歴
 
+- 2026-09-10（#1487）: `.github/workflows/release-all.yml`（run 34417008617）
+  で v0.8.0 の crates.io 公開が完了した（#1486 コメントに記録）ことを受け、
+  framework-compare の承認ピン（`.claude/rules/deps-policy.md` 第 9 区分）を
+  `fandhe-ai =0.7.0` → `=0.8.0` へ更新し（ユーザー承認: #1486 完了報告
+  〈v0.8.0 公開のユーザー承認 2026-09-10〉・イシュー #1487 の承認節）、
+  旧 `bench_fandhe_pin_guard.sh`（借用ビュー readout API のピン未収録
+  ガード。#1438 で導入）を撤去した。§10 に追補を記録した。
 - 2026-09-10（#1486・親 Phase #1473・ルート #1468）: 公開 6 クレートの
   `workspace.version` を 0.7.0 → 0.8.0 へ lockstep バンプした（#1269 完了後の
   引き継ぎ改善〈PR #1451 CPU GEMM 2D 動的分配の本番結線・PR #1450/#1452 借用

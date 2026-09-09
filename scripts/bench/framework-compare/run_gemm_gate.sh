@@ -73,23 +73,15 @@ LABEL=${2:-}
 # 検証する（run_ab_train_cuda.sh と同じ方針）。
 if [[ "$DEVICE" != "cuda" && "$DEVICE" != "metal" && "$DEVICE" != "cpu" ]]; then
   echo "usage: $0 <device: cuda|metal|cpu> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
-  echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列。#1438 でピン未更新の間は正式系列でも必須）" >&2
+  echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列用。任意指定）" >&2
   echo "  通常は device 別 wrapper（run_gemm_gate_cuda.sh／run_gemm_gate_metal.sh／run_gemm_gate_cpu.sh）経由で呼ぶ" >&2
   exit 1
 fi
 if [[ -z "$LABEL" || ! "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "usage: $0 <device: cuda|metal|cpu> <label>  (label must match [A-Za-z0-9._-]+, e.g. 0.6.0 or head-abc1234)" >&2
-  echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列。#1438 でピン未更新の間は正式系列でも必須）" >&2
+  echo "  optional: GEMM_GATE_PATCH_FACADE_PATH=<crates/facade 絶対パス> でビルド時に patch.crates-io.fandhe-ai.path を適用（参考系列用。任意指定）" >&2
   exit 1
 fi
-
-# イシュー #1438: bench-fandhe は借用ビュー readout（旧計測専用 cargo
-# feature・#1337 導入）を既定経路化したため、crates.io ピン
-# fandhe-ai =0.7.0 の registry 解決ビルドは構造的に不可能になった。
-# ビルド起動前にここで明示エラーとして早期停止する
-# （bench_fandhe_pin_guard.sh 参照）。
-source "${SCRIPT_DIR}/bench_fandhe_pin_guard.sh"
-bench_fandhe_require_facade_patch "run_gemm_gate.sh" "${GEMM_GATE_PATCH_FACADE_PATH:-}"
 
 # イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59K）:
 # 旧 legacy 経路（feature OFF）と #1438 で常時有効化した借用ビュー readout

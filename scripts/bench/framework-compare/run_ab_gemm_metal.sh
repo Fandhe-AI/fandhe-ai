@@ -1,16 +1,17 @@
 #!/bin/bash
 # イシュー #1306: Metal GEMM の framework-compare 実践規模計測を
-# before（正式系列 `fandhe-ai =0.7.0`。registry 解決の承認済みピン）/
-# after（参考系列 HEAD。`crates/facade` への path patch）の 2 バイナリで
-# 交互起動し、N=512/1024/2048/4096 × fresh/reuse を 5 回ずつ計測する。
+# before（正式系列。`fandhe-ai` 承認ピン〈現行 `=0.8.0`。#1487〉の
+# registry 解決）/ after（参考系列 HEAD。`crates/facade` への path
+# patch）の 2 バイナリで交互起動し、N=512/1024/2048/4096 × fresh/reuse
+# を 5 回ずつ計測する。
 #
 # 「結線前後」の呼称について（`docs/perf/metal-gemm-n4096-kernel-gap.md`
 # §19.1 に詳細）: 依存 #1304（E2〜E4 の候補組み込み判断）は
 # `tile::CANDIDATES`／`tile::select`／`select_for_device` を一切変更して
 # いない（本番既定は不変）ため、本スクリプトは字義通りの「結線前後」の
-# コード差分を計測するものではなく、v0.7.0 → HEAD の Metal 側変更群
+# コード差分を計測するものではなく、承認ピン → HEAD の Metal 側変更群
 # （E2〜E8 の function constant・候補追加等）が本番既定経路の性能を
-# 後退させていないかを確認する 0.7.0 ↔ HEAD 非後退確認である。
+# 後退させていないかを確認する承認ピン ↔ HEAD 非後退確認である。
 #
 # 呼び出し例（M4 Max 実機。ユーザー承認・別セッション。低負荷時間帯に
 # `uptime` を確認してから実行する）:
@@ -42,6 +43,18 @@ LABEL=${1:-}
 if [[ -z "$LABEL" || ! "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "usage: $0 <label>  (label must match [A-Za-z0-9._-]+, e.g. head-abc1234)" >&2
   echo "  env AB_PATCH_FACADE_PATH=<absolute path to HEAD's crates/facade> is required" >&2
+  exit 1
+fi
+
+# イシュー #1487: before 腕の出力ファイル名・メッセージに埋め込む承認
+# ピン値は `bench-fandhe/Cargo.toml` から読み取る（ハードコードすると
+# 次回ピン更新のたびに本スクリプトへ churn が生じるため。#1487 でこの
+# 方式へ変更）。取得できない・形式不正なら fail-closed で早期終了する
+# （A03 インジェクション対策: ファイル名へ埋め込むため `[A-Za-z0-9.]+`
+# のみ許可する）。
+BEFORE_PIN="$(grep -o 'fandhe-ai = "=[^"]*"' "${SCRIPT_DIR}/bench-fandhe/Cargo.toml" | head -1 | sed -E 's/.*"=(.*)"/\1/')"
+if [[ -z "$BEFORE_PIN" || ! "$BEFORE_PIN" =~ ^[A-Za-z0-9.]+$ ]]; then
+  echo "error: bench-fandhe/Cargo.toml から承認ピン値を取得できなかった（取得値: '${BEFORE_PIN:-<空>}'）" >&2
   exit 1
 fi
 
@@ -90,9 +103,10 @@ MODES=(fresh reuse)
 # before 側の保存先も LABEL でスコープする（codex-review P2 指摘。
 # LABEL 非依存だと別 label で次の A/B を実行した際に過去の before が
 # 上書きされ、当該 label の交互計測ペア〈before/after〉を再現できなく
-# なる。before バイナリ自体は常に registry pin fandhe-ai =0.7.0 だが、
-# 「どの label 実行で計測した before データか」を追跡できることが目的）。
-OUT_BEFORE="results/raw/results-m4max-gemm-ab-before-0.7.0-${LABEL}.jsonl"
+# なる。before バイナリ自体は常に registry pin `fandhe-ai =${BEFORE_PIN}`
+# だが、「どの label 実行で計測した before データか」を追跡できることが
+# 目的）。
+OUT_BEFORE="results/raw/results-m4max-gemm-ab-before-${BEFORE_PIN}-${LABEL}.jsonl"
 OUT_AFTER="results/raw/results-m4max-gemm-ab-after-${LABEL}.jsonl"
 SKIP="results/raw/skipped-m4max-gemm-ab-${LABEL}.log"
 MANIFEST="results/raw/manifest-m4max-gemm-ab-${LABEL}.json"
@@ -212,29 +226,18 @@ build_bench_fandhe() { # build_bench_fandhe <out_exe_pathvar> [追加の cargo b
   printf -v "$__out_var" '%s' "$exe"
 }
 
-# イシュー #1438: before 腕は常に registry 解決を意図する（本スクリプトの
-# 目的そのもの）。bench-fandhe が借用ビュー readout を既定経路化した
-# ため、crates.io ピンのままの registry ビルドは構造的に不能になった
-# （bench_fandhe_pin_guard.sh 参照）。ビルド起動前に明示エラーで早期停止
-# する（after 腕は AB_PATCH_FACADE_PATH を必ず伴うため対象外）。
-#
-# PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）: before 腕は
-# facade への path patch では解消できない（bench-fandhe ソース＝現行
-# HEAD 自体が借用ビュー readout API を無条件に要求するため、facade だけ
-# 差し替えても後続の `fandhe_ai_source_desc` の "registry" 検証が必ず
-# 失敗する）。汎用の GEMM_GATE_PATCH_FACADE_PATH 案内はここでは誤りに
-# なるため、専用 note で正しい対処を案内する（`bench_fandhe_pin_guard.sh`
-# の note 引数）。
-source ./bench_fandhe_pin_guard.sh
-bench_fandhe_require_facade_patch "run_ab_gemm_metal.sh (before arm)" "" \
-  "before 腕は registry 解決（crates.io ピン fandhe-ai =0.7.0）を意図しており、GEMM_GATE_PATCH_FACADE_PATH 等の facade path patch では解消できない（bench-fandhe ソース自体〈現行 HEAD〉が借用ビュー readout API を無条件に要求するため）。対処: (1) crates.io ピンが借用ビュー readout API を収録するまで待つ、または (2) #1438 の feature 撤去より前のコミットを別 git worktree にチェックアウトし、その worktree の scripts/bench/framework-compare/ から本スクリプトを実行する（その場合 after 腕の AB_PATCH_FACADE_PATH には現行 HEAD の crates/facade を指定できる）。"
-
-echo "== build bench-fandhe (before: registry pin fandhe-ai =0.7.0) =="
+# イシュー #1487: before 腕は常に registry 解決を意図する（本スクリプトの
+# 目的そのもの）。承認ピン `fandhe-ai =${BEFORE_PIN}` は借用ビュー
+# readout API を収録済み（#1487 でピン更新）のため、registry 解決の
+# まま通常ビルドする（旧 `bench_fandhe_pin_guard.sh` の早期停止ガードは
+# #1487 で撤去済み。after 腕は AB_PATCH_FACADE_PATH を必ず伴うため元々
+# 対象外）。
+echo "== build bench-fandhe (before: registry pin fandhe-ai =${BEFORE_PIN}) =="
 build_bench_fandhe BEFORE_EXE
 BEFORE_SOURCE="$(fandhe_ai_source_desc || true)"
 if [[ "$BEFORE_SOURCE" != "registry" ]]; then
   echo "error: before ビルドの fandhe-ai が registry 解決ではない (actual=${BEFORE_SOURCE:-<取得失敗>})" >&2
-  echo "  承認済みピン fandhe-ai =0.7.0（registry）以外での before 確定はできない（fail-closed）。" >&2
+  echo "  承認済みピン fandhe-ai =${BEFORE_PIN}（registry）以外での before 確定はできない（fail-closed）。" >&2
   exit 1
 fi
 # `cp` の終了状態を確認する（codex-review P2 指摘）: 失敗を無視すると
@@ -452,7 +455,7 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
   echo "done. before results in $OUT_BEFORE ; after results in $OUT_AFTER ; failures (if any) in $SKIP ; manifest in $MANIFEST"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
-  mv_checked "$OUT_BEFORE_TMP" "results/raw/results-m4max-gemm-ab-before-0.7.0-${LABEL}.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_BEFORE_TMP" "results/raw/results-m4max-gemm-ab-before-${BEFORE_PIN}-${LABEL}.failed-${FAIL_TS}.jsonl"
   mv_checked "$OUT_AFTER_TMP" "results/raw/results-m4max-gemm-ab-after-${LABEL}.failed-${FAIL_TS}.jsonl"
   mv_checked "$SKIP_TMP" "results/raw/skipped-m4max-gemm-ab-${LABEL}.failed-${FAIL_TS}.log"
   mv_checked "$MANIFEST_TMP" "results/raw/manifest-m4max-gemm-ab-${LABEL}.failed-${FAIL_TS}.json"

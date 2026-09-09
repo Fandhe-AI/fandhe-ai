@@ -9,8 +9,8 @@
 
 ## 1. 目的と位置づけ
 
-- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.7.0`。2026-09-06 に crates.io 公開済み
-  〈`docs/crates-io-publishing-order.md` §10 追補〉。イシュー #1185 に対するユーザー指示で `=0.6.0` から更新）を、既存 ML フレームワーク
+- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.8.0`。2026-09-09 に crates.io 公開済み
+  〈`docs/crates-io-publishing-order.md` §10 追補〉。イシュー #1487 で `=0.7.0` から更新）を、既存 ML フレームワーク
   `candle-core =0.11.0`・`burn =0.21.0` と**同一プロトコル**（同一シード・同一入力・
   同一の同期境界・warmup 20 → 計測 20・中央値 + Q1/Q3）で横並び計測する
 - 本 workspace はベンチ専用ツール（全クレート `publish = false`・非配布）であり、
@@ -30,7 +30,7 @@
   `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート Cargo.lock・
   `cargo tree` に対する `scripts/check-forbidden-deps.sh` が fail-closed に検出する
 - 直接依存は `=x.y.z` 完全固定（`burn =0.21.0`・`candle-core =0.11.0`・
-  `fandhe-ai =0.7.0`）で、`Cargo.lock` をコミットして再現性を確保する
+  `fandhe-ai =0.8.0`）で、`Cargo.lock` をコミットして再現性を確保する
 - 同 workspace の `Cargo.lock` は比較対象という性質上、依存禁止リストのクレート
   （`burn-*`・`candle-*`・`cubecl`・`ndarray`・`tch` 等の推移的混入を含む）を
   **意図的に含む**。このため禁止リスト grep（`check_lock`）は適用せず、代わりに
@@ -38,7 +38,7 @@
   （`check_framework_compare`）を毎回実行する:
   1. `Cargo.lock` の存在（不在はエラー）
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
-  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.7.0）の存在
+  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.8.0）の存在
      （承認外バージョンへのドリフト・比較対象の削除を検出。加えて各エントリが
      `source = "registry+https://github.com/rust-lang/crates.io-index"` を
      伴うことを要求する＝path/git 依存への差し替えで `source`/`checksum` 行が
@@ -111,6 +111,18 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   `CudaGemmAuto` f16 経路の mma 優先本番有効化・#1167 Metal 転置タイル variant・
   #1174 CPU GEMM 再チューニング結線・#1211〜#1219 学習・推論固定費改善）を
   crates.io 公開版としてフレームワーク横並びベンチの比較対象に反映するため
+- 2026-09-10: ユーザーが #1486 完了報告（v0.8.0 の crates.io 公開のユーザー
+  承認 2026-09-10）およびイシュー #1487 の承認節に基づき、`fandhe-ai` 承認
+  ピンを crates.io 公開済みの `=0.8.0`（`release-all.yml` run 34417008617・
+  tag `v0.8.0` = `81411488`）へ更新することを承認。同時に、借用ビュー
+  readout API（`Var::host_view`／`Tensor::host_slice`。#1335・#1336・#1337）
+  が旧ピン `=0.7.0` に未収録だったため #1438 で導入していた早期停止ガード
+  （`bench_fandhe_pin_guard.sh`）を撤去した。ピン更新理由は v0.8.0 に含まれる
+  #1269 完了後の引き継ぎ改善（CPU GEMM 2D 動的分配の本番結線・借用ビュー
+  readout の既定経路化・CUDA ホストステージング `Pinned` 既定化・Metal
+  split-K 本番結線・resident `GradStaging` 読み出し API・CPU 出力並列ゼロ
+  埋めの本番既定確定）を crates.io 公開版としてフレームワーク横並びベンチの
+  比較対象に反映するため
 
 ## 5. tch-rs を計測対象に含めない判断
 
