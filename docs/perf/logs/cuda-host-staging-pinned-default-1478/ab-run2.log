@@ -1,0 +1,23 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/host_view_staging_readout_ab_1336.rs (/home/fandhe/work/target-fandhe-ai-1478/release/deps/host_view_staging_readout_ab_1336-4df91e7f7b51bec9)
+
+running 1 test
+test host_view_staging_readout_ab ... default_kind,Pinned
+phase,n,bytes_mib,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms
+before,1024,4.0000,2.4402,0.4324,0.4335,0.4339,0.4346,0.4379
+after_pageable,1024,4.0000,43.1892,0.2674,0.2692,0.2705,0.2708,0.2738
+after_pinned,1024,4.0000,0.9313,0.2119,0.2139,0.2152,0.2159,0.2185
+note: N=1024（4.0 MiB）は glibc mmap 閾値（32 MiB）未満のため、after 系列の改善が観測されなくても病態不成立とは判断しない（doc §5 ゲート B 参照）
+before,2048,16.0000,9.4147,1.3586,1.3634,1.3653,1.3667,1.3688
+after_pageable,2048,16.0000,1.3496,0.9436,0.9464,0.9486,0.9494,0.9506
+after_pinned,2048,16.0000,2.8940,0.7485,0.7525,0.7539,0.7545,0.7587
+note: N=2048（16.0 MiB）は glibc mmap 閾値（32 MiB）未満のため、after 系列の改善が観測されなくても病態不成立とは判断しない（doc §5 ゲート B 参照）
+before,4096,64.0000,37.2796,30.0760,30.1238,30.1436,30.1956,31.1308
+after_pageable,4096,64.0000,28.4998,3.3846,3.3901,3.3940,3.3955,3.4020
+after_pinned,4096,64.0000,11.2107,3.1652,3.1699,3.1718,3.1757,3.1870
+release_host_staging,pageable,88080384
+release_host_staging,pinned,88080384
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.24s
+

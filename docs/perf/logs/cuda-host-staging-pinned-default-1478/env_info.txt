@@ -1,0 +1,48 @@
+実機: DGX Spark GB10（sm_121）。イシュー #1478（`HOST_STAGING_KIND` の既定を
+`Pinned` へ切替）の GB10 実機実測記録。
+
+## 転送リビジョン
+
+.rev-stamp: 0fda7bcbd1c59f8eb960872de6c8255e398eec53
+（`perf/1478-host-staging-pinned-default` ブランチの test コミット。
+`perf(backend-cuda): HOST_STAGING_KIND の既定を Pinned へ切り替え〜` +
+`test(backend-cuda): host_view A/B ハーネスを明示種別化し〜` の 2 コミット
+反映済み。転送は `git archive` 経由（`<cuda-node>` のホームディレクトリの
+イシュー専用作業ディレクトリへ tar 展開。作業ツリー rsync を使わなかった
+理由: 本リポジトリの隔離 worktree 上で並走する別イシュー〈#1479〉の
+未コミット WIP が同一ディレクトリに存在したため、コミット済みツリーのみを
+運ぶ `git archive` で汚染を避けた）。
+
+## 計測前後の env_info
+
+```
+$ nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader
+0 %
+
+$ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+pid, process_name, used_gpu_memory [MiB]
+427276, /opt/llm-infra/comfyui-env/bin/python, 170 MiB
+1241474, /opt/llm-infra/venvs/kokoro/bin/python3, 870 MiB
+
+$ uptime
+ 15:45:50 up 13 days,  3:12,  6 users,  load average: 0.06, 0.12, 0.07
+
+$ rustc -V
+rustc 1.97.0 (2d8144b78 2026-07-07)
+
+$ nvcc --version
+Cuda compilation tools, release 13.0, V13.0.88
+```
+
+常駐サービス（ComfyUI・Kokoro）以外に GPU を使うプロセスはなし。
+utilization.gpu は計測前後とも 0%。ゲート A・ゲート B（5 回独立プロセス
+起動）の全実行を通じて他 GPU プロセスの介入なしを確認済み（各実行直前に
+`nvidia-smi` で毎回確認）。
+
+## ビルド
+
+```
+$ cargo test -p fandhe-ai-backend-cuda --release --all-features \
+    --test host_view_real_device --test host_view_staging_readout_ab_1336 --no-run
+```
+`CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai-1478`（同期ツリー外）。

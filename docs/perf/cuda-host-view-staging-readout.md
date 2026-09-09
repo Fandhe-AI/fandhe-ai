@@ -22,9 +22,9 @@ GB10 実機（DGX Spark GB10・sm_121）で D2H＋読み出し時間の before/a
 （64 MiB）で約 7.9 倍改善に加え、閾値未満の N=1024/2048 も約 1.4〜1.6
 倍の明確な改善を示した（是正前の参考値は N=1024/2048 が「差なし」寄り
 だったが、is-optimized-away の懸念解消後は全 N で改善が確認できた）。
-既定の `HOST_STAGING_KIND` は確定値でも unsafe 経路（`Pinned`）を通さ
-ない安全側（`Pageable`）のまま維持する（§6。`Pinned` への切替は
-ユーザー承認事項として引き継ぐ）。
+**イシュー #1478（2026-09-09 ユーザー承認）で `HOST_STAGING_KIND` の
+既定を `Pinned` へ切り替え済み**（§8。unsafe 経路の既定化についての
+security-auditor レビューを実施済み）。
 
 ## 1. 背景（実測根拠）
 
@@ -57,8 +57,8 @@ P4 相当（`CudaStream::clone_dtoh` が毎回新規 `Vec<f32>` を確保）で�
 
 | 種別 | 実装 | unsafe | 特性 |
 |------|------|--------|------|
-| `Pageable`（既定） | 事前タッチ済み `Vec<f32>` | なし | 確保コストは通常の `Vec` 確保と同じ。ホスト読み出しは通常速度 |
-| `Pinned` | cudarc `CudaContext::alloc_pinned`（`CU_MEMHOSTALLOC_WRITECOMBINED` 固定・page-locked） | **1 箇所**（`HostStaging::alloc` 内の `ctx.alloc_pinned::<f32>(numel)` 呼び出し） | GPU 側の DMA 転送は高速だが、WRITECOMBINED メモリは CPU 側の読み出しが著しく遅いことが知られている（cudarc-0.19.8 `core.rs:1406-1427` のドキュメンテーションコメント）。D2H 単体では有利でも「D2H＋ホスト読み出し」の合計で `Pageable` に劣る可能性があり、決め打ちしない |
+| `Pageable`（切替前既定・#1336〜#1438） | 事前タッチ済み `Vec<f32>` | なし | 確保コストは通常の `Vec` 確保と同じ。ホスト読み出しは通常速度。`new_with_host_staging_kind` 経由で A/B 対照腕として明示選択できる |
+| `Pinned`（**既定**。イシュー #1478） | cudarc `CudaContext::alloc_pinned`（`CU_MEMHOSTALLOC_WRITECOMBINED` 固定・page-locked） | **1 箇所**（`HostStaging::alloc` 内の `ctx.alloc_pinned::<f32>(numel)` 呼び出し） | GPU 側の DMA 転送は高速だが、WRITECOMBINED メモリは CPU 側の読み出しが著しく遅いことが知られている（cudarc-0.19.8 `core.rs:1406-1427` のドキュメンテーションコメント）。§5.2 の確定実測では「D2H＋ホスト読み出し」の合計でも全 N で `Pageable` を上回った（§8 で本番既定化） |
 
 `docs/backend-cuda-managed-placement-decision.md` が既存の設計判断で
 「pinned host memory は対象外」としていた領域に本イシューで対応した
@@ -127,10 +127,14 @@ let pinned = unsafe { ctx.alloc_pinned::<f32>(numel)? };
   `memory.rs::alloc_zeroed_inner` の managed 確保分岐（`alloc_unified` +
   `memset_zeros`）・`pool.rs::CudaAllocator::alloc_uninit` と同一クラスの
   安全性根拠である。
-- **既定では通らない**: `HOST_STAGING_KIND = HostStagingKind::Pageable`
-  （既定）のため、本番経路は通常この unsafe ブロックへ到達しない。
-  `#[ignore]` 実機テスト（`tests/host_view_real_device.rs`）でのみ
-  `Pinned` 種の確保が実行される。
+- **既定で通る**（イシュー #1478。旧: `HOST_STAGING_KIND = HostStagingKind::
+  Pageable` で当時は通らなかった）: 現在は `HOST_STAGING_KIND =
+  HostStagingKind::Pinned` のため、本番経路（`CudaMemory::new`）は
+  キャッシュ miss 時にこの unsafe ブロックへ到達する。確保失敗
+  （`cuMemHostAlloc`）は `CudaError` として fail-closed に呼び出し元へ
+  伝播し、`Pageable` へのサイレントフォールバックはしない（§8）。
+  `Pageable` は `new_with_host_staging_kind` 経由で明示選択した場合の
+  対照腕としてのみ使う。
 
 ## 4. テスト
 
@@ -272,22 +276,18 @@ Cursor Bugbot が同一箇所を独立に指摘。一致度が高い）。
 
 ## 6. 採否
 
-- **本番既定は `HostStagingKind::Pageable`（unsafe 経路を通さない安全側）
-  のまま維持する**（イシュー #1438 の是正後再計測が完了した後も変更
-  しない）。§5.2 の確定値では `Pinned` が全 N で `Pageable` をさらに
-  上回る傾向が確認できたが（ゲート C。§5.3 の計測保護是正後の値として
-  確定）、unsafe 経路の既定化は「性能で押し切らず必要最小限に留める」
-  方針（`.claude/rules/security.md`）に基づきユーザー承認事項として
-  残す。**`Pinned` への切替の判断材料は §5.3 の再計測完了により揃った**
-  （is-optimized-away の懸念は解消済み）——ユーザーが承認すれば
-  `HOST_STAGING_KIND` の切替は本節を更新のうえ別イシューで実施できる
-  （本 PR〈#1438〉のスコープではデータの確定までに留め、切替の実施は
-  行わない）。
+- **本番既定は `HostStagingKind::Pinned` へ切り替えた**（イシュー
+  #1478・2026-09-09 ユーザー承認。切替前は `Pageable`〈unsafe 経路を
+  通さない安全側〉を維持していたが、§5.2 の確定値〈イシュー #1438 の
+  is-optimized-away 懸念是正後〉で `Pinned` が全 N で `Pageable` を
+  一貫して上回ることを確認したうえで、unsafe 経路の既定化についての
+  ユーザー承認と security-auditor レビューを経て切替を実施した。
+  詳細・GB10 実機再計測は §8）。
 - 実装（`HostStagingCache`・`with_host_view` の 3 分岐・GPU 非依存
   テスト・`#[ignore]` 実機テスト）は完了し（ゲート A は bit 同一等の
   受け入れ条件検査のため §5.3 の計測保護是正の影響を受けず確定
-  済み）、既定 `Pageable` 種の下で #1146 が示した「事前タッチ済み
-  再利用 `Vec`」の段差回避効果は §5.2 の確定値で**全 N で**確認できた
+  済み）、`Pageable` 種の下で #1146 が示した「事前タッチ済み再利用
+  `Vec`」の段差回避効果は §5.2 の確定値で**全 N で**確認できた
   （N=4096・64 MiB で `before` 比約 7.9 倍改善に加え、32 MiB 未満の
   N=1024/2048 も想定に反し約 1.4〜1.6 倍の明確な改善を示した。§5.3）。
 
@@ -322,16 +322,113 @@ Cursor Bugbot が同一箇所を独立に指摘。一致度が高い）。
    small-shape-regression.md` §13）。
 3. **キャッシュ可能 pinned（フラグ 0）**: `driver::result::malloc_host` +
    自作 `HostSlice` 実装は unsafe 面が広がるため本イシューでは実装しない
-   （2.2 節）。5 節の**是正前の参考値**では `Pinned`（WRITECOMBINED）が
-   全 N で `Pageable` を上回る傾向だったが、§5.3 の計測保護是正後の
-   再計測が未実施のため確定していない。再計測に加え、より広い読み出し
-   パターン（ストライドアクセス・複数スレッド同時読み出し等）での追加
-   実測を経てユーザー承認を得れば検討候補になる。
-4. **`HOST_STAGING_KIND` の `Pinned` への切替可否**: 5 節（ゲート C）の
-   **是正前の参考値**では `Pinned` が全 N で `Pageable` を一貫して
-   上回る傾向だった（N=1024 約 20%・N=2048 約 15%・N=4096 約 6% 高速）。
-   ただし §5.3 の計測保護是正（`black_box` 適用）後の再計測が未実施の
-   ため、この傾向自体が最適化除去の産物でないかは未確認。再計測で傾向
-   が維持されることを確認し、かつ unsafe 経路の既定化についてユーザー
-   承認が得られれば（6 節）、`HOST_STAGING_KIND` の切替は別イシューで
-   実施できる。
+   （2.2 節）。`Pinned`（WRITECOMBINED）の確定実測（§5.2）は本番既定化
+   （イシュー #1478）の根拠となったが、より広い読み出しパターン
+   （ストライドアクセス・複数スレッド同時読み出し等）での追加実測は
+   未実施のまま引き継ぐ（本番既定化そのものはこれらの追加実測を前提
+   条件とせずユーザー承認済み）。
+4. **`HOST_STAGING_KIND` の `Pinned` への切替**: §5.2〜§5.3 の確定実測
+   （is-optimized-away 懸念是正後）に基づき、イシュー #1478・
+   2026-09-09 ユーザー承認により切替を実施済み（§8）。GB10 実機での
+   ゲート A／B 再計測・security-auditor レビューを完了している。
+
+## 8. `Pinned` 既定化の実測（イシュー #1478）
+
+### 8.1 事前宣言ゲート（計測前に本節へ記載・計測後に変更していない）
+
+- ゲート A（必須）: `host_view_real_device` の `#[ignore]` 全件 pass。
+  本イシューで新規追加した `default_cuda_memory_uses_pinned_staging_
+  and_matches_pageable_bit_exact`（`CudaMemory::new` が実際に `Pinned`
+  へ解決され、かつ `Pageable` 対照腕・`download()` と bit 完全一致する
+  ことを検証）を含む。
+- ゲート B（本番切替の非後退）: 全 N（1024/2048/4096）で
+  `after_pinned/after_pageable`（5 プロセス起動中央値の比）が
+  **≤ 1.05**、かつ `default_kind,Pinned` 行が 5 run すべてに存在する
+  こと（`CudaMemory::new` が実際に `Pinned` へ解決されていることの
+  自己証明。イシュー #1336 の `after_pageable` 系列は暗黙の
+  `CudaMemory::new` に依存していたため、本番既定切替後は
+  `new_with_host_staging_kind(Pageable)` で明示構築するよう是正した
+  うえで計測している）。
+- ゲート C（framework-compare gemm cuda reuse 非後退ガード）: F2（下記）
+  の構造的非到達により想定結果は「差なし」。
+
+### 8.2 F1〜F4（実装時に判明した事実）
+
+- **F1**: `host_view_staging_readout_ab_1336.rs` の対照腕（旧称
+  `after_pageable`）は暗黙の `CudaMemory::new`（本番既定コンストラクタ）
+  で構築していたため、既定を `Pinned` へ切り替えると系列名と実体が
+  乖離する。`new_with_host_staging_kind(Pageable)` による明示構築へ
+  是正し、加えて `mem_default = CudaMemory::new(&device)` を計測に
+  使わず構築して `host_staging_kind()`（`internal-diagnostics` feature
+  限定の診断アクセサ。本イシューで新設）を `default_kind,<kind>` として
+  出力することで、本番既定コンストラクタが実際にどの種別へ解決されて
+  いるかを自己証明する。
+- **F2**: `autodiff`／`facade`／`bench-fandhe` のいずれからも
+  `MemoryOps::with_host_view` の呼び出しは 0 件（`grep` 確認済み）。
+  `Var::matmul` の出力は `gemm` 内部の `readback`（イシュー #1437 で
+  `ReadbackDest::PretouchedFresh` へ切替済み。`host_staging` とは別
+  経路）で既にホスト常駐化されるため、framework-compare の `gemm cuda
+  reuse` 計測は本イシューの変更に到達しない。ゲート C は「本変更が
+  本番経路を壊していないこと」の非後退ガードであり、効果測定ではない
+  （§7 項目 1 と同じ構造）。
+- **F3**: 現時点で `with_host_view` の本番呼び出し元は存在せず、
+  `Pinned` 既定化の受益は将来の消費者（`DeviceBuffer<f32>` を保持する
+  経路。§7 項目 1・2）に対する先行整備という位置づけである
+  （prospective）。
+- **F4**: `Pinned` 既定化後は `cuMemHostAlloc`（`alloc_pinned`）が失敗
+  した場合、`CudaError` として呼び出し元へ fail-closed に伝播し、
+  `Pageable` へのサイレントフォールバックは行わない（意図的な契約。
+  `host_staging.rs` モジュール冒頭コメント参照）。
+
+### 8.3 GB10 実機実測（2026-09-09）
+
+実行ログ・env_info・集計スクリプトは
+`docs/perf/logs/cuda-host-staging-pinned-default-1478/`（README.md に
+再現手順あり。内部ホスト名は含めない）。転送は `git archive` 経由
+（本リポジトリの隔離 worktree 上で並走する別イシュー〈#1479〉の
+未コミット WIP による汚染を避けるため。作業ツリー rsync は使わなかった）。
+
+**ゲート A**: `host_view_real_device` の `#[ignore]` 8/8 件 pass（新規
+追加分含む。`ignored-host_view_real_device.log`）。
+
+**ゲート B**（5 プロセス起動中央値。詳細は `aggregate.md`）:
+
+| N | before_med_ms | pageable_med_ms | pinned_med_ms | pinned/pageable | 判定 |
+|---|---|---|---|---|---|
+| 1024 | 0.4014 | 0.2606 | 0.2069 | 0.7939 | PASS |
+| 2048 | 1.2494 | 0.9170 | 0.7838 | 0.8547 | PASS |
+| 4096 | 30.1436 | 3.1983 | 3.0325 | 0.9482 | PASS |
+
+全 N で判定基準（≤1.05）を満たし、いずれも改善方向（約 6〜21%）。
+`default_kind` は全 5 run とも `Pinned`。§5.2・§5.3（イシュー #1438
+確定値）の傾向を本番既定切替後の系列構成（F1 是正後）でも再現した。
+
+**ゲート C（縮小スコープ）**: 時間制約により正式な `run_gemm_gate_cuda.sh`
+（5 回計測中央値・candle 併走）は実施せず、`bench-fandhe --task gemm
+--device cuda --size <N> --mode reuse` を before（コミット `e8cd3a2`）／
+after（本イシューの test コミットまで反映した HEAD）で各 1 回実行して
+比較した（詳細・数値は `docs/perf/logs/cuda-host-staging-pinned-default-
+1478/gate-c-sanity.md`）。全 N で `checksum` が完全一致し
+（F2 の構造的非到達を実測でも裏付け）、`parity_fail_count` 0（両方）・
+timing は誤差範囲内で非後退（比 0.96〜0.99）。5 回計測中央値による
+正式なゲート再計測は本イシューのスコープ外として引き継ぐ（§9）。
+
+### 8.4 採否
+
+**ADOPT**（既に §6 で `HOST_STAGING_KIND = HostStagingKind::Pinned` へ
+切替済み）。ゲート A・B とも事前宣言基準を満たし、ゲート C は想定どおり
+「差なし」（非後退）を確認した。security-auditor レビュー（unsafe 経路
+の既定化。PR 本文「セキュリティレビュー」節参照）を実施済み。
+
+## 9. 引き継ぎ（イシュー #1478 スコープ外事項）
+
+- ゲート C の正式な 5 回計測中央値による `run_gemm_gate_cuda.sh` 実行
+  （candle 併走・fail-closed manifest 検証込み）は時間制約により本
+  イシューでは未実施（§8.3）。F2 の構造的非到達により影響は想定され
+  ないが、必要であれば別イシューで実施できる。
+- キャッシュ可能 pinned（フラグ 0）・より広い読み出しパターンでの追加
+  実測は §7 項目 3 のとおり引き続き対象外。
+- `with_host_view` の本番呼び出し元の新設（F3。`gemm` 内 `readback` の
+  ステージング化・resident `GradStaging` の重み勾配ホスト読み出し API
+  等）は §7 項目 1・2 のとおり対象外（兄弟イシュー #1479 が
+  `GradStaging` 読み出し API を別途扱う）。
