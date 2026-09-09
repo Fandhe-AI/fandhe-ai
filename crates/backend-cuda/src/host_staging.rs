@@ -27,18 +27,18 @@
 //! 合計では `Pinned` が `Pageable` に劣る可能性がある（決め打ちしない）。
 //!
 //! **GB10 実機実測（2026-09-08。`docs/perf/cuda-host-view-staging-readout.md`
-//! §5）では `Pinned` が全計測形状（N=1024/2048/4096）で `Pageable` を
-//! 一貫して上回る傾向が見られたが、この計測は計測対象クロージャの戻り値
-//! を `black_box` で保護する是正（同 doc §5.3。codex-review P1・
-//! Cursor Bugbot 指摘）より前のバイナリで取得した参考値であり、is-
-//! optimized-away の可能性を排除できていないため確定した結論ではない
-//! （再計測は未実施のまま引き継ぎ）。既定 [`HOST_STAGING_KIND`] は
-//! いずれにせよ unsafe 経路を通さない安全側（`Pageable`）に固定した
-//! まま維持している**（同 doc「採否」節。unsafe 経路の既定化は
-//! ユーザー承認事項のため、性能が上回るだけでは切り替えない方針。
-//! かつ切替の判断材料は再計測完了まで揃っていない）。`Pinned` 経路
-//! 自体は実装・GPU 非依存単体テスト・`#[ignore]` 実機テストとも整備
-//! 済みで、再計測とユーザー承認を経て切り替える想定。
+//! §5）は当初、計測対象クロージャの戻り値を `black_box` で保護しない
+//! バイナリで取得した参考値だったが、is-optimized-away 懸念を是正した
+//! うえでの再計測（同 doc §5.3・イシュー #1438）により `Pinned` が全
+//! 計測形状（N=1024/2048/4096）で `Pageable` をさらに上回る（約 6〜21%
+//! 高速）ことが確定した。この確定値とユーザー承認（2026-09-09・
+//! イシュー #1478）に基づき、既定 `HOST_STAGING_KIND` は `Pinned`
+//! へ切り替えている**（同 doc §8。`Pageable` は `new_with_host_
+//! staging_kind` 経由で A/B 比較用に明示選択できる対照腕として残す）。
+//! `cuMemHostAlloc`（`alloc_pinned`）が失敗した場合は `CudaError` として
+//! 呼び出し元へ fail-closed に伝播し、`Pageable` へのサイレント
+//! フォールバックは行わない（意図的な契約。`docs/perf/cuda-host-view-
+//! staging-readout.md` §8 参照）。
 //!
 //! ## 同期契約
 //!
@@ -65,9 +65,16 @@ use cudarc::driver::{CudaContext, HostSlice, PinnedHostSlice};
 
 use crate::error::CudaError;
 
-/// 本番経路が使うステージング種別（実測前は unsafe 経路を通さない
-/// `Pageable` を既定とする。モジュール冒頭コメント「種別」節）。
-pub(crate) const HOST_STAGING_KIND: HostStagingKind = HostStagingKind::Pageable;
+/// 本番経路が使うステージング種別。GB10 実機実測（`docs/perf/cuda-host-
+/// view-staging-readout.md` §5.2・§5.3。イシュー #1438 で is-optimized-
+/// away 懸念を是正した確定値）で `Pinned` が全計測形状で `Pageable` を
+/// 上回ることを確認したうえ、unsafe 経路の既定化についてユーザー承認
+/// （2026-09-09・イシュー #1478）を得て `Pinned` へ切り替えた（同 doc
+/// §8）。確保失敗（`cuMemHostAlloc`）は `CudaError` として fail-closed に
+/// 伝播し、`Pageable` への暗黙フォールバックはしない。`default_host_
+/// staging_kind_is_pinned`（本ファイル下部）が将来の意図しない差し戻し
+/// を検知する drift ガード。
+pub(crate) const HOST_STAGING_KIND: HostStagingKind = HostStagingKind::Pinned;
 
 /// [`HostStagingCache`] が保持するホストバッファ合計の確保上限
 /// （バイト）。超過分は使用後に破棄する（`.claude/rules/security.md`
@@ -77,32 +84,34 @@ pub(crate) const HOST_STAGING_KIND: HostStagingKind = HostStagingKind::Pageable;
 pub(crate) const HOST_STAGING_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
 /// ホストステージングバッファの実装種別。`Pageable`・`Pinned` いずれも
-/// `pub`（`pub(crate)` から変更。codex-review 指摘: 本番既定
-/// （[`HOST_STAGING_KIND`]）は `Pageable` に固定されているため、`Pinned`
+/// `pub`（`pub(crate)` から変更。codex-review 指摘の経緯: 当時の本番既定
+/// （`HOST_STAGING_KIND`）は `Pageable` に固定されており、`Pinned`
 /// 経路を実機で検証する・両者を A/B 比較する手段が診断入口から
 /// 提供されていなかった）で、`internal-diagnostics` feature（既定
 /// off）限定の `memory::CudaMemory::with_host_view_using_kind`
 /// （`lib.rs` の `pub use host_staging::HostStagingKind` re-export と
-/// 対）から crate 外部（実機 `#[ignore]` テスト）が明示的に選べる。
+/// 対）から crate 外部（実機 `#[ignore]` テスト・A/B ハーネス）が
+/// 明示的に選べる。現在は本番既定が `Pinned`（#1478）であるため、この
+/// 診断入口は主に `Pageable`（対照腕）を明示選択する用途で使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostStagingKind {
     /// cudarc `alloc_pinned`（page-locked・WRITECOMBINED）。unsafe 1 箇所。
+    /// **本番既定**（`HOST_STAGING_KIND`。イシュー #1478・2026-09-09
+    /// ユーザー承認）。
     ///
     /// GB10 実機実測（`docs/perf/cuda-host-view-staging-readout.md`
-    /// §5・2026-09-08）では本 variant が全計測形状（N=1024/2048/4096）で
-    /// `Pageable` を一貫して上回る傾向が見られたが、この計測は `black_box`
-    /// による計測保護是正（同 doc §5.3）より前のバイナリで取得した参考値
-    /// であり、再計測が未実施のため確定していない。本番既定
-    /// [`HOST_STAGING_KIND`] は unsafe 経路の既定化がユーザー承認事項
-    /// であることに加え、再計測が済むまで切替の判断材料が揃わないため、
-    /// 本 variant を選ばない（常に `Pageable`）。
-    /// `memory::CudaMemory::with_host_view_using_kind`（`internal-
-    /// diagnostics` feature 限定）を介して明示的に選べば `HostStaging::
-    /// alloc` の `match` アームへ到達し、`tests/host_view_real_device.rs`
-    /// の実機 `#[ignore]` テストが実際に `Pinned` 経路を通す（再計測と
-    /// ユーザー承認のうえ本番既定へ切り替える際は本コメントを更新する）。
+    /// §5.2・§5.3・2026-09-08。イシュー #1438 で is-optimized-away 懸念を
+    /// 是正した確定値）では本 variant が全計測形状（N=1024/2048/4096）で
+    /// `Pageable` を一貫して上回ることを確認済み（約 6〜21% 高速）。
+    /// `memory::CudaMemory::new_with_host_staging_kind`（`internal-
+    /// diagnostics` feature 限定）を介して `Pageable` を明示選択すれば
+    /// 切替前の既定（#1336〜#1438）と同じ経路を A/B 比較用の対照腕として
+    /// 使える。
     Pinned,
-    /// 事前タッチ済み pageable `Vec<f32>`（unsafe なし）。
+    /// 事前タッチ済み pageable `Vec<f32>`（unsafe なし）。切替前の既定
+    /// （#1336〜#1438）。`internal-diagnostics` feature 限定の
+    /// `new_with_host_staging_kind` 経由で A/B 比較用の対照腕として
+    /// 明示選択できる。
     Pageable,
 }
 
@@ -355,13 +364,25 @@ mod tests {
 
     #[test]
     fn host_staging_kind_variants_are_distinct() {
-        // `HostStagingKind::Pinned` は実機（`CudaContext`）を要求する
-        // 経路でのみ構築されるため（`HostStaging::alloc`・`tests/
-        // host_view_real_device.rs`）、GPU 非依存の通常ビルドでは
-        // このテストが唯一の構築箇所になる（dead_code 検査対策では
-        // なく、`Eq`／`Clone` 実装そのものの契約検証を兼ねる）。
+        // `HostStagingKind::Pinned` という enum 値自体は `HOST_STAGING_
+        // KIND`（本番既定・#1478）としても構築されるため GPU 非依存の
+        // 通常ビルドでも複数箇所で構築されるが、`HostStaging::alloc`
+        // が実際に `CudaContext::alloc_pinned` を呼ぶ経路は実機
+        // （`tests/host_view_real_device.rs`）でしか検証できない。
+        // 本テストは `Eq`／`Clone` 実装そのものの契約検証を兼ねる。
         assert_ne!(HostStagingKind::Pinned, HostStagingKind::Pageable);
         assert_eq!(HostStagingKind::Pinned, HostStagingKind::Pinned.clone());
+    }
+
+    /// drift ガード: `HOST_STAGING_KIND` の本番既定が意図せず
+    /// `Pageable` へ差し戻されていないかを機械的に検知する（イシュー
+    /// #1478・2026-09-09 ユーザー承認。`docs/perf/cuda-host-view-
+    /// staging-readout.md` §8 実測記録）。既定を変更する場合は本
+    /// テストの期待値・上記 doc・モジュール冒頭コメントを合わせて
+    /// 更新すること。
+    #[test]
+    fn default_host_staging_kind_is_pinned() {
+        assert_eq!(HOST_STAGING_KIND, HostStagingKind::Pinned);
     }
 
     #[test]

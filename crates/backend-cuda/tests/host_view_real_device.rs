@@ -283,15 +283,15 @@ fn with_host_view_matches_download_on_managed_placement() {
     );
 }
 
-/// codex-review 指摘（イシュー #1336）: 本番既定 [`HostStagingKind::
-/// Pageable`] のみが `with_host_view` の通常経路を通り、`Pinned`
-/// （page-locked・WRITECOMBINED）経路は実機テスト・A/B 比較のいずれから
-/// も到達できていなかった。本テストは `CudaMemory::
-/// with_host_view_using_kind`（`internal-diagnostics` feature 限定の
-/// 診断専用入口）を介して `Pinned` を明示的に選び、`download()` および
-/// `Pageable` 経由の結果と bit 完全一致することを確認する（`Pinned`
-/// 経路が実際に driver へ到達し、かつ両種別が同じ D2H 内容を返すことの
-/// 直接検証。tolerance は使わない）。
+/// codex-review 指摘（イシュー #1336）の経緯: 当時の本番既定
+/// [`HostStagingKind::Pageable`] のみが `with_host_view` の通常経路を
+/// 通り、`Pinned`（page-locked・WRITECOMBINED）経路は実機テスト・A/B
+/// 比較のいずれからも到達できていなかった（現在は `Pinned` が本番既定
+/// ・イシュー #1478）。本テストは `CudaMemory::with_host_view_using_kind`
+/// （`internal-diagnostics` feature 限定の診断専用入口）を介して両種別を
+/// 明示的に選び、`download()` および互いの結果と bit 完全一致することを
+/// 確認する（`Pinned` 経路が実際に driver へ到達し、かつ両種別が同じ
+/// D2H 内容を返すことの直接検証。tolerance は使わない）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn with_host_view_using_kind_pinned_matches_pageable_and_download_bit_exact() {
@@ -419,5 +419,97 @@ fn with_host_view_cached_pinned_matches_download_bit_exact() {
     assert!(
         stats_after.hits > stats_before.hits,
         "キャッシュ経由 Pinned も 2 回目以降は hit を観測するはず: before={stats_before:?} after={stats_after:?}"
+    );
+}
+
+/// イシュー #1478（本番既定を `Pinned` へ切替）の受け入れ条件（AC-1
+/// ゲート A）: `CudaMemory::new`（本番既定コンストラクタ）が実際に
+/// `host_staging_kind() == Pinned` へ解決されていることを自己証明した
+/// うえで、同じバッファを `new_with_host_staging_kind(Pageable)`
+/// （切替前既定・対照腕）経由の `with_host_view`・`download()` と
+/// bit 完全一致することを確認する（tolerance は使わない）。加えて
+/// `HostStagingCache` の再利用契約（`with_host_view_cached_pinned_
+/// matches_download_bit_exact` と同型）が本番既定経路でも成立する
+/// ことを 2 回目以降の `hits` 増加で確認する。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn default_cuda_memory_uses_pinned_staging_and_matches_pageable_bit_exact() {
+    // `Device` 配置（`host_staging` 経由）前提のため `false` 固定で直列化
+    // する（他テストと同じ理由）。
+    let _guard = PlacementFlagGuard::acquire(false);
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let mem_default = CudaMemory::new(&device);
+    let mem_pageable = CudaMemory::new_with_host_staging_kind(&device, HostStagingKind::Pageable);
+
+    assert_eq!(
+        mem_default.host_staging_kind(),
+        HostStagingKind::Pinned,
+        "CudaMemory::new は本番既定（イシュー #1478）どおり Pinned へ解決されるはず"
+    );
+
+    let data: Vec<f32> = (0..2048)
+        .map(|i| match i % 6 {
+            0 => f32::NAN,
+            1 => f32::INFINITY,
+            2 => f32::NEG_INFINITY,
+            3 => f32::MIN_POSITIVE,
+            _ => (i as f32) * 0.125 - 75.0,
+        })
+        .collect();
+    let tensor = Tensor::<f32>::new(data, &[2048]).unwrap();
+    let buf_default = mem_default
+        .upload(&tensor)
+        .expect("upload must succeed on real hardware (default CudaMemory)");
+    let buf_pageable = mem_pageable
+        .upload(&tensor)
+        .expect("upload must succeed on real hardware (pageable-kind CudaMemory)");
+
+    let downloaded = mem_default
+        .download(&buf_default)
+        .expect("download must succeed");
+    let download_bits: Vec<u32> = downloaded
+        .as_slice()
+        .expect("download returns a contiguous tensor")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+
+    let stats_before = mem_default.host_staging_stats();
+
+    let mut default_bits: Option<Vec<u32>> = None;
+    mem_default
+        .with_host_view(&buf_default, &mut |slice| {
+            default_bits = Some(slice.iter().map(|v| v.to_bits()).collect());
+        })
+        .expect("with_host_view must succeed on real hardware (default CudaMemory)");
+    let default_bits = default_bits.expect("closure must be invoked exactly once");
+
+    let mut pageable_bits: Option<Vec<u32>> = None;
+    mem_pageable
+        .with_host_view(&buf_pageable, &mut |slice| {
+            pageable_bits = Some(slice.iter().map(|v| v.to_bits()).collect());
+        })
+        .expect("with_host_view must succeed on real hardware (pageable-kind CudaMemory)");
+    let pageable_bits = pageable_bits.expect("closure must be invoked exactly once");
+
+    assert_eq!(
+        default_bits, download_bits,
+        "本番既定（Pinned）は download().as_slice() と bit 完全一致するはず"
+    );
+    assert_eq!(
+        default_bits, pageable_bits,
+        "本番既定（Pinned）は Pageable 対照腕と bit 完全一致するはず（種別による内容差異は許容しない）"
+    );
+
+    for _ in 0..2 {
+        mem_default
+            .with_host_view(&buf_default, &mut |_slice| {})
+            .expect("with_host_view must succeed");
+    }
+    let stats_after = mem_default.host_staging_stats();
+    assert!(
+        stats_after.hits > stats_before.hits,
+        "本番既定（Pinned）も 2 回目以降は hit を観測するはず: before={stats_before:?} after={stats_after:?}"
     );
 }
