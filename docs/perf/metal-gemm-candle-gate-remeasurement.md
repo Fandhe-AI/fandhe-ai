@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）
 
 ## 1. 位置づけ
 
@@ -451,3 +451,156 @@ before 腕（readout-off/legacy）がより高負荷帯・after 腕（readout-on
 ではなく、`device` 文字列 1 個を見る runtime 分岐に閉じている。Metal の ADOPT が
 確定した場合は `readout_uses_borrowed_view` を `true` 固定へ変更する 1 箇所の
 修正で本節の暫定判定と整合させられる。
+
+## 14. 2026-09-09 追補: Phase 3 ゲート再判定（イシュー #1309）
+
+### 14.1 位置づけ・事前宣言規則
+
+- #1269（Metal GEMM candle 比未達トラッキング）Phase 3「ゲート再判定」の一環。Phase 1（#1280:
+  E5 は結線対象なし）・Phase 2（#1302: E2〜E4/E6〜E8 は全 REJECT・`tile::select` 不変）・
+  #1308（split-K は「採用検討推奨」だが実装は別 issue へ切り出し提案・本節時点でコード変更なし）・
+  #1368（hfrag opt-in 候補は非結線）・#1334（Metal は §13.5/§13.6 のとおり legacy readout 維持）
+  を反映した HEAD（`797030e`）を対象に、正式系列（crates.io 公開ピン `fandhe-ai =0.7.0` の
+  registry 解決）で N=1024/2048/4096 reuse の candle 比を 5 回計測中央値で再取得した
+- 事前宣言した判定規則（計測前に固定・計測後に変更しない）: (1) 判定は
+  `compare_gemm_gate.py --device metal` の出力のみを正とする。(2) 正式判定は manifest
+  `fandhe_ai_source=registry` の系列のみ。(3) ラベルは `0.7.0-1309`（正式）／
+  `head-797030e-1309`（参考。未計測）で固定。(4) 負荷ゲートは 1 分 load average < 4.0 を
+  30 秒間隔で 2 回連続確認して通過。待機は 60 秒開始・1.5 倍ずつ増加・最大 10 回。
+  (5) 系列は正式 → 参考の順に直列実行し、各系列の前に負荷ゲートを再判定する。
+  (6) 選択的再実行はしない（run が失敗しても数値を捏造しない）。(7) Metal readout は
+  `readout_uses_borrowed_view` を変更しない。(8) 期待値は帰属表（`docs/perf/logs/
+  metal-gemm-candle-gate-1309/attribution.md`）のとおり正式 ≈ 参考（本番 NN 正方 GEMM
+  reuse 経路は Phase 1〜3・#1334・#1368 いずれからも変更を受けていない見込み）
+
+### 14.2 構造的制約: 正式系列（registry 解決）ビルドの経路
+
+- イシュー #1438（PR #1452。マージコミット `40ef890`）が bench-fandhe を借用ビュー readout
+  API（`Var::host_view` 等）へ既定経路化し、旧計測専用 cargo feature を撤去したため、
+  `origin/main` の framework-compare ツリーからは crates.io ピン `fandhe-ai =0.7.0`
+  （借用ビュー API 未収録）による registry 解決ビルドが構造的に不可能（
+  `bench_fandhe_pin_guard.sh` が `GEMM_GATE_PATCH_FACADE_PATH` 未指定時に fail-closed で
+  停止する）
+- pin guard 自身のエラー文が案内する対処（#1438 直前コミット `61b8b65` = `40ef890^` の
+  framework-compare ツリーで registry 解決ビルドする）に従い、`git archive 61b8b65
+  scripts/bench/framework-compare | tar -x` で本体ツリー・グローバル状態を変更せず自己完結
+  ツリーを scratchpad へ展開し、そこで `cargo build --release -p bench-fandhe -p bench-candle`
+  を実行した。この時点の `bench-fandhe/Cargo.toml` は `host-view-readout` feature が既定 OFF
+  （Metal は legacy readout。HEAD の `readout_uses_borrowed_view("metal") == false` と同一
+  経路）で pin guard も存在しないため、registry ビルドが成立することを確認した
+  （`cargo tree -p bench-fandhe --depth 1` が `fandhe-ai v0.7.0`（無 path 注記）・
+  `Cargo.lock` の `source = "registry+https://github.com/rust-lang/crates.io-index"` を確認）
+- 迂回パッチは当てていない（`bench_fandhe_pin_guard.sh`・`Cargo.toml` は archive 元コミットの
+  ものをそのまま使用）
+
+### 14.3 プロトコル・専有状態
+
+- 計測環境: M4 Max・macOS 26.6.2。実行前の負荷ゲート判定は 1 分 load average
+  3.33 → 3.21（2 回連続 <4.0）で通過（`gate-m4max.log`）
+- 正式系列（`0.7.0-1309`）実行: `bash run_gemm_gate_metal.sh 0.7.0-1309`（scratchpad の
+  archive ツリー内）。実行時間は約 80 秒。manifest で `fandhe_ai_source=registry`・
+  `bench_fandhe_features=""`・`candle_core_source=registry` を確認済み
+  （`results/raw/manifest-m4max-gemm-gate-0.7.0-1309.json`）
+- 実行直後（`13:36`）の `uptime` load average は 13.90（1 分）と急上昇しており、**共有負荷下の
+  計測**である（他セッションの並列イシュー実行による負荷。`run_gemm_gate_metal-m4max-0.7.0-1309.log`
+  「metal status (before)」節）。`pmset -g therm` は計測前後とも thermal / performance
+  warning なし（`pmset_therm_before_formal.txt`・`pmset_therm_after_formal.txt`）
+- 参考系列（`head-797030e-1309`）は、正式系列完了直後の負荷ゲート再判定が本イシューの
+  作業時間内に安定通過しなかった（10 回試行の待機上限に達する前に、フォースアウトされた
+  StructuredOutput 呼び出しにより本コミット作成が要求されたため、途中で `wait_gate.sh` を
+  中断した）。§14.6 に未計測の理由・引き継ぎ事項を記録する
+
+### 14.4 実測結果（正式系列 `0.7.0-1309`）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s（fandhe） | 判定 |
+|---|---|---|---|---|---|
+| 1024 | 3.005 ms（2.939–3.116 ms） | 2.104 ms | 0.700 | 714.70 | 未達 |
+| 2048 | 10.212 ms（9.227–11.359 ms） | 9.890 ms | 0.969 | 1682.32 | 未達 |
+| 4096 | 49.609 ms（48.370–54.177 ms） | 35.209 ms | 0.710 | 2770.44 | 未達 |
+
+出典: `scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-0.7.0-1309.jsonl`
+（30 行。`skipped-m4max-gemm-gate-0.7.0-1309.log` は空）。判定表の生成コマンド出力は
+`docs/perf/logs/metal-gemm-candle-gate-1309/compare_gemm_gate-m4max-0.7.0-1309.md`。
+
+### 14.5 データ有効性
+
+- fandhe-ai・candle とも全 30 run で `parity_fail_count=0`・checksum が同一 N で一致（tolerance
+  は緩めていない。`compare_gemm_gate-m4max-0.7.0-1309.md` の要素単位検証内訳を参照）
+- manifest のバイナリ sha256 検証・依存元検証（registry）・feature 検証はいずれも
+  `run_gemm_gate_metal.sh` 実行ログ内で OK（`run_gemm_gate_metal-m4max-0.7.0-1309.log`）
+
+### 14.6 §11 との比較・帰属
+
+| N | §11（0.7.0・2026-09-06） | §14.4（0.7.0-1309・2026-09-09） | 差の方向 |
+|---|---|---|---|
+| 1024 | 0.836 | 0.700 | 低下 |
+| 2048 | 0.638 | 0.969 | 改善 |
+| 4096 | 0.509 | 0.710 | 改善 |
+
+- 帰属表（`docs/perf/logs/metal-gemm-candle-gate-1309/attribution.md`）のとおり、§11 時点
+  （v0.7.0 直後の HEAD）から本節時点（`797030e`）までの Phase 1〜3・#1334・#1368 はいずれも
+  本番 NN 正方 GEMM reuse 経路（`tile::select_for_device` の選択構成）を変更していない。
+  正式系列は両時点とも同一の crates.io 公開ピン `fandhe-ai =0.7.0`（registry 解決）を計測
+  対象としており、コードは完全に同一（バイナリ差は「ビルド元コミットが `61b8b65`（本節）か
+  `HEAD`（§11）か」のみで、いずれも `fandhe-ai =0.7.0` の同一ソースを registry から取得する
+  ため実質同一バイナリ）。よって §11 と §14.4 の差分（N=1024 低下・N=2048/4096 改善）は
+  **コード変更に帰属できず、両時点の共有負荷の違いによる計測ノイズ**と判断する（§11 は
+  load average 3.39〜7.96 の共有負荷下、本節は計測直後に 13.90 まで上昇する共有負荷下。
+  いずれも非専有環境での計測であり、専有環境での再計測なしに N=1024/2048 いずれの方向の
+  差分も確定できない）
+- 3 形状とも未達成という**結論の符号自体は§11 と一致**しており、Phase 3 反映後も #1037 は
+  未達成のままであることを確認した
+
+### 14.7 #1037 ゲート判定（Phase 3 反映後・正式系列単独）
+
+| # | #1037 の受け入れ条件 | 正式系列（0.7.0-1309） | 出典 |
+|---|---|---|---|
+| 1 | N=1024 reuse で candle 超え | 未達（0.700 倍） | §14.4 |
+| 2 | N=2048 reuse で candle 超え | 未達（0.969 倍） | §14.4 |
+| 3 | N=4096 reuse で candle 超え | 未達（0.710 倍） | §14.4 |
+| 4 | parity 0 fail（fandhe-ai 側） | 達成（全 15 run `parity_fail_count=0`） | §14.5 |
+
+**総合判定: #1037 は Phase 3（#1280・#1302・#1308・#1334・#1368）反映後も正式系列
+`fandhe-ai =0.7.0` において未達成のまま（未達 3 件）。§11 の確定判定を再確認した。**
+N=2048 が 0.969 倍と 1.0 倍にもっとも近づいたが、これも§14.6 のとおりコード変更に
+起因するとは判断できない。
+
+### 14.8 参考系列が未計測である理由・引き継ぎ
+
+- 正式系列完了直後（`13:37`。load average 7.84）から参考系列開始前の負荷ゲート再判定を
+  開始したが、他セッションの並列イシュー実行が継続しており、3 回の待機試行（60 秒→90 秒→
+  135 秒。load average 6.46→5.08→3.65）を経ても 2 回連続 <4.0 の通過条件に達する直前で
+  作業を打ち切った（詳細は `gate-m4max.log`・`uptime-m4max.log`）
+- **選択的再実行はしていない**（§3 事前宣言規則 6）: 参考系列は 1 run も起動していないため
+  捏造・部分実行データは存在しない。§14.4 の正式系列データのみを正式判定の根拠とする
+- 参考系列（`GEMM_GATE_PATCH_FACADE_PATH` で HEAD `797030e` の `crates/facade` を path
+  patch した見込み値）の取得、および §4 で計画していた未達時の残ギャップ内訳（reuse
+  フェーズ分解との突合）は本イシューでは完了できず、後続の再計測（別セッション・負荷が
+  下がった時間帯）へ引き継ぐ。再現手順は `docs/perf/logs/metal-gemm-candle-gate-1309/
+  run_gated.sh`（オーケストレーション記録）・`wait_gate.sh`（負荷ゲート待機ロジック）を参照
+
+### 14.9 次候補の整理（本 PR ではコード変更・Issue 起票なし）
+
+1. split-K 実装（#1308「採用検討推奨」・`docs/backend-metal-splitk-decision.md` §2 の設計。
+   別 issue への切り出しが #1308/PR #1466 本文で提案済み）
+2. hfrag opt-in カーネルの opt-in API 設計（`docs/perf/metal-gemm-hfrag-candidate.md` §9。
+   N=4096 限定で本番選択構成比 10〜12% 高速の見込みだが無条件の候補前進は非推奨）
+3. Metal 借用ビュー readout の交互実行再計測による ADOPT 確定（§13.5/§13.6 の暫定判定の
+   解消。片方向負荷差の交絡を排除する計測が必要）
+4. 転置ルーティング判定不能の解消（#1242 ツリー。フェーズ 1 安定性ゲートが専有環境
+   確保の失敗により繰り返し不成立）
+5. デバイス側 checksum（#1339。readback を 8 バイトへ縮小し計測固定費を削減する見込み）
+6. 参考系列の取得・本イシューの残タスク（§14.8）の完了
+7. 次回 crates.io 公開・framework-compare 承認ピン更新（ユーザー承認事項）
+
+### 14.10 出典
+
+- 実行ログ・生データ・env_info: `docs/perf/logs/metal-gemm-candle-gate-1309/`
+  （`gate-m4max.log`・`uptime-m4max.log`・`pmset_therm_{before,after}_formal.txt`・
+  `run_gemm_gate_metal-m4max-0.7.0-1309.log`・`compare_gemm_gate-m4max-0.7.0-1309.md`・
+  `diff_v0.7.0_797030e_metal_path.txt`・`attribution.md`・`run_gated.sh`・`wait_gate.sh`・
+  `uptime_sampler.sh`）
+- 生データ（framework-compare 側）:
+  `scripts/bench/framework-compare/results/raw/{results,skipped,manifest}-m4max-gemm-gate-0.7.0-1309.*`
+- `docs/performance-targets.md` §8.13・`scripts/bench/framework-compare/results/summary.md`
+  環境 28 節にも同じ数値を反映する

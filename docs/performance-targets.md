@@ -497,3 +497,21 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   remeasurement.md` §15・`docs/perf/metal-gemm-candle-gate-remeasurement.md` §13・
   `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §21 を参照。生データ・実行ログは
   `docs/perf/logs/gemm-candle-gate-readout-default-1438/`
+
+### 8.13 #1309 追補（Metal GEMM candle 比ゲートを Phase 3 反映後の正式系列で再計測。§2 段階的下限表・§3 丸め規則は不変）
+
+- #1269 Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の HEAD `797030e` を対象に、
+  正式系列（crates.io 公開ピン `fandhe-ai =0.7.0` の registry 解決）で N=1024/2048/4096
+  reuse の candle 比を Apple M4 Max で 5 回計測中央値再取得した（イシュー #1309）
+- 結果: N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。**全形状未達のまま**（全 run
+  `parity_fail_count=0`）。§8.3（#1147）・§11（#1185）の未達成判定を再確認した
+- Phase 1〜3・#1334・#1368 はいずれも本番 NN 正方 GEMM reuse 経路（`tile::select_for_device`
+  の選択構成）を変更していないため（`docs/perf/logs/metal-gemm-candle-gate-1309/
+  attribution.md`）、§11 との差分（N=1024 低下・N=2048/4096 改善）はコード変更ではなく
+  両計測時点の共有負荷差によるノイズと判断する
+- **参考系列（HEAD への path patch）は本 PR では未計測**: 正式系列完了直後の負荷ゲート
+  （1 分 load average < 4.0 を 2 回連続。事前宣言）が計測時間内に安定通過せず、選択的
+  再実行はせずに打ち切った。後続の再計測へ引き継ぐ（`docs/perf/
+  metal-gemm-candle-gate-remeasurement.md` §14.8）
+- 出典: `docs/perf/metal-gemm-candle-gate-remeasurement.md` §14、生データ・実行ログは
+  `docs/perf/logs/metal-gemm-candle-gate-1309/`

@@ -1594,6 +1594,9 @@ N=1024/2048 は改善・N=4096 は低下したが、共有負荷下の観測で�
 `docs/perf/metal-gemm-candle-gate-remeasurement.md`（イシュー #1147）を参照。
 **2026-09-06 更新（#1185）: 正式系列 `0.7.0` でも未達 3 件（0.836／0.638／0.509 倍）で未達成を
 確定**（同ドキュメント §11）。ユーザー指示により後継ツリーへ引き継ぎ、#1037 はクローズする。
+**2026-09-09 更新（#1309）: Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列
+`0.7.0-1309` でも未達 3 件（0.700／0.969／0.710 倍）で未達成のまま不変**（同ドキュメント §14。
+参考系列は負荷ゲート不通過により未計測。詳細は環境 28）。
 
 
 ## 環境 14: DGX Spark GB10（GEMM 目標達成ゲート #1117 の 5 回計測再計測・イシュー #1148。CPU device 拡張）
@@ -2234,3 +2237,27 @@ CPU の同一 raw JSONL から `fresh` を再集計した参考行（受け入�
   根拠・§13.6 に runtime legacy フォールバックの実装記録）・
   `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §23（§23.2a に fresh 参考表）・
   `docs/perf/logs/gemm-candle-gate-readout-default-1438/` を参照
+
+## 環境 28: Apple M4 Max（Metal GEMM candle 比ゲートを Phase 3 反映後の正式系列で再計測。イシュー #1309）
+
+#1269 Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の HEAD `797030e` を対象に、
+`run_gemm_gate_metal.sh`／`compare_gemm_gate.py --device metal` の同一プロトコル（5 回
+独立プロセス起動・中央値）で正式系列（crates.io 公開ピン `fandhe-ai =0.7.0` の registry
+解決）のみを計測した。参考系列（HEAD への path patch）は正式系列完了直後の負荷ゲート
+（1 分 load average < 4.0 を 2 回連続。事前宣言）が計測時間内に安定通過せず未計測のまま
+本イシューを打ち切った（選択的再実行はしていない）。
+
+| N | fandhe-ai reuse 中央値 | candle fresh 中央値 | candle/fandhe | 判定 |
+|---|---|---|---|---|
+| 1024 | 3.005 ms | 2.104 ms | 0.700 | 未達 |
+| 2048 | 10.212 ms | 9.890 ms | 0.969 | 未達 |
+| 4096 | 49.609 ms | 35.209 ms | 0.710 | 未達 |
+
+**正式判定（`fandhe-ai =0.7.0` ピン基準。#1037）は Phase 3 反映後も未達成のまま不変**
+（環境 13／#1147 §11 の確定判定を再確認）。fandhe-ai・candle とも全 30 run で
+`parity_fail_count=0`・checksum が同一 N で一致。Phase 1〜3・#1334・#1368 はいずれも
+本番 NN 正方 GEMM reuse 経路を変更していないため、§11（2026-09-06 計測）との差分
+（N=1024 低下・N=2048/4096 改善）はコード変更ではなく両計測時点の共有負荷差による
+ノイズと判断する。詳細・帰属表・参考系列未計測の経緯は
+`docs/perf/metal-gemm-candle-gate-remeasurement.md` §14、生データ・実行ログは
+`docs/perf/logs/metal-gemm-candle-gate-1309/` を参照。
