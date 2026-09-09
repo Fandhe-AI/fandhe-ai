@@ -669,6 +669,20 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 ## 変更履歴
 
+- 2026-09-10（#1486・親 Phase #1473・ルート #1468）: 公開 6 クレートの
+  `workspace.version` を 0.7.0 → 0.8.0 へ lockstep バンプした（#1269 完了後の
+  引き継ぎ改善〈PR #1451 CPU GEMM 2D 動的分配の本番結線・PR #1450/#1452 借用
+  ビュー readout の既定経路化・PR #1494 CUDA ホストステージング Pinned 既定化・
+  PR #1496/#1500 Metal split-K 本番結線・PR #1492 resident GradStaging 読み出し
+  API・PR #1502 CPU 出力並列ゼロ埋めの本番既定確定〉の公開前提。§11 手順 1）。内部依存
+  `version = "=0.8.0"`（9 箇所）・ルート `Cargo.lock`（`cargo update -w --offline`）・
+  `scripts/bench/oss-gemm-compare/Cargo.lock`（`fandhe-ai-*` 4 クレート・
+  `bench-harness` のみ狙い撃ち更新）を同時に更新した。`release-all.yml` は
+  `mode: dry-run-only` までを実行する（run ID はイシュー #1486 コメントに記録）。
+  **v0.8.0 の crates.io 公開（`mode: publish`・environment 承認）はユーザーの
+  明示指示待ちで未実施**であり、公開後に §10 追補・framework-compare の承認ピン
+  更新（`fandhe-ai =0.7.0` → `=0.8.0`。イシュー #1487）・リリースタグ付与を別途
+  行う。
 - 2026-09-06（v0.7.0 リリースサイクル）: `release-all.yml` で公開 6 クレートの
   v0.7.0 を crates.io へ公開完了（run ID は §10 追補を参照）。§10 追補に記録した。
   framework-compare の承認ピンをイシュー #1185（ブロッカーとして名指し）に
