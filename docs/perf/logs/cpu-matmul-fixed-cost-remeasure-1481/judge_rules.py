@@ -111,6 +111,14 @@ LAYER_B_SECTION_RE = re.compile(r"^##\s*N=(?P<n>\d+)\s*$")
 LAYER_B_ROW_RE = re.compile(
     r"^\|\s*(?P<phase>[A-Za-z_]+)\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*(?P<ratio>[0-9.nNaA]+)\s*\|"
 )
+# `aggregate_layer_b.py`（PR #1501 codex-review P2 是正）が各行の直後に
+# 出力する丸めなし raw コメント行。`repr(float)` の round-trip 表現
+# （指数表記 `e±NN` を含みうる）を許容する。
+LAYER_B_RAW_RE = re.compile(
+    r"^<!--\s*raw\s+N=(?P<n>\d+)\s+phase=(?P<phase>[A-Za-z_]+)\s+"
+    r"off_med=(?P<off>[-0-9.eE+]+)\s+on_med=(?P<on>[-0-9.eE+]+)\s+"
+    r"ratio=(?P<ratio>[-0-9.eE+]+)\s*-->\s*$"
+)
 
 
 @dataclass
@@ -163,13 +171,34 @@ def parse_layer_a_md(text: str) -> dict[tuple[int, str], LayerACell]:
 
 
 def parse_layer_b_md(text: str) -> dict[tuple[int, str], float]:
-    """`aggregate_layer_b.py` 出力 md から {(N, phase): on/off 比} を抽出する。"""
+    """`aggregate_layer_b.py` 出力 md から {(N, phase): on/off 比} を抽出する。
+
+    PR #1501 codex-review P2 是正: 人間可読テーブルの `on/off 比` 列は
+    表示用に小数 4 桁へ丸められており、これを規則 2（`RULE2_OPS_GEMM_
+    THRESHOLD=1.00` の厳密な `<=`／`<` 判定）へそのまま使うと丸め誤差で
+    誤通過・誤棄却しうる。`aggregate_layer_b.py` が追加出力する
+    `<!-- raw N=... phase=... ... ratio=... -->` コメント行（`repr(float)`
+    による丸めなし round-trip 表現）が同じ (N, phase) に存在すれば
+    そちらを優先し、無ければ従来どおりテーブル列の丸め値へフォール
+    バックする（旧形式の md〈本ファイルの自己テストフィクスチャを
+    含む〉との後方互換を保つため）。
+    """
     out: dict[tuple[int, str], float] = {}
+    raw_out: dict[tuple[int, str], float] = {}
     cur_n: int | None = None
     for line in text.splitlines():
         m_sec = LAYER_B_SECTION_RE.match(line)
         if m_sec:
             cur_n = int(m_sec.group("n"))
+            continue
+        m_raw = LAYER_B_RAW_RE.match(line)
+        if m_raw:
+            try:
+                raw_out[(int(m_raw.group("n")), m_raw.group("phase"))] = float(
+                    m_raw.group("ratio")
+                )
+            except ValueError:
+                pass
             continue
         m = LAYER_B_ROW_RE.match(line)
         if m and cur_n is not None:
@@ -181,6 +210,9 @@ def parse_layer_b_md(text: str) -> dict[tuple[int, str], float]:
                 out[(cur_n, phase)] = float(raw)
             except ValueError:
                 continue
+    # raw コメント由来の丸めなし値があれば表示丸め値より優先する
+    # （表示は表示専用・判定は生値、という P2 是正の核心）。
+    out.update(raw_out)
     return out
 
 
@@ -269,14 +301,35 @@ def _raw_candle_ratio(
     （`compare_gemm_gate.py` の定義に一致）。off/on それぞれこの比を
     丸めなしで算出してから除算するため、Markdown 表示値（3 桁丸め）を
     再除算する経路（`RULE4_MIN_RATIO` 境界近傍で採否が逆転しうる）を
-    経由しない。いずれかの生値が欠落していれば None を返す
-    （呼び出し側は Markdown 由来の丸め値へフォールバックする）。
+    経由しない。いずれかの生値が欠落、または 4 入力（fandhe-ai
+    off/on・candle off/on）のいずれかがちょうど `REQUIRED_RUN_COUNT`
+    （5）件の有効値を持たない場合は None を返す（呼び出し側は
+    Markdown 由来の丸め値へフォールバックする）。
+
+    PR #1501 codex-review P1 是正（2026-09-09 その 5）: 従来は 4 入力
+    いずれも「非空であること」しか検証しておらず、例えば片方の腕が
+    1 run しか収集できていなくても `statistics.median` は単一値を
+    そのまま返すため、AGENTS.md の 5 回計測中央値契約に反した「1 run
+    だけの中央値」を規則 4 の判定に使いうる契約不整合があった
+    （`_raw_median_ratio` と同型の欠陥。`_raw_run_pair_ratios` は既に
+    5 run 要求を実装済みだったが、本関数・`_raw_median_ratio` は対象外
+    のまま残っていた）。本版は 4 入力すべてがちょうど
+    `REQUIRED_RUN_COUNT` 件であることを要求し、いずれか 1 つでも
+    不足・超過（欠落を含む）であれば None（判定不能。呼び出し側で
+    Markdown フォールバックへ倒れる）を返す。
     """
     off_c = off_candle.get(n)
     on_c = on_candle.get(n)
     off_f = off_fandhe.get((n, "reuse"))
     on_f = on_fandhe.get((n, "reuse"))
     if not off_c or not on_c or not off_f or not on_f:
+        return None
+    if (
+        len(off_c) != REQUIRED_RUN_COUNT
+        or len(on_c) != REQUIRED_RUN_COUNT
+        or len(off_f) != REQUIRED_RUN_COUNT
+        or len(on_f) != REQUIRED_RUN_COUNT
+    ):
         return None
     off_fandhe_median = statistics.median(off_f)
     on_fandhe_median = statistics.median(on_f)
@@ -301,10 +354,31 @@ def _raw_median_ratio(
     が Markdown へ出力する `after/before` 列（3〜4 桁丸め）と同じ定義だが、
     本関数は生の `median_s` から直接計算するため丸め誤差を持ち込まない
     （PR #1501 codex-review P2: 表示用に丸めた値を再除算しない）。
+
+    PR #1501 codex-review P1 是正（2026-09-09 その 5）: 本関数は規則
+    2〜4 の判定（DGX N=2048 決定セル・対照セル・M4Max N=2048 の
+    Layer A 比）に直接使われるにもかかわらず、従来は両腕とも
+    「非空であること」しか検証していなかった。AGENTS.md の 5 回計測
+    中央値契約は判定に使う全セルへ適用されるべきところ、`REQUIRED_
+    RUN_COUNT`（5）件の完備要求は規則 5 専用の `_raw_run_pair_ratios`
+    にしか実装されておらず、片腕が 1 run しか収集できていなくても
+    その 1 値を「中央値」として採用し比を計算してしまう契約不整合
+    があった（例: off が 5 run とも 1.0、on が本来 [1.2]×5 のところ
+    後半 4 行が欠落し `[1.2]` のみ収集された場合、`statistics.
+    median([1.2]) == 1.2` で比は正しく 1.2 になるが、逆に on の収集が
+    `[1.0]` のみで真の 5 run 中央値が 1.2 だった場合は比が 1.0 に
+    見え規則 3 を誤って通過させうる）。本版は両腕ちょうど
+    `REQUIRED_RUN_COUNT` 件であることを要求し、不足・超過（欠落を
+    含む）であれば None を返す（呼び出し側は Markdown 由来の丸め値へ
+    フォールバックする。フォールバック自体は `--jsonl` 完全未指定時の
+    既存挙動と同一で、生データが「一部だけ」揃っている場合に限り
+    判定不能として弾く）。
     """
     off_list = off_runs.get((n, mode))
     on_list = on_runs.get((n, mode))
     if not off_list or not on_list:
+        return None
+    if len(off_list) != REQUIRED_RUN_COUNT or len(on_list) != REQUIRED_RUN_COUNT:
         return None
     return statistics.median(on_list) / statistics.median(off_list)
 
@@ -687,6 +761,28 @@ def _self_test() -> int:
     assert parsed_b[(2048, "ops_gemm")] == 0.9972, parsed_b
     assert parsed_b[(2048, "alloc_c")] == 0.5166, parsed_b
 
+    # PR #1501 codex-review P2 是正の回帰テスト: `<!-- raw ... -->`
+    # コメント行があれば、テーブル列の丸め値（小数 4 桁）ではなく
+    # 丸めなしの raw 比を優先して採用すること（境界値の誤通過・誤棄却
+    # を防ぐ本修正の核心）。
+    sample_layer_b_raw = """
+## N=2048
+
+| phase | off median (of 5 run medians, ms) | off n | on median (ms) | on n | on/off 比 |
+|---|---|---|---|---|---|
+| ops_gemm | 1.0 | 5 | 1.00004 | 5 | 1.0000 |
+<!-- raw N=2048 phase=ops_gemm off_med=1.0 on_med=1.00004 ratio=1.00004 -->
+"""
+    parsed_b_raw = parse_layer_b_md(sample_layer_b_raw)
+    # テーブル列だけを見れば 1.0000（<= 1.00 を満たすように見える）だが、
+    # raw コメントの真の比 1.00004 は不成立（> 1.00）であるべき。
+    assert parsed_b_raw[(2048, "ops_gemm")] == 1.00004, parsed_b_raw
+    assert parsed_b_raw[(2048, "ops_gemm")] > RULE2_OPS_GEMM_THRESHOLD, parsed_b_raw
+
+    # raw コメントが無い旧形式の md では従来どおりテーブル列の丸め値へ
+    # フォールバックすること（後方互換）。
+    assert parse_layer_b_md(sample_layer_b)[(2048, "ops_gemm")] == 0.9972
+
     # `parse_jsonl_medians`: bench-fandhe 生 JSONL（1 行 1 run）から
     # (size, mode) ごとの median_s リストを出現順で抽出できること。
     # 壊れた行（JSON 不正・必須フィールド欠落）は静かに無視すること。
@@ -728,6 +824,35 @@ def _self_test() -> int:
     on_runs_long = {(2048, "reuse"): [1.2, 1.2, 1.2, 1.2, 1.2, 1.2]}
     assert _raw_run_pair_ratios(off_runs_full, on_runs_long, 2048, "reuse") is None
 
+    # PR #1501 codex-review P1 是正の回帰テスト（2026-09-09 その 5）:
+    # `_raw_median_ratio`（規則 2〜4 の判定に直接使う）も片腕が
+    # `REQUIRED_RUN_COUNT`（5）未満・超過の場合は None（判定不能。
+    # Markdown フォールバックへ倒れる）を返すこと。旧実装は「両腕とも
+    # 非空」しか検証せず、1 run だけの「中央値」を採用しうる欠陥が
+    # あった（`_raw_run_pair_ratios` にしか 5 run 完備要求が実装
+    # されておらず、規則 5 以外の判定〈規則 2・3〉が本欠陥の対象
+    # だった）。
+    assert _raw_median_ratio(off_runs_full, on_runs_short, 2048, "reuse") is None
+    assert _raw_median_ratio(off_runs_full, on_runs_long, 2048, "reuse") is None
+    # 片腕が完全に欠落している場合も引き続き None。
+    assert _raw_median_ratio({}, off_runs_full, 2048, "reuse") is None
+    # 両腕ちょうど 5 件なら従来どおり丸めなし中央値比を返す（非退行確認）。
+    assert _raw_median_ratio(off_runs_full, off_runs_full, 2048, "reuse") == 1.0
+
+    # `_raw_candle_ratio` も同型の 5 run 完備要求を持つこと（PR #1501
+    # codex-review P1 是正）。4 入力（fandhe-ai off/on・candle off/on）
+    # のいずれか 1 つでも run 数が `REQUIRED_RUN_COUNT` と異なれば None。
+    candle_full = {2048: [1.0, 1.0, 1.0, 1.0, 1.0]}
+    candle_short = {2048: [1.0]}
+    assert (
+        _raw_candle_ratio(off_runs_full, off_runs_full, candle_full, candle_short, 2048)
+        is None
+    )
+    assert (
+        _raw_candle_ratio(off_runs_full, on_runs_short, candle_full, candle_full, 2048)
+        is None
+    )
+
     # `parse_candle_jsonl_medians`: `framework` タグ付き生 JSONL から
     # candle（`mode=="fresh"`）行のみを size ごとに抽出し、fandhe-ai の
     # 行（同じ `mode=="fresh"` でも `framework` が異なる）を混入させない
@@ -750,8 +875,13 @@ def _self_test() -> int:
     # 直接計算するため、この逆転を起こさず正しく不成立と判定できること。
     off_fandhe_sample = {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]}
     on_fandhe_sample = {(2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]}
-    off_candle_sample = {2048: [1.00049]}
-    on_candle_sample = {2048: [0.95251]}
+    # 5 件とも同一値にして中央値が単一値ケースと一致するようにする
+    # （PR #1501 codex-review P1 是正: `_raw_candle_ratio` も 4 入力
+    # すべてちょうど `REQUIRED_RUN_COUNT` 件を要求するようになったため、
+    # 1 件だけのフィクスチャでは None が返り本テストの意図〈丸めなし比の
+    # 逆転再現〉を検証できなくなった）。
+    off_candle_sample = {2048: [1.00049] * REQUIRED_RUN_COUNT}
+    on_candle_sample = {2048: [0.95251] * REQUIRED_RUN_COUNT}
     raw_ratio = _raw_candle_ratio(
         off_fandhe_sample, on_fandhe_sample, off_candle_sample, on_candle_sample, 2048
     )
@@ -807,9 +937,15 @@ def _self_test() -> int:
     gate_boundary = dict(gate_ok)
     gate_boundary[("dgx", "off")] = {512: round(1.00049, 3), 1024: 0.78, 2048: 0.96}
     gate_boundary[("dgx", "on")] = {512: round(0.95251, 3), 1024: 0.78, 2048: 0.96}
+    # 5 件とも同一値にして中央値が単一値ケースと一致するようにする
+    # （PR #1501 codex-review P1 是正: `_raw_candle_ratio` が 4 入力とも
+    # ちょうど `REQUIRED_RUN_COUNT` 件を要求するようになったため、1 件
+    # だけのフィクスチャでは None が返り Markdown フォールバックへ
+    # 倒れてしまい、本テストが検証すべき「生値では正しく不成立」の
+    # end-to-end 経路を検証できなくなる）。
     candle_jsonl_boundary = {
-        ("dgx", "off"): {512: [1.00049]},
-        ("dgx", "on"): {512: [0.95251]},
+        ("dgx", "off"): {512: [1.00049] * REQUIRED_RUN_COUNT},
+        ("dgx", "on"): {512: [0.95251] * REQUIRED_RUN_COUNT},
     }
     jsonl_dgx_512_fandhe = dict(jsonl_r5_no_regression)
     jsonl_dgx_512_fandhe[("dgx", "off")] = {(512, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]}

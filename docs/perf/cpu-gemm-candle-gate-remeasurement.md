@@ -2033,6 +2033,47 @@ run 数不足・境界逆転の回帰テストで確認。P3 のオーケスト�
 生成条件は今回満たされていた〉自体には影響しない将来の再計測に対する
 是正）。
 
+**判定コードの計測後修正 5 回目（PR #1501 codex-review 指摘対応その 4。
+透明性のための明記）**: 上記 4 回目の修正後も 2 点の指摘を受けた。
+(P1) 規則 2〜4 の判定に直接使う `_raw_median_ratio`・`_raw_candle_ratio`
+は、規則 5 専用の `_raw_run_pair_ratios` とは異なり「両腕とも非空」
+としか検証しておらず、片腕が `REQUIRED_RUN_COUNT`（5）未満・超過
+（1 run のみの収集を含む）でもその値をそのまま「中央値」として比を
+計算しうる契約不整合が残っていた（AGENTS.md の 5 回計測契約は判定に
+使う全セルへ適用されるべきところ、5 run 完備要求が規則 5 限定に
+留まっていた）。両関数とも両腕（`_raw_candle_ratio` は fandhe-ai
+off/on・candle off/on の 4 入力すべて）がちょうど `REQUIRED_RUN_COUNT`
+件であることを要求し、不足・超過であれば None（Markdown 丸め値への
+フォールバックへ倒れる。フォールバック自体は既存の `--jsonl`／
+`--candle-jsonl` 未指定時の挙動と同一）を返すよう是正した（厳格化
+方向の修正のみ・緩和なし）。
+(P2) 規則 2 が参照する Layer B（`aggregate_layer_b.py` 出力）の
+`alloc_c`／`ops_gemm` on/off 比は、人間可読テーブルの表示丸め（小数
+4 桁）をそのまま `RULE2_OPS_GEMM_THRESHOLD=1.00` の厳密な `<=`／`<`
+判定へ使っており、境界付近（例: 真の比 1.00004 が表示 1.0000 に丸まり
+誤通過）で採否が逆転しうる欠陥があった。`aggregate_layer_b.py` に、
+各行の直後へ `repr(float)`（round-trip 精度）による丸めなし値を
+`<!-- raw N=... phase=... off_med=... on_med=... ratio=... -->` として
+機械可読コメント出力する変更を加え、`judge_rules.py::parse_layer_b_md`
+がこのコメントを優先して読み取るよう是正した（表示テーブル自体は
+`.4f` のまま不変＝丸めは表示専用に限定。旧形式 md〈raw コメント無し〉
+との後方互換フォールバックも維持）。
+本イシューの保存済み Layer B 生ログ（`layerB-{dgx,m4max}-{off,on}-
+run{1..5}.log`）は測定値そのものであり書き換えていない。是正後の
+`aggregate_layer_b.py` をこの生ログへ再適用して `aggregate-dgx.md`・
+`aggregate-m4max.md` を再生成した結果、人間可読テーブル列（`.4f`
+丸め値）は 1 桁も変化せず（`diff` で確認済み）、raw コメント行のみが
+追加された。是正後の `judge_rules.py` を本イシューの保存データへ
+`--jsonl`・`--candle-jsonl` 付きで再適用した結果、規則 2 の
+`alloc_c`比・`ops_gemm`比は表示値（2.1199／0.8012）から丸めなし値
+（2.1198577958354496／0.8011769028698661）へ精度が上がっただけで
+規則 2 の不成立という結論（`alloc_c` が削減方向〈<1.0〉ではなく増加
+しているため）は変わらず、規則 2・3・4 いずれも `--jsonl`・
+`--candle-jsonl` の全セルがちょうど 5 run 完備（実測データ自体が
+最初から欠落なく揃っていたため P1 の 5 run 完備要求追加による値の
+変化も無し）。**verdict は REJECT のまま修正前後で不変**（`judge.md`
+差分・`judge_rules.py` の `_self_test()` に追加した回帰テストで確認）。
+
 出典: イシュー #1481・`docs/perf/logs/cpu-matmul-fixed-cost-remeasure-1481/`
 （`env_info.txt`・`judge.md`・`judge_rules.py`・Layer A/B 生ログ・
 `aggregate_layer_b.py`・`compare_gemm_ab-{dgx,m4max}.md`・

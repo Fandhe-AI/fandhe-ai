@@ -193,6 +193,26 @@ def main() -> int:
             print(
                 f"| {phase} | {off_med:.4f} | {len(off_vals)} | {on_med:.4f} | {len(on_vals)} | {ratio:.4f} |"
             )
+            # PR #1501 codex-review P2 是正: 上記テーブル列は人間可読性の
+            # ための表示丸め（小数 4 桁）であり、`judge_rules.py` の規則 2
+            # （DGX N=2048 決定セル。`RULE2_OPS_GEMM_THRESHOLD=1.00` を
+            # 厳密な `<=`／`<` で判定する）がこの丸め値をそのまま比較に
+            # 使うと、真の比が 1.00004 のように閾値をわずかに超えていても
+            # 表示は 1.0000 に丸まり誤って通過（逆に 0.99996 は誤って
+            # 棄却）しうる欠陥があった。`repr()` は Python の float が
+            # 同じ 64 bit 表現へ丸め落ちなく再構成できる最短の文字列
+            # 表現（round-trip 保証）を返すため、この行を機械可読な
+            # コメントとして追加出力し `judge_rules.py::parse_layer_b_md`
+            # が丸めなしの値を優先して読み取れるようにする（表示用の
+            # `.4f` テーブル自体は変更しない＝丸めは表示専用に限定）。
+            # `off_vals`／`on_vals` が空（=ratio が nan）の場合は出力しない
+            # （`parse_layer_b_md` 側で "nan" 文字列を特別扱いする必要を
+            # 避けるフェイルセーフ）。
+            if off_vals and on_vals and off_med != 0:
+                print(
+                    f"<!-- raw N={n} phase={phase} off_med={off_med!r} "
+                    f"on_med={on_med!r} ratio={ratio!r} -->"
+                )
         print()
     return 0
 
