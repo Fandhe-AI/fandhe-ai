@@ -178,3 +178,118 @@ fn device_resident_matches_host_sgd_on_cuda_across_100_steps() {
     let host_params = train_host_reference(STEPS, LR);
     assert_params_match(&device_params, &host_params, "CUDA vs host (100 steps)");
 }
+
+/// イシュー #1479 の AC-R2（バックエンド差異）を実機で確認する共通
+/// ヘルパ: `device` で 1 step だけ forward・backward し、strict 版
+/// （`resident_grads_to_host`）が `BackendError::Unsupported` を返す
+/// こと（CUDA／Metal は `gemm_fp32_strict_into` 未実装のため resident
+/// 経路に到達しない。panic なし）、unified 版（`param_grads_to_host`）
+/// は全パラメータの勾配を `Ok` で返し、host-only 参照実装（`Sgd::step`
+/// が使うのと同じ `bound.trainable_grads`）と統一複合判定で一致する
+/// ことを検証する。
+///
+/// `docs/perf/train-resident-grad-device-update.md` §4「追補: #1479」・
+/// イシュー本文の受入基準 AC-R4 に対応。本エージェント実行環境には
+/// CUDA／Metal 実機がないため、本ヘルパ自体は両 `#[ignore]` テストから
+/// 呼ばれるのみで通常 CI では実行されない（未実測は下記個別テストの
+/// doc に明記）。
+fn assert_grad_readout_contract(device: Device) {
+    let model = build_model();
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+
+    let init_tape =
+        fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
+    drop(init_tape);
+
+    let tape = fandhe_ai::tape_for(device).unwrap();
+    let x = tape.var(&x_data);
+    let y = tape.var(&y_data);
+    let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
+    let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+    let grads = tape.backward_device_param_store(&loss, &store).unwrap();
+
+    // strict 版: CUDA／Metal は `gemm_fp32_strict_into` 未実装のため
+    // resident 経路に到達せず、必ず `Unsupported`（panic なし）。
+    let strict_err = tape.resident_grads_to_host(&store, &grads).unwrap_err();
+    assert!(
+        matches!(strict_err, fandhe_ai::BackendError::Unsupported(_)),
+        "resident 未対応バックエンドでは Unsupported を返すはず（panic なし）: {strict_err:?}"
+    );
+
+    // unified 版: 全パラメータの勾配を `Ok` で返す（`grads.get(...)`
+    // フォールバックのみ。CUDA／Metal は resident 未充填のため全 slot
+    // がこの経路を通る）。
+    let device_grads_host = tape.param_grads_to_host(&store, &grads).unwrap();
+
+    // host-only 参照実装（同一初期化・同一データの 1 step 目）。
+    let host_model = build_model();
+    let host_grads_host = {
+        let host_tape = fandhe_ai::tape();
+        let bound = host_model.bind(&host_tape);
+        let hx = host_tape.var(&x_data);
+        let hy = host_tape.var(&y_data);
+        let hpred = bound.forward(&host_tape, &hx).unwrap();
+        let hloss = MseLoss::new(Reduction::Mean).forward(&hpred, &hy).unwrap();
+        let hgrads = host_tape.backward(&hloss).unwrap();
+        bound
+            .trainable_grads(&hgrads)
+            .unwrap()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<Tensor<f32>>>()
+    };
+
+    assert_eq!(device_grads_host.len(), host_grads_host.len());
+    for (i, (d, h)) in device_grads_host
+        .iter()
+        .zip(host_grads_host.iter())
+        .enumerate()
+    {
+        assert_eq!(d.shape(), h.shape(), "param {i} shape mismatch");
+        let d_slice = d.contiguous();
+        let h_slice = h.contiguous();
+        for (j, (dv, hv)) in d_slice
+            .as_slice()
+            .unwrap()
+            .iter()
+            .zip(h_slice.as_slice().unwrap())
+            .enumerate()
+        {
+            assert_close(
+                *dv,
+                *hv,
+                &format!("param {i} element {j} (grad readout contract)"),
+            );
+        }
+    }
+}
+
+/// Metal 実機での AC-R2 契約検証（`assert_grad_readout_contract` 参照）。
+///
+/// 本エージェント実行環境には Metal 実機がないため未実測（イシュー
+/// #1479 実装セッションでは未実行）。
+///
+/// ```sh
+/// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture
+/// ```
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn grad_readout_contract_on_metal() {
+    assert_grad_readout_contract(Device::Metal);
+}
+
+/// CUDA 実機での AC-R2 契約検証（`assert_grad_readout_contract` 参照）。
+///
+/// 本エージェント実行環境には CUDA 実機がないため未実測（イシュー
+/// #1479 実装セッションでは未実行）。
+///
+/// ```sh
+/// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn grad_readout_contract_on_cuda() {
+    assert_grad_readout_contract(Device::Cuda(0));
+}

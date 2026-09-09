@@ -117,3 +117,8 @@ update 全体）は速度差が計測ノイズ（±10% 程度）に埋もれて�
   採用しなかった（`grads.get()` は単に `Ok(None)` を返す。公開 API から
   `Op::ResidentLeaf` の `Var` を得る経路が元々存在しないため実害はないと
   判断したが、内部一貫性としては計画どおりの型付きエラー化が望ましい）
+- resident 経由の重み勾配をホストへ読み出す公開 API（`facade::Tape::
+  resident_grads_to_host`／`param_grads_to_host`）はイシュー #1479 で
+  追加した（詳細・契約は `docs/device-resident-update-design.md` 追補:
+  #1479 を参照。実測記録の追加は不要——読み出し専用 API の追加であり
+  性能結線ではない）

@@ -129,6 +129,17 @@
 //! `--gpu-watch` 等 CLI opt-in。閾値の既定値はユーザー承認事項のためコードに
 //! 埋め込まない）。詳細な出力フォーマット・再試行規定は
 //! `docs/perf/metal-bench-noise-protocol.md` を参照。
+//!
+//! ## Phase 4: 補助 spread 統計量の判定非依存併記（本イシュー #1483 の実装範囲。親 #1472）
+//!
+//! [`trimmed_relative_spread`]・[`iqr_over_median`]・[`mad2_over_median`]
+//! （`stats` モジュール）と [`ab::AuxiliarySpread`]（`StabilityResult::aux`・
+//! `AbResult::aux_a`／`aux_b`）が、`docs/perf/metal-bench-noise-protocol.md`
+//! §8 の総合推奨（案 A・C・D を「ゲート置換ではなく判定に使わないレポート
+//! 項目として併記追加する」）を実装する。[`ab::STABILITY_SPREAD_GATE`]・
+//! `spread`／`spread_a`／`spread_b`・既存の判定経路は一切変更しない
+//! （`ab` モジュール冒頭ドキュメント参照）。呼び出し側 example への出力追記は
+//! 兄弟イシュー #1484、docs 側の確定記録・実機非後退確認は #1485 のスコープ。
 
 pub mod ab;
 pub mod alloc_tracker;
@@ -152,7 +163,10 @@ pub use peak_memory::{
 pub use protocol::{Measurement, MeasurementConfig, run};
 pub use report::{BenchReport, SCHEMA_VERSION};
 pub use rounding::{RoundingError, floor_lower_bound};
-pub use stats::{BenchError, Quartiles, median_q1_q3, relative_spread};
+pub use stats::{
+    BenchError, Quartiles, iqr_over_median, mad2_over_median, median_q1_q3, relative_spread,
+    trimmed_relative_spread,
+};
 pub use threshold::{
     BackendDtype, FloorJudgment, FloorSpec, Stage, THRESHOLD_SCHEMA_VERSION, Verdict, floor_spec,
     judge,

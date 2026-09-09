@@ -228,6 +228,38 @@ impl Tape {
     ) -> Result<Vec<Tensor<f32>>, BackendError> {
         store.sync_to_host(&self.0)
     }
+
+    /// [`DeviceParamStore::resident_grads_to_host`] への委譲入口
+    /// （イシュー #1479）。resident 経路（`GradStaging`）で新鮮に充填
+    /// 済みの重み勾配のみをホストへ読み出す（bias 等の未充填 slot は
+    /// `None`）。resident 未対応バックエンド（CUDA／Metal。
+    /// `gemm_fp32_strict_into` 未実装）では [`BackendError::
+    /// Unsupported`] を返す（panic なし）。全パラメータの勾配を
+    /// バックエンド横断で読みたい場合は
+    /// [`Self::param_grads_to_host`] を使う。上記 `sync_device_param_
+    /// store_to_host` と同じ理由の薄い委譲。
+    pub fn resident_grads_to_host(
+        &self,
+        store: &DeviceParamStore,
+        grads: &Gradients,
+    ) -> Result<Vec<Option<Tensor<f32>>>, BackendError> {
+        store.resident_grads_to_host(&self.0, grads)
+    }
+
+    /// [`DeviceParamStore::param_grads_to_host`] への委譲入口
+    /// （イシュー #1479）。resident 経由で充填済みの slot は staging
+    /// から、それ以外は `grads` からのフォールバックで、全パラメータの
+    /// 勾配を 3 バックエンド共通の読み出し窓として返す（CUDA／Metal も
+    /// `Ok` を返す。§設計は `fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore::param_grads_to_host` doc 参照）。上記と同じ
+    /// 理由の薄い委譲。
+    pub fn param_grads_to_host(
+        &self,
+        store: &DeviceParamStore,
+        grads: &Gradients,
+    ) -> Result<Vec<Tensor<f32>>, BackendError> {
+        store.param_grads_to_host(&self.0, grads)
+    }
 }
 
 /// 既定バックエンド（CPU・TASK-2.5 ユーザー承認済み。
