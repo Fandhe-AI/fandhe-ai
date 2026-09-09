@@ -19,8 +19,19 @@ target_actual_groups=... control_actual_groups=...` 行を抽出し、12 組
 
 を Markdown 表として `aggregate.md` へ出力する。
 
-`--self-test` で行パース・中央値算出の回帰確認を行う（実機ログなしで実行
-可能）。
+**採否判定前の検証（codex-review 指摘対応）**: 各 run ログは、期待する 12 組
+（`EXPECTED_KEYS` = `gemm_splitk_shapes_bench.rs::TARGET_MN` × `TARGET_K` の
+ミラー）の測定行をそれぞれちょうど 1 件ずつ含んでいることを `parse_log` が
+自己完結で検証する。run 間のキー順一致だけを見る旧チェックでは、全 run で
+同じ形状が揃って欠落していたり、実測行が 1 件も無い場合（例: 非 macOS 環境
+で `main` が解析値のみを出力するケース）でも `keys=[]` のまま集計ループが
+黙って 0 走査で完了し「不採用（現状維持）」を誤って機械判定してしまう
+（実測なしを不採用と取り違える）。欠落・重複を検出した時点で `ValueError`
+を送出し、集計を中止する（fail-closed。どの run・どの形状が問題かをエラー
+メッセージに含める）。
+
+`--self-test` で行パース・中央値算出・上記の欠落／重複検出の回帰確認を行う
+（実機ログなしで実行可能）。
 """
 
 from __future__ import annotations
@@ -54,13 +65,37 @@ CONDITION2_GROUPS_THRESHOLD = 40
 CONDITION1_RATIO_THRESHOLD = 0.7
 STABILITY_SPREAD_GATE = 0.05
 
+# `gemm_splitk_shapes_bench.rs::TARGET_MN` × `TARGET_K` のミラー（12 組）。
+# import ではなく値の複製: 当該 example は Rust クレート（Cargo ビルド必須）
+# であり、python3 標準ライブラリのみで完結する本集計スクリプトの設計
+# （モジュール冒頭コメント）から直接 import する経路がないため。値が乖離
+# した場合は `--self-test` の `expected_keys_matches_bench_rs_literal`相当の
+# 固定値検査、または実 run ログの欠落検出（`parse_log` の ValueError）で
+# 顕在化する。
+EXPECTED_KEYS: frozenset[tuple[int, int, int]] = frozenset(
+    (mn, mn, k) for mn in (32, 64, 128, 256) for k in (2048, 4096, 8192)
+)
+
 
 def parse_log(path: Path) -> dict[tuple[int, int, int], dict]:
-    """1 run ログから 12 組の測定行を抽出する。"""
+    """1 run ログから 12 組の測定行を抽出する。
+
+    期待する 12 組（`EXPECTED_KEYS`）がそれぞれちょうど 1 件ずつ存在する
+    ことを検証し、欠落・重複があれば `ValueError` で集計を中止する
+    （fail-closed。モジュール docstring「採否判定前の検証」節参照）。
+    測定行が 1 件も無い場合（非 macOS 実行等）も「12 件すべて欠落」として
+    同じ経路で検出され、黙って 0 走査のまま完了することはない。
+    """
     rows: dict[tuple[int, int, int], dict] = {}
+    duplicates: list[tuple[int, int, int]] = []
+    unexpected: list[tuple[int, int, int]] = []
     text = path.read_text()
     for m in LINE_RE.finditer(text):
         key = (int(m["tm"]), int(m["tn"]), int(m["tk"]))
+        if key in rows:
+            duplicates.append(key)
+        if key not in EXPECTED_KEYS:
+            unexpected.append(key)
         rows[key] = {
             "control": (int(m["cm"]), int(m["cn"]), int(m["ck"])),
             "target_tflops": float(m["target_tflops"]),
@@ -71,11 +106,26 @@ def parse_log(path: Path) -> dict[tuple[int, int, int], dict]:
             "target_actual_groups": int(m["target_actual_groups"]),
             "control_actual_groups": int(m["control_actual_groups"]),
         }
+
+    missing = sorted(EXPECTED_KEYS - rows.keys())
+    if missing or duplicates or unexpected:
+        parts = [f"{path.name}: 期待する 12 形状の測定行検証に失敗した"]
+        if missing:
+            parts.append(f"欠落 {len(missing)} 件: {missing}")
+        if duplicates:
+            parts.append(f"重複 {len(duplicates)} 件: {duplicates}")
+        if unexpected:
+            parts.append(f"想定外の組 {len(unexpected)} 件: {unexpected}")
+        raise ValueError("。".join(parts))
+
     return rows
 
 
 def aggregate(run_logs: list[Path]) -> str:
     per_run = [parse_log(p) for p in run_logs]
+    # 各 run は parse_log で EXPECTED_KEYS の 12 組ちょうど 1 件ずつを
+    # 持つことが既に保証されているため、run 間で走査順序（辞書挿入順＝
+    # ログ内出現順）が食い違っていないかのみを追加確認する。
     keys = list(per_run[0].keys())
     for i, rows in enumerate(per_run[1:], start=2):
         if list(rows.keys()) != keys:
@@ -132,6 +182,24 @@ def aggregate(run_logs: list[Path]) -> str:
     return "\n".join(lines)
 
 
+def _line_for(m: int, n: int, k: int, control: tuple[int, int, int]) -> str:
+    """self-test 用の 1 形状分の測定行を組み立てる（`LINE_RE` の形式に合わせる）。"""
+    cm, cn, ck = control
+    return (
+        f"target=({m},{n},{k}) control=({cm},{cn},{ck}) target_tflops=0.1000 "
+        "control_tflops=0.2000 target_over_control=0.5000 spread_target=0.0100 "
+        "spread_control=0.0100 target_actual_groups=4 control_actual_groups=64\n"
+    )
+
+
+def _all_12_lines() -> str:
+    return "".join(
+        _line_for(mn, mn, k, (256, 256, 256))
+        for mn in (32, 64, 128, 256)
+        for k in (2048, 4096, 8192)
+    )
+
+
 def self_test() -> None:
     sample = (
         "target=(64,64,4096) control=(256,256,256) target_tflops=0.0909 "
@@ -139,18 +207,69 @@ def self_test() -> None:
         "spread_control=0.4255 target_actual_groups=4 control_actual_groups=64\n"
     )
     tmp = LOG_DIR / "_self_test_sample.log"
-    tmp.write_text(sample)
+
+    def write_and_parse(text: str) -> dict[tuple[int, int, int], dict]:
+        tmp.write_text(text)
+        return parse_log(tmp)
+
     try:
-        rows = parse_log(tmp)
+        # 単一行のパース自体は従来どおり検証できる（12 組検証はこの後の
+        # ケースで別途確認する）が、EXPECTED_KEYS の 12 組検証が新設された
+        # ため単独では ValueError になる。行パース結果の中身の検証は
+        # 12 組が揃った `_all_12_lines()` ベースの正常系ケースで行う。
+        try:
+            write_and_parse(sample)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("1 行のみのログは 12 組検証で ValueError になるはず")
+
+        # 正常系: 12 組がちょうど 1 件ずつ揃っていればパースが通る。
+        rows = write_and_parse(_all_12_lines())
         key = (64, 64, 4096)
         assert key in rows, "行パース失敗"
         assert rows[key]["control"] == (256, 256, 256)
-        assert abs(rows[key]["target_tflops"] - 0.0909) < 1e-9
+        assert abs(rows[key]["target_tflops"] - 0.1000) < 1e-9
         assert rows[key]["target_actual_groups"] == 4
         assert rows[key]["control_actual_groups"] == 64
+        assert len(rows) == 12, "12 組ちょうどのはず"
+
+        # 異常系1: 測定行が 1 件も無い（非 macOS 環境で解析値のみ出力する
+        # ケースの再現）。旧実装は keys=[] のまま黙って完走し「不採用」を
+        # 誤って機械判定していた（codex-review 指摘対応の回帰確認）。
+        try:
+            write_and_parse("")
+        except ValueError as e:
+            assert "欠落 12 件" in str(e), f"空ログのエラーメッセージが想定外: {e}"
+        else:
+            raise AssertionError("空ログは ValueError になるはず")
+
+        # 異常系2: 12 組中 1 組欠落（(256,256,8192) を除いた 11 行）。
+        missing_one = "".join(
+            _line_for(mn, mn, k, (256, 256, 256))
+            for mn in (32, 64, 128, 256)
+            for k in (2048, 4096, 8192)
+            if not (mn == 256 and k == 8192)
+        )
+        try:
+            write_and_parse(missing_one)
+        except ValueError as e:
+            assert "欠落 1 件" in str(e), f"欠落 1 件のエラーメッセージが想定外: {e}"
+        else:
+            raise AssertionError("11 組のログは ValueError になるはず")
+
+        # 異常系3: 同一形状が重複（(32,32,2048) を 2 回）。
+        duplicated = _line_for(32, 32, 2048, (256, 256, 256)) + _all_12_lines()
+        try:
+            write_and_parse(duplicated)
+        except ValueError as e:
+            assert "重複" in str(e), f"重複のエラーメッセージが想定外: {e}"
+        else:
+            raise AssertionError("重複を含むログは ValueError になるはず")
+
         print("self-test OK")
     finally:
-        tmp.unlink()
+        tmp.unlink(missing_ok=True)
 
 
 def main() -> None:
