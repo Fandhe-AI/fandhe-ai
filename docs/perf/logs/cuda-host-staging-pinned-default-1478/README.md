@@ -55,7 +55,7 @@ WIP による汚染防止）。
 - ゲート B: 全 N で `after_pinned/after_pageable ≤ 1.05` かつ
   `default_kind,Pinned` が 5 run すべてに存在 — **達成**
 - ゲート C（framework-compare gemm cuda reuse 非後退ガード）は
-  `docs/perf/logs/cuda-host-staging-pinned-default-1478/gate-c/` を参照
+  `docs/perf/logs/cuda-host-staging-pinned-default-1478/gate-c-sanity.md` を参照
   （実施した場合）。想定結果は「差なし」（`gemm` タスクは
   `MemoryOps::with_host_view` に到達しないため。イシュー #1478 計画
   F2 参照）。
