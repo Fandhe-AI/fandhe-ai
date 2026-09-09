@@ -472,7 +472,11 @@ impl CudaMemory {
     /// `device.stream()` を `Arc` クローンで共有する（`gemm.rs::CudaGemm::new`
     /// と同じ共有契約）。新規の計測系列を持つトラッカーを生成する
     /// （`backend-cpu::CpuMemory::new` と同型。同一プロセス内でピークを
-    /// 集約したい場合は `clone()` でトラッカーを共有する）。
+    /// 集約したい場合は `clone()` でトラッカーを共有する）。`host_staging`
+    /// は本番既定種別（[`host_staging::HOST_STAGING_KIND`]。イシュー
+    /// #1478 で `Pinned` へ切替済み）で初期化する。`Pinned` 確保
+    /// （`unsafe`）自体はキャッシュ miss 時に `HostStaging::alloc` 内で
+    /// 遅延実行されるため、本コンストラクタ自体は driver を呼ばない。
     pub fn new(device: &CudaDevice) -> Self {
         Self {
             stream: device.stream().clone(),
@@ -495,13 +499,14 @@ impl CudaMemory {
     /// コメント参照）により本番 `with_host_view`（`self.host_staging`
     /// キャッシュ経由・2 回目以降は `take` が hit する）と不公平な
     /// 比較になってしまう。本コンストラクタは `self.host_staging` の
-    /// 初期種別だけを差し替えた `CudaMemory` を返すことで、`Pageable`
-    /// （本番既定）と `Pinned` の両方を**同じキャッシュ経由の
-    /// `with_host_view` 経路**で比較できるようにする
-    /// （`docs/perf/cuda-host-view-staging-readout.md` §5.1 のゲート C
-    /// 計測が使う入口）。`unsafe` は追加しない（`kind` に応じた
-    /// `unsafe` 呼び出し自体は既存の `HostStaging::alloc` 内に閉じて
-    /// おり、本コンストラクタはそこへ渡す初期値を選ぶだけ）。
+    /// 初期種別だけを差し替えた `CudaMemory` を返すことで、`Pinned`
+    /// （本番既定・イシュー #1478）と `Pageable`（切替前既定・対照腕）
+    /// の両方を**同じキャッシュ経由の `with_host_view` 経路**で比較
+    /// できるようにする（`docs/perf/cuda-host-view-staging-readout.md`
+    /// §5.1 のゲート C 計測が使う入口。§8 の #1478 再計測でも同じ入口を
+    /// 使う）。`unsafe` は追加しない（`kind` に応じた `unsafe` 呼び出し
+    /// 自体は既存の `HostStaging::alloc` 内に閉じており、本
+    /// コンストラクタはそこへ渡す初期値を選ぶだけ）。
     #[cfg(feature = "internal-diagnostics")]
     pub fn new_with_host_staging_kind(
         device: &CudaDevice,
@@ -1139,6 +1144,21 @@ impl CudaMemory {
         }
     }
 
+    /// `self.host_staging` が実際に構築されている種別（`Pinned`／
+    /// `Pageable`）を返す診断用アクセサ（イシュー #1478 で追加）。
+    /// `CudaMemory::new` の既定が `HOST_STAGING_KIND` の値どおり
+    /// `Pinned` に解決されていることを、A/B ハーネス・実機テストが
+    /// 自己証明するために使う（`host_staging_stats` と同じ
+    /// `internal-diagnostics` feature 限定・poison 時のフォールバック
+    /// 方針。unsafe は追加しない）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn host_staging_kind(&self) -> host_staging::HostStagingKind {
+        match self.host_staging.lock() {
+            Ok(guard) => guard.kind(),
+            Err(poisoned) => poisoned.into_inner().kind(),
+        }
+    }
+
     /// `host_staging` の全エントリを破棄し、解放したバイト数を返す
     /// （REQ-14 `release_cached` 系と同型の明示解放 API。page-locked
     /// メモリ〈`Pinned` 種〉はホスト RAM を固定するため、長時間常駐する
@@ -1151,10 +1171,13 @@ impl CudaMemory {
     }
 
     /// **`internal-diagnostics` feature（既定 off）限定の診断専用入口**。
-    /// イシュー #1336 codex-review 指摘: 本番既定 [`host_staging::
-    /// HOST_STAGING_KIND`] は `Pageable` に固定されているため、`Pinned`
-    /// （page-locked・WRITECOMBINED）経路は実機テスト・`Pageable` との
-    /// A/B 比較のいずれからも到達できていなかった。本メソッドは
+    /// イシュー #1336 codex-review 指摘の経緯: 当時の本番既定
+    /// [`host_staging::HOST_STAGING_KIND`] は `Pageable` に固定されて
+    /// おり、`Pinned`（page-locked・WRITECOMBINED）経路は実機テスト・
+    /// `Pageable` との A/B 比較のいずれからも到達できていなかった。
+    /// 現在は本番既定が `Pinned`（イシュー #1478）であるため、本
+    /// メソッドは主に `Pageable`（切替前既定）を明示選択して A/B 比較
+    /// する用途で使う。本メソッドは
     /// [`MemoryOps::with_host_view`]（`Device` 配置分岐）と同じ D2H・
     /// `f` 呼び出し手順を踏みつつ、`self.host_staging`（本番既定種別で
     /// 固定された共有キャッシュ）を経由せず、呼び出しごとに指定
