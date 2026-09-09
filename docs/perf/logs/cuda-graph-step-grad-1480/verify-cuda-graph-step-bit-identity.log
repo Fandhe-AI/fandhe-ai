@@ -1,0 +1,21 @@
+[手動再現] scripts/verify-cuda-graph-step-bit-identity.sh と同一手順・同一判定ロジックによる
+eager_baseline（opt-in OFF）・graph_capture（opt-in ON）の 2 プロセス実行結果の突合。
+
+同スクリプトのリモート直接起動は、本エージェントのローカル worktree 隔離ガードにより
+実行できなかった（env_info.txt「補足」節参照）ため、同スクリプトが内部で行う手順
+（extract_bits_lines の正規表現 `^(step\[|final\.param\[)` によるビット行抽出・diff 突合）
+を手動で再現した。個々のコマンド生出力は eager_baseline_raw.log / graph_capture_raw.log、
+抽出済みビット行は eager_bits.txt / graph_bits.txt を参照。
+
+[1/2] eager_baseline（opt-in OFF）を実行する...
+test eager_baseline ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.92s
+
+[2/2] graph_capture（opt-in ON）を実行する...
+test graph_capture ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.45s
+
+$ diff <(eager_bits.txt) <(graph_bits.txt)
+(差分なし。diff exit code 0)
+
+OK: eager_baseline（opt-in OFF）と graph_capture（opt-in ON）は 4782 行すべて bit 同一
