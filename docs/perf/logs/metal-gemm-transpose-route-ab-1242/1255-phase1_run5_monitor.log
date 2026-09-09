@@ -1,0 +1,19 @@
+2026-09-09T07:46:16+0900 load1=2.00 load_error=0
+2026-09-09T07:46:46+0900 load1=2.12 load_error=0
+2026-09-09T07:47:16+0900 load1=2.50 load_error=0
+2026-09-09T07:47:46+0900 load1=2.05 load_error=0
+2026-09-09T07:48:16+0900 load1=2.07 load_error=0
+2026-09-09T07:48:46+0900 load1=1.79 load_error=0
+2026-09-09T07:49:16+0900 load1=1.66 load_error=0
+2026-09-09T07:49:46+0900 load1=1.62 load_error=0
+2026-09-09T07:50:16+0900 load1=1.48 load_error=0
+2026-09-09T07:50:46+0900 load1=1.50 load_error=0
+2026-09-09T07:51:16+0900 load1=1.59 load_error=0
+2026-09-09T07:51:46+0900 load1=1.28 load_error=0
+2026-09-09T07:52:16+0900 load1=1.04 load_error=0
+2026-09-09T07:52:47+0900 load1=1.13 load_error=0
+2026-09-09T07:53:17+0900 load1=2.02 load_error=0
+2026-09-09T07:53:47+0900 load1=2.20 load_error=0
+2026-09-09T07:54:17+0900 load1=2.33 load_error=0
+2026-09-09T07:54:47+0900 load1=10.74 load_error=0
+RUN_CLASSIFICATION run=5 run_valid=1 load_class=low median_load1=1.895
