@@ -32,7 +32,7 @@
 //! うえでの再計測（同 doc §5.3・イシュー #1438）により `Pinned` が全
 //! 計測形状（N=1024/2048/4096）で `Pageable` をさらに上回る（約 6〜21%
 //! 高速）ことが確定した。この確定値とユーザー承認（2026-09-09・
-//! イシュー #1478）に基づき、既定 [`HOST_STAGING_KIND`] は `Pinned`
+//! イシュー #1478）に基づき、既定 `HOST_STAGING_KIND` は `Pinned`
 //! へ切り替えている**（同 doc §8。`Pageable` は `new_with_host_
 //! staging_kind` 経由で A/B 比較用に明示選択できる対照腕として残す）。
 //! `cuMemHostAlloc`（`alloc_pinned`）が失敗した場合は `CudaError` として
@@ -85,7 +85,7 @@ pub(crate) const HOST_STAGING_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
 /// ホストステージングバッファの実装種別。`Pageable`・`Pinned` いずれも
 /// `pub`（`pub(crate)` から変更。codex-review 指摘の経緯: 当時の本番既定
-/// （[`HOST_STAGING_KIND`]）は `Pageable` に固定されており、`Pinned`
+/// （`HOST_STAGING_KIND`）は `Pageable` に固定されており、`Pinned`
 /// 経路を実機で検証する・両者を A/B 比較する手段が診断入口から
 /// 提供されていなかった）で、`internal-diagnostics` feature（既定
 /// off）限定の `memory::CudaMemory::with_host_view_using_kind`
@@ -96,7 +96,7 @@ pub(crate) const HOST_STAGING_CAP_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostStagingKind {
     /// cudarc `alloc_pinned`（page-locked・WRITECOMBINED）。unsafe 1 箇所。
-    /// **本番既定**（[`HOST_STAGING_KIND`]。イシュー #1478・2026-09-09
+    /// **本番既定**（`HOST_STAGING_KIND`。イシュー #1478・2026-09-09
     /// ユーザー承認）。
     ///
     /// GB10 実機実測（`docs/perf/cuda-host-view-staging-readout.md`

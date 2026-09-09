@@ -473,7 +473,7 @@ impl CudaMemory {
     /// と同じ共有契約）。新規の計測系列を持つトラッカーを生成する
     /// （`backend-cpu::CpuMemory::new` と同型。同一プロセス内でピークを
     /// 集約したい場合は `clone()` でトラッカーを共有する）。`host_staging`
-    /// は本番既定種別（[`host_staging::HOST_STAGING_KIND`]。イシュー
+    /// は本番既定種別（`host_staging::HOST_STAGING_KIND`。イシュー
     /// #1478 で `Pinned` へ切替済み）で初期化する。`Pinned` 確保
     /// （`unsafe`）自体はキャッシュ miss 時に `HostStaging::alloc` 内で
     /// 遅延実行されるため、本コンストラクタ自体は driver を呼ばない。
@@ -1172,7 +1172,7 @@ impl CudaMemory {
 
     /// **`internal-diagnostics` feature（既定 off）限定の診断専用入口**。
     /// イシュー #1336 codex-review 指摘の経緯: 当時の本番既定
-    /// [`host_staging::HOST_STAGING_KIND`] は `Pageable` に固定されて
+    /// `host_staging::HOST_STAGING_KIND` は `Pageable` に固定されて
     /// おり、`Pinned`（page-locked・WRITECOMBINED）経路は実機テスト・
     /// `Pageable` との A/B 比較のいずれからも到達できていなかった。
     /// 現在は本番既定が `Pinned`（イシュー #1478）であるため、本
