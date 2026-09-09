@@ -184,6 +184,18 @@ def main() -> int:
         print(f"## N={n}\n")
         print("| phase | off median (of 5 run medians, ms) | off n | on median (ms) | on n | on/off 比 |")
         print("|---|---|---|---|---|---|")
+        # PR #1501 codex-review P2 是正: 丸めなし raw コメント（後述）を
+        # 各行の直後へインラインで出力すると、GitHub の Markdown テーブルは
+        # `|` で始まらない行（コメント行）に遭遇した時点で終了してしまい、
+        # それ以降の行（同じテーブルの残り phase 行）が表として描画されず
+        # 生テキストのまま表示されてしまう（イシュー #1481 codex-review
+        # 指摘。`aggregate-dgx.md`／`aggregate-m4max.md` の各 N セクション
+        # で alloc_c 行の直後に表が壊れて見える形で実際に発生していた）。
+        # `judge_rules.py::parse_layer_b_md` の `LAYER_B_RAW_RE` はコメント
+        # 自身が `N=`／`phase=` を保持しており位置に依存しないため、
+        # 全 phase 行を出し切ってからコメントをまとめて表の後ろへ出力する
+        # よう変更する（機械可読性は不変・人間可読の表だけが直る）。
+        raw_comments: list[str] = []
         for phase in PHASES:
             off_vals = off_agg.get(n, {}).get(phase, [])
             on_vals = on_agg.get(n, {}).get(phase, [])
@@ -193,26 +205,29 @@ def main() -> int:
             print(
                 f"| {phase} | {off_med:.4f} | {len(off_vals)} | {on_med:.4f} | {len(on_vals)} | {ratio:.4f} |"
             )
-            # PR #1501 codex-review P2 是正: 上記テーブル列は人間可読性の
-            # ための表示丸め（小数 4 桁）であり、`judge_rules.py` の規則 2
-            # （DGX N=2048 決定セル。`RULE2_OPS_GEMM_THRESHOLD=1.00` を
-            # 厳密な `<=`／`<` で判定する）がこの丸め値をそのまま比較に
-            # 使うと、真の比が 1.00004 のように閾値をわずかに超えていても
-            # 表示は 1.0000 に丸まり誤って通過（逆に 0.99996 は誤って
-            # 棄却）しうる欠陥があった。`repr()` は Python の float が
-            # 同じ 64 bit 表現へ丸め落ちなく再構成できる最短の文字列
-            # 表現（round-trip 保証）を返すため、この行を機械可読な
-            # コメントとして追加出力し `judge_rules.py::parse_layer_b_md`
-            # が丸めなしの値を優先して読み取れるようにする（表示用の
-            # `.4f` テーブル自体は変更しない＝丸めは表示専用に限定）。
-            # `off_vals`／`on_vals` が空（=ratio が nan）の場合は出力しない
-            # （`parse_layer_b_md` 側で "nan" 文字列を特別扱いする必要を
-            # 避けるフェイルセーフ）。
+            # 上記テーブル列は人間可読性のための表示丸め（小数 4 桁）で
+            # あり、`judge_rules.py` の規則 2（DGX N=2048 決定セル。
+            # `RULE2_OPS_GEMM_THRESHOLD=1.00` を厳密な `<=`／`<` で判定
+            # する）がこの丸め値をそのまま比較に使うと、真の比が
+            # 1.00004 のように閾値をわずかに超えていても表示は 1.0000 に
+            # 丸まり誤って通過（逆に 0.99996 は誤って棄却）しうる欠陥が
+            # あった。`repr()` は Python の float が同じ 64 bit 表現へ
+            # 丸め落ちなく再構成できる最短の文字列表現（round-trip 保証）
+            # を返すため、このコメントを機械可読な形で保持し
+            # `judge_rules.py::parse_layer_b_md` が丸めなしの値を優先して
+            # 読み取れるようにする（表示用の `.4f` テーブル自体は変更
+            # しない＝丸めは表示専用に限定）。`off_vals`／`on_vals` が空
+            # （=ratio が nan）の場合は追加しない（`parse_layer_b_md` 側で
+            # "nan" 文字列を特別扱いする必要を避けるフェイルセーフ）。
             if off_vals and on_vals and off_med != 0:
-                print(
+                raw_comments.append(
                     f"<!-- raw N={n} phase={phase} off_med={off_med!r} "
                     f"on_med={on_med!r} ratio={ratio!r} -->"
                 )
+        if raw_comments:
+            print()
+            for comment in raw_comments:
+                print(comment)
         print()
     return 0
 

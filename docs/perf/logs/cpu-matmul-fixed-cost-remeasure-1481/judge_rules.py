@@ -414,6 +414,69 @@ def _raw_run_pair_ratios(
     return [on_list[i] / off_list[i] for i in range(REQUIRED_RUN_COUNT)]
 
 
+def _raw_ratio_or_incomplete(
+    off_runs: dict[tuple[int, str], list[float]],
+    on_runs: dict[tuple[int, str], list[float]],
+    n: int,
+    mode: str,
+) -> tuple[float | None, bool]:
+    """`_raw_median_ratio` を計算し、あわせて「指定済み生データが不完全
+    だったか」（`incomplete`）を返す（PR #1501 codex-review P1 是正・
+    2026-09-09 その 6）。
+
+    `attempted`（`off_runs`／`on_runs` のいずれかに該当 `(n, mode)`
+    キーが存在する）を「この (実機, 腕, size, mode) の生データが
+    `--jsonl` で指定されていた」の判定基準とする。未指定（両方とも
+    キーが存在しない。例: `--jsonl` 完全省略時の自己テスト後方互換
+    ケースや、当該実機の当該腕がそもそも `--jsonl` に含まれない
+    ケース）は Markdown フォールバックが正当なため `incomplete=False`
+    を返す。指定されていたにもかかわらず run 数が
+    `REQUIRED_RUN_COUNT` と異なる・片腕のみ欠落等で `raw is None` に
+    なった場合（例: DGX on N=512/reuse の生データが 1 件しか収集
+    できなかった）は `incomplete=True` を返す。呼び出し側 `judge()`
+    はこれを収集し、1 件でもあれば最終 verdict を UNDETERMINED へ
+    強制する（従来は規則 2〜4 いずれも `raw is None` を無条件で
+    Markdown 由来の丸め値へフォールバックし、その丸め値だけで
+    ADOPT 系判定へ寄与しうる契約不整合があった。指摘の反例:
+    DGX on N=512/reuse を 1 件だけにし対応する Markdown 比を 1.0 に
+    すると、規則 3 が「満たす」と誤判定されて ADOPT_UNCONDITIONAL を
+    返しうる）。
+    """
+    attempted = (n, mode) in off_runs or (n, mode) in on_runs
+    raw = _raw_median_ratio(off_runs, on_runs, n, mode)
+    incomplete = attempted and raw is None
+    return raw, incomplete
+
+
+def _raw_candle_ratio_or_incomplete(
+    off_fandhe: dict[tuple[int, str], list[float]],
+    on_fandhe: dict[tuple[int, str], list[float]],
+    off_candle: dict[int, list[float]],
+    on_candle: dict[int, list[float]],
+    n: int,
+) -> tuple[float | None, bool]:
+    """`_raw_candle_ratio` を計算し、あわせて「指定済み生データが不完全
+    だったか」（`incomplete`）を返す（`_raw_ratio_or_incomplete` の
+    規則 4（改定版）版。PR #1501 codex-review P1 是正・2026-09-09
+    その 6）。
+
+    `attempted`（`off_candle`／`on_candle` のいずれかに該当 `n` キーが
+    存在する）を「この (実機, 腕, size) の candle 生データが
+    `--candle-jsonl` で指定されていた」の判定基準とする（fandhe-ai 側
+    `off_fandhe`／`on_fandhe` の有無は判定に使わない。他規則の判定に
+    必要な理由で fandhe-ai 側 jsonl のみ与えられ candle-jsonl が
+    entirely 未指定のケース〈自己テスト後方互換〉を誤って
+    incomplete 扱いしないため）。未指定は `incomplete=False`
+    （Markdown フォールバックが正当）、指定されていたのに 4 入力の
+    いずれかが `REQUIRED_RUN_COUNT` に満たない等で `raw is None` に
+    なった場合は `incomplete=True` を返す。
+    """
+    attempted = n in off_candle or n in on_candle
+    raw = _raw_candle_ratio(off_fandhe, on_fandhe, off_candle, on_candle, n)
+    incomplete = attempted and raw is None
+    return raw, incomplete
+
+
 def _check_rule1_checksum(
     layer_a: dict[str, dict[tuple[int, str], LayerACell]],
 ) -> tuple[bool, list[str]]:
@@ -488,6 +551,12 @@ def judge(
     lines: list[str] = []
     jsonl = jsonl or {}
     candle_jsonl = candle_jsonl or {}
+    # 規則 2〜4 で「指定済み生データが不完全」（`_raw_ratio_or_incomplete`
+    # ／`_raw_candle_ratio_or_incomplete` の `incomplete=True`）と判定
+    # されたセルの説明を集める。1 件でもあれば規則 1・規則 5 の
+    # データ欠落と同様、他規則の成否によらず最終 verdict を
+    # UNDETERMINED へ強制する（PR #1501 codex-review P1 是正）。
+    incomplete_cells: list[str] = []
 
     # 規則 1（前提条件）: 両実機・全セルで checksum 完全一致。
     checksum_ok, checksum_lines = _check_rule1_checksum(layer_a)
@@ -501,9 +570,11 @@ def judge(
     dgx_b = layer_b.get("dgx", {})
     r2_layer_a_cell = dgx_a.get((2048, "reuse"))
     r2_layer_a_md = r2_layer_a_cell.ratio if r2_layer_a_cell is not None else None
-    r2_layer_a_raw = _raw_median_ratio(
+    r2_layer_a_raw, r2_incomplete = _raw_ratio_or_incomplete(
         jsonl.get(("dgx", "off"), {}), jsonl.get(("dgx", "on"), {}), 2048, "reuse"
     )
+    if r2_incomplete:
+        incomplete_cells.append("規則2 DGX N=2048/reuse")
     r2_layer_a = r2_layer_a_raw if r2_layer_a_raw is not None else r2_layer_a_md
     r2_alloc_c = dgx_b.get((2048, "alloc_c"))
     r2_ops_gemm = dgx_b.get((2048, "ops_gemm"))
@@ -520,9 +591,11 @@ def judge(
     )
     lines.append(
         f"規則2 DGX N=2048決定セル: layer_a(reuse)={r2_layer_a} "
-        f"(md={r2_layer_a_md}, raw={r2_layer_a_raw}) (<= {RULE234_THRESHOLD}) "
+        f"(md={r2_layer_a_md}, raw={r2_layer_a_raw}, incomplete={r2_incomplete}) "
+        f"(<= {RULE234_THRESHOLD}) "
         f"alloc_c比={r2_alloc_c} ops_gemm比={r2_ops_gemm} (<= {RULE2_OPS_GEMM_THRESHOLD}) "
         f"-> {'満たす' if r2_ok else '不成立'}"
+        f"{'（指定済み生データ不完全のため最終 verdict は UNDETERMINED へ）' if r2_incomplete else ''}"
     )
 
     # 規則 3: 対照セル（両実機 N=512/1024 の fresh/reuse 全セル）。
@@ -539,13 +612,17 @@ def judge(
             for mode in ("fresh", "reuse"):
                 cell = a.get((n, mode))
                 v_md = cell.ratio if cell is not None else None
-                v_raw = _raw_median_ratio(off_runs, on_runs, n, mode)
+                v_raw, v_incomplete = _raw_ratio_or_incomplete(off_runs, on_runs, n, mode)
+                if v_incomplete:
+                    incomplete_cells.append(f"規則3 対照セル {node} N={n}/{mode}")
                 v = v_raw if v_raw is not None else v_md
                 ok = v is not None and v <= RULE234_THRESHOLD
                 lines.append(
                     f"規則3 対照セル {node} N={n}/{mode}: 比={v} "
-                    f"(md={v_md}, raw={v_raw}) (<= {RULE234_THRESHOLD}) "
+                    f"(md={v_md}, raw={v_raw}, incomplete={v_incomplete}) "
+                    f"(<= {RULE234_THRESHOLD}) "
                     f"-> {'満たす' if ok else '不成立'}"
+                    f"{'（指定済み生データ不完全のため最終 verdict は UNDETERMINED へ）' if v_incomplete else ''}"
                 )
                 if node == "dgx":
                     r3_dgx_ok = r3_dgx_ok and ok
@@ -581,7 +658,11 @@ def judge(
         for n in (512, 1024, 2048):
             off_v_md = off.get(n)
             on_v_md = on.get(n)
-            ratio_raw = _raw_candle_ratio(off_fandhe, on_fandhe, off_candle, on_candle, n)
+            ratio_raw, ratio_incomplete = _raw_candle_ratio_or_incomplete(
+                off_fandhe, on_fandhe, off_candle, on_candle, n
+            )
+            if ratio_incomplete:
+                incomplete_cells.append(f"規則4改定版 {node} N={n}")
             if ratio_raw is not None:
                 ratio = ratio_raw
                 ok = ratio >= RULE4_MIN_RATIO
@@ -596,17 +677,22 @@ def judge(
                 lines.append(
                     f"規則4改定版 {node} N={n}: candle比 off={off_v_md} on={on_v_md} "
                     f"on/off比={ratio} (>= {RULE4_MIN_RATIO:.4f}) -> {'不成立（データ欠落）'}"
+                    f"{'（指定済み生データ不完全のため最終 verdict は UNDETERMINED へ）' if ratio_incomplete else ''}"
                 )
             else:
                 # `--candle-jsonl` 未指定・データ欠落: Markdown 由来の
                 # 丸め済み比へフォールバックする（既知の精度限界: 3 桁
-                # 丸め由来の乖離は高々 5e-4 程度）。
+                # 丸め由来の乖離は高々 5e-4 程度）。`ratio_incomplete` が
+                # True の場合（= 指定済みだったが不完全）は、この
+                # フォールバック結果の成否によらず最終 verdict が
+                # UNDETERMINED へ倒れる（PR #1501 codex-review P1 是正）。
                 ratio = on_v_md / off_v_md
                 ok = ratio >= RULE4_MIN_RATIO
                 lines.append(
                     f"規則4改定版 {node} N={n}: candle比 off={off_v_md} on={on_v_md} "
                     f"on/off比（md フォールバック・丸めあり）={ratio} "
                     f"(>= {RULE4_MIN_RATIO:.4f}) -> {'満たす' if ok else '不成立'}"
+                    f"{'（指定済み生データ不完全のため最終 verdict は UNDETERMINED へ）' if ratio_incomplete else ''}"
                 )
             if node == "dgx":
                 r4_dgx_ok = r4_dgx_ok and ok
@@ -680,6 +766,16 @@ def judge(
         # 規則 5 の入力（両腕 5 run の対応関係）が欠落・不完全な場合も、
         # 規則 1 と同様に他規則の成否によらず判定不能とする（P1 是正）。
         verdict = "UNDETERMINED"
+    elif incomplete_cells:
+        # 規則 2〜4 のいずれかで「指定済み生データが不完全」だった
+        # セルが 1 件でもあれば、規則 1・規則 5 の欠落と同様に他規則の
+        # 成否によらず判定不能とする（PR #1501 codex-review P1 是正:
+        # 従来は Markdown フォールバックの成否のみで ADOPT 系判定へ
+        # 寄与しえた。指摘の反例は DGX on N=512/reuse の生データを
+        # 1 件だけにし対応する Markdown 比を 1.0 にすると規則 3 が
+        # 「満たす」と誤判定されて ADOPT_UNCONDITIONAL を返せてしまう
+        # というもの）。
+        verdict = "UNDETERMINED"
     elif dgx_rules_1_4_ok and m4max_rules_1_4_ok and not r5_regression:
         # (c) 両実機とも全規則を満たす → 無条件 ADOPT。
         verdict = "ADOPT_UNCONDITIONAL"
@@ -698,7 +794,8 @@ def judge(
     lines.append(
         f"折り込み判定: checksum_ok={checksum_ok} dgx_rules_1_4_ok={dgx_rules_1_4_ok} "
         f"m4max_rules_1_4_ok={m4max_rules_1_4_ok} r5_regression={r5_regression} "
-        f"r5_data_complete={r5_data_complete} -> verdict={verdict}"
+        f"r5_data_complete={r5_data_complete} incomplete_cells={incomplete_cells} "
+        f"-> verdict={verdict}"
     )
 
     return lines, verdict
@@ -1051,6 +1148,53 @@ def _self_test() -> int:
         layer_a_m4max_r3_fail, layer_b_ok, gate_ok, jsonl_r5_no_regression
     )
     assert verdict_m4max_r3_fail == "REJECT", verdict_m4max_r3_fail
+
+    # PR #1501 codex-review P1 是正の核心回帰テスト（2026-09-09 その 6）:
+    # レビュー指摘の反例そのもの。DGX on N=512/reuse の生データが
+    # `REQUIRED_RUN_COUNT`（5）に満たず 1 件だけ収集された（off は
+    # 完備）状態で、対応する Markdown 比を 1.0（規則 3 の閾値内）に
+    # しても、規則 3 が「Markdown フォールバックで満たす」と誤判定
+    # されず、最終 verdict が UNDETERMINED になること（指定済み生
+    # データの不足を無条件フォールバックで握りつぶさない）。
+    jsonl_dgx_512_reuse_incomplete = dict(jsonl_r5_no_regression)
+    jsonl_dgx_512_reuse_incomplete[("dgx", "off")] = {
+        (512, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]
+    }
+    jsonl_dgx_512_reuse_incomplete[("dgx", "on")] = {(512, "reuse"): [1.0]}
+    _, verdict_r3_incomplete = judge(
+        _all_ok_layer_a(), layer_b_ok, gate_ok, jsonl_dgx_512_reuse_incomplete
+    )
+    assert verdict_r3_incomplete == "UNDETERMINED", verdict_r3_incomplete
+
+    # 同型の回帰テスト: 規則 2（DGX N=2048 決定セル）で on 腕の run 数が
+    # 超過（6 件）した場合も同様に UNDETERMINED になること。
+    jsonl_dgx_2048_reuse_excess = dict(jsonl_r5_no_regression)
+    jsonl_dgx_2048_reuse_excess[("dgx", "off")] = {
+        (2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0]
+    }
+    jsonl_dgx_2048_reuse_excess[("dgx", "on")] = {
+        (2048, "reuse"): [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    }
+    layer_b_r2_ok = {"dgx": {(2048, "alloc_c"): 0.5, (2048, "ops_gemm"): 0.99}}
+    _, verdict_r2_incomplete = judge(
+        _all_ok_layer_a(), layer_b_r2_ok, gate_ok, jsonl_dgx_2048_reuse_excess
+    )
+    assert verdict_r2_incomplete == "UNDETERMINED", verdict_r2_incomplete
+
+    # 同型の回帰テスト: 規則 4（改定版）で candle 側 off 腕の run 数が
+    # 不足（3 件）した場合も同様に UNDETERMINED になること。
+    candle_jsonl_dgx_512_incomplete = {
+        ("dgx", "off"): {512: [1.00049, 1.00049, 1.00049]},
+        ("dgx", "on"): {512: [0.95251] * REQUIRED_RUN_COUNT},
+    }
+    _, verdict_r4_incomplete = judge(
+        _all_ok_layer_a(),
+        layer_b_ok,
+        gate_ok,
+        jsonl_dgx_512_fandhe,
+        candle_jsonl_dgx_512_incomplete,
+    )
+    assert verdict_r4_incomplete == "UNDETERMINED", verdict_r4_incomplete
 
     print("self-test: OK", file=sys.stderr)
     return 0
