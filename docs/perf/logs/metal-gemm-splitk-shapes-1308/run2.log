@@ -1,0 +1,520 @@
+warning: struct `BatchGpuTimestamps` is never constructed
+   --> crates/backend-metal/src/context.rs:144:19
+    |
+144 | pub(crate) struct BatchGpuTimestamps {
+    |                   ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `from_raw`, `labels`, and `kernel_gpu_secs` are never used
+   --> crates/backend-metal/src/context.rs:152:8
+    |
+150 | impl BatchGpuTimestamps {
+    | ----------------------- associated items in this implementation
+151 |     /// `0.0`（未開始／完了通知未受領）を `None` へ変換して保持する。
+152 |     fn from_raw(gpu_start_secs: f64, gpu_end_secs: f64, meta: &BatchMeta) -> Self {
+    |        ^^^^^^^^
+...
+161 |     pub fn labels(&self) -> &[&'static str] {
+    |            ^^^^^^
+...
+168 |     pub fn kernel_gpu_secs(&self) -> Option<f64> {
+    |            ^^^^^^^^^^^^^^^
+
+warning: methods `synchronize_with_gpu_timestamps` and `synchronize_with_gpu_timestamps_impl` are never used
+   --> crates/backend-metal/src/context.rs:691:19
+    |
+242 | impl MetalContext {
+    | ----------------- methods in this implementation
+...
+691 |     pub(crate) fn synchronize_with_gpu_timestamps(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+699 |     fn synchronize_with_gpu_timestamps_impl(&self) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `encode_tiled_nn_recorded` and `encode_tiled_prepared` are never used
+    --> crates/backend-metal/src/gemm.rs:1790:8
+     |
+ 502 | impl MetalGemm {
+     | -------------- methods in this implementation
+...
+1790 |     fn encode_tiled_nn_recorded(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1912 |     pub(crate) fn encode_tiled_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `CudaSlice`
+  --> crates/backend-cuda/src/gemm_mma.rs:17:19
+   |
+17 |     CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, LaunchConfig, PushKernelArg,
+   |                   ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CudaSlice`
+  --> crates/backend-cuda/src/gemm_mma_tf32x3.rs:30:36
+   |
+30 | use cudarc::driver::{CudaFunction, CudaSlice, CudaStream};
+   |                                    ^^^^^^^^^
+
+warning: field `tiled_pipeline_128x64_error` is never read
+   --> crates/backend-cuda/src/gemm.rs:390:5
+    |
+237 | pub struct CudaGemm {
+    |            -------- field in this struct
+...
+390 |     tiled_pipeline_128x64_error: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:879:48
+    |
+879 | pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+879 - pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+879 + pub struct TiledPipelineFunction(CudaFunction, (), TiledPipelineTile);
+    |
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:892:8
+    |
+881 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+892 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: function `persistent_grid_blocks` is never used
+    --> crates/backend-cuda/src/gemm.rs:1055:15
+     |
+1055 | pub(crate) fn persistent_grid_blocks(num_tiles: u32, num_sms: u32, blocks_per_sm: u32) -> u32 {
+     |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_tile_count` is never used
+    --> crates/backend-cuda/src/gemm.rs:1075:15
+     |
+1075 | pub(crate) fn persistent_tile_count(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PersistentTiledPipelineFunction` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1142:12
+     |
+1142 | pub struct PersistentTiledPipelineFunction {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_block_threads` is never used
+    --> crates/backend-cuda/src/gemm.rs:1385:4
+     |
+1385 | fn persistent_block_threads(tile: TiledPipelineTile) -> u32 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StreamKPlan` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1418:12
+     |
+1418 | pub struct StreamKPlan {
+     |            ^^^^^^^^^^^
+
+warning: method `is_active` is never used
+    --> crates/backend-cuda/src/gemm.rs:1449:12
+     |
+1444 | impl StreamKPlan {
+     | ---------------- method in this implementation
+...
+1449 |     pub fn is_active(&self) -> bool {
+     |            ^^^^^^^^^
+
+warning: function `streamk_plan` is never used
+    --> crates/backend-cuda/src/gemm.rs:1479:15
+     |
+1479 | pub(crate) fn streamk_plan(
+     |               ^^^^^^^^^^^^
+
+warning: function `u32_from_u64_bounded` is never used
+    --> crates/backend-cuda/src/gemm.rs:1582:4
+     |
+1582 | fn u32_from_u64_bounded(value: u64, context: &str) -> Result<u32, CudaError> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StreamKTiledPipelineFunction` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1617:12
+     |
+1617 | pub struct StreamKTiledPipelineFunction {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:240:8
+    |
+240 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:302:4
+    |
+302 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:320:8
+    |
+320 | pub fn tiled_pipeline_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:324:8
+    |
+324 | static TILED_PIPELINE_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:331:8
+    |
+331 | pub fn tiled_pipeline_persistent_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:596:7
+    |
+596 | const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:661:7
+    |
+661 | const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_KERNEL_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:711:7
+    |
+711 | const TP_SK_KERNEL_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_streamk_f32(
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_TILE_CORE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:827:7
+    |
+827 | const TP_SK_TILE_CORE: &str = r#"            int tid = threadIdx.x;
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_KERNEL_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:965:7
+    |
+965 | const TP_SK_KERNEL_SUFFIX: &str = "        }\n    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_FIXUP_BLOCK_THREADS` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:979:11
+    |
+979 | pub const TP_SK_FIXUP_BLOCK_THREADS: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_FIXUP_KERNEL` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1036:7
+     |
+1036 | const TP_SK_FIXUP_KERNEL: &str = r#"
+     |       ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_streamk_source` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1105:4
+     |
+1105 | fn render_streamk_source(stages: u32) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_streamk_f32_source` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1120:8
+     |
+1120 | pub fn tiled_pipeline_streamk_f32_source() -> &'static str {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_STREAMK_F32_SOURCE` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1124:8
+     |
+1124 | static TILED_PIPELINE_STREAMK_F32_SOURCE: LazyLock<String> =
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_streamk_f32_source_with_stages` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1130:8
+     |
+1130 | pub fn tiled_pipeline_streamk_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:320:8
+    |
+320 | pub fn tiled_pipeline_128x64_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:380:4
+    |
+380 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:399:8
+    |
+399 | pub fn tiled_pipeline_128x64_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:403:8
+    |
+403 | static TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:411:8
+    |
+411 | pub fn tiled_pipeline_128x64_persistent_f32_source_with_stages(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:695:7
+    |
+695 | const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:763:7
+    |
+763 | const TP128_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Pinned` is never constructed
+   --> crates/backend-cuda/src/host_staging.rs:104:5
+    |
+ 88 | pub enum HostStagingKind {
+    |          --------------- variant in this enum
+...
+104 |     Pinned,
+    |     ^^^^^^
+    |
+    = note: `HostStagingKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `stats` is never used
+   --> crates/backend-cuda/src/host_staging.rs:250:19
+    |
+223 | impl HostStagingCache {
+    | --------------------- method in this implementation
+...
+250 |     pub(crate) fn stats(&self) -> HostStagingStats {
+    |                   ^^^^^
+
+warning: variant `Fresh` is never constructed
+   --> crates/backend-cuda/src/memory.rs:554:5
+    |
+550 | pub(crate) enum ReadbackDest {
+    |                 ------------ variant in this enum
+...
+554 |     Fresh,
+    |     ^^^^^
+    |
+    = note: `ReadbackDest` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:319:19
+    |
+299 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+319 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:715:19
+    |
+517 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+715 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+warning: `fandhe-ai-backend-cuda` (lib) generated 61 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running `target/release/examples/gemm_splitk_shapes_bench`
+label=target m=32 n=32 k=2048 tile=8x8x8(1x1, staged=false) actual_groups=16 k_tile_count=256 flops=4194304 mlx_case1_domain(tm=2,tn=2,tk=128)=true
+label=control m=128 n=128 k=128 tile=32x32x16(2x2, staged=true) actual_groups=16 k_tile_count=8 flops=4194304 mlx_case1_domain(tm=8,tn=8,tk=8)=true
+label=target m=32 n=32 k=2048 resolved_tile=8x8x8(1x1, staged=false) resolved_actual_groups=16
+label=control m=128 n=128 k=128 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=16
+target=(32,32,2048) control=(128,128,128) target_tflops=0.0196 control_tflops=0.0389 target_over_control=0.5030 spread_target=1.4377 spread_control=0.2750 target_actual_groups=16 control_actual_groups=16
+label=target m=32 n=32 k=4096 tile=8x8x8(1x1, staged=false) actual_groups=16 k_tile_count=512 flops=8388608 mlx_case1_domain(tm=2,tn=2,tk=256)=true
+label=control m=160 n=160 k=160 tile=32x32x16(2x2, staged=true) actual_groups=25 k_tile_count=10 flops=8192000 mlx_case1_domain(tm=10,tn=10,tk=10)=true
+label=target m=32 n=32 k=4096 resolved_tile=8x8x8(1x1, staged=false) resolved_actual_groups=16
+label=control m=160 n=160 k=160 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=25
+target=(32,32,4096) control=(160,160,160) target_tflops=0.0282 control_tflops=0.0835 target_over_control=0.3383 spread_target=0.0572 spread_control=0.2161 target_actual_groups=16 control_actual_groups=25
+label=target m=32 n=32 k=8192 tile=8x8x8(1x1, staged=false) actual_groups=16 k_tile_count=1024 flops=16777216 mlx_case1_domain(tm=2,tn=2,tk=512)=true
+label=control m=200 n=200 k=200 tile=32x32x16(2x2, staged=true) actual_groups=49 k_tile_count=13 flops=16000000 mlx_case1_domain(tm=13,tn=13,tk=12)=true
+label=target m=32 n=32 k=8192 resolved_tile=8x8x8(1x1, staged=false) resolved_actual_groups=16
+label=control m=200 n=200 k=200 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=49
+target=(32,32,8192) control=(200,200,200) target_tflops=0.0343 control_tflops=0.1417 target_over_control=0.2418 spread_target=0.0650 spread_control=0.1849 target_actual_groups=16 control_actual_groups=49
+label=target m=64 n=64 k=2048 tile=32x32x16(2x2, staged=true) actual_groups=4 k_tile_count=128 flops=16777216 mlx_case1_domain(tm=4,tn=4,tk=128)=true
+label=control m=200 n=200 k=200 tile=32x32x16(2x2, staged=true) actual_groups=49 k_tile_count=13 flops=16000000 mlx_case1_domain(tm=13,tn=13,tk=12)=true
+label=target m=64 n=64 k=2048 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=4
+label=control m=200 n=200 k=200 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=49
+target=(64,64,2048) control=(200,200,200) target_tflops=0.0726 control_tflops=0.1431 target_over_control=0.5074 spread_target=0.0794 spread_control=0.4409 target_actual_groups=4 control_actual_groups=49
+label=target m=64 n=64 k=4096 tile=32x32x16(2x2, staged=true) actual_groups=4 k_tile_count=256 flops=33554432 mlx_case1_domain(tm=4,tn=4,tk=256)=true
+label=control m=256 n=256 k=256 tile=32x32x16(2x2, staged=true) actual_groups=64 k_tile_count=16 flops=33554432 mlx_case1_domain(tm=16,tn=16,tk=16)=true
+label=target m=64 n=64 k=4096 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=4
+label=control m=256 n=256 k=256 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=64
+target=(64,64,4096) control=(256,256,256) target_tflops=0.0673 control_tflops=0.2947 target_over_control=0.2283 spread_target=0.7204 spread_control=0.5851 target_actual_groups=4 control_actual_groups=64
+label=target m=64 n=64 k=8192 tile=32x32x16(2x2, staged=true) actual_groups=4 k_tile_count=512 flops=67108864 mlx_case1_domain(tm=4,tn=4,tk=512)=true
+label=control m=320 n=320 k=320 tile=32x32x16(2x2, staged=true) actual_groups=100 k_tile_count=20 flops=65536000 mlx_case1_domain(tm=20,tn=20,tk=20)=true
+label=target m=64 n=64 k=8192 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=4
+label=control m=320 n=320 k=320 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=100
+target=(64,64,8192) control=(320,320,320) target_tflops=0.1196 control_tflops=0.5160 target_over_control=0.2318 spread_target=0.2683 spread_control=5.4787 target_actual_groups=4 control_actual_groups=100
+label=target m=128 n=128 k=2048 tile=32x32x16(2x2, staged=true) actual_groups=16 k_tile_count=128 flops=67108864 mlx_case1_domain(tm=8,tn=8,tk=128)=true
+label=control m=320 n=320 k=320 tile=32x32x16(2x2, staged=true) actual_groups=100 k_tile_count=20 flops=65536000 mlx_case1_domain(tm=20,tn=20,tk=20)=true
+label=target m=128 n=128 k=2048 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=16
+label=control m=320 n=320 k=320 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=100
+target=(128,128,2048) control=(320,320,320) target_tflops=0.1213 control_tflops=0.3789 target_over_control=0.3201 spread_target=0.5809 spread_control=0.1968 target_actual_groups=16 control_actual_groups=100
+label=target m=128 n=128 k=4096 tile=32x32x16(2x2, staged=true) actual_groups=16 k_tile_count=256 flops=134217728 mlx_case1_domain(tm=8,tn=8,tk=256)=true
+label=control m=408 n=408 k=408 tile=32x32x16(2x2, staged=true) actual_groups=169 k_tile_count=26 flops=135834624 mlx_case1_domain(tm=26,tn=26,tk=25)=true
+label=target m=128 n=128 k=4096 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=16
+label=control m=408 n=408 k=408 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=169
+target=(128,128,4096) control=(408,408,408) target_tflops=0.2246 control_tflops=0.5359 target_over_control=0.4190 spread_target=0.0545 spread_control=0.5701 target_actual_groups=16 control_actual_groups=169
+label=target m=128 n=128 k=8192 tile=32x32x16(2x2, staged=true) actual_groups=16 k_tile_count=512 flops=268435456 mlx_case1_domain(tm=8,tn=8,tk=512)=true
+label=control m=512 n=512 k=512 tile=32x32x16(2x2, staged=true) actual_groups=256 k_tile_count=32 flops=268435456 mlx_case1_domain(tm=32,tn=32,tk=32)=true
+label=target m=128 n=128 k=8192 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=16
+label=control m=512 n=512 k=512 resolved_tile=64x32x32(2x2, staged=true) resolved_actual_groups=128
+target=(128,128,8192) control=(512,512,512) target_tflops=0.4084 control_tflops=0.7906 target_over_control=0.5166 spread_target=0.1925 spread_control=0.0091 target_actual_groups=16 control_actual_groups=256
+label=target m=256 n=256 k=2048 tile=32x32x16(2x2, staged=true) actual_groups=64 k_tile_count=128 flops=268435456 mlx_case1_domain(tm=16,tn=16,tk=128)=true
+label=control m=512 n=512 k=512 tile=32x32x16(2x2, staged=true) actual_groups=256 k_tile_count=32 flops=268435456 mlx_case1_domain(tm=32,tn=32,tk=32)=true
+label=target m=256 n=256 k=2048 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=64
+label=control m=512 n=512 k=512 resolved_tile=64x32x32(2x2, staged=true) resolved_actual_groups=128
+target=(256,256,2048) control=(512,512,512) target_tflops=0.4844 control_tflops=0.7918 target_over_control=0.6117 spread_target=0.4904 spread_control=0.0368 target_actual_groups=64 control_actual_groups=256
+label=target m=256 n=256 k=4096 tile=32x32x16(2x2, staged=true) actual_groups=64 k_tile_count=256 flops=536870912 mlx_case1_domain(tm=16,tn=16,tk=256)=true
+label=control m=648 n=648 k=648 tile=32x32x16(2x2, staged=true) actual_groups=441 k_tile_count=41 flops=544195584 mlx_case1_domain(tm=41,tn=41,tk=40)=false
+label=target m=256 n=256 k=4096 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=64
+label=control m=648 n=648 k=648 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=441
+target=(256,256,4096) control=(648,648,648) target_tflops=0.9116 control_tflops=1.1298 target_over_control=0.8069 spread_target=0.0211 spread_control=0.0822 target_actual_groups=64 control_actual_groups=441
+label=target m=256 n=256 k=8192 tile=32x32x16(2x2, staged=true) actual_groups=64 k_tile_count=512 flops=1073741824 mlx_case1_domain(tm=16,tn=16,tk=512)=true
+label=control m=816 n=816 k=816 tile=32x32x16(2x2, staged=true) actual_groups=676 k_tile_count=51 flops=1086676992 mlx_case1_domain(tm=51,tn=51,tk=51)=false
+label=target m=256 n=256 k=8192 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=64
+label=control m=816 n=816 k=816 resolved_tile=32x32x16(2x2, staged=true) resolved_actual_groups=676
+target=(256,256,8192) control=(816,816,816) target_tflops=1.7436 control_tflops=1.4644 target_over_control=1.1907 spread_target=0.2225 spread_control=0.6313 target_actual_groups=64 control_actual_groups=676

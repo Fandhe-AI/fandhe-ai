@@ -1,0 +1,42 @@
+イシュー #1308: gemm_splitk_shapes_bench 実測環境情報
+
+機種: Apple M4 Max（macOS 実機。docs/real-hardware-verification-env.md §1 準拠）
+sw_vers: ProductName macOS / ProductVersion 26.6.2 / BuildVersion 25G83
+uname -a: Darwin ... 25.6.0 Darwin Kernel Version 25.6.0 ... RELEASE_ARM64_T6041 arm64
+rustc: (下記コマンドの出力を追記)
+base commit (main): 60dc70a75e873382322b615b0c96e3236331f1cb
+branch: perf/1308-metal-splitk-shapes-measure
+実行日時（UTC）: 2026-09-09（実行時刻は各 run セクションに記載）
+
+## 負荷ゲート方針（計画 §3.4）
+
+各 run 起動直前に `uptime` を記録し、1 分 load average が 4.0 以下のときのみ起動する。
+超過時は 60s→90s→135s… と増加する間隔で待機し最大 10 回再試行する。
+10 回とも不成立の場合は打ち切らず、負荷下で実行した旨と load average を明記した上で
+実行し、判定は §3.3 の符号一貫性規則（5/5 run 一貫）に委ねる。
+
+## ゲート試行履歴・uptime 記録
+
+(以下、実行ログとして追記)
+rustc 1.96.0 (ac68faa20 2026-05-25)
+run1 attempt=1 ts=2026-09-09T03:04:15Z load1=1.76
+12:04  up 20 days, 23:16, 19 users, load averages: 1.76 3.42 5.14
+run1 completed at 2026-09-09T03:11:06Z
+run2 attempt=1 ts=2026-09-09T03:11:20Z load1=2.18
+12:11  up 20 days, 23:23, 19 users, load averages: 2.18 2.53 3.97
+run2 completed at 2026-09-09T03:18:12Z
+run3 attempt=1 ts=2026-09-09T03:18:25Z load1=4.91
+run3: load average 4.91 > 4.0。60s 待機して再試行
+run3 attempt=2 ts=2026-09-09T03:19:25Z load1=3.42
+12:19  up 20 days, 23:32, 19 users, load averages: 3.42 3.95 4.11
+run3 completed at 2026-09-09T03:26:16Z
+run4 attempt=1 ts=2026-09-09T03:26:30Z load1=2.30
+12:26  up 20 days, 23:39, 19 users, load averages: 2.30 2.86 3.50
+run4 completed at 2026-09-09T03:33:21Z
+run5 attempt=1 ts=2026-09-09T03:33:34Z load1=6.80
+run5: load average 6.80 > 4.0。60s 待機して再試行
+run5 attempt=2 ts=2026-09-09T03:34:34Z load1=4.60
+run5: load average 4.60 > 4.0。90s 待機して再試行
+run5 attempt=3 ts=2026-09-09T03:36:04Z load1=2.84
+12:36  up 20 days, 23:48, 19 users, load averages: 2.84 3.67 3.68
+run5 completed at 2026-09-09T03:42:56Z
