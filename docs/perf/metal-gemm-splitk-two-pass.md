@@ -159,6 +159,34 @@ splitk_parity_baseline.rs::BASELINES` の実測データ・`assert_no_split_k_pa
 具体的な baseline 値の承認を得た場合は、判定方式を再度実測ベースライン非後退方式へ切り替える
 （tolerance 定数自体は §5.1 のとおり変更しない）。
 
+### 5.6 公開入口の数値契約ゲート（PR #1496 codex-review P1 指摘・再対応。2026-09-09）
+
+§5.5 の差し戻しは受け入れテスト（`#[ignore]`・CI 非実行）の判定方式のみを対象としており、
+自動判定入口 `MetalGemm::dispatch_split_k_strided_prepared`（`should_split_k` が `Some` を返す
+形状であれば split-K を実行して `Ok(SplitKRoute::Split)` を返す）自体は無条件で成功を返して
+いた。この入口はテストコード以外からも呼び出し可能な `pub fn` であり、`dispatch_auto` へ
+未結線であること・opt-in であることは、§5.3 で判明した「対象 11 形状中 8 形状が REQ-2 統一
+複合判定を満たさない」という事実と、この公開入口が無条件に成功を返す実装との不整合を解消し
+ない（PR #1496 codex-review P1 再指摘。`crates/backend-metal/src/gemm.rs:2401` 付近）。
+
+対応として `crate::gemm::SPLIT_K_NUMERIC_CONTRACT_APPROVED`（既定 `false`）を追加し、
+`dispatch_split_k_strided_prepared` は本フラグが `false` の間 `should_split_k` の判定結果に
+関わらず常に classic 経路へフォールバックする（新設 `SplitKFallbackReason::
+NumericContractPendingApproval`）よう変更した。§5.2 の実測が示すとおりこの誤差は入力データにも
+依存する（近ゼロ要素での相対誤差外れ値）ため、形状単位の allowlist（例えば §5.3 で厳密ゼロ
+fail を満たした 3 形状のみ許可する）では数値契約を機構的に保証できないと判断し、適用拡張の
+承認（§5.5 と同じユーザー承認事項）を得るまでは自動判定入口を一律無効化する設計とした。
+
+`_with_plan` 版（`dispatch_split_k_strided_prepared_with_plan`）はこのゲートの対象外のまま
+維持する（AC-1 bit-match テスト・AC-2 parity テストが split-K 経路自体の構造的妥当性を明示的に
+検証するための診断専用入口という位置づけは §5.1〜§5.5 と変わらない）。`gemm_splitk_parity.rs`
+は `should_split_k` が算出した計画を `_with_plan` へ明示的に渡す形へ更新し、判定方式（§5.5 の
+厳密ゼロ fail）自体は変更していない。
+
+Linux 相当チェック（`cargo test -p fandhe-ai-backend-metal`・`cargo clippy --workspace
+--all-targets --all-features -- -D warnings`）は green（実機 `#[ignore]` テストの再実行は
+Apple Silicon 実機依存のため本対応では未実施。§5.5 の既知 FAIL 状態は変更なし）。
+
 ## 6. AC-5: 本番経路の非後退確認
 
 `tile::select`／`select_for_device`／`select_with_occupancy_for_device`・`MetalGemm::new`／

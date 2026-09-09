@@ -33,9 +33,17 @@
 //! 未使用）を再度使う形で対応する（承認記録は取得次第 `docs/perf/
 //! metal-gemm-splitk-two-pass.md` へ追記予定。イシュー #1474）。
 //!
-//! いずれのケースも `dispatch_split_k_strided_prepared` の戻り値が
-//! `SplitKRoute::Split` であることを assert し、フォールバック（classic
-//! 経路）による自明合格を排除する。
+//! 本テストは `crate::tile::should_split_k` の算出した計画を
+//! `dispatch_split_k_strided_prepared_with_plan`（`tests/
+//! gemm_splitk_bit_match.rs`〈AC-1〉と同じ明示計画版。`gemm.rs::
+//! SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートの対象外）へ直接渡す。
+//! 自動判定入口 `dispatch_split_k_strided_prepared`（ゲート未承認の間は
+//! 常に classic 経路へフォールバックする。PR #1496 codex-review P1
+//! 指摘・`gemm.rs` 該当ドキュメンテーションコメント参照）は本テストの
+//! 対象外で、split-K 経路自体の正しさ検証には明示計画版を使う。
+//!
+//! いずれのケースも戻り値が `SplitKRoute::Split` であることを assert し、
+//! フォールバック（classic 経路）による自明合格を排除する。
 //!
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する。`#[ignore]` に
 //! より通常の `cargo test` からは除外される
@@ -53,6 +61,7 @@ mod common;
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
 use fandhe_ai_backend_metal::layout::{MatrixLayout, classify_2d};
+use fandhe_ai_backend_metal::tile;
 use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm, SplitKRoute};
 
 /// `logical`（行優先の論理 `[rows, cols]`）から `[cols, rows]` 行優先の
@@ -85,8 +94,8 @@ const TARGET_SHAPES: &[(usize, usize, usize)] = &[
     (128, 128, 2064),
 ];
 
-/// NN/NT/TN/TT の 4 パターンで `dispatch_split_k_strided_prepared` を
-/// 直接呼び、classic 経路・CPU 参照実装との統一複合判定（REQ-2）を検証
+/// NN/NT/TN/TT の 4 パターンで `dispatch_split_k_strided_prepared_with_plan`
+/// を直接呼び、classic 経路・CPU 参照実装との統一複合判定（REQ-2）を検証
 /// する。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
@@ -95,6 +104,16 @@ fn split_k_matches_classic_and_cpu_reference_for_target_shapes_and_transpose_pat
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
     for &(m, n, k) in TARGET_SHAPES {
+        // `should_split_k`（自動判定）が算出する計画をそのまま
+        // `_with_plan`（`SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲート対象外）
+        // へ明示的に渡す。対象形状はいずれも `should_split_k` が `Some`
+        // を返す前提（`docs/backend-metal-splitk-decision.md` §3）。
+        let plan = tile::should_split_k(m, n, k).unwrap_or_else(|| {
+            panic!(
+                "should_split_k が None を返した（対象形状の前提が崩れている）: m={m}, n={n}, k={k}"
+            )
+        });
+
         let a_logical = Xorshift64Star::new(m as u64 * 7 + k as u64 + 1).fill_vec(m * k);
         let b_logical = Xorshift64Star::new(n as u64 * 11 + k as u64 + 2).fill_vec(k * n);
         let mut expected = vec![0.0f32; m * n];
@@ -132,12 +151,12 @@ fn split_k_matches_classic_and_cpu_reference_for_target_shapes_and_transpose_pat
             let c_buf = MetalBuffer::new_zeroed(&ctx, m * n).expect("C バッファ確保に失敗した");
 
             let route = gemm
-                .dispatch_split_k_strided_prepared(
-                    &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf, m, n, k,
+                .dispatch_split_k_strided_prepared_with_plan(
+                    &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf, m, n, k, plan,
                 )
                 .unwrap_or_else(|e| {
                     panic!(
-                        "dispatch_split_k_strided_prepared failed (trans_a={trans_a}, \
+                        "dispatch_split_k_strided_prepared_with_plan failed (trans_a={trans_a}, \
                          trans_b={trans_b}, m={m}, n={n}, k={k}): {e}"
                     )
                 });

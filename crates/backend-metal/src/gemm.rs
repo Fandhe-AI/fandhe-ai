@@ -113,6 +113,25 @@ thread_local! {
     pub(crate) static SPLIT_K_FALLBACK_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
+/// split-K 自動判定入口（[`MetalGemm::dispatch_split_k_strided_prepared`]）
+/// の数値契約承認ゲート。`false`（既定）の間は `should_split_k` が
+/// `Some` を返す形状であっても常に classic 経路へフォールバックする
+/// （[`SplitKFallbackReason::NumericContractPendingApproval`]）。
+///
+/// 実機実測（`docs/perf/metal-gemm-splitk-two-pass.md` §5）で、split-K
+/// はパーティション分割の結合順序差に起因する丸め誤差により対象 11
+/// 形状中 8 形状が REQ-2 統一複合判定（相対誤差 1e-3 未満または絶対
+/// 誤差 1e-5 未満）の厳密ゼロ fail を満たさないと判明した。この誤差は
+/// 入力データにも依存する（近ゼロ要素での相対誤差外れ値）ため、形状
+/// 単位の allowlist では数値契約を機構的に保証できない。CUDA 側
+/// TF32/f16 経路（spec REQ-2 2026-09-02 追記）と同型の実測ベースライン
+/// 非後退方式への適用拡張は、`.claude/rules/coding-rust.md`「バック
+/// エンド間数値一致テストの許容誤差を単独で緩和しない」原則により
+/// ユーザー承認が必要（PR #1496 codex-review P1 指摘。イシュー
+/// #1474）。承認を得た場合のみ `true` へ切り替える（`_with_plan` 系は
+/// このゲートの対象外。AC-1／診断テスト専用の明示入口として維持する）。
+pub(crate) const SPLIT_K_NUMERIC_CONTRACT_APPROVED: bool = false;
+
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
 ///
 /// [`MetalGemm::dispatch_variant`] が本 enum で選択したパイプラインへ
@@ -594,6 +613,22 @@ pub enum SplitKFallbackReason {
     /// の構築が失敗した（デバイス上限超過等。フォールバック chain を
     /// 使い切った場合を含む）。
     PipelineBuild,
+    /// split-K の数値契約（REQ-2 統一複合判定）が未承認のため、
+    /// `crate::tile::should_split_k` が `Some` を返す形状であっても
+    /// `MetalGemm::dispatch_split_k_strided_prepared`（自動判定入口）が
+    /// classic 経路へ強制フォールバックした（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`
+    /// が `false` の間）。実機実測（`docs/perf/metal-gemm-splitk-two-pass.md`
+    /// §5）で split-K はパーティション分割の結合順序差に起因する丸め
+    /// 誤差により対象形状の大半が REQ-2 統一複合判定（相対誤差 1e-3
+    /// 未満または絶対誤差 1e-5 未満）の厳密ゼロ fail を満たさないと
+    /// 判明しており、`.claude/rules/coding-rust.md`「バックエンド間数値
+    /// 一致テストの許容誤差を単独で緩和しない」原則によりユーザー承認
+    /// なしに緩和判定（実測ベースライン非後退方式）を適用できない
+    /// （PR #1496 codex-review P1 指摘。イシュー #1474）。承認が得られる
+    /// までは自動判定入口を常に classic 経路へ倒し、公開入口が数値契約
+    /// を満たさない結果を成功として返さないようにする。`_with_plan` 系
+    /// （明示的な計画指定・AC-1／診断テスト専用）はこのゲートの対象外。
+    NumericContractPendingApproval,
 }
 
 /// [`MetalGemm::dispatch_split_k_strided_prepared`] 系の結果。実際に
@@ -2225,6 +2260,24 @@ impl MetalGemm {
     /// 委譲する。性能 A/B・`dispatch_auto` への結線可否は後続イシュー
     /// （#1475/#1476）のスコープ（`docs/perf/metal-gemm-splitk-two-pass.md`
     /// 「スコープ外」節）。
+    ///
+    /// **数値契約ゲート（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`。本モジュール
+    /// 内 `pub(crate)` 定数のためリンク非対応）**:
+    /// `docs/perf/metal-gemm-splitk-two-pass.md` §5 の実機実測により、
+    /// split-K はパーティション分割の結合順序差に起因する丸め誤差で
+    /// 対象形状の大半（11 形状中 8 形状）が REQ-2 統一複合判定の厳密
+    /// ゼロ fail を満たさないと判明している。この誤差は入力データにも
+    /// 依存する（近ゼロ要素での相対誤差外れ値）ため、形状単位の
+    /// allowlist では数値契約を機構的に保証できない。よって
+    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` が `false` の間は
+    /// `should_split_k` が `Some` を返す形状であっても本入口は常に
+    /// classic 経路へフォールバックし（[`SplitKFallbackReason::
+    /// NumericContractPendingApproval`]）、数値契約を満たさない結果を
+    /// 成功として返さない（PR #1496 codex-review P1 指摘。適用拡張・
+    /// 具体的な baseline 値の承認を得た場合のみ `true` へ切り替える）。
+    /// `_with_plan` 系（明示的な計画指定・AC-1／診断テスト専用）は
+    /// このゲートの対象外で、承認前でも split-K 経路を明示的に検証
+    /// できる。
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_split_k_strided_prepared(
         &self,
@@ -2240,11 +2293,21 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<SplitKRoute, MetalError> {
-        match tile::should_split_k(m, n, k) {
+        let gated_plan = if SPLIT_K_NUMERIC_CONTRACT_APPROVED {
+            tile::should_split_k(m, n, k)
+        } else {
+            None
+        };
+        match gated_plan {
             Some(plan) => self.dispatch_split_k_strided_prepared_with_plan(
                 ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, c_buf, m, n, k, plan,
             ),
             None => {
+                let fallback_reason = if SPLIT_K_NUMERIC_CONTRACT_APPROVED {
+                    SplitKFallbackReason::NotEligible
+                } else {
+                    SplitKFallbackReason::NumericContractPendingApproval
+                };
                 let (dims, strides) = validate_strided_dims(
                     a_buf.len(),
                     a_offset,
@@ -2267,7 +2330,7 @@ impl MetalGemm {
                 SPLIT_K_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
                 Ok(SplitKRoute::Classic {
                     tile: resolved_cfg,
-                    reason: SplitKFallbackReason::NotEligible,
+                    reason: fallback_reason,
                 })
             }
         }
