@@ -67,7 +67,16 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
      バックエンド間統一複合判定（相対誤差 1e-3 未満 または絶対誤差
      1e-5 未満）・FMA 契約に従う（出典: `docs/spec/
      04-requirements.md:213`・設計 `docs/device-resident-update-design.md`
-     〈#951・#1022 追補〉・#955〈parity テスト・ベンチ非後退確認〉）
+     〈#951・#1022 追補〉・#955〈parity テスト・ベンチ非後退確認〉）。
+     イシュー #1479（`docs/device-resident-update-design.md` 追補：
+     #1479）で `Tape::resident_grads_to_host`／`Tape::
+     param_grads_to_host` を同じ確定入口へ追加した: resident 経由
+     （`GradStaging`）で新鮮に充填済みの重み勾配を、`step()` を呼ばずに
+     読み出し専用でホストへ取得する API。CUDA／Metal（resident 未対応。
+     `gemm_fp32_strict_into` 未実装）では `resident_grads_to_host` が
+     `BackendError::Unsupported` を返す一方、`param_grads_to_host`
+     （unified 版。未充填 slot は `grads.get(...)` へフォールバック）は
+     3 バックエンド共通で `Ok` を返す
   5. **デバイスメモリプール解放 API `fandhe_ai::release_cached_memory(Device)`／
      `fandhe_ai::memory_pool_stats(Device)`**（イシュー #1020・REQ-14 14-3。
      クレート root からの再エクスポート。`crates/facade/src/lib.rs`）:
