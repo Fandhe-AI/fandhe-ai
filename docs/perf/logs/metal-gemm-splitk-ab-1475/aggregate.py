@@ -143,17 +143,38 @@ def render_markdown(shapes: dict[tuple[str, int, int, int], ShapeSamples], any_u
     if not any_undetermined:
         target_rows = [v for v in shapes.values() if v.kind == "target"]
         control_rows = [v for v in shapes.values() if v.kind == "control"]
-        target_ok = len(target_rows) == 9 and all(
-            (t.median_speedup or 0.0) >= ADOPT_TARGET_MIN_SPEEDUP and t.all_positive
-            for t in target_rows
+        # 完全性検査（イシュー #1499 codex-review 指摘）: 形状の個数が
+        # 9/3 揃っているだけでは、いずれかの run でその形状が欠落・
+        # 重複していても検出できない（例: 1 run だけで 9 形状が揃えば
+        # ADOPT を出力し得た）。各形状の `speedups` 件数が `n_runs`
+        # （渡された run ログの本数）と一致することまで確認し、AGENTS.md
+        # の「5 回計測の中央値・5/5 run」契約を機械的に担保する。
+        target_complete = len(target_rows) == 9 and all(
+            len(t.speedups) == n_runs for t in target_rows
         )
-        control_ok = len(control_rows) == 3 and all(
-            (c.median_speedup or 0.0) >= ADOPT_CONTROL_MIN_SPEEDUP for c in control_rows
+        control_complete = len(control_rows) == 3 and all(
+            len(c.speedups) == n_runs for c in control_rows
         )
-        verdict = "ADOPT" if (target_ok and control_ok) else "REJECT"
-        lines.append(f"\n## verdict\n\n**{verdict}**"
-                      f"（target_shapes={len(target_rows)}/9・target_ok={target_ok}・"
-                      f"control_shapes={len(control_rows)}/3・control_ok={control_ok}）\n")
+        if not (target_complete and control_complete):
+            lines.append(
+                "\n## verdict\n\n**undetermined**"
+                "（run の完全性検査が不成立: 対象・対照形状のいずれかが"
+                f" 全 {n_runs} run に揃っていない。"
+                f"target_shapes={len(target_rows)}/9・target_complete={target_complete}・"
+                f"control_shapes={len(control_rows)}/3・control_complete={control_complete}）\n"
+            )
+        else:
+            target_ok = all(
+                (t.median_speedup or 0.0) >= ADOPT_TARGET_MIN_SPEEDUP and t.all_positive
+                for t in target_rows
+            )
+            control_ok = all(
+                (c.median_speedup or 0.0) >= ADOPT_CONTROL_MIN_SPEEDUP for c in control_rows
+            )
+            verdict = "ADOPT" if (target_ok and control_ok) else "REJECT"
+            lines.append(f"\n## verdict\n\n**{verdict}**"
+                          f"（target_shapes={len(target_rows)}/9・target_ok={target_ok}・"
+                          f"control_shapes={len(control_rows)}/3・control_ok={control_ok}）\n")
     else:
         lines.append("\n## verdict\n\n**undetermined**\n")
 
@@ -188,6 +209,57 @@ def self_test() -> None:
     md = render_markdown(shapes, False, 2)
     assert "target" in md
     assert "floor" in md
+    # 対象 9・対照 3 形状が揃っていない（self-test サンプルは各 1 形状のみ）
+    # ため、判定は undetermined になるはず（イシュー #1499 codex-review
+    # 指摘: 形状個数だけでなく run ごとの揃いを検査する）。
+    assert "verdict" in md
+    assert "**undetermined**" in md
+
+    # 完全性検査そのものの自己検証: 対象 9・対照 3 形状を 5 run 分すべて
+    # 揃えれば ADOPT、いずれか 1 run でも 1 形状が欠落すれば undetermined
+    # になることを確認する（AGENTS.md の 5/5 run 契約の機械的担保）。
+    target_mn = [32, 64, 128]
+    control_mn = 256
+    k_list = [2048, 4096, 8192]
+
+    def make_run(drop: tuple[str, int, int, int] | None) -> str:
+        lines_: list[str] = []
+        for mn in target_mn:
+            for k in k_list:
+                if drop == ("target", mn, mn, k):
+                    continue
+                lines_.append(
+                    f"splitk_ab kind=target m={mn} n={mn} k={k} partitions=4 "
+                    "median_a_secs=2e-4 median_b_secs=1e-4 speedup=2.0000 "
+                    "spread_a=0.1 spread_b=0.1"
+                )
+        for k in k_list:
+            if drop == ("control", control_mn, control_mn, k):
+                continue
+            lines_.append(
+                f"splitk_ab kind=control m={control_mn} n={control_mn} k={k} "
+                "partitions=NA median_a_secs=5e-4 median_b_secs=5e-4 "
+                "speedup=1.0000 spread_a=0.1 spread_b=0.1"
+            )
+        return "\n".join(lines_) + "\n"
+
+    complete_runs = [make_run(None) for _ in range(5)]
+    complete_shapes, complete_any_undetermined = aggregate(complete_runs)
+    assert not complete_any_undetermined
+    complete_md = render_markdown(complete_shapes, False, len(complete_runs))
+    assert "**ADOPT**" in complete_md, complete_md
+
+    # 5 run 中 1 run だけ対象形状の 1 つ（32,32,2048）が欠落 → 全体が
+    # undetermined になるはず（欠落を無視して ADOPT を出力してはならない）。
+    incomplete_runs = [make_run(None) for _ in range(4)] + [
+        make_run(("target", 32, 32, 2048))
+    ]
+    incomplete_shapes, incomplete_any_undetermined = aggregate(incomplete_runs)
+    assert not incomplete_any_undetermined
+    incomplete_md = render_markdown(incomplete_shapes, False, len(incomplete_runs))
+    assert "**undetermined**" in incomplete_md, incomplete_md
+    assert "**ADOPT**" not in incomplete_md, incomplete_md
+    assert "**REJECT**" not in incomplete_md, incomplete_md
 
     print("self-test OK", file=sys.stderr)
 

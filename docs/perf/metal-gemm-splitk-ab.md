@@ -38,7 +38,10 @@ K ∈ {2048, 4096, 8192}）はすべて 3 run の中央値で speedup（= median
     `SplitKRoute::Split` でなければ計測を中止する（フォールバックをデータ点
     として扱わない）。
   - B′（対照・classic）: `(256,256,K)` は `should_split_k` が `None` を
-    返すことを assert したうえで classic を dispatch。
+    返すことを assert したうえで classic を dispatch。**計測クロージャ
+    内でも毎回 `should_split_k` を呼ぶ**（`dispatch_auto` 相当が本番で
+    毎回払う選択関数の呼び出し費用込みで計測する。2026-09-09 是正。
+    §3 「既知の限界」参照）。
   - C（対照・強制 split-K。参考のみ）: `max_groups=u64::MAX` で強制した
     split-K。`max_groups=40` 境界の妥当性の記録のみ。
   - フロア（参考のみ）: 各 `(M,N)` を `K=64` で classic dispatch した dispatch
@@ -94,6 +97,21 @@ https://github.com/Fandhe-AI/fandhe-ai/issues/1475#issuecomment-5599418673
   の既知 FAIL・`docs/perf/metal-gemm-splitk-two-pass.md` §5 と整合。
   verdict の入力にはしない）。
 
+**既知の限界（イシュー #1499 codex-review・Cursor Bugbot 指摘。2026-09-09
+是正）**: 本節・`self_check.log` の `a_vs_b_fail_count` は、`prepare()` の
+`seed_offset` が A（classic。`p1`）=1・B（split-K。`p2`）=2 と**異なる
+入力行列**で生成されたバイナリによる実測値だった。異なる入力同士の出力を
+比較しても「K 分割の結合順序差に起因する丸め誤差」という解釈の根拠には
+ならない（別問題を解いた結果を比較しているにすぎない）。コード側は
+`p2` の `seed_offset` を `p1` と同一の `1` へ統一済み（同一入力での
+比較へ是正済み）だが、本ドキュメントが参照する `self_check.log`・上記
+`a_vs_b_fail_count` の実測値自体は是正前バイナリによるものであり、
+**同一入力での再実測は未実施**（実機〈M4 Max〉再接続が必要なため本 PR
+のスコープ外。§7 のフォローアップ参照）。run-to-run bit 同一
+（`classic_stable`／`splitk_stable`）・A vs A′（`a_vs_at_fail_count`。
+両者とも `seed_offset=1` で同一入力のため元々有効）は本是正の影響を
+受けない。
+
 ## §4 実測結果（3 run。`aggregate.md` から転記）
 
 生データ・集計スクリプトは `docs/perf/logs/metal-gemm-splitk-ab-1475/`
@@ -128,6 +146,17 @@ partitions は形状ごとに一貫（`(32,*,*)`／`(64,*,*)` は 32、`(128,128
 （対照は classic vs classic の対称比較のため理論上 1.0 近傍のはず。この
 run 単発のノイズと考えられる）、median は基準を満たす。全 run を通じた
 ばらつきの大きさは §5 で留保として明記する。
+
+**既知の限界（イシュー #1499 codex-review 指摘。2026-09-09 是正）**: 上表の
+実測値は、B′ の計測クロージャが `should_split_k` を呼ばずに classic
+dispatch のみを測っていた是正前バイナリによるもの（A と全く同一の経路を
+測っていたに等しい）。コード側は結線相当経路の選択関数呼び出し費用を
+含めるよう是正済みだが、上表の再実測は未実施（§7 のフォローアップ
+参照）。「対照は classic vs classic の対称比較のため理論上 1.0 近傍」
+という解釈自体は妥当（`should_split_k` の呼び出し費用は encode／
+コマンドバッファ完了待ちに比べ無視できるほど小さいと見込まれるため
+median 側の結論〈基準 `>=0.95` を満たす〉が覆るとは考えにくいが、
+未検証である点を明記する）。
 
 ### target_tile（対象 9 形状。A=classic〈select_for_device〉vs A′=classic
 〈split_k_tile〉。参考のみ・タイル構成効果の分離）
@@ -233,6 +262,16 @@ speedup の主因ではないことも確認した。
 
 ## §7 スコープ外（フォローアップ）
 
+- **フェーズ 1 control（B′）の選択関数呼び出し費用込み再実測**: §4
+  「control」節「既知の限界」参照。`should_split_k` 呼び出しをクロージャへ
+  含めるよう是正済みのコードで対照 3 形状を実機（M4 Max）で再実測し、
+  §4 の control 表・§5 の判定根拠を更新する。
+- **フェーズ 0 A vs B（`a_vs_b_fail_count`）の同一入力での再実測**: §3
+  「既知の限界」参照。`prepare()` の `seed_offset` 不一致（是正済み）を
+  反映した同一入力でのフェーズ 0 自己検証を実機（M4 Max）で再実行し、
+  `self_check.log`・§3 の実測値を更新する。フェーズ 1（§4）の speedup
+  自体は GEMM の実行時間が入力値に依存しない（形状のみに依存する）ため
+  本是正による再実測は不要と判断する。
 - **5 run 完了による正式確定**: 単一セッションの時間制約により 3/5 run で
   打ち切った。残り 2 run（可能なら専有環境・`--max-load-avg` をより厳格な
   値で）を追加実行し、§0/§5 の「暫定」を外す正式判定へ更新することを

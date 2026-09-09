@@ -84,20 +84,33 @@ const CONTROL_MN: usize = 256;
 /// 対象・対照共通の `K` 候補。
 const K_LIST: [usize; 3] = [2048, 4096, 8192];
 /// フロア計測（dispatch 固定費の参考値）が使う `K`。
+/// macOS（`macos_impl`）とテストからのみ参照されるため、非 macOS の通常
+/// ビルド（clippy 含む）では未使用になる。`gemm_transpose_route_ab_bench.rs`
+/// と同型の `cfg_attr` で dead_code を抑止する。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const FLOOR_K: usize = 64;
 /// フロア計測対象の `(M,N)`（対象 3 種 ＋ 対照）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const FLOOR_MN: [usize; 4] = [32, 64, 128, 256];
 
 /// `splitk_ab` 行の種別。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const KIND_TARGET: &str = "target";
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const KIND_TARGET_TILE: &str = "target_tile";
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const KIND_CONTROL: &str = "control";
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const KIND_CONTROL_FORCED: &str = "control_forced";
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const KIND_FLOOR: &str = "floor";
 
 /// A/B 双方が揃う行（`splitk_ab`）を機械可読 1 行へ整形する純関数。
 /// `kind` は [`KIND_TARGET`] 等の固定文字列のみを想定（外部入力を
 /// 埋め込まない。`.claude/rules/security.md` A03 対応）。
+/// macOS（`macos_impl`）とテストからのみ呼ばれるため非 macOS の通常
+/// ビルドでは未使用になる（`FLOOR_K` と同様の理由）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 fn format_ab_line(
     kind: &str,
@@ -123,7 +136,8 @@ fn format_ab_line(
 }
 
 /// フロア計測（単一腕。`median_b_secs`／`speedup`／`spread_b` は `NA`）を
-/// 整形する純関数。
+/// 整形する純関数。macOS（`macos_impl`）とテストからのみ呼ばれる。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn format_floor_line(m: usize, n: usize, k: usize, median_secs: f64, spread: f64) -> String {
     format!(
         "splitk_ab kind={KIND_FLOOR} m={m} n={n} k={k} partitions=NA \
@@ -151,13 +165,17 @@ fn control_shapes() -> Vec<(usize, usize, usize)> {
         .collect()
 }
 
-/// フロア計測対象（4 `(M,N)` × `FLOOR_K`）。
+/// フロア計測対象（4 `(M,N)` × `FLOOR_K`）。macOS（`macos_impl`）と
+/// テストからのみ呼ばれる。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn floor_shapes() -> Vec<(usize, usize, usize)> {
     FLOOR_MN.iter().map(|&mn| (mn, mn, FLOOR_K)).collect()
 }
 
 /// CLI 引数の解析結果（`gemm_transpose_route_ab_bench.rs::CliArgs` と同型の
-/// 一括走査＋未知引数・重複指定の拒否）。
+/// 一括走査＋未知引数・重複指定の拒否）。macOS（`macos_impl`）とテスト
+/// からのみ構築される。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct CliArgs {
     /// `--max-load-avg=<f64>`。指定時のみ環境ガードを **gated** で行う
@@ -174,6 +192,8 @@ struct CliArgs {
 
 /// [`CliArgs`] を解析する純関数（`gemm_transpose_route_ab_bench.rs::
 /// parse_args_from` と同型。未知引数・重複指定を `Err` で拒否する）。
+/// macOS（`macos_impl`）とテストからのみ呼ばれる。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, String> {
     let mut out = CliArgs::default();
     let mut max_load_avg_seen = false;
@@ -427,8 +447,13 @@ mod macos_impl {
             let at_run2 = p1t.c_buf.read_to_vec();
             let target_tile_stable = at_run1 == at_run2;
 
-            // split-K（B）run-to-run bit 同一。
-            let p2 = prepare(ctx, m, n, k, 2);
+            // split-K（B）run-to-run bit 同一。`p1`（classic）と同一
+            // `seed_offset`（=1）で生成する: 以下の `a_vs_b_fail_count`
+            // は同一入力に対する classic／split-K の出力差（丸め順序差
+            // 起因と期待される既知 fail）を見る比較であり、異なる入力
+            // 行列同士を比較すると解釈の前提が崩れる（イシュー #1499
+            // codex-review・Cursor Bugbot 指摘）。
+            let p2 = prepare(ctx, m, n, k, 1);
             dispatch_split_k(gemm, ctx, &p2, plan);
             let b_run1 = p2.c_buf.read_to_vec();
             dispatch_split_k(gemm, ctx, &p2, plan);
@@ -590,11 +615,24 @@ mod macos_impl {
             dispatch_classic(gemm, ctx, &p_a, select_cfg);
             dispatch_classic(gemm, ctx, &p_b, select_cfg);
 
+            // B′ の計測クロージャは `should_split_k` を呼んでから classic
+            // へ dispatch する（`結線相当経路` を名乗る以上、本番の
+            // `dispatch_auto` 相当が毎回払う選択関数の呼び出し費用込みで
+            // 計測する必要がある。呼ばないと A と全く同一の経路を測る
+            // だけになり B′ の存在意義がなくなる。イシュー #1499
+            // codex-review 指摘）。対照形状では `None` を返す前提は
+            // ループ先頭の assert で確認済みのため、ここでは
+            // `debug_assert` に留め計測クロージャの呼び出し費用を
+            // 不必要に増やさない。
             let result = run_ab(
                 ab_config,
                 measurement_config,
                 || dispatch_classic(gemm, ctx, &p_a, select_cfg),
-                || dispatch_classic(gemm, ctx, &p_b, select_cfg),
+                || {
+                    let route = tile::should_split_k(m, n, k);
+                    debug_assert!(route.is_none(), "対照形状の前提が崩れている");
+                    dispatch_classic(gemm, ctx, &p_b, select_cfg);
+                },
             )
             .expect("run_ab が失敗した（MeasurementConfig::default は下限を満たす）");
 
