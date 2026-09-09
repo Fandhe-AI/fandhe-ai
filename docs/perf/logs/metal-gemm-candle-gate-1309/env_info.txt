@@ -1,0 +1,47 @@
+イシュー #1309 実行環境記録
+
+機種: Apple M4 Max (hw.model=Mac16,6)
+macOS: 26.6.2 (25G83)
+rustc: 1.96.0
+worktree: .claude/worktrees/wf_53d07789-001-35（隔離 worktree）
+作業ブランチ: test/1309-metal-gemm-candle-gate（origin/main 797030e から作成）
+
+正式系列ビルド:
+  git archive 61b8b65（#1438 直前コミット）scripts/bench/framework-compare を
+  scratchpad（本体 workspace 外）へ tar 展開し、そこで
+  `cargo build --release -p bench-fandhe -p bench-candle` を実行（registry 解決）。
+  展開先の bench-fandhe/Cargo.toml は host-view-readout feature が既定 OFF・
+  pin guard（bench_fandhe_pin_guard.sh）を持たないため registry ビルドが成立。
+
+  registry 解決確認:
+    cargo tree -p bench-fandhe --depth 1 => "└── fandhe-ai v0.7.0"（path 注記なし）
+    Cargo.lock の fandhe-ai エントリ:
+      source = "registry+https://github.com/rust-lang/crates.io-index"
+
+  manifest（run_gemm_gate_metal.sh が自動記録）:
+    {"label":"0.7.0-1309","device":"metal",
+     "bench_fandhe_sha256":"aec615d1b6a9cba1361b74b033d287a13428ab389cb9bd3b4ad7e2fa7d7f63ac",
+     "fandhe_ai_source":"registry","bench_fandhe_features":"",
+     "bench_candle_sha256":"1f0d9061870eb02ce66286f5716de8465d322a92bae0255a0513b1bf05c3c1e3",
+     "candle_core_source":"registry","recorded_at":"2026-09-09T04:36:34Z"}
+
+負荷ゲート（正式系列開始前。事前宣言規則: 1 分 load average < 4.0 を 30 秒間隔で 2 回連続）:
+  04:35:26Z load1=3.33
+  04:35:56Z load1=3.21
+  => 通過（2 回連続 <4.0）
+
+正式系列実行: bash run_gemm_gate_metal.sh 0.7.0-1309（scratchpad の archive ツリー内）
+  実行時間: 約 80 秒（04:36:34Z 開始 〜 04:37:51Z 完了）
+  実行直後 load average（1 分）: 13.90（共有負荷下。他セッションの並列イシュー実行による）
+  pmset -g therm: 計測前後とも thermal / performance warning なし
+
+参考系列: 本イシューでは未計測。
+  正式系列完了直後（13:37Z・load1=7.84）から負荷ゲート再判定を開始したが、
+  3 回の待機試行（60s→90s→135s。load1: 6.46→5.08→3.65）を経ても
+  2 回連続 <4.0 の通過条件に達する前に、フォースアウトされた
+  StructuredOutput 呼び出しにより打ち切った。選択的再実行はしていない
+  （参考系列は 1 run も起動していない）。
+
+git status（scripts/bench/framework-compare/Cargo.toml・Cargo.lock）:
+  差分なし（空。正式系列ビルドは本体ツリー外の archive で実施したため
+  worktree 内の Cargo.lock は変更されていない）
