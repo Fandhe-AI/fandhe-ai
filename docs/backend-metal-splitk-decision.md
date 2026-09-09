@@ -9,13 +9,17 @@
 
 ## 判断サマリ
 
-**実測（`docs/perf/metal-gemm-splitk-shapes.md` §4）待ちのため、採否は未確定。** 解析値（同 doc §3）
-は「対象形状（K 支配的非正方。M=N=32〜256・K=2048〜8192）12 点は全点 MLX の split-K 選択域に該当し、
-かつ本実装の `actual_groups`（4〜64）は実機 GPU コア数（40）を下回るか同程度に留まる」ことを示しており、
-split-K 導入の理論的な有効性を示唆する一次所見が得られている。ただし本実装の `tile::select` は K 方向の
-threadgroup 分割を一切持たない構造上の欠落があることは実装（`tile.rs:788-793`）から確定的に確認できるが、
-実機での劣化幅（TFLOPS 比）は未計測であり、`docs/perf/metal-gemm-splitk-shapes.md` §5 の判定基準に
-基づく確定判断は Mac 実機セッションに委ねる。
+**採用検討推奨（M4 Max 実機実測完了。イシュー #1308・2026-09-09。`docs/perf/metal-gemm-splitk-shapes.md`
+§4・§6）。** 対象形状（K 支配的非正方。M=N=32〜256・K=2048〜8192）12 点中、並列度不足の解析裏付け
+（`actual_groups < 40`）に該当する 9 点（`(32,32,*)`・`(64,64,*)`・`(128,128,*)`）**全点**で、5 プロセス
+起動 5 回計測中央値による劣化率（対象/対照 TFLOPS 比）が事前登録判定基準の `< 0.7` を満たし、かつ 5/5
+run すべてで一貫して下回った（劣化率中央値 0.2265〜0.5166）。事前登録した「過半数（目安 7 点以上）で
+採用検討推奨」の基準を 9/9 で明確に上回ったため、split-K 導入は**採用検討推奨**と判定する。ただし
+確定的な採用可否（実装の是非）は本ドキュメント §2 の設計方針に基づく別 issue でのユーザー承認を要する
+（`.claude/rules/out-of-scope-tracking.md`）。本実装の `tile::select`／`select_for_device` は K 方向の
+threadgroup 分割を一切持たない構造上の欠落があることは実装（`tile.rs:1165`／`tile.rs:1183`）から
+確定的に確認できていた事実であり、今回の実測はこの構造上の欠落が実機で実際に測定可能な劣化として現れる
+ことを裏付けた。
 
 ## §1 MLX split-K（非 NAX・Case 1）選択条件
 
@@ -106,23 +110,32 @@ split-K の文脈でも変わらない。本ドキュメントは Case 1（非 N
 
 ## §3 採否判断
 
-`docs/perf/metal-gemm-splitk-shapes.md` §4「実測結果」の記入を受けて確定する。
+`docs/perf/metal-gemm-splitk-shapes.md` §4「実測結果」・§6「採否判断」で確定した（イシュー #1308・
+M4 Max 実機実測・2026-09-09）。
 
-**本セッション環境は Linux のため実測は実施できない**（#487・#549 と同じ運用）。実装エージェントの
-実行環境が macOS の場合のみ、その場で実測・記入まで行い採否を確定してよい（同 doc §5 の判定基準に
-従う）。実測未実施の間、以下を構造的事実として記録する:
+**確定判断: 採用検討推奨。** 判定根拠:
 
-- `crate::tile::select`（本番ディスパッチ入口。`crate::gemm::MetalGemm::dispatch_auto` が使用）は
-  K 方向の threadgroup 分割経路を持たない（`tile.rs:788-793` の 4 分岐はすべて M・N 方向の形状判定
-  のみ）。これは実測を要さずコードから確定的に確認できる構造上の欠落である
+- `crate::tile::select`（本番ディスパッチ入口 `crate::gemm::MetalGemm::dispatch_auto` が使う
+  `select_for_device` の内部で呼ばれる形状クラス判定）は K 方向の threadgroup 分割経路を持たない
+  （`tile.rs:1165`〈`select`〉・`tile.rs:1183`〈`select_for_device`〉・`tile.rs:1239`
+  〈`select_with_occupancy_for_device`。4 分岐 match〉のいずれも M・N 方向の形状判定のみ）。これは
+  実測を要さずコードから確定的に確認できる構造上の欠落である
 - `docs/perf/metal-gemm-splitk-shapes.md` §3 の解析値は、対象形状 12 点全点が MLX の split-K
   選択域（Case 1）に該当し、`actual_groups`（4〜64）が実機 GPU コア数（40）を下回るか同程度に
-  留まることを示す。これは split-K 導入の理論的な有効性を示唆する一次所見であり、確定的な採用判断
-  ではない（並列度不足の解析ヒューリスティックが真の occupancy を表さない限界は
-  `gemm_diagnosis.rs::analytics::DeviceProfile` ドキュメントと同じ限定を持つ）
+  留まることを示していた（理論的な有効性を示唆する一次所見）
+- **実測（§4・M4 Max・5 プロセス起動 5 回中央値）はこの一次所見を裏付けた**: 対象 9 点（条件2
+  該当。`(256,256,*)` 3 点は `actual_groups=64 >= 40` のため除外）全点で対照（同程度 FLOPs の正方
+  立方形状）比の劣化率中央値が 0.2265〜0.5166 の範囲に収まり、事前登録基準 `< 0.7` を 5/5 run すべて
+  で一貫して満たした。共有負荷環境（1 分 load average 1.76〜6.80）下の計測のため spread（0.05 目安）
+  は全点で超過しているが、劣化率自体は 0.7 の閾値から明確に離れた値で一貫しており、ばらつきが判定を
+  左右する境界事例ではない
+- したがって「並列度不足の解析ヒューリスティックが真の occupancy を表さない限界」（旧記述の留保）は
+  実測により解消され、劣化は実測可能な事実として確定した
 
 ## §4 参照
 
+- `docs/perf/logs/metal-gemm-splitk-shapes-1308/`（M4 Max 実機実測の生ログ・`aggregate.py`／
+  `aggregate.md`・`env_info.txt`。イシュー #1308）
 - MLX リポジトリ `ml-explore/mlx`（参照時点コミット `a082cb91d5908e9d89a61a31ee90ee45875b8a1e`。
   `gh api repos/ml-explore/mlx/commits/main --jq '.sha'` で解決）
   - `mlx/backend/metal/matmul.cpp:503-660`（`steel_gemm_splitk_axpby`。2 パス構造・`C_split`
@@ -130,8 +143,9 @@ split-K の文脈でも変わらない。本ドキュメントは Case 1（非 N
   - `mlx/backend/metal/matmul.cpp:913-945`（Case 1 選択条件式）
   - `mlx/backend/metal/matmul.cpp:660-820`（`steel_gemm_splitk_axpby_nax`。NAX 版。本実装は不採用）
   - `mlx/backend/metal/matmul.cpp:947-963`（Case 2 選択条件式）
-- 本実装 `crates/backend-metal/src/tile.rs:682-831`（`select`／`select_with_occupancy`。K 方向分岐が
-  存在しないことの根拠）
+- 本実装 `crates/backend-metal/src/tile.rs:1165`（`select`）・`tile.rs:1183`（`select_for_device`）・
+  `tile.rs:1239`（`select_with_occupancy_for_device`）。K 方向分岐が存在しないことの根拠（#1308 で
+  #1039 等の後続変更による行番号移動を反映して更新）
 - `crates/backend-metal/examples/gemm_splitk_shapes_bench.rs`（本イシューで新規作成。MLX Case 1
   条件式の突合・対象/対照形状の解析値算出・macOS 実機実測）
 - `docs/perf/metal-gemm-splitk-shapes.md`（実測記録テンプレート。実測結果・採否判定基準）

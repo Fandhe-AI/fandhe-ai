@@ -335,6 +335,26 @@ mod macos_impl {
         Ok(MeasurementConfig::default())
     }
 
+    /// `select_for_device`（機種検証テーブル適用込みの本番選択関数と同じ
+    /// 経路。`prepare` 内で呼ばれる）が実際に解決した [`fandhe_ai_backend_metal::
+    /// tile::TileConfig`] と、それに基づく実 dispatch threadgroup 数
+    /// （`ceil(m_eff/bm) * ceil(n_eff/bn)`。`m_eff`/`n_eff` はパディング後の
+    /// 次元で `dispatch_tiled_prepared` が実際に使う値）を出力する。
+    /// `analytics::analyze`（機種ゲートなし・非パディング次元基準）との
+    /// 乖離を §4 記入時に区別できるようにするための行（`docs/perf/
+    /// metal-gemm-splitk-shapes.md` §3.1 参照）。
+    fn print_resolved_tile_line(label: &str, m: usize, n: usize, k: usize, p: &PreparedShape) {
+        let cfg = p.cfg;
+        let resolved_groups_m = (p.m_eff as u64).div_ceil(cfg.bm as u64);
+        let resolved_groups_n = (p.n_eff as u64).div_ceil(cfg.bn as u64);
+        let resolved_actual_groups = resolved_groups_m * resolved_groups_n;
+        println!(
+            "label={label} m={m} n={n} k={k} resolved_tile={}x{}x{}({}x{}, staged={}) \
+             resolved_actual_groups={resolved_actual_groups}",
+            cfg.bm, cfg.bn, cfg.bk, cfg.wm, cfg.wn, cfg.staged,
+        );
+    }
+
     /// 対象（side A）・対照（side B）1 組を prepared 境界・`run_ab` の
     /// 順序反転 interleave で計測し、劣化率（§5 判定基準の分子/分母）を
     /// 出力する。
@@ -356,6 +376,16 @@ mod macos_impl {
 
         let target_prepared = prepare(ctx, tm, tn, tk);
         let control_prepared = prepare(ctx, s, s, s);
+
+        // `analytics::analyze` は機種ゲートなしの `tile::select`（§3 解析値
+        // 算出と同一）を使うため、実測ディスパッチが実際に使う
+        // `select_for_device`（機種検証テーブル適用）の resolved 構成と
+        // 乖離しうる（M4 Max では `(512,512,512)` 近傍が厳密一致テーブルに
+        // 発火し `CANDIDATES[5]` を選ぶ場合がある。§4 記入時に解析値の
+        // `actual_groups` をそのまま対照タイルの実測根拠として扱わない
+        // ための出力。`docs/perf/metal-gemm-splitk-shapes.md` §3.1 参照）。
+        print_resolved_tile_line("target", tm, tn, tk, &target_prepared);
+        print_resolved_tile_line("control", s, s, s, &control_prepared);
 
         // ウォームアップディスパッチ 1 回（`gemm_f32_prepared_bench.rs::measure`
         // と同じ狙い。`run_ab` 内の `extended_warmup` に先立って構成解決の
