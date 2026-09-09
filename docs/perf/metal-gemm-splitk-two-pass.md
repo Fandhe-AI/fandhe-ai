@@ -53,7 +53,7 @@
 
 ## 4. AC-1: run-to-run bit 同一（実機実測。Apple M4 Max）
 
-`cargo test -p fandhe-ai-backend-metal --release --test gemm_splitk_bit_match -- --ignored --nocapture`
+`cargo test -p fandhe-ai-backend-metal --release --features internal-diagnostics --test gemm_splitk_bit_match -- --ignored --nocapture`
 
 対象 9 形状 × partitions ∈ {2,4,8,16,32} の split-K 経路が 2 回実行で bit 完全一致、かつ
 `MetalGemm::new()` の `dispatch_auto`／`dispatch_tiled_prepared`（classic 経路）が split-K 追加後も
@@ -186,6 +186,38 @@ fail を満たした 3 形状のみ許可する）では数値契約を機構的
 Linux 相当チェック（`cargo test -p fandhe-ai-backend-metal`・`cargo clippy --workspace
 --all-targets --all-features -- -D warnings`）は green（実機 `#[ignore]` テストの再実行は
 Apple Silicon 実機依存のため本対応では未実施。§5.5 の既知 FAIL 状態は変更なし）。
+
+### 5.7 `_with_plan` 版の可視性ゲート（PR #1496 codex-review P1 再指摘対応。2026-09-09）
+
+§5.6 は自動判定入口（`dispatch_split_k_strided_prepared`）のみを数値契約ゲートで塞いだが、
+`_with_plan` 版（`dispatch_split_k_strided_prepared_with_plan`）は「AC-1／AC-2 の診断専用入口」
+という位置づけのまま無条件 `pub fn` だった。この関数は `should_split_k` の自動判定・
+`SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートいずれも経由しないため、crates.io 公開クレートの
+利用者が `should_split_k(32, 32, 8192)` 等の計画を自分で構築して直接渡せば、§5.3 で厳密ゼロ
+fail が不成立と判明済みの形状であっても split-K を無条件に実行して `Ok(SplitKRoute::Split)` を
+返してしまう（PR #1496 codex-review P1 再指摘。「診断専用」というコメントだけでは本番利用を
+制限できず AGENTS.md「数値契約の統一」に違反する公開経路が残っていた）。
+
+対応として `MetalGemm::encode_tiled_prepared`（イシュー #1259。`Cargo.toml` の
+`internal-diagnostics` feature コメント参照）と同型の 2 分岐可視性ゲートを適用した:
+`internal-diagnostics` feature（既定 OFF）を有効化したビルドでのみ `pub`、既定ビルドでは
+`pub(crate)` に絞りクレート外部から到達不能にする。共通実装は `pub(crate)` の `_impl` 関数へ
+切り出し、2 分岐は薄い委譲ラッパーとした（`crates/backend-metal/src/gemm.rs::MetalGemm::
+dispatch_split_k_strided_prepared_with_plan`／`_impl`）。`Self::dispatch_split_k_strided_
+prepared`（自動判定入口。承認後に `SPLIT_K_NUMERIC_CONTRACT_APPROVED=true` へ切り替えた際に
+`_with_plan` を内部呼び出しする）はクレート内部呼び出しのためどちらの分岐でも到達できる。
+
+AC-1（`tests/gemm_splitk_bit_match.rs`）・AC-2（`tests/gemm_splitk_parity.rs`）は本 feature を
+要求する `required-features = ["internal-diagnostics"]` を `Cargo.toml` の `[[test]]` へ追加した
+（`gemm_transpose_route_ab_bench` の `required-features` 先例と同型）。両テストとも macOS 実機
+限定（`#![cfg(target_os = "macos")]`）・`#[ignore]` のため、CI（GitHub ホステッド・ubuntu-latest）
+での実行対象範囲は変わらない。実機再実行コマンドは `--features internal-diagnostics` を追加した
+（§4 のコマンド例を更新）。
+
+Linux 相当チェック（`cargo test -p fandhe-ai-backend-metal --all-features`・`cargo clippy
+--workspace --all-targets --all-features -- -D warnings`）は green。実機 `#[ignore]` テストの
+再実行は Apple Silicon 実機依存のため本対応では未実施（§5.3〜§5.5 の既知 FAIL 状態・§5.2 の
+bit-match／parity 実測値自体はコード変更なしのため不変）。
 
 ## 6. AC-5: 本番経路の非後退確認
 

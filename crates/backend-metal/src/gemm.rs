@@ -2276,8 +2276,12 @@ impl MetalGemm {
     /// 成功として返さない（PR #1496 codex-review P1 指摘。適用拡張・
     /// 具体的な baseline 値の承認を得た場合のみ `true` へ切り替える）。
     /// `_with_plan` 系（明示的な計画指定・AC-1／診断テスト専用）は
-    /// このゲートの対象外で、承認前でも split-K 経路を明示的に検証
-    /// できる。
+    /// 本フラグ（数値契約ゲート）の対象外で、承認前でも split-K 経路を
+    /// 明示的に検証できる。ただしクレート外部からの無条件到達を防ぐ
+    /// 別の可視性ゲート（`internal-diagnostics` feature。PR #1496
+    /// codex-review P1 再指摘対応）を持つ。詳細は
+    /// [`Self::dispatch_split_k_strided_prepared_with_plan`] doc
+    /// コメント参照。
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_split_k_strided_prepared(
         &self,
@@ -2347,8 +2351,76 @@ impl MetalGemm {
     /// [`SplitKFallbackReason::NotEligible`] で classic 経路へ委譲し、
     /// `shaders/gemm.metal::gemm_simdgroup_tiled` 側の `k_begin >= k_end`
     /// ガードが実質到達しないことを host 側の契約として担保する）。
+    ///
+    /// **数値契約ゲートの対象外である理由と可視性ゲート（PR #1496
+    /// codex-review P1 指摘対応）**: 本関数自体は `should_split_k` の
+    /// 自動判定・[`Self::dispatch_split_k_strided_prepared`] の
+    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートを経由しないため、
+    /// `plan` を直接構築して渡せば split-K を無条件に実行できてしまう
+    /// （`docs/perf/metal-gemm-splitk-two-pass.md` §5 の未承認形状を
+    /// 含む）。よって `encode_tiled_prepared`（イシュー #1259。
+    /// `Cargo.toml` の `internal-diagnostics` feature コメント参照）と
+    /// 同じ 2 分岐構成を採る: `internal-diagnostics` feature（既定 OFF）
+    /// を有効化したビルドでのみ `pub`（AC-1 実機テスト
+    /// `tests/gemm_splitk_bit_match.rs`／`tests/gemm_splitk_parity.rs`
+    /// が `required-features` 経由で要求する）とし、既定ビルドでは
+    /// `pub(crate)` に絞ってクレート外部から到達不能にする（`Self::
+    /// dispatch_split_k_strided_prepared` からの内部呼び出しは両分岐
+    /// とも可能）。crates.io 公開クレートの利用者が数値契約ゲートを
+    /// 迂回して split-K を直接起動できる恒久的な公開 API 面を作らない。
+    #[cfg(feature = "internal-diagnostics")]
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_split_k_strided_prepared_with_plan(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        plan: tile::SplitKPlan,
+    ) -> Result<SplitKRoute, MetalError> {
+        self.dispatch_split_k_strided_prepared_with_plan_impl(
+            ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, c_buf, m, n, k, plan,
+        )
+    }
+
+    /// [`Self::dispatch_split_k_strided_prepared_with_plan`] doc コメント
+    /// 参照。既定ビルド（`internal-diagnostics` feature 無効）では
+    /// クレート内部限定に絞る（`Self::dispatch_split_k_strided_prepared`
+    /// からの委譲のみに到達経路を限定する）。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_split_k_strided_prepared_with_plan(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        plan: tile::SplitKPlan,
+    ) -> Result<SplitKRoute, MetalError> {
+        self.dispatch_split_k_strided_prepared_with_plan_impl(
+            ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, c_buf, m, n, k, plan,
+        )
+    }
+
+    /// [`Self::dispatch_split_k_strided_prepared_with_plan`] の実体
+    /// （可視性分岐を持たない共通実装。`pub(crate)` に留め、公開可否は
+    /// 上記 2 関数の cfg 分岐のみが決める）。
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_split_k_strided_prepared_with_plan_impl(
         &self,
         ctx: &MetalContext,
         a_buf: &MetalBuffer,

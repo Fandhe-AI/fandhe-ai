@@ -18,7 +18,7 @@
 //!
 //! 実機実行（Apple Silicon 必須）:
 //! ```sh
-//! cargo test -p fandhe-ai-backend-metal --release --test gemm_splitk_bit_match -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --release --features internal-diagnostics --test gemm_splitk_bit_match -- --ignored --nocapture
 //! ```
 
 #![cfg(target_os = "macos")]
