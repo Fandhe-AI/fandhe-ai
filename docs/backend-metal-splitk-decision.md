@@ -119,7 +119,7 @@ split-K の文脈でも変わらない。本ドキュメントは Case 1（非 N
 
 **追記（イシュー #1474）**: 上記 1〜4 の設計方針どおり opt-in で実装済み（`dispatch_auto` へは
 未結線）。実装記録は `docs/perf/metal-gemm-splitk-two-pass.md` を参照。性能 A/B・本番結線可否は
-それぞれ後続イシュー #1475／#1476 のスコープ。
+それぞれ後続イシュー #1475／#1476 のスコープ。#1476 は結線せずと確定（§4）。
 
 ## §3 採否判断
 
@@ -168,8 +168,94 @@ M4 Max 実機実測・2026-09-09）。
 時間制約により事前登録した 5 run のうち 3 run で打ち切ったため、正式確定ではなく暫定判定である
 （同 doc §0／§5・§7 フォローアップ参照）。ADOPT（性能上の判定）が確定しても、本番結線
 （`SPLIT_K_NUMERIC_CONTRACT_APPROVED` の切替）は別途ユーザー承認が必要（#1476）。
+#1476 は性能判定〈undetermined〉・数値契約〈未承認〉の 2 ブロッカーにより結線せずと確定した
+（§4）。
 
-## §4 参照
+## §4 本番結線可否（#1476）
+
+**確定判断: 結線しない（`select_for_device`／`dispatch_auto`／`MetalBackendOps::gemm` は不変）。**
+`SPLIT_K_NUMERIC_CONTRACT_APPROVED` は `false` を維持し、opt-in 実装（`crate::tile::
+should_split_k`／`MetalGemm::dispatch_split_k_strided_prepared`・診断入口 `_with_plan`）は
+そのまま残す。独立した 2 つのブロッカーがあり、いずれか一方が解消しても他方が結線を阻む。
+
+1. **性能判定が正式 ADOPT ではない**（`docs/perf/metal-gemm-splitk-ab.md` §0／§9）: #1475
+   の機械判定（`aggregate.md` の `verdict`）は `undetermined`（`n_runs=3 < MIN_FORMAL_RUNS=5`。
+   PR #1499 の codex-review P1 対応で 5 run 未満は正式 ADOPT/REJECT を出力しない仕様。実測値
+   自体〈対象 9 形状すべて speedup 1.57〜4.42・3/3 run 符号一貫〉は改善方向を示すが、Issue の
+   結線条件「#1475 が ADOPT の場合のみ」に対し正式な ADOPT 判定は得られていない
+2. **数値契約が未承認**（`docs/perf/metal-gemm-splitk-two-pass.md` §5）: split-K は K 分割の
+   結合順序差により対象 11 形状中 8 形状が REQ-2 統一複合判定の厳密ゼロ fail を満たさない。
+   結線には `SPLIT_K_NUMERIC_CONTRACT_APPROVED=true` への切替が必須で、これは CUDA TF32/f16
+   と同型の実測ベースライン非後退方式（`tests/common/splitk_parity_baseline.rs::BASELINES`）
+   を Metal f32 split-K へ適用拡張するという、`.claude/rules/coding-rust.md`「バックエンド間
+   数値一致テストの許容誤差を単独で緩和しない」原則に基づくユーザー承認事項。memory
+   `prod-wiring-preapproved`（性能結線の事前承認）も「tolerance 定数・baseline 行は引き続き
+   ユーザー承認必須」と明示的にこの事項を除外している。一括承認（2026-09-09 06:10）の時点は
+   PR #1496 レビューで parity 不成立が判明した時刻（同日 08:50 マージ）より前であり、数値契約の
+   適用拡張を包含していたとは解釈できない
+
+### 承認依頼の要点（ユーザーが判断すべき項目）
+
+- (a) REQ-2 実測ベースライン非後退方式の Metal f32 split-K への適用拡張の可否（spec 側への
+  提案要否を含む。CUDA TF32/f16 は spec REQ-2 2026-09-02 追記の対象で Metal f32 split-K は
+  対象外）
+- (b) `splitk_parity_baseline.rs::BASELINES` に登録する具体値の承認（`docs/perf/
+  metal-gemm-splitk-two-pass.md` §5.3 の実測表を出典とする）
+- (c) 承認後の適用順序: (a)(b) の承認 → `SPLIT_K_NUMERIC_CONTRACT_APPROVED=true` へ切替 →
+  結線
+
+### 再開条件・結線案メモ（コード変更なし）
+
+結線位置は `MetalBackendOps::gemm`（`crates/backend-metal/src/ops.rs`）または
+`MetalGemm::dispatch_auto`（`gemm.rs`）で、`tile::select_for_device` を呼ぶ前に
+`tile::should_split_k(m, n, k)` を評価し `Some` なら `dispatch_split_k_strided_prepared` へ
+委譲、`None` なら従来の classic 経路を通す構成を想定する。再開時のチェックリスト:
+
+- 正方 N=512〜4096 が `should_split_k` で `None` を返すこと（既存 Linux 単体テスト
+  `should_split_k_rejects_large_square_and_wide_shapes` で確認済み。`tile.rs`）
+- classic 経路 bit 同一の非後退（`gemm_fine_barrier_bit_match`／`gemm_swizzle_bit_match`／
+  `gemm_splitk_bit_match` の classic ケース）
+- `gemm_splitk_parity.rs` を baseline 方式（`assert_parity` の厳密ゼロ fail ではなく
+  `ParityBaseline` 非後退検査）へ戻す（(a)(b) 承認後）
+- framework-compare gemm metal 8 セル（N=512〜4096 × fresh/reuse）の before/after 5 回
+  中央値・checksum 完全一致（`run_ab_gemm_metal.sh`）
+- #1475 §7 の残 5 run（run4/run5）完了による正式 ADOPT 確定
+
+### framework-compare A/B の扱い（「計測対象なし」）
+
+本イシューはコメントのみの変更（コードロジック無変更）のため、`crates/backend-metal/src`
+の before（`origin/main` 43a1e158）／after（本 PR HEAD）差分はコメント行のみであり、
+framework-compare gemm metal の実行時計測は「計測対象なし」とする（#1272 §5.11 の先例と
+同型）。根拠は `git diff --stat 43a1e158 HEAD -- crates/backend-metal/src` の出力:
+
+```text
+ crates/backend-metal/src/gemm.rs | 9 ++++++---
+ crates/backend-metal/src/tile.rs | 6 ++++--
+ 2 files changed, 10 insertions(+), 5 deletions(-)
+```
+
+変更行はすべて `///`／`//` で始まるドキュメンテーション・通常コメント行であることを
+`git diff 43a1e158 -- crates/backend-metal/src/gemm.rs crates/backend-metal/src/tile.rs`
+の追加・削除行を機械確認した（コメント以外の追加・削除行は 0 件）。
+
+### 既存 docs との整合確認
+
+`select_for_device` が本イシューで不変であることを前提に記述している以下の 3 文書を確認し、
+いずれも記述が真のままであることを確認した（編集なし）:
+
+- `docs/perf/metal-gemm-transpose-tiled.md`
+- `docs/perf/metal-gemm-n4096-kernel-gap.md`
+- `docs/perf/metal-gemm-candle-gate-remeasurement.md`
+
+### スコープ外
+
+- #1475 §7 のフォローアップ（run4/run5・B′ 選択関数呼び出し費用込み再実測・フェーズ 0
+  同一入力再実測）は本イシューでは実施しない（独立したブロッカー 2 が結線を阻むため結線判断
+  には影響せず、#1475 が自ら宣言したフォローアップであり、計測時の共有負荷〈1 分 load average
+  約 6.5〉で事前登録ゲート 4.0 が枯渇しやすく再緩和は行わない）
+- NT/TN/TT・f16／hfrag・`gemm_bias_act` 融合経路への split-K 適用（#1474 §8 と同じスコープ外）
+
+## §5 参照
 
 - `docs/perf/logs/metal-gemm-splitk-shapes-1308/`（M4 Max 実機実測の生ログ・`aggregate.py`／
   `aggregate.md`・`env_info.txt`。イシュー #1308）

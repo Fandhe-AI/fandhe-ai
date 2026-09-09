@@ -60,9 +60,11 @@
 //!
 //! **ADOPT は性能上の判定に限る**: 本番結線（`SPLIT_K_NUMERIC_CONTRACT_
 //! APPROVED` の切替）は REQ-2 判定方式の Metal f32 split-K への適用拡張
-//! というユーザー承認が別途必要（#1476 のスコープ）。本 example・
-//! `crates/backend-metal/src/` はいずれも変更しない（性能 A/B の実測・
-//! 記録に限る）。
+//! というユーザー承認が別途必要。#1476 で本番結線可否を確定した結果は
+//! **結線しない**（本ドキュメントの機械判定 `undetermined`〈3/5 run〉に
+//! 加え数値契約未承認の 2 ブロッカー。`docs/backend-metal-splitk-decision.md`
+//! §4）。本 example・`crates/backend-metal/src/` はいずれも変更しない
+//! （性能 A/B の実測・記録に限る）。
 //!
 //! ## 実行方法
 //!

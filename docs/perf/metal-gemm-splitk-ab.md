@@ -303,16 +303,33 @@ speedup の主因ではないことも確認した。
   フォローアップとして issue #1475 に残す。
 - **#1476（本番結線可否）**: `select_for_device`／`dispatch_auto`／
   `MetalBackendOps::gemm` への結線と `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
-  の切替（数値契約の適用拡張。ユーザー承認事項）。
+  の切替（数値契約の適用拡張。ユーザー承認事項）。**結線せずと確定（§9）**。
 - split-K の encode 分離入口の追加と GPU タイムスタンプによる純カーネル
   時間計測（`gemm.rs` 変更が必要）。
 - NT/TN/TT の性能比較・f16／hfrag の split-K・`gemm_bias_act` 融合経路への
   適用（#1474 §8 と同じ）。
 
+
 ## §8 参照
 
-- `docs/backend-metal-splitk-decision.md`（本イシューの追記先。§3）
+- `docs/backend-metal-splitk-decision.md`（本イシューの追記先。§3。本番結線可否の確定は §4）
 - `docs/perf/metal-gemm-splitk-shapes.md`（#1308。劣化率の元実測）
 - `docs/perf/metal-gemm-splitk-two-pass.md`（#1474。split-K 実装記録）
 - `docs/perf/logs/metal-gemm-splitk-ab-1475/`（本イシューの生ログ・
   `aggregate.py`／`aggregate.md`・`env_info.txt`・`self_check.log`）
+
+## §9 本番結線可否の確定（#1476）
+
+**結論: 結線しない。** `select_for_device`／`dispatch_auto`／`MetalBackendOps::gemm` は不変、
+`SPLIT_K_NUMERIC_CONTRACT_APPROVED=false` を維持する。判定根拠は
+`docs/backend-metal-splitk-decision.md` §4 を正とし、本節では要点のみ記す。
+
+- 本ドキュメント §0 の「暫定 ADOPT」は人間側の解釈であり、機械判定（`aggregate.md` の
+  `verdict`）は `undetermined`（`n_runs=3 < MIN_FORMAL_RUNS=5`。PR #1499 の codex-review P1
+  対応で 5 run 未満は正式 ADOPT/REJECT を出力しない仕様）。Issue #1476 の結線条件「#1475 が
+  ADOPT の場合のみ」に対し、正式な ADOPT 判定は得られていない
+- 独立してもう 1 つのブロッカー（`docs/perf/metal-gemm-splitk-two-pass.md` §5 の数値契約未承認）
+  があり、性能判定が仮に正式 ADOPT であっても結線には至らない
+- 本節は §0／§4／§5 の実測記述を「確定」へ書き換えるものではない。5 run 完了による正式確定は
+  §7 のフォローアップのまま未実施（本イシューでも実施しない。理由は decision doc §4「スコープ外」）
+

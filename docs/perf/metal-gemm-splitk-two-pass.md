@@ -241,6 +241,8 @@ ignored は実機依存）。`make check-cross-metal-tests`（`aarch64-apple-dar
 
 - 性能 A/B（対象 9 形状・5 回計測中央値・専有ゲート）: #1475。
 - `select_for_device`／`dispatch_auto`／`MetalBackendOps::gemm` への結線可否: #1476。
+  **結線せずと確定**（性能判定 undetermined・数値契約未承認の 2 ブロッカー。
+  `docs/backend-metal-splitk-decision.md` §4）。
 - f16／hfrag カーネルの split-K・TT 以外の一般 stride・`gemm_bias_act` 融合経路への適用・
   `TileClassMode::Split` との併用は対象外。
 - 縮約側アルゴリズムの追加改善（例: ツリー型縮約・より高精度な補償和の組合せ）は、§5.2 の原因
