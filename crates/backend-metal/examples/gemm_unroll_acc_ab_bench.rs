@@ -132,6 +132,110 @@ fn single_run_verdict(ratios: &[(usize, bool, f64)], gate_exceeded: bool) -> Sin
     }
 }
 
+/// [`round_extrema`] の戻り値。`phase1_round_stats` 行の `min_secs`／
+/// `max_secs` とその 0 始まり index を保持する
+/// （`gemm_transpose_route_ab_bench.rs::RoundExtrema` と同一契約。
+/// イシュー #1484）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RoundExtrema {
+    min_secs: f64,
+    min_round_idx: usize,
+    max_secs: f64,
+    max_round_idx: usize,
+}
+
+/// `round_medians_secs`（[`bench_harness::ab::StabilityResult::
+/// round_medians_secs`]。秒単位）から最小・最大ラウンドを求める純関数。
+///
+/// `gemm_transpose_route_ab_bench.rs::round_extrema`（イシュー #1251）と
+/// 同一実装・同一契約（**秒基準**判定・同値タイは最初の出現・空スライス
+/// は `None`）。本ファイルは transpose example と実行バイナリが分かれる
+/// ため複製している（`bench-harness` クレートへの共通化は #1484 のスコープ
+/// 外。イシュー本文参照）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn round_extrema(round_medians_secs: &[f64]) -> Option<RoundExtrema> {
+    if round_medians_secs.is_empty() {
+        return None;
+    }
+    let (mut min_idx, mut max_idx) = (0usize, 0usize);
+    for (i, &v) in round_medians_secs.iter().enumerate().skip(1) {
+        if v < round_medians_secs[min_idx] {
+            min_idx = i;
+        }
+        if v > round_medians_secs[max_idx] {
+            max_idx = i;
+        }
+    }
+    Some(RoundExtrema {
+        min_secs: round_medians_secs[min_idx],
+        min_round_idx: min_idx,
+        max_secs: round_medians_secs[max_idx],
+        max_round_idx: max_idx,
+    })
+}
+
+/// [`bench_harness::ab::StabilityResult::aux`]（[`bench_harness::ab::
+/// AuxiliarySpread`]。イシュー #1483）を `phase1_round_stats` 行の末尾
+/// キー群（`trimmed_spread_k1=`／`iqr_spread=`／`mad_spread=`）へ整形する
+/// 純関数。`gemm_transpose_route_ab_bench.rs::format_aux_spread_keys` と
+/// 同一契約（キー → フィールド対応・`NA` sentinel・判定への転用禁止。
+/// イシュー #1484）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn format_aux_spread_keys(aux: &bench_harness::ab::AuxiliarySpread) -> String {
+    let trimmed_str = match aux.trimmed {
+        Some(v) => format!("{v:.4e}"),
+        None => "NA".to_string(),
+    };
+    format!(
+        "trimmed_spread_k1={trimmed_str} iqr_spread={:.4e} mad_spread={:.4e}",
+        aux.iqr_over_median, aux.mad2_over_median
+    )
+}
+
+/// `phase1_round_stats` 行（機械可読な 1 行）を組み立てる純関数
+/// （イシュー #1484。新規追加）。識別キーは他 3 example の `size=` と
+/// 異なり `m=`／`n=`／`k=`（本 example の既存人間可読行
+/// `m={m} n={n} k={k} spread=…` と同じ識別子集合。`SHAPES` が非正方形状を
+/// 含むため単一 `size` では表現できない）。
+///
+/// 呼び出し元（`phase1_stability_selfcheck`）の既存人間可読行は本関数の
+/// 追加によって変更しない（本関数はその**直後**に新規出力される 1 行を
+/// 生成するのみ）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn format_phase1_round_stats_line(
+    m: usize,
+    n: usize,
+    k: usize,
+    result: &bench_harness::ab::StabilityResult,
+    gate: f64,
+    within_gate: bool,
+    extrema: &RoundExtrema,
+) -> String {
+    let median_secs = bench_harness::median_q1_q3(&result.round_medians_secs)
+        .expect("run_stability が返す round_medians_secs は非空・非 NaN のため成功する")
+        .median;
+    let round_medians_secs_str = result
+        .round_medians_secs
+        .iter()
+        .map(|s| format!("{s:.6e}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "phase1_round_stats m={m} n={n} k={k} rounds={} spread={:.4e} gate={gate:.4e} \
+         within_gate={within_gate} median_secs={median_secs:.6e} \
+         min_secs={:.6e} min_round_idx={} max_secs={:.6e} max_round_idx={} \
+         round_medians_secs={round_medians_secs_str} {}",
+        result.round_medians_secs.len(),
+        result.spread,
+        extrema.min_secs,
+        extrema.min_round_idx,
+        extrema.max_secs,
+        extrema.max_round_idx,
+        format_aux_spread_keys(&result.aux),
+    )
+}
+
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use bench_harness::MeasurementConfig;
@@ -318,6 +422,26 @@ mod macos_impl {
                 result.spread,
                 if within_gate { "OK" } else { "NG: gate 超過" }
             );
+
+            // イシュー #1484: 上記の既存人間可読行はバイト単位で変更せず、
+            // 機械可読な `phase1_round_stats` 行を直後に追加出力する
+            // （`gemm_transpose_route_ab_bench.rs` と同一キー集合＋
+            // `m=`／`n=`／`k=` 識別キー。`super::round_extrema`／
+            // `super::format_phase1_round_stats_line` 契約参照）。
+            if let Some(extrema) = super::round_extrema(&result.round_medians_secs) {
+                println!(
+                    "{}",
+                    super::format_phase1_round_stats_line(
+                        m,
+                        n,
+                        k,
+                        &result,
+                        SPREAD_GATE,
+                        within_gate,
+                        &extrema
+                    )
+                );
+            }
         }
 
         if !all_within_gate {
@@ -702,6 +826,81 @@ mod single_run_verdict_tests {
         assert_eq!(
             single_run_verdict(&ratios, true),
             SingleRunVerdict::Undetermined
+        );
+    }
+}
+
+/// `round_extrema`／`format_aux_spread_keys`／`format_phase1_round_stats_line`
+/// （イシュー #1484）の純関数ユニットテスト。macOS 依存部分を持たないため
+/// Linux CI（`cargo test -p fandhe-ai-backend-metal --example
+/// gemm_unroll_acc_ab_bench`）でも走る。
+#[cfg(test)]
+mod phase1_round_stats_tests {
+    use super::{format_aux_spread_keys, format_phase1_round_stats_line, round_extrema};
+    use bench_harness::ab::{AUXILIARY_TRIM_PER_SIDE, AuxiliarySpread, StabilityResult};
+
+    #[test]
+    fn auxiliary_trim_per_side_is_one() {
+        assert_eq!(AUXILIARY_TRIM_PER_SIDE, 1);
+    }
+
+    #[test]
+    fn round_extrema_empty_slice_is_none() {
+        assert_eq!(round_extrema(&[]), None);
+    }
+
+    #[test]
+    fn round_extrema_single_spike_finds_correct_index() {
+        let samples = [1.0, 1.1, 0.9, 5.0, 1.05, 0.95];
+        let extrema = round_extrema(&samples).expect("非空スライスは Some を返すはず");
+        assert_eq!(extrema.max_secs, 5.0);
+        assert_eq!(extrema.max_round_idx, 3);
+        assert_eq!(extrema.min_secs, 0.9);
+        assert_eq!(extrema.min_round_idx, 2);
+    }
+
+    #[test]
+    fn format_aux_spread_keys_trimmed_none_renders_na_sentinel() {
+        let aux = AuxiliarySpread {
+            trimmed: None,
+            iqr_over_median: 1.0e-1,
+            mad2_over_median: 2.0e-1,
+        };
+        let keys = format_aux_spread_keys(&aux);
+        assert_eq!(
+            keys,
+            "trimmed_spread_k1=NA iqr_spread=1.0000e-1 mad_spread=2.0000e-1"
+        );
+    }
+
+    /// 識別キーが `m=`／`n=`／`k=`（本 example の `SHAPES` は非正方形状を
+    /// 含むため `size=` 単一では表現できない）であることを含め、既存
+    /// キーの並び・書式・末尾補助 3 キーの追記を検証する（イシュー
+    /// #1484）。
+    #[test]
+    fn format_phase1_round_stats_line_has_m_n_k_identity_keys() {
+        let round_medians_secs = vec![1.0e-4, 1.1e-4, 0.9e-4, 1.05e-4];
+        let result = StabilityResult {
+            round_medians_secs: round_medians_secs.clone(),
+            spread: 2.0e-1,
+            aux: AuxiliarySpread {
+                trimmed: Some(1.2345e-1),
+                iqr_over_median: 2.3456e-1,
+                mad2_over_median: 3.4567e-1,
+            },
+        };
+        let extrema = round_extrema(&round_medians_secs).expect("非空スライスは Some を返すはず");
+        let line =
+            format_phase1_round_stats_line(2048, 2048, 512, &result, 5.0000e-2, false, &extrema);
+        assert!(
+            line.starts_with("phase1_round_stats m=2048 n=2048 k=512 rounds=4 spread=2.0000e-1 ")
+        );
+        assert!(line.contains("gate=5.0000e-2 within_gate=false"));
+        assert!(
+            line.contains("round_medians_secs=1.000000e-4,1.100000e-4,9.000000e-5,1.050000e-4")
+        );
+        assert!(
+            line.ends_with("trimmed_spread_k1=1.2345e-1 iqr_spread=2.3456e-1 mad_spread=3.4567e-1")
         );
     }
 }

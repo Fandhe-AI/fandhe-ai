@@ -108,10 +108,25 @@ cargo run -p fandhe-ai-backend-metal --example gemm_transpose_route_ab_bench --r
 '^phase1_round_stats '` で抽出。キー: `size`・`rounds`・`spread`・
 `gate`・`within_gate`・`median_secs`・`min_secs`／`min_round_idx`・
 `max_secs`／`max_round_idx`〈秒基準・0 始まり。TFLOPS では大小が逆転
-するため注意〉・`round_medians_secs`〈カンマ区切り〉）と、末尾に総括
-`phase1_summary`（`sizes_gate_exceeded` 一覧）が出る。§5.4 の 4 試行が
-示す単発スパイク型の再現条件を排他環境／負荷環境で切り分ける用途
-（#1253・#1255）で、1 回ごとに別プロセスで起動する運用を想定する。
+するため注意〉・`round_medians_secs`〈カンマ区切り〉・`trimmed_spread_k1`・
+`iqr_spread`・`mad_spread`〈イシュー #1484。以下の**補助 spread 統計量**
+節参照〉）と、末尾に総括 `phase1_summary`（`sizes_gate_exceeded` 一覧）が
+出る。§5.4 の 4 試行が示す単発スパイク型の再現条件を排他環境／負荷環境で
+切り分ける用途（#1253・#1255）で、1 回ごとに別プロセスで起動する運用を
+想定する。
+
+**補助 spread 統計量（`trimmed_spread_k1`／`iqr_spread`／`mad_spread`。
+イシュー #1483/#1484）**: `round_medians_secs` の末尾に追記される 3 キー
+（`bench_harness::ab::StabilityResult::aux`。`AuxiliarySpread` 由来）。
+`trimmed_spread_k1` は上下各 1（`AUXILIARY_TRIM_PER_SIDE=1`）を除いた
+レンジ ÷ median（ラウンド数がトリム後 2 要素未満の場合は `NA`）、
+`iqr_spread` は `(Q3 − Q1) / median`、`mad_spread` は **2·MAD/median**
+（`median absolute deviation` の 2 倍を median で正規化した値）。いずれも
+**判定には使わない**（`within_gate` は既存の `spread`／`gate` 列のみで
+決まり、これら 3 キーはレポート専用の追加情報）。`gemm_swizzle_ab_bench`・
+`gemm_fine_barrier_ab_bench`・`gemm_unroll_acc_ab_bench` の 3 example にも
+（後 2 者は識別キーが `m=`／`n=`／`k=`）同じキー集合の `phase1_round_stats`
+行を新規追加している（従来は本 example のみが出力していた）。
 
 実行前の環境確認（load average・他 GPU プロセス・uptime）はイシュー #1265 で
 example 自身が自動記録するようになった（フェーズ 1・フェーズ 2 の各開始前に

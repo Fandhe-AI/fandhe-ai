@@ -167,7 +167,16 @@ ROUND_STATS_RE = re.compile(
     r"within_gate=(?P<within_gate>[Tt]rue|[Ff]alse) median_secs=(?P<median_secs>[0-9.eE+-]+) "
     r"min_secs=(?P<min_secs>[0-9.eE+-]+) min_round_idx=(?P<min_round_idx>\d+) "
     r"max_secs=(?P<max_secs>[0-9.eE+-]+) max_round_idx=(?P<max_round_idx>\d+) "
-    r"round_medians_secs=(?P<round_medians_secs>[0-9.eE+,-]+)$"
+    r"round_medians_secs=(?P<round_medians_secs>[0-9.eE+,-]+)"
+    # イシュー #1484: `bench_harness::ab::StabilityResult::aux`（トリム済み
+    # レンジ・IQR・MAD ベースの補助 spread 統計量。判定には使わない）を
+    # 行末へ追記する形式へ example 側が変更されたため、任意の末尾キー群
+    # として受理する（無ければ従来どおり `round_medians_secs=…` で終端）。
+    # `trimmed_spread_k1` は `aux.trimmed == None` のとき example 側の
+    # `NA` sentinel を出力しうるため `[0-9.eE+-]+|NA` を許す。
+    r"(?: trimmed_spread_k1=(?P<trimmed_spread_k1>[0-9.eE+-]+|NA) "
+    r"iqr_spread=(?P<iqr_spread>[0-9.eE+-]+) "
+    r"mad_spread=(?P<mad_spread>[0-9.eE+-]+))?$"
 )
 
 LOAD_RE = re.compile(r"load averages?:\s*([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)")
@@ -191,6 +200,19 @@ def parse_run_log(path: Path) -> dict[int, dict]:
         deviating = sum(
             1 for v in round_medians if abs(v - median) > gate * median
         )
+        # イシュー #1484: 末尾の補助 spread 統計量（`trimmed_spread_k1`／
+        # `iqr_spread`／`mad_spread`）は既存ログには存在しないため
+        # `d.get(...)` は `None` になる（regex の optional 群）。存在する
+        # 場合のみ `aux` dict を作る（表 D の表示要否判定に使う）。本スク
+        # リプト自身も判定へは使わない（レポート転記のみ）。
+        aux = None
+        if d.get("iqr_spread") is not None:
+            trimmed_raw = d.get("trimmed_spread_k1")
+            aux = {
+                "trimmed_spread_k1": None if trimmed_raw == "NA" else float(trimmed_raw),
+                "iqr_spread": float(d["iqr_spread"]),
+                "mad_spread": float(d["mad_spread"]),
+            }
         out[size] = {
             "spread": float(d["spread"]),
             "gate": gate,
@@ -202,6 +224,7 @@ def parse_run_log(path: Path) -> dict[int, dict]:
             "max_round_idx": int(d["max_round_idx"]),
             "round_medians_secs": round_medians,
             "deviating_rounds": deviating,
+            "aux": aux,
         }
     return out
 
@@ -528,8 +551,117 @@ def main() -> None:
             row.append(f"{d['max_round_idx']} ({d['deviating_rounds']})")
         lines.append("| " + " | ".join(row) + " |")
 
+    lines.extend(render_table_d(runs_data, valid_run_ids))
+
     print("\n".join(lines))
 
 
+def render_table_d(
+    runs_data: dict[int, dict[int, dict]], valid_run_ids: list[int]
+) -> list[str]:
+    """表 D: 補助 spread 統計量（`StabilityResult::aux`。イシュー #1483/
+    #1484）を run × size で並べる。
+
+    既存ログ（本イシュー以前に取得した `phase1_run{N}.log`）は
+    `phase1_round_stats` 行に補助キーを持たないため `d["aux"]` は常に
+    `None` になり、いずれの有効 run にも 1 セルも aux が無ければ表自体を
+    出力しない（既存ログでの出力を byte 単位で不変に保つ。イシュー #1484
+    受入条件 1）。
+    """
+    has_any_aux = any(
+        runs_data.get(n, {}).get(size, {}).get("aux") is not None
+        for n in valid_run_ids
+        for size in SIZES
+    )
+    if not has_any_aux:
+        return []
+
+    lines: list[str] = [
+        "",
+        "### 表 D: 補助 spread 統計量（トリム済みレンジ・IQR・MAD。判定には使わない）\n",
+        "**ゲート判定は表 A の spread 列が正**。本表はレポート専用の補助指標"
+        "（`bench_harness::ab::StabilityResult::aux`。イシュー #1483/#1484）で、"
+        "`trimmed_spread_k1` が `NA` の場合はラウンド数がトリム後 2 要素未満"
+        "（トリム不能）を示す。\n",
+    ]
+    header_d = (
+        "| size | "
+        + " | ".join(
+            f"run{n} trimmed_k1 / iqr / mad" for n in valid_run_ids
+        )
+        + " |"
+    )
+    lines.append(header_d)
+    lines.append("|---|" + "---|" * len(valid_run_ids))
+    for size in SIZES:
+        row = [str(size)]
+        for n in valid_run_ids:
+            d = runs_data.get(n, {}).get(size)
+            aux = d.get("aux") if d else None
+            if aux is None:
+                row.append("N/A")
+                continue
+            trimmed_str = (
+                "NA"
+                if aux["trimmed_spread_k1"] is None
+                else f"{aux['trimmed_spread_k1']:.4e}"
+            )
+            row.append(f"{trimmed_str} / {aux['iqr_spread']:.4e} / {aux['mad_spread']:.4e}")
+        lines.append("| " + " | ".join(row) + " |")
+    return lines
+
+
+def _self_test() -> None:
+    """合成 `phase1_round_stats` 行で regex・aux 取り込み・表 D の条件付き
+    表示ロジックを検証する（実機なしで CI 実行可能。`1267-aggregate.py::
+    _self_test` と同方針。イシュー #1484）。
+    """
+    # 補助キーなし（既存ログと同じ形式）: aux は None・表 D は空になる。
+    line_no_aux = (
+        "phase1_round_stats size=256 rounds=2 spread=1.0000e-2 gate=5.0000e-2 "
+        "within_gate=true median_secs=1.0e-3 min_secs=9.0e-4 min_round_idx=0 "
+        "max_secs=1.1e-3 max_round_idx=1 round_medians_secs=9.0e-4,1.1e-3"
+    )
+    m = ROUND_STATS_RE.match(line_no_aux)
+    assert m is not None, "補助キーなしの既存ログ行が一致しないのは regex の後退"
+    assert m.group("iqr_spread") is None
+
+    # 補助キーあり（`trimmed_spread_k1=NA` を含む）: aux が正しく取り込まれる。
+    line_with_aux = line_no_aux + " trimmed_spread_k1=NA iqr_spread=2.3456e-1 mad_spread=3.4567e-1"
+    m2 = ROUND_STATS_RE.match(line_with_aux)
+    assert m2 is not None
+    assert m2.group("trimmed_spread_k1") == "NA"
+    assert m2.group("iqr_spread") == "2.3456e-1"
+    assert m2.group("mad_spread") == "3.4567e-1"
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        p_no_aux = Path(td) / "no_aux.log"
+        p_no_aux.write_text(line_no_aux + "\n")
+        parsed_no_aux = parse_run_log(p_no_aux)
+        assert parsed_no_aux[256]["aux"] is None
+        assert render_table_d({1: parsed_no_aux}, [1]) == []
+
+        p_with_aux = Path(td) / "with_aux.log"
+        p_with_aux.write_text(line_with_aux + "\n")
+        parsed_with_aux = parse_run_log(p_with_aux)
+        aux = parsed_with_aux[256]["aux"]
+        assert aux == {
+            "trimmed_spread_k1": None,
+            "iqr_spread": 2.3456e-1,
+            "mad_spread": 3.4567e-1,
+        }
+        table_d = render_table_d({1: parsed_with_aux}, [1])
+        assert table_d, "aux を持つ run が 1 件あれば表 D は非空であるはず"
+        assert any("表 D" in line for line in table_d)
+        assert any("NA / 2.3456e-01 / 3.4567e-01" in line for line in table_d)
+
+    print("self-test OK", file=sys.stderr)
+
+
 if __name__ == "__main__":
-    main()
+    if "--self-test" in sys.argv:
+        _self_test()
+    else:
+        main()

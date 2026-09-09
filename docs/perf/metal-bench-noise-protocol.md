@@ -222,6 +222,18 @@ GPU プロセス検出・uptime 記録の取得と判定を行う設定型・取
 または GPU タイムスタンプ分離計測（#1257 系）の結果を待ってから判断する」
 と提案する。
 
+**イシュー #1484 での先行実施**: `crates/bench-harness`（`StabilityResult::aux`・
+`AuxiliarySpread`）は #1483 で追加済み。それを受けて #1484 が本節の C・D
+（判定に使わない補助レポート）を出力側へ配線した: 呼び出し側 example 4 本
+（`gemm_transpose_route_ab_bench.rs`・`gemm_swizzle_ab_bench.rs`・
+`gemm_fine_barrier_ab_bench.rs`・`gemm_unroll_acc_ab_bench.rs`）の
+`phase1_round_stats` 行へ `trimmed_spread_k1`（案 A・k=1 も併記）・
+`iqr_spread`・`mad_spread` を追記し、`aggregate.py`・`1255-aggregate.py`
+を後方互換な形で追従させた（`STABILITY_SPREAD_GATE`・判定式・既存キーは
+不変。詳細は `docs/perf/metal-gemm-transpose-tiled.md` のキー一覧節）。
+本節（§8.5）が挙げる A の**ゲート置換**（統計量そのものの置き換え）は
+未承認のまま・スコープ外（下記の見積もりは引き続き将来の承認事項）。
+
 ### 8.5 採用時の変更範囲（承認が下りた場合の見積もり。本 PR では未実施）
 
 - `crates/bench-harness/src/stats.rs`: 新関数（例

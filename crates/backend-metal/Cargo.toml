@@ -137,3 +137,14 @@ test = true
 name = "gemm_transpose_route_ab_bench"
 test = true
 required-features = ["internal-diagnostics"]
+
+# 同上の理由。本 example は `single_run_verdict_tests`（イシュー #1284
+# loop unroll A/B 採否判定純関数のクロスプラットフォーム回帰検知テスト）を
+# 持つが、これまで `test = true` が未指定だったため CI（Linux）で実行対象
+# になっていなかった（イシュー #1484 で発見・是正。`gemm_swizzle_ab_bench`
+# 等と同型）。加えて #1484 で `phase1_round_stats_tests`（`RoundExtrema`／
+# 補助 spread 統計量整形の純関数テスト）を新設する
+# （`gemm_swizzle_ab_bench`／`gemm_fine_barrier_ab_bench` と同型）。
+[[example]]
+name = "gemm_unroll_acc_ab_bench"
+test = true
