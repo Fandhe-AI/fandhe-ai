@@ -1,0 +1,8 @@
+== env_guard(phase1) ==
+8:27  up 20 days, 19:40, 19 users, load averages: 1.20 4.03 4.92
+env_guard_mode=gated
+env_guard_load_avg one=1.20 five=4.03 fifteen=4.92 max_1min=2.00 verdict=pass
+env_guard_uptime_secs=1798793 collected_at_unix_secs=1788910067
+env_guard_gpu status=available processes=92 flagged=none device_utilization_percent=1 verdict=pass note=none
+env_guard_overall verdict=pass attempts=1 max_attempts=20 total_wait_secs=0.00
+env_guard_attempt idx=1 waited_before_secs=0.00 load_avg_one=1.20 gpu_verdict=pass overall=pass

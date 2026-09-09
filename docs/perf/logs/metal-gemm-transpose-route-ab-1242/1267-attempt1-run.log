@@ -1,0 +1,23 @@
+== env_guard(phase1) ==
+8:27  up 20 days, 19:40, 19 users, load averages: 1.20 4.03 4.92
+env_guard_mode=gated
+env_guard_load_avg one=1.20 five=4.03 fifteen=4.92 max_1min=2.00 verdict=pass
+env_guard_uptime_secs=1798793 collected_at_unix_secs=1788910067
+env_guard_gpu status=available processes=92 flagged=none device_utilization_percent=1 verdict=pass note=none
+env_guard_overall verdict=pass attempts=1 max_attempts=20 total_wait_secs=0.00
+env_guard_attempt idx=1 waited_before_secs=0.00 load_avg_one=1.20 gpu_verdict=pass overall=pass
+env_guard_result=pass attempts=1
+--- フェーズ 1: 安定性セルフチェック（対照カーネル: dispatch_auto）---
+size=256 spread=0.3121 (NG: gate 超過) round_tflops=[0.1751, 0.1350, 0.1743, 0.1864, 0.1711, 0.1476, 0.1382, 0.1754, 0.1389, 0.1337]
+phase1_round_stats size=256 rounds=10 spread=3.1207e-1 gate=5.0000e-2 within_gate=false median_secs=2.273750e-4 min_secs=1.800000e-4 min_round_idx=3 max_secs=2.509580e-4 max_round_idx=9 round_medians_secs=1.916250e-4,2.485000e-4,1.925420e-4,1.800000e-4,1.961250e-4,2.273750e-4,2.428330e-4,1.912500e-4,2.415830e-4,2.509580e-4
+size=512 spread=0.5794 (NG: gate 超過) round_tflops=[0.6797, 0.4421, 0.4450, 0.7071, 0.6938, 0.4505, 0.5007, 0.6799, 0.7096, 0.6995]
+phase1_round_stats size=512 rounds=10 spread=5.7945e-1 gate=5.0000e-2 within_gate=false median_secs=3.949160e-4 min_secs=3.782920e-4 min_round_idx=8 max_secs=6.071250e-4 max_round_idx=1 round_medians_secs=3.949160e-4,6.071250e-4,6.031670e-4,3.796250e-4,3.869170e-4,5.958750e-4,5.361250e-4,3.947910e-4,3.782920e-4,3.837500e-4
+size=1024 spread=0.5818 (NG: gate 超過) round_tflops=[1.0201, 1.8326, 1.4763, 0.9080, 0.9267, 0.9003, 1.0296, 1.7794, 1.8043, 1.7923]
+phase1_round_stats size=1024 rounds=10 spread=5.8180e-1 gate=5.0000e-2 within_gate=false median_secs=2.085708e-3 min_secs=1.171792e-3 min_round_idx=1 max_secs=2.385250e-3 max_round_idx=5 round_medians_secs=2.105167e-3,1.171792e-3,1.454625e-3,2.365166e-3,2.317333e-3,2.385250e-3,2.085708e-3,1.206875e-3,1.190209e-3,1.198167e-3
+size=2048 spread=0.6478 (NG: gate 超過) round_tflops=[3.2093, 1.9275, 3.1819, 3.0988, 3.1987, 3.2284, 3.1299, 2.2502, 2.9973, 2.6529]
+phase1_round_stats size=2048 rounds=10 spread=6.4783e-1 gate=5.0000e-2 within_gate=false median_secs=5.544000e-3 min_secs=5.321459e-3 min_round_idx=5 max_secs=8.913042e-3 max_round_idx=1 round_medians_secs=5.353166e-3,8.913042e-3,5.399166e-3,5.544000e-3,5.370917e-3,5.321459e-3,5.488959e-3,7.634792e-3,5.731834e-3,6.475833e-3
+size=4096 spread=0.0481 (OK) round_tflops=[4.7724, 4.7451, 4.7543, 4.7562, 4.6660, 4.5754, 4.6939, 4.7460, 4.7978, 4.6111]
+phase1_round_stats size=4096 rounds=10 spread=4.8057e-2 gate=5.0000e-2 within_gate=true median_secs=2.896454e-2 min_secs=2.864650e-2 min_round_idx=8 max_secs=3.003846e-2 max_round_idx=5 round_medians_secs=2.879888e-2,2.896454e-2,2.890817e-2,2.889658e-2,2.945512e-2,3.003846e-2,2.928054e-2,2.895912e-2,2.864650e-2,2.980625e-2
+phase1_summary sizes_measured=5 sizes_gate_exceeded=256,512,1024,2048 all_within_gate=false
+--- フェーズ 1 判定: 一部サイズが spread ≤0.05 相当を満たさなかった。フェーズ 2（A/B 判定）はスキップする（安全側判断: 判定不可のまま採否を確定しない）。
+verdict=undetermined (フェーズ 1 の安定性セルフチェックで spread ≤gate 相当を満たさないサイズが残ったため、フェーズ 2（A/B 判定）を実行せず判定不可のまま終了する)
