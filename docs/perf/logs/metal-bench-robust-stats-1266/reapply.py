@@ -10,9 +10,15 @@ Python3 標準ライブラリのみで完結させ（`.claude/rules/security.md`
 方針）。
 
 閾値（0.05）は `crates/bench-harness/src/ab.rs::STABILITY_SPREAD_GATE`
-（単一真実源）をこのスクリプトでは再定義せず、ログ行の `gate=` を転記する
-（1186/1187 系は `gate=` を出力しない旧フォーマットのため 0.05 を「ログが
-本来使っていた値」として明示的に仮定する。値そのものは変更しない）。
+（単一真実源）をこのスクリプトでは再定義せず、判定には**ログ行から読み取った
+実際の `gate=`**（`logged_gate`。セルごとに保持）を使う。#1255（正確値）系は
+実ログの `gate=` 値をそのまま使い、`validate_gate_consistency()` で全 25 セル
+の `logged_gate` が `GATE` 定数と一致することを検査する（不一致ならログ側の
+実閾値が定数からドリフトしている証拠であり、目視で気づけないまま判定基準が
+分散するのを防ぐため fail-closed で異常終了する）。1186/1187 系（参考値）は
+`gate=` を出力しない旧フォーマットのため、`GATE` 定数を「ログが本来使って
+いた値」として明示的に仮定した値を `logged_gate` に代入する（実ログ由来の
+値ではないことをコード上も分離して残す。値そのものは変更しない）。
 
 分位点の定義は `crates/bench-harness/src/stats.rs::median_q1_q3`
 （median-of-halves 方式: `idx = round(p * (n-1))`）と同一のものをここでも
@@ -258,6 +264,35 @@ def self_test(exact: dict[str, dict[int, dict]]) -> bool:
     return ok
 
 
+def validate_gate_consistency(exact: dict[str, dict[int, dict]]) -> bool:
+    """判定に使う `logged_gate`（#1255 正確値セッション。実ログの `gate=` 転記）が
+    `GATE` 定数と全件一致することを検査する。
+
+    判定処理自体は各セルの `logged_gate` を直接使う（共通閾値と信じて `GATE`
+    定数を判定式に埋め込むのではなく、ログが実際に使っていた値を使う設計。
+    P1 是正: `logged_gate` を保存するだけで判定には未使用だった構造を解消）。
+    この検査は「共通閾値という前提」自体が壊れていないかを別途保証する
+    フェイルセーフで、レポート生成時（`--self-test` なし）にも常に実行する。
+    1186/1187 系（参考値）は `gate=` を出力しない旧フォーマットのため
+    `logged_gate` 自体が `GATE` の代入値であり、本検査の対象外（トートロジー
+    になるため）。
+    """
+    ok = True
+    checked = 0
+    for session, cells in exact.items():
+        for size, cell in cells.items():
+            checked += 1
+            if cell["logged_gate"] != GATE:
+                ok = False
+                print(
+                    f"[gate-consistency FAIL] {session} size={size}: "
+                    f"logged_gate={cell['logged_gate']!r} != GATE={GATE!r}",
+                    file=sys.stderr,
+                )
+    print(f"[gate-consistency] {checked} 件（#1255 正確値）の logged_gate を検査", file=sys.stderr)
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # レポート生成
 # ---------------------------------------------------------------------------
@@ -267,7 +302,11 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
     lines: list[str] = []
     lines.append("<!-- 本ファイルは reapply.py の決定的出力。手動編集しない。 -->")
     lines.append("")
-    lines.append(f"gate（閾値。`ab.rs::STABILITY_SPREAD_GATE` の値をログから転記） = {GATE}")
+    lines.append(
+        "gate（閾値。判定は各セルの `logged_gate`〈ログの `gate=` 転記。"
+        f"#1255 系は `validate_gate_consistency()` で `GATE`={GATE} と全件一致を検証済み〉"
+        "を使用。1186/1187 系は `gate=` 非出力の旧フォーマットのため GATE 定数を仮定値として転記）"
+    )
     lines.append("")
 
     all_sessions: dict[str, dict[int, dict]] = {}
@@ -278,7 +317,12 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
     lines.append("## per-cell 表（run × size × 候補。値 ≤ gate なら成立）")
     lines.append("")
     header = "| session | size | " + " | ".join(CANDIDATES) + " |"
+    # per-cell 表（session・size の 2 列 + 候補列）用の区切り行。
     sep = "|---|---|" + "---|" * len(CANDIDATES)
+    # サイズ別・セッション別の集計表（1 列 + 候補列）は列数が異なるため
+    # 専用の区切り行を用いる（P2 是正: per-cell 用 sep の使い回しは
+    # ヘッダーと列数が食い違い GitHub 上で表として描画されない）。
+    sep_1col = "|---|" + "---|" * len(CANDIDATES)
     lines.append(header)
     lines.append(sep)
 
@@ -293,11 +337,12 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
             if size not in cells:
                 continue
             total_cells += 1
+            cell_gate = cells[size]["logged_gate"]
             candidates = compute_candidates(cells[size]["samples_secs"])
             row = [session, str(size)]
             for c in CANDIDATES:
                 v = candidates[c]
-                passed = v is not None and v <= GATE
+                passed = v is not None and v <= cell_gate
                 if passed:
                     cell_pass_count[c] += 1
                 mark = "✓" if passed else ""
@@ -315,7 +360,7 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
     lines.append("")
     header2 = "| size | " + " | ".join(CANDIDATES) + " |"
     lines.append(header2)
-    lines.append(sep)
+    lines.append(sep_1col)
     for size in SIZES:
         row = [str(size)]
         for c in CANDIDATES:
@@ -327,7 +372,7 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
                     continue
                 n_total += 1
                 v = compute_candidates(cells[size]["samples_secs"])[c]
-                if v is not None and v <= GATE:
+                if v is not None and v <= cells[size]["logged_gate"]:
                     n_pass += 1
             row.append(f"{n_pass}/{n_total}")
         lines.append("| " + " | ".join(row) + " |")
@@ -336,7 +381,7 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
     lines.append("### 分母: #1255 正確値 + #1186/#1187 参考値込み（10 run × 5 size = 50 セル）")
     lines.append("")
     lines.append(header2)
-    lines.append(sep)
+    lines.append(sep_1col)
     for size in SIZES:
         row = [str(size)]
         for c in CANDIDATES:
@@ -348,7 +393,7 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
                     continue
                 n_total += 1
                 v = compute_candidates(cells[size]["samples_secs"])[c]
-                if v is not None and v <= GATE:
+                if v is not None and v <= cells[size]["logged_gate"]:
                     n_pass += 1
             row.append(f"{n_pass}/{n_total}")
         lines.append("| " + " | ".join(row) + " |")
@@ -359,7 +404,7 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
     lines.append("")
     header3 = "| session | " + " | ".join(CANDIDATES) + " |"
     lines.append(header3)
-    lines.append(sep)
+    lines.append(sep_1col)
     session_pass_count = {c: 0 for c in CANDIDATES}
     for session in session_order:
         cells = all_sessions[session]
@@ -371,7 +416,7 @@ def render_report(exact: dict[str, dict[int, dict]], reference: dict[str, dict[i
                     all_pass = False
                     break
                 v = compute_candidates(cells[size]["samples_secs"])[c]
-                if v is None or v > GATE:
+                if v is None or v > cells[size]["logged_gate"]:
                     all_pass = False
                     break
             if all_pass:
@@ -401,8 +446,14 @@ def main() -> int:
     exact, reference = load_all_sessions()
 
     if args.self_test:
-        ok = self_test(exact)
+        ok = self_test(exact) and validate_gate_consistency(exact)
         return 0 if ok else 1
+
+    # レポート生成時も「判定に使う logged_gate が GATE 定数から乖離していない
+    # か」を毎回検査する（--self-test 限定にすると通常実行〈標準出力を
+    # reapply.md へ転記する経路〉ではドリフトを検出できないため）。
+    if not validate_gate_consistency(exact):
+        return 1
 
     sys.stdout.write(render_report(exact, reference))
     return 0
