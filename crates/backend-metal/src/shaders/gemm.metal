@@ -2413,10 +2413,20 @@ kernel void gemm_splitk_reduce(
     for (uint p = 0; p < sk.partitions; p++) {
         float term = c_split[(size_t)p * plane + idx];
         float t = acc + term;
-        if (fabs(acc) >= fabs(term)) {
-            comp += (acc - t) + term;
-        } else {
-            comp += (term - t) + acc;
+        // `t` が非有限（有限入力の overflow による `inf`／`NaN` 入力の伝播）
+        // の場合、Neumaier 補正項の計算（`acc - t` 等）が `inf - inf` 等で
+        // 補正自体が `NaN` になり、有限の `acc + term` なら `+inf` になる
+        // はずの結果を `NaN` へ変えてしまう（PR #1496 codex-review 指摘。
+        // classic 経路〈単純な逐次 FMA 加算〉は同じ有限入力 overflow で
+        // `+inf` を返すため、この分岐がないと split-K だけ異なる値を返す
+        // 数値契約違反になる）。非有限区間では補正を適用せず naive 加算と
+        // 同じ挙動（`acc` をそのまま伝播）にすることで両経路を揃える。
+        if (isfinite(t)) {
+            if (fabs(acc) >= fabs(term)) {
+                comp += (acc - t) + term;
+            } else {
+                comp += (term - t) + acc;
+            }
         }
         acc = t;
     }

@@ -6,26 +6,32 @@
 //! `(64,64,2056)`／`(128,128,2064)` も併せて確認する（イシュー #1474
 //! 計画 §7.2）。
 //!
-//! **判定方式（実機実測を経て AC-2 の当初記述から変更。イシュー #1474）**:
-//! split-K は K 方向を複数パーティションへ分割し独立に部分和を求めてから
-//! 固定順序で結合するため、単一の連続 K ループで求める classic 経路とは
-//! 加算の結合順序が異なり、丸め誤差の生じ方も異なる。実機実測（M4 Max）で
-//! classic 経路は全対象形状で CPU 参照実装と bit 完全一致する一方、split-K
-//! 経路は対象 11 形状のうち大半で REQ-2 統一複合判定の要素単位 fail が
-//! 1〜8 件／総要素数発生し、`partitions=2`（最小分割）の時点で既に発生する
-//! ことを確認した（結合順序の違いに起因する構造的特性であり、`docs/
-//! coding-rust.md` が定める tolerance 定数〈`RELATIVE_TOLERANCE`/
-//! `ABSOLUTE_RESCUE_THRESHOLD`〉の緩和では解消しない）。詳細は
-//! `docs/perf/metal-gemm-splitk-two-pass.md` §5 を参照。
+//! **判定方式（厳密ゼロ fail 判定。`.claude/rules/coding-rust.md` の既定
+//! 方針どおり）**: 本テストは `fandhe_ai_backend_cpu::parity::assert_parity`
+//! による厳密ゼロ fail 判定を用いる。
 //!
-//! そのため本テストは厳密ゼロ fail 判定（`assert_parity`）ではなく、
-//! `tests/common/splitk_parity_baseline.rs` の実測ベースライン非後退
-//! 契約（`assert_no_split_k_parity_regression`）で判定する。これは
-//! `docs/spec/04-requirements.md` REQ-2 2026-09-02 追記（TF32/f16 Tensor
-//! Core 経路の受け入れ判定方式）が CUDA 側で確立した「厳密ゼロ fail
-//! 判定は実機実測で成立が確認された形状に限り、成立しない形状は実測
-//! baseline 非後退方式を正式な受け入れ判定とする」という方針と同種の
-//! 適用である（判定式・tolerance 定数自体は一切変更しない）。
+//! 実機実測（M4 Max）では、split-K は K 方向を複数パーティションへ分割し
+//! 独立に部分和を求めてから固定順序で結合するため、単一の連続 K ループで
+//! 求める classic 経路とは加算の結合順序が異なり、丸め誤差の生じ方も異なる
+//! ことを確認している。classic 経路は全対象形状で CPU 参照実装と bit
+//! 完全一致する一方、split-K 経路は対象 11 形状のうち大半で REQ-2 統一
+//! 複合判定の要素単位 fail が発生する（詳細は `docs/perf/metal-gemm-
+//! splitk-two-pass.md` §5 を参照）。
+//!
+//! この実測結果を受け、当初は CUDA 側 TF32/f16 Tensor Core 経路（spec
+//! REQ-2 2026-09-02 追記）と同型の実測ベースライン非後退方式へ判定方式を
+//! 変更する案を実装したが、PR #1496 の codex-review 指摘（イシュー #1474）
+//! により、当該 spec 追記は TF32/f16 Tensor Core 経路限定であり Metal f32
+//! split-K への適用拡張には別途ユーザー承認が必要と判明したため、承認を
+//! 得るまでの間は `.claude/rules/coding-rust.md` の既定方針（バックエンド
+//! 間数値一致テストの許容誤差を単独で緩和しない）に従い厳密ゼロ fail
+//! 判定へ差し戻した。この差し戻しにより、実機（Apple Silicon）で本テストを
+//! 実行すると split-K 側の丸め誤差に起因する `#[ignore]` テスト失敗が
+//! 再発する状態は既知（`docs/perf/metal-gemm-splitk-two-pass.md` §5 参照）。
+//! 適用拡張の是非・具体的な baseline 値は別途ユーザー承認を得たうえで
+//! `tests/common/splitk_parity_baseline.rs`（実装は保持済み・本テストからは
+//! 未使用）を再度使う形で対応する（承認記録は取得次第 `docs/perf/
+//! metal-gemm-splitk-two-pass.md` へ追記予定。イシュー #1474）。
 //!
 //! いずれのケースも `dispatch_split_k_strided_prepared` の戻り値が
 //! `SplitKRoute::Split` であることを assert し、フォールバック（classic
@@ -45,8 +51,7 @@
 mod common;
 
 use bench_harness::rng::Xorshift64Star;
-use common::splitk_parity_baseline::{assert_no_split_k_parity_regression, find_baseline};
-use fandhe_ai_backend_cpu::parity::{compare, matmul_reference_fma};
+use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
 use fandhe_ai_backend_metal::layout::{MatrixLayout, classify_2d};
 use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm, SplitKRoute};
 
@@ -145,22 +150,13 @@ fn split_k_matches_classic_and_cpu_reference_for_target_shapes_and_transpose_pat
             );
 
             let actual = c_buf.read_to_vec();
-            let report = compare(&actual, &expected)
-                .expect("compare の長さ検証に失敗した（actual/expected のサイズ不一致）");
-            let baseline = find_baseline(m, n, k).unwrap_or_else(|| {
-                panic!(
-                    "m={m}, n={n}, k={k}: split-K parity baseline が未登録です。\
-                     `tests/common/splitk_parity_baseline.rs::BASELINES` に実測値を追加してください \
-                     （推定値の記入は禁止）。"
-                )
-            });
-            assert_no_split_k_parity_regression(
+            assert_parity(
                 &format!(
                     "split-K parity vs CPU reference (trans_a={trans_a}, trans_b={trans_b}, \
                      m={m}, n={n}, k={k})"
                 ),
-                &report,
-                baseline,
+                &actual,
+                &expected,
             );
         }
     }

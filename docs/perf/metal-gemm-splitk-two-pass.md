@@ -45,7 +45,7 @@
 | AC | 内容 | 結果 |
 |----|------|------|
 | AC-1 | run-to-run bit 同一（split 数 2/4/8/16/32） | 達成（`tests/gemm_splitk_bit_match.rs`。§4） |
-| AC-2 | classic 経路・CPU 参照実装との REQ-2 判定（対象 9 形状 + K 端数境界 2 形状 × NN/NT/TN/TT） | **判定方式を変更**（§5。厳密ゼロ fail ではなく実測ベースライン非後退方式） |
+| AC-2 | classic 経路・CPU 参照実装との REQ-2 判定（対象 9 形状 + K 端数境界 2 形状 × NN/NT/TN/TT） | **厳密ゼロ fail 判定**（§5.5。実測ベースライン非後退方式は未承認のため差し戻し・8/11 形状で既知 FAIL） |
 | AC-3 | `should_split_k` の Linux 単体テスト | 達成（`tile.rs` 内 `#[cfg(test)]`） |
 | AC-4 | REQ-8 手動境界検査維持 | 達成（§2） |
 | AC-5 | 本番 `dispatch_auto`／`select_for_device` 不変 | 達成（§6） |
@@ -140,6 +140,24 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 いずれのケースも `dispatch_split_k_strided_prepared` の戻り値が `SplitKRoute::Split` であることを
 assert しており、フォールバック（classic 経路）による自明合格ではない。
+
+### 5.5 判定方式の差し戻し（PR #1496 codex-review 指摘。2026-09-09）
+
+上記 §5.1〜§5.4 の実測ベースライン非後退方式（§5.4 実装）は、PR #1496 の codex-review により
+P1 指摘を受けた: spec REQ-2 2026-09-02 追記（TF32/f16 Tensor Core 経路の受け入れ判定方式）は
+CUDA 側 TF32/f16 経路限定であり、Metal f32 split-K への適用拡張・具体的な baseline 値の追加には
+別途ユーザー承認が必要（`.claude/rules/coding-rust.md` の「バックエンド間数値一致テストの許容
+誤差を単独で緩和しない」原則）。当該 PR には承認記録がなかったため、承認を得るまでの間は
+`crates/backend-metal/tests/gemm_splitk_parity.rs` の判定方式を `fandhe_ai_backend_cpu::parity::
+assert_parity` による厳密ゼロ fail 判定へ差し戻した。
+
+この差し戻しにより、§5.3 の表で `fail_count > 0` の 8 形状（(32,32,8192)・(64,64,2048)・
+(64,64,4096) 以外の全形状）は実機（Apple Silicon）で本テストを実行すると `#[ignore]` テストが
+FAIL する既知の状態になる（実測値・原因は §5.2／§5.3 のまま変わらない）。`tests/common/
+splitk_parity_baseline.rs::BASELINES` の実測データ・`assert_no_split_k_parity_regression` 関数
+自体はコードとして保持しているが、`gemm_splitk_parity.rs` からは現在未使用。適用拡張の是非・
+具体的な baseline 値の承認を得た場合は、判定方式を再度実測ベースライン非後退方式へ切り替える
+（tolerance 定数自体は §5.1 のとおり変更しない）。
 
 ## 6. AC-5: 本番経路の非後退確認
 

@@ -590,15 +590,15 @@ pub enum SplitKFallbackReason {
     /// スクラッチバッファ（`MetalBuffer::alloc_uninit_pooled`）の確保が
     /// 失敗した（メモリ不足等）。
     ScratchAllocation,
-    /// split-K パス 1 パイプライン（[`MetalGemm::pipeline_for_tile_split_k`]）
+    /// split-K パス 1 パイプライン（`MetalGemm::pipeline_for_tile_split_k`）
     /// の構築が失敗した（デバイス上限超過等。フォールバック chain を
     /// 使い切った場合を含む）。
     PipelineBuild,
 }
 
 /// [`MetalGemm::dispatch_split_k_strided_prepared`] 系の結果。実際に
-/// split-K 2 パスで実行したか、classic 経路（[`MetalGemm::
-/// encode_tiled_by_class`]。`crate::tile::select_for_device` が選ぶ構成）
+/// split-K 2 パスで実行したか、classic 経路（`MetalGemm::
+/// encode_tiled_by_class`。`crate::tile::select_for_device` が選ぶ構成）
 /// へフォールバックしたかを呼び出し元が判別できるようにする。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitKRoute {
@@ -606,7 +606,7 @@ pub enum SplitKRoute {
     /// threadgroup 構成（フォールバック chain 解決後）、`partitions` は
     /// K 方向の分割数。
     Split { tile: TileConfig, partitions: u32 },
-    /// classic 経路（[`MetalGemm::encode_tiled_by_class`]）へフォール
+    /// classic 経路（`MetalGemm::encode_tiled_by_class`）へフォール
     /// バックした。`tile` はフォールバック解決後に実際に使用した構成。
     Classic {
         tile: TileConfig,
@@ -2218,7 +2218,7 @@ impl MetalGemm {
     /// 未結線）の strided 明示入口。`crate::tile::should_split_k` が
     /// `(m, n, k)` から split-K 採用可否・実行計画（[`tile::SplitKPlan`]）
     /// を判定し、`None`（対象条件を満たさない形状）なら classic 経路
-    /// （[`Self::encode_tiled_by_class`]。`crate::tile::select_for_device`
+    /// （`Self::encode_tiled_by_class`。`crate::tile::select_for_device`
     /// が選ぶ構成）へフォールバックする（[`SplitKRoute::Classic`]。
     /// `reason` は [`SplitKFallbackReason::NotEligible`]）。`Some(plan)`
     /// の場合は [`Self::dispatch_split_k_strided_prepared_with_plan`] へ
