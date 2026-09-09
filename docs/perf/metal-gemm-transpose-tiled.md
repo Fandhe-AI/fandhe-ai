@@ -1225,11 +1225,20 @@ framework-compare `gemm metal` タスク（8 セル）の A/B では結線の
    （`run_ab_gemm_metal.sh` + `compare_gemm_ab.py`）を「結線の影響を
    受けないはず」の非後退確認として実施する（上記到達性分析の裏付け
    として位置づけ、主判定には用いない）。
-3. **比率の向きの注意**: `compare_gemm_ab.py` の判定式は
-   `after/before ≤ DEFAULT_THRESHOLD`（既定 1.05）であり、
-   「B/A ≥ 1.0（B=after が A=before 以上）」を判定基準とする §5.10
-   の記法とは分母・分子の向きが逆である。再開時の実装者はこの表記
-   差異を混同しないこと（判定基準そのものは変更しない）。
+3. **比率の種類の注意（実行時間比と TFLOPS 比は別物）**:
+   `compare_gemm_ab.py` の判定式は **実行時間比**
+   `t_after / t_before ≤ DEFAULT_THRESHOLD`（既定 1.05。時間が短い
+   ほど良いため「小さいほど改善」）であるのに対し、§5.10 の
+   「B/A ≥ 1.0」は **TFLOPS 比**
+   `TFLOPS_after / TFLOPS_before ≥ 1.0`（スループットが高いほど良い
+   ため「大きいほど改善」）である。両者は単に分母・分子が逆なので
+   はなく、そもそも比較する量（実行時間 vs TFLOPS）が異なる。ただし
+   同一の計測（時間とスループットは反比例）に対しては
+   `t_after/t_before` と `TFLOPS_after/TFLOPS_before` は互いに逆数の
+   関係になる（`t_after/t_before ≈ TFLOPS_before/TFLOPS_after`）。再開
+   時の実装者は「小さいほど良い（時間比）」と「大きいほど良い
+   （TFLOPS 比）」の判定方向を混同しないこと（判定基準そのものは
+   変更しない）。
 
 ### before 腕の構造的制約
 
