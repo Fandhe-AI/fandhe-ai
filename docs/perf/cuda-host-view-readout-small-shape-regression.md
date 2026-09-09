@@ -379,7 +379,7 @@ Layer B の腕別実測（§6）から、以下の優先順位で候補を提示
 - `HostStagingKind::Pinned` 既定化・キャッシュ可能 pinned
   （`malloc_host`）はユーザー承認事項のまま（変更なし）
 - N=2048 の candle 判定不能（#1258）は本イシューで扱わない
-- Metal の全形状後退（1.30〜1.56 倍）は本イシューの対象外（CUDA 限定）
+- Metal の全形状後退（1.30〜1.56 倍）は本イシューの対象外（CUDA 限定）。Metal 側の interleave 再計測・判定は `docs/perf/metal-gemm-candle-gate-remeasurement.md` §15（#1477）を参照
 
 ## 12. 参照
 
@@ -569,4 +569,4 @@ checksum 完全一致（生ログ `docs/perf/logs/cuda-host-view-readout-fix-143
   3 バックエンド × 両実機の before/after 実測で判定対象の reuse 全セル非後退・checksum 完全一致を
   確認（CPU の fresh 参考行は M4 Max N=512/1024 が僅かに後退方向・ノイズかは未確定）。
   `docs/perf/{cuda,metal,cpu}-gemm-candle-gate-remeasurement.md` の該当節を参照）
-- Metal の全形状後退（1.30〜1.56 倍。CUDA 限定のためスコープ外）
+- Metal の全形状後退（1.30〜1.56 倍。CUDA 限定のためスコープ外）。Metal 側の interleave 再計測・判定は `docs/perf/metal-gemm-candle-gate-remeasurement.md` §15（#1477）を参照

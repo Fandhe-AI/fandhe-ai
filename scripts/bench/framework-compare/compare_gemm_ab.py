@@ -203,6 +203,23 @@ def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None):
                     "— skipped"
                 )
                 continue
+            # イシュー #1477: `readout`（Metal 借用ビュー readout の
+            # legacy/borrowed override 計測）も `tf32`／`managed`／
+            # `device_checksum` と同じ理由で型検証・除外する
+            # （`compare_readout_ab.py` が専用の interleave A/B 比較を
+            # 別途担う）。
+            if "readout" in obj and not isinstance(obj["readout"], str):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'readout' フィールド型（str を期待。"
+                    f"実際: {obj['readout']!r}） — skipped"
+                )
+                continue
+            if "readout" in obj:
+                warnings.append(
+                    f"{path}:{lineno}: 'readout' キーを持つ行は本 A/B の対象外 "
+                    "— skipped"
+                )
+                continue
             if not _valid_cell_identity(obj, device, size_set=size_set):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"

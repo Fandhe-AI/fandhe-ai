@@ -1,0 +1,4 @@
+verdict=undetermined
+reason=専有ゲート（load average < 4.0 を 2 回連続）が 4 試行以内に成立しなかった
+gate_log=results/raw/gate-readout-ab-head-e8cd3a2-1477.log
+2026-09-09T06:46:17Z
