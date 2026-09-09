@@ -23,8 +23,10 @@ GB10 実機（DGX Spark GB10・sm_121）で D2H＋読み出し時間の before/a
 倍の明確な改善を示した（是正前の参考値は N=1024/2048 が「差なし」寄り
 だったが、is-optimized-away の懸念解消後は全 N で改善が確認できた）。
 **イシュー #1478（2026-09-09 ユーザー承認）で `HOST_STAGING_KIND` の
-既定を `Pinned` へ切り替え済み**（§8。unsafe 経路の既定化についての
-security-auditor レビューを実施済み）。
+既定を `Pinned` へ切り替え済み**（§8。unsafe 経路の既定化について
+実装フェーズで機械的自己監査を実施済み〈unsafe 箇所数 1・`SAFETY`
+根拠不変・確保上限／fail-closed 契約不変。`security-audit.md`〉。
+正式な security-auditor 承認は PR レビューで行う）。
 
 ## 1. 背景（実測根拠）
 
@@ -281,8 +283,9 @@ Cursor Bugbot が同一箇所を独立に指摘。一致度が高い）。
   通さない安全側〉を維持していたが、§5.2 の確定値〈イシュー #1438 の
   is-optimized-away 懸念是正後〉で `Pinned` が全 N で `Pageable` を
   一貫して上回ることを確認したうえで、unsafe 経路の既定化についての
-  ユーザー承認と security-auditor レビューを経て切替を実施した。
-  詳細・GB10 実機再計測は §8）。
+  ユーザー承認を得て切替を実施した。実装フェーズの機械的自己監査は
+  `security-audit.md`（正式な security-auditor 承認は PR レビューで
+  行う）。詳細・GB10 実機再計測は §8）。
 - 実装（`HostStagingCache`・`with_host_view` の 3 分岐・GPU 非依存
   テスト・`#[ignore]` 実機テスト）は完了し（ゲート A は bit 同一等の
   受け入れ条件検査のため §5.3 の計測保護是正の影響を受けず確定
@@ -330,11 +333,13 @@ Cursor Bugbot が同一箇所を独立に指摘。一致度が高い）。
 4. **`HOST_STAGING_KIND` の `Pinned` への切替**: §5.2〜§5.3 の確定実測
    （is-optimized-away 懸念是正後）に基づき、イシュー #1478・
    2026-09-09 ユーザー承認により切替を実施済み（§8）。GB10 実機での
-   ゲート A／B 再計測・security-auditor レビューを完了している。
+   ゲート A／B 再計測を完了し、実装フェーズの機械的自己監査を実施した
+   （正式な security-auditor 承認は PR レビューで行う）。
 
 ## 8. `Pinned` 既定化の実測（イシュー #1478）
 
-### 8.1 事前宣言ゲート（計測前に本節へ記載・計測後に変更していない）
+### 8.1 事前宣言ゲート（実装計画段階で事前宣言し、計測後に緩和・変更
+していない。本節への転記自体は計測後）
 
 - ゲート A（必須）: `host_view_real_device` の `#[ignore]` 全件 pass。
   本イシューで新規追加した `default_cuda_memory_uses_pinned_staging_
@@ -416,9 +421,15 @@ timing は誤差範囲内で非後退（比 0.96〜0.99）。5 回計測中央�
 ### 8.4 採否
 
 **ADOPT**（既に §6 で `HOST_STAGING_KIND = HostStagingKind::Pinned` へ
-切替済み）。ゲート A・B とも事前宣言基準を満たし、ゲート C は想定どおり
-「差なし」（非後退）を確認した。security-auditor レビュー（unsafe 経路
-の既定化。PR 本文「セキュリティレビュー」節参照）を実施済み。
+切替済み）。ADOPT の根拠は**ゲート A・B の事前宣言基準達成**である
+（両方とも必須ゲート・達成済み）。ゲート C は縮小スコープ（1 回計測・
+`bench-fandhe` バイナリ直接比較・candle 併走なし・manifest 検証なし）
+であり、事前宣言した 5 回計測中央値の判定基準（§8.1）を満たす形では
+実施していない。ゲート C の結果（checksum 完全一致・timing 非後退）は
+F2（構造的非到達）を裏付ける**参考値**として扱い、ADOPT の必須根拠とは
+しない。正式な 5 回計測中央値ゲート C は §9 へ引き継ぐ。unsafe 経路の
+既定化についての実装フェーズ機械的自己監査は `security-audit.md`
+（正式な security-auditor 承認は PR レビューで行う）。
 
 ## 9. 引き継ぎ（イシュー #1478 スコープ外事項）
 
