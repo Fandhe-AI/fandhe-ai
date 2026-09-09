@@ -156,10 +156,17 @@ endif
 # Metal 実機テスト導線。`--release` を既定にする（`tests/cpu_metal_parity.rs` の
 # K=4096 ストレスケース〈`k4096_stress_poc_v2_5`〉が debug ビルドでは著しく遅いため。
 # 各テストファイル冒頭コメントの推奨コマンドと一致させる）。
+# `--all-features` 必須（PR #1496 codex-review P1 指摘対応で追加。`test-ignored-cuda`
+# 冒頭コメントと同じ false-green の落とし穴）: `tests/gemm_splitk_bit_match.rs`・
+# `tests/gemm_splitk_parity.rs`（イシュー #1474／#1496）は `dispatch_split_k_strided_
+# prepared_with_plan` が `internal-diagnostics` feature 限定の `pub`（既定は
+# `pub(crate)`）であることを受け `[[test]] required-features = ["internal-diagnostics"]`
+# でゲートされており、feature 未指定では cargo がテストバイナリ自体をビルド対象から
+# 外すため `--ignored` を渡しても実行されず暗黙に「パス」扱いになる。
 .PHONY: test-ignored-metal
 test-ignored-metal: ## Metal 実機専用: backend-metal の #[ignore] 分離テストを実行する（release）
 ifdef HAS_CARGO
-	cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
+	cargo test -p fandhe-ai-backend-metal --release --all-features -- --ignored --nocapture
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored-metal をスキップ"
 endif

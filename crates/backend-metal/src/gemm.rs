@@ -98,7 +98,39 @@ thread_local! {
     /// Interior/Edge の解決構成不一致により Legacy 単一 dispatch へ
     /// フォールバックした回数（イシュー #1327）。
     pub(crate) static TILE_CLASS_SPLIT_FALLBACK_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// [`MetalGemm::dispatch_split_k_strided_prepared`]（イシュー #1474・
+    /// opt-in・未結線）が実際に split-K 経路（[`SplitKRoute::Split`]）で
+    /// 2 パス dispatch した回数。`STRIDED_TILED_ROUTE_COUNT` と同じ設計
+    /// 判断（スレッドローカル化の理由も同一。実機テストがフォールバック
+    /// による自明合格を排除し、実際に split-K 経路が発火したことを assert
+    /// するための可観測点）。
+    pub(crate) static SPLIT_K_DISPATCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// 上記が classic 経路（[`SplitKRoute::Classic`]）へフォールバック
+    /// した回数（[`SplitKFallbackReason`] の内訳は呼び出し元が
+    /// `SplitKRoute::Classic { reason, .. }` を直接検査する）。
+    pub(crate) static SPLIT_K_FALLBACK_COUNT: Cell<u64> = const { Cell::new(0) };
 }
+
+/// split-K 自動判定入口（[`MetalGemm::dispatch_split_k_strided_prepared`]）
+/// の数値契約承認ゲート。`false`（既定）の間は `should_split_k` が
+/// `Some` を返す形状であっても常に classic 経路へフォールバックする
+/// （[`SplitKFallbackReason::NumericContractPendingApproval`]）。
+///
+/// 実機実測（`docs/perf/metal-gemm-splitk-two-pass.md` §5）で、split-K
+/// はパーティション分割の結合順序差に起因する丸め誤差により対象 11
+/// 形状中 8 形状が REQ-2 統一複合判定（相対誤差 1e-3 未満または絶対
+/// 誤差 1e-5 未満）の厳密ゼロ fail を満たさないと判明した。この誤差は
+/// 入力データにも依存する（近ゼロ要素での相対誤差外れ値）ため、形状
+/// 単位の allowlist では数値契約を機構的に保証できない。CUDA 側
+/// TF32/f16 経路（spec REQ-2 2026-09-02 追記）と同型の実測ベースライン
+/// 非後退方式への適用拡張は、`.claude/rules/coding-rust.md`「バック
+/// エンド間数値一致テストの許容誤差を単独で緩和しない」原則により
+/// ユーザー承認が必要（PR #1496 codex-review P1 指摘。イシュー
+/// #1474）。承認を得た場合のみ `true` へ切り替える（`_with_plan` 系は
+/// このゲートの対象外。AC-1／診断テスト専用の明示入口として維持する）。
+pub(crate) const SPLIT_K_NUMERIC_CONTRACT_APPROVED: bool = false;
 
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
 ///
@@ -239,6 +271,51 @@ impl From<tile::TileClassRegion> for TileClassRegion {
             col_off: r.col_off,
             rows: r.rows,
             cols: r.cols,
+        }
+    }
+}
+
+/// `shaders/gemm.metal` の `SplitKParams` 構造体とレイアウトを一致させる
+/// （`repr(C)`・4 × u32 = 16 バイト。イシュー #1474）。split-K パス 1
+/// （`gemm_simdgroup_tiled`。`SPLIT_K_ENABLED=true`）・パス 2
+/// （`gemm_splitk_reduce`）双方が buffer(6)／buffer(3) で受け取る。
+/// `reserved0`/`reserved1` は `TileClassRegion` と同様に 16 バイト境界へ
+/// 揃えるための予約領域（現状未使用）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SplitKParams {
+    partitions: u32,
+    k_per_partition: u32,
+    reserved0: u32,
+    reserved1: u32,
+}
+
+impl SplitKParams {
+    /// classic 経路（`SPLIT_K_ENABLED=false`）向けの無効化値。
+    /// `gemm_simdgroup_tiled` の非 split-K 呼び出し元（`encode_dispatch_tiled`
+    /// の既存全経路）が「未バインドバッファ参照を作らない」契約
+    /// （`TileClassRegion` と同じ設計）を満たすために常にこの値を渡す。
+    /// `SPLIT_K_ENABLED=false` の場合、MSL 側はこの値を一切参照しない
+    /// （function constant 畳み込みにより到達不能）ため、`partitions`/
+    /// `k_per_partition` の具体値は無害（`1`/`dims.k` は可読性のための
+    /// 慣習値）。
+    fn disabled(k: u32) -> Self {
+        SplitKParams {
+            partitions: 1,
+            k_per_partition: k,
+            reserved0: 0,
+            reserved1: 0,
+        }
+    }
+}
+
+impl From<tile::SplitKPlan> for SplitKParams {
+    fn from(plan: tile::SplitKPlan) -> Self {
+        SplitKParams {
+            partitions: plan.partitions,
+            k_per_partition: plan.k_per_partition,
+            reserved0: 0,
+            reserved1: 0,
         }
     }
 }
@@ -463,6 +540,23 @@ pub struct MetalGemm {
     /// `tile::select` への組み込み判断は行わない（兄弟イシュー #1328 の
     /// スコープ）。
     tile_class_mode: tile::TileClassMode,
+    /// split-K 2 パス GEMM（イシュー #1474。opt-in・未結線）のパス 1
+    /// （`gemm_simdgroup_tiled`。`SPLIT_K_ENABLED=true`）専用パイプライン
+    /// キャッシュ。`tiled_cache`（classic 経路）とは独立に持つ設計判断
+    /// （`tiled_spec_cache`／`tiled_hfrag_cache` と同じ理由: 関数の
+    /// function constant 構成が異なるため取り違えを構造的に防ぐ）。
+    /// キーは `tiled_cache` と同じ `(TileConfig, TransposePattern,
+    /// tile::TileClass)` だが、split-K は `TileClass::Legacy` 固定で
+    /// dispatch する契約（`Self::pipeline_for_tile_split_k` 参照。
+    /// `TileClassMode::Split` との併用は本イシューのスコープ外）。
+    tiled_splitk_cache: Mutex<
+        HashMap<(TileConfig, TransposePattern, tile::TileClass), objc2::rc::Retained<MtlPipeline>>,
+    >,
+    /// split-K パス 2（縮約。`gemm_splitk_reduce`）のパイプライン。
+    /// function constant を持たない単一カーネルのため、他のタイル化
+    /// カーネルと異なり `MetalGemm::new_with_gates` 構築時に eager に
+    /// 1 回だけ構築する（`pipeline_tiled_bias_act` と同じ設計判断）。
+    pipeline_splitk_reduce: objc2::rc::Retained<MtlPipeline>,
 }
 
 /// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
@@ -497,6 +591,62 @@ pub(crate) struct TilePipelineReflectionDiag {
     pub(crate) max_total_threads_per_threadgroup: u32,
     pub(crate) thread_execution_width: u32,
     pub(crate) static_threadgroup_memory_length: u32,
+}
+
+/// [`MetalGemm::dispatch_split_k_strided_prepared`] 系（イシュー #1474・
+/// opt-in・未結線）が split-K を採用しなかった理由。呼び出し元
+/// （実機テスト・将来の性能 A/B）が「フォールバックによる自明合格」を
+/// 排除できるよう、[`SplitKRoute::Classic`] に必ず添える。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitKFallbackReason {
+    /// `crate::tile::should_split_k` が `None` を返した（形状が split-K
+    /// 対象条件〈MLX Case 1 ＋ 並列度条件〉を満たさない）。
+    NotEligible,
+    /// スクラッチバッファの要素数（`partitions * m * n`）が `usize` の
+    /// 範囲でオーバーフローする（`checked_mul` によりアクセス前に検出。
+    /// OWASP A03 観点）。
+    ScratchSizeOverflow,
+    /// スクラッチバッファ（`MetalBuffer::alloc_uninit_pooled`）の確保が
+    /// 失敗した（メモリ不足等）。
+    ScratchAllocation,
+    /// split-K パス 1 パイプライン（`MetalGemm::pipeline_for_tile_split_k`）
+    /// の構築が失敗した（デバイス上限超過等。フォールバック chain を
+    /// 使い切った場合を含む）。
+    PipelineBuild,
+    /// split-K の数値契約（REQ-2 統一複合判定）が未承認のため、
+    /// `crate::tile::should_split_k` が `Some` を返す形状であっても
+    /// `MetalGemm::dispatch_split_k_strided_prepared`（自動判定入口）が
+    /// classic 経路へ強制フォールバックした（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`
+    /// が `false` の間）。実機実測（`docs/perf/metal-gemm-splitk-two-pass.md`
+    /// §5）で split-K はパーティション分割の結合順序差に起因する丸め
+    /// 誤差により対象形状の大半が REQ-2 統一複合判定（相対誤差 1e-3
+    /// 未満または絶対誤差 1e-5 未満）の厳密ゼロ fail を満たさないと
+    /// 判明しており、`.claude/rules/coding-rust.md`「バックエンド間数値
+    /// 一致テストの許容誤差を単独で緩和しない」原則によりユーザー承認
+    /// なしに緩和判定（実測ベースライン非後退方式）を適用できない
+    /// （PR #1496 codex-review P1 指摘。イシュー #1474）。承認が得られる
+    /// までは自動判定入口を常に classic 経路へ倒し、公開入口が数値契約
+    /// を満たさない結果を成功として返さないようにする。`_with_plan` 系
+    /// （明示的な計画指定・AC-1／診断テスト専用）はこのゲートの対象外。
+    NumericContractPendingApproval,
+}
+
+/// [`MetalGemm::dispatch_split_k_strided_prepared`] 系の結果。実際に
+/// split-K 2 パスで実行したか、classic 経路（`MetalGemm::
+/// encode_tiled_by_class`。`crate::tile::select_for_device` が選ぶ構成）
+/// へフォールバックしたかを呼び出し元が判別できるようにする。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitKRoute {
+    /// split-K パス 1／パス 2 を実行した。`tile` はパス 1 が使った
+    /// threadgroup 構成（フォールバック chain 解決後）、`partitions` は
+    /// K 方向の分割数。
+    Split { tile: TileConfig, partitions: u32 },
+    /// classic 経路（`MetalGemm::encode_tiled_by_class`）へフォール
+    /// バックした。`tile` はフォールバック解決後に実際に使用した構成。
+    Classic {
+        tile: TileConfig,
+        reason: SplitKFallbackReason,
+    },
 }
 
 impl MetalGemm {
@@ -793,6 +943,12 @@ impl MetalGemm {
             pipeline::make_pipeline(ctx.device(), &library, "gemm_simdgroup_f16")?;
         let pipeline_tiled_bias_act =
             pipeline::make_pipeline(ctx.device(), &library, "gemm_tiled_bias_act")?;
+        // イシュー #1474: split-K パス 2（縮約）は function constant を
+        // 持たない単一カーネルのため、`pipeline_tiled_bias_act` と同じく
+        // ここで eager に 1 回だけ構築する（`Self::pipeline_for_tile*` の
+        // ような遅延構築キャッシュを持たない）。
+        let pipeline_splitk_reduce =
+            pipeline::make_pipeline(ctx.device(), &library, "gemm_splitk_reduce")?;
         Ok(Self {
             pipeline_naive,
             pipeline_tiled,
@@ -811,6 +967,8 @@ impl MetalGemm {
             frag_load,
             coop_load,
             tile_class_mode,
+            tiled_splitk_cache: Mutex::new(HashMap::new()),
+            pipeline_splitk_reduce,
         })
     }
 
@@ -924,6 +1082,11 @@ impl MetalGemm {
                 tgp_pad_elems,
                 coop_load_layout: self.coop_load.layout.as_u32(),
                 tile_class: tile_class.as_u32(),
+                // イシュー #1474: `pipeline_for_tile`（classic 経路）は
+                // split-K パス 1 を構築しないため常に `false`（no-op
+                // 契約）。split-K 専用パイプラインは
+                // `pipeline_for_tile_split_k`（別キャッシュ）が構築する。
+                split_k_enabled: false,
             };
             let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
             let build_result = if self.source_specialized {
@@ -963,6 +1126,92 @@ impl MetalGemm {
 
         Err(last_err.unwrap_or(MetalError::PipelineCreation {
             message: "no tile configuration in fallback chain was accepted".to_string(),
+        }))
+    }
+
+    /// split-K パス 1（イシュー #1474。opt-in・未結線）用パイプラインを
+    /// キャッシュから取得、無ければ構築してキャッシュする。[`Self::
+    /// pipeline_for_tile`]（classic 経路）と並行して存在する独立キャッシュ
+    /// （[`Self::tiled_splitk_cache`]）を使う設計判断（フィールドドキュメン
+    /// テーションコメント参照）。`cfg` は [`tile::split_k_tile`] が返す
+    /// split-K 専用の小タイル構成（`crate::tile::should_split_k` が判定
+    /// した形状に対する構成）で、フォールバック chain は
+    /// [`Self::pipeline_for_tile`] と同じ `tile::fallback_chain`（最終的に
+    /// 常に妥当な `SINGLE_SIMDGROUP_8X8` へ縮退する）を使う。
+    /// `TileClass::Legacy` 固定（`region` は恒等領域）で dispatch する
+    /// 契約とし、`TileClassMode::Split` との併用は本イシューのスコープ外
+    /// （`docs/perf/metal-gemm-splitk-two-pass.md`「スコープ外」節）。
+    fn pipeline_for_tile_split_k(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+        pattern: TransposePattern,
+    ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
+        let mut last_err: Option<MetalError> = None;
+        let tile_class = tile::TileClass::Legacy;
+
+        for candidate in tile::fallback_chain(cfg) {
+            if let Some(pipeline) =
+                lock_tile_cache(&self.tiled_splitk_cache)?.get(&(candidate, pattern, tile_class))
+            {
+                return Ok((Retained::clone(pipeline), candidate));
+            }
+
+            let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
+            if candidate.validate(1024, max_shared_mem_bytes).is_err() {
+                continue;
+            }
+            let tgp_pad_elems = candidate.pad();
+            if candidate.shared_mem_bytes_for_class(pattern, tgp_pad_elems, tile_class)
+                > max_shared_mem_bytes
+            {
+                continue;
+            }
+
+            let gates = pipeline::GemmGateConstants {
+                // split-K パイプラインは A/B 計測用の実験的ゲート（swizzle・
+                // fine barrier・unroll・frag load・coop load）を一切 opt-in
+                // せず、本番既定値（無効・`RowLinear`）で固定する
+                // （split-K 自体の正しさ検証に軸を絞るため。これらの軸との
+                // 直交組み合わせは本イシューのスコープ外）。
+                swizzle_enabled: false,
+                fine_barrier_enabled: false,
+                unroll_acc_enabled: false,
+                frag_load_device_hoisted: false,
+                frag_load_ksteps: tile::FragLoadConfig::DEFAULT.ksteps.as_u32(),
+                tgp_pad_elems,
+                coop_load_layout: 0,
+                tile_class: tile_class.as_u32(),
+                split_k_enabled: true,
+            };
+            let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
+            let build_result = pipeline::make_pipeline_with_constants(
+                ctx.device(),
+                &self.library,
+                function_name,
+                candidate,
+                gates,
+                pattern,
+            );
+            match build_result {
+                Ok(pipeline) => {
+                    let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
+                    if candidate.thread_count() > actual_max_threads {
+                        continue;
+                    }
+                    lock_tile_cache(&self.tiled_splitk_cache)?
+                        .insert((candidate, pattern, tile_class), Retained::clone(&pipeline));
+                    return Ok((pipeline, candidate));
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    continue;
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or(MetalError::PipelineCreation {
+            message: "no split-K tile configuration in fallback chain was accepted".to_string(),
         }))
     }
 
@@ -1133,6 +1382,10 @@ impl MetalGemm {
                 dispatch.tgp_pad_elems,
                 dispatch.region,
                 dispatch.tile_class,
+                // イシュー #1474: classic 経路（本関数）は split-K を
+                // 使わないため常に無効化値を渡す（`region` と同じ
+                // 「常にバインド」契約。非後退）。
+                SplitKParams::disabled(dims.k),
             );
         }
     }
@@ -1253,6 +1506,10 @@ impl MetalGemm {
                 // （`TileClass::Legacy`）を渡す no-op 契約（他ゲートと
                 // 同じ扱い）。
                 tile_class: 0,
+                // イシュー #1474: f16 経路は split-K（`SPLIT_K_ENABLED`）を
+                // 一切参照しないため常に `false` を渡す no-op 契約
+                // （他ゲートと同じ扱い）。
+                split_k_enabled: false,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -1348,6 +1605,9 @@ impl MetalGemm {
                 tgp_pad_elems: candidate.pad(),
                 coop_load_layout: 0,
                 tile_class: 0,
+                // イシュー #1474: hfrag 経路も split-K（`SPLIT_K_ENABLED`）を
+                // 一切参照しないため常に `false`（no-op 契約）。
+                split_k_enabled: false,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -1987,6 +2247,300 @@ impl MetalGemm {
         STRIDED_TILED_ROUTE_COUNT.with(|c| c.set(c.get() + 1));
 
         Ok(resolved_cfg)
+    }
+
+    /// split-K 2 パス GEMM（イシュー #1474。opt-in・`dispatch_auto`へ
+    /// 未結線）の strided 明示入口。`crate::tile::should_split_k` が
+    /// `(m, n, k)` から split-K 採用可否・実行計画（[`tile::SplitKPlan`]）
+    /// を判定し、`None`（対象条件を満たさない形状）なら classic 経路
+    /// （`Self::encode_tiled_by_class`。`crate::tile::select_for_device`
+    /// が選ぶ構成）へフォールバックする（[`SplitKRoute::Classic`]。
+    /// `reason` は [`SplitKFallbackReason::NotEligible`]）。`Some(plan)`
+    /// の場合は `Self::dispatch_split_k_strided_prepared_with_plan` へ
+    /// 委譲する。性能 A/B・`dispatch_auto` への結線可否は後続イシュー
+    /// （#1475/#1476）のスコープ（`docs/perf/metal-gemm-splitk-two-pass.md`
+    /// 「スコープ外」節）。
+    ///
+    /// **数値契約ゲート（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`。本モジュール
+    /// 内 `pub(crate)` 定数のためリンク非対応）**:
+    /// `docs/perf/metal-gemm-splitk-two-pass.md` §5 の実機実測により、
+    /// split-K はパーティション分割の結合順序差に起因する丸め誤差で
+    /// 対象形状の大半（11 形状中 8 形状）が REQ-2 統一複合判定の厳密
+    /// ゼロ fail を満たさないと判明している。この誤差は入力データにも
+    /// 依存する（近ゼロ要素での相対誤差外れ値）ため、形状単位の
+    /// allowlist では数値契約を機構的に保証できない。よって
+    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` が `false` の間は
+    /// `should_split_k` が `Some` を返す形状であっても本入口は常に
+    /// classic 経路へフォールバックし（[`SplitKFallbackReason::
+    /// NumericContractPendingApproval`]）、数値契約を満たさない結果を
+    /// 成功として返さない（PR #1496 codex-review P1 指摘。適用拡張・
+    /// 具体的な baseline 値の承認を得た場合のみ `true` へ切り替える）。
+    /// `_with_plan` 系（明示的な計画指定・AC-1／診断テスト専用）は
+    /// 本フラグ（数値契約ゲート）の対象外で、承認前でも split-K 経路を
+    /// 明示的に検証できる。ただしクレート外部からの無条件到達を防ぐ
+    /// 別の可視性ゲート（`internal-diagnostics` feature。PR #1496
+    /// codex-review P1 再指摘対応）を持つ。詳細は
+    /// `Self::dispatch_split_k_strided_prepared_with_plan` doc
+    /// コメント参照。
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_split_k_strided_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<SplitKRoute, MetalError> {
+        let gated_plan = if SPLIT_K_NUMERIC_CONTRACT_APPROVED {
+            tile::should_split_k(m, n, k)
+        } else {
+            None
+        };
+        match gated_plan {
+            Some(plan) => self.dispatch_split_k_strided_prepared_with_plan(
+                ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, c_buf, m, n, k, plan,
+            ),
+            None => {
+                let fallback_reason = if SPLIT_K_NUMERIC_CONTRACT_APPROVED {
+                    SplitKFallbackReason::NotEligible
+                } else {
+                    SplitKFallbackReason::NumericContractPendingApproval
+                };
+                let (dims, strides) = validate_strided_dims(
+                    a_buf.len(),
+                    a_offset,
+                    a_layout,
+                    b_buf.len(),
+                    b_offset,
+                    b_layout,
+                    c_buf.len(),
+                    m,
+                    n,
+                    k,
+                )?;
+                strided_tiled_eligibility(m, n, k, a_layout, a_offset, b_layout, b_offset)?;
+                let pattern =
+                    TransposePattern::from_flags(a_layout.transposed, b_layout.transposed);
+                let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
+                let resolved_cfg = self.encode_tiled_by_class(
+                    ctx, a_buf, a_offset, b_buf, b_offset, c_buf, dims, cfg, strides, pattern,
+                )?;
+                SPLIT_K_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
+                Ok(SplitKRoute::Classic {
+                    tile: resolved_cfg,
+                    reason: fallback_reason,
+                })
+            }
+        }
+    }
+
+    /// [`Self::dispatch_split_k_strided_prepared`] の、split-K 分割計画
+    /// （[`tile::SplitKPlan`]）を明示指定できる版。AC-1（同一入力の
+    /// run-to-run bit 同一を分割数 2/4/8/16/32 で実機確認する）が
+    /// `should_split_k` の自動判定を経ずに任意の `partitions` を検証する
+    /// ために使う。任意の `plan` を受け取れるため、host 側で構造的妥当性
+    /// （`k_per_partition` が `tile.bk` の倍数・非 0、`(partitions-1) *
+    /// k_per_partition < k`〈空パーティションを作らない〉、`partitions >=
+    /// 2`）を検証してから使う（fail-closed。不成立なら
+    /// [`SplitKFallbackReason::NotEligible`] で classic 経路へ委譲し、
+    /// `shaders/gemm.metal::gemm_simdgroup_tiled` 側の `k_begin >= k_end`
+    /// ガードが実質到達しないことを host 側の契約として担保する）。
+    ///
+    /// **数値契約ゲートの対象外である理由と可視性ゲート（PR #1496
+    /// codex-review P1 指摘対応）**: 本関数自体は `should_split_k` の
+    /// 自動判定・[`Self::dispatch_split_k_strided_prepared`] の
+    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートを経由しないため、
+    /// `plan` を直接構築して渡せば split-K を無条件に実行できてしまう
+    /// （`docs/perf/metal-gemm-splitk-two-pass.md` §5 の未承認形状を
+    /// 含む）。よって `encode_tiled_prepared`（イシュー #1259。
+    /// `Cargo.toml` の `internal-diagnostics` feature コメント参照）と
+    /// 同じ 2 分岐構成を採る: `internal-diagnostics` feature（既定 OFF）
+    /// を有効化したビルドでのみ `pub`（AC-1 実機テスト
+    /// `tests/gemm_splitk_bit_match.rs`／`tests/gemm_splitk_parity.rs`
+    /// が `required-features` 経由で要求する）とし、既定ビルドでは
+    /// `pub(crate)` に絞ってクレート外部から到達不能にする（`Self::
+    /// dispatch_split_k_strided_prepared` からの内部呼び出しは両分岐
+    /// とも可能）。crates.io 公開クレートの利用者が数値契約ゲートを
+    /// 迂回して split-K を直接起動できる恒久的な公開 API 面を作らない。
+    #[cfg(feature = "internal-diagnostics")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_split_k_strided_prepared_with_plan(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        plan: tile::SplitKPlan,
+    ) -> Result<SplitKRoute, MetalError> {
+        self.dispatch_split_k_strided_prepared_with_plan_impl(
+            ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, c_buf, m, n, k, plan,
+        )
+    }
+
+    /// [`Self::dispatch_split_k_strided_prepared_with_plan`] doc コメント
+    /// 参照。既定ビルド（`internal-diagnostics` feature 無効）では
+    /// クレート内部限定に絞る（`Self::dispatch_split_k_strided_prepared`
+    /// からの委譲のみに到達経路を限定する）。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_split_k_strided_prepared_with_plan(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        plan: tile::SplitKPlan,
+    ) -> Result<SplitKRoute, MetalError> {
+        self.dispatch_split_k_strided_prepared_with_plan_impl(
+            ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, c_buf, m, n, k, plan,
+        )
+    }
+
+    /// [`Self::dispatch_split_k_strided_prepared_with_plan`] の実体
+    /// （可視性分岐を持たない共通実装。`pub(crate)` に留め、公開可否は
+    /// 上記 2 関数の cfg 分岐のみが決める）。
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_split_k_strided_prepared_with_plan_impl(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        plan: tile::SplitKPlan,
+    ) -> Result<SplitKRoute, MetalError> {
+        let (dims, strides) = validate_strided_dims(
+            a_buf.len(),
+            a_offset,
+            a_layout,
+            b_buf.len(),
+            b_offset,
+            b_layout,
+            c_buf.len(),
+            m,
+            n,
+            k,
+        )?;
+        strided_tiled_eligibility(m, n, k, a_layout, a_offset, b_layout, b_offset)?;
+        let pattern = TransposePattern::from_flags(a_layout.transposed, b_layout.transposed);
+
+        let fallback_to_classic =
+            |reason: SplitKFallbackReason, this: &Self| -> Result<SplitKRoute, MetalError> {
+                let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
+                let resolved_cfg = this.encode_tiled_by_class(
+                    ctx, a_buf, a_offset, b_buf, b_offset, c_buf, dims, cfg, strides, pattern,
+                )?;
+                SPLIT_K_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
+                Ok(SplitKRoute::Classic {
+                    tile: resolved_cfg,
+                    reason,
+                })
+            };
+
+        // host 側の構造的妥当性検証（`Self::dispatch_split_k_strided_prepared_
+        // with_plan` doc コメント参照）。ここを通過すれば
+        // `shaders/gemm.metal` 側の `k_begin >= k_end` ガードは通常経路
+        // では到達しない（fail-closed の保険として維持する）。
+        let bk = plan.tile.bk as u64;
+        let k_per = plan.k_per_partition as u64;
+        let partitions = plan.partitions as u64;
+        let structurally_valid = plan.partitions >= 2
+            && bk != 0
+            && k_per != 0
+            && k_per.is_multiple_of(bk)
+            && (partitions - 1) * k_per < k as u64
+            && plan.tile.validate(1024, u32::MAX).is_ok();
+        if !structurally_valid {
+            return fallback_to_classic(SplitKFallbackReason::NotEligible, self);
+        }
+
+        // スクラッチ（`partitions` 枚の M×N f32 プレーン）の要素数を
+        // overflow 検査つきで算出する（OWASP A03 観点。`.claude/rules/
+        // security.md`）。
+        let total_elems = usize::try_from(plan.partitions)
+            .ok()
+            .and_then(|p| p.checked_mul(m))
+            .and_then(|pm| pm.checked_mul(n));
+        let Some(total_elems) = total_elems else {
+            return fallback_to_classic(SplitKFallbackReason::ScratchSizeOverflow, self);
+        };
+
+        // カーネル（パス 1）が全パーティション・全要素を書き切る出力専用
+        // バッファのため `alloc_uninit_pooled` の契約（`buffer.rs`
+        // ドキュメンテーションコメント参照）を満たす。
+        let scratch = match MetalBuffer::alloc_uninit_pooled(ctx, total_elems) {
+            Ok(buf) => buf,
+            Err(_) => return fallback_to_classic(SplitKFallbackReason::ScratchAllocation, self),
+        };
+
+        let (pipeline1, resolved_tile) =
+            match self.pipeline_for_tile_split_k(ctx, plan.tile, pattern) {
+                Ok(v) => v,
+                Err(_) => {
+                    return fallback_to_classic(SplitKFallbackReason::PipelineBuild, self);
+                }
+            };
+
+        let tiles_m = (m as u32).div_ceil(resolved_tile.bm);
+        let tiles_n = (n as u32).div_ceil(resolved_tile.bn);
+        let region = TileClassRegion::full_grid(tiles_m, tiles_n);
+        let tgp_pad_elems = resolved_tile.pad();
+        let split_k_params = SplitKParams::from(plan);
+        let pipeline2 = Retained::clone(&self.pipeline_splitk_reduce);
+
+        ctx.dispatch_sync(|encoder| {
+            encode_dispatch_tiled(
+                encoder,
+                &pipeline1,
+                a_buf,
+                a_offset,
+                b_buf,
+                b_offset,
+                &scratch,
+                dims,
+                resolved_tile,
+                false,
+                strides,
+                pattern,
+                tgp_pad_elems,
+                region,
+                tile::TileClass::Legacy,
+                split_k_params,
+            );
+            encode_splitk_reduce(encoder, &pipeline2, &scratch, c_buf, dims, split_k_params);
+        })?;
+
+        SPLIT_K_DISPATCH_COUNT.with(|c| c.set(c.get() + 1));
+        Ok(SplitKRoute::Split {
+            tile: resolved_tile,
+            partitions: plan.partitions,
+        })
     }
 
     /// naive GEMM（`C = A @ B`。ゼロ初期化した C へのディスパッチ 1 回のみ、
@@ -3550,6 +4104,14 @@ fn encode_dispatch_tiled(
     // `tile::TileClass` を渡す（`pipeline_for_tile` の事前検証
     // （`TileConfig::shared_mem_bytes_for_class`）と同一の式を使う契約）。
     tile_class: tile::TileClass,
+    // イシュー #1474: split-K パラメータ（buffer(6)）。`region` と同じ
+    // 「未バインドバッファ参照を作らない」契約で常にバインドする。
+    // `SplitKParams::disabled(dims.k)`（`partitions=1`）を渡す既存
+    // 呼び出し元（`encode_tiled_plan`。classic 経路）は dispatch grid の
+    // depth も従来どおり 1 のまま（非後退）。`partitions > 1` の
+    // split-K パス 1 呼び出し元（`MetalGemm::dispatch_split_k*`）は
+    // ここで 3 次元 dispatch の depth（K パーティション数）を指定する。
+    split_k: SplitKParams,
 ) {
     encoder.setComputePipelineState(pipeline);
 
@@ -3586,6 +4148,14 @@ fn encode_dispatch_tiled(
             std::ptr::NonNull::from(&region).cast(),
             std::mem::size_of::<TileClassRegion>(),
             5,
+        );
+        // イシュー #1474: `split_k` も `SPLIT_K_ENABLED==false`（既定）
+        // でも常にバインドする（`region` と同じ契約。上記関数
+        // ドキュメンテーションコメント参照）。
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&split_k).cast(),
+            std::mem::size_of::<SplitKParams>(),
+            6,
         );
     }
 
@@ -3644,9 +4214,68 @@ fn encode_dispatch_tiled(
         region.rows as usize,
         swizzle_enabled,
     );
+    // イシュー #1474: split-K パス 1 の 3 次元 dispatch は depth に
+    // パーティション数を指定する。`SplitKParams::disabled` を渡す既存
+    // 呼び出し元は `partitions=1` のため depth は従来どおり 1（非後退）。
     let threadgroups = MTLSize {
         width: grid_w,
         height: grid_h,
+        depth: split_k.partitions as usize,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// split-K パス 2（縮約。`gemm_splitk_reduce`。イシュー #1474）の
+/// パイプライン設定・バッファ結線・ディスパッチ。`MetalGemm::
+/// dispatch_split_k*` が [`MetalContext::dispatch_sync`] の同一クロージャ
+/// 内でパス 1（`encode_dispatch_tiled`。`SPLIT_K_ENABLED=true`）の直後に
+/// 呼ぶことで、`computeCommandEncoder()`（serial）による実行順序保証を
+/// 得る（`docs/backend-metal-command-batching-design.md` のコマンド
+/// バッファ・エンコーダ共有設計と同じ前提）。grid は
+/// `ceil(n/16) x ceil(m/16)` threadgroup（16×16 スレッド/グループ）で、
+/// `gemm_splitk_reduce` 側の手動境界チェック（REQ-8）が端を弾く。
+fn encode_splitk_reduce(
+    encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    c_split_buf: &MetalBuffer,
+    c_buf: &MetalBuffer,
+    dims: Dims,
+    split_k: SplitKParams,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 1/2）と同一の
+    // 契約。`c_split_buf`/`c_buf` は `dispatch_sync` の同期完了まで
+    // 呼び出し元スタックフレームで生存する。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(c_split_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 1);
+    }
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 2/2）と同一の
+    // 契約（`dims`/`split_k` はローカル変数、長さは各々の `size_of` と
+    // 一致）。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&dims).cast(),
+            std::mem::size_of::<Dims>(),
+            2,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&split_k).cast(),
+            std::mem::size_of::<SplitKParams>(),
+            3,
+        );
+    }
+
+    const REDUCE_TG: usize = 16;
+    let threads_per_tg = MTLSize {
+        width: REDUCE_TG,
+        height: REDUCE_TG,
+        depth: 1,
+    };
+    let threadgroups = MTLSize {
+        width: (dims.n as usize).div_ceil(REDUCE_TG),
+        height: (dims.m as usize).div_ceil(REDUCE_TG),
         depth: 1,
     };
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);

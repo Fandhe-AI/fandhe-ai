@@ -66,6 +66,15 @@ objc2-metal.workspace = true
 # 「バックエンド切替は feature フラグなしの cfg ベース」はバックエンド選択
 # （CUDA/Metal/CPU）に関する規約であり、本 feature は内部診断専用ツールの
 # 可視性制御であって対象外（`backend-cuda` の同コメントと同じ判断）。
+#
+# `MetalGemm::dispatch_split_k_strided_prepared_with_plan`（イシュー #1474。
+# `should_split_k` の自動判定・`SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートを
+# 経由せず split-K 実行計画を明示指定できる AC-1 診断専用入口）も本 feature
+# へ追加した（PR #1496 codex-review P1 指摘対応）。既定ビルドでは
+# `pub(crate)` に絞り、`tests/gemm_splitk_bit_match.rs`・
+# `tests/gemm_splitk_parity.rs`（`[[test]]` セクションで `required-features`
+# 指定）のみが本 feature 経由で到達できる（`gemm.rs::MetalGemm::
+# dispatch_split_k_strided_prepared_with_plan` の doc コメント参照）。
 internal-diagnostics = []
 
 [dev-dependencies]
@@ -148,3 +157,18 @@ required-features = ["internal-diagnostics"]
 [[example]]
 name = "gemm_unroll_acc_ab_bench"
 test = true
+
+# split-K 2 パス GEMM（イシュー #1474）の AC-1 実機テスト。
+# `dispatch_split_k_strided_prepared_with_plan`（`internal-diagnostics`
+# feature 限定の `pub`。PR #1496 codex-review P1 指摘対応）を直接呼ぶため
+# 本 feature を要求する（`gemm_transpose_route_ab_bench` と同型）。CI の
+# `cargo test --workspace --all-features` は本 feature を含むが、両テスト
+# 自体は macOS 実機限定（`#![cfg(target_os = "macos")]`）・`#[ignore]` の
+# ため通常 CI（ubuntu-latest）では実行対象外のまま変わらない。
+[[test]]
+name = "gemm_splitk_bit_match"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "gemm_splitk_parity"
+required-features = ["internal-diagnostics"]

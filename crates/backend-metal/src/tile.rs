@@ -2229,6 +2229,230 @@ pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
     actual <= ideal
 }
 
+// --- split-K 2 パス選択（イシュー #1474・親設計 `docs/backend-metal-splitk-decision.md`）---
+//
+// `gemm_simdgroup_tiled`（`shaders/gemm.metal`）は K 方向の threadgroup
+// 分割を持たないため、K が M/N に対して支配的な形状（`docs/backend-
+// metal-splitk-decision.md` §3 の対象 9 形状）では threadgroup 数が
+// GPU コア数を大きく下回り並列度が枯渇する（同 doc §2〜§3）。本節は
+// MLX steel の split-K 選択条件（Case 1。同 doc §1 出典）を移植した純関数
+// [`should_split_k`] と、split-K 経路が使う threadgroup 構成
+// [`split_k_tile`] を提供する。
+//
+// **本節は選択判定のみを扱う（opt-in・`select`/`select_for_device` へは
+// 未結線）**。実際の 2 パスディスパッチ（パス 1: K 区間ごとの部分和を
+// device スクラッチへ書く 3 次元 dispatch・パス 2: 固定順序逐次縮約）は
+// `crate::gemm::MetalGemm::dispatch_split_k*`（`gemm.rs`）が担う。性能
+// A/B・本番結線可否は後続イシュー #1475/#1476 のスコープ（本モジュール・
+// 本ファイルは変更しない）。
+
+/// [`should_split_k_with`] の判定パラメータ（MLX steel Case 1 の閾値を
+/// 実行時に差し替え可能にする。既定値は [`SplitKParams::MLX_CASE1_M4_MAX`]）。
+///
+/// 全フィールドを `u64` にしているのは [`should_split_k_with`] 内部の
+/// 算出がすべて `u64` 算術（`checked_*`）で行われ、`usize`（`m`/`n`/`k`
+/// 引数の型）からの変換誤差・環境依存の桁あふれを避けるため
+/// （32bit ターゲット非依存の決定性）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SplitKParams {
+    /// MLX Case 1 の `tm*tn <= tmn16_max`（`tm=ceil(m/16)`・`tn=ceil(n/16)`）。
+    pub tmn16_max: u64,
+    /// MLX Case 1 の `tk >= min_k_tiles16`（`tk=k/16`。整数除算）。
+    pub min_k_tiles16: u64,
+    /// 並列度条件（#1308 #1474 計画 §3「並列度条件」）: split-K タイル
+    /// （[`split_k_tile`]）での threadgroup 起動数
+    /// （[`actual_groups`]）がこの値未満でなければ split-K を採用しない
+    /// （classic 経路でも既に十分な並列度があり、split-K の縮約オーバー
+    /// ヘッドが正当化されない形状〈正方大形状・`(256,256,*)` 等〉を
+    /// 除外する。#1308 実測の「40 threadgroup 未満」を踏襲）。
+    pub max_groups: u64,
+    /// [`SplitKPlan::partitions`] の下限（2 未満は分割の意味がないため
+    /// `should_split_k_with` は `None` を返す）。
+    pub min_partitions: u32,
+    /// [`SplitKPlan::partitions`] の上限（MLX Case 1 の `clamp` 上限）。
+    pub max_partitions: u32,
+}
+
+impl SplitKParams {
+    /// MLX steel Case 1（`docs/backend-metal-splitk-decision.md` §1）を
+    /// `docs/backend-metal-splitk-decision.md` §3／イシュー #1474 計画
+    /// §4.2 の並列度条件（#1308 実測: 対象 9 形状は本条件下の
+    /// threadgroup 数が 40 未満）と組み合わせた既定パラメータ。
+    /// 出典: MLX `mlx/backend/metal/matmul.cpp`（`steel_matmul` の
+    /// `if (M >= 40 && N >= 40 ...)` Case 1 分岐相当。同 doc §1 参照）。
+    pub const MLX_CASE1_M4_MAX: Self = SplitKParams {
+        tmn16_max: 1024,
+        min_k_tiles16: 8,
+        max_groups: 40,
+        min_partitions: 2,
+        max_partitions: 32,
+    };
+}
+
+/// [`should_split_k`]／[`should_split_k_with`] が返す split-K 実行計画。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SplitKPlan {
+    /// split-K パス 1（部分和カーネル）が使う threadgroup 構成
+    /// （[`split_k_tile`]）。
+    pub tile: TileConfig,
+    /// K 方向の分割数（device スクラッチのプレーン数・パス 1 の 3 次元
+    /// dispatch の depth）。2 以上・32 以下（[`SplitKParams`]）。
+    pub partitions: u32,
+    /// 1 パーティションあたりの K 幅（`tile.bk` の倍数。末尾パーティション
+    /// はこれに K の端数分を加えて引き受ける。`crate::gemm` 側の
+    /// `SplitKParams`〈repr(C)。本型と同名だが別の型〉が
+    /// `k_per_partition` としてシェーダへ渡す）。
+    pub k_per_partition: u32,
+}
+
+/// `2` の冪で `n` 以上になる最小値（`n == 0` は `1` を返す）。
+fn next_pow2_u64(n: u64) -> u64 {
+    if n <= 1 {
+        1
+    } else {
+        1u64 << (u64::BITS - (n - 1).leading_zeros())
+    }
+}
+
+/// `2` の冪で `n` 以下になる最大値（`n == 0` は `0` を返す）。
+fn prev_pow2_u64(n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        1u64 << (u64::BITS - 1 - n.leading_zeros())
+    }
+}
+
+/// split-K パス 1／パス 2 が使う threadgroup 構成。MLX steel の split-K
+/// 分岐が使う小タイル（`docs/backend-metal-splitk-decision.md` §1）を
+/// 移植: `bm`/`bn` は `m`/`n` が 40 未満なら 16、そうでなければ 32
+/// （K 支配的形状では M/N が小さいことが多く、大タイルは threadgroup
+/// 数をさらに減らして並列度を悪化させるため）。`bk=16`・`wm=wn=2`・
+/// `staged=true`（既存 `CANDIDATES` と同じ協調ロード方式。パス 1
+/// カーネルは `gemm_simdgroup_tiled` を `SPLIT_K_ENABLED=true` で再利用
+/// するため、`staged=false` の direct-load 版と同じ検証
+/// （[`TileConfig::validate`]）を通す）。
+pub fn split_k_tile(m: usize, n: usize) -> TileConfig {
+    let bm = if m < 40 { 16 } else { 32 };
+    let bn = if n < 40 { 16 } else { 32 };
+    TileConfig {
+        bm,
+        bn,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    }
+}
+
+/// [`should_split_k_with`] を [`SplitKParams::MLX_CASE1_M4_MAX`] で呼ぶ
+/// 既定入口。`crate::gemm::MetalGemm::dispatch_split_k*`（opt-in・
+/// `dispatch_auto` へは未結線）が使う（イシュー #1474 計画 §4.2）。
+pub fn should_split_k(m: usize, n: usize, k: usize) -> Option<SplitKPlan> {
+    should_split_k_with(m, n, k, &SplitKParams::MLX_CASE1_M4_MAX)
+}
+
+/// split-K（K 方向 2 パス分割）を採用すべきかを判定し、採用する場合は
+/// 実行計画（[`SplitKPlan`]）を返す純関数。`m`/`n`/`k` のいずれかが `0`
+/// の場合は常に `None`（空形状は classic 経路〈既存 `select`〉に委ねる。
+/// fail-closed）。
+///
+/// 判定手順（イシュー #1474 計画 §4.2。全て `u64`・`checked_*`／`div_ceil`
+/// で桁あふれを回避）:
+/// 1. MLX Case 1: `ceil(m/16)*ceil(n/16) <= tmn16_max && k/16 >=
+///    min_k_tiles16 && k >= max(m,n)`（K 支配的・タイル数上限内）。
+/// 2. 並列度条件（#1308）: [`split_k_tile`] での [`actual_groups`] が
+///    `max_groups` 未満（classic 経路で既に十分な並列度がある形状を
+///    除外する。これにより MLX Case 1 単体では true になる
+///    `(256,256,*)`・正方 512 以上を排除する。#1474 計画 §3「注意」）。
+/// 3. `partitions = clamp(next_pow2(max(1, tk16 / (ceil(m/32)*ceil(n/32)))),
+///    min_partitions, max_partitions)`（`tk16 = k/16`）。
+/// 4. `k_tiles = ceil(k / tile.bk)`（`tile = split_k_tile(m,n)`）。
+///    `next_pow2` が K タイル数を超える分割を作らないよう
+///    `partitions = min(partitions, prev_pow2(k_tiles))` で丸める。
+///    丸め後 `partitions < 2` なら `None`。
+/// 5. `k_per_partition = (k_tiles / partitions) * tile.bk`（`tile.bk` の
+///    倍数・`k_per_partition >= tile.bk`）。末尾パーティションは
+///    `k_per_partition` を超える端数（K が `partitions * k_per_partition`
+///    で割り切れない場合の残り。K の非 16 整除分を含む）を引き受ける
+///    （`crate::gemm` 側の 2 パス実装が `k_end = min(k_begin +
+///    k_per_partition, dims.k)`／最終区間は `dims.k` まで、として処理）。
+/// 6. `tile.validate(1024, u32::MAX)`（threadgroup スレッド数上限のみ
+///    検査。共有メモリ上限は呼び出し側〈`crate::gemm`〉のデバイス実測値
+///    で別途検証するため、ここでは緩い上限で機構的な妥当性のみを
+///    確認する）に失敗すれば `None`。
+pub fn should_split_k_with(
+    m: usize,
+    n: usize,
+    k: usize,
+    params: &SplitKParams,
+) -> Option<SplitKPlan> {
+    if m == 0 || n == 0 || k == 0 {
+        return None;
+    }
+    let (m64, n64, k64) = (m as u64, n as u64, k as u64);
+
+    // 手順 1: MLX Case 1。
+    let tm16 = m64.div_ceil(16);
+    let tn16 = n64.div_ceil(16);
+    let tmn16 = tm16.checked_mul(tn16)?;
+    if tmn16 > params.tmn16_max {
+        return None;
+    }
+    let tk16 = k64 / 16;
+    if tk16 < params.min_k_tiles16 {
+        return None;
+    }
+    if k64 < m64.max(n64) {
+        return None;
+    }
+
+    // 手順 2: 並列度条件（#1308）。
+    let tile = split_k_tile(m, n);
+    let groups = actual_groups(m, n, tile)?;
+    if groups >= params.max_groups {
+        return None;
+    }
+
+    // 手順 3: partitions の初期値。
+    let tm32 = m64.div_ceil(32);
+    let tn32 = n64.div_ceil(32);
+    let denom = tm32.checked_mul(tn32)?.max(1);
+    let raw = (tk16 / denom).max(1);
+    let mut partitions = next_pow2_u64(raw)
+        .max(params.min_partitions as u64)
+        .min(params.max_partitions as u64);
+
+    // 手順 4: K タイル数で頭打ちにする（空パーティションを作らない）。
+    if tile.bk == 0 {
+        return None;
+    }
+    let k_tiles = k64.div_ceil(tile.bk as u64);
+    partitions = partitions.min(prev_pow2_u64(k_tiles));
+    if partitions < params.min_partitions as u64 || partitions < 2 {
+        return None;
+    }
+
+    // 手順 5: 1 パーティションあたりの K 幅（`tile.bk` の倍数）。
+    let k_per_partition_tiles = (k_tiles / partitions).max(1);
+    let k_per_partition = k_per_partition_tiles.checked_mul(tile.bk as u64)?;
+    if k_per_partition == 0 {
+        return None;
+    }
+
+    // 手順 6: 機構的妥当性（threadgroup スレッド数上限のみ）。
+    if tile.validate(1024, u32::MAX).is_err() {
+        return None;
+    }
+
+    let partitions_u32 = u32::try_from(partitions).ok()?;
+    let k_per_partition_u32 = u32::try_from(k_per_partition).ok()?;
+    Some(SplitKPlan {
+        tile,
+        partitions: partitions_u32,
+        k_per_partition: k_per_partition_u32,
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5547,5 +5771,141 @@ mod tests {
             Some(TileClassRegion::full_grid(tiles_m, tiles_n))
         );
         assert_eq!(plan.edges[1], None);
+    }
+    // --- should_split_k（イシュー #1474）---
+    //
+    // 期待値は `docs` に記載の机上計算（イシュー #1474 計画 §4.2）を
+    // Python で再現し実装と突合した値（本ファイル冒頭コメントは実装の
+    // 正であり Python 計算は検証補助）。
+
+    #[test]
+    fn should_split_k_accepts_target_9_shapes() {
+        // #1308／#1474 計画 §3 の対象 9 形状はすべて Some（K 支配的・
+        // 並列度枯渇形状）。
+        let cases: &[(usize, usize, usize, u32, u32)] = &[
+            // (m, n, k, expected_partitions, expected_k_per_partition)
+            (32, 32, 2048, 32, 64),
+            (32, 32, 4096, 32, 128),
+            (32, 32, 8192, 32, 256),
+            (64, 64, 2048, 32, 64),
+            (64, 64, 4096, 32, 128),
+            (64, 64, 8192, 32, 256),
+            (128, 128, 2048, 8, 256),
+            (128, 128, 4096, 16, 256),
+            (128, 128, 8192, 32, 256),
+        ];
+        for &(m, n, k, exp_partitions, exp_kpp) in cases {
+            let plan =
+                should_split_k(m, n, k).unwrap_or_else(|| panic!("({m},{n},{k}) は Some を期待"));
+            assert_eq!(
+                plan.partitions, exp_partitions,
+                "({m},{n},{k}) の partitions"
+            );
+            assert_eq!(
+                plan.k_per_partition, exp_kpp,
+                "({m},{n},{k}) の k_per_partition"
+            );
+            assert!(plan.tile.validate(1024, u32::MAX).is_ok());
+        }
+    }
+
+    #[test]
+    fn should_split_k_rejects_large_square_and_wide_shapes() {
+        // (256,256,*) は MLX Case 1（tm*tn=256<=1024・K>=max(M,N)）は
+        // 満たすが、split-K タイル（`split_k_tile(256,256)` は bm=bn=32）
+        // での threadgroup 数 groups=ceil(256/32)*ceil(256/32)=8*8=64 が
+        // `max_groups`（40）以上のため並列度条件で除外される。
+        for &(m, n, k) in &[(256usize, 256usize, 2048usize), (256, 256, 4096)] {
+            assert!(
+                should_split_k(m, n, k).is_none(),
+                "({m},{n},{k}) は groups>=40 のため None を期待"
+            );
+        }
+        // 正方 512〜4096（K=M=N）は groups がさらに大きく None。
+        for &n in &[512usize, 1024, 2048, 4096] {
+            assert!(should_split_k(n, n, n).is_none(), "正方 {n} は None を期待");
+        }
+    }
+
+    #[test]
+    fn should_split_k_rejects_below_min_k_tiles() {
+        // tk16 = k/16 が 8 未満（k < 128）だと Case 1 不成立。
+        assert!(should_split_k(32, 32, 127).is_none());
+        assert!(should_split_k(32, 32, 128).is_some());
+    }
+
+    #[test]
+    fn should_split_k_rejects_k_below_max_m_n() {
+        // K が M/N より小さい（K 支配的でない）形状は常に None。
+        assert!(should_split_k(64, 64, 63).is_none());
+    }
+
+    #[test]
+    fn should_split_k_handles_k_tail_not_multiple_of_16() {
+        // K が 16 の倍数でない（末尾パーティションが端数を引き受ける
+        // 前提の境界ケース）。
+        let plan = should_split_k(64, 64, 2056).expect("(64,64,2056) は Some を期待");
+        assert_eq!(plan.partitions, 32);
+        assert_eq!(plan.k_per_partition, 64);
+        // 末尾パーティションが引き受ける端数: 32 * 64 = 2048 < 2056。
+        assert!(plan.partitions as u64 * plan.k_per_partition as u64 <= 2056);
+
+        let plan2 = should_split_k(128, 128, 2064).expect("(128,128,2064) は Some を期待");
+        assert_eq!(plan2.partitions, 8);
+        assert_eq!(plan2.k_per_partition, 256);
+    }
+
+    #[test]
+    fn should_split_k_rejects_zero_dims() {
+        assert!(should_split_k(0, 32, 2048).is_none());
+        assert!(should_split_k(32, 0, 2048).is_none());
+        assert!(should_split_k(32, 32, 0).is_none());
+    }
+
+    #[test]
+    fn split_k_tile_selects_16_or_32_by_dimension() {
+        assert_eq!(split_k_tile(32, 32).bm, 16);
+        assert_eq!(split_k_tile(32, 32).bn, 16);
+        assert_eq!(split_k_tile(64, 64).bm, 32);
+        assert_eq!(split_k_tile(64, 64).bn, 32);
+        // m/n を跨ぐ非対称形状でも独立に判定する。
+        assert_eq!(split_k_tile(32, 128).bm, 16);
+        assert_eq!(split_k_tile(32, 128).bn, 32);
+    }
+
+    #[test]
+    fn should_split_k_with_custom_params_narrows_max_groups() {
+        // `max_groups` を極端に小さくすると対象 9 形状も除外されうる
+        // （パラメータ化の動作確認。#1474 計画 §4.2 のパラメータ差し替え
+        // 契約）。
+        let strict = SplitKParams {
+            max_groups: 1,
+            ..SplitKParams::MLX_CASE1_M4_MAX
+        };
+        assert!(should_split_k_with(32, 32, 2048, &strict).is_none());
+    }
+
+    #[test]
+    fn should_split_k_plan_partitions_within_declared_bounds() {
+        // partitions は常に [min_partitions, max_partitions] の範囲内
+        // （`SplitKParams::MLX_CASE1_M4_MAX` は 2..=32）。
+        let shapes: &[(usize, usize, usize)] = &[
+            (32, 32, 2048),
+            (32, 32, 4096),
+            (32, 32, 8192),
+            (64, 64, 2048),
+            (128, 128, 2048),
+            (128, 128, 4096),
+            (128, 128, 8192),
+            (32, 32, 128),
+        ];
+        for &(m, n, k) in shapes {
+            if let Some(plan) = should_split_k(m, n, k) {
+                assert!(plan.partitions >= 2 && plan.partitions <= 32);
+                assert!(plan.partitions.is_power_of_two());
+                assert!(plan.k_per_partition >= plan.tile.bk);
+                assert!(plan.k_per_partition % plan.tile.bk == 0);
+            }
+        }
     }
 }

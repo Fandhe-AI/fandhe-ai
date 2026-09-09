@@ -76,7 +76,7 @@ fandhe-ai/
     ├── backend-metal-mlx-classic-nax-decision.md # MLX classic 経路と CANDIDATES の構成対比・NAX 経路不採用判断（#549）
     ├── backend-metal-mpp-tensor-decision.md # Metal 4 `tensor<>`＋Metal Performance Primitives（MPP）行列積の可用性・バインディング到達性（Route C）・純カーネル時間 A/B・「完全自作コア」との整合のユーザー判断事項整理（採否の結論は出さない。M4 Max 実機実測。#1326）
     ├── backend-metal-morton-mapping-decision.md # 標準 simdgroup_matrix API 下での Morton 順レーン→要素マッピング適用不可の判断（#544）
-    ├── backend-metal-splitk-decision.md # split-K ディスパッチ分岐の MLX 選択条件対比・採否判断（#810）。#1308 で M4 Max 実機実測を完了し「採用検討推奨」を確定記録（対象 9 点全点で劣化率中央値 0.2265〜0.5166・5/5 run 一貫。split-K 実装自体は別 issue へ切り出し提案・本 PR ではコード変更なし）
+    ├── backend-metal-splitk-decision.md # split-K ディスパッチ分岐の MLX 選択条件対比・採否判断（#810）。#1308 で M4 Max 実機実測を完了し「採用検討推奨」を確定記録（対象 9 点全点で劣化率中央値 0.2265〜0.5166・5/5 run 一貫。split-K 実装自体は別 issue へ切り出し提案・本 PR ではコード変更なし）。#1474 で opt-in 実装完了（`dispatch_auto` へ未結線）を追記。実装記録は `docs/perf/metal-gemm-splitk-two-pass.md`
     ├── backend-metal-transpose-collapse-design.md # 転置パターン別 strided GEMM 入口（GemmStrides）・先頭次元 collapse の設計・実機実測記入欄（#1029 ツリー・#1040）
     ├── backend-metal-wgpu-decision.md  # Metal バックエンド実装方式（wgpu 非採用）の決定記録
     ├── backend-switching-design.md     # cfg ベースバックエンド切替の設計
@@ -113,6 +113,8 @@ fandhe-ai/
     │   ├── metal-gemm-bottleneck-diagnosis.md # Metal GEMM 1024 以降スループット頭打ちの定量診断（#487。#744 是正前・context_cache 導入前の前提。再診断は metal-gemm-bottleneck-rediagnosis.md を参照）
     │   ├── metal-gemm-bottleneck-rediagnosis.md # Metal GEMM 1024 以降頭打ちの context_cache 後の再診断（M4 Max 実機実測完了。fandhe-ai 自系列内の転送〈アップロード＋readback〉寄与は確認したが、candle 側転送分離測定〈#1103 追補〉の結果 candle比ギャップの主因とは確定できず・GPU counters は引き続き未計測〈GPU Service が対象デバイス非対応と報告〉・タイル形状は現行 CANDIDATES[3] が 4096 で最良・1024/2048 は [5]/[6] と同等〈相対 5% 未満〉。#1036・#1103）
     │   ├── metal-gemm-splitk-shapes.md # split-K 対象形状（K 支配的非正方）の劣化定量化実測記録（#810）。#1308 で M4 Max 実機実測（5 プロセス起動 5 回計測中央値）を完了・§4/§6 確定。対象 12 点中 9 点（`actual_groups < 40` 該当）全点で劣化率中央値が事前登録基準 `<0.7` を 5/5 run 一貫して満たし「採用検討推奨」と判定
+    │   ├── metal-gemm-splitk-two-pass.md # split-K 2 パス GEMM カーネル（パス 1: K 区間分割・パス 2: 固定順序 Neumaier 補償和縮約）の opt-in 実装記録（`dispatch_auto` へ未結線）。AC-1（run-to-run bit 同一）・AC-4（REQ-8 境界検査）・AC-5（本番経路非後退）は達成。AC-2 は実機実測（M4 Max）で「split-K はパーティション分割そのものに起因し縮約側改善では解消しない厳密ゼロ fail 不成立」が判明し、当初は CUDA 側 `ParityBaseline` と同型の実測ベースライン非後退方式（`tests/common/splitk_parity_baseline.rs`）へ判定方式を変更していたが、PR #1496 の codex-review 指摘（当該 spec 追記は TF32/f16 Tensor Core 経路限定で Metal f32 split-K への適用拡張は未承認）を受け厳密ゼロ fail 判定（`assert_parity`）へ差し戻し・未承認のため 11 形状中 8 形状で実機実行時に既知 FAIL が残る（§5.5）。性能 A/B は #1475、本番結線可否は #1476 へ引き継ぎ。イシュー #1474
+    │   ├── logs/metal-gemm-splitk-two-pass-1474/ # 上記の bit_match／parity／対象 11 形状×4 転置パターン全数実測（parity_survey_all_shapes）・既存 `#[ignore]` 群非後退確認の実行ログ・env_info（内部ホスト名は含めない。イシュー #1474）
     │   ├── logs/metal-gemm-splitk-shapes-1308/ # 上記 #1308 の M4 Max 実機実測 5 run 生ログ・`aggregate.py`（python3 標準ライブラリのみ）／`aggregate.md`・`env_info.txt`（負荷ゲート試行履歴含む）・`smoke_run.log`・`pmset_therm_{before,after}.txt`（内部ホスト名は含めない）
     │   ├── cuda-fresh-gemm-n2048-overhead-diagnosis.md # fresh モード CUDA GEMM N=2048 固有の約 166〜184 ms 残存オーバーヘッド診断（DGX Spark GB10 実機実測完了・HEAD 時点で非再現を確認・コード修正なし。#956・#1025。#1157 で §11 追記: #1130 ツリー〈#1146/#1149/#1153〉の結論と #956/#1025 非再現の関係。確定機構〈32 MiB 固定上限〉は #956 の 16 MiB を説明せず別原因・同族の可能性は推測として区別・N=4096 異常値は #1130 と整合・対策なし〈環境要因〉）
     │   ├── burn-wgpu-metal-gemm-zero-result.md # framework-compare の Burn(wgpu) Metal GEMM N>=512 全ゼロの原因切り分け（upstream 既知バグ。#965）
