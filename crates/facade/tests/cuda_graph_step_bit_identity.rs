@@ -64,8 +64,9 @@
 //!   -- --ignored --nocapture --exact graph_capture_completes_training_loop_without_error
 //! ```
 //!
-//! 両者の標準出力（loss 列・各 step 完了直後のパラメータ・最終
-//! パラメータのビット表現）を比較し、完全一致することを確認する。
+//! 両者の標準出力（loss 列・各 step の入力勾配・各 step の重み勾配
+//! （イシュー #1480）・各 step 完了直後のパラメータ・最終パラメータの
+//! ビット表現）を比較し、完全一致することを確認する。
 //!
 //! **単一 GPU 環境での自動比較（codex-review P2 指摘対応・PR #1390
 //! 再修正）**: 上記 2 コマンドを手動で実行し目視・手動 diff するのは
@@ -95,11 +96,13 @@ fn eager_baseline() {
         "本テストは opt-in OFF（既定）の基準値を記録する。環境変数 \
          FANDHE_AI_CUDA_GRAPH_STEP を設定せずに実行すること"
     );
-    let (log, per_step_dinput, per_step_params, final_params) = train_on_cuda(0, STEPS, LR);
+    let (log, per_step_dinput, per_step_grads, per_step_params, final_params) =
+        train_on_cuda(0, STEPS, LR);
     print_bit_identity_report(
         "eager (opt-in OFF)",
         &log,
         &per_step_dinput,
+        &per_step_grads,
         &per_step_params,
         &final_params,
     );
@@ -119,11 +122,13 @@ fn graph_capture() {
         "本テストは opt-in ON（環境変数 FANDHE_AI_CUDA_GRAPH_STEP=1）の \
          別プロセスとして実行すること"
     );
-    let (log, per_step_dinput, per_step_params, final_params) = train_on_cuda(0, STEPS, LR);
+    let (log, per_step_dinput, per_step_grads, per_step_params, final_params) =
+        train_on_cuda(0, STEPS, LR);
     print_bit_identity_report(
         "graph capture (opt-in ON)",
         &log,
         &per_step_dinput,
+        &per_step_grads,
         &per_step_params,
         &final_params,
     );
@@ -151,7 +156,8 @@ fn graph_capture() {
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須。単独プロセスで --exact 単独実行すること（opt-in をプロセスワイドに変更するため）"]
 fn graph_capture_completes_training_loop_without_error() {
     fandhe_ai::set_cuda_graph_step_enabled(true);
-    let (log, _per_step_dinput, _per_step_params, _final_params) = train_on_cuda(0, STEPS, LR);
+    let (log, _per_step_dinput, _per_step_grads, _per_step_params, _final_params) =
+        train_on_cuda(0, STEPS, LR);
     assert_eq!(log.len(), STEPS);
     for loss in &log {
         assert!(loss.is_finite(), "loss must remain finite: {loss}");

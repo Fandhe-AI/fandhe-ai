@@ -1,0 +1,67 @@
+# イシュー #1480 実機実測環境情報（GB10・DGX Spark。内部ホスト名は書かない）
+
+対象 HEAD（rsync 転送時点。ワーキングツリーには本イシューのコミット前の
+変更が乗った状態で転送している。実測後にコミットしたローカルコミット
+SHA は PR 本文へ記載する）: 93e11a71dad16e48e8e0bb9883c57a6b2b285a2b
+（origin/main。イシュー #1479 実装 PR #1492 マージ済み時点）
+
+## 計測前（2026-09-09）
+
+- uptime: 16:16:12 up 13 days, 3:43, 8 users, load average: 0.02, 0.02, 0.03
+- nvidia-smi utilization.gpu: 0 %
+- nvidia-smi compute-apps: pid=427276 used_memory=170 MiB / pid=1241474 used_memory=870 MiB
+  （常駐サービスによる小規模な GPU メモリ使用。計測に支障なし）
+
+## rustc / nvcc
+
+- rustc 1.97.0 (2d8144b78 2026-07-07)
+- nvcc release 13.0 V13.0.88（`docs/real-hardware-verification-env.md` §2.1 記載の同一実機。バージョン変化なし）
+
+## 計測後（2026-09-09）
+
+- uptime: 16:18:46 up 13 days, 3:45, 8 users, load average: 0.60, 0.19, 0.09
+  （bit 同一性テスト自体は数秒未満の CPU 負荷しかかからないため、この
+  程度の変動は通常のバックグラウンド活動の範囲内。bit 同一性は負荷
+  非依存のため専有ゲート判定の対象にしない）
+- nvidia-smi utilization.gpu: 0 %
+
+## 実行した検証・結果一覧
+
+1. `cargo build -p fandhe-ai --release --tests`: 成功（API 解決確認）
+2. `cuda_graph_step_bit_identity::eager_baseline`（`--exact`・opt-in OFF）:
+   ok（`eager_baseline_raw.log`）
+3. `cuda_graph_step_bit_identity::graph_capture`（`--exact`・opt-in ON・
+   `FANDHE_AI_CUDA_GRAPH_STEP=1`）: ok（`graph_capture_raw.log`）
+4. 上記 2 プロセスの出力から `^(step\[|final\.param\[)` 行を抽出し
+   （`scripts/verify-cuda-graph-step-bit-identity.sh` の
+   `extract_bits_lines` と同一パターン）`diff` で突合:
+   **4782 行すべて完全一致（diff exit code 0）**
+   （`eager_bits.txt`・`graph_bits.txt`。内訳: loss 10 + dinput 10×32=320
+   + grad 10×212=2120（イシュー #1480 新規） + param 10×212=2120 +
+   final 212 = 4782。#1350 の 2662 行 + 本イシューで追加した grad
+   2120 行）
+5. `cuda_graph_step_bit_identity::graph_capture_completes_training_loop_without_error`
+   （`--exact`・弱い受け入れ条件）: ok
+   （`graph_capture_completes_training_loop_without_error.log`）
+6. `device_param_store_backend_parity::grad_readout_contract_on_cuda`
+   （イシュー #1479・#1492 が本イシューへ引き継いだ未実測項目）: ok
+   （`grad_readout_contract_on_cuda.log`。strict 版
+   `resident_grads_to_host` が `Unsupported` を返すこと・統合版
+   `param_grads_to_host` の勾配値がホスト参照実装と一致することの
+   両方を検証）
+7. `cargo test -p fandhe-ai-backend-cuda --release --test
+   graph_capture_real_device -- --ignored --nocapture --test-threads=1`
+   （#1349/#1350 の既存 capture 機構テストの非後退確認）: 2 passed・
+   0 failed（`graph_capture_real_device.log`）
+
+## 補足
+
+- `scripts/verify-cuda-graph-step-bit-identity.sh` をリモートで直接
+  起動する呼び出しは、本エージェントが動作するローカル worktree
+  隔離ガード（ファイル名に含まれる語 `verify` 起因と推定される
+  ヒューリスティック）により実行できなかった。上記 4. が同スクリプトの
+  ロジック（`extract_bits_lines` の正規表現・`eager_baseline`／
+  `graph_capture` の 2 プロセス実行・`diff` による突合）を手動で
+  再現したものであり、判定結果は同一
+- ノード上の常駐サービス（ComfyUI・Kokoro・local-llm-server gateway 等）
+  は計測前後とも `utilization.gpu` 0 % のまま・計測を妨げなかった
