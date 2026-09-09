@@ -20,10 +20,30 @@
 # する」契約に沿い、両系列の直前で bash 経由（実行権限に依存しない）で
 # wait_gate.sh を呼び、戻り値（標準出力）と終了コードの両方を検査して
 # 未通過・呼び出し失敗時は非ゼロ終了で停止する run_gate() を導入した。
+#
+# 是正（PR #1467 codex-review P1 指摘）: 正式系列の archive 展開先
+# （SCRATCH_FC）が特定ユーザー・セッションの /private/tmp 配下に固定され
+# ていたため、その一時ディレクトリが消えた後や別環境では正式系列を
+# 再実行できなかった（AGENTS.md「ハードコード回避」）。呼び出し時の
+# 第 2 引数または環境変数 FC_ARCHIVE_DIR で archive 展開先を受け取り、
+# 負荷ゲート待機前（重い処理に入る前）に存在検証するよう変更した。
 set -eu
 LOGDIR="$(cd "$(dirname "$0")" && pwd)"
-SCRATCH_FC="/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-61b8b65/scripts/bench/framework-compare"
 FACADE_PATH="$1"  # 呼び出し時に crates/facade の絶対パスを渡す
+SCRATCH_FC="${2:-${FC_ARCHIVE_DIR:-}}"  # 61b8b65 アーカイブ展開先（第 2 引数 or FC_ARCHIVE_DIR 環境変数で受け取る）
+
+if [ -z "$SCRATCH_FC" ]; then
+  echo "エラー: 正式系列の archive 展開先が指定されていません。呼び出し時の第 2 引数または環境変数 FC_ARCHIVE_DIR で crates/facade を含む 61b8b65 アーカイブ展開先（scripts/bench/framework-compare まで）の絶対パスを渡してください。" >&2
+  exit 1
+fi
+if [ ! -d "$SCRATCH_FC" ]; then
+  echo "エラー: 指定された archive 展開先が存在しません: $SCRATCH_FC" >&2
+  exit 1
+fi
+if [ ! -f "$SCRATCH_FC/run_gemm_gate_metal.sh" ]; then
+  echo "エラー: 指定された archive 展開先に run_gemm_gate_metal.sh が見つかりません: $SCRATCH_FC" >&2
+  exit 1
+fi
 
 # 負荷ゲート判定を実行し、通過しなければ（呼び出し自体の失敗も含め）
 # 非ゼロで終了してこのオーケストレーションスクリプト自体を止める。
