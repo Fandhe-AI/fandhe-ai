@@ -307,7 +307,8 @@ CPU にはホスト⇄デバイス転送・ストリーム同期が存在しな�
 の実体化）」＋「C 確保（`zeroed_output(n*n)`。イシュー #1299 でしきい値
 以上の rayon 並列ゼロ書き込み分岐を追加したが、M4 Max スモーク実測で
 N=2048 が後退したため本番既定 `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS =
-usize::MAX` により無効化。#1301 が DGX 実機実測で有効化可否を判断する）」
+usize::MAX` により無効化。#1481 で独立再計測を実施し verdict=REJECT を
+確定・#1482 で `usize::MAX` を確定既定化）」
 ＋「マイクロカーネル本体
 （`gemm_blis_parallel`）」＋「`Tensor::new` によるラップ」＋「autodiff
 ノード push（`push_eager`）」の合成である:
@@ -377,7 +378,8 @@ cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
   という Layer A/B 間の乖離自体は事実として記録を維持する（Layer A/B
   双方の生ログは `docs/perf/logs/cpu-matmul-fixed-cost-1301/`）。
   規則 4 を事前登録規則として固定したうえでの独立の再計測（同 doc
-  §20.6）で ADOPT／REJECT を確定するまで、本番既定は有効化しない。
+  §20.6）は #1481 で実施済みで verdict=REJECT が確定し、#1482 で
+  `usize::MAX` を確定既定として固定した。
 
 **突合前提**（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` への
 転記時に明記する）: Layer A（`gemm --mode reuse --phases`）は
