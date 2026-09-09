@@ -182,7 +182,13 @@ class LoadRowsTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_size_set_filters_out_of_gate_sizes(self):
+    def test_size_set_filters_out_of_gate_sizes_without_warning(self):
+        """cursor (Bugbot) 指摘（PR #1493 未解決スレッド 2）の回帰確認:
+        `--sizes` によるサブセット選別で対象外になった行は、型・値域上は
+        妥当な正当行であるため warning を出さずに静かに除外されなければ
+        ならない（warning は `main()` の exit 3 fail-closed 方針に直結し、
+        要求したサブセット計測そのものが不正入力扱いされてはいけない）。
+        """
         rows = [_rec("legacy", 0.001, size=512), _rec("borrowed", 0.0009, size=512)]
         path = _write_jsonl(rows)
         try:
@@ -190,7 +196,28 @@ class LoadRowsTest(unittest.TestCase):
                 path, size_set=compare_readout_ab.GATE_SIZES
             )
             self.assertEqual(loaded, [])
-            self.assertTrue(warnings)
+            self.assertEqual(warnings, [])
+        finally:
+            os.unlink(path)
+
+    def test_custom_sizes_subset_does_not_warn_on_other_valid_rows(self):
+        """`--sizes` にカスタムサブセット（例 gate 3 サイズ中の 1 つ）を
+        指定しても、`run_ab_readout_metal.sh` が出力する他の正当な gate
+        サイズ行（要求サブセット外）が warning を生まず、要求したサブ
+        セットのみが黙って除外されることを確認する（同上・回帰確認）。
+        """
+        rows = _five_cell(0.010, 0.009, size=1024) + [
+            _rec("legacy", 0.002, size=2048),
+            _rec("borrowed", 0.0019, size=2048),
+        ]
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_readout_ab.load_rows(
+                path, size_set=frozenset({1024})
+            )
+            self.assertEqual(warnings, [])
+            self.assertEqual(len(loaded), 10)
+            self.assertTrue(all(r.get("size") == 1024 for r in loaded))
         finally:
             os.unlink(path)
 

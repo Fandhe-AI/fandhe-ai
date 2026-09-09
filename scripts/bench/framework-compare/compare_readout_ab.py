@@ -74,10 +74,23 @@ _VALID_MODES = frozenset({"fresh", "reuse"})
 GATE_SIZES = frozenset({1024, 2048, 4096})
 
 
-def _valid_cell_identity(obj, size_set=None):
+def _valid_cell_identity(obj):
     """`_cell_key` がグループ化キーへ使う `task`/`device`/`size`/`mode`/
     `phase` の型・値域を検証する（`compare_managed_ab.py::_valid_cell_
     identity` と同方針）。
+
+    cursor (Bugbot) 指摘（PR #1493 未解決スレッド 2）: 以前は `size_set`
+    （`--sizes` で指定したサブセット）を本関数の妥当性検査に混ぜており、
+    「型が正しいが要求サブセット外の size を持つ行」を不正行と同列に
+    warning へ積んでいた。`run_ab_readout_metal.sh` は既定 gate 3 サイズ
+    分の行を出力するため、`--sizes` でサブセットを絞ると絞った分だけ
+    正当な行が warning を生み、`main()` の「1 件でも warning があれば
+    exit 3」という fail-closed 方針（不正入力の握り潰し防止。A08）に
+    巻き込まれて要求したサブセットのスコアリングそのものが行えなくなる
+    （型・値域として不正な行と、要求範囲外というだけの正当な行を区別
+    できていなかったのが原因）。size の型・値域検査はここに残し、
+    `--sizes` によるサブセット選別は呼び出し側（[`load_rows`]）で
+    warning を出さずに行単位でフィルタするだけの処理へ分離する。
     """
     task = obj.get("task")
     if not isinstance(task, str) or task not in _VALID_TASKS:
@@ -90,8 +103,6 @@ def _valid_cell_identity(obj, size_set=None):
         return False
     size = obj.get("size")
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-        return False
-    if size_set is not None and size not in size_set:
         return False
     phase = obj.get("phase")
     if phase is not None and not isinstance(phase, str):
@@ -187,11 +198,19 @@ def load_rows(path, size_set=None):
                     f"（'legacy'／'borrowed' を期待。実際: {readout!r}） — skipped"
                 )
                 continue
-            if not _valid_cell_identity(obj, size_set=size_set):
+            if not _valid_cell_identity(obj):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"
                     f"'mode' フィールド（行: {obj!r}） — skipped"
                 )
+                continue
+            # `--sizes` によるサブセット選別（cursor Bugbot 指摘・PR #1493
+            # 未解決スレッド 2）: 型・値域としては妥当だが要求サイズ外の
+            # 行は、不正入力ではなく「対象外として除外」するだけであり
+            # warning を出さない（warning は `main()` の exit 3 fail-closed
+            # 方針〈不正入力の握り潰し防止〉に直結するため、正当な行の
+            # サブセット選別をこの経路に混ぜてはならない）。
+            if size_set is not None and obj.get("size") not in size_set:
                 continue
             rows.append(obj)
     return rows, warnings
@@ -414,11 +433,19 @@ def render_markdown(cells, threshold, device, size_set):
             if result["checksum_exact_match"]
             else ("複合判定 ok" if result["checksum_composite_match"] else "不一致")
         )
-        verdict = (
-            "非後退"
-            if result["ratio"] <= threshold and result["checksum_exact_match"]
-            else "後退"
-        )
+        # cursor (Bugbot) 指摘（PR #1493 未解決スレッド 1）: 本表は
+        # ratio・checksum のみで「非後退」を表示していたため、
+        # `_cell_has_parity_fail` が REJECT を返す parity fail 行があって
+        # も表上は問題なく見え、読者が総合判定（`overall_verdict`）を見ず
+        # に表だけを ADOPT シグナルと誤読しうる。行単位の判定にも parity
+        # fail を反映し、fail があれば "後退（parity fail）" と明示する。
+        cell_parity_fail = _cell_has_parity_fail(cells[key])
+        if result["ratio"] <= threshold and result["checksum_exact_match"] and not cell_parity_fail:
+            verdict = "非後退"
+        elif cell_parity_fail:
+            verdict = "後退（parity fail）"
+        else:
+            verdict = "後退"
         lines.append(
             f"| {cell_label} | {_fmt_ms(result['legacy_median_s'])} "
             f"(min {_fmt_ms(result['legacy_min_s'])} / max {_fmt_ms(result['legacy_max_s'])}) | "
