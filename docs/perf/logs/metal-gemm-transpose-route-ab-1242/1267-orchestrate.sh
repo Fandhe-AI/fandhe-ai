@@ -39,12 +39,36 @@
 # 経由の任意実行はしない。ホスト名・ユーザー名の絶対パスはログへ書く前に
 # 必ず SANITIZE_SED を通す（#1261 の方針を踏襲）。
 #
-# PR #1462 codex-review 是正: 監視ループはバイナリ起動直後（内側ガード
-# のバックオフ待機区間を含む）から始まるため、待機中の負荷逸脱と
-# phase 1／phase 2 実測区間中の逸脱を区別せずに breach を立てていた
-# （詳細は `current_phase_state` 関数コメント参照）。実測区間の判定に
-# は OUT_LOG（本計測プロセスの標準出力）中の `== env_guard(` ／
-# `env_guard_result=` マーカーを用いる。
+# PR #1462 codex-review／Bugbot 指摘（3 巡目）と是正方針: 一度は監視
+# ループへ「実測区間（measuring）」と「内側ガードのバックオフ待機区間
+# （guard_wait）」を OUT_LOG（本計測プロセスの標準出力）中の
+# `== env_guard(` ／ `env_guard_result=` マーカーで区別し、待機中の
+# 逸脱を valid 判定から除外する変更を入れた。しかし指摘のとおり、この
+# 方式には本スクリプト単独では解消できない 2 つの欠陥があった:
+#   (i) `${BINARY}` は `format_env_info_text` を `run_guard_with_retry`
+#       完了後（＝バックオフ待機がすべて終わった後）にしか呼ばない
+#       （`crates/bench-harness/src/env_guard.rs`）ため、phase 2 の
+#       バックオフ待機が始まった時点では OUT_LOG に phase 2 の開始
+#       マーカー自体がまだ存在せず、直近に見えるのは phase 1 の完了
+#       マーカーのまま——`current_phase_state` は誤って「measuring」を
+#       返し続けていた。
+#   (ii) たとえマーカーの出力タイミングを直せても、`> "$OUT_LOG" 2>&1`
+#       でファイルへリダイレクトされた子プロセスの標準出力は（tty で
+#       ないため）フルバッファリングされ、実際にマーカーが書かれてから
+#       本監視ループ（`grep`）に見えるまで数分単位で遅延しうる。
+# いずれも `${BINARY}`（`crates/backend-metal/examples/
+# gemm_transpose_route_ab_bench.rs`）側の出力タイミング・バッファリング
+# 契約に踏み込まない限り本スクリプト単独では正しく解消できず、本 PR は
+# 「Rust コードは変更せず」実測記録のみを追加する方針（PR #1462 本文）
+# のため、Rust 側の是正は本 PR のスコープ外とする。よって phase 判定
+# 機構自体を撤去し、#1253 の元設計（`${BINARY}` 起動から終了までの
+# 全区間で逸脱があれば無条件に `valid=0` とする）へ差し戻す。これは
+# 「バックオフ待機中だけの一時的な逸脱で valid=0 になりうる」という
+# 意味では保守的（false negative になりうる）だが、fail-closed の
+# 原則上「実測できていない値を排他環境の結果として提示しない」（本
+# ドキュメント群で一貫する方針）には反しない。マーカーの出力タイミング・
+# バッファリングという Rust 側の是正込みでの再導入は別イシューで検討
+# する（Rust コードを変更しない場合は撤去したままとする）。
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -203,37 +227,6 @@ MONITOR_LOG="${RUN_PREFIX}monitor.log"
 MONITOR_POLL_INTERVAL_SECS="${MONITOR_POLL_INTERVAL_SECS:-30}"
 
 OUT_LOG="${RUN_PREFIX}run.log"
-
-# PR #1462 codex-review 指摘: 監視ループはバイナリ起動直後（内側ガード
-# `env_guard` のバックオフ待機の最中）から始まり、待機中の負荷も
-# 実測中の負荷と同じ扱いで breach=1 を不可逆に記録していた。外側
-# ゲート通過後に一時的に負荷が上がり、内側ガードが待機してから
-# phase 1／phase 2 の実測自体は排他的に成功した場合でも valid=0 に
-# なってしまい、内側ガードの再試行設計が結果に反映されない。
-#
-# `${BINARY}` は `env_guard` のブロックを `== env_guard(<label>) ==`
-# で開始し、判定確定時に `env_guard_result=<pass|fail...>` を書く
-# （`env_guard.rs`。`crates/bench-harness` 側の契約。本スクリプトは
-# 変更しない）。この 2 種のマーカーのうち OUT_LOG 中で最後に現れた
-# 方を見て、現在が「ガード待機中（guard_wait）」か「実測中
-# （measuring。直近の env_guard が通過し、次の env_guard ブロックが
-# まだ始まっていない区間）」かを判定する。まだ 1 つも
-# `env_guard_result=` が現れていなければ guard_wait とみなす
-# （fail-closed。実測開始の証拠がない間は実測中とみなさない）。
-current_phase_state() {
-  local out_log="$1" last_start last_result
-  last_start=$(grep -n '^== env_guard(' "$out_log" 2>/dev/null | tail -1 | cut -d: -f1)
-  last_result=$(grep -n '^env_guard_result=' "$out_log" 2>/dev/null | tail -1 | cut -d: -f1)
-  if [ -z "$last_result" ]; then
-    echo "guard_wait"
-    return
-  fi
-  if [ -n "$last_start" ] && [ "$last_start" -gt "$last_result" ]; then
-    echo "guard_wait"
-  else
-    echo "measuring"
-  fi
-}
 "${BINARY}" \
   --max-load-avg=2.0 \
   --gpu-watch=python --gpu-watch=torch --gpu-watch=mlx --gpu-watch=gemm_ --gpu-watch=bench \
@@ -274,20 +267,14 @@ while kill -0 "$BENCH_PID" 2>/dev/null; do
     enum_error=1
   fi
   load_ok=$(awk -v l="$load1" -v t="$GATE_THRESHOLD" -v le="$load_error" 'BEGIN{print (le==0 && l<t)?1:0}')
-  # PR #1462 codex-review 指摘: `breach` は実測区間（phase_state=
-  # measuring）で検出された逸脱のみで不可逆に立てる。ガード待機中
-  # （guard_wait）の逸脱は監視ログには記録する（可視性のため）が
-  # `valid` の判定へは影響させない——内側ガード自身がバックオフで
-  # 再試行し、実測を開始できる状態まで待つ設計だから。
-  phase_state=$(current_phase_state "$OUT_LOG")
   if [ "$enum_error" -ne 0 ] || [ "$load_error" -ne 0 ]; then
-    [ "$phase_state" = "measuring" ] && breach=1
-    echo "$ts load1=$load1 load_error=$load_error other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=$enum_error phase=$phase_state UNDETERMINED" >> "$MONITOR_LOG"
+    breach=1
+    echo "$ts load1=$load1 load_error=$load_error other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=$enum_error UNDETERMINED" >> "$MONITOR_LOG"
   elif [ "$load_ok" != "1" ] || [ "$other_count" -gt 0 ]; then
-    [ "$phase_state" = "measuring" ] && breach=1
-    echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 phase=$phase_state BREACH" >> "$MONITOR_LOG"
+    breach=1
+    echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 BREACH" >> "$MONITOR_LOG"
   else
-    echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 phase=$phase_state ok" >> "$MONITOR_LOG"
+    echo "$ts load1=$load1 load_error=0 other_count=$other_count other_procs=[$other_procs] vanished=[$vanished_procs] enum_error=0 ok" >> "$MONITOR_LOG"
   fi
   sleep "$MONITOR_POLL_INTERVAL_SECS"
 done
