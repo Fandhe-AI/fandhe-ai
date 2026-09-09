@@ -1,0 +1,6 @@
+gate try=1 load1=0.02 ok=1 2026-09-09T12:17:27Z
+gate try=2 load1=0.12 ok=1 2026-09-09T12:17:57Z
+layerA off start 2026-09-09T12:17:57Z  21:17:57 up 13 days,  8:44,  8 users,  load average: 0.12, 0.05, 0.01
+layerA off end 2026-09-09T12:19:51Z  21:19:51 up 13 days,  8:46,  8 users,  load average: 7.56, 2.69, 0.97
+layerA on start 2026-09-09T12:19:51Z  21:19:51 up 13 days,  8:46,  8 users,  load average: 7.56, 2.69, 0.97
+layerA on end 2026-09-09T12:20:36Z  21:20:36 up 13 days,  8:47,  8 users,  load average: 6.44, 3.12, 1.20

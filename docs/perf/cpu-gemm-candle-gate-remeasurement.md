@@ -1,6 +1,6 @@
 # CPU GEMM N=512/1024/2048 reuse candle 比再計測と #1117 ゲート判定（イシュー #1148）
 
-## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§16）。#1305 で専有環境の RAYON_NUM_THREADS スイープを両実機で 5 回計測中央値再実測し、DGX Spark GB10 の N=1024 非単調性を taskset pin 実験で H1（異種コア由来）と確定・Apple M4 Max は専有ゲート不通過のため undetermined のまま記録した（§17）。#1312 で `TwoDDynamic`（2D 動的分配）vs `RowPanel` の両実機 A/B を実施し、DGX（専有ゲート通過）は全形状で `RowPanel` を 1.09〜1.80 倍上回ったが Apple M4 Max が専有ゲート不通過のため最終判定は undetermined（結線せず #1313 へ記録のみ引き継ぎ）・DGX 単独の非単調性（T10/T8）は「残存」（比 0.86 前後・僅かに閾値未達）と判定した（§18）。#1262 で承認済み tolerance 契約（#1241 承認・#1443/#1445 実装）下の DGX Spark GB10 N=2048 を再計測し、「判定不能」が解消して確定判定（未達・0.950 倍）へ遷移したことを確認した（§19。N=512/1024 は引き続き未達。Apple M4 Max は N=2048 が元々 0 fail のため対象外）。#1301 で出力並列ゼロ埋め（#1299）の on/off を両実機実測し、両実機・全形状で非後退（DGX N=2048 alloc_c 約 48% 削減）を確認したが、事前宣言した規則 4（candle 比の非後退）が緩和なしでは 6 セル中 3 セルで不成立だった点を PR #1448 の codex-review が指摘したため、いったん有効化した `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = 2 << 20` を `usize::MAX`（無効化）へ差し戻し、§20.1a の改定版規則 4 を事前登録規則として固定したうえで独立の再計測（§20.6）を経て確定する方針とした（§20）。#1313 で `TwoDDynamic`（2D 動的分配）を M4 Max 専有ゲート付き Phase 0 再計測で ADOPT 確定・本番結線し、framework-compare gemm cpu 全 12 セル（両実機）が非後退（改善方向）であることを確認した（§21。candle 比ゲート自体の判定は不変）。#1321（#1283 Phase 4）で Phase 1〜3 結線後（実質 `TwoDDynamic` のみ）の両実機ゲート再判定を実施し、正式系列（`fandhe-ai =0.7.0` ピン）は両実機・全形状で未達成のまま（DGX N=2048 は §19 の確定判定を再確認）だが、参考系列（origin/main HEAD `ced4d14`）では Apple M4 Max が全 3 形状（512/1024/2048）で達成・DGX Spark GB10 が N=2048 のみ達成（1.562 倍）という、初めて candle 比ゲート達成が観測された結果を記録した（§22。ピン未更新のため正式判定は不変） #1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を両実機実測し、reuse 全 6 セル（3 サイズ×2 実機）非後退・checksum 完全一致を確認（ADOPT。§15 の交絡を解消。正式判定は §12／§19 のまま不変。fresh は参考記録で DGX 全形状改善だが M4 Max N=512/1024 は after/before 1.0115／1.0028 と僅かに後退方向であり、計測ノイズかどうかは本記録のみでは確定できない。§23）
+## 状態: DGX Spark（Grace CPU）・Apple M4 Max とも実機実測完了。#1117（reuse candle 超え）は両実機・全形状で未達成（DGX N=2048 は候補側 candle 無効データにより判定不能）と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に両実機で再計測し未達成を確定（§12）。#1364 で既定スレッド数の大コア限定（#1363）on/off を両実機比較し REJECT（不採用）と確定・`BIG_CORE_LIMIT_ENABLED=false` へ差し戻し済み（§13）。#1367 で `IcDynamic` variant を両実機比較し REJECT（不採用）と確定・本番結線せず（§14）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を両実機で 2026-09-07 に再計測（§15）。DGX は非後退だが未達のまま、M4 Max は達成見込み（片方向負荷差あり・確度限定的）。正式判定（§12）は不変。#1292 で reuse 計測境界のフェーズ分解を両実機で 5 回計測中央値実測し、§8.1 の「facade/autodiff 呼び出しオーバーヘッド・readout コピー・checksum の固定費」推定を内訳分解して確定した（§16）。#1305 で専有環境の RAYON_NUM_THREADS スイープを両実機で 5 回計測中央値再実測し、DGX Spark GB10 の N=1024 非単調性を taskset pin 実験で H1（異種コア由来）と確定・Apple M4 Max は専有ゲート不通過のため undetermined のまま記録した（§17）。#1312 で `TwoDDynamic`（2D 動的分配）vs `RowPanel` の両実機 A/B を実施し、DGX（専有ゲート通過）は全形状で `RowPanel` を 1.09〜1.80 倍上回ったが Apple M4 Max が専有ゲート不通過のため最終判定は undetermined（結線せず #1313 へ記録のみ引き継ぎ）・DGX 単独の非単調性（T10/T8）は「残存」（比 0.86 前後・僅かに閾値未達）と判定した（§18）。#1262 で承認済み tolerance 契約（#1241 承認・#1443/#1445 実装）下の DGX Spark GB10 N=2048 を再計測し、「判定不能」が解消して確定判定（未達・0.950 倍）へ遷移したことを確認した（§19。N=512/1024 は引き続き未達。Apple M4 Max は N=2048 が元々 0 fail のため対象外）。#1301 で出力並列ゼロ埋め（#1299）の on/off を両実機実測し、両実機・全形状で非後退（DGX N=2048 alloc_c 約 48% 削減）を確認したが、事前宣言した規則 4（candle 比の非後退）が緩和なしでは 6 セル中 3 セルで不成立だった点を PR #1448 の codex-review が指摘したため、いったん有効化した `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = 2 << 20` を `usize::MAX`（無効化）へ差し戻し、§20.1a の改定版規則 4 を事前登録規則として固定したうえで独立の再計測（§20.6）を経て確定する方針とした（§20）。#1313 で `TwoDDynamic`（2D 動的分配）を M4 Max 専有ゲート付き Phase 0 再計測で ADOPT 確定・本番結線し、framework-compare gemm cpu 全 12 セル（両実機）が非後退（改善方向）であることを確認した（§21。candle 比ゲート自体の判定は不変）。#1321（#1283 Phase 4）で Phase 1〜3 結線後（実質 `TwoDDynamic` のみ）の両実機ゲート再判定を実施し、正式系列（`fandhe-ai =0.7.0` ピン）は両実機・全形状で未達成のまま（DGX N=2048 は §19 の確定判定を再確認）だが、参考系列（origin/main HEAD `ced4d14`）では Apple M4 Max が全 3 形状（512/1024/2048）で達成・DGX Spark GB10 が N=2048 のみ達成（1.562 倍）という、初めて candle 比ゲート達成が観測された結果を記録した（§22。ピン未更新のため正式判定は不変） #1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を両実機実測し、reuse 全 6 セル（3 サイズ×2 実機）非後退・checksum 完全一致を確認（ADOPT。§15 の交絡を解消。正式判定は §12／§19 のまま不変。fresh は参考記録で DGX 全形状改善だが M4 Max N=512/1024 は after/before 1.0115／1.0028 と僅かに後退方向であり、計測ノイズかどうかは本記録のみでは確定できない。§23）。#1481 で §20.6 の独立再計測を実施し、§20.1a の改定版規則 4 を含む全規則を計測後の緩和なしで機械適用した結果 **verdict=REJECT** と確定（規則 2〈DGX N=2048 alloc_c が削減ではなく増加〉・規則 3〈対照セル 8 中 3 超過〉・規則 4〈M4Max N=512 が閾値未達〉のいずれも不成立）・本番既定 `GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX` を維持（§20.7）
 
 ## 1. 位置づけ
 
@@ -1891,6 +1891,197 @@ ELEMS`）の有効化可否を確定する:
   （`out-of-scope-tracking.md` に従い、本 PR 自体での Issue 起票は
   行わない。イシュー #1301 を再オープンするか新規 issue を起票するかは
   ユーザー判断）
+
+### 20.7 独立再計測の実施結果（イシュー #1481・2026-09-09 実施済み）
+
+§20.6 で引き継いだ独立再計測を実施した。対象コミット
+`54cb14057dbf30cc77a3d77c0d1b37caf348f75c`。§20.1（規則 1〜3・5）・
+§20.1a（規則 4 改定版）を計測開始前に `docs/perf/logs/
+cpu-matmul-fixed-cost-remeasure-1481/env_info.txt` へ一字一句転記し、
+`judge_rules.py`（python3 標準ライブラリのみ・`--self-test` 付き）に
+数値閾値をハードコードして機械適用した。**規則は計測後に一切緩和・
+読み替えていない**（§20.1a 追補が指摘した問題の再発防止そのもの）。
+
+**専有状態**: DGX Spark GB10 は転送直後 1 分 load average 0.02〜0.12
+（2 回連続 <6.0 で即通過。ほぼ完全アイドル）。Apple M4 Max は 4.07〜4.92
+（2 回連続 <6.0 で通過したが完全な専有ではない共有マシン。Layer A/B
+実行中に load average が 6〜12 台まで上昇する区間があった）。
+
+**規則別判定**（詳細表は `judge_rules.py` 出力
+`docs/perf/logs/cpu-matmul-fixed-cost-remeasure-1481/judge.md`）:
+
+| 規則 | 結果 | 要点 |
+|---|---|---|
+| 1（checksum） | 満たす | 両実機・全 6 セル完全一致。`parity_fail_count` 全 120 行で 0 |
+| 2（DGX N=2048 決定セル） | **不成立** | Layer A 2048/reuse on/off 比 0.7090（≤1.05 満たす）だが Layer B `alloc_c` on/off 比 **2.1199**（削減ではなく約 2.1 倍に増加。#1301 実測〈0.5166・約 48% 削減〉と逆符号） |
+| 3（対照セル） | **不成立** | 8 セル中 3 セル超過: DGX 1024/fresh 1.0549・M4Max 512/fresh 1.0576・M4Max 512/reuse 1.0780（いずれも 1.05 をわずかに超過） |
+| 4（改定版） | **不成立** | 6 セル中 5 セルは満たすが M4Max N=512 が candle 比 on/off 0.9060（<0.9524 の事前登録閾値） |
+| 5（M4Max N=2048 後退） | 発火せず | Layer A on/off 比 1.0212（≤1.05） |
+
+**verdict = REJECT**。§20.1 の場合分け (a)〜(c) のいずれにも該当しない
+（規則 2・3・4 のいずれも不成立セルを含む）。**本番既定
+`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`（無効化）を維持する**
+（`crates/**` は本イシューで無変更）。
+
+**判定コードの計測後修正（透明性のための明記）**: `judge_rules.py` 初版は
+規則 2 の `alloc_c` 削減条件をコードへ反映し忘れており、この状態では
+規則 2 が「満たす」と出力されていた（`alloc_c比=2.1199` という数値自体
+は最初から表示されていた）。事前登録文言〈§20.1〉との不一致を発見し
+`alloc_c < 1.0` 条件を追加（厳格化方向の修正のみ・緩和なし）してから
+`judge.md` を再生成し「不成立」へ訂正した。規則 3・4 は独立に不成立の
+ままのため verdict=REJECT は修正前後で不変（詳細は `env_info.txt`）。
+
+本イシューの実測（§20.7）と #1301（§20.3）は方向性が一部逆転している
+（DGX `alloc_c` は削減→増加、両実機の一部対照セルは非後退→僅かな後退）。
+事実として、DGX N=2048 off 腕（本番既定経路・変更なし）の `alloc_c`
+中央値自体が #1301〈145639d 時点。3.2554 ms〉から本イシュー〈54cb1405
+時点。0.1969 ms〉で約 16 倍縮小しており、§16 が指摘した「DGX N=2048
+の `alloc_c` 異常（2.8〜3.0 ms）」はこの HEAD では観測されない（原因は
+本イシューでは特定しない事実の記録のみ）。両実機とも共有負荷下（M4Max
+は他 worktree 並走・DGX も計測中に load average が上昇する区間があった）
+での 1 セッション限りの独立計測であり、この方向性の違いの原因（真の
+後退か計測ノイズか、alloc_c ベースライン自体の縮小によるものか）自体の
+分析は本イシューのスコープ外として記録するに留める。§20.1a の改定版
+規則 4 は今後も事前登録規則として維持し、次回再計測（正式系列を
+`fandhe-ai =0.8.0` 等新しいピンへ更新するタイミング等）でも同一規則を
+機械適用する。
+
+**判定コードの計測後修正 2 回目（PR #1501 codex-review 指摘対応。透明性の
+ための明記）**: `judge_rules.py` は規則 1（checksum 完全一致）をテキスト
+出力のみに留め最終 verdict へ一切反映しておらず、規則 5（M4 Max N=2048
+後退）も表示のみで `all_ok` に寄与しない実装になっていた（§20.1 の場合
+分け (a)〜(c) が実装されず、常に「規則 2〜4 充足なら ADOPT・不成立なら
+REJECT」の二値判定に単純化されていた）。`compare_gemm_ab.py` 出力の
+`checksum` 列を機械抽出して規則 1 を前提条件（不一致・セル欠落なら
+"UNDETERMINED"）とし、規則 5 の発火有無を §20.1 の場合分けへ折り込んで
+"ADOPT_UNCONDITIONAL"／"ADOPT_LINUX_ONLY"／"REJECT"／"UNDETERMINED" の
+4 値判定へ是正した（厳格化方向の修正のみ・緩和なし）。本イシューの
+保存データ（本節の生ログ）へ是正後のコードを再適用した結果、両実機・
+全 12 セルで checksum 完全一致（規則 1 満たす）・M4 Max N=2048 は後退
+なし（規則 5 発火せず）だが、規則 2（DGX N=2048 決定セル）・規則 3
+（対照セル 8 中 3 超過）・規則 4（M4 Max N=512 が閾値未達）がいずれも
+不成立のため §20.1 の場合分け (a)〜(c) いずれにも該当せず、**verdict は
+REJECT のまま修正前後で不変**（詳細は `judge.md`・`judge_rules.py` の
+`_self_test()` に追加した回帰テスト）。
+
+**判定コードの計測後修正 3 回目（PR #1501 codex-review 指摘対応その 2。
+透明性のための明記）**: 上記 2 回目の修正後も、規則 5（M4 Max N=2048
+後退）は集計済み Markdown（`compare_gemm_ab.py` 出力）の中央値比のみで
+発火判定しており、5 run 個々の符号一貫性を検証していなかった（DGX 側が
+規則 1〜4 を満たし M4 Max 側が規則 3／4 不成立のまま符号混在の計測から
+`ADOPT_LINUX_ONLY` を返しうる契約不整合。P1・要修正）。あわせて規則 4
+の候補比計算が表示用に丸めた（小数 3〜4 桁）candle 比を再除算しており
+境界精度が失われる指摘（P2・参考）も受けた。`judge_rules.py` へ
+`--jsonl`（`bench-fandhe` の生 JSONL・`node:arm:path` 形式）を追加入力
+とし、規則 5 は (i) 生 `median_s` から丸めなしで算出した中央値比が
+閾値超、かつ (ii) run 番号を対応付けた on/off 比が全 run で 1.0 超
+（符号一貫）の両方を満たす場合のみ発火するよう是正した（`--jsonl` 未
+指定時は符号一貫性を確認できないため発火させない fail-safe 側に倒す。
+厳格化方向の修正のみ・緩和なし）。副次的に規則 2・3 の on/off 比も
+`--jsonl` 指定時は生 `median_s` 由来の丸めなし中央値比を優先して使う
+ようにした。規則 4（candle 比）は candle 側の生 `median_s` が本節の
+成果物として保存されておらず丸めなし値を復元する手段がないため、
+既知の精度限界としてコード中に明記したうえで Markdown 値のまま維持
+した（3 桁丸め由来の乖離は高々 5e-4 程度で `RULE4_MIN_RATIO` 境界
+〈0.952380...〉付近でなければ判定結果へ影響しない）。本イシューの
+保存データ（4 実機分の生 JSONL）へ是正後のコードを `--jsonl` 付きで
+再適用した結果、規則 5 は run 別比 5 件すべてが符号一貫（全 run で
+on/off > 1.0）だが中央値比 1.0212 が閾値 1.05 以下のため元々発火せず、
+規則 2・3・4 の不成立セルも数値・成否とも変化なし（丸めなし値と丸め
+表示値の差は小数第 4〜5 位に留まり境界を跨がない）。**verdict は
+REJECT のまま修正前後で不変**（`judge.md` 差分・`judge_rules.py` の
+`_self_test()` に追加した符号一貫性回帰テストで確認）。
+
+**判定コードの計測後修正 4 回目（PR #1501 codex-review 指摘対応その 3。
+透明性のための明記）**: 上記 3 回目の修正後も 2 点の指摘を受けた。
+(P1) 規則 5 の run 別符号一貫性判定（`_raw_run_pair_ratios`）が両腕の
+run 数が異なる場合に短い方へ切り詰めていたため、片腕が 1 run しか
+無くても「5 run 符号一貫」相当の判定を通過しうる契約不整合があり、
+かつ `--jsonl` が完全に未指定・データ欠落の場合は「後退なし」の
+fail-safe が最終 verdict の決定ロジックへそのまま伝播し、他規則さえ
+満たせば `ADOPT_UNCONDITIONAL` を返しうる欠陥があった（AGENTS.md の
+5 回計測契約・§20.1 の採否条件は両腕 5 run の対応関係が前提）。
+`_raw_run_pair_ratios` を両腕ちょうど `REQUIRED_RUN_COUNT`（5）件の
+対応関係を要求する実装へ是正し、規則 5 の入力が欠落・不完全な場合は
+「後退なし」と区別して最終 verdict を `UNDETERMINED` へ強制するよう
+`judge()` を是正した（厳格化方向の修正のみ・緩和なし）。
+(P2) 規則 4（改定版）は 3 回目の修正時点で `compare_gemm_gate.py`
+出力 Markdown の candle/fandhe 列（3 桁丸め）を on/off で再除算して
+おり、`RULE4_MIN_RATIO` 境界（~0.952380...）付近で表示丸めにより採否
+が逆転しうる欠陥が残っていた。本イシューの成果物として
+`scripts/bench/framework-compare/results/raw/results-*-1481-pzero-*.
+jsonl`（`framework` タグ付き生 JSONL。candle・fandhe-ai 両方の生
+`median_s` を含む）が保存済みであると判明したため、`judge_rules.py` に
+`--candle-jsonl` を追加入力とし、`parse_candle_jsonl_medians`／
+`_raw_candle_ratio` で丸めなしの candle 比 on/off 比を優先的に算出
+するよう是正した（`--candle-jsonl` 未指定・データ欠落時は従来どおり
+Markdown 丸め値へフォールバック）。
+(P3) `orchestrate_m4max.sh`・`orchestrate_dgx.sh` は `errexit` を有効化
+せず Layer A/B 呼び出しの終了コードも確認していなかったため、計測
+コマンドが失敗しても `ALL_DONE.marker` を生成し終了コード 0 を返し、
+不完全な計測を完了として扱ってしまう欠陥があった。両オーケストレーター
+に `set -euo pipefail` を追加し、各呼び出しの成功確認後にのみ完了
+マーカーを生成するよう是正した。
+本イシューの保存データへ P1・P2 是正後のコードを `--candle-jsonl` 付きで
+再適用した結果、規則 5 は run 別対応関係が完備（両腕 5 run）かつ符号
+一貫のまま元々発火せず、規則 4 の丸めなし raw 比は Markdown 丸め値と
+数値が僅かに異なるのみで成否は変化しない（M4Max N=512 が引き続き
+`0.9060` 未満で不成立）。**verdict は REJECT のまま修正前後で不変**
+（`judge.md` 差分・`judge_rules.py` の `_self_test()` に追加した
+run 数不足・境界逆転の回帰テストで確認。P3 のオーケストレータ修正は
+本イシューの保存済み計測結果〈両腕とも完走済み・`ALL_DONE.marker` の
+生成条件は今回満たされていた〉自体には影響しない将来の再計測に対する
+是正）。
+
+**判定コードの計測後修正 5 回目（PR #1501 codex-review 指摘対応その 4。
+透明性のための明記）**: 上記 4 回目の修正後も 2 点の指摘を受けた。
+(P1) 規則 2〜4 の判定に直接使う `_raw_median_ratio`・`_raw_candle_ratio`
+は、規則 5 専用の `_raw_run_pair_ratios` とは異なり「両腕とも非空」
+としか検証しておらず、片腕が `REQUIRED_RUN_COUNT`（5）未満・超過
+（1 run のみの収集を含む）でもその値をそのまま「中央値」として比を
+計算しうる契約不整合が残っていた（AGENTS.md の 5 回計測契約は判定に
+使う全セルへ適用されるべきところ、5 run 完備要求が規則 5 限定に
+留まっていた）。両関数とも両腕（`_raw_candle_ratio` は fandhe-ai
+off/on・candle off/on の 4 入力すべて）がちょうど `REQUIRED_RUN_COUNT`
+件であることを要求し、不足・超過であれば None（Markdown 丸め値への
+フォールバックへ倒れる。フォールバック自体は既存の `--jsonl`／
+`--candle-jsonl` 未指定時の挙動と同一）を返すよう是正した（厳格化
+方向の修正のみ・緩和なし）。
+(P2) 規則 2 が参照する Layer B（`aggregate_layer_b.py` 出力）の
+`alloc_c`／`ops_gemm` on/off 比は、人間可読テーブルの表示丸め（小数
+4 桁）をそのまま `RULE2_OPS_GEMM_THRESHOLD=1.00` の厳密な `<=`／`<`
+判定へ使っており、境界付近（例: 真の比 1.00004 が表示 1.0000 に丸まり
+誤通過）で採否が逆転しうる欠陥があった。`aggregate_layer_b.py` に、
+各行の直後へ `repr(float)`（round-trip 精度）による丸めなし値を
+`<!-- raw N=... phase=... off_med=... on_med=... ratio=... -->` として
+機械可読コメント出力する変更を加え、`judge_rules.py::parse_layer_b_md`
+がこのコメントを優先して読み取るよう是正した（表示テーブル自体は
+`.4f` のまま不変＝丸めは表示専用に限定。旧形式 md〈raw コメント無し〉
+との後方互換フォールバックも維持）。
+本イシューの保存済み Layer B 生ログ（`layerB-{dgx,m4max}-{off,on}-
+run{1..5}.log`）は測定値そのものであり書き換えていない。是正後の
+`aggregate_layer_b.py` をこの生ログへ再適用して `aggregate-dgx.md`・
+`aggregate-m4max.md` を再生成した結果、人間可読テーブル列（`.4f`
+丸め値）は 1 桁も変化せず（`diff` で確認済み）、raw コメント行のみが
+追加された。是正後の `judge_rules.py` を本イシューの保存データへ
+`--jsonl`・`--candle-jsonl` 付きで再適用した結果、規則 2 の
+`alloc_c`比・`ops_gemm`比は表示値（2.1199／0.8012）から丸めなし値
+（2.1198577958354496／0.8011769028698661）へ精度が上がっただけで
+規則 2 の不成立という結論（`alloc_c` が削減方向〈<1.0〉ではなく増加
+しているため）は変わらず、規則 2・3・4 いずれも `--jsonl`・
+`--candle-jsonl` の全セルがちょうど 5 run 完備（実測データ自体が
+最初から欠落なく揃っていたため P1 の 5 run 完備要求追加による値の
+変化も無し）。**verdict は REJECT のまま修正前後で不変**（`judge.md`
+差分・`judge_rules.py` の `_self_test()` に追加した回帰テストで確認）。
+
+出典: イシュー #1481・`docs/perf/logs/cpu-matmul-fixed-cost-remeasure-1481/`
+（`env_info.txt`・`judge.md`・`judge_rules.py`・Layer A/B 生ログ・
+`aggregate_layer_b.py`・`compare_gemm_ab-{dgx,m4max}.md`・
+`compare_gemm_gate-{dgx,m4max}-{off,on}.md`・`on-arm.patch`・
+`orchestrate_m4max.sh`・`orchestrate_dgx.sh`）・
+`scripts/bench/framework-compare/results/raw/results-{dgx,m4max}-
+cpu-gemm-gate-head-54cb14057dbf30cc77a3d77c0d1b37caf348f75c-1481-
+pzero-{off,on}.jsonl`（規則 4 の candle 側生 `median_s` 出典）。
 
 ## 21. 2026-09-08 追補: 2D 動的分配の本番結線（イシュー #1313）
 
