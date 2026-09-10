@@ -77,7 +77,7 @@ fandhe-ai/
     ├── backend-metal-mpp-tensor-decision.md # Metal 4 `tensor<>`＋Metal Performance Primitives（MPP）行列積の可用性・バインディング到達性（Route C）・純カーネル時間 A/B・「完全自作コア」との整合のユーザー判断事項整理（採否の結論は出さない。M4 Max 実機実測。#1326）
     ├── backend-metal-morton-mapping-decision.md # 標準 simdgroup_matrix API 下での Morton 順レーン→要素マッピング適用不可の判断（#544）
     ├── backend-metal-splitk-decision.md # split-K ディスパッチ分岐の MLX 選択条件対比・採否判断（#810）。#1308 で M4 Max 実機実測を完了し「採用検討推奨」を確定記録（対象 9 点全点で劣化率中央値 0.2265〜0.5166・5/5 run 一貫。split-K 実装自体は別 issue へ切り出し提案・本 PR ではコード変更なし）。#1474 で opt-in 実装完了（`dispatch_auto` へ未結線）を追記。実装記録は `docs/perf/metal-gemm-splitk-two-pass.md`。#1475 で A/B 実測（暫定 ADOPT・3/5 run）を §3 追記（`docs/perf/metal-gemm-splitk-ab.md`）。#1476 で本番結線可否を §4 に確定記録（**結線しない**。性能判定 undetermined・数値契約未承認の 2 ブロッカー。`select_for_device`／`dispatch_auto`／`MetalBackendOps::gemm` は不変・`SPLIT_K_NUMERIC_CONTRACT_APPROVED=false` 維持）
-    ├── backend-metal-splitk-parity-judgment-decision.md # Metal f32 split-K 経路の受け入れ判定方式（実測ベースライン非後退方式の適用拡張）の決定記録 draft。候補比較（厳密ゼロ fail 維持／baseline 非後退方式／候補 A′ 救済項）・推奨（baseline 非後退方式・全 11 形状一律適用）・spec 起票用本文案を整理。承認は未承認のまま記録（イシュー #1511）
+    ├── backend-metal-splitk-parity-judgment-decision.md # Metal f32 split-K 経路の受け入れ判定方式（実測ベースライン非後退方式の適用拡張）の決定記録（**2026-09-10 ユーザー承認済み・§7**。全 11 形状一律 baseline・tolerance 定数不変・spec 提案は Fandhe-AI/fandhe-ai-spec#65 として起票済み）。候補比較（厳密ゼロ fail 維持／baseline 非後退方式／候補 A′ 救済項）・推奨（baseline 非後退方式・全 11 形状一律適用）・spec 起票用本文案を整理（draft 作成時〈PR #1523〉は未承認のまま記録し、承認記録は PR #1525 で §7 へ追記。イシュー #1511）
     ├── backend-metal-transpose-collapse-design.md # 転置パターン別 strided GEMM 入口（GemmStrides）・先頭次元 collapse の設計・実機実測記入欄（#1029 ツリー・#1040）
     ├── backend-metal-wgpu-decision.md  # Metal バックエンド実装方式（wgpu 非採用）の決定記録
     ├── backend-switching-design.md     # cfg ベースバックエンド切替の設計
