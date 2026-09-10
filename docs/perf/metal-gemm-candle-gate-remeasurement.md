@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）。#1490 で正式系列 `fandhe-ai =0.8.0` を 2026-09-10 に再計測し §16 追記: N=1024 0.743 倍（未達）・**N=2048 1.002 倍（達成。正式系列として初めて #1037 の形状別条件を満たした）**・N=4096 0.634 倍（未達）。共有負荷下の計測であり、旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）。#1490 で正式系列 `fandhe-ai =0.8.0` を 2026-09-10 に再計測し §16 追記: N=1024 0.743 倍（未達）・**N=2048 1.002 倍（達成。正式系列として初めて #1037 の形状別条件を満たした）**・N=4096 0.634 倍（未達）。共有負荷下の計測であり、旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま。#1520 で §15 undetermined を受け専有ゲートを opt-out 可能にする `AB_LOAD_GATE_MODE=record_only` を `run_ab_readout_metal.sh` へ追加（ルート #1519 指示）したが、本セッションは実機（Apple M4 Max）へのアクセス経路を持たないため実測は未実施のまま §17 に記入欄を残した
 
 ## 1. 位置づけ
 
@@ -820,3 +820,96 @@ legacy/borrowed override interleave 再計測。イシュー #1477）」節・
   `scripts/bench/framework-compare/results/raw/{results,skipped,manifest}-m4max-gemm-gate-0.8.0-1490.*`
 - `docs/performance-targets.md` §8.16・`scripts/bench/framework-compare/results/summary.md`
   環境 30 節にも同じ数値を反映する
+
+## 17. §15 undetermined を受けた 2 回目の試み: `AB_LOAD_GATE_MODE=record_only`（イシュー #1520・ルート #1519）
+
+### 17.0 位置づけ
+
+§15 の 1 回目の試み（イシュー #1477）は専有ゲート（1 分 load average < 4.0
+を 2 回連続確認・最大 4 試行）が一度も成立せず、計測（build・
+`bench-fandhe` 起動）を一切開始しないまま undetermined のまま終了した。
+
+ルート issue #1519 でのユーザー指示「Metal に関しては一旦現在の環境で
+測れる値で大丈夫です」を受け、専有ゲートを「要件」から「記録専用
+（`AB_LOAD_GATE_MODE=record_only` で明示 opt-out）」へ変える最小限の
+スクリプト変更（`run_ab_readout_metal.sh`）をイシュー #1520 で実施した。
+既定値 `exclusive`（§15 までの挙動）は変更していない。判定規則自体
+（§15.1）も計測前に固定したまま変更していない。
+
+### 17.1 実施内容（本セッションで完了した範囲）
+
+- `scripts/bench/framework-compare/run_ab_readout_metal.sh`:
+  `AB_LOAD_GATE_MODE`（既定 `exclusive`。`record_only` で専有ゲートを
+  スキップし現在の load average を 1 行記録して直ちに計測を開始する）
+  を追加し、manifest JSON へ `gate_mode` フィールドを追記した。
+  `record_only_gate_note` は `wait_for_exclusive_gate` と同じ
+  `load1_is_valid` 検証を経てから記録する（非数値を `load1=` として
+  誤記録しない）。
+- `scripts/bench/framework-compare/README.md`「`--readout`」節へ
+  `AB_LOAD_GATE_MODE` の説明を追記した。
+- 単体検証: `bash -n run_ab_readout_metal.sh`（構文検証）・
+  `python3 -m unittest compare_readout_ab_test.py`（既存 23 件 green。
+  判定ロジック自体は無変更のため回帰確認のみ）。
+
+### 17.2 実機計測（未実施・記入欄）
+
+**本セッションは Linux 環境（`dev-box02`）で実行されており、Apple M4 Max
+実機への到達経路（ローカル直接実行が前提。`docs/real-hardware-
+verification-env.md` §1・§7）を持たない**。`docs/real-hardware-
+verification-env.local.md`（SSH ホスト名等の実値）も本 worktree には
+存在しない。そのため、以下の実測コマンド自体はステップとして用意したが
+**未実行**であり、判定（ADOPT／REJECT／undetermined）は未確定のまま
+記入欄を残す（`docs/cuda-tf32-optin-api-decision.md` 等と同型の「実機
+なしのため未実測明記」方針。CLAUDE.md 記載の他イシューと同様）。
+
+実行予定コマンド（実機を持つ別セッションが引き継ぐ場合の手順）:
+
+```bash
+cd scripts/bench/framework-compare
+SHORT_SHA=$(git rev-parse --short HEAD)
+LABEL="head-${SHORT_SHA}-1520"
+FACADE_PATH="$(cd ../../../crates/facade && pwd)"
+
+pmset -g therm > "results/raw/pmset_therm_before-${LABEL}.txt" 2>&1 || true
+uptime
+
+AB_LOAD_GATE_MODE=record_only \
+AB_PATCH_FACADE_PATH="$FACADE_PATH" \
+  bash run_ab_readout_metal.sh "$LABEL" 2>&1 | tee "results/raw/run-${LABEL}.log"
+
+pmset -g therm > "results/raw/pmset_therm_after-${LABEL}.txt" 2>&1 || true
+
+python3 compare_readout_ab.py \
+  "results/raw/results-m4max-readout-ab-${LABEL}.jsonl" \
+  --device metal --sizes gate --threshold 1.00 \
+  | tee "results/raw/compare_readout_ab-${LABEL}.md"
+```
+
+判定規則は §15.1 のまま変更しない（`AB_LOAD_GATE_MODE=record_only` は
+計測実施条件〈専有ゲートの要否〉の運用パラメータであり、ADOPT/REJECT/
+undetermined の閾値・対象セル・checksum 判定には影響しない）。
+
+### 17.3 結果・判定
+
+**未確定（実機未実測のため）**。`readout_uses_borrowed_view`（`bench-
+fandhe/src/main.rs`）の Metal 分岐は §15 までと同じく legacy 既定の
+まま維持する。正式系列 `fandhe-ai =0.8.0` の #1037 ゲート判定（§16）
+は本イシューでは不変（計測自体が発生していないため）。
+
+引き継ぎ: 実機（Apple M4 Max）にアクセス可能な別セッションが上記
+17.2 のコマンドを実行し、本節へ実測結果表・checksum 一致・判定を追記
+する。ADOPT と確定した場合に限り `bench-fandhe/src/main.rs` の
+`readout_uses_borrowed_view` Metal 分岐撤去・
+`scripts/bench/framework-compare/README.md`「借用ビュー readout」見出し・
+`docs/perf/cuda-host-view-readout-small-shape-regression.md` §11／§13.6
+末尾の注記更新を行う（コード変更は ADOPT 確定後の別イシューとする）。
+
+### 17.4 出典
+
+- 実装: `scripts/bench/framework-compare/run_ab_readout_metal.sh`
+  （`AB_LOAD_GATE_MODE`）・`scripts/bench/framework-compare/README.md`
+  （「`--readout`」節）
+- 前回の試み（undetermined）: §15・`docs/perf/logs/
+  metal-gemm-readout-interleave-1477/`
+- 本イシューでは実機計測を実施していないため、新規ログディレクトリは
+  作成していない
