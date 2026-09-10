@@ -23,7 +23,15 @@
 set -u
 LOG="${LOG:-$HOME/work/fc-1488/logs}"
 TREE="${TREE:-$HOME/work/fc-1488/tree}"
-mkdir -p "$LOG"
+# LOG は作業ディレクトリ変更（後段の `cd "$TREE"`）より前に作成し絶対パスへ
+# 解決する（相対指定時にゲート状態と計測ログ・マーカーの出力先が分かれるのを
+# 防ぐ。PR #1506 codex-review 指摘 PRRT_kwDOTuUCJc6g7fq_ 対応・m4max 版と同一）。
+mkdir -p "$LOG" || { echo "orchestrate_dgx: cannot create LOG dir '$LOG'" >&2; exit 1; }
+LOG=$(cd "$LOG" && pwd) || { echo "orchestrate_dgx: cannot resolve LOG dir" >&2; exit 1; }
+if [ -z "$LOG" ] || [ "$LOG" = "/" ]; then
+  echo "orchestrate_dgx: refusing to use LOG='$LOG'" >&2
+  exit 1
+fi
 
 rm -f "$LOG/ALL_DONE.marker" "$LOG/MEASUREMENT_FAILED.marker" "$LOG/GATE_NOT_PASSED.marker"
 export PATH="$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH"
