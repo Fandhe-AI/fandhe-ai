@@ -1,0 +1,9 @@
+gate attempt=1 wait=60s load1=13.81 ok=0 2026-09-10T00:50:17Z
+gate attempt=2 wait=90s load1=12.36 ok=0 2026-09-10T00:51:47Z
+gate attempt=3 wait=135s load1=10.56 ok=0 2026-09-10T00:54:02Z
+gate attempt=4 wait=202s load1=11.08 ok=0 2026-09-10T00:57:24Z
+gate attempt=5 wait=303s load1=40.65 ok=0 2026-09-10T01:02:27Z
+gate attempt=6 wait=454s load1=12.67 ok=0 2026-09-10T01:10:01Z
+gate attempt=7 wait=681s load1=18.52 ok=0 2026-09-10T01:21:22Z
+gate attempt=8 wait=1021s load1=5.27 ok=1 2026-09-10T01:38:23Z
+gate attempt=9 wait=30s load1=6.14 ok=0 2026-09-10T01:38:53Z

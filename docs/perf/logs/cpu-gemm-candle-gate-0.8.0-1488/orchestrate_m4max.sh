@@ -14,29 +14,45 @@ LOG=$(cd "$LOG" && pwd)
 
 rm -f "$LOG/ALL_DONE_m4max.marker" "$LOG/MEASUREMENT_FAILED_m4max.marker" "$LOG/GATE_NOT_PASSED_m4max.marker"
 
-# --- (i) 専有ゲート ---
+# --- (i) 専有ゲート（是正版。計画 §3 規則 4・`docs/perf/logs/
+#     metal-gemm-candle-gate-1309/wait_gate.sh` 方式と同一のバックオフ系列:
+#     60 秒開始・不合格時のみ backoff_s を 1.5 倍・1 回目合格直後の 2 回目
+#     確認だけは宣言どおり 30 秒固定・最大 10 試行（合計約 30 分上限）。
+#     試行 1 回目（`gate-m4max-attempt1.log` に保存済み）は固定 30 秒間隔・
+#     10 試行〈約 5 分〉のみで、計画が事前宣言したバックオフ系列と異なって
+#     いたため、正しい系列で再試行する〉。閾値は #1309 の 4.0 ではなく本
+#     イシューの計画どおり 6.0 を使う。 ---
 GATE_OK=0
-CONSEC=0
-i=1
-while [ "$i" -le 10 ]; do
+PASS_COUNT=0
+ATTEMPT=0
+WAIT_S=60
+BACKOFF_S=60
+while [ "$ATTEMPT" -lt 10 ]; do
+  ATTEMPT=$((ATTEMPT + 1))
+  sleep "$WAIT_S"
   LOAD1=$(uptime | sed -E 's/.*load averages?: ([0-9.]+)[, ].*/\1/')
-  OK=$(awk -v l="$LOAD1" 'BEGIN{print (l != "" && l < 6.0) ? 1 : 0}')
-  echo "gate try=$i load1=$LOAD1 ok=$OK $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG/gate-m4max.log"
+  OK=$(awk -v l="$LOAD1" 'BEGIN{print (l != "" && l == l+0 && l < 6.0) ? 1 : 0}')
+  echo "gate attempt=$ATTEMPT wait=${WAIT_S}s load1=$LOAD1 ok=$OK $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG/gate-m4max.log"
   if [ "$OK" = "1" ]; then
-    CONSEC=$((CONSEC + 1))
+    PASS_COUNT=$((PASS_COUNT + 1))
   else
-    CONSEC=0
+    PASS_COUNT=0
   fi
-  if [ "$CONSEC" -ge 2 ]; then
+  if [ "$PASS_COUNT" -ge 2 ]; then
     GATE_OK=1
     break
   fi
-  i=$((i + 1))
-  sleep 30
+  if [ "$PASS_COUNT" -eq 1 ]; then
+    # 1 回目合格: 宣言どおり 30 秒後に 2 回目を確認する（バックオフしない）。
+    WAIT_S=30
+  else
+    BACKOFF_S=$(awk -v w="$BACKOFF_S" 'BEGIN{printf "%d", w*1.5}')
+    WAIT_S=$BACKOFF_S
+  fi
 done
 
 if [ "$GATE_OK" != "1" ]; then
-  echo "gate not passed after 10 tries" > "$LOG/GATE_NOT_PASSED_m4max.marker"
+  echo "gate not passed after 10 attempts (backoff schedule)" > "$LOG/GATE_NOT_PASSED_m4max.marker"
   exit 0
 fi
 

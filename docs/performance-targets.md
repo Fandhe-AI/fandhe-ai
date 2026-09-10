@@ -523,17 +523,23 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   reuse の candle 比を DGX Spark GB10（Grace CPU）・Apple M4 Max で再計測した
   （イシュー #1488。`v0.8.0 ↔ origin/main` の CPU 計測経路 src 差分がゼロのため
   参考系列は計測せず）
-- **DGX Spark GB10 N=2048 が正式系列として初めて candle 比ゲート達成を記録した**
-  （1.400 倍。candle 側 5 run とも `rescued=2, bound=1.525878e-05` の再現・fandhe-ai
-  側全 run `fail=0 かつ rescued=0`）。N=512／N=1024 は未達のまま（0.820／0.981 倍）
-- **Apple M4 Max は専有ゲート（1 分 load average < 6.0 を 2 回連続・最大 10 試行）が
-  10 試行すべて不通過**（他セッション並走による共有負荷。load1 8.17〜19.49）のため
-  計測を実行せず、事前宣言した規則に従い `verdict=undetermined` を記録した
-  （「未達」ではなく「未確認」）
-- §8.11（#1321）の正式系列（`0.7.0-1321`。DGX N=2048=0.938 倍）から比較すると改善しており、
-  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.2 の帰属表（実質差分は借用ビュー
-  readout の既定経路化のみ）と整合する方向の変化だが、1 回計測（5 run 中央値）のため
-  コード差分への厳密な因果帰属は行わない
+- **判定可能な 6 セル（両実機×3 形状）中 3 セルで正式系列として初めて candle 比
+  ゲート達成を記録した**: DGX Spark GB10 N=2048（1.400 倍。candle 側 5 run とも
+  `rescued=2, bound=1.525878e-05` の再現・fandhe-ai 側全 run `fail=0 かつ
+  rescued=0`）・Apple M4 Max N=512（1.159 倍）・Apple M4 Max N=2048（1.075 倍）。
+  未達のまま残るのは DGX N=512（0.820 倍）・DGX N=1024（0.981 倍）・M4 Max N=1024
+  （0.854 倍）
+- **Apple M4 Max の専有ゲート（1 分 load average < 6.0 を 2 回連続・最大 10 試行・
+  60 秒開始 1.5 倍バックオフ）は 1 回目の試行を誤って固定 30 秒間隔で実行してしまい
+  事前宣言と異なっていたため破棄し**、是正した 2 回目の試行（他セッション並走の
+  負荷の波はあったが attempt=6/7 で 2 回連続 load1<6.0 を確認して通過）を正式値と
+  した（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.3）
+- §8.11（#1321）の正式系列（`0.7.0-1321`。DGX N=2048=0.938 倍・M4 Max
+  N=512/1024/2048=0.981/0.887/0.891 倍）から比較すると、DGX は 3 形状すべて・
+  M4 Max も N=1024 を除く 2 形状が改善しており、`docs/perf/
+  cpu-gemm-candle-gate-remeasurement.md` §24.2 の帰属表（実質差分は借用ビュー
+  readout の既定経路化のみ）と整合する方向の変化だが、1 回計測（5 run 中央値）の
+  ためコード差分への厳密な因果帰属は行わない
 - 出典: `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24、生データ・実行ログは
   `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/`、集計表は
   `scripts/bench/framework-compare/results/summary.md` 環境 29 節

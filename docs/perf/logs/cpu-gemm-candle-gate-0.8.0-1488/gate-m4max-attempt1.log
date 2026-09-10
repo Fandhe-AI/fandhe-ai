@@ -1,0 +1,10 @@
+gate try=1 load1=8.17 ok=0 2026-09-10T00:32:25Z
+gate try=2 load1=9.10 ok=0 2026-09-10T00:32:55Z
+gate try=3 load1=8.77 ok=0 2026-09-10T00:33:25Z
+gate try=4 load1=8.76 ok=0 2026-09-10T00:33:55Z
+gate try=5 load1=9.26 ok=0 2026-09-10T00:34:25Z
+gate try=6 load1=10.52 ok=0 2026-09-10T00:34:55Z
+gate try=7 load1=10.42 ok=0 2026-09-10T00:35:25Z
+gate try=8 load1=19.49 ok=0 2026-09-10T00:35:55Z
+gate try=9 load1=16.70 ok=0 2026-09-10T00:36:25Z
+gate try=10 load1=14.17 ok=0 2026-09-10T00:36:55Z
