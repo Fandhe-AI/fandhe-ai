@@ -121,6 +121,10 @@ split-K の文脈でも変わらない。本ドキュメントは Case 1（非 N
 未結線）。実装記録は `docs/perf/metal-gemm-splitk-two-pass.md` を参照。性能 A/B・本番結線可否は
 それぞれ後続イシュー #1475／#1476 のスコープ。#1476 は結線せずと確定（§4）。
 
+**追記（イシュー #1518）**: #1476 時点の「結線しない」判断はその後 #1513 で数値契約
+ブロッカーが解消し、#1516 で `dispatch_auto` へ定数ゲート付き（既定 OFF）結線された。
+現行状態は §5「本番結線（#1516）」を正とする。
+
 ## §3 採否判断
 
 `docs/perf/metal-gemm-splitk-shapes.md` §4「実測結果」・§6「採否判断」で確定した（イシュー #1308・
@@ -171,7 +175,16 @@ M4 Max 実機実測・2026-09-09）。
 #1476 は性能判定〈undetermined〉・数値契約〈未承認〉の 2 ブロッカーにより結線せずと確定した
 （§4）。
 
+**追記（イシュー #1518）**: ブロッカー 2（数値契約）は #1513 で解消済み。ブロッカー 1
+（性能の正式 ADOPT 判定）は #1518 時点でも未実測のまま残るが、結線自体は #1516 で
+定数ゲート付き（既定 OFF）に実施済み。詳細は §5 を参照。
+
 ## §4 本番結線可否（#1476）
+
+**追記（イシュー #1518）**: 本節は #1476 時点（2026-09-09）の記録。ブロッカー 2
+（数値契約）は #1513 で解消・ブロッカー 1（性能の正式 ADOPT 判定）は #1518 時点でも
+未実測のまま残るが、結線自体は #1516 で定数ゲート付き（既定 OFF）に実施済み。現行状態は
+§5「本番結線（#1516）」を正とする。
 
 **確定判断: 結線しない（`select_for_device`／`dispatch_auto`／`MetalBackendOps::gemm` は不変）。**
 `SPLIT_K_NUMERIC_CONTRACT_APPROVED` は `false` を維持し、opt-in 実装（`crate::tile::
@@ -255,6 +268,11 @@ framework-compare gemm metal の実行時計測は「計測対象なし」とす
 - `docs/perf/metal-gemm-transpose-tiled.md`
 - `docs/perf/metal-gemm-n4096-kernel-gap.md`
 - `docs/perf/metal-gemm-candle-gate-remeasurement.md`
+
+**追記（イシュー #1518）**: `select_for_device` 自体は #1516 結線後も不変のままだが、
+`dispatch_auto` は `select_route_for_device` を経由するようになったため、上記 3 文書の
+該当箇所（`select_for_device`／`dispatch_auto` を参照する記述）へ #1516 以降の状態を
+補足する追記を行った（§5「記述整合の棚卸し」参照）。
 
 ### スコープ外
 
@@ -342,7 +360,60 @@ split_k_dispatch_auto_production_enabled_is_false_by_default`）で機械的に�
 
 NT/TN/TT・f16／hfrag・`gemm_bias_act` 融合経路への split-K 適用は引き続きスコープ外（§4 の
 既存整理を踏襲）。「結線しない記述の横断整合」（他 docs での「結線しない」記述の棚卸し）は
-別イシュー #1518 へ引き継ぐ。
+**#1518 で完了**（下記「記述整合の棚卸し」参照）。
+
+### 記述整合の棚卸し（イシュー #1518）
+
+`select_for_device` 不変を前提に「結線しない」「未結線」「`SPLIT_K_NUMERIC_CONTRACT_
+APPROVED=false`」等と記述していた docs・`CLAUDE.md` 索引行を棚卸しし、#1513（数値契約
+ゲート解除）・#1516（`dispatch_auto` への定数ゲート付き結線・既定 OFF）を反映した状態へ
+追記した。判断方針:
+
+- 日付付きの判断記録（例: §3／§4 の「#1476 時点」の確定記録）は歴史記録として本文を残し、
+  現行状態への forward pointer のみ追記する（書き換えない）
+- 「現在の状態」として読まれる行（冒頭要約・AC 対応表・見出し直下の結論文）は #1516 以降の
+  状態へ更新する
+- v0.8.0（crates.io registry 系列）に関する `SPLIT_K_NUMERIC_CONTRACT_APPROVED=false`
+  等の記述は、v0.8.0 タグ時点の事実として真であるため訂正せず、HEAD の状態は別であることを
+  補足するに留める
+- 「本番有効」と読める表現は使わない（ゲート既定 OFF・`SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+  ENABLED = false` の間は結線前と bit 同一の classic 経路のまま）
+
+対象（更新・追記）:
+
+| ファイル | 節 | 対応 |
+|---|---|---|
+| 本ファイル | §2／§3／§4／§5 | forward pointer 追記（本 PR） |
+| `docs/backend-metal-splitk-parity-judgment-decision.md` | §8 | forward pointer 追記 |
+| `docs/performance-targets.md` | §8.16 | v0.8.0 事実への補足 |
+| `docs/perf/metal-gemm-splitk-two-pass.md` | 冒頭・AC-5 行・§6・§8 | forward pointer 追記 |
+| `docs/perf/metal-gemm-splitk-ab.md` | §7・§9 | forward pointer 追記 |
+| `docs/perf/metal-gemm-n4096-kernel-gap.md` | §19.4 | forward pointer 追記 |
+| `docs/perf/metal-gemm-transpose-tiled.md` | §5.10 (b)・§5.11 | forward pointer 追記 |
+| `docs/perf/metal-gemm-candle-gate-remeasurement.md` | §16.2・§16.8 | 補足追記 |
+| `docs/perf/logs/metal-gemm-splitk-ab-5run-1515/README.md` | 手順 6 | 更新 |
+| `CLAUDE.md` | 索引行（4 件） | forward pointer 追記 |
+
+対象外（歴史記録・無関係のため編集しない）:
+
+- `docs/perf/metal-gemm-tile-class-split.md`（E6 の「結線しない」。split-K と無関係）
+- `docs/perf/cuda-gemm-f32-variant-selection.md`（CUDA 側 SplitK。Metal split-K とは無関係）
+- `crates/backend-metal/src/shaders/gemm.metal` の hfrag「結線しない」コメント（別候補）
+- `docs/perf/metal-gemm-splitk-shapes.md`（#1308 の設計検討スコープ記述。歴史記録）
+- `docs/perf/metal-gemm-splitk-two-pass.md` §5.5〜§5.7（PR #1496 時点の日付付き記録。
+  §5.9 に #1516 追記が既にある）
+- `docs/perf/metal-gemm-splitk-framework-compare-1517.md`・
+  `scripts/bench/framework-compare/README.md` の split-K 節（#1517 で現行状態に合わせて
+  書かれており整合済み）
+
+`.rs` doc comment のフォローアップ（本イシューでは編集しない。受け入れ条件「コード変更
+なし」を優先）: `crates/backend-metal/src/gemm.rs`（`SPLIT_K_ROUTE_*` 診断カウンタ・
+`SplitKParams`・`SplitKFallbackReason`・split-K パイプラインキャッシュ・
+`dispatch_split_k_strided_prepared` の doc comment）・`crates/backend-metal/src/tile.rs`
+（`split_k_tile` 付近の「`dispatch_auto` へは未結線」）・
+`crates/backend-metal/tests/common/splitk_parity_baseline.rs`・
+`tests/gemm_splitk_bit_match.rs`・`tests/gemm_splitk_parity.rs` の冒頭 `//!`。切り出し先:
+未起票（ユーザー承認待ち。`.claude/rules/out-of-scope-tracking.md`）。
 
 ## §6 参照
 

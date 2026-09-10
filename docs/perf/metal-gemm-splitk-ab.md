@@ -311,6 +311,8 @@ speedup の主因ではないことも確認した。
 - **#1476（本番結線可否）**: `select_for_device`／`dispatch_auto`／
   `MetalBackendOps::gemm` への結線と `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
   の切替（数値契約の適用拡張。ユーザー承認事項）。**結線せずと確定（§9）**。
+  **追記（イシュー #1518）**: 数値契約は #1513 で解消・結線自体は #1516 で定数ゲート付き
+  （既定 OFF）に実施済み。詳細は §9 追記・`docs/backend-metal-splitk-decision.md` §5 参照。
 - split-K の encode 分離入口の追加と GPU タイムスタンプによる純カーネル
   時間計測（`gemm.rs` 変更が必要）。
 - NT/TN/TT の性能比較・f16／hfrag の split-K・`gemm_bias_act` 融合経路への
@@ -344,6 +346,14 @@ speedup の主因ではないことも確認した。
   があり、性能判定が仮に正式 ADOPT であっても結線には至らない
 - 本節は §0／§4／§5 の実測記述を「確定」へ書き換えるものではない。5 run 完了による正式確定は
   §7 のフォローアップのまま未実施（本イシューでも実施しない。理由は decision doc §4「スコープ外」）
+
+**追記（イシュー #1518）**: `select_for_device`／`dispatch_auto`／`MetalBackendOps::
+gemm` への結線は、その後 #1516 で `dispatch_auto` への定数ゲート付き結線（既定
+`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false`）として実施された。ゲート OFF の間は
+結線前と bit 同一の classic 経路が維持され、本節の「結線しない」という §9 見出しの結論
+（性能の正式 ADOPT 未確定を理由にゲート ON へは進まない）自体は #1518 時点でも不変。§10.4
+の 5 run 正式確定は未実測のまま Mac セッションへ引き継ぐ（`docs/backend-metal-splitk-
+decision.md` §5「ゲート既定値・切替条件」）。
 
 ## §10 5 run 正式確定（イシュー #1515。共有負荷下・専有ゲートなし）
 

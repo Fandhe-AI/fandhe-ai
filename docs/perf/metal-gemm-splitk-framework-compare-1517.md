@@ -197,7 +197,7 @@ d_input 伝播スキップ）の対象になりうる形状（`x` は学習対�
 - framework-compare へ K 支配的形状（例 `(64,64,4096)`）の gemm セルを
   追加して split-K の到達を実践規模で検出すること。
 - facade への Metal split-K runtime トグル公開 API。
-- 「未結線」等の既存 docs 記述の横断整合（#1518）。
+- 「未結線」等の既存 docs 記述の横断整合（#1518。**完了**）。
 - `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` の `true` 切替（Mac セッ
   ション。#1515 ADOPT 確定後・ドリフトテスト更新込み）。
 
