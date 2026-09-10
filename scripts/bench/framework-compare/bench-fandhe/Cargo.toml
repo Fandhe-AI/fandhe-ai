@@ -12,15 +12,14 @@ publish = false
 [dependencies]
 bench-common = { path = "../bench-common" }
 # deps-policy.md（第 9 区分の適用範囲拡張。本 workspace 限定）に合わせ =x.y.z 完全固定
-fandhe-ai = "=0.7.0"
+fandhe-ai = "=0.8.0"
 
 # イシュー #1353: `--managed`（CUDA managed memory 配置）の実計測結線用。
-# crates.io 公開版 `fandhe-ai =0.7.0` には `set_cuda_managed_memory_enabled`
-# API が未収録（#1352・未リリースの HEAD で追加）のため、既定ビルド
-# （feature 無効）ではこの feature 配下のコードはコンパイルされず
-# `=0.7.0` ピンのままビルド可能である。有効化する場合は
-# `[patch.crates-io.fandhe-ai]` で `crates/facade` への path patch を
-# 併用する前提（README「`--managed`」節・`run_ab_managed_cuda.sh` 参照）。
+# `set_cuda_managed_memory_enabled` API は `fandhe-ai =0.8.0`（#1487 で
+# ピン更新）で収録済み。feature 分岐自体は既定 OFF のまま維持し（挙動
+# 変更は本イシューのスコープ外）、有効化する場合は `run_ab_managed_cuda.sh`
+# の HEAD ソース計測が主目的のため引き続き `[patch.crates-io.fandhe-ai]`
+# の path patch を併用する（README「`--managed`」節参照）。
 [features]
 managed-placement = []
 
@@ -28,33 +27,27 @@ managed-placement = []
 # の host_copy memcpy）を借用ビュー（`fandhe_ai::VarHostView`/
 # `Tensor::host_slice`）へ切り替える経路は #1438 で bench-fandhe の
 # 既定経路へ取り込み、旧計測専用 cargo feature（既定 OFF・#1337 で導入）は
-# 撤去した。crates.io 公開版 `fandhe-ai =0.7.0` には `Var::host_view`/
-# `VarHostView`/`Tensor::host_slice` API が未収録（#1335・#1336 は
-# 未リリースの HEAD で追加）のため、ピン未更新の間は registry 解決
-# ビルドが構造的に不可能になった。`managed-placement` と同じく
-# `[patch.crates-io.fandhe-ai]` で `crates/facade` への path patch を
-# CLI `--config` 経由で併用する前提（README「借用ビュー readout
-# （既定経路）」節参照。`bench_fandhe_pin_guard.sh` が未指定時を
-# fail-closed で検知する）。
+# 撤去した。`Var::host_view`/`VarHostView`/`Tensor::host_slice` API は
+# `fandhe-ai =0.8.0`（#1487 でピン更新）で収録済みのため、registry
+# 解決のまま既定ビルドが成立する（path patch は不要になった。旧
+# `bench_fandhe_pin_guard.sh` の未指定検知ガードは #1487 で撤去済み）。
 
 # イシュー #1339: `--device-checksum`（GEMM checksum をバックエンド側
 # `f64` reduction で求め読み戻しを 8 バイトへ縮小する経路）の実計測結線用。
-# crates.io 公開版 `fandhe-ai =0.7.0` には `Var::matmul_checksum`/
-# `ChecksumReadout`/`GemmChecksum` API が未収録（本イシューは未リリースの
-# HEAD で追加）のため、既定ビルド（feature 無効）ではこの feature 配下の
-# コードはコンパイルされず `=0.7.0` ピンのままビルド可能である。有効化する
+# `Var::matmul_checksum`/`ChecksumReadout`/`GemmChecksum` API は
+# `fandhe-ai =0.8.0`（#1487 でピン更新）で収録済み。feature 分岐自体は
+# 既定 OFF のまま維持し（挙動変更は本イシューのスコープ外）、有効化する
 # 場合は `managed-placement` と同じく `[patch.crates-io.fandhe-ai]` で
 # `crates/facade` への path patch を CLI `--config` 経由で併用する前提
 # （README「`--device-checksum`」節参照）。
 device-checksum = []
 
 # イシュー #1350: `--graph <on|stream-only>`（学習 step の CUDA Graph
-# capture 経路。#1349）の実計測結線用。crates.io 公開版
-# `fandhe-ai =0.7.0` には `cuda_graph_step_mode`/`cuda_graph_step_stats`
-# API が未収録（#1349 は未リリースの HEAD で追加）のため、既定ビルド
-# （feature 無効）ではこの feature 配下のコードはコンパイルされず
-# `=0.7.0` ピンのままビルド可能である。有効化する場合は
-# `managed-placement` と同じく `[patch.crates-io.fandhe-ai]` で
-# `crates/facade` への path patch を CLI `--config` 経由で併用する前提
-# （README「`--graph`」節・`run_ab_graph_cuda.sh` 参照）。
+# capture 経路。#1349）の実計測結線用。`cuda_graph_step_mode`/
+# `cuda_graph_step_stats` API は `fandhe-ai =0.8.0`（#1487 でピン更新）で
+# 収録済み。feature 分岐自体は既定 OFF のまま維持し（挙動変更は本
+# イシューのスコープ外）、有効化する場合は `managed-placement` と同じく
+# `[patch.crates-io.fandhe-ai]` で `crates/facade` への path patch を
+# CLI `--config` 経由で併用する前提（README「`--graph`」節・
+# `run_ab_graph_cuda.sh` 参照）。
 graph-step = []

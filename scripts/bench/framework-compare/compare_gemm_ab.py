@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""イシュー #1306: Metal GEMM の before（正式系列 `fandhe-ai =0.7.0`）/
-after（参考系列 HEAD。`crates/facade` への path patch）2 バイナリ A/B 比較。
+"""イシュー #1306: Metal GEMM の before（正式系列。承認ピン〈現行
+`fandhe-ai =0.8.0`。#1487〉）/after（参考系列 HEAD。`crates/facade` への
+path patch）2 バイナリ A/B 比較。
 
 `run_ab_gemm_metal.sh` が出力する 2 本の JSONL（`bench-fandhe --task gemm
 --device metal` を N=512/1024/2048/4096 × fresh/reuse × 5 回起動した結果）
@@ -10,16 +11,16 @@ Markdown 表を出力する。
 `--device`（既定 `metal`。後方互換）で `metal`／`cpu` を選択できる
 （イシュー #1364）。`cpu` はセル集合が `{512,1024,2048}×{fresh,reuse}`
 （`compare_gemm_gate.py --device cpu` と同じ N 集合。N=4096 は CPU GEMM
-ゲート計測の対象外）。同一バイナリ（`fandhe-ai =0.7.0` の facade path
-patch を固定し、環境変数 `RAYON_NUM_THREADS` の有無のみを切替える）の
-on/off 比較にも本ツールを流用する（#1364「既定スレッド数限定」A/B）。
+ゲート計測の対象外）。同一バイナリ（承認ピンの facade path patch を固定
+し、環境変数 `RAYON_NUM_THREADS` の有無のみを切替える）の on/off 比較
+にも本ツールを流用する（#1364「既定スレッド数限定」A/B）。
 判定ロジック（threshold・checksum 複合判定・parity fail-closed）は
 device に関わらず不変。
 
 `compare_ab.py` は `framework_version` が before/after で同一だと fail-closed
 拒否する（同一バージョンの A/B は意味を持たないという前提）ため、before/after
-とも `fandhe-ai =0.7.0` を名乗る本用途（before=registry・after=HEAD path
-patch。バージョン文字列は変わらない）には流用できない。`compare_managed_ab.py`
+とも承認ピンのバージョン文字列を名乗る本用途（before=registry・after=HEAD
+path patch。バージョン文字列は変わらない）には流用できない。`compare_managed_ab.py`
 は同一バイナリのフラグ（`managed`）切替専用で、2 本の異なるバイナリを別ファイル
 として比較する構造を持たない。本ツールは両者の fail-closed 方針を踏襲しつつ、
 2 ファイル入力・`(size, mode)` セルキー（device=metal・task=gemm 固定）に
@@ -310,9 +311,10 @@ def evaluate_cell(before_rows, after_rows, threshold):
                 "status": "undeterminable",
                 "reason": f"'{field}' が before または after 内で不一致",
             }
-        # `version` はいずれも "0.7.0" を名乗ることが前提（before=registry・
-        # after=HEAD path patch。workspace.package.version 不変）。before/after
-        # 間で異なる場合は前提が崩れているため判定不能とする。
+        # `version` はいずれも承認ピンのバージョン文字列（現行 "0.8.0"）を
+        # 名乗ることが前提（before=registry・after=HEAD path patch。
+        # workspace.package.version 不変）。before/after 間で異なる場合は
+        # 前提が崩れているため判定不能とする。
         if before_values != after_values:
             return {
                 "status": "undeterminable",
@@ -477,7 +479,7 @@ def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, mode
 
 def main(argv):
     parser = argparse.ArgumentParser(
-        description="Metal GEMM before/after (0.7.0 vs HEAD) A/B comparison (issue #1306)"
+        description="Metal GEMM before/after (approved pin vs HEAD) A/B comparison (issue #1306)"
     )
     parser.add_argument("before", help="before JSONL path")
     parser.add_argument("after", help="after JSONL path")

@@ -3,10 +3,11 @@
 # 有無の GB10 実践規模 A/B 計測。3 状態（off/stream-only/on）を同一
 # バイナリで交互起動する（`run_ab_managed_cuda.sh` の 2 状態版を拡張）。
 #
-# `bench-fandhe` は既定ビルド（`graph-step` feature 無効・crates.io 公開版
-# `fandhe-ai =0.7.0` ピン）では `--graph` を常に MEASURE_ERROR で拒否する
-# （`cuda_graph_step_mode`/`cuda_graph_step_stats` API 自体が 0.7.0 ピンに
-# 未収録のため。`bench-fandhe/src/main.rs` dispatch 参照）。本スクリプトは
+# `bench-fandhe` は既定ビルド（`graph-step` feature 無効）では `--graph`
+# を常に MEASURE_ERROR で拒否する。`cuda_graph_step_mode`/
+# `cuda_graph_step_stats` API は crates.io 公開版 `fandhe-ai =0.8.0`
+# （#1487 でピン更新）に収録済みだが、feature 分岐自体は挙動不変のまま
+# 維持されている（`bench-fandhe/src/main.rs` dispatch 参照）。本スクリプトは
 # `graph-step` feature を有効化し、かつ `AB_PATCH_FACADE_PATH`（未リリース
 # の HEAD `crates/facade` への path patch。deps-policy.md 第 9 区分は
 # registry 取得元のみを許容するため、この patch は本スクリプトの CLI

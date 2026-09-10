@@ -6,22 +6,13 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 # イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）に加え
-# PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）: 当初は「本スクリプト
-# は常に registry 解決でビルドする（path patch 機構を持たない）」としていたが、
-# crates.io ピン `fandhe-ai =0.7.0` には借用ビュー readout API が未収録のため
-# registry 解決は構造的にビルド不能（bench_fandhe_pin_guard.sh 参照）であり、
-# この設計のままでは本スクリプトが恒久的に実行不能になってしまう。
-# `run_gemm_gate.sh`／`run_ab_gemm_metal.sh`（after 腕）と同型の
-# `GEMM_GATE_PATCH_FACADE_PATH`（任意。`crates/facade` への path patch）を
-# 導入し、指定時のみ `--config patch.crates-io.fandhe-ai.path=...` でビルドを
-# 解放する（deps-policy.md 第 9 区分の承認済みピン固定は Cargo.lock へ
-# 永続化しない invocation 限定の `--config` のため壊さない）。実行拒否ガード
-# （`bench_fandhe_require_facade_patch`）は、既存の計測結果・ログを初期化する
-# `: > "$OUT"`／`: > "$SKIP"` より前に置く。後ろに置くと、通常起動しただけで
-# ガードに拒否される前に既存ファイルが空へ初期化されてしまい、過去の計測
-# 結果が失われる（データ破壊。security.md A08）。
-source ./bench_fandhe_pin_guard.sh
-bench_fandhe_require_facade_patch "run_all.sh" "${GEMM_GATE_PATCH_FACADE_PATH:-}"
+# PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）で導入した
+# `GEMM_GATE_PATCH_FACADE_PATH`（任意。`crates/facade` への path patch）は
+# 承認ピン `fandhe-ai =0.8.0`（#1487）への更新後も参考系列（HEAD ソース）
+# 計測用として維持する。指定時のみ `--config patch.crates-io.fandhe-ai.
+# path=...` でビルドする（deps-policy.md 第 9 区分の承認済みピン固定は
+# Cargo.lock へ永続化しない invocation 限定の `--config` のため壊さない）。
+# 未指定時は registry 解決（承認ピン）のまま通常ビルドする。
 
 # A03 インジェクション対策（run_gemm_gate.sh と同一方針）: TOML 文字列値へ
 # 埋め込むため、二重引用符・バックスラッシュを含む値は不正な `--config` を
@@ -41,12 +32,13 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
-# PR #1452 codex-review P2 指摘（PRRT_kwDOTuUCJc6gKI3z）: 上記ガードにより
-# 本スクリプトは常に path patch（`GEMM_GATE_PATCH_FACADE_PATH`）付きで
-# `cargo build` するため、invocation-only のはずの patch 解決過程で本
+# PR #1452 codex-review P2 指摘（PRRT_kwDOTuUCJc6gKI3z）: `GEMM_GATE_
+# PATCH_FACADE_PATH` 指定時、invocation-only のはずの patch 解決過程で本
 # workspace の `Cargo.lock`（承認済みピン固定）が書き換わったまま残る。
-# `bench_fandhe_pin_guard.sh` 共有のバックアップ・復元 EXIT trap
-# （`run_ab_gemm_metal.sh` と同一設計）で必ず元へ戻す。
+# `bench_fandhe_lock_restore.sh` 共有のバックアップ・復元 EXIT trap
+# （`run_ab_gemm_metal.sh` と同一設計。#1487 で `bench_fandhe_pin_guard.sh`
+# から分離）で必ず元へ戻す（未指定時も無害）。
+source ./bench_fandhe_lock_restore.sh
 bench_fandhe_setup_lock_restore_trap
 
 run() { # run <binary> <task> <device> <size> [mode] [extra_flag]

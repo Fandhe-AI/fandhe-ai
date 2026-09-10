@@ -11,13 +11,13 @@
 # →原子的 mv・`pmset -g therm`／`uptime` 記録・専有ゲート（load average）
 # を合成したもの。
 #
-# `--readout` override（`bench-fandhe` 側実装）は crates.io 公開版
-# `fandhe-ai =0.7.0` ピンに未収録の API（`Var::host_view` 等。#1335）を
-# 要求しないため（`readout_uses_borrowed_view` の device 文字列 1 個の
-# runtime 分岐のみ）、`AB_PATCH_FACADE_PATH` は本スクリプトの主目的
-# （HEAD ソースでの計測）のため必須とする（`run_ab_gemm_metal.sh` の
-# after 腕と同型。registry pin 限定の before 腕は本スクリプトには無い —
-# 両腕〈legacy／borrowed〉は同一バイナリの `--readout` 値切替であり、
+# `--readout` override（`bench-fandhe` 側実装）は `Var::host_view` 等
+# （#1335。crates.io 公開版 `fandhe-ai =0.8.0` に #1487 でピン更新済みの
+# ため収録済み）自体は要求せず（`readout_uses_borrowed_view` の device
+# 文字列 1 個の runtime 分岐のみ）、`AB_PATCH_FACADE_PATH` は本スクリプト
+# の主目的（HEAD ソースでの計測）のため必須とする（`run_ab_gemm_metal.sh`
+# の after 腕と同型。registry pin 限定の before 腕は本スクリプトには無い
+# — 両腕〈legacy／borrowed〉は同一バイナリの `--readout` 値切替であり、
 # 「結線前後」の 2 バイナリ比較ではないため）。
 #
 # 呼び出し例（M4 Max 実機。ユーザー承認・別セッション。低負荷時間帯に

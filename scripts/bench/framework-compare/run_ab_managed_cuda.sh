@@ -2,10 +2,12 @@
 # イシュー #1353: CUDA managed memory 配置（#1352。`--managed`）有無の
 # GB10 実践規模 A/B 計測。
 #
-# `bench-fandhe` は既定ビルド（`managed-placement` feature 無効・
-# crates.io 公開版 `fandhe-ai =0.7.0` ピン）では `--managed` を常に
-# MEASURE_ERROR で拒否する（`set_cuda_managed_memory_enabled` API 自体が
-# 0.7.0 ピンに未収録のため。`bench-fandhe/src/main.rs` dispatch 参照）。
+# `bench-fandhe` は既定ビルド（`managed-placement` feature 無効）では
+# `--managed` を常に MEASURE_ERROR で拒否する。
+# `set_cuda_managed_memory_enabled` API は crates.io 公開版
+# `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済みだが、feature 分岐
+# 自体は挙動不変のまま維持されている（`bench-fandhe/src/main.rs`
+# dispatch 参照）。
 # 本スクリプトは `managed-placement` feature を有効化し、かつ
 # `AB_PATCH_FACADE_PATH`（未リリースの HEAD `crates/facade` への path
 # patch。deps-policy.md 第 9 区分は registry 取得元のみを許容するため、
@@ -34,9 +36,10 @@ fi
 
 # `AB_PATCH_FACADE_PATH` の検証（A03・A08）: 未設定・相対パス・
 # Cargo.toml 不在・crate 名不一致のいずれかなら fail-closed で exit 1。
-# 0.7.0 ピンには `set_cuda_managed_memory_enabled` API 自体が無いため、
-# patch なしの計測は「--managed が常に MEASURE_ERROR」という無意味な結果
-# にしかならない（bench-fandhe 側の契約テストで別途検証済み）。
+# `managed-placement` feature が既定 OFF のため、patch なしの計測は
+# 「--managed が常に MEASURE_ERROR」という無意味な結果にしかならない
+# （bench-fandhe 側の契約テストで別途検証済み。HEAD ソース計測が本
+# スクリプトの主目的のため path patch は維持する）。
 if [[ -z "${AB_PATCH_FACADE_PATH:-}" ]]; then
   echo "error: AB_PATCH_FACADE_PATH is required (absolute path to an unreleased HEAD's crates/facade with set_cuda_managed_memory_enabled; issue #1353)" >&2
   exit 1

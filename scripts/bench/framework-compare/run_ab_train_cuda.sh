@@ -32,14 +32,9 @@ fi
 # イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）に加え
 # PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）: `run_all.sh` と
 # 同じ理由で `GEMM_GATE_PATCH_FACADE_PATH`（任意。`crates/facade` への
-# path patch）を導入し、指定時のみビルドを解放する。実行拒否ガード
-# （`bench_fandhe_require_facade_patch`。空文字判定で常に exit する）は、
-# 既存の計測結果・ログを初期化する `: > "$OUT"`／`: > "$SKIP"` より前に
-# 置く。後ろに置くと、通常起動しただけでガードに拒否される前に既存
-# ファイルが空へ初期化されてしまい、過去の計測結果が失われる（データ
-# 破壊。security.md A08）。
-source ./bench_fandhe_pin_guard.sh
-bench_fandhe_require_facade_patch "run_ab_train_cuda.sh" "${GEMM_GATE_PATCH_FACADE_PATH:-}"
+# path patch）を導入した。承認ピン `fandhe-ai =0.8.0`（#1487）への更新後
+# も参考系列（HEAD ソース）計測用として維持し、未指定時は registry 解決
+# （承認ピン）のまま通常ビルドする。
 
 # A03 インジェクション対策（run_gemm_gate.sh と同一方針）。
 CARGO_CONFIG_ARGS=()
@@ -58,10 +53,12 @@ mkdir -p results/raw
 : > "$SKIP"
 
 # PR #1452 codex-review P2 指摘（PRRT_kwDOTuUCJc6gKI3z）: `run_all.sh` と
-# 同じ理由で、本スクリプトも常に path patch 付きで `cargo build` する
-# ため、`bench_fandhe_pin_guard.sh` 共有のバックアップ・復元 EXIT trap
-# （`run_ab_gemm_metal.sh` と同一設計）で workspace の `Cargo.lock`
-# （承認済みピン固定）を必ず元へ戻す。
+# 同じ理由で、`GEMM_GATE_PATCH_FACADE_PATH` 指定時は path patch 付きで
+# `cargo build` するため、`bench_fandhe_lock_restore.sh`（#1487 で
+# `bench_fandhe_pin_guard.sh` から分離）共有のバックアップ・復元 EXIT
+# trap（`run_ab_gemm_metal.sh` と同一設計）で workspace の `Cargo.lock`
+# （承認済みピン固定）を必ず元へ戻す（未指定時も無害）。
+source ./bench_fandhe_lock_restore.sh
 bench_fandhe_setup_lock_restore_trap
 
 # fail-closed（AGENTS.md）: run() 内の個々の起動失敗はログに記録しつつ計測を

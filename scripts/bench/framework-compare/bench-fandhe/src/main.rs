@@ -103,11 +103,10 @@
 //!
 //! checksum（全要素 `f64` 逐次和）・parity（`GemmReference::verify`）の
 //! 契約・計算式はいずれの分岐でも不変（呼び出し側は両型とも
-//! `Deref<Target=[f32]>` のため無変更）。crates.io 公開版
-//! `fandhe-ai =0.7.0` には該当 API が未収録のため、ピン更新までは
-//! `crates/facade` への path patch が CLI `--config` 経由で必須
-//! （`bench_fandhe_pin_guard.sh` が未指定時に early-exit で検知する。
-//! README「借用ビュー readout（既定経路）」節参照）。
+//! `Deref<Target=[f32]>` のため無変更）。該当 API は crates.io 公開版
+//! `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済みのため、registry
+//! 解決のまま既定ビルドが成立する（path patch は不要。旧
+//! `bench_fandhe_pin_guard.sh` は #1487 で撤去済み）。
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
@@ -115,7 +114,7 @@ use fandhe_ai::{Device, SgdConfig, Tape, Tensor};
 use std::time::{Duration, Instant};
 
 const FRAMEWORK: &str = "fandhe-ai";
-const VERSION: &str = "0.7.0";
+const VERSION: &str = "0.8.0";
 
 /// イシュー #1350: `--graph` が渡された `--task train` 計測の record
 /// 生成時に 1 回だけ呼び、launch 固定費の診断カウンタ（`fandhe_ai::
@@ -168,7 +167,7 @@ const PHASE_STEP_TOTAL: &str = "step_total";
 // H2D／D2H／同期」と推定した内容を、公開 API 呼び出し境界で分解して
 // 実測確定するための計装。`matmul` 区間の内側に H2D（A/B のアップロード）
 // ・カーネル実行・D2H（結果ダウンロード）・ストリーム同期が全て閉じて
-// おり、fandhe-ai 0.7.0 の公開 API（`Var::matmul`）ではこれ以上分離
+// おり、fandhe-ai 0.8.0 の公開 API（`Var::matmul`）ではこれ以上分離
 // できない（内訳は CUDA／Metal／CPU 各バックエンドの
 // `gemm_reuse_phase_diag_tests` が別途取る。`docs/perf/
 // cuda-gemm-reuse-phase-breakdown.md`・`docs/perf/
@@ -304,13 +303,12 @@ fn readout_uses_borrowed_view(device: &str, readout_override: Option<&str>) -> b
 /// （`out.iter()`・`GemmReference::verify(&out)` の deref 強制）はいずれ
 /// の分岐でも無変更で成立する。
 ///
-/// crates.io 公開版 `fandhe-ai =0.7.0` には `VarHostView`／
-/// `Var::host_view` が未収録（#1335 は未リリースの HEAD で追加）のため、
-/// ピン未更新の間は `crates/facade` への path patch（CLI `--config`）が
-/// 必須（`bench_fandhe_pin_guard.sh` が未指定時に registry ビルドを
-/// fail-closed で拒否する。#1438 で既定経路化・旧計測専用 cargo
-/// feature（#1337 導入）は撤去済み。Metal の legacy 分岐は runtime 判定
-/// のためこの制約と無関係に成立する）。
+/// `VarHostView`／`Var::host_view` は crates.io 公開版
+/// `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済みのため、registry
+/// 解決のまま既定ビルドが成立する（path patch は不要。旧
+/// `bench_fandhe_pin_guard.sh` は #1487 で撤去済み。#1438 で既定経路化・
+/// 旧計測専用 cargo feature〈#1337 導入〉は撤去済み。Metal の legacy
+/// 分岐は runtime 判定のためこの制約と無関係に成立する）。
 enum HostReadout {
     Borrowed(fandhe_ai::VarHostView),
     Owned(Vec<f32>),
@@ -1912,7 +1910,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// **`--tf32`（イシュー #1042）は本バイナリでは常に MEASURE_ERROR で
 /// fail-fast する**: `bench-fandhe` は crates.io 公開版 `fandhe-ai
-/// =0.7.0` に完全固定されており（deps-policy 第 9 区分。
+/// =0.8.0` に完全固定されており（deps-policy 第 9 区分。
 /// `check_framework_compare` が registry 取得元を fail-closed 検査する
 /// ため path 依存への差し替えは不可）。`fandhe_ai::set_cuda_tf32_gemm_enabled`
 /// 自体は crates.io 公開版から呼び出し可能になったが（承認ピンは v0.5.0 公開
@@ -1924,11 +1922,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// **`--managed`（イシュー #1353）**: CUDA managed memory 配置
 /// （`fandhe_ai::set_cuda_managed_memory_enabled`。#1352）を有効化して
-/// 計測する。`--tf32` と異なり crates.io 公開版 `fandhe-ai =0.7.0` には
-/// 当該 API 自体が未収録（#1352 は本イシュー時点で未リリースの HEAD）
-/// のため、`managed-placement` feature（既定無効）で呼び出しをコンパイル
-/// 時に分離する: feature 無効時は API 呼び出しコード自体が存在せず
-/// `=0.7.0` ピンのままビルド成立する契約を保つ。`device != "cuda"` は
+/// 計測する。当該 API は crates.io 公開版 `fandhe-ai =0.8.0`
+/// （#1487 でピン更新）に収録済みだが、`managed-placement` feature
+/// （既定無効）による呼び出しのコンパイル時分離は挙動不変のまま維持する
+/// （feature 有効化・撤去は #1487 のスコープ外）。`device != "cuda"` は
 /// プロセスワイドフラグが cpu 計測で無音 no-op になるのを防ぐため
 /// fail-fast する（README「`--managed`」節参照）。
 fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -1972,11 +1969,11 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // イシュー #1350: `--graph <on|stream-only>` は `--device cuda` かつ
     // `--task train` 限定（`DeviceParamStore::step` の update 区間のみが
     // capture 対象のため。gemm／infer は `sgd_step_device_tracked` に
-    // 到達しない）。`bench-fandhe` は crates.io 公開版 `fandhe-ai =0.7.0`
-    // ピンには `cuda_graph_step_mode`/`cuda_graph_step_stats` API 自体が
-    // 未収録のため、`graph-step` feature（既定無効）でコンパイル時に
-    // 分離する（`--managed`／`--device-checksum` と同型の allowlist
-    // 方式）。
+    // 到達しない）。`cuda_graph_step_mode`/`cuda_graph_step_stats` API は
+    // crates.io 公開版 `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済み
+    // だが、`graph-step` feature（既定無効）によるコンパイル時分離は
+    // 挙動不変のまま維持する（`--managed`／`--device-checksum` と同型の
+    // allowlist 方式。feature 有効化・撤去は #1487 のスコープ外）。
     //
     // **`on` と `stream-only` でゲートの形が異なる**（`fandhe_ai_backend_
     // cuda::graph` モジュール冒頭コメントの契約）:
@@ -2071,10 +2068,10 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     // イシュー #1339: `--device-checksum` は `--task gemm`（`--phases` なし。
     // `run_gemm`／`run_gemm_reuse` のみが device reduction 分岐を持つ）
-    // 限定の allowlist 方式。`device-checksum` feature（crates.io 公開版
-    // `fandhe-ai =0.7.0` には `Var::matmul_checksum` API が未収録のため
-    // path patch 前提）が無効なビルドでは常に MEASURE_ERROR とする
-    // （`--managed` と同型）。
+    // 限定の allowlist 方式。`Var::matmul_checksum` API は crates.io
+    // 公開版 `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済みだが、
+    // `device-checksum` feature が無効なビルドでは常に MEASURE_ERROR
+    // とする挙動は不変のまま維持する（`--managed` と同型）。
     if cli.device_checksum {
         if cli.task != "gemm" || cli.phases {
             return Err(format!(
@@ -3239,8 +3236,9 @@ mod tests {
     }
 
     /// イシュー #1353: `managed-placement` feature が無効な既定ビルド
-    /// （`fandhe-ai =0.7.0` ピンには `set_cuda_managed_memory_enabled` API
-    /// 自体が未収録）では、`--device cuda` でも `--managed` は常に
+    /// （`set_cuda_managed_memory_enabled` API は `fandhe-ai =0.8.0`
+    /// 〈#1487 でピン更新〉に収録済みだが、feature 分岐自体は挙動不変の
+    /// まま維持する）では、`--device cuda` でも `--managed` は常に
     /// MEASURE_ERROR で fail-fast する。本テストはこのビルド構成（既定
     /// feature）でのみ意味を持つ（`managed-placement` feature 有効ビルド
     /// では実際に path patch 済み facade を呼び出す経路が走るため、本
@@ -3305,13 +3303,15 @@ mod tests {
         }
     }
 
-    /// イシュー #1350: `graph-step` feature が無効な既定ビルド（`fandhe-ai
-    /// =0.7.0` ピンには `cuda_graph_step_mode`/`cuda_graph_step_stats` API
-    /// 自体が未収録）では、`--device cuda --task train` でも `--graph` は
-    /// 常に MEASURE_ERROR で fail-fast する。本テストはこのビルド構成
-    /// （既定 feature）でのみ意味を持つ（`graph-step` feature 有効ビルド
-    /// では実際に path patch 済み facade を呼び出す経路が走るため、本
-    /// テストとは別に GB10 実機実測で検証する。README「`--graph`」節）。
+    /// イシュー #1350: `graph-step` feature が無効な既定ビルド
+    /// （`cuda_graph_step_mode`/`cuda_graph_step_stats` API は
+    /// `fandhe-ai =0.8.0`〈#1487 でピン更新〉に収録済みだが、feature
+    /// 分岐自体は挙動不変のまま維持する）では、`--device cuda --task
+    /// train` でも `--graph` は常に MEASURE_ERROR で fail-fast する。本
+    /// テストはこのビルド構成（既定 feature）でのみ意味を持つ
+    /// （`graph-step` feature 有効ビルドでは実際に path patch 済み
+    /// facade を呼び出す経路が走るため、本テストとは別に GB10 実機実測
+    /// で検証する。README「`--graph`」節）。
     #[test]
     #[cfg(not(feature = "graph-step"))]
     fn graph_flag_without_feature_is_measure_error() {
@@ -3393,11 +3393,12 @@ mod tests {
     }
 
     /// イシュー #1339: `device-checksum` feature が無効な既定ビルド
-    /// （`fandhe-ai =0.7.0` ピンには `Var::matmul_checksum` API 自体が
-    /// 未収録）では、`--task gemm` でも `--device-checksum` は常に
-    /// MEASURE_ERROR で fail-fast する。本テストはこのビルド構成（既定
-    /// feature）でのみ意味を持つ（`device-checksum` feature 有効ビルドは
-    /// 本ファイル冒頭の手動確認手順・README「`--device-checksum`」節を
+    /// （`Var::matmul_checksum` API は `fandhe-ai =0.8.0`〈#1487 でピン
+    /// 更新〉に収録済みだが、feature 分岐自体は挙動不変のまま維持する）
+    /// では、`--task gemm` でも `--device-checksum` は常に MEASURE_ERROR
+    /// で fail-fast する。本テストはこのビルド構成（既定 feature）
+    /// でのみ意味を持つ（`device-checksum` feature 有効ビルドは本
+    /// ファイル冒頭の手動確認手順・README「`--device-checksum`」節を
     /// 参照。CPU 経由の実測は同 feature 有効ビルドで別途確認済み）。
     #[test]
     #[cfg(not(feature = "device-checksum"))]
