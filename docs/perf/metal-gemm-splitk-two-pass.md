@@ -224,6 +224,45 @@ Linux 相当チェック（`cargo test -p fandhe-ai-backend-metal --all-features
 再実行は Apple Silicon 実機依存のため本対応では未実施（§5.3〜§5.5 の既知 FAIL 状態・§5.2 の
 bit-match／parity 実測値自体はコード変更なしのため不変）。
 
+### 5.8 判定方式の再切替（イシュー #1512。2026-09-10 承認後）
+
+§5.5 の差し戻し後、イシュー #1511 で適用拡張・baseline 値がユーザー承認され
+（`docs/backend-metal-splitk-parity-judgment-decision.md` §7・2026-09-10 ユーザー承認）、
+本イシュー（#1512）で `crates/backend-metal/tests/gemm_splitk_parity.rs` の判定を
+`fandhe_ai_backend_cpu::parity::assert_parity`（厳密ゼロ fail 判定）から
+`crates/backend-metal/tests/common/splitk_parity_baseline.rs::assert_no_split_k_parity_
+regression`（実測ベースライン非後退方式。§5.4 実装をそのまま再利用）へ再切替した。
+対象 11 形状すべてへ一律適用する（§3 の決定どおり、CUDA 先例の形状二分方式は不採用）。
+`crates/backend-metal/tests/common/splitk_parity_baseline.rs::BASELINES` の数値自体は §5.4
+実装時点から一切変更していない（承認記録の §7 表と一致）。tolerance 定数
+（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）も不変。`SPLIT_K_NUMERIC_CONTRACT_APPROVED`
+（自動判定入口 `dispatch_split_k_strided_prepared` のゲート）は本イシューのスコープ外で
+`false` のまま（解除は別イシュー #1513）。
+
+**Linux 実行可能な契約テストの新設**: `gemm_splitk_parity.rs` は macOS 実機限定
+（`#![cfg(target_os = "macos")]`）・`required-features = ["internal-diagnostics"]` のため、
+`common::splitk_parity_baseline` モジュール自体は Linux CI（GitHub ホステッド・
+ubuntu-latest）で型検査カバレッジがゼロだった。本イシューで `crates/backend-metal/tests/
+splitk_parity_baseline_contract.rs`（macOS cfg・`required-features` いずれも持たない通常の
+`[[test]]`）を新設し、`BASELINES` が承認記録からの独立転記と全一致すること（改竄・緩和の
+黙った混入の検出）・`find_baseline` の契約・`assert_no_split_k_parity_regression` の 5 種
+falsification（`crates/backend-cuda/tests/parity_nonregression.rs` と同方針）を通常
+`cargo test -p fandhe-ai-backend-metal` の対象へ含めた（10 tests、全 pass）。
+
+Linux 相当チェック（`cargo fmt --all --check`・`cargo clippy -p fandhe-ai-backend-metal
+--all-targets --all-features -- -D warnings`〈本クレート単体では green。`--workspace` は
+`backend-cuda` 側の無関係な pre-existing dead-code エラーにより本 PR 実行環境では失敗する。
+`git stash` で本変更を除いても同一エラーが再現することを確認済みで、本イシューの変更による
+ものではない〉・`cargo test -p fandhe-ai-backend-metal --all-features`・`cargo check -p
+fandhe-ai-backend-metal --tests --all-features --target aarch64-apple-darwin`・
+`make check-cross-metal-tests`・`make doc-warnings`・`make test`）は green。
+
+**M4 Max 実機実測（イシュー #1512 記入欄）**: 未実測。`docs/perf/logs/metal-gemm-splitk-
+parity-baseline-1512/`（`run_parity.sh`・事前登録判定規則・README）を用意し、Mac セッション
+での実行を申し送る。実測完了後、本節へ以下を追記する: (a) 11 形状 × 4 パターン全 44 組合せが
+記録済みベースライン ceiling 以下であることの確認結果、(b) §5.3 の表との実測値差分の有無、
+(c) `uptime_during.log` から見た load average 推移。
+
 ## 6. AC-5: 本番経路の非後退確認
 
 `tile::select`／`select_for_device`／`select_with_occupancy_for_device`・`MetalGemm::new`／

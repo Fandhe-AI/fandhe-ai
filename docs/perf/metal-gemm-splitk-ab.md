@@ -98,8 +98,10 @@ https://github.com/Fandhe-AI/fandhe-ai/issues/1475#issuecomment-5599418673
   `classic_stable`／`target_tile_stable`／`splitk_stable`〈`to_bits()`
   比較〉が別途 run-to-run の bit 同一を担保している〉）。
 - A vs B（`a_vs_b_fail_count`）は全 9 対象形状で総要素数近くまで不一致
-  （K 分割の結合順序差に起因する既知の丸め誤差。`tests/gemm_splitk_parity.rs`
-  の既知 FAIL・`docs/perf/metal-gemm-splitk-two-pass.md` §5 と整合。
+  （K 分割の結合順序差に起因する既知の丸め誤差。`docs/perf/metal-gemm-
+  splitk-two-pass.md` §5 と整合。`tests/gemm_splitk_parity.rs` はイシュー
+  #1512 で baseline 非後退方式へ切替済み〈同 §5.8〉のため既知 FAIL では
+  なくなったが、A vs B 自体の丸め誤差の存在という事実は変わらないため
   verdict の入力にはしない）。
 
 **既知の限界（イシュー #1499 codex-review・Cursor Bugbot 指摘。2026-09-09

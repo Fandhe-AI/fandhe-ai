@@ -6,9 +6,16 @@
 //! `(64,64,2056)`／`(128,128,2064)` も併せて確認する（イシュー #1474
 //! 計画 §7.2）。
 //!
-//! **判定方式（厳密ゼロ fail 判定。`.claude/rules/coding-rust.md` の既定
-//! 方針どおり）**: 本テストは `fandhe_ai_backend_cpu::parity::assert_parity`
-//! による厳密ゼロ fail 判定を用いる。
+//! **判定方式（実測ベースライン非後退方式。イシュー #1512。承認記録は
+//! `docs/backend-metal-splitk-parity-judgment-decision.md` §7・
+//! 2026-09-10 ユーザー承認）**: 本テストは
+//! `fandhe_ai_backend_cpu::parity::compare` の集計結果（`CompareReport`）を
+//! `crates/backend-metal/tests/common/splitk_parity_baseline.rs::
+//! assert_no_split_k_parity_regression`（CUDA 側 `ParityBaseline` と同型の
+//! 4 指標連言〈`total` 一致・`fail_count`／`mean_abs_diff`／`max_abs_diff`／
+//! `max_rel_err` の非後退〉）で判定する。対象 11 形状すべてへ一律適用する
+//! （承認記録 §3・§7。CUDA 側のような「厳密ゼロ fail 成立形状は厳密判定・
+//! 不成立形状のみ baseline」という形状二分方式は採らない）。
 //!
 //! 実機実測（M4 Max）では、split-K は K 方向を複数パーティションへ分割し
 //! 独立に部分和を求めてから固定順序で結合するため、単一の連続 K ループで
@@ -16,22 +23,20 @@
 //! ことを確認している。classic 経路は全対象形状で CPU 参照実装と bit
 //! 完全一致する一方、split-K 経路は対象 11 形状のうち大半で REQ-2 統一
 //! 複合判定の要素単位 fail が発生する（詳細は `docs/perf/metal-gemm-
-//! splitk-two-pass.md` §5 を参照）。
+//! splitk-two-pass.md` §5 を参照）。この特性は分割そのものに起因する構造的
+//! 特性であり、縮約アルゴリズムの改善だけでは解消できないことを確認済み
+//! （同 §5.2）。
 //!
-//! この実測結果を受け、当初は CUDA 側 TF32/f16 Tensor Core 経路（spec
-//! REQ-2 2026-09-02 追記）と同型の実測ベースライン非後退方式へ判定方式を
-//! 変更する案を実装したが、PR #1496 の codex-review 指摘（イシュー #1474）
-//! により、当該 spec 追記は TF32/f16 Tensor Core 経路限定であり Metal f32
-//! split-K への適用拡張には別途ユーザー承認が必要と判明したため、承認を
-//! 得るまでの間は `.claude/rules/coding-rust.md` の既定方針（バックエンド
-//! 間数値一致テストの許容誤差を単独で緩和しない）に従い厳密ゼロ fail
-//! 判定へ差し戻した。この差し戻しにより、実機（Apple Silicon）で本テストを
-//! 実行すると split-K 側の丸め誤差に起因する `#[ignore]` テスト失敗が
-//! 再発する状態は既知（`docs/perf/metal-gemm-splitk-two-pass.md` §5 参照）。
-//! 適用拡張の是非・具体的な baseline 値は別途ユーザー承認を得たうえで
-//! `tests/common/splitk_parity_baseline.rs`（実装は保持済み・本テストからは
-//! 未使用）を再度使う形で対応する（承認記録は取得次第 `docs/perf/
-//! metal-gemm-splitk-two-pass.md` へ追記予定。イシュー #1474）。
+//! **経緯（差し戻し→再承認）**: 当初 baseline 方式を実装したが、PR #1496 の
+//! codex-review 指摘（イシュー #1474）により、当時参照していた spec REQ-2
+//! 2026-09-02 追記は TF32/f16 Tensor Core 経路限定であり Metal f32 split-K
+//! への適用拡張には別途ユーザー承認が必要と判明したため、いったん
+//! `assert_parity`（厳密ゼロ fail 判定）へ差し戻した
+//! （`docs/perf/metal-gemm-splitk-two-pass.md` §5.5）。その後イシュー #1511
+//! で適用拡張・baseline 値がユーザー承認され（`docs/backend-metal-splitk-
+//! parity-judgment-decision.md` §7）、本イシュー（#1512）で baseline 方式へ
+//! 再切替した。tolerance 定数（`RELATIVE_TOLERANCE`/
+//! `ABSOLUTE_RESCUE_THRESHOLD`）自体は一貫して変更していない。
 //!
 //! 本テストは `crate::tile::should_split_k` の算出した計画を
 //! `dispatch_split_k_strided_prepared_with_plan`（`tests/
@@ -40,7 +45,8 @@
 //! 自動判定入口 `dispatch_split_k_strided_prepared`（ゲート未承認の間は
 //! 常に classic 経路へフォールバックする。PR #1496 codex-review P1
 //! 指摘・`gemm.rs` 該当ドキュメンテーションコメント参照）は本テストの
-//! 対象外で、split-K 経路自体の正しさ検証には明示計画版を使う。
+//! 対象外で、split-K 経路自体の正しさ検証には明示計画版を使う。ゲート
+//! 解除自体は別イシュー（#1513）のスコープ。
 //!
 //! いずれのケースも戻り値が `SplitKRoute::Split` であることを assert し、
 //! フォールバック（classic 経路）による自明合格を排除する。
@@ -59,7 +65,8 @@
 mod common;
 
 use bench_harness::rng::Xorshift64Star;
-use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+use common::splitk_parity_baseline::{assert_no_split_k_parity_regression, find_baseline};
+use fandhe_ai_backend_cpu::parity::{compare, matmul_reference_fma};
 use fandhe_ai_backend_metal::layout::{MatrixLayout, classify_2d};
 use fandhe_ai_backend_metal::tile;
 use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm, SplitKRoute};
@@ -79,7 +86,8 @@ fn transpose_dense(logical: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 
 /// AC-2 の対象形状: `docs/backend-metal-splitk-decision.md` §3 の対象 9
 /// 形状に加え、K 端数（`tile.bk`=16 の非整除）を含む境界ケース 2 点
-/// （イシュー #1474 計画 §7.2）。
+/// （イシュー #1474 計画 §7.2）。`common::splitk_parity_baseline::BASELINES`
+/// が同じ 11 形状を 1 対 1 でカバーする。
 const TARGET_SHAPES: &[(usize, usize, usize)] = &[
     (32, 32, 2048),
     (32, 32, 4096),
@@ -95,8 +103,9 @@ const TARGET_SHAPES: &[(usize, usize, usize)] = &[
 ];
 
 /// NN/NT/TN/TT の 4 パターンで `dispatch_split_k_strided_prepared_with_plan`
-/// を直接呼び、classic 経路・CPU 参照実装との統一複合判定（REQ-2）を検証
-/// する。
+/// を直接呼び、CPU 参照実装との非後退契約（`assert_no_split_k_parity_
+/// regression`。REQ-2 統一複合判定の集計値 `CompareReport` を記録済み
+/// ベースラインと比較する）を検証する。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn split_k_matches_classic_and_cpu_reference_for_target_shapes_and_transpose_patterns() {
@@ -104,6 +113,18 @@ fn split_k_matches_classic_and_cpu_reference_for_target_shapes_and_transpose_pat
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
     for &(m, n, k) in TARGET_SHAPES {
+        // `(m, n, k)` に対応する記録済みベースライン行。未登録形状での
+        // 呼び出しは fail-open で素通りさせず panic する（`find_baseline`
+        // の doc コメント参照。TARGET_SHAPES と BASELINES は 1 対 1 で
+        // 対応する前提が崩れていないことをここで機械的に保証する）。
+        let baseline = find_baseline(m, n, k).unwrap_or_else(|| {
+            panic!(
+                "m={m}, n={n}, k={k} に対応する記録済みベースラインが見つからない \
+                 （TARGET_SHAPES と common::splitk_parity_baseline::BASELINES の対応が \
+                 崩れている。baseline 行の追加は実機実測とセットでユーザー承認が必要）"
+            )
+        });
+
         // `should_split_k`（自動判定）が算出する計画をそのまま
         // `_with_plan`（`SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲート対象外）
         // へ明示的に渡す。対象形状はいずれも `should_split_k` が `Some`
@@ -169,14 +190,34 @@ fn split_k_matches_classic_and_cpu_reference_for_target_shapes_and_transpose_pat
             );
 
             let actual = c_buf.read_to_vec();
-            assert_parity(
-                &format!(
-                    "split-K parity vs CPU reference (trans_a={trans_a}, trans_b={trans_b}, \
-                     m={m}, n={n}, k={k})"
-                ),
-                &actual,
-                &expected,
+            let report = compare(&actual, &expected).unwrap_or_else(|e| {
+                panic!(
+                    "parity compare failed (trans_a={trans_a}, trans_b={trans_b}, m={m}, n={n}, \
+                     k={k}): {e}"
+                )
+            });
+
+            // #1474 実測時の survey ログ（`docs/perf/logs/metal-gemm-
+            // splitk-two-pass-1474/parity_survey_all_shapes.log`）と同一
+            // 形式で 1 行出力する。Mac 実機ログ（`docs/perf/logs/
+            // metal-gemm-splitk-parity-baseline-1512/`）で承認済み
+            // ベースラインとの一致を目視確認できるようにするため
+            // （`--nocapture` 併用が前提）。
+            println!(
+                "m={m} n={n} k={k} trans_a={trans_a} trans_b={trans_b} \
+                 fail_count={}/{} max_abs_diff={:.10} mean_abs_diff={:.10} max_rel_err={:.8}",
+                report.fail_count,
+                report.total,
+                report.max_abs_diff,
+                report.mean_abs_diff,
+                report.max_rel_err
             );
+
+            let context = format!(
+                "split-K parity vs CPU reference (trans_a={trans_a}, trans_b={trans_b}, m={m}, \
+                 n={n}, k={k})"
+            );
+            assert_no_split_k_parity_regression(&context, &report, baseline);
         }
     }
 }

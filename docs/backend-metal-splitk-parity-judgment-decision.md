@@ -192,6 +192,10 @@ ceiling 内に収まる回帰（相対誤差のみが悪化するケース）は
   フラグの値は変更しない
 - **`crates/backend-metal/tests/gemm_splitk_parity.rs` の判定方式切替は別イシュー（#1512）**:
   本ドキュメントの承認（未承認のまま）を踏まえてテストを baseline 方式へ切り替える作業は含まない
+  （**#1512 で切替済み**。承認〈§7〉を受け `assert_no_split_k_parity_regression` 判定へ再切替
+  し、Linux 実行可能な契約テスト `tests/splitk_parity_baseline_contract.rs` を新設した。実機
+  〈Apple M4 Max〉での全形状 pass 確認は本 PR 実行環境の制約により未実施のまま `docs/perf/
+  metal-gemm-splitk-two-pass.md` §5.8 に記入欄を残した。詳細は同 §5.8 を参照）
 - **本ドキュメント自体は `crates/`・`scripts/`・`.github/`・`docs/spec/` を変更しない**: 決定
   記録の draft 作成に閉じる
 
@@ -311,6 +315,8 @@ fail を満たすにもかかわらず、CUDA 先例の形状二分方式では�
 - `docs/spec-proposal-req2-candle-parity-tolerance.md`（spec 起票用本文の書式テンプレート）
 - `crates/backend-metal/tests/common/splitk_parity_baseline.rs`（`BASELINES`・
   `assert_no_split_k_parity_regression` 実装本体。現状未使用のまま維持）
-- `crates/backend-metal/tests/gemm_splitk_parity.rs`（現状: 厳密ゼロ fail 判定。切替は #1512）
+- `crates/backend-metal/tests/gemm_splitk_parity.rs`（**#1512 で baseline 非後退方式へ切替済み**。
+  実機〈Apple M4 Max〉での全形状 pass 確認は未実施のまま `docs/perf/metal-gemm-splitk-two-pass.md`
+  §5.8 に記入欄を残す）
 - `.claude/rules/security.md`「自己修復ループ固有のガードレール」・`.claude/rules/coding-rust.md`
   「テスト・ベンチ」節（本決定記録が draft のまま未承認とすべき根拠）

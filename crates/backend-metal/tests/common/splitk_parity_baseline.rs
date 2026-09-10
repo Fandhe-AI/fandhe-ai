@@ -39,13 +39,28 @@
 //! （`fail_count`・`mean_abs_diff`・`max_abs_diff`・`max_rel_err`）が
 //! 実測ベースラインを上回っていないかのみを検査する。
 //!
+//! **適用拡張の承認状況（イシュー #1511・2026-09-10 ユーザー承認。
+//! `docs/backend-metal-splitk-parity-judgment-decision.md` §7）**:
+//! 上記の TF32/f16 Tensor Core 経路限定だった spec REQ-2 追記の判定
+//! パターンを Metal f32 split-K 経路へ適用拡張してよいこと・対象 11
+//! 形状すべてへ一律に baseline 方式を適用すること（CUDA 先例の形状二分
+//! 方式は不採用）・本モジュール `BASELINES` の 11 行を承認済み ceiling
+//! 値として用いることが承認された。これより緩める「上方更新」は改めて
+//! ユーザー承認が必要（下記 `assert_no_split_k_parity_regression` の doc
+//! コメント参照）。
+//!
 //! 本経路は opt-in・`dispatch_auto` へ未結線のプロトタイプ（イシュー
 //! #1474 のスコープ。性能 A/B は #1475、本番結線可否は #1476 で
 //! **結線しないと確定**〈`docs/backend-metal-splitk-decision.md` §4〉）
 //! であり、本非後退契約は「正しさが実測どおりであること」を機械的に
-//! 固定する目的に限る（現状 PR #1496 の判定方式差し戻しにより本モジュール
-//! 自体は `assert_parity` 経由の判定方式へ差し戻し済みで、未使用のまま
-//! 承認後の再開に備えて維持する）。
+//! 固定する目的に限る。判定方式は PR #1496 の codex-review 指摘を受け
+//! いったん `assert_parity`（厳密ゼロ fail 判定）へ差し戻されたが、上記
+//! 承認を受けてイシュー #1512 で `tests/gemm_splitk_parity.rs` から
+//! 本モジュール経由（`assert_no_split_k_parity_regression`）の判定へ
+//! 再切替済み（`docs/perf/metal-gemm-splitk-two-pass.md` §5.5・§5.8）。
+//! `SPLIT_K_NUMERIC_CONTRACT_APPROVED`（自動判定入口 `dispatch_split_k_
+//! strided_prepared` のゲート）の解除は別イシュー（#1513）のスコープで
+//! 本モジュールの承認範囲外。
 
 #![allow(dead_code)] // テストファイルごとに使う関数が異なるため。
 
@@ -77,8 +92,11 @@ pub struct SplitKParityBaseline {
 /// の表・11 行。`docs/backend-metal-splitk-decision.md` §3 の対象 9 形状 +
 /// K 端数境界 2 形状）。
 ///
-/// 出典: イシュー #1474 実機実測（Apple M4 Max。2026-09-09）。未計測形状の
-/// 行追加は実機実測とセットでのみ行う（推定値の捏造をしない）。
+/// 出典: イシュー #1474 実機実測（Apple M4 Max。2026-09-09）。承認記録:
+/// `docs/backend-metal-splitk-parity-judgment-decision.md` §7 の表
+/// （2026-09-10 ユーザー承認。実測値・ceiling とも本 11 行と一致）・
+/// `docs/perf/metal-gemm-splitk-two-pass.md` §5.3 の全数実測結果表。
+/// 未計測形状の行追加は実機実測とセットでのみ行う（推定値の捏造をしない）。
 pub static BASELINES: &[SplitKParityBaseline] = &[
     SplitKParityBaseline {
         m: 32,
