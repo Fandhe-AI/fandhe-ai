@@ -2245,8 +2245,12 @@ pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
 // `crate::gemm::MetalGemm::dispatch_split_k*`（`gemm.rs`）が担う。性能
 // A/B は #1475（暫定 ADOPT・3/5 run）、本番結線可否は #1476 で確定した
 // （**結線しない**。性能判定 undetermined・数値契約未承認の 2 ブロッカー。
-// `docs/backend-metal-splitk-decision.md` §4。本モジュール・本ファイルは
-// 変更しない）。
+// `docs/backend-metal-splitk-decision.md` §4）。ブロッカー 2（数値契約
+// 未承認）は #1511 の適用拡張承認・#1513 の `SPLIT_K_NUMERIC_CONTRACT_
+// APPROVED=true` 切替で解消済み。ブロッカー 1（性能の正式 ADOPT 判定）
+// は #1515 へ引き継ぎ、`select`/`select_for_device` への本番結線自体は
+// #1516（Phase 2）が担う。本モジュール・本ファイルの選択ロジックは
+// 変更しない。
 
 /// [`should_split_k_with`] の判定パラメータ（MLX steel Case 1 の閾値を
 /// 実行時に差し替え可能にする。既定値は [`SplitKParams::MLX_CASE1_M4_MAX`]）。

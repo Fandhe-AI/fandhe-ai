@@ -290,3 +290,35 @@ fn assert_no_split_k_parity_regression_panics_on_max_rel_err_regression() {
     let report = synthetic_report(&a, &b);
     assert_no_split_k_parity_regression("synthetic max_rel_err", &report, &baseline);
 }
+
+/// イシュー #1513: `SPLIT_K_NUMERIC_CONTRACT_APPROVED` を `true` へ切り替え
+/// 済みのため、`MetalGemm::dispatch_split_k_strided_prepared`（自動判定
+/// 入口）は `crate::tile::should_split_k` が `Some` を返す形状で実際に
+/// split-K 経路（`SplitKRoute::Split`）を実行するようになった。この
+/// 前提が崩れていないこと（承認済み `BASELINES` 11 形状 ⊂
+/// `should_split_k` の `Some` 集合であること）を Linux で機械的に固定
+/// する。macOS 実機での公開入口自体の到達確認（`SplitKRoute::Split` を
+/// 実際に返すこと）は `tests/gemm_splitk_auto_entry_parity.rs`（`#[ignore]`）
+/// が担う。
+#[test]
+fn approved_baseline_shapes_are_split_k_eligible() {
+    for b in BASELINES {
+        let plan = fandhe_ai_backend_metal::should_split_k(b.m, b.n, b.k).unwrap_or_else(|| {
+            panic!(
+                "承認済み形状 (m={}, n={}, k={}) で should_split_k が None を返した \
+                     （BASELINES と自動判定条件の前提が崩れている。baseline 行の追加・\
+                     `should_split_k` の判定条件変更は実機実測とセットでユーザー承認が必要）",
+                b.m, b.n, b.k
+            )
+        });
+        assert!(
+            plan.partitions >= 2,
+            "(m={}, n={}, k={}): should_split_k が返した partitions({}) が 2 未満（split-K \
+             として機能する分割数の前提が崩れている）",
+            b.m,
+            b.n,
+            b.k,
+            plan.partitions
+        );
+    }
+}

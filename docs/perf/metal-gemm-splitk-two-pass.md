@@ -263,6 +263,98 @@ parity-baseline-1512/`（`run_parity.sh`・事前登録判定規則・README）�
 記録済みベースライン ceiling 以下であることの確認結果、(b) §5.3 の表との実測値差分の有無、
 (c) `uptime_during.log` から見た load average 推移。
 
+### 5.9 公開入口の数値契約ゲート解除（イシュー #1513。2026-09-10）
+
+§5.8 で判定方式を承認済み baseline 非後退方式へ再切替した後、本イシューで残る作業
+（`SPLIT_K_NUMERIC_CONTRACT_APPROVED` の `true` への切り替え）を実施した。
+
+**切替内容**: `crates/backend-metal/src/gemm.rs:135`（現在値。切替前は `false`）を
+`false` → `true` へ変更した。これに伴い `dispatch_split_k_strided_prepared`（自動判定
+入口）は `crate::tile::should_split_k` が `Some` を返す形状（承認済み 11 形状を含む）で
+実際に split-K 2 パス経路（`SplitKRoute::Split`）を実行するようになり、`None` を返す
+形状のみ classic 経路（`SplitKFallbackReason::NotEligible`）へフォールバックする。
+承認出典は `docs/backend-metal-splitk-parity-judgment-decision.md` §7（2026-09-10
+ユーザー承認: 適用拡張可・全 11 形状一律 baseline・`BASELINES` 11 行承認）。
+
+**保持した公開 API（後方互換）**: `SplitKFallbackReason::NumericContractPendingApproval`
+variant は crates.io 公開済みクレート（`fandhe-ai-backend-metal`）の public enum である
+ため削除しない（破壊的変更を避ける）。doc comment を「承認済みのため現在は到達しない・
+後方互換のため保持」へ書き換えた。ゲート解除後、本 variant を実際に返す経路はコード上
+存在しない（`gemm.rs::dispatch_split_k_strided_prepared` の分岐は
+`SPLIT_K_NUMERIC_CONTRACT_APPROVED` が `true` の場合 `NotEligible` のみを使う）。
+
+**本番経路は不変**: `dispatch_auto`／`crate::tile::select_for_device` への結線は本
+イシューのスコープ外（#1516・Phase 2 へ引き継ぎ）。`crate::ops::MetalBackendOps::gemm`
+（`dispatch_auto` が担う本番経路）は `dispatch_split_k_strided_prepared` を呼ばない
+ことを実装時点で確認済み:
+
+```
+$ grep -rn "dispatch_split_k_strided_prepared" crates/backend-metal/src/ops.rs
+（出力なし）
+```
+
+したがって本切替は `MetalBackendOps::gemm` の挙動・性能に一切影響しない。
+
+**framework-compare A/B**: 「計測対象なし」と判断した。本番経路（`dispatch_auto`・
+`MetalBackendOps::gemm`）へのコード変更がゼロであるため（上記出力参照）、
+#1272 §5.11・#1476 の先例（本番結線なしの変更は framework-compare 計測対象なし）と
+同型の判断。
+
+**新規テスト**:
+- `crates/backend-metal/tests/splitk_parity_baseline_contract.rs::
+  approved_baseline_shapes_are_split_k_eligible`（Linux 実行可能・CI 対象）:
+  承認済み `BASELINES` 11 行すべてについて `should_split_k(m, n, k)` が `Some` を
+  返し `partitions >= 2` であることを assert する（ゲート解除後の公開入口が split-K
+  経路を実行する前提となる純関数部分の集合レベル検査）。
+- `crates/backend-metal/tests/gemm_splitk_auto_entry_parity.rs`（`#![cfg(target_os =
+  "macos")]`・`#[ignore]`・`required-features` なし）: 公開入口
+  `dispatch_split_k_strided_prepared` 自体を直接呼ぶ受け入れテスト 2 件。
+  - `auto_entry_dispatches_split_k_for_eligible_shapes_and_matches_baseline`:
+    承認済み 11 形状 × NN/NT/TN/TT で戻り値が `SplitKRoute::Split` であること・
+    `partitions` が `should_split_k` の算出値と一致すること・出力が
+    `assert_no_split_k_parity_regression` を満たすことを確認する。
+  - `auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes`:
+    `should_split_k` が `None` を返す形状（`(512,512,512)`・`(64,64,63)`）で
+    公開入口が `SplitKRoute::Classic { reason: NotEligible }` を返し
+    （`NumericContractPendingApproval` では**ない**ことを直接 assert）、CPU 参照
+    実装と bit 完全一致することを確認する。
+
+`required-features` を指定しない設計により、両テストは
+`cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`
+の型検査対象に含まれる（`required-features` 付きテストが同ターゲットの型検査
+対象に含まれないという #1526 の観察〈`docs/backend-metal-splitk-parity-judgment-
+decision.md` 系の教訓〉を本テストでは回避する）。
+
+**Linux 相当チェック結果**（実装時点）:
+
+```
+cargo fmt --all --check                      … green
+cargo clippy -p fandhe-ai-backend-metal \
+  --all-targets --all-features -- -D warnings  … green
+cargo test -p fandhe-ai-backend-metal --all-features … green（新規 1 件含む Linux 実行対象）
+cargo check -p fandhe-ai-backend-metal --tests \
+  --target aarch64-apple-darwin (+ --all-features) … green（新規 #[ignore] 2 件の型検査含む）
+make check-cross-metal-tests / check-cross-cpu-tests / doc-warnings / test / deps-forbidden … green
+```
+
+（`cargo clippy --workspace --all-targets --all-features` は本実行環境で `backend-cuda`
+側の無関係な pre-existing エラーにより失敗するため、§5.8 と同様変更を除いても同一エラーが
+再現することを確認したうえで `-p fandhe-ai-backend-metal` 限定の結果を正とする。）
+
+**M4 Max 実機実測（本イシュー #1513 記入欄）**: 未実測。`docs/perf/logs/metal-gemm-
+splitk-auto-entry-1513/`（`run_auto_entry.sh`・事前登録判定規則・README）を用意し、
+Mac セッションでの実行を申し送る。実測完了後、本節へ以下を追記する:
+
+(a) 新規 `#[ignore]` テスト `auto_entry_dispatches_split_k_for_eligible_shapes_and_
+    matches_baseline` が 11 形状 × 4 パターン = 44 組合せすべてで `SplitKRoute::Split`
+    へ到達し、記録済みベースライン ceiling 以下であることの確認結果
+(b) `auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes` が
+    非対象形状で `NotEligible`（`NumericContractPendingApproval` ではない）を返す
+    ことの確認結果
+(c) 既存 `gemm_splitk_bit_match.rs`（`classic_dispatch_auto_remains_run_to_run_bit_
+    exact_after_split_k_addition` を含む）・`gemm_splitk_parity.rs` の非後退確認結果
+(d) `uptime_during.log` から見た load average 推移
+
 ## 6. AC-5: 本番経路の非後退確認
 
 `tile::select`／`select_for_device`／`select_with_occupancy_for_device`・`MetalGemm::new`／
