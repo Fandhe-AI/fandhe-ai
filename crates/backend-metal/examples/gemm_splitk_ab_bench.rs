@@ -380,8 +380,8 @@ fn env_guard_result_label(gated: bool, overall: bench_harness::ab::GuardVerdict)
 mod macos_impl {
     use super::{
         CliArgs, KIND_CONTROL, KIND_CONTROL_FORCED, KIND_TARGET, KIND_TARGET_TILE, bit_equal,
-        control_shapes, floor_shapes, format_ab_line, format_floor_line, parse_args_from,
-        target_shapes,
+        control_shapes, floor_shapes, format_ab_line, format_floor_line, format_phase0_target_line,
+        parse_args_from, target_shapes,
     };
     use bench_harness::BenchError;
     use bench_harness::MeasurementConfig;

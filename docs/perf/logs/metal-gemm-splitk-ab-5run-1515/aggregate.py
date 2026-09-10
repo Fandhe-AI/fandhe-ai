@@ -436,9 +436,27 @@ def aggregate(
     """複数 run のログテキストを集約する。`gate_mode` は
     `check_env_guard` へそのまま渡す（イシュー #1515）。戻り値の構造は
     `metal-gemm-splitk-ab-1475/aggregate.py::aggregate` と同型。
+
+    イシュー #1529 codex-review P2 指摘: `n_runs >= MIN_FORMAL_RUNS`
+    （旧実装）では 6 run 以上を入力しても全入力の中央値で正式判定
+    （ADOPT/REJECT）が出力されてしまい、`docs/perf/metal-gemm-splitk-ab.md`
+    §10.2 の「5 run 中央値・5/5 run」契約（ちょうど 5 run を対象とする
+    事前登録規則）と一致しない。6 run 以上は「差し替え・選別の余地」
+    （都合の悪い run を後から追加で薄めて上書きする等）を生むため、
+    undetermined へ格下げするのではなく fail-closed にエラー終了する
+    （呼び出し側に「ちょうど 5 run のみを渡す」ことを強制する）。
     """
     if gate_mode not in GATE_MODES:
         raise ValueError(f"gate_mode は {GATE_MODES} のいずれかである必要がある: {gate_mode}")
+    if len(logs) > MIN_FORMAL_RUNS:
+        raise ValueError(
+            f"入力 run 数が {len(logs)} 件で正式確定の対象（ちょうど "
+            f"{MIN_FORMAL_RUNS} run）を超過している。§10.2 は 5 run 中央値・"
+            f"5/5 run 判定を前提とするため、6 run 以上の入力は差し替え・"
+            f"選別の余地を生み判定の恣意性を排除できない（undetermined へ"
+            f"格下げせず fail-closed にエラー終了する）。超過分を除いた "
+            f"ちょうど {MIN_FORMAL_RUNS} run のみを渡すこと。"
+        )
 
     shapes: dict[tuple[str, int, int, int], ShapeSamples] = {}
     any_undetermined = False
@@ -849,6 +867,17 @@ def self_test() -> None:
     assert "**undetermined**" in t_md, t_md
     assert "MIN_FORMAL_RUNS" in t_md, t_md
 
+    # イシュー #1529 codex-review P2 指摘の回帰: 6 run（`MIN_FORMAL_RUNS=5`
+    # 超過）は undetermined へ格下げせず fail-closed にエラー終了する
+    # （§10.2 の「ちょうど 5 run」契約。超過は差し替え・選別の余地を
+    # 生むため undetermined より拒否が望ましい）。
+    six_runs = [make_run() for _ in range(6)]
+    try:
+        aggregate(six_runs, gate_mode="record_only")
+        raise AssertionError("6 run（MIN_FORMAL_RUNS 超過）で例外が出なかった")
+    except ValueError as e:
+        assert "6" in str(e) and "超過" in str(e), str(e)
+
     # --monitor-logs の集計（load1 の min/median/max）。
     import tempfile
     import os
@@ -971,7 +1000,11 @@ def main() -> None:
         with open(p, "r", encoding="utf-8") as f:
             logs.append(f.read())
 
-    shapes, any_undetermined, violations = aggregate(logs, gate_mode=gate_mode)
+    try:
+        shapes, any_undetermined, violations = aggregate(logs, gate_mode=gate_mode)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
     monitor_summaries = summarize_monitor_logs(monitor_paths) if monitor_paths else None
     print(
         render_markdown(

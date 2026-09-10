@@ -403,7 +403,10 @@ speedup の主因ではないことも確認した。
   よる計測のため、本 `aggregate.py` の正式な checksum 一致検査対象外
   （bits 欠落で undetermined 扱い）であり、当時の判定は
   `docs/perf/logs/metal-gemm-splitk-ab-1475/aggregate.md`（旧
-  aggregate.py 出力）を正とする。
+  aggregate.py 出力）を正とする。**正式判定の対象は入力がちょうど 5 run
+  の場合に限る**（6 run 以上は差し替え・選別の余地を生むため、
+  undetermined ではなく `aggregate.py` が fail-closed にエラー終了する。
+  イシュー #1529）。
 - 負荷推移（`runN_monitor.log` の load1 min/median/max）・並走プロセス
   件数は**情報としてのみ**記録し、判定（ADOPT/REJECT/undetermined）へは
   影響させない。
