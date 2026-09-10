@@ -326,6 +326,11 @@ speedup の主因ではないことも確認した。
 `SPLIT_K_NUMERIC_CONTRACT_APPROVED=false` を維持する。判定根拠は
 `docs/backend-metal-splitk-decision.md` §4 を正とし、本節では要点のみ記す。
 
+**追記（イシュー #1513。2026-09-10）**: `SPLIT_K_NUMERIC_CONTRACT_APPROVED` は #1513 で
+`true` へ切替済み（数値契約ブロッカーの解消。`docs/perf/metal-gemm-splitk-two-pass.md`
+§5.9）。本節の「結線しない」判断自体は性能ブロッカー（本節が確定した undetermined 判定）
+により不変で、`select_for_device`／`dispatch_auto` への本番結線は #1516 へ引き継ぐ。
+
 - 本ドキュメント §0 の「暫定 ADOPT」は人間側の解釈であり、機械判定（`aggregate.md` の
   `verdict`）は `undetermined`（`n_runs=3 < MIN_FORMAL_RUNS=5`。PR #1499 の codex-review P1
   対応で 5 run 未満は正式 ADOPT/REJECT を出力しない仕様）。Issue #1476 の結線条件「#1475 が

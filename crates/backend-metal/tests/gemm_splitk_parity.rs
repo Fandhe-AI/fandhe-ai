@@ -42,11 +42,12 @@
 //! `dispatch_split_k_strided_prepared_with_plan`（`tests/
 //! gemm_splitk_bit_match.rs`〈AC-1〉と同じ明示計画版。`gemm.rs::
 //! SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートの対象外）へ直接渡す。
-//! 自動判定入口 `dispatch_split_k_strided_prepared`（ゲート未承認の間は
-//! 常に classic 経路へフォールバックする。PR #1496 codex-review P1
-//! 指摘・`gemm.rs` 該当ドキュメンテーションコメント参照）は本テストの
-//! 対象外で、split-K 経路自体の正しさ検証には明示計画版を使う。ゲート
-//! 解除自体は別イシュー（#1513）のスコープ。
+//! 自動判定入口 `dispatch_split_k_strided_prepared`（イシュー #1513 で
+//! `SPLIT_K_NUMERIC_CONTRACT_APPROVED` を `true` へ切替済み・ゲート解除
+//! 完了。`gemm.rs` 該当ドキュメンテーションコメント参照）は本テストの
+//! 対象外で、split-K 経路自体の正しさ検証には明示計画版を使う。公開
+//! 入口自体の到達確認は `tests/gemm_splitk_auto_entry_parity.rs`
+//! （#1513 で新設）が担う。
 //!
 //! いずれのケースも戻り値が `SplitKRoute::Split` であることを assert し、
 //! フォールバック（classic 経路）による自明合格を排除する。

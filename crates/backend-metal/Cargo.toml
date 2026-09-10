@@ -75,6 +75,10 @@ objc2-metal.workspace = true
 # `tests/gemm_splitk_parity.rs`（`[[test]]` セクションで `required-features`
 # 指定）のみが本 feature 経由で到達できる（`gemm.rs::MetalGemm::
 # dispatch_split_k_strided_prepared_with_plan` の doc コメント参照）。
+# 自動判定入口 `dispatch_split_k_strided_prepared`（`required-features` の
+# 指定なし・既定ビルドで `pub`）自体の数値契約ゲートはイシュー #1513 で
+# 解除済み（本 feature とは独立。`gemm.rs::SPLIT_K_NUMERIC_CONTRACT_
+# APPROVED` 参照）。
 internal-diagnostics = []
 
 [dev-dependencies]

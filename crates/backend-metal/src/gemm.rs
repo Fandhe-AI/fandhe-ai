@@ -114,25 +114,43 @@ thread_local! {
 }
 
 /// split-K 自動判定入口（[`MetalGemm::dispatch_split_k_strided_prepared`]）
-/// の数値契約承認ゲート。`false`（既定）の間は `should_split_k` が
-/// `Some` を返す形状であっても常に classic 経路へフォールバックする
-/// （[`SplitKFallbackReason::NumericContractPendingApproval`]）。
+/// の数値契約承認ゲート。
 ///
-/// 実機実測（`docs/perf/metal-gemm-splitk-two-pass.md` §5）で、split-K
-/// はパーティション分割の結合順序差に起因する丸め誤差により対象 11
-/// 形状中 8 形状が REQ-2 統一複合判定（相対誤差 1e-3 未満または絶対
-/// 誤差 1e-5 未満）の厳密ゼロ fail を満たさないと判明した。この誤差は
-/// 入力データにも依存する（近ゼロ要素での相対誤差外れ値）ため、形状
-/// 単位の allowlist では数値契約を機構的に保証できない。CUDA 側
-/// TF32/f16 経路（spec REQ-2 2026-09-02 追記）と同型の実測ベースライン
-/// 非後退方式への適用拡張は、`.claude/rules/coding-rust.md`「バック
-/// エンド間数値一致テストの許容誤差を単独で緩和しない」原則により
-/// ユーザー承認が必要（PR #1496 codex-review P1 指摘。イシュー
-/// #1474）。承認を得た場合のみ `true` へ切り替える（`_with_plan` 系は
-/// このゲートの対象外。AC-1／診断テスト専用の明示入口として維持する）。
-/// 承認依頼の要点（適用拡張の可否・`BASELINES` 具体値・適用順序）は
-/// #1476 で整理済み（`docs/backend-metal-splitk-decision.md` §4）。
-pub(crate) const SPLIT_K_NUMERIC_CONTRACT_APPROVED: bool = false;
+/// **承認記録（イシュー #1513。2026-09-10）**: 実機実測（`docs/perf/
+/// metal-gemm-splitk-two-pass.md` §5）で、split-K はパーティション分割の
+/// 結合順序差に起因する丸め誤差により対象 11 形状中 8 形状が REQ-2 統一
+/// 複合判定（相対誤差 1e-3 未満または絶対誤差 1e-5 未満）の厳密ゼロ fail
+/// を満たさないと判明していた。この誤差は入力データにも依存する（近ゼロ
+/// 要素での相対誤差外れ値）ため、形状単位の allowlist では数値契約を
+/// 機構的に保証できず、CUDA 側 TF32/f16 経路（spec REQ-2 2026-09-02
+/// 追記）と同型の実測ベースライン非後退方式への適用拡張が
+/// `.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容
+/// 誤差を単独で緩和しない」原則によりユーザー承認事項だった（PR #1496
+/// codex-review P1 指摘。イシュー #1474）。イシュー #1511 で適用拡張・
+/// `BASELINES` 11 行の ceiling 値がユーザー承認され
+/// （`docs/backend-metal-splitk-parity-judgment-decision.md` §7・
+/// 2026-09-10）、本定数を `true` へ切り替えた。
+///
+/// `true`（現在値）の間は `should_split_k` が `Some` を返す形状で本入口
+/// が実際に split-K 2 パス経路（[`SplitKRoute::Split`]）を実行し、`None`
+/// を返す形状のみ classic 経路（[`SplitKFallbackReason::NotEligible`]）
+/// へフォールバックする。split-K 経路の正しさは
+/// `crate::tests::common::splitk_parity_baseline`（実測ベースライン
+/// 非後退契約）が担保し、tolerance 定数自体は変更しない。
+///
+/// **残るブロッカー（本定数とは独立）**: `dispatch_auto`／
+/// `crate::tile::select_for_device` への結線（性能上デフォルト経路と
+/// して選ばれるようにする変更）は本イシューのスコープ外で #1516
+/// （Phase 2）へ引き継ぐ。それまで split-K は本関数を明示的に呼んだ
+/// 場合にのみ発火する opt-in のままであり、`MetalBackendOps::gemm` の
+/// 挙動・性能は本切替の前後で変化しない（`crate::ops` は本関数を
+/// 呼ばない）。
+///
+/// **`false` へ戻す条件**: `BASELINES` の ceiling を緩める「上方更新」
+/// など、`docs/backend-metal-splitk-parity-judgment-decision.md` §7 の
+/// 承認範囲を超える変更が必要になった場合は、再度ユーザー承認を得るまで
+/// 本定数を `false` へ差し戻す。
+pub(crate) const SPLIT_K_NUMERIC_CONTRACT_APPROVED: bool = true;
 
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
 ///
@@ -615,21 +633,19 @@ pub enum SplitKFallbackReason {
     /// の構築が失敗した（デバイス上限超過等。フォールバック chain を
     /// 使い切った場合を含む）。
     PipelineBuild,
-    /// split-K の数値契約（REQ-2 統一複合判定）が未承認のため、
-    /// `crate::tile::should_split_k` が `Some` を返す形状であっても
+    /// **後方互換のため保持（イシュー #1513 でゲート解除済み・現在は
+    /// 到達しない）**: split-K の数値契約（REQ-2 統一複合判定）が未承認
+    /// の間、`crate::tile::should_split_k` が `Some` を返す形状であっても
     /// `MetalGemm::dispatch_split_k_strided_prepared`（自動判定入口）が
-    /// classic 経路へ強制フォールバックした（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`
-    /// が `false` の間）。実機実測（`docs/perf/metal-gemm-splitk-two-pass.md`
-    /// §5）で split-K はパーティション分割の結合順序差に起因する丸め
-    /// 誤差により対象形状の大半が REQ-2 統一複合判定（相対誤差 1e-3
-    /// 未満または絶対誤差 1e-5 未満）の厳密ゼロ fail を満たさないと
-    /// 判明しており、`.claude/rules/coding-rust.md`「バックエンド間数値
-    /// 一致テストの許容誤差を単独で緩和しない」原則によりユーザー承認
-    /// なしに緩和判定（実測ベースライン非後退方式）を適用できない
-    /// （PR #1496 codex-review P1 指摘。イシュー #1474）。承認が得られる
-    /// までは自動判定入口を常に classic 経路へ倒し、公開入口が数値契約
-    /// を満たさない結果を成功として返さないようにする。`_with_plan` 系
-    /// （明示的な計画指定・AC-1／診断テスト専用）はこのゲートの対象外。
+    /// classic 経路へ強制フォールバックしていた際に使われていた variant
+    /// （`SPLIT_K_NUMERIC_CONTRACT_APPROVED` が `false` の間。経緯は
+    /// `docs/perf/metal-gemm-splitk-two-pass.md` §5・イシュー #1474）。
+    /// イシュー #1511 で適用拡張・`BASELINES` がユーザー承認され、#1513
+    /// で `SPLIT_K_NUMERIC_CONTRACT_APPROVED` を `true` へ切り替えたため、
+    /// 本 variant は本入口からは到達しなくなった。crates.io 公開済みの
+    /// `fandhe-ai-backend-metal` の public enum の破壊的変更（variant
+    /// 削除）を避けるため保持する。`should_split_k` が `None` を返す
+    /// 形状は [`SplitKFallbackReason::NotEligible`] を使う。
     NumericContractPendingApproval,
 }
 
@@ -2269,22 +2285,33 @@ impl MetalGemm {
     /// `docs/perf/metal-gemm-splitk-two-pass.md` §5 の実機実測により、
     /// split-K はパーティション分割の結合順序差に起因する丸め誤差で
     /// 対象形状の大半（11 形状中 8 形状）が REQ-2 統一複合判定の厳密
-    /// ゼロ fail を満たさないと判明している。この誤差は入力データにも
+    /// ゼロ fail を満たさないと判明していた。この誤差は入力データにも
     /// 依存する（近ゼロ要素での相対誤差外れ値）ため、形状単位の
-    /// allowlist では数値契約を機構的に保証できない。よって
-    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` が `false` の間は
-    /// `should_split_k` が `Some` を返す形状であっても本入口は常に
-    /// classic 経路へフォールバックし（[`SplitKFallbackReason::
-    /// NumericContractPendingApproval`]）、数値契約を満たさない結果を
-    /// 成功として返さない（PR #1496 codex-review P1 指摘。適用拡張・
-    /// 具体的な baseline 値の承認を得た場合のみ `true` へ切り替える）。
-    /// `_with_plan` 系（明示的な計画指定・AC-1／診断テスト専用）は
-    /// 本フラグ（数値契約ゲート）の対象外で、承認前でも split-K 経路を
-    /// 明示的に検証できる。ただしクレート外部からの無条件到達を防ぐ
-    /// 別の可視性ゲート（`internal-diagnostics` feature。PR #1496
-    /// codex-review P1 再指摘対応）を持つ。詳細は
+    /// allowlist では数値契約を機構的に保証できず、CUDA 側 TF32/f16
+    /// 経路と同型の実測ベースライン非後退方式への適用拡張がユーザー
+    /// 承認事項だった（PR #1496 codex-review P1 指摘。イシュー
+    /// #1474）。イシュー #1511 で適用拡張・`BASELINES` 11 行がユーザー
+    /// 承認され、**イシュー #1513 で `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
+    /// を `true` へ切り替え済み**。よって本入口は現在、`should_split_k`
+    /// が `Some` を返す形状では実際に split-K 経路を実行し
+    /// （[`SplitKRoute::Split`]）、`None` を返す形状のみ classic 経路へ
+    /// フォールバックする（[`SplitKFallbackReason::NotEligible`]）。
+    /// split-K 経路の正しさは呼び出し側が
+    /// `crate::tests::common::splitk_parity_baseline`（実測ベースライン
+    /// 非後退契約）で検証する。`_with_plan` 系（明示的な計画指定・
+    /// AC-1／診断テスト専用）は本フラグ（数値契約ゲート）の対象外で、
+    /// `should_split_k` の自動判定を経ずに任意の `plan` を直接検証
+    /// できる。クレート外部からの無条件到達を防ぐ別の可視性ゲート
+    /// （`internal-diagnostics` feature。PR #1496 codex-review P1
+    /// 再指摘対応）を持つ。詳細は
     /// `Self::dispatch_split_k_strided_prepared_with_plan` doc
     /// コメント参照。
+    ///
+    /// **本番結線は未実施（本関数のゲート解除とは独立のスコープ）**:
+    /// `dispatch_auto`／`crate::tile::select_for_device` への結線は
+    /// #1516（Phase 2）へ引き継ぎ、`MetalBackendOps::gemm` の挙動・
+    /// 性能は本切替の前後で変化しない（`crate::ops` は本関数を呼ばない。
+    /// `docs/backend-metal-splitk-decision.md` §4）。
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_split_k_strided_prepared(
         &self,
@@ -2359,18 +2386,22 @@ impl MetalGemm {
     /// codex-review P1 指摘対応）**: 本関数自体は `should_split_k` の
     /// 自動判定・[`Self::dispatch_split_k_strided_prepared`] の
     /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートを経由しないため、
-    /// `plan` を直接構築して渡せば split-K を無条件に実行できてしまう
-    /// （`docs/perf/metal-gemm-splitk-two-pass.md` §5 の未承認形状を
-    /// 含む）。よって `encode_tiled_prepared`（イシュー #1259。
-    /// `Cargo.toml` の `internal-diagnostics` feature コメント参照）と
-    /// 同じ 2 分岐構成を採る: `internal-diagnostics` feature（既定 OFF）
-    /// を有効化したビルドでのみ `pub`（AC-1 実機テスト
-    /// `tests/gemm_splitk_bit_match.rs`／`tests/gemm_splitk_parity.rs`
-    /// が `required-features` 経由で要求する）とし、既定ビルドでは
-    /// `pub(crate)` に絞ってクレート外部から到達不能にする（`Self::
-    /// dispatch_split_k_strided_prepared` からの内部呼び出しは両分岐
-    /// とも可能）。crates.io 公開クレートの利用者が数値契約ゲートを
-    /// 迂回して split-K を直接起動できる恒久的な公開 API 面を作らない。
+    /// `plan` を直接構築して渡せば `should_split_k` の判定条件外の
+    /// 任意 `(m, n, k, partitions)` の組合せでも split-K を実行できて
+    /// しまう（`docs/perf/metal-gemm-splitk-two-pass.md` §5 で実測済みの
+    /// 11 形状の外側は正しさが未検証）。よって `encode_tiled_prepared`
+    /// （イシュー #1259。`Cargo.toml` の `internal-diagnostics` feature
+    /// コメント参照）と同じ 2 分岐構成を採る: `internal-diagnostics`
+    /// feature（既定 OFF）を有効化したビルドでのみ `pub`（AC-1 実機
+    /// テスト `tests/gemm_splitk_bit_match.rs`／`tests/gemm_splitk_
+    /// parity.rs` が `required-features` 経由で要求する）とし、既定
+    /// ビルドでは `pub(crate)` に絞ってクレート外部から到達不能にする
+    /// （`Self::dispatch_split_k_strided_prepared` からの内部呼び出しは
+    /// 両分岐とも可能）。イシュー #1513 で
+    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` が `true` へ切り替わった後も、
+    /// crates.io 公開クレートの利用者が実測済み形状の外側で split-K を
+    /// 直接起動できる恒久的な公開 API 面を作らないという可視性ゲート
+    /// 自体の目的は変わらない。
     #[cfg(feature = "internal-diagnostics")]
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_split_k_strided_prepared_with_plan(

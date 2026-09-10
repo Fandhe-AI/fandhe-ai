@@ -59,8 +59,10 @@
 //! 本モジュール経由（`assert_no_split_k_parity_regression`）の判定へ
 //! 再切替済み（`docs/perf/metal-gemm-splitk-two-pass.md` §5.5・§5.8）。
 //! `SPLIT_K_NUMERIC_CONTRACT_APPROVED`（自動判定入口 `dispatch_split_k_
-//! strided_prepared` のゲート）の解除は別イシュー（#1513）のスコープで
-//! 本モジュールの承認範囲外。
+//! strided_prepared` のゲート）の解除はイシュー #1513 で完了済み
+//! （`true` へ切替。`docs/perf/metal-gemm-splitk-two-pass.md` §5.9）。
+//! `select_for_device`／`dispatch_auto` への本番結線自体は別イシュー
+//! #1516 へ引き継ぐ（本モジュールの承認範囲外のまま）。
 
 #![allow(dead_code)] // テストファイルごとに使う関数が異なるため。
 

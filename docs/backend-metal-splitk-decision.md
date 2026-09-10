@@ -204,6 +204,12 @@ should_split_k`／`MetalGemm::dispatch_split_k_strided_prepared`・診断入口 
 - (c) 承認後の適用順序: (a)(b) の承認 → `SPLIT_K_NUMERIC_CONTRACT_APPROVED=true` へ切替 →
   結線
 
+**イシュー #1513 で「切替」段階を完了した**: `SPLIT_K_NUMERIC_CONTRACT_APPROVED` を `true` へ
+切り替え、自動判定入口 `dispatch_split_k_strided_prepared` のゲートを解除した（`docs/perf/
+metal-gemm-splitk-two-pass.md` §5.9）。ブロッカー 2（数値契約）は解消済み。残る「結線」
+段階（`select_for_device`／`dispatch_auto` への本番結線）はブロッカー 1（性能の正式 ADOPT
+判定）が未解消のため実施しない。本節見出しの「結線しない」判断自体は #1513 時点でも不変。
+
 ### 再開条件・結線案メモ（コード変更なし）
 
 結線位置は `MetalBackendOps::gemm`（`crates/backend-metal/src/ops.rs`）または

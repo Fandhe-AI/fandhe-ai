@@ -298,8 +298,9 @@ fail を満たすにもかかわらず、CUDA 先例の形状二分方式では�
   | (128, 128, 2064) | 16384 | 2 | 9.13e-6 → 1.0e-5 | 1.22e-4 → 1.3e-4 | 1.31e-1 → 0.14 |
 - **tolerance 定数**（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）は不変
 - **spec 起票**: §6 の本文案で Fandhe-AI/fandhe-ai-spec#65 として起票済み（2026-09-10）
-- 後続: 判定方式の切替は #1512、`SPLIT_K_NUMERIC_CONTRACT_APPROVED` の解除・本番結線は #1513
-  （いずれも本承認後に着手）
+- 後続: 判定方式の切替は #1512（完了）、`SPLIT_K_NUMERIC_CONTRACT_APPROVED` の解除は #1513
+  （完了。ゲート解除済み。`docs/perf/metal-gemm-splitk-two-pass.md` §5.9）。`select_for_device`／
+  `dispatch_auto` への本番結線自体は別イシュー #1516（Phase 2）へ引き継ぐ
 
 ## 8. 関連
 
