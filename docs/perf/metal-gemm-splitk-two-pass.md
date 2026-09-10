@@ -159,6 +159,11 @@ splitk_parity_baseline.rs::BASELINES` の実測データ・`assert_no_split_k_pa
 具体的な baseline 値の承認を得た場合は、判定方式を再度実測ベースライン非後退方式へ切り替える
 （tolerance 定数自体は §5.1 のとおり変更しない）。
 
+適用拡張の是非は `docs/backend-metal-splitk-parity-judgment-decision.md`（イシュー #1511）で
+決定記録 draft 化した（候補比較・推奨〈baseline 非後退方式・全 11 形状一律適用〉・spec 起票用
+本文案を整理。承認記録は draft 作成時点では未承認のまま。承認され次第、判定方式の切替は
+別イシュー #1512、`SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲート解除は別イシュー #1513 で扱う）。
+
 ### 5.6 公開入口の数値契約ゲート（PR #1496 codex-review P1 指摘・再対応。2026-09-09）
 
 §5.5 の差し戻しは受け入れテスト（`#[ignore]`・CI 非実行）の判定方式のみを対象としており、
