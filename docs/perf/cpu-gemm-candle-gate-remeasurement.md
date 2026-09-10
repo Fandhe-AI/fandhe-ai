@@ -2756,7 +2756,7 @@ DGX 正式系列は 3 形状すべてで §22 正式系列（`0.7.0-1321`）か�
   0.8.0-1488.jsonl`（各 45 行）・`manifest-{dgx,m4max}-cpu-gemm-gate-0.8.0-1488.json`・
   `skipped-{dgx,m4max}-cpu-gemm-gate-0.8.0-1488.log`（各空）
 - `scripts/bench/framework-compare/results/summary.md` 環境 29 節
-- `docs/performance-targets.md` §8.14
+- `docs/performance-targets.md` §8.15
 
 ### 24.10 PR #1506 是正: 専有ゲート経過時間上限の是正・M4 Max 独立再計測
 
@@ -2846,7 +2846,7 @@ attempt=9 の直前で「次の待機 681 秒 > 残り 260 秒」により短縮
   未達）は本是正の対象外であり不変
 - **#1283 のクローズ可否**: 確定しているのは DGX N=2048 の達成のみであり、
   M4 Max 分は未確定のため、引き続きクローズしない
-- `docs/performance-targets.md` §8.14・`scripts/bench/framework-compare/
+- `docs/performance-targets.md` §8.15・`scripts/bench/framework-compare/
   results/summary.md` 環境 29 節・`CLAUDE.md` の該当箇所は本節の結論に揃えて
   更新済み
 
