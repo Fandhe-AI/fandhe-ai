@@ -2263,3 +2263,35 @@ CPU の同一 raw JSONL から `fresh` を再集計した参考行（受け入�
 ノイズと判断する。詳細・帰属表・参考系列未計測の経緯は
 `docs/perf/metal-gemm-candle-gate-remeasurement.md` §14、生データ・実行ログは
 `docs/perf/logs/metal-gemm-candle-gate-1309/` を参照。
+
+## 環境 29: DGX Spark GB10・Apple M4 Max（CPU GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で再計測。イシュー #1488）
+
+`run_gemm_gate_cpu.sh`／`compare_gemm_gate.py --device cpu` の同一プロトコル（5 回独立
+プロセス起動・中央値）で、正式系列（`fandhe-ai =0.8.0` registry ピン）のみを計測した
+（`v0.8.0 ↔ origin/main` の CPU 計測経路 src 差分がゼロのため参考系列は計測せず）。
+
+| 実機 | 系列 | N=512 | N=1024 | N=2048 |
+|---|---|---|---|---|
+| DGX Spark GB10 | 正式 `0.8.0-1488` | 未達（0.820） | 未達（0.981） | **達成（1.400。candle 救済 2 要素）** |
+| Apple M4 Max | 参考 `0.8.0-1488`（試行 3。§24.10 参照） | **達成（1.159）** | 未達（0.854） | **達成（1.075）** |
+
+**DGX Spark GB10 は正式系列として初めて N=2048 で candle 比ゲート達成を記録した**
+（§22 の `0.7.0-1321` 正式系列と比べ 3 形状すべて改善）。Apple M4 Max は専有
+ゲートに当初計 3 回の試行を要した: 1 回目の試行を誤って固定 30 秒間隔で実行して
+しまい事前宣言したバックオフ系列（60 秒開始・1.5 倍・最大 10 試行）と異なって
+いたため破棄し、是正後の 2 回目の試行は 1 回目合格直後の 2 回目確認が僅かに
+不合格となり不成立に終わったため、同系列を再度 attempt=1 から実行した 3 回目の
+試行（他セッション並走による負荷の波はあったが attempt=6/7 で専有ゲート通過）を
+当初正式値としていた。しかし `orchestrate_m4max.sh` はプロセス内の試行カウンタ・
+経過時間しか管理していなかったため、このプロセス再起動により事前宣言した「約
+30 分上限で不成立なら undetermined として打ち切る」終了条件が実質的にリセット
+されており、PR #1506 の codex-review 指摘を受けて 3 回目の値は参考記録へ降格し、
+プロセス再起動をまたいで通用する経過時間上限へ是正したうえで独立再計測したが、
+事前宣言した約 30 分上限内に専有ゲートが成立せず `verdict=undetermined` に
+終わったため、M4 Max の正式値は本 PR 時点で未確定のまま残る（§24.10）。DGX 側
+fandhe-ai は全 30 run（reuse 15 + fresh 15。JSONL
+45 行のうち candle fresh 15 行を除く内訳）で `parity_fail_count=0` かつ
+`parity_scaled_abs_rescued=0` を確認。詳細・帰属表・突合結果は
+`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24、生データ・実行ログは
+`docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/`（M4 Max 独立再計測は同配下
+`m4max-redo-pr1506/`）を参照。

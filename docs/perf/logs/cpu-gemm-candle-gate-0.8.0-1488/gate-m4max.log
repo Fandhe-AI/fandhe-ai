@@ -1,0 +1,10 @@
+gate attempt=1 wait=60s load1=8.99 ok=0 2026-09-10T02:00:12Z
+gate attempt=2 wait=90s load1=9.04 ok=0 2026-09-10T02:01:42Z
+gate attempt=3 wait=135s load1=6.70 ok=0 2026-09-10T02:03:57Z
+gate attempt=4 wait=202s load1=9.47 ok=0 2026-09-10T02:07:19Z
+gate attempt=5 wait=303s load1=7.47 ok=0 2026-09-10T02:12:22Z
+gate attempt=6 wait=454s load1=3.61 ok=1 2026-09-10T02:19:56Z
+gate attempt=7 wait=30s load1=4.13 ok=1 2026-09-10T02:20:26Z
+=== proc check 2026-09-10T02:20:26Z ===
+formal start 2026-09-10T02:20:26Z 11:20  up 21 days, 22:33, 19 users, load averages: 4.13 5.31 7.27
+formal end 2026-09-10T02:21:31Z 11:21  up 21 days, 22:34, 19 users, load averages: 11.42 7.16 7.81

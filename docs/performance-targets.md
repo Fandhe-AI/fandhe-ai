@@ -532,3 +532,35 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
 - 出典: `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §16、生データ・実行ログ・ゲートログは
   `docs/perf/logs/cuda-gemm-candle-gate-0.8.0-1489/`・
   `scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-0.8.0-1489.jsonl`
+
+### 8.15 #1488 追補（CPU GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で両実機再計測。§2 段階的下限表・§3 丸め規則は不変）
+
+- v0.8.0 の crates.io 公開（2026-09-10）とピン更新・pin guard 撤去（イシュー #1487）を
+  受け、正式系列 `fandhe-ai =0.8.0`（registry 解決）のみで CPU GEMM N=512/1024/2048
+  reuse の candle 比を DGX Spark GB10（Grace CPU）・Apple M4 Max で再計測した
+  （イシュー #1488。`v0.8.0 ↔ origin/main` の CPU 計測経路 src 差分がゼロのため
+  参考系列は計測せず）
+- **DGX Spark GB10 は正式系列として初めて N=2048 で candle 比ゲート達成を記録した**
+  （1.400 倍。candle 側 5 run とも `rescued=2, bound=1.525878e-05` の再現・
+  fandhe-ai 側全 run `fail=0 かつ rescued=0`）。未達のまま残るのは DGX N=512
+  （0.820 倍）・DGX N=1024（0.981 倍）
+- **Apple M4 Max の専有ゲート（1 分 load average < 6.0 を 2 回連続・最大 10 試行・
+  60 秒開始 1.5 倍バックオフ）は当初計 3 回の試行を要したが、この 3 回目
+  （N=512 1.159 倍・N=1024 0.854 倍・N=2048 1.075 倍）はプロセス再起動により
+  事前宣言した「約 30 分上限で不成立なら undetermined」という終了条件が実質的に
+  リセットされた状態での計測であったため、PR #1506 の codex-review 指摘を受けて
+  参考記録へ降格した。プロセス再起動をまたいで通用する経過時間上限へ是正した
+  うえで独立再計測したが、事前宣言した約 30 分上限内に専有ゲートが成立せず
+  `verdict=undetermined` に終わり、M4 Max の正式値は本 PR 時点で未確定のまま
+  残る**（正式達成は DGX N=2048 のみ。是正版オーケストレーションはその後、累積
+  試行数のセッション永続化・待機時間の非短縮・待機後の期限再確認まで契約どおりに
+  整合済み。詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.1／§24.10）
+- §8.11（#1321）の正式系列（`0.7.0-1321`。DGX N=2048=0.938 倍）から比較すると、
+  DGX は 3 形状すべて改善しており、`docs/perf/cpu-gemm-candle-gate-
+  remeasurement.md` §24.2 の帰属表（実質差分は借用ビュー readout の既定経路化
+  のみ）と整合する方向の変化だが、1 回計測（5 run 中央値）のためコード差分への
+  厳密な因果帰属は行わない。M4 Max との比較は正式値確定後（後続イシュー）に記録する
+- 出典: `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24、生データ・実行ログは
+  `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/`（M4 Max 独立再計測は同配下
+  `m4max-redo-pr1506/`）、集計表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 29 節
