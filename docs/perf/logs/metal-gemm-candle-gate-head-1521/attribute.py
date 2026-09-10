@@ -118,8 +118,13 @@ def render(path_a, path_b, band, device="metal"):
         if res_a.get("status") != "ok" or res_b.get("status") != "ok":
             reason_a = res_a.get("reason", "")
             reason_b = res_b.get("reason", "")
+            # ヘッダ・区切り行と同じ 9 列に揃える（Cursor Bugbot 指摘）。
+            # A中央値/B中央値/B-A/分類/candle-A/candle-B/§16参照値 の 7 列を
+            # 「-」で埋め、最終列（§16比）に理由をまとめて 1 列で収める。
+            # 独立の列を追加すると `|` 区切り数がヘッダとずれ、fail-closed
+            # の理由が表の外へはみ出す（markdown レンダリングが崩れる）。
             lines.append(
-                f"| {size} | 判定不能 | 判定不能 | - | - | - | - | - | - "
+                f"| {size} | 判定不能 | 判定不能 | - | - | - | - | - "
                 f"| （A: {reason_a}｜B: {reason_b}） |"
             )
             continue
@@ -277,6 +282,41 @@ def _self_test():
     finally:
         os.unlink(path_a_broken)
         os.unlink(path_b_broken)
+
+    # ケース 5: 判定不能サイズ（一部 N のレコードが欠落）を含む出力の
+    # 各行が、ヘッダ・区切り行と同じ `|` 区切り列数であることを機械検査
+    # する（Cursor Bugbot 指摘。`res_a`/`res_b` の `status != "ok"` 行に
+    # 独立列を追加すると表が崩れ、fail-closed の理由が表の外へ出てしまう
+    # ため、テーブル整形自体を自己検証する）。size=1024 のみデータを持ち
+    # size=2048/4096 は `evaluate_size` が自然に "undeterminable" を返す
+    # （MIN_RECORDS 件数不一致）状態で `render` を呼び出す。
+    rows_a_one_size = [make_row("fandhe-ai", "reuse", size, 0.010) for _ in range(5)]
+    rows_a_one_size += [make_row("candle", "fresh", size, 0.011) for _ in range(5)]
+    path_a_one_size = write_jsonl(rows_a_one_size)
+    path_b_one_size = write_jsonl(rows_b_in_band)
+    try:
+        table = render(path_a_one_size, path_b_one_size, DEFAULT_BAND, "metal")
+        table_lines = table.rstrip("\n").split("\n")
+        header_line = next(ln for ln in table_lines if ln.startswith("| N |"))
+        sep_line = next(ln for ln in table_lines if ln.startswith("|---"))
+        expected_cols = header_line.count("|") - 1
+        assert sep_line.count("|") - 1 == expected_cols, (sep_line, expected_cols)
+        row_lines = [
+            ln
+            for ln in table_lines
+            if ln.startswith("|") and ln not in (header_line, sep_line)
+        ]
+        assert len(row_lines) == len(gate._SIZES_BY_DEVICE["metal"]), row_lines
+        for ln in row_lines:
+            got_cols = ln.count("|") - 1
+            assert got_cols == expected_cols, (ln, got_cols, expected_cols)
+        # size=2048/4096 は判定不能行のはずで、理由が最終列に収まっている
+        # こと（列がヘッダからはみ出していないこと）を明示確認する。
+        undetermined_rows = [ln for ln in row_lines if "判定不能" in ln]
+        assert len(undetermined_rows) == 2, undetermined_rows
+    finally:
+        os.unlink(path_a_one_size)
+        os.unlink(path_b_one_size)
 
     print("attribute.py --self-test: all cases passed")
 

@@ -38,7 +38,13 @@ true`）・#1530（split-K 本番結線）で diff が非ゼロになったた�
    （verdict を付けない）。
 6. run の差し替え禁止。失敗時は数値を捏造せず fail-closed の退避に従う。
 7. 実行前に `git diff v0.8.0..HEAD --stat`（Metal 経路）を再取得し、
-   想定外の差分があれば帰属表を再導出する。
+   想定外の差分があれば帰属表を再導出する。この diff・log・`SHORT_SHA`
+   との一致・未コミット変更の有無は、必ず参考系列（B）が実際にビルド
+   する `FACADE_PATH`（`GEMM_GATE_PATCH_FACADE_PATH`）側のリポジトリ
+   から取得・検証する（本スクリプトが置かれた worktree 側からではない。
+   `FACADE_PATH` が別 worktree の場合に計測対象と異なるコードの差分を
+   記録してしまうのを防ぐため）。`SHORT_SHA` 不一致・計測経路配下の
+   未コミット変更はいずれも fail-closed で停止する。
 
 ## 実行手順
 
@@ -58,7 +64,10 @@ GEMM_GATE_PATCH_FACADE_PATH="$FACADE_PATH" \
 A（対照 `0.8.0-ctrl-1521`）→ B（参考 `head-<short sha>-1521`）の順に
 `run_gemm_gate_metal.sh` を 1 回ずつ実行する（`run_gemm_gate.sh` が内部で
 N=1024/2048/4096 それぞれ 5 回起動するため、run 単位の interleave は
-構造的に不可。系列単位の A→B 固定順のみ）。
+構造的に不可。系列単位の A→B 固定順のみ）。`FACADE_PATH` は
+`SHORT_SHA` の HEAD かつ計測経路配下が clean（未コミット変更なし）で
+あることが前提であり、不一致・dirty のいずれも `orchestrate_m4max.sh`
+が fail-closed で停止する。
 
 ## 集計
 

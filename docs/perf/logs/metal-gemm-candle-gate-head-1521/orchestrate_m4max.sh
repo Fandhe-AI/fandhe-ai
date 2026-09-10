@@ -172,13 +172,37 @@ fail_measurement() {
   exit 1
 }
 
-# --- 実行時点の v0.8.0..HEAD diff を再取得し、コミット済み
-#     diff_v0.8.0_origin-main_metal_path.txt と突き合わせる（Mac
-#     セッションの HEAD が想定より進んでいる場合の検知。計画 §3
-#     手順 3 参照）。不一致は警告のみで継続する（帰属表の再導出は
-#     人間の手順として README に委ねる）。 ---
+# --- 帰属根拠の diff・ログ・SHORT_SHA との一致・未コミット変更の
+#     有無は、必ず参考系列（B）が実際にビルドする `FACADE_PATH` 側の
+#     リポジトリから取得・検証する（codex P2 指摘: `$FC_DIR` 側〈本
+#     スクリプトが置かれた worktree〉から取得すると、`FACADE_PATH` に
+#     別 worktree を指定した場合に計測対象と異なるコードの差分を記録
+#     してしまい、対象側の変更を検知できない）。`SHORT_SHA` との不一致・
+#     計測経路配下の未コミット変更は fail-closed で停止する（警告のみ
+#     で継続していた従来挙動を変更）。 ---
+FACADE_ROOT="$(cd "$FACADE_PATH" && git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$FACADE_ROOT" ]; then
+  fail_measurement "FACADE_PATH is not inside a git repository ($FACADE_PATH)"
+fi
+FACADE_HEAD_SHA="$(git -C "$FACADE_ROOT" rev-parse HEAD 2>/dev/null)"
+if [ -z "$FACADE_HEAD_SHA" ]; then
+  fail_measurement "failed to resolve HEAD sha in FACADE_ROOT ($FACADE_ROOT)"
+fi
+case "$FACADE_HEAD_SHA" in
+  "$SHORT_SHA"*) ;;
+  *)
+    echo "error: SHORT_SHA ($SHORT_SHA) does not match FACADE_ROOT HEAD"          "($FACADE_HEAD_SHA at $FACADE_ROOT)" >&2
+    fail_measurement "short-sha mismatch against FACADE_ROOT HEAD"
+    ;;
+esac
+FACADE_DIRTY="$(git -C "$FACADE_ROOT" status --porcelain --   crates/backend-metal/src crates/facade/src crates/autodiff/src   crates/tensor-core/src 2>&1)"
+if [ -n "$FACADE_DIRTY" ]; then
+  echo "error: FACADE_ROOT has uncommitted changes under the measured path"        "(計測経路に未コミット変更あり。帰属根拠を確定できない):" >&2
+  echo "$FACADE_DIRTY" >&2
+  fail_measurement "uncommitted changes under measured path in FACADE_ROOT"
+fi
 (
-  cd "$FC_DIR/../../.."
+  cd "$FACADE_ROOT"
   {
     echo '$ git diff v0.8.0..HEAD --stat -- crates/backend-metal/src crates/facade/src crates/autodiff/src crates/tensor-core/src'
     git diff v0.8.0..HEAD --stat -- crates/backend-metal/src crates/facade/src crates/autodiff/src crates/tensor-core/src 2>&1
