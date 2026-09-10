@@ -192,7 +192,7 @@ should_split_k`／`MetalGemm::dispatch_split_k_strided_prepared`・診断入口 
    `prod-wiring-preapproved`（性能結線の事前承認）も「tolerance 定数・baseline 行は引き続き
    ユーザー承認必須」と明示的にこの事項を除外している。一括承認（2026-09-09 06:10）の時点は
    PR #1496 レビューで parity 不成立が判明した時刻（同日 08:50 マージ）より前であり、数値契約の
-   適用拡張を包含していたとは解釈できない
+   適用拡張を包含していたとは解釈できない（**追記: イシュー #1511 で適用拡張・baseline 値が2026-09-10 にユーザー承認された〈`docs/backend-metal-splitk-parity-judgment-decision.md`§7〉。受け入れテスト側の判定方式切替は #1512 で完了済みだが、`SPLIT_K_NUMERIC_CONTRACT_APPROVED` の `true` への切替・自動判定入口〈`dispatch_split_k_strided_prepared`〉のゲート解除自体は別イシュー #1513 のスコープであり、本ブロッカー 2 は #1513 完了まで有効のまま**）
 
 ### 承認依頼の要点（ユーザーが判断すべき項目）
 
@@ -216,7 +216,9 @@ should_split_k`／`MetalGemm::dispatch_split_k_strided_prepared`・診断入口 
 - classic 経路 bit 同一の非後退（`gemm_fine_barrier_bit_match`／`gemm_swizzle_bit_match`／
   `gemm_splitk_bit_match` の classic ケース）
 - `gemm_splitk_parity.rs` を baseline 方式（`assert_parity` の厳密ゼロ fail ではなく
-  `ParityBaseline` 非後退検査）へ戻す（(a)(b) 承認後）
+  `ParityBaseline` 非後退検査）へ戻す（(a)(b) 承認後。**#1512 で対応済み**。実機〈Apple
+  M4 Max〉での全形状 pass 確認は `docs/perf/metal-gemm-splitk-two-pass.md` §5.8 に記入欄
+  を残す）
 - framework-compare gemm metal 8 セル（N=512〜4096 × fresh/reuse）の before/after 5 回
   中央値・checksum 完全一致（`run_ab_gemm_metal.sh`）
 - #1475 §7 の残 5 run（run4/run5）完了による正式 ADOPT 確定
