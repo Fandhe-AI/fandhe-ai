@@ -1,0 +1,68 @@
+イシュー #1489 実行環境情報（内部ホスト名・machine-id・ユーザー名は含めない）
+
+## 実機
+- DGX Spark GB10（`docs/real-hardware-verification-env.md` の CUDA 実機ノード。内部ホスト名は
+  `docs/real-hardware-verification-env.local.md` を参照〈Git 管理外〉）
+- GPU: NVIDIA GB10
+- driver: 580.173.02
+- OS: Linux aarch64
+- CUDA: 13.0.88（`nvcc` build cuda_13.0.r13.0/compiler.36424714_0）
+- rustc: 1.97.0 (2d8144b78 2026-07-07)
+
+## 転送元 sha（origin/main）
+- a2a1c8605a2fdfd93548b3b869624989c0e35de1（PR #1504 マージ後 HEAD。framework-compare の承認ピンを
+  `fandhe-ai =0.8.0` へ更新し `bench_fandhe_pin_guard.sh` を撤去した状態。イシュー #1487）
+- 承認済み tolerance 契約: A-1（`c=0.5`。`docs/candle-parity-tolerance-contract-decision.md` §8。
+  イシュー #1241 で承認。#1247／#1250 実装済み）
+- crates.io 承認済みピン: `fandhe-ai =0.8.0`（2026-09-09 公開・`release-all.yml` run 34417008617）。
+  `run_gemm_gate.sh` は `GEMM_GATE_PATCH_FACADE_PATH`・`GEMM_GATE_SKIP_BUILD` いずれも未指定の
+  **正式系列のみ**で計測。参考系列（HEAD path patch）は計測していない（ピンが HEAD と同一版のため
+  区別する意味がない）
+
+## 事前宣言の専有ゲート（`orchestrate.sh`。結果を見てから緩和していない）
+- 条件: 1 分 load average < 1.0 かつ `nvidia-smi utilization.gpu == 0 %` を 30 秒間隔で
+  連続 3 サンプル充足。最大 20 サンプル（約 10 分）で不成立なら `verdict=undetermined` を
+  1 回記録して終了（再試行ループなし。イシュー #1489 ユーザー承認節）
+- 結果: sample 1〜3（load1 0.10／0.18／0.11・util 0 %・compute-apps 2〈常駐 ComfyUI・Kokoro のみ〉）
+  で通過（`gate-0.8.0-1489.log`）。ゲート通過 2026-09-10T03:50:24Z
+- 計測完了直後の load average: 2.13/0.66/0.23（計測プロセス自身の負荷。`run_gemm_gate` 終了直後の
+  `uptime`）・utilization.gpu 8 %（`status (after)`。直前の計測プロセスの残余）。compute-apps に
+  計測対象以外の割り込みはなし
+- 同一ノード上で別セッションのポーリング用 `bash -c "while pgrep ... cargo build ...; do sleep 60; done"`
+  （別ディレクトリ配下の完了待ちループ。sleep 主体）が常駐していたが、load average 0.1 台で
+  ゲート通過しているため計測への影響はないと判断
+
+## ビルド残余負荷の分離（§14.6 の再発防止）
+- `run_gemm_gate_cuda.sh` 起動前に `cargo build --release -p bench-fandhe` および
+  `cargo build --release -p bench-candle --no-default-features --features cuda` を prebuild
+  （`prebuild-1489.log`。`fandhe-ai` 系 5 クレートが `v0.8.0` として registry からコンパイルされた
+  ことを確認）。bench-candle（CUDA feature）は既存キャッシュが有効でビルド時間はごく短い
+- prebuild 完了（2026-09-10T03:48 UTC 頃）後にゲート待機を開始し、`run_gemm_gate_cuda.sh` 内の
+  `cargo build` は no-op（`Finished` のみ）で通過。manifest 記録（`record_manifest`）・
+  `verify_manifest`（バイナリ sha256・依存元・feature・readout_method 検証）はすべて OK
+
+## 実行順序・所要時間
+1. rsync 転送（12:46 JST）→ prebuild（約 2 分）→ ゲート待機（03:49:24Z〜03:50:24Z）
+2. `run_gemm_gate_cuda.sh 0.8.0-1489`: 03:50:24Z〜03:52:02Z（30 起動・失敗 0）
+3. `compare_gemm_gate.py --device cuda`: 終了コード 3（N=1024/2048 が「未達」のため。仕様どおりで
+   失敗ではない）
+
+## manifest 突合（`manifest-dgx-gemm-gate-0.8.0-1489.json`）
+- `fandhe_ai_source=registry`・`candle_core_source=registry`・`bench_fandhe_features=""`・
+  `readout_method=borrowed-view-default-1438`（正式系列）
+- `skipped-dgx-gemm-gate-0.8.0-1489.log` は空・`results-dgx-gemm-gate-0.8.0-1489.jsonl` は 30 行
+  （N=1024/2048/4096 × fandhe reuse／candle fresh × 5 run）
+
+## 転送・回収
+- rsync（`--exclude .git --exclude .codex/ --exclude target --exclude _/ --exclude '.env*'
+  --exclude .claude/settings.local.json --exclude '.venv*'
+  --exclude real-hardware-verification-env.local.md --exclude gemm-gate-trusted-hosts.local`）で
+  Mac → GB10 へ転送し、`.rev-stamp` が転送元 sha と一致することを確認済み
+- 回収後、内部ホスト名（`docs/real-hardware-verification-env.local.md` 記載の実値）・machine-id・
+  ユーザー名・`/home/<user>` パターンで grep 走査。`prebuild-1489.log` の cargo 出力 3 行に
+  `/home/<ユーザー名>/...` が含まれていたため `/home/<user>` へ置換した。それ以外は 0 件
+
+## 判定結果の要点（詳細は `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §16）
+- N=1024: 0.429 倍 未達 / N=2048: 0.496 倍 未達（candle 救済 2 要素。判定不能ではなく確定）/
+  N=4096: **1.478 倍 達成**（正式系列として初）
+- fandhe-ai 側は全 15 run で `parity_fail_count=0` かつ `parity_scaled_abs_rescued=0`

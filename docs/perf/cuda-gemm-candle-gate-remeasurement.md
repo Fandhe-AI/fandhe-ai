@@ -818,3 +818,99 @@ N=4096 が after 腕で #1031 の受け入れ条件（candle 超え）を満た�
 全 3 サイズ非後退・checksum 完全一致のため、CUDA については既定経路化を承認（ADOPT）。
 判定木（§3.2 に相当する事前宣言）の条件 (a)「全 N で after/before ≤ 1.00」を満たすため、
 runtime `Device` 分岐によるフォールバックは導入しない。
+
+## 16. 2026-09-10 追補: 正式系列 `fandhe-ai =0.8.0` 再計測（イシュー #1489）
+
+### 16.1 位置づけ・プロトコル
+
+- v0.8.0 が 2026-09-09 に crates.io へ公開され（`release-all.yml` run 34417008617）、framework-compare
+  の承認ピンが #1487（PR #1504）で `fandhe-ai =0.8.0` へ更新された。本追補は、この**正式系列**
+  （registry 解決・path patch なし）で CUDA GEMM N=1024/2048/4096 reuse の candle 比ゲート
+  （旧 #1031。後継ツリー #1234／#1468 Phase 5 #1473）を GB10 で再計測し確定判定を記録する。
+  §15（#1438）は「HEAD path patch で facade を揃えた参考系列」の before/after であり、正式系列で
+  #1438 以降の変更を計測するのは本追補が初めて
+- **コード変更なし**（tolerance 定数・判定式・`bench-common`・`compare_gemm_gate.py`・`crates/`・
+  `docs/spec/` は不変。本追補は既存契約下の実測記録のみ）
+- **正式ピン `0.7.0` → `0.8.0` の差分のうち本計測経路（`bench-fandhe gemm cuda reuse`）に
+  影響しうるもの**（`git log v0.7.0..v0.8.0`）:
+  - 借用ビュー readout（`Tensor::host_slice`。#1404〈PR〉・#1337）と、その CUDA reuse
+    N=1024/2048 後退を是正した `ReadbackDest::PretouchedFresh`（#1437・PR #1450）。bench-fandhe
+    側は #1438 で既定経路化済み（`readout_method=borrowed-view-default-1438`）だが、0.7.0 ピンでは
+    facade 側 API が未収録だった（#1487 以前は `bench_fandhe_pin_guard.sh` で早期停止）
+  - f32 SIMT GEMM の 128×64×16 cp.async pipeline カーネルの形状条件付き本番結線
+    （#1344・PR #1385。N≥1024 かつ K≥1024）
+  - `HOST_STAGING_KIND` 既定の `Pinned` 化（#1478・PR #1494）は `MemoryOps::with_host_view`
+    経路のみに作用し、本 gemm reuse 計測では非到達（`docs/perf/cuda-host-view-staging-readout.md`
+    §7・§15.4 と同じ注記）
+- プロトコルは §2／§14 と同一（`run_gemm_gate_cuda.sh 0.8.0-1489`・`compare_gemm_gate.py --device
+  cuda`）。§14.6 の反省（直前フルビルドの残余負荷による分散拡大）を受け、**ビルドを計測から分離**
+  した: `bench-fandhe`／`bench-candle`（CUDA feature）を prebuild したうえで事前宣言の専有ゲート
+  （1 分 load average < 1.0 かつ utilization.gpu 0 % を 30 秒間隔・連続 3 サンプル。最大 20
+  サンプルで不成立なら `verdict=undetermined` を 1 回記録して終了）を通過してから計測した
+  （`docs/perf/logs/cuda-gemm-candle-gate-0.8.0-1489/orchestrate.sh`）。ゲートは sample 1〜3
+  （load1 0.10／0.18／0.11）で通過
+- 計測環境: DGX Spark GB10・driver 580.173.02・CUDA 13.0.88・rustc 1.97.0。詳細は
+  `docs/perf/logs/cuda-gemm-candle-gate-0.8.0-1489/env_info.txt`
+- 生データ: `scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-0.8.0-1489.jsonl`
+  （30 行）・`skipped-dgx-gemm-gate-0.8.0-1489.log`（空）・`manifest-dgx-gemm-gate-0.8.0-1489.json`
+  （`fandhe_ai_source=registry`・`candle_core_source=registry`・`bench_fandhe_features=""`・
+  `readout_method=borrowed-view-default-1438`）。実行ログ・判定表出力・ゲートログ:
+  `docs/perf/logs/cuda-gemm-candle-gate-0.8.0-1489/`
+
+### 16.2 実測結果（正式系列 `0.8.0-1489`）
+
+| N | fandhe-ai reuse 中央値（min–max, n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s（fandhe） | 判定 |
+|---|---|---|---|---|---|
+| 1024 | 2.156 ms（2.093–2.273 ms） | 924.7 µs | 0.429 | 996.0 | 未達 |
+| 2048 | 8.473 ms（8.302–9.043 ms） | 4.200 ms | 0.496 | 2027.5 | 未達（candle 救済 2 要素） |
+| 4096 | 38.398 ms（37.720–38.571 ms） | 56.738 ms | **1.478** | 3579.3 | **達成** |
+
+出典: `docs/perf/logs/cuda-gemm-candle-gate-0.8.0-1489/compare_gemm_gate-0.8.0-1489.md`。
+`compare_gemm_gate.py` の終了コードは 3（N=1024/2048 の「未達」が残るため。仕様どおり）。
+
+- **§15.3 の参考系列 after 腕（0.428／0.494／1.489）と 3 形状とも誤差範囲内で一致**した。
+  §15 が「facade を HEAD path patch で揃えた参考系列」として観測した readout 既定化の効果が、
+  crates.io 公開版 `0.8.0` の正式系列でそのまま再現したことを意味する
+- §14.2（`0.7.0`: 0.416／0.476／0.919）との差は N=4096 のみ顕著（59.677 ms → 38.398 ms・
+  0.643 倍）で、§15.2 の after/before（0.656）と整合する。N=1024/2048 は §14.2 と同水準
+  （それぞれ 2.221→2.156 ms・8.825→8.473 ms。約 3〜4 % 改善）で、§15.2 の 0.935／0.884 ほどの
+  幅は出ていない（§14.2 側の計測がビルド残余負荷下だった点も含め、ノイズ範囲と判断）
+- N=4096 の run 間分散は 37.720–38.571 ms（幅 2.3 %）で、§14.2（48.201–62.048 ms）より大幅に
+  縮小した。ビルドを計測から分離したプロトコルが §14.6 の懸念を解消したことを示す
+- candle 側は 3 形状とも §14.2 と同水準（924.5→924.7 µs・4.205→4.200 ms・54.868→56.738 ms）で、
+  比較基準の変動ではなく fandhe-ai 側の改善が N=4096 達成の要因であることが確認できる
+
+### 16.3 要素単位判定
+
+- fandhe-ai 側: 全 15 run で `parity_fail_count=0` **かつ** `parity_scaled_abs_rescued=0`
+  （`verify_strict` 経路。§14.4 と同じ）
+- candle 側 N=2048: 5 run すべてで `parity_fail_count=0`・`parity_scaled_abs_rescued=2`・
+  `parity_scaled_abs_bound=1.525878e-05`・`max_abs_err=3.623962e-05`・`max_rel_err=2.811288e-01`
+  （§14.3 と完全同一の決定的再現。承認済み契約 A-1 の救済項で確定判定となる）
+- candle 側 N=1024: `rescued=0`（`bound=7.629375e-06`）・N=4096: `fail_count=0`・`max_abs_err=0`
+  （`bound=3.051757e-05`）
+
+### 16.4 ゲート判定表（正式系列 `0.8.0`。確定）
+
+| # | 旧 #1031 の受け入れ条件 | 正式系列（`0.8.0-1489`） | 出典 |
+|---|---|---|---|
+| 1 | N=1024 reuse で candle 超え | 未達（0.429 倍） | §16.2 |
+| 2 | N=2048 reuse で candle 超え | 未達（0.496 倍。candle 救済 2 要素・確定判定） | §16.2・§16.3 |
+| 3 | N=4096 reuse で candle 超え | **達成（1.478 倍）** | §16.2 |
+| 4 | parity 0 fail（fandhe-ai 側） | 達成（全 15 run `parity_fail_count=0` かつ `rescued=0`） | §16.3 |
+
+**総合判定: 正式系列 `fandhe-ai =0.8.0` で N=4096 が初めて candle 比ゲートを達成した
+（1.478 倍）。N=1024／2048 は未達のまま（0.429／0.496 倍）で、3 形状すべての達成という
+旧 #1031 の受け入れ条件は依然として満たしていない。** §11／§14 の「3 形状とも未達」判定は
+本追補で「N=4096 達成・N=1024/2048 未達」へ更新される（`docs/performance-targets.md` §8.14）。
+
+### 16.5 スコープ外・引き継ぎ
+
+- N=1024/2048 の未達要因は §4.3／§8・#1182（reuse 計測境界の `host_copy`／`checksum` 診断コスト
+  が小形状ほど支配的）で整理済みの構造であり、本追補では対応しない（後継ツリー #1234／#1468 の
+  既存スコープ）
+- 公正性の論点（`bench-candle` は所有 `Vec` 読み出しのまま・fandhe-ai 側のみ借用ビュー）は
+  §15.4 のまま不変
+- 参考系列（HEAD path patch）は計測していない（HEAD とピンが同一版 `0.8.0` のため。次に
+  `crates/` へ本計測経路に影響する変更が入った時点で §12 と同型の 2 系列併記へ戻す）
+
