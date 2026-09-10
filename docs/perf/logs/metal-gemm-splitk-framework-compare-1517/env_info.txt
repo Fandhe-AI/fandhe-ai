@@ -1,0 +1,33 @@
+# イシュー #1517: split-K 結線前後 framework-compare A/B の実機環境記入欄
+#
+# 本ラン（Linux x86_64・CI 環境）には Apple M4 Max 実機への到達経路が
+# ないため、以下は Mac セッションが実測時に埋めるテンプレートである
+# （ルート #1509・メモリ `issue-1509-linux-side-policy` の運用方針）。
+# 内部ホスト名は書かない（`docs/real-hardware-verification-env.md`）。
+
+## 機種・OS
+- 機種: <記入。例: Apple M4 Max>
+- OS: <記入。例: macOS 15.x>
+- rustc: <記入。`rustc --version` の出力>
+
+## before/after facade worktree
+- AB_BEFORE_FACADE_PATH（絶対パス実値は書かず `<facade 絶対パス>` 表記へ
+  置換する。イシュー #1306 env_info の慣例）: <facade 絶対パス>
+  - HEAD sha: <記入>
+  - SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: false（期待値。
+    `run_ab_splitk_metal.sh` の差分ガードが機械検証する）
+- AB_AFTER_FACADE_PATH: <facade 絶対パス>
+  - HEAD sha: <記入>
+  - SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: true（期待値）
+- ビルド後バイナリ sha256（before/after）: <manifest ファイルの
+  `before_sha256`/`after_sha256` を転記>
+
+## 負荷推移
+- 計測開始前 uptime: <記入>
+- 計測中の load average 推移（`monitor_<label>.log` の要約）: <記入>
+- 中断・再試行の有無: <記入>
+
+## 実行結果
+- `run_ab_splitk_metal.sh <label>` の終了コード: <記入>
+- `compare_gemm_ab.py --task gemm`／`--task train` の判定: <記入。
+  `docs/perf/metal-gemm-splitk-framework-compare-1517.md` §5/§6 へ転記>

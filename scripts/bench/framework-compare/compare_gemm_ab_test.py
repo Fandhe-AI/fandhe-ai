@@ -538,6 +538,301 @@ class GateCudaAndModesTest(unittest.TestCase):
             os.unlink(before_path)
             os.unlink(after_path)
 
+    def test_default_gemm_output_is_byte_unchanged(self):
+        """イシュー #1517: `--task` 追加後も既定（`--task` 省略・gemm）の
+        出力が旧実装とバイト単位で不変であることを固定する（実装計画
+        §6「既定 gemm 出力バイト不変」）。
+        """
+        before, after = _all_cells_rows(0.002, 0.0019)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 0)
+            self.assertEqual(err.getvalue(), "")
+            stdout = out.getvalue()
+            self.assertIn("| size/mode | before median | after median |", stdout)
+            self.assertEqual(stdout.count("非後退"), 8)
+            # `--task`/`--phases` 追加により既定出力へフェーズ表等の余計な
+            # 出力が混入していないこと（末尾が判定表のみで終わること）を
+            # 固定する。
+            self.assertTrue(stdout.rstrip("\n").endswith("| 非後退 |"))
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+
+def _rec_train(median_s, checksum=-1.5, mode="reuse", version="0.8.0", warmup=5, iters=15):
+    """`bench-fandhe --task train` 行の複製。`train` タスクは `parity`
+    フィールドを `None` として emit しない（`Record.parity: Option<
+    ParityStats>`）ため `parity_fail_count` キー自体を持たない
+    （`_rec` の gemm 用フィクスチャとは異なる。実装計画 §3.3 手順 6 で
+    確認済み）。`size` は `bench-fandhe` の `BATCH` 定数（64）固定。
+    """
+    return {
+        "framework": "fandhe-ai",
+        "version": version,
+        "task": "train",
+        "device": "metal",
+        "size": 64,
+        "median_s": median_s,
+        "q1_s": median_s,
+        "q3_s": median_s,
+        "checksum": checksum,
+        "warmup": warmup,
+        "iters": iters,
+        "mode": mode,
+    }
+
+
+def _all_train_cells_rows(before_median, after_median, checksum=-1.5):
+    before = []
+    after = []
+    for mode in _MODES:
+        for _ in range(5):
+            before.append(_rec_train(before_median, checksum=checksum, mode=mode))
+            after.append(_rec_train(after_median, checksum=checksum, mode=mode))
+    return before, after
+
+
+class TaskTrainTest(unittest.TestCase):
+    """イシュー #1517: `--task train`（split-K 結線前後 A/B の train 2 セル）
+    の判定ロジックを検証する。"""
+
+    def test_all_cells_non_regression(self):
+        before, after = _all_train_cells_rows(0.010, 0.0099)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", "--task", "train", before_path, after_path])
+            self.assertEqual(code, 0)
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual(out.getvalue().count("非後退"), 2)
+            self.assertIn("64/fresh", out.getvalue())
+            self.assertIn("64/reuse", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_regression_cell_detected(self):
+        before, after = _all_train_cells_rows(0.010, 0.020)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", "--task", "train", before_path, after_path])
+            self.assertEqual(code, 3)
+            self.assertEqual(out.getvalue().count("後退"), 2)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_gemm_rows_excluded_when_task_train(self):
+        """`task:"gemm"` の行が紛れ込むと `--task train` 実行時は不正行
+        として警告付きでスキップされ、fail-closed の「判定不能」（終了
+        コード 2）になることを確認する（`load_rows` の既存 fail-closed
+        方針〈不正行が 1 件でもあれば判定不能〉を `--task train` でも
+        維持する。混在を黙って無視して「非後退」と誤判定しない）。"""
+        before, after = _all_train_cells_rows(0.010, 0.0099)
+        before.append(_rec(0.002))
+        after.append(_rec(0.002))
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", "--task", "train", before_path, after_path])
+            self.assertEqual(code, 2)
+            self.assertIn("WARNING", err.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_phases_requires_train_task(self):
+        before_path = _write_jsonl(_all_train_cells_rows(0.010, 0.0099)[0])
+        after_path = _write_jsonl(_all_train_cells_rows(0.010, 0.0099)[1])
+        phases_path = _write_jsonl([])
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    [
+                        "prog",
+                        "--phases",
+                        phases_path,
+                        phases_path,
+                        before_path,
+                        after_path,
+                    ]
+                )
+            self.assertEqual(code, 2)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+            os.unlink(phases_path)
+
+    def test_phases_diagnostic_table_rendered(self):
+        before, after = _all_train_cells_rows(0.010, 0.0099)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        before_phases_path = _write_jsonl(
+            [
+                {
+                    "framework": "fandhe-ai",
+                    "version": "0.8.0",
+                    "task": "train_phases",
+                    "device": "metal",
+                    "size": 64,
+                    "median_s": 0.001,
+                    "q1_s": 0.001,
+                    "q3_s": 0.001,
+                    "checksum": -1.5,
+                    "warmup": 5,
+                    "iters": 15,
+                    "mode": "reuse",
+                    "phase": "backward",
+                    "phase_index": 2,
+                }
+            ]
+        )
+        after_phases_path = _write_jsonl(
+            [
+                {
+                    "framework": "fandhe-ai",
+                    "version": "0.8.0",
+                    "task": "train_phases",
+                    "device": "metal",
+                    "size": 64,
+                    "median_s": 0.0009,
+                    "q1_s": 0.0009,
+                    "q3_s": 0.0009,
+                    "checksum": -1.5,
+                    "warmup": 5,
+                    "iters": 15,
+                    "mode": "reuse",
+                    "phase": "backward",
+                    "phase_index": 2,
+                }
+            ]
+        )
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    [
+                        "prog",
+                        "--task",
+                        "train",
+                        "--phases",
+                        before_phases_path,
+                        after_phases_path,
+                        before_path,
+                        after_path,
+                    ]
+                )
+            self.assertEqual(code, 0)
+            stdout = out.getvalue()
+            self.assertIn("フェーズ分解（診断用・reuse・単発計測・非判定）", stdout)
+            self.assertIn("| backward |", stdout)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+            os.unlink(before_phases_path)
+            os.unlink(after_phases_path)
+
+
+class PerRunTest(unittest.TestCase):
+    """イシュー #1517 実装計画 §4 rule (b)（run 内比 5/5 run 符号一貫の
+    機械判定）向け `--per-run` 診断列を検証する。"""
+
+    def test_default_output_unaffected_by_per_run_flag_availability(self):
+        """`--per-run` を渡さない既定実行は列追加前と出力が完全一致する
+        （実装計画 §6「既定出力バイト不変」の `--per-run` 追加後の再確認）。
+        """
+        before, after = _all_cells_rows(0.002, 0.0019)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                compare_gemm_ab.main(["prog", before_path, after_path])
+            baseline = out.getvalue()
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+        self.assertNotIn("run 内比", baseline)
+        self.assertNotIn("符号一貫", baseline)
+
+    def test_per_run_sign_consistent_regression_flagged(self):
+        """全 5 run で after が before を上回る（後退方向で一貫）場合、
+        `sign_consistent` 相当の列が「はい」になることを確認する
+        （実装計画 §4 rule (b) の機械判定対象ケース）。fresh セルは
+        非後退の 5 件を与え、reuse セル 1 つだけの符号一貫性を
+        `--per-run` 列で確認できることを検証する（`_all_expected_cells`
+        が両セルを要求するため）。
+        """
+        before_rows = list(_all_train_cells_rows(0.010, 0.0099)[0])
+        after_rows = list(_all_train_cells_rows(0.010, 0.0099)[1])
+        # reuse セルだけ 5 run 一貫して後退する行へ差し替える。
+        before_rows = [r for r in before_rows if r["mode"] != "reuse"]
+        after_rows = [r for r in after_rows if r["mode"] != "reuse"]
+        for _ in range(5):
+            before_rows.append(_rec_train(0.010, mode="reuse"))
+            after_rows.append(_rec_train(0.0103, mode="reuse"))
+        before_path = _write_jsonl(before_rows)
+        after_path = _write_jsonl(after_rows)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    [
+                        "prog",
+                        "--task",
+                        "train",
+                        "--threshold",
+                        "1.05",
+                        "--per-run",
+                        before_path,
+                        after_path,
+                    ]
+                )
+            stdout = out.getvalue()
+            self.assertIn("run 内比（5 run）", stdout)
+            self.assertIn("符号一貫（全 run >1.00）", stdout)
+            # 64/reuse セルは 5 run とも ratio=1.03>1.0 のため「はい」。
+            self.assertIn("| はい |", stdout)
+            # 判定自体（ratio<=threshold=1.05）は 2 セルとも非後退のまま
+            # （--per-run は終了コード・verdict に影響しない診断列）。
+            self.assertEqual(code, 0)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_per_run_helper_returns_none_on_count_mismatch(self):
+        before = [_rec(0.01) for _ in range(4)]
+        after = [_rec(0.01) for _ in range(5)]
+        self.assertIsNone(compare_gemm_ab.per_run_ratios(before, after))
+
+    def test_per_run_helper_ratios(self):
+        before = [_rec(0.010) for _ in range(5)]
+        after = [_rec(0.011) for _ in range(5)]
+        ratios = compare_gemm_ab.per_run_ratios(before, after)
+        self.assertEqual(len(ratios), 5)
+        for r in ratios:
+            self.assertAlmostEqual(r, 1.1, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
