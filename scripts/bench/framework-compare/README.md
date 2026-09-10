@@ -505,6 +505,17 @@ interleave 計測**できるようにする（`bench-candle`／`bench-burn` は�
   実行する。専有ゲートが規定回数以内に成立しない場合は
   `results/raw/readout-ab-<label>.undetermined.txt` へ記録して計測を
   開始せず終了する（再試行しない。判定規則は事前宣言済み）。
+  **`AB_LOAD_GATE_MODE=<exclusive|record_only>`**（既定 `exclusive`。
+  イシュー #1520・ルート #1519 のユーザー指示「Metal は専有ゲートを要件に
+  しない」を受けた opt-out）: 既定 `exclusive` は上記の専有ゲートを従来
+  どおり必須とする（後方互換。別の専有環境で再計測する場合はそのまま
+  使える）。`record_only` を明示指定すると待機・リトライを一切行わず
+  現在の load average を `gate-readout-ab-<label>.log` へ 1 行記録した
+  うえで直ちに計測を開始する（共有負荷下での実測用。判定規則〈閾値・
+  対象セル・checksum 判定〉自体は変更しない。計測中の load average 推移
+  は既存の `uptime-readout-ab-<label>.log`〈30 秒間隔〉がモードに依らず
+  無条件に記録する）。どちらのモードで計測したかは manifest JSON の
+  `gate_mode` フィールドへも記録される。
 - **集計**: `compare_readout_ab.py results.jsonl --device metal --sizes gate
   --threshold 1.00` が device=metal・N∈{1024,2048,4096}・mode∈
   {fresh,reuse} の 6 セルを legacy/borrowed へ分離し、5 回計測中央値の

@@ -28,6 +28,14 @@
 # 出力は「失敗を捏造しない」方針（security.md A08）: 全 run 成功時のみ
 # 一時ファイルを正規パスへ原子的に反映する。1 件でも失敗すれば正規パスは
 # 変更せず、不完全な結果は `.failed-<UTC>` へ退避する。
+#
+# イシュー #1520（ルート #1519）: 1 回目の試行（専有ゲート必須）は
+# 最大試行回数以内にゲートが成立せず未計測のまま undetermined で終わった
+# （`docs/perf/logs/metal-gemm-readout-interleave-1477/`）。ルート #1519 の
+# ユーザー指示「Metal は一旦現在の環境で測れる値で大丈夫」を受け、
+# `AB_LOAD_GATE_MODE=record_only`（既定は `exclusive` のまま不変）を
+# 追加した。record_only は専有ゲートを待たず load average を記録するのみ
+# で計測を開始する opt-out。判定規則（§15.1）の閾値・対象セルは変更しない。
 set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -127,6 +135,21 @@ AB_LOAD_GATE_MAX_LOAD1=${AB_LOAD_GATE_MAX_LOAD1:-4.0}
 AB_LOAD_GATE_MAX_ATTEMPTS=${AB_LOAD_GATE_MAX_ATTEMPTS:-10}
 AB_LOAD_GATE_INITIAL_WAIT=${AB_LOAD_GATE_INITIAL_WAIT:-60}
 
+# イシュー #1520（ルート #1519）: ユーザー指示「Metal は専有ゲートを
+# 要件にしない」を受け、専有ゲートを「必須」から「既定は現行どおり必須・
+# record_only で明示的に要件を外せる」opt-out 方式にする。既定
+# `exclusive` は #1477 までの挙動（本節冒頭のゲート）を一切変えない
+# （後方互換。将来また専有環境で再計測する場合はそのまま使える）。
+# `record_only` は待機・リトライを一切行わず、現在の load average を
+# 1 行記録してから直ちに計測へ進む。「計測中の load average 推移」は
+# 既存の UPTIME_SAMPLER_LOG（30 秒間隔）が無条件に取得するため
+# record_only でも失われない。
+AB_LOAD_GATE_MODE=${AB_LOAD_GATE_MODE:-exclusive}
+if [[ "$AB_LOAD_GATE_MODE" != "exclusive" && "$AB_LOAD_GATE_MODE" != "record_only" ]]; then
+  echo "error: AB_LOAD_GATE_MODE must be 'exclusive' or 'record_only' (got: $AB_LOAD_GATE_MODE)" >&2
+  exit 1
+fi
+
 # `AB_LOAD_GATE_MAX_LOAD1`（環境変数から利用者が上書き可能な専有ゲート
 # 閾値）が有限の正数であることを事前検証する（codex-review 指摘・PR
 # #1493 スレッド 2: 未検証のまま awk の数値コンテキストへ渡すと不正値
@@ -217,7 +240,38 @@ if pgrep -f 'bench-fandhe|bench-candle' >/dev/null 2>&1; then
   echo "warning: 他の bench-fandhe/bench-candle プロセスが実行中の可能性がある（pgrep 検出）" >&2
 fi
 
-if ! wait_for_exclusive_gate; then
+# `AB_LOAD_GATE_MODE=record_only`（イシュー #1520）: 専有ゲートを要件に
+# せず、現在の load average を 1 行記録するだけで即座に計測を開始する。
+# 判定規則（§15.1／README「--readout」節）自体は変更しない — 「共有負荷下
+# であることと計測中の load average 推移を env_info に記録する」という
+# ルート issue #1519 の指示を、既存の gate-readout-ab-<label>.log／
+# uptime-readout-ab-<label>.log の記録先へそのまま流用する形で満たす。
+record_only_gate_note() {
+  local gate_log="results/raw/gate-readout-ab-${LABEL}.log"
+  local l1
+  l1="$(load1_now)"
+  : > "$gate_log"
+  # `wait_for_exclusive_gate` と同じく `load1_is_valid` で数値妥当性を
+  # 検証してから記録する（codex-review 指摘・PR #1493 P1 と同型の懸念:
+  # `uptime` の出力形式が想定外の場合 `load1_now` が非数値をそのまま
+  # 返しうるため、無検証でログへ書くと後続の集計・判定を誤誘導しうる）。
+  if ! load1_is_valid "$l1"; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1_invalid=${l1:-<empty>}（専有ゲート要件なし。イシュー #1520・ルート #1519）" | tee -a "$gate_log"
+  else
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1=$l1（専有ゲート要件なし。イシュー #1520・ルート #1519）" | tee -a "$gate_log"
+  fi
+  return 0
+}
+
+run_gate() {
+  if [[ "$AB_LOAD_GATE_MODE" == "record_only" ]]; then
+    record_only_gate_note
+  else
+    wait_for_exclusive_gate
+  fi
+}
+
+if ! run_gate; then
   exit 1
 fi
 
@@ -274,7 +328,7 @@ SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null
 FACADE_HEAD_SHA="$(git -C "$AB_PATCH_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
 MANIFEST_TMP="${MANIFEST}.tmp"
 cat > "$MANIFEST_TMP" <<JSON
-{"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${SOURCE_DESC}","readout_arms":["legacy","borrowed"],"recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${SOURCE_DESC}","readout_arms":["legacy","borrowed"],"gate_mode":"${AB_LOAD_GATE_MODE}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
 echo "== manifest（一時ファイル）記録: $MANIFEST_TMP =="
 cat "$MANIFEST_TMP"
