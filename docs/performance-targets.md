@@ -535,7 +535,9 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   参考記録へ降格した。プロセス再起動をまたいで通用する経過時間上限へ是正した
   うえで独立再計測したが、事前宣言した約 30 分上限内に専有ゲートが成立せず
   `verdict=undetermined` に終わり、M4 Max の正式値は本 PR 時点で未確定のまま
-  残る**（詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.1／§24.10）
+  残る**（正式達成は DGX N=2048 のみ。是正版オーケストレーションはその後、累積
+  試行数のセッション永続化・待機時間の非短縮・待機後の期限再確認まで契約どおりに
+  整合済み。詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.1／§24.10）
 - §8.11（#1321）の正式系列（`0.7.0-1321`。DGX N=2048=0.938 倍）から比較すると、
   DGX は 3 形状すべて改善しており、`docs/perf/cpu-gemm-candle-gate-
   remeasurement.md` §24.2 の帰属表（実質差分は借用ビュー readout の既定経路化
