@@ -99,14 +99,16 @@ thread_local! {
     /// フォールバックした回数（イシュー #1327）。
     pub(crate) static TILE_CLASS_SPLIT_FALLBACK_COUNT: Cell<u64> = const { Cell::new(0) };
 
-    /// [`MetalGemm::dispatch_split_k_strided_prepared`]（イシュー #1474・
-    /// opt-in の自動判定入口。`SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲート済みで
-    /// 既に有効）が実際に split-K 経路（[`SplitKRoute::Split`]）で
-    /// 2 パス dispatch した回数。本カウンタはこの独立入口の発火のみを数え、
-    /// #1516 で `dispatch_auto` へ定数ゲート付きで結線された経路
-    /// （`dispatch_split_k_auto_padded` 経由の `_with_plan`）は共通の
-    /// split-K 2 パス機構を共有するが本カウンタには計上しない。
-    /// `STRIDED_TILED_ROUTE_COUNT` と同じ設計
+    /// split-K 2 パス dispatch が実際に split-K 経路（[`SplitKRoute::Split`]）
+    /// で成功した回数。加算点は共通入口
+    /// `MetalGemm::dispatch_split_k_strided_prepared_with_plan` の実装
+    /// （`_impl`）の成功時に 1 箇所だけ置いてあるため、独立の自動判定入口
+    /// [`MetalGemm::dispatch_split_k_strided_prepared`]（イシュー #1474。
+    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲート済みで既に有効）からの
+    /// 発火だけでなく、#1516 で `dispatch_auto` へ定数ゲート付きで結線された
+    /// 経路（`dispatch_split_k_auto_padded` 経由）や明示 opt-in の
+    /// `_with_plan` 直接呼び出しも、この入口を経由する split-K 成功はすべて
+    /// 計上する。`STRIDED_TILED_ROUTE_COUNT` と同じ設計
     /// 判断（スレッドローカル化の理由も同一。実機テストがフォールバック
     /// による自明合格を排除し、実際に split-K 経路が発火したことを assert
     /// するための可観測点）。
