@@ -1,0 +1,3 @@
+<WORKTREE>/docs/perf/logs/metal-gemm-candle-gate-0.8.0-1490/orchestrate_m4max.sh: line 208: 45457 Terminated: 15          ( while true; do
+    echo "poll $(date -u +%Y-%m-%dT%H:%M:%SZ) $(uptime)" >> "$LOG/uptime-m4max.log"; sleep 30;
+done )

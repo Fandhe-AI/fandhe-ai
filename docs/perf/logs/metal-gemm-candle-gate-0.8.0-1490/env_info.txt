@@ -1,0 +1,76 @@
+# イシュー #1490 実機実測 env_info
+
+## 共通
+
+- 対象イシュー: #1490（正式系列 `fandhe-ai =0.8.0` で Metal GEMM candle 比ゲート〈旧
+  #1037〉を M4 Max 再計測し確定する）
+- 転送元コミット（base）: `3de5f98d824ecdcd458a173b88af2dc1c4c66acd`（`origin/main` HEAD。
+  PR #1506 マージ直後）
+- 系列: **正式系列のみ**（`fandhe-ai =0.8.0` registry 解決）。ラベル `0.8.0-1490`。
+  参考系列（path patch）は計測していない（`v0.8.0` と `origin/main` の Metal 計測経路
+  src 差分がゼロのため。`diff_v0.8.0_origin-main_metal_path.txt`・`attribution.md` 参照）
+- プロトコル: `run_gemm_gate_metal.sh` → `compare_gemm_gate.py --device metal`
+  （5 回独立プロセス起動・中央値）
+- tolerance 契約: #1241 承認・#1443/#1445 実装済み（候補 A-1・`c=0.5`）を適用。
+  tolerance 定数・判定式は本イシューで変更していない
+- 専有ゲート閾値: 1 分 load average < 6.0 を 2 回連続（1 回目合格直後の 2 回目は
+  30 秒固定・不合格時のみ 60 秒開始 1.5 倍バックオフ）・最大 10 試行（合計約 30 分
+  上限）。閾値は #1309（4.0）ではなく、同一ホストの #1488（CPU 計測。Metal より
+  背景負荷に敏感な経路）が採用した 6.0 と同一値を計画段階で事前宣言して使用した。
+  不成立の場合は計測せず `verdict=undetermined` を記録する設計（本イシューは成立し
+  計測完了）
+
+## 実機（本セッションのホスト自身）
+
+- 機種: `Mac16,6`
+- CPU: Apple M4 Max
+- OS: macOS 26.6.2（BuildVersion 25G83）
+- rustc: `1.96.0`（`ac68faa20` 2026-05-25）
+- 実行ディレクトリ: `scripts/bench/framework-compare`（worktree 内。隔離転送・
+  rsync は不要 — 本セッション自身が実機のため。`docs/real-hardware-verification-env.local.md`
+  等は未参照）
+
+## プレビルド（計測からの分離）
+
+- `cargo build --release -p bench-fandhe` → `cargo build --release -p bench-candle`
+  をゲート開始前に実行（`prebuild-1490.log`。両方とも exit 0）。ビルド後 `git status`
+  で `Cargo.lock` 等の差分が生じていないことを確認済み（実装コミットの diff に
+  含まれる変更は本ディレクトリの新規ファイルのみ）
+
+## 専有ゲート試行履歴
+
+| 試行 | 待機 | load1 | 合否 | elapsed |
+|---|---|---|---|---|
+| 1 | 60s | 12.17 | NG | 60s |
+| 2 | 90s | 16.68 | NG | 150s |
+| 3 | 135s | 7.17 | NG | 285s |
+| 4 | 202s | 7.69 | NG | 487s |
+| 5 | 303s | 3.61 | OK（1 回目） | 790s |
+| 6 | 30s（固定確認） | 3.70 | OK（2 回目・成立） | 820s |
+
+計 6 試行・約 820 秒でゲート成立（`gate-m4max.log`）。並走プロセス確認
+（`pgrep -x bench-fandhe`／`bench-candle`）はいずれもヒットなし。
+
+## サーマル状態
+
+- 計測前後とも `pmset -g therm` は thermal / performance warning なし
+  （`pmset_therm_before_formal.txt`・`pmset_therm_after_formal.txt`）
+- 計測前 load average: 3.70（1 分）。計測完了直後（約 49 秒後）: 7.05（1 分）。
+  他セッションの並走負荷が計測中に再上昇しており、**共有負荷下の計測**である
+  （§16.3 参照）
+
+## manifest 突合（期待どおり）
+
+| 系列 | fandhe_ai_source | bench_fandhe_features | readout_method | candle_core_source |
+|---|---|---|---|---|
+| 0.8.0-1490 | registry | "" | legacy-metal-1452 | registry |
+
+`results/raw/results-m4max-gemm-gate-0.8.0-1490.jsonl` は 30 行、
+`results/raw/skipped-m4max-gemm-gate-0.8.0-1490.log` は空。
+バイナリ sha256 検証・依存元検証（registry）・feature 検証・readout 方式検証は
+いずれも `run_gemm_gate_metal-m4max-0.8.0-1490.log` 内で OK。
+
+## 秘匿情報
+
+- 本ファイル・同ディレクトリの他ファイルに実ホスト名・IOPlatformUUID・
+  ユーザー名・絶対パスは含めていない（commit 前 grep で確認済み）
