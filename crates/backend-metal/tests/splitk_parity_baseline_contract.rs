@@ -24,7 +24,7 @@
 //!   する」壊れ方の防止）
 //! - (d) ceiling ちょうど以下の合成 report は pass すること（正例。
 //!   境界値そのものを後退と誤検出しないことの確認）
-//! を検証する。`BASELINES` の数値自体は一切変更しない。
+//!   を検証する。`BASELINES` の数値自体は一切変更しない。
 
 mod common;
 
@@ -38,7 +38,12 @@ use fandhe_ai_backend_cpu::parity::{CompareReport, compare};
 /// fail_count, mean_abs_diff_ceiling, max_abs_diff_ceiling,
 /// max_rel_err_ceiling)`。`BASELINES` と全一致することを (a) で検査する
 /// （`BASELINES` 側の改竄・緩和を fail-closed に検出する独立の転記元）。
-const APPROVED_BASELINES: &[(usize, usize, usize, usize, usize, f64, f64, f64)] = &[
+/// `(m, n, k, total, fail_count, mean_abs_diff_ceiling, max_abs_diff_ceiling,
+/// max_rel_err_ceiling)`。clippy::type_complexity 回避のための factoring
+/// （`common::splitk_parity_baseline::Baseline` とは独立の転記元用タプル型）。
+type ApprovedBaselineRow = (usize, usize, usize, usize, usize, f64, f64, f64);
+
+const APPROVED_BASELINES: &[ApprovedBaselineRow] = &[
     (32, 32, 2048, 1024, 0, 1.0e-5, 9.0e-5, 3.0e-4),
     (32, 32, 4096, 1024, 0, 2.0e-5, 3.0e-4, 2.0e-4),
     (32, 32, 8192, 1024, 1, 4.0e-5, 4.0e-4, 1.2e-3),
