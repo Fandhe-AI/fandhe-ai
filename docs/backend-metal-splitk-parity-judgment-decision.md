@@ -163,9 +163,10 @@ splitk_parity_baseline.rs`）:
 ceiling（他 10 行はいずれも 1.0e-3〜8.6e-3 台）と比べて大幅に緩い点を明示する**: 真値が 0 近傍の
 要素で相対誤差が桁落ちにより外れ値化する現象（§1.1 の説明）であり、この行では `max_rel_err`
 単独では小さな悪化（例えば 0.1309 → 0.139 程度への微増）を検出できない。ただし本行の回帰検出は
-`max_rel_err` だけでなく 4 指標の連言（AND）であり、承認済み ceiling（`fail_count<=2`・
-`mean_abs_diff<=1.0e-5`・`max_abs_diff<=1.3e-4`。§1.1 の実測値はそれぞれ fail_count=2・
-mean_abs_diff=9.13e-6・max_abs_diff=1.22e-4 で、いずれも ceiling 未満または同値）が独立に
+`max_rel_err` だけでなく 4 指標の連言（AND）であり、承認対象の ceiling 案（`fail_count<=2`・
+`mean_abs_diff<=1.0e-5`・`max_abs_diff<=1.3e-4`。いずれも「7. 承認記録」のとおり本ドキュメント
+自体が未承認のため、数値としても未承認のまま。§1.1 の実測値はそれぞれ fail_count=2・
+mean_abs_diff=9.13e-6・max_abs_diff=1.22e-4 で、いずれも ceiling 案未満または同値）が独立に
 fail-closed 検査として機能するため、`max_rel_err` の緩さのみをもって「この行の回帰検出が
 実効的な保護になっていない」とは言えない。一方で `max_rel_err` が悪化しても他 3 指標が
 ceiling 内に収まる回帰（相対誤差のみが悪化するケース）は本行では検出できないという限定的な
