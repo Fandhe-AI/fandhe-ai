@@ -2263,3 +2263,24 @@ CPU の同一 raw JSONL から `fresh` を再集計した参考行（受け入�
 ノイズと判断する。詳細・帰属表・参考系列未計測の経緯は
 `docs/perf/metal-gemm-candle-gate-remeasurement.md` §14、生データ・実行ログは
 `docs/perf/logs/metal-gemm-candle-gate-1309/` を参照。
+
+## 環境 29: DGX Spark GB10・Apple M4 Max（CPU GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で再計測。イシュー #1488）
+
+`run_gemm_gate_cpu.sh`／`compare_gemm_gate.py --device cpu` の同一プロトコル（5 回独立
+プロセス起動・中央値）で、正式系列（`fandhe-ai =0.8.0` registry ピン）のみを計測した
+（`v0.8.0 ↔ origin/main` の CPU 計測経路 src 差分がゼロのため参考系列は計測せず）。
+
+| 実機 | 系列 | N=512 | N=1024 | N=2048 |
+|---|---|---|---|---|
+| DGX Spark GB10 | 正式 `0.8.0-1488` | 未達（0.820） | 未達（0.981） | **達成（1.400。candle 救済 2 要素）** |
+| Apple M4 Max | 正式 `0.8.0-1488` | 未確認（専有ゲート 10 試行すべて不通過） | 未確認 | 未確認 |
+
+**DGX Spark GB10 N=2048 が正式系列として初めて candle 比ゲート達成を記録した**
+（§22 の `0.7.0-1321` 正式系列 0.938 → 本イシュー 1.400 と改善。#1321 参考系列
+`head-ced4d14-1321` の 1.562 の水準に近づいた）。N=512／N=1024 は未達のまま。
+Apple M4 Max は他セッション（#1489／#1490 等）並走による共有負荷のため専有ゲートが
+10 試行とも不通過となり、計画の事前宣言規則に従って計測せず `verdict=undetermined`
+を記録した（「未達」ではなく「未確認」）。fandhe-ai 側（DGX）は全 45 run で
+`parity_fail_count=0` かつ `parity_scaled_abs_rescued=0` を確認。詳細・帰属表・
+突合結果は `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24、生データ・実行ログは
+`docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/` を参照。

@@ -515,3 +515,25 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   metal-gemm-candle-gate-remeasurement.md` §14.8）
 - 出典: `docs/perf/metal-gemm-candle-gate-remeasurement.md` §14、生データ・実行ログは
   `docs/perf/logs/metal-gemm-candle-gate-1309/`
+
+### 8.14 #1488 追補（CPU GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で両実機再計測。§2 段階的下限表・§3 丸め規則は不変）
+
+- v0.8.0 の crates.io 公開（2026-09-10）とピン更新・pin guard 撤去（イシュー #1487）を
+  受け、正式系列 `fandhe-ai =0.8.0`（registry 解決）のみで CPU GEMM N=512/1024/2048
+  reuse の candle 比を DGX Spark GB10（Grace CPU）・Apple M4 Max で再計測した
+  （イシュー #1488。`v0.8.0 ↔ origin/main` の CPU 計測経路 src 差分がゼロのため
+  参考系列は計測せず）
+- **DGX Spark GB10 N=2048 が正式系列として初めて candle 比ゲート達成を記録した**
+  （1.400 倍。candle 側 5 run とも `rescued=2, bound=1.525878e-05` の再現・fandhe-ai
+  側全 run `fail=0 かつ rescued=0`）。N=512／N=1024 は未達のまま（0.820／0.981 倍）
+- **Apple M4 Max は専有ゲート（1 分 load average < 6.0 を 2 回連続・最大 10 試行）が
+  10 試行すべて不通過**（他セッション並走による共有負荷。load1 8.17〜19.49）のため
+  計測を実行せず、事前宣言した規則に従い `verdict=undetermined` を記録した
+  （「未達」ではなく「未確認」）
+- §8.11（#1321）の正式系列（`0.7.0-1321`。DGX N=2048=0.938 倍）から比較すると改善しており、
+  `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.2 の帰属表（実質差分は借用ビュー
+  readout の既定経路化のみ）と整合する方向の変化だが、1 回計測（5 run 中央値）のため
+  コード差分への厳密な因果帰属は行わない
+- 出典: `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24、生データ・実行ログは
+  `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/`、集計表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 29 節

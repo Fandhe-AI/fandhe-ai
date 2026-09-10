@@ -1,0 +1,128 @@
+# イシュー #1488 実機実測 env_info
+
+## 共通
+
+- 対象イシュー: #1488（正式系列 `fandhe-ai =0.8.0` で CPU GEMM candle 比ゲート〈旧
+  #1117〉を両実機再計測し確定する）
+- 転送元コミット（base）: `a2a1c8605a2fdfd93548b3b869624989c0e35de1`（`origin/main`
+  HEAD。PR #1504／イシュー #1487 マージ直後）
+- 系列: **正式系列のみ**（`fandhe-ai =0.8.0` registry 解決）。ラベル `0.8.0-1488`。
+  参考系列（path patch）は計測していない（`v0.8.0` と `origin/main` の CPU
+  計測経路に差分が無いため。`diff_v0.8.0_a2a1c86_cpu_path.txt`・`attribution.md`
+  参照）
+- プロトコル: `run_gemm_gate_cpu.sh` → `compare_gemm_gate.py --device cpu`
+  （5 回独立プロセス起動・中央値）
+- 判定規則: `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.1（本イシュー
+  冒頭で事前宣言・計測後に変更なし）
+- tolerance 契約: #1241 承認・#1443/#1445 実装済み（候補 A-1・`c=0.5`）を適用。
+  tolerance 定数・判定式は本イシューで変更していない
+- 専有ゲート閾値: 1 分 load average < 6.0 を 30 秒間隔で 2 回連続・最大 10 試行
+  （約 5 分上限）。不成立の実機は計測せず `verdict=undetermined` を記録
+
+## manifest 突合（DGX のみ計測。期待どおり）
+
+| 実機 | 系列 | fandhe_ai_source | bench_fandhe_features | readout_method | candle_core_source |
+|---|---|---|---|---|---|
+| DGX | 0.8.0-1488 | registry | "" | borrowed-view-default-1438 | registry |
+| M4 Max | 0.8.0-1488 | （計測せず。専有ゲート不通過。`undetermined-m4max.txt`） | — | — | — |
+
+DGX の `results/raw/results-dgx-cpu-gemm-gate-0.8.0-1488.jsonl` は 45 行、
+`skipped-dgx-cpu-gemm-gate-0.8.0-1488.log` は空。
+
+## DGX Spark GB10（Grace CPU）
+
+- ノード: `docs/real-hardware-verification-env.local.md` 記載の CUDA 実機ノード
+  （`CUDA_NODE`。実 SSH ホスト名は非開示。本イシューは CPU 経路のみ使用）
+- OS: `Linux spark-dbd9 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul
+  24 22:03:06 UTC 2026 aarch64`
+- CPU: Cortex-X925 ×10（大コア）+ Cortex-A725 ×10（小コア）計 20 論理 CPU
+- rustc: `1.97.0`（ノード側既定 toolchain）
+- 隔離ディレクトリ: `~/work/fc-1488/tree/`（本イシュー専用。共有
+  `~/work/rust-ai-library-run` は未使用）。計測後に `rm -rf ~/work/fc-1488` で
+  削除・確認済み
+- 転送: rsync（`.gitignore` フィルタ + 明示除外。`gemm-gate-trusted-hosts.local`
+  も除外）。`.rev-stamp` がノード側で `a2a1c8605a2fdfd93548b3b869624989c0e35de1`
+  と一致することを確認。転送後 secrets grep（`.env*`／`settings.local.json`／
+  `real-hardware-verification-env.local.md`／`gemm-gate-trusted-hosts.local`）は
+  0 件
+- trusted-hosts: `gemm-gate-trusted-hosts.local` をノード上で生成（`hostname`＝
+  `spark-dbd9`・`/etc/machine-id` の実値。Mac から転送していない・回収もして
+  いない）
+- 並走プロセス確認: `pgrep -x bench-fandhe`／`pgrep -x bench-candle` はいずれも
+  ヒットなし（`nvidia-smi --query-compute-apps` は ComfyUI・Kokoro の常駐サービス
+  のみ検出。#1489〈CUDA〉等の bench 系プロセスは検出されず）。1 回目の
+  `pgrep -fl 'bench-fandhe|bench-candle'`（`-f` 全体一致）は、13 日前からの
+  無関係な残留 `bash -c 'while pgrep ... "bench-(fandhe|candle|burn)" ...'`
+  ループ（文字列の部分一致）に誤反応したため、`-x`（バイナリ名完全一致）へ
+  是正した上で再実行した（`orchestrate_dgx.sh` コメント参照）
+- 専有ゲート: 00:29:57〜00:30:27 UTC に 2 回連続 load1<6.0（0.02→0.01）で通過
+  （`gate-dgx.log`）
+- 実行順: 正式系列（`0.8.0-1488`）のみ。00:30:27 UTC 開始 → 00:32:15 UTC 完了
+  （load average は開始時 0.01・完了時 5.51 と上昇。ビルド〈warm cache〉+
+  計測 45 run 込みで約 2 分弱）
+- 完了時 load average: `5.51, 2.16, 0.79`（`uptime-dgx.log`。ポーラは 1 回のみ
+  記録して終了。計測が短時間で完了したため）
+- `git status` は隔離ディレクトリのため本 worktree には影響なし。ノード側で
+  `scripts/bench/framework-compare/Cargo.toml`／`Cargo.lock` は rsync 転送のまま
+  未変更（ビルドは `GEMM_GATE_PATCH_FACADE_PATH` 未指定＝registry 解決のみ）
+- 秘密情報 grep（回収後）: 短縮ホスト名（`spark-dbd9`。信頼済みタグとして
+  precedent〈既存コミット済み manifest 等〉で許容されている表記）以外の内部実値は
+  本ファイル・生成物のいずれにも含めていない。`/etc/machine-id` の実値は
+  env_info.txt を含むどの生成物にも記載していない（trusted-hosts ファイルは
+  ノード上で生成しノード上のまま残置。回収対象に含めず、隔離ディレクトリごと
+  削除済み）
+
+## Apple M4 Max（このセッションが動くホスト自身）
+
+- OS: macOS 26.6.2（BuildVersion 25G83）・`Darwin nancynoMBP 25.6.0 arm64`
+- CPU: `hw.perflevel0.logicalcpu=12`（性能コア）・`hw.perflevel1.logicalcpu=4`
+  （効率コア）
+- rustc: `1.96.0 (ac68faa20 2026-05-25)`
+- 実行場所: 本 worktree
+  （`/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_bc0d0530-bc1-27`）
+  を直接使用（rsync 転送不要。ローカル実行）
+- trusted-hosts: `GEMM_GATE_TRUSTED_HOSTS_FILE` でメイン worktree の
+  `scripts/bench/framework-compare/gemm-gate-trusted-hosts.local` を直接参照
+  （コピーせず）
+- 並走プロセス確認: `pgrep -x bench-fandhe`／`pgrep -x bench-candle` はいずれも
+  ヒットなし（ゲート試行の都度確認・`gate-m4max.log`「proc check」節）
+- **専有ゲート: 10 試行すべて不通過**（load1 8.17／9.10／8.77／8.76／9.26／
+  10.52／10.42／19.49／16.70／14.17 UTC 00:32:25〜00:36:55。閾値 6.0 を一度も
+  下回らず）。同時並行で本セッションが実施した `cargo fmt --check`／
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  （#1488 の検証ステップ・§7 参照）が同一マシン上の CPU 負荷に寄与した可能性が
+  ある（try=8 で load1 が 19.49 まで急伸）ほか、`ps -Ao pid,pcpu,comm -r` では
+  ブラウザヘルパー・`du`・複数の claude セッション等の一般的な共有負荷が確認
+  された。#1489／#1490 等の兄弟イシューの bench プロセス自体は `pgrep -x` で
+  検出されなかった
+- **計画 §3 規則 5 に従い、専有ゲート不通過のため計測を実行せず
+  `verdict=undetermined` を 1 回だけ記録して終了した**（`GATE_NOT_PASSED_
+  m4max.marker`・`undetermined-m4max.txt`）。uptime ポーラは専有ゲート通過後にのみ
+  起動する設計のため `uptime-m4max.log` は生成されていない
+- 秘密情報 grep: `/Users/nancy/...` パスは precedent（既存コミット済み manifest
+  多数）と同型のため許容する既存慣行として扱う。DGX 側の CUDA_NODE 実 SSH
+  ホスト名（`docs/real-hardware-verification-env.local.md` にのみ存在するフル
+  ドメイン形式）は非開示のまま維持
+
+## 実測結果サマリ（詳細は gate doc §24.4 を正とする）
+
+| 実機 | 系列 | N=512 | N=1024 | N=2048 |
+|---|---|---|---|---|
+| DGX | 0.8.0-1488（正式） | 0.820 未達 | 0.981 未達 | **1.400 達成（candle 救済 2 要素）** |
+| M4 Max | 0.8.0-1488（正式） | 未確認（専有ゲート不通過） | 未確認 | 未確認 |
+
+fandhe-ai 側（DGX）は全 45 run（reuse 15・candle fresh 15・fandhe fresh 15）で
+`parity_fail_count=0` **かつ** `parity_scaled_abs_rescued=0`（`verify_strict`
+経路）。N=2048 の candle 側は全 5 run で `parity_fail_count=0,
+parity_scaled_abs_rescued=2, parity_scaled_abs_bound=1.525878e-05`（§19／§22.5 と
+完全に同一の決定的挙動）。
+
+## §22.4 参考系列（`head-ced4d14-1321`）との比較（詳細は gate doc §24.7）
+
+DGX 正式系列は N=2048 で 0.938（§22。0.7.0-1321）→ 0.950（§19。tolerance 契約
+適用後）→ **1.400**（本イシュー・v0.8.0）と改善し、#1321 で観測された参考系列
+（origin/main HEAD `ced4d14`。1.562）の水準に近づいた。attribution.md のとおり
+`ced4d14` → `v0.8.0` の実質差分は借用ビュー readout の既定経路化のみであり、
+この改善は当該変更に帰属すると見て矛盾しない（他の Phase 施策はいずれも無効・
+REJECT のまま不変）。N=512／N=1024 も §22 正式系列（0.696／0.770）から改善
+（0.820／0.981）しているが、いずれも未達成のまま。

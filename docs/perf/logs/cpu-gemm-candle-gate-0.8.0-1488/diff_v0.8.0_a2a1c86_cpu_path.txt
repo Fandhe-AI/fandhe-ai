@@ -1,0 +1,16 @@
+$ git log -1 --oneline v0.8.0
+81411488 build(workspace): v0.8.0 へ一括バンプする（#1269 完了後の引き継ぎ改善の公開前提） (#1503)
+
+$ git log -1 --oneline origin/main
+a2a1c860 build(bench): framework-compare の承認ピンを fandhe-ai =0.8.0 へ更新し pin guard を撤去する (#1504)
+
+$ git diff v0.8.0..origin/main --stat -- crates/backend-cpu/src crates/facade/src crates/autodiff/src crates/tensor-core/src
+(出力なし＝差分ゼロ)
+
+結論: v0.8.0（tag）と origin/main（イシュー #1488 実装時点の HEAD）の間で
+CPU GEMM 計測経路（crates/backend-cpu, crates/facade, crates/autodiff,
+crates/tensor-core の src 配下）に差分は無い。origin/main の差分は
+scripts/bench/framework-compare/bench-fandhe/Cargo.toml の承認ピン更新
+（#1487・PR #1504）のみであり、正式系列 `fandhe-ai =0.8.0`（registry 解決）
+の計測結果と origin/main への path patch 版は同一ソースになる。よって本
+イシューでは参考系列（path patch）を計測しない（計画 §2 参照）。

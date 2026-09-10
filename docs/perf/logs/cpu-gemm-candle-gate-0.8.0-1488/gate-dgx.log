@@ -1,0 +1,8 @@
+gate try=1 load1=0.02 ok=1 2026-09-10T00:29:57Z
+gate try=2 load1=0.01 ok=1 2026-09-10T00:30:27Z
+=== proc check 2026-09-10T00:30:27Z ===
+pid, process_name, used_gpu_memory [MiB]
+427276, /opt/llm-infra/comfyui-env/bin/python, 170 MiB
+1241474, /opt/llm-infra/venvs/kokoro/bin/python3, 870 MiB
+formal start 2026-09-10T00:30:27Z  09:30:27 up 13 days, 20:57,  8 users,  load average: 0.01, 0.02, 0.00
+formal end 2026-09-10T00:32:15Z  09:32:15 up 13 days, 20:59,  8 users,  load average: 5.51, 2.16, 0.79

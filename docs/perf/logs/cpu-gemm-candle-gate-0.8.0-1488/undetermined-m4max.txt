@@ -1,0 +1,23 @@
+Apple M4 Max（イシュー #1488）: verdict=undetermined（専有ゲート不通過）
+
+計画 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.1 の事前宣言規則 4・5
+（1 分 load average < 6.0 を 30 秒間隔で 2 回連続・最大 10 試行。不成立ならその
+実機は計測を実行せず verdict=undetermined を 1 回だけ記録して終了）に従い、
+Apple M4 Max（本セッションのホスト自身）は 10 試行すべてで load average が
+6.0 を上回ったため（8.17〜19.49。`gate-m4max.log` 参照。#1489／#1490 等の
+兄弟イシューを含む他セッションの並走ビルド・共有負荷）、正式系列
+`0.8.0-1488` の計測を実行しなかった。
+
+これは「未達」ではなく「未確認」である（計測自体を行っていないため、
+candle 比の判定値は存在しない）。再試行・再計測の要否はユーザー判断とし、
+本イシューでは再試行ループを継続しない（計画 §3 規則 5）。
+
+- 並走プロセス確認: `pgrep -x bench-fandhe`／`pgrep -x bench-candle` はいずれも
+  ヒットなし（`gate-m4max.log`「proc check」節）。専有ゲート不通過の原因は
+  bench 系プロセス自体の並走ではなく、他セッション（claude 端末セッション
+  多数・`du`・ブラウザ等）による一般的な共有負荷
+- 試行履歴: `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/gate-m4max.log`
+  （10 試行・load1 8.17〜19.49・全 ok=0）
+- 生成物: `GATE_NOT_PASSED_m4max.marker`・`gate-m4max.log` のみ（`uptime-m4max.log`・
+  `run_gemm_gate_cpu-m4max-0.8.0-1488.log`・raw JSONL・manifest はいずれも
+  生成されていない。計測自体が実行されなかったため）
