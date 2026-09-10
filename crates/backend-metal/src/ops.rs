@@ -4,7 +4,13 @@
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の Metal 実装。GEMM は
 //! 既定で `gemm::MetalGemm::dispatch_auto`（動的タイル選択済み。
 //! TASK-1.8c・#40）へ委譲する（既存カーネル・許容誤差・境界検査には
-//! 触れない）。片側のみが転置 view（NT/TN。`autodiff::grad` の VJP が
+//! 触れない）。`dispatch_auto` は内部に split-K 2 パス経路への本番結線
+//! ゲート（`gemm::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`。既定
+//! `false`・イシュー #1516）を持つが、本モジュール（`gemm` メソッド）は
+//! `dispatch_auto` を呼ぶのみでゲートの状態を意識しない——ゲートが
+//! `false` の間は本結線追加前と bit 同一の classic 経路のまま
+//! （`docs/backend-metal-splitk-decision.md` §5）。片側のみが転置 view
+//! （NT/TN。`autodiff::grad` の VJP が
 //! `transpose2d` した勾配を渡す形状）の場合は `dispatch_auto` の代わりに
 //! `gemm::MetalGemm::dispatch_strided_bias_act_prepared`（classic strided
 //! カーネル）へ結線し、ホスト側の転置再パックコピーを省く（イシュー

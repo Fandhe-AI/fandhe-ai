@@ -295,6 +295,13 @@ $ grep -rn "dispatch_split_k_strided_prepared" crates/backend-metal/src/ops.rs
 
 したがって本切替は `MetalBackendOps::gemm` の挙動・性能に一切影響しない。
 
+**追記（#1516）**: 上記「本番経路は不変」は #1513 時点（本節記述時点）の事実であり、
+#1516 で `dispatch_auto` へ split-K 2 パス経路の**定数ゲート付き結線**を実装した
+（既定 `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false`）。ゲートが `false` の間は
+本段落が記述する状態（`dispatch_auto` は `dispatch_split_k_strided_prepared` 系を呼ばない）
+と実質的に同一の挙動（bit 同一の classic 経路）が維持される。詳細・切替条件は
+`docs/backend-metal-splitk-decision.md` §5「本番結線（#1516）」を参照。
+
 **framework-compare A/B**: 「計測対象なし」と判断した。本番経路（`dispatch_auto`・
 `MetalBackendOps::gemm`）へのコード変更がゼロであるため（上記出力参照）、
 #1272 §5.11・#1476 の先例（本番結線なしの変更は framework-compare 計測対象なし）と

@@ -524,7 +524,7 @@ pub use rmsnorm::MetalRmsNorm;
 #[cfg(target_os = "macos")]
 pub use softmax::MetalSoftmax;
 pub use tile::TileConfig;
-pub use tile::{SplitKParams, SplitKPlan, should_split_k};
+pub use tile::{GemmRoute, SplitKParams, SplitKPlan, select_route_for_device, should_split_k};
 
 /// テスト・診断専用: プロセスワイド singleton `MetalContext`
 /// （`context_cache::cached_context`。`ops::MetalBackendOps` の全演算

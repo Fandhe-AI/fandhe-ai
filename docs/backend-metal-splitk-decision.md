@@ -264,7 +264,87 @@ framework-compare gemm metal の実行時計測は「計測対象なし」とす
   約 6.5〉で事前登録ゲート 4.0 が枯渇しやすく再緩和は行わない）
 - NT/TN/TT・f16／hfrag・`gemm_bias_act` 融合経路への split-K 適用（#1474 §8 と同じスコープ外）
 
-## §5 参照
+## §5 本番結線（#1516）
+
+`MetalGemm::dispatch_auto`（本番 NN 経路の自動入口。`MetalBackendOps::gemm` が呼ぶ唯一の
+入口）へ split-K 2 パス経路の分岐を**定数ゲート付きで結線した**（既定 OFF。実装 PR で
+コード変更あり——本節は上記 §4「framework-compare A/B の扱い」が前提としていた「コメントの
+みの変更」を、本イシューで正式に更新する）。
+
+### 結線内容
+
+- `crate::tile::GemmRoute`（`SplitK(SplitKPlan)` / `Classic(TileConfig)`）・
+  `crate::tile::select_route_for_device(m, n, k, gpu_core_count)`（純関数。`should_split_k`
+  が `Some` なら `SplitK`、`None` なら `select_for_device` の結果を `Classic` として返す）を
+  新設した。`select_for_device` 自体のシグネチャ・戻り値・意味論は crates.io 公開 API
+  互換性のため不変のまま（PR #1108 の互換維持方針を踏襲。Issue タイトルの「`select_for_device`
+  へ結線する」は本関数を介して実現する）
+- `MetalGemm` に `split_k_auto_enabled: bool` インスタンスフィールドを追加し、`new_with_gates`
+  経由で構築する全コンストラクタ（`new`／`new_with_swizzle`／`new_with_fine_barrier`／
+  `new_with_unroll_acc`／`new_with_frag_load`／`new_with_coop_load`／
+  `new_with_tile_class`／`new_with_source_specialization`）は本番既定ゲート定数
+  `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（`crate::tile`。`gemm.rs` 側の全コンストラクタ
+  からは `tile::` 経由で参照する。**既定 `false`**）を渡す。
+  `MetalGemm::new_with_split_k_auto(ctx, enabled: bool)` を新設し、A/B 計測・実機テスト専用の
+  明示 opt-in 入口とする（`new_with_swizzle` 等と同型の設計）
+- `dispatch_auto` は `split_k_auto_enabled` が `true` の場合のみ、`should_split_k` の判定を
+  **8 の倍数へパディング済みの実効次元**（`crate::pad::pad8`）で評価し、`GemmRoute::SplitK`
+  が選ばれた形状のみ split-K 2 パス経路（`dispatch_split_k_strided_prepared_with_plan`。既存
+  の internal-diagnostics 限定公開入口を crate 内部から呼ぶ）へ分岐する。`GemmRoute::Classic`
+  が選ばれた形状・ゲート `false` の場合は、**`select_route_for_device` が返す `TileConfig` を
+  使わず**、常に非パディング次元で `select_for_device(m, n, k, ..)` を呼び直したうえで
+  `dispatch_variant` へ委譲する——結線前の `dispatch_auto` と 1 バイトも変わらない経路を保証
+  する設計判断（下記「パディング整合の設計判断」参照）
+- 診断専用入口 `dispatch_auto_with_route`（`internal-diagnostics` feature 限定の `pub`。既定
+  ビルドは `pub(crate)`）を新設し、実際に採用した経路（`GemmRoute`）を返す。`dispatch_auto`
+  自身もこの実装（`dispatch_auto_with_route_impl`）へ委譲することで、本番経路と診断経路の
+  ロジックが乖離しない構造にしている
+
+### パディング整合の設計判断
+
+`dispatch_variant`（classic 経路）は 8 の倍数へパディングしてディスパッチするが、タイル選択
+（`select_for_device`）自体は**非パディング次元**で行う。一方 split-K の判定（`should_split_k`）
+は `strided_tiled_eligibility` が 8 の倍数の次元を要求し、`SplitKPlan::k_per_partition` も
+渡した `k` から導出されるため、split-K の判定・スクラッチ確保は**実効次元**で行う必要がある。
+承認済み対象 11 形状（`tests/common/splitk_parity_baseline.rs::BASELINES`）はすべて 8 の倍数
+のためこの差は顕在化しないが、非 8 倍数形状で `select_route_for_device` の `Classic(cfg)` を
+そのまま使うと、実効次元と非パディング次元とでタイル選択結果が食い違いうる。この差分を避ける
+ため、classic 分岐は `select_route_for_device` の戻り値の `cfg` を捨てて `dispatch_variant`
+（非パディング次元で自前に `select_for_device` を呼び直す既存実装）へ委譲する設計とした。
+split-K 分岐の内部フォールバック（`dispatch_split_k_strided_prepared_with_plan` がスクラッチ
+確保失敗等で classic へ縮退する稀な経路）のみ実効次元で `select_for_device` を呼ぶ非対称が
+残るが、承認済み形状群では実効次元＝非パディング次元のため影響しない。
+
+### ゲート既定値・切替条件（事前登録）
+
+**既定 `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false`**: 依存イシュー #1515（split-K vs
+classic 経路の性能 A/B・#1475 §7 フォローアップの 5 run 正式確定）は、5 run 計測スキャフォー
+ルド（`docs/perf/metal-gemm-splitk-ab.md` §10）のみを確立した段階で PR #1529 としてマージ・
+クローズされ、**§10.4 の ADOPT 判定は「未実測」のまま確定していない**。§4 の結線判断（ブロッ
+カー 1「性能判定が正式 ADOPT ではない」）は本イシュー時点でも解消していないため、本ゲートは
+既定 OFF のまま維持する。ゲート `false` の間、`dispatch_auto` は本結線コード追加前と bit 同一
+の classic 経路を通ることを実機 `#[ignore]` テスト（`tests/gemm_splitk_auto_wiring.rs::
+wiring_off_is_bit_identical_to_new`）・ゲート定数のドリフト検出テスト（`gemm.rs::tests::
+split_k_dispatch_auto_production_enabled_is_false_by_default`）で機械的に担保する。
+
+`true` への切替手順（Mac セッションでの実施を事前登録する）:
+
+1. #1515 §10（`docs/perf/metal-gemm-splitk-ab.md`）の 5 run 正式計測が ADOPT と確定する
+2. `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` を `true` へ切替（`crate::tile`。`tile.rs`）
+3. `tests/gemm_splitk_auto_wiring.rs`（本イシューで新設）・既存 `#[ignore]` split-K 群
+   （`gemm_splitk_bit_match`／`gemm_splitk_parity`／`gemm_splitk_auto_entry_parity`）を実機
+   （Apple Silicon）で pass 確認する
+4. イシュー #1517（framework-compare 結線前後 A/B）の 5 回中央値で非後退・checksum 完全一致
+   を確認する
+5. 後退時は `false` へ差し戻し、理由を本節へ追記する
+
+### スコープ外（変更なし）
+
+NT/TN/TT・f16／hfrag・`gemm_bias_act` 融合経路への split-K 適用は引き続きスコープ外（§4 の
+既存整理を踏襲）。「結線しない記述の横断整合」（他 docs での「結線しない」記述の棚卸し）は
+別イシュー #1518 へ引き継ぐ。
+
+## §6 参照
 
 - `docs/perf/logs/metal-gemm-splitk-shapes-1308/`（M4 Max 実機実測の生ログ・`aggregate.py`／
   `aggregate.md`・`env_info.txt`。イシュー #1308）

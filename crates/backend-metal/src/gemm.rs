@@ -152,6 +152,13 @@ thread_local! {
 /// 本定数を `false` へ差し戻す。
 pub(crate) const SPLIT_K_NUMERIC_CONTRACT_APPROVED: bool = true;
 
+// `MetalGemm::dispatch_auto` の split-K 本番結線ゲート（イシュー #1516）
+// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` は `crate::tile` 側に
+// 定義する（`tile::UNROLL_ACC_ENABLED` 等の既存ゲート定数と同じ配置
+// 判断: `tile` モジュールは `cfg(target_os = "macos")` を持たないため、
+// ドリフト検出テストが Linux（CI・本実装環境）でも実行される。定義・
+// 切替条件は `tile.rs` の同定数 doc コメントを参照）。
+
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
 ///
 /// [`MetalGemm::dispatch_variant`] が本 enum で選択したパイプラインへ
@@ -577,6 +584,16 @@ pub struct MetalGemm {
     /// カーネルと異なり `MetalGemm::new_with_gates` 構築時に eager に
     /// 1 回だけ構築する（`pipeline_tiled_bias_act` と同じ設計判断）。
     pipeline_splitk_reduce: objc2::rc::Retained<MtlPipeline>,
+    /// [`Self::dispatch_auto`] が `tile::should_split_k` 判定に基づき
+    /// split-K 2 パス経路へ分岐するかどうか（イシュー #1516）。
+    /// `swizzle_enabled`/`fine_barrier_enabled`/`unroll_acc_enabled` 等と
+    /// 同じ設計判断（instance フィールド化により base（`false`。既定）/
+    /// head（`true`）の 2 `MetalGemm` を同一プロセス内に構築して bit 一致・
+    /// 性能を A/B できるようにする）。`MetalGemm::new` は本番既定
+    /// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（`false`）を渡すため
+    /// 既定挙動は不変。`true` の場合の実際の分岐先（split-K か classic か）
+    /// は `tile::select_route_for_device` が `(m, n, k)` から純粋に決める。
+    split_k_auto_enabled: bool,
 }
 
 /// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
@@ -708,6 +725,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
+            tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED,
         )
     }
 
@@ -747,6 +765,7 @@ impl MetalGemm {
             frag_load,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
+            tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED,
         )
     }
 
@@ -782,6 +801,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             coop_load,
             tile::TILE_CLASS_MODE,
+            tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED,
         )
     }
 
@@ -825,6 +845,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile_class_mode,
+            tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED,
         )
     }
 
@@ -862,6 +883,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
+            tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED,
         )
     }
 
@@ -889,6 +911,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
+            tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED,
         )
     }
 
@@ -915,6 +938,41 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
+            tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED,
+        )
+    }
+
+    /// [`Self::new`] と同じ構築を行うが、`tile::should_split_k` 判定に
+    /// 基づく split-K 2 パス経路への本番結線ゲート（イシュー #1516）を
+    /// 明示的な `split_k_auto_enabled` 引数で指定する。実機 `#[ignore]`
+    /// bit 一致自己検証テスト（`tests/gemm_splitk_auto_wiring.rs`）・
+    /// イシュー #1517 の framework-compare A/B 専用の入口: 同一プロセス内
+    /// で base（`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`。既定 `false`）/
+    /// head（`true`）の 2 インスタンスを構築して比較する（[`Self::
+    /// new_with_tile_class`] と同型の設計）。他 7 フラグ（threadgroup ID
+    /// スウィズル・simdgroup 細粒度同期・条件付き loop unroll・ソース
+    /// テキスト特殊化・フラグメントロード方式候補・協調ロードレイアウト
+    /// 候補・タイルクラス分割）は本番既定のまま据え置く。本番経路
+    /// （[`Self::new`]）は常に `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
+    /// （`false`）を渡すため、本関数の追加自体は既定挙動を変えない。
+    ///
+    /// `pub` にする理由は [`Self::new_with_tile_class`] doc comment と同じ
+    /// （`pub(crate)` のまま `#[cfg(test)]` を付けない場合の dead_code
+    /// 検査抵触も同型）。
+    pub fn new_with_split_k_auto(
+        ctx: &MetalContext,
+        split_k_auto_enabled: bool,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            tile::FINE_BARRIER_ENABLED,
+            tile::UNROLL_ACC_ENABLED,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
+            tile::FRAG_LOAD_CONFIG,
+            tile::COOP_LOAD_CONFIG,
+            tile::TILE_CLASS_MODE,
+            split_k_auto_enabled,
         )
     }
 
@@ -943,6 +1001,7 @@ impl MetalGemm {
         frag_load: tile::FragLoadConfig,
         coop_load: tile::CoopLoadConfig,
         tile_class_mode: tile::TileClassMode,
+        split_k_auto_enabled: bool,
     ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -987,6 +1046,7 @@ impl MetalGemm {
             tile_class_mode,
             tiled_splitk_cache: Mutex::new(HashMap::new()),
             pipeline_splitk_reduce,
+            split_k_auto_enabled,
         })
     }
 
@@ -1831,6 +1891,20 @@ impl MetalGemm {
     /// 構成の混同〉を一意に識別できないため、[`MetalContext::
     /// verified_m4_max_gpu_core_count`] が SoC ブランド文字列と組み合わせて
     /// 検証済みの値を渡す。`crate::tile` モジュール `verify_m4_max` 参照）。
+    ///
+    /// **split-K 本番結線（イシュー #1516）**: `self.split_k_auto_enabled`
+    /// （既定 `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`＝`false`）が
+    /// `true` の場合のみ、`tile::should_split_k` 判定を 8 の倍数へパディング
+    /// 済みの実効次元（[`pad8`]）で評価し、対象形状（`crate::tile::
+    /// select_route_for_device` が [`tile::GemmRoute::SplitK`] を返す形状）を
+    /// split-K 2 パス経路（`Self::dispatch_split_k_strided_prepared_with_plan`）
+    /// へ振り向ける。対象外の形状・ゲート無効時は本関数追加前と 1 バイトも
+    /// 変わらない classic 経路（[`tile::select_for_device`] を**非パディング
+    /// 次元**で呼び直す）を通る——`select_route_for_device` が実効次元で
+    /// 返す `Classic` 側の `TileConfig` は「対象外と判定された」ことを示す
+    /// のみに使い、実際のディスパッチには使わない（`tile::
+    /// select_route_for_device` doc コメント「判定入力の次元について」・
+    /// `docs/backend-metal-splitk-decision.md` §5 参照）。
     pub fn dispatch_auto(
         &self,
         ctx: &MetalContext,
@@ -1840,8 +1914,177 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<f32>, MetalError> {
+        // `dispatch_auto_with_route`（可視性は feature ゲート次第だが
+        // クレート内部からは常に呼べる。同関数 doc コメント参照）へ委譲
+        // する。`_impl` を直接呼ばない理由: `internal-diagnostics` feature
+        // 無効ビルドでの `dispatch_auto_with_route`（`pub(crate)`）が本関数
+        // 以外に呼び出し元を持たない dead_code 警告を防ぎつつ、経路判断の
+        // 唯一の実装点を 1 か所（`dispatch_auto_with_route_impl`）に保つ。
+        self.dispatch_auto_with_route(ctx, a, b, m, n, k)
+            .map(|(out, _route)| out)
+    }
+
+    /// [`Self::dispatch_auto`] と同じ結線判断を行うが、実際に採用した
+    /// 経路（[`tile::GemmRoute`]）を戻り値で返す診断専用入口（イシュー
+    /// #1516）。`dispatch_auto` は本関数の結果からベクトルのみを取り出す
+    /// 薄いラッパーとして委譲する。
+    ///
+    /// **可視性ゲート（`Self::encode_tiled_prepared`・`Self::
+    /// dispatch_split_k_strided_prepared_with_plan` と同型の 2 分岐構成。
+    /// PR #1496 codex-review P1 指摘と同じ懸念）**: `dispatch_auto` の内部
+    /// 分岐先（split-K か classic か）を外部から無条件に観測できる恒久的な
+    /// 公開 API 面を作らないよう、`internal-diagnostics` feature（既定
+    /// OFF）限定の `pub` とし、既定ビルドでは `pub(crate)` に絞る。実機
+    /// `#[ignore]` テスト（`tests/gemm_splitk_auto_wiring.rs`）が
+    /// `required-features` 経由でのみ到達できる。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn dispatch_auto_with_route(
+        &self,
+        ctx: &MetalContext,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(Vec<f32>, tile::GemmRoute), MetalError> {
+        self.dispatch_auto_with_route_impl(ctx, a, b, m, n, k)
+    }
+
+    /// [`Self::dispatch_auto_with_route`] doc コメント参照。既定ビルド
+    /// （`internal-diagnostics` feature 無効）ではクレート内部限定に絞る。
+    /// `Self::dispatch_auto` が常にこの入口へ委譲するため dead_code には
+    /// ならない（`encode_tiled_prepared` と異なり `#[allow(dead_code)]`
+    /// は不要）。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    pub(crate) fn dispatch_auto_with_route(
+        &self,
+        ctx: &MetalContext,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(Vec<f32>, tile::GemmRoute), MetalError> {
+        self.dispatch_auto_with_route_impl(ctx, a, b, m, n, k)
+    }
+
+    /// [`Self::dispatch_auto_with_route`] の実体（可視性分岐を持たない
+    /// 共通実装。[`Self::dispatch_auto`] の判定ロジックと同一——重複実装
+    /// すると本番経路と診断経路の挙動がドリフトしうるため、`dispatch_auto`
+    /// 自身も本関数へ委譲する契約とする）。
+    fn dispatch_auto_with_route_impl(
+        &self,
+        ctx: &MetalContext,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(Vec<f32>, tile::GemmRoute), MetalError> {
+        if self.split_k_auto_enabled {
+            validate_dims(a, b, m, n, k)?;
+            let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
+            // `dispatch_variant`（classic 経路）が実効次元確定後に必ず通す
+            // `validate_effective_dims`（`m_eff*n_eff` 等のオーバーフロー・
+            // `u32::MAX` 超過検出。OWASP A03 観点・`.claude/rules/
+            // security.md`）と同じ検査をここでも行う。`Self::
+            // dispatch_split_k_auto_padded` が `m_eff * n_eff` をチェック
+            // なしでスクラッチ確保サイズへ使うため、その手前で桁あふれを
+            // 検出しておく必要がある。
+            validate_effective_dims(m_eff, n_eff, k_eff)?;
+            let core = ctx.verified_m4_max_gpu_core_count();
+            let decision = tile::select_route_for_device(m_eff, n_eff, k_eff, core);
+            if let tile::GemmRoute::SplitK(plan) = decision {
+                let (out, executed_route) = self
+                    .dispatch_split_k_auto_padded(ctx, a, b, m, n, k, m_eff, n_eff, k_eff, plan)?;
+                // `select_route_for_device` の事前判定（`should_split_k`
+                // が `Some`）だけでなく、`dispatch_split_k_auto_padded` が
+                // 実際に実行した経路（`SplitKRoute`。スクラッチ確保・
+                // パイプライン構築失敗時は内部で classic へ fail-closed
+                // フォールバックしうる）を反映して `GemmRoute` を確定する。
+                // これにより診断入口 `dispatch_auto_with_route` は
+                // フォールバックによる自明合格を排除できる。
+                let route = match executed_route {
+                    SplitKRoute::Split { .. } => tile::GemmRoute::SplitK(plan),
+                    SplitKRoute::Classic { tile: cfg, .. } => tile::GemmRoute::Classic(cfg),
+                };
+                return Ok((out, route));
+            }
+        }
         let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
-        self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)
+        let out = self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)?;
+        Ok((out, tile::GemmRoute::Classic(cfg)))
+    }
+
+    /// [`Self::dispatch_auto`] の split-K 分岐（イシュー #1516）専用ヘルパー。
+    /// `m_eff`/`n_eff`/`k_eff`（[`pad8`] 済みの実効次元。`select_route_for_device`
+    /// の判定入力と一致させる契約——[`tile::SplitKPlan::k_per_partition`]
+    /// が `k_eff` から導出されているため、ここで異なる次元のバッファを
+    /// 渡すと分割計画と実際のスクラッチ確保量が食い違う）で A・B・C
+    /// バッファを確保し、[`Self::dispatch_split_k_strided_prepared_with_plan`]
+    /// （`plan` は `select_route_for_device` が確定済みのため
+    /// `should_split_k` の再判定は行わない）へ委譲する。[`Self::
+    /// dispatch_variant`] の classic 経路と同じ pad→dispatch→unpad の構造
+    /// （[`pad_matrix`]/[`unpad_matrix`]）を踏む。
+    ///
+    /// 戻り値の [`SplitKRoute`] は `_with_plan` が**実際に実行した**経路
+    /// （スクラッチ確保・パイプライン構築失敗時は classic へ fail-closed
+    /// フォールバックしうる）をそのまま返す。呼び出し元（`dispatch_auto_
+    /// with_route_impl`）はこれを使って `tile::GemmRoute` を確定するため、
+    /// ここで破棄してはならない（フォールバックによる自明合格を排除する
+    /// ための契約）。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: `dispatch_variant` と同じ
+    /// 判断根拠（呼び出し側の意図明確化のため個別引数のまま構造体へ
+    /// まとめ込まない。`.claude/rules/coding-rust.md` の理由コメント
+    /// 必須ルールに対応）。
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_split_k_auto_padded(
+        &self,
+        ctx: &MetalContext,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        plan: tile::SplitKPlan,
+    ) -> Result<(Vec<f32>, SplitKRoute), MetalError> {
+        let a_padded = pad_matrix(a, m, k, m_eff, k_eff);
+        let b_padded = pad_matrix(b, k, n, k_eff, n_eff);
+        let a_buf = MetalBuffer::new_with_data(ctx, &a_padded)?;
+        let b_buf = MetalBuffer::new_with_data(ctx, &b_padded)?;
+        // split-K パス 1 が `m_eff * n_eff` 全要素を書き切る出力専用
+        // バッファのため `dispatch_variant` と同じくゼロ初期化を経由しない
+        // プール確保（`alloc_uninit_pooled`）を使う（設計文書 §6「A02」）。
+        let c_buf = MetalBuffer::alloc_uninit_pooled(ctx, m_eff * n_eff)?;
+        let a_layout = MatrixLayout {
+            rows: m_eff,
+            cols: k_eff,
+            ld: k_eff,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: k_eff,
+            cols: n_eff,
+            ld: n_eff,
+            transposed: false,
+        };
+        // 戻り値の `SplitKRoute` を呼び出し元（`dispatch_auto_with_route_impl`）
+        // へそのまま伝播する（破棄しない）。`_with_plan` はスクラッチ確保・
+        // パイプライン構築失敗時に内部で classic 経路へ fail-closed
+        // フォールバックする契約（`SplitKRoute::Classic{..}` を返す）ため、
+        // ここで捨てると「`should_split_k` が `Some` を返した」という
+        // 事前判定のみで `GemmRoute::SplitK` を報告してしまい、実際には
+        // classic 実行だった場合の診断入口（`dispatch_auto_with_route`）の
+        // 自明合格排除という目的が破れる。
+        let route = self.dispatch_split_k_strided_prepared_with_plan(
+            ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf, m_eff, n_eff, k_eff, plan,
+        )?;
+        let padded_c = c_buf.read_to_vec();
+        Ok((unpad_matrix(padded_c, m_eff, n_eff, m, n), route))
     }
 
     /// f16 動的タイル選択（イシュー #798）の自動入口。[`Self::dispatch_auto`]
@@ -4481,6 +4724,13 @@ fn encode_dispatch_tiled_hfrag(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // split-K 本番結線ゲート（`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+    // ENABLED`）のドリフト検出テストは `tile.rs` 側に置く（本モジュール
+    //〈`gemm`〉は `cfg(target_os = "macos")` 限定のため Linux（CI）では
+    // コンパイルされず、ここに置くとドリフト検出が機能しない。`tile.rs`
+    // は `cfg(target_os = "macos")` を持たないためテストが Linux でも
+    // 実行される。イシュー #1516）。
 
     // --- validate_dims（pure・実機不要） ---
 
