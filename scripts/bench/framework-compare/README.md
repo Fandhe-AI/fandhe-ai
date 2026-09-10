@@ -1306,6 +1306,47 @@ before/after で同一だと fail-closed 拒否するため（同一バージョ
   既定は切り替えない（安全側）。判断の記録先は
   `docs/perf/metal-gemm-n4096-kernel-gap.md` §19
 
+### split-K 結線前後 A/B（`run_ab_splitk_metal.sh`／`compare_gemm_ab.py --task train`。イシュー #1517）
+
+`run_ab_gemm_metal.sh`（上記 #1306）の「承認ピン ↔ HEAD」方式とは異なり、
+本ツールは **両腕とも `crates/facade` への path patch**（`AB_BEFORE_
+FACADE_PATH`＝`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=false` の
+worktree・`AB_AFTER_FACADE_PATH`＝同定数 `=true` の worktree）を比較する。
+「結線前後」の実体がこの定数の `false`/`true` そのものであるため
+（イシュー #1516・PR #1530）、承認ピン ↔ HEAD 比較では混入するゲート
+以外の差分（E2〜E8 等）を排除した、字義通りの結線前後計測になる。
+
+- `run_ab_splitk_metal.sh <label>`（`AB_BEFORE_FACADE_PATH`／
+  `AB_AFTER_FACADE_PATH` 必須・`AB_DRY_RUN=1` でバリデーションのみ実行）
+  は両腕の `tile.rs` 宣言行を grep で読み、`false`/`true` であることを
+  検証する差分ガード（両腕が同一パス・同一 sha256 なら fail-closed で
+  停止）を経てからビルドし、gemm 8 セル＋train 2 セルを 5 round 計測する。
+  `compare_gemm_ab.py --task <t>` は指定タスク以外の行を警告つきで
+  除外し 1 件でもあれば判定不能（終了コード 2）にする fail-closed 契約
+  （`load_rows` docstring）のため、gemm・train は最初から別ファイル
+  （`results-m4max-splitk-ab-{before,after}-<label>-gemm.jsonl`／
+  `-train.jsonl`）へ出力する（PR #1531 是正。同一ファイルに両タスクを
+  追記すると `--task gemm`／`--task train` のいずれで集計しても相手
+  タスクの行が警告対象になり必ず判定不能になっていた）。train の
+  `--phases`（診断用）はさらに別ファイル
+  （`-phases.jsonl`）へ出力し、「ちょうど 5 件」契約を汚さない。
+- `compare_gemm_ab.py --task {gemm,train}`（既定 `gemm`。後方互換）に
+  それぞれのタスク専用ファイル（`-gemm.jsonl`／`-train.jsonl`）を渡すと
+  判定できる（`-gemm.jsonl` を `--task train` で読む、あるいはその逆は
+  fail-closed で判定不能になる）。`--phases BEFORE AFTER`（train 限定）
+  は `train_phases` 行の phase 別 before/after を参考表として出力する
+  （判定には用いない）。`--per-run`（既定 off・既定出力はバイト不変）は
+  run 単位（append 順＝run 順）の `after_k/before_k` 比 5 件と「5 run
+  全て `> 1.00`（符号一貫）」フラグを追加列として表示する（判定
+  〈終了コード・verdict〉には影響しない診断列。後退セルが「共有負荷
+  ノイズ帯」か「一貫した後退」かを人間が機械的に見分けるための値。
+  `docs/perf/metal-gemm-splitk-framework-compare-1517.md` §3 rule (b)）。
+- 判定規則・帰属表（gemm は形状条件で・train の reuse／backward は
+  入口条件〈backward は形状条件でも〉split-K に非到達だが、train の
+  fresh は L2 forward〈非融合 matmul〉が `dispatch_auto` を経由するため
+  結線後は split-K に到達しうるという構造分析）・実測結果は
+  `docs/perf/metal-gemm-splitk-framework-compare-1517.md` を参照。
+
 ### `compare_gemm_ab.py --device cpu`（既定スレッド数限定 on/off 比較・イシュー #1364）
 
 `compare_gemm_ab.py` は既定で `--device metal`（上記 #1306 用途・8 セル）を

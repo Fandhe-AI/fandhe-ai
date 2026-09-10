@@ -26,9 +26,15 @@ path patch。バージョン文字列は変わらない）には流用できな�
 2 ファイル入力・`(size, mode)` セルキー（device=metal・task=gemm 固定）に
 特化する。
 
+`--task train`（既定 `gemm`。イシュー #1517）指定時は `bench-fandhe
+--task train` が emit する単一形状（`size=BATCH=64`）の 2 セルを対象に
+する（split-K 結線前後 A/B の train セル判定用。`run_ab_splitk_metal.sh`
+が出力する JSONL を読む）。
+
 fail-closed 方針（security.md A08。`compare_managed_ab.py` と同方針）:
-- `framework != "fandhe-ai"`・`task != "gemm"`・`device != "metal"`・
-  `tf32:true`・`managed:true` の行は判定不能行として除外する
+- `framework != "fandhe-ai"`・`task != <--task の指定値>`・
+  `device != "metal"`・`tf32:true`・`managed:true` の行は判定不能行と
+  して除外する
 - 各セル before/after とも「ちょうど 5 件」でなければ「判定不能」
 - `warmup`/`iters`/`version` が before/after で不一致なら「判定不能」
 - checksum が複合判定（`checksum_contract.checksums_match`）を外れれば
@@ -41,6 +47,7 @@ import argparse
 import importlib.util
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -85,13 +92,28 @@ _GATE_SIZES_BY_DEVICE = {
     "cuda": frozenset({1024, 2048, 4096}),
 }
 
+# イシュー #1517: `--task train` 用のセル集合。`bench-fandhe --task train`
+# は `Record.size` に `BATCH`（`scripts/bench/framework-compare/
+# bench-fandhe/src/main.rs` の `const BATCH: usize = 64;`）を emit する
+# （train タスクは gemm と異なり N をスイープしない・単一形状のみ）。
+# device に依らず単一値（現状 metal 限定用途だが、将来 cpu/cuda へ拡張
+# しても train の形状定義は `bench-fandhe` 側の定数に従うため、device
+# 別の分岐は設けない）。
+_VALID_SIZES_TRAIN = frozenset({64})
+DEFAULT_TASK = "gemm"
+_VALID_TASKS = frozenset({"gemm", "train"})
 
-def _size_set_for(device, sizes_arg):
-    """`--device`/`--sizes` から実際に使うセルサイズ集合を決める。
+
+def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
+    """`--device`/`--sizes`/`--task` から実際に使うセルサイズ集合を決める。
 
     `sizes_arg` は `"full"`（既定・後方互換。`_VALID_SIZES_BY_DEVICE` を
     そのまま使う）または `"gate"`（`_GATE_SIZES_BY_DEVICE` へ絞り込む）。
+    `task == "train"` の場合は `sizes_arg` を無視し `_VALID_SIZES_TRAIN`
+    （単一形状）を返す（train タスクに "gate" の概念は存在しない）。
     """
+    if task == "train":
+        return _VALID_SIZES_TRAIN
     if sizes_arg == "gate":
         return _GATE_SIZES_BY_DEVICE[device]
     return _VALID_SIZES_BY_DEVICE[device]
@@ -103,7 +125,7 @@ def _size_set_for(device, sizes_arg):
 DEFAULT_THRESHOLD = 1.05
 
 
-def _valid_cell_identity(obj, device, size_set=None):
+def _valid_cell_identity(obj, device, size_set=None, task=DEFAULT_TASK):
     """`_cell_key` がグループ化に使う `task`/`device`/`size`/`mode` の型・
     値域を検証する（`compare_managed_ab.py::_valid_cell_identity` と同方針。
     未検証のまま集約すると、これらのフィールドを欠いた行が単一の偽セルへ
@@ -115,9 +137,18 @@ def _valid_cell_identity(obj, device, size_set=None):
     （`_VALID_MODES` 内か）はここで検証するが、`--modes` による絞り込み
     （例: `reuse` のみ）は呼び出し側（`load_rows`）が別途「無視して集約
     しない」形で扱う（不正行としては扱わない。#1337）。
+
+    `task`（既定 `"gemm"`・後方互換）で行の `task` フィールド自体の期待値を
+    切り替える（イシュー #1517「`--task train`」）。行が求める `task`
+    以外（例: `--task train` 実行時に紛れ込んだ `task:"gemm"` 行や
+    `bench-fandhe --phases` が emit する `task:"train_phases"` 行）は不正
+    として除外する——`bench-fandhe` は `--phases` 実行時に `task:"train"`
+    行を emit しない契約（`main.rs` 実測確認済み）のため実運用では混在
+    しないが、本関数は入力の型・値域を機械的に検証する層であり前提を
+    信用せず fail-closed に拒否する。
     """
-    task = obj.get("task")
-    if not isinstance(task, str) or task != "gemm":
+    row_task = obj.get("task")
+    if not isinstance(row_task, str) or row_task != task:
         return False
     row_device = obj.get("device")
     if not isinstance(row_device, str) or row_device != device:
@@ -132,7 +163,7 @@ def _valid_cell_identity(obj, device, size_set=None):
     return True
 
 
-def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None):
+def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None, task=DEFAULT_TASK):
     """JSONL を読み、不正な行は理由付きで報告しスキップする（A08）。
 
     `size_set`（`--sizes` 由来。省略時 `_VALID_SIZES_BY_DEVICE[device]`）・
@@ -221,7 +252,7 @@ def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None):
                     "— skipped"
                 )
                 continue
-            if not _valid_cell_identity(obj, device, size_set=size_set):
+            if not _valid_cell_identity(obj, device, size_set=size_set, task=task):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"
                     f"'mode' フィールド（行: {obj!r}） — skipped"
@@ -436,12 +467,61 @@ def _all_expected_cells(device=DEFAULT_DEVICE, size_set=None, modes=None):
     return sorted((size, mode) for size in size_set for mode in modes)
 
 
-def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, modes=None):
+def per_run_ratios(before_rows, after_rows):
+    """`before_rows`/`after_rows`（各ちょうど 5 件・append 順＝run 順という
+    計測スクリプトの契約〈`run_ab_gemm_metal.sh`／`run_ab_splitk_metal.sh`
+    が run 単位で交互起動し、各腕の出力ファイルへその順で 1 行ずつ
+    追記する〉を前提に、run k 番目同士の `after_k/before_k` 比を 5 件
+    返す。イシュー #1517 実装計画 §4 rule (b) の「run 単位ペアの run 内比
+    が 5/5 run すべて `>1.00` なら結線維持不可」を人間（Mac セッション）
+    が機械的に判定できるようにするための診断値（判定そのものは行わない
+    ——終了コード・`verdict` には影響しない。`--per-run` 指定時のみ
+    `render_markdown` が表へ追記する）。
+
+    件数が 5 件ちょうどでない場合は `None`（`evaluate_cell` の「ちょうど
+    5 件」契約と同じ理由で判定不能扱いとする）。
+    """
+    if len(before_rows) != 5 or len(after_rows) != 5:
+        return None
+    ratios = []
+    for b, a in zip(before_rows, after_rows):
+        bv = b.get("median_s")
+        av = a.get("median_s")
+        if (
+            not isinstance(bv, (int, float))
+            or isinstance(bv, bool)
+            or not isinstance(av, (int, float))
+            or isinstance(av, bool)
+            or not math.isfinite(bv)
+            or not math.isfinite(av)
+            or bv <= 0
+        ):
+            return None
+        ratios.append(av / bv)
+    return ratios
+
+
+def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, modes=None, per_run=False):
+    """`cells` を Markdown 表として整形する。
+
+    列は `columns` リストへ 1 列 1 要素で積んでから
+    `"| " + " | ".join(columns) + " |"` で組み立てる（header・sep・各データ
+    行のすべてで同一の組み立て方をする）。以前は文字列スライス
+    （`header[:-2]` 等）と行末への直接連結（`f"...{tail}"`／
+    `f"...{per_run_tail}"`）で `--per-run` 列を継ぎ足しており、
+    区切り行のスライスが `---` の 1 文字を余分に削って列数がずれ、
+    データ行は基本列の末尾 `|` と追加列の先頭 `|` が連結されて `||` の
+    空列が生じていた（codex-review P2・Cursor Bugbot Low Severity
+    指摘。イシュー #1517 PR #1531）。列リスト方式は header・sep・
+    データ行の列数を機械的に一致させるため、この種のずれが再発しない。
+    非 `--per-run`（既定）出力は本リファクタ前とバイト同一。
+    """
     lines = []
-    lines.append(
-        "| size/mode | before median | after median | after/before | checksum | 判定 |"
-    )
-    lines.append("|---|---|---|---|---|---|")
+    base_columns = ["size/mode", "before median", "after median", "after/before", "checksum", "判定"]
+    per_run_columns = ["run 内比（5 run）", "符号一貫（全 run >1.00）"]
+    columns = base_columns + per_run_columns if per_run else list(base_columns)
+    lines.append("| " + " | ".join(columns) + " |")
+    lines.append("|" + "|".join(["---"] * len(columns)) + "|")
     for key in _all_expected_cells(device, size_set=size_set, modes=modes):
         rows = cells.get(key, [])
         before_rows = [r for r in rows if not r.get("_is_after")]
@@ -455,9 +535,10 @@ def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, mode
             result = evaluate_cell(before_rows, after_rows, threshold)
         cell_label = "/".join(str(v) for v in key)
         if result["status"] != "ok":
-            lines.append(
-                f"| {cell_label} | - | - | - | - | 判定不能: {result['reason']} |"
-            )
+            row = [cell_label, "-", "-", "-", "-", f"判定不能: {result['reason']}"]
+            if per_run:
+                row += ["-", "-"]
+            lines.append("| " + " | ".join(row) + " |")
             continue
         checksum_label = (
             "完全一致"
@@ -467,13 +548,82 @@ def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, mode
         note = ""
         if result["before_spread"] > 1.5:
             note = "（判定注意: before spread > 1.5x・負荷ノイズの疑い）"
-        lines.append(
-            f"| {cell_label} | {_fmt_ms(result['before_median_s'])} "
-            f"(min {_fmt_ms(result['before_min_s'])} / max {_fmt_ms(result['before_max_s'])}) | "
+        row = [
+            cell_label,
+            f"{_fmt_ms(result['before_median_s'])} "
+            f"(min {_fmt_ms(result['before_min_s'])} / max {_fmt_ms(result['before_max_s'])})",
             f"{_fmt_ms(result['after_median_s'])} "
-            f"(min {_fmt_ms(result['after_min_s'])} / max {_fmt_ms(result['after_max_s'])}) | "
-            f"{result['ratio']:.4f} | {checksum_label} | {result['verdict']}{note} |"
-        )
+            f"(min {_fmt_ms(result['after_min_s'])} / max {_fmt_ms(result['after_max_s'])})",
+            f"{result['ratio']:.4f}",
+            checksum_label,
+            f"{result['verdict']}{note}",
+        ]
+        if per_run:
+            ratios = per_run_ratios(before_rows, after_rows)
+            if ratios is None:
+                row += ["判定不能", "-"]
+            else:
+                sign_consistent = all(r > 1.0 for r in ratios)
+                ratios_str = ", ".join(f"{r:.4f}" for r in ratios)
+                row += [ratios_str, "はい" if sign_consistent else "いいえ"]
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+_PHASE_NAME_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def _valid_phase_row(obj, device):
+    """`train_phases` 行（`bench-fandhe --task train --phases`。イシュー
+    #1009）として `--phases` 診断表に使ってよいかを検証する。
+
+    `compare_ab.py::_valid_phase_row` は `device == "cuda"` 固定（イシュー
+    #1083 の CUDA 専用ツール）だが、本関数は呼び出し元が渡す `device`
+    （`metal` 等）と突き合わせる（イシュー #1517「`train --phases` 診断表」。
+    `compare_ab.compare_phases` を流用しない理由は同モジュール docstring
+    参照）。
+    """
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("framework") != "fandhe-ai" or obj.get("task") != "train_phases":
+        return False
+    if obj.get("device") != device:
+        return False
+    phase = obj.get("phase")
+    if not isinstance(phase, str) or not _PHASE_NAME_RE.match(phase):
+        return False
+    v = obj.get("median_s")
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+        return False
+    return True
+
+
+def render_phases_table(before_rows, after_rows, device, mode):
+    """`--phases` 診断表（1 回計測・参考値。判定には用いない）を Markdown
+    で返す。`before_rows`/`after_rows` は別ファイル（`--phases` 引数）から
+    読んだ生の JSON オブジェクトのリスト。一致する行が無ければ空文字列
+    （呼び出し元が節ごと省略する）。
+    """
+    before = [r for r in before_rows if _valid_phase_row(r, device) and r.get("mode", "fresh") == mode]
+    after = [r for r in after_rows if _valid_phase_row(r, device) and r.get("mode", "fresh") == mode]
+    if not before or not after:
+        return ""
+    before_by_phase = {r["phase"]: r for r in before}
+    after_by_phase = {r["phase"]: r for r in after}
+    phases = sorted(
+        set(before_by_phase) & set(after_by_phase),
+        key=lambda p: (before_by_phase[p].get("phase_index", 1 << 30), p),
+    )
+    if not phases:
+        return ""
+    lines = [f"### フェーズ分解（診断用・{mode}・単発計測・非判定）", ""]
+    lines.append("| phase | before | after | after/before |")
+    lines.append("|---|---|---|---|")
+    for p in phases:
+        b = before_by_phase[p]["median_s"]
+        a = after_by_phase[p]["median_s"]
+        ratio = f"{(a / b):.3f}" if b > 0 else "-"
+        lines.append(f"| {p} | {_fmt_ms(b)} | {_fmt_ms(a)} | {ratio} |")
     return "\n".join(lines)
 
 
@@ -518,7 +668,46 @@ def main(argv):
             "イシュー #1337）"
         ),
     )
+    parser.add_argument(
+        "--task",
+        choices=sorted(_VALID_TASKS),
+        default=DEFAULT_TASK,
+        help=(
+            "判定対象タスク（既定 'gemm'・後方互換。'train' は "
+            "bench-fandhe --task train が emit する単一形状 "
+            "（size=BATCH=64）のセルを対象にする。イシュー #1517。"
+            "'train' 指定時 --sizes は無視する（train に gate の概念は"
+            "ない）"
+        ),
+    )
+    parser.add_argument(
+        "--phases",
+        nargs=2,
+        metavar=("BEFORE_PHASES_JSONL", "AFTER_PHASES_JSONL"),
+        default=None,
+        help=(
+            "`--task train` 限定の診断表（`bench-fandhe --task train "
+            "--phases` が出す task:\"train_phases\" 行の before/after を "
+            "1 回計測のまま並べる。判定には用いない参考値。"
+            "イシュー #1517）"
+        ),
+    )
+    parser.add_argument(
+        "--per-run",
+        action="store_true",
+        help=(
+            "各セルへ run 単位（append 順＝run 順）の `after_k/before_k` "
+            "比 5 件と「5 run 全てで比 > 1.00（符号一貫）」フラグを追加列と"
+            "して表示する（既定 off・既定出力はバイト不変。判定〈終了"
+            "コード・verdict〉には影響しない診断列。イシュー #1517 実装"
+            "計画 §4 rule (b) の『run 内比が 5/5 run すべて > 1.00 なら"
+            "結線維持不可』を人間が機械的に確認するための値）"
+        ),
+    )
     args = parser.parse_args(argv[1:])
+    if args.phases is not None and args.task != "train":
+        print("ERROR: --phases は --task train と併用する場合のみ有効", file=sys.stderr)
+        return 2
 
     modes = frozenset(m.strip() for m in args.modes.split(",") if m.strip())
     invalid_modes = modes - _VALID_MODES
@@ -529,13 +718,13 @@ def main(argv):
             file=sys.stderr,
         )
         return 2
-    size_set = _size_set_for(args.device, args.sizes)
+    size_set = _size_set_for(args.device, args.sizes, task=args.task)
 
     before_rows, before_warnings = load_rows(
-        args.before, args.device, size_set=size_set, modes=modes
+        args.before, args.device, size_set=size_set, modes=modes, task=args.task
     )
     after_rows, after_warnings = load_rows(
-        args.after, args.device, size_set=size_set, modes=modes
+        args.after, args.device, size_set=size_set, modes=modes, task=args.task
     )
     warnings = before_warnings + after_warnings
     for w in warnings:
@@ -561,7 +750,28 @@ def main(argv):
         print("判定不能: 入力ファイルに行がない", file=sys.stderr)
         return 2
 
-    print(render_markdown(cells, args.threshold, args.device, size_set=size_set, modes=modes))
+    print(
+        render_markdown(
+            cells, args.threshold, args.device, size_set=size_set, modes=modes, per_run=args.per_run
+        )
+    )
+
+    if args.phases is not None:
+        try:
+            with open(args.phases[0], encoding="utf-8") as f:
+                before_phase_rows = [json.loads(line) for line in f if line.strip()]
+            with open(args.phases[1], encoding="utf-8") as f:
+                after_phase_rows = [json.loads(line) for line in f if line.strip()]
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"WARNING: --phases 入力の読み込みに失敗した（{e}） — 診断表を省略", file=sys.stderr)
+        else:
+            for mode in sorted(modes):
+                table = render_phases_table(
+                    before_phase_rows, after_phase_rows, args.device, mode
+                )
+                if table:
+                    print()
+                    print(table)
 
     any_bad = False
     for key in _all_expected_cells(args.device, size_set=size_set, modes=modes):
