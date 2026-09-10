@@ -243,17 +243,34 @@ def check_phase0_consistency(
     for run_index, rows in enumerate(per_run_phase0):
         t: dict[tuple[int, int, int], dict[str, str]] = {}
         c: dict[tuple[int, int, int], dict[str, str]] = {}
+        # イシュー #1529 codex-review P2 指摘 2: 同一形状の phase0 行が
+        # run 内に重複した場合、辞書への無条件上書き（`t[key] = row`）は
+        # 後勝ちとなり、`splitk_stable=false` や `a_vs_at_fail_count` 非
+        # ゼロの異常行の後に正常行が来ると異常記録が消えてしまう
+        # （検査を fail-closed で通過してしまう）。期待形状ごとに行数が
+        # ちょうど 1 であることを run 単位でここで検査し、重複は
+        # undetermined 扱いの違反として記録する（`check_run_shape_
+        # completeness` と同型の検査を phase0 行にも適用する）。
+        phase0_counts: Counter[tuple[str, int, int, int]] = Counter()
         for row in rows:
             kind = row.get("kind")
             if kind is None or "m" not in row or "n" not in row or "k" not in row:
                 continue
             key = (int(row["m"]), int(row["n"]), int(row["k"]))
+            phase0_counts[(kind, key[0], key[1], key[2])] += 1
             if kind == "target":
                 t[key] = row
             elif kind == "control":
                 c[key] = row
         target_by_run.append(t)
         control_by_run.append(c)
+
+        for (kind, m, n, k), cnt in sorted(phase0_counts.items()):
+            if cnt != 1:
+                violations.append(
+                    f"run{run_index}: phase0 kind={kind} m={m} n={n} k={k} "
+                    f"の行数が {cnt}（期待 1）"
+                )
 
         for key in sorted(EXPECTED_TARGET_KEYS):
             _, m, n, k = key
@@ -296,20 +313,35 @@ def check_phase0_consistency(
                 )
 
     # checksum の全 run 一致（target のみ。control は checksum を出力しない）。
+    #
+    # イシュー #1529 codex-review P2 指摘 1: 欠落値を `discard(None)` で
+    # 除外して残り 2 種類以上のときだけ不一致とする実装は、一部または全 run
+    # で checksum フィールド自体が欠落していても（values が空集合または
+    # 単一値のみになり）検査を素通りしてしまう。§10.2 が要求するのは
+    # 「5 run 間の checksum 一致」であり、そもそも値が揃って存在すること
+    # が前提のため、run ごとに値の有無を明示確認したうえで一致を判定する
+    # （欠落は不一致とは別に fail-closed で違反扱いにする）。
     if n_runs > 0:
         for key in sorted(EXPECTED_TARGET_KEYS):
             _, m, n, k = key
             for field_name in ("checksum_a", "checksum_at", "checksum_b"):
-                values = {
+                collected: list[str | None] = [
                     target_by_run[i].get((m, n, k), {}).get(field_name)
                     for i in range(n_runs)
-                    if (m, n, k) in target_by_run[i]
-                }
-                values.discard(None)
-                if len(values) > 1:
+                ]
+                missing_runs = [i for i, v in enumerate(collected) if v is None]
+                if missing_runs:
+                    violations.append(
+                        f"target m={m} n={n} k={k} の {field_name} が "
+                        f"run {missing_runs} で欠落している（{n_runs} run 中 "
+                        f"{len(missing_runs)} run）"
+                    )
+                    continue
+                distinct = set(collected)
+                if len(distinct) > 1:
                     violations.append(
                         f"target m={m} n={n} k={k} の {field_name} が run 間で不一致: "
-                        f"{sorted(values)}"
+                        f"{sorted(distinct)}"
                     )
 
     return violations
@@ -735,6 +767,36 @@ def self_test() -> None:
     assert us_undetermined
     assert any("splitk_stable" in v for v in us_violations), us_violations
 
+    # イシュー #1529 codex-review P2 指摘 1 の回帰: フェーズ 0 の checksum
+    # フィールド自体が 1 run で欠落（値が異なるのではなく行に存在しない）
+    # → undetermined（欠落を不一致と別枠で検出できることを確認する）。
+    missing_checksum_phase0 = _make_phase0_lines()
+    missing_checksum_phase0[0] = missing_checksum_phase0[0].replace(
+        " checksum_at=1.000000e2", ""
+    )
+    missing_checksum_runs = [make_run() for _ in range(4)] + [
+        make_run(phase0_override=missing_checksum_phase0)
+    ]
+    mc_shapes, mc_undetermined, mc_violations = aggregate(
+        missing_checksum_runs, gate_mode="record_only"
+    )
+    assert mc_undetermined
+    assert any(
+        "checksum_at" in v and "欠落" in v for v in mc_violations
+    ), mc_violations
+
+    # イシュー #1529 codex-review P2 指摘 2 の回帰: 同一形状の phase0 行が
+    # 1 run 内で重複（後続行が正常値で先行の異常行を上書きする形）
+    # → undetermined（run 単位の行数検査で重複を検出できることを確認する）。
+    dup_phase0 = _make_phase0_lines()
+    anomalous_first = dup_phase0[0].replace("splitk_stable=true", "splitk_stable=false")
+    dup_phase0[0] = anomalous_first
+    dup_phase0.insert(1, dup_phase0[0].replace("splitk_stable=false", "splitk_stable=true"))
+    dup_runs = [make_run() for _ in range(4)] + [make_run(phase0_override=dup_phase0)]
+    dup_shapes, dup_undetermined, dup_violations = aggregate(dup_runs, gate_mode="record_only")
+    assert dup_undetermined
+    assert any("の行数が 2（期待 1）" in v for v in dup_violations), dup_violations
+
     # 3 run（完全でも 5 未満）→ undetermined（MIN_FORMAL_RUNS）。
     three_runs = [make_run() for _ in range(3)]
     t_shapes, t_undetermined, t_violations = aggregate(three_runs, gate_mode="record_only")
@@ -768,7 +830,60 @@ def self_test() -> None:
         assert "負荷推移" in monitor_md
         assert "run1_monitor.log" in monitor_md
 
+    # イシュー #1529 codex-review P2 指摘 3 の回帰: 入力パスの重複
+    # （文字列としての重複・`os.path.realpath` 正規化後にのみ判明する
+    # 別名越しの重複の両方）を `check_duplicate_paths` が拒否すること。
+    try:
+        check_duplicate_paths(["run1.log", "run2.log", "run1.log"])
+        raise AssertionError("文字列として重複したパスで例外が出なかった")
+    except ValueError as e:
+        assert "重複" in str(e), str(e)
+
+    with tempfile.TemporaryDirectory() as d:
+        real_path = os.path.join(d, "run1.log")
+        with open(real_path, "w", encoding="utf-8") as f:
+            f.write("")
+        os.makedirs(os.path.join(d, "sub"), exist_ok=True)
+        alias_path = os.path.join(d, "sub", "..", "run1.log")
+        try:
+            check_duplicate_paths([real_path, alias_path])
+            raise AssertionError("realpath 正規化後の重複で例外が出なかった")
+        except ValueError as e:
+            assert "重複" in str(e), str(e)
+
+        # 正規化後に別ファイルを指す場合は重複と判定しない（過検出防止）。
+        other_path = os.path.join(d, "run2.log")
+        with open(other_path, "w", encoding="utf-8") as f:
+            f.write("")
+        check_duplicate_paths([real_path, other_path])  # 例外が出ないことを確認
+
     print("self-test OK", file=sys.stderr)
+
+
+def check_duplicate_paths(paths: list[str]) -> None:
+    """入力ログパスの重複を検査する純関数（イシュー #1529 codex-review P2
+    指摘 3）。
+
+    正規化前の文字列（例: `run1.log` と `./run1.log`）はもちろん、
+    シンボリックリンク越しの別名も `os.path.realpath` で正規化してから
+    重複を判定する。同じログファイルを複数回指定すると `len(paths)` が
+    実際の独立試行回数より多く数えられ、正式 ADOPT/REJECT（
+    `MIN_FORMAL_RUNS=5` 到達）の判定が「同じログの水増しで 5 run 分の
+    記録があるように見える」形で成立してしまうため、fail-closed に
+    エラーとして拒否する（正式判定には独立した 5 run の記録を要求する
+    `docs/perf/metal-gemm-splitk-ab.md` §10.2 の趣旨）。
+    """
+    import os
+
+    seen: dict[str, str] = {}
+    for p in paths:
+        real = os.path.realpath(p)
+        if real in seen:
+            raise ValueError(
+                f"入力ログパスが重複している（同じファイルを指す）: "
+                f"{seen[real]!r} と {p!r}"
+            )
+        seen[real] = p
 
 
 def main() -> None:
@@ -800,6 +915,12 @@ def main() -> None:
             "[--monitor-logs=a.log,b.log,...] run1.log run2.log ... [--self-test]",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+    try:
+        check_duplicate_paths(paths)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
     logs = []
