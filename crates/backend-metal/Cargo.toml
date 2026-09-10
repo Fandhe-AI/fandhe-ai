@@ -188,3 +188,13 @@ required-features = ["internal-diagnostics"]
 name = "gemm_splitk_ab_bench"
 test = true
 required-features = ["internal-diagnostics"]
+
+# split-K 本番結線（イシュー #1516）の実機 bit 一致・baseline 非後退
+# テスト。`MetalGemm::new_with_split_k_auto`（常時 `pub`）・
+# `MetalGemm::dispatch_auto_with_route`（`internal-diagnostics` feature
+# 限定の `pub`。実際に split-K 経路へ到達したかをフォールバックによる
+# 自明合格なしに検証するため）を直接呼ぶため本 feature を要求する
+# （`gemm_splitk_bit_match`／`gemm_splitk_parity` と同型）。
+[[test]]
+name = "gemm_splitk_auto_wiring"
+required-features = ["internal-diagnostics"]

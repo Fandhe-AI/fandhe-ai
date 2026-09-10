@@ -2239,18 +2239,61 @@ pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
 // [`should_split_k`] と、split-K 経路が使う threadgroup 構成
 // [`split_k_tile`] を提供する。
 //
-// **本節は選択判定のみを扱う（opt-in・`select`/`select_for_device` へは
-// 未結線）**。実際の 2 パスディスパッチ（パス 1: K 区間ごとの部分和を
-// device スクラッチへ書く 3 次元 dispatch・パス 2: 固定順序逐次縮約）は
-// `crate::gemm::MetalGemm::dispatch_split_k*`（`gemm.rs`）が担う。性能
-// A/B は #1475（暫定 ADOPT・3/5 run）、本番結線可否は #1476 で確定した
-// （**結線しない**。性能判定 undetermined・数値契約未承認の 2 ブロッカー。
-// `docs/backend-metal-splitk-decision.md` §4）。ブロッカー 2（数値契約
-// 未承認）は #1511 の適用拡張承認・#1513 の `SPLIT_K_NUMERIC_CONTRACT_
-// APPROVED=true` 切替で解消済み。ブロッカー 1（性能の正式 ADOPT 判定）
-// は #1515 へ引き継ぎ、`select`/`select_for_device` への本番結線自体は
-// #1516（Phase 2）が担う。本モジュール・本ファイルの選択ロジックは
-// 変更しない。
+// **本節は選択判定のみを扱う**。実際の 2 パスディスパッチ（パス 1: K
+// 区間ごとの部分和を device スクラッチへ書く 3 次元 dispatch・パス 2:
+// 固定順序逐次縮約）は `crate::gemm::MetalGemm::dispatch_split_k*`
+// （`gemm.rs`）が担う。性能 A/B は #1475（暫定 ADOPT・3/5 run）、本番
+// 結線可否は #1476 で確定した（**結線しない**。性能判定 undetermined・
+// 数値契約未承認の 2 ブロッカー。`docs/backend-metal-splitk-decision.md`
+// §4）。ブロッカー 2（数値契約未承認）は #1511 の適用拡張承認・#1513 の
+// `SPLIT_K_NUMERIC_CONTRACT_APPROVED=true` 切替で解消済み。ブロッカー 1
+// （性能の正式 ADOPT 判定）は #1515 へ引き継がれ、#1515 は 5 run 計測
+// スキャフォールドのみを確立した段階で完了したため（ADOPT/REJECT 判定
+// 自体は未確定）、**#1516（Phase 2）は `select`/`select_for_device` への
+// 本番結線コードを `select_route_for_device`（下記）経由で追加したが、
+// `crate::gemm::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（既定 `false`。
+// `crate::gemm::MetalGemm::dispatch_auto` が参照）でゲートし、ブロッカー 1
+// 解消まで無効のまま維持する**（`docs/backend-metal-splitk-decision.md`
+// §5）。`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 自体は下記で定義する
+// （`crate::gemm::MetalGemm::dispatch_auto` からは `tile::` 経由で参照する。
+// `UNROLL_ACC_ENABLED` 等の既存ゲート定数と同じくクレート横断で常に
+// コンパイル対象となる本モジュールに置くことで、ドリフト検出テストが
+// Linux（CI）でも実行される）。`should_split_k`／`split_k_tile` 自体の
+// 選択ロジックは変更しない。
+
+/// [`crate::gemm::MetalGemm::dispatch_auto`]（本番 NN 経路の自動入口）が
+/// [`should_split_k`] 判定に基づき split-K 2 パス経路へ分岐するかどうかの
+/// 本番結線ゲート（イシュー #1516）。
+///
+/// **既定 `false`（本 PR 時点）**: split-K 経路の性能 A/B（イシュー
+/// #1515）は依存 PR #1529 で計測スキャフォールドのみを確立した段階で、
+/// `docs/perf/metal-gemm-splitk-ab.md` §10.4 の ADOPT 判定は「未実測」の
+/// まま確定していない。数値契約（[`crate::gemm::SPLIT_K_NUMERIC_CONTRACT_
+/// APPROVED`]相当。本モジュールとは独立）はイシュー #1513 で承認済みだが、
+/// 性能面の正式 ADOPT 判定が出るまでは `MetalBackendOps::gemm`
+/// （`crate::ops`）の挙動・性能を変えないよう本定数は `false` のまま
+/// 維持する。`false` の間、`dispatch_auto` は本定数追加前と 1 バイトも
+/// 変わらない経路（`select_for_device(m, n, k, ..)` →
+/// `MetalGemm::dispatch_variant`）を通る（[`select_route_for_device`] doc
+/// コメント・`docs/backend-metal-splitk-decision.md` §5 参照）。
+///
+/// **`true` への切替条件（事前登録。`docs/backend-metal-splitk-decision.md`
+/// §5「切替手順」）**: ①イシュー #1515 §10 が split-K 経路を ADOPT と
+/// 確定する ②本定数を `true` へ切り替える ③`gemm_splitk_auto_wiring`
+/// （`crates/backend-metal/tests/gemm_splitk_auto_wiring.rs`。`#[ignore]`）・
+/// 既存 `#[ignore]` split-K 群（`gemm_splitk_bit_match`／
+/// `gemm_splitk_parity`／`gemm_splitk_auto_entry_parity`）が実機（Apple
+/// Silicon）で pass する ④イシュー #1517 の framework-compare 結線前後
+/// A/B（5 回計測中央値）で非後退・checksum 一致を確認する ⑤後退時は
+/// `false` へ差し戻し理由を `docs/backend-metal-splitk-decision.md` §5 へ
+/// 記録する。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
+/// doc comment を参照（同一の dead_code 誤検知回避。本定数は macOS 限定
+/// モジュール `crate::gemm` からのみ参照されるが、ドリフト検出テスト
+/// （`tests` モジュール）は Linux でも実行するため）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = false;
 
 /// [`should_split_k_with`] の判定パラメータ（MLX steel Case 1 の閾値を
 /// 実行時に差し替え可能にする。既定値は [`SplitKParams::MLX_CASE1_M4_MAX`]）。
@@ -2459,6 +2502,64 @@ pub fn should_split_k_with(
         k_per_partition: k_per_partition_u32,
     })
 }
+
+// --- split-K 本番結線ルーティング（イシュー #1516）---
+//
+// `crate::gemm::MetalGemm::dispatch_auto`（本番 NN 経路の自動入口）が
+// `should_split_k` の判定結果に基づき split-K 2 パス経路／classic 経路の
+// どちらへディスパッチするかを決める純粋関数を提供する。crates.io 公開
+// API の [`select_for_device`] はシグネチャを変更しない（PR #1108 で
+// 互換維持が明記済み。戻り値 `TileConfig` に split-K 計画を載せる余地が
+// ないため）。よって本節は `select_for_device` をラップする新規関数
+// [`select_route_for_device`] を追加する方式を採る（Issue タイトルの
+// 「`select_for_device` へ結線する」は、本関数を介して実現する）。
+
+/// [`select_route_for_device`] の戻り値。`crate::gemm::MetalGemm::
+/// dispatch_auto` が split-K 2 パス経路（[`Self::SplitK`]）へ進むか、
+/// 従来の classic 経路（[`Self::Classic`]）へ進むかを表す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GemmRoute {
+    /// split-K 2 パスで実行すべき（`should_split_k` が `Some` を返した）。
+    /// `crate::gemm::MetalGemm::dispatch_split_k_strided_prepared_with_plan`
+    /// が使う実行計画。
+    SplitK(SplitKPlan),
+    /// classic 経路（[`select_for_device`] が返す構成）で実行すべき
+    /// （`should_split_k` が `None` を返した）。
+    Classic(TileConfig),
+}
+
+/// `(m, n, k)` から [`should_split_k`] で split-K 対象形状かを判定し、
+/// 対象なら [`GemmRoute::SplitK`]、対象外なら [`select_for_device`] の
+/// 結果を [`GemmRoute::Classic`] で包んで返す純粋関数（イシュー #1516）。
+///
+/// **判定入力の次元について**: 本関数自体は `m`/`n`/`k` の意味（パディング
+/// 前か実効次元かどうか）を規定しない——呼び出し元が渡した値をそのまま
+/// [`should_split_k`]／[`select_for_device`] へ渡すのみ。`crate::gemm::
+/// MetalGemm::dispatch_auto` は split-K の判定（[`should_split_k`]）を
+/// **8 の倍数へパディング済みの実効次元**（`crate::pad::pad8`）で行う
+/// 契約とする: split-K のスクラッチバッファ・`strided_tiled_eligibility`
+/// は 8 の倍数の次元を要求し（`gemm.rs::strided_tiled_eligibility`
+/// doc コメント参照）、`SplitKPlan::k_per_partition` は渡した `k` から
+/// 導出されるため、非パディング次元で判定すると分割計画と実際に確保する
+/// バッファの次元が食い違う。一方 `GemmRoute::Classic` 分岐が返す
+/// `TileConfig` は「対象外と判定された」ことを示すのみに使い、
+/// `dispatch_auto` はこの `cfg` を実際には使わず、常に非パディング次元
+/// （元の `m`/`n`/`k`）で [`select_for_device`] を呼び直して構成を選ぶ
+/// （現行 `dispatch_auto`〈本結線前〉と bit 同一の classic 経路を保証する
+/// ための設計判断。`docs/backend-metal-splitk-decision.md` §5「パディング
+/// 整合の設計判断」）。
+pub fn select_route_for_device(
+    m: usize,
+    n: usize,
+    k: usize,
+    gpu_core_count: Option<VerifiedM4MaxGpuCoreCount>,
+) -> GemmRoute {
+    match should_split_k(m, n, k) {
+        Some(plan) => GemmRoute::SplitK(plan),
+        None => GemmRoute::Classic(select_for_device(m, n, k, gpu_core_count)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4475,6 +4576,25 @@ mod tests {
         );
     }
 
+    /// `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（`crate::gemm::MetalGemm::
+    /// dispatch_auto` の split-K 本番結線ゲート）の**コミット状態既定値**が
+    /// `false` に固定されていることをロックする（`unroll_acc_enabled_is_
+    /// false_by_default` と同じ設計判断。ゲート追加前と bit 同一の classic
+    /// 経路を保つには本定数が `false` である必要があるため、`gemm.rs` 側
+    /// （`cfg(target_os = "macos")` 限定で Linux CI では未コンパイル）では
+    /// なく本モジュールに置いてドリフトを常時検出する。イシュー #1516）。
+    #[test]
+    fn split_k_dispatch_auto_production_enabled_is_false_by_default() {
+        assert!(
+            !std::hint::black_box(SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED),
+            "SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED が true のままコミットされている\
+             疑いがあります。本番既定は false（#1515 が split-K 経路を ADOPT と確定する\
+             まで維持する契約）です（tile.rs 冒頭 SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED\
+             doc comment・イシュー #1516 参照。意図的な true への切替であれば本テストごと\
+             更新すること）。"
+        );
+    }
+
     /// `SOURCE_SPECIALIZATION_ENABLED` の**コミット状態既定値**が `false`
     /// に固定されていることをロックする（`unroll_acc_enabled_is_false_
     /// by_default` と同じ設計判断: 本イシュー〈#1288〉は機構の実装と
@@ -5866,6 +5986,94 @@ mod tests {
         assert!(should_split_k(0, 32, 2048).is_none());
         assert!(should_split_k(32, 0, 2048).is_none());
         assert!(should_split_k(32, 32, 0).is_none());
+    }
+
+    // --- select_route_for_device（本番結線ルーティング。イシュー #1516）---
+
+    #[test]
+    fn select_route_for_device_returns_split_k_for_target_shapes() {
+        // `should_split_k` が `Some` を返す承認済み 11 形状
+        // （`tests/gemm_splitk_auto_entry_parity.rs::TARGET_SHAPES` と同一）
+        // では `GemmRoute::SplitK` を返し、中身は `should_split_k` の計画と
+        // 一致する。
+        let shapes: &[(usize, usize, usize)] = &[
+            (32, 32, 2048),
+            (32, 32, 4096),
+            (32, 32, 8192),
+            (64, 64, 2048),
+            (64, 64, 4096),
+            (64, 64, 8192),
+            (128, 128, 2048),
+            (128, 128, 4096),
+            (128, 128, 8192),
+            (64, 64, 2056),
+            (128, 128, 2064),
+        ];
+        for &(m, n, k) in shapes {
+            let expected_plan = should_split_k(m, n, k)
+                .unwrap_or_else(|| panic!("({m},{n},{k}) は Some を期待（前提が崩れている）"));
+            match select_route_for_device(m, n, k, verified_m4_max_for_test()) {
+                GemmRoute::SplitK(plan) => assert_eq!(
+                    plan, expected_plan,
+                    "({m},{n},{k}) の SplitK 計画が should_split_k と一致しない"
+                ),
+                other => panic!("({m},{n},{k}) は GemmRoute::SplitK を期待したが {other:?} だった"),
+            }
+        }
+    }
+
+    #[test]
+    fn select_route_for_device_returns_classic_for_non_target_shapes() {
+        // 正方 512〜4096・`(256,256,*)`・K が M/N 未満の形状は
+        // `should_split_k` が `None` のため `GemmRoute::Classic` を返し、
+        // 中身は `select_for_device` の結果と一致する
+        // （`gpu_core_count` の有無いずれでも成立することを確認する）。
+        let shapes: &[(usize, usize, usize)] = &[
+            (512, 512, 512),
+            (1024, 1024, 1024),
+            (2048, 2048, 2048),
+            (4096, 4096, 4096),
+            (256, 256, 2048),
+            (256, 256, 4096),
+            (64, 64, 63),
+        ];
+        for &(m, n, k) in shapes {
+            for gpu_core_count in [None, verified_m4_max_for_test()] {
+                let expected_cfg = select_for_device(m, n, k, gpu_core_count);
+                match select_route_for_device(m, n, k, gpu_core_count) {
+                    GemmRoute::Classic(cfg) => assert_eq!(
+                        cfg, expected_cfg,
+                        "({m},{n},{k}) の Classic 構成が select_for_device と一致しない \
+                         （gpu_core_count={gpu_core_count:?}）"
+                    ),
+                    other => panic!(
+                        "({m},{n},{k}) は GemmRoute::Classic を期待したが {other:?} だった \
+                         （gpu_core_count={gpu_core_count:?}）"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn select_route_for_device_uses_padded_effective_dims_contract() {
+        // `crate::gemm::MetalGemm::dispatch_auto` は本関数を `pad8` 済みの
+        // 実効次元で呼ぶ契約（doc コメント参照）。8 の倍数でない K
+        // （2050 → pad8 で 2056）を実効次元として渡すと split-K 対象に
+        // 転じることを確認し、この契約が実装と一致していることを検証する
+        // （`should_split_k(64, 64, 2050)` 自体は 8 の倍数でないため
+        // `strided_tiled_eligibility` の前提〈呼び出し元契約〉を満たさない
+        // が、本関数自体は純粋に `should_split_k` へ委譲するのみで次元の
+        // 意味を規定しないため、pad8 後の値を渡した場合の挙動のみを
+        // 検証する）。
+        let (m, n, k_raw) = (64usize, 64usize, 2050usize);
+        let k_eff = crate::pad::pad8(k_raw);
+        assert_eq!(k_eff, 2056);
+        let plan = should_split_k(m, n, k_eff).expect("(64,64,2056) は Some を期待");
+        match select_route_for_device(m, n, k_eff, verified_m4_max_for_test()) {
+            GemmRoute::SplitK(actual) => assert_eq!(actual, plan),
+            other => panic!("(64,64,{k_eff}) は GemmRoute::SplitK を期待したが {other:?} だった"),
+        }
     }
 
     #[test]
