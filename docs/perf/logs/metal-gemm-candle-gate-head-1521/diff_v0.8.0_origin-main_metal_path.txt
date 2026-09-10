@@ -1,0 +1,10 @@
+$ git diff v0.8.0..origin/main --stat -- crates/backend-metal/src crates/facade/src crates/autodiff/src crates/tensor-core/src
+ crates/backend-metal/src/gemm.rs | 413 +++++++++++++++++++++++++++++++++------
+ crates/backend-metal/src/lib.rs  |   2 +-
+ crates/backend-metal/src/ops.rs  |   8 +-
+ crates/backend-metal/src/tile.rs | 228 ++++++++++++++++++++-
+ 4 files changed, 583 insertions(+), 68 deletions(-)
+
+$ git log --oneline v0.8.0..origin/main -- crates/backend-metal/src crates/facade/src crates/autodiff/src crates/tensor-core/src
+5b2d5060 perf(backend-metal): should_split_k 分岐を dispatch_auto／select_for_device へ結線する (#1530)
+ef613b9b feat(backend-metal): SPLIT_K_NUMERIC_CONTRACT_APPROVED を true へ切り替え公開入口の数値契約ゲートを解除する (#1527)
