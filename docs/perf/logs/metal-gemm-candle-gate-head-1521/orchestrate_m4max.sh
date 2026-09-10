@@ -130,7 +130,7 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "[dry-run]   pmset_before  -> $PMSET_BEFORE"
   echo "[dry-run]   monitor_log   -> $MONITOR_LOG（バックグラウンド uptime サンプラー・10 秒間隔）"
   echo "[dry-run]   procs_log     -> $PROCS_LOG（watchlist: $WATCHLIST）"
-  echo "[dry-run]   step A        -> cd \"$FC_DIR\" && cargo build --release -p bench-fandhe && cargo build --release -p bench-candle && bash run_gemm_gate_metal.sh \"$LABEL_A\""
+  echo "[dry-run]   step A        -> cd \"$FC_DIR\" && cargo build --release -p bench-fandhe && cargo build --release -p bench-candle && env -u GEMM_GATE_PATCH_FACADE_PATH bash run_gemm_gate_metal.sh \"$LABEL_A\""
   echo "[dry-run]   run_a_log     -> $RUN_A_LOG"
   echo "[dry-run]   step B        -> GEMM_GATE_PATCH_FACADE_PATH=\"$FACADE_PATH\" bash run_gemm_gate_metal.sh \"$LABEL_B\""
   echo "[dry-run]   run_b_log     -> $RUN_B_LOG"
@@ -234,7 +234,17 @@ if [ "$?" != "0" ]; then
   fail_measurement "prebuild A"
 fi
 
-if ! bash run_gemm_gate_metal.sh "$LABEL_A" > "$RUN_A_LOG" 2>&1; then
+# `GEMM_GATE_PATCH_FACADE_PATH` はこのオーケストレータ自身の起動時 env
+# （README の `GEMM_GATE_PATCH_FACADE_PATH="$FACADE_PATH" ./orchestrate_m4max.sh ...`
+# 起動）としてプロセス環境に残り続ける。`FACADE_PATH` へは既に退避済みのため、
+# 系列 A（対照・registry 版）の起動では `env -u` で明示的に取り除き、
+# `run_gemm_gate_metal.sh` の子プロセス（`run_gemm_gate.sh`）が
+# `patch.crates-io.fandhe-ai.path` を誤って適用しないようにする
+# （codex-review 指摘。放置すると A/B が同一ビルドになり得るが、
+# `run_gemm_gate.sh` 側の manifest 整合性検査は env var の有無と実ビルド元の
+# 自己整合性しか見ないため検知できない）。
+if ! env -u GEMM_GATE_PATCH_FACADE_PATH \
+     bash run_gemm_gate_metal.sh "$LABEL_A" > "$RUN_A_LOG" 2>&1; then
   fail_measurement "series A ($LABEL_A)"
 fi
 
