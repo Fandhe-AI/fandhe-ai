@@ -11,6 +11,11 @@ M4 Max 実機を持つ Mac セッションで実施**する）。
   是正前バイナリ（`seed_offset` 不一致・B′ の `should_split_k` 未呼び出し）
   による計測のため、本 5 run は **新規**（run1〜run5）として実施する。
   #1475 の 3 run とは混在させない（旧ログは編集せずそのまま保持する）。
+  また #1475 のログは `checksum_*_bits`（`f64::to_bits()` 由来。イシュー
+  #1529）を出力しない旧バイナリによる計測のため、本 `aggregate.py` の
+  正式な checksum 一致検査対象外（bits 欠落で undetermined 扱い）となる。
+  当時の判定は `docs/perf/logs/metal-gemm-splitk-ab-1475/aggregate.md`
+  （旧 aggregate.py 出力）を正とする。
 - **専有ゲート（load average の閾値判定）は受け入れ条件にしない**
   （ルート #1509 のユーザー指示）。`gemm_splitk_ab_bench` へ
   `--max-load-avg` を渡さず **record_only** 運用（判定なし・load average

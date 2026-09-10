@@ -17,7 +17,10 @@
   `env_guard_overall verdict=pass` を要求する。
 - `phase0 kind=...` 行から run-to-run bit 同一（`classic_stable`／
   `target_tile_stable`／`splitk_stable`）・`a_vs_at_fail_count=0`・
-  `checksum_a`／`checksum_at`／`checksum_b` の全 run 一致を検査する
+  `checksum_a_bits`／`checksum_at_bits`／`checksum_b_bits`（`f64::
+  to_bits()` を 16 進数化した round-trip 可能な値。`.6e` 表示の
+  `checksum_a` 等は丸め誤差で異なる checksum が同一文字列になり得る
+  ため一致検査には使わない。イシュー #1529）の全 run 一致を検査する
   （受け入れ条件「checksum 一致」の機械化）。`a_vs_b_fail_count` は
   情報としてのみ表に残し判定へは使わない（split-K 経路自体の既知 fail
   が再現することが期待値のため。`docs/perf/metal-gemm-splitk-two-pass.md`
@@ -227,13 +230,18 @@ def check_phase0_consistency(
     per_run_phase0: list[list[dict[str, str]]],
 ) -> list[str]:
     """全 run の `phase0` 行から (a) run-to-run bit 同一（`classic_stable`
-    等）・`a_vs_at_fail_count=0`、(b) target の checksum（`checksum_a`／
-    `checksum_at`／`checksum_b`）が全 run で完全一致すること、を検査する
-    純関数（受け入れ条件「checksum 一致」の機械化。イシュー #1515）。
+    等）・`a_vs_at_fail_count=0`、(b) target の checksum
+    （`checksum_a_bits`／`checksum_at_bits`／`checksum_b_bits`）が全 run で
+    完全一致すること、を検査する純関数（受け入れ条件「checksum 一致」の
+    機械化。イシュー #1515・#1529）。
 
-    checksum は f64 の科学的記数法文字列（`format_ab_line` 等と同様に
-    example 側が既に固定精度で出力するため、文字列一致で bit 完全一致相当
-    を検査できる。浮動小数点の再パース・再比較による誤差混入を避ける）。
+    checksum の一致検査は `.6e` で丸めた表示文字列（`checksum_a` 等）では
+    なく `f64::to_bits()` を 16 進数化した `checksum_*_bits` フィールド
+    （`gemm_splitk_ab_bench.rs::format_phase0_target_line`）で行う。`.6e`
+    表示は丸め誤差により異なる checksum が同一文字列になり得るため
+    （例: 100.00001 と 100.00002）、表示文字列一致は完全一致の代用になら
+    ない（イシュー #1529 codex-review P2 指摘）。bits フィールドは
+    round-trip 可能な値のため文字列一致がそのまま bit 完全一致になる。
     """
     violations: list[str] = []
     n_runs = len(per_run_phase0)
@@ -314,17 +322,29 @@ def check_phase0_consistency(
 
     # checksum の全 run 一致（target のみ。control は checksum を出力しない）。
     #
-    # イシュー #1529 codex-review P2 指摘 1: 欠落値を `discard(None)` で
-    # 除外して残り 2 種類以上のときだけ不一致とする実装は、一部または全 run
-    # で checksum フィールド自体が欠落していても（values が空集合または
-    # 単一値のみになり）検査を素通りしてしまう。§10.2 が要求するのは
-    # 「5 run 間の checksum 一致」であり、そもそも値が揃って存在すること
-    # が前提のため、run ごとに値の有無を明示確認したうえで一致を判定する
-    # （欠落は不一致とは別に fail-closed で違反扱いにする）。
+    # イシュー #1529 codex-review P2 指摘 1（1 回目）: 欠落値を
+    # `values.discard(None)` で無条件に除外して残り 2 種類以上のときだけ
+    # 不一致とする実装は、一部または全 run で checksum フィールド自体が
+    # 欠落していても検査を素通りしてしまう。run ごとに値の有無を明示確認
+    # したうえで一致を判定する（欠落は不一致とは別に fail-closed で
+    # 違反扱いにする）よう是正した。
+    #
+    # イシュー #1529 codex-review P2 指摘 1（2 回目・本ブロック）: 上記
+    # 是正後も比較対象が `checksum_a`（`.6e` で丸めた表示文字列。
+    # `crates/backend-metal/examples/gemm_splitk_ab_bench.rs::
+    # format_phase0_target_line`）のままだと、丸め誤差で異なる checksum
+    # （例: 100.00001 と 100.00002）が同一表示文字列になり得るため
+    # 「一致」を誤検出しうる。§10.2 が要求するのは checksum の完全一致で
+    # あり丸め後の表示一致ではないため、比較フィールドを `checksum_a_bits`
+    # 等（`f64::to_bits()` を 16 桁 16 進数へ変換した round-trip 可能な
+    # 値。同 example の追加フィールド）へ切り替える。`.6e` 表示フィールド
+    # 自体は削除せず（人間が読む用途・旧ログとの後方互換のため）、判定
+    # ロジックだけを bits フィールドへ移す。bits フィールドが存在しない行
+    # （旧バイナリ・#1475 ログ等）は「欠落」として fail-closed に扱う。
     if n_runs > 0:
         for key in sorted(EXPECTED_TARGET_KEYS):
             _, m, n, k = key
-            for field_name in ("checksum_a", "checksum_at", "checksum_b"):
+            for field_name in ("checksum_a_bits", "checksum_at_bits", "checksum_b_bits"):
                 collected: list[str | None] = [
                     target_by_run[i].get((m, n, k), {}).get(field_name)
                     for i in range(n_runs)
@@ -618,6 +638,14 @@ def render_markdown(
 def _make_phase0_lines(gated: bool = True) -> list[str]:
     """自己検証用の擬似 phase0 行（全形状 stable=true・checksum 固定値・
     `a_vs_at_fail_count=0`）を生成する（`self_test` からのみ呼ばれる）。
+
+    checksum の `.6e` 表示（`checksum_a=1.000000e2` 等）に加え、実装
+    （`gemm_splitk_ab_bench.rs::format_phase0_target_line`）と同型の
+    `checksum_*_bits=0x<16 桁 hex>`（`f64::to_bits()` 相当。100.0 →
+    `0x4059000000000000`・110.0 → `0x405b800000000000`）も出力する
+    （イシュー #1529。一致検査は bits フィールドで行うため、フィクス
+    チャにも bits がなければ「欠落」扱いになり素通しの ADOPT を検出
+    できない）。
     """
     out: list[str] = []
     for mn in _TARGET_MN:
@@ -626,7 +654,9 @@ def _make_phase0_lines(gated: bool = True) -> list[str]:
                 f"phase0 kind=target m={mn} n={mn} k={k} classic_stable=true "
                 "target_tile_stable=true splitk_stable=true "
                 "checksum_a=1.000000e2 checksum_at=1.000000e2 checksum_b=1.100000e2 "
-                "a_vs_b_fail_count=3 a_vs_at_fail_count=0"
+                "a_vs_b_fail_count=3 a_vs_at_fail_count=0 "
+                "checksum_a_bits=0x4059000000000000 checksum_at_bits=0x4059000000000000 "
+                "checksum_b_bits=0x405b800000000000"
             )
     for k in _K_LIST:
         out.append(
@@ -745,17 +775,27 @@ def self_test() -> None:
     assert na_undetermined
     assert any("load_avg" in v for v in na_violations), na_violations
 
-    # フェーズ 0 の checksum が 1 run だけ異なる → undetermined。
+    # イシュー #1529 codex-review P2 指摘 1（2 回目）の回帰:
+    # `.6e` 表示（`checksum_a`）は 5 run 全体で同一のまま
+    # `checksum_a_bits` のみが 1 run だけ異なる → undetermined。
+    # （100.00001 と 100.00002 のように `.6e`〈小数点以下 6 桁〉表示では
+    # 丸めで同一文字列になるが実体は異なる checksum を想定した回帰。
+    # `.6e` 表示だけを検査していた旧実装ではこのケースを見逃す）。
     mismatched_phase0 = _make_phase0_lines()
+    assert "checksum_a=1.000000e2" in mismatched_phase0[0]
     mismatched_phase0[0] = mismatched_phase0[0].replace(
-        "checksum_a=1.000000e2", "checksum_a=9.999999e1"
+        "checksum_a_bits=0x4059000000000000", "checksum_a_bits=0x4059000000000001"
     )
+    # `.6e` 表示自体は変更しない（同一のまま）ことを明示的に確認する。
+    assert "checksum_a=1.000000e2" in mismatched_phase0[0]
     mismatched_runs = [make_run() for _ in range(4)] + [
         make_run(phase0_override=mismatched_phase0)
     ]
     cs_shapes, cs_undetermined, cs_violations = aggregate(mismatched_runs, gate_mode="record_only")
     assert cs_undetermined
-    assert any("checksum_a" in v and "不一致" in v for v in cs_violations), cs_violations
+    assert any(
+        "checksum_a_bits" in v and "不一致" in v for v in cs_violations
+    ), cs_violations
 
     # フェーズ 0 の stable=false → undetermined。
     unstable_phase0 = _make_phase0_lines()
@@ -767,13 +807,16 @@ def self_test() -> None:
     assert us_undetermined
     assert any("splitk_stable" in v for v in us_violations), us_violations
 
-    # イシュー #1529 codex-review P2 指摘 1 の回帰: フェーズ 0 の checksum
-    # フィールド自体が 1 run で欠落（値が異なるのではなく行に存在しない）
+    # イシュー #1529 codex-review P2 指摘 1（1 回目・2 回目とも）の回帰:
+    # 判定に使う `checksum_at_bits` フィールド自体が 1 run で欠落（値が
+    # 異なるのではなく行に存在しない。旧バイナリ・#1475 ログ等を模す）
     # → undetermined（欠落を不一致と別枠で検出できることを確認する）。
+    # `.6e` 表示フィールド（`checksum_at=...`）は判定に使わないため残す。
     missing_checksum_phase0 = _make_phase0_lines()
     missing_checksum_phase0[0] = missing_checksum_phase0[0].replace(
-        " checksum_at=1.000000e2", ""
+        " checksum_at_bits=0x4059000000000000", ""
     )
+    assert "checksum_at=1.000000e2" in missing_checksum_phase0[0]
     missing_checksum_runs = [make_run() for _ in range(4)] + [
         make_run(phase0_override=missing_checksum_phase0)
     ]
@@ -782,7 +825,7 @@ def self_test() -> None:
     )
     assert mc_undetermined
     assert any(
-        "checksum_at" in v and "欠落" in v for v in mc_violations
+        "checksum_at_bits" in v and "欠落" in v for v in mc_violations
     ), mc_violations
 
     # イシュー #1529 codex-review P2 指摘 2 の回帰: 同一形状の phase0 行が

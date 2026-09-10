@@ -170,6 +170,48 @@ fn format_floor_line(m: usize, n: usize, k: usize, median_secs: f64, spread: f64
     )
 }
 
+/// `phase0 kind=target ...` 行を整形する純関数（`format_ab_line`／
+/// `format_floor_line` と同型。macOS（`macos_impl::phase0_self_check`）と
+/// テストからのみ呼ばれる）。
+///
+/// `checksum_*` の `.6e` 表示は丸めた文字列（例: `100.00001` と
+/// `100.00002` がいずれも同じ表示になりうる）であり、これだけでは
+/// `docs/perf/metal-gemm-splitk-ab.md` §10.2 が要求する 5 run 間
+/// checksum 完全一致を機械検証できない（イシュー #1529 codex-review P2
+/// 指摘）。`f64::to_bits()` は round-trip 可能な bit パターンをそのまま
+/// 16 桁 16 進数で出力するため、丸め誤差を介さず checksum の完全一致を
+/// `docs/perf/logs/metal-gemm-splitk-ab-5run-1515/aggregate.py` 側で
+/// 検証できる。既存の `.6e` 表示フィールドは人間が読む用途に残し、
+/// フィールド名・出現順序も変更しない（後方互換。旧 aggregate.py／
+/// `docs/perf/logs/metal-gemm-splitk-ab-1475/` ログとの整合を壊さない）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+fn format_phase0_target_line(
+    m: usize,
+    n: usize,
+    k: usize,
+    classic_stable: bool,
+    target_tile_stable: bool,
+    splitk_stable: bool,
+    checksum_a: f64,
+    checksum_at: f64,
+    checksum_b: f64,
+    a_vs_b_fail_count: &str,
+    a_vs_at_fail_count: &str,
+) -> String {
+    format!(
+        "phase0 kind={KIND_TARGET} m={m} n={n} k={k} classic_stable={classic_stable} \
+         target_tile_stable={target_tile_stable} splitk_stable={splitk_stable} \
+         checksum_a={checksum_a:.6e} checksum_at={checksum_at:.6e} \
+         checksum_b={checksum_b:.6e} a_vs_b_fail_count={a_vs_b_fail_count} \
+         a_vs_at_fail_count={a_vs_at_fail_count} \
+         checksum_a_bits=0x{:016x} checksum_at_bits=0x{:016x} checksum_b_bits=0x{:016x}",
+        checksum_a.to_bits(),
+        checksum_at.to_bits(),
+        checksum_b.to_bits(),
+    )
+}
+
 /// run-to-run bit 同一検証を `to_bits()` 経由で行う純関数
 /// （`tests/gemm_swizzle_bit_match.rs::assert_bit_exact`・
 /// `tests/gemm_splitk_bit_match.rs` と同じ理由: `&[f32]` の `==` は
@@ -544,16 +586,24 @@ mod macos_impl {
             let cmp_a_at = compare(&a_run1, &at_run1).ok();
 
             println!(
-                "phase0 kind={KIND_TARGET} m={m} n={n} k={k} classic_stable={classic_stable} \
-                 target_tile_stable={target_tile_stable} splitk_stable={splitk_stable} \
-                 checksum_a={checksum_a:.6e} checksum_at={checksum_at:.6e} \
-                 checksum_b={checksum_b:.6e} a_vs_b_fail_count={} a_vs_at_fail_count={}",
-                cmp_ab
-                    .map(|r| r.fail_count.to_string())
-                    .unwrap_or_else(|| "NA".to_string()),
-                cmp_a_at
-                    .map(|r| r.fail_count.to_string())
-                    .unwrap_or_else(|| "NA".to_string()),
+                "{}",
+                format_phase0_target_line(
+                    m,
+                    n,
+                    k,
+                    classic_stable,
+                    target_tile_stable,
+                    splitk_stable,
+                    checksum_a,
+                    checksum_at,
+                    checksum_b,
+                    &cmp_ab
+                        .map(|r| r.fail_count.to_string())
+                        .unwrap_or_else(|| "NA".to_string()),
+                    &cmp_a_at
+                        .map(|r| r.fail_count.to_string())
+                        .unwrap_or_else(|| "NA".to_string()),
+                )
             );
         }
 
@@ -1074,5 +1124,51 @@ mod tests {
         assert!(line.contains("speedup=NA"));
         assert!(line.contains("spread_b=NA"));
         assert!(line.contains("kind=floor"));
+    }
+
+    /// イシュー #1529 codex-review P2 指摘の回帰: `phase0 kind=target` 行が
+    /// `.6e` 表示に加え `f64::to_bits()` 由来の `checksum_*_bits=0x<16 桁
+    /// hex>` を 3 checksum すべて出力すること。`aggregate.py` 側はこの
+    /// bits フィールドで run 間一致を検査するため（`.6e` 表示だけでは
+    /// 丸めにより異なる checksum が同一文字列になりうる）、フィールドの
+    /// 存在・書式（`0x` 接頭辞・16 桁 16 進数・round-trip 可能な値）を
+    /// ここで自己検証する。
+    #[test]
+    fn format_phase0_target_line_includes_checksum_bits_for_round_trip_comparison() {
+        // 100.00001 と 100.00002 は `.6e`（小数点以下 6 桁）表示では丸めに
+        // より同一文字列 "1.000000e2" になりうる差異だが、bits 表現なら
+        // 区別できることを実測で確認する（表示文字列比較の不十分さの
+        // 直接的な反証）。
+        let a = 100.00001_f64;
+        let b = 100.00002_f64;
+        assert_eq!(
+            format!("{a:.6e}"),
+            format!("{b:.6e}"),
+            "前提: .6e 表示は丸めで一致する"
+        );
+        assert_ne!(a.to_bits(), b.to_bits(), "前提: bits は異なる");
+
+        let line_a = format_phase0_target_line(32, 32, 2048, true, true, true, a, a, a, "0", "0");
+        let line_b = format_phase0_target_line(32, 32, 2048, true, true, true, b, b, b, "0", "0");
+
+        // 既存の `.6e` 表示フィールドは変更なく両方に存在する（後方互換）。
+        assert!(line_a.contains("checksum_a=1.000000e2"));
+        assert!(line_b.contains("checksum_a=1.000000e2"));
+
+        // bits フィールドは 3 checksum すべてに存在し、`0x` 接頭辞・
+        // 16 桁 16 進数で round-trip 可能な値を持つ。
+        for field in ["checksum_a_bits", "checksum_at_bits", "checksum_b_bits"] {
+            let needle = format!("{field}=0x{:016x}", a.to_bits());
+            assert!(
+                line_a.contains(&needle),
+                "{line_a} に {needle} が含まれない"
+            );
+        }
+        // `.6e` 表示では区別できない a と b が bits では区別できる
+        // （検査対象が表示文字列ではなく bits であることの直接確認）。
+        assert_ne!(
+            line_a.split("checksum_a_bits=").nth(1),
+            line_b.split("checksum_a_bits=").nth(1)
+        );
     }
 }

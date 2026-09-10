@@ -380,13 +380,15 @@ speedup の主因ではないことも確認した。
      run で欠落・重複する。`aggregate.py::check_run_shape_completeness`）。
   2. フェーズ 0 の run-to-run bit 同一（`classic_stable`／
      `target_tile_stable`／`splitk_stable`）が崩れる、または target の
-     checksum（`checksum_a`／`checksum_at`／`checksum_b`）が 5 run 間で
-     一致しない、または `a_vs_at_fail_count` が 0 でない
-     （`aggregate.py::check_phase0_consistency`。受け入れ条件
-     「checksum 一致」の機械化）。`a_vs_b_fail_count`（classic vs
-     split-K の既知差）は情報としてのみ記録し判定へは使わない
-     （`docs/perf/metal-gemm-splitk-two-pass.md` §5.5 の既知 fail が
-     期待値であるため）。
+     checksum（`checksum_a_bits`／`checksum_at_bits`／`checksum_b_bits`。
+     `f64::to_bits()` 由来の round-trip 可能な値。`.6e` 表示の
+     `checksum_a` 等は丸め誤差で異なる checksum が同一文字列になり得る
+     ため判定には使わない。イシュー #1529）が 5 run 間で一致しない、
+     または `a_vs_at_fail_count` が 0 でない（`aggregate.py::
+     check_phase0_consistency`。受け入れ条件「checksum 一致」の機械化）。
+     `a_vs_b_fail_count`（classic vs split-K の既知差）は情報としてのみ
+     記録し判定へは使わない（`docs/perf/metal-gemm-splitk-two-pass.md`
+     §5.5 の既知 fail が期待値であるため）。
   3. env_guard の記録が欠落・不一致（record_only 運用なのに
      `env_guard_mode=record_only`・`env_guard_load_avg` の数値記録が
      見つからない、またはログの取り違え）。
@@ -397,6 +399,11 @@ speedup の主因ではないことも確認した。
   と非ゼロ終了し（同番号の同時実行もロックで拒否する）、中断後の再開は
   **未実施の run 番号のみ**を指定する運用を機械的に強制する（イシュー
   #1529）。同番号の再実行は成果物を手動で別名へ退避してから行う。
+  #1475 のログは `checksum_*_bits`（上記 2.）を出力しない旧バイナリに
+  よる計測のため、本 `aggregate.py` の正式な checksum 一致検査対象外
+  （bits 欠落で undetermined 扱い）であり、当時の判定は
+  `docs/perf/logs/metal-gemm-splitk-ab-1475/aggregate.md`（旧
+  aggregate.py 出力）を正とする。
 - 負荷推移（`runN_monitor.log` の load1 min/median/max）・並走プロセス
   件数は**情報としてのみ**記録し、判定（ADOPT/REJECT/undetermined）へは
   影響させない。
