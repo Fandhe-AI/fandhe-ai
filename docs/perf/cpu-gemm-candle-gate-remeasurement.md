@@ -2904,7 +2904,18 @@ orchestrate_m4max.sh`〈PR #1506 是正版〉。1488 側のファイル自体は
    継続し検出時は計測せず終了）へ進む。session-start スタンプ・gate-state は
    作成しない（exclusive 経路の再開・打ち切りロジックと混同させないため）
 3. `pmset -g therm` の before/after 取得を両モード共通で追加（失敗しても
-   計測は止めない `|| true`。#1475/#1490 と同じ記録項目）
+   計測は止めない `|| true`。#1475/#1490 と同じ記録項目。失敗した run
+   〈`fail_measurement`〉でも after スナップショットを取得するよう追加
+   是正済み。Cursor Bugbot 指摘 PRRT_kwDOTuUCJc6hD32X 対応）
+4. per-attempt な証跡（`{ALL_DONE,MEASUREMENT_FAILED,GATE_NOT_PASSED}_m4max`
+   マーカー・`pmset_therm_{before,after}-m4max`・`uptime-m4max` ポーラログ）は
+   すべて `LABEL`（`GEMM_GATE_LABEL`。既定 `0.8.0-1522`）でファイル名を
+   分離する。規則 3 のワンショット規則により性能以外の失敗での再試行は
+   別ラベルを渡す運用のため、ラベル分離しないと同一 LOG 内で前回試行の
+   pmset 記録が上書きされ・失敗マーカーが削除され・uptime ログへ別試行の
+   負荷サンプルが混入し `aggregate_uptime.py` の集計を汚染する
+   （codex-review 指摘 PRRT_kwDOTuUCJc6hD1A7 対応。gate-state・
+   session-start スタンプはセッション単位で共有する既存設計のまま不変）
 
 あわせて `LOG` 既定を本ディレクトリへ、`GEMM_GATE_LABEL` 既定を
 `0.8.0-1522` へ変更した（1488 側の証跡 `results-m4max-cpu-gemm-gate-
@@ -2946,8 +2957,13 @@ m4max-cpu` が Darwin ホスト限定検査で fail-closed に停止すること
    未達の受け入れ・棄却に使わない。共有負荷下である旨と負荷推移（min／
    median／max）を本節と env_info に明記する
 5. **系列**: 正式系列（registry ピン `=0.8.0`）のみ。Mac セッションは
-   `git diff v0.8.0..HEAD --stat -- crates/backend-cpu/src crates/facade/src
-   crates/autodiff/src crates/tensor-core/src` を `diff_v0.8.0_<sha>_
+   `git diff v0.8.0..HEAD --stat -- ':(top)crates/backend-cpu/src'
+   ':(top)crates/facade/src' ':(top)crates/autodiff/src'
+   ':(top)crates/tensor-core/src'`（`:(top)` pathspec magic でリポジトリ
+   ルート基準に固定する。cwd が `scripts/bench/framework-compare` のため
+   相対パスのままでは該当パスがマッチせず差分が常に空になり、CPU 経路の
+   変更があっても規則 5 の帰属確認が「差分なし」と誤認する。codex-review
+   指摘 PRRT_kwDOTuUCJc6hD1Ay 対応）を `diff_v0.8.0_<sha>_
    cpu_path.txt` として記録する（帰属用。CPU 経路差分が生じていれば注記）
 6. §24.4 試行 3 参考値・DGX 正式値との比較は情報のみ（因果帰属しない）
 7. **#1283 のクローズ可否は本イシューで決めない**（ユーザー判断へ回す）
@@ -2959,15 +2975,22 @@ m4max-cpu` が Darwin ホスト限定検査で fail-closed に停止すること
 ```bash
 cd scripts/bench/framework-compare   # worktree 上・HEAD は本 PR マージ後の main
 cp -n gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local  # 実値を記入（gitignore 対象）
-git diff v0.8.0..HEAD --stat -- crates/backend-cpu/src crates/facade/src crates/autodiff/src crates/tensor-core/src \
+git diff v0.8.0..HEAD --stat -- ':(top)crates/backend-cpu/src' ':(top)crates/facade/src' ':(top)crates/autodiff/src' ':(top)crates/tensor-core/src' \
   > ../../../docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/diff_v0.8.0_$(git rev-parse --short HEAD)_cpu_path.txt
 GEMM_GATE_LOAD_GATE_MODE=record_only \
   sh ../../../docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/orchestrate_m4max.sh
 python3 compare_gemm_gate.py --device cpu results/raw/results-m4max-cpu-gemm-gate-0.8.0-1522.jsonl \
   | tee ../../../docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/compare_gemm_gate-m4max-0.8.0-1522.md
 python3 ../../../docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/aggregate_uptime.py \
-  ../../../docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/uptime-m4max.log
+  ../../../docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/uptime-m4max-0.8.0-1522.log
 ```
+
+再試行が発生した場合（規則 3）は `GEMM_GATE_LABEL=0.8.0-1522-r2` 等を明示して
+再実行し、`uptime-m4max-<LABEL>.log`・`pmset_therm_{before,after}-m4max-
+<LABEL>.txt`・`{ALL_DONE,MEASUREMENT_FAILED,GATE_NOT_PASSED}_m4max-<LABEL>.
+marker` のように LABEL ごとにファイル名が分離される（同一 LOG 内で前回試行の
+証跡を上書きしない。codex-review 指摘 PRRT_kwDOTuUCJc6hD1A7 対応）ため、
+`aggregate_uptime.py` にもそのラベルの `uptime-m4max-<LABEL>.log` を渡すこと。
 
 計測後: `results/raw/{results,manifest,skipped}-m4max-cpu-gemm-gate-
 0.8.0-1522.*` をコミットし（1488 と同じ置き場）、本節の実測結果・判定欄・

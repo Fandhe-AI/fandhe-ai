@@ -35,7 +35,18 @@ if [ -z "$LOG" ] || [ "$LOG" = "/" ]; then
   exit 1
 fi
 
-rm -f "$LOG/ALL_DONE_m4max.marker" "$LOG/MEASUREMENT_FAILED_m4max.marker" "$LOG/GATE_NOT_PASSED_m4max.marker"
+# --- LABEL（イシュー #1522）: 計画 §4 規則 3〈ワンショット規則〉に従い、
+#     性能以外の失敗〈ビルド・manifest 不一致・ホスト照合失敗・並走 bench
+#     検出〉での再試行は別ラベル（例 `0.8.0-1522-r2`）を渡す運用のため、
+#     per-attempt な証跡（マーカー・pmset・uptime ポーラログ）はすべて
+#     LABEL でファイル名を分離する（同一 LOG 内での再試行時に前回試行の
+#     pmset 記録が上書き・失敗マーカーが削除される・uptime ログへ別試行の
+#     負荷が混入するのを防ぐ。codex-review 指摘 PRRT_kwDOTuUCJc6hD1A7
+#     対応。LABEL は本来 (iv) 正式系列計測の直前で決めていたが、(i)〜(iii)
+#     の証跡もラベル分離対象のためここへ引き上げる）。
+LABEL="${GEMM_GATE_LABEL:-0.8.0-1522}"
+
+rm -f "$LOG/ALL_DONE_m4max-${LABEL}.marker" "$LOG/MEASUREMENT_FAILED_m4max-${LABEL}.marker" "$LOG/GATE_NOT_PASSED_m4max-${LABEL}.marker"
 
 # --- GEMM_GATE_LOAD_GATE_MODE（イシュー #1522。#1520 と同型の opt-out
 #     方式）: `exclusive`（既定。1488 版と完全同一の専有ゲート）または
@@ -101,8 +112,10 @@ MAX_ATTEMPTS=10
 
 refuse() {
   # 専有ゲートを不成立（undetermined）として終了する。$1 はマーカー本文・
-  # $2 は gate ログ本文。
-  echo "$1" > "$LOG/GATE_NOT_PASSED_m4max.marker"
+  # $2 は gate ログ本文。マーカーは LABEL でファイル名を分離する（再試行時に
+  # 前回試行のマーカーを上書き削除しないため。codex-review 指摘
+  # PRRT_kwDOTuUCJc6hD1A7 対応）。
+  echo "$1" > "$LOG/GATE_NOT_PASSED_m4max-${LABEL}.marker"
   echo "$2 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GATE_LOG"
   exit 0
 }
@@ -239,7 +252,7 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
 done
 
 if [ "$GATE_OK" != "1" ]; then
-  echo "gate not passed within elapsed-time cap (${CAP_S}s) / ${MAX_ATTEMPTS} attempts (session cumulative=${ATTEMPT})" > "$LOG/GATE_NOT_PASSED_m4max.marker"
+  echo "gate not passed within elapsed-time cap (${CAP_S}s) / ${MAX_ATTEMPTS} attempts (session cumulative=${ATTEMPT})" > "$LOG/GATE_NOT_PASSED_m4max-${LABEL}.marker"
   exit 0
 fi
 else
@@ -268,18 +281,22 @@ fi
   pgrep -x -l 'bench-candle' || true
 } >> "$LOG/gate-m4max.log"
 if pgrep -x 'bench-fandhe' > /dev/null 2>&1 || pgrep -x 'bench-candle' > /dev/null 2>&1; then
-  echo "sibling bench process detected; treating gate as not passed" > "$LOG/GATE_NOT_PASSED_m4max.marker"
+  echo "sibling bench process detected; treating gate as not passed" > "$LOG/GATE_NOT_PASSED_m4max-${LABEL}.marker"
   exit 0
 fi
 
 # --- pmset -g therm（before）記録（イシュー #1522。#1475/#1490 と同じ
-#     記録項目。失敗しても計測は止めない）。 ---
-pmset -g therm > "$LOG/pmset_therm_before-m4max.txt" 2>&1 || true
+#     記録項目。失敗しても計測は止めない。LABEL でファイル名を分離し、
+#     別ラベルでの再試行が前回試行の記録を上書きしないようにする。
+#     codex-review 指摘 PRRT_kwDOTuUCJc6hD1A7 対応）。 ---
+pmset -g therm > "$LOG/pmset_therm_before-m4max-${LABEL}.txt" 2>&1 || true
 
-# --- (iii) uptime 30 秒ポーラ（バックグラウンド） ---
+# --- (iii) uptime 30 秒ポーラ（バックグラウンド）。ログも LABEL で分離する
+#     （同一 LOG 内の再試行で別試行の負荷サンプルが混ざり aggregate_uptime.py
+#     の集計に失敗試行の負荷が混入するのを防ぐ。同上指摘対応）。 ---
 (
   while true; do
-    echo "poll $(date -u +%Y-%m-%dT%H:%M:%SZ) $(uptime)" >> "$LOG/uptime-m4max.log"
+    echo "poll $(date -u +%Y-%m-%dT%H:%M:%SZ) $(uptime)" >> "$LOG/uptime-m4max-${LABEL}.log"
     sleep 30
   done
 ) &
@@ -287,7 +304,11 @@ POLLER_PID=$!
 
 fail_measurement() {
   kill "$POLLER_PID" 2>/dev/null || true
-  echo "$1 failed $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOG/MEASUREMENT_FAILED_m4max.marker"
+  # 失敗した run も成功経路と同じく after スナップショットを残す（失敗した
+  # run の計測区間中の温度状態を追跡可能にするため。Cursor Bugbot 指摘
+  # PRRT_kwDOTuUCJc6hD32X 対応。失敗しても後続のマーカー書き込みは止めない）。
+  pmset -g therm > "$LOG/pmset_therm_after-m4max-${LABEL}.txt" 2>&1 || true
+  echo "$1 failed $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOG/MEASUREMENT_FAILED_m4max-${LABEL}.marker"
   exit 1
 }
 
@@ -296,7 +317,8 @@ fail_measurement() {
 # 〈ワンショット規則〉に従い、性能以外の失敗〈ビルド・manifest 不一致・
 # ホスト照合失敗・並走 bench 検出〉での再試行は別ラベル
 # `0.8.0-1522-r2` 等を明示的に渡し、失敗した試行の証跡を上書きしない）。
-LABEL="${GEMM_GATE_LABEL:-0.8.0-1522}"
+# （LABEL 自体はスクリプト冒頭〈LOG 解決直後〉で既に確定済み。(i)〜(iii) の
+# 証跡もラベル分離対象のためそちらへ引き上げてある。ここでは再代入しない。）
 echo "formal start $(date -u +%Y-%m-%dT%H:%M:%SZ) $(uptime)" >> "$LOG/gate-m4max.log"
 if ! GEMM_GATE_CPU_NODE_TAG=m4max-cpu \
   bash run_gemm_gate_cpu.sh "$LABEL" \
@@ -308,6 +330,6 @@ echo "formal end $(date -u +%Y-%m-%dT%H:%M:%SZ) $(uptime)" >> "$LOG/gate-m4max.l
 kill "$POLLER_PID" 2>/dev/null || true
 
 # --- pmset -g therm（after）記録（イシュー #1522） ---
-pmset -g therm > "$LOG/pmset_therm_after-m4max.txt" 2>&1 || true
+pmset -g therm > "$LOG/pmset_therm_after-m4max-${LABEL}.txt" 2>&1 || true
 
-echo "all done $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOG/ALL_DONE_m4max.marker"
+echo "all done $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOG/ALL_DONE_m4max-${LABEL}.marker"
