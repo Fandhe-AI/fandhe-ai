@@ -2296,6 +2296,14 @@ fandhe-ai は全 30 run（reuse 15 + fresh 15。JSONL
 `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/`（M4 Max 独立再計測は同配下
 `m4max-redo-pr1506/`）を参照。
 
+**#1522 追補**: 上表の Apple M4 Max 行（参考 `0.8.0-1488` 試行 3）は §24.10 のとおり
+`verdict=undetermined` のまま正式値未確定である。専有ゲート opt-out
+（`GEMM_GATE_LOAD_GATE_MODE=record_only`。ルート #1519 のユーザー指示）版
+オーケストレーションを `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/` へ
+整備したが、本イシューの実行環境に Apple Silicon 実機への到達経路がないため実測は
+未実施のまま Mac セッションへ引き継いでおり、本表は実測後に更新する
+（`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.11）。
+
 ## 環境 30: Apple M4 Max（Metal GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で再計測。イシュー #1490）
 
 `run_gemm_gate_metal.sh`／`compare_gemm_gate.py --device metal` の同一プロトコル（5 回独立
