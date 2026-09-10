@@ -1,4 +1,5 @@
-//! split-K 2 パス GEMM（イシュー #1474。opt-in・`dispatch_auto` へ未結線）
+//! split-K 2 パス GEMM（イシュー #1474。#1516 で `dispatch_auto` へ
+//! 定数ゲート付きで結線済み・既定 OFF〈有効化は #1515 の ADOPT 確定後〉）
 //! の AC-1: 同一入力に対する run-to-run の bit 同一を、split 数
 //! 2/4/8/16/32 × `docs/backend-metal-splitk-decision.md` §3 の対象 9 形状
 //! （`(32,32,*)`/`(64,64,*)`/`(128,128,*)`。K=2048/4096/8192）で実機確認
