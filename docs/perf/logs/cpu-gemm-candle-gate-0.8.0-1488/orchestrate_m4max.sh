@@ -10,7 +10,15 @@
 # 上書きできる。
 set -u
 LOG="${LOG:-$(pwd)/../../../docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488}"
-LOG=$(cd "$LOG" && pwd)
+# 新規の再計測ディレクトリ（§24.10 の設計どおり stamp ごと新しい LOG で実行する）
+# を作成し、解決に失敗した場合は空の LOG で `/` 直下へ書き込まないよう即終了する
+# （PR #1506 Cursor Bugbot 指摘 PRRT_kwDOTuUCJc6g7bsn 対応）。
+mkdir -p "$LOG" || { echo "orchestrate_m4max: cannot create LOG dir '$LOG'" >&2; exit 1; }
+LOG=$(cd "$LOG" && pwd) || { echo "orchestrate_m4max: cannot resolve LOG dir" >&2; exit 1; }
+if [ -z "$LOG" ] || [ "$LOG" = "/" ]; then
+  echo "orchestrate_m4max: refusing to use LOG='$LOG'" >&2
+  exit 1
+fi
 
 rm -f "$LOG/ALL_DONE_m4max.marker" "$LOG/MEASUREMENT_FAILED_m4max.marker" "$LOG/GATE_NOT_PASSED_m4max.marker"
 
