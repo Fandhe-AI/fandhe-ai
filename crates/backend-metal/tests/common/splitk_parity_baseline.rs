@@ -49,20 +49,31 @@
 //! ユーザー承認が必要（下記 `assert_no_split_k_parity_regression` の doc
 //! コメント参照）。
 //!
-//! 本経路は opt-in・`dispatch_auto` へ未結線のプロトタイプ（イシュー
-//! #1474 のスコープ。性能 A/B は #1475、本番結線可否は #1476 で
-//! **結線しないと確定**〈`docs/backend-metal-splitk-decision.md` §4〉）
-//! であり、本非後退契約は「正しさが実測どおりであること」を機械的に
-//! 固定する目的に限る。判定方式は PR #1496 の codex-review 指摘を受け
-//! いったん `assert_parity`（厳密ゼロ fail 判定）へ差し戻されたが、上記
-//! 承認を受けてイシュー #1512 で `tests/gemm_splitk_parity.rs` から
-//! 本モジュール経由（`assert_no_split_k_parity_regression`）の判定へ
-//! 再切替済み（`docs/perf/metal-gemm-splitk-two-pass.md` §5.5・§5.8）。
-//! `SPLIT_K_NUMERIC_CONTRACT_APPROVED`（自動判定入口 `dispatch_split_k_
-//! strided_prepared` のゲート）の解除はイシュー #1513 で完了済み
-//! （`true` へ切替。`docs/perf/metal-gemm-splitk-two-pass.md` §5.9）。
-//! `select_for_device`／`dispatch_auto` への本番結線自体は別イシュー
-//! #1516 へ引き継ぐ（本モジュールの承認範囲外のまま）。
+//! 本経路は当初、opt-in・`dispatch_auto` へ未結線のプロトタイプとして
+//! 追加された（イシュー #1474 のスコープ。性能 A/B は #1475）。本番結線
+//! 可否は **#1476 時点では**「結線しない」と確定していた（性能判定
+//! `undetermined`・数値契約未承認の 2 ブロッカー。
+//! `docs/backend-metal-splitk-decision.md` §4）。本非後退契約は「正しさが
+//! 実測どおりであること」を機械的に固定する目的に限る。判定方式は
+//! PR #1496 の codex-review 指摘を受けいったん `assert_parity`（厳密ゼロ
+//! fail 判定）へ差し戻されたが、上記承認を受けてイシュー #1512 で
+//! `tests/gemm_splitk_parity.rs` から本モジュール経由
+//! （`assert_no_split_k_parity_regression`）の判定へ再切替済み
+//! （`docs/perf/metal-gemm-splitk-two-pass.md` §5.5・§5.8）。
+//!
+//! `#1476` 時点の「結線しない」確定のうち、2 ブロッカーの片方（数値契約
+//! 未承認）はその後解消されている: `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
+//! （自動判定入口 `dispatch_split_k_strided_prepared` のゲート）の解除は
+//! イシュー #1513 で完了済み（`true` へ切替。`docs/perf/
+//! metal-gemm-splitk-two-pass.md` §5.9）。さらに `select_for_device`／
+//! `dispatch_auto` への本番結線コード自体は **イシュー #1516（PR #1530）
+//! で追加済み**であり、`#1476` の「結線しない」確定はこの結線によって
+//! 上書き・更新されている。ただし `tile::
+//! SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（既定 `false`）で無効化
+//! されたままであり、残るブロッカー（性能の正式 ADOPT 判定。#1515）が
+//! 確定するまで本番経路（`MetalBackendOps::gemm`）は split-K を選択しない
+//! （`docs/backend-metal-splitk-decision.md` §5）。`#1476` 時点の確定と
+//! `#1516` 時点の現状を混同しないこと。
 
 #![allow(dead_code)] // テストファイルごとに使う関数が異なるため。
 

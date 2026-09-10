@@ -2395,8 +2395,15 @@ pub fn split_k_tile(m: usize, n: usize) -> TileConfig {
 }
 
 /// [`should_split_k_with`] を [`SplitKParams::MLX_CASE1_M4_MAX`] で呼ぶ
-/// 既定入口。`crate::gemm::MetalGemm::dispatch_split_k*`（opt-in・
-/// `dispatch_auto` へは未結線）が使う（イシュー #1474 計画 §4.2）。
+/// 既定入口。`crate::gemm::MetalGemm::dispatch_split_k*`（イシュー #1474
+/// の opt-in 自動判定入口。数値契約ゲート済みで既に有効）が使う（イシュー
+/// #1474 計画 §4.2）ほか、[`select_route_for_device`]（本モジュール。
+/// #1516 で `dispatch_auto` へ結線された経路）からも呼ばれる。ただし
+/// `dispatch_auto` 側は `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
+/// （既定 `false`）が `true` の場合のみ `select_route_for_device`（延いては
+/// 本関数）を呼ぶため、既定ビルドではこの経路から本関数は呼ばれない
+/// （`crate::gemm::MetalGemm::dispatch_auto` doc コメント「split-K 本番
+/// 結線」節参照）。
 pub fn should_split_k(m: usize, n: usize, k: usize) -> Option<SplitKPlan> {
     should_split_k_with(m, n, k, &SplitKParams::MLX_CASE1_M4_MAX)
 }

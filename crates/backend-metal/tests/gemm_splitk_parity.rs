@@ -1,4 +1,5 @@
-//! split-K 2 パス GEMM（イシュー #1474。opt-in・`dispatch_auto` へ未結線）
+//! split-K 2 パス GEMM（イシュー #1474。#1516 で `dispatch_auto` へ
+//! 定数ゲート付きで結線済み・既定 OFF〈有効化は #1515 の ADOPT 確定後〉）
 //! の AC-2: split 経路（[`fandhe_ai_backend_metal::SplitKRoute::Split`]）
 //! の出力が CPU 参照実装（`matmul_reference_fma`）と一致することを、
 //! `docs/backend-metal-splitk-decision.md` §3 の対象 9 形状 × NN/NT/TN/TT
