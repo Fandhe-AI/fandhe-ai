@@ -2399,11 +2399,16 @@ pub fn split_k_tile(m: usize, n: usize) -> TileConfig {
 /// の opt-in 自動判定入口。数値契約ゲート済みで既に有効）が使う（イシュー
 /// #1474 計画 §4.2）ほか、[`select_route_for_device`]（本モジュール。
 /// #1516 で `dispatch_auto` へ結線された経路）からも呼ばれる。ただし
-/// `dispatch_auto` 側は `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
-/// （既定 `false`）が `true` の場合のみ `select_route_for_device`（延いては
-/// 本関数）を呼ぶため、既定ビルドではこの経路から本関数は呼ばれない
-/// （`crate::gemm::MetalGemm::dispatch_auto` doc コメント「split-K 本番
-/// 結線」節参照）。
+/// `dispatch_auto` 側が `select_route_for_device`（延いては本関数）を
+/// 呼ぶ実際の条件は `MetalGemm::split_k_auto_enabled &&
+/// SPLIT_K_NUMERIC_CONTRACT_APPROVED` であり、
+/// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（既定 `false`）は
+/// 通常コンストラクタ `MetalGemm::new` が `split_k_auto_enabled` に与える
+/// 既定値に過ぎない。したがって `MetalGemm::new` で構築した本番経路では
+/// 定数が `true` になるまでこの経路から本関数は呼ばれないが、
+/// `MetalGemm::new_with_split_k_auto(ctx, true)` による明示 opt-in では
+/// 定数が `false` のままでも呼ばれる（`crate::gemm::MetalGemm::dispatch_auto`
+/// doc コメント「split-K 本番結線」節参照）。
 pub fn should_split_k(m: usize, n: usize, k: usize) -> Option<SplitKPlan> {
     should_split_k_with(m, n, k, &SplitKParams::MLX_CASE1_M4_MAX)
 }
