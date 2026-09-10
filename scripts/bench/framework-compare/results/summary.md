@@ -2295,3 +2295,29 @@ fandhe-ai は全 30 run（reuse 15 + fresh 15。JSONL
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24、生データ・実行ログは
 `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/`（M4 Max 独立再計測は同配下
 `m4max-redo-pr1506/`）を参照。
+
+## 環境 30: Apple M4 Max（Metal GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で再計測。イシュー #1490）
+
+`run_gemm_gate_metal.sh`／`compare_gemm_gate.py --device metal` の同一プロトコル（5 回独立
+プロセス起動・中央値）で、正式系列（`fandhe-ai =0.8.0` registry ピン）のみを計測した
+（`v0.8.0 ↔ origin/main` の Metal 計測経路 src 差分がゼロのため参考系列は計測せず）。
+
+| N | fandhe-ai reuse 中央値 | candle fresh 中央値 | candle/fandhe | 判定 |
+|---|---|---|---|---|
+| 1024 | 2.856 ms | 2.123 ms | 0.743 | 未達 |
+| 2048 | 9.774 ms | 9.798 ms | **1.002** | **達成** |
+| 4096 | 48.753 ms | 30.922 ms | 0.634 | 未達 |
+
+専有ゲート（1 分 load average < 6.0 を 2 回連続・最大 10 試行・60 秒開始 1.5 倍バックオフ。
+プロビルドで計測から分離済み）は 6 試行（約 820 秒。load1: 12.17→16.68→7.17→7.69→3.61→3.70）
+で成立し、計測は 1 回で完了した。**N=2048 は正式系列として初めて #1037 の形状別受け入れ
+条件（reuse で candle 超え）を達成した**が、fandhe-ai reuse の run 間分散が大きく
+（8.992–13.603 ms）、共有負荷下の計測（ゲート成立直後 load average 3.70 → 計測完了直後
+7.05 まで再上昇）のため専有環境での再現性は未確認。`v0.7.0 → v0.8.0` の間で本番 NN 正方
+GEMM reuse 経路への変更はない（split-K opt-in 実装・結線が入ったが
+`SPLIT_K_NUMERIC_CONTRACT_APPROVED=false` により classic 経路へフォールバックし対象形状へ
+非到達）ため、§11（0.7.0・0.638 倍）・§8.13（0.7.0-1309・0.969 倍）からの改善はコード変更に
+帰属できず計測ノイズと判断する。fandhe-ai・candle とも全 30 run で `parity_fail_count=0`。
+旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま。詳細・帰属表・突合
+結果は `docs/perf/metal-gemm-candle-gate-remeasurement.md` §16、生データ・実行ログは
+`docs/perf/logs/metal-gemm-candle-gate-0.8.0-1490/` を参照。

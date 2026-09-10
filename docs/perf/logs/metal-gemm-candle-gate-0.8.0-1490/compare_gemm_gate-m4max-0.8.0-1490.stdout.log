@@ -1,0 +1,3 @@
+未達: results/raw/results-m4max-gemm-gate-0.8.0-1490.jsonl size=1024（fandhe-ai 0.002856s > candle 0.002123s）
+未達: results/raw/results-m4max-gemm-gate-0.8.0-1490.jsonl size=4096（fandhe-ai 0.048753s > candle 0.030922s）
+exit=3

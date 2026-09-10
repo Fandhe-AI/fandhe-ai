@@ -564,3 +564,25 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/`（M4 Max 独立再計測は同配下
   `m4max-redo-pr1506/`）、集計表は
   `scripts/bench/framework-compare/results/summary.md` 環境 29 節
+
+### 8.16 #1490 追補（Metal GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で M4 Max 再計測。§2 段階的下限表・§3 丸め規則は不変）
+
+- v0.8.0 の crates.io 公開（2026-09-09）とピン更新・pin guard 撤去（イシュー #1487）を
+  受け、正式系列 `fandhe-ai =0.8.0`（registry 解決）のみで Metal GEMM N=1024/2048/4096
+  reuse の candle 比を Apple M4 Max（本セッションのホスト自身）で再計測した
+  （イシュー #1490。`v0.8.0 ↔ origin/main` の Metal 計測経路 src 差分がゼロのため
+  参考系列は計測せず）
+- 専有ゲート（1 分 load average < 6.0 を 2 回連続・最大 10 試行・60 秒開始 1.5 倍
+  バックオフ）は 6 試行（約 820 秒）で成立し、計測（ビルドは事前分離）は 1 回で完了した
+- **N=2048 は正式系列として初めて candle 比ゲートを達成した**（1.002 倍）。
+  N=1024（0.743 倍）・N=4096（0.634 倍）は未達のまま。fandhe-ai・candle とも全 30 run で
+  `parity_fail_count=0`
+- §11（0.7.0・0.638 倍）・§8.13（0.7.0-1309・0.969 倍）と比較すると N=2048 は達成側へ
+  振れているが、`v0.7.0 → v0.8.0` の間で本番 NN 正方 GEMM reuse 経路（`tile::select_
+  for_device` の選択構成・Metal readout）へのコード変更はなく（split-K opt-in 実装・
+  結線は `SPLIT_K_NUMERIC_CONTRACT_APPROVED=false` により到達しない）、この差分は
+  コード変更に帰属できない計測ノイズと判断する。旧 #1037 の「3 形状すべて」という
+  受け入れ条件は依然として未達成
+- 出典: `docs/perf/metal-gemm-candle-gate-remeasurement.md` §16、生データ・実行ログは
+  `docs/perf/logs/metal-gemm-candle-gate-0.8.0-1490/`、集計表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 30 節

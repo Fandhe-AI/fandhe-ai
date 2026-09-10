@@ -1,0 +1,3 @@
+$ git diff v0.8.0..origin/main --stat -- crates/backend-metal/src crates/facade/src crates/autodiff/src crates/tensor-core/src
+（出力なし。v0.8.0 タグと origin/main〈3de5f98d824ecdcd458a173b88af2dc1c4c66acd〉の間で
+Metal 計測経路に関わるソース差分はゼロ）
