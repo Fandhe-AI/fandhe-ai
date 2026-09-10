@@ -69,8 +69,13 @@ fail-closed にエラー終了する。イシュー #1529）。
    の機械判定をそのまま採用し、人間側で緩めない。
 5. `env_info.txt` の記入欄（機種・OS・rustc・base sha・作業ブランチ・
    run ごとの load1 範囲・中断有無）を埋める。内部ホスト名は書かない。
-6. イシュー #1515 へ結果をコメントする。ADOPT なら #1516（本番結線）の
-   ブロッカーを解除し、REJECT なら理由を記録し結線しないまま完了とする。
+6. イシュー #1515 へ結果をコメントする。ADOPT なら `docs/backend-metal-
+   splitk-decision.md` §5「ゲート既定値・切替条件」の手順（`SPLIT_K_DISPATCH_
+   AUTO_PRODUCTION_ENABLED` を `true` へ切替・ドリフトテスト更新・実機
+   `#[ignore]` 群 pass・#1517 の framework-compare A/B）へ進み、REJECT なら
+   理由を記録しゲート `false` を維持したまま完了とする（**追記〈#1518〉**:
+   `dispatch_auto` への定数ゲート付き結線自体は #1516 で既に実施済みのため、
+   本手順は「結線」ではなく「ゲート ON への切替」を指す）。
 
 ## ファイル構成
 

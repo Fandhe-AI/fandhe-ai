@@ -1163,7 +1163,13 @@ stat -- crates/` は空）。NN 経路は結線前と同一実装のままのた
   同一契約〈§4 の parity テスト〉を維持するため引き続き対象外とし、
   NT/TN/TT のみ委譲対象とする）かつ `strided_tiled_eligibility` 通過。
 - (b) タイル構成は `tile::select_for_device`（`dispatch_auto` と同一
-  の選択ロジック）を再利用する。
+  の選択ロジック）を再利用する（**追記〈#1518〉**: #1516 以降 `dispatch_auto` は
+  `select_route_for_device` 経由で split-K 分岐を持つが、ゲート既定 OFF では
+  `select_for_device` と同一結果を返す。split-K は `dispatch_auto`（NN 限定）
+  経由でのみ発火し、対象形状は正方限定ではなく `should_split_k` の判定条件
+  〈K 支配的形状・並列度条件〉を満たす形状全般（例: `(32,64,4096)` 等の非正方
+  形状も対象になりうる）である。本結線案自体は NT/TN/TT 限定であり、NN 限定
+  の split-K とは対象パターンの時点で重ならない）。
 - (c) `Err(StridedTiledIneligible)` および構成失敗時は classic
   strided 経路（`encode_strided_bias_act_prepared`）へ fail-closed
   フォールバックし、本番経路で `unwrap`／`expect` を使わない
@@ -1230,6 +1236,16 @@ framework-compare `gemm metal` タスク（8 セル）の A/B では結線の
 影響を**検出できない**。非後退確認の対象としては原理的に不適切で
 あり、本イシューが求めていた計測自体が、依頼時点で想定されていた
 経路と実際の到達経路の不一致により成立しないことが判明した。
+
+**追記〈イシュー #1518〉**: #1516 の split-K 分岐（既定ゲート OFF）が有効化
+されても、上記の `gemm` タスク（NN・contiguous）が `dispatch_auto` 経由で classic
+経路を通る到達性分析そのものは変わらない。split-K は `dispatch_auto`（NN 限定）
+経由でのみ発火するが、対象形状は正方限定ではなく `should_split_k` の判定条件
+（K 支配的〈`k >= max(m,n)`〉・タイル数上限・並列度条件）を満たす形状全般であり、
+`(32,64,4096)` のような非正方形状も対象になりうる。本節が扱う N=512〜4096 の
+正方形状はこの並列度条件（`actual_groups` が `max_groups` 未満という条件）を
+満たさないため split-K 非対象と判定される〈`docs/perf/metal-gemm-splitk-framework-compare-1517.md`
+§2.1 帰属表〉。したがって本節の結論（当該 8 セルでは split-K 非到達）は不変。
 
 ### 再開時の正しいプロトコル（事前宣言）
 

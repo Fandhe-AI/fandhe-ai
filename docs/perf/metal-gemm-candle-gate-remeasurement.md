@@ -719,6 +719,10 @@ legacy/borrowed override interleave 再計測。イシュー #1477）」節・
   本計測（推論 GEMM・reuse）には無関係。よって本節の期待値は §11・§14 と同水準
   （差は計測ノイズ）であり、これを計測前に固定した（`docs/perf/logs/
   metal-gemm-candle-gate-0.8.0-1490/attribution.md`）
+  **追記（イシュー #1518）**: 上記は v0.8.0 タグ時点（`SPLIT_K_NUMERIC_CONTRACT_APPROVED
+  = false`）の事実。HEAD は #1513 で `true`・#1516 で `dispatch_auto` へ定数ゲート付き
+  結線済み（既定 OFF）だが、対象形状（NN 正方）は並列度条件で非到達のため本節の帰属判断は
+  変わらない（`docs/backend-metal-splitk-decision.md` §5）
 
 ### 16.3 プロトコル・専有状態
 
@@ -798,7 +802,9 @@ legacy/borrowed override interleave 再計測。イシュー #1477）」節・
 
 - 参考系列（HEAD path patch）の計測（v0.8.0 ↔ origin/main 差分ゼロのため不要と判断） → split-K 本番結線（#1527・#1530）により差分が非ゼロになったため #1521（§18）で着手
 - Metal 借用ビュー readout の interleave 再計測（#1477 undetermined の再挑戦）
-- split-K 数値契約承認（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`）
+- split-K 数値契約承認（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`）: **#1513 で完了**
+  （`true` へ切替済み）。結線自体は #1516（定数ゲート付き・既定 OFF）、ゲート ON への
+  切替は #1515 の 5 run 正式 ADOPT 確定（未実測）待ち
 - N=4096 カーネル純境界ギャップの縮小（#1269 後継）
 - N=2048 の達成が専有環境下で再現するかの確認（§16.4 の run 間分散が大きいため、
   1 回の計測のみでは再現性を確定できない）

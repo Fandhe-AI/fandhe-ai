@@ -589,7 +589,10 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
 - §11（0.7.0・0.638 倍）・§8.13（0.7.0-1309・0.969 倍）と比較すると N=2048 は達成側へ
   振れているが、`v0.7.0 → v0.8.0` の間で本番 NN 正方 GEMM reuse 経路（`tile::select_
   for_device` の選択構成・Metal readout）へのコード変更はなく（split-K opt-in 実装・
-  結線は `SPLIT_K_NUMERIC_CONTRACT_APPROVED=false` により到達しない）、この差分は
+  結線は `SPLIT_K_NUMERIC_CONTRACT_APPROVED=false` により到達しない〈v0.8.0 タグ時点の
+  事実。HEAD は #1513／#1516 で状態が更新されているが、対象形状〈NN 正方〉は `should_
+  split_k` の並列度条件で引き続き非到達のため帰属判断は不変。`docs/backend-metal-
+  splitk-decision.md` §5〉）、この差分は
   コード変更に帰属できない計測ノイズと判断する。旧 #1037 の「3 形状すべて」という
   受け入れ条件は依然として未達成
 - 出典: `docs/perf/metal-gemm-candle-gate-remeasurement.md` §16、生データ・実行ログは

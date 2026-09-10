@@ -307,8 +307,8 @@ fail を満たすにもかかわらず、CUDA 先例の形状二分方式では�
 - イシュー #1474（split-K 2 パス実装・§5 判定方式の実測・差し戻し）・#1511（本決定記録・本
   イシュー）・親 #1510・ルート #1509
 - `docs/perf/metal-gemm-splitk-two-pass.md`（§5. AC-2 判定方式の実測・差し戻しの経緯本体）
-- `docs/backend-metal-splitk-decision.md`（split-K 採否判断・§4 本番結線可否〈結線しない〉・
-  承認依頼の要点 (a)(b)(c)）
+- `docs/backend-metal-splitk-decision.md`（split-K 採否判断・§4 本番結線可否〈#1476 時点は
+  結線しない〉・§5 本番結線〈#1516。定数ゲート付き・既定 OFF〉・承認依頼の要点 (a)(b)(c)）
 - `docs/cuda-tensor-core-parity-judgment-decision.md`（先例。判定方式決定記録の構成・spec 反映
   フローの雛形）
 - `docs/candle-parity-tolerance-contract-decision.md`（A-1 救済項の出典・「ハーネス限定」スコープ
