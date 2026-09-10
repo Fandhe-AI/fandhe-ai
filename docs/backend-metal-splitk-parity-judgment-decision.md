@@ -1,4 +1,6 @@
-# Metal f32 split-K 経路の受け入れ判定方式の決定記録 draft（イシュー #1511）
+# Metal f32 split-K 経路の受け入れ判定方式の決定記録（イシュー #1511）
+
+> **状態: 確定（2026-09-10 ユーザー承認）**。承認内容は「7. 承認記録」を参照。draft 段階の記述（「未承認」等）は経緯として保持する。
 
 イシュー #1474（`docs/perf/metal-gemm-splitk-two-pass.md` §5.1〜§5.7）で、Metal f32 split-K
 GEMM 経路（`MetalGemm::dispatch_split_k_strided_prepared*`）の受け入れ判定に「実測ベースライン
@@ -205,7 +207,7 @@ CUDA 先例の追記文言をそのまま適用対象化するのではなく、
 
 `docs/spec-proposal-req2-candle-parity-tolerance.md` の書式（起票用タイトル案・本文案テンプレー
 ト・「そのまま貼り付け可能な形式」）に倣い、**承認された場合に使う起票用本文の draft** を
-以下に用意する（未起票のまま。実起票は承認後の別イシューで行う）:
+以下に用意する（**2026-09-10 の承認を受け Fandhe-AI/fandhe-ai-spec#65〈https://github.com/Fandhe-AI/fandhe-ai-spec/issues/65〉として起票済み**。以下は起票時の本文案）:
 
 ---
 
@@ -262,8 +264,20 @@ fail を満たすにもかかわらず、CUDA 先例の形状二分方式では�
 
 ## 7. 承認記録
 
-**未承認**（2026-09-10 時点。draft 作成完了・自動実装フローのためユーザー承認待ち。
-本 issue または本 PR への人間のコメントが承認の一次記録となる）。
+**承認済み（2026-09-10・ユーザー承認）**。draft は PR #1523 で main へ取り込み済み（未承認の
+まま。上記経緯）で、承認はその後の対話でユーザーから得た。承認内容は次のとおり:
+
+- **適用拡張**: Metal f32 split-K 経路へ実測ベースライン非後退方式（CUDA Tensor Core 経路の
+  `ParityBaseline` と同型。§4 の 4 指標連言・上方更新は承認必須）を適用してよい
+- **適用粒度**: §3 のとおり対象 11 形状すべてへ一律に baseline 方式を適用する（CUDA 先例の形状
+  二分方式は採用しない）。イシュー #1512 本文の「厳密ゼロ fail 成立 3 形状は `assert_parity`
+  維持」という記述より本 §3 を優先する（#1512 本文へ同旨を追記済み）
+- **baseline 値**: §1.1 の実測表 11 行（4 転置パターンは同一集計値のため `(m, n, k)` 単位）を
+  `crates/backend-metal/tests/common/splitk_parity_baseline.rs::BASELINES` の承認値とする
+- **tolerance 定数**（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）は不変
+- **spec 起票**: §6 の本文案で Fandhe-AI/fandhe-ai-spec#65 として起票済み（2026-09-10）
+- 後続: 判定方式の切替は #1512、`SPLIT_K_NUMERIC_CONTRACT_APPROVED` の解除・本番結線は #1513
+  （いずれも本承認後に着手）
 
 ## 8. 関連
 
