@@ -119,26 +119,34 @@ DGX・M4 Max とも `results/raw/results-*-cpu-gemm-gate-0.8.0-1488.jsonl` は 4
 
 ## 実測結果サマリ（詳細は gate doc §24.4 を正とする）
 
+**M4 Max 行は試行 3（参考値。専有ゲートの終了条件がプロセス再起動でリセット
+される欠陥下の計測のため正式値としない。gate doc §24.1／§24.10・PR #1506
+codex-review 指摘参照）。是正版オーケストレーションによる独立再計測
+（`m4max-redo-pr1506/`）は事前宣言した約 30 分上限内に専有ゲートが成立せず
+`verdict=undetermined` に終わったため、M4 Max の正式値は本 PR 時点で未確定。**
+
 | 実機 | 系列 | N=512 | N=1024 | N=2048 |
 |---|---|---|---|---|
 | DGX | 0.8.0-1488（正式） | 0.820 未達 | 0.981 未達 | **1.400 達成（candle 救済 2 要素）** |
-| M4 Max | 0.8.0-1488（正式） | **1.159 達成** | 0.854 未達 | **1.075 達成** |
+| M4 Max | 0.8.0-1488（試行 3・参考値） | **1.159 達成** | 0.854 未達 | **1.075 達成** |
 
-fandhe-ai 側（両実機）は全 90 run（DGX 45 + M4 Max 45。各実機 reuse 15・candle
-fresh 15・fandhe fresh 15）で `parity_fail_count=0` **かつ**
-`parity_scaled_abs_rescued=0`（`verify_strict` 経路）。DGX N=2048 の candle 側は
-全 5 run で `parity_fail_count=0, parity_scaled_abs_rescued=2,
+各 JSONL の 45 行は fandhe-ai reuse 15 行・fandhe-ai fresh 15 行・candle fresh 15 行の
+内訳（fandhe-ai 側は 1 実機あたり 30 run・両実機合計 60 run。candle 側は 1 実機あたり
+15 run・両実機合計 30 run）。fandhe-ai 側（両実機合計 60 run）は全 run で
+`parity_fail_count=0` **かつ** `parity_scaled_abs_rescued=0`（`verify_strict` 経路）。
+DGX N=2048 の candle 側は全 5 run で `parity_fail_count=0, parity_scaled_abs_rescued=2,
 parity_scaled_abs_bound=1.525878e-05`（§19／§22.5 と完全に同一の決定的挙動）。
-M4 Max の candle 側は全 45 run で `rescued=0`（DGX のような救済適用なし）。
+M4 Max の candle 側は全 15 run で `rescued=0`（DGX のような救済適用なし）。
 
 ## §22.4 参考系列（`head-ced4d14-1321`）との比較（詳細は gate doc §24.7）
 
 DGX 正式系列は N=2048 で 0.938（§22。0.7.0-1321）→ 0.950（§19。tolerance 契約
 適用後）→ **1.400**（本イシュー・v0.8.0）と改善し、#1321 で観測された参考系列
-（origin/main HEAD `ced4d14`。1.562）の水準に近づいた。M4 Max 正式系列も 3 形状
-すべてで §22 正式系列（0.981／0.887／0.891）から改善し、N=512（→1.159）・N=2048
-（→1.075）は §22 参考系列（1.133／1.051）の水準を上回った。N=1024 は僅かに
-後退（0.887→0.854）したが §22 参考系列（1.169）には届かない。attribution.md
+（origin/main HEAD `ced4d14`。1.562）の水準に近づいた。M4 Max 正式系列は N=1024 を
+除く 2 形状（N=512・N=2048）で §22 正式系列（0.981／0.887／0.891）から改善し、
+N=512（→1.159）・N=2048（→1.075）は §22 参考系列（1.133／1.051）の水準を
+上回った。N=1024 は僅かに後退（0.887→0.854）したが §22 参考系列（1.169）には
+届かない。attribution.md
 のとおり `ced4d14` → `v0.8.0` の実質差分は借用ビュー readout の既定経路化のみで
 あり、この全体的な改善傾向は当該変更に帰属すると見て矛盾しない（他の Phase
 施策はいずれも無効・REJECT のまま不変）。

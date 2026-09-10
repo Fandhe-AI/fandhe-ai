@@ -1,0 +1,15 @@
+gate attempt=1 wait=60s load1=6.54 ok=0 elapsed=0s 2026-09-10T02:50:05Z
+gate attempt=2 wait=90s load1=5.05 ok=1 elapsed=60s 2026-09-10T02:51:35Z
+gate attempt=3 wait=30s load1=4.60 ok=1 elapsed=150s 2026-09-10T02:52:05Z
+=== proc check 2026-09-10T02:52:05Z ===
+formal start 2026-09-10T02:52:05Z 11:52  up 21 days, 23:04, 19 users, load averages: 4.60 7.33 9.90
+gate attempt=1 wait=60s load1=6.12 ok=0 elapsed=236s 2026-09-10T02:54:01Z
+gate attempt=2 wait=90s load1=5.69 ok=1 elapsed=296s 2026-09-10T02:55:31Z
+gate attempt=3 wait=30s load1=9.30 ok=0 elapsed=386s 2026-09-10T02:56:01Z
+gate attempt=4 wait=135s load1=5.97 ok=1 elapsed=416s 2026-09-10T02:58:16Z
+gate attempt=5 wait=30s load1=6.30 ok=0 elapsed=551s 2026-09-10T02:58:46Z
+gate attempt=6 wait=202s load1=7.79 ok=0 elapsed=581s 2026-09-10T03:02:08Z
+gate attempt=7 wait=303s load1=8.97 ok=0 elapsed=783s 2026-09-10T03:07:11Z
+gate attempt=8 wait=454s load1=7.42 ok=0 elapsed=1086s 2026-09-10T03:14:45Z
+gate attempt=9 wait=260s load1=5.70 ok=1 elapsed=1540s 2026-09-10T03:19:05Z
+gate cap reached mid-loop: elapsed=1800s cap=1800s 2026-09-10T03:19:05Z

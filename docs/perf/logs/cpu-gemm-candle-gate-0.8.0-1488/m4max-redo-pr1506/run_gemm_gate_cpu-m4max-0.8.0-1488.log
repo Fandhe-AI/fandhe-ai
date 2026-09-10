@@ -1,0 +1,3 @@
+ERROR: 正式実機ホスト照合用ファイルが見つかりません: /Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_bc0d0530-bc1-37/scripts/bench/framework-compare/gemm-gate-trusted-hosts.local
+  gemm-gate-trusted-hosts.local.example をコピーし、実ホスト名・機体識別子（m4max-cpu=<hostname>|<machine-id/IOPlatformUUID>）を記入してください（このファイルは Git 管理外）。
+  GEMM_GATE_TRUSTED_HOSTS_FILE=<絶対パス> で別ファイルを指定することもできます。
