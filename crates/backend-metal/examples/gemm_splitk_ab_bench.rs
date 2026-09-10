@@ -46,9 +46,14 @@
 //! - **ADOPT**: 対象 9 形状すべてで (i) 主指標（run 内比の 5 run 中央値）
 //!   ≥ 1.5 かつ (ii) 5/5 run すべてで run 内比 > 1.0、かつ対照 3 形状
 //!   すべてで主指標 ≥ 0.95。
-//! - **REJECT**: 専有ゲート成立下で上記いずれかが不成立。
-//! - **undetermined**: 専有ゲート（`--max-load-avg`）が規定回数で成立しない
-//!   場合（1 回だけ記録して終了）。
+//! - **REJECT**: 共有負荷下でも上記いずれかが不成立（イシュー #1515・
+//!   ルート #1509 のユーザー指示により専有ゲートは受け入れ条件にしない。
+//!   REJECT は共有負荷下でも有効な REJECT として扱う）。
+//! - **undetermined**: `--max-load-avg` を指定した gated 運用で専有ゲートが
+//!   規定回数で成立しない場合（1 回だけ記録して終了）。`--max-load-avg`
+//!   未指定の record_only 運用（#1515 の既定運用）では、5 run の完全性・
+//!   フェーズ 0 の run-to-run bit 同一・checksum 一致が崩れた場合にのみ
+//!   undetermined とする（`docs/perf/metal-gemm-splitk-ab.md` §10）。
 //!
 //! spread（`spread_a`／`spread_b`。レンジベース）は判定に使わない
 //! （#1308 が同一形状・同一境界で spread 0.78〜1.44 を実測しており、
@@ -60,21 +65,30 @@
 //!
 //! **ADOPT は性能上の判定に限る**: 本番結線（`SPLIT_K_NUMERIC_CONTRACT_
 //! APPROVED` の切替）は REQ-2 判定方式の Metal f32 split-K への適用拡張
-//! というユーザー承認が別途必要。#1476 で本番結線可否を確定した結果は
-//! **結線しない**（本ドキュメントの機械判定 `undetermined`〈3/5 run〉に
-//! 加え数値契約未承認の 2 ブロッカー。`docs/backend-metal-splitk-decision.md`
-//! §4）。本 example・`crates/backend-metal/src/` はいずれも変更しない
-//! （性能 A/B の実測・記録に限る）。
+//! というユーザー承認が別途必要（#1513 で数値契約自体は承認・
+//! `SPLIT_K_NUMERIC_CONTRACT_APPROVED = true` 済み）。5 run 正式確定の
+//! ADOPT／REJECT 判定は #1515（`docs/perf/metal-gemm-splitk-ab.md` §10）
+//! を正とし、本番結線可否そのものは別イシュー（#1516）へ引き継ぐ。本
+//! example・`crates/backend-metal/src/` はいずれも変更しない（性能 A/B
+//! の実測・記録に限る）。
 //!
 //! ## 実行方法
 //!
 //! ```sh
 //! cargo run -p fandhe-ai-backend-metal --example gemm_splitk_ab_bench \
-//!   --release --features internal-diagnostics -- --max-load-avg=4.0
+//!   --release --features internal-diagnostics
 //! ```
 //!
-//! `--max-load-avg=<f64>` 未指定時は環境ガードを行わず即座に計測へ進む
-//! （記録のみ。本番実測では必ず指定する。閾値自体に既定値はない）。
+//! `--max-load-avg=<f64>` は **省略可能**（イシュー #1515・ルート #1509 の
+//! ユーザー指示により専有ゲートは受け入れ条件にしない）。未指定時は
+//! **record_only**（`GuardRetryOutcome::record_only`。判定なし・load
+//! average 等を記録するのみで即座に計測へ進む。`gemm_transpose_route_
+//! ab_bench.rs::macos_impl::run_env_guard` と同型）で動作し、`--max-
+//! load-avg=<f64>` を指定した場合のみ **gated**（`EnvGuardConfig` による
+//! 判定・バックオフ再試行）で動作する。record_only 運用が #1515 の 5 run
+//! 正式確定における既定運用であり、共有負荷下（他プロセス並走を許容）で
+//! あることを `env_guard_load_avg` 行・`env_guard_mode=record_only` 行で
+//! 記録する。
 //! `--self-check-only` はフェーズ 0（自己検証）のみ実行し終了する。
 //! `--iters=<N>` は warmup・計測回数を引き上げる（未指定なら
 //! `MeasurementConfig::default` = 20/20）。
@@ -153,6 +167,48 @@ fn format_floor_line(m: usize, n: usize, k: usize, median_secs: f64, spread: f64
         "splitk_ab kind={KIND_FLOOR} m={m} n={n} k={k} partitions=NA \
          median_a_secs={median_secs:.6e} median_b_secs=NA speedup=NA spread_a={spread:.4e} \
          spread_b=NA"
+    )
+}
+
+/// `phase0 kind=target ...` 行を整形する純関数（`format_ab_line`／
+/// `format_floor_line` と同型。macOS（`macos_impl::phase0_self_check`）と
+/// テストからのみ呼ばれる）。
+///
+/// `checksum_*` の `.6e` 表示は丸めた文字列（例: `100.00001` と
+/// `100.00002` がいずれも同じ表示になりうる）であり、これだけでは
+/// `docs/perf/metal-gemm-splitk-ab.md` §10.2 が要求する 5 run 間
+/// checksum 完全一致を機械検証できない（イシュー #1529 codex-review P2
+/// 指摘）。`f64::to_bits()` は round-trip 可能な bit パターンをそのまま
+/// 16 桁 16 進数で出力するため、丸め誤差を介さず checksum の完全一致を
+/// `docs/perf/logs/metal-gemm-splitk-ab-5run-1515/aggregate.py` 側で
+/// 検証できる。既存の `.6e` 表示フィールドは人間が読む用途に残し、
+/// フィールド名・出現順序も変更しない（後方互換。旧 aggregate.py／
+/// `docs/perf/logs/metal-gemm-splitk-ab-1475/` ログとの整合を壊さない）。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+fn format_phase0_target_line(
+    m: usize,
+    n: usize,
+    k: usize,
+    classic_stable: bool,
+    target_tile_stable: bool,
+    splitk_stable: bool,
+    checksum_a: f64,
+    checksum_at: f64,
+    checksum_b: f64,
+    a_vs_b_fail_count: &str,
+    a_vs_at_fail_count: &str,
+) -> String {
+    format!(
+        "phase0 kind={KIND_TARGET} m={m} n={n} k={k} classic_stable={classic_stable} \
+         target_tile_stable={target_tile_stable} splitk_stable={splitk_stable} \
+         checksum_a={checksum_a:.6e} checksum_at={checksum_at:.6e} \
+         checksum_b={checksum_b:.6e} a_vs_b_fail_count={a_vs_b_fail_count} \
+         a_vs_at_fail_count={a_vs_at_fail_count} \
+         checksum_a_bits=0x{:016x} checksum_at_bits=0x{:016x} checksum_b_bits=0x{:016x}",
+        checksum_a.to_bits(),
+        checksum_at.to_bits(),
+        checksum_b.to_bits(),
     )
 }
 
@@ -294,18 +350,44 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, S
     Ok(out)
 }
 
+/// `env_guard_result=` 行の値を導出する純関数（`gemm_transpose_route_
+/// ab_bench.rs::env_guard_result_label` と同型。イシュー #1515）。
+///
+/// - `gated == false`（`--max-load-avg` 未指定。#1515 の既定運用）: 判定を
+///   行わないため常に `record_only`（`GuardRetryOutcome::record_only` の
+///   `overall` は `Undetermined` 固定だが、これは「未判定」であり
+///   「取得不能」とは区別する）
+/// - `gated == true`: `final_report.overall` をそのまま写像する。`Fail` は
+///   `run_guard_with_retry` が `Err(EnvGuardExhausted)` を返すため `Ok`
+///   経路では現れないが、panic 経路を作らず `fail` へ写像しておく
+///   （fail-closed）
+///
+/// `macos_impl::main` から呼ばれる。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn env_guard_result_label(gated: bool, overall: bench_harness::ab::GuardVerdict) -> &'static str {
+    use bench_harness::ab::GuardVerdict;
+    if !gated {
+        return "record_only";
+    }
+    match overall {
+        GuardVerdict::Pass => "pass",
+        GuardVerdict::Undetermined => "undetermined",
+        GuardVerdict::Fail => "fail",
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use super::{
         CliArgs, KIND_CONTROL, KIND_CONTROL_FORCED, KIND_TARGET, KIND_TARGET_TILE, bit_equal,
-        control_shapes, floor_shapes, format_ab_line, format_floor_line, parse_args_from,
-        target_shapes,
+        control_shapes, floor_shapes, format_ab_line, format_floor_line, format_phase0_target_line,
+        parse_args_from, target_shapes,
     };
     use bench_harness::BenchError;
     use bench_harness::MeasurementConfig;
     use bench_harness::ab::{
-        AbConfig, EnvGuardConfig, GuardRetryOutcome, RetryConfig, format_env_info_text, run_ab,
-        run_guard_with_retry, run_stability,
+        AbConfig, EnvGuardConfig, EnvSample, GuardRetryOutcome, RetryConfig, format_env_info_text,
+        run_ab, run_guard_with_retry, run_stability,
     };
     use bench_harness::rng::Xorshift64Star;
     use fandhe_ai_backend_cpu::parity::compare;
@@ -418,10 +500,19 @@ mod macos_impl {
         }
     }
 
-    /// 環境ガード（`--max-load-avg` 指定時のみ **gated**。未指定時は
-    /// 実行せず即座に計測へ進む。`gemm_transpose_route_ab_bench.rs::
-    /// macos_impl::run_env_guard` と同型）。
-    fn run_env_guard(args: &CliArgs) -> Result<Option<GuardRetryOutcome>, BenchError> {
+    /// 環境ガード（`--max-load-avg` 指定時は **gated**、未指定時は
+    /// **record_only**〈判定なし・[`EnvSample::collect`] を記録するのみで
+    /// 即座に計測へ進む〉。`gemm_transpose_route_ab_bench.rs::macos_impl::
+    /// run_env_guard` と同型（イシュー #1515・ルート #1509 のユーザー指示
+    /// により専有ゲートは受け入れ条件にしないため、record_only が #1515 の
+    /// 5 run 正式確定における既定運用）。呼び出し元 `main` が
+    /// `format_env_info_text` の出力（`env_guard_mode=` 行を含む）を常時
+    /// stdout へ出すため、以前バージョン（`--max-load-avg` 未指定時に
+    /// env_guard ブロックを一切出力しなかった実装）と異なり、record_only
+    /// 運用でも load average 等が計測ログへ残る。
+    fn run_env_guard(
+        args: &CliArgs,
+    ) -> Result<(GuardRetryOutcome, Option<EnvGuardConfig>), BenchError> {
         match args.max_load_avg {
             Some(max_load_avg) => {
                 let config = EnvGuardConfig::new(max_load_avg)?;
@@ -433,13 +524,9 @@ mod macos_impl {
                     max_attempts,
                 )?;
                 let outcome = run_guard_with_retry(&config, &retry)?;
-                println!(
-                    "{}",
-                    format_env_info_text("gemm_splitk_ab_bench", &outcome, Some(&config))
-                );
-                Ok(Some(outcome))
+                Ok((outcome, Some(config)))
             }
-            None => Ok(None),
+            None => Ok((GuardRetryOutcome::record_only(EnvSample::collect()), None)),
         }
     }
 
@@ -499,16 +586,24 @@ mod macos_impl {
             let cmp_a_at = compare(&a_run1, &at_run1).ok();
 
             println!(
-                "phase0 kind={KIND_TARGET} m={m} n={n} k={k} classic_stable={classic_stable} \
-                 target_tile_stable={target_tile_stable} splitk_stable={splitk_stable} \
-                 checksum_a={checksum_a:.6e} checksum_at={checksum_at:.6e} \
-                 checksum_b={checksum_b:.6e} a_vs_b_fail_count={} a_vs_at_fail_count={}",
-                cmp_ab
-                    .map(|r| r.fail_count.to_string())
-                    .unwrap_or_else(|| "NA".to_string()),
-                cmp_a_at
-                    .map(|r| r.fail_count.to_string())
-                    .unwrap_or_else(|| "NA".to_string()),
+                "{}",
+                format_phase0_target_line(
+                    m,
+                    n,
+                    k,
+                    classic_stable,
+                    target_tile_stable,
+                    splitk_stable,
+                    checksum_a,
+                    checksum_at,
+                    checksum_b,
+                    &cmp_ab
+                        .map(|r| r.fail_count.to_string())
+                        .unwrap_or_else(|| "NA".to_string()),
+                    &cmp_a_at
+                        .map(|r| r.fail_count.to_string())
+                        .unwrap_or_else(|| "NA".to_string()),
+                )
             );
         }
 
@@ -787,8 +882,18 @@ mod macos_impl {
         let ab_config = AbConfig::new(ROUNDS, COOLDOWN, MIN_WARMUP)
             .expect("ROUNDS は偶数固定のため AbConfig::new は失敗しない");
 
+        let gated = args.max_load_avg.is_some();
         match run_env_guard(&args) {
-            Ok(_) => {}
+            Ok((outcome, config)) => {
+                println!(
+                    "{}",
+                    format_env_info_text("gemm_splitk_ab_bench", &outcome, config.as_ref())
+                );
+                println!(
+                    "env_guard_result={}",
+                    super::env_guard_result_label(gated, outcome.final_report.overall)
+                );
+            }
             Err(BenchError::EnvGuardExhausted { attempts, detail }) => {
                 println!(
                     "env_guard_result=exhausted attempts={attempts} detail={detail}\nverdict=undetermined"
@@ -985,6 +1090,33 @@ mod tests {
         assert!(line.contains("partitions=NA"));
     }
 
+    /// record_only 運用（`gated=false`）は `overall` の値に関わらず常に
+    /// `record_only` を返す（イシュー #1515。`GuardRetryOutcome::
+    /// record_only` の `overall` は `Undetermined` 固定だが「未判定」と
+    /// 「取得不能」を区別するため gated の判定結果とは混同しない）。
+    #[test]
+    fn env_guard_result_label_record_only_ignores_verdict() {
+        use bench_harness::ab::GuardVerdict;
+        for v in [
+            GuardVerdict::Pass,
+            GuardVerdict::Fail,
+            GuardVerdict::Undetermined,
+        ] {
+            assert_eq!(env_guard_result_label(false, v), "record_only");
+        }
+    }
+
+    #[test]
+    fn env_guard_result_label_gated_maps_verdict() {
+        use bench_harness::ab::GuardVerdict;
+        assert_eq!(env_guard_result_label(true, GuardVerdict::Pass), "pass");
+        assert_eq!(
+            env_guard_result_label(true, GuardVerdict::Undetermined),
+            "undetermined"
+        );
+        assert_eq!(env_guard_result_label(true, GuardVerdict::Fail), "fail");
+    }
+
     #[test]
     fn format_floor_line_renders_na_sentinels_for_b_side() {
         let line = format_floor_line(32, 32, 64, 1.0e-4, 0.05);
@@ -992,5 +1124,51 @@ mod tests {
         assert!(line.contains("speedup=NA"));
         assert!(line.contains("spread_b=NA"));
         assert!(line.contains("kind=floor"));
+    }
+
+    /// イシュー #1529 codex-review P2 指摘の回帰: `phase0 kind=target` 行が
+    /// `.6e` 表示に加え `f64::to_bits()` 由来の `checksum_*_bits=0x<16 桁
+    /// hex>` を 3 checksum すべて出力すること。`aggregate.py` 側はこの
+    /// bits フィールドで run 間一致を検査するため（`.6e` 表示だけでは
+    /// 丸めにより異なる checksum が同一文字列になりうる）、フィールドの
+    /// 存在・書式（`0x` 接頭辞・16 桁 16 進数・round-trip 可能な値）を
+    /// ここで自己検証する。
+    #[test]
+    fn format_phase0_target_line_includes_checksum_bits_for_round_trip_comparison() {
+        // 100.00001 と 100.00002 は `.6e`（小数点以下 6 桁）表示では丸めに
+        // より同一文字列 "1.000000e2" になりうる差異だが、bits 表現なら
+        // 区別できることを実測で確認する（表示文字列比較の不十分さの
+        // 直接的な反証）。
+        let a = 100.00001_f64;
+        let b = 100.00002_f64;
+        assert_eq!(
+            format!("{a:.6e}"),
+            format!("{b:.6e}"),
+            "前提: .6e 表示は丸めで一致する"
+        );
+        assert_ne!(a.to_bits(), b.to_bits(), "前提: bits は異なる");
+
+        let line_a = format_phase0_target_line(32, 32, 2048, true, true, true, a, a, a, "0", "0");
+        let line_b = format_phase0_target_line(32, 32, 2048, true, true, true, b, b, b, "0", "0");
+
+        // 既存の `.6e` 表示フィールドは変更なく両方に存在する（後方互換）。
+        assert!(line_a.contains("checksum_a=1.000000e2"));
+        assert!(line_b.contains("checksum_a=1.000000e2"));
+
+        // bits フィールドは 3 checksum すべてに存在し、`0x` 接頭辞・
+        // 16 桁 16 進数で round-trip 可能な値を持つ。
+        for field in ["checksum_a_bits", "checksum_at_bits", "checksum_b_bits"] {
+            let needle = format!("{field}=0x{:016x}", a.to_bits());
+            assert!(
+                line_a.contains(&needle),
+                "{line_a} に {needle} が含まれない"
+            );
+        }
+        // `.6e` 表示では区別できない a と b が bits では区別できる
+        // （検査対象が表示文字列ではなく bits であることの直接確認）。
+        assert_ne!(
+            line_a.split("checksum_a_bits=").nth(1),
+            line_b.split("checksum_a_bits=").nth(1)
+        );
     }
 }
