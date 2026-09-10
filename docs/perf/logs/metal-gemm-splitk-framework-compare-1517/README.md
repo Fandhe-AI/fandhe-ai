@@ -42,18 +42,22 @@ AB_AFTER_FACADE_PATH="$FACADE_AFTER" \
 # 4. 集計（gemm）。--per-run は後退セルが出た場合に §3 rule (b) の
 #    「run 単位で符号一貫しているか」を機械的に確認するための追加列
 #    （非後退セルのみなら省略してよい。判定〈終了コード〉には影響しない）
+#    gemm/train はタスク別ファイル（`-gemm.jsonl`／`-train.jsonl`）へ
+#    分離出力されるため、それぞれ対応するファイルだけを渡す（PR #1531。
+#    同一ファイルを `--task` 違いで渡すと相手タスクの行が警告つきで
+#    除外され fail-closed で判定不能になる）。
 cd ../../../../scripts/bench/framework-compare
 python3 compare_gemm_ab.py --task gemm --threshold 1.00 --per-run \
-  results/raw/results-m4max-splitk-ab-before-splitk-1517-run1.jsonl \
-  results/raw/results-m4max-splitk-ab-after-splitk-1517-run1.jsonl
+  results/raw/results-m4max-splitk-ab-before-splitk-1517-run1-gemm.jsonl \
+  results/raw/results-m4max-splitk-ab-after-splitk-1517-run1-gemm.jsonl
 
 # 5. 集計（train。--phases 診断表つき。--per-run も併用可）
 python3 compare_gemm_ab.py --task train --threshold 1.00 --per-run \
   --phases \
   results/raw/results-m4max-splitk-ab-before-splitk-1517-run1-phases.jsonl \
   results/raw/results-m4max-splitk-ab-after-splitk-1517-run1-phases.jsonl \
-  results/raw/results-m4max-splitk-ab-before-splitk-1517-run1.jsonl \
-  results/raw/results-m4max-splitk-ab-after-splitk-1517-run1.jsonl
+  results/raw/results-m4max-splitk-ab-before-splitk-1517-run1-train.jsonl \
+  results/raw/results-m4max-splitk-ab-after-splitk-1517-run1-train.jsonl
 ```
 
 `--per-run` は run 単位（append 順＝run 順）の `after_k/before_k` 比

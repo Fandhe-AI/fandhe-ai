@@ -833,6 +833,47 @@ class PerRunTest(unittest.TestCase):
         for r in ratios:
             self.assertAlmostEqual(r, 1.1, places=6)
 
+    def test_per_run_table_column_count_matches_header_for_all_row_kinds(self):
+        """codex-review P2・Cursor Bugbot Low Severity 指摘（イシュー #1517
+        PR #1531）の再発防止: `--per-run` 出力のヘッダー・区切り行・
+        すべてのデータ行（欠測セル／`ratios is None` セル／通常セル）が
+        同一列数（パイプ `|` の出現数が同一）であることを機械的に検証
+        する。以前は文字列スライス（`header[:-2]`／行末直接連結）に
+        よって区切り行が 1 列少なく・データ行が重複パイプで 1 列多く
+        描画され GitHub Markdown として壊れていた。
+        """
+        # 欠測セル（rows が空）・通常セル（ratios あり）の双方を含む
+        # 入力: fresh のみ用意し reuse セルを欠測させる。
+        before_rows = [_rec(0.010, size=512, mode="fresh") for _ in range(5)]
+        after_rows = [_rec(0.0105, size=512, mode="fresh") for _ in range(5)]
+        before_path = _write_jsonl(before_rows)
+        after_path = _write_jsonl(after_rows)
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = compare_gemm_ab.main(
+                    ["prog", "--threshold", "1.05", "--per-run", before_path, after_path]
+                )
+            stdout = out.getvalue()
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+        lines = [ln for ln in stdout.splitlines() if ln.startswith("|")]
+        self.assertGreaterEqual(len(lines), 3, "header・sep・データ行が出力されていない")
+        pipe_counts = {ln.count("|") for ln in lines}
+        self.assertEqual(
+            len(pipe_counts),
+            1,
+            f"--per-run 出力の列数（'|' 出現数）が行ごとに異なる: {pipe_counts}\n{stdout}",
+        )
+        # 8 列（size/mode・before・after・after/before・checksum・判定・
+        # run 内比・符号一貫）= パイプ 9 個。
+        self.assertEqual(pipe_counts.pop(), 9)
+        # reuse セルを意図的に欠測させているため判定不能セルが残り、
+        # 終了コードは 3（any_bad）になる。列数の検証が本テストの主眼で
+        # あり終了コード自体は本題ではないため存在確認のみ行う。
+        self.assertEqual(code, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

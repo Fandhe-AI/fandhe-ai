@@ -1321,17 +1321,25 @@ worktree・`AB_AFTER_FACADE_PATH`＝同定数 `=true` の worktree）を比較�
   は両腕の `tile.rs` 宣言行を grep で読み、`false`/`true` であることを
   検証する差分ガード（両腕が同一パス・同一 sha256 なら fail-closed で
   停止）を経てからビルドし、gemm 8 セル＋train 2 セルを 5 round 計測する。
-  train の `--phases`（診断用）は本体セルとは別ファイルへ出力し、
-  「ちょうど 5 件」契約を汚さない。
-- `compare_gemm_ab.py --task {gemm,train}`（既定 `gemm`。後方互換）で
-  train タスク（`bench-fandhe --task train` が emit する `size=64` 単一
-  形状の 2 セル）も同一ツールで判定できる。`--phases BEFORE AFTER`
-  （train 限定）は `train_phases` 行の phase 別 before/after を参考表と
-  して出力する（判定には用いない）。`--per-run`（既定 off・既定出力は
-  バイト不変）は run 単位（append 順＝run 順）の `after_k/before_k` 比
-  5 件と「5 run 全て `> 1.00`（符号一貫）」フラグを追加列として表示する
-  （判定〈終了コード・verdict〉には影響しない診断列。後退セルが「共有
-  負荷ノイズ帯」か「一貫した後退」かを人間が機械的に見分けるための値。
+  `compare_gemm_ab.py --task <t>` は指定タスク以外の行を警告つきで
+  除外し 1 件でもあれば判定不能（終了コード 2）にする fail-closed 契約
+  （`load_rows` docstring）のため、gemm・train は最初から別ファイル
+  （`results-m4max-splitk-ab-{before,after}-<label>-gemm.jsonl`／
+  `-train.jsonl`）へ出力する（PR #1531 是正。同一ファイルに両タスクを
+  追記すると `--task gemm`／`--task train` のいずれで集計しても相手
+  タスクの行が警告対象になり必ず判定不能になっていた）。train の
+  `--phases`（診断用）はさらに別ファイル
+  （`-phases.jsonl`）へ出力し、「ちょうど 5 件」契約を汚さない。
+- `compare_gemm_ab.py --task {gemm,train}`（既定 `gemm`。後方互換）に
+  それぞれのタスク専用ファイル（`-gemm.jsonl`／`-train.jsonl`）を渡すと
+  判定できる（`-gemm.jsonl` を `--task train` で読む、あるいはその逆は
+  fail-closed で判定不能になる）。`--phases BEFORE AFTER`（train 限定）
+  は `train_phases` 行の phase 別 before/after を参考表として出力する
+  （判定には用いない）。`--per-run`（既定 off・既定出力はバイト不変）は
+  run 単位（append 順＝run 順）の `after_k/before_k` 比 5 件と「5 run
+  全て `> 1.00`（符号一貫）」フラグを追加列として表示する（判定
+  〈終了コード・verdict〉には影響しない診断列。後退セルが「共有負荷
+  ノイズ帯」か「一貫した後退」かを人間が機械的に見分けるための値。
   `docs/perf/metal-gemm-splitk-framework-compare-1517.md` §3 rule (b)）。
 - 判定規則・帰属表（gemm は形状条件で・train は入口条件〈backward は
   形状条件でも〉split-K に非到達という構造分析）・実測結果は

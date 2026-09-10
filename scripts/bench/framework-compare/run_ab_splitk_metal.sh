@@ -25,8 +25,12 @@
 #
 # gemm 8 セル（N=512/1024/2048/4096 × fresh/reuse）に加え、train 2 セル
 # （`--task train` × fresh/reuse。`docs/perf/metal-gemm-splitk-framework-
-# compare-1517.md` §2 の帰属表参照）を計測する。`--phases`（train のみ・
-# 診断用・各腕 1 回）は本体セルとは別ファイルへ出力し、5 回計測の
+# compare-1517.md` §2 の帰属表参照）を計測する。gemm と train は
+# `compare_gemm_ab.py --task <t>` の task 別 fail-closed 検証（他タスク
+# の行を警告つきで除外し 1 件でもあれば判定不能にする。`load_rows`
+# docstring）と整合させるため、最初からタスク別の JSONL（`-gemm.jsonl`／
+# `-train.jsonl`）へ出力を分離する（PR #1531 是正）。`--phases`（train
+# のみ・診断用・各腕 1 回）はさらに別ファイルへ出力し、5 回計測の
 # 「ちょうど 5 件」契約を汚さない。
 #
 # 専有ゲートは要求しない（record_only。ルート #1509 運用方針）。
@@ -197,21 +201,38 @@ fi
 SIZES=(512 1024 2048 4096)
 MODES=(fresh reuse)
 
-OUT_BEFORE="results/raw/results-m4max-splitk-ab-before-${LABEL}.jsonl"
-OUT_AFTER="results/raw/results-m4max-splitk-ab-after-${LABEL}.jsonl"
+# P1 是正（codex-review・Cursor Bugbot 指摘。イシュー #1517 PR #1531）:
+# `compare_gemm_ab.py` は `--task`（gemm/train）で指定したタスク以外の
+# 行を `_valid_cell_identity` で不正行として警告つき除外し、1 件でも
+# warning があれば fail-closed（終了コード 2）で判定不能にする
+# （`load_rows` docstring・`main` の `if warnings: return 2`）。
+# 当初 gemm 8 セルと train 2 セルを同一 before/after JSONL へ追記して
+# いたため、README の手順どおり `--task gemm`／`--task train` のいずれで
+# 集計しても相手タスクの行が必ず警告対象になり判定不能になっていた。
+# gemm と train を最初からタスク別ファイルへ分離して出力し、
+# `compare_gemm_ab.py --task <t>` にはそのタスク単独のファイルだけを
+# 渡す契約へ変更する。
+OUT_BEFORE_GEMM="results/raw/results-m4max-splitk-ab-before-${LABEL}-gemm.jsonl"
+OUT_AFTER_GEMM="results/raw/results-m4max-splitk-ab-after-${LABEL}-gemm.jsonl"
+OUT_BEFORE_TRAIN="results/raw/results-m4max-splitk-ab-before-${LABEL}-train.jsonl"
+OUT_AFTER_TRAIN="results/raw/results-m4max-splitk-ab-after-${LABEL}-train.jsonl"
 OUT_BEFORE_PHASES="results/raw/results-m4max-splitk-ab-before-${LABEL}-phases.jsonl"
 OUT_AFTER_PHASES="results/raw/results-m4max-splitk-ab-after-${LABEL}-phases.jsonl"
 SKIP="results/raw/skipped-m4max-splitk-ab-${LABEL}.log"
 MANIFEST="results/raw/manifest-m4max-splitk-ab-${LABEL}.json"
 mkdir -p results/raw
 
-OUT_BEFORE_TMP="${OUT_BEFORE}.tmp"
-OUT_AFTER_TMP="${OUT_AFTER}.tmp"
+OUT_BEFORE_GEMM_TMP="${OUT_BEFORE_GEMM}.tmp"
+OUT_AFTER_GEMM_TMP="${OUT_AFTER_GEMM}.tmp"
+OUT_BEFORE_TRAIN_TMP="${OUT_BEFORE_TRAIN}.tmp"
+OUT_AFTER_TRAIN_TMP="${OUT_AFTER_TRAIN}.tmp"
 OUT_BEFORE_PHASES_TMP="${OUT_BEFORE_PHASES}.tmp"
 OUT_AFTER_PHASES_TMP="${OUT_AFTER_PHASES}.tmp"
 SKIP_TMP="${SKIP}.tmp"
-: > "$OUT_BEFORE_TMP"
-: > "$OUT_AFTER_TMP"
+: > "$OUT_BEFORE_GEMM_TMP"
+: > "$OUT_AFTER_GEMM_TMP"
+: > "$OUT_BEFORE_TRAIN_TMP"
+: > "$OUT_AFTER_TRAIN_TMP"
 : > "$OUT_BEFORE_PHASES_TMP"
 : > "$OUT_AFTER_PHASES_TMP"
 : > "$SKIP_TMP"
@@ -383,28 +404,31 @@ pmset -g therm 2>&1 || true
 uptime 2>&1 || true
 
 # run 単位で before/after を交互起動する。偶数 run_i では順序を反転する
-# （`run_ab_gemm_metal.sh` と同一方針）。gemm 8 セル・train 2 セルを
-# 同一 run ループ内で実行する（run 単位ペアリング契約: `compare_gemm_ab.py`
-# の集計は各セル append 順を run 番号と見なす）。
+# （`run_ab_gemm_metal.sh` と同一方針）。gemm 8 セル・train 2 セルは
+# 同一 run ループ内で実行するが、出力先はタスク別ファイル
+# （`OUT_*_GEMM`／`OUT_*_TRAIN`）へ分離する（P1 是正。上記コメント参照）。
+# 分離後も各ファイル内での append 順は run 番号のままのため、
+# `compare_gemm_ab.py --per-run` の「append 順＝run 順」前提は
+# タスクごとに維持される。
 for run_i in $(seq 1 "$AB_ROUNDS"); do
   for size in "${SIZES[@]}"; do
     for mode in "${MODES[@]}"; do
       if (( run_i % 2 == 1 )); then
-        run_gemm bench-fandhe-splitk-ab-before "$OUT_BEFORE_TMP" "$size" "$mode"
-        run_gemm bench-fandhe-splitk-ab-after "$OUT_AFTER_TMP" "$size" "$mode"
+        run_gemm bench-fandhe-splitk-ab-before "$OUT_BEFORE_GEMM_TMP" "$size" "$mode"
+        run_gemm bench-fandhe-splitk-ab-after "$OUT_AFTER_GEMM_TMP" "$size" "$mode"
       else
-        run_gemm bench-fandhe-splitk-ab-after "$OUT_AFTER_TMP" "$size" "$mode"
-        run_gemm bench-fandhe-splitk-ab-before "$OUT_BEFORE_TMP" "$size" "$mode"
+        run_gemm bench-fandhe-splitk-ab-after "$OUT_AFTER_GEMM_TMP" "$size" "$mode"
+        run_gemm bench-fandhe-splitk-ab-before "$OUT_BEFORE_GEMM_TMP" "$size" "$mode"
       fi
     done
   done
   for mode in "${MODES[@]}"; do
     if (( run_i % 2 == 1 )); then
-      run_train bench-fandhe-splitk-ab-before "$OUT_BEFORE_TMP" "$mode"
-      run_train bench-fandhe-splitk-ab-after "$OUT_AFTER_TMP" "$mode"
+      run_train bench-fandhe-splitk-ab-before "$OUT_BEFORE_TRAIN_TMP" "$mode"
+      run_train bench-fandhe-splitk-ab-after "$OUT_AFTER_TRAIN_TMP" "$mode"
     else
-      run_train bench-fandhe-splitk-ab-after "$OUT_AFTER_TMP" "$mode"
-      run_train bench-fandhe-splitk-ab-before "$OUT_BEFORE_TMP" "$mode"
+      run_train bench-fandhe-splitk-ab-after "$OUT_AFTER_TRAIN_TMP" "$mode"
+      run_train bench-fandhe-splitk-ab-before "$OUT_BEFORE_TRAIN_TMP" "$mode"
     fi
   done
   echo "== run $run_i/$AB_ROUNDS 完了時点の status =="
@@ -443,8 +467,10 @@ mv_checked() { # mv_checked <src> <dst>
 }
 
 if [[ "$ANY_FAILED" -eq 0 ]]; then
-  mv_checked "$OUT_BEFORE_TMP" "$OUT_BEFORE"
-  mv_checked "$OUT_AFTER_TMP" "$OUT_AFTER"
+  mv_checked "$OUT_BEFORE_GEMM_TMP" "$OUT_BEFORE_GEMM"
+  mv_checked "$OUT_AFTER_GEMM_TMP" "$OUT_AFTER_GEMM"
+  mv_checked "$OUT_BEFORE_TRAIN_TMP" "$OUT_BEFORE_TRAIN"
+  mv_checked "$OUT_AFTER_TRAIN_TMP" "$OUT_AFTER_TRAIN"
   mv_checked "$OUT_BEFORE_PHASES_TMP" "$OUT_BEFORE_PHASES"
   mv_checked "$OUT_AFTER_PHASES_TMP" "$OUT_AFTER_PHASES"
   mv_checked "$SKIP_TMP" "$SKIP"
@@ -453,11 +479,13 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
     echo "error: $MV_FAILED 件の mv が失敗した。新旧結果混在の可能性があるため、正規パスの内容を手動確認すること（fail-closed。security.md A08）。" >&2
     exit 1
   fi
-  echo "done. before results in $OUT_BEFORE ; after results in $OUT_AFTER ; phases (diagnostic) in $OUT_BEFORE_PHASES/$OUT_AFTER_PHASES ; failures (if any) in $SKIP ; manifest in $MANIFEST"
+  echo "done. gemm before/after results in $OUT_BEFORE_GEMM / $OUT_AFTER_GEMM ; train before/after results in $OUT_BEFORE_TRAIN / $OUT_AFTER_TRAIN ; phases (diagnostic) in $OUT_BEFORE_PHASES/$OUT_AFTER_PHASES ; failures (if any) in $SKIP ; manifest in $MANIFEST"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
-  mv_checked "$OUT_BEFORE_TMP" "results/raw/results-m4max-splitk-ab-before-${LABEL}.failed-${FAIL_TS}.jsonl"
-  mv_checked "$OUT_AFTER_TMP" "results/raw/results-m4max-splitk-ab-after-${LABEL}.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_BEFORE_GEMM_TMP" "results/raw/results-m4max-splitk-ab-before-${LABEL}-gemm.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_AFTER_GEMM_TMP" "results/raw/results-m4max-splitk-ab-after-${LABEL}-gemm.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_BEFORE_TRAIN_TMP" "results/raw/results-m4max-splitk-ab-before-${LABEL}-train.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_AFTER_TRAIN_TMP" "results/raw/results-m4max-splitk-ab-after-${LABEL}-train.failed-${FAIL_TS}.jsonl"
   mv_checked "$OUT_BEFORE_PHASES_TMP" "results/raw/results-m4max-splitk-ab-before-${LABEL}-phases.failed-${FAIL_TS}.jsonl"
   mv_checked "$OUT_AFTER_PHASES_TMP" "results/raw/results-m4max-splitk-ab-after-${LABEL}-phases.failed-${FAIL_TS}.jsonl"
   mv_checked "$SKIP_TMP" "results/raw/skipped-m4max-splitk-ab-${LABEL}.failed-${FAIL_TS}.log"
@@ -465,6 +493,6 @@ else
   if [[ "$MV_FAILED" -ne 0 ]]; then
     echo "error: $MV_FAILED 件の失敗結果退避 mv も失敗した（診断用データが一部欠落している可能性がある）。" >&2
   fi
-  echo "FAILED: $ANY_FAILED run(s) failed; partial/unreliable data kept for diagnosis (${FAIL_TS}). $OUT_BEFORE/$OUT_AFTER/$MANIFEST left untouched (fail-closed. security.md A08)." >&2
+  echo "FAILED: $ANY_FAILED run(s) failed; partial/unreliable data kept for diagnosis (${FAIL_TS}). $OUT_BEFORE_GEMM/$OUT_AFTER_GEMM/$OUT_BEFORE_TRAIN/$OUT_AFTER_TRAIN/$MANIFEST left untouched (fail-closed. security.md A08)." >&2
   exit 1
 fi

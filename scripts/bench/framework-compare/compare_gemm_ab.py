@@ -502,14 +502,26 @@ def per_run_ratios(before_rows, after_rows):
 
 
 def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, modes=None, per_run=False):
+    """`cells` を Markdown 表として整形する。
+
+    列は `columns` リストへ 1 列 1 要素で積んでから
+    `"| " + " | ".join(columns) + " |"` で組み立てる（header・sep・各データ
+    行のすべてで同一の組み立て方をする）。以前は文字列スライス
+    （`header[:-2]` 等）と行末への直接連結（`f"...{tail}"`／
+    `f"...{per_run_tail}"`）で `--per-run` 列を継ぎ足しており、
+    区切り行のスライスが `---` の 1 文字を余分に削って列数がずれ、
+    データ行は基本列の末尾 `|` と追加列の先頭 `|` が連結されて `||` の
+    空列が生じていた（codex-review P2・Cursor Bugbot Low Severity
+    指摘。イシュー #1517 PR #1531）。列リスト方式は header・sep・
+    データ行の列数を機械的に一致させるため、この種のずれが再発しない。
+    非 `--per-run`（既定）出力は本リファクタ前とバイト同一。
+    """
     lines = []
-    header = "| size/mode | before median | after median | after/before | checksum | 判定 |"
-    sep = "|---|---|---|---|---|---|"
-    if per_run:
-        header = header[:-2] + " | run 内比（5 run） | 符号一貫（全 run >1.00） |"
-        sep = sep[:-2] + "---|---|"
-    lines.append(header)
-    lines.append(sep)
+    base_columns = ["size/mode", "before median", "after median", "after/before", "checksum", "判定"]
+    per_run_columns = ["run 内比（5 run）", "符号一貫（全 run >1.00）"]
+    columns = base_columns + per_run_columns if per_run else list(base_columns)
+    lines.append("| " + " | ".join(columns) + " |")
+    lines.append("|" + "|".join(["---"] * len(columns)) + "|")
     for key in _all_expected_cells(device, size_set=size_set, modes=modes):
         rows = cells.get(key, [])
         before_rows = [r for r in rows if not r.get("_is_after")]
@@ -523,10 +535,10 @@ def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, mode
             result = evaluate_cell(before_rows, after_rows, threshold)
         cell_label = "/".join(str(v) for v in key)
         if result["status"] != "ok":
-            tail = " | - | - |" if per_run else ""
-            lines.append(
-                f"| {cell_label} | - | - | - | - | 判定不能: {result['reason']} |{tail}"
-            )
+            row = [cell_label, "-", "-", "-", "-", f"判定不能: {result['reason']}"]
+            if per_run:
+                row += ["-", "-"]
+            lines.append("| " + " | ".join(row) + " |")
             continue
         checksum_label = (
             "完全一致"
@@ -536,22 +548,25 @@ def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, mode
         note = ""
         if result["before_spread"] > 1.5:
             note = "（判定注意: before spread > 1.5x・負荷ノイズの疑い）"
-        per_run_tail = ""
+        row = [
+            cell_label,
+            f"{_fmt_ms(result['before_median_s'])} "
+            f"(min {_fmt_ms(result['before_min_s'])} / max {_fmt_ms(result['before_max_s'])})",
+            f"{_fmt_ms(result['after_median_s'])} "
+            f"(min {_fmt_ms(result['after_min_s'])} / max {_fmt_ms(result['after_max_s'])})",
+            f"{result['ratio']:.4f}",
+            checksum_label,
+            f"{result['verdict']}{note}",
+        ]
         if per_run:
             ratios = per_run_ratios(before_rows, after_rows)
             if ratios is None:
-                per_run_tail = " | 判定不能 | - |"
+                row += ["判定不能", "-"]
             else:
                 sign_consistent = all(r > 1.0 for r in ratios)
                 ratios_str = ", ".join(f"{r:.4f}" for r in ratios)
-                per_run_tail = f" | {ratios_str} | {'はい' if sign_consistent else 'いいえ'} |"
-        lines.append(
-            f"| {cell_label} | {_fmt_ms(result['before_median_s'])} "
-            f"(min {_fmt_ms(result['before_min_s'])} / max {_fmt_ms(result['before_max_s'])}) | "
-            f"{_fmt_ms(result['after_median_s'])} "
-            f"(min {_fmt_ms(result['after_min_s'])} / max {_fmt_ms(result['after_max_s'])}) | "
-            f"{result['ratio']:.4f} | {checksum_label} | {result['verdict']}{note} |{per_run_tail}"
-        )
+                row += [ratios_str, "はい" if sign_consistent else "いいえ"]
+        lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
 
 
