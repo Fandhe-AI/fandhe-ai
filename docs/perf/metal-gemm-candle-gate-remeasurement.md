@@ -853,7 +853,7 @@ legacy/borrowed override interleave 再計測。イシュー #1477）」節・
 
 ### 17.2 実機計測（未実施・記入欄）
 
-**本セッションは Linux 環境（`dev-box02`）で実行されており、Apple M4 Max
+**本セッションは Linux 環境で実行されており、Apple M4 Max
 実機への到達経路（ローカル直接実行が前提。`docs/real-hardware-
 verification-env.md` §1・§7）を持たない**。`docs/real-hardware-
 verification-env.local.md`（SSH ホスト名等の実値）も本 worktree には
