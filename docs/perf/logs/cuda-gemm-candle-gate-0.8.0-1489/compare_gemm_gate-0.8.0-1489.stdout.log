@@ -1,0 +1,2 @@
+未達: results/raw/results-dgx-gemm-gate-0.8.0-1489.jsonl size=1024（fandhe-ai 0.002156s > candle 0.000925s）
+未達: results/raw/results-dgx-gemm-gate-0.8.0-1489.jsonl size=2048（fandhe-ai 0.008473s > candle 0.004200s）

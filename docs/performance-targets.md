@@ -515,3 +515,20 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   metal-gemm-candle-gate-remeasurement.md` §14.8）
 - 出典: `docs/perf/metal-gemm-candle-gate-remeasurement.md` §14、生データ・実行ログは
   `docs/perf/logs/metal-gemm-candle-gate-1309/`
+
+### 8.14 #1489 追補（CUDA GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で再計測。N=4096 が正式系列として初達成。§2 段階的下限表・§3 丸め規則は不変）
+
+- v0.8.0 公開（2026-09-09）・承認ピン更新（#1487）後の正式系列（crates.io `fandhe-ai =0.8.0` の
+  registry 解決・path patch なし）で、CUDA GEMM N=1024/2048/4096 reuse の candle 比を DGX Spark
+  GB10 で 5 回計測中央値再取得した（イシュー #1489）。承認済み tolerance 契約（#1241・A-1
+  `c=0.5`）下の判定
+- 結果: N=1024 0.429 倍（未達）・N=2048 0.496 倍（未達。candle 救済 2 要素・確定判定）・
+  **N=4096 1.478 倍（達成）**。fandhe-ai 側は全 15 run `parity_fail_count=0` かつ `rescued=0`
+- §8.2（#1142）・#1185・§8.9（#1260）で「3 形状とも未達」だった正式判定は、**「N=4096 達成・
+  N=1024/2048 未達」へ更新**される。旧 #1031 の受け入れ条件（3 形状すべて）は依然として未達成
+- §8.12（#1438）の参考系列 after 腕（0.428／0.494／1.489）と 3 形状とも誤差範囲内で一致し、
+  借用ビュー readout 既定化（#1404/#1437/#1438）の効果が公開版で再現した。N=4096 の run 間
+  分散は 2.3 % 幅（ビルドを計測から分離し事前宣言の専有ゲートを通過してから計測）
+- 出典: `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §16、生データ・実行ログ・ゲートログは
+  `docs/perf/logs/cuda-gemm-candle-gate-0.8.0-1489/`・
+  `scripts/bench/framework-compare/results/raw/results-dgx-gemm-gate-0.8.0-1489.jsonl`

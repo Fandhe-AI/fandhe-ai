@@ -1,0 +1,11 @@
+   Compiling fandhe-ai-tensor-core v0.8.0
+   Compiling fandhe-ai-backend-cpu v0.8.0
+   Compiling bench-common v0.1.0 (/home/<user>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-common)
+   Compiling fandhe-ai-backend-cuda v0.8.0
+   Compiling fandhe-ai-autodiff v0.8.0
+   Compiling fandhe-ai v0.8.0
+   Compiling bench-fandhe v0.1.0 (/home/<user>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-fandhe)
+    Finished `release` profile [optimized] target(s) in 3.01s
+   Compiling bench-candle v0.1.0 (/home/<user>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-candle)
+    Finished `release` profile [optimized] target(s) in 0.87s
+prebuild-done.
