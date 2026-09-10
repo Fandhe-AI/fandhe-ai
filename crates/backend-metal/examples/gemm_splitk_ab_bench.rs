@@ -46,9 +46,14 @@
 //! - **ADOPT**: 対象 9 形状すべてで (i) 主指標（run 内比の 5 run 中央値）
 //!   ≥ 1.5 かつ (ii) 5/5 run すべてで run 内比 > 1.0、かつ対照 3 形状
 //!   すべてで主指標 ≥ 0.95。
-//! - **REJECT**: 専有ゲート成立下で上記いずれかが不成立。
-//! - **undetermined**: 専有ゲート（`--max-load-avg`）が規定回数で成立しない
-//!   場合（1 回だけ記録して終了）。
+//! - **REJECT**: 共有負荷下でも上記いずれかが不成立（イシュー #1515・
+//!   ルート #1509 のユーザー指示により専有ゲートは受け入れ条件にしない。
+//!   REJECT は共有負荷下でも有効な REJECT として扱う）。
+//! - **undetermined**: `--max-load-avg` を指定した gated 運用で専有ゲートが
+//!   規定回数で成立しない場合（1 回だけ記録して終了）。`--max-load-avg`
+//!   未指定の record_only 運用（#1515 の既定運用）では、5 run の完全性・
+//!   フェーズ 0 の run-to-run bit 同一・checksum 一致が崩れた場合にのみ
+//!   undetermined とする（`docs/perf/metal-gemm-splitk-ab.md` §10）。
 //!
 //! spread（`spread_a`／`spread_b`。レンジベース）は判定に使わない
 //! （#1308 が同一形状・同一境界で spread 0.78〜1.44 を実測しており、
@@ -60,21 +65,30 @@
 //!
 //! **ADOPT は性能上の判定に限る**: 本番結線（`SPLIT_K_NUMERIC_CONTRACT_
 //! APPROVED` の切替）は REQ-2 判定方式の Metal f32 split-K への適用拡張
-//! というユーザー承認が別途必要。#1476 で本番結線可否を確定した結果は
-//! **結線しない**（本ドキュメントの機械判定 `undetermined`〈3/5 run〉に
-//! 加え数値契約未承認の 2 ブロッカー。`docs/backend-metal-splitk-decision.md`
-//! §4）。本 example・`crates/backend-metal/src/` はいずれも変更しない
-//! （性能 A/B の実測・記録に限る）。
+//! というユーザー承認が別途必要（#1513 で数値契約自体は承認・
+//! `SPLIT_K_NUMERIC_CONTRACT_APPROVED = true` 済み）。5 run 正式確定の
+//! ADOPT／REJECT 判定は #1515（`docs/perf/metal-gemm-splitk-ab.md` §10）
+//! を正とし、本番結線可否そのものは別イシュー（#1516）へ引き継ぐ。本
+//! example・`crates/backend-metal/src/` はいずれも変更しない（性能 A/B
+//! の実測・記録に限る）。
 //!
 //! ## 実行方法
 //!
 //! ```sh
 //! cargo run -p fandhe-ai-backend-metal --example gemm_splitk_ab_bench \
-//!   --release --features internal-diagnostics -- --max-load-avg=4.0
+//!   --release --features internal-diagnostics
 //! ```
 //!
-//! `--max-load-avg=<f64>` 未指定時は環境ガードを行わず即座に計測へ進む
-//! （記録のみ。本番実測では必ず指定する。閾値自体に既定値はない）。
+//! `--max-load-avg=<f64>` は **省略可能**（イシュー #1515・ルート #1509 の
+//! ユーザー指示により専有ゲートは受け入れ条件にしない）。未指定時は
+//! **record_only**（`GuardRetryOutcome::record_only`。判定なし・load
+//! average 等を記録するのみで即座に計測へ進む。`gemm_transpose_route_
+//! ab_bench.rs::macos_impl::run_env_guard` と同型）で動作し、`--max-
+//! load-avg=<f64>` を指定した場合のみ **gated**（`EnvGuardConfig` による
+//! 判定・バックオフ再試行）で動作する。record_only 運用が #1515 の 5 run
+//! 正式確定における既定運用であり、共有負荷下（他プロセス並走を許容）で
+//! あることを `env_guard_load_avg` 行・`env_guard_mode=record_only` 行で
+//! 記録する。
 //! `--self-check-only` はフェーズ 0（自己検証）のみ実行し終了する。
 //! `--iters=<N>` は warmup・計測回数を引き上げる（未指定なら
 //! `MeasurementConfig::default` = 20/20）。
@@ -294,6 +308,32 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, S
     Ok(out)
 }
 
+/// `env_guard_result=` 行の値を導出する純関数（`gemm_transpose_route_
+/// ab_bench.rs::env_guard_result_label` と同型。イシュー #1515）。
+///
+/// - `gated == false`（`--max-load-avg` 未指定。#1515 の既定運用）: 判定を
+///   行わないため常に `record_only`（`GuardRetryOutcome::record_only` の
+///   `overall` は `Undetermined` 固定だが、これは「未判定」であり
+///   「取得不能」とは区別する）
+/// - `gated == true`: `final_report.overall` をそのまま写像する。`Fail` は
+///   `run_guard_with_retry` が `Err(EnvGuardExhausted)` を返すため `Ok`
+///   経路では現れないが、panic 経路を作らず `fail` へ写像しておく
+///   （fail-closed）
+///
+/// `macos_impl::main` から呼ばれる。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn env_guard_result_label(gated: bool, overall: bench_harness::ab::GuardVerdict) -> &'static str {
+    use bench_harness::ab::GuardVerdict;
+    if !gated {
+        return "record_only";
+    }
+    match overall {
+        GuardVerdict::Pass => "pass",
+        GuardVerdict::Undetermined => "undetermined",
+        GuardVerdict::Fail => "fail",
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use super::{
@@ -304,8 +344,8 @@ mod macos_impl {
     use bench_harness::BenchError;
     use bench_harness::MeasurementConfig;
     use bench_harness::ab::{
-        AbConfig, EnvGuardConfig, GuardRetryOutcome, RetryConfig, format_env_info_text, run_ab,
-        run_guard_with_retry, run_stability,
+        AbConfig, EnvGuardConfig, EnvSample, GuardRetryOutcome, RetryConfig, format_env_info_text,
+        run_ab, run_guard_with_retry, run_stability,
     };
     use bench_harness::rng::Xorshift64Star;
     use fandhe_ai_backend_cpu::parity::compare;
@@ -418,10 +458,19 @@ mod macos_impl {
         }
     }
 
-    /// 環境ガード（`--max-load-avg` 指定時のみ **gated**。未指定時は
-    /// 実行せず即座に計測へ進む。`gemm_transpose_route_ab_bench.rs::
-    /// macos_impl::run_env_guard` と同型）。
-    fn run_env_guard(args: &CliArgs) -> Result<Option<GuardRetryOutcome>, BenchError> {
+    /// 環境ガード（`--max-load-avg` 指定時は **gated**、未指定時は
+    /// **record_only**〈判定なし・[`EnvSample::collect`] を記録するのみで
+    /// 即座に計測へ進む〉。`gemm_transpose_route_ab_bench.rs::macos_impl::
+    /// run_env_guard` と同型（イシュー #1515・ルート #1509 のユーザー指示
+    /// により専有ゲートは受け入れ条件にしないため、record_only が #1515 の
+    /// 5 run 正式確定における既定運用）。呼び出し元 `main` が
+    /// `format_env_info_text` の出力（`env_guard_mode=` 行を含む）を常時
+    /// stdout へ出すため、以前バージョン（`--max-load-avg` 未指定時に
+    /// env_guard ブロックを一切出力しなかった実装）と異なり、record_only
+    /// 運用でも load average 等が計測ログへ残る。
+    fn run_env_guard(
+        args: &CliArgs,
+    ) -> Result<(GuardRetryOutcome, Option<EnvGuardConfig>), BenchError> {
         match args.max_load_avg {
             Some(max_load_avg) => {
                 let config = EnvGuardConfig::new(max_load_avg)?;
@@ -433,13 +482,9 @@ mod macos_impl {
                     max_attempts,
                 )?;
                 let outcome = run_guard_with_retry(&config, &retry)?;
-                println!(
-                    "{}",
-                    format_env_info_text("gemm_splitk_ab_bench", &outcome, Some(&config))
-                );
-                Ok(Some(outcome))
+                Ok((outcome, Some(config)))
             }
-            None => Ok(None),
+            None => Ok((GuardRetryOutcome::record_only(EnvSample::collect()), None)),
         }
     }
 
@@ -787,8 +832,18 @@ mod macos_impl {
         let ab_config = AbConfig::new(ROUNDS, COOLDOWN, MIN_WARMUP)
             .expect("ROUNDS は偶数固定のため AbConfig::new は失敗しない");
 
+        let gated = args.max_load_avg.is_some();
         match run_env_guard(&args) {
-            Ok(_) => {}
+            Ok((outcome, config)) => {
+                println!(
+                    "{}",
+                    format_env_info_text("gemm_splitk_ab_bench", &outcome, config.as_ref())
+                );
+                println!(
+                    "env_guard_result={}",
+                    super::env_guard_result_label(gated, outcome.final_report.overall)
+                );
+            }
             Err(BenchError::EnvGuardExhausted { attempts, detail }) => {
                 println!(
                     "env_guard_result=exhausted attempts={attempts} detail={detail}\nverdict=undetermined"
@@ -983,6 +1038,33 @@ mod tests {
     fn format_ab_line_partitions_none_renders_na() {
         let line = format_ab_line("control", 256, 256, 2048, None, 1.0e-3, 1.0e-3, 0.0, 0.0);
         assert!(line.contains("partitions=NA"));
+    }
+
+    /// record_only 運用（`gated=false`）は `overall` の値に関わらず常に
+    /// `record_only` を返す（イシュー #1515。`GuardRetryOutcome::
+    /// record_only` の `overall` は `Undetermined` 固定だが「未判定」と
+    /// 「取得不能」を区別するため gated の判定結果とは混同しない）。
+    #[test]
+    fn env_guard_result_label_record_only_ignores_verdict() {
+        use bench_harness::ab::GuardVerdict;
+        for v in [
+            GuardVerdict::Pass,
+            GuardVerdict::Fail,
+            GuardVerdict::Undetermined,
+        ] {
+            assert_eq!(env_guard_result_label(false, v), "record_only");
+        }
+    }
+
+    #[test]
+    fn env_guard_result_label_gated_maps_verdict() {
+        use bench_harness::ab::GuardVerdict;
+        assert_eq!(env_guard_result_label(true, GuardVerdict::Pass), "pass");
+        assert_eq!(
+            env_guard_result_label(true, GuardVerdict::Undetermined),
+            "undetermined"
+        );
+        assert_eq!(env_guard_result_label(true, GuardVerdict::Fail), "fail");
     }
 
     #[test]

@@ -227,7 +227,8 @@ metal-gemm-splitk-two-pass.md` §5.9）。ブロッカー 2（数値契約）は
   を残す）
 - framework-compare gemm metal 8 セル（N=512〜4096 × fresh/reuse）の before/after 5 回
   中央値・checksum 完全一致（`run_ab_gemm_metal.sh`）
-- #1475 §7 の残 5 run（run4/run5）完了による正式 ADOPT 確定
+- #1515 で新規 5 run（`docs/perf/metal-gemm-splitk-ab.md` §10）により確定する
+  （本 PR 時点では未実測。#1475 の 3 run とは混在させない）
 
 ### framework-compare A/B の扱い（「計測対象なし」）
 

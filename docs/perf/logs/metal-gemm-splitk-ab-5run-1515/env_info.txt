@@ -1,0 +1,36 @@
+split-K vs classic 経路 5 run 正式確定（イシュー #1515）env_info
+
+**本 PR 時点では未実測（Linux 本ラン分の記入欄のみ）。実測は Apple M4 Max
+実機を持つ Mac セッションで実施し、本ファイルへ追記する。**
+
+== 機種・OS・toolchain ==
+機種: 未実測（想定: Apple M4 Max。docs/real-hardware-verification-env.md §1 の実機）
+sw_vers: 未実測
+uname -srm: 未実測（内部ホスト名は記録しない）
+rustc --version: 未実測
+
+== base commit・作業ブランチ ==
+base commit: 未実測
+作業ブランチ: test/1515-metal-splitk-ab-5run-scaffold
+
+== 参照 ==
+事前登録判定規則: docs/perf/metal-gemm-splitk-ab.md §10.2
+運用方針（専有ゲートなし・record_only）: 同 §10.1・ルート #1509 のユーザー指示
+
+== gate_mode ==
+gate_mode=record_only（`--max-load-avg` を渡さず実行する。専有ゲートは
+受け入れ条件にしない）
+
+== run ごとの負荷推移・並走プロセス（実測後に追記） ==
+run1: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
+run2: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
+run3: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
+run4: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
+run5: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
+
+== run 数・中断有無 ==
+未実測（5 run 完走予定。中断した場合はここに経緯を記録し run を黙って
+差し替えない）。
+
+== pmset -g therm（実行前後） ==
+未実測（`pmset_therm_{before,after}_runN.txt` 参照）。

@@ -20,6 +20,9 @@ K ∈ {2048, 4096, 8192}）はすべて 3 run の中央値で speedup（= median
 主因）であることを確認した。`docs/backend-metal-splitk-decision.md` §3 が
 留保していた「因果は仮説」を実測で更新する。
 
+**5 run 正式確定は #1515（§10）へ引き継ぐ**（本ページの本追記時点では
+未実測。新規 5 run として実施し #1475 の 3 run とは混在させない）。
+
 ## §1 計測手段
 
 実装: `crates/backend-metal/examples/gemm_splitk_ab_bench.rs`（本イシュー）。
@@ -302,7 +305,9 @@ speedup の主因ではないことも確認した。
 - **5 run 完了による正式確定**: 単一セッションの時間制約により 3/5 run で
   打ち切った。残り 2 run（可能なら専有環境・`--max-load-avg` をより厳格な
   値で）を追加実行し、§0/§5 の「暫定」を外す正式判定へ更新することを
-  フォローアップとして issue #1475 に残す。
+  フォローアップとして issue #1475 に残す。**→ #1515（§10）で新規 5 run
+  として実施する（専有ゲートは受け入れ条件にしない。ルート #1509 の
+  ユーザー指示）。#1475 の 3 run とは混在させない**。
 - **#1476（本番結線可否）**: `select_for_device`／`dispatch_auto`／
   `MetalBackendOps::gemm` への結線と `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
   の切替（数値契約の適用拡張。ユーザー承認事項）。**結線せずと確定（§9）**。
@@ -339,4 +344,142 @@ speedup の主因ではないことも確認した。
   があり、性能判定が仮に正式 ADOPT であっても結線には至らない
 - 本節は §0／§4／§5 の実測記述を「確定」へ書き換えるものではない。5 run 完了による正式確定は
   §7 のフォローアップのまま未実施（本イシューでも実施しない。理由は decision doc §4「スコープ外」）
+
+## §10 5 run 正式確定（イシュー #1515。共有負荷下・専有ゲートなし）
+
+### §10.1 運用方針
+
+ルート #1509 のユーザー指示により、split-K A/B の 5 run 正式確定は**専有
+ゲート（load average の閾値判定）を受け入れ条件にしない**。§0・§9 が
+「暫定 ADOPT（3/5 run）」「undetermined」と記録してきた状態を解消するため、
+本節では以下の方針で 5 run を実施する:
+
+- `gemm_splitk_ab_bench` へ `--max-load-avg` を渡さず **record_only**
+  運用（判定なし・[`bench_harness::ab::GuardRetryOutcome::record_only`]。
+  load average 等を記録するのみで即座に計測へ進む）で実行する
+  （`docs/perf/logs/metal-gemm-splitk-ab-5run-1515/orchestrate.sh`）。
+- 共有負荷下（他プロセス並走を許容）であることを、各 run の
+  `env_guard_mode=record_only`・`env_guard_load_avg` 行に加え、計測中の
+  負荷推移を記録するバックグラウンド `uptime` サンプラー
+  （`runN_monitor.log`）・並走プロセス watchlist の件数
+  （`runN_procs.txt`）で記録する。
+- **REJECT は共有負荷下でも有効な REJECT として扱う**（専有ゲート不成立
+  を理由に REJECT を undetermined へ格下げしない）。
+
+### §10.2 事前登録判定規則（計測前に固定。以後変更しない）
+
+- **腕定義・計測境界**: §1 と同一（A=classic／A′=classic・split-K タイル
+  ／B=split-K／B′=対照・classic／C=対照・強制 split-K／フロア）。
+- **ADOPT／REJECT の定数**: §2 と同一。対象 9 形状すべてで (i) 主指標
+  （run 内比の 5 run 中央値）≥ 1.5 かつ (ii) 5/5 run すべてで run 内比
+  > 1.0、かつ対照 3 形状すべてで主指標 ≥ 0.95 なら ADOPT、いずれか不成立
+  なら REJECT（共有負荷下でも有効な REJECT）。
+- **undetermined の条件**（以下のいずれかのみから生じる。それ以外の理由
+  で undetermined へ倒さない）:
+  1. 5 run の完全性が崩れる（対象 9・対照 3 形状のいずれかが、いずれかの
+     run で欠落・重複する。`aggregate.py::check_run_shape_completeness`）。
+  2. フェーズ 0 の run-to-run bit 同一（`classic_stable`／
+     `target_tile_stable`／`splitk_stable`）が崩れる、または target の
+     checksum（`checksum_a`／`checksum_at`／`checksum_b`）が 5 run 間で
+     一致しない、または `a_vs_at_fail_count` が 0 でない
+     （`aggregate.py::check_phase0_consistency`。受け入れ条件
+     「checksum 一致」の機械化）。`a_vs_b_fail_count`（classic vs
+     split-K の既知差）は情報としてのみ記録し判定へは使わない
+     （`docs/perf/metal-gemm-splitk-two-pass.md` §5.5 の既知 fail が
+     期待値であるため）。
+  3. env_guard の記録が欠落・不一致（record_only 運用なのに
+     `env_guard_mode=record_only`・`env_guard_load_avg` の数値記録が
+     見つからない、またはログの取り違え）。
+- **5 run は新規**（run1〜run5）とし、#1475 の 3 run（is-optimized-away
+  是正前バイナリによる計測）とは**混在させない**。run の差し替えは禁止
+  し、中断した場合は `env_info.txt` に経緯を記録する。
+- 負荷推移（`runN_monitor.log` の load1 min/median/max）・並走プロセス
+  件数は**情報としてのみ**記録し、判定（ADOPT/REJECT/undetermined）へは
+  影響させない。
+- **ADOPT は性能上の判定に限る**。本番結線（`select_for_device`／
+  `dispatch_auto`／`MetalBackendOps::gemm` への結線・
+  `SPLIT_K_NUMERIC_CONTRACT_APPROVED` は #1513 で承認・切替済み）は
+  #1516 へ引き継ぐ。本節では判定結果のみを確定する。
+
+### §10.3 実施手順
+
+`docs/perf/logs/metal-gemm-splitk-ab-5run-1515/README.md` の「Mac セッション
+での実行手順」を正とする（要約）:
+
+```sh
+cd docs/perf/logs/metal-gemm-splitk-ab-5run-1515
+for i in 1 2 3 4 5; do ./orchestrate.sh "$i"; done
+python3 aggregate.py --gate-mode=record_only \
+  --monitor-logs=run1_monitor.log,run2_monitor.log,run3_monitor.log,run4_monitor.log,run5_monitor.log \
+  run1.log run2.log run3.log run4.log run5.log > aggregate.md
+```
+
+`aggregate.md` の内容を §10.4 へ転記する。
+
+### §10.4 記入欄（本 PR 時点では未実測）
+
+**実測は Apple M4 Max 実機を持つ Mac セッションで実施する。本 PR は計測
+スキャフォールド（`orchestrate.sh`／`aggregate.py`／README／env_info
+テンプレート）の整備のみを行い、以下は「未実測」のまま記入欄を残す。**
+
+#### target（対象 9 形状）
+
+| m | n | k | n_runs | speedups | median_speedup | all_run_positive |
+|---|---|---|--------|----------|-----------------|-------------------|
+| 32 | 32 | 2048 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 32 | 32 | 4096 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 32 | 32 | 8192 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 64 | 64 | 2048 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 64 | 64 | 4096 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 64 | 64 | 8192 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 128 | 128 | 2048 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 128 | 128 | 4096 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 128 | 128 | 8192 | 未実測 | 未実測 | 未実測 | 未実測 |
+
+#### control（対照 3 形状）
+
+| m | n | k | n_runs | speedups | median_speedup |
+|---|---|---|--------|----------|-----------------|
+| 256 | 256 | 2048 | 未実測 | 未実測 | 未実測 |
+| 256 | 256 | 4096 | 未実測 | 未実測 | 未実測 |
+| 256 | 256 | 8192 | 未実測 | 未実測 | 未実測 |
+
+#### target_tile／control_forced／floor（参考のみ）
+
+未実測（`aggregate.md` 全文を転記予定）。
+
+#### フェーズ 0 checksum 一致
+
+未実測（`aggregate.py::check_phase0_consistency` の違反リストが空である
+こと〈= 5 run 間で checksum 完全一致・全形状 stable=true・
+`a_vs_at_fail_count=0`〉を確認する）。
+
+#### 負荷推移（情報のみ）
+
+| run | load1_min | load1_median | load1_max | 並走プロセス（watchlist 件数） |
+|-----|-----------|--------------|-----------|-------------------------------|
+| 1 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 2 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 3 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 4 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 5 | 未実測 | 未実測 | 未実測 | 未実測 |
+
+#### 機械判定
+
+`aggregate.py` の verdict: **未実測**
+
+#### 人間側の判定
+
+未実測（機械判定をそのまま採用する予定。緩和・格上げは行わない）。
+
+### §10.5 §7 フォローアップとの対応
+
+本 5 run により、§7 が残していた以下 2 項目も同時に消化される
+（新規バイナリでの計測のため）:
+
+- 「フェーズ 1 control（B′）の選択関数呼び出し費用込み再実測」
+- 「フェーズ 0 A vs B（`a_vs_b_fail_count`）の同一入力での再実測」
+
+いずれも §3／§4 本文（3 run 実測の記述）自体は書き換えない。5 run 完了後
+の正式値は本節（§10.4）へ記録し、§3／§4 は歴史的記録として残す。
 
