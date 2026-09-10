@@ -1894,17 +1894,33 @@ impl MetalGemm {
     ///
     /// **split-K 本番結線（イシュー #1516）**: `self.split_k_auto_enabled`
     /// （既定 `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`＝`false`）が
-    /// `true` の場合のみ、`tile::should_split_k` 判定を 8 の倍数へパディング
-    /// 済みの実効次元（[`pad8`]）で評価し、対象形状（`crate::tile::
-    /// select_route_for_device` が [`tile::GemmRoute::SplitK`] を返す形状）を
-    /// split-K 2 パス経路（`Self::dispatch_split_k_strided_prepared_with_plan`）
-    /// へ振り向ける。対象外の形状・ゲート無効時は本関数追加前と 1 バイトも
+    /// `true` かつ `SPLIT_K_NUMERIC_CONTRACT_APPROVED` が `true` の場合のみ、
+    /// `tile::should_split_k` 判定を 8 の倍数へパディング済みの実効次元
+    /// （[`pad8`]）で評価し、対象形状（`crate::tile::select_route_for_device`
+    /// が [`tile::GemmRoute::SplitK`] を返す形状）を split-K 2 パス経路
+    /// （`Self::dispatch_split_k_strided_prepared_with_plan`）へ振り向ける。
+    /// 対象外の形状・いずれかのゲート無効時は本関数追加前と 1 バイトも
     /// 変わらない classic 経路（[`tile::select_for_device`] を**非パディング
     /// 次元**で呼び直す）を通る——`select_route_for_device` が実効次元で
     /// 返す `Classic` 側の `TileConfig` は「対象外と判定された」ことを示す
     /// のみに使い、実際のディスパッチには使わない（`tile::
     /// select_route_for_device` doc コメント「判定入力の次元について」・
     /// `docs/backend-metal-splitk-decision.md` §5 参照）。
+    ///
+    /// **数値契約ゲートの二重適用（PR #1530 codex-review P1 指摘対応）**:
+    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` は本来
+    /// `Self::dispatch_split_k_strided_prepared`（`should_split_k` の自動
+    /// 判定入口）が確認するが、本関数（`dispatch_auto`）の split-K 分岐は
+    /// `select_route_for_device` で事前判定した `plan` を
+    /// `Self::dispatch_split_k_strided_prepared_with_plan`（`plan` 明示指定・
+    /// 数値契約ゲート非経由。`internal-diagnostics` feature 無効時も
+    /// `pub(crate)` でクレート内部からは到達可能）へ直接渡すため、
+    /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED` を経由しない。`new_with_split_k_auto`
+    /// は `pub` な通常 API であり、`split_k_auto_enabled=true` で構築された
+    /// `MetalGemm` は本関数を経由する限り数値契約ゲートの外側で split-K が
+    /// 発火してしまう。将来 `SPLIT_K_NUMERIC_CONTRACT_APPROVED` を `false` へ
+    /// 差し戻す運用（本モジュール冒頭 doc コメント「`false` へ戻す条件」）を
+    /// 全入口で一貫させるため、本関数でも明示的に確認する。
     pub fn dispatch_auto(
         &self,
         ctx: &MetalContext,
@@ -1981,7 +1997,7 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<(Vec<f32>, tile::GemmRoute), MetalError> {
-        if self.split_k_auto_enabled {
+        if self.split_k_auto_enabled && SPLIT_K_NUMERIC_CONTRACT_APPROVED {
             validate_dims(a, b, m, n, k)?;
             let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
             // `dispatch_variant`（classic 経路）が実効次元確定後に必ず通す
