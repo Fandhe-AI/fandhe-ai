@@ -63,7 +63,7 @@ N=1024/2048/4096 それぞれ 5 回起動するため、run 単位の interleave
 ## 集計
 
 ```sh
-cd ../../../scripts/bench/framework-compare
+cd ../../../../scripts/bench/framework-compare
 python3 compare_gemm_gate.py --device metal \
   results/raw/results-m4max-gemm-gate-0.8.0-ctrl-1521.jsonl \
   --out ../../../docs/perf/logs/metal-gemm-candle-gate-head-1521/compare-A.md
@@ -73,8 +73,8 @@ python3 compare_gemm_gate.py --device metal \
 
 cd ../../../docs/perf/logs/metal-gemm-candle-gate-head-1521
 python3 attribute.py \
-  ../../../scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-0.8.0-ctrl-1521.jsonl \
-  "../../../scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-head-${SHORT_SHA}-1521.jsonl" \
+  ../../../../scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-0.8.0-ctrl-1521.jsonl \
+  "../../../../scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-head-${SHORT_SHA}-1521.jsonl" \
   | tee attribution-result.md
 ```
 

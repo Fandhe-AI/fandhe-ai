@@ -188,11 +188,20 @@ fail_measurement() {
   } > "$DIFF_HEAD" 2>&1 || true
 )
 if [ -f "$DIFF_COMMITTED" ] && [ -f "$DIFF_HEAD" ]; then
-  if ! diff -q "$DIFF_COMMITTED" "$DIFF_HEAD" > /dev/null 2>&1; then
+  # ヘッダ行（`$ git diff v0.8.0..origin/main ...`／`$ git diff v0.8.0..HEAD
+  # ...` 等のコマンド表記行）は比較対象の参照名（origin/main／HEAD）が異なる
+  # ため実行のたびに必ず不一致になる。ヘッダ行を除いた本文（--stat 集計
+  # 行・log 行）のみを比較し、実差分の有無だけを検知する。
+  DIFF_COMMITTED_BODY="$(mktemp)"
+  DIFF_HEAD_BODY="$(mktemp)"
+  grep -v '^\$ git ' "$DIFF_COMMITTED" > "$DIFF_COMMITTED_BODY"
+  grep -v '^\$ git ' "$DIFF_HEAD" > "$DIFF_HEAD_BODY"
+  if ! diff -q "$DIFF_COMMITTED_BODY" "$DIFF_HEAD_BODY" > /dev/null 2>&1; then
     echo "WARNING: v0.8.0..HEAD の Metal 計測経路 diff がコミット時点" \
          "（$DIFF_COMMITTED）と異なる。帰属表（attribution.md）の再導出" \
          "が必要な可能性がある。差分: $DIFF_HEAD" >&2
   fi
+  rm -f "$DIFF_COMMITTED_BODY" "$DIFF_HEAD_BODY"
 fi
 
 uptime > "$UPTIME_BEFORE"

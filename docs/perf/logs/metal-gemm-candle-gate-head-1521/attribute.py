@@ -18,6 +18,12 @@ import して使う。`docs/perf/metal-gemm-candle-gate-remeasurement.md`
 使い方:
     python3 attribute.py <A.jsonl> <B.jsonl> [--band 0.05] [--device metal]
     python3 attribute.py --self-test
+
+fail-closed 契約（A03/A08。codex-review 指摘）: `load_rows` が破損 JSON・
+不正型の行を除外して返す読み込み警告が A・B いずれか一方でも 1 件でも
+あれば、帰属分類は行わず「判定不能」を出力して非ゼロ終了する。外部入力
+（JSONL）の一部行が不正であることは全体の信頼性を損なうため、正常な行
+だけが残っても数値・分類を確定表示しない。
 """
 
 from __future__ import annotations
@@ -63,21 +69,43 @@ def classify(median_a, min_a, max_a, median_b, band):
     return "構造分析と矛盾・原因未確定", r
 
 
+class InputWarningError(RuntimeError):
+    """`load_rows` の読み込み警告が 1 件でもある場合に送出する。
+
+    帰属分類（`classify`）は正常な行だけを見て数値を確定表示するが、
+    不正行を含む入力を外部から検証せず分類を続行すると、破損データが
+    混入した状態でも「判定不能」ではなく確定した数値・分類が出力されて
+    しまう（fail-closed 契約違反。A03/A08）。呼び出し側（`render`／
+    `main`）はこの例外を受けて「判定不能」表示・非ゼロ終了へ倒す。
+    """
+
+
 def render(path_a, path_b, band, device="metal"):
     rows_a, warn_a = gate.load_rows(path_a)
     rows_b, warn_b = gate.load_rows(path_b)
 
-    lines = []
-    lines.append(f"# 帰属表（A={path_a} / B={path_b}）")
-    lines.append("")
     if warn_a or warn_b:
+        lines = []
+        lines.append(f"# 帰属表（A={path_a} / B={path_b}）")
+        lines.append("")
+        lines.append("## 判定不能（読み込み警告あり。fail-closed）")
+        lines.append("")
+        lines.append(
+            "入力 JSONL に不正行（破損 JSON・不正型）が含まれるため、"
+            "帰属分類を行わず判定不能として扱う。"
+        )
+        lines.append("")
         lines.append("## 読み込み警告")
         for w in warn_a:
             lines.append(f"- A: {w}")
         for w in warn_b:
             lines.append(f"- B: {w}")
         lines.append("")
+        raise InputWarningError("\n".join(lines) + "\n")
 
+    lines = []
+    lines.append(f"# 帰属表（A={path_a} / B={path_b}）")
+    lines.append("")
     lines.append(
         "| N | A中央値(min-max) | B中央値 | B/A | 分類 | candle/A | candle/B "
         "| §16参照値(candle/fandhe) | §16比 |"
@@ -225,6 +253,31 @@ def _self_test():
         os.unlink(path_a2)
         os.unlink(path_b_out)
 
+    # ケース 4: A 側 JSONL に不正行（破損 JSON）が 1 行混入。正常な行は
+    # 各 5 件残るが、`render` は分類を行わず `InputWarningError`（判定
+    # 不能・非ゼロ終了）を送出しなければならない（fail-closed 契約。
+    # codex-review P0 指摘）。
+    rows_a_broken = [make_row("fandhe-ai", "reuse", size, 0.010) for _ in range(5)]
+    rows_a_broken += [make_row("candle", "fresh", size, 0.011) for _ in range(5)]
+    path_a_broken = write_jsonl(rows_a_broken)
+    with open(path_a_broken, "a", encoding="utf-8") as f:
+        f.write("{not valid json\n")
+    path_b_broken = write_jsonl(rows_b_in_band)
+    try:
+        try:
+            render(path_a_broken, path_b_broken, DEFAULT_BAND, "metal")
+            raise AssertionError(
+                "render() は不正行混入時に InputWarningError を送出すべき"
+            )
+        except InputWarningError as e:
+            assert "判定不能" in str(e), str(e)
+        # main() 経由でも非ゼロ終了することを確認する。
+        rc = main([path_a_broken, path_b_broken])
+        assert rc == 1, rc
+    finally:
+        os.unlink(path_a_broken)
+        os.unlink(path_b_broken)
+
     print("attribute.py --self-test: all cases passed")
 
 
@@ -253,7 +306,11 @@ def main(argv=None):
     if not args.jsonl_a or not args.jsonl_b:
         parser.error("jsonl_a と jsonl_b の両方が必要（--self-test 以外）")
 
-    print(render(args.jsonl_a, args.jsonl_b, args.band, args.device))
+    try:
+        print(render(args.jsonl_a, args.jsonl_b, args.band, args.device))
+    except InputWarningError as e:
+        print(str(e))
+        return 1
     return 0
 
 
