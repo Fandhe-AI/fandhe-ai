@@ -125,28 +125,22 @@ d_input 伝播スキップ）の対象になりうる形状（`x` は学習対�
   以上・欠落は判定不能）。
 - **指標**: `ratio = median(after median_s) / median(before median_s)`
   （実行時間比。小さいほど良い。TFLOPS 比と混同しない）。
-- **非後退**: 全 10 セルで `ratio ≤ 1.00`（`--threshold 1.00` を明示。
-  既定 1.05 は使わない）かつ checksum **bit 完全一致**（複合判定 pass
-  のみは不可）かつ gemm は `parity_fail_count == 0`。
-- **後退セルの扱い（結線維持可否の判定規則）**:
-  - (a) checksum 不一致、または `ratio > 1.05` のセルが 1 つでもある →
-    **結線維持不可**。`docs/backend-metal-splitk-decision.md` §5
-    手順⑤（ゲート `false` へ差し戻し）を実施し理由を記録する。
-  - (b) `1.00 < ratio ≤ 1.05` のセル → 「後退（共有負荷ノイズ帯・結線
-    維持可）」として記録する。§2 の帰属表（split-K 非到達）と負荷推移
-    （`monitor_<label>.log`）を原因欄に記す。**ただし**
-    `compare_gemm_ab.py --per-run` が出力する run 単位ペア（append
-    順 k 番目＝run k。5 run とも同一セルへ 1 行ずつ追記する計測スクリプト
-    の契約に基づく）の run 内比（`after_k/before_k`）が **5/5 run すべて
-    `> 1.00`**（符号一貫。`--per-run` 出力の「符号一貫」列が「はい」）
-    である場合は、ノイズ帯ではなく一貫した後退とみなし (a) と同じ
-    **結線維持不可**とする（機械出力で判定し、目視の「ノイズだろう」で
-    (b) へ丸めない）。
+- **非後退**: 全 10 セルで `ratio ≤ 1.00`（`--threshold 1.00` を明示）
+  かつ checksum **bit 完全一致**（複合判定 pass のみは不可）かつ gemm
+  は `parity_fail_count == 0`。
+- **後退セルの扱い（結線維持可否の判定規則）**: `docs/backend-metal-
+  splitk-decision.md` §5「ゲート既定値・切替条件」の手順④⑤（非後退・
+  checksum 一致を確認できた場合のみ結線維持、後退時は `false` へ差し
+  戻す）と同一の判定条件を用いる。誤差帯・符号一致数による救済は設け
+  ない——checksum 不一致、または `ratio > 1.00` のセルが 1 つでもあれ
+  ば**結線維持不可**とし、`docs/backend-metal-splitk-decision.md` §5
+  手順⑤（ゲート `false` へ差し戻し）を実施して理由を記録する。§2 の
+  帰属表（split-K 非到達）と負荷推移（`monitor_<label>.log`）は原因の
+  参考情報として記す（判定基準そのものを緩めない）。
 
-- **記録する verdict は 3 値**: 「非後退（全 10 セル ≤ 1.00・checksum
-  完全一致）」／「後退（ノイズ帯・結線維持可）」／「結線維持不可」。
-  §0・§6 にこの 3 値で記入する（(b) を「非後退」へ丸めたり誤って差し
-  戻したりしない）。
+- **記録する verdict は 2 値**: 「非後退（全 10 セル ≤ 1.00・checksum
+  完全一致・結線維持）」／「結線維持不可（`false` へ差し戻し）」。
+  §0・§6 にこの 2 値で記入する。
 - **undetermined**: 件数不足・warmup/iters/version 不一致・スクリプト
   fail-closed 停止（差分ガード・sha256 変化）のみ。負荷が高いこと自体
   は undetermined の理由にしない（ルート #1509 の運用方針）。

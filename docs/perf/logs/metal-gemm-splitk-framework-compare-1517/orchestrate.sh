@@ -69,15 +69,13 @@ record_procs() {
     } > "$out"
 }
 
-CMD="bash $FC_DIR/run_ab_splitk_metal.sh $LABEL"
-
 if [ "$DRY_RUN" = "1" ]; then
     echo "[dry-run] label=$LABEL"
     echo "[dry-run]   uptime_before -> $UPTIME_BEFORE"
     echo "[dry-run]   pmset_before  -> $PMSET_BEFORE"
     echo "[dry-run]   monitor_log   -> $MONITOR_LOG（バックグラウンド uptime サンプラー）"
     echo "[dry-run]   procs_log     -> $PROCS_LOG（watchlist: $WATCHLIST）"
-    echo "[dry-run]   command       -> $CMD"
+    echo "[dry-run]   command       -> bash \"$FC_DIR/run_ab_splitk_metal.sh\" \"$LABEL\""
     echo "[dry-run]   run_log       -> $RUN_LOG"
     echo "[dry-run]   pmset_after   -> $PMSET_AFTER"
     exit 0
@@ -94,9 +92,17 @@ for artifact in "$UPTIME_BEFORE" "$PMSET_BEFORE" "$PMSET_AFTER" "$RUN_LOG" "$MON
     fi
 done
 
-LOCK_DIR="$SCRIPT_DIR/${LABEL}.lock"
+# ロックは label 単位ではなく framework-compare ディレクトリ（$FC_DIR）
+# 単位で取る。`run_ab_splitk_metal.sh` は Cargo.lock・path patch・
+# before/after バイナリ等 $FC_DIR 配下の共有ファイルを書き換えるため、
+# label が異なっていても同時実行すると互いの成果物を破壊しうる
+# （codex-review 指摘。イシュー #1517 PR #1531）。ロックファイルは
+# $FC_DIR 側に置き、label をまたいで単一のロックを共有する。
+LOCK_DIR="$FC_DIR/.splitk-framework-compare-1517.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "label=${LABEL}: 同 label の実行が既に進行中（ロック $LOCK_DIR が存在する）" >&2
+    echo "label=${LABEL}: framework-compare ディレクトリの実行が既に" \
+         "進行中（ロック $LOCK_DIR が存在する。他 label を含め同時実行" \
+         "しない）" >&2
     exit 1
 fi
 
@@ -131,7 +137,7 @@ record_procs "$PROCS_LOG"
 SAMPLER_PID=$!
 
 cd "$FC_DIR"
-$CMD > "$RUN_LOG" 2>&1 || {
+bash "$FC_DIR/run_ab_splitk_metal.sh" "$LABEL" > "$RUN_LOG" 2>&1 || {
     STATUS=$?
     echo "label=${LABEL}: run_ab_splitk_metal.sh が非ゼロ終了（status=${STATUS}）。$RUN_LOG を確認する" >&2
     exit "$STATUS"
