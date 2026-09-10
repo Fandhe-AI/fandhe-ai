@@ -1,0 +1,68 @@
+# イシュー #1521 実機実測 env_info（記入欄テンプレート）
+
+## 共通
+
+- 対象イシュー: #1521（Metal GEMM candle 比ゲート〈旧 #1037〉を split-K
+  結線後 HEAD〈参考系列〉で再計測し §16 正式系列との差分を帰属する）
+- 転送元コミット（base）: 未記入（Linux 側実装コミットの sha）
+- 系列: **2 系列**。A（対照 `0.8.0-ctrl-1521`。registry `fandhe-ai
+  =0.8.0`）・B（参考 `head-<short sha>-1521`。origin/main `crates/facade`
+  への path patch）。プロトコル・帰属方針は同ディレクトリ `README.md`・
+  `attribution.md` 参照
+- プロトコル: `orchestrate_m4max.sh` → `run_gemm_gate_metal.sh`
+  （A→B 固定順・各 5 回独立プロセス起動・中央値）→
+  `compare_gemm_gate.py --device metal`（系列ごと独立集計）→
+  `attribute.py`（帰属表）
+- tolerance 契約: #1241 承認・#1443/#1445 実装済み（候補 A-1・`c=0.5`）
+  を適用。tolerance 定数・判定式は本イシューで変更していない
+- 専有ゲート: **なし（record_only。ルート #1509 のユーザー指示）**。
+  負荷推移は `monitor.log`（10 秒間隔 uptime サンプラー）・
+  `uptime_before.txt`・`pmset_therm_{before,after}.txt` へ記録するのみ
+
+## 実機（記入欄）
+
+- 機種: 未記入
+- CPU: 未記入
+- OS: 未記入
+- rustc: 未記入
+- 実行ディレクトリ: `scripts/bench/framework-compare`
+
+## v0.8.0..HEAD diff の再確認（記入欄）
+
+- `diff_v0.8.0_head_metal_path.txt`（`orchestrate_m4max.sh` が実行時点で
+  再取得）とコミット済み `diff_v0.8.0_origin-main_metal_path.txt` の
+  一致確認結果: 未記入（不一致の場合は WARNING がログへ出力され
+  `attribution.md` の再導出が必要）
+
+## プレビルド（記入欄）
+
+- `cargo build --release -p bench-fandhe` → `cargo build --release -p
+  bench-candle`（`prebuild-1521.log`）の結果: 未記入
+
+## 負荷推移（記入欄）
+
+- 実行前 load average: 未記入
+- 実行中の推移: 未記入（`monitor.log` 参照）
+- 実行後 load average: 未記入
+
+## サーマル状態（記入欄）
+
+- `pmset_therm_before.txt`／`pmset_therm_after.txt`: 未記入
+
+## manifest 突合（記入欄）
+
+| 系列 | fandhe_ai_source | bench_fandhe_features | readout_method | candle_core_source |
+|---|---|---|---|---|
+| 0.8.0-ctrl-1521 | 期待: registry | 期待: "" | 期待: legacy-metal-1452 | 期待: registry |
+| head-\<sha\>-1521 | 期待: path:\<facade\> | 期待: "" | 期待: legacy-metal-1452 | 期待: registry |
+
+実測値: 未記入
+
+## 中断・再実行の有無
+
+未記入（あれば経緯と再実行の判断根拠を記録する）
+
+## 秘匿情報
+
+本ファイル・同ディレクトリの他ファイルに実ホスト名・IOPlatformUUID・
+ユーザー名・絶対パスを含めないこと（commit 前 grep で確認する）。

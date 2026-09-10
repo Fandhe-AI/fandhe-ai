@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）。#1490 で正式系列 `fandhe-ai =0.8.0` を 2026-09-10 に再計測し §16 追記: N=1024 0.743 倍（未達）・**N=2048 1.002 倍（達成。正式系列として初めて #1037 の形状別条件を満たした）**・N=4096 0.634 倍（未達）。共有負荷下の計測であり、旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま。#1520 で §15 undetermined を受け専有ゲートを opt-out 可能にする `AB_LOAD_GATE_MODE=record_only` を `run_ab_readout_metal.sh` へ追加（ルート #1519 指示）したが、本セッションは実機（Apple M4 Max）へのアクセス経路を持たないため実測は未実施のまま §17 に記入欄を残した
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）。#1490 で正式系列 `fandhe-ai =0.8.0` を 2026-09-10 に再計測し §16 追記: N=1024 0.743 倍（未達）・**N=2048 1.002 倍（達成。正式系列として初めて #1037 の形状別条件を満たした）**・N=4096 0.634 倍（未達）。共有負荷下の計測であり、旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま。#1520 で §15 undetermined を受け専有ゲートを opt-out 可能にする `AB_LOAD_GATE_MODE=record_only` を `run_ab_readout_metal.sh` へ追加（ルート #1519 指示）したが、本セッションは実機（Apple M4 Max）へのアクセス経路を持たないため実測は未実施のまま §17 に記入欄を残した。#1521 で、split-K 本番結線（#1527・#1530）により初めて `v0.8.0 ↔ origin/main` の Metal 計測経路 diff が非ゼロになったことを受け、対照系列（`0.8.0-ctrl-1521`）・参考系列（`head-<sha>-1521`。split-K 結線後 HEAD）の 2 系列を同一セッションで計測するスキャフォールド・帰属テスト・事前登録判定規則を整備した（§18）。本セッションも実機アクセス経路を持たないため実測は未実施のまま記入欄を残した
 
 ## 1. 位置づけ
 
@@ -800,7 +800,7 @@ legacy/borrowed override interleave 再計測。イシュー #1477）」節・
 
 ### 16.8 スコープ外・引き継ぎ
 
-- 参考系列（HEAD path patch）の計測（v0.8.0 ↔ origin/main 差分ゼロのため不要と判断）
+- 参考系列（HEAD path patch）の計測（v0.8.0 ↔ origin/main 差分ゼロのため不要と判断） → split-K 本番結線（#1527・#1530）により差分が非ゼロになったため #1521（§18）で着手
 - Metal 借用ビュー readout の interleave 再計測（#1477 undetermined の再挑戦）
 - split-K 数値契約承認（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`）: **#1513 で完了**
   （`true` へ切替済み）。結線自体は #1516（定数ゲート付き・既定 OFF）、ゲート ON への
@@ -919,3 +919,170 @@ fandhe/src/main.rs`）の Metal 分岐は §15 までと同じく legacy 既定�
   metal-gemm-readout-interleave-1477/`
 - 本イシューでは実機計測を実施していないため、新規ログディレクトリは
   作成していない
+
+## 18. §17 は #1520 が使用済みのため §18: split-K 結線後 HEAD（参考系列）の再計測スキャフォールドと帰属（イシュー #1521）
+
+### 18.0 位置づけ
+
+§16.2 は `v0.8.0 ↔ origin/main` の Metal 計測経路 diff がゼロだったため
+参考系列を計測しないと判断した。その後 #1527
+（`SPLIT_K_NUMERIC_CONTRACT_APPROVED` を `true` へ切替）・#1530（split-K
+本番結線。`should_split_k` 分岐を `dispatch_auto`／`select_for_device`
+へ結線）が入り、この判断の前提（diff ゼロ）が崩れた。本節は §16.2 の
+判断が覆った経緯を踏まえ、split-K 結線後 HEAD を参考系列として計測し、
+§16 正式系列との差分を「コード差」か「負荷差（計測ノイズ）」かへ帰属
+することを目的とする。**正式判定（`fandhe-ai =0.8.0` ピン・§16.7）は
+本節では不変**。
+
+### 18.1 事前登録判定規則（計測前に固定。計測後に変更しない）
+
+1. 判定の正は `compare_gemm_gate.py --device metal <A.jsonl> <B.jsonl>`
+   （系列ごと独立集計）の出力のみ。tolerance・判定式・`BASELINES`・
+   `SPLIT_K_*` 定数・`tile::select` 系は不変。
+2. 正式判定は §16.7 のまま不変。A（対照。registry `fandhe-ai =0.8.0`）は
+   「同一負荷環境での §16 再現値」、B（参考。split-K 結線後 HEAD への
+   `crates/facade` path patch）は「本イシューの主対象」であり、いずれも
+   #1037 の正式判定を更新しない。
+3. 専有ゲートなし（record_only。ルート #1509 のユーザー指示）。負荷が
+   高いこと自体は undetermined の理由にしない。undetermined は件数
+   不足（各系列・各 N で fandhe/candle ちょうど 5 件でない）・
+   `run_gemm_gate.sh` の fail-closed 停止・manifest 不一致・
+   `parity_fail_count>0` のみ。
+4. 帰属分類（N ごと・fandhe-ai reuse 中央値）: `r = median_B / median_A`
+   として、`|r − 1| ≤ 0.05` **または** `median_B` が A の 5 run
+   min–max 範囲内 → 「負荷差（ノイズ帯）・構造分析と整合」。それ以外
+   → 「構造分析と矛盾・原因未確定」（コード差確定ではない）。§16.4
+   の run 内分散（N=1024 で 2.191–3.071 ms ≈ ±20%）を踏まえ 5% 帯単独
+   では誤検知するため OR 条件とする。
+5. §16 との差（A/§16・B/§16）は「セッション間の負荷ドリフト指標」
+   として記録のみ（verdict を付けない）。
+6. run の差し替え禁止。失敗時は数値を捏造せず `.failed-<ts>.jsonl`
+   退避に従う。同 label の再実行は成果物退避後・新 label で行う。
+7. 実行前に v0.8.0..HEAD の `--stat`（Metal 経路 4 パス）を再取得し、
+   想定外の差分があれば帰属表を再導出する（規則 4 の帯域は変更しない）。
+
+### 18.2 系列設計・帰属
+
+- `run_gemm_gate.sh <device> <label>` は 1 起動で N=1024/2048/4096 の
+  5 回計測を内部ループするため、run 単位の interleave は構造的に
+  不可能。系列単位で A（対照 `0.8.0-ctrl-1521`）→ B（参考
+  `head-<short sha>-1521`）の固定順に計測する。
+- v0.8.0..origin/main の `--stat -- crates/backend-metal/src
+  crates/facade/src crates/autodiff/src crates/tensor-core/src` は
+  4 files・+583 −68（`gemm.rs`・`lib.rs`・`ops.rs`・`tile.rs`）。
+  対応するコミットは `5b2d5060`（#1530）・`ef613b9b`（#1527）の
+  2 コミット（`docs/perf/logs/metal-gemm-candle-gate-head-1521/
+  diff_v0.8.0_origin-main_metal_path.txt`）。
+- **構造分析（結論：計測前の期待値。`attribution.md` に事前登録）**:
+  独立した 2 つの理由により、GEMM ゲート対象形状（NN 正方
+  N=1024/2048/4096）は split-K 結線後も classic 経路のまま変わらない。
+  1. 本番既定の `MetalGemm::new` は `split_k_auto_enabled =
+     tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false` のため、
+     `dispatch_auto_with_route_impl` の `if self.split_k_auto_enabled
+     && SPLIT_K_NUMERIC_CONTRACT_APPROVED` が偽となり split-K 分岐へ
+     一切入らない（`SPLIT_K_NUMERIC_CONTRACT_APPROVED` が #1527 で
+     `true` になった今も不変）。
+  2. 対象形状自体が `tile::should_split_k` の並列度条件で `None`
+     （`tile.rs::should_split_k_rejects_large_square_and_wide_shapes`
+     が正方 512〜4096 を対象に回帰確認済み）。
+  本 PR に含む Linux 実行可能テスト
+  （`crates/backend-metal/tests/splitk_gemm_gate_shape_attribution.rs`）
+  が両方を機械的に固定した（`print_attribution_table` 出力）:
+
+  ```
+  | shape | (m,n,k) | should_split_k | select_route_for_device |
+  |---|---|---|---|
+  | N=1024 | (1024,1024,1024) | should_split_k=None | select_route_for_device=Classic |
+  | N=2048 | (2048,2048,2048) | should_split_k=None | select_route_for_device=Classic |
+  | N=4096 | (4096,4096,4096) | should_split_k=None | select_route_for_device=Classic |
+  ```
+
+- readout 方式（`readout_uses_borrowed_view("metal", None)` は `false`。
+  legacy 経路）は両系列とも不変。manifest で
+  `readout_method=legacy-metal-1452` を両系列とも検証する。
+
+### 18.3 プロトコル・共有負荷下の記録項目
+
+- `docs/perf/logs/metal-gemm-candle-gate-head-1521/orchestrate_m4max.sh`
+  （record_only。専有ゲートなし）が A→B の固定順で
+  `run_gemm_gate_metal.sh` を実行する。
+- 系列 A はビルドを計測から分離する（`cargo build --release -p
+  bench-fandhe` → `cargo build --release -p bench-candle` を事前実行。
+  #1490 §16.3 と同じ設計判断）。系列 B は `GEMM_GATE_PATCH_FACADE_PATH`
+  経由のビルドと計測が不可分（#1166 の設計。プレビルドしない）。
+- 10 秒間隔の uptime サンプラー・サーマル状態（前後）・watchlist
+  プロセス件数を記録する（負荷を record_only で可視化するのみ。合否
+  判定はしない）。
+- 実行前に実行時点の v0.8.0..HEAD の `--stat`（Metal 経路）を
+  再取得し、コミット済み diff（§18.2）と突き合わせる（規則 7）。
+
+### 18.4 実測結果（未実測）
+
+| N | A: fandhe-ai reuse 中央値（min–max, n=5） | A: candle fresh 中央値 | B: fandhe-ai reuse 中央値（min–max, n=5） | B: candle fresh 中央値 | B/A | 分類 |
+|---|---|---|---|---|---|---|
+| 1024 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 2048 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 4096 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+
+出典（記入予定）:
+`scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-
+0.8.0-ctrl-1521.jsonl`・`results-m4max-gemm-gate-head-<sha>-1521.jsonl`。
+
+### 18.5 データ有効性（未実測）
+
+- parity 0 fail（fandhe-ai・candle 両系列とも全 run）: 未確認
+- manifest 4 条件（A: `fandhe_ai_source=registry`、B:
+  `fandhe_ai_source=path:<facade>`、両系列とも
+  `bench_fandhe_features=""`・`readout_method=legacy-metal-1452`・
+  `candle_core_source=registry`）: 未確認
+
+### 18.6 帰属表（§16 ↔ A ↔ B）
+
+`docs/perf/logs/metal-gemm-candle-gate-head-1521/attribute.py` の出力を
+転記する欄（未実測）。
+
+| N | A中央値 | B中央値 | B/A | 分類 | candle/A | candle/B | §16参照値 | §16比 |
+|---|---|---|---|---|---|---|---|---|
+| 1024 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 0.743 | 未実測 |
+| 2048 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 1.002 | 未実測 |
+| 4096 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 0.634 | 未実測 |
+
+### 18.7 #1037 ゲート判定はユーザー判断事項（読み替え可否）
+
+**正式判定は §16.7 のまま不変**（#1037 は 3 形状中 2 形状が未達成の
+まま）。本節は以下のみを整理し、判定自体は本 PR では行わない:
+
+- 旧 #1037 の受け入れ条件は「N=1024/2048/4096 の**3 形状すべて**で
+  reuse が candle を超える」というものだった。§16.4 は N=2048 のみ
+  正式系列として初めて形状別条件を達成した（3 形状すべてではない）。
+- この「3 形状すべて」条件を「形状ごとの個別条件」へ読み替えるか
+  （読み替えた場合 N=2048 のみ達成という整理になる）は、旧 #1037 の
+  受け入れ条件そのものの再定義に当たり、**spec（`docs/spec/`）の変更
+  ではなくリポ側 issue の受け入れ条件の再定義**である。
+- N=2048 の達成が再現するかは §16.8 のとおり未確認（run 間分散が
+  大きく、専有環境での再計測なしに再現性を確定できない）。
+- 上記を踏まえ、読み替え可否・#1037 系ツリーのクローズ可否は本 PR では
+  決定しない（ユーザー判断事項として記録するのみ）。
+
+### 18.8 スコープ外・引き継ぎ
+
+- `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` の `true` 切替（#1515
+  ADOPT 後の判断）とその後の A/B（#1517 が別途担当）
+- §18.4〜18.6 の実機実測（Mac セッションへ引き継ぎ）
+- `docs/performance-targets.md`・`scripts/bench/framework-compare/
+  results/summary.md` への実測値反映（実測後・別途判断）
+- 帰属表（§18.6）が「構造分析と矛盾・原因未確定」に分類された場合の
+  原因調査（別イシュー起票をユーザーへ提案）
+- 旧 #1037 受け入れ条件の読み替え（§18.7。ユーザー判断）
+
+### 18.9 出典
+
+- 実装（Linux 側スキャフォールド）: `docs/perf/logs/
+  metal-gemm-candle-gate-head-1521/`（`orchestrate_m4max.sh`・
+  `attribute.py`・`attribution.md`・`README.md`・`env_info.txt`・
+  `diff_v0.8.0_origin-main_metal_path.txt`）
+- 帰属テスト: `crates/backend-metal/tests/
+  splitk_gemm_gate_shape_attribution.rs`
+- v0.8.0 タグ時点の非到達根拠: `docs/perf/logs/
+  metal-gemm-candle-gate-0.8.0-1490/attribution.md`
+- split-K 本番結線の設計判断: `docs/backend-metal-splitk-decision.md`

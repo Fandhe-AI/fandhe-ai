@@ -1081,7 +1081,11 @@ fresh` も交互起動する（環境 10/11 単発 fresh 計測との連続性�
   固定」を壊さないため）。`bench-fandhe` の `VERSION` 定数は crates.io 版の
   まま変わらないため JSONL の `framework_version` では両系列を区別できず、
   **ファイル名ラベル**（例: `head-<short sha>`）で区別する。参考系列は
-  #1031/#1037 の正式達成判定には使わない（次回ピン更新後の正式再計測で確定する）
+  #1031/#1037 の正式達成判定には使わない（次回ピン更新後の正式再計測で確定する）。
+  対照系列（正式系列と同一構成の再現値）と参考系列を同一セッションで A→B
+  固定順に計測し §16 正式系列との差分を「コード差／負荷差」へ帰属する運用
+  例は `docs/perf/logs/metal-gemm-candle-gate-head-1521/`（イシュー #1521。
+  `orchestrate_m4max.sh`・`attribute.py`）を参照
 
 ```bash
 cd scripts/bench/framework-compare
