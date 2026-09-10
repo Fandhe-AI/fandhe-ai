@@ -92,6 +92,50 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
+# 既存成果物の確認（イシュー #1529 codex-review P2 指摘: 同じ run 番号の
+# 再実行によるログ上書き防止）。README の 5 回ループを途中中断後に先頭
+# から再実行すると、確認なしに `>` で切り詰めて書き始めてしまうと完了済
+# み run の測定値・中断の証跡が失われ、`docs/perf/metal-gemm-splitk-ab.md`
+# §10.2 の「run の差し替え禁止」と整合しない。計測開始前（何も書き込む前）
+# に当該 run 番号の成果物の有無を確認し、1 つでも既存なら何も書かず・
+# 削除せず非ゼロ終了する（fail-closed）。同番号の再実行は成果物を手動で
+# 別名へ退避してから行う。
+for artifact in "$UPTIME_BEFORE" "$PMSET_BEFORE" "$PMSET_AFTER" "$RUN_LOG" "$MONITOR_LOG" "$PROCS_LOG"; do
+    if [ -e "$artifact" ]; then
+        echo "run${RUN_NO}: 既存の成果物が見つかった（$artifact）。" \
+             "同番号の再実行は成果物を手動で別名へ退避してから行う" \
+             "（run の差し替え禁止。docs/perf/metal-gemm-splitk-ab.md §10.2）" >&2
+        exit 1
+    fi
+done
+
+# 同番号の同時実行を排他的に拒否する。`mkdir` は POSIX で単一のアトミック
+# 排他作成操作であり、既にロックディレクトリが存在すれば非ゼロ終了する
+# 性質を利用する（`set -C` の `>` 作成は run 途中の `>>` 追記との併用が
+# ある本スクリプトでは扱いにくいため、専用ロックディレクトリ方式を採る）。
+# ロック自体は正常・異常いずれの終了でも trap で解放するが、計測成果物
+# （上記の既存確認対象）は解放対象に含めない（残す）。
+LOCK_DIR="$SCRIPT_DIR/run${RUN_NO}.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "run${RUN_NO}: 同番号の実行が既に進行中（ロック $LOCK_DIR が存在する）" >&2
+    exit 1
+fi
+
+# バックグラウンド `uptime` サンプラーの PID とロックの解放をまとめて
+# 扱う cleanup（EXIT trap）。`kill`／`rmdir` はいずれも `|| true` で
+# 冪等化してあるため、成功・失敗いずれの終了経路でも安全に複数回呼び
+# 出せる（以降のコード側で個別に `trap - EXIT` を呼んで無効化する必要
+# がなくなり、ロック解放漏れを防ぐ）。
+SAMPLER_PID=""
+cleanup() {
+    if [ -n "$SAMPLER_PID" ]; then
+        kill "$SAMPLER_PID" 2>/dev/null || true
+        wait "$SAMPLER_PID" 2>/dev/null || true
+    fi
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 uptime > "$UPTIME_BEFORE"
 pmset -g therm > "$PMSET_BEFORE" 2>&1 || true
 record_procs "$PROCS_LOG"
@@ -119,7 +163,10 @@ record_procs "$PROCS_LOG"
     done
 ) &
 SAMPLER_PID=$!
-trap 'kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+# 個別の `trap 'kill ...' EXIT` は張らない（既に `cleanup`〈ロック解放込み〉
+# を trap 済みであり、シェルの trap はスロット 1 つのため再設定すると
+# ロック解放が上書きされて消えてしまう。`cleanup` は `SAMPLER_PID` を
+# 都度参照するため、ここでの代入のみで両方が正しく解放される）。
 
 cd "$REPO_ROOT"
 # shellcheck disable=SC2086 # CMD は固定リテラル（外部入力を含まない）で
@@ -129,14 +176,12 @@ cd "$REPO_ROOT"
 $CMD > "$RUN_LOG" 2>&1 || {
     STATUS=$?
     echo "run${RUN_NO}: cargo run が非ゼロ終了（status=${STATUS}）。$RUN_LOG を確認する" >&2
-    kill "$SAMPLER_PID" 2>/dev/null || true
-    trap - EXIT
     exit "$STATUS"
 }
 
 kill "$SAMPLER_PID" 2>/dev/null || true
 wait "$SAMPLER_PID" 2>/dev/null || true
-trap - EXIT
+SAMPLER_PID=""
 
 pmset -g therm > "$PMSET_AFTER" 2>&1 || true
 

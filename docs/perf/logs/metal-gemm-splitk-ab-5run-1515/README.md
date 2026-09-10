@@ -44,7 +44,10 @@ M4 Max 実機を持つ Mac セッションで実施**する）。
    サンプラー）・`runN_procs.txt`（watchlist プロセス件数）・
    `uptime_before_runN.txt`・`pmset_therm_{before,after}_runN.txt` を生成
    する。中断した場合は `env_info.txt` に経緯を記録し、run を黙って差し
-   替えない。
+   替えない。`orchestrate.sh` は計測開始前に当該 run 番号の既存成果物を
+   検出すると何も書かずに非ゼロ終了する（同番号の同時実行もロックで拒否
+   する）ため、中断後の再開は**未実施の run 番号のみ**を指定する。同番号
+   を取り直したい場合は成果物を手動で別名へ退避してから再実行する。
 
 3. 集計する:
 
