@@ -11,10 +11,30 @@
 # 前提: bench-fandhe / bench-candle(cuda) は本スクリプト起動前に prebuild 済み（ビルド残余負荷を
 #       計測区間から分離する。§14.6 の再発防止）。run_gemm_gate.sh 側の cargo build は no-op
 #       で通過し、manifest 記録（record_manifest）だけが行われる（GEMM_GATE_SKIP_BUILD は使わない）。
+# 実行ディレクトリ: `run_gemm_gate_cuda.sh`・`compare_gemm_gate.py` がある
+#   `scripts/bench/framework-compare/`（`FRAMEWORK_COMPARE_DIR` で上書き可。未指定時は本ファイルの
+#   保存先 `docs/perf/logs/<...>/` からリポジトリ相対で解決する）。ログ（gate／run／compare 出力）も
+#   同ディレクトリへ書き出し、計測後に `docs/perf/logs/cuda-gemm-candle-gate-0.8.0-1489/` へ回収する。
+#   実測時（2026-09-10）は本ファイルを GB10 上の `scripts/bench/framework-compare/orchestrate-1489.sh`
+#   へコピーして `(setsid nohup bash ./orchestrate-1489.sh 0.8.0-1489 > orchestrate-1489.out 2>&1 < /dev/null &)`
+#   で切り離し実行した（その配置でも上記の相対解決で同じディレクトリに到達する）。
 set -u
 export PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH
 LABEL=${1:-0.8.0-1489}
-cd "$(dirname "$0")"
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ -n "${FRAMEWORK_COMPARE_DIR:-}" ]]; then
+  WORK_DIR="$FRAMEWORK_COMPARE_DIR"
+elif [[ -f "$SELF_DIR/run_gemm_gate_cuda.sh" ]]; then
+  WORK_DIR="$SELF_DIR"
+else
+  WORK_DIR="$SELF_DIR/../../../../scripts/bench/framework-compare"
+fi
+if [[ ! -f "$WORK_DIR/run_gemm_gate_cuda.sh" || ! -f "$WORK_DIR/compare_gemm_gate.py" ]]; then
+  echo "ERROR: run_gemm_gate_cuda.sh / compare_gemm_gate.py が見つからない: $WORK_DIR" >&2
+  echo "  FRAMEWORK_COMPARE_DIR=<scripts/bench/framework-compare の絶対パス> を指定すること" >&2
+  exit 1
+fi
+cd "$WORK_DIR"
 GATE_LOG="gate-${LABEL}.log"
 RUN_LOG="run_gemm_gate_cuda-dgx-${LABEL}.log"
 CMP_OUT="compare_gemm_gate-${LABEL}.md"
