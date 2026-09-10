@@ -2432,6 +2432,14 @@ before 側の run 間ばらつき（spread = max/min > 1.5x）が大きく「判
 §18 の E2〜E4 REJECT 判断・#1304 の「組み込み対象なし」確定と合わせ、
 E2〜E4 系列の調査は本イシューをもって一区切りとする。
 
+**追記（イシュー #1518）**: #1516 で `dispatch_auto` が `select_route_for_device`
+（`should_split_k` が `Some` なら split-K、`None` なら `select_for_device` の結果を
+経由する分岐）を持つようになったが、`tile::CANDIDATES`／`tile::select`／
+`tile::select_for_device` の候補表・選択ロジック自体は不変で、既定ゲート OFF
+（`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false`）の間は本節の確定がそのまま
+有効。ゲート ON 後の framework-compare 非後退確認は `docs/perf/metal-gemm-splitk-
+framework-compare-1517.md`（§5／§6。未実測）が担う。
+
 ### §19.5 env_info・負荷状態
 
 M4 Max（GPU 40 コア）・macOS 26.6.2・rustc 1.96.0。計測中の

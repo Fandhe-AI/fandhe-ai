@@ -4,7 +4,9 @@
 の実装記録。`docs/backend-metal-splitk-decision.md`（#810・#1308 で「採用検討推奨」確定）を受け、
 機構の実装と正しさの自己検証を行う。**本イシューのスコープは機構実装と正しさ検証のみ**（性能 A/B
 は #1475、`select_for_device`／`dispatch_auto` への本番結線可否は #1476）。本 PR では
-`dispatch_auto` は変更しない（opt-in・未結線）。
+`dispatch_auto` は変更しない（opt-in・未結線）。**追記（イシュー #1518）**: #1474 時点の
+記録。#1513 でブロッカー解消・#1516 で `dispatch_auto` へ定数ゲート付き結線済み（既定
+OFF。`docs/backend-metal-splitk-decision.md` §5）。
 
 ## 1. 実装概要
 
@@ -48,7 +50,7 @@
 | AC-2 | classic 経路・CPU 参照実装との REQ-2 判定（対象 9 形状 + K 端数境界 2 形状 × NN/NT/TN/TT） | **厳密ゼロ fail 判定**（§5.5。実測ベースライン非後退方式は未承認のため差し戻し・8/11 形状で既知 FAIL） |
 | AC-3 | `should_split_k` の Linux 単体テスト | 達成（`tile.rs` 内 `#[cfg(test)]`） |
 | AC-4 | REQ-8 手動境界検査維持 | 達成（§2） |
-| AC-5 | 本番 `dispatch_auto`／`select_for_device` 不変 | 達成（§6） |
+| AC-5 | 本番 `dispatch_auto`／`select_for_device` 不変（#1474 時点） | 達成（§6。#1516 以降の状態は §5.9・decision.md §5 参照） |
 | AC-6 | `cargo fmt`／`clippy -D warnings` green・内部ホスト名なし | 達成（§7） |
 
 ## 4. AC-1: run-to-run bit 同一（実機実測。Apple M4 Max）
@@ -364,6 +366,10 @@ Mac セッションでの実行を申し送る。実測完了後、本節へ以�
 
 ## 6. AC-5: 本番経路の非後退確認
 
+**追記（イシュー #1518）**: 本節は #1474 時点（本イシュー実装時点）の記録。#1516 で
+`dispatch_auto` へ split-K 分岐が定数ゲート付き（既定 OFF）で結線されたため、下記の
+「無変更」は #1474 時点の事実として読む。
+
 `tile::select`／`select_for_device`／`select_with_occupancy_for_device`・`MetalGemm::new`／
 `dispatch_auto`・`MetalBackendOps::gemm` は無変更。以下の既存 `#[ignore]` テスト群を実機
 （Apple M4 Max）で再実行し非後退を確認した
@@ -386,6 +392,9 @@ ignored は実機依存）。`make check-cross-metal-tests`（`aarch64-apple-dar
 - `select_for_device`／`dispatch_auto`／`MetalBackendOps::gemm` への結線可否: #1476。
   **結線せずと確定**（性能判定 undetermined・数値契約未承認の 2 ブロッカー。
   `docs/backend-metal-splitk-decision.md` §4）。
+  **追記（イシュー #1518）**: 数値契約ブロッカーは #1513 で解消・結線自体は #1516 で
+  定数ゲート付き（既定 OFF）に実施済み。現行状態は `docs/backend-metal-splitk-decision.md`
+  §5 を参照。
 - f16／hfrag カーネルの split-K・TT 以外の一般 stride・`gemm_bias_act` 融合経路への適用・
   `TileClassMode::Split` との併用は対象外。
 - 縮約側アルゴリズムの追加改善（例: ツリー型縮約・より高精度な補償和の組合せ）は、§5.2 の原因
