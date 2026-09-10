@@ -28,87 +28,156 @@ rm -f "$LOG/ALL_DONE_m4max.marker" "$LOG/MEASUREMENT_FAILED_m4max.marker" "$LOG/
 #     ディレクトリでの暗黙リセットを禁止する設計）。 ---
 # --- 追加是正（PR #1506 codex-review・Cursor Bugbot 指摘対応。スレッド
 #     PRRT_kwDOTuUCJc6g6tbf〈累積試行数〉・PRRT_kwDOTuUCJc6g6tbc〈待機後の
-#     期限再確認〉・PRRT_kwDOTuUCJc6g6vMQ〈確認間隔の短縮禁止〉）:
-#     (a) 試行数もスタンプと同じセッション単位で `$LOG/attempts-m4max.count`
-#         に累積保存し、プロセス再起動をまたいで「最大 10 試行」を適用する
-#         （経過時間上限だけを永続化した版では、再起動ごとに試行数が 0 へ
-#         戻り同一セッションで 10 試行を超過できた。m4max-redo-pr1506/ の
-#         記録は 3 + 9 = 累積 12 試行）。カウントは sleep の前に書き込む
-#         （待機中に kill されても試行として数える fail-closed 方向）。
-#     (b) 残り時間が次の待機時間（1 回目合格直後の 30 秒固定確認・不合格時の
+#     期限再確認〉・PRRT_kwDOTuUCJc6g6vMQ〈確認間隔の短縮禁止〉・
+#     PRRT_kwDOTuUCJc6g7Kcp〈状態の fail-closed 読み書き〉・
+#     PRRT_kwDOTuUCJc6g7Kcq〈バックオフ状態の永続化〉）:
+#     (a) 専有ゲートの進行状態（累積試行数・現在のバックオフ秒・次回サンプル
+#         採取可能時刻・連続合格数）をスタンプと同じセッション単位で
+#         `$LOG/gate-state-m4max` に永続化し、プロセス再起動をまたいで
+#         「最大 10 試行」と「宣言どおりのバックオフ系列」を継続適用する
+#         （経過時間上限だけを永続化した版では、再起動ごとに試行数が 0 へ戻り
+#         同一セッションで 10 試行を超過できた〈m4max-redo-pr1506/ の記録は
+#         3 + 9 = 累積 12 試行〉うえ、バックオフも 60 秒へ戻っていた）。
+#     (b) 状態の読み書きは fail-closed とする: スタンプが存在するのに状態
+#         ファイルが欠落・空・不正な場合は「状態を復元できない再起動」として
+#         試行を一切行わず undetermined で終了する（0 へ戻さない）。保存は
+#         一時ファイルへ書いて mv する原子的更新とし、書き戻しの読み取り検証に
+#         失敗すれば計測せず終了する。保存は sleep の前に行う（待機中に kill
+#         されても試行として数える）。
+#     (c) 残り時間が次の待機時間（1 回目合格直後の 30 秒固定確認・不合格時の
 #         バックオフ）より短い場合は待機時間を短縮せず、その時点で終了する。
-#         待機時間を残り時間へクランプする実装では、連続 2 回確認の 30 秒
-#         間隔が短縮されたり、期限到達後のサンプルで合格判定されうる。
-#     (c) 待機後に時刻を再取得し、期限へ到達していればそのサンプルで合否を
-#         判定せず終了する。gate ログの elapsed はサンプル採取時点の値。 ---
+#     (d) 待機後に時刻を再取得し、期限へ到達していればそのサンプルで合否を
+#         判定せず終了する。gate ログの elapsed はサンプル採取時点の値。
+#     (e) 再起動時、1 回目合格（連続合格数 1）の状態は次回サンプル時刻がまだ
+#         到来していない場合に限り引き継ぐ（30 秒固定間隔をそのまま守れる）。
+#         到来済みなら 30 秒間隔を守れないため合格数を 0 へ戻し（fail-closed）、
+#         復元したバックオフ秒で待機する。 ---
 STAMP="$LOG/session-start-m4max.stamp"
-COUNT_FILE="$LOG/attempts-m4max.count"
+STATE="$LOG/gate-state-m4max"
 CAP_S=1800
 MAX_ATTEMPTS=10
+GATE_LOG="$LOG/gate-m4max.log"
+
+refuse() {
+  # 専有ゲートを不成立（undetermined）として終了する。$1 はマーカー本文・
+  # $2 は gate ログ本文。
+  echo "$1" > "$LOG/GATE_NOT_PASSED_m4max.marker"
+  echo "$2 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GATE_LOG"
+  exit 0
+}
+
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# 状態を原子的に保存し、書き戻しを読み取り検証する。失敗時は計測せず終了する。
+save_state() {
+  _content="$1 $2 $3 $4"
+  if ! printf '%s\n' "$_content" > "$STATE.tmp" || ! mv -f "$STATE.tmp" "$STATE"; then
+    rm -f "$STATE.tmp"
+    refuse "gate state save failed (fail-closed; no measurement)" \
+      "gate state save failed: content='${_content}'"
+  fi
+  if [ "$(cat "$STATE" 2>/dev/null)" != "$_content" ]; then
+    refuse "gate state verify-after-save failed (fail-closed; no measurement)" \
+      "gate state verify-after-save failed: content='${_content}'"
+  fi
+}
+
 NOW_EPOCH=$(date -u +%s)
 if [ ! -f "$STAMP" ]; then
+  # 新規セッション: 初期状態（累積 0 試行・バックオフ 60 秒・次回サンプルは
+  # 60 秒後・連続合格 0）を先に保存してからスタンプを置く。
+  save_state 0 60 $((NOW_EPOCH + 60)) 0
   echo "$NOW_EPOCH" > "$STAMP"
 fi
-SESSION_START=$(cat "$STAMP")
+SESSION_START=$(cat "$STAMP" 2>/dev/null)
+if ! is_uint "$SESSION_START"; then
+  refuse "session stamp unreadable or invalid (fail-closed; no measurement)" \
+    "gate session stamp unreadable or invalid: '${SESSION_START}'"
+fi
 ELAPSED=$((NOW_EPOCH - SESSION_START))
 if [ "$ELAPSED" -ge "$CAP_S" ]; then
-  echo "session elapsed=${ELAPSED}s >= cap=${CAP_S}s at invocation start; refusing further attempts (no silent restart-reset)" \
-    > "$LOG/GATE_NOT_PASSED_m4max.marker"
-  echo "gate cap exceeded before any attempt: elapsed=${ELAPSED}s cap=${CAP_S}s $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG/gate-m4max.log"
-  exit 0
+  refuse "session elapsed=${ELAPSED}s >= cap=${CAP_S}s at invocation start; refusing further attempts (no silent restart-reset)" \
+    "gate cap exceeded before any attempt: elapsed=${ELAPSED}s cap=${CAP_S}s"
 fi
-ATTEMPT=0
-if [ -f "$COUNT_FILE" ]; then
-  ATTEMPT=$(cat "$COUNT_FILE")
-  case "$ATTEMPT" in
-    ''|*[!0-9]*) ATTEMPT=0 ;;
-  esac
+
+# 状態の復元（fail-closed: 欠落・空・不正は 0 へ戻さず終了する）。
+if [ ! -f "$STATE" ]; then
+  refuse "session stamp exists but gate state file is missing; cannot restore session (fail-closed; no measurement)" \
+    "gate state missing for existing session: elapsed=${ELAPSED}s"
 fi
+STATE_LINE=$(cat "$STATE" 2>/dev/null)
+set -- $STATE_LINE
+if [ "$#" -ne 4 ] || ! is_uint "$1" || ! is_uint "$2" || ! is_uint "$3" || ! is_uint "$4" \
+  || [ "$2" -lt 1 ] || [ "$4" -gt 1 ]; then
+  refuse "gate state file unreadable or invalid ('${STATE_LINE}'); cannot restore session (fail-closed; no measurement)" \
+    "gate state invalid for existing session: '${STATE_LINE}' elapsed=${ELAPSED}s"
+fi
+ATTEMPT=$1
+BACKOFF_S=$2
+NEXT_EPOCH=$3
+PASS_COUNT=$4
 if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
-  echo "session cumulative attempts=${ATTEMPT} >= max=${MAX_ATTEMPTS} at invocation start; refusing further attempts (no silent restart-reset)" \
-    > "$LOG/GATE_NOT_PASSED_m4max.marker"
-  echo "gate attempt cap exceeded before any attempt: attempts=${ATTEMPT} max=${MAX_ATTEMPTS} elapsed=${ELAPSED}s $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG/gate-m4max.log"
-  exit 0
+  refuse "session cumulative attempts=${ATTEMPT} >= max=${MAX_ATTEMPTS} at invocation start; refusing further attempts (no silent restart-reset)" \
+    "gate attempt cap exceeded before any attempt: attempts=${ATTEMPT} max=${MAX_ATTEMPTS} elapsed=${ELAPSED}s"
+fi
+if [ "$ATTEMPT" -gt 0 ]; then
+  # 再起動による復元。1 回目合格は次回サンプル時刻が未到来の場合のみ引き継ぐ。
+  if [ "$PASS_COUNT" -eq 1 ] && [ "$NOW_EPOCH" -gt "$NEXT_EPOCH" ]; then
+    echo "gate restore: first-pass confirmation window (30s) already elapsed; dropping pass_count to 0 (fail-closed) elapsed=${ELAPSED}s $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GATE_LOG"
+    PASS_COUNT=0
+    NEXT_EPOCH=$((NOW_EPOCH + BACKOFF_S))
+    save_state "$ATTEMPT" "$BACKOFF_S" "$NEXT_EPOCH" "$PASS_COUNT"
+  fi
+  echo "gate restore: attempts=${ATTEMPT} backoff=${BACKOFF_S}s next_epoch=${NEXT_EPOCH} pass_count=${PASS_COUNT} elapsed=${ELAPSED}s $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GATE_LOG"
 fi
 
 # --- (i) 専有ゲート（計画 §3 規則 4・`docs/perf/logs/
 #     metal-gemm-candle-gate-1309/wait_gate.sh` 方式と同一のバックオフ系列:
 #     60 秒開始・不合格時のみ backoff_s を 1.5 倍・1 回目合格直後の 2 回目
-#     確認だけは宣言どおり 30 秒固定・最大 10 試行。試行数・経過時間はいずれも
-#     session-start スタンプと同一セッションの累積値で打ち切る（プロセス内の
-#     値ではない）。待機時間は短縮しない（残り時間が足りなければ終了）。閾値は
-#     #1309 の 4.0 ではなく本イシューの計画どおり 6.0 を使う。 ---
+#     確認だけは宣言どおり 30 秒固定・最大 10 試行。試行数・経過時間・
+#     バックオフ・次回サンプル時刻はいずれも session-start スタンプと同一
+#     セッションの永続化状態で管理し打ち切る（プロセス内の値ではない）。
+#     待機時間は短縮しない（残り時間が足りなければ終了）。閾値は #1309 の
+#     4.0 ではなく本イシューの計画どおり 6.0 を使う。 ---
 GATE_OK=0
-PASS_COUNT=0
-WAIT_S=60
-BACKOFF_S=60
 while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   NOW_EPOCH=$(date -u +%s)
   ELAPSED=$((NOW_EPOCH - SESSION_START))
   REMAINING=$((CAP_S - ELAPSED))
   if [ "$REMAINING" -le 0 ]; then
-    echo "gate cap reached mid-loop: elapsed=${ELAPSED}s cap=${CAP_S}s $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG/gate-m4max.log"
+    echo "gate cap reached mid-loop: elapsed=${ELAPSED}s cap=${CAP_S}s $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GATE_LOG"
     break
+  fi
+  # 次回サンプル採取可能時刻までの待機時間（再起動復元時は既に一部経過して
+  # いることがある。経過分だけ短くなるのは間隔の短縮ではない）。
+  WAIT_S=$((NEXT_EPOCH - NOW_EPOCH))
+  if [ "$WAIT_S" -lt 0 ]; then
+    WAIT_S=0
   fi
   if [ "$WAIT_S" -gt "$REMAINING" ]; then
     # 待機時間を短縮しない: 宣言した間隔（30 秒固定確認・バックオフ）を守れない
     # 場合は合格とせず終了する。
-    echo "gate insufficient remaining time: next wait=${WAIT_S}s > remaining=${REMAINING}s (elapsed=${ELAPSED}s cap=${CAP_S}s); not shortening the interval $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG/gate-m4max.log"
+    echo "gate insufficient remaining time: next wait=${WAIT_S}s > remaining=${REMAINING}s (elapsed=${ELAPSED}s cap=${CAP_S}s); not shortening the interval $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GATE_LOG"
     break
   fi
   ATTEMPT=$((ATTEMPT + 1))
-  echo "$ATTEMPT" > "$COUNT_FILE"
+  save_state "$ATTEMPT" "$BACKOFF_S" "$NEXT_EPOCH" "$PASS_COUNT"
   sleep "$WAIT_S"
   # 待機後に時刻を再取得し、期限へ到達していればこのサンプルで判定しない。
   NOW_EPOCH=$(date -u +%s)
   ELAPSED=$((NOW_EPOCH - SESSION_START))
   if [ "$ELAPSED" -ge "$CAP_S" ]; then
-    echo "gate cap reached after wait: attempt=$ATTEMPT elapsed=${ELAPSED}s cap=${CAP_S}s; sample not evaluated $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG/gate-m4max.log"
+    echo "gate cap reached after wait: attempt=$ATTEMPT elapsed=${ELAPSED}s cap=${CAP_S}s; sample not evaluated $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GATE_LOG"
     break
   fi
   LOAD1=$(uptime | sed -E 's/.*load averages?: ([0-9.]+)[, ].*/\1/')
   OK=$(awk -v l="$LOAD1" 'BEGIN{print (l != "" && l == l+0 && l < 6.0) ? 1 : 0}')
-  echo "gate attempt=$ATTEMPT (session cumulative) wait=${WAIT_S}s load1=$LOAD1 ok=$OK elapsed=${ELAPSED}s $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG/gate-m4max.log"
+  echo "gate attempt=$ATTEMPT (session cumulative) wait=${WAIT_S}s load1=$LOAD1 ok=$OK elapsed=${ELAPSED}s $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GATE_LOG"
   if [ "$OK" = "1" ]; then
     PASS_COUNT=$((PASS_COUNT + 1))
   else
@@ -120,11 +189,12 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   fi
   if [ "$PASS_COUNT" -eq 1 ]; then
     # 1 回目合格: 宣言どおり 30 秒後に 2 回目を確認する（バックオフしない）。
-    WAIT_S=30
+    NEXT_EPOCH=$((NOW_EPOCH + 30))
   else
     BACKOFF_S=$(awk -v w="$BACKOFF_S" 'BEGIN{printf "%d", w*1.5}')
-    WAIT_S=$BACKOFF_S
+    NEXT_EPOCH=$((NOW_EPOCH + BACKOFF_S))
   fi
+  save_state "$ATTEMPT" "$BACKOFF_S" "$NEXT_EPOCH" "$PASS_COUNT"
 done
 
 if [ "$GATE_OK" != "1" ]; then
