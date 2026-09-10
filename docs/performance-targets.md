@@ -564,6 +564,15 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-1488/`（M4 Max 独立再計測は同配下
   `m4max-redo-pr1506/`）、集計表は
   `scripts/bench/framework-compare/results/summary.md` 環境 29 節
+- **#1522 追補**: M4 Max の `verdict=undetermined` を解消するため、専有ゲート
+  opt-out（`GEMM_GATE_LOAD_GATE_MODE=record_only`。ルート #1519 のユーザー指示
+  「Metal・M4 Max 側は現在の環境で測れる値で大丈夫」を受けた措置）版
+  オーケストレーション（`docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/
+  orchestrate_m4max.sh`）・事前登録判定規則を整備した。本イシューの実行環境に
+  Apple Silicon 実機への到達経路がないため実測は未実施のまま Mac セッションへ
+  引き継いでおり、上記の「M4 Max の正式値は未確定のまま残る」という記述自体は
+  本追補では反転しない（詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md`
+  §24.11）
 
 ### 8.16 #1490 追補（Metal GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で M4 Max 再計測。§2 段階的下限表・§3 丸め規則は不変）
 
