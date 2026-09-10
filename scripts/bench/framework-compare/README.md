@@ -1341,8 +1341,10 @@ worktree・`AB_AFTER_FACADE_PATH`＝同定数 `=true` の worktree）を比較�
   〈終了コード・verdict〉には影響しない診断列。後退セルが「共有負荷
   ノイズ帯」か「一貫した後退」かを人間が機械的に見分けるための値。
   `docs/perf/metal-gemm-splitk-framework-compare-1517.md` §3 rule (b)）。
-- 判定規則・帰属表（gemm は形状条件で・train は入口条件〈backward は
-  形状条件でも〉split-K に非到達という構造分析）・実測結果は
+- 判定規則・帰属表（gemm は形状条件で・train の reuse／backward は
+  入口条件〈backward は形状条件でも〉split-K に非到達だが、train の
+  fresh は L2 forward〈非融合 matmul〉が `dispatch_auto` を経由するため
+  結線後は split-K に到達しうるという構造分析）・実測結果は
   `docs/perf/metal-gemm-splitk-framework-compare-1517.md` を参照。
 
 ### `compare_gemm_ab.py --device cpu`（既定スレッド数限定 on/off 比較・イシュー #1364）

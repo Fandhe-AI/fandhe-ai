@@ -62,15 +62,33 @@ splitk_train_shape_attribution -- --nocapture`。Linux で実行・実装計画
 
 **形状条件（`should_split_k`）だけでは forward 2 本は split-K 対象**だが、
 **入口条件**（コード読みで裏取り。実装計画 §3.3 手順 1〜4）により
-いずれも `dispatch_auto` へ到達しない:
+到達可否は fresh/reuse・層ごとに分かれる（訂正: PR #1531 レビュー
+指摘〈Cursor Bugbot・codex-review、根拠
+`crates/backend-metal/tests/splitk_train_shape_attribution.rs#L51-L55`〉
+を受け、下記のとおり「forward はすべて非到達」という当初の記述を
+訂正する）:
 
-- **forward**: `Linear::forward` は epilogue 融合 `gemm_bias_act`
-  （`crates/autodiff/src/nn/linear.rs`）を使う。bias 形状が `[n]` と
-  厳密一致するため `gemm_bias_act_route` は `Fused` を返し
-  （`crates/backend-metal/src/ops.rs::gemm_bias_act_route`）、
-  `run_tiled_bias_act_f32`（融合カーネル）を直接呼ぶ——`dispatch_auto`
-  を経由しない。reuse 経路（`gemm_resident_rhs_act`）も同様に
-  strided prepared 専用入口で `dispatch_auto` 非経由。
+- **forward・reuse（`Sequential::forward_from_flat_leaves`。
+  `crates/facade/src/compat/sequential.rs:606-613`）**: L1・L2 とも
+  `store.linear_forward_with_activation` → `BackendOps::
+  gemm_resident_rhs_act` へ委譲する。次層が `ReLU` でない L2 も
+  `Activation::None` で同じ融合 strided prepared 専用入口を通るため
+  `dispatch_auto` 非経由（`gemm_bias_act_route` が `Fused` を返す条件は
+  `crates/backend-metal/src/ops.rs::gemm_bias_act_route` 参照）。
+- **forward・fresh（`Sequential::forward`。`crates/facade/src/
+  compat/sequential.rs:152-190`）**: 次層が `ReLU` の場合（L1）のみ
+  `LinearVars::forward_with_activation`（epilogue 融合
+  `gemm_bias_act`。`crates/autodiff/src/nn/linear.rs`）へ結線し
+  `dispatch_auto` を経由しない。**次層が `ReLU` でない L2（出力層・
+  fresh train ではここに該当）は非融合の `LinearVars::forward`
+  （`matmul` → `add`。`crates/facade/src/compat/sequential.rs:185`・
+  `crates/autodiff/src/nn/linear.rs::LinearVars::forward`）を使う**。
+  この `matmul` は `MetalBackendOps::gemm`（`ops.rs:554`）→
+  `layout::classify_2d` が NN・contiguous と判定 → `dispatch_auto`
+  （split-K 判定を行う唯一の本番入口）へ到達する。形状
+  `(BATCH,D_OUT,D_HIDDEN)=(64,10,256)` は `should_split_k` が `Some`
+  （上表参照）のため、**結線後（ゲート `true`）は fresh train の L2
+  forward が split-K 経路へ到達しうる**。
 - **backward**: `matmul_vjp`（`crates/autodiff/src/grad.rs`）は
   `da = gemm(g, b^T)`・`db = gemm(a^T, g)` という形で必ず転置オペランド
   を含む GEMM を発行する。`MetalBackendOps::gemm`（`ops.rs:554`）は
@@ -82,11 +100,16 @@ splitk_train_shape_attribution -- --nocapture`。Linux で実行・実装計画
   `None`）に加え、入口条件でも非到達という二重の理由で split-K に
   到達しない。
 
-**結論（実測前の構造分析）**: `gemm` は形状条件で・`train` は入口条件
-（backward は形状条件でも）で split-K に到達しない。本 A/B は「結線に
-よる本番既定経路の非後退ガード」であり、split-K の性能効果そのものは
-framework-compare（本イシューの計測対象）では検出できない（性能面の
-根拠は #1515・`docs/perf/metal-gemm-splitk-ab.md` を参照）。
+**結論（実測前の構造分析。訂正版）**: `gemm`（8 セル）は形状条件で
+split-K に到達しない。`train` の reuse・backward（全形状）は入口条件
+（backward は形状条件でも）で到達しないが、**`train` の fresh は L2
+forward（非融合 `matmul`）が `dispatch_auto` を経由するため、結線後
+（ゲート `true`）は split-K 経路へ到達しうる**。したがって本 A/B は
+「gemm 8 セル＋train reuse 1 セル」については結線による本番既定経路の
+非後退ガード（split-K 非到達のまま）であり、「train fresh 1 セル」は
+split-K が実際に効く経路を含む非後退ガードとなる（=このセルに限り
+split-K の性能効果自体も間接的に観測されうる。性能面の主根拠は
+引き続き #1515・`docs/perf/metal-gemm-splitk-ab.md` を参照）。
 
 補足（実装計画 §3.3 手順 5）: 上表の「backward L1 d_input」は
 `docs/autodiff-nograd-leaf-dinput-skip-decision.md`（非学習葉への
