@@ -24,6 +24,22 @@
 # 行わず worktree 上でそのまま実行する）。ログ出力先は環境変数 LOG で
 # 上書きできる。
 set -u
+
+# --- GEMM_GATE_LOAD_GATE_MODE（イシュー #1522。#1520 と同型の opt-out
+#     方式）: `exclusive`（既定。1488 版と完全同一の専有ゲート）または
+#     `record_only`（専有ゲートを要件にせず load average を記録するのみ）
+#     の 2 値 allowlist。それ以外は何も書き込まず fail-closed で exit 1
+#     とする（判定規則を計測後に緩めない設計と対になる、無効値の暗黙
+#     フォールバック禁止）。 ---
+GEMM_GATE_LOAD_GATE_MODE="${GEMM_GATE_LOAD_GATE_MODE:-exclusive}"
+case "$GEMM_GATE_LOAD_GATE_MODE" in
+  exclusive|record_only) ;;
+  *)
+    echo "orchestrate_m4max: GEMM_GATE_LOAD_GATE_MODE must be 'exclusive' or 'record_only' (got: $GEMM_GATE_LOAD_GATE_MODE)" >&2
+    exit 1
+    ;;
+esac
+
 LOG="${LOG:-$(pwd)/../../../docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522}"
 # 新規の再計測ディレクトリ（§24.10 の設計どおり stamp ごと新しい LOG で実行する）
 # を作成し、解決に失敗した場合は空の LOG で `/` 直下へ書き込まないよう即終了する
@@ -47,22 +63,6 @@ fi
 LABEL="${GEMM_GATE_LABEL:-0.8.0-1522}"
 
 rm -f "$LOG/ALL_DONE_m4max-${LABEL}.marker" "$LOG/MEASUREMENT_FAILED_m4max-${LABEL}.marker" "$LOG/GATE_NOT_PASSED_m4max-${LABEL}.marker"
-
-# --- GEMM_GATE_LOAD_GATE_MODE（イシュー #1522。#1520 と同型の opt-out
-#     方式）: `exclusive`（既定。1488 版と完全同一の専有ゲート）または
-#     `record_only`（専有ゲートを要件にせず load average を記録するのみ）
-#     の 2 値 allowlist。それ以外は何も書き込まず fail-closed で exit 1
-#     とする（判定規則を計測後に緩めない設計と対になる、無効値の暗黙
-#     フォールバック禁止）。 ---
-GEMM_GATE_LOAD_GATE_MODE="${GEMM_GATE_LOAD_GATE_MODE:-exclusive}"
-case "$GEMM_GATE_LOAD_GATE_MODE" in
-  exclusive|record_only) ;;
-  *)
-    echo "orchestrate_m4max: GEMM_GATE_LOAD_GATE_MODE must be 'exclusive' or 'record_only' (got: $GEMM_GATE_LOAD_GATE_MODE)" >&2
-    exit 1
-    ;;
-esac
-
 
 GATE_LOG="$LOG/gate-m4max.log"
 

@@ -2897,7 +2897,9 @@ orchestrate_m4max.sh`〈PR #1506 是正版〉。1488 側のファイル自体は
 
 1. `GEMM_GATE_LOAD_GATE_MODE` 環境変数（既定 `exclusive`）: `exclusive` または
    `record_only` の 2 値 allowlist。それ以外は何も書き込まず fail-closed で
-   `exit 1` とする
+   `exit 1` とする（この allowlist 検証は `LOG` の `mkdir`・既存 per-attempt
+   マーカーの削除より前に実行し、無効値での起動が既存証跡へ影響しないように
+   する。codex-review 指摘対応）
 2. `record_only`: 専有ゲートを待たず `uptime` から load1 を取得し
    （数値妥当性を検証したうえで）`gate-m4max.log` へ 1 行記録してから、直ちに
    並走プロセス確認（`pgrep -x bench-fandhe`／`bench-candle`。両モード共通で
