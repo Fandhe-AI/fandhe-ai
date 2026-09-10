@@ -64,8 +64,11 @@ split-K カーネル実装の数値バグではなく、パーティション分
   パーティション分割そのもの（各パーティションが独立した FMA 連鎖で部分和を求め、単一の連続
   K ループとは異なる結合順序で最終加算される）にあることを示す
 - **最小分割の時点で既に発生**: `(64,64,2048)` を `partitions ∈ {2,4,8,16,32}` で計測したところ、
-  最小分割の `partitions=2` の時点で既に一部要素が閾値を超過した。分割数を増やすほど
-  `fail_count` は非減少に推移する（2/4/8/16/32 partitions でそれぞれ 0/1/2/2/2 件、4096 要素中）
+  最小分割の `partitions=2` の時点で既に一部要素が相対誤差閾値を超過した（`max_rel_err=0.002030`）。
+  ただし `partitions=2` は `fail_count=0` であり、同一要素で絶対誤差・相対誤差の両方が閾値超過し
+  複合判定（`assert_parity`）が不合格になるのは `partitions=4` 以降である（`docs/perf/metal-gemm-
+  splitk-two-pass.md` §5.2）。分割数を増やすほど `fail_count` は非減少に推移する（2/4/8/16/32
+  partitions でそれぞれ 0/1/2/2/2 件、4096 要素中）
 - **classic 経路は同一入力で bit 完全一致**: 古典経路（`dispatch_strided_tiled_prepared` +
   `tile::select_for_device`）は同一乱数シードの `(32,32,8192)` で CPU 参照実装
   （`matmul_reference_fma`）と bit 完全一致（`fail_count=0/1024`・`max_abs_diff=0.0`）すること
@@ -160,7 +163,7 @@ splitk_parity_baseline.rs`）:
 
 **`(128,128,2064)` の `max_rel_err` ceiling（`splitk_parity_baseline.rs::BASELINES` 記録値
 0.14。§1.1 実測値 1.31e-1〈同ファイルのコメントでは 0.1309〉に表記丸め天井を加えた値）は他行の
-ceiling（他 10 行はいずれも 1.0e-3〜8.6e-3 台）と比べて大幅に緩い点を明示する**: 真値が 0 近傍の
+ceiling（他 10 行はいずれも 2.0e-4〜8.6e-3 の範囲）と比べて大幅に緩い点を明示する**: 真値が 0 近傍の
 要素で相対誤差が桁落ちにより外れ値化する現象（§1.1 の説明）であり、この行では `max_rel_err`
 単独では小さな悪化（例えば 0.1309 → 0.139 程度への微増）を検出できない。ただし本行の回帰検出は
 `max_rel_err` だけでなく 4 指標の連言（AND）であり、承認対象の ceiling 案（`fail_count<=2`・
