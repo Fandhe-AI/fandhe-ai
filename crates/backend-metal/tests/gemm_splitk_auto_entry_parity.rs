@@ -67,6 +67,24 @@ fn transpose_dense(logical: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     out
 }
 
+/// classic 経路（非 split-K）の CPU 参照実装に対する bit 完全一致を
+/// `to_bits()` 経由で検証する（`tests/gemm_splitk_bit_match.rs::
+/// assert_bit_exact` と同じ理由: `compare()` は REQ-2 統一複合判定
+/// 「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」を用いるため
+/// `fail_count == 0` は許容誤差内での一致を意味するに過ぎず、bit 完全
+/// 一致を意味しない。classic 経路は CPU 参照実装〈`f32::mul_add`〉と
+/// 同一の FMA 契約〈`.claude/rules/coding-rust.md`〉で丸めるため bit
+/// 完全一致を期待できる回帰検出用の厳密判定として用いる）。
+fn assert_bit_exact_vs_reference(actual: &[f32], expected: &[f32], context: &str) {
+    let actual_bits: Vec<u32> = actual.iter().map(|v| v.to_bits()).collect();
+    let expected_bits: Vec<u32> = expected.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(
+        actual_bits, expected_bits,
+        "{context}: classic 経路の出力が CPU 参照実装と bit 単位で一致しなかった\
+         （fail_count ベースの許容誤差判定では検出できない回帰の疑いがある）。"
+    );
+}
+
 /// `tests/gemm_splitk_parity.rs::TARGET_SHAPES` と同一の承認済み 11
 /// 形状（`common::splitk_parity_baseline::BASELINES` が 1 対 1 対応）。
 const TARGET_SHAPES: &[(usize, usize, usize)] = &[
@@ -211,7 +229,9 @@ fn auto_entry_dispatches_split_k_for_eligible_shapes_and_matches_baseline() {
 /// し、**`NumericContractPendingApproval` では決してない**こと
 /// （ゲート解除自体の直接検証）。classic 経路の出力は既存 bit 一致群
 /// （`tests/gemm_splitk_bit_match.rs` 等）が別途カバーするが、ここでも
-/// CPU 参照実装との bit 完全一致（fail_count=0）を併せて確認する。
+/// CPU 参照実装との bit 完全一致を `to_bits()` 経由（許容誤差を用いる
+/// `compare()`/`fail_count` ではなく `assert_bit_exact_vs_reference`）で
+/// 併せて確認する。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes() {
@@ -262,13 +282,7 @@ fn auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes() {
         }
 
         let actual = c_buf.read_to_vec();
-        let report = compare(&actual, &expected)
-            .unwrap_or_else(|e| panic!("parity compare failed (m={m}, n={n}, k={k}): {e}"));
-        assert_eq!(
-            report.fail_count, 0,
-            "m={m}, n={n}, k={k}: classic 経路が CPU 参照実装と bit 完全一致しない \
-             （fail_count={}）",
-            report.fail_count
-        );
+        let context = format!("auto entry classic fallback vs CPU reference (m={m}, n={n}, k={k})");
+        assert_bit_exact_vs_reference(&actual, &expected, &context);
     }
 }
