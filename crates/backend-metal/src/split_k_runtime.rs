@@ -56,7 +56,7 @@
 //!
 //! # 既定値の単一情報源（イシュー #1547 是正・PR #1553 codex-review 指摘）
 //!
-//! [`SPLIT_K_DEFAULT_ENABLED`] は split-K 到達の既定値を表す単一の契約
+//! `SPLIT_K_DEFAULT_ENABLED` は split-K 到達の既定値を表す単一の契約
 //! 定数であり、次の 2 箇所の既定値をこの定数から seed する:
 //!
 //! (a) 本モジュールの実行時トグル初期値
@@ -83,7 +83,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// の本番結線・#1515 §10.4 の ADOPT 確定と同一）。
 pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;
 
-/// split-K 実行時トグル本体。既定は [`SPLIT_K_DEFAULT_ENABLED`]
+/// split-K 実行時トグル本体。既定は `SPLIT_K_DEFAULT_ENABLED`
 /// （`true`。#1544 の本番既定と同一）。
 static SPLIT_K_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(SPLIT_K_DEFAULT_ENABLED);
 
@@ -148,7 +148,7 @@ mod tests {
         }
     }
 
-    /// [`SPLIT_K_DEFAULT_ENABLED`] 自体が `true` にコミットされていることを
+    /// `SPLIT_K_DEFAULT_ENABLED` 自体が `true` にコミットされていることを
     /// ロックする（Linux でも実行される契約テスト。PR #1553 codex-review
     /// P1 指摘: 削除された旧 `tile.rs` の
     /// `split_k_dispatch_auto_production_enabled_is_true_by_default` は
@@ -172,7 +172,7 @@ mod tests {
         );
     }
 
-    /// [`split_k_enabled`] の**現在値**が [`SPLIT_K_DEFAULT_ENABLED`] と
+    /// [`split_k_enabled`] の**現在値**が `SPLIT_K_DEFAULT_ENABLED` と
     /// 一致することを、`set_split_k_enabled` を一切呼ばずに検証する
     /// （PR #1553 codex-review P1 指摘: 旧
     /// `default_is_enabled_when_no_prior_test_left_it_disabled` は

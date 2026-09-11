@@ -166,8 +166,10 @@ if [[ ! -f "$TILE_RS" ]]; then
   exit 1
 fi
 
-# 1a. 既定値定数宣言が true であること。
-DEFAULT_CONST_LINE="$(grep -F 'pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;' "$RUNTIME_RS" || true)"
+# 1a. 既定値定数宣言が true であること。コメント内に残された旧宣言文で
+#     素通りしないよう、行頭アンカー付きのコード行として完全一致で検証する
+#     （PR #1553 codex-review P0 指摘）。
+DEFAULT_CONST_LINE="$(grep -E '^pub\(crate\) const SPLIT_K_DEFAULT_ENABLED: bool = true;$' "$RUNTIME_RS" || true)"
 if [[ -z "$DEFAULT_CONST_LINE" ]]; then
   echo "error: 'pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;' を $RUNTIME_RS から特定できなかった（既定値が true ではないか宣言形式が変更された可能性。fail-closed。issue #1545/#1547）" >&2
   exit 1
@@ -184,8 +186,11 @@ if [[ -z "$RUNTIME_INIT_LINE" ]]; then
 fi
 
 # 1c. 本番コンストラクタ 7 箇所すべてが単一定数を参照していること。
+#     コメントアウトされた引数（`// crate::...`）を数えないよう、行頭（空白
+#     のみ許容）から始まるコード行としての参照だけを数える
+#     （PR #1553 codex-review P0 指摘）。
 EXPECTED_CTOR_REFS=7
-CTOR_REF_COUNT="$(grep -cF 'crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,' "$GEMM_RS" || true)"
+CTOR_REF_COUNT="$(grep -cE '^[[:space:]]*crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,' "$GEMM_RS" || true)"
 if [[ "$CTOR_REF_COUNT" -ne "$EXPECTED_CTOR_REFS" ]]; then
   echo "error: gemm.rs 内の 'crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,'（本番コンストラクタが split_k_auto_enabled へ渡す既定値）の参照数が ${EXPECTED_CTOR_REFS} 件ではない（実際: ${CTOR_REF_COUNT} 件、$GEMM_RS）。コンストラクタの一部がリテラル固定値・旧ゲート参照へ差し戻された可能性がある（fail-closed。issue #1545/#1547）" >&2
   exit 1
