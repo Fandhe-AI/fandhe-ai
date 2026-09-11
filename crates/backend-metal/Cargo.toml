@@ -208,3 +208,14 @@ required-features = ["internal-diagnostics"]
 [[test]]
 name = "gemm_splitk_runtime_toggle"
 required-features = ["internal-diagnostics"]
+
+# split-K 経路・classic 経路・CPU f32 参照実装の各出力をホスト f64 真値
+# （i 外側・k 中間・j 内側の逐次加算）と突き合わせる診断専用テスト
+# （イシュー #1549）。判定基準は持たず `docs/perf/metal-gemm-splitk-
+# f64-truth.md` へ記録するための実測値を出力する。`MetalGemm::
+# dispatch_auto_with_route`（`internal-diagnostics` feature 限定の
+# `pub`）を直接呼ぶため本 feature を要求する（`gemm_splitk_auto_wiring`
+# と同型）。
+[[test]]
+name = "gemm_splitk_f64_truth"
+required-features = ["internal-diagnostics"]

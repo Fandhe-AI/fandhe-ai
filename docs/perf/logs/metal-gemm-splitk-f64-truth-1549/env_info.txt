@@ -1,0 +1,7 @@
+chip: Apple M4 Max
+os: macOS 26.6.2 (BuildVersion 25G83)
+rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+commit: a87aac69e7d6e7d89b45e2fd487246ac9ba31d27
+load_average: 24.54 12.04 8.01 (1/5/15分。共有負荷下。本テストは実測ベースライン
+  比較を伴わない決定的な診断計測のため負荷ゲートは適用していない)
+hostname: masked
