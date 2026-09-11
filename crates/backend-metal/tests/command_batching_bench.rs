@@ -19,7 +19,8 @@
 //! `cfg(target_os = "macos")` ＋ 各 `#[test]` の理由付き `#[ignore]` は
 //! `command_batching.rs` と同じ方針。
 //!
-//! **`--test-threads=1` が必須（レビュー指摘対応）**:
+//! **直列化ガードで安全化済み（イシュー #1550。旧
+//! `--test-threads=1` 必須運用からの変更）**:
 //! [`pool_reuse_interleaved_with_tracked_steps_preserves_batching`] は
 //! プロセスワイド singleton `MetalContext` の診断カウンタ
 //! （`__diagnostic_batch_counters_snapshot`）を読む。既定の並列実行
@@ -27,12 +28,15 @@
 //! `#[test]` 関数を同時実行する）下では、同一バイナリ内の他テスト
 //! （`command_batching_micro_bench_untracked_vs_tracked`）が同じ
 //! singleton 経由で `encode()` を呼ぶため、カウンタの before/after
-//! 差分が他テストの dispatch で汚染され、`command_buffer_delta <
-//! encode_delta` の判定が本来の意図と無関係な理由で fail/pass しうる。
-//! 必ず `--test-threads=1` を付けて逐次実行すること。
+//! 差分が他テストの dispatch で汚染されうる。両テストの冒頭で
+//! `serialize_diagnostic_counter_tests()`（プロセス内 `static Mutex`
+//! ガード。`crates/backend-metal/tests/gemm_splitk_auto_wiring.rs::
+//! RuntimeFlagGuard` と同型）を取得して直列化するため、
+//! `--test-threads=1` なしの既定並列実行でも安全（付けてもロックにより
+//! 無害）。
 //!
 //! ```sh
-//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture --test-threads=1
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 //! ```
 #![cfg(target_os = "macos")]
 
@@ -51,6 +55,22 @@ const NUMEL: usize = 1024;
 const TRIALS: usize = 5;
 /// 1 trial あたりの連続更新回数。
 const STEPS: usize = 100;
+
+/// 本ファイル内の 2 つの `#[test]`
+/// （[`command_batching_micro_bench_untracked_vs_tracked`]・
+/// [`pool_reuse_interleaved_with_tracked_steps_preserves_batching`]）を
+/// 直列化するロック（イシュー #1550）。両テストともプロセスワイド
+/// singleton `MetalContext` 経由で `encode()` を呼ぶため、`cargo test`
+/// の既定並列実行下では互いの dispatch がカウンタへ混入しうる（旧
+/// 「`--test-threads=1` 必須」運用の代替。`crates/backend-metal/tests/
+/// gemm_splitk_auto_wiring.rs::RuntimeFlagGuard` と同型: `static` 内
+/// `Mutex` を関数内に置くことで同一アドレスをプロセス内で共有し、
+/// lock poisoning は `unwrap_or_else(|e| e.into_inner())` で握り潰して
+/// 継続する）。
+fn serialize_diagnostic_counter_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn sgd_config() -> SgdStepConfig {
     SgdStepConfig {
@@ -164,6 +184,7 @@ fn run_tracked(ops: &MetalBackendOps, steps: usize) -> (f64, Vec<f32>) {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn command_batching_micro_bench_untracked_vs_tracked() {
+    let _guard = serialize_diagnostic_counter_tests();
     let ops = MetalBackendOps::new();
 
     // warmup: パイプライン初回コンパイル（`MetalSgd::new` の実行時
@@ -237,6 +258,7 @@ fn command_batching_micro_bench_untracked_vs_tracked() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn pool_reuse_interleaved_with_tracked_steps_preserves_batching() {
+    let _guard = serialize_diagnostic_counter_tests();
     let ops = MetalBackendOps::new();
     let mem = ops
         .memory_ops()
