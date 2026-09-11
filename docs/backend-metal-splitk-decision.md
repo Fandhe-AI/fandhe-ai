@@ -431,6 +431,24 @@ eligible_shapes_and_matches_baseline` は pass）。
   次段でゲート定数・ドリフト検出テスト・「既定 false」前提の doc コメント
   を撤去できる（定数撤去は別 PR）。
 
+**ゲート ON での既存 `#[ignore]` 群全件走査（M4 Max・2026-09-11・
+backend-metal／facade／autodiff／tensor-core）**: 新規 FAIL は
+`tests/gemm_bias_act_parity.rs` の (64, 64, 4096)・Relu 1 件のみ。融合カーネル
+（classic 経路）と `MetalBackendOps::gemm`→`add`→`relu` の合成腕（`dispatch_auto`
+→ split-K 到達）の Metal 内比較が複合判定 `fail_count=2/4096`
+（`max_abs_diff=1.411e-4`・`max_rel_err=1.497e-3`・`mean_abs_diff=8.515e-6`。
+CPU 参照との比較は pass）——split-K の K 分割に由来する既知特性（`docs/perf/
+metal-gemm-splitk-two-pass.md` §5.5）がこのテストに現れたもの。ユーザー判断
+（2026-09-11）により、この比較にも #1511 承認の baseline 非後退方式を適用し、
+上記実測値を `tests/common/splitk_parity_baseline.rs::FUSED_VS_COMPOSED_
+BASELINES`（CPU 参照用 `BASELINES` 11 行とは独立の表。契約テストの 11 行検査
+には含めない）へ記録・切替済み（tolerance 定数・判定式は不変）。その他の FAIL
+は main でも同一 assert で FAIL する既存（`command_batching_bench`・
+`mnist_scale_train_reuse_metal_batch_counters` の dispatch 数契約）、singleton
+プール共有の並列 flaky（`pool_real_device`。両ツリーで再実行 4/4 pass）、
+worktree の `docs/spec` 未 checkout（autodiff／tensor-core の PoC evidence 参照）、
+CUDA 実機なし（CUDA 専用テスト）のいずれかで、ゲート切替とは無関係。
+
 事後監視として、低負荷時に #1517 と同一プロトコルの framework-compare を
 再実行し記録する（結線の条件にはしない）。
 
