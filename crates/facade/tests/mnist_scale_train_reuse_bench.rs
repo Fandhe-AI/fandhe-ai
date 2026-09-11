@@ -49,7 +49,8 @@
 //! PR #1097 clippy 指摘対応）。理由付き `#[ignore]` は既存の
 //! `device_param_store_bench.rs` と同じ方針。
 //!
-//! **`--test-threads=1` が必須（レビュー指摘対応）**:
+//! **直列化ガードで安全化済み（イシュー #1550。旧
+//! `--test-threads=1` 必須運用からの変更）**:
 //! [`mnist_scale_train_reuse_metal_batch_counters`] はプロセスワイド
 //! singleton `MetalContext` の診断カウンタ
 //! （`__diagnostic_batch_counters_snapshot`）を読む。既定の並列実行
@@ -57,11 +58,13 @@
 //! `#[test]` 関数を同時実行する）下では、同一バイナリ内の他テスト
 //! （`mnist_scale_train_fresh_vs_reuse_metal`）が同じ singleton 経由で
 //! `encode()` を呼ぶため、カウンタの before/after 差分が他テストの
-//! dispatch で汚染され、期待値との一致判定が意図と無関係な理由で
-//! fail/pass しうる。必ず `--test-threads=1` を付けて逐次実行すること。
+//! dispatch で汚染されうる。両テストの冒頭で
+//! `serialize_diagnostic_counter_tests()`（プロセス内 `static Mutex`
+//! ガード）を取得して直列化するため、`--test-threads=1` なしの既定
+//! 並列実行でも安全（`--test-threads=1` を付けてもロックにより無害）。
 //!
 //! ```sh
-//! cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1
+//! cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture
 //! ```
 #![cfg(target_os = "macos")]
 
@@ -97,6 +100,22 @@ const LR: f32 = 0.01;
 /// 比較元と同一プロトコルの実行を `TRIALS` 回独立に繰り返し、各実行の
 /// median をさらに中央値化する（冒頭コメント参照）。
 const TRIALS: usize = 5;
+
+/// 本ファイル内の 2 つの `#[test]`（[`mnist_scale_train_fresh_vs_reuse_metal`]・
+/// [`mnist_scale_train_reuse_metal_batch_counters`]）を直列化するロック
+/// （イシュー #1550）。両テストともプロセスワイド singleton
+/// `MetalContext` 経由で `encode()` を呼ぶため、`cargo test` の既定
+/// 並列実行下では互いの dispatch がカウンタへ混入し、
+/// `mnist_scale_train_reuse_metal_batch_counters` の before/after 差分が
+/// 意図と無関係な理由で fail/pass しうる（旧「`--test-threads=1` 必須」
+/// 運用の代替。`crates/backend-metal/tests/gemm_splitk_auto_wiring.rs::
+/// RuntimeFlagGuard` と同型: `static` 内 `Mutex` を関数内に置くことで
+/// 同一アドレスをプロセス内で共有し、lock poisoning は
+/// `unwrap_or_else(|e| e.into_inner())` で握り潰して継続する）。
+fn serialize_diagnostic_counter_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -274,6 +293,7 @@ fn bench_fresh_vs_reuse(device: Device, label: &str) {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn mnist_scale_train_fresh_vs_reuse_metal() {
+    let _guard = serialize_diagnostic_counter_tests();
     bench_fresh_vs_reuse(Device::Metal, "metal");
 }
 
@@ -282,12 +302,26 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
 /// MetalAllocator::alloc_inner`）により、steady-state の MLP reuse 学習
 /// 1 step でコマンドバッファ生成数・`waitUntilCompleted()` 呼び出し数が
 /// `docs/backend-metal-command-batching-design.md` §4.2 の before 実測
-/// （9 / 9 / 9）から **9 / 8 / 8** へ減ることを、プロセスワイド singleton
-/// `MetalContext`（`ops::MetalBackendOps` の全演算メソッドが経由する
-/// 唯一のコンテキスト）の診断カウンタ（`fandhe_ai_backend_metal::
-/// __diagnostic_batch_counters_snapshot`。`#[doc(hidden)]` のテスト・
-/// 診断専用 API）差分で確認する。`encode()` 呼び出し総数（= dispatch
-/// 総数）自体は #1099 で不変のはず（9）。
+/// （9 / 9 / 9）から #1099 適用直後は **9 / 8 / 8** へ減ることを、
+/// プロセスワイド singleton `MetalContext`（`ops::MetalBackendOps` の
+/// 全演算メソッドが経由する唯一のコンテキスト）の診断カウンタ
+/// （`fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot`。
+/// `#[doc(hidden)]` のテスト・診断専用 API）差分で確認する。
+///
+/// **#1550 追記**: #1223（`docs/perf/train-backward-gemm-wiring.md`）で
+/// `Op::LinearResident` の VJP（`d_weight`）が host CPU `eval::matmul`
+/// から `BackendOps::gemm_fp32_strict` 経由の Metal GPU dispatch へ
+/// 切り替わったことにより、1 step あたり L1・L2 各層の `d_weight` 計算
+/// （2 回）が新たに Metal GPU 上で実行されるようになった（Metal は
+/// `fill_resident_weight_grad` 未実装〈#1212 で CUDA/Metal 双方とも
+/// スコープ外に据え置き〉のため、計算結果はホストへ `download` される
+/// 必要があり、この `download` が同期点となって現在の open バッチを
+/// 都度終端する）。この結果、steady-state 1 step のカウンタは
+/// **11 / 10 / 10**（encode / command_buffer / wait）へ変化した
+/// （既存のバッチ化経路〈forward・SGD〉が分割されたのではなく、新規に
+/// 追加された GPU dispatch 2 件がそれぞれ独立した同期境界を伴うため）。
+/// `encode_delta` は 9 のままではない点に注意（旧コメントの「#1099 で
+/// 不変のはず」は #1223 で成立しなくなった）。
 ///
 /// warmup（`WARMUP` step）で MSL パイプライン初回コンパイル・プールの
 /// フリーリスト充足を steady-state 化してから、その次の 1 step だけを
@@ -296,6 +330,7 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn mnist_scale_train_reuse_metal_batch_counters() {
+    let _guard = serialize_diagnostic_counter_tests();
     let device = Device::Metal;
     let model = build_model();
     let (x_data, y_data) = mlp_data();
@@ -347,20 +382,33 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
     println!(
         "[mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: \
          encode_delta={encode_delta} command_buffer_delta={command_buffer_delta} \
-         wait_delta={wait_delta} — before（#1099 適用前）は 9/9/9 \
-         （`docs/backend-metal-command-batching-design.md` §4.2）"
+         wait_delta={wait_delta} — before（#1099 適用前）は 9/9/9、#1099 適用直後は \
+         9/8/8、#1223（VJP の Metal GPU dispatch 化）適用後は 11/10/10 \
+         （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」節）"
     );
 
+    // #1550: #1223 で `Op::LinearResident` の VJP（d_weight。L1・L2 の
+    // 2 箇所）が host CPU `eval::matmul` から Metal GPU dispatch
+    // （`BackendOps::gemm_fp32_strict`）へ切り替わったことによる意図した
+    // 増分（本ファイル冒頭の doc comment・
+    // `docs/perf/train-backward-gemm-wiring.md` 参照）。Metal は
+    // `fill_resident_weight_grad` 未実装のため、この 2 回の gemm は
+    // 計算結果をホストへ `download` する必要があり、`download` が同期点
+    // として現在の open バッチを終端する。このため encode 総数だけで
+    // なくコマンドバッファ生成数・待機回数も同数（+2）増える。
     assert_eq!(
-        encode_delta, 9,
-        "encode() 呼び出し総数（= dispatch 総数）は #1099 で不変のはず"
+        encode_delta, 11,
+        "encode() 呼び出し総数（= dispatch 総数）は #1223（Op::LinearResident \
+         の VJP が Metal GPU dispatch を追加）適用後は 9→11 のはず"
     );
     assert_eq!(
-        command_buffer_delta, 8,
-        "コマンドバッファ生成数は #1099 適用後 9→8（境界で 1 組統合）のはず"
+        command_buffer_delta, 10,
+        "コマンドバッファ生成数は #1223 適用後 8→10（VJP の 2 回の gemm が \
+         それぞれ download 同期でバッチを終端するため）のはず"
     );
     assert_eq!(
-        wait_delta, 8,
-        "waitUntilCompleted() 呼び出し数は #1099 適用後 9→8 のはず"
+        wait_delta, 10,
+        "waitUntilCompleted() 呼び出し数は #1223 適用後 8→10（VJP の 2 回の \
+         gemm がそれぞれ download で同期するため）のはず"
     );
 }

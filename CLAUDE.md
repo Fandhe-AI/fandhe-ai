@@ -72,7 +72,7 @@ fandhe-ai/
     ├── backend-cuda-ptx-embedding-decision.md # CUDA GEMM ビルド時 PTX 事前埋め込み（candle 方式）不採用判断・JIT キャッシュ結線範囲の更新（#1024）
     ├── backend-metal-aligned-load-decision.md # Metal GEMM アラインメント特化ロード分岐（align_M/N/K function constant 方式）不採用判断（#752 保留 → #808 格下げ）
     ├── backend-metal-async-copy-decision.md # Metal 非公式 simdgroup_async_copy 系 AIR intrinsic 不採用の決定記録（#546）
-    ├── backend-metal-command-batching-design.md # コマンドバッファ・エンコーダ共有と同期境界（waitUntilCompleted）の設計・CUDA 側契約との対応（#1015 ツリー・#1016。§7 に #1017 実装記録追記）
+    ├── backend-metal-command-batching-design.md # コマンドバッファ・エンコーダ共有と同期境界（waitUntilCompleted）の設計・CUDA 側契約との対応（#1015 ツリー・#1016。§7 に #1017 実装記録追記。#1550 で §7 に dispatch 回数テストの切り分け記録を追記）
     ├── backend-metal-mlx-classic-nax-decision.md # MLX classic 経路と CANDIDATES の構成対比・NAX 経路不採用判断（#549）
     ├── backend-metal-mpp-tensor-decision.md # Metal 4 `tensor<>`＋Metal Performance Primitives（MPP）行列積の可用性・バインディング到達性（Route C）・純カーネル時間 A/B・「完全自作コア」との整合のユーザー判断事項整理（採否の結論は出さない。M4 Max 実機実測。#1326）
     ├── backend-metal-morton-mapping-decision.md # 標準 simdgroup_matrix API 下での Morton 順レーン→要素マッピング適用不可の判断（#544）

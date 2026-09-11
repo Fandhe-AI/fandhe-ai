@@ -720,6 +720,53 @@ Metal API を直接呼ばない純粋なロジック）は `cfg(target_os = "mac
   device_param_store_bench.rs` の `legacy_vs_resident_per_step_metal`
   は正しさ検証・小規模ベンチの既存参照として引き続き有効。
 
+### 7.1 #1550: dispatch 回数テスト 2 件の main 側 FAIL の切り分け
+
+`main`（a87aac69 時点）実機実行で以下 2 件が FAIL していた事象の切り分け記録。
+
+- **`command_batching_bench.rs::pool_reuse_interleaved_with_tracked_steps_preserves_batching`**:
+  原因は数値・経路側ではなく**テスト分離不備**。同一バイナリ内の
+  `command_batching_micro_bench_untracked_vs_tracked` と並列実行される
+  と、両テストがプロセスワイド singleton `MetalContext` の診断カウンタ
+  （`diag_encode_calls` 等）を共有してしまい、before/after 差分が汚染
+  される（ファイル冒頭コメントに「`--test-threads=1` 必須」と書かれて
+  いたが機構的な強制が無かった）。是正: 両テストの冒頭で
+  プロセス内 `static Mutex<()>` ガード（`serialize_diagnostic_counter_tests()`。
+  `crates/backend-metal/tests/gemm_splitk_auto_wiring.rs::
+  RuntimeFlagGuard` と同型）を取得して直列化し、`--test-threads=1`
+  なしの既定並列実行でも安全にした。
+- **`mnist_scale_train_reuse_bench.rs::mnist_scale_train_reuse_metal_batch_counters`**:
+  単独実行（`--exact --test-threads=1`）でも `encode_delta` が期待値 9
+  ではなく 11 になる FAIL。`git bisect`（good=`6789a6b7`〈#1110〉・
+  bad=`a87aac69`）で原因コミットを特定した結果、
+  **`e8061f47`（#1223「VJP の `eval::matmul` 呼び出し 3 箇所を
+  `BackendOps::gemm` 経由へ切り替える」）が first bad commit**と判明
+  した。原因は `Op::LinearResident` の VJP（`d_weight`）が host CPU
+  `eval::matmul`（Metal GPU dispatch ゼロ）から
+  `BackendOps::gemm_fp32_strict` 経由の Metal GPU dispatch へ切り替
+  わったこと。本 MLP（2 層）は L1・L2 各層で `d_weight` を 1 回ずつ
+  計算するため、1 step あたり新規に 2 回の Metal GPU gemm dispatch が
+  追加される（+2 encode）。Metal は `fill_resident_weight_grad`
+  未実装（#1212 で CUDA/Metal ともスコープ外に据え置き）のため、この
+  2 回の gemm 結果はホストへ `download` する必要があり、`download` が
+  同期点として現在の open バッチを都度終端する。このため
+  `command_buffer_delta`／`wait_delta` も同数（+2）増える
+  （既存のバッチ化経路〈forward・SGD〉が分割されたわけではない。
+  `dispatch_sync`／`gemm_bias_act_strided` の各ラベルの内訳を
+  `ctx.encode` に一時的な `eprintln!` を仕込んで実機実測し確認済み。
+  `e8061f47` 自体の時点では Metal 側 NT/TN 専用入口〈#1215〉が未実装
+  のため 2 回とも `dispatch_sync`〈host round-trip〉経由、HEAD 時点
+  〈#1215 適用後〉では `gemm_bias_act_strided`〈tracked encode +
+  `mem.download`〉経由に変わっているが、追加の同期境界が生じる点は
+  変わらない）。#1223 自体は CPU 実機で ADOPT 確定済み
+  （`docs/perf/train-backward-gemm-wiring.md`）、Metal は #1215 の
+  M4 Max 実機実測（`docs/perf/metal-gemm-vjp-transposed-entry.md`。
+  train phases reuse step_total 1.109× 改善）で非後退が確認されている
+  意図した経路変更と判断し、期待値を 9/8/8 から **11/10/10** へ更新
+  した（コード側の是正は行っていない。cb/wait 増分を回収する方向の
+  対応は #1212 の Metal 側 `fill_resident_weight_grad` 実装〈未着手〉
+  へ引き継ぐ）。
+
 ## 8. 実装記録（#1099。§4.2・§4.4・§4.5・§3.4・§3.5 の追記）
 
 §4.2・§4.5 が特定した「9 個のバッチがいずれも dispatch 数 1（マージ
