@@ -2111,6 +2111,14 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // 行い、`set_metal_split_k_gemm_enabled` 直後に
     // `metal_split_k_gemm_enabled()` を読み戻して反映を確認する
     // （`--managed` と同一の fail-closed 確認パターン）。
+    //
+    // codex-review 指摘（PR #1546 P2）: facade 側 API 自体が
+    // `#[cfg(target_os = "macos")]` 限定（`crates/facade/src/lib.rs`）の
+    // ため、`metal-split-k-toggle` feature だけで呼び出しブロックを
+    // 有効化すると非 macOS（例: Linux CI・DGX Spark GB10）での
+    // feature-enabled ビルドがリンクエラーになる。`target_os` を
+    // 組み合わせた 3 分岐にし、非 macOS で feature が有効なビルドは
+    // 黙殺せず型付きエラーへ明示的に進める。
     if let Some(split_k_mode) = cli.metal_split_k.as_deref() {
         if cli.device != "metal" {
             return Err(format!(
@@ -2121,7 +2129,7 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        #[cfg(feature = "metal-split-k-toggle")]
+        #[cfg(all(feature = "metal-split-k-toggle", target_os = "macos"))]
         {
             let want_on = split_k_mode == "on";
             fandhe_ai::set_metal_split_k_gemm_enabled(want_on);
@@ -2133,6 +2141,13 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
+        }
+        #[cfg(all(feature = "metal-split-k-toggle", not(target_os = "macos")))]
+        {
+            return Err("MEASURE_ERROR: --metal-split-k is only supported on macOS \
+                 (fandhe_ai::set_metal_split_k_gemm_enabled is `#[cfg(target_os = \"macos\")]`; \
+                 issue #1545)"
+                .into());
         }
         #[cfg(not(feature = "metal-split-k-toggle"))]
         {

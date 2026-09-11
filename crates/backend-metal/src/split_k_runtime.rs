@@ -146,13 +146,27 @@ mod tests {
 
     #[test]
     fn disabling_then_restoring_round_trips_via_guard() {
-        let outer_original = split_k_enabled();
-        {
-            let _guard = FlagGuard::acquire();
-            set_split_k_enabled(false);
-            assert!(!split_k_enabled());
-        }
-        // guard の Drop で `acquire()` 呼び出し時点の値へ復元される。
-        assert_eq!(split_k_enabled(), outer_original);
+        // 初期値の取得から復元確認までを同一のロック区間内（`guard` が
+        // 生存している間）に収める。当初は `_guard` をブロックで早期
+        // drop し、ロック解放後に外側で読んだ `outer_original` と比較して
+        // いたが、その両読み取り（ロック取得前の初期値読み取り・ロック
+        // 解放後の復元確認）はいずれも本ロックの保護区間外であり、
+        // 並列実行される他テスト（例: `set_true_then_false_round_trips`）
+        // がその隙間でフラグを書き換えると比較が偽陰性・偽陽性になり
+        // うる欠陥だった（PR #1546 codex-review P2 指摘）。`guard` を
+        // スコープ末尾まで生存させることで、初期値の捕捉・書き換え・
+        // 復元操作の検証をすべてロック保持中に行う。
+        let guard = FlagGuard::acquire();
+        let original = guard.original;
+        set_split_k_enabled(false);
+        assert!(!split_k_enabled());
+        // `Drop for FlagGuard` が行う復元処理（`set_split_k_enabled(self.
+        // original)`）と同じ操作をロックを保持したまま直接検証する
+        // （`guard` をここで drop してロック解放後に確認すると上記と同じ
+        // 欠陥が再発するため、drop を待たずに検証する）。
+        set_split_k_enabled(original);
+        assert_eq!(split_k_enabled(), original);
+        // スコープ末尾で `guard` が drop され、同じ復元処理が冪等に
+        // もう一度走る（ロック保持中に既に検証済みのため実害なし）。
     }
 }

@@ -259,14 +259,42 @@ restore_lock_trap() {
 }
 trap restore_lock_trap EXIT
 
-echo "== build bench-fandhe (HEAD path patch, --features metal-split-k-toggle) =="
-if ! cargo build --release -p bench-fandhe --features metal-split-k-toggle --config "$PATCH_CONFIG" 2>build-err.tmp; then
-  tail -40 build-err.tmp
-  echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
+# `build_bench_fandhe`（旧 `run_ab_splitk_metal.sh`〈#1517〉と同一方式。
+# codex-review 指摘・PR #1546）: `target/release/bench-fandhe` を直接
+# 決め打ちで参照すると、`CARGO_TARGET_DIR`／`.cargo/config.toml` の
+# `build.target-dir`（Cargo が対象トリプルごとのサブディレクトリへ成果物
+# を出す設定）が指定された環境では実際のビルド成果物とは異なる場所を
+# 読むことになり、また同名の旧バイナリが残っていた場合はビルド失敗時
+# でも古いバイナリを計測してしまう fail-open の危険がある。`--target-dir
+# target`（本スクリプトの cwd 基準に固定）と `cargo build --message-
+# format=json` の JSON Lines 出力から `compiler-artifact` の
+# `target.name == "bench-fandhe"` かつ `target.kind` に `"bin"` を含む
+# 最後のエントリの `executable` を `jq` で抽出し、そのパスを以後の
+# sha256 記録・ドライラン・全計測で使う。
+build_bench_fandhe() { # build_bench_fandhe <out_exe_pathvar> [追加の cargo build 引数...]
+  local __out_var=$1
+  shift
+  local msg_file
+  msg_file="$(mktemp)"
+  if ! cargo build --release -p bench-fandhe --target-dir target --message-format=json "$@" >"$msg_file" 2>build-err.tmp; then
+    tail -40 build-err.tmp
+    echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
+    rm -f build-err.tmp "$msg_file"
+    exit 1
+  fi
   rm -f build-err.tmp
-  exit 1
-fi
-rm -f build-err.tmp
+  local exe
+  exe="$(jq -rs '[.[] | select(.reason == "compiler-artifact" and .target.name == "bench-fandhe" and (.target.kind[]? == "bin") and .executable != null)] | last | .executable // empty' "$msg_file")"
+  rm -f "$msg_file"
+  if [[ -z "$exe" || ! -f "$exe" ]]; then
+    echo "error: bench-fandhe ビルド成果物のパスを 'cargo build --message-format=json' から特定できなかった（jq 抽出結果: '${exe:-<空>}')" >&2
+    exit 1
+  fi
+  printf -v "$__out_var" '%s' "$exe"
+}
+
+echo "== build bench-fandhe (HEAD path patch, --features metal-split-k-toggle) =="
+build_bench_fandhe BUILT_EXE --features metal-split-k-toggle --config "$PATCH_CONFIG"
 
 SOURCE_DESC="$(fandhe_ai_source_desc --features metal-split-k-toggle --config "$PATCH_CONFIG" || true)"
 if [[ "$SOURCE_DESC" != "path:${AB_PATCH_FACADE_PATH}" ]]; then
@@ -274,8 +302,20 @@ if [[ "$SOURCE_DESC" != "path:${AB_PATCH_FACADE_PATH}" ]]; then
   exit 1
 fi
 
-BIN_SHA="$(sha256_of target/release/bench-fandhe)"
-echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC)"
+# 抽出した成果物パスを、以後の全参照（sha256・ドライラン・run_gemm／
+# run_train・`--phases`）が使う既知の固定パスへコピーする（旧 splitk
+# スクリプトの before/after コピーと同型。ビルド成果物パス自体を都度
+# jq で再取得せずに済み、計測中のバイナリ入れ替え検出〈`verify_binary`〉
+# の対象を単純化する）。
+mkdir -p target/release
+if ! cp "$BUILT_EXE" target/release/bench-fandhe-splitk-toggle; then
+  echo "error: cp '$BUILT_EXE' target/release/bench-fandhe-splitk-toggle に失敗した" >&2
+  exit 1
+fi
+EXE=target/release/bench-fandhe-splitk-toggle
+
+BIN_SHA="$(sha256_of "$EXE")"
+echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC, exe: $BUILT_EXE)"
 
 # 差分ガード其の 2（冒頭コメント参照）: `--metal-split-k off` のドライラン
 # 1 回（極小サイズの gemm。計測対象の JSONL・SKIP には出力しない）が
@@ -285,7 +325,7 @@ echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC)"
 # 時に固定されるため、ビルド成功だけでは runtime 分岐が意図どおり
 # 通っているか判別できない）。
 DRYRUN_OUT="$(mktemp)"
-if ! ./target/release/bench-fandhe --task gemm --device metal --size 64 --mode fresh --metal-split-k off --out "$DRYRUN_OUT" 2>dryrun-err.tmp; then
+if ! "./$EXE" --task gemm --device metal --size 64 --mode fresh --metal-split-k off --out "$DRYRUN_OUT" 2>dryrun-err.tmp; then
   echo "error: --metal-split-k off のドライランが失敗した（metal-split-k-toggle feature が有効に反映されていない可能性）: $(cat dryrun-err.tmp)" >&2
   rm -f dryrun-err.tmp "$DRYRUN_OUT"
   exit 1
@@ -304,7 +344,7 @@ cat "$MANIFEST_TMP"
 
 verify_binary() {
   local now
-  now="$(sha256_of target/release/bench-fandhe)"
+  now="$(sha256_of "$EXE")"
   if [[ "$now" != "$BIN_SHA" ]]; then
     echo "error: bench-fandhe のバイナリが計測中に変化した（sha256 不一致）" >&2
     exit 1
@@ -315,7 +355,7 @@ run_gemm() { # run_gemm <arm(off|on)> <out_tmp> <size> <mode>
   local arm=$1 out=$2 size=$3 mode=$4
   verify_binary
   echo "== bench-fandhe gemm metal size=$size mode=$mode metal-split-k=$arm =="
-  if ! ./target/release/bench-fandhe --task gemm --device metal --size "$size" --mode "$mode" --metal-split-k "$arm" --out "$out" 2>err.tmp; then
+  if ! "./$EXE" --task gemm --device metal --size "$size" --mode "$mode" --metal-split-k "$arm" --out "$out" 2>err.tmp; then
     echo "gemm metal size=$size mode=$mode metal-split-k=$arm : $(cat err.tmp)" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in $SKIP_TMP)"
     ANY_FAILED=$((ANY_FAILED + 1))
@@ -327,7 +367,7 @@ run_train() { # run_train <arm(off|on)> <out_tmp> <mode>
   local arm=$1 out=$2 mode=$3
   verify_binary
   echo "== bench-fandhe train metal mode=$mode metal-split-k=$arm =="
-  if ! ./target/release/bench-fandhe --task train --device metal --mode "$mode" --metal-split-k "$arm" --out "$out" 2>err.tmp; then
+  if ! "./$EXE" --task train --device metal --mode "$mode" --metal-split-k "$arm" --out "$out" 2>err.tmp; then
     echo "train metal mode=$mode metal-split-k=$arm : $(cat err.tmp)" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in $SKIP_TMP)"
     ANY_FAILED=$((ANY_FAILED + 1))
@@ -402,13 +442,13 @@ done
 for mode in "${MODES[@]}"; do
   verify_binary
   echo "== bench-fandhe train --phases mode=$mode metal-split-k=off =="
-  if ! ./target/release/bench-fandhe --task train --device metal --mode "$mode" --metal-split-k off --phases --out "$OUT_OFF_PHASES_TMP" 2>err.tmp; then
+  if ! "./$EXE" --task train --device metal --mode "$mode" --metal-split-k off --phases --out "$OUT_OFF_PHASES_TMP" 2>err.tmp; then
     echo "train --phases mode=$mode metal-split-k=off : $(cat err.tmp)" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in ${SKIP_TMP}。--phases は診断用のため ANY_FAILED には計上しない)"
   fi
   rm -f err.tmp
   echo "== bench-fandhe train --phases mode=$mode metal-split-k=on =="
-  if ! ./target/release/bench-fandhe --task train --device metal --mode "$mode" --metal-split-k on --phases --out "$OUT_ON_PHASES_TMP" 2>err.tmp; then
+  if ! "./$EXE" --task train --device metal --mode "$mode" --metal-split-k on --phases --out "$OUT_ON_PHASES_TMP" 2>err.tmp; then
     echo "train --phases mode=$mode metal-split-k=on : $(cat err.tmp)" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in ${SKIP_TMP}。--phases は診断用のため ANY_FAILED には計上しない)"
   fi
