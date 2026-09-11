@@ -2,21 +2,22 @@
 //! 本番結線・#1544 で既定有効化）を実行時に無効化する opt-out スイッチ
 //! （イシュー #1545）。
 //!
-//! # 背景・3 段ゲートの関係
+//! # 背景・2 段ゲートの関係
 //!
-//! split-K 経路への到達は次の 3 段すべてが揃って初めて成立する
-//! （`gemm.rs::dispatch_auto_with_route_impl` の分岐条件を参照）。
+//! split-K 経路への到達は次の 2 段すべてが揃って初めて成立する
+//! （`gemm.rs::dispatch_auto_with_route_impl` の分岐条件を参照。かつては
+//! コンパイル時定数 `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` を
+//! 含む 3 段ゲートだったが、#1547 で当該定数とドリフト検出テストを撤去し
+//! 本モジュールの実行時トグルへ一本化した）。
 //!
-//! 1. `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（コンパイル時
-//!    定数。既定 `true`・イシュー #1516・#1544 で確定した本番既定）。
-//! 2. `MetalGemm::split_k_auto_enabled`（インスタンス単位フィールド。
-//!    `MetalGemm::new` は常に上記コンパイル時定数を渡すため通常は 1. と
-//!    同じ値。`new_with_split_k_auto` で個別インスタンスごとに明示
-//!    `true`／`false` を指定できる A/B 診断用の入口）。
-//! 3. 本モジュールの [`split_k_enabled`]（**プロセスワイドな実行時
-//!    フラグ**。本イシューで新設）。
+//! 1. `MetalGemm::split_k_auto_enabled`（インスタンス単位フィールド。
+//!    `MetalGemm::new` は常に `true` 固定で渡す。`new_with_split_k_auto`
+//!    で個別インスタンスごとに明示 `true`／`false` を指定できる A/B
+//!    診断用の入口）。
+//! 2. 本モジュールの [`split_k_enabled`]（**プロセスワイドな実行時
+//!    フラグ**。イシュー #1545 で新設）。
 //!
-//! 1.・2. はいずれもコンパイル時・構築時に固定される値であり、実行中の
+//! 上記 1. はコンパイル時・構築時に固定される値であり、実行中の
 //! プロセスから split-K を一時的に無効化する手段がなかった
 //! （`docs/backend-metal-splitk-parity-judgment-decision.md` の baseline
 //! 非後退方式は split-K 到達形状で classic 経路と bit 一致しないため、
@@ -31,15 +32,14 @@
 //! - **既定値は `true`**（#1544 の本番既定と同一。フラグ導入前後で
 //!   デフォルト挙動は完全に不変）。
 //! - `false` の間、`dispatch_auto`（`gemm.rs::dispatch_auto_with_route_impl`
-//!   の分岐条件に本フラグが AND で加わる）は 1.・2. の値に関わらず常に
+//!   の分岐条件に本フラグが AND で加わる）は 1. の値に関わらず常に
 //!   classic 経路（`GemmRoute::Classic`）へ固定され、結線前
 //!   （`fandhe-ai =0.8.0` 相当）と bit 同一の出力を返す（fail-closed に
 //!   「安全な既知の経路」へ倒す設計。split-K 側で問題が起きても `false`
 //!   にすれば必ず classic へ戻せる）。
-//! - `true` に戻すと `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` と
-//!   `split_k_auto_enabled` の積で決まる従来どおりの経路選択に戻る
-//!   （本フラグが `true` であること自体は split-K 到達を保証しない。
-//!   1.・2. がいずれも `true` かつ `tile::should_split_k` が対象形状と
+//! - `true` に戻すと `split_k_auto_enabled` の値で決まる従来どおりの
+//!   経路選択に戻る（本フラグが `true` であること自体は split-K 到達を
+//!   保証しない。1. が `true` かつ `tile::should_split_k` が対象形状と
 //!   判定した場合のみ split-K に到達する）。
 //! - **プロセスワイド**（`Device` 単位ではない）。`context_cache::
 //!   cached_gemm` が保持する `MetalGemm` シングルトンはシェーダの
@@ -53,11 +53,39 @@
 //!
 //! `facade::set_metal_split_k_gemm_enabled`／`metal_split_k_gemm_enabled`
 //! から委譲される（composition root。`docs/compat-api-scope.md` §0）。
+//!
+//! # 既定値の単一情報源（イシュー #1547 是正・PR #1553 codex-review 指摘）
+//!
+//! `SPLIT_K_DEFAULT_ENABLED` は split-K 到達の既定値を表す単一の契約
+//! 定数であり、次の 2 箇所の既定値をこの定数から seed する:
+//!
+//! (a) 本モジュールの実行時トグル初期値
+//!     `SPLIT_K_RUNTIME_ENABLED = AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)`
+//! (b) `crate::gemm::MetalGemm::new` 系の通常コンストラクタが
+//!     `Self::new_with_gates` へ渡す per-instance フィールド
+//!     `split_k_auto_enabled` の既定値（`gemm.rs` の 7 箇所すべてが
+//!     `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED` を参照する）
+//!
+//! #1547 で撤去したコンパイル時ゲート `tile::
+//! SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（`dispatch_auto` 自体の結線
+//! 有無を切り替えるゲート）の代替ではない点に注意: 本番経路を無効化する
+//! 唯一の切替手段は上記 2 段ゲート（per-instance フィールド・実行時
+//! トグル）であり、本定数は「その 2 段が seed する既定値が意図せず
+//! `false` へドリフトしていないか」を Linux（macOS 実機を要さない）
+//! でも検出するための契約定数に過ぎない（本モジュール自体は
+//! `cfg(target_os = "macos")` に閉じておらず常時コンパイルされるため、
+//! `tests` モジュールのドリフト検出テストは CI で実行される）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// split-K 実行時トグル本体。既定 `true`（#1544 の本番既定と同一）。
-static SPLIT_K_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(true);
+/// split-K 到達の既定値の単一情報源（イシュー #1547 是正。本モジュール
+/// 冒頭「既定値の単一情報源」節参照）。`true`（#1544 の本番既定・#1516
+/// の本番結線・#1515 §10.4 の ADOPT 確定と同一）。
+pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;
+
+/// split-K 実行時トグル本体。既定は `SPLIT_K_DEFAULT_ENABLED`
+/// （`true`。#1544 の本番既定と同一）。
+static SPLIT_K_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(SPLIT_K_DEFAULT_ENABLED);
 
 /// split-K 2 パス経路への実行時分岐を有効化・無効化する。
 /// `false` にすると `dispatch_auto` は常に classic 経路へ固定される
@@ -120,17 +148,56 @@ mod tests {
         }
     }
 
+    /// `SPLIT_K_DEFAULT_ENABLED` 自体が `true` にコミットされていることを
+    /// ロックする（Linux でも実行される契約テスト。PR #1553 codex-review
+    /// P1 指摘: 削除された旧 `tile.rs` の
+    /// `split_k_dispatch_auto_production_enabled_is_true_by_default` は
+    /// 本番コンストラクタへ渡す既定値が `true` であることを Linux でも
+    /// 検証していたが、置換後の 7 箇所のリテラルには同等の検証がなかった。
+    /// 本テストと `gemm.rs` の 7 箇所の参照〈`crate::split_k_runtime::
+    /// SPLIT_K_DEFAULT_ENABLED`〉・実行時トグル初期値〈直下の定義〉が
+    /// いずれも本定数から seed されるため、本定数のドリフト検出のみで
+    /// 両方をカバーする）。`black_box` は削除された旧テストと同じく
+    /// 定数評価への最適化での握り潰しを避ける目的。
     #[test]
-    fn default_is_enabled_when_no_prior_test_left_it_disabled() {
+    fn split_k_default_enabled_is_true() {
+        assert!(
+            std::hint::black_box(SPLIT_K_DEFAULT_ENABLED),
+            "SPLIT_K_DEFAULT_ENABLED が false のままコミットされている疑いがあります。\
+             本番既定は true（#1515 §10.4 の ADOPT 確定〈2026-09-11〉・#1544 の本番既定と\
+             同一）です。本定数は crate::gemm::MetalGemm::new 系コンストラクタが渡す\
+             per-instance フィールド split_k_auto_enabled の既定・本モジュールの実行時\
+             トグル初期値の両方の単一情報源です（本モジュール冒頭「既定値の単一\
+             情報源」節参照）。"
+        );
+    }
+
+    /// [`split_k_enabled`] の**現在値**が `SPLIT_K_DEFAULT_ENABLED` と
+    /// 一致することを、`set_split_k_enabled` を一切呼ばずに検証する
+    /// （PR #1553 codex-review P1 指摘: 旧
+    /// `default_is_enabled_when_no_prior_test_left_it_disabled` は
+    /// 「明示的に true へ戻した直後は true を観測できる」という
+    /// setter 呼び出し後の往復契約しか検証していなかった）。
+    ///
+    /// 本テストが安全である根拠（帰納法）: 本ファイル内の他の全テストは
+    /// [`FlagGuard`] を経由し、`Drop` が `acquire()` 時点で捕捉した
+    /// `original` へ必ず復元する（panic 時も unwind 経由で `Drop` が
+    /// 走る）。ロック未取得のままフラグを書き換えるテスト（クレート内・
+    /// `tests/*.rs` の別プロセス実行分を含め）は本クレートに存在しない
+    /// （`grep -rn set_split_k_enabled` で確認済み）。したがって
+    /// プロセス起動直後の初期値が `SPLIT_K_DEFAULT_ENABLED` である限り、
+    /// 以降どのテストが何回実行されても「区間の始点で読んだ値へ必ず
+    /// 戻す」性質が保たれ、他のどのテストの後に本テストが実行されても
+    /// 観測値は `SPLIT_K_DEFAULT_ENABLED` のままになる。
+    #[test]
+    fn current_value_matches_default_without_prior_setter_call() {
         let _guard = FlagGuard::acquire();
-        // 既定値そのものの検証はプロセス起動直後の状態に依存するため、
-        // ここでは「明示的に true へ戻した直後は true を観測できる」
-        // という setter/getter の往復契約を検証する（他テストが無効化
-        // したまま残す可能性があるため、真の初期値検証はしない。
-        // `precision.rs::tests::default_is_disabled_when_no_prior_test_
-        // left_it_enabled` と同じ設計判断）。
-        set_split_k_enabled(true);
-        assert!(split_k_enabled());
+        assert_eq!(
+            split_k_enabled(),
+            SPLIT_K_DEFAULT_ENABLED,
+            "setter 未呼び出しの現在値が SPLIT_K_DEFAULT_ENABLED と一致しません。\
+             他のテストが FlagGuard を経由せずフラグを書き換えた可能性があります。"
+        );
     }
 
     #[test]

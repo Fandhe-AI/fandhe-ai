@@ -304,6 +304,7 @@ $ grep -rn "dispatch_split_k_strided_prepared" crates/backend-metal/src/ops.rs
 と実質的に同一の挙動（bit 同一の classic 経路）が維持される。詳細・切替条件は
 `docs/backend-metal-splitk-decision.md` §5「本番結線（#1516）」を参照。
 **追記（2026-09-11・#1516 マージ）**: ゲートはユーザー判断（保守性優先・後退セルは split-K 非到達のノイズ帯）で `true` へ切替済み。経緯は `docs/backend-metal-splitk-decision.md` §5「ユーザー判断による本番結線」を参照。
+**追記（#1547）**: 上記のコンパイル時定数 `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` とそのドリフト検出テストは撤去し、split-K の切替は per-instance フィールド `split_k_auto_enabled`（`MetalGemm::new` は `true` 固定）と #1545 の実行時トグル（`crate::split_k_runtime`）へ一本化した。詳細は `docs/backend-metal-splitk-decision.md` §5「定数ゲートの撤去（#1547）」参照。
 
 **framework-compare A/B**: 「計測対象なし」と判断した。本番経路（`dispatch_auto`・
 `MetalBackendOps::gemm`）へのコード変更がゼロであるため（上記出力参照）、

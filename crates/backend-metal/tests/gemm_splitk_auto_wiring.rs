@@ -9,13 +9,15 @@
 //! 上——`MetalBackendOps::gemm` が実際に呼ぶ本番 NN 入口
 //! `MetalGemm::dispatch_auto` が `tile::should_split_k`／
 //! `tile::select_route_for_device` の判定結果に基づき正しく分岐するか
-//! （`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` ゲート・
-//! `MetalGemm::split_k_auto_enabled` インスタンスフィールド）を検証する。
+//! （`MetalGemm::split_k_auto_enabled` インスタンスフィールド・実行時
+//! トグル `crate::split_k_runtime::split_k_enabled()`）を検証する。
 //!
-//! **2026-09-11・イシュー #1516 でゲートは既定 `true`**（`docs/backend-
+//! **2026-09-11・イシュー #1516 で本番既定は `true`**（`docs/backend-
 //! metal-splitk-decision.md` §5「本番結線（#1516）」参照: 性能面の正式
 //! ADOPT 判定〈イシュー #1515 §10.4〉が M4 Max 実機 5 run で確定した
-//! ことを受けた切替）。よって `MetalGemm::new()`（本番既定コンストラクタ）
+//! ことを受けた切替。#1547 でコンパイル時定数ゲートを撤去し
+//! per-instance フィールドの固定値＋実行時トグルへ一本化した）。
+//! よって `MetalGemm::new()`（本番既定コンストラクタ）
 //! 自体が split-K 分岐を有効化した状態で構築される。本テストは
 //! `MetalGemm::new_with_split_k_auto` で明示的に `true`／`false` を
 //! 指定したインスタンスとの bit 一致・経路選択を検証する

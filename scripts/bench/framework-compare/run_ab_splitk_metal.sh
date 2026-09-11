@@ -22,11 +22,27 @@
 #
 # 差分ガード（旧方式の「before==after で計測対象なし」再発防止・
 # `docs/perf/train-step-phase-breakdown.md` §5.11 の教訓を踏襲）は、
-# 2 バイナリ比較ではなくなったため以下の 2 点へ置き換える:
-#   1. `AB_PATCH_FACADE_PATH/../backend-metal/src/tile.rs` の
-#      `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 宣言行が `true` で
-#      あること（`--metal-split-k off` が「本番経路が元々 off だから
-#      off に見える」だけの無意味な比較にならないことの確認）。
+# 2 バイナリ比較ではなくなったため以下の点へ置き換える:
+#   1. `AB_PATCH_FACADE_PATH/../backend-metal/src/{split_k_runtime,gemm,
+#      tile}.rs` に対する 4 点の静的検証（PR #1553 codex-review P0 是正で
+#      4a/4b/4c/4d へ拡張。旧版〈#1545 導入時点〉は実行時トグルの初期値
+#      宣言行のみを検証しており、本番コンストラクタ側の有効化状態を
+#      検証していなかったため、コンパイル時ゲートが無効化されたまま
+#      実行時トグル初期値だけ `true` の worktree を誤検出できなかった）:
+#      1a. `split_k_runtime.rs` の既定値定数宣言
+#          `pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;` の存在
+#      1b. 実行時トグル初期値式がその定数を参照していること
+#          （`AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)`）
+#      1c. `gemm.rs` 内で本番コンストラクタ 7 箇所すべてが
+#          `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,` を参照して
+#          いること（本番コンストラクタが有効化状態で構築されることの
+#          直接検証）
+#      1d. `tile.rs` に旧コンパイル時ゲート
+#          `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = false;` の
+#          宣言行が残っていないこと（#1547 以前の状態・誤指定の検出）
+#      （`--metal-split-k off` が「本番経路が元々 off だから off に見える」
+#      だけの無意味な比較にならないことの確認。詳細は本スクリプト中盤の
+#      「差分ガード其の 1」コメント参照）。
 #   2. ビルド後、`--metal-split-k off` のドライラン 1 回（極小サイズの
 #      gemm 1 回）が MEASURE_ERROR にならないこと（`metal-split-k-toggle`
 #      feature が実際に有効化されていることの確認）。
@@ -99,25 +115,97 @@ if ! grep -qE '^\s*name\s*=\s*"fandhe-ai"\s*$' "$AB_PATCH_FACADE_PATH/Cargo.toml
 fi
 PATCH_CONFIG="patch.crates-io.fandhe-ai.path=\"${AB_PATCH_FACADE_PATH}\""
 
-# 差分ガード其の 1（上記コメント参照）: `SPLIT_K_DISPATCH_AUTO_
-# PRODUCTION_ENABLED`（`crates/backend-metal/src/tile.rs`）が `true` で
-# あることを機械検証する。`grep -E` の alternation は BRE エスケープ不要
-# （`(false|true)`）。
-TILE_RS="$(cd "$AB_PATCH_FACADE_PATH/../backend-metal" 2>/dev/null && pwd)/src/tile.rs"
+# 差分ガード其の 1（上記コメント参照）: PR #1553 codex-review P0 指摘への
+# 是正。旧ガードは実行時トグル `SPLIT_K_RUNTIME_ENABLED` の初期値式しか
+# 検証しておらず、本番コンストラクタ（`crate::gemm::MetalGemm::new` 系）
+# が `new_with_gates` へ渡す per-instance `split_k_auto_enabled` の
+# 有効化状態を検証していなかった。このため「コンパイル時ゲートは
+# `false`・実行時トグル初期値のみ `true`」という worktree を
+# `AB_PATCH_FACADE_PATH` に指定した場合、旧ガードは通過してしまい
+# on/off 双方が classic 経路のまま計測される事故を防げなかった
+# （#1547 で単一定数 `split_k_runtime::SPLIT_K_DEFAULT_ENABLED` へ
+# 一本化した経緯は `crates/backend-metal/src/split_k_runtime.rs` 冒頭
+# 「既定値の単一情報源」節・`docs/backend-metal-splitk-decision.md` §5
+# 参照）。本ガードは次の 4 点をすべて機械検証する:
+#   1a. `split_k_runtime.rs` の既定値定数宣言
+#       `pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;` が存在する
+#   1b. 実行時トグルの初期値式がその定数を参照している
+#       （`AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)`）
+#   1c. `gemm.rs` 内で本番コンストラクタが `new_with_gates` へ渡す
+#       `split_k_auto_enabled` の既定値として
+#       `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,`（末尾カンマで
+#       引数位置に固定。doc comment の `///` 行はこの形では始まらない
+#       ため誤検出しない）が**ちょうど 7 箇所**参照されている（`gemm.rs`
+#       の `MetalGemm::new`／`new_with_unroll_acc`／`new_with_frag_load`／
+#       `new_with_coop_load`／`new_with_tile_class`／
+#       `new_with_source_specialization`／`new_with_fine_barrier` の
+#       7 コンストラクタに対応）
+#   1d. 旧コンパイル時ゲート `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
+#       を `false` で宣言する行が `tile.rs` に存在しない（#1547 以前の
+#       worktree を誤って指定した場合の検出。#1547 で当該定数自体を
+#       撤去済みのため、通常は宣言行そのものが存在しない）
+# `grep -F` は固定文字列一致（正規表現メタ文字のエスケープ不要）。
+BACKEND_METAL_SRC="$(cd "$AB_PATCH_FACADE_PATH/../backend-metal/src" 2>/dev/null && pwd)"
+if [[ -z "$BACKEND_METAL_SRC" ]]; then
+  echo "error: backend-metal/src not found relative to AB_PATCH_FACADE_PATH ($AB_PATCH_FACADE_PATH)" >&2
+  exit 1
+fi
+RUNTIME_RS="$BACKEND_METAL_SRC/split_k_runtime.rs"
+GEMM_RS="$BACKEND_METAL_SRC/gemm.rs"
+TILE_RS="$BACKEND_METAL_SRC/tile.rs"
+if [[ ! -f "$RUNTIME_RS" ]]; then
+  echo "error: split_k_runtime.rs not found ($RUNTIME_RS)" >&2
+  exit 1
+fi
+if [[ ! -f "$GEMM_RS" ]]; then
+  echo "error: gemm.rs not found ($GEMM_RS)" >&2
+  exit 1
+fi
 if [[ ! -f "$TILE_RS" ]]; then
-  echo "error: tile.rs not found relative to AB_PATCH_FACADE_PATH ($AB_PATCH_FACADE_PATH)" >&2
+  echo "error: tile.rs not found ($TILE_RS)" >&2
   exit 1
 fi
-GATE_LINE="$(grep -E '^pub\(crate\) const SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = (false|true);$' "$TILE_RS" || true)"
-if [[ -z "$GATE_LINE" ]]; then
-  echo "error: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED の宣言行を $TILE_RS から特定できなかった（フォーマット変更の可能性。fail-closed）" >&2
+
+# 1a. 既定値定数宣言が true であること。コメント内に残された旧宣言文で
+#     素通りしないよう、行頭アンカー付きのコード行として完全一致で検証する
+#     （PR #1553 codex-review P0 指摘）。
+DEFAULT_CONST_LINE="$(grep -E '^pub\(crate\) const SPLIT_K_DEFAULT_ENABLED: bool = true;$' "$RUNTIME_RS" || true)"
+if [[ -z "$DEFAULT_CONST_LINE" ]]; then
+  echo "error: 'pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;' を $RUNTIME_RS から特定できなかった（既定値が true ではないか宣言形式が変更された可能性。fail-closed。issue #1545/#1547）" >&2
   exit 1
 fi
-if [[ "$GATE_LINE" != *"= true;" ]]; then
-  echo "error: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED が true ではない（${GATE_LINE}）。runtime トグルの on/off 比較が本番経路の on/off 比較にならないため fail-closed で停止する（issue #1545）。" >&2
+
+# 1b. 実行時トグル初期値式が同定数を参照していること。doc comment 内の
+#     同文（`//! ... AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)`）に一致して
+#     素通りしないよう、行頭の `static` 宣言と初期値式を 1 行で一体検証する
+#     （PR #1553 codex-review 指摘）。
+RUNTIME_INIT_LINE="$(grep -E '^static SPLIT_K_RUNTIME_ENABLED: AtomicBool = AtomicBool::new\(SPLIT_K_DEFAULT_ENABLED\);$' "$RUNTIME_RS" || true)"
+if [[ -z "$RUNTIME_INIT_LINE" ]]; then
+  echo "error: 実行時トグルの static 宣言 'static SPLIT_K_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(SPLIT_K_DEFAULT_ENABLED);' を $RUNTIME_RS から特定できなかった（初期値がリテラルへ差し戻された、または SPLIT_K_DEFAULT_ENABLED を参照していない可能性。doc comment 内の言及は検証対象外。fail-closed。issue #1545/#1547）" >&2
   exit 1
 fi
-echo "gate check: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=true ($TILE_RS)"
+
+# 1c. 本番コンストラクタ 7 箇所すべてが単一定数を参照していること。
+#     コメントアウトされた引数（`// crate::...`）を数えないよう、行頭（空白
+#     のみ許容）から始まるコード行としての参照だけを数える
+#     （PR #1553 codex-review P0 指摘）。
+EXPECTED_CTOR_REFS=7
+CTOR_REF_COUNT="$(grep -cE '^[[:space:]]*crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,' "$GEMM_RS" || true)"
+if [[ "$CTOR_REF_COUNT" -ne "$EXPECTED_CTOR_REFS" ]]; then
+  echo "error: gemm.rs 内の 'crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,'（本番コンストラクタが split_k_auto_enabled へ渡す既定値）の参照数が ${EXPECTED_CTOR_REFS} 件ではない（実際: ${CTOR_REF_COUNT} 件、$GEMM_RS）。コンストラクタの一部がリテラル固定値・旧ゲート参照へ差し戻された可能性がある（fail-closed。issue #1545/#1547）" >&2
+  exit 1
+fi
+
+# 1d. 旧コンパイル時ゲートが false で宣言されたままの worktree を拒否する
+#     （#1547 以前の状態や誤指定の検出。当該定数自体は #1547 で撤去済み
+#     のため、通常は宣言行が存在しない = 空文字列 = チェック通過）。
+LEGACY_GATE_LINE="$(grep -F 'SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = false;' "$TILE_RS" || true)"
+if [[ -n "$LEGACY_GATE_LINE" ]]; then
+  echo "error: 旧コンパイル時ゲート 'SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = false;' が $TILE_RS に見つかった。split-K 本番結線が無効化された worktree の可能性があり、on/off 比較が本番経路の on/off 比較にならないため fail-closed で停止する（issue #1545/#1547）" >&2
+  exit 1
+fi
+
+echo "gate check: SPLIT_K_DEFAULT_ENABLED=true / runtime init references it / gemm.rs ctor refs=${CTOR_REF_COUNT} (expected ${EXPECTED_CTOR_REFS}) / no legacy false gate in tile.rs ($BACKEND_METAL_SRC)"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "AB_DRY_RUN=1: バリデーションのみ完了（cargo/pmset/sysctl は実行しない）。"

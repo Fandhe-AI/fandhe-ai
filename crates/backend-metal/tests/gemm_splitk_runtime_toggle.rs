@@ -3,15 +3,16 @@
 //!
 //! # 位置づけ（`gemm_splitk_auto_wiring.rs` との違い）
 //!
-//! `gemm_splitk_auto_wiring.rs`（イシュー #1516）は、コンパイル時定数
-//! `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` とインスタンス単位
+//! `gemm_splitk_auto_wiring.rs`（イシュー #1516）は、インスタンス単位
 //! フィールド `MetalGemm::split_k_auto_enabled`（`new_with_split_k_auto`
-//! で構築時に固定）による 2 段のゲートを検証する。本ファイルは、その
-//! さらに 1 段上——`split_k_runtime::set_split_k_enabled`（プロセス
-//! ワイドかつ**実行時に**切り替え可能な 3 段目のゲート）が、同一の
-//! `MetalGemm` インスタンス（`MetalGemm::new()`。本番既定コンストラクタ）
-//! に対して呼び出しごとの経路選択を実際に変えることを検証する
-//! （`docs/backend-metal-splitk-decision.md` §5「実行時トグル」参照）。
+//! で構築時に固定。`MetalGemm::new()` は既定 `true` 固定。#1547 で
+//! コンパイル時定数ゲートを撤去し本フィールドへ一本化）による段の
+//! ゲートを検証する。本ファイルは、その 1 段上——
+//! `split_k_runtime::set_split_k_enabled`（プロセスワイドかつ**実行時
+//! に**切り替え可能なゲート）が、同一の `MetalGemm` インスタンス
+//! （`MetalGemm::new()`。本番既定コンストラクタ）に対して呼び出しごとの
+//! 経路選択を実際に変えることを検証する（`docs/backend-metal-splitk-
+//! decision.md` §5「実行時トグル」参照）。
 //!
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する。CI（GitHub
 //! ホステッド・ubuntu-latest）では `#![cfg(target_os = "macos")]` により

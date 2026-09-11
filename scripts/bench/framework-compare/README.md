@@ -962,13 +962,14 @@ CUDA Graph で capture・再利用する経路（`fandhe_ai::set_cuda_graph_step
 
 ### `--metal-split-k <on|off>`（イシュー #1545。Metal GEMM split-K opt-in 経路の runtime トグル A/B）
 
-Metal GEMM split-K opt-in 経路（`crates/backend-metal` の
-`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`。イシュー #1516 で本番結線・
-#1544 で既定 `true` 化済み）を、facade 公開 API
+Metal GEMM split-K opt-in 経路（`crates/backend-metal`。イシュー #1516 で
+`dispatch_auto` へ本番結線・`MetalGemm::new` は `split_k_auto_enabled=true`
+固定〈#1547 でコンパイル時定数ゲート `SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+ENABLED` を撤去し per-instance フィールドへ一本化〉）を、facade 公開 API
 `fandhe_ai::set_metal_split_k_gemm_enabled`／`metal_split_k_gemm_enabled`
 （`#[cfg(target_os = "macos")]`）経由で run 単位に明示 on/off するための
-値付きフラグ。既定は未指定（API を呼ばない。既存の `SPLIT_K_DISPATCH_
-AUTO_PRODUCTION_ENABLED` 本番既定がそのまま適用される）。
+値付きフラグ。既定は未指定（API を呼ばない。実行時トグル
+`crate::split_k_runtime`〈既定 `true`〉がそのまま適用される）。
 
 - **`bench-fandhe`**: `--device metal` 以外は常に `MEASURE_ERROR`
   （プロセスワイドフラグが cpu／cuda 計測で無音 no-op になるのを防ぐ。
@@ -999,15 +1000,26 @@ AUTO_PRODUCTION_ENABLED` 本番既定がそのまま適用される）。
   でバリデーションのみ実行）が同一バイナリで `--metal-split-k off`／
   `--metal-split-k on` を run 単位に interleave 起動し、gemm 8 セル
   （N=512/1024/2048/4096 × fresh/reuse）＋ train 2 セル（fresh/reuse）を
-  5 round 計測する。差分ガードは①`AB_PATCH_FACADE_PATH` 配下の
-  `crates/backend-metal/src/tile.rs` の `SPLIT_K_DISPATCH_AUTO_
-  PRODUCTION_ENABLED` が `true` であること（`--metal-split-k off` が
-  「本番経路が元々 off だから off に見える」だけの無意味な比較になるのを
-  防ぐ）、②ビルド後 `--metal-split-k off` のドライラン 1 回が
-  `MEASURE_ERROR` にならないこと（`metal-split-k-toggle` feature が実際
-  に有効化されていることの確認）の 2 点（`run_ab_gemm_metal.sh`／旧
-  `run_ab_splitk_metal.sh` の「before==after で計測対象なし」再発防止と
-  同じ思想。`docs/perf/train-step-phase-breakdown.md` §5.11）。gemm・
+  5 round 計測する。差分ガードは `AB_PATCH_FACADE_PATH` 配下の
+  `crates/backend-metal/src/{split_k_runtime,gemm,tile}.rs` に対する
+  4 点の静的検証（PR #1553 codex-review P0 是正で拡張。旧版は実行時
+  トグルの初期値宣言行のみを検証しており、コンパイル時ゲートが無効な
+  まま初期値だけ `true` の worktree を誤検出できなかった）——
+  ①`split_k_runtime.rs` の既定値定数宣言
+  `pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;` の存在、
+  ②実行時トグル初期値式がその定数を参照していること
+  （`AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)`）、③`gemm.rs` 内で本番
+  コンストラクタ 7 箇所すべてが
+  `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,` を参照していること
+  （本番コンストラクタが有効化状態で構築されることの直接検証）、
+  ④`tile.rs` に旧コンパイル時ゲート `SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+  ENABLED: bool = false;` の宣言行が残っていないこと（#1547 以前の
+  状態・誤指定の検出）——に加え、⑤ビルド後 `--metal-split-k off` の
+  ドライラン 1 回が `MEASURE_ERROR` にならないこと（`metal-split-k-
+  toggle` feature が実際に有効化されていることの確認）（`run_ab_gemm_
+  metal.sh`／旧 `run_ab_splitk_metal.sh` の「before==after で計測対象
+  なし」再発防止と同じ思想。`docs/perf/train-step-phase-breakdown.md`
+  §5.11）。gemm・
   train は `compare_gemm_ab.py --task <t>` の task 別 fail-closed 検証
   （他タスクの行を警告つきで除外し 1 件でもあれば判定不能にする）と
   整合させるため、最初からタスク別 JSONL（`results-m4max-splitk-ab-
@@ -1045,7 +1057,10 @@ AUTO_PRODUCTION_ENABLED` 本番既定がそのまま適用される）。
   既定有効化された現在は、facade 公開 API による runtime on/off 切替が
   可能になったため、本節の**単一 facade path・単一バイナリ・
   `--metal-split-k on|off` の runtime 切替**方式へ置換した
-  （`run_ab_readout_metal.sh` と同型の設計）
+  （`run_ab_readout_metal.sh` と同型の設計）。**追記（#1547）**:
+  `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 定数自体は #1547 で撤去済み
+  （`split_k_runtime` の実行時トグルへ一本化）。上記は #1517 当時の経緯を
+  記した歴史記録として保持する
 
 ## 使い方
 
@@ -1415,6 +1430,9 @@ worktree・`AB_AFTER_FACADE_PATH`＝同定数 `=true` の worktree）を比較�
 「結線前後」の実体がこの定数の `false`/`true` そのものであるため
 （イシュー #1516・PR #1530）、承認ピン ↔ HEAD 比較では混入するゲート
 以外の差分（E2〜E8 等）を排除した、字義通りの結線前後計測になる。
+**追記（#1547）**: `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 定数自体は
+#1547 で撤去済み（`split_k_runtime` の実行時トグルへ一本化）。本セクション
+全体は #1517 当時（2 worktree・2 バイナリ方式）の歴史記録として保持する。
 
 - `run_ab_splitk_metal.sh <label>`（`AB_BEFORE_FACADE_PATH`／
   `AB_AFTER_FACADE_PATH` 必須・`AB_DRY_RUN=1` でバリデーションのみ実行）
