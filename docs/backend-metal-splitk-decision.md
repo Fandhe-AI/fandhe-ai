@@ -511,6 +511,53 @@ APPROVED=false`」等と記述していた docs・`CLAUDE.md` 索引行を棚卸
 `tests/gemm_splitk_bit_match.rs`・`tests/gemm_splitk_parity.rs` の冒頭 `//!`。切り出し先:
 未起票（ユーザー承認待ち。`.claude/rules/out-of-scope-tracking.md`）。
 
+### 実行時トグル（#1545・2026-09-11）
+
+`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = true`（#1544）により split-K 2 パス経路が
+本番既定になったのを受け、プロセスワイドかつ実行時に classic 経路へ一時的に固定できる
+opt-out スイッチを追加した。
+
+- **API**: `fandhe_ai::set_metal_split_k_gemm_enabled(bool)` / `fandhe_ai::
+  metal_split_k_gemm_enabled() -> bool`（`crates/facade/src/lib.rs`。`cfg(target_os =
+  "macos")`）。実体は `fandhe_ai_backend_metal::split_k_runtime::set_split_k_enabled` /
+  `split_k_enabled`（`crates/backend-metal/src/split_k_runtime.rs`。新設）への薄い委譲。
+  `crates/backend-cuda/src/precision.rs`（`AtomicU8` による CUDA GEMM 精度モードの
+  プロセスワイド切替）と同型の設計（`AtomicBool`・`Ordering::SeqCst`）。
+- **既定値**: `true`（#1544 の本番既定と同一。導入前後でデフォルト挙動は完全に不変）。
+- **3 段ゲートの関係**: split-K 到達は次の 3 つがすべて `true` の場合のみ成立する
+  （`gemm.rs::dispatch_auto_with_route_impl` の分岐条件）。
+  1. `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（コンパイル時定数。既定 `true`）
+  2. `MetalGemm::split_k_auto_enabled`（インスタンス単位フィールド。`MetalGemm::new` は
+     常に 1. の値を渡す。`new_with_split_k_auto` で個別に固定可能）
+  3. `split_k_runtime::split_k_enabled()`（本節の実行時トグル。プロセスワイド・実行中に
+     切り替え可能）
+- **fail-closed**: `false` にすると、1.・2. の値に関わらず常に classic 経路
+  （`GemmRoute::Classic`）へ固定され、split-K 結線前（`fandhe-ai =0.8.0` 相当）と bit
+  同一の出力になる。「問題が起きたら `false` にすれば必ず既知の安全な経路へ戻せる」設計。
+- **スレッド安全性**: `AtomicBool`（`Ordering::SeqCst`）でスレッド間共有。頻度が低い設定
+  変更のため緩い順序による最適化は不要と判断（`precision.rs` の `AtomicU8` と同じ判断）。
+- **bit 同一契約**: `false` の間の出力は結線前と bit 同一（classic 経路のみを通るため）。
+  `true`（既定）時の split-K 到達形状は従来どおり実測 baseline 非後退方式（`docs/backend-
+  metal-splitk-parity-judgment-decision.md` §7）で classic と bit 不一致を受け入れる。
+- **`context_cache::cached_gemm` シングルトンとの関係**: `MetalGemm` はシェーダの実行時
+  コンパイルを伴う重い構築コストを持つため、本トグルの切り替えのために作り直すことは
+  しない。`split_k_auto_enabled` フィールド自体は構築時のまま不変で、呼び出しの都度
+  実行時トグルを読み取ることで対応する。
+- **テストの所在**:
+  - 単体テスト（Linux。`split_k_runtime.rs` 内 `#[cfg(test)] mod tests`）: 既定 `true`・
+    set/get 往復・RAII ガードによる原状復帰。
+  - 実機 `#[ignore]` 統合テスト（`crates/backend-metal/tests/gemm_splitk_runtime_toggle.rs`。
+    `internal-diagnostics` feature 限定）: (a) `false` で `MetalGemm::new()` が
+    `new_with_split_k_auto(&ctx, false)` と bit 同一・`GemmRoute::Classic` 到達、
+    (b) `true` で対象形状が `GemmRoute::SplitK` へ到達し `new_with_split_k_auto(&ctx,
+    true)` と bit 同一、(c) false→true の往復後に既定と bit 同一に戻ることを検証する。
+  - 既存 `tests/gemm_splitk_auto_wiring.rs`（インスタンス単位ゲートの検証が目的）は、
+    本トグルの状態に左右されないよう各テスト冒頭で `true` へ固定する RAII ガードを追加
+    済み。
+- **bench-fandhe との関係**: `scripts/bench/` 配下の `--metal-split-k` フラグ（`feature
+  metal-split-k-toggle` 限定。別イシュー実装）は本 facade API を経由して実行時トグルを
+  操作する想定（本ドキュメント時点ではスコープ外・別エージェント実装）。
+
 ## §6 参照
 
 - `docs/perf/logs/metal-gemm-splitk-shapes-1308/`（M4 Max 実機実測の生ログ・`aggregate.py`／

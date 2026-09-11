@@ -179,6 +179,34 @@ class LoadRowsTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_metal_split_k_key_row_is_skipped_with_warning(self):
+        # イシュー #1545: `metal_split_k`（Metal GEMM split-K opt-in 経路
+        # の runtime トグル A/B）は `managed`（CUDA managed memory 配置）
+        # とは別軸のフラグのため、混入した行は managed 配置 A/B から
+        # 除外される。
+        r = _rec(False, 0.001)
+        r["metal_split_k"] = "on"
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("metal_split_k", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_invalid_metal_split_k_type_is_skipped_with_warning(self):
+        r = _rec(False, 0.001)
+        r["metal_split_k"] = 1  # 不正型（str ではない）
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_managed_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("metal_split_k", warnings[0])
+        finally:
+            os.unlink(path)
+
     def test_rows_missing_identity_fields_are_skipped_with_warning(self):
         # イシュー #1353（github-actions レビュー指摘・2 巡目）:
         # `task`/`device`/`size` を削除した行は `_cell_key` が

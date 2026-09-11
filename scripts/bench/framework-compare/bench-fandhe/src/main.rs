@@ -519,6 +519,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: None,
         graph_stats: None,
         readout: cli.readout.as_deref(),
+        metal_split_k: cli.metal_split_k.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -619,6 +620,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: None,
         graph_stats: None,
         readout: cli.readout.as_deref(),
+        metal_split_k: cli.metal_split_k.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -705,6 +707,7 @@ fn run_gemm_device_checksum(
         graph: None,
         graph_stats: None,
         readout: None,
+        metal_split_k: cli.metal_split_k.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -787,6 +790,7 @@ fn run_gemm_reuse_device_checksum(
         graph: None,
         graph_stats: None,
         readout: None,
+        metal_split_k: cli.metal_split_k.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -945,6 +949,7 @@ fn emit_gemm_phase_records(
                 graph: None,
                 graph_stats: None,
                 readout: cli.readout.as_deref(),
+                metal_split_k: cli.metal_split_k.as_deref(),
             },
             phase,
             phase_index,
@@ -1053,6 +1058,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // （実際に到達するかどうかも本計測の観測対象）。
         graph: cli.graph.as_deref(),
         readout: None,
+        metal_split_k: cli.metal_split_k.as_deref(),
         #[cfg(feature = "graph-step")]
         graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
         #[cfg(not(feature = "graph-step"))]
@@ -1219,6 +1225,7 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // 到達する主対象（実装計画 (a)(b)）。
         graph: cli.graph.as_deref(),
         readout: None,
+        metal_split_k: cli.metal_split_k.as_deref(),
         #[cfg(feature = "graph-step")]
         graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
         #[cfg(not(feature = "graph-step"))]
@@ -1459,6 +1466,7 @@ fn emit_phase_records(
                 // step` 非到達の対照として `graph` 値のみ記録する。
                 graph: cli.graph.as_deref(),
                 readout: None,
+                metal_split_k: cli.metal_split_k.as_deref(),
                 #[cfg(feature = "graph-step")]
                 graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
                 #[cfg(not(feature = "graph-step"))]
@@ -1541,6 +1549,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: None,
         graph_stats: None,
         readout: cli.readout.as_deref(),
+        metal_split_k: cli.metal_split_k.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1645,6 +1654,7 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: None,
         graph_stats: None,
         readout: cli.readout.as_deref(),
+        metal_split_k: cli.metal_split_k.as_deref(),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1867,6 +1877,7 @@ fn emit_infer_phase_records(
                 graph: None,
                 graph_stats: None,
                 readout: cli.readout.as_deref(),
+                metal_split_k: cli.metal_split_k.as_deref(),
             },
             phase,
             phase_index,
@@ -2091,6 +2102,64 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    // イシュー #1545: `--metal-split-k <on|off>` は `--device metal`
+    // 限定の allowlist 方式（`--managed` の `--device cuda` 限定と同型）。
+    // Metal GEMM split-K opt-in 経路の本番結線（`SPLIT_K_DISPATCH_AUTO_
+    // PRODUCTION_ENABLED`）は runtime トグルを持たない facade 公開 API
+    // 未着のため、`metal-split-k-toggle` feature（既定無効）でコンパイル
+    // 時に分離する。有効化・呼び出しは計測開始前（run_* を呼ぶより前）に
+    // 行い、`set_metal_split_k_gemm_enabled` 直後に
+    // `metal_split_k_gemm_enabled()` を読み戻して反映を確認する
+    // （`--managed` と同一の fail-closed 確認パターン）。
+    //
+    // codex-review 指摘（PR #1546 P2）: facade 側 API 自体が
+    // `#[cfg(target_os = "macos")]` 限定（`crates/facade/src/lib.rs`）の
+    // ため、`metal-split-k-toggle` feature だけで呼び出しブロックを
+    // 有効化すると非 macOS（例: Linux CI・DGX Spark GB10）での
+    // feature-enabled ビルドがリンクエラーになる。`target_os` を
+    // 組み合わせた 3 分岐にし、非 macOS で feature が有効なビルドは
+    // 黙殺せず型付きエラーへ明示的に進める。
+    if let Some(split_k_mode) = cli.metal_split_k.as_deref() {
+        if cli.device != "metal" {
+            return Err(format!(
+                "MEASURE_ERROR: --metal-split-k is only meaningful for --device metal (got \
+                 device='{}'; the split-K opt-in path affects only the Metal backend. \
+                 issue #1545)",
+                cli.device
+            )
+            .into());
+        }
+        #[cfg(all(feature = "metal-split-k-toggle", target_os = "macos"))]
+        {
+            let want_on = split_k_mode == "on";
+            fandhe_ai::set_metal_split_k_gemm_enabled(want_on);
+            if fandhe_ai::metal_split_k_gemm_enabled() != want_on {
+                return Err(format!(
+                    "MEASURE_ERROR: set_metal_split_k_gemm_enabled({want_on}) did not take \
+                     effect (metal_split_k_gemm_enabled() != {want_on} after setting; \
+                     issue #1545)"
+                )
+                .into());
+            }
+        }
+        #[cfg(all(feature = "metal-split-k-toggle", not(target_os = "macos")))]
+        {
+            return Err("MEASURE_ERROR: --metal-split-k is only supported on macOS \
+                 (fandhe_ai::set_metal_split_k_gemm_enabled is `#[cfg(target_os = \"macos\")]`; \
+                 issue #1545)"
+                .into());
+        }
+        #[cfg(not(feature = "metal-split-k-toggle"))]
+        {
+            return Err(format!(
+                "MEASURE_ERROR: --metal-split-k {split_k_mode} requires a path-patched facade \
+                 built with --features metal-split-k-toggle (fandhe_ai::set_metal_split_k_gemm_\
+                 enabled is not part of the crates.io =0.8.0 pin; issue #1545; see \
+                 scripts/bench/framework-compare/README.md \"--metal-split-k\" section)"
+            )
+            .into());
+        }
+    }
     match (cli.task.as_str(), cli.mode.as_str(), cli.phases) {
         ("train", "fresh", true) => run_train_phases(cli),
         ("train", "reuse", true) => run_train_reuse_phases(cli),
@@ -2158,6 +2227,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         }
     }
 
@@ -2240,6 +2310,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         }
     }
 
@@ -2375,6 +2446,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         };
         let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
         let msg = err.to_string();
@@ -2402,6 +2474,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         }
     }
 
@@ -2651,6 +2724,7 @@ mod tests {
     fn run_gemm_jsonl_records_readout_override_value() {
         let cli = Cli {
             readout: Some("legacy".to_string()),
+            metal_split_k: None,
             ..make_cli("gemm", "fresh", &temp_out_path("gemm-readout-legacy"))
         };
         let out_path = std::path::PathBuf::from(cli.out.clone());
@@ -2668,6 +2742,7 @@ mod tests {
     fn run_gemm_reuse_jsonl_records_readout_override_value() {
         let cli = Cli {
             readout: Some("borrowed".to_string()),
+            metal_split_k: None,
             ..make_cli(
                 "gemm",
                 "reuse",
@@ -2799,6 +2874,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         };
         dispatch(&cli).expect("cuda gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2828,6 +2904,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         };
         dispatch(&cli).expect("metal gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2858,6 +2935,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         }
     }
 
@@ -3082,6 +3160,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         })
         .expect("cuda infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -3106,6 +3185,7 @@ mod tests {
                 device_checksum: false,
                 graph: None,
                 readout: None,
+                metal_split_k: None,
             })
             .expect("cuda infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -3140,6 +3220,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         })
         .expect("metal infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -3164,6 +3245,7 @@ mod tests {
                 device_checksum: false,
                 graph: None,
                 readout: None,
+                metal_split_k: None,
             })
             .expect("metal infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -3199,6 +3281,7 @@ mod tests {
                 device_checksum: false,
                 graph: None,
                 readout: None,
+                metal_split_k: None,
             };
             let err = dispatch(&cli).expect_err("--tf32 must be rejected on bench-fandhe");
             let msg = err.to_string();
@@ -3227,6 +3310,7 @@ mod tests {
                 device_checksum: false,
                 graph: None,
                 readout: None,
+                metal_split_k: None,
             };
             let err = dispatch(&cli).expect_err("--managed must be rejected on non-cuda device");
             let msg = err.to_string();
@@ -3259,6 +3343,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         };
         let err = dispatch(&cli)
             .expect_err("--managed must be rejected without managed-placement feature");
@@ -3266,6 +3351,69 @@ mod tests {
         assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
         assert!(msg.contains("--managed"), "msg={msg}");
         assert!(msg.contains("0.8.0"), "msg={msg}");
+    }
+
+    /// イシュー #1545: `--metal-split-k` は `--device metal` 以外では
+    /// 常に MEASURE_ERROR で fail-fast する（プロセスワイドフラグが
+    /// cpu／cuda 計測で無音 no-op になるのを防ぐため。`--managed` と同型）。
+    #[test]
+    fn metal_split_k_flag_on_non_metal_device_is_measure_error() {
+        for device in ["cpu", "cuda"] {
+            let out = temp_out_path(&format!("metal-split-k-non-metal-{device}"));
+            let cli = Cli {
+                task: "gemm".to_string(),
+                device: device.to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: "fresh".to_string(),
+                phases: false,
+                tf32: false,
+                managed: false,
+                device_checksum: false,
+                graph: None,
+                readout: None,
+                metal_split_k: Some("on".to_string()),
+            };
+            let err =
+                dispatch(&cli).expect_err("--metal-split-k must be rejected on non-metal device");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--metal-split-k"), "msg={msg}");
+        }
+    }
+
+    /// イシュー #1545: `metal-split-k-toggle` feature が無効な既定ビルド
+    /// （`fandhe_ai::set_metal_split_k_gemm_enabled` API は crates.io 公開版
+    /// `fandhe-ai =0.8.0` に未収録）では、`--device metal` でも
+    /// `--metal-split-k` は常に MEASURE_ERROR で fail-fast する。本テストは
+    /// このビルド構成（既定 feature）でのみ意味を持つ（`metal-split-k-toggle`
+    /// feature 有効ビルドでは実際に path patch 済み facade を呼び出す経路が
+    /// 走るため、本テストとは別に M4 Max 実機実測で検証する。README
+    /// 「`--metal-split-k`」節）。
+    #[test]
+    #[cfg(not(feature = "metal-split-k-toggle"))]
+    fn metal_split_k_flag_without_feature_is_measure_error() {
+        let out = temp_out_path("metal-split-k-no-feature-metal");
+        let cli = Cli {
+            task: "gemm".to_string(),
+            device: "metal".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: "fresh".to_string(),
+            phases: false,
+            tf32: false,
+            managed: false,
+            device_checksum: false,
+            graph: None,
+            readout: None,
+            metal_split_k: Some("on".to_string()),
+        };
+        let err = dispatch(&cli)
+            .expect_err("--metal-split-k must be rejected without metal-split-k-toggle feature");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--metal-split-k"), "msg={msg}");
+        assert!(msg.contains("metal-split-k-toggle"), "msg={msg}");
     }
 
     /// イシュー #1350: `--graph` は `--device cuda --task train` 以外では
@@ -3294,6 +3442,7 @@ mod tests {
                 device_checksum: false,
                 graph: Some("on".to_string()),
                 readout: None,
+                metal_split_k: None,
             };
             let err = dispatch(&cli)
                 .expect_err("--graph must be rejected outside --device cuda --task train");
@@ -3329,6 +3478,7 @@ mod tests {
                 device_checksum: false,
                 graph: Some(mode.to_string()),
                 readout: None,
+                metal_split_k: None,
             };
             let err =
                 dispatch(&cli).expect_err("--graph must be rejected without graph-step feature");
@@ -3358,6 +3508,7 @@ mod tests {
                 device_checksum: true,
                 graph: None,
                 readout: None,
+                metal_split_k: None,
             };
             let err =
                 dispatch(&cli).expect_err("--device-checksum must be rejected for non-gemm tasks");
@@ -3385,6 +3536,7 @@ mod tests {
             device_checksum: true,
             graph: None,
             readout: None,
+            metal_split_k: None,
         };
         let err = dispatch(&cli).expect_err("--device-checksum --phases must be rejected");
         let msg = err.to_string();
@@ -3416,6 +3568,7 @@ mod tests {
             device_checksum: true,
             graph: None,
             readout: None,
+            metal_split_k: None,
         };
         let err = dispatch(&cli)
             .expect_err("--device-checksum must be rejected without device-checksum feature");
@@ -3476,6 +3629,7 @@ mod tests {
                 device_checksum: false,
                 graph: None,
                 readout: None,
+                metal_split_k: None,
             };
             dispatch(&cli).expect("cuda train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -3508,6 +3662,7 @@ mod tests {
                 device_checksum: false,
                 graph: None,
                 readout: None,
+                metal_split_k: None,
             };
             dispatch(&cli).expect("metal train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");

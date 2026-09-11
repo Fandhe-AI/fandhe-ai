@@ -231,6 +231,19 @@ def load_rows(path):
                     f"実際: {obj['readout']!r}） — skipped"
                 )
                 continue
+            # イシュー #1545: `metal_split_k`（Metal GEMM split-K opt-in
+            # 経路の runtime トグル A/B。`--metal-split-k`）行も `readout`
+            # と同型の理由で型検証する（値は `"on"`/`"off"` の文字列）。
+            if "metal_split_k" in obj and (
+                not isinstance(obj["metal_split_k"], str)
+                or obj["metal_split_k"] not in ("on", "off")
+            ):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'metal_split_k' フィールド型/値"
+                    f"（'on'/'off' の str を期待。実際: "
+                    f"{obj['metal_split_k']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -282,6 +295,12 @@ def _matching_rows(rows, framework, mode, size, device="cuda"):
         # ゲート混同を防ぐため除外する（`compare_readout_ab.py` が専用の
         # interleave A/B 比較を別途担う）。
         if "readout" in r:
+            continue
+        # イシュー #1545: `metal_split_k` キーを持つ行（Metal GEMM
+        # split-K opt-in 経路の runtime トグル A/B 計測）は既定プロトコル
+        # 計測とのゲート混同を防ぐため除外する（`run_ab_splitk_metal.sh`
+        # が `compare_gemm_ab.py` で専用の A/B 比較を別途担う）。
+        if "metal_split_k" in r:
             continue
         out.append(r)
     return out

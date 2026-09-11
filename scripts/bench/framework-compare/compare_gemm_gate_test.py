@@ -444,6 +444,47 @@ class LoadRowsTfz32Test(unittest.TestCase):
         self.assertTrue(any("tf32" in w for w in warnings))
 
 
+class LoadRowsMetalSplitKTest(unittest.TestCase):
+    """`metal_split_k`（イシュー #1545）の型検証・除外を `tf32` と同型で
+    検証する。"""
+
+    def test_non_string_row_is_skipped_with_warning(self):
+        good = _row("fandhe-ai", 1024, "reuse", 0.010)
+        bad = dict(_row("fandhe-ai", 1024, "reuse", 0.011))
+        bad["metal_split_k"] = 1  # 不正型（str ではない）
+        path = _write_jsonl([good, bad])
+        try:
+            rows, warnings = compare_gemm_gate.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(any("metal_split_k" in w for w in warnings))
+
+    def test_unknown_string_value_row_is_skipped_with_warning(self):
+        good = _row("fandhe-ai", 1024, "reuse", 0.010)
+        bad = dict(_row("fandhe-ai", 1024, "reuse", 0.011))
+        bad["metal_split_k"] = "maybe"  # 不正値（"on"/"off" 以外）
+        path = _write_jsonl([good, bad])
+        try:
+            rows, warnings = compare_gemm_gate.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(any("metal_split_k" in w for w in warnings))
+
+    def test_metal_split_k_row_is_excluded_from_gate_matching(self):
+        # `metal_split_k` キーを持つ行（Metal split-K runtime トグル
+        # A/B 計測）は既定プロトコル計測とのゲート混同を防ぐため
+        # `_matching_rows` から除外されることを確認する。
+        rows = [
+            dict(_row("fandhe-ai", 1024, "reuse", 0.010), metal_split_k="on"),
+        ]
+        matches = compare_gemm_gate._matching_rows(
+            rows, "fandhe-ai", "reuse", 1024, device="metal"
+        )
+        self.assertEqual(matches, [])
+
+
 class MainCliTest(unittest.TestCase):
     def test_main_exit_code_reflects_achievement(self):
         achieved_rows = [_row("fandhe-ai", 1024, "reuse", 0.010) for _ in range(5)] + [

@@ -603,6 +603,12 @@ pub struct MetalGemm {
     /// 2026-09-11・イシュー #1516・#1515 §10.4 の ADOPT 確定を受けて切替）を
     /// 渡す。実際の分岐先（split-K か classic か）
     /// は `tile::select_route_for_device` が `(m, n, k)` から純粋に決める。
+    /// **本フィールドが `true` でも、実行時トグル（`crate::
+    /// split_k_runtime::split_k_enabled()`。イシュー #1545）が `false`
+    /// の間は classic 経路へ固定される**（`dispatch_auto_with_route_impl`
+    /// 参照。本フィールドはコンパイル時・構築時に固定される値であり、
+    /// 実行中のプロセスから一時的に無効化する手段は実行時トグル側が
+    /// 担う）。
     split_k_auto_enabled: bool,
 }
 
@@ -971,6 +977,12 @@ impl MetalGemm {
     /// `pub` にする理由は [`Self::new_with_tile_class`] doc comment と同じ
     /// （`pub(crate)` のまま `#[cfg(test)]` を付けない場合の dead_code
     /// 検査抵触も同型）。
+    ///
+    /// 本引数は `crate::split_k_runtime`（イシュー #1545・プロセスワイド
+    /// な実行時トグル）とは独立の軸である: 本引数はインスタンス構築時に
+    /// 固定されるのに対し、`split_k_runtime` は構築後も実行時に切り替え
+    /// 可能な 3 段目のゲート（`docs/backend-metal-splitk-decision.md`
+    /// §5「実行時トグル」参照）。
     pub fn new_with_split_k_auto(
         ctx: &MetalContext,
         split_k_auto_enabled: bool,
@@ -1935,6 +1947,13 @@ impl MetalGemm {
     /// 発火してしまう。将来 `SPLIT_K_NUMERIC_CONTRACT_APPROVED` を `false` へ
     /// 差し戻す運用（本モジュール冒頭 doc コメント「`false` へ戻す条件」）を
     /// 全入口で一貫させるため、本関数でも明示的に確認する。
+    ///
+    /// **3 段ゲート（イシュー #1545）**: split-K 分岐は上記の数値契約定数・
+    /// インスタンス単位の `split_k_auto_enabled` に加え、プロセスワイドな
+    /// 実行時 opt-out トグル `crate::split_k_runtime::split_k_enabled()`
+    /// （`facade::set_metal_split_k_gemm_enabled`。既定 `true`）の 3 つが
+    /// すべて `true` のときのみ発火する（実体は
+    /// `dispatch_auto_with_route_impl` の条件式）。
     pub fn dispatch_auto(
         &self,
         ctx: &MetalContext,
@@ -2011,7 +2030,18 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<(Vec<f32>, tile::GemmRoute), MetalError> {
-        if self.split_k_auto_enabled && SPLIT_K_NUMERIC_CONTRACT_APPROVED {
+        // 実行時 opt-out トグル（`crate::split_k_runtime`。イシュー
+        // #1545）を条件へ追加する。コンパイル時定数
+        // `SPLIT_K_NUMERIC_CONTRACT_APPROVED`・インスタンス単位の
+        // `self.split_k_auto_enabled` に続く 3 段目のゲートであり、
+        // `false` の間は他 2 段の値に関わらず classic 経路へ固定される
+        // （`facade::set_metal_split_k_gemm_enabled` から委譲される
+        // プロセスワイドな設定。`split_k_runtime` モジュール冒頭
+        // コメントの契約参照）。
+        if self.split_k_auto_enabled
+            && SPLIT_K_NUMERIC_CONTRACT_APPROVED
+            && crate::split_k_runtime::split_k_enabled()
+        {
             validate_dims(a, b, m, n, k)?;
             let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
             // `dispatch_variant`（classic 経路）が実効次元確定後に必ず通す

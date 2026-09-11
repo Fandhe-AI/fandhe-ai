@@ -154,6 +154,44 @@ class LoadRowsTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_metal_split_k_on_and_off_values_are_loaded_not_excluded(self):
+        # イシュー #1545: `metal_split_k` は `readout`／`graph`／`managed`
+        # 等と異なり本比較器の対象から除外しない（`run_ab_splitk_metal.sh`
+        # が off/on を別ファイルへ分離して本比較器の before/after 入力に
+        # 渡す設計のため）。妥当な値（"on"/"off"）は通常どおりロードされる。
+        rows = [_rec(0.001), _rec(0.0009)]
+        rows[0]["metal_split_k"] = "off"
+        rows[1]["metal_split_k"] = "on"
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(len(loaded), 2)
+            self.assertEqual(warnings, [])
+        finally:
+            os.unlink(path)
+
+    def test_metal_split_k_invalid_string_value_is_skipped_with_warning(self):
+        rows = [_rec(0.001)]
+        rows[0]["metal_split_k"] = "maybe"  # 不正値（"on"/"off" 以外）
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertTrue(any("metal_split_k" in w for w in warnings))
+        finally:
+            os.unlink(path)
+
+    def test_metal_split_k_non_string_value_is_skipped_with_warning(self):
+        rows = [_rec(0.001)]
+        rows[0]["metal_split_k"] = 1  # 不正型（str ではない）
+        path = _write_jsonl(rows)
+        try:
+            loaded, warnings = compare_gemm_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertTrue(any("metal_split_k" in w for w in warnings))
+        finally:
+            os.unlink(path)
+
     def test_wrong_task_or_device_or_size_is_skipped(self):
         rows = [
             _rec(0.001, task="train"),

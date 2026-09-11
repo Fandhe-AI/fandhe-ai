@@ -164,6 +164,33 @@ class LoadRowsTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_metal_split_k_key_row_is_skipped_with_warning(self):
+        # イシュー #1545: `metal_split_k`（Metal GEMM split-K opt-in 経路
+        # の runtime トグル A/B）は `graph`（CUDA Graph step capture）とは
+        # 別軸のフラグのため、混入した行は graph A/B から除外される。
+        r = _rec(None, 0.001)
+        r["metal_split_k"] = "on"
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_graph_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("metal_split_k", warnings[0])
+        finally:
+            os.unlink(path)
+
+    def test_non_string_metal_split_k_row_is_skipped_with_type_warning(self):
+        r = _rec(None, 0.001)
+        r["metal_split_k"] = 1  # 不正型（str ではない）
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_graph_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("metal_split_k", warnings[0])
+        finally:
+            os.unlink(path)
+
     def test_other_framework_is_skipped_with_warning(self):
         r = _rec(None, 0.001)
         r["framework"] = "candle"

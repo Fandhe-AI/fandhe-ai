@@ -524,3 +524,42 @@ pub fn set_cuda_managed_memory_enabled(enabled: bool) {
 pub fn cuda_managed_memory_enabled() -> bool {
     fandhe_ai_backend_cuda::placement::managed_placement_enabled()
 }
+
+/// Metal GEMM（`fandhe_ai::tape().var(a).matmul(b)` 等が最終的に到達する
+/// `MetalBackendOps::gemm`）の split-K 2 パス経路（イシュー #1516 で
+/// 本番結線・#1544 で既定有効化）を実行時に無効化する opt-out スイッチ
+/// （イシュー #1545）。
+///
+/// `fandhe_ai_backend_metal::split_k_runtime::set_split_k_enabled` への
+/// 薄い委譲（[`set_cuda_tf32_gemm_enabled`] と同型の composition root。
+/// `docs/compat-api-scope.md` §0 の確定公開面）。**既定は有効
+/// （`true`）**——コンパイル時ゲート（`SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+/// ENABLED`）・インスタンス単位ゲート（`MetalGemm::split_k_auto_enabled`）
+/// に続く 3 段目のゲートであり、本関数を呼ばない限り #1544 で確定した
+/// 本番既定挙動は完全に不変。`false` にすると、以降の全スレッドの
+/// `dispatch_auto`（`MetalBackendOps::gemm` が通る本番 NN 入口）が
+/// split-K 到達形状も含めて常に classic 経路へ固定され、結線前
+/// （`fandhe-ai =0.8.0` 相当）と bit 同一の出力を返す（fail-closed に
+/// 「安全な既知の経路」へ倒す設計。`true` に戻すと従来どおりの経路選択
+/// に戻る）。プロセスワイドな設定であり（`Device` 単位ではない）、
+/// `fandhe_ai_backend_metal::split_k_runtime` モジュール冒頭コメントの
+/// 3 段ゲートの関係・`docs/backend-metal-splitk-decision.md` §5
+/// 「実行時トグル」を参照。
+///
+/// split-K 到達形状（K 支配的な非正方形状。`tile::should_split_k`）では
+/// classic 経路と bit 一致しない（実測 baseline 非後退方式による受け入れ。
+/// `docs/backend-metal-splitk-parity-judgment-decision.md` §7）。数値一致
+/// 許容誤差そのものは変更しない。適用範囲は `dispatch_auto` を経由する
+/// `MetalBackendOps::gemm` 系のみ（`gemm_bias_act` 融合カーネルは元々
+/// classic 経路のみのため対象外）。
+#[cfg(target_os = "macos")]
+pub fn set_metal_split_k_gemm_enabled(enabled: bool) {
+    fandhe_ai_backend_metal::split_k_runtime::set_split_k_enabled(enabled);
+}
+
+/// [`set_metal_split_k_gemm_enabled`] で設定した現在の実行時トグル状態を
+/// 返す（既定 `true`）。
+#[cfg(target_os = "macos")]
+pub fn metal_split_k_gemm_enabled() -> bool {
+    fandhe_ai_backend_metal::split_k_runtime::split_k_enabled()
+}

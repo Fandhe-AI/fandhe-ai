@@ -217,6 +217,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: None,
         graph_stats: None,
         readout: None,
+        metal_split_k: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -344,6 +345,7 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             graph: None,
             graph_stats: None,
             readout: None,
+            metal_split_k: None,
         }
         .emit(&cli.out)?;
     }
@@ -411,6 +413,7 @@ fn run_gemm_transfer_split(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             graph: None,
             graph_stats: None,
             readout: None,
+            metal_split_k: None,
         }
         .emit(&cli.out)?;
     }
@@ -513,6 +516,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: None,
         graph_stats: None,
         readout: None,
+        metal_split_k: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -560,6 +564,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: None,
         graph_stats: None,
         readout: None,
+        metal_split_k: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -639,6 +644,20 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    // イシュー #1545: `--metal-split-k`（Metal GEMM split-K opt-in 経路の
+    // runtime トグル）も fandhe-ai 固有の opt-in API
+    // （`set_metal_split_k_gemm_enabled`）を指す概念であり、candle には
+    // 対応する公開 API が存在しない。`--managed`／`--graph` と同型の
+    // allowlist 方式で常に拒否する（codex-review 指摘・PR #1546:
+    // 共通パーサーがこのフラグを受理しても、candle 側で拒否しなければ
+    // フラグを無視したまま通常計測してしまう）。
+    if cli.metal_split_k.is_some() {
+        return Err(
+            "MEASURE_ERROR: --metal-split-k is not supported by candle (fandhe-ai-only Metal \
+             GEMM split-K opt-in; issue #1545)"
+                .into(),
+        );
+    }
     // イシュー #1339: `--device-checksum` は `--task gemm` 限定（`run_gemm`
     // 内でのみ device reduction 分岐を持つ）。`gemm-transfer-split`
     // （#1103 の Metal 転送分離診断）・`train`／`infer` は対象外。
@@ -676,6 +695,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         }
     }
 
@@ -754,5 +774,25 @@ mod tests {
     fn graph_flag_absent_passes_the_guard() {
         let cli = base_cli("gemm", "cuda", false);
         assert!(cli.graph.is_none());
+    }
+
+    /// イシュー #1545（codex-review 指摘・PR #1546）: `--metal-split-k`
+    /// は fandhe-ai 固有の opt-in であり candle には対応する公開 API が
+    /// 存在しないため、`--graph` と同様に常に MEASURE_ERROR で拒否
+    /// されることを確認する。
+    #[test]
+    fn metal_split_k_flag_is_always_measure_error() {
+        let mut cli = base_cli("gemm", "metal", false);
+        cli.metal_split_k = Some("on".to_string());
+        let err = dispatch(&cli).expect_err("--metal-split-k must be rejected on bench-candle");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--metal-split-k"), "msg={msg}");
+    }
+
+    #[test]
+    fn metal_split_k_flag_absent_passes_the_guard() {
+        let cli = base_cli("gemm", "cuda", false);
+        assert!(cli.metal_split_k.is_none());
     }
 }

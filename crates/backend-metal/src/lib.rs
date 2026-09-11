@@ -482,6 +482,11 @@ pub mod softmax;
 // 方針（AGENTS.md P1）。
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) mod spec_source;
+// split-K 2 パス経路（イシュー #1516・#1544）の実行時 opt-out トグル
+// （イシュー #1545）。`pad`/`tile` と同じ設計判断で `objc2` 系 FFI に
+// 触れないため、`cfg(target_os = "macos")` を付けず Linux（本実装
+// 環境・CI）でも `AtomicBool` の単体テストが回るようにしてある。
+pub mod split_k_runtime;
 pub mod tile;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた

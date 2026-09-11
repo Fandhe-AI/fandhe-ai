@@ -146,6 +146,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         graph: None,
         graph_stats: None,
         readout: None,
+        metal_split_k: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -265,6 +266,7 @@ fn run_train<B: AutodiffBackend>(
         graph: None,
         graph_stats: None,
         readout: None,
+        metal_split_k: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -317,6 +319,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         graph: None,
         graph_stats: None,
         readout: None,
+        metal_split_k: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -407,6 +410,20 @@ fn validate_unsupported_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
                 .into(),
         );
     }
+    // イシュー #1545: `--metal-split-k`（Metal GEMM split-K opt-in 経路の
+    // runtime トグル）も fandhe-ai 固有の opt-in API
+    // （`set_metal_split_k_gemm_enabled`）を指す概念であり、burn には
+    // 対応する公開 API が存在しない。`--managed`／`--graph` と同型の
+    // allowlist 方式で常に拒否する（codex-review 指摘・PR #1546:
+    // 共通パーサーがこのフラグを受理しても、burn 側で拒否しなければ
+    // フラグを無視したまま通常計測してしまう）。
+    if cli.metal_split_k.is_some() {
+        return Err(
+            "MEASURE_ERROR: --metal-split-k is not supported by burn (fandhe-ai-only Metal \
+             GEMM split-K opt-in; issue #1545)"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -445,6 +462,7 @@ mod tests {
             device_checksum: false,
             graph: None,
             readout: None,
+            metal_split_k: None,
         }
     }
 
@@ -500,6 +518,26 @@ mod tests {
 
     #[test]
     fn graph_flag_absent_passes_the_guard() {
+        assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
+    }
+
+    /// イシュー #1545（codex-review 指摘・PR #1546）: `--metal-split-k`
+    /// は fandhe-ai 固有の opt-in であり burn には対応する公開 API が
+    /// 存在しないため、`--graph` と同様に常に MEASURE_ERROR で拒否
+    /// されることを確認する。
+    #[test]
+    fn metal_split_k_flag_is_always_measure_error() {
+        let mut cli = base_cli(false);
+        cli.metal_split_k = Some("on".to_string());
+        let err = validate_unsupported_flags(&cli)
+            .expect_err("--metal-split-k must be rejected on bench-burn");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--metal-split-k"), "msg={msg}");
+    }
+
+    #[test]
+    fn metal_split_k_flag_absent_passes_the_guard() {
         assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
     }
 }
