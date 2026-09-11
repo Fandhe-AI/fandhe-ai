@@ -163,9 +163,13 @@ pub(crate) const SPLIT_K_NUMERIC_CONTRACT_APPROVED: bool = true;
 // かつてはコンパイル時定数ゲート `tile::
 // SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` を `crate::tile` 側に置いて
 // いたが、#1547 で撤去し per-instance フィールド
-// `split_k_auto_enabled`（`Self::new` は `true` 固定で構築）＋
-// `crate::split_k_runtime` の実行時トグル（`AtomicBool`。既定 `true`）
-// へ一本化した（`tile.rs` 冒頭「split-K 2 パス選択」節コメント・
+// `split_k_auto_enabled`（`Self::new` は `crate::split_k_runtime::
+// SPLIT_K_DEFAULT_ENABLED`＝`true` 固定で構築）＋ `crate::split_k_runtime`
+// の実行時トグル（`AtomicBool`。既定は同じく `SPLIT_K_DEFAULT_ENABLED`）
+// へ一本化した。既定値は `split_k_runtime::SPLIT_K_DEFAULT_ENABLED` の
+// 単一定数へ集約し、Linux 実行可能な契約テスト
+// （`split_k_runtime.rs::tests::split_k_default_enabled_is_true`）で
+// ドリフトを検出する（`tile.rs` 冒頭「split-K 2 パス選択」節コメント・
 // `split_k_runtime.rs` モジュール doc 参照）。
 
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
@@ -601,10 +605,12 @@ pub struct MetalGemm {
     /// 同じ設計判断（instance フィールド化により明示 `false`（opt-out）/
     /// head（`true`。既定）の 2 `MetalGemm` を同一プロセス内に構築して
     /// bit 一致・性能を A/B できるようにする）。`MetalGemm::new` は
-    /// **`true` 固定**（#1547 でコンパイル時定数ゲート `tile::
-    /// SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` を撤去し per-instance
-    /// フィールドへ一本化。2026-09-11・イシュー #1516・#1515 §10.4 の
-    /// ADOPT 確定を受けた本番既定は不変）を渡す。実際の分岐先
+    /// `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED`（**`true`**。
+    /// #1547 でコンパイル時定数ゲート `tile::
+    /// SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` を撤去し、`split_k_runtime`
+    /// の単一定数（Linux 実行可能な契約テストでドリフト検出）へ
+    /// 一本化。2026-09-11・イシュー #1516・#1515 §10.4 の ADOPT 確定を
+    /// 受けた本番既定は不変）を渡す。実際の分岐先
     /// （split-K か classic か）
     /// は `tile::select_route_for_device` が `(m, n, k)` から純粋に決める。
     /// **本フィールドが `true` でも、実行時トグル（`crate::
@@ -746,7 +752,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
-            true, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し true 固定化）
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
         )
     }
 
@@ -786,7 +792,7 @@ impl MetalGemm {
             frag_load,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
-            true, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し true 固定化）
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
         )
     }
 
@@ -822,7 +828,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             coop_load,
             tile::TILE_CLASS_MODE,
-            true, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し true 固定化）
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
         )
     }
 
@@ -866,7 +872,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile_class_mode,
-            true, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し true 固定化）
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
         )
     }
 
@@ -904,7 +910,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
-            true, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し true 固定化）
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
         )
     }
 
@@ -932,7 +938,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
-            true, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し true 固定化）
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
         )
     }
 
@@ -959,7 +965,7 @@ impl MetalGemm {
             tile::FRAG_LOAD_CONFIG,
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
-            true, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し true 固定化）
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
         )
     }
 
@@ -968,9 +974,10 @@ impl MetalGemm {
     /// 明示的な `split_k_auto_enabled` 引数で指定する。実機 `#[ignore]`
     /// bit 一致自己検証テスト（`tests/gemm_splitk_auto_wiring.rs`）・
     /// イシュー #1517 の framework-compare A/B 専用の入口: 同一プロセス内
-    /// で base（既定 `true` 固定。2026-09-11・#1515 §10.4 の ADOPT 確定を
-    /// 受けた本番既定。#1547 でコンパイル時定数ゲートを撤去し per-instance
-    /// フィールドへ一本化）/ 明示 `false`（opt-out）の 2 インスタンスを
+    /// で base（既定 `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED`。
+    /// `true`。2026-09-11・#1515 §10.4 の ADOPT 確定を受けた本番既定。
+    /// #1547 でコンパイル時定数ゲートを撤去し `split_k_runtime` の単一
+    /// 定数へ一本化）/ 明示 `false`（opt-out）の 2 インスタンスを
     /// 構築して比較する（[`Self::new_with_tile_class`] と同型の設計）。
     /// 他 7 フラグ（threadgroup ID スウィズル・simdgroup 細粒度同期・
     /// 条件付き loop unroll・ソーステキスト特殊化・フラグメントロード
@@ -1922,9 +1929,10 @@ impl MetalGemm {
     /// 検証済みの値を渡す。`crate::tile` モジュール `verify_m4_max` 参照）。
     ///
     /// **split-K 本番結線（イシュー #1516）**: `self.split_k_auto_enabled`
-    /// （既定 **`true`** 固定。2026-09-11・#1515 §10.4 の ADOPT 確定を
-    /// 受けた本番既定。#1547 でコンパイル時定数ゲートを撤去し
-    /// per-instance フィールドへ一本化）・`SPLIT_K_NUMERIC_CONTRACT_
+    /// （既定 `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED`。**`true`**
+    /// 固定。2026-09-11・#1515 §10.4 の ADOPT 確定を受けた本番既定。
+    /// #1547 でコンパイル時定数ゲートを撤去し `split_k_runtime` の単一
+    /// 定数へ一本化）・`SPLIT_K_NUMERIC_CONTRACT_
     /// APPROVED`・実行時トグル（`crate::split_k_runtime::
     /// split_k_enabled()`。イシュー #1545）がいずれも `true` の場合のみ、
     /// `tile::should_split_k` 判定を 8 の倍数へパディング済みの実効次元
@@ -2624,8 +2632,9 @@ impl MetalGemm {
     /// **本番結線（イシュー #1516・PR #1530）**: `dispatch_auto`／
     /// `crate::tile::select_for_device` への結線は完了済みで
     /// （`Self::dispatch_auto` doc コメント「split-K 本番結線」節参照）、
-    /// `self.split_k_auto_enabled`（既定 **`true`** 固定。#1547 で
-    /// コンパイル時定数ゲートを撤去し per-instance フィールドへ一本化）・
+    /// `self.split_k_auto_enabled`（既定 `crate::split_k_runtime::
+    /// SPLIT_K_DEFAULT_ENABLED`。**`true`** 固定。#1547 でコンパイル時
+    /// 定数ゲートを撤去し `split_k_runtime` の単一定数へ一本化）・
     /// `SPLIT_K_NUMERIC_CONTRACT_APPROVED`・実行時トグル（`crate::
     /// split_k_runtime::split_k_enabled()`。イシュー #1545）でゲートされて
     /// いる。`MetalBackendOps::gemm`（`crate::ops`。本関数を直接呼ばない）は

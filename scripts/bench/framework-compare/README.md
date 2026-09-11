@@ -1000,15 +1000,26 @@ ENABLED` を撤去し per-instance フィールドへ一本化〉）を、facade
   でバリデーションのみ実行）が同一バイナリで `--metal-split-k off`／
   `--metal-split-k on` を run 単位に interleave 起動し、gemm 8 セル
   （N=512/1024/2048/4096 × fresh/reuse）＋ train 2 セル（fresh/reuse）を
-  5 round 計測する。差分ガードは①`AB_PATCH_FACADE_PATH` 配下の
-  `crates/backend-metal/src/tile.rs` の `SPLIT_K_DISPATCH_AUTO_
-  PRODUCTION_ENABLED` が `true` であること（`--metal-split-k off` が
-  「本番経路が元々 off だから off に見える」だけの無意味な比較になるのを
-  防ぐ）、②ビルド後 `--metal-split-k off` のドライラン 1 回が
-  `MEASURE_ERROR` にならないこと（`metal-split-k-toggle` feature が実際
-  に有効化されていることの確認）の 2 点（`run_ab_gemm_metal.sh`／旧
-  `run_ab_splitk_metal.sh` の「before==after で計測対象なし」再発防止と
-  同じ思想。`docs/perf/train-step-phase-breakdown.md` §5.11）。gemm・
+  5 round 計測する。差分ガードは `AB_PATCH_FACADE_PATH` 配下の
+  `crates/backend-metal/src/{split_k_runtime,gemm,tile}.rs` に対する
+  4 点の静的検証（PR #1553 codex-review P0 是正で拡張。旧版は実行時
+  トグルの初期値宣言行のみを検証しており、コンパイル時ゲートが無効な
+  まま初期値だけ `true` の worktree を誤検出できなかった）——
+  ①`split_k_runtime.rs` の既定値定数宣言
+  `pub(crate) const SPLIT_K_DEFAULT_ENABLED: bool = true;` の存在、
+  ②実行時トグル初期値式がその定数を参照していること
+  （`AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)`）、③`gemm.rs` 内で本番
+  コンストラクタ 7 箇所すべてが
+  `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,` を参照していること
+  （本番コンストラクタが有効化状態で構築されることの直接検証）、
+  ④`tile.rs` に旧コンパイル時ゲート `SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+  ENABLED: bool = false;` の宣言行が残っていないこと（#1547 以前の
+  状態・誤指定の検出）——に加え、⑤ビルド後 `--metal-split-k off` の
+  ドライラン 1 回が `MEASURE_ERROR` にならないこと（`metal-split-k-
+  toggle` feature が実際に有効化されていることの確認）（`run_ab_gemm_
+  metal.sh`／旧 `run_ab_splitk_metal.sh` の「before==after で計測対象
+  なし」再発防止と同じ思想。`docs/perf/train-step-phase-breakdown.md`
+  §5.11）。gemm・
   train は `compare_gemm_ab.py --task <t>` の task 別 fail-closed 検証
   （他タスクの行を警告つきで除外し 1 件でもあれば判定不能にする）と
   整合させるため、最初からタスク別 JSONL（`results-m4max-splitk-ab-

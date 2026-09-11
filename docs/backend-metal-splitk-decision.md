@@ -606,10 +606,37 @@ by_default`）は **#1547 で撤去**した。理由は、実行時トグル（#
      `MetalGemm::new` は常に `true`）
   2. `crate::split_k_runtime::split_k_enabled()`（実行時トグル。既定 `true`）
 - 本撤去はコード上の整理のみであり、**本番既定の挙動（split-K 到達形状で
-  split-K 2 パス経路を通ること）は変わらない**。`scripts/bench/framework-
-  compare/run_ab_splitk_metal.sh` の差分ガードは、撤去済みのコンパイル時
-  定数宣言行ではなく `crate::split_k_runtime::SPLIT_K_RUNTIME_ENABLED` の
-  既定値宣言行を検証する形へ付け替えた。
+  split-K 2 パス経路を通ること）は変わらない**。
+
+**追記（PR #1553 codex-review P1/P0 是正）**: 撤去直後（本節初版）は
+上記 1./2. の既定値がいずれもリテラル `true` の重複記述になっており、
+ドリフト検出テストも Metal 実機依存の `wiring_default_is_bit_identical_
+to_explicit_on`（`tests/gemm_splitk_auto_wiring.rs`）と `split_k_runtime`
+のトグル操作テスト（setter 呼び出し後の値しか検証しない）しか残って
+おらず、Linux でも本番コンストラクタの既定値そのものをロックする契約
+テストが失われていた。これを是正し、既定値の**単一情報源**
+`crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED`（`pub(crate) const
+... : bool = true;`）を新設して次の 2 箇所を seed する形へ変更した:
+
+- (a) 実行時トグル初期値 `SPLIT_K_RUNTIME_ENABLED = AtomicBool::new(
+  SPLIT_K_DEFAULT_ENABLED)`
+- (b) `MetalGemm::new` 系 7 コンストラクタが `new_with_gates` へ渡す
+  `split_k_auto_enabled` の既定値（`gemm.rs` の 7 箇所すべてが
+  `crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED` を参照する）
+
+Linux 実行可能な契約テスト `split_k_runtime::tests::split_k_default_
+enabled_is_true`（`black_box` 経由で `SPLIT_K_DEFAULT_ENABLED` 自体が
+`true` であることをロック）が、削除された旧 `tile.rs` テストと同じ役割
+（本番コンストラクタへ渡す既定値のドリフト検出）を Linux でも果たす。
+併せて `scripts/bench/framework-compare/run_ab_splitk_metal.sh` の差分
+ガードを、単に実行時トグルの初期値宣言行を読むだけの検証から、
+(1a) `SPLIT_K_DEFAULT_ENABLED` 定数宣言・(1b) 実行時トグル初期値式が
+同定数を参照していること・(1c) `gemm.rs` の 7 箇所すべてが同定数を
+参照していること（本番コンストラクタの有効化状態そのものの検証）・
+(1d) 旧コンパイル時ゲートが `false` で宣言されたまま残っていないこと、
+の 4 点検証へ強化した（旧ガードは「コンパイル時ゲートは無効化されて
+いるが実行時トグル初期値だけ `true`」という worktree を誤って通過
+させうる欠陥があった）。
 - 上記「§5 本番結線（#1516）」「ゲート既定値・切替条件（事前登録）」
   「切替判断の記録」「ユーザー判断による本番結線」の各節に現れる
   `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` という定数名は、いずれも
