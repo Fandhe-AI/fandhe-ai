@@ -303,6 +303,7 @@ $ grep -rn "dispatch_split_k_strided_prepared" crates/backend-metal/src/ops.rs
 本段落が記述する状態（`dispatch_auto` は `dispatch_split_k_strided_prepared` 系を呼ばない）
 と実質的に同一の挙動（bit 同一の classic 経路）が維持される。詳細・切替条件は
 `docs/backend-metal-splitk-decision.md` §5「本番結線（#1516）」を参照。
+**追記（2026-09-11・#1516 マージ）**: ゲートはユーザー判断（保守性優先・後退セルは split-K 非到達のノイズ帯）で `true` へ切替済み。経緯は `docs/backend-metal-splitk-decision.md` §5「ユーザー判断による本番結線」を参照。
 
 **framework-compare A/B**: 「計測対象なし」と判断した。本番経路（`dispatch_auto`・
 `MetalBackendOps::gemm`）へのコード変更がゼロであるため（上記出力参照）、
@@ -367,7 +368,7 @@ Mac セッションでの実行を申し送る。実測完了後、本節へ以�
 ## 6. AC-5: 本番経路の非後退確認
 
 **追記（イシュー #1518）**: 本節は #1474 時点（本イシュー実装時点）の記録。#1516 で
-`dispatch_auto` へ split-K 分岐が定数ゲート付き（既定 OFF）で結線されたため、下記の
+`dispatch_auto` へ split-K 分岐が定数ゲート付き（当初既定 OFF・2026-09-11 に既定 `true`）で結線されたため、下記の
 「無変更」は #1474 時点の事実として読む。
 
 `tile::select`／`select_for_device`／`select_with_occupancy_for_device`・`MetalGemm::new`／
@@ -393,7 +394,7 @@ ignored は実機依存）。`make check-cross-metal-tests`（`aarch64-apple-dar
   **結線せずと確定**（性能判定 undetermined・数値契約未承認の 2 ブロッカー。
   `docs/backend-metal-splitk-decision.md` §4）。
   **追記（イシュー #1518）**: 数値契約ブロッカーは #1513 で解消・結線自体は #1516 で
-  定数ゲート付き（既定 OFF）に実施済み。現行状態は `docs/backend-metal-splitk-decision.md`
+  定数ゲート付き（当初既定 OFF・2026-09-11 に既定 `true`）に実施済み。現行状態は `docs/backend-metal-splitk-decision.md`
   §5 を参照。
 - f16／hfrag カーネルの split-K・TT 以外の一般 stride・`gemm_bias_act` 融合経路への適用・
   `TileClassMode::Split` との併用は対象外。

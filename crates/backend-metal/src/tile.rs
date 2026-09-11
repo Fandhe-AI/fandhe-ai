@@ -2247,53 +2247,60 @@ pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
 // 数値契約未承認の 2 ブロッカー。`docs/backend-metal-splitk-decision.md`
 // §4）。ブロッカー 2（数値契約未承認）は #1511 の適用拡張承認・#1513 の
 // `SPLIT_K_NUMERIC_CONTRACT_APPROVED=true` 切替で解消済み。ブロッカー 1
-// （性能の正式 ADOPT 判定）は #1515 へ引き継がれ、#1515 は 5 run 計測
-// スキャフォールドのみを確立した段階で完了したため（ADOPT/REJECT 判定
-// 自体は未確定）、**#1516（Phase 2）は `select`/`select_for_device` への
-// 本番結線コードを `select_route_for_device`（下記）経由で追加したが、
-// `crate::gemm::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（既定 `false`。
-// `crate::gemm::MetalGemm::dispatch_auto` が参照）でゲートし、ブロッカー 1
-// 解消まで無効のまま維持する**（`docs/backend-metal-splitk-decision.md`
-// §5）。`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 自体は下記で定義する
-// （`crate::gemm::MetalGemm::dispatch_auto` からは `tile::` 経由で参照する。
-// `UNROLL_ACC_ENABLED` 等の既存ゲート定数と同じくクレート横断で常に
-// コンパイル対象となる本モジュールに置くことで、ドリフト検出テストが
-// Linux（CI）でも実行される）。`should_split_k`／`split_k_tile` 自体の
-// 選択ロジックは変更しない。
+// （性能の正式 ADOPT 判定）は #1515 へ引き継がれ、#1515 §10.4 が
+// 2026-09-11 に M4 Max 実機 5 run で **ADOPT** と正式確定した
+// （`docs/perf/metal-gemm-splitk-ab.md` §10.4）。これを受け、
+// `#1516（Phase 2）は `select`/`select_for_device` への本番結線コードを
+// `select_route_for_device`（下記）経由で追加したうえで、
+// `crate::gemm::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（**`true`**。
+// `crate::gemm::MetalGemm::dispatch_auto` が参照）を有効化し、split-K
+// 2 パス経路を本番既定として結線した**（`docs/backend-metal-splitk-
+// decision.md` §5）。`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 自体は
+// 下記で定義する（`crate::gemm::MetalGemm::dispatch_auto` からは
+// `tile::` 経由で参照する。`UNROLL_ACC_ENABLED` 等の既存ゲート定数と
+// 同じくクレート横断で常にコンパイル対象となる本モジュールに置くことで、
+// ドリフト検出テストが Linux（CI）でも実行される）。`should_split_k`／
+// `split_k_tile` 自体の選択ロジックは変更しない。
 
 /// [`crate::gemm::MetalGemm::dispatch_auto`]（本番 NN 経路の自動入口）が
 /// [`should_split_k`] 判定に基づき split-K 2 パス経路へ分岐するかどうかの
 /// 本番結線ゲート（イシュー #1516）。
 ///
-/// **既定 `false`（本 PR 時点）**: split-K 経路の性能 A/B（イシュー
-/// #1515）は依存 PR #1529 で計測スキャフォールドのみを確立した段階で、
-/// `docs/perf/metal-gemm-splitk-ab.md` §10.4 の ADOPT 判定は「未実測」の
-/// まま確定していない。数値契約（[`crate::gemm::SPLIT_K_NUMERIC_CONTRACT_
-/// APPROVED`]相当。本モジュールとは独立）はイシュー #1513 で承認済みだが、
-/// 性能面の正式 ADOPT 判定が出るまでは `MetalBackendOps::gemm`
-/// （`crate::ops`）の挙動・性能を変えないよう本定数は `false` のまま
-/// 維持する。`false` の間、`dispatch_auto` は本定数追加前と 1 バイトも
-/// 変わらない経路（`select_for_device(m, n, k, ..)` →
-/// `MetalGemm::dispatch_variant`）を通る（[`select_route_for_device`] doc
-/// コメント・`docs/backend-metal-splitk-decision.md` §5 参照）。
+/// **`true`（2026-09-11・イシュー #1516）**: split-K 経路の性能 A/B
+/// （イシュー #1515）が `docs/perf/metal-gemm-splitk-ab.md` §10.4 で
+/// M4 Max 実機 5 run（対象 9 形状すべて中央値 1.55〜3.75 倍・5/5 run
+/// 一貫・対照 3 形状 ≥0.95・checksum 5 run 完全一致）に基づき **ADOPT**
+/// と正式確定したことを受け、下記「切替条件」の①〜③を満たしたうえで
+/// `false` から `true` へ切り替えた。`true` の間、`dispatch_auto` は
+/// `tile::should_split_k` が `Some` を返す対象形状で split-K 2 パス
+/// 経路（[`select_route_for_device`]）を通り、対象外の形状では従来と
+/// 同じ classic 経路（`select_for_device(m, n, k, ..)` →
+/// `MetalGemm::dispatch_variant`）を通る。
 ///
-/// **`true` への切替条件（事前登録。`docs/backend-metal-splitk-decision.md`
+/// **`false` へ差し戻す条件**: イシュー #1517 の framework-compare
+/// 結線前後 A/B（5 回計測中央値）で後退が確認された場合は、理由を
+/// `docs/backend-metal-splitk-decision.md` §5 へ記録したうえで本定数を
+/// `false` へ差し戻す（下記「切替条件（事前登録）」の④⑤）。
+///
+/// **切替条件（事前登録。`docs/backend-metal-splitk-decision.md`
 /// §5「切替手順」）**: ①イシュー #1515 §10 が split-K 経路を ADOPT と
-/// 確定する ②本定数を `true` へ切り替える ③`gemm_splitk_auto_wiring`
+/// 確定する（**完了**）②本定数を `true` へ切り替える（**完了**）
+/// ③`gemm_splitk_auto_wiring`
 /// （`crates/backend-metal/tests/gemm_splitk_auto_wiring.rs`。`#[ignore]`）・
 /// 既存 `#[ignore]` split-K 群（`gemm_splitk_bit_match`／
 /// `gemm_splitk_parity`／`gemm_splitk_auto_entry_parity`）が実機（Apple
-/// Silicon）で pass する ④イシュー #1517 の framework-compare 結線前後
-/// A/B（5 回計測中央値）で非後退・checksum 一致を確認する ⑤後退時は
-/// `false` へ差し戻し理由を `docs/backend-metal-splitk-decision.md` §5 へ
-/// 記録する。
+/// Silicon）で pass する（**完了**。実測結果は
+/// `docs/backend-metal-splitk-decision.md` §5 参照）④イシュー #1517 の
+/// framework-compare 結線前後 A/B（5 回計測中央値）で非後退・checksum
+/// 一致を確認する（**#1517 で別途実施**）⑤後退時は `false` へ差し戻し
+/// 理由を `docs/backend-metal-splitk-decision.md` §5 へ記録する。
 ///
 /// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
 /// doc comment を参照（同一の dead_code 誤検知回避。本定数は macOS 限定
 /// モジュール `crate::gemm` からのみ参照されるが、ドリフト検出テスト
 /// （`tests` モジュール）は Linux でも実行するため）。
 #[cfg(any(test, target_os = "macos"))]
-pub(crate) const SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = false;
+pub(crate) const SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = true;
 
 /// [`should_split_k_with`] の判定パラメータ（MLX steel Case 1 の閾値を
 /// 実行時に差し替え可能にする。既定値は [`SplitKParams::MLX_CASE1_M4_MAX`]）。
@@ -2398,17 +2405,17 @@ pub fn split_k_tile(m: usize, n: usize) -> TileConfig {
 /// 既定入口。`crate::gemm::MetalGemm::dispatch_split_k*`（イシュー #1474
 /// の opt-in 自動判定入口。数値契約ゲート済みで既に有効）が使う（イシュー
 /// #1474 計画 §4.2）ほか、[`select_route_for_device`]（本モジュール。
-/// #1516 で `dispatch_auto` へ結線された経路）からも呼ばれる。ただし
+/// #1516 で `dispatch_auto` へ結線された経路）からも呼ばれる。
 /// `dispatch_auto` 側が `select_route_for_device`（延いては本関数）を
 /// 呼ぶ実際の条件は `MetalGemm::split_k_auto_enabled &&
 /// SPLIT_K_NUMERIC_CONTRACT_APPROVED` であり、
-/// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（既定 `false`）は
+/// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（**`true`**。
+/// 2026-09-11・イシュー #1516・#1515 §10.4 の ADOPT 確定を受けて切替）は
 /// 通常コンストラクタ `MetalGemm::new` が `split_k_auto_enabled` に与える
-/// 既定値に過ぎない。したがって `MetalGemm::new` で構築した本番経路では
-/// 定数が `true` になるまでこの経路から本関数は呼ばれないが、
-/// `MetalGemm::new_with_split_k_auto(ctx, true)` による明示 opt-in では
-/// 定数が `false` のままでも呼ばれる（`crate::gemm::MetalGemm::dispatch_auto`
-/// doc コメント「split-K 本番結線」節参照）。
+/// 既定値である。したがって `MetalGemm::new` で構築した本番経路も
+/// この経路から本関数を呼ぶ（`MetalGemm::new_with_split_k_auto(ctx, false)`
+/// による明示 opt-out のみが classic 経路へ固定される。`crate::gemm::
+/// MetalGemm::dispatch_auto` doc コメント「split-K 本番結線」節参照）。
 pub fn should_split_k(m: usize, n: usize, k: usize) -> Option<SplitKPlan> {
     should_split_k_with(m, n, k, &SplitKParams::MLX_CASE1_M4_MAX)
 }
@@ -4590,20 +4597,24 @@ mod tests {
 
     /// `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（`crate::gemm::MetalGemm::
     /// dispatch_auto` の split-K 本番結線ゲート）の**コミット状態既定値**が
-    /// `false` に固定されていることをロックする（`unroll_acc_enabled_is_
-    /// false_by_default` と同じ設計判断。ゲート追加前と bit 同一の classic
-    /// 経路を保つには本定数が `false` である必要があるため、`gemm.rs` 側
-    /// （`cfg(target_os = "macos")` 限定で Linux CI では未コンパイル）では
-    /// なく本モジュールに置いてドリフトを常時検出する。イシュー #1516）。
+    /// `true` に固定されていることをロックする（`unroll_acc_enabled_is_
+    /// false_by_default` と対称の設計判断だが、本定数は #1515 §10.4
+    /// （2026-09-11・M4 Max 実機 5 run）の ADOPT 確定に基づき `true` を
+    /// 本番既定とする契約のため、他ゲート定数群とは異なり `true` を
+    /// ロックする。`gemm.rs` 側（`cfg(target_os = "macos")` 限定で
+    /// Linux CI では未コンパイル）ではなく本モジュールに置いてドリフトを
+    /// 常時検出する。イシュー #1516）。
     #[test]
-    fn split_k_dispatch_auto_production_enabled_is_false_by_default() {
+    fn split_k_dispatch_auto_production_enabled_is_true_by_default() {
         assert!(
-            !std::hint::black_box(SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED),
-            "SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED が true のままコミットされている\
-             疑いがあります。本番既定は false（#1515 が split-K 経路を ADOPT と確定する\
-             まで維持する契約）です（tile.rs 冒頭 SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED\
-             doc comment・イシュー #1516 参照。意図的な true への切替であれば本テストごと\
-             更新すること）。"
+            std::hint::black_box(SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED),
+            "SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED が false のままコミットされている\
+             疑いがあります。本番既定は true（#1515 §10.4 の ADOPT 確定〈2026-09-11〉に\
+             基づき本番既定とする契約）です（tile.rs 冒頭\
+             SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED doc comment・イシュー #1516 参照）。\
+             `false` へ戻すのは #1517 の framework-compare A/B で後退が確認された場合の\
+             みで、その際は理由を docs/backend-metal-splitk-decision.md §5 へ記録した\
+             うえで本テストごと更新すること。"
         );
     }
 

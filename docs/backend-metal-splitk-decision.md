@@ -122,7 +122,7 @@ split-K の文脈でも変わらない。本ドキュメントは Case 1（非 N
 それぞれ後続イシュー #1475／#1476 のスコープ。#1476 は結線せずと確定（§4）。
 
 **追記（イシュー #1518）**: #1476 時点の「結線しない」判断はその後 #1513 で数値契約
-ブロッカーが解消し、#1516 で `dispatch_auto` へ定数ゲート付き（既定 OFF）結線された。
+ブロッカーが解消し、#1516 で `dispatch_auto` へ定数ゲート付き（当初既定 OFF。2026-09-11 に既定 `true` へ切替。§5）結線された。
 現行状態は §5「本番結線（#1516）」を正とする。
 
 ## §3 採否判断
@@ -177,13 +177,13 @@ M4 Max 実機実測・2026-09-09）。
 
 **追記（イシュー #1518）**: ブロッカー 2（数値契約）は #1513 で解消済み。ブロッカー 1
 （性能の正式 ADOPT 判定）は #1518 時点でも未実測のまま残るが、結線自体は #1516 で
-定数ゲート付き（既定 OFF）に実施済み。詳細は §5 を参照。
+定数ゲート付き（当初既定 OFF・2026-09-11 に既定 `true`）に実施済み。詳細は §5 を参照。
 
 ## §4 本番結線可否（#1476）
 
 **追記（イシュー #1518）**: 本節は #1476 時点（2026-09-09）の記録。ブロッカー 2
 （数値契約）は #1513 で解消・ブロッカー 1（性能の正式 ADOPT 判定）は #1518 時点でも
-未実測のまま残るが、結線自体は #1516 で定数ゲート付き（既定 OFF）に実施済み。現行状態は
+未実測のまま残るが、結線自体は #1516 で定数ゲート付き（当初既定 OFF・2026-09-11 に既定 `true`）に実施済み。現行状態は
 §5「本番結線（#1516）」を正とする。
 
 **確定判断: 結線しない（`select_for_device`／`dispatch_auto`／`MetalBackendOps::gemm` は不変）。**
@@ -285,7 +285,7 @@ framework-compare gemm metal の実行時計測は「計測対象なし」とす
 ## §5 本番結線（#1516）
 
 `MetalGemm::dispatch_auto`（本番 NN 経路の自動入口。`MetalBackendOps::gemm` が呼ぶ唯一の
-入口）へ split-K 2 パス経路の分岐を**定数ゲート付きで結線した**（既定 OFF。実装 PR で
+入口）へ split-K 2 パス経路の分岐を**定数ゲート付きで結線した**（実装 PR 時点は既定 OFF・2026-09-11 に既定 `true` へ切替〈本節末尾〉。実装 PR で
 コード変更あり——本節は上記 §4「framework-compare A/B の扱い」が前提としていた「コメントの
 みの変更」を、本イシューで正式に更新する）。
 
@@ -335,6 +335,10 @@ split-K 分岐の内部フォールバック（`dispatch_split_k_strided_prepare
 
 ### ゲート既定値・切替条件（事前登録）
 
+> **現行状態（2026-09-11・#1516 で更新）**: 下記は本セクション新設時点（ゲート既定
+> `false`）の判断記録であり、そのまま残す。#1515 §10.4 の ADOPT 確定を受け、ゲートは
+> 既定 `true` へ切替済み（詳細は本節末尾「ユーザー判断による本番結線（2026-09-11・#1516 マージ）」参照。以下の「既定 `false`」の記述は切替前の経緯として保持する）。
+
 **既定 `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false`**: 依存イシュー #1515（split-K vs
 classic 経路の性能 A/B・#1475 §7 フォローアップの 5 run 正式確定）は、5 run 計測スキャフォー
 ルド（`docs/perf/metal-gemm-splitk-ab.md` §10）のみを確立した段階で PR #1529 としてマージ・
@@ -371,6 +375,65 @@ HEAD でも再現〉）。④ #1517 run1 は checksum 全 10 セル（gemm 8 + t
 非到達・符号非一貫・共有負荷下で計測ノイズと整合（参考情報。規則は
 緩めない）。再開条件は #1517 doc §6 参照。
 
+**#1516 ブランチ上のゲート ON 検証記録（2026-09-11。当初は未マージ）**: 手順①は #1515 §10.4（`docs/perf/metal-gemm-splitk-ab.md`。
+2026-09-11 に M4 Max 実機 5 run で確定。対象 9 形状すべて中央値 1.55〜3.75 倍・5/5 run 一貫、
+対照 3 形状 ≥0.95、phase0 checksum 5 run 完全一致）で **ADOPT** と正式確定し充足された。これを
+受け、②`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（`crate::tile`。`tile.rs`）を `true` へ切替
+済み。ドリフト検出テスト（`tile.rs::tests::split_k_dispatch_auto_production_enabled_is_false_
+by_default`）は `..._is_true_by_default` へ改名し `true` を固定する契約へ更新済み。③実機
+（Apple M4 Max）での受け入れテスト実行結果は以下のとおり（すべて pass）:
+
+- `cargo test -p fandhe-ai-backend-metal --lib tile::tests`: 134 passed（
+  `split_k_dispatch_auto_production_enabled_is_true_by_default` 含む）
+- `cargo test -p fandhe-ai-backend-metal --release --features internal-diagnostics --test
+  gemm_splitk_auto_wiring -- --ignored`: 4 passed（`wiring_default_is_bit_identical_to_
+  explicit_on`〈旧 `wiring_off_is_bit_identical_to_new` を `new()` の既定 ON 化に合わせて
+  改名・再設計〉・`wiring_explicit_off_forces_classic_route_for_targets`〈新設。明示
+  opt-out が対象形状でも classic に固定されることの直接検証〉を含む）
+- `cargo test -p fandhe-ai-backend-metal --release --features internal-diagnostics --test
+  gemm_splitk_bit_match -- --ignored`: 2 passed
+- `cargo test -p fandhe-ai-backend-metal --release --features internal-diagnostics --test
+  gemm_splitk_parity -- --ignored`: 1 passed
+- `cargo test -p fandhe-ai-backend-metal --test splitk_parity_baseline_contract`: 11 passed
+- `cargo test -p fandhe-ai-backend-metal --test splitk_gemm_gate_shape_attribution`: 3 passed
+  （GEMM candle 比ゲート対象の正方 3 形状は、ゲート ON 後も `should_split_k` が `None` を
+  返す独立した理由により classic 経路のまま）
+
+`gemm_splitk_auto_entry_parity`（`--ignored`）は
+`auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes` が
+`dispatch_split_k_strided_prepared failed (m=64, n=64, k=63): ... must all be multiples of
+8` で FAIL したが、本ゲート切替前（`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false` の
+HEAD）でも同一の FAIL を再現することを確認済みであり、本切替とは無関係の既存不具合
+（`dispatch_split_k_strided_prepared` 自体が 8 の倍数でない次元を拒否する一方、テストが
+`(64, 64, 63)` のような非 8 の倍数形状を渡している）。tolerance・テストの緩和は行っておらず、
+本 PR のスコープ外として記録するに留める（同テストの `auto_entry_dispatches_split_k_for_
+eligible_shapes_and_matches_baseline` は pass）。
+
+④（イシュー #1517 の framework-compare A/B）は上記のとおり結線維持不可であった。
+
+### ユーザー判断による本番結線（2026-09-11・#1516 マージ）
+
+上記の #1517 判定（結線維持不可）は事前登録規則どおり確定した記録として
+**書き換えない**。そのうえで、ユーザーは以下の別根拠により
+`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = true` での本番結線を決定した
+（性能規則の事後緩和ではなく、保守性を主眼とする上位判断）:
+
+- #1517 の後退 4 セル（gemm 1024/reuse・2048/fresh・4096/fresh・train
+  64/reuse）はいずれも帰属表（同 doc §2）上 split-K に構造的に非到達で、
+  before/after が同一カーネル経路の比較・5 run 内で符号非一貫・共有負荷下
+  （load1 6.3〜11.6）のため、結線の有無で差が生じないと判断した。checksum
+  は全 10 セル完全一致・gemm parity 0 fail。
+- 到達形状側の性能根拠は #1515 §10.4（ADOPT・対象 9 形状 1.55〜3.75 倍・
+  5/5 run 一貫）で確定済み。数値契約は #1511 承認済み。
+- **保守性**: ゲート OFF のままでは split-K 2 パスカーネル・
+  `select_route_for_device`・parity baseline・数値契約テストを本番非到達の
+  まま保守し続けることになる。結線によりこの死んだ本番隣接経路を解消し、
+  次段でゲート定数・ドリフト検出テスト・「既定 false」前提の doc コメント
+  を撤去できる（定数撤去は別 PR）。
+
+事後監視として、低負荷時に #1517 と同一プロトコルの framework-compare を
+再実行し記録する（結線の条件にはしない）。
+
 ### スコープ外（変更なし）
 
 NT/TN/TT・f16／hfrag・`gemm_bias_act` 融合経路への split-K 適用は引き続きスコープ外（§4 の
@@ -391,7 +454,7 @@ APPROVED=false`」等と記述していた docs・`CLAUDE.md` 索引行を棚卸
 - v0.8.0（crates.io registry 系列）に関する `SPLIT_K_NUMERIC_CONTRACT_APPROVED=false`
   等の記述は、v0.8.0 タグ時点の事実として真であるため訂正せず、HEAD の状態は別であることを
   補足するに留める
-- 「本番有効」と読める表現は使わない（ゲート既定 OFF・`SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+- 「本番有効」と読める表現は使わない（#1518 時点はゲート既定 OFF。2026-09-11 の既定 `true` 切替後は本項は失効・`SPLIT_K_DISPATCH_AUTO_PRODUCTION_
   ENABLED = false` の間は結線前と bit 同一の classic 経路のまま）
 
 対象（更新・追記）:

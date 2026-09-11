@@ -1164,7 +1164,7 @@ stat -- crates/` は空）。NN 経路は結線前と同一実装のままのた
   NT/TN/TT のみ委譲対象とする）かつ `strided_tiled_eligibility` 通過。
 - (b) タイル構成は `tile::select_for_device`（`dispatch_auto` と同一
   の選択ロジック）を再利用する（**追記〈#1518〉**: #1516 以降 `dispatch_auto` は
-  `select_route_for_device` 経由で split-K 分岐を持つが、ゲート既定 OFF では
+  `select_route_for_device` 経由で split-K 分岐を持つが、ゲート OFF（#1518 時点の既定。2026-09-11 に既定 `true` へ切替）では
   `select_for_device` と同一結果を返す。split-K は `dispatch_auto`（NN 限定）
   経由でのみ発火し、対象形状は正方限定ではなく `should_split_k` の判定条件
   〈K 支配的形状・並列度条件〉を満たす形状全般（例: `(32,64,4096)` 等の非正方
@@ -1237,7 +1237,7 @@ framework-compare `gemm metal` タスク（8 セル）の A/B では結線の
 あり、本イシューが求めていた計測自体が、依頼時点で想定されていた
 経路と実際の到達経路の不一致により成立しないことが判明した。
 
-**追記〈イシュー #1518〉**: #1516 の split-K 分岐（既定ゲート OFF）が有効化
+**追記〈イシュー #1518〉**: #1516 の split-K 分岐（#1518 時点は既定ゲート OFF。2026-09-11 に既定 `true` へ切替済み）が有効化
 されても、上記の `gemm` タスク（NN・contiguous）が `dispatch_auto` 経由で classic
 経路を通る到達性分析そのものは変わらない。split-K は `dispatch_auto`（NN 限定）
 経由でのみ発火するが、対象形状は正方限定ではなく `should_split_k` の判定条件

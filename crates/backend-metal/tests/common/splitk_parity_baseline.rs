@@ -61,17 +61,19 @@
 //! （`assert_no_split_k_parity_regression`）の判定へ再切替済み
 //! （`docs/perf/metal-gemm-splitk-two-pass.md` §5.5・§5.8）。
 //!
-//! `#1476` 時点の「結線しない」確定のうち、2 ブロッカーの片方（数値契約
-//! 未承認）はその後解消されている: `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
+//! `#1476` 時点の「結線しない」確定のうち、2 ブロッカーは両方とも
+//! その後解消されている: `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
 //! （自動判定入口 `dispatch_split_k_strided_prepared` のゲート）の解除は
 //! イシュー #1513 で完了済み（`true` へ切替。`docs/perf/
-//! metal-gemm-splitk-two-pass.md` §5.9）。さらに `select_for_device`／
+//! metal-gemm-splitk-two-pass.md` §5.9）。`select_for_device`／
 //! `dispatch_auto` への本番結線コード自体は **イシュー #1516（PR #1530）
-//! で追加済み**であり、`#1476` の「結線しない」確定はこの結線によって
-//! 上書き・更新されている。ただし `tile::
-//! SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（既定 `false`）で無効化
-//! されたままであり、残るブロッカー（性能の正式 ADOPT 判定。#1515）が
-//! 確定するまで本番経路（`MetalBackendOps::gemm`）は split-K を選択しない
+//! で追加済み**であり、残るブロッカー（性能の正式 ADOPT 判定）は
+//! イシュー #1515 §10.4 が 2026-09-11 に M4 Max 実機 5 run で **ADOPT**
+//! と確定したことを受け、`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
+//! を **`true`** へ切り替えた（イシュー #1516・2026-09-11）。よって
+//! `#1476` の「結線しない」確定は上書き・更新済みであり、本番経路
+//! （`MetalBackendOps::gemm`）は `dispatch_auto` 経由で
+//! `should_split_k` が対象と判定した形状に対し split-K 経路を選択する
 //! （`docs/backend-metal-splitk-decision.md` §5）。`#1476` 時点の確定と
 //! `#1516` 時点の現状を混同しないこと。
 

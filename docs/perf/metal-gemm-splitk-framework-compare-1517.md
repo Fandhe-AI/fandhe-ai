@@ -6,6 +6,7 @@
 
 - verdict: **結線維持不可（false へ差し戻し）**
 - 結線維持可否: **ゲート `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false` を維持**（理由は §6 参照）
+- 追記（2026-09-11・#1516 マージ）: 上記 verdict は事前登録規則どおりの確定記録として不変。その後ユーザーが保守性を主眼とする別根拠でゲート `true` への結線を決定した（`docs/backend-metal-splitk-decision.md` §5「ユーザー判断による本番結線」）。本 doc の判定規則・記録は書き換えない
 
 ## §1 前提
 

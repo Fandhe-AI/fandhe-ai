@@ -11,15 +11,15 @@
 //! `fandhe-ai =0.8.0` タグ時点（`SPLIT_K_NUMERIC_CONTRACT_APPROVED=
 //! false`）での非到達根拠を記録した。その後 #1527
 //! （`SPLIT_K_NUMERIC_CONTRACT_APPROVED=true`）・#1530（split-K 本番
-//! 結線）を経た現在の HEAD では、数値契約ゲート自体は真になったが、
-//! (a) `MetalGemm::dispatch_auto` の既定構成（`split_k_auto_enabled`＝
-//! `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`＝`false`）では
-//! split-K 分岐そのものへ入らない、(b) 仮に入ったとしても本テストの
+//! 結線）・#1516（2026-09-11・`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
+//! を `true` へ切替）を経た現在の HEAD では、数値契約ゲート・本番結線
+//! ゲートの双方が有効（`true`）になったため、(a)（`split_k_auto_enabled`
+//! の既定値による非到達）はもはや成立しない。しかし (b) 本テストの
 //! 対象形状は `should_split_k` の並列度条件（`tile.rs`
 //! `should_split_k_rejects_large_square_and_wide_shapes` が正方
-//! 512〜4096 を対象に回帰確認済み）で `None` になる、という**独立した
-//! 2 つの理由**により、v0.7.0/v0.8.0 時点と同じ classic 経路を通ることを
-//! 本テストで確定する（`docs/perf/logs/
+//! 512〜4096 を対象に回帰確認済み）で `None` になるため、ゲート値に
+//! 依存しない独立した理由により、v0.7.0/v0.8.0 時点と同じ classic
+//! 経路を通ることを本テストで確定する（`docs/perf/logs/
 //! metal-gemm-candle-gate-head-1521/attribution.md` §「split-K が
 //! 非到達である根拠」の一次証跡）。
 //!

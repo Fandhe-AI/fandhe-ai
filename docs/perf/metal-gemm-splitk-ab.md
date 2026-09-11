@@ -312,11 +312,12 @@ speedup の主因ではないことも確認した。
   `MetalBackendOps::gemm` への結線と `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
   の切替（数値契約の適用拡張。ユーザー承認事項）。**結線せずと確定（§9）**。
   **追記（イシュー #1518）**: 数値契約は #1513 で解消・結線自体は #1516 で定数ゲート付き
-  （既定 OFF）に実施済み。詳細は §9 追記・`docs/backend-metal-splitk-decision.md` §5 参照。
+  （当初既定 OFF・2026-09-11 に既定 `true`）に実施済み。詳細は §9 追記・`docs/backend-metal-splitk-decision.md` §5 参照。
 - split-K の encode 分離入口の追加と GPU タイムスタンプによる純カーネル
   時間計測（`gemm.rs` 変更が必要）。
 - NT/TN/TT の性能比較・f16／hfrag の split-K・`gemm_bias_act` 融合経路への
   適用（#1474 §8 と同じ）。
+**追記（2026-09-11・#1516 マージ）**: ゲートはユーザー判断（保守性優先・後退セルは split-K 非到達のノイズ帯）で `true` へ切替済み。経緯は `docs/backend-metal-splitk-decision.md` §5「ユーザー判断による本番結線」を参照。
 
 
 ## §8 参照
