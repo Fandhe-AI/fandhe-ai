@@ -69,8 +69,12 @@
 //! `dispatch_auto` への本番結線コード自体は **イシュー #1516（PR #1530）
 //! で追加済み**であり、残るブロッカー（性能の正式 ADOPT 判定）は
 //! イシュー #1515 §10.4 が 2026-09-11 に M4 Max 実機 5 run で **ADOPT**
-//! と確定したことを受け、`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
-//! を **`true`** へ切り替えた（イシュー #1516・2026-09-11）。よって
+//! と確定したことを受け、`MetalGemm::new` の `split_k_auto_enabled` を
+//! **`true`** 固定へ切り替えた（イシュー #1516・2026-09-11。当初はこれを
+//! コンパイル時定数 `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` で
+//! ゲートしていたが、#1547 で同定数とドリフト検出テストを撤去し、
+//! per-instance フィールドの固定値＋実行時トグル〈`crate::
+//! split_k_runtime`〉へ一本化した）。よって
 //! `#1476` の「結線しない」確定は上書き・更新済みであり、本番経路
 //! （`MetalBackendOps::gemm`）は `dispatch_auto` 経由で
 //! `should_split_k` が対象と判定した形状に対し split-K 経路を選択する
@@ -237,8 +241,9 @@ pub static BASELINES: &[SplitKParityBaseline] = &[
 /// split-K 2 パス経路）の **Metal 内比較**に対する記録済みベースライン
 /// （`tests/gemm_bias_act_parity.rs` 専用。CPU 参照との比較ではない）。
 ///
-/// `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = true`（2026-09-11・#1516
-/// マージ）以降、split-K 到達形状では合成腕が split-K 経路を通るため
+/// split-K 本番結線（2026-09-11・#1516 マージ。`split_k_auto_enabled`
+/// 既定 `true`。#1547 でコンパイル時定数ゲートを撤去し per-instance
+/// フィールドへ一本化）以降、split-K 到達形状では合成腕が split-K 経路を通るため
 /// classic 経路の融合腕と厳密ゼロ fail（`assert_parity`）を満たさない
 /// （split-K の K 分割に由来する既知特性。`docs/perf/metal-gemm-splitk-
 /// two-pass.md` §5.5）。#1511 承認の baseline 非後退方式をこの比較にも

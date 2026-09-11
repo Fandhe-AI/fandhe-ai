@@ -962,13 +962,14 @@ CUDA Graph で capture・再利用する経路（`fandhe_ai::set_cuda_graph_step
 
 ### `--metal-split-k <on|off>`（イシュー #1545。Metal GEMM split-K opt-in 経路の runtime トグル A/B）
 
-Metal GEMM split-K opt-in 経路（`crates/backend-metal` の
-`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`。イシュー #1516 で本番結線・
-#1544 で既定 `true` 化済み）を、facade 公開 API
+Metal GEMM split-K opt-in 経路（`crates/backend-metal`。イシュー #1516 で
+`dispatch_auto` へ本番結線・`MetalGemm::new` は `split_k_auto_enabled=true`
+固定〈#1547 でコンパイル時定数ゲート `SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+ENABLED` を撤去し per-instance フィールドへ一本化〉）を、facade 公開 API
 `fandhe_ai::set_metal_split_k_gemm_enabled`／`metal_split_k_gemm_enabled`
 （`#[cfg(target_os = "macos")]`）経由で run 単位に明示 on/off するための
-値付きフラグ。既定は未指定（API を呼ばない。既存の `SPLIT_K_DISPATCH_
-AUTO_PRODUCTION_ENABLED` 本番既定がそのまま適用される）。
+値付きフラグ。既定は未指定（API を呼ばない。実行時トグル
+`crate::split_k_runtime`〈既定 `true`〉がそのまま適用される）。
 
 - **`bench-fandhe`**: `--device metal` 以外は常に `MEASURE_ERROR`
   （プロセスワイドフラグが cpu／cuda 計測で無音 no-op になるのを防ぐ。
@@ -1045,7 +1046,10 @@ AUTO_PRODUCTION_ENABLED` 本番既定がそのまま適用される）。
   既定有効化された現在は、facade 公開 API による runtime on/off 切替が
   可能になったため、本節の**単一 facade path・単一バイナリ・
   `--metal-split-k on|off` の runtime 切替**方式へ置換した
-  （`run_ab_readout_metal.sh` と同型の設計）
+  （`run_ab_readout_metal.sh` と同型の設計）。**追記（#1547）**:
+  `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 定数自体は #1547 で撤去済み
+  （`split_k_runtime` の実行時トグルへ一本化）。上記は #1517 当時の経緯を
+  記した歴史記録として保持する
 
 ## 使い方
 
@@ -1415,6 +1419,9 @@ worktree・`AB_AFTER_FACADE_PATH`＝同定数 `=true` の worktree）を比較�
 「結線前後」の実体がこの定数の `false`/`true` そのものであるため
 （イシュー #1516・PR #1530）、承認ピン ↔ HEAD 比較では混入するゲート
 以外の差分（E2〜E8 等）を排除した、字義通りの結線前後計測になる。
+**追記（#1547）**: `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 定数自体は
+#1547 で撤去済み（`split_k_runtime` の実行時トグルへ一本化）。本セクション
+全体は #1517 当時（2 worktree・2 バイナリ方式）の歴史記録として保持する。
 
 - `run_ab_splitk_metal.sh <label>`（`AB_BEFORE_FACADE_PATH`／
   `AB_AFTER_FACADE_PATH` 必須・`AB_DRY_RUN=1` でバリデーションのみ実行）

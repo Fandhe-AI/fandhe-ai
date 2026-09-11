@@ -2,21 +2,22 @@
 //! 本番結線・#1544 で既定有効化）を実行時に無効化する opt-out スイッチ
 //! （イシュー #1545）。
 //!
-//! # 背景・3 段ゲートの関係
+//! # 背景・2 段ゲートの関係
 //!
-//! split-K 経路への到達は次の 3 段すべてが揃って初めて成立する
-//! （`gemm.rs::dispatch_auto_with_route_impl` の分岐条件を参照）。
+//! split-K 経路への到達は次の 2 段すべてが揃って初めて成立する
+//! （`gemm.rs::dispatch_auto_with_route_impl` の分岐条件を参照。かつては
+//! コンパイル時定数 `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` を
+//! 含む 3 段ゲートだったが、#1547 で当該定数とドリフト検出テストを撤去し
+//! 本モジュールの実行時トグルへ一本化した）。
 //!
-//! 1. `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（コンパイル時
-//!    定数。既定 `true`・イシュー #1516・#1544 で確定した本番既定）。
-//! 2. `MetalGemm::split_k_auto_enabled`（インスタンス単位フィールド。
-//!    `MetalGemm::new` は常に上記コンパイル時定数を渡すため通常は 1. と
-//!    同じ値。`new_with_split_k_auto` で個別インスタンスごとに明示
-//!    `true`／`false` を指定できる A/B 診断用の入口）。
-//! 3. 本モジュールの [`split_k_enabled`]（**プロセスワイドな実行時
-//!    フラグ**。本イシューで新設）。
+//! 1. `MetalGemm::split_k_auto_enabled`（インスタンス単位フィールド。
+//!    `MetalGemm::new` は常に `true` 固定で渡す。`new_with_split_k_auto`
+//!    で個別インスタンスごとに明示 `true`／`false` を指定できる A/B
+//!    診断用の入口）。
+//! 2. 本モジュールの [`split_k_enabled`]（**プロセスワイドな実行時
+//!    フラグ**。イシュー #1545 で新設）。
 //!
-//! 1.・2. はいずれもコンパイル時・構築時に固定される値であり、実行中の
+//! 上記 1. はコンパイル時・構築時に固定される値であり、実行中の
 //! プロセスから split-K を一時的に無効化する手段がなかった
 //! （`docs/backend-metal-splitk-parity-judgment-decision.md` の baseline
 //! 非後退方式は split-K 到達形状で classic 経路と bit 一致しないため、
@@ -31,15 +32,14 @@
 //! - **既定値は `true`**（#1544 の本番既定と同一。フラグ導入前後で
 //!   デフォルト挙動は完全に不変）。
 //! - `false` の間、`dispatch_auto`（`gemm.rs::dispatch_auto_with_route_impl`
-//!   の分岐条件に本フラグが AND で加わる）は 1.・2. の値に関わらず常に
+//!   の分岐条件に本フラグが AND で加わる）は 1. の値に関わらず常に
 //!   classic 経路（`GemmRoute::Classic`）へ固定され、結線前
 //!   （`fandhe-ai =0.8.0` 相当）と bit 同一の出力を返す（fail-closed に
 //!   「安全な既知の経路」へ倒す設計。split-K 側で問題が起きても `false`
 //!   にすれば必ず classic へ戻せる）。
-//! - `true` に戻すと `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` と
-//!   `split_k_auto_enabled` の積で決まる従来どおりの経路選択に戻る
-//!   （本フラグが `true` であること自体は split-K 到達を保証しない。
-//!   1.・2. がいずれも `true` かつ `tile::should_split_k` が対象形状と
+//! - `true` に戻すと `split_k_auto_enabled` の値で決まる従来どおりの
+//!   経路選択に戻る（本フラグが `true` であること自体は split-K 到達を
+//!   保証しない。1. が `true` かつ `tile::should_split_k` が対象形状と
 //!   判定した場合のみ split-K に到達する）。
 //! - **プロセスワイド**（`Device` 単位ではない）。`context_cache::
 //!   cached_gemm` が保持する `MetalGemm` シングルトンはシェーダの

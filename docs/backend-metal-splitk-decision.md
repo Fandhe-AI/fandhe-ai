@@ -302,7 +302,9 @@ framework-compare gemm metal の実行時計測は「計測対象なし」とす
   `new_with_unroll_acc`／`new_with_frag_load`／`new_with_coop_load`／
   `new_with_tile_class`／`new_with_source_specialization`）は本番既定ゲート定数
   `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（`crate::tile`。`gemm.rs` 側の全コンストラクタ
-  からは `tile::` 経由で参照する。**既定 `false`**）を渡す。
+  からは `tile::` 経由で参照する。**既定 `false`**）を渡す（**追記（#1547）**:
+  本定数は撤去済み。現在は全コンストラクタがリテラル `true` を渡す。詳細は
+  本節末尾「定数ゲートの撤去（#1547）」参照）。
   `MetalGemm::new_with_split_k_auto(ctx, enabled: bool)` を新設し、A/B 計測・実機テスト専用の
   明示 opt-in 入口とする（`new_with_swizzle` 等と同型の設計）
 - `dispatch_auto` は `split_k_auto_enabled` が `true` の場合のみ、`should_split_k` の判定を
@@ -338,6 +340,13 @@ split-K 分岐の内部フォールバック（`dispatch_split_k_strided_prepare
 > **現行状態（2026-09-11・#1516 で更新）**: 下記は本セクション新設時点（ゲート既定
 > `false`）の判断記録であり、そのまま残す。#1515 §10.4 の ADOPT 確定を受け、ゲートは
 > 既定 `true` へ切替済み（詳細は本節末尾「ユーザー判断による本番結線（2026-09-11・#1516 マージ）」参照。以下の「既定 `false`」の記述は切替前の経緯として保持する）。
+>
+> **さらなる現行状態（#1547）**: コンパイル時定数 `SPLIT_K_DISPATCH_AUTO_
+> PRODUCTION_ENABLED` とそのドリフト検出テストは #1547 で撤去し、split-K
+> の切替は per-instance フィールド `split_k_auto_enabled`（`MetalGemm::new`
+> は `true` 固定）と #1545 の実行時トグル（`crate::split_k_runtime`）の
+> みへ一本化した。詳細は本節末尾「定数ゲートの撤去（#1547）」参照。以下の
+> 定数名を含む記述はすべて撤去前の経緯として保持する。
 
 **既定 `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false`**: 依存イシュー #1515（split-K vs
 classic 経路の性能 A/B・#1475 §7 フォローアップの 5 run 正式確定）は、5 run 計測スキャフォー
@@ -531,6 +540,10 @@ opt-out スイッチを追加した。
      常に 1. の値を渡す。`new_with_split_k_auto` で個別に固定可能）
   3. `split_k_runtime::split_k_enabled()`（本節の実行時トグル。プロセスワイド・実行中に
      切り替え可能）
+
+  **追記（#1547）**: 上記 1. のコンパイル時定数は撤去済みで、現在は
+  `MetalGemm::new` がリテラル `true` を 2. へ渡す 2 段構成になっている。
+  詳細は本節末尾「定数ゲートの撤去（#1547）」参照。
 - **fail-closed**: `false` にすると、1.・2. の値に関わらず常に classic 経路
   （`GemmRoute::Classic`）へ固定され、split-K 結線前（`fandhe-ai =0.8.0` 相当）と bit
   同一の出力になる。「問題が起きたら `false` にすれば必ず既知の安全な経路へ戻せる」設計。
@@ -570,6 +583,37 @@ split-K 経路が classic 経路・CPU f32 参照実装より `f64` 真値に近
 記録: 後退セルはいずれも split-K 非到達で計測ノイズと整合するが、トグル ON 時のみ実行
 されるホスト側経路判定のオーバーヘッド寄与は未分離。既定 ON（#1544 ユーザー判断）は
 不変。詳細は `docs/perf/metal-gemm-splitk-framework-compare-1517.md` §6a を参照。
+
+### 定数ゲートの撤去（#1547）
+
+上記「実行時トグル」節が記す「3 段ゲート」のうち、1 段目のコンパイル時定数
+`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（および対応するドリフト
+検出テスト `tile::tests::split_k_dispatch_auto_production_enabled_is_true_
+by_default`）は **#1547 で撤去**した。理由は、実行時トグル（#1545）導入後は
+コンパイル時定数ゲートが実質的に意味を持たなくなった（`MetalGemm::new` が
+常に渡す固定値でしかなく、切替手段としては実行時トグルへ完全に代替された）
+ため、保守すべきゲートを 1 つに集約する。
+
+- `MetalGemm::new` を含む `new_with_gates` 経由の全コンストラクタは、
+  `split_k_auto_enabled` に**リテラル `true`** を渡すよう変更した（従来の
+  `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 参照を置換。値は不変
+  のため挙動は変わらない）。
+- `MetalGemm::new_with_split_k_auto(ctx, enabled: bool)` による per-instance
+  の明示 opt-out・#1545 の実行時トグル（`crate::split_k_runtime`。既定
+  `true`）は**変更なし**。したがって split-K 到達は次の 2 段のみで決まる
+  （旧 3 段から 1 段減）:
+  1. `MetalGemm::split_k_auto_enabled`（インスタンス単位フィールド。
+     `MetalGemm::new` は常に `true`）
+  2. `crate::split_k_runtime::split_k_enabled()`（実行時トグル。既定 `true`）
+- 本撤去はコード上の整理のみであり、**本番既定の挙動（split-K 到達形状で
+  split-K 2 パス経路を通ること）は変わらない**。`scripts/bench/framework-
+  compare/run_ab_splitk_metal.sh` の差分ガードは、撤去済みのコンパイル時
+  定数宣言行ではなく `crate::split_k_runtime::SPLIT_K_RUNTIME_ENABLED` の
+  既定値宣言行を検証する形へ付け替えた。
+- 上記「§5 本番結線（#1516）」「ゲート既定値・切替条件（事前登録）」
+  「切替判断の記録」「ユーザー判断による本番結線」の各節に現れる
+  `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` という定数名は、いずれも
+  撤去前の実装状態を記した歴史記録として**書き換えずに保持**する。
 
 ## §6 参照
 

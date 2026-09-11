@@ -5,11 +5,13 @@
 //! 既定で `gemm::MetalGemm::dispatch_auto`（動的タイル選択済み。
 //! TASK-1.8c・#40）へ委譲する（既存カーネル・許容誤差・境界検査には
 //! 触れない）。`dispatch_auto` は内部に split-K 2 パス経路への本番結線
-//! ゲート（`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`。既定
-//! `true`・イシュー #1516。2026-09-11 にユーザー判断で切替）を持つが、本
-//! モジュール（`gemm` メソッド）は `dispatch_auto` を呼ぶのみでゲートの
-//! 状態を意識しない——ゲートを明示 `false` にした場合は結線追加前と
-//! bit 同一の classic 経路のまま（`docs/backend-metal-splitk-decision.md` §5）。片側のみが転置 view
+//! ゲート（`self.split_k_auto_enabled`〈既定 `true` 固定〉・
+//! `SPLIT_K_NUMERIC_CONTRACT_APPROVED`・実行時トグル `crate::
+//! split_k_runtime::split_k_enabled()`〈既定 `true`〉。イシュー
+//! #1516・#1545・#1547）を持つが、本モジュール（`gemm` メソッド）は
+//! `dispatch_auto` を呼ぶのみでゲートの状態を意識しない——実行時トグルを
+//! `false` にした場合は結線追加前と bit 同一の classic 経路のまま
+//! （`docs/backend-metal-splitk-decision.md` §5）。片側のみが転置 view
 //! （NT/TN。`autodiff::grad` の VJP が
 //! `transpose2d` した勾配を渡す形状）の場合は `dispatch_auto` の代わりに
 //! `gemm::MetalGemm::dispatch_strided_bias_act_prepared`（classic strided

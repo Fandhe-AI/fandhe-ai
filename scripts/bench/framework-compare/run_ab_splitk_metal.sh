@@ -23,10 +23,13 @@
 # 差分ガード（旧方式の「before==after で計測対象なし」再発防止・
 # `docs/perf/train-step-phase-breakdown.md` §5.11 の教訓を踏襲）は、
 # 2 バイナリ比較ではなくなったため以下の 2 点へ置き換える:
-#   1. `AB_PATCH_FACADE_PATH/../backend-metal/src/tile.rs` の
-#      `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 宣言行が `true` で
-#      あること（`--metal-split-k off` が「本番経路が元々 off だから
-#      off に見える」だけの無意味な比較にならないことの確認）。
+#   1. `AB_PATCH_FACADE_PATH/../backend-metal/src/split_k_runtime.rs` の
+#      `SPLIT_K_RUNTIME_ENABLED`（実行時トグル本体）の既定値宣言行が
+#      `true` であること（`--metal-split-k off` が「本番経路が元々 off
+#      だから off に見える」だけの無意味な比較にならないことの確認。
+#      #1547 でコンパイル時定数ゲート `tile::
+#      SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` を撤去したため対象を
+#      付け替えた）。
 #   2. ビルド後、`--metal-split-k off` のドライラン 1 回（極小サイズの
 #      gemm 1 回）が MEASURE_ERROR にならないこと（`metal-split-k-toggle`
 #      feature が実際に有効化されていることの確認）。
@@ -99,25 +102,27 @@ if ! grep -qE '^\s*name\s*=\s*"fandhe-ai"\s*$' "$AB_PATCH_FACADE_PATH/Cargo.toml
 fi
 PATCH_CONFIG="patch.crates-io.fandhe-ai.path=\"${AB_PATCH_FACADE_PATH}\""
 
-# 差分ガード其の 1（上記コメント参照）: `SPLIT_K_DISPATCH_AUTO_
-# PRODUCTION_ENABLED`（`crates/backend-metal/src/tile.rs`）が `true` で
-# あることを機械検証する。`grep -E` の alternation は BRE エスケープ不要
-# （`(false|true)`）。
-TILE_RS="$(cd "$AB_PATCH_FACADE_PATH/../backend-metal" 2>/dev/null && pwd)/src/tile.rs"
-if [[ ! -f "$TILE_RS" ]]; then
-  echo "error: tile.rs not found relative to AB_PATCH_FACADE_PATH ($AB_PATCH_FACADE_PATH)" >&2
+# 差分ガード其の 1（上記コメント参照）: `SPLIT_K_RUNTIME_ENABLED`
+# （`crates/backend-metal/src/split_k_runtime.rs`。実行時トグル本体の
+# 既定値）が `true` であることを機械検証する（#1547 でコンパイル時定数
+# ゲート `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` を撤去した
+# ため、本ガードの対象を実行時トグルの既定値宣言行へ付け替えた）。
+# `grep -E` の alternation は BRE エスケープ不要（`(false|true)`）。
+RUNTIME_RS="$(cd "$AB_PATCH_FACADE_PATH/../backend-metal" 2>/dev/null && pwd)/src/split_k_runtime.rs"
+if [[ ! -f "$RUNTIME_RS" ]]; then
+  echo "error: split_k_runtime.rs not found relative to AB_PATCH_FACADE_PATH ($AB_PATCH_FACADE_PATH)" >&2
   exit 1
 fi
-GATE_LINE="$(grep -E '^pub\(crate\) const SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = (false|true);$' "$TILE_RS" || true)"
+GATE_LINE="$(grep -E '^static SPLIT_K_RUNTIME_ENABLED: AtomicBool = AtomicBool::new\((false|true)\);$' "$RUNTIME_RS" || true)"
 if [[ -z "$GATE_LINE" ]]; then
-  echo "error: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED の宣言行を $TILE_RS から特定できなかった（フォーマット変更の可能性。fail-closed）" >&2
+  echo "error: SPLIT_K_RUNTIME_ENABLED の宣言行を $RUNTIME_RS から特定できなかった（フォーマット変更の可能性。fail-closed）" >&2
   exit 1
 fi
-if [[ "$GATE_LINE" != *"= true;" ]]; then
-  echo "error: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED が true ではない（${GATE_LINE}）。runtime トグルの on/off 比較が本番経路の on/off 比較にならないため fail-closed で停止する（issue #1545）。" >&2
+if [[ "$GATE_LINE" != *"(true);" ]]; then
+  echo "error: SPLIT_K_RUNTIME_ENABLED の既定値が true ではない（${GATE_LINE}）。runtime トグルの on/off 比較が本番経路の on/off 比較にならないため fail-closed で停止する（issue #1545）。" >&2
   exit 1
 fi
-echo "gate check: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=true ($TILE_RS)"
+echo "gate check: SPLIT_K_RUNTIME_ENABLED=true ($RUNTIME_RS)"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "AB_DRY_RUN=1: バリデーションのみ完了（cargo/pmset/sysctl は実行しない）。"
