@@ -1,0 +1,10 @@
+# env_info（イシュー #1548）
+date_utc: 2026-09-11T15:55:21Z
+commit: a87aac69e7d6e7d89b45e2fd487246ac9ba31d27
+chip: Apple M4 Max
+os: 26.6.2 (25.6.0)
+rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+load_mode: record_only（専有ゲートなし）
+run1 load1 推移: 3.58 17.56 18.12 16.98 （並走した読み取り専用調査エージェント 3 本による高負荷）
+run2 load1 推移: 5.02 4.03 3.75 3.69 （調査エージェント 1 本のみ並走・ビルド並走なし）
+hostname: masked

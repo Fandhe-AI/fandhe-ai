@@ -558,6 +558,19 @@ opt-out スイッチを追加した。
   metal-split-k-toggle` 限定。別イシュー実装）は本 facade API を経由して実行時トグルを
   操作する想定（本ドキュメント時点ではスコープ外・別エージェント実装）。
 
+**#1549 追記（診断専用・判定基準なし）**: split-K 到達 11 形状（NN・単一乱数系列）で
+split-K 経路・classic 経路・CPU f32 参照実装の出力をホスト `f64` 厳密解と突き合わせた
+誤差実測を `docs/perf/metal-gemm-splitk-f64-truth.md` に記録した。本実測の範囲では
+split-K 経路が classic 経路・CPU f32 参照実装より `f64` 真値に近かった（全 11 形状で
+`max_abs`／`mean_abs` とも split-K が下回った）。`assert_no_split_k_parity_regression`
+の baseline・tolerance 定数・既存テストは変更していない。
+
+**#1548 事後監視（2026-09-12）**: run2（低負荷）で規則 1 不成立 7 セル（§3 規則上は
+結線維持不可相当の記録）・符号一貫セル 0 件・checksum 全一致。原因帰属は判定と分けて
+記録: 後退セルはいずれも split-K 非到達で計測ノイズと整合するが、トグル ON 時のみ実行
+されるホスト側経路判定のオーバーヘッド寄与は未分離。既定 ON（#1544 ユーザー判断）は
+不変。詳細は `docs/perf/metal-gemm-splitk-framework-compare-1517.md` §6a を参照。
+
 ## §6 参照
 
 - `docs/perf/logs/metal-gemm-splitk-shapes-1308/`（M4 Max 実機実測の生ログ・`aggregate.py`／
