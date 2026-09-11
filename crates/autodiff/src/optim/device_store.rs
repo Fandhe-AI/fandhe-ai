@@ -511,7 +511,19 @@ impl ResidentResolver for DeviceParamStore {
         if self.resident_grad_capability.get().is_none() {
             let mn = expected_shape[0] * expected_shape[1];
             let mut probe = mem.alloc_zeroed(&[mn]).map_err(AutodiffError::Backend)?;
-            match ops.gemm_fp32_strict_into(x_t, g, &mut probe, 0) {
+            // `_tracked` 版（`gemm_fp32_strict_into` ではなく）を使い
+            // `self.failure_token` を渡す（codex-review 指摘・PR #1556）:
+            // Metal の NT/TN encode-only 経路（`backend-metal::ops::
+            // MetalBackendOps::gemm_fp32_strict_into` doc 参照）は
+            // dispatch 登録直後に待たないため、`sgd_step_device_tracked`
+            // と同様に encode と同一ロック区間で失敗トークンを登録して
+            // おかないと、共有 `MetalContext` を使う別スレッドが先に
+            // `synchronize()` してエラーを回収した場合に本ストアの後続
+            // `download`／`upload_into` がそのエラーを observe できず、
+            // 未完成な probe を「成功」として扱ってしまう。CPU 等の同期
+            // 実装ではトークンはデフォルト実装により無視され挙動は
+            // 変わらない。
+            match ops.gemm_fp32_strict_into_tracked(x_t, g, &mut probe, 0, &self.failure_token) {
                 Ok(()) => {
                     self.resident_grad_capability.set(Some(true));
                 }
@@ -653,7 +665,17 @@ impl ResidentResolver for DeviceParamStore {
             return Ok(true);
         }
 
-        match ops.gemm_fp32_strict_into(x_t, g, &mut staging.buf, offset) {
+        // `_tracked` 版を使う理由は probe 呼び出しと同じ（上記コメント
+        // 参照）。ここは永続 `grad_staging`（学習全体で使い回すバッファ）
+        // への書き込みのため、トークン未登録による見落としの影響が
+        // probe よりも大きい（`step()` の poison 検査まで気付けない）。
+        match ops.gemm_fp32_strict_into_tracked(
+            x_t,
+            g,
+            &mut staging.buf,
+            offset,
+            &self.failure_token,
+        ) {
             Ok(()) => {
                 staging.filled[slot] = Some(ResidentFill {
                     backward_serial: current_serial,

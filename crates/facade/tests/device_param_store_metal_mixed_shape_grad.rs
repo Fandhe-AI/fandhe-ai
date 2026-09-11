@@ -36,6 +36,7 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai_autodiff::nn::loss::{MseLoss, Reduction};
+use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_tensor_core::Tensor;
 
 const BATCH: usize = 4;
@@ -51,25 +52,17 @@ fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
 }
 
-/// 統一複合判定（`.claude/rules/coding-rust.md`）。
-fn assert_close(actual: f32, expected: f32, ctx: &str) {
-    let abs_diff = (actual - expected).abs();
-    let rel_diff = abs_diff / expected.abs().max(1e-12);
-    assert!(
-        abs_diff < 1e-5 || rel_diff < 1e-3,
-        "{ctx}: actual={actual} expected={expected} abs_diff={abs_diff} rel_diff={rel_diff}"
-    );
-}
-
+/// 統一複合判定（`.claude/rules/coding-rust.md`）。判定式・誤差計算は
+/// `fandhe_ai_backend_cpu::parity::assert_parity`（`compat_sequential.rs`・
+/// `fusion_default_parity.rs` と同型の利用）へ委譲する（codex-review
+/// 指摘・PR #1556: 独自の許容誤差・判定式定義を持たず共通実装を使う）。
 fn assert_tensors_match(actual: &Tensor<f32>, expected: &Tensor<f32>, ctx: &str) {
     assert_eq!(actual.shape(), expected.shape(), "{ctx}: shape mismatch");
     let a = actual.contiguous();
     let e = expected.contiguous();
     let a_data = a.as_slice().unwrap();
     let e_data = e.as_slice().unwrap();
-    for (i, (av, ev)) in a_data.iter().zip(e_data.iter()).enumerate() {
-        assert_close(*av, *ev, &format!("{ctx}: element {i}"));
-    }
+    assert_parity(ctx, a_data, e_data);
 }
 
 fn gen_regression_data(seed: u64) -> (Tensor<f32>, Tensor<f32>) {

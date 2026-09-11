@@ -37,6 +37,31 @@ fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).unwrap()
 }
 
+/// 要素ごとの `to_bits()` 比較（bit 完全一致契約の検証。codex-review
+/// 指摘・PR #1556: `assert_eq!(&[f32], &[f32])` は `+0.0`／`-0.0` を
+/// 同一値として扱い区別できないため、符号付きゼロの取り違えを見逃す
+/// おそれがある。`f32::to_bits()` はビット表現をそのまま比較するため
+/// `+0.0`（`0x0000_0000`）と `-0.0`（`0x8000_0000`）を確実に区別する）。
+fn assert_bits_eq(actual: &[f32], expected: &[f32], ctx: &str) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{ctx}: length mismatch (actual={} expected={})",
+        actual.len(),
+        expected.len()
+    );
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            a.to_bits(),
+            e.to_bits(),
+            "{ctx}: element {i} bit mismatch (actual={a:?} bits={:#010x}, expected={e:?} \
+             bits={:#010x})",
+            a.to_bits(),
+            e.to_bits(),
+        );
+    }
+}
+
 /// `Op::LinearResident` の VJP が実際に渡す形（`x_t = x.transpose(0, 1)`・
 /// `g` はそのまま）を再現する transposed-operand ペアを作る。`x_t` は
 /// `layout::classify_2d` が `transposed: true` と分類する view（TN 側）、
@@ -107,11 +132,13 @@ fn gemm_fp32_strict_into_matches_gemm_fp32_strict_with_offset() {
         let readback_c = readback.contiguous();
         let readback_data = readback_c.as_slice().unwrap();
 
-        assert_eq!(
+        assert_bits_eq(
             &readback_data[prefix..prefix + mn],
             expected_data,
-            "gemm_fp32_strict_into は gemm_fp32_strict と bit 完全一致するはず（batch={batch} \
-             d_in={d_in} d_out={d_out} prefix={prefix}）"
+            &format!(
+                "gemm_fp32_strict_into は gemm_fp32_strict と bit 完全一致するはず \
+                 （batch={batch} d_in={d_in} d_out={d_out} prefix={prefix}）"
+            ),
         );
         assert!(
             readback_data[..prefix].iter().all(|v| v.is_nan()),
@@ -215,10 +242,10 @@ fn gemm_fp32_strict_into_falls_back_to_host_path_for_nn_shape() {
     let readback_c = readback.contiguous();
     let readback_data = readback_c.as_slice().unwrap();
 
-    assert_eq!(
+    assert_bits_eq(
         &readback_data[prefix..prefix + mn],
         expected_data,
-        "NN フォールバック経路は gemm_fp32_strict と bit 完全一致するはず"
+        "NN フォールバック経路は gemm_fp32_strict と bit 完全一致するはず",
     );
     assert!(
         readback_data[..prefix].iter().all(|v| v.is_nan()),
@@ -268,8 +295,84 @@ fn gemm_fp32_strict_into_falls_back_for_in_features_one_transpose() {
     let readback_c = readback.contiguous();
     let readback_data = readback_c.as_slice().unwrap();
 
-    assert_eq!(
-        readback_data, expected_data,
-        "in_features=1 の縮退ケースも gemm_fp32_strict と bit 完全一致するはず"
+    assert_bits_eq(
+        readback_data,
+        expected_data,
+        "in_features=1 の縮退ケースも gemm_fp32_strict と bit 完全一致するはず",
+    );
+}
+
+/// 符号付きゼロ（`-0.0`）を含むオペランドでも `gemm_fp32_strict_into` が
+/// `gemm_fp32_strict` と bit 完全一致することを確認する（codex-review
+/// 指摘・PR #1556）。`assert_eq!(&[f32], &[f32])` は `-0.0 == 0.0`
+/// （IEEE 754 の等価性）のため符号の取り違えを検出できず、旧版の
+/// テストは実際には符号ビットを検証していなかった。`assert_bits_eq`
+/// （`to_bits()` 比較）へ置き換えたことで、本テストが実際に符号ビット
+/// まで検証していることを NT/TN 経路・NN フォールバック経路の双方で
+/// 確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn gemm_fp32_strict_into_bit_matches_with_negative_zero_operands() {
+    let ops = MetalBackendOps::new();
+    let mem = ops
+        .memory_ops()
+        .expect("Metal MemoryOps must be available on a Metal-equipped test runner");
+
+    // NT/TN 経路: `x`（batch=2, d_in=2）の一部要素を `-0.0` にしてから
+    // 転置して `x_t` を作る。`g`（batch=2, d_out=2）にも `-0.0` を混ぜる。
+    let x = tensor(vec![-0.0f32, 1.5, 2.5, -0.0], &[2, 2]);
+    let x_t = x.transpose(0, 1).unwrap();
+    let g = tensor(vec![0.0f32, -0.0, -3.0, 4.0], &[2, 2]);
+
+    let expected_nt_tn = ops
+        .gemm_fp32_strict(&x_t, &g)
+        .expect("gemm_fp32_strict must succeed on a Metal-equipped test runner");
+    let expected_nt_tn_c = expected_nt_tn.contiguous();
+    let expected_nt_tn_data = expected_nt_tn_c.as_slice().unwrap();
+
+    let mn_nt_tn = 2 * 2;
+    let seed_nt_tn = tensor(vec![f32::NAN; mn_nt_tn], &[mn_nt_tn]);
+    let mut staging_nt_tn = mem.upload(&seed_nt_tn).unwrap();
+    ops.gemm_fp32_strict_into(&x_t, &g, &mut staging_nt_tn, 0)
+        .expect("gemm_fp32_strict_into must succeed for the NT/TN transposed-operand path");
+    let readback_nt_tn = mem.download(&staging_nt_tn).unwrap();
+    let readback_nt_tn_c = readback_nt_tn.contiguous();
+    let readback_nt_tn_data = readback_nt_tn_c.as_slice().unwrap();
+    assert_bits_eq(
+        readback_nt_tn_data,
+        expected_nt_tn_data,
+        "NT/TN 経路（符号付きゼロ入力）は gemm_fp32_strict と bit 完全一致するはず",
+    );
+
+    // NN フォールバック経路: `a`（2x3）・`b`（3x4）の一部要素を `-0.0` に
+    // する（NN は `layout::classify_2d` が両方 contiguous と分類する
+    // ため `Unsupported` を返さずホスト経路フォールバックへ落ちる。
+    // `ops::MetalBackendOps::gemm_fp32_strict_into` doc 参照）。
+    let a = tensor(vec![-0.0f32, 1.0, -0.0, 2.0, -0.0, 3.0], &[2, 3]);
+    let b = tensor(
+        vec![
+            0.0f32, -0.0, 1.0, -1.0, -0.0, 0.0, -0.0, 2.0, 1.0, -0.0, -2.0, 0.0,
+        ],
+        &[3, 4],
+    );
+
+    let expected_nn = ops
+        .gemm_fp32_strict(&a, &b)
+        .expect("gemm_fp32_strict must succeed on a Metal-equipped test runner");
+    let expected_nn_c = expected_nn.contiguous();
+    let expected_nn_data = expected_nn_c.as_slice().unwrap();
+
+    let mn_nn = 2 * 4;
+    let seed_nn = tensor(vec![f32::NAN; mn_nn], &[mn_nn]);
+    let mut staging_nn = mem.upload(&seed_nn).unwrap();
+    ops.gemm_fp32_strict_into(&a, &b, &mut staging_nn, 0)
+        .expect("gemm_fp32_strict_into must fall back to the host path for NN shapes");
+    let readback_nn = mem.download(&staging_nn).unwrap();
+    let readback_nn_c = readback_nn.contiguous();
+    let readback_nn_data = readback_nn_c.as_slice().unwrap();
+    assert_bits_eq(
+        readback_nn_data,
+        expected_nn_data,
+        "NN フォールバック経路（符号付きゼロ入力）は gemm_fp32_strict と bit 完全一致するはず",
     );
 }

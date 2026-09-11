@@ -28,6 +28,8 @@ use std::sync::Mutex;
 use objc2::rc::Retained;
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLSize};
 
+use fandhe_ai_tensor_core::DispatchFailureCell;
+
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
@@ -3201,7 +3203,7 @@ impl MetalGemm {
     ) -> Result<(), MetalError> {
         self.encode_strided_bias_act_prepared_impl(
             ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, bias, act_relu, c_buf, None,
-            m, n, k,
+            m, n, k, None,
         )
     }
 
@@ -3223,6 +3225,16 @@ impl MetalGemm {
     /// `encode_dispatch_bias_act` への配線・`resources` retention 契約は
     /// [`Self::encode_strided_bias_act_prepared`] と同一（同メソッド doc
     /// 「`resources` へ...」参照）。
+    ///
+    /// `token`（`Some` の場合）は本 dispatch を含むバッチが実行時エラー
+    /// になった際に [`DispatchFailureCell::set`] される
+    /// （`context.rs::MetalContext::encode` の `token` 引数と同一契約。
+    /// codex-review 指摘・PR #1556: `ops::MetalBackendOps::
+    /// gemm_fp32_strict_into_tracked`〈トレイトの `sgd_step_device_tracked`
+    /// と同型の非破壊拡張〉が `DeviceParamStore::failure_token` を渡し、
+    /// `encode` と同一ロック区間で登録することで、共有 `MetalContext` を
+    /// 使う別スレッドが先に `synchronize()` してエラーを回収してしまう
+    /// 競合を防ぐ）。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn encode_strided_bias_act_prepared_with_c_offset(
         &self,
@@ -3240,6 +3252,7 @@ impl MetalGemm {
         m: usize,
         n: usize,
         k: usize,
+        token: Option<&DispatchFailureCell>,
     ) -> Result<(), MetalError> {
         self.encode_strided_bias_act_prepared_impl(
             ctx,
@@ -3256,6 +3269,7 @@ impl MetalGemm {
             m,
             n,
             k,
+            token,
         )
     }
 
@@ -3281,6 +3295,7 @@ impl MetalGemm {
         m: usize,
         n: usize,
         k: usize,
+        token: Option<&DispatchFailureCell>,
     ) -> Result<(), MetalError> {
         let (dims, strides) = validate_strided_dims_impl(
             a_buf.len(),
@@ -3329,7 +3344,7 @@ impl MetalGemm {
         ctx.encode(
             "gemm_bias_act_strided",
             &[a_buf.raw(), b_buf.raw(), bias_ref.raw(), c_buf.raw()],
-            None,
+            token,
             |encoder| {
                 encode_dispatch_bias_act(
                     encoder,

@@ -151,6 +151,13 @@ update 全体）は速度差が計測ノイズ（±10% 程度）に埋もれて�
   きり判定されるため、形状単位の `Unsupported` を返すと同じ backward で既に staging へ充填
   済みの他層の勾配が `param_grads_to_host` から読めなくなる（PR #1556 codex-review P1
   指摘。`Linear(1,8)` → `Linear(8,4)` の混在ケースを実機 `#[ignore]` テストで回帰確認）。
+- 失敗トークン（PR #1556 codex-review P0 是正）: encode-only の書き込みは `ctx.encode` に
+  `token: None` を渡すと、共有 `MetalContext` を使う別スレッドが先に `synchronize()` して
+  GPU エラーを回収した場合にストアへ失敗が伝播せず、未完成の staging を正常値として読み
+  出しうる。`sgd_step_device_tracked` と同型の `BackendOps::gemm_fp32_strict_into_tracked`
+  （既定実装は非 tracked 版へ委譲。CPU 等の同期バックエンドはそのまま）を追加し、
+  `fill_resident_weight_grad` が `DeviceParamStore::failure_token` を渡して dispatch 登録と
+  同じロック区間でトークンを登録する。
 
 ### 5.2 カウンタ変遷
 
