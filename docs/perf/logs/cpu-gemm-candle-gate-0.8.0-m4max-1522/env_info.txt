@@ -47,8 +47,8 @@ orchestrate_m4max.sh` ラベル `0.8.0-1522` の単一ラン実施。中断再�
 - `pmset -g therm` before/after: thermal warning なし。before/after ファイル参照
 - 並走 bench プロセス検出: なし。`skipped-m4max-cpu-gemm-gate-0.8.0-1522.log` は空
 - `git diff v0.8.0..HEAD --stat --` CPU 経路（帰属用。
-  `diff_v0.8.0_<sha>_cpu_path.txt` として保存）: 未生成（規則 5 の帰属記録は
-  本イシューのログに欠落）
+  `diff_v0.8.0_<sha>_cpu_path.txt` として保存）: `diff_v0.8.0_cbf5488f_cpu_path.txt`
+  （計測後に同一 sha `cbf5488f` から決定的に再生成。CPU 計測経路の差分ゼロ）
 
 ### `compare_gemm_gate.py --device cpu` 判定結果
 
