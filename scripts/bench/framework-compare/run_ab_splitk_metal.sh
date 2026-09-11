@@ -173,10 +173,13 @@ if [[ -z "$DEFAULT_CONST_LINE" ]]; then
   exit 1
 fi
 
-# 1b. 実行時トグル初期値式が同定数を参照していること。
-RUNTIME_INIT_LINE="$(grep -F 'AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)' "$RUNTIME_RS" || true)"
+# 1b. 実行時トグル初期値式が同定数を参照していること。doc comment 内の
+#     同文（`//! ... AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)`）に一致して
+#     素通りしないよう、行頭の `static` 宣言と初期値式を 1 行で一体検証する
+#     （PR #1553 codex-review 指摘）。
+RUNTIME_INIT_LINE="$(grep -E '^static SPLIT_K_RUNTIME_ENABLED: AtomicBool = AtomicBool::new\(SPLIT_K_DEFAULT_ENABLED\);$' "$RUNTIME_RS" || true)"
 if [[ -z "$RUNTIME_INIT_LINE" ]]; then
-  echo "error: 実行時トグルの初期値式 'AtomicBool::new(SPLIT_K_DEFAULT_ENABLED)' を $RUNTIME_RS から特定できなかった（初期値がリテラルへ差し戻された、または SPLIT_K_DEFAULT_ENABLED を参照していない可能性。fail-closed。issue #1545/#1547）" >&2
+  echo "error: 実行時トグルの static 宣言 'static SPLIT_K_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(SPLIT_K_DEFAULT_ENABLED);' を $RUNTIME_RS から特定できなかった（初期値がリテラルへ差し戻された、または SPLIT_K_DEFAULT_ENABLED を参照していない可能性。doc comment 内の言及は検証対象外。fail-closed。issue #1545/#1547）" >&2
   exit 1
 fi
 
