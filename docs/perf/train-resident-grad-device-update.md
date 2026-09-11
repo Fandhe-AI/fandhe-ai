@@ -125,7 +125,7 @@ update 全体）は速度差が計測ノイズ（±10% 程度）に埋もれて�
 
 ## 5. #1555 Metal 実装
 
-イシュー #1555 にて Metal 側の `BackendOps::gemm_fp32_strict_into`（NT/TN 限定、encode-only）
+イシュー #1555 にて Metal 側の `BackendOps::gemm_fp32_strict_into`（NT/TN は encode-only 直接書き込み・それ以外はホスト GEMM → `upload_into` フォールバック）
 と `MemoryOps::upload_into` を実装し、reuse 経路の weight 勾配をデバイス常駐 staging へ
 直接書き込む結線を完了した。
 
@@ -140,12 +140,17 @@ update 全体）は速度差が計測ノイズ（±10% 程度）に埋もれて�
   （`StorageModeShared` 上の競合書き込み回避）。
 - `MetalBuffer::write_slice_at(offset, data)` を追加（unsafe 4 箇所目・`zero_fill` の
   書き込み版）。
-- `MetalBackendOps::gemm_fp32_strict_into` を NT/TN 限定で実装。`gemm` の #1215 NT/TN
-  分岐と同じ `classify_2d`／`as_view_slice` ゲート・同一 classic strided カーネル。
-  NN／TT／分類不能は `Unsupported`（呼び出し元 `fill_resident_weight_grad` が
-  `resident_grad_capability = Some(false)` として永続キャッシュし silent fallback）。
-  encode-only（内部 `synchronize()` なし）のため、`MemoryOps::download` が読み出し前に
-  必ず `synchronize()` する既存契約により動作。
+- `MetalBackendOps::gemm_fp32_strict_into` を実装。NT/TN に分類できる入力（`Op::LinearResident`
+  の `x_t = transpose2d(x)` は通常ここ）は `gemm` の #1215 NT/TN 分岐と同じ `classify_2d`／
+  `as_view_slice` ゲート・同一 classic strided カーネルで staging へ encode-only（内部
+  `synchronize()` なし）に直接書き込む（`MemoryOps::download` が読み出し前に必ず
+  `synchronize()` する既存契約により動作）。NN／TT／分類不能（例: in_features=1 で `x_t` の
+  strides が `[1,1]` になる場合）は `gemm_fp32_strict`（ホスト結果）→ `upload_into` の
+  フォールバックで同じ位置へ書き込み、**形状を理由に `Unsupported` を返さない**。理由:
+  呼び出し元 `fill_resident_weight_grad` の `resident_grad_capability` はストア全体で 1 度
+  きり判定されるため、形状単位の `Unsupported` を返すと同じ backward で既に staging へ充填
+  済みの他層の勾配が `param_grads_to_host` から読めなくなる（PR #1556 codex-review P1
+  指摘。`Linear(1,8)` → `Linear(8,4)` の混在ケースを実機 `#[ignore]` テストで回帰確認）。
 
 ### 5.2 カウンタ変遷
 
