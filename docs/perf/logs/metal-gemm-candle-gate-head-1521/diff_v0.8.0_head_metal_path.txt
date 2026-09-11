@@ -1,0 +1,11 @@
+$ git diff v0.8.0..HEAD --stat -- crates/backend-metal/src crates/facade/src crates/autodiff/src crates/tensor-core/src
+ crates/backend-metal/src/gemm.rs | 471 ++++++++++++++++++++++++++++++++-------
+ crates/backend-metal/src/lib.rs  |   2 +-
+ crates/backend-metal/src/ops.rs  |   8 +-
+ crates/backend-metal/src/tile.rs | 244 +++++++++++++++++++-
+ 4 files changed, 637 insertions(+), 88 deletions(-)
+
+$ git log --oneline v0.8.0..HEAD -- crates/backend-metal/src crates/facade/src crates/autodiff/src crates/tensor-core/src
+f91cafa3 docs(backend-metal): split-K 関連 .rs doc comment の「未結線」記述を結線後の状態へ整合する (#1535)
+5b2d5060 perf(backend-metal): should_split_k 分岐を dispatch_auto／select_for_device へ結線する (#1530)
+ef613b9b feat(backend-metal): SPLIT_K_NUMERIC_CONTRACT_APPROVED を true へ切り替え公開入口の数値契約ゲートを解除する (#1527)

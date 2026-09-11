@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）。#1490 で正式系列 `fandhe-ai =0.8.0` を 2026-09-10 に再計測し §16 追記: N=1024 0.743 倍（未達）・**N=2048 1.002 倍（達成。正式系列として初めて #1037 の形状別条件を満たした）**・N=4096 0.634 倍（未達）。共有負荷下の計測であり、旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま。#1520 で 2026-09-11 に M4 Max を `AB_LOAD_GATE_MODE=record_only`（共有負荷下）で実測し REJECT（N=1024 fresh/reuse が 1.2108／1.1112 で後退・N=2048/4096 は非後退～改善・checksum 全セル一致）→ legacy フォールバック維持・`readout_uses_borrowed_view` Metal 分岐不変（§17。§13.5 暫定・ADOPT 保留は #1520 で REJECT 確定）。正式系列 #1037 判定（§16）は影響を受けない。#1521 で、split-K 本番結線（#1527・#1530）により初めて `v0.8.0 ↔ origin/main` の Metal 計測経路 diff が非ゼロになったことを受け、対照系列（`0.8.0-ctrl-1521`）・参考系列（`head-<sha>-1521`。split-K 結線後 HEAD）の 2 系列を同一セッションで計測するスキャフォールド・帰属テスト・事前登録判定規則を整備した（§18）。本セッションも実機アクセス経路を持たないため実測は未実施のまま記入欄を残した
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）。#1490 で正式系列 `fandhe-ai =0.8.0` を 2026-09-10 に再計測し §16 追記: N=1024 0.743 倍（未達）・**N=2048 1.002 倍（達成。正式系列として初めて #1037 の形状別条件を満たした）**・N=4096 0.634 倍（未達）。共有負荷下の計測であり、旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま。#1520 で 2026-09-11 に M4 Max を `AB_LOAD_GATE_MODE=record_only`（共有負荷下）で実測し REJECT（N=1024 fresh/reuse が 1.2108／1.1112 で後退・N=2048/4096 は非後退～改善・checksum 全セル一致）→ legacy フォールバック維持・`readout_uses_borrowed_view` Metal 分岐不変（§17。§13.5 暫定・ADOPT 保留は #1520 で REJECT 確定）。正式系列 #1037 判定（§16）は影響を受けない。#1521 で、split-K 本番結線（#1527・#1530）により初めて `v0.8.0 ↔ origin/main` の Metal 計測経路 diff が非ゼロになったことを受け、対照系列（`0.8.0-ctrl-1521`）・参考系列（`head-<sha>-1521`。split-K 結線後 HEAD）の 2 系列を同一セッションで計測するスキャフォールド・帰属テスト・事前登録判定規則を整備した（§18）。#1521 で 2026-09-11 に M4 Max を record_only で実測（§18）: A・B とも 3 形状未達・parity 0 fail・帰属は 3 形状とも負荷差（ノイズ帯）・正式判定は不変
 
 ## 1. 位置づけ
 
@@ -1028,36 +1028,46 @@ legacy フォールバック（§13.6 で fail-closed に実装済み）を維�
 - 実行前に実行時点の v0.8.0..HEAD の `--stat`（Metal 経路）を
   再取得し、コミット済み diff（§18.2）と突き合わせる（規則 7）。
 
-### 18.4 実測結果（未実測）
+### 18.4 実測結果
 
 | N | A: fandhe-ai reuse 中央値（min–max, n=5） | A: candle fresh 中央値 | B: fandhe-ai reuse 中央値（min–max, n=5） | B: candle fresh 中央値 | B/A | 分類 |
 |---|---|---|---|---|---|---|
-| 1024 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 2048 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| 4096 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 1024 | 2.997 ms (2.324–3.047 ms) | 1.952 ms | 3.072 ms (3.010–3.141 ms) | 2.129 ms | 1.0250 | 負荷差（ノイズ帯）・構造分析と整合 |
+| 2048 | 9.588 ms (9.338–10.017 ms) | 7.909 ms | 9.386 ms (8.989–11.522 ms) | 6.603 ms | 0.9789 | 負荷差（ノイズ帯）・構造分析と整合 |
+| 4096 | 46.670 ms (39.739–50.505 ms) | 23.029 ms | 40.064 ms (39.284–48.943 ms) | 22.968 ms | 0.8585 | 負荷差（ノイズ帯）・構造分析と整合 |
 
-出典（記入予定）:
-`scripts/bench/framework-compare/results/raw/results-m4max-gemm-gate-
-0.8.0-ctrl-1521.jsonl`・`results-m4max-gemm-gate-head-<sha>-1521.jsonl`。
+出典:
+`docs/perf/logs/metal-gemm-candle-gate-head-1521/` 配下：
+`results-m4max-gemm-gate-0.8.0-ctrl-1521.jsonl`・`results-m4max-gemm-gate-head-cbf5488f-1521.jsonl`・
+`compare-A.md`・`compare-B.md`・`attribution-result.md`。
 
-### 18.5 データ有効性（未実測）
+### 18.5 データ有効性
 
-- parity 0 fail（fandhe-ai・candle 両系列とも全 run）: 未確認
-- manifest 4 条件（A: `fandhe_ai_source=registry`、B:
-  `fandhe_ai_source=path:<facade>`、両系列とも
-  `bench_fandhe_features=""`・`readout_method=legacy-metal-1452`・
-  `candle_core_source=registry`）: 未確認
+- **parity 0 fail**: fandhe-ai・candle 両系列とも全 N・全 run（各 5 run）で pass。判定不能なし
+- **manifest 4 条件確認**:
+  - A（対照 `0.8.0-ctrl-1521`）: `fandhe_ai_source=registry` ✓・`bench_fandhe_features=""` ✓・`readout_method=legacy-metal-1452` ✓・`candle_core_source=registry` ✓
+  - B（参考 `head-cbf5488f-1521`）: `fandhe_ai_source=path:<repo>/crates/facade` ✓・`bench_fandhe_features=""` ✓・`readout_method=legacy-metal-1452` ✓・`candle_core_source=registry` ✓
+- **skipped**: 両系列とも空（失敗・中断なし）
+- **中断・再実行**: なし（終了コード 0）
+- **負荷推移**（record_only）:
+  - 実行前: load averages 4.52 5.15 4.70
+  - monitor 推移（10 サンプル）: load1 最小 4.52 / 中央値 6.93 / 最大 9.40
+  - 実行後: uptime tail（monitor 最終サンプル）= 22:14 load1 6.60
+- **サーマル状態**: 両系列前後とも thermal warning / performance warning なし
+- **WARNING（記録）**: 実行時点の `diff_v0.8.0..HEAD --stat`（Metal 経路）に #1535（`f91cafa3`。split-K 関連 `.rs` doc comment 記述整合。コード変更なし）が HEAD に加わり、コミット済み diff（`diff_v0.8.0_origin-main_metal_path.txt`: 4 files・583 insertions・68 deletions）に対し実行時点の diff（`diff_v0.8.0_head_metal_path.txt`: 4 files・637 insertions・88 deletions。`gemm.rs` の変更行数 413 → 471・`tile.rs` 228 → 244）となった（3 コミット: `f91cafa3`・`5b2d5060`・`ef613b9b`。増分は #1535 の doc comment のみ）。`attribution.md` の構造分析（対象形状は split-K 結線後も classic 経路のまま。`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=false` により不変）は不変と判定し、帰属表再導出は実施しない
 
 ### 18.6 帰属表（§16 ↔ A ↔ B）
 
-`docs/perf/logs/metal-gemm-candle-gate-head-1521/attribute.py` の出力を
-転記する欄（未実測）。
+`docs/perf/logs/metal-gemm-candle-gate-head-1521/attribution-result.md` より転記。
 
-| N | A中央値 | B中央値 | B/A | 分類 | candle/A | candle/B | §16参照値 | §16比 |
+| N | A中央値 | B中央値 | B/A | 分類 | candle/A | candle/B | §16参照値（candle/fandhe） | §16比（candle/B ÷ §16参照値） |
 |---|---|---|---|---|---|---|---|---|
-| 1024 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 0.743 | 未実測 |
-| 2048 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 1.002 | 未実測 |
-| 4096 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 0.634 | 未実測 |
+| 1024 | 2.997 ms | 3.072 ms | 1.0250 | 負荷差（ノイズ帯）・構造分析と整合 | 0.651 | 0.693 | 0.743 | 0.933 |
+| 2048 | 9.588 ms | 9.386 ms | 0.9789 | 負荷差（ノイズ帯）・構造分析と整合 | 0.825 | 0.704 | 1.002 | 0.702 |
+| 4096 | 46.670 ms | 40.064 ms | 0.8585 | 負荷差（ノイズ帯）・構造分析と整合 | 0.493 | 0.573 | 0.634 | 0.904 |
+
+§16比は `attribute.py` が算出する **B 対 §16 参照値**（`candle/B ÷ §16参照値`）であり、A 系列（registry 版）のセッション間ドリフトではない。A 対 §16 は `candle/A ÷ §16参照値` = 0.876／0.823／0.778（本文で手計算した参考値。`attribute.py` の出力列ではない）。いずれも計測セッション間の負荷ドリフト指標として記録のみ。
+正式判定（旧 #1037）は §16.7 のまま不変（verdict なし）。
 
 ### 18.7 #1037 ゲート判定はユーザー判断事項（読み替え可否）
 
