@@ -261,9 +261,13 @@ bench）件数は全て 0。中断・再試行なし。
 （gemm NN 正方は `should_split_k` が `None`・train reuse は入口条件で非到達）
 のため、before/after は同一カーネル経路の比較・符号一貫性なし・共有負荷下
 （run1 時点は load1 3.58→17.56→18.12→16.98）から run2 で低負荷に低下
-（load1 5.02→4.03→3.75→3.69）した計測ノイズと整合する。ノイズ帯であり、
-結線の有無で差が生じない。checksum は全一致・gemm は split-K 非到達のため
-parity ゼロ fail（期待値）。
+（load1 5.02→4.03→3.75→3.69）した計測ノイズと整合する。ただし、split-K
+非到達でも `dispatch_auto` はトグル ON 時のみ `validate_dims`／
+`validate_effective_dims`／`select_route_for_device` のホスト側判定を実行
+するため、「結線の有無で差が生じない」とは断定せず、**計測ノイズと整合するが
+結線によるホスト側オーバーヘッドの寄与は未分離**と限定する（符号一貫性なし
+のため、規則上は後退の確証なし）。checksum は全一致・gemm は split-K 非到達
+のため parity ゼロ fail（期待値）。
 
 **判定: 記録のみ・決定不変。** #1544 のユーザー判断（既定 ON）を変更する
 入力にはしない。
