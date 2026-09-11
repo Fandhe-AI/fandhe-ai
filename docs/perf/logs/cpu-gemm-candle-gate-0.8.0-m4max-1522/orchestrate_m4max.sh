@@ -265,7 +265,7 @@ else
   RAW_UPTIME="$(uptime 2>/dev/null)" || RAW_UPTIME=""
   LOAD1=$(printf '%s\n' "$RAW_UPTIME" | sed -E 's/.*load averages?: ([0-9.]+)[, ].*/\1/')
   if awk -v l="$LOAD1" 'BEGIN{exit !(l != "" && l == l+0 && l >= 0)}' 2>/dev/null; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1=$LOAD1（専有ゲート要件なし。イシュー #1522・ルート #1519） $RAW_UPTIME" >> "$GATE_LOG"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1=${LOAD1}（専有ゲート要件なし。イシュー #1522・ルート #1519） $RAW_UPTIME" >> "$GATE_LOG"
   else
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1_invalid=${LOAD1:-<empty>}（専有ゲート要件なし。イシュー #1522・ルート #1519） $RAW_UPTIME" >> "$GATE_LOG"
   fi

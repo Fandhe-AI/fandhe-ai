@@ -443,13 +443,13 @@ for mode in "${MODES[@]}"; do
   echo "== bench-fandhe-splitk-ab-before train --phases mode=$mode =="
   if ! ./target/release/bench-fandhe-splitk-ab-before --task train --device metal --mode "$mode" --phases --out "$OUT_BEFORE_PHASES_TMP" 2>err.tmp; then
     echo "bench-fandhe-splitk-ab-before train --phases mode=$mode : $(cat err.tmp)" >> "$SKIP_TMP"
-    echo "  -> FAILED (recorded in $SKIP_TMP。--phases は診断用のため ANY_FAILED には計上しない)"
+    echo "  -> FAILED (recorded in ${SKIP_TMP}。--phases は診断用のため ANY_FAILED には計上しない)"
   fi
   rm -f err.tmp
   echo "== bench-fandhe-splitk-ab-after train --phases mode=$mode =="
   if ! ./target/release/bench-fandhe-splitk-ab-after --task train --device metal --mode "$mode" --phases --out "$OUT_AFTER_PHASES_TMP" 2>err.tmp; then
     echo "bench-fandhe-splitk-ab-after train --phases mode=$mode : $(cat err.tmp)" >> "$SKIP_TMP"
-    echo "  -> FAILED (recorded in $SKIP_TMP。--phases は診断用のため ANY_FAILED には計上しない)"
+    echo "  -> FAILED (recorded in ${SKIP_TMP}。--phases は診断用のため ANY_FAILED には計上しない)"
   fi
   rm -f err.tmp
 done

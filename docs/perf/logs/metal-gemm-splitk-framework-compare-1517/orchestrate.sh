@@ -27,7 +27,7 @@ case "$LABEL" in
         exit 1
         ;;
     *[!A-Za-z0-9._-]*)
-        echo "label は英数字・'._-' のみ許可する（got: $LABEL）" >&2
+        echo "label は英数字・'._-' のみ許可する（got: ${LABEL}）" >&2
         exit 1
         ;;
 esac
@@ -60,7 +60,7 @@ WATCHLIST="python torch mlx cargo gemm_ bench"
 record_procs() {
     out="$1"
     {
-        echo "# 固定 watchlist（$WATCHLIST）に一致するプロセス名の件数のみを記録する"
+        echo "# 固定 watchlist（${WATCHLIST}）に一致するプロセス名の件数のみを記録する"
         echo "# （コマンドライン全文・絶対パスは含めない）。"
         for name in $WATCHLIST; do
             count=$(ps -axo comm= 2>/dev/null | grep -ic -- "$name" || true)
@@ -73,8 +73,8 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "[dry-run] label=$LABEL"
     echo "[dry-run]   uptime_before -> $UPTIME_BEFORE"
     echo "[dry-run]   pmset_before  -> $PMSET_BEFORE"
-    echo "[dry-run]   monitor_log   -> $MONITOR_LOG（バックグラウンド uptime サンプラー）"
-    echo "[dry-run]   procs_log     -> $PROCS_LOG（watchlist: $WATCHLIST）"
+    echo "[dry-run]   monitor_log   -> ${MONITOR_LOG}（バックグラウンド uptime サンプラー）"
+    echo "[dry-run]   procs_log     -> ${PROCS_LOG}（watchlist: ${WATCHLIST}）"
     echo "[dry-run]   command       -> bash \"$FC_DIR/run_ab_splitk_metal.sh\" \"$LABEL\""
     echo "[dry-run]   run_log       -> $RUN_LOG"
     echo "[dry-run]   pmset_after   -> $PMSET_AFTER"
@@ -85,14 +85,14 @@ fi
 # §10.2 と同方針）。
 for artifact in "$UPTIME_BEFORE" "$PMSET_BEFORE" "$PMSET_AFTER" "$RUN_LOG" "$MONITOR_LOG" "$PROCS_LOG"; do
     if [ -e "$artifact" ]; then
-        echo "label=${LABEL}: 既存の成果物が見つかった（$artifact）。" \
+        echo "label=${LABEL}: 既存の成果物が見つかった（${artifact}）。" \
              "同 label の再実行は成果物を手動で別名へ退避してから行う" \
              "（run の差し替え禁止）" >&2
         exit 1
     fi
 done
 
-# ロックは label 単位ではなく framework-compare ディレクトリ（$FC_DIR）
+# ロックは label 単位ではなく framework-compare ディレクトリ（${FC_DIR}）
 # 単位で取る。`run_ab_splitk_metal.sh` は Cargo.lock・path patch・
 # before/after バイナリ等 $FC_DIR 配下の共有ファイルを書き換えるため、
 # label が異なっていても同時実行すると互いの成果物を破壊しうる
@@ -153,4 +153,4 @@ pmset -g therm > "$PMSET_AFTER" 2>&1 || true
     echo "label=${LABEL} completed at $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 } >> "$ENV_INFO"
 
-echo "label=${LABEL} 完了: $RUN_LOG（監視ログ: $MONITOR_LOG）"
+echo "label=${LABEL} 完了: ${RUN_LOG}（監視ログ: ${MONITOR_LOG}）"
