@@ -1,6 +1,6 @@
 # Metal GEMM N=1024/2048/4096 reuse candle 比再計測と #1037 ゲート判定の確定（イシュー #1147）
 
-## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）。#1490 で正式系列 `fandhe-ai =0.8.0` を 2026-09-10 に再計測し §16 追記: N=1024 0.743 倍（未達）・**N=2048 1.002 倍（達成。正式系列として初めて #1037 の形状別条件を満たした）**・N=4096 0.634 倍（未達）。共有負荷下の計測であり、旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま。#1520 で §15 undetermined を受け専有ゲートを opt-out 可能にする `AB_LOAD_GATE_MODE=record_only` を `run_ab_readout_metal.sh` へ追加（ルート #1519 指示）したが、本セッションは実機（Apple M4 Max）へのアクセス経路を持たないため実測は未実施のまま §17 に記入欄を残した。#1521 で、split-K 本番結線（#1527・#1530）により初めて `v0.8.0 ↔ origin/main` の Metal 計測経路 diff が非ゼロになったことを受け、対照系列（`0.8.0-ctrl-1521`）・参考系列（`head-<sha>-1521`。split-K 結線後 HEAD）の 2 系列を同一セッションで計測するスキャフォールド・帰属テスト・事前登録判定規則を整備した（§18）。本セッションも実機アクセス経路を持たないため実測は未実施のまま記入欄を残した
+## 状態: Apple M4 Max 実機実測完了。#1037（reuse candle 超え）は正式系列・参考系列（#1167/#1168 反映後 HEAD）のいずれも未達成と判定した。#1185 で正式系列 `fandhe-ai =0.7.0` を 2026-09-06 に再計測し未達成を確定（§11）。#1337 で借用ビュー readout（既定 OFF feature）切替前後を 2026-09-07 に再計測（§12）。共有負荷下・全 3 形状で後退したが片方向の負荷差と切り分けられておらず、正式判定（§11）は不変。#1438 で同一 facade ソース下の借用ビュー readout 既定化 before/after を M4 Max 実機実測し、全 3 形状非後退・checksum 完全一致を確認したが、before/after を連続実行しており負荷差の影響を排除できていないため暫定の参考結果とする（交互実行または負荷を揃えた再計測まで最終確定しない。正式判定は §11 のまま不変。§13）。#1309 で Phase 3（#1280・#1302・#1308・#1334・#1368 反映後）の正式系列 `fandhe-ai =0.7.0` を 2026-09-09 に再計測し §11 の未達成判定を再確認（§14。N=1024 0.700 倍・N=2048 0.969 倍・N=4096 0.710 倍。共有負荷下）。参考系列は負荷ゲート（1 分 load average < 4.0 を 2 回連続）が計測時間内に安定通過せず未計測のまま（§14.6）。#1477 で `--readout <legacy|borrowed>`（同一バイナリの run 単位 interleave override）を実装し §13.5 の暫定判定解消を試みたが、1 回目の専有ゲート試行（最大 4 試行）は成立せず undetermined のまま終了（計測未実施。§15）。#1490 で正式系列 `fandhe-ai =0.8.0` を 2026-09-10 に再計測し §16 追記: N=1024 0.743 倍（未達）・**N=2048 1.002 倍（達成。正式系列として初めて #1037 の形状別条件を満たした）**・N=4096 0.634 倍（未達）。共有負荷下の計測であり、旧 #1037 の「3 形状すべて」という受け入れ条件は依然として未達成のまま。#1520 で 2026-09-11 に M4 Max を `AB_LOAD_GATE_MODE=record_only`（共有負荷下）で実測し REJECT（N=1024 fresh/reuse が 1.2108／1.1112 で後退・N=2048/4096 は非後退～改善・checksum 全セル一致）→ legacy フォールバック維持・`readout_uses_borrowed_view` Metal 分岐不変（§17。§13.5 暫定・ADOPT 保留は #1520 で REJECT 確定）。正式系列 #1037 判定（§16）は影響を受けない。#1521 で、split-K 本番結線（#1527・#1530）により初めて `v0.8.0 ↔ origin/main` の Metal 計測経路 diff が非ゼロになったことを受け、対照系列（`0.8.0-ctrl-1521`）・参考系列（`head-<sha>-1521`。split-K 結線後 HEAD）の 2 系列を同一セッションで計測するスキャフォールド・帰属テスト・事前登録判定規則を整備した（§18）。本セッションも実機アクセス経路を持たないため実測は未実施のまま記入欄を残した
 
 ## 1. 位置づけ
 
@@ -440,6 +440,8 @@ before 腕（readout-off/legacy）がより高負荷帯・after 腕（readout-on
 断定はしない。runtime `Device::Metal` 限定の legacy フォールバックの要否も同様に再計測後の
 判断とする。正式判定（#1037 ゲート）は §11 のまま不変。
 
+**→ #1520（§17）で 2026-09-11 に interleave 再計測を実施し REJECT（N=1024 後退・全 checksum 一致）として確定（legacy 維持・コード変更なし）。**
+
 ### 13.6 runtime legacy フォールバックの実装（codex-review 指摘・PR #1452 P2）
 
 §13.5 で「要否は再計測後の判断」としていた `runtime Device::Metal` 限定の legacy
@@ -857,18 +859,13 @@ legacy/borrowed override interleave 再計測。イシュー #1477）」節・
   `python3 -m unittest compare_readout_ab_test.py`（既存 23 件 green。
   判定ロジック自体は無変更のため回帰確認のみ）。
 
-### 17.2 実機計測（未実施・記入欄）
+### 17.2 実機計測（2026-09-11・Apple M4 Max・record_only）
 
-**本セッションは Linux 環境で実行されており、Apple M4 Max
-実機への到達経路（ローカル直接実行が前提。`docs/real-hardware-
-verification-env.md` §1・§7）を持たない**。`docs/real-hardware-
-verification-env.local.md`（SSH ホスト名等の実値）も本 worktree には
-存在しない。そのため、以下の実測コマンド自体はステップとして用意したが
-**未実行**であり、判定（ADOPT／REJECT／undetermined）は未確定のまま
-記入欄を残す（`docs/cuda-tf32-optin-api-decision.md` 等と同型の「実機
-なしのため未実測明記」方針。CLAUDE.md 記載の他イシューと同様）。
+**実機（Apple M4 Max・MacBook Pro Mac16,6・16 コア・64 GB）での
+計測を 2026-09-11 に完了した**。環境・HEAD・実行内容の詳細は
+`docs/perf/logs/metal-gemm-readout-interleave-1520/env_info.txt` を参照。
 
-実行予定コマンド（実機を持つ別セッションが引き継ぐ場合の手順）:
+実行したコマンド:
 
 ```bash
 cd scripts/bench/framework-compare
@@ -891,24 +888,39 @@ python3 compare_readout_ab.py \
   | tee "results/raw/compare_readout_ab-${LABEL}.md"
 ```
 
-判定規則は §15.1 のまま変更しない（`AB_LOAD_GATE_MODE=record_only` は
+**判定規則** は §15.1 のまま変更していない（`AB_LOAD_GATE_MODE=record_only` は
 計測実施条件〈専有ゲートの要否〉の運用パラメータであり、ADOPT/REJECT/
 undetermined の閾値・対象セル・checksum 判定には影響しない）。
 
+**実行環境・負荷・出力ファイル**: HEAD `cbf5488f`（#1537 マージ後・split-K 関連コメント 整合前）。facade は path patch（`AB_PATCH_FACADE_PATH`=同 HEAD の `crates/facade`）。bench-fandhe バイナリ sha256 `925dd578b57a14adb81b2ba153f159cf1b495b72c1574111b38c7bdb036346d3`。開始時 load1 2.75（gate ログに record_only 行）。uptime サンプラ（30 秒間隔）は計測が短時間で完了したため 3 サンプルのみ: load1 min 2.61 / median 3.50 / max 12.54。run 5/5 完了時点・ループ後の load averages 11.23 6.06 4.94。pmset thermal warning なし。skipped 空（失敗セルなし）・中断なし・終了コード 0。各セル・各腕ちょうど 5 プロセス起動・run 単位で順序反転（スクリプト仕様どおり）。出力ファイル: `run-head-cbf5488f-1520.log`・`results-m4max-readout-ab-head-cbf5488f-1520.jsonl`・`manifest-*json`・`skipped-*log`（空）・`gate-readout-ab-*log`・`uptime-readout-ab-*log`・`compare_readout_ab-head-cbf5488f-1520.md`・`env_info.txt`（新規）。
+
 ### 17.3 結果・判定
 
-**未確定（実機未実測のため）**。`readout_uses_borrowed_view`（`bench-
-fandhe/src/main.rs`）の Metal 分岐は §15 までと同じく legacy 既定の
-まま維持する。正式系列 `fandhe-ai =0.8.0` の #1037 ゲート判定（§16）
-は本イシューでは不変（計測自体が発生していないため）。
+**REJECT（legacy フォールバックを維持する）**。
 
-引き継ぎ: 実機（Apple M4 Max）にアクセス可能な別セッションが上記
-17.2 のコマンドを実行し、本節へ実測結果表・checksum 一致・判定を追記
-する。ADOPT と確定した場合に限り `bench-fandhe/src/main.rs` の
-`readout_uses_borrowed_view` Metal 分岐撤去・
-`scripts/bench/framework-compare/README.md`「借用ビュー readout」見出し・
-`docs/perf/cuda-host-view-readout-small-shape-regression.md` §11／§13.6
-末尾の注記更新を行う（コード変更は ADOPT 確定後の別イシューとする）。
+6 セル（N=1024/2048/4096 × fresh/reuse）の比較結果（legacy median / borrowed median / borrowed÷legacy / checksum / 判定）:
+
+| 形状 | legacy | borrowed | ratio | checksum | 判定 |
+|------|--------|----------|-------|----------|------|
+| 1024/fresh | 2.122 ms (2.034–2.606) | 2.570 ms (2.275–2.713) | **1.2108** | 完全一致 | 後退 |
+| 1024/reuse | 2.628 ms (2.310–3.064) | 2.920 ms (2.614–2.930) | **1.1112** | 完全一致 | 後退 |
+| 2048/fresh | 8.215 ms (7.606–9.049) | 8.060 ms (7.131–8.865) | 0.9811 | 完全一致 | 非後退 |
+| 2048/reuse | 9.435 ms (8.734–10.655) | 9.395 ms (8.870–10.280) | 0.9958 | 完全一致 | 非後退 |
+| 4096/fresh | 34.154 ms (33.353–35.508) | 33.526 ms (32.565–35.176) | 0.9816 | 完全一致 | 非後退 |
+| 4096/reuse | 42.837 ms (39.848–49.079) | 38.164 ms (37.877–42.913) | 0.8909 | 完全一致 | 非後退 |
+
+**帰結**: 判定規則 §15.1「全セルが条件を満たす」を適用。N=1024/fresh・N=1024/reuse が
+ratio > 1.00 の後退判定のため条件未達。
+
+> 「判定: REJECT。N=1024 の後退は共有負荷下・単一 label（§17.1 参照）の計測であり、
+> run 単位 interleave により負荷差はある程度相殺されるが排除はできない。即座に
+> 原因の断定はしない」（判定規則 §15.1a 備考）。
+
+`readout_uses_borrowed_view`（`bench-fandhe/src/main.rs`）の Metal 分岐は
+§13.5 で「暫定・ADOPT 保留」だった判定が本計測で **REJECT として確定**。
+legacy フォールバック（§13.6 で fail-closed に実装済み）を維持し、
+コード変更は行わない。正式系列 `fandhe-ai =0.8.0` の #1037 ゲート判定（§16）
+は本イシューでは不変（計測が別系列のため）。
 
 ### 17.4 出典
 
