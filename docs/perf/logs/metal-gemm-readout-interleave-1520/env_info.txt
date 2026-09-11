@@ -1,0 +1,52 @@
+イシュー #1520: `--readout <legacy|borrowed>` interleave 再計測（2 回目・record_only モード）の環境情報。
+
+実機: Apple M4 Max（MacBook Pro Mac16,6・16 コア・64 GB）
+OS: macOS 26.6.2（Darwin 25.6.0）
+日時: 2026-09-11 T08:00:00 UTC（gate-readout-ab-head-cbf5488f-1520.log 参照）
+HEAD: cbf5488f（origin/main。#1537「docs(backend-metal): split-K 関連 .rs doc comment の整合」マージ後）
+facade path patch: `AB_PATCH_FACADE_PATH` により同 HEAD の `crates/facade`。
+
+実行条件: 専有ゲート opt-out（`AB_LOAD_GATE_MODE=record_only`）・共有負荷下計測。
+ルート #1519 でのユーザー指示「Metal に関しては一旦現在の環境で測れる値で大丈夫です」に基づく
+実装（イシュー #1520）と今回の実測。
+
+負荷状況:
+- 計測開始時: load1 2.75（gate ログに record_only 行・ゲート skip）
+- uptime サンプラ（30 秒間隔）: 計測が短時間で完了したため 3 サンプルのみ
+  - load1 最小値: 2.61
+  - load1 中央値: 3.50
+  - load1 最大値: 12.54
+- 計測完了時: load averages 11.23 6.06 4.94（1 分・5 分・15 分）
+
+bench-fandhe バイナリ（HEAD `cbf5488f`・facade path patch）
+  sha256: 925dd578b57a14adb81b2ba153f159cf1b495b72c1574111b38c7bdb036346d3
+
+実施内容:
+  - skipped: 空（失敗セルなし）
+  - 中断: なし
+  - 終了コード: 0
+  - 各セル・各腕: ちょうど 5 プロセス起動起動
+  - run 単位の順序反転: スクリプト仕様どおり実施（負荷差相殺）
+
+出力ファイル:
+  - run-head-cbf5488f-1520.log
+  - results-m4max-readout-ab-head-cbf5488f-1520.jsonl
+  - manifest-*.json
+  - skipped-*.log（空）
+  - gate-readout-ab-head-cbf5488f-1520.log
+  - uptime-readout-ab-head-cbf5488f-1520.log
+  - compare_readout_ab-head-cbf5488f-1520.md
+
+熱・電源:
+  - pmset thermal warning: なし
+  - pmset -g therm（before/after）: warning なし
+
+判定結果: REJECT
+  - N=1024 fresh/reuse で ratio > 1.00（後退）
+  - N=2048/4096 は非後退～改善
+  - checksum 全セル完全一致
+  - 根拠: 判定規則 §15.1 適用・全セル条件未達（N=1024 後退）
+  - 帰結: legacy フォールバック維持・コード変更なし
+
+出典: `docs/perf/metal-gemm-candle-gate-remeasurement.md` §17
+
