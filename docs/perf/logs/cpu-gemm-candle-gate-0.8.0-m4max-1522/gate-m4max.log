@@ -1,0 +1,4 @@
+2026-09-11T12:44:25Z mode=record_only load1=4.92（専有ゲート要件なし。イシュー #1522・ルート #1519） 21:44  up 23 days,  8:56, 20 users, load averages: 4.92 6.84 6.17
+=== proc check 2026-09-11T12:44:25Z ===
+formal start 2026-09-11T12:44:25Z 21:44  up 23 days,  8:57, 20 users, load averages: 4.92 6.84 6.17
+formal end 2026-09-11T12:44:53Z 21:44  up 23 days,  8:57, 20 users, load averages: 5.64 6.85 6.20

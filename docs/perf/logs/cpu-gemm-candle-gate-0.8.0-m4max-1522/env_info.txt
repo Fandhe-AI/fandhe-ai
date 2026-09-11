@@ -1,10 +1,9 @@
-# イシュー #1522 実機実測 env_info（記入欄テンプレート・未実測）
+# イシュー #1522 実機実測 env_info
 
-本ファイルは Mac セッションが M4 Max 実機で
-`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.11 の Mac 実行手順を実施
-した後、値を埋めて更新することを前提としたテンプレートである（本イシュー
-#1522 の実装ランは Linux worktree のみで実行しており Apple Silicon 実機への
-到達経路がないため、以下は「未実測」のまま記録する）。
+実測日: 2026-09-11
+実施状況: 完了（Apple M4 Max で `GEMM_GATE_LOAD_GATE_MODE=record_only sh
+orchestrate_m4max.sh` ラベル `0.8.0-1522` の単一ラン実施。中断再試行なし。
+正式値確定）
 
 ## 共通
 
@@ -14,8 +13,7 @@
   `verdict=undetermined` のまま残っている M4 Max 側の CPU GEMM candle 比ゲート
   （旧 #1117／#1283）正式値を、専有ゲート opt-out（`GEMM_GATE_LOAD_GATE_MODE=
   record_only`）を使って共有負荷下でも一発計測として確定させる
-- 転送元コミット（base）: 未実測（Mac セッションが実行した時点の
-  `git rev-parse --short HEAD` を記入する）
+- 転送元コミット（base）: cbf5488f（origin/main）
 - 系列: 正式系列のみ（`fandhe-ai =0.8.0` registry 解決）。ラベル
   `0.8.0-1522`（計画 §4 規則 3〈ワンショット規則〉。性能以外の失敗での再試行は
   `0.8.0-1522-r2` 等の別ラベルを使う）
@@ -30,52 +28,57 @@
 - tolerance 契約: #1241 承認・#1443/#1445 実装済み（候補 A-1・`c=0.5`）を適用。
   tolerance 定数・判定式は本イシューで変更していない
 
-## manifest 突合（未実測）
+## manifest 突合
 
-| 実機 | 系列 | fandhe_ai_source | bench_fandhe_features | readout_method | candle_core_source |
-|---|---|---|---|---|---|
-| M4 Max | 0.8.0-1522 | 未実測 | 未実測 | 未実測 | 未実測 |
-
-計測後、`results/raw/results-m4max-cpu-gemm-gate-0.8.0-1522.jsonl` が 45 行、
-`skipped-m4max-cpu-gemm-gate-0.8.0-1522.log` が空であることを確認して記入する。
+| 実機 | 系列 | fandhe_ai_source | bench_fandhe_features | readout_method | candle_core_source | JSONL 行数 | skipped |
+|---|---|---|---|---|---|---|---|
+| M4 Max | 0.8.0-1522 | registry | （empty） | borrowed-view-default-1438 | registry | 45 | 空 |
 
 ## Apple M4 Max（record_only。専有ゲート要件なし）
 
+- 機種・OS: MacBook Pro Mac16,6（16 コア〈12P+4E〉・64 GB）・macOS 26.6.2・rustc 1.96.0 stable
 - ノード: `docs/real-hardware-verification-env.local.md` 記載の Metal 実機ノード
   （`METAL_NODE`。実ホスト名は非開示）
-- OS: 未実測
 - gate mode: `record_only`
-- 開始時 load1（`gate-m4max.log` の `mode=record_only load1=<値>` 行）: 未実測
+- 開始時 load1（`gate-m4max.log` の `mode=record_only load1=<値>` 行）: 4.92
 - 計測区間中の load average 推移（`uptime-m4max.log` 30 秒間隔ポーラ。
-  `aggregate_uptime.py` で min／median／max を集計する）: 未実測
-- `pmset -g therm` before/after: 未実測
-- 並走 bench プロセス検出: 未実測（検出時は `MEASUREMENT_FAILED_m4max.marker`
-  ではなく `GATE_NOT_PASSED_m4max.marker`「sibling bench process detected」で
-  終了し、計測は開始されない）
-- `git diff v0.8.0..HEAD --stat -- crates/backend-cpu/src crates/facade/src
-  crates/autodiff/src crates/tensor-core/src`（帰属用。
-  `diff_v0.8.0_<sha>_cpu_path.txt` として保存）: 未実測
+  `aggregate_uptime.py` で min／median／max を集計する）: 1 サンプル
+  min=4.92 / median=4.92 / max=4.92（共有負荷下）
+- `pmset -g therm` before/after: thermal warning なし。before/after ファイル参照
+- 並走 bench プロセス検出: なし。`skipped-m4max-cpu-gemm-gate-0.8.0-1522.log` は空
+- `git diff v0.8.0..HEAD --stat --` CPU 経路（帰属用。
+  `diff_v0.8.0_<sha>_cpu_path.txt` として保存）: 未生成（規則 5 の帰属記録は
+  本イシューのログに欠落）
 
-### `compare_gemm_gate.py --device cpu` 判定結果（未実測）
+### `compare_gemm_gate.py --device cpu` 判定結果
 
-| N | fandhe_median_s | candle_median_s | 判定 |
-|---|---|---|---|
-| 512 | 未実測 | 未実測 | 未実測 |
-| 1024 | 未実測 | 未実測 | 未実測 |
-| 2048 | 未実測 | 未実測 | 未実測 |
+| N | fandhe_median_s | candle_median_s | 比 | 判定 |
+|---|---|---|---|---|
+| 512 | 666.6 µs（638.6–674.4） | 676.6 µs | 1.015 | **達成** |
+| 1024 | 3.174 ms（3.093–3.234） | 2.727 ms | 0.859 | **未達** |
+| 2048 | 19.522 ms（19.352–19.628） | 17.266 ms | 0.884 | **未達** |
 
-### 正式値・判定（未実測）
+### 正式値・判定
 
-- 正式値（ワンショット・単一ラベル `0.8.0-1522`。良い値の選別禁止。計画 §4
-  規則 3）: 未実測
-- §24.10 の `undetermined` を本イシューにより解消したか: 未実測
-- 共有負荷下であった旨・負荷推移: 未実測（record_only は計測条件の運用
-  パラメータであって判定入力ではない。計画 §4 規則 4）
+- 正式値（ワンショット・単一ラベル `0.8.0-1522`）: **N=512 達成・N=1024/2048 未達**
+  （parity 全形状 0 fail。要素単位検証 fandhe/candle とも rescued=0）
+- §24.10 の `undetermined` を本イシューにより解消したか: **はい。確定**
+- 共有負荷下: はい（開始時 load1=4.92）。record_only は計測条件の運用
+  パラメータのため、判定入力ではない。ユーザー指示（ルート #1519）に従い
+  記録のみ
 
-## 引き継ぎ・スコープ外
+## 記入状況
 
-- 本ドキュメントの実測・`docs/perf/cpu-gemm-candle-gate-remeasurement.md`
-  §24.11 記入・`docs/performance-targets.md` §8.15「未確定」の反転・
-  `scripts/bench/framework-compare/results/summary.md` 環境 29 節更新・
-  #1283 クローズ可否の判断は Mac セッション（実測後の別 PR）へ引き継ぐ
-- 内部ホスト名・機体識別子は本ファイルに記載しない
+- 本ファイル本体: **完了**（2026-09-11 実測）
+- `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.11.1: **完了**（実測結果
+  入力・正式値確定）
+- `docs/performance-targets.md` §8.15: 本 docs-writer 対象外（別 PR）
+- `scripts/bench/framework-compare/results/summary.md` 環境 29 節: 本
+  docs-writer 対象外（別 PR）
+- `CLAUDE.md` 索引行・ログ行: 本コミットで同時更新済み
+- #1283 クローズ可否: ユーザー判断へ回す（正式値 N=512 達成・N=1024/2048 未達
+  により「3 形状すべて達成」条件は未満たす）
+
+## 秘密情報
+
+- 内部ホスト名・機体識別子: 本ファイルに記載しない
