@@ -1054,19 +1054,19 @@ legacy フォールバック（§13.6 で fail-closed に実装済み）を維�
   - monitor 推移（10 サンプル）: load1 最小 4.52 / 中央値 6.93 / 最大 9.40
   - 実行後: uptime tail（monitor 最終サンプル）= 22:14 load1 6.60
 - **サーマル状態**: 両系列前後とも thermal warning / performance warning なし
-- **WARNING（記録）**: 実行時点の `diff_v0.8.0..HEAD --stat`（Metal 経路）に #1535（`f91cafa3`。split-K 関連 `.rs` doc comment 記述整合。コード変更なし）が HEAD に加わり、コミット済み diff（4 files・637 insertions）+ 58（`gemm.rs`） + 16（`tile.rs`） = 3 コミット・711 insertions（+58 doc comment）になった。`attribution.md` の構造分析（対象形状は split-K 結線後も classic 経路のまま。`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=false` により不変）は不変と判定し、帰属表再導出は実施しない
+- **WARNING（記録）**: 実行時点の `diff_v0.8.0..HEAD --stat`（Metal 経路）に #1535（`f91cafa3`。split-K 関連 `.rs` doc comment 記述整合。コード変更なし）が HEAD に加わり、コミット済み diff（`diff_v0.8.0_origin-main_metal_path.txt`: 4 files・583 insertions・68 deletions）に対し実行時点の diff（`diff_v0.8.0_head_metal_path.txt`: 4 files・637 insertions・88 deletions。`gemm.rs` の変更行数 413 → 471・`tile.rs` 228 → 244）となった（3 コミット: `f91cafa3`・`5b2d5060`・`ef613b9b`。増分は #1535 の doc comment のみ）。`attribution.md` の構造分析（対象形状は split-K 結線後も classic 経路のまま。`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=false` により不変）は不変と判定し、帰属表再導出は実施しない
 
 ### 18.6 帰属表（§16 ↔ A ↔ B）
 
 `docs/perf/logs/metal-gemm-candle-gate-head-1521/attribution-result.md` より転記。
 
-| N | A中央値 | B中央値 | B/A | 分類 | candle/A | candle/B | §16参照値 | §16比 |
+| N | A中央値 | B中央値 | B/A | 分類 | candle/A | candle/B | §16参照値（candle/fandhe） | §16比（candle/B ÷ §16参照値） |
 |---|---|---|---|---|---|---|---|---|
 | 1024 | 2.997 ms | 3.072 ms | 1.0250 | 負荷差（ノイズ帯）・構造分析と整合 | 0.651 | 0.693 | 0.743 | 0.933 |
 | 2048 | 9.588 ms | 9.386 ms | 0.9789 | 負荷差（ノイズ帯）・構造分析と整合 | 0.825 | 0.704 | 1.002 | 0.702 |
 | 4096 | 46.670 ms | 40.064 ms | 0.8585 | 負荷差（ノイズ帯）・構造分析と整合 | 0.493 | 0.573 | 0.634 | 0.904 |
 
-§16比（A 対 §16 参照値）の 3 形状は計測セッション間の負荷ドリフト指標として記録のみ。
+§16比は `attribute.py` が算出する **B 対 §16 参照値**（`candle/B ÷ §16参照値`）であり、A 系列（registry 版）のセッション間ドリフトではない。A 対 §16 は `candle/A ÷ §16参照値` = 0.876／0.823／0.778（本文で手計算した参考値。`attribute.py` の出力列ではない）。いずれも計測セッション間の負荷ドリフト指標として記録のみ。
 正式判定（旧 #1037）は §16.7 のまま不変（verdict なし）。
 
 ### 18.7 #1037 ゲート判定はユーザー判断事項（読み替え可否）
