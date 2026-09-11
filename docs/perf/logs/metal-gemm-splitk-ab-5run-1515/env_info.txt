@@ -1,17 +1,16 @@
 split-K vs classic 経路 5 run 正式確定（イシュー #1515）env_info
 
-**本 PR 時点では未実測（Linux 本ラン分の記入欄のみ）。実測は Apple M4 Max
-実機を持つ Mac セッションで実施し、本ファイルへ追記する。**
+**2026-09-11 に Apple M4 Max 実機で実測完了（run1〜run5・中断なし）。**
 
 == 機種・OS・toolchain ==
-機種: 未実測（想定: Apple M4 Max。docs/real-hardware-verification-env.md §1 の実機）
-sw_vers: 未実測
-uname -srm: 未実測（内部ホスト名は記録しない）
-rustc --version: 未実測
+機種: Apple M4 Max（MacBook Pro Mac16,6。16 コア〈12P+4E〉・64 GB）
+sw_vers: macOS 26.6.2 (25G83)
+uname -srm: Darwin 25.6.0 arm64（内部ホスト名は記録しない）
+rustc --version: rustc 1.96.0 (ac68faa20 2026-05-25)
 
 == base commit・作業ブランチ ==
-base commit: 未実測
-作業ブランチ: test/1515-metal-splitk-ab-5run-scaffold
+base commit: f91cafa3（origin/main。#1535 マージ後）+ bc2c8e20（PR #1537: orchestrate.sh の bash 3.2 変数名誤解釈修正。計測ロジック不変）
+作業ブランチ: fix/1509-bash32-var-escaping（PR #1537）→ 実測記録は perf/1515-metal-splitk-ab-5run-m4max
 
 == 参照 ==
 事前登録判定規則: docs/perf/metal-gemm-splitk-ab.md §10.2
@@ -22,15 +21,19 @@ gate_mode=record_only（`--max-load-avg` を渡さず実行する。専有ゲー
 受け入れ条件にしない）
 
 == run ごとの負荷推移・並走プロセス（実測後に追記） ==
-run1: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
-run2: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
-run3: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
-run4: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
-run5: load1 範囲 未実測 / 並走プロセス（watchlist 件数） 未実測
+run1: load1 範囲 1.50〜6.00（中央値 2.45・89 サンプル） / 並走プロセス（watchlist 件数） 全 6 名 0 件
+run2: load1 範囲 1.43〜3.39（中央値 2.48・89 サンプル） / 並走プロセス（watchlist 件数） 全 6 名 0 件
+run3: load1 範囲 1.27〜7.10（中央値 2.23・89 サンプル） / 並走プロセス（watchlist 件数） 全 6 名 0 件
+run4: load1 範囲 2.56〜4.93（中央値 3.43・89 サンプル） / 並走プロセス（watchlist 件数） 全 6 名 0 件
+run5: load1 範囲 2.83〜5.74（中央値 3.77・89 サンプル） / 並走プロセス（watchlist 件数） 全 6 名 0 件
 
 == run 数・中断有無 ==
-未実測（5 run 完走予定。中断した場合はここに経緯を記録し run を黙って
-差し替えない）。
+5 run 完走（run1〜run5 を README の for ループで直列に 1 回ずつ起動。中断なし・差し替えなし）。
 
 == pmset -g therm（実行前後） ==
-未実測（`pmset_therm_{before,after}_runN.txt` 参照）。
+全 run の前後とも thermal／performance warning・CPU power status の記録なし（`pmset_therm_{before,after}_runN.txt` 参照）。
+run1 completed at 2026-09-11T11:30:48Z
+run2 completed at 2026-09-11T11:45:34Z
+run3 completed at 2026-09-11T12:00:21Z
+run4 completed at 2026-09-11T12:15:06Z
+run5 completed at 2026-09-11T12:29:54Z
