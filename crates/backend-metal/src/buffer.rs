@@ -88,7 +88,7 @@ fn checked_byte_len(len: usize) -> Result<usize, MetalError> {
 impl MetalBuffer {
     /// `data` の内容を Metal バッファへアップロードして確保する。
     ///
-    /// # Safety 境界（`unsafe` 使用箇所 1/3）
+    /// # Safety 境界（`unsafe` 使用箇所 1/4）
     /// `newBufferWithBytes_length_options` は `data` の先頭ポインタから
     /// `bytes_len` バイトを読み取って複製する。`bytes_len` は直前の
     /// `checked_byte_len(data.len())` により `data` の実バイト長と一致する
@@ -272,7 +272,7 @@ impl MetalBuffer {
     /// dispatch を渡さない契約。同メソッドのドキュメンテーションコメント
     /// 参照）の 2 箇所のみ）。
     ///
-    /// # Safety 境界（`unsafe` 使用箇所 2/3。イシュー #1335 で
+    /// # Safety 境界（`unsafe` 使用箇所 2/4。イシュー #1335 で
     /// `read_to_vec` から本メソッドへ移設）
     /// 呼び出し元は次の 2 点を保証すること:
     /// 1. このバッファへの書き込みが完了していることを
@@ -324,7 +324,7 @@ impl MetalBuffer {
     /// 「全要素 0」契約を再適用するために呼ぶ（`memory.rs::PoolZeroFill`
     /// 実装から呼ばれる想定。Metal 実機検証は #175 完了後）。
     ///
-    /// # Safety 境界（`unsafe` 使用箇所 3/3。`read_to_vec` の書き込み版）
+    /// # Safety 境界（`unsafe` 使用箇所 3/4。`read_to_vec` の書き込み版）
     /// `contents()` は `StorageModeShared` バッファの CPU 可視アドレスを
     /// 返す（確保時に `MTLResourceOptions::StorageModeShared` を指定して
     /// いるため CPU から直接書き込み可能。`new_with_data`/`new_zeroed`
@@ -350,5 +350,40 @@ impl MetalBuffer {
         let slice: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr() as *mut f32, self.len) };
         slice.fill(0.0);
+    }
+
+    /// バッファの `offset` 要素目から `data` の内容を書き込む
+    /// （`zero_fill` の範囲限定・任意データ版。`memory.rs::MetalMemory::
+    /// upload_into`〈`MemoryOps::upload_into` の Metal 実装。イシュー
+    /// #1555〉が使う）。
+    ///
+    /// # Safety 境界（`unsafe` 使用箇所 4/4。`zero_fill` と同型）
+    /// `contents()` は `StorageModeShared` バッファの CPU 可視アドレスを
+    /// 返す（`zero_fill` doc 参照）。呼び出し元は次を保証すること:
+    /// 1. `offset + data.len() <= self.len`
+    ///    （呼び出し元〈`memory.rs::MetalMemory::upload_into`〉が REQ-8
+    ///    「カーネル側の手動境界チェックを省略しない」に従い、本メソッド
+    ///    呼び出し前に `checked_add`／`dst.numel()` 比較で検証済み。
+    ///    本メソッド自身は `debug_assert!` で防御的に再確認するのみ）。
+    /// 2. このバッファへの GPU 側の未完了書き込みが残っていないこと
+    ///    （呼び出し元が `MetalContext::synchronize` 等で保証済み。
+    ///    `zero_fill` と同じ契約）。
+    pub(crate) fn write_slice_at(&self, offset: usize, data: &[f32]) {
+        debug_assert!(
+            offset
+                .checked_add(data.len())
+                .is_some_and(|end| end <= self.len),
+            "write_slice_at: [offset, offset + data.len()) must fit within the buffer \
+             (contract violation — caller must validate before calling)"
+        );
+        let ptr = self.raw().contents();
+        // SAFETY: 上記コメント参照。`offset`/`data.len()` は呼び出し元が
+        // 事前検証済み（契約 1）で、`.add(offset)` は `self.len` 以内
+        // （`Owned`/`Pooled` いずれも capacity >= self.len。`zero_fill`
+        // doc「`Pooled` 分岐の capacity 契約」）に収まる。
+        let base = ptr.as_ptr() as *mut f32;
+        let dst_ptr = unsafe { base.add(offset) };
+        let slice: &mut [f32] = unsafe { std::slice::from_raw_parts_mut(dst_ptr, data.len()) };
+        slice.copy_from_slice(data);
     }
 }

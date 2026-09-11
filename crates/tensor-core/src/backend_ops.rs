@@ -548,10 +548,10 @@ pub trait BackendOps {
     /// の `Op::LinearResident` 分岐は `Unsupported` のときのみ既存の
     /// ホスト経路（`gemm_fp32_strict` を呼び戻り値をそのまま勾配として
     /// 使う）へフォールバックする（判定迂回を作らない。`.claude/rules/
-    /// security.md` A08）。現時点では `backend-cpu::CpuBackendOps` のみ
-    /// オーバーライドする（CUDA／Metal は既定 `Unsupported` のまま。
-    /// 引き継ぎは `docs/perf/train-resident-grad-device-update.md`
-    /// スコープ外節）。
+    /// security.md` A08）。`backend-cpu::CpuBackendOps`（#1212）と
+    /// `backend-metal::MetalBackendOps`（#1555。NT/TN 限定・encode-only）
+    /// がオーバーライドする（CUDA は既定 `Unsupported` のまま。引き継ぎは
+    /// `docs/perf/train-resident-grad-device-update.md` スコープ外節）。
     fn gemm_fp32_strict_into(
         &self,
         _a: &Tensor<f32>,
@@ -564,6 +564,50 @@ pub trait BackendOps {
              available for this backend)"
                 .into(),
         ))
+    }
+
+    /// [`Self::gemm_fp32_strict_into`] と同型だが、[`Self::
+    /// sgd_step_device_tracked`] と同じく Metal のコマンドバッファ共有
+    /// （イシュー #1017・`docs/backend-metal-command-batching-design.md`）
+    /// 向けに共有失敗トークン [`DispatchFailureCell`] を追加引数として
+    /// 受け取る非破壊拡張（`sgd_step_device`／`sgd_step_device_tracked`
+    /// と同じ「デフォルトメソッド追加」パターン。`BackendOps` の SemVer
+    /// 非破壊拡張）。
+    ///
+    /// # デフォルト実装
+    /// 既定は `token` を無視して [`Self::gemm_fp32_strict_into`] へ
+    /// そのまま委譲する。CPU は都度同期実行のため実行時エラーが
+    /// 呼び出し元へ即座に返り、遅延失敗トークンを必要としない（この
+    /// デフォルトのままでよい）。
+    ///
+    /// Metal のみ `backend-metal::ops::MetalBackendOps` がオーバーライド
+    /// し、encode-only（待たない）で直接書き込む NT/TN 経路
+    /// （`gemm_fp32_strict_into` doc「NT/TN 経路のみ encode-only にできる
+    /// 理由」参照）で `MetalContext::encode` と**同一ロック区間で**
+    /// `token` をバッチへ登録する（`sgd_step_device_tracked` doc と同じ
+    /// 「encode と登録の間に別スレッドの `synchronize` が割り込む競合を
+    /// 防ぐ」設計。codex-review 指摘・PR #1556: この登録がないと、
+    /// 共有 `MetalContext` を使う別スレッドが先に `synchronize()` して
+    /// GPU エラーを回収した場合、当該バッチは `committed` 列から drain
+    /// 済みになり、呼び出し元（`DeviceParamStore`）自身の後続
+    /// `download`／`upload_into` がエラーを observe できないまま成功
+    /// してしまう——未完成または前回の勾配を正常値として読み出し・更新
+    /// に使ってしまう fail-closed 違反を防ぐ）。
+    ///
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore::
+    /// fill_resident_weight_grad` が呼び出し元となり、自身が保持する
+    /// `failure_token` を渡す（`sgd_step_device_tracked` doc「4 つの
+    /// 状態機械エントリ」と同様、`step()` 冒頭の `failure_token.is_set()`
+    /// 検査が自己 poison する）。
+    fn gemm_fp32_strict_into_tracked(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.gemm_fp32_strict_into(a, b, out, out_offset)
     }
 
     // elementwise（`docs/public-api-design.md` §4.2 と同じ 5 演算）

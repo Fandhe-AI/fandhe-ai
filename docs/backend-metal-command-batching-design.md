@@ -767,6 +767,27 @@ Metal API を直接呼ばない純粋なロジック）は `cfg(target_os = "mac
   対応は #1212 の Metal 側 `fill_resident_weight_grad` 実装〈未着手〉
   へ引き継ぐ）。
 
+### 7.2 #1555: `d_weight` GEMM の同期境界最適化
+
+イシュー #1555 にて Metal 側の `BackendOps::gemm_fp32_strict_into` と
+`MemoryOps::upload_into` を実装し、reuse 経路の weight 勾配をデバイス常駐 staging へ
+直接書き込む結線により、`d_weight` GEMM の同期点が整理された。
+
+`mnist_scale_train_reuse_metal_batch_counters` の実測値が以下のとおり更新:
+
+| 指標 | before（#1099 直後） | after（#1555 実装後） | 変化 |
+|---|---|---|---|
+| `encode()` 呼び出し総数 | 11 | 11 | 不変 |
+| コマンドバッファ生成数 | 10 | **9** | −1 |
+| `waitUntilCompleted()` 呼び出し数 | 10 | **9** | −1 |
+
+L1・L2 各層の `d_weight` GEMM（従来は host round-trip `dispatch_sync` 経由）が、
+resident weight grad staging 直接書き込み経路へ切り替わったことにより、各層ごとの
+GPU 完了待機が削減された。具体的には、2 層の `d_weight` 計算が従来は各々 GPU 完了を
+待つ 2 つの同期点を生成していたが、これが bias 勾配 `upload_into` の防御的
+synchronize 1 回に集約された。`d_input` の GEMM 同期は依然として残る（scope 外）。
+（#1099 直後の 9/8/8 へは戻らない。§4 時点の最適構成を維持）
+
 ## 8. 実装記録（#1099。§4.2・§4.4・§4.5・§3.4・§3.5 の追記）
 
 §4.2・§4.5 が特定した「9 個のバッチがいずれも dispatch 数 1（マージ
