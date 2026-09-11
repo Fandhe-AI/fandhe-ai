@@ -210,6 +210,75 @@ bench）件数は全て 0。中断・再試行なし。
   維持不可）は変わらない。規則自体を改定する（例: 到達セルのみ ratio
   判定）場合は、計測前に issue でユーザー承認が必要。
 
+## §6a #1548 事後監視（実行時トグル・同一バイナリ A/B。2026-09-12）
+
+#1544 のユーザー判断（既定 ON）に対する事後監視。#1546 の実行時トグル
+（`bench-fandhe --metal-split-k on|off`・feature `metal-split-k-toggle`）を
+使い、単一バイナリで before=`off`／after=`on` を run 単位 interleave 計測
+（`scripts/bench/framework-compare/run_ab_splitk_metal.sh` commit a87aac69）。
+**結果は記録のみ**。#1517 の判定・#1544 の決定は変更しない。
+
+### 計測結果（run2・低負荷・正式値）
+
+**gemm 8 セル（N=512/1024/2048/4096 × fresh/reuse）**
+
+| size/mode | before median | after median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 512/fresh | 648.3 us | 654.5 us | 1.0096 | 完全一致 | 後退 |
+| 512/reuse | 728.5 us | 728.6 us | 1.0002 | 完全一致 | 後退 |
+| 1024/fresh | 2.385 ms | 2.429 ms | 1.0184 | 完全一致 | 後退 |
+| 1024/reuse | 2.884 ms | 2.900 ms | 1.0055 | 完全一致 | 後退 |
+| 2048/fresh | 8.426 ms | 7.955 ms | 0.9442 | 完全一致 | 非後退 |
+| 2048/reuse | 9.353 ms | 10.122 ms | 1.0822 | 完全一致 | 後退 |
+| 4096/fresh | 34.444 ms | 33.845 ms | 0.9826 | 完全一致 | 非後退 |
+| 4096/reuse | 39.915 ms | 47.695 ms | 1.1949 | 完全一致 | 後退 |
+
+**train 2 セル（fresh/reuse）**
+
+| size/mode | before median | after median | after/before | checksum | 判定 |
+|---|---|---|---|---|---|
+| 64/fresh | 1.646 ms | 1.562 ms | 0.9493 | 完全一致 | 非後退 |
+| 64/reuse | 1.426 ms | 1.433 ms | 1.0049 | 完全一致 | 後退 |
+
+**`--phases` 診断表（train・参考値。非判定）**
+
+| phase | fresh | reuse |
+|---|---|---|
+| step_total 比 | 1.053 | 1.282 |
+
+### 所見
+
+**規則判定**（§3 事前登録規則に従う）:
+
+- 規則 1 超過セル: gemm 6 セル（512/fresh・512/reuse・1024/fresh・1024/reuse・
+  2048/reuse・4096/reuse）+ train 1 セル（64/reuse）= **7 セル**
+- 規則 1 符号一貫セル（全 5 run が `ratio > 1.00`）: **0 件**
+- 規則 2（checksum）: 全 10 セル完全一致
+
+**評価**:
+
+- **規則上の判定（§3 に従う。符号一致数による救済は設けない）**: run2 の
+  規則 1（`ratio<=1.00`）は 7 セルで不成立であり、§3 の判定基準どおりに
+  読めば「結線維持不可」相当の記録となる（#1517 本計測と同じ結論）。
+- **原因の帰属（判定とは別の解釈・未分離）**: 上記 7 セルはいずれも §2
+  帰属表上 split-K に**構造的に非到達**（gemm NN 正方は `should_split_k`
+  が `None`・train reuse は入口条件で非到達）であり、before/after は同一
+  カーネル経路の比較。符号一貫性なし・共有負荷下（run1 は load1
+  3.58→17.56→18.12→16.98、run2 は 5.02→4.03→3.75→3.69）という観測は
+  計測ノイズと整合する。ただし split-K 非到達でも `dispatch_auto` はトグル
+  ON 時のみ `validate_dims`／`validate_effective_dims`／
+  `select_route_for_device` のホスト側判定を実行するため、「結線の有無で
+  差が生じない」とは断定せず、**計測ノイズと整合するが結線によるホスト側
+  オーバーヘッドの寄与は未分離**と限定する。
+- checksum は全一致・gemm は split-K 非到達のため parity ゼロ fail（期待値）。
+
+**判定: 記録のみ・決定不変。** #1544 のユーザー判断（既定 ON）を変更する
+入力にはしない。
+
+### ログ参照先
+
+- `docs/perf/logs/metal-gemm-splitk-framework-compare-1548/`
+
 ## §7 スコープ外（out-of-scope-tracking.md に従い記録のみ・起票はユーザー
 承認後）
 
