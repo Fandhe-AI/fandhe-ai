@@ -252,6 +252,27 @@ def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None, task=DEFAU
                     "— skipped"
                 )
                 continue
+            # イシュー #1545: `metal_split_k`（Metal GEMM split-K opt-in
+            # 経路の runtime トグル A/B。`--metal-split-k`）は
+            # `readout`／`graph`／`managed` 等とは異なり**本比較器の対象
+            # から除外しない** — `run_ab_splitk_metal.sh` は
+            # `--metal-split-k off`（before 相当）／`--metal-split-k on`
+            # （after 相当）で分離した別ファイルをそれぞれ本比較器の
+            # before/after 入力として渡す設計であり、本比較器はどのフラグ
+            # で分岐したかを意識せず「2 つの JSONL 間の中央値比・checksum
+            # 一致」だけを見る。型検証（`"on"`/`"off"` の str のみ許容）
+            # のみ適用し、不正型・不正値の行は理由付きで丸ごとスキップする
+            # （fail-closed。README「`--metal-split-k <on|off>`」節参照）。
+            if "metal_split_k" in obj and (
+                not isinstance(obj["metal_split_k"], str)
+                or obj["metal_split_k"] not in ("on", "off")
+            ):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'metal_split_k' フィールド型/値"
+                    f"（'on'/'off' の str を期待。実際: "
+                    f"{obj['metal_split_k']!r}） — skipped"
+                )
+                continue
             if not _valid_cell_identity(obj, device, size_set=size_set, task=task):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"

@@ -633,6 +633,75 @@ class LoadRowsTf32ValidationTests(unittest.TestCase):
                     os.unlink(path)
 
 
+class LoadRowsMetalSplitKValidationTests(unittest.TestCase):
+    """`load_rows()` の `metal_split_k` フィールド型検証（イシュー #1545。
+    `readout`／`graph` と同型の「キー欠損 = 既定」互換規約を持つ文字列値。
+    `"on"`／`"off"` 以外（不正型・不正値）は `ValueError` でロード全体を
+    失敗させることを検証する。
+    """
+
+    def test_missing_metal_split_k_key_loads_as_untouched_row(self):
+        path = _write_jsonl([_base_row()])
+        try:
+            rows = summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertNotIn("metal_split_k", rows[0])
+
+    def test_on_and_off_values_load_unchanged(self):
+        rows_in = [
+            dict(_base_row(framework="fandhe-ai"), metal_split_k="on"),
+            dict(_base_row(framework="fandhe-ai"), metal_split_k="off"),
+        ]
+        path = _write_jsonl(rows_in)
+        try:
+            rows = summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rows[0]["metal_split_k"], "on")
+        self.assertEqual(rows[1]["metal_split_k"], "off")
+
+    def test_unknown_string_value_raises_value_error(self):
+        path = _write_jsonl([dict(_base_row(), metal_split_k="maybe")])
+        try:
+            with self.assertRaises(ValueError):
+                summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+
+    def test_non_string_value_raises_value_error(self):
+        for bad_value in (True, 1, [], {}, None):
+            with self.subTest(bad_value=bad_value):
+                path = _write_jsonl([dict(_base_row(), metal_split_k=bad_value)])
+                try:
+                    with self.assertRaises(ValueError):
+                        summarize.load_rows(path)
+                finally:
+                    os.unlink(path)
+
+    def test_metal_split_k_fresh_row_is_excluded_from_infer_reuse_checksum_match(self):
+        # `test_graph_fresh_row_is_excluded_from_infer_reuse_checksum_match`
+        # と同型: fresh 側に metal_split_k 行（checksum 不一致）が混在
+        # していても、reuse 側（metal_split_k なし）の突合先として誤って
+        # 選ばれないことを確認する。
+        rows = [
+            dict(
+                _infer_row(mode="fresh", checksum=999.0),
+                size=64,
+                metal_split_k="on",
+            ),
+            dict(_infer_row(mode="fresh", checksum=1.0), size=64),
+            dict(
+                _infer_row(mode="reuse", median_s=0.0005, checksum=1.0, init_s=0.02),
+                size=64,
+            ),
+        ]
+        lines, *_, has_infer_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
+        self.assertFalse(has_infer_reuse_invalid)
+        text = "\n".join(lines)
+        self.assertIn("一致", text)
+
+
 class SectionRenderingTests(unittest.TestCase):
     def test_gemm_row_with_unhashable_size_does_not_raise(self):
         # イシュー #1051 codex-review 指摘の防御的スイープ（PR #1082）:

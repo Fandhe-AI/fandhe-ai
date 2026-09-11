@@ -960,6 +960,93 @@ CUDA Graph で capture・再利用する経路（`fandhe_ai::set_cuda_graph_step
   完全一致）・launch カウンタの 5 run 内一致を集計する。実測記録・既定化可否の判定は
   `docs/perf/train-step-phase-breakdown.md` §16 を参照
 
+### `--metal-split-k <on|off>`（イシュー #1545。Metal GEMM split-K opt-in 経路の runtime トグル A/B）
+
+Metal GEMM split-K opt-in 経路（`crates/backend-metal` の
+`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`。イシュー #1516 で本番結線・
+#1544 で既定 `true` 化済み）を、facade 公開 API
+`fandhe_ai::set_metal_split_k_gemm_enabled`／`metal_split_k_gemm_enabled`
+（`#[cfg(target_os = "macos")]`）経由で run 単位に明示 on/off するための
+値付きフラグ。既定は未指定（API を呼ばない。既存の `SPLIT_K_DISPATCH_
+AUTO_PRODUCTION_ENABLED` 本番既定がそのまま適用される）。
+
+- **`bench-fandhe`**: `--device metal` 以外は常に `MEASURE_ERROR`
+  （プロセスワイドフラグが cpu／cuda 計測で無音 no-op になるのを防ぐ。
+  `--managed` の `--device cuda` 限定と同型）。`--device metal` でも、
+  `metal-split-k-toggle` cargo feature（既定無効）を有効化したビルド
+  でなければ `MEASURE_ERROR` になる。`set_metal_split_k_gemm_enabled` API
+  は crates.io 公開版 `fandhe-ai =0.8.0` には未収録のため、
+  `managed-placement`／`graph-step` と同じく **`metal-split-k-toggle`
+  feature ＋ `[patch.crates-io.fandhe-ai]` による HEAD `crates/facade`
+  への path patch**の両方が必要:
+
+  ```sh
+  cargo build --release -p bench-fandhe --features metal-split-k-toggle \
+    --config 'patch.crates-io.fandhe-ai.path="/absolute/path/to/crates/facade"'
+  ```
+
+  `[patch]`／`.cargo/config.toml` は本 workspace の `Cargo.toml`・`Cargo.lock` へコミットしない
+  （計測後は `git checkout -- scripts/bench/framework-compare/Cargo.lock` で復元する）
+- **`bench-candle`／`bench-burn`**: `--metal-split-k` は fandhe-ai 固有の
+  split-K opt-in API を指す概念であり対応する公開 API がないため、常に
+  `MEASURE_ERROR` で fail-fast する
+- **JSONL**: `--metal-split-k on`／`--metal-split-k off` で計測した行は
+  `"metal_split_k":"on"`／`"metal_split_k":"off"` を emit する（未指定
+  なら emit しないキー欠損 = 既定の互換規約。`bench_common::
+  Record::metal_split_k`。`readout`／`graph` と同型）
+- **A/B 計測**: `run_ab_splitk_metal.sh <label>`（`AB_PATCH_FACADE_PATH`
+  環境変数必須。上記 path patch 先の絶対パス 1 つを指定。`AB_DRY_RUN=1`
+  でバリデーションのみ実行）が同一バイナリで `--metal-split-k off`／
+  `--metal-split-k on` を run 単位に interleave 起動し、gemm 8 セル
+  （N=512/1024/2048/4096 × fresh/reuse）＋ train 2 セル（fresh/reuse）を
+  5 round 計測する。差分ガードは①`AB_PATCH_FACADE_PATH` 配下の
+  `crates/backend-metal/src/tile.rs` の `SPLIT_K_DISPATCH_AUTO_
+  PRODUCTION_ENABLED` が `true` であること（`--metal-split-k off` が
+  「本番経路が元々 off だから off に見える」だけの無意味な比較になるのを
+  防ぐ）、②ビルド後 `--metal-split-k off` のドライラン 1 回が
+  `MEASURE_ERROR` にならないこと（`metal-split-k-toggle` feature が実際
+  に有効化されていることの確認）の 2 点（`run_ab_gemm_metal.sh`／旧
+  `run_ab_splitk_metal.sh` の「before==after で計測対象なし」再発防止と
+  同じ思想。`docs/perf/train-step-phase-breakdown.md` §5.11）。gemm・
+  train は `compare_gemm_ab.py --task <t>` の task 別 fail-closed 検証
+  （他タスクの行を警告つきで除外し 1 件でもあれば判定不能にする）と
+  整合させるため、最初からタスク別 JSONL（`results-m4max-splitk-ab-
+  {off,on}-<label>-{gemm,train}.jsonl`）へ出力を分離する（旧
+  `run_ab_splitk_metal.sh` の PR #1531 是正を踏襲）。train の `--phases`
+  （診断用）はさらに別ファイル（`-phases.jsonl`）へ出力し「ちょうど
+  5 件」契約を汚さない。専有ゲートは要求しない（record_only。ルート
+  #1509 運用方針。`uptime`／`pmset -g therm` を各 run の前後で記録）。
+  `run_ab_splitk_metal.sh` 自体は判定器を呼ばない（`run_ab_readout_
+  metal.sh`／`run_ab_managed_cuda.sh`／`run_ab_graph_cuda.sh` と同じ
+  流儀。計測と判定を分離する）。計測後、`compare_gemm_ab.py`
+  （位置引数 `before after`）へ off 側ファイルを `before`・on 側
+  ファイルを `after` として渡すと判定できる（`metal_split_k` キーは
+  `compare_gemm_ab.py` では除外対象にしないため、そのまま渡してよい）:
+
+  ```sh
+  python3 compare_gemm_ab.py \
+    results/raw/results-m4max-splitk-ab-off-<label>-gemm.jsonl \
+    results/raw/results-m4max-splitk-ab-on-<label>-gemm.jsonl \
+    --task gemm --threshold 1.00
+  python3 compare_gemm_ab.py \
+    results/raw/results-m4max-splitk-ab-off-<label>-train.jsonl \
+    results/raw/results-m4max-splitk-ab-on-<label>-train.jsonl \
+    --task train --threshold 1.00
+  ```
+
+  （`compare_gemm_ab.py` の CLI・判定規則は既存の「split-K 結線前後
+  A/B」節を参照）
+- **旧 `run_ab_splitk_metal.sh`（イシュー #1517）からの変更点**: #1517
+  当時は `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 定数の `false`/`true`
+  を切り替えた 2 つの worktree（`AB_BEFORE_FACADE_PATH`／
+  `AB_AFTER_FACADE_PATH`）を別々にビルドして比較する 2 バイナリ方式
+  だった（「結線前後」の実体がコンパイル時定数そのものだったため）。
+  #1544 で当該定数が既定 `true` へ切り替わり split-K が本番経路として
+  既定有効化された現在は、facade 公開 API による runtime on/off 切替が
+  可能になったため、本節の**単一 facade path・単一バイナリ・
+  `--metal-split-k on|off` の runtime 切替**方式へ置換した
+  （`run_ab_readout_metal.sh` と同型の設計）
+
 ## 使い方
 
 ```bash
@@ -1310,7 +1397,16 @@ before/after で同一だと fail-closed 拒否するため（同一バージョ
   既定は切り替えない（安全側）。判断の記録先は
   `docs/perf/metal-gemm-n4096-kernel-gap.md` §19
 
-### split-K 結線前後 A/B（`run_ab_splitk_metal.sh`／`compare_gemm_ab.py --task train`。イシュー #1517）
+### split-K 結線前後 A/B（イシュー #1517。実測完了済みの過去実績。**`run_ab_splitk_metal.sh` は #1545 で runtime トグル方式へ置換済み**）
+
+**このセクションは #1517 時点（2 worktree・2 バイナリ方式）で完了した
+実測の記録である。同名スクリプト `run_ab_splitk_metal.sh` は #1545 で
+「`--metal-split-k <on|off>`（Metal GEMM split-K opt-in 経路の runtime
+トグル A/B）」節（上記）の単一 facade path・単一バイナリ・runtime
+切替方式へ置換済みのため、以下の `AB_BEFORE_FACADE_PATH`／
+`AB_AFTER_FACADE_PATH` 系の呼び出し例は現在のスクリプトの引数と一致
+しない。新規に split-K の A/B を計測する場合は上記「`--metal-split-k
+<on|off>`」節を参照すること。**
 
 `run_ab_gemm_metal.sh`（上記 #1306）の「承認ピン ↔ HEAD」方式とは異なり、
 本ツールは **両腕とも `crates/facade` への path patch**（`AB_BEFORE_

@@ -320,6 +320,19 @@ pub struct Record<'a> {
     /// （`docs/perf/metal-gemm-candle-gate-remeasurement.md` §15 参照。
     /// 既存 device 既定契約は変更しない）。
     pub readout: Option<&'a str>,
+    /// `--metal-split-k <on|off>`（値付きフラグ。イシュー #1545）。Metal
+    /// GEMM split-K opt-in 経路（`fandhe_ai::set_metal_split_k_gemm_
+    /// enabled`。`crates/backend-metal` の `SPLIT_K_DISPATCH_AUTO_
+    /// PRODUCTION_ENABLED` 本番経路を runtime で off 固定できる facade
+    /// 公開 API。`#[cfg(target_os = "macos")]`）を run 単位で明示切替する
+    /// 計測専用トグル。`None`（既定・未指定）のときはキー自体を emit
+    /// しない（`readout`/`graph` と同型の「キー欠損 = 既定」後方互換
+    /// 規約）。`Some("on")`/`Some("off")` のときのみ
+    /// `"metal_split_k":"on"`/`"metal_split_k":"off"` を emit する。
+    /// summarize.py・compare_gemm_gate.py・compare_gemm_ab.py の目標
+    /// 達成ゲート・既存 A/B 比較の除外設定は別イシューへ引き継ぐ
+    /// （README「`--metal-split-k`」節参照）。
+    pub metal_split_k: Option<&'a str>,
 }
 
 /// [`Record::graph_stats`] の中身（POD。イシュー #1350）。
@@ -404,6 +417,9 @@ impl Record<'_> {
         }
         if let Some(r) = self.readout {
             s.push_str(&format!(",\"readout\":\"{r}\""));
+        }
+        if let Some(m) = self.metal_split_k {
+            s.push_str(&format!(",\"metal_split_k\":\"{m}\""));
         }
         s.push('}');
         s
@@ -549,6 +565,11 @@ pub struct Cli {
     /// `bench-burn` は本フラグを受理しない（`readout: None` 固定で
     /// 無視）。
     pub readout: Option<String>,
+    /// `--metal-split-k <on|off>`（値付きフラグ。イシュー #1545）。
+    /// `Record.metal_split_k` のドキュメントコメント参照。`bench-candle`・
+    /// `bench-burn` は本フラグを受理しない（`metal_split_k: None` 固定で
+    /// 無視）。
+    pub metal_split_k: Option<String>,
 }
 
 /// Parse the CLI arguments from `std::env::args()`. 薄いラッパーで、実体は
@@ -635,6 +656,29 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         }
         None => None,
     };
+    // イシュー #1545: `--metal-split-k` は `--readout` と同型の値付き
+    // フラグ（`on`／`off` の完全一致のみ受理。未知値・値欠落は
+    // fail-closed で `InvalidArg`）。Metal GEMM split-K opt-in 経路
+    // （`fandhe_ai::set_metal_split_k_gemm_enabled`）を同一バイナリで
+    // run 単位に interleave 計測できるようにする計測専用トグルであり、
+    // `crates/backend-metal` の本番既定（`SPLIT_K_DISPATCH_AUTO_
+    // PRODUCTION_ENABLED`）自体は変更しない。
+    let metal_split_k = match get("--metal-split-k") {
+        Some(v) if v == "on" || v == "off" => Some(v),
+        Some(v) => {
+            return Err(BenchError::InvalidArg {
+                flag: "--metal-split-k",
+                value: v,
+            });
+        }
+        None if has_flag("--metal-split-k") => {
+            return Err(BenchError::InvalidArg {
+                flag: "--metal-split-k",
+                value: String::new(),
+            });
+        }
+        None => None,
+    };
     Ok(Cli {
         task: get("--task").unwrap_or_else(|| "gemm".into()),
         device: get("--device").unwrap_or_else(|| "cpu".into()),
@@ -647,6 +691,7 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         device_checksum: has_flag("--device-checksum"),
         graph,
         readout,
+        metal_split_k,
     })
 }
 
@@ -738,6 +783,7 @@ mod tests {
             graph: None,
             graph_stats: None,
             readout: None,
+            metal_split_k: None,
         }
     }
 
@@ -1251,5 +1297,87 @@ mod tests {
         let mut r = sample_record("fresh", None);
         r.readout = Some("borrowed");
         assert!(r.to_json_line().contains("\"readout\":\"borrowed\""));
+    }
+
+    // イシュー #1545: `--metal-split-k`（`parse_cli_from`）・
+    // `Record.metal_split_k` の契約（`--readout` と同型の値付きフラグ
+    // 形式＋「キー欠損＝既定」の後方互換規約）。Metal GEMM split-K
+    // opt-in 経路を同一バイナリで run 単位に明示切替する計測専用トグル
+    // であることを固定する。
+
+    #[test]
+    fn parse_cli_from_defaults_metal_split_k_to_none() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--device", "metal"]))
+            .expect("parse should succeed");
+        assert!(cli.metal_split_k.is_none());
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_metal_split_k_on() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--metal-split-k", "on"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.metal_split_k.as_deref(), Some("on"));
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_metal_split_k_off() {
+        let cli = parse_cli_from(&args(&["--task", "gemm", "--metal-split-k", "off"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.metal_split_k.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn parse_cli_from_rejects_unknown_metal_split_k_value() {
+        let result = parse_cli_from(&args(&["--task", "gemm", "--metal-split-k", "maybe"]));
+        assert!(matches!(
+            result,
+            Err(BenchError::InvalidArg {
+                flag: "--metal-split-k",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    // `--readout` の末尾値欠落防止（PR #1425・P2 と同型）: `--metal-split-k`
+    // が引数列の末尾で値を伴わない場合、フラグ非指定と誤認せず
+    // `InvalidArg` で fail-closed 拒否する。
+    fn parse_cli_from_rejects_metal_split_k_flag_without_trailing_value() {
+        let result = parse_cli_from(&args(&["--task", "gemm", "--metal-split-k"]));
+        assert!(matches!(
+            result,
+            Err(BenchError::InvalidArg {
+                flag: "--metal-split-k",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_cli_from_metal_split_k_flag_is_order_independent() {
+        let cli = parse_cli_from(&args(&["--metal-split-k", "off", "--task", "gemm"]))
+            .expect("parse should succeed");
+        assert_eq!(cli.metal_split_k.as_deref(), Some("off"));
+        assert_eq!(cli.task, "gemm");
+    }
+
+    #[test]
+    fn json_line_without_metal_split_k_omits_metal_split_k_key() {
+        let line = sample_record("fresh", None).to_json_line();
+        assert!(!line.contains("\"metal_split_k\""));
+    }
+
+    #[test]
+    fn json_line_with_metal_split_k_on_includes_metal_split_k_on() {
+        let mut r = sample_record("fresh", None);
+        r.metal_split_k = Some("on");
+        assert!(r.to_json_line().contains("\"metal_split_k\":\"on\""));
+    }
+
+    #[test]
+    fn json_line_with_metal_split_k_off_includes_metal_split_k_off() {
+        let mut r = sample_record("fresh", None);
+        r.metal_split_k = Some("off");
+        assert!(r.to_json_line().contains("\"metal_split_k\":\"off\""));
     }
 }

@@ -182,6 +182,31 @@ class LoadRowsTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_metal_split_k_key_row_is_excluded(self):
+        # イシュー #1545: `metal_split_k`（Metal GEMM split-K opt-in 経路
+        # の runtime トグル A/B）行は本 readout A/B の対象外として除外
+        # される（`graph` と同型）。
+        r = _rec("legacy", 0.001)
+        r["metal_split_k"] = "on"
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_readout_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertTrue(any("metal_split_k" in w for w in warnings))
+        finally:
+            os.unlink(path)
+
+    def test_non_string_metal_split_k_row_is_excluded_with_type_warning(self):
+        r = _rec("legacy", 0.001)
+        r["metal_split_k"] = 1  # 不正型（str ではない）
+        path = _write_jsonl([r])
+        try:
+            loaded, warnings = compare_readout_ab.load_rows(path)
+            self.assertEqual(loaded, [])
+            self.assertTrue(any("metal_split_k" in w for w in warnings))
+        finally:
+            os.unlink(path)
+
     def test_size_set_filters_out_of_gate_sizes_without_warning(self):
         """cursor (Bugbot) 指摘（PR #1493 未解決スレッド 2）の回帰確認:
         `--sizes` によるサブセット選別で対象外になった行は、型・値域上は

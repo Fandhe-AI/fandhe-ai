@@ -191,6 +191,23 @@ def load_rows(path, size_set=None):
                     "対象外 — skipped"
                 )
                 continue
+            # イシュー #1545: `metal_split_k`（Metal GEMM split-K opt-in
+            # 経路の runtime トグル A/B。`--metal-split-k`）行も `graph`
+            # と同方針で除外する（本ツールは readout フラグの切替効果に
+            # 分離キーを限定するため、別軸のトグルが混入した行は判定
+            # 対象にしない）。
+            if "metal_split_k" in obj and not isinstance(obj["metal_split_k"], str):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'metal_split_k' フィールド型"
+                    f"（str を期待。実際: {obj['metal_split_k']!r}） — skipped"
+                )
+                continue
+            if "metal_split_k" in obj:
+                warnings.append(
+                    f"{path}:{lineno}: 'metal_split_k' キーを持つ行は readout "
+                    "A/B の対象外 — skipped"
+                )
+                continue
             readout = obj.get("readout")
             if readout not in ("legacy", "borrowed"):
                 warnings.append(

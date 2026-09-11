@@ -1,45 +1,54 @@
 #!/bin/bash
-# イシュー #1517: Metal split-K 本番結線（イシュー #1516・
-# `crate::tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`）の結線前後
-# framework-compare 実践規模 A/B。
+# イシュー #1545: Metal split-K opt-in 経路の runtime トグル
+# （`fandhe_ai::set_metal_split_k_gemm_enabled`/`metal_split_k_gemm_enabled`。
+# `#[cfg(target_os = "macos")]`。crates.io 公開版 `fandhe-ai =0.8.0` には
+# 未収録のため `bench-fandhe` の `metal-split-k-toggle` feature〈既定無効〉
+# 経由の path patch ビルド限定）を、同一バイナリで run 単位に interleave
+# 計測する。
 #
-# `run_ab_gemm_metal.sh`（イシュー #1306。before=crates.io 承認ピン
-# registry／after=HEAD path patch）とは異なり、本スクリプトは**両腕とも
-# `crates/facade` への path patch**（`AB_BEFORE_FACADE_PATH`＝ゲート
-# `false` の worktree・`AB_AFTER_FACADE_PATH`＝ゲート `true` の worktree）
-# を用いる。理由（`docs/backend-metal-splitk-decision.md` §5・実装計画
-# §2）:
-#   - 「結線前後」の実体は crates.io 承認ピンの有無ではなく
-#     `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 定数の `false`/`true`
-#     そのものである。承認ピン ↔ HEAD 比較（`run_ab_gemm_metal.sh`）では
-#     ゲート以外の差分（E2〜E8 等）が混入し、字義通りの「結線前後」計測
-#     にならない（`docs/perf/metal-gemm-n4096-kernel-gap.md` §19.1 と
-#     同型の教訓）。
-#   - facade 公開 API での runtime トグルは本イシューのスコープ外
-#     （実装計画 §8「スコープ外」）。
+# **旧方式からの変更点（#1517 当時 → 本イシュー #1545 で置換）**: #1517
+# 時点では `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 定数（`crates/
+# backend-metal/src/tile.rs`）の `false`/`true` を切り替えた 2 つの
+# worktree（`AB_BEFORE_FACADE_PATH`/`AB_AFTER_FACADE_PATH`）を別々に
+# ビルドして比較する方式だった（結線前後の実体がコンパイル時定数
+# そのものだったため）。#1544 で当該定数が既定 `true` へ切り替わり
+# split-K が本番経路として既定有効化された現在は、facade 公開 API
+# （`set_metal_split_k_gemm_enabled`）による runtime on/off 切替が
+# 可能になったため、`run_ab_readout_metal.sh`（`--readout legacy|
+# borrowed` の同一バイナリ run 単位 interleave）と同型の**単一 facade
+# path・単一バイナリ・`--metal-split-k on|off` の runtime 切替**方式へ
+# 置換する（`docs/perf/metal-gemm-splitk-two-pass.md` §5.9 以降・
+# `docs/backend-metal-splitk-decision.md` §5 参照）。
 #
-# 「before==after で計測対象なし」の再発防止（`docs/perf/train-step-
-# phase-breakdown.md` §5.11 の教訓）として、両腕の `tile.rs` 定数値・
-# 絶対パス・ビルド後バイナリの sha256 のいずれかが一致すれば fail-closed
-# で停止する（下記「差分ガード」節）。
+# 差分ガード（旧方式の「before==after で計測対象なし」再発防止・
+# `docs/perf/train-step-phase-breakdown.md` §5.11 の教訓を踏襲）は、
+# 2 バイナリ比較ではなくなったため以下の 2 点へ置き換える:
+#   1. `AB_PATCH_FACADE_PATH/../backend-metal/src/tile.rs` の
+#      `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` 宣言行が `true` で
+#      あること（`--metal-split-k off` が「本番経路が元々 off だから
+#      off に見える」だけの無意味な比較にならないことの確認）。
+#   2. ビルド後、`--metal-split-k off` のドライラン 1 回（極小サイズの
+#      gemm 1 回）が MEASURE_ERROR にならないこと（`metal-split-k-toggle`
+#      feature が実際に有効化されていることの確認）。
 #
 # gemm 8 セル（N=512/1024/2048/4096 × fresh/reuse）に加え、train 2 セル
 # （`--task train` × fresh/reuse。`docs/perf/metal-gemm-splitk-framework-
 # compare-1517.md` §2 の帰属表参照）を計測する。gemm と train は
 # `compare_gemm_ab.py --task <t>` の task 別 fail-closed 検証（他タスク
 # の行を警告つきで除外し 1 件でもあれば判定不能にする。`load_rows`
-# docstring）と整合させるため、最初からタスク別の JSONL（`-gemm.jsonl`／
-# `-train.jsonl`）へ出力を分離する（PR #1531 是正）。`--phases`（train
-# のみ・診断用・各腕 1 回）はさらに別ファイルへ出力し、5 回計測の
-# 「ちょうど 5 件」契約を汚さない。
+# docstring）と整合させるため、タスク別の JSONL（`-gemm.jsonl`／
+# `-train.jsonl`）へ出力を分離する（#1517 PR #1531 是正を踏襲）。
+# `--phases`（train のみ・診断用・各腕 1 回）はさらに別ファイルへ出力し、
+# 5 回計測の「ちょうど 5 件」契約を汚さない。
 #
-# 専有ゲートは要求しない（record_only。ルート #1509 運用方針）。
+# 専有ゲートは要求しない（record_only。ルート #1509 運用方針。
+# `run_ab_readout_metal.sh` の `AB_LOAD_GATE_MODE=record_only` と同型の
+# 「待機なし・load average を記録するのみ」を既定にする）。
 # `uptime`／`pmset -g therm` を各 run の前後で記録し負荷推移を残す。
 #
 # 呼び出し例（M4 Max 実機。Mac セッション）:
-#   AB_BEFORE_FACADE_PATH="<gate=false worktree>/crates/facade" \
-#   AB_AFTER_FACADE_PATH="<gate=true worktree>/crates/facade" \
-#     bash run_ab_splitk_metal.sh splitk-1517
+#   AB_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
+#     bash run_ab_splitk_metal.sh splitk-toggle-1545
 #
 # 出力は「失敗を捏造しない」方針（security.md A08）: 全 run 成功時のみ
 # 一時ファイルを正規パスへ原子的に反映する。1 件でも失敗すれば正規パスは
@@ -52,11 +61,10 @@ LABEL=${1:-}
 
 # A03 インジェクション対策: ラベルはファイル名へ直接埋め込むため、
 # 英数字・`._-` のみを許可する allowlist で検証する
-# （`run_ab_gemm_metal.sh` と同一方針）。
+# （`run_ab_readout_metal.sh` と同一方針）。
 if [[ -z "$LABEL" || ! "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  echo "usage: $0 <label>  (label must match [A-Za-z0-9._-]+, e.g. splitk-1517)" >&2
-  echo "  env AB_BEFORE_FACADE_PATH=<absolute path to crates/facade with gate=false> is required" >&2
-  echo "  env AB_AFTER_FACADE_PATH=<absolute path to crates/facade with gate=true> is required" >&2
+  echo "usage: $0 <label>  (label must match [A-Za-z0-9._-]+, e.g. splitk-toggle-1545)" >&2
+  echo "  env AB_PATCH_FACADE_PATH=<absolute path to HEAD's crates/facade> is required" >&2
   exit 1
 fi
 
@@ -65,125 +73,51 @@ if [[ "${AB_DRY_RUN:-0}" == "1" ]]; then
   DRY_RUN=1
 fi
 
-# `AB_*_FACADE_PATH` の検証（A03・A08。`run_ab_gemm_metal.sh` の
-# `AB_PATCH_FACADE_PATH` 検証と同一方針を両腕に適用する）: 未設定・
-# 相対パス・`"`／`\` 混入・空白混入（`--config` の TOML 文字列へそのまま
-# 埋め込むため）・Cargo.toml 不在・crate 名不一致のいずれかなら
-# fail-closed で exit 1。
-validate_facade_path() { # validate_facade_path <var_name> <value>
-  local name=$1 value=$2
-  if [[ -z "$value" ]]; then
-    echo "error: $name is required (absolute path to a crates/facade worktree; issue #1517)" >&2
-    exit 1
-  fi
-  if [[ "$value" != /* ]]; then
-    echo "error: $name must be an absolute path (got: $value)" >&2
-    exit 1
-  fi
-  if [[ "$value" == *'"'* || "$value" == *'\'* || "$value" == *' '* ]]; then
-    echo "error: $name must not contain '\"', '\\', or a space (got: $value)" >&2
-    exit 1
-  fi
-  if [[ ! -f "$value/Cargo.toml" ]]; then
-    echo "error: $name/Cargo.toml not found ($value)" >&2
-    exit 1
-  fi
-  if ! grep -qE '^\s*name\s*=\s*"fandhe-ai"\s*$' "$value/Cargo.toml"; then
-    echo "error: $name/Cargo.toml does not declare name = \"fandhe-ai\" ($value)" >&2
-    exit 1
-  fi
-}
-validate_facade_path AB_BEFORE_FACADE_PATH "${AB_BEFORE_FACADE_PATH:-}"
-validate_facade_path AB_AFTER_FACADE_PATH "${AB_AFTER_FACADE_PATH:-}"
-
-# 両腕が同一パスを指す誤操作の fail-closed 検出（`realpath` があれば
-# シンボリックリンク経由の別名一致も検出する。無ければ文字列比較のみ）。
-BEFORE_REAL="$AB_BEFORE_FACADE_PATH"
-AFTER_REAL="$AB_AFTER_FACADE_PATH"
-if command -v realpath >/dev/null 2>&1; then
-  BEFORE_REAL="$(realpath "$AB_BEFORE_FACADE_PATH" 2>/dev/null || echo "$AB_BEFORE_FACADE_PATH")"
-  AFTER_REAL="$(realpath "$AB_AFTER_FACADE_PATH" 2>/dev/null || echo "$AB_AFTER_FACADE_PATH")"
-fi
-if [[ "$BEFORE_REAL" == "$AFTER_REAL" ]]; then
-  echo "error: AB_BEFORE_FACADE_PATH と AB_AFTER_FACADE_PATH が同一パスを指している（結線前後の対照にならない。fail-closed）" >&2
+# `AB_PATCH_FACADE_PATH` の検証（A03・A08。`run_ab_readout_metal.sh` の
+# `AB_PATCH_FACADE_PATH` 検証と同一方針）: 未設定・相対パス・`"`／`\`
+# ／空白混入・Cargo.toml 不在・crate 名不一致のいずれかなら fail-closed
+# で exit 1。
+if [[ -z "${AB_PATCH_FACADE_PATH:-}" ]]; then
+  echo "error: AB_PATCH_FACADE_PATH is required (absolute path to HEAD's crates/facade; issue #1545)" >&2
   exit 1
 fi
-
-# 差分ガード（実装計画 §1「設計判断」表・「before==after 再発防止」）:
-# 注: 2026-09-11 の既定 `true` 切替（#1516 マージ）以降、before 腕には
-# 切替前コミット（例 37bb6765）を checkout した別 worktree の facade path を
-# 指定する（main の tile.rs はもはや false ではない）。
-# 各腕の `crates/backend-metal/src/tile.rs`
-# （`<facade path>/../backend-metal/src/tile.rs`）を読み、
-# `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` の宣言行が before=false・
-# after=true であることを機械検証する。`grep -E` の alternation は
-# BRE エスケープ不要（`(false|true)`）。
-gate_value_of() { # gate_value_of <facade_path>
-  local facade=$1 tile_rs
-  tile_rs="$(cd "$facade/../backend-metal" 2>/dev/null && pwd)/src/tile.rs"
-  if [[ ! -f "$tile_rs" ]]; then
-    echo "error: tile.rs not found relative to facade path ($facade)" >&2
-    return 1
-  fi
-  local line
-  line="$(grep -E '^pub\(crate\) const SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = (false|true);$' "$tile_rs" || true)"
-  if [[ -z "$line" ]]; then
-    echo "error: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED の宣言行を $tile_rs から特定できなかった（フォーマット変更の可能性。fail-closed）" >&2
-    return 1
-  fi
-  if [[ "$line" == *"= false;" ]]; then
-    echo "false"
-  else
-    echo "true"
-  fi
-}
-BEFORE_GATE="$(gate_value_of "$AB_BEFORE_FACADE_PATH")" || exit 1
-AFTER_GATE="$(gate_value_of "$AB_AFTER_FACADE_PATH")" || exit 1
-if [[ "$BEFORE_GATE" != "false" || "$AFTER_GATE" != "true" ]]; then
-  echo "error: 期待するゲート値と異なる（before(expected=false)=${BEFORE_GATE}, after(expected=true)=${AFTER_GATE}）。結線前後の対照にならないため fail-closed で停止する。" >&2
+if [[ "$AB_PATCH_FACADE_PATH" != /* ]]; then
+  echo "error: AB_PATCH_FACADE_PATH must be an absolute path (got: $AB_PATCH_FACADE_PATH)" >&2
   exit 1
 fi
-echo "gate check: before=SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=false / after=SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=true"
-
-# 参考記録（fail-closed の対象ではない。tile.rs 定数フリップ以外の
-# 差分が両腕に混入していないかを人間が確認するための情報のみ）。
-#
-# README が想定する運用（同一 HEAD sha から一方の worktree だけ tile.rs
-# の定数を書き換えるコミットなしの一時フリップ）では、①両腕は別
-# worktree のため `git rev-parse --show-toplevel` が一致せずクロス
-# HEAD-sha diff は計算できない、②両腕の `git rev-parse HEAD` はそもそも
-# 同一（コミットなしフリップのため）で計算できたとしても常に空になる
-# ——という 2 重の理由でクロス HEAD-sha diff は実運用では機能しない
-# （advisor 指摘）。代わりに **各腕の worktree 内の未コミット差分**
-# （tile.rs 以外）を個別に記録する: これは「フリップ以外にもコミット
-# されていない変更が紛れ込んでいないか」を検出できる。加えてクロス
-# HEAD-sha diff も（両腕が別コミットを指す構成で使われた場合に備え）
-# 参考として試みるが、`--show-toplevel` の一致は要求しない
-# （2>/dev/null で失敗時は結果空）。
-non_tile_uncommitted_diff_lines() { # non_tile_uncommitted_diff_lines <facade_path>
-  local facade=$1 root
-  root="$(git -C "$facade" rev-parse --show-toplevel 2>/dev/null || echo "")"
-  if [[ -z "$root" ]]; then
-    echo "unknown"
-    return
-  fi
-  git -C "$root" diff --stat HEAD -- ':!crates/backend-metal/src/tile.rs' 2>/dev/null | wc -l | tr -d ' '
-}
-BEFORE_HEAD_SHA="$(git -C "$AB_BEFORE_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
-AFTER_HEAD_SHA="$(git -C "$AB_AFTER_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
-BEFORE_NON_TILE_UNCOMMITTED="$(non_tile_uncommitted_diff_lines "$AB_BEFORE_FACADE_PATH")"
-AFTER_NON_TILE_UNCOMMITTED="$(non_tile_uncommitted_diff_lines "$AB_AFTER_FACADE_PATH")"
-CROSS_SHA_NON_TILE_DIFF="unknown"
-if [[ "$BEFORE_HEAD_SHA" != "unknown" && "$AFTER_HEAD_SHA" != "unknown" ]]; then
-  BEFORE_ROOT_FOR_CROSS="$(git -C "$AB_BEFORE_FACADE_PATH" rev-parse --show-toplevel 2>/dev/null || echo "")"
-  if [[ -n "$BEFORE_ROOT_FOR_CROSS" ]]; then
-    CROSS_SHA_NON_TILE_DIFF="$(git -C "$BEFORE_ROOT_FOR_CROSS" diff --stat "$BEFORE_HEAD_SHA" "$AFTER_HEAD_SHA" -- ':!crates/backend-metal/src/tile.rs' 2>/dev/null | wc -l | tr -d ' ')"
-    CROSS_SHA_NON_TILE_DIFF="${CROSS_SHA_NON_TILE_DIFF:-unknown}"
-  fi
+if [[ "$AB_PATCH_FACADE_PATH" == *'"'* || "$AB_PATCH_FACADE_PATH" == *'\'* || "$AB_PATCH_FACADE_PATH" == *' '* ]]; then
+  echo "error: AB_PATCH_FACADE_PATH must not contain '\"', '\\', or a space" >&2
+  exit 1
 fi
-echo "note: before 腕の tile.rs 以外の未コミット差分行数: ${BEFORE_NON_TILE_UNCOMMITTED}"
-echo "note: after 腕の tile.rs 以外の未コミット差分行数: ${AFTER_NON_TILE_UNCOMMITTED}"
-echo "note: before/after 間の tile.rs 以外のクロス HEAD-sha 差分行数（同一 repo 内かつ両腕が別コミットを指す場合のみ計算。同一コミットの一時フリップ運用では常に unknown/0）: ${CROSS_SHA_NON_TILE_DIFF}"
+if [[ ! -f "$AB_PATCH_FACADE_PATH/Cargo.toml" ]]; then
+  echo "error: AB_PATCH_FACADE_PATH/Cargo.toml not found ($AB_PATCH_FACADE_PATH)" >&2
+  exit 1
+fi
+if ! grep -qE '^\s*name\s*=\s*"fandhe-ai"\s*$' "$AB_PATCH_FACADE_PATH/Cargo.toml"; then
+  echo "error: AB_PATCH_FACADE_PATH/Cargo.toml does not declare name = \"fandhe-ai\" ($AB_PATCH_FACADE_PATH)" >&2
+  exit 1
+fi
+PATCH_CONFIG="patch.crates-io.fandhe-ai.path=\"${AB_PATCH_FACADE_PATH}\""
+
+# 差分ガード其の 1（上記コメント参照）: `SPLIT_K_DISPATCH_AUTO_
+# PRODUCTION_ENABLED`（`crates/backend-metal/src/tile.rs`）が `true` で
+# あることを機械検証する。`grep -E` の alternation は BRE エスケープ不要
+# （`(false|true)`）。
+TILE_RS="$(cd "$AB_PATCH_FACADE_PATH/../backend-metal" 2>/dev/null && pwd)/src/tile.rs"
+if [[ ! -f "$TILE_RS" ]]; then
+  echo "error: tile.rs not found relative to AB_PATCH_FACADE_PATH ($AB_PATCH_FACADE_PATH)" >&2
+  exit 1
+fi
+GATE_LINE="$(grep -E '^pub\(crate\) const SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: bool = (false|true);$' "$TILE_RS" || true)"
+if [[ -z "$GATE_LINE" ]]; then
+  echo "error: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED の宣言行を $TILE_RS から特定できなかった（フォーマット変更の可能性。fail-closed）" >&2
+  exit 1
+fi
+if [[ "$GATE_LINE" != *"= true;" ]]; then
+  echo "error: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED が true ではない（${GATE_LINE}）。runtime トグルの on/off 比較が本番経路の on/off 比較にならないため fail-closed で停止する（issue #1545）。" >&2
+  exit 1
+fi
+echo "gate check: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=true ($TILE_RS)"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "AB_DRY_RUN=1: バリデーションのみ完了（cargo/pmset/sysctl は実行しない）。"
@@ -196,48 +130,34 @@ if [[ ! "$AB_ROUNDS" =~ ^[0-9]+$ || "$AB_ROUNDS" -lt 1 ]]; then
   exit 1
 fi
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "error: jq is required (used to parse 'cargo build --message-format=json' artifact paths)" >&2
-  exit 1
-fi
-
 SIZES=(512 1024 2048 4096)
 MODES=(fresh reuse)
 
-# P1 是正（codex-review・Cursor Bugbot 指摘。イシュー #1517 PR #1531）:
-# `compare_gemm_ab.py` は `--task`（gemm/train）で指定したタスク以外の
-# 行を `_valid_cell_identity` で不正行として警告つき除外し、1 件でも
-# warning があれば fail-closed（終了コード 2）で判定不能にする
-# （`load_rows` docstring・`main` の `if warnings: return 2`）。
-# 当初 gemm 8 セルと train 2 セルを同一 before/after JSONL へ追記して
-# いたため、README の手順どおり `--task gemm`／`--task train` のいずれで
-# 集計しても相手タスクの行が必ず警告対象になり判定不能になっていた。
-# gemm と train を最初からタスク別ファイルへ分離して出力し、
-# `compare_gemm_ab.py --task <t>` にはそのタスク単独のファイルだけを
-# 渡す契約へ変更する。
-OUT_BEFORE_GEMM="results/raw/results-m4max-splitk-ab-before-${LABEL}-gemm.jsonl"
-OUT_AFTER_GEMM="results/raw/results-m4max-splitk-ab-after-${LABEL}-gemm.jsonl"
-OUT_BEFORE_TRAIN="results/raw/results-m4max-splitk-ab-before-${LABEL}-train.jsonl"
-OUT_AFTER_TRAIN="results/raw/results-m4max-splitk-ab-after-${LABEL}-train.jsonl"
-OUT_BEFORE_PHASES="results/raw/results-m4max-splitk-ab-before-${LABEL}-phases.jsonl"
-OUT_AFTER_PHASES="results/raw/results-m4max-splitk-ab-after-${LABEL}-phases.jsonl"
+# タスク別 JSONL（`compare_gemm_ab.py --task <t>` の task 別 fail-closed
+# 検証と整合させるため。#1517 PR #1531 是正を踏襲）。
+OUT_OFF_GEMM="results/raw/results-m4max-splitk-ab-off-${LABEL}-gemm.jsonl"
+OUT_ON_GEMM="results/raw/results-m4max-splitk-ab-on-${LABEL}-gemm.jsonl"
+OUT_OFF_TRAIN="results/raw/results-m4max-splitk-ab-off-${LABEL}-train.jsonl"
+OUT_ON_TRAIN="results/raw/results-m4max-splitk-ab-on-${LABEL}-train.jsonl"
+OUT_OFF_PHASES="results/raw/results-m4max-splitk-ab-off-${LABEL}-phases.jsonl"
+OUT_ON_PHASES="results/raw/results-m4max-splitk-ab-on-${LABEL}-phases.jsonl"
 SKIP="results/raw/skipped-m4max-splitk-ab-${LABEL}.log"
 MANIFEST="results/raw/manifest-m4max-splitk-ab-${LABEL}.json"
 mkdir -p results/raw
 
-OUT_BEFORE_GEMM_TMP="${OUT_BEFORE_GEMM}.tmp"
-OUT_AFTER_GEMM_TMP="${OUT_AFTER_GEMM}.tmp"
-OUT_BEFORE_TRAIN_TMP="${OUT_BEFORE_TRAIN}.tmp"
-OUT_AFTER_TRAIN_TMP="${OUT_AFTER_TRAIN}.tmp"
-OUT_BEFORE_PHASES_TMP="${OUT_BEFORE_PHASES}.tmp"
-OUT_AFTER_PHASES_TMP="${OUT_AFTER_PHASES}.tmp"
+OUT_OFF_GEMM_TMP="${OUT_OFF_GEMM}.tmp"
+OUT_ON_GEMM_TMP="${OUT_ON_GEMM}.tmp"
+OUT_OFF_TRAIN_TMP="${OUT_OFF_TRAIN}.tmp"
+OUT_ON_TRAIN_TMP="${OUT_ON_TRAIN}.tmp"
+OUT_OFF_PHASES_TMP="${OUT_OFF_PHASES}.tmp"
+OUT_ON_PHASES_TMP="${OUT_ON_PHASES}.tmp"
 SKIP_TMP="${SKIP}.tmp"
-: > "$OUT_BEFORE_GEMM_TMP"
-: > "$OUT_AFTER_GEMM_TMP"
-: > "$OUT_BEFORE_TRAIN_TMP"
-: > "$OUT_AFTER_TRAIN_TMP"
-: > "$OUT_BEFORE_PHASES_TMP"
-: > "$OUT_AFTER_PHASES_TMP"
+: > "$OUT_OFF_GEMM_TMP"
+: > "$OUT_ON_GEMM_TMP"
+: > "$OUT_OFF_TRAIN_TMP"
+: > "$OUT_ON_TRAIN_TMP"
+: > "$OUT_OFF_PHASES_TMP"
+: > "$OUT_ON_PHASES_TMP"
 : > "$SKIP_TMP"
 
 ANY_FAILED=0
@@ -251,7 +171,10 @@ sha256_of() {
   fi
 }
 
-fandhe_ai_source_desc() { # fandhe_ai_source_desc [追加の cargo tree 引数...]
+# `cargo tree -p bench-fandhe --depth 1` の `fandhe-ai` 行から解決元
+# （path か registry か）を抽出する（`run_ab_readout_metal.sh` と同型の
+# ハードゲート）。
+fandhe_ai_source_desc() {
   local line path_part
   line=$(cargo tree -p bench-fandhe --depth 1 "$@" 2>/dev/null | grep -E "^[├└]── fandhe-ai " || true)
   if [[ -z "$line" ]]; then
@@ -265,7 +188,46 @@ fandhe_ai_source_desc() { # fandhe_ai_source_desc [追加の cargo tree 引数..
   fi
 }
 
-# `Cargo.lock` の退避・復元（`run_ab_gemm_metal.sh` と同一方針。deps-
+# `AB_LOAD_GATE_MODE=record_only`（既定。ルート #1509 運用方針）: 専有
+# ゲートを要件にせず、現在の load average を 1 行記録するだけで即座に
+# 計測を開始する。「共有負荷下であることと計測中の load average 推移を
+# env_info に記録する」方針を、`gate-splitk-ab-<label>.log`／
+# `uptime-splitk-ab-<label>.log` の記録先で満たす
+# （`run_ab_readout_metal.sh` の `record_only` モードと同型。専有ゲート
+# の `exclusive` モードは本スクリプトでは実装しない — 旧 `run_ab_
+# splitk_metal.sh` も専有ゲートを要求しない前提のため、必要になれば
+# `run_ab_readout_metal.sh` から `wait_for_exclusive_gate` を移植する）。
+load1_now() {
+  local raw parsed
+  if ! raw="$(uptime 2>/dev/null)"; then
+    return 0
+  fi
+  parsed="$(printf '%s\n' "$raw" | sed -E 's/.*load average[s]?: ([0-9.]+).*/\1/')"
+  printf '%s' "$parsed"
+}
+load1_is_valid() {
+  local v="$1"
+  [[ -n "$v" ]] && awk -v l="$v" 'BEGIN{exit !(l ~ /^[0-9]+(\.[0-9]+)?$/ && l + 0 >= 0)}'
+}
+record_only_gate_note() {
+  local gate_log="results/raw/gate-splitk-ab-${LABEL}.log"
+  local l1
+  l1="$(load1_now)"
+  : > "$gate_log"
+  if ! load1_is_valid "$l1"; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1_invalid=${l1:-<empty>}（専有ゲート要件なし。issue #1545・ルート #1509）" | tee -a "$gate_log"
+  else
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1=${l1}（専有ゲート要件なし。issue #1545・ルート #1509）" | tee -a "$gate_log"
+  fi
+}
+record_only_gate_note
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq is required (used to parse 'cargo build --message-format=json' artifact paths)" >&2
+  exit 1
+fi
+
+# `Cargo.lock` の退避・復元（`run_ab_readout_metal.sh` と同一方針。deps-
 # policy.md 第 9 区分「`[patch]` は CLI 引数のみで与え Cargo.lock は
 # 変更しない」契約）。
 LOCK_BACKUP="$(mktemp)"
@@ -297,104 +259,76 @@ restore_lock_trap() {
 }
 trap restore_lock_trap EXIT
 
-build_bench_fandhe() { # build_bench_fandhe <out_exe_pathvar> [追加の cargo build 引数...]
-  local __out_var=$1
-  shift
-  local msg_file
-  msg_file="$(mktemp)"
-  if ! cargo build --release -p bench-fandhe --target-dir target --message-format=json "$@" >"$msg_file" 2>build-err.tmp; then
-    tail -40 build-err.tmp
-    echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
-    rm -f build-err.tmp "$msg_file"
-    exit 1
-  fi
+echo "== build bench-fandhe (HEAD path patch, --features metal-split-k-toggle) =="
+if ! cargo build --release -p bench-fandhe --features metal-split-k-toggle --config "$PATCH_CONFIG" 2>build-err.tmp; then
+  tail -40 build-err.tmp
+  echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
   rm -f build-err.tmp
-  local exe
-  exe="$(jq -rs '[.[] | select(.reason == "compiler-artifact" and .target.name == "bench-fandhe" and (.target.kind[]? == "bin") and .executable != null)] | last | .executable // empty' "$msg_file")"
-  rm -f "$msg_file"
-  if [[ -z "$exe" || ! -f "$exe" ]]; then
-    echo "error: bench-fandhe ビルド成果物のパスを 'cargo build --message-format=json' から特定できなかった（jq 抽出結果: '${exe:-<空>}')" >&2
-    exit 1
-  fi
-  printf -v "$__out_var" '%s' "$exe"
-}
+  exit 1
+fi
+rm -f build-err.tmp
 
-BEFORE_CONFIG="patch.crates-io.fandhe-ai.path=\"${AB_BEFORE_FACADE_PATH}\""
-AFTER_CONFIG="patch.crates-io.fandhe-ai.path=\"${AB_AFTER_FACADE_PATH}\""
+SOURCE_DESC="$(fandhe_ai_source_desc --features metal-split-k-toggle --config "$PATCH_CONFIG" || true)"
+if [[ "$SOURCE_DESC" != "path:${AB_PATCH_FACADE_PATH}" ]]; then
+  echo "error: fandhe-ai が期待した path 解決ではない (expected=path:${AB_PATCH_FACADE_PATH} actual=${SOURCE_DESC:-<取得失敗>})" >&2
+  exit 1
+fi
 
-echo "== build bench-fandhe (before: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=false path patch) =="
-build_bench_fandhe BEFORE_EXE --config "$BEFORE_CONFIG"
-BEFORE_SOURCE="$(fandhe_ai_source_desc --config "$BEFORE_CONFIG" || true)"
-if [[ "$BEFORE_SOURCE" != "path:${AB_BEFORE_FACADE_PATH}" ]]; then
-  echo "error: before ビルドの fandhe-ai が期待した path 解決ではない (expected=path:${AB_BEFORE_FACADE_PATH} actual=${BEFORE_SOURCE:-<取得失敗>})" >&2
-  exit 1
-fi
-mkdir -p target/release
-if ! cp "$BEFORE_EXE" target/release/bench-fandhe-splitk-ab-before; then
-  echo "error: cp '$BEFORE_EXE' target/release/bench-fandhe-splitk-ab-before に失敗した" >&2
-  exit 1
-fi
-BEFORE_SHA="$(sha256_of target/release/bench-fandhe-splitk-ab-before)"
-echo "bench-fandhe-splitk-ab-before sha256: $BEFORE_SHA (source: $BEFORE_SOURCE, exe: $BEFORE_EXE)"
+BIN_SHA="$(sha256_of target/release/bench-fandhe)"
+echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC)"
 
-echo "== build bench-fandhe (after: SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED=true path patch) =="
-build_bench_fandhe AFTER_EXE --config "$AFTER_CONFIG"
-AFTER_SOURCE="$(fandhe_ai_source_desc --config "$AFTER_CONFIG" || true)"
-if [[ "$AFTER_SOURCE" != "path:${AB_AFTER_FACADE_PATH}" ]]; then
-  echo "error: after ビルドの fandhe-ai が期待した path 解決ではない (expected=path:${AB_AFTER_FACADE_PATH} actual=${AFTER_SOURCE:-<取得失敗>})" >&2
+# 差分ガード其の 2（冒頭コメント参照）: `--metal-split-k off` のドライラン
+# 1 回（極小サイズの gemm。計測対象の JSONL・SKIP には出力しない）が
+# MEASURE_ERROR にならないことを確認する。`metal-split-k-toggle` feature
+# が実際に有効化されビルドへ反映されていることの機械確認
+# （feature フラグ自体は `--config` 経由の path patch と独立してビルド
+# 時に固定されるため、ビルド成功だけでは runtime 分岐が意図どおり
+# 通っているか判別できない）。
+DRYRUN_OUT="$(mktemp)"
+if ! ./target/release/bench-fandhe --task gemm --device metal --size 64 --mode fresh --metal-split-k off --out "$DRYRUN_OUT" 2>dryrun-err.tmp; then
+  echo "error: --metal-split-k off のドライランが失敗した（metal-split-k-toggle feature が有効に反映されていない可能性）: $(cat dryrun-err.tmp)" >&2
+  rm -f dryrun-err.tmp "$DRYRUN_OUT"
   exit 1
 fi
-if ! cp "$AFTER_EXE" target/release/bench-fandhe-splitk-ab-after; then
-  echo "error: cp '$AFTER_EXE' target/release/bench-fandhe-splitk-ab-after に失敗した" >&2
-  exit 1
-fi
-AFTER_SHA="$(sha256_of target/release/bench-fandhe-splitk-ab-after)"
-echo "bench-fandhe-splitk-ab-after sha256: $AFTER_SHA (source: $AFTER_SOURCE, exe: $AFTER_EXE)"
-
-# 「before==after で計測対象なし」の再発防止（差分ガードの最終段。
-# バイナリ自体が同一なら、ゲート値の grep 検証をすり抜けた別種の
-# 取り違えが起きている可能性がある）。
-if [[ "$BEFORE_SHA" == "$AFTER_SHA" ]]; then
-  echo "error: before/after のビルド成果物が bit 同一（sha256 一致）。結線前後の対照になっていない（fail-closed）。" >&2
-  exit 1
-fi
+rm -f dryrun-err.tmp "$DRYRUN_OUT"
+echo "gate check: --metal-split-k off dry-run OK (metal-split-k-toggle feature is active)"
 
 SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null || echo unknown)"
+FACADE_HEAD_SHA="$(git -C "$AB_PATCH_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
 MANIFEST_TMP="${MANIFEST}.tmp"
 cat > "$MANIFEST_TMP" <<JSON
-{"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","before_source_head_sha":"${BEFORE_HEAD_SHA}","after_source_head_sha":"${AFTER_HEAD_SHA}","before_gate":"${BEFORE_GATE}","after_gate":"${AFTER_GATE}","before_sha256":"${BEFORE_SHA}","before_source":"${BEFORE_SOURCE}","after_sha256":"${AFTER_SHA}","after_source":"${AFTER_SOURCE}","before_non_tile_uncommitted_diff_lines":"${BEFORE_NON_TILE_UNCOMMITTED}","after_non_tile_uncommitted_diff_lines":"${AFTER_NON_TILE_UNCOMMITTED}","cross_sha_non_tile_diff_lines":"${CROSS_SHA_NON_TILE_DIFF}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${SOURCE_DESC}","split_k_arms":["off","on"],"gate_mode":"record_only","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
 echo "== manifest（一時ファイル）記録: $MANIFEST_TMP =="
 cat "$MANIFEST_TMP"
 
-verify_binaries() {
-  local now_before now_after
-  now_before="$(sha256_of target/release/bench-fandhe-splitk-ab-before)"
-  now_after="$(sha256_of target/release/bench-fandhe-splitk-ab-after)"
-  if [[ "$now_before" != "$BEFORE_SHA" || "$now_after" != "$AFTER_SHA" ]]; then
-    echo "error: bench-fandhe-splitk-ab-before/after のバイナリが計測中に変化した（sha256 不一致）" >&2
+verify_binary() {
+  local now
+  now="$(sha256_of target/release/bench-fandhe)"
+  if [[ "$now" != "$BIN_SHA" ]]; then
+    echo "error: bench-fandhe のバイナリが計測中に変化した（sha256 不一致）" >&2
     exit 1
   fi
 }
 
-run_gemm() { # run_gemm <binary> <out_tmp> <size> <mode>
-  local bin=$1 out=$2 size=$3 mode=$4
-  verify_binaries
-  echo "== $bin gemm metal size=$size mode=$mode =="
-  if ! "./target/release/$bin" --task gemm --device metal --size "$size" --mode "$mode" --out "$out" 2>err.tmp; then
-    echo "$bin gemm metal size=$size mode=$mode : $(cat err.tmp)" >> "$SKIP_TMP"
+run_gemm() { # run_gemm <arm(off|on)> <out_tmp> <size> <mode>
+  local arm=$1 out=$2 size=$3 mode=$4
+  verify_binary
+  echo "== bench-fandhe gemm metal size=$size mode=$mode metal-split-k=$arm =="
+  if ! ./target/release/bench-fandhe --task gemm --device metal --size "$size" --mode "$mode" --metal-split-k "$arm" --out "$out" 2>err.tmp; then
+    echo "gemm metal size=$size mode=$mode metal-split-k=$arm : $(cat err.tmp)" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in $SKIP_TMP)"
     ANY_FAILED=$((ANY_FAILED + 1))
   fi
   rm -f err.tmp
 }
 
-run_train() { # run_train <binary> <out_tmp> <mode>
-  local bin=$1 out=$2 mode=$3
-  verify_binaries
-  echo "== $bin train metal mode=$mode =="
-  if ! "./target/release/$bin" --task train --device metal --mode "$mode" --out "$out" 2>err.tmp; then
-    echo "$bin train metal mode=$mode : $(cat err.tmp)" >> "$SKIP_TMP"
+run_train() { # run_train <arm(off|on)> <out_tmp> <mode>
+  local arm=$1 out=$2 mode=$3
+  verify_binary
+  echo "== bench-fandhe train metal mode=$mode metal-split-k=$arm =="
+  if ! ./target/release/bench-fandhe --task train --device metal --mode "$mode" --metal-split-k "$arm" --out "$out" 2>err.tmp; then
+    echo "train metal mode=$mode metal-split-k=$arm : $(cat err.tmp)" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in $SKIP_TMP)"
     ANY_FAILED=$((ANY_FAILED + 1))
   fi
@@ -406,32 +340,56 @@ sysctl -n machdep.cpu.brand_string 2>&1 || true
 pmset -g therm 2>&1 || true
 uptime 2>&1 || true
 
-# run 単位で before/after を交互起動する。偶数 run_i では順序を反転する
-# （`run_ab_gemm_metal.sh` と同一方針）。gemm 8 セル・train 2 セルは
+UPTIME_SAMPLER_LOG="results/raw/uptime-splitk-ab-${LABEL}.log"
+: > "$UPTIME_SAMPLER_LOG"
+(
+  while true; do
+    { date -u +%Y-%m-%dT%H:%M:%SZ; uptime; } >> "$UPTIME_SAMPLER_LOG" 2>&1
+    sleep 30
+  done
+) &
+UPTIME_SAMPLER_PID=$!
+# `restore_lock_trap`（Cargo.lock 復元）を上書きせず、バックグラウンド
+# サンプラーの kill も併せて行う合成 trap へ差し替える（元の trap を
+# 上書きしたまま計測ループ中に exit すると Cargo.lock が復元されない
+# 事故を防ぐ。`run_ab_readout_metal.sh` と同一方針）。
+restore_lock_and_kill_sampler_trap() {
+  local code=$?
+  kill "$UPTIME_SAMPLER_PID" 2>/dev/null || true
+  if ! restore_lock; then
+    if [[ "$code" -eq 0 ]]; then
+      code=1
+    fi
+  fi
+  exit "$code"
+}
+trap restore_lock_and_kill_sampler_trap EXIT
+
+# run 単位で off/on を交互起動する。奇数 run: off→on・偶数 run: on→off
+# （起動順序自体の系統誤差を均す。`run_ab_readout_metal.sh`／旧
+# `run_ab_splitk_metal.sh` と同型。判定規則は `docs/perf/metal-gemm-
+# splitk-framework-compare-1517.md` を踏襲）。gemm 8 セル・train 2 セルは
 # 同一 run ループ内で実行するが、出力先はタスク別ファイル
-# （`OUT_*_GEMM`／`OUT_*_TRAIN`）へ分離する（P1 是正。上記コメント参照）。
-# 分離後も各ファイル内での append 順は run 番号のままのため、
-# `compare_gemm_ab.py --per-run` の「append 順＝run 順」前提は
-# タスクごとに維持される。
+# （`OUT_*_GEMM`／`OUT_*_TRAIN`）へ分離する（#1517 PR #1531 是正を踏襲）。
 for run_i in $(seq 1 "$AB_ROUNDS"); do
   for size in "${SIZES[@]}"; do
     for mode in "${MODES[@]}"; do
       if (( run_i % 2 == 1 )); then
-        run_gemm bench-fandhe-splitk-ab-before "$OUT_BEFORE_GEMM_TMP" "$size" "$mode"
-        run_gemm bench-fandhe-splitk-ab-after "$OUT_AFTER_GEMM_TMP" "$size" "$mode"
+        run_gemm off "$OUT_OFF_GEMM_TMP" "$size" "$mode"
+        run_gemm on "$OUT_ON_GEMM_TMP" "$size" "$mode"
       else
-        run_gemm bench-fandhe-splitk-ab-after "$OUT_AFTER_GEMM_TMP" "$size" "$mode"
-        run_gemm bench-fandhe-splitk-ab-before "$OUT_BEFORE_GEMM_TMP" "$size" "$mode"
+        run_gemm on "$OUT_ON_GEMM_TMP" "$size" "$mode"
+        run_gemm off "$OUT_OFF_GEMM_TMP" "$size" "$mode"
       fi
     done
   done
   for mode in "${MODES[@]}"; do
     if (( run_i % 2 == 1 )); then
-      run_train bench-fandhe-splitk-ab-before "$OUT_BEFORE_TRAIN_TMP" "$mode"
-      run_train bench-fandhe-splitk-ab-after "$OUT_AFTER_TRAIN_TMP" "$mode"
+      run_train off "$OUT_OFF_TRAIN_TMP" "$mode"
+      run_train on "$OUT_ON_TRAIN_TMP" "$mode"
     else
-      run_train bench-fandhe-splitk-ab-after "$OUT_AFTER_TRAIN_TMP" "$mode"
-      run_train bench-fandhe-splitk-ab-before "$OUT_BEFORE_TRAIN_TMP" "$mode"
+      run_train on "$OUT_ON_TRAIN_TMP" "$mode"
+      run_train off "$OUT_OFF_TRAIN_TMP" "$mode"
     fi
   done
   echo "== run $run_i/$AB_ROUNDS 完了時点の status =="
@@ -440,18 +398,18 @@ for run_i in $(seq 1 "$AB_ROUNDS"); do
 done
 
 # `--phases`（train のみ・診断用・各腕 1 回。本体セルの「ちょうど 5 件」
-# 契約を汚さないよう別ファイルへ出力する。実装計画 §1「設計判断」表）。
+# 契約を汚さないよう別ファイルへ出力する）。
 for mode in "${MODES[@]}"; do
-  verify_binaries
-  echo "== bench-fandhe-splitk-ab-before train --phases mode=$mode =="
-  if ! ./target/release/bench-fandhe-splitk-ab-before --task train --device metal --mode "$mode" --phases --out "$OUT_BEFORE_PHASES_TMP" 2>err.tmp; then
-    echo "bench-fandhe-splitk-ab-before train --phases mode=$mode : $(cat err.tmp)" >> "$SKIP_TMP"
+  verify_binary
+  echo "== bench-fandhe train --phases mode=$mode metal-split-k=off =="
+  if ! ./target/release/bench-fandhe --task train --device metal --mode "$mode" --metal-split-k off --phases --out "$OUT_OFF_PHASES_TMP" 2>err.tmp; then
+    echo "train --phases mode=$mode metal-split-k=off : $(cat err.tmp)" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in ${SKIP_TMP}。--phases は診断用のため ANY_FAILED には計上しない)"
   fi
   rm -f err.tmp
-  echo "== bench-fandhe-splitk-ab-after train --phases mode=$mode =="
-  if ! ./target/release/bench-fandhe-splitk-ab-after --task train --device metal --mode "$mode" --phases --out "$OUT_AFTER_PHASES_TMP" 2>err.tmp; then
-    echo "bench-fandhe-splitk-ab-after train --phases mode=$mode : $(cat err.tmp)" >> "$SKIP_TMP"
+  echo "== bench-fandhe train --phases mode=$mode metal-split-k=on =="
+  if ! ./target/release/bench-fandhe --task train --device metal --mode "$mode" --metal-split-k on --phases --out "$OUT_ON_PHASES_TMP" 2>err.tmp; then
+    echo "train --phases mode=$mode metal-split-k=on : $(cat err.tmp)" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in ${SKIP_TMP}。--phases は診断用のため ANY_FAILED には計上しない)"
   fi
   rm -f err.tmp
@@ -460,6 +418,10 @@ done
 echo "== metal status (after loop) =="
 pmset -g therm 2>&1 || true
 uptime 2>&1 || true
+
+kill "$UPTIME_SAMPLER_PID" 2>/dev/null || true
+wait "$UPTIME_SAMPLER_PID" 2>/dev/null || true
+trap restore_lock_trap EXIT
 
 MV_FAILED=0
 mv_checked() { # mv_checked <src> <dst>
@@ -470,32 +432,32 @@ mv_checked() { # mv_checked <src> <dst>
 }
 
 if [[ "$ANY_FAILED" -eq 0 ]]; then
-  mv_checked "$OUT_BEFORE_GEMM_TMP" "$OUT_BEFORE_GEMM"
-  mv_checked "$OUT_AFTER_GEMM_TMP" "$OUT_AFTER_GEMM"
-  mv_checked "$OUT_BEFORE_TRAIN_TMP" "$OUT_BEFORE_TRAIN"
-  mv_checked "$OUT_AFTER_TRAIN_TMP" "$OUT_AFTER_TRAIN"
-  mv_checked "$OUT_BEFORE_PHASES_TMP" "$OUT_BEFORE_PHASES"
-  mv_checked "$OUT_AFTER_PHASES_TMP" "$OUT_AFTER_PHASES"
+  mv_checked "$OUT_OFF_GEMM_TMP" "$OUT_OFF_GEMM"
+  mv_checked "$OUT_ON_GEMM_TMP" "$OUT_ON_GEMM"
+  mv_checked "$OUT_OFF_TRAIN_TMP" "$OUT_OFF_TRAIN"
+  mv_checked "$OUT_ON_TRAIN_TMP" "$OUT_ON_TRAIN"
+  mv_checked "$OUT_OFF_PHASES_TMP" "$OUT_OFF_PHASES"
+  mv_checked "$OUT_ON_PHASES_TMP" "$OUT_ON_PHASES"
   mv_checked "$SKIP_TMP" "$SKIP"
   mv_checked "$MANIFEST_TMP" "$MANIFEST"
   if [[ "$MV_FAILED" -ne 0 ]]; then
     echo "error: $MV_FAILED 件の mv が失敗した。新旧結果混在の可能性があるため、正規パスの内容を手動確認すること（fail-closed。security.md A08）。" >&2
     exit 1
   fi
-  echo "done. gemm before/after results in $OUT_BEFORE_GEMM / $OUT_AFTER_GEMM ; train before/after results in $OUT_BEFORE_TRAIN / $OUT_AFTER_TRAIN ; phases (diagnostic) in $OUT_BEFORE_PHASES/$OUT_AFTER_PHASES ; failures (if any) in $SKIP ; manifest in $MANIFEST"
+  echo "done. gemm off/on results in $OUT_OFF_GEMM / $OUT_ON_GEMM ; train off/on results in $OUT_OFF_TRAIN / $OUT_ON_TRAIN ; phases (diagnostic) in $OUT_OFF_PHASES/$OUT_ON_PHASES ; failures (if any) in $SKIP ; manifest in $MANIFEST"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
-  mv_checked "$OUT_BEFORE_GEMM_TMP" "results/raw/results-m4max-splitk-ab-before-${LABEL}-gemm.failed-${FAIL_TS}.jsonl"
-  mv_checked "$OUT_AFTER_GEMM_TMP" "results/raw/results-m4max-splitk-ab-after-${LABEL}-gemm.failed-${FAIL_TS}.jsonl"
-  mv_checked "$OUT_BEFORE_TRAIN_TMP" "results/raw/results-m4max-splitk-ab-before-${LABEL}-train.failed-${FAIL_TS}.jsonl"
-  mv_checked "$OUT_AFTER_TRAIN_TMP" "results/raw/results-m4max-splitk-ab-after-${LABEL}-train.failed-${FAIL_TS}.jsonl"
-  mv_checked "$OUT_BEFORE_PHASES_TMP" "results/raw/results-m4max-splitk-ab-before-${LABEL}-phases.failed-${FAIL_TS}.jsonl"
-  mv_checked "$OUT_AFTER_PHASES_TMP" "results/raw/results-m4max-splitk-ab-after-${LABEL}-phases.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_OFF_GEMM_TMP" "results/raw/results-m4max-splitk-ab-off-${LABEL}-gemm.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_ON_GEMM_TMP" "results/raw/results-m4max-splitk-ab-on-${LABEL}-gemm.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_OFF_TRAIN_TMP" "results/raw/results-m4max-splitk-ab-off-${LABEL}-train.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_ON_TRAIN_TMP" "results/raw/results-m4max-splitk-ab-on-${LABEL}-train.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_OFF_PHASES_TMP" "results/raw/results-m4max-splitk-ab-off-${LABEL}-phases.failed-${FAIL_TS}.jsonl"
+  mv_checked "$OUT_ON_PHASES_TMP" "results/raw/results-m4max-splitk-ab-on-${LABEL}-phases.failed-${FAIL_TS}.jsonl"
   mv_checked "$SKIP_TMP" "results/raw/skipped-m4max-splitk-ab-${LABEL}.failed-${FAIL_TS}.log"
   mv_checked "$MANIFEST_TMP" "results/raw/manifest-m4max-splitk-ab-${LABEL}.failed-${FAIL_TS}.json"
   if [[ "$MV_FAILED" -ne 0 ]]; then
     echo "error: $MV_FAILED 件の失敗結果退避 mv も失敗した（診断用データが一部欠落している可能性がある）。" >&2
   fi
-  echo "FAILED: $ANY_FAILED run(s) failed; partial/unreliable data kept for diagnosis (${FAIL_TS}). $OUT_BEFORE_GEMM/$OUT_AFTER_GEMM/$OUT_BEFORE_TRAIN/$OUT_AFTER_TRAIN/$MANIFEST left untouched (fail-closed. security.md A08)." >&2
+  echo "FAILED: $ANY_FAILED run(s) failed; partial/unreliable data kept for diagnosis (${FAIL_TS}). $OUT_OFF_GEMM/$OUT_ON_GEMM/$OUT_OFF_TRAIN/$OUT_ON_TRAIN/$MANIFEST left untouched (fail-closed. security.md A08)." >&2
   exit 1
 fi

@@ -42,8 +42,42 @@ mod common;
 use bench_harness::rng::Xorshift64Star;
 use common::splitk_parity_baseline::{assert_no_split_k_parity_regression, find_baseline};
 use fandhe_ai_backend_cpu::parity::{compare, matmul_reference_fma};
+use fandhe_ai_backend_metal::split_k_runtime::{set_split_k_enabled, split_k_enabled};
 use fandhe_ai_backend_metal::tile;
 use fandhe_ai_backend_metal::{GemmRoute, MetalContext, MetalGemm};
+
+/// 本ファイルの各テストはインスタンス単位ゲート（`MetalGemm::
+/// split_k_auto_enabled`）の検証が目的であり、実行時トグル
+/// （`crate::split_k_runtime`。イシュー #1545）の影響を受けないことを
+/// 前提とする。本ガードは、本ファイルと同一プロセスで並列実行され
+/// うる他テストバイナリの状態変化から独立させるための直列化・
+/// 原状復帰 RAII ガード（`gemm_splitk_runtime_toggle.rs::
+/// RuntimeFlagGuard` と同型）。各テスト冒頭で明示的に `true`（既定
+/// 相当）へ固定し、本ファイルの意図（インスタンス単位ゲートの検証）を
+/// 実行時トグルの状態に左右されないようにする。
+struct RuntimeFlagGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    original: bool,
+}
+
+impl RuntimeFlagGuard {
+    fn acquire_enabled() -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = split_k_enabled();
+        set_split_k_enabled(true);
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+}
+
+impl Drop for RuntimeFlagGuard {
+    fn drop(&mut self) {
+        set_split_k_enabled(self.original);
+    }
+}
 
 /// `to_bits()` 経由の bit 単位一致検証（`tests/gemm_splitk_bit_match.rs::
 /// assert_bit_exact` と同じ理由: `assert_eq!` の `f32` 比較は `+0.0 == -0.0`
@@ -95,6 +129,7 @@ const TARGET_SHAPES: &[(usize, usize, usize)] = &[
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn wiring_default_is_bit_identical_to_explicit_on() {
+    let _rt_guard = RuntimeFlagGuard::acquire_enabled();
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let base = MetalGemm::new(&ctx).expect("base GEMM パイプラインの構築に失敗した");
     let head = MetalGemm::new_with_split_k_auto(&ctx, true)
@@ -134,6 +169,7 @@ fn wiring_default_is_bit_identical_to_explicit_on() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn wiring_explicit_off_forces_classic_route_for_targets() {
+    let _rt_guard = RuntimeFlagGuard::acquire_enabled();
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let head = MetalGemm::new_with_split_k_auto(&ctx, false)
         .expect("head GEMM パイプラインの構築に失敗した");
@@ -165,6 +201,7 @@ fn wiring_explicit_off_forces_classic_route_for_targets() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn wiring_on_keeps_classic_bit_identical_for_non_eligible() {
+    let _rt_guard = RuntimeFlagGuard::acquire_enabled();
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let base = MetalGemm::new(&ctx).expect("base GEMM パイプラインの構築に失敗した");
     let head = MetalGemm::new_with_split_k_auto(&ctx, true)
@@ -205,6 +242,7 @@ fn wiring_on_keeps_classic_bit_identical_for_non_eligible() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn wiring_on_routes_split_k_for_targets_and_matches_baseline() {
+    let _rt_guard = RuntimeFlagGuard::acquire_enabled();
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let head = MetalGemm::new_with_split_k_auto(&ctx, true)
         .expect("head GEMM パイプラインの構築に失敗した");

@@ -51,3 +51,15 @@ device-checksum = []
 # CLI `--config` 経由で併用する前提（README「`--graph`」節・
 # `run_ab_graph_cuda.sh` 参照）。
 graph-step = []
+
+# イシュー #1545: `--metal-split-k <on|off>`（Metal GEMM split-K opt-in
+# 経路。`crates/backend-metal` の `SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+# ENABLED` 本番結線）を runtime で明示 on/off するための facade 公開 API
+# `fandhe_ai::set_metal_split_k_gemm_enabled`/`metal_split_k_gemm_enabled`
+# （`#[cfg(target_os = "macos")]`）は crates.io 公開版 `fandhe-ai =0.8.0`
+# には未収録のため、`managed-placement`/`graph-step` と同じく feature
+# 分岐でコンパイル時に分離し、有効化する場合は `[patch.crates-io.
+# fandhe-ai]` で `crates/facade` への path patch を CLI `--config` 経由で
+# 併用する前提とする（README「`--metal-split-k`」節・
+# `run_ab_splitk_metal.sh` 参照）。
+metal-split-k-toggle = []

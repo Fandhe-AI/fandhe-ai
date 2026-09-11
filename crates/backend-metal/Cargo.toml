@@ -198,3 +198,13 @@ required-features = ["internal-diagnostics"]
 [[test]]
 name = "gemm_splitk_auto_wiring"
 required-features = ["internal-diagnostics"]
+
+# split-K 実行時 opt-out トグル（`crate::split_k_runtime`。イシュー
+# #1545）の実機 bit 一致・経路選択テスト。`MetalGemm::
+# dispatch_auto_with_route`（`internal-diagnostics` feature 限定の
+# `pub`。実際に classic/split-K のどちらへ到達したかをフォールバック
+# による自明合格なしに検証するため）を直接呼ぶため本 feature を要求する
+# （`gemm_splitk_auto_wiring` と同型）。
+[[test]]
+name = "gemm_splitk_runtime_toggle"
+required-features = ["internal-diagnostics"]
