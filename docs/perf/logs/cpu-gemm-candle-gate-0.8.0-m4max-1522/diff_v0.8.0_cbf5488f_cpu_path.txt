@@ -1,0 +1,3 @@
+$ git diff v0.8.0..cbf5488f --stat -- crates/backend-cpu/src crates/facade/src crates/autodiff/src crates/tensor-core/src
+
+$ git log --oneline v0.8.0..cbf5488f -- crates/backend-cpu/src crates/facade/src crates/autodiff/src crates/tensor-core/src

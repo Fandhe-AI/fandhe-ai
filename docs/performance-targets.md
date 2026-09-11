@@ -573,6 +573,17 @@ parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08
   引き継いでおり、上記の「M4 Max の正式値は未確定のまま残る」という記述自体は
   本追補では反転しない（詳細は `docs/perf/cpu-gemm-candle-gate-remeasurement.md`
   §24.11）
+- **#1522 実測追補（2026-09-11）**: 上記 record_only 版オーケストレーションを Apple
+  M4 Max 実機で実行（ラベル `0.8.0-1522`・正式系列 `fandhe-ai =0.8.0` registry・
+  共有負荷下 load1 4.92・5 回独立プロセス起動中央値）し、事前登録規則を緩和なしで
+  適用した結果、**M4 Max の正式値は N=512 達成（1.015）・N=1024 未達（0.859）・
+  N=2048 未達（0.884）** で確定した（要素単位検証は全 N・両フレームワークとも
+  5 run 0 fail・判定不能なし）。§24.10 の `verdict=undetermined` は解消し、上記
+  「M4 Max の正式値は未確定のまま残る」という記述はこの時点で反転する（正式達成は
+  DGX N=2048 と M4 Max N=512 の 2 セル。§2 段階的下限表・§3 丸め規則は不変）。
+  出典: `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §24.11.1、生データ・
+  実行ログは `docs/perf/logs/cpu-gemm-candle-gate-0.8.0-m4max-1522/`、集計表は
+  `scripts/bench/framework-compare/results/summary.md` 環境 29 節
 
 ### 8.16 #1490 追補（Metal GEMM candle 比ゲートを正式系列 `fandhe-ai =0.8.0` で M4 Max 再計測。§2 段階的下限表・§3 丸め規則は不変）
 
