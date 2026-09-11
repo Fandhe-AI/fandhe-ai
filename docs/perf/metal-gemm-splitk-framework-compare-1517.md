@@ -2,15 +2,10 @@
 
 ## §0 状態
 
-**未実測**（2026-09-10 時点）。本ラン（Linux x86_64・CI 環境）には Apple
-M4 Max 実機への到達経路がないため、本ドキュメントは計測スクリプト・
-帰属表（機械生成済み）・事前登録判定規則までを整備し、実測は Mac セッ
-ションへ引き継ぐ（ルート #1509 の運用方針。メモリ
-`issue-1509-linux-side-policy`）。実測値は捏造しない——以下 §5/§6 の表は
-空欄のまま残す。
+**実測完了**（2026-09-11・M4 Max・共有負荷下・record_only）。
 
-- verdict: **未実測**
-- 結線維持可否: **未確定**（実測後に §6 へ記録する）
+- verdict: **結線維持不可（false へ差し戻し）**
+- 結線維持可否: **ゲート `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false` を維持**（理由は §6 参照）
 
 ## §1 前提
 
@@ -153,43 +148,66 @@ d_input 伝播スキップ）の対象になりうる形状（`x` は学習対�
 `docs/perf/logs/metal-gemm-splitk-framework-compare-1517/README.md` を
 参照。
 
-## §5 記入欄（実測結果。未実測）
+## §5 記入欄（実測結果）
 
 ### §5.1 gemm 8 セル
 
 | size/mode | before median | after median | after/before | checksum | 判定 |
 |---|---|---|---|---|---|
-| 512/fresh | - | - | - | - | 未実測 |
-| 512/reuse | - | - | - | - | 未実測 |
-| 1024/fresh | - | - | - | - | 未実測 |
-| 1024/reuse | - | - | - | - | 未実測 |
-| 2048/fresh | - | - | - | - | 未実測 |
-| 2048/reuse | - | - | - | - | 未実測 |
-| 4096/fresh | - | - | - | - | 未実測 |
-| 4096/reuse | - | - | - | - | 未実測 |
+| 512/fresh | 656.8 us | 646.3 us | 0.9840 | 完全一致 | 非後退 |
+| 512/reuse | 722.3 us | 721.7 us | 0.9992 | 完全一致 | 非後退 |
+| 1024/fresh | 2.222 ms | 2.138 ms | 0.9622 | 完全一致 | 非後退 |
+| 1024/reuse | 2.415 ms | 2.597 ms | 1.0752 | 完全一致 | 後退 |
+| 2048/fresh | 8.504 ms | 8.712 ms | 1.0245 | 完全一致 | 後退 |
+| 2048/reuse | 10.721 ms | 9.686 ms | 0.9035 | 完全一致 | 非後退 |
+| 4096/fresh | 34.755 ms | 35.049 ms | 1.0085 | 完全一致 | 後退 |
+| 4096/reuse | 40.047 ms | 39.501 ms | 0.9864 | 完全一致 | 非後退 |
 
 ### §5.2 train 2 セル
 
 | size/mode | before median | after median | after/before | checksum | 判定 |
 |---|---|---|---|---|---|
-| 64/fresh | - | - | - | - | 未実測 |
-| 64/reuse | - | - | - | - | 未実測 |
+| 64/fresh | 1.519 ms | 1.511 ms | 0.9947 | 完全一致 | 非後退 |
+| 64/reuse | 1.427 ms | 1.456 ms | 1.0207 | 完全一致 | 後退 |
 
 ### §5.3 `--phases` 診断表（train・参考値。判定に用いない）
 
-未実測。
+`compare-train-1517-run1.md` に全文記録。要約:
+- fresh: step_total 0.966 倍（forward 0.962・backward 0.989）
+- reuse: step_total 0.990 倍（forward_resident 0.992・backward 0.994）
 
 ### §5.4 負荷推移・env_info
 
 `docs/perf/logs/metal-gemm-splitk-framework-compare-1517/env_info.txt`
-を参照（未実測のためテンプレートのまま）。
+を参照。M4 Max・macOS 26.6.2・共有負荷下・開始前 uptime load averages
+6.44 7.25 6.00・計測中 load1 min 6.32 / median 7.66 / max 11.56・終了時
+11.56 8.33 6.55。watchlist 並走プロセス（python/torch/mlx/cargo/gemm_/
+bench）件数は全て 0。中断・再試行なし。
 
-## §6 結線維持可否の判定（実測後に記入）
+## §6 結線維持可否の判定
 
-- verdict: **未確定**
-- 理由: -
-- 対応（結線維持 or `docs/backend-metal-splitk-decision.md` §5 手順⑤
-  への差し戻し）: -
+- verdict: **結線維持不可（false へ差し戻し）**
+
+- 理由: gemm 3 セル（1024/reuse・2048/fresh・4096/fresh）・train 1 セル
+  （64/reuse）で `ratio > 1.00`。checksum は全 10 セル完全一致・gemm parity
+  0 fail（§3 事前登録規則「`ratio ≤ 1.00` かつ checksum 完全一致 かつ
+  gemm parity_fail_count == 0」の全条件不成立）。
+
+- 帰属分析（参考情報・判定基準は緩めない）: 後退セルはいずれも §2
+  帰属表上 split-K に構造的に非到達（gemm NN 正方は `should_split_k` が
+  `None`・train reuse は入口条件で非到達）のため、before/after は同一
+  カーネル経路の比較。5 run 内の比値は全後退セルで符号一貫性なし（run
+  間で改善・後退が反転）。共有負荷下の計測ノイズと整合するが、規則（§3）
+  では誤差帯・符号一致による救済を明示的に禁じているため判定は変えない。
+
+- 対応: `docs/backend-metal-splitk-decision.md` §5 手順⑤（ゲート
+  `false` へ差し戻し）を実施。理由を同ファイル「切替判断の記録」節へ
+  記録（2026-09-11・ユーザー判断）。
+
+- **規則改定なし・再計測条件**: 本 A/B の判定規則（§3）は変更しない。
+  同一規則で新たに実測する場合も verdict 判定フロー（後退セル有→結線
+  維持不可）は変わらない。規則自体を改定する（例: 到達セルのみ ratio
+  判定）場合は、計測前に issue でユーザー承認が必要。
 
 ## §7 スコープ外（out-of-scope-tracking.md に従い記録のみ・起票はユーザー
 承認後）
