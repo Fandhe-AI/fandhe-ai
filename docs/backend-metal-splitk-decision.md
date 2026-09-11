@@ -565,6 +565,10 @@ split-K 経路が classic 経路・CPU f32 参照実装より `f64` 真値に近
 `max_abs`／`mean_abs` とも split-K が下回った）。`assert_no_split_k_parity_regression`
 の baseline・tolerance 定数・既存テストは変更していない。
 
+**#1548 事後監視（2026-09-12）**: run2（低負荷）で規則 1 超過 7 セル・符号一貫セル 0 
+件・checksum 全一致。後退セルはいずれも split-K 非到達で計測ノイズ・結線の条件変更なし。
+詳細は `docs/perf/metal-gemm-splitk-framework-compare-1517.md` §6a を参照。
+
 ## §6 参照
 
 - `docs/perf/logs/metal-gemm-splitk-shapes-1308/`（M4 Max 実機実測の生ログ・`aggregate.py`／
