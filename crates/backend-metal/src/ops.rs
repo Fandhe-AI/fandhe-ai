@@ -608,6 +608,165 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`BackendOps::gemm_fp32_strict_into`] の Metal 実装（イシュー
+    /// #1555・`docs/device-resident-update-design.md` 追補）。`Self::gemm`
+    /// （イシュー #1215）の NT/TN 判定条件（`layout::classify_2d` が両方
+    /// `Some` かつ `transposed` が互いに異なり、かつ両方
+    /// `as_view_slice().is_some()`）と同一の条件でのみ対応する。
+    ///
+    /// - **NN を対応しない理由**: `gemm`（NN 経路）は `dispatch_auto`
+    ///   （split-K 実行時トグル込み。`Self::gemm` doc 参照）を経由しないと
+    ///   `gemm_fp32_strict`（`gemm` の既定委譲先）と bit 同一にならない
+    ///   ——本メソッドが使う `dispatch_strided_bias_act_prepared` 系の
+    ///   classic カーネルは split-K を持たないため NN では対応しない。
+    /// - **TT・分類不能形状を対応しない理由**: `contiguous()`（ホスト側
+    ///   転置コピー）を経由する必要があり、encode-only の zero-copy 化が
+    ///   できない。
+    ///
+    /// **同期の回収**: `Self::gemm_strided_nt_tn`（`gemm` の NT/TN 経路）
+    /// は `dispatch_strided_bias_act_prepared`（内部で `ctx.synchronize()`
+    /// する dispatch 版）→ `download` という 2 段の同期を経る。本メソッドは
+    /// `gemm::MetalGemm::encode_strided_bias_act_prepared_with_c_offset`
+    /// （encode-only 版。`Self::linear_forward_device`〈イシュー #1216〉と
+    /// 同型のバッチ結合パターン）で GPU dispatch をバッチへ積むだけで
+    /// 復帰し、`out` への書き込み完了は呼び出し元
+    /// （`DeviceParamStore::step`／`resident_grads_to_host` 等）が後段の
+    /// `MemoryOps::download`／`upload_into` で行う `synchronize()` まで
+    /// 遅延する。GPU 側の dispatch 失敗（`CommandBufferExecutionFailed`
+    /// 等）もその同期点まで遅延して表面化する（`linear_forward_device`
+    /// doc「同期契約」と同一の契約）。
+    ///
+    /// **境界検査の順序**: `out.device()` → shape（`matmul_out_shape`）→
+    /// `out_offset + m*n <= out.numel()`（REQ-8・OWASP A03）→ NT/TN 判定、
+    /// の順に検査する。範囲外オフセットは NN 等の非対応形状であっても
+    /// 常に `InvalidArgument`（`Unsupported` へ静かに丸めない。
+    /// fail-closed）。
+    ///
+    /// **`upload_view` 一時バッファの生存**: `a_dev_buf`/`b_dev_buf`
+    /// （`MetalMemory::upload_view`。`Backing::Owned`）は本メソッド復帰時
+    /// に Rust 側スコープを抜けるが、
+    /// `encode_strided_bias_act_prepared_with_c_offset` が `ctx.encode` の
+    /// `resources` へ `raw()` を渡しており、その裏の `MTLBuffer` は
+    /// `Batch::in_flight` の retain（`context.rs` の同種コメント参照）に
+    /// よって GPU 完了まで生存するため、Rust 側の drop（Objective-C
+    /// 参照カウントの減算）と衝突しない。
+    ///
+    /// **`Unsupported` の永続キャッシュ（呼び出し元の契約）**: 呼び出し元
+    /// `DeviceParamStore::fill_resident_weight_grad` は、最初の
+    /// `Unsupported` をストアの生存期間中 `resident_grad_capability =
+    /// Some(false)` としてキャッシュし、以後は本メソッドを一切呼ばず
+    /// 既存のホスト経路（`gemm_fp32_strict` の戻り値をそのまま勾配として
+    /// 使う）へ黙って（silent）フォールバックする
+    /// （`crates/autodiff/src/optim/device_store.rs` 該当コメント参照）。
+    fn gemm_fp32_strict_into(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        out_offset: usize,
+    ) -> Result<(), BackendError> {
+        if out.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+        let _ = out_shape; // shape 検証のみに使用（`gemm_fp32_strict_into` の CPU 実装と同型）
+
+        // REQ-8「カーネル側の手動境界チェックを省略しない」・OWASP A03:
+        // `out_offset + m*n` を `checked_mul`/`checked_add` で検査し、
+        // `out.numel()` を超える書き込みを事前に拒否する（カーネル起動
+        // 前・NT/TN 判定より前。範囲外オフセットは形状に関わらず常に
+        // `InvalidArgument`）。
+        let mn = m.checked_mul(n).ok_or_else(|| {
+            BackendError::InvalidArgument("gemm_fp32_strict_into: m * n overflowed usize".into())
+        })?;
+        let end = out_offset.checked_add(mn).ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "gemm_fp32_strict_into: out_offset + m * n overflowed usize".into(),
+            )
+        })?;
+        if end > out.numel() {
+            return Err(BackendError::InvalidArgument(format!(
+                "gemm_fp32_strict_into: write range [{out_offset}, {end}) exceeds out buffer \
+                 length {}",
+                out.numel()
+            )));
+        }
+
+        let (la, lb) = match (
+            layout::classify_2d(a.shape(), a.strides()),
+            layout::classify_2d(b.shape(), b.strides()),
+        ) {
+            (Some(la), Some(lb))
+                if la.transposed != lb.transposed
+                    && a.as_view_slice().is_some()
+                    && b.as_view_slice().is_some() =>
+            {
+                (la, lb)
+            }
+            _ => {
+                return Err(BackendError::Unsupported(
+                    "gemm_fp32_strict_into: Metal only implements the NT/TN transposed-operand \
+                     path (no in-place device GEMM kernel for NN/TT/non-classifiable shapes)"
+                        .into(),
+                ));
+            }
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+
+        let a_slice = a.as_view_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gemm_fp32_strict_into: lhs not contiguous".into())
+        })?;
+        let a_dev_buf = mem
+            .upload_view(a_slice, a.shape())
+            .map_err(map_metal_error)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_fp32_strict_into: lhs buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let b_slice = b.as_view_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gemm_fp32_strict_into: rhs not contiguous".into())
+        })?;
+        let b_dev_buf = mem
+            .upload_view(b_slice, b.shape())
+            .map_err(map_metal_error)?;
+        let b_handle = b_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_buf) = b_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_fp32_strict_into: rhs buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let out_handle = out
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_buf) = out_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_fp32_strict_into: out buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        gemm.encode_strided_bias_act_prepared_with_c_offset(
+            &ctx, a_buf, 0, la, b_buf, 0, lb, None, false, out_buf, out_offset, m, n, k,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        Ok(())
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
     /// `gemm` → `add` → `relu` 合成）を、GEMM epilogue に bias 加算・
     /// activation を融合したカーネル

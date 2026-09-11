@@ -312,16 +312,43 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
 /// `Op::LinearResident` の VJP（`d_weight`）が host CPU `eval::matmul`
 /// から `BackendOps::gemm_fp32_strict` 経由の Metal GPU dispatch へ
 /// 切り替わったことにより、1 step あたり L1・L2 各層の `d_weight` 計算
-/// （2 回）が新たに Metal GPU 上で実行されるようになった（Metal は
+/// （2 回）が新たに Metal GPU 上で実行されるようになった（当時の Metal は
 /// `fill_resident_weight_grad` 未実装〈#1212 で CUDA/Metal 双方とも
 /// スコープ外に据え置き〉のため、計算結果はホストへ `download` される
 /// 必要があり、この `download` が同期点となって現在の open バッチを
-/// 都度終端する）。この結果、steady-state 1 step のカウンタは
-/// **11 / 10 / 10**（encode / command_buffer / wait）へ変化した
+/// 都度終端していた）。この結果、steady-state 1 step のカウンタは
+/// 一時的に **11 / 10 / 10**（encode / command_buffer / wait）へ変化した
 /// （既存のバッチ化経路〈forward・SGD〉が分割されたのではなく、新規に
 /// 追加された GPU dispatch 2 件がそれぞれ独立した同期境界を伴うため）。
-/// `encode_delta` は 9 のままではない点に注意（旧コメントの「#1099 で
-/// 不変のはず」は #1223 で成立しなくなった）。
+///
+/// **#1555 追記**: `MetalBackendOps::gemm_fp32_strict_into`（`BackendOps::
+/// gemm_fp32_strict_into` の Metal 実装。`docs/device-resident-
+/// update-design.md` 追補）を実装したことで、L1・L2 の `d_weight` は
+/// `DeviceParamStore::fill_resident_weight_grad` 経由で resident 化され、
+/// `MetalGemm::encode_strided_bias_act_prepared_with_c_offset`
+/// （encode-only。`gemm_fp32_strict_into` doc「同期の回収」参照）で grad
+/// staging バッファへ直接書き込まれるようになった——**個別の
+/// `download` は発生しない**。ただし `step()` の `any_resident == true`
+/// 分岐（`crates/autodiff/src/optim/device_store.rs`）は resident 経由で
+/// ない勾配（本モデルの bias）を `MemoryOps::upload_into`
+/// （`memory.rs::MetalMemory::upload_into`。同 #1555 で新規実装）で同じ
+/// staging バッファへ書き込む必要があり、この `upload_into` は
+/// `zero_fill` と同じ理由（GPU 側の未完了書き込みとの競合回避）で
+/// **書き込み前に 1 回 `synchronize()` する**。L1・L2 双方の `d_weight`
+/// encode が既にバッチへ積まれた後、bias 分の最初の `upload_into` 呼び
+/// 出しがこの 1 回の同期でバッチをまとめて終端する（2 回目以降の
+/// `upload_into` は既に空になったバッチに対する no-op 相当の
+/// `synchronize()` のため追加の commit/wait を発生させない）。この結果、
+/// steady-state 1 step のカウンタは **11 / 9 / 9**
+/// （encode / command_buffer / wait）——#1223 直後の 11/10/10 から
+/// command_buffer・wait のみ 1 ずつ減り、#1099 直後の 9/8/8 へは戻らない
+/// （d_weight 計算自体の GPU dispatch 2 件〈encode_delta の +2〉は
+/// 引き続き残るが、これらはもはや個別の同期境界を持たず、bias 用
+/// `upload_into` の同期 1 回へ集約される）。`d_input` の GEMM（`Op::
+/// LinearResident` の VJP のもう一方）は引き続き `BackendOps::gemm`
+/// （`gemm_strided_nt_tn` → `dispatch_strided_bias_act_prepared` → 内部
+/// `ctx.synchronize()` → `download`）経由のままであり、resident 化の
+/// 対象外（回収は部分的）。
 ///
 /// warmup（`WARMUP` step）で MSL パイプライン初回コンパイル・プールの
 /// フリーリスト充足を steady-state 化してから、その次の 1 step だけを
@@ -383,32 +410,39 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
         "[mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: \
          encode_delta={encode_delta} command_buffer_delta={command_buffer_delta} \
          wait_delta={wait_delta} — before（#1099 適用前）は 9/9/9、#1099 適用直後は \
-         9/8/8、#1223（VJP の Metal GPU dispatch 化）適用後は 11/10/10 \
-         （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」節）"
+         9/8/8、#1223（VJP の Metal GPU dispatch 化）適用直後は 11/10/10、#1555 \
+         （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9 \
+         （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」\
+         「#1555」節）"
     );
 
-    // #1550: #1223 で `Op::LinearResident` の VJP（d_weight。L1・L2 の
-    // 2 箇所）が host CPU `eval::matmul` から Metal GPU dispatch
-    // （`BackendOps::gemm_fp32_strict`）へ切り替わったことによる意図した
-    // 増分（本ファイル冒頭の doc comment・
-    // `docs/perf/train-backward-gemm-wiring.md` 参照）。Metal は
-    // `fill_resident_weight_grad` 未実装のため、この 2 回の gemm は
-    // 計算結果をホストへ `download` する必要があり、`download` が同期点
-    // として現在の open バッチを終端する。このため encode 総数だけで
-    // なくコマンドバッファ生成数・待機回数も同数（+2）増える。
+    // #1555: `gemm_fp32_strict_into`（イシュー #1212 のトレイトメソッド）
+    // を Metal で実装したことで、L1・L2 の `d_weight` は encode-only
+    // （個別 `download` なし）で grad staging バッファへ直接書き込まれる
+    // ようになった（本ファイル冒頭の doc comment・
+    // `docs/device-resident-update-design.md` 追補参照）。encode 総数
+    // （dispatch 総数）自体は #1223 直後から変わらず 11 のまま
+    // （d_weight 計算 2 回の GPU dispatch 自体は残る）だが、コマンド
+    // バッファ生成数・待機回数は「bias 分の `MemoryOps::upload_into` が
+    // 書き込み前に 1 回だけ同期する」ことに集約され、#1223 直後の 10 から
+    // 1 ずつ減って 9 になる（#1099 直後の 8 へは戻らない——`upload_into`
+    // の 1 回の同期自体が残る。回収は部分的。本ファイル冒頭 doc comment
+    // 「#1555 追記」参照）。
     assert_eq!(
         encode_delta, 11,
         "encode() 呼び出し総数（= dispatch 総数）は #1223（Op::LinearResident \
-         の VJP が Metal GPU dispatch を追加）適用後は 9→11 のはず"
+         の VJP が Metal GPU dispatch を追加）適用後から #1555 適用後も変わらず \
+         11 のはず（d_weight 計算 2 回の GPU dispatch 自体は残るため）"
     );
     assert_eq!(
-        command_buffer_delta, 10,
-        "コマンドバッファ生成数は #1223 適用後 8→10（VJP の 2 回の gemm が \
-         それぞれ download 同期でバッチを終端するため）のはず"
+        command_buffer_delta, 9,
+        "コマンドバッファ生成数は #1555（gemm_fp32_strict_into の encode-only \
+         化 + upload_into の同期集約）適用後は 10→9 のはず（bias 分の \
+         upload_into 1 回の同期のみが残る）"
     );
     assert_eq!(
-        wait_delta, 10,
-        "waitUntilCompleted() 呼び出し数は #1223 適用後 8→10（VJP の 2 回の \
-         gemm がそれぞれ download で同期するため）のはず"
+        wait_delta, 9,
+        "waitUntilCompleted() 呼び出し数は #1555 適用後は 10→9 のはず \
+         （command_buffer_delta と同じ理由）"
     );
 }

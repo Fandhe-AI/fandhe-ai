@@ -3030,6 +3030,7 @@ impl MetalGemm {
                 &bias_buf,
                 0,
                 &c_buf,
+                0,
                 dims,
                 has_bias,
                 act_i,
@@ -3198,7 +3199,90 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<(), MetalError> {
-        let (dims, strides) = validate_strided_dims(
+        self.encode_strided_bias_act_prepared_impl(
+            ctx, a_buf, a_offset, a_layout, b_buf, b_offset, b_layout, bias, act_relu, c_buf, None,
+            m, n, k,
+        )
+    }
+
+    /// [`Self::encode_strided_bias_act_prepared`] の C バッファオフセット
+    /// 対応版（イシュー #1555・`docs/device-resident-update-design.md`
+    /// 追補）。`c_offset`（要素単位）を渡すと、GEMM の結果を `c_buf` の
+    /// `[c_offset, c_offset + m*n)` へ直接書き込む——`ops::
+    /// MetalBackendOps::gemm_fp32_strict_into` が `DeviceParamStore` の
+    /// grad staging バッファ（全パラメータ連結。イシュー #1023）へ、
+    /// d_weight の D2H を経由せず直接書き込むための入口。
+    ///
+    /// `shaders/gemm.metal::gemm_tiled_bias_act` の C 書き込みは
+    /// `c[row*n+col] = v`（float4 等のベクトルストアではないスカラー
+    /// 書き込み）のため、`setBuffer:offset:atIndex:` へ渡すバイト
+    /// オフセット（`c_offset * size_of::<f32>()`）に `a_offset`/
+    /// `b_offset`/`bias_offset`（イシュー #1023「R3」）を超える追加の
+    /// アラインメント制約はない（4 バイト境界で十分）。
+    ///
+    /// `encode_dispatch_bias_act` への配線・`resources` retention 契約は
+    /// [`Self::encode_strided_bias_act_prepared`] と同一（同メソッド doc
+    /// 「`resources` へ...」参照）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_strided_bias_act_prepared_with_c_offset(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        bias: Option<(&MetalBuffer, usize)>,
+        act_relu: bool,
+        c_buf: &MetalBuffer,
+        c_offset: usize,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(), MetalError> {
+        self.encode_strided_bias_act_prepared_impl(
+            ctx,
+            a_buf,
+            a_offset,
+            a_layout,
+            b_buf,
+            b_offset,
+            b_layout,
+            bias,
+            act_relu,
+            c_buf,
+            Some(c_offset),
+            m,
+            n,
+            k,
+        )
+    }
+
+    /// [`Self::encode_strided_bias_act_prepared`]／[`Self::
+    /// encode_strided_bias_act_prepared_with_c_offset`] の共有本体
+    /// （イシュー #1555。二重化を避けるための切り出し）。`c_offset` が
+    /// `None` の場合は従来どおり `c_buf` 全体（`[0, m*n)`）へ、`Some` の
+    /// 場合は `c_buf` の当該範囲へのみ書き込む。
+    #[allow(clippy::too_many_arguments)]
+    fn encode_strided_bias_act_prepared_impl(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        bias: Option<(&MetalBuffer, usize)>,
+        act_relu: bool,
+        c_buf: &MetalBuffer,
+        c_offset: Option<usize>,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(), MetalError> {
+        let (dims, strides) = validate_strided_dims_impl(
             a_buf.len(),
             a_offset,
             a_layout,
@@ -3206,6 +3290,7 @@ impl MetalGemm {
             b_offset,
             b_layout,
             c_buf.len(),
+            c_offset,
             m,
             n,
             k,
@@ -3235,6 +3320,7 @@ impl MetalGemm {
             }
         };
         let act_i: i32 = if act_relu { 1 } else { 0 };
+        let c_offset = c_offset.unwrap_or(0);
 
         // `resources` へ 4 本すべて（`a_buf`／`b_buf`／`bias_ref`／
         // `c_buf`）を渡し、`ctx.encode` 復帰後も `Batch::in_flight` の
@@ -3255,6 +3341,7 @@ impl MetalGemm {
                     bias_ref,
                     bias_offset,
                     c_buf,
+                    c_offset,
                     dims,
                     has_bias,
                     act_i,
@@ -3857,6 +3944,11 @@ fn validate_bias_act_dims(
 /// required_span(layout) <= buf_len` を fail-closed に検証する。
 /// `m == 0 || n == 0`（呼び出し元が no-op として扱う縮退）は
 /// `validate_bias_act_dims` と同じく一律拒否しない。
+///
+/// **シグネチャは不変**（`.claude/rules` の委譲指示・イシュー #1555）。
+/// 本体は [`validate_strided_dims_impl`]（`c_offset: None`）へ委譲する
+/// だけの薄いラッパーで、`c_len != m * n`（厳密一致）の既存契約は
+/// 変更しない。
 #[allow(clippy::too_many_arguments)]
 fn validate_strided_dims(
     a_buf_len: usize,
@@ -3866,6 +3958,35 @@ fn validate_strided_dims(
     b_offset: usize,
     b_layout: MatrixLayout,
     c_len: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<(Dims, GemmStrides), MetalError> {
+    validate_strided_dims_impl(
+        a_buf_len, a_offset, a_layout, b_buf_len, b_offset, b_layout, c_len, None, m, n, k,
+    )
+}
+
+/// [`validate_strided_dims`] の本体（イシュー #1555・
+/// `docs/train-resident-grad-device-update.md` §4 の Metal 拡張）。
+/// `c_offset` が `None` の場合は従来どおり `c_len == m * n`
+/// （厳密一致）を要求し、`Some(offset)` の場合は
+/// [`MetalGemm::encode_strided_bias_act_prepared_with_c_offset`]
+/// （`DeviceParamStore` の grad staging バッファへ d_weight を
+/// オフセット書き込みする経路）向けに `offset + m*n <= c_len`
+/// （範囲内）へ緩和する。a/b の検証順序・エラー種別は `c_offset` の
+/// 有無に関わらず同一（どちらが同時に不正な場合も従来と同じ優先順位で
+/// a/b 側のエラーが先に出る）。
+#[allow(clippy::too_many_arguments)]
+fn validate_strided_dims_impl(
+    a_buf_len: usize,
+    a_offset: usize,
+    a_layout: MatrixLayout,
+    b_buf_len: usize,
+    b_offset: usize,
+    b_layout: MatrixLayout,
+    c_len: usize,
+    c_offset: Option<usize>,
     m: usize,
     n: usize,
     k: usize,
@@ -3917,11 +4038,26 @@ fn validate_strided_dims(
         });
     }
 
-    if c_len != m * n {
-        return Err(MetalError::CLenMismatch {
-            expected: m * n,
-            actual: c_len,
-        });
+    match c_offset {
+        None => {
+            if c_len != m * n {
+                return Err(MetalError::CLenMismatch {
+                    expected: m * n,
+                    actual: c_len,
+                });
+            }
+        }
+        Some(offset) => {
+            let c_end = offset
+                .checked_add(m * n)
+                .ok_or(MetalError::DimProductOverflow)?;
+            if c_end > c_len {
+                return Err(MetalError::CLenMismatch {
+                    expected: c_end,
+                    actual: c_len,
+                });
+            }
+        }
     }
 
     let dims = Dims {
@@ -4290,6 +4426,7 @@ fn encode_dispatch_bias_act(
     bias_buf: &MetalBuffer,
     bias_offset: usize,
     c_buf: &MetalBuffer,
+    c_offset: usize,
     dims: Dims,
     has_bias: i32,
     act: i32,
@@ -4301,10 +4438,17 @@ fn encode_dispatch_bias_act(
     // Metal の `setBuffer:offset:atIndex:` はバイト単位を要求するため
     // `size_of::<f32>()` を掛けて変換する（呼び出し元
     // `dispatch_bias_act_prepared` が offset+numel の範囲検査を済ませて
-    // いるため、ここでの追加検査は不要）。
+    // いるため、ここでの追加検査は不要）。`c_offset`（イシュー #1555・
+    // `encode_strided_bias_act_prepared_with_c_offset` が渡す）も同じ
+    // 契約: `shaders/gemm.metal::gemm_tiled_bias_act` の C 書き込みは
+    // `c[row*n+col] = v` というスカラー store のため、a/b/bias と同じ
+    // 4 バイト境界のバッファオフセットで足りる（float4 等のベクトル
+    // ストアが要求する 16 バイト整列は不要。`gemm.rs::
+    // encode_strided_bias_act_prepared_with_c_offset` doc 参照）。
     let a_byte_offset = a_offset * std::mem::size_of::<f32>();
     let b_byte_offset = b_offset * std::mem::size_of::<f32>();
     let bias_byte_offset = bias_offset * std::mem::size_of::<f32>();
+    let c_byte_offset = c_offset * std::mem::size_of::<f32>();
 
     // SAFETY: FFI 境界 1/2。`encode_dispatch` の同種コメントと同一の
     // 契約（`a_buf`/`b_buf`/`bias_buf`/`c_buf` は `dispatch_sync` の同期
@@ -4313,7 +4457,7 @@ fn encode_dispatch_bias_act(
         encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), a_byte_offset, 0);
         encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), b_byte_offset, 1);
         encoder.setBuffer_offset_atIndex(Some(bias_buf.raw()), bias_byte_offset, 2);
-        encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 3);
+        encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), c_byte_offset, 3);
     }
 
     // SAFETY: FFI 境界 2/2。`encode_dispatch` の同種コメントと同一の
@@ -5227,6 +5371,62 @@ mod tests {
             MetalError::CLenMismatch {
                 expected: 8,
                 actual: 7
+            }
+        ));
+    }
+
+    /// [`validate_strided_dims_impl`]（イシュー #1555）: `c_offset =
+    /// Some(offset)` は `c_len == m*n`（厳密一致）ではなく
+    /// `offset + m*n <= c_len`（範囲内）を要求する。`validate_strided_dims`
+    /// （`c_offset = None`）の厳密一致契約とは異なることを確認する。
+    #[test]
+    fn validate_strided_dims_impl_with_c_offset_accepts_range_within_larger_buffer() {
+        let a_layout = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 3,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 4,
+            transposed: false,
+        };
+        // c_len = 20（m*n=8 より大きい永続バッファを模す）・offset=5。
+        let (dims, _strides) =
+            validate_strided_dims_impl(6, 0, a_layout, 12, 0, b_layout, 20, Some(5), 2, 4, 3)
+                .unwrap();
+        assert_eq!(dims.m, 2);
+        assert_eq!(dims.n, 4);
+        assert_eq!(dims.k, 3);
+    }
+
+    /// [`validate_strided_dims_impl`]: `offset + m*n > c_len` は
+    /// `CLenMismatch { expected: offset + m*n, actual: c_len }` で拒否
+    /// される（REQ-8「カーネル側の手動境界チェックを省略しない」）。
+    #[test]
+    fn validate_strided_dims_impl_with_c_offset_rejects_out_of_range() {
+        let a_layout = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 3,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: 3,
+            cols: 4,
+            ld: 4,
+            transposed: false,
+        };
+        // c_len = 10・offset=5 だと [5, 13) が範囲外になる（m*n=8）。
+        let err = validate_strided_dims_impl(6, 0, a_layout, 12, 0, b_layout, 10, Some(5), 2, 4, 3)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::CLenMismatch {
+                expected: 13,
+                actual: 10
             }
         ));
     }

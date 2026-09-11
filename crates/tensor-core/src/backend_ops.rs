@@ -548,10 +548,10 @@ pub trait BackendOps {
     /// の `Op::LinearResident` 分岐は `Unsupported` のときのみ既存の
     /// ホスト経路（`gemm_fp32_strict` を呼び戻り値をそのまま勾配として
     /// 使う）へフォールバックする（判定迂回を作らない。`.claude/rules/
-    /// security.md` A08）。現時点では `backend-cpu::CpuBackendOps` のみ
-    /// オーバーライドする（CUDA／Metal は既定 `Unsupported` のまま。
-    /// 引き継ぎは `docs/perf/train-resident-grad-device-update.md`
-    /// スコープ外節）。
+    /// security.md` A08）。`backend-cpu::CpuBackendOps`（#1212）と
+    /// `backend-metal::MetalBackendOps`（#1555。NT/TN 限定・encode-only）
+    /// がオーバーライドする（CUDA は既定 `Unsupported` のまま。引き継ぎは
+    /// `docs/perf/train-resident-grad-device-update.md` スコープ外節）。
     fn gemm_fp32_strict_into(
         &self,
         _a: &Tensor<f32>,

@@ -416,6 +416,72 @@ impl MemoryOps for MetalMemory {
         self.download_inner(buffer).map_err(map_metal_error)
     }
 
+    /// [`MemoryOps::upload_into`] の Metal 実装（イシュー #1555）。
+    ///
+    /// `ops::MetalBackendOps::gemm_fp32_strict_into` を成立させるには
+    /// `DeviceParamStore::step`（`crates/autodiff/src/optim/
+    /// device_store.rs` の `any_resident == true` 分岐）が bias 等
+    /// resident 経由でない勾配を grad staging バッファへ直接書き込む
+    /// 経路（本メソッド）も必要（既定 `Unsupported` のままだと resident
+    /// weight grad が 1 個でも成功した時点で `step()` がこの分岐へ入り
+    /// `Unsupported` で fail-closed に失敗する）。
+    ///
+    /// `zero_fill`（`buffer.rs`）と同じ理由で、書き込み前に
+    /// `self.context.synchronize()` を挟む: `StorageModeShared` は
+    /// 物理メモリ共有のみを保証し、GPU 側の未完了書き込み（本メソッドの
+    /// 典型的な呼び出し元では、直前に `gemm_fp32_strict_into` が同じ
+    /// `dst` バッファの別オフセットへ encode-only で積んだ d_weight
+    /// dispatch）と host 側の書き込みの**実行順序**は保証しないため
+    /// （モジュール冒頭コメント）。この同期は `gemm_fp32_strict_into`
+    /// が回避した「GEMM 個別 download」より早い段階（bias 分の
+    /// `upload_into` 呼び出し時点）に 1 回だけ発生し、それ以降の
+    /// `SgdStepDeviceTracked` 等は改めて同期しない（`ops.rs::
+    /// MetalBackendOps::gemm_fp32_strict_into` doc「同期の回収」参照）。
+    fn upload_into(
+        &self,
+        tensor: &Tensor<f32>,
+        dst: &mut DeviceBuffer<f32>,
+        dst_offset: usize,
+    ) -> Result<(), BackendError> {
+        if dst.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let contiguous = tensor.contiguous();
+        let src = contiguous.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed(
+                "upload_into: tensor not contiguous after contiguous()".into(),
+            )
+        })?;
+        let numel = src.len();
+        let end = dst_offset.checked_add(numel).ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "upload_into: dst_offset + tensor.numel() overflowed usize".to_string(),
+            )
+        })?;
+        if end > dst.numel() {
+            return Err(BackendError::InvalidArgument(format!(
+                "upload_into: write range [{dst_offset}, {end}) exceeds dst buffer length {}",
+                dst.numel()
+            )));
+        }
+        if numel == 0 {
+            return Ok(());
+        }
+        // GPU 側の未完了書き込みとの競合を避けるための同期
+        // （本メソッド doc 参照）。範囲検査の後・書き込み前に行う。
+        self.context.synchronize().map_err(map_metal_error)?;
+        let handle = dst
+            .downcast_handle_mut::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(buf) = handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "upload_into: dst buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        buf.write_slice_at(dst_offset, src);
+        Ok(())
+    }
+
     /// [`MemoryOps::with_host_view`] の Metal 実装（イシュー #1335）。
     ///
     /// `download_inner` と同じ同期契約（`self.context.synchronize()` を

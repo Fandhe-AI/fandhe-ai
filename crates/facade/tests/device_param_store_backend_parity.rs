@@ -180,20 +180,30 @@ fn device_resident_matches_host_sgd_on_cuda_across_100_steps() {
 }
 
 /// イシュー #1479 の AC-R2（バックエンド差異）を実機で確認する共通
-/// ヘルパ: `device` で 1 step だけ forward・backward し、strict 版
-/// （`resident_grads_to_host`）が `BackendError::Unsupported` を返す
-/// こと（CUDA／Metal は `gemm_fp32_strict_into` 未実装のため resident
-/// 経路に到達しない。panic なし）、unified 版（`param_grads_to_host`）
-/// は全パラメータの勾配を `Ok` で返し、host-only 参照実装（`Sgd::step`
-/// が使うのと同じ `bound.trainable_grads`）と統一複合判定で一致する
-/// ことを検証する。
+/// ヘルパ: `device` で 1 step だけ forward・backward し、`resident_
+/// capable`（`BackendOps::gemm_fp32_strict_into` を実装しているか）に
+/// 応じて strict 版（`resident_grads_to_host`）の期待挙動を切り替える。
+///
+/// - `resident_capable == false`（CUDA。`gemm_fp32_strict_into` 未実装の
+///   ため resident 経路に到達しない）: `BackendError::Unsupported` を
+///   返すこと（panic なし）を検証する。
+/// - `resident_capable == true`（CPU・Metal〈イシュー #1555〉）: 各
+///   `Linear` 層の weight slot（`build_model` の層順・層内 weight →
+///   bias の順序契約。`Sequential::init_device_param_store` doc 参照）が
+///   `Some`、bias slot は resident 経由で充填されない（`gemm_fp32_
+///   strict_into` は d_weight のみを対象とし bias 勾配は reduction 経由
+///   のまま）ため `None` であることを検証する。
+///
+/// unified 版（`param_grads_to_host`）はいずれの場合も全パラメータの
+/// 勾配を `Ok` で返し、host-only 参照実装（`Sgd::step` が使うのと同じ
+/// `bound.trainable_grads`）と統一複合判定で一致することを検証する
+/// （backend 間でカーネルが異なりうるため bit 一致ではなく複合判定）。
 ///
 /// `docs/perf/train-resident-grad-device-update.md` §4「追補: #1479」・
 /// イシュー本文の受入基準 AC-R4 に対応。本エージェント実行環境には
-/// CUDA／Metal 実機がないため、本ヘルパ自体は両 `#[ignore]` テストから
-/// 呼ばれるのみで通常 CI では実行されない（未実測は下記個別テストの
-/// doc に明記）。
-fn assert_grad_readout_contract(device: Device) {
+/// CUDA 実機がないため、`resident_capable == false` 側は未実測（未実測は
+/// 下記個別テストの doc に明記）。
+fn assert_grad_readout_contract(device: Device, resident_capable: bool) {
     let model = build_model();
     let (x_data, y_data) = gen_regression_data(SEED_DATA);
 
@@ -209,16 +219,39 @@ fn assert_grad_readout_contract(device: Device) {
     let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
     let grads = tape.backward_device_param_store(&loss, &store).unwrap();
 
-    // strict 版: CUDA／Metal は `gemm_fp32_strict_into` 未実装のため
-    // resident 経路に到達せず、必ず `Unsupported`（panic なし）。
-    let strict_err = tape.resident_grads_to_host(&store, &grads).unwrap_err();
-    assert!(
-        matches!(strict_err, fandhe_ai::BackendError::Unsupported(_)),
-        "resident 未対応バックエンドでは Unsupported を返すはず（panic なし）: {strict_err:?}"
-    );
+    if resident_capable {
+        // strict 版: `build_model`（2 層 Linear。層順に weight → bias）の
+        // weight slot（index 0・2）は resident 経由で新鮮に充填され
+        // `Some`、bias slot（index 1・3）は resident 経由で充填されない
+        // ため `None`（`docs/device-resident-update-design.md` 追補
+        // 「gemm_fp32_strict_into は d_weight のみが対象」）。
+        let strict = tape.resident_grads_to_host(&store, &grads).unwrap();
+        assert_eq!(
+            strict.len(),
+            4,
+            "build_model は 2 層 Linear（各 weight・bias）で計 4 パラメータ"
+        );
+        for (i, slot) in strict.iter().enumerate() {
+            let is_weight = i % 2 == 0;
+            assert_eq!(
+                slot.is_some(),
+                is_weight,
+                "param {i}（{}）の resident 充填状態が期待と異なる: {slot:?}",
+                if is_weight { "weight" } else { "bias" }
+            );
+        }
+    } else {
+        // strict 版: CUDA は `gemm_fp32_strict_into` 未実装のため
+        // resident 経路に到達せず、必ず `Unsupported`（panic なし）。
+        let strict_err = tape.resident_grads_to_host(&store, &grads).unwrap_err();
+        assert!(
+            matches!(strict_err, fandhe_ai::BackendError::Unsupported(_)),
+            "resident 未対応バックエンドでは Unsupported を返すはず（panic なし）: {strict_err:?}"
+        );
+    }
 
     // unified 版: 全パラメータの勾配を `Ok` で返す（`grads.get(...)`
-    // フォールバックのみ。CUDA／Metal は resident 未充填のため全 slot
+    // フォールバックのみ。CUDA は resident 未充填のため全 slot
     // がこの経路を通る）。
     let device_grads_host = tape.param_grads_to_host(&store, &grads).unwrap();
 
@@ -267,8 +300,15 @@ fn assert_grad_readout_contract(device: Device) {
 
 /// Metal 実機での AC-R2 契約検証（`assert_grad_readout_contract` 参照）。
 ///
-/// 本エージェント実行環境には Metal 実機がないため未実測（イシュー
-/// #1479 実装セッションでは未実行）。
+/// イシュー #1479 実装セッションでは本エージェント実行環境に Metal 実機が
+/// なかったため未実測のまま引き継がれていたが、**イシュー #1555（Metal
+/// `gemm_fp32_strict_into` の実装）で Metal は resident_capable
+/// （`resident_capable = true`）側へ移った**うえで M4 Max 実機実測 pass
+/// 済み: strict 版 `resident_grads_to_host` が weight slot（index 0・2）
+/// を `Some`・bias slot（index 1・3）を `None` で返すこと（`gemm_fp32_
+/// strict_into` は NT/TN 限定・d_weight のみ対象）・統合版
+/// `param_grads_to_host` が返す全パラメータ勾配がホスト参照実装と統一
+/// 複合判定内で一致することの両方を確認した。
 ///
 /// ```sh
 /// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture
@@ -277,7 +317,7 @@ fn assert_grad_readout_contract(device: Device) {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn grad_readout_contract_on_metal() {
-    assert_grad_readout_contract(Device::Metal);
+    assert_grad_readout_contract(Device::Metal, true);
 }
 
 /// CUDA 実機での AC-R2 契約検証（`assert_grad_readout_contract` 参照）。
@@ -298,5 +338,5 @@ fn grad_readout_contract_on_metal() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn grad_readout_contract_on_cuda() {
-    assert_grad_readout_contract(Device::Cuda(0));
+    assert_grad_readout_contract(Device::Cuda(0), false);
 }

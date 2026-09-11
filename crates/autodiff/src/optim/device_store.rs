@@ -1971,10 +1971,10 @@ impl DeviceParamStore {
     /// （イシュー #1479・`docs/device-resident-
     /// update-design.md` 追補）。
     ///
-    /// **由来**: `Op::LinearResident` の weight 勾配は CPU（resident
-    /// 経路が現状唯一成功するバックエンド。`gemm_fp32_strict_into` の
-    /// デフォルト実装が `Unsupported` のため CUDA／Metal は resident
-    /// 経路に到達しない）では `Gradients` へ寄与を残さず、`GradStaging`
+    /// **由来**: `Op::LinearResident` の weight 勾配は CPU（#1212）と
+    /// Metal（#1555）の resident 経路（`gemm_fp32_strict_into` の
+    /// デフォルト実装が `Unsupported` のため CUDA は resident 経路に
+    /// 到達しない）では `Gradients` へ寄与を残さず、`GradStaging`
     /// へ直接書き込まれる（`docs/perf/train-resident-grad-device-update.md`
     /// §4）。したがって resident 経由の重み勾配は、本イシュー以前は
     /// ホストから一切観測できなかった（PR #1390 codex-review P2「対象

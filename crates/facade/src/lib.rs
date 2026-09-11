@@ -232,10 +232,10 @@ impl Tape {
     /// [`DeviceParamStore::resident_grads_to_host`] への委譲入口
     /// （イシュー #1479）。resident 経路（`GradStaging`）で新鮮に充填
     /// 済みの重み勾配のみをホストへ読み出す（bias 等の未充填 slot は
-    /// `None`）。resident 未対応バックエンド（CUDA／Metal。
-    /// `gemm_fp32_strict_into` 未実装）では [`BackendError::
-    /// Unsupported`] を返す（panic なし）。全パラメータの勾配を
-    /// バックエンド横断で読みたい場合は
+    /// `None`）。resident 未対応バックエンド（CUDA。`gemm_fp32_
+    /// strict_into` 未実装。CPU・Metal はイシュー #1555 で対応済み）では
+    /// [`BackendError::Unsupported`] を返す（panic なし）。全パラメータの
+    /// 勾配をバックエンド横断で読みたい場合は
     /// [`Self::param_grads_to_host`] を使う。上記 `sync_device_param_
     /// store_to_host` と同じ理由の薄い委譲。
     pub fn resident_grads_to_host(
