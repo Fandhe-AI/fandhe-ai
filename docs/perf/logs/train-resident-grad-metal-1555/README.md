@@ -46,7 +46,7 @@ before（origin/main の `crates/facade` path patch）・after（本ブランチ
 **対照セル: fresh（resident 経路非到達）**
 - 比率: 1.0012 倍（after 1.446 ms vs before 1.444 ms）
 - 5 run 内比率: 0.9896・0.9485・0.9719・1.0092・1.0024（符号不一致・ノイズ帯）
-- 機械判定は「後退」だが、fresh は設計上 resident 経路へ非到達のため計測環境ノイズと帰属
+- 機械判定は「後退」。fresh は resident 経路へ非到達だが変更コード（`encode_strided_bias_act_prepared` の零オフセット委譲・挙動同一）は通る。checksum 一致・3/5 run < 1.00・符号不一致のため共有負荷ノイズと整合（負荷差との分離は未実施）
 - **規則の緩和ではない**点を明記（#1448/#1506 の教訓）
 
 ### フェーズ分解診断

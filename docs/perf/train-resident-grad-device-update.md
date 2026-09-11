@@ -186,10 +186,14 @@ before（origin/main の `crates/facade` path patch）・after（本ブランチ
 | 64 | fresh | 1.444 | 1.446 | 1.0012 | 完全一致 | 符号不一致（0.9896 / 0.9485 / 0.9719 / 1.0092 / 1.0024） / ノイズ帯と帰属・規則の緩和ではない |
 
 フレームワーク機械判定（`compare_gemm_ab.py --task train --threshold 1.00`）は fresh セルを
-「後退」と判定するが、fresh は設計上 resident 経路に到達しない対照セルであり、上記の
-符号不一致は計測環境の共有負荷（load1 ≈ 7.9〜8.5）によるノイズと帰属される。判定対象は
-事前登録どおり reuse セルであり、当該セルは規則「reuse `step_total` の after/before ≤ 1.00」
-を充足する（**規則の緩和を伴わない**）。
+「後退」と判定する。fresh は resident 経路（`fill_resident_weight_grad`）に到達しない対照
+セルだが、本 PR の変更コードを全く通らないわけではない: `d_weight` GEMM は既存入口
+`encode_strided_bias_act_prepared` → `_impl(c_offset: None)`（零オフセット委譲・挙動同一）を
+経由する。checksum 完全一致・5 run 中 3 run が 1.00 未満・符号不一致であることから、
+1.0012 倍の差は計測環境の共有負荷（load1 ≈ 7.9〜8.5）によるノイズと整合する（ノイズと
+確定したわけではなく、負荷差との分離は行っていない）。判定対象は事前登録どおり reuse
+セルであり、当該セルは規則「reuse `step_total` の after/before ≤ 1.00」を充足する
+（**規則の緩和を伴わない**）。
 
 ### 5.5 フェーズ分解診断（reuse セル・単発・非判定）
 
