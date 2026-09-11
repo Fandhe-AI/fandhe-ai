@@ -1889,11 +1889,11 @@ resident 経由で充填された slot は `Gradients` に寄与を持たない�
 CPU（`backend-cpu`）のみ `gemm_fp32_strict_into`／`upload_into` を
 実装した（`gemm_blis_parallel` は C へ**累積**するカーネルのため、
 `gemm_fp32_strict_into` は書き込み対象範囲を明示的に `fill(0.0)` して
-から呼ぶことで「上書き」契約を満たす）。CUDA／Metal は既定
-`Unsupported` のままで、`fill_resident_weight_grad` が `Ok(false)` を
-返して既存経路へフォールバックするため挙動・性能とも本イシュー着手前と
-不変（実機なしのため未実測。§4 参照）。実測記録・Go/No-Go 判断は
-`docs/perf/train-resident-grad-device-update.md` を参照。
+から呼ぶことで「上書き」契約を満たす）。CUDA は既定 `Unsupported` のまま。
+Metal は #1555 で NT/TN 限定で実装済み（#1555 で追補「Metal 実装」を参照）。
+CUDA は `fill_resident_weight_grad` が `Ok(false)` を返して既存経路へ
+フォールバックするため挙動・性能とも本イシュー着手前と不変。実測記録・
+Go/No-Go 判断は `docs/perf/train-resident-grad-device-update.md` を参照。
 
 ## 追補: #1479 — resident `GradStaging` の重み勾配をホストへ読み出す公開 API
 

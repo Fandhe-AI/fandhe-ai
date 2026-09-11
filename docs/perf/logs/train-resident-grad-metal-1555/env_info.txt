@@ -1,0 +1,12 @@
+# イシュー #1555 Metal resident weight-grad staging（gemm_fp32_strict_into）実測環境
+hostname: masked
+date: 2026-09-11T17:39:35Z
+cpu: Apple M4 Max
+os: macOS 26.6.2 (arm64)
+rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+cargo: cargo 1.96.0 (30a34c682 2026-05-25)
+main_sha: 4e68a4dc
+branch_head_sha: f34cf3b1
+before_arm: origin/main crates/facade（path patch）bench-fandhe sha256=5f034a6dba71dc9e73c97765e5526437d7a19d35abce894220a87c6e90448660
+after_arm: feat/metal-resident-weight-grad crates/facade（path patch）bench-fandhe sha256=5be46157951420a59a9a8ca7ac348aeff15ba3dd7d2bb785b472daf0f14e05eb
+load_mode: record_only（専有ゲートなし・uptime を run ごとに記録）
