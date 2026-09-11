@@ -33,13 +33,13 @@ case "$SHORT_SHA" in
     exit 1
     ;;
   *[!0-9a-f]*)
-    echo "short-sha は 16 進小文字のみ許可する（got: $SHORT_SHA）" >&2
+    echo "short-sha は 16 進小文字のみ許可する（got: ${SHORT_SHA}）" >&2
     exit 1
     ;;
 esac
 SHA_LEN=${#SHORT_SHA}
 if [ "$SHA_LEN" -lt 7 ] || [ "$SHA_LEN" -gt 40 ]; then
-  echo "short-sha は 7〜40 文字である必要がある（got length=$SHA_LEN）" >&2
+  echo "short-sha は 7〜40 文字である必要がある（got length=${SHA_LEN}）" >&2
   exit 1
 fi
 
@@ -112,7 +112,7 @@ WATCHLIST="python torch mlx cargo gemm_ bench"
 record_procs() {
   out="$1"
   {
-    echo "# 固定 watchlist（$WATCHLIST）に一致するプロセス名の件数のみを記録する"
+    echo "# 固定 watchlist（${WATCHLIST}）に一致するプロセス名の件数のみを記録する"
     echo "# （コマンドライン全文・絶対パスは含めない）。"
     for name in $WATCHLIST; do
       count=$(ps -axo comm= 2>/dev/null | grep -ic -- "$name" || true)
@@ -124,12 +124,12 @@ record_procs() {
 if [ "$DRY_RUN" = "1" ]; then
   echo "[dry-run] label_a=$LABEL_A label_b=$LABEL_B"
   echo "[dry-run]   facade_path   -> $FACADE_PATH"
-  echo "[dry-run]   diff_head     -> $DIFF_HEAD（実行時点の v0.8.0..HEAD diff を再取得）"
+  echo "[dry-run]   diff_head     -> ${DIFF_HEAD}（実行時点の v0.8.0..HEAD diff を再取得）"
   echo "[dry-run]   prebuild_log  -> $PREBUILD_LOG"
   echo "[dry-run]   uptime_before -> $UPTIME_BEFORE"
   echo "[dry-run]   pmset_before  -> $PMSET_BEFORE"
-  echo "[dry-run]   monitor_log   -> $MONITOR_LOG（バックグラウンド uptime サンプラー・10 秒間隔）"
-  echo "[dry-run]   procs_log     -> $PROCS_LOG（watchlist: $WATCHLIST）"
+  echo "[dry-run]   monitor_log   -> ${MONITOR_LOG}（バックグラウンド uptime サンプラー・10 秒間隔）"
+  echo "[dry-run]   procs_log     -> ${PROCS_LOG}（watchlist: ${WATCHLIST}）"
   echo "[dry-run]   step A        -> cd \"$FC_DIR\" && cargo build --release -p bench-fandhe && cargo build --release -p bench-candle && env -u GEMM_GATE_PATCH_FACADE_PATH bash run_gemm_gate_metal.sh \"$LABEL_A\""
   echo "[dry-run]   run_a_log     -> $RUN_A_LOG"
   echo "[dry-run]   step B        -> GEMM_GATE_PATCH_FACADE_PATH=\"$FACADE_PATH\" bash run_gemm_gate_metal.sh \"$LABEL_B\""
@@ -141,7 +141,7 @@ fi
 # 既存成果物の確認（run の差し替え禁止。#1517 と同方針）。
 for artifact in "$UPTIME_BEFORE" "$PMSET_BEFORE" "$PMSET_AFTER" "$RUN_A_LOG" "$RUN_B_LOG" "$MONITOR_LOG" "$PROCS_LOG" "$ALL_DONE"; do
   if [ -e "$artifact" ]; then
-    echo "既存の成果物が見つかった（$artifact）。同 label の再実行は" \
+    echo "既存の成果物が見つかった（${artifact}）。同 label の再実行は" \
          "成果物を手動で別名へ退避してから行う（run の差し替え禁止）" >&2
     exit 1
   fi
@@ -222,7 +222,7 @@ if [ -f "$DIFF_COMMITTED" ] && [ -f "$DIFF_HEAD" ]; then
   grep -v '^\$ git ' "$DIFF_HEAD" > "$DIFF_HEAD_BODY"
   if ! diff -q "$DIFF_COMMITTED_BODY" "$DIFF_HEAD_BODY" > /dev/null 2>&1; then
     echo "WARNING: v0.8.0..HEAD の Metal 計測経路 diff がコミット時点" \
-         "（$DIFF_COMMITTED）と異なる。帰属表（attribution.md）の再導出" \
+         "（${DIFF_COMMITTED}）と異なる。帰属表（attribution.md）の再導出" \
          "が必要な可能性がある。差分: $DIFF_HEAD" >&2
   fi
   rm -f "$DIFF_COMMITTED_BODY" "$DIFF_HEAD_BODY"
@@ -295,4 +295,4 @@ SAMPLER_PID=""
 pmset -g therm > "$PMSET_AFTER" 2>&1 || true
 
 echo "all done $(date -u +%Y-%m-%dT%H:%M:%SZ) label_a=$LABEL_A label_b=$LABEL_B" > "$ALL_DONE"
-echo "完了: A=$RUN_A_LOG B=$RUN_B_LOG（監視ログ: $MONITOR_LOG）"
+echo "完了: A=$RUN_A_LOG B=${RUN_B_LOG}（監視ログ: ${MONITOR_LOG}）"

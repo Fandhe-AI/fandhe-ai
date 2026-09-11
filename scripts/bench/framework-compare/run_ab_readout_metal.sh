@@ -229,7 +229,7 @@ wait_for_exclusive_gate() {
     echo "gate_log=$gate_log"
     date -u +%Y-%m-%dT%H:%M:%SZ
   } > "$UNDETERMINED"
-  echo "undetermined: $UNDETERMINED（判定規則 §2 に従い再試行せず終了する）" >&2
+  echo "undetermined: ${UNDETERMINED}（判定規則 §2 に従い再試行せず終了する）" >&2
   return 1
 }
 
@@ -258,7 +258,7 @@ record_only_gate_note() {
   if ! load1_is_valid "$l1"; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1_invalid=${l1:-<empty>}（専有ゲート要件なし。イシュー #1520・ルート #1519）" | tee -a "$gate_log"
   else
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1=$l1（専有ゲート要件なし。イシュー #1520・ルート #1519）" | tee -a "$gate_log"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mode=record_only load1=${l1}（専有ゲート要件なし。イシュー #1520・ルート #1519）" | tee -a "$gate_log"
   fi
   return 0
 }

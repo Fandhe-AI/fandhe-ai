@@ -69,7 +69,7 @@ WATCHLIST="python torch mlx cargo gemm_ bench"
 record_procs() {
     out="$1"
     {
-        echo "# 固定 watchlist（$WATCHLIST）に一致するプロセス名の件数のみを記録する"
+        echo "# 固定 watchlist（${WATCHLIST}）に一致するプロセス名の件数のみを記録する"
         echo "# （コマンドライン全文・絶対パスは含めない）。"
         for name in $WATCHLIST; do
             count=$(ps -axo comm= 2>/dev/null | grep -ic -- "$name" || true)
@@ -84,8 +84,8 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "[dry-run] run${RUN_NO}"
     echo "[dry-run]   uptime_before -> $UPTIME_BEFORE"
     echo "[dry-run]   pmset_before  -> $PMSET_BEFORE"
-    echo "[dry-run]   monitor_log   -> $MONITOR_LOG（バックグラウンド uptime サンプラー）"
-    echo "[dry-run]   procs_log     -> $PROCS_LOG（watchlist: $WATCHLIST）"
+    echo "[dry-run]   monitor_log   -> ${MONITOR_LOG}（バックグラウンド uptime サンプラー）"
+    echo "[dry-run]   procs_log     -> ${PROCS_LOG}（watchlist: ${WATCHLIST}）"
     echo "[dry-run]   command       -> $CMD"
     echo "[dry-run]   run_log       -> $RUN_LOG"
     echo "[dry-run]   pmset_after   -> $PMSET_AFTER"
@@ -102,7 +102,7 @@ fi
 # 別名へ退避してから行う。
 for artifact in "$UPTIME_BEFORE" "$PMSET_BEFORE" "$PMSET_AFTER" "$RUN_LOG" "$MONITOR_LOG" "$PROCS_LOG"; do
     if [ -e "$artifact" ]; then
-        echo "run${RUN_NO}: 既存の成果物が見つかった（$artifact）。" \
+        echo "run${RUN_NO}: 既存の成果物が見つかった（${artifact}）。" \
              "同番号の再実行は成果物を手動で別名へ退避してから行う" \
              "（run の差し替え禁止。docs/perf/metal-gemm-splitk-ab.md §10.2）" >&2
         exit 1
@@ -189,4 +189,4 @@ pmset -g therm > "$PMSET_AFTER" 2>&1 || true
     echo "run${RUN_NO} completed at $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 } >> "$ENV_INFO"
 
-echo "run${RUN_NO} 完了: $RUN_LOG（監視ログ: $MONITOR_LOG）"
+echo "run${RUN_NO} 完了: ${RUN_LOG}（監視ログ: ${MONITOR_LOG}）"
