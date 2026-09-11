@@ -356,6 +356,21 @@ split_k_dispatch_auto_production_enabled_is_false_by_default`）で機械的に�
    を確認する
 5. 後退時は `false` へ差し戻し、理由を本節へ追記する
 
+### 切替判断の記録（2026-09-11・#1515／#1516／#1517）
+
+①は #1515 §10.4（M4 Max 5 run・ADOPT）で充足。②③は #1516 でブランチ
+`perf/1516-metal-splitk-gate-on`（未 push）上に実装。実機 `#[ignore]` 群
+pass（`gemm_splitk_auto_wiring` 4/4・`gemm_splitk_bit_match` 2/2・
+`gemm_splitk_parity` 1/1・`splitk_parity_baseline_contract` 11/11・
+`splitk_gemm_gate_shape_attribution` 3/3・`gemm_splitk_auto_entry_parity`
+1/2〈FAIL 1 件は `(64,64,63)` 非 8 倍数形状を渡す既存無関係な不具合で切替前
+HEAD でも再現〉）。④ #1517 run1 は checksum 全 10 セル（gemm 8 + train 2）
+一致だが 4 セル `ratio > 1.00`（gemm 3 + train 1）→ 手順⑤に従い **`false`
+維持**（ユーザー判断 2026-09-11）。main は既に `false` のため差し戻し
+コミットなし。#1516 ブランチはマージしない。後退セルは帰属表上 split-K
+非到達・符号非一貫・共有負荷下で計測ノイズと整合（参考情報。規則は
+緩めない）。再開条件は #1517 doc §6 参照。
+
 ### スコープ外（変更なし）
 
 NT/TN/TT・f16／hfrag・`gemm_bias_act` 融合経路への split-K 適用は引き続きスコープ外（§4 の
