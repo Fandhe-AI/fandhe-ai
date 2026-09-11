@@ -2439,6 +2439,7 @@ E2〜E4 系列の調査は本イシューをもって一区切りとする。
 （`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = false`）の間は本節の確定がそのまま
 有効。ゲート ON 後の framework-compare 非後退確認は `docs/perf/metal-gemm-splitk-
 framework-compare-1517.md`（§5／§6。未実測）が担う。
+**追記（2026-09-11・#1516 マージ）**: ゲートはユーザー判断（保守性優先・後退セルは split-K 非到達のノイズ帯）で `true` へ切替済み。経緯は `docs/backend-metal-splitk-decision.md` §5「ユーザー判断による本番結線」を参照。
 
 ### §19.5 env_info・負荷状態
 

@@ -575,7 +575,8 @@ pub struct MetalGemm {
     /// スコープ）。
     tile_class_mode: tile::TileClassMode,
     /// split-K 2 パス GEMM（イシュー #1474。#1516 で `dispatch_auto` へ
-    /// 定数ゲート付きで結線済み・既定 OFF）のパス 1
+    /// 定数ゲート付きで結線済み・既定 ON〈2026-09-11・#1515 §10.4 の
+    /// ADOPT 確定を受けて切替〉）のパス 1
     /// （`gemm_simdgroup_tiled`。`SPLIT_K_ENABLED=true`）専用パイプライン
     /// キャッシュ。`tiled_cache`（classic 経路）とは独立に持つ設計判断
     /// （`tiled_spec_cache`／`tiled_hfrag_cache` と同じ理由: 関数の
@@ -595,11 +596,12 @@ pub struct MetalGemm {
     /// [`Self::dispatch_auto`] が `tile::should_split_k` 判定に基づき
     /// split-K 2 パス経路へ分岐するかどうか（イシュー #1516）。
     /// `swizzle_enabled`/`fine_barrier_enabled`/`unroll_acc_enabled` 等と
-    /// 同じ設計判断（instance フィールド化により base（`false`。既定）/
-    /// head（`true`）の 2 `MetalGemm` を同一プロセス内に構築して bit 一致・
-    /// 性能を A/B できるようにする）。`MetalGemm::new` は本番既定
-    /// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（`false`）を渡すため
-    /// 既定挙動は不変。`true` の場合の実際の分岐先（split-K か classic か）
+    /// 同じ設計判断（instance フィールド化により明示 `false`（opt-out）/
+    /// head（`true`。既定）の 2 `MetalGemm` を同一プロセス内に構築して
+    /// bit 一致・性能を A/B できるようにする）。`MetalGemm::new` は本番既定
+    /// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（**`true`**。
+    /// 2026-09-11・イシュー #1516・#1515 §10.4 の ADOPT 確定を受けて切替）を
+    /// 渡す。実際の分岐先（split-K か classic か）
     /// は `tile::select_route_for_device` が `(m, n, k)` から純粋に決める。
     split_k_auto_enabled: bool,
 }
@@ -639,7 +641,7 @@ pub(crate) struct TilePipelineReflectionDiag {
 }
 
 /// [`MetalGemm::dispatch_split_k_strided_prepared`] 系（イシュー #1474。
-/// #1516 で `dispatch_auto` へ定数ゲート付きで結線済み・既定 OFF）
+/// #1516 で `dispatch_auto` へ定数ゲート付きで結線済み・既定 ON）
 /// が split-K を採用しなかった理由。呼び出し元
 /// （実機テスト・将来の性能 A/B）が「フォールバックによる自明合格」を
 /// 排除できるよう、[`SplitKRoute::Classic`] に必ず添える。
@@ -956,14 +958,15 @@ impl MetalGemm {
     /// 明示的な `split_k_auto_enabled` 引数で指定する。実機 `#[ignore]`
     /// bit 一致自己検証テスト（`tests/gemm_splitk_auto_wiring.rs`）・
     /// イシュー #1517 の framework-compare A/B 専用の入口: 同一プロセス内
-    /// で base（`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`。既定 `false`）/
-    /// head（`true`）の 2 インスタンスを構築して比較する（[`Self::
+    /// で base（`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`。既定
+    /// `true`。2026-09-11・#1515 §10.4 の ADOPT 確定を受けて切替）/
+    /// 明示 `false`（opt-out）の 2 インスタンスを構築して比較する（[`Self::
     /// new_with_tile_class`] と同型の設計）。他 7 フラグ（threadgroup ID
     /// スウィズル・simdgroup 細粒度同期・条件付き loop unroll・ソース
     /// テキスト特殊化・フラグメントロード方式候補・協調ロードレイアウト
     /// 候補・タイルクラス分割）は本番既定のまま据え置く。本番経路
     /// （[`Self::new`]）は常に `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
-    /// （`false`）を渡すため、本関数の追加自体は既定挙動を変えない。
+    /// （**`true`**）を渡すため、本関数の追加自体は既定挙動を変えない。
     ///
     /// `pub` にする理由は [`Self::new_with_tile_class`] doc comment と同じ
     /// （`pub(crate)` のまま `#[cfg(test)]` を付けない場合の dead_code
@@ -1903,7 +1906,8 @@ impl MetalGemm {
     /// 検証済みの値を渡す。`crate::tile` モジュール `verify_m4_max` 参照）。
     ///
     /// **split-K 本番結線（イシュー #1516）**: `self.split_k_auto_enabled`
-    /// （既定 `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`＝`false`）が
+    /// （既定 `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`＝**`true`**。
+    /// 2026-09-11・#1515 §10.4 の ADOPT 確定を受けて切替）が
     /// `true` かつ `SPLIT_K_NUMERIC_CONTRACT_APPROVED` が `true` の場合のみ、
     /// `tile::should_split_k` 判定を 8 の倍数へパディング済みの実効次元
     /// （[`pad8`]）で評価し、対象形状（`crate::tile::select_route_for_device`
@@ -2551,7 +2555,7 @@ impl MetalGemm {
     /// `undetermined`・数値契約未承認の 2 ブロッカー。
     /// `docs/backend-metal-splitk-decision.md` §4）。この確定はブロッカー
     /// 解消後の #1516（下記「本番結線」節）によって上書き・更新されており、
-    /// 現在は `dispatch_auto` へ定数ゲート付きで結線済み（既定 OFF）で
+    /// 現在は `dispatch_auto` へ定数ゲート付きで結線済み（既定 ON。2026-09-11 切替）で
     /// ある。両者を混同しないこと。
     ///
     /// **数値契約ゲート（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`。本モジュール
@@ -2582,13 +2586,13 @@ impl MetalGemm {
     /// コメント参照。
     ///
     /// **本番結線（イシュー #1516・PR #1530）**: `dispatch_auto`／
-    /// `crate::tile::select_for_device` への結線は完了済みだが
+    /// `crate::tile::select_for_device` への結線は完了済みで
     /// （`Self::dispatch_auto` doc コメント「split-K 本番結線」節参照）、
-    /// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（既定 `false`）で
-    /// ゲートされている。`false` の間、`MetalBackendOps::gemm`
-    /// （`crate::ops`。本関数を直接呼ばない）の挙動・性能は不変。`true`
-    /// への切替は #1515 の性能 ADOPT 確定後（`docs/backend-metal-splitk-
-    /// decision.md` §5「切替手順」）。なお本関数自体
+    /// `tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（**`true`**。
+    /// 2026-09-11・#1515 §10.4 の ADOPT 確定を受けて切替）でゲートされて
+    /// いる。`MetalBackendOps::gemm`（`crate::ops`。本関数を直接呼ばない）は
+    /// `dispatch_auto` 経由で本ゲートの影響を受ける（切替手順は
+    /// `docs/backend-metal-splitk-decision.md` §5 参照）。なお本関数自体
     /// （`dispatch_split_k_strided_prepared`）は独立の自動判定入口であり、
     /// 上記の `SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートは既に解除済みの
     /// ため、`should_split_k` が対象と判定した形状では `dispatch_auto` の

@@ -805,7 +805,7 @@ legacy/borrowed override interleave 再計測。イシュー #1477）」節・
 - 参考系列（HEAD path patch）の計測（v0.8.0 ↔ origin/main 差分ゼロのため不要と判断） → split-K 本番結線（#1527・#1530）により差分が非ゼロになったため #1521（§18）で着手
 - Metal 借用ビュー readout の interleave 再計測（#1477 undetermined の再挑戦）
 - split-K 数値契約承認（`SPLIT_K_NUMERIC_CONTRACT_APPROVED`）: **#1513 で完了**
-  （`true` へ切替済み）。結線自体は #1516（定数ゲート付き・既定 OFF）、ゲート ON への
+  （`true` へ切替済み）。結線自体は #1516（定数ゲート付き・当初既定 OFF・2026-09-11 に既定 `true` へ切替）、ゲート ON への
   切替は #1515 の 5 run 正式 ADOPT 確定（未実測）待ち
 - N=4096 カーネル純境界ギャップの縮小（#1269 後継）
 - N=2048 の達成が専有環境下で再現するかの確認（§16.4 の run 間分散が大きいため、
@@ -993,7 +993,9 @@ legacy フォールバック（§13.6 で fail-closed に実装済み）を維�
      `dispatch_auto_with_route_impl` の `if self.split_k_auto_enabled
      && SPLIT_K_NUMERIC_CONTRACT_APPROVED` が偽となり split-K 分岐へ
      一切入らない（`SPLIT_K_NUMERIC_CONTRACT_APPROVED` が #1527 で
-     `true` になった今も不変）。
+     `true` になった今も不変）。（追記 2026-09-11・#1516 マージ: ゲートは
+     ユーザー判断で `true` へ切替済み。ただし理由 2〈`should_split_k` が
+     `None`〉により対象形状は引き続き classic 経路のまま）
   2. 対象形状自体が `tile::should_split_k` の並列度条件で `None`
      （`tile.rs::should_split_k_rejects_large_square_and_wide_shapes`
      が正方 512〜4096 を対象に回帰確認済み）。

@@ -37,15 +37,25 @@
 
 #![cfg(target_os = "macos")]
 
+mod common;
+
 use bench_harness::rng::Xorshift64Star;
+use common::splitk_parity_baseline::{
+    assert_no_split_k_parity_regression, find_fused_vs_composed_baseline,
+};
 use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cpu::parity::compare;
 use fandhe_ai_backend_metal::MetalBackendOps;
 use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 /// CPU-Metal の `gemm_bias_act` 複合判定（REQ-2）と、Metal 上での融合 vs
-/// 非融合合成（`gemm`→`add`→act）の bit 完全一致（`shaders/gemm.metal::
+/// 非融合合成（`gemm`→`add`→act）の数値一致（`shaders/gemm.metal::
 /// gemm_tiled_bias_act` ドキュメンテーションコメント「数値契約」参照）を
-/// 検証する。
+/// 検証する。融合 vs 合成は原則 REQ-2 厳密ゼロ fail 判定だが、合成腕が
+/// split-K 2 パス経路へ到達する形状（`SPLIT_K_DISPATCH_AUTO_PRODUCTION_
+/// ENABLED = true`。2026-09-11・#1516）に限り、`common::splitk_parity_
+/// baseline::FUSED_VS_COMPOSED_BASELINES` に記録済みの実機ベースライン
+/// 非後退方式（#1511 承認方式の適用）で判定する。
 fn assert_gemm_bias_act_parity(
     seed_a: u64,
     seed_b: u64,
@@ -90,11 +100,37 @@ fn assert_gemm_bias_act_parity(
     if act == Activation::Relu {
         composed = metal.relu(&composed).expect("metal relu must succeed");
     }
-    fandhe_ai_backend_cpu::parity::assert_parity(
-        &format!("gemm_bias_act fused vs composed metal parity m={m} n={n} k={k} act={act:?}"),
-        metal_result.as_slice().expect("contiguous"),
-        composed.as_slice().expect("contiguous"),
-    );
+    let context =
+        format!("gemm_bias_act fused vs composed metal parity m={m} n={n} k={k} act={act:?}");
+    match find_fused_vs_composed_baseline(m, n, k) {
+        // split-K 到達形状: 合成腕（`dispatch_auto` → split-K 2 パス）は
+        // classic 経路の融合腕と厳密ゼロ fail を満たさない既知特性のため、
+        // 記録済み実機ベースラインに対する非後退で判定する（tolerance
+        // 定数・判定式は不変。`assert_no_split_k_parity_regression`）。
+        Some(baseline) => {
+            let report = compare(
+                metal_result.as_slice().expect("contiguous"),
+                composed.as_slice().expect("contiguous"),
+            )
+            .unwrap_or_else(|e| panic!("{context}: {e}"));
+            println!(
+                "{context}: fail_count={}/{} max_abs_diff={:.4e} mean_abs_diff={:.4e} \
+                 max_rel_err={:.4e}（baseline 非後退方式）",
+                report.fail_count,
+                report.total,
+                report.max_abs_diff,
+                report.mean_abs_diff,
+                report.max_rel_err
+            );
+            assert_no_split_k_parity_regression(&context, &report, baseline);
+        }
+        // それ以外（classic 同士）は従来どおり REQ-2 厳密ゼロ fail 判定。
+        None => fandhe_ai_backend_cpu::parity::assert_parity(
+            &context,
+            metal_result.as_slice().expect("contiguous"),
+            composed.as_slice().expect("contiguous"),
+        ),
+    }
 }
 
 /// elementwise 5 演算（`add`／`mul`／`relu`／`exp`／`tanh`）の CPU-Metal

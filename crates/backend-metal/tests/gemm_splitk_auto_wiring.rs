@@ -12,12 +12,15 @@
 //! （`SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` ゲート・
 //! `MetalGemm::split_k_auto_enabled` インスタンスフィールド）を検証する。
 //!
-//! **本 PR 時点でゲートは既定 `false`**（`docs/backend-metal-splitk-
-//! decision.md` §5「本番結線（#1516）」参照: 性能面の正式 ADOPT 判定
-//! 〈イシュー #1515〉が未確定のため）。よって本テストは
-//! `MetalGemm::new_with_split_k_auto` で明示的に `true` を指定した
-//! head インスタンスを構築して検証する（`gemm_fine_barrier_bit_match.rs`
-//! 等の A/B 自己検証テストと同型の設計）。
+//! **2026-09-11・イシュー #1516 でゲートは既定 `true`**（`docs/backend-
+//! metal-splitk-decision.md` §5「本番結線（#1516）」参照: 性能面の正式
+//! ADOPT 判定〈イシュー #1515 §10.4〉が M4 Max 実機 5 run で確定した
+//! ことを受けた切替）。よって `MetalGemm::new()`（本番既定コンストラクタ）
+//! 自体が split-K 分岐を有効化した状態で構築される。本テストは
+//! `MetalGemm::new_with_split_k_auto` で明示的に `true`／`false` を
+//! 指定したインスタンスとの bit 一致・経路選択を検証する
+//! （`gemm_fine_barrier_bit_match.rs` 等の A/B 自己検証テストと同型の
+//! 設計）。
 //!
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する。CI（GitHub
 //! ホステッド・ubuntu-latest）では `#![cfg(target_os = "macos")]` により
@@ -83,16 +86,18 @@ const TARGET_SHAPES: &[(usize, usize, usize)] = &[
     (128, 128, 2064),
 ];
 
-/// AC-1: split-K 結線ゲート `false`（既定）の `MetalGemm::new_with_split_k_auto`
-/// と `MetalGemm::new`（本結線前と同一の構築経路）が、対象形状・非対象
-/// 形状の区別なく常に bit 同一の出力を返すことを確認する。ゲート追加
-/// そのものが既存本番経路（既定 OFF）を 1 バイトも変えないことの直接検証。
+/// AC-1: split-K 結線ゲートが既定 `true`（イシュー #1516・2026-09-11
+/// 切替）であることを、`MetalGemm::new()`（本番コンストラクタ）と
+/// `MetalGemm::new_with_split_k_auto(&ctx, true)`（明示 opt-in）が、
+/// 対象形状・非対象形状の区別なく常に bit 同一の出力を返すことで
+/// 直接検証する。ゲートの「既定値」が実際に `true` であることの機構的な
+/// 証跡（`new()` が明示 `true` 指定と同じ経路を通ることの直接検証）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
-fn wiring_off_is_bit_identical_to_new() {
+fn wiring_default_is_bit_identical_to_explicit_on() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let base = MetalGemm::new(&ctx).expect("base GEMM パイプラインの構築に失敗した");
-    let head = MetalGemm::new_with_split_k_auto(&ctx, false)
+    let head = MetalGemm::new_with_split_k_auto(&ctx, true)
         .expect("head GEMM パイプラインの構築に失敗した");
 
     let shapes: Vec<(usize, usize, usize)> = NON_TARGET_SHAPES
@@ -115,7 +120,38 @@ fn wiring_off_is_bit_identical_to_new() {
         assert_bit_exact(
             &head_out,
             &base_out,
-            &format!("split_k_auto_enabled=false (m={m}, n={n}, k={k})"),
+            &format!("split_k_auto_enabled=true (default vs explicit) (m={m}, n={n}, k={k})"),
+        );
+    }
+}
+
+/// AC-1 補助: 明示的な opt-out（`new_with_split_k_auto(&ctx, false)`）は
+/// 本番既定（`true`）とは無関係に、`should_split_k` が対象と判定する
+/// 形状（`TARGET_SHAPES`）でも常に classic 経路（[`GemmRoute::Classic`]）
+/// へ固定されることを確認する。ゲートを個別インスタンス単位で無効化
+/// できる手段（実機診断・将来の A/B）が実際に classic 経路のみを通る
+/// ことの直接検証（フォールバックによる自明合格の排除）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn wiring_explicit_off_forces_classic_route_for_targets() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let head = MetalGemm::new_with_split_k_auto(&ctx, false)
+        .expect("head GEMM パイプラインの構築に失敗した");
+
+    for &(m, n, k) in TARGET_SHAPES {
+        let a = Xorshift64Star::new(m as u64 * 19 + k as u64 + 23).fill_vec(m * k);
+        let b = Xorshift64Star::new(n as u64 * 29 + k as u64 + 31).fill_vec(k * n);
+
+        let (_out, route) = head
+            .dispatch_auto_with_route(&ctx, &a, &b, m, n, k)
+            .unwrap_or_else(|e| {
+                panic!("head dispatch_auto_with_route failed (m={m}, n={n}, k={k}): {e}")
+            });
+
+        assert!(
+            matches!(route, GemmRoute::Classic(_)),
+            "m={m}, n={n}, k={k}: split_k_auto_enabled=false のはずが GemmRoute::SplitK が \
+             選ばれた（明示 opt-out がゲートを無視している疑いがある）。route={route:?}"
         );
     }
 }

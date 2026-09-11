@@ -61,17 +61,19 @@
 //! （`assert_no_split_k_parity_regression`）の判定へ再切替済み
 //! （`docs/perf/metal-gemm-splitk-two-pass.md` §5.5・§5.8）。
 //!
-//! `#1476` 時点の「結線しない」確定のうち、2 ブロッカーの片方（数値契約
-//! 未承認）はその後解消されている: `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
+//! `#1476` 時点の「結線しない」確定のうち、2 ブロッカーは両方とも
+//! その後解消されている: `SPLIT_K_NUMERIC_CONTRACT_APPROVED`
 //! （自動判定入口 `dispatch_split_k_strided_prepared` のゲート）の解除は
 //! イシュー #1513 で完了済み（`true` へ切替。`docs/perf/
-//! metal-gemm-splitk-two-pass.md` §5.9）。さらに `select_for_device`／
+//! metal-gemm-splitk-two-pass.md` §5.9）。`select_for_device`／
 //! `dispatch_auto` への本番結線コード自体は **イシュー #1516（PR #1530）
-//! で追加済み**であり、`#1476` の「結線しない」確定はこの結線によって
-//! 上書き・更新されている。ただし `tile::
-//! SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`（既定 `false`）で無効化
-//! されたままであり、残るブロッカー（性能の正式 ADOPT 判定。#1515）が
-//! 確定するまで本番経路（`MetalBackendOps::gemm`）は split-K を選択しない
+//! で追加済み**であり、残るブロッカー（性能の正式 ADOPT 判定）は
+//! イシュー #1515 §10.4 が 2026-09-11 に M4 Max 実機 5 run で **ADOPT**
+//! と確定したことを受け、`tile::SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED`
+//! を **`true`** へ切り替えた（イシュー #1516・2026-09-11）。よって
+//! `#1476` の「結線しない」確定は上書き・更新済みであり、本番経路
+//! （`MetalBackendOps::gemm`）は `dispatch_auto` 経由で
+//! `should_split_k` が対象と判定した形状に対し split-K 経路を選択する
 //! （`docs/backend-metal-splitk-decision.md` §5）。`#1476` 時点の確定と
 //! `#1516` 時点の現状を混同しないこと。
 
@@ -230,6 +232,50 @@ pub static BASELINES: &[SplitKParityBaseline] = &[
 /// `(m, n, k)` に対応するベースライン行を探す。見つからなければ `None`
 /// （未登録形状での呼び出しは呼び出し側で明示的に扱う。fail-open で
 /// 素通りさせない）。
+/// `gemm_bias_act` 融合カーネル（classic 経路）と `MetalBackendOps::gemm`→
+/// `add`→act の非融合合成（`dispatch_auto` 経由。split-K 到達形状では
+/// split-K 2 パス経路）の **Metal 内比較**に対する記録済みベースライン
+/// （`tests/gemm_bias_act_parity.rs` 専用。CPU 参照との比較ではない）。
+///
+/// `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED = true`（2026-09-11・#1516
+/// マージ）以降、split-K 到達形状では合成腕が split-K 経路を通るため
+/// classic 経路の融合腕と厳密ゼロ fail（`assert_parity`）を満たさない
+/// （split-K の K 分割に由来する既知特性。`docs/perf/metal-gemm-splitk-
+/// two-pass.md` §5.5）。#1511 承認の baseline 非後退方式をこの比較にも
+/// 適用する（2026-09-11 ユーザー判断。`docs/backend-metal-splitk-
+/// decision.md` §5「ユーザー判断による本番結線」）。[`BASELINES`]（CPU
+/// 参照・11 形状・別シード）とは入力が異なるため独立の表とし、
+/// `splitk_parity_baseline_contract.rs` の 11 行契約には含めない。
+///
+/// 出典: Apple M4 Max 実機実測（2026-09-11。`cargo test -p
+/// fandhe-ai-backend-metal --release --test gemm_bias_act_parity --
+/// --ignored --nocapture`。シード a=510/b=511/bias=512・Relu）:
+/// `fail_count=2/4096, max_abs_diff=1.411e-4, max_rel_err=1.497e-3,
+/// mean_abs_diff=8.515e-6`。ceiling は表示桁の最終桁を切り上げた値。
+pub static FUSED_VS_COMPOSED_BASELINES: &[SplitKParityBaseline] = &[SplitKParityBaseline {
+    m: 64,
+    n: 64,
+    k: 4096,
+    total: 4096,
+    baseline_fail_count: 2,
+    baseline_mean_abs_diff_ceiling: 8.52e-6,
+    baseline_max_abs_diff_ceiling: 1.42e-4,
+    baseline_max_rel_err_ceiling: 1.50e-3,
+}];
+
+/// `gemm_bias_act` 融合 vs 非融合合成（Metal 内）比較のベースラインを
+/// `(m, n, k)` で検索する。`None` なら従来どおり厳密ゼロ fail 判定
+/// （`assert_parity`）を適用する。
+pub fn find_fused_vs_composed_baseline(
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Option<&'static SplitKParityBaseline> {
+    FUSED_VS_COMPOSED_BASELINES
+        .iter()
+        .find(|b| b.m == m && b.n == n && b.k == k)
+}
+
 pub fn find_baseline(m: usize, n: usize, k: usize) -> Option<&'static SplitKParityBaseline> {
     BASELINES.iter().find(|b| b.m == m && b.n == n && b.k == k)
 }

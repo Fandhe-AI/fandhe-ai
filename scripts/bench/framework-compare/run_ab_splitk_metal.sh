@@ -110,6 +110,9 @@ if [[ "$BEFORE_REAL" == "$AFTER_REAL" ]]; then
 fi
 
 # 差分ガード（実装計画 §1「設計判断」表・「before==after 再発防止」）:
+# 注: 2026-09-11 の既定 `true` 切替（#1516 マージ）以降、before 腕には
+# 切替前コミット（例 37bb6765）を checkout した別 worktree の facade path を
+# 指定する（main の tile.rs はもはや false ではない）。
 # 各腕の `crates/backend-metal/src/tile.rs`
 # （`<facade path>/../backend-metal/src/tile.rs`）を読み、
 # `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` の宣言行が before=false・
