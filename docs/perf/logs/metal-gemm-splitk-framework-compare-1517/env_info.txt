@@ -6,28 +6,32 @@
 # 内部ホスト名は書かない（`docs/real-hardware-verification-env.md`）。
 
 ## 機種・OS
-- 機種: <記入。例: Apple M4 Max>
-- OS: <記入。例: macOS 15.x>
-- rustc: <記入。`rustc --version` の出力>
+- 機種: Apple M4 Max
+- OS: macOS 26.6.2
+- rustc: rustc 1.96.0 (5d1a9a90c 2025-09-15)
 
 ## before/after facade worktree
 - AB_BEFORE_FACADE_PATH（絶対パス実値は書かず `<facade 絶対パス>` 表記へ
   置換する。イシュー #1306 env_info の慣例）: <facade 絶対パス>
-  - HEAD sha: <記入>
+  - HEAD sha: cbf5488f
   - SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: false（期待値。
     `run_ab_splitk_metal.sh` の差分ガードが機械検証する）
 - AB_AFTER_FACADE_PATH: <facade 絶対パス>
-  - HEAD sha: <記入>
+  - HEAD sha: cbf5488f
   - SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED: true（期待値）
-- ビルド後バイナリ sha256（before/after）: <manifest ファイルの
-  `before_sha256`/`after_sha256` を転記>
+- ビルド後バイナリ sha256（before/after）:
+  before 3a7fc878cff7f7d51afaa84fe2e76d7ed7e2134e7e1fbd038985526df3fd1b69
+  after ef175135f7f39c29b31566c805ea3c2743ec201cc275e654920a88fb3a789e36
 
 ## 負荷推移
-- 計測開始前 uptime: <記入>
-- 計測中の load average 推移（`monitor_<label>.log` の要約）: <記入>
-- 中断・再試行の有無: <記入>
+- 計測開始前 uptime: 6.44 7.25 6.00
+- 計測中の load average 推移（`monitor_<label>.log` の要約）: load1 min 6.32 / median 7.66 / max 11.56（11 サンプル・10 秒間隔）。終了時 11.56 8.33 6.55
+- 中断・再試行の有無: なし。skipped ログ空。終了コード 0
 
 ## 実行結果
-- `run_ab_splitk_metal.sh <label>` の終了コード: <記入>
-- `compare_gemm_ab.py --task gemm`／`--task train` の判定: <記入。
-  `docs/perf/metal-gemm-splitk-framework-compare-1517.md` §5/§6 へ転記>
+- `run_ab_splitk_metal.sh <label>` の終了コード: 0
+- `compare_gemm_ab.py --task gemm`／`--task train` の判定:
+  - gemm 終了コード 3（後退セル: 1024/reuse・2048/fresh・4096/fresh。checksum 全 8 セル完全一致）
+  - train 終了コード 3（後退セル: 64/reuse。checksum 全 2 セル完全一致）
+  - 結線維持可否: 結線維持不可（`docs/perf/metal-gemm-splitk-framework-compare-1517.md` §5/§6 に詳細。verdict: ゲート `false` 維持）
+label=splitk-1517-run1 completed at 2026-09-11T12:42:34Z
