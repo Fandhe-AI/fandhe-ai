@@ -44,7 +44,7 @@ spec 側は REQ-9 の 2026-09-12 追記で custom autograd Function を **Tier 2
 | `Tensor<f32>` は host 常駐（`Storage<T> { data: Vec<T> }`）。デバイス常駐は `DeviceBuffer`／`ResidentLeaf` の別経路 | `crates/tensor-core/src/tensor.rs:33-34` |
 | `Tape::backward_impl` は逆走査ループ全体を単一の不変借用 `self.nodes.borrow()` で完結させ、各ノードで `materialize_fallible` → `grad::vjp` → `accumulate` を呼ぶ。`Tape: Send` は静的アサーション（`fn assert_send<T: Send>() {} assert_send::<Tape>();`）で固定 | `crates/autodiff/src/backward.rs:132`・`crates/autodiff/tests/fusion_backend_integration.rs:391-392` |
 | `ResidentResolver`（`pub(crate)` trait）は backward に注入されるフック（`Option<&dyn ResidentResolver>`）の既存先例。`Op::LinearResident` の VJP が d_weight をデバイス staging へ直接書く | `crates/autodiff/src/tape.rs:387` |
-| `nn::Module` trait（`forward(&self, tape, input)`／`forward_host`）は `autodiff` で `pub` だが、facade は `nn::LinearVars` のみ再エクスポート。`compat::Sequential` は `Vec<Box<dyn Module>>` を持つが公開ビルダーは `add_linear`／`add_relu`／`add_sigmoid`／`add_tanh` に固定（`add_module` はない）→ 合成ベースの独自層は現行の公開面から到達不能 | `crates/autodiff/src/nn/module.rs:33`・`crates/facade/src/compat/sequential.rs:116,129,135,141` |
+| `nn::Module` trait（`forward(&self, tape, input)`／`forward_host`）は `autodiff` で `pub` だが、facade は `nn::LinearVars` のみ再エクスポート。`compat::Sequential` は `Vec<Box<dyn Module>>` を持つが公開ビルダーは `add_linear`／`add_relu`／`add_sigmoid`／`add_tanh` に固定（`add_module` はない）→ `Sequential` へ独自層として登録する経路が現行の公開面から到達不能（ただし公開 `Var` 演算を直接合成し `Sequential` を介さずに使うこと自体は妨げられない） | `crates/autodiff/src/nn/module.rs:33`・`crates/facade/src/compat/sequential.rs:116,129,135,141` |
 | `Var` の公開演算は `matmul`・`add`・`mul`・`sum`・`max`・`relu`・`exp`・`tanh`・`sigmoid`・`softmax`・`log_softmax`・`mse_loss`・`cross_entropy_loss`・`reshape`・`transpose`・線形代数（`inv`…`matrix_norm`）。`sub`／`neg`／スカラー倍（#1593）・`detach`／`no_grad`（#1612）は本基準コミット時点で未実装（OPEN） | `crates/autodiff/src/var.rs`・#1593／#1612 |
 | facade 公開面の機械検査 `api_surface.rs`: `pub use` での `Tape`／`BackendOps`／`new_with_ops` 再エクスポート禁止・`pub fn` が `BackendOps` を引数に取ることを禁止・`compat` の `pub fn` が生 `fandhe_ai_autodiff::Tape` を取ることを禁止 | `crates/facade/tests/api_surface.rs:53-164` |
 | `BackendOps` は crates.io 公開済み trait。非破壊拡張は「既定 `Unsupported` のデフォルトメソッド追加」パターン（`sgd_step_device`・`memory_ops` 等）が慣例 | `crates/tensor-core/src/backend_ops.rs` |
@@ -68,15 +68,17 @@ spec 側は REQ-9 の 2026-09-12 追記で custom autograd Function を **Tier 2
 
 | 案 | 概要 | `Op` enum 変更 | テープ再設計 | REQ-12 整合 | `api_surface.rs` 影響 | 数値契約 | facade 公開面 | 前提 issue | 難度 |
 |---|---|---|---|---|---|---|---|---|---|
-| **A: 合成のみ（custom backward なし）** | 既存 `Var` 演算の合成で独自 forward を書く | 不要 | 不要 | 抵触なし | 影響なし | 既存演算の VJP のみ（合成の連鎖規則で自動導出） | 追加不要（既存 `Var` 演算のみ） | なし | S（ただし現行公開面からは `Sequential::add_module` 欠如で到達しづらい） |
-| **B（主案）: `Op::Custom { inputs: Vec<NodeId>, func: Arc<dyn CustomFunction + Send + Sync> }`** | `trait CustomFunction { fn name(&self) -> &str; fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>>; fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>>; fn backward(&self, inputs: &[&Tensor<f32>], out_value: &Tensor<f32>, upstream: &Tensor<f32>) -> Result<Vec<Tensor<f32>>> }`。host `Tensor<f32>` のみを受け渡し、`BackendOps` は非露出。常に `push_eager`（融合境界） | `Op` に 1 variant 追加（`Arc` 化・手書き `Debug`／`name()` が必要） | 不要（既存の逆走査アルゴリズムのまま） | 抵触なし（`BackendOps` を渡さない） | 影響なし（新規 trait は `BackendOps` を引数に取らない） | host 実行のためバックエンド間で構造的に bit 同一（REQ-2 判定対象外・ユーザー責任） | 新規 `pub trait CustomFunction`＋`Var::custom(...)` 相当の入口（要承認） | #1612（`detach`）・#1593（`sub`／スカラー演算）・#1634（ScalarOp dispatch） | M |
+| **A: 合成のみ（custom backward なし）** | 既存 `Var` 演算の合成で独自 forward を書く | 不要 | 不要 | 抵触なし | 影響なし | 既存演算の VJP のみ（合成の連鎖規則で自動導出） | 追加不要（既存 `Var` 演算のみ） | なし | S（`Var` 直接合成としての到達自体は可能。`Sequential` への統合は `add_module` 欠如で別途不可だが、案 A を退ける決定的理由ではない） |
+| **B（主案）: `Op::Custom { inputs: Vec<NodeId>, func: Arc<dyn CustomFunction + Send + Sync> }`** | `trait CustomFunction { fn name(&self) -> &str; fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>>; fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>>; fn backward(&self, inputs: &[&Tensor<f32>], out_value: &Tensor<f32>, upstream: &Tensor<f32>) -> Result<Vec<Tensor<f32>>> }`。host `Tensor<f32>` のみを受け渡し、`BackendOps` は非露出。常に `push_eager`（融合境界） | `Op` に 1 variant 追加（`Arc` 化・手書き `Debug`／`name()` が必要） | 不要（既存の逆走査アルゴリズムのまま） | 抵触なし（`BackendOps` を渡さない） | 影響なし（新規 trait は `BackendOps` を引数に取らない） | 同一ビット入力・同一 `Tape` 状態・決定的な `CustomFunction` 実装である限り、host 実行のためバックエンド間で構造的に bit 同一（REQ-2 判定対象外・ユーザー責任。乱数使用や並列縮約順序依存等の非決定的な実装ではこの限りではない） | 新規 `pub trait CustomFunction`＋`Var::custom(...)` 相当の入口（要承認） | #1612（`detach`）・#1593（`sub`／スカラー演算）・#1634（ScalarOp dispatch） | M |
 | **B′: 案 B に `&dyn BackendOps` を渡す** | `forward`／`backward` にバックエンド実装への参照を渡しユーザーコードからカーネル選択を可能にする | 同上 | 不要 | **抵触**（任意 `BackendOps` 実装を注入できる公開 API を設けない、REQ-9 2026-09-12 追記の「引き続き対象外」に正面から該当） | `api_surface.rs` の「`pub fn` が `BackendOps` を引数に取ることを禁止」検査に抵触 | 同上 | 抵触するため不可 | — | — |
 | **C: 勾配のみ差し替える固定集合の組み込み Op** | `Op::StraightThrough`／`Op::GradReverse(scale)`／`Op::GradClamp` 等を通常の Op として追加（`custom_gradient`-lite） | `Op` に固定個数の variant 追加 | 不要 | 抵触なし | 影響なし | 既存 Op と同じ扱い（parity 体系に自然に乗る） | 追加不要または最小限（`Var::straight_through()` 等の個別メソッド） | #1612（`detach`。役割が重なる） | S〜M（用途ごとに個別 issue が必要） |
 | **D: `BackendOps` レベルのレジストリ／テーブル拡張** | 承認済み enum の範囲で backend 実装を選ぶ方式（#1634 ScalarOp dispatch の延長） | 不要（`ScalarUnary`／`ScalarBinary` 等の enum を拡張） | 不要 | 抵触なし | 影響なし | 既存契約のまま | 追加不要 | #1634 | 任意関数は挿せず「ユーザー定義」には届かない。将来 GPU カーネル化が必要になった場合の別軸の案として位置づけ |
 | **E: 現時点では非対応と明文化し再開条件を定義する（段階 0）** | 何も実装しない。ギャップ表・spec の「Tier 2・XL」評価をそのまま維持し、再開条件を明記する | なし | なし | 抵触なし | 影響なし | 変更なし | 変更なし | — | 既存契約への影響ゼロ |
 
-案 A は現行の公開面（`Module` が facade 非公開・`Sequential` に `add_module` がない）から独自層を挿す経路が
-無く、かつ独自 backward を一切表現できない。ただし `detach`（#1612）＋`sub`（#1593）が揃えば、
+案 A（既存 `Var` 演算の合成）自体は公開 `Var` メソッドのみで表現でき到達可能である。`Module` が
+facade 非公開・`Sequential` に `add_module` がないことは、独自層を `Sequential` へ登録する経路を塞ぐ
+別の制限（§9 参照）であり、案 A 自体への到達を妨げるものではない。案 A を退ける決定的な理由は、
+独自 backward を一切表現できないことにある。ただし `detach`（#1612）＋`sub`（#1593）が揃えば、
 `x + (f(x) - x).detach()` 型の STE や、スカラー倍 `detach` による gradient reversal を**合成のみ**で
 表現できる可能性がある（これは検証済みの事実ではなく、案 A の再開条件として記録するに留める）。
 
@@ -96,8 +98,9 @@ spec 側は REQ-9 の 2026-09-12 追記で custom autograd Function を **Tier 2
 - 案 B は `Op` の閉鎖性への影響を「1 variant 追加」に抑え、`backward_impl` の実行モデル
   （不変借用・逆走査）を変えない
 - 案 B′ は REQ-9 2026-09-12 追記「引き続き対象外」・`api_surface.rs` の機械検査に正面から抵触するため不採用
-- 案 A は現行公開面から到達不能（`Module` 非公開・`add_module` なし）で、かつ独自 backward が
-  表現できない
+- 案 A は独自 backward を一切表現できないため退ける。`Module` 非公開・`Sequential::add_module`
+  欠如は `Sequential` への登録経路のみを塞ぐ別の制限であり、`Var` 直接合成としての案 A 自体への
+  到達を妨げるものではない
 - 案 D は「ユーザー定義」の演算（任意の forward/backward ペア）には届かず、承認済み演算の
   バックエンド選択に留まる
 - 案 E は既存契約への影響がゼロで、前提が揃っていない現時点で選べる唯一の安全な選択肢
@@ -105,8 +108,11 @@ spec 側は REQ-9 の 2026-09-12 追記で custom autograd Function を **Tier 2
 ## 6. 数値一致・既存テストとの整合
 
 1 階 backward・parity・bit 一致テスト群は不変。段階 1 で `Op::Custom`（案 B）を実装する場合、
-ユーザー定義 Op 自体は REQ-2 の判定対象外（ユーザー責任）だが、host 実行によりバックエンド間で
-構造的に bit 同一になる（GPU 上では H2D／D2H を伴い性能は保証しない）。tolerance／baseline は
+ユーザー定義 Op 自体は REQ-2 の判定対象外（ユーザー責任）だが、同一ビット入力・同一 `Tape` 状態・
+決定的な `CustomFunction` 実装の場合に限り、host 実行によりバックエンド間で構造的に bit 同一になる
+（乱数使用や並列縮約順序依存等の非決定的な実装ではこの限りではなく、GPU 上では H2D／D2H を伴い
+性能は保証しない）。この bit 同一性はユーザー定義 Op 自体の出力についての契約であり、グラフ全体の
+数値一致を保証するものではない。tolerance／baseline は
 本イシュー・段階 1 とも変更しない。
 
 段階 1 で追加するテスト候補（記録のみ・本 PR では実装しない）:
@@ -150,7 +156,8 @@ spec 側は REQ-9 の 2026-09-12 追記で custom autograd Function を **Tier 2
 1. `Op` enum への trait object variant（`Arc<dyn CustomFunction + Send + Sync>`）追加の可否
 2. facade 公開面への新規 `pub trait`／入口メソッド追加（API 形状）
 3. REQ-12 の読み（(i) を採るか）。必要なら spec 側への注記提案（`docs/spec/` は本 PR では編集しない）
-4. ユーザー定義 Op の数値契約（REQ-2 判定対象外・host 実行で bit 同一・tolerance／baseline 不変）
+4. ユーザー定義 Op の数値契約（REQ-2 判定対象外・同一ビット入力／同一 `Tape` 状態／決定的実装に
+   限り host 実行で bit 同一・tolerance／baseline 不変）
 5. `nn::Module` 再エクスポート／`Sequential::add_module` を本件と切り離すか
 6. 段階 1 実装 issue の起票
 
