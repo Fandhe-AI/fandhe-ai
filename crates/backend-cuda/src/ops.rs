@@ -285,6 +285,36 @@ impl CudaBackendOps {
         out: &mut DeviceBuffer<f32>,
         out_offset: usize,
     ) -> Result<(), BackendError> {
+        // codex-review 指摘（PR #1569）対応: capture 中の拒否は
+        // NT/TN 経路の `with_sync_point_call`（後続）だけでなく、本関数
+        // 全体の共通入口でも行う。NN/TT・分類不能・退化形状はフォール
+        // バック（`gemm_fp32_strict` → `run_tiled_f32` 系）へ進み、
+        // そちらは内部で `Self::with_driver_call`（`gemm.rs` 側。
+        // capture 中でも同一スレッドなら通す設計）経由の同期的な
+        // D2H readback（`clone_dtoh` 相当）を伴う——このホスト
+        // ブロッキング読み出しは capture 対象にできない（グラフに記録
+        // できるのは driver 呼び出しの列であり、ホスト側の同期完了待ちは
+        // 記録できない）ため、そもそも `with_sync_point_call` を経由
+        // しない分岐が存在する。加えて NT/TN 経路自体も、`cached_gemm`
+        // 取得（後続の `with_driver_call`）や NT/TN 判定用の
+        // `dense_transposed_view`／`contiguous()` 呼び出しより後で
+        // ようやく `with_sync_point_call` に到達するため、それより前の
+        // 区間（判定自体は driver 非依存だが `cached_gemm` の
+        // `with_driver_call` は driver に触れる）で capture 状態を
+        // 分岐ごとに個別判定するのではなく、最初の driver 呼び出しより
+        // 前の本関数入口 1 箇所で一律拒否する（`docs/
+        // backend-cuda-async-execution-design.md` §15「同期点は driver
+        // 操作前に拒否する」契約）。`context_cache::
+        // is_capturing_on_current_thread` は driver に触れない純粋な
+        // レジストリ照会（`begin_sync_point_call` 内部と同じ判定）。
+        if context_cache::is_capturing_on_current_thread(self.ordinal) {
+            return Err(BackendError::Unsupported(
+                "cuda graph capture: gemm_fp32_strict_into is a host synchronization point and \
+                 cannot be captured"
+                    .into(),
+            ));
+        }
+
         if out.device() != Device::Cuda(self.ordinal) {
             return Err(BackendError::DeviceMismatch);
         }
@@ -1350,7 +1380,17 @@ impl BackendOps for CudaBackendOps {
     /// 本メソッドは NN・TT・分類不能形状・退化形状を含め
     /// `DeviceMismatch`／`InvalidArgument` 以外では失敗しないため、
     /// `resident_grad_capability` は CUDA でも常に `Some(true)`
-    /// （または致命的なデバイスエラー）へ確定する。
+    /// （または致命的なデバイスエラー）へ確定する（**例外**:
+    /// CUDA Graph capture 中〈本メソッドが `#[cfg(test)]` 外の呼び出しで
+    /// 現状到達しない区間。イシュー #1349 のスコープは update 区間限定
+    /// で backward〈本メソッドの呼び出し元〉は capture 対象外）は
+    /// `context_cache::is_capturing_on_current_thread` により
+    /// `BackendError::Unsupported` を返す——本メソッドは NT/TN 経路の
+    /// ホスト同期〈`stream.synchronize()`〉に加え、NN・TT・分類不能・
+    /// 退化形状のフォールバック〈`gemm_fp32_strict` → `run_tiled_f32`
+    /// 系〉も内部で D2H readback（ホスト同期）を伴うため、いずれの
+    /// 分岐も capture 不能。`gemm_fp32_strict_into_impl` doc コメント
+    /// 参照）。
     fn gemm_fp32_strict_into(
         &self,
         a: &Tensor<f32>,
@@ -3590,6 +3630,45 @@ mod tests {
         assert!(
             matches!(&result, Err(BackendError::Unsupported(msg)) if msg.contains("gemm_fp32_strict_into")),
             "capture 中の with_sync_point_call は Unsupported で拒否されるはず: {result:?}"
+        );
+    }
+
+    /// codex-review 指摘（PR #1569）の再発防止テスト: `gemm_fp32_strict_
+    /// into` の NN 分岐（`dense_transposed_view` がどちらも `None` を
+    /// 返す通常 shape）は `with_sync_point_call`（NT/TN 経路限定）を
+    /// 経由せずフォールバック（`gemm_fp32_strict` → `run_tiled_f32` 系。
+    /// 内部でホスト同期の D2H readback を伴う）へ進むため、修正前は
+    /// capture 中でも `cached_gemm` 取得（`with_driver_call`。同一
+    /// スレッド capture 中は通過する設計）を経て実際に driver へ触れ
+    /// うる欠陥があった。`gemm_fp32_strict_into_impl` 冒頭の共通入口
+    /// 検査（`context_cache::is_capturing_on_current_thread`）が
+    /// **どの driver 呼び出しよりも前**に `Unsupported` で拒否する
+    /// ことを、GPU 不要（`begin_capture_session` は純粋な状態機械
+    /// 操作。driver ハンドルを一切取得しない未初期化 ordinal で検証する
+    /// ことで「driver に到達する前に拒否された」ことを間接的に確認する）
+    /// で検証する。
+    #[test]
+    fn gemm_fp32_strict_into_rejects_nn_fallback_branch_before_touching_driver_while_capturing() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let _guard = context_cache::begin_capture_session(ordinal)
+            .expect("begin_capture_session は driver 非依存の状態機械操作のため成功するはず");
+
+        // NN（両オペランドとも `dense_transposed_view` が `None` を返す
+        // 通常 shape）。転置カーネル可用性照会（`transpose_smem_f32_
+        // available`）にすら到達せず、本関数入口で拒否されるはず。
+        let a = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let mut out = DeviceBuffer::new(Device::Cuda(ordinal), vec![0], Box::new(EmptyHandle));
+
+        let result = cuda.gemm_fp32_strict_into(&a, &b, &mut out, 0);
+        assert!(
+            matches!(&result, Err(BackendError::Unsupported(msg)) if msg.contains("gemm_fp32_strict_into")),
+            "capture 中の gemm_fp32_strict_into（NN フォールバック分岐）は \
+             with_sync_point_call を経由せずとも本関数入口で Unsupported を \
+             返すはず: {result:?}"
         );
     }
 }
