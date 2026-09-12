@@ -87,8 +87,21 @@ before_lines="$(wc -l <"$OUT_DIR/before_bits.txt" | tr -d ' ')"
 after_lines="$(wc -l <"$OUT_DIR/after_bits.txt" | tr -d ' ')"
 echo "before_lines=$before_lines after_lines=$after_lines" >"$OUT_DIR/line_counts.txt"
 
+# README の受け入れ条件は「4782 行・差分 0」（#1480 実績値）。diff が
+# 0（テキストとして一致）でも、before/after が同一箇所で行を欠落させた
+# まま揃っていれば `diff` は差分なしと報告してしまう（例: 両者とも
+# 早期終了・出力形式変化で 0 行や途中打ち切りの部分一致になるケース）。
+# 成功と判定する前に両ファイルが期待行数 4782 と一致することを検査し、
+# 一致しなければ「diff は 0 でも判定不能」として非 0 終了にする
+# （イシュー #1560 codex-review [P2] 指摘）。
+readonly EXPECTED_BITDUMP_LINES=4782
+if [[ "$before_lines" -ne "$EXPECTED_BITDUMP_LINES" || "$after_lines" -ne "$EXPECTED_BITDUMP_LINES" ]]; then
+  echo "判定不能: before_lines=${before_lines} after_lines=${after_lines} が期待行数 ${EXPECTED_BITDUMP_LINES} と一致しない（diff_rc=${diff_rc}。$OUT_DIR/line_counts.txt を参照）" >&2
+  exit 2
+fi
+
 if [[ "$diff_rc" -eq 0 ]]; then
-  echo "OK: before/after は ${before_lines} 行すべて bit 同一（#1480 実績値 4782 行と突合すること）" >&2
+  echo "OK: before/after は ${before_lines} 行すべて bit 同一（#1480 実績値 4782 行と一致）" >&2
   exit 0
 elif [[ "$diff_rc" -eq 1 ]]; then
   echo "NG: before/after の出力が bit 同一でない（diff は $OUT_DIR/bitdump_diff.txt を参照）" >&2

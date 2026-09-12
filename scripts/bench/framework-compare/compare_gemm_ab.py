@@ -725,6 +725,19 @@ def main(argv):
             "結線維持不可』を人間が機械的に確認するための値）"
         ),
     )
+    parser.add_argument(
+        "--require-checksum-exact",
+        action="store_true",
+        help=(
+            "既定 off（後方互換。既存呼び出しは `checksum_composite_match` "
+            "のみで判定する契約を維持する）。指定時は各セルの "
+            "`checksum_exact_match` が False の場合も、比が threshold 内で"
+            "あっても non-regression 判定から除外し、終了コードへ反映する"
+            "（イシュー #1560 codex-review [P1] 指摘: 事前登録規則が "
+            "reuse セルの checksum 完全一致を必須としている呼び出し向けの"
+            "明示 opt-in）"
+        ),
+    )
     args = parser.parse_args(argv[1:])
     if args.phases is not None and args.task != "train":
         print("ERROR: --phases は --task train と併用する場合のみ有効", file=sys.stderr)
@@ -804,6 +817,13 @@ def main(argv):
         after_rows_k = [r for r in rows if r.get("_is_after")]
         result = evaluate_cell(before_rows_k, after_rows_k, args.threshold)
         if result["status"] != "ok" or result.get("verdict") != "非後退":
+            any_bad = True
+        elif args.require_checksum_exact and not result.get("checksum_exact_match", False):
+            print(
+                f"NG: {key} は checksum_exact_match=False のため "
+                "--require-checksum-exact により後退相当として扱う",
+                file=sys.stderr,
+            )
             any_bad = True
     return 3 if any_bad else 0
 

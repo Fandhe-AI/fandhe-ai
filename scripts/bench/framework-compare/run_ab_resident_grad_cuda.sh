@@ -179,7 +179,15 @@ nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits >"$OUT/nvid
 # 3=後退）を保存し、非 0 終了を `ANY_FAILED` へ反映してスクリプト
 # 全体の終了コードへ伝播させる（codex-review [P1] 指摘: 計測プロセス
 # 自体が成功していても、必須の A/B 判定失敗を検出できなければならない）。
+# `--require-checksum-exact` を明示指定する: 事前登録規則は reuse セルの
+# checksum 完全一致（`checksum_exact_match`）を必須としているが、
+# `compare_gemm_ab.py` は複合誤差判定（`checksum_composite_match`）のみを
+# 終了コードへ反映する既定契約のため、これを付けない限り
+# checksum 不一致でも性能比が threshold 内なら成功扱いになってしまう
+# （codex-review [P1] 指摘。PR #1655）。フラグは opt-in のため既存呼び出し
+# （複合判定のみで足りる用途）の契約は変えない。
 python3 compare_gemm_ab.py --device cuda --task train --threshold 1.00 --per-run --modes reuse --phases \
+  --require-checksum-exact \
   "$OUT/results-before-${LABEL}-phases.jsonl" "$OUT/results-after-${LABEL}-phases.jsonl" \
   "$OUT/results-before-${LABEL}-train.jsonl" "$OUT/results-after-${LABEL}-train.jsonl" \
   >"compare-train-${LABEL}.md" 2>"compare-train-${LABEL}.err"
