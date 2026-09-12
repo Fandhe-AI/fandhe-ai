@@ -465,6 +465,20 @@ autodiff-view-recompute-decision.md` を参照）。非 contiguous な
 `reshape` は案 A（エラー。`tensor-core::Tensor::reshape` と同じ方針）を
 踏襲する。
 
+**イシュー #1621 追加**: 線形代数（`inv`／`solve`／`det`／`cholesky`／
+`qr`／`svd`）・`matrix_norm` を追加した（REQ-9 2026-09-12 追記・
+`docs/spec/04-requirements.md:232` の Tier 2 列挙対応）。既存演算と
+異なり全て rank-2 限定（バッチ次元は対象外）で、`push_eager` の非
+elementwise ノードとして記録する。`qr`／`svd` はテープが 1 ノード
+1 出力の制約のため出力ごとに別ノード（`QrQ`／`QrR`、`SvdU`／`SvdS`／
+`SvdVh`）を積む多出力設計を採る（コタンジェントに線形なことを利用し
+各ノードが部分寄与を返し `Tape::backward` が合算する。`view_node_fan_
+out_accumulates_gradient` と同じ蓄積機構）。CPU は実装済み、CUDA／
+Metal は既定 `Unsupported`（`BackendOps::linalg_*` は非破壊拡張の
+デフォルトメソッド。`gemm_checksum` と同型）。設計判断・数値契約
+（`f64` 内部計算・符号／ゲージ規約・エラー分類）の詳細は `docs/
+autodiff-linalg-design.md` を参照。
+
 ## 4. backend 入口公開 API
 
 ### 4.1 デバイス選択

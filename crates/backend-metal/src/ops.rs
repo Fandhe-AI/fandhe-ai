@@ -34,8 +34,9 @@
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DispatchFailureCell, FusionPlan, MseReduction, ShapeError, Tensor,
-    require_same_shape, row_norm_layout, row_softmax_layout,
+    Activation, BackendOps, DispatchFailureCell, FusionPlan, MatrixNormOrd, MseReduction,
+    QrFactors, ShapeError, SvdFactors, Tensor, require_same_shape, row_norm_layout,
+    row_softmax_layout,
 };
 
 use crate::context::MetalContext;
@@ -1655,6 +1656,70 @@ impl BackendOps for MetalBackendOps {
     fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "MetalBackendOps::max: reduction カーネル未実装（TASK-1.9c スコープ外）".into(),
+        ))
+    }
+
+    /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は
+    /// GPU カーネル未実装（設計文書「スコープ外」節）。既定
+    /// `Unsupported` を明示オーバーライドし、`device_handle()` を経由
+    /// しない（`Self::sum`／`Self::max` と同じ方針。`backend-cuda::ops::
+    /// CudaBackendOps` と同様の対称な整備）。
+    fn linalg_inv(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::linalg_inv: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
+                .into(),
+        ))
+    }
+
+    fn linalg_solve(
+        &self,
+        _a: &Tensor<f32>,
+        _b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::linalg_solve: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
+                .into(),
+        ))
+    }
+
+    fn linalg_det(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::linalg_det: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
+                .into(),
+        ))
+    }
+
+    fn linalg_cholesky(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::linalg_cholesky: 線形代数カーネル未実装（イシュー #1621 \
+             スコープ外）"
+                .into(),
+        ))
+    }
+
+    fn linalg_qr(&self, _a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::linalg_qr: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
+                .into(),
+        ))
+    }
+
+    fn linalg_svd(&self, _a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::linalg_svd: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
+                .into(),
+        ))
+    }
+
+    fn linalg_matrix_norm(
+        &self,
+        _a: &Tensor<f32>,
+        _ord: MatrixNormOrd,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::linalg_matrix_norm: 線形代数カーネル未実装（イシュー #1621 \
+             スコープ外）"
+                .into(),
         ))
     }
 
