@@ -1810,27 +1810,43 @@ resident-grad-device-update.md` の bias 追記も本節の内容へ整合させ
 実機（Apple Silicon・CUDA）での forward/backward 経路混在時の非後退
 確認は Mac／GB10 実機セッションへ申し送る。
 
-### 10.13 #1666 codex-review 指摘を受けた判定契約の 2 層構造化（2026-09-12）
+### 10.13 #1666 codex-review 指摘を受けた判定契約の 2 層構造化（2026-09-12。最終形）
 
 §10.8〜§10.12 が繰り返し使ってきた「REQ-2 統一複合判定」（bias 勾配の
 Metal カーネル・ホスト `f64` 参照実装間の一致判定）は、契約 PR #1666
-（bias 縮約判定方式そのものを扱う別 PR）への codex-review 指摘「除外
-範囲を事前判定できる検証可能な契約にせよ」を受け、以後 **2 層構造**へ
-改める:
+（bias 縮約判定方式そのものを扱う別 PR）への codex-review 指摘
+（P1「除外範囲を事前判定できる検証可能な契約にせよ」・追加 P1「`O(n·ε²)`
+が計算不能」・P2「`f64` 逐次和と厳密和の混同」）を受け、以後 **2 層
+構造**へ改める（初版は `O` 記法・「真値」表現を含んでいたため本節で
+明示式・用語へ確定させた）:
 
-- **Tier A（全入力に常に適用）**: Metal bias 勾配 `y_metal` とホスト
-  `f64` 逐次和の downcast `y_f64` の差が、Neumaier 補償和の理論上界
-  `|Δ| ≤ C·ε32·Σ|x_i|`（`ε32 = 2^-24`・`C = 3`）を満たす。導出・
-  Rust ホストモデルでの実測（`crates/backend-metal/tests/gemm_bias_
-  scale_sum_host_model.rs::{tier_a_holds_for_cancelling_extreme_
-  magnitude_sequence, tier_a_holds_for_existing_rounding_prone_and_
-  overflow_cases, tier_a_holds_for_high_kappa_random_columns}`）は
-  同ファイルのコメントを正とする（観測最大比 ≈ 3×10⁻⁸ で `C=3` に
-  対し十分な安全マージンを確認済み）。
-- **Tier B（REQ-2 複合判定）**: `C·ε32·Σ|x_i| ≤ max(1e-3·|S_f64|,
-  1e-5)` が入力から事前に成立する列（条件数 `κ = Σ|x_i| / |S|` の
-  上限と等価）にのみ適用する、従来どおりの相対誤差 1e-3 未満 または
-  絶対誤差 1e-5 未満の判定。
+- **参照値**: `S_ref` は入力列 `xs` をホスト `f64` で **index 順に
+  逐次加算**した和（`reduce_bias_grad_rows_host`／`eval::reduce_bias_
+  grad_rows` と同じ縮約順序。「厳密和」「真値」という語は使わない
+  ——`S_ref` はあくまで参照実装が計算する具体的な値）。`y_ref` は
+  `S_ref` を 1 回 downcast した `f32`。
+- **Tier A（全入力に常に適用）**: Metal bias 勾配 `y_metal` と `y_ref`
+  の差が、明示式の理論上界
+  `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`
+  （`ε32 = 2^-24`・`n` は縮約要素数〈行数 `m`〉・有効範囲
+  `n < 2^24`。`O` 記法は使わない）を満たす。`Σ|x_i|` はホスト `f64`
+  で index 順に累積する。導出・Rust ホストモデルでの実測
+  （`crates/backend-metal/tests/gemm_bias_scale_sum_host_model.rs::
+  {tier_a_holds_for_cancelling_extreme_magnitude_sequence,
+  tier_a_holds_for_existing_rounding_prone_and_overflow_cases,
+  tier_a_holds_for_high_kappa_random_columns,
+  tier_b_predicate_selects_expected_cases_and_matches_assert_parity}`）
+  は同ファイルのコメントを正とする（観測最大比 ≈ 3×10⁻⁸ で加法定数
+  `3` に対し十分な安全マージンを確認済み）。
+- **Tier B（REQ-2 複合判定）**: `(3 + n·ε32)·ε32·Σ|x_i| ≤
+  max(1e-3·|S_ref|, 1e-5)` が入力から事前に成立する列（条件数
+  `κ = Σ|x_i| / |S_ref|` の上限と等価）にのみ、従来どおりの相対誤差
+  1e-3 未満 または 絶対誤差 1e-5 未満（`assert_parity`）を適用する。
+  不成立列（例: `[2^48, 2^24, 1, -2^48, -2^24]`。`κ` が極端に高い）は
+  Tier A のみで検証する。逆に、条件数の低い列（例: `[3.0, 4.0,
+  -2.0]`）は Tier B が成立し `assert_parity` を実際に適用できる
+  （両者の機械検査は `tier_b_predicate_selects_expected_cases_and_
+  matches_assert_parity` 参照）。
 
 **§10.8〜§10.12 の「REQ-2 統一複合判定」という表現は、この 2 層構造の
 うち Tier B を指すものとして読み替える**（過去の記述自体は変更せず、

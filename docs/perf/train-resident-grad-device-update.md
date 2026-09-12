@@ -423,14 +423,23 @@ train reuse A/B・`metal_reuse_step_grad_bit_dump` の Mac 実機比較は、bia
 で行う（step 0 の bias 縮約自体のみが直接の変更対象であり、その後の伝播は
 間接的な帰結）。
 
-**追補（イシュー #1666・codex-review P1「除外範囲を事前判定できる検証可能な
-契約にせよ」を受けた 2 層構造化。2026-09-12）**: 上記「REQ-2 統一複合判定」は
-Metal bias 縮約カーネル（`gemm_bias_grad_reduce_f32`）とホスト `f64` 参照実装
-（`eval::reduce_bias_grad_rows` 等）の一致判定として、以後 **Tier A（理論上界。
-全入力へ常に適用）**・**Tier B（REQ-2 複合判定。Tier A の上界が事前に REQ-2
-閾値以下と分かる列にのみ適用）** の 2 層構造で扱う。Tier A は Neumaier 補償和の
-古典的前方誤差上界 `|Δ| ≤ C·ε32·Σ|x_i|`（`ε32 = 2^-24`・`C = 3`）で、上記の
-「REQ-2 統一複合判定」という表現はこの 2 層構造のうち Tier B を指す。契約の
-正本・導出・実測（Rust ホストモデルでの観測比実測）は `docs/metal-grad-
-reduction-parity-judgment-decision.md`（予定）を参照し、本 doc では重複記載
-しない。
+**追補（イシュー #1666・codex-review 指摘〈P1「除外範囲を事前判定できる検証
+可能な契約にせよ」・追加 P1「`O(n·ε²)` が計算不能」・P2「`f64` 逐次和と厳密和
+の混同」〉を受けた 2 層構造化・最終形。2026-09-12）**: 上記「REQ-2 統一複合
+判定」は Metal bias 縮約カーネル（`gemm_bias_grad_reduce_f32`）とホスト `f64`
+参照実装（`eval::reduce_bias_grad_rows` 等）の一致判定として、以後次の 2 層
+構造で扱う。
+
+- **参照値**: `S_ref` は入力列をホスト `f64` で **index 順に逐次加算**した和
+  （「厳密和」「真値」という語は使わない）。`y_ref` は `S_ref` を 1 回
+  downcast した `f32`。
+- **Tier A（全入力へ常に適用）**: 明示式の理論上界
+  `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`（`ε32 = 2^-24`・`n` は
+  縮約要素数〈行数〉・有効範囲 `n < 2^24`。`O` 記法は使わない）。
+- **Tier B（REQ-2 複合判定）**: `(3 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|,
+  1e-5)` が入力から事前に成立する列にのみ適用する。
+
+上記の「REQ-2 統一複合判定」という表現はこの 2 層構造のうち Tier B を指す。
+契約の正本・導出・実測（Rust ホストモデルでの観測比実測）は `docs/metal-grad-
+reduction-parity-judgment-decision.md`（予定）・`docs/backend-metal-command-
+batching-design.md` §10.13 を参照し、本 doc では重複記載しない。
