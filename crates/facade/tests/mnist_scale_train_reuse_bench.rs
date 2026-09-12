@@ -350,6 +350,25 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
 /// `ctx.synchronize()` → `download`）経由のままであり、resident 化の
 /// 対象外（回収は部分的）。
 ///
+/// **#1563 追記**: `crates/autodiff/src/grad.rs` の `Op::LinearResident`
+/// VJP で、encode-only の `fill_resident_weight_grad`（d_weight）呼び
+/// 出しを、同期点を持つ `gemm_resident_lhs`（d_input）呼び出しより
+/// **前**へ移した（両者は独立計算のため出力は bit 同一。
+/// `docs/backend-metal-command-batching-design.md` §7.4）。この結果、
+/// 各層の d_weight の GPU コマンドが同じ層の d_input の同期点へ合流
+/// するようになり、L1 の d_weight（従来は窓終了時点で未 commit のまま
+/// 残り、bias 分の `upload_into` の同期 1 回が肩代わりしていた）も
+/// L1 の d_input の同期で完了するようになる。backward 終了時点で open
+/// バッチが残らないため、`upload_into` の防御的 `synchronize()` は
+/// `committed` が空で `waitUntilCompleted` を呼ばない no-op になる
+/// （`crates/backend-metal/src/context.rs::synchronize_observed` の
+/// 契約）。この結果、steady-state 1 step のカウンタは **11 / 8 / 8**
+/// （encode / command_buffer / wait）——encode 総数は変わらず、
+/// command_buffer・wait のみ #1555 の 9 からさらに 1 ずつ減る（d_input
+/// 自身の同期境界 2 件〈L1・L2 各層〉は引き続き残る。回収は部分的。
+/// `docs/backend-metal-command-batching-design.md` §7.4「回収しない
+/// 結論」参照）。
+///
 /// warmup（`WARMUP` step）で MSL パイプライン初回コンパイル・プールの
 /// フリーリスト充足を steady-state 化してから、その次の 1 step だけを
 /// 計測窓に取る（`run_fresh`／`run_reuse` と同じモデル形状・シードだが、
@@ -411,38 +430,39 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
          encode_delta={encode_delta} command_buffer_delta={command_buffer_delta} \
          wait_delta={wait_delta} — before（#1099 適用前）は 9/9/9、#1099 適用直後は \
          9/8/8、#1223（VJP の Metal GPU dispatch 化）適用直後は 11/10/10、#1555 \
-         （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9 \
+         （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9、#1563 \
+         （d_weight encode を d_input の同期点より前へ移し層内で合流）適用後は \
+         11/8/8 \
          （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」\
-         「#1555」節）"
+         「#1555」「#1563」節）"
     );
 
-    // #1555: `gemm_fp32_strict_into`（イシュー #1212 のトレイトメソッド）
-    // を Metal で実装したことで、L1・L2 の `d_weight` は encode-only
-    // （個別 `download` なし）で grad staging バッファへ直接書き込まれる
-    // ようになった（本ファイル冒頭の doc comment・
-    // `docs/device-resident-update-design.md` 追補参照）。encode 総数
-    // （dispatch 総数）自体は #1223 直後から変わらず 11 のまま
-    // （d_weight 計算 2 回の GPU dispatch 自体は残る）だが、コマンド
-    // バッファ生成数・待機回数は「bias 分の `MemoryOps::upload_into` が
-    // 書き込み前に 1 回だけ同期する」ことに集約され、#1223 直後の 10 から
-    // 1 ずつ減って 9 になる（#1099 直後の 8 へは戻らない——`upload_into`
-    // の 1 回の同期自体が残る。回収は部分的。本ファイル冒頭 doc comment
-    // 「#1555 追記」参照）。
+    // #1563: `crates/autodiff/src/grad.rs` の `Op::LinearResident` VJP で
+    // encode-only の d_weight（`fill_resident_weight_grad`）を、同期点を
+    // 持つ d_input（`gemm_resident_lhs`）より前へ移した。両者は独立計算
+    // のため出力は bit 同一のまま、同じ層の d_weight コマンドが d_input
+    // の同期点へ合流するようになり、backward 終了時点で open バッチが
+    // 残らなくなる。この結果 bias 分の `upload_into` の防御的
+    // `synchronize()` が待つ対象を失い（`committed` が空で
+    // `waitUntilCompleted` を呼ばない no-op）、command_buffer_delta・
+    // wait_delta のみ #1555 の 9 からさらに 1 ずつ減って 8 になる
+    // （encode 総数は 11 のまま不変。本ファイル冒頭 doc comment
+    // 「#1563 追記」参照）。
     assert_eq!(
         encode_delta, 11,
         "encode() 呼び出し総数（= dispatch 総数）は #1223（Op::LinearResident \
-         の VJP が Metal GPU dispatch を追加）適用後から #1555 適用後も変わらず \
-         11 のはず（d_weight 計算 2 回の GPU dispatch 自体は残るため）"
+         の VJP が Metal GPU dispatch を追加）適用後から #1555・#1563 適用後も \
+         変わらず 11 のはず（d_weight 計算 2 回の GPU dispatch 自体は残るため）"
     );
     assert_eq!(
-        command_buffer_delta, 9,
-        "コマンドバッファ生成数は #1555（gemm_fp32_strict_into の encode-only \
-         化 + upload_into の同期集約）適用後は 10→9 のはず（bias 分の \
-         upload_into 1 回の同期のみが残る）"
+        command_buffer_delta, 8,
+        "コマンドバッファ生成数は #1563（d_weight encode を d_input の同期点より \
+         前へ移し層内で合流。upload_into の防御的同期が no-op 化）適用後は \
+         9→8 のはず（d_input 自身の同期境界 2 件〈L1・L2〉のみが残る）"
     );
     assert_eq!(
-        wait_delta, 9,
-        "waitUntilCompleted() 呼び出し数は #1555 適用後は 10→9 のはず \
+        wait_delta, 8,
+        "waitUntilCompleted() 呼び出し数は #1563 適用後は 9→8 のはず \
          （command_buffer_delta と同じ理由）"
     );
 }
@@ -458,7 +478,7 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
 /// 切り分けるために `tape.backward_device_param_store` の呼び出し前後
 /// **だけ**でカウンタ・`Instant` 計測を取る。
 ///
-/// # 事前登録仮説（イシュー #1562 codex-review 是正後）
+/// # 事前登録仮説（イシュー #1562 codex-review 是正後・#1563 で更新）
 ///
 /// 当初仮説は backward 区間を「L1・L2 の `d_weight`〈encode-only・
 /// #1555〉+ `d_input`〈`gemm_resident_lhs` 経由・個別 `download` あり〉
@@ -467,12 +487,19 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
 /// `ops.mse_loss_backward` → `run_mse_backward_f32`
 /// （`crates/backend-metal/src/mse.rs`）は**それ自身の
 /// `ctx.dispatch_sync`**（encode + 即時 `synchronize`）を持つ。
-/// この分の GPU dispatch を見落としていた（Bugbot 指摘）。
+/// この分の GPU dispatch を見落としていた（Bugbot 指摘）。#1562 時点
+/// （#1563 適用前）はこれに基づき encode_delta=5・command_buffer_delta=4
+/// ・wait_delta=3 という訂正仮説を記録した（履歴として残す。以下は
+/// #1563 適用後の更新版）。
 ///
-/// backward の VJP 評価順（ノード生成の逆順: `MseLoss` → `L2
-/// LinearResident` → `L1 LinearResident`）と `context.rs::encode`／
-/// `synchronize`（`slots.open.is_none()` の時のみ新規コマンドバッファ
-/// を生成し `diag_command_buffers` を加算。`waitUntilCompleted` ごとに
+/// **#1563 更新**: `crates/autodiff/src/grad.rs` の `Op::LinearResident`
+/// VJP で、encode-only の d_weight（`fill_resident_weight_grad`）呼び
+/// 出しを、同期点を持つ d_input（`gemm_resident_lhs`）呼び出しより前へ
+/// 移した（両者は独立計算のため出力は bit 同一）。backward の VJP
+/// 評価順（ノード生成の逆順: `MseLoss` → `L2 LinearResident` → `L1
+/// LinearResident`）と `context.rs::encode`／`synchronize`
+/// （`slots.open.is_none()` の時のみ新規コマンドバッファを生成し
+/// `diag_command_buffers` を加算。`waitUntilCompleted` ごとに
 /// `diag_wait_until_completed` を加算）の契約から、次のイベント列を
 /// 導出する（`before` snapshot 直前の `loss.to_tensor().get(&[])` が
 /// forward 側のバッチを既に flush・wait 済みのため、backward 開始時点
@@ -480,35 +507,39 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
 ///
 /// 1. `MseLoss` VJP の `dispatch_sync`: encode #1（新規 cb #1）→
 ///    synchronize（wait #1）
-/// 2. L2 `d_input`（`gemm_resident_lhs`）: encode #2（新規 cb #2）→
-///    synchronize（wait #2）
-/// 3. L2 `d_weight`（encode-only）: encode #3（新規 cb #3。同期しない
+/// 2. L2 `d_weight`（encode-only。#1563 により d_input より先に呼ばれる）:
+///    encode #2（新規 cb #2。同期しないため開いたまま残る）
+/// 3. L2 `d_input`（`gemm_resident_lhs`）: encode #3（cb #2 が開いた
+///    ままのため新規 cb を開かず同じバッチへ追加）→ synchronize
+///    （wait #2。cb #2 を commit・待機——L2 の `d_weight` と `d_input`
+///    が同一バッチに合流する）
+/// 4. L1 `d_weight`（encode-only）: encode #4（新規 cb #3。同期しない
 ///    ため開いたまま残る）
-/// 4. L1 `d_input`: encode #4（cb #3 が開いたままのため新規 cb を
+/// 5. L1 `d_input`: encode #5（cb #3 が開いたままのため新規 cb を
 ///    開かず同じバッチへ追加）→ synchronize（wait #3。cb #3 を
-///    commit・待機——L2 の `d_weight` と L1 の `d_input` が同一バッチに
-///    まとまる）
-/// 5. L1 `d_weight`（encode-only）: encode #5（新規 cb #4。窓終了時点
-///    では未 commit のまま残り、生成タイミングで加算される
-///    `command_buffer_delta` には含まれるが `wait` はこの窓の外）
+///    commit・待機——L1 の `d_weight` と `d_input` が同一バッチに
+///    合流する）
 ///
-/// これに基づく訂正仮説:
+/// これに基づく更新仮説:
 ///
-/// - `encode_delta = 5`（上記 #1〜#5。`MseLoss` の 1 回を追加）
-/// - `command_buffer_delta = 4`（cb #1〜#4 の生成）
-/// - `wait_delta = 3`（wait #1〜#3。cb #4 の wait は窓外）
+/// - `encode_delta = 5`（上記 #1〜#5。#1562 時点から不変）
+/// - `command_buffer_delta = 3`（cb #1〜#3 の生成。#1562 時点の 4 から
+///   1 減る——L1 の `d_weight` がもはや独立した cb を残さず L1 の
+///   `d_input` の cb へ合流するため）
+/// - `wait_delta = 3`（wait #1〜#3。窓終了時点で open バッチが残らない
+///   ため、#1562 時点で「窓外」だった cb #4 の wait 相当も本窓内で
+///   完了する）
 ///
-/// この訂正仮説は「backward 中の `materialize_fallible`（`pred_val`／
+/// この更新仮説は「backward 中の `materialize_fallible`（`pred_val`／
 /// `x_val`／ReLU マスク用 `out_value`）がいずれも forward 時点で
 /// キャッシュ済みの値を返し、新規デバイス同期を伴わない」という
 /// 机上の前提に基づく未検証の仮説であり、実機実測での確認は本イシュー
 /// の実測記入欄（`docs/backend-metal-command-batching-design.md`
-/// §7.3.4）で行う。当初仮説・訂正仮説いずれとの不一致でも assert では
-/// 止めず（本イシューは記録専用・non-gating。受け入れ条件「コード変更は
-/// 無しでもよい」の測定タスク）乖離をログへ残す。
-/// `step_device_param_store`（SGD update）分のカウンタ・時間はこの
-/// 計測窓の外（bias の `upload_into` 同期はここに含まれない。冒頭 doc
-/// comment 「#1564 のスコープ」参照）。
+/// §7.4）で行う。仮説との不一致でも assert では止めず（本テストは
+/// 記録専用・non-gating）乖離をログへ残す。`step_device_param_store`
+/// （SGD update）分のカウンタ・時間はこの計測窓の外（bias の
+/// `upload_into` 同期はここに含まれない。冒頭 doc comment
+/// 「#1564 のスコープ」参照）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn mnist_scale_train_reuse_metal_backward_dinput_phase() {
@@ -590,14 +621,15 @@ fn mnist_scale_train_reuse_metal_backward_dinput_phase() {
         "[mnist_scale_train_reuse_metal_backward_dinput_phase] backward-only \
          median={:.6}ms q1={:.6}ms q3={:.6}ms (n={TRIALS}) \
          encode_deltas={encode_deltas:?} command_buffer_deltas={command_buffer_deltas:?} \
-         wait_deltas={wait_deltas:?} — 事前登録仮説（#1562 codex-review 是正後）: \
-         encode_delta=5（MseLoss VJP の dispatch_sync 1 回 + d_input 2 回 + \
-         d_weight 2 回）・command_buffer_delta=4（cb 生成は MseLoss 1 + \
-         d_input(L2) 1 + [d_weight(L2)+d_input(L1)が同一バッチ] 1 + d_weight(L1) 1）・\
-         wait_delta=3（MseLoss 1 + d_input(L2) 1 + [d_weight(L2)+d_input(L1)合流] \
-         1。d_weight(L1) 分の cb は本窓内で未 wait のまま SGD update 側へ持ち越す）。\
+         wait_deltas={wait_deltas:?} — 事前登録仮説（#1562 codex-review 是正後・\
+         #1563 で更新）: encode_delta=5（MseLoss VJP の dispatch_sync 1 回 + \
+         d_input 2 回 + d_weight 2 回。不変）・command_buffer_delta=3（cb 生成は \
+         MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)\
+         合流] 1。#1562 時点の 4 から 1 減る）・wait_delta=3（MseLoss 1 + \
+         [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。\
+         窓終了時点で open バッチが残らないため全て本窓内で wait 済み）。\
          record only, non-gating（`docs/backend-metal-command-batching-design.md` \
-         §7.3）",
+         §7.4）",
         q.median * 1e3,
         q.q1 * 1e3,
         q.q3 * 1e3,
@@ -609,7 +641,7 @@ fn mnist_scale_train_reuse_metal_backward_dinput_phase() {
         .zip(wait_deltas.iter())
         .enumerate()
     {
-        if encode_delta != 5 || command_buffer_delta != 4 || wait_delta != 3 {
+        if encode_delta != 5 || command_buffer_delta != 3 || wait_delta != 3 {
             println!(
                 "[mnist_scale_train_reuse_metal_backward_dinput_phase] trial {i}: \
                  事前登録仮説から乖離（encode_delta={encode_delta} \

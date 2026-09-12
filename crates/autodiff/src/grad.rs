@@ -277,16 +277,6 @@ pub(crate) fn vjp(
                 }
             };
 
-            // d_input^T = W @ g^T（`W: [k,n]`・`g: [m,n]` → `g^T: [n,m]`
-            // → `tmp: [k,m]`）。`W` はデバイス常駐のまま
-            // `ops.gemm_resident_lhs` へ渡し、ホストへ download しない
-            // （本イシューの受け入れ条件の中核）。
-            let g_t = transpose2d(g);
-            let tmp = ops
-                .gemm_resident_lhs(w_dev, &g_t)
-                .map_err(AutodiffError::Backend)?;
-            let d_input = transpose2d(&tmp);
-
             // d_weight = x^T @ g（既存 `matmul_vjp` の `dB` と同一式。
             // `x`・`g` はいずれもホスト常駐）。イシュー #1211:
             // `ops.gemm_fp32_strict`（forward と同じ CPU BLIS／CUDA／
@@ -335,9 +325,39 @@ pub(crate) fn vjp(
             // `tape_epoch` と併せて resident 書き込みの由来として
             // 実装側（`DeviceParamStore`）へ渡す（`ResidentResolver::
             // fill_resident_weight_grad` doc 参照）。
+            //
+            // イシュー #1563: この `fill_resident_weight_grad`
+            // （encode-only。Metal では GPU コマンドバッファへ積むだけ
+            // で同期しない）を、下の `gemm_resident_lhs`（d_input。
+            // Metal では同期点を持つ）より **前** に呼ぶ。d_weight と
+            // d_input は独立な計算（`x^T @ g` と `W @ g^T`）であり
+            // どちらを先に encode しても出力は bit 同一（構造的に
+            // 保証される順序無依存性）。この順序により、同じ層の
+            // d_weight の GPU コマンドが d_input の同期点へ「合流」し、
+            // 層ごとに開きっぱなしだったコマンドバッファが d_input の
+            // 同期 1 回で一緒に flush・wait される（Metal の同期境界
+            // 回収。`docs/backend-metal-command-batching-design.md`
+            // §7.4）。CPU／CUDA は本経路に同期境界を持たないため本質
+            // 的な影響はない（CUDA の `gemm_fp32_strict_into` NT/TN は
+            // 内部 `stream.synchronize()` を持つが性能中立）。
             let filled_resident = resident.fill_resident_weight_grad(
                 ops, store_id, slot, tape_id, tape_epoch, weight, &x_t, g,
             )?;
+
+            // d_input^T = W @ g^T（`W: [k,n]`・`g: [m,n]` → `g^T: [n,m]`
+            // → `tmp: [k,m]`）。`W` はデバイス常駐のまま
+            // `ops.gemm_resident_lhs` へ渡し、ホストへ download しない
+            // （本イシューの受け入れ条件の中核）。イシュー #1563: 本
+            // 呼び出しの同期点は、直前に encode-only で積んだ同じ層の
+            // d_weight のコマンドバッファも合流させて完了させる合流点
+            // になる（`crates/backend-metal/src/ops.rs::
+            // gemm_resident_lhs` doc 参照）。
+            let g_t = transpose2d(g);
+            let tmp = ops
+                .gemm_resident_lhs(w_dev, &g_t)
+                .map_err(AutodiffError::Backend)?;
+            let d_input = transpose2d(&tmp);
+
             let mut contributions = vec![(input, d_input)];
             if !filled_resident {
                 let d_weight = ops

@@ -161,8 +161,12 @@ update 全体）は速度差が計測ノイズ（±10% 程度）に埋もれて�
 
 ### 5.2 カウンタ変遷
 
-Metal GEMM command batching ベンチ（`crates/backend-metal/tests/
-command_batching_bench.rs::mnist_scale_train_reuse_metal_batch_counters`）において、
+Metal GEMM command batching ベンチ（`crates/facade/tests/
+mnist_scale_train_reuse_bench.rs::mnist_scale_train_reuse_metal_batch_counters`。
+**イシュー #1563 で訂正**: 旧版は所在を `crates/backend-metal/tests/
+command_batching_bench.rs` と誤記していたが、同ファイルは MLP のカウンタ
+期待値を持たず〈`command_buffer_delta < encode_delta` のみ〉、正しい所在は
+`crates/facade/tests/mnist_scale_train_reuse_bench.rs` である）において、
 `d_weight` GEMM の同期境界が最適化されたことを確認:
 
 - before（#1099 直後）: 11 dispatch（`encode_delta`）/ 10 command_buffer / 10 wait
@@ -229,7 +233,7 @@ bias `upload_into` の synchronize へ移動）。これは **同期点の移動
   引き継ぎ
 - bias 勾配自体のデバイス常駐化（デバイス側列縮約カーネル必要。現状は bias は常にホスト経由
   で `upload_into`）
-- `d_input` GEMM の同期境界解消（従来どおり `gemm()` → `download` 経路。スコープ外）
+- `d_input` GEMM の同期境界解消（従来どおり `gemm_resident_lhs()` → `download` 経路。本イシュー〈#1555〉のスコープ外。**イシュー #1563 で更新**: 層内合流〈encode-only の d_weight を d_input の同期点より前へ移す〉のみ実施し、d_input 自身の同期境界 2 件は回収しないと結論した。L1 の d_input を丸ごと省略する #1219 の opt-in スキップ、または L2→L1 間を常駐チェーン化する新規カーネル案は、いずれもユーザー承認後の別イシューへ引き継ぐ〈`docs/backend-metal-command-batching-design.md` §7.4〉）
 
 ## 6. #1559 CUDA 実装
 
@@ -301,3 +305,23 @@ GB10 実機を持つセッションへ実測を申し送る。
 | CUDA Graph capture 副次観測 | 未実測 |
 
 実測完了後、本節を実測値で更新すること（事前登録規則の事後緩和は行わない）。
+
+## 8. #1563 層内合流の実装・前後比較（記入欄）
+
+`Op::LinearResident` VJP で encode-only の d_weight（`fill_resident_
+weight_grad`）を、同期点を持つ d_input（`gemm_resident_lhs`）より前へ
+移す変更（層内合流。設計・結論は `docs/backend-metal-command-batching-
+design.md` §7.4 を正とし本節では重複記載しない）の前後比較記入欄。
+
+| 項目 | 結果 |
+|---|---|
+| bit 同一（`metal_reuse_step_grad_bit_dump`。4462 行） | 未実測 |
+| `#[ignore]` 非後退 | 未実測 |
+| カウンタ（`mnist_scale_train_reuse_metal_batch_counters`。hard assert） | 未実測（期待: before 11/9/9 → after 11/8/8） |
+| カウンタ（`mnist_scale_train_reuse_metal_backward_dinput_phase`。record-only） | 未実測（期待仮説: before 5/4/3 → after 5/3/3） |
+| A/B reuse `step_total` 判定（`run_ab_dinput_sync_metal.sh`） | 未実測 |
+| fresh 対照セル | 未実測 |
+
+実測は `docs/perf/logs/metal-dinput-sync-1563/`（生ログ・env_info）へ
+記録し、実測完了後に本節を実測値で更新すること（事前登録規則の事後
+緩和は行わない）。
