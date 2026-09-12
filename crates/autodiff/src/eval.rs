@@ -28,6 +28,11 @@ use fandhe_ai_tensor_core::Tensor;
 use crate::layout;
 use crate::var::Reduction;
 
+/// 線形代数（inv／solve／det／qr／cholesky／svd）・matrix_norm のホスト
+/// 参照実装（イシュー #1621）。行数が大きいため子モジュールへ分ける
+/// （モジュール冒頭コメント参照）。
+pub(crate) mod linalg;
+
 std::thread_local! {
     /// `matmul`（下記）が転置 view（`grad.rs::transpose2d` が作る
     /// zero-copy view）を `layout::classify_2d` で分類できず、

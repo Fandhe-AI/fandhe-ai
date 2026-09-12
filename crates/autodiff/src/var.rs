@@ -16,8 +16,8 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, ChecksumReadout, GemmChecksum, MseReduction, ShapeError, Tensor,
-    broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
+    Activation, BackendError, ChecksumReadout, GemmChecksum, MatrixNormOrd, MseReduction,
+    ShapeError, Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 
 use crate::error::AutodiffError;
@@ -704,6 +704,328 @@ impl<'t> Var<'t> {
         );
         Ok(Var::from_raw(self.tape, id))
     }
+
+    /// `A^{-1}`（`A: [n,n]`）。イシュー #1621・親イシュー #1573
+    /// 「Tier 2: 線形代数」・`docs/spec/04-requirements.md` REQ-9
+    /// 2026-09-12 追記・`docs/autodiff-linalg-design.md`。
+    ///
+    /// 検査順序（`mse_loss_with` と同じ規律）: ①shape 検査（rank-2・
+    /// 正方）→ ②入力実体化（層 1）→ ③`self.tape.ops().linalg_inv` を
+    /// 試み `Err(BackendError::Unsupported(_))` のときのみ
+    /// `eval::linalg::inv`（ホスト参照実装）へフォールバック（それ以外の
+    /// エラー〈特異行列の `InvalidArgument` 等〉は伝播する。判定迂回
+    /// 経路を作らない。`.claude/rules/security.md` A08）→ ④ノード記録。
+    pub fn inv(&self) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        require_square(&shape, "Var::inv")?;
+        let a_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().linalg_inv(&a_val) {
+            Ok(v) => {
+                verify_shape(v.shape(), &shape)?;
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::linalg::inv(&a_val)?,
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(Op::Inv { input: self.id }, value);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `A X = B` を解く（`self: [n,n]`・`b: [n,k]` → `[n,k]`）。
+    /// イシュー #1621。`inv` と同じ二段フォールバック規律。
+    pub fn solve(&self, b: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(b)?;
+        let a_shape = self.shape();
+        let n = require_square(&a_shape, "Var::solve")?;
+        let b_shape = b.shape();
+        if b_shape.len() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: b_shape.len(),
+            }));
+        }
+        if b_shape[0] != n {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::solve: a の行数 {n} と b の行数 {} が一致しない",
+                b_shape[0]
+            )));
+        }
+        let (a_val, b_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let a_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let b_val = materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone();
+            (a_val, b_val)
+        };
+        let expected_shape = vec![n, b_shape[1]];
+        let value = match self.tape.ops().linalg_solve(&a_val, &b_val) {
+            Ok(v) => {
+                verify_shape(v.shape(), &expected_shape)?;
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::linalg::solve(&a_val, &b_val)?,
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::Solve {
+                a: self.id,
+                b: b.id,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `det(A)`（`A: [n,n]` → スカラー `[]`）。イシュー #1621。特異行列は
+    /// forward で `0.0`（エラーにしない。`eval::linalg::det` doc・
+    /// `torch.linalg.det` と同じ挙動）。
+    pub fn det(&self) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        require_square(&shape, "Var::det")?;
+        let a_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().linalg_det(&a_val) {
+            Ok(v) => {
+                verify_shape(v.shape(), &[])?;
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::linalg::det(&a_val),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(Op::Det { input: self.id }, value);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// Cholesky 分解（`A: [n,n]`〈対称正定値。下三角のみ読む〉→
+    /// `L: [n,n]`〈下三角、`A = L Lᵀ`〉）。イシュー #1621。非正定値は
+    /// `AutodiffError::InvalidArgument`。
+    pub fn cholesky(&self) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        require_square(&shape, "Var::cholesky")?;
+        let a_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().linalg_cholesky(&a_val) {
+            Ok(v) => {
+                verify_shape(v.shape(), &shape)?;
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::linalg::cholesky(&a_val)?,
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(Op::Cholesky { input: self.id }, value);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// reduced QR 分解（`A: [m,n]` → [`QrVars`]。`k = min(m,n)`）。
+    /// イシュー #1621。
+    ///
+    /// **多出力の扱い**（`docs/autodiff-linalg-design.md` §3.3）: テープは
+    /// 1 ノード 1 出力のため `Q`／`R` を別ノード（[`Op::QrQ`]／
+    /// [`Op::QrR`]）として積む。各ノードは兄弟ノードの forward 値を
+    /// payload として保持し、VJP（`grad.rs`）はコタンジェントに線形な
+    /// ことを利用して各出力ノードの部分寄与を返す
+    /// （`Tape::backward` が入力ノードへ合算する）。
+    pub fn qr(&self) -> Result<QrVars<'t>, AutodiffError> {
+        let shape = self.shape();
+        if shape.len() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: shape.len(),
+            }));
+        }
+        let (m, n) = (shape[0], shape[1]);
+        let k = m.min(n);
+        let a_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let (q_val, r_val) = match self.tape.ops().linalg_qr(&a_val) {
+            Ok(factors) => {
+                verify_shape(factors.q.shape(), &[m, k])?;
+                verify_shape(factors.r.shape(), &[k, n])?;
+                (factors.q, factors.r)
+            }
+            Err(BackendError::Unsupported(_)) => eval::linalg::qr(&a_val),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let q_id = self.tape.push_eager(
+            Op::QrQ {
+                input: self.id,
+                r: r_val.clone(),
+            },
+            q_val.clone(),
+        );
+        let r_id = self.tape.push_eager(
+            Op::QrR {
+                input: self.id,
+                q: q_val,
+            },
+            r_val,
+        );
+        Ok(QrVars {
+            q: Var::from_raw(self.tape, q_id),
+            r: Var::from_raw(self.tape, r_id),
+        })
+    }
+
+    /// reduced SVD（`A: [m,n]` → [`SvdVars`]。`k = min(m,n)`）。
+    /// イシュー #1621。`qr` と同じ多出力設計（[`Op::SvdU`]／
+    /// [`Op::SvdS`]／[`Op::SvdVh`]）。反復が収束しない場合は
+    /// `AutodiffError::InvalidArgument`。
+    pub fn svd(&self) -> Result<SvdVars<'t>, AutodiffError> {
+        let shape = self.shape();
+        if shape.len() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: shape.len(),
+            }));
+        }
+        let (m, n) = (shape[0], shape[1]);
+        let k = m.min(n);
+        let a_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let (u_val, s_val, vh_val) = match self.tape.ops().linalg_svd(&a_val) {
+            Ok(factors) => {
+                verify_shape(factors.u.shape(), &[m, k])?;
+                verify_shape(factors.s.shape(), &[k])?;
+                verify_shape(factors.vh.shape(), &[k, n])?;
+                (factors.u, factors.s, factors.vh)
+            }
+            Err(BackendError::Unsupported(_)) => eval::linalg::svd(&a_val)?,
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let u_id = self.tape.push_eager(
+            Op::SvdU {
+                input: self.id,
+                s: s_val.clone(),
+                vh: vh_val.clone(),
+            },
+            u_val.clone(),
+        );
+        let s_id = self.tape.push_eager(
+            Op::SvdS {
+                input: self.id,
+                u: u_val.clone(),
+                vh: vh_val.clone(),
+            },
+            s_val.clone(),
+        );
+        let vh_id = self.tape.push_eager(
+            Op::SvdVh {
+                input: self.id,
+                u: u_val,
+                s: s_val,
+            },
+            vh_val,
+        );
+        Ok(SvdVars {
+            u: Var::from_raw(self.tape, u_id),
+            s: Var::from_raw(self.tape, s_id),
+            vh: Var::from_raw(self.tape, vh_id),
+        })
+    }
+
+    /// 行列ノルム（`A: [m,n]`・`ord` → スカラー `[]`）。イシュー #1621。
+    /// `ord` が [`MatrixNormOrd::Nuc`]／[`MatrixNormOrd::Spectral`] の
+    /// 場合、フォールバック実装（`eval::linalg::matrix_norm`）内部で
+    /// 特異値分解を用いる（`Var` 側で `svd` ノードを合成しない設計。
+    /// `docs/autodiff-linalg-design.md` §3.2）。
+    pub fn matrix_norm(&self, ord: MatrixNormOrd) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        if shape.len() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: shape.len(),
+            }));
+        }
+        let a_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().linalg_matrix_norm(&a_val, ord) {
+            Ok(v) => {
+                verify_shape(v.shape(), &[])?;
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::linalg::matrix_norm(&a_val, ord)?,
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::MatrixNorm {
+                input: self.id,
+                ord,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+}
+
+/// rank-2・正方であることを検査し、辺長 `n` を返す（線形代数演算
+/// 共通のヘルパー。イシュー #1621）。非正方は `ShapeError` の既存
+/// variant で意味的に表現できないため `AutodiffError::InvalidArgument`
+/// とする（`cross_entropy_loss` の target 範囲検査と同方針）。
+fn require_square(shape: &[usize], op_name: &str) -> Result<usize, AutodiffError> {
+    if shape.len() != 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    if shape[0] != shape[1] {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{op_name}: 正方行列（[n,n]）が必要（形状 {shape:?}）"
+        )));
+    }
+    Ok(shape[0])
+}
+
+/// バックエンド実装（`BackendOps::linalg_*`）の戻り値 shape が契約
+/// （doc comment）どおりであることを検証する（`mse_loss_with` の
+/// 「バックエンド実装の契約を検証する」規律と同型。実装バグの黙認
+/// 防止。`.claude/rules/security.md` A08）。
+fn verify_shape(actual: &[usize], expected: &[usize]) -> Result<(), AutodiffError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: actual.to_vec(),
+                rhs: expected.to_vec(),
+            },
+        )))
+    }
+}
+
+/// [`Var::qr`] の戻り値。`Q`（`[m,k]`）・`R`（`[k,n]`）は別テープノード
+/// （多出力設計。`Op::QrQ`／`Op::QrR` doc 参照）。
+#[derive(Debug, Clone, Copy)]
+pub struct QrVars<'t> {
+    /// `[m, k]`（`k = min(m, n)`）。列直交。
+    pub q: Var<'t>,
+    /// `[k, n]`（`k = min(m, n)`）。上三角・対角非負。
+    pub r: Var<'t>,
+}
+
+/// [`Var::svd`] の戻り値。`U`（`[m,k]`）・`S`（`[k]`）・`Vh`（`[k,n]`）は
+/// 別テープノード（多出力設計。`Op::SvdU`／`Op::SvdS`／`Op::SvdVh` doc
+/// 参照）。
+#[derive(Debug, Clone, Copy)]
+pub struct SvdVars<'t> {
+    /// `[m, k]`（`k = min(m, n)`）。列直交。
+    pub u: Var<'t>,
+    /// `[k]`。特異値（降順・非負）。
+    pub s: Var<'t>,
+    /// `[k, n]`（`k = min(m, n)`）。行直交（`V^T`）。
+    pub vh: Var<'t>,
 }
 
 /// [`Var::host_view`] が返す借用ビュー（イシュー #1335。P1 是正で

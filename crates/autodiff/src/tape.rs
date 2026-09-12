@@ -260,6 +260,59 @@ pub(crate) enum Op {
         dim0: usize,
         dim1: usize,
     },
+    /// 線形代数（イシュー #1621・親イシュー #1573「Tier 2」・`docs/
+    /// spec/04-requirements.md` REQ-9 2026-09-12 追記・`docs/
+    /// autodiff-linalg-design.md`）。`BackendOps` に対応メソッドがある
+    /// （既定 `Unsupported`）ため融合対象外とし常に実体化済み
+    /// （`push_eager`）。`Var::inv` doc の二段フォールバック（バックエンド
+    /// 実装 → `Unsupported` のときのみ `eval::linalg::inv`）参照。
+    Inv { input: NodeId },
+    /// `A X = B`（`a: [n,n]`・`b: [n,k]`）。`Var::solve` 参照。
+    Solve { a: NodeId, b: NodeId },
+    /// `det(A)`（`A: [n,n]` → スカラー `[]`）。特異行列は forward で
+    /// `0.0`（エラーにしない。`eval::linalg::det` doc 参照）。
+    Det { input: NodeId },
+    /// Cholesky 分解（`A: [n,n]` → 下三角 `L`）。`Var::cholesky` 参照。
+    Cholesky { input: NodeId },
+    /// reduced QR の `Q` 出力ノード（イシュー #1621・`docs/
+    /// autodiff-linalg-design.md` §3.3「多出力の扱い」）。テープは
+    /// 1 ノード 1 出力のため `Q`／`R` を別ノードとして積む。VJP は
+    /// コタンジェントに線形なので、各出力ノードが「自分の upstream
+    /// だけを非ゼロ、他をゼロ」とした部分寄与を返し、`Tape::backward`
+    /// が入力ノードへ合算すれば全体の VJP に一致する（`view_node_fan_
+    /// out_accumulates_gradient` と同じ蓄積機構）。`r` は兄弟ノード
+    /// `Op::QrR` の forward 値を `Arc` 共有で安価に保持する
+    /// （`CrossEntropyLoss.targets` と同型の非追跡ペイロード）。
+    QrQ { input: NodeId, r: Tensor<f32> },
+    /// reduced QR の `R` 出力ノード（`QrQ` と対になる）。`q` は兄弟ノード
+    /// `Op::QrQ` の forward 値。
+    QrR { input: NodeId, q: Tensor<f32> },
+    /// reduced SVD の `U` 出力ノード（`QrQ`／`QrR` と同じ多出力設計）。
+    /// `s`／`vh` は兄弟ノードの forward 値。
+    SvdU {
+        input: NodeId,
+        s: Tensor<f32>,
+        vh: Tensor<f32>,
+    },
+    /// reduced SVD の `S`（特異値ベクトル）出力ノード。
+    SvdS {
+        input: NodeId,
+        u: Tensor<f32>,
+        vh: Tensor<f32>,
+    },
+    /// reduced SVD の `Vh` 出力ノード。
+    SvdVh {
+        input: NodeId,
+        u: Tensor<f32>,
+        s: Tensor<f32>,
+    },
+    /// 行列ノルム（`Var::matrix_norm`。`Fro`／`One`／`Inf`／`Nuc`／
+    /// `Spectral` の 5 ord すべてを 1 variant で扱う。`Var` 側で `svd`
+    /// ノードを合成しない設計。`docs/autodiff-linalg-design.md` §3.2）。
+    MatrixNorm {
+        input: NodeId,
+        ord: fandhe_ai_tensor_core::MatrixNormOrd,
+    },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の

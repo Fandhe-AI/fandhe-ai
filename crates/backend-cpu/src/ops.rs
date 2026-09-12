@@ -16,13 +16,14 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, ChecksumReadout, DType, FusionPlan, GemmChecksum, MseReduction,
-    SgdStepConfig, ShapeError, Tensor, require_same_shape,
+    Activation, BackendOps, ChecksumReadout, DType, FusionPlan, GemmChecksum, MatrixNormOrd,
+    MseReduction, QrFactors, SgdStepConfig, ShapeError, SvdFactors, Tensor, require_same_shape,
 };
 
 use crate::gemm_blis::{
     gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt, gemm_blis_parallel_tn,
 };
+use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::softmax::{self, match_softmax_plan};
@@ -1159,6 +1160,46 @@ impl BackendOps for CpuBackendOps {
         }
         fused_elementwise::run_fused_elementwise(plan, leaves)
     }
+
+    /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）。
+    /// `linalg` モジュール（本クレート `src/linalg.rs`。`autodiff::eval::
+    /// linalg` と同一アルゴリズム・同一符号規約の意図的複製）への薄い
+    /// 委譲。`LinalgError`（特異・非正定値・非収束）はいずれも
+    /// `BackendError::InvalidArgument` へ変換する（`linalg_error_to_
+    /// backend_error` 参照）。
+    fn linalg_inv(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        linalg::inv(a).map_err(linalg_error_to_backend_error)
+    }
+
+    fn linalg_solve(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        linalg::solve(a, b).map_err(linalg_error_to_backend_error)
+    }
+
+    fn linalg_det(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Ok(linalg::det(a))
+    }
+
+    fn linalg_cholesky(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        linalg::cholesky(a).map_err(linalg_error_to_backend_error)
+    }
+
+    fn linalg_qr(&self, a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
+        let (q, r) = linalg::qr(a);
+        Ok(QrFactors { q, r })
+    }
+
+    fn linalg_svd(&self, a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {
+        let (u, s, vh) = linalg::svd(a).map_err(linalg_error_to_backend_error)?;
+        Ok(SvdFactors { u, s, vh })
+    }
+
+    fn linalg_matrix_norm(
+        &self,
+        a: &Tensor<f32>,
+        ord: MatrixNormOrd,
+    ) -> Result<Tensor<f32>, BackendError> {
+        linalg::matrix_norm(a, ord).map_err(linalg_error_to_backend_error)
+    }
 }
 
 impl CpuBackendOps {
@@ -1245,6 +1286,14 @@ impl CpuBackendOps {
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, plan.output_shape()).map_err(BackendError::ShapeMismatch)
     }
+}
+
+/// [`LinalgError`] を `BackendError::InvalidArgument` へ写像する
+/// （`reduce_error_to_backend_error` と同じ「専用 variant を設けず既存
+/// `InvalidArgument` に寄せる」方針。`BackendOps::linalg_*` doc の
+/// 契約「特異／非正定値／非収束は `InvalidArgument`」に対応する）。
+fn linalg_error_to_backend_error(err: LinalgError) -> BackendError {
+    BackendError::InvalidArgument(err.to_string())
 }
 
 /// `reduction::ReduceError`（`Shape`／`EmptyReduction` の 2 variant）を
