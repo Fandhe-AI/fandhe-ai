@@ -184,15 +184,17 @@ fn device_resident_matches_host_sgd_on_cuda_across_100_steps() {
 /// capable`（`BackendOps::gemm_fp32_strict_into` を実装しているか）に
 /// 応じて strict 版（`resident_grads_to_host`）の期待挙動を切り替える。
 ///
-/// - `resident_capable == false`（CUDA。`gemm_fp32_strict_into` 未実装の
-///   ため resident 経路に到達しない）: `BackendError::Unsupported` を
-///   返すこと（panic なし）を検証する。
-/// - `resident_capable == true`（CPU・Metal〈イシュー #1555〉）: 各
-///   `Linear` 層の weight slot（`build_model` の層順・層内 weight →
-///   bias の順序契約。`Sequential::init_device_param_store` doc 参照）が
-///   `Some`、bias slot は resident 経由で充填されない（`gemm_fp32_
-///   strict_into` は d_weight のみを対象とし bias 勾配は reduction 経由
-///   のまま）ため `None` であることを検証する。
+/// - `resident_capable == false`（現時点でこの分岐に該当するバックエンド
+///   はない。CPU・Metal〈#1555〉・CUDA〈#1559〉のいずれも `gemm_fp32_
+///   strict_into` を実装済みのため resident 経路に到達する）:
+///   `BackendError::Unsupported` を返すこと（panic なし）を検証する。
+/// - `resident_capable == true`（CPU・Metal〈イシュー #1555〉・CUDA
+///   〈イシュー #1559〉）: 各 `Linear` 層の weight slot（`build_model` の
+///   層順・層内 weight → bias の順序契約。`Sequential::
+///   init_device_param_store` doc 参照）が `Some`、bias slot は resident
+///   経由で充填されない（`gemm_fp32_strict_into` は d_weight のみを対象
+///   とし bias 勾配は reduction 経由のまま）ため `None` であることを
+///   検証する。
 ///
 /// unified 版（`param_grads_to_host`）はいずれの場合も全パラメータの
 /// 勾配を `Ok` で返し、host-only 参照実装（`Sgd::step` が使うのと同じ
@@ -201,8 +203,9 @@ fn device_resident_matches_host_sgd_on_cuda_across_100_steps() {
 ///
 /// `docs/perf/train-resident-grad-device-update.md` §4「追補: #1479」・
 /// イシュー本文の受入基準 AC-R4 に対応。本エージェント実行環境には
-/// CUDA 実機がないため、`resident_capable == false` 側は未実測（未実測は
-/// 下記個別テストの doc に明記）。
+/// CUDA 実機がないため、CUDA（イシュー #1559 の `resident_capable = true`
+/// への移行後）の実機再実測は未実施のまま引き継ぐ（未実測は下記個別
+/// テストの doc に明記）。
 fn assert_grad_readout_contract(device: Device, resident_capable: bool) {
     let model = build_model();
     let (x_data, y_data) = gen_regression_data(SEED_DATA);
@@ -323,14 +326,16 @@ fn grad_readout_contract_on_metal() {
 /// CUDA 実機での AC-R2 契約検証（`assert_grad_readout_contract` 参照）。
 ///
 /// イシュー #1479 実装セッションでは本エージェント実行環境に CUDA 実機が
-/// なかったため未実測のまま引き継がれていたが、**イシュー #1480 の GB10
-/// 実機実測（2026-09-09）で pass 済み**（`docs/perf/logs/
-/// cuda-graph-step-grad-1480/grad_readout_contract_on_cuda.log`）:
-/// strict 版 `resident_grads_to_host` が `BackendError::Unsupported` を
-/// 返すこと（CUDA は `gemm_fp32_strict_into` 未実装のため resident
-/// staging 未到達）・統合版 `param_grads_to_host` が返す全パラメータ
-/// 勾配がホスト参照実装（`eval::matmul` ベース）と統一複合判定内で一致
-/// することの両方を確認した。
+/// なかったため未実測のまま引き継がれていたが、イシュー #1480 の GB10
+/// 実機実測（2026-09-09）で pass 済みだった（`docs/perf/logs/
+/// cuda-graph-step-grad-1480/grad_readout_contract_on_cuda.log`）。
+/// **その後イシュー #1559 で CUDA が `gemm_fp32_strict_into` を実装した
+/// ことにより `resident_grad_capability` が `Some(true)` へ確定し、Metal
+/// （イシュー #1555）と同じ `resident_capable = true` 側（weight slot
+/// のみ resident 経由で `Some`・bias slot は `None`）へ移行した**
+/// （`crates/backend-cuda/src/ops.rs::CudaBackendOps::gemm_fp32_strict_into`
+/// doc 参照）。本エージェント実行環境には CUDA 実機がないため、この
+/// 更新後の実機再実測は未実施のまま引き継ぐ。
 ///
 /// ```sh
 /// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture
@@ -338,5 +343,5 @@ fn grad_readout_contract_on_metal() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn grad_readout_contract_on_cuda() {
-    assert_grad_readout_contract(Device::Cuda(0), false);
+    assert_grad_readout_contract(Device::Cuda(0), true);
 }

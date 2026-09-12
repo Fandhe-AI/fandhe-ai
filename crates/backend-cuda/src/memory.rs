@@ -41,8 +41,8 @@ use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
 use cudarc::driver::{
-    CudaSlice, CudaStream, CudaView, DevicePtr, DeviceRepr, LaunchArgs, PushKernelArg,
-    UnifiedSlice, UnifiedView,
+    CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtr, DeviceRepr, LaunchArgs, PushKernelArg,
+    UnifiedSlice, UnifiedView, UnifiedViewMut,
 };
 
 use crate::context_cache;
@@ -333,6 +333,23 @@ impl CudaStorage {
             CudaStorage::Managed(s) => CudaArg::UnifiedView(s.slice(bounds)),
         }
     }
+
+    /// [`Self::view`] の可変版（イシュー #1559）。`bounds`（要素インデックス
+    /// 範囲）の部分ビューを書き込み可能引数として返す。
+    /// `ops.rs::CudaBackendOps::gemm_fp32_strict_into` が
+    /// `DeviceParamStore` の連結バッファ内の指定オフセットへ GEMM 結果を
+    /// 直接書き込むために使う（`CudaArgMut::View`／`UnifiedView`
+    /// 追加の動機。同構造体ドキュメンテーションコメント参照）。
+    /// `view()` と同じく境界検証は呼び出し元
+    /// （`ops.rs::gemm_fp32_strict_into_impl` の `checked_add`／
+    /// `out.numel()` 検査）が済ませている前提で、ここでの追加検証は
+    /// 行わない。
+    pub(crate) fn view_mut(&mut self, bounds: impl RangeBounds<usize>) -> CudaArgMut<'_> {
+        match self {
+            CudaStorage::Device(s) => CudaArgMut::View(s.slice_mut(bounds)),
+            CudaStorage::Managed(s) => CudaArgMut::UnifiedView(s.slice_mut(bounds)),
+        }
+    }
 }
 
 /// 配置非依存の読み取り専用カーネル引数（イシュー #1352）。
@@ -396,16 +413,22 @@ impl<'d> CudaArg<'d> {
 /// 配置非依存の書き込み可能カーネル引数（[`CudaArg`] の可変版）。
 /// 呼び出し規約は [`CudaArg::push`] と同一。
 ///
-/// `View`／`UnifiedView` 相当の可変部分ビュー variant は持たない
-/// （`CudaStorage::as_arg_mut` が常にバッファ全体を返す契約のため。
-/// 出力バッファ〈`c_dev`〉はいずれも `CudaMemory::alloc_zeroed` が
-/// 新規確保した全体バッファであり、`DeviceParamStore` の連結バッファの
-/// 部分範囲へ書き込む呼び出し元は本イシュー時点で存在しない。必要に
-/// なった時点で [`CudaArg::View`]／`UnifiedView` と対称な variant を
-/// 追加する）。
+/// `View`／`UnifiedView`（可変部分ビュー。イシュー #1559 で追加）:
+/// `ops.rs::CudaBackendOps::gemm_fp32_strict_into` が
+/// `DeviceParamStore` の連結バッファ内の指定オフセット（`out_offset`）
+/// へ GEMM 結果を直接書き込むために必要になった（導入前は「出力
+/// バッファ〈`c_dev`〉はいずれも `CudaMemory::alloc_zeroed` が新規確保
+/// した全体バッファであり、連結バッファの部分範囲へ書き込む呼び出し元は
+/// 存在しない」ため `SliceMut`／`UnifiedMut`〈バッファ全体〉のみで
+/// 足りていた）。`cudarc-0.19.8` は `PushKernelArg<&'b mut
+/// CudaViewMut<'c, T>>`／`PushKernelArg<&'b mut UnifiedViewMut<'c, T>>`
+/// を実装済みのため、[`CudaArg::View`]／`UnifiedView`（読み取り専用側）
+/// と対称に追加できる。
 pub(crate) enum CudaArgMut<'a> {
     SliceMut(&'a mut CudaSlice<f32>),
     UnifiedMut(&'a mut UnifiedSlice<f32>),
+    View(CudaViewMut<'a, f32>),
+    UnifiedView(UnifiedViewMut<'a, f32>),
 }
 
 impl<'d> CudaArgMut<'d> {
@@ -414,6 +437,8 @@ impl<'d> CudaArgMut<'d> {
         match self {
             CudaArgMut::SliceMut(s) => s.len(),
             CudaArgMut::UnifiedMut(s) => s.len(),
+            CudaArgMut::View(v) => v.len(),
+            CudaArgMut::UnifiedView(v) => v.len(),
         }
     }
 
@@ -431,7 +456,32 @@ impl<'d> CudaArgMut<'d> {
             CudaArgMut::UnifiedMut(s) => {
                 builder.arg(&mut **s);
             }
+            CudaArgMut::View(v) => {
+                builder.arg(v);
+            }
+            CudaArgMut::UnifiedView(v) => {
+                builder.arg(v);
+            }
         }
+    }
+
+    /// 全要素をゼロで埋める（イシュー #1559。`gemm.rs::CudaGemm::
+    /// launch_tiled_f32_nt_into`／`_tn_into` の `k == 0` 分岐——数学的に
+    /// 結果が全 0 になる契約——が、カーネル起動を経由せず `c_dev` へ
+    /// 直接ゼロを書き込むために使う。`cudarc::CudaStream::memset_zeros`
+    /// は `DevicePtrMut<T>` を実装する型（`CudaSlice`／`CudaViewMut`／
+    /// `UnifiedSlice`／`UnifiedViewMut`。いずれも実装済み）を汎用に扱う
+    /// ため、本列挙体の 4 variant すべてに委譲できる。非同期投入契約
+    /// （#1013）は他のカーネル起動と同じで、完了保証は呼び出し元の次の
+    /// 同期点へ委ねる。
+    pub(crate) fn zero_fill(&mut self, stream: &Arc<CudaStream>) -> Result<(), CudaError> {
+        match self {
+            CudaArgMut::SliceMut(s) => stream.memset_zeros(&mut **s)?,
+            CudaArgMut::UnifiedMut(s) => stream.memset_zeros(&mut **s)?,
+            CudaArgMut::View(v) => stream.memset_zeros(v)?,
+            CudaArgMut::UnifiedView(v) => stream.memset_zeros(v)?,
+        }
+        Ok(())
     }
 }
 

@@ -550,8 +550,10 @@ pub trait BackendOps {
     /// 使う）へフォールバックする（判定迂回を作らない。`.claude/rules/
     /// security.md` A08）。`backend-cpu::CpuBackendOps`（#1212）と
     /// `backend-metal::MetalBackendOps`（#1555。NT/TN 限定・encode-only）
-    /// がオーバーライドする（CUDA は既定 `Unsupported` のまま。引き継ぎは
-    /// `docs/perf/train-resident-grad-device-update.md` スコープ外節）。
+    /// `backend-cuda::CudaBackendOps`（#1559。NT/TN 限定・GPU 側 smem
+    /// 転置カーネル再利用）がオーバーライドする（3 バックエンドすべてが
+    /// オーバーライド済み。詳細は `docs/perf/
+    /// train-resident-grad-device-update.md`）。
     fn gemm_fp32_strict_into(
         &self,
         _a: &Tensor<f32>,
@@ -578,7 +580,14 @@ pub trait BackendOps {
     /// 既定は `token` を無視して [`Self::gemm_fp32_strict_into`] へ
     /// そのまま委譲する。CPU は都度同期実行のため実行時エラーが
     /// 呼び出し元へ即座に返り、遅延失敗トークンを必要としない（この
-    /// デフォルトのままでよい）。
+    /// デフォルトのままでよい）。CUDA（`backend-cuda::ops::
+    /// CudaBackendOps`。#1559）も同じ理由（`context_cache` の poison／
+    /// 世代検査が各呼び出しごとに同期的に完結し、NT/TN 経路自体が
+    /// 内部で `stream.synchronize()` する）でこのデフォルトのままで
+    /// 良いが、トレイト doc の更新漏れを避けるため機能的に同一の明示
+    /// オーバーライドを置いている（`ops.rs::CudaBackendOps::
+    /// gemm_fp32_strict_into_tracked` のドキュメンテーションコメント
+    /// 参照）。
     ///
     /// Metal のみ `backend-metal::ops::MetalBackendOps` がオーバーライド
     /// し、encode-only（待たない）で直接書き込む NT/TN 経路
