@@ -297,6 +297,40 @@ pub(crate) enum Op {
 /// として保持するため、`slot` に対応する個々のパラメータは連結
 /// バッファ内の要素オフセット範囲としてしか表現できない
 /// （「R3: 要素オフセット付き常駐ビュー」設計）。
+/// [`ResidentResolver::fill_resident_weight_grad`] に渡す bias 側の
+/// resident 化対象（イシュー #1566。`docs/backend-metal-command-
+/// batching-design.md` §10「案 A′」）。`grad::vjp` の `Op::LinearResident`
+/// 分岐が `bias`（`Option<NodeId>`）から `Op::ResidentLeaf { store_id,
+/// slot }` を解決できた場合のみ構築する（weight と同じ store の葉で
+/// あることは呼び出し元が検証済み。異なる store・非 `ResidentLeaf` の
+/// 場合は `None` のまま渡し、bias は常にホスト経路
+/// （`reduce_to_shape`）へフォールバックする）。
+#[derive(Debug, Clone)]
+pub(crate) struct ResidentBiasTarget {
+    /// bias が属する `DeviceParamStore` 内の位置（weight と同じ
+    /// `ParamLayout` 配列の添字空間）。
+    pub slot: usize,
+    /// 実際に微分した bias `Op::ResidentLeaf` ノードの `NodeId`
+    /// （weight の `weight_node_id` と同じ役割。weight tying と対称に
+    /// bias tying を検出するための由来情報）。
+    pub node_id: NodeId,
+    /// bias の論理 shape（`[n]` 想定。呼び出し元が `layout[slot].shape`
+    /// との一致を検証する）。
+    pub shape: Vec<usize>,
+}
+
+/// [`ResidentResolver::fill_resident_weight_grad`] の戻り値
+/// （イシュー #1566）。weight・bias は独立に resident 化の成否が
+/// 決まりうる（bias のみ非対応バックエンド・bias 引数省略時は常に
+/// `bias_filled: false`）契約を型で明示する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResidentFillOutcome {
+    /// `weight` がデバイス常駐 staging へ直接書き込めたか。
+    pub weight_filled: bool,
+    /// `bias`（`Some` を渡した場合のみ意味を持つ）が同時に書き込めたか。
+    pub bias_filled: bool,
+}
+
 pub(crate) trait ResidentResolver {
     /// `store_id`（このリゾルバ自身が保持するストアと一致するはず）・
     /// `slot`（ストア内の位置）から対応するデバイスバッファ範囲を返す。
@@ -349,6 +383,16 @@ pub(crate) trait ResidentResolver {
     /// 常に `Ok(false)`（ホスト経路へフォールバック）。現時点で
     /// `DeviceParamStore` のみがオーバーライドする。
     #[allow(clippy::too_many_arguments)]
+    ///
+    /// **`bias` 引数（イシュー #1566 追加。非破壊拡張——シグネチャは
+    /// 変わるが `pub(crate)` トレイトのためクレート内のみに影響し、
+    /// 呼び出し元・実装は本 PR 内で揃えて更新する）**: `Some` の場合、
+    /// weight と同時に bias 勾配（`g` の行方向和）も resident staging
+    /// へ直接書き込めるか試みる。戻り値 [`ResidentFillOutcome`] の
+    /// `weight_filled`／`bias_filled` は独立——`bias` を渡しても
+    /// バックエンドが bias 縮約に非対応なら `bias_filled: false`
+    /// （呼び出し元は `weight_filled` の値に関わらず bias のみ
+    /// ホスト `reduce_to_shape` へフォールバックしてよい）。
     fn fill_resident_weight_grad(
         &self,
         _ops: &dyn BackendOps,
@@ -359,8 +403,12 @@ pub(crate) trait ResidentResolver {
         _weight_node_id: NodeId,
         _x_t: &Tensor<f32>,
         _g: &Tensor<f32>,
-    ) -> Result<bool, AutodiffError> {
-        Ok(false)
+        _bias: Option<ResidentBiasTarget>,
+    ) -> Result<ResidentFillOutcome, AutodiffError> {
+        Ok(ResidentFillOutcome {
+            weight_filled: false,
+            bias_filled: false,
+        })
     }
 
     /// 「今回の `backward_impl` 走査中に resident 経路（[`Self::
