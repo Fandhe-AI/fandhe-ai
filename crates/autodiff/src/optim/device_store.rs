@@ -484,7 +484,9 @@ fn accumulate_into_resident_slot(
 /// `staging.filled[bias.slot]` から独立に判定する:
 /// - 初回（`None`）: `reduce_bias_grad_rows(g)` の結果をそのまま
 ///   `upload_into`（上書き契約。weight の初回 `_into_tracked` と同じ
-///   意味論）。
+///   意味論）。**呼び出し元契約（下記）により実行時には到達しない
+///   防御的分岐**（コード上は残すが `debug_assert!` で契約違反を検知
+///   する）。
 /// - 2 回目以降（`Some` かつ由来一致）: [`accumulate_into_resident_slot`]
 ///   で加算・再アップロード。
 /// - 由来不一致（別の `Op::ResidentLeaf` からの寄与混入）: weight と
@@ -493,6 +495,17 @@ fn accumulate_into_resident_slot(
 ///
 /// 常に `staging.filled[bias.slot]` を今回の由来で更新して `Ok(true)`
 /// を返す（呼び出し元はこれを `outcome.bias_filled` として使う）。
+///
+/// **呼び出し元契約（codex-review・Cursor Bugbot 指摘是正。PR #1566）**:
+/// 呼び出し元（`fill_resident_weight_grad` の tie 分岐・fresh 分岐の
+/// いずれも）は、`staging.filled[bias.slot]`（現在の `backward_serial`
+/// でフィルタ済み）が既に `Some`（＝ bias が今回の backward で既に
+/// resident 経由に統一されている）場合に限りこの関数を呼ぶ。bias が
+/// まだ resident 未充填（backend が bias 縮約に非対応、または今回が
+/// 真の初回）の場合は呼ばず `bias_filled: false` のまま返し、
+/// `grad::vjp` の通常 `Gradients` 経由累積へ一本化する（さもないと
+/// 既にホスト側 `Gradients` へ積まれた寄与を検査なしに resident
+/// staging で上書きし、その寄与が `step()` から silently 失われる）。
 #[allow(clippy::too_many_arguments)]
 fn fill_bias_slot_via_host_reduce(
     mem: &dyn MemoryOps,
@@ -505,6 +518,20 @@ fn fill_bias_slot_via_host_reduce(
     g: &Tensor<f32>,
 ) -> Result<bool, AutodiffError> {
     let prev = staging.filled[bias.slot].filter(|r| r.backward_serial == current_serial);
+    // 呼び出し元契約（上記 doc）により `prev` は理論上常に `Some`。
+    // `None` は呼び出し元の契約違反（bias 未充填のままこの関数へ来た）
+    // であり、実害は本来ホスト `Gradients` 経由で累積されるはずだった
+    // 寄与を検査なしに resident staging の「初回書き込み」として上書き
+    // してしまうこと。`unwrap`/`expect` ではなく `debug_assert!` で
+    // 契約違反を検知する（`.claude/rules/coding-rust.md`「本番経路で
+    // unwrap()/expect() を使わない」。release では防御的分岐として
+    // そのまま初回書き込み扱いで進む）。
+    debug_assert!(
+        prev.is_some(),
+        "fill_bias_slot_via_host_reduce: 呼び出し元は bias slot が現在の backward_serial で \
+         既に resident 充填済みの場合に限りこの関数を呼ぶはずだが、prev が None だった \
+         （呼び出し元契約違反）"
+    );
     if let Some(prev) = prev
         && (prev.tape_id != tape_id || prev.epoch != epoch || prev.node_id != bias.node_id)
     {
@@ -826,16 +853,41 @@ impl ResidentResolver for DeviceParamStore {
                 bias_filled: false,
             };
             if let (Some(b), Some(b_offset)) = (&bias, bias_offset) {
-                outcome.bias_filled = fill_bias_slot_via_host_reduce(
-                    mem,
-                    staging,
-                    b,
-                    b_offset,
-                    tape_id,
-                    epoch,
-                    current_serial,
-                    g,
-                )?;
+                // codex-review・Cursor Bugbot 指摘是正（PR #1566）: bias
+                // 縮約が resident 経由で書けるか（backend が
+                // `gemm_fp32_strict_into_with_bias_reduce_tracked` の
+                // 融合ディスパッチで実際に bias を書いたか）は weight の
+                // resident 対応可否と独立（`weight_filled`／`bias_filled`
+                // は独立契約。`ResidentResolver::fill_resident_weight_grad`
+                // doc 参照）。weight のみ resident 対応・bias は非対応の
+                // バックエンド（fresh 呼び出しで `bias_written == false`
+                // のまま `staging.filled[bias.slot]` が未充填）では、
+                // bias の最初の寄与は既に通常の `Gradients` 経由の累積
+                // （`grad::vjp` の `!outcome.bias_filled` 分岐）へ回って
+                // いる。ここで無条件に `fill_bias_slot_via_host_reduce`
+                // を呼ぶと、その最初の寄与を検査せず resident staging
+                // （今回の寄与のみ）で上書きしたことにしてしまい、
+                // `step()` は resident 側しか見ないため最初の寄与が
+                // silently 失われる。bias slot がこの backward 走査内で
+                // 既に resident 充填済み（＝ bias も resident 経由に
+                // 統一されている）場合に限り resident へ委譲し、そうで
+                // なければ `bias_filled: false` のまま返して呼び出し元の
+                // 通常累積（`Gradients` 経由）に一本化する。
+                let bias_already_resident = staging.filled[b.slot]
+                    .filter(|r| r.backward_serial == current_serial)
+                    .is_some();
+                if bias_already_resident {
+                    outcome.bias_filled = fill_bias_slot_via_host_reduce(
+                        mem,
+                        staging,
+                        b,
+                        b_offset,
+                        tape_id,
+                        epoch,
+                        current_serial,
+                        g,
+                    )?;
+                }
             }
             return Ok(outcome);
         }
@@ -2414,6 +2466,17 @@ mod tests {
         /// テストの挙動を変えない）、`resident_capable` コンストラクタ
         /// のみ `true` にする。
         resident_capable: bool,
+        /// `true`（既定）の場合、`resident_capable == true` のとき
+        /// `gemm_fp32_strict_into_with_bias_reduce_tracked` が bias 縮約
+        /// も融合ディスパッチへ含める（weight・bias とも resident 対応。
+        /// 既存 `resident_capable()` の挙動）。`false` の場合は
+        /// `BackendOps` の既定実装と同じく bias を無視して常に
+        /// `bias_filled: false` を返す（weight のみ resident 対応・bias
+        /// は非対応のバックエンド〈CPU 等〉を模す。イシュー #1566
+        /// codex-review・Cursor Bugbot 指摘の再現テスト
+        /// `fill_resident_weight_grad_tie_does_not_drop_first_bias_
+        /// contribution_when_bias_fusion_unsupported` 用）。
+        bias_fusion_capable: bool,
         /// `true` の場合のみ [`BackendOps::captured_segment_key`]／
         /// [`BackendOps::run_captured_sgd_step_segment`] を既定（`Ok(None)`／
         /// `Unsupported`）からオーバーライドし、CUDA Graph capture opt-in
@@ -2442,6 +2505,7 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
+                bias_fusion_capable: false,
                 graph_capable: false,
                 segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
                 seen_segment_keys: Arc::new(
@@ -2457,6 +2521,7 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
+                bias_fusion_capable: false,
                 graph_capable: false,
                 segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
                 seen_segment_keys: Arc::new(
@@ -2476,6 +2541,7 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
+                bias_fusion_capable: false,
                 graph_capable: true,
                 segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
                 seen_segment_keys: Arc::new(
@@ -2508,11 +2574,25 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: true,
+                bias_fusion_capable: true,
                 graph_capable: false,
                 segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
                 seen_segment_keys: Arc::new(
                     std::sync::Mutex::new(std::collections::HashSet::new()),
                 ),
+            }
+        }
+
+        /// weight のみ resident 対応・bias 縮約の融合ディスパッチには
+        /// 非対応（`BackendOps` 既定実装と同じ `bias_filled: false` を
+        /// 常に返す）バックエンドを模す（イシュー #1566 codex-review・
+        /// Cursor Bugbot 指摘の再現テスト用。CPU 等「weight は
+        /// `gemm_fp32_strict_into` に対応するが bias 縮約カーネルは
+        /// 持たない」構成に相当する）。
+        fn resident_capable_bias_fusion_unsupported() -> Self {
+            Self {
+                bias_fusion_capable: false,
+                ..Self::resident_capable()
             }
         }
 
@@ -2844,6 +2924,13 @@ mod tests {
             _token: &DispatchFailureCell,
         ) -> Result<bool, BackendError> {
             self.gemm_fp32_strict_into(a, b, out, out_offset)?;
+            if !self.bias_fusion_capable {
+                // `BackendOps` の既定実装（`tensor-core::backend_ops`）と
+                // 同じ契約: bias 縮約に非対応のバックエンドは weight を
+                // 書いたうえで常に `Ok(false)` を返す（イシュー #1566
+                // `resident_capable_bias_fusion_unsupported` 用）。
+                return Ok(false);
+            }
             let Some((bias_offset, n)) = bias else {
                 return Ok(false);
             };
@@ -3735,6 +3822,102 @@ mod tests {
             "同一 bias を 2 回共有した場合、resident 経由の累積（1 回目 fresh・2 回目 \
              tie 累積）と host-only の `backward::accumulate` は一致するはず。bias 自身の \
              tie 追跡がなければ 1 回目の寄与が silently に失われ、この比較は不一致になる"
+        );
+    }
+
+    /// codex-review・Cursor Bugbot 指摘の直接再現・是正確認（PR #1659）:
+    /// weight は resident 対応だが bias 縮約の融合ディスパッチには
+    /// 非対応（`resident_capable_bias_fusion_unsupported`。CPU 等
+    /// 「weight のみ resident 対応」バックエンドを模す）場合、同一
+    /// weight／bias を 2 つの `linear_forward` 呼び出しで共有する
+    /// weight tying でも、1 回目（fresh）の bias 寄与が 2 回目
+    /// （tie）の `fill_resident_weight_grad` 呼び出しによって silently
+    /// に上書き・消失しないことを bit 完全一致で検証する。
+    ///
+    /// 修正前は、weight の tie 分岐が無条件に
+    /// `fill_bias_slot_via_host_reduce` を呼び bias slot を「resident
+    /// 経由で充填済み」にしてしまうため、1 回目の寄与（このバックエンド
+    /// では bias 融合非対応のため通常の `Gradients` 経由で積まれる）が
+    /// `step()` から見えなくなっていた（`fill_bias_slot_via_host_reduce`
+    /// doc「呼び出し元契約」参照）。
+    #[test]
+    fn fill_resident_weight_grad_tie_does_not_drop_first_bias_contribution_when_bias_fusion_unsupported()
+     {
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let b_init = tensor(vec![0.5, -0.5], &[2]);
+        let x1 = tensor(vec![2.0, 3.0], &[1, 2]);
+        let x2 = tensor(vec![-1.0, 4.0], &[1, 2]);
+        let target1 = tensor(vec![10.0, 10.0], &[1, 2]);
+        let target2 = tensor(vec![-4.0, 7.0], &[1, 2]);
+
+        // resident 経路: weight のみ resident 対応・bias 縮約は非対応の
+        // バックエンドで、同一 weight／bias を 2 回共有する。
+        let resident_ops = MockDeviceOps::resident_capable_bias_fusion_unsupported();
+        let resident_tape =
+            Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let mut store = DeviceParamStore::new(&resident_tape, &[&w_init, &b_init]).unwrap();
+        let leaves = store.register_resident_params(&resident_tape).unwrap();
+        let x1_var = resident_tape.var(&x1);
+        let x2_var = resident_tape.var(&x2);
+        let pred1 = store
+            .linear_forward(&resident_tape, &x1_var, &leaves[0], Some(&leaves[1]))
+            .unwrap();
+        let pred2 = store
+            .linear_forward(&resident_tape, &x2_var, &leaves[0], Some(&leaves[1]))
+            .unwrap();
+        let target1_var = resident_tape.var(&target1);
+        let target2_var = resident_tape.var(&target2);
+        let loss1 = pred1.mse_loss(&target1_var).unwrap();
+        let loss2 = pred2.mse_loss(&target2_var).unwrap();
+        let loss = loss1.add(&loss2).unwrap();
+        let grads = store.backward(&resident_tape, &loss).unwrap();
+        store
+            .step(&resident_tape, &grads, &SgdConfig::new(0.1))
+            .unwrap();
+        let resident_params = store.sync_to_host(&resident_tape).unwrap();
+        let resident_w = resident_params[0].clone();
+        let resident_b = resident_params[1].clone();
+
+        // host-only 経路（同じ `w`／`b` Var を 2 回共有する参照実装。
+        // 通常の `backward::accumulate` が 2 回分の寄与を合算する）。
+        let host_tape = simple_tape(None);
+        let w = host_tape.var(&w_init);
+        let b = host_tape.var(&b_init);
+        let x1_var = host_tape.var(&x1);
+        let x2_var = host_tape.var(&x2);
+        let pred1 = x1_var.matmul(&w).unwrap().add(&b).unwrap();
+        let pred2 = x2_var.matmul(&w).unwrap().add(&b).unwrap();
+        let target1_var = host_tape.var(&target1);
+        let target2_var = host_tape.var(&target2);
+        let loss1 = pred1.mse_loss(&target1_var).unwrap();
+        let loss2 = pred2.mse_loss(&target2_var).unwrap();
+        let loss = loss1.add(&loss2).unwrap();
+        let grads = host_tape.backward(&loss).unwrap();
+        let w_grad = grads.get(&w).unwrap().unwrap().clone();
+        let b_grad = grads.get(&b).unwrap().unwrap().clone();
+        let mut sgd = crate::optim::sgd::Sgd::new(SgdConfig::new(0.1)).unwrap();
+        let host_updated = sgd.step(&[&w_init, &b_init], &[&w_grad, &b_grad]).unwrap();
+        let host_w = host_updated[0].clone();
+        let host_b = host_updated[1].clone();
+
+        assert_ne!(
+            host_b.get(&[0]).unwrap(),
+            0.5,
+            "退化した比較（更新前のまま）になっていないことを確認する"
+        );
+        assert_eq!(
+            host_w.contiguous().as_slice().unwrap(),
+            resident_w.contiguous().as_slice().unwrap(),
+            "weight は resident 経由の累積と host-only の `backward::accumulate` が \
+             一致するはず"
+        );
+        assert_eq!(
+            host_b.contiguous().as_slice().unwrap(),
+            resident_b.contiguous().as_slice().unwrap(),
+            "bias 縮約が非対応のバックエンドでは、1 回目（fresh）・2 回目（tie）とも \
+             `bias_filled: false` のまま通常の `Gradients` 経由で累積されるはず。是正前は \
+             tie 分岐が無条件に resident staging へ書き込み 1 回目の寄与を silently に \
+             上書きしていたため、この比較は不一致になっていた"
         );
     }
 
