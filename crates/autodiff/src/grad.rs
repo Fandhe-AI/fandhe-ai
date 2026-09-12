@@ -445,7 +445,7 @@ pub(crate) fn vjp(
                 // 「resident 成功時は無駄な計算をスキップする」最適化。
                 // `fill_resident_weight_grad` doc 参照）が、resident
                 // 非対応バックエンドのフォールバックがここに来るため、
-                // resident 経路（f64／Neumaier）と数値方式を揃える
+                // resident 経路（f64 逐次和）と数値方式を揃える
                 // 必要がある（イシュー #1566・PR #1659 codex-review P1）。
                 let d_bias = reduce_bias_grad(g, &bias_node.shape);
                 contributions.push((bias_id, d_bias));
@@ -660,7 +660,8 @@ fn reduce_to_shape(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
 ///
 /// `Op::LinearResident` は resident 経由の成功時（`outcome.bias_filled`）
 /// `eval::reduce_bias_grad_rows`（`f64` アキュムレータ。ホスト経路）・
-/// GPU カーネル `gemm_bias_grad_reduce_f32`（Neumaier 補償和）のいずれか
+/// GPU カーネル `gemm_bias_grad_reduce_f32`（binary64 加算の 64bit 整数
+/// エミュレーション。ホストと bit 一致）のいずれか
 /// で bias を計算する（`docs/backend-metal-command-batching-design.md`
 /// §10.8）。`outcome.bias_filled == false`（CPU／CUDA 等 resident 非対応
 /// バックエンド、または weight tying で bias 自身が非 resident 扱いに

@@ -385,14 +385,11 @@ fn gemm_fp32_strict_into_bit_matches_with_negative_zero_operands() {
 // === イシュー #1566: gemm_fp32_strict_into_with_bias_reduce_tracked ===
 
 /// NT/TN 経路（同一 `ctx.encode` 呼び出し内で weight・bias を同時に
-/// 書く）で、weight は `gemm_fp32_strict_into` と bit 完全一致し、bias
-/// は `layout::reduce_bias_grad_rows_host`（ホスト参照実装）と 2 層契約
-/// （Tier A 理論上界・Tier B＝REQ-2 統一複合判定。イシュー #1666。
-/// `docs/backend-metal-command-batching-design.md` §10.13）で一致する
-/// ことを確認する（本テストは Tier B の判定で検証する。GPU カーネルは
-/// scale 方式＋Neumaier 補償和・ホストは `f64` アキュムレータのため
-/// bit 完全一致ではない。2026-09-12 ユーザー承認 A）。戻り値は `bias`
-/// を渡した場合
+/// 書く）で、weight は `gemm_fp32_strict_into` と、bias は
+/// `layout::reduce_bias_grad_rows_host`（ホスト参照実装。`f64` 逐次和）
+/// と、いずれも bit 完全一致することを確認する（GPU カーネルは binary64
+/// 加算を 64bit 整数でエミュレートし同じ演算列を辿る。`docs/backend-metal-
+/// command-batching-design.md` §10.14）。戻り値は `bias` を渡した場合
 /// `Ok(true)` になるはず（`ops::MetalBackendOps::gemm_fp32_strict_into_
 /// with_bias_reduce_tracked` doc「NT/TN」参照）。
 #[test]
@@ -473,22 +470,18 @@ fn gemm_fp32_strict_into_with_bias_reduce_tracked_matches_reference_for_nt_tn() 
             "weight と bias の間の未使用領域（NaN 事前充填）が変更された（batch={batch} \
              d_in={d_in} d_out={d_out}）"
         );
-        // bias は GPU カーネル（scale 方式＋Neumaier 改良版 Kahan 補償和）
-        // とホスト参照実装（`f64` アキュムレータ）で蓄積方式が異なる
-        // ため bit 完全一致ではなく 2 層契約（Tier A 理論上界・Tier B＝
-        // REQ-2 統一複合判定。イシュー #1666。`docs/backend-metal-
-        // command-batching-design.md` §10.13）の Tier B で検証する
-        // （2026-09-12 ユーザー承認 A。`crates/backend-metal/src/
-        // shaders/gemm.metal::gemm_bias_grad_reduce_f32` 冒頭コメント
-        // 参照）。weight 部分は引き続き bit 完全一致契約（上の
-        // `assert_bits_eq`）。
-        fandhe_ai_backend_cpu::assert_parity(
-            &format!(
-                "bias 部分は reduce_bias_grad_rows_host（ホスト参照実装）と REQ-2 複合判定で \
-                 一致するはず（batch={batch} d_in={d_in} d_out={d_out}）"
-            ),
+        // bias も GPU カーネル（binary64 逐次加算の 64bit 整数エミュ
+        // レーション）とホスト参照実装（`f64` 逐次和）が同じ演算列を
+        // 辿るため、weight と同じ bit 完全一致契約で検証する
+        // （`crates/backend-metal/src/shaders/gemm.metal::
+        // gemm_bias_grad_reduce_f32` 冒頭コメント参照）。
+        assert_bits_eq(
             &readback_data[bias_offset..bias_offset + d_out],
             &expected_bias,
+            &format!(
+                "bias 部分は reduce_bias_grad_rows_host（ホスト参照実装）と bit 完全一致するはず \
+                 （batch={batch} d_in={d_in} d_out={d_out}）"
+            ),
         );
     }
 }

@@ -1810,7 +1810,7 @@ resident-grad-device-update.md` の bias 追記も本節の内容へ整合させ
 実機（Apple Silicon・CUDA）での forward/backward 経路混在時の非後退
 確認は Mac／GB10 実機セッションへ申し送る。
 
-### 10.13 #1666 codex-review 指摘を受けた判定契約の 2 層構造化（2026-09-12。最終形）
+### 10.13 #1666 codex-review 指摘を受けた判定契約の 2 層構造化（2026-09-12。§10.14 で置換済み・経緯のみ）
 
 §10.8〜§10.12 が繰り返し使ってきた「REQ-2 統一複合判定」（bias 勾配の
 Metal カーネル・ホスト `f64` 参照実装間の一致判定）は、契約 PR #1666
@@ -1857,3 +1857,53 @@ Metal カーネル・ホスト `f64` 参照実装間の一致判定）は、契�
 本節自体はドキュメント整合のみでコード変更を伴わない
 （`crates/backend-metal/src/shaders/gemm.metal::bias_scale_sum_add`・
 `bias_pow2_floor`・`bias_kahan_add` は §10.11 の実装のまま不変）。
+
+### 10.14 判定契約の緩和を撤回し Metal カーネルを binary64 加算のソフトウェアエミュレーションへ置換（2026-09-12。最終形）
+
+§10.10〜§10.13 は「Metal は `double` 非対応」を前提に f32 のみの補償和
+（Neumaier + 2 のべき乗 scale）で「`f64` 相当」を狙い、ホスト `f64` 逐次和と
+一致しない相殺列（`[2^48, 2^24, 1, -2^48, -2^24]` 等）を判定契約側
+（Tier A 理論上界／Tier B 条件付き REQ-2 判定・`n < 2^24` 上限・非有限値
+クラス一致）で吸収しようとしていたが、契約 PR #1666 への codex-review は
+「補償項自身の丸めで寄与が失われる」「subnormal で scale がゼロになる」
+「REQ-2 の適用範囲を承認なしに狭める」等の P1 を繰り返し指摘し、判定契約の
+緩和では収束しなかった。本節で方針を転換し、**契約は緩めず実装側を
+ホストと同一の演算列にする**:
+
+- `gemm.metal::gemm_bias_grad_reduce_f32` の `m >= 2` 経路を、**IEEE 754
+  binary64 の逐次加算（最近接偶数丸め）を 64bit 整数（`ulong`／`long`）
+  演算で忠実に再現する**ソフトウェアエミュレーション（`bias_f64_widen`／
+  `bias_f64_add`／`bias_f64_narrow`／`bias_clz64`）へ置き換えた。演算列は
+  ホスト参照実装（`eval::reduce_bias_grad_rows`／`layout::
+  reduce_bias_grad_rows_host`。`acc: f64 = 0.0` から index 順に加算し最後に
+  1 回 `as f32`）と同一であり、**結果は bit 完全一致**する（NaN のみ payload
+  がハードウェア依存のため quiet NaN へ正規化し、クラス一致で比較する）
+- ホスト側の逐語モデル `crates/backend-metal/src/soft_f64.rs`
+  （`widen_f32_bits`／`add_f64_bits`／`narrow_f64_bits`／`sequential_sum_f32`）
+  を新設し、Rust の `f64` 実演算と `to_bits` で一致することを Linux 実行
+  可能なユニットテストで検証する（ランダム 400 万組・指数差 0〜70 の総当たり
+  ・全 f32 subnormal・f32 指数境界〈overflow／subnormal／underflow〉・
+  codex-review の名指しケース）。`bias_scale_sum_add`／`bias_pow2_floor`／
+  `bias_kahan_add` と旧ホストモデル `tests/gemm_bias_scale_sum_host_model.rs`
+  は撤去
+- 実機テスト `tests/gemm_bias_grad_reduce_bit_match.rs`（`#[ignore]`）で
+  GPU カーネル・ホスト参照実装・逐語モデルの 3 者 bit 一致を名指しケース
+  （相殺・中間 overflow・subnormal・非有限値・符号付きゼロ）込みで確認し、
+  `tests/gemm_fp32_strict_into_parity.rs` の bias 比較を `assert_parity`
+  から `assert_bits_eq` へ、`crates/facade/tests/device_param_store_grad_
+  readout.rs` の bias slot を `assert_parity` から bit 比較へそれぞれ戻した
+  （M4 Max 実機で全 pass・2026-09-12）
+- これにより §10.13 の Tier A/B・`n < 2^24` の `InvalidArgument` 要件・
+  非有限値クラス一致規則はいずれも不要になり、**bias 勾配は weight 勾配と
+  同じ bit 完全一致契約**へ揃う。tolerance 定数（`RELATIVE_TOLERANCE`／
+  `ABSOLUTE_RESCUE_THRESHOLD`）・`docs/spec/`・REQ-2 の適用範囲はいずれも
+  不変であり、契約 PR #1666（Tier A/B の明文化）はマージ不要（superseded）
+- 64bit 整数はループ添字用途で既に他シェーダ（`mse.metal`・`rmsnorm.metal`
+  ・`softmax.metal`）が使用しており、M4 Max（Apple9 ファミリ）で実行時
+  コンパイル可能なことを確認済み。64 以上のシフトは MSL・Rust とも未定義
+  動作／panic のため、桁合わせ・subnormal 化の経路は分岐で除外してから
+  shift する。1 出力列あたり `m` 回の整数演算（各数十命令）であり、
+  GEMM 本体に対して無視できる規模だが、reuse `step_total` の再計測は
+  本節時点では未実施（並走ビルド中はベンチを行わない規約のため。必要なら
+  `docs/perf/train-resident-grad-device-update.md` §9 の手順で再計測する）
+

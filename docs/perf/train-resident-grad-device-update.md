@@ -423,23 +423,15 @@ train reuse A/B・`metal_reuse_step_grad_bit_dump` の Mac 実機比較は、bia
 で行う（step 0 の bias 縮約自体のみが直接の変更対象であり、その後の伝播は
 間接的な帰結）。
 
-**追補（イシュー #1666・codex-review 指摘〈P1「除外範囲を事前判定できる検証
-可能な契約にせよ」・追加 P1「`O(n·ε²)` が計算不能」・P2「`f64` 逐次和と厳密和
-の混同」〉を受けた 2 層構造化・最終形。2026-09-12）**: 上記「REQ-2 統一複合
-判定」は Metal bias 縮約カーネル（`gemm_bias_grad_reduce_f32`）とホスト `f64`
-参照実装（`eval::reduce_bias_grad_rows` 等）の一致判定として、以後次の 2 層
-構造で扱う。
-
-- **参照値**: `S_ref` は入力列をホスト `f64` で **index 順に逐次加算**した和
-  （「厳密和」「真値」という語は使わない）。`y_ref` は `S_ref` を 1 回
-  downcast した `f32`。
-- **Tier A（全入力へ常に適用）**: 明示式の理論上界
-  `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`（`ε32 = 2^-24`・`n` は
-  縮約要素数〈行数〉・有効範囲 `n < 2^24`。`O` 記法は使わない）。
-- **Tier B（REQ-2 複合判定）**: `(3 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|,
-  1e-5)` が入力から事前に成立する列にのみ適用する。
-
-上記の「REQ-2 統一複合判定」という表現はこの 2 層構造のうち Tier B を指す。
-契約の正本・導出・実測（Rust ホストモデルでの観測比実測）は `docs/metal-grad-
-reduction-parity-judgment-decision.md`（予定）・`docs/backend-metal-command-
-batching-design.md` §10.13 を参照し、本 doc では重複記載しない。
+**追補（2026-09-12・最終形。判定契約の緩和を撤回）**: PR #1659 は当初、Metal
+bias 縮約カーネル（`gemm_bias_grad_reduce_f32`）が f32 のみの補償和で
+ホスト `f64` 逐次和と一致しない相殺列を、判定契約側（Tier A 理論上界／
+Tier B 条件付き REQ-2 判定。契約 PR #1666）で吸収しようとしたが、codex-review
+で収束せず撤回した。最終形はカーネル側を **IEEE 754 binary64 逐次加算の 64bit
+整数ソフトウェアエミュレーション**へ置き換え、ホスト参照実装
+（`eval::reduce_bias_grad_rows`）と **bit 完全一致**させる方式（`crates/
+backend-metal/src/soft_f64.rs` が逐語モデル）。bias 勾配も weight 勾配と同じ
+bit 一致契約となり、上記本文中の「REQ-2 統一複合判定」は bit 一致へ読み替える
+（tolerance・REQ-2 の適用範囲は不変）。経緯・検証方法は
+`docs/backend-metal-command-batching-design.md` §10.14 を参照。カーネル置換後
+の reuse `step_total` 再計測は未実施（並走ビルド中はベンチを行わない規約）。

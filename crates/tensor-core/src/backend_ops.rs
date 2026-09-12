@@ -647,22 +647,16 @@ pub trait BackendOps {
     /// ついて `sum_{i=0}^{m-1} b[i, j]`。走査順は行 `0..m` 昇順）を書き
     /// 込む。蓄積方式は `.claude/rules/coding-rust.md` の勾配長軸縮約
     /// `f64` アキュムレータ方針（2026-09-12 ユーザー承認 A）に従い、
-    /// 実装はホスト `f64` アキュムレータまたは Metal の scale 方式
-    /// （LAPACK SLASSQ 系の線形和版。中間 overflow 回避）+ Neumaier
-    /// 改良版 Kahan 補償和のいずれかを用いる（実装依存。`fandhe_ai_backend_
-    /// metal::shaders::gemm_bias_grad_reduce_f32`・`fandhe_ai_backend_
-    /// metal::layout::reduce_bias_grad_rows_host` 参照）。このため
-    /// 実装間・ホスト参照実装との一致は bit 完全一致ではなく 2 層契約
-    /// （イシュー #1666。正本 `docs/metal-grad-reduction-parity-
-    /// judgment-decision.md` 予定・`docs/backend-metal-command-
-    /// batching-design.md` §10.13）で判定する。参照値 `S_ref`（入力を
-    /// ホスト `f64` で index 順に逐次加算した和）・`y_ref`（`S_ref` の
-    /// 1 回 downcast）に対し、Tier A（全入力に常に適用する明示式の
-    /// 理論上界 `|y − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`。`ε32 =
-    /// 2^-24`・`n` は縮約要素数）を満たしたうえで、Tier B（REQ-2
-    /// 統一複合判定。相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は
-    /// `(3 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|, 1e-5)` が入力から
-    /// 事前に成立する列（条件数の上限と等価）にのみ適用する。
+    /// 実装はホスト `f64` アキュムレータ（`acc: f64 = 0.0` から行 `0..m`
+    /// を昇順に加算し最後に 1 回 `as f32`）、または `double` 非対応の
+    /// Metal では同じ演算列を IEEE 754 binary64 加算の 64bit 整数ソフト
+    /// ウェアエミュレーションで再現するカーネル（`fandhe_ai_backend_
+    /// metal::shaders::gemm_bias_grad_reduce_f32`。逐語モデルは
+    /// `fandhe_ai_backend_metal::soft_f64`）を用いる。いずれも
+    /// `fandhe_ai_backend_metal::layout::reduce_bias_grad_rows_host` と
+    /// **bit 完全一致**する（NaN のみ payload がハードウェア依存のため
+    /// クラス一致。`docs/backend-metal-command-batching-design.md`
+    /// §10.14）。
     /// `bias_offset + n` は [`Self::gemm_fp32_strict_into`]
     /// の `out_offset + m*n` と同じ検査規約（`checked_add`・範囲外は
     /// [`BackendError::InvalidArgument`]。REQ-8・OWASP A03）を適用する。
