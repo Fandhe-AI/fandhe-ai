@@ -59,8 +59,8 @@
 //! 本機構は**並列度のみ**を変える（専用プールで実行するか・グローバル
 //! プールで実行するかの違い）。GEMM カーネル本体（マイクロカーネル・
 //! packing・FMA 契約・累積順序）は変更しないため、出力は常にグローバル
-//! プール実行と bit 完全一致する（`tests/gemm_small_shape_cap_parity.rs`
-//! で検証）。
+//! プール実行と bit 完全一致する（`small_shape_thread_cap::tests::
+//! dedicated_pool_execution_matches_global_pool_bit_exact` で検証）。
 
 use std::sync::OnceLock;
 
