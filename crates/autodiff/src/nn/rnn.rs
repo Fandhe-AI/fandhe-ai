@@ -248,6 +248,25 @@ fn validate_seq_input(
     Ok((t_len, b_dim, d_dim))
 }
 
+/// `outputs` バッファ（per-step の `Var`／`Tensor` を溜める `Vec`）を
+/// `t_len` 要素分確保する。`validate_seq_input` は shape 由来の
+/// `t_len` が `usize::MAX` 近辺でも通す（他の次元が 0 なら要素数 0 の
+/// 有効なテンソルが構築できるため）。`Vec::with_capacity(t_len)` を
+/// そのまま呼ぶと確保不能な `t_len` で本番経路が capacity overflow
+/// panic する（`.claude/rules/coding-rust.md` 本番経路 panic 禁止。
+/// イシュー #1647 codex-review P1 指摘）。`try_reserve_exact` で
+/// 確保可否を先に確認し、失敗時は panic させず
+/// [`AutodiffError::InvalidArgument`] へ変換して呼び出し元へ返す。
+fn reserve_outputs<T>(t_len: usize, op_name: &str) -> Result<Vec<T>, AutodiffError> {
+    let mut outputs = Vec::new();
+    outputs.try_reserve_exact(t_len).map_err(|err| {
+        AutodiffError::InvalidArgument(format!(
+            "{op_name}: T={t_len} 分の出力バッファを確保できません: {err}"
+        ))
+    })?;
+    Ok(outputs)
+}
+
 /// セル 1 step の入力形状を検証する（`Var::{rnn_cell,lstm_cell,
 /// gru_cell}`〈`var.rs`〉が tape 経路で行う検証と同型の rank・batch
 /// 数・hidden 次元・重み shape・bias shape チェック。`forward_host`
@@ -546,7 +565,7 @@ impl Rnn {
             Some(v) => *v,
             None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
         };
-        let mut outputs = Vec::with_capacity(t_len);
+        let mut outputs = reserve_outputs(t_len, "Rnn::forward_seq")?;
         for t in 0..t_len {
             let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
             let x_t = tape.var(&x_t_tensor);
@@ -579,7 +598,7 @@ impl Module for Rnn {
         let (t_len, b_dim, d_dim) = validate_seq_input(input, "Rnn::forward_host")?;
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
-        let mut outputs = Vec::with_capacity(t_len);
+        let mut outputs = reserve_outputs(t_len, "Rnn::forward_host")?;
         for t in 0..t_len {
             let x_t = slice_timestep(input, t, b_dim, d_dim)?;
             h = self.cell.forward_host(ops, &x_t, &h)?;
@@ -804,7 +823,7 @@ impl Lstm {
             Some(v) => *v,
             None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
         };
-        let mut outputs = Vec::with_capacity(t_len);
+        let mut outputs = reserve_outputs(t_len, "Lstm::forward_seq")?;
         for t in 0..t_len {
             let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
             let x_t = tape.var(&x_t_tensor);
@@ -839,7 +858,7 @@ impl Module for Lstm {
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
         let mut c = Tensor::zeros(&[b_dim, hidden])?;
-        let mut outputs = Vec::with_capacity(t_len);
+        let mut outputs = reserve_outputs(t_len, "Lstm::forward_host")?;
         for t in 0..t_len {
             let x_t = slice_timestep(input, t, b_dim, d_dim)?;
             let (h_t, c_t) = self.cell.forward_host(ops, &x_t, &h, &c)?;
@@ -1034,7 +1053,7 @@ impl Gru {
             Some(v) => *v,
             None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
         };
-        let mut outputs = Vec::with_capacity(t_len);
+        let mut outputs = reserve_outputs(t_len, "Gru::forward_seq")?;
         for t in 0..t_len {
             let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
             let x_t = tape.var(&x_t_tensor);
@@ -1062,7 +1081,7 @@ impl Module for Gru {
         let (t_len, b_dim, d_dim) = validate_seq_input(input, "Gru::forward_host")?;
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
-        let mut outputs = Vec::with_capacity(t_len);
+        let mut outputs = reserve_outputs(t_len, "Gru::forward_host")?;
         for t in 0..t_len {
             let x_t = slice_timestep(input, t, b_dim, d_dim)?;
             h = self.cell.forward_host(ops, &x_t, &h)?;

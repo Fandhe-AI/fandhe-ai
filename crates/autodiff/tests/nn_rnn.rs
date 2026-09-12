@@ -1743,3 +1743,51 @@ fn forward_seq_rejects_zero_length_sequence() {
     let err = rnn.forward_seq(&tape, &empty, None).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
+
+/// PR #1672 codex-review P1 指摘の回帰テスト: `[T,B,D]` の shape が
+/// `T=usize::MAX`・`B=0`（要素数 0 のまま合法に構築できる。`Tensor::new`
+/// はデータ長と shape の要素数積が一致することのみ検査するため）だと
+/// `validate_seq_input` の `T>0` 検査は通過してしまう。`outputs` バッファ
+/// を `Vec::with_capacity(t_len)` で確保していると capacity overflow で
+/// panic する（本番経路 panic 禁止。`.claude/rules/coding-rust.md`）。
+/// `reserve_outputs`（`try_reserve_exact` 経由）へ切替後は panic せず
+/// 型付きエラーを返すことを、`Rnn`／`Lstm`／`Gru` の
+/// `forward_seq`／`forward_host` 全 6 経路で確認する。
+#[test]
+fn forward_seq_and_forward_host_reject_unreservable_sequence_length_instead_of_panicking() {
+    // 要素数 0（`b_dim=0`）のまま `t_len=usize::MAX` を許す不正 shape。
+    let huge_t_zero_batch = t(Vec::new(), &[usize::MAX, 0, D]);
+
+    let rnn = Rnn::new(D, HID, true, 1).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let err = rnn
+        .forward_seq(&tape, &huge_t_zero_batch, None)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let err = rnn
+        .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+    let lstm = Lstm::new(D, HID, true, 1).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let err = lstm
+        .forward_seq(&tape, &huge_t_zero_batch, None, None)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let err = lstm
+        .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+    let gru = Gru::new(D, HID, true, 1).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let err = gru
+        .forward_seq(&tape, &huge_t_zero_batch, None)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let err = gru
+        .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
