@@ -474,6 +474,28 @@ pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
 // 片側 Jacobi SVD（Hestenes 法）。
 // =====================================================================
 
+/// ベクトルの符号を「最大絶対値成分（同値は最小添字）が正」に
+/// 正規化する（設計文書 §3.5 の SVD 符号規約。`svd` の Gram–Schmidt
+/// 直交補完で生成する `σ == 0` 側の列にもこの規約を適用するために
+/// 独立関数化した——補完前の符号正規化ループの後に上書きするため、
+/// 適用しないと補完列だけ規約に従わない不変量違反になっていた
+/// （codex-review 指摘）。
+fn normalize_max_abs_sign(v: &mut [f64]) {
+    let mut max_abs = 0.0;
+    let mut max_idx = 0usize;
+    for (idx, &x) in v.iter().enumerate() {
+        if x.abs() > max_abs {
+            max_abs = x.abs();
+            max_idx = idx;
+        }
+    }
+    if v[max_idx] < 0.0 {
+        for x in v.iter_mut() {
+            *x = -*x;
+        }
+    }
+}
+
 /// `m >= n` の片側 Jacobi SVD（列直交化による古典的手法）。
 /// `A` の列を回転で逐次直交化し、収束後の列ノルムが特異値になる。
 /// 反復上限は 60 スイープ（実用上ほぼ全ての小〜中規模行列で収束する）。
@@ -494,7 +516,16 @@ fn jacobi_svd_tall(a: &Mat) -> Result<(Mat, Vec<f64>, Mat), AutodiffError> {
                 let beta: f64 = col_q.iter().map(|v| v * v).sum();
                 let gamma: f64 = col_p.iter().zip(col_q.iter()).map(|(a, b)| a * b).sum();
 
-                if gamma.abs() <= EPS * (alpha * beta).sqrt().max(EPS) {
+                // 収束判定は `alpha*beta` の平方根に対する相対しきい値のみ
+                // で行う（絶対下限 `.max(EPS)` を持たない）。`alpha` また
+                // は `beta` が 0（零列）のとき `gamma` も必ず 0 になる
+                // （零ベクトルとの内積）ため `0.0 <= 0.0` で安全に収束
+                // 判定できる。絶対下限があると `EPS*EPS = 1e-28` という
+                // 入力スケール非依存の閾値が生じ、列ノルムが
+                // 約 1e-15 スケールの小さい入力で非直交な列を誤って
+                // 収束扱いし、誤った特異値・特異ベクトルを返していた
+                // （codex-review 指摘）。
+                if gamma.abs() <= EPS * (alpha * beta).sqrt() {
                     continue;
                 }
                 converged = false;
@@ -686,6 +717,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
             }
         }
         if chosen {
+            normalize_max_abs_sign(&mut candidate);
             u_sorted.set_col(j, &candidate);
         }
     }
@@ -723,6 +755,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
             }
         }
         if chosen {
+            normalize_max_abs_sign(&mut candidate);
             v_sorted.set_col(j, &candidate);
         }
     }
@@ -751,28 +784,47 @@ pub(crate) fn matrix_norm_fro(a: &Tensor<f32>) -> Tensor<f32> {
 pub(crate) fn matrix_norm_one(a: &Tensor<f32>) -> Tensor<f32> {
     let mat = Mat::from_tensor(a);
     let mut max_sum = 0.0f64;
+    let mut has_nan = false;
     for c in 0..mat.cols {
         let sum: f64 = mat.col(c).iter().map(|v| v.abs()).sum();
+        // `sum` が `NaN` のとき `sum > max_sum` は常に偽（IEEE 754 の
+        // 順序付き比較は NaN を含む比較を全て偽にする）ため、`NaN` を
+        // 含む列が最大値の更新へ一切寄与せず、無視されたかのように
+        // `max_sum` が有限値のまま返ってしまう（codex-review 指摘。
+        // 数値異常が正常値 `0` へ変換され隠れる）。列走査とは独立に
+        // `NaN` の有無を検出し、1 つでもあれば最終結果を `NaN` へ
+        // 伝播させる。
+        if sum.is_nan() {
+            has_nan = true;
+        }
         if sum > max_sum {
             max_sum = sum;
         }
     }
-    build_tensor(vec![max_sum as f32], &[])
+    let result = if has_nan { f64::NAN } else { max_sum };
+    build_tensor(vec![result as f32], &[])
 }
 
 pub(crate) fn matrix_norm_inf(a: &Tensor<f32>) -> Tensor<f32> {
     let mat = Mat::from_tensor(a);
     let mut max_sum = 0.0f64;
+    let mut has_nan = false;
     for r in 0..mat.rows {
         let mut sum = 0.0;
         for c in 0..mat.cols {
             sum += mat.get(r, c).abs();
         }
+        // `matrix_norm_one` と同じ理由（NaN 比較は常に偽）で NaN の
+        // 有無を独立に検出し最終結果へ伝播する（codex-review 指摘）。
+        if sum.is_nan() {
+            has_nan = true;
+        }
         if sum > max_sum {
             max_sum = sum;
         }
     }
-    build_tensor(vec![max_sum as f32], &[])
+    let result = if has_nan { f64::NAN } else { max_sum };
+    build_tensor(vec![result as f32], &[])
 }
 
 /// `MatrixNormOrd` の 5 種すべてを扱う `var.rs::Var::matrix_norm` の
@@ -846,16 +898,39 @@ pub(crate) fn solve_vjp(
 }
 
 /// `Op::Det` の VJP: `dA = g · det(A) · A^{-T}`。`det(A) == 0`（特異）の
-/// 場合は `inv` が `InvalidArgument` を返すため fail-closed に伝播する
+/// 場合は `lu_decompose` が `None` を返すため fail-closed に伝播する
 /// （設計文書 §3.4「`Det` は … fail-closed」）。
-pub(crate) fn det_vjp(
-    a: &Tensor<f32>,
-    det_value: f32,
-    g_scalar: f32,
-) -> Result<Tensor<f32>, AutodiffError> {
-    let inv_a = inv(a)?;
-    let mut result = Mat::from_tensor(&inv_a).transpose();
-    let scale = f64::from(g_scalar) * f64::from(det_value);
+///
+/// forward の `det()` が返す `f32` 記録値（`out_value`）は受け取らず、
+/// ここで `a` から改めて `f64` の `LuDecomp` を作り、行列式・逆行列の
+/// 両方をその 1 回の分解から導出する（`inv(a)` を呼ぶと別途 LU 分解が
+/// 走るため二重計算にもなる）。forward の記録値は出力テンソルの契約
+/// 上 `f32` へ downcast 済みのため、`|det(A)|` が `f32` の表現範囲
+/// （約 3.4e38）を超える入力（例 `diag(1e20, 1e20)` は `det = 1e40`）
+/// では forward 出力自体は `f32::INFINITY` になるが、勾配
+/// `dA = g · det(A) · A^{-T}` は `A^{-T}` の要素が `det(A)` に反比例
+/// して小さくなるため有限になりうる。forward の丸め済み `f32` 値を
+/// 乗算に使うと、その時点で無限大が伝播し正しい有限勾配が
+/// `Inf`／`NaN` になってしまう（codex-review 指摘）。`f64` のまま
+/// `det(A) · A^{-T}` を計算し、最後に 1 回だけ `f32` へ downcast する
+/// ことでこれを避ける（`.claude/rules/coding-rust.md` の内部精度契約）。
+pub(crate) fn det_vjp(a: &Tensor<f32>, g_scalar: f32) -> Result<Tensor<f32>, AutodiffError> {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        // 空行列の `det` は空積 `1.0`（定数）のため勾配は自明に空。
+        return Ok(build_tensor(Vec::new(), &[0, 0]));
+    }
+    let lu = lu_decompose(&mat)
+        .ok_or_else(|| invalid("eval::linalg::det_vjp: 行列が特異（ピボットが厳密 0）"))?;
+    let mut det_value = lu.sign;
+    for i in 0..n {
+        det_value *= lu.lu.get(i, i);
+    }
+    let identity = Mat::identity(n);
+    let inv_mat = lu_solve_mat(&lu, &identity);
+    let mut result = inv_mat.transpose();
+    let scale = f64::from(g_scalar) * det_value;
     for v in result.data.iter_mut() {
         *v *= scale;
     }
@@ -1037,20 +1112,25 @@ pub(crate) fn svd_vjp(
     let term1 = u_mat.matmul(&inner).matmul(&vh_mat);
 
     // term2 = (I_m - U Uᵀ) dU diag(S)^{-1} Vᵀ
-    let uut = u_mat.matmul(&u_mat.transpose());
-    let mut proj_m = Mat::zeros(m, m);
-    for i in 0..m {
-        for j in 0..m {
-            let ident = if i == j { 1.0 } else { 0.0 };
-            proj_m.set(i, j, ident - uut.get(i, j));
-        }
-    }
-    // `1/σ_j`（`σ_j ≈ 0` は 0）を事前計算して `i`/`j` 二重ループの内側
-    // 添字アクセスを配列直接インデクスから外す（clippy::needless_range_loop
-    // 回避。`term2`／`term3` で共通利用する）。
+    //       = dU diag(S)^{-1} Vᵀ − U (Uᵀ dU diag(S)^{-1}) Vᵀ
+    // `U Uᵀ`（`m×m`）・`V Vᵀ`（`n×n`）を明示構築すると reduced SVD
+    // （`k = min(m,n)` 列限定）の縮退次元 `m`／`n` が非常に大きい入力
+    // （例 `[100000,1]`）でメモリを枯渇させる（`m×m` だけで約 80 GB。
+    // codex-review 指摘）。積の結合順序を変え、常に `k×k` 以下の
+    // 中間行列のみを経由するよう書き換える（数式としては同値。
+    // `(I_m − U Uᵀ) X = X − U (Uᵀ X)` は行列積の結合則そのもの）。
+    //
+    // `1/σ_j`（`σ_j == 0` は 0）を事前計算して `i`/`j` 二重ループの
+    // 内側添字アクセスを配列直接インデクスから外す
+    // （clippy::needless_range_loop 回避。`term2`／`term3` で共通
+    // 利用する）。forward `svd` の `σ ≈ 0` 判定（PR #1668 是正）と
+    // 同じく厳密ゼロ比較とし、固定絶対閾値 `1e-12` を用いない——
+    // 閾値があると `1e-13` 等の数値的に小さいが非ゼロな特異値の列が
+    // 逆数 0 として扱われ、対応する勾配寄与が黙って消える長方形
+    // 行列のケースがあった（codex-review 指摘）。
     let inv_s_vals: Vec<f64> = s_vals
         .iter()
-        .map(|&sv| if sv.abs() > 1e-12 { 1.0 / sv } else { 0.0 })
+        .map(|&sv| if sv != 0.0 { 1.0 / sv } else { 0.0 })
         .collect();
     let mut du_sinv = Mat::zeros(m, k);
     for i in 0..m {
@@ -1058,9 +1138,18 @@ pub(crate) fn svd_vjp(
             du_sinv.set(i, j, du_mat.get(i, j) * inv_s);
         }
     }
-    let term2 = proj_m.matmul(&du_sinv).matmul(&vh_mat);
+    let du_sinv_vht = du_sinv.matmul(&vh_mat); // m×n
+    let ut_du_sinv = u_mat.transpose().matmul(&du_sinv); // k×k
+    let u_ut_du_sinv_vht = u_mat.matmul(&ut_du_sinv).matmul(&vh_mat); // m×n
+    let mut term2 = Mat::zeros(m, n);
+    for i in 0..m {
+        for j in 0..n {
+            term2.set(i, j, du_sinv_vht.get(i, j) - u_ut_du_sinv_vht.get(i, j));
+        }
+    }
 
     // term3 = U diag(S)^{-1} dVᵀ (I_n - V Vᵀ)
+    //       = U diag(S)^{-1} dVᵀ − U (diag(S)^{-1} dVᵀ V) Vᵀ
     let dv_t = dv_mat.transpose();
     let mut sinv_dvt = Mat::zeros(k, n);
     for (i, &inv_s) in inv_s_vals.iter().enumerate() {
@@ -1068,15 +1157,15 @@ pub(crate) fn svd_vjp(
             sinv_dvt.set(i, j, inv_s * dv_t.get(i, j));
         }
     }
-    let vvt = v_mat.matmul(&v_mat.transpose());
-    let mut proj_n = Mat::zeros(n, n);
-    for i in 0..n {
+    let u_sinv_dvt = u_mat.matmul(&sinv_dvt); // m×n
+    let sinv_dvt_v = sinv_dvt.matmul(&v_mat); // k×k
+    let u_sinv_dvt_v_vht = u_mat.matmul(&sinv_dvt_v).matmul(&vh_mat); // m×n
+    let mut term3 = Mat::zeros(m, n);
+    for i in 0..m {
         for j in 0..n {
-            let ident = if i == j { 1.0 } else { 0.0 };
-            proj_n.set(i, j, ident - vvt.get(i, j));
+            term3.set(i, j, u_sinv_dvt.get(i, j) - u_sinv_dvt_v_vht.get(i, j));
         }
     }
-    let term3 = u_mat.matmul(&sinv_dvt).matmul(&proj_n);
 
     let mut da = Mat::zeros(m, n);
     for i in 0..m {
@@ -1088,12 +1177,13 @@ pub(crate) fn svd_vjp(
 }
 
 /// `Op::MatrixNorm` の VJP（5 ord。設計文書 §3.4「MatrixNorm」）。
-/// `a` は入力の forward 値、`out_value` は当該ノードの forward 記録値
-/// （ノルムのスカラー）、`g_scalar` は upstream（スカラー）。
+/// `a` は入力の forward 値、`g_scalar` は upstream（スカラー）。forward
+/// が記録するノルムの `f32` 値は受け取らない（`Fro` 分岐参照: 大きい
+/// スケールの入力で `f32` へ丸め済みの記録値を再利用すると `Inf` が
+/// 混入するため、必要な統計量は都度 `a` から `f64` で計算し直す）。
 pub(crate) fn matrix_norm_vjp(
     a: &Tensor<f32>,
     ord: MatrixNormOrd,
-    out_value: &Tensor<f32>,
     g_scalar: f32,
 ) -> Result<Tensor<f32>, AutodiffError> {
     let mat = Mat::from_tensor(a);
@@ -1111,7 +1201,19 @@ pub(crate) fn matrix_norm_vjp(
     }
     match ord {
         MatrixNormOrd::Fro => {
-            let norm = f64::from(dense_vec(out_value).first().copied().unwrap_or(0.0));
+            // `out_value`（forward が返す `f32` 記録値）を再利用せず、
+            // `mat`（`a` の `f64` 表現）から改めて二乗和を計算する。
+            // forward `matrix_norm_fro` は `f64` で二乗和を取るものの
+            // 最終的に `f32` へ downcast した値を `out_value` として
+            // 記録するため、要素スケールが大きい入力（例 `3e38`）では
+            // `norm` が `f32::MAX`（約 `3.4e38`）を超えて `f32::INFINITY`
+            // に丸まる。`scale = g / norm` にその `Inf` を使うと勾配が
+            // 本来有限な値であるにもかかわらず `0` になり異常が隠れる
+            // （codex-review 指摘）。`f64` のまま二乗和・平方根を計算し
+            // 最後に 1 回だけ downcast することでこれを避ける
+            // （`.claude/rules/coding-rust.md` の内部精度契約）。
+            let sum_sq: f64 = mat.data.iter().map(|v| v * v).sum();
+            let norm = sum_sq.sqrt();
             let mut da = mat.clone();
             if norm > 0.0 {
                 let scale = f64::from(g_scalar) / norm;
@@ -1139,7 +1241,17 @@ pub(crate) fn matrix_norm_vjp(
             let mut da = Mat::zeros(mat.rows, mat.cols);
             for r in 0..mat.rows {
                 let v = mat.get(r, best_col);
-                let sign = if v >= 0.0 { 1.0 } else { -1.0 };
+                // `sign(0) == 0`（数学的な符号関数の慣例。`v > 0.0` /
+                // `v < 0.0` の二分岐だけだと `v == 0.0` にも `+1` の
+                // 符号が割り当たり、設計文書 §3.4 の `g·sign(A)` から
+                // 乖離する（codex-review 指摘）。
+                let sign = if v > 0.0 {
+                    1.0
+                } else if v < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
                 da.set(r, best_col, f64::from(g_scalar) * sign);
             }
             Ok(da.to_tensor())
@@ -1161,7 +1273,15 @@ pub(crate) fn matrix_norm_vjp(
             let mut da = Mat::zeros(mat.rows, mat.cols);
             for c in 0..mat.cols {
                 let v = mat.get(best_row, c);
-                let sign = if v >= 0.0 { 1.0 } else { -1.0 };
+                // `MatrixNormOrd::One` と同じ理由で `sign(0) == 0` を
+                // 明示する（codex-review 指摘）。
+                let sign = if v > 0.0 {
+                    1.0
+                } else if v < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
                 da.set(best_row, c, f64::from(g_scalar) * sign);
             }
             Ok(da.to_tensor())
@@ -1565,12 +1685,29 @@ mod tests {
     fn det_vjp_matches_numeric() {
         let a = build_tensor(vec![4.0, 1.0, 2.0, 3.0], &[2, 2]);
         let g_scalar = 1.5f32;
-        let det_value = dense_vec(&det(&a))[0];
-        let da = det_vjp(&a, det_value, g_scalar).unwrap();
+        let da = det_vjp(&a, g_scalar).unwrap();
         let numeric = numeric_grad(&a, |ap| {
             f64::from(g_scalar) * f64::from(dense_vec(&det(ap))[0])
         });
         assert_grad_close("det", &da, &numeric);
+    }
+
+    #[test]
+    fn det_vjp_large_scale_input_is_finite() {
+        // 診断済み P2: forward `det()` の `f32` 記録値をそのまま乗算に
+        // 使うと `diag(1e20, 1e20)`（`det = 1e40`）で `f32::INFINITY`
+        // が伝播し `dA` が `Inf`／`NaN` になっていた（codex-review
+        // 指摘）。`det_vjp` は `a` から `f64` で改めて分解するため、
+        // `A^{-T}` の要素（約 `1e-20`）との積で有限勾配になることを
+        // 検証する。
+        let a = build_tensor(vec![1e20, 0.0, 0.0, 1e20], &[2, 2]);
+        let da = det_vjp(&a, 1.0).unwrap();
+        for v in dense_vec(&da) {
+            assert!(
+                v.is_finite(),
+                "det_vjp large-scale grad must be finite: {v}"
+            );
+        }
     }
 
     #[test]
@@ -1632,8 +1769,7 @@ mod tests {
     fn matrix_norm_fro_vjp_matches_numeric() {
         let a = build_tensor(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]);
         let g_scalar = 1.3f32;
-        let out = matrix_norm_fro(&a);
-        let da = matrix_norm_vjp(&a, MatrixNormOrd::Fro, &out, g_scalar).unwrap();
+        let da = matrix_norm_vjp(&a, MatrixNormOrd::Fro, g_scalar).unwrap();
         let numeric = numeric_grad(&a, |ap| {
             f64::from(g_scalar) * f64::from(dense_vec(&matrix_norm_fro(ap))[0])
         });
@@ -1648,8 +1784,7 @@ mod tests {
         // なることが判明したため変更）。
         let a = build_tensor(vec![2.0, -1.0, -6.0, 3.0], &[2, 2]);
         let g_scalar = 0.7f32;
-        let out = matrix_norm_one(&a);
-        let da = matrix_norm_vjp(&a, MatrixNormOrd::One, &out, g_scalar).unwrap();
+        let da = matrix_norm_vjp(&a, MatrixNormOrd::One, g_scalar).unwrap();
         let numeric = numeric_grad(&a, |ap| {
             f64::from(g_scalar) * f64::from(dense_vec(&matrix_norm_one(ap))[0])
         });
@@ -1660,8 +1795,7 @@ mod tests {
     fn matrix_norm_inf_vjp_matches_numeric() {
         let a = build_tensor(vec![1.0, -2.0, -5.0, 4.0], &[2, 2]);
         let g_scalar = -0.9f32;
-        let out = matrix_norm_inf(&a);
-        let da = matrix_norm_vjp(&a, MatrixNormOrd::Inf, &out, g_scalar).unwrap();
+        let da = matrix_norm_vjp(&a, MatrixNormOrd::Inf, g_scalar).unwrap();
         let numeric = numeric_grad(&a, |ap| {
             f64::from(g_scalar) * f64::from(dense_vec(&matrix_norm_inf(ap))[0])
         });
@@ -1676,8 +1810,7 @@ mod tests {
             let (_, s, _) = svd(ap).unwrap();
             dense_vec(&s).iter().map(|&v| f64::from(v)).sum()
         };
-        let out = build_tensor(vec![norm_fn(&a) as f32], &[]);
-        let da = matrix_norm_vjp(&a, MatrixNormOrd::Nuc, &out, g_scalar).unwrap();
+        let da = matrix_norm_vjp(&a, MatrixNormOrd::Nuc, g_scalar).unwrap();
         let numeric = numeric_grad(&a, |ap| f64::from(g_scalar) * norm_fn(ap));
         assert_grad_close("matrix_norm nuc", &da, &numeric);
     }
@@ -1690,8 +1823,7 @@ mod tests {
             let (_, s, _) = svd(ap).unwrap();
             f64::from(dense_vec(&s)[0])
         };
-        let out = build_tensor(vec![norm_fn(&a) as f32], &[]);
-        let da = matrix_norm_vjp(&a, MatrixNormOrd::Spectral, &out, g_scalar).unwrap();
+        let da = matrix_norm_vjp(&a, MatrixNormOrd::Spectral, g_scalar).unwrap();
         let numeric = numeric_grad(&a, |ap| f64::from(g_scalar) * norm_fn(ap));
         assert_grad_close("matrix_norm spectral", &da, &numeric);
     }

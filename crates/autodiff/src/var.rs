@@ -810,7 +810,9 @@ impl<'t> Var<'t> {
                 verify_shape(v.shape(), &shape)?;
                 v
             }
-            Err(BackendError::Unsupported(_)) => eval::linalg::inv(&a_val)?,
+            Err(BackendError::Unsupported(_)) => {
+                eval::linalg::inv(&a_val).map_err(unify_fallback_error)?
+            }
             Err(other) => return Err(AutodiffError::Backend(other)),
         };
         let id = self.tape.push_eager(Op::Inv { input: self.id }, value);
@@ -848,7 +850,9 @@ impl<'t> Var<'t> {
                 verify_shape(v.shape(), &expected_shape)?;
                 v
             }
-            Err(BackendError::Unsupported(_)) => eval::linalg::solve(&a_val, &b_val)?,
+            Err(BackendError::Unsupported(_)) => {
+                eval::linalg::solve(&a_val, &b_val).map_err(unify_fallback_error)?
+            }
             Err(other) => return Err(AutodiffError::Backend(other)),
         };
         let id = self.tape.push_eager(
@@ -898,7 +902,9 @@ impl<'t> Var<'t> {
                 verify_shape(v.shape(), &shape)?;
                 v
             }
-            Err(BackendError::Unsupported(_)) => eval::linalg::cholesky(&a_val)?,
+            Err(BackendError::Unsupported(_)) => {
+                eval::linalg::cholesky(&a_val).map_err(unify_fallback_error)?
+            }
             Err(other) => return Err(AutodiffError::Backend(other)),
         };
         let id = self.tape.push_eager(Op::Cholesky { input: self.id }, value);
@@ -982,7 +988,9 @@ impl<'t> Var<'t> {
                 verify_shape(factors.vh.shape(), &[k, n])?;
                 (factors.u, factors.s, factors.vh)
             }
-            Err(BackendError::Unsupported(_)) => eval::linalg::svd(&a_val)?,
+            Err(BackendError::Unsupported(_)) => {
+                eval::linalg::svd(&a_val).map_err(unify_fallback_error)?
+            }
             Err(other) => return Err(AutodiffError::Backend(other)),
         };
         let u_id = self.tape.push_eager(
@@ -1038,7 +1046,9 @@ impl<'t> Var<'t> {
                 verify_shape(v.shape(), &[])?;
                 v
             }
-            Err(BackendError::Unsupported(_)) => eval::linalg::matrix_norm(&a_val, ord)?,
+            Err(BackendError::Unsupported(_)) => {
+                eval::linalg::matrix_norm(&a_val, ord).map_err(unify_fallback_error)?
+            }
             Err(other) => return Err(AutodiffError::Backend(other)),
         };
         let id = self.tape.push_eager(
@@ -1085,6 +1095,28 @@ fn verify_shape(actual: &[usize], expected: &[usize]) -> Result<(), AutodiffErro
                 rhs: expected.to_vec(),
             },
         )))
+    }
+}
+
+/// `eval::linalg`（ホスト参照実装。`BackendOps::linalg_*` が
+/// `Unsupported` を返したときのフォールバック経路）が返す
+/// `AutodiffError::InvalidArgument` を、CPU 本番経路
+/// （`BackendOps::linalg_*` → `Err(other) => AutodiffError::Backend(other)`）
+/// と同じ `AutodiffError::Backend(BackendError::InvalidArgument(_))`
+/// へ統一する。フォールバック経路と CPU 本番経路のどちらを通ったか
+/// （バックエンドが `linalg_*` を実装しているか否か）という実装選択の
+/// 差で、特異行列・非正定値・非収束という同一の論理的失敗が呼び出し
+/// 元から見て異なる `AutodiffError` variant として観測されていた
+/// （codex-review／Cursor Bugbot 指摘。パターンマッチで variant を
+/// 区別するコードが実装選択に依存してしまう）。`InvalidArgument`
+/// 以外（`eval::linalg` の内部で `Tensor::new`／view 操作が返しうる
+/// `Shape` 等）はそのまま通す。
+fn unify_fallback_error(err: AutodiffError) -> AutodiffError {
+    match err {
+        AutodiffError::InvalidArgument(msg) => {
+            AutodiffError::Backend(BackendError::InvalidArgument(msg))
+        }
+        other => other,
     }
 }
 

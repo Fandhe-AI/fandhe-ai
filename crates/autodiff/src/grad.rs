@@ -578,9 +578,8 @@ pub(crate) fn vjp(
         }
         Op::Det { input } => {
             let a_val = materialize_fallible(nodes, ops, input)?;
-            let det_value = dense_vec(out_value).first().copied().unwrap_or(0.0);
             let g_scalar = dense_vec(upstream).first().copied().unwrap_or(0.0);
-            let da = eval::linalg::det_vjp(a_val, det_value, g_scalar)?;
+            let da = eval::linalg::det_vjp(a_val, g_scalar)?;
             vec![(input, da)]
         }
         Op::Cholesky { input } => {
@@ -618,7 +617,7 @@ pub(crate) fn vjp(
         Op::MatrixNorm { input, ord } => {
             let a_val = materialize_fallible(nodes, ops, input)?;
             let g_scalar = dense_vec(upstream).first().copied().unwrap_or(0.0);
-            let da = eval::linalg::matrix_norm_vjp(a_val, ord, out_value, g_scalar)?;
+            let da = eval::linalg::matrix_norm_vjp(a_val, ord, g_scalar)?;
             vec![(input, da)]
         }
     };

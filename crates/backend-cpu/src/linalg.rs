@@ -492,6 +492,28 @@ pub(crate) fn qr(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgEr
 // 片側 Jacobi SVD（Hestenes 法）。
 // =====================================================================
 
+/// ベクトルの符号を「最大絶対値成分（同値は最小添字）が正」に
+/// 正規化する（設計文書 §3.5 の SVD 符号規約。`svd` の Gram–Schmidt
+/// 直交補完で生成する `σ == 0` 側の列にもこの規約を適用するために
+/// 独立関数化した——補完前の符号正規化ループの後に上書きするため、
+/// 適用しないと補完列だけ規約に従わない不変量違反になっていた
+/// （codex-review 指摘）。
+fn normalize_max_abs_sign(v: &mut [f64]) {
+    let mut max_abs = 0.0;
+    let mut max_idx = 0usize;
+    for (idx, &x) in v.iter().enumerate() {
+        if x.abs() > max_abs {
+            max_abs = x.abs();
+            max_idx = idx;
+        }
+    }
+    if v[max_idx] < 0.0 {
+        for x in v.iter_mut() {
+            *x = -*x;
+        }
+    }
+}
+
 /// `m >= n` の片側 Jacobi SVD（列直交化による古典的手法）。
 /// `A` の列を回転で逐次直交化し、収束後の列ノルムが特異値になる。
 /// 反復上限は 60 スイープ（実用上ほぼ全ての小〜中規模行列で収束する）。
@@ -512,7 +534,16 @@ fn jacobi_svd_tall(a: &Mat) -> Result<(Mat, Vec<f64>, Mat), LinalgError> {
                 let beta: f64 = col_q.iter().map(|v| v * v).sum();
                 let gamma: f64 = col_p.iter().zip(col_q.iter()).map(|(a, b)| a * b).sum();
 
-                if gamma.abs() <= EPS * (alpha * beta).sqrt().max(EPS) {
+                // 収束判定は `alpha*beta` の平方根に対する相対しきい値のみ
+                // で行う（絶対下限 `.max(EPS)` を持たない）。`alpha` また
+                // は `beta` が 0（零列）のとき `gamma` も必ず 0 になる
+                // （零ベクトルとの内積）ため `0.0 <= 0.0` で安全に収束
+                // 判定できる。絶対下限があると `EPS*EPS = 1e-28` という
+                // 入力スケール非依存の閾値が生じ、列ノルムが
+                // 約 1e-15 スケールの小さい入力で非直交な列を誤って
+                // 収束扱いし、誤った特異値・特異ベクトルを返していた
+                // （codex-review 指摘）。
+                if gamma.abs() <= EPS * (alpha * beta).sqrt() {
                     continue;
                 }
                 converged = false;
@@ -703,6 +734,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
             }
         }
         if chosen {
+            normalize_max_abs_sign(&mut candidate);
             u_sorted.set_col(j, &candidate);
         }
     }
@@ -740,6 +772,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
             }
         }
         if chosen {
+            normalize_max_abs_sign(&mut candidate);
             v_sorted.set_col(j, &candidate);
         }
     }
@@ -768,28 +801,47 @@ pub(crate) fn matrix_norm_fro(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgErro
 pub(crate) fn matrix_norm_one(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let mat = Mat::from_tensor(a);
     let mut max_sum = 0.0f64;
+    let mut has_nan = false;
     for c in 0..mat.cols {
         let sum: f64 = mat.col(c).iter().map(|v| v.abs()).sum();
+        // `sum` が `NaN` のとき `sum > max_sum` は常に偽（IEEE 754 の
+        // 順序付き比較は NaN を含む比較を全て偽にする）ため、NaN を
+        // 含む列が最大値の更新へ一切寄与せず無視されたかのように
+        // `max_sum` が有限値のまま返ってしまう（codex-review 指摘。
+        // 数値異常が正常値 `0` へ変換され隠れる）。列走査とは独立に
+        // NaN の有無を検出し最終結果へ伝播させる（`eval::linalg::
+        // matrix_norm_one` と同一方針）。
+        if sum.is_nan() {
+            has_nan = true;
+        }
         if sum > max_sum {
             max_sum = sum;
         }
     }
-    build_tensor(vec![max_sum as f32], &[])
+    let result = if has_nan { f64::NAN } else { max_sum };
+    build_tensor(vec![result as f32], &[])
 }
 
 pub(crate) fn matrix_norm_inf(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let mat = Mat::from_tensor(a);
     let mut max_sum = 0.0f64;
+    let mut has_nan = false;
     for r in 0..mat.rows {
         let mut sum = 0.0;
         for c in 0..mat.cols {
             sum += mat.get(r, c).abs();
         }
+        // `matrix_norm_one` と同じ理由で NaN の有無を独立に検出し
+        // 最終結果へ伝播する（codex-review 指摘）。
+        if sum.is_nan() {
+            has_nan = true;
+        }
         if sum > max_sum {
             max_sum = sum;
         }
     }
-    build_tensor(vec![max_sum as f32], &[])
+    let result = if has_nan { f64::NAN } else { max_sum };
+    build_tensor(vec![result as f32], &[])
 }
 
 /// `MatrixNormOrd` の 5 種すべてを扱う `var.rs::Var::matrix_norm` の
