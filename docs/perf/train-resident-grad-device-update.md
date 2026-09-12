@@ -226,6 +226,41 @@ bias `upload_into` の synchronize へ移動）。これは **同期点の移動
 
 - CUDA 実機での `gemm_fp32_strict_into`／`upload_into` 実装・実測（#1212 から継続・
   既定 `Unsupported`・フォールバック）
-- bias 勾配自体のデバイス常駐化（デバイス側列縮約カーネル必要。現状は bias は常にホスト経由
-  で `upload_into`）
+- bias 勾配自体のデバイス常駐化は Metal で #1566 により実装済み（下記 §7）。CUDA は
+  引き続き既定 `Unsupported`（`gemm_fp32_strict_into_with_bias_reduce_tracked` の
+  既定実装が weight のみへ委譲し bias は無視する）のままスコープ外
 - `d_input` GEMM の同期境界解消（従来どおり `gemm()` → `download` 経路。スコープ外）
+
+## 7. bias 勾配のデバイス常駐化（イシュー #1566）
+
+#1565（`docs/backend-metal-command-batching-design.md` §10）が比較・採用した
+**案 A′**（既存 `gemm_fp32_strict_into` と同一のアップロード・failure-token 登録から
+d_weight・d_bias を同時に encode-only で書き込む拡張）を実装した。
+
+- `tensor-core::BackendOps::gemm_fp32_strict_into_with_bias_reduce_tracked`（非破壊
+  拡張。既定は bias を無視して既存 `_tracked` へ委譲。CPU・CUDA は無変更）。
+- `backend-metal::gemm::MetalGemm::encode_weight_and_bias_grad_with_offsets`（NT/TN
+  encode-only。d_weight と**同一 `ctx.encode` 呼び出し**で bias 縮約カーネル
+  `gemm_bias_grad_reduce_f32` を追加ディスパッチする。`encode_calls` は増えない）。
+- `backend-metal::ops::MetalBackendOps` の同トレイトメソッドオーバーライド（NN/TT・
+  分類不能形状はホスト経由〈`layout::reduce_bias_grad_rows_host` → `upload_into`〉で
+  常に成功する既存パターンを踏襲）。
+- `autodiff::tape::ResidentResolver::fill_resident_weight_grad` のシグネチャ拡張
+  （`bias: Option<ResidentBiasTarget>`・戻り値 `ResidentFillOutcome`）・
+  `device_store.rs`／`grad.rs` の結線。weight tying 時は bias 自身の slot について
+  独立に tie 判定・累積を行う（詳細は `docs/backend-metal-command-batching-design.md`
+  §10.7「実装中に発見した正当性の落とし穴」）。
+
+数値契約: `reduce_to_shape`（`f32` 逐次和）と bit 完全一致させる設計とし、
+`.claude/rules/coding-rust.md` の勾配長軸縮約 `f64` アキュムレータ方針との不整合は
+本イシューでは解消せず未解決のまま引き継ぐ（同上 §10.7）。
+
+**bias 部分の恒久的な同期削減効果**: `docs/backend-metal-command-batching-design.md`
+§4.2 と本 §5.5 が記録した「bias 分の `upload_into` が書き込み前に 1 回だけ
+`synchronize()` する」という残存同期点は、bias が NT/TN（d_weight と同じ判定）と
+なる層では完全に解消される——同一 `ctx.encode` 呼び出しへ折り込まれるため
+`upload_into` 自体を呼ばない。NN/TT・分類不能形状の層では従来どおり `upload_into`
+を要するため、モデル構成によっては残存同期点が残る（例: `Linear(1, n)` の
+1 層目は引き続き NN 扱い）。実測（実機カウンタ・A/B）は本 Linux セッションでは
+実施できないため未記入（`docs/backend-metal-command-batching-design.md` §10.7
+「Mac 実機セッションへの申し送り」参照）。

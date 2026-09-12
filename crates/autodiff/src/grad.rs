@@ -33,7 +33,9 @@ use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, Tensor};
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
-use crate::tape::{NodeId, Op, ResidentResolver, TapeId, TapeNode, materialize_fallible};
+use crate::tape::{
+    NodeId, Op, ResidentBiasTarget, ResidentResolver, TapeId, TapeNode, materialize_fallible,
+};
 use crate::var::Reduction;
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
@@ -335,28 +337,74 @@ pub(crate) fn vjp(
             // `tape_epoch` と併せて resident 書き込みの由来として
             // 実装側（`DeviceParamStore`）へ渡す（`ResidentResolver::
             // fill_resident_weight_grad` doc 参照）。
-            let filled_resident = resident.fill_resident_weight_grad(
-                ops, store_id, slot, tape_id, tape_epoch, weight, &x_t, g,
-            )?;
-            let mut contributions = vec![(input, d_input)];
-            if !filled_resident {
-                let d_weight = ops
-                    .gemm_fp32_strict(&x_t, g)
-                    .map_err(AutodiffError::Backend)?;
-                contributions.push((weight, d_weight));
-            }
-            if let Some(bias_id) = bias {
-                // bias の勾配は `Op::Add` の VJP と同じ縮約
-                // （`reduce_to_shape`。行方向ブロードキャストの逆演算）。
-                // `weight` と同じ理由で `nodes.get(...)` を経由し、
-                // 範囲外添字 panic を防ぐ（fail-closed）。
-                let bias_node = nodes.get(bias_id.0).ok_or_else(|| {
+            // イシュー #1566: bias の `Op::ResidentLeaf` 解決を
+            // `fill_resident_weight_grad` 呼び出しより前に行う（bias も
+            // 同時に resident staging へ書き込めるか試みるため。
+            // `docs/backend-metal-command-batching-design.md` §10
+            // 「案 A′」）。bias が `Some` でも `Op::ResidentLeaf` でない
+            // ／`store_id` が weight と異なる場合は `bias_target` を
+            // `None` のままにし、bias は常にホスト `reduce_to_shape`
+            // フォールバックへ回す（`fill_resident_weight_grad` は
+            // weight のみを試み `bias_filled: false` を返す）。
+            // `nodes.get(...)` は `weight` と同じ理由（範囲外添字 panic
+            // 防止・fail-closed）で経由する。
+            let bias_node = match bias {
+                Some(bias_id) => Some(nodes.get(bias_id.0).ok_or_else(|| {
                     AutodiffError::InvalidArgument(
                         "grad::vjp: Op::LinearResident.bias node_id is out of range for this \
                          tape (contract violation: leaf registered on a different Tape?)"
                             .to_string(),
                     )
-                })?;
+                })?),
+                None => None,
+            };
+            let bias_target = match (bias, bias_node) {
+                (Some(bias_id), Some(node)) => match &node.op {
+                    Op::ResidentLeaf {
+                        store_id: bias_store_id,
+                        slot: bias_slot,
+                    } if *bias_store_id == store_id => Some(ResidentBiasTarget {
+                        slot: *bias_slot,
+                        node_id: bias_id,
+                        shape: node.shape.clone(),
+                    }),
+                    // 別 store の葉、または `Op::ResidentLeaf` 以外
+                    // （理論上到達しないはず——`DeviceParamStore::
+                    // linear_forward` は bias も `ResidentLeaf` としてのみ
+                    // 受け付ける——だが fail-closed に「resident 化を
+                    // 試みない」側へ倒す。誤った勾配を書き込むより安全）。
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            let outcome = resident.fill_resident_weight_grad(
+                ops,
+                store_id,
+                slot,
+                tape_id,
+                tape_epoch,
+                weight,
+                &x_t,
+                g,
+                bias_target,
+            )?;
+            let mut contributions = vec![(input, d_input)];
+            if !outcome.weight_filled {
+                let d_weight = ops
+                    .gemm_fp32_strict(&x_t, g)
+                    .map_err(AutodiffError::Backend)?;
+                contributions.push((weight, d_weight));
+            }
+            if let (Some(bias_id), Some(bias_node)) = (bias, bias_node)
+                && !outcome.bias_filled
+            {
+                // bias の勾配は `Op::Add` の VJP と同じ縮約
+                // （`reduce_to_shape`。行方向ブロードキャストの逆演算）。
+                // resident 経由で書き込めた場合（`outcome.bias_filled`）
+                // はここへ来ない——weight と対称の「resident 成功時は
+                // 無駄な計算をスキップする」最適化（`fill_resident_
+                // weight_grad` doc 参照）。
                 let d_bias = reduce_to_shape(g, &bias_node.shape);
                 contributions.push((bias_id, d_bias));
             }

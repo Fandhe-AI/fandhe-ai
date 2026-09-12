@@ -2432,3 +2432,54 @@ kernel void gemm_splitk_reduce(
     }
     c[idx] = acc + comp;
 }
+
+// bias 勾配（`Op::LinearResident` の VJP における `g` の行方向和。
+// `reduce_to_shape` の rank-2→rank-1 特殊ケース）を GPU 側で計算し、
+// d_weight と同一の encode-only 書き込みで staging へ直接書く
+// （イシュー #1566）。ホスト `crates/autodiff/src/eval.rs::
+// reduce_bias_grad_rows`（および `crates/backend-metal/src/layout.rs::
+// reduce_bias_grad_rows_host`）と bit 完全一致させるため、縮約順序
+// （行 0..M 昇順）・初期値（0.0f）・単純な `+=`（Neumaier 補正等は
+// 使わない）をそのまま複製する。numeric contract 一般原則（`f64`
+// アキュムレータ。`.claude/rules/coding-rust.md`）との不整合は
+// `reduce_to_shape` 自体の既存未解決事項であり本カーネルで新規に導入
+// するものではない（`docs/backend-metal-command-batching-design.md`
+// §10.2-1）。
+//
+// `crate::gemm::BiasGradReduceParams`（repr(C)）とレイアウトを一致
+// させる（4 × uint32 = 16 バイト）。`m`/`n`/`b_ld`/`b_transposed` は
+// `crate::layout::MatrixLayout` から構築する（`b_offset`／
+// `bias_offset` はここに含めず、呼び出し元が `setBuffer:offset:` の
+// バイトオフセットとして渡す。`crate::gemm::
+// encode_dispatch_bias_grad_reduce` doc 参照）。
+struct BiasGradReduceParams {
+    uint m;
+    uint n;
+    uint b_ld;
+    uint b_transposed;
+};
+
+kernel void gemm_bias_grad_reduce_f32(
+    device const float* g [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant BiasGradReduceParams& p [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // REQ-8: grid は `ceil(n/64)` threadgroup（64 スレッド/グループ）
+    // のため端で `n` をはみ出しうる（手動境界チェックを省略しない）。
+    if (gid >= p.n) {
+        return;
+    }
+    float acc = 0.0f;
+    for (uint row = 0; row < p.m; row++) {
+        // `crate::layout::MatrixLayout` の添字式と一致させる契約
+        // （`layout.rs` モジュール冒頭 doc「添字式」）: 転置 view
+        // （`b_transposed == 1`）は `data[col * ld + row]`、非転置は
+        // `data[row * ld + col]`。
+        size_t idx = p.b_transposed
+            ? (size_t)gid * (size_t)p.b_ld + (size_t)row
+            : (size_t)row * (size_t)p.b_ld + (size_t)gid;
+        acc += g[idx];
+    }
+    out[gid] = acc;
+}

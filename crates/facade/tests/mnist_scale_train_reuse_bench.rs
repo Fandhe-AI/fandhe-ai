@@ -350,6 +350,21 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
 /// `ctx.synchronize()` → `download`）経由のままであり、resident 化の
 /// 対象外（回収は部分的）。
 ///
+/// **#1566 追記（Mac 実機セッションへの申し送り）**: bias 勾配（本モデル
+/// では L1・L2 双方の bias）を `ops::MetalBackendOps::
+/// gemm_fp32_strict_into_with_bias_reduce_tracked`（weight と同一
+/// `ctx.encode` 呼び出し内で NT/TN の場合は encode-only、NN/TT・分類
+/// 不能形状はホスト経由で書く。トレイト doc 参照）へ結線したことで、
+/// この 11/9/9 という値は変化する可能性が高い——L2（NT/TN）の bias は
+/// もはや個別の `MemoryOps::upload_into` を経由せず L2 の d_weight と
+/// 同一ディスパッチへ折り込まれる一方、L1（NN・分類不能）の bias は
+/// 引き続きホスト経由の `upload_into` を要する（本ファイル冒頭 doc
+/// comment「L1 は NN 扱いで分類不能」参照）。encode 総数（11）は不変の
+/// 見込みだが、command_buffer・wait の実測値（現在 9/9）は Mac 実機
+/// セッションでの再計測後に本テストのアサーション値を更新すること
+/// （本 Linux セッションでは実行できないため、値は意図的に未変更のまま
+/// 残している）。
+///
 /// warmup（`WARMUP` step）で MSL パイプライン初回コンパイル・プールの
 /// フリーリスト充足を steady-state 化してから、その次の 1 step だけを
 /// 計測窓に取る（`run_fresh`／`run_reuse` と同じモデル形状・シードだが、

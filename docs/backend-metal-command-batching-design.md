@@ -1108,3 +1108,92 @@ failure-token 登録から d_weight・d_bias を同時に encode-only で書き�
   決めたうえで着手する（`.claude/rules/out-of-scope-tracking.md` に
   従い別 Issue で追跡）。「bit 同一」を無条件の受け入れ基準として
   固定しない。
+
+### 10.7 #1566 実装記録（Linux セッション。実機実測は Mac セッションへ引き継ぐ）
+
+**§10.2-1 の判断（(a) か (b) か）**: 自動運転（ユーザー承認を得られない
+セッション）のため安全側に倒し **(a)（`f64` アキュムレータ化による
+新しい数値挙動の導入）は選ばない**。新設した GPU カーネル
+（`gemm_bias_grad_reduce_f32`）・ホストフォールバック（`layout::
+reduce_bias_grad_rows_host`）はいずれも `reduce_to_shape` の現行
+アルゴリズム（行 0..M 昇順・`f32` 逐次 `+=`・初期値 `0.0f`）をそのまま
+複製し bit 完全一致を狙う設計とした。(b)（例外の明示）についても、
+本セッションはユーザー承認を経て一次規約（`.claude/rules/coding-
+rust.md`）を書き換える権限がないため見送り、**未解決事項として引き継ぐ**
+（一次規約は無変更のまま）。`reduce_to_shape` 全体（本イシューが触れない
+`Op::Add`／`Op::Mul` の VJP・`Op::LinearAct` の bias 等、他の呼び出し
+箇所）の `f64` アキュムレータ化可否も同様に未解決のまま。
+
+**実装した内容**:
+
+- `tensor-core::BackendOps::gemm_fp32_strict_into_with_bias_reduce_
+  tracked`（非破壊拡張。既定は `bias` を無視して既存
+  `gemm_fp32_strict_into_tracked` へ委譲し `Ok(false)`。CPU・CUDA は
+  オーバーライドなし＝挙動変更ゼロ）。
+- `backend-metal::gemm::MetalGemm::encode_weight_and_bias_grad_with_
+  offsets`（NT/TN encode-only 経路。d_weight のディスパッチと同一
+  `ctx.encode` 呼び出し内で `encode_dispatch_bias_grad_reduce`
+  〈新設〉を追加ディスパッチする。`encode_calls` は増えない設計）・
+  新規カーネル `gemm_bias_grad_reduce_f32`（`shaders/gemm.metal`）。
+- `backend-metal::ops::MetalBackendOps::gemm_fp32_strict_into_with_
+  bias_reduce_tracked`（トレイトオーバーライド。NN/TT・分類不能形状は
+  ホスト経由〈`gemm_fp32_strict` → `upload_into` に続けて bias も
+  `layout::reduce_bias_grad_rows_host` → `upload_into`〉で常に成功する
+  ——既存 `gemm_fp32_strict_into_impl` と同じ「`Unsupported` を返さない
+  理由」を踏襲）。
+- `autodiff::tape::ResidentResolver::fill_resident_weight_grad` の
+  シグネチャ拡張（`bias: Option<ResidentBiasTarget>` 追加・戻り値を
+  `ResidentFillOutcome { weight_filled, bias_filled }` へ変更。
+  `pub(crate)` トレイトのため呼び出し元・実装を同一 PR 内で揃えて
+  更新）。
+- `autodiff::optim::device_store::DeviceParamStore::
+  fill_resident_weight_grad`: fresh 経路は上記の結合 API を 1 回だけ
+  呼ぶ（weight・bias 同時）。weight tying（同一 backward 内で同一
+  weight slot への 2 回目以降の寄与）分岐では、**bias 自身の slot に
+  ついても独立に tie 判定・累積を行う**（`fill_bias_slot_via_host_
+  reduce` 新設。理由は下記「発見した正当性の落とし穴」参照）。
+- `autodiff::grad::vjp`（`Op::LinearResident` 分岐）: bias の
+  `Op::ResidentLeaf` 解決を `fill_resident_weight_grad` 呼び出しより
+  前へ移動し、`outcome.bias_filled` に応じて `reduce_to_shape` の
+  ホスト計算をスキップする（weight の既存最適化と対称）。
+
+**実装中に発見した正当性の落とし穴（当初計画からの設計変更）**: 当初の
+計画は「weight tying が起きた場合、2 回目以降の呼び出しでは bias の
+resident 化を試みず常に `bias_filled: false` を返す」という単純化を
+想定していたが、これは以下の理由で誤りだと判明した——weight が tie
+する（同一 `Op::LinearResident` weight leaf を複数回参照する）モデルは
+通常 bias の `Var` も同時に再利用するため、1 回目（fresh）で bias が
+resident 充填され `staging.filled[bias_slot]` に記録された後、2 回目
+（weight tie）で `bias_filled: false` を返すと、grad.rs は 2 回目の
+寄与だけを通常の `Gradients` へ push するが、`resident_filled_slots`
+（`step()` 側の判定）は 1 回目の resident 充填を「新鮮」と判定して
+デバイス側の値のみを信頼し、2 回目の寄与が silently に失われる
+（`device_store.rs::resident_filled_slots` doc 参照）。この落とし穴は
+`resident_bias_shared_grad_accumulates_matches_host_only_grad_path`
+（新規テスト。修正前のコードで実際に FAIL することを確認済み——
+`fill_bias_slot_via_host_reduce` を呼ばないよう一時的に patch した
+状態で実行し、host-only 経路と食い違う〈`[0.9, 0.6]` vs `[0.15,
+-0.15]`〉ことを実測確認した）で検出・修正した。
+
+**Linux セッションでの検証**: `cargo test --workspace`（Linux で
+実行可能な全クレート）全 green。`cargo check`／`cargo clippy -D
+warnings` を `--target aarch64-apple-darwin`（`cfg(target_os =
+"macos")` 限定コードの型検査。MSL 自体はコンパイルできない）で実行し
+`fandhe-ai-backend-metal`（lib・`--tests`・対象テストファイル単体）が
+いずれも警告ゼロで通ることを確認した。
+
+**Mac 実機セッションへの申し送り（本セッションでは実施不可）**:
+
+- `cargo test -p fandhe-ai-backend-metal --release --test gemm_fp32_
+  strict_into_parity -- --ignored --nocapture`（新規 4 テスト・既存
+  テストの非後退確認）。
+- `crates/facade/tests/mnist_scale_train_reuse_bench.rs::mnist_scale_
+  train_reuse_metal_batch_counters` の実測・アサーション値
+  （現在の `11/9/9`）の更新（本ファイル §10.6 の想定どおり）。
+- `metal_reuse_step_grad_bit_dump`（main/branch 比較。weight・bias
+  とも bit 完全一致を確認）・`device_param_store_backend_parity`
+  （Metal）の非後退確認。
+- train reuse A/B（5 run 中央値・record_only・事前登録 `step_total ≤
+  1.00`・checksum 一致・`--phases` の `device_update` 内訳）。
+- `docs/perf/train-resident-grad-device-update.md` §7 として上記実測
+  結果を追記する（本ドキュメントは実装記録のみで実測値は含まない）。
