@@ -219,9 +219,11 @@ fn layer_norm_large_opposite_sign_pair_stays_finite() {
     }
     // 期待値: mean=0（両者の厳密和が 0）・var=4e76・rstd ≈ 5e-39 と
     // なり、xhat ≈ dev_i * rstd（dev[0]=+2e38・dev[1]=-2e38）で
-    // out ≈ [+1, -1] に収束する。
-    assert!((out[0] - 1.0).abs() < 1e-2, "out[0]={}", out[0]);
-    assert!((out[1] + 1.0).abs() < 1e-2, "out[1]={}", out[1]);
+    // out ≈ [+1, -1] に収束する。codex-review 指摘（P1・PR #1671）に
+    // 従い、独自のハードコード許容誤差ではなく `f64_layer_norm_reference`
+    // × `assert_parity`（REQ-2 統一複合判定）で突合する。
+    let expected = f64_layer_norm_reference(&x, None, None, 1e-5, 1, 2);
+    assert_parity("layer_norm opposite_sign_pair", &out, &expected);
 }
 
 /// advisor が指摘した偏差自体の overflow ケース: 行の 1 要素が突出して
@@ -264,8 +266,12 @@ fn layer_norm_constant_large_row_does_not_overflow() {
         .expect("run_layer_norm_f32 must succeed");
     for &v in &out {
         assert!(v.is_finite(), "expected finite layer_norm output, got {v}");
-        assert!(v.abs() < 1e-3, "expected near-zero output, got {v}");
     }
+    // codex-review 指摘（P1・PR #1671）: 独自のハードコード許容誤差
+    // ではなく `f64_layer_norm_reference` × `assert_parity`（REQ-2
+    // 統一複合判定）で突合する。
+    let expected = f64_layer_norm_reference(&x, None, None, 1e-5, 1, 2);
+    assert_parity("layer_norm constant_large_row", &out, &expected);
 }
 
 /// NaN 伝播（行内に NaN が 1 つでもあれば行全体が NaN。`rmsnorm_parity.rs`
@@ -388,12 +394,15 @@ fn layer_norm_uniform_row_non_power_of_two_hidden_matches_zero_deviation() {
         let out = layer_norm
             .run_layer_norm_f32(&ctx, &x, None, None, 1e-5, 1, hidden)
             .expect("run_layer_norm_f32 must succeed");
-        for &v in &out {
-            assert!(
-                v.abs() < 1e-4,
-                "hidden={hidden}: expected near-zero deviation for uniform row, got {v}"
-            );
-        }
+        // codex-review 指摘（P1・PR #1671）: 独自のハードコード許容誤差
+        // ではなく `f64_layer_norm_reference` × `assert_parity`（REQ-2
+        // 統一複合判定）で突合する。
+        let expected = f64_layer_norm_reference(&x, None, None, 1e-5, 1, hidden);
+        assert_parity(
+            &format!("layer_norm uniform_row hidden={hidden}"),
+            &out,
+            &expected,
+        );
     }
 }
 
@@ -441,8 +450,12 @@ fn layer_norm_positive_eps_degenerate_row_stays_finite_near_zero() {
         .expect("run_layer_norm_f32 must succeed");
     for &v in &out {
         assert!(v.is_finite(), "expected finite output, got {v}");
-        assert!(v.abs() < 1e-2, "expected near-zero output, got {v}");
     }
+    // codex-review 指摘（P1・PR #1671）: 独自のハードコード許容誤差
+    // ではなく `f64_layer_norm_reference` × `assert_parity`（REQ-2
+    // 統一複合判定）で突合する。
+    let expected = f64_layer_norm_reference(&x, None, None, 1e-5, 1, 2);
+    assert_parity("layer_norm positive_eps_degenerate_row", &out, &expected);
 }
 
 /// codex-review 指摘の再現ケース（P1・#1671 スレッド 2 件目）: `eps` が
@@ -473,8 +486,14 @@ fn layer_norm_tiny_x_huge_eps_stays_finite_and_nonzero() {
         out[0].abs() > 1e-3,
         "expected non-degenerate-zero output (row_scale must account for eps), got {out:?}"
     );
-    assert!((out[0] - 0.1).abs() < 2e-2, "out[0]={} out={out:?}", out[0]);
-    assert!((out[1] + 0.1).abs() < 2e-2, "out[1]={} out={out:?}", out[1]);
+    // codex-review 指摘（P1・PR #1671。この極端値ケース専用の
+    // ハードコード許容誤差 `2e-2`〈相対誤差にして約 20%〉は REQ-2
+    // 統一複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉より
+    // 大幅に緩く、統一判定では不合格となる出力も見逃しうる。他の
+    // テスト（本ファイル冒頭の `assert_layer_norm_parity` 等）と同じ
+    // `f64_layer_norm_reference` × `assert_parity` に統一する。
+    let expected = f64_layer_norm_reference(&x, Some(&w), None, 1e38, 1, 2);
+    assert_parity("layer_norm tiny_x_huge_eps", &out, &expected);
 }
 
 /// codex-review 指摘の再現ケース（P1・#1671 スレッド 1 件目）: `hidden`

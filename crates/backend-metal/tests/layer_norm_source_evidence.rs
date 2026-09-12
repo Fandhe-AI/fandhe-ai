@@ -191,19 +191,43 @@ fn eps_row_scale_extension_uses_minimal_ldexp_shift() {
     );
 }
 
-/// パス 4 が `weight` を正規化係数の除算より先に乗じる分解
-/// （`pre = dev * wv` を `scale` 除算の前段に置く）を維持することを
-/// ロックする（PR #1671 スレッド 2 件目の是正。`eps` が `x` を極端に
-/// 上回る行で中間値が subnormal に潰れる回帰を検出する。冒頭コメント
-/// 「`row_scale` の eps 対応拡張・weight 先乗算」参照）。
+/// パス 4 が `weight` の乗算順序（`scale` 除算の前か後か）を
+/// `dev/scale` の subnormal リスクに応じて要素ごとに適応的に選ぶ
+/// ことをロックする（PR #1671 スレッド 2 件目の是正。`eps` が `x` を
+/// 極端に上回る行で中間値が subnormal に潰れる回帰・巨大 `weight` で
+/// 無条件premultiplyがoverflowする回帰の両方を検出する。冒頭コメント
+/// 「`row_scale` の eps 対応拡張・weight 乗算順序の適応的選択」参照）。
 #[test]
-fn pass4_applies_weight_before_scale_division() {
+fn pass4_selects_weight_multiply_order_adaptively() {
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("float pre = dev * wv;"),
-        "weight を scale 除算より先に乗じる分解（pre = dev * wv）が見つかりません"
+        LAYER_NORM_METAL_SOURCE.contains("constant float LN_FLT_MIN_NORMAL ="),
+        "LN_FLT_MIN_NORMAL 定数（subnormal 判定しきい値）が見つかりません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("fma(pre / scale, norm, bv)"),
-        "affine 最終段の fma 融合（fma(pre / scale, norm, bv)）が見つかりません"
+        LAYER_NORM_METAL_SOURCE.contains(
+            "bool subnormal_risk =
+                (scale > 0.0f) && (fabs(dev) < scale * LN_FLT_MIN_NORMAL);"
+        ),
+        "subnormal リスク判定（fabs(dev) < scale * LN_FLT_MIN_NORMAL）が見つかりません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains(
+            "float xhat_weighted = subnormal_risk
+                ? (dev * wv) / scale
+                : (dev / scale) * wv;"
+        ),
+        "weight 乗算順序の適応的選択（subnormal_risk ? (dev*wv)/scale : (dev/scale)*wv）が見つかりません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("fma(xhat_weighted, norm, bv)"),
+        "affine 最終段の fma 融合（fma(xhat_weighted, norm, bv)）が見つかりません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("bool wv_finite = !isnan(wv) && !isinf(wv);"),
+        "weight の有限性判定（wv_finite）が見つかりません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("(wv_finite ? bv : fma(0.0f * wv, norm, bv))"),
+        "ゼロ偏差短絡（weight 有限時は bv 直接返却・非有限時のみ fma 経由で NaN 伝播）が見つかりません"
     );
 }

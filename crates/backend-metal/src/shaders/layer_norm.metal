@@ -10,13 +10,18 @@
 // 優先し `fma()` を使わない単純な加減算のみだが、affine（`x̂·w+b`）は
 // 最終段を `fma()` で明示的に融合する（`.claude/rules/coding-rust.md`
 // の FMA 契約統一。codex-review 指摘）。**PR #1671 スレッド 2 件目の
-// 是正（パス 4 コメント参照）により、`weight` を正規化係数の除算より
-// 先に乗じる分解（`fma(dev*wv/scale, norm, bv)`）へ変更済み**——`eps`
-// が `x` を極端に上回る行で中間値が subnormal に潰れ Apple GPU が
-// flush-to-zero する問題への対応。CUDA カーネル（`fmaf`）・CPU/ホスト
-// 参照実装（`xhat.mul_add(w,b)`）とは融合の分解点が異なるため bit
-// 一致は保証しない（LayerNorm の CPU-Metal 数値一致は REQ-2 統一複合
-// 判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉であり bit-exact
+// 是正（パス 4 コメント「重みの乗算順序の適応的選択」参照）により、
+// `weight` を `dev/scale` の前に乗じるか後に乗じるかを要素ごとに
+// 適応的に選ぶ**——`dev/scale` が subnormal domain に入る場合のみ
+// `weight` を先に乗じ（`eps` が `x` を極端に上回る行で中間値が
+// subnormal に潰れ Apple GPU が flush-to-zero する問題への対応）、
+// それ以外の通常ケースでは `weight` を後に乗じる（無条件premultiply
+// が引き起こす巨大 `weight` での overflow regression を回避）。
+// いずれの順序でも最終段は `fma(xhat_weighted, norm, bv)` として
+// 1 回の融合演算にする。CUDA カーネル（`fmaf`）・CPU/ホスト参照実装
+// （`xhat.mul_add(w,b)`）とは中間の乗算順序が異なるため bit 一致は
+// 保証しない（LayerNorm の CPU-Metal 数値一致は REQ-2 統一複合判定
+// 〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉であり bit-exact
 // 契約ではない）。コンパイルオプションは `pipeline::compile_options()`
 // を適用する。
 //
@@ -115,13 +120,19 @@
 // `maxabs` 系テスト〈`layer_norm_deviation_overflow_case_stays_finite`
 // 等〉の挙動は不変）。
 //
-// **2 段目（パス 4・weight 先乗算）**: 1 段目だけでは、`eps` が `x` を
-// 極端に上回る行で `dev/scale` 自体が真に subnormal（本例で
-// `dev/scale≈7e-40`。数学的に正しい中間値であり計算順序の誤りではない）
-// になる場合が残る。これは `weight` によって最終的に正常範囲へ戻る
-// べき値であるため、`weight` を `scale` 除算より**先に**乗じることで
-// （`pre = dev*wv` を先に求めてから `pre/scale`）中間値が正常範囲に
-// 留まるようにする（詳細はパス 4 のコメント参照）。
+// **2 段目（パス 4・weight 乗算順序の適応的選択）**: 1 段目だけでは、
+// `eps` が `x` を極端に上回る行で `dev/scale` 自体が真に subnormal
+// （本例で `dev/scale≈7e-40`。数学的に正しい中間値であり計算順序の
+// 誤りではない）になる場合が残る。これは `weight` によって最終的に
+// 正常範囲へ戻るべき値であるため、この場合に限り `weight` を `scale`
+// 除算より**先に**乗じる（`pre = dev*wv` を先に求めてから
+// `pre/scale`）ことで中間値が正常範囲に留まるようにする。ただし
+// この並び替えを無条件に適用すると、通常ケース（`dev/scale` が
+// subnormal でない）で `weight` が巨大な値の行では `dev*wv` 自体が
+// overflow するため、`dev/scale` が subnormal domain に入るときだけ
+// この並び替えを適用し、それ以外は「先に `dev/scale` を計算してから
+// `weight` を乗じる」安全な順序を使う（詳細はパス 4 のコメント
+// 「重みの乗算順序の適応的選択」参照）。
 //
 // **最終正規化係数は 1 つの逆数として合成しない**（codex-review が示唆
 // した通り、退化ケース——全要素が同一の巨大値の行〈例 `[2e38, 2e38]`〉
@@ -169,6 +180,14 @@ constant uint LAYER_NORM_SIMD_WIDTH = 32u;
 // 引き上げ幅を最小限にする）よう選んだ値。冒頭コメント「`row_scale` の
 // eps 対応拡張」参照。
 constant int LN_EPS_ELEM_SAFE_SHIFT = 100;
+
+// `dev/scale` が GPU 上で flush-to-zero（FTZ）されうる subnormal 領域に
+// 入るかどうかの判定しきい値（`f32` の最小正規化値 `2^-126`）。
+// `fabs(dev) < scale * LN_FLT_MIN_NORMAL` が成り立つ場合、`dev/scale`
+// の絶対値は正規化下限を割り込む（数学的には代表可能な subnormal
+// 値だが、Apple GPU 実機は subnormal な中間値を flush-to-zero しうる。
+// パス 4 コメント「重みの乗算順序の適応的選択」参照）。
+constant float LN_FLT_MIN_NORMAL = 1.1754943508222875e-38f;
 
 // Neumaier 改良版 Kahan 補償和の 1 ステップ（`rmsnorm.metal::
 // rmsnorm_kahan_add` と同一アルゴリズム。本ファイル内で独立定義する
@@ -441,72 +460,97 @@ kernel void layer_norm_f32(
         // パス 4: 書き出し（device メモリを再読）。affine の最終段
         // （正規化係数の乗算 + bias 加算）を `fma()` で明示的に融合
         // する（`.claude/rules/coding-rust.md` の FMA 契約統一。
-        // codex-review 指摘）。`weight` の乗算をこの融合より前段
-        // （`scale` 除算前）に置く理由は下記ループ内コメント参照
-        // （冒頭コメント「FMA 契約」参照）。
+        // codex-review 指摘）。`weight` の乗算順序（`scale` 除算の前か
+        // 後か）は要素ごとに適応的に選ぶ（下記ループ内コメント「重みの
+        // 乗算順序の適応的選択」参照。冒頭コメント「FMA 契約」参照）。
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
             float ratio = x[row_base + idx] / row_scale;
             float dev = (ratio - mean_hi) - mean_lo;
-            // `dev == 0.0 && eps > 0.0` の場合のみ明示的に 0 を返す
-            // （codex-review 指摘: 当初 `dev == 0.0` だけで分岐すると
-            // `eps == 0` かつ真の分散も 0 の退化ケース〈例 `x=[1,1],
-            // eps=0`〉で `scale` が数学的に厳密 0〈FTZ ではなく実際に
-            // ゼロの mathematical scale〉になり、CPU/CUDA・ホスト参照
-            // 実装が `0 * inf = NaN`（`rstd = 1/sqrt(var+eps) = 1/0 =
-            // inf`）として返す NaN 伝播契約と食い違い Metal だけ `[0,
-            // 0]` を返していた。`eps > 0.0` を条件に加えることで、この
-            // ゼロ返却は「`scale` が `eps` 由来の極小疑似要素のみに
-            // 由来し FTZ で潰れうる」退化ケース〈行の全要素が同一の
-            // 巨大値・`eps > 0`。例 `[2e38, 2e38]`〉に限定される。
-            // `eps == 0` かつ真の分散も 0 の場合は自然な `dev/scale =
-            // 0/0 = NaN` 分岐へフォールバックし、参照実装と同じ NaN
-            // 伝播契約を保つ。`eps > 0` かつ真の分散も 0 の通常ケース
-            // （`scale` が subnormal 域でない。例 `x=[1024,1024,1024],
-            // eps=1e-5`）では `dev` が厳密に 0 であるため、この分岐が
-            // なくとも `0 / scale(非ゼロ) = 0` が exact に成立する
-            // （分子が厳密 0 のため FTZ の影響を受けない）。
             float wv = (has_weight != 0) ? w[idx] : 1.0f;
             float bv = (has_bias != 0) ? b[idx] : 0.0f;
-            // **`weight` を `scale` 除算より先に乗じる（codex-review
-            // 指摘・PR #1671 スレッド 2 件目「affine 適用まで有効精度を
-            // 保つ」の対応）**: `eps` が `x` に比べて極端に大きい行では
-            // `row_scale` の eps 対応拡張（パス 1）を適用しても
-            // `dev/scale` 自体が真に `subnormal`（例 `x=[1e-20,
-            // -1e-20], eps=1e38` で `dev/scale≈7e-40`）になりうる
-            // （これは数学的に正しい中間値であり計算順序の誤りではない
-            // ——真の `xhat` 自体が subnormal 級）。GPU が subnormal
-            // 中間値を flush-to-zero する場合、`weight` が桁を戻す
-            // 大きな値（例 `1e38`）であっても「先に `xhat`（重み適用前）
-            // を subnormal として確定させてから乗じる」順序では `xhat`
-            // 自体が 0 へ潰れて情報が失われる。`weight` を `dev` に
-            // 先に乗じてから `scale` で割ることで（`pre = dev*wv` は
-            // 通常範囲に収まる——本例では `pre≈1.37e29`）、最終除算
+
+            // **重みの乗算順序の適応的選択（codex-review 指摘・PR #1671
+            // スレッド 2 件目の是正）**: `dev/scale` を先に計算してから
+            // `weight` を乗じる「安全な順序」が既定だが、`eps` が `x`
+            // に比べて極端に大きい行では `dev/scale` 自体が真に
+            // `subnormal`（例 `x=[1e-20,-1e-20], eps=1e38,
+            // weight=[1e38,1e38]` で `dev/scale≈7e-40`。数学的に正しい
+            // 中間値であり計算順序の誤りではない——真の `xhat` 自体が
+            // subnormal 級）になりうる。GPU が subnormal 中間値を
+            // flush-to-zero（FTZ）する場合、安全な順序（先に `xhat` を
+            // 確定してから `weight` を乗じる）では `xhat` 自体が 0 へ
+            // 潰れて情報が失われる。この場合に限り `weight` を `dev`
+            // に先に乗じてから `scale` で割る（`pre = dev*wv` は
+            // 通常範囲に収まる——本例では `pre≈1.37e29`）ことで
             // `pre/scale` も通常範囲（本例で `≈0.0707`）に収まり
-            // subnormal を経由しない。`has_weight==0`（`wv=1.0`）の
-            // 場合は `pre=dev` で従来と同値になり、通常ケースの挙動は
-            // 不変。
+            // subnormal を経由しない。
             //
-            // `weight` を先に乗じる都合上、正規化係数 `norm` の乗算と
-            // `bias` の加算を `fma(pre/scale, norm, bv)` として融合する
-            // （`xhat·w+b` を単一の `fma` にしていた是正前とは異なる
-            // 分解だが、最終段を 1 回の融合演算にする「affine は
-            // `fma()` で明示的に融合する」契約〈冒頭コメント「FMA
-            // 契約」・`.claude/rules/coding-rust.md`〉は維持する。
-            // CPU/CUDA 参照実装〈`xhat.mul_add(w,b)`〉とは分解が異なる
-            // ため bit 一致は保証しないが、LayerNorm の CPU-Metal 数値
-            // 一致は REQ-2 統一複合判定〈相対誤差 1e-3 未満 または
-            // 絶対誤差 1e-5 未満〉であり bit-exact 契約ではない）。
+            // 逆に、`dev/scale` が subnormal domain（`|dev/scale| <
+            // LN_FLT_MIN_NORMAL`）でない**通常ケース**では「先に
+            // `weight` を乗じる」順序を常用すると、`weight` が巨大な
+            // 値（例 `3e38`）の行で `dev*wv` 自体が `f32` の表現範囲
+            // （約 `3.4e38`）を超えて overflow する（例 `dev=1.5,
+            // weight=3e38` で `dev*wv` が `±inf` へ潰れる。是正前の
+            // 無条件premultiply で確認された regression。
+            // `docs/norm-ops-design.md` 参照）。`dev/scale` が通常域
+            // （非 subnormal）であれば `xhat=dev/scale` 自体は
+            // `O(1)` 程度に収まる設計（`row_scale`・scale/ssq 方式の
+            // 比スケール正規化。冒頭コメント参照）であるため、
+            // `xhat*weight` の大きさは概ね `weight` と同程度に留まり
+            // （真の数学的結果が `f32` 表現範囲を超える場合のみ
+            // overflow し、これは CPU/CUDA 側も同じく `inf` を返す
+            // 正しい挙動であり artifact ではない）、安全な順序を既定に
+            // することで通常ケースの overflow を回避できる。
             //
-            // FTZ 対策のゼロ返却（既存分岐）は `scale` 自体が `eps`
-            // 由来の極小疑似要素の flush-to-zero で厳密 0 になりうる
-            // ケース向けであり、`pre/scale` の**除算を実行せず**
-            // `bv` を直接返す短絡評価を維持する（除算してから `fma` に
-            // 渡すと `scale` が flush 済みで `0.0f` の場合
-            // `fma(0.0f/0.0f, norm, bv) = fma(NaN, norm, bv) = NaN` に
-            // なってしまい、この分岐が意味を失う）。
-            float pre = dev * wv;
-            out[row_base + idx] =
-                (eps > 0.0f && dev == 0.0f) ? bv : fma(pre / scale, norm, bv);
+            // 判定は `fabs(dev) < scale * LN_FLT_MIN_NORMAL` で行う
+            // （`scale` は比スケール scale/ssq 蓄積のスケール成分。
+            // `scale > 0` を前提とし、`scale == 0`〈全要素の偏差が
+            // 厳密 0 かつ `eps == 0` の退化ケース〉では安全な順序へ
+            // フォールバックする——この場合 `dev` も厳密 0 のため
+            // `dev/scale = 0/0 = NaN` が自然に成立し NaN 伝播契約は
+            // 維持される）。
+            bool subnormal_risk =
+                (scale > 0.0f) && (fabs(dev) < scale * LN_FLT_MIN_NORMAL);
+            float xhat_weighted = subnormal_risk
+                ? (dev * wv) / scale
+                : (dev / scale) * wv;
+
+            // `dev == 0.0 && eps > 0.0` の場合は `xhat_weighted` を
+            // 明示的に `0.0f * wv` へ置き換える（codex-review 指摘:
+            // 当初 `dev == 0.0` だけで分岐すると `eps == 0` かつ真の
+            // 分散も 0 の退化ケース〈例 `x=[1,1], eps=0`〉で `scale`
+            // が数学的に厳密 0〈FTZ ではなく実際にゼロの mathematical
+            // scale〉になり、CPU/CUDA・ホスト参照実装が `0 * inf =
+            // NaN`（`rstd = 1/sqrt(var+eps) = 1/0 = inf`）として返す
+            // NaN 伝播契約と食い違い Metal だけ `[0, 0]` を返していた。
+            // `eps > 0.0` を条件に加えることで、このゼロ経由の分岐は
+            // 「`scale` が `eps` 由来の極小疑似要素のみに由来し FTZ で
+            // 潰れうる」退化ケース〈行の全要素が同一の巨大値・
+            // `eps > 0`。例 `[2e38, 2e38]`〉に限定される。`eps == 0`
+            // かつ真の分散も 0 の場合は自然な `dev/scale = 0/0 = NaN`
+            // へフォールバックし、参照実装と同じ NaN 伝播契約を保つ。
+            // **非有限 `weight` の NaN 伝播是正（codex-review 指摘）**:
+            // 是正前は `bv` を無条件に返しており、`weight` が
+            // `NaN`／`inf` の場合でも `[0,0]` 相当を返していた（例
+            // `x=[1,1], weight=[NaN,inf], eps=1e-5`）。CPU/CUDA・
+            // ホスト参照実装は `xhat=0` を `weight` と `mul_add` する
+            // ため `0*NaN=NaN`・`0*inf=NaN` が affine 出力へ伝播する。
+            // `wv` が有限の場合は従来どおり `bv` を直接返す（`norm` は
+            // このケースで `+inf` になりうる——退化ケース〈`eps>0` かつ
+            // 真の分散も 0〉では `ssq` が `eps` 疑似要素の flush-to-
+            // zero で厳密 0 になり `norm = 1/sqrt(0) = inf` となる。
+            // `0.0f * wv`〈`wv` 有限なら `0.0f`〉を経由して `fma(0.0f,
+            // inf, bv)` を計算すると IEEE 754 の `0*inf=NaN` 規則により
+            // NaN になってしまい、この短絡評価自体が無意味化する——
+            // 冒頭 `dev == 0.0 && eps > 0.0` 分岐の元々の存在理由）。
+            // `wv` が非有限の場合のみ `fma(0.0f * wv, norm, bv)` を
+            // 経由させ、`0*NaN=NaN`／`0*inf=NaN` が `norm` の値に
+            // 関わらず（`NaN` は `fma` のどの引数であっても結果を
+            // `NaN` にする）出力へ伝播するようにする。
+            bool wv_finite = !isnan(wv) && !isinf(wv);
+            out[row_base + idx] = (eps > 0.0f && dev == 0.0f)
+                ? (wv_finite ? bv : fma(0.0f * wv, norm, bv))
+                : fma(xhat_weighted, norm, bv);
         }
     }
 }
