@@ -352,7 +352,7 @@ mod tests {
     fn run_capped_disabled_mechanism_calls_f_directly() {
         // SMALL_SHAPE_CAP_ENABLED == false の間は常に f() が現行プール
         // （テストランナーのグローバルプール）で呼ばれる契約を確認する。
-        let result = run_capped(64, 256, 784, || rayon::current_num_threads());
+        let result = run_capped(64, 256, 784, rayon::current_num_threads);
         assert_eq!(result, rayon::current_num_threads());
     }
 
