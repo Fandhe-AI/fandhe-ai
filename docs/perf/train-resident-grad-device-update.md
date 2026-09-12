@@ -422,3 +422,15 @@ train reuse A/B・`metal_reuse_step_grad_bit_dump` の Mac 実機比較は、bia
 含む step 以降は **loss・weight 勾配・パラメータも含め REQ-2 統一複合判定**
 で行う（step 0 の bias 縮約自体のみが直接の変更対象であり、その後の伝播は
 間接的な帰結）。
+
+**追補（イシュー #1666・codex-review P1「除外範囲を事前判定できる検証可能な
+契約にせよ」を受けた 2 層構造化。2026-09-12）**: 上記「REQ-2 統一複合判定」は
+Metal bias 縮約カーネル（`gemm_bias_grad_reduce_f32`）とホスト `f64` 参照実装
+（`eval::reduce_bias_grad_rows` 等）の一致判定として、以後 **Tier A（理論上界。
+全入力へ常に適用）**・**Tier B（REQ-2 複合判定。Tier A の上界が事前に REQ-2
+閾値以下と分かる列にのみ適用）** の 2 層構造で扱う。Tier A は Neumaier 補償和の
+古典的前方誤差上界 `|Δ| ≤ C·ε32·Σ|x_i|`（`ε32 = 2^-24`・`C = 3`）で、上記の
+「REQ-2 統一複合判定」という表現はこの 2 層構造のうち Tier B を指す。契約の
+正本・導出・実測（Rust ホストモデルでの観測比実測）は `docs/metal-grad-
+reduction-parity-judgment-decision.md`（予定）を参照し、本 doc では重複記載
+しない。

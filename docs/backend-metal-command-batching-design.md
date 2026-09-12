@@ -1809,3 +1809,35 @@ nn::linear::`）。`.claude/rules/coding-rust.md`・`docs/perf/train-
 resident-grad-device-update.md` の bias 追記も本節の内容へ整合させた。
 実機（Apple Silicon・CUDA）での forward/backward 経路混在時の非後退
 確認は Mac／GB10 実機セッションへ申し送る。
+
+### 10.13 #1666 codex-review 指摘を受けた判定契約の 2 層構造化（2026-09-12）
+
+§10.8〜§10.12 が繰り返し使ってきた「REQ-2 統一複合判定」（bias 勾配の
+Metal カーネル・ホスト `f64` 参照実装間の一致判定）は、契約 PR #1666
+（bias 縮約判定方式そのものを扱う別 PR）への codex-review 指摘「除外
+範囲を事前判定できる検証可能な契約にせよ」を受け、以後 **2 層構造**へ
+改める:
+
+- **Tier A（全入力に常に適用）**: Metal bias 勾配 `y_metal` とホスト
+  `f64` 逐次和の downcast `y_f64` の差が、Neumaier 補償和の理論上界
+  `|Δ| ≤ C·ε32·Σ|x_i|`（`ε32 = 2^-24`・`C = 3`）を満たす。導出・
+  Rust ホストモデルでの実測（`crates/backend-metal/tests/gemm_bias_
+  scale_sum_host_model.rs::{tier_a_holds_for_cancelling_extreme_
+  magnitude_sequence, tier_a_holds_for_existing_rounding_prone_and_
+  overflow_cases, tier_a_holds_for_high_kappa_random_columns}`）は
+  同ファイルのコメントを正とする（観測最大比 ≈ 3×10⁻⁸ で `C=3` に
+  対し十分な安全マージンを確認済み）。
+- **Tier B（REQ-2 複合判定）**: `C·ε32·Σ|x_i| ≤ max(1e-3·|S_f64|,
+  1e-5)` が入力から事前に成立する列（条件数 `κ = Σ|x_i| / |S|` の
+  上限と等価）にのみ適用する、従来どおりの相対誤差 1e-3 未満 または
+  絶対誤差 1e-5 未満の判定。
+
+**§10.8〜§10.12 の「REQ-2 統一複合判定」という表現は、この 2 層構造の
+うち Tier B を指すものとして読み替える**（過去の記述自体は変更せず、
+本節を追記することで用語を整合させる）。契約の正本・詳細な導出・
+実測記録は `docs/metal-grad-reduction-parity-judgment-decision.md`
+（予定。契約 PR #1666 側）に置き、本 doc では重複記載しない。
+
+本節自体はドキュメント整合のみでコード変更を伴わない
+（`crates/backend-metal/src/shaders/gemm.metal::bias_scale_sum_add`・
+`bias_pow2_floor`・`bias_kahan_add` は §10.11 の実装のまま不変）。

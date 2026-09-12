@@ -652,9 +652,15 @@ pub trait BackendOps {
     /// 改良版 Kahan 補償和のいずれかを用いる（実装依存。`fandhe_ai_backend_
     /// metal::shaders::gemm_bias_grad_reduce_f32`・`fandhe_ai_backend_
     /// metal::layout::reduce_bias_grad_rows_host` 参照）。このため
-    /// 実装間・ホスト参照実装との一致は bit 完全一致ではなく REQ-2
-    /// 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で
-    /// 判定する。`bias_offset + n` は [`Self::gemm_fp32_strict_into`]
+    /// 実装間・ホスト参照実装との一致は bit 完全一致ではなく 2 層契約
+    /// （イシュー #1666。正本 `docs/metal-grad-reduction-parity-
+    /// judgment-decision.md` 予定・`docs/backend-metal-command-
+    /// batching-design.md` §10.13）で判定する: Tier A（全入力に常に
+    /// 適用する理論上界 `|Δ| ≤ C·ε32·Σ|x_i|`）を満たしたうえで、
+    /// Tier B（REQ-2 統一複合判定。相対誤差 1e-3 未満 または 絶対誤差
+    /// 1e-5 未満）は Tier A の上界が事前に REQ-2 閾値以下と分かる列
+    /// （条件数の上限と等価）にのみ適用する。`bias_offset + n` は
+    /// [`Self::gemm_fp32_strict_into`]
     /// の `out_offset + m*n` と同じ検査規約（`checked_add`・範囲外は
     /// [`BackendError::InvalidArgument`]。REQ-8・OWASP A03）を適用する。
     ///

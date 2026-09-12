@@ -20,6 +20,19 @@
 //! （実測 約 2.04）が生じた。本ファイルの
 //! [`preserves_cancelling_contribution_with_rounding_prone_values`] が
 //! この再現・是正確認を直接担う。
+//!
+//! # Tier A（イシュー #1666・codex-review P1 是正）
+//!
+//! REQ-2 判定（上記）は入力の条件数によっては成立しない場合があり、
+//! 事前判定できない「除外範囲」が生じるという codex-review 指摘を受け、
+//! 判定契約を **Tier A（全入力に常に適用する理論上界）**・**Tier B
+//! （REQ-2 複合判定。Tier A の上界が事前に REQ-2 閾値以下と分かる列
+//! にのみ適用）** の 2 層構造へ改めた（正本
+//! `docs/metal-grad-reduction-parity-judgment-decision.md` 予定・
+//! `docs/backend-metal-command-batching-design.md` §10.13）。Tier A は
+//! `[assert_tier_a]`・`[tier_a_holds_for_cancelling_extreme_magnitude_
+//! sequence]` 等（下記）が担う。上記の「REQ-2」表記はこの 2 層構造の
+//! うち Tier B を指す。
 
 use bench_harness::rng::Xorshift64Star;
 
@@ -189,6 +202,144 @@ fn matches_f64_reference_sum_for_mixed_magnitude_random_sequence() {
         ),
         &[got],
         &[f64_truth as f32],
+    );
+}
+
+/// Tier A（イシュー #1666・codex-review P1「除外範囲を事前判定できる
+/// 検証可能な契約にせよ」を受けた 2 層契約。正本は
+/// `docs/metal-grad-reduction-parity-judgment-decision.md` 予定・
+/// `docs/perf/train-resident-grad-device-update.md` §10.x 参照）:
+/// `f32` unit roundoff（`ε32 = 2^-24`。round-to-nearest の 1 ulp 相対
+/// 誤差上限）。
+const EPS32: f64 = 1.0 / (1u64 << 24) as f64;
+
+/// Tier A の安全側定数 `C = 3`。導出:
+///
+/// `gemm_bias_grad_reduce_f32` は 1 出力列につき 1 thread が `m` 行を
+/// 逐次処理する構成であり、`rmsnorm.metal` のような thread 間 butterfly
+/// 結合を**持たない**（段数 = 1）。各項 `x_i / scale`（`scale` は 2 の
+/// べき乗）は指数部のシフトのみで exact（丸めなし）、再スケール時の
+/// `acc *= ratio`／`comp *= ratio`（`ratio` も 2 のべき乗同士の比）も
+/// exact、最終読み出しの `scale * (acc + comp)`（`scale` は 2 のべき乗）
+/// も exact——誤差源は `bias_kahan_add`（Neumaier 改良版 Kahan 補償和）
+/// 本体の丸めのみに帰着する。古典的な Neumaier／Kahan-Babuska 補償和の
+/// 前方誤差上界（Higham, *Accuracy and Stability of Numerical
+/// Algorithms*）は `|E_n| ≤ (2u + O(n u²)) Σ|t_i|` であり、
+/// `Σ|t_i| = Σ|x_i| / scale`・最終読み出しの exact な `scale` 倍を
+/// 適用すると `|Δ| ≤ (2ε32 + O(m ε32²)) Σ|x_i|` になる（`u = ε32`。
+/// `O(m ε32²)` 項は `m` が現実的な行数〈高々数千〜数万〉である限り
+/// `ε32²=2^-48` により無視できるほど小さい）。ホスト参照（`eval::
+/// reduce_bias_grad_rows` 等）側の `f64` → `f32` 最終 downcast 1 回も
+/// `≤ 0.5 ulp` 相対誤差（`0.5 ε32`）を追加しうる（`|S_f64| ≤ Σ|x_i|`
+/// のため `Σ|x_i|` 基準でも同じ上界に収まる）。合計 `2 + 0.5 = 2.5` を
+/// 安全側に切り上げ、`C = 段数(1) × 2 + downcast 余裕 1 = 3` とする。
+const TIER_A_C: f64 = 3.0;
+
+/// `xs` に対し Tier A（`|Δ| ≤ C·ε32·Σ|x_i|`。理論上界・全入力へ常に
+/// 適用）を検証し、観測比 `|Δ| / (ε32·Σ|x_i|)`（`Σ|x_i| == 0` の場合は
+/// `0.0`）を返す。`Σ|x_i|` は `f32::MAX` 級の入力でも overflow しない
+/// よう `f64` で計算する。
+fn assert_tier_a(label: &str, xs: &[f32]) -> f64 {
+    let y_metal = bias_scale_sum_reduce(xs);
+    let sum_f64: f64 = xs.iter().map(|&v| f64::from(v)).sum();
+    let y_f64_downcast = sum_f64 as f32;
+    let sum_abs: f64 = xs.iter().map(|&v| f64::from(v).abs()).sum();
+    let delta = (f64::from(y_metal) - f64::from(y_f64_downcast)).abs();
+    let bound = TIER_A_C * EPS32 * sum_abs;
+    let ratio = if sum_abs > 0.0 {
+        delta / (EPS32 * sum_abs)
+    } else {
+        0.0
+    };
+    assert!(
+        delta <= bound,
+        "{label}: Tier A 上界超過（|Δ|={delta:e}, bound=C·ε32·Σ|x_i|={bound:e}, \
+         観測比={ratio:.4}, C={TIER_A_C}）"
+    );
+    ratio
+}
+
+/// Tier A 単体: codex-review 指摘の直接検証入力
+/// `[2^48, 2^24, 1, -2^48, -2^24]`（真値 `1`。`2^48`・`2^24` は `f32`
+/// で exact に表現できる 2 のべき乗のため、真値の exactness 自体は
+/// 本テストの前提として崩れない）。
+#[test]
+fn tier_a_holds_for_cancelling_extreme_magnitude_sequence() {
+    let xs = [
+        2f32.powi(48),
+        2f32.powi(24),
+        1.0,
+        -(2f32.powi(48)),
+        -(2f32.powi(24)),
+    ];
+    let ratio = assert_tier_a("[2^48, 2^24, 1, -2^48, -2^24]", &xs);
+    println!(
+        "[tier_a_holds_for_cancelling_extreme_magnitude_sequence] observed_ratio={ratio:.3e} \
+         (C={TIER_A_C})"
+    );
+}
+
+/// Tier A 単体: 既存 3 ケース（(a)/(b)/(c)。上記 Tier B〈REQ-2〉テストと
+/// 同じ入力）でも Tier A が成立することを確認する。
+#[test]
+fn tier_a_holds_for_existing_rounding_prone_and_overflow_cases() {
+    let cases: [(&str, &[f32]); 3] = [
+        (
+            "preserves_cancelling_contribution",
+            &[1.0e8f32, -100000008.0, 8.0],
+        ),
+        (
+            "avoids_intermediate_overflow",
+            &[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX],
+        ),
+        (
+            "preserves_non_cancelling_residual",
+            &[1.0e8f32, 1.0, -1.0e8],
+        ),
+    ];
+    let mut max_ratio = 0.0f64;
+    for (label, xs) in cases {
+        let ratio = assert_tier_a(label, xs);
+        max_ratio = max_ratio.max(ratio);
+    }
+    println!(
+        "[tier_a_holds_for_existing_rounding_prone_and_overflow_cases] max_observed_ratio=\
+         {max_ratio:.3e} (C={TIER_A_C})"
+    );
+}
+
+/// Tier A 単体: 高条件数（κ = Σ|x_i| / |S|）の乱数列を多数生成し、
+/// 観測比 `|Δ| / (ε32·Σ|x_i|)` の最大値が `C=3` の範囲内に収まることを
+/// 確認する（イシュー #1666 の依頼「乱数高 κ 列（m=4096 程度・符号
+/// 混在・振幅 2^-20〜2^20 の対数一様）数十本」）。決定的シード PRNG
+/// （`.claude/rules/coding-rust.md`）で系列ごとに独立したシードを使う。
+#[test]
+fn tier_a_holds_for_high_kappa_random_columns() {
+    const M: usize = 4096;
+    const TRIALS: usize = 30;
+    let mut max_ratio = 0.0f64;
+    let mut max_ratio_trial = 0usize;
+    for trial in 0..TRIALS {
+        let mut rng = Xorshift64Star::new(0xC0FF_EE00_0000_0001u64 ^ (trial as u64));
+        let mut xs = Vec::with_capacity(M);
+        for _ in 0..M {
+            // 符号は独立の乱数draw、振幅は `next_f32()`（`[-1, 1)`）を
+            // `[-20, 20)` へ線形写像した指数で対数一様に生成する
+            // （`2^-20`〜`2^20` の振幅レンジ）。
+            let sign = if rng.next_f32() >= 0.0 { 1.0f64 } else { -1.0 };
+            let exponent = f64::from(rng.next_f32()) * 20.0;
+            let magnitude = 2f64.powf(exponent);
+            xs.push((sign * magnitude) as f32);
+        }
+        let ratio = assert_tier_a(&format!("high_kappa_random[trial={trial}]"), &xs);
+        if ratio > max_ratio {
+            max_ratio = ratio;
+            max_ratio_trial = trial;
+        }
+    }
+    println!(
+        "[tier_a_holds_for_high_kappa_random_columns] max_observed_ratio={max_ratio:.3e} \
+         (trial={max_ratio_trial}, m={M}, trials={TRIALS}, C={TIER_A_C})"
     );
 }
 
