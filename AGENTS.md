@@ -102,7 +102,16 @@
   overflow して `NaN` を生むため必須。`NaN`／`inf` 入力の伝播も明示的に扱う〉を
   正規化統計の「`f64` 相当」実装形として適用する（イシュー #1102。ユーザー承認
   2026-09-01。GB10 実機実測・Metal 実機実測: `docs/perf/cuda-parity-baseline.md`
-  §9.8〜§9.10）。契約の片側変更（一部バックエンドのみ精度を上げる等）は P1
+  §9.8〜§9.10）。**勾配の長軸縮約の Metal 実装形**は正規化統計とは別に規定する。
+  MSL は `double` 非対応のため、IEEE 754 binary64 逐次加算の 64bit 整数ソフト
+  ウェアエミュレーションとして実装し、ホスト `f64` 逐次和（index 順）を 1 回
+  `f32` へ downcast した値と**bit 完全一致**する（NaN のみ quiet NaN へ正規化
+  しクラス一致で比較。tolerance・baseline・REQ-2 判定は不変）。f32 のみの
+  補償和による近似契約（Tier A/B 等の事前判定可能な誤差上界方式）は、bit
+  一致するカーネル実装の採用により不要となる見込みである。**実装は PR #1659
+  （イシュー #1566。2026-09-12 マージ）で導入済み**。契約・経緯・実装記録の正本は
+  `docs/metal-grad-reduction-parity-judgment-decision.md`（§6 実装記録）。契約の片側変更（一部
+  バックエンドのみ精度を上げる等）は P1
 - **TF32/f16 Tensor Core 経路の parity テスト判定方式（P1。テストの弱体化禁止の
   例外を明記する規約。正本仕様 `docs/spec/04-requirements.md` REQ-2「2026-09-02
   追記・Tensor Core 経路の受け入れ判定方式」〈fandhe-ai-spec PR #63〉が正式な

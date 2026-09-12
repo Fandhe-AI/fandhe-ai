@@ -2432,3 +2432,294 @@ kernel void gemm_splitk_reduce(
     }
     c[idx] = acc + comp;
 }
+
+// bias 勾配（`Op::LinearResident` の VJP における `g` の行方向和。
+// `reduce_to_shape` の rank-2→rank-1 特殊ケース）を GPU 側で計算し、
+// d_weight と同一の encode-only 書き込みで staging へ直接書く
+// （イシュー #1566）。
+//
+// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review 是正の
+// 最終形）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+// アキュムレータで統一する」規約（イシュー #1102・PR #1120）に従う。
+// Metal は `double` 型非対応のため `f64` そのものは使えないが、本
+// カーネルは **IEEE 754 binary64 の逐次加算（最近接偶数丸め）を 64bit
+// 整数演算でソフトウェアエミュレート**する（`bias_f64_widen`／
+// `bias_f64_add`／`bias_f64_narrow`。本カーネル直前に定義）。演算列は
+// ホスト参照実装 `crates/autodiff/src/eval.rs::reduce_bias_grad_rows`
+// （および `crates/backend-metal/src/layout.rs::
+// reduce_bias_grad_rows_host`）の「`acc: f64 = 0.0` から index 順に
+// `acc += f64::from(x)`、最後に 1 回 `acc as f32`」と同一であり、
+// 結果は **bit 完全一致**する（NaN のみ payload がハードウェア依存
+// のため quiet NaN へ正規化し、クラス一致で比較する）。weight 勾配
+// （`gemm_fp32_strict_into`）と同じ bit 一致契約であり、REQ-2 統一
+// 複合判定の閾値・`backend_cpu::parity` の定数は無変更。
+//
+// **f32 のみの補償和を採らなかった理由（PR #1659 codex-review P1）**:
+// 当初は Neumaier 改良版 Kahan 補償和（＋中間 overflow 回避のための
+// 2 のべき乗 scale）で「`f64` 相当」を狙ったが、f32 の 24bit 仮数＋
+// 補償項 1 語では `[2^48, 2^24, 1, -2^48, -2^24]`（ホスト `f64` 逐次和
+// は `1`）のような相殺列で補償項自体が丸め落ち、ホストと一致しない。
+// 判定契約側を緩める（理論上界・条件付き REQ-2 判定）案はレビューで
+// 受け入れられず、`f64` の加算そのものを再現する本方式へ置き換えた。
+// 経緯は `docs/backend-metal-command-batching-design.md` §10.10〜§10.14。
+//
+// **ホスト側の逐語モデル**: `crates/backend-metal/src/soft_f64.rs`
+// （`widen_f32_bits`／`add_f64_bits`／`narrow_f64_bits`）が本ファイルの
+// `bias_f64_*` と 1 対 1 対応し、Rust の `f64` 実演算と `to_bits` で
+// 一致することをユニットテスト（Linux 実行可能）で網羅検証する。
+// 本ファイルを変更した場合は同モジュールも追従させること。実機での
+// カーネル出力 bit 一致は `tests/gemm_fp32_strict_into_parity.rs`・
+// `tests/gemm_bias_grad_reduce_bit_match.rs`（`#[ignore]`）で確認する。
+//
+// **64bit 整数（`ulong`／`long`）の可用性**: Apple Silicon（本リポの
+// Metal 実機 M4 Max・Apple9 ファミリ）で実行時コンパイル可能なことを
+// 確認済み。64 以上のシフトは MSL で未定義動作のため、桁合わせ・
+// subnormal 化の経路は必ず分岐で除外してから shift する（ホスト側
+// `soft_f64.rs` と同じ構造）。
+//
+// `m == 1` は加算を経由せず直接コピーする（PR #1659 codex-review P2
+// 是正。`reduce_to_shape` は既に `1` の軸を縮約しないため `-0.0` 等の
+// 符号付きゼロが保持される。上記ホスト 2 関数と同じ特殊扱いをカーネル
+// 側にも実装する。`f32` の直接コピーなのでエミュレーションの対象外）。
+//
+// `crate::gemm::BiasGradReduceParams`（repr(C)）とレイアウトを一致
+// させる（4 × uint32 = 16 バイト）。`m`/`n`/`b_ld`/`b_transposed` は
+// `crate::layout::MatrixLayout` から構築する（`b_offset`／
+// `bias_offset` はここに含めず、呼び出し元が `setBuffer:offset:` の
+// バイトオフセットとして渡す。`crate::gemm::
+// encode_dispatch_bias_grad_reduce` doc 参照）。
+struct BiasGradReduceParams {
+    uint m;
+    uint n;
+    uint b_ld;
+    uint b_transposed;
+};
+
+// ---- IEEE 754 binary64 逐次加算のソフトウェアエミュレーション ----
+// `crates/backend-metal/src/soft_f64.rs` の逐語移植（`u64`→`ulong`・
+// `u32`→`uint`・`leading_zeros()`→`clz()`。`gemm_bias_grad_reduce_f32`
+// 冒頭コメント「ホスト側の逐語モデル」参照）。定数は同モジュールの
+// `F64_*`／`F32_*` と同値。
+
+#define BIAS_F64_SIGN      0x8000000000000000ul
+#define BIAS_F64_EXP_MASK  0x7FFul
+#define BIAS_F64_FRAC_MASK 0x000FFFFFFFFFFFFFul
+#define BIAS_F64_QNAN      0x7FF8000000000000ul
+#define BIAS_F64_INF       0x7FF0000000000000ul
+#define BIAS_F32_QNAN      0x7FC00000u
+#define BIAS_F32_INF       0x7F800000u
+
+// 64bit leading zero count を 32bit `clz` 2 回で構成する（`clz(0u) == 32`
+// は MSL 仕様で定義済み。`soft_f64::clz64` と同一構造）。
+inline uint bias_clz64(ulong x) {
+    uint hi = (uint)(x >> 32);
+    uint lo = (uint)x;
+    return (hi != 0u) ? clz(hi) : (32u + clz(lo));
+}
+
+// `f64::from(f32)`（NaN は quiet NaN へ正規化）。`soft_f64::widen_f32_bits`。
+inline ulong bias_f64_widen(uint bits) {
+    ulong sign = ((ulong)(bits >> 31)) << 63;
+    uint exp = (bits >> 23) & 0xFFu;
+    ulong frac = (ulong)(bits & 0x7FFFFFu);
+    if (exp == 0xFFu) {
+        return (frac != 0ul) ? BIAS_F64_QNAN : (sign | BIAS_F64_INF);
+    }
+    if (exp == 0u) {
+        if (frac == 0ul) {
+            return sign;
+        }
+        // f32 subnormal（`frac × 2^-149`）は f64 では正規化数。
+        uint p = 31u - clz((uint)frac);
+        ulong exp64 = (ulong)((int)p - 149 + 1023);
+        ulong frac64 = (frac << (52u - p)) & BIAS_F64_FRAC_MASK;
+        return sign | (exp64 << 52) | frac64;
+    }
+    ulong exp64 = (ulong)exp + (1023ul - 127ul); // 減算を先にすると exp < 127 で下溢れ。
+    return sign | (exp64 << 52) | (frac << 29);
+}
+
+// `f64 + f64`（最近接偶数丸め。NaN は quiet NaN へ正規化）。
+// `soft_f64::add_f64_bits` と同一手順（特殊値 → ガード 3 bit 付き桁合わせ
+// → 加減算 → 正規化 → 丸め）。
+inline ulong bias_f64_add(ulong a, ulong b) {
+    ulong sa = a & BIAS_F64_SIGN;
+    ulong sb = b & BIAS_F64_SIGN;
+    ulong ea = (a >> 52) & BIAS_F64_EXP_MASK;
+    ulong eb = (b >> 52) & BIAS_F64_EXP_MASK;
+    ulong fa = a & BIAS_F64_FRAC_MASK;
+    ulong fb = b & BIAS_F64_FRAC_MASK;
+
+    if (ea == BIAS_F64_EXP_MASK || eb == BIAS_F64_EXP_MASK) {
+        bool a_nan = (ea == BIAS_F64_EXP_MASK) && (fa != 0ul);
+        bool b_nan = (eb == BIAS_F64_EXP_MASK) && (fb != 0ul);
+        if (a_nan || b_nan) {
+            return BIAS_F64_QNAN;
+        }
+        if (ea == BIAS_F64_EXP_MASK && eb == BIAS_F64_EXP_MASK) {
+            return (sa == sb) ? a : BIAS_F64_QNAN;
+        }
+        return (ea == BIAS_F64_EXP_MASK) ? a : b;
+    }
+    bool a_zero = (ea == 0ul) && (fa == 0ul);
+    bool b_zero = (eb == 0ul) && (fb == 0ul);
+    if (a_zero && b_zero) {
+        return sa & sb;
+    }
+    if (a_zero) {
+        return b;
+    }
+    if (b_zero) {
+        return a;
+    }
+
+    ulong ma = (ea == 0ul) ? fa : (fa | (1ul << 52));
+    ulong ea_eff = (ea == 0ul) ? 1ul : ea;
+    ulong mb = (eb == 0ul) ? fb : (fb | (1ul << 52));
+    ulong eb_eff = (eb == 0ul) ? 1ul : eb;
+    // `|a| >= |b|` に揃える（指数・仮数の辞書順比較）。
+    if (ea_eff < eb_eff || (ea_eff == eb_eff && ma < mb)) {
+        ulong t;
+        t = ma; ma = mb; mb = t;
+        t = ea_eff; ea_eff = eb_eff; eb_eff = t;
+        t = sa; sa = sb; sb = t;
+    }
+    ma <<= 3;
+    mb <<= 3;
+    // 桁合わせ。64 以上のシフトは UB のため sticky のみへ縮退させる。
+    ulong d = ea_eff - eb_eff;
+    if (d >= 64ul) {
+        mb = (mb != 0ul) ? 1ul : 0ul;
+    } else if (d > 0ul) {
+        ulong lost = mb & ((1ul << d) - 1ul);
+        mb = (mb >> d) | ((lost != 0ul) ? 1ul : 0ul);
+    }
+
+    ulong e = ea_eff;
+    ulong m;
+    if (sa == sb) {
+        m = ma + mb;
+        if (m >= (1ul << 56)) {
+            ulong lost = m & 1ul;
+            m = (m >> 1) | lost;
+            e += 1ul;
+        }
+    } else {
+        m = ma - mb;
+        if (m == 0ul) {
+            // 完全相殺は最近接丸めでは `+0`。
+            return 0ul;
+        }
+        ulong sh = (ulong)bias_clz64(m);
+        sh = (sh >= 8ul) ? (sh - 8ul) : 0ul;
+        if (sh > e - 1ul) {
+            sh = e - 1ul;
+        }
+        m <<= sh;
+        e -= sh;
+    }
+
+    ulong r = m & 7ul;
+    m >>= 3;
+    if (r > 4ul || (r == 4ul && (m & 1ul) == 1ul)) {
+        m += 1ul;
+    }
+    if (m >= (1ul << 53)) {
+        m >>= 1;
+        e += 1ul;
+    }
+    ulong exp_field = (m >= (1ul << 52)) ? e : 0ul;
+    if (exp_field >= BIAS_F64_EXP_MASK) {
+        return sa | BIAS_F64_INF;
+    }
+    return sa | (exp_field << 52) | (m & BIAS_F64_FRAC_MASK);
+}
+
+// `f64 as f32`（最近接偶数丸め・overflow は `±inf`・underflow は f32
+// subnormal／`±0`。NaN は quiet NaN へ正規化）。`soft_f64::narrow_f64_bits`。
+inline uint bias_f64_narrow(ulong bits) {
+    uint sign = ((uint)(bits >> 63)) << 31;
+    ulong e = (bits >> 52) & BIAS_F64_EXP_MASK;
+    ulong f = bits & BIAS_F64_FRAC_MASK;
+    if (e == BIAS_F64_EXP_MASK) {
+        return (f != 0ul) ? BIAS_F32_QNAN : (sign | BIAS_F32_INF);
+    }
+    if (e == 0ul && f == 0ul) {
+        return sign;
+    }
+    ulong m = (e == 0ul) ? f : (f | (1ul << 52));
+    long ee = (e == 0ul) ? -1022l : ((long)e - 1023l);
+    long ef = ee + 127l;
+    if (ef >= 255l) {
+        return sign | BIAS_F32_INF;
+    }
+    long extra = (ef <= 0l) ? (1l - ef) : 0l;
+    long shift_l = 29l + extra;
+    if (shift_l >= 54l) {
+        return sign;
+    }
+    uint shift = (uint)shift_l;
+    ulong q0 = m >> shift;
+    ulong rem = m & ((1ul << shift) - 1ul);
+    ulong halfway = 1ul << (shift - 1u);
+    ulong q = q0;
+    if (rem > halfway || (rem == halfway && (q0 & 1ul) == 1ul)) {
+        q += 1ul;
+    }
+    uint exp_field = (ef <= 0l) ? 0u : (uint)ef;
+    if (ef <= 0l) {
+        if (q >= (1ul << 23)) {
+            exp_field = 1u;
+            q -= (1ul << 23);
+        }
+    } else {
+        if (q >= (1ul << 24)) {
+            q >>= 1;
+            exp_field += 1u;
+        }
+        q -= (1ul << 23);
+    }
+    if (exp_field >= 255u) {
+        return sign | BIAS_F32_INF;
+    }
+    return sign | (exp_field << 23) | (uint)q;
+}
+kernel void gemm_bias_grad_reduce_f32(
+    device const float* g [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant BiasGradReduceParams& p [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // REQ-8: grid は `ceil(n/64)` threadgroup（64 スレッド/グループ）
+    // のため端で `n` をはみ出しうる（手動境界チェックを省略しない）。
+    if (gid >= p.n) {
+        return;
+    }
+    // `crate::layout::MatrixLayout` の添字式と一致させる契約
+    // （`layout.rs` モジュール冒頭 doc「添字式」）: 転置 view
+    // （`b_transposed == 1`）は `data[col * ld + row]`、非転置は
+    // `data[row * ld + col]`。
+    if (p.m == 1) {
+        // `m == 1` は直接コピーし `0.0f` へ加算しない（PR #1659
+        // codex-review P2 是正。`crate::layout::
+        // reduce_bias_grad_rows_host` doc の「`rows == 1` は直接
+        // コピー」と同じ理由。`grad::reduce_to_shape` は既に `1` の
+        // 軸を縮約しないため `-0.0` 等の符号付きゼロが保持される）。
+        size_t idx = p.b_transposed
+            ? (size_t)gid * (size_t)p.b_ld
+            : (size_t)gid;
+        out[gid] = g[idx];
+        return;
+    }
+    // binary64 逐次加算のソフトウェアエミュレーション（本カーネル冒頭
+    // コメント「数値方式」）: `acc = +0.0`（f64）から index 順に加算し、
+    // 最後に 1 回だけ f32 へ丸める。ホスト参照実装と bit 完全一致。
+    ulong acc = 0ul;
+    for (uint row = 0; row < p.m; row++) {
+        size_t idx = p.b_transposed
+            ? (size_t)gid * (size_t)p.b_ld + (size_t)row
+            : (size_t)row * (size_t)p.b_ld + (size_t)gid;
+        acc = bias_f64_add(acc, bias_f64_widen(as_type<uint>(g[idx])));
+    }
+    out[gid] = as_type<float>(bias_f64_narrow(acc));
+}

@@ -33,7 +33,9 @@ use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, Tensor};
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
-use crate::tape::{NodeId, Op, ResidentResolver, TapeId, TapeNode, materialize_fallible};
+use crate::tape::{
+    NodeId, Op, ResidentBiasTarget, ResidentResolver, TapeId, TapeNode, materialize_fallible,
+};
 use crate::var::Reduction;
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
@@ -90,8 +92,25 @@ pub(crate) fn vjp(
         Op::Add(a, b) => {
             let a_shape = &nodes[a.0].shape;
             let b_shape = &nodes[b.0].shape;
-            let da = reduce_to_shape(upstream, a_shape);
-            let db = reduce_to_shape(upstream, b_shape);
+            // イシュー #1566・PR #1659→#1665→#1666 取り込み後の追加
+            // ユーザー承認（2026-09-12）: `Op::Add` の broadcast 縮約
+            // のうち bias パターン（`upstream: [m, n]` → `[n]`／
+            // `[1, n]` の行方向縮約。`reduce_bias_grad` の shape 構造
+            // 判定と同一条件）に限り `reduce_bias_grad`（f64 相当の
+            // アキュムレータ。`Op::LinearAct`／`Op::LinearResident` の
+            // bias フォールバックと共通）へ委譲する。`LinearVars::
+            // forward`（`nn/linear.rs`。`matmul → add` の非融合合成。
+            // `nn::Linear` の既定 forward 経路）の bias 勾配はこの
+            // `Op::Add` の VJP を経由するため、これまで `LinearAct`／
+            // `LinearResident`（同一の bias 縮約が f64 相当）と
+            // 数値方式が食い違っていた（`[1e8, 1.0, -1e8]` で結果が
+            // 変わる）。条件を満たさない broadcast 形状（bias パターン
+            // 以外の一般的な `Op::Add` 縮約）は `reduce_bias_grad` が
+            // 内部で `reduce_to_shape`（`f32` 逐次和・任意 rank・任意軸
+            // 対応）へそのまま委譲するため挙動を変えない（`reduce_bias_
+            // grad` doc 参照）。
+            let da = reduce_bias_grad(upstream, a_shape);
+            let db = reduce_bias_grad(upstream, b_shape);
             vec![(a, da), (b, db)]
         }
         Op::Mul(a, b) => {
@@ -104,6 +123,9 @@ pub(crate) fn vjp(
         Op::Relu(a) => {
             // 劣勾配は x = 0 で 0 とする（PoC-v2-2 準拠）。NaN 入力は
             // マスク不成立（`v > 0.0` が false）となり勾配 0 を返す。
+            // `upstream`（reuse backward の下流層からは非連続転置 view
+            // でありうる）・`a_val` とも `elementwise_mul_mask` が
+            // stride 対応で読む（イシュー #1577）。
             let a_val = materialize_fallible(nodes, ops, a)?;
             let da = elementwise_mul_mask(upstream, a_val, |v| v > 0.0);
             vec![(a, da)]
@@ -127,6 +149,23 @@ pub(crate) fn vjp(
             let factor = sigmoid_grad_factor(out_value);
             let da = eval::mul(upstream, &factor);
             vec![(a, da)]
+        }
+        Op::Softmax { input, dim } => {
+            // d/dx softmax(x) = y ⊙ (g − Σ_dim(g ⊙ y))（`y` = forward
+            // 記録値 `out_value` = softmax(x)。`Exp`/`Sigmoid` と同じ
+            // 「再計算しない」方針）。軸方向の縮約は f64 アキュムレータ
+            // （要素積は f32 で確定してから f64 へ昇格。
+            // `.claude/rules/coding-rust.md`「勾配の長軸縮約は f64
+            // アキュムレータで統一する」）。
+            let da = softmax_vjp_along(out_value, upstream, dim);
+            vec![(input, da)]
+        }
+        Op::LogSoftmax { input, dim } => {
+            // d/dx log_softmax(x) = g − exp(y) ⊙ Σ_dim(g)（`y` = forward
+            // 記録値 `out_value` = log_softmax(x)）。軸方向の縮約
+            // （`Σ_dim(g)`）は f64 アキュムレータ。
+            let da = log_softmax_vjp_along(out_value, upstream, dim);
+            vec![(input, da)]
         }
         Op::Sum { input, dim } => {
             let input_shape = &nodes[input.0].shape;
@@ -256,7 +295,10 @@ pub(crate) fn vjp(
             // ここから直接マスクを復元でき、前活性化の再計算・追加ノード
             // を必要としない）を先に適用し、以降は「非融合の
             // `Op::LinearResident`（`act: None`）の VJP と同じ勾配 `g`」
-            // として扱う。
+            // として扱う。`upstream` はこの層が最終出力層でない限り
+            // 下流の `Op::LinearResident` d_input が返す非連続転置 view
+            // でありうるが、`elementwise_mul_mask` が stride 対応で
+            // 読むためコピーは発生しない（イシュー #1577）。
             let masked_upstream;
             let g: &Tensor<f32> = match act {
                 Activation::None => upstream,
@@ -340,8 +382,58 @@ pub(crate) fn vjp(
             // §7.4）。CPU／CUDA は本経路に同期境界を持たないため本質
             // 的な影響はない（CUDA の `gemm_fp32_strict_into` NT/TN は
             // 内部 `stream.synchronize()` を持つが性能中立）。
-            let filled_resident = resident.fill_resident_weight_grad(
-                ops, store_id, slot, tape_id, tape_epoch, weight, &x_t, g,
+            //
+            // イシュー #1566: bias の `Op::ResidentLeaf` 解決を
+            // `fill_resident_weight_grad` 呼び出しより前に行う（bias も
+            // 同時に resident staging へ書き込めるか試みるため。
+            // `docs/backend-metal-command-batching-design.md` §10
+            // 「案 A′」）。bias が `Some` でも `Op::ResidentLeaf` でない
+            // ／`store_id` が weight と異なる場合は `bias_target` を
+            // `None` のままにし、bias は常にホスト `reduce_bias_grad`
+            // フォールバックへ回す（`fill_resident_weight_grad` は
+            // weight のみを試み `bias_filled: false` を返す）。
+            // `nodes.get(...)` は `weight` と同じ理由（範囲外添字 panic
+            // 防止・fail-closed）で経由する。
+            let bias_node = match bias {
+                Some(bias_id) => Some(nodes.get(bias_id.0).ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "grad::vjp: Op::LinearResident.bias node_id is out of range for this \
+                         tape (contract violation: leaf registered on a different Tape?)"
+                            .to_string(),
+                    )
+                })?),
+                None => None,
+            };
+            let bias_target = match (bias, bias_node) {
+                (Some(bias_id), Some(node)) => match &node.op {
+                    Op::ResidentLeaf {
+                        store_id: bias_store_id,
+                        slot: bias_slot,
+                    } if *bias_store_id == store_id => Some(ResidentBiasTarget {
+                        slot: *bias_slot,
+                        node_id: bias_id,
+                        shape: node.shape.clone(),
+                    }),
+                    // 別 store の葉、または `Op::ResidentLeaf` 以外
+                    // （理論上到達しないはず——`DeviceParamStore::
+                    // linear_forward` は bias も `ResidentLeaf` としてのみ
+                    // 受け付ける——だが fail-closed に「resident 化を
+                    // 試みない」側へ倒す。誤った勾配を書き込むより安全）。
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            let outcome = resident.fill_resident_weight_grad(
+                ops,
+                store_id,
+                slot,
+                tape_id,
+                tape_epoch,
+                weight,
+                &x_t,
+                g,
+                bias_target,
             )?;
 
             // d_input^T = W @ g^T（`W: [k,n]`・`g: [m,n]` → `g^T: [n,m]`
@@ -359,25 +451,26 @@ pub(crate) fn vjp(
             let d_input = transpose2d(&tmp);
 
             let mut contributions = vec![(input, d_input)];
-            if !filled_resident {
+            if !outcome.weight_filled {
                 let d_weight = ops
                     .gemm_fp32_strict(&x_t, g)
                     .map_err(AutodiffError::Backend)?;
                 contributions.push((weight, d_weight));
             }
-            if let Some(bias_id) = bias {
-                // bias の勾配は `Op::Add` の VJP と同じ縮約
-                // （`reduce_to_shape`。行方向ブロードキャストの逆演算）。
-                // `weight` と同じ理由で `nodes.get(...)` を経由し、
-                // 範囲外添字 panic を防ぐ（fail-closed）。
-                let bias_node = nodes.get(bias_id.0).ok_or_else(|| {
-                    AutodiffError::InvalidArgument(
-                        "grad::vjp: Op::LinearResident.bias node_id is out of range for this \
-                         tape (contract violation: leaf registered on a different Tape?)"
-                            .to_string(),
-                    )
-                })?;
-                let d_bias = reduce_to_shape(g, &bias_node.shape);
+            if let (Some(bias_id), Some(bias_node)) = (bias, bias_node)
+                && !outcome.bias_filled
+            {
+                // bias の勾配は `Op::Add` の VJP と同じ縮約の基本形
+                // （行方向ブロードキャストの逆演算）だが、`reduce_bias_
+                // grad`（f64 アキュムレータ経由。上記 doc 参照）へ委譲
+                // する——resident 経由で書き込めた場合（`outcome.
+                // bias_filled`）はここへ来ない（weight と対称の
+                // 「resident 成功時は無駄な計算をスキップする」最適化。
+                // `fill_resident_weight_grad` doc 参照）が、resident
+                // 非対応バックエンドのフォールバックがここに来るため、
+                // resident 経路（f64 逐次和）と数値方式を揃える
+                // 必要がある（イシュー #1566・PR #1659 codex-review P1）。
+                let d_bias = reduce_bias_grad(g, &bias_node.shape);
                 contributions.push((bias_id, d_bias));
             }
             contributions
@@ -392,7 +485,9 @@ pub(crate) fn vjp(
             let x_val = materialize_fallible(nodes, ops, input)?;
 
             // epilogue activation のマスク段（`Op::LinearResident` と同じ
-            // `out_value > 0` 規約。イシュー #1044）。
+            // `out_value > 0` 規約。イシュー #1044）。`upstream` が
+            // 非連続転置 view の場合の扱いは `Op::LinearResident` 分岐
+            // の同型コメント（イシュー #1577）を参照。
             let masked_upstream;
             let g: &Tensor<f32> = match act {
                 Activation::None => upstream,
@@ -417,7 +512,11 @@ pub(crate) fn vjp(
             let mut contributions = vec![(input, d_input), (weight, d_weight)];
             if let Some(bias_id) = bias {
                 let bias_shape = &nodes[bias_id.0].shape;
-                let d_bias = reduce_to_shape(g, bias_shape);
+                // `Op::LinearResident` の resident フォールバック（上記
+                // `reduce_bias_grad` doc 参照）と数値方式を揃える
+                // （fresh〈本 Op〉/reuse 間の一致。イシュー #1566・PR
+                // #1659 codex-review P1）。
+                let d_bias = reduce_bias_grad(g, bias_shape);
                 contributions.push((bias_id, d_bias));
             }
             contributions
@@ -881,15 +980,124 @@ fn reduce_to_shape(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
     build_tensor(data, target_shape)
 }
 
+/// bias 勾配専用の縮約ディスパッチ（イシュー #1566・PR #1659 codex-review
+/// P1 是正・2026-09-12 ユーザー承認 A の横展開）。
+///
+/// `Op::LinearResident` は resident 経由の成功時（`outcome.bias_filled`）
+/// `eval::reduce_bias_grad_rows`（`f64` アキュムレータ。ホスト経路）・
+/// GPU カーネル `gemm_bias_grad_reduce_f32`（binary64 加算の 64bit 整数
+/// エミュレーション。ホストと bit 一致）のいずれか
+/// で bias を計算する（`docs/backend-metal-command-batching-design.md`
+/// §10.8）。`outcome.bias_filled == false`（CPU／CUDA 等 resident 非対応
+/// バックエンド、または weight tying で bias 自身が非 resident 扱いに
+/// なった場合のフォールバック）だけが `g` を単純な `f32` 逐次和
+/// （`reduce_to_shape`）で縮約していたため、**同一の `Op::LinearResident`
+/// が実行環境（バックエンド／resident 対応可否）によって異なる縮約方式
+/// を使う**という不整合があった（`[1e8, 1.0, -1e8]` のような相殺入力で
+/// Metal resident 経路と CPU／CUDA フォールバックが食い違う。codex-review
+/// 指摘）。
+///
+/// `Op::LinearAct`（`Op::LinearResident` の resident 化を伴わない同型の
+/// bias 縮約）にも同じ理由で適用し、両 Op 間の縮約方式を揃える
+/// （fresh〈`LinearAct`〉と reuse〈`LinearResident` フォールバック〉が
+/// 同じ形状パターンで異なる数値を返さないようにする）。
+///
+/// **`Op::Add` への横展開（2026-09-12 ユーザー承認・PR #1659→#1665→
+/// #1666 取り込み後の追加是正）**: `nn::Linear` の既定 forward 経路
+/// （`LinearVars::forward`。`matmul → add` の非融合合成。`nn/linear.rs`
+/// doc「bias 加算は `Var::add` の broadcast に委ねる」参照）は `Op::Add`
+/// の VJP を経由するため、`Op::Add(a, b)` 側でも本関数へ委譲する
+/// （`da`／`db` 双方。`Op::Add` は可換なので bias がどちらの引数に来ても
+/// 対称に扱える）。これにより、同じ `Linear` 層が `LinearVars::forward`
+/// （fresh・非融合）と `forward_with_activation`（`Op::LinearAct`。
+/// epilogue 融合）・`DeviceParamStore::linear_forward_with_activation`
+/// （`Op::LinearResident`。reuse）のいずれで forward されても bias
+/// 勾配の数値方式が揃う。`Op::Add` は bias 以外の一般的な broadcast
+/// （bias パターンに一致しない任意 shape の加算）にも使われる汎用 Op
+/// のため、下記の shape 構造判定を満たさない呼び出しは本関数の内部で
+/// 既存の `reduce_to_shape` へそのまま委譲され挙動を変えない（bias
+/// パターンに限定した横展開であり、汎用 `Op::Add`・`reduce_to_shape`
+/// 本体自体は不変）。
+///
+/// 適用条件は `g` が rank-2 `[m, n]` かつ `target_shape` が「軸 0
+/// （行／batch 軸）方向の縮約」を表す形状（末尾次元が `n` と一致し、
+/// それより前の全次元が `1`。典型例: `[n]`・`[1, n]`。`nn::Linear` の
+/// bias `[out_features]` を含む）の場合に限る。`eval::reduce_bias_grad_
+/// rows` は「rank-2 入力を行 `0..m` で縮約し列ごとの和を返す」という
+/// 固定の契約（`gemm_bias_grad_reduce_f32` の `MatrixLayout` と同型）
+/// のため、**軸 1（列）方向を縮約する broadcast 形状（例: `g: [2, 2]`
+/// に対する `target_shape: [2, 1]`。各行の bias が列方向へ複製される
+/// パターン）には適用できない**——列ごとの和という異なる縮約軸の結果を
+/// 返してしまい、値そのものが誤りになる（PR #1659 codex-review P2
+/// 是正。回帰テスト `reduce_bias_grad_does_not_misapply_row_reduction_
+/// to_column_broadcast_bias` 参照）。この判定は総要素数の一致だけでは
+/// 検出できない（`[2, 1]` も総要素数 `2` で `g` の列数 `2` と一致して
+/// しまうため、旧実装は shape 構造を見ずに誤って f64 経路へ分岐して
+/// いた）。`nn::Linear`〈`from_parameters` が bias を `[out_features]`
+/// 厳密一致にしか構築しない〉経由では軸 1 縮約の broadcast bias は
+/// 到達しない（`pub(crate) fn linear_act` を直接呼ぶ経路・`Op::Add`
+/// 経由で `Var::add` に非 bias 形状の broadcast を直接渡す経路限定。
+/// `var.rs` doc「`linear_act` は `[n]` と厳密一致しない broadcast
+/// 可能な bias も受理する」参照）。`Op::Add` への横展開後もこの shape
+/// 構造判定自体は不変であり、`[2, 1]` のような軸 1 縮約は `Op::Add`
+/// 経由でも同様に誤適用を回避する。適用条件を満たさない場合は既存の
+/// `reduce_to_shape`（`f32` 逐次和・任意 rank・任意軸対応）のまま
+/// 維持し挙動を変えない（安全側）。
+fn reduce_bias_grad(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
+    let g_shape = g.shape();
+    let is_row_axis_reduction = g_shape.len() == 2
+        && target_shape.last() == Some(&g_shape[1])
+        && target_shape[..target_shape.len().saturating_sub(1)]
+            .iter()
+            .all(|&d| d == 1);
+    if is_row_axis_reduction {
+        let data = eval::reduce_bias_grad_rows(g);
+        return build_tensor(data, target_shape);
+    }
+    reduce_to_shape(g, target_shape)
+}
+
 /// 同 shape の 2 テンソルに対する要素ごとの条件付き選択
 /// （`g` をそのまま通すか 0 にするかを `mask_src` の値で決める）。
 /// `Relu` の VJP（`g ⊙ 1[x > 0]`）専用の最小実装。
+///
+/// **イシュー #1577**: reuse 学習（`DeviceParamStore` 経由・
+/// `Op::LinearResident`）の backward では、下流層の VJP が返す
+/// `d_input = transpose2d(&tmp)`（本ファイル内 `Op::LinearResident`
+/// 分岐）が stride `[1, m]` のゼロコピー転置 view であり、単一寄与
+/// なら `backward.rs::accumulate` がコピーせずそのまま上流層の
+/// `upstream` になる。旧実装は `dense_vec`（`eval::dense_vec` →
+/// `Tensor::contiguous()`）が非連続入力を要素ごと `get(&index)`
+/// （rank 検査・軸ごとの範囲検査を伴う）で走査するため、連続入力比で
+/// 大幅に劣化していた（実測は `docs/perf/
+/// lowlayer-diagnosis-2026-09-12.md` §4・`docs/perf/
+/// train-reuse-relu-mask-stride.md`）。
+///
+/// 本実装は `g`・`mask_src`（`Op::LinearAct`／`Op::LinearResident` では
+/// `out_value` が `materialize_fallible` 経由で view になりうる）の
+/// 双方を独立に [`Tensor::as_view_slice`]（全 strides が非負な限り
+/// `contiguous()` を経由せず storage を借用で読む。`as_slice` が成功
+/// するケース〈真に contiguous〉も同じ formula で正しく読める＝分岐を
+/// 増やさず包含する）で読み、`get()` の rank・範囲検査コストを避けて
+/// 出力を 1 パスで構築する。`as_view_slice` が `None`（負 stride 等。
+/// 現行公開 API の `transpose`/`narrow`/`broadcast_to` はいずれも負
+/// stride を生成しないため到達しないが将来拡張への fail-safe）の
+/// 場合や shape 不一致・オフセット計算のオーバーフロー等、想定外の
+/// 状態を検知した場合は、静かに 0 で埋めたり判定を迂回したりせず、
+/// `dense_vec` を使う既存の走査へ**経路全体を丸ごと**フォールバック
+/// する（数値的に同一のコピー経路であり、`.claude/rules/security.md`
+/// A08 が禁じる判定迂回ではない）。出力は要素ごとの選択（算術なし）
+/// のため走査順に依存せず bit 同一（run-to-run・変更前後とも）を
+/// 維持する。
 fn elementwise_mul_mask(
     g: &Tensor<f32>,
     mask_src: &Tensor<f32>,
     keep: impl Fn(f32) -> bool,
 ) -> Tensor<f32> {
     let shape = g.shape().to_vec();
+    if let Some(out) = try_elementwise_mul_mask_strided(g, mask_src, &shape, &keep) {
+        return build_tensor(out, &shape);
+    }
     let g_data = dense_vec(g);
     let mask_data = dense_vec(mask_src);
     let out: Vec<f32> = g_data
@@ -898,6 +1106,219 @@ fn elementwise_mul_mask(
         .map(|(&gv, &mv)| if keep(mv) { gv } else { 0.0 })
         .collect();
     build_tensor(out, &shape)
+}
+
+/// [`elementwise_mul_mask`] の stride 対応主経路。読み出しに失敗しうる
+/// 要因（shape 不一致・オフセット計算オーバーフロー）を検出した場合は
+/// `None` を返し、呼び出し元が `dense_vec` 経路へ丸ごとフォールバック
+/// する（部分的に誤った値を返さない）。
+fn try_elementwise_mul_mask_strided(
+    g: &Tensor<f32>,
+    mask_src: &Tensor<f32>,
+    shape: &[usize],
+    keep: &impl Fn(f32) -> bool,
+) -> Option<Vec<f32>> {
+    if mask_src.shape() != shape {
+        // 既存実装（`dense_vec` の zip）は shape 不一致時に短い方へ
+        // 暗黙に切り詰めていた。多次元 index による読み出しはこの
+        // 前提を要求するため、不一致時は無条件でフォールバックし
+        // 既存の暗黙切り詰め挙動をそのまま保つ。
+        return None;
+    }
+    let numel: usize = shape.iter().product();
+    let g_op = MaskReadOperand::classify(g);
+    let mask_op = MaskReadOperand::classify(mask_src);
+
+    // fresh 経路（`Op::Relu`／`Op::LinearAct` の `upstream` が
+    // `matmul_vjp` の連続な GEMM 出力である通常ケース）を含む、
+    // 両オペランドとも連続な最頻ケースの高速経路。`read(idx, flat)`
+    // 経由の enum ディスパッチ・オフセット計算を経由せず、借用スライス
+    // 2 本の `zip`／`map`／`collect` に落とすことでコンパイラの自動
+    // ベクトル化を妨げない（`MaskReadOperand::read` 経由の一般化した
+    // 経路は非連続 view 専用に限定する）。
+    if let (MaskReadOperand::Contig(g_s), MaskReadOperand::Contig(m_s)) = (&g_op, &mask_op) {
+        return Some(
+            g_s.iter()
+                .zip(m_s.iter())
+                .map(|(&gv, &mv)| if keep(mv) { gv } else { 0.0 })
+                .collect(),
+        );
+    }
+
+    if shape.len() == 2 {
+        let (rows, cols) = (shape[0], shape[1]);
+        // reuse backward の実際のホットパス（下流層 d_input が
+        // `transpose2d` のゼロコピー view・上流層 `out_value` は連続な
+        // forward 記録値、またはその逆）を狙い撃ちした専用経路。片方が
+        // `Contig`（行優先の連続スライスを直接インデックス）・片方が
+        // `View`（行ごとの基準オフセット `i * s0` を 1 回だけ計算し、
+        // 列方向は `+ j * s1` の加算のみ）に限定して読み出すことで、
+        // 一般化した `MaskReadOperand::read` 経由（列ごとに strides を
+        // ゼロから内積するオーバーヘッド）より高速化する（実測は
+        // `docs/perf/train-reuse-relu-mask-stride.md` §5）。
+        if let (
+            MaskReadOperand::Contig(g_s),
+            MaskReadOperand::View {
+                span: m_span,
+                strides: m_strides,
+            },
+        ) = (&g_op, &mask_op)
+        {
+            let (ms0, ms1) = (m_strides[0], m_strides[1]);
+            let mut out = Vec::with_capacity(numel);
+            for i in 0..rows {
+                let row_start = i * cols;
+                let g_row = g_s.get(row_start..row_start + cols)?;
+                let m_base = i * ms0;
+                for (j, &gv) in g_row.iter().enumerate() {
+                    let mv = *m_span.get(m_base + j * ms1)?;
+                    out.push(if keep(mv) { gv } else { 0.0 });
+                }
+            }
+            return Some(out);
+        }
+        if let (
+            MaskReadOperand::View {
+                span: g_span,
+                strides: g_strides,
+            },
+            MaskReadOperand::Contig(m_s),
+        ) = (&g_op, &mask_op)
+        {
+            let (gs0, gs1) = (g_strides[0], g_strides[1]);
+            let mut out = Vec::with_capacity(numel);
+            for i in 0..rows {
+                let row_start = i * cols;
+                let m_row = m_s.get(row_start..row_start + cols)?;
+                let g_base = i * gs0;
+                for (j, &mv) in m_row.iter().enumerate() {
+                    let gv = *g_span.get(g_base + j * gs1)?;
+                    out.push(if keep(mv) { gv } else { 0.0 });
+                }
+            }
+            return Some(out);
+        }
+    }
+
+    let mut out = Vec::with_capacity(numel);
+
+    if shape.len() == 2 {
+        // 上記 2 分岐（片方 `Contig`・片方 `View`）に該当しない rank-2
+        // （両方 `View`／`Owned` を含むケース）向けの一般経路。固定長
+        // 2 要素の index 配列のみでスタック上で完結し、一般 N-d 経路の
+        // `Vec<usize>` 繰り上げより軽い。
+        let (rows, cols) = (shape[0], shape[1]);
+        for i in 0..rows {
+            for j in 0..cols {
+                let idx = [i, j];
+                let flat = i * cols + j;
+                let gv = g_op.read(&idx, flat)?;
+                let mv = mask_op.read(&idx, flat)?;
+                out.push(if keep(mv) { gv } else { 0.0 });
+            }
+        }
+        return Some(out);
+    }
+
+    // 一般 N-d: index ベクタを行優先（最終軸が最速）で繰り上げる。
+    let mut idx = vec![0usize; shape.len()];
+    for flat in 0..numel {
+        let gv = g_op.read(&idx, flat)?;
+        let mv = mask_op.read(&idx, flat)?;
+        out.push(if keep(mv) { gv } else { 0.0 });
+        for axis in (0..shape.len()).rev() {
+            idx[axis] += 1;
+            if idx[axis] < shape[axis] {
+                break;
+            }
+            idx[axis] = 0;
+        }
+    }
+    Some(out)
+}
+
+/// [`elementwise_mul_mask`] が読む 1 オペランド分の抽象。
+///
+/// `as_slice()`（真に contiguous）が成功すれば `Contig` として最優先で
+/// 扱う（`try_elementwise_mul_mask_strided` の全 contig 高速経路・
+/// rank-2／一般 N-d 経路いずれからも `flat` 添字で直接読める）。次に
+/// `as_view_slice()`（`transpose`/`narrow`/`broadcast_to` の非負
+/// stride view を含む）が成功すれば `View` として **`usize` へ変換
+/// 済みの** strides 付きで借用を保持する。いずれも失敗した場合のみ
+/// `dense_vec`（コピー）を保持する `Owned` へフォールバックする。
+///
+/// `View` のオフセット計算（[`Self::read`]）は要素ごとに `checked_mul`/
+/// `checked_add`/`isize`↔`usize` 変換を経由せず、プレーンな `usize`
+/// 乗算・加算のみを行う。安全性の根拠: `as_view_slice()` が `Some` を
+/// 返した時点で全 strides が非負であることが確定しており（`classify`
+/// で 1 回だけ `usize` へ変換）、かつ同メソッドは
+/// `span = 1 + Σ (shape_i − 1)·stride_i` を `checked_add`/`checked_mul`
+/// で検証済みである。したがって shape 範囲内の任意の `idx` に対し
+/// `Σ idx_i·stride_i < span == span.len()` が保証され、本メソッド内で
+/// 改めて overflow を心配する必要はない（対象テンソルの要素数は
+/// 学習用途の実用範囲で `usize::MAX` に遠く及ばない）。境界外
+/// アクセスの検出自体は最終的な `span.get(off)` の 1 回の `Option`
+/// 判定に集約し、そこで `None` になった場合のみ
+/// `try_elementwise_mul_mask_strided` 全体が `dense_vec` 経路へ
+/// フォールバックする（`.claude/rules/coding-rust.md` の `unwrap`／
+/// `expect` 非使用方針を保ちつつ、要素ごとの checked 演算チェーンに
+/// よる速度低下〈初版実装で実測。`docs/perf/
+/// train-reuse-relu-mask-stride.md` §5 参照〉を避ける）。
+enum MaskReadOperand<'a> {
+    Contig(&'a [f32]),
+    View {
+        span: &'a [f32],
+        strides: Vec<usize>,
+    },
+    Owned(Vec<f32>),
+}
+
+impl<'a> MaskReadOperand<'a> {
+    fn classify(t: &'a Tensor<f32>) -> Self {
+        if let Some(s) = t.as_slice() {
+            return MaskReadOperand::Contig(s);
+        }
+        if let Some(span) = t.as_view_slice() {
+            // `as_view_slice()` が `Some` を返した時点で strides は
+            // 全て非負が保証されるため、この `usize::try_from` は
+            // 通常失敗しない。万一の不整合（`Tensor` 側の契約違反）
+            // に備え、フォールバック先である `Owned` へ迂回する。
+            let strides: Option<Vec<usize>> = t
+                .strides()
+                .iter()
+                .map(|&s| usize::try_from(s).ok())
+                .collect();
+            if let Some(strides) = strides {
+                return MaskReadOperand::View { span, strides };
+            }
+        }
+        MaskReadOperand::Owned(dense_vec(t))
+    }
+
+    /// `Contig`／`Owned` の場合は `flat`（行優先の平坦 index。
+    /// `as_slice()`／`dense_vec` の走査順と一致）で、`View` の場合は
+    /// `idx`（strides との内積でオフセットを計算。プレーン `usize`
+    /// 演算のみ・型定義側 doc 参照）で読む。境界外アクセスを検知
+    /// した場合（`View` の `span.get` が `None` を返す場合。通常到達
+    /// しない防御的経路）は `None` を返し、呼び出し元の
+    /// `try_elementwise_mul_mask_strided` 全体を `dense_vec` 経路へ
+    /// フォールバックさせる。両オペランドとも `Contig` の最頻ケースは
+    /// この汎用経路を経由せず、呼び出し元の専用高速経路で処理する
+    /// （enum ディスパッチのオーバーヘッドを避けるため）。
+    #[inline]
+    fn read(&self, idx: &[usize], flat: usize) -> Option<f32> {
+        match self {
+            MaskReadOperand::Contig(s) => s.get(flat).copied(),
+            MaskReadOperand::View { span, strides } => {
+                let mut off = 0usize;
+                for (&i, &s) in idx.iter().zip(strides.iter()) {
+                    off += i * s;
+                }
+                span.get(off).copied()
+            }
+            MaskReadOperand::Owned(v) => v.get(flat).copied(),
+        }
+    }
 }
 
 /// `Tanh` の VJP 係数 `1 - tanh(x)^2` を forward 記録値 `out_value`
@@ -916,6 +1337,103 @@ fn sigmoid_grad_factor(out_value: &Tensor<f32>) -> Tensor<f32> {
     let shape = out_value.shape().to_vec();
     let data = dense_vec(out_value);
     let out: Vec<f32> = data.iter().map(|&v| v * (1.0 - v)).collect();
+    build_tensor(out, &shape)
+}
+
+/// `Op::Softmax` の VJP 本体: `dx = y ⊙ (g − Σ_dim(g ⊙ y))`。
+/// `eval::softmax_along`／`log_softmax_along` と同じ「外側（outer）×
+/// 走査軸（axis_len）× 内側（inner）」の 3 段走査（`dim` は forward
+/// 側で範囲検査済みの前提）。`Σ_dim(g ⊙ y)` の要素積は `f32` で確定
+/// してから `f64` へ昇格して蓄積し（`.claude/rules/coding-rust.md`
+/// 「勾配の長軸縮約の要素積は f32 で確定してから f64 へ昇格」）、
+/// `g` からの減算・`y` との最終乗算も（`log_softmax_vjp_along` と同じ
+/// 理由で）`f64` のまま保持し、最終書き出しで 1 回だけ `f32` へ
+/// downcast する（縮約値を先に `f32` へ戻すと、有限の `f32` 入力でも
+/// 減算・乗算の結果が overflow しうるため）。
+fn softmax_vjp_along(out_value: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = out_value.shape().to_vec();
+    // `log_softmax_vjp_along` 直下と同じ早期 return（部分積オーバー
+    // フロー回避。`eval::softmax_along` 冒頭のコメント参照）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let y = dense_vec(out_value);
+    let g = dense_vec(upstream);
+    let mut out = vec![0f32; y.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut dot_acc: f64 = 0.0;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                let term = g[idx] * y[idx];
+                dot_acc += term as f64;
+            }
+            // `dot_acc`（f64）を乗算前に `f32` へ downcast すると、
+            // `y * (g - dot)` が有限の `f32` 入力でも overflow しうる
+            // （例: `y=[0.25,0.75]`・上流勾配 `g=[3e38,-3e38]` で正しい
+            // 入力勾配 `[~1.125e38, ...]` が `[inf, ...]` になる）。
+            // `log_softmax_vjp_along` と同じ f64 アキュムレータ契約
+            // （`.claude/rules/coding-rust.md`）に従い、`g` からの減算・
+            // `y` との最終乗算まで f64 で保持し、最終書き出しでのみ
+            // `f32` へ downcast する。
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                let d = (y[idx] as f64) * (g[idx] as f64 - dot_acc);
+                out[idx] = d as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::LogSoftmax` の VJP 本体: `dx = g − exp(y) ⊙ Σ_dim(g)`。
+/// `softmax_vjp_along` と同じ 3 段走査・f64 縮約方針（本関数の縮約は
+/// 要素積ではなく単純和のため、`g` の各要素をそのまま `f64` へ昇格して
+/// 蓄積する）。`Σ_dim(g)` との乗算（`exp(y) ⊙ Σ_dim(g)`）・`g` からの
+/// 減算も f64 のまま行い、最終書き出しで 1 回だけ `f32` へ downcast
+/// する（縮約値を先に `f32` へ戻すと、有限の `f32` 入力でも乗算結果が
+/// overflow しうるため）。
+fn log_softmax_vjp_along(
+    out_value: &Tensor<f32>,
+    upstream: &Tensor<f32>,
+    axis: usize,
+) -> Tensor<f32> {
+    let shape = out_value.shape().to_vec();
+    // `softmax_vjp_along` 直上と同じ早期 return（部分積オーバーフロー
+    // 回避。`eval::softmax_along` 冒頭のコメント参照）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let y = dense_vec(out_value);
+    let g = dense_vec(upstream);
+    let mut out = vec![0f32; y.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut sum_acc: f64 = 0.0;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                sum_acc += g[idx] as f64;
+            }
+            // `sum_acc`（f64）を乗算前に `f32` へ downcast すると、
+            // `exp(y) * sum_g` が有限の `f32` 入力でも overflow しうる
+            // （例: `y=[0,0]`・上流勾配 `g=[2e38,2e38]` で正しい入力勾配
+            // `[0,0]` が `[-inf,-inf]` になる）。`.claude/rules/
+            // coding-rust.md` の f64 アキュムレータ契約に従い、
+            // `exp(y)` との乗算・`g` からの減算まで f64 で保持し、
+            // 最終書き出しでのみ `f32` へ downcast する。
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                let d = g[idx] as f64 - (y[idx].exp() as f64) * sum_acc;
+                out[idx] = d as f32;
+            }
+        }
+    }
     build_tensor(out, &shape)
 }
 
@@ -1414,6 +1932,279 @@ mod tests {
         assert_eq!(dense_vec(&da), vec![0.0]);
     }
 
+    // --- イシュー #1577: elementwise_mul_mask の stride 対応 ---
+    //
+    // 新実装（`try_elementwise_mul_mask_strided` を経由する
+    // `elementwise_mul_mask`）と、旧実装をそのまま残した参照実装
+    // （`dense_vec` を zip するだけの経路）の出力を `to_bits()` で
+    // 完全一致比較する。数値的に同一の値を出す契約（bit 同一）を
+    // 直接検証する。
+
+    /// `dense_vec` 経由の参照実装（旧 `elementwise_mul_mask` そのもの）。
+    /// 新実装との bit 同一性を突き合わせる基準として使う。
+    fn elementwise_mul_mask_reference(
+        g: &Tensor<f32>,
+        mask_src: &Tensor<f32>,
+        keep: impl Fn(f32) -> bool,
+    ) -> Tensor<f32> {
+        let shape = g.shape().to_vec();
+        let g_data = dense_vec(g);
+        let mask_data = dense_vec(mask_src);
+        let out: Vec<f32> = g_data
+            .iter()
+            .zip(mask_data.iter())
+            .map(|(&gv, &mv)| if keep(mv) { gv } else { 0.0 })
+            .collect();
+        build_tensor(out, &shape)
+    }
+
+    fn assert_bits_eq(label: &str, actual: &Tensor<f32>, expected: &Tensor<f32>) {
+        let a = dense_vec(actual);
+        let e = dense_vec(expected);
+        assert_eq!(a.len(), e.len(), "{label}: 要素数不一致");
+        for (i, (&av, &ev)) in a.iter().zip(e.iter()).enumerate() {
+            assert_eq!(
+                av.to_bits(),
+                ev.to_bits(),
+                "{label}[{i}]: actual={av:?}（bits={:#x}） expected={ev:?}（bits={:#x}）",
+                av.to_bits(),
+                ev.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn mask_stride_transpose_view_matches_reference() {
+        // reuse backward が生む `d_input = transpose2d(&tmp)` を再現
+        // （`tmp: [k, m]` 連続 → 転置後 `[m, k]`・strides `[1, k]`）。
+        let tmp = t(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0], &[2, 3]);
+        let g = transpose2d(&tmp); // shape [3, 2]、strides [1, 3]
+        let mask_src = t(&[1.0, -1.0, 0.0, 2.0, -2.0, 0.5], &[3, 2]);
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("transpose view (g 側)", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_mask_src_side_non_contiguous() {
+        // `mask_src` 側だけが非連続（`out_value` が view の場合の
+        // 想定。`g` は連続）。
+        let g = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]);
+        let mask_tmp = t(&[1.0, -1.0, 0.0, 2.0, -2.0, 0.5], &[2, 3]);
+        let mask_src = transpose2d(&mask_tmp); // shape [3, 2]
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("transpose view (mask_src 側)", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_narrow_offset_view() {
+        // `narrow` 後の view（offset != 0・かつ真に非連続）。列方向
+        // （dim 1）の `narrow` は、行方向（dim 0）の `narrow` と異なり
+        // 元の行幅（stride 4）が残ったまま shape が縮む（`[3,4]` の
+        // 列 1..3 を切り出すと shape `[3,2]`・strides `[4,1]` となり、
+        // 新 shape の標準行優先 stride `[2,1]` とは一致しない）ため
+        // `as_slice()` が `None` を返す（`Tensor::is_contiguous` 契約）。
+        // 行方向の `narrow` は新 shape でも標準行優先 stride のまま
+        // 残り `as_slice()` が成功してしまう（`Contig` 分類）ため、
+        // 本テストの意図（`View` 分類・rank-2 `Contig`×`View` 専用
+        // 経路のオフセット付きケース）を検証するには列方向でなければ
+        // ならない（advisor 指摘。行方向版は誤って `Contig`×`Contig`
+        // 高速経路しか検証していなかった）。
+        let base = t(
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            &[3, 4],
+        );
+        let g = base
+            .narrow(1, 1, 2)
+            .expect("narrow: 事前に範囲内であることを確認済み");
+        assert!(
+            g.as_slice().is_none(),
+            "narrow(dim=1) は非連続 view のはず（本テストが検証したい前提。\
+release ビルドの `cargo test --release` でも前提崩れを検知できるよう \
+`debug_assert!` ではなく `assert!` を使う）"
+        );
+        let mask_src = t(&[-1.0, 1.0, 0.0, -2.0, 3.0, -3.0], &[3, 2]);
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("narrow(dim=1) view", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_both_operands_transposed_rank2() {
+        // `g`・`mask_src` の両方が非連続 view（`View`×`View`）の
+        // rank-2 ケース。rank-2 専用経路のうち「片方 `Contig`・片方
+        // `View`」の 2 分岐（advisor 指摘で追加）のどちらにも該当
+        // しないため、`try_elementwise_mul_mask_strided` 内の
+        // 一般化した `read(idx, flat)` 経由の rank-2 経路（`MaskReadOperand::
+        // read` の `View` アーム）を確実に踏む。
+        let tmp_g = t(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0], &[2, 3]);
+        let g = transpose2d(&tmp_g); // shape [3, 2]、非連続 view
+        let tmp_mask = t(&[1.0, -1.0, 0.0, 2.0, -2.0, 0.5], &[2, 3]);
+        let mask_src = transpose2d(&tmp_mask); // shape [3, 2]、非連続 view
+        assert!(
+            g.as_slice().is_none() && mask_src.as_slice().is_none(),
+            "両オペランドとも非連続 view のはず（本テストが検証したい前提。\
+release ビルドでも検知できるよう `assert!` を使う）"
+        );
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("View×View rank-2", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_broadcast_zero_stride_view() {
+        // `broadcast_to` が生む stride 0 の軸を含む view。
+        let row = t(&[1.0, -1.0, 2.0], &[1, 3]);
+        let g = row
+            .broadcast_to(&[2, 3])
+            .expect("broadcast_to: shape 互換性は事前に確認済み");
+        let mask_src = t(&[1.0, -1.0, 1.0, -1.0, 1.0, -1.0], &[2, 3]);
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("broadcast (stride 0) view", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_rank1_and_rank3() {
+        // rank-1（transpose2d 適用対象外だが narrow で非連続を作る）。
+        let base1 = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5]);
+        let g1 = base1
+            .narrow(0, 1, 3)
+            .expect("narrow: 事前に範囲内であることを確認済み");
+        let mask1 = t(&[-1.0, 1.0, -1.0], &[3]);
+        let actual1 = elementwise_mul_mask(&g1, &mask1, |v| v > 0.0);
+        let expected1 = elementwise_mul_mask_reference(&g1, &mask1, |v| v > 0.0);
+        assert_bits_eq("rank-1 narrow", &actual1, &expected1);
+
+        // rank-3: 2x2x3 を transpose(0, 2) で非連続にする。
+        let base3 = t(
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            &[2, 2, 3],
+        );
+        let g3 = base3
+            .transpose(0, 2)
+            .expect("transpose: rank-3 は 0,2 とも範囲内");
+        let mask3 = t(
+            &[
+                1.0, -1.0, 0.0, 2.0, -2.0, 0.5, -0.5, 1.5, -1.5, 3.0, -3.0, 0.25,
+            ],
+            &[3, 2, 2],
+        );
+        let actual3 = elementwise_mul_mask(&g3, &mask3, |v| v > 0.0);
+        let expected3 = elementwise_mul_mask_reference(&g3, &mask3, |v| v > 0.0);
+        assert_bits_eq("rank-3 transpose", &actual3, &expected3);
+    }
+
+    #[test]
+    fn mask_stride_empty_tensor() {
+        let g = t(&[], &[0, 3]);
+        let mask_src = t(&[], &[0, 3]);
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        assert_eq!(dense_vec(&actual), Vec::<f32>::new());
+    }
+
+    #[test]
+    fn mask_stride_nan_and_signed_zero_and_subnormal() {
+        // NaN（マスク不成立で 0 を返す規約）・-0.0・subnormal を含む
+        // 転置 view で bit 同一性を確認する。
+        let tmp = t(
+            &[f32::NAN, -0.0, f32::MIN_POSITIVE / 2.0, 1.0, -1.0, 0.0],
+            &[2, 3],
+        );
+        let g = transpose2d(&tmp); // shape [3, 2]
+        let mask_src = t(&[1.0, f32::NAN, -0.0, 1.0, 0.0, -1.0], &[3, 2]);
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("NaN / -0.0 / subnormal", &actual, &expected);
+    }
+
+    /// マイクロベンチ（`#[ignore]`。手動実行専用。
+    /// `docs/perf/lowlayer-diagnosis-2026-09-12.md` §4 の
+    /// `diag_elementwise_mask_bench` と同構成。64×256 の連続入力 と
+    /// `[256,64]→transpose2d` の非連続転置 view を 1000 回反復した
+    /// 中央値を、新実装（`elementwise_mul_mask`）・旧参照実装
+    /// （`elementwise_mul_mask_reference`。`dense_vec` zip 経路）の
+    /// 双方・連続／非連続の計 4 系列で比較する。stderr 出力のみで
+    /// assert は行わない（実測記録は `docs/perf/
+    /// train-reuse-relu-mask-stride.md`）。
+    /// 実行例:
+    /// `cargo test -p fandhe-ai-autodiff --release -- --ignored
+    /// --nocapture mask_stride_microbench`
+    #[test]
+    #[ignore = "手動実行専用のマイクロベンチ（stderr 出力のみ）"]
+    fn mask_stride_microbench() {
+        use std::time::Instant;
+
+        const ROWS: usize = 64;
+        const COLS: usize = 256;
+        const ITERS: usize = 1000;
+
+        let contiguous_data: Vec<f32> = (0..ROWS * COLS).map(|i| ((i % 7) as f32) - 3.0).collect();
+        let contiguous = t(&contiguous_data, &[ROWS, COLS]);
+        let mask_contig = t(&contiguous_data, &[ROWS, COLS]);
+
+        let transposed_src_data: Vec<f32> =
+            (0..COLS * ROWS).map(|i| ((i % 7) as f32) - 3.0).collect();
+        let transposed_src = t(&transposed_src_data, &[COLS, ROWS]);
+        let non_contig = transpose2d(&transposed_src); // shape [ROWS, COLS]
+        let mask_non_contig = t(&contiguous_data, &[ROWS, COLS]);
+
+        let mut contig_times = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let out = elementwise_mul_mask(&contiguous, &mask_contig, |v| v > 0.0);
+            std::hint::black_box(&out);
+            contig_times.push(start.elapsed());
+        }
+        let mut non_contig_times = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let out = elementwise_mul_mask(&non_contig, &mask_non_contig, |v| v > 0.0);
+            std::hint::black_box(&out);
+            non_contig_times.push(start.elapsed());
+        }
+        // 旧実装（`dense_vec` zip 経路）との対照。新実装の連続経路が
+        // 旧実装の連続経路を大きく下回っていないか（退行していないか）
+        // を直接確認するための参考値。
+        let mut reference_contig_times = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let out = elementwise_mul_mask_reference(&contiguous, &mask_contig, |v| v > 0.0);
+            std::hint::black_box(&out);
+            reference_contig_times.push(start.elapsed());
+        }
+        let mut reference_non_contig_times = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let out = elementwise_mul_mask_reference(&non_contig, &mask_non_contig, |v| v > 0.0);
+            std::hint::black_box(&out);
+            reference_non_contig_times.push(start.elapsed());
+        }
+
+        contig_times.sort();
+        non_contig_times.sort();
+        reference_contig_times.sort();
+        reference_non_contig_times.sort();
+        eprintln!(
+            "mask_stride_microbench: contiguous median={:?} non_contiguous(transpose view) median={:?} reference_contiguous(dense_vec zip) median={:?} reference_non_contiguous(dense_vec zip) median={:?}",
+            contig_times[ITERS / 2],
+            non_contig_times[ITERS / 2],
+            reference_contig_times[ITERS / 2],
+            reference_non_contig_times[ITERS / 2]
+        );
+    }
+
     // --- Exp ---
 
     #[test]
@@ -1725,6 +2516,69 @@ mod tests {
         let num_db = numeric_grad_unary(&b, &s, |x| eval::add(&a, x));
 
         assert_grad_close("reduce_to_shape(middle axis) dB", &db, &num_db);
+    }
+
+    // --- reduce_bias_grad（イシュー #1566・PR #1659 codex-review P2 是正） ---
+
+    /// `reduce_bias_grad` が「軸 0（行）方向の bias 縮約」用の f64 経路
+    /// （`eval::reduce_bias_grad_rows`）を、**軸 1（列）方向の
+    /// broadcast bias**（`target_shape` の末尾次元が `g` の列数と
+    /// 一致しない形状。例: `g: [2, 2]` に対する `target_shape: [2, 1]`）
+    /// へ誤って適用しないことを確認する回帰テスト（codex-review 指摘。
+    /// `[2, 1]` は総要素数が `2` で `g` の列数 `2` と偶然一致するため、
+    /// 総要素数のみで判定する実装だと誤って行縮約の f64 経路へ分岐し
+    /// てしまっていた）。
+    #[test]
+    fn reduce_bias_grad_does_not_misapply_row_reduction_to_column_broadcast_bias() {
+        // g = [[1, 2], [3, 4]]（行優先）。target_shape = [2, 1] は
+        // 各行の bias 値が 2 列へ複製される broadcast（軸 1 縮約）。
+        // 正しい勾配は行ごとの和: row0 = 1+2=3・row1 = 3+4=7。
+        // 行縮約（列ごとの和 col0=1+3=4・col1=2+4=6）を誤って適用すると
+        // 全く異なる値になる。
+        let g = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+
+        let got = reduce_bias_grad(&g, &[2, 1]);
+        let expected = reduce_to_shape(&g, &[2, 1]);
+
+        assert_eq!(got.shape(), &[2, 1]);
+        assert_eq!(
+            got.contiguous().as_slice().unwrap(),
+            expected.contiguous().as_slice().unwrap(),
+            "reduce_bias_grad は軸 1 縮約（[2, 1]）には reduce_to_shape をそのまま使う              はず（f64 行縮約経路を誤適用してはいけない）"
+        );
+        assert_eq!(
+            got.contiguous().as_slice().unwrap(),
+            &[3.0f32, 7.0],
+            "軸 1 縮約の正しい値（行ごとの和）と一致するはず"
+        );
+    }
+
+    /// 対照: 軸 0（行）方向の標準的な bias 縮約（`target_shape` の末尾
+    /// 次元が `g` の列数と一致し、それより前の次元がすべて `1`）は
+    /// 引き続き `eval::reduce_bias_grad_rows`（f64 経路）へ委譲される
+    /// ことを、`[n]`・`[1, n]` の両形状で確認する（値は
+    /// `reduce_to_shape`〈こちらは `f32` 逐次和〉と一致する範囲——
+    /// 相殺による桁落ちがない入力なので両経路の値自体は一致するが、
+    /// 経路選択の正しさを shape 網羅で確認する意図）。
+    #[test]
+    fn reduce_bias_grad_applies_row_reduction_for_rank1_and_leading_one_targets() {
+        let g = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+
+        let got_rank1 = reduce_bias_grad(&g, &[2]);
+        assert_eq!(got_rank1.shape(), &[2]);
+        assert_eq!(
+            got_rank1.contiguous().as_slice().unwrap(),
+            &[4.0f32, 6.0],
+            "target_shape=[2] は列ごとの和（col0=1+3=4・col1=2+4=6）のはず"
+        );
+
+        let got_leading_one = reduce_bias_grad(&g, &[1, 2]);
+        assert_eq!(got_leading_one.shape(), &[1, 2]);
+        assert_eq!(
+            got_leading_one.contiguous().as_slice().unwrap(),
+            &[4.0f32, 6.0],
+            "target_shape=[1, 2] も同じ列ごとの和になるはず（先頭次元 1 個の reshape）"
+        );
     }
 
     // --- vjp() ディスパッチの疎通確認（#18 との継ぎ目契約） ---
@@ -2116,5 +2970,249 @@ mod tests {
         assert_eq!(grads[0].0, NodeId(0));
         let expected = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Mean, &g);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    // --- Softmax / LogSoftmax（イシュー #1594） ---
+    //
+    // softmax の行和は常に 1（一様重みでは L(x) = Σ softmax(x) が
+    // 定数となり勾配が恒等的に 0 になってしまい検証が空になる）ため、
+    // 射影重み `s` はすべて非一様にする。
+
+    #[test]
+    fn softmax_grad_matches_numeric_dim1() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+
+        let out_value = eval::softmax_along(&x, 1);
+        let da = softmax_vjp_along(&out_value, &s, 1);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::softmax_along(x, 1));
+
+        assert_grad_close("softmax dim1", &da, &num_da);
+    }
+
+    #[test]
+    fn softmax_grad_matches_numeric_dim0() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+
+        let out_value = eval::softmax_along(&x, 0);
+        let da = softmax_vjp_along(&out_value, &s, 0);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::softmax_along(x, 0));
+
+        assert_grad_close("softmax dim0", &da, &num_da);
+    }
+
+    #[test]
+    fn softmax_grad_matches_numeric_3d_middle_axis() {
+        let x = t(
+            &[
+                1.0, -1.0, 2.0, 0.5, -0.5, 1.5, 0.3, -0.2, 1.0, -1.0, 2.0, 0.1,
+            ],
+            &[2, 3, 2],
+        );
+        let s = t(
+            &[
+                1.0, -0.5, 2.0, 0.3, -1.0, 0.7, 0.4, -0.8, 1.2, -0.3, 0.6, -1.5,
+            ],
+            &[2, 3, 2],
+        );
+
+        let out_value = eval::softmax_along(&x, 1);
+        let da = softmax_vjp_along(&out_value, &s, 1);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::softmax_along(x, 1));
+
+        assert_grad_close("softmax 3d middle axis", &da, &num_da);
+    }
+
+    #[test]
+    fn log_softmax_grad_matches_numeric_dim1() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+
+        let out_value = eval::log_softmax_along(&x, 1);
+        let da = log_softmax_vjp_along(&out_value, &s, 1);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::log_softmax_along(x, 1));
+
+        assert_grad_close("log_softmax dim1", &da, &num_da);
+    }
+
+    #[test]
+    fn log_softmax_grad_matches_numeric_dim0() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+
+        let out_value = eval::log_softmax_along(&x, 0);
+        let da = log_softmax_vjp_along(&out_value, &s, 0);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::log_softmax_along(x, 0));
+
+        assert_grad_close("log_softmax dim0", &da, &num_da);
+    }
+
+    #[test]
+    fn log_softmax_grad_matches_numeric_3d_middle_axis() {
+        let x = t(
+            &[
+                1.0, -1.0, 2.0, 0.5, -0.5, 1.5, 0.3, -0.2, 1.0, -1.0, 2.0, 0.1,
+            ],
+            &[2, 3, 2],
+        );
+        let s = t(
+            &[
+                1.0, -0.5, 2.0, 0.3, -1.0, 0.7, 0.4, -0.8, 1.2, -0.3, 0.6, -1.5,
+            ],
+            &[2, 3, 2],
+        );
+
+        let out_value = eval::log_softmax_along(&x, 1);
+        let da = log_softmax_vjp_along(&out_value, &s, 1);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::log_softmax_along(x, 1));
+
+        assert_grad_close("log_softmax 3d middle axis", &da, &num_da);
+    }
+
+    #[test]
+    fn vjp_dispatch_softmax_returns_single_input() {
+        let a = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[2, 2]);
+        let out_value = eval::softmax_along(&a, 1);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Softmax {
+            input: NodeId(0),
+            dim: 1,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = softmax_vjp_along(&out_value, &g, 1);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    #[test]
+    fn vjp_dispatch_log_softmax_returns_single_input() {
+        let a = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[2, 2]);
+        let out_value = eval::log_softmax_along(&a, 1);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::LogSoftmax {
+            input: NodeId(0),
+            dim: 1,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = log_softmax_vjp_along(&out_value, &g, 1);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: `sum_acc`（f64）を
+    // `exp(y)` との乗算前に `f32` へ downcast する実装では、有限の
+    // `f32` 上流勾配でも overflow しうる（`logits=[0,0]` すなわち
+    // `y=log_softmax([0,0])=[-ln(2),-ln(2)]`・上流勾配 `g=[2e38,2e38]`
+    // で、正しい入力勾配 `[0,0]`〈`Σ_dim(g)=4e38` に対し `exp(y)=0.5`
+    // なので `g - exp(y)*Σg = 2e38 - 0.5*4e38 = 0` のはずが、`sum_g`
+    // を `f32` へ戻してから `exp(y) as f32 * sum_g` を計算すると
+    // `0.5 * 4e38 = 2e38` は有限だが、`f32::MAX ≈ 3.4e38` に近い値の
+    // 掛け算・加減算が丸め誤差で `-inf` を生む経路がある）。
+    // `exp(y)` との乗算・`g` からの減算まで f64 で保持することで
+    // overflow を避ける。
+    #[test]
+    fn log_softmax_vjp_along_large_upstream_grad_does_not_overflow() {
+        let logits = t(&[0.0, 0.0], &[1, 2]);
+        let y = eval::log_softmax_along(&logits, 1);
+        let g = t(&[2e38, 2e38], &[1, 2]);
+        let dx = log_softmax_vjp_along(&y, &g, 1);
+        for (c, v) in dense_vec(&dx).iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "dx[{c}] = {v} は有限であるべき（overflow 回帰）"
+            );
+            assert!(v.abs() < 1.0, "dx[{c}] = {v}（期待値は 0 近傍）");
+        }
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: 縮約後の `dot`（`Σ_dim
+    // (g ⊙ y)`）を `y[idx] * (g[idx] - dot)` の減算まで `f32` で行う
+    // 実装では、有限で表現可能な入力勾配が overflow して `inf`/`-inf`
+    // になる。`y=[0.25,0.75]`・上流勾配 `g=[3e38,-3e38]` では
+    // `dot=-1.5e38` に対し `g[0]-dot=4.5e38` が `f32::MAX`（約 3.4e38）
+    // を超えて `f32` では overflow するが、正しい入力勾配
+    // `y[0]*(g[0]-dot)=0.25*4.5e38=1.125e38` は有限。`log_softmax_vjp_
+    // along` と同じく `g` からの減算・`y` との最終乗算まで `f64` で
+    // 保持することで overflow を避ける。
+    #[test]
+    fn softmax_vjp_along_large_upstream_grad_does_not_overflow() {
+        let y = t(&[0.25, 0.75], &[1, 2]);
+        let g = t(&[3e38, -3e38], &[1, 2]);
+        let dx = softmax_vjp_along(&y, &g, 1);
+        let dx = dense_vec(&dx);
+        for (c, v) in dx.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "dx[{c}] = {v} は有限であるべき（overflow 回帰）"
+            );
+        }
+        assert!(
+            (dx[0] - 1.125e38).abs() < 1e33,
+            "dx[0] = {}（期待値 1.125e38 近傍）",
+            dx[0]
+        );
+        assert!(
+            (dx[1] + 1.125e38).abs() < 1e33,
+            "dx[1] = {}（期待値 -1.125e38 近傍）",
+            dx[1]
+        );
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: `eval::softmax_along`
+    // 冒頭コメント参照。`shape[axis+1..]` 等の部分積は `checked_numel`
+    // が通した shape（要素数積は `0`）でも overflow しうるため、
+    // `softmax_vjp_along`／`log_softmax_vjp_along` も同じ早期 return
+    // で部分積計算前に安全側へ倒れることを確認する。
+    #[test]
+    fn softmax_vjp_along_empty_tensor_with_overflow_prone_inner_does_not_panic() {
+        let shape = [0usize, 0, usize::MAX, 2];
+        let y = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let g = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let dx = softmax_vjp_along(&y, &g, 1);
+        assert_eq!(dx.shape(), &shape);
+        assert_eq!(dx.numel(), 0);
+    }
+
+    #[test]
+    fn log_softmax_vjp_along_empty_tensor_with_overflow_prone_inner_does_not_panic() {
+        let shape = [0usize, 0, usize::MAX, 2];
+        let y = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let g = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let dx = log_softmax_vjp_along(&y, &g, 1);
+        assert_eq!(dx.shape(), &shape);
+        assert_eq!(dx.numel(), 0);
     }
 }

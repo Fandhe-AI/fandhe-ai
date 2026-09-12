@@ -369,6 +369,49 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
 /// `docs/backend-metal-command-batching-design.md` §7.4「回収しない
 /// 結論」参照）。
 ///
+/// **#1566 追記（是正版。round1 の記述は根拠のない推測を含んでいた
+/// ため #1665 取り込み時に是正）**: bias 勾配（本モデルでは L1・L2
+/// 双方の bias）を `ops::MetalBackendOps::gemm_fp32_strict_into_with_
+/// bias_reduce_tracked`（weight と同一 `ctx.encode` 呼び出し内で
+/// NT/TN の場合は encode-only、NN/TT・分類不能形状はホスト経由で書く。
+/// トレイト doc 参照）へ結線した。**round1 は「L2（NT/TN）の bias は
+/// encode-only に折り込まれる一方 L1（NN・分類不能）の bias は
+/// upload_into を要する」と記述していたが、これは根拠のない誤りだった
+/// **——`x_t = transpose2d(x_val)` は L1・L2 いずれも常に転置 view
+/// （`x_val` が contiguous な限り）・`g`（upstream。L1 は ReLU マスク
+/// 後、L2 は `MseLoss` の VJP 出力）も両層とも contiguous であり、
+/// `layout::classify_2d` によるレイアウト判定は L1・L2 で対称（どちらも
+/// NT パターン）になる。実際、上記「#1563 追記」自身の backward 区間
+/// イベント列導出（L2 の `d_weight`・L1 の `d_weight` いずれも
+/// 「encode-only」と扱う）がこの対称性を裏付けている。
+///
+/// この結果、L1・L2 とも weight の resident 書き込みと**同一の**
+/// encode-only ディスパッチへ bias 縮約が折り込まれ（`gemm::
+/// MetalGemm::encode_weight_and_bias_grad_with_offsets`）、両層とも
+/// もはや個別の `MemoryOps::upload_into`（bias 用）を経由しない。
+/// #1563 適用後（上記）の時点で、bias 用 `upload_into`（当時は
+/// `step()` 内のホスト `Gradients` 経由。L1・L2 各 1 回、計 2 回）は
+/// 既に**完全な no-op**（`committed` が空で `waitUntilCompleted` を
+/// 呼ばない）になっていた（backward 終了時点で open バッチが残らない
+/// ため）。本イシュー（#1566）はこの 2 回の no-op な `upload_into`
+/// 呼び出し自体を発生させなくするが、**除去される呼び出しの cb・wait
+/// 寄与が元々ゼロだったため**、steady-state 1 step のカウンタは
+/// #1563 適用後の **11 / 8 / 8**（encode / command_buffer / wait）
+/// から**変化しない**という結論になる（encode 総数も、bias 縮約自体は
+/// 既存の weight encode-only ディスパッチ内に折り込まれるだけで新規の
+/// `ctx.encode` 呼び出しを増やさないため不変）。
+///
+/// この結論は `docs/backend-metal-command-batching-design.md`
+/// §7.4（#1563 の cb/wait 削減根拠）・§10.7〜§10.9（#1566／#1659 の
+/// bias resident 化・数値方式統一の実装記録）から論理的に導出した
+/// 机上の結論であり、Mac 実機セッションでの実測確認（`cargo test
+/// -p fandhe-ai --release --test mnist_scale_train_reuse_bench
+/// mnist_scale_train_reuse_metal_batch_counters -- --ignored
+/// --nocapture`）はまだ行っていない。実測で不一致が判明した場合は
+/// 本テストのアサーション値・本コメントを実測値に合わせて更新する
+/// こと（事前登録規則の事後緩和ではなく、机上導出の誤りを実測で
+/// 訂正する通常のフロー）。
+///
 /// warmup（`WARMUP` step）で MSL パイプライン初回コンパイル・プールの
 /// フリーリスト充足を steady-state 化してから、その次の 1 step だけを
 /// 計測窓に取る（`run_fresh`／`run_reuse` と同じモデル形状・シードだが、
@@ -432,9 +475,12 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
          9/8/8、#1223（VJP の Metal GPU dispatch 化）適用直後は 11/10/10、#1555 \
          （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9、#1563 \
          （d_weight encode を d_input の同期点より前へ移し層内で合流）適用後は \
-         11/8/8 \
+         11/8/8、#1566（bias 勾配も同一 encode-only ディスパッチへ統合。 \
+         机上導出では #1563 時点で bias 用 upload_into が既に no-op だった \
+         ため 11/8/8 から不変と結論。本ファイル冒頭 doc comment「#1566 \
+         追記（是正版）」参照）適用後も 11/8/8（見込み・Mac 実機未確認） \
          （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」\
-         「#1555」「#1563」節）"
+         「#1555」「#1563」節・§10.7〜§10.9「#1566」節）"
     );
 
     // #1563: `crates/autodiff/src/grad.rs` の `Op::LinearResident` VJP で
@@ -448,22 +494,37 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
     // wait_delta のみ #1555 の 9 からさらに 1 ずつ減って 8 になる
     // （encode 総数は 11 のまま不変。本ファイル冒頭 doc comment
     // 「#1563 追記」参照）。
+    //
+    // #1566（bias 勾配のデバイス常駐化。本ファイル冒頭 doc comment
+    // 「#1566 追記（是正版）」参照）: L1・L2 とも bias 縮約が weight と
+    // 同一の encode-only ディスパッチへ折り込まれ、bias 用
+    // `upload_into` 呼び出し自体（計 2 回）が発生しなくなる。ただし
+    // これらの呼び出しは #1563 適用後の時点で既に完全な no-op
+    // （`committed` が空・cb 0・wait 0 の寄与）だったため、それらを
+    // 除去しても encode/cb/wait のいずれも変化しない——11/8/8 が
+    // #1566 適用後も不変という机上結論になる（`docs/backend-metal-
+    // command-batching-design.md` §10.7〜§10.9）。
     assert_eq!(
         encode_delta, 11,
         "encode() 呼び出し総数（= dispatch 総数）は #1223（Op::LinearResident \
-         の VJP が Metal GPU dispatch を追加）適用後から #1555・#1563 適用後も \
-         変わらず 11 のはず（d_weight 計算 2 回の GPU dispatch 自体は残るため）"
+         の VJP が Metal GPU dispatch を追加）適用後から #1555・#1563・#1566 \
+         適用後も変わらず 11 のはず（d_weight 計算 2 回の GPU dispatch 自体は \
+         残り、#1566 の bias 縮約は既存ディスパッチへ折り込まれるだけで \
+         新規 encode を増やさないため）"
     );
     assert_eq!(
         command_buffer_delta, 8,
         "コマンドバッファ生成数は #1563（d_weight encode を d_input の同期点より \
          前へ移し層内で合流。upload_into の防御的同期が no-op 化）適用後は \
-         9→8 のはず（d_input 自身の同期境界 2 件〈L1・L2〉のみが残る）"
+         9→8 のはず（d_input 自身の同期境界 2 件〈L1・L2〉のみが残る）。#1566 \
+         は既に no-op だった bias 用 upload_into を除去するのみのため \
+         8 から不変のはず（机上導出。Mac 実機未確認）"
     );
     assert_eq!(
         wait_delta, 8,
         "waitUntilCompleted() 呼び出し数は #1563 適用後は 9→8 のはず \
-         （command_buffer_delta と同じ理由）"
+         （command_buffer_delta と同じ理由）。#1566 適用後も同じ理由で \
+         8 から不変のはず（机上導出。Mac 実機未確認）"
     );
 }
 

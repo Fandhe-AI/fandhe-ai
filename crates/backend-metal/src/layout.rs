@@ -186,6 +186,178 @@ pub fn required_span(layout: &MatrixLayout) -> Option<usize> {
         .checked_add(minor)
 }
 
+/// `ops::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_tracked`
+/// が weight（GEMM 出力 `[m, n]`）と bias（縮約結果 `[n]`）を同一 `out`
+/// バッファへ書く前に呼ぶ、範囲検証の純関数版（PR #1659 codex-review
+/// P1 是正）。`ops.rs` は `cfg(target_os = "macos")` だが本関数は
+/// `objc2` 系 FFI に触れない純粋な範囲計算のため、`pad`/`tile`/本
+/// モジュールの他関数と同じ設計判断で cfg を付けず Linux（本実装
+/// 環境・CI）でも単体テストが回るようにしてある。
+///
+/// 検証項目（いずれも `checked_mul`/`checked_add` でオーバーフロー
+/// 安全）:
+/// 1. `m * n` のオーバーフロー、`out_offset + m*n` のオーバーフロー・
+///    `out_numel` 超過（weight 書き込み範囲）
+/// 2. `bias` が `Some((bias_offset, bn))` の場合、`bn == n`・
+///    `bias_offset + bn` のオーバーフロー・`out_numel` 超過（bias
+///    書き込み範囲）
+/// 3. **weight 範囲 `[out_offset, out_offset+m*n)` と bias 範囲
+///    `[bias_offset, bias_offset+bn)` の重複禁止**（従来欠落していた
+///    検証。例: `a` が単位行列・`out_offset=0`・`bias=Some((0, n))` は
+///    weight・bias 両範囲が `[0, n)` で完全に重なり、bias の書き込みが
+///    weight の一部を無言で上書きする。`m == 0` または `n == 0`
+///    （空次元）は範囲自体が空集合になるため重複判定から除外する）。
+///
+/// 呼び出し元は返り値の `Err` をそのまま伝播すればよい（`BackendError::
+/// InvalidArgument`）。
+pub fn validate_gemm_bias_write_ranges(
+    m: usize,
+    n: usize,
+    out_offset: usize,
+    out_numel: usize,
+    bias: Option<(usize, usize)>,
+) -> Result<(), fandhe_ai_tensor_core::device::BackendError> {
+    use fandhe_ai_tensor_core::device::BackendError;
+
+    let mn = m.checked_mul(n).ok_or_else(|| {
+        BackendError::InvalidArgument(
+            "validate_gemm_bias_write_ranges: m * n overflowed usize".into(),
+        )
+    })?;
+    let end = out_offset.checked_add(mn).ok_or_else(|| {
+        BackendError::InvalidArgument(
+            "validate_gemm_bias_write_ranges: out_offset + m * n overflowed usize".into(),
+        )
+    })?;
+    if end > out_numel {
+        return Err(BackendError::InvalidArgument(format!(
+            "validate_gemm_bias_write_ranges: weight write range [{out_offset}, {end}) exceeds \
+             out buffer length {out_numel}"
+        )));
+    }
+    let Some((bias_offset, bn)) = bias else {
+        return Ok(());
+    };
+    if bn != n {
+        return Err(BackendError::InvalidArgument(format!(
+            "validate_gemm_bias_write_ranges: bias n ({bn}) does not match GEMM n ({n})"
+        )));
+    }
+    let bias_end = bias_offset.checked_add(bn).ok_or_else(|| {
+        BackendError::InvalidArgument(
+            "validate_gemm_bias_write_ranges: bias_offset + n overflowed usize".into(),
+        )
+    })?;
+    if bias_end > out_numel {
+        return Err(BackendError::InvalidArgument(format!(
+            "validate_gemm_bias_write_ranges: bias write range [{bias_offset}, {bias_end}) \
+             exceeds out buffer length {out_numel}"
+        )));
+    }
+    // 半開区間 [out_offset, end) と [bias_offset, bias_end) の重複判定。
+    // どちらかが空（mn == 0 または bn == 0）なら重複しようがない。
+    if mn > 0 && bn > 0 && out_offset < bias_end && bias_offset < end {
+        return Err(BackendError::InvalidArgument(format!(
+            "validate_gemm_bias_write_ranges: weight write range [{out_offset}, {end}) \
+             overlaps bias write range [{bias_offset}, {bias_end})"
+        )));
+    }
+    Ok(())
+}
+
+/// bias 勾配（`Op::LinearResident` の VJP における `g` の行方向和）の
+/// ホスト参照実装（イシュー #1566）。GPU カーネル
+/// `shaders/gemm.metal::gemm_bias_grad_reduce_f32` の正しさを検証する
+/// 基準（REQ-2 統一複合判定。下記「数値方式」参照）、および
+/// `ops::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_
+/// tracked` の NN/TT・分類不能形状フォールバック経路（GPU ディスパッチ
+/// を経由しない）の両方から使う。
+///
+/// `autodiff::eval::reduce_bias_grad_rows`（`grad::reduce_to_shape` の
+/// rank-2→rank-1 特殊ケース）と**アルゴリズム的に同一**（行 `0..rows`
+/// 昇順・`f64` アキュムレータで蓄積し最後に 1 回だけ `f32` へ
+/// downcast。下記「数値方式」参照）だが、`backend-metal` は
+/// `autodiff` に依存できない（クレート依存方向: `autodiff` →
+/// `backend-metal` の逆方向はない）ため独立実装する。両実装の bit
+/// 完全一致は実機 `#[ignore]` テスト（`docs/backend-metal-command-
+/// batching-design.md` §10 実装記録参照）で確認する。
+///
+/// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review 是正の
+/// 最終形）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+/// アキュムレータで統一する」規約（イシュー #1102・PR #1120）に従う。
+/// GPU カーネル（`gemm_bias_grad_reduce_f32`。Metal は `double` 型
+/// 非対応）は IEEE 754 binary64 の逐次加算を 64bit 整数演算でソフト
+/// ウェアエミュレートし（ホスト側逐語モデル `crate::soft_f64`）、本
+/// 関数と同じ演算列（`0.0` から行 `0..rows` 昇順に加算し最後に 1 回
+/// `f32` へ downcast）を辿るため、結果は **bit 完全一致**する（NaN の
+/// み payload がハードウェア依存のためクラス一致。`docs/backend-metal-
+/// command-batching-design.md` §10.14）。NN/TT フォールバック経路は
+/// ホスト側で本関数のみを使うため、こちらも bit 完全一致。
+///
+/// `data` は `g` を [`classify_2d`] で分類した [`MatrixLayout`]
+/// （`rows`/`cols`/`ld`/`transposed`）が示す添字式（本モジュール冒頭
+/// doc「添字式」参照）に従って読む。
+///
+/// 呼び出し前に [`required_span`]（`checked_mul`/`checked_add` による
+/// オーバーフロー安全な最小バッファ長算出。`crate::gemm::
+/// validate_strided_dims` と同じ関数を再利用）で `data.len()` が
+/// レイアウトの要求範囲を満たすことを検証し、満たさない場合は
+/// `Err(BackendError::InvalidArgument)` を返す（PR #1659 codex-review
+/// P1 是正: 従来は `debug_assert!` 契約違反検知＋release ゼロ埋め
+/// フォールバックだったが、`pub fn` として任意の `data`/`layout` の
+/// 組み合わせを受理しうる以上、境界外読み取り・添字乗算の
+/// オーバーフローを事前検証で遮断する方が安全。検証を通過した後は
+/// ループ中のあらゆる `idx` が `required_span` 未満に収まることが
+/// `required_span` 自体の算出式から保証されるため、追加のオーバー
+/// フローチェックなしに直接インデックスできる）。`.claude/rules/
+/// coding-rust.md`「本番経路で `unwrap()`/`expect()` を使わない」は
+/// 型付き `Result` エラーで満たす。
+pub fn reduce_bias_grad_rows_host(
+    data: &[f32],
+    layout: &MatrixLayout,
+) -> Result<Vec<f32>, fandhe_ai_tensor_core::device::BackendError> {
+    let required = required_span(layout).ok_or_else(|| {
+        fandhe_ai_tensor_core::device::BackendError::InvalidArgument(
+            "reduce_bias_grad_rows_host: layout の添字計算が usize をオーバーフローする".into(),
+        )
+    })?;
+    if data.len() < required {
+        return Err(
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(format!(
+                "reduce_bias_grad_rows_host: data の長さ {} が layout の要求範囲 {required} を満たさない",
+                data.len()
+            )),
+        );
+    }
+    let (rows, cols, ld, transposed) = (layout.rows, layout.cols, layout.ld, layout.transposed);
+    // `rows == 1` は直接コピーし `0.0f32` へ加算しない（PR #1659
+    // codex-review P2 是正）: `eval::reduce_bias_grad_rows` doc の
+    // 「`m == 1` の特殊扱い」と同じ理由で、`grad::reduce_to_shape` は
+    // 既に `1` の軸を縮約しないため `-0.0` 等の符号付きゼロが保持
+    // される一方、単純な `+=` 版は `0.0 + (-0.0) == +0.0` により
+    // 符号を失い bit 完全一致契約が崩れる。
+    if rows == 1 {
+        let mut out = Vec::with_capacity(cols);
+        for col in 0..cols {
+            let idx = if transposed { col * ld } else { col };
+            out.push(data[idx]);
+        }
+        return Ok(out);
+    }
+    let mut acc = vec![0f64; cols];
+    for row in 0..rows {
+        for (col, a) in acc.iter_mut().enumerate() {
+            let idx = if transposed {
+                col * ld + row
+            } else {
+                row * ld + col
+            };
+            *a += f64::from(data[idx]);
+        }
+    }
+    Ok(acc.into_iter().map(|v| v as f32).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +695,224 @@ mod tests {
             TransposePattern::from_flags(true, true),
             TransposePattern::Tt
         );
+    }
+
+    // イシュー #1566・PR #1659 codex-review P1 是正（2026-09-12 ユーザー
+    // 承認 A）: `reduce_bias_grad_rows_host` は `f64` アキュムレータで
+    // 列ごとに蓄積するため（`autodiff::eval::reduce_bias_grad_rows` と
+    // 同じ数値方式。クレート依存方向のため直接突合はできず、同一
+    // アルゴリズムであることを手計算した期待値との一致で独立に確認
+    // する）、単純な `f32` 逐次和なら桁落ちで消える寄与（`1e8 + 1.0 +
+    // (-1e8)` の `1.0`）が保持される。
+    #[test]
+    fn reduce_bias_grad_rows_host_preserves_cancelling_contribution_via_f64_accumulator() {
+        // g: [3, 2]（行優先 contiguous）。列 0 は 1e8 + 1.0 + -1e8。
+        let data = vec![1.0e8, 10.0, 1.0, 20.0, -1.0e8, 30.0];
+        let layout = MatrixLayout {
+            rows: 3,
+            cols: 2,
+            ld: 2,
+            transposed: false,
+        };
+        let got = reduce_bias_grad_rows_host(&data, &layout).expect("valid layout/data in test");
+
+        // 対照: f32 逐次和では 1.0 の寄与が失われることの確認。
+        let mut naive_f32_col0 = 0.0f32;
+        naive_f32_col0 += 1.0e8;
+        naive_f32_col0 += 1.0;
+        naive_f32_col0 += -1.0e8;
+        assert_eq!(
+            naive_f32_col0, 0.0,
+            "対照: f32 逐次和では桁落ちにより 1.0 の寄与が失われる"
+        );
+
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0], 1.0,
+            "f64 アキュムレータでは 1e8 + 1.0 + (-1e8) の 1.0 が保持されるはず"
+        );
+        assert_eq!(got[1], 60.0);
+    }
+
+    #[test]
+    fn reduce_bias_grad_rows_host_transposed_view_matches_logical_shape() {
+        // `g` が列優先 view（転置）の場合、`(row, col)` は
+        // `data[col * ld + row]` で読む（本モジュール冒頭 doc「添字式」）。
+        // 論理形状 [2, 3]（rows=2, cols=3）・実データは
+        // `data[col*ld+row]`（ld=2）で `g[r][c] = data[c*2+r]` となる
+        // 行列を手で構成する: g = [[1,3,5],[2,4,6]]。
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let layout = MatrixLayout {
+            rows: 2,
+            cols: 3,
+            ld: 2,
+            transposed: true,
+        };
+        let got = reduce_bias_grad_rows_host(&data, &layout).expect("valid layout/data in test");
+        // 列ごとの和: col0=1+2=3・col1=3+4=7・col2=5+6=11。
+        assert_eq!(got, vec![3.0f32, 7.0, 11.0]);
+    }
+
+    #[test]
+    fn reduce_bias_grad_rows_host_preserves_nan_and_inf() {
+        let data = vec![-0.0, f32::NAN, f32::INFINITY, 1.0, -0.0, f32::NEG_INFINITY];
+        let layout = MatrixLayout {
+            rows: 3,
+            cols: 2,
+            ld: 2,
+            transposed: false,
+        };
+        let got = reduce_bias_grad_rows_host(&data, &layout).expect("valid layout/data in test");
+        // row0=[-0.0, NaN]・row1=[+inf, 1.0]・row2=[-0.0, -inf]。
+        // col0: -0.0 + (+inf) + -0.0 = +inf
+        assert!(got[0].is_infinite() && got[0] > 0.0);
+        // col1: NaN + 1.0 + -inf = NaN
+        assert!(got[1].is_nan());
+    }
+
+    // PR #1659 codex-review P2 是正の回帰テスト（`reduce_bias_grad_rows_host`
+    // doc「`rows == 1` は直接コピー」）: `rows == 1` の単純な `+=` 版
+    // （`0.0f32 + (-0.0f32) == +0.0f32`）だと符号付きゼロが失われる
+    // ことを直接検知する。転置 view（`transposed: true`）でも同じ
+    // 契約が成立することを確認する。
+    #[test]
+    fn reduce_bias_grad_rows_host_single_row_preserves_negative_zero_sign() {
+        let data = vec![-0.0f32, 0.0f32];
+        let layout = MatrixLayout {
+            rows: 1,
+            cols: 2,
+            ld: 2,
+            transposed: false,
+        };
+        let got = reduce_bias_grad_rows_host(&data, &layout).expect("valid layout/data in test");
+        assert!(
+            got[0].is_sign_negative(),
+            "rows == 1 では -0.0 の符号を保持するはず（reduce_to_shape との bit 完全一致契約）"
+        );
+        assert!(!got[1].is_sign_negative());
+
+        // 転置 view: cols=1 の軸を rows==1 相当として扱う（`ld` 経由の
+        // 添字式は転置版でも col*ld+row のため cols==1 で row 走査は
+        // 単一要素になる想定だが、本関数の特殊扱いは `rows == 1` 判定
+        // のみのため、転置 view でも `rows` フィールドの値で分岐する
+        // ことを確認する）。
+        let data_t = vec![-0.0f32, 0.0f32];
+        let layout_t = MatrixLayout {
+            rows: 1,
+            cols: 2,
+            ld: 1,
+            transposed: true,
+        };
+        let got_t =
+            reduce_bias_grad_rows_host(&data_t, &layout_t).expect("valid layout/data in test");
+        assert!(got_t[0].is_sign_negative());
+        assert!(!got_t[1].is_sign_negative());
+    }
+
+    // PR #1659 codex-review P1 是正の回帰テスト: 空 `data` と最小 `MatrixLayout`
+    // （codex-review 指摘の具体例そのもの）を渡すと、契約違反検知が debug
+    // ビルドの panic ではなく型付き `Err(BackendError::InvalidArgument)` に
+    // なることを確認する（`required_span` によるオーバーフロー安全な事前
+    // 検証。本モジュール冒頭の `reduce_bias_grad_rows_host` doc 参照）。
+    #[test]
+    fn reduce_bias_grad_rows_host_rejects_insufficient_data_instead_of_panicking() {
+        let layout = MatrixLayout {
+            rows: 1,
+            cols: 1,
+            ld: 1,
+            transposed: false,
+        };
+        let err = reduce_bias_grad_rows_host(&[], &layout)
+            .expect_err("空 data は required_span 未満のため Err のはず");
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn reduce_bias_grad_rows_host_rejects_overflowing_layout() {
+        // `required_span` が `checked_mul`/`checked_add` でオーバーフローを
+        // 検知するケース（`rows`/`ld` が usize::MAX 近傍）。
+        let layout = MatrixLayout {
+            rows: usize::MAX,
+            cols: 2,
+            ld: usize::MAX,
+            transposed: false,
+        };
+        let err = reduce_bias_grad_rows_host(&[1.0, 2.0], &layout)
+            .expect_err("layout の添字計算がオーバーフローするため Err のはず");
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
+        ));
+    }
+
+    // PR #1659 codex-review P1 是正の回帰テスト（`validate_gemm_bias_write_
+    // ranges`）: weight・bias 書き込み範囲の重複検出。
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_rejects_full_overlap() {
+        // codex-review 指摘の具体例: a=単位行列(2x2)・b=[[1,2],[3,4]]・
+        // out_offset=0・bias=Some((0,2))。m=n=2 なので weight は [0,4)・
+        // bias は [0,2) で完全に重なる。
+        let err = validate_gemm_bias_write_ranges(2, 2, 0, 8, Some((0, 2)))
+            .expect_err("weight・bias 範囲が重複するため Err のはず");
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_rejects_partial_overlap() {
+        // weight [4, 8)・bias [6, 8) は末尾側で部分的に重なる。
+        let err = validate_gemm_bias_write_ranges(2, 2, 4, 8, Some((6, 2)))
+            .expect_err("weight・bias 範囲が部分的に重複するため Err のはず");
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_accepts_disjoint_ranges() {
+        // weight [0, 4)・bias [4, 6) は互いに素（隣接するだけで重ならない）。
+        validate_gemm_bias_write_ranges(2, 2, 0, 6, Some((4, 2)))
+            .expect("互いに素な範囲は受理されるはず");
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_accepts_zero_rows_without_false_overlap() {
+        // m == 0（空次元）は weight 範囲が空集合になるため、bias 範囲が
+        // 数値上重なって見えても実際には書き込みが発生せず重複ではない。
+        validate_gemm_bias_write_ranges(0, 2, 0, 8, Some((0, 2)))
+            .expect("m == 0 は空範囲のため重複判定の対象外のはず");
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_accepts_no_bias() {
+        validate_gemm_bias_write_ranges(2, 2, 0, 4, None)
+            .expect("bias なしなら weight 範囲検査のみ通れば受理されるはず");
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_rejects_out_of_bounds_weight() {
+        let err = validate_gemm_bias_write_ranges(2, 2, 0, 3, None)
+            .expect_err("out_numel を超える weight 範囲は Err のはず");
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_rejects_bias_n_mismatch() {
+        let err = validate_gemm_bias_write_ranges(2, 2, 0, 8, Some((4, 3)))
+            .expect_err("bias の n が GEMM の n と不一致のため Err のはず");
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
+        ));
     }
 }

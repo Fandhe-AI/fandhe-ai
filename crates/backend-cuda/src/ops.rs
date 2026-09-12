@@ -30,7 +30,7 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, DType, DispatchFailureCell, FusionPlan, GruBackwardOutput,
     GruPointwiseOutput, LstmPointwiseOutput, MseReduction, SegmentKey, SegmentResource, SegmentRun,
-    ShapeError, Tensor, require_same_shape,
+    ShapeError, Tensor, require_same_shape, row_softmax_layout,
 };
 
 use crate::context_cache;
@@ -2547,6 +2547,40 @@ impl BackendOps for CudaBackendOps {
             Tensor::new(d_pre_h, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
             Tensor::new(dh_prev_direct, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
         ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::softmax`] の CUDA 実装
+    /// （イシュー #1594）。[`row_softmax_layout`] が非最終軸を `Ok(None)`
+    /// として区別する契約に従い、その場合はデフォルトの
+    /// `Unsupported`（`Var::softmax` がホスト参照実装へフォールバック
+    /// する合図）と同じ挙動を返す。最終軸の場合は `run_fused_softmax`
+    /// （`run_fused` の softmax 一致経路）と同じ
+    /// `context_cache::cached_softmax` キャッシュ・`CudaSoftmax::
+    /// run_softmax_f32` を直接呼ぶ（融合プランを経由しない独立入口）。
+    fn softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        let Some((rows, cols)) =
+            row_softmax_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?
+        else {
+            return Err(BackendError::Unsupported(
+                "softmax: CUDA 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）".into(),
+            ));
+        };
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("softmax: input not contiguous".into())
+        })?;
+
+        let softmax = self.with_driver_call(&[], map_fused_kernel_init_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_softmax(&device)
+        })?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || softmax.run_softmax_f32(x_slice, rows, cols),
+        )?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::release_cached_device_memory`] の CUDA 実装
