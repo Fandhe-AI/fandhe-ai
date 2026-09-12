@@ -906,50 +906,16 @@ impl BackendOps for MetalBackendOps {
         let n = b.shape()[1];
         let _ = out_shape;
 
-        // REQ-8・OWASP A03: weight・bias 双方の書き込み範囲をカーネル
-        // 起動・NT/TN 判定より前に検証する（`gemm_fp32_strict_into_impl`
-        // と同じ順序規約）。
-        let mn = m.checked_mul(n).ok_or_else(|| {
-            BackendError::InvalidArgument(
-                "gemm_fp32_strict_into_with_bias_reduce_tracked: m * n overflowed usize".into(),
-            )
-        })?;
-        let end = out_offset.checked_add(mn).ok_or_else(|| {
-            BackendError::InvalidArgument(
-                "gemm_fp32_strict_into_with_bias_reduce_tracked: out_offset + m * n overflowed \
-                 usize"
-                    .into(),
-            )
-        })?;
-        if end > out.numel() {
-            return Err(BackendError::InvalidArgument(format!(
-                "gemm_fp32_strict_into_with_bias_reduce_tracked: write range [{out_offset}, \
-                 {end}) exceeds out buffer length {}",
-                out.numel()
-            )));
-        }
-        if let Some((bias_offset, bn)) = bias {
-            if bn != n {
-                return Err(BackendError::InvalidArgument(format!(
-                    "gemm_fp32_strict_into_with_bias_reduce_tracked: bias n ({bn}) does not \
-                     match GEMM n ({n})"
-                )));
-            }
-            let bias_end = bias_offset.checked_add(bn).ok_or_else(|| {
-                BackendError::InvalidArgument(
-                    "gemm_fp32_strict_into_with_bias_reduce_tracked: bias_offset + n overflowed \
-                     usize"
-                        .into(),
-                )
-            })?;
-            if bias_end > out.numel() {
-                return Err(BackendError::InvalidArgument(format!(
-                    "gemm_fp32_strict_into_with_bias_reduce_tracked: bias write range \
-                     [{bias_offset}, {bias_end}) exceeds out buffer length {}",
-                    out.numel()
-                )));
-            }
-        }
+        // REQ-8・OWASP A03: weight・bias 双方の書き込み範囲（および両者の
+        // 重複禁止。PR #1659 codex-review P1 是正: 従来は重複を検証して
+        // おらず、weight・bias が同一領域を指すと bias の書き込みが
+        // weight の一部を無言で上書きしていた）をカーネル起動・NT/TN
+        // 判定より前に検証する（`gemm_fp32_strict_into_impl` と同じ順序
+        // 規約）。検証本体（`m * n`／オフセット加算のオーバーフロー・
+        // バッファ範囲超過・weight/bias 範囲重複）は Linux 実行可能な
+        // 単体テストを持つ純関数 `layout::validate_gemm_bias_write_ranges`
+        // に委譲する。
+        layout::validate_gemm_bias_write_ranges(m, n, out_offset, out.numel(), bias)?;
 
         let layout_pair = match (
             layout::classify_2d(a.shape(), a.strides()),
@@ -996,7 +962,7 @@ impl BackendOps for MetalBackendOps {
                 ld: n,
                 transposed: false,
             };
-            let contribution = layout::reduce_bias_grad_rows_host(b_slice, &contiguous_layout);
+            let contribution = layout::reduce_bias_grad_rows_host(b_slice, &contiguous_layout)?;
             debug_assert_eq!(contribution.len(), bn);
             let contribution_tensor =
                 Tensor::new(contribution, &[bn]).map_err(BackendError::ShapeMismatch)?;
